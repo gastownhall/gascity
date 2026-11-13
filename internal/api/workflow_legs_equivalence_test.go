@@ -329,6 +329,15 @@ func t7dWorkflow(t *testing.T, store *beads.MemStore, prefix, workflowID, scopeK
 // same rows, creation stamps included, and neither sees the other's writes.
 func (sh t7dShape) fixtures(t *testing.T) func() t7dFixture {
 	t.Helper()
+	return sh.fixturesWith(t, nil)
+}
+
+// fixturesWith is fixtures with more rows: seed adds them to the templates,
+// by name ("city", "alpha", "beta", and "binding", "named" and "orders" where
+// the shape has them), after the shape's own, so every fixture's copy holds
+// them with the same stamps.
+func (sh t7dShape) fixturesWith(t *testing.T, seed func(templates map[string]*beads.MemStore)) func() t7dFixture {
+	t.Helper()
 	city := sh.cityName()
 	templates := map[string]*beads.MemStore{}
 	mem := func(name, prefix string) *beads.MemStore {
@@ -383,6 +392,9 @@ func (sh t7dShape) fixtures(t *testing.T) func() t7dFixture {
 	}
 	t7dBead(t, alpha, beads.Bead{ID: "al-or1", Title: "order:nightly", Type: "task", Status: "closed", Labels: []string{"order-run:nightly", "order-tracking"}})
 
+	if seed != nil {
+		seed(templates)
+	}
 	return func() t7dFixture { return sh.fixture(t, templates) }
 }
 
@@ -466,10 +478,48 @@ func (sh t7dShape) fixture(t *testing.T, templates map[string]*beads.MemStore) t
 	return fx
 }
 
+// t7dFrozenInfo is main's workflowStoreInfo as T7d's frozen copies built it:
+// a workflow leg, or an order read's store (T7d.2 retired that field from
+// production; the frozen copies keep it).
+type t7dFrozenInfo struct {
+	ref       string
+	scopeKind string
+	scopeRef  string
+	leg       storeref.TypedLeg
+	store     beads.Store
+}
+
+// t7dFrozenRootMatch is main's workflowRootMatch over a frozen entry.
+type t7dFrozenRootMatch struct {
+	info t7dFrozenInfo
+	root beads.Bead
+}
+
+// live is f as a live entry, for the pure live helpers the frozen copies call
+// (they read its names and leg, never its store).
+func (f t7dFrozenInfo) live() workflowStoreInfo {
+	return workflowStoreInfo{ref: f.ref, scopeKind: f.scopeKind, scopeRef: f.scopeRef, leg: f.leg}
+}
+
+// t7dLive is a live entry as the renderer reads it.
+func t7dLive(info workflowStoreInfo, ok bool) (t7dFrozenInfo, bool) {
+	return t7dFrozenInfo{ref: info.ref, scopeKind: info.scopeKind, scopeRef: info.scopeRef, leg: info.leg}, ok
+}
+
+// t7dLives is t7dLive over a list.
+func t7dLives(infos []workflowStoreInfo) []t7dFrozenInfo {
+	out := make([]t7dFrozenInfo, 0, len(infos))
+	for _, info := range infos {
+		l, _ := t7dLive(info, true)
+		out = append(out, l)
+	}
+	return out
+}
+
 // t7dInfo renders a workflow store entry: its names, and the store and side
-// the live code reads through its leg (or, on an order entry and in the
-// frozen code, through its store).
-func (fx t7dFixture) t7dInfo(info workflowStoreInfo, ok bool) string {
+// the live code reads through its leg (or, in the frozen code, through its
+// store).
+func (fx t7dFixture) t7dInfo(info t7dFrozenInfo, ok bool) string {
 	if !ok {
 		return "-"
 	}
@@ -483,7 +533,7 @@ func (fx t7dFixture) t7dInfo(info workflowStoreInfo, ok bool) string {
 	return fmt.Sprintf("%s|%s|%s|%s", info.ref, info.scopeKind, info.scopeRef, fx.name(reads))
 }
 
-func (fx t7dFixture) t7dInfos(infos []workflowStoreInfo) string {
+func (fx t7dFixture) t7dInfos(infos []t7dFrozenInfo) string {
 	out := make([]string, 0, len(infos))
 	for _, info := range infos {
 		out = append(out, fx.t7dInfo(info, true))
@@ -508,9 +558,11 @@ type t7dOp struct {
 	name         string
 	frozen, live func(t *testing.T, fx t7dFixture) string
 	resultsOnly  bool // a declared log divergence; see the op
-	// keepsMarkers is a reader T7d leaves marked (the order reads, T7f): only
-	// its stores come from the workflow legs, so every verdict stays.
-	keepsMarkers bool
+	// orderVerdicts is an order read (the feed, the history detail): T7d.2
+	// moved its verdicts to its order-history plan's roles, which
+	// order_history_handlers_equivalence_test.go judges; here its results
+	// and its reads, store by store and operation by operation, must match.
+	orderVerdicts bool
 	// writes is a teardown. Over a CachingStore, which lists and reads back a
 	// batch in map order, the order of its reads and writes, and how many
 	// edges it unlinks before their other end is gone, vary from run to run
@@ -533,7 +585,7 @@ func t7dOps(city string) []t7dOp {
 		t7dOp{
 			name:   "workflowStores",
 			frozen: func(_ *testing.T, fx t7dFixture) string { return fx.t7dInfos(frozenWorkflowStores(fx.state)) },
-			live:   func(_ *testing.T, fx t7dFixture) string { return fx.t7dInfos(workflowStores(fx.state)) },
+			live:   func(_ *testing.T, fx t7dFixture) string { return fx.t7dInfos(t7dLives(workflowStores(fx.state))) },
 		},
 		t7dOp{
 			name: "workflowStoresIncludingRetiredRigs",
@@ -541,16 +593,16 @@ func t7dOps(city string) []t7dOp {
 				return fx.t7dInfos(frozenWorkflowStoresIncludingRetiredRigs(fx.state))
 			},
 			live: func(_ *testing.T, fx t7dFixture) string {
-				return fx.t7dInfos(workflowStoresIncludingRetiredRigs(fx.state))
+				return fx.t7dInfos(t7dLives(workflowStoresIncludingRetiredRigs(fx.state)))
 			},
 		},
 		t7dOp{
-			name: "workflowWritableStores+orders",
+			name: "every order's legs",
 			frozen: func(_ *testing.T, fx t7dFixture) string {
 				return fx.t7dInfos(frozenAppendOrdersClassStoreInfo(frozenWorkflowStores(fx.state), fx.state, city))
 			},
 			live: func(_ *testing.T, fx t7dFixture) string {
-				return fx.t7dInfos(appendOrdersClassStoreInfo(workflowWritableStores(fx.state), fx.state, city))
+				return fx.t7dInfos(t7dLives(everyOrderLegs(fx.state.Stores(), fx.state.CityName())))
 			},
 		},
 	)
@@ -558,7 +610,9 @@ func t7dOps(city string) []t7dOp {
 		ops = append(ops, t7dOp{
 			name:   "workflowStoreByRef " + ref,
 			frozen: func(_ *testing.T, fx t7dFixture) string { return fx.t7dInfo(frozenWorkflowStoreByRef(fx.state, ref)) },
-			live:   func(_ *testing.T, fx t7dFixture) string { return fx.t7dInfo(workflowStoreByRef(fx.state, ref)) },
+			live: func(_ *testing.T, fx t7dFixture) string {
+				return fx.t7dInfo(t7dLive(workflowStoreByRef(fx.state, ref)))
+			},
 		})
 	}
 	for _, id := range []string{"tc1-wf", "gcg1-wf", "al9-wf", "be5-wf", "tx7-wf", "tc3-wf", "tw-wf", "al-cv1", "co-1", "co-2", "missing"} {
@@ -589,7 +643,8 @@ func t7dOps(city string) []t7dOp {
 				},
 				live: func(_ *testing.T, fx t7dFixture) string {
 					info, b, ok := workflowEventRoot(fx.state, t7dEventBead("evt", root, hint))
-					return fx.t7dInfo(info, ok) + " " + b.ID
+					l, ok := t7dLive(info, ok)
+					return fx.t7dInfo(l, ok) + " " + b.ID
 				},
 			}
 			// An orders:<city> hint is no scope any writer stamps. The frozen
@@ -639,7 +694,7 @@ func t7dOps(city string) []t7dOp {
 				},
 			},
 			t7dOp{
-				name: "buildOrderRunFeedItems " + scope[1], keepsMarkers: true,
+				name: "buildOrderRunFeedItems " + scope[1], orderVerdicts: true,
 				frozen: func(_ *testing.T, fx t7dFixture) string {
 					return t7dJSON(frozenBuildOrderRunFeedItems(fx.state, scope[0], scope[1], 0))
 				},
@@ -655,7 +710,7 @@ func t7dOps(city string) []t7dOp {
 			// list now comes from the workflow legs, and the order reader it
 			// calls is the one T7d leaves as it is.
 			ops = append(ops, t7dOp{
-				name: "humaHandleOrderHistoryDetail " + id + " ref=" + ref, keepsMarkers: true,
+				name: "humaHandleOrderHistoryDetail " + id + " ref=" + ref, orderVerdicts: true,
 				frozen: func(_ *testing.T, fx t7dFixture) string {
 					return t7dJSON(frozenHumaHandleOrderHistoryDetail(context.Background(), New(fx.state), &OrderHistoryDetailInput{BeadID: id, StoreRef: ref}))
 				},
@@ -780,7 +835,9 @@ func TestWorkflowLegsMatchTheFrozenReaders(t *testing.T) {
 							continue
 						}
 						w, g := t7dSortDepRuns(*ffx.log), t7dSortDepRuns(*lfx.log)
-						if !op.keepsMarkers {
+						if op.orderVerdicts {
+							w, g = t7dStripVerdicts(w), t7dStripVerdicts(g)
+						} else {
 							w, g = t7dMovedVerdicts(ffx, w, g)
 						}
 						switch {
@@ -801,6 +858,15 @@ func TestWorkflowLegsMatchTheFrozenReaders(t *testing.T) {
 			}
 		})
 	}
+}
+
+// t7dStripVerdicts drops each entry's split-strict verdict.
+func t7dStripVerdicts(log []string) []string {
+	out := make([]string, len(log))
+	for i, entry := range log {
+		out[i] = entry[:strings.LastIndex(entry, " [")]
+	}
+	return out
 }
 
 // t7dFirstDiff renders where two logs part.

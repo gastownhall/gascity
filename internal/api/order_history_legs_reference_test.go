@@ -12,9 +12,11 @@ import (
 // origin/main 8d2fb3120c (huma_handlers_orders.go orderStoreInfosForState and
 // appendOrdersClassStoreInfo; handler_convoy_dispatch.go
 // workflowWritableStores and workflowStoreByRef's orders: arm; rig_graph_legs.go
-// rigGraphLegRetired), for order_history_legs_equivalence_test.go. Three
+// rigGraphLegRetired), for order_history_legs_equivalence_test.go. Four
 // substitutions, so these copies outlive T7d.2's deletions, and nothing else:
 //
+//   - every name takes the t7b2Frozen prefix (T7d's reference file holds
+//     frozen copies of an earlier main under the plain frozen names);
 //   - workflowStoreInfo becomes t7b2FrozenOrderInfo, the fields the order reads
 //     read (T7d.2 deletes workflowStoreInfo.store);
 //   - state.BeadStore(rig) becomes t7b2FrozenBeadStore(state, rig), the same
@@ -25,13 +27,10 @@ import (
 // workflowLegs and workflowCityScopeRef are called live: T7b.2 and T7d.2 leave
 // them byte-identical.
 
-// t7b2FrozenOrderInfo is the part of main's workflowStoreInfo an order read reads.
-type t7b2FrozenOrderInfo struct {
-	ref       string
-	scopeKind string
-	scopeRef  string
-	store     beads.Store
-}
+// t7b2FrozenOrderInfo is main's workflowStoreInfo as these copies build it
+// (T7d.2 made it T7d's t7dFrozenInfo, so one frozen entry type serves both
+// frozen worlds).
+type t7b2FrozenOrderInfo = t7dFrozenInfo
 
 // t7b2FrozenBeadStore is main's State.BeadStore.
 func t7b2FrozenBeadStore(state State, rig string) beads.Store {

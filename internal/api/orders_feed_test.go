@@ -227,10 +227,10 @@ func TestBuildOrderRunFeedItemsUsesAllOrdersForDisabledExecMetadata(t *testing.T
 }
 
 func TestOrderTrackingUpdatedAtLogsLookupFailure(t *testing.T) {
-	front := orders.NewStore(beads.OrdersStore{Store: labelFailListStore{
+	leg := beadstest.StrictLeg(labelFailListStore{
 		Store:     beads.NewMemStore(),
 		failLabel: "order-run:digest",
-	}})
+	})
 	run := orders.OrderRun{
 		Scoped:    "digest",
 		CreatedAt: time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC),
@@ -244,7 +244,7 @@ func TestOrderTrackingUpdatedAtLogsLookupFailure(t *testing.T) {
 	}
 	defer func() { orderFeedLogf = origLogf }()
 
-	got := orderTrackingUpdatedAt(front, run, make(map[string]latestOpenRunLookup))
+	got := orderTrackingUpdatedAt(leg, run, make(map[string]latestOpenRunLookup))
 	if !got.Equal(run.CreatedAt) {
 		t.Fatalf("updatedAt = %s, want %s", got, run.CreatedAt)
 	}

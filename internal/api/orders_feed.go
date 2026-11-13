@@ -339,12 +339,13 @@ func listActiveWorkflowProjectionBeads(store beads.FederatedReader) ([]beads.Bea
 
 func buildOrderRunFeedItems(state State, requestedScopeKind, requestedScopeRef string, limit int) (orderRunFeedResult, error) {
 	// The feed lists order-tracking beads, which are orders class and live in
-	// the orders binding on a split city. workflowStores leads with the GRAPH
-	// binding (its own callers scan workflow roots), so on a city that relocates
-	// only graph the tracking beads would still be missed; the orders leg is
-	// appended here and deduplicated, so a city that serves both classes from
-	// one binding — the shape this build supports — reads it once.
-	stores := appendOrdersClassStoreInfo(workflowWritableStores(state), state, workflowCityScopeRef(state.CityName()))
+	// the orders binding on a split city. The workflow legs lead with the GRAPH
+	// binding (their own callers scan workflow roots), so on a city that
+	// relocates only graph the tracking beads would still be missed; the
+	// every-order legs add the orders leg and dedupe it, so a city that serves
+	// both classes from one binding — the shape this build supports — reads it
+	// once.
+	stores := everyOrderLegs(state.Stores(), state.CityName())
 	allOrders := state.OrdersAll()
 	orderByScopedName := make(map[string]orders.Order, len(allOrders))
 	for _, order := range allOrders {
@@ -357,21 +358,14 @@ func buildOrderRunFeedItems(state State, requestedScopeKind, requestedScopeRef s
 	partialErrors := make([]string, 0)
 	var requestedScopeErr error
 	for _, info := range stores {
-		if info.store == nil {
+		if beads.IsNilStore(info.leg.Reader) {
 			continue
 		}
-		front := orders.NewStore(beads.OrdersStore{Store: info.store})
-		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
-		// rows only as pre-split copies, so beads.RelicRead counts the read as
-		// debt; on the class binding the same read is legitimate.
 		// One leg of the order-feed federation (graph, orders binding, and
-		// the city and rig scopes for pre-cutover history).
-		var runs []orders.OrderRun
-		err := beads.RelicRead(func() error {
-			var listErr error
-			runs, listErr = front.ListTracking(limit)
-			return listErr
-		})
+		// the city and rig scopes for pre-cutover history), read in its plan
+		// role: a relocated city's scope legs are relic legs (S4 debt), the
+		// bindings federated.
+		runs, err := orders.ListTrackingOn(info.leg.Reader, limit)
 		if err != nil {
 			if requestedScopeErr == nil && info.scopeKind == requestedScopeKind && info.scopeRef == requestedScopeRef {
 				requestedScopeErr = err
@@ -384,8 +378,9 @@ func buildOrderRunFeedItems(state State, requestedScopeKind, requestedScopeRef s
 			continue
 		}
 
-		// Scoped to this store's front: LatestOpenRun is a per-store lookup, so
-		// a cache keyed only by run.Scoped must not be reused across stores.
+		// Scoped to this leg: LatestOpenRun is a per-store lookup, so a cache
+		// keyed only by run.Scoped must not be reused across legs. It read
+		// unmarked, so it reads the leg strict.
 		// Runs sharing a scoped name within this store's result (repeat runs of
 		// the same order) cost one backing lookup instead of one per run.
 		latestOpenCache := make(map[string]latestOpenRunLookup, len(runs))
@@ -395,7 +390,7 @@ func buildOrderRunFeedItems(state State, requestedScopeKind, requestedScopeRef s
 				continue
 			}
 
-			updatedAt := orderTrackingUpdatedAt(front, run, latestOpenCache)
+			updatedAt := orderTrackingUpdatedAt(info.leg.Strict, run, latestOpenCache)
 			orderDef, ok := orderByScopedName[run.Scoped]
 			title := orderTrackingTitle(run.Scoped, orderDef, ok)
 			target := orderTrackingTarget(orderDef, ok, run)
@@ -438,11 +433,11 @@ type latestOpenRunLookup struct {
 	err   error
 }
 
-func orderTrackingUpdatedAt(front *orders.Store, run orders.OrderRun, cache map[string]latestOpenRunLookup) time.Time {
+func orderTrackingUpdatedAt(leg beads.FederatedReader, run orders.OrderRun, cache map[string]latestOpenRunLookup) time.Time {
 	updatedAt := run.CreatedAt
 	lookup, cached := cache[run.Scoped]
 	if !cached {
-		latest, found, err := front.LatestOpenRun(run.Scoped)
+		latest, found, err := orders.LatestOpenRunOn(leg, run.Scoped)
 		lookup = latestOpenRunLookup{run: latest, found: found, err: err}
 		cache[run.Scoped] = lookup
 	}

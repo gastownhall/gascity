@@ -128,7 +128,8 @@ func TestWorkflowLegsSkipARigNamedLikeTheCity(t *testing.T) {
 	}
 	info, ok := workflowStoreByRef(fx.state, "rig:"+t7dCity)
 	if !ok || fx.name(info.leg.Reader) != "named" {
-		t.Errorf("workflowStoreByRef(rig:%s) = %v, %s; want the rig's own store", t7dCity, ok, fx.t7dInfo(info, ok))
+		l, lok := t7dLive(info, ok)
+		t.Errorf("workflowStoreByRef(rig:%s) = %v, %s; want the rig's own store", t7dCity, ok, fx.t7dInfo(l, lok))
 	}
 	// co-1 is a workflow root in the city and in the rig named like it, and
 	// plain work in alpha, which sorts first: alpha answers, so not a graph
@@ -195,11 +196,15 @@ func TestWorkflowLegsReadARigOverTheCityStoreOnce(t *testing.T) {
 	if got, want := t7dRefs(workflowStores(state)), "city:"+t7dCity; got != want {
 		t.Errorf("workflowStores = %s, want %s", got, want)
 	}
-	if got, want := t7dRefs(frozenWorkflowStores(state)), "city:"+t7dCity+" rig:alpha"; got != want {
+	frozenRefs := make([]workflowStoreInfo, 0, 2)
+	for _, info := range frozenWorkflowStores(state) {
+		frozenRefs = append(frozenRefs, info.live())
+	}
+	if got, want := t7dRefs(frozenRefs), "city:"+t7dCity+" rig:alpha"; got != want {
 		t.Errorf("the frozen workflowStores = %s, want %s", got, want)
 	}
 	info, ok := workflowStoreByRef(state, "rig:alpha")
-	if !ok || info.ref != "rig:alpha" || info.scopeKind != beadmeta.ScopeKindRig || info.scopeRef != "alpha" || !beads.SameStore(info.leg.Reader, city) || !beads.SameStore(info.store, city) {
+	if !ok || info.ref != "rig:alpha" || info.scopeKind != beadmeta.ScopeKindRig || info.scopeRef != "alpha" || !beads.SameStore(info.leg.Reader, city) {
 		t.Errorf("workflowStoreByRef(rig:alpha) = %v, %+v; want the shared leg under rig:alpha", ok, info)
 	}
 }

@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/orders"
@@ -14,8 +13,9 @@ import (
 )
 
 // The T7b.2 equivalence table: storeref's OrderHistory legs, labeled the way
-// the API names its order-history stores (t7b2OrderLegs, which T7d.2 promotes
-// to production), beside main's frozen order-history builders
+// the API names its order-history stores (orderHistoryLegs and
+// orderHistoryOrdersRef, test-local in T7b.2 and production since T7d.2),
+// beside main's frozen order-history builders
 // (order_history_legs_reference_test.go), on every T7d shape under every T7e
 // rig variant, gate on and off, each side on a fresh fixture. A run must pick
 // the same stores in the same order under the same refs and scopes, and one
@@ -33,72 +33,8 @@ import (
 //     city whose graph is not relocated read federated, and only a relocated
 //     city's scope legs stay relic (t7b2-design.md Q7).
 //
-// The handlers that read these legs are compared whole in T7d.2.
-
-// t7b2OrderLeg is one labeled order-history leg.
-type t7b2OrderLeg struct {
-	ref, scopeKind, scopeRef string
-	leg                      storeref.TypedLeg
-}
-
-// t7b2OrderLegs labels plan in's legs with the refs the API names its order
-// stores by: the city and rigs by scope, a rig named like the city skipped in
-// the every-order list (workflowLegs' rule) and read in an order's own; the
-// Authority legs by store identity, never by ref (a plane's per-class refusal
-// shares the binding's ref): in the every-order list the leg over the graph
-// handle's store is graph:, as workflowLegs names it, and any other Authority
-// leg orders:; an order's own list has no graph leg, so its Authority leg is
-// orders:.
-func t7b2OrderLegs(st storeref.Stores, cityName string, in storeref.OrderHistory) ([]t7b2OrderLeg, error) {
-	plan, err := st.Plan(in)
-	if err != nil {
-		return nil, err
-	}
-	city := workflowCityScopeRef(cityName)
-	var out []t7b2OrderLeg
-	storeref.EachTypedLeg(plan, func(leg storeref.TypedLeg) {
-		l := t7b2OrderLeg{scopeKind: beadmeta.ScopeKindCity, scopeRef: city, leg: leg}
-		switch rig, _ := storeref.ScopeRigContext(string(leg.Ref)); {
-		case leg.Role == storeref.RoleAuthority:
-			l.ref = ordersClassStoreRefPrefix + ":" + city
-			if in.Kind == storeref.OrderHistoryAll && beads.SameStore(leg.Reader, st.Graph()) {
-				l.ref = workflowGraphStoreRefPrefix + ":" + city
-			}
-		case leg.Ref == storeref.WorkRef:
-			l.ref = "city:" + city
-		case rig != "":
-			if rig == city && in.Kind == storeref.OrderHistoryAll {
-				return
-			}
-			l.ref, l.scopeKind, l.scopeRef = "rig:"+rig, beadmeta.ScopeKindRig, rig
-		default:
-			return
-		}
-		out = append(out, l)
-	})
-	return out, nil
-}
-
-// t7b2OrdersRef is workflowStoreByRef's orders: arm over the plan: on a city
-// whose orders handle is not its work handle, the every-order list's leg over
-// the orders handle's store, named orders: whatever the list labels it.
-func t7b2OrdersRef(st storeref.Stores, cityName, scopeRef string) (t7b2OrderLeg, bool) {
-	city := workflowCityScopeRef(cityName)
-	if strings.TrimSpace(scopeRef) != city || beads.IsNilStore(st.Orders()) || beads.SameStore(st.Orders(), st.Work()) {
-		return t7b2OrderLeg{}, false
-	}
-	legs, err := t7b2OrderLegs(st, cityName, storeref.OrderHistory{Kind: storeref.OrderHistoryAll, SuspendedRigs: storeref.WorkflowReadsSuspendedRigs})
-	if err != nil {
-		return t7b2OrderLeg{}, false
-	}
-	for _, l := range legs {
-		if beads.SameStore(l.leg.Reader, st.Orders()) {
-			l.ref, l.scopeKind, l.scopeRef = ordersClassStoreRefPrefix+":"+city, beadmeta.ScopeKindCity, city
-			return l, true
-		}
-	}
-	return t7b2OrderLeg{}, false
-}
+// The handlers that read these legs are compared whole in
+// order_history_handlers_equivalence_test.go.
 
 // t7b2HistoryQuery is the history list's read of one leg.
 var t7b2HistoryQuery = beads.ListQuery{Label: "order-run:nightly", Limit: 20, IncludeClosed: true, Sort: beads.SortCreatedDesc, TierMode: beads.TierBoth}
@@ -123,7 +59,7 @@ func t7b2Frozen(fx t7dFixture, infos []t7b2FrozenOrderInfo, err error) string {
 }
 
 // t7b2Live renders the labeled legs and reads each through its reader.
-func t7b2Live(fx t7dFixture, legs []t7b2OrderLeg, err error) string {
+func t7b2Live(fx t7dFixture, legs []workflowStoreInfo, err error) string {
 	if err != nil {
 		return "error: " + err.Error()
 	}
@@ -163,7 +99,7 @@ func t7b2DropRepeats(infos []t7b2FrozenOrderInfo) []t7b2FrozenOrderInfo {
 type t7b2Op struct {
 	name   string
 	frozen func(fx t7dFixture) ([]t7b2FrozenOrderInfo, error)
-	live   func(fx t7dFixture) ([]t7b2OrderLeg, error)
+	live   func(fx t7dFixture) ([]workflowStoreInfo, error)
 }
 
 func t7b2Ops(city string) []t7b2Op {
@@ -179,8 +115,8 @@ func t7b2Ops(city string) []t7b2Op {
 			frozen: func(fx t7dFixture) ([]t7b2FrozenOrderInfo, error) {
 				return t7b2FrozenOrderStoreInfosForState(fx.state, orders.Order{Name: "nightly", Rig: rig})
 			},
-			live: func(fx t7dFixture) ([]t7b2OrderLeg, error) {
-				legs, err := t7b2OrderLegs(fx.state.Stores(), fx.state.CityName(), storeref.OrderHistory{Kind: storeref.OrderHistoryOne, Scope: scope, SuspendedRigs: reads})
+			live: func(fx t7dFixture) ([]workflowStoreInfo, error) {
+				legs, err := orderHistoryLegs(fx.state.Stores(), fx.state.CityName(), storeref.OrderHistory{Kind: storeref.OrderHistoryOne, Scope: scope, SuspendedRigs: reads})
 				if err != nil {
 					return nil, errNoOrderStores
 				}
@@ -191,8 +127,8 @@ func t7b2Ops(city string) []t7b2Op {
 	ops = append(ops, t7b2Op{
 		name:   "every order",
 		frozen: func(fx t7dFixture) ([]t7b2FrozenOrderInfo, error) { return t7b2FrozenEveryOrderInfos(fx.state), nil },
-		live: func(fx t7dFixture) ([]t7b2OrderLeg, error) {
-			legs, err := t7b2OrderLegs(fx.state.Stores(), fx.state.CityName(), storeref.OrderHistory{Kind: storeref.OrderHistoryAll, SuspendedRigs: reads})
+		live: func(fx t7dFixture) ([]workflowStoreInfo, error) {
+			legs, err := orderHistoryLegs(fx.state.Stores(), fx.state.CityName(), storeref.OrderHistory{Kind: storeref.OrderHistoryAll, SuspendedRigs: reads})
 			if err != nil {
 				return nil, nil // main's list was empty, never an error
 			}
@@ -209,12 +145,12 @@ func t7b2Ops(city string) []t7b2Op {
 				}
 				return []t7b2FrozenOrderInfo{info}, nil
 			},
-			live: func(fx t7dFixture) ([]t7b2OrderLeg, error) {
-				l, ok := t7b2OrdersRef(fx.state.Stores(), fx.state.CityName(), scopeRef)
+			live: func(fx t7dFixture) ([]workflowStoreInfo, error) {
+				l, ok := orderHistoryOrdersRef(fx.state.Stores(), fx.state.CityName(), scopeRef)
 				if !ok {
 					return nil, nil
 				}
-				return []t7b2OrderLeg{l}, nil
+				return []workflowStoreInfo{l}, nil
 			},
 		})
 	}
@@ -314,7 +250,7 @@ func TestOrderHistoryLegsMatchTheFrozenBuilders(t *testing.T) {
 
 // t7b2CheckLiveVerdicts pins the declared verdicts: each leg's one read ran
 // in its plan's gate role, relic exactly on a relocated city's scope legs.
-func t7b2CheckLiveVerdicts(t *testing.T, name string, fx t7dFixture, legs []t7b2OrderLeg, verdicts []string) {
+func t7b2CheckLiveVerdicts(t *testing.T, name string, fx t7dFixture, legs []workflowStoreInfo, verdicts []string) {
 	t.Helper()
 	relocated := !beads.SameStore(fx.state.Stores().Graph(), fx.state.Stores().Work())
 	if len(verdicts) != len(legs) && !strings.Contains(name, "cached") {
@@ -353,7 +289,7 @@ func TestOrderHistoryReadsARigOverTheCityStoreOnce(t *testing.T) {
 	if len(frozen) != 2 || !beads.SameStore(frozen[0].store, frozen[1].store) {
 		t.Fatalf("fixture: main's list is %d entries; want rig:zz and city: over one store", len(frozen))
 	}
-	legs, err := t7b2OrderLegs(fx.state.Stores(), fx.state.CityName(), storeref.OrderHistory{Kind: storeref.OrderHistoryOne, Scope: storeref.RigRef("zz"), SuspendedRigs: storeref.WorkflowReadsSuspendedRigs})
+	legs, err := orderHistoryLegs(fx.state.Stores(), fx.state.CityName(), storeref.OrderHistory{Kind: storeref.OrderHistoryOne, Scope: storeref.RigRef("zz"), SuspendedRigs: storeref.WorkflowReadsSuspendedRigs})
 	if err != nil {
 		t.Fatal(err)
 	}

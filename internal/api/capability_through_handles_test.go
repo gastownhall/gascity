@@ -109,7 +109,7 @@ func TestAPICapabilitiesReachTheStoreThroughAHandle(t *testing.T) {
 				t.Errorf("measuredStoreRows over a witness that saw rows = %v, want errRowCountContradicted", err)
 			}
 			// huma_handlers_orders.go orderHistoryBeadsAcrossStoreInfosCachedFirst: CachedLister.
-			if _, err := orderHistoryBeadsAcrossStoreInfosCachedFirst([]workflowStoreInfo{{ref: "city", store: wrap(store)}}, "o", 10, time.Time{}); err != nil || store.cachedLists.Load() != 1 {
+			if _, err := orderHistoryBeadsAcrossStoreInfosCachedFirst([]workflowStoreInfo{{ref: "city", leg: testWorkLeg(t, wrap(store))}}, "o", 10, time.Time{}); err != nil || store.cachedLists.Load() != 1 {
 				t.Errorf("order history made %d cache-only lists (%v), want 1", store.cachedLists.Load(), err)
 			}
 			// handler_agents.go findActiveBeadForAssigneesWithFreshness: CachedLister.

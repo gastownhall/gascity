@@ -217,7 +217,6 @@ func newSeededState(deps SeededCityDeps) *seededState {
 
 func (s *seededState) Config() *config.City              { return s.cfg }
 func (s *seededState) SessionProvider() runtime.Provider { return s.sp }
-func (s *seededState) BeadStore(rig string) beads.Store  { return s.rigStores[rig] }
 
 // BeadStores returns the rig stores plus the city (HQ) store keyed by city name,
 // so /beads federates the city root alongside every rig — the same shape

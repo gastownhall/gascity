@@ -9,7 +9,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/orders"
 )
 
 // The order-tracking bead is orders class, and on a city whose infrastructure
@@ -43,13 +42,13 @@ func TestOrderStoreInfosReachTheOrdersBinding(t *testing.T) {
 	st.stores = nil
 	st.cfg.Rigs = nil
 
-	infos, err := orderStoreInfosForState(st, orders.Order{Name: "dolt-health"})
+	infos, err := orderLegsFor(st.Stores(), st.CityName(), "")
 	if err != nil {
-		t.Fatalf("orderStoreInfosForState: %v", err)
+		t.Fatalf("orderLegsFor: %v", err)
 	}
 	var reachesBinding bool
 	for _, info := range infos {
-		if info.store == beads.Store(binding) {
+		if beads.SameStore(info.leg.Reader, binding) {
 			reachesBinding = true
 		}
 	}
@@ -59,7 +58,7 @@ func TestOrderStoreInfosReachTheOrdersBinding(t *testing.T) {
 }
 
 // TestOrderStoreInfosStayOnTheOneStoreOnSingleStoreCity is the compatibility
-// half: with Stores().Orders() == CityBeadStore() — every city that relocates
+// half: with Stores().Orders() over CityBeadStore() — every city that relocates
 // nothing — the list is exactly the one it always was, so the read does not scan
 // one database twice.
 func TestOrderStoreInfosStayOnTheOneStoreOnSingleStoreCity(t *testing.T) {
@@ -70,11 +69,11 @@ func TestOrderStoreInfosStayOnTheOneStoreOnSingleStoreCity(t *testing.T) {
 	st.stores = nil
 	st.cfg.Rigs = nil
 
-	infos, err := orderStoreInfosForState(st, orders.Order{Name: "dolt-health"})
+	infos, err := orderLegsFor(st.Stores(), st.CityName(), "")
 	if err != nil {
-		t.Fatalf("orderStoreInfosForState: %v", err)
+		t.Fatalf("orderLegsFor: %v", err)
 	}
-	if len(infos) != 1 || infos[0].store != beads.Store(city) {
+	if len(infos) != 1 || !beads.SameStore(infos[0].leg.Reader, city) {
 		t.Fatalf("order store infos = %+v, want exactly the city store", infos)
 	}
 }
@@ -302,7 +301,7 @@ func TestOrderHistoryStoreRefsAllResolveToTheSameStore(t *testing.T) {
 		if !ok {
 			t.Fatalf("workflowStoreByRef(%q) = false; an order endpoint published a ref no reader resolves", ref)
 		}
-		if !beads.SameStore(info.store, binding) {
+		if !beads.SameStore(info.leg.Reader, binding) {
 			t.Fatalf("workflowStoreByRef(%q) resolved to a store other than the bead's own binding", ref)
 		}
 	}
