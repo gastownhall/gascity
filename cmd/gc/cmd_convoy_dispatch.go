@@ -3678,10 +3678,11 @@ type sourceWorkflowWriteTarget struct {
 // with nothing said about it, which is the same wrong copy this resolution
 // exists to stop — arrived at silently instead of by the selector.
 //
-// The walk carries no rig legs (see cliByIDBindingOwner), so a rig-owned source
-// bead has no binding answer and the owning copy is the store the selector
-// named. That is what keeps every unsplit city, and every --rig run, on exactly
-// the store it wrote before.
+// A selector that names a rig scope never reaches the walk: the write stays in
+// the rig, matching the scope the caller locked, even when the id is one the
+// binding owns. The walk carries no rig legs (see cliByIDBindingOwner), so a
+// rig-owned source bead has no binding answer either way. That is what keeps
+// every unsplit city, and every --rig run, on exactly the store it wrote before.
 //
 // Opening the retained twin is best-effort for the same reason writing it is
 // (see clearSourceWorkflowTwins): a converged city whose retained ledger has
@@ -3700,6 +3701,13 @@ func resolveSourceWorkflowWriteTarget(cfg *config.City, cityPath string, target 
 			return sourceWorkflowWriteTarget{}, err
 		}
 		selected = view
+	}
+	// A selector that names a rig scope keeps the write in that scope. The lock
+	// the caller took is keyed on the same scope, so redirecting to a binding
+	// here — a city-scope write — would run it under a lock that does not
+	// exclude a city-scoped run (ga-grk7rk).
+	if !samePath(selected.scopePath(cityPath), cityPath) {
+		return sourceWorkflowWriteTarget{owning: selected}, nil
 	}
 	owner, ownedByBinding, err := cliByIDBindingOwner(cityPath, target.sourceBeadID)
 	if err != nil {
