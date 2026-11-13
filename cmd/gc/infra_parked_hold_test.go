@@ -16,6 +16,7 @@ import (
 // row bd holds by an undated deferral or a status the binding cannot record.
 func TestInfraParkedStatus(t *testing.T) {
 	future := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	past := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
 		name string
 		b    beads.Bead
@@ -24,6 +25,9 @@ func TestInfraParkedStatus(t *testing.T) {
 		{"undated deferral", beads.Bead{Status: "open", IndefinitelyDeferred: true}, "deferred"},
 		{"raw deferred alone", beads.Bead{Status: "open", SourceStatus: "deferred"}, "deferred"},
 		{"dated deferral", beads.Bead{Status: "open", IndefinitelyDeferred: true, SourceStatus: "deferred", DeferUntil: &future}, ""},
+		// bd keeps it parked until its own sweep; it crosses as its date and
+		// wakes in the binding, as that sweep would wake it.
+		{"deferral past its date", beads.Bead{Status: "open", IndefinitelyDeferred: true, SourceStatus: "deferred", DeferUntil: &past}, ""},
 		{"blocked", beads.Bead{Status: "open", SourceStatus: "blocked"}, "blocked"},
 		{"pinned", beads.Bead{Status: "open", SourceStatus: "pinned"}, "pinned"},
 		{"custom", beads.Bead{Status: "open", SourceStatus: "qa"}, "qa"},
@@ -82,6 +86,15 @@ func TestReverseParkedHold(t *testing.T) {
 	closed.Status = "closed"
 	if got, err := reverseParkedHold(closed); err != nil || got.Status != "closed" {
 		t.Errorf("a row closed in the split city came back %q (%v)", got.Status, err)
+	} else if got.DeferUntil == nil || !got.DeferUntil.Equal(past) {
+		// The sentinel is the copy's, not the row's: a row reopened later in
+		// the work store would stay hidden until 9999.
+		t.Errorf("a row closed in the split city came back deferred until %v, want the %v it had", got.DeferUntil, past)
+	}
+	claimed := infraCarryParkedHold(beads.Bead{ID: "gc-3", Status: "open", SourceStatus: "blocked"})
+	claimed.Status = "in_progress"
+	if got, err := reverseParkedHold(claimed); err != nil || got.Status != "in_progress" || got.DeferUntil != nil {
+		t.Errorf("a row claimed in the split city came back %q until %v (%v), want in_progress with no deferral", got.Status, got.DeferUntil, err)
 	}
 
 	broken := beads.Bead{ID: "gc-2", Status: "open", Metadata: beads.StringMap{beadmeta.MigratedParkedHoldMetadataKey: "{not json"}}
