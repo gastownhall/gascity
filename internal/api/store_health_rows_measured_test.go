@@ -3,7 +3,6 @@ package api
 import (
 	"encoding/json"
 	"testing"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/api/genclient"
 	"github.com/gastownhall/gascity/internal/storehealth"
@@ -26,7 +25,7 @@ func TestStatusStoreHealthFromDomainCarriesRowsMeasured(t *testing.T) {
 		{name: "unmeasured", measured: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h := storehealth.Compute("/c", 329_400_000, 0, tc.measured, time.Time{}, "")
+			h := storehealth.Compute("/c", 329_400_000, 0, tc.measured)
 			got := statusStoreHealthFromDomain(h)
 
 			if got.RowsMeasured != tc.measured {
@@ -40,7 +39,7 @@ func TestStatusStoreHealthFromDomainCarriesRowsMeasured(t *testing.T) {
 // measured at zero rows is measured, and reporting it as unmeasured would be
 // the original conflation running the other way.
 func TestStatusStoreHealthFromDomainDoesNotInferFromLiveRows(t *testing.T) {
-	measuredEmpty := statusStoreHealthFromDomain(storehealth.Compute("/c", 4096, 0, true, time.Time{}, ""))
+	measuredEmpty := statusStoreHealthFromDomain(storehealth.Compute("/c", 4096, 0, true))
 	if !measuredEmpty.RowsMeasured {
 		t.Error("a measured empty store is reported as unmeasured; the flag is being inferred from LiveRows")
 	}

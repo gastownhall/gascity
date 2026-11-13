@@ -313,7 +313,6 @@ cmd/gc/city_runtime_v2.go	listRevisionCheckIsCheap	raw-var	1
 cmd/gc/city_runtime_v2.go	sameClassStore	raw-param	2
 cmd/gc/city_runtime_v2.go	v2ClassStoreCapabilities	raw-field	1
 cmd/gc/city_runtime_v2.go	v2ClassStoreCapabilities	raw-param	2
-cmd/gc/city_status_snapshot.go	buildCityStoreHealth	raw-param	1
 cmd/gc/city_status_snapshot.go	collectCitySessionCounts	raw-param	1
 cmd/gc/city_status_snapshot.go	collectCityStatusSnapshot	raw-param	1
 cmd/gc/city_status_snapshot.go	collectCityStatusSnapshotFromStoreSnapshot	raw-param	1
@@ -1797,8 +1796,6 @@ internal/sling/sling_core.go	sourceWorkflowRootCollector.scanStore	mint	1
 internal/sling/sling_core.go	sourceWorkflowRootCollector.scanStore	read-marker	1
 internal/sling/sling_core.go	withSourceWorkflowLaunchLock	mint	1
 internal/sling/sling_core.go	workflowRestoreState	raw-field	1
-internal/supervisor/maintenance.go	StoreMaintenanceLoop	raw-field	1
-internal/supervisor/maintenance.go	StoreMaintenanceLoopDeps	raw-field	1
 internal/worker/factory.go	Factory	raw-field	1
 internal/worker/factory.go	Factory.HandleForTarget	mint	1
 internal/worker/factory.go	FactoryConfig	raw-field	1

@@ -369,7 +369,6 @@ func newRootCmdWithOptions(stdout, stderr io.Writer, options rootCommandOptions)
 		newResumeCmd(stdout, stderr),
 		newRigCmd(stdout, stderr),
 		newMailCmd(stdout, stderr),
-		newMaintenanceCmd(stdout, stderr),
 		newNudgeCmd(stdout, stderr),
 		newWaitCmd(stdout, stderr),
 		newAgentCmd(stdout, stderr),

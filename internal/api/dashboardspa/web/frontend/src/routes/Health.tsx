@@ -27,7 +27,6 @@ import type {
 import { useCachedData } from '../hooks/useCachedData';
 import { useVisibleRefresh } from '../hooks/useVisibleRefresh';
 import { formatHumanSize } from '../lib/format';
-import { formatShortDate } from '../hooks/time';
 import { supervisorApiForRequestBudget } from '../supervisor/client';
 
 const HEALTH_SUPERVISOR_REQUEST_TIMEOUT_MS = 2_500;
@@ -429,16 +428,6 @@ function DoltUsageBlock({ usage }: { usage: DiagnosticDatum<StatusStoreHealth> }
         <Kv label="On-disk size" value={formatHumanSize(statusNumber(u.size_bytes))} />
         <Kv label="Live rows" value={u.live_rows.toLocaleString()} />
         <Kv label="MB per row" value={u.ratio_mb_per_row.toString()} />
-        <Kv
-          label="Last maintenance"
-          value={u.last_gc_status ?? 'not reported'}
-          {...(u.last_gc_status !== undefined && u.last_gc_status !== 'success'
-            ? { tone: 'warn' as const }
-            : {})}
-        />
-        {u.last_gc_at !== undefined && (
-          <Kv label="Last maintenance at" value={formatShortDate(u.last_gc_at)} />
-        )}
         <Kv label="Store path" value={u.path} />
       </KvList>
     </div>

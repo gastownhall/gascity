@@ -1009,6 +1009,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   them (see Fixed). Correct or delete the entry, and check that the overrides
   below it, such as an `enabled = false`, still say what you want.
 
+- **The observe-only Dolt maintenance loop is retired.** `[maintenance.dolt]`
+  never snapshotted or compacted anything, so nothing is lost by removing it;
+  compaction is `gc dolt compact`, tuned through its `GC_DOLT_COMPACT_*`
+  settings. This replaces the closed #3579 and credits
+  sjarmak's review of it. A stale `[maintenance.dolt]` table stays harmless: it
+  loads with a "was retired in" warning, and you can delete it. Breaking
+  changes:
+  - **Status contract.** `GET /v0/city/{city}/maintenance/status` and
+    `POST /v0/city/{city}/maintenance/dolt-gc` are gone, and so is the
+    `gc maintenance` command. The status `store_health` block no longer carries
+    `last_gc_at` or `last_gc_status`, and `gc status` no longer prints a
+    `Last GC:` line. `store_health.warning` now means the store's size-to-row
+    ratio exceeds `threshold_mb_per_row` over the minimum size floor, not that
+    "maintenance is overdue". Generated clients, including the dashboard's, were
+    regenerated; regenerate any client of your own.
+  - **Events.** `gc.store.maintenance.done`, `gc.store.maintenance.failed`,
+    `gc.store.disk_warn` and `gc.store.disk_critical` are no longer emitted or
+    registered.
+  - **Event export.** `pkg/eventexport` `SchemaVersion` moves from 6 to 7,
+    because the default type allowlist drops `gc.store.maintenance.done`. A
+    receiver pinned to schema 6 rejects the new batches (`ErrSchemaMismatch`)
+    until it is updated.
+  - **Known limit.** `gc migrate` and other config rewrites still refuse a
+    city whose `city.toml` carries the retired keys; delete the
+    `[maintenance.dolt]` table first.
+
 ### Added
 
 - **Events: `session.created` and `session.closed`.** The city event

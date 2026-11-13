@@ -483,19 +483,11 @@
             },
             "warning": {
               "type": "boolean",
-              "description": "True when maintenance is overdue."
+              "description": "True when the store's size-to-row ratio exceeds threshold_mb_per_row and the store is over the minimum size floor, so it is large for the beads it holds. Meaningless when live_rows_unknown is true."
             },
             "threshold_mb_per_row": {
               "type": "number",
               "description": "Ratio threshold above which warning trips."
-            },
-            "last_gc_at": {
-              "type": "string",
-              "description": "RFC3339 time of the last maintenance run, when one is recorded."
-            },
-            "last_gc_status": {
-              "type": "string",
-              "description": "Outcome of the last maintenance run (success or failed), when one is recorded."
             }
           }
         }

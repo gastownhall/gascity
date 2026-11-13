@@ -64,7 +64,7 @@ func TestStandaloneControllerClient(t *testing.T) {
 // before any probe. The supervisor fall-through for a live controller of
 // unknown mode with no [api] port is scoped to the
 // supervisorFallthroughAPIClient callers — see
-// TestMaintenanceAPIClientRoutesToSupervisor and
+// TestSupervisorFallthroughAPIClientRoutesToSupervisor and
 // TestCityStatusAPIClientRoutesToSupervisor. (gascity ga-tp7, #5262)
 func TestAPIClientRouting(t *testing.T) {
 	sentinel := api.NewClient("http://supervisor.sentinel:1")
@@ -228,16 +228,16 @@ func TestAPIClientRouting(t *testing.T) {
 	})
 }
 
-// TestMaintenanceAPIClientRoutesToSupervisor proves the maintenance-scoped
+// TestSupervisorFallthroughAPIClientRoutesToSupervisor proves the supervisor
 // fall-through: when the controller socket is alive with an unknown hosting
 // mode (a supervisor predating identify) and the city omits a standalone [api]
 // port, or when the supervisor hosting the city requires city grants,
-// maintenanceAPIClient routes to the supervisor-managed client (maintenance
+// supervisorFallthroughAPIClient routes to the supervisor-managed client (it
 // has no local fallback), where general commands' apiClient returns nil. A
 // controller that identifies as standalone is never sent to the supervisor,
 // and the supervisor-managed client is resolved at most once. The fall-through
 // never consults the supervisor's grant requirement. (gascity ga-tp7)
-func TestMaintenanceAPIClientRoutesToSupervisor(t *testing.T) {
+func TestSupervisorFallthroughAPIClientRoutesToSupervisor(t *testing.T) {
 	sentinel := api.NewClient("http://supervisor.sentinel:1")
 	origIdentity, origSup, origGrants := apiRouteControllerIdentityHook, apiRouteSupervisorClientHook, apiRouteSupervisorGrantsHook
 	t.Cleanup(func() {
@@ -255,12 +255,12 @@ func TestMaintenanceAPIClientRoutesToSupervisor(t *testing.T) {
 		apiRouteControllerIdentityHook = func(string) controllerIdentityReply { return controllerIdentityReply{PID: 4242} }
 		apiRouteSupervisorClientHook = func(string) *api.Client { return sentinel }
 		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
-		c, reason := maintenanceAPIClient(dir)
+		c, reason := supervisorFallthroughAPIClient(dir)
 		if c != sentinel {
-			t.Fatalf("maintenanceAPIClient client = %p, want supervisor sentinel %p", c, sentinel)
+			t.Fatalf("supervisorFallthroughAPIClient client = %p, want supervisor sentinel %p", c, sentinel)
 		}
 		if reason != "" {
-			t.Fatalf("maintenanceAPIClient reason = %q, want empty", reason)
+			t.Fatalf("supervisorFallthroughAPIClient reason = %q, want empty", reason)
 		}
 	})
 
@@ -269,17 +269,17 @@ func TestMaintenanceAPIClientRoutesToSupervisor(t *testing.T) {
 		apiRouteControllerIdentityHook = func(string) controllerIdentityReply { return controllerIdentityReply{PID: 4242} }
 		apiRouteSupervisorClientHook = func(string) *api.Client { return sentinel }
 		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
-		c, reason := maintenanceAPIClient(dir)
+		c, reason := supervisorFallthroughAPIClient(dir)
 		if c != nil {
-			t.Fatalf("maintenanceAPIClient client = %p, want nil under GC_NO_API", c)
+			t.Fatalf("supervisorFallthroughAPIClient client = %p, want nil under GC_NO_API", c)
 		}
 		if reason != "escape-hatch" {
-			t.Fatalf("maintenanceAPIClient reason = %q, want \"escape-hatch\"", reason)
+			t.Fatalf("supervisorFallthroughAPIClient reason = %q, want \"escape-hatch\"", reason)
 		}
 	})
 
 	t.Run("supervisor-hosted-requiring-grants-routes-to-supervisor", func(t *testing.T) {
-		// Maintenance has no local fallback, so it asks a supervisor that
+		// The fall-through has no local fallback, so it asks a supervisor that
 		// requires city grants and reports its refusal like any API error.
 		t.Setenv("GC_NO_API", "")
 		apiRouteControllerIdentityHook = func(string) controllerIdentityReply {
@@ -287,12 +287,12 @@ func TestMaintenanceAPIClientRoutesToSupervisor(t *testing.T) {
 		}
 		apiRouteSupervisorClientHook = func(string) *api.Client { return sentinel }
 		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
-		c, reason := maintenanceAPIClient(dir)
+		c, reason := supervisorFallthroughAPIClient(dir)
 		if c != sentinel {
-			t.Fatalf("maintenanceAPIClient client = %p, want supervisor sentinel %p", c, sentinel)
+			t.Fatalf("supervisorFallthroughAPIClient client = %p, want supervisor sentinel %p", c, sentinel)
 		}
 		if reason != "" {
-			t.Fatalf("maintenanceAPIClient reason = %q, want empty", reason)
+			t.Fatalf("supervisorFallthroughAPIClient reason = %q, want empty", reason)
 		}
 	})
 
@@ -308,12 +308,12 @@ func TestMaintenanceAPIClientRoutesToSupervisor(t *testing.T) {
 			return sentinel
 		}
 		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
-		c, reason := maintenanceAPIClient(dir)
+		c, reason := supervisorFallthroughAPIClient(dir)
 		if c != nil {
-			t.Fatalf("maintenanceAPIClient client = %p, want nil (standalone controller without an [api] port)", c)
+			t.Fatalf("supervisorFallthroughAPIClient client = %p, want nil (standalone controller without an [api] port)", c)
 		}
 		if reason != "controller-down" {
-			t.Fatalf("maintenanceAPIClient reason = %q, want \"controller-down\"", reason)
+			t.Fatalf("supervisorFallthroughAPIClient reason = %q, want \"controller-down\"", reason)
 		}
 	})
 
@@ -331,15 +331,15 @@ func TestMaintenanceAPIClientRoutesToSupervisor(t *testing.T) {
 			return nil
 		}
 		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n[api]\nport = 9443\nbind = \"0.0.0.0\"\n")
-		c, reason := maintenanceAPIClient(dir)
+		c, reason := supervisorFallthroughAPIClient(dir)
 		if c != nil {
-			t.Fatalf("maintenanceAPIClient client = %p, want nil (no supervisor-managed client)", c)
+			t.Fatalf("supervisorFallthroughAPIClient client = %p, want nil (no supervisor-managed client)", c)
 		}
 		if resolutions != 1 {
 			t.Fatalf("supervisor client resolved %d times, want 1", resolutions)
 		}
 		if reason != "controller-down" {
-			t.Fatalf("maintenanceAPIClient reason = %q, want \"controller-down\"", reason)
+			t.Fatalf("supervisorFallthroughAPIClient reason = %q, want \"controller-down\"", reason)
 		}
 	})
 }
@@ -391,7 +391,7 @@ func TestAPIClientFallbackReason(t *testing.T) {
 // fallback (open the bead/dolt store, rescan event archives to rebuild store
 // health), measured at ~9.5s of CPU on a 26-agent/1.2GB city versus ~0.35s
 // for the supervisor's already-cached response. cityStatusAPIClient now
-// shares supervisorFallthroughAPIClient with maintenanceAPIClient, so it
+// shares supervisorFallthroughAPIClient with supervisorFallthroughAPIClient, so it
 // must resolve the supervisor client in that same shape (a live controller of
 // unknown hosting mode, no [api] port) instead of nil, and for a
 // supervisor-hosted city whether or not it sets an [api] port.

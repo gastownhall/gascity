@@ -257,8 +257,8 @@ func TestMetadataInfoOnlyFilesStayOnInfoSnapshot(t *testing.T) {
 // session access is non-front-door (loadStatusSessionSnapshot → ListAllSessionBeads,
 // namedSessionStatusForCity → resolveSessionIDWithConfig + store.Get,
 // collectCitySessionCounts → workerSessionCatalogWithConfig), all routed through
-// cliSessionStore, while the store-health probe (buildCityStoreHealth →
-// collectStoreHealth → store.List) deliberately stays on the generic work store it
+// cliSessionStore, while the store-health probe (collectStoreHealth →
+// store.List) deliberately stays on the generic work store it
 // measures. The negative sessionFrontDoor(store...) needles are inert for these
 // files; the positive cliSessionStore( tripwire protects the routed reads the same
 // way it protects providers.go's snapshot route, consistent with this guard being

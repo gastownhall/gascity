@@ -132,7 +132,7 @@ describe('cockpit instruments', () => {
             {
               key: 'store',
               label: 'store',
-              value: 'maintenance overdue',
+              value: 'large for its row count',
               state: 'warning',
               href: '/health',
             },
@@ -147,7 +147,7 @@ describe('cockpit instruments', () => {
         />
       </MemoryRouter>,
     );
-    expect(screen.getByRole('link', { name: 'store: warning, maintenance overdue' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: 'store: warning, large for its row count' })).toBeTruthy();
     expect(screen.getByRole('link', { name: 'live feed: unknown, disconnected' })).toBeTruthy();
   });
 });

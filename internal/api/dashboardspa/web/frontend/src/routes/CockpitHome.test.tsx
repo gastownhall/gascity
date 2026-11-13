@@ -539,35 +539,35 @@ describe('<CockpitHomePage>', () => {
     expect(screen.queryByRole('link', { name: 'active sessions: 99' })).toBeNull();
   });
 
-  it('reports failed store maintenance when the size ratio is within threshold', async () => {
+  it('reports an oversized store when the size-to-row ratio exceeds the threshold', async () => {
     const current = await mocks.cityStatus();
     mocks.cityStatus.mockResolvedValue({
       ...current,
-      store_health: { ...current.store_health, last_gc_status: 'failed', warning: false },
+      store_health: { ...current.store_health, warning: true },
     });
 
     render(router(<CockpitHomePage />));
 
     expect(
       await screen.findByRole('link', {
-        name: 'dolt store: warning, maintenance failed',
+        name: 'dolt store: warning, large for its row count',
       }),
     ).toBeTruthy();
   });
 
-  it('marks partial status lamps unknown and reports failed store maintenance', async () => {
+  it('marks partial status lamps unknown and reports the last oversized store reading', async () => {
     const current = await mocks.cityStatus();
     mocks.cityStatus.mockResolvedValue({
       ...current,
       partial: true,
-      store_health: { ...current.store_health, last_gc_status: 'failed' },
+      store_health: { ...current.store_health, warning: true },
     });
 
     render(router(<CockpitHomePage />));
 
     expect(
       await screen.findByRole('link', {
-        name: 'dolt store: unknown, partial · last reported maintenance failed',
+        name: 'dolt store: unknown, partial · last reported large for its row count',
       }),
     ).toBeTruthy();
   });

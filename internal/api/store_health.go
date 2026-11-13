@@ -107,17 +107,16 @@ func (s *Server) computeStoreHealth(ctx context.Context) (*StatusStoreHealth, er
 	if err != nil {
 		return nil, err
 	}
-	lastAt, lastStatus := storehealth.LastMaintenance(s.state.EventProvider())
 	// countBeadStoreRows returns an error (handled above) rather than a
 	// fabricated count on every failure path, and refuses a zero the store's
 	// own row witness contradicts, so rows here is a count this process holds
 	// no evidence against. That is what the true below asserts.
-	h := storehealth.Compute(cityPath, size, rows, true, lastAt, lastStatus)
+	h := storehealth.Compute(cityPath, size, rows, true)
 	return statusStoreHealthFromDomain(h), nil
 }
 
 // statusStoreHealthFromDomain adapts storehealth.Health to the wire
-// type StatusStoreHealth, serializing LastGCAt to RFC3339 UTC.
+// type StatusStoreHealth.
 // RowsMeasured is carried across verbatim rather than derived from
 // LiveRows: an unmeasured count and a genuinely empty store are both
 // zero, and telling them apart is the whole reason the flag exists.
@@ -130,10 +129,6 @@ func statusStoreHealthFromDomain(h storehealth.Health) *StatusStoreHealth {
 		RatioMB:      h.RatioMB,
 		Warning:      h.Warning,
 		ThresholdMB:  h.ThresholdMB,
-	}
-	if !h.LastGCAt.IsZero() {
-		out.LastGCAt = h.LastGCAt.UTC().Format(time.RFC3339)
-		out.LastGCStatus = h.LastGCStatus
 	}
 	return out
 }

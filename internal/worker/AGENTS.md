@@ -304,9 +304,7 @@ seams consult it:
   box wrote (`gc events`, and `gc analyze-reliability` on the city it
   resolves; a file named by `--events` is still read), and any class whose
   configured binding is not the binding of the descriptor ledger whose
-  `classes` list it. `gc status`' store-health block opens no events log on
-  a box (`openStoreHealthEvents`), so it reports no last maintenance. The
-  one-shot storage funnel (`resolveCLIStorageRoutes`) takes that verdict
+  `classes` list it. The one-shot storage funnel (`resolveCLIStorageRoutes`) takes that verdict
   before it opens or creates a binding, as a standing refusal, so the by-id
   resolver and the graph binding refuse too while work ids still resolve to
   work.

@@ -139,7 +139,6 @@ go_test(
         "legacy_workspace_warnings_test.go",
         "loader_coverage_test.go",
         "maintenance_retired_test.go",
-        "maintenance_test.go",
         "migration_guide_overlay_test.go",
         "named_sessions_test.go",
         "namepool_test.go",

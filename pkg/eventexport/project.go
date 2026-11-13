@@ -78,8 +78,9 @@ import (
 // an operator-chosen city name no longer leaves the box. v3 adds native
 // execution-step dependencies to the envelope. v4 adds fail-closed execution
 // work-association and step-definition facts. v6 adds the execution run-anchor
-// fact.
-const SchemaVersion = 6
+// fact. v7 removes gc.store.maintenance.done from the default type allowlist,
+// because the loop that emitted it was retired.
+const SchemaVersion = 7
 
 // Profile selects the redaction profile. There is exactly one today; it is part
 // of the public API so Validate can stay profile-aware as profiles are added
@@ -129,7 +130,6 @@ var allowedTypes = map[string]bool{
 	"session.drain_acked_with_assigned_work": true,
 	"session.reset_stalled":                  true,
 	"project.identity.stamped":               true,
-	"gc.store.maintenance.done":              true,
 	"mail.sent":                              true, // reduced to {type, ts}; see ProjectEvent
 }
 

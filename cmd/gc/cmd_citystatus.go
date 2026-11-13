@@ -120,8 +120,6 @@ type StoreHealth struct {
 	RatioMB         float64 `json:"ratio_mb_per_row"`
 	Warning         bool    `json:"warning"`
 	ThresholdMB     float64 `json:"threshold_mb_per_row"`
-	LastGCAt        string  `json:"last_gc_at,omitempty"`
-	LastGCStatus    string  `json:"last_gc_status,omitempty"`
 }
 
 var (
@@ -393,8 +391,6 @@ func snapshotFromStatusView(cityPath string, v api.StatusView) cityStatusSnapsho
 			RatioMB:         v.StoreHealth.RatioMB,
 			Warning:         v.StoreHealth.Warning,
 			ThresholdMB:     v.StoreHealth.ThresholdMB,
-			LastGCAt:        v.StoreHealth.LastGCAt,
-			LastGCStatus:    v.StoreHealth.LastGCStatus,
 		}
 	}
 	return snapshot

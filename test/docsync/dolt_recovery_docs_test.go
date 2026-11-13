@@ -14,7 +14,6 @@ import (
 // not name (#1979).
 var doltRecoveryDocs = []string{
 	"examples/bd/dolt/docs/journal-corruption-recovery.md",
-	"engdocs/contributors/dolt-maintenance.md",
 }
 
 var (

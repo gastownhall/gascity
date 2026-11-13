@@ -30,17 +30,32 @@ type retiredKey struct {
 // classifier (classifyUndecoded), and IsRetiredKeyWarning keeps it non-fatal +
 // surfaced on the two downstream deciders that re-classify config warnings —
 // strict mode (cmd/gc/strict_warnings.go) and the agent warning-emit path
-// (cmd/gc/cmd_agent.go). It is intentionally empty until the first consumer:
-// S5-T7 retires daemon.graph_workflows (today still a live formula_v2 alias).
+// (cmd/gc/cmd_agent.go).
 //
-// S5-T7 INTEGRATION NOTES (deferred to the change that adds the first entry):
-//   - Whole-table retirement needs BOTH the parent-table key and each leaf key
-//     registered, because toml.MetaData.Undecoded() reports both.
-//   - The struct-round-trip rewrite guard (GuardRewriteKeyLoss in
-//     site_binding.go) and `gc migrate` still refuse a file carrying a retired
-//     key (the rewrite would drop it). S5-T7 must decide whether to exempt
-//     retired keys there or reword the "upgrade gc" guidance.
-var retiredKeys = map[string]retiredKey{}
+// Whole-table retirement needs BOTH the parent-table key and each leaf key
+// registered, because toml.MetaData.Undecoded() reports both. The
+// struct-round-trip rewrite guard (GuardRewriteKeyLoss in site_binding.go) and
+// `gc migrate` still refuse a file carrying a retired key (the rewrite would
+// drop it); that guard does not yet exempt retired keys.
+var retiredKeys = map[string]retiredKey{
+	// The periodic Dolt store maintenance loop was observe-only (it took no
+	// snapshot and ran no CALL DOLT_GC) and is removed. Whole-table
+	// retirement registers the parent tables and every leaf key, because
+	// toml.MetaData.Undecoded() reports both.
+	"maintenance":                 retiredMaintenanceDolt,
+	"maintenance.dolt":            retiredMaintenanceDolt,
+	"maintenance.dolt.enabled":    retiredMaintenanceDolt,
+	"maintenance.dolt.interval":   retiredMaintenanceDolt,
+	"maintenance.dolt.alert_to":   retiredMaintenanceDolt,
+	"maintenance.dolt.gc_timeout": retiredMaintenanceDolt,
+}
+
+// retiredMaintenanceDolt is the shared registration for the removed
+// [maintenance.dolt] table.
+var retiredMaintenanceDolt = retiredKey{
+	RemovedIn: "the release after v1.5.1",
+	Note:      "the observe-only Dolt maintenance loop was removed; delete the [maintenance.dolt] table (compaction is the dolt compact command's GC_DOLT_COMPACT_* settings)",
+}
 
 // retiredKeyWarning renders the migration warning for a retired key.
 func retiredKeyWarning(source, key string, rk retiredKey) string {

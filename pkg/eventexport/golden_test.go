@@ -93,7 +93,7 @@ func TestGoldenWireBytes(t *testing.T) {
 func slicePtr(values []string) *[]string { return &values }
 
 // TestBatchGoldenBytes pins the batch envelope shape: an opaque city_hash (never
-// a cleartext city name) and schema_version 6.
+// a cleartext city name) and schema_version 7.
 func TestBatchGoldenBytes(t *testing.T) {
 	b := Batch{CityHash: "7f3a9c1e5b2d4068", SchemaVersion: SchemaVersion, Events: []Envelope{
 		{Seq: 1, Type: "convoy.closed", TS: "2026-06-21T10:03:27Z", ActorHash: "0123456789abcdef", Ref: "gcg-4216"},
@@ -102,7 +102,7 @@ func TestBatchGoldenBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `{"city_hash":"7f3a9c1e5b2d4068","schema_version":6,"events":[{"seq":1,"type":"convoy.closed","ts":"2026-06-21T10:03:27Z","actor_hash":"0123456789abcdef","ref":"gcg-4216"}]}`
+	want := `{"city_hash":"7f3a9c1e5b2d4068","schema_version":7,"events":[{"seq":1,"type":"convoy.closed","ts":"2026-06-21T10:03:27Z","actor_hash":"0123456789abcdef","ref":"gcg-4216"}]}`
 	if string(out) != want {
 		t.Fatalf("batch golden:\n got %s\nwant %s", out, want)
 	}
@@ -117,7 +117,7 @@ func TestAllowlistPolicyGolden(t *testing.T) {
 	wantAllowed := []string{
 		"bead.closed", "bead.created", "controller.started", "convoy.closed",
 		"events.rotated", "execution.run_anchored", "execution.step_completed", "execution.step_defined", "execution.step_started", "execution.work_associated",
-		"gc.store.maintenance.done", "mail.sent",
+		"mail.sent",
 		"order.completed", "order.failed", "order.fired",
 		"project.identity.stamped", "session.drain_acked_with_assigned_work",
 		"session.draining", "session.reset_stalled", "session.stopped",

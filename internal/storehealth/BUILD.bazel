@@ -10,7 +10,6 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/beads/contract",
-        "//internal/events",
         "//internal/fsys",
     ],
 )
@@ -24,10 +23,7 @@ go_test(
         "testenv_import_test.go",
     ],
     embed = [":storehealth"],
-    deps = [
-        "//internal/events",
-        "//internal/testenv",
-    ],
+    deps = ["//internal/testenv"],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
