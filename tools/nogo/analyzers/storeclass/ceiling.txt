@@ -22,7 +22,7 @@ internal/api	unwrap	5
 internal/dispatch	mint	5
 internal/dispatch	raw-field	2
 internal/dispatch	raw-param	14
-internal/dispatch	raw-result	5
+internal/dispatch	raw-result	4
 internal/dispatch	unwrap	7
 internal/doctor	raw-field	1
 internal/doctor	raw-param	2

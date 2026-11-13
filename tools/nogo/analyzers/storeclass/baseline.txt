@@ -1755,11 +1755,10 @@ internal/dispatch/drain.go	drainMemberDepStore	raw-result	1
 internal/dispatch/drain.go	drainMemberDepStore	unwrap	1
 internal/dispatch/drain.go	drainMemberOwningStore	raw-result	1
 internal/dispatch/drain.go	drainMemberOwningStore	unwrap	1
+internal/dispatch/drain.go	drainUnitConvoyByKey	mint	1
 internal/dispatch/drain.go	drainUnitConvoyByKey	raw-param	1
-internal/dispatch/drain.go	drainUnitConvoyByKey	raw-result	1
 internal/dispatch/drain.go	drainUnitConvoyStore	mint	1
 internal/dispatch/drain.go	drainUnitConvoyStore	raw-param	1
-internal/dispatch/drain.go	ensureDrainUnitConvoy	mint	1
 internal/dispatch/drain.go	releaseDrainReservation	raw-param	1
 internal/dispatch/drain.go	reloadDrainUnitConvoy	raw-param	1
 internal/dispatch/drain.go	walkDrainUnitConvoyLegs	raw-param	2
