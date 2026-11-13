@@ -1206,3 +1206,110 @@ func TestRuntimeLeaseHeldAt(t *testing.T) {
 		t.Fatal("a nil lease reads held")
 	}
 }
+
+// revRecorder records the revision of every conditional write.
+type revRecorder struct {
+	*rowWriteRecorder
+	revs []int64
+}
+
+func (r *revRecorder) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts) error {
+	r.revs = append(r.revs, rev)
+	return r.rowWriteRecorder.UpdateIfMatch(id, rev, opts)
+}
+
+// leaseClock is a settable holder's clock.
+type leaseClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *leaseClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *leaseClock) set(now time.Time) {
+	c.mu.Lock()
+	c.now = now
+	c.mu.Unlock()
+}
+
+// TestRuntimeLeaseExtendRecord (AC-4): ExtendRecord on a row that still
+// records the lease, after its SafeUntil and after its expiry when nobody else
+// acquired, writes one conditional write at the fresh read's revision setting
+// only the expiry and TTL; SafeUntil, HeldAt and a later Watch follow it.
+func TestRuntimeLeaseExtendRecord(t *testing.T) {
+	backing := openLeaseStore(t, t.TempDir())
+	store := &revRecorder{rowWriteRecorder: &rowWriteRecorder{Store: backing}}
+	f := leaseFixtureOver(t, store)
+	clk := &leaseClock{now: leaseT0}
+	l, err := TryRuntimeLease(f.front, RuntimeLeaseRequest{City: t.TempDir(), Name: "s-lease", ID: f.id, TTL: leaseTTL, now: clk.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Release()
+	before := f.meta(t)
+	for _, c := range []struct {
+		name string
+		at   time.Time
+	}{
+		{"after SafeUntil", l.SafeUntil().Add(1500 * time.Millisecond)},
+		{"after expiry", leaseT0.Add(3*leaseTTL + 700*time.Millisecond)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			clk.set(c.at)
+			if l.HeldAt(c.at) {
+				t.Fatalf("the lease reads held at %v before the extension; the case does not exercise a lapsed record", c.at)
+			}
+			read := mustBead(t, backing, f.id)
+			store.writes, store.ifMatch, store.revs = nil, nil, nil
+			ttl := leaseTTL + time.Minute
+			if err := l.ExtendRecord(ttl); err != nil {
+				t.Fatalf("ExtendRecord: %v", err)
+			}
+			want := c.at.Add(ttl).UTC().Truncate(time.Second)
+			if len(store.writes) != 1 || store.writes[0] != "UpdateIfMatch" || len(store.revs) != 1 || store.revs[0] != read.Revision {
+				t.Fatalf("writes %v at revisions %v, want one UpdateIfMatch at the read's revision %d", store.writes, store.revs, read.Revision)
+			}
+			wrote := store.ifMatch[0].Metadata
+			if len(wrote) != 2 || wrote[RuntimeLeaseExpiresKey] != want.Format(time.RFC3339) || wrote[RuntimeLeaseTTLKey] != strconv.Itoa(int(ttl/time.Second)) {
+				t.Fatalf("extension wrote %v, want only %s=%s and %s=%d", wrote, RuntimeLeaseExpiresKey, want.Format(time.RFC3339), RuntimeLeaseTTLKey, int(ttl/time.Second))
+			}
+			after := f.meta(t)
+			for _, key := range []string{RuntimeLeaseHolderKey, RuntimeLeaseEpochKey, RuntimeLeaseFlockKey} {
+				if after[key] != before[key] {
+					t.Fatalf("%s = %q after the extension, want %q kept", key, after[key], before[key])
+				}
+			}
+			if !l.Expires().Equal(want) || !l.SafeUntil().Equal(want.Add(-RuntimeLeaseSkewAllowance)) {
+				t.Fatalf("Expires %v, SafeUntil %v; want %v and %v", l.Expires(), l.SafeUntil(), want, want.Add(-RuntimeLeaseSkewAllowance))
+			}
+			if !l.HeldAt(c.at) || !l.HeldAt(l.SafeUntil().Add(-time.Second)) || l.HeldAt(l.SafeUntil()) {
+				t.Fatal("HeldAt does not follow the extended expiry")
+			}
+			watched, cancel, err := l.Watch(context.Background(), time.Hour)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer cancel()
+			deadline, ok := watched.Deadline()
+			wantDeadline := time.Now().Add(l.SafeUntil().Sub(c.at))
+			if !ok || deadline.Sub(wantDeadline).Abs() > 5*time.Second || watched.Err() != nil {
+				t.Fatalf("Watch deadline %v (set %v, err %v), want about %v", deadline, ok, watched.Err(), wantDeadline)
+			}
+		})
+	}
+	flock, err := TryRuntimeLease(nil, RuntimeLeaseRequest{City: t.TempDir(), Name: "s-flock"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer flock.Release()
+	if err := flock.ExtendRecord(leaseTTL); err != nil {
+		t.Fatalf("a flock-only lease's extension = %v, want nil", err)
+	}
+	if err := l.ExtendRecord(runtimeLeaseMinTTL - time.Second); err == nil {
+		t.Fatal("ExtendRecord took a TTL below the minimum")
+	}
+}
