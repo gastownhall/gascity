@@ -131,6 +131,7 @@ var Default = Config{
 		{Package: "internal/storebinding/sqlite", Reason: storeBindings},
 		{Package: "internal/storebinding/storebindingtest", Reason: storeBindings},
 		{Package: "internal/storeref", Rules: AllRulesBut(CapAssert, CachePeel), Reason: "the residency resolver: the mint (T2) and the plan executors that run legs over physical stores. A capability assertion or a cache peel here still goes through beads.As"},
+		{Package: "internal/api", File: "dashport_support.go", Tag: "integration", Rules: append([]Rule{Mint}, rawRules...), Reason: "the dashboard e2e harness's seeded State (integration tag only, never in the production binary): it holds the caller's pre-seeded raw stores and mints the seeded city's Stores over them, as the router does (T6 OD-6); counted in allowed.txt"},
 		{Package: "cmd/gc", File: "city_stores.go", Rules: append([]Rule{Mint}, rawRules...), Reason: "the router's cmd/gc plane: builds each holder's topology from the opened routes and mints its storeref.Stores (T2); counted in allowed.txt"},
 		{Package: "cmd/gc", File: "class_store_cache.go", Rules: []Rule{CachePeel}, Reason: "the controller's cache construction: decides whether a store already is, or wraps, the CachingStore it installs, before any handle exists; counted in allowed.txt"},
 		{Package: "cmd/gc", File: "storage_boot.go", Reason: "storage-class routing at boot: opens and holds the physical engines the router later wraps"},

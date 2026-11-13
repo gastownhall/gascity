@@ -93,6 +93,32 @@ func extractBeadID(t *testing.T, jsonOut string) string {
 	return issue.ID
 }
 
+// beadShown reports whether bd show --json resolves id. A failing show
+// means the bead is gone; a successful one must list it in its JSON array.
+func beadShown(t *testing.T, dir, id string) bool {
+	t.Helper()
+	out, err := runBD(t, dir, "show", "--json", id)
+	if err != nil {
+		return false
+	}
+	idx := strings.Index(out, "[")
+	if idx < 0 {
+		t.Fatalf("bd show --json %s returned no JSON array:\n%s", id, out)
+	}
+	var issues []struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(out[idx:]), &issues); err != nil {
+		t.Fatalf("bd show --json %s not parseable: %v\n%s", id, err, out)
+	}
+	for _, iss := range issues {
+		if iss.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 // --- Contract tests ---
 
 // TestBdBasicCRUD exercises all basic CRUD operations against a single
@@ -858,6 +884,44 @@ func TestBdDestructive(t *testing.T) {
 		}
 		if err := json.Unmarshal([]byte(out[idx:]), &result); err != nil {
 			t.Fatalf("bd purge --json not parseable: %v\n%s", err, out)
+		}
+	})
+
+	// BdStore.Purge depends on this: without --force, bd purge only
+	// previews and exits non-zero when something matches, so a real purge
+	// must pass --force and read purged_count from the JSON.
+	t.Run("PurgeRequiresForce", func(t *testing.T) {
+		dir := initBeadsDir(t)
+		out := requireBD(t, dir, "create", "--json", "--ephemeral", "purge force candidate", "-t", "task")
+		id := extractBeadID(t, out)
+		if id == "" {
+			t.Fatalf("bd create --ephemeral returned no bead ID in output:\n%s", out)
+		}
+		requireBD(t, dir, "close", "--json", id)
+
+		if out, err := runBD(t, dir, "purge", "--json"); err == nil {
+			t.Fatalf("unforced bd purge --json with a purgeable bead exited 0, want non-zero:\n%s", out)
+		}
+		if !beadShown(t, dir, id) {
+			t.Fatalf("bead %s gone after unforced bd purge", id)
+		}
+
+		out = requireBD(t, dir, "purge", "--json", "--force")
+		idx := strings.Index(out, "{")
+		if idx < 0 {
+			t.Fatalf("bd purge --json --force returned no JSON:\n%s", out)
+		}
+		var result struct {
+			PurgedCount *int `json:"purged_count"`
+		}
+		if err := json.Unmarshal([]byte(out[idx:]), &result); err != nil {
+			t.Fatalf("bd purge --json --force not parseable: %v\n%s", err, out)
+		}
+		if result.PurgedCount == nil || *result.PurgedCount != 1 {
+			t.Fatalf("bd purge --json --force purged_count = %v, want 1:\n%s", result.PurgedCount, out)
+		}
+		if beadShown(t, dir, id) {
+			t.Fatalf("bead %s still present after bd purge --force", id)
 		}
 	})
 }

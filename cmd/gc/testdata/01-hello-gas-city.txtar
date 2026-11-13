@@ -9,7 +9,10 @@ exec gc version
 stdout 'dev'
 
 # Initialize a city
-exec gc init $WORK/bright-lights
+# --storage=single: this script's gc start is the one-shot reconcile, which
+# only the legacy session reconciler has; a born-split city runs v2 under the
+# controller.
+exec gc init $WORK/bright-lights --storage=single
 stdout 'Welcome to Gas City!'
 stdout 'Initialized city'
 stdout 'bright-lights'

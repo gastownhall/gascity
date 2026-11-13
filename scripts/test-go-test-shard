@@ -49,6 +49,20 @@ trap 'gc_shard_on_signal INT' INT
 trap 'gc_shard_on_signal TERM' TERM
 trap 'gc_shard_on_signal HUP' HUP
 
+# QUIT gets its own handler rather than reusing gc_shard_on_signal: re-raising
+# QUIT after un-trapping would let bash's own default disposition dump core on
+# this process, which is the exact defect this trap exists to avoid. A clean
+# `exit 131` (128+SIGQUIT) preserves the same $? a signal death would report
+# without ever leaving QUIT uncaught here. This covers the case where this
+# runner itself is signaled directly; the job's own subshell installs the same
+# defense in gc_harness_run_supervised (harness-reap.sh), which is what the
+# watchdog actually signals in production.
+gc_shard_on_quit() {
+  gc_harness_terminate_group "${gc_harness_supervised_pgid:-}"
+  exit 131          # 128 + SIGQUIT
+}
+trap 'gc_shard_on_quit' QUIT
+
 timeout="${GO_TEST_TIMEOUT:-20m}"
 
 gopath_val="$(go env GOPATH)"
