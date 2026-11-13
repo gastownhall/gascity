@@ -93,20 +93,30 @@ type testDeadline interface {
 	Deadline() (deadline time.Time, ok bool)
 }
 
+// doltCallCap is the longest one dolt CLI call may run however far away the
+// test's deadline is, so a hung dolt does not hold the test package for the
+// whole of its timeout less doltCallMargin. It is a var so a test can shorten it.
+var doltCallCap = 5 * time.Minute
+
 // doltCallContext returns the context for one external dolt CLI call. The call
-// may use whatever is left of the test's own deadline less doltCallMargin; that
-// margin is capped at half of what is left, so a short deadline still gives the
-// call time and the test can still report. With no test deadline
-// (go test -timeout 0) nothing bounds the call. There is deliberately no fixed
-// per-call budget: under suite load a merely slow dolt call outlasts any fixed
-// one and is SIGKILLed, which fails its test with "signal: killed".
+// may use whatever is left of the test's own deadline less doltCallMargin, and
+// never more than doltCallCap from now; that margin is capped at half of what is
+// left, so a short deadline still gives the call time and the test can still
+// report. With no test deadline (go test -timeout 0) nothing bounds the call.
+// The cap is not a tight per-call budget: under suite load a merely slow dolt
+// call outlasts a tight one and is SIGKILLed, which fails its test with "signal:
+// killed", so the cap is far above any call that is merely slow.
 func doltCallContext(t testDeadline) (context.Context, context.CancelFunc) {
 	deadline, ok := t.Deadline()
 	if !ok {
 		return context.WithCancel(context.Background())
 	}
 	held := min(doltCallMargin, max(0, time.Until(deadline))/2)
-	return context.WithDeadline(context.Background(), deadline.Add(-held))
+	end := deadline.Add(-held)
+	if limit := time.Now().Add(doltCallCap); limit.Before(end) {
+		end = limit
+	}
+	return context.WithDeadline(context.Background(), end)
 }
 
 func runDoltForCompactTest(t *testing.T, doltPath, dir string, args ...string) string {
