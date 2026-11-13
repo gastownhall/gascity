@@ -2541,6 +2541,18 @@ resource = "fixed_sleep"
 calls = 1
 
 [[count]]
+path = "internal/runtime/proctable/console_windows_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
+path = "internal/runtime/proctable/identity_windows_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
 path = "internal/runtime/proctable/kill_unix_test.go"
 resource = "fixed_sleep"
 calls = 1
@@ -2549,6 +2561,24 @@ calls = 1
 path = "internal/runtime/proctable/kill_unix_test.go"
 resource = "subprocess"
 calls = 2
+
+[[count]]
+path = "internal/runtime/proctable/kill_windows_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
+
+[[count]]
+path = "internal/runtime/proctable/kill_windows_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
+path = "internal/runtime/proctable/proctable_windows_test.go"
+resource = "subprocess"
+calls = 3
+tagged = true
 
 [[count]]
 path = "internal/runtime/proctable/supervisor_fork_orphan_repro_test.go"
