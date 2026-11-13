@@ -170,6 +170,11 @@ every row with its edges and their payloads:
 
 The JSONL is a record, not yet a restore source: no tool imports it.
 
+A managed Dolt's data directory is copied whole, empty directories
+included. The copy is refused before the server stops when it would leave
+less than the managed Dolt's critical floor (GC_DOLT_MIN_FREE_BYTES) free
+where it lands.
+
 --work also records city.toml and the city's storage records (the id-floor
 file, the served-binding and cleared notes), so a snapshot taken before the
 split is a way back to the whole city: gc storage snapshot restore <id>

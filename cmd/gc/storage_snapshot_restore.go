@@ -316,12 +316,14 @@ aside, so the city serves from its work store alone again. It refuses before
 it moves anything: a snapshot of another work store, one that records no
 city, a store whose copy restores nothing exactly (a Dolt tag, a bd export,
 no copy), a snapshot that holds a binding (restore that with --binding), a
+snapshot of a split city (one that records a served-binding or cleared note),
+a rig imported since the snapshot whose store the snapshot does not hold, a
 running managed Dolt, or a reverse migration in progress. Every file it
-replaces is kept beside it as *.pre-restore-<ts>. Its journal,
-.gc/storage-city-restore.json, holds every other writing storage command off
-until it finishes; run again, it finishes an interrupted restore. Last, it
-reads each restored store back and proves its rows equal to the snapshot's
-JSONL.`,
+replaces is kept beside it as *.pre-restore-<ts>; city.toml is copied aside,
+so it is never missing. Its journal, .gc/storage-city-restore.json, holds gc
+start until every file is back and every other writing storage command until
+it finishes; run again, it finishes an interrupted restore. Last, it reads
+each restored store back and proves its rows equal to the snapshot's JSONL.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if binding == city {
 				fmt.Fprintf(stderr, "%s: pass --binding (the binding's database) or --city (the whole city: its stores, storage records and city.toml)\n", prefix) //nolint:errcheck // best-effort stderr
