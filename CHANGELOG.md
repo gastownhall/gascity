@@ -1346,6 +1346,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The `opencode` provider preset offers models OpenCode Zen still serves.**
+  Two of its three model choices, `opencode/deepseek-v4-flash-free` and
+  `opencode/nemotron-3-super-free`, are no longer in Zen's model list, so an
+  agent that selected either was launched with a model that does not exist.
+  They are replaced by `opencode/deepseek-v4.1-flash-free` and
+  `opencode/nemotron-3.5-super-vl-free`. `opencode/big-pickle` is unchanged.
+  A city that names one of the old ids in its own config must update it
+  (#9111).
 - **Adopting or restarting with a bd store bound to a loopback Dolt server
   gc does not run works.** A store `bd init --server --external` bound to a
   dolt sql-server on `127.0.0.1`/`localhost`/`::1` was classified as gc's own
