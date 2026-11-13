@@ -1299,9 +1299,7 @@ func TestSplitPreflightSizesTheManagedDoltDataDirItSnapshots(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dataDir, "hq", ".dolt", "noms", "journal.idx"), bytes.Repeat([]byte("x"), size), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	prevIn := snapshotScopeInManagedDolt
-	snapshotScopeInManagedDolt = samePath
-	t.Cleanup(func() { snapshotScopeInManagedDolt = prevIn })
+	stubSnapshotScopeDoltDatabase(t, map[string]string{request.CityPath: "hq"})
 	prevDir := snapshotManagedDoltDataDir
 	snapshotManagedDoltDataDir = func(string) (string, error) { return dataDir, nil }
 	t.Cleanup(func() { snapshotManagedDoltDataDir = prevDir })

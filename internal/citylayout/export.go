@@ -76,8 +76,14 @@ var defaultWorkDirExportExcludes = []string{
 	// which the reverse reads.
 	".gc/storage-reverse.json",
 	".gc/storage-split.journal.json",
-	// The city restore's journal (gc storage snapshot restore --city).
+	// The city restore's journal (gc storage snapshot restore --city), and
+	// what it keeps aside as *.pre-restore-<ts>: the stores, the managed
+	// Dolt's data directory, the storage records and the binding root it
+	// replaced.
 	".gc/storage-city-restore.json",
+	".gc/*.pre-restore-*/**",
+	"**/.gc/beads.json.pre-restore-*",
+	"**/.beads/dolt.pre-restore-*/**",
 	".gc/scope-ownership.json",
 	// gc bd's trust state for this host's bd binaries: the verdict cache,
 	// its lock, the walks' scratch dirs, and the operator's vouches.
