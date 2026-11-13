@@ -539,6 +539,51 @@ func TestRetireRemovedNamedSessionAlertsOnKeptClaims(t *testing.T) {
 	}
 }
 
+// Retiring a removed named session releases the claims addressed to its
+// identity and runtime name that a lane serves, and keeps and alerts on the
+// identity's claim no lane serves: the retirement passes no preserve list,
+// so the stable addresses are its to release.
+func TestRetireRemovedConfiguredNamedSessionReleasesIdentityAssignedWork(t *testing.T) {
+	store := beads.NewMemStore()
+	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	b, err := store.Create(beads.Bead{Title: "retired reviewer", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
+		"session_name": "reviewer-runtime", "template": "worker", "state": "asleep",
+		namedSessionMetadataKey: "true", namedSessionIdentityMetadata: "reviewer", namedSessionModeMetadata: "on_demand",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	served := createWork(t, store, "in_progress", "reviewer", map[string]string{beadmeta.RoutedToMetadataKey: "worker"})
+	runtimeServed := createWork(t, store, "in_progress", "reviewer-runtime", map[string]string{beadmeta.RoutedToMetadataKey: "worker"})
+	unserved := createWork(t, store, "in_progress", "reviewer", map[string]string{beadmeta.RoutedToMetadataKey: "nowhere/lane"})
+	rec := events.NewFake()
+	sw := testSeatWork(t.TempDir(), servingCity("worker"), store, nil)
+	sw.alerts = &strandedClaimAlerts{rec: rec}
+	if !retireRemovedConfiguredNamedSessionBead(t.TempDir(), store, sw, runtime.NewFake(), b, now, io.Discard) {
+		t.Fatal("retire failed")
+	}
+	for _, w := range []beads.Bead{served, runtimeServed} {
+		got, err := store.Get(w.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Assignee != "" || got.Status != "open" || got.Metadata[beadmeta.RoutedToMetadataKey] != "worker" {
+			t.Errorf("served claim for %q = (assignee %q, status %q, route %q), want released to (\"\", open, worker)", w.Assignee, got.Assignee, got.Status, got.Metadata[beadmeta.RoutedToMetadataKey])
+		}
+	}
+	kept, err := store.Get(unserved.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kept.Assignee != "reviewer" || kept.Status != "in_progress" || kept.Metadata[beadmeta.StrandedSessionMetadataKey] != b.ID {
+		t.Errorf("unserved identity claim = (assignee %q, status %q, stranded_session %q), want kept on the retired seat and stamped %s", kept.Assignee, kept.Status, kept.Metadata[beadmeta.StrandedSessionMetadataKey], b.ID)
+	}
+	evts, _ := rec.List(events.Filter{Type: events.SessionStrandedClaims})
+	if len(evts) != 1 || !strings.Contains(string(evts[0].Payload), unserved.ID) || strings.Contains(string(evts[0].Payload), served.ID) {
+		t.Fatalf("session.stranded_claims = %+v, want one naming only %s", evts, unserved.ID)
+	}
+}
+
 // The killed seat's pre-gate costs no read for a seat whose open claims have
 // no route: laneDirect would keep them all (M26).
 func TestKilledSeatPreGateWantsARoutedClaim(t *testing.T) {

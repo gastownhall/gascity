@@ -1269,12 +1269,11 @@ func unclaimWorkAssignedToRetiredSessionBead(
 // session ...: getting bead ...: bead not found" and left
 // current_claim_bead_id stamped on the closed session.
 //
-// preserve is the identity exception list (assigneePreserveSet), the same
-// mechanism closeBeadPreservingAssignees uses: work addressed to an identity
-// in preserve is demand for that identity, not for this particular dying
-// bead, and is left with its assignee intact (gastownhall/gascity#8179). A
-// nil or empty preserve releases every identity sessionBead's own scope
-// carries, unchanged from before this parameter existed.
+// preserve names assignees the release leaves alone: work held under them is
+// not this session's to release, so it is neither released nor kept as
+// stranded. `gc session close` passes a still-configured named session's
+// stable addresses, which the identity's next session serves; nil releases
+// under every identity the bead persisted.
 func unclaimWorkAssignedToRetiredSessionBeadVia(
 	legs WorkLegs,
 	sessionStore beads.Store,
