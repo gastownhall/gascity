@@ -33,13 +33,16 @@ const (
 	// scopeAbortSkippedCloseReason: bd rejects close reasons shorter than 20
 	// characters.
 	drainPredecessorFailedCloseReason = "drain failed: a blocking predecessor closed with a failed outcome"
-	// drainUnitRetiredCloseReason is stamped as close_reason on each unit
-	// convoy a drain retires when the drain control reaches a terminal state.
-	// It is prose rather than a token for the same reason as
-	// drainPredecessorFailedCloseReason: bd rejects close reasons shorter than
-	// 20 characters.
-	drainUnitRetiredCloseReason = "drain unit retired: its drain control reached a terminal state"
+	// drainUnitConvoySyntheticKind is the gc.synthetic_kind of the unit
+	// convoys a drain mints, one per manifest row.
+	drainUnitConvoySyntheticKind = "drain-unit-convoy"
 )
+
+// DrainUnitRetiredCloseReason is stamped as close_reason on each unit convoy
+// retired because its drain control reached a terminal state. It is prose
+// rather than a token for the same reason as drainPredecessorFailedCloseReason:
+// bd rejects close reasons shorter than 20 characters.
+const DrainUnitRetiredCloseReason = "drain unit retired: its drain control reached a terminal state"
 
 type drainManifest struct {
 	Version        int                `json:"version"`
@@ -1121,22 +1124,41 @@ func markRemainingSharedRowsSkipped(manifest *drainManifest, start int) {
 	}
 }
 
-// closeDrainControl is every terminal close of a drain control. A drain is
-// scope-check-exempt and reconciles its own enclosing scope, so the scope is
-// settled before the drain closes (closeScopedControl). A terminal drain
-// carries no controller error: a transient one recorded by an earlier pass
-// (markControllerSpawnError) is cleared with the close.
+// closeDrainControl closes a drain control that the drain itself brought to a
+// terminal state. A drain is scope-check-exempt and reconciles its own
+// enclosing scope, so the scope is settled before the drain closes
+// (closeScopedControl). A terminal drain carries no controller error: a
+// transient one recorded by an earlier pass (markControllerSpawnError) is
+// cleared with the close.
+//
+// The drain's unit convoys retire first, each with its row's verdict
+// (closeDrainManifestUnitConvoys). A transient retirement error leaves the
+// drain open, and the next pass retries the close. Any other retirement error
+// is traced and the drain closes with its own verdict: a unit convoy is
+// bookkeeping, not part of that verdict, and `gc convoy check` retires every
+// unit a closed drain leaves open (DrainUnitConvoyRetirement).
+//
+// This is not every close of a drain control. A canceled, settled or missing
+// workflow root (closeOrphanedControl), a hard controller error
+// (markControllerSpawnError), a scope abort, a dispatcher quarantine, the
+// finalizer's terminal sweep, run cancel and an operator can each close a
+// drain without running it again; `gc convoy check` retires the units of those
+// drains too.
 func closeDrainControl(store beads.GraphStore, drainID string, metadata map[string]string, action string, opts ProcessOptions) (ControlResult, error) {
 	if err := closeDrainManifestUnitConvoys(store, drainID, metadata, opts); err != nil {
-		return ControlResult{}, err
+		if IsTransientControllerError(err) {
+			return ControlResult{}, err
+		}
+		opts.tracef("process-control bead=%s kind=drain retire-units-deferred err=%s", drainID, strings.ReplaceAll(err.Error(), "\n", "; "))
 	}
 	clearControllerSpawnErrorMetadata(metadata)
 	return closeScopedControl(store, drainID, metadata, action, opts)
 }
 
 // closeDrainManifestUnitConvoys retires the unit convoy of every manifest row
-// that has one, before the drain control closes: nothing else ever closes a
-// unit convoy, because a drain never closes the members its units track.
+// that has one, before the drain control closes: nothing else closes a unit
+// convoy as soon as its drain does, because a drain never closes the members
+// its units track.
 //
 // The manifest is the closing one in metadata when the closer passes it — the
 // only copy holding a unit minted earlier in the same pass — and otherwise the
@@ -1144,9 +1166,10 @@ func closeDrainControl(store beads.GraphStore, drainID string, metadata map[stri
 // predecessor-failed closes, which run before any unit is minted) has nothing
 // to retire.
 //
-// A unit already closed, or gone, is left alone, so a retry writes nothing to
-// the units an earlier attempt retired. A failed close returns the error and
-// leaves the drain open: the open drain is what drives the next attempt.
+// A transient error ends the walk and is returned at once: the drain stays
+// open and its next pass retries the close. Any other error does not stop the
+// walk, so one unit that cannot be retired leaves no other unit open; those
+// errors are returned together once every row was tried.
 func closeDrainManifestUnitConvoys(store beads.GraphStore, drainID string, metadata map[string]string, opts ProcessOptions) error {
 	raw, ok := metadata[drainManifestMetadataKey]
 	if !ok {
@@ -1163,28 +1186,62 @@ func closeDrainManifestUnitConvoys(store beads.GraphStore, drainID string, metad
 	if err != nil {
 		return fmt.Errorf("%s: parsing drain manifest to retire unit convoys: %w", drainID, err)
 	}
+	var deferred []error
 	for _, row := range manifest.Rows {
-		unitID := strings.TrimSpace(row.UnitConvoyID)
-		if unitID == "" {
+		if strings.TrimSpace(row.UnitConvoyID) == "" {
 			continue
 		}
+		err := retireDrainRowUnitConvoys(store, drainID, row, opts)
+		switch {
+		case err == nil:
+		case IsTransientControllerError(err):
+			return err
+		default:
+			deferred = append(deferred, err)
+		}
+	}
+	return errors.Join(deferred...)
+}
+
+// retireDrainRowUnitConvoys closes every open unit convoy that row's unit key
+// resolves to, with the row's verdict, in the store that owns it. The key is
+// the mint's own idempotence token (drainUnitConvoyByKey), and it embeds the
+// drain, the row index and the member, so every convoy it resolves to is a
+// unit of this row: the one the row records, and any duplicate an earlier pass
+// minted for the same row. The lookup never answers with a closed unit, so a
+// retry writes nothing to the units an earlier attempt retired.
+func retireDrainRowUnitConvoys(store beads.GraphStore, drainID string, row drainManifestRow, opts ProcessOptions) error {
+	outcome := drainUnitRetiredOutcome(row.Status)
+	retired := make(map[string]bool)
+	for {
 		unit, owner, found, err := drainUnitConvoyByKey(store, row.UnitKey, opts)
 		if err != nil {
-			return fmt.Errorf("%s: looking up drain unit convoy %s: %w", drainID, unitID, err)
+			return fmt.Errorf("%s: looking up drain unit convoy %s: %w", drainID, row.UnitConvoyID, err)
 		}
 		if !found || unit.Status == "closed" {
-			continue
+			return nil
 		}
-		if unit.ID != unitID {
-			return fmt.Errorf("%w: %s: manifest row %d records unit convoy %s but unit key %q resolves to %s", ErrControlGraphMalformed, drainID, row.Index, unitID, row.UnitKey, unit.ID)
+		if retired[unit.ID] {
+			return fmt.Errorf("%s: drain unit convoy %s is still open after it was retired", drainID, unit.ID)
 		}
-		outcome := drainUnitRetiredOutcome(row.Status)
-		if err := closeDrainUnitConvoy(owner, unit.ID, outcome); err != nil {
+		// owner is the unit convoy's store from the federated walk, a raw store
+		// until T7: the close goes where the unit lives, which on a split city is
+		// a work store rather than the graph store the drain runs in. A store
+		// that took the metadata but not the status gets an explicit close.
+		status := "closed"
+		updated, err := beads.UpdateAndReadBack(owner, unit.ID, beads.UpdateOpts{
+			Status:   &status,
+			Metadata: drainUnitRetiredMetadata(outcome),
+		})
+		if err == nil && updated.Status != "closed" {
+			err = owner.Close(unit.ID)
+		}
+		if err != nil {
 			return fmt.Errorf("%s: retiring drain unit convoy %s: %w", drainID, unit.ID, err)
 		}
+		retired[unit.ID] = true
 		opts.tracef("process-control bead=%s kind=drain retire-unit unit=%s outcome=%s", drainID, unit.ID, outcome)
 	}
-	return nil
 }
 
 // drainUnitRetiredOutcome is the gc.outcome a retired unit convoy closes with:
@@ -1201,25 +1258,61 @@ func drainUnitRetiredOutcome(status string) string {
 	}
 }
 
-// closeDrainUnitConvoy closes a unit convoy in the work store that owns it, in
-// one update carrying its outcome and close reason. A store that took the
-// metadata but not the status gets an explicit close.
-func closeDrainUnitConvoy(owner beads.WorkStore, unitID, outcome string) error {
-	status := "closed"
-	row, err := beads.UpdateAndReadBack(owner, unitID, beads.UpdateOpts{
-		Status: &status,
-		Metadata: map[string]string{
-			beadmeta.OutcomeMetadataKey: outcome,
-			"close_reason":              drainUnitRetiredCloseReason,
-		},
-	})
+// drainUnitRetiredMetadata is the metadata a unit convoy retires with: outcome
+// and the retirement close reason, written with the close.
+func drainUnitRetiredMetadata(outcome string) map[string]string {
+	return map[string]string{
+		beadmeta.OutcomeMetadataKey: outcome,
+		"close_reason":              DrainUnitRetiredCloseReason,
+	}
+}
+
+// DrainUnitConvoyControlID returns the id of the drain control that minted
+// bead when bead is a drain unit convoy, and "" for any other bead.
+func DrainUnitConvoyControlID(bead beads.Bead) string {
+	if bead.Type != "convoy" || strings.TrimSpace(bead.Metadata[beadmeta.SyntheticKindMetadataKey]) != drainUnitConvoySyntheticKind {
+		return ""
+	}
+	return strings.TrimSpace(bead.Metadata[beadmeta.DrainControlIDMetadataKey])
+}
+
+// DrainUnitConvoyRetirement is the level-triggered half of unit convoy
+// retirement. It reports whether unit, an open drain unit convoy, is due to
+// retire because control, the drain control unit names
+// (DrainUnitConvoyControlID), has closed, and the gc.outcome it retires with:
+// the verdict of its row in the control's manifest. The close carries
+// DrainUnitRetiredCloseReason.
+//
+// A drain retires its own units when it closes itself (closeDrainControl), but
+// a closed drain is never processed again, and several paths close one without
+// running it (see closeDrainControl). `gc convoy check` asks this of every open
+// unit it reads, so a unit retires whichever path closed its drain, including
+// a unit a closed drain left open before drains retired their units.
+//
+// A unit whose row the manifest does not record, or whose drain closed with no
+// manifest, retires skipped: the drain is terminal and recorded no verdict for
+// it. A manifest that does not parse is an error, and the unit is not due.
+func DrainUnitConvoyRetirement(unit, control beads.Bead) (string, bool, error) {
+	controlID := DrainUnitConvoyControlID(unit)
+	if controlID == "" || control.ID != controlID || control.Status != "closed" ||
+		control.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindDrain {
+		return "", false, nil
+	}
+	raw := control.Metadata[drainManifestMetadataKey]
+	if strings.TrimSpace(raw) == "" {
+		return beadmeta.OutcomeSkipped, true, nil
+	}
+	manifest, err := parseDrainManifest(raw)
 	if err != nil {
-		return err
+		return "", false, fmt.Errorf("drain unit convoy %s: parsing the manifest of its drain %s: %w", unit.ID, controlID, err)
 	}
-	if row.Status == "closed" {
-		return nil
+	unitKey := strings.TrimSpace(unit.Metadata[beadmeta.DrainUnitKeyMetadataKey])
+	for _, row := range manifest.Rows {
+		if row.UnitConvoyID == unit.ID || (unitKey != "" && row.UnitKey == unitKey) {
+			return drainUnitRetiredOutcome(row.Status), true, nil
+		}
 	}
-	return owner.Close(unitID)
+	return beadmeta.OutcomeSkipped, true, nil
 }
 
 // drainValidationClosedError reports a drain that failed validation while its
@@ -1468,10 +1561,7 @@ func drainUnitConvoyStore(store beads.GraphStore, member beads.Bead, opts Proces
 // minted the convoy and does not resolve on the pass that resumes sends the
 // lookup to a different store, it misses, and the drain mints a second unit
 // convoy for a row that already has one.
-//
-// The owner is returned as a work handle: a unit convoy is a synthetic convoy,
-// which is work class wherever it was minted.
-func drainUnitConvoyByKey(store beads.GraphStore, unitKey string, opts ProcessOptions) (beads.Bead, beads.WorkStore, bool, error) {
+func drainUnitConvoyByKey(store beads.GraphStore, unitKey string, opts ProcessOptions) (beads.Bead, beads.Store, bool, error) {
 	var (
 		found beads.Bead
 		owner beads.Store
@@ -1492,14 +1582,12 @@ func drainUnitConvoyByKey(store beads.GraphStore, unitKey string, opts ProcessOp
 		return false, nil
 	})
 	if err != nil {
-		return beads.Bead{}, beads.WorkStore{}, false, err
+		return beads.Bead{}, nil, false, err
 	}
 	if owner == nil {
-		return beads.Bead{}, beads.WorkStore{}, false, nil
+		return beads.Bead{}, nil, false, nil
 	}
-	// owner is the unit convoy's store from the federated walk, a raw plan leg
-	// until T7.
-	return found, beads.WorkStore{Store: owner}, true, nil
+	return found, owner, true, nil
 }
 
 func ensureDrainUnitConvoy(store beads.GraphStore, control beads.Bead, parentConvoyID string, count int, row drainManifestRow, member beads.Bead, opts ProcessOptions) (beads.Bead, bool, error) {
@@ -1510,7 +1598,9 @@ func ensureDrainUnitConvoy(store beads.GraphStore, control beads.Bead, parentCon
 		return beads.Bead{}, false, fmt.Errorf("%s: looking up unit convoy for member %s: %w", control.ID, member.ID, err)
 	}
 	if found {
-		if err := ensureDrainUnitTrack(existingStore, control.ID, existing.ID, member); err != nil {
+		// existingStore is the unit convoy's owner from the federated walk, a raw
+		// store until T7; unit convoys are work class.
+		if err := ensureDrainUnitTrack(beads.WorkStore{Store: existingStore}, control.ID, existing.ID, member); err != nil {
 			return beads.Bead{}, false, err
 		}
 		return existing, false, nil
@@ -1521,7 +1611,7 @@ func ensureDrainUnitConvoy(store beads.GraphStore, control beads.Bead, parentCon
 	}
 	metadata := map[string]string{
 		beadmeta.SyntheticMetadataKey:         "true",
-		beadmeta.SyntheticKindMetadataKey:     "drain-unit-convoy",
+		beadmeta.SyntheticKindMetadataKey:     drainUnitConvoySyntheticKind,
 		beadmeta.ParentConvoyIDMetadataKey:    parentConvoyID,
 		beadmeta.DrainControlIDMetadataKey:    control.ID,
 		beadmeta.DrainIndexMetadataKey:        strconv.Itoa(row.Index),

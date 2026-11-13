@@ -12,9 +12,11 @@ import (
 	"text/tabwriter"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/storeref"
@@ -1962,6 +1964,10 @@ func newConvoyCheckCmd(stdout, stderr io.Writer) *cobra.Command {
 Evaluates each open convoy's children. If all children have status
 "closed", the convoy is automatically closed and an event is recorded.
 
+A drain's unit convoy is closed once its drain control has closed,
+whatever the status of the item it tracks, with that item's verdict as
+gc.outcome: a drain never closes the items its unit convoys track.
+
 The check skips a suspended rig's store, naming the rig on stderr, and
 checks its convoys once the rig resumes. A store it cannot open or list,
 or a convoy it cannot read or close, is named on stderr and the check
@@ -2107,12 +2113,9 @@ func doConvoyCheckAcrossStoresJSON(stores []convoyStoreView, unopened int, rec e
 		return 1
 	}
 
-	binding := classBindingStore(stores)
 	closed, failed := 0, 0
 	for _, item := range convoys {
-		// One frame per convoy store: the children plan reads the convoy's own
-		// store and the binding, and plans over no route (scopeStores).
-		ok, err := closeCompletedConvoyAcross(scopeStores("", nil, item.store), item.store, binding, item.bead)
+		ok, err := closeConvoyIfDone(stores, item)
 		switch {
 		case errors.Is(err, errAutocloseRefused), errors.Is(err, beads.ErrNotFound):
 			// The convoy changed or went away after the list; the next check decides it again.
@@ -2146,6 +2149,81 @@ func doConvoyCheckAcrossStoresJSON(stores []convoyStoreView, unopened int, rec e
 		}
 	}
 	return 0
+}
+
+// closeConvoyIfDone closes item when the check finds it done, and reports
+// whether this call closed it: a drain unit convoy whose drain control has
+// closed (retireDrainUnitOfClosedDrain), and otherwise a convoy whose children
+// are all closed (closeCompletedConvoyAcross).
+func closeConvoyIfDone(views []convoyStoreView, item convoyWithStore) (bool, error) {
+	if retired, err := retireDrainUnitOfClosedDrain(views, item); err != nil || retired {
+		return retired, err
+	}
+	// One frame per convoy store: the children plan reads the convoy's own
+	// store and the binding, and plans over no route (scopeStores).
+	return closeCompletedConvoyAcross(scopeStores("", nil, item.store), item.store, classBindingStore(views), item.bead)
+}
+
+// retireDrainUnitOfClosedDrain retires item when it is a drain unit convoy
+// whose drain control has closed (dispatch.DrainUnitConvoyRetirement), and
+// reports whether this call closed it. A drain never closes the members its
+// unit convoys track, so the children rule would leave such a unit open for
+// good, and only the closes a drain makes itself retire its units: a drain
+// closed under a canceled or settled workflow root, by a scope abort, a
+// dispatcher quarantine, the finalizer's sweep, run cancel or an operator
+// leaves them open. This retires them whichever path closed the drain, and
+// also the units a closed drain left open before drains retired their units.
+//
+// The close carries the unit's row verdict as gc.outcome and
+// dispatch.DrainUnitRetiredCloseReason, through the same live re-read and fence
+// as the children rule's close.
+func retireDrainUnitOfClosedDrain(views []convoyStoreView, item convoyWithStore) (bool, error) {
+	controlID := dispatch.DrainUnitConvoyControlID(item.bead)
+	if controlID == "" || !convoyStillAutocloses(item.bead) {
+		return false, nil
+	}
+	control, found, err := drainUnitControl(views, item, controlID)
+	if err != nil || !found {
+		return false, err
+	}
+	outcome, due, err := dispatch.DrainUnitConvoyRetirement(item.bead, control)
+	if err != nil || !due {
+		return false, err
+	}
+	closed, err := autocloseCloseIfStill(item.store, item.bead.ID, dispatch.DrainUnitRetiredCloseReason,
+		map[string]string{beadmeta.OutcomeMetadataKey: outcome}, convoyStillAutocloses, func() error {
+			if err := item.store.SetMetadata(item.bead.ID, beadmeta.OutcomeMetadataKey, outcome); err != nil {
+				return fmt.Errorf("stamping drain unit convoy %s outcome: %w", item.bead.ID, err)
+			}
+			return closeConvoyWithReason(item.store, item.bead.ID, dispatch.DrainUnitRetiredCloseReason)
+		})
+	if err != nil {
+		return false, fmt.Errorf("retiring drain unit convoy %s: %w", item.bead.ID, err)
+	}
+	return closed, nil
+}
+
+// drainUnitControl reads controlID, the drain control of item's unit convoy,
+// and reports whether a store holds it. A drain control is graph class: on a
+// city that relocated its classes it lives in the class binding, which is read
+// first, as every by-id read on a split city reads the binding before the work
+// ledger, and otherwise in the store that holds the unit. A control no store
+// holds is no proof that its drain closed, so the caller leaves the unit alone.
+func drainUnitControl(views []convoyStoreView, item convoyWithStore, controlID string) (beads.Bead, bool, error) {
+	for _, store := range []beads.Store{classBindingStore(views), item.store} { // residency:allow — the check's own two handles, binding first: the class binding its views already federate, then the store it listed the unit from; no topology, binding census or namespace is consulted
+		if store == nil {
+			continue
+		}
+		control, err := beads.HandlesFor(store).Live.Get(controlID)
+		if errors.Is(err, beads.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return beads.Bead{}, false, fmt.Errorf("reading drain control %s of unit convoy %s: %w", controlID, item.bead.ID, err)
+		}
+		return control, true, nil
+	}
+	return beads.Bead{}, false, nil
 }
 
 func newConvoyStrandedCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -2736,7 +2814,7 @@ func closeCompletedConvoyAcross(stores storeref.Stores, store, childStore beads.
 	case open || len(children) == 0:
 		return false, nil
 	}
-	closed, err := autocloseCloseIfStill(store, convoy.ID, convoyAutocloseReason, convoyStillAutocloses, func() error {
+	closed, err := autocloseCloseIfStill(store, convoy.ID, convoyAutocloseReason, nil, convoyStillAutocloses, func() error {
 		return closeConvoyWithReason(store, convoy.ID, convoyAutocloseReason)
 	})
 	if err != nil {

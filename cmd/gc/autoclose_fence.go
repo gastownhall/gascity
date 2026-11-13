@@ -3,7 +3,9 @@ package main
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"os"
+	"slices"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -12,7 +14,8 @@ import (
 // landed after the re-read. The decision may still hold; see autocloseRun.
 var errAutocloseRefused = errors.New("autoclose: conditional close refused")
 
-// autocloseCloseIfStill closes id with reason only if the store still holds it
+// autocloseCloseIfStill closes id with reason, and with metadata (keys other
+// than close_reason; nil for none) beside it, only if the store still holds it
 // as the autoclose decided. Autoclose decides from reads that may be stale (a
 // cached row, a scan-installed row without labels), so it re-reads the row live
 // and asks still; a row that moved since (closed, reopened, labeled owned) is
@@ -24,12 +27,14 @@ var errAutocloseRefused = errors.New("autoclose: conditional close refused")
 //     revision, so a write landing in between refuses it. A re-read revision
 //     of 0 is a legacy row's real revision, not an absent one, and is CASed
 //     like any other: every capable store compares it exactly, so it never
-//     licenses an unconditional close. The reason commits
+//     licenses an unconditional close. The reason and metadata commit
 //     with the close where the store has an atomic closer
-//     (CloseWithMetadataIfMatch); otherwise it is stamped after the close.
+//     (CloseWithMetadataIfMatch); otherwise they are stamped after the close,
+//     the reason first and then metadata in key order.
 //   - Otherwise (conditional writes off, the default on every city today;
 //     BdStore on every bd build; the legacy SQLite layouts): the live re-check
-//     is the guard, then an unconditional close. That is a deliberate
+//     is the guard, then an unconditional close (closeUnconditional, which
+//     writes the reason and metadata itself). That is a deliberate
 //     exception to the no-blind-write rule: these backends have no
 //     conditional close to fence with, and leaving every autoclose undone on
 //     them is worse than a one-round-trip window. A require-mode store that
@@ -40,7 +45,7 @@ var errAutocloseRefused = errors.New("autoclose: conditional close refused")
 // (beadCloseAutoclose), since the write that refused the CAS may have changed
 // it. A cross-row premise (every convoy member terminal, a parent closed) is
 // the caller's, from reads; no row CAS can fence it.
-func autocloseCloseIfStill(store beads.Store, id, reason string, still func(beads.Bead) bool, closeUnconditional func() error) (bool, error) {
+func autocloseCloseIfStill(store beads.Store, id, reason string, metadata map[string]string, still func(beads.Bead) bool, closeUnconditional func() error) (bool, error) {
 	fresh, err := beads.HandlesFor(store).Live.Get(id)
 	if err != nil {
 		return false, err
@@ -55,11 +60,18 @@ func autocloseCloseIfStill(store beads.Store, id, reason string, still func(bead
 	if writer == nil {
 		return true, closeUnconditional()
 	}
+	closeMetadata := map[string]string{"close_reason": reason}
+	maps.Copy(closeMetadata, metadata)
 	if closer, ok := beads.AtomicConditionalCloserFor(store); ok {
-		_, err = closer.CloseWithMetadataIfMatch(id, fresh.Revision, map[string]string{"close_reason": reason})
+		_, err = closer.CloseWithMetadataIfMatch(id, fresh.Revision, closeMetadata)
 	} else if err = writer.CloseIfMatch(id, fresh.Revision); err == nil {
 		if stampErr := store.SetMetadata(id, "close_reason", reason); stampErr != nil {
 			fmt.Fprintf(os.Stderr, "autoclose: closed %s but could not stamp its close reason: %v\n", id, stampErr) //nolint:errcheck // best-effort stderr
+		}
+		for _, key := range slices.Sorted(maps.Keys(metadata)) {
+			if stampErr := store.SetMetadata(id, key, metadata[key]); stampErr != nil {
+				fmt.Fprintf(os.Stderr, "autoclose: closed %s but could not stamp its %s: %v\n", id, key, stampErr) //nolint:errcheck // best-effort stderr
+			}
 		}
 	}
 	if beads.IsPreconditionFailed(err) {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -4133,8 +4135,8 @@ func assertDrainUnitRetired(t *testing.T, store beads.Store, unitID, outcome str
 	if got := unit.Metadata[beadmeta.OutcomeMetadataKey]; got != outcome {
 		t.Fatalf("drain unit convoy %s gc.outcome = %q, want %q", unitID, got, outcome)
 	}
-	if got := unit.Metadata["close_reason"]; got != drainUnitRetiredCloseReason {
-		t.Fatalf("drain unit convoy %s close_reason = %q, want %q", unitID, got, drainUnitRetiredCloseReason)
+	if got := unit.Metadata["close_reason"]; got != DrainUnitRetiredCloseReason {
+		t.Fatalf("drain unit convoy %s close_reason = %q, want %q", unitID, got, DrainUnitRetiredCloseReason)
 	}
 }
 
@@ -4165,8 +4167,8 @@ func TestProcessDrainSeparateClosesUnitConvoysOnCompletion(t *testing.T) {
 	if closed.Status != "closed" || closed.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass {
 		t.Fatalf("drain = status %q outcome %q, want closed/pass", closed.Status, closed.Metadata[beadmeta.OutcomeMetadataKey])
 	}
-	if len(drainUnitRetiredCloseReason) < 20 {
-		t.Fatalf("drainUnitRetiredCloseReason %q is shorter than the 20 characters bd requires of a close reason", drainUnitRetiredCloseReason)
+	if len(DrainUnitRetiredCloseReason) < 20 {
+		t.Fatalf("DrainUnitRetiredCloseReason %q is shorter than the 20 characters bd requires of a close reason", DrainUnitRetiredCloseReason)
 	}
 	for _, row := range manifest.Rows {
 		if row.UnitConvoyID == "" {
@@ -4323,6 +4325,10 @@ func (s *writeRecordingStore) SetMetadataBatch(id string, kvs map[string]string)
 	return s.Store.SetMetadataBatch(id, kvs)
 }
 
+// TestProcessDrainUnitConvoyRetireFailureKeepsDrainOpen pins the transient arm
+// of closeDrainControl's contract: a unit convoy close that fails transiently
+// leaves the drain open, with an error the dispatcher retries rather than
+// quarantines, and the retry retires only the units the failed pass left open.
 func TestProcessDrainUnitConvoyRetireFailureKeepsDrainOpen(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 	dir := t.TempDir()
@@ -4339,11 +4345,14 @@ func TestProcessDrainUnitConvoyRetireFailureKeepsDrainOpen(t *testing.T) {
 	}
 	unit0, unit1 := manifest.Rows[0].UnitConvoyID, manifest.Rows[1].UnitConvoyID
 
-	injected := errors.New("injected unit convoy close failure")
+	injected := errors.New("injected unit convoy close failure: database is locked")
 	failing := closeErrorStore{Store: store, failID: unit1, err: injected}
 	_, err := ProcessControl(beadstest.Graph(failing), mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(failing), FormulaSearchPaths: []string{dir}})
 	if !errors.Is(err, injected) {
 		t.Fatalf("ProcessControl(failing unit close) error = %v, want it to wrap %v", err, injected)
+	}
+	if tier := ClassifyControllerError(err); tier != TierAvailability {
+		t.Fatalf("ClassifyControllerError(%v) = %v, want TierAvailability: the dispatcher must retry the open drain, not quarantine it on the first refusal", err, tier)
 	}
 	if !strings.Contains(err.Error(), drain.ID) || !strings.Contains(err.Error(), unit1) {
 		t.Fatalf("error %q does not name drain %s and unit convoy %s", err, drain.ID, unit1)
@@ -4447,5 +4456,259 @@ func TestProcessDrainSplitCityRetiresUnitConvoysInTheWorkStore(t *testing.T) {
 	}
 	if units := drainUnitConvoysFor(t, graph, drain.ID); len(units) != 0 {
 		t.Fatalf("graph store holds %d drain unit convoy(s), want none: retirement must close the work store's unit, not mint or copy one", len(units))
+	}
+}
+
+// TestProcessDrainPermanentUnitConvoyRetireFailureClosesDrainWithItsVerdict
+// pins the other arm of closeDrainControl's contract. A retirement error the
+// dispatcher would quarantine on its first refusal must not decide the drain:
+// the drain closes with the verdict its items earned, the walk goes on past the
+// unit it could not close, the error is traced, and that unit is left for `gc
+// convoy check`, which DrainUnitConvoyRetirement tells to retire it with its
+// row's verdict.
+func TestProcessDrainPermanentUnitConvoyRetireFailureClosesDrainWithItsVerdict(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	store, drain := seedDrainWorkflow(t)
+	if _, err := ProcessControl(beadstest.Graph(store), drain, ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}); err != nil {
+		t.Fatalf("ProcessControl(drain expand): %v", err)
+	}
+	manifest := mustDrainManifest(t, mustGetBead(t, store, drain.ID))
+	for _, row := range manifest.Rows {
+		if err := updateMetadataAndClose(beadstest.Graph(store), row.ItemRootID, map[string]string{"gc.outcome": "pass"}); err != nil {
+			t.Fatalf("close item root %s: %v", row.ItemRootID, err)
+		}
+	}
+	unit0, unit1 := manifest.Rows[0].UnitConvoyID, manifest.Rows[1].UnitConvoyID
+
+	injected := errors.New("injected unit convoy close failure")
+	if IsTransientControllerError(injected) {
+		t.Fatalf("test premise: %v classifies transient", injected)
+	}
+	failing := closeErrorStore{Store: store, failID: unit0, err: injected}
+	var trace strings.Builder
+	opts := ProcessOptions{Work: beadstest.Work(failing), FormulaSearchPaths: []string{dir}, Tracef: func(format string, args ...any) {
+		fmt.Fprintf(&trace, format, args...)
+		trace.WriteByte('\n')
+	}}
+	result, err := ProcessControl(beadstest.Graph(failing), mustGetBead(t, store, drain.ID), opts)
+	if err != nil {
+		t.Fatalf("ProcessControl(permanent unit close failure) = %v, want the drain closed with its own verdict", err)
+	}
+	if result.Action != "drain-succeeded" {
+		t.Fatalf("Action = %q, want drain-succeeded", result.Action)
+	}
+	closed := mustGetBead(t, store, drain.ID)
+	if closed.Status != "closed" || closed.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass {
+		t.Fatalf("drain = status %q outcome %q, want closed/pass: every item passed", closed.Status, closed.Metadata[beadmeta.OutcomeMetadataKey])
+	}
+	assertDrainUnitRetired(t, store, unit1, beadmeta.OutcomePass)
+	left := mustGetBead(t, store, unit0)
+	if left.Status == "closed" {
+		t.Fatalf("unit convoy %s closed although its close failed", unit0)
+	}
+	if !strings.Contains(trace.String(), "retire-units-deferred") || !strings.Contains(trace.String(), unit0) {
+		t.Fatalf("trace does not record the deferred retirement of %s:\n%s", unit0, trace.String())
+	}
+	outcome, due, err := DrainUnitConvoyRetirement(left, closed)
+	if err != nil || !due || outcome != beadmeta.OutcomePass {
+		t.Fatalf("DrainUnitConvoyRetirement(%s) = (%q, %v, %v), want it due with its row's pass", unit0, outcome, due, err)
+	}
+}
+
+// TestProcessDrainRetiresEveryUnitConvoyCarryingARowsKey pins that a row's unit
+// key resolving to a convoy other than the one the row records is not a
+// malformed graph. The key embeds the drain, the row index and the member, so
+// both convoys are units of that row (a duplicate an earlier pass minted), and
+// both retire with its verdict instead of failing the drain.
+func TestProcessDrainRetiresEveryUnitConvoyCarryingARowsKey(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	store, drain := seedDrainWorkflow(t)
+	opts := ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}
+	if _, err := ProcessControl(beadstest.Graph(store), drain, opts); err != nil {
+		t.Fatalf("ProcessControl(drain expand): %v", err)
+	}
+	expanded := mustGetBead(t, store, drain.ID)
+	manifest := mustDrainManifest(t, expanded)
+	minted := mustGetBead(t, store, manifest.Rows[0].UnitConvoyID)
+	duplicate, err := store.Create(beads.Bead{Title: minted.Title, Type: "convoy", Metadata: maps.Clone(minted.Metadata)})
+	if err != nil {
+		t.Fatalf("create duplicate unit convoy: %v", err)
+	}
+	// The row records the duplicate, so the key lookup answers first with a
+	// convoy the row does not record.
+	manifest.Rows[0].UnitConvoyID = duplicate.ID
+	if err := persistDrainManifest(beadstest.Graph(store), drain.ID, manifest, nil); err != nil {
+		t.Fatalf("persist manifest: %v", err)
+	}
+	for _, row := range manifest.Rows {
+		if err := updateMetadataAndClose(beadstest.Graph(store), row.ItemRootID, map[string]string{"gc.outcome": "pass"}); err != nil {
+			t.Fatalf("close item root %s: %v", row.ItemRootID, err)
+		}
+	}
+	result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, drain.ID), opts)
+	if err != nil {
+		t.Fatalf("ProcessControl(drain complete): %v", err)
+	}
+	if result.Action != "drain-succeeded" {
+		t.Fatalf("Action = %q, want drain-succeeded", result.Action)
+	}
+	assertDrainUnitRetired(t, store, minted.ID, beadmeta.OutcomePass)
+	assertDrainUnitRetired(t, store, duplicate.ID, beadmeta.OutcomePass)
+	assertDrainUnitRetired(t, store, manifest.Rows[1].UnitConvoyID, beadmeta.OutcomePass)
+}
+
+// TestDrainUnitConvoyRetirementCoversDrainsTheRootGateCloses is the regression
+// for the paths #8173's leak continued through. closeOrphanedControl closes an
+// expanded drain under a canceled or settled workflow root without running the
+// drain, so the drain never retires its units, and a closed drain is never
+// processed again. DrainUnitConvoyRetirement, which `gc convoy check` asks of
+// every open unit, is what retires them: each is due, and skipped, since no row
+// reached a verdict before the gate closed the drain.
+func TestDrainUnitConvoyRetirementCoversDrainsTheRootGateCloses(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		stop         func(t *testing.T, store *beads.MemStore, rootID string)
+		action       string
+		drainOutcome string
+	}{
+		{
+			name: "canceled root",
+			stop: func(t *testing.T, store *beads.MemStore, rootID string) {
+				if err := store.SetMetadata(rootID, beadmeta.CancelRequestedMetadataKey, "true"); err != nil {
+					t.Fatalf("cancel root: %v", err)
+				}
+			},
+			action:       "canceled-workflow",
+			drainOutcome: beadmeta.OutcomeCanceled,
+		},
+		{
+			name: "settled root",
+			stop: func(t *testing.T, store *beads.MemStore, rootID string) {
+				if err := store.Close(rootID); err != nil {
+					t.Fatalf("close root: %v", err)
+				}
+			},
+			action:       "settled-workflow",
+			drainOutcome: beadmeta.OutcomeSkipped,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			formulatest.EnableV2ForTest(t)
+			dir := t.TempDir()
+			writeDrainItemFormula(t, dir)
+			store, drain := seedDrainWorkflow(t)
+			if err := store.SetMetadata(drain.ID, beadmeta.RootStoreRefMetadataKey, "rig:gascity"); err != nil {
+				t.Fatalf("SetMetadata(gc.root_store_ref): %v", err)
+			}
+			opts := ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}}
+			if _, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, drain.ID), opts); err != nil {
+				t.Fatalf("ProcessControl(drain expand): %v", err)
+			}
+			manifest := mustDrainManifest(t, mustGetBead(t, store, drain.ID))
+			tc.stop(t, store, drain.Metadata[beadmeta.RootBeadIDMetadataKey])
+
+			result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, drain.ID), opts)
+			if err != nil {
+				t.Fatalf("ProcessControl(drain under a stopped root): %v", err)
+			}
+			if result.Action != tc.action {
+				t.Fatalf("Action = %q, want %q", result.Action, tc.action)
+			}
+			closed := mustGetBead(t, store, drain.ID)
+			if closed.Status != "closed" || closed.Metadata[beadmeta.OutcomeMetadataKey] != tc.drainOutcome {
+				t.Fatalf("drain = status %q outcome %q, want closed/%s", closed.Status, closed.Metadata[beadmeta.OutcomeMetadataKey], tc.drainOutcome)
+			}
+			for _, row := range manifest.Rows {
+				unit := mustGetBead(t, store, row.UnitConvoyID)
+				outcome, due, err := DrainUnitConvoyRetirement(unit, closed)
+				if err != nil || !due || outcome != beadmeta.OutcomeSkipped {
+					t.Fatalf("DrainUnitConvoyRetirement(%s) = (%q, %v, %v) under a drain the root gate closed, want it due and skipped", unit.ID, outcome, due, err)
+				}
+			}
+		})
+	}
+}
+
+// TestDrainUnitConvoyRetirement pins when an open drain unit convoy is due to
+// retire and the outcome it retires with.
+func TestDrainUnitConvoyRetirement(t *testing.T) {
+	const controlID = "gc-10"
+	unit := beads.Bead{
+		ID:   "gc-20",
+		Type: "convoy",
+		Metadata: map[string]string{
+			beadmeta.SyntheticMetadataKey:      "true",
+			beadmeta.SyntheticKindMetadataKey:  "drain-unit-convoy",
+			beadmeta.DrainControlIDMetadataKey: controlID,
+			beadmeta.DrainUnitKeyMetadataKey:   "gc-10:unit:1:gc-3",
+		},
+	}
+	manifest := func(rows ...drainManifestRow) string {
+		data, err := json.Marshal(drainManifest{Version: 1, Rows: rows})
+		if err != nil {
+			t.Fatalf("marshal manifest: %v", err)
+		}
+		return string(data)
+	}
+	control := func(status, rawManifest string) beads.Bead {
+		metadata := map[string]string{beadmeta.KindMetadataKey: beadmeta.KindDrain}
+		if rawManifest != "" {
+			metadata[drainManifestMetadataKey] = rawManifest
+		}
+		return beads.Bead{ID: controlID, Status: status, Metadata: metadata}
+	}
+	other := drainManifestRow{Index: 0, UnitKey: "gc-10:unit:0:gc-2", UnitConvoyID: "gc-19", Status: "succeeded"}
+	for _, tc := range []struct {
+		name        string
+		unit        beads.Bead
+		control     beads.Bead
+		wantDue     bool
+		wantOutcome string
+		wantErr     bool
+	}{
+		{name: "row succeeded", unit: unit, control: control("closed", manifest(other, drainManifestRow{Index: 1, UnitKey: "gc-10:unit:1:gc-3", UnitConvoyID: "gc-20", Status: "succeeded"})), wantDue: true, wantOutcome: beadmeta.OutcomePass},
+		{name: "row failed", unit: unit, control: control("closed", manifest(drainManifestRow{Index: 1, UnitConvoyID: "gc-20", Status: "failed"})), wantDue: true, wantOutcome: beadmeta.OutcomeFail},
+		{name: "row never reached a verdict", unit: unit, control: control("closed", manifest(drainManifestRow{Index: 1, UnitConvoyID: "gc-20", Status: "wired"})), wantDue: true, wantOutcome: beadmeta.OutcomeSkipped},
+		{name: "duplicate unit found by its row's key", unit: unit, control: control("closed", manifest(drainManifestRow{Index: 1, UnitKey: "gc-10:unit:1:gc-3", UnitConvoyID: "gc-21", Status: "failed"})), wantDue: true, wantOutcome: beadmeta.OutcomeFail},
+		{name: "row the manifest does not record", unit: unit, control: control("closed", manifest(other)), wantDue: true, wantOutcome: beadmeta.OutcomeSkipped},
+		{name: "drain closed with no manifest", unit: unit, control: control("closed", ""), wantDue: true, wantOutcome: beadmeta.OutcomeSkipped},
+		{name: "drain still open", unit: unit, control: control("open", manifest(drainManifestRow{Index: 1, UnitConvoyID: "gc-20", Status: "succeeded"}))},
+		{name: "another control", unit: unit, control: func() beads.Bead { c := control("closed", ""); c.ID = "gc-11"; return c }()},
+		{name: "a closed bead that is no drain", unit: unit, control: beads.Bead{ID: controlID, Status: "closed", Metadata: map[string]string{beadmeta.KindMetadataKey: "retry"}}},
+		{name: "a convoy that is no drain unit", unit: beads.Bead{ID: "gc-20", Type: "convoy", Metadata: map[string]string{beadmeta.DrainControlIDMetadataKey: controlID}}, control: control("closed", "")},
+		{name: "unparseable manifest", unit: unit, control: control("closed", "{not json"), wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			outcome, due, err := DrainUnitConvoyRetirement(tc.unit, tc.control)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("DrainUnitConvoyRetirement err = %v, want error %v", err, tc.wantErr)
+			}
+			if due != tc.wantDue || outcome != tc.wantOutcome {
+				t.Fatalf("DrainUnitConvoyRetirement = (%q, %v), want (%q, %v)", outcome, due, tc.wantOutcome, tc.wantDue)
+			}
+		})
+	}
+}
+
+// TestDrainUnitConvoyControlID pins which beads are drain unit convoys: a
+// convoy of the drain-unit-convoy synthetic kind, the kind a drain mints.
+func TestDrainUnitConvoyControlID(t *testing.T) {
+	unitMetadata := map[string]string{
+		beadmeta.SyntheticKindMetadataKey:  "drain-unit-convoy",
+		beadmeta.DrainControlIDMetadataKey: "gc-10",
+	}
+	if got := DrainUnitConvoyControlID(beads.Bead{Type: "convoy", Metadata: unitMetadata}); got != "gc-10" {
+		t.Fatalf("DrainUnitConvoyControlID(unit convoy) = %q, want gc-10", got)
+	}
+	if got := DrainUnitConvoyControlID(beads.Bead{Type: "task", Metadata: unitMetadata}); got != "" {
+		t.Fatalf("DrainUnitConvoyControlID(task carrying the unit metadata) = %q, want empty", got)
+	}
+	itemRoot := map[string]string{beadmeta.DrainControlIDMetadataKey: "gc-10"}
+	if got := DrainUnitConvoyControlID(beads.Bead{Type: "convoy", Metadata: itemRoot}); got != "" {
+		t.Fatalf("DrainUnitConvoyControlID(convoy of another kind) = %q, want empty", got)
 	}
 }
