@@ -70,6 +70,4 @@ internal/api/dashport_support.go	seededState	raw-field	2
 internal/api/dashport_support.go	seededState.BeadStore	raw-result	1
 internal/api/dashport_support.go	seededState.BeadStores	raw-result	1
 internal/api/dashport_support.go	seededState.CityBeadStore	raw-result	1
-internal/api/dashport_support.go	seededState.ScopedStoreLike	raw-param	1
-internal/api/dashport_support.go	seededState.ScopedStoreLike	raw-result	1
 internal/api/dashport_support.go	seededState.classStores	mint	1

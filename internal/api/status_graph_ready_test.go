@@ -36,7 +36,7 @@ func TestStatusReadyCountIncludesTheSplitGraphBinding(t *testing.T) {
 				state.graphBeadStore = binding
 				want = 2
 			}
-			wc, errs := (&Server{state: state}).statusWorkCounts(context.Background(), nil)
+			wc, errs := (&Server{state: state}).statusWorkCounts(context.Background(), state.Stores(), nil)
 			if len(errs) != 0 {
 				t.Fatalf("partial errors = %v", errs)
 			}

@@ -49,7 +49,7 @@ func TestStatusWorkCountsSkipsCacheColdRigs(t *testing.T) {
 	state, cold := newColdCacheRigState(t)
 	s := &Server{state: state}
 
-	wc, errs := s.statusWorkCounts(context.Background(), map[string]bool{"myrig": true})
+	wc, errs := s.statusWorkCounts(context.Background(), state.Stores(), map[string]bool{"myrig": true})
 
 	if len(errs) != 0 {
 		t.Fatalf("partial errors = %v, want none for a cache-cold rig", errs)
@@ -73,7 +73,7 @@ func TestStatusWorkCountsStillReportsReadyFailureForRefreshingRigs(t *testing.T)
 	state, cold := newColdCacheRigState(t)
 	s := &Server{state: state}
 
-	_, errs := s.statusWorkCounts(context.Background(), nil)
+	_, errs := s.statusWorkCounts(context.Background(), state.Stores(), nil)
 
 	if len(errs) != 1 {
 		t.Fatalf("partial errors = %v, want exactly 1", errs)

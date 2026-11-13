@@ -2410,13 +2410,36 @@ func (cs *controllerState) CityBeadStore() beads.Store {
 // ScopedStoreLike implements api.State. See the interface doc comment for
 // the contract; scopedStoreLike (cmd/gc/scoped_store.go) does the actual
 // unwrap-and-rebuild work, reusing the same credential/env resolution as
-// every other bd-CLI store this package constructs.
-func (cs *controllerState) ScopedStoreLike(ctx context.Context, existing beads.Store) (beads.Store, error) {
+// every other bd-CLI store this package constructs. It binds the leg through
+// storeref.BindLeg, which hands the bind the raw store the plan leg holds
+// (never a class handle, which bdStoreBacking would answer "not bd" for, R12),
+// so the clone keeps the leg's ref, role and gate role.
+func (cs *controllerState) ScopedStoreLike(ctx context.Context, leg storeref.TypedLeg) (storeref.TypedLeg, bool, error) {
 	cs.mu.RLock()
 	cityPath := cs.cityPath
 	cfg := cs.cfg
 	cs.mu.RUnlock()
-	return scopedStoreLike(ctx, cityPath, cfg, existing)
+	cloned := false
+	var scopeErr error
+	bound, err := storeref.BindLeg(leg, func(existing beads.Store) (beads.Store, error) {
+		scoped, err := scopedStoreLike(ctx, cityPath, cfg, existing)
+		if err != nil || scoped == nil {
+			scopeErr = err
+			return existing, nil
+		}
+		cloned = true
+		return scoped, nil
+	})
+	switch {
+	case scopeErr != nil:
+		// Unwrapped, so status's "resolving scoped store: %w" reads as before.
+		return storeref.TypedLeg{}, false, scopeErr
+	case err != nil:
+		return storeref.TypedLeg{}, false, err
+	case !cloned:
+		return leg, false, nil
+	}
+	return bound, true, nil
 }
 
 // NudgeQueue returns the city's nudge queue over its nudges-class store, for the

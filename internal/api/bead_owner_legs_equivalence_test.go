@@ -11,7 +11,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/workrecord"
@@ -241,7 +240,7 @@ func t7eOps(home string) []t7dOp {
 						if miss != "" {
 							return miss
 						}
-						return New(fx.state).workRecordRepoDir(store, t7eRecord(b, owned))
+						return New(fx.state).workRecordRepoDir(fx.state.Stores(), store, t7eRecord(b, owned))
 					},
 				},
 				t7dOp{
@@ -261,7 +260,7 @@ func t7eOps(home string) []t7dOp {
 							return miss
 						}
 						return t7eGateCall(t, func() error {
-							return New(fx.state).gateWorkRecordClose(t.Context(), id, store, t7eRecord(b, owned), t7eShipped)
+							return New(fx.state).gateWorkRecordClose(t.Context(), fx.state.Stores(), id, store, t7eRecord(b, owned), t7eShipped)
 						})
 					},
 				},
@@ -425,27 +424,46 @@ func TestAppendMetadataAttachedChildrenWithoutAnOwner(t *testing.T) {
 	}
 }
 
-// TestWorkRecordLegacyRepoDirReadsOneEpoch pins that the close gate matches
-// every configured rig against one Stores() epoch. The epoch is swapped after
-// the first read, from one where rig beta holds the answering store to one
-// where it holds another: a match that read the epoch per rig would judge the
-// bead against the city checkout.
-func TestWorkRecordLegacyRepoDirReadsOneEpoch(t *testing.T) {
+// TestBeadCloseGateReadsTheOwnersEpoch pins that a close, through the close
+// route and through a closing update (PATCH or POST /bead/{id}/update with
+// status closed), resolves its owner and matches it to a rig in one Stores()
+// epoch (T7e.2). The epoch is swapped after the first read, from one where rig
+// beta holds the store the bead is read from to one where it holds another: a
+// gate that read the epoch again would match no rig and judge the bead
+// against the city checkout, and an owner resolved in the later epoch would
+// not be found.
+func TestBeadCloseGateReadsTheOwnersEpoch(t *testing.T) {
 	t7dGateOff(t)
-	alpha, beta, other := beads.NewMemStore(), beads.NewMemStore(), beads.NewMemStore()
-	before := newFakeState(t)
-	before.cityBeadStore = beads.NewMemStore()
-	before.stores = map[string]beads.Store{"alpha": alpha, "beta": beta}
-	before.cfg.Rigs = []config.Rig{{Name: "alpha", Path: "/nonexistent/alpha"}, {Name: "beta", Path: "/nonexistent/beta"}}
-	after := newFakeState(t)
-	after.cityBeadStore = before.cityBeadStore
-	after.stores = map[string]beads.Store{"alpha": alpha, "beta": other}
-	state := &t7dEpochSwapState{fakeState: before, first: before.Stores(), later: after.Stores()}
+	t.Setenv(workrecord.EnforceEnvVar, "1")
+	closed := "closed"
+	for name, closeBead := range map[string]func(s *Server, id string) error{
+		"close": func(s *Server, id string) error {
+			_, err := s.humaHandleBeadClose(t.Context(), &BeadCloseInput{ID: id})
+			return err
+		},
+		"closing update": func(s *Server, id string) error {
+			_, err := s.humaHandleBeadUpdate(t.Context(), &BeadUpdateInput{ID: id, Body: beadUpdateBody{Status: &closed}})
+			return err
+		},
+	} {
+		alpha, beta, other := beads.NewMemStore(), beads.NewMemStore(), beads.NewMemStore()
+		bead, err := beta.Create(beads.Bead{Title: "shipped", Type: "task", Metadata: t7eShipped})
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := newFakeState(t)
+		before.cityBeadStore = beads.NewMemStore()
+		before.stores = map[string]beads.Store{"alpha": alpha, "beta": beta}
+		before.cfg.Rigs = []config.Rig{{Name: "alpha", Path: "/nonexistent/alpha"}, {Name: "beta", Path: "/nonexistent/beta"}}
+		after := newFakeState(t)
+		after.cityBeadStore = before.cityBeadStore
+		after.stores = map[string]beads.Store{"alpha": alpha, "beta": other}
+		state := &t7dEpochSwapState{fakeState: before, first: before.Stores(), later: after.Stores()}
 
-	s := New(state)
-	got := s.workRecordLegacyRepoDir(beadstest.Resident(beta), s.workRecordScopeDirs())
-	if got != "/nonexistent/beta" || state.calls != 1 {
-		t.Errorf("legacy repo dir over a swapped epoch = %q after %d Stores() reads; want rig beta's checkout after one", got, state.calls)
+		got := t7eGateCall(t, func() error { return closeBead(New(state), bead.ID) })
+		if !strings.Contains(got, `asked ["/nonexistent/beta"]`) {
+			t.Errorf("%s over a swapped epoch: %s; want rig beta's checkout asked", name, got)
+		}
 	}
 }
 
