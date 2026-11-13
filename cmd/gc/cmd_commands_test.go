@@ -2828,7 +2828,7 @@ func TestPackCommandTreeCandidateSnapshotFieldCountRatchet(t *testing.T) {
 		want int
 	}{
 		{name: "candidate", typ: reflect.TypeOf(packCommandTreeCandidate{}), want: 3},
-		{name: "discovered command", typ: reflect.TypeOf(config.DiscoveredCommand{}), want: 9},
+		{name: "discovered command", typ: reflect.TypeOf(config.DiscoveredCommand{}), want: 10},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := test.typ.NumField(); got != test.want {

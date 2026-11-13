@@ -114,6 +114,7 @@ func discoveredCommandFromDir(fs fsys.FS, packDir, packName, commandDir string, 
 	manifestPath := filepath.Join(commandDir, "command.toml")
 	words := append([]string{}, defaultWords...)
 	description := ""
+	nativeHelp := false
 
 	if data, err := fs.ReadFile(manifestPath); err == nil {
 		var manifest commandManifest
@@ -130,6 +131,7 @@ func discoveredCommandFromDir(fs fsys.FS, packDir, packName, commandDir string, 
 		if manifest.Run != "" {
 			runRel = manifest.Run
 		}
+		nativeHelp = manifest.NativeHelp
 	}
 
 	if strings.Contains(runRel, "{{") {
@@ -153,6 +155,7 @@ func discoveredCommandFromDir(fs fsys.FS, packDir, packName, commandDir string, 
 			SourceDir:   commandDir,
 			PackDir:     packDir,
 			PackName:    packName,
+			NativeHelp:  nativeHelp,
 		}, true, nil
 	}
 
@@ -183,5 +186,6 @@ func discoveredCommandFromDir(fs fsys.FS, packDir, packName, commandDir string, 
 		SourceDir:   commandDir,
 		PackDir:     packDir,
 		PackName:    packName,
+		NativeHelp:  nativeHelp,
 	}, true, nil
 }
