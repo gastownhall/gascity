@@ -40,6 +40,11 @@ import (
 // minGCVersionFileName is the floor's file under the city's .gc.
 const minGCVersionFileName = "min-gc-version"
 
+// splitMinGCVersion is the floor the guided split writes (owner decision Q1,
+// 2026-11-12): the first release that carries this file's reader and the
+// split's relic legs. A floor the file already holds that is higher stays.
+const splitMinGCVersion = "1.6.0"
+
 // minGCVersionPattern is the floor's one accepted shape.
 var minGCVersionPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
 

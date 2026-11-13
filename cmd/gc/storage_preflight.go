@@ -628,7 +628,7 @@ func preflightBlockRow(stdout io.Writer, check string, cause error) {
 // import cannot move without a cross-store edge, or a rig it cannot read —
 // blocks.
 func preflightRigScopes(request storageOperatorRequest, target infraBindingTarget, found *preflightFindings, stdout io.Writer) int {
-	rows := censusRigs(request.CityPath, request.Cfg, target, true)
+	rows := censusRigsAttested(request.CityPath, request.Cfg, target, true, request.Force)
 	found.rigs = rows
 	if len(rows) == 0 {
 		preflightPass(stdout, "rig scopes", "this city declares no rig")

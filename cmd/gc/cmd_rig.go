@@ -477,7 +477,7 @@ func recordNewRigClean(cityPath string, cfg *config.City, r config.Rig, stderr i
 	// create (or start a server for) the store being asked about.
 	row := rigCensusRow{Rig: r.Name, State: rigCensusAwaiting}
 	if !rigScopeHasNoStore(cityPath, r) {
-		row = censusRig(cityPath, loadedCityName(cfg, cityPath), cfg, target, r, false)
+		row = censusRig(cityPath, loadedCityName(cfg, cityPath), cfg, target, r, false, storageForce{})
 	}
 	if _, err := recordCensusClean(cityPath, target, r, &row, "gc rig add"); err != nil {
 		fmt.Fprintf(stderr, "gc rig add: warning: recording rig %s clean for the split store: %v (run `%s` to record it)\n", r.Name, err, rigImportInstruction(r.Name)) //nolint:errcheck // best-effort stderr
