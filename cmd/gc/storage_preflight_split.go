@@ -326,6 +326,10 @@ func doStorageSplitPreflight(request storageOperatorRequest, stdout, stderr io.W
 	split := splitHypotheticalConfig(request.Cfg)
 	fmt.Fprintf(stdout, "the [storage] block the split writes (hypothetical; nothing is written):\n\n%s\n", splitStorageTOML(split)) //nolint:errcheck // best-effort stdout
 	preflightPass(stdout, "config", "city.toml authors no [storage]; the split writes the block above")
+	if err := splitVersionFloorRefusal(request.CityPath, splitMinGCVersion); err != nil {
+		block("gc version", err)
+		return splitPreflightFooter(stdout, request, summary), summary
+	}
 
 	// The reconciler, before and after: an existing city moves its storage
 	// and its reconciler in one step. A mode the split city would refuse to

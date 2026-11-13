@@ -74,7 +74,11 @@ type rigCensusRow struct {
 	// census: what `gc storage snapshot --rigs` exports for the rig, which
 	// `gc storage preflight --split` sizes.
 	Rows []beads.Bead
-	Err  error
+	// LiveCoTenants names, on a full census under an attestation that lifts
+	// the rig's shared-store refusal, each co-tenant city that is live now
+	// (coTenantLiveness): the import refuses at this rig until it is stopped.
+	LiveCoTenants []string
+	Err           error
 }
 
 // blocking reports whether the row holds the deploy gate (`gc storage
@@ -203,8 +207,14 @@ func censusRig(cityPath, cityName string, cfg *config.City, target infraBindingT
 		// The import's shared-store check up to its co-tenant locks: the
 		// census writes nothing, so it keeps no co-tenant stopped, and a
 		// rehearsal takes no other city's lock.
-		if _, err := findSharedStore(cityPath, "rig "+rig.Name, rigStoreRoot(cityPath, rig), force); err != nil {
+		if finding, err := findSharedStore(cityPath, "rig "+rig.Name, rigStoreRoot(cityPath, rig), force); err != nil {
 			plan.Refusals = append(plan.Refusals, rigImportRefusal{IDs: []string{rig.Name}, Reason: err.Error(), Remedy: "give the rig a store of its own"})
+		} else {
+			for _, other := range finding.coTenants() {
+				if why := coTenantLiveness(other); why != "" {
+					row.LiveCoTenants = append(row.LiveCoTenants, other+" ("+why+")")
+				}
+			}
 		}
 		if _, err := rigImportHashConfigOpener(cityPath, cfg, rig); err != nil {
 			plan.Refusals = append(plan.Refusals, rigImportRefusal{IDs: []string{rig.Name}, Reason: err.Error(), Remedy: "serve the rig from a bd or file provider"})

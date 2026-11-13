@@ -636,6 +636,9 @@ func preflightRigScopes(request storageOperatorRequest, target infraBindingTarge
 	}
 	var refusals []string
 	for _, r := range rows {
+		for _, live := range r.LiveCoTenants {
+			preflightNote(stdout, "rig "+r.Rig, fmt.Sprintf("rig %s's store is shared with city %s, which is live: the rig import (the guided split's rig step) refuses at this rig until that city is stopped (`%s`)", r.Rig, live, storageCoTenantStopCommand))
+		}
 		switch {
 		case r.State == rigCensusSkipped:
 			preflightPass(stdout, "rig "+r.Rig, "n/a ("+r.Why+")")

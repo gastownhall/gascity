@@ -34,8 +34,17 @@ const (
 	minAbbrevCommitLen = 7
 )
 
+// versionBuilt is the version this binary was built as, before
+// normalizeVersion: a Go pseudo-version (`go install …@<ref>`) keeps its
+// suffix here, which the version floor needs (gcVersionForFloor).
+var versionBuilt string
+
 func init() {
 	info, ok := debug.ReadBuildInfo()
+	versionBuilt = version
+	if normalizeVersion(versionBuilt) == "dev" && ok && info != nil {
+		versionBuilt = info.Main.Version
+	}
 	version, commit, date = resolveBuildMetadata(version, commit, date, ok, info)
 }
 

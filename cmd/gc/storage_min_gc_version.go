@@ -87,9 +87,18 @@ func writeMinGCVersion(cityPath, floor string) error {
 }
 
 // gcVersionCore is the MAJOR.MINOR.PATCH of a gc version string, or false
-// when it has none (a "dev" build).
+// when it has none: a "dev" build, or a Go pseudo-version (owner decision,
+// 2026-11-13: `go install …@<ref>` builds a commit, not the release its
+// prefix names, so it is no more comparable than dev). Releases and release
+// candidates are compared.
 func gcVersionCore(v string) (string, bool) {
-	m := gcVersionCorePattern.FindStringSubmatch(strings.TrimSpace(v))
+	v = strings.TrimSpace(v)
+	for _, re := range goPseudoVersionSuffixRes {
+		if re.MatchString(strings.TrimPrefix(v, "v")) {
+			return "", false
+		}
+	}
+	m := gcVersionCorePattern.FindStringSubmatch(v)
 	if m == nil {
 		return "", false
 	}
@@ -102,6 +111,19 @@ func gcVersionCore(v string) (string, bool) {
 func gcVersionBelowFloor(running, floor string) bool {
 	core, ok := gcVersionCore(running)
 	return ok && deps.CompareVersions(core, floor) < 0
+}
+
+// gcVersionForFloor is this gc's version as the floor compares it: the
+// version it was built as when that is a Go pseudo-version, which
+// normalizeVersion strips to the release it is not, and its version
+// otherwise. Boot, doctor and the split all compare through it.
+func gcVersionForFloor() string {
+	for _, re := range goPseudoVersionSuffixRes {
+		if re.MatchString(strings.TrimPrefix(strings.TrimSpace(versionBuilt), "v")) {
+			return versionBuilt
+		}
+	}
+	return version
 }
 
 // minGCVersionRefusal refuses a gc of version running on a city whose floor

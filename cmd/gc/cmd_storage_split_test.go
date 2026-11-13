@@ -278,26 +278,44 @@ func TestStorageSplitGuidedMovesAnUnsplitCityAndItsRigs(t *testing.T) {
 }
 
 // guidedSplitSeams are the seams of a guided split, in order (S5-H design
-// §3.3), and what a boot between the kill and the next run does: refuse
-// (unconverged), or serve.
-var guidedSplitSeams = []string{
-	"split guarded",
-	"split " + splitPhaseSnapshotted,
-	"split " + splitPhaseReadied,
-	"split " + splitPhaseConfiguring,
-	"split floor",
-	"split city.toml",
-	"split " + splitPhaseConfigured,
-	"prepare",
-	"copying rows",
-	"verify",
-	"manifest",
-	"marker",
-	"clearing",
-	"floor",
-	"split " + splitPhaseCityConverged,
-	"split " + splitPhaseRigsImported,
-	"split " + splitPhaseComplete,
+// §3.3), with what a boot between the kill and the next run does: serve
+// unsplit before city.toml is written, refuse while the city's copy and
+// clear are under way, and serve split once the copy has converged.
+var guidedSplitSeams = []struct {
+	seam string
+	boot string // "serves" or the refusal's text
+}{
+	{"split guarded", "serves"},
+	{"split " + splitPhaseSnapshotted, "serves"},
+	{"split " + splitPhaseReadied, "serves"},
+	{"split " + splitPhaseConfiguring, "serves"},
+	{"split floor", "serves"},
+	{"split city.toml", `assign graph/sessions/messaging/orders/nudges to binding "infra"`},
+	{"split " + splitPhaseConfigured, `assign graph/sessions/messaging/orders/nudges to binding "infra"`},
+	{"prepare", `assign graph/sessions/messaging/orders/nudges to binding "infra"`},
+	{"copying rows", `assign graph/sessions/messaging/orders/nudges to binding "infra"`},
+	{"verify", `assign graph/sessions/messaging/orders/nudges to binding "infra"`},
+	{"manifest", `assign graph/sessions/messaging/orders/nudges to binding "infra"`},
+	{"marker", "this city converged on binding"},
+	{"clearing", "this city converged on binding"},
+	{"floor", "this city converged on binding"},
+	{"split " + splitPhaseCityConverged, "serves"},
+	{"split " + splitPhaseRigsImported, "serves"},
+	{"split " + splitPhaseComplete, "serves"},
+}
+
+// assertBoot checks what a boot of the city does now: serve, or refuse with
+// want in its refusal.
+func (c *guidedSplitCity) assertBoot(want string) {
+	c.t.Helper()
+	request := c.reload()
+	_, err := storageBootGate(c.request.CityPath, request.Cfg, "gc start", nil, io.Discard)
+	switch {
+	case want == "serves" && err != nil:
+		c.t.Fatalf("boot = %v, want it to serve", err)
+	case want != "serves" && (err == nil || !strings.Contains(err.Error(), want)):
+		c.t.Fatalf("boot = %v, want a refusal naming %q", err, want)
+	}
 }
 
 // killSplitAt runs the split with the seam point failing once.
@@ -312,8 +330,8 @@ func (c *guidedSplitCity) killSplitAt(point string) {
 		}
 		return nil
 	}
+	defer func() { infraEngineCrashPoint = prev }() // restored on a Fatal too
 	code, stdout, stderr := c.split(splitOptions{})
-	infraEngineCrashPoint = prev
 	if !fired {
 		c.t.Fatalf("the seam %q never fired (exit %d):\n%s%s", point, code, stdout, stderr)
 	}
@@ -323,24 +341,26 @@ func (c *guidedSplitCity) killSplitAt(point string) {
 // finishes on the next run, with every invariant, and the journal's
 // city.toml record is the one a single run writes.
 func TestStorageSplitResumesFromEverySeam(t *testing.T) {
-	for _, seam := range guidedSplitSeams {
-		t.Run(seam, func(t *testing.T) {
+	for _, tc := range guidedSplitSeams {
+		t.Run(tc.seam, func(t *testing.T) {
 			c := newGuidedSplitCity(t)
 			before := c.readTOML()
-			c.killSplitAt(seam)
+			c.killSplitAt(tc.seam)
+			c.assertBoot(tc.boot)
 			code, stdout, stderr := c.split(splitOptions{})
-			if code != 0 && seam == "split "+splitPhaseComplete {
-				// Killed after the journal said complete: the split is done.
-				if !strings.Contains(stderr, "already authors [storage]") {
+			if code != 0 && tc.seam == "split "+splitPhaseComplete {
+				// Killed after the journal said complete: the split is done,
+				// and the rerun names the run that did it (§3.3, last row).
+				if run := c.journal().Run; !strings.Contains(stderr, "the guided split "+run+" completed") {
 					t.Fatalf("a rerun of a completed split = %d: %s%s", code, stdout, stderr)
 				}
 			} else if code != 0 {
-				t.Fatalf("the rerun after a kill at %q = %d:\n%s\n%s", seam, code, stdout, stderr)
+				t.Fatalf("the rerun after a kill at %q = %d:\n%s\n%s", tc.seam, code, stdout, stderr)
 			}
 			c.assertSplit()
 			j := c.journal()
 			if *j.CityTOMLBefore != before || j.CityTOMLAfterSHA256 != sha256Hex([]byte(c.readTOML())) {
-				t.Fatalf("the journal's city.toml record after a kill at %q does not match the file", seam)
+				t.Fatalf("the journal's city.toml record after a kill at %q does not match the file", tc.seam)
 			}
 		})
 	}
@@ -460,13 +480,14 @@ func TestStorageSplitJournalJudge(t *testing.T) {
 		{"no journal, unsplit", splitJudgement{}, splitFresh, "", ""},
 		{"no journal, authored", splitJudgement{authored: true, splitting: true}, splitRefuse, "", "already authors [storage]"},
 		{"complete, unsplit (reversed since)", splitJudgement{journal: at(splitPhaseComplete)}, splitFresh, "", ""},
-		{"complete, authored", splitJudgement{journal: at(splitPhaseComplete), authored: true, splitting: true, sha: "after"}, splitRefuse, "", "already authors [storage]"},
+		{"complete, authored", splitJudgement{journal: at(splitPhaseComplete), authored: true, splitting: true, sha: "after"}, splitRefuse, "", "the guided split r1 completed"},
+		{"abandoned, authored", splitJudgement{journal: at(splitPhaseAbandoned), authored: true, splitting: true}, splitRefuse, "", "already authors [storage]"},
 		{"abandoned, unsplit", splitJudgement{journal: at(splitPhaseAbandoned)}, splitFresh, "", ""},
 		{"abandoning", splitJudgement{journal: at(splitPhaseAbandoning)}, splitRefuse, "", "--abandon"},
 		{"unknown phase", splitJudgement{journal: at("later")}, splitRefuse, "", "does not know"},
 		{"snapshotted, unsplit", splitJudgement{journal: at(splitPhaseSnapshotted), sha: "before"}, splitFresh, "starting it over", ""},
 		{"readied, unsplit", splitJudgement{journal: at(splitPhaseReadied), sha: "before"}, splitFresh, "starting it over", ""},
-		{"readied, authored by hand", splitJudgement{journal: at(splitPhaseReadied), authored: true, splitting: true}, splitRefuse, "", "already authors [storage]"},
+		{"readied, authored by hand", splitJudgement{journal: at(splitPhaseReadied), authored: true, splitting: true}, splitRefuse, "", "--abandon"},
 		{"configuring, file as before", splitJudgement{journal: at(splitPhaseConfiguring), sha: "before"}, splitResume, "", ""},
 		{"configuring, file written", splitJudgement{journal: at(splitPhaseConfiguring), authored: true, splitting: true, sha: "after"}, splitResume, "", ""},
 		{"configuring, file edited, no storage", splitJudgement{journal: at(splitPhaseConfiguring), sha: "other"}, splitFresh, "starting a new split", ""},

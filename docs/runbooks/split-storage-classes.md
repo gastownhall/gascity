@@ -88,8 +88,10 @@ registered city uses, with that city stopped by `gc supervisor stop --wait`.
 A bare `--force` refuses.
 
 **Rolling back.** Before the city's copy converges, `gc storage split
---abandon --fleet-stopped` puts `city.toml` and the version floor back, deletes
-the rows it copied into the binding, and unpins the snapshot. After that, run
+--abandon --fleet-stopped` puts `city.toml` back, puts the version floor back
+as it was before the split (or removes it if there was none), deletes the rows
+it copied into the binding, and unpins the snapshot. A split stopped before it
+wrote `city.toml` only has its journal closed and its snapshot unpinned. After that, run
 `gc storage migrate --to-work --fleet-stopped` ("Reversing the split" below).
 It copies the binding's rows back and, when `city.toml` is still the file the
 split wrote, restores the file's bytes from before the split.

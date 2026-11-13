@@ -5819,8 +5819,10 @@ city.toml starts over.
 
 --abandon backs out a split stopped before the city's copy converged: city.toml
 gets its bytes from before the split back (or [storage] removed, if it changed
-since), the half-copied binding rows are deleted, and the version floor is
-removed. Past the convergence marker the way back is gc storage migrate
+since), the half-copied binding rows are deleted, and the version floor is put
+back as it was before the split (removed if there was none). A split stopped
+before it wrote city.toml only has its journal closed and its snapshot
+unpinned. Past the convergence marker the way back is gc storage migrate
 --to-work, which keeps every bead written to the binding since.
 
 --dry-run is gc storage preflight --split.

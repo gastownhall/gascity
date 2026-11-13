@@ -79,8 +79,8 @@ func (c *storageSplitCheck) versionFloor(f *storageSplitFindings) {
 	case !present:
 		return
 	}
-	if gcVersionBelowFloor(version, floor) {
-		f.errs = append(f.errs, fmt.Sprintf("this gc is %s, below the city's floor %s (%s)", version, floor, minGCVersionPath(c.cityPath)))
+	if running := gcVersionForFloor(); gcVersionBelowFloor(running, floor) {
+		f.errs = append(f.errs, fmt.Sprintf("this gc is %s, below the city's floor %s (%s)", running, floor, minGCVersionPath(c.cityPath)))
 	}
 	path, running, err := minGCVersionPathProbe(c.cfg)
 	switch {
@@ -101,19 +101,26 @@ func (c *storageSplitCheck) versionFloor(f *storageSplitFindings) {
 // splitJournal warns on a guided split that stopped with work left
 // (S5-H, owner decision: WARN): what it left is graded by the checks below
 // (an unconverged city is an error through status), and this names the
-// command that continues it. A split past its rig imports has only its
+// command that continues it. The hint goes into the details too, so it is
+// shown beside an error. A split past its rig imports has only its
 // verification left, which the checks below are.
 func (c *storageSplitCheck) splitJournal(f *storageSplitFindings) {
 	j, present, err := readStorageSplitJournal(c.cityPath)
+	var hint string
 	switch {
 	case err != nil:
-		f.warns = append(f.warns, err.Error())
+		hint = err.Error()
 	case !present || !j.open() || j.Phase == splitPhaseRigsImported:
+		return
 	case j.Phase == splitPhaseAbandoning:
-		f.warns = append(f.warns, fmt.Sprintf("the guided split %s is being abandoned; `%s` finishes it", j.Run, storageSplitAbandonInstruction()))
+		hint = fmt.Sprintf("the guided split %s is being abandoned; `%s` finishes it", j.Run, storageSplitAbandonInstruction())
+	case splitPhaseRank[j.Phase] < splitPhaseRank[splitPhaseConfiguring] && c.cfg != nil && c.cfg.Storage != nil:
+		hint = fmt.Sprintf("the guided split %s stopped at %s, before it wrote city.toml, and city.toml authors [storage] it did not write; `%s` closes the split and changes nothing else", j.Run, j.Phase, storageSplitAbandonInstruction())
 	default:
-		f.warns = append(f.warns, fmt.Sprintf("the guided split %s stopped at %s; `%s` continues it", j.Run, j.Phase, storageSplitInstruction()))
+		hint = fmt.Sprintf("the guided split %s stopped at %s; `%s` continues it", j.Run, j.Phase, storageSplitInstruction())
 	}
+	f.warns = append(f.warns, hint)
+	f.details = append(f.details, hint)
 }
 
 // unsplit is the verdict of a city with no [storage].
