@@ -108,6 +108,11 @@ type snapshotExact struct {
 	Tree   *snapshotCopiedTree `json:"tree,omitempty"`
 	Tag    string              `json:"tag,omitempty"`
 	Commit string              `json:"commit,omitempty"`
+	// CopiedAt is when a file copy or a data-directory copy was taken. The
+	// JSONL is read after it, from the live store, so a row it records as
+	// changed at or after this moment may postdate the copy. Zero for a
+	// snapshot taken before gc recorded it, and for the other methods.
+	CopiedAt time.Time `json:"copied_at,omitzero"`
 }
 
 // snapshotFile is one file in a snapshot, relative to its directory.
