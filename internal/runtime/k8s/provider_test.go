@@ -2030,7 +2030,10 @@ func TestStartDetectsImmediateSessionDeath(t *testing.T) {
 	p.postStartSettle = 0 // no delay in tests
 
 	// tmux has-session succeeds during waitForTmux, then fails on post-start check.
+	// The agent has exited by then and taken its session with it, so reading
+	// its pane exits 1 in the pod.
 	hasSessionCalls := 0
+	captures := 0
 	fake.execFunc = func(_ string, cmd []string) (string, error) {
 		if len(cmd) >= 3 && cmd[0] == "tmux" && cmd[1] == "has-session" {
 			hasSessionCalls++
@@ -2039,10 +2042,12 @@ func TestStartDetectsImmediateSessionDeath(t *testing.T) {
 			}
 			return "", fmt.Errorf("no server running on /tmp/tmux-1000/default")
 		}
+		if len(cmd) >= 2 && cmd[0] == "tmux" && cmd[1] == "capture-pane" {
+			captures++
+			return "", execerr.CodeExitError{Err: errors.New("no server running on /tmp/tmux-1000/default"), Code: 1}
+		}
 		return "", nil
 	}
-
-	paneShowsReadyPrompt(fake)
 
 	cfg := runtime.Config{
 		Command:      "claude --resume stale-key",
@@ -2055,6 +2060,9 @@ func TestStartDetectsImmediateSessionDeath(t *testing.T) {
 	}
 	if !errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
 		t.Fatalf("Start error = %v, want ErrSessionDiedDuringStartup", err)
+	}
+	if captures != 1 {
+		t.Errorf("startup-dialog pass read the dead pane %d times, want 1: it must stop at the first failed read", captures)
 	}
 
 	// Pod should have been cleaned up.
@@ -2803,55 +2811,5 @@ func TestRelaunchFailsClosedWhenTheRemoteStageRecordFails(t *testing.T) {
 	}
 	if findExecCmd(fake, "respawn-pane") != nil {
 		t.Error("the agent was respawned into a pod that could not be marked")
-	}
-}
-
-// TestStartAcceptsTrustDialogBeforeInitialNudge: when the agent shows a
-// workspace-trust dialog at startup, Start must dismiss it before typing the
-// initial nudge, or the nudge lands in the dialog and the first turn never runs.
-func TestStartAcceptsTrustDialogBeforeInitialNudge(t *testing.T) {
-	fake := newFakeK8sOps()
-	p := newProviderWithOps(fake)
-
-	const trustDialog = "Quick safety check: Is this a project you created or one you trust?\n\n❯ Yes, I trust this folder\n  No, exit\n\nEnter to confirm · Esc to cancel"
-	dialogOpen := true
-	nudgeTypedIntoDialog := false
-	nudgeTyped := false
-	fake.execFunc = func(_ string, cmd []string) (string, error) {
-		if len(cmd) >= 2 && cmd[0] == "tmux" && cmd[1] == "capture-pane" {
-			if dialogOpen {
-				return trustDialog, nil
-			}
-			return "> ", nil
-		}
-		if len(cmd) >= 2 && cmd[0] == "tmux" && cmd[1] == "send-keys" {
-			if len(cmd) >= 6 && cmd[4] == "-l" && cmd[5] == "do the work" {
-				nudgeTyped = true
-				if dialogOpen {
-					nudgeTypedIntoDialog = true
-				}
-				return "", nil
-			}
-			if !nudgeTyped && len(cmd) >= 5 && cmd[len(cmd)-1] == "Enter" {
-				dialogOpen = false
-			}
-		}
-		return "", nil
-	}
-
-	cfg := runtime.Config{
-		Command:      "claude --settings .gc/settings.json",
-		ProcessNames: []string{"claude"},
-		Nudge:        "do the work",
-		Env:          map[string]string{"GC_CITY": "/workspace"},
-	}
-	if err := p.Start(context.Background(), "gc-test-agent", cfg); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	if !nudgeTyped {
-		t.Fatal("initial nudge was never typed")
-	}
-	if nudgeTypedIntoDialog {
-		t.Error("initial nudge was typed into the open workspace-trust dialog; Start must accept startup dialogs before nudging")
 	}
 }

@@ -299,7 +299,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// liveness probe and the initial nudge, matching the tmux adapter.
 	nudgeAllowed := true
 	if k8sAcceptsStartupDialogs(cfg) {
-		allowed, err := p.runStartupDialogPass(ctx, name)
+		allowed, err := p.runStartupDialogPass(ctx, name, cfg)
 		if err != nil {
 			cleanup("startup dialogs canceled")
 			return fmt.Errorf("accepting startup dialogs for session %q: %w", name, err)
@@ -447,7 +447,7 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 
 	nudgeAllowed := true
 	if acceptDialogs {
-		allowed, err := p.runStartupDialogPass(ctx, name)
+		allowed, err := p.runStartupDialogPass(ctx, name, cfg)
 		if err != nil {
 			return fmt.Errorf("k8s relaunch %q: accepting startup dialogs: %w", name, err)
 		}

@@ -3,9 +3,13 @@ package k8s
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"testing/synctest"
+	"time"
+
+	execerr "k8s.io/client-go/util/exec"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -21,9 +25,33 @@ const (
 	oldTurnPrompt = "> earlier turn\nworking on the earlier turn..."
 )
 
+// earlierAgentRecord is a startupDialogsUnresolvedKey record left on a warm
+// pod's session by an earlier agent.
+const earlierAgentRecord = "2026-01-01T00:00:00Z initial nudge withheld: earlier agent"
+
+var (
+	// errTmuxNoServer is how a tmux command exits in the pod once the agent
+	// has exited and taken its session, and so the tmux server, with it.
+	errTmuxNoServer = execerr.CodeExitError{Err: errors.New("no server running on /tmp/tmux-0/default"), Code: 1}
+	// errExecBlip is a pod exec that failed in the apiserver, not in the pod.
+	errExecBlip = errors.New("error dialing backend: EOF")
+)
+
+// externalImportsModal is Claude's "Allow external CLAUDE.md file imports?"
+// modal listing path. Its pre-selected option allows the imports.
+func externalImportsModal(path string) string {
+	return "Allow external CLAUDE.md file imports?\n" +
+		"This project's CLAUDE.md imports files outside the current working directory. " +
+		"Never allow this for third-party repositories.\n\n" +
+		"External imports:\n  " + path + "\n\n" +
+		"❯ 1. Yes, allow external imports\n  2. No, disable external imports\n\n" +
+		"Enter to confirm · Esc to cancel"
+}
+
 // fakePane scripts the in-pod tmux pane the k8s provider drives through its
-// carrier: a workspace-trust dialog with a selectable cursor, the pane's
-// scrollback history kept apart from its visible screen, and an ordered log
+// carrier: a workspace-trust dialog with a selectable cursor, Claude's
+// external-imports modal behind it, the pane's scrollback history kept apart
+// from its visible screen, the session's tmux environment, and an ordered log
 // of every pod interaction the startup tail makes.
 type fakePane struct {
 	// dialogOpen is whether the trust dialog is on the visible screen.
@@ -35,11 +63,40 @@ type fakePane struct {
 	// blankFrames is how many captures show an empty screen before the
 	// dialog (or the ready prompt) renders.
 	blankFrames int
+	// ready is the visible screen once no dialog is open: the agent's output
+	// above its prompt. Empty means readyPrompt alone.
+	ready string
 	// history is scrollback left in the pane by an earlier agent.
 	history string
 
+	// imports is a file the project's CLAUDE.md imports from outside the work
+	// dir. When set, accepting the trust dialog opens the external-imports
+	// modal listing it, and any Enter that reaches the modal allows it.
+	imports     string
+	importsOpen bool
+	// gitCommonDir is what `git rev-parse --git-common-dir` prints in the
+	// pod; empty means the work dir is in no repository (git exits 128).
+	gitCommonDir string
+	// gitDirs is the -C directory of every git query run in the pod.
+	gitDirs []string
+
+	// dieAfterProbe is the has-session probe after which the agent exits and
+	// takes its tmux session with it, so tmux commands exit 1 from then on.
+	// Zero keeps the session alive.
+	dieAfterProbe int
+	probes        int
+	dead          bool
+
+	// env is the session's tmux environment (SetMeta, RemoveMeta).
+	env map[string]string
+
 	// failOn makes the named tmux events fail with a transport error.
 	failOn map[string]error
+	// captureBlips fails that many captures with errExecBlip first.
+	captureBlips int
+	// screenBlips fails that many captures of the visible screen alone, the
+	// read after the pass, with errExecBlip first.
+	screenBlips int
 	// cancelOn names the event whose first occurrence calls cancel.
 	cancelOn string
 	cancel   context.CancelFunc
@@ -62,11 +119,14 @@ func (f *fakePane) exec(_ string, cmd []string) (string, error) {
 		return "", nil
 	}
 	switch {
+	case cmd[0] == "git":
+		return f.gitQuery(cmd)
 	case cmd[0] == "sh" && len(cmd) >= 3 && strings.Contains(cmd[2], "respawn-pane"):
 		f.record("respawn")
 	case cmd[0] != "tmux":
 	case cmd[1] == "has-session":
 		f.record("has-session")
+		return "", f.probe()
 	case cmd[1] == "pipe-pane":
 		f.record("setup")
 	case cmd[1] == "clear-history":
@@ -76,34 +136,104 @@ func (f *fakePane) exec(_ string, cmd []string) (string, error) {
 		}
 		f.history = ""
 	case cmd[1] == "capture-pane":
-		f.record("capture")
-		if err := f.failOn["capture"]; err != nil {
-			return "", err
-		}
-		return f.screen(), nil
+		return f.capture(cmd)
 	case cmd[1] == "send-keys":
+		if f.dead {
+			return "", errTmuxNoServer
+		}
 		f.sendKeys(cmd[2:])
+	case cmd[1] == "set-environment":
+		f.setEnvironment(cmd[2:])
 	}
 	return "", nil
 }
 
-// screen is what capture-pane returns: scrollback history, then the visible
-// screen.
-func (f *fakePane) screen() string {
-	visible := readyPrompt
+// gitQuery answers `git -C <dir> rev-parse --git-common-dir` run in the pod.
+func (f *fakePane) gitQuery(cmd []string) (string, error) {
+	if len(cmd) >= 3 && cmd[1] == "-C" {
+		f.gitDirs = append(f.gitDirs, cmd[2])
+	}
+	if f.gitCommonDir == "" {
+		return "", execerr.CodeExitError{Err: errors.New("fatal: not a git repository"), Code: 128}
+	}
+	return f.gitCommonDir + "\n", nil
+}
+
+// probe answers has-session: alive until the session dies, then tmux's
+// "no server running" exit.
+func (f *fakePane) probe() error {
+	if f.dead {
+		return errTmuxNoServer
+	}
+	f.probes++
+	if f.dieAfterProbe > 0 && f.probes >= f.dieAfterProbe {
+		f.dead = true
+	}
+	return nil
+}
+
+// capture answers capture-pane: scrollback history then the visible screen
+// when cmd names a start line (-S), the visible screen alone otherwise.
+func (f *fakePane) capture(cmd []string) (string, error) {
+	f.record("capture")
+	screenOnly := !slices.Contains(cmd, "-S")
+	switch {
+	case f.dead:
+		return "", errTmuxNoServer
+	case f.captureBlips > 0:
+		f.captureBlips--
+		return "", errExecBlip
+	case screenOnly && f.screenBlips > 0:
+		f.screenBlips--
+		return "", errExecBlip
+	}
+	if err := f.failOn["capture"]; err != nil {
+		return "", err
+	}
+	if screenOnly {
+		return f.visible(), nil
+	}
+	if f.history == "" {
+		return f.visible(), nil
+	}
+	return f.history + "\n" + f.visible(), nil
+}
+
+// visible is the pane's visible screen.
+func (f *fakePane) visible() string {
 	switch {
 	case f.blankFrames > 0:
 		f.blankFrames--
-		visible = ""
+		return ""
 	case f.dialogOpen && f.cursorOnTrust:
-		visible = trustDialogOnTrustRow
+		return trustDialogOnTrustRow
 	case f.dialogOpen:
-		visible = trustDialogOffTrustRow
+		return trustDialogOffTrustRow
+	case f.importsOpen:
+		return externalImportsModal(f.imports)
+	case f.ready != "":
+		return f.ready
 	}
-	if f.history == "" {
-		return visible
+	return readyPrompt
+}
+
+// setEnvironment applies set-environment args after "set-environment":
+// "-t main" then "KEY VALUE" or "-u KEY".
+func (f *fakePane) setEnvironment(args []string) {
+	if len(args) >= 2 && args[0] == "-t" {
+		args = args[2:]
 	}
-	return f.history + "\n" + visible
+	if len(args) != 2 {
+		return
+	}
+	if f.env == nil {
+		f.env = map[string]string{}
+	}
+	if args[0] == "-u" {
+		delete(f.env, args[1])
+		return
+	}
+	f.env[args[0]] = args[1]
 }
 
 // sendKeys models send-keys args after "send-keys": "-t main" then either
@@ -114,7 +244,7 @@ func (f *fakePane) sendKeys(args []string) {
 	}
 	if len(args) >= 1 && args[0] == "-l" {
 		f.record("nudge-text")
-		if f.dialogOpen {
+		if f.dialogOpen || f.importsOpen {
 			f.nudgeIntoDialog = true
 		}
 		return
@@ -130,10 +260,14 @@ func (f *fakePane) sendKeys(args []string) {
 			switch {
 			case f.dialogOpen && f.cursorOnTrust:
 				f.dialogOpen = false
+				f.importsOpen = f.imports != ""
 				f.record("accept")
 			case f.dialogOpen:
 				f.dialogOpen = false
 				f.record("enter-wrong-row")
+			case f.importsOpen:
+				f.importsOpen = false
+				f.record("imports-allowed")
 			default:
 				f.record("submit")
 			}
@@ -514,17 +648,22 @@ func TestStartupDialogsCancellation(t *testing.T) {
 
 // TestStartupDialogsTransportFailuresAreBestEffort: with a live ctx, a pane
 // capture or history-clear failure is reported on stderr, naming the session,
-// and the operation still probes liveness and nudges.
+// and the operation still succeeds and probes liveness. A failed history
+// clear leaves the pane readable, so the initial nudge goes. A pane that
+// cannot be read at all cannot show that the pass left no dialog on it, so
+// the nudge is withheld, and the failed pass and the withheld nudge are
+// recorded on the session.
 func TestStartupDialogsTransportFailuresAreBestEffort(t *testing.T) {
 	transportErr := errors.New("error dialing backend: connection refused")
 	cases := []struct {
-		name     string
-		relaunch bool
-		failOn   string
+		name      string
+		relaunch  bool
+		failOn    string
+		wantNudge bool
 	}{
 		{name: "start capture fails", failOn: "capture"},
 		{name: "relaunch capture fails", relaunch: true, failOn: "capture"},
-		{name: "relaunch history clear fails", relaunch: true, failOn: "clear-history"},
+		{name: "relaunch history clear fails", relaunch: true, failOn: "clear-history", wantNudge: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -547,8 +686,22 @@ func TestStartupDialogsTransportFailuresAreBestEffort(t *testing.T) {
 				if got := stderr.String(); !strings.Contains(got, `"gc-test-agent"`) || !strings.Contains(got, transportErr.Error()) {
 					t.Fatalf("stderr = %q, want a warning naming the session and the failure", got)
 				}
+				probe := pane.lastIndex("has-session")
+				if probe < pane.index(tc.failOn) {
+					t.Fatalf("liveness not probed after the failed %s; log = %v", tc.failOn, pane.log)
+				}
 				nudge := pane.index("nudge-text")
-				if nudge < 0 || pane.lastIndex("has-session") > nudge || pane.lastIndex("has-session") < pane.index(tc.failOn) {
+				if !tc.wantNudge {
+					if nudge >= 0 {
+						t.Fatalf("nudge typed into a screen that could not be read; log = %v", pane.log)
+					}
+					record := pane.env[startupDialogsUnresolvedKey]
+					if !strings.Contains(record, "withheld") || !strings.Contains(record, "unreadable") || !strings.Contains(record, transportErr.Error()) {
+						t.Fatalf("session record %s = %q, want the failed pass and the withheld nudge recorded", startupDialogsUnresolvedKey, record)
+					}
+					return
+				}
+				if nudge < 0 || probe > nudge {
 					t.Fatalf("liveness then nudge did not follow the failed %s; log = %v", tc.failOn, pane.log)
 				}
 			})
@@ -611,7 +764,318 @@ func TestStartupDialogsTrustSelection(t *testing.T) {
 				if !strings.Contains(got, `"gc-test-agent"`) || !strings.Contains(got, "withheld") {
 					t.Fatalf("stderr = %q, want a warning naming the session and the withheld nudge", got)
 				}
+				if record := pane.env[startupDialogsUnresolvedKey]; !strings.Contains(record, "withheld") {
+					t.Fatalf("session record %s = %q, want the withheld nudge recorded", startupDialogsUnresolvedKey, record)
+				}
 			})
 		})
+	}
+}
+
+// dialogOps runs Start, or Relaunch into a warm pod, for gc-test-agent.
+var dialogOps = map[string]func(context.Context, *Provider, runtime.Config) error{
+	"start": func(ctx context.Context, p *Provider, cfg runtime.Config) error {
+		return p.Start(ctx, "gc-test-agent", cfg)
+	},
+	"relaunch": func(ctx context.Context, p *Provider, cfg runtime.Config) error {
+		addRunningPod(p.ops.(*fakeK8sOps), "gc-test-agent", "gc-test-agent")
+		return p.Relaunch(ctx, "gc-test-agent", cfg)
+	},
+}
+
+// worktreeDialogConfig runs the agent in a linked worktree of the rig's
+// repository, which the pod names /workspace/rig/ga-1-fix.
+func worktreeDialogConfig() runtime.Config {
+	cfg := dialogStartConfig()
+	cfg.WorkDir = "/workspace/rig/ga-1-fix"
+	return cfg
+}
+
+// TestStartupDialogsExternalImportsInPodRepositoryAccepted: after the trust
+// dialog, Claude asks to allow the CLAUDE.md imports from outside the work
+// dir. Imports inside the repository the work dir is in are first-party, and
+// that repository is resolved in the pod, where the import paths the modal
+// lists live; the pass allows them before the initial nudge.
+func TestStartupDialogsExternalImportsInPodRepositoryAccepted(t *testing.T) {
+	for opName, op := range dialogOps {
+		t.Run(opName, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				pane := &fakePane{
+					dialogOpen: true, cursorOnTrust: true,
+					imports: "/workspace/rig/AGENTS.md", gitCommonDir: "/workspace/rig/.git",
+				}
+				p := newDialogProvider(pane)
+				p.prebaked = true // no host files to stage for the rig work dir
+
+				if err := op(context.Background(), p, worktreeDialogConfig()); err != nil {
+					t.Fatalf("%s: %v", opName, err)
+				}
+				if want := []string{"/workspace/rig/ga-1-fix"}; !slices.Equal(pane.gitDirs, want) {
+					t.Fatalf("trust root resolved in %q, want the pod work dir %q", pane.gitDirs, want)
+				}
+				assertAcceptedBeforeNudge(t, pane)
+				if allowed, nudge := pane.index("imports-allowed"), pane.index("nudge-text"); allowed < 0 || allowed > nudge {
+					t.Fatalf("first-party imports not allowed before the nudge; log = %v", pane.log)
+				}
+				if record, ok := pane.env[startupDialogsUnresolvedKey]; ok {
+					t.Fatalf("clean pass left session record %s = %q", startupDialogsUnresolvedKey, record)
+				}
+			})
+		})
+	}
+}
+
+// TestStartupDialogsExternalImportsLeftForHumanWithholdNudge: imports that
+// are not inside the work dir's repository in the pod, or a work dir in no
+// repository there, are left for a human. The modal's pre-selected option
+// allows the imports, so the initial nudge is withheld: its text would land
+// in the modal and its Enter would allow them. The session stays up, and the
+// withheld nudge is reported on stderr and recorded on the session.
+func TestStartupDialogsExternalImportsLeftForHumanWithholdNudge(t *testing.T) {
+	cases := map[string]string{
+		"import outside the repository":        "/workspace/rig/.git",
+		"work dir in no repository in the pod": "",
+	}
+	for opName, op := range dialogOps {
+		for caseName, gitCommonDir := range cases {
+			t.Run(opName+"/"+caseName, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					pane := &fakePane{
+						dialogOpen: true, cursorOnTrust: true,
+						imports: "/workspace/AGENTS.md", gitCommonDir: gitCommonDir,
+					}
+					p := newDialogProvider(pane)
+					p.prebaked = true
+					var stderr strings.Builder
+					p.stderr = &stderr
+
+					if err := op(context.Background(), p, worktreeDialogConfig()); err != nil {
+						t.Fatalf("%s failed a live session left on the imports modal: %v", opName, err)
+					}
+					if pane.index("accept") < 0 {
+						t.Fatalf("trust dialog never accepted; log = %v", pane.log)
+					}
+					for _, event := range []string{"imports-allowed", "nudge-text", "submit"} {
+						if n := pane.count(event); n != 0 {
+							t.Fatalf("%d %s events with the imports modal left for a human; log = %v", n, event, pane.log)
+						}
+					}
+					if !pane.importsOpen {
+						t.Fatal("the imports modal was answered; it must stay for a human")
+					}
+					if _, alive := p.ops.(*fakeK8sOps).pods["gc-test-agent"]; !alive {
+						t.Fatal("the pod was removed; the live session must stay running")
+					}
+					if got := stderr.String(); !strings.Contains(got, `"gc-test-agent"`) || !strings.Contains(got, "withheld") {
+						t.Fatalf("stderr = %q, want a warning naming the session and the withheld nudge", got)
+					}
+					if record := pane.env[startupDialogsUnresolvedKey]; !strings.Contains(record, "withheld") {
+						t.Fatalf("session record %s = %q, want the withheld nudge recorded", startupDialogsUnresolvedKey, record)
+					}
+				})
+			})
+		}
+	}
+}
+
+// TestStartupDialogsDeadSessionReportedWithinSettle: an agent that exits at
+// once (a stale resume key) takes its tmux session with it, so reading the
+// pane exits 1 in the pod. The pass stops at that first read instead of
+// polling an empty pane for its whole budget, so the post-start liveness
+// probe reports the death within the settle, also when the deadline is
+// shorter than the settle plus that budget, and the session layer can still
+// retry without the stale key.
+func TestStartupDialogsDeadSessionReportedWithinSettle(t *testing.T) {
+	const settle = 3 * time.Second // the production settle
+	for opName, op := range dialogOps {
+		for _, deadline := range []bool{false, true} {
+			name := opName + "/no deadline"
+			if deadline {
+				name = opName + "/deadline under settle plus the dialog budget"
+			}
+			t.Run(name, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					// The first probe (Start's wait for tmux, Relaunch's warm
+					// check) finds the session; the agent then exits.
+					pane := &fakePane{dieAfterProbe: 1}
+					p := newDialogProvider(pane)
+					p.postStartSettle = settle
+					ctx := context.Background()
+					if deadline {
+						var cancel context.CancelFunc
+						ctx, cancel = context.WithTimeout(ctx, settle+runtime.StartupDialogTimeout()/2)
+						defer cancel()
+					}
+
+					began := time.Now()
+					err := op(ctx, p, dialogStartConfig())
+					if !errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
+						t.Fatalf("error = %v, want ErrSessionDiedDuringStartup", err)
+					}
+					if took := time.Since(began); took > settle {
+						t.Fatalf("death reported after %v, want within the %v settle", took, settle)
+					}
+					if n := pane.count("capture"); n != 1 {
+						t.Fatalf("pass read the dead pane %d times, want 1; log = %v", n, pane.log)
+					}
+					if n := pane.count("nudge-text"); n != 0 {
+						t.Fatalf("nudge typed into a dead session; log = %v", pane.log)
+					}
+				})
+			})
+		}
+	}
+}
+
+// TestStartupDialogsTransportBlipRetried: one failed pane read, which the
+// apiserver exec path produces independently of the pod, does not end the
+// pass on its first frame: the pass runs once more and still answers the
+// trust dialog before the initial nudge.
+func TestStartupDialogsTransportBlipRetried(t *testing.T) {
+	for opName, op := range dialogOps {
+		t.Run(opName, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				pane := &fakePane{dialogOpen: true, cursorOnTrust: true, captureBlips: 1}
+				p := newDialogProvider(pane)
+
+				if err := op(context.Background(), p, dialogStartConfig()); err != nil {
+					t.Fatalf("%s: %v", opName, err)
+				}
+				assertAcceptedBeforeNudge(t, pane)
+				if record, ok := pane.env[startupDialogsUnresolvedKey]; ok {
+					t.Fatalf("recovered pass left session record %s = %q", startupDialogsUnresolvedKey, record)
+				}
+			})
+		})
+	}
+}
+
+// TestStartupDialogsCleanPassClearsRecord: a warm pod keeps its tmux
+// environment across a relaunch, so a clean pass removes the record an
+// earlier agent left, and the record always describes the current agent.
+func TestStartupDialogsCleanPassClearsRecord(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		pane := &fakePane{
+			dialogOpen: true, cursorOnTrust: true,
+			env: map[string]string{startupDialogsUnresolvedKey: earlierAgentRecord},
+		}
+		p := newDialogProvider(pane)
+
+		if err := dialogOps["relaunch"](context.Background(), p, dialogStartConfig()); err != nil {
+			t.Fatalf("Relaunch: %v", err)
+		}
+		assertAcceptedBeforeNudge(t, pane)
+		if record, ok := pane.env[startupDialogsUnresolvedKey]; ok {
+			t.Fatalf("earlier agent's record %q survived a clean pass", record)
+		}
+	})
+}
+
+// TestStartupDialogsReadyScreenQuotingDialogWordingGetsNudge: once the trust
+// dialog is answered, an agent whose screen shows dialog wording above its
+// prompt (a resumed transcript with a rate-limit error, a usage-limit notice,
+// trust wording, or the imports modal itself) is waiting for input, not on a
+// dialog. It gets its initial nudge, exactly once, and the clean pass clears
+// the record.
+func TestStartupDialogsReadyScreenQuotingDialogWordingGetsNudge(t *testing.T) {
+	screens := map[string]string{
+		"rate-limit error":   "⏺ Bash(gh pr view 9140)\n  ⎿  gh: API rate limit exceeded for installation ID 1\n\n" + readyPrompt,
+		"usage-limit notice": "⏺ Resuming.\n  ⎿  You've hit your limit · resets 3pm (UTC)\n\n" + readyPrompt,
+		"trust wording":      "⏺ The setup guide says to trust this folder before the first run.\n\n" + readyPrompt,
+		"imports modal":      externalImportsModal("/workspace/AGENTS.md") + "\n\n" + readyPrompt,
+	}
+	for opName, op := range dialogOps {
+		for screenName, screen := range screens {
+			t.Run(opName+"/"+screenName, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					pane := &fakePane{
+						dialogOpen: true, cursorOnTrust: true, ready: screen,
+						env: map[string]string{startupDialogsUnresolvedKey: earlierAgentRecord},
+					}
+					p := newDialogProvider(pane)
+
+					if err := op(context.Background(), p, dialogStartConfig()); err != nil {
+						t.Fatalf("%s: %v", opName, err)
+					}
+					accept, nudge := pane.index("accept"), pane.index("nudge-text")
+					if accept < 0 || nudge < accept {
+						t.Fatalf("initial nudge (%d) not typed after the trust dialog was accepted (%d); log = %v", nudge, accept, pane.log)
+					}
+					if n := pane.count("nudge-text"); n != 1 {
+						t.Fatalf("initial nudge typed %d times, want once; log = %v", n, pane.log)
+					}
+					if pane.lastIndex("submit") < nudge {
+						t.Fatalf("nudge never submitted after its text; log = %v", pane.log)
+					}
+					if record, ok := pane.env[startupDialogsUnresolvedKey]; ok {
+						t.Fatalf("clean pass left session record %s = %q", startupDialogsUnresolvedKey, record)
+					}
+				})
+			})
+		}
+	}
+}
+
+// TestStartupDialogsScreenReadAfterPass: the read of the visible screen after
+// the pass decides the nudge, over the same apiserver exec path as the pass's
+// own reads. One failed read is read again. A screen still unreadable cannot
+// show that the pass left no dialog on it, so the nudge is withheld rather
+// than typed blind, where its Enter would allow the imports of a modal left
+// for a human, and the record says why rather than being cleared as after a
+// clean pass.
+func TestStartupDialogsScreenReadAfterPass(t *testing.T) {
+	cases := []struct {
+		name string
+		// imports outside the repository leave the imports modal for a human.
+		imports     string
+		screenBlips int
+		wantNudge   bool
+		wantRecord  string
+	}{
+		{name: "imports modal, one failed read", imports: "/workspace/AGENTS.md", screenBlips: 1, wantRecord: "still on screen"},
+		{name: "imports modal, screen unreadable", imports: "/workspace/AGENTS.md", screenBlips: 2, wantRecord: "unreadable"},
+		{name: "ready, one failed read", screenBlips: 1, wantNudge: true},
+		{name: "ready, screen unreadable", screenBlips: 2, wantRecord: "unreadable"},
+	}
+	for opName, op := range dialogOps {
+		for _, tc := range cases {
+			t.Run(opName+"/"+tc.name, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					pane := &fakePane{
+						dialogOpen: true, cursorOnTrust: true,
+						imports: tc.imports, gitCommonDir: "/workspace/rig/.git",
+						screenBlips: tc.screenBlips,
+						env:         map[string]string{startupDialogsUnresolvedKey: earlierAgentRecord},
+					}
+					p := newDialogProvider(pane)
+					p.prebaked = true
+
+					if err := op(context.Background(), p, worktreeDialogConfig()); err != nil {
+						t.Fatalf("%s: %v", opName, err)
+					}
+					if pane.index("accept") < 0 {
+						t.Fatalf("trust dialog never accepted; log = %v", pane.log)
+					}
+					if n := pane.count("imports-allowed"); n != 0 {
+						t.Fatalf("imports allowed %d times with the modal left for a human; log = %v", n, pane.log)
+					}
+					record, recorded := pane.env[startupDialogsUnresolvedKey]
+					nudges := pane.count("nudge-text")
+					if tc.wantNudge {
+						if nudges != 1 || recorded {
+							t.Fatalf("nudges = %d, record %q (present %v); want one nudge and the record cleared after the read was retried; log = %v",
+								nudges, record, recorded, pane.log)
+						}
+						return
+					}
+					if nudges != 0 {
+						t.Fatalf("initial nudge typed %d times; want it withheld; log = %v", nudges, pane.log)
+					}
+					if !strings.Contains(record, "withheld") || !strings.Contains(record, tc.wantRecord) {
+						t.Fatalf("session record %s = %q, want the withheld nudge recorded with %q", startupDialogsUnresolvedKey, record, tc.wantRecord)
+					}
+				})
+			})
+		}
 	}
 }
