@@ -560,7 +560,7 @@ func TestDoSlingChecksRoutedBeadAgainstCustomWorkQuery(t *testing.T) {
 			cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
 			a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1), WorkQuery: tc.workQuery}
 			deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
-			deps.Store = seededStore("BL-42")
+			deps.Store = beads.WorkStore{Store: seededStore("BL-42")}
 
 			code := doSling(testOpts(a, "BL-42"), deps, nil, stdout, stderr)
 
@@ -617,7 +617,7 @@ func TestDoSlingChecksEveryFederatedLegOfACityScopedTarget(t *testing.T) {
 			workQuery := `if [ "$GC_RIG" = riga ]; then ` + tc.rigLeg + `; else printf '[]'; fi`
 			a := config.Agent{Name: "worker", Scope: "city", MaxActiveSessions: intPtr(1), WorkQuery: workQuery}
 			deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
-			deps.Store = seededStore("BL-42")
+			deps.Store = beads.WorkStore{Store: seededStore("BL-42")}
 
 			code := doSling(testOpts(a, "BL-42"), deps, nil, stdout, stderr)
 
@@ -656,7 +656,7 @@ func TestDoSlingProbeSkipsSuspendedRigLeg(t *testing.T) {
 	a := config.Agent{Name: "worker", Scope: "city", MaxActiveSessions: intPtr(1), WorkQuery: workQuery}
 	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	deps.CityPath = cityPath
-	deps.Store = seededStore("BL-42")
+	deps.Store = beads.WorkStore{Store: seededStore("BL-42")}
 
 	code := doSling(testOpts(a, "BL-42"), deps, nil, stdout, stderr)
 
