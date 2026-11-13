@@ -194,22 +194,22 @@ var routedToAllowlist = []routedToSite{
 	// WithRouteChangeClearing wrapped in during the GREEN phase. ---
 	{
 		path:   "cmd/gc/build_desired_state.go",
-		line:   6579,
+		line:   6576,
 		reason: "write to a pre-existing bead (canonicalize routed_to spelling on assignee-change repair pass); Root #5 (build_desired_state.go reconciliation loop) -- wrap that root's store construction in GREEN phase",
 	},
 	{
 		path:   "cmd/gc/build_desired_state.go",
-		line:   6639,
+		line:   6636,
 		reason: "write to a pre-existing bead (canonicalizeLegacyBoundUnassignedRoutedWork); Root #5 (build_desired_state.go reconciliation loop) -- wrap that root's store construction in GREEN phase",
 	},
 	{
 		path:   "cmd/gc/build_desired_state.go",
-		line:   7457,
+		line:   7454,
 		reason: "write to a pre-existing bead (controlDispatcherRouteRepair.persist, repairControlDispatcherRoutesForStoreScope); Root #5 (build_desired_state.go reconciliation loop) -- wrap that root's store construction in GREEN phase",
 	},
 	{
 		path:   "cmd/gc/build_desired_state.go",
-		line:   7484,
+		line:   7481,
 		reason: "in-memory mirror of the line-6210 persisted write (applyRouteRepairInMemory), applied only after the durable write at line 6210 already succeeded; same Root #5 -- wrap that root's store construction in GREEN phase",
 	},
 	{
@@ -224,7 +224,7 @@ var routedToAllowlist = []routedToSite{
 	},
 	{
 		path:   "cmd/gc/cmd_sling.go",
-		line:   853,
+		line:   925,
 		reason: "write to a pre-existing bead; Root #3 (cmd_sling.go slingDeps.Store) -- wrap that root's store construction in GREEN phase",
 	},
 	{
@@ -244,12 +244,12 @@ var routedToAllowlist = []routedToSite{
 	},
 	{
 		path:   "internal/api/handler_sling.go",
-		line:   658,
+		line:   686,
 		reason: "write to a pre-existing bead; Root #4 (internal/api/handler_sling.go:534, API sling composition root per design sec 15) -- wrap that root's store construction in GREEN phase",
 	},
 	{
 		path:   "internal/sling/sling_core.go",
-		line:   1120,
+		line:   1128,
 		reason: "write to a pre-existing bead (restampWorkBeadRouting restamps gc.execution_routed_to and clears gc.routed_to/gc.run_target through deps.Store.SetMetadataBatch); deps.Store is wrapped at both sling roots: Root #3 (cmd_sling.go slingDeps.Store, opened by openAuthoritativeStoreAtForCity, whose wrap is main.go WithRouteChangeClearing; gc sling is not an invocationStoreMemoCommands verb, so it is never handed the undecorated memo store) and Root #4 (handler_sling.go findSlingStore, whose CityBeadStore/BeadStore are policy-wrapped controller stores that wrapWithCachingStoreFeed re-decorates)",
 	},
 
@@ -314,7 +314,7 @@ var routedToAllowlist = []routedToSite{
 	},
 	{
 		path:   "cmd/gc/order_dispatch.go",
-		line:   2888,
+		line:   2885,
 		reason: "creation-time-only: identical fresh-creation labeling pattern to cmd_order.go:903 -- no prior stamps possible",
 	},
 	{
@@ -379,7 +379,7 @@ var routedToAllowlist = []routedToSite{
 	},
 	{
 		path:   "cmd/gc/wisp_step_inject.go",
-		line:   485,
+		line:   500,
 		reason: "not a write: stepResolution.rootViaRoutedBridgeIn calls r.work.List(beads.ListQuery{Metadata: ...}) per assignee to find an already-routed bridge bead -- a pure lookup, no write anywhere in this function",
 	},
 }

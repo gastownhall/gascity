@@ -349,6 +349,28 @@ func (w *routeChangeClearingStore) GetExactBatch(ids []string) (map[string]Bead,
 	return getter.GetExactBatch(ids)
 }
 
+// CreatedForm forwards the backing store's created form (CreatedFormer), which
+// the reverse migration's copy proves itself against. A backing without one
+// round-trips every field a bead carries, so b comes back as it is: the answer
+// its absence gives, and the one the emitter returns for the same absence
+// (cmd/gc/class_store_emit.go).
+func (w *routeChangeClearingStore) CreatedForm(b Bead) (Bead, error) {
+	if former, ok := As[CreatedFormer](w.Store); ok {
+		return former.CreatedForm(b)
+	}
+	return b, nil
+}
+
+// AcceptsDanglingDep forwards the backing store's dangling-edge rule
+// (DanglingDepJudge). A backing without one keeps every edge, which is the
+// answer its absence gives.
+func (w *routeChangeClearingStore) AcceptsDanglingDep(issueID, dependsOnID string) bool {
+	if judge, ok := As[DanglingDepJudge](w.Store); ok {
+		return judge.AcceptsDanglingDep(issueID, dependsOnID)
+	}
+	return true
+}
+
 // ProxiedStore forwards the split store underneath this decorator
 // (ProxiedStoreCarrier). Forwarded for the same reason as DepMetadata and the
 // rest above: the embedded Store field does not promote an optional capability.

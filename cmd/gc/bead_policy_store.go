@@ -119,8 +119,9 @@ func (s *beadPolicyStore) ProxiedStore() (beads.ProxiedStoreView, bool) {
 // so the policy layer can still be found -- and correctly reinstated by
 // wrapWithCachingStore -- even when it isn't the outermost wrapper. The
 // bounded walk mirrors beads.followConditionalWritesResolveTarget: a
-// cycle or an unrecognized chain degrades to "not found" (returning the
-// original, untouched store) rather than looping.
+// cycle, a typed class handle (never peeled) or an unrecognized chain degrades
+// to "not found" (returning the original, untouched store) rather than
+// looping.
 func unwrapBeadPolicyStore(store beads.Store) (beads.Store, *beadPolicyStore, bool) {
 	original := store
 	for range 8 {
@@ -135,7 +136,11 @@ func unwrapBeadPolicyStore(store beads.Store) (beads.Store, *beadPolicyStore, bo
 		default:
 			return original, nil, false
 		}
-		if target == nil || target == store {
+		// SameStore is true for a cycle and for a typed class handle over its
+		// target, and false for a decorator over its target: the walk peels
+		// decorators and stops at a class handle, which hides its engine from the
+		// one-shot emitter on purpose (withMainStoreEmission).
+		if target == nil || beads.SameStore(target, store) {
 			return original, nil, false
 		}
 		store = target
