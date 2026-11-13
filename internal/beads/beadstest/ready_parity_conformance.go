@@ -155,6 +155,25 @@ func seedReadyParityCorpus(t *testing.T, s beads.Store) {
 	}); err != nil {
 		t.Fatalf("CloseAll(%s): %v", failedStep.ID, err)
 	}
+	verdictlessStep := mk(beads.Bead{Title: "closed verdictless-step blocker"})
+	dep(mk(beads.Bead{Title: "blocked by verdictless step"}), verdictlessStep.ID, "blocks")
+	if _, err := s.CloseAll([]string{verdictlessStep.ID}, map[string]string{
+		beadmeta.StepRefMetadataKey:     "review",
+		beadmeta.OutcomeMetadataKey:     "unknown",
+		beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked,
+	}); err != nil {
+		t.Fatalf("CloseAll(%s): %v", verdictlessStep.ID, err)
+	}
+	// A formula step with no gc.outcome at all keeps its blocked work
+	// outcome's veto: cache and store must agree it is withheld.
+	outcomelessStep := mk(beads.Bead{Title: "closed outcomeless-step blocker"})
+	dep(mk(beads.Bead{Title: "blocked by outcomeless step"}), outcomelessStep.ID, "blocks")
+	if _, err := s.CloseAll([]string{outcomelessStep.ID}, map[string]string{
+		beadmeta.StepRefMetadataKey:     "review",
+		beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked,
+	}); err != nil {
+		t.Fatalf("CloseAll(%s): %v", outcomelessStep.ID, err)
+	}
 
 	future := readyParityFarFuture
 	mk(beads.Bead{Title: "deferred", DeferUntil: &future})
