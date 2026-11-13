@@ -62,6 +62,16 @@
 #                        twice, nor the same method (receiver type plus name)
 #                        twice. `init` and `_` are exempt, and lines inside a
 #                        backtick raw string are ignored.
+#                     d. a keep-both hunk whose two sides share a leading or
+#                        trailing line (the diff3 hunk keeps lines both sides
+#                        added) is a REAL conflict when that shared line is
+#                        more than blank or brace-only punctuation, since the
+#                        union would repeat it: a duplicate `"os"` import, a
+#                        second `got := compute()`, a second `## Unreleased`
+#                        heading (ga-99czjsz4). This applies to every
+#                        keep-both path, docs included, not only *.go. Lines
+#                        shared mid-hunk (`t.Parallel()` in two new tests)
+#                        are not caught and do not refuse.
 #                   This is a SYNTACTIC check, not a type-check. Not covered:
 #                   two pure insertions at the same point inside one block
 #                   that redeclare a local with `:=`, and members of grouped
@@ -249,10 +259,12 @@ resolve_conflict_markers_in_file() {
     #   both empty                        -> emit nothing (degenerate; trivial)
     #   both non-empty & differ:
     #       *.go with a non-empty base    -> REAL CONFLICT (exit 1)
+    #       allow_keepboth==1, a shared non-trivial leading/trailing line
+    #                                     -> REAL CONFLICT (exit 1)
     #       allow_keepboth==1             -> emit ours then theirs (union)
     #       else                          -> REAL CONFLICT (exit 1)
     if awk -v allow_keepboth="$allow_keepboth" -v is_go="$is_go" '
-        function flush_hunk(   i, ours_n, theirs_n, identical) {
+        function flush_hunk(   i, n, ours_n, theirs_n, identical) {
             ours_n = o_count
             theirs_n = t_count
             identical = 0
@@ -276,6 +288,19 @@ resolve_conflict_markers_in_file() {
                     real_conflict = 1
                     exit 1
                 } else if (allow_keepboth == 1) {
+                    # diff3 keeps a line both sides added INSIDE the hunk, so
+                    # the union would write it twice. A shared leading or
+                    # trailing line that is more than blank or brace-only
+                    # punctuation is therefore refused, never unioned.
+                    n = (ours_n < theirs_n) ? ours_n : theirs_n
+                    for (i = 1; i <= n; i++) {
+                        if (ours[i] != theirs[i]) break
+                        if (ours[i] !~ /^[ \t{}()\[\],;]*$/) { real_conflict = 1; exit 1 }
+                    }
+                    for (i = 0; i < n; i++) {
+                        if (ours[ours_n - i] != theirs[theirs_n - i]) break
+                        if (ours[ours_n - i] !~ /^[ \t{}()\[\],;]*$/) { real_conflict = 1; exit 1 }
+                    }
                     for (i = 1; i <= ours_n; i++) print ours[i]
                     for (i = 1; i <= theirs_n; i++) print theirs[i]
                 } else {
@@ -339,7 +364,10 @@ resolve_conflict_markers_in_file() {
             fi
             local gofmt_err dup
             if ! gofmt_err="$(gofmt -e "$tmp" 2>&1 >/dev/null)"; then
-                echo "resolve_conflict_markers_in_file: $path: resolved union is not valid Go: ${gofmt_err%%$'\n'*}" >&2
+                # The diagnostic quotes file content (untrusted): one line, no
+                # control bytes, at most 300 characters.
+                gofmt_err="$(printf '%s\n' "${gofmt_err%%$'\n'*}" | tr -d '\000-\010\013-\037\177' | cut -c1-300)"
+                echo "resolve_conflict_markers_in_file: $path: resolved union is not valid Go: $gofmt_err" >&2
                 rm -f "$tmp"
                 return 1
             fi

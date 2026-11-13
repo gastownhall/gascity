@@ -95,6 +95,21 @@ has_markers() {
     [[ -n "$(git -C "$1" -c core.pager=cat grep -lE '^(<<<<<<< |=======$|>>>>>>> )' -- . 2>/dev/null)" ]]
 }
 
+# materialize_markers <file>: turn the placeholder lines a fixture heredoc
+# holds (`@OURS <label>`, `@BASE <label>`, `@SEP`, `@THEIRS <label>`) into real
+# conflict markers. Tracked text must never hold a column-1 marker: the lib's
+# repo-wide `git grep` marker nets would match this script and answer rc=12 to
+# every bounded self-rebase (ga-99czjsz4; TestRebaseResolveLibHolds...).
+materialize_markers() {
+    local f="$1" lt eq gt pipe
+    lt="$(printf '<%.0s' 1 2 3 4 5 6 7)"
+    eq="$(printf '=%.0s' 1 2 3 4 5 6 7)"
+    gt="$(printf '>%.0s' 1 2 3 4 5 6 7)"
+    pipe="$(printf '|%.0s' 1 2 3 4 5 6 7)"
+    sed -e "s/^@OURS /$lt /" -e "s/^@BASE /$pipe /" -e "s/^@SEP\$/$eq/" \
+        -e "s/^@THEIRS /$gt /" "$f" > "$f.mk" && mv -f "$f.mk" "$f"
+}
+
 # write_conflict_file <path> <ours_block> <theirs_block>
 write_conflict_file() {
     local path="$1" ours="$2" theirs="$3"
@@ -1144,16 +1159,17 @@ test_resolve_go_duplicate_top_level_declaration() {
     cat > "$d/raw.go" <<'GOEOF'
 package widget
 
-<<<<<<< HEAD
+@OURS HEAD
 const doc = `
 func TestNew() {}
-`
-=======
+` // doc
+@SEP
 const other = `
 func TestNew() {}
-`
->>>>>>> branch
+` // other
+@THEIRS branch
 GOEOF
+    materialize_markers "$d/raw.go"
     resolve_conflict_markers_in_file "$d/raw.go" 1 >/dev/null 2>&1; rc=$?
     if [[ $rc -eq 0 ]]; then
         record_pass "resolve/go-duplicate-top-level/raw-string-not-a-declaration (rc=0)"
@@ -1174,15 +1190,16 @@ test_resolve_go_diff3_nonempty_base_is_real_conflict() {
 package widget
 
 func f() {
-<<<<<<< HEAD
+@OURS HEAD
 	want := 2
-||||||| base
+@BASE base
 	want := 1
-=======
+@SEP
 	want := 3
->>>>>>> branch
+@THEIRS branch
 }
 GOEOF
+    materialize_markers "$d/f.go"
     local before rc
     before="$(cat "$d/f.go")"
     resolve_conflict_markers_in_file "$d/f.go" 1 >/dev/null 2>&1; rc=$?
@@ -1197,13 +1214,14 @@ GOEOF
     cat > "$d/g.go" <<'GOEOF'
 package widget
 
-<<<<<<< HEAD
+@OURS HEAD
 func TestA() {}
-||||||| base
-=======
+@BASE base
+@SEP
 func TestB() {}
->>>>>>> branch
+@THEIRS branch
 GOEOF
+    materialize_markers "$d/g.go"
     resolve_conflict_markers_in_file "$d/g.go" 1 >/dev/null 2>&1; rc=$?
     if [[ $rc -eq 0 ]] && grep -q TestA "$d/g.go" && grep -q TestB "$d/g.go"; then
         record_pass "resolve/go-diff3-empty-base-still-unions (rc=0)"
