@@ -106,6 +106,7 @@ start_command = "echo hello"
 
 [[agent]]
 name = "dog"
+work_dir = ".gc/worktrees/{{.AgentBase}}"
 start_command = "echo hello"
 min_active_sessions = 0
 max_active_sessions = 3
@@ -125,6 +126,7 @@ start_command = "echo hello"
 
 [[agent]]
 name = "dog"
+work_dir = ".gc/worktrees/{{.AgentBase}}"
 start_command = "echo hello"
 min_active_sessions = 0
 max_active_sessions = 3
@@ -144,6 +146,7 @@ start_command = "echo hello"
 
 [[agent]]
 name = "dog"
+work_dir = ".gc/worktrees/{{.AgentBase}}"
 start_command = "echo hello"
 min_active_sessions = 0
 max_active_sessions = 3

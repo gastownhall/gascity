@@ -77,6 +77,7 @@ schema = 1
 
 [[agent]]
 name = "dog"
+work_dir = ".gc/worktrees/{{.AgentBase}}"
 scope = "city"
 start_command = "echo hello"
 min_active_sessions = 0

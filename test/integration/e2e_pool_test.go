@@ -4,6 +4,7 @@ package integration
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -86,18 +87,19 @@ func TestE2E_Pool_WithDir(t *testing.T) {
 	reports := waitForPoolMemberReports(t, cityDir, "workdir/dirpool",
 		[]string{"workdir/dirpool-1", "workdir/dirpool-2"}, e2eDefaultTimeout())
 
-	wantDir := filepath.Join(cityDir, "workdir")
-
-	// Both instances share the same workdir (no template expansion).
-	for _, slot := range []string{"workdir/dirpool-1", "workdir/dirpool-2"} {
-		if cwd := reports[slot].get("CWD"); !sameE2EPath(t, cwd, wantDir) {
-			t.Errorf("%s CWD = %q, want %q", slot, cwd, wantDir)
-		}
-	}
+	// The e2e helper gives every pooled agent a per-instance work_dir, so each
+	// instance runs in its own directory under the city's worktrees root
+	// rather than sharing the configured dir.
+	assertPerInstancePoolCWDs(t, cityDir, reports,
+		map[string]string{"workdir/dirpool-1": "dirpool-1", "workdir/dirpool-2": "dirpool-2"})
 }
 
-// TestE2E_Pool_SharedDir verifies that without a template dir, all pool
-// instances share the same working directory.
+// TestE2E_Pool_SharedDir verifies the pool work_dir isolation contract: a
+// pooled agent that can run several sessions at once never shares one working
+// directory. The e2e helper writes a per-instance work_dir for every pooled
+// agent (a pool whose work_dir does not vary per instance is rejected at
+// start, see workdir.ValidatePoolWorkDirIsolation), so the instances report
+// different CWDs.
 func TestE2E_Pool_SharedDir(t *testing.T) {
 	city := e2eCity{
 		Agents: []e2eAgent{
@@ -112,11 +114,34 @@ func TestE2E_Pool_SharedDir(t *testing.T) {
 
 	reports := waitForPoolMemberReports(t, cityDir, "shared", []string{"shared-1", "shared-2"}, e2eDefaultTimeout())
 
-	cwd1 := reports["shared-1"].get("CWD")
-	cwd2 := reports["shared-2"].get("CWD")
+	assertPerInstancePoolCWDs(t, cityDir, reports,
+		map[string]string{"shared-1": "shared-1", "shared-2": "shared-2"})
+}
 
-	if cwd1 != cwd2 {
-		t.Errorf("shared pool instances have different CWDs: %q vs %q", cwd1, cwd2)
+// assertPerInstancePoolCWDs checks that each pool member (keyed by slot name,
+// valued by its expected instance directory name) reports a CWD under the
+// city's .gc/worktrees root whose last element is its own instance name, and
+// that no two members share a CWD.
+func assertPerInstancePoolCWDs(t *testing.T, cityDir string, reports map[string]*e2eReport, wantBase map[string]string) {
+	t.Helper()
+	root := filepath.Join(cityDir, ".gc", "worktrees")
+	seen := map[string]string{}
+	for slot, base := range wantBase {
+		cwd := reports[slot].get("CWD")
+		if cwd == "" {
+			t.Errorf("%s reported no CWD", slot)
+			continue
+		}
+		if filepath.Base(cwd) != base {
+			t.Errorf("%s CWD = %q, want a per-instance directory named %q", slot, cwd, base)
+		}
+		if !strings.HasPrefix(normalizeE2EPath(t, cwd), normalizeE2EPath(t, root)+string(filepath.Separator)) {
+			t.Errorf("%s CWD = %q, want it under %q", slot, cwd, root)
+		}
+		if other, dup := seen[cwd]; dup {
+			t.Errorf("%s and %s share CWD %q; pool instances must not share a working directory", slot, other, cwd)
+		}
+		seen[cwd] = slot
 	}
 }
 

@@ -551,6 +551,7 @@ provider = "file"
 [[agent]]
 name = "worker"
 scope = "city"
+work_dir = ".gc/worktrees/{{.AgentBase}}"
 max_active_sessions = 3
 `
 			if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityTOML), 0o644); err != nil {

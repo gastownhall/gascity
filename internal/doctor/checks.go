@@ -123,8 +123,12 @@ func (c *ConfigValidCheck) Run(ctx *CheckContext) *CheckResult {
 		r.Message = fmt.Sprintf("agent validation: %v", err)
 		return r
 	}
-	cityName := config.EffectiveCityName(c.cfg, filepath.Base(ctx.CityPath))
-	if err := workdir.ValidatePoolWorkDirIsolation(ctx.CityPath, cityName, c.cfg.Agents, c.cfg.Rigs); err != nil {
+	cityPath := ""
+	if ctx != nil {
+		cityPath = ctx.CityPath
+	}
+	cityName := config.EffectiveCityName(c.cfg, filepath.Base(cityPath))
+	if err := workdir.ValidatePoolWorkDirIsolation(cityPath, cityName, c.cfg.Agents, c.cfg.Rigs); err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("agent validation: %v", err)
 		return r
@@ -133,10 +137,6 @@ func (c *ConfigValidCheck) Run(ctx *CheckContext) *CheckResult {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("rig validation: %v", err)
 		return r
-	}
-	cityPath := ""
-	if ctx != nil {
-		cityPath = ctx.CityPath
 	}
 	if err := config.ValidateRigFederationLayout(cityPath, c.cfg); err != nil {
 		r.Status = StatusError

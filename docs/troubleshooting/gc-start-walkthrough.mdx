@@ -203,9 +203,14 @@ max_active = 4
 # After:
 [[agent]]
 name = "worker"
+work_dir = ".gc/worktrees/{{.AgentBase}}"
 min_active_sessions = 1
 max_active_sessions = 4
 ```
+
+An agent that can run more than one session at a time needs a `work_dir`
+that varies per instance, such as the `{{.AgentBase}}` template above;
+`gc start` rejects it otherwise.
 
 For current pack layout and import examples, see
 [Shareable Packs](/guides/shareable-packs).
