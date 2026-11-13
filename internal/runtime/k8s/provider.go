@@ -427,8 +427,19 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 		return fmt.Errorf("k8s relaunch %q: respawn-pane: %w", name, err)
 	}
 
+	// The warm pane keeps the previous agent's scrollback, whose old prompt
+	// would end the startup-dialog pass before the new agent draws its dialog.
+	acceptDialogs := k8sAcceptsStartupDialogs(cfg)
+	if acceptDialogs {
+		p.clearRelaunchHistory(ctx, name)
+	}
+
 	// Re-run the post-launch setup tail (pipe-pane logging + session_setup[/script]).
 	p.runPodPostLaunchSetup(ctx, podName, cfg)
+
+	if acceptDialogs {
+		p.runStartupDialogPass(ctx, name)
+	}
 
 	// Post-relaunch liveness: detect an agent that dies immediately.
 	if k8sRequiresPostStartLiveness(cfg) {

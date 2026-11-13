@@ -26,6 +26,16 @@ func (p *Provider) acceptStartupDialogs(ctx context.Context, name string) error 
 	)
 }
 
+// clearRelaunchHistory clears the warm pane's scrollback after a respawn so
+// the previous agent's prompt cannot read as the new agent being ready. The
+// visible screen and the pipe-pane log are untouched. Best-effort: a failure
+// is reported on stderr.
+func (p *Provider) clearRelaunchHistory(ctx context.Context, name string) {
+	if err := p.carrier().ClearScrollback(ctx, name); err != nil {
+		fmt.Fprintf(p.stderr, "gc: warning: session %q: clearing history before the startup-dialog pass: %v\n", name, err) //nolint:errcheck
+	}
+}
+
 // runStartupDialogPass answers the agent's startup dialogs before the
 // post-start liveness probe and the initial nudge, so the nudge reaches the
 // agent rather than a workspace-trust or permission dialog. A pass that

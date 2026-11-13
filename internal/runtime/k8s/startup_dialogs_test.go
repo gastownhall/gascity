@@ -307,3 +307,58 @@ func paneShowsReadyPrompt(fake *fakeK8sOps) {
 		return fake.execOutput[key], nil
 	}
 }
+
+// podMutations counts the createPod and deletePod calls the fake saw.
+func podMutations(p *Provider) int {
+	n := 0
+	for _, c := range p.ops.(*fakeK8sOps).calls {
+		if c.method == "createPod" || c.method == "deletePod" {
+			n++
+		}
+	}
+	return n
+}
+
+// newWarmDialogProvider returns a provider with a warm, running pod "s" whose
+// pane answers from pane.
+func newWarmDialogProvider(pane *fakePane) *Provider {
+	p := newDialogProvider(pane)
+	addRunningPod(p.ops.(*fakeK8sOps), "s", "s")
+	return p
+}
+
+// TestStartupDialogsRelaunchClearsHistoryAndAcceptsDelayedDialog covers AC-2:
+// the warm pane's old prompt must not end the pass before the new agent's
+// delayed trust dialog renders.
+func TestStartupDialogsRelaunchClearsHistoryAndAcceptsDelayedDialog(t *testing.T) {
+	cases := map[string]int{
+		"dialog after blank frames":   3,
+		"dialog visible when cleared": 0,
+	}
+	for label, blank := range cases {
+		t.Run(label, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				pane := &fakePane{dialogOpen: true, cursorOnTrust: true, blankFrames: blank, history: oldTurnPrompt}
+				p := newWarmDialogProvider(pane)
+
+				if err := p.Relaunch(context.Background(), "s", dialogStartConfig()); err != nil {
+					t.Fatalf("Relaunch: %v", err)
+				}
+				cleared := pane.index("clear-history")
+				if cleared < 0 {
+					t.Fatalf("Relaunch never cleared the warm pane's history; log = %v", pane.log)
+				}
+				if respawn := pane.index("respawn"); respawn > cleared {
+					t.Fatalf("history cleared (%d) before the respawn (%d); log = %v", cleared, respawn, pane.log)
+				}
+				if capture := pane.index("capture"); capture < cleared {
+					t.Fatalf("pane polled (%d) before its history was cleared (%d); log = %v", capture, cleared, pane.log)
+				}
+				assertAcceptedBeforeNudge(t, pane)
+				if n := podMutations(p); n != 0 {
+					t.Fatalf("Relaunch created or deleted %d pods; want the warm pod kept", n)
+				}
+			})
+		})
+	}
+}
