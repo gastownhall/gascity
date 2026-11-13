@@ -2650,9 +2650,14 @@ func hookClaimIdentityPatch(bead beads.Bead, opts hookClaimOptions, ops hookClai
 	if hookClaimRecordsNoWorkDir(bead) && sessionID != "" && !isControl &&
 		hookClaimWorktreeEvidenceIsWholeOrAbsent(bead) && ops.ResolveSessionWorkDir != nil {
 		if sessionDir := strings.TrimSpace(ops.ResolveSessionWorkDir(sessionID)); sessionDir != "" {
-			if tree, admitted := storeHead.Admit(sessionDir); admitted {
+			if _, admitted := storeHead.Admit(sessionDir); admitted {
 				patch[beadmeta.WorkDirMetadataKey] = sessionDir
-				trees = []hookClaimWorkTree{tree}
+				// The session checkout is the worker's home worktree, not the
+				// tree the work lands on: the work branch is created later by
+				// the formula's branch-setup step, so whatever this tree is
+				// parked on at claim time is stale (gcf-23j). Stamp the dir but
+				// resolve no branch from it; branch-setup records the real one.
+				trees = nil
 			}
 		}
 	}

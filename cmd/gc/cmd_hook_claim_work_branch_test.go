@@ -324,7 +324,7 @@ func TestHookClaimWorkerTreesDedupesIdenticalKeys(t *testing.T) {
 // TestHookClaimIdentityPatchFallsBackToSessionWorkDir covers gc-2n4c: a
 // pool-routed bead records no checkout, because no slot is chosen until the claim
 // happens, so the claim takes the checkout of the claiming session and stamps
-// BOTH gc.work_dir and the branch resolved from it in the same patch.
+// gc.work_dir only: the branch is not knowable until branch-setup (gcf-23j).
 func TestHookClaimIdentityPatchFallsBackToSessionWorkDir(t *testing.T) {
 	bead := beads.Bead{ID: "hw-pool-routed", Metadata: beads.StringMap{}}
 	ops := hookClaimOps{
@@ -338,8 +338,13 @@ func TestHookClaimIdentityPatchFallsBackToSessionWorkDir(t *testing.T) {
 	if got := patch[beadmeta.WorkDirMetadataKey]; got != "/worktrees/sess-1" {
 		t.Errorf("gc.work_dir = %q; want the checkout of the claiming session", got)
 	}
-	if got := patch[beadmeta.WorkBranchMetadataKey]; got != "bd-from-session" {
-		t.Errorf("gc.work_branch = %q; want bd-from-session resolved from that checkout", got)
+	// gcf-23j: the session checkout is the worker's home worktree, parked on
+	// whatever branch it was last left on. The branch the work lands on does not
+	// exist until the formula's branch-setup step creates it, so a branch read
+	// here at claim time is wrong by construction and would poison the ADR-0009
+	// close gate. The branch is left for branch-setup to stamp.
+	if got, ok := patch[beadmeta.WorkBranchMetadataKey]; ok {
+		t.Errorf("gc.work_branch = %q stamped from the session fallback checkout; want no branch until branch-setup creates the work branch", got)
 	}
 }
 
