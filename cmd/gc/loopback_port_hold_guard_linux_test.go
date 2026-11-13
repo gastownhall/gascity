@@ -4,6 +4,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"path/filepath"
 	"strconv"
@@ -335,4 +336,233 @@ func TestStartOpenFileAndTCPListenerHoldsLoopbackV6Twin(t *testing.T) {
 		_ = proc.Wait()
 	})
 	requireLoopbackPortHeld(t, port, []int{syscall.AF_INET, syscall.AF_INET6})
+}
+
+// The tests below were added by the reviewer (gm-4xiq97, ga-os7kifr). They pin
+// the AC2 clauses of holdLoopbackPortFDs that no test above pins: the re-pick is
+// bounded at 64, a rejected candidate stays open until the pick ends, and an
+// error from the candidate source or from the [::1] bind is wrapped with %w. They
+// use the same raw syscalls as the tests above: no listen(2), no child process,
+// no probe of a port number after a release.
+
+// socketInode returns the inode of the socket behind fd, or 0 when fd is closed.
+// A closed descriptor number a later socket reuses reads as a different inode, so
+// a held socket cannot be mistaken for its replacement.
+func socketInode(fd int) uint64 {
+	var st syscall.Stat_t
+	if err := syscall.Fstat(fd, &st); err != nil {
+		return 0
+	}
+	return st.Ino
+}
+
+// twinTakenCandidate returns a candidate source for holdLoopbackPortFDs: a
+// SO_REUSEADDR bind(0) on 127.0.0.1 like v4Candidate, whose [::1] twin the first
+// taken candidates find held by a bound-only socket without SO_REUSEADDR. Later
+// candidates are left alone. The blockers close at t.Cleanup.
+func twinTakenCandidate(t *testing.T, taken int) func() (int, int, error) {
+	t.Helper()
+	var blockers []int
+	t.Cleanup(func() { closeFDs(blockers) })
+	picks := 0
+	return func() (int, int, error) {
+		fd, port, err := v4Candidate()
+		if err != nil {
+			return -1, 0, err
+		}
+		picks++
+		if picks <= taken {
+			blocker, _, err := rawBind(syscall.AF_INET6, port, false)
+			switch {
+			case err == nil:
+				blockers = append(blockers, blocker)
+			case errors.Is(err, syscall.EADDRINUSE):
+				// a foreign socket already holds the twin: the pick is rejected either way
+			default:
+				_ = syscall.Close(fd)
+				return -1, 0, err
+			}
+		}
+		return fd, port, nil
+	}
+}
+
+// TestHoldLoopbackPortFDsGivesUpAtTheTryBound pins AC2's bound: when every
+// candidate's [::1] twin is taken, the pick asks for exactly 64 candidates and
+// then fails with no descriptor, instead of looping on.
+func TestHoldLoopbackPortFDsGivesUpAtTheTryBound(t *testing.T) {
+	if !loopbackV6Usable(t) {
+		t.Skip("[::1] is not usable on this host")
+	}
+	const bound = 64
+	inner := twinTakenCandidate(t, bound*2)
+	calls := 0
+	candidate := func() (int, int, error) {
+		calls++
+		return inner()
+	}
+	port, fds, err := holdLoopbackPortFDs(candidate)
+	if err == nil {
+		closeFDs(fds)
+		t.Fatalf("held port %d although every [::1] twin was taken", port)
+	}
+	if calls != bound {
+		t.Errorf("asked the candidate source %d times, want exactly %d", calls, bound)
+	}
+	if fds != nil {
+		t.Errorf("returned descriptors %v alongside the error", fds)
+	}
+}
+
+// TestHoldLoopbackPortFDsKeepsRejectedCandidatesOpenUntilThePickEnds pins AC2's
+// keep-open clause: a candidate whose [::1] twin was taken stays the same open
+// socket through every later candidate, so bind(0) cannot hand its number back
+// inside one pick, and it is released when the pick returns while the winner is
+// held.
+func TestHoldLoopbackPortFDsKeepsRejectedCandidatesOpenUntilThePickEnds(t *testing.T) {
+	if !loopbackV6Usable(t) {
+		t.Skip("[::1] is not usable on this host")
+	}
+	const taken = 3
+	type pick struct {
+		fd, port int
+		ino      uint64
+	}
+	var picks []pick
+	inner := twinTakenCandidate(t, taken)
+	candidate := func() (int, int, error) {
+		for _, p := range picks {
+			if socketInode(p.fd) != p.ino {
+				t.Errorf("rejected candidate %d (descriptor %d) was released before the pick ended", p.port, p.fd)
+			}
+		}
+		fd, port, err := inner()
+		if err == nil {
+			picks = append(picks, pick{fd, port, socketInode(fd)})
+		}
+		return fd, port, err
+	}
+	port, fds, err := holdLoopbackPortFDs(candidate)
+	if err != nil {
+		t.Fatalf("holdLoopbackPortFDs: %v", err)
+	}
+	t.Cleanup(func() { closeFDs(fds) })
+	if len(picks) <= taken {
+		t.Fatalf("candidate source called %d times, want more than the %d candidates whose twin was taken", len(picks), taken)
+	}
+	winner := picks[len(picks)-1]
+	if port != winner.port || len(fds) == 0 || fds[0] != winner.fd {
+		t.Fatalf("held port %d with descriptors %v, want the last candidate %d on descriptor %d", port, fds, winner.port, winner.fd)
+	}
+	if socketInode(winner.fd) != winner.ino {
+		t.Errorf("the winning candidate %d is no longer the socket the pick returned", winner.port)
+	}
+	for _, p := range picks[:len(picks)-1] {
+		if socketInode(p.fd) == p.ino {
+			t.Errorf("rejected candidate %d (descriptor %d) is still open after the pick returned", p.port, p.fd)
+		}
+	}
+}
+
+// TestHoldLoopbackPortFDsWrapsACandidateError pins AC2's last clause for the
+// candidate source: its error comes back wrapped with %w and with context, and
+// no descriptor comes back with it.
+func TestHoldLoopbackPortFDsWrapsACandidateError(t *testing.T) {
+	refused := errors.New("candidate source refused")
+	port, fds, err := holdLoopbackPortFDs(func() (int, int, error) { return -1, 0, refused })
+	if err == nil {
+		closeFDs(fds)
+		t.Fatalf("held port %d although the candidate source failed", port)
+	}
+	if !errors.Is(err, refused) {
+		t.Errorf("error %q does not wrap the candidate source's error", err)
+	}
+	if err.Error() == refused.Error() {
+		t.Errorf("error %q carries no context beyond the candidate source's own", err)
+	}
+	if fds != nil {
+		t.Errorf("returned descriptors %v alongside the error", fds)
+	}
+}
+
+// TestHoldLoopbackPortFDsWrapsAV6BindErrorAndReleasesTheCandidate pins AC2's
+// last clause for the [::1] twin: a bind error that is neither "in use" nor "no
+// [::1]" fails the pick with %w and context, closes the 127.0.0.1 candidate and
+// holds nothing. The candidate reports a port number no socket can bind: Go
+// refuses anything above 65535 with EINVAL before the kernel sees it.
+func TestHoldLoopbackPortFDsWrapsAV6BindErrorAndReleasesTheCandidate(t *testing.T) {
+	if !loopbackV6Usable(t) {
+		t.Skip("[::1] is not usable on this host")
+	}
+	const unbindable = 70000
+	var candidateFD int
+	var candidateInode uint64
+	candidate := func() (int, int, error) {
+		fd, _, err := v4Candidate()
+		if err != nil {
+			return -1, 0, err
+		}
+		candidateFD, candidateInode = fd, socketInode(fd)
+		return fd, unbindable, nil
+	}
+	port, fds, err := holdLoopbackPortFDs(candidate)
+	if err == nil {
+		closeFDs(fds)
+		t.Fatalf("held port %d although [::1]:%d cannot be bound", port, unbindable)
+	}
+	if !errors.Is(err, syscall.EINVAL) {
+		t.Errorf("error %q does not wrap the [::1] bind error", err)
+	}
+	if err.Error() == syscall.EINVAL.Error() {
+		t.Errorf("error %q carries no context beyond the bind error's own", err)
+	}
+	if fds != nil {
+		t.Errorf("returned descriptors %v alongside the error", fds)
+	}
+	if socketInode(candidateFD) == candidateInode {
+		t.Errorf("the 127.0.0.1 candidate (descriptor %d) is still open after the failed pick", candidateFD)
+	}
+}
+
+// TestLoopbackV6UnavailableMatchesOnlyAHostWithoutLoopbackV6 pins the test the
+// v4-only fallback hangs on: only the three errors a host without a usable [::1]
+// returns from a bind count, wrapped or not. Any other bind error must fail the
+// pick instead.
+func TestLoopbackV6UnavailableMatchesOnlyAHostWithoutLoopbackV6(t *testing.T) {
+	cases := []struct {
+		err  error
+		want bool
+	}{
+		{syscall.EADDRNOTAVAIL, true},
+		{syscall.EAFNOSUPPORT, true},
+		{syscall.EPROTONOSUPPORT, true},
+		{fmt.Errorf("bind [::1]:0: %w", syscall.EADDRNOTAVAIL), true},
+		{syscall.EADDRINUSE, false},
+		{syscall.EACCES, false},
+		{syscall.EINVAL, false},
+		{errors.New("not an errno"), false},
+	}
+	for _, c := range cases {
+		if got := loopbackV6Unavailable(c.err); got != c.want {
+			t.Errorf("loopbackV6Unavailable(%v) = %t, want %t", c.err, got, c.want)
+		}
+	}
+}
+
+// TestHoldLoopbackPortFDsHoldsEveryFamilyTheHostHas pins AC2's fallback from the
+// other side: the pick holds the v4 socket and, exactly when [::1] is usable, its
+// twin. On a host without [::1] it pins the v4-only result.
+func TestHoldLoopbackPortFDsHoldsEveryFamilyTheHostHas(t *testing.T) {
+	want := 1
+	if loopbackV6Usable(t) {
+		want = 2
+	}
+	port, fds, err := holdLoopbackPortFDs(v4Candidate)
+	if err != nil {
+		t.Fatalf("holdLoopbackPortFDs: %v", err)
+	}
+	t.Cleanup(func() { closeFDs(fds) })
+	if len(fds) != want {
+		t.Errorf("held %d descriptors for port %d, want %d", len(fds), port, want)
+	}
 }
