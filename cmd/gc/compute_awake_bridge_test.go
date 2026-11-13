@@ -919,6 +919,67 @@ func TestBuildAwakeInputFromReconciler_RigNamedWorkQueryDemandWakesCanonicalSess
 	}
 }
 
+// TestBuildAwakeInputFromReconciler_RigNamedSessionExplicitWakeResolvesDirlessRigAgent
+// pins an explicit wake on a rig's named session backed by a scope="rig"
+// agent with no dir: the bead template is rig-qualified ("rig-a/worker")
+// while the agent's qualified name is bare ("worker"), and the wake must
+// still start the session.
+func TestBuildAwakeInputFromReconciler_RigNamedSessionExplicitWakeResolvesDirlessRigAgent(t *testing.T) {
+	now := time.Now().UTC()
+	cfg := &config.City{
+		ResolvedWorkspaceName: "gc-test",
+		Rigs:                  []config.Rig{{Name: "rig-a"}},
+		Agents:                []config.Agent{{Name: "worker", Scope: "rig"}},
+		NamedSessions: []config.NamedSession{
+			{Template: "worker", Mode: "on_demand", Scope: "rig", Dir: "rig-a"},
+		},
+	}
+	identity := "rig-a/worker"
+	runtimeName := config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, identity)
+	sessionBead := beads.Bead{
+		ID:     "mc-session-1",
+		Status: "open",
+		Type:   "session",
+		Metadata: map[string]string{
+			"configured_named_session":  "true",
+			"state":                     "asleep",
+			"session_name":              runtimeName,
+			"template":                  "rig-a/worker",
+			"configured_named_identity": identity,
+			"configured_named_mode":     "on_demand",
+			"wake_request":              "explicit",
+		},
+	}
+
+	input := buildAwakeInputFromReconciler(
+		cfg,
+		"", // cityPath: empty exercises zero suspension state
+		[]session.Info{sessiontest.SeedBead(t, sessionBead)},
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		runtime.NewFake(),
+		now,
+	)
+
+	decisions := ComputeAwakeSet(input)
+	got, ok := decisions[runtimeName]
+	if !ok {
+		t.Fatal("decision for rig named session missing from awake set")
+	}
+	if !got.ShouldWake {
+		t.Fatalf("decision = %+v, want wake", got)
+	}
+	if got.Reason != "explicit-wake" {
+		t.Fatalf("Reason = %q, want explicit-wake", got.Reason)
+	}
+}
+
 // TestBuildAwakeInputFromReconcilerNamedAlwaysPostChurnRewakes pins the
 // contract for a mode=always named session that was put to sleep after churn:
 // if named-session metadata survives, the next awake-set pass must re-wake it.

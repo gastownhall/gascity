@@ -705,12 +705,12 @@ func TestNamedOnDemand_ExplicitWakeWakesWithoutDemand(t *testing.T) {
 	assertReason(t, result, "hello-world--refinery", "explicit-wake")
 }
 
-// A rig-scoped agent with no dir keeps a bare qualified name while its named
-// session expands to <rig>/<name>. An explicit wake on that session must
-// resolve the rig-qualified template to the agent, as the other arms do.
-func TestNamedOnDemand_ExplicitWakeRigQualifiedTemplateBareAgent(t *testing.T) {
-	result := computeAwakeSetChecked(t, AwakeInput{
-		Agents:        []AwakeAgent{{QualifiedName: "worker"}},
+// rigQualifiedExplicitWakeInput is the shape of a scope="rig" agent with no
+// dir: its qualified name is bare ("worker") while its named session expands
+// with dir = "rig-a", so the session bead's template is "rig-a/worker".
+func rigQualifiedExplicitWakeInput(agents ...AwakeAgent) AwakeInput {
+	return AwakeInput{
+		Agents:        agents,
 		NamedSessions: []AwakeNamedSession{{Identity: "rig-a/worker", Template: "rig-a/worker", Mode: "on_demand"}},
 		SessionBeads: []AwakeSessionBead{{
 			ID:            "mc-1",
@@ -719,30 +719,27 @@ func TestNamedOnDemand_ExplicitWakeRigQualifiedTemplateBareAgent(t *testing.T) {
 			State:         "asleep",
 			ExplicitWake:  true,
 			NamedIdentity: "rig-a/worker",
+			WaitHold:      true,
 		}},
 		Now: now,
-	})
+	}
+}
+
+func TestNamedOnDemand_ExplicitWakeRigQualifiedTemplateBareAgent(t *testing.T) {
+	result := computeAwakeSetChecked(t, rigQualifiedExplicitWakeInput(AwakeAgent{QualifiedName: "worker"}))
 	assertAwake(t, result, "rig-a--worker")
 	assertReason(t, result, "rig-a--worker", "explicit-wake")
 }
 
 func TestNamedOnDemand_ExplicitWakeRigQualifiedTemplateSuspendedAgent(t *testing.T) {
-	result := computeAwakeSetChecked(t, AwakeInput{
-		Agents:        []AwakeAgent{{QualifiedName: "worker", Suspended: true}},
-		NamedSessions: []AwakeNamedSession{{Identity: "rig-a/worker", Template: "rig-a/worker", Mode: "on_demand"}},
-		SessionBeads: []AwakeSessionBead{{
-			ID:            "mc-1",
-			SessionName:   "rig-a--worker",
-			Template:      "rig-a/worker",
-			State:         "asleep",
-			ExplicitWake:  true,
-			NamedIdentity: "rig-a/worker",
-		}},
-		Now: now,
-	})
+	result := computeAwakeSetChecked(t, rigQualifiedExplicitWakeInput(AwakeAgent{QualifiedName: "worker", Suspended: true}))
 	assertAsleep(t, result, "rig-a--worker")
 }
 
+// TestNamedOnDemand_ExplicitWakeAmbiguousBaseNameStaysAsleep pins
+// lookupAgent's refusal to guess when the template's base name matches more
+// than one agent: an explicit wake on an orphaned rig-c/worker resolves to
+// neither rig-a/worker nor rig-b/worker.
 func TestNamedOnDemand_ExplicitWakeAmbiguousBaseNameStaysAsleep(t *testing.T) {
 	result := computeAwakeSetChecked(t, AwakeInput{
 		Agents: []AwakeAgent{{QualifiedName: "rig-a/worker"}, {QualifiedName: "rig-b/worker"}},

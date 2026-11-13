@@ -57,6 +57,22 @@ func TestWakeStartRefusal(t *testing.T) {
 			agent: config.Agent{Name: "worker", Dir: "frontend"}, rigs: []config.Rig{{Name: "frontend", SuspendedOnStart: true}},
 			info: sessionpkg.Info{Template: "frontend/worker"}, want: `rig "frontend" is suspended`,
 		},
+		"dirless rig agent on a live rig": {
+			agent: config.Agent{Name: "worker", Scope: "rig"}, rigs: []config.Rig{{Name: "frontend"}},
+			info: sessionpkg.Info{Template: "frontend/worker"},
+		},
+		"dirless rig agent on a suspended rig": {
+			agent: config.Agent{Name: "worker", Scope: "rig"}, rigs: []config.Rig{{Name: "frontend", SuspendedOnStart: true}},
+			info: sessionpkg.Info{Template: "frontend/worker"}, want: `rig "frontend" is suspended`,
+		},
+		"suspended dirless rig agent": {
+			agent: config.Agent{Name: "worker", Scope: "rig", Suspended: true}, rigs: []config.Rig{{Name: "frontend"}},
+			info: sessionpkg.Info{Template: "frontend/worker"}, want: "is suspended",
+		},
+		"dirless rig agent naming no configured rig": {
+			agent: config.Agent{Name: "worker", Scope: "rig"}, rigs: []config.Rig{{Name: "frontend"}},
+			info: sessionpkg.Info{Template: "r9/worker"}, want: "no configured agent",
+		},
 		"suspended agent": {agent: config.Agent{Name: "worker", Suspended: true}, info: sessionpkg.Info{Template: "worker"}, want: "is suspended"},
 		"startup quarantine": {
 			agent: config.Agent{Name: "worker"}, info: sessionpkg.Info{Template: "worker", SessionNameMetadata: "worker"},
