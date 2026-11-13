@@ -430,8 +430,8 @@ func (p *Provider) Get(id string) (mail.Message, error) {
 	if err != nil {
 		return mail.Message{}, beadmailError("get", err)
 	}
-	if b.Type != messageBeadType {
-		return mail.Message{}, fmt.Errorf("beadmail get: bead %s is type %q, not message", id, b.Type)
+	if err := requireMessageBead("get", b); err != nil {
+		return mail.Message{}, err
 	}
 	if isRemovedMessageBead(b) {
 		return mail.Message{}, beadmailError("get", beads.ErrNotFound)
@@ -445,6 +445,9 @@ func (p *Provider) Read(id string) (mail.Message, error) {
 	b, err := p.store.Get(id)
 	if err != nil {
 		return mail.Message{}, beadmailError("read", err)
+	}
+	if err := requireMessageBead("read", b); err != nil {
+		return mail.Message{}, err
 	}
 	if isRemovedMessageBead(b) {
 		return mail.Message{}, beadmailError("read", beads.ErrNotFound)
@@ -469,6 +472,9 @@ func (p *Provider) MarkRead(id string) error {
 	if err != nil {
 		return beadmailError("mark-read", err)
 	}
+	if err := requireMessageBead("mark-read", b); err != nil {
+		return err
+	}
 	if isRemovedMessageBead(b) {
 		return beadmailError("mark-read", beads.ErrNotFound)
 	}
@@ -487,6 +493,9 @@ func (p *Provider) MarkUnread(id string) error {
 	b, err := p.store.Get(id)
 	if err != nil {
 		return beadmailError("mark-unread", err)
+	}
+	if err := requireMessageBead("mark-unread", b); err != nil {
+		return err
 	}
 	if isRemovedMessageBead(b) {
 		return beadmailError("mark-unread", beads.ErrNotFound)
@@ -853,6 +862,9 @@ func (p *Provider) Reply(id, from, subject, body string) (mail.Message, error) {
 	if err != nil {
 		return mail.Message{}, beadmailError("reply", err)
 	}
+	if err := requireMessageBead("reply", original); err != nil {
+		return mail.Message{}, err
+	}
 	if isRemovedMessageBead(original) {
 		return mail.Message{}, beadmailError("reply", beads.ErrNotFound)
 	}
@@ -915,6 +927,17 @@ func beadmailError(operation string, err error) error {
 		err = mail.ErrNotFound
 	}
 	return fmt.Errorf("beadmail %s: %w", operation, err)
+}
+
+// requireMessageBead refuses a bead that is not mail. A direct-ID operation
+// takes whatever bead the ID names, so without this a session-tracking bead
+// (or any other type) would be readable as, mutated as, and replied to as a
+// message. op names the calling operation in the error.
+func requireMessageBead(op string, b beads.Bead) error {
+	if b.Type != messageBeadType {
+		return fmt.Errorf("beadmail %s: bead %s is type %q, not message", op, b.ID, b.Type)
+	}
+	return nil
 }
 
 // isRemovedMessageBead reports whether b is a message bead that direct-ID
