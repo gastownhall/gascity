@@ -177,8 +177,8 @@ func scopedHookFixture(t *testing.T, rootStatus string, rows []beads.Bead) (hook
 			b, err := store.Get(id)
 			return b, err == nil, err
 		},
-		InputDone: func(context.Context, string, []string, beads.Bead, []string) (string, bool, error) {
-			return "", false, nil
+		InputVerdict: func(context.Context, string, []string, beads.Bead, []string, workflowInputAbsenceProver) (workflowInputVerdict, error) {
+			return workflowInputVerdict{}, nil
 		},
 		WorkflowStore:    func(context.Context, string, []string, string, string) beads.Store { return store },
 		ConfirmBlocked:   func(context.Context, string, []string, string, string) (bool, error) { return false, nil },
@@ -311,11 +311,11 @@ func TestHookRootDomainReadFailures(t *testing.T) {
 					}
 					return b, err
 				}
-				ops.InputDone = func(context.Context, string, []string, beads.Bead, []string) (string, bool, error) {
+				ops.InputVerdict = func(context.Context, string, []string, beads.Bead, []string, workflowInputAbsenceProver) (workflowInputVerdict, error) {
 					if fault == "input before claim" || (fault == "input before delivery" && afterClaim) {
-						return "", false, errors.New("injected input read failure")
+						return workflowInputVerdict{}, errors.New("injected input read failure")
 					}
-					return "", false, nil
+					return workflowInputVerdict{}, nil
 				}
 				ops.WorkflowStore = func(_ context.Context, _ string, _ []string, id, actor string) beads.Store {
 					if id != "" && ((fault == "ancestry before claim") || (fault == "ancestry before delivery" && afterClaim) || (fault == "reservation ancestry" && actor == "")) {
@@ -372,6 +372,32 @@ func TestHookRootDomainReadFailures(t *testing.T) {
 	}
 }
 
+func TestHookRootPurgedInputBeforeDelivery(t *testing.T) {
+	step := scopedHookBead("step-a", "root-a", "open", "")
+	opts, ops, run, claims := scopedHookFixture(t, "open", []beads.Bead{step})
+	retired, released := false, false
+	ops.InputVerdict = func(context.Context, string, []string, beads.Bead, []string, workflowInputAbsenceProver) (workflowInputVerdict, error) {
+		if len(*claims) == 0 {
+			return workflowInputVerdict{RootID: "root-a", State: workflowInputPending}, nil
+		}
+		return workflowInputVerdict{RootID: "root-a", State: workflowInputPurged, MissingIDs: []string{"input"}}, nil
+	}
+	ops.RetireWorkflow = func(_ context.Context, _ string, _ []string, verdict workflowInputVerdict) error {
+		retired = verdict.RootID == "root-a" && verdict.State == workflowInputPurged
+		return nil
+	}
+	ops.Release = func(_ context.Context, _ string, _ []string, id, _ string) (bool, error) {
+		released = id == step.ID
+		return released, nil
+	}
+	ops.EmitClaimReleased = func(hookClaimReleaseRecord) {}
+	var out, errOut bytes.Buffer
+	code := claimHookWorkWithRunner("unused generic query", "/rig", nil, nil, opts, ops, run, nil, &out, &errOut)
+	if code == 0 || out.Len() != 0 || !retired || !released || len(*claims) != 1 {
+		t.Fatalf("code=%d out=%s err=%s retired=%v released=%v claims=%v", code, &out, &errOut, retired, released, *claims)
+	}
+}
+
 func TestHookUnscopedDomainReadFailuresKeepV1(t *testing.T) {
 	for _, fault := range []string{"input", "ancestry"} {
 		t.Run(fault, func(t *testing.T) {
@@ -384,8 +410,8 @@ func TestHookUnscopedDomainReadFailuresKeepV1(t *testing.T) {
 			}
 			ops.Runner = func(string, string) (string, error) { return string(rows), nil }
 			if fault == "input" {
-				ops.InputDone = func(context.Context, string, []string, beads.Bead, []string) (string, bool, error) {
-					return "", false, errors.New("input read failed")
+				ops.InputVerdict = func(context.Context, string, []string, beads.Bead, []string, workflowInputAbsenceProver) (workflowInputVerdict, error) {
+					return workflowInputVerdict{}, errors.New("input read failed")
 				}
 			} else {
 				store := ops.WorkflowStore(context.Background(), "/rig", nil, "", "")

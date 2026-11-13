@@ -134,9 +134,9 @@ func TestActiveWispStepSingleReadMatchesPerQuestionReads(t *testing.T) {
 	for name, fixture := range cases {
 		t.Run(name, func(t *testing.T) {
 			store := seedStepFixture(fixture)
-			want, wantErr := resolveActiveWispStep(store, &splitStoreHandle{Store: store}, assignees)
+			want, wantErr := resolveActiveWispStep(store, testStores(store, &splitStoreHandle{Store: store}), assignees)
 			rec := beadstest.NewOpRecordingStore(store)
-			got, gotErr := resolveActiveWispStep(rec, rec, assignees)
+			got, gotErr := resolveActiveWispStep(rec, testStores(rec, rec), assignees)
 			if (wantErr == nil) != (gotErr == nil) {
 				t.Fatalf("errors differ: single read %v, per question %v", gotErr, wantErr)
 			}

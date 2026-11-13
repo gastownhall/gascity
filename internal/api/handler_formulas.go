@@ -45,7 +45,7 @@ func (s *Server) formulaSearchPaths(scopeKind, scopeRef string) ([]string, int, 
 		}
 		return cfg.FormulaLayers.City, http.StatusOK, ""
 	case "rig":
-		if s.state.BeadStore(scopeRef) == nil {
+		if _, ok := s.state.Stores().Rig(scopeRef); !ok {
 			return nil, http.StatusNotFound, "rig scope " + scopeRef + " not found"
 		}
 		return cfg.FormulaLayers.SearchPaths(scopeRef), http.StatusOK, ""

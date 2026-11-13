@@ -17,9 +17,15 @@ import (
 //
 // The observe.v1 interfaces (the error-bearing liveness read, fresh reads,
 // identity, exact object kills, v2 readiness, the batched inventory and its
-// gate, the attested listing) are forwarded too, and Start
+// gate, the attested listing) are forwarded too, as are the driving verbs
+// (behind a presence check, so input to a vanished session is never reported
+// delivered) and the single-op reads, and Start
 // routes a FreshOnly start to the raw provider's: an optional interface the
 // cut-over does not forward does not exist in production.
+//
+// The process-table scanner, which only a v2-ready pack sharing the host
+// can use (process_scan.go), and the local-transcript trait (hoststage.go)
+// are passed through from the files that define them.
 //
 // ExecProvider is deliberately NOT passed through: exec's Exec op is the
 // connection the carrier drives over INTERNALLY (no production caller
@@ -50,18 +56,20 @@ var (
 	_ runtime.InventoryGate             = (*seamBackedProvider)(nil)
 	_ runtime.ListingAttestation        = (*seamBackedProvider)(nil)
 	_ runtime.InventoryLister           = (*seamBackedProvider)(nil)
+
+	_ runtime.ServerLifecycleProvider = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked wraps an exec provider for the given script so it is served
 // through the seams.
-func NewSeamBacked(script string) runtime.Provider {
-	return seamBacked(NewProvider(script))
+func NewSeamBacked(script string, opts ...Option) runtime.Provider {
+	return seamBacked(NewProvider(script, opts...))
 }
 
 // NewSeamBackedForCity is NewSeamBacked for a provider serving one city: every
 // op carries GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH (NewProviderForCity).
-func NewSeamBackedForCity(script, cityName, cityPath string) runtime.Provider {
-	return seamBacked(NewProviderForCity(script, cityName, cityPath))
+func NewSeamBackedForCity(script, cityName, cityPath string, opts ...Option) runtime.Provider {
+	return seamBacked(NewProviderForCity(script, cityName, cityPath, opts...))
 }
 
 func seamBacked(raw *Provider) *seamBackedProvider {
@@ -144,6 +152,18 @@ func (s *seamBackedProvider) V2Readiness() ([]string, error) {
 	return s.raw.V2Readiness()
 }
 
+// ConfigureServer passes through to the underlying provider's no-op
+// (non-seam).
+func (s *seamBackedProvider) ConfigureServer() error {
+	return s.raw.ConfigureServer()
+}
+
+// TeardownServer passes through to the underlying provider, which runs
+// `server-stop` for a pack declaring server-lifecycle (non-seam).
+func (s *seamBackedProvider) TeardownServer() error {
+	return s.raw.TeardownServer()
+}
+
 // DismissKnownDialogs implements [runtime.DialogProvider] (non-seam passthrough).
 func (s *seamBackedProvider) DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error {
 	return s.raw.DismissKnownDialogs(ctx, name, timeout)
@@ -184,6 +204,72 @@ func (s *seamBackedProvider) Peek(name string, lines int) (string, error) {
 		return s.raw.peekBox(name, lines)
 	}
 	return s.Provider.Peek(name, lines)
+}
+
+// Nudge passes through to the underlying provider once requirePresent has
+// not found the session gone. The seams' Nudge answers nil for a session
+// `is-running` does not open, which a caller reads as delivered.
+func (s *seamBackedProvider) Nudge(name string, content []runtime.ContentBlock) error {
+	if err := s.raw.requirePresent(name); err != nil {
+		return err
+	}
+	return s.raw.Nudge(name, content)
+}
+
+// SendKeys passes through to the underlying provider once requirePresent
+// has not found the session gone.
+func (s *seamBackedProvider) SendKeys(name string, keys ...string) error {
+	if err := s.raw.requirePresent(name); err != nil {
+		return err
+	}
+	return s.raw.SendKeys(name, keys...)
+}
+
+// Interrupt passes through to the underlying provider once requirePresent
+// has not found the session gone.
+func (s *seamBackedProvider) Interrupt(name string) error {
+	if err := s.raw.requirePresent(name); err != nil {
+		return err
+	}
+	return s.raw.Interrupt(name)
+}
+
+// ClearScrollback passes through to the underlying provider once
+// requirePresent has not found the session gone.
+func (s *seamBackedProvider) ClearScrollback(name string) error {
+	if err := s.raw.requirePresent(name); err != nil {
+		return err
+	}
+	return s.raw.ClearScrollback(name)
+}
+
+// IsAttached passes through to the underlying provider's single probe; the
+// seams' IsAttached opens the box twice and reads every liveness field.
+func (s *seamBackedProvider) IsAttached(name string) bool {
+	return s.raw.IsAttached(name)
+}
+
+// GetLastActivity passes through to the underlying provider's single
+// get-last-activity op; the seams' read opens the box twice first.
+func (s *seamBackedProvider) GetLastActivity(name string) (time.Time, error) {
+	return s.raw.GetLastActivity(name)
+}
+
+// ProcessAlive reads a v2-ready pack's `observe` once: a live agent is
+// alive, a dead agent or a missing box is not, and a failed read is alive,
+// never a spurious dead. Other packs keep the seams' read, because a pack
+// without process-alive answers exit 2, which reads alive even for a
+// missing box.
+func (s *seamBackedProvider) ProcessAlive(name string, processNames []string) bool {
+	if !s.raw.v2Ready() {
+		return s.Provider.ProcessAlive(name, processNames)
+	}
+	o, err := s.raw.observe(context.Background(), name, processNames)
+	if err != nil {
+		return true
+	}
+	l := o.liveness(processNames)
+	return l.Running && l.Alive
 }
 
 // CheckImage passes through (non-seam; cmd/gc start asserts an image-checker).

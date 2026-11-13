@@ -953,7 +953,7 @@ func TestWorkerFactorySessionByIDUsesResolvedTemplateRuntime(t *testing.T) {
 		t.Fatalf("CreateBeadOnly: %v", err)
 	}
 
-	factory, err := srv.workerFactory(fs.cityBeadStore)
+	factory, err := srv.workerFactory(beadstest.Sessions(fs.cityBeadStore))
 	if err != nil {
 		t.Fatalf("workerFactory: %v", err)
 	}
@@ -996,7 +996,7 @@ func TestWorkerFactorySessionByIDPreservesStoredResolvedCommand(t *testing.T) {
 		t.Fatalf("CreateBeadOnly: %v", err)
 	}
 
-	factory, err := srv.workerFactory(fs.cityBeadStore)
+	factory, err := srv.workerFactory(beadstest.Sessions(fs.cityBeadStore))
 	if err != nil {
 		t.Fatalf("workerFactory: %v", err)
 	}
@@ -1043,7 +1043,7 @@ func TestWorkerFactorySessionByIDUsesResolvedCommandAndResumeSettingsOnResume(t 
 		t.Fatalf("Suspend: %v", err)
 	}
 
-	factory, err := srv.workerFactory(fs.cityBeadStore)
+	factory, err := srv.workerFactory(beadstest.Sessions(fs.cityBeadStore))
 	if err != nil {
 		t.Fatalf("workerFactory: %v", err)
 	}
@@ -1091,7 +1091,7 @@ func TestWorkerFactorySessionByIDAppliesTemplateOverridesToExplicitResumeCommand
 		t.Fatalf("SetMetadata(template_overrides): %v", err)
 	}
 
-	factory, err := srv.workerFactory(fs.cityBeadStore)
+	factory, err := srv.workerFactory(beadstest.Sessions(fs.cityBeadStore))
 	if err != nil {
 		t.Fatalf("workerFactory: %v", err)
 	}
@@ -1137,7 +1137,7 @@ func TestWorkerFactoryHandleForTargetUsesResolvedTemplateRuntimeForSessionMeta(t
 		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
 	}
 
-	factory, err := srv.workerFactory(fs.cityBeadStore)
+	factory, err := srv.workerFactory(beadstest.Sessions(fs.cityBeadStore))
 	if err != nil {
 		t.Fatalf("workerFactory: %v", err)
 	}
@@ -1168,7 +1168,7 @@ func TestNewResolvedWorkerSessionHandleStartsResolvedSession(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
-	handle, err := srv.newResolvedWorkerSessionHandle(fs.cityBeadStore, worker.ResolvedSessionConfig{
+	handle, err := srv.newResolvedWorkerSessionHandle(beadstest.Sessions(fs.cityBeadStore), worker.ResolvedSessionConfig{
 		Alias:        "worker",
 		ExplicitName: "worker-named",
 		Template:     "myrig/worker",
@@ -1220,7 +1220,7 @@ func TestNewResolvedWorkerSessionHandleDerivesProviderFromCommand(t *testing.T) 
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
-	handle, err := srv.newResolvedWorkerSessionHandle(fs.cityBeadStore, worker.ResolvedSessionConfig{
+	handle, err := srv.newResolvedWorkerSessionHandle(beadstest.Sessions(fs.cityBeadStore), worker.ResolvedSessionConfig{
 		Alias:        "worker",
 		ExplicitName: "worker-command-only",
 		Template:     "myrig/worker",
@@ -1260,7 +1260,7 @@ func TestWorkerFactoryRoutesWorkerOperationEventsToStateProvider(t *testing.T) {
 	fs := newSessionFakeState(t)
 	srv := New(fs)
 
-	handle, err := srv.newResolvedWorkerSessionHandle(fs.cityBeadStore, worker.ResolvedSessionConfig{
+	handle, err := srv.newResolvedWorkerSessionHandle(beadstest.Sessions(fs.cityBeadStore), worker.ResolvedSessionConfig{
 		Alias:        "worker",
 		ExplicitName: "worker-events",
 		Template:     "myrig/worker",
@@ -1302,7 +1302,7 @@ func TestWorkerFactorySharesDerivedActivityMemoAcrossRequests(t *testing.T) {
 	srv := newServerWithSearchPaths(fs, searchBase)
 	workDir := t.TempDir()
 
-	factory, err := srv.workerFactory(fs.cityBeadStore)
+	factory, err := srv.workerFactory(beadstest.Sessions(fs.cityBeadStore))
 	if err != nil {
 		t.Fatalf("workerFactory: %v", err)
 	}
@@ -1336,7 +1336,7 @@ func TestWorkerFactorySharesDerivedActivityMemoAcrossRequests(t *testing.T) {
 	}
 
 	for i := 1; i <= 3; i++ {
-		requestFactory, err := srv.workerFactory(fs.cityBeadStore)
+		requestFactory, err := srv.workerFactory(beadstest.Sessions(fs.cityBeadStore))
 		if err != nil {
 			t.Fatalf("workerFactory(request %d): %v", i, err)
 		}

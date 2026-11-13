@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/platform/localsocket"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/testutil"
@@ -211,7 +212,7 @@ func TestControllerShutdown(t *testing.T) {
 func TestControllerSocketFallbackUsesShortPathForLongCityPath(t *testing.T) {
 	base := shortSocketTempDir(t, "gc-controller-long-")
 	cityPath := base
-	for len(filepath.Join(normalizePathForCompare(cityPath), ".gc", "controller.sock")) <= controllerSocketPathLimit {
+	for len(filepath.Join(normalizePathForCompare(cityPath), ".gc", "controller.sock")) <= localsocket.PathLimit {
 		cityPath = filepath.Join(cityPath, "segment-1234567890")
 	}
 	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
@@ -223,7 +224,7 @@ func TestControllerSocketFallbackUsesShortPathForLongCityPath(t *testing.T) {
 	if fallback == legacy {
 		t.Fatalf("controllerSocketPath(%q) = %q, want fallback path", cityPath, fallback)
 	}
-	if !strings.HasPrefix(fallback, filepath.Join("/tmp", "gascity-controller")+string(filepath.Separator)) {
+	if !strings.HasPrefix(fallback, localsocket.FallbackDir("gascity-controller")+string(filepath.Separator)) {
 		t.Fatalf("controllerSocketPath(%q) = %q, want /tmp/gascity-controller fallback", cityPath, fallback)
 	}
 
@@ -320,7 +321,7 @@ func TestControllerSocketPathUsesShortCanonicalPathForLongAlias(t *testing.T) {
 	}
 
 	aliasName := "alias"
-	for len(filepath.Join(base, aliasName, ".gc", "controller.sock")) <= controllerSocketPathLimit {
+	for len(filepath.Join(base, aliasName, ".gc", "controller.sock")) <= localsocket.PathLimit {
 		aliasName += "-segment"
 	}
 	aliasCityPath := filepath.Join(base, aliasName)
@@ -329,12 +330,12 @@ func TestControllerSocketPathUsesShortCanonicalPathForLongAlias(t *testing.T) {
 	}
 
 	canonicalSocketPath := filepath.Join(normalizePathForCompare(aliasCityPath), ".gc", "controller.sock")
-	if len(canonicalSocketPath) > controllerSocketPathLimit {
-		t.Fatalf("canonical test socket path length = %d, want <= %d: %s", len(canonicalSocketPath), controllerSocketPathLimit, canonicalSocketPath)
+	if len(canonicalSocketPath) > localsocket.PathLimit {
+		t.Fatalf("canonical test socket path length = %d, want <= %d: %s", len(canonicalSocketPath), localsocket.PathLimit, canonicalSocketPath)
 	}
 	aliasSocketPath := filepath.Join(aliasCityPath, ".gc", "controller.sock")
-	if len(aliasSocketPath) <= controllerSocketPathLimit {
-		t.Fatalf("alias test socket path length = %d, want > %d: %s", len(aliasSocketPath), controllerSocketPathLimit, aliasSocketPath)
+	if len(aliasSocketPath) <= localsocket.PathLimit {
+		t.Fatalf("alias test socket path length = %d, want > %d: %s", len(aliasSocketPath), localsocket.PathLimit, aliasSocketPath)
 	}
 
 	if got := controllerSocketPath(aliasCityPath); got != canonicalSocketPath {

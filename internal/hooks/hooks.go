@@ -347,6 +347,9 @@ func installOverlayManaged(fs fsys.FS, cityDir, workDir, provider string) error 
 		if provider == "codex" && rel == path.Join(".codex", "hooks.json") {
 			return writeCodexHooksManaged(fs, cityDir, dst, data)
 		}
+		if provider == "kiro" && rel == overlay.KiroAgentsMDPath {
+			return writeKiroAgentsMDManaged(fs, dst, data)
+		}
 		if overlay.IsMergeablePath(filepath.FromSlash(rel)) {
 			if normalized, normErr := overlay.CanonicalJSON(data); normErr == nil {
 				data = normalized
@@ -354,6 +357,26 @@ func installOverlayManaged(fs fsys.FS, cityDir, workDir, provider string) error 
 		}
 		return writeEmbeddedManaged(fs, dst, data, overlayManagedNeedsUpgrade(provider, rel, data))
 	})
+}
+
+// writeKiroAgentsMDManaged writes the Kiro fallback AGENTS.md when dst is
+// absent, and otherwise keeps the existing file — it sits at the workspace
+// root, where it is usually the repository's own instructions — unless it is
+// exactly a body an earlier gc release wrote that says plain `gc hook` claims
+// work (overlay.IsReleasedKiroAgentsMD). That body is replaced without a
+// backup: it is reproducible byte for byte, and a .bak beside a repository's
+// AGENTS.md would only be litter. Overlay staging applies the same rule
+// (overlay.providerPreserveExisting), so the two writers agree.
+func writeKiroAgentsMDManaged(fs fsys.FS, dst string, data []byte) error {
+	if existing, err := fs.ReadFile(dst); err == nil {
+		if !overlay.IsReleasedKiroAgentsMD(existing) {
+			return nil
+		}
+	} else if _, statErr := fs.Stat(dst); statErr == nil {
+		// File exists but isn't readable. Preserve it rather than clobbering it.
+		return nil
+	}
+	return writeManagedData(fs, dst, data)
 }
 
 func writeJSONOverlayManaged(fs fsys.FS, dst string, data []byte) error {

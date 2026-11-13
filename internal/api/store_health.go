@@ -157,7 +157,7 @@ func countBeadStoreRows(ctx context.Context, state State, store beads.Store) (in
 		return 0, errors.New("counting retained bead rows: store unavailable")
 	}
 	query := beads.ListQuery{AllowScan: true, IncludeClosed: true}
-	if counter, ok := store.(beads.Counter); ok {
+	if counter, ok := beads.As[beads.Counter](store); ok {
 		// cachedStoreHealth strips the request deadline, so bound the count
 		// here the same way the status handler bounds its store reads.
 		reqCtx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
@@ -220,7 +220,7 @@ func measuredStoreRows(store beads.Store, rows int, branch string) (int, error) 
 	if rows > 0 {
 		return rows, nil
 	}
-	witness, ok := store.(beads.RowWitness)
+	witness, ok := beads.As[beads.RowWitness](store)
 	if !ok || !witness.SawRows() {
 		return rows, nil
 	}

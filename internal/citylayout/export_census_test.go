@@ -32,6 +32,7 @@ var exportKeptRepoRuntimeEntries = map[string]string{
 	"artifacts":         "convergence iteration artifacts agents read and write",
 	"synth":             "staged meta-prompts the slung agent reads",
 	"file-beads-layout": "layout marker only; the file store it describes is excluded",
+	"min-gc-version":    "the split's gc version floor; a session-side gc that knows it refuses below it (S5 §7.4)",
 }
 
 // exportHomeOnlyRuntimeEntries lists .gc/ entries the source builds by
