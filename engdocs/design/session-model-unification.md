@@ -561,7 +561,12 @@ It declares a step's intended config/pool target in recipe metadata, for
 steps where `assignee` cannot be used (e.g. check and control-dispatch
 steps). The stampers resolve it into `gc.routed_to` before a bead is
 persisted, so no runtime demand/claim/scale reader consults it:
-`gc.routed_to` is the sole persisted routing key (ga-eld2x). A bare
+`gc.routed_to` is the sole persisted routing key (ga-eld2x). This scopes
+routing-target resolution only: metadata that records something about a
+routing event rather than a target (for example a timestamp such as
+`gc.routed_at`) is not a second routing key and is not covered by this
+rule — compare `gc.execution_routed_to` above, which coexists with
+`gc.routed_to` under the same target/non-target distinction. A bare
 `gc.run_target` left on a stored bead is inert authoring provenance;
 `gc doctor --fix` backfills `gc.routed_to` for any pre-migration workflow
 root that still carries only `gc.run_target`.
