@@ -697,6 +697,23 @@ func terminateDrainAckRuntimeByProcessTable(
 // wrapper), so requiring the root's name to match the agent's process hints
 // would refuse the legitimate target.
 //
+// For an exec pack whose boxes share the host, the outcome turns on where its
+// agent runs. A pack whose agent runs in its box's tmux session main
+// (proc.exec without carrier.ops) is scanned as the tmux runtime is: its
+// agent is a pane of that session-carrying tmux server, tracked under the
+// seat's name while the pack lists the box, and this rule targets it as it
+// targets the tmux runtime's pane. For any other pack the rule selects
+// nothing, by construction. Its agent runs outside tmux, so a tmux server in
+// its box that carries the session's GC_SESSION_ID is one an agent or a user
+// founded there, and the shared scan would read each of its panes as a
+// tracked, tmux-parented root of the seat, the exact shape this fence
+// accepts. The exec scanner leaves out every process such a tmux hosts
+// (proctable.ScanBySessionIDOutsideTmux), and an auto composite over the
+// pack reports only what that scan reports, so no in-box pane reaches the
+// rule; the seat's own box program, under the pack's holder or init, is never
+// tmux-parented either. Such a wedged seat's escalation therefore reports
+// "nothing_attributable" and its slot stays occupied, the outcome below.
+//
 // The cost of the positive form is that a provider whose runtimes are not
 // children of infrastructure the scan recognizes gets no force at all — its rows
 // stay exactly as wedged as they are today. That is the right direction for this

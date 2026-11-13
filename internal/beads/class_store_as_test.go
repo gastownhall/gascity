@@ -215,13 +215,13 @@ func TestAsRoutesEveryCapabilityHelper(t *testing.T) {
 }
 
 // capabilityHelperOf is the capability an exported func XFor(Store) (T, bool)
-// returns.
+// returns; a read helper widened to take a leg reader (StoreReader) counts.
 func capabilityHelperOf(fn *ast.FuncDecl) (string, bool) {
 	if !fn.Name.IsExported() || !strings.HasSuffix(fn.Name.Name, "For") {
 		return "", false
 	}
 	params, results := fieldTypes(fn.Type.Params), fieldTypes(fn.Type.Results)
-	if len(params) != 1 || len(results) != 2 || !identNamed(params[0], "Store") || !identNamed(results[1], "bool") {
+	if len(params) != 1 || len(results) != 2 || !identNamed(params[0], "Store") && !identNamed(params[0], "StoreReader") || !identNamed(results[1], "bool") {
 		return "", false
 	}
 	capability, ok := results[0].(*ast.Ident)
@@ -492,12 +492,13 @@ func TestClassGateAllowlist(t *testing.T) {
 	}
 }
 
-// TestXForThroughAHandleToday pins today's behavior, which T1 does not
-// change: the XFor helpers that do not follow a declared resolution target
-// answer "no" on a typed handle even when its store has the capability, and
-// HandlesFor falls back to the logical wrappers. Provider forwarding on the
-// handles (design §3.3.1-2) changes these answers, so it lands with its own
-// behavior tests; until then As is the way through a handle.
+// TestXForThroughAHandleToday pins today's behavior: the XFor helpers that
+// do not follow a declared resolution target answer "no" on a typed handle
+// even when its store has the capability, so As is the way through a handle.
+// Provider forwarding on the handles (design §3.3.1) would change those
+// answers, so it lands with its own behavior tests. HandlesFor is forwarded
+// since T7a (design §3.3.2): a handle over a cache answers the cache's own
+// readers.
 func TestXForThroughAHandleToday(t *testing.T) {
 	mem := NewMemStore()
 	h := GraphStore{mem}
@@ -517,8 +518,8 @@ func TestXForThroughAHandleToday(t *testing.T) {
 		t.Error("MetadataCASWriterFor no longer follows the handle's resolution target")
 	}
 	cache := NewCachingStoreForTest(mem, nil)
-	if _, logical := HandlesFor(GraphStore{cache}).Cached.(logicalCachedStoreReader); !logical {
-		t.Error("HandlesFor now sees through a handle to the cache: provider forwarding landed; update this pin")
+	if got := HandlesFor(GraphStore{cache}).Cached; got != (cachedStoreReader{store: cache}) {
+		t.Errorf("HandlesFor through a handle over a cache: Cached = %#v, want the cache's own reader", got)
 	}
 }
 

@@ -260,38 +260,29 @@ func (s *seededState) ScopedStoreLike(context.Context, beads.Store) (beads.Store
 }
 
 // classStores mints the seeded city's handles: a single-store topology, so
-// NudgesBeadStore, SessionsBeadStore, GraphBeadStore and OrdersBeadStore all
-// wrap the city store, exactly as they do on a default (non-relocated)
-// controller city.
+// every class handle wraps the city store, exactly as on a default
+// (non-relocated) controller city, and each seeded rig is a rig scope over its
+// own store, by name as the controller lists them, with the configured
+// prefixes, so Stores().Topology(), which the API plans its residency over,
+// carries the prefixes its by-id router routes on.
 func (s *seededState) classStores() storeref.Stores {
-	return storeref.NewStores(storeref.Topology{Work: storeref.Leg{Store: s.cityStore}}, storeref.StoresOptions{})
+	topo := storeref.Topology{Work: storeref.Leg{Store: s.cityStore}, Rigs: storeref.RigLegs(s.rigStores)}
+	var rigPrefixes map[storeref.StoreRef]string
+	topo.Work.Prefix, rigPrefixes = configuredPrefixes(s.cfg)
+	for i := range topo.Rigs {
+		topo.Rigs[i].Prefix = rigPrefixes[topo.Rigs[i].Ref]
+	}
+	return storeref.NewStores(topo, storeref.StoresOptions{})
 }
 
-func (s *seededState) NudgesBeadStore() beads.NudgesStore {
-	return s.classStores().Nudges()
-}
+// Stores is the seeded city's class handles (classStores). The seeded stores
+// never change, so every call mints the same handles.
+func (s *seededState) Stores() storeref.Stores { return s.classStores() }
 
 // NudgeQueue is the city's state.json queue over the seeded city store.
 func (s *seededState) NudgeQueue() NudgeQueue {
-	return nudgequeue.StateFileQueue{CityPath: s.cityPath, Shadows: s.NudgesBeadStore()}
+	return nudgequeue.StateFileQueue{CityPath: s.cityPath, Shadows: s.classStores().Nudges()}
 }
-
-func (s *seededState) SessionsBeadStore() beads.SessionStore {
-	return s.classStores().Sessions()
-}
-
-func (s *seededState) GraphBeadStore() beads.GraphStore {
-	return s.classStores().Graph()
-}
-
-func (s *seededState) OrdersBeadStore() beads.OrdersStore {
-	return s.classStores().Orders()
-}
-
-// ClassBindingHasLegacyResidents answers true for everything: a seeded city
-// relocates no class, so it contributes no binding and nothing consults this —
-// and a state that censused nothing has cleared nothing.
-func (s *seededState) ClassBindingHasLegacyResidents(beads.Store) bool { return true }
 
 func (s *seededState) Orders() []orders.Order      { return nil }
 func (s *seededState) OrdersAll() []orders.Order   { return nil }

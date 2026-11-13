@@ -261,6 +261,9 @@ type CityRuntime struct {
 	// they change (city_stores.go).
 	standaloneStores    storesEpochCache
 	standaloneRigStores map[string]beads.Store
+	// standaloneRigGen names standaloneRigStores for the store epoch:
+	// setStandaloneStores bumps it on every swap.
+	standaloneRigGen uint64
 
 	// storageRoutes is the opened non-work storage binding this process
 	// resolved once at boot, or nil for every city that authors no [storage]
@@ -563,6 +566,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 	if err != nil {
 		return nil, err
 	}
+	warnDegradedServing(routes, p.Stderr, logPrefix)
 	// NOTE: the routes are NOT registered as this city's residency answer here.
 	// Construction happens before the supervisor knows whether it can take the
 	// controller lock, and a replacement that loses it would have repointed the
@@ -586,7 +590,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		configRev:               p.ConfigRev,
 		configDirty:             configDirty,
 		configDebounce:          p.ConfigDebounce,
-		reconcilerDrift:         reconcilerModeDrift{running: p.ReconcilerMode, lookupEnv: p.ReconcilerLookupEnv, fellBack: p.ReconcilerV2FellBack},
+		reconcilerDrift:         reconcilerModeDrift{running: p.ReconcilerMode, cityPath: p.CityPath, lookupEnv: p.ReconcilerLookupEnv, fellBack: p.ReconcilerV2FellBack},
 		cfg:                     p.Cfg,
 		sp:                      p.SP,
 		publishedRev:            p.ConfigRev,
@@ -737,6 +741,12 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// after its import are named once, here, and never in a CLI process. A
 	// rig suspended now is censused when it resumes (censusResumedRigs).
 	cr.startRigResidueCensus(ctx)
+
+	// The containment check the boot gate ran, again every
+	// strandRecheckInterval, read-only and report-only: a write that strands
+	// rows after boot becomes a storage.binding.stranded event.
+	stopStrandRecheck := cr.startStrandRecheck(ctx)
+	defer stopStrandRecheck()
 
 	// Record bead store health metric.
 	telemetry.RecordBeadStoreHealth(context.Background(), cr.cityName, cr.cityBeadStore() != nil)
@@ -1921,7 +1931,8 @@ func (cr *CityRuntime) tickReconcileExecutionCompletions(p *tickPass) bool {
 // gets the sessions class only when it is relocated onto a SQLite infra
 // ledger; on an unsplit city it gets nothing and never touches the work store.
 func (cr *CityRuntime) tickWispGC(p *tickPass) bool {
-	if graphStore := cr.graphBeadStore(); cr.wg != nil && graphStore.Store != nil && cr.wg.shouldRun(time.Now()) {
+	stores := cr.cityStores()
+	if graphStore := stores.Graph(); cr.wg != nil && graphStore.Store != nil && cr.wg.shouldRun(time.Now()) {
 		phaseStart := time.Now()
 		// On a city that relocates the graph class, the attachment holders and
 		// the v1 poured molecule roots live on the work legs, not the binding
@@ -1931,7 +1942,13 @@ func (cr *CityRuntime) tickWispGC(p *tickPass) bool {
 		if _, relocated := graphClassBinding(cr.storageRoutes); relocated { // residency:allow — asks only whether the graph class is relocated; the legs come from the census plan (workLegs)
 			legs = cr.workLegs()
 		}
-		purged, gcErr := cr.wg.runGC(legs, graphStore, cr.infraSessionLedger(), cr.mailBeadStore(), time.Now())
+		// The pass's readers: the epoch's Molecule{Roots} plan over the
+		// census legs (graph alone when legs is nil).
+		roots := wispGCGraphRoots(stores, graphStore)
+		if legs != nil {
+			roots = legs.wispGCRoots(stores, graphStore)
+		}
+		purged, gcErr := cr.wg.runGC(roots, legs, graphStore, cr.infraSessionLedger(), cr.mailBeadStore(), time.Now())
 		payload := map[string]any{"purged": purged}
 		if legs != nil {
 			// The work arm runs on its own lane; the tick only wakes it and
@@ -2972,7 +2989,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 			}
 			return reloadControlReply{Outcome: reloadOutcomeFailed, Error: err.Error(), Warnings: warnings}
 		}
-		resume, err := cr.beforeProviderSwap(ctx, nextCfg)
+		resume, err := cr.beforeProviderSwap(ctx, nextCfg, nextSp)
 		defer resume() // after the swap publishes, or the reload aborts
 		if err != nil {
 			return swapFailed(fmt.Errorf("provider swap: %w", err))
@@ -4639,6 +4656,7 @@ func (cr *CityRuntime) setStandaloneStores(city beads.Store, rigs map[string]bea
 	cr.serviceStateMu.Lock()
 	cr.standaloneCityStore = city
 	cr.standaloneRigStores = rigs
+	cr.standaloneRigGen++
 	cr.serviceStateMu.Unlock()
 }
 

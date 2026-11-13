@@ -180,15 +180,14 @@ type = "task"
 	config.InjectImplicitAgents(cfg)
 	addTestControlDispatcherAgents(cfg, "", "frontend")
 
-	deps := slingDeps{
+	deps := slingDepsWithStore(slingDeps{
 		CityName: "test-city",
 		CityPath: "/city",
 		Cfg:      cfg,
-		Store:    store,
 		StoreRef: "city:test-city",
 		Resolver: cliAgentResolver{},
 		Notify:   cliNotifier{},
-	}
+	}, store)
 
 	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
 	result, err := sling.InstantiateSlingFormula(
@@ -260,9 +259,9 @@ metadata = { "gc.run_target" = "{{review_target}}" }
 	}
 
 	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
-	deps.Store = beads.NewMemStoreFrom(1, []beads.Bead{
+	deps = slingDepsWithStore(deps, beads.NewMemStoreFrom(1, []beads.Bead{
 		{ID: "BL-42", Title: "Work", Type: "task", Status: "open"},
-	}, nil)
+	}, nil))
 	config.InjectImplicitAgents(cfg)
 	addTestControlDispatcherAgents(cfg, "", "frontend")
 	opts := testOpts(reviewer, "BL-42")

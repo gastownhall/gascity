@@ -18,6 +18,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/pidutil"
 )
@@ -55,6 +56,9 @@ type managedDoltStartedProcess struct {
 	// these before signaling WatchdogPID. Zero/empty when there is no watchdog.
 	WatchdogStartTimeTicks uint64
 	WatchdogStartIdentity  string
+	// InfraScope names the transient systemd user scope unit the spawn runs
+	// in (see infraArgv); empty when it was spawned unscoped.
+	InfraScope string
 }
 
 // defaultManagedDoltBindHost is the listener host a managed dolt sql-server
@@ -238,11 +242,12 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 			return report, fmt.Errorf("write pid file: %w", err)
 		}
 		if err := writeDoltRuntimeStateFile(layout.StateFile, doltRuntimeState{
-			Running:   true,
-			PID:       started.PID,
-			Port:      currentPort,
-			DataDir:   layout.DataDir,
-			StartedAt: time.Now().UTC().Format(time.RFC3339),
+			Running:    true,
+			PID:        started.PID,
+			Port:       currentPort,
+			DataDir:    layout.DataDir,
+			StartedAt:  time.Now().UTC().Format(time.RFC3339),
+			InfraScope: started.InfraScope,
 		}); err != nil {
 			terminateManagedDoltStartedProcess(started)
 			_ = os.Remove(layout.PIDFile)
@@ -445,7 +450,7 @@ func startManagedDoltSQLServer(cityPath, configFile, logFilePath string, logFile
 	if managedDoltScopeWatchdogEnabled() {
 		return startManagedDoltSQLServerWithScopeWatchdog(cityPath, configFile, logFilePath, logFile)
 	}
-	cmd := exec.Command("dolt", "sql-server", "--config", configFile)
+	cmd, infraScopeUnit := infraCommand(managedDoltInfraDescription(cityPath), "dolt", "sql-server", "--config", configFile)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
@@ -469,6 +474,7 @@ func startManagedDoltSQLServer(cityPath, configFile, logFilePath string, logFile
 		PID:            pid,
 		StartTimeTicks: startTimeTicks,
 		StartIdentity:  startIdentity,
+		InfraScope:     infraScopeUnit,
 	}
 	// Reap the child when it exits so it does not linger as a zombie under a
 	// non-reaping PID-1 controller. This server is managed out-of-band by PID
@@ -1276,45 +1282,26 @@ func managedDoltTestParentDone(rawFD string) (<-chan struct{}, func(), error) {
 	return done, func() { _ = parentPipe.Close() }, nil
 }
 
-// managedDoltSessionScopedEnvKeys are the per-session identity variables the
-// session lifecycle injects into an agent runtime
-// (session.RuntimeEnvWithSessionContext), plus the provider's own session id.
-// A managed server started from inside an agent session would otherwise
-// inherit them, and its scope watchdog reparents to init, so the session
-// reconciler's orphan sweep (sweepProcessTableOrphans) would reap the watchdog
-// as that session's process-table root once the session bead closes, taking
-// the server down with it. A managed server is city infrastructure, not part
-// of any session. A hook's deadline (hookDeadlineEnv) is scrubbed too: the
-// server outlives the hook that may have started it, so the deadline would be
-// stale for anything the server or its watchdog spawns.
-var managedDoltSessionScopedEnvKeys = []string{
-	hookDeadlineEnv,
-	"GC_SESSION_ID",
-	"GC_SESSION_NAME",
-	"GC_ALIAS",
-	"GC_AGENT",
-	"GC_TEMPLATE",
-	"GC_SESSION_ORIGIN",
-	"GC_RUNTIME_EPOCH",
-	"GC_CONTINUATION_EPOCH",
-	"GC_INSTANCE_TOKEN",
-	"BEADS_HOLDER_TOKEN",
-	"BEADS_ACTOR",
-	"CLAUDE_CODE_SESSION_ID",
-}
+// managedDoltSessionScopedEnvKeys are the per-session identity variables
+// (execenv.SessionScopedEnvKeys) a managed server started from inside an
+// agent session would otherwise inherit. Its scope watchdog reparents to
+// init, so the session reconciler's orphan sweep (sweepProcessTableOrphans)
+// would reap the watchdog as that session's process-table root once the
+// session bead closes, taking the server down with it. A managed server is
+// city infrastructure, not part of any session. The list is shared with the
+// exec runtime's ops, so the two scrubs cannot drift.
+var managedDoltSessionScopedEnvKeys = execenv.SessionScopedEnvKeys
 
-// withoutSessionIdentityEnv returns env with every
-// managedDoltSessionScopedEnvKeys entry removed. Every long-lived, detached
-// city-infrastructure process gc spawns (managed Dolt, its scope watchdog, a
-// drift-respawned supervisor) goes through it, because a reparented process
-// carrying an agent's GC_SESSION_ID is that session's orphan-sweep target.
-// Exec orders go through it too (mergeOrderExecEnv): an order acts for the
-// city, not for the seat that started the controller.
+// withoutSessionIdentityEnv returns env without any
+// managedDoltSessionScopedEnvKeys entry (execenv.WithoutSessionIdentity).
+// Every long-lived, detached city-infrastructure process gc spawns (managed
+// Dolt, its scope watchdog, a drift-respawned supervisor) goes through it,
+// because a reparented process carrying an agent's GC_SESSION_ID is that
+// session's orphan-sweep target. Exec orders go through it too
+// (mergeOrderExecEnv): an order acts for the city, not for the seat that
+// started the controller.
 func withoutSessionIdentityEnv(env []string) []string {
-	for _, key := range managedDoltSessionScopedEnvKeys {
-		env = removeEnvKey(env, key)
-	}
-	return env
+	return execenv.WithoutSessionIdentity(env)
 }
 
 // doltServerEnv returns the environment applied to every managed dolt

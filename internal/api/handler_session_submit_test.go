@@ -711,7 +711,7 @@ func TestBackgroundMessageNeverStartsInProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	startsBefore := fs.sp.CountCalls("Start", info.SessionName)
-	if err := srv.sendBackgroundMessageToSession(context.Background(), fs.cityBeadStore, info.ID, "ping"); err != nil {
+	if err := srv.sendBackgroundMessageToSession(context.Background(), beadstest.Sessions(fs.cityBeadStore), info.ID, "ping"); err != nil {
 		t.Fatalf("sendBackgroundMessageToSession: %v", err)
 	}
 	b, err := fs.cityBeadStore.Get(info.ID)

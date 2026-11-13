@@ -40,6 +40,14 @@ that is 71 bytes, enough for gc's pool session names
 (`<template>-gcg-session-<32 hex>`) of templates up to 26 characters. A
 start whose socket path would not fit fails before screen runs.
 
+**Reconciler v2:** the script is v2-ready, so a city running it with
+`[daemon] session_reconciler` unset runs reconciler v2 from its next
+controller start, unless the city falls back to legacy for another reason
+(the boot log and `gc doctor` say which); set
+`session_reconciler = "legacy"` to keep legacy. Before switching a city with
+running sessions, see "Switching an existing exec city to v2" in
+`docs/reference/exec-session-provider.md`.
+
 **Upgrading from an earlier version:** with the old script still in place,
 stop the city (`gc stop <city>`: the controller and every session), then
 replace the file and start the city again. The earlier version kept its

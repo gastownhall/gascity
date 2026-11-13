@@ -6,7 +6,6 @@
 # fails the gate's TESTS verdict and TestSplitStrictGateInputsParse until it is
 # replaced with why the test fails under the gate.
 # The nightly downward ratchet (--check) fails on an entry that now passes.
-TestAnEarlierMigrationsReclassifiedRowsKeepTheFenceOpen	fails under the gate: drain fence fails closed = false, want true (probe error: loading session "gcg-session-904dc4b6bb": getting bead "gcg-session-904dc4b6bb": bead not found)
 TestAnUnknownClassNameStaysOnTheWorkLedger	fails under the gate: unknown class resolved to 0x6315ef68e20, want the work store 0x6315cefe540
 TestAttachGitHubPRRepairWorkflowStaysOnTheOneStoreOnSingleStoreCity	fails under the gate: the repair workflow's wisp root is not in the one store a single-store city has
 TestAutocloseSweepClosesMoleculeForALostStepClose	fails under the gate: molecule root open after the sweep, want closed
@@ -22,6 +21,7 @@ TestCLIStorageRoutesBypassACityWithNoStorageSection	fails under the gate: the on
 TestCLIStorageRoutesKeepTheWorkStoreForABrokenSingleStoreCity	fails under the gate: a single-store city with a broken config routed sessions to 0x1abba9089160, want the work store 0x1abba85d8d20
 TestCLIStorageRoutesRefuseAnUnconvergedCity	fails under the gate: work resolved to 0x563e1e561c0 on a refused city, want the work store 0x563e278ce00
 TestCLIStorageRoutesRefuseWhenCityConfigFailsToLoad	fails under the gate: work resolved to 0xa08540efc0 on an unloadable config, want the work store 0xa086d06540
+TestCN2WorkerSiteOfAV2CityNeverTakesTheCheckedWrite	fails under the gate: session rows [], want the restart not recorded: like its TestWorkerSite* and TestRowFirstRestartWorkerSite* siblings, it reads the box's session row through localSessionBeads, the local ledger's work view, which lists none under the gate; the CAS-only verdict and the refused exit it pins hold under the gate
 TestCacheAgeFooterLeavesRouteStdoutEqual	fails under the gate: the API route prints no cache-age footer because the served age reads 0: the gate's work view over the city store claims the cache probes only when its front has both IsLive and Stats (splittest.newProjectionView), and the bead-policy layer forwards Stats alone (IsLive is deliberately hidden so city reads are never refused with cache_not_live), so the view hides Stats and the age reads 0; production serves the policy layer directly and reports the age
 TestCityAPIReportsTheCityCacheAge	fails under the gate: GET /beads X-GC-Cache-Age-S: cache age = 0, want in (60, 75]: the gate's work view over the city store claims the cache probes only when its front has both IsLive and Stats (splittest.newProjectionView), and the bead-policy layer forwards Stats alone (IsLive is deliberately hidden so city reads are never refused with cache_not_live), so the view hides Stats and the age reads 0; production serves the policy layer directly and reports the age
 TestCityRuntimeBeadReconcileTick_IdleClaimNudgeSeesReadyUnassignedRoutedTrigger	fails under the gate: idle-claim nudge count = "0", want 1 for ready routed unassigned trigger; output=""
@@ -127,9 +127,6 @@ TestFormulaCookRootOnlyLegacyWispStaysOnTheOneStoreOnSingleStoreCity	fails under
 TestFormulaCookStandaloneGraphV2StampsRunRootStoreScope	fails under the gate: get root gcg-1: bead "gcg-1" is not in this store: bead not found
 TestFormulaCookStandaloneGraphV2StampsRunRootStoreScopeForRig	fails under the gate: get root gcg-1: bead "gcg-1" is not in this store: bead not found
 TestGraphPlacementRuleTable	fails under the gate: split=false city: graphPlacementForScope = *splittest.view(0x28a1790d2300), want *beads.FileStore(0x28a175ea0ee0)
-TestHookClaimDrainFenceFailsClosedOnAStorageGateRefusal	fails under the gate: code = 0, want 2 (fence failed closed: unknown, not empty and not drained); stderr=gc hook --claim: drain-pending probe unavailable for gcg-session-904dc4b6bb: 
-TestHookDiscoveryDrainFenceFailsClosedOnAStorageGateRefusal	fails under the gate: code = 0, want 2 (fence failed closed); stderr=gc hook: drain-pending probe unavailable for gcg-session-904dc4b6bb: loading session "gcg-session-904dc4b6bb": ge
-TestHookDrainPendingProbeCarriesTheStorageGateRefusal	fails under the gate: the probe's error lost the standing-refusal mark, so the fence cannot tell it from a hiccup: loading session "gcg-session-904dc4b6bb": getting bead "gcg-session
 TestHookIdentityFallbackResolvesAsBefore	fails under the gate: session beads = 0, want 1
 TestHookRequestBudget	fails under the gate: session beads = 0, want 1
 TestHookRequestBudgetOnAWorkerSite	fails under the gate: session beads = 0, want 1
@@ -250,7 +247,6 @@ TestSingleStoreConvergenceIsUnchanged	fails under the gate: single-store rig sco
 TestSplitEnvTopologies	fails under the gate: resolveClassStore("graph") on the single-store topology did not collapse to the work store
 TestSplitEnvTopologiesWithRigLeg	fails under the gate: resolveClassStore("graph") on the single-store topology did not collapse to the work store
 TestSplitTopologyConformance	fails under the gate: minted wisp gc-2 has Ephemeral=true, want false: policy-wrapped=false (a wrapped front door maps the wisp policy onto the ephemeral tier under bd-1.0.5; a reloc
-TestStandingGateRefusalIsNotTransient	fails under the gate: stranded-city refusal: err=loading session "gcg-session-904dc4b6bb": getting bead "gcg-session-904dc4b6bb": bead not found transient=false failsClosed=false; wa
 TestStorageGateServesAConvergedCityFromTheBinding	fails under the gate: work stopped resolving to the work store on a converged city
 TestStoreOpensWithoutTheMemoStayOwned	fails under the gate: store 0 closed 0 times, want 1
 TestSweepOrderTrackingCommandClosesAllStaleTracking	fails under the gate: Get(gcg-1): bead "gcg-1" is not in this store: bead not found

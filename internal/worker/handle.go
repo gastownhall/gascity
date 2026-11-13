@@ -285,12 +285,14 @@ type InterruptRequest struct {
 	// runtime not running by a fresh liveness read, nothing sent; an error
 	// wrapping runtime.ErrTurnNotEnded when it was interrupted but not seen
 	// to end, which wraps no other sentinel (the last failure is in its text
-	// only), so "sent" is never misread as unknown; and an error wrapping
-	// runtime.ErrRuntimeUnavailable when it is unknown whether anything was
-	// sent, which then wraps session.ErrInterruptOutcomeUnknown too, or when
-	// the turn could not be checked before ctx ended or its idle state could
-	// not be read (nothing sent then). ctx bounds the wait for the session
-	// mutation lock and the check before the keys.
+	// only), so "sent" is never misread as unknown, unless a restart on
+	// failure was withheld behind a pending interaction (OnFailure); and an
+	// error wrapping runtime.ErrRuntimeUnavailable when it is unknown
+	// whether anything was sent, which then wraps
+	// session.ErrInterruptOutcomeUnknown too, or when the turn could not be
+	// checked before ctx ended or its idle state could not be read (nothing
+	// sent then). ctx bounds the wait for the session mutation lock and the
+	// check before the keys.
 	Turn string `json:"turn,omitempty"`
 	// OnFailure is what the interrupt does when it was sent and its turn was
 	// not seen to end. Empty and InterruptOnFailureFail return that error
@@ -305,11 +307,16 @@ type InterruptRequest struct {
 	// ctx ended, a check refused the follow-up interrupt, or nothing showed
 	// the interrupted turn still running: no read of it answered) an error
 	// wrapping session.ErrInterruptOutcomeUnknown, as
-	// session.StopTurnOptions.Restart documents. A restart applies to a
-	// keystroke runtime on a SessionHandle, whatever its turn source: a
-	// turn-scoped interrupt on a protocol turn source whose runtime
-	// interrupts by keystroke (ACP) interrupts the turn by protocol first
-	// and restarts only once it is not seen to end
+	// session.StopTurnOptions.Restart documents. A restart is withheld too,
+	// on either scope, when the idle wait after the keys ended on a pending
+	// interaction (under program_status "on", a dialog the interrupted
+	// program raised since the interrupt), which it would discard: that
+	// error wraps session.ErrPendingInteraction beside
+	// runtime.ErrTurnNotEnded, since the dialog holds the turn. A restart
+	// applies to a keystroke runtime on a SessionHandle, whatever its turn
+	// source: a turn-scoped interrupt on a protocol turn source whose
+	// runtime interrupts by keystroke (ACP) interrupts the turn by protocol
+	// first and restarts only once it is not seen to end
 	// (session.Manager.InterruptTurn). A protocol runtime's stop may leave
 	// it running, so its not-ended error is returned as with fail, and a
 	// RuntimeHandle, which has no session row to restart from, refuses it,

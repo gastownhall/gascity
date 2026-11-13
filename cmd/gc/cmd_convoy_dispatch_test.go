@@ -1468,6 +1468,32 @@ func TestPendingControlRefusal_FirstRefusalIsNotQuiet(t *testing.T) {
 	}
 }
 
+// TestPendingControlRefusal_NonCheckDriftIsNotAnnouncedAsUnlaunchable keeps
+// control.check_unlaunchable scoped to its one refusal. A drift that has
+// nothing to do with a check script (here a rig that left city.toml) shares
+// the pending lane and its budget, but announcing it as an unlaunchable check
+// would send the operator looking for a script that is not the problem.
+func TestPendingControlRefusal_NonCheckDriftIsNotAnnouncedAsUnlaunchable(t *testing.T) {
+	clearGCEnv(t)
+
+	store, _, finalizerID := newPendingControlBead(t)
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	cityPath := t.TempDir()
+
+	var stderr bytes.Buffer
+	err := runControlDispatcherWithStoreAndConfig(cityPath, t.TempDir(), store, finalizerID, cfg, io.Discard, &stderr)
+	if !errors.Is(err, dispatch.ErrControlDriftPending) {
+		t.Fatalf("dispatch error = %v, want ErrControlDriftPending", err)
+	}
+	recorded, err := events.ReadAll(filepath.Join(cityPath, ".gc", "events.jsonl"))
+	if err != nil {
+		t.Fatalf("read recorded events: %v", err)
+	}
+	if n := countEventsOfType(recorded, events.ControlCheckUnlaunchable); n != 0 {
+		t.Fatalf("%s emitted %d times for a rig drift, want 0", events.ControlCheckUnlaunchable, n)
+	}
+}
+
 func TestSourceWorkflowLockScopeForStoreRefUsesSharedHelper(t *testing.T) {
 	cityPath := "/city"
 	cfg := &config.City{
@@ -2932,10 +2958,11 @@ func TestCmdWorkflowReopenSourcePreRoutesGraphWrappedSource(t *testing.T) {
 	}
 
 	deps, slingStdout, slingStderr := testDeps(graphWorkSlingTestCity(t), runtime.NewFake(), newFakeRunner().run)
-	deps.Store = store
+	deps = slingDepsWithStore(deps, store)
 	// The workflow is graph class: it goes to the graph store gc sling
 	// resolves for this city, the source stays in the work store.
-	deps.GraphStore = resolveGraphStore(cliStorageRoutes(cityDir), store, deps.Cfg, cityDir, nil)
+	deps.GraphStore = beadstest.Graph(resolveGraphStore(cliStorageRoutes(cityDir), store, deps.Cfg, cityDir, nil))
+	deps.Sessions = beadstest.Sessions(resolveSessionStore(cliStorageRoutes(cityDir), store, deps.Cfg, cityDir, nil))
 	maxPolecats := 5
 	a := config.Agent{Name: "polecat", MaxActiveSessions: &maxPolecats}
 
