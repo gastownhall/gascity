@@ -808,6 +808,63 @@ func TestGetRejectsNonMessageType(t *testing.T) {
 	}
 }
 
+// TestNonMessageBeadIsNeverSurfacedAsMail pins that a bead of another type (a
+// session-tracking bead whose title looks like an address) is not mail on any
+// path: the direct-ID operations refuse it without touching it, and the list
+// and count views never include it (ga-g6d94e).
+func TestNonMessageBeadIsNeverSurfacedAsMail(t *testing.T) {
+	store := beads.NewMemStore()
+	p := newTestProvider(store)
+
+	sess, err := store.Create(beads.Bead{
+		Title:    "pack-author.pack-author",
+		Type:     "session",
+		Assignee: "mayor",
+		From:     "alice", // a sender, so Reply would succeed were the type not checked
+		Labels:   []string{"gc:session", "template:pack-author.pack-author"},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+
+	ops := map[string]func() error{
+		"Read":       func() error { _, err := p.Read(sess.ID); return err },
+		"MarkRead":   func() error { return p.MarkRead(sess.ID) },
+		"MarkUnread": func() error { return p.MarkUnread(sess.ID) },
+		"Reply":      func() error { _, err := p.Reply(sess.ID, "bob", "re", "body"); return err },
+		"Archive":    func() error { return p.Archive(sess.ID) },
+	}
+	for name, op := range ops {
+		t.Run(name, func(t *testing.T) {
+			if err := op(); err == nil {
+				t.Fatalf("%s(session bead) = nil error, want a not-a-message refusal", name)
+			}
+		})
+	}
+
+	got, err := store.Get(sess.ID)
+	if err != nil {
+		t.Fatalf("Get session bead: %v", err)
+	}
+	if slices.Contains(got.Labels, "read") || got.Metadata["mail.read"] != "" {
+		t.Errorf("session bead was mutated by a mail operation: labels=%v metadata=%v", got.Labels, got.Metadata)
+	}
+	all, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(all) != 1 {
+		t.Errorf("store holds %d beads after the operations, want only the session bead (Reply must not create one)", len(all))
+	}
+
+	if total, unread, err := p.Count("mayor"); err != nil || total != 0 || unread != 0 {
+		t.Errorf("Count(mayor) = %d, %d, %v; want 0, 0, nil", total, unread, err)
+	}
+	if msgs, err := p.Inbox("mayor"); err != nil || len(msgs) != 0 {
+		t.Errorf("Inbox(mayor) = %d messages, %v; want none", len(msgs), err)
+	}
+}
+
 // --- Inbox ---
 
 func TestInboxEmpty(t *testing.T) {
