@@ -116,7 +116,7 @@ type storageSplitJournal struct {
 	// ReadyBefore is the city's ready set before the copy, which the split
 	// proves the split city's against (cmd_storage_split_readiness.go).
 	ReadyBefore *splitReadySnapshot `json:"ready_before,omitempty"`
-	// DanglingRepair says why the dangling-edge repair before the copy
+	// DanglingRepair says why the dangling-edge repair after the rig imports
 	// stopped, or "".
 	DanglingRepair string `json:"dangling_repair,omitempty"`
 	// AbandonedFrom is the phase an --abandon began from.

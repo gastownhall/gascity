@@ -25,18 +25,21 @@ package main
 //   - a row that waits on an "external:<id>" reference whose bead no store
 //     holds: bd serves it, and the split city enforces the reference
 //     (preflight's `external refs` note);
-//   - a cross-store gate the split minted.
-//
+//   - a cross-store gate the split minted;
 //   - a row the dangling-edge repair may release: one holding a blocking edge
 //     whose target its store does not hold, which a reader may count blocked
-//     before the split.
+//     before the split;
+//   - a ready row that carries a defer_until: its deferral has come due, so
+//     the clock, not the split, made it ready. A deferral that passes while
+//     the window runs is one; a bd deferral already past its date, which bd
+//     keeps parked until its own sweep and the binding serves once due, is
+//     the other.
 //
 // Any other row ready on one side and not the other fails the split before
 // it is recorded complete, naming each: the city is split and serves, and
 // both rollbacks stay open.
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"slices"
@@ -57,7 +60,8 @@ var splitDanglingEdgeRepairs = func(cfg *config.City, cityPath string) error {
 
 // splitReadySnapshot is a city's ready set: every ready row's id, and the
 // rows the split is known to change (a row waiting on an external reference
-// bd does not enforce, a cross-store gate, a row the repair may release).
+// bd does not enforce, a cross-store gate, a row the repair may release, a
+// row whose deferral came due).
 type splitReadySnapshot struct {
 	IDs       []string `json:"ids"`
 	Explained []string `json:"explained,omitempty"`
@@ -95,7 +99,8 @@ func readSplitReadySet(cityPath string, cfg *config.City) (splitReadySnapshot, e
 	}
 	for _, r := range rows {
 		out.IDs = append(out.IDs, r.ID)
-		if splitWaitsOnExternal(r) || hasLabel(r.Labels, dispatch.CrossStoreGateLabel) {
+		// A ready row with a defer_until is one whose deferral came due.
+		if splitWaitsOnExternal(r) || hasLabel(r.Labels, dispatch.CrossStoreGateLabel) || r.DeferUntil != nil {
 			out.Explained = append(out.Explained, r.ID)
 		}
 	}
@@ -243,10 +248,20 @@ func (r *splitRun) splitRepairAndProve(cfg *config.City) error {
 		return fmt.Errorf("reading the ready set after the split: %w", err)
 	}
 	if diff := splitReadinessDifference(*r.journal.ReadyBefore, after); len(diff) > 0 {
-		return errors.New("the split changed which beads are ready, for no reason it records: " + strings.Join(diff, ", ") + ". Inspect them with `gc ready` and `gc bd show <id>`; the city is split, and either rollback below puts it back")
+		return fmt.Errorf("the split changed which beads are ready, for no reason it records: %s. Inspect them with `gc ready` and `gc bd show <id>`. The city is split, and the split stays incomplete until they are resolved; either way back puts it back: %s", strings.Join(diff, ", "), splitRollbackChoices(r.journal))
 	}
 	fmt.Fprintf(r.stdout, "%s: the ready set is the same before and after the split (%d bead(s); %d waiting on an external reference or a gate)\n", r.logPrefix, len(after.IDs), len(after.Explained)) //nolint:errcheck // best-effort stdout
 	return nil
+}
+
+// splitRollbackChoices names the ways back from a split, for a refusal that
+// stops the run before its closing report.
+func splitRollbackChoices(j storageSplitJournal) string {
+	choices := fmt.Sprintf("`%s` keeps every bead written since", storageReverseInstruction(reverseToWork, nil))
+	if j.Snapshot != "" {
+		choices += fmt.Sprintf("; `%s` puts the city back exactly as the pinned snapshot %s found it", snapshotCityRestoreInstruction(j.Snapshot, j.SnapshotTo), j.Snapshot)
+	}
+	return choices
 }
 
 // splitClosingRollbacks is the closing report's account of the two ways back
