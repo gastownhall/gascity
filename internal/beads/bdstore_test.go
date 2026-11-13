@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -3100,6 +3101,11 @@ func TestBdStorePurge(t *testing.T) {
 	if strings.Contains(args, "--dry-run") {
 		t.Errorf("args = %q, should not contain --dry-run", args)
 	}
+	// A real purge must confirm with --force: unforced bd purge only
+	// previews and exits non-zero when anything matches.
+	if !slices.Contains(gotArgs, "--force") {
+		t.Errorf("args = %q, want --force for a non-dry-run purge", args)
+	}
 	// Dir should be parent of beads dir.
 	if gotDir != "/city/rigs/fe" {
 		t.Errorf("dir = %q, want %q", gotDir, "/city/rigs/fe")
@@ -3128,8 +3134,12 @@ func TestBdStorePurgeDryRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := strings.Join(gotArgs, " ")
-	if !strings.Contains(args, "--dry-run") {
+	if !slices.Contains(gotArgs, "--dry-run") {
 		t.Errorf("args = %q, want --dry-run", args)
+	}
+	// A preview must never confirm the deletion.
+	if slices.Contains(gotArgs, "--force") {
+		t.Errorf("args = %q, dry-run must not contain --force", args)
 	}
 }
 
@@ -5419,6 +5429,30 @@ func TestBdStoreReadyRetryBoundedReturnsErrorAfterExhaustion(t *testing.T) {
 	}
 	if calls < 2 {
 		t.Fatalf("calls = %d, want >= 2 (retry must be attempted)", calls)
+	}
+}
+
+// TestIsIssueTypeRefused pins the classifier for a store refusing a type its
+// registry does not define, however the store wrapped bd's answer.
+func TestIsIssueTypeRefused(t *testing.T) {
+	refusal := errors.New(`Error: invalid issue type "session" (valid: bug, feature, task, epic, chore, decision)`)
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"bd's answer", refusal, true},
+		{"both tiers, hard", fmt.Errorf("bd list both tiers: bd list: %w", refusal), true},
+		{"both tiers, partial", &beads.PartialResultError{Op: "bd list both tiers", Err: fmt.Errorf("bd list: %w", refusal)}, true},
+		{"a failed read is not a refusal", errors.New("bd list: dial tcp 127.0.0.1:3307: connect: connection refused"), false},
+		{"a timeout is not a refusal", errors.New("timed out after 30s"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := beads.IsIssueTypeRefused(tc.err); got != tc.want {
+				t.Fatalf("IsIssueTypeRefused(%v) = %t, want %t", tc.err, got, tc.want)
+			}
+		})
 	}
 }
 

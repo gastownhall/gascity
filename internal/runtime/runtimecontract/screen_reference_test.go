@@ -68,10 +68,11 @@ func TestScreenReferenceIsConformant(t *testing.T) {
 		t.Errorf("handshake: v2-ready %v (missing %v), locality %q; want v2-ready and local", report.V2Ready, report.V2Missing, report.Protocol.Locality)
 	}
 	// The script owns no server of its own (each box is its own screen
-	// session), so it does not declare server-lifecycle.
+	// session), so it does not declare server-lifecycle; nor does it type
+	// outcomes (input-outcome), so the whole input group skips.
 	wantSkip := map[Code]bool{
 		ReqConnectionExec: true, ReqConnectionIdleBoundary: true, ReqProvisionBoxWithoutAgent: true, ReqObserveInventoryHasActivity: true,
-		ReqFSHostSharedView: true, ReqFSHostSameUser: true, ReqFSHostLocal: true, ReqFSHostRunsWhatItCarries: true, ReqFSHostAgentPIDOnHost: true,
+		ReqFSHostSharedView: true, ReqFSHostSameUser: true, ReqFSHostLocal: true, ReqFSHostRunsWhatItCarries: true, ReqFSHostAgentPIDOnHost: true, ReqFSHostHomeView: true,
 		ReqServerStopIdempotent: true, ReqServerStartAfterStop: true, ReqServerStopEndsSession: true,
 		ReqServerStopSparesOtherCities: true,
 	}
@@ -79,7 +80,7 @@ func TestScreenReferenceIsConformant(t *testing.T) {
 		switch {
 		case res.Status == StatusFail:
 			t.Errorf("%s failed: %s", res.Code, res.Detail)
-		case res.Status == StatusSkip && !wantSkip[res.Code]:
+		case res.Status == StatusSkip && !wantSkip[res.Code] && res.Group != GroupInput:
 			t.Errorf("%s skipped: %s", res.Code, res.Detail)
 		}
 	}

@@ -17,7 +17,11 @@ const ( //nolint:revive // exported requirement IDs are documented by the catalo
 	RequirementAcceptedMessageQueuesBehindPending  RequirementCode = "WC-DELIVERY-002"
 	RequirementWaitIdleOutOfReachQueuesAtOnce      RequirementCode = "WC-NUDGE-001"
 	RequirementRPPVanishedNudgeNotDelivered        RequirementCode = "WC-RPP-001"
+	RequirementRPPTypedOutcomeReachesHandle        RequirementCode = "WC-RPP-002"
+	RequirementRPPUnobservedIsDelivered            RequirementCode = "WC-RPP-003"
 	RequirementRPPHostFSTranscriptTurns            RequirementCode = "WC-RPP-005"
+	RequirementRPPHostFSLeftoverReaped             RequirementCode = "WC-RPP-006"
+	RequirementRPPHeldNudgeTypedOnce               RequirementCode = "WC-RPP-012"
 	RequirementContinuationContinuity              RequirementCode = "WC-CONT-001"
 	RequirementFreshSessionIsolation               RequirementCode = "WC-CONT-002"
 	RequirementStartupOutcomeBound                 RequirementCode = "WC-BRINGUP-001"
@@ -221,9 +225,29 @@ func RPPHandleCatalog() []Requirement {
 			Description: "A nudge to a pack-runtime session that vanished after the handle's liveness read is never reported delivered: it fails with runtime.ErrSessionNotFound, the refusal the nudge queue releases without spending an attempt.",
 		},
 		{
+			Code:        RequirementRPPTypedOutcomeReachesHandle,
+			Group:       "rpp",
+			Description: "Each non-success input outcome a pack declaring input-outcome answers a nudge with reaches the handle as its runtime sentinel and is never reported delivered: busy as runtime.ErrSessionBusy and unavailable as runtime.ErrRuntimeUnavailable (deferred without an attempt), pending_interaction as runtime.ErrNudgeRefusedPendingInteraction under session.ErrPendingInteraction (an immediate nudge refused), not_sent as runtime.ErrNudgeNotSent and rejected as runtime.ErrNudgeRejected (charged), gone as runtime.ErrSessionNotFound.",
+		},
+		{
+			Code:        RequirementRPPUnobservedIsDelivered,
+			Group:       "rpp",
+			Description: "A nudge a pack declaring input-outcome answers delivered_unobserved reaches the handle as runtime.ErrNudgeDeliveredUnobserved, which runtime.NudgeDelivered counts as delivered (never retried); one it answers unconfirmed reaches it as runtime.ErrNudgeDeliveryUnconfirmed, possibly delivered and not counted as delivered.",
+		},
+		{
 			Code:        RequirementRPPHostFSTranscriptTurns,
 			Group:       "rpp",
 			Description: "A session on a pack runtime whose handshake shares the controller's host filesystem (locality local with fs.host) reads its turns from its transcript (TurnSourceTranscript) and keeps the TurnHandle contract; the same pack without fs.host has no turn source.",
+		},
+		{
+			Code:        RequirementRPPHostFSLeftoverReaped,
+			Group:       "rpp",
+			Description: "A session on a v2-ready pack runtime whose handshake shares the controller's host (locality local with fs.host) that is started again after a stop first reaps the process its stopped incarnation left behind (a child that outlived the agent, carrying the session's GC_SESSION_ID and city), as a tmux or subprocess session does; the same pack without fs.host claims no process-table scanner.",
+		},
+		{
+			Code:        RequirementRPPHeldNudgeTypedOnce,
+			Group:       "rpp",
+			Description: "A nudge redelivered through the handle while the pack still holds the first, unresolved, answers unconfirmed both times and is typed once: the pack dedupes the redelivery (input-outcome, the golden reference's hold_send).",
 		},
 	}
 }

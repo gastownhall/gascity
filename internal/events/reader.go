@@ -13,6 +13,8 @@ import (
 	"slices"
 	"sort"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/platform/livefile"
 )
 
 // readRotationDir is the directory snapshot used by rotation catch-up readers.
@@ -299,7 +301,7 @@ func readFilteredTracked(path string, filter Filter) ([]Event, map[eventSeqWindo
 		}
 	}
 
-	f, err := os.Open(path)
+	f, err := livefile.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			if len(result) == 0 {
@@ -536,7 +538,7 @@ func archiveSeq(line []byte) (uint64, bool) {
 // a monotonic log and should be seq-ordered, but `continue` saves the same
 // decode without depending on that.
 func streamArchive(path string, filter Filter, fn func(Event) bool) error {
-	f, err := os.Open(path)
+	f, err := livefile.Open(path)
 	if err != nil {
 		return err
 	}
@@ -638,7 +640,7 @@ func ReadFilteredTail(path string, filter Filter, limit int) ([]Event, error) {
 	if limit <= 0 {
 		return ReadFiltered(path, filter)
 	}
-	f, err := os.Open(path)
+	f, err := livefile.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -730,7 +732,7 @@ func latestRotatedSeq(dir string) (uint64, error) {
 }
 
 func readLatestActiveSeq(path string) (uint64, error) {
-	f, err := os.Open(path)
+	f, err := livefile.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return 0, nil
@@ -829,7 +831,7 @@ func latestSeqInCompleteLines(data []byte) (uint64, bool) {
 // and any error. Returns (nil, offset, nil) if no new data is available
 // or the file doesn't exist yet. Skips malformed lines (partial writes).
 func ReadFrom(path string, offset int64) ([]Event, int64, error) {
-	f, err := os.Open(path)
+	f, err := livefile.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, offset, nil

@@ -6,17 +6,22 @@ description: Config swap, one operator command, and the boot refusal that stands
 Every city stores six kinds of state. One is the **work ledger** — the tasks,
 epics, bugs, and convoys people and agents actually reason about. The other
 five are **infrastructure**: the execution graph, session lifecycle, messaging,
-orders, and the nudge queue. By default all six live in the work ledger.
+orders, and the nudge queue. A city with no `[storage]` section keeps all six
+in the work ledger.
 
 They do not have to. `[storage]` in `city.toml` assigns each class to a named
 binding, and this build serves one split: work stays on the work ledger, and
-the five infrastructure classes move to a single SQLite bead engine. On a
+the five infrastructure classes move to a single SQLite bead engine. A city
+created by `gc init` is born split: it carries that section from the start,
+creates the binding on its first boot, and has nothing to migrate. On a
 production-scale city that measured **130–250× lower latency for
 infrastructure-class reads** than serving them from the work ledger, because
 those reads stop competing with the work ledger's own traffic.
 
-This runbook is the whole cutover. It is short because the design is: swap the
-config, run one command, start the city.
+This runbook is the whole cutover for a city that predates the split, or
+that `gc init` created single-store (`--storage=single`, a remote session
+runtime, or a bd a split city does not run). It is short because the design
+is: swap the config, run one command, start the city.
 
 ## Before you start
 
@@ -1574,6 +1579,243 @@ only half of the rollback: the rig's rows left the rig's store. To go back:
 3. Restore the binding: `gc storage snapshot restore <id> --binding --fleet-stopped --to <dir>`.
 4. Check with `gc storage status`: the rig shows as awaiting import again.
 
+## Reversing the split
+
+`gc storage migrate --to-work` is the automated rollback after cutover. It
+copies the binding's **current** rows back, so nothing written since the
+cutover is lost, and then retires the split:
+
+```
+gc storage migrate --to-work --dry-run   # the plan and every refusal; live, no lock, writes nothing
+gc stop
+gc storage migrate --to-work --fleet-stopped
+gc start
+```
+
+In order (each phase is recorded in `.gc/storage-reverse.json`, and a run
+killed or paused at any point is continued by the same command):
+
+| Phase | What it does |
+|---|---|
+| R0 | snapshots the binding, the work store and every rig into `.gc/snapshots/<id>/` and pins it; writes the journal and `infra.reverting` beside the binding |
+| R1 | each rig's imported rows back into the rig's own store, the `gc.root_store_ref` its import added taken off; proven against the reopened store |
+| R2 | every other row into the work store, ids kept, edge payloads kept, and each cross-store edge a migration recorded (`gc.migrated_cross_edges`) restored where both ends now share a store; proven; the work store's id floor raised past the ids it got back |
+| R3 | the reverse manifest, `infra.reversed.beads`, written and re-read |
+| R4 | `city.toml` without `[storage]`: its bytes from before the split when the guided split's journal holds them and the file is byte for byte what the split wrote, otherwise the section removed in place, every other line and comment kept. The edit is composed and loaded in memory before the copy starts, so a `[storage]` a fragment declares is refused up front. The served-binding note and the city's and each rig's cleared notes are renamed `*.reverted-<run>`, and `.gc/min-gc-version` is removed |
+| R5 | the binding root renamed `<root>.reverted-<run>`, the rigs' import records with it |
+
+Before R3, and before the binding is archived, the binding is read again and
+compared with the one the copies were planned from; a binding that changed
+(a writer still reaches it) puts the reverse back to R0, and the next run
+copies again. Before R4 and before the archive, each store it wrote is listed
+again under its stamp against its manifest: a row gone puts it back to R0 the
+same way. Once a `--to-rigs` has begun clearing the binding, it never goes
+back: a row a rig lost that the binding still holds is copied back from the
+binding, with the stamp and its edges: before its first delete, the clear
+records in the journal every edge that touches a row it removes, in the
+binding and in the rig, so an edge from a row the clear already removed is
+restored too. A recorded edge whose other end neither store holds any longer
+is reported as not restored, and one whose other end the binding keeps is
+recorded on the row as dropped (`gc.migrated_cross_edges`), as the reverse
+records any edge it cannot carry. A row an interrupted re-copy wrote that
+differs from the binding's is written again. A row gone from both refuses, nothing changed: put
+it back into its rig by hand carrying `gc.infra_reversed_from=<stamp>` (the
+refusal prints the stamp; the snapshot taken before the reverse holds the
+row as it was), then run the reverse again. A re-copy never deletes a
+stamped row the binding no longer holds; it refuses, since that row may be
+the only copy. Inspect it in that store (`bd show <id>`), then delete it with
+`bd delete <id>` if it is not wanted and run the reverse again, or abandon
+the reverse with `--abort-reverse`.
+
+Every row it writes carries `gc.infra_reversed_from=<binding>/<run>`, the run
+being its start to the nanosecond and a random suffix. Before it writes
+anything it records, in the journal, the stores it writes and every edge
+those stores already held onto a row it is about to write (an older clear
+re-added `W -> D` edges with `D` only in the binding). From the first phase
+until the last, boot, `gc doctor` and every other storage command refuse the
+city and name both ways out:
+
+- `gc storage migrate --to-work --fleet-stopped` finishes the reverse;
+- `gc storage migrate --abort-reverse --fleet-stopped` abandons it: it deletes
+  exactly the rows carrying that stamp from the stores the journal names, puts
+  back the edges those stores held onto them, puts back `city.toml`, the
+  renamed records and the version floor, removes the reverse's records, and
+  unpins the snapshot (which it keeps). The binding was not written, so the
+  city is split again as it was. A store that would refuse one of those edges
+  back (native Dolt, for an edge onto its own prefix, or for any edge payload)
+  refuses the abort before anything is deleted; finish the reverse instead.
+  If you changed `city.toml` after R4 edited it, the abort keeps your change:
+  it refuses, before it deletes anything, until the file declares the split's
+  `[storage]` again. Put `[storage]` back as the split had it (the journal
+  `.gc/storage-reverse.json` holds the earlier file as `city_toml_before`)
+  and run the abort again. Once the abort has begun deleting, the reverse
+  cannot be resumed: run the abort again to finish it. Once R5 has renamed
+  the binding root the reverse can only be finished.
+
+Like the forward migration, the reverse and its abort refuse a work or rig
+store another registered city also uses, until `--force=shared-store:<token>`
+attests it, and refuse while that city holds its controller lock.
+
+`--time-budget` bounds a reverse as it bounds the copy: it stops at a batch
+boundary, exits 75, and the next run continues.
+
+It refuses, writing nothing, and names each bead and the fix:
+
+- an **open cross-store gate**: a single store has no release lane, so it would
+  hold its owner forever. Close the work it waits on, or cancel the owner's
+  workflow (`gc workflow delete <root>`);
+- a **cross-store gate an operator closed**, where the edge it stood for would
+  hold an open row again: the close released the rows that waited on the gate
+  whatever its blocker does, and a single store has no gate to keep that. The
+  refusal names each row, the gate's unfinished blocker it would land with,
+  and the gate. Finish or close the blocker, or close the row. To let a
+  drain's item run while its blocker stays open, remove each named row's edge
+  onto the gate and the drain's convoy member's edge onto the blocker, which
+  a drain on one store projects onto its item on every pass;
+- an **open row the binding minted for a rig's scope** (D8): no reader reaches
+  it on a single-store city. Finish or cancel its workflow; closed ones move to
+  the city store;
+- an **edge whose rows would land in different stores** while it still joins
+  them, since no cross-store edge is ever written. A blocking edge (`blocks`,
+  `waits-for`, `conditional-blocks`) holds its open row until the blocker is
+  finished: a blocker that is open, or closed with `gc.work_outcome=blocked`,
+  still holds it, so dropping the edge would release the row. Finish the
+  blocker, or close the dependent. Any other edge joins two open rows: close
+  one side;
+- an **edge payload** (a `waits_for` gate's) going into a store that cannot
+  write one: native Dolt has no edge-payload writer yet. That includes an
+  edge such a store already holds onto a row the reverse writes, which a
+  resume or an abort would have to put back;
+- a generic exec work store whose provider has no `import` op (listed by its
+  `capabilities` op): it cannot take a bead under its own id. Roll back by
+  restoring the snapshot instead;
+- an explicit `session_reconciler = "v2"`, which would refuse the reverted
+  city's boot. `--reconciler=legacy` rewrites the key in R4's edit;
+- a binding whose root is or holds the city's `.gc` or a rig (a `path` of
+  `.gc` or `.`, or any directory above the city), or is, holds or lies inside
+  a directory a store keeps its files in: the city's `.beads` (bd's files, and
+  the managed Dolt server's data in `.beads/dolt`) and each rig's `.beads` and
+  `.gc`. R5 renames the binding root with everything under it, so it would
+  take the city's own state, a rig, or a store the reverse just copied rows
+  into. Keep the city split, or roll back by restoring the snapshot instead. A
+  root inside the city's `.gc`, such as the default `.gc/store`, is not
+  refused;
+- an id the work store already holds as another bead, a rig import that has
+  not finished, and a rig the city no longer configures.
+
+Before those, `--to-work` checks the work store with the containment check
+boot runs (see "Stranded writes: degraded serving"). Once the split is
+retired the work store serves every class, so no row it holds stays hidden
+from its readers. The rows the reverse wrote carry its stamp and are left
+out, so a resumed run is not refused for them. While one of these is left,
+the plan lists no other refusal:
+
+- an **open stranded row**, an infrastructure row the work store holds that
+  the binding does not serve: an open message would be delivered, and an
+  open session or wait would run again. Close each one that must not come
+  back with `bd close <id>`, run from the city directory. Purge stranded mail
+  nobody will read instead (see "Stranded mail nobody will read: purge it
+  instead"). Or carry them on: `gc storage recover-stranded --from-work
+  --fleet-stopped` copies every stranded row into the binding as it is,
+  `gc storage migrate --from-work --fleet-stopped` clears their work-store
+  copies, and the reverse then brings them back;
+- a **stranded id the binding holds for a different bead**, open or closed:
+  the id would name two beads. Decide each with `recover-stranded`'s
+  `--replace-binding-row` or `--drop-work-row`;
+- **retained pre-migration copies** (see "Upgrading a city migrated by gc
+  1.5.0"): one refusal names the clear, `gc storage migrate --from-work
+  --fleet-stopped`, as boot does. The clear refuses while a stranded row is
+  left, so settle those first.
+
+A closed stranded row, and a row that is infrastructure class only because
+of metadata (see "Repair in place: a work bead that carries a class key"),
+stay in the work store as they are, which is where a single-store city keeps
+them: the plan names them and the reverse goes on. A binding that converged
+before its copy manifest was recorded cannot be checked; the plan says so.
+
+Both reverses check each rig they return the same way, and these come first
+too: `--to-work` every rig with a store of its own, `--to-rigs` the rigs it
+names. A rig that was imported, or recorded clean, is relic-free: readers of
+its graph, orders and sessions rows skip its store, so an infrastructure row
+a raw writer put there afterwards is hidden from them, and `gc storage
+status` calls the rig stranded. The reverse gives the rig's store every class
+back (`--to-work`) or gives the rig its relic legs back (`--to-rigs`), so it
+classifies the rig's rows as `gc storage status` does, leaves out the rows it
+wrote, and refuses:
+
+- an **open stranded row** in the rig of the graph, orders or sessions class:
+  an open session or wait would run again, and an open workflow or order row
+  would run again. Close each one that must not come back with `bd close
+  <id>`, run from the rig's directory. Or carry them on:
+  `gc storage migrate --from-rigs --rig <rig> --fleet-stopped` copies them
+  into the binding, and the reverse brings them back with the rig's other
+  rows;
+- a **row under an id the rig's import moved** for a different bead, of any
+  class, open or closed: the reverse returns that bead under its id.
+  Re-create the rig's row under a new id.
+
+A closed stranded row, a row that is infrastructure class only because of
+metadata, and open stranded mail or nudges stay in the rig as they are, and
+the plan names them. Mail, external messaging and the nudge queue read only
+the city's store, split or not, so nothing delivers a message or a nudge
+from a rig's store. A rig
+still awaiting import hides nothing, because its relic legs serve it, so the
+reverse does not check it.
+
+A reverse resumed before R3 plans and checks again, and a row a raw writer
+put in a store since is refused the same way. While the reverse is open,
+every `gc storage` command these fixes run refuses, `recover-stranded`
+included, so on a resume the refusal names `--abort-reverse` first: abandon
+the reverse, settle the rows, then start it again. `bd close` works either
+way.
+
+Closed cross-store gates are not carried. Each row that waited on one gets
+back the edge the gate stood for, row -> blocker, from the gate's own
+metadata, where the row and the blocker land in one store; where they do
+not, the row records the edge as one the reverse drops. For a gate a
+migration minted, that row is the gate's owner. For a drain gate the runtime
+minted, it is each of the drain's items: the drain's control bead owns the
+gate but waits only on its items, so it gets no edge. A gate gc closed
+itself (released or retired by the gate lane, or closed by a workflow
+teardown) can open again: a live drain reopens it when its blocker holds
+again, so its edge comes back. An operator's close is final, so where the
+gate's edge would hold an open row on an unfinished blocker in one store,
+the reverse refuses instead (see above). `--to-rigs` takes out of the
+binding the closed gates of the rows it returns, those the rig's import
+minted and those the runtime minted for them since, which carry no import
+stamp, and refuses an open one. A gate that a row the binding keeps still
+waits on stays there with that row, and a gate whose owner stays in the
+binding stays there as it is. Records the clear wrote on work beads stay on
+them. An edge the reverse drops (one that would cross stores once it no
+longer joins its rows, or one onto a row no store holds) is recorded as
+`gc.migrated_cross_edges` on the row it moves, so a later import can restore
+it.
+
+Fields the destination store does not hold are not carried: a native Dolt
+work store keeps no step `ref` (the reverse copies it into `gc.step_ref` when
+that is absent, and prints how many), stamps its own `updated_at`, holds a
+parent as a parent-child edge (the reverse writes that edge for a row whose
+parent lands with it), and puts bd's infrastructure types (`message`,
+`agent`, `role` unless `types.infra` says otherwise) in its wisp tables,
+exactly as for a row created there. A proxied work store whose write leaf
+cannot keep a bead's id, status and timestamps is refused.
+
+### Returning one rig: `--to-rigs`
+
+`gc storage migrate --to-rigs --rig <rig> --fleet-stopped` undoes one rig's
+import (`--from-rigs`) and keeps the city split. Each `--rig` must name a rig
+this city configures with a store of its own, whose import marker and
+manifest are beside the binding. It snapshots the binding and
+the rigs, copies the rig's imported rows back into its store and proves them,
+then removes them from the binding (with their closed gates, those the import
+minted and those the runtime minted for them since, but not a gate a row the
+binding keeps still waits on) and renames the rig's
+import records, so the rig reads as awaiting import
+again and its relic legs serve it. `--from-rigs` imports it again. The same
+refusals apply, and `--abort-reverse` abandons it until the binding clear has
+begun; a rig whose clear has begun is finished by running `--to-rigs` again. A snapshot taken before a `--to-rigs` no longer restores: its records
+name the rig's import.
+
 ## Rolling back
 
 **Before cutover, rollback is free** — nothing moved, so nothing is lost. How
@@ -1610,8 +1852,9 @@ routed halfway, and `gc storage status` still prints the class map you are
 reading. Pointing the map back at `infra` then puts the convergence checks
 — marker, manifest, and the stranded-write re-check — back in play in one edit.
 
-**After cutover it is not.** The binding is the live infrastructure store, and
-everything written since the marker exists only there. The gc refusal messages
+**After cutover it is not**, short of `gc storage migrate --to-work` (above),
+which copies the binding back first. The binding is the live infrastructure
+store, and everything written since the marker exists only there. The gc refusal messages
 make that decision for you rather than leaving it to judgment: the sentence
 telling you to revert appears **only** when the binding has been read and
 proven to hold nothing. If gc cannot see the binding — an unmounted volume, a
@@ -1632,7 +1875,10 @@ state:
 - a binding whose volume is not mounted: with the note present, a missing
   marker refuses the boot instead of creating an empty binding;
 - a revert — `[storage.classes]` pointed back at `work`, or `[storage]`
-  deleted: boot refuses and names the restore below.
+  deleted: boot refuses. It names `gc storage migrate --to-work` first (put
+  `[storage]` back, then reverse; see "Reversing the split"), which keeps
+  every bead written since the cutover, and the restore below as the
+  fallback.
 
 Removing the note is your attestation that the work store holds the state you
 want served, or that the binding's contents are deliberately abandoned.

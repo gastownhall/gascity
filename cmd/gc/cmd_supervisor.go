@@ -31,6 +31,8 @@ import (
 	"github.com/gastownhall/gascity/internal/hooks"
 	"github.com/gastownhall/gascity/internal/logutil"
 	"github.com/gastownhall/gascity/internal/pidutil"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
+	"github.com/gastownhall/gascity/internal/platform/localsocket"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sdnotify"
@@ -243,9 +245,9 @@ func acquireSupervisorLock() (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening supervisor lock: %w", err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if _, err := filelock.Acquire(f, filelock.Options{Mode: filelock.Exclusive, NonBlocking: true, Label: path}); err != nil {
 		f.Close() //nolint:errcheck
-		if errors.Is(err, syscall.EWOULDBLOCK) {
+		if errors.Is(err, filelock.ErrBusy) {
 			return nil, errSupervisorLockHeld
 		}
 		return nil, fmt.Errorf("locking supervisor lock: %w", err)
@@ -271,19 +273,17 @@ func guardSupervisorSocketDir(dir string) {
 	}
 }
 
-// supervisorSocketPathLimit caps the canonical socket path length below the
-// platform sockaddr_un limit (108 bytes on Linux, 104 on macOS). Matches the
-// controllerSocketPathLimit pattern in controller.go.
-const supervisorSocketPathLimit = 100
-
+// supervisorSocketPathForDir resolves the supervisor control endpoint inside
+// dir, falling back to a deterministic short path when the canonical one would
+// exceed the platform's endpoint length limit.
 func supervisorSocketPathForDir(dir string) string {
 	guardSupervisorSocketDir(dir)
 	canonical := filepath.Join(dir, "supervisor.sock")
-	if len(canonical) <= supervisorSocketPathLimit {
+	if len(canonical) <= localsocket.PathLimit {
 		return canonical
 	}
 	sum := sha256.Sum256([]byte(dir))
-	return filepath.Join("/tmp", "gascity-supervisor", fmt.Sprintf("%x.sock", sum[:16]))
+	return filepath.Join(localsocket.FallbackDir("gascity-supervisor"), fmt.Sprintf("%x.sock", sum[:16]))
 }
 
 func supervisorSocketPathCandidates() []string {
@@ -660,8 +660,10 @@ func (s *shutdownState) finish(err error) {
 }
 
 func startSupervisorSocket(sockPath string, requestShutdown func(supervisorShutdownMode, shutdownTrigger) bool, reconcileCh chan reconcileRequest, shut *shutdownState) (net.Listener, error) {
-	os.Remove(sockPath) //nolint:errcheck // remove stale socket from previous crash
-	lis, err := net.Listen("unix", sockPath)
+	// The supervisor runtime directory is state gc creates and owns, so the
+	// endpoint asks for owner-only protection: a 0600 socket on Unix, an
+	// owner-only DACL on the directory it is bound in on Windows.
+	lis, err := localsocket.Listen(sockPath, localsocket.Options{DirMode: 0o700, SocketMode: 0o600})
 	if err != nil {
 		return nil, fmt.Errorf("listening on supervisor socket: %w", err)
 	}
@@ -789,7 +791,7 @@ func supervisorAliveAtPathUntil(sockPath string, deadline time.Time) int {
 	if dialTimeout > remaining {
 		dialTimeout = remaining
 	}
-	conn, err := net.DialTimeout("unix", sockPath, dialTimeout)
+	conn, err := localsocket.Dial(sockPath, dialTimeout)
 	if err != nil {
 		return 0
 	}
@@ -873,7 +875,7 @@ func stopSupervisorViaSocketJSON(stdout, stderr io.Writer, wait bool, waitTimeou
 	if wait {
 		processAlive = supervisorProcessWatch(pid)
 	}
-	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
+	conn, err := localsocket.Dial(sockPath, 2*time.Second)
 	if err != nil {
 		fmt.Fprintln(stderr, "gc supervisor stop: supervisor is not running") //nolint:errcheck
 		return 1
@@ -1247,7 +1249,7 @@ func reloadSupervisorJSON(stdout, stderr io.Writer, jsonOut bool) int {
 		fmt.Fprintln(stderr, "gc supervisor reload: supervisor is not running; start it with 'gc supervisor start'") //nolint:errcheck
 		return 1
 	}
-	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
+	conn, err := localsocket.Dial(sockPath, 2*time.Second)
 	if err != nil {
 		fmt.Fprintln(stderr, "gc supervisor reload: supervisor is not running; start it with 'gc supervisor start'") //nolint:errcheck
 		return 1

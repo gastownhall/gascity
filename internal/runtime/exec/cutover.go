@@ -23,6 +23,10 @@ import (
 // routes a FreshOnly start to the raw provider's: an optional interface the
 // cut-over does not forward does not exist in production.
 //
+// The process-table scanner, which only a v2-ready pack sharing the host
+// can use (process_scan.go), and the local-transcript trait (hoststage.go)
+// are passed through from the files that define them.
+//
 // ExecProvider is deliberately NOT passed through: exec's Exec op is the
 // connection the carrier drives over INTERNALLY (no production caller
 // type-asserts it), so seam-backed driving reaches it through the provider's own
@@ -206,7 +210,7 @@ func (s *seamBackedProvider) Peek(name string, lines int) (string, error) {
 // not found the session gone. The seams' Nudge answers nil for a session
 // `is-running` does not open, which a caller reads as delivered.
 func (s *seamBackedProvider) Nudge(name string, content []runtime.ContentBlock) error {
-	if err := s.raw.requirePresent(name); err != nil {
+	if err := s.requirePresent(name); err != nil {
 		return err
 	}
 	return s.raw.Nudge(name, content)
@@ -215,7 +219,7 @@ func (s *seamBackedProvider) Nudge(name string, content []runtime.ContentBlock) 
 // SendKeys passes through to the underlying provider once requirePresent
 // has not found the session gone.
 func (s *seamBackedProvider) SendKeys(name string, keys ...string) error {
-	if err := s.raw.requirePresent(name); err != nil {
+	if err := s.requirePresent(name); err != nil {
 		return err
 	}
 	return s.raw.SendKeys(name, keys...)
@@ -224,7 +228,7 @@ func (s *seamBackedProvider) SendKeys(name string, keys ...string) error {
 // Interrupt passes through to the underlying provider once requirePresent
 // has not found the session gone.
 func (s *seamBackedProvider) Interrupt(name string) error {
-	if err := s.raw.requirePresent(name); err != nil {
+	if err := s.requirePresent(name); err != nil {
 		return err
 	}
 	return s.raw.Interrupt(name)
@@ -233,10 +237,20 @@ func (s *seamBackedProvider) Interrupt(name string) error {
 // ClearScrollback passes through to the underlying provider once
 // requirePresent has not found the session gone.
 func (s *seamBackedProvider) ClearScrollback(name string) error {
-	if err := s.raw.requirePresent(name); err != nil {
+	if err := s.requirePresent(name); err != nil {
 		return err
 	}
 	return s.raw.ClearScrollback(name)
+}
+
+// requirePresent is the driving verbs' presence pre-check, skipped when the
+// pack's typed outcomes are read (outcomesRead): the pack then answers a
+// vanished session with gone itself, and the call costs one spawn.
+func (s *seamBackedProvider) requirePresent(name string) error {
+	if s.raw.outcomesRead() {
+		return nil
+	}
+	return s.raw.requirePresent(name)
 }
 
 // IsAttached passes through to the underlying provider's single probe; the

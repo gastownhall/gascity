@@ -64,7 +64,11 @@ type fakeState struct {
 	bindingRelics map[beads.Store]bool
 	// classRefusals is a plane's per-class refusal (cmd/gc's worker site):
 	// the class's handle refuses, while the topology keeps the binding.
-	classRefusals     map[coordclass.Class]storeref.RefusingClassStore
+	classRefusals map[coordclass.Class]storeref.RefusingClassStore
+	// rigBits are the per-rig bits a holder's epoch carries for its rigs:
+	// the S4 relic-free bit and the suspension set (Leg.RelicFree,
+	// Leg.Suspended). Zero is none of either, as a holder that knows neither.
+	rigBits           fakeRigBits
 	cityBeadsDiag     *beads.BeadsDiagnostic
 	cityMailProv      mail.Provider // city-level mail provider (all mail is city-scoped)
 	eventProv         events.Provider
@@ -206,7 +210,13 @@ func (f *fakeState) NudgeQueue() NudgeQueue {
 // are the projection, so the work and rig handles wrap exactly the stores
 // CityBeadStore and BeadStore return (TestFakeStateStoresWrapTheResidueAccessors).
 func (f *fakeState) Stores() storeref.Stores {
-	return mintFakeStores(f.cityBeadStore, f.stores, f.relocatedClasses(), storeref.StoresOptions{Projection: gateProjection{}, ClassRefusals: f.classRefusals}, f.cfg, f.ClassBindingHasLegacyResidents)
+	return mintFakeStores(f.cityBeadStore, f.stores, f.relocatedClasses(), storeref.StoresOptions{Projection: gateProjection{}, ClassRefusals: f.classRefusals}, f.cfg, f.ClassBindingHasLegacyResidents, f.rigBits)
+}
+
+// fakeRigBits are a fake holder's per-rig epoch bits, by rig name.
+type fakeRigBits struct {
+	relicFree map[string]bool
+	suspended map[string]bool
 }
 
 // relocatedClasses is every class a test relocated off the city store.
@@ -240,8 +250,10 @@ func (f *fakeState) relocatedClasses() map[coordclass.Class]beads.Store {
 // opts carries the split-strict gate's projection (none for stores that
 // already carry it) and any per-class refusal. cfg supplies the configured prefixes and relics the census a test
 // recorded (nil: none), so the handles' Topology is the one the API plane
-// derives from the same fake (TestFakeStateTopologyMatchesProduction).
-func mintFakeStores(city beads.Store, rigs map[string]beads.Store, relocated map[coordclass.Class]beads.Store, opts storeref.StoresOptions, cfg *config.City, relics func(beads.Store) bool) storeref.Stores {
+// derives from the same fake (TestFakeStateTopologyMatchesProduction). bits
+// marks each rig leg relic-free and suspended as a production holder marks
+// it (cmd/gc's mintCityStores).
+func mintFakeStores(city beads.Store, rigs map[string]beads.Store, relocated map[coordclass.Class]beads.Store, opts storeref.StoresOptions, cfg *config.City, relics func(beads.Store) bool, bits fakeRigBits) storeref.Stores {
 	var order []beads.Store
 	byStore := map[beads.Store][]coordclass.Class{}
 	for _, class := range coordclass.Classes() {
@@ -265,6 +277,9 @@ func mintFakeStores(city beads.Store, rigs map[string]beads.Store, relocated map
 	topo.Work.Prefix, rigPrefixes = configuredPrefixes(cfg)
 	for i := range topo.Rigs {
 		topo.Rigs[i].Prefix = rigPrefixes[topo.Rigs[i].Ref]
+		if name, ok := storeref.ScopeRigContext(string(topo.Rigs[i].Ref)); ok {
+			topo.Rigs[i].RelicFree, topo.Rigs[i].Suspended = bits.relicFree[name], bits.suspended[name]
+		}
 	}
 	return storeref.NewStores(topo, opts)
 }
@@ -362,6 +377,10 @@ type fakeMutatorState struct {
 	// assert mutations route through it.
 	serializeMu    sync.Mutex
 	serializeCalls atomic.Int32
+
+	// createRigErr, when set, is what CreateRig returns instead of adding the
+	// rig: the refusal the real provisioning would answer.
+	createRigErr error
 
 	// provisionGate, when non-nil, blocks ProvisionRigFromGit until it is closed
 	// or receives — lets a test hold a provision in flight to exercise the
@@ -501,6 +520,9 @@ func (f *fakeMutatorState) DeleteAgent(name string) error {
 }
 
 func (f *fakeMutatorState) CreateRig(r config.Rig) error {
+	if f.createRigErr != nil {
+		return f.createRigErr
+	}
 	f.cfg.Rigs = append(f.cfg.Rigs, r)
 	return nil
 }

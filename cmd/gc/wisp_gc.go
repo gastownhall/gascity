@@ -195,7 +195,11 @@ type wispGC interface {
 	// legs is the work side of a split city: the stores that hold attachment
 	// holders and work-class molecule roots (see wispGCLegs). nil means the
 	// graph-class store is the city's only store, and every read stays on it.
-	runGC(legs wispGCLegs, graphStore beads.GraphStore, sessionLedger beads.SessionStore, mailStore beads.MailStore, now time.Time) (int, error)
+	//
+	// roots are the pass's readers of those stores (wispGCRoots: the
+	// epoch's Molecule{Roots} plan over legs, by ref): every root listing
+	// and holder read goes through them, and every write through the stores.
+	runGC(roots wispGCRoots, legs wispGCLegs, graphStore beads.GraphStore, sessionLedger beads.SessionStore, mailStore beads.MailStore, now time.Time) (int, error)
 }
 
 // wispGCLegs is the leg set a wisp GC pass reads beyond the graph-class store
@@ -209,7 +213,6 @@ type wispGC interface {
 // the GC must find it there to close it when abandoned and collect it once
 // expired.
 type wispGCLegs interface {
-	each(visit func(beads.Store))
 	// eachLeg is each with every leg's store ref, its stable identity.
 	eachLeg(visit func(ref string, store beads.Store))
 	// unusable is why the leg set answers nothing (a refused city). A holder
@@ -219,6 +222,10 @@ type wispGCLegs interface {
 	// are suspended. They may hold live attachment sources the guard cannot
 	// read.
 	suspendedRigs() []string
+	// wispGCRoots is the pass's readers over the legs (wispGCRoots): the
+	// epoch's Molecule{Roots} plan over the census legs by ref, each checked
+	// against the census's store for it.
+	wispGCRoots(stores storeref.Stores, graph beads.StoreReader) wispGCRoots
 	// storeForRef resolves a gc.source_store_ref to the leg it names:
 	// ok=false when it names no leg this set knows, suspended=true when it
 	// names a suspended rig (which is not read).
@@ -300,7 +307,7 @@ func (m *memoryWispGC) shouldRun(now time.Time) bool {
 	return now.Sub(m.lastRun) >= m.interval
 }
 
-func (m *memoryWispGC) runGC(legs wispGCLegs, graphStore beads.GraphStore, sessionLedger beads.SessionStore, mailStore beads.MailStore, now time.Time) (int, error) {
+func (m *memoryWispGC) runGC(roots wispGCRoots, legs wispGCLegs, graphStore beads.GraphStore, sessionLedger beads.SessionStore, mailStore beads.MailStore, now time.Time) (int, error) {
 	m.lastRun = now
 	// The molecule/wisp/workflow purge arm operates on the graph-class store; the
 	// read-message retention arm on the messaging-class store. Pass the unwrapped
@@ -320,7 +327,7 @@ func (m *memoryWispGC) runGC(legs wispGCLegs, graphStore beads.GraphStore, sessi
 			log.Printf("wisp gc: closed %d generated spec sidecars for closed workflow roots", closedSpecs)
 		}
 
-		closedMembers, memberErr := closeGeneratedMembersForClosedRoots(store)
+		closedMembers, memberErr := closeGeneratedMembersForClosedRoots(store, roots)
 		if memberErr != nil {
 			deleteErr = errors.Join(deleteErr, fmt.Errorf("closing generated members for terminal workflow roots: %w", memberErr))
 		} else if closedMembers > 0 {
@@ -333,13 +340,17 @@ func (m *memoryWispGC) runGC(legs wispGCLegs, graphStore beads.GraphStore, sessi
 		// CreatedAt, not close time), or on a later tick otherwise. Best-effort:
 		// never fails the GC tick.
 		pass := &wispGCPassLog{}
-		holders := wispGCHolders{graph: store, legs: legs, pass: pass, cityName: m.cityName, memo: &m.notes, now: now}
-		if abandonedErr := closeAbandonedRoots(store, holders, now, &m.notes); abandonedErr != nil {
+		holders := wispGCHolders{graph: store, roots: roots, legs: legs, pass: pass, cityName: m.cityName, memo: &m.notes, now: now}
+		if abandonedErr := closeAbandonedRoots(store, roots, holders, now, &m.notes); abandonedErr != nil {
 			deleteErr = errors.Join(deleteErr, abandonedErr)
 		}
 		pass.logSuspension()
 
-		entries, err := closedWispGCEntries(store)
+		graph, err := roots.graphReader()
+		if err != nil {
+			return 0, fmt.Errorf("listing closed molecules: %w", err)
+		}
+		entries, err := closedWispGCEntries(graph)
 		if err != nil {
 			return 0, err
 		}
@@ -422,16 +433,14 @@ func (m *memoryWispGC) runGC(legs wispGCLegs, graphStore beads.GraphStore, sessi
 // formula protos `bd mol` instantiates from), so the read stays on the issues
 // tier — a TierBoth read makes bd add --include-templates — and any row
 // carrying the template label is dropped as well.
-func enumerateWorkClassMoleculeRoots(store beads.Store, statuses ...string) ([]beads.Bead, error) {
+//
+// leg is a work leg of the pass's root union (wispGCRoots): graph molecule
+// roots (wisps) live in the graph store (closedWispGCEntries,
+// openWispGCRootCandidates), so a miss here is covered there.
+func enumerateWorkClassMoleculeRoots(leg beads.FederatedReader, statuses ...string) ([]beads.Bead, error) {
 	sel := wispGCMoleculeRootSelector()
 	sel.query.TierMode = beads.TierIssues
-	// The work leg of the wisp GC root union: graph molecule roots (wisps)
-	// live in the graph store (closedWispGCEntries, openWispGCRootCandidates).
-	var roots []beads.Bead
-	err := beads.FederatedRead(func() (err error) {
-		roots, err = enumerateWispGCRootsWith(store, []wispGCRootSelector{sel}, statuses...)
-		return err
-	})
+	roots, err := enumerateWispGCRootsWith(leg, []wispGCRootSelector{sel}, statuses...)
 	if err != nil {
 		return nil, err
 	}
@@ -457,10 +466,15 @@ const bdTemplateLabel = "template"
 // (wispGCLegs) as well as the graph-class store.
 type wispGCHolders struct {
 	graph beads.Store
+	// roots are the pass's readers of graph and of each leg: every holder
+	// read goes through them (wispGCRoots).
+	roots wispGCRoots
 	legs  wispGCLegs
 	// own, when set, is the root's own work leg: the guard reads only it and
 	// the graph store, and no rig's suspension is consulted (the work arm).
-	own beads.Store
+	// ownRef is its census ref, the key of its reader.
+	own    beads.Store
+	ownRef string
 	// pass collects what the guard decided this pass, for one summary line.
 	pass *wispGCPassLog
 	// cityName, on a single-store city (no legs), is the only city a source
@@ -516,8 +530,12 @@ func (p *wispGCPassLog) logSuspension() {
 // residue. A v1 POURED molecule root is work class and has no finalizer; an
 // open step under a closed one is a step someone reopened, which is live
 // work, not residue, and is left alone (the closure purge refuses it too).
-func closeGeneratedMembersForClosedRoots(store beads.Store) (int, error) {
-	roots, err := closedWispGCEntries(store)
+func closeGeneratedMembersForClosedRoots(store beads.Store, legs wispGCRoots) (int, error) {
+	graph, err := legs.graphReader()
+	if err != nil {
+		return 0, err
+	}
+	roots, err := closedWispGCEntries(graph)
 	if err != nil {
 		return 0, err
 	}
@@ -579,12 +597,12 @@ func wispGCMoleculeRootSelector() wispGCRootSelector {
 // enumerateWispGCRoots unions wispGCRootSelectors across the given statuses,
 // deduping by bead ID so a root matching more than one selector (for example a
 // graph.v2 root that also carries gc.kind=workflow) appears once.
-func enumerateWispGCRoots(store beads.Store, statuses ...string) ([]beads.Bead, error) {
-	return enumerateWispGCRootsWith(store, wispGCRootSelectors(), statuses...)
+func enumerateWispGCRoots(leg beads.FederatedReader, statuses ...string) ([]beads.Bead, error) {
+	return enumerateWispGCRootsWith(leg, wispGCRootSelectors(), statuses...)
 }
 
 // enumerateWispGCRootsWith is enumerateWispGCRoots over the given selectors.
-func enumerateWispGCRootsWith(store beads.Store, selectors []wispGCRootSelector, statuses ...string) ([]beads.Bead, error) {
+func enumerateWispGCRootsWith(store beads.FederatedReader, selectors []wispGCRootSelector, statuses ...string) ([]beads.Bead, error) {
 	entries := make([]beads.Bead, 0)
 	seen := make(map[string]struct{})
 	for _, status := range statuses {
@@ -616,14 +634,12 @@ func enumerateWispGCRootsWith(store beads.Store, selectors []wispGCRootSelector,
 // here — not just molecule/wisp — is what lets a graph workflow root the
 // abandoned-root sweep closes (type=task) actually be collected rather than
 // linger as permanent closed residue.
-func closedWispGCEntries(store beads.Store) (roots []beads.Bead, err error) {
-	// The graph leg of the wisp GC root union: a v1 poured molecule root
-	// (work class) lives on a work leg (enumerateWorkClassMoleculeRoots).
-	err = beads.FederatedRead(func() (err error) {
-		roots, err = enumerateWispGCRoots(store, "closed")
-		return err
-	})
-	return roots, err
+//
+// graph is the graph leg of the pass's root union (wispGCRoots): a v1 poured
+// molecule root (work class) lives on a work leg
+// (enumerateWorkClassMoleculeRoots), so a miss here is covered there.
+func closedWispGCEntries(graph beads.FederatedReader) ([]beads.Bead, error) {
+	return enumerateWispGCRoots(graph, "closed")
 }
 
 // reapOrphanedClosedWisps reaps closed wisp-tier descendants whose owning root
@@ -1070,11 +1086,15 @@ func hasParentChildDepEdge(store interface {
 //
 // notes are the tracker's memo: a per-root dry-run line is printed only when
 // it is new since the previous pass (nil: always).
-func closeAbandonedRoots(store beads.Store, holders wispGCHolders, now time.Time, notes *wispGCNotes) error {
+func closeAbandonedRoots(store beads.Store, roots wispGCRoots, holders wispGCHolders, now time.Time, notes *wispGCNotes) error {
 	if store == nil {
 		return nil
 	}
-	candidates, err := openWispGCRootCandidates(store)
+	graph, err := roots.graphReader()
+	if err != nil {
+		return fmt.Errorf("listing open workflow roots for abandoned-root sweep: %w", err)
+	}
+	candidates, err := openWispGCRootCandidates(graph)
 	if err != nil {
 		// Best-effort: a list failure must not fail the GC tick.
 		return fmt.Errorf("listing open workflow roots for abandoned-root sweep: %w", err)
@@ -1288,8 +1308,14 @@ func steplessRootIsAbandoned(b beads.Bead) bool {
 func (h wispGCHolders) liveAttachmentSource(root beads.Bead) bool {
 	rootID := root.ID
 	if h.own != nil {
-		return (h.graph != nil && storeHoldsLiveAttachmentSource(h.graph, rootID)) ||
-			storeHoldsLiveAttachmentSource(h.own, rootID)
+		if h.graph != nil {
+			graph, err := h.roots.graphReader()
+			if holdsLiveAttachmentSource(graph, err, rootID) {
+				return true
+			}
+		}
+		own, err := h.roots.workLeg(h.ownRef)
+		return holdsLiveAttachmentSource(own, err, rootID)
 	}
 	if h.legs != nil {
 		if err := h.legs.unusable(); err != nil {
@@ -1346,16 +1372,20 @@ func (h wispGCHolders) readHolders(root beads.Bead, pointerUsable bool, srcStore
 	if pointerUsable && sourceIsLiveIn(srcStore, root, src) {
 		return true
 	}
-	if h.graph != nil && storeHoldsLiveAttachmentSource(h.graph, root.ID) {
-		return true
+	if h.graph != nil {
+		graph, err := h.roots.graphReader()
+		if holdsLiveAttachmentSource(graph, err, root.ID) {
+			return true
+		}
 	}
 	live := false
 	if h.legs != nil {
-		h.legs.each(func(store beads.Store) {
+		h.legs.eachLeg(func(ref string, store beads.Store) {
 			if live || store == nil || sameBeadStore(store, h.graph) {
 				return
 			}
-			live = storeHoldsLiveAttachmentSource(store, root.ID)
+			leg, err := h.roots.workLeg(ref)
+			live = holdsLiveAttachmentSource(leg, err, root.ID)
 		})
 	}
 	return live
@@ -1411,18 +1441,16 @@ func sourceIsLiveIn(store beads.Store, root beads.Bead, src string) bool {
 
 // storeHoldsLiveAttachmentSource is the holder query against one store. Fails
 // CLOSED on a query error.
-func storeHoldsLiveAttachmentSource(store beads.Store, rootID string) bool {
+//
+// leg is one leg of the holder walk (the graph store, then every work leg): a
+// holder lives in exactly one of them. An error on it means held: the walk's
+// leg policy is not consulted (N5).
+func storeHoldsLiveAttachmentSource(leg beads.FederatedReader, rootID string) bool {
 	for _, key := range []string{beadmeta.MoleculeIDMetadataKey, "workflow_id"} {
-		// One leg of the holder walk (the graph store, then every work leg):
-		// a holder lives in exactly one of them.
-		var holders []beads.Bead
-		err := beads.FederatedRead(func() (err error) {
-			holders, err = store.List(beads.ListQuery{
-				Metadata:      map[string]string{key: rootID},
-				IncludeClosed: true,
-				TierMode:      beads.TierBoth,
-			})
-			return err
+		holders, err := leg.List(beads.ListQuery{
+			Metadata:      map[string]string{key: rootID},
+			IncludeClosed: true,
+			TierMode:      beads.TierBoth,
 		})
 		if err != nil {
 			log.Printf("wisp gc: cannot resolve %s holders for stepless root %s (%v); leaving it open", key, rootID, err)
@@ -1471,14 +1499,11 @@ func beadLastActivity(b beads.Bead) time.Time {
 // descendants invisible to the sweep — the exact lost-finalize leak this sweep
 // exists to close. The caller applies the IsWorkflowRoot / TTL / terminal /
 // exempt filters.
-func openWispGCRootCandidates(store beads.Store) (roots []beads.Bead, err error) {
-	// The graph leg of the wisp GC root union: a v1 poured molecule root
-	// (work class) lives on a work leg (enumerateWorkClassMoleculeRoots).
-	err = beads.FederatedRead(func() (err error) {
-		roots, err = enumerateWispGCRoots(store, "open", "in_progress")
-		return err
-	})
-	return roots, err
+//
+// graph is the graph leg of the pass's root union (wispGCRoots), as for
+// closedWispGCEntries.
+func openWispGCRootCandidates(graph beads.FederatedReader) ([]beads.Bead, error) {
+	return enumerateWispGCRoots(graph, "open", "in_progress")
 }
 
 // purgeExpiredBeadClosures purges aged closed roots, deleting each root's full

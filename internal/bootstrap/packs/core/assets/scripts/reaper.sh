@@ -1281,7 +1281,8 @@ reap_scope_purge() {
 
 # Scopes are resolved first so that scopes sharing one database (a rig bound
 # to the city store) are reaped once, with every sharing rig's store ref.
-# A scope bd cannot reach is recorded and skipped; the others still run.
+# A scope bd cannot reach is recorded and skipped; the others still run. A
+# scope bd reaches but serves no SQL is skipped without an anomaly.
 SCOPE_TABLE=""
 resolve_scope_row() {
     scope_select "$@"
@@ -1289,6 +1290,11 @@ resolve_scope_row() {
         if [ "$SCOPE_NOT_BD" -eq 1 ]; then
             echo "reaper: $SCOPE_LABEL is not a bd bead store; nothing to reap there"
             order_outcome_scope_skipped "$SCOPE_LABEL" "not a bd bead store"
+            return 0
+        fi
+        if [ "$SCOPE_SQL_UNSUPPORTED" -eq 1 ]; then
+            echo "reaper: $SCOPE_LABEL is a bd store that serves no SQL (embedded mode); its selections cannot run there"
+            order_outcome_scope_skipped "$SCOPE_LABEL" "bead store serves no SQL (bd embedded mode)"
             return 0
         fi
         record_anomaly "$SCOPE_LABEL" "bead store unreachable through gc bd: $(sanitize_output "$SCOPE_LAST_ERROR")"

@@ -19,8 +19,11 @@ import (
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
-func appendMetadataAttachedChildren(store beads.Store, parent beads.Bead, children []beads.Bead) []beads.Bead {
-	if store == nil {
+// appendMetadataAttachedChildren appends the molecules parent's metadata
+// names to children, read through store, the owner resolveBeadOwner found
+// parent in.
+func appendMetadataAttachedChildren(store beads.ResidentStore, parent beads.Bead, children []beads.Bead) []beads.Bead {
+	if beads.IsNilStore(store) {
 		return children
 	}
 	seen := make(map[string]struct{}, len(children))
@@ -144,27 +147,9 @@ func (s *Server) normalizeRawBeadAssignee(ctx context.Context, assignee string) 
 	return session.AssigneeIdentifier(info), nil
 }
 
-// findStore returns the bead store for the given rig. If rig is empty, returns
-// the sole store when exactly one exists (after deduplication), or nil when
-// multiple distinct stores exist (caller should require explicit rig).
-func (s *Server) findStore(rig string) beads.Store {
-	if rig != "" {
-		return s.state.BeadStore(rig)
-	}
-	if cityStore := s.state.CityBeadStore(); cityStore != nil {
-		return cityStore
-	}
-	stores := s.state.BeadStores()
-	names := sortedRigNames(stores)
-	if len(names) == 1 {
-		return stores[names[0]]
-	}
-	return nil
-}
-
-// findWorkStore is findStore over st's work handles: rig's store when rig is
-// named, else the city's work store, else the sole store left after
-// deduplication. ok is false when no store answers (an unknown rig, or several
+// findWorkStore is the work handle a rig-addressed request reads or writes:
+// rig's store when rig is named, else the city's work store, else the sole
+// store left after deduplication. ok is false when no store answers (an unknown rig, or several
 // distinct stores and no rig).
 func findWorkStore(st storeref.Stores, cityName, rig string) (beads.WorkStore, bool) {
 	if rig != "" {
@@ -181,30 +166,30 @@ func findWorkStore(st storeref.Stores, cityName, rig string) (beads.WorkStore, b
 	return beads.WorkStore{}, false
 }
 
-// resolveStoreByPrefix finds the store that owns a bead prefix by checking
+// resolveRefByPrefix finds the work leg that owns a bead prefix by checking
 // routes.jsonl files in the city and each rig's .beads/ directory, then
-// mapping the resolved store path back to the correct store.
-func (s *Server) resolveStoreByPrefix(prefix string) beads.Store {
+// mapping the resolved store path back to the leg's ref. loaded is the legs
+// the epoch holds a store for (loadedWorkLegs): a route to any other answers
+// nothing.
+func (s *Server) resolveRefByPrefix(prefix string, loaded map[storeref.StoreRef]bool) (storeref.StoreRef, bool) {
 	cfg := s.state.Config()
 	if cfg == nil {
-		return nil
+		return "", false
 	}
-	stores := s.state.BeadStores()
 	cityPath := strings.TrimSpace(s.state.CityPath())
+	rigLeg := func(name string) (storeref.StoreRef, bool) {
+		ref := storeref.RigRef(name)
+		return ref, loaded[ref]
+	}
 
-	if prefix == config.EffectiveHQPrefix(cfg) {
-		if cityStore := s.state.CityBeadStore(); cityStore != nil {
-			return cityStore
-		}
+	if prefix == config.EffectiveHQPrefix(cfg) && loaded[storeref.WorkRef] {
+		return storeref.WorkRef, true
 	}
 	for _, rig := range cfg.Rigs {
 		if prefix != rig.EffectivePrefix() {
 			continue
 		}
-		if store, exists := stores[rig.Name]; exists {
-			return store
-		}
-		return nil
+		return rigLeg(rig.Name)
 	}
 
 	// Build rig path → name map for reverse lookup (used by both city
@@ -227,15 +212,13 @@ func (s *Server) resolveStoreByPrefix(prefix string) beads.Store {
 			cleanPath := filepath.Clean(storePath)
 			// Route may point to a rig directory — resolve to the rig store.
 			if rigName, found := rigPathToName[cleanPath]; found {
-				if store, exists := stores[rigName]; exists {
-					return store
+				if ref, ok := rigLeg(rigName); ok {
+					return ref, true
 				}
 			}
 			// Route points to the city itself (e.g. prefix "mc" → ".").
-			if cleanPath == filepath.Clean(cityPath) {
-				if cityStore := s.state.CityBeadStore(); cityStore != nil {
-					return cityStore
-				}
+			if cleanPath == filepath.Clean(cityPath) && loaded[storeref.WorkRef] {
+				return storeref.WorkRef, true
 			}
 		}
 	}
@@ -257,8 +240,8 @@ func (s *Server) resolveStoreByPrefix(prefix string) beads.Store {
 		// (e.g., prefix "gb" in alpha's routes maps to ../beta).
 		cleanPath := filepath.Clean(storePath)
 		if rigName, found := rigPathToName[cleanPath]; found {
-			if store, exists := stores[rigName]; exists {
-				return store
+			if ref, ok := rigLeg(rigName); ok {
+				return ref, true
 			}
 		}
 		// Fallback: the route pointed back at this rig itself (a self-route).
@@ -267,12 +250,12 @@ func (s *Server) resolveStoreByPrefix(prefix string) beads.Store {
 		// directory — says the prefix does NOT live here, so it must fall
 		// through to the caller's candidate scan rather than pin the wrong store.
 		if cleanPath == filepath.Clean(rigPath) {
-			if store, exists := stores[rig.Name]; exists {
-				return store
+			if ref, ok := rigLeg(rig.Name); ok {
+				return ref, true
 			}
 		}
 	}
-	return nil
+	return "", false
 }
 
 // sortedRigNames returns rig names from the store map in deterministic sorted order,
@@ -354,7 +337,8 @@ type BeadGraphResponse struct {
 }
 
 // collectBeadGraph resolves the member set of the graph rooted at root and the
-// parent-child edges within it. The membership rule it applied is returned
+// parent-child edges within it, reading store, the owner resolveBeadOwner
+// found root in. The membership rule it applied is returned
 // alongside, so the handler reports it on the wire instead of the caller
 // inferring it: beads.MembershipRootIDAndParentClosure, widened to
 // beads.MembershipRootIDParentClosureAndConvoy when the root is a convoy.
@@ -382,7 +366,7 @@ type BeadGraphResponse struct {
 // the closure covers the convoy members too and a convoy member brings its own
 // subtree. That is what the "+parent-closure" half of both spellings means; it
 // is not the closure of the root alone.
-func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workflowDepResponse, beads.Membership, error) {
+func collectBeadGraph(store beads.ResidentStore, root beads.Bead) ([]beads.Bead, []workflowDepResponse, beads.Membership, error) {
 	graphBeads := make([]beads.Bead, 0, 1)
 	beadIndex := make(map[string]beads.Bead)
 
@@ -424,6 +408,8 @@ func collectBeadGraph(store beads.Store, root beads.Bead) ([]beads.Bead, []workf
 
 	if root.Type == "convoy" {
 		membership = beads.MembershipRootIDParentClosureAndConvoy
+		// A convoy root is work class; its owner is relabeled a work handle
+		// until storeref names a class for a by-id owner (T7b.2's MoleculeAt).
 		members, err := convoycore.MembersIn(convoycore.MemberClasses{Convoy: beads.WorkStore{Store: store}}, root.ID, true)
 		if err != nil {
 			return nil, nil, "", fmt.Errorf("listing convoy members for bead %q: %w", root.ID, err)

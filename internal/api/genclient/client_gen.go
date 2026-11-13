@@ -5409,6 +5409,27 @@ type SessionBindingRecord struct {
 	Status BindingStatus `json:"Status"`
 }
 
+// SessionClosedPayload defines model for SessionClosedPayload.
+type SessionClosedPayload struct {
+	// AgentName The concrete agent identity the session ran as. Empty when the session records none.
+	AgentName *string `json:"agent_name,omitempty"`
+
+	// Alias Session alias, when set.
+	Alias *string `json:"alias,omitempty"`
+
+	// Reason The close reason the session bead records (its close_reason), when it records one.
+	Reason *string `json:"reason,omitempty"`
+
+	// SessionId Session bead ID.
+	SessionId string `json:"session_id"`
+
+	// Template Session template, when known.
+	Template *string `json:"template,omitempty"`
+
+	// Title Session title.
+	Title *string `json:"title,omitempty"`
+}
+
 // SessionCommandStatusBody defines model for SessionCommandStatusBody.
 type SessionCommandStatusBody struct {
 	// IdempotencyKey The key the request was recorded under: the client's Idempotency-Key, or one the server minted when the request carried none. Retry with it to get this request's outcome instead of acting again.
@@ -5487,6 +5508,24 @@ type SessionCreateSucceededPayload struct {
 	// RequestId Correlation ID from the 202 response.
 	RequestId string          `json:"request_id"`
 	Session   SessionResponse `json:"session"`
+}
+
+// SessionCreatedPayload defines model for SessionCreatedPayload.
+type SessionCreatedPayload struct {
+	// AgentName The concrete agent identity the session runs as: the agent's qualified name or a pool slot such as rig/worker-1. Empty when the session records none.
+	AgentName *string `json:"agent_name,omitempty"`
+
+	// Alias Session alias, when set.
+	Alias *string `json:"alias,omitempty"`
+
+	// SessionId Session bead ID.
+	SessionId string `json:"session_id"`
+
+	// Template Session template, when known.
+	Template *string `json:"template,omitempty"`
+
+	// Title Session title.
+	Title *string `json:"title,omitempty"`
 }
 
 // SessionDemandClaimDivergencePayload defines model for SessionDemandClaimDivergencePayload.
@@ -9001,6 +9040,22 @@ type TypedEventStreamEnvelopeRigProvisionProgress struct {
 	Workflow         *WorkflowEventProjection    `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeSessionClosed defines model for TypedEventStreamEnvelopeSessionClosed.
+type TypedEventStreamEnvelopeSessionClosed struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          SessionClosedPayload     `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSessionColdStartTimeout defines model for TypedEventStreamEnvelopeSessionColdStartTimeout.
 type TypedEventStreamEnvelopeSessionColdStartTimeout struct {
 	Actor            string                   `json:"actor"`
@@ -9055,6 +9110,22 @@ type TypedEventStreamEnvelopeSessionCrashed struct {
 	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
 	Message          *string                  `json:"message,omitempty"`
 	Payload          SessionLifecyclePayload  `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeSessionCreated defines model for TypedEventStreamEnvelopeSessionCreated.
+type TypedEventStreamEnvelopeSessionCreated struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          SessionCreatedPayload    `json:"payload"`
 	RunId            *string                  `json:"run_id,omitempty"`
 	Seq              int64                    `json:"seq"`
 	SessionId        *string                  `json:"session_id,omitempty"`
@@ -11166,6 +11237,23 @@ type TypedTaggedEventStreamEnvelopeRigProvisionProgress struct {
 	Workflow         *WorkflowEventProjection    `json:"workflow,omitempty"`
 }
 
+// TypedTaggedEventStreamEnvelopeSessionClosed defines model for TypedTaggedEventStreamEnvelopeSessionClosed.
+type TypedTaggedEventStreamEnvelopeSessionClosed struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          SessionClosedPayload     `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedTaggedEventStreamEnvelopeSessionColdStartTimeout defines model for TypedTaggedEventStreamEnvelopeSessionColdStartTimeout.
 type TypedTaggedEventStreamEnvelopeSessionColdStartTimeout struct {
 	Actor            string                   `json:"actor"`
@@ -11224,6 +11312,23 @@ type TypedTaggedEventStreamEnvelopeSessionCrashed struct {
 	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
 	Message          *string                  `json:"message,omitempty"`
 	Payload          SessionLifecyclePayload  `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionCreated defines model for TypedTaggedEventStreamEnvelopeSessionCreated.
+type TypedTaggedEventStreamEnvelopeSessionCreated struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          SessionCreatedPayload    `json:"payload"`
 	RunId            *string                  `json:"run_id,omitempty"`
 	Seq              int64                    `json:"seq"`
 	SessionId        *string                  `json:"session_id,omitempty"`
@@ -14995,6 +15100,32 @@ func (t *EventPayload) MergeRotatedPayload(v RotatedPayload) error {
 	return err
 }
 
+// AsSessionClosedPayload returns the union data inside the EventPayload as a SessionClosedPayload
+func (t EventPayload) AsSessionClosedPayload() (SessionClosedPayload, error) {
+	var body SessionClosedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionClosedPayload overwrites any union data inside the EventPayload as the provided SessionClosedPayload
+func (t *EventPayload) FromSessionClosedPayload(v SessionClosedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionClosedPayload performs a merge with any union data inside the EventPayload, using the provided SessionClosedPayload
+func (t *EventPayload) MergeSessionClosedPayload(v SessionClosedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsSessionConfigDriftDeferredPayload returns the union data inside the EventPayload as a SessionConfigDriftDeferredPayload
 func (t EventPayload) AsSessionConfigDriftDeferredPayload() (SessionConfigDriftDeferredPayload, error) {
 	var body SessionConfigDriftDeferredPayload
@@ -15037,6 +15168,32 @@ func (t *EventPayload) FromSessionCreateSucceededPayload(v SessionCreateSucceede
 
 // MergeSessionCreateSucceededPayload performs a merge with any union data inside the EventPayload, using the provided SessionCreateSucceededPayload
 func (t *EventPayload) MergeSessionCreateSucceededPayload(v SessionCreateSucceededPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionCreatedPayload returns the union data inside the EventPayload as a SessionCreatedPayload
+func (t EventPayload) AsSessionCreatedPayload() (SessionCreatedPayload, error) {
+	var body SessionCreatedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionCreatedPayload overwrites any union data inside the EventPayload as the provided SessionCreatedPayload
+func (t *EventPayload) FromSessionCreatedPayload(v SessionCreatedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionCreatedPayload performs a merge with any union data inside the EventPayload, using the provided SessionCreatedPayload
+func (t *EventPayload) MergeSessionCreatedPayload(v SessionCreatedPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -19740,6 +19897,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeRigProvisionProg
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSessionClosed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionClosed
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionClosed() (TypedEventStreamEnvelopeSessionClosed, error) {
+	var body TypedEventStreamEnvelopeSessionClosed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionClosed overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionClosed
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionClosed(v TypedEventStreamEnvelopeSessionClosed) error {
+	v.Type = "session.closed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionClosed performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionClosed
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionClosed(v TypedEventStreamEnvelopeSessionClosed) error {
+	v.Type = "session.closed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionColdStartTimeout returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionColdStartTimeout
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionColdStartTimeout() (TypedEventStreamEnvelopeSessionColdStartTimeout, error) {
 	var body TypedEventStreamEnvelopeSessionColdStartTimeout
@@ -19842,6 +20027,34 @@ func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionCrashed(v 
 // MergeTypedEventStreamEnvelopeSessionCrashed performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionCrashed
 func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionCrashed(v TypedEventStreamEnvelopeSessionCrashed) error {
 	v.Type = "session.crashed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeSessionCreated returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionCreated
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionCreated() (TypedEventStreamEnvelopeSessionCreated, error) {
+	var body TypedEventStreamEnvelopeSessionCreated
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionCreated overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionCreated
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionCreated(v TypedEventStreamEnvelopeSessionCreated) error {
+	v.Type = "session.created"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionCreated performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionCreated
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionCreated(v TypedEventStreamEnvelopeSessionCreated) error {
+	v.Type = "session.created"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -21342,6 +21555,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeRequestResultSessionSubmit()
 	case "rig.provision.progress":
 		return t.AsTypedEventStreamEnvelopeRigProvisionProgress()
+	case "session.closed":
+		return t.AsTypedEventStreamEnvelopeSessionClosed()
 	case "session.cold_start_timeout":
 		return t.AsTypedEventStreamEnvelopeSessionColdStartTimeout()
 	case "session.config_drift_deferred":
@@ -21350,6 +21565,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSessionConversationReset()
 	case "session.crashed":
 		return t.AsTypedEventStreamEnvelopeSessionCrashed()
+	case "session.created":
+		return t.AsTypedEventStreamEnvelopeSessionCreated()
 	case "session.demand_claim_divergence":
 		return t.AsTypedEventStreamEnvelopeSessionDemandClaimDivergence()
 	case "session.drain_acked_with_assigned_work":
@@ -23669,6 +23886,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeRigP
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSessionClosed returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionClosed
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionClosed() (TypedTaggedEventStreamEnvelopeSessionClosed, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionClosed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionClosed overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionClosed
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionClosed(v TypedTaggedEventStreamEnvelopeSessionClosed) error {
+	v.Type = "session.closed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionClosed performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionClosed
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionClosed(v TypedTaggedEventStreamEnvelopeSessionClosed) error {
+	v.Type = "session.closed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionColdStartTimeout returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionColdStartTimeout
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionColdStartTimeout() (TypedTaggedEventStreamEnvelopeSessionColdStartTimeout, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionColdStartTimeout
@@ -23771,6 +24016,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessi
 // MergeTypedTaggedEventStreamEnvelopeSessionCrashed performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionCrashed
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionCrashed(v TypedTaggedEventStreamEnvelopeSessionCrashed) error {
 	v.Type = "session.crashed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeSessionCreated returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionCreated
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionCreated() (TypedTaggedEventStreamEnvelopeSessionCreated, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionCreated
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionCreated overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionCreated
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionCreated(v TypedTaggedEventStreamEnvelopeSessionCreated) error {
+	v.Type = "session.created"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionCreated performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionCreated
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionCreated(v TypedTaggedEventStreamEnvelopeSessionCreated) error {
+	v.Type = "session.created"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -25271,6 +25544,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeRequestResultSessionSubmit()
 	case "rig.provision.progress":
 		return t.AsTypedTaggedEventStreamEnvelopeRigProvisionProgress()
+	case "session.closed":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionClosed()
 	case "session.cold_start_timeout":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionColdStartTimeout()
 	case "session.config_drift_deferred":
@@ -25279,6 +25554,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSessionConversationReset()
 	case "session.crashed":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionCrashed()
+	case "session.created":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionCreated()
 	case "session.demand_claim_divergence":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionDemandClaimDivergence()
 	case "session.drain_acked_with_assigned_work":
