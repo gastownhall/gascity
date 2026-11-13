@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -32,9 +33,17 @@ import (
 // frozen worlds).
 type t7b2FrozenOrderInfo = t7dFrozenInfo
 
-// t7b2FrozenBeadStore is main's State.BeadStore.
+// t7b2FrozenBeadStore is main's State.BeadStore: the state's own method where
+// it kept one (the fakes, controllerState), else main's body for a state that
+// dropped it (the dashport seededState, t7b2FrozenSeededBeadStore).
 func t7b2FrozenBeadStore(state State, rig string) beads.Store {
-	return state.(interface{ BeadStore(string) beads.Store }).BeadStore(rig)
+	switch s := state.(type) {
+	case interface{ BeadStore(string) beads.Store }:
+		return s.BeadStore(rig)
+	case interface{ t7b2FrozenSeededBeadStore(string) beads.Store }:
+		return s.t7b2FrozenSeededBeadStore(rig)
+	}
+	panic(fmt.Sprintf("t7b2FrozenBeadStore: %T had no BeadStore on main", state))
 }
 
 type t7b2FrozenRigGraphRelicReporter interface {
