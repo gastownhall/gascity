@@ -9,9 +9,10 @@ import (
 
 // k8sAcceptsStartupDialogs reports whether Start and Relaunch run the shared
 // startup-dialog pass for cfg: the explicit AcceptStartupDialogs setting, or
-// acceptance inferred from the managed process hints.
+// acceptance inferred from the managed process hints. A one-shot command is
+// never polled, keeping its Start a fire-and-forget launch.
 func k8sAcceptsStartupDialogs(cfg runtime.Config) bool {
-	return runtime.ShouldAcceptStartupDialogs(cfg)
+	return k8sRequiresPostStartLiveness(cfg) && runtime.ShouldAcceptStartupDialogs(cfg)
 }
 
 // acceptStartupDialogs runs the shared startup-dialog pass

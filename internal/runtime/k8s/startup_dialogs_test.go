@@ -362,3 +362,56 @@ func TestStartupDialogsRelaunchClearsHistoryAndAcceptsDelayedDialog(t *testing.T
 		})
 	}
 }
+
+// TestStartupDialogsSkippedWhenNotEnabled covers AC-3: with acceptance
+// explicitly off, a one-shot lifecycle (even with process hints), or only a
+// nudge, Start and Relaunch read no pane, clear no history, send no dialog
+// keys, and deliver the initial nudge as before.
+func TestStartupDialogsSkippedWhenNotEnabled(t *testing.T) {
+	configs := map[string]func(*runtime.Config){
+		"explicit false": func(c *runtime.Config) {
+			c.AcceptStartupDialogs = boolPtr(false)
+		},
+		"one-shot with hints": func(c *runtime.Config) {
+			c.Lifecycle = runtime.LifecycleOneShot
+			c.EmitsPermissionWarning = true
+		},
+		"nudge only": func(c *runtime.Config) {
+			c.ProcessNames = nil
+		},
+	}
+	ops := map[string]func(*Provider, runtime.Config) error{
+		"start": func(p *Provider, cfg runtime.Config) error {
+			return p.Start(context.Background(), "gc-test-agent", cfg)
+		},
+		"relaunch": func(p *Provider, cfg runtime.Config) error {
+			addRunningPod(p.ops.(*fakeK8sOps), "gc-test-agent", "gc-test-agent")
+			return p.Relaunch(context.Background(), "gc-test-agent", cfg)
+		},
+	}
+	for opName, op := range ops {
+		for cfgName, mutate := range configs {
+			t.Run(opName+"/"+cfgName, func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					pane := &fakePane{history: oldTurnPrompt}
+					p := newDialogProvider(pane)
+					cfg := dialogStartConfig()
+					mutate(&cfg)
+
+					if err := op(p, cfg); err != nil {
+						t.Fatalf("%s: %v", opName, err)
+					}
+					for _, event := range []string{"capture", "clear-history", "move"} {
+						if n := pane.count(event); n != 0 {
+							t.Fatalf("dialog pass ran (%d %s events); log = %v", n, event, pane.log)
+						}
+					}
+					nudge := pane.index("nudge-text")
+					if nudge < 0 || pane.lastIndex("has-session") > nudge || pane.index("submit") < nudge {
+						t.Fatalf("initial nudge not delivered as before; log = %v", pane.log)
+					}
+				})
+			})
+		}
+	}
+}
