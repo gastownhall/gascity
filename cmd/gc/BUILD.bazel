@@ -2388,6 +2388,7 @@ go_test(
         "storage_snapshot_test.go",
         "storage_store_identity_test.go",
         "storage_verb_exclusion_test.go",
+        "storage_window_adopt_test.go",
         "store_health_test.go",
         "store_health_timeout_test.go",
         "store_identity_guard_test.go",
