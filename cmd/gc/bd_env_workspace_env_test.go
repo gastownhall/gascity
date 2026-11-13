@@ -29,6 +29,103 @@ func writeWorkspaceEnvCityTOML(t *testing.T, cityPath, body string, stamp time.T
 	}
 }
 
+// TestWorkspaceEnvTableInvalidatesOnSizeChangeAlone guards a rewrite whose mtime
+// stays fixed, so the size half of the cache stamp must detect the new value.
+func TestWorkspaceEnvTableInvalidatesOnSizeChangeAlone(t *testing.T) {
+	resetWorkspaceEnvCache()
+	t.Cleanup(resetWorkspaceEnvCache)
+	cityPath := t.TempDir()
+	writeWorkspaceEnvCityTOML(t, cityPath, "[workspace]\nname = \"demo\"\n[workspace.env]\nK = \"one\"\n", workspaceEnvStamp)
+	if got, err := workspaceEnvTable(cityPath); err != nil || got["K"] != "one" {
+		t.Fatalf("first read: K = %q, err %v; want one", got["K"], err)
+	}
+
+	writeWorkspaceEnvCityTOML(t, cityPath, "[workspace]\nname = \"demo\"\n[workspace.env]\nK = \"three\"\n", workspaceEnvStamp)
+	got, err := workspaceEnvTable(cityPath)
+	if err != nil || got["K"] != "three" {
+		t.Fatalf("after a longer rewrite with the same mtime: K = %q, err %v; want three", got["K"], err)
+	}
+}
+
+// TestWorkspaceEnvTableKeepsCitiesApart guards independent cache entries for
+// equally sized city files with identical mtimes and different environment values.
+func TestWorkspaceEnvTableKeepsCitiesApart(t *testing.T) {
+	resetWorkspaceEnvCache()
+	t.Cleanup(resetWorkspaceEnvCache)
+	a, b := t.TempDir(), t.TempDir()
+	writeWorkspaceEnvCityTOML(t, a, "[workspace]\nname = \"a\"\n[workspace.env]\nK = \"from-a\"\n", workspaceEnvStamp)
+	writeWorkspaceEnvCityTOML(t, b, "[workspace]\nname = \"b\"\n[workspace.env]\nK = \"from-b\"\n", workspaceEnvStamp)
+
+	loadsBefore := workspaceEnvLoads.Load()
+	for round := 0; round < 2; round++ {
+		for _, tc := range []struct{ path, want string }{{a, "from-a"}, {b, "from-b"}} {
+			got, err := workspaceEnvTable(tc.path)
+			if err != nil || got["K"] != tc.want {
+				t.Fatalf("round %d: K for %s = %q, err %v; want %q", round, tc.path, got["K"], err, tc.want)
+			}
+		}
+	}
+	if n := workspaceEnvLoads.Load() - loadsBefore; n != 2 {
+		t.Fatalf("file reads for two cities over two rounds = %d, want 2 (one per city)", n)
+	}
+}
+
+// TestWorkspaceEnvTableMissPathHandsOutACopy guards the caller's ownership of
+// the first returned table, which must not expose the map stored in the cache.
+func TestWorkspaceEnvTableMissPathHandsOutACopy(t *testing.T) {
+	resetWorkspaceEnvCache()
+	t.Cleanup(resetWorkspaceEnvCache)
+	cityPath := t.TempDir()
+	writeWorkspaceEnvCityTOML(t, cityPath, "[workspace]\nname = \"demo\"\n[workspace.env]\nK = \"one\"\n", workspaceEnvStamp)
+
+	first, err := workspaceEnvTable(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first["K"] = "scribbled"
+	first["EXTRA"] = "x"
+	second, err := workspaceEnvTable(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second["K"] != "one" || len(second) != 1 {
+		t.Fatalf("cache was mutated through the table returned by the filling call: %v", second)
+	}
+}
+
+// TestWorkspaceEnvTableReportsAReadError guards an existing city.toml that cannot
+// be read: a directory fails ReadFile even when the test runs as root.
+func TestWorkspaceEnvTableReportsAReadError(t *testing.T) {
+	resetWorkspaceEnvCache()
+	t.Cleanup(resetWorkspaceEnvCache)
+	cityPath := t.TempDir()
+	cityConfig := filepath.Join(cityPath, "city.toml")
+	if err := os.Mkdir(cityConfig, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := workspaceEnvTable(cityPath); err == nil || !strings.Contains(err.Error(), "read workspace env") {
+		t.Fatalf("unreadable city.toml: table %v, err %v; want a contextual read error", got, err)
+	}
+	if _, cached := workspaceEnvCache.Load(normalizePathForCompare(cityConfig)); cached {
+		t.Fatal("a failed read was memoized")
+	}
+}
+
+// TestWorkspaceStrictPinTreatsAnEmptyWorkspacePathAsConfigured guards the
+// distinction between an absent workspace PATH and an explicitly empty one.
+func TestWorkspaceStrictPinTreatsAnEmptyWorkspacePathAsConfigured(t *testing.T) {
+	resetWorkspaceEnvCache()
+	t.Cleanup(resetWorkspaceEnvCache)
+	cityPath := t.TempDir()
+	writeWorkspaceEnvCityTOML(t, cityPath, "[workspace]\nname = \"demo\"\n[workspace.env]\nPATH = \"\"\n", workspaceEnvStamp)
+	t.Setenv("BD_BIN", "")
+
+	_, err := workspacePinnedBdBinary(cityPath)
+	if err == nil || !strings.Contains(err.Error(), "workspace.env PATH is configured but contains no executable bd") {
+		t.Fatalf("workspacePinnedBdBinary with PATH = \"\": err %v; want the PATH-without-bd configuration error", err)
+	}
+}
+
 // writeWorkspaceEnvIncludedFragment writes a fragment that declares its own
 // [workspace.env]. The composed load drops it, so the narrow reader must too.
 func writeWorkspaceEnvIncludedFragment(t *testing.T, cityPath, pinDir string) {

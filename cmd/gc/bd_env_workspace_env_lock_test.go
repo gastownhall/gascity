@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -100,6 +101,61 @@ func TestWorkspacePinDoesNotWaitOnHeldRepoCacheLock(t *testing.T) {
 	}
 	if appliedErr != nil || gotApplied != pinned {
 		t.Fatalf("applyWorkspacePinnedBdBinary BD_BIN = %q, %v; want %q", gotApplied, appliedErr, pinned)
+	}
+}
+
+// TestWorkspaceStrictPinWithoutAPinDoesNotWaitOnHeldRepoCacheLock guards both
+// unpinned paths through the strict resolver while an import holds the cache lock.
+func TestWorkspaceStrictPinWithoutAPinDoesNotWaitOnHeldRepoCacheLock(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		path    bool
+		wantErr string
+	}{
+		{name: "no workspace env"},
+		{
+			name:    "PATH without bd",
+			path:    true,
+			wantErr: "workspace.env PATH is configured but contains no executable bd",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath, cacheRoot := setupDiscoveryLockCity(t)
+			if tc.path {
+				f, err := os.OpenFile(filepath.Join(cityPath, "city.toml"), os.O_APPEND|os.O_WRONLY, 0o600)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, writeErr := f.WriteString("\n[workspace.env]\nPATH = " + strconv.Quote(t.TempDir()) + "\n")
+				closeErr := f.Close()
+				if writeErr != nil {
+					t.Fatal(writeErr)
+				}
+				if closeErr != nil {
+					t.Fatal(closeErr)
+				}
+			}
+			resetWorkspaceEnvCache()
+			t.Cleanup(resetWorkspaceEnvCache)
+			t.Setenv("PATH", t.TempDir())
+			t.Setenv("BD_BIN", "")
+			release := holdExclusiveRepoCacheLock(t, cacheRoot)
+
+			var got string
+			var err error
+			boundedEnvBuild(t, "strict workspace pin resolution without a pin", release, func() {
+				got, err = workspacePinnedBdBinary(cityPath)
+			})
+			if tc.wantErr == "" {
+				if err != nil || got != "" {
+					t.Fatalf("workspacePinnedBdBinary = %q, %v; want empty, nil", got, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("workspacePinnedBdBinary = %q, %v; want an error containing %q", got, err, tc.wantErr)
+			}
+		})
 	}
 }
 
