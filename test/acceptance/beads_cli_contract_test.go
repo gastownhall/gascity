@@ -765,6 +765,51 @@ func TestBdBasicCRUD(t *testing.T) {
 			t.Fatalf("bd config get issue_prefix = %q, want ct", strings.TrimSpace(out))
 		}
 	})
+
+	// --- Ready type exclusion ---
+
+	// gc's beads.readyExcludeTypes lists twelve infrastructure types; bd's own
+	// ready query excludes only seven of them. gc's stores re-filter bd's rows,
+	// so gc readers are unaffected, but a raw `bd ready` returns the other five.
+	// This pins bd's side of that skew so the contract radar names it when bd
+	// starts (or stops) excluding a type, which is the moment gc's list and the
+	// comment on it need revisiting. ga-tzh9bl.
+	t.Run("ReadyNativeTypeExclusion", func(t *testing.T) {
+		nativelyExcluded := []string{"merge-request", "gate", "molecule", "message", "agent", "role", "rig"}
+		gcOnlyExcluded := []string{"step", "convoy", "session", "startup-health-episode", "op"}
+		all := slices.Concat(nativelyExcluded, gcOnlyExcluded)
+
+		requireBD(t, dir, "config", "set", "types.custom", strings.Join(all, ","))
+		typeByID := map[string]string{}
+		for _, typ := range all {
+			out := requireBD(t, dir, "create", "--json", "ready exclusion "+typ, "-t", typ)
+			typeByID[extractBeadID(t, out)] = typ
+		}
+
+		out := requireBD(t, dir, "ready", "--json", "--limit", "0")
+		idx := strings.Index(out, "[")
+		if idx < 0 {
+			t.Fatalf("bd ready --json returned no JSON array:\n%s", out)
+		}
+		var ready []struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal([]byte(out[idx:]), &ready); err != nil {
+			t.Fatalf("bd ready --json not parseable: %v\n%s", err, out)
+		}
+		var returned []string
+		for _, r := range ready {
+			if typ, ok := typeByID[r.ID]; ok {
+				returned = append(returned, typ)
+			}
+		}
+		slices.Sort(returned)
+		want := slices.Clone(gcOnlyExcluded)
+		slices.Sort(want)
+		if !slices.Equal(returned, want) {
+			t.Fatalf("bd ready returned infra types %v, want exactly %v (bd's native exclusion list changed: update beads.readyExcludeTypes' comment and this pin)", returned, want)
+		}
+	})
 }
 
 // TestBdDependencies exercises all dependency operations against a single

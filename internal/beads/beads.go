@@ -814,8 +814,15 @@ func IsMoleculeType(t string) bool {
 
 // readyExcludeTypes enumerates bead types that Ready() excludes by
 // default. These are infrastructure or workflow-container types that
-// represent internal bookkeeping rather than actionable work. This
-// matches the exclusion list in the bd CLI's GetReadyWork query.
+// represent internal bookkeeping rather than actionable work. This is a
+// superset of the exclusion list in the bd CLI's GetReadyWork query: bd
+// natively excludes only merge-request, gate, molecule, message, agent, role
+// and rig, so a raw `bd ready` still returns step, convoy, session,
+// startup-health-episode and op. gc's stores re-filter bd's rows through
+// IsReadyCandidateForTier, which is what keeps those five out of gc's Ready().
+// The bd side is pinned by TestBdBasicCRUD/ReadyNativeTypeExclusion in
+// test/acceptance; bd is version-held (ga-drlztz), so do not bump it to close
+// the gap.
 var readyExcludeTypes = map[string]bool{
 	"merge-request":          true, // processed by automation
 	"gate":                   true, // async wait conditions
