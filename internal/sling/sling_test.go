@@ -1201,7 +1201,7 @@ func TestDoSlingFailsWhenBeadNotVisibleToTargetWorkQuery(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), WorkQuery: testCustomWorkQuery}
 
 	deps := testDeps(cfg, sp, runner.run)
-	deps.Store = seededStore("BL-42")
+	deps.Store = beads.WorkStore{Store: seededStore("BL-42")}
 	deps.WorkQueryProbe = func(_ config.Agent) (string, error) {
 		// Simulates a work_query whose label filter excludes this bead.
 		return "[]", nil
@@ -1236,7 +1236,7 @@ func TestDoSlingSucceedsWhenBeadVisibleToTargetWorkQuery(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), WorkQuery: testCustomWorkQuery}
 
 	deps := testDeps(cfg, sp, runner.run)
-	deps.Store = seededStore("BL-42")
+	deps.Store = beads.WorkStore{Store: seededStore("BL-42")}
 	deps.WorkQueryProbe = func(_ config.Agent) (string, error) {
 		return `[{"id":"BL-42","status":"open"}]`, nil
 	}
@@ -1265,7 +1265,7 @@ func TestDoSlingSkipsWorkQueryProbeForBuiltInWorkQuery(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 
 	deps := testDeps(cfg, sp, runner.run)
-	deps.Store = seededStore("BL-42")
+	deps.Store = beads.WorkStore{Store: seededStore("BL-42")}
 	probed := 0
 	deps.WorkQueryProbe = func(_ config.Agent) (string, error) {
 		probed++
@@ -1289,7 +1289,7 @@ func TestDoSlingWarnsWhenWorkQueryListsOtherWork(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), WorkQuery: testCustomWorkQuery}
 
 	deps := testDeps(cfg, sp, runner.run)
-	deps.Store = seededStore("BL-42")
+	deps.Store = beads.WorkStore{Store: seededStore("BL-42")}
 	deps.WorkQueryProbe = func(_ config.Agent) (string, error) {
 		return `[{"id":"BL-7","status":"in_progress"}]`, nil
 	}
@@ -1372,7 +1372,7 @@ func TestDoSlingToleratesWorkQueryMissForBeadThatIsNotUnclaimedReadyWork(t *test
 
 			store := beads.NewMemStoreFrom(0, tt.seed, tt.deps)
 			deps := testDeps(cfg, sp, runner.run)
-			deps.Store = store
+			deps.Store = beads.WorkStore{Store: store}
 			deps.WorkQueryProbe = func(_ config.Agent) (string, error) {
 				if tt.duringProbe != nil {
 					tt.duringProbe(t, store)
@@ -1401,7 +1401,7 @@ func TestDoSlingRecordsWorkQueryProbeErrorWithoutFailing(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), WorkQuery: testCustomWorkQuery}
 
 	deps := testDeps(cfg, sp, runner.run)
-	deps.Store = seededStore("BL-42")
+	deps.Store = beads.WorkStore{Store: seededStore("BL-42")}
 	deps.WorkQueryProbe = func(_ config.Agent) (string, error) {
 		return "", errors.New("work query timed out")
 	}
@@ -1440,7 +1440,7 @@ func TestDoSlingWarnsWhenReadinessOfUnsurfacedBeadIsUnknown(t *testing.T) {
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), WorkQuery: testCustomWorkQuery}
 
 	deps := testDeps(cfg, sp, runner.run)
-	deps.Store = &readyErrStore{Store: seededStore("BL-42"), err: errors.New("ready read failed")}
+	deps.Store = beads.WorkStore{Store: &readyErrStore{Store: seededStore("BL-42"), err: errors.New("ready read failed")}}
 	deps.WorkQueryProbe = func(_ config.Agent) (string, error) {
 		return "[]", nil
 	}
