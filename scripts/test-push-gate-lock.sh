@@ -14,7 +14,9 @@
 # Coverage: acquire/hold/deny/release, the bounded wait and its return code,
 # FD inheritance (a detached descendant must not pin a slot), dead-holder
 # diagnostics, automatic reap of leaked descendants when the stamped holder
-# PID is dead (ga-34a), slot-holder discovery (fuser first, lsof fallback),
+# PID is dead (ga-34a) — only holders in the stamped process group, never an
+# unrelated opener, and never a slot stamped without one (ga-y5030z) —
+# slot-holder discovery (fuser first, lsof fallback),
 # the missing-flock degrade path, malformed tunables,
 # the GC_PUSH_GATE_NO_CAP escape hatch, both city-root resolution modes, the
 # slots-dir fallback, and static assertions that scripts/test-local-parallel

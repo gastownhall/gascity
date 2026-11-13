@@ -38,6 +38,16 @@
 #   slot until an operator kills the leak by hand (ga-34a). Never delete
 #   the slot file to "unlock" it — that does not release a live flock.
 #
+#   lsof/fuser list EVERY process with the slot file open, and a live gate's
+#   own acquire poll or another reaper's probe opens a dead slot's file too,
+#   so "has the file open" cannot pick the victim. The gate therefore stamps
+#   its process group, and the reaper signals only a holder still in that
+#   group (ga-y5030z). A leaked descendant is a plain fork that never called
+#   setsid, so it shares its dead parent's group; a concurrent gate or reaper
+#   is a separate invocation with a group of its own. Residual assumption:
+#   every gate invocation has its own process group. A descendant that
+#   called setsid/setpgid is outside its parent's group and is not reaped.
+#
 #   One deliberate deviation from mpr: mpr's caller is an automatic
 #   cooldown-retry dispatcher, so it fails fast (immediate EX_TEMPFAIL) when
 #   all slots are busy. This gate's caller is a synchronous, human/agent-
@@ -50,11 +60,14 @@
 #   scripts/push-ownership-guard.sh's unrelated exit-1 contract.
 #
 # CONTRACT
-#   - Slot content is diagnostic only: "<pid> <iso8601-utc> <label>
-#     <hostname>" (mpr's own global slot only stamps pid+timestamp; this
-#     adds label+hostname per FR8, since callers here span an entire city
-#     of heterogeneous rigs/roles rather than one single-purpose script).
-#     Slot files are never sourced or eval'd — display only.
+#   - Slot content is diagnostic, except that the reaper reads the stamped
+#     process group: "<pid> <iso8601-utc> <label> <hostname> <pgid>" (mpr's
+#     own global slot only stamps pid+timestamp; this adds label+hostname per
+#     FR8, since callers here span an entire city of heterogeneous
+#     rigs/roles rather than one single-purpose script, and the pgid per
+#     ga-y5030z). Readers parse by field position; add new fields at the
+#     end. A slot stamped before the pgid field existed has four fields and
+#     is never reaped. Slot files are never sourced or eval'd.
 #   - This library is entirely bd/beads/claim-lease-agnostic. It is a
 #     generic, reusable mutex-semaphore primitive with no awareness of bead
 #     claims, mail, or any other Gas City concept. Do not add any
@@ -127,12 +140,13 @@
 #       holder line alone points at the wrong process.
 #   push_gate_reap_dead_holders <slot_dir> <max_concurrent>
 #       For each occupied slot whose stamped PID is missing or dead, kill
-#       the processes that still have the slot file open (leaked
-#       descendants), once that state has held unchanged for
-#       PUSH_GATE_REAP_SETTLE_SECONDS. Never kills the stamped PID while it
-#       is alive, and never kills this shell ($$). Returns 0 if anything was
-#       signalled (caller should retry acquire immediately), 1 if there was
-#       nothing to reap. Best-effort: if neither fuser nor lsof is
+#       the processes that still have the slot file open AND are in the
+#       stamped process group (leaked descendants), once that state has held
+#       unchanged for PUSH_GATE_REAP_SETTLE_SECONDS. A slot whose stamp has no
+#       valid pgid is left alone, with a diagnostic. Never kills the stamped
+#       PID while it is alive, and never kills this shell ($$). Returns 0 if
+#       anything was signalled (caller should retry acquire immediately), 1
+#       if there was nothing to reap. Best-effort: if neither fuser nor lsof is
 #       available, prints a diagnostic and returns 1 rather than blocking.
 #   push_gate_release_slot <fd>
 #       Explicit release + close. Normally unnecessary (process exit
@@ -282,6 +296,12 @@ _push_gate_slot_holder_pids() {
     return 0
 }
 
+# Process group of pid $1 on stdout; empty when the process is gone or ps
+# cannot say. `ps -o pgid= -p` is the form Linux, macOS and BSD all accept.
+_push_gate_pgid_of() {
+    ps -o pgid= -p "$1" 2>/dev/null | tr -d '[:space:]' || true
+}
+
 # The stamp line of slot file $1, on stdout, when the slot is locked and the
 # stamped PID is missing or dead; fails otherwise.
 _push_gate_dead_stamp() {
@@ -310,8 +330,8 @@ _push_gate_dead_stamp() {
 PUSH_GATE_REAP_SETTLE_SECONDS=1
 push_gate_reap_dead_holders() {
     local _pgr_dir="$1" _pgr_max="$2"
-    local _pgr_i _pgr_slot _pgr_stamp _pgr_h _pgr_any=0 _pgr_killed=0
-    local -a _pgr_stamps=() _pgr_first=() _pgr_signalled=()
+    local _pgr_i _pgr_slot _pgr_stamp _pgr_h _pgr_any=0 _pgr_killed=0 _pgr_pgid
+    local -a _pgr_stamps=() _pgr_pgids=() _pgr_first=() _pgr_signalled=()
 
     for (( _pgr_i = 0; _pgr_i < _pgr_max; _pgr_i++ )); do
         _pgr_slot="$_pgr_dir/slot-${_pgr_i}.lock"
@@ -320,7 +340,17 @@ push_gate_reap_dead_holders() {
             echo "push-gate: slot-${_pgr_i} holder pid ${_pgr_stamp%% *} is dead but neither fuser nor lsof is available to reap leaked descendants" >&2
             continue
         fi
+        # Field 5 is the stamped process group (see the CONTRACT). Without a
+        # valid one there is nothing to match a holder against, and guessing
+        # is how a live gate gets killed, so leave the slot to its holder.
+        _pgr_pgid=""
+        read -r _ _ _ _ _pgr_pgid _ <<<"$_pgr_stamp" || true
+        if ! [[ "$_pgr_pgid" =~ ^[1-9][0-9]*$ ]]; then
+            echo "push-gate: slot-${_pgr_i} holder pid ${_pgr_stamp%% *} is dead but its stamp has no process group (written before the pgid stamp existed); not reaping — wait for the holder to exit or kill it by hand" >&2
+            continue
+        fi
         _pgr_stamps[_pgr_i]="$_pgr_stamp"
+        _pgr_pgids[_pgr_i]="$_pgr_pgid"
         _pgr_first[_pgr_i]=" $(_push_gate_slot_holder_pids "$_pgr_slot" | tr '\n' ' ') "
         _pgr_any=1
     done
@@ -339,6 +369,7 @@ push_gate_reap_dead_holders() {
             [[ "$_pgr_h" =~ ^[0-9]+$ ]] || continue
             [[ "$_pgr_h" -eq "$$" ]] && continue
             [[ "${_pgr_first[_pgr_i]}" == *" $_pgr_h "* ]] || continue
+            [[ "$(_push_gate_pgid_of "$_pgr_h")" == "${_pgr_pgids[_pgr_i]}" ]] || continue
             echo "push-gate: slot-${_pgr_i} holder pid ${_pgr_stamp%% *} is dead; reaping leaked descendant ${_pgr_h}" >&2
             kill -TERM "$_pgr_h" 2>/dev/null || true
             _pgr_signalled[_pgr_i]+="$_pgr_h "
@@ -359,6 +390,7 @@ push_gate_reap_dead_holders() {
         [[ "$_pgr_stamp" == "${_pgr_stamps[_pgr_i]}" ]] || continue
         for _pgr_h in $(_push_gate_slot_holder_pids "$_pgr_slot"); do
             [[ "${_pgr_signalled[_pgr_i]}" == *" $_pgr_h "* ]] || continue
+            [[ "$(_push_gate_pgid_of "$_pgr_h")" == "${_pgr_pgids[_pgr_i]}" ]] || continue
             kill -KILL "$_pgr_h" 2>/dev/null || true
         done
     done
@@ -415,8 +447,14 @@ push_gate_acquire_slot() {
     _pgl_max="$(_push_gate_tunable PUSH_GATE_MAX_CONCURRENT 2 1)"
     _pgl_max_wait="$(_push_gate_tunable PUSH_GATE_MAX_WAIT_SECONDS 600 0)"
     _pgl_poll="$(_push_gate_tunable PUSH_GATE_POLL_SECONDS 15 1)"
-    local _pgl_host
+    local _pgl_host _pgl_pgid
     _pgl_host="$(hostname 2>/dev/null || echo unknown)"
+    # The reaper signals only holders in this process group (ga-y5030z). Read
+    # it before the sweep: the stamp below is written with builtins only.
+    # $$ stands in when ps cannot say; a wrong guess only makes this slot
+    # unreapable, never a wrong kill.
+    _pgl_pgid="$(_push_gate_pgid_of "$$")"
+    [[ "$_pgl_pgid" =~ ^[1-9][0-9]*$ ]] || _pgl_pgid="$$"
 
     # An unwritable slot dir (e.g. a parent path component that is a file,
     # as .git is in a linked worktree prior to push_gate_slots_dir's
@@ -459,7 +497,7 @@ push_gate_acquire_slot() {
             if flock -n "$_pgl_fd"; then
                 # Stamp with builtins only, right after flock, so the reaper's
                 # settle interval cannot catch a live holder mid-stamp.
-                printf '%s %s %s %s\n' "$$" "$_pgl_ts" "$_pgl_label" "$_pgl_host" >"$_pgl_slot" 2>/dev/null || true
+                printf '%s %s %s %s %s\n' "$$" "$_pgl_ts" "$_pgl_label" "$_pgl_host" "$_pgl_pgid" >"$_pgl_slot" 2>/dev/null || true
                 eval "$_pgl_fd_var=\$_pgl_fd"
                 if [[ "$_pgl_announced" -eq 1 ]]; then
                     echo "push-gate: slot-${_pgl_i} acquired after wait" >&2

@@ -2328,6 +2328,12 @@ instead of waiting out the bound. It first waits one second and checks
 again, and signals only a process that still has the file open under the
 same dead stamp: a new holder rewrites the stamp just after it wins the
 lock, and a waiter probing the slot holds the file only for an instant.
+It also signals only a process in the process group the gate stamped as the
+slot's fifth field, because `lsof`/`fuser` list every opener, including
+another live gate's poll or reaper's probe, and a leaked descendant that
+never called `setsid` shares its dead parent's group. A slot stamped
+before that field existed, or whose holder called `setsid`, is not reaped:
+the diagnostic says so and the acquire waits out the bound.
 Never delete the slot file to "unlock" it. The gate needs `flock(1)`,
 which `docs/getting-started/installation.md` already lists as required; if
 it is absent the run proceeds uncapped with a warning rather than blocking.
