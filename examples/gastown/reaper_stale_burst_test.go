@@ -1,0 +1,195 @@
+//go:build unix
+
+package gastown_test
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// reaperStaleBurstRun is what one reaper run did with a city scope holding a
+// number of stale issues.
+type reaperStaleBurstRun struct {
+	// closed is how many of the stale issues a bd close named.
+	closed int
+	// gcLog is every gc call, the summary and escalations included.
+	gcLog string
+	// outcome is the order outcome the run declared, or "".
+	outcome string
+}
+
+// runReaperStaleBurst runs the core reaper over a city scope whose Step 5
+// query answers count stale issues (ga-s0 .. ga-s<count-1>), with env
+// layered over the fixture's.
+func runReaperStaleBurst(t *testing.T, count int, env map[string]string) reaperStaleBurstRun {
+	t.Helper()
+	return runReaperStaleBurstIn(t, t.TempDir(), count, env)
+}
+
+// runReaperStaleBurstIn is runReaperStaleBurst on cityDir, whose incident
+// state a later run sees.
+func runReaperStaleBurstIn(t *testing.T, cityDir string, count int, env map[string]string) reaperStaleBurstRun {
+	t.Helper()
+	writeCityBeadsMetadata(t, cityDir, "citydb")
+	writeFreshBackupState(t, cityDir)
+	binDir := t.TempDir()
+	bdLog := filepath.Join(t.TempDir(), "bd.log")
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	outcome := filepath.Join(t.TempDir(), "outcome.json")
+
+	var rows strings.Builder
+	rows.WriteString(`id,close_mode\n`)
+	for i := 0; i < count; i++ {
+		fmt.Fprintf(&rows, `ga-s%d,bare\n`, i)
+	}
+	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/bin/sh
+case "$*" in
+  *"SHOW TABLES FROM"*"LIKE 'wisps'"*)
+    printf 'Tables_in_db\nwisps\n'
+    ;;
+  *"SHOW DATABASES"*)
+    printf 'Database\ncitydb\n'
+    ;;
+  *"STR_TO_DATE(JSON_UNQUOTE(JSON_EXTRACT(metadata, '$.expires_at'))"*)
+    printf 'id\n'
+    ;;
+  *"SELECT id, CASE WHEN COALESCE(assignee"*"citydb"*"issues"*)
+    printf '`+rows.String()+`'
+    ;;
+  *"COUNT("*)
+    printf 'COUNT(*)\n0\n'
+    ;;
+esac
+exit 0
+`)
+	writeExecutable(t, filepath.Join(binDir, "bd"), `#!/bin/sh
+printf '%s\n' "$*" >> "$BD_CALL_LOG"
+`+maintenanceBdPurgeAndBackupVerbs+`exit 0
+`)
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+exit 0
+`)
+	base := map[string]string{
+		"BD_CALL_LOG":           bdLog,
+		"GC_CALL_LOG":           gcLog,
+		"GC_CITY":               cityDir,
+		"GC_CITY_PATH":          cityDir,
+		"GC_DOLT_HOST":          "127.0.0.1",
+		"GC_DOLT_PORT":          "3307",
+		"GC_DOLT_USER":          "root",
+		"GC_DOLT_PASSWORD":      "",
+		"GC_ORDER_OUTCOME_FILE": outcome,
+		"PATH":                  binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+	for k, v := range env {
+		base[k] = v
+	}
+	runScript(t, coreScriptPath("reaper.sh"), base)
+
+	var run reaperStaleBurstRun
+	bdData, _ := os.ReadFile(bdLog)
+	for _, line := range strings.Split(string(bdData), "\n") {
+		if !strings.Contains(line, "stale:auto-closed by reaper") {
+			continue
+		}
+		for _, field := range strings.Fields(line) {
+			if strings.HasPrefix(field, "ga-s") {
+				run.closed++
+			}
+		}
+	}
+	gcData, _ := os.ReadFile(gcLog)
+	run.gcLog = string(gcData)
+	outcomeData, _ := os.ReadFile(outcome)
+	run.outcome = string(outcomeData)
+	return run
+}
+
+// TestReaperHoldsAStaleIssueBurst: a city scope whose Step 5 finds more
+// stale issues than GC_REAPER_STALE_ISSUE_BURST_MAX (default 25) closes none,
+// escalates as an anomaly naming the count and the release, and
+// says so in its summary and its order outcome. After a storage split one
+// city's first reaper run closed 98 stale work beads at once (ga-efurfu).
+func TestReaperHoldsAStaleIssueBurst(t *testing.T) {
+	run := runReaperStaleBurst(t, 98, nil)
+	if run.closed != 0 {
+		t.Fatalf("the reaper closed %d of a 98-issue burst; want none:\n%s", run.closed, run.gcLog)
+	}
+	for _, want := range []string{
+		"stale_issues_held:98",
+		"closed:0",
+		"ESCALATION: Reaper anomalies detected [MEDIUM]",
+		"stale-issue burst held=98",
+		"GC_REAPER_STALE_ISSUE_BURST_ACK=98",
+		"GC_REAPER_STALE_ISSUE_BURST_MAX=25",
+	} {
+		if !strings.Contains(run.gcLog, want) {
+			t.Errorf("the run does not report %q:\n%s", want, run.gcLog)
+		}
+	}
+	if !strings.Contains(run.outcome, `"partial"`) || !strings.Contains(run.outcome, "step 5 held 98 stale issue(s)") {
+		t.Errorf("the order outcome does not name the held step: %q", run.outcome)
+	}
+}
+
+// TestReaperStaleIssueBurstRelease: what releases a held burst and what does
+// not. The acknowledgement names a count, so a backlog that moved since an
+// operator reviewed it is held again rather than closed on a stale review.
+func TestReaperStaleIssueBurstRelease(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		count      int
+		env        map[string]string
+		wantClosed int
+		wantHeld   bool
+	}{
+		{name: "at the default max", count: 25, wantClosed: 25},
+		{name: "one over the default max", count: 26, wantHeld: true},
+		{name: "acknowledged at its exact count", count: 30, env: map[string]string{"GC_REAPER_STALE_ISSUE_BURST_ACK": "30"}, wantClosed: 30},
+		{name: "acknowledged at another count", count: 30, env: map[string]string{"GC_REAPER_STALE_ISSUE_BURST_ACK": "29"}, wantHeld: true},
+		{name: "under a raised max", count: 30, env: map[string]string{"GC_REAPER_STALE_ISSUE_BURST_MAX": "40"}, wantClosed: 30},
+		{name: "with the guard off", count: 30, env: map[string]string{"GC_REAPER_STALE_ISSUE_BURST_MAX": "0"}, wantClosed: 30},
+		{name: "with a max that is not a number", count: 30, env: map[string]string{"GC_REAPER_STALE_ISSUE_BURST_MAX": "lots"}, wantHeld: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := runReaperStaleBurst(t, tc.count, tc.env)
+			if run.closed != tc.wantClosed {
+				t.Errorf("closed %d stale issue(s), want %d:\n%s", run.closed, tc.wantClosed, run.gcLog)
+			}
+			held := strings.Contains(run.gcLog, fmt.Sprintf("stale_issues_held:%d", tc.count))
+			escalated := strings.Contains(run.gcLog, "stale-issue burst held=")
+			if held != tc.wantHeld || escalated != tc.wantHeld {
+				t.Errorf("held %t, escalated %t; want both %t:\n%s", held, escalated, tc.wantHeld, run.gcLog)
+			}
+			if !tc.wantHeld && !strings.Contains(run.gcLog, "stale_issues_held:0") {
+				t.Errorf("the summary does not report stale_issues_held:0:\n%s", run.gcLog)
+			}
+		})
+	}
+}
+
+// TestReaperStaleIssueBurstStaysOneIncidentAsItGrows: a held backlog that
+// grows between runs is the same incident, so it is not re-sent every 30
+// minutes; releasing it resolves the incident, so the next burst notifies.
+func TestReaperStaleIssueBurstStaysOneIncidentAsItGrows(t *testing.T) {
+	cityDir := t.TempDir()
+	sent := func(run reaperStaleBurstRun) int {
+		return strings.Count(run.gcLog, "stale-issue burst held=")
+	}
+	if first := runReaperStaleBurstIn(t, cityDir, 98, nil); sent(first) != 1 {
+		t.Fatalf("the first held burst sent %d escalation(s), want 1:\n%s", sent(first), first.gcLog)
+	}
+	if grown := runReaperStaleBurstIn(t, cityDir, 99, nil); sent(grown) != 0 || !strings.Contains(grown.gcLog, "stale_issues_held:99") {
+		t.Fatalf("a held burst that grew by one was sent again (%d) or not held:\n%s", sent(grown), grown.gcLog)
+	}
+	if released := runReaperStaleBurstIn(t, cityDir, 99, map[string]string{"GC_REAPER_STALE_ISSUE_BURST_ACK": "99"}); released.closed != 99 {
+		t.Fatalf("the acknowledged burst closed %d, want 99:\n%s", released.closed, released.gcLog)
+	}
+	if again := runReaperStaleBurstIn(t, cityDir, 40, nil); sent(again) != 1 {
+		t.Fatalf("a new burst after a release sent %d escalation(s), want 1:\n%s", sent(again), again.gcLog)
+	}
+}
