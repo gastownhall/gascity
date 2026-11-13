@@ -555,3 +555,63 @@ func TestStartupDialogsTransportFailuresAreBestEffort(t *testing.T) {
 		})
 	}
 }
+
+// TestStartupDialogsTrustSelection covers AC-5: a trust dialog whose cursor
+// starts off the trust row is confirmed only once the shared helper sees the
+// cursor on that row. When moves never get it there, the session stays up, a
+// warning names it, and the initial nudge is withheld so its Enter cannot
+// answer the dialog.
+func TestStartupDialogsTrustSelection(t *testing.T) {
+	ops := map[string]func(*Provider) error{
+		"start": func(p *Provider) error {
+			return p.Start(context.Background(), "gc-test-agent", dialogStartConfig())
+		},
+		"relaunch": func(p *Provider) error {
+			addRunningPod(p.ops.(*fakeK8sOps), "gc-test-agent", "gc-test-agent")
+			return p.Relaunch(context.Background(), "gc-test-agent", dialogStartConfig())
+		},
+	}
+	for opName, op := range ops {
+		t.Run(opName+"/moves reach the trust row", func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				pane := &fakePane{dialogOpen: true}
+				p := newDialogProvider(pane)
+
+				if err := op(p); err != nil {
+					t.Fatalf("%s: %v", opName, err)
+				}
+				if move, accept := pane.index("move"), pane.index("accept"); move < 0 || move > accept {
+					t.Fatalf("Enter not preceded by a selection move; log = %v", pane.log)
+				}
+				assertAcceptedBeforeNudge(t, pane)
+			})
+		})
+		t.Run(opName+"/moves never reach the trust row", func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				pane := &fakePane{dialogOpen: true, movesIgnored: true}
+				p := newDialogProvider(pane)
+				var stderr strings.Builder
+				p.stderr = &stderr
+
+				if err := op(p); err != nil {
+					t.Fatalf("%s failed a live session left on an unconfirmed dialog: %v", opName, err)
+				}
+				if pane.count("move") == 0 {
+					t.Fatalf("the helper never tried to move the selection; log = %v", pane.log)
+				}
+				for _, event := range []string{"accept", "enter-wrong-row", "nudge-text", "submit"} {
+					if n := pane.count(event); n != 0 {
+						t.Fatalf("%d %s events with the trust row unconfirmed; log = %v", n, event, pane.log)
+					}
+				}
+				if _, alive := p.ops.(*fakeK8sOps).pods["gc-test-agent"]; !alive {
+					t.Fatal("the pod was removed; the live session must stay running")
+				}
+				got := stderr.String()
+				if !strings.Contains(got, `"gc-test-agent"`) || !strings.Contains(got, "withheld") {
+					t.Fatalf("stderr = %q, want a warning naming the session and the withheld nudge", got)
+				}
+			})
+		})
+	}
+}

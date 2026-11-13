@@ -297,11 +297,14 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 
 	// Answer startup dialogs (workspace trust, permissions) before the
 	// liveness probe and the initial nudge, matching the tmux adapter.
+	nudgeAllowed := true
 	if k8sAcceptsStartupDialogs(cfg) {
-		if err := p.runStartupDialogPass(ctx, name); err != nil {
+		allowed, err := p.runStartupDialogPass(ctx, name)
+		if err != nil {
 			cleanup("startup dialogs canceled")
 			return fmt.Errorf("accepting startup dialogs for session %q: %w", name, err)
 		}
+		nudgeAllowed = allowed
 	}
 
 	requiresPostStartLiveness := k8sRequiresPostStartLiveness(cfg)
@@ -337,7 +340,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	}
 
 	// Send initial nudge if configured (matches tmux adapter step 6).
-	if cfg.Nudge != "" {
+	if cfg.Nudge != "" && nudgeAllowed {
 		_ = p.Nudge(name, runtime.TextContent(cfg.Nudge))
 	}
 
@@ -442,10 +445,13 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 	// Re-run the post-launch setup tail (pipe-pane logging + session_setup[/script]).
 	p.runPodPostLaunchSetup(ctx, podName, cfg)
 
+	nudgeAllowed := true
 	if acceptDialogs {
-		if err := p.runStartupDialogPass(ctx, name); err != nil {
+		allowed, err := p.runStartupDialogPass(ctx, name)
+		if err != nil {
 			return fmt.Errorf("k8s relaunch %q: accepting startup dialogs: %w", name, err)
 		}
+		nudgeAllowed = allowed
 	}
 
 	// Post-relaunch liveness: detect an agent that dies immediately.
@@ -466,7 +472,7 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 		}
 	}
 
-	if cfg.Nudge != "" {
+	if cfg.Nudge != "" && nudgeAllowed {
 		_ = p.Nudge(name, runtime.TextContent(cfg.Nudge))
 	}
 	return nil

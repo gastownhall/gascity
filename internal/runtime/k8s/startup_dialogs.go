@@ -2,6 +2,7 @@ package k8s
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -44,13 +45,24 @@ func (p *Provider) clearRelaunchHistory(ctx context.Context, name string) error 
 // fails is best-effort: it is reported on stderr and startup continues. Only
 // a ctx that ended during the pass is returned, so the caller stops before
 // probing or nudging.
-func (p *Provider) runStartupDialogPass(ctx context.Context, name string) error {
+//
+// nudgeAllowed is false when a workspace-trust dialog was left unconfirmed
+// ([runtime.ErrWorkspaceTrustUnconfirmed]): its cursor is off the trust row,
+// possibly on "No, exit", and the nudge's submit Enter would answer it. The
+// session stays up and the nudge is withheld, as herdr does.
+func (p *Provider) runStartupDialogPass(ctx context.Context, name string) (nudgeAllowed bool, err error) {
 	dialogErr := p.acceptStartupDialogs(ctx, name)
 	if err := ctx.Err(); err != nil {
-		return err
+		return false, err
 	}
-	if dialogErr != nil {
+	switch {
+	case dialogErr == nil:
+		return true, nil
+	case errors.Is(dialogErr, runtime.ErrWorkspaceTrustUnconfirmed):
+		fmt.Fprintf(p.stderr, "gc: warning: session %q: startup dialogs: %v; the initial nudge is withheld so its Enter cannot answer the dialog\n", name, dialogErr) //nolint:errcheck
+		return false, nil
+	default:
 		fmt.Fprintf(p.stderr, "gc: warning: session %q: startup dialogs: %v\n", name, dialogErr) //nolint:errcheck
+		return true, nil
 	}
-	return nil
 }
