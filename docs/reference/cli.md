@@ -5804,18 +5804,19 @@ Split this city, in one command, the way the runbook does it by hand.
 
 With the city stopped (gc stop) it takes the controller lock and the
 maintenance window, rehearses the split (gc storage preflight --split) and
-refuses on any block, then: snapshots the work store and the rigs (pinned),
-runs legacy's demand-migration repairs when the split city runs the v2
-reconciler, appends the [storage] block to city.toml and writes
+refuses on any block, a gc on the session PATH older than the version floor
+the split leaves among them, then: snapshots the work store and the rigs
+(pinned), runs legacy's demand-migration repairs when the split city runs the
+v2 reconciler, appends the [storage] block to city.toml and writes
 .gc/min-gc-version, migrates the city's infrastructure classes into the
 binding (gc storage migrate --from-work), imports every rig (--from-rigs), and
 checks the result (gc storage status, the storage-split doctor check).
 
 It records each step in .gc/storage-split.journal.json, with city.toml's
 bytes from before the split, which gc storage migrate --to-work restores.
-Run it again to continue a split that stopped: on its time budget (exit 75),
-on a rig the import refused, or killed. A split stopped before it wrote
-city.toml starts over.
+Run it again, with the --force attestations it was started with, to continue
+a split that stopped: on its time budget (exit 75), on a rig the import
+refused, or killed. A split stopped before it wrote city.toml starts over.
 
 --abandon backs out a split stopped before the city's copy converged: city.toml
 gets its bytes from before the split back (or [storage] removed, if it changed
@@ -5823,7 +5824,9 @@ since), the half-copied binding rows are deleted, and the version floor is put
 back as it was before the split (removed if there was none). A split stopped
 before it wrote city.toml only has its journal closed and its snapshot
 unpinned. Past the convergence marker the way back is gc storage migrate
---to-work, which keeps every bead written to the binding since.
+--to-work, which keeps every bead written to the binding since; once it has
+reversed a split that stopped, --abandon only closes the split's journal and
+unpins its snapshot.
 
 --dry-run is gc storage preflight --split.
 
@@ -5833,7 +5836,7 @@ gc storage split [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--abandon` | bool |  | back out a split stopped before the city's copy converged |
+| `--abandon` | bool |  | back out a split stopped before the city's copy converged, or close one a reverse undid |
 | `--dry-run` | bool |  | rehearse the split (gc storage preflight --split): no lock, nothing written |
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
 | `--force` | stringArray |  | attest a named hazard (repeatable): remote-runtime (remote sessions refuse infrastructure-class commands until worker-site transport exists, and no remote host writes them to the work store) or shared-store:&lt;identity&gt; (this city is the single writer of a work store other registered cities also use). A bare --force refuses |

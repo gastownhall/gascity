@@ -621,7 +621,7 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 	}
 	defer window.closeReporting(logPrefix, stderr, &code)
 	window.setTimeBudget(request.TimeBudget)
-	result, code := runCityMigration(ctx, request, target, plan, shared, logPrefix, stderr)
+	result, code := runCityMigration(ctx, request, target, plan, shared, logPrefix, stderr, "")
 	if code != 0 {
 		return code
 	}
@@ -653,8 +653,11 @@ type cityMigrationResult struct {
 // converged binding's deliver-now units. It returns a non-zero exit code on
 // anything short of converged: 75 when the time budget paused it. The caller
 // closes the window and reports; `gc storage migrate --from-work` and the
-// guided split share it.
-func runCityMigration(ctx context.Context, request storageOperatorRequest, target infraBindingTarget, plan *storebinding.StoragePlan, shared sharedStoreExclusion, logPrefix string, stderr io.Writer) (cityMigrationResult, int) {
+// guided split share it. unconverged, when the caller gives it, is the advice
+// said and recorded for a copy that stopped before its convergence marker, in
+// place of the engine's, whose remedy is `gc storage migrate --from-work`:
+// the guided split names its own command, which keeps its journal.
+func runCityMigration(ctx context.Context, request storageOperatorRequest, target infraBindingTarget, plan *storebinding.StoragePlan, shared sharedStoreExclusion, logPrefix string, stderr io.Writer, unconverged string) (cityMigrationResult, int) {
 	if shared.Attested && !request.FromBackup {
 		if err := sharedStoreForeignRowRefusal(request.CityPath, request.Cfg); err != nil {
 			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
@@ -687,6 +690,11 @@ func runCityMigration(ctx context.Context, request storageOperatorRequest, targe
 	}
 	if !report.serving() {
 		advice := infraMigrationOperatorAdvice(report, logPrefix)
+		// An unconverged copy whose binding could not be read keeps the
+		// engine's advice: it puts the hazard of a missing volume first.
+		if unconverged != "" && report.Outcome == infraMigrationUnconverged && report.BindingProbe == nil {
+			advice = unconverged
+		}
 		if advice != "" {
 			fmt.Fprintln(stderr, advice) //nolint:errcheck // best-effort stderr
 		}
