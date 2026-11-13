@@ -256,6 +256,23 @@ func InputOutcomeBodies(b map[string]string) map[string]string {
 	return b
 }
 
+// goldenInterruptEnds is the interrupt body InterruptEndsBoxBodies adds
+// after the interrupt is typed: the box's command ends on it, and the box
+// with it.
+const goldenInterruptEnds = `reap "$box"; rm -rf "$box"; `
+
+// InterruptEndsBoxBodies returns b, input-outcome bodies
+// (InputOutcomeBodies), for a reference whose box lives only while its
+// command runs: a delivered interrupt ends the command, so the box is gone
+// after it and every later op on the name answers as for an absent name.
+// It is the shape of a pack whose interrupt is a real Ctrl-C to a box that
+// exists only while its command runs.
+func InterruptEndsBoxBodies(b map[string]string) map[string]string {
+	b["interrupt"] = strings.Replace(b["interrupt"], `printf '%s\n' "$*" >> "$box/typed"; `,
+		`printf '%s\n' "$*" >> "$box/typed"; `+goldenInterruptEnds, 1)
+	return b
+}
+
 // Script renders bodies (Bodies, or a variant) as an
 // executable RPP shell script keeping its state under stateDir. Unlisted
 // ops exit 2.

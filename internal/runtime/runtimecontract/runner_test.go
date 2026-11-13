@@ -111,6 +111,35 @@ func TestGoldenReferenceIsFullyConformant(t *testing.T) {
 	}
 }
 
+// TestInterruptEndingTheBoxPassesTheInputGroup runs the input group against
+// a reference whose delivered interrupt ends the box (a real Ctrl-C to a box
+// that lives only while its command runs): a correct pack of that shape must
+// pass every input requirement, so no probe may drive the box after
+// interrupting it.
+func TestInterruptEndingTheBoxPassesTheInputGroup(t *testing.T) {
+	for name, bodies := range map[string]map[string]string{
+		"tmux": reference.InterruptEndsBoxBodies(reference.InputOutcomeBodies(reference.HostFSBodies())),
+		"ops":  reference.InterruptEndsBoxBodies(reference.InputOutcomeBodies(reference.NonTmuxHostFSBodies())),
+	} {
+		t.Run(name, func(t *testing.T) {
+			report := runGolden(t, writeScript(t, t.TempDir(), bodies))
+			seen := 0
+			for _, res := range report.Results {
+				if res.Group != GroupInput {
+					continue
+				}
+				seen++
+				if res.Status != StatusPass {
+					t.Errorf("%s: %s %s", res.Code, res.Status, res.Detail)
+				}
+			}
+			if seen != 12 {
+				t.Errorf("ran %d input requirements, want RPP-INPUT-001..012 (12)", seen)
+			}
+		})
+	}
+}
+
 // TestEveryRequirementIsGated is the negative-gating proof: for each
 // requirement, a reference that violates exactly that behavior must FAIL
 // exactly that requirement's check. This is what upgrades "probed" to

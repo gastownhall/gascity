@@ -28,8 +28,12 @@ const (
 	inputFaultDead        = "dead"
 )
 
-// drivingOps are the four ops input-outcome types.
-var drivingOps = []string{"nudge", "send-keys", "interrupt", "clear-scrollback"}
+// drivingOps are the four ops input-outcome types, ordered for driving one
+// running box in turn: interrupt is last, because a real interrupt may end
+// the box's command and, for a pack whose box lives only while its command
+// runs, the box with it, after which the correct answer to any op on the
+// name is gone. drivingOps[1:] are the key ops, every driving op but nudge.
+var drivingOps = []string{"nudge", "send-keys", "clear-scrollback", "interrupt"}
 
 // inputAnswer is one driving op's answer: its exit code and stdout.
 type inputAnswer struct {
@@ -281,7 +285,7 @@ func probeInputUnavailable(ctx context.Context, r *runner, hs runtime.ProtocolIn
 
 // probeInputLostReplyUnknown checks that input written before its reply was
 // lost is never answered not_sent: a nudge is unconfirmed and the other ops
-// exit 1 (outcome unknown).
+// exit 1 (outcome unknown). The interrupt is sent last (drivingOps).
 func probeInputLostReplyUnknown(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
 	if ok, detail := inputDeclared(hs, true); !ok {
 		return StatusSkip, detail
@@ -423,6 +427,7 @@ func probeInputDeadBoxGone(ctx context.Context, r *runner, hs runtime.ProtocolIn
 // clear-scrollback to a running box exit 0 with no line or one delivered
 // line: gc reads any exit 80 as a failure, so a key op that answers a
 // delivery on exit 80 fails every startup-dialog key and every interrupt.
+// The interrupt is sent last (drivingOps).
 func probeInputKeysDelivered(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
 	if ok, detail := inputDeclared(hs, false); !ok {
 		return StatusSkip, detail
