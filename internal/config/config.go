@@ -2937,7 +2937,9 @@ type DaemonConfig struct {
 	// time for one server instance (PID, process start time, and port).
 	// Duration string (e.g., "180s", "5m"). Defaults to "180s". Set to "0s"
 	// to restart on the first failed probe. Negative values are rejected at
-	// config load; malformed values warn and fall back to the default.
+	// config load; malformed values warn and fall back to the default. If a
+	// fragment listed in `include` defines `[daemon]`, its table replaces the
+	// root's, so set this key in that fragment.
 	DoltUnresponsiveRestartAfter string `toml:"dolt_unresponsive_restart_after,omitempty" jsonschema:"default=180s"`
 	// DoltStartAddressInUseRetryWindow is how long the managed dolt start
 	// path waits on the originally requested port when dolt reports it in

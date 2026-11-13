@@ -1439,7 +1439,7 @@
         },
         "dolt_unresponsive_restart_after": {
           "type": "string",
-          "description": "DoltUnresponsiveRestartAfter is how long recovery observes an owned,\nlive, listening managed dolt server that keeps failing SQL probes before\nit stops and restarts that server. A probe that times out under load\nsays nothing about whether the server answers a moment later, so a\nsingle failure no longer restarts it. The window is measured in wall\ntime for one server instance (PID, process start time, and port).\nDuration string (e.g., \"180s\", \"5m\"). Defaults to \"180s\". Set to \"0s\"\nto restart on the first failed probe. Negative values are rejected at\nconfig load; malformed values warn and fall back to the default.",
+          "description": "DoltUnresponsiveRestartAfter is how long recovery observes an owned,\nlive, listening managed dolt server that keeps failing SQL probes before\nit stops and restarts that server. A probe that times out under load\nsays nothing about whether the server answers a moment later, so a\nsingle failure no longer restarts it. The window is measured in wall\ntime for one server instance (PID, process start time, and port).\nDuration string (e.g., \"180s\", \"5m\"). Defaults to \"180s\". Set to \"0s\"\nto restart on the first failed probe. Negative values are rejected at\nconfig load; malformed values warn and fall back to the default. If a\nfragment listed in `include` defines `[daemon]`, its table replaces the\nroot's, so set this key in that fragment.",
           "default": "180s"
         },
         "dolt_start_address_in_use_retry_window": {
