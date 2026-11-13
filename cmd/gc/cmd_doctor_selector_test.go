@@ -280,3 +280,105 @@ func TestDoctorCheckSuggestionsStayQuietOnAnUnrelatedName(t *testing.T) {
 		t.Errorf("suggestions = %v, want none for an unrelated name", got)
 	}
 }
+
+// newDoctorFixPrerequisiteCity builds a city whose builtin-pack-imports check
+// has a fix to make (no bundled imports declared yet), which is the state in
+// which packv2-import-state's fix depends on builtin-pack-imports having run
+// first.
+func newDoctorFixPrerequisiteCity(t *testing.T) string {
+	t.Helper()
+	cityDir := writeBuiltinImportTestCity(t, "[workspace]\nname = \"demo\"\n\n[beads]\nprovider = \"file\"\n")
+	writePackToml(t, cityDir, "[pack]\nname = \"demo\"\nschema = 2\n")
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	prependDoctorJSONStubBinaries(t, "tmux", "git", "jq", "pgrep", "lsof")
+	return cityDir
+}
+
+// readCityDeclarations returns city.toml and pack.toml as one string, so a
+// test can tell whether any fix wrote to either.
+func readCityDeclarations(t *testing.T, cityDir string) string {
+	t.Helper()
+	var b strings.Builder
+	for _, name := range []string{"city.toml", "pack.toml"} {
+		data, err := os.ReadFile(filepath.Join(cityDir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.WriteString(name + ":\n" + string(data))
+	}
+	return b.String()
+}
+
+func TestDoctorCheckFixRefusesWhenFixPrerequisiteNotSelected(t *testing.T) {
+	cityDir := newDoctorFixPrerequisiteCity(t)
+	before := readCityDeclarations(t, cityDir)
+
+	// Control: the prerequisite really has something to fix in this city.
+	if _, payload, stderr := runDoctorJSON(t, cityDir, "--check", "builtin-pack-imports"); len(payload.Results) != 1 || payload.Results[0].Status == "ok" {
+		t.Fatalf("fixture invalid: builtin-pack-imports results = %+v, want one non-ok result; stderr=%s", payload.Results, stderr)
+	}
+
+	code, payload, stderr := runDoctorJSON(t, cityDir, "--check", "packv2-import-state", "--fix")
+	if code == 0 {
+		t.Fatalf("exit = 0, want non-zero: --check packv2-import-state --fix skips builtin-pack-imports' fix")
+	}
+	if payload.Error == nil || payload.Error.Code != "doctor_fix_prerequisite_missing" {
+		t.Fatalf("error = %+v, want code doctor_fix_prerequisite_missing; stderr=%s", payload.Error, stderr)
+	}
+	if !strings.Contains(payload.Error.Message, "builtin-pack-imports") || !strings.Contains(payload.Error.Message, "packv2-import-state") {
+		t.Errorf("message = %q, want it to name both packv2-import-state and the prerequisite builtin-pack-imports", payload.Error.Message)
+	}
+	if len(payload.Results) != 0 {
+		t.Errorf("results = %v, want empty: nothing may run on a refusal", resultNames(payload))
+	}
+	if after := readCityDeclarations(t, cityDir); after != before {
+		t.Errorf("a refused --fix changed the city:\nbefore:\n%s\nafter:\n%s", before, after)
+	}
+}
+
+func TestDoctorCheckFixRefusalNamesPrerequisiteInTextMode(t *testing.T) {
+	cityDir := newDoctorFixPrerequisiteCity(t)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--city", cityDir, "doctor", "--check", "packv2-import-state", "--fix"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("exit = 0, want non-zero; stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--check builtin-pack-imports") {
+		t.Errorf("stderr = %q, want it to say which --check to add", stderr.String())
+	}
+	if strings.Contains(stdout.String(), "✓") || strings.Contains(stdout.String(), "passed") {
+		t.Errorf("stdout reported check results on a refusal: %q", stdout.String())
+	}
+}
+
+func TestDoctorCheckFixRunsPrerequisiteFirstWhenBothNamed(t *testing.T) {
+	cityDir := newDoctorFixPrerequisiteCity(t)
+	before := readCityDeclarations(t, cityDir)
+
+	// Request order is the reverse of the order the fixes have to run in.
+	_, payload, stderr := runDoctorJSON(t, cityDir, "--check", "packv2-import-state", "--check", "builtin-pack-imports", "--fix")
+	if payload.Error != nil {
+		t.Fatalf("error = %+v, want none when the prerequisite is named; stderr=%s", payload.Error, stderr)
+	}
+	want := []string{"builtin-pack-imports", "packv2-import-state"}
+	if got := resultNames(payload); !slices.Equal(got, want) {
+		t.Errorf("results = %v, want %v (registration order)", got, want)
+	}
+	if after := readCityDeclarations(t, cityDir); after == before {
+		t.Errorf("builtin-pack-imports' fix did not run: city unchanged:\n%s", after)
+	}
+}
+
+func TestDoctorCheckWithoutFixDoesNotRequireFixPrerequisites(t *testing.T) {
+	cityDir := newDoctorFixPrerequisiteCity(t)
+
+	_, payload, stderr := runDoctorJSON(t, cityDir, "--check", "packv2-import-state")
+	if payload.Error != nil {
+		t.Fatalf("error = %+v, want none: the ordering only matters when a fix runs; stderr=%s", payload.Error, stderr)
+	}
+	if got := resultNames(payload); !slices.Equal(got, []string{"packv2-import-state"}) {
+		t.Errorf("results = %v, want [packv2-import-state]", got)
+	}
+}
