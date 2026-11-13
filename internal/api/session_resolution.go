@@ -88,7 +88,7 @@ func apiCityName(cfg *config.City, cityPath string) string {
 	return config.EffectiveCityName(cfg, filepath.Base(cityPath))
 }
 
-func (s *Server) findNamedSessionSpecForTarget(_ beads.Store, target string) (apiNamedSessionSpec, bool, error) {
+func (s *Server) findNamedSessionSpecForTarget(target string) (apiNamedSessionSpec, bool, error) {
 	cfg := s.state.Config()
 	target = apiNormalizeSessionTarget(target)
 	if cfg == nil || target == "" {
@@ -129,19 +129,19 @@ func (s *Server) findNamedSessionSpecForTarget(_ beads.Store, target string) (ap
 	}
 }
 
-func (s *Server) findCanonicalNamedSession(store beads.Store, spec apiNamedSessionSpec) (beads.Bead, bool, error) {
-	if store == nil {
+func (s *Server) findCanonicalNamedSession(store beads.SessionStore, spec apiNamedSessionSpec) (beads.Bead, bool, error) {
+	if store == (beads.SessionStore{}) {
 		return beads.Bead{}, false, nil
 	}
-	bead, ok, err := session.FindCanonicalConfiguredNamedSessionBead(beads.SessionStore{Store: store}, spec)
+	bead, ok, err := session.FindCanonicalConfiguredNamedSessionBead(store, spec)
 	if err != nil {
 		return beads.Bead{}, false, fmt.Errorf("looking up canonical named session: %w", err)
 	}
 	return bead, ok, nil
 }
 
-func (s *Server) retireContinuityIneligibleNamedSessionIdentifiers(store beads.Store, spec apiNamedSessionSpec) ([]session.Info, error) {
-	if store == nil {
+func (s *Server) retireContinuityIneligibleNamedSessionIdentifiers(store beads.SessionStore, spec apiNamedSessionSpec) ([]session.Info, error) {
+	if store == (beads.SessionStore{}) {
 		return nil, nil
 	}
 	// Typed candidate feed: ExactMetadataSessionCandidatesInfo projects each
@@ -149,7 +149,7 @@ func (s *Server) retireContinuityIneligibleNamedSessionIdentifiers(store beads.S
 	// lane reads only session.Info fields — no raw bead is cracked here and no
 	// b.Metadata key is inlined (the census-honest replacement for the old raw
 	// codec projection of SessionNameMetadata per candidate).
-	all, err := session.ExactMetadataSessionCandidatesInfo(beads.SessionStore{Store: store}, false, map[string]string{
+	all, err := session.ExactMetadataSessionCandidatesInfo(store, false, map[string]string{
 		session.NamedSessionIdentityMetadata: spec.Identity,
 	})
 	if err != nil {
@@ -190,7 +190,7 @@ func continuityIneligibleNamedSession(info session.Info, identity string) bool {
 // reassignContinuityIneligibleNamedSessionState hands what the retired rows
 // hold to replacementID once the replacement exists, reading every work store
 // live (reassignOpenWorkAssignedToSession).
-func (s *Server) reassignContinuityIneligibleNamedSessionState(ctx context.Context, store beads.Store, retired []session.Info, replacementID string) error {
+func (s *Server) reassignContinuityIneligibleNamedSessionState(ctx context.Context, store beads.SessionStore, retired []session.Info, replacementID string) error {
 	return s.handOffRetiredNamedSessionState(ctx, store, retired, replacementID, reassignOpenWorkAssignedToSession)
 }
 
@@ -204,15 +204,20 @@ func (s *Server) reassignContinuityIneligibleNamedSessionState(ctx context.Conte
 // waits or the bindings on an id no session answers to; what that store holds
 // moves on a later materializing resolve of the identity
 // (handOffReleasedNamedSessionPredecessors).
-func (s *Server) handOffRetiredNamedSessionState(ctx context.Context, store beads.Store, retired []session.Info, replacementID string, moveWork func(store beads.Store, oldID, newID string) error) error {
-	if store == nil || strings.TrimSpace(replacementID) == "" || len(retired) == 0 {
+func (s *Server) handOffRetiredNamedSessionState(ctx context.Context, store beads.SessionStore, retired []session.Info, replacementID string, moveWork func(store beads.Store, oldID, newID string) error) error {
+	if store == (beads.SessionStore{}) || strings.TrimSpace(replacementID) == "" || len(retired) == 0 {
 		return nil
 	}
 	now := time.Now().UTC()
 	workStores := s.retiredSessionWorkStores(store)
-	// The bindings and participants have always been reassigned through the
-	// sessions store; see extmsgStoreOverSessions in cmd/gc.
-	messaging := beads.MailStore{Store: store}
+	// The bindings and participants are messaging-class: they move in the
+	// city's messaging store, which is the sessions store on every topology
+	// the routes serve (one store unsplit, one binding split; typed-stores T6
+	// plan, R13). Reading Stores() again here, mid-request, is deliberate and
+	// benign: an epoch swapped since store was read serves the same database,
+	// so the bindings move in the store they live in either way. T7 threads
+	// the request's Stores through instead.
+	messaging := s.state.Stores().Mail()
 	var errs []error
 	for _, info := range retired {
 		for _, workStore := range workStores {
@@ -220,7 +225,7 @@ func (s *Server) handOffRetiredNamedSessionState(ctx context.Context, store bead
 				errs = append(errs, err)
 			}
 		}
-		if err := session.NewStore(beads.SessionStore{Store: store}).ReassignWaits(info.ID, replacementID); err != nil {
+		if err := session.NewStore(store).ReassignWaits(info.ID, replacementID); err != nil {
 			errs = append(errs, fmt.Errorf("reassign waits from retired session %s to %s: %w", info.ID, replacementID, err))
 		}
 		if err := extmsg.ReassignSessionBindings(ctx, messaging, info.ID, replacementID, now); err != nil {
@@ -251,7 +256,7 @@ func (s *Server) handOffRetiredNamedSessionState(ctx context.Context, store bead
 // (reassignHeldOpenWorkAssignedToSession). A failure is logged and does not
 // fail the resolve, whose answer does not depend on it; the next materializing
 // resolve tries again.
-func (s *Server) handOffReleasedNamedSessionPredecessors(ctx context.Context, store beads.Store, spec apiNamedSessionSpec, canonicalID string) {
+func (s *Server) handOffReleasedNamedSessionPredecessors(ctx context.Context, store beads.SessionStore, spec apiNamedSessionSpec, canonicalID string) {
 	retired, err := releasedNamedSessionPredecessors(store, spec.Identity, canonicalID)
 	if err == nil {
 		err = s.handOffRetiredNamedSessionState(ctx, store, retired, canonicalID, reassignHeldOpenWorkAssignedToSession)
@@ -264,8 +269,8 @@ func (s *Server) handOffReleasedNamedSessionPredecessors(ctx context.Context, st
 // releasedNamedSessionPredecessors lists the identity's retired rows other
 // than canonicalID: open rows that lost continuity and released their
 // identifiers.
-func releasedNamedSessionPredecessors(store beads.Store, identity, canonicalID string) ([]session.Info, error) {
-	all, err := session.ExactMetadataSessionCandidatesInfo(beads.SessionStore{Store: store}, false, map[string]string{
+func releasedNamedSessionPredecessors(store beads.SessionStore, identity, canonicalID string) ([]session.Info, error) {
+	all, err := session.ExactMetadataSessionCandidatesInfo(store, false, map[string]string{
 		session.NamedSessionIdentityMetadata: identity,
 	})
 	if err != nil {
@@ -304,7 +309,7 @@ func releasedNamedSessionPredecessors(store beads.Store, identity, canonicalID s
 // to one session id, not a residency answer: each store is listed by assignee,
 // so a store that holds nothing for the id costs one query and changes nothing.
 func (s *Server) retiredSessionWorkStores(sessions beads.Store) []beads.Store {
-	if relocatedGraphStore(s.state) == nil {
+	if _, relocated := relocatedGraphStore(s.state); !relocated {
 		return []beads.Store{sessions} // residency:allow — a city that relocates nothing sweeps the one sessions store it always swept
 	}
 	var out []beads.Store
@@ -331,7 +336,7 @@ func (s *Server) retiredSessionWorkStores(sessions beads.Store) []beads.Store {
 			add(stores[rigName])
 		}
 	}
-	add(s.state.GraphBeadStore().Store)
+	add(s.state.Stores().Graph().Store)
 	add(sessions)
 	return out
 }
@@ -393,15 +398,15 @@ func reassignOpenWorkAssignedToSession(store beads.Store, oldID, newID string) e
 	return nil
 }
 
-func (s *Server) resolveConfiguredNamedSessionIDWithContext(ctx context.Context, store beads.Store, identifier string, opts apiSessionResolveOptions) (string, bool, error) {
-	spec, ok, err := s.findNamedSessionSpecForTarget(store, identifier)
+func (s *Server) resolveConfiguredNamedSessionIDWithContext(ctx context.Context, store beads.SessionStore, identifier string, opts apiSessionResolveOptions) (string, bool, error) {
+	spec, ok, err := s.findNamedSessionSpecForTarget(identifier)
 	if err != nil {
 		return "", false, err
 	}
 	if !ok {
 		return "", false, fmt.Errorf("%w: %q", session.ErrSessionNotFound, identifier)
 	}
-	lookup, err := session.LookupConfiguredNamedSession(beads.SessionStore{Store: store}, spec)
+	lookup, err := session.LookupConfiguredNamedSession(store, spec)
 	if err != nil {
 		return "", true, fmt.Errorf("looking up configured named session: %w", err)
 	}
@@ -452,7 +457,7 @@ func parseAPITemplateTarget(identifier string) (string, bool) {
 	return name, true
 }
 
-func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store beads.Store, spec apiNamedSessionSpec) (string, error) {
+func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store beads.SessionStore, spec apiNamedSessionSpec) (string, error) {
 	if bead, ok, err := s.findCanonicalNamedSession(store, spec); err != nil {
 		return "", err
 	} else if ok {
@@ -543,12 +548,11 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 		},
 	}
 	var info session.Info
-	sessions := beads.SessionStore{Store: store}
 	err = session.WithCitySessionIdentifierLocks(s.state.CityPath(), []string{spec.Identity, spec.SessionName}, func() error {
-		if err := session.EnsureAliasAvailableWithConfigForOwner(sessions, s.state.Config(), spec.Identity, "", spec.Identity); err != nil {
+		if err := session.EnsureAliasAvailableWithConfigForOwner(store, s.state.Config(), spec.Identity, "", spec.Identity); err != nil {
 			return err
 		}
-		if err := session.EnsureSessionNameAvailableWithConfigForOwner(sessions, s.state.Config(), spec.SessionName, "", spec.Identity); err != nil {
+		if err := session.EnsureSessionNameAvailableWithConfigForOwner(store, s.state.Config(), spec.SessionName, "", spec.Identity); err != nil {
 			return err
 		}
 		handle, herr := s.newResolvedWorkerSessionHandle(store, resolvedCfg)
@@ -589,13 +593,13 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 // canonical. A step that failed is logged, as the canonical branch's re-run
 // logs it, and what it left on a retired row moves on a later materializing
 // resolve of the identity (handOffReleasedNamedSessionPredecessors).
-func (s *Server) handOffToReplacement(ctx context.Context, store beads.Store, spec apiNamedSessionSpec, retired []session.Info, replacementID string) {
+func (s *Server) handOffToReplacement(ctx context.Context, store beads.SessionStore, spec apiNamedSessionSpec, retired []session.Info, replacementID string) {
 	if err := s.reassignContinuityIneligibleNamedSessionState(ctx, store, retired, replacementID); err != nil {
 		log.Printf("gc api: handing what the retired rows of named session %q hold to its replacement %s: %v", spec.Identity, replacementID, err)
 	}
 }
 
-func (s *Server) materializeNamedSession(store beads.Store, spec apiNamedSessionSpec) (string, error) {
+func (s *Server) materializeNamedSession(store beads.SessionStore, spec apiNamedSessionSpec) (string, error) {
 	return s.materializeNamedSessionWithContext(context.Background(), store, spec)
 }
 
@@ -626,15 +630,15 @@ func (s *Server) materializeNamedSession(store beads.Store, spec apiNamedSession
 // Tiebreaker on duplicate active-pool Titles (rare misconfiguration):
 // most-recently-created bead wins; ties on CreatedAt resolve to the first
 // match in store iteration order.
-func resolveLiveSessionByPathAlias(store beads.Store, identifier string) (string, bool, error) {
-	if store == nil {
+func resolveLiveSessionByPathAlias(store beads.SessionStore, identifier string) (string, bool, error) {
+	if store == (beads.SessionStore{}) {
 		return "", false, nil
 	}
 	identifier = strings.TrimSpace(identifier)
 	if identifier == "" {
 		return "", false, nil
 	}
-	all, err := session.NewStore(beads.SessionStore{Store: store}).ListAll(session.ListAllOptions{})
+	all, err := session.NewStore(store).ListAll(session.ListAllOptions{})
 	if err != nil {
 		return "", false, fmt.Errorf("resolveLiveSessionByPathAlias: listing sessions: %w", err)
 	}
@@ -670,9 +674,8 @@ func resolveLiveSessionByPathAlias(store beads.Store, identifier string) (string
 // each gather action names and keeps the matched ID or error for the step a
 // terminal decision cites. Lookups run exactly when the old inline ladder
 // ran them — an exact-ID hit never reaches the live scan.
-func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store beads.Store, identifier string, opts apiSessionResolveOptions) (string, error) {
-	sessions := beads.SessionStore{Store: store}
-	if store == nil {
+func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store beads.SessionStore, identifier string, opts apiSessionResolveOptions) (string, error) {
+	if store == (beads.SessionStore{}) {
 		return "", fmt.Errorf("session store unavailable")
 	}
 	_, templateForm := parseAPITemplateTarget(identifier)
@@ -703,7 +706,7 @@ func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store be
 		}
 		switch dec.Gather {
 		case session.TargetStepExactID:
-			id, err := session.ResolveSessionIDByExactID(sessions, identifier)
+			id, err := session.ResolveSessionIDByExactID(store, identifier)
 			facts.ExactID = lookupFact(err)
 			selected[dec.Gather], failed[dec.Gather] = id, err
 		case session.TargetStepConfiguredName:
@@ -719,7 +722,7 @@ func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store be
 				facts.ConfiguredName = session.NamedLookupNoMatch
 			}
 		case session.TargetStepLive:
-			id, err := session.ResolveSessionID(sessions, identifier)
+			id, err := session.ResolveSessionID(store, identifier)
 			facts.Live = lookupFact(err)
 			selected[dec.Gather], failed[dec.Gather] = id, err
 			if err == nil {
@@ -738,7 +741,7 @@ func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store be
 				facts.PathAlias = session.LookupNoMatch
 			}
 		case session.TargetStepClosedNamedSpec:
-			_, ok, err := s.findNamedSessionSpecForTarget(store, identifier)
+			_, ok, err := s.findNamedSessionSpecForTarget(identifier)
 			switch {
 			case err != nil:
 				facts.ClosedNamedSpec = session.LookupError
@@ -749,7 +752,7 @@ func (s *Server) resolveSessionTargetIDWithContext(ctx context.Context, store be
 				facts.ClosedNamedSpec = session.LookupNoMatch
 			}
 		case session.TargetStepClosed:
-			id, err := session.ResolveSessionIDAllowClosed(sessions, identifier)
+			id, err := session.ResolveSessionIDAllowClosed(store, identifier)
 			facts.Closed = lookupFact(err)
 			selected[dec.Gather], failed[dec.Gather] = id, err
 		default:
@@ -789,12 +792,12 @@ func lookupFact(err error) session.TargetLookupFact {
 // fails the front door's IsSessionBeadOrRepairable check → ErrSessionNotFound →
 // false (the match stands). A named bead that is merely type-lost stays
 // repairable and reaches the identity check unchanged.
-func (s *Server) liveSessionMatchIsConfigOrphan(store beads.Store, id string) bool {
+func (s *Server) liveSessionMatchIsConfigOrphan(store beads.SessionStore, id string) bool {
 	cfg := s.state.Config()
 	if cfg == nil {
 		return false
 	}
-	info, err := session.NewStore(beads.SessionStore{Store: store}).Get(id)
+	info, err := session.NewStore(store).Get(id)
 	if err != nil || !session.IsNamedSessionInfo(info) {
 		return false
 	}
@@ -802,15 +805,15 @@ func (s *Server) liveSessionMatchIsConfigOrphan(store beads.Store, id string) bo
 	return identity != "" && config.FindNamedSession(cfg, identity) == nil
 }
 
-func (s *Server) resolveSessionTargetID(store beads.Store, identifier string, opts apiSessionResolveOptions) (string, error) {
+func (s *Server) resolveSessionTargetID(store beads.SessionStore, identifier string, opts apiSessionResolveOptions) (string, error) {
 	return s.resolveSessionTargetIDWithContext(context.Background(), store, identifier, opts)
 }
 
-func (s *Server) resolveSessionIDWithConfig(store beads.Store, identifier string) (string, error) {
+func (s *Server) resolveSessionIDWithConfig(store beads.SessionStore, identifier string) (string, error) {
 	return s.resolveSessionTargetID(store, identifier, apiSessionResolveOptions{})
 }
 
-func (s *Server) resolveSessionIDAllowClosedWithConfig(store beads.Store, identifier string) (string, error) {
+func (s *Server) resolveSessionIDAllowClosedWithConfig(store beads.SessionStore, identifier string) (string, error) {
 	return s.resolveSessionTargetID(store, identifier, apiSessionResolveOptions{allowClosed: true})
 }
 
@@ -828,13 +831,13 @@ func (s *Server) resolveSessionIDAllowClosedWithConfig(store beads.Store, identi
 //
 // It returns the resolved session id, or "" for a configured named session
 // that has no row yet (the async path materializes it).
-func (s *Server) sessionTargetDeliverable(ctx context.Context, store beads.Store, identifier string) (string, error) {
+func (s *Server) sessionTargetDeliverable(ctx context.Context, store beads.SessionStore, identifier string) (string, error) {
 	if id, err := s.resolveSessionTargetIDWithContext(ctx, store, identifier, apiSessionResolveOptions{}); err == nil {
 		return id, nil
 	} else if !errors.Is(err, session.ErrSessionNotFound) {
 		return "", err
 	}
-	if _, ok, specErr := s.findNamedSessionSpecForTarget(store, identifier); specErr == nil && ok {
+	if _, ok, specErr := s.findNamedSessionSpecForTarget(identifier); specErr == nil && ok {
 		return "", nil
 	}
 	return "", apiSessionTargetNotFound(identifier)
@@ -853,7 +856,7 @@ func (s *Server) sessionTargetDeliverable(ctx context.Context, store beads.Store
 // lanesubmit.PendingCheckTimeout, and a look that fails, does not answer in
 // time, or panics refuses the text with a retryable 503
 // pending_check_unavailable (pendingCheckError).
-func (s *Server) rejectPendingInteraction(ctx context.Context, store beads.Store, identifier string) error {
+func (s *Server) rejectPendingInteraction(ctx context.Context, store beads.SessionStore, identifier string) error {
 	id, err := s.resolveSessionTargetIDWithContext(ctx, store, identifier, apiSessionResolveOptions{})
 	if err != nil {
 		if errors.Is(err, session.ErrSessionNotFound) {
@@ -895,11 +898,11 @@ func pendingCheckError(err error) error {
 	return humaSessionManagerError(err)
 }
 
-func (s *Server) resolveSessionIDMaterializingNamed(store beads.Store, identifier string) (string, error) {
+func (s *Server) resolveSessionIDMaterializingNamed(store beads.SessionStore, identifier string) (string, error) {
 	return s.resolveSessionTargetID(store, identifier, apiSessionResolveOptions{materialize: true})
 }
 
-func (s *Server) resolveSessionIDMaterializingNamedWithContext(ctx context.Context, store beads.Store, identifier string) (string, error) {
+func (s *Server) resolveSessionIDMaterializingNamedWithContext(ctx context.Context, store beads.SessionStore, identifier string) (string, error) {
 	return s.resolveSessionTargetIDWithContext(ctx, store, identifier, apiSessionResolveOptions{materialize: true})
 }
 
@@ -916,7 +919,7 @@ type messageOutcome struct {
 // session, here in the controller's process (CONTRACT v5.9 D8, owner ruling
 // 2026-10-08). Otherwise a session that is not running gets the message
 // queued and the start is left to the controller (deferToController).
-func (s *Server) submitMessageToSession(ctx context.Context, store beads.Store, id, message string, intent session.SubmitIntent, resume bool) (messageOutcome, error) {
+func (s *Server) submitMessageToSession(ctx context.Context, store beads.SessionStore, id, message string, intent session.SubmitIntent, resume bool) (messageOutcome, error) {
 	return s.submitMessageToSessionFor(ctx, store, id, message, intent, resume, messageOpDelivery{})
 }
 
@@ -943,7 +946,7 @@ func opDeliveryOf(adm *legacyop.Admission) messageOpDelivery {
 // request carries od's key and redelivery. A result the runtime replayed (an
 // adopted op whose first execution delivered) is logged and returned as a
 // delivered, unqueued outcome: nothing was sent again.
-func (s *Server) submitMessageToSessionFor(ctx context.Context, store beads.Store, id, message string, intent session.SubmitIntent, resume bool, od messageOpDelivery) (messageOutcome, error) {
+func (s *Server) submitMessageToSessionFor(ctx context.Context, store beads.SessionStore, id, message string, intent session.SubmitIntent, resume bool, od messageOpDelivery) (messageOutcome, error) {
 	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		return messageOutcome{}, err
@@ -978,10 +981,9 @@ func (s *Server) submitMessageToSessionFor(ctx context.Context, store beads.Stor
 // whether the controller will start the session, nil when it cannot tell (a
 // lost wake CAS, a row that is not dormant, a pool seat that starts only for
 // demand) and, if not, why, with the remedy.
-func (s *Server) deferToController(store beads.Store, id string) (*bool, string) {
-	sessions := beads.SessionStore{Store: store}
+func (s *Server) deferToController(store beads.SessionStore, id string) (*bool, string) {
 	no := false
-	outcome, err := session.NewStore(sessions).RequestWakeUnlessHeld(id, false, time.Now().UTC())
+	outcome, err := session.NewStore(store).RequestWakeUnlessHeld(id, false, time.Now().UTC())
 	d := deferralFor(outcome, err)
 	switch d {
 	case deferFailed:
@@ -995,7 +997,7 @@ func (s *Server) deferToController(store beads.Store, id string) (*bool, string)
 		return nil, ""
 	}
 	certain := true
-	if info, err := session.NewStore(sessions).Get(id); err == nil {
+	if info, err := session.NewStore(store).Get(id); err == nil {
 		// Resume does not change a state the controller skips: that refusal
 		// names only its own remedy, the close.
 		if refuser, ok := s.state.(UnknownStateRefuser); ok {
@@ -1051,7 +1053,7 @@ func deferralFor(outcome session.WakeRequestOutcome, err error) deferral {
 // one that is not running gets the nudge queued and the start left to the
 // controller (CONTRACT v5.9 D8 7(e)). When the city's lane host executes
 // message, it proposes a lane notice instead (proposeExtmsgNotice).
-func (s *Server) sendBackgroundMessageToSession(ctx context.Context, store beads.Store, id, message string) error {
+func (s *Server) sendBackgroundMessageToSession(ctx context.Context, store beads.SessionStore, id, message string) error {
 	if s.laneExecutes(opjournal.KindMessage) {
 		return s.proposeExtmsgNotice(id, message)
 	}
@@ -1068,11 +1070,11 @@ func (s *Server) sendBackgroundMessageToSession(ctx context.Context, store beads
 
 // sendUserMessageToSession keeps POST /messages as a compatibility alias for
 // the semantic default submit path.
-func (s *Server) sendUserMessageToSession(ctx context.Context, store beads.Store, id, message string, resume bool) (messageOutcome, error) {
+func (s *Server) sendUserMessageToSession(ctx context.Context, store beads.SessionStore, id, message string, resume bool) (messageOutcome, error) {
 	return s.submitMessageToSession(ctx, store, id, message, session.SubmitIntentDefault, resume)
 }
 
-func (s *Server) workerHandleForSession(store beads.Store, id string) (worker.Handle, error) {
+func (s *Server) workerHandleForSession(store beads.SessionStore, id string) (worker.Handle, error) {
 	factory, err := s.workerFactory(store)
 	if err != nil {
 		return nil, err
@@ -1080,7 +1082,7 @@ func (s *Server) workerHandleForSession(store beads.Store, id string) (worker.Ha
 	return factory.SessionByID(id)
 }
 
-func (s *Server) workerHandleForSessionTarget(store beads.Store, target string) (worker.Handle, error) {
+func (s *Server) workerHandleForSessionTarget(store beads.SessionStore, target string) (worker.Handle, error) {
 	target = strings.TrimSpace(target)
 	if target == "" {
 		return nil, session.ErrSessionNotFound
@@ -1089,7 +1091,7 @@ func (s *Server) workerHandleForSessionTarget(store beads.Store, target string) 
 	if err != nil {
 		return nil, err
 	}
-	if store != nil {
+	if store != (beads.SessionStore{}) {
 		if id, err := s.resolveSessionIDWithConfig(store, target); err == nil {
 			return factory.SessionByID(id)
 		} else if !errors.Is(err, session.ErrSessionNotFound) || errors.Is(err, errSessionTargetRejectedByConfig) {
@@ -1099,7 +1101,7 @@ func (s *Server) workerHandleForSessionTarget(store beads.Store, target string) 
 	return factory.HandleForTarget(target, nil)
 }
 
-func (s *Server) newResolvedWorkerSessionHandle(store beads.Store, cfg worker.ResolvedSessionConfig) (worker.Handle, error) {
+func (s *Server) newResolvedWorkerSessionHandle(store beads.SessionStore, cfg worker.ResolvedSessionConfig) (worker.Handle, error) {
 	factory, err := s.workerFactory(store)
 	if err != nil {
 		return nil, err

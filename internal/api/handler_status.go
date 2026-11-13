@@ -101,8 +101,8 @@ type StatusInput struct {
 // so a priming sessions binding surfaces as a "sessions:" partial error from
 // statusSessionSnapshot, never as a silent zero-session fleet.
 func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*IndexOutput[StatusBody], error) {
-	store := s.state.CityBeadStore()
-	if err := cacheLiveOr503(store); err != nil {
+	work := s.state.Stores().Work()
+	if err := cacheLiveOr503(work); err != nil {
 		return nil, err
 	}
 	bp := input.toBlockingParams()
@@ -135,11 +135,11 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	bucket := responseCacheTimeBucket(time.Now())
 	if !blocking {
 		if hit, ok := cachedResponseAs[indexedResponse[StatusBody]](s, cacheKey, bucket); ok {
-			f := statusCacheFreshness(hit.Body, cacheAgeSeconds(store))
+			f := statusCacheFreshness(hit.Body, cacheAgeSeconds(work))
 			return &IndexOutput[StatusBody]{Index: hit.Index, CacheAgeS: f.ageS, CacheRefresh: f.refresh, Body: hit.Body}, nil
 		}
 		if hit, ok := cachedResponseWithinAgeAs[indexedResponse[StatusBody]](s, cacheKey, statusResponseTTLFloor); ok {
-			f := statusCacheFreshness(hit.Body, cacheAgeSeconds(store))
+			f := statusCacheFreshness(hit.Body, cacheAgeSeconds(work))
 			return &IndexOutput[StatusBody]{Index: hit.Index, CacheAgeS: f.ageS, CacheRefresh: f.refresh, Body: hit.Body}, nil
 		}
 		// Stale-while-revalidate (ra-4u2eqc): the bucket and TTL-floor caches
@@ -155,7 +155,7 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 		// send ?fresh=true instead. A genuine cold cache (nothing ever built)
 		// has nothing to serve here and falls through to the synchronous
 		// build below, same as before this change.
-		if out, ok := s.savedStatusOutput(cacheKey, cacheAgeSeconds(store)); ok {
+		if out, ok := s.savedStatusOutput(cacheKey, cacheAgeSeconds(work)); ok {
 			s.refreshStatusResponseInBackground(cacheKey, input.Lite)
 			return out, nil
 		}
@@ -166,7 +166,7 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 		s.storeResponse(cacheKey, bucket, indexedResponse[StatusBody]{Index: index, Body: resp})
 	}
 
-	f := statusCacheFreshness(resp, cacheAgeSeconds(store))
+	f := statusCacheFreshness(resp, cacheAgeSeconds(work))
 	return &IndexOutput[StatusBody]{Index: index, CacheAgeS: f.ageS, CacheRefresh: f.refresh, Body: resp}, nil
 }
 
@@ -190,10 +190,10 @@ func (s *Server) freshStatusOutput(ctx context.Context, cacheKey string, lite bo
 			if b.built == nil {
 				return nil, apierr.Internal.Msg("building the status panicked; the server's log has the stack")
 			}
-			f := statusCacheFreshness(b.built.Body, cacheAgeSeconds(s.state.CityBeadStore()))
+			f := statusCacheFreshness(b.built.Body, cacheAgeSeconds(s.state.Stores().Work()))
 			return &IndexOutput[StatusBody]{Index: b.built.Index, CacheAgeS: f.ageS, CacheRefresh: f.refresh, Body: b.built.Body}, nil
 		case <-overrun.C:
-			if out, ok := s.savedStatusOutput(cacheKey, cacheAgeSeconds(s.state.CityBeadStore())); ok {
+			if out, ok := s.savedStatusOutput(cacheKey, cacheAgeSeconds(s.state.Stores().Work())); ok {
 				return out, nil
 			}
 			// Nothing saved: wait on for the build. The timer fires only once.
@@ -803,7 +803,7 @@ func (s *Server) citySessionSnapshot(ctx context.Context, cfg *config.City) (sta
 // field of the status body is built from: per-agent running/suspended state,
 // named-session status, the unlimited-pool expansion, and the session counts.
 //
-// It reads SessionsBeadStore(), not CityBeadStore(). Those are the same store
+// It reads Stores().Sessions(), not CityBeadStore(). Those are the same store
 // on a city that relocates nothing, so this is byte-identical there; on a city
 // with [beads.classes.sessions] relocated the session beads live in the class
 // binding, and reading them off the work ledger returned an empty fleet at
@@ -816,7 +816,7 @@ func (s *Server) statusSessionSnapshot(ctx context.Context) statusSessionSnapsho
 		bySessionName: make(map[string]statusSessionInfo),
 		byTemplate:    make(map[string][]statusSessionInfo),
 	}
-	sessions := s.state.SessionsBeadStore()
+	sessions := s.state.Stores().Sessions()
 	store := sessions.Store
 	if store == nil {
 		// A nil session-class store is benign only when the city has no bead
@@ -983,7 +983,7 @@ func (s *Server) statusWorkCounts(ctx context.Context, cacheColdRigs map[string]
 		})
 	}
 
-	if graph := s.state.GraphBeadStore().Store; graph != nil && !slices.ContainsFunc(queries, func(q workQuery) bool { return q.store == graph }) {
+	if graph := s.state.Stores().Graph().Store; graph != nil && !slices.ContainsFunc(queries, func(q workQuery) bool { return q.store == graph }) {
 		queries = append(queries, workQuery{label: "graph", store: graph, includeReady: true})
 	}
 

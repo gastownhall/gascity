@@ -26,6 +26,11 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
 
+// rootIsCityInfrastructure classifies a scanned root before the pre-start
+// orphan kill. It is a variable so tests can supply a classification the host
+// does not produce under `go test`.
+var rootIsCityInfrastructure = proctable.RootIsCityInfrastructure
+
 // State represents the runtime state of a chat session.
 type State string
 
@@ -458,6 +463,11 @@ type Info struct {
 	// / _key), the same shape as the named pair above but for the attached path.
 	AttachedConfigDriftDeferredAt  string // attached_config_drift_deferred_at (raw)
 	AttachedConfigDriftDeferredKey string // attached_config_drift_deferred_key (raw)
+	// ConfigDriftEscalatedAt is the RAW config_drift_escalated_at metadata, the
+	// marker that the deferral episode named by ConfigDriftDeferredKey has
+	// emitted its single past-horizon escalation. It is valid only while its
+	// timestamp lies between ConfigDriftDeferredAt and now.
+	ConfigDriftEscalatedAt string // config_drift_escalated_at (raw)
 	// StrandedEventEmittedAt is the RAW stranded_event_emitted_at metadata, the
 	// idempotency marker the stranded-diagnostic emitter checks (trimmed != "")
 	// before firing once.
@@ -770,22 +780,66 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 // nothing, when the provider claims one of them as a live runtime it does not
 // list (LiveUnlisted, an error wrapping runtime.ErrRuntimeUnavailable), so
 // callers gating a Start can refuse rather than race a survivor for the same
-// work. A scan error is logged and treated as fail-closed (see
-// FindRuntimesBySessionID): the orphans the scan did surface are still
-// terminated unless one of them is LiveUnlisted, which terminates none, and
-// matching the started replacement is impossible because it does not exist
-// yet.
+// work.
+//
+// The roots a failed scan did surface are still killed, unless one of them is
+// LiveUnlisted, which terminates none: a partial result is worth acting on. Where orphanScanErrorsRefuseStart is set (Windows), the scan
+// error is then fatal to the gate too, joined with any termination failures
+// rather than logged, because an incomplete scan cannot establish the one fact
+// this gate exists to establish. Elsewhere it is only logged, as
+// ProcessTableScanner allows.
+//
+// On Windows the gate also refuses while a session a more elevated gc started
+// in this city could still be running, since the scan here cannot read it, and
+// records a start made from above medium integrity for the same reason. Both
+// apply to every provider, whether or not it can scan the process table: the
+// elevation fence is about the city, and nothing here tells where a provider
+// runs its processes, so no provider is exempt from it.
+//
+// Where terminating a root can leave a descendant the termination could not
+// reach (proctable.RescanAfterTermination), that descendant still carries the
+// session's identity and is reported as a root by any scan made after it lost
+// its parent. The gate scans again until a pass terminates nothing, and
+// refuses if the orphans keep coming after maxOrphanPasses.
 func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) error {
 	_ = ctx
+	if err := checkElevatedSessions(m.cityPath); err != nil {
+		return err
+	}
 	scanner, ok := runtime.AsProcessTableScanner(m.sp)
 	if !ok || sessionID == "" {
-		return nil
-	}
-	found, err := scanner.FindRuntimesBySessionID(sessionID)
-	if err != nil {
-		log.Printf("session: scanning for orphaned runtimes for %s (failing closed): %s", sessionID, proctable.SummarizeScanError(err))
+		return recordElevatedSessionStart(m.cityPath)
 	}
 	cityPath := pathutil.NormalizePathForCompare(strings.TrimSpace(m.cityPath))
+	for pass := 1; ; pass++ {
+		terminated, err := m.killOrphanPass(scanner, scanner.TerminateRuntime, sessionID, cityPath)
+		if err != nil {
+			return err
+		}
+		if terminated == 0 || !proctable.RescanAfterTermination {
+			break
+		}
+		if pass == maxOrphanPasses {
+			return fmt.Errorf("orphaned runtimes for %s were still appearing after %d passes of termination", sessionID, maxOrphanPasses)
+		}
+	}
+	return recordElevatedSessionStart(m.cityPath)
+}
+
+// maxOrphanPasses bounds how many scans the pre-start gate makes for orphans
+// its own terminations surfaced.
+const maxOrphanPasses = 3
+
+// killOrphanPass scans once for sessionID's untracked roots in cityPath and
+// terminates each with terminate, reporting how many it terminated.
+// killExistingOrphans passes the scanner's TerminateRuntime, so the runtime
+// verb is referenced, and lease-checked, in killExistingOrphans itself.
+func (m *Manager) killOrphanPass(scanner runtime.ProcessTableScanner, terminate func(runtime.LiveRuntime) error, sessionID, cityPath string) (int, error) {
+	found, scanErr := scanner.FindRuntimesBySessionID(sessionID)
+	if scanErr != nil && !orphanScanErrorsRefuseStart {
+		log.Printf("session: scanning for orphaned runtimes for %s (failing closed): %s", sessionID, proctable.SummarizeScanError(scanErr))
+	}
+	var termErrs []error
 	var orphans []runtime.LiveRuntime
 	for _, live := range found {
 		if live.IsTracked || live.SessionID != sessionID {
@@ -798,34 +852,69 @@ func (m *Manager) killExistingOrphans(ctx context.Context, sessionID string) err
 		// that merely inherited it: a managed Dolt scope watchdog or bd's
 		// db-proxy-child started from this session's shell. Terminating it
 		// signals its process group and takes the city's Dolt server down
-		// (#6316), so a same-session restart must never reach it.
-		if proctable.IsCityInfrastructureRoot(live.PID) {
+		// (#6316), so a same-session restart must never reach it. A root that
+		// cannot be classified is left running rather than terminated on a
+		// command line nobody read; where orphanScanErrorsRefuseStart is set
+		// the start is then refused, since the survivor may be this session's
+		// runtime.
+		infrastructure, err := rootIsCityInfrastructure(live)
+		if err != nil {
+			log.Printf("session: leaving process-table root for %s pid=%d running: %v", sessionID, live.PID, err)
+			if orphanScanErrorsRefuseStart {
+				termErrs = append(termErrs, fmt.Errorf("orphan pid=%d provider_name=%q: %w", live.PID, live.ProviderName, err))
+			}
+			continue
+		}
+		if infrastructure {
 			log.Printf("session: leaving process-table root for %s pid=%d alone: city infrastructure (managed Dolt watchdog or bd proxy)", sessionID, live.PID)
 			continue
 		}
 		// The provider claims this root as a live runtime of its own that it
 		// does not list: a pane of its socket that it cannot reach or that a
-		// failed listing missed. It is not an orphan, and a replacement would
-		// race it for the session's work, so the start refuses and terminates
-		// nothing. The reconciler defers a refused start without recording a
-		// failure, so the refusal is logged here.
+		// failed listing missed, or a root its failed listing cannot rule
+		// out. It is not an orphan, and a replacement would race it for the
+		// session's work, so the start refuses and terminates nothing.
 		if live.LiveUnlisted {
-			log.Printf("session: refusing to start %s: live runtime pid=%d ppid=%d belongs to the provider but is not listed by it", sessionID, live.PID, live.PPID)
-			return fmt.Errorf("live runtime pid=%d ppid=%d for session %s belongs to the provider but is not listed by it: %w", live.PID, live.PPID, sessionID, runtime.ErrRuntimeUnavailable)
+			return 0, refuseLiveUnlisted(sessionID, live, scanErr)
 		}
 		orphans = append(orphans, live)
 	}
-	var termErrs []error
+	terminated := 0
 	for _, live := range orphans {
-		if err := scanner.TerminateRuntime(live); err != nil {
+		if err := terminate(live); err != nil {
 			log.Printf("session: terminating orphaned runtime for %s pid=%d provider_name=%q: %v", sessionID, live.PID, live.ProviderName, err)
 			termErrs = append(termErrs, fmt.Errorf("orphan pid=%d provider_name=%q: %w", live.PID, live.ProviderName, err))
+			continue
 		}
+		terminated++
 	}
 	if len(termErrs) > 0 {
-		return fmt.Errorf("%d orphaned runtime(s) not confirmed dead: %w", len(termErrs), errors.Join(termErrs...))
+		unconfirmed := fmt.Errorf("%d orphaned runtime(s) not confirmed dead: %w", len(termErrs), errors.Join(termErrs...))
+		if scanErr != nil && orphanScanErrorsRefuseStart {
+			return terminated, errors.Join(unconfirmed, fmt.Errorf("scanning for orphaned runtimes for %s: %w", sessionID, scanErr))
+		}
+		return terminated, unconfirmed
 	}
-	return nil
+	if scanErr != nil && orphanScanErrorsRefuseStart {
+		return terminated, fmt.Errorf("scanning for orphaned runtimes for %s: %w", sessionID, scanErr)
+	}
+	return terminated, nil
+}
+
+// refuseLiveUnlisted logs and returns killExistingOrphans' refusal to start
+// sessionID over live, a root its provider claims as a live runtime it does
+// not list. When the scan's tracking failed (scanErr holds a whole-scan
+// failure), the claim rests on a listing that could not rule the root out,
+// so the refusal names that failure rather than say the root is the
+// provider's. The reconciler defers a refused start without recording a
+// failure, so the refusal is logged here.
+func refuseLiveUnlisted(sessionID string, live runtime.LiveRuntime, scanErr error) error {
+	claim := "belongs to the provider but is not listed by it"
+	if proctable.HasWholeScanFailure(scanErr) {
+		claim = "may belong to the provider, whose listing could not rule it out (" + proctable.SummarizeScanError(scanErr) + ")"
+	}
+	log.Printf("session: refusing to start %s: live runtime pid=%d ppid=%d %s", sessionID, live.PID, live.PPID, claim)
+	return fmt.Errorf("live runtime pid=%d ppid=%d for session %s %s: %w", live.PID, live.PPID, sessionID, claim, runtime.ErrRuntimeUnavailable)
 }
 
 func (m *Manager) now() time.Time {
@@ -1156,6 +1245,7 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			}
 			return fmt.Errorf("starting session: %w", err)
 		}
+		m.queueStartupNudgeHandbackLocked(b, sessName)
 		if metaErr := m.confirmStartedRuntimeMetadata(inc, sessName, &b); metaErr != nil {
 			if errors.Is(metaErr, ErrMintSuperseded) {
 				// The row records a newer incarnation: the runtime is its

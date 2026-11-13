@@ -473,9 +473,11 @@ func TestSessionRelocationRootsRouteThroughSessionClassStore(t *testing.T) {
 }
 
 // graphRelocationRoutedFiles are the CLI one-shot roots that reach the graph
-// coordination class and must derive their graph leg through cliGraphStore. The
-// callee's typed parameter is compile-enforced; whether the CALLER handed it a
-// routed store is what this substring canary covers.
+// coordination class and must derive their graph leg through cliGraphStore, or
+// hand the callee the one-shot epoch whose graph handle that is (cliStores:
+// the autoclose hooks and the step reminder plan their molecule federations
+// over it, T7g). The callee's typed parameter is compile-enforced; whether the
+// CALLER handed it a routed store is what this substring canary covers.
 var graphRelocationRoutedFiles = []string{
 	"wisp_autoclose.go",     // bd on_close hook: attached molecule/workflow reaping
 	"molecule_autoclose.go", // bd on_close hook: molecule completion
@@ -498,8 +500,8 @@ func TestGraphRelocationRootsRouteThroughGraphClassStore(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ReadFile(%q): %v", path, err)
 		}
-		if !strings.Contains(string(data), "cliGraphStore(") {
-			t.Errorf("%s is listed as graph-relocation-routed but never calls cliGraphStore( — did the routing get dropped? A graph read left on the work store returns empty on a migrated city and reports success", name)
+		if !strings.Contains(string(data), "cliGraphStore(") && !strings.Contains(string(data), "cliStores(") {
+			t.Errorf("%s is listed as graph-relocation-routed but never calls cliGraphStore( or cliStores( — did the routing get dropped? A graph read left on the work store returns empty on a migrated city and reports success", name)
 		}
 	}
 }

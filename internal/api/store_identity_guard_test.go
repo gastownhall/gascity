@@ -17,23 +17,9 @@ import (
 // by the PR that hands it a class handle. The table only shrinks: a new
 // comparison uses SameStore.
 var reviewedStoreIdentitySites = map[string]beadstest.IdentitySite{
-	"beads_graph_federation.go Server.bindingReservedPrefixes eq":     {Count: 1, Reason: "binding.Leg.Store == store: both raw (residency topology legs, relocatedGraphStore); T7 by-id residency"},
-	"beads_graph_federation.go relocatedGraphStore eq":                {Count: 1, Reason: "GraphBeadStore().Store == CityBeadStore(): both raw unwraps; T7 (relocatedGraphStore is residue)"},
-	"handler_agents.go activeBeadSearchScope eq":                      {Count: 1, Reason: "stores[name] == shared over the raw BeadStores() map; T6c workStoresByName"},
-	"handler_agents_graph_work.go Server.graphActiveWorkBySession eq": {Count: 1, Reason: "graphStore == CityBeadStore(): both raw; T6c moves it to st.Graph() and SameStore"},
-	"handler_beads.go sortedRigNames map-key":                         {Count: 1, Reason: "dedupes the raw BeadStores() map by value; T7 (sortedRigNames is residue)"},
-	"handler_convoy_dispatch.go workflowStoreByRef eq":                {Count: 2, Reason: "graph/orders store == CityBeadStore(): raw unwraps; T7 workflow legs"},
-	"handler_convoy_dispatch.go workflowStoresWith eq":                {Count: 1, Reason: "GraphBeadStore().Store != the raw city store; T7 workflow legs"},
-	"handler_convoys.go isGraphConvoyID eq":                           {Count: 1, Reason: "GraphBeadStore().Store != CityBeadStore(): both raw; T7 (federated marker)"},
-	"handler_status.go Server.statusWorkCounts eq":                    {Count: 1, Reason: "q.store == graph over raw work-count legs; T7 status federation"},
-	"huma_handlers_beads.go Server.storeClassHolds eq":                {Count: 1, Reason: "binding.Leg.Store == store: raw topology legs and the raw by-id owner; T7 holds rule"},
-	"huma_handlers_orders.go appendOrdersClassStoreInfo eq":           {Count: 1, Reason: "info.store == ordersStore: raw legs and a raw unwrap; T7 orders legs"},
-	"residency_by_id.go Server.workLegFor eq":                         {Count: 1, Reason: "leg.Store == store over raw by-id legs; T7 by-id residency"},
-	"residency_topology.go Server.residencyTopology eq":               {Count: 2, Reason: "a class store == the raw city store; T7 residency topology"},
-	"residency_topology.go Server.residencyTopology map-key":          {Count: 1, Reason: "groups raw class stores into bindings by store value; T7 residency topology"},
-	"residency_topology.go apiResidencyBindings map-key":              {Count: 1, Reason: "the grouping map residencyTopology builds; T7 residency topology"},
-	"rig_graph_legs.go workflowGraphStoreInfo eq":                     {Count: 1, Reason: "graphStore == CityBeadStore(): both raw; T7 workflow legs"},
-	"session_ops.go sameStoreValue eq":                                {Count: 1, Reason: "the panic-safe raw == helper serverOps.store uses; T6b replaces it with beads.SameStore"},
+	"handler_beads.go sortedRigNames map-key":          {Count: 1, Reason: "dedupes the raw BeadStores() map by value; T7 (sortedRigNames is residue)"},
+	"handler_convoy_dispatch.go workflowStoreByRef eq": {Count: 1, Reason: "orders store == CityBeadStore(): a raw unwrap; T7f orders legs"},
+	"handler_status.go Server.statusWorkCounts eq":     {Count: 1, Reason: "q.store == graph over raw work-count legs; T7 status federation"},
 }
 
 // TestStoreIdentityGuard holds internal/api's store comparisons to the
@@ -43,14 +29,16 @@ func TestStoreIdentityGuard(t *testing.T) {
 }
 
 // TestAPIBeadRouterHonorsTheGraphBindingThroughAHandle pins apiBeadRouter's
-// identity test to SameStore (T6a, R3): the core names the store that holds
-// the routed bead, and on a city whose graph is relocated the route honors it
-// when it is the graph binding, whether the core names it raw or as a class
-// handle. With == a handle never matched, so a standalone formula root minted
-// in the binding was routed through the sling's own store and the route
-// failed.
+// identity test to SameStore (T6a, R3): the core names the molecule target
+// that holds the routed bead, and on a city whose graph is relocated the
+// route honors it when it is over the graph binding. With == a target never
+// matched the raw binding, so a standalone formula root minted in the binding
+// was routed through the sling's own store and the route failed.
 func TestAPIBeadRouterHonorsTheGraphBindingThroughAHandle(t *testing.T) {
-	for name, wrap := range apiHandleWraps {
+	for name, target := range map[string]func(beads.Store) beads.MoleculeTarget{
+		"a graph target": beadstest.GraphMolecule,
+		"a work target":  beadstest.WorkMolecule,
+	} {
 		state := newFakeState(t)
 		city, binding, rig := beads.NewMemStore(), beads.NewMemStore(), beads.NewMemStore()
 		state.cityBeadStore = city
@@ -59,8 +47,8 @@ func TestAPIBeadRouterHonorsTheGraphBindingThroughAHandle(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		r := apiBeadRouter{server: New(state), store: rig}
-		if err := r.Route(t.Context(), sling.RouteRequest{BeadID: root.ID, Target: "myrig/worker", Store: wrap(binding)}); err != nil {
+		r := apiBeadRouter{server: New(state), store: beadstest.Work(rig), binding: graphBinding(state.Stores())}
+		if err := r.Route(t.Context(), sling.RouteRequest{BeadID: root.ID, Target: "myrig/worker", Store: target(binding)}); err != nil {
 			t.Fatalf("%s: route: %v", name, err)
 		}
 		got, err := binding.Get(root.ID)
@@ -85,10 +73,10 @@ func TestWorkRecordLegacyRepoDirMatchesARigThroughAHandle(t *testing.T) {
 		state.cfg.Rigs = []config.Rig{{Name: "myrig", Path: rigPath}, {Name: "unbound"}}
 		s := New(state)
 		dirs := s.workRecordScopeDirs()
-		if got := s.workRecordLegacyRepoDir(wrap(state.BeadStore("myrig")), dirs); got != rigPath {
+		if got := s.workRecordLegacyRepoDir(beadstest.Resident(wrap(state.BeadStore("myrig"))), dirs); got != rigPath {
 			t.Errorf("%s over the rig's store: repo dir %q, want the rig checkout %q", name, got, rigPath)
 		}
-		if got := s.workRecordLegacyRepoDir(wrap(beads.NewMemStore()), dirs); got != dirs.CityDir() {
+		if got := s.workRecordLegacyRepoDir(beadstest.Resident(wrap(beads.NewMemStore())), dirs); got != dirs.CityDir() {
 			t.Errorf("%s over another store: repo dir %q, want the city checkout %q", name, got, dirs.CityDir())
 		}
 	}

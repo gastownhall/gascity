@@ -29,7 +29,10 @@ func providerDataProgramStatus(t *testing.T, profile Profile) ProgramStatusDecla
 		t.Fatalf("profile %s: family %q is not a builtin provider", profile.ID, ProfileFamily(profile))
 	}
 	arm, _ := spec.ProgramStatus.Arm(runtime.ProgramStatusShadow, false)
-	return ProgramStatusDeclaration{Declared: arm.Capture, App: arm.App, Relay: arm.Relay, HoldMidTurn: arm.HoldMidTurn}
+	return ProgramStatusDeclaration{
+		Declared: arm.Capture, App: arm.App, Relay: arm.Relay, HoldMidTurn: arm.HoldMidTurn,
+		DecideStartup: arm.DecideStartup, DecideSettle: arm.DecideSettle,
+	}
 }
 
 // TestProgramStatusConformance runs the WC-PSTAT rows for every profile: a
@@ -121,9 +124,11 @@ func TestProgramStatusGate(t *testing.T) {
 	}{
 		"provider data declares, profile does not": {undeclared, declaration},
 		"profile declares, provider data does not": {declared, ProgramStatusDeclaration{}},
-		"app drifts":   {declared, ProgramStatusDeclaration{Declared: true, App: "other", Relay: true}},
-		"relay drifts": {declared, ProgramStatusDeclaration{Declared: true, App: "agent"}},
-		"hold drifts":  {declared, ProgramStatusDeclaration{Declared: true, App: "agent", Relay: true, HoldMidTurn: true}},
+		"app drifts":            {declared, ProgramStatusDeclaration{Declared: true, App: "other", Relay: true}},
+		"relay drifts":          {declared, ProgramStatusDeclaration{Declared: true, App: "agent"}},
+		"hold drifts":           {declared, ProgramStatusDeclaration{Declared: true, App: "agent", Relay: true, HoldMidTurn: true}},
+		"startup opt-in drifts": {declared, ProgramStatusDeclaration{Declared: true, App: "agent", Relay: true, DecideStartup: true}},
+		"settle opt-in drifts":  {declared, ProgramStatusDeclaration{Declared: true, App: "agent", Relay: true, DecideSettle: true}},
 	} {
 		if r, run := ProgramStatusGate(c.profile, code, c.implementation); run || r.Status != ResultFail || !strings.Contains(r.Detail, "drift") {
 			t.Errorf("%s: %+v run=%t, want a drift failure", name, r, run)

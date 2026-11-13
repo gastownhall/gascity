@@ -68,7 +68,12 @@ func codeLines(script string) string {
 // step, ancestry is checked before any checkout, the script never prints
 // the scaler's isolation-phase marker, and it stays bash-3.2-safe (no
 // mapfile, no external timeout command), because gascity's script tests
-// also run this on macOS's /bin/bash.
+// also run this on macOS's /bin/bash. Every git call also goes through the
+// one git() wrapper with auto-maintenance and auto-gc off: fetch.sh reads
+// no global config and drops GIT_TEMPLATE_DIR, so neither the test env's
+// seeded gitconfig nor internal/testenv's git template reaches the
+// repository it fetches into, and a detached `git maintenance run --auto`
+// would race these tests' t.TempDir cleanup.
 func TestRBEWorkerFetchScriptInvariants(t *testing.T) {
 	root := repoRoot(t)
 	script := readFile(t, root, rbeWorkerFetchScript)
@@ -116,6 +121,19 @@ func TestRBEWorkerFetchScriptInvariants(t *testing.T) {
 	}
 	if regexp.MustCompile(`(?m)(^|[;&|]\s*)timeout\s`).MatchString(code) {
 		t.Errorf("%s: uses the external timeout command, which macOS's bash 3.2 environment may lack", rbeWorkerFetchScript)
+	}
+
+	wrapper := regexp.MustCompile(`(?m)^git\(\) \{ command git .*\}$`).FindString(code)
+	if wrapper == "" {
+		t.Fatalf("%s: no one-line git() wrapper running command git", rbeWorkerFetchScript)
+	}
+	for _, flag := range []string{"-c maintenance.auto=false", "-c gc.auto=0"} {
+		if !strings.Contains(wrapper, flag) {
+			t.Errorf("%s: the git() wrapper lacks %s, so a fetch can leave detached auto-maintenance writing into the repository", rbeWorkerFetchScript, flag)
+		}
+	}
+	if n := strings.Count(code, "command git"); n != 1 {
+		t.Errorf("%s: %d uses of command git, want exactly 1 (the git() wrapper; any other bypasses its flags)", rbeWorkerFetchScript, n)
 	}
 }
 
@@ -907,6 +925,12 @@ func TestRBEWorkerPoolWorkflowIsolatesActions(t *testing.T) {
 			if got, want := step.Env["CAS_MAX_BYTES"], "${{ vars.RBE_CAS_MAX_BYTES || '' }}"; got != want {
 				t.Errorf("worker step CAS_MAX_BYTES = %q, want %q", got, want)
 			}
+			// The setup downloads' mirror (rbe-worker rbe-fetch; every file
+			// checked against the pin's sha256): off unless the repository
+			// variable names it, so merging changes nothing.
+			if got, want := step.Env["RBE_DIST_MIRROR"], "${{ vars.RBE_DIST_MIRROR || '' }}"; got != want {
+				t.Errorf("worker step RBE_DIST_MIRROR = %q, want %q", got, want)
+			}
 			// The OSS pool keeps the script's defaults (tier oss, :443) and its
 			// own certificate; the fork tier is rbe-fork-pool.yml's alone.
 			for _, k := range []string{"WORKER_TIER", "RBE_WEST_PORT"} {
@@ -1106,8 +1130,14 @@ func TestRBEPoolCanaryInput(t *testing.T) {
 			}
 			// rbe_worker_sha reaches nothing but these: the run name, the
 			// canary step's env and the fetch's canary-sha.
-			if n := strings.Count(text, "inputs.rbe_worker_sha"); n != 8 {
-				t.Errorf("inputs.rbe_worker_sha referenced %d times, want 8 (run-name 2, canary if and env, the fetch's with, the H5 if, await-drift's if)", n)
+			// The fork pool's hot pre-check also refuses the two together
+			// (its CANARY env): one more.
+			want := 8
+			if path == rbeForkPoolWorkflow {
+				want = 9
+			}
+			if n := strings.Count(text, "inputs.rbe_worker_sha"); n != want {
+				t.Errorf("inputs.rbe_worker_sha referenced %d times, want %d (run-name 2, canary if and env, the fetch's with, the H5 if, await-drift's if; fork: the pre-check's CANARY)", n, want)
 			}
 			// No drift job on a canary: a canary commit that measures
 			// something else would open a drift issue for the pin, which caps
@@ -1122,7 +1152,7 @@ func TestRBEPoolCanaryInput(t *testing.T) {
 			if err := yaml.Unmarshal([]byte(text), &jobs); err != nil {
 				t.Fatal(err)
 			}
-			if !strings.HasSuffix(jobs.Jobs["await-drift"].If, " && inputs.rbe_worker_sha == ''") {
+			if !strings.Contains(jobs.Jobs["await-drift"].If, " && inputs.rbe_worker_sha == ''") {
 				t.Errorf("await-drift if %q: must skip a canary", jobs.Jobs["await-drift"].If)
 			}
 			if jobs.Jobs["report-drift"].Needs != "await-drift" || !strings.Contains(jobs.Jobs["report-drift"].If, "needs.await-drift.outputs.drift == 'true'") {

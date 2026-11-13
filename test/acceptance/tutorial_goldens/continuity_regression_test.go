@@ -46,7 +46,7 @@ func TestTutorialContinuity_SessionLookupFlowIsExplicit(t *testing.T) {
 		"cat pack.toml",
 		"cat agents/reviewer/agent.toml",
 		"gc session list --template my-project/reviewer",
-		"gc session peek mc-8sfd",
+		"gc session peek gcg-14",
 	} {
 		if !strings.Contains(page03Text, want) {
 			t.Fatalf("tutorial 03 is missing %q", want)
@@ -70,7 +70,7 @@ func TestTutorialContinuity_CommunicationUsesVisibleWakeAndRigScopedReviewer(t *
 	if !strings.Contains(page04Text, `gc session nudge mayor "Check mail and hook status, then act accordingly"`) {
 		t.Fatal("tutorial 04 no longer shows the explicit mayor wake-up step")
 	}
-	if !strings.Contains(page04Text, `gc sling my-project/reviewer "Review the auth module changes"`) {
+	if !strings.Contains(page04Text, `gc sling my-project/reviewer "Review hello.py and report feedback"`) {
 		t.Fatal("tutorial 04 no longer shows the mayor routing work to the rig-scoped reviewer")
 	}
 }
@@ -86,8 +86,15 @@ func TestTutorialContinuity_FormulasIntroducesWorkerBeforeUse(t *testing.T) {
 			t.Fatalf("tutorial 05 is missing the worker setup step %q", want)
 		}
 	}
-	if !strings.Contains(page05Text, `gc sling worker mc-79s`) {
-		t.Fatal("tutorial 05 slings work to worker without first establishing that agent in the prose")
+	// Tutorial 07 routes its orders to the worker tutorial 05 adds.
+	if !strings.Contains(readTutorialPageText(t, "07-orders.md"), "`worker` agent from Tutorial 05") {
+		t.Fatal("tutorial 07 no longer routes to the worker tutorial 05 establishes")
+	}
+	// A born-split city keeps a cooked workflow in its infrastructure store,
+	// which gc sling does not route by hand: the page launches formulas with
+	// --formula instead.
+	if strings.Contains(page05Text, "gc sling worker gcg-") || strings.Contains(page05Text, "gc sling worker mc-") {
+		t.Fatal("tutorial 05 slings a cooked workflow root by hand, which a born-split city refuses")
 	}
 }
 
@@ -101,6 +108,24 @@ func TestTutorialContinuity_BeadsExplainsBlockedReadyQuery(t *testing.T) {
 	} {
 		if !strings.Contains(page06Text, want) {
 			t.Fatalf("tutorial 06 is missing the blocked-work explanation %q", want)
+		}
+	}
+}
+
+func TestTutorialContinuity_OrdersPageCarriesTheFilesItsGoldenCreates(t *testing.T) {
+	script := tutorialLintScriptShellCommand(t)
+	for _, want := range []string{"#!/bin/sh", "exit 0"} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("tutorial 07 lint-changed.sh heredoc is missing %q:\n%s", want, script)
+		}
+	}
+	for file, want := range map[string]string{
+		"# orders/lint-check.toml":    `exec = "scripts/lint-changed.sh"`,
+		"# orders/release-notes.toml": `schedule = "0 9 * * 1"`,
+	} {
+		body := tutorialFileSnippet(t, "docs/tutorials/07-orders.md", "toml", file)
+		if !strings.Contains(body, want) {
+			t.Fatalf("tutorial 07 %s is missing %q:\n%s", file, want, body)
 		}
 	}
 }

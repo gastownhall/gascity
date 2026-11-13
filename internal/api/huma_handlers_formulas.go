@@ -164,11 +164,12 @@ func (s *Server) formulaDetail(ctx context.Context, rawName, rawScopeKind, rawSc
 	// returning the typed 503 above.
 	_, targetIsRoutingIdentity := findAgentByQualifiedTemplate(s.state.Config(), target)
 
-	store := s.state.CityBeadStore()
+	st := s.state.Stores()
+	store := st.Work()
 	if scopeKind == "rig" {
-		store = s.state.BeadStore(scopeRef)
+		store, _ = st.Rig(scopeRef)
 	}
-	detail, err := buildFormulaDetail(ctx, beads.WorkStore{Store: store}, name, paths, target, targetIsRoutingIdentity, vars, validateRuntimeVars)
+	detail, err := buildFormulaDetail(ctx, store, name, paths, target, targetIsRoutingIdentity, vars, validateRuntimeVars)
 	if err != nil {
 		if errors.Is(err, errFormulaNotWorkflow) || errors.Is(err, errFormulaNotFound) {
 			return nil, apierr.FormulaNotFound.Msg(err.Error())

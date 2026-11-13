@@ -2,9 +2,12 @@ package api
 
 import (
 	"encoding/json"
+	"reflect"
+	"slices"
 	"testing"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
@@ -148,5 +151,58 @@ func TestDecodeBeadEventPayloadCoercesNonStringMetadata(t *testing.T) {
 	}
 	if payload.Bead.Metadata["wake_attempts"] != "0" {
 		t.Fatalf("wake_attempts = %q, want 0", payload.Bead.Metadata["wake_attempts"])
+	}
+}
+
+func TestSessionConfigDriftDeferredPayloadContract(t *testing.T) {
+	since := time.Date(2026, 3, 4, 5, 6, 7, 0, time.FixedZone("x", 3600))
+	for _, tc := range []struct {
+		name   string
+		fields []string
+		want   string
+	}{
+		{"missing breakdown stays an empty list", nil, `[]`},
+		{"field names", []string{"command", "env"}, `["command","env"]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := SessionConfigDriftDeferredPayloadJSON("gc-1", "", "worker", tc.fields, "bd-9", since, 90*time.Minute+500*time.Millisecond, true)
+			var wire map[string]json.RawMessage
+			if err := json.Unmarshal(raw, &wire); err != nil {
+				t.Fatalf("unmarshal %s: %v", raw, err)
+			}
+			if got := string(wire["drifted_fields"]); got != tc.want {
+				t.Errorf("drifted_fields = %s, want %s", got, tc.want)
+			}
+			if _, ok := wire["session_name"]; ok {
+				t.Errorf("session_name present though unset: %s", raw)
+			}
+			got, registered, err := events.DecodePayload(events.SessionConfigDriftDeferred, raw)
+			if err != nil || !registered {
+				t.Fatalf("DecodePayload = %v, registered %v", err, registered)
+			}
+			p, ok := got.(SessionConfigDriftDeferredPayload)
+			if !ok {
+				t.Fatalf("payload = %T, want SessionConfigDriftDeferredPayload", got)
+			}
+			if p.SessionID != "gc-1" || p.Template != "worker" || p.WorkBeadID != "bd-9" || !p.Escalated {
+				t.Errorf("payload = %+v", p)
+			}
+			if p.DeferredSince != "2026-03-04T04:06:07Z" || p.PendingSeconds != 5400 {
+				t.Errorf("deferred_since = %q, pending_seconds = %d; want 2026-03-04T04:06:07Z, 5400", p.DeferredSince, p.PendingSeconds)
+			}
+		})
+	}
+	schema := huma.NewMapRegistry("#/components/schemas/", huma.DefaultSchemaNamer).
+		Schema(reflect.TypeOf(SessionConfigDriftDeferredPayload{}), false, "")
+	if f := schema.Properties["drifted_fields"]; f == nil || f.Nullable {
+		t.Errorf("drifted_fields schema = %+v, want a non-nullable array", f)
+	}
+	for _, name := range []string{"session_id", "template", "drifted_fields", "work_bead_id", "deferred_since", "pending_seconds", "escalated"} {
+		if !slices.Contains(schema.Required, name) {
+			t.Errorf("%s not required in %v", name, schema.Required)
+		}
+	}
+	if author, ok := events.RegisteredAuthorship(events.SessionConfigDriftDeferred); !ok || author != events.AuthorController {
+		t.Errorf("authorship = %v, %v; want controller", author, ok)
 	}
 }

@@ -21,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 type slingBody struct {
@@ -157,13 +158,14 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 	storeBeadID := slingStoreBeadID(body)
 
 	// Build deps and construct Sling instance.
-	store := s.findSlingStore(body.Rig, agentCfg, storeBeadID)
+	st := s.state.Stores()
+	store, scope := s.findSlingStore(st, body.Rig, agentCfg, storeBeadID)
 	storeRef := s.slingStoreRef(body.Rig, agentCfg, storeBeadID)
-	if store == nil && allowsForceStoreFallback(body, agentCfg) {
-		store = s.findSlingStore(body.Rig, agentCfg, "")
+	if store == (beads.WorkStore{}) && allowsForceStoreFallback(body, agentCfg) {
+		store, scope = s.findSlingStore(st, body.Rig, agentCfg, "")
 		storeRef = s.slingStoreRef(body.Rig, agentCfg, "")
 	}
-	if store == nil {
+	if store == (beads.WorkStore{}) {
 		message := fmt.Sprintf("bead prefix store %s is not registered; cannot verify bead %q", storeRef, storeBeadID)
 		return nil, http.StatusBadRequest, "missing_bead", message, nil
 	}
@@ -186,12 +188,13 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 		Cfg:      s.state.Config(),
 		SP:       s.state.SessionProvider(),
 		Store:    store,
-		// Only a relocated graph binding; with nil the sling domain cooks the
-		// workflow in the sling's selected work store, next to its source
-		// bead, the rule `gc sling` applies through resolveGraphStore.
-		// Passing the non-relocated graph store (the city store) put a rig
-		// bead's workflow where the rig's pool workers never look.
-		GraphStore: relocatedGraphStore(s.state),
+		// The graph store at the sling's scope: the relocated graph binding,
+		// else the selected work store itself, so the workflow is cooked next
+		// to its source bead, the rule `gc sling` applies. The city's graph
+		// store on a city that relocates nothing is the city store, which put
+		// a rig bead's workflow where the rig's pool workers never look.
+		GraphStore: graphAt(st, scope),
+		Sessions:   st.Sessions(),
 		Events:     s.state.EventProvider(),
 		StoreRef:   storeRef,
 		SourceWorkflowStores: func() ([]sling.SourceWorkflowStore, error) {
@@ -210,7 +213,7 @@ func (s *Server) execSling(ctx context.Context, body slingBody, _ string) (*slin
 			fmt.Fprintf(apiSlingStderr(), "warning: %s\n", message) //nolint:errcheck
 		},
 		Runner:   s.slingRunner(),
-		Router:   apiBeadRouter{server: s, store: store},
+		Router:   apiBeadRouter{server: s, store: store, binding: graphBinding(st)},
 		Resolver: apiAgentResolver{},
 		Branches: apiBranchResolver{cityPath: s.state.CityPath()},
 		Notify:   &apiNotifier{state: s.state},
@@ -402,26 +405,35 @@ func sourceWorkflowCleanupHint(sourceBeadID, storeRef string) string {
 	return strings.Join(args, " ")
 }
 
-// findSlingStore returns the bead store for sling operations.
-func (s *Server) findSlingStore(rig string, agentCfg config.Agent, beadID string) beads.Store {
+// findSlingStore returns st's work store for sling operations and the scope
+// it is the work store of: the city's, or a rig's. The store is zero when the
+// scope the bead's prefix names has none open.
+func (s *Server) findSlingStore(st storeref.Stores, rig string, agentCfg config.Agent, beadID string) (beads.WorkStore, storeref.StoreRef) {
 	// Match the CLI's bead-prefix-first resolution so existence checks consult
 	// the bead's home store before any cross-rig guard runs.
 	if resolvedRig, cityScope := s.slingStoreScopeForBead(beadID); cityScope {
-		return s.state.CityBeadStore()
+		return st.Work(), storeref.WorkRef
 	} else if resolvedRig != "" {
-		return s.state.BeadStore(resolvedRig)
+		store, _ := st.Rig(resolvedRig)
+		return store, storeref.RigRef(resolvedRig)
 	}
 	if rig != "" {
-		if store := s.state.BeadStore(rig); store != nil {
-			return store
+		if store, ok := st.Rig(rig); ok {
+			return store, storeref.RigRef(rig)
 		}
 	}
 	if agentCfg.Dir != "" {
-		if store := s.state.BeadStore(agentCfg.Dir); store != nil {
-			return store
+		if store, ok := st.Rig(agentCfg.Dir); ok {
+			return store, storeref.RigRef(agentCfg.Dir)
 		}
 	}
-	return s.state.CityBeadStore()
+	return st.Work(), storeref.WorkRef
+}
+
+// graphAt is st's graph store at scope, a scope findSlingStore named.
+func graphAt(st storeref.Stores, scope storeref.StoreRef) beads.GraphStore {
+	graph, _ := st.GraphFor(scope)
+	return graph
 }
 
 // slingStoreRef returns a store ref string for the sling context.
@@ -472,16 +484,16 @@ func (s *Server) slingStoreScopeForBead(beadID string) (rigName string, cityScop
 // refuses the sling instead of degrading to the tolerated non-source-store
 // warning, because a binding fault is an error, never absence.
 //
-// It is skipped on a default (non-relocated) city, where GraphBeadStore() ==
-// CityBeadStore(), so the single-store enumeration stays byte-identical and no
-// store is scanned twice. Its ref reuses workflowStores()'s "graph:<city>"
-// spelling so the store_ref round trip has one parse, not two.
+// It is skipped on a default (non-relocated) city, where Stores().Graph()
+// wraps CityBeadStore(), so the single-store enumeration stays byte-identical
+// and no store is scanned twice. Its ref reuses workflowStores()'s
+// "graph:<city>" spelling so the store_ref round trip has one parse, not two.
 func (s *Server) sourceWorkflowStores() []sling.SourceWorkflowStore {
 	stores := make([]sling.SourceWorkflowStore, 0, len(s.state.BeadStores())+2)
 	cityStore := s.state.CityBeadStore()
-	if graphStore := relocatedGraphStore(s.state); graphStore != nil {
+	if graph, ok := relocatedGraphStore(s.state); ok {
 		stores = append(stores, sling.SourceWorkflowStore{
-			Store:    graphStore,
+			Store:    graph,
 			StoreRef: sourceworkflow.GraphStoreRef(s.state.CityName()),
 			Strict:   true,
 		})
@@ -616,7 +628,20 @@ func (n *apiNotifier) PokeControlDispatch(_ string) {
 
 type apiBeadRouter struct {
 	server *Server
-	store  beads.Store
+	store  beads.WorkStore
+	// binding is the request's relocated graph binding, zero on a city that
+	// does not relocate graph (graphBinding).
+	binding beads.GraphStore
+}
+
+// graphBinding is st's graph store when the city relocates the graph class,
+// else the zero handle: on a city that relocates nothing the graph store is
+// the city's work store.
+func graphBinding(st storeref.Stores) beads.GraphStore {
+	if beads.SameStore(st.Graph(), st.Work()) {
+		return beads.GraphStore{}
+	}
+	return st.Graph()
 }
 
 func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
@@ -644,8 +669,11 @@ func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	// sling's own store, unchanged. Identity is SameStore's: a class handle
 	// over the binding is the binding, where == between a handle and the raw
 	// store would be false.
-	store := r.store
-	if req.Store != nil && beads.SameStore(req.Store, relocatedGraphStore(r.server.state)) {
+	var store beads.Writer
+	if r.store != (beads.WorkStore{}) {
+		store = r.store
+	}
+	if beads.SameStore(req.Store, r.binding) {
 		store = req.Store
 	}
 	if store == nil {

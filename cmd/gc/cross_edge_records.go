@@ -22,7 +22,7 @@ func mergeCrossEdgeRecords(existing string, add []rigCrossEdgeRecord) (string, b
 		}
 	}
 	type key struct{ dir, typ, other string }
-	have := make(map[key]bool, len(records)+len(add))
+	have := make(map[key]bool)
 	for _, r := range records {
 		have[key{r.Dir, r.Type, r.Other}] = true
 	}

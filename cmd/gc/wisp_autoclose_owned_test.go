@@ -85,7 +85,7 @@ func TestWispAutocloseNeverClosesAControllerOwnedRow(t *testing.T) {
 				if err := store.Close(work.ID); err != nil {
 					t.Fatal(err)
 				}
-				doWispAutocloseWith(store, work.ID, io.Discard, beads.GraphStore{Store: store})
+				doWispAutocloseWith(store, work.ID, io.Discard, testStores(store, store))
 				if got, _ := store.Get(row.ID); got.Status != before.Status {
 					t.Fatalf("owned row %s -> %s after the work bead's autoclose, want it as it was", before.Status, got.Status)
 				}

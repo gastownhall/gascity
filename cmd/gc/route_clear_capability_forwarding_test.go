@@ -757,11 +757,11 @@ func TestBindingCensusSurvivesRouteClear(t *testing.T) {
 	}
 
 	cs, _ := newCachedSplitControllerState(context.Background(), t, routes, beads.NewMemStore())
-	graph := cs.GraphBeadStore().Store
+	graph := cs.Stores().Graph().Store
 	if _, cached := graph.(*beads.CachingStore); !cached {
 		t.Fatalf("graph class resolves to %T, want the binding cache", graph)
 	}
-	if cs.ClassBindingHasLegacyResidents(graph) {
+	if cs.storageRoutes.hasLegacyResidents(graph) {
 		t.Fatal("a clean decorated binding reads as holding relics once cached")
 	}
 }

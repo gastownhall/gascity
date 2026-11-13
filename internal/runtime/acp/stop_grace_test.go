@@ -105,14 +105,12 @@ func TestConfigStopGraceDefaultsToManagedProcessStopGrace(t *testing.T) {
 	}
 }
 
-func TestConfigStopSocketTimeoutOutlastsStopGrace(t *testing.T) {
+func TestConfigStopSocketTimeoutOutlastsStopGraceAndReapGrace(t *testing.T) {
 	for _, c := range []Config{{}, {StopGrace: testStopGrace}, {StopGrace: 30 * time.Second}} {
-		if got := c.stopSocketTimeout(); got <= c.stopGrace() {
-			t.Errorf("Config{StopGrace: %v}.stopSocketTimeout() = %v, want longer than the %v grace", c.StopGrace, got, c.stopGrace())
+		floor := c.stopGrace() + runtime.ManagedProcessReapGrace
+		if got := c.stopSocketTimeout(); got <= floor {
+			t.Errorf("Config{StopGrace: %v}.stopSocketTimeout() = %v, want longer than stop grace + reap grace = %v", c.StopGrace, got, floor)
 		}
-	}
-	if got := (&Config{}).stopSocketTimeout(); got != 7*time.Second {
-		t.Errorf("default stopSocketTimeout() = %v, want the historical 7s", got)
 	}
 }
 

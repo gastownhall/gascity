@@ -54,13 +54,21 @@ type fakeState struct {
 	sessionsBeadStore beads.Store // relocated sessions store; nil falls back to cityBeadStore (default backend)
 	graphBeadStore    beads.Store // relocated graph store; nil falls back to cityBeadStore (default backend)
 	ordersBeadStore   beads.Store // relocated orders store; nil falls back to cityBeadStore (default backend)
+	mailBeadStore     beads.Store // relocated messaging store (Stores().Mail only); nil follows a relocated sessions store, as a whole split relocates both, else cityBeadStore (default backend)
 	// nudgeQueue overrides NudgeQueue; nil is the city's state.json queue over
 	// the nudges store.
 	nudgeQueue NudgeQueue
 	// bindingRelics is the boot census a test wants replayed. Absent means
 	// uncensused, which means "assume relics" — see
 	// ClassBindingHasLegacyResidents.
-	bindingRelics     map[beads.Store]bool
+	bindingRelics map[beads.Store]bool
+	// classRefusals is a plane's per-class refusal (cmd/gc's worker site):
+	// the class's handle refuses, while the topology keeps the binding.
+	classRefusals map[coordclass.Class]storeref.RefusingClassStore
+	// rigBits are the per-rig bits a holder's epoch carries for its rigs:
+	// the S4 relic-free bit and the suspension set (Leg.RelicFree,
+	// Leg.Suspended). Zero is none of either, as a holder that knows neither.
+	rigBits           fakeRigBits
 	cityBeadsDiag     *beads.BeadsDiagnostic
 	cityMailProv      mail.Provider // city-level mail provider (all mail is city-scoped)
 	eventProv         events.Provider
@@ -186,60 +194,47 @@ func (f *fakeState) ScopedStoreLike(ctx context.Context, existing beads.Store) (
 	return f.scopedStoreFn(ctx, existing)
 }
 
-func (f *fakeState) NudgesBeadStore() beads.NudgesStore {
-	return beads.NudgesStore{Store: f.classStore(f.nudgesBeadStore)}
-}
-
 func (f *fakeState) NudgeQueue() NudgeQueue {
 	if f.nudgeQueue != nil {
 		return f.nudgeQueue
 	}
-	return nudgequeue.StateFileQueue{CityPath: f.cityPath, Shadows: f.NudgesBeadStore()}
-}
-
-func (f *fakeState) SessionsBeadStore() beads.SessionStore {
-	return beads.SessionStore{Store: f.classStore(f.sessionsBeadStore)}
-}
-
-func (f *fakeState) GraphBeadStore() beads.GraphStore {
-	return beads.GraphStore{Store: f.classStore(f.graphBeadStore)}
-}
-
-func (f *fakeState) OrdersBeadStore() beads.OrdersStore {
-	return beads.OrdersStore{Store: f.classStore(f.ordersBeadStore)}
-}
-
-// classStore resolves a coordination-class accessor: the relocated store a
-// test set, or the city store when it set none (the default backend keeps every
-// class there). A class left on the city store — unset, or set to the city
-// store itself — is the gate's class view of it under GC_TEST_SPLIT_STRICT=1,
-// and the city store unchanged otherwise. A store relocated to a different
-// physical store is already split and is handed out as is.
-func (f *fakeState) classStore(relocated beads.Store) beads.Store {
-	if relocated != nil && relocated != f.cityBeadStore {
-		return relocated
-	}
-	return splittest.GateClassView(f.cityBeadStore)
+	return nudgequeue.StateFileQueue{CityPath: f.cityPath, Shadows: f.Stores().Nudges()}
 }
 
 // Stores mints the fake's class handles per call from its raw fields, through
 // the same router production uses (storeref.NewStores): the city store is the
 // work store, every rig in stores is a rig scope, and a class a test relocated
-// to a different store is a one-class binding. The split-strict gate's views
-// are the projection, so each handle wraps exactly the store its raw accessor
-// returns (TestFakeStateStoresWrapTheAccessorsStores).
+// to a different store is a one-class binding. A class left on the city store
+// (unset, or set to the city store itself) wraps the city store, through the
+// gate's class view under GC_TEST_SPLIT_STRICT=1. The split-strict gate's views
+// are the projection, so the work and rig handles wrap exactly the stores
+// CityBeadStore and BeadStore return (TestFakeStateStoresWrapTheResidueAccessors).
 func (f *fakeState) Stores() storeref.Stores {
-	return mintFakeStores(f.cityBeadStore, f.stores, f.relocatedClasses(), gateProjection{})
+	return mintFakeStores(f.cityBeadStore, f.stores, f.relocatedClasses(), storeref.StoresOptions{Projection: gateProjection{}, ClassRefusals: f.classRefusals}, f.cfg, f.ClassBindingHasLegacyResidents, f.rigBits)
+}
+
+// fakeRigBits are a fake holder's per-rig epoch bits, by rig name.
+type fakeRigBits struct {
+	relicFree map[string]bool
+	suspended map[string]bool
 }
 
 // relocatedClasses is every class a test relocated off the city store.
+// Messaging a test left unset follows a relocated sessions store: the split
+// the routes serve relocates every class into one binding, so the two never
+// part in production.
 func (f *fakeState) relocatedClasses() map[coordclass.Class]beads.Store {
+	mail := f.mailBeadStore
+	if mail == nil {
+		mail = f.sessionsBeadStore
+	}
 	out := map[coordclass.Class]beads.Store{}
 	for class, relocated := range map[coordclass.Class]beads.Store{
-		coordclass.ClassGraph:    f.graphBeadStore,
-		coordclass.ClassSessions: f.sessionsBeadStore,
-		coordclass.ClassOrders:   f.ordersBeadStore,
-		coordclass.ClassNudges:   f.nudgesBeadStore,
+		coordclass.ClassGraph:     f.graphBeadStore,
+		coordclass.ClassSessions:  f.sessionsBeadStore,
+		coordclass.ClassOrders:    f.ordersBeadStore,
+		coordclass.ClassNudges:    f.nudgesBeadStore,
+		coordclass.ClassMessaging: mail,
 	} {
 		if relocated != nil && relocated != f.cityBeadStore {
 			out[class] = relocated
@@ -249,62 +244,44 @@ func (f *fakeState) relocatedClasses() map[coordclass.Class]beads.Store {
 }
 
 // mintFakeStores mints a fake city's handles: city is the work store, rigs
-// the rig scopes, and each class in relocated a one-class binding over its
-// store; a nil store there is a binding that failed to open, whose handle is
-// zero. proj is the split-strict gate's projection, or nil for stores that
-// already carry it.
-func mintFakeStores(city beads.Store, rigs map[string]beads.Store, relocated map[coordclass.Class]beads.Store, proj storeref.Projection) storeref.Stores {
-	var bindings []storeref.ClassBinding
-	for class, store := range relocated {
-		classes := []coordclass.Class{class}
-		bindings = append(bindings, storeref.ClassBinding{Classes: classes, Leg: storeref.Leg{Ref: storeref.ClassRef(classes), Store: store}})
+// the rig scopes, and the classes in relocated are grouped by store into
+// bindings, as a production plane groups its routes (storeref.BuildBindings);
+// a nil store there is a binding that failed to open, whose handle is zero.
+// opts carries the split-strict gate's projection (none for stores that
+// already carry it) and any per-class refusal. cfg supplies the configured prefixes and relics the census a test
+// recorded (nil: none), so the handles' Topology is the one the API plane
+// derives from the same fake (TestFakeStateTopologyMatchesProduction). bits
+// marks each rig leg relic-free and suspended as a production holder marks
+// it (cmd/gc's mintCityStores).
+func mintFakeStores(city beads.Store, rigs map[string]beads.Store, relocated map[coordclass.Class]beads.Store, opts storeref.StoresOptions, cfg *config.City, relics func(beads.Store) bool, bits fakeRigBits) storeref.Stores {
+	var order []beads.Store
+	byStore := map[beads.Store][]coordclass.Class{}
+	for _, class := range coordclass.Classes() {
+		store, ok := relocated[class]
+		if !ok {
+			continue
+		}
+		if _, seen := byStore[store]; !seen {
+			order = append(order, store)
+		}
+		byStore[store] = append(byStore[store], class)
 	}
-	return storeref.NewStores(storeref.Topology{
+	bindings, refused := storeref.BuildBindings(order, byStore, storeref.BindingOptions{Relics: relics})
+	topo := storeref.Topology{
 		Work:     storeref.Leg{Ref: storeref.WorkRef, Store: city},
 		Rigs:     storeref.RigLegs(rigs),
 		Bindings: bindings,
-	}, storeref.StoresOptions{Projection: proj})
-}
-
-// accessorState is the raw and per-class store accessors a State stands
-// beside Stores until T6c drops the per-class ones.
-type accessorState interface {
-	Stores() storeref.Stores
-	CityBeadStore() beads.Store
-	BeadStore(rig string) beads.Store
-	BeadStores() map[string]beads.Store
-	GraphBeadStore() beads.GraphStore
-	SessionsBeadStore() beads.SessionStore
-	OrdersBeadStore() beads.OrdersStore
-	NudgesBeadStore() beads.NudgesStore
-	CityName() string
-}
-
-// mirrorAccessorStores mints handles that wrap exactly what st's accessors
-// return, for a fake that overrides some of them: the work store is
-// CityBeadStore, each class whose accessor answers another store is a binding
-// over that store (a zero handle's, nil, is a binding that failed to open),
-// and the rigs are BeadStore's. It applies no projection: the accessors
-// already did. A rig's graph placement follows the same rule as Stores': the
-// graph binding when graph is relocated, else the rig's own store.
-func mirrorAccessorStores(st accessorState, rigs []string) storeref.Stores {
-	work := st.CityBeadStore()
-	relocated := map[coordclass.Class]beads.Store{}
-	for class, store := range map[coordclass.Class]beads.Store{
-		coordclass.ClassGraph:    st.GraphBeadStore().Store,
-		coordclass.ClassSessions: st.SessionsBeadStore().Store,
-		coordclass.ClassOrders:   st.OrdersBeadStore().Store,
-		coordclass.ClassNudges:   st.NudgesBeadStore().Store,
-	} {
-		if store != work {
-			relocated[class] = store
+		Refused:  refused,
+	}
+	var rigPrefixes map[storeref.StoreRef]string
+	topo.Work.Prefix, rigPrefixes = configuredPrefixes(cfg)
+	for i := range topo.Rigs {
+		topo.Rigs[i].Prefix = rigPrefixes[topo.Rigs[i].Ref]
+		if name, ok := storeref.ScopeRigContext(string(topo.Rigs[i].Ref)); ok {
+			topo.Rigs[i].RelicFree, topo.Rigs[i].Suspended = bits.relicFree[name], bits.suspended[name]
 		}
 	}
-	rigStores := make(map[string]beads.Store, len(rigs))
-	for _, rig := range rigs {
-		rigStores[rig] = st.BeadStore(rig)
-	}
-	return mintFakeStores(work, rigStores, relocated, nil)
+	return storeref.NewStores(topo, opts)
 }
 
 // gateProjection is the split-strict gate's views as the router's projection:
@@ -400,6 +377,10 @@ type fakeMutatorState struct {
 	// assert mutations route through it.
 	serializeMu    sync.Mutex
 	serializeCalls atomic.Int32
+
+	// createRigErr, when set, is what CreateRig returns instead of adding the
+	// rig: the refusal the real provisioning would answer.
+	createRigErr error
 
 	// provisionGate, when non-nil, blocks ProvisionRigFromGit until it is closed
 	// or receives — lets a test hold a provision in flight to exercise the
@@ -539,6 +520,9 @@ func (f *fakeMutatorState) DeleteAgent(name string) error {
 }
 
 func (f *fakeMutatorState) CreateRig(r config.Rig) error {
+	if f.createRigErr != nil {
+		return f.createRigErr
+	}
 	f.cfg.Rigs = append(f.cfg.Rigs, r)
 	return nil
 }

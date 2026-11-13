@@ -406,7 +406,7 @@ func (s *Server) findLiveActiveBeadForAssignees(rig string, assignees ...string)
 // through findLiveActiveBeadInStores. Both read only the stores
 // activeBeadSearchScope picks.
 func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, assignees ...string) string {
-	stores, rigNames := activeBeadSearchScope(s.state.BeadStores(), s.loadCacheColdRigs(), rig)
+	stores, rigNames := activeBeadSearchScope(workStoresByName(s.state.Stores(), s.state.CityName()), s.loadCacheColdRigs(), rig)
 	seen := make(map[string]bool, len(assignees))
 	var unique []string
 	for _, assignee := range assignees {
@@ -453,9 +453,9 @@ func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, 
 // the names to read them through, in order. A rig suspended by effective
 // state (cold, cacheColdRigNames) has no cache, and a read of its store
 // restarts its retired proxy and Dolt, so its name is dropped before
-// sortedRigNames dedupes the stores; a store it shares with a rig that is not
-// suspended, as in legacy shared-file mode, stays reachable through that
-// alias. A lookup scoped to a rig reads that rig's store alone: a suspended
+// sortedWorkStoreNames dedupes the stores; a store it shares with a rig that
+// is not suspended, as in legacy shared-file mode, stays reachable through
+// that alias. A lookup scoped to a rig reads that rig's store alone: a suspended
 // rig's through such an alias, or nothing when the store has none, never the
 // other rigs' stores. An unscoped lookup, or one scoped to a rig that is not
 // suspended and has no store, reads every remaining store once.
@@ -463,17 +463,17 @@ func (s *Server) findActiveBeadForAssigneesWithFreshness(rig string, live bool, 
 // residency:allow — filters the caller's own rig map by effective suspension
 // and names the rigs to read it through; it opens no store and consults no
 // binding, namespace or leg order.
-func activeBeadSearchScope(all map[string]beads.Store, cold map[string]bool, rig string) (map[string]beads.Store, []string) {
-	stores := make(map[string]beads.Store, len(all))
+func activeBeadSearchScope(all map[string]beads.WorkStore, cold map[string]bool, rig string) (map[string]beads.WorkStore, []string) {
+	stores := make(map[string]beads.WorkStore, len(all))
 	for name, store := range all {
 		if !cold[name] {
 			stores[name] = store
 		}
 	}
 	if rig != "" && cold[rig] {
-		if shared := all[rig]; shared != nil {
-			for _, name := range sortedRigNames(stores) {
-				if stores[name] == shared {
+		if shared, ok := all[rig]; ok {
+			for _, name := range sortedWorkStoreNames(stores) {
+				if beads.SameStore(stores[name], shared) {
 					return stores, []string{name}
 				}
 			}
@@ -483,7 +483,7 @@ func activeBeadSearchScope(all map[string]beads.Store, cold map[string]bool, rig
 	if _, ok := stores[rig]; ok && rig != "" {
 		return stores, []string{rig}
 	}
-	return stores, sortedRigNames(stores)
+	return stores, sortedWorkStoreNames(stores)
 }
 
 // findLiveActiveBeadInStores makes one live List call per store for all
@@ -493,7 +493,7 @@ func activeBeadSearchScope(all map[string]beads.Store, cold map[string]bool, rig
 // identity, and SQLiteStore reads the store's whole in_progress set and
 // filters it client-side. Precedence matches the cached path. Reading stops
 // once the first identity has a match, since no later store can outrank it.
-func findLiveActiveBeadInStores(stores map[string]beads.Store, rigNames, identities []string) string {
+func findLiveActiveBeadInStores(stores map[string]beads.WorkStore, rigNames, identities []string) string {
 	if len(identities) == 0 {
 		return ""
 	}
@@ -520,7 +520,7 @@ func findLiveActiveBeadInStores(stores map[string]beads.Store, rigNames, identit
 // identities, newest first. A failed read is logged and skipped, but a partial
 // result keeps the rows that did decode: one unreadable bead must not hide the
 // session's own work.
-func liveActiveWork(store beads.Store, rig string, identities []string) []beads.Bead {
+func liveActiveWork(store beads.WorkStore, rig string, identities []string) []beads.Bead {
 	matches, err := store.List(beads.ListQuery{
 		Assignees: identities,
 		Status:    "in_progress",
@@ -683,7 +683,7 @@ func computeAgentState(suspended, quarantined, running bool, activeBead string, 
 // enrichSessionMeta populates model and context usage fields on the agent
 // response by reading the tail of the agent's session JSONL file.
 func (s *Server) enrichSessionMeta(resp *agentResponse, agentCfg config.Agent, qualifiedName string) {
-	factory, err := s.workerFactory(s.state.SessionsBeadStore().Store)
+	factory, err := s.workerFactory(s.state.Stores().Sessions())
 	if err != nil {
 		return
 	}
