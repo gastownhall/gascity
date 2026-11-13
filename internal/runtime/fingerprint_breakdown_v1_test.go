@@ -448,9 +448,9 @@ func lineContaining(out, substr string) string {
 
 // TestCoreFingerprintBreakdownReportsOperatorEnvAndUpstream pins that every
 // input the core hash folds in has a breakdown field: a drift in
-// Config.OperatorEnv or Config.Upstream must surface under its own name, not
-// under another field or nowhere (ga-f1rvkg). Mutating only that input must
-// move exactly that field.
+// Config.OperatorEnv or Config.Upstream, set, changed or cleared, must surface
+// under its own name, not under another field or nowhere (ga-f1rvkg). Changing
+// only that input must move exactly that field.
 func TestCoreFingerprintBreakdownReportsOperatorEnvAndUpstream(t *testing.T) {
 	base := Config{
 		Command:     "claude",
@@ -465,45 +465,67 @@ func TestCoreFingerprintBreakdownReportsOperatorEnvAndUpstream(t *testing.T) {
 	}
 
 	cases := []struct {
+		name   string
 		field  string
 		mutate func(c *Config)
 	}{
-		{"OperatorEnv", func(c *Config) { c.OperatorEnv = map[string]string{"OPERATOR_KEY": "two"} }},
-		{"Upstream", func(c *Config) { c.Upstream = "bedrock" }},
+		{"OperatorEnv changed", "OperatorEnv", func(c *Config) { c.OperatorEnv = map[string]string{"OPERATOR_KEY": "two"} }},
+		{"OperatorEnv cleared", "OperatorEnv", func(c *Config) { c.OperatorEnv = nil }},
+		{"Upstream changed", "Upstream", func(c *Config) { c.Upstream = "bedrock" }},
+		{"Upstream cleared", "Upstream", func(c *Config) { c.Upstream = "" }},
 	}
 	for _, tc := range cases {
-		t.Run(tc.field, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			mutated := base
 			tc.mutate(&mutated)
 			got := diffBreakdownFields(baseFields, CoreFingerprintBreakdown(mutated).Fields)
 			if want := []string{tc.field}; !reflect.DeepEqual(got, want) {
-				t.Errorf("mutating only %s moved breakdown fields %v, want %v", tc.field, got, want)
+				t.Errorf("changing only %s moved breakdown fields %v, want %v", tc.field, got, want)
+			}
+			// The reverse direction: setting it on a config that lacked it.
+			unset := mutated
+			got = diffBreakdownFields(CoreFingerprintBreakdown(unset).Fields, baseFields)
+			if want := []string{tc.field}; !reflect.DeepEqual(got, want) {
+				t.Errorf("changing only %s (reversed) moved breakdown fields %v, want %v", tc.field, got, want)
 			}
 		})
 	}
 }
 
+// TestCoreFingerprintBreakdownOmitsUnsetOperatorEnvAndUpstream keeps the
+// breakdown of a config without them identical to what older binaries stored,
+// as the core hash does: nil and empty OperatorEnv are the same identity, and
+// no stored breakdown reads as drifted on a field it never had.
+func TestCoreFingerprintBreakdownOmitsUnsetOperatorEnvAndUpstream(t *testing.T) {
+	for name, cfg := range map[string]Config{
+		"zero":               {Command: "agent"},
+		"empty operator env": {Command: "agent", OperatorEnv: map[string]string{}},
+	} {
+		fields := CoreFingerprintBreakdown(cfg).Fields
+		for _, field := range []string{"OperatorEnv", "Upstream"} {
+			if v, ok := fields[field]; ok {
+				t.Errorf("%s: breakdown has %s=%q for a config that sets none; fields: %v", name, field, v, fields)
+			}
+		}
+	}
+}
+
 // TestCoreFingerprintBreakdownOperatorEnvUsesHashFraming keeps the breakdown
-// aligned with how the core hash frames OperatorEnv: nil and empty are the
-// same identity, and the same pairs in FingerprintExtra are a different one.
+// aligned with how the core hash frames OperatorEnv: the same pairs in
+// FingerprintExtra are a different identity.
 func TestCoreFingerprintBreakdownOperatorEnvUsesHashFraming(t *testing.T) {
 	pairs := map[string]string{"ALPHA": "one", "BETA": "two"}
-	nilEnv := CoreFingerprintBreakdown(Config{Command: "agent"}).Fields["OperatorEnv"]
-	emptyEnv := CoreFingerprintBreakdown(Config{Command: "agent", OperatorEnv: map[string]string{}}).Fields["OperatorEnv"]
-	if nilEnv == "" || nilEnv != emptyEnv {
-		t.Errorf("OperatorEnv breakdown for nil = %q, for empty = %q; want equal and non-empty", nilEnv, emptyEnv)
-	}
-
 	authored := CoreFingerprintBreakdown(Config{Command: "agent", OperatorEnv: pairs}).Fields
 	extra := CoreFingerprintBreakdown(Config{Command: "agent", FingerprintExtra: pairs}).Fields
-	if authored["OperatorEnv"] == extra["FPExtra"] {
-		t.Errorf("OperatorEnv breakdown collides with FPExtra for the same pairs: %q", authored["OperatorEnv"])
+	if authored["OperatorEnv"] == "" || authored["OperatorEnv"] == extra["FPExtra"] {
+		t.Errorf("OperatorEnv breakdown %q must be set and differ from FPExtra %q for the same pairs", authored["OperatorEnv"], extra["FPExtra"])
 	}
 }
 
 // TestLogDriftNamesOperatorEnvAndUpstream is the diagnosis the breakdown
 // exists for: when only OperatorEnv or Upstream changed since start, the drift
-// report names that field rather than "no per-field diff".
+// report names that field rather than "no per-field diff". An older stored
+// breakdown without the field is no drift on it.
 func TestLogDriftNamesOperatorEnvAndUpstream(t *testing.T) {
 	base := Config{Command: "claude", OperatorEnv: map[string]string{"OPERATOR_KEY": "one"}, Upstream: "anthropic"}
 	storedJSON, err := json.Marshal(CoreFingerprintBreakdown(base))
@@ -511,14 +533,17 @@ func TestLogDriftNamesOperatorEnvAndUpstream(t *testing.T) {
 		t.Fatalf("marshal stored breakdown: %v", err)
 	}
 	cases := []struct {
+		name   string
 		field  string
 		mutate func(c *Config)
 	}{
-		{"OperatorEnv", func(c *Config) { c.OperatorEnv = map[string]string{"OPERATOR_KEY": "two"} }},
-		{"Upstream", func(c *Config) { c.Upstream = "bedrock" }},
+		{"OperatorEnv changed", "OperatorEnv", func(c *Config) { c.OperatorEnv = map[string]string{"OPERATOR_KEY": "two"} }},
+		{"OperatorEnv cleared", "OperatorEnv", func(c *Config) { c.OperatorEnv = nil }},
+		{"Upstream changed", "Upstream", func(c *Config) { c.Upstream = "bedrock" }},
+		{"Upstream cleared", "Upstream", func(c *Config) { c.Upstream = "" }},
 	}
 	for _, tc := range cases {
-		t.Run(tc.field, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			current := base
 			tc.mutate(&current)
 			var buf bytes.Buffer
@@ -527,5 +552,18 @@ func TestLogDriftNamesOperatorEnvAndUpstream(t *testing.T) {
 				t.Errorf("drift report does not name only %s, want line %q:\n%s", tc.field, want, buf.String())
 			}
 		})
+	}
+
+	// A breakdown stored before these fields existed has neither; a config that
+	// sets none of them has no drift on them.
+	older := Config{Command: "claude"}
+	olderJSON, err := json.Marshal(CoreFingerprintBreakdown(older))
+	if err != nil {
+		t.Fatalf("marshal older breakdown: %v", err)
+	}
+	var buf bytes.Buffer
+	LogCoreFingerprintDrift(&buf, "agent", string(olderJSON), Config{Command: "claude --new"})
+	if want := "drifted fields: Command\n"; !strings.Contains(buf.String(), want) {
+		t.Errorf("drift report does not name only Command, want line %q:\n%s", want, buf.String())
 	}
 }

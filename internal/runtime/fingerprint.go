@@ -435,11 +435,18 @@ func hashCoreFieldsExtra(h hash.Hash, cfg Config, extra map[string]string) {
 	// FingerprintExtra map hashed above, even when both carry the same
 	// key/value pairs. Conditional, so an empty/nil OperatorEnv leaves every
 	// existing config's fingerprint byte-identical.
-	if len(cfg.OperatorEnv) > 0 {
-		h.Write([]byte("operator_env")) //nolint:errcheck // hash.Write never errors
-		h.Write([]byte{0})              //nolint:errcheck // hash.Write never errors
-		hashSortedMap(h, cfg.OperatorEnv)
+	hashOperatorEnv(h, cfg.OperatorEnv)
+}
+
+// hashOperatorEnv writes env to h, framed by "operator_env"; nothing when it is
+// empty.
+func hashOperatorEnv(h hash.Hash, env map[string]string) {
+	if len(env) == 0 {
+		return
 	}
+	h.Write([]byte("operator_env")) //nolint:errcheck // hash.Write never errors
+	h.Write([]byte{0})              //nolint:errcheck // hash.Write never errors
+	hashSortedMap(h, env)
 }
 
 // hashFingerprintExtra writes extra to h, framed by "fp"; nothing when it is
@@ -651,6 +658,21 @@ func CoreFingerprintBreakdown(cfg Config) BreakdownV1 {
 			}
 		}),
 	}
+	// OperatorEnv and Upstream are hashed into the core fingerprint, so a drift
+	// in either must name its own field. Like the hash, the breakdown carries
+	// them only when set: a config without them yields the same breakdown as
+	// before, so a stored one from an older binary is not reported as drifted
+	// on them. diffBreakdownFields names one that was cleared since.
+	if len(cfg.OperatorEnv) > 0 {
+		fields["OperatorEnv"] = fieldHash(func(h hash.Hash) {
+			hashOperatorEnv(h, cfg.OperatorEnv)
+		})
+	}
+	if cfg.Upstream != "" {
+		fields["Upstream"] = fieldHash(func(h hash.Hash) {
+			hashOptionalString(h, "upstream", cfg.Upstream)
+		})
+	}
 	var copyEntries []BreakdownCopyEntry
 	if len(cfg.CopyFiles) > 0 {
 		copyEntries = make([]BreakdownCopyEntry, 0, len(cfg.CopyFiles))
@@ -806,11 +828,17 @@ func parseStoredBreakdown(stored string) (fields map[string]string, copyEntries 
 }
 
 // diffBreakdownFields returns the sorted list of field names where the
-// stored and current per-field hashes differ.
+// stored and current per-field hashes differ, including a field present on
+// only one side (an optional input set or cleared since the stored breakdown).
 func diffBreakdownFields(stored, current map[string]string) []string {
 	var diffs []string
 	for field, ch := range current {
 		if stored[field] != ch {
+			diffs = append(diffs, field)
+		}
+	}
+	for field := range stored {
+		if _, ok := current[field]; !ok {
 			diffs = append(diffs, field)
 		}
 	}
