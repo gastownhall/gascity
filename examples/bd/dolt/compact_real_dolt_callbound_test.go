@@ -3,6 +3,7 @@
 package dolt_test
 
 import (
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -28,8 +29,8 @@ func (f fakeTestDeadline) Deadline() (time.Time, bool) { return f.at, f.ok }
 // by a fixed per-call budget: under suite load a merely slow dolt call outlasts
 // any fixed budget and is SIGKILLed, which fails its test with "signal: killed".
 func TestDoltCallContextIsBoundedByTheTestDeadline(t *testing.T) {
-	t.Run("a far deadline leaves the call everything but the margin", func(t *testing.T) {
-		deadline := time.Now().Add(30 * time.Minute)
+	t.Run("a deadline inside the cap leaves the call everything but the margin", func(t *testing.T) {
+		deadline := time.Now().Add(4 * time.Minute)
 		ctx, cancel := doltCallContext(fakeTestDeadline{at: deadline, ok: true})
 		defer cancel()
 
@@ -40,6 +41,20 @@ func TestDoltCallContextIsBoundedByTheTestDeadline(t *testing.T) {
 		if want := deadline.Add(-doltCallMargin); !got.Equal(want) {
 			t.Fatalf("call deadline = %v (%v from now), want %v (test deadline %v less doltCallMargin %v): a fixed per-call budget kills a slow dolt call under suite load",
 				got, time.Until(got).Round(time.Second), want, deadline, doltCallMargin)
+		}
+	})
+
+	t.Run("a far deadline is capped at about five minutes", func(t *testing.T) {
+		ctx, cancel := doltCallContext(fakeTestDeadline{at: time.Now().Add(30 * time.Minute), ok: true})
+		defer cancel()
+
+		got, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("call context has no deadline, want the five minute cap")
+		}
+		// 5m is the cap; the slack on either side absorbs scheduling noise.
+		if left := time.Until(got); left > 5*time.Minute+5*time.Second || left < 4*time.Minute {
+			t.Fatalf("call deadline is %v from now, want about 5m: a hung dolt holds the test package for its whole timeout less doltCallMargin when the bound is not capped", left.Round(time.Second))
 		}
 	})
 
@@ -85,6 +100,41 @@ func TestDoltCallContextIsBoundedByTheTestDeadline(t *testing.T) {
 			t.Fatalf("call deadline = %v, want none when the test has no deadline (go test -timeout 0)", got)
 		}
 	})
+}
+
+// A hung dolt is killed at doltCallCap even when the package deadline is far
+// away, so one hung call cannot hold a test package for up to its timeout less
+// doltCallMargin. The cap is shortened for the test; the far deadline is the
+// case where the cap, and not the test deadline, is what must end the call.
+func TestDoltCallContextKillsAHungDoltAtTheCap(t *testing.T) {
+	prev := doltCallCap
+	doltCallCap = 300 * time.Millisecond
+	t.Cleanup(func() { doltCallCap = prev })
+
+	// exec, so the kill lands on the sleep itself and no child keeps the pipe.
+	fakeDolt := filepath.Join(t.TempDir(), "dolt")
+	if err := os.WriteFile(fakeDolt, []byte("#!/bin/sh\nexec sleep 30\n"), 0o755); err != nil {
+		t.Fatalf("write fake dolt: %v", err)
+	}
+
+	ctx, cancel := doltCallContext(fakeTestDeadline{at: time.Now().Add(30 * time.Minute), ok: true})
+	defer cancel()
+	cmd := exec.CommandContext(ctx, fakeDolt, "commit")
+	cmd.WaitDelay = doltCallWaitDelay
+
+	start := time.Now()
+	_, err := cmd.CombinedOutput()
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatalf("hung fake dolt exited cleanly after %v, want it killed at the %v cap", elapsed, doltCallCap)
+	}
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		t.Fatalf("call context err = %v, want DeadlineExceeded: the call was not ended by its bound (cmd err %v)", ctx.Err(), err)
+	}
+	if elapsed > testutil.ExecRaceTimeout {
+		t.Fatalf("hung fake dolt ran %v, want it killed near the %v cap: a far package deadline leaves a hung call unbounded", elapsed, doltCallCap)
+	}
 }
 
 // A compact run whose script exits while a child it started still holds the
