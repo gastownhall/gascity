@@ -179,31 +179,50 @@ func TestStorageSplitRefusesAGcBelowItsVersionFloor(t *testing.T) {
 // whose journal says the city converged, over a binding that no longer
 // holds it, refuses before the rig import and leaves the rig as it was.
 func TestStorageSplitNeverImportsRigsOntoAnUnconvergedBinding(t *testing.T) {
-	c := newGuidedSplitCity(t)
-	c.killSplitAt("split " + splitPhaseCityConverged)
-	target := c.target()
-	rigRows := len(rigTestList(t, c.rig()))
-	if err := os.Rename(target.Root, target.Root+".lost"); err != nil {
-		t.Fatal(err)
-	}
-	code, _, stderr := c.split(splitOptions{})
-	if code == 0 || !strings.Contains(stderr, "a rig is never imported onto a binding that does not hold the city's state") {
-		t.Fatalf("a resume over a lost binding = %d: %s", code, stderr)
-	}
-	if strings.Contains(stderr, "--abandon") {
-		t.Fatalf("the refusal offers --abandon past the city's copy: %s", stderr)
-	}
-	if got := len(rigTestList(t, c.rig())); got != rigRows {
-		t.Fatalf("the rig holds %d row(s), want %d", got, rigRows)
-	}
-	if fileExists(target.Database) {
-		t.Fatal("the refused resume created a binding")
-	}
-	if c.journal().Phase != splitPhaseCityConverged {
-		t.Fatalf("the journal = %s, want city_converged", c.journal().Phase)
-	}
-	if code, _, stderr := c.split(splitOptions{Abandon: true}); code == 0 || !strings.Contains(stderr, "converged the city's copy") {
-		t.Fatalf("--abandon past the city's copy = %d: %s", code, stderr)
+	for _, tc := range []struct {
+		name string
+		lose func(t *testing.T, target infraBindingTarget)
+	}{
+		{"binding root gone", func(t *testing.T, target infraBindingTarget) {
+			if err := os.Rename(target.Root, target.Root+".lost"); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"stale marker, database gone", func(t *testing.T, target infraBindingTarget) {
+			for _, suffix := range []string{"", "-wal", "-shm"} {
+				_ = os.Remove(target.Database + suffix)
+			}
+			if state, err := readInfraConvergenceState(target); err != nil || state != infraConvergenceStale {
+				t.Fatalf("precondition: the binding is %v, %v; want stale", state, err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newGuidedSplitCity(t)
+			c.killSplitAt("split " + splitPhaseCityConverged)
+			target := c.target()
+			rigRows := len(rigTestList(t, c.rig()))
+			tc.lose(t, target)
+			code, _, stderr := c.split(splitOptions{})
+			if code == 0 || !strings.Contains(stderr, "a rig is never imported onto a binding that does not hold the city's state") {
+				t.Fatalf("a resume over a lost binding = %d: %s", code, stderr)
+			}
+			if strings.Contains(stderr, "--abandon") {
+				t.Fatalf("the refusal offers --abandon past the city's copy: %s", stderr)
+			}
+			if got := len(rigTestList(t, c.rig())); got != rigRows {
+				t.Fatalf("the rig holds %d row(s), want %d", got, rigRows)
+			}
+			if fileExists(target.Database) {
+				t.Fatal("the refused resume created a binding")
+			}
+			if c.journal().Phase != splitPhaseCityConverged {
+				t.Fatalf("the journal = %s, want city_converged", c.journal().Phase)
+			}
+			if code, _, stderr := c.split(splitOptions{Abandon: true}); code == 0 || !strings.Contains(stderr, "converged the city's copy") {
+				t.Fatalf("--abandon past the city's copy = %d: %s", code, stderr)
+			}
+		})
 	}
 }
 
@@ -284,68 +303,84 @@ func TestStorageSplitDemandRepairsRunAfterTheSnapshot(t *testing.T) {
 // those, even when the operator authored them since; it closes the journal
 // and unpins the snapshot. The split's refusal and doctor both name it.
 func TestStorageSplitAbandonBeforeItWroteCityTOML(t *testing.T) {
-	c := newGuidedSplitCity(t)
-	if err := writeMinGCVersion(c.request.CityPath, "1.5.1"); err != nil {
-		t.Fatal(err)
-	}
-	c.killSplitAt("split " + splitPhaseReadied)
-	j := c.journal()
-	// The operator authors the split by hand and starts its migration.
-	c.writeTOML(c.readTOML() + "\n" + splitStorageTOML(splitHypotheticalConfig(c.request.Cfg)))
-	prev := infraEngineCrashPoint
-	infraEngineCrashPoint = func(p string) error {
-		if strings.HasPrefix(p, "copying rows") {
-			return errors.New("killed")
-		}
-		return nil
-	}
-	var out, errOut bytes.Buffer
-	_ = doStorageMigrate(context.Background(), c.reload(), &out, &errOut)
-	infraEngineCrashPoint = prev
-	binding, err := openInfraDestination(c.target())
-	if err != nil {
-		t.Fatal(err)
-	}
-	rows := len(rigTestList(t, binding))
-	_ = closeBeadStoreHandle(binding)
-	if rows == 0 {
-		t.Fatal("precondition: the hand migration copied no row")
-	}
-	authored := c.readTOML()
+	for _, tc := range []struct {
+		name    string
+		stopped bool // the operator's migration stopped mid-copy; else it reached its marker
+	}{
+		{"the operator's migration stopped mid-copy", true},
+		{"the operator's migration completed", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newGuidedSplitCity(t)
+			if err := writeMinGCVersion(c.request.CityPath, "1.5.1"); err != nil {
+				t.Fatal(err)
+			}
+			c.killSplitAt("split " + splitPhaseReadied)
+			j := c.journal()
+			// The operator authors the split by hand and starts its migration.
+			c.writeTOML(c.readTOML() + "\n" + splitStorageTOML(splitHypotheticalConfig(c.request.Cfg)))
+			prev := infraEngineCrashPoint
+			infraEngineCrashPoint = func(p string) error {
+				if tc.stopped && strings.HasPrefix(p, "copying rows") {
+					return errors.New("killed")
+				}
+				return nil
+			}
+			var out, errOut bytes.Buffer
+			migrated := doStorageMigrate(context.Background(), c.reload(), &out, &errOut)
+			infraEngineCrashPoint = prev
+			if state, _ := readInfraConvergenceState(c.target()); (state == infraConvergenceMarked) == tc.stopped || (migrated == 0) == tc.stopped {
+				t.Fatalf("precondition: the hand migration = %d, binding %v; want stopped %t:\n%s", migrated, state, tc.stopped, errOut.String())
+			}
+			binding, err := openInfraDestination(c.target())
+			if err != nil {
+				t.Fatal(err)
+			}
+			rows := len(rigTestList(t, binding))
+			_ = closeBeadStoreHandle(binding)
+			if rows == 0 {
+				t.Fatal("precondition: the hand migration copied no row")
+			}
+			authored := c.readTOML()
 
-	code, _, stderr := c.split(splitOptions{})
-	if code == 0 || !strings.Contains(stderr, "stopped before it wrote city.toml") || !strings.Contains(stderr, storageSplitAbandonInstruction()) {
-		t.Fatalf("split over a hand-authored [storage] = %d: %s", code, stderr)
-	}
-	res := newStorageSplitCheck(c.reload().Cfg, c.request.CityPath).Run(nil)
-	if !strings.Contains(strings.Join(append([]string{res.Message}, res.Details...), "\n"), storageSplitAbandonInstruction()) {
-		t.Fatalf("doctor does not name --abandon for the stuck split: %s %v", res.Message, res.Details)
-	}
+			code, _, stderr := c.split(splitOptions{})
+			if code == 0 || !strings.Contains(stderr, "stopped before it wrote city.toml") || !strings.Contains(stderr, storageSplitAbandonInstruction()) {
+				t.Fatalf("split over a hand-authored [storage] = %d: %s", code, stderr)
+			}
+			res := newStorageSplitCheck(c.reload().Cfg, c.request.CityPath).Run(nil)
+			if !strings.Contains(strings.Join(append([]string{res.Message}, res.Details...), "\n"), storageSplitAbandonInstruction()) {
+				t.Fatalf("doctor does not name --abandon for the stuck split: %s %v", res.Message, res.Details)
+			}
 
-	code, stdout, stderr := c.split(splitOptions{Abandon: true})
-	if code != 0 {
-		t.Fatalf("--abandon = %d:\n%s\n%s", code, stdout, stderr)
-	}
-	if c.readTOML() != authored {
-		t.Fatal("--abandon changed a city.toml the split never wrote")
-	}
-	if data, _ := os.ReadFile(minGCVersionPath(c.request.CityPath)); string(data) != "1.5.1\n" {
-		t.Fatalf("--abandon changed the floor to %q", data)
-	}
-	binding, err = openInfraDestination(c.target())
-	if err != nil {
-		t.Fatal(err)
-	}
-	after := len(rigTestList(t, binding))
-	_ = closeBeadStoreHandle(binding)
-	if after != rows {
-		t.Fatalf("--abandon deleted binding rows the split never wrote: %d, want %d", after, rows)
-	}
-	if got := c.journal(); got.Phase != splitPhaseAbandoned {
-		t.Fatalf("the journal = %s, want abandoned", got.Phase)
-	}
-	if fileExists(filepath.Join(j.SnapshotTo, j.Snapshot, storageSnapshotPinName)) {
-		t.Fatal("the snapshot is still pinned")
+			code, stdout, stderr := c.split(splitOptions{Abandon: true})
+			if code != 0 {
+				t.Fatalf("--abandon = %d:\n%s\n%s", code, stdout, stderr)
+			}
+			if c.readTOML() != authored {
+				t.Fatal("--abandon changed a city.toml the split never wrote")
+			}
+			if data, _ := os.ReadFile(minGCVersionPath(c.request.CityPath)); string(data) != "1.5.1\n" {
+				t.Fatalf("--abandon changed the floor to %q", data)
+			}
+			if state, _ := readInfraConvergenceState(c.target()); !tc.stopped && state != infraConvergenceMarked {
+				t.Fatalf("--abandon touched the operator's converged binding: %v", state)
+			}
+			binding, err = openInfraDestination(c.target())
+			if err != nil {
+				t.Fatal(err)
+			}
+			after := len(rigTestList(t, binding))
+			_ = closeBeadStoreHandle(binding)
+			if after != rows {
+				t.Fatalf("--abandon deleted binding rows the split never wrote: %d, want %d", after, rows)
+			}
+			if got := c.journal(); got.Phase != splitPhaseAbandoned {
+				t.Fatalf("the journal = %s, want abandoned", got.Phase)
+			}
+			if fileExists(filepath.Join(j.SnapshotTo, j.Snapshot, storageSnapshotPinName)) {
+				t.Fatal("the snapshot is still pinned")
+			}
+		})
 	}
 }
 
@@ -553,6 +588,9 @@ func TestStorageSplitReadsCityTOMLUnderTheLock(t *testing.T) {
 		code, _, stderr := c.split(splitOptions{})
 		if code == 0 || !strings.Contains(stderr, "neither the file the split recorded") {
 			t.Fatalf("a resume over an unrecognized city.toml = %d: %s", code, stderr)
+		}
+		if strings.Contains(stderr, "keeps the change") {
+			t.Fatalf("the resume promised to keep a change its edit then refused: %s", stderr)
 		}
 		if c.readTOML() != edited || c.journal().Phase != splitPhaseConfiguring {
 			t.Fatal("the refused resume wrote city.toml or moved the journal")

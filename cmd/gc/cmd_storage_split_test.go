@@ -791,8 +791,14 @@ func TestStorageSplitSharedRigStore(t *testing.T) {
 	stubOtherCities(t, other)
 	stubStoreIdentity(t, storeDoltIdentity{Database: "bd_shared", Endpoint: "loopback:3307"})
 	c.request.Force = storageForce{SharedStores: []string{sharedToken}}
-	if code, stdout, stderr := c.split(splitOptions{}); code != 0 {
+	code, stdout, stderr := c.split(splitOptions{})
+	if code != 0 {
 		t.Fatalf("split with one co-tenant of the work store and the rig = %d:\n%s\n%s", code, stdout, stderr)
+	}
+	// P1 holds the co-tenant's lock for the work store when P0 rehearses:
+	// that holder is this run, not a live co-tenant.
+	if strings.Contains(stdout, "which is live") {
+		t.Fatalf("the rehearsal called the stopped co-tenant live:\n%s", stdout)
 	}
 	c.assertSplit()
 }

@@ -218,7 +218,9 @@ func judgeSplit(in splitJudgement) (decision splitDecision, note string, err err
 	case j.Phase == splitPhaseConfiguring && !in.authored && in.sha == j.CityTOMLBeforeSHA256:
 		return splitResume, "", nil
 	case in.authored && in.splitting:
-		if in.sha != j.CityTOMLAfterSHA256 {
+		// At configuring, a file that is not the one the split writes is
+		// refused by the edit itself (configure), so it says nothing here.
+		if in.sha != j.CityTOMLAfterSHA256 && j.Phase != splitPhaseConfiguring {
 			note = fmt.Sprintf("city.toml changed since the split %s wrote it; a later `%s` removes [storage] from it in place and keeps the change", j.Run, storageReverseInstruction(reverseToWork, nil))
 		}
 		return splitResume, note, nil
@@ -795,22 +797,19 @@ func raiseMinGCVersion(cityPath, floor string) error {
 // are now, before P4 writes [storage]. Nothing later in the split reads
 // sessions through it; a step added after P4 that does must not trust it.
 var splitDemandRepairs = func(cfg *config.City, cityPath string, stderr io.Writer) {
-	open := perRunStoreFactory(openStoreForCity(cityPath))
+	// Every store the sweep opens is recorded as the factory opens it, and
+	// exactly those are closed after: the sweep's own scope rules decide
+	// what it opens, and nothing here repeats them.
+	var opened []string
+	open := perRunStoreFactory(openStoreForCity(cityPath), func(dir string) { opened = append(opened, dir) })
 	swept := newV2DemandMigrationsCheck(cfg, cityPath, open).sweep(true, stderr)
 	for _, problem := range swept.problems {
 		fmt.Fprintf(stderr, "%s: demand repairs: %s\n", storageSplitLogName, problem) //nolint:errcheck // best-effort stderr
 	}
-	// The factory memoizes each scope, so asking it again for one the sweep
-	// opened (the city, and each rig it did not skip as suspended) hands back
-	// that handle, which is closed here; it opens nothing new.
-	scopes := []string{cityPath}
-	suspended := buildSuspendedRigPathsForCity(cfg, cityPath)
-	for _, rig := range cfg.Rigs {
-		if strings.TrimSpace(rig.Path) != "" && !suspended[filepath.Clean(rig.Path)] {
-			scopes = append(scopes, rig.Path)
-		}
-	}
-	for _, scope := range scopes {
+	// The factory memoizes each scope and reports it once, so asking it
+	// again for one the sweep opened hands back that handle, which is
+	// closed here.
+	for _, scope := range opened {
 		if store, err := open(scope); err == nil {
 			_ = closeBeadStoreHandle(store)
 		}
@@ -918,11 +917,22 @@ func doStorageSplitAbandon(ctx context.Context, request storageOperatorRequest, 
 }
 
 // splitAbandonRefusal says why the open split j cannot be abandoned, or nil:
-// once the city's copy has converged (the journal past it, or a marker,
+// a split that stopped before P4a can always be (it wrote nothing to back
+// out); past that, once the city's copy has converged (the journal past it, or a marker,
 // even a stale one, beside the binding), the binding is the city's
 // infrastructure state, and backing the split out by deleting it would lose
 // it. The split's failure hint and --abandon both ask it.
 func splitAbandonRefusal(j storageSplitJournal) error {
+	// A split that stopped before its city.toml record wrote no binding row:
+	// a marker there now is the operator's own migration, not this split's
+	// copy, and the abandon touches none of it (it closes the journal).
+	from := j.Phase
+	if from == splitPhaseAbandoning {
+		from = j.AbandonedFrom
+	}
+	if splitPhaseRank[from] < splitPhaseRank[splitPhaseConfiguring] {
+		return nil
+	}
 	state, err := readInfraConvergenceState(j.target())
 	if err != nil {
 		return err

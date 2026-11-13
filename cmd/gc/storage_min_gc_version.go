@@ -21,6 +21,7 @@ package main
 
 import (
 	"context"
+	"debug/buildinfo"
 	"errors"
 	"fmt"
 	"os"
@@ -93,10 +94,8 @@ func writeMinGCVersion(cityPath, floor string) error {
 // candidates are compared.
 func gcVersionCore(v string) (string, bool) {
 	v = strings.TrimSpace(v)
-	for _, re := range goPseudoVersionSuffixRes {
-		if re.MatchString(strings.TrimPrefix(v, "v")) {
-			return "", false
-		}
+	if _, pseudo := goPseudoVersionBase(v); pseudo {
+		return "", false
 	}
 	m := gcVersionCorePattern.FindStringSubmatch(v)
 	if m == nil {
@@ -118,10 +117,8 @@ func gcVersionBelowFloor(running, floor string) bool {
 // normalizeVersion strips to the release it is not, and its version
 // otherwise. Boot, doctor and the split all compare through it.
 func gcVersionForFloor() string {
-	for _, re := range goPseudoVersionSuffixRes {
-		if re.MatchString(strings.TrimPrefix(strings.TrimSpace(versionBuilt), "v")) {
-			return versionBuilt
-		}
+	if _, pseudo := goPseudoVersionBase(versionBuilt); pseudo {
+		return versionBuilt
 	}
 	return version
 }
@@ -180,5 +177,20 @@ func probeSessionPathGCVersion(cfg *config.City) (path, version string, err erro
 		return path, "", fmt.Errorf("running %s version: %w", path, err)
 	}
 	version, _, _ = strings.Cut(strings.TrimSpace(string(out)), "\n")
-	return path, strings.TrimSpace(version), nil
+	version = strings.TrimSpace(version)
+	// `gc version` prints the normalized version, which strips a Go
+	// pseudo-version to a release the binary is not (normalizeVersion). The
+	// module version the binary records says which it is: a pseudo-version
+	// that normalizes to the printed line is that build, and the floor
+	// does not compare it (gcVersionCore), as for this gc (gcVersionForFloor).
+	if info, err := sessionPathGCBuildInfo(path); err == nil && info != nil {
+		if _, pseudo := goPseudoVersionBase(info.Main.Version); pseudo && normalizeVersion(info.Main.Version) == normalizeVersion(version) {
+			version = info.Main.Version
+		}
+	}
+	return path, version, nil
 }
+
+// sessionPathGCBuildInfo reads the build information a gc binary records; a
+// test seam.
+var sessionPathGCBuildInfo = buildinfo.ReadFile

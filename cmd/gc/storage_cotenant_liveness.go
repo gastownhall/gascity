@@ -16,7 +16,7 @@ import (
 // holder that is this process's own co-tenant exclusion (coTenantLocks) is
 // not the co-tenant. A test seam.
 var coTenantLiveness = func(otherPath string) string {
-	if pid := controllerAlive(otherPath); pid != 0 {
+	if pid := coTenantControllerPing(otherPath); pid != 0 {
 		return fmt.Sprintf("its controller, PID %d, answers", pid)
 	}
 	lockPath := filepath.Join(otherPath, ".gc", "controller.lock")
@@ -35,3 +35,7 @@ var coTenantLiveness = func(otherPath string) string {
 	}
 	return fmt.Sprintf("PID %d holds its controller lock", pids[0])
 }
+
+// coTenantControllerPing asks a co-tenant's controller socket for its PID
+// (controllerAlive); a test seam.
+var coTenantControllerPing = controllerAlive
