@@ -8446,6 +8446,70 @@ func TestReconcileSessionBeads_StaleExplicitWakeOnRunningSessionStillIdleDrains(
 	}
 }
 
+// An explicit wake recorded on a rig's named session while the rig is
+// suspended waits for `gc rig resume`: `gc session wake` reports that the
+// session will not start and leaves the wake pending, and the controller does
+// not try to start it. The session's agent is a scope="rig" agent with no dir,
+// whose bare name ("worker") carries none of its rig's suspension; the
+// rig-stamped copy the session was built from does. Kills an explicit-wake
+// arm that read the bare agent: it woke the session every tick, the start
+// refused the suspended rig, and each refusal counted as a wake failure,
+// clearing the conversation key and quarantining the session at the fifth.
+func TestReconcileSessionBeads_ExplicitWakeOnSuspendedRigWaitsForDirlessRigAgent(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	const identity = "rig-a/worker"
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Rigs:          []config.Rig{{Name: "rig-a", Path: filepath.Join(env.city, "rig-a"), SuspendedOnStart: true}},
+		Agents:        []config.Agent{{Name: "worker", Scope: "rig", StartCommand: "true"}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand", Scope: "rig", Dir: "rig-a"}},
+	}
+	name := config.NamedSessionRuntimeName(env.cfg.EffectiveCityName(), env.cfg.Workspace, identity)
+	session := env.createSessionBead(name, identity)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: identity,
+		namedSessionModeMetadata:     "on_demand",
+		"wake_request":               string(sessionpkg.WakeCauseExplicit),
+		"wake_requested_at":          env.clk.Now().UTC().Format(time.RFC3339),
+		"session_key":                "conversation-1",
+		"started_config_hash":        "config-1",
+	})
+
+	// Seven ticks, 30s apart: the old arm reached its fifth wake failure,
+	// and the quarantine, on the sixth.
+	for tick := 1; tick <= 7; tick++ {
+		current, err := env.store.Get(session.ID)
+		if err != nil {
+			t.Fatalf("tick %d: Get(session): %v", tick, err)
+		}
+		env.reconcile([]beads.Bead{current})
+		env.clk.Advance(30 * time.Second)
+	}
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(session): %v", err)
+	}
+	if attempts := got.Metadata["wake_attempts"]; attempts != "" && attempts != "0" {
+		t.Errorf("wake_attempts = %q, want no wake failure: the controller tried to start a session on a suspended rig; stderr=%q", attempts, env.stderr.String())
+	}
+	if until := got.Metadata["quarantined_until"]; until != "" {
+		t.Errorf("quarantined_until = %q, want no quarantine", until)
+	}
+	if key := got.Metadata["session_key"]; key != "conversation-1" {
+		t.Errorf("session_key = %q, want the conversation kept for the resume", key)
+	}
+	if wake := got.Metadata["wake_request"]; wake != string(sessionpkg.WakeCauseExplicit) {
+		t.Errorf("wake_request = %q, want the wake still pending for `gc rig resume`", wake)
+	}
+	for _, call := range env.sp.SnapshotCalls() {
+		if call.Method == "Start" {
+			t.Errorf("runtime Start(%s) on a suspended rig", call.Name)
+		}
+	}
+}
+
 func TestFreshRestartSessionKey(t *testing.T) {
 	cases := []struct {
 		name        string

@@ -118,9 +118,11 @@ func buildAwakeInputFromReconcilerWithObservationErrors(
 
 // newAwakeInputFromSnapshot builds every part of AwakeInput that comes from
 // config, demand and the session rows: everything but the runtime maps, which
-// the caller fills. agentSuspended reports an agent's effective suspension.
-// It does no I/O, so the v2 allocator builds its awake input with it inside
-// its pure pass.
+// the caller fills. agentSuspended reports an agent's effective suspension,
+// its rig's included; it also judges a row's explicit wake, on the agent
+// findSessionAgentByTemplate resolves for the row (ExplicitWakeStartable,
+// sessionAgentCanStart). It does no I/O, so the v2 allocator builds its awake
+// input with it inside its pure pass.
 func newAwakeInputFromSnapshot(
 	cfg *config.City,
 	agentSuspended func(*config.Agent) bool,
@@ -250,6 +252,8 @@ func newAwakeInputFromSnapshot(
 			CurrentlyProcessingBeadID: strings.TrimSpace(info.CurrentlyProcessingBeadID),
 			PostCreateProtected:       poolSessionWithinPostCreateProtection(info, clk),
 		}
+		bead.ExplicitWakeStartable = bead.ExplicitWake &&
+			sessionAgentCanStart(findSessionAgentByTemplate(cfg, bead.Template), agentSuspended)
 		bead.HeldUntil = lifecycle.HeldUntil
 		bead.QuarantinedUntil = lifecycle.QuarantinedUntil
 		bead.CreatedAt = info.CreatedAt
@@ -277,6 +281,18 @@ func newAwakeInputFromSnapshot(
 	}
 
 	return input
+}
+
+// sessionAgentCanStart reports whether agent, the agent
+// findSessionAgentByTemplate resolves for a session, can start it: it is
+// configured, and suspended, the caller's effective suspension with the
+// rig's, does not hold it. A rig's session of a scope="rig" agent with no
+// dir resolves to the agent's rig-stamped copy, which carries the rig, so
+// the rig's suspension holds it as it holds a rig-bound agent. The awake
+// set's explicit wake (ExplicitWakeStartable) and v2's honored wake
+// (honorsExplicitWake) both judge a wake with it.
+func sessionAgentCanStart(agent *config.Agent, suspended func(*config.Agent) bool) bool {
+	return agent != nil && !suspended(agent)
 }
 
 func shouldProbeAttachmentForAwakeInput(info session.Info, alive bool, cfg *config.City, sp runtime.Provider, poolDesired map[string]int) bool {

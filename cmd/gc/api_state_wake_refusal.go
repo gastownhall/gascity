@@ -94,6 +94,9 @@ func wakeGateRefusal(info sessionpkg.Info, d wakeVerdictDeps, agent *config.Agen
 	case suspended && scope == "city":
 		return "the city is suspended; run `gc resume`"
 	case suspended:
+		if scope == "agent" {
+			name = resumableAgentName(d.cfg, agent)
+		}
 		return fmt.Sprintf("%s %q is suspended; run `gc %s resume %s`", scope, name, scope, name)
 	case sessionpkg.DemandOnlySingletonWakeRefused(d.cfg, agent, info):
 		return sessionpkg.DemandOnlySingletonExplanation(agent.QualifiedName())
@@ -105,6 +108,22 @@ func wakeGateRefusal(info sessionpkg.Info, d wakeVerdictDeps, agent *config.Agen
 		return fmt.Sprintf("its respawn circuit breaker is open; `gc session reset %s` clears it", info.ID)
 	}
 	return ""
+}
+
+// resumableAgentName is the agent `gc agent resume` resumes for agent, a
+// session's agent as sessionWakeResolveAgentInfo resolves it: its qualified
+// name, or, for the rig-stamped copy of a generic scope="rig" agent, which no
+// configured agent matches, the generic agent's, the template that serves
+// every rig. The API names a per-rig instance's template the same way
+// (rigTemplateInstance) and refuses to edit the instance.
+func resumableAgentName(cfg *config.City, agent *config.Agent) string {
+	name := agent.QualifiedName()
+	if findAgentByTemplate(cfg, name) != nil {
+		return name
+	}
+	template := *agent
+	template.Dir = ""
+	return template.QualifiedName()
 }
 
 // WakeStartRefusal is api.WakeStartRefuser over wakeWillNotStart.

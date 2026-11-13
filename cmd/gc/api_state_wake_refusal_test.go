@@ -65,9 +65,12 @@ func TestWakeStartRefusal(t *testing.T) {
 			agent: config.Agent{Name: "worker", Scope: "rig"}, rigs: []config.Rig{{Name: "frontend", SuspendedOnStart: true}},
 			info: sessionpkg.Info{Template: "frontend/worker"}, want: `rig "frontend" is suspended`,
 		},
+		// The suspended agent is the generic template, which serves every
+		// rig: the remedy names it, not the rig-stamped copy, which `gc agent
+		// resume` cannot edit.
 		"suspended dirless rig agent": {
 			agent: config.Agent{Name: "worker", Scope: "rig", Suspended: true}, rigs: []config.Rig{{Name: "frontend"}},
-			info: sessionpkg.Info{Template: "frontend/worker"}, want: "is suspended",
+			info: sessionpkg.Info{Template: "frontend/worker"}, want: "agent \"worker\" is suspended; run `gc agent resume worker`",
 		},
 		"dirless rig agent naming no configured rig": {
 			agent: config.Agent{Name: "worker", Scope: "rig"}, rigs: []config.Rig{{Name: "frontend"}},

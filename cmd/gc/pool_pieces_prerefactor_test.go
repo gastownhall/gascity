@@ -56,7 +56,7 @@ func computeAwakeSetPreRefactor(input AwakeInput) map[string]AwakeDecision {
 		if !bead.ExplicitWake || bead.State == "closed" || bead.DependencyOnly {
 			continue
 		}
-		if agent, ok := lookupAgent(bead.Template); ok && !agent.Suspended {
+		if bead.ExplicitWakeStartable {
 			desired[bead.SessionName] = "explicit-wake"
 		}
 	}
@@ -164,7 +164,7 @@ func computeAwakeSetPreRefactor(input AwakeInput) map[string]AwakeDecision {
 		if !bead.ManualSession || bead.State == "closed" || bead.Drained {
 			continue
 		}
-		if _, ok := lookupAgent(bead.Template); ok {
+		if _, ok := agentsByName[bead.Template]; ok {
 			desired[bead.SessionName] = "manual"
 		}
 	}
