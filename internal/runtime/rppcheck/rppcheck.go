@@ -431,8 +431,8 @@ func (c *checker) checkLifecycle(ctx context.Context) {
 	// probe would tear the session down and let a broken stop op pass
 	// the is-running-after-stop assertion on interrupt's side effect.
 	// Post-stop it exercises the documented missing-session contract:
-	// best-effort, exit 0.
-	c.checkDrivingOp(ctx, "interrupt", name)
+	// best-effort, exit 0, or under input-outcome exit 80 gone.
+	c.checkDrivingOpAfterStop(ctx, "interrupt", name)
 }
 
 // checkInputOutcome sends a nudge to a name no session holds, as a script
@@ -466,18 +466,18 @@ func (c *checker) checkInputOutcome(ctx context.Context) {
 	}
 }
 
-// typedOutcome reports a driving op's exit 80 under input-outcome that
-// carries one valid outcome line op may answer: an answer, not a broken op.
-// It returns the word for the check's detail.
-func (c *checker) typedOutcome(op string, res opResult) (runtime.InputOutcome, bool) {
+// goneAfterStop reports a driving op's answer to the session rppcheck has
+// just stopped as an exit 80 gone under input-outcome: the answer a script
+// declaring the token owes a name no running box holds. Any other typed
+// word, and every typed answer from a running session, is not accepted: a
+// driving op that refuses the session rppcheck started and verified running
+// is a broken op, whichever word it names.
+func (c *checker) goneAfterStop(res opResult) bool {
 	if !c.result.Protocol.Has(runtime.ProtocolCapabilityInputOutcome) || res.exitCode != runtime.ExitCodeInputOutcome {
-		return "", false
+		return false
 	}
 	word, _, err := sessionexec.ParseInputOutcome(res.failedStdout)
-	if err != nil || word.Success() || !sessionexec.InputOutcomeAllowed(op, word) {
-		return "", false
-	}
-	return word, true
+	return err == nil && word == runtime.InputOutcomeGone
 }
 
 // checkServerLifecycle runs the server-stop a script declaring
@@ -792,13 +792,8 @@ func (c *checker) checkProcessAlive(ctx context.Context, name string) {
 	}
 }
 
-// checkOptional probes an op whose absence is acceptable.
-func (c *checker) checkOptional(ctx context.Context, check string, stdin []byte, args ...string) {
-	res := c.runOp(ctx, stdin, args...)
-	if word, ok := c.typedOutcome(args[0], res); ok {
-		c.record(check, StatusPass, "typed outcome "+string(word))
-		return
-	}
+// recordOptional records res for an op whose absence is acceptable.
+func (c *checker) recordOptional(check string, res opResult) {
 	switch {
 	case res.unsupported:
 		c.record(check, StatusSkip, "not implemented (exit 2)")
@@ -819,14 +814,27 @@ func (c *checker) drivingCheckName(op string) string {
 // checkDrivingOp keeps the optional path unchanged; an explicit carrier.ops
 // declaration obliges the op, so an unsupported op is a failed promise.
 func (c *checker) checkDrivingOp(ctx context.Context, args ...string) {
+	c.recordDrivingOp(c.drivingCheckName(args[0]), c.runOp(ctx, nil, args...))
+}
+
+// checkDrivingOpAfterStop is checkDrivingOp for a session rppcheck has
+// stopped, where an exit 80 gone (goneAfterStop) is the answer a script
+// declaring input-outcome owes.
+func (c *checker) checkDrivingOpAfterStop(ctx context.Context, args ...string) {
 	check := c.drivingCheckName(args[0])
-	if !c.result.Protocol.Has(runtime.ProtocolCapabilityCarrierOps) {
-		c.checkOptional(ctx, check, nil, args...)
+	res := c.runOp(ctx, nil, args...)
+	if c.goneAfterStop(res) {
+		c.record(check, StatusPass, "typed outcome gone")
 		return
 	}
-	res := c.runOp(ctx, nil, args...)
-	if word, ok := c.typedOutcome(args[0], res); ok {
-		c.record(check, StatusPass, "typed outcome "+string(word))
+	c.recordDrivingOp(check, res)
+}
+
+// recordDrivingOp records res for a driving op: optional unless carrier.ops
+// is declared.
+func (c *checker) recordDrivingOp(check string, res opResult) {
+	if !c.result.Protocol.Has(runtime.ProtocolCapabilityCarrierOps) {
+		c.recordOptional(check, res)
 		return
 	}
 	switch {
@@ -862,10 +870,6 @@ func (c *checker) nudgeCheckName() string {
 func (c *checker) checkNudge(ctx context.Context, name string) {
 	check := c.nudgeCheckName()
 	res := c.runOp(ctx, []byte("gc runtime check probe"), "nudge", name)
-	if word, ok := c.typedOutcome("nudge", res); ok {
-		c.record(check, StatusPass, "typed outcome "+string(word))
-		return
-	}
 	switch {
 	case res.unsupported:
 		if c.result.Protocol.Has(runtime.ProtocolCapabilityCarrierOps) {

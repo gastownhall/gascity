@@ -966,3 +966,46 @@ func observeResult(t *testing.T) Result {
 	}
 	return res
 }
+
+// Kills a check that reads a typed refusal from a driving op to the session
+// rppcheck just started and verified running as a pass: a nudge that never
+// delivers fails "required: nudge" whatever word it answers, a carrier.ops
+// key op that always answers rejected fails its carrier.ops check, and the
+// post-stop interrupt accepts only gone.
+func TestRun_InputOutcomeRefusalOnARunningSessionFails(t *testing.T) {
+	for _, word := range []string{"not_sent", "rejected", "gone", "unavailable", "busy", "pending_interaction"} {
+		path := outcomeReference(t, map[string]string{"nudge": `cat >/dev/null; out ` + word})
+		res, err := Run(context.Background(), path, Options{RequireNudge: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c := findCheck(t, res, "required: nudge"); c.Status != StatusFail {
+			t.Errorf("nudge always %s: required: nudge = %s (%s), want FAIL", word, c.Status, c.Detail)
+		}
+		if !res.Failed() {
+			t.Errorf("nudge always %s: the run did not fail", word)
+		}
+	}
+
+	ops := reference.InputOutcomeBodies(reference.NonTmuxBodies())
+	ops["send-keys"] = `out rejected`
+	path := filepath.Join(t.TempDir(), "golden")
+	if err := os.WriteFile(path, []byte(reference.Script(t.TempDir(), ops)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Run(context.Background(), path, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := findCheck(t, res, "capability carrier.ops: send-keys"); c.Status != StatusFail {
+		t.Errorf("send-keys always rejected: %s (%s), want FAIL", c.Status, c.Detail)
+	}
+
+	res, err = Run(context.Background(), outcomeReference(t, map[string]string{"interrupt": `out not_sent`}), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := findCheck(t, res, "optional: interrupt"); c.Status != StatusFail {
+		t.Errorf("post-stop interrupt answering not_sent = %s (%s), want FAIL: only gone answers a stopped session", c.Status, c.Detail)
+	}
+}
