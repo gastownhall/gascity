@@ -56,7 +56,12 @@ registered check matches fails the run: an empty result set would read as
 a clean bill of health to a caller filtering by name. Which names exist
 depends on the workspace, because doctor registers checks conditionally —
 run without --check to see them, or name a nonexistent check to have them
-listed.`,
+listed.
+
+--check with --fix runs only the fixes you name, so a check whose fix
+depends on another check's fix running first (packv2-import-state needs
+builtin-pack-imports) is refused until you name that check too. A refused
+run applies no fix.`,
 		Example: `  gc doctor
   gc doctor --fix
   gc doctor --verbose
@@ -771,6 +776,12 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 		reportUnknownDoctorChecks(unmatched, registered, opts.JSON, stdout, stderr)
 		return 1
 	}
+	if opts.Fix {
+		if gaps := doctorFixPrerequisiteGaps(selected, registered); len(gaps) > 0 {
+			reportDoctorFixPrerequisiteGaps(gaps, opts.JSON, stdout, stderr)
+			return 1
+		}
+	}
 	for _, check := range selected {
 		d.Register(check)
 	}
@@ -817,6 +828,68 @@ const doctorUnknownCheckErrorCode = "unknown_check"
 type doctorUnknownCheckFailure struct {
 	jsonSchemaErrorPayload
 	RegisteredChecks []string `json:"registered_checks,omitempty"`
+}
+
+// doctorFixPrerequisites maps a check to the checks whose fix has to run before
+// its own. Doctor runs fixes in registration order, so a full `gc doctor --fix`
+// honors this by construction; `--check X --fix` runs only what it names and
+// would skip the handoff. packv2-import-state owns the wave-1 public-pack
+// sources that builtin-pack-imports deliberately leaves alone, and it reads
+// the imports builtin-pack-imports adds first
+// (TestDoDoctorFixConvergesWave1CityRootImportsThroughImportState).
+var doctorFixPrerequisites = map[string][]string{
+	"packv2-import-state": {"builtin-pack-imports"},
+}
+
+// doctorFixPrerequisiteGaps returns one "X's fix needs Y first" entry for each
+// selected check whose registered fix-time prerequisite is not also selected.
+// A prerequisite that is not registered in this workspace is no gap: there is
+// nothing to run first. Refusing beats pulling the prerequisite in silently,
+// because a --check run reports exactly the checks the caller named.
+func doctorFixPrerequisiteGaps(selected, registered []doctor.Check) []string {
+	named := make(map[string]struct{}, len(selected))
+	for _, c := range selected {
+		named[c.Name()] = struct{}{}
+	}
+	exists := make(map[string]struct{}, len(registered))
+	for _, name := range doctor.CheckNames(registered) {
+		exists[name] = struct{}{}
+	}
+	var gaps []string
+	for _, c := range selected {
+		for _, pre := range doctorFixPrerequisites[c.Name()] {
+			_, isNamed := named[pre]
+			if _, isRegistered := exists[pre]; isRegistered && !isNamed {
+				gaps = append(gaps, fmt.Sprintf("%s's fix needs %s to run first (add --check %s)", c.Name(), pre, pre))
+			}
+		}
+	}
+	return gaps
+}
+
+// doctorFixPrerequisiteErrorCode is the error code a --check --fix run reports
+// under --json when a selected check's fix-time prerequisite was not named.
+const doctorFixPrerequisiteErrorCode = "doctor_fix_prerequisite_missing"
+
+// reportDoctorFixPrerequisiteGaps refuses a --check --fix run before anything
+// runs, so no fix is applied out of order. The caller exits 1.
+func reportDoctorFixPrerequisiteGaps(gaps []string, jsonOut bool, stdout, stderr io.Writer) {
+	message := "--check --fix: " + strings.Join(gaps, "; ") + "; or drop --check to run every check in order"
+	if jsonOut {
+		if err := writeCLIJSONLine(stdout, jsonSchemaErrorPayload{
+			SchemaVersion: "1",
+			OK:            false,
+			Error: jsonSchemaErrorDetail{
+				Code:     doctorFixPrerequisiteErrorCode,
+				Message:  message,
+				ExitCode: 1,
+			},
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc doctor: %v\n", err) //nolint:errcheck // best-effort stderr
+		}
+		return
+	}
+	fmt.Fprintf(stderr, "gc doctor: %s\n", message) //nolint:errcheck // best-effort stderr
 }
 
 // doctorBlockingFailedErrorCode is the error code a --json run reports when

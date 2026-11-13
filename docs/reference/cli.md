@@ -1552,6 +1552,11 @@ depends on the workspace, because doctor registers checks conditionally —
 run without --check to see them, or name a nonexistent check to have them
 listed.
 
+--check with --fix runs only the fixes you name, so a check whose fix
+depends on another check's fix running first (packv2-import-state needs
+builtin-pack-imports) is refused until you name that check too. A refused
+run applies no fix.
+
 ```
 gc doctor [flags]
 ```
