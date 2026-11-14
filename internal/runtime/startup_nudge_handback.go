@@ -11,8 +11,8 @@ package runtime
 // implement it ([TakeStartupNudgeHandback] resolves the leaf).
 type StartupNudgeHandbackProvider interface {
 	// TakeStartupNudgeHandback returns the startup nudge the last Start of
-	// session name left undelivered behind a program-reported dialog, and
-	// forgets it: ok is true once per such Start.
+	// session name could not deliver, and forgets it: ok is true once per
+	// such Start.
 	TakeStartupNudgeHandback(name string) (nudge string, ok bool)
 }
 

@@ -148,7 +148,8 @@ const (
 
 	// The proc.launch half of the provision group (RUNTIME-RPP-029): the
 	// `launch` op starts the agent in the box provision prepared, replacing a
-	// running one unless fresh_only, and types nothing. Optional: SKIP unless
+	// running one unless fresh_only (a fresh_only launch into a freshly
+	// provisioned box starts it), and types nothing. Optional: SKIP unless
 	// proc.launch is declared; RPP-PROVISION-003 also SKIPs without
 	// observe.v1, whose identity shows the replacement.
 	ReqProvisionLaunchStartsAgent Code = "RPP-PROVISION-002"
@@ -299,7 +300,7 @@ var catalog = []Requirement{
 	{ReqProvisionBoxWithoutAgent, GroupProvision, "provision creates a reachable box WITHOUT launching the agent: after provision, is-running reports false yet the box is exec-able, so the controller launches the agent over exec; a pack declaring proc.launch without proc.exec is launch-able instead (RPP-PROVISION-002) (absent = SKIP; a welded start pack launches in one shot)", true},
 	{ReqProvisionLaunchStartsAgent, GroupProvision, "after provision, launch starts the agent (is-running true) and types nothing, not even the nudge its config carries (declared proc.launch only)", true},
 	{ReqProvisionLaunchReplaces, GroupProvision, "launch without fresh_only on a running agent replaces it: observe shows the new launch's identity (declared proc.launch with observe.v1 only)", true},
-	{ReqProvisionLaunchFreshOnly, GroupProvision, "launch with fresh_only on a running agent exits 73 (declared proc.launch only)", true},
+	{ReqProvisionLaunchFreshOnly, GroupProvision, "launch with fresh_only into the box provision just prepared starts the agent (is-running true), and on a running agent exits 73 (declared proc.launch only)", true},
 
 	{ReqObserveDeclaredOpsRespond, GroupObserve, "observe, inventory and kill-object answer (never exit 2) when observe.v1 is declared", true},
 	{ReqObserveAbsentNeverStarted, GroupObserve, "observe on a never-started name answers absent", true},

@@ -1181,13 +1181,18 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 // declaration it tries tmux over exec, then nudge on ErrExecUnsupported.
 // Empty content is a no-op.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
+	return p.nudgeWithContext(context.Background(), name, content)
+}
+
+// nudgeWithContext is Nudge bounded by ctx.
+func (p *Provider) nudgeWithContext(ctx context.Context, name string, content []runtime.ContentBlock) error {
 	if p.opsCarrierSelected() {
-		return p.carrier().Nudge(context.Background(), name, content)
+		return p.carrier().Nudge(ctx, name, content)
 	}
-	if err := p.carrier().Nudge(context.Background(), name, content); !errors.Is(err, runtime.ErrExecUnsupported) {
+	if err := p.carrier().Nudge(ctx, name, content); !errors.Is(err, runtime.ErrExecUnsupported) {
 		return err
 	}
-	return p.nudgeOp(context.Background(), name, content)
+	return p.nudgeOp(ctx, name, content)
 }
 
 // SetMeta stores a key-value pair: script set-meta <name> <key>

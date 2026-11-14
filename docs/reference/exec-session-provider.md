@@ -160,7 +160,7 @@ above: a canceled `exec` or `watch-startup` call is killed outright, with
 | `is-attached` | `script is-attached <name>` | — | `true` or `false` |
 | `exec` | `script exec <name>` | command | combined output (op exit == command exit) |
 | `provision` | `script provision <name>` | JSON config | — |
-| `launch` | `script launch <name>` | JSON config | — (exit 73 under `fresh_only` when an agent runs) |
+| `launch` | `script launch <name>` | JSON config | — (under `fresh_only`: starts the agent in a box with none, exit 73 when an agent runs) |
 | `observe` | `script observe <name>` | process names (1/line) | one JSON object (see [observe.v1](#observev1-reconciler-v2)) |
 | `inventory` | `script inventory` | — | one JSON object (see [observe.v1](#observev1-reconciler-v2)) |
 | `kill-object` | `script kill-object <name>` | JSON request | `killed`, `gone`, `renamed`, `live` or `changed` |
@@ -177,9 +177,14 @@ config change relaunches the agent in the warm box instead of reprovisioning
   config `provision` received on stdin. `launch` starts the config's `command`
   in the prepared box, with its `env` and `work_dir`, and exits 0 once the
   agent process runs. Without `fresh_only`, it replaces an agent already
-  running in the box; with `fresh_only`, a running agent is exit 73. It types
-  nothing: no `nudge` and no dialog keys. This is the way for a pack without
-  tmux in its box, with either carrier.
+  running in the box; with `fresh_only`, it starts the agent in a box with
+  none (the box `provision` just prepared, which is how every fresh start
+  launches) and a running agent is exit 73. It types nothing: no `nudge` and
+  no dialog keys. A pack without tmux in its box should also declare
+  `carrier.ops`: under the default carrier gc still answers startup dialogs
+  and types the first turn with tmux over `exec` (the agent must run in tmux
+  `main`), and falls back to the dedicated ops only when `exec` is
+  unimplemented (exit 2).
 - `proc.exec`, with the default tmux carrier: the orchestrator exec-s `tmux
   new-session` / `respawn-pane -k` over the `exec` op.
 
@@ -194,10 +199,12 @@ config's `nudge` itself, and leaves it out of the config it sends to
 `provision` and `launch`. After the launch it publishes the ready prompt and
 answers startup dialogs, then waits for the agent: with `idle-boundary`
 declared, for the selected carrier to read it idle, otherwise for
-`ready_delay_ms`, at most 60 seconds either way (a wait that runs out is not a
-failure). Under `fs.host` it then runs `session_setup` on the host. Last, it
-sends the first turn once, through the path every later nudge takes (see
-[Startup Hints](#startup-hints)). It reads the answer as the [typed input
+`ready_delay_ms`. The wait is at most 60 seconds and at most half of what is
+left of the start's deadline, so it runs out inside the start budget; a wait
+that runs out is not a failure, and the first turn's answer decides the
+outcome. Under `fs.host` it then runs `session_setup` on the host. Last, it
+sends the first turn once, within the start's deadline, through the path
+every later nudge takes (see [Startup Hints](#startup-hints)). It reads the answer as the [typed input
 outcomes](#typed-input-outcomes-input-outcome) say:
 
 | First-turn answer | Effect |
@@ -260,7 +267,7 @@ Capabilities:
 | `idle-boundary` | Declares that the selected carrier can answer `Peek`. Full idle sleep also needs `report-activity`, `report-attachment` and either `carrier.ops` or the default carrier's `proc.exec`. `RPP-CONN-002` checks tmux main and capture over `exec` for the default carrier; for `carrier.ops`, it checks `is-running`, `peek <name> 120` showing the started agent's command line or output, and that `set-meta` and `get-meta` round-trip a non-default ready prompt byte for byte, which `gc runtime check` requires too. Neither probe classifies the ready prompt. |
 | `input-fence` | With `proc.exec` and without `carrier.ops`, declares that the box's tmux can hold an input fence, so gc sends nudges, keys and interrupts only to the agent incarnation they are meant for (see [Fenced input over `exec`](#fenced-input-over-exec)). Without it, gc touches no fence in the box, and a fenced request to the runtime is refused (`ErrInputFenceUnsupported`); unfenced input is unaffected. |
 | `proc.provision` | The script implements the box-without-agent `provision` op (see Operations), so the orchestrator provisions the box, then launches the agent and delivers its first turn itself. Also requires a way to launch: `proc.launch`, or `proc.exec` with the default tmux carrier. Without one, `start` provisions and launches in one op. |
-| `proc.launch` | The script implements the `launch` op (see Operations), which starts the agent in the box `provision` prepared, replacing a running one unless `fresh_only`, and types nothing. With `proc.provision`, the orchestrator launches through it instead of sending tmux over `exec`, so a pack without tmux in its box can un-weld start, with either carrier. Without `proc.provision` it has no effect. |
+| `proc.launch` | The script implements the `launch` op (see Operations), which starts the agent in the box `provision` prepared, replacing a running one unless `fresh_only`, and types nothing. With `proc.provision`, the orchestrator launches through it instead of sending tmux launch argv over `exec`. A pack without tmux in its box declares `carrier.ops` too, since the default carrier still answers dialogs and types the first turn with tmux over `exec`. Without `proc.provision` it has no effect. |
 | `proc.stream` | Reserved (connection-plane family, parallel to `env.*`): declares the persistent bidirectional `stream` connection op (ACP over a stream, tmux pipe-pane). Sets `CanStream`. The `stream` op and its capability-gated conformance entry land with the connection rewrite. |
 | `tty.attach` | Reserved: declares an interactive PTY `attach` connection op. Sets `CanAttachTTY`. |
 | `observe.v1` | The script keeps the observe.v1 profile reconciler v2 reads: the `observe`, `inventory` and `kill-object` ops, `fresh_only` starts and strict exits (see [observe.v1](#observev1-reconciler-v2)). With `report-attachment`, the script is v2-ready. |

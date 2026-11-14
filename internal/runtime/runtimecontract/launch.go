@@ -126,18 +126,23 @@ func probeLaunchReplaces(ctx context.Context, r *runner, hs runtime.ProtocolInfo
 	return StatusPass, "a launch on a running agent replaced it"
 }
 
-// probeLaunchFreshOnly: a fresh_only launch on a running agent exits 73.
+// probeLaunchFreshOnly: a fresh_only launch into the box provision just
+// prepared starts the agent (gc launches every fresh start this way), and a
+// second fresh_only launch, on the now-running agent, exits 73.
 func probeLaunchFreshOnly(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
 	if status, detail, ok := launchDeclared(hs); !ok {
 		return status, detail
 	}
 	name := r.nextName()
 	defer r.stop(ctx, name)
-	if status, detail := provisionAndLaunch(ctx, r, name, launchConfig{}); status != StatusPass {
-		return status, detail
+	if status, detail := provisionAndLaunch(ctx, r, name, launchConfig{FreshOnly: true}); status != StatusPass {
+		return status, detail + " (a fresh_only launch into a freshly provisioned box, with no agent yet, starts it)"
+	}
+	if res := r.isRunning(ctx, name); !res.ok() || strings.TrimSpace(res.stdout) != "true" {
+		return StatusFail, fmt.Sprintf("is-running after a fresh_only launch into a provisioned box = %q (%v), want \"true\"", strings.TrimSpace(res.stdout), res.err)
 	}
 	if res := r.launch(ctx, name, launchConfig{FreshOnly: true}); res.exitCode != 73 {
 		return StatusFail, fmt.Sprintf("a fresh_only launch on a running agent exited %d (%v), want 73", res.exitCode, res.err)
 	}
-	return StatusPass, "a fresh_only launch on a running agent exits 73"
+	return StatusPass, "a fresh_only launch starts an agent in a provisioned box and exits 73 on a running one"
 }

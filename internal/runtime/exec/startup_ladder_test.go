@@ -1,12 +1,14 @@
 package exec
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -210,5 +212,68 @@ func TestUnweldedFirstTurnHandedBackOnRefusal(t *testing.T) {
 	}
 	if turn, ok := runtime.TakeStartupNudgeHandback(sp, "s"); ok {
 		t.Errorf("handback %q left over from an earlier start", turn)
+	}
+}
+
+// launchIdlePackCaps is a pack without tmux that un-welds start under
+// carrier.ops and declares the idle triple, so gc's readiness wait before the
+// first turn is the carrier's idle wait.
+const launchIdlePackCaps = `{"version":0,"capabilities":["proc.provision","proc.launch","carrier.ops","report-activity","report-attachment","idle-boundary","input-outcome"]}`
+
+// Kills a readiness wait capped by the start's own deadline: an agent that
+// never reads idle ran the wait into the start's ctx, which failed the start
+// and tore its box down. The wait stays inside the start budget, its timeout
+// is not a failure, and the single first-turn attempt decides the outcome:
+// a busy answer is handed back.
+func TestUnweldedReadinessWaitStaysInsideStartBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		nudge    string
+		handBack bool
+	}{
+		{name: "delivered", nudge: `txt=$(cat); echo "nudge $txt" >> "$dir/input"`},
+		{name: "busy", nudge: `txt=$(cat); echo "nudge $txt" >> "$dir/input"; echo '{"outcome":"busy"}'; exit 80`, handBack: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			script, dir := observePack(t, launchIdlePackCaps, launchPackOps(map[string]string{
+				"peek":  `echo "Thinking (esc to interrupt)"`,
+				"nudge": tc.nudge,
+			}))
+			sp := NewSeamBacked(script)
+			ctx, cancel := context.WithTimeout(t.Context(), 4*time.Second)
+			defer cancel()
+			if err := sp.Start(ctx, "s", runtime.Config{Command: "agent", Nudge: "first turn"}); err != nil {
+				t.Fatalf("Start = %v, want success: a readiness wait that runs out is not a failure", err)
+			}
+			if slices.Contains(opsRan(t, dir), "stop") {
+				t.Error("the start tore its box down")
+			}
+			if got := inputLines(t, dir); !slices.Equal(got, []string{"nudge first turn"}) {
+				t.Errorf("input = %q, want the first turn attempted once", got)
+			}
+			if _, ok := runtime.TakeStartupNudgeHandback(sp, "s"); ok != tc.handBack {
+				t.Errorf("handed back = %v, want %v", ok, tc.handBack)
+			}
+		})
+	}
+}
+
+// Kills a first turn sent outside the start's ctx: a nudge op that hangs
+// held Start past its deadline for the whole op timeout. A first turn cut off
+// by the deadline may have been typed, so it is not handed back.
+func TestUnweldedFirstTurnBoundedByStartContext(t *testing.T) {
+	script, _ := observePack(t, launchPackCaps, launchPackOps(map[string]string{
+		"nudge": `cat > /dev/null; exec sleep 30`,
+	}))
+	sp := NewSeamBacked(script)
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	began := time.Now()
+	_ = sp.Start(ctx, "s", runtime.Config{Command: "agent", Nudge: "first turn"})
+	if elapsed := time.Since(began); elapsed > 10*time.Second {
+		t.Errorf("Start took %s with a 2s ctx: the first turn is bounded by the start's ctx", elapsed)
+	}
+	if turn, ok := runtime.TakeStartupNudgeHandback(sp, "s"); ok {
+		t.Errorf("handback %q: a turn cut off mid-send may have been typed", turn)
 	}
 }

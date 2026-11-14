@@ -25,6 +25,12 @@ const launchOp = "launch"
 // firstTurnReadyBound caps the readiness wait before the first turn.
 const firstTurnReadyBound = 60 * time.Second
 
+// firstTurnReadyBudgetFraction caps the readiness wait at this fraction of
+// the start's remaining budget, so the wait running out never expires the
+// start's ctx and the rest of the start, the first turn included, has the
+// other half. It follows the tmux provider's startup-nudge budget split.
+const firstTurnReadyBudgetFraction = 0.5
+
 // launchDeclared reports whether the pack declared the `launch` op.
 func (p *Provider) launchDeclared() bool {
 	return p.handshakeCapability(runtime.ProtocolCapabilityLaunch)
@@ -87,27 +93,32 @@ func (p *Provider) finishSeparableLaunch(ctx context.Context, name string, cfg r
 	if cfg.Nudge == "" {
 		return nil
 	}
-	return p.deliverFirstTurn(name, cfg.Nudge)
+	return p.deliverFirstTurn(ctx, name, cfg.Nudge)
 }
 
-// awaitFirstTurnReady waits, bounded by ctx and firstTurnReadyBound, for the
-// launched agent to take input: the selected carrier's idle wait when the
-// pack declares an idle boundary, otherwise the config's ready_delay_ms. A
-// wait that runs out is not a failure; a canceled or expired ctx is.
+// awaitFirstTurnReady waits for the launched agent to take input: the
+// selected carrier's idle wait when the pack declares an idle boundary,
+// otherwise the config's ready_delay_ms. The wait is bounded by
+// firstTurnReadyBound and by firstTurnReadyBudgetFraction of what is left of
+// ctx, so it runs out inside the start budget. A wait that runs out is not a
+// failure: the first-turn attempt decides the outcome. A canceled or expired
+// ctx is.
 func (p *Provider) awaitFirstTurnReady(ctx context.Context, name string, cfg runtime.Config) error {
 	bound := firstTurnReadyBound
-	if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < bound {
-		bound = time.Until(deadline)
+	if deadline, ok := ctx.Deadline(); ok {
+		bound = min(bound, time.Duration(float64(time.Until(deadline))*firstTurnReadyBudgetFraction))
 	}
-	if p.idleBoundaryDeclared() {
-		_ = p.WaitForIdle(ctx, name, bound) // a timeout is not a failure; ctx is checked below
-	} else if delay := time.Duration(cfg.ReadyDelayMs) * time.Millisecond; delay > 0 {
-		timer := time.NewTimer(min(delay, bound))
-		select {
-		case <-ctx.Done():
-		case <-timer.C:
+	if bound > 0 {
+		if p.idleBoundaryDeclared() {
+			_ = p.WaitForIdle(ctx, name, bound) // a timeout is not a failure; ctx is checked below
+		} else if delay := time.Duration(cfg.ReadyDelayMs) * time.Millisecond; delay > 0 {
+			timer := time.NewTimer(min(delay, bound))
+			select {
+			case <-ctx.Done():
+			case <-timer.C:
+			}
+			timer.Stop()
 		}
-		timer.Stop()
 	}
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("exec provider: waiting for %q to take its first turn: %w", name, err)
@@ -115,15 +126,15 @@ func (p *Provider) awaitFirstTurnReady(ctx context.Context, name string, cfg run
 	return nil
 }
 
-// deliverFirstTurn sends nudge to name once, through the selected carrier
-// (Provider.Nudge), and reads its outcome. A delivered answer, delivered
+// deliverFirstTurn sends nudge to name once, bounded by ctx, through the
+// path Provider.Nudge takes, and reads its outcome. A delivered answer, delivered
 // unobserved included, is final. An answer that may have been delivered
 // (unconfirmed, or an untyped failure from a pack without input-outcome) is
 // a warning and is not handed back, which could deliver it twice. A turn the
 // runtime did not take (busy, pending_interaction, rejected, not_sent,
 // unavailable) is handed back. Gone is the agent dying during startup.
-func (p *Provider) deliverFirstTurn(name, nudge string) error {
-	err := p.Nudge(name, runtime.TextContent(nudge))
+func (p *Provider) deliverFirstTurn(ctx context.Context, name, nudge string) error {
+	err := p.nudgeWithContext(ctx, name, runtime.TextContent(nudge))
 	switch {
 	case runtime.NudgeDelivered(err):
 		return nil
