@@ -951,7 +951,7 @@ func TestApplyFactsConsumesEveryField(t *testing.T) {
 		Noted:       &notedRuntime{Name: "s1", At: plannerT0},
 		Quarantined: "worker-1",
 		AliasOwed:   &rowKey{Leg: rowLeg, ID: "gc-a"},
-		Stopped:     &agentStop{Name: "s1", Identity: "worker"},
+		Stopped:     &agentStop{Name: "s1", Identity: "worker", Reason: "drain-ack"},
 		Classified:  &classifiedRuntime{Key: rowKey{ID: "gc-1"}, Token: "tok", Crash: &events.Event{Type: events.SessionCrashed}, Recycle: true},
 		IdleKilled:  "worker",
 	}

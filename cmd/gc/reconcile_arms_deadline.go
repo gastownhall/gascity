@@ -2,8 +2,7 @@ package main
 
 import (
 	"strings"
-
-	"github.com/gastownhall/gascity/internal/session"
+	"time"
 )
 
 // drainDeadlineReason is the stop request A22 begins for a pool seat parked
@@ -51,9 +50,9 @@ func armDrainDeadline(r *rowFacts) (intent, bool) {
 	if !r.drainDeadlineDue() {
 		return intent{}, false
 	}
-	it, ok := r.drainBegin(drainDeadlineReason, nil)
-	if drainAt := strings.TrimSpace(r.row.Info.DrainAt); drainAt != "" {
-		it.Patch[session.DrainIntentAtKey] = drainAt
+	enteredAt, err := time.Parse(time.RFC3339, strings.TrimSpace(r.row.Info.DrainAt))
+	if err != nil { // the due check parsed it, so this holds a row the bound does not own
+		return intent{}, false
 	}
-	return it, ok
+	return r.heal(intentDrainBegin, decideDrainBegin+drainDeadlineReason, stopBeginPatch(r.row, drainDeadlineReason, enteredAt))
 }

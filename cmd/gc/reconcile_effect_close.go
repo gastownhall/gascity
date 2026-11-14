@@ -524,18 +524,6 @@ func (c *closeReleases) pruneSlot(ctx context.Context, it intent) {
 	pruneWorktree(sessionInfoFromBead(b), c.cityPath, c.cfg, c.stderr)
 }
 
-// stopAround runs the stop, then, once a close landed under the pool-slot
-// drain deadline, reclaims the retired seat's worktree: the deadline's close
-// preempts A21's pool-freeable close, the other site that does (legacy's
-// poolSlotRetireWorktreePrune).
-func stopAround(ctx context.Context, a aroundCaps, run func() settlement) settlement {
-	s := run()
-	if s.Closed && a.release != nil && deadlineWorkRead(a.it) {
-		a.release.pruneSlot(ctx, a.it)
-	}
-	return s
-}
-
 // pruneWorktree is pruneAgentHomeWorktreeIfSafeInfo; a test observes it.
 var pruneWorktree = pruneAgentHomeWorktreeIfSafeInfo
 

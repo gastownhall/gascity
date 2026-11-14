@@ -234,6 +234,10 @@ var simCoverageAllowlist = map[string]string{
 	"arm:A16/armExecutionStalled": "mc-i7efm: execution stalled",
 	// No heartbeat goes stale.
 	"arm:A17/armHeartbeatRespawn": "mc-i7efm: heartbeat respawn",
+	// No generator parks a pool seat in an unfinalized drain for the 30m
+	// deadline (a corpus pass is far shorter); TestSimPoolSeatInDrain* in
+	// reconcile_sim_drain_deadline_test.go covers the arm on the fake clock.
+	"arm:A22/armDrainDeadline": "ga-8epipf3: pool-slot drain deadline",
 	// No row is detached, stranded or carries a stale current bead.
 	"arm:A6/armDetachedAt":    "mc-i7efm: A6 subarms",
 	"arm:A6/armStrandedClear": "mc-i7efm: A6 subarms",

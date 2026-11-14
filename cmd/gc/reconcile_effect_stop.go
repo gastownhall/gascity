@@ -234,6 +234,17 @@ func dormantGone(v txView) bool {
 // confirms C8.8 alone; a confirmed corpse is then removed when L3 passes.
 func stopCall(ctx context.Context, c txCaps, p stopPlan) (stopped, error) {
 	sp, now := c.stop.sp, c.stop.clock.Now
+	if deadlineWorkRead(c.it) && c.release != nil {
+		// The pool-slot drain deadline's close preempts A21's pool-freeable
+		// close, the other site that reclaims a retired seat's worktree
+		// (legacy's poolSlotRetireWorktreePrune): once it landed, so does the
+		// prune, past the effect's own context.
+		c.onExit(func(final settlement) {
+			if final.Closed {
+				c.release.pruneSlot(context.WithoutCancel(ctx), c.it)
+			}
+		})
+	}
 	switch {
 	case p.foreign:
 		return stopped{Confirmed: true}, nil
