@@ -96,6 +96,7 @@ go_test(
         "tool_home_test.go",
         "tutorial_path_test.go",
         "workflow_event_wait_test.go",
+        "zz_gc_cwd_test.go",
     ],
     data = glob(
         ["**"],
