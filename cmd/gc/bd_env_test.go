@@ -5697,7 +5697,8 @@ func TestMirrorBeadsDoltScopeEnvClearsTLSForExternalLocalEndpoint(t *testing.T) 
 // carry resolves the ambient BEADS_DOLT_SERVER_TLS through the native-open env guard
 // (ambientNativeDoltOpenEnv, which answers from the environment a native open's
 // projection window found) rather than a bare os.Getenv. A native open mutates
-// BEADS_DOLT_SERVER_TLS inside its projection window while a concurrent scope opens, so an unguarded read could carry another scope's transient TLS
+// BEADS_DOLT_SERVER_TLS inside its projection window while a concurrent scope
+// opens, so an unguarded read could carry another scope's transient TLS
 // into this projection. The stub returns a sentinel distinct from the ambient value so a
 // regression to os.Getenv (which would read the ambient value and never call the stub)
 // fails this test.

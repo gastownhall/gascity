@@ -4994,7 +4994,8 @@ func (t *Tmux) CheckSessionHealth(session string, maxInactivity time.Duration) Z
 // cost 17 full reads per look, seconds on a busy host.
 //
 // The bound can fail a read the per-process walk would have finished: under
-// fleet load the full-OS scan runs past fetchTimeout. A failure is logged, rate-limited (processSnapshotFailureLog).
+// fleet load the full-OS scan runs past fetchTimeout. A failure is logged,
+// rate-limited (processSnapshotFailureLog).
 func (t *Tmux) readProcessSnapshot() (processSnapshot, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
 	defer cancel()
