@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -650,6 +652,29 @@ func CoreFingerprintBreakdown(cfg Config) BreakdownV1 {
 				}
 			}
 		}),
+		// Upstream and OperatorEnv use the same conditional framing as
+		// hashCoreFields. Between two breakdowns written by this binary, an
+		// unset value hashes to the same empty-input digest on both sides
+		// and never reports as drifted on its own. A breakdown stored by a
+		// binary that predates these keys has no entry for them at all.
+		// Until core_hash_breakdown is next written (a start, relaunch,
+		// rebaseline or accepted soft reload), every drift the legacy
+		// reconciler reports for that session, deferred ticks included,
+		// lists both keys beside the field that actually changed: the
+		// config-drift diagnostic as stored-hash=(absent), the trace's
+		// drifted_fields by name. Parity with hashCoreFields is pinned by
+		// TestCoreFingerprintBreakdownCoversEveryCoreField, the absent-key
+		// rendering by TestLogDriftReportsFieldsAbsentFromStoredBreakdown.
+		"Upstream": fieldHash(func(h hash.Hash) {
+			hashOptionalString(h, "upstream", cfg.Upstream)
+		}),
+		"OperatorEnv": fieldHash(func(h hash.Hash) {
+			if len(cfg.OperatorEnv) > 0 {
+				h.Write([]byte("operator_env"))
+				h.Write([]byte{0})
+				hashSortedMap(h, cfg.OperatorEnv)
+			}
+		}),
 	}
 	var copyEntries []BreakdownCopyEntry
 	if len(cfg.CopyFiles) > 0 {
@@ -717,10 +742,22 @@ func LogCoreFingerprintDrift(w io.Writer, name string, storedJSON string, curren
 
 	fmt.Fprintf(w, "  config-drift-diag %s: drifted fields: %s\n", name, strings.Join(diffs, ", ")) //nolint:errcheck // best-effort diag
 	for _, field := range diffs {
-		fmt.Fprintf(w, "    %s: stored-hash=%s current-hash=%s\n", field, storedFields[field], currentBd.Fields[field]) //nolint:errcheck // best-effort diag
+		// A key the stored breakdown never carried (written by a binary
+		// that predates the field) is reported as absent rather than as an
+		// empty hash, so the operator can tell "new field" from "changed".
+		storedHash, ok := storedFields[field]
+		if !ok {
+			storedHash = "(absent)"
+		}
+		fmt.Fprintf(w, "    %s: stored-hash=%s current-hash=%s\n", field, storedHash, currentBd.Fields[field]) //nolint:errcheck // best-effort diag
 		switch field {
 		case "Command":
 			fmt.Fprintf(w, "    Command: %q\n", current.Command) //nolint:errcheck // best-effort diag
+		case "Upstream":
+			fmt.Fprintf(w, "    Upstream: %q\n", current.Upstream) //nolint:errcheck // best-effort diag
+		case "OperatorEnv":
+			// Keys only: config-authored env may carry credentials.
+			fmt.Fprintf(w, "    OperatorEnv keys: %v\n", slices.Sorted(maps.Keys(current.OperatorEnv))) //nolint:errcheck // best-effort diag
 		case "Env":
 			fmt.Fprintf(w, "    Env: %v\n", filteredEnv(current.Env)) //nolint:errcheck // best-effort diag
 		case "MCPServers":
