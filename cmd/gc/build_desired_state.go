@@ -742,15 +742,28 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 			"beads": len(unassignedRoutedBeads),
 		})
 		collected := collectedDemand{
-			UnassignedRouted:        unassignedRoutedBeads,
-			UnassignedRoutedRefs:    unassignedRoutedStoreRefs,
-			UnassignedRoutedPartial: unassignedRoutedPartial,
-			ColdWakeTemplates:       targets.coldWakeTemplates,
-			NamedOnDemandTemplates:  targets.namedOnDemandTemplates,
-			NameOnlyTemplates:       targets.nameOnlyTemplates,
+			UnassignedRouted:          unassignedRoutedBeads,
+			UnassignedRoutedRefs:      unassignedRoutedStoreRefs,
+			UnassignedRoutedPartial:   unassignedRoutedPartial,
+			ColdWakeTemplates:         targets.coldWakeTemplates,
+			ColdWakeDisabledTemplates: targets.coldWakeDisabledTemplates,
+			NamedOnDemandTemplates:    targets.namedOnDemandTemplates,
+			NameOnlyTemplates:         targets.nameOnlyTemplates,
 		}
 		subPhaseStart = trace.demandNow()
 		collected.CustomCounts, collected.CustomPartials = evaluatePendingPoolsMap(cfg, targets.pendingPools, stderr, trace)
+		// CustomScaleCheckSucceeded snapshots which templates a custom
+		// scale_check just answered for successfully, before CustomPartials
+		// is merged with the separate default/cold-wake probe's own partial
+		// set in mergeCollectedDemand -- the cold-wake clamp there needs to
+		// know whether THIS custom check succeeded, not whether the
+		// cold-wake probe itself did.
+		collected.CustomScaleCheckSucceeded = make(map[string]bool, len(collected.CustomCounts))
+		for template := range collected.CustomCounts {
+			if !collected.CustomPartials[template] {
+				collected.CustomScaleCheckSucceeded[template] = true
+			}
+		}
 		recordDemandSubPhase(trace, "demand_snapshot.evaluate_pending_pools", subPhaseStart, map[string]any{
 			"pools": len(targets.pendingPools),
 		})
@@ -1190,6 +1203,13 @@ type demandTargets struct {
 	// worktree starts in that worktree. The probe never changes their count
 	// or partial retention.
 	nameOnlyTemplates map[string]bool
+	// coldWakeDisabledTemplates marks templates whose agent set cold_wake=false:
+	// the wake probe must defer to a successful custom scale_check's count,
+	// including an authoritative 0, rather than merge by maximum (#6351). Unset
+	// (the default) keeps today's behavior, where the wake probe may override a
+	// 0 it cannot tell apart from a check that is simply blind to demand from
+	// another store.
+	coldWakeDisabledTemplates map[string]bool
 }
 
 // probeEnvFunc builds a custom scale_check pool's probe env
@@ -1254,6 +1274,14 @@ func buildDemandTargets(
 	coldWakeTemplates := map[string]bool{}
 	namedOnDemandTemplates := map[string]bool{}
 	nameOnlyTemplates := map[string]bool{}
+	// coldWakeDisabledTemplates marks templates whose agent set cold_wake=false
+	// (see demandTargets.coldWakeDisabledTemplates for the full rationale).
+	coldWakeDisabledTemplates := map[string]bool{}
+	for i := range cfg.Agents {
+		if !cfg.Agents[i].EffectiveColdWake() {
+			coldWakeDisabledTemplates[cfg.Agents[i].QualifiedName()] = true
+		}
+	}
 	// activeStores is the set of stores a custom-scale_check pool is probed
 	// against (city + every non-suspended rig store), so routed demand a sleeping
 	// rig pool can't see locally — e.g. work queued in the city store — still
@@ -1561,12 +1589,13 @@ func buildDemandTargets(
 		pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, env: env, newDemand: store != nil})
 	}
 	return demandTargets{
-		pendingPools:             pendingPools,
-		defaultScaleTargets:      defaultScaleTargets,
-		defaultNamedScaleTargets: defaultNamedScaleTargets,
-		coldWakeTemplates:        coldWakeTemplates,
-		namedOnDemandTemplates:   namedOnDemandTemplates,
-		nameOnlyTemplates:        nameOnlyTemplates,
+		pendingPools:              pendingPools,
+		defaultScaleTargets:       defaultScaleTargets,
+		defaultNamedScaleTargets:  defaultNamedScaleTargets,
+		coldWakeTemplates:         coldWakeTemplates,
+		namedOnDemandTemplates:    namedOnDemandTemplates,
+		nameOnlyTemplates:         nameOnlyTemplates,
+		coldWakeDisabledTemplates: coldWakeDisabledTemplates,
 	}
 }
 
@@ -2572,6 +2601,16 @@ type collectedDemand struct {
 	// NameOnlyTemplates take default demand only as the work bead ids of
 	// their custom count's seats (demandTargets.nameOnlyTemplates).
 	NameOnlyTemplates map[string]bool
+	// ColdWakeDisabledTemplates marks templates whose agent set cold_wake=false
+	// (demandTargets.coldWakeDisabledTemplates). CustomScaleCheckSucceeded
+	// records which templates CustomCounts answered for successfully, read
+	// before CustomPartials is merged with the default probe's own partial
+	// set below -- the cold-wake clamp needs to know whether THIS custom
+	// check succeeded, not whether the cold-wake probe itself did. Together
+	// they let the merge defer to a successful custom check's authoritative
+	// count, including an explicit 0, on an opted-out template (#6351).
+	ColdWakeDisabledTemplates map[string]bool
+	CustomScaleCheckSucceeded map[string]bool
 	// UnassignedRouted, UnassignedRoutedRefs and UnassignedRoutedPartial are
 	// collectOpenUnassignedRoutedWork's index-aligned rows, after the route
 	// repairs the caller applies.
@@ -2680,6 +2719,22 @@ func mergeCollectedDemand(cfg *config.City, in collectedDemand) mergedDemand {
 			// 1 so N unassigned gc.routed_to beads do not spawn {name}-N phantoms.
 			if in.NamedOnDemandTemplates[template] && count > 1 {
 				count = 1
+			}
+			// A successful custom scale_check's count is authoritative on a
+			// cold_wake=false template, including an explicit 0 -- the one
+			// value that means "no session right now" and the one value
+			// merge-by-maximum could not otherwise preserve, since 1 > 0.
+			// Gated on the opt-out (not the default): the wake probe
+			// otherwise exists precisely because a check can be blind to
+			// demand from a store it never queries (see the CrossRig test),
+			// and treating every successful 0 as authoritative would
+			// silently stop those pools from ever waking. A check that
+			// errored is never authoritative here either way -- it goes
+			// PARTIAL rather than reading as zero demand, which other logic
+			// relies on.
+			if in.ColdWakeTemplates[template] && in.CustomScaleCheckSucceeded[template] && in.ColdWakeDisabledTemplates[template] {
+				scaleCheckDemandByTemplate[template] = mergeScaleCheckDemand(scaleCheckDemandByTemplate[template], in.DefaultDemand[template], count)
+				continue
 			}
 			if count > scaleCheckCounts[template] {
 				scaleCheckCounts[template] = count
