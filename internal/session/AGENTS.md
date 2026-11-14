@@ -127,6 +127,32 @@ evidence from tests, source, an issue, or a commit.
   the attempted identity outside the mutation lock. Persistence failure alone
   must not trigger runtime cleanup.
 
+## Runtime Lease Ownership When a Commit Is Bounded
+
+- A bounded commit phase (`commitAsyncStartBounded`, SESSION-RUNTIME-017) means
+  the goroutine that holds the start slot is not the one that finishes the
+  commit. One word (`commitHandoff`: waiter-owned, closure-owned, abandoned,
+  compare-and-swap only) decides who ends the start's runtime lease. The commit
+  closure claims it first and releases it when it returns; the waiter, after the
+  bound, abandons it only if the closure never claimed it.
+- The waiter makes no store call, so it never calls `RuntimeLease.Release` (that
+  reads and writes the row) or the lease-watch stop (that waits for a read in
+  flight). It calls `RuntimeLease.Abandon`: no store call, the name's flock
+  dropped, the record left to lapse.
+- Do not "simplify" the compare-and-swap away. `HoldsMeta` ignores the lease's
+  released flag, so after `Abandon` the record on the row still names the lease
+  and a late-starting closure would commit under a flock the waiter already
+  dropped. Do not change `HoldsMeta`, `CommitVerdict` or
+  `StateConfirmsPendingStart` to cover for a missing hand-off.
+- A test that keeps a commit hung in the same city sees the lease retained and
+  the repair paths defer, except the dead-runtime stale-create rollback, which
+  still clears an expired claim (the zombie's late commit is then fenced
+  against the closed row; see
+  `TestRepairMatrixDeadHungCommitIsRolledBackAndTheLateCommitIsFenced`). A test
+  that models a departed controller runs the tick in a fresh city directory, so
+  it does not share the hung commit's lock file. See
+  `abandonedCommitRepairScenario`.
+
 When a session has a persisted native conversation key and its provider family
 resolves transcripts by that key (`transcript.SupportsIDLookup`),
 `Manager.TranscriptPathClassified` waits for that exact transcript. Another
