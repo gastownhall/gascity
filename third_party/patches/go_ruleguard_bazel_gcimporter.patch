@@ -20,7 +20,7 @@ diff -ruN a/ruleguard/importer.go b/ruleguard/importer.go
  		buildContext:    config.buildContext,
  	}
  	imp.initSourceImporter()
-@@ -93,3 +96,30 @@
+@@ -93,3 +96,40 @@
  	}
  	imp.srcImporter = xsrcimporter.New(imp.buildContext, imp.fset)
  }
@@ -30,7 +30,10 @@ diff -ruN a/ruleguard/importer.go b/ruleguard/importer.go
 +// GOROOT -- one with compiled packages in $GOROOT/pkg/$GOOS_$GOARCH but no
 +// sources or go command, as rules_go's stdlib provides to nogo actions --
 +// where it reads standard-library export data from that directory instead of
-+// running `go list -export`, which cannot work there.
++// running `go list -export`, which cannot work there. rules_go builds the
++// standard library for one mode, so under --@rules_go//go/config:race or :msan
++// the packages sit in $GOROOT/pkg/$GOOS_$GOARCH_race or _msan and the plain
++// directory does not exist; the first of the three holding runtime.a is used.
 +func defaultGcImporter(fset *token.FileSet) types.Importer {
 +	goroot := os.Getenv("GOROOT")
 +	if goroot == "" {
@@ -43,8 +46,15 @@ diff -ruN a/ruleguard/importer.go b/ruleguard/importer.go
 +	if goarch == "" {
 +		goarch = runtime.GOARCH
 +	}
-+	dir := filepath.Join(goroot, "pkg", goos+"_"+goarch)
-+	if _, err := os.Stat(filepath.Join(dir, "runtime.a")); err != nil {
++	dir := ""
++	for _, suffix := range []string{"", "_race", "_msan"} {
++		d := filepath.Join(goroot, "pkg", goos+"_"+goarch+suffix)
++		if _, err := os.Stat(filepath.Join(d, "runtime.a")); err == nil {
++			dir = d
++			break
++		}
++	}
++	if dir == "" {
 +		return importer.Default()
 +	}
 +	return importer.ForCompiler(fset, "gc", func(path string) (io.ReadCloser, error) {
