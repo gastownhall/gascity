@@ -102,25 +102,43 @@ func (c *storageSplitCheck) versionFloor(f *storageSplitFindings) {
 // (S5-H, owner decision: WARN): what it left is graded by the checks below
 // (an unconverged city is an error through status), and this names the
 // command that continues it. The hint goes into the details too, so it is
-// shown beside an error. A split past its rig imports has only its
-// verification left, which the checks below are.
+// shown beside an error.
 func (c *storageSplitCheck) splitJournal(f *storageSplitFindings) {
 	j, present, err := readStorageSplitJournal(c.cityPath)
 	var hint string
 	switch {
 	case err != nil:
 		hint = err.Error()
-	case !present || !j.open() || j.Phase == splitPhaseRigsImported:
+	case !present || !j.open():
 		return
-	case j.Phase == splitPhaseAbandoning:
-		hint = fmt.Sprintf("the guided split %s is being abandoned; `%s` finishes it", j.Run, storageSplitAbandonInstruction())
-	case splitPhaseRank[j.Phase] < splitPhaseRank[splitPhaseConfiguring] && c.cfg != nil && c.cfg.Storage != nil:
-		hint = fmt.Sprintf("the guided split %s stopped at %s, before it wrote city.toml, and city.toml authors [storage] it did not write; `%s` closes the split and changes nothing else", j.Run, j.Phase, storageSplitAbandonInstruction())
 	default:
-		hint = fmt.Sprintf("the guided split %s stopped at %s; `%s` continues it", j.Run, j.Phase, storageSplitInstruction())
+		if hint = c.splitJournalHint(j); hint == "" {
+			return
+		}
 	}
 	f.warns = append(f.warns, hint)
 	f.details = append(f.details, hint)
+}
+
+// splitJournalHint is the warning for the open split j, or "" for none. A
+// split past its rig imports has only its verification left, which the
+// checks below are. A split a reverse undid (splitUndone) has nothing left to
+// continue: the next split starts over, and --abandon closes its journal.
+func (c *storageSplitCheck) splitJournalHint(j storageSplitJournal) string {
+	undone, err := splitUndone(j, c.cfg, c.cityPath)
+	switch {
+	case err != nil:
+		return err.Error()
+	case undone:
+		return fmt.Sprintf("the guided split %s stopped at %s and was undone since, as a reverse leaves it (city.toml composes no [storage] and binding %s holds no convergence marker); `%s` closes it, and `%s` starts a new split", j.Run, j.Phase, j.Binding, storageSplitAbandonInstruction(), j.continueInstruction())
+	case j.Phase == splitPhaseRigsImported:
+		return ""
+	case j.Phase == splitPhaseAbandoning:
+		return fmt.Sprintf("the guided split %s is being abandoned; `%s` finishes it", j.Run, storageSplitAbandonInstruction())
+	case splitPhaseRank[j.Phase] < splitPhaseRank[splitPhaseConfiguring] && c.cfg != nil && c.cfg.Storage != nil:
+		return fmt.Sprintf("the guided split %s stopped at %s, before it wrote city.toml, and city.toml authors [storage] it did not write; `%s` closes the split and changes nothing else", j.Run, j.Phase, storageSplitAbandonInstruction())
+	}
+	return fmt.Sprintf("the guided split %s stopped at %s; `%s` continues it", j.Run, j.Phase, j.continueInstruction())
 }
 
 // unsplit is the verdict of a city with no [storage].

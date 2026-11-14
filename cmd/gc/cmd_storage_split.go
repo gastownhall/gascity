@@ -28,7 +28,8 @@ package main
 // carries the split's [storage]; a split stopped before that write is started
 // over, because the city could have run since. --abandon backs out a split
 // stopped before the city copy's convergence marker; past it, the reverse
-// (`gc storage migrate --to-work`) is the way back.
+// (`gc storage migrate --to-work`) is the way back, and once a reverse has
+// undone the split, --abandon closes its journal (splitUndone).
 
 import (
 	"bytes"
@@ -107,10 +108,15 @@ type storageSplitJournal struct {
 	CityTOMLBefore       *string `json:"city_toml_before"`
 	CityTOMLBeforeSHA256 string  `json:"city_toml_before_sha256,omitempty"`
 	CityTOMLAfterSHA256  string  `json:"city_toml_after_sha256,omitempty"`
-	// MinGCVersion is the floor P4 writes; MinGCVersionBefore the file it
-	// replaced, null when there was none.
-	MinGCVersion       string  `json:"min_gc_version,omitempty"`
-	MinGCVersionBefore *string `json:"min_gc_version_before"`
+	// MinGCVersion is the floor P4 writes; MinGCVersionBefore the file from
+	// before the split, null when there was none, recorded when the journal
+	// is created. MinGCVersionBeforeCarried says it came from a superseded
+	// split that may have written the floor (one at or past configuring, or
+	// one that carried the record itself), so the file then held a split's
+	// floor and the next split carries this record forward instead.
+	MinGCVersion              string  `json:"min_gc_version,omitempty"`
+	MinGCVersionBefore        *string `json:"min_gc_version_before"`
+	MinGCVersionBeforeCarried bool    `json:"min_gc_version_before_carried,omitempty"`
 	// AbandonedFrom is the phase an --abandon began from.
 	AbandonedFrom string `json:"abandoned_from,omitempty"`
 }
@@ -164,6 +170,17 @@ func storageSplitAbandonInstruction() string {
 	return storageSplitInstruction() + " --" + storageAbandonFlag
 }
 
+// continueInstruction is the command that continues the split j records: the
+// split's command with each attestation the run was accepted under, without
+// which P1 refuses the hazard it accepted.
+func (j storageSplitJournal) continueInstruction() string {
+	command := storageSplitInstruction()
+	for _, hazard := range j.Forced {
+		command += " --" + storageForceFlag + "=" + hazard
+	}
+	return command
+}
+
 // splitStorageMatches reports whether cfg authors exactly the split's
 // [storage]: the born-split block (bornSplitStorageConfig).
 func splitStorageMatches(cfg *config.City) bool {
@@ -210,17 +227,20 @@ func judgeSplit(in splitJudgement) (decision splitDecision, note string, err err
 	switch {
 	case !known:
 		return splitRefuse, "", fmt.Errorf("the split journal %s records a phase this build does not know (%q); it was written by another gc", storageSplitJournalName, j.Phase)
-	case rank < splitPhaseRank[splitPhaseConfiguring]:
-		if in.authored {
-			return splitRefuse, "", fmt.Errorf("the split %s stopped before it wrote city.toml (%s), and city.toml now authors [storage], which the split did not write. Close the split with `%s`, which changes nothing but its journal and its snapshot's pin; then `%s` and `%s` continue the authored split", j.Run, j.Phase, storageSplitAbandonInstruction(), storageClearInstruction(), rigImportAllInstruction())
-		}
+	case rank < splitPhaseRank[splitPhaseConfiguring] && in.authored:
+		return splitRefuse, "", fmt.Errorf("the split %s stopped before it wrote city.toml (%s), and city.toml now authors [storage], which the split did not write. Close the split with `%s`, which changes nothing but its journal and its snapshot's pin; then `%s` and `%s` continue the authored split", j.Run, j.Phase, storageSplitAbandonInstruction(), storageClearInstruction(), rigImportAllInstruction())
+	case rank < splitPhaseRank[splitPhaseConfiguring],
+		// At configuring with city.toml as it was before, the split recorded
+		// its edit and may have written the floor, but not the file: a boot
+		// between the runs serves the city unsplit, as before configuring, so
+		// it starts over too, and the new run carries the floor record
+		// (splitFloorBefore).
+		j.Phase == splitPhaseConfiguring && !in.authored && in.sha == j.CityTOMLBeforeSHA256:
 		return splitFresh, fmt.Sprintf("the split %s stopped before it wrote city.toml (%s), and the city may have run since; starting it over", j.Run, j.Phase), nil
-	case j.Phase == splitPhaseConfiguring && !in.authored && in.sha == j.CityTOMLBeforeSHA256:
-		return splitResume, "", nil
+	case j.Phase == splitPhaseConfiguring && in.authored && in.sha != j.CityTOMLBeforeSHA256 && in.sha != j.CityTOMLAfterSHA256:
+		return splitRefuse, "", splitCityTOMLChangedRefusal(*j)
 	case in.authored && in.splitting:
-		// At configuring, a file that is not the one the split writes is
-		// refused by the edit itself (configure), so it says nothing here.
-		if in.sha != j.CityTOMLAfterSHA256 && j.Phase != splitPhaseConfiguring {
+		if in.sha != j.CityTOMLAfterSHA256 {
 			note = fmt.Sprintf("city.toml changed since the split %s wrote it; a later `%s` removes [storage] from it in place and keeps the change", j.Run, storageReverseInstruction(reverseToWork, nil))
 		}
 		return splitResume, note, nil
@@ -271,18 +291,19 @@ func newStorageSplitCmd(surface storageCommandSurface, stdout, stderr io.Writer)
 
 With the city stopped (gc stop) it takes the controller lock and the
 maintenance window, rehearses the split (gc storage preflight --split) and
-refuses on any block, then: snapshots the work store and the rigs (pinned),
-runs legacy's demand-migration repairs when the split city runs the v2
-reconciler, appends the [storage] block to city.toml and writes
+refuses on any block, a gc on the session PATH older than the version floor
+the split leaves among them, then: snapshots the work store and the rigs
+(pinned), runs legacy's demand-migration repairs when the split city runs the
+v2 reconciler, appends the [storage] block to city.toml and writes
 .gc/min-gc-version, migrates the city's infrastructure classes into the
 binding (gc storage migrate --from-work), imports every rig (--from-rigs), and
 checks the result (gc storage status, the storage-split doctor check).
 
 It records each step in .gc/storage-split.journal.json, with city.toml's
 bytes from before the split, which gc storage migrate --to-work restores.
-Run it again to continue a split that stopped: on its time budget (exit 75),
-on a rig the import refused, or killed. A split stopped before it wrote
-city.toml starts over.
+Run it again, with the --force attestations it was started with, to continue
+a split that stopped: on its time budget (exit 75), on a rig the import
+refused, or killed. A split stopped before it wrote city.toml starts over.
 
 --abandon backs out a split stopped before the city's copy converged: city.toml
 gets its bytes from before the split back (or [storage] removed, if it changed
@@ -290,7 +311,9 @@ since), the half-copied binding rows are deleted, and the version floor is put
 back as it was before the split (removed if there was none). A split stopped
 before it wrote city.toml only has its journal closed and its snapshot
 unpinned. Past the convergence marker the way back is gc storage migrate
---to-work, which keeps every bead written to the binding since.
+--to-work, which keeps every bead written to the binding since; once it has
+reversed a split that stopped, --abandon only closes the split's journal and
+unpins its snapshot.
 
 --dry-run is gc storage preflight --split.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -316,7 +339,7 @@ unpinned. Past the convergence marker the way back is gc storage migrate
 	}
 	cmd.Flags().BoolVar(&fleetStopped, storageFleetStoppedFlag, false, "attest that "+storageFleetStoppedAttestation)
 	cmd.Flags().BoolVar(&opts.DryRun, storageDryRunFlag, false, "rehearse the split (gc storage preflight --split): no lock, nothing written")
-	cmd.Flags().BoolVar(&opts.Abandon, storageAbandonFlag, false, "back out a split stopped before the city's copy converged")
+	cmd.Flags().BoolVar(&opts.Abandon, storageAbandonFlag, false, "back out a split stopped before the city's copy converged, or close one a reverse undid")
 	cmd.Flags().DurationVar(&timeBudget, storageTimeBudgetFlag, storageDefaultTimeBudget,
 		"stop the city's copy or clear at the next batch boundary once this much time has passed, exit 75, and continue on the next run (0: no budget)")
 	addStorageForceFlag(cmd, &forced)
@@ -494,15 +517,14 @@ func (r *splitRun) start(ctx context.Context, toml splitCityTOML, present bool, 
 	fmt.Fprint(r.stdout, report)                                                     //nolint:errcheck // best-effort stdout
 	fmt.Fprintf(r.stdout, "\n%s: the rehearsal is ready; splitting.\n", r.logPrefix) //nolint:errcheck // best-effort stdout
 
-	// The old journal goes aside, so the live one is always this split's. A
-	// superseded split that wrote the floor leaves it behind, so the floor
-	// from before the split is the one that split recorded, not the file now.
-	floorBefore, floorFromOld := (*string)(nil), false
+	// The floor from before the split goes into the new journal before
+	// anything is written, so a run stopped at any phase keeps it; then the
+	// old journal goes aside, so the live one is always this split's.
+	floorBefore, carried, err := splitFloorBefore(cityPath, r.journal, present)
+	if err != nil {
+		return err
+	}
 	if present {
-		old := r.journal
-		if old.open() && splitPhaseRank[old.Phase] >= splitPhaseRank[splitPhaseConfiguring] {
-			floorBefore, floorFromOld = old.MinGCVersionBefore, true
-		}
 		if err := r.retireJournal(); err != nil {
 			return err
 		}
@@ -511,7 +533,8 @@ func (r *splitRun) start(ctx context.Context, toml splitCityTOML, present bool, 
 	r.journal = storageSplitJournal{
 		Format: storageSplitJournalFormat, Run: reverseRunID(now), StartedAt: now,
 		Binding: r.target.Binding, Root: r.target.Root, Dir: r.target.Dir, Database: r.target.Database,
-		Forced: sortedUnique(r.request.Force.acceptedHazards(shared)),
+		Forced:             sortedUnique(r.request.Force.acceptedHazards(shared)),
+		MinGCVersionBefore: floorBefore, MinGCVersionBeforeCarried: carried,
 	}
 
 	// P3: the snapshot, before anything is written, pinned.
@@ -545,9 +568,9 @@ func (r *splitRun) start(ctx context.Context, toml splitCityTOML, present bool, 
 	}
 
 	// P4, its record: the bytes before, read here under the lock and the
-	// guard, the sha256 of the bytes after, and the floor, proven to compose
-	// to the split before anything is written. The bytes are the ones the
-	// judge and the rehearsal read, or the run refuses.
+	// guard, the sha256 of the bytes after, and the floor P4b writes, proven
+	// to compose to the split before anything is written. The bytes are the
+	// ones the judge and the rehearsal read, or the run refuses.
 	current, err := readSplitCityTOML(cityPath)
 	if err != nil {
 		return fmt.Errorf("reading city.toml: %w", err)
@@ -565,22 +588,34 @@ func (r *splitRun) start(ctx context.Context, toml splitCityTOML, present bool, 
 	r.journal.CityTOMLBeforeSHA256 = sha256Hex(current.bytes)
 	r.journal.CityTOMLAfterSHA256 = sha256Hex(after)
 	r.journal.MinGCVersion = splitMinGCVersion
-	switch data, err := os.ReadFile(minGCVersionPath(cityPath)); {
-	case floorFromOld:
-		r.journal.MinGCVersionBefore = floorBefore
-	case err == nil:
-		floor := string(data)
-		r.journal.MinGCVersionBefore = &floor
-	case !errors.Is(err, os.ErrNotExist):
-		return err
-	}
 	return r.advance(splitPhaseConfiguring)
+}
+
+// splitFloorBefore is the record of .gc/min-gc-version from before the split
+// that a new journal starts with: the file's bytes, nil when there is none.
+// When the open journal old it supersedes may have written the floor (it got
+// to configuring, or carried its record from a split that did), the file
+// holds a split's floor, so old's record is carried forward instead.
+func splitFloorBefore(cityPath string, old storageSplitJournal, present bool) (floor *string, carried bool, err error) {
+	if present && old.open() && (splitPhaseRank[old.Phase] >= splitPhaseRank[splitPhaseConfiguring] || old.MinGCVersionBeforeCarried) {
+		return old.MinGCVersionBefore, true, nil
+	}
+	data, err := os.ReadFile(minGCVersionPath(cityPath))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	text := string(data)
+	return &text, false, nil
 }
 
 // retireJournal moves the journal of an earlier split aside, as
 // .completed-<run> or .abandoned-<run>, or as .superseded-<run> for one
 // that stopped and was undone, whose pinned snapshot it unpins: the stores
-// have changed since.
+// have changed since. A pin it cannot remove is a warning that names it: the
+// new split goes on, and the snapshot stays until the pin is removed.
 func (r *splitRun) retireJournal() error {
 	old := r.journal
 	state := "superseded"
@@ -590,7 +625,9 @@ func (r *splitRun) retireJournal() error {
 	case splitPhaseAbandoned:
 		state = "abandoned"
 	default:
-		unpinSplitSnapshot(old)
+		if err := unpinSplitSnapshot(old); err != nil {
+			fmt.Fprintf(r.stderr, "%s: warning: the superseded split %s keeps its snapshot pinned (%v); remove %s to let retention prune it\n", r.logPrefix, old.Run, err, splitSnapshotPinPath(old)) //nolint:errcheck // best-effort stderr
+		}
 	}
 	path := storageSplitJournalPath(r.request.CityPath)
 	if err := os.Rename(path, path+"."+state+"-"+old.Run); err != nil {
@@ -600,11 +637,26 @@ func (r *splitRun) retireJournal() error {
 	return nil
 }
 
-// unpinSplitSnapshot lets retention prune a split's snapshot.
-func unpinSplitSnapshot(j storageSplitJournal) {
-	if j.SnapshotTo != "" && j.Snapshot != "" {
-		_ = os.Remove(filepath.Join(j.SnapshotTo, j.Snapshot, storageSnapshotPinName))
+// splitSnapshotPinPath is the pin of the snapshot j names, or "" when it
+// names none.
+func splitSnapshotPinPath(j storageSplitJournal) string {
+	if j.SnapshotTo == "" || j.Snapshot == "" {
+		return ""
 	}
+	return filepath.Join(j.SnapshotTo, j.Snapshot, storageSnapshotPinName)
+}
+
+// unpinSplitSnapshot lets retention prune a split's snapshot. A pin already
+// gone is not an error.
+func unpinSplitSnapshot(j storageSplitJournal) error {
+	pin := splitSnapshotPinPath(j)
+	if pin == "" {
+		return nil
+	}
+	if err := os.Remove(pin); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("unpinning snapshot %s: %w", j.Snapshot, err)
+	}
+	return nil
 }
 
 // splitCityTOMLAfter is city.toml with the split's [storage] appended, in
@@ -634,7 +686,7 @@ func splitCityTOMLAfter(cityPath string, before []byte, cfg *config.City) ([]byt
 func (r *splitRun) finish(ctx context.Context, shared sharedStoreExclusion) int {
 	cityPath := r.request.CityPath
 	fail := func(err error) int {
-		fmt.Fprintf(r.stderr, "%s: %v. Run `%s` to continue", r.logPrefix, err, storageSplitInstruction()) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(r.stderr, "%s: %v. Run `%s` to continue", r.logPrefix, err, r.journal.continueInstruction()) //nolint:errcheck // best-effort stderr
 		if splitAbandonRefusal(r.journal) == nil {
 			fmt.Fprintf(r.stderr, ", or `%s` to back it out", storageSplitAbandonInstruction()) //nolint:errcheck // best-effort stderr
 		}
@@ -660,7 +712,7 @@ func (r *splitRun) finish(ctx context.Context, shared sharedStoreExclusion) int 
 	}
 
 	if splitPhaseRank[r.journal.Phase] < splitPhaseRank[splitPhaseCityConverged] {
-		_, code := runCityMigration(ctx, r.request, r.target, plan, shared, r.logPrefix, r.stderr)
+		_, code := runCityMigration(ctx, r.request, r.target, plan, shared, r.logPrefix, r.stderr, r.unconvergedAdvice())
 		if code == storagePausedExitCode {
 			return code
 		}
@@ -712,6 +764,14 @@ func (r *splitRun) finish(ctx context.Context, shared sharedStoreExclusion) int 
 	return 0
 }
 
+// unconvergedAdvice is what the split says, in place of the engine's advice,
+// when its city copy stops before the convergence marker. The engine's names
+// `gc storage migrate --from-work`, which would converge the binding past the
+// split's journal; the split's own line then names what continues it.
+func (r *splitRun) unconvergedAdvice() string {
+	return fmt.Sprintf("%s: the city's copy into binding %s stopped before its convergence marker (%s), so the work store still holds the city's infrastructure state", r.logPrefix, r.target.Binding, r.target.MarkerPath())
+}
+
 // configure is P4's writes: the floor, then city.toml, each only if it is not
 // already written. The journal holds the bytes before and the sha256 after.
 func (r *splitRun) configure() error {
@@ -729,7 +789,7 @@ func (r *splitRun) configure() error {
 	switch sha256Hex(current) {
 	case r.journal.CityTOMLBeforeSHA256, r.journal.CityTOMLAfterSHA256:
 	default:
-		return fmt.Errorf("%s is neither the file the split recorded before its edit nor the one it writes, so this run cannot tell its edit from yours; put it back as the journal %s records it (city_toml_before), or back the split out with `%s`", r.journal.CityTOMLPath, storageSplitJournalPath(cityPath), storageSplitAbandonInstruction())
+		return splitCityTOMLChangedRefusal(r.journal)
 	}
 	if sha256Hex(current) == r.journal.CityTOMLBeforeSHA256 {
 		after, err := splitCityTOMLAfter(cityPath, current, r.request.Cfg)
@@ -754,18 +814,37 @@ func (r *splitRun) configure() error {
 	return r.advance(splitPhaseConfigured)
 }
 
-// splitVersionFloorRefusal refuses a split by a gc below the floor it would
-// leave in .gc/min-gc-version: floor, or the file's own when that is higher.
-// Every gc that reads the file refuses the city below it, so such a gc would
-// split the city and then refuse to run it. A gc whose version does not
-// compare (dev, a Go pseudo-version) is not refused, as at boot.
-func splitVersionFloorRefusal(cityPath, floor string) error {
+// splitCityTOMLChangedRefusal refuses a split at configuring whose city.toml
+// is neither the file it recorded before its edit nor the one it writes: the
+// edit was recorded and maybe written, so the split cannot tell its edit from
+// the operator's. The judge and P4b's write both refuse it.
+func splitCityTOMLChangedRefusal(j storageSplitJournal) error {
+	return fmt.Errorf("%s is neither the file the split recorded before its edit nor the one it writes, so this run cannot tell its edit from yours; put it back as the journal %s records it (city_toml_before), or back the split %s out with `%s`", j.CityTOMLPath, storageSplitJournalName, j.Run, storageSplitAbandonInstruction())
+}
+
+// splitLeavesFloor is the version floor the split leaves in
+// .gc/min-gc-version: floor, or the file's own when that is higher (the
+// split never lowers one).
+func splitLeavesFloor(cityPath, floor string) (string, error) {
 	current, present, err := readMinGCVersion(cityPath)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if present && deps.CompareVersions(current, floor) > 0 {
-		floor = current
+		return current, nil
+	}
+	return floor, nil
+}
+
+// splitVersionFloorRefusal refuses a split by a gc below the floor it would
+// leave (splitLeavesFloor). Every gc that reads the file refuses the city
+// below it, so such a gc would split the city and then refuse to run it. A gc
+// whose version does not compare (dev, a Go pseudo-version) is not refused,
+// as at boot.
+func splitVersionFloorRefusal(cityPath, floor string) error {
+	floor, err := splitLeavesFloor(cityPath, floor)
+	if err != nil {
+		return err
 	}
 	if running := gcVersionForFloor(); gcVersionBelowFloor(running, floor) {
 		return fmt.Errorf("this gc is %s, below the version floor %s the split leaves in %s, which every gc that reads it obeys: it would split the city and then refuse to run it. Split with gc %s or later; nothing was written", running, floor, minGCVersionPath(cityPath), floor)
@@ -826,17 +905,7 @@ func doStorageSplitAbandon(ctx context.Context, request storageOperatorRequest, 
 		return 1
 	}
 	cityPath := request.CityPath
-	judge := func() (storageSplitJournal, error) {
-		j, present, err := readStorageSplitJournal(cityPath)
-		switch {
-		case err != nil:
-			return j, err
-		case !present || !j.open():
-			return j, errors.New("no split is under way, so there is nothing to abandon")
-		}
-		return j, splitAbandonRefusal(j)
-	}
-	journal, err := judge()
+	journal, err := splitAbandonJudge(cityPath, request.Cfg)
 	if err != nil {
 		return fail(err)
 	}
@@ -859,7 +928,7 @@ func doStorageSplitAbandon(ctx context.Context, request storageOperatorRequest, 
 	if err := infraEngineCrashPoint("split abandon guarded"); err != nil {
 		return fail(err)
 	}
-	again, err := judge()
+	again, err := splitAbandonJudge(cityPath, request.Cfg)
 	if err != nil {
 		return fail(err)
 	}
@@ -874,17 +943,12 @@ func doStorageSplitAbandon(ctx context.Context, request storageOperatorRequest, 
 			return fail(err)
 		}
 	}
-	// A split that stopped before its city.toml record (P4a) wrote no
-	// [storage], no floor and no binding row: whatever the city holds of
-	// those is someone else's, so the abandon closes the journal and unpins
-	// the snapshot, and touches nothing else.
-	if splitPhaseRank[r.journal.AbandonedFrom] < splitPhaseRank[splitPhaseConfiguring] {
-		unpinSplitSnapshot(r.journal)
-		if err := r.advance(splitPhaseAbandoned); err != nil {
+	if why, only := r.abandonsOnlyItsJournal(); only {
+		if err := r.closeAbandoned(); err != nil {
 			return fail(err)
 		}
-		fmt.Fprintf(stdout, "Abandoned the split %s (stopped at %s, before it wrote city.toml): its journal is closed and snapshot %s in %s is unpinned; nothing else was changed.\n", //nolint:errcheck // best-effort stdout
-			r.journal.Run, r.journal.AbandonedFrom, r.journal.Snapshot, r.journal.SnapshotTo)
+		fmt.Fprintf(stdout, "Abandoned the split %s (stopped at %s, %s): its journal is closed and snapshot %s in %s is unpinned; nothing else was changed.\n", //nolint:errcheck // best-effort stdout
+			r.journal.Run, r.journal.AbandonedFrom, why, r.journal.Snapshot, r.journal.SnapshotTo)
 		return 0
 	}
 	how, err := r.abandonCityTOML()
@@ -907,8 +971,7 @@ func doStorageSplitAbandon(ctx context.Context, request storageOperatorRequest, 
 	if err := infraEngineCrashPoint("split abandon floor"); err != nil {
 		return fail(err)
 	}
-	unpinSplitSnapshot(r.journal)
-	if err := r.advance(splitPhaseAbandoned); err != nil {
+	if err := r.closeAbandoned(); err != nil {
 		return fail(err)
 	}
 	fmt.Fprintf(stdout, "Abandoned the split %s (stopped at %s): city.toml %s; %d half-copied binding row(s) deleted; the version floor %s. Every class is on the work store; start the city with `gc start`. Snapshot %s in %s is unpinned.\n", //nolint:errcheck // best-effort stdout
@@ -916,12 +979,81 @@ func doStorageSplitAbandon(ctx context.Context, request storageOperatorRequest, 
 	return 0
 }
 
+// splitAbandonJudge reads the journal --abandon would close, cfg being the
+// city's config: an error when there is no open split, or when the split may
+// not be abandoned. A split a reverse undid (splitUndone) may be, past its
+// copy's convergence too; any other is as splitAbandonRefusal says.
+func splitAbandonJudge(cityPath string, cfg *config.City) (storageSplitJournal, error) {
+	j, present, err := readStorageSplitJournal(cityPath)
+	switch {
+	case err != nil:
+		return j, err
+	case !present || !j.open():
+		return j, errors.New("no split is under way, so there is nothing to abandon")
+	}
+	undone, err := splitUndone(j, cfg, cityPath)
+	if err != nil || undone {
+		return j, err
+	}
+	return j, splitAbandonRefusal(j)
+}
+
+// abandonsOnlyItsJournal reports whether --abandon closes the journal, unpins
+// the snapshot and touches nothing else, and why. A split that stopped
+// before its city.toml record (P4a) wrote no [storage], no floor and no
+// binding row, so whatever the city holds of those is someone else's. One
+// abandoned from past its copy's convergence was undone since (splitUndone,
+// which alone lets --abandon past it): whatever undid it, the reverse's R4
+// and R5 for one, already put back city.toml, the floor and the binding, and
+// none of them is the split's to change again.
+func (r *splitRun) abandonsOnlyItsJournal() (string, bool) {
+	switch from := splitPhaseRank[r.journal.AbandonedFrom]; {
+	case from < splitPhaseRank[splitPhaseConfiguring]:
+		return "before it wrote city.toml", true
+	case from >= splitPhaseRank[splitPhaseCityConverged]:
+		return "and undone since: city.toml composes no [storage] and its binding no convergence marker", true
+	}
+	return "", false
+}
+
+// closeAbandoned unpins the snapshot and records the split abandoned. A pin
+// it cannot remove stops it before the journal is closed, so the next
+// --abandon removes it.
+func (r *splitRun) closeAbandoned() error {
+	if err := unpinSplitSnapshot(r.journal); err != nil {
+		return fmt.Errorf("%w; the split stays open, and `%s` tries the pin again", err, storageSplitAbandonInstruction())
+	}
+	return r.advance(splitPhaseAbandoned)
+}
+
+// splitUndone reports whether the open split j was undone after it wrote
+// city.toml, as `gc storage migrate --to-work` leaves the split it reverses:
+// city.toml composes no [storage] (cfg), no note holds the city to a binding
+// it served (R4 retires them, and an operator removes one only to attest the
+// binding's contents recovered or abandoned), and j's binding holds no
+// convergence marker (R5 archives its root). There is nothing to continue
+// then: the next split starts over (judgeSplit), doctor says so, and
+// --abandon closes the journal, past the city's copy too.
+func splitUndone(j storageSplitJournal, cfg *config.City, cityPath string) (bool, error) {
+	if !j.open() || splitPhaseRank[j.Phase] < splitPhaseRank[splitPhaseConfigured] || cfg == nil || cfg.Storage != nil {
+		return false, nil
+	}
+	if _, held := revertHoldingNote(storageSplitNone, cityPath); held {
+		return false, nil
+	}
+	state, err := readInfraConvergenceState(j.target())
+	if err != nil {
+		return false, err
+	}
+	return state == infraConvergenceAbsent, nil
+}
+
 // splitAbandonRefusal says why the open split j cannot be abandoned, or nil:
 // a split that stopped before P4a can always be (it wrote nothing to back
-// out); past that, once the city's copy has converged (the journal past it, or a marker,
-// even a stale one, beside the binding), the binding is the city's
-// infrastructure state, and backing the split out by deleting it would lose
-// it. The split's failure hint and --abandon both ask it.
+// out); past that, once the city's copy has converged (the journal past it,
+// or a marker, even a stale one, beside the binding), the binding is the
+// city's infrastructure state, and backing the split out by deleting it would
+// lose it. The split's failure hint and --abandon both ask it.
 func splitAbandonRefusal(j storageSplitJournal) error {
 	// A split that stopped before its city.toml record wrote no binding row:
 	// a marker there now is the operator's own migration, not this split's
@@ -940,7 +1072,7 @@ func splitAbandonRefusal(j storageSplitJournal) error {
 	if splitPhaseRank[j.Phase] < splitPhaseRank[splitPhaseCityConverged] && state == infraConvergenceAbsent {
 		return nil
 	}
-	return fmt.Errorf("the split %s converged the city's copy into binding %s (%s): the binding is this city's infrastructure state now, so it is not backed out by deleting it. Finish the split with `%s`, then reverse it with `%s`, which keeps every bead written since", j.Run, j.Binding, j.target().MarkerPath(), storageSplitInstruction(), storageReverseInstruction(reverseToWork, nil))
+	return fmt.Errorf("the split %s converged the city's copy into binding %s (%s): the binding is this city's infrastructure state now, so it is not backed out by deleting it. Finish the split with `%s`, then reverse it with `%s`, which keeps every bead written since", j.Run, j.Binding, j.target().MarkerPath(), j.continueInstruction(), storageReverseInstruction(reverseToWork, nil))
 }
 
 // abandonCityTOML takes [storage] back out of city.toml: the bytes from

@@ -79,8 +79,13 @@ func TestStorageSplitCompletesWithAPseudoVersionGcOnTheSessionPATH(t *testing.T)
 	prev := minGCVersionPathProbe
 	t.Cleanup(func() { minGCVersionPathProbe = prev })
 	minGCVersionPathProbe = probeSessionPathGCVersion
-	if code, stdout, stderr := c.split(splitOptions{}); code != 0 {
+	code, stdout, stderr := c.split(splitOptions{})
+	if code != 0 {
 		t.Fatalf("split by a pseudo-version build that is the session PATH gc = %d:\n%s\n%s", code, stdout, stderr)
+	}
+	// P0 (round 2's session-PATH check) notes it rather than blocking.
+	if !strings.Contains(stdout, "which cannot be compared with the floor") || strings.Contains(stdout, "[BLOCK]") {
+		t.Fatalf("the rehearsal did not note the pseudo-version PATH gc:\n%s", stdout)
 	}
 	c.assertSplit()
 	res := newStorageSplitCheck(c.reload().Cfg, c.request.CityPath).Run(nil)

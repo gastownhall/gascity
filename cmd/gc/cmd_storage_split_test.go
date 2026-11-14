@@ -488,8 +488,9 @@ func TestStorageSplitJournalJudge(t *testing.T) {
 		{"snapshotted, unsplit", splitJudgement{journal: at(splitPhaseSnapshotted), sha: "before"}, splitFresh, "starting it over", ""},
 		{"readied, unsplit", splitJudgement{journal: at(splitPhaseReadied), sha: "before"}, splitFresh, "starting it over", ""},
 		{"readied, authored by hand", splitJudgement{journal: at(splitPhaseReadied), authored: true, splitting: true}, splitRefuse, "", "--abandon"},
-		{"configuring, file as before", splitJudgement{journal: at(splitPhaseConfiguring), sha: "before"}, splitResume, "", ""},
+		{"configuring, file as before", splitJudgement{journal: at(splitPhaseConfiguring), sha: "before"}, splitFresh, "starting it over", ""},
 		{"configuring, file written", splitJudgement{journal: at(splitPhaseConfiguring), authored: true, splitting: true, sha: "after"}, splitResume, "", ""},
+		{"configuring, the split's storage edited", splitJudgement{journal: at(splitPhaseConfiguring), authored: true, splitting: true, sha: "other"}, splitRefuse, "", "neither the file the split recorded"},
 		{"configuring, file edited, no storage", splitJudgement{journal: at(splitPhaseConfiguring), sha: "other"}, splitFresh, "starting a new split", ""},
 		{"configured, as written", splitJudgement{journal: at(splitPhaseConfigured), authored: true, splitting: true, sha: "after"}, splitResume, "", ""},
 		{"city converged, edited", splitJudgement{journal: at(splitPhaseCityConverged), authored: true, splitting: true, sha: "edited"}, splitResume, "in place and keeps the change", ""},
@@ -1163,12 +1164,19 @@ func TestDoctorStorageSplitNamesAnOpenSplitJournal(t *testing.T) {
 
 // TestStorageSplitVerifyFailsOnADoctorError: P9 runs the storage-split doctor
 // check, and an error there (a gc on the session PATH older than the floor
-// the split wrote, B10) fails the run with the journal left before complete;
-// fixed, the same command closes the split.
+// the split wrote, B10, put there after the rehearsal checked it) fails the
+// run with the journal left before complete; fixed, the same command closes
+// the split.
 func TestStorageSplitVerifyFailsOnADoctorError(t *testing.T) {
 	c := newGuidedSplitCity(t)
-	prev := minGCVersionPathProbe
-	minGCVersionPathProbe = func(*config.City) (string, string, error) { return "/old/gc", "1.5.1", nil }
+	prevPoint := infraEngineCrashPoint
+	t.Cleanup(func() { infraEngineCrashPoint = prevPoint })
+	infraEngineCrashPoint = func(p string) error {
+		if p == "split "+splitPhaseRigsImported {
+			minGCVersionPathProbe = func(*config.City) (string, string, error) { return "/old/gc", "1.5.1", nil }
+		}
+		return nil
+	}
 	code, stdout, stderr := c.split(splitOptions{})
 	if code == 0 || !strings.Contains(stderr, "storage-split doctor check") {
 		t.Fatalf("split with an old gc on the session PATH = %d:\n%s\n%s", code, stdout, stderr)
@@ -1176,8 +1184,7 @@ func TestStorageSplitVerifyFailsOnADoctorError(t *testing.T) {
 	if j := c.journal(); j.Phase != splitPhaseRigsImported {
 		t.Fatalf("the journal = %s, want rigs_imported", j.Phase)
 	}
-	minGCVersionPathProbe = prev
-	t.Cleanup(func() { minGCVersionPathProbe = prev })
+	infraEngineCrashPoint = prevPoint
 	minGCVersionPathProbe = func(*config.City) (string, string, error) { return "", "", nil }
 	if code, stdout, stderr := c.split(splitOptions{}); code != 0 {
 		t.Fatalf("the rerun = %d:\n%s\n%s", code, stdout, stderr)

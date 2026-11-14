@@ -336,6 +336,7 @@ func doStorageSplitPreflight(request storageOperatorRequest, stdout, stderr io.W
 		block("gc version", err)
 		return splitPreflightFooter(stdout, request, summary), summary
 	}
+	splitPreflightSessionGC(request, stdout, block)
 
 	// The reconciler, before and after: an existing city moves its storage
 	// and its reconciler in one step. A mode the split city would refuse to
@@ -412,6 +413,37 @@ func doStorageSplitPreflight(request storageOperatorRequest, stdout, stderr io.W
 	}
 	summary.Estimate = splitPreflightEstimate(request, found, lane, diag, known, stdout, block)
 	return splitPreflightFooter(stdout, request, summary), summary
+}
+
+// splitPreflightSessionGC holds the gc an agent session runs (B10) against
+// the floor the split leaves (splitLeavesFloor): agents running a gc below it
+// do not read the split. The rehearsal blocks on it, so the split refuses
+// with nothing written instead of finding it in the storage-split doctor
+// check its last phase runs, once the city is cut over and its rigs
+// imported. A gc it cannot run or whose version does not compare is a note,
+// as in that check.
+func splitPreflightSessionGC(request storageOperatorRequest, stdout io.Writer, block func(string, error)) {
+	const check = "gc version"
+	floor, err := splitLeavesFloor(request.CityPath, splitMinGCVersion)
+	if err != nil {
+		block(check, err)
+		return
+	}
+	path, running, err := minGCVersionPathProbe(request.Cfg)
+	switch {
+	case err != nil:
+		preflightNote(stdout, check, fmt.Sprintf("the gc on the session PATH could not report its version (%v), so it is not compared with the floor %s", err, floor))
+	case path == "":
+		preflightNote(stdout, check, "no gc on the session PATH to compare with the floor "+floor)
+	case gcVersionBelowFloor(running, floor):
+		block(check, fmt.Errorf("the gc on the session PATH (%s) is %s, below the floor %s the split leaves: agents running it do not read the split. Upgrade it, or take it off the PATH agent sessions get, and run this again", path, running, floor))
+	default:
+		if _, ok := gcVersionCore(running); !ok {
+			preflightNote(stdout, check, fmt.Sprintf("the gc on the session PATH (%s) reports version %s, which cannot be compared with the floor %s", path, running, floor))
+			return
+		}
+		preflightPass(stdout, check, fmt.Sprintf("the gc on the session PATH (%s) is %s, at or above the floor %s", path, running, floor))
+	}
 }
 
 // splitConvergedRefusal is the refusal for an unsplit city whose split
