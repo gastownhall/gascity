@@ -70,14 +70,40 @@ fi
 # Capture jq output into variables (instead of piping into the loops) so
 # producer failures still trip pipefail+set -e fail-loud, and the loop
 # bodies run in the parent shell — RESOLVED is incremented in scope and
-# survives to the summary echo below. CLOSED is pre-validated as a
-# non-empty array above, so CLOSED_IDS is non-empty here.
+# survives to the summary echo below.
+#
+# Order-tracking beads are left out. Every order run creates one and closes
+# it, so in a busy city they are nearly all of the lookback's closes (82 of 83
+# in a 20-minute sample of one city), and none is ever a blocker: a dependency
+# lookup per tracking bead on every run is pure cost. A bead with no label
+# list is kept.
 RESOLVED=0
-CLOSED_IDS=$(echo "$CLOSED" | jq -r '.[].id' 2>/dev/null)
+CLOSED_IDS=$(echo "$CLOSED" | jq -r '.[]
+    | select(((.labels // []) | if type == "array" then index("order-tracking") else null end) == null)
+    | .id // empty' 2>/dev/null)
+[ -n "$CLOSED_IDS" ] || exit 0
 # Bead-id prefixes of suspended rigs. A suspended rig is left cold: any bd
 # read restarts its retired proxy, so its beads wait for it to resume.
 SUSPENDED_PREFIXES=$(gc rig list --json 2>/dev/null \
     | jq -r '(.rigs // [])[] | select(.hq != true and .suspended == true) | .prefix' 2>/dev/null) || SUSPENDED_PREFIXES=""
+if [ -n "$SUSPENDED_PREFIXES" ]; then
+    CLOSED_IDS=$(printf '%s\n' "$CLOSED_IDS" | while IFS= read -r closed_id; do
+        printf '%s\n' "$SUSPENDED_PREFIXES" | grep -qxF "${closed_id%%-*}" || printf '%s\n' "$closed_id"
+    done)
+    [ -n "$CLOSED_IDS" ] || exit 0
+fi
+
+# One batched dependents read answers the common case, a lookback where no
+# closed bead has an external dependent, in a single bd call. It does not say
+# which closed bead each dependent hangs off, so when it finds an external
+# dependent (or the batch read fails, as on a bd without multi-id dep list)
+# the per-bead walk below does the conversion.
+# shellcheck disable=SC2086 # one bead id per word, split on purpose
+ALL_DEPS=$(gc bd dep list $CLOSED_IDS --direction=up --type=blocks --json 2>/dev/null) || ALL_DEPS=""
+if [ -n "$ALL_DEPS" ] && printf '%s' "$ALL_DEPS" | jq -e 'type == "array" and all(.[]; ((.id // "") | startswith("external:")) | not)' >/dev/null 2>&1; then
+    exit 0
+fi
+
 while IFS= read -r closed_id; do
     if [ -n "$SUSPENDED_PREFIXES" ] && printf '%s\n' "$SUSPENDED_PREFIXES" | grep -qxF "${closed_id%%-*}"; then
         continue
