@@ -337,6 +337,53 @@ func TestStampRunRootFromStepPreservesRootEvidenceAgainstPoolSlotCwd(t *testing.
 	}
 }
 
+func TestStampRunSessionIdentityPreservesRootEvidenceAgainstPoolSlotStepCwd(t *testing.T) {
+	// ga-q8ol2y: stampRunRootFromStep's clobber guard is exercised today only
+	// via a direct call (TestStampRunRootFromStepPreservesRootEvidenceAgainstPoolSlotCwd,
+	// hardcoded allowUnownedWorkDir=true) or through stampRunSessionIdentity
+	// with a bead that carries no gc.root_bead_id
+	// (TestStampRunSessionIdentityPreservesRealEvidenceAgainstPoolSlotSelfCwd,
+	// which only reaches the sibling work-bead-level guard). Neither exercises
+	// the full wiring: a STEP bead whose session info is resolved through
+	// stampRunSessionIdentity's own sessionByAssignee/PoolManaged machinery,
+	// with the resulting allowUnownedWorkDir flowing into stampRunRootFromStep's
+	// root-level guard.
+	const (
+		sessionName  = "gascity--builder-1"
+		poolSlotSelf = "/home/jaword/projects/gc-management/.gc/worktrees/gascity/builder-1"
+		realEvidence = "/home/ds/gascity-worktrees/ga-3c5isi"
+	)
+	root := beads.Bead{
+		ID: "ga-root", Type: "molecule", Status: "in_progress",
+		Metadata: map[string]string{"gc.kind": "workflow", "gc.work_dir": realEvidence},
+	}
+	step := beads.Bead{
+		ID: "ga-step", Type: "step", Status: "in_progress", Assignee: sessionName,
+		Metadata: map[string]string{"gc.root_bead_id": "ga-root"},
+	}
+	mem := beads.NewMemStoreFrom(0, []beads.Bead{root, step}, nil)
+	store := &countingStore{Store: mem}
+	// pool_managed is deliberately left unset: a non-pool-managed session
+	// running from a pool-slot-shaped self cwd is exactly the scenario where
+	// stampRunSessionIdentity computes allowUnownedWorkDir=true and passes it
+	// down to the root guard.
+	sessions := newSessionBeadSnapshot([]beads.Bead{stampTestSession(sessionName, poolSlotSelf)})
+
+	stampRunSessionIdentity(gaConfig(), []beads.Bead{step}, []beads.Store{store}, sessions, io.Discard)
+
+	gotRoot, err := mem.Get("ga-root")
+	if err != nil {
+		t.Fatalf("Get(ga-root): %v", err)
+	}
+	if gotRoot.Metadata["gc.work_dir"] != realEvidence {
+		t.Errorf("root gc.work_dir = %q, want %q (real worktree evidence must survive a pool-slot step cwd reached through stampRunSessionIdentity)",
+			gotRoot.Metadata["gc.work_dir"], realEvidence)
+	}
+	if gotRoot.Metadata["gc.session_name"] != sessionName {
+		t.Errorf("root gc.session_name = %q, want %q", gotRoot.Metadata["gc.session_name"], sessionName)
+	}
+}
+
 func TestRepairPoolSlotWorkDirClobberThenStampPreservesLiveWorkDir(t *testing.T) {
 	// Ordering regression: the reconciler collects the work slice once and
 	// neither pass refreshes it, so a repair sweep placed AFTER
