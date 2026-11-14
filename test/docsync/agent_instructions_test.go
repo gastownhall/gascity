@@ -33,15 +33,45 @@ var agentTestRefRE = regexp.MustCompile("`(Test[A-Z][A-Za-z0-9_]*)`")
 
 var goTestFuncRE = regexp.MustCompile(`(?m)^func (Test[A-Za-z0-9_]+)\(`)
 
+// rootAgentsSeatMarkerBudgetBytes caps the seat-digest marker lines
+// (cmd/gen-seat-digest) that rootAgentsBudgetBytes does not count. They are
+// structure, not guidance, and stay far below Codex's 32 KiB limit.
+const rootAgentsSeatMarkerBudgetBytes = 512
+
 func TestRootAgentsFileWithinBudget(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(repoRoot(), "AGENTS.md"))
 	if err != nil {
 		t.Fatalf("reading root AGENTS.md: %v", err)
 	}
-	if len(data) > rootAgentsBudgetBytes {
-		t.Errorf("root AGENTS.md is %d bytes, budget is %d. Move area-specific rules "+
+	markers := seatMarkerBytes(data)
+	if markers > rootAgentsSeatMarkerBudgetBytes {
+		t.Errorf("root AGENTS.md has %d bytes of seat-digest markers, budget is %d: merge adjacent regions",
+			markers, rootAgentsSeatMarkerBudgetBytes)
+	}
+	if size := len(data) - markers; size > rootAgentsBudgetBytes {
+		t.Errorf("root AGENTS.md is %d bytes (seat markers excluded), budget is %d. Move area-specific rules "+
 			"verbatim into the owning directory's AGENTS.md and add a row to the "+
-			"\"Read first\" table instead of growing the root file.", len(data), rootAgentsBudgetBytes)
+			"\"Read first\" table instead of growing the root file.", size, rootAgentsBudgetBytes)
+	}
+}
+
+// seatMarkerBytes counts the bytes, newlines included, of the
+// "<!-- seat:begin -->" and "<!-- seat:end -->" lines in data.
+func seatMarkerBytes(data []byte) int {
+	n := 0
+	for _, line := range bytes.SplitAfter(data, []byte("\n")) {
+		switch string(bytes.TrimSpace(line)) {
+		case "<!-- seat:begin -->", "<!-- seat:end -->":
+			n += len(line)
+		}
+	}
+	return n
+}
+
+func TestSeatMarkerBytesCountsOnlyMarkerLines(t *testing.T) {
+	data := []byte("# T\n<!-- seat:begin -->\ntext <!-- seat:end --> inline\n<!-- seat:end -->\n")
+	if got, want := seatMarkerBytes(data), len("<!-- seat:begin -->\n")+len("<!-- seat:end -->\n"); got != want {
+		t.Fatalf("seatMarkerBytes = %d, want %d", got, want)
 	}
 }
 
