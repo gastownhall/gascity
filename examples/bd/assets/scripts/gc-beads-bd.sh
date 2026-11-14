@@ -3021,27 +3021,35 @@ attempt_journal_corruption_recovery() {
 # binary's pid in GC_MANAGED_DOLT_TEST_PARENT_PID, which gc passes to its
 # children only from a test binary. The watchdog polls the parent once a
 # second, exits as soon as the server is gone, and signals the pid only while
-# it is still the dolt sql-server started with config_file: if the server dies
-# and its pid is reused by another dolt sql-server (a parallel test's, or the
-# host's own) between polls, that server is left alone.
+# it is still the process it was armed for: a dolt sql-server with the start
+# time ps reported when it was armed. If the server dies and its pid is reused
+# by another dolt sql-server (a parallel test's, or the host's own) between
+# polls, that server started later and is left alone. The start time, not the
+# --config path on the command line, is the identity because ps renders a
+# non-ASCII byte in that path differently by locale (escaped under C, as with
+# an unset LANG), and the watchdog may run under another locale than the path
+# was written in.
 start_dolt_test_parent_watchdog() {
-    local server_pid="$1" config_file="$2" parent_pid
+    local server_pid="$1" parent_pid started
     [ "${GC_MANAGED_DOLT_TEST_MODE:-}" = "1" ] || return 0
-    [ -n "$config_file" ] || return 0
     parent_pid="${GC_MANAGED_DOLT_TEST_PARENT_PID:-}"
     case "$parent_pid" in
         ''|*[!0-9]*) return 0 ;;
     esac
     [ "$parent_pid" -gt 1 ] || return 0
+    # Read at once after the launch, before the pid can plausibly have been
+    # reused. A server that has already exited gives no start time and arms
+    # no watchdog.
+    started=$(ps -p "$server_pid" -o lstart= 2>/dev/null)
+    [ -n "$started" ] || return 0
     # Detached from this script's stdio and its start lock (fd 9), so neither
     # the caller's output pipe nor the lock is held for the server's lifetime.
     nohup sh -c '
-        # $1 is a pid, $2 the --config path its server was started with. The
-        # path must end the command line or be followed by a space, so a
-        # config path that only starts with $2 does not match.
-        is_dolt_server() {
+        # $1 is a pid, $2 the start time ps reported for it when armed.
+        is_armed_server() {
+            [ "$(ps -p "$1" -o lstart= 2>/dev/null)" = "$2" ] || return 1
             case "$(ps -p "$1" -o args= 2>/dev/null)" in
-                *"dolt sql-server --config $2"|*"dolt sql-server --config $2 "*) return 0 ;;
+                *"dolt sql-server"*) return 0 ;;
             esac
             return 1
         }
@@ -3049,17 +3057,17 @@ start_dolt_test_parent_watchdog() {
             kill -0 "$2" 2>/dev/null || exit 0
             sleep 1
         done
-        is_dolt_server "$2" "$3" || exit 0
+        is_armed_server "$2" "$3" || exit 0
         kill -TERM "$2" 2>/dev/null || exit 0
         i=0
         while [ "$i" -lt 20 ]; do
-            is_dolt_server "$2" "$3" || exit 0
+            is_armed_server "$2" "$3" || exit 0
             sleep 0.5 2>/dev/null || sleep 1
             i=$((i + 1))
         done
-        is_dolt_server "$2" "$3" && kill -KILL "$2" 2>/dev/null
+        is_armed_server "$2" "$3" && kill -KILL "$2" 2>/dev/null
         exit 0
-    ' sh "$parent_pid" "$server_pid" "$config_file" </dev/null >/dev/null 2>&1 9>&- &
+    ' sh "$parent_pid" "$server_pid" "$started" </dev/null >/dev/null 2>&1 9>&- &
 }
 
 # op_start starts the dolt server if not already running.
@@ -3270,7 +3278,7 @@ op_start() {
         # the child so the flock is released when this starter exits.
         nohup sh -c 'exec 9>&-; exec dolt sql-server --config "$1"' sh "$CONFIG_FILE" >> "$LOG_FILE" 2>&1 &
         local server_pid=$!
-        start_dolt_test_parent_watchdog "$server_pid" "$CONFIG_FILE"
+        start_dolt_test_parent_watchdog "$server_pid"
 
         # Write PID file.
         echo "$server_pid" > "$PID_FILE"

@@ -102,7 +102,7 @@ func runTestParentWatchdog(t *testing.T, f *testParentWatchdogFixture, testMode 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", "-c", fnSrc+"\nstart_dolt_test_parent_watchdog \"$1\" \"$2\"\n", "watchdog", strconv.Itoa(f.server.Process.Pid), f.server.Args[3])
+	cmd := exec.CommandContext(ctx, "sh", "-c", fnSrc+"\nstart_dolt_test_parent_watchdog \"$1\"\n", "watchdog", strconv.Itoa(f.server.Process.Pid))
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() != nil {
