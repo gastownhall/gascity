@@ -4328,10 +4328,13 @@ func TestConvoyListLimitCommandFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
+	var created []string
 	for _, title := range []string{"first", "second", "third"} {
-		if _, err := store.Create(beads.Bead{Title: title, Type: "convoy"}); err != nil {
+		b, err := store.Create(beads.Bead{Title: title, Type: "convoy"})
+		if err != nil {
 			t.Fatalf("create convoy %s: %v", title, err)
 		}
+		created = append(created, b.ID)
 	}
 
 	t.Run("cut", func(t *testing.T) {
@@ -4340,8 +4343,8 @@ func TestConvoyListLimitCommandFlag(t *testing.T) {
 			t.Fatalf("exit = %d; stderr=%s stdout=%s", code, stderr.String(), stdout.String())
 		}
 		result, ids := decodeConvoyListJSON(t, stdout.String())
-		if want := []string{"gc-2", "gc-3"}; !slices.Equal(ids, want) {
-			t.Errorf("convoys = %v, want %v", ids, want)
+		if want := created[1:]; !slices.Equal(ids, want) {
+			t.Errorf("convoys = %v, want the two newest, %v", ids, want)
 		}
 		if result.Summary.Total != 3 || !result.Summary.Truncated {
 			t.Errorf("summary = %+v, want total 3 and truncated", result.Summary)
@@ -4353,7 +4356,7 @@ func TestConvoyListLimitCommandFlag(t *testing.T) {
 
 	t.Run("negative is a usage error", func(t *testing.T) {
 		var stdout, stderr bytes.Buffer
-		code := run([]string{"convoy", "list", "--json", "--limit", "-1"}, &stdout, &stderr)
+		code := run([]string{"convoy", "list", "--limit", "-1"}, &stdout, &stderr)
 		if code == 0 {
 			t.Errorf("exit = 0, want a usage error")
 		}

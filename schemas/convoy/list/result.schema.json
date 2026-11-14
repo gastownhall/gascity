@@ -98,6 +98,10 @@
         "hidden_synthetic": {
           "type": "integer",
           "description": "Synthetic convoys left out (--include-synthetic lists them). Omitted when 0."
+        },
+        "truncated": {
+          "type": "boolean",
+          "description": "True when --limit cut the listing: convoys holds the newest N and total counts the convoys the complete listing would print. Omitted when the listing is complete."
         }
       },
       "additionalProperties": true

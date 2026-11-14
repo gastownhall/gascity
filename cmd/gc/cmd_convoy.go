@@ -298,9 +298,19 @@ child issues.
 Synthetic convoys (metadata gc.synthetic=true) are hidden by default:
 the system mints one per formula launch on a single bead and per
 drained work unit, so a busy city holds thousands of them. The output
-says how many were hidden; --include-synthetic lists them too.`,
+says how many were hidden; --include-synthetic lists them too.
+
+--limit N lists only the newest N of the convoys the listing would
+otherwise print (by creation time), so a busy city's list stays short.
+The output then says on stderr that it was cut and how many convoys the
+complete listing holds; --json sets summary.truncated and summary.total
+counts the complete listing. Omit --limit, or pass 0, to list them all.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if opts.limit < 0 {
+				fmt.Fprintf(stderr, "gc convoy list: --limit must be 0 or greater, got %d\n", opts.limit) //nolint:errcheck // best-effort stderr
+				return errExit
+			}
 			if cmdConvoyList(opts, stdout, stderr) != 0 {
 				return errExit
 			}
@@ -309,6 +319,7 @@ says how many were hidden; --include-synthetic lists them too.`,
 	}
 	cmd.Flags().BoolVar(&opts.jsonOut, "json", false, "emit JSONL result")
 	cmd.Flags().BoolVar(&opts.includeSynthetic, "include-synthetic", false, "also list synthetic convoys (gc.synthetic=true), minted for formula launches and drained work units")
+	cmd.Flags().IntVar(&opts.limit, "limit", 0, "list only the newest N convoys (0 = all); a cut is noted on stderr and, with --json, in summary.truncated")
 	return cmd
 }
 
@@ -316,7 +327,15 @@ says how many were hidden; --include-synthetic lists them too.`,
 type convoyListOptions struct {
 	jsonOut          bool
 	includeSynthetic bool
-	limit            int
+	// limit lists only the newest limit convoys; 0 lists them all.
+	limit int
+}
+
+// convoyListTally is what a convoy listing counts besides its rows: listed
+// is the rows the complete listing would print, hidden the synthetic convoys
+// left out of it, limit the --limit that cut it (0: none).
+type convoyListTally struct {
+	listed, hidden, limit int
 }
 
 // withoutSyntheticConvoys drops the synthetic convoys (convoycore.IsSynthetic)
@@ -336,6 +355,41 @@ func withoutSyntheticConvoys[T any](convoys []T, beadOf func(T) beads.Bead, incl
 		kept = append(kept, c)
 	}
 	return kept, hidden
+}
+
+// newestConvoys keeps the limit newest convoys (CreatedAt, then ID, descending;
+// Title ascending as the last tiebreak) and reports how many it was given. A
+// limit of 0, or one the convoys fit within, keeps them all. The kept convoys
+// stay in the order they came in, so a caller that sorted them for listing
+// still has them in that order; convoys itself is never reordered. Callers cut
+// right after hiding the synthetic convoys and before any per-convoy read, so
+// a convoy the limit leaves out costs no membership read or check.
+func newestConvoys[T any](convoys []T, beadOf func(T) beads.Bead, limit int) (kept []T, listed int) {
+	listed = len(convoys)
+	if limit <= 0 || listed <= limit {
+		return convoys, listed
+	}
+	newestFirst := make([]int, listed)
+	for i := range newestFirst {
+		newestFirst[i] = i
+	}
+	sort.SliceStable(newestFirst, func(i, j int) bool {
+		a, b := beadOf(convoys[newestFirst[i]]), beadOf(convoys[newestFirst[j]])
+		if !a.CreatedAt.Equal(b.CreatedAt) {
+			return a.CreatedAt.After(b.CreatedAt)
+		}
+		if a.ID != b.ID {
+			return a.ID > b.ID
+		}
+		return a.Title < b.Title
+	})
+	keep := newestFirst[:limit]
+	sort.Ints(keep)
+	kept = make([]T, 0, limit)
+	for _, i := range keep {
+		kept = append(kept, convoys[i])
+	}
+	return kept, listed
 }
 
 // writeHiddenSyntheticNote tells a human reader how many synthetic convoys
@@ -376,6 +430,12 @@ var convoyListAPIClient = func(cityPath string) (*api.Client, string) {
 // fallbackable error, the whole operation falls back to local reads so
 // output is consistent (partial failure would produce surprising gaps).
 //
+// --limit cuts to the newest N listed convoys (newestConvoys) after the whole
+// list is drained and the synthetic convoys are hidden, so it bounds the
+// per-row /check work, not the /convoys reads: a total the complete listing
+// holds needs every page, and a list a store failed to give in full is an
+// error, never a "newest N".
+//
 // Rows are sorted by ID (sortConvoysForListing) and rendered by the local
 // route's writer, so both routes print the same output. A /convoys answer the
 // server marks partial is an error (exit 1), as a failed store read is on the
@@ -390,7 +450,7 @@ var convoyListAPIClient = func(cityPath string) (*api.Client, string) {
 // prints the one answer for each and says so.
 func routeConvoyList(cityPath string, c *api.Client, nilReason string, opts convoyListOptions, stdout, stderr io.Writer) int {
 	var cr api.CachedRead[[]beads.Bead]
-	var hidden int
+	var tally convoyListTally
 	var progress []api.ConvoyCheckView
 	var sharedIDs []string
 	return routeRead(c, "convoy list", nilReason, stderr,
@@ -399,11 +459,15 @@ func routeConvoyList(cityPath string, c *api.Client, nilReason string, opts conv
 			if cr, err = c.ListConvoys(); err != nil {
 				return err
 			}
+			// The whole drained list, before the hiding and the --limit cut: a
+			// repeated ID is a fact about the stores, not about the rows kept.
 			if sharedIDs = repeatedConvoyIDs(cr.Body); len(sharedIDs) > 0 && !c.IsRemote() {
 				return fallbackAfterFetch{Reason: "convoy-id-in-several-stores"}
 			}
 			beadOf := func(b beads.Bead) beads.Bead { return b }
-			cr.Body, hidden = withoutSyntheticConvoys(cr.Body, beadOf, opts.includeSynthetic)
+			cr.Body, tally.hidden = withoutSyntheticConvoys(cr.Body, beadOf, opts.includeSynthetic)
+			cr.Body, tally.listed = newestConvoys(cr.Body, beadOf, opts.limit)
+			tally.limit = opts.limit
 			sortConvoysForListing(cr.Body, beadOf)
 			if progress, err = fetchConvoyProgress(c, cr.Body); err != nil {
 				return err
@@ -414,7 +478,7 @@ func routeConvoyList(cityPath string, c *api.Client, nilReason string, opts conv
 			return nil
 		},
 		func() int {
-			return renderConvoyListFromAPI(cr, progress, hidden, sharedIDs, opts.jsonOut, stdout, stderr)
+			return renderConvoyListFromAPI(cr, progress, tally, sharedIDs, opts.jsonOut, stdout, stderr)
 		},
 		func() int { return doConvoyListFallback(cityPath, opts, stdout, stderr) },
 	)
@@ -468,13 +532,14 @@ func fetchConvoyProgress(c *api.Client, convoys []beads.Bead) ([]api.ConvoyCheck
 
 // renderConvoyListFromAPI renders the API-sourced convoy list through the
 // same writer as the local route (writeConvoyList), so both print one schema
-// with one content. hidden is the number of synthetic convoys left out. A
-// non-empty human listing is followed by the cache-age footer on stderr when
-// the server's cache is behind (writeCacheAgeFooter). Two cases reach it only on a remote target, which
-// has no local route, and each is named on stderr: a server that predates
+// with one content. tally counts the convoys listed, the synthetic ones left
+// out and the --limit that cut the listing. A non-empty human listing is
+// followed by the cache-age footer on stderr when the server's cache is behind
+// (writeCacheAgeFooter). Two cases reach it only on a remote target, which has
+// no local route, and each is named on stderr: a server that predates
 // child_ids, and sharedIDs, the IDs that more than one store's convoy carries,
 // whose rows all show the one store's progress /convoy/{id}/check reports.
-func renderConvoyListFromAPI(cr api.CachedRead[[]beads.Bead], progress []api.ConvoyCheckView, hidden int, sharedIDs []string, jsonOut bool, stdout, stderr io.Writer) int {
+func renderConvoyListFromAPI(cr api.CachedRead[[]beads.Bead], progress []api.ConvoyCheckView, tally convoyListTally, sharedIDs []string, jsonOut bool, stdout, stderr io.Writer) int {
 	if convoyChecksLackChildIDs(progress) {
 		fmt.Fprintln(stderr, "gc convoy list: this city's API predates child_ids; child_ids and dangling-track counts are left out") //nolint:errcheck // best-effort stderr
 	}
@@ -485,7 +550,7 @@ func renderConvoyListFromAPI(cr api.CachedRead[[]beads.Bead], progress []api.Con
 	for i, convoy := range cr.Body {
 		rows = append(rows, convoySummaryFromAPI(convoy, progress[i]))
 	}
-	if code := writeConvoyList(rows, hidden, jsonOut, stdout, stderr); code != 0 {
+	if code := writeConvoyList(rows, tally, jsonOut, stdout, stderr); code != 0 {
 		return code
 	}
 	if !jsonOut && len(rows) > 0 {
@@ -1420,13 +1485,15 @@ func doConvoyListAcrossStores(stores []convoyStoreView, opts convoyListOptions, 
 		fmt.Fprintf(stderr, "gc convoy list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	convoys, hidden := withoutSyntheticConvoys(openConvoys, func(c convoyWithStore) beads.Bead { return c.bead }, opts.includeSynthetic)
+	beadOf := func(c convoyWithStore) beads.Bead { return c.bead }
+	convoys, hidden := withoutSyntheticConvoys(openConvoys, beadOf, opts.includeSynthetic)
+	convoys, listed := newestConvoys(convoys, beadOf, opts.limit)
 	rows, err := convoyListRows(convoys)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc convoy list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	return writeConvoyList(rows, hidden, opts.jsonOut, stdout, stderr)
+	return writeConvoyList(rows, convoyListTally{listed: listed, hidden: hidden, limit: opts.limit}, opts.jsonOut, stdout, stderr)
 }
 
 // convoyListRows reads each convoy's members from the store it was listed
@@ -1443,15 +1510,30 @@ func convoyListRows(convoys []convoyWithStore) ([]convoySummaryJSON, error) {
 	return rows, nil
 }
 
-// writeConvoyList prints gc convoy list's rows: the schema-v1 JSON result, or
-// the ID/TITLE/PROGRESS table followed by the hidden-synthetic note. Both
-// routes render through it, so they print the same thing for the same rows.
-func writeConvoyList(rows []convoySummaryJSON, hidden int, jsonOut bool, stdout, stderr io.Writer) int {
+// writeConvoyList prints gc convoy list's rows (writeConvoyListRows), then,
+// when --limit left rows out (fewer rows than tally.listed), says so on
+// stderr. Both routes render through it, so they print the same thing for the
+// same rows.
+func writeConvoyList(rows []convoySummaryJSON, tally convoyListTally, jsonOut bool, stdout, stderr io.Writer) int {
+	if code := writeConvoyListRows(rows, tally, jsonOut, stdout, stderr); code != 0 {
+		return code
+	}
+	if len(rows) < tally.listed {
+		fmt.Fprintf(stderr, "gc convoy list: showing %d of %d open convoys (--limit %d); omit --limit to list all\n", len(rows), tally.listed, tally.limit) //nolint:errcheck // best-effort stderr
+	}
+	return 0
+}
+
+// writeConvoyListRows prints the schema-v1 JSON result, or the ID/TITLE/PROGRESS
+// table followed by the hidden-synthetic note. summary.total is the rows the
+// complete listing holds (tally.listed) and summary.truncated is set when
+// --limit left some out.
+func writeConvoyListRows(rows []convoySummaryJSON, tally convoyListTally, jsonOut bool, stdout, stderr io.Writer) int {
 	if jsonOut {
 		if err := writeCLIJSONLine(stdout, convoyListResultJSON{
 			SchemaVersion: "1",
 			Convoys:       rows,
-			Summary:       convoyListSummaryJSON{Total: len(rows), HiddenSynthetic: hidden},
+			Summary:       convoyListSummaryJSON{Total: tally.listed, HiddenSynthetic: tally.hidden, Truncated: len(rows) < tally.listed},
 		}); err != nil {
 			fmt.Fprintf(stderr, "gc convoy list: writing JSON: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -1460,7 +1542,7 @@ func writeConvoyList(rows []convoySummaryJSON, hidden int, jsonOut bool, stdout,
 	}
 	if len(rows) == 0 {
 		fmt.Fprintln(stdout, "No open convoys") //nolint:errcheck // best-effort stdout
-		writeHiddenSyntheticNote(stdout, hidden)
+		writeHiddenSyntheticNote(stdout, tally.hidden)
 		return 0
 	}
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
@@ -1469,7 +1551,7 @@ func writeConvoyList(rows []convoySummaryJSON, hidden int, jsonOut bool, stdout,
 		fmt.Fprintf(tw, "%s\t%s\t%s\n", row.ID, row.Title, formatConvoyProgress(row.Progress)) //nolint:errcheck // best-effort stdout
 	}
 	tw.Flush() //nolint:errcheck // best-effort stdout
-	writeHiddenSyntheticNote(stdout, hidden)
+	writeHiddenSyntheticNote(stdout, tally.hidden)
 	return 0
 }
 

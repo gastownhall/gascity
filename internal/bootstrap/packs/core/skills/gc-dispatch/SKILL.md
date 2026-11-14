@@ -290,7 +290,7 @@ as a manual sling or a patrol pour.
 gc convoy create <name> <bead-ids...>                 # Group beads into a convoy
 gc convoy create <name> --owned --target integration/<slug>  # Long-lived initiative convoy
 gc convoy target <id> <branch>                        # Set/update convoy target branch
-gc convoy list                                        # List active convoys
+gc convoy list [--limit N]                            # List active convoys (--limit N: the newest N).
 gc convoy status <id>                                 # Show convoy progress + metadata
 gc convoy add <id> <bead-ids...>                      # Add beads to convoy
 gc convoy close <id>                                  # Close convoy

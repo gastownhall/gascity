@@ -1387,6 +1387,12 @@ the system mints one per formula launch on a single bead and per
 drained work unit, so a busy city holds thousands of them. The output
 says how many were hidden; --include-synthetic lists them too.
 
+--limit N lists only the newest N of the convoys the listing would
+otherwise print (by creation time), so a busy city's list stays short.
+The output then says on stderr that it was cut and how many convoys the
+complete listing holds; --json sets summary.truncated and summary.total
+counts the complete listing. Omit --limit, or pass 0, to list them all.
+
 ```
 gc convoy list [flags]
 ```
@@ -1395,6 +1401,7 @@ gc convoy list [flags]
 |------|------|---------|-------------|
 | `--include-synthetic` | bool |  | also list synthetic convoys (gc.synthetic=true), minted for formula launches and drained work units |
 | `--json` | bool |  | emit JSONL result |
+| `--limit` | int |  | list only the newest N convoys (0 = all); a cut is noted on stderr and, with --json, in summary.truncated |
 
 ## gc convoy reopen-source
 
