@@ -11,6 +11,7 @@ go_library(
 go_test(
     name = "cipolicy_test",
     srcs = [
+        "go_version_resolution_test.go",
         "policy_test.go",
         "testenv_import_test.go",
     ],
