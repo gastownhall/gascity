@@ -131,7 +131,11 @@ func waitTmux(t *testing.T, what string, ready func() bool) {
 // the operator's pane stand, and nothing starts.
 func TestStartRecycleSparesAZombiesOperatorPaneOnRealTmux(t *testing.T) {
 	sp, tm := realTmux(t, "zag")
-	env := map[string]string{"GC_SESSION_ID": "gc-1", "GC_INSTANCE_TOKEN": "tok", "GC_RUNTIME_EPOCH": "3"}
+	// GT_PROCESS_NAMES records the row's template's process names at launch,
+	// as gc's launch does (ProcessNames, published by the tmux provider). The
+	// fresh read judges the agent dead by those launch names: without them
+	// the operator's live pane reads as a live agent, not a zombie.
+	env := map[string]string{"GC_SESSION_ID": "gc-1", "GC_INSTANCE_TOKEN": "tok", "GC_RUNTIME_EPOCH": "3", "GT_PROCESS_NAMES": "agent"}
 	if err := sp.Start(context.Background(), "s-gc-1", runtime.Config{Command: "sleep 300", Env: env}); err != nil {
 		t.Fatalf("start: %v", err)
 	}

@@ -549,6 +549,7 @@ func TestCloseEffectEdges(t *testing.T) {
 			c := newCloseCase(t, livenessDead, desireDrain, "state", "active")
 			c.entry().DrainReason = drainOrphaned
 			f := corpseRead(c, tc.attached, false)
+			f.env["GT_PROCESS_NAMES"] = "agent"
 			f.l = runtime.Liveness{Running: true, ObjectID: "$1", ObjectCreated: "1", PanePID: "42"}
 			if err := f.Fake.Start(context.Background(), "s-close", runtime.Config{}); err != nil {
 				t.Fatal(err)

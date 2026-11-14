@@ -45,7 +45,7 @@ func TestFreshHealNeverOrphansALiveRuntime(t *testing.T) {
 	}{
 		{"name held by a start", gone().tmux(), true, causeNameBusy},
 		{"alive", (&freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Running: true, Alive: true}}).tmux(), false, causeRuntimePresent},
-		{"live pane, agent dead", (&freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Running: true}}).tmux(), false, causeRuntimePresent},
+		{"live pane, agent dead", (&freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Running: true}, env: map[string]string{"GT_PROCESS_NAMES": "agent"}}).tmux(), false, causeRuntimePresent},
 		{"corpse", (&freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Corpse: true}}).tmux(), false, causeRuntimePresent},
 		{"incomplete", (&freshObserver{Fake: runtime.NewFake(), err: unavailable}).tmux(), false, causeLivenessUnknown},
 		{"no error-bearing read", runtime.NewFake(), false, causeLivenessUnsupported},
