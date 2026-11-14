@@ -12,6 +12,7 @@ import (
 	"fmt"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/coordclass"
 )
 
 // TypedLeg is one plan leg as a consumer reads it.
@@ -29,6 +30,14 @@ type TypedLeg struct {
 	Ref     StoreRef
 	Role    Role
 	OnError ErrPolicy
+
+	// planned is the plan leg the readers were minted from: what BindLeg
+	// rebinds, so no consumer has to unwrap a reader to find its store.
+	planned PlanLeg
+
+	// sessions marks the epoch's sessions leg (Stores.SessionsLeg), the one
+	// leg SessionStoreOn hands a session handle over. BindLeg keeps it.
+	sessions bool
 }
 
 // typedLeg mints l's readers.
@@ -39,6 +48,7 @@ func typedLeg(l PlanLeg) TypedLeg {
 		Ref:     l.Leg.Ref,
 		Role:    l.Role,
 		OnError: l.OnError,
+		planned: l,
 	}
 }
 
@@ -236,7 +246,7 @@ func unionPlan[T any](p ResolvedPlan, id func(T) string, fn func(PlanLeg) ([]T, 
 // BindLegs is p with each leg's store replaced by bind's answer for it: the
 // same federation read through other instances of its stores, such as a
 // request-bound clone of each (cmd/gc's step reminder over the controller's
-// stores; T7e's ScopedStoreLike). Ref, Role, OnError and Gate are kept, and
+// stores; BindLeg, one leg at a time). Ref, Role, OnError and Gate are kept, and
 // the legs are not deduped again: a plan's shape is decided over the stores
 // it was planned over, so a bind that answers one clone for two legs reads
 // both. The first error bind returns is returned, with the leg it was for.
@@ -255,4 +265,54 @@ func BindLegs(p ResolvedPlan, bind func(beads.Store) (beads.Store, error)) (Reso
 		out.Legs[i] = l
 	}
 	return out, nil
+}
+
+// BindLeg is BindLegs for one typed leg: l re-minted over bind's answer for
+// its store, with its Ref, Role, OnError and gate role kept. It is for a
+// reader that binds each leg where it reads it, such as /status's ctx-bound
+// bd clone (ga-cdmx6x), resolved inside each leg's own timed read (gc-08qgn).
+// It runs BindLegs over the one leg, so the two cannot differ; a zero leg is
+// an error.
+func BindLeg(l TypedLeg, bind func(beads.Store) (beads.Store, error)) (TypedLeg, error) {
+	if beads.IsNilStore(l.planned.Leg.Store) {
+		return TypedLeg{}, fmt.Errorf("storeref: BindLeg needs a leg a plan minted")
+	}
+	bound, err := BindLegs(ResolvedPlan{Mode: ModeUnion, Legs: []PlanLeg{l.planned}}, bind)
+	if err != nil {
+		return TypedLeg{}, err
+	}
+	out := typedLeg(bound.Legs[0])
+	out.sessions = l.sessions
+	return out, nil
+}
+
+// SessionsLeg is the epoch's sessions placement as one leg, read strict (a
+// session read through the sessions handle declares no role), and false when
+// the epoch has no sessions store. It is the leg a reader binds to read the
+// sessions store through another instance of it (BindLeg), then reads as a
+// session handle (SessionStoreOn).
+func (s Stores) SessionsLeg() (TypedLeg, bool) {
+	store := s.city.Sessions.Raw()
+	if beads.IsNilStore(store) {
+		return TypedLeg{}, false
+	}
+	l := s.leg(coordclass.ClassSessions, store, WorkRef, RoleAuthority, PolicyFatal)
+	l.Gate = beads.NoLegRole
+	leg := typedLeg(l)
+	leg.sessions = true
+	return leg, true
+}
+
+// SessionStoreOn is the session handle over l's store: the epoch's sessions
+// placement, or the instance BindLeg bound it to. Any leg but one
+// SessionsLeg minted is refused, so no other class's store becomes a session
+// handle.
+func SessionStoreOn(l TypedLeg) (beads.SessionStore, error) {
+	if !l.sessions || beads.IsNilStore(l.planned.Leg.Store) {
+		return beads.SessionStore{}, fmt.Errorf("storeref: SessionStoreOn needs the sessions leg (Stores.SessionsLeg), got %q", legName(l.Ref))
+	}
+	// MintClassStores' sessions handle, minted by literal so NewStores stays
+	// MintClassStores' only caller; T10's removal of the handles' Store field
+	// makes this stop compiling, which is where it moves to the mint.
+	return beads.SessionStore{Store: l.planned.Leg.Store}, nil
 }

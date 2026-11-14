@@ -488,7 +488,8 @@ func (s *Server) rigIdemCity() string {
 // request.failed error_code. A blocked host (the SSRF fence) is checked before
 // the clone sentinel because the fence returns before git runs; a git.Clone
 // failure carries rig.ErrCloneFailed across the StateMutator boundary and maps
-// to the dedicated clone_failed code (C4c §5).
+// to the dedicated clone_failed code (C4c §5). A rig prefix in a split city's
+// reserved namespace is the request's own error, as on the synchronous create.
 func rigProvisionFailureCode(err error) string {
 	switch {
 	case errors.Is(err, ssrf.ErrBlockedHost):
@@ -497,7 +498,7 @@ func rigProvisionFailureCode(err error) string {
 		return "already_exists"
 	case errors.Is(err, rig.ErrCloneFailed):
 		return "clone_failed"
-	case errors.Is(err, configedit.ErrValidation):
+	case errors.Is(err, configedit.ErrValidation), errors.Is(err, config.ErrReservedBeadPrefix):
 		return "invalid_request"
 	default:
 		return "provision_failed"
