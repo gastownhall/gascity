@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -422,12 +423,19 @@ func TestLegacyStartDefersOnAnotherHostsRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer remote.Release()
+	remoteRecord := mustGetBead(t, store, f.cand.info.ID).Metadata
 	before := len(defaultSessionCircuitBreaker().entrySnapshot("lease-remote-worker").entryRestarts())
 	if got := f.run(); got != 0 || len(f.sp.starts) != 0 || !strings.Contains(f.log.String(), "outcome=deferred_by_runtime_lease") {
 		t.Fatalf("woken = %d, starts %q, log %q; want deferred", got, f.sp.starts, f.log.String())
 	}
 	if gen := mustGetBead(t, store, f.cand.info.ID).Metadata["generation"]; gen != "1" {
 		t.Fatalf("generation = %q, want no PreWake", gen)
+	}
+	afterRecord := mustGetBead(t, store, f.cand.info.ID).Metadata
+	for _, key := range []string{sessionpkg.RuntimeLeaseHolderKey, sessionpkg.RuntimeLeaseEpochKey, sessionpkg.RuntimeLeaseExpiresKey, sessionpkg.RuntimeLeaseTTLKey} {
+		if afterRecord[key] != remoteRecord[key] {
+			t.Fatalf("%s after the deferred start = %q, want the other holder's %q untouched", key, afterRecord[key], remoteRecord[key])
+		}
 	}
 	if after := len(defaultSessionCircuitBreaker().entrySnapshot("lease-remote-worker").entryRestarts()); after != before {
 		t.Fatalf("circuit restarts %d -> %d, want a deferred start not counted", before, after)
@@ -890,5 +898,243 @@ func TestFreshClaimedMarkerIsNotRolledBackWithoutALease(t *testing.T) {
 	got := mustGetBead(t, env.store, row.ID)
 	if got.Status == "closed" || got.Metadata["pending_create_claim"] != "true" {
 		t.Fatalf("row %s %v, want the claimed row kept open with its claim", got.Status, got.Metadata)
+	}
+}
+
+// rowAtStartProvider records each session row's metadata as its provider
+// Start begins, and whether the Start's ctx had already ended.
+type rowAtStartProvider struct {
+	*runtime.Fake
+	store beads.Store
+	ids   map[string]string // runtime name -> row id
+	mu    sync.Mutex
+	rows  map[string]map[string]string
+	ended map[string]error
+}
+
+func (p *rowAtStartProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	b, err := p.store.Get(p.ids[name])
+	meta := map[string]string{}
+	for k, v := range b.Metadata {
+		meta[k] = v
+	}
+	p.mu.Lock()
+	p.rows[name] = meta
+	p.ended[name] = context.Cause(ctx)
+	p.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	return p.Fake.Start(ctx, name, cfg)
+}
+
+func (p *rowAtStartProvider) rowAtStart(name string) (map[string]string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	meta, ok := p.rows[name]
+	return meta, ok
+}
+
+// leasedBatchFixture is three creating rows, w1 to w3, that the legacy start
+// leases and launches in one batch, in a city with a runtime dir.
+type leasedBatchFixture struct {
+	store   beads.Store
+	sp      *rowAtStartProvider
+	cands   []startCandidate
+	ids     map[string]string
+	cfg     *config.City
+	desired map[string]TemplateParams
+	city    string
+	log     synchronizedBuffer
+}
+
+func newLeasedBatchFixture(t *testing.T, store beads.Store) *leasedBatchFixture {
+	t.Helper()
+	f := &leasedBatchFixture{store: store, ids: map[string]string{}, cfg: &config.City{}, desired: map[string]TemplateParams{}, city: t.TempDir()}
+	for _, name := range []string{"w1", "w2", "w3"} {
+		bead, err := store.Create(beads.Bead{
+			Title: name, Type: sessionBeadType, Labels: []string{sessionBeadLabel},
+			Metadata: creatingMeta(map[string]string{
+				"session_name": name, "template": name, "generation": "1",
+				"continuation_epoch": "1", "instance_token": "tok-" + name, "pending_create_claim": "true",
+			}),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		tp := TemplateParams{Command: name, SessionName: name, TemplateName: name}
+		f.desired[name] = tp
+		f.ids[name] = bead.ID
+		f.cfg.Agents = append(f.cfg.Agents, config.Agent{Name: name})
+		f.cands = append(f.cands, startCandidate{info: sessiontest.SeedBead(t, bead), tp: tp})
+	}
+	f.sp = &rowAtStartProvider{Fake: runtime.NewFake(), store: store, ids: f.ids, rows: map[string]map[string]string{}, ended: map[string]error{}}
+	return f
+}
+
+// run starts the batch with a one-minute startup timeout, synchronously or
+// async; an async run returns once every launched start has committed.
+func (f *leasedBatchFixture) run(t *testing.T, async bool, options ...startExecutionOption) *asyncStartLimiter {
+	t.Helper()
+	clk := &clock.Fake{Time: time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)}
+	var tracker asyncStartTracker
+	limiter := newAsyncStartLimiter(3)
+	if async {
+		options = append(options, withAsyncStartExecution(), withAsyncStartLimiter(limiter), withAsyncStartTracker(&tracker))
+	}
+	executePlannedStartsTraced(context.Background(), f.cands, f.cfg, f.desired, f.sp, f.store,
+		"test-city", f.city, clk, events.Discard, time.Minute, &f.log, &f.log, nil, options...)
+	if async {
+		if err := tracker.waitLaunchedStarts(context.Background(), hangBudget); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return limiter
+}
+
+// leaseRecordKeys are the record's keys an extension keeps.
+var leaseRecordKeys = []string{sessionpkg.RuntimeLeaseHolderKey, sessionpkg.RuntimeLeaseEpochKey, sessionpkg.RuntimeLeaseFlockKey}
+
+// TestBatchedStartsExtendTheirRecordBeforeLaunch (AC-2): each start of a batch
+// whose last prepare is slow launches on a record extended past that prepare,
+// still the holder, epoch and flock its TakeRecord wrote before PreWake.
+func TestBatchedStartsExtendTheirRecordBeforeLaunch(t *testing.T) {
+	for _, async := range []bool{false, true} {
+		t.Run(map[bool]string{false: "sync", true: "async"}[async], func(t *testing.T) {
+			f := newLeasedBatchFixture(t, beads.NewMemStore())
+			var calls int
+			var prepared3 time.Time
+			taken := map[string]map[string]string{}
+			resolver := func(c startCandidate, _ *config.City) string {
+				meta := mustGetBead(t, f.store, c.info.ID).Metadata
+				taken[c.tp.SessionName] = map[string]string{}
+				for _, key := range leaseRecordKeys {
+					taken[c.tp.SessionName][key] = meta[key]
+				}
+				if calls++; calls == 3 {
+					time.Sleep(2 * time.Second)
+					prepared3 = time.Now()
+				}
+				return ""
+			}
+			f.run(t, async, withTaskWorkDirResolver(resolver))
+			if calls != 3 {
+				t.Fatalf("prepared %d candidates, want 3; log %q", calls, f.log.String())
+			}
+			floor := prepared3.Add(sessionpkg.RuntimeLeaseTTL(time.Minute)).Truncate(time.Second)
+			for name := range f.ids {
+				meta, started := f.sp.rowAtStart(name)
+				if !started {
+					t.Fatalf("%s: never started; log %q", name, f.log.String())
+				}
+				if taken[name][sessionpkg.RuntimeLeaseHolderKey] == "" {
+					t.Fatalf("%s: no record before PreWake: %v", name, taken[name])
+				}
+				for _, key := range leaseRecordKeys {
+					if meta[key] != taken[name][key] {
+						t.Errorf("%s: %s at Start = %q, want %q from its TakeRecord", name, key, meta[key], taken[name][key])
+					}
+				}
+				expires, err := time.Parse(time.RFC3339, meta[sessionpkg.RuntimeLeaseExpiresKey])
+				if err != nil || expires.Before(floor) {
+					t.Errorf("%s: record expires at %q (%v) at Start, want at least %v: the last prepare's end plus the TTL", name, meta[sessionpkg.RuntimeLeaseExpiresKey], err, floor.Format(time.RFC3339))
+				}
+			}
+		})
+	}
+}
+
+// takenOverKeys are the row's keys a start that lost its record to another
+// holder leaves to that holder: the record and the lifecycle facts.
+var takenOverKeys = []string{
+	sessionpkg.RuntimeLeaseHolderKey, sessionpkg.RuntimeLeaseEpochKey, sessionpkg.RuntimeLeaseExpiresKey,
+	sessionpkg.RuntimeLeaseTTLKey, sessionpkg.RuntimeLeaseFlockKey,
+	"state", "generation", "instance_token", "last_woke_at", "pending_create_claim", "started_config_hash", "wake_attempts",
+}
+
+// TestBatchedStartSkipsALaunchWhoseRecordWasTakenOver (AC-3): a start whose
+// row record another holder took while its batch prepared is never launched.
+// It leaves the row to the taker, is no wake failure and no restart, releases
+// its slot and flock, and is logged deferred; the batch's other starts launch.
+func TestBatchedStartSkipsALaunchWhoseRecordWasTakenOver(t *testing.T) {
+	for _, async := range []bool{false, true} {
+		mode := map[bool]string{false: "sync", true: "async"}[async]
+		t.Run(mode, func(t *testing.T) {
+			f := newLeasedBatchFixture(t, beads.NewMemStore())
+			f.cfg.Daemon.SessionCircuitBreaker = true
+			identities := map[string]string{}
+			for i := range f.cands {
+				name := f.cands[i].tp.SessionName
+				identities[name] = "x04u8f-" + mode + "-" + name
+				if err := f.store.SetMetadataBatch(f.ids[name], map[string]string{sessionpkg.NamedSessionIdentityMetadata: identities[name]}); err != nil {
+					t.Fatal(err)
+				}
+				f.cands[i].info.ConfiguredNamedIdentity = identities[name]
+			}
+			restarts := func(name string) int {
+				return len(defaultSessionCircuitBreaker().entrySnapshot(identities[name]).entryRestarts())
+			}
+			before := map[string]int{}
+			for name := range f.ids {
+				before[name] = restarts(name)
+			}
+			var calls int
+			var lost string
+			var takenOver map[string]string
+			resolver := func(c startCandidate, _ *config.City) string {
+				if calls++; calls == 1 {
+					lost = c.tp.SessionName
+				}
+				if calls == 3 {
+					if err := f.store.SetMetadataBatch(f.ids[lost], map[string]string{sessionpkg.RuntimeLeaseHolderKey: "other/1/n", sessionpkg.RuntimeLeaseEpochKey: "9"}); err != nil {
+						t.Fatal(err)
+					}
+					takenOver = mustGetBead(t, f.store, f.ids[lost]).Metadata
+				}
+				return ""
+			}
+			limiter := f.run(t, async, withTaskWorkDirResolver(resolver))
+			if calls != 3 {
+				t.Fatalf("prepared %d candidates, want 3; log %q", calls, f.log.String())
+			}
+			for name := range f.ids {
+				_, started := f.sp.rowAtStart(name)
+				if started == (name == lost) {
+					t.Errorf("%s: Start called = %v, want %v; log %q", name, started, name != lost, f.log.String())
+				}
+			}
+			meta := mustGetBead(t, f.store, f.ids[lost]).Metadata
+			for _, key := range takenOverKeys {
+				if meta[key] != takenOver[key] {
+					t.Errorf("%s: %s = %q, want the taker's %q", lost, key, meta[key], takenOver[key])
+				}
+			}
+			episodes, err := f.store.List(beads.ListQuery{Type: sessionpkg.StartupHealthEpisodeType, IncludeClosed: true})
+			if err != nil || len(episodes) != 0 {
+				t.Errorf("startup-health episodes = %v (%v), want none", episodes, err)
+			}
+			if !regexp.MustCompile(`session=` + lost + ` [^\n]*outcome=deferred_by_runtime_lease`).MatchString(f.log.String()) {
+				t.Errorf("log %q, want %s's start logged deferred_by_runtime_lease", f.log.String(), lost)
+			}
+			for name := range f.ids {
+				grew := restarts(name) > before[name]
+				if grew == (name == lost) {
+					t.Errorf("%s: circuit restarts %d -> %d, want counted only for a launched start", name, before[name], restarts(name))
+				}
+			}
+			_, release, err := tryRuntimeLease(f.store, f.city, lost, "", 0)
+			if err != nil {
+				t.Fatalf("%s's flock after its skipped launch: %v, want released", lost, err)
+			}
+			release()
+			if async {
+				limiter.mu.Lock()
+				inFlight := limiter.inFlight
+				limiter.mu.Unlock()
+				if inFlight != 0 {
+					t.Errorf("async slots in flight = %d, want every slot released", inFlight)
+				}
+			}
+		})
 	}
 }

@@ -189,7 +189,8 @@ type startCandidate struct {
 
 	// lease is the runtime lease the start holds from before PreWake through
 	// its commit (I-LEASE): the name's flock, and the row's record from just
-	// before PreWake; nil without a city runtime dir.
+	// before PreWake, extended just before launch; nil without a city runtime
+	// dir.
 	lease *sessionpkg.RuntimeLease
 
 	// inc is the incarnation the PreWake minted under lease
@@ -1993,6 +1994,32 @@ func watchStartLease(ctx context.Context, item preparedStart) (context.Context, 
 		}
 	}
 	return ctx, func() {}
+}
+
+// extendStartLease extends a start's lease record to a whole start's TTL just
+// before its launch, so the prepares of its batch do not spend the window its
+// provider calls run in (watchStartLease). A start without a record extends
+// nothing.
+func extendStartLease(item preparedStart, startupTimeout time.Duration) error {
+	if l := item.candidate.lease; l != nil && l.Epoch() != 0 {
+		return l.ExtendRecord(sessionpkg.RuntimeLeaseTTL(startupTimeout))
+	}
+	return nil
+}
+
+// keepExtendedStarts returns the prepared starts whose lease record
+// extendStartLease extended, in order. A start whose extension was refused is
+// settled unlaunched by its own unlaunched[i], which runs no provider call.
+func keepExtendedStarts[T any](items []T, unlaunched []func(error), prepared func(T) preparedStart, startupTimeout time.Duration) []T {
+	kept := items[:0]
+	for i, item := range items {
+		if err := extendStartLease(prepared(item), startupTimeout); err != nil {
+			unlaunched[i](err)
+			continue
+		}
+		kept = append(kept, item)
+	}
+	return kept
 }
 
 func runPreparedStartCandidate(
@@ -4951,6 +4978,9 @@ func executePlannedStartsTraced(
 			batchCandidates := ready[offset:end]
 			var prepared []preparedStart
 			var asyncPrepared []asyncPreparedStart
+			// unlaunched settles the prepared start at the same index, one
+			// whose record cannot be extended at launch.
+			var unlaunched []func(error)
 			for _, candidate := range batchCandidates {
 				if ctx != nil && ctx.Err() != nil {
 					return wakeCount
@@ -4996,7 +5026,8 @@ func executePlannedStartsTraced(
 				}
 				// The start holds the runtime name's flock from here through its
 				// commit (I-LEASE), and takes the row's record just before PreWake,
-				// after capacity admission and the circuit's open check. A name
+				// after capacity admission and the circuit's open check, and
+				// extends it just before launch. A name
 				// another holder has (an operator's attach or kill, another host)
 				// defers, writing nothing; the next pass reconsiders it, as does a
 				// city path that is not absolute (ErrRuntimeLeaseNoCity).
@@ -5141,12 +5172,27 @@ func executePlannedStartsTraced(
 				} else {
 					prepared = append(prepared, *item)
 				}
+				// A start whose record another holder took while its batch
+				// prepared is no restart, as a refused PreWake is not, and
+				// leaves the row to that holder; any other failed extension
+				// is no wake failure either, and leaves its PreWake marker for
+				// the abandoned-start recovery.
+				unlaunched = append(unlaunched, func(err error) {
+					cb.restoreEntrySnapshot(sessFront, candidate.info.ID, identity, cbBefore, cbNow, stderr)
+					outcome := "failed"
+					if errors.Is(err, sessionpkg.ErrRuntimeLeaseLost) {
+						outcome = "deferred_by_runtime_lease"
+					}
+					drop(outcome, err)
+				})
 			}
 			offset = end
 			var results []startResult
 			if ctx != nil && ctx.Err() != nil {
 				return wakeCount
 			}
+			prepared = keepExtendedStarts(prepared, unlaunched, func(item preparedStart) preparedStart { return item }, startupTimeout)
+			asyncPrepared = keepExtendedStarts(asyncPrepared, unlaunched, func(item asyncPreparedStart) preparedStart { return item.item }, startupTimeout)
 			if startOpts.async {
 				results = enqueuePreparedStartWaveForCity(ctx, asyncPrepared, cityPath, sp, store, cfg, clk, rec, startupTimeout, wave, stdout, stderr, trace, startOpts.asyncFollowUp, stabilityWaiter, sessionStaleKeyDetectionWaiter, startOpts.warmClaimProbe)
 				// The start goroutines own these tickets and leases now.

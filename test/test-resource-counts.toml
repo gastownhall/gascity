@@ -1264,6 +1264,11 @@ resource = "http_test_server"
 calls = 2
 
 [[count]]
+path = "cmd/gc/runtime_lease_adoption_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
 path = "cmd/gc/runtime_lease_crossproc_test.go"
 resource = "subprocess"
 calls = 1
@@ -1338,6 +1343,11 @@ calls = 1
 path = "cmd/gc/sling_remote_test.go"
 resource = "http_test_server"
 calls = 6
+
+[[count]]
+path = "cmd/gc/slow_prepare_lease_test.go"
+resource = "fixed_sleep"
+calls = 1
 
 [[count]]
 path = "cmd/gc/socket_mode_unix_test.go"

@@ -39,8 +39,10 @@ import (
 // RuntimeLeaseClearPatch, ClearRuntimeLeaseForReopen before a generic
 // reopen), so a reopened row never hands its old holder back its lease.
 //
-// The record never renews (no revision churn), so its TTL covers a whole
-// start (RuntimeLeaseTTL), and is at least RuntimeLeaseMargin. A crashed
+// The record is taken just before PreWake and extended once (ExtendRecord),
+// just before the start's provider calls, and never during them (no revision
+// churn), so its TTL covers a whole start (RuntimeLeaseTTL), and is at least
+// RuntimeLeaseMargin. A crashed
 // holder that shared the contender's flock is taken over at once: the record
 // names the flock (boot ID, lock file identity, and the random token its
 // holder wrote into the lock file) the contender now holds, so its holder is
@@ -177,11 +179,15 @@ type RuntimeLease struct {
 func (l *RuntimeLease) Epoch() int64 { return l.epoch }
 
 // Expires is when the record lapses on the holder's clock.
-func (l *RuntimeLease) Expires() time.Time { return l.expires }
+func (l *RuntimeLease) Expires() time.Time {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.expires
+}
 
 // SafeUntil is Expires less RuntimeLeaseSkewAllowance: work under the lease,
 // a provider call or an effect's deadline, must end by it.
-func (l *RuntimeLease) SafeUntil() time.Time { return l.expires.Add(-RuntimeLeaseSkewAllowance) }
+func (l *RuntimeLease) SafeUntil() time.Time { return l.Expires().Add(-RuntimeLeaseSkewAllowance) }
 
 // HeldAt reports whether the lease still excludes other holders at now on
 // the holder's clock: it is not released and, when it took a record, now is
@@ -192,12 +198,12 @@ func (l *RuntimeLease) HeldAt(now time.Time) bool {
 		return false
 	}
 	l.mu.Lock()
-	released := l.released
+	released, expires := l.released, l.expires
 	l.mu.Unlock()
 	if released {
 		return false
 	}
-	return l.expires.IsZero() || now.Before(l.SafeUntil())
+	return expires.IsZero() || now.Before(expires.Add(-RuntimeLeaseSkewAllowance))
 }
 
 // Fenced reports whether the record was taken by conditional write. False
@@ -396,7 +402,7 @@ func (l *RuntimeLease) acquireRecord(city string, ttl time.Duration) error {
 			RuntimeLeaseHolderKey:  l.holder,
 			RuntimeLeaseEpochKey:   strconv.FormatInt(l.epoch, 10),
 			RuntimeLeaseExpiresKey: l.expires.Format(time.RFC3339),
-			RuntimeLeaseTTLKey:     strconv.FormatInt(int64(ttl.Round(time.Second)/time.Second), 10),
+			RuntimeLeaseTTLKey:     runtimeLeaseTTLSeconds(ttl),
 			RuntimeLeaseFlockKey:   mine,
 		}
 		if writer == nil {
@@ -413,6 +419,46 @@ func (l *RuntimeLease) acquireRecord(city string, ttl time.Duration) error {
 		}
 	}
 	return fmt.Errorf("%w: session %q: lost the revision fence %d times", ErrRuntimeLeaseContention, l.id, runtimeLeaseAttempts)
+}
+
+// ExtendRecord moves the record's expiry to ttl past now on the holder's
+// clock, keeping its holder, epoch and flock, so the fencing token and every
+// write fenced under the lease carry over. It writes as UpdateMetadataFenced
+// does: from a fresh read of the open row that still records this lease, with
+// conditional writes fenced at that read's revision. It may run after
+// SafeUntil and after expiry: the fence, not a clock, arbitrates against a
+// contender that took the lapsed record (its acquire moves the holder and the
+// epoch). A moved record or a closed row writes nothing and returns
+// ErrRuntimeLeaseLost; a released lease, ErrRuntimeLeaseAfterRelease; a fence
+// lost on every attempt, ErrRuntimeLeaseContention. A flock-only lease has no
+// record and extends nothing.
+func (l *RuntimeLease) ExtendRecord(ttl time.Duration) error {
+	if l.id == "" {
+		return nil
+	}
+	if ttl < runtimeLeaseMinTTL {
+		return fmt.Errorf("runtime lease: extending session %q's record: a TTL of at least %v is required (got %v)", l.id, runtimeLeaseMinTTL, ttl)
+	}
+	var expires time.Time
+	wrote, err := l.UpdateMetadataFenced(runtimeLeaseAttempts, func(Info, PersistedResponse) MetadataPatch {
+		expires = l.now().Add(ttl).UTC().Truncate(time.Second)
+		return MetadataPatch{RuntimeLeaseExpiresKey: expires.Format(time.RFC3339), RuntimeLeaseTTLKey: runtimeLeaseTTLSeconds(ttl)}
+	})
+	switch {
+	case err != nil:
+		return fmt.Errorf("runtime lease: extending session %q's record: %w", l.id, err)
+	case !wrote:
+		return fmt.Errorf("%w: extending session %q's record: lost the revision fence %d times", ErrRuntimeLeaseContention, l.id, runtimeLeaseAttempts)
+	}
+	l.mu.Lock()
+	l.expires = expires
+	l.mu.Unlock()
+	return nil
+}
+
+// runtimeLeaseTTLSeconds formats ttl as the record's TTL key: whole seconds.
+func runtimeLeaseTTLSeconds(ttl time.Duration) string {
+	return strconv.FormatInt(int64(ttl.Round(time.Second)/time.Second), 10)
 }
 
 func warnRuntimeLeaseNoCAS(city string, diag *beads.BeadsDiagnostic) {

@@ -2343,6 +2343,7 @@ go_test(
         "sling_seam_test.go",
         "sling_source_workflow_binding_test.go",
         "sling_typed_deps_test.go",
+        "slow_prepare_lease_test.go",
         "socket_mode_unix_test.go",
         "soft_reload_test.go",
         "sole_class_binding_test.go",
