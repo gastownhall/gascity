@@ -165,6 +165,7 @@ func (f *fakeState) BeadStores() map[string]beads.Store {
 	}
 	return out
 }
+
 func (f *fakeState) MailProvider(_ string) mail.Provider { return f.cityMailProv }
 func (f *fakeState) MailProviders() map[string]mail.Provider {
 	if f.cityMailProv == nil {

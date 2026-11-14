@@ -60,10 +60,15 @@ func newGatherFixture(t *testing.T, rows ...beads.Bead) *gatherFixture {
 	f.p = newPlanner(realPlannerClock{}, func() time.Duration { return time.Minute }, nil, f.inflight, nil, io.Discard)
 	f.env = gatherEnv{
 		CityPath: t.TempDir(), CityName: "test-city",
-		Env:          f.cur.Load,
-		Sessions:     func() beads.Store { return f.cache },
-		RigStores:    func() map[string]beads.Store { return nil },
-		Recording:    f.rec.Load,
+		Env:       f.cur.Load,
+		Sessions:  func() beads.Store { return f.cache },
+		RigStores: func() map[string]beads.Store { return nil },
+		Recording: func() *externalReadsRecording {
+			if rec := f.rec.Load(); rec != nil {
+				return rec
+			}
+			return fixtureDemandRecording(gatherNow, externalReadsEnv{CityPath: f.env.CityPath, CityName: f.env.CityName, Cfg: f.cur.Load().Cfg, CityStore: f.cache, RigStores: f.env.RigStores()})
+		},
 		Observations: func() *ObservationCache { return obs },
 		Episodes:     func() (map[string]session.StartupHealthEpisode, error) { return readStartupHealthEpisodes(f.cache) },
 		Templates: func(*reconcileEnv, time.Time) templateResolver {
@@ -243,6 +248,7 @@ func TestGatherBootStateComputed(t *testing.T) {
 // laneFedRig adds a rig whose store has no cache: a lane-fed demand leg.
 func laneFedRig(t *testing.T, f *gatherFixture) {
 	t.Helper()
+	f.env.Recording = f.rec.Load
 	cfg := *f.cur.Load().Cfg
 	cfg.Rigs = []config.Rig{{Name: "rig-a", Path: t.TempDir()}}
 	f.cur.Store(&reconcileEnv{Gen: 1, Cfg: &cfg, SP: f.sp})
@@ -469,4 +475,20 @@ func TestGatherReusesTheDemandProbeStores(t *testing.T) {
 			}
 		})
 	}
+}
+
+// fixtureDemandRecording runs the production demand sources over a bounded
+// synthetic city. Exact local legs also need input-admitted readings before
+// the planner consumes them; the planner itself still performs no live reads.
+func fixtureDemandRecording(now time.Time, env externalReadsEnv) *externalReadsRecording {
+	lane := &externalReadsLane{stderr: io.Discard, sourceDeadline: time.Second}
+	rec := &externalReadsRecording{Seq: 1, FreshFor: time.Minute, Sources: make(map[sourceKey]sourceResult)}
+	for _, source := range lane.sources(env) {
+		if source.key.kind == sourceScaleCheck {
+			continue
+		}
+		payload, err := source.read()
+		rec.Sources[source.key] = sourceResult{StartedAt: now, EndedAt: now, Err: err, sourcePayload: payload}
+	}
+	return rec
 }

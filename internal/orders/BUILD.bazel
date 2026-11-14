@@ -91,6 +91,7 @@ go_test(
         "order_requires_backend_test.go",
         "order_test.go",
         "override_test.go",
+        "run_record_external_test.go",
         "run_record_test.go",
         "runtime_helpers_test.go",
         "scanner_test.go",

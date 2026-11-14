@@ -101,8 +101,9 @@ type StoresOptions struct {
 // minted from the same topology as its city handles, so one Stores never
 // mixes two epochs.
 type Stores struct {
-	city beads.ClassStores
-	rigs []rigStores
+	city      beads.ClassStores
+	workGraph beads.GraphStore
+	rigs      []rigStores
 	// topo is the minted topology (mintedTopology): the epoch's legs over the
 	// handles' own stores.
 	topo Topology
@@ -114,6 +115,9 @@ type rigStores struct {
 	ref   StoreRef
 	work  beads.WorkStore
 	graph beads.GraphStore
+	// workGraph reads graphs already resident in this rig's work scope,
+	// independently of where GraphFor places new graphs.
+	workGraph beads.GraphStore
 	// orders is the orders placement over the rig's frame, by Place's rule:
 	// the order dispatcher reads a rig order's run evidence there
 	// (resolveOrderStore). It is not handed out; Stores.Plan reads it.
@@ -127,11 +131,10 @@ type RigWork struct {
 }
 
 // NewStores mints the handles for t. Every city handle wraps the store Place
-// answers for its class over t. Each rig leg of t gets two handles, with the
-// same options: its work store (Place ClassWork with the rig leg as the work
-// leg) and its graph store (Place ClassGraph over that same frame, the
-// binding when graph is relocated, else the rig's own work store). A rig leg
-// whose ref is not a rig ref names no rig and is skipped.
+// answers for its class over t. Each rig leg gets its work handle and placed
+// graph handle with the same options. GraphInWork also gets a graph handle
+// over each work scope's class view, independently of class placement. A rig
+// leg whose ref is not a rig ref names no rig and is skipped.
 func NewStores(t Topology, opts StoresOptions) Stores {
 	s := Stores{city: beads.MintClassStores(beads.MintSpec{
 		Work:     Place(t, opts, coordclass.ClassWork),
@@ -141,6 +144,9 @@ func NewStores(t Topology, opts StoresOptions) Stores {
 		Orders:   Place(t, opts, coordclass.ClassOrders),
 		Nudges:   Place(t, opts, coordclass.ClassNudges),
 	})}
+	s.workGraph = beads.MintClassStores(beads.MintSpec{
+		Graph: Place(Topology{Work: t.Work}, StoresOptions{Projection: opts.Projection}, coordclass.ClassGraph),
+	}).Graph
 	for _, leg := range t.Rigs {
 		name, ok := ScopeRigContext(string(leg.Ref))
 		if !ok || name == "" {
@@ -152,7 +158,10 @@ func NewStores(t Topology, opts StoresOptions) Stores {
 			Graph:  Place(frame, opts, coordclass.ClassGraph),
 			Orders: Place(frame, opts, coordclass.ClassOrders),
 		})
-		s.rigs = append(s.rigs, rigStores{name: name, ref: RigRef(name), work: h.Work, graph: h.Graph, orders: h.Orders})
+		local := beads.MintClassStores(beads.MintSpec{
+			Graph: Place(Topology{Work: leg}, StoresOptions{Projection: opts.Projection}, coordclass.ClassGraph),
+		})
+		s.rigs = append(s.rigs, rigStores{name: name, ref: RigRef(name), work: h.Work, graph: h.Graph, workGraph: local.Graph, orders: h.Orders})
 	}
 	s.topo = mintedTopology(t, opts, s)
 	return s
@@ -260,6 +269,23 @@ func (s Stores) GraphFor(ref StoreRef) (beads.GraphStore, bool) {
 	for _, r := range s.rigs {
 		if r.ref == ref {
 			return r.graph, true
+		}
+	}
+	return beads.GraphStore{}, false
+}
+
+// GraphInWork reads graphs already resident in a work scope, including a
+// legacy graph whose class is now relocated. It reads that work scope's class
+// view, never the relocated binding or its placement refusal. GraphFor remains
+// the placement of new graphs; a relocated leg reads Graph. Unknown work
+// scopes answer false.
+func (s Stores) GraphInWork(ref StoreRef) (beads.GraphStore, bool) {
+	if ref == WorkRef {
+		return s.workGraph, true
+	}
+	for _, r := range s.rigs {
+		if r.ref == ref {
+			return r.workGraph, true
 		}
 	}
 	return beads.GraphStore{}, false
