@@ -204,6 +204,8 @@ run_guard() {
     )
 }
 
+# Global zsh startup files can replace PATH. Restore the fixture path inside
+# the shell after startup so this test always reads the fake bead store.
 # run_guard_zsh: identical to run_guard, but sources and calls the guard
 # under a real zsh subprocess instead of bash. push-ownership-guard.sh is
 # SOURCED into the deployer's ambient interactive shell (zsh, in this fork —
@@ -215,10 +217,10 @@ run_guard_zsh() {
     local session_id="${6:-}" session_name="${7:-}"
     (
         cd "$repo" || exit 1
-        PATH="$fbd:$PATH" GC_AGENT="$agent" GC_TEMPLATE="$template" \
+        POG_TEST_PATH="$fbd:$PATH" GC_AGENT="$agent" GC_TEMPLATE="$template" \
             GC_SESSION_ID="$session_id" GC_SESSION_NAME="$session_name" \
             POG_TIMEOUT_SECONDS="$pog_timeout" LIB="$LIB" \
-            zsh -c '. "$LIB"; assert_bead_still_claimed'
+            zsh -c 'PATH="$POG_TEST_PATH"; export PATH; . "$LIB"; assert_bead_still_claimed'
     )
 }
 
