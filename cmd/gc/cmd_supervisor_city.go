@@ -635,12 +635,20 @@ func waitForSupervisorCity(cityPath string, wantRunning bool, timeout time.Durat
 		case !known && supervisorAliveHook() == 0:
 			return fmt.Errorf("supervisor stopped before city became ready")
 		}
-		if stdout != nil && status != "" && status != lastStatus {
-			fmt.Fprintf(stdout, "  %s\n", statusDisplayText(status)) //nolint:errcheck // best-effort stdout
+		// lastStatus tracks the last non-empty status observed whether or
+		// not stdout is printing it: the ceiling error below needs it to
+		// tell "never progressed" from "progressed, then stalled".
+		if status != "" && status != lastStatus {
+			if stdout != nil {
+				fmt.Fprintf(stdout, "  %s\n", statusDisplayText(status)) //nolint:errcheck // best-effort stdout
+			}
 			lastStatus = status
 		}
 		if wantRunning && time.Now().After(absDeadline) {
-			return fmt.Errorf("city did not become ready under supervisor within the %s absolute start ceiling (last known status %q; run 'gc trace' to inspect what stalled)", absCeiling, status)
+			if lastStatus == "" {
+				return fmt.Errorf("city did not become ready under supervisor within the %s absolute start ceiling (supervisor never reported any startup status for it; run 'gc trace' to inspect what stalled)", absCeiling)
+			}
+			return fmt.Errorf("city did not become ready under supervisor within the %s absolute start ceiling (last known status %q; run 'gc trace' to inspect what stalled)", absCeiling, lastStatus)
 		}
 		if time.Now().After(deadline) {
 			if wantRunning {
