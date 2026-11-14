@@ -15617,3 +15617,126 @@ func TestReconcileSessionBeads_AsleepGenericRigNamedSessionDriftRepair(t *testin
 		t.Fatalf("pending_create_claim = %q, want cleared after asleep config-drift repair", got.Metadata["pending_create_claim"])
 	}
 }
+
+// retainedNamedPane models tmux's remain-on-exit behavior: the name remains
+// occupied but IsRunning reports false. A normal Start recycles that corpse,
+// as tmux's ensureFreshSession does; a failing Start leaves it in place.
+type retainedNamedPane struct {
+	*runtime.Fake
+	name      string
+	corpse    atomic.Bool
+	starts    atomic.Int32
+	failStart bool
+	deadErr   error
+}
+
+func (p *retainedNamedPane) IsRunning(name string) bool {
+	return (name != p.name || !p.corpse.Load()) && p.Fake.IsRunning(name)
+}
+
+func (p *retainedNamedPane) ProcessAlive(name string, processes []string) bool {
+	return (name != p.name || !p.corpse.Load()) && p.Fake.ProcessAlive(name, processes)
+}
+
+func (p *retainedNamedPane) IsDeadRuntimeSession(name string) (bool, error) {
+	return name == p.name && p.corpse.Load(), p.deadErr
+}
+
+func (p *retainedNamedPane) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	p.starts.Add(1)
+	if p.failStart {
+		return errors.New("start refused")
+	}
+	if name == p.name && p.corpse.Load() {
+		if cfg.FreshOnly {
+			return runtime.ErrSessionExists
+		}
+		if err := p.Fake.Stop(name); err != nil {
+			return err
+		}
+		p.corpse.Store(false)
+	}
+	if err := p.Fake.Start(ctx, name, cfg); err != nil {
+		return err
+	}
+	return p.SetMeta(name, "GC_INSTANCE_TOKEN", cfg.Env["GC_INSTANCE_TOKEN"])
+}
+
+func (p *retainedNamedPane) Stop(name string) error {
+	if name == p.name {
+		p.corpse.Store(false)
+	}
+	return p.Fake.Stop(name)
+}
+
+func TestReconcileSessionBeads_AlwaysNamedDeadPane(t *testing.T) {
+	for _, failStart := range []bool{false, true} {
+		label := "recovers"
+		if failStart {
+			label = "start_fails"
+		}
+		t.Run(label, func(t *testing.T) {
+			env, identity, name := namedSessionEnv(t, "")
+			env.cfg.NamedSessions[0].Mode = "always"
+			env.desiredState[name] = TemplateParams{Command: "true", SessionName: name, TemplateName: "keeper", ConfiguredNamedIdentity: identity, ConfiguredNamedMode: "always"}
+			row := env.createSessionBead(name, "keeper")
+			env.setSessionMetadata(&row, map[string]string{
+				namedSessionMetadataKey: "true", namedSessionIdentityMetadata: identity,
+				namedSessionModeMetadata: "always", "state": "active",
+				"last_woke_at": env.clk.Now().Add(-time.Hour).Format(time.RFC3339),
+			})
+			p := &retainedNamedPane{Fake: runtime.NewFake(), name: name, failStart: failStart}
+			if err := p.Fake.Start(context.Background(), name, runtime.Config{Command: "true"}); err != nil {
+				t.Fatal(err)
+			}
+			p.corpse.Store(true)
+			if err := p.SetMeta(name, "GC_INSTANCE_TOKEN", row.Metadata["instance_token"]); err != nil {
+				t.Fatal(err)
+			}
+
+			for tick := 0; tick < 6; tick++ {
+				current, err := env.store.Get(row.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				reconcileSessionBeadsAtPath(context.Background(), env.city, []beads.Bead{current}, env.desiredState,
+					configuredSessionNames(env.cfg, "", env.store), env.cfg, p, env.store, nil, nil, nil, nil,
+					env.dt, map[string]int{"keeper": 1}, false, nil, "", nil, env.clk, env.rec, 0, 0,
+					&env.stdout, &env.stderr, env.startOptions...)
+				env.clk.Advance(time.Minute)
+				if p.starts.Load() > 0 {
+					break
+				}
+			}
+			final, err := env.store.Get(row.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if p.starts.Load() == 0 {
+				t.Fatalf("no Start attempted after six ticks; state=%q stderr=%s", final.Metadata["state"], &env.stderr)
+			}
+			if final.Status != "open" {
+				t.Fatalf("status=%q, want open", final.Status)
+			}
+			if failStart {
+				if final.Metadata["state"] == "active" || final.Metadata["state"] == "awake" {
+					t.Fatalf("state=%q after failed Start over dead pane; stderr=%s", final.Metadata["state"], &env.stderr)
+				}
+				return
+			}
+			if p.corpse.Load() || !p.IsRunning(name) {
+				t.Fatalf("runtime was not replaced; stderr=%s", &env.stderr)
+			}
+			token, err := p.GetMeta(name, "GC_INSTANCE_TOKEN")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if token == "" || token != final.Metadata["instance_token"] {
+				t.Fatalf("runtime token=%q, row token=%q", token, final.Metadata["instance_token"])
+			}
+			if final.Metadata["state"] != "active" && final.Metadata["state"] != "awake" {
+				t.Fatalf("state=%q, want running; stderr=%s", final.Metadata["state"], &env.stderr)
+			}
+		})
+	}
+}
