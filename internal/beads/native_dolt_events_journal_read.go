@@ -33,11 +33,10 @@ var ErrEventsJournalUnavailable = errors.New("events journal unavailable: no usa
 // reads then succeed again. Writes made while it was off have no rows, so a
 // tail that saw this refusal resumes past a gap, not where it stopped
 // (ledgerfeed.Tailer.Lapse). A switch is noticed only when activation is
-// re-resolved — on a direct native store within nativeJournalActivationRecheck,
-// or once a native open in flight elsewhere in the process ends; on a proxied
-// one at the next guard tick (proxiedGuardInterval) — so a lapse shorter than
-// that is never refused and leaves no trace: a consumer that must not miss a
-// write still reconciles in full now and then.
+// re-resolved — on a direct native store within nativeJournalActivationRecheck;
+// on a proxied one at the next guard tick (proxiedGuardInterval) — so a lapse
+// shorter than that is never refused and leaves no trace: a consumer that must
+// not miss a write still reconciles in full now and then.
 var ErrEventsJournalInactive = errors.New("events journal is not activated for this scope")
 
 var _ journalops.Journal = (*NativeDoltStore)(nil)
@@ -117,11 +116,10 @@ func (s *NativeDoltStore) readEventsJournalPage(ctx context.Context, since int64
 // writes at once while this handle, opened earlier, keeps journaling gc's
 // own. The store re-checks the scope's resolution at most every
 // nativeJournalActivationRecheck, so it stops answering "caught up" over
-// unrecorded writes within that interval — or, when a native open elsewhere in
-// the process holds the environment at the re-check, once that open ends: the
-// re-check keeps the last answer rather than wait for it under the store's
-// read lock. A scope that turns the journal on after open does not make the
-// handle tailable: its own writes are not journaled until it reopens.
+// unrecorded writes within that interval. The re-check reads the ambient
+// environment without waiting for any native open's projection window. A
+// scope that turns the journal on after open does not make the handle
+// tailable: its own writes are not journaled until it reopens.
 //
 // The library exposes the activation switch but no getter, so the open-time
 // answer is recorded where the switch is thrown (nativeEventsJournalActivations).
