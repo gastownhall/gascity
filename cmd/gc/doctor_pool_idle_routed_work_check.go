@@ -241,8 +241,10 @@ func unclaimedRoutedWork(store beads.Store, template string) ([]string, error) {
 	// before mapBdStatus collapses them into "open" and the check reports
 	// work the instance is correct to leave alone (same tradeoff as
 	// listOpenForControllerDemandLive). FederatedReadTier because a
-	// relocated class leg answers at exactly the tier asked.
-	items, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
+	// relocated class leg answers at exactly the tier asked. Dependencies are
+	// checked separately because blocked work can still have status=open.
+	live := beads.HandlesFor(store).Live
+	items, err := live.List(beads.ListQuery{
 		Status:   "open",
 		TierMode: beads.FederatedReadTier,
 		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: template},
@@ -255,8 +257,41 @@ func unclaimedRoutedWork(store beads.Store, template string) ([]string, error) {
 		if strings.TrimSpace(b.Assignee) != "" || b.Status != "open" {
 			continue
 		}
+		blocked, err := waitsOnBlockingDependency(live, b.ID)
+		if err != nil {
+			return nil, fmt.Errorf("checking routed work %s: %w", b.ID, err)
+		}
+		if blocked {
+			continue
+		}
 		beadIDs = append(beadIDs, b.ID)
 	}
 	sort.Strings(beadIDs)
 	return beadIDs, nil
+}
+
+// waitsOnBlockingDependency reports whether the bead still has a blocking
+// dependency (blocks, waits-for, conditional-blocks) whose target does not
+// satisfy it, which is the condition bd ready uses to withhold the bead from
+// every claimant. A failed dependency or blocker read is returned rather than
+// read as "not blocked": counting the bead would report work no instance can
+// claim.
+func waitsOnBlockingDependency(live beads.LiveReader, id string) (bool, error) {
+	deps, err := live.DepList(id, "down")
+	if err != nil {
+		return false, fmt.Errorf("listing dependencies: %w", err)
+	}
+	for _, dep := range deps {
+		if !beads.IsReadyBlockingDependencyType(dep.Type) {
+			continue
+		}
+		blocker, err := live.Get(dep.DependsOnID)
+		if err != nil {
+			return false, fmt.Errorf("resolving blocker %s: %w", dep.DependsOnID, err)
+		}
+		if !beads.DependencySatisfied(blocker.Status, beads.ReadinessWorkOutcome(blocker.Metadata)) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
