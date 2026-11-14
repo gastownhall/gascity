@@ -153,8 +153,8 @@ func (r *runner) opTimeout(ctx context.Context, timeout time.Duration, stdin []b
 func (r *runner) opEnv(ctx context.Context, timeout time.Duration, env []string, stdin []byte, args ...string) outcome {
 	var cmdEnv []string
 	if env != nil {
-		// Read before the op's deadline: execenv.Environ waits out an
-		// in-flight native store open, and that wait is not the op's.
+		// Read before the op's deadline, so the read is not the op's. During
+		// a native store open it is the environment as the open found it.
 		cmdEnv = append(execenv.Environ(), env...)
 	}
 	opCtx, cancel := context.WithTimeout(ctx, timeout)

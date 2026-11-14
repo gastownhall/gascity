@@ -1952,82 +1952,51 @@ func TestOpenNativeDoltStoreAtPersistsLocalStringsAcrossReopen(t *testing.T) {
 	}
 }
 
-func TestProcessEnvSnapshotWaitsForNativeDoltOpenEnvRestore(t *testing.T) {
+// A native open's window projects scope values into the process env. The
+// snapshot every bd child's environment is built from never shows them: it
+// answers at once with the ambient value, while the window stands and after.
+func TestProcessEnvSnapshotShowsTheAmbientValueDuringNativeDoltOpenEnv(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient.example.com")
-	restoreEnv, err := withNativeDoltOpenEnv(map[string]string{
+	endWindow := holdProjectionWindow(t, nil, map[string]string{
 		"BEADS_DOLT_SERVER_HOST": "scoped.example.com",
 	})
-	if err != nil {
-		t.Fatalf("withNativeDoltOpenEnv: %v", err)
+	if got := os.Getenv("BEADS_DOLT_SERVER_HOST"); got != "scoped.example.com" {
+		t.Fatalf("the window did not project its host: os.Getenv = %q", got)
 	}
-	envCh := make(chan []string, 1)
-	go func() {
-		envCh <- processEnvSnapshotExcludingNativeDoltOpen()
-	}()
-	select {
-	case env := <-envCh:
-		t.Fatalf("process env snapshot completed during native open with host %q", beadsDoltServerHostFromEnv(env))
-	case <-time.After(10 * time.Millisecond):
-	}
-	restoreEnv()
-	var env []string
-	select {
-	case env = <-envCh:
-	case <-time.After(time.Second):
-		t.Fatal("process env snapshot did not complete after native open env restored")
-	}
-	if got := beadsDoltServerHostFromEnv(env); got != "ambient.example.com" {
-		t.Fatalf("BEADS_DOLT_SERVER_HOST in snapshot = %q, want ambient.example.com", got)
-	}
-}
-
-func TestProcessEnvSnapshotWaitsForWholeBeadsNamespaceRestore(t *testing.T) {
-	t.Setenv("BEADS_FUTURE_AUTHORITY", "ambient-authority")
-	restoreEnv, err := withWithheldBeadsEnv()
-	if err != nil {
-		t.Fatalf("withWithheldBeadsEnv: %v", err)
-	}
-	restored := false
-	t.Cleanup(func() {
-		if !restored {
-			restoreEnv()
+	within(t, "processEnvSnapshotExcludingNativeDoltOpen", time.Second, func() {
+		if got := beadsDoltServerHostFromEnv(processEnvSnapshotExcludingNativeDoltOpen()); got != "ambient.example.com" {
+			t.Errorf("BEADS_DOLT_SERVER_HOST in the snapshot during the window = %q, want ambient.example.com", got)
 		}
 	})
-
-	envCh := make(chan []string, 1)
-	go func() {
-		envCh <- ProcessEnvSnapshotExcludingNativeDoltOpen()
-	}()
-	select {
-	case env := <-envCh:
-		t.Fatalf("process env snapshot completed while BEADS_ was withheld: %v", envValues(env, "BEADS_FUTURE_AUTHORITY"))
-	case <-time.After(10 * time.Millisecond):
-	}
-
-	restoreEnv()
-	restored = true
-	select {
-	case env := <-envCh:
-		if got := envValues(env, "BEADS_FUTURE_AUTHORITY"); len(got) != 1 || got[0] != "ambient-authority" {
-			t.Fatalf("BEADS_FUTURE_AUTHORITY after restore = %v, want [ambient-authority]", got)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("process env snapshot did not complete after the BEADS_ namespace was restored")
+	endWindow()
+	if got := beadsDoltServerHostFromEnv(processEnvSnapshotExcludingNativeDoltOpen()); got != "ambient.example.com" {
+		t.Fatalf("BEADS_DOLT_SERVER_HOST in the snapshot after the window = %q, want ambient.example.com", got)
 	}
 }
 
+// The whole BEADS_ namespace is withheld inside a window, not just the keys gc
+// projects; the snapshot still carries what the operator set.
+func TestProcessEnvSnapshotShowsTheWholeBeadsNamespaceDuringAWindow(t *testing.T) {
+	t.Setenv("BEADS_FUTURE_AUTHORITY", "ambient-authority")
+	endWindow := holdProjectionWindow(t, []string{beadsEnvPrefix}, nil)
+	if got := os.Getenv("BEADS_FUTURE_AUTHORITY"); got != "" {
+		t.Fatalf("the window did not withhold BEADS_FUTURE_AUTHORITY: os.Getenv = %q", got)
+	}
+	within(t, "ProcessEnvSnapshotExcludingNativeDoltOpen", time.Second, func() {
+		env := ProcessEnvSnapshotExcludingNativeDoltOpen()
+		if got := envValues(env, "BEADS_FUTURE_AUTHORITY"); len(got) != 1 || got[0] != "ambient-authority" {
+			t.Errorf("BEADS_FUTURE_AUTHORITY during the window = %v, want [ambient-authority]", got)
+		}
+	})
+	endWindow()
+}
+
+// An ordinary native open takes the gate like any window holder: while another
+// window holds it, the open does not reach the library, and once that window
+// ends it runs and sees the ambient BEADS_ namespace restored.
 func TestOrdinaryNativeOpenWaitsForWholeBeadsNamespaceRestore(t *testing.T) {
 	t.Setenv("BEADS_FUTURE_AUTHORITY", "ambient-authority")
-	restoreEnv, err := withWithheldBeadsEnv()
-	if err != nil {
-		t.Fatalf("withWithheldBeadsEnv: %v", err)
-	}
-	restored := false
-	t.Cleanup(func() {
-		if !restored {
-			restoreEnv()
-		}
-	})
+	endWindow := holdProjectionWindow(t, []string{beadsEnvPrefix}, nil)
 
 	oldOpen := nativeDoltOpenBestAvailable
 	t.Cleanup(func() { nativeDoltOpenBestAvailable = oldOpen })
@@ -2050,19 +2019,18 @@ func TestOrdinaryNativeOpenWaitsForWholeBeadsNamespaceRestore(t *testing.T) {
 	}()
 	select {
 	case got := <-seen:
-		t.Fatalf("ordinary native open ran while BEADS_ was withheld (saw %q)", got)
+		t.Fatalf("ordinary native open ran while another window held the gate (saw %q)", got)
 	case <-time.After(10 * time.Millisecond):
 	}
 
-	restoreEnv()
-	restored = true
+	endWindow()
 	select {
 	case got := <-seen:
 		if got != "ambient-authority" {
 			t.Fatalf("ordinary native open saw BEADS_FUTURE_AUTHORITY=%q, want ambient-authority", got)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("ordinary native open did not continue after the BEADS_ namespace was restored")
+		t.Fatal("ordinary native open did not continue after the other window ended")
 	}
 	select {
 	case err := <-openDone:
@@ -2074,60 +2042,35 @@ func TestOrdinaryNativeOpenWaitsForWholeBeadsNamespaceRestore(t *testing.T) {
 	}
 }
 
-// TestAmbientNativeDoltOpenEnvWaitsForNativeDoltOpenEnvRestore proves the guarded
-// single-key ambient read serializes with an in-flight native Dolt open. A native
-// open for a non-external scope unsets BEADS_DOLT_SERVER_TLS under nativeDoltOpenEnvMu
-// for the duration of the open, so a bare os.Getenv could observe that transient unset.
-// AmbientNativeDoltOpenEnv must block until restore and then observe the true ambient
-// "1", never the concurrent scope's transient value.
-func TestAmbientNativeDoltOpenEnvWaitsForNativeDoltOpenEnvRestore(t *testing.T) {
+// AmbientNativeDoltOpenEnv is the single-key ambient read. A native open for a
+// non-external scope unsets BEADS_DOLT_SERVER_TLS inside its window, so a bare
+// os.Getenv could observe that transient unset; AmbientNativeDoltOpenEnv answers
+// at once with the true ambient "1", never the open's transient value.
+func TestAmbientNativeDoltOpenEnvAnswersDuringNativeDoltOpenEnv(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_TLS", "1")
-	restoreEnv, err := withNativeDoltOpenEnv(map[string]string{
+	endWindow := holdProjectionWindow(t, nil, map[string]string{
 		"BEADS_DOLT_SERVER_HOST": "scoped.example.com",
 	})
-	if err != nil {
-		t.Fatalf("withNativeDoltOpenEnv: %v", err)
+	if got := os.Getenv("BEADS_DOLT_SERVER_TLS"); got != "" {
+		t.Fatalf("the window did not unset BEADS_DOLT_SERVER_TLS: os.Getenv = %q", got)
 	}
-	restored := false
-	t.Cleanup(func() {
-		if !restored {
-			restoreEnv()
+	within(t, "AmbientNativeDoltOpenEnv", time.Second, func() {
+		if got := AmbientNativeDoltOpenEnv("BEADS_DOLT_SERVER_TLS"); got != "1" {
+			t.Errorf("ambient TLS during the window = %q, want 1", got)
 		}
 	})
-	tlsCh := make(chan string, 1)
-	go func() {
-		tlsCh <- AmbientNativeDoltOpenEnv("BEADS_DOLT_SERVER_TLS")
-	}()
-	select {
-	case got := <-tlsCh:
-		t.Fatalf("ambient TLS read completed during native open (got %q); it must block on nativeDoltOpenEnvMu", got)
-	case <-time.After(10 * time.Millisecond):
-	}
-	restoreEnv()
-	restored = true
-	select {
-	case got := <-tlsCh:
-		if got != "1" {
-			t.Fatalf("ambient TLS after native open restore = %q, want 1", got)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("ambient TLS read did not complete after native open env restored")
+	endWindow()
+	if got := AmbientNativeDoltOpenEnv("BEADS_DOLT_SERVER_TLS"); got != "1" {
+		t.Fatalf("ambient TLS after the window = %q, want 1", got)
 	}
 }
 
-func TestBdStorePurgeWaitsForNativeDoltOpenEnvRestore(t *testing.T) {
+// Purge builds its child environment from the snapshot: it runs at once during
+// a window and the child carries the ambient host.
+func TestBdStorePurgeRunsDuringNativeDoltOpenEnv(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_HOST", "ambient.example.com")
-	restoreEnv, err := withNativeDoltOpenEnv(map[string]string{
+	endWindow := holdProjectionWindow(t, nil, map[string]string{
 		"BEADS_DOLT_SERVER_HOST": "scoped.example.com",
-	})
-	if err != nil {
-		t.Fatalf("withNativeDoltOpenEnv: %v", err)
-	}
-	restored := false
-	t.Cleanup(func() {
-		if !restored {
-			restoreEnv()
-		}
 	})
 	done := make(chan []string, 1)
 	store := NewBdStore(t.TempDir(), nil)
@@ -2143,20 +2086,13 @@ func TestBdStorePurgeWaitsForNativeDoltOpenEnvRestore(t *testing.T) {
 	}()
 	select {
 	case env := <-done:
-		t.Fatalf("Purge env snapshot completed during native open with host %q", beadsDoltServerHostFromEnv(env))
-	case <-time.After(10 * time.Millisecond):
-	}
-	restoreEnv()
-	restored = true
-	var env []string
-	select {
-	case env = <-done:
+		if got := beadsDoltServerHostFromEnv(env); got != "ambient.example.com" {
+			t.Fatalf("BEADS_DOLT_SERVER_HOST in purge env during the window = %q, want ambient.example.com", got)
+		}
 	case <-time.After(time.Second):
-		t.Fatal("Purge env snapshot did not complete after native open env restored")
+		t.Fatal("Purge did not run within 1s of a window standing")
 	}
-	if got := beadsDoltServerHostFromEnv(env); got != "ambient.example.com" {
-		t.Fatalf("BEADS_DOLT_SERVER_HOST in purge env = %q, want ambient.example.com", got)
-	}
+	endWindow()
 }
 
 func TestCachingStoreCreateWithNativeDoltStoreHydratesDependencies(t *testing.T) {
@@ -3284,10 +3220,7 @@ func TestOpenNativeDoltStoreAtWithoutAmbientEnvWithCredentialCommandProjectsOnly
 // names, so passing an "empty environment" to it withholds nothing else.
 func TestScopedNativeDoltOpenEnvIgnoresKeysOutsideItsList(t *testing.T) {
 	t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", "/poison/credential-command")
-	restore, err := withNativeDoltOpenEnv(map[string]string{"BEADS_DOLT_CREDENTIAL_COMMAND": ""})
-	if err != nil {
-		t.Fatalf("withNativeDoltOpenEnv: %v", err)
-	}
+	restore := holdProjectionWindow(t, nil, map[string]string{"BEADS_DOLT_CREDENTIAL_COMMAND": ""})
 	got := os.Getenv("BEADS_DOLT_CREDENTIAL_COMMAND")
 	restore()
 	if got != "/poison/credential-command" {

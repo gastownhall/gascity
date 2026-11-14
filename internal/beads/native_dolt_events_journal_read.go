@@ -33,11 +33,10 @@ var ErrEventsJournalUnavailable = errors.New("events journal unavailable: no usa
 // reads then succeed again. Writes made while it was off have no rows, so a
 // tail that saw this refusal resumes past a gap, not where it stopped
 // (ledgerfeed.Tailer.Lapse). A switch is noticed only when activation is
-// re-resolved — on a direct native store within nativeJournalActivationRecheck,
-// or once a native open in flight elsewhere in the process ends; on a proxied
-// one at the next guard tick (proxiedGuardInterval) — so a lapse shorter than
-// that is never refused and leaves no trace: a consumer that must not miss a
-// write still reconciles in full now and then.
+// re-resolved — on a direct native store within nativeJournalActivationRecheck;
+// on a proxied one at the next guard tick (proxiedGuardInterval) — so a lapse
+// shorter than that is never refused and leaves no trace: a consumer that must
+// not miss a write still reconciles in full now and then.
 var ErrEventsJournalInactive = errors.New("events journal is not activated for this scope")
 
 var _ journalops.Journal = (*NativeDoltStore)(nil)
@@ -117,11 +116,10 @@ func (s *NativeDoltStore) readEventsJournalPage(ctx context.Context, since int64
 // writes at once while this handle, opened earlier, keeps journaling gc's
 // own. The store re-checks the scope's resolution at most every
 // nativeJournalActivationRecheck, so it stops answering "caught up" over
-// unrecorded writes within that interval — or, when a native open elsewhere in
-// the process holds the environment at the re-check, once that open ends: the
-// re-check keeps the last answer rather than wait for it under the store's
-// read lock. A scope that turns the journal on after open does not make the
-// handle tailable: its own writes are not journaled until it reopens.
+// unrecorded writes within that interval. The re-check reads the ambient
+// environment without waiting for any native open's projection window. A
+// scope that turns the journal on after open does not make the handle
+// tailable: its own writes are not journaled until it reopens.
 //
 // The library exposes the activation switch but no getter, so the open-time
 // answer is recorded where the switch is thrown (nativeEventsJournalActivations).
@@ -161,9 +159,9 @@ type nativeJournalActivationSet struct {
 	handles map[beadslib.Storage]*nativeJournalActivation
 	// now is the clock the recheck interval is measured on.
 	now func() time.Time
-	// resolve re-resolves a scope's activation; nil resolves it as bd does
-	// whenever no open holds the environment (resolveScope). A test swaps it
-	// to land a close or a re-record in a resolution.
+	// resolve re-resolves a scope's activation; nil resolves it as bd does,
+	// from the ambient environment. A test swaps it to land a close or a
+	// re-record in a resolution.
 	resolve func(beadsDir string) bool
 }
 
@@ -195,11 +193,10 @@ func (a *nativeJournalActivationSet) record(storage beadslib.Storage, beadsDir s
 // interval. A handle that closes, or is recorded anew, while its scope
 // resolves reports false.
 //
-// Its callers hold the store's read lock, so the re-resolution never waits
-// for nativeDoltOpenEnvMu: an open elsewhere in the process holds that for its
-// whole window, and the store's close, and every reader queued behind that
-// close, would wait as long. While an open holds it, active keeps the last
-// answer and leaves checkedAt alone, so the next question resolves again.
+// Its callers hold the store's read lock, and the re-resolution reads the
+// ambient environment without waiting for any open's projection window, so the
+// store's close, and every reader queued behind that close, never wait on an
+// open elsewhere in the process.
 func (a *nativeJournalActivationSet) active(storage beadslib.Storage) bool {
 	if !nativeStorageComparable(storage) {
 		return false
@@ -220,7 +217,7 @@ func (a *nativeJournalActivationSet) active(storage beadslib.Storage) bool {
 	beadsDir := entry.beadsDir
 	a.mu.Unlock()
 
-	enabled, resolved := a.resolveScope(beadsDir)
+	enabled := a.resolveScope(beadsDir)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.sweepLocked()
@@ -229,20 +226,16 @@ func (a *nativeJournalActivationSet) active(storage beadslib.Storage) bool {
 		// the answer is about a handle that is gone.
 		return false
 	}
-	if !resolved {
-		return entry.enabled
-	}
 	entry.enabled, entry.checkedAt = enabled, now
 	return enabled
 }
 
-// resolveScope re-resolves beadsDir's activation, reporting resolved false
-// when an open holds the environment it reads.
-func (a *nativeJournalActivationSet) resolveScope(beadsDir string) (enabled, resolved bool) {
+// resolveScope re-resolves beadsDir's activation.
+func (a *nativeJournalActivationSet) resolveScope(beadsDir string) bool {
 	if a.resolve != nil {
-		return a.resolve(beadsDir), true
+		return a.resolve(beadsDir)
 	}
-	return tryAmbientEventsJournalEnabledFor(beadsDir)
+	return ambientEventsJournalEnabledFor(beadsDir)
 }
 
 func (a *nativeJournalActivationSet) clock() time.Time {

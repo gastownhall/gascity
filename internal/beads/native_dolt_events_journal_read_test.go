@@ -499,11 +499,11 @@ func TestProxiedEventsJournalActiveFollowsBdPrecedence(t *testing.T) {
 }
 
 // A proxied native open withholds the whole BD_ namespace for its window. A
-// proxied activation resolution that ran inside it would read the scope's
-// config alone, over an ambient BD_EVENTS_JOURNAL=0, and cache the inverted
-// answer. It holds no store lock and has no earlier answer to give, so it
-// waits the window out instead.
-func TestProxiedEventsJournalResolutionWaitsOutAnOpenWindow(t *testing.T) {
+// proxied activation resolution reads the ambient environment through the
+// execenv readers, which never show the window's projection, so it answers at
+// once from the ambient BD_EVENTS_JOURNAL=0 and caches that true answer
+// instead of waiting the window out.
+func TestProxiedEventsJournalResolutionAnswersFromTheAmbientEnvInAnOpenWindow(t *testing.T) {
 	t.Setenv("BD_EVENTS_JOURNAL", "0")
 	scopeRoot := t.TempDir()
 	writeScopeJournalConfig(t, scopeRoot, "events-journal: true\n")
@@ -512,25 +512,20 @@ func TestProxiedEventsJournalResolutionWaitsOutAnOpenWindow(t *testing.T) {
 	go func() { got <- proxiedEventsJournalActive(PinForTest(scopeRoot, "", "beads")) }()
 	select {
 	case answer := <-got:
-		t.Fatalf("the resolution answered %v inside the window; it must wait on nativeDoltOpenEnvMu", answer)
-	case <-time.After(100 * time.Millisecond):
-	}
-	endWindow()
-	select {
-	case answer := <-got:
 		if answer {
-			t.Fatal("the resolution answered true over the ambient BD_EVENTS_JOURNAL=0")
+			t.Fatal("the resolution answered true inside the window over the ambient BD_EVENTS_JOURNAL=0")
 		}
 	case <-time.After(openWindowPatience):
-		t.Fatal("the resolution did not answer after the window closed")
+		t.Fatalf("the resolution is still waiting %v into the window; it must read the ambient env without waiting", openWindowPatience)
 	}
+	endWindow()
 }
 
-// The native re-check runs under a store's read lock, so unlike the proxied
-// resolution it does not wait an open window out: inside one it keeps the
-// last answer and caches nothing, and the first question after the window
-// resolves the scope again.
-func TestNativeJournalRecheckKeepsTheLastAnswerThroughAnOpenWindow(t *testing.T) {
+// The native re-check runs under a store's read lock. It reads the ambient
+// environment without waiting, so inside an open window it resolves the scope
+// against the ambient BD_EVENTS_JOURNAL=0 at once, and the answer is cached:
+// the window's withheld namespaces are never what it sees.
+func TestNativeJournalRecheckResolvesTheAmbientEnvInAnOpenWindow(t *testing.T) {
 	t.Setenv("BD_EVENTS_JOURNAL", "0")
 	scopeRoot := t.TempDir()
 	writeScopeJournalConfig(t, scopeRoot, "events-journal: true\n")
@@ -546,30 +541,24 @@ func TestNativeJournalRecheckKeepsTheLastAnswerThroughAnOpenWindow(t *testing.T)
 	go func() { got <- set.active(spy) }()
 	select {
 	case answer := <-got:
-		if !answer {
-			t.Fatal("active = false inside the window; it must keep the last answer, true")
+		if answer {
+			t.Fatal("active = true inside the window; the ambient BD_EVENTS_JOURNAL=0 must resolve the scope to false")
 		}
 	case <-time.After(openWindowPatience):
-		t.Fatalf("active is still waiting %v into the window; it must not wait on nativeDoltOpenEnvMu", openWindowPatience)
-	}
-	endWindow()
-	if checked := set.handles[spy].checkedAt; !checked.Equal(recorded) {
-		t.Fatalf("checkedAt = %v, want %v: an answer kept inside the window must not be cached", checked, recorded)
-	}
-	if set.active(spy) {
-		t.Fatal("active = true after the window over the ambient BD_EVENTS_JOURNAL=0; the scope was not resolved again")
+		t.Fatalf("active is still waiting %v into the window; the ambient read must not wait", openWindowPatience)
 	}
 	if checked := set.handles[spy].checkedAt; !checked.Equal(now) {
-		t.Fatalf("checkedAt = %v, want %v after the scope resolved again", checked, now)
+		t.Fatalf("checkedAt = %v, want %v: the ambient answer is the true one and is cached", checked, now)
 	}
+	endWindow()
 }
 
 // A direct native store re-checks its scope's activation under its read lock.
-// Another scope's open holds nativeDoltOpenEnvMu for its whole window — up to
-// that open's full budget against a wedged proxy — so a re-check that waited
-// for it would hold the read lock as long: the journal read would outlive its
-// caller's ctx, and a CloseStore queued behind it would stall every reader of
-// the store. Each step below must finish while the window still stands.
+// Another scope's open holds its projection window for up to that open's full
+// budget against a wedged proxy, so a re-check that waited for it would hold
+// the read lock as long: the journal read would outlive its caller's ctx, and
+// a CloseStore queued behind it would stall every reader of the store. Each
+// step below must finish while the window still stands.
 func TestNativeDoltStoreJournalRecheckDoesNotWaitOutAnOpenWindow(t *testing.T) {
 	t.Setenv("BD_EVENTS_JOURNAL", "")
 	beadsDir := t.TempDir()
@@ -659,27 +648,14 @@ func TestNativeDoltStoreJournalRecheckDoesNotWaitOutAnOpenWindow(t *testing.T) {
 // and one that does never comes back while the window stands.
 const openWindowPatience = 5 * time.Second
 
-// holdOpenWindow stands up a native open's window — nativeDoltOpenEnvMu held
-// and the BEADS_ and BD_ namespaces withheld, as openNativeStorageProxied
-// holds them — and returns the func that ends it. The test's cleanup ends it
-// too, so a test that fails inside it does not leave it standing.
+// holdOpenWindow stands up a native open's window — an execenv projection
+// window entered and the BEADS_ and BD_ namespaces withheld, as
+// openNativeStorageProxied holds them — and returns the func that ends it. The
+// test's cleanup ends it too, so a test that fails inside it does not leave it
+// standing.
 func holdOpenWindow(t *testing.T) (end func()) {
 	t.Helper()
-	nativeDoltOpenEnvMu.Lock()
-	restore, err := withWithheldPrefixesLocked(beadsEnvPrefix, bdEnvPrefix)
-	if err != nil {
-		nativeDoltOpenEnvMu.Unlock()
-		t.Fatalf("withholding the window's namespaces: %v", err)
-	}
-	var once sync.Once
-	end = func() {
-		once.Do(func() {
-			restore()
-			nativeDoltOpenEnvMu.Unlock()
-		})
-	}
-	t.Cleanup(end)
-	return end
+	return holdProjectionWindow(t, []string{beadsEnvPrefix, bdEnvPrefix}, nil)
 }
 
 // proxiedJournalFixture is newSplitFixture with the native leaf latched onto
@@ -773,8 +749,8 @@ func TestProxiedStoreEventsJournalRefusalOrder(t *testing.T) {
 		}
 	})
 	t.Run("closed, inside another open's window", func(t *testing.T) {
-		// A closed store resolves no activation, so it does not wait the
-		// window out for an answer it cannot use.
+		// A closed store resolves no activation, so it answers ErrStoreClosed
+		// at once whatever window stands.
 		store, _, _ := newSplitFixture(t)
 		if err := store.CloseStore(); err != nil {
 			t.Fatalf("CloseStore: %v", err)
@@ -825,9 +801,8 @@ func TestProxiedStoreEventsJournalRefusalOrder(t *testing.T) {
 	})
 }
 
-// Resolving the activation can wait out another native open's whole window
-// (TestProxiedEventsJournalResolutionWaitsOutAnOpenWindow), and a guard tick
-// that stands the leaf down or re-pins it inside that wait drops the leaf the
+// Resolving the activation reads the scope's config, and a guard tick that
+// stands the leaf down or re-pins it inside that resolution drops the leaf the
 // read started from. The read must not go on with the dropped leaf: closed by
 // then, it refuses with ErrStoreClosed, which tells the caller a store that is
 // open has closed. The read refuses as transiently unavailable instead, and
@@ -1007,20 +982,23 @@ func resolvingJournalFixture(t *testing.T, config string) (*ProxiedStore, <-chan
 	return store, leafClosed
 }
 
-// readWhileTheLeafIsDropped reads store's journal while another open's window
-// stands, runs drop once the read is resolving the activation, waits for the
-// dropped leaf to close, and returns the read's error once the window ends.
+// readWhileTheLeafIsDropped reads store's journal, parks the read inside its
+// activation resolution, runs drop there, waits for the dropped leaf to close,
+// and returns the read's error once the resolution is let go.
 func readWhileTheLeafIsDropped(t *testing.T, store *ProxiedStore, leafClosed <-chan struct{}, drop func()) error {
 	t.Helper()
 	resolving := make(chan struct{})
+	proceed := make(chan struct{})
 	var once sync.Once
 	oldResolve := proxiedJournalResolve
 	t.Cleanup(func() { proxiedJournalResolve = oldResolve })
 	proxiedJournalResolve = func(pin Pin) bool {
-		once.Do(func() { close(resolving) })
+		once.Do(func() {
+			close(resolving)
+			<-proceed
+		})
 		return oldResolve(pin)
 	}
-	endWindow := holdOpenWindow(t)
 	read := make(chan error, 1)
 	go func() {
 		_, err := store.ReadEventsJournalPage(context.Background(), 0, 0)
@@ -1029,20 +1007,22 @@ func readWhileTheLeafIsDropped(t *testing.T, store *ProxiedStore, leafClosed <-c
 	select {
 	case <-resolving:
 	case <-time.After(openWindowPatience):
+		close(proceed)
 		t.Fatal("the read did not start resolving the activation")
 	}
 	drop()
 	select {
 	case <-leafClosed:
 	case <-time.After(openWindowPatience):
+		close(proceed)
 		t.Fatal("the dropped leaf was not closed")
 	}
-	endWindow()
+	close(proceed)
 	select {
 	case err := <-read:
 		return err
 	case <-time.After(openWindowPatience):
-		t.Fatal("the read did not answer after the window ended")
+		t.Fatal("the read did not answer after the resolution was let go")
 		return nil
 	}
 }

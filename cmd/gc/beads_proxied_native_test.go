@@ -900,8 +900,8 @@ func TestProxiedGuardRecoverySpendsAtMostOneProbeSession(t *testing.T) {
 
 // TestProxiedGuardRecoveryHoldsTheOpenToTheReadBudget is council pr2 D-F16.
 //
-// The recovery's library open holds nativeDoltOpenEnvMu, a process-global lock
-// every other scope's native open waits on. It ran under the 90s long-lived
+// The recovery's library open holds the process-wide execenv projection window,
+// which every other scope's native open waits on until its own context ends. It ran under the 90s long-lived
 // admission budget, on a background timer with no caller waiting, where the
 // read path's equivalent reopen is held to ProxiedReadBudget. The row captures
 // the deadline the library open actually receives.

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -198,7 +199,7 @@ func TestDirectNativeOpenEnvKeyListUnchanged(t *testing.T) {
 }
 
 // TestProcessEnvSnapshotSeesAmbientDuringProxiedWindow extends the existing
-// snapshot fence to the proxied window, in both directions.
+// snapshot fence to the proxied window.
 //
 // The snapshot exists so that a bd child's environment is built from the true
 // ambient process env rather than from another scope's transient projection --
@@ -208,10 +209,10 @@ func TestDirectNativeOpenEnvKeyListUnchanged(t *testing.T) {
 // author pair), so it is exactly the window in which an unguarded reader would
 // see the most wrong.
 //
-// Both directions matter: the snapshot must BLOCK while the window is open (a
-// snapshot taken mid-window would report gc's identity as the operator's and
-// bd's unlocks as absent), and it must see the ambient values once it is
-// restored.
+// The snapshot must answer with the ambient values WHILE the window is open (it
+// is built from the clean copy of the env taken as the window was entered, so
+// it reports the operator's identity and bd's unlocks, never gc's), and the
+// same values once the window is restored.
 func TestProcessEnvSnapshotSeesAmbientDuringProxiedWindow(t *testing.T) {
 	t.Setenv("BD_ALLOW_REMOTE_MIGRATE", "1")
 	t.Setenv("BEADS_FUTURE_AUTHORITY", "ambient-authority")
@@ -221,7 +222,9 @@ func TestProcessEnvSnapshotSeesAmbientDuringProxiedWindow(t *testing.T) {
 	t.Cleanup(func() { nativeDoltOpenBestAvailable = oldOpen })
 	inWindow := make(chan struct{})
 	release := make(chan struct{})
+	var windowAuthor atomic.Value
 	nativeDoltOpenBestAvailable = func(context.Context, string) (beadslib.Storage, error) {
+		windowAuthor.Store(os.Getenv("GIT_AUTHOR_NAME"))
 		close(inWindow)
 		<-release
 		return &nativeDoltStorageSpy{
@@ -240,23 +243,12 @@ func TestProcessEnvSnapshotSeesAmbientDuringProxiedWindow(t *testing.T) {
 		openDone <- err
 	}()
 	<-inWindow
-
-	envCh := make(chan []string, 1)
-	go func() { envCh <- ProcessEnvSnapshotExcludingNativeDoltOpen() }()
-	select {
-	case env := <-envCh:
-		t.Fatalf("the snapshot completed inside the proxied window: BD_ALLOW_REMOTE_MIGRATE=%v GIT_AUTHOR_NAME=%v",
-			envValues(env, "BD_ALLOW_REMOTE_MIGRATE"), envValues(env, "GIT_AUTHOR_NAME"))
-	case <-time.After(20 * time.Millisecond):
+	if got, _ := windowAuthor.Load().(string); got != "gc" {
+		t.Fatalf("the proxied window's own GIT_AUTHOR_NAME = %q, want its projected gc", got)
 	}
 
-	close(release)
-	if err := <-openDone; err != nil {
-		t.Fatalf("OpenNativeDoltStoreAtProxied: %v", err)
-	}
-
-	select {
-	case env := <-envCh:
+	assertAmbient := func(when string, env []string) {
+		t.Helper()
 		for key, want := range map[string]string{
 			"BD_ALLOW_REMOTE_MIGRATE": "1",
 			"BEADS_FUTURE_AUTHORITY":  "ambient-authority",
@@ -264,12 +256,24 @@ func TestProcessEnvSnapshotSeesAmbientDuringProxiedWindow(t *testing.T) {
 		} {
 			got := envValues(env, key)
 			if len(got) != 1 || got[0] != want {
-				t.Errorf("%s in the post-window snapshot = %v, want [%s]", key, got, want)
+				t.Errorf("%s in the %s snapshot = %v, want [%s]", key, when, got, want)
 			}
 		}
-	case <-time.After(time.Second):
-		t.Fatal("the snapshot did not complete after the proxied window restored")
 	}
+	envCh := make(chan []string, 1)
+	go func() { envCh <- ProcessEnvSnapshotExcludingNativeDoltOpen() }()
+	select {
+	case env := <-envCh:
+		assertAmbient("in-window", env)
+	case <-time.After(time.Second):
+		t.Fatal("the snapshot did not answer within 1s of the proxied window standing")
+	}
+
+	close(release)
+	if err := <-openDone; err != nil {
+		t.Fatalf("OpenNativeDoltStoreAtProxied: %v", err)
+	}
+	assertAmbient("post-window", ProcessEnvSnapshotExcludingNativeDoltOpen())
 }
 
 // TestWithNativeReadRetryBudgetIsAProductionOption pins that the proxied lane
