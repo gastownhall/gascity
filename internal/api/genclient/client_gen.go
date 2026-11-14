@@ -13586,6 +13586,9 @@ type GetV0CityByCityNameSessionsParams struct {
 
 	// WakeReasons Include wake_reasons on each open session: why the controller keeps it awake, as gc session list's REASON column shows them. Costs runtime probes per session.
 	WakeReasons *bool `form:"wake_reasons,omitempty" json:"wake_reasons,omitempty"`
+
+	// Enrich Include per-session runtime enrichment (running state, active bead, peek/model info). Defaults to true; set false for a cheap read-model-only roster with zero runtime calls. With enrich=false the runtime stale-active downgrade is skipped too, so state is the persisted value and an active session whose runtime is no longer alive is still reported as active.
+	Enrich *bool `form:"enrich,omitempty" json:"enrich,omitempty"`
 }
 
 // CreateSessionParams defines parameters for CreateSession.
@@ -39220,6 +39223,22 @@ func NewGetV0CityByCityNameSessionsRequest(server string, cityName string, param
 		if params.WakeReasons != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "wake_reasons", *params.WakeReasons, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Enrich != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "enrich", *params.Enrich, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
