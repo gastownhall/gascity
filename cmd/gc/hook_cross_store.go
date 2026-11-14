@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +23,9 @@ type hookStore struct {
 	// rig is the rig whose store this leg reads, "" for the agent's own store
 	// and the city store. A failed read is reported under it.
 	rig string
+	// storeRef names the store this leg reads ("city:<name>" or "rig:<name>"),
+	// as gc hook --claim --worktree records it on the workspace it provisions.
+	storeRef string
 	// command overrides the shared work query for this store, and is empty on
 	// every store production builds: one command is run against each leg in
 	// turn. It was set by scopeFederatedHookStores when that pinned the
@@ -243,9 +247,10 @@ func appendOneRigHookStore(stores []hookStore, cityPath string, cfg *config.City
 		}
 	}
 	return append(stores, hookStore{
-		dir: agentCommandDir(cityPath, &view, cfg.Rigs),
-		env: mergeRuntimeEnv(os.Environ(), rigEnv),
-		rig: rigName,
+		dir:      agentCommandDir(cityPath, &view, cfg.Rigs),
+		env:      mergeRuntimeEnv(os.Environ(), rigEnv),
+		rig:      rigName,
+		storeRef: "rig:" + rigName,
 	})
 }
 
@@ -278,9 +283,42 @@ func appendCityHookStore(stores []hookStore, cityPath string, cfg *config.City, 
 		}
 	}
 	return append(stores, hookStore{
-		dir: cityPath,
-		env: mergeRuntimeEnv(os.Environ(), cityEnv),
+		dir:      cityPath,
+		env:      mergeRuntimeEnv(os.Environ(), cityEnv),
+		storeRef: "city:" + hookStoreCityName(cityPath, loadedCityName(cfg, cityPath)),
 	})
+}
+
+// primaryHookStoreRef names the store the agent's own work-query env reads.
+func primaryHookStoreRef(cityPath string, cfg *config.City, agentForQuery, workDir string, env []string) string {
+	cityName := hookStoreCityName(cityPath, loadedCityName(cfg, cityPath))
+	if cfg == nil {
+		return "city:" + cityName
+	}
+	if rig := rigScopedHookRig(cfg, agentForQuery); rig != "" {
+		return "rig:" + rig
+	}
+	if rigRoot := hookClaimEnvValue(env, "GC_RIG_ROOT"); rigRoot != "" {
+		if ref := workflowStoreRefForDir(rigRoot, cityPath, cityName, cfg); ref != "" {
+			return ref
+		}
+	}
+	if ref := workflowStoreRefForDir(workDir, cityPath, cityName, cfg); ref != "" {
+		return ref
+	}
+	return "city:" + cityName
+}
+
+func hookStoreCityName(cityPath, cityName string) string {
+	cityName = strings.TrimSpace(cityName)
+	if cityName != "" {
+		return cityName
+	}
+	base := strings.TrimSpace(filepath.Base(filepath.Clean(cityPath)))
+	if base != "" {
+		return base
+	}
+	return "city"
 }
 
 // rigScopedHookRig returns the rig whose store a rig-scoped agent must ALSO

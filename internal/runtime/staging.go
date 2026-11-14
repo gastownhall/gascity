@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/overlay"
 )
 
@@ -58,16 +59,16 @@ func StageSessionWorkDir(cfg Config) error {
 // StageSessionWorkDirWithWarnings applies provider-aware pack overlays, the
 // agent overlay, and CopyFiles staging before a provider starts the session
 // process. Nonfatal overlay preservation warnings are written to warnings.
-func StageSessionWorkDirWithWarnings(cfg Config, warnings io.Writer) error {
+func StageSessionWorkDirWithWarnings(cfg Config, warnings io.Writer, opts ...StageOption) error {
 	if cfg.WorkDir != "" {
 		overlayProviders := EffectiveOverlayProviderNames(cfg)
 		for _, od := range cfg.PackOverlayDirs {
-			if err := StageProviderOverlayDir(od, cfg.WorkDir, overlayProviders, warnings); err != nil {
+			if err := StageProviderOverlayDir(od, cfg.WorkDir, overlayProviders, warnings, opts...); err != nil {
 				return fmt.Errorf("pack overlay %q -> %q: %w", od, cfg.WorkDir, err)
 			}
 		}
 		if cfg.OverlayDir != "" {
-			if err := StageProviderOverlayDir(cfg.OverlayDir, cfg.WorkDir, overlayProviders, warnings); err != nil {
+			if err := StageProviderOverlayDir(cfg.OverlayDir, cfg.WorkDir, overlayProviders, warnings, opts...); err != nil {
 				return fmt.Errorf("overlay %q -> %q: %w", cfg.OverlayDir, cfg.WorkDir, err)
 			}
 		}
@@ -150,9 +151,10 @@ type PreserveFunc func(relPath string, existing []byte) bool
 type StageOption func(*stageConfig)
 
 type stageConfig struct {
-	preserve PreserveFunc
-	staged   map[string]bool
-	mu       *sync.Mutex
+	preserve    PreserveFunc
+	staged      map[string]bool
+	mu          *sync.Mutex
+	skipTracked bool
 }
 
 // WithPreserve installs a predicate consulted for every non-directory overlay
@@ -171,6 +173,33 @@ func WithPreserve(preserve PreserveFunc) StageOption {
 		c.staged = staged
 		c.mu = mu
 	}
+}
+
+// WithSkipTrackedOverlays makes provider-overlay staging leave files alone when
+// the destination worktree tracks their paths. The default is platform-specific:
+// Windows enables this protection for every provider overlay staging call
+// because NTFS case folding can otherwise clobber repository-owned files; other
+// platforms opt in for managed worker worktrees while preserving historical
+// session/home staging behavior.
+func WithSkipTrackedOverlays() StageOption {
+	return func(c *stageConfig) {
+		c.skipTracked = true
+	}
+}
+
+func trackedOverlayGitEnv() []string {
+	env := execenv.Environ()
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		key, _, _ := strings.Cut(entry, "=")
+		switch key {
+		case "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR":
+			continue
+		default:
+			out = append(out, entry)
+		}
+	}
+	return out
 }
 
 // StageProviderOverlayDirSkippingMergeable copies a provider-aware overlay
@@ -232,6 +261,18 @@ func stageProviderOverlayDir(srcDir, dstDir string, providers []string, skip fun
 			opt(&cfg)
 		}
 	}
+	if cfg.skipTracked || defaultSkipTrackedOverlays() {
+		trackedSkip := trackedOverlaySkip(dstDir, providerOverlayFileCandidates(srcDir, providers), warnings)
+		base := skip
+		if trackedSkip != nil {
+			skip = func(relPath string, isDir bool) bool {
+				if base != nil && base(relPath, isDir) {
+					return true
+				}
+				return trackedSkip(relPath, isDir)
+			}
+		}
+	}
 	if cfg.preserve != nil {
 		base := skip
 		skip = func(relPath string, isDir bool) bool {
@@ -276,6 +317,70 @@ func stageProviderOverlayDir(srcDir, dstDir string, providers []string, skip fun
 		return fmt.Errorf("%s", fatal)
 	}
 	return nil
+}
+
+func providerOverlayFileCandidates(srcDir string, providers []string) []string {
+	var out []string
+	collectOverlayFiles(srcDir, "", func(rel string) {
+		if !providerUniversalCandidate(rel) {
+			return
+		}
+		out = append(out, filepath.Clean(rel))
+	})
+	seen := make(map[string]bool, len(providers))
+	for _, provider := range providers {
+		provider = strings.TrimSpace(provider)
+		if provider == "" || seen[provider] {
+			continue
+		}
+		seen[provider] = true
+		providerDir := filepath.Join(srcDir, overlay.PerProviderDir, provider)
+		collectOverlayFiles(providerDir, "", func(rel string) {
+			out = append(out, filepath.Clean(rel))
+		})
+	}
+	return out
+}
+
+func collectOverlayFiles(root, rel string, appendRel func(string)) {
+	dir := root
+	if rel != "" {
+		dir = filepath.Join(root, rel)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		entryRel := entry.Name()
+		if rel != "" {
+			entryRel = filepath.Join(rel, entry.Name())
+		}
+		if providerRuntimeMirrorCandidate(entryRel) {
+			continue
+		}
+		if entry.IsDir() {
+			collectOverlayFiles(root, entryRel, appendRel)
+			continue
+		}
+		appendRel(entryRel)
+	}
+}
+
+func providerUniversalCandidate(relPath string) bool {
+	clean := filepath.Clean(relPath)
+	return !providerRuntimeMirrorCandidate(clean) && !providerPerProviderCandidate(clean)
+}
+
+func providerRuntimeMirrorCandidate(relPath string) bool {
+	clean := filepath.Clean(relPath)
+	return clean == ".gc" || strings.HasPrefix(clean, ".gc"+string(filepath.Separator))
+}
+
+func providerPerProviderCandidate(relPath string) bool {
+	clean := filepath.Clean(relPath)
+	return clean == overlay.PerProviderDir || filepath.Dir(clean) == overlay.PerProviderDir ||
+		strings.HasPrefix(clean, overlay.PerProviderDir+string(filepath.Separator))
 }
 
 func splitOverlayWarnings(raw string) (string, string) {

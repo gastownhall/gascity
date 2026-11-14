@@ -527,13 +527,17 @@ const gitWaitDelay = 2 * time.Second
 // A failure on a ctx that is done also wraps ctx.Err(), so callers can tell a
 // missed deadline from an ordinary non-zero exit.
 func (g *Git) runCtx(ctx context.Context, args ...string) (string, error) {
+	return g.runCtxExtraEnv(ctx, nil, args...)
+}
+
+func (g *Git) runCtxExtraEnv(ctx context.Context, extraEnv []string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = g.workDir
 	if _, ok := ctx.Deadline(); ok {
 		cmd.WaitDelay = gitWaitDelay
 	}
 	// Build clean env: inherit everything except git-specific vars.
-	cmd.Env = sanitizeGitEnv(os.Environ())
+	cmd.Env = append(sanitizeGitEnv(os.Environ()), extraEnv...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil && !errors.Is(err, ctxErr) {
