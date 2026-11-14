@@ -151,7 +151,10 @@ func (f doneWorkflowSplitFixture) retire(t *testing.T, ops hookClaimOps, candida
 		IdentityCandidates: []string{"worker-1"},
 		RouteTargets:       []string{"worker"},
 	}
-	kept := retireDoneWorkflowCandidates([]beads.Bead{candidate}, opts, ops, "/work", &stderr)
+	kept, err := retireDoneWorkflowCandidates([]beads.Bead{candidate}, opts, ops, "/work", &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
 	return kept, stderr.String()
 }
 

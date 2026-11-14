@@ -32,7 +32,13 @@ extends = ["mol-polecat-base"]
 formula_compiler = ">=2.0.0"
 
 [[steps]]
+id = "load-context"
+title = "Load report assignment context"
+metadata = { "gc.continuation_group" = "report", "gc.session_affinity" = "require" }
+
+[[steps]]
 id = "workspace-setup"
+metadata = { "gc.continuation_group" = "report", "gc.session_affinity" = "require" }
 title = "Verify assignment (report-only, no worktree)"
 needs = ["load-context"]
 description = """
@@ -68,6 +74,7 @@ gc bd prime
 
 [[steps]]
 id = "preflight-tests"
+metadata = { "gc.continuation_group" = "report", "gc.session_affinity" = "require" }
 title = "Skip pre-flights (no code changes)"
 needs = ["workspace-setup"]
 description = """
@@ -79,6 +86,7 @@ Close this step immediately and proceed to implement.
 
 [[steps]]
 id = "implement"
+metadata = { "gc.continuation_group" = "report", "gc.session_affinity" = "require" }
 title = "Investigate (no code changes)"
 needs = ["preflight-tests"]
 description = """
@@ -96,6 +104,7 @@ code changes.
 
 [[steps]]
 id = "self-review"
+metadata = { "gc.continuation_group" = "report", "gc.session_affinity" = "require" }
 title = "Self-review: verify investigation is complete"
 needs = ["implement"]
 description = """
@@ -128,6 +137,7 @@ This formula produces ZERO code changes. All output is bead notes.
 
 [[steps]]
 id = "write-report"
+metadata = { "gc.continuation_group" = "report", "gc.session_affinity" = "require" }
 title = "Write report to bead notes and close"
 needs = ["self-review"]
 description = """

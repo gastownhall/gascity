@@ -1,11 +1,92 @@
 package molecule
 
 import (
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
+
+type workflowLinkFaultStore struct {
+	beads.Store
+	id  string
+	err error
+}
+
+func (s workflowLinkFaultStore) Get(id string) (beads.Bead, error) {
+	if id == s.id {
+		return beads.Bead{}, s.err
+	}
+	return s.Store.Get(id)
+}
+
+func (s workflowLinkFaultStore) ListByMetadata(filters map[string]string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
+	if s.id == "" {
+		return nil, s.err
+	}
+	return s.Store.ListByMetadata(filters, limit, opts...)
+}
+
+func TestWorkflowStopStrictRequiresReadableLinks(t *testing.T) {
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "root", Status: "open", Metadata: map[string]string{"gc.drain_control_id": "drain"}},
+		{ID: "drain", Status: "open", Metadata: map[string]string{"gc.root_bead_id": "parent"}},
+		{ID: "parent", Status: "open"},
+	}, nil)
+	step := beads.Bead{ID: "step", Metadata: map[string]string{"gc.root_bead_id": "root"}}
+	for _, id := range []string{"root", "drain", "parent"} {
+		for _, fault := range []error{fmt.Errorf("missing link: %w", beads.ErrNotFound), errors.New("store unavailable")} {
+			t.Run(id+"/"+fault.Error(), func(t *testing.T) {
+				target := beadstest.GraphMolecule(workflowLinkFaultStore{Store: store, id: id, err: fault})
+				for _, strict := range []func(beads.MoleculeTarget, beads.Bead) (WorkflowStop, error){StoppedWorkflowAncestorStrict, WorkflowStopReasonStrict} {
+					stop, err := strict(target, step)
+					if !errors.Is(err, fault) || !strings.Contains(err.Error(), id) || stop.Stopped() {
+						t.Fatalf("strict: stop=%+v err=%v, want unresolved %s: %v", stop, err, id, fault)
+					}
+				}
+				for _, legacy := range []func(beads.MoleculeTarget, beads.Bead) (WorkflowStop, error){StoppedWorkflowAncestor, WorkflowStopReason} {
+					stop, err := legacy(target, step)
+					if errors.Is(fault, beads.ErrNotFound) {
+						if err != nil || stop.Stopped() {
+							t.Fatalf("legacy missing link changed: stop=%+v err=%v", stop, err)
+						}
+					} else if !errors.Is(err, fault) {
+						t.Fatalf("legacy store error=%v, want %v", err, fault)
+					}
+				}
+			})
+		}
+	}
+	if _, err := WorkflowStopReasonStrict(beads.MoleculeTarget{}, step); err == nil {
+		t.Fatal("strict ancestry accepted an absent store")
+	}
+}
+
+func TestWorkflowStopStrictTeardownReads(t *testing.T) {
+	store := beads.NewMemStoreFrom(0, []beads.Bead{{ID: "root", Status: "closed"}}, nil)
+	step := beads.Bead{ID: "step", Metadata: map[string]string{"gc.root_bead_id": "root", "gc.step_id": "cleanup"}}
+	fault := fmt.Errorf("missing teardown subtree: %w", beads.ErrNotFound)
+	target := beadstest.GraphMolecule(workflowLinkFaultStore{Store: store, err: fault})
+	if _, err := WorkflowStopReasonStrict(target, step); !errors.Is(err, fault) {
+		t.Fatalf("strict stop=%v, want teardown failure", err)
+	}
+	if _, err := IsTeardownTailMemberStrict(target, step); !errors.Is(err, fault) {
+		t.Fatalf("strict membership=%v, want teardown failure", err)
+	}
+	if stop, err := WorkflowStopReason(target, step); err != nil || stop.RootID != "root" {
+		t.Fatalf("legacy teardown failure changed: stop=%+v err=%v", stop, err)
+	}
+	step.Metadata["gc.scope_role"] = "teardown"
+	if stop, err := WorkflowStopReasonStrict(target, step); err != nil || stop.Stopped() {
+		t.Fatalf("explicit teardown: stop=%+v err=%v, want exempt", stop, err)
+	}
+	if stop, err := StoppedWorkflowAncestorStrict(target, step); err != nil || stop.RootID != "root" {
+		t.Fatalf("raw ancestry: stop=%+v err=%v, want stopped root", stop, err)
+	}
+}
 
 func TestStoppedWorkflowAncestorWalksDrainLinks(t *testing.T) {
 	store := beads.NewMemStore()

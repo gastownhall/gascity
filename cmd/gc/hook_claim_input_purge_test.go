@@ -1077,7 +1077,10 @@ func TestHookDoneWorkflowRetirementListsMembershipOnceAndNeverProves(t *testing.
 	opts := hookClaimOptions{Assignee: "worker-1", IdentityCandidates: []string{"worker-1"}, RouteTargets: []string{"worker"}}
 
 	var stderr bytes.Buffer
-	kept := retireDoneWorkflowCandidates([]beads.Bead{w.open}, opts, ops, "/work", &stderr)
+	kept, err := retireDoneWorkflowCandidates([]beads.Bead{w.open}, opts, ops, "/work", &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(kept) != 0 {
 		t.Fatalf("candidate %s kept (stderr=%q); its input work is terminal", w.open.ID, stderr.String())
 	}
@@ -1143,7 +1146,10 @@ func TestHookInputPurgeRetirementFailure(t *testing.T) {
 	opts := hookClaimOptions{Assignee: "worker-1", IdentityCandidates: []string{"worker-1"}, RouteTargets: []string{"worker"}}
 
 	var stderr bytes.Buffer
-	kept := retireDoneWorkflowCandidates([]beads.Bead{w.open}, opts, ops, "/work", &stderr)
+	kept, err := retireDoneWorkflowCandidates([]beads.Bead{w.open}, opts, ops, "/work", &stderr)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(kept) != 1 || kept[0].ID != w.open.ID {
 		t.Fatalf("kept = %v after a failed retirement write, want [%s]", kept, w.open.ID)
 	}
@@ -1168,8 +1174,8 @@ func TestHookInputPurgeRetirementFailure(t *testing.T) {
 
 	store.fail = false
 	stderr.Reset()
-	if kept := retireDoneWorkflowCandidates([]beads.Bead{w.open}, opts, ops, "/work", &stderr); len(kept) != 0 {
-		t.Fatalf("candidate %s kept on retry (stderr=%q), want retired", w.open.ID, stderr.String())
+	if kept, err := retireDoneWorkflowCandidates([]beads.Bead{w.open}, opts, ops, "/work", &stderr); err != nil || len(kept) != 0 {
+		t.Fatalf("candidate %s kept on retry (stderr=%q, err=%v), want retired", w.open.ID, stderr.String(), err)
 	}
 	assertPurgeRetired(t, mem, w.root.ID, w.open.ID)
 	assertFinishedOutcomeKept(t, mem, w.finished.ID)
