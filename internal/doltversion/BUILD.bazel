@@ -2,7 +2,10 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "doltversion",
-    srcs = ["doltversion.go"],
+    srcs = [
+        "doltversion.go",
+        "probe.go",
+    ],
     importpath = "github.com/gastownhall/gascity/internal/doltversion",
     visibility = ["//:__subpackages__"],
 )

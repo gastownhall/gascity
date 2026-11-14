@@ -1913,6 +1913,10 @@ const (
 
 var doltVersionCommandTimeout = 10 * time.Second
 
+// errDoltVersionTimeout marks a `dolt version` probe that was killed at
+// doltVersionCommandTimeout: dolt is installed but did not answer in time.
+var errDoltVersionTimeout = errors.New("dolt version timed out")
+
 const doltDirMeasureTimeout = 60 * time.Second
 
 // resolveManagedDoltDataDir returns the effective Dolt data directory for the
@@ -3055,9 +3059,16 @@ func (c *DoltVersionCheck) Run(_ *CheckContext) *CheckResult {
 			ctx, cancel := context.WithTimeout(context.Background(), doltVersionCommandTimeout)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, path, "version")
+			// Run without the user's dolt config: its release check would
+			// otherwise block on the network. If the throwaway config cannot
+			// be made, probe with the caller's environment as before.
+			if probeEnv, cleanup, envErr := doltversion.IsolatedProbeEnv(); envErr == nil {
+				defer cleanup()
+				cmd.Env = append(os.Environ(), probeEnv...)
+			}
 			out, err := cmd.CombinedOutput()
 			if ctx.Err() == context.DeadlineExceeded {
-				return string(out), fmt.Errorf("dolt version timed out after %s", doltVersionCommandTimeout)
+				return string(out), errDoltVersionTimeout
 			}
 			return string(out), err
 		}
@@ -3065,6 +3076,11 @@ func (c *DoltVersionCheck) Run(_ *CheckContext) *CheckResult {
 
 	out, err := getOutput()
 	if err != nil {
+		if errors.Is(err, errDoltVersionTimeout) {
+			r.Status = StatusWarning
+			r.Message = fmt.Sprintf("dolt is installed, but `dolt version` timed out after %s", doltVersionCommandTimeout)
+			return r
+		}
 		if errors.Is(err, exec.ErrNotFound) || strings.Contains(err.Error(), "executable file not found") {
 			r.Status = StatusWarning
 			r.Message = "dolt binary not in PATH"

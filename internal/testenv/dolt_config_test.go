@@ -17,9 +17,14 @@ import (
 
 const doltConfigFileName = "config_global.json"
 
-// sharedDoltConfigWriter is the one file allowed to write the dolt global
-// config, relative to the repository root.
-var sharedDoltConfigWriter = filepath.Join("internal", "testutil", "dolt.go")
+// sharedDoltConfigWriters are the only files allowed to write the dolt global
+// config, relative to the repository root: the test helper, and the throwaway
+// config gc doctor's `dolt version` probe runs under (the same two disabling
+// keys, no identity).
+var sharedDoltConfigWriters = []string{
+	filepath.Join("internal", "testutil", "dolt.go"),
+	filepath.Join("internal", "doltversion", "probe.go"),
+}
 
 // TestOnlyTheSharedHelperWritesDoltGlobalConfig keeps the dolt global config to
 // one source, testutil.SeedDoltGlobalConfig. A test that writes
@@ -32,9 +37,13 @@ var sharedDoltConfigWriter = filepath.Join("internal", "testutil", "dolt.go")
 // assembled from a named constant is not seen.
 func TestOnlyTheSharedHelperWritesDoltGlobalConfig(t *testing.T) {
 	root := repoRoot(t)
-	shared := filepath.Join(root, sharedDoltConfigWriter)
-	if _, err := os.Stat(shared); err != nil {
-		t.Fatalf("the shared dolt global config writer moved: %v\nupdate sharedDoltConfigWriter in this test", err)
+	shared := map[string]bool{}
+	for _, w := range sharedDoltConfigWriters {
+		p := filepath.Join(root, w)
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("a shared dolt global config writer moved: %v\nupdate sharedDoltConfigWriters in this test", err)
+		}
+		shared[p] = true
 	}
 	var offenders []string
 	scanned := 0
@@ -48,7 +57,7 @@ func TestOnlyTheSharedHelperWritesDoltGlobalConfig(t *testing.T) {
 			}
 			return nil
 		}
-		if !strings.HasSuffix(path, ".go") || path == shared {
+		if !strings.HasSuffix(path, ".go") || shared[path] {
 			return nil
 		}
 		src, err := os.ReadFile(path)
