@@ -95,11 +95,18 @@ func formatStartupHealthEpisodeDetail(ep session.StartupHealthEpisode) string {
 	if alert == "" {
 		alert = "none"
 	}
-	return fmt.Sprintf("%s: %d consecutive %s failures (first=%s, last=%s, quarantined_until=%s, alert=%s)",
+	// held_until is the EFFECTIVE hold (StartHoldUntil: the later of the
+	// quarantine and the retry backoff), not QuarantinedUntil alone. Past the
+	// threshold the quarantine is re-stamped at its fixed duration on every
+	// failure while the backoff keeps growing to its cap, so reporting the
+	// quarantine by itself would understate how long starts are actually
+	// refused. Both are rendered so an operator can still tell the two apart.
+	return fmt.Sprintf("%s: %d consecutive %s failures (first=%s, last=%s, quarantined_until=%s, held_until=%s, alert=%s)",
 		ep.SessionName, ep.ConsecutiveCount, kind,
 		formatStartupHealthDetailTime(ep.FirstFailureAt),
 		formatStartupHealthDetailTime(ep.LastFailureAt),
 		formatStartupHealthDetailTime(ep.QuarantinedUntil),
+		formatStartupHealthDetailTime(ep.StartHoldUntil()),
 		alert)
 }
 
