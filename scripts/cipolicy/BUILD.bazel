@@ -13,6 +13,7 @@ go_test(
     srcs = [
         "policy_test.go",
         "testenv_import_test.go",
+        "watchdog_policy_test.go",
     ],
     data = glob(
         ["**"],
