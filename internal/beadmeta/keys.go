@@ -329,6 +329,7 @@ const (
 	// SessionNameCamelMetadataKey is the camelCase variant of SessionNameMetadataKey,
 	// mirroring SessionIDCamelMetadataKey.
 	SessionNameCamelMetadataKey = "gc.sessionName"
+	SkippedBlockersMetadataKey  = "gc.skipped_blockers"
 	SourceBeadIDMetadataKey     = "gc.source_bead_id"
 	SourceStepSpecMetadataKey   = "gc.source_step_spec"
 	SourceStoreRefMetadataKey   = "gc.source_store_ref"
@@ -761,6 +762,7 @@ var KnownMetadataKeys = []string{
 	SessionIDCamelMetadataKey,
 	SessionNameMetadataKey,
 	SessionNameCamelMetadataKey,
+	SkippedBlockersMetadataKey,
 	SourceBeadIDMetadataKey,
 	SourceStepSpecMetadataKey,
 	SourceStoreRefMetadataKey,
