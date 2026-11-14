@@ -51,9 +51,21 @@ type Report struct {
 }
 
 // Failed reports whether any required requirement failed. A run with only
-// passes and skips is a conformant run.
+// passes, skips and advisory FAILs is a conformant run.
 func (r Report) Failed() bool {
-	return r.Summary.Failed > 0
+	return r.RequiredFailed() > 0
+}
+
+// RequiredFailed counts the FAILs that fail the run: every FAIL but an
+// advisory group's, which Summary.Failed still counts.
+func (r Report) RequiredFailed() int {
+	n := 0
+	for _, res := range r.Results {
+		if res.Status == StatusFail && !advisory(res.Group) {
+			n++
+		}
+	}
+	return n
 }
 
 func (r *Report) record(req Requirement, status Status, detail string) {

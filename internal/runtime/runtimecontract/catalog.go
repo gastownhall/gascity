@@ -353,18 +353,19 @@ var catalog = []Requirement{
 	{ReqInputDeadBoxGone, GroupInput, "under GC_RPP_FAULT=dead (the box holds the name but nothing runs in it: observe reports it dead), every driving op exits 80 gone and types nothing: gone means no running box holds the name (declared conformance-faults only)", true},
 	{ReqInputKeysDelivered, GroupInput, "send-keys, interrupt and clear-scrollback to a running box exit 0 with stdout empty or exactly one delivered line", true},
 
-	{ReqObservationPeek, GroupObservation, "peek of a running box exits 0 (absent = SKIP; exit 2 FAILs under carrier.ops; advisory)", true},
+	{ReqObservationPeek, GroupObservation, "peek of a running box exits 0 (absent = SKIP; exit 2 FAILs under carrier.ops or the v2 profile; advisory)", true},
 	{ReqObservationLastActivity, GroupObservation, "get-last-activity of a running box exits 0 with an RFC3339 time or nothing (absent = SKIP; exit 2 FAILs under report-activity; advisory)", true},
 	{ReqObservationClearScrollback, GroupObservation, "clear-scrollback of a running box exits 0 (absent = SKIP; exit 2 FAILs under carrier.ops or input-outcome; advisory)", true},
 	{ReqObservationCopyTo, GroupObservation, "copy-to into a running box exits 0 even when the source is missing: the copy is best-effort (absent = SKIP; advisory)", true},
 }
 
-// advisory reports whether req's FAIL is kept out of v2_failed: a ported
-// group lands advisory, so a published pack it would fail is not taken off
-// v2_ready by a gc upgrade, and is made strict once published packs pass it.
-// Only the observation group is advisory.
-func advisory(req Requirement) bool {
-	return req.Group == GroupObservation
+// advisory reports whether a FAIL in group is kept out of v2_failed and
+// out of a failed run: a ported group lands advisory, so a published pack
+// it would fail is neither taken off v2_ready nor failed by a gc upgrade,
+// and is made strict once published packs pass it. Only the observation
+// group is advisory.
+func advisory(group Group) bool {
+	return group == GroupObservation
 }
 
 // Catalog returns the authoritative requirement list in run order. The

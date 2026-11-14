@@ -101,11 +101,11 @@ func run(ctx context.Context, executable string, opts Options, selected func(Cod
 			continue
 		}
 		status, detail := probe(ctx, r, report.Protocol)
-		if status == StatusFail && advisory(req) {
+		if status == StatusFail && advisory(req.Group) {
 			detail = "advisory, does not gate v2_ready: " + detail
 		}
 		report.record(req, status, detail)
-		if status == StatusFail && !advisory(req) {
+		if status == StatusFail && !advisory(req.Group) {
 			report.V2Failed = append(report.V2Failed, req.Code)
 		}
 	}

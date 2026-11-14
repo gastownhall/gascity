@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 )
 
 // This file holds the observation group ported from RunProviderTests
@@ -14,7 +15,7 @@ import (
 // ClearScrollback_NoError and CopyTo_NoError, each over the wire. Like the
 // other ported groups, each probe asks about its op on a name no box holds
 // before it starts a session, so an op that answers exit 2 SKIPs (or FAILs,
-// when a declared token makes the op mandatory) even if start is broken, and
+// when the handshake makes the op mandatory) even if start is broken, and
 // a present op that fails on a running box FAILs. The group is advisory
 // (advisory): its FAILs do not enter v2_failed yet.
 
@@ -23,8 +24,8 @@ import (
 const copyToMissingSource = "/nonexistent-path-for-conformance"
 
 // observationOp is one observation op: its name, its arguments after the
-// session name, and the token, if one is declared, that makes its exit 2 a
-// failure.
+// session name, and what the handshake declares, if anything, that makes
+// its exit 2 a failure.
 type observationOp struct {
 	op        string
 	args      []string
@@ -36,11 +37,11 @@ func (o observationOp) run(ctx context.Context, r *runner, name string) outcome 
 	return r.op(ctx, append([]string{o.op, name}, o.args...)...)
 }
 
-// unsupported is the verdict on an op that answered exit 2: SKIP, unless a
-// declared token makes the op mandatory.
+// unsupported is the verdict on an op that answered exit 2: SKIP, unless
+// the handshake makes the op mandatory.
 func (o observationOp) unsupported(hs runtime.ProtocolInfo) (Status, string) {
-	if token := o.mandatory(hs); token != "" {
-		return StatusFail, fmt.Sprintf("%s returned exit 2 although %s is declared, which makes it a required op", o.op, token)
+	if declared := o.mandatory(hs); declared != "" {
+		return StatusFail, fmt.Sprintf("%s returned exit 2 although %s, which makes it a required op", o.op, declared)
 	}
 	return StatusSkip, o.op + " not implemented (exit 2)"
 }
@@ -51,19 +52,33 @@ func declaredOf(tokens ...string) func(runtime.ProtocolInfo) string {
 	return func(hs runtime.ProtocolInfo) string {
 		for _, token := range tokens {
 			if hs.Has(token) {
-				return token
+				return token + " is declared"
 			}
 		}
 		return ""
 	}
 }
 
+// peekMandatory names what makes peek's exit 2 a failure, as the exec
+// provider reads it (exitTwoIsStrict): carrier.ops, whose carrier reads the
+// screen through peek, or the v2 profile, under which peek is an op a
+// v2-ready script must implement.
+func peekMandatory(hs runtime.ProtocolInfo) string {
+	if hs.Has(runtime.ProtocolCapabilityCarrierOps) {
+		return runtime.ProtocolCapabilityCarrierOps + " is declared"
+	}
+	if len(sessionexec.V2ProfileGaps(hs)) == 0 {
+		return "the v2 profile (" + strings.Join(sessionexec.V2ProfileCapabilities(), ", ") + ") is declared"
+	}
+	return ""
+}
+
 var (
-	// peek is mandatory under carrier.ops, whose carrier reads the screen
-	// through it and reads its exit 2 as a failure.
+	// peek is mandatory under carrier.ops or the v2 profile
+	// (peekMandatory).
 	observationPeek = observationOp{
 		op: "peek", args: []string{"10"},
-		mandatory: declaredOf(runtime.ProtocolCapabilityCarrierOps),
+		mandatory: peekMandatory,
 	}
 	// get-last-activity is mandatory under report-activity, which tells gc
 	// its answer is meaningful for idle and health decisions.
