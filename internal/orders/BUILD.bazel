@@ -112,6 +112,7 @@ go_test(
     ],
     embed = [":orders"],
     deps = [
+        "//internal/beadmeta",
         "//internal/beads",
         "//internal/beads/beadstest",
         "//internal/convergence",
