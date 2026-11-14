@@ -1272,6 +1272,7 @@ skipped when its op answers exit 2 and failed when it answers wrongly:
 | `process` | `RPP-PROCESS-001` to `002` | `process-alive` with no names answers `true`; after `stop` it never answers `true` or empty. |
 | `concurrency` | `RPP-CONCURRENCY-001` to `005` | Under `observe.v1`: `start`, `stop`, `is-running`, `process-alive` and `list-running` on distinct names all work at once. |
 | `observe` | `RPP-OBSERVE-017` to `018` | With `report-attachment`: `is-attached` answers `false`, exit 0, for a running box with no client and for a name no box holds. |
+| `observation` | `RPP-OBSERVATION-001` to `004` | On a running box: `peek` exits 0; `get-last-activity` exits 0 with an RFC3339 time or nothing; `clear-scrollback` exits 0; `copy-to` of a missing source exits 0. An exit 2 fails `peek` under `carrier.ops`, `clear-scrollback` under `carrier.ops` or `input-outcome`, and `get-last-activity` under `report-activity`. Advisory for now: a failure is reported but does not affect `v2_ready`. |
 
 ### Switching an existing exec city to v2
 

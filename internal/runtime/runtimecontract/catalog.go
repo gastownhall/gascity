@@ -83,6 +83,11 @@ const (
 	GroupDiscovery   Group = "discovery"
 	GroupProcess     Group = "process"
 	GroupConcurrency Group = "concurrency"
+
+	// The observation group (observation.go) reads a box's screen, its last
+	// activity, clears its scrollback and copies into it. It is advisory
+	// (see advisory): a FAIL is reported but does not gate v2_ready yet.
+	GroupObservation Group = "observation"
 )
 
 // Requirement is one behavior an RPP executable must satisfy to be a
@@ -250,6 +255,19 @@ const (
 	ReqInputExit80OneLine       Code = "RPP-INPUT-010"
 	ReqInputDeadBoxGone         Code = "RPP-INPUT-011"
 	ReqInputKeysDelivered       Code = "RPP-INPUT-012"
+
+	// The observation group: peek, get-last-activity, clear-scrollback and
+	// copy-to on a running box (RunProviderTests' *_NoError cases). An op
+	// that answers exit 2 SKIPs, unless a declared token makes it mandatory:
+	// carrier.ops for peek and clear-scrollback (the ops carrier reads that
+	// exit 2 as a failure), input-outcome for clear-scrollback, and
+	// report-activity for get-last-activity. copy-to is optional under every
+	// handshake. Advisory: a FAIL does not enter v2_failed. See
+	// REQUIREMENTS.md (RUNTIME-RPP-037).
+	ReqObservationPeek            Code = "RPP-OBSERVATION-001"
+	ReqObservationLastActivity    Code = "RPP-OBSERVATION-002"
+	ReqObservationClearScrollback Code = "RPP-OBSERVATION-003"
+	ReqObservationCopyTo          Code = "RPP-OBSERVATION-004"
 )
 
 // catalog is the authoritative, ordered requirement list. Run walks it in
@@ -334,6 +352,19 @@ var catalog = []Requirement{
 	{ReqInputExit80OneLine, GroupInput, "exit 80 always carries exactly one outcome line gc reads as typed: a non-success word the op may answer", true},
 	{ReqInputDeadBoxGone, GroupInput, "under GC_RPP_FAULT=dead (the box holds the name but nothing runs in it: observe reports it dead), every driving op exits 80 gone and types nothing: gone means no running box holds the name (declared conformance-faults only)", true},
 	{ReqInputKeysDelivered, GroupInput, "send-keys, interrupt and clear-scrollback to a running box exit 0 with stdout empty or exactly one delivered line", true},
+
+	{ReqObservationPeek, GroupObservation, "peek of a running box exits 0 (absent = SKIP; exit 2 FAILs under carrier.ops; advisory)", true},
+	{ReqObservationLastActivity, GroupObservation, "get-last-activity of a running box exits 0 with an RFC3339 time or nothing (absent = SKIP; exit 2 FAILs under report-activity; advisory)", true},
+	{ReqObservationClearScrollback, GroupObservation, "clear-scrollback of a running box exits 0 (absent = SKIP; exit 2 FAILs under carrier.ops or input-outcome; advisory)", true},
+	{ReqObservationCopyTo, GroupObservation, "copy-to into a running box exits 0 even when the source is missing: the copy is best-effort (absent = SKIP; advisory)", true},
+}
+
+// advisory reports whether req's FAIL is kept out of v2_failed: a ported
+// group lands advisory, so a published pack it would fail is not taken off
+// v2_ready by a gc upgrade, and is made strict once published packs pass it.
+// Only the observation group is advisory.
+func advisory(req Requirement) bool {
+	return req.Group == GroupObservation
 }
 
 // Catalog returns the authoritative requirement list in run order. The

@@ -80,6 +80,11 @@ const goldenExec = `cmd=$(cat); ` +
 const goldenListRunning = faultGuard + `for b in "$B"/*; do [ -d "$b" ] || continue; case "$b" in *.tmp) continue ;; esac; ` +
 	`n=$(basename "$b"); case "$n" in "$name"*) echo "$n" ;; esac; done`
 
+// goldenCopyTo copies a source that exists into the box, under copied/ at
+// the relative destination, and succeeds without copying a source that does
+// not: copy-to is best-effort.
+const goldenCopyTo = `if [ -d "$box" ] && [ -e "$3" ]; then mkdir -p "$box/copied/$4" && cp -R "$3" "$box/copied/$4"/; fi`
+
 // goldenServerStop ends the city's server: every box of the city (the city's
 // state, $B) goes with it, whether or not any is left. It is behind the
 // backend fault, like every op that reaches the backend.
@@ -122,6 +127,10 @@ func Bodies() map[string]string {
 		"kill-object":       goldenKillObject,
 		"peek":              goldenPeek,
 		"exec":              goldenExec,
+		// clear-scrollback: the model keeps no scrollback, so there is
+		// nothing to clear.
+		"clear-scrollback": `:`,
+		"copy-to":          goldenCopyTo,
 		// provision = the box half: consume the config and succeed WITHOUT
 		// creating the box, so is-running stays false; the box is exec-able
 		// (exec runs regardless).

@@ -6,6 +6,7 @@ go_library(
         "catalog.go",
         "fshost.go",
         "input.go",
+        "observation.go",
         "observe.go",
         "ported.go",
         "probes.go",
