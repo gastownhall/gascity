@@ -526,6 +526,56 @@ func TestSweepDetachedHandoffOrphans_SkipsWhenSessionHasNoTemplate(t *testing.T)
 	}
 }
 
+// A configured named session's bead left open and unassigned was parked by
+// its seat, not detached by a failed done sequence: the named identity serves
+// it, not its template's pool. Restoring the template route handed a named
+// crew member's bead to a pool instance of the crew template.
+func TestSweepDetachedHandoffOrphans_SkipsNamedSessionWork(t *testing.T) {
+	store := beads.NewMemStore()
+
+	_, err := store.Create(beads.Bead{
+		Title:  "named crew session",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":               "frontend--alice",
+			"template":                   "frontend/crew",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "frontend/alice",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	work, err := store.Create(beads.Bead{
+		Title:  "parked crew work",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.WorkBranchMetadataKey:  "feat/feature-a",
+			beadmeta.SessionNameMetadataKey: "frontend--alice",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+
+	n, err := sweepDetachedHandoffOrphans(store)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("restored=%d, want 0 (a named session's work is not its template pool's)", n)
+	}
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("get work bead: %v", err)
+	}
+	if r := got.Metadata[beadmeta.RoutedToMetadataKey]; r != "" {
+		t.Fatalf("gc.routed_to=%q, want empty", r)
+	}
+}
+
 // A closed session bead still carries the template we need — route recovery
 // works even after the worker session has been closed and GC-swept.
 func TestSweepDetachedHandoffOrphans_RecoverFromClosedSessionBead(t *testing.T) {
