@@ -419,4 +419,93 @@ describe('isWorkerSession', () => {
   it('excludes a non-worker rig session (no worker/pool role)', () => {
     expect(isWorkerSession(gcSession({ template: 'reviewer', rig: 'gascity' }))).toBe(false);
   });
+
+  describe('native pool sessions (agent_kind)', () => {
+    // An ephemeral pool slot is named by its session handle, so neither the
+    // template (`cursor`) nor the session name (`cursor-vc-wisp-jcc7qo`) ends in
+    // `worker` / `polecat`. The supervisor's `agent_kind` is what identifies it.
+    const cursorSlot = {
+      id: 'vc-wisp-jcc7qo',
+      template: 'cursor',
+      session_name: 'cursor-vc-wisp-jcc7qo',
+      pool: 'cursor',
+      agent_kind: 'pool',
+    } as const;
+
+    it('does not count the same session without agent_kind (older payload)', () => {
+      expect(
+        isWorkerSession(
+          gcSession({
+            id: cursorSlot.id,
+            template: cursorSlot.template,
+            session_name: cursorSlot.session_name,
+            pool: cursorSlot.pool,
+          }),
+        ),
+      ).toBe(false);
+    });
+
+    it('counts an active pool session whose name has no worker/polecat suffix', () => {
+      expect(isWorkerSession(gcSession(cursorSlot))).toBe(true);
+      expect(
+        isWorkerSession(
+          gcSession({ template: 'claude-reviewer', rig: 'gascity', agent_kind: 'pool' }),
+        ),
+      ).toBe(true);
+    });
+
+    it("counts a pool session reported in the 'running' state", () => {
+      expect(isWorkerSession(gcSession({ ...cursorSlot, state: 'running' }))).toBe(true);
+    });
+
+    it.each(['asleep', 'creating', 'detached', 'failed', 'closed'])(
+      'excludes a pool session in the %s state',
+      (state) => {
+        expect(isWorkerSession(gcSession({ ...cursorSlot, state }))).toBe(false);
+      },
+    );
+
+    it('does not count a non-pool agent_kind without a worker/polecat role', () => {
+      expect(isWorkerSession(gcSession({ template: 'reviewer', agent_kind: 'role' }))).toBe(false);
+      expect(isWorkerSession(gcSession({ template: 'reviewer', agent_kind: 'crew' }))).toBe(false);
+    });
+
+    it('keeps counting a worker/polecat-named session whatever its agent_kind', () => {
+      expect(isWorkerSession(gcSession({ template: 'scix-worker', agent_kind: 'role' }))).toBe(
+        true,
+      );
+      expect(
+        isWorkerSession(gcSession({ template: 'pool', session_name: 'polecat-gc-335825' })),
+      ).toBe(true);
+    });
+
+    it('still excludes orchestration sessions that are backed by a pool agent', () => {
+      const pool = { agent_kind: 'pool' } as const;
+      expect(isWorkerSession(gcSession({ template: 'mayor', rig: '', ...pool }))).toBe(false);
+      expect(isWorkerSession(gcSession({ template: 'control-dispatcher', rig: '', ...pool }))).toBe(
+        false,
+      );
+      expect(
+        isWorkerSession(gcSession({ template: 'oversight-rig.chief-of-staff', rig: '', ...pool })),
+      ).toBe(false);
+      expect(
+        isWorkerSession(
+          gcSession({
+            template: 'control-dispatcher',
+            rig: 'gascity',
+            alias: 'gascity/control-dispatcher',
+            ...pool,
+          }),
+        ),
+      ).toBe(false);
+      expect(
+        isWorkerSession(gcSession({ template: 'gascity.project-lead', rig: 'gascity', ...pool })),
+      ).toBe(false);
+      expect(
+        isWorkerSession(
+          gcSession({ template: 'oversight-rig.chief-of-staff', rig: 'gascity', ...pool }),
+        ),
+      ).toBe(false);
+    });
+  });
 });
