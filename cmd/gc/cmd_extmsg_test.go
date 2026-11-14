@@ -3,11 +3,81 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/extmsg"
 )
+
+func TestCmdExtMsgBindUsesSupervisorForSupervisorManagedCity(t *testing.T) {
+	t.Setenv("GC_CITY", writeCityStatusTestCity(t))
+	t.Setenv("GC_CITY_URL", "")
+	t.Setenv("GC_CITY_CONTEXT", "")
+	t.Setenv("GC_NO_API", "")
+
+	requestSeen := false
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v0/city/test-city/extmsg/bind" {
+			t.Errorf("unexpected request %s %s", r.Method, r.URL.String())
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		requestSeen = true
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(extmsg.SessionBindingRecord{
+			ID:                "binding-1",
+			Conversation:      extmsg.ConversationRef{ScopeID: "test-city", Provider: "telegram", AccountID: "default", ConversationID: "42", Kind: extmsg.ConversationDM},
+			AgentName:         "rig/worker",
+			Status:            extmsg.BindingActive,
+			BoundAt:           time.Now().UTC(),
+			BindingGeneration: 1,
+		})
+	})
+	client := api.NewCityScopedClientWithHTTPClient("http://supervisor.test", "test-city", &http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, r)
+			return recorder.Result(), nil
+		}),
+	})
+
+	origIdentity, origSup := apiRouteControllerIdentityHook, apiRouteSupervisorClientHook
+	t.Cleanup(func() {
+		apiRouteControllerIdentityHook = origIdentity
+		apiRouteSupervisorClientHook = origSup
+	})
+	apiRouteControllerIdentityHook = func(string) controllerIdentityReply {
+		return controllerIdentityReply{PID: 4242, HostingMode: controllerHostingSupervisor}
+	}
+	apiRouteSupervisorClientHook = func(string) *api.Client {
+		return client
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdExtMsgBind(extMsgConversationFlags{
+		scopeID:        "test-city",
+		provider:       "telegram",
+		conversationID: "42",
+		kind:           "dm",
+	}, "rig/worker", "", false, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdExtMsgBind exit = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !requestSeen {
+		t.Fatal("extmsg bind did not use the supervisor API")
+	}
+	var got extmsg.SessionBindingRecord
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal stdout: %v; stdout=%s", err, stdout.String())
+	}
+	if got.ID != "binding-1" || got.AgentName != "rig/worker" {
+		t.Fatalf("binding = %+v, want supervisor response", got)
+	}
+}
 
 func TestCmdExtMsgBindRejectsInvalidTargetFlags(t *testing.T) {
 	tests := []struct {
