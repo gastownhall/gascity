@@ -42,6 +42,7 @@ duration-range
 provider-parity
 formula-requirements
 named-always-min-conflict
+pool-agent-missing-nudge
 instructions-file
 service-secrets-perms
 skill-collision
