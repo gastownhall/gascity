@@ -90,6 +90,7 @@ go_test(
         "bazel_callers_permissions_test.go",
         "bazel_fork_cache_test.go",
         "bazel_fresh_merge_test.go",
+        "bazel_gazelle_exclude_guard_test.go",
         "bazel_go_repository_tools_test.go",
         "bazel_hermetic_cc_test.go",
         "bazel_hermetic_tags_test.go",
