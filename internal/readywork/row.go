@@ -53,6 +53,13 @@ type ReadyBead struct {
 	// CloseReason follows beads.Bead onto the wire so the field set stays the
 	// HTTP Bead shape. Ready rows are open, so it is normally absent.
 	CloseReason string `json:"close_reason,omitempty"`
+	// bd's plain columns, carried so `gc ready --json` shows the same bead bd
+	// does. Read-only projections: nothing on this path writes them back.
+	CreatedBy string `json:"created_by,omitempty"`
+	Owner     string `json:"owner,omitempty"`
+	Notes     string `json:"notes,omitempty"`
+	AwaitType string `json:"await_type,omitempty"`
+	AwaitID   string `json:"await_id,omitempty"`
 	// BlockedBy carries the row's blocking dependencies with each blocker's
 	// STATUS, in bd's `bd ready --json` shape. It is populated only on the
 	// --status in_progress arm, which is the crash-recovery read: a resumed
@@ -131,6 +138,11 @@ func ToReadyBead(b beads.Bead) ReadyBead {
 		DeferUntil:   b.DeferUntil,
 		IsBlocked:    b.IsBlocked,
 		CloseReason:  b.CloseReason,
+		CreatedBy:    b.CreatedBy,
+		Owner:        b.Owner,
+		Notes:        b.Notes,
+		AwaitType:    b.AwaitType,
+		AwaitID:      b.AwaitID,
 	}
 }
 

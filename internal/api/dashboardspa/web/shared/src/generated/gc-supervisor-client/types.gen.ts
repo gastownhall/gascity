@@ -337,8 +337,11 @@ export type BackendCredentialResolvedPayload = {
 
 export type Bead = {
     assignee?: string;
+    await_id?: string;
+    await_type?: string;
     close_reason?: string;
     created_at: string;
+    created_by?: string;
     defer_until?: string;
     dependencies?: Array<Dep> | null;
     description?: string;
@@ -353,6 +356,8 @@ export type Bead = {
     };
     needs?: Array<string> | null;
     no_history?: boolean;
+    notes?: string;
+    owner?: string;
     parent?: string;
     priority?: number;
     ref?: string;
@@ -3243,9 +3248,12 @@ export type ReadinessResponse = {
 
 export type ReadyBead = {
     assignee?: string;
+    await_id?: string;
+    await_type?: string;
     blocked_by?: Array<ReadyBeadBlocker> | null;
     close_reason?: string;
     created_at: string;
+    created_by?: string;
     defer_until?: string;
     dependencies?: Array<ReadyBeadDep> | null;
     description?: string;
@@ -3260,6 +3268,8 @@ export type ReadyBead = {
     };
     needs?: Array<string> | null;
     no_history?: boolean;
+    notes?: string;
+    owner?: string;
     parent?: string;
     priority?: number;
     ref?: string;

@@ -992,11 +992,20 @@
           "assignee": {
             "type": "string"
           },
+          "await_id": {
+            "type": "string"
+          },
+          "await_type": {
+            "type": "string"
+          },
           "close_reason": {
             "type": "string"
           },
           "created_at": {
             "format": "date-time",
+            "type": "string"
+          },
+          "created_by": {
             "type": "string"
           },
           "defer_until": {
@@ -1056,6 +1065,12 @@
           },
           "no_history": {
             "type": "boolean"
+          },
+          "notes": {
+            "type": "string"
+          },
+          "owner": {
+            "type": "string"
           },
           "parent": {
             "type": "string"
@@ -7773,6 +7788,12 @@
           "assignee": {
             "type": "string"
           },
+          "await_id": {
+            "type": "string"
+          },
+          "await_type": {
+            "type": "string"
+          },
           "blocked_by": {
             "items": {
               "$ref": "#/components/schemas/ReadyBeadBlocker"
@@ -7787,6 +7808,9 @@
           },
           "created_at": {
             "format": "date-time",
+            "type": "string"
+          },
+          "created_by": {
             "type": "string"
           },
           "defer_until": {
@@ -7846,6 +7870,12 @@
           },
           "no_history": {
             "type": "boolean"
+          },
+          "notes": {
+            "type": "string"
+          },
+          "owner": {
+            "type": "string"
           },
           "parent": {
             "type": "string"

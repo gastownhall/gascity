@@ -393,10 +393,11 @@ func TestReadyWireFieldSetIsPinnedToTheHTTPBeadShape(t *testing.T) {
 	computedReadyWireFields := map[string]bool{"blocked_by": true}
 
 	want := []string{
-		"assignee", "blocked_by", "close_reason", "created_at", "defer_until", "dependencies",
-		"description", "ephemeral", "from", "id", "is_blocked", "issue_type",
-		"labels", "metadata", "needs", "no_history", "parent", "priority",
-		"ref", "status", "title", "updated_at",
+		"assignee", "await_id", "await_type", "blocked_by", "close_reason", "created_at",
+		"created_by", "defer_until", "dependencies", "description", "ephemeral",
+		"from", "id", "is_blocked", "issue_type", "labels", "metadata", "needs",
+		"no_history", "notes", "owner", "parent", "priority", "ref", "status",
+		"title", "updated_at",
 	}
 	got := jsonFieldNames(reflect.TypeOf(readywork.ReadyBead{}))
 	if !reflect.DeepEqual(got, want) {

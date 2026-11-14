@@ -84,6 +84,21 @@ func beadFromGen(g genclient.Bead) beads.Bead {
 	if g.CloseReason != nil {
 		out.CloseReason = *g.CloseReason
 	}
+	if g.CreatedBy != nil {
+		out.CreatedBy = *g.CreatedBy
+	}
+	if g.Owner != nil {
+		out.Owner = *g.Owner
+	}
+	if g.Notes != nil {
+		out.Notes = *g.Notes
+	}
+	if g.AwaitType != nil {
+		out.AwaitType = *g.AwaitType
+	}
+	if g.AwaitId != nil {
+		out.AwaitID = *g.AwaitId
+	}
 	if g.Needs != nil {
 		out.Needs = append([]string(nil), *g.Needs...)
 	}

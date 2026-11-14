@@ -22,6 +22,7 @@ go_test(
         "idprefix_test.go",
         "import_test.go",
         "payload_blind_test.go",
+        "plain_columns_test.go",
         "testenv_import_test.go",
     ],
     data = glob(

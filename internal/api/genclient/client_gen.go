@@ -2379,8 +2379,11 @@ type BackendCredentialResolvedPayload struct {
 // Bead defines model for Bead.
 type Bead struct {
 	Assignee     *string            `json:"assignee,omitempty"`
+	AwaitId      *string            `json:"await_id,omitempty"`
+	AwaitType    *string            `json:"await_type,omitempty"`
 	CloseReason  *string            `json:"close_reason,omitempty"`
 	CreatedAt    time.Time          `json:"created_at"`
+	CreatedBy    *string            `json:"created_by,omitempty"`
 	DeferUntil   *time.Time         `json:"defer_until,omitempty"`
 	Dependencies *[]Dep             `json:"dependencies,omitempty"`
 	Description  *string            `json:"description,omitempty"`
@@ -2393,6 +2396,8 @@ type Bead struct {
 	Metadata     *map[string]string `json:"metadata,omitempty"`
 	Needs        *[]string          `json:"needs,omitempty"`
 	NoHistory    *bool              `json:"no_history,omitempty"`
+	Notes        *string            `json:"notes,omitempty"`
+	Owner        *string            `json:"owner,omitempty"`
 	Parent       *string            `json:"parent,omitempty"`
 	Priority     *int64             `json:"priority,omitempty"`
 	Ref          *string            `json:"ref,omitempty"`
@@ -4913,9 +4918,12 @@ type ReadinessResponse struct {
 // ReadyBead defines model for ReadyBead.
 type ReadyBead struct {
 	Assignee     *string             `json:"assignee,omitempty"`
+	AwaitId      *string             `json:"await_id,omitempty"`
+	AwaitType    *string             `json:"await_type,omitempty"`
 	BlockedBy    *[]ReadyBeadBlocker `json:"blocked_by,omitempty"`
 	CloseReason  *string             `json:"close_reason,omitempty"`
 	CreatedAt    time.Time           `json:"created_at"`
+	CreatedBy    *string             `json:"created_by,omitempty"`
 	DeferUntil   *time.Time          `json:"defer_until,omitempty"`
 	Dependencies *[]ReadyBeadDep     `json:"dependencies,omitempty"`
 	Description  *string             `json:"description,omitempty"`
@@ -4928,6 +4936,8 @@ type ReadyBead struct {
 	Metadata     *map[string]string  `json:"metadata,omitempty"`
 	Needs        *[]string           `json:"needs,omitempty"`
 	NoHistory    *bool               `json:"no_history,omitempty"`
+	Notes        *string             `json:"notes,omitempty"`
+	Owner        *string             `json:"owner,omitempty"`
 	Parent       *string             `json:"parent,omitempty"`
 	Priority     *int64              `json:"priority,omitempty"`
 	Ref          *string             `json:"ref,omitempty"`

@@ -66,6 +66,11 @@ func fullReadyBead() readywork.ReadyBead {
 		DeferUntil:   &deferUntil,
 		IsBlocked:    &blocked,
 		CloseReason:  "reason",
+		CreatedBy:    "dispatcher",
+		Owner:        "owner@example.com",
+		Notes:        "notes",
+		AwaitType:    "gh:run",
+		AwaitID:      "12345",
 		BlockedBy:    []readywork.ReadyBeadBlocker{{ID: "gc-0", Status: "open"}},
 	}
 }
