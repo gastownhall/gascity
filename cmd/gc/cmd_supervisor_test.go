@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	goruntime "runtime"
 	"slices"
 	"strconv"
@@ -381,6 +383,89 @@ func TestRenderSupervisorLaunchdTemplateUsesPreserveEnvFromData(t *testing.T) {
 		if !strings.Contains(content, want) {
 			t.Fatalf("launchd template missing preserve env %q:\n%s", want, content)
 		}
+	}
+}
+
+// parseLaunchdPlistRoot decodes the root <dict> of a launchd plist.
+func parseLaunchdPlistRoot(t *testing.T, content string) map[string]plistValue {
+	t.Helper()
+	dec := xml.NewDecoder(strings.NewReader(content))
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			t.Fatalf("launchd plist has no root dict: %v\n%s", err, content)
+		}
+		if start, ok := tok.(xml.StartElement); ok && start.Name.Local == "dict" {
+			root, err := parsePlistDict(dec)
+			if err != nil {
+				t.Fatalf("parse launchd plist: %v\n%s", err, content)
+			}
+			return root
+		}
+	}
+}
+
+var launchdExitTimeOutPattern = regexp.MustCompile(`<key>ExitTimeOut</key>\s*<integer>(\d+)</integer>`)
+
+// TestRenderSupervisorLaunchdTemplateSetsInteractiveProcessType guards #8015:
+// without a root ProcessType key launchd treats the supervisor as Standard and
+// throttles it, the Dolt server and every tmux session it spawns.
+func TestRenderSupervisorLaunchdTemplateSetsInteractiveProcessType(t *testing.T) {
+	content, err := renderSupervisorTemplate(supervisorLaunchdTemplate, &supervisorServiceData{
+		GCPath:       "/usr/local/bin/gc",
+		LogPath:      "$HOME/.gc/supervisor.log",
+		GCHome:       "$HOME/.gc",
+		LaunchdLabel: defaultSupervisorLaunchdLabel,
+		Path:         "/usr/local/bin:/usr/bin:/bin",
+		ExtraEnv: []supervisorServiceEnvVar{
+			{Name: "ProcessType", Value: "Standard"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := parseLaunchdPlistRoot(t, content)
+	got, ok := root["ProcessType"]
+	if !ok {
+		t.Fatalf("launchd plist root sets no ProcessType key (launchd defaults to Standard and throttles the supervisor):\n%s", content)
+	}
+	if got.text != "Interactive" {
+		t.Fatalf("launchd plist root ProcessType = %q, want <string>Interactive</string>:\n%s", got.text, content)
+	}
+	if env := root["EnvironmentVariables"].dict["ProcessType"].text; env != "Standard" {
+		t.Fatalf("EnvironmentVariables ProcessType = %q, want ExtraEnv value %q", env, "Standard")
+	}
+	if n := strings.Count(content, "<key>ProcessType</key>"); n != 2 {
+		t.Fatalf("launchd plist has %d ProcessType keys, want 2 (one root key plus the ExtraEnv entry):\n%s", n, content)
+	}
+}
+
+// TestRenderSupervisorLaunchdTemplateSetsExitTimeOut guards #8015: launchd's
+// default 5 s SIGTERM-to-SIGKILL grace cuts off a preserve-mode stop.
+func TestRenderSupervisorLaunchdTemplateSetsExitTimeOut(t *testing.T) {
+	content, err := renderSupervisorTemplate(supervisorLaunchdTemplate, &supervisorServiceData{
+		GCPath:       "/usr/local/bin/gc",
+		LogPath:      "$HOME/.gc/supervisor.log",
+		GCHome:       "$HOME/.gc",
+		LaunchdLabel: defaultSupervisorLaunchdLabel,
+		Path:         "/usr/local/bin:/usr/bin:/bin",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := parseLaunchdPlistRoot(t, content)
+	if _, ok := root["ExitTimeOut"]; !ok {
+		t.Fatalf("launchd plist root sets no ExitTimeOut key (launchd defaults to a 5 s grace):\n%s", content)
+	}
+	if n := strings.Count(content, "<key>ExitTimeOut</key>"); n != 1 {
+		t.Fatalf("launchd plist has %d ExitTimeOut keys, want 1:\n%s", n, content)
+	}
+	matches := launchdExitTimeOutPattern.FindAllStringSubmatch(content, -1)
+	if len(matches) != 1 {
+		t.Fatalf("launchd plist ExitTimeOut is not a single <integer> (launchd ignores a <string>):\n%s", content)
+	}
+	if matches[0][1] != "60" {
+		t.Fatalf("launchd plist ExitTimeOut = %s, want 60", matches[0][1])
 	}
 }
 
@@ -3863,6 +3948,90 @@ func TestInstallSupervisorLaunchdSkipsReloadWhenUnchangedAndSupervisorAlive(t *t
 	}
 	if !strings.Contains(stdout.String(), "Installed launchd service: "+currentPath) {
 		t.Fatalf("stdout = %q, want install confirmation for %s", stdout.String(), currentPath)
+	}
+}
+
+// launchdSchedulingKeysPattern matches the root ProcessType and ExitTimeOut
+// stanzas of a rendered supervisor plist.
+var launchdSchedulingKeysPattern = regexp.MustCompile(`\s*<key>(?:ProcessType|ExitTimeOut)</key>\s*<(?:string|integer)>[^<]*</(?:string|integer)>`)
+
+// TestInstallSupervisorLaunchdRewritesPlistMissingSchedulingKeys guards #8015:
+// a plist installed before ProcessType/ExitTimeOut existed (or hand-edited to
+// drop them) is rewritten and reloaded with both keys, and the binary path
+// and environment the supervisor runs with are unchanged.
+func TestInstallSupervisorLaunchdRewritesPlistMissingSchedulingKeys(t *testing.T) {
+	homeDir := t.TempDir()
+	gcHome := filepath.Join(t.TempDir(), "isolated-home")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("GC_HOME", gcHome)
+
+	data := &supervisorServiceData{
+		GCPath:       "/tmp/gc-same",
+		LogPath:      filepath.Join(gcHome, "supervisor.log"),
+		GCHome:       gcHome,
+		LaunchdLabel: supervisorLaunchdLabel(),
+		Path:         "/usr/local/bin:/usr/bin:/bin",
+	}
+	rendered, err := renderSupervisorTemplate(supervisorLaunchdTemplate, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := launchdSchedulingKeysPattern.ReplaceAllString(rendered, "")
+	staleRoot := parseLaunchdPlistRoot(t, stale)
+	for _, key := range []string{"ProcessType", "ExitTimeOut"} {
+		if _, ok := staleRoot[key]; ok {
+			t.Fatalf("stale plist still sets %s:\n%s", key, stale)
+		}
+	}
+	path := supervisorLaunchdPlistPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(stale), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	oldRun := supervisorLaunchctlRun
+	oldAlive := supervisorAliveHook
+	var calls []string
+	supervisorLaunchctlRun = func(args ...string) error {
+		calls = append(calls, strings.Join(args, " "))
+		return nil
+	}
+	supervisorAliveHook = func() int { return 4242 }
+	t.Cleanup(func() {
+		supervisorLaunchctlRun = oldRun
+		supervisorAliveHook = oldAlive
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := installSupervisorLaunchd(data, &stdout, &stderr); code != 0 {
+		t.Fatalf("installSupervisorLaunchd code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if !slices.Contains(calls, "unload "+path) || !slices.Contains(calls, "load "+path) {
+		t.Fatalf("launchctl calls = %v, want unload and load of %s for a plist missing the scheduling keys", calls, path)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", path, err)
+	}
+	root := parseLaunchdPlistRoot(t, string(got))
+	if pt := root["ProcessType"].text; pt != "Interactive" {
+		t.Fatalf("rewritten plist root ProcessType = %q, want Interactive:\n%s", pt, got)
+	}
+	if m := launchdExitTimeOutPattern.FindAllStringSubmatch(string(got), -1); len(m) != 1 || m[0][1] != "60" {
+		t.Fatalf("rewritten plist ExitTimeOut matches = %v, want one <integer>60</integer>:\n%s", m, got)
+	}
+	if gcPath := supervisorLaunchdPlistGCPath(string(got)); gcPath != supervisorLaunchdPlistGCPath(stale) || gcPath != data.GCPath {
+		t.Fatalf("rewritten plist ProgramArguments[0] = %q, want %q (unchanged)", gcPath, data.GCPath)
+	}
+	for _, key := range []string{"GC_HOME", "PATH", "GC_SUPERVISOR_PRESERVE_SESSIONS_ON_SIGNAL"} {
+		before, okBefore := launchdPlistEnvValue([]byte(stale), key)
+		after, okAfter := launchdPlistEnvValue(got, key)
+		if !okBefore || !okAfter || before != after {
+			t.Fatalf("EnvironmentVariables %s = %q (set=%v), want unchanged %q (set=%v)", key, after, okAfter, before, okBefore)
+		}
 	}
 }
 
