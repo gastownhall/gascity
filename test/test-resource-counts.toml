@@ -274,7 +274,7 @@ calls = 1
 [[count]]
 path = "cmd/gc/cmd_convoy_test.go"
 resource = "http_test_server"
-calls = 10
+calls = 11
 
 [[count]]
 path = "cmd/gc/cmd_doctor_test.go"
