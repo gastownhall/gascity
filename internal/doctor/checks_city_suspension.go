@@ -106,10 +106,8 @@ func (c *CitySuspensionCheck) CanFix() bool { return false }
 // Fix is a no-op; the check is report-only.
 func (c *CitySuspensionCheck) Fix(_ *CheckContext) error { return nil }
 
-// WarmupEligible returns true: like LegacySuspendedFieldCheck, this is
-// most useful right when the user is about to act on a stale-config
-// view — telling an operator at `gc start` time that the city is
-// suspended (and so will do no agent work regardless of how healthy
-// everything else looks) is exactly the top-level condition warm-up is
-// for.
-func (c *CitySuspensionCheck) WarmupEligible() bool { return true }
+// WarmupEligible returns false: suspension is a deliberate operator
+// state, not a defect, and warm-up treats any warning as a failure that
+// mails on every `gc start`. Surfacing it there would re-alert on a
+// choice the operator already made; `gc doctor` and `gc status` report it.
+func (c *CitySuspensionCheck) WarmupEligible() bool { return false }

@@ -154,7 +154,7 @@ func TestCitySuspensionCheck_NotFixable(t *testing.T) {
 }
 
 func TestCitySuspensionCheck_WarmupEligible(t *testing.T) {
-	if !NewCitySuspensionCheck(nil).WarmupEligible() {
-		t.Error("the check should opt into warmup so suspension surfaces on `gc start`")
+	if NewCitySuspensionCheck(nil).WarmupEligible() {
+		t.Error("city suspension is a deliberate state; it must not be warm-up eligible, or every `gc start` of a suspended city mails a warm-up failure")
 	}
 }
