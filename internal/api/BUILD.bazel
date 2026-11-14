@@ -468,6 +468,7 @@ go_test(
         "pagination_dialect_guard_test.go",
         "pagination_test.go",
         "pending_interaction_queue_test.go",
+        "pool_boot_status_red_test.go",
         "principal_test.go",
         "program_status_test.go",
         "read_model_no_get_test.go",
