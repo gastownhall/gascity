@@ -34,6 +34,10 @@
       "type": "integer",
       "minimum": 0
     },
+    "head_updated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
     "active_arms": {
       "type": "array",
       "items": {
