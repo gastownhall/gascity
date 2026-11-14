@@ -30,6 +30,7 @@ type hostProcessFake struct {
 	untracked    bool // no root is tracked, a running session's included
 	unbound      bool // TerminateRuntime ignores the start identity
 	dropsInfra   bool // the scan leaves out city-infrastructure roots
+	tmuxPanes    bool // the scan reports processes under a tmux server
 }
 
 func newHostProcessFake(t *testing.T, configure func(*hostProcessFake)) *hostProcessFake {
@@ -88,7 +89,11 @@ func (f *hostProcessFake) FindRuntimesBySessionID(id string) ([]runtime.LiveRunt
 	if f.offHost && !f.claimsScan {
 		return nil, nil
 	}
-	found, err := proctable.ScanBySessionID(id)
+	scan := proctable.ScanBySessionIDOutsideTmux
+	if f.tmuxPanes {
+		scan = proctable.ScanBySessionID
+	}
+	found, err := scan(id)
 	f.mu.Lock()
 	tracked := map[string]string{}
 	for name, cmd := range f.procs {
@@ -123,10 +128,12 @@ func (f *hostProcessFake) TerminateRuntime(r runtime.LiveRuntime) error {
 }
 
 // processTableFixtureOf is the fixtures over hostProcessFakes configured by
-// configure, the off-host one also marked offHost.
+// configure, the off-host one also marked offHost. Its sessions never run
+// under a tmux server (FencesTmuxSubtrees).
 func processTableFixtureOf(configure func(*hostProcessFake)) ProcessTableScannerFixtures {
 	return ProcessTableScannerFixtures{
-		Scanning: func(t *testing.T) runtime.Provider { return newHostProcessFake(t, configure) },
+		FencesTmuxSubtrees: true,
+		Scanning:           func(t *testing.T) runtime.Provider { return newHostProcessFake(t, configure) },
 		NotScanning: func(t *testing.T) runtime.Provider {
 			return newHostProcessFake(t, func(f *hostProcessFake) { f.offHost = true; configure(f) })
 		},
@@ -160,6 +167,7 @@ func TestProcessTableChecksCatchEachViolation(t *testing.T) {
 		{"tracks no running session", func(f *hostProcessFake) { f.untracked = true }, onHost(checkLeftoverFound)},
 		{"kills without the start identity", func(f *hostProcessFake) { f.unbound = true }, onHost(checkTerminateBoundToIdentity)},
 		{"drops city-infrastructure roots", func(f *hostProcessFake) { f.dropsInfra = true }, onHost(checkInfrastructureRootReported)},
+		{"reports tmux-hosted processes", func(f *hostProcessFake) { f.tmuxPanes = true }, onHost(checkTmuxSubtreeFenced)},
 		{"claims the scanner off the host", func(f *hostProcessFake) { f.claimsScan = true }, offHost},
 		{"terminates off the host", func(f *hostProcessFake) { f.killsOffHost = true }, offHost},
 	}

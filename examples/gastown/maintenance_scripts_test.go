@@ -6348,6 +6348,7 @@ func TestReaperOrderAndScriptDefaults(t *testing.T) {
 		{envName: "GC_REAPER_MAX_AGE", want: "24h"},
 		{envName: "GC_REAPER_PURGE_AGE", want: "168h"},
 		{envName: "GC_REAPER_STALE_ISSUE_AGE", want: "720h"},
+		{envName: "GC_REAPER_STALE_ISSUE_BURST_MAX", want: "25"},
 	} {
 		if got := extractShellDefault(t, script, check.envName); got != check.want {
 			t.Errorf("%s default = %q, want %q", check.envName, got, check.want)

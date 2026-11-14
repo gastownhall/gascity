@@ -28,6 +28,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/workrecord"
 )
 
@@ -63,6 +64,9 @@ var workRecordCommitReachable = workrecord.CommitReachableOnBranchContext
 // moving it belongs in internal/workrecord so both doors move together rather
 // than asking different questions of different populations.
 //
+// st is the epoch the caller resolved the owner in (resolveBeadOwnerIn), so the
+// owner and the rig it is matched against come from one Stores() read.
+//
 // ctx is the request's, and it reaches the reachability clause because that
 // clause shells out to git: a client that hangs up has to be able to stop the
 // subprocess, or a wedged repository leaves one blocking call per retry.
@@ -85,12 +89,12 @@ var workRecordCommitReachable = workrecord.CommitReachableOnBranchContext
 // degraded path there rather than a refusal. The window is small and the losing
 // outcome is a close that recorded slightly less than it should, not a corrupted
 // row.
-func (s *Server) gateWorkRecordClose(ctx context.Context, id string, store beads.ResidentStore, stored beads.Bead, submitted map[string]string) error {
+func (s *Server) gateWorkRecordClose(ctx context.Context, st storeref.Stores, id string, store beads.ResidentStore, stored beads.Bead, submitted map[string]string) error {
 	if !workrecord.Gated(stored) {
 		return nil
 	}
 	prospective := projectSubmittedWorkRecord(stored, submitted)
-	repoDir := s.workRecordRepoDir(store, prospective)
+	repoDir := s.workRecordRepoDir(st, store, prospective)
 	unverified := false
 	violations := workrecord.ValidateOnClose(prospective, func(commit, branch string) bool {
 		if repoDir == "" {
@@ -202,11 +206,11 @@ func (s *Server) workRecordScopeDirs() workRecordScopeDirs {
 // because falling back to a default would run git in whatever directory the
 // server happens to occupy and answer the reachability question about the wrong
 // repository.
-func (s *Server) workRecordRepoDir(store beads.ResidentStore, bead beads.Bead) string {
+func (s *Server) workRecordRepoDir(st storeref.Stores, store beads.ResidentStore, bead beads.Bead) string {
 	dirs := s.workRecordScopeDirs()
 	dir, kind := workrecord.RepoDirFor(bead, dirs)
 	if kind == workrecord.ScopeUnrooted {
-		return s.workRecordLegacyRepoDir(store, dirs)
+		return s.workRecordLegacyRepoDir(st, store, dirs)
 	}
 	return dir
 }
@@ -225,10 +229,10 @@ func (s *Server) workRecordRepoDir(store beads.ResidentStore, bead beads.Bead) s
 // construction, and the question is not "which stores exist" but "does the
 // store that answered belong to a rig with a checkout".
 //
-// Every rig is asked of one Stores() epoch, read here: one epoch per gate
-// check. The owner was resolved under resolveBeadOwner's own read, so a reload
-// between the two can still judge the bead against the city checkout, as it
-// could before; one epoch per request is T7e.2's.
+// Every rig is asked of st, the epoch the owner was resolved in
+// (resolveBeadOwnerIn): one Stores() read per request, so a reload between the
+// owner's resolution and the match cannot judge the bead against the city
+// checkout.
 //
 // A store no configured rig claims is the city store or a class binding, and
 // both answered to the city checkout before this rule existed. buildStores keys
@@ -252,8 +256,7 @@ func (s *Server) workRecordRepoDir(store beads.ResidentStore, bead beads.Bead) s
 // already-resolved directory and never reassigned. State is an interface and the
 // branches are cheap, so they stay; a refactor that changes either fact should
 // update this note rather than find it silently wrong.
-func (s *Server) workRecordLegacyRepoDir(store beads.ResidentStore, dirs workRecordScopeDirs) string {
-	st := s.state.Stores()
+func (s *Server) workRecordLegacyRepoDir(st storeref.Stores, store beads.ResidentStore, dirs workRecordScopeDirs) string {
 	for _, rig := range dirs.rigs {
 		if work, _ := st.Rig(rig.Name); !beads.SameStore(work, store) {
 			continue

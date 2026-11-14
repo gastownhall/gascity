@@ -86,10 +86,12 @@ type State interface {
 	Stores() storeref.Stores
 
 	// BeadStore returns the bead store for a rig (by name).
-	// Returns nil if the rig doesn't exist. BeadStore, BeadStores,
-	// CityBeadStore and ScopedStoreLike stay raw until T7's federated
-	// readers: callers are the T7 residue. The binding census the API plans
-	// by-id reads against crosses as Stores().Topology(), not here.
+	// Returns nil if the rig doesn't exist. BeadStore, BeadStores and
+	// CityBeadStore stay raw until their last readers convert: the order
+	// readers (T7f), the orders-class workflow ref (T7d) and sling's source
+	// workflow stores (T7i), the T7 residue reviewedResidueCallers lists. The
+	// binding census the API plans by-id reads against crosses as
+	// Stores().Topology(), not here.
 	BeadStore(rig string) beads.Store
 
 	// BeadStores returns all rig names and their stores.
@@ -133,21 +135,23 @@ type State interface {
 	// Returns nil if no store is available.
 	CityBeadStore() beads.Store
 
-	// ScopedStoreLike returns a throwaway, ctx-bound clone of existing when
-	// existing is (or wraps) a bd-CLI-shell-backed store: cancellation kills
-	// the backend bd subprocess instead of abandoning it to run past ctx's
-	// deadline, unlike existing's own long-lived runner (fixed to
-	// context.Background() at construction). Returns (nil, nil) when
-	// existing is not bd-CLI backed (e.g. a native, file, or in-memory
-	// store) — those have no subprocess to leak, so callers should keep
-	// reading through existing directly in that case.
+	// ScopedStoreLike returns leg bound to a throwaway, ctx-bound clone of
+	// its store, and true, when that store is (or wraps) a bd-CLI-shell-backed
+	// store: cancellation kills the backend bd subprocess instead of
+	// abandoning it to run past ctx's deadline, unlike the store's own
+	// long-lived runner (fixed to context.Background() at construction). The
+	// bound leg keeps leg's ref, role and gate role (storeref.BindLeg). It
+	// returns leg unchanged and false when the store is not bd-CLI backed
+	// (e.g. a native, file, or in-memory store) — those have no subprocess to
+	// leak, so callers keep reading through leg in that case. A failed
+	// resolution returns its error and a zero leg.
 	//
 	// Read paths with their own short request budget (e.g. GET /status) use
 	// this instead of reading through the shared store so a slow bd command
 	// cannot pin a Dolt connection past the caller's own deadline
 	// (gascity ga-cdmx6x). Implementations must observe ctx during resolution
 	// and finish any work they start before returning after cancellation.
-	ScopedStoreLike(ctx context.Context, existing beads.Store) (beads.Store, error)
+	ScopedStoreLike(ctx context.Context, leg storeref.TypedLeg) (storeref.TypedLeg, bool, error)
 
 	// NudgeQueue returns the city's nudge queue, through which the API queues
 	// deferred submits and withdraws wait nudges.

@@ -51,7 +51,9 @@ func appendMetadataAttachedChildren(store beads.ResidentStore, parent beads.Bead
 	return children
 }
 
-func (s *Server) beadListAssigneeTerms(ctx context.Context, assignee string) []string {
+// beadListAssigneeTerms is the assignee spellings GET /v0/beads matches for
+// assignee, resolved against the sessions store of the request's epoch st.
+func (s *Server) beadListAssigneeTerms(ctx context.Context, st storeref.Stores, assignee string) []string {
 	assignee = strings.TrimSpace(assignee)
 	if assignee == "" {
 		return []string{""}
@@ -60,7 +62,7 @@ func (s *Server) beadListAssigneeTerms(ctx context.Context, assignee string) []s
 	// is resolved against SESSION beads, and the identity expansion below reads
 	// one — so this store is the sessions class even though the caller is a work
 	// query. Identity to the work store on a city that relocates nothing.
-	store := s.state.Stores().Sessions()
+	store := st.Sessions()
 	if store == (beads.SessionStore{}) {
 		return []string{assignee}
 	}
@@ -258,35 +260,12 @@ func (s *Server) resolveRefByPrefix(prefix string, loaded map[storeref.StoreRef]
 	return "", false
 }
 
-// sortedRigNames returns rig names from the store map in deterministic sorted order,
-// deduplicating rigs that share the same underlying store (e.g. file provider mode).
-func sortedRigNames(stores map[string]beads.Store) []string {
-	names := make([]string, 0, len(stores))
-	for name := range stores {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	// Deduplicate by store identity — when multiple rigs share the same
-	// store instance (file provider), only keep the first rig name to
-	// prevent duplicate results in aggregate queries.
-	seen := make(map[beads.Store]bool, len(names))
-	deduped := names[:0]
-	for _, name := range names {
-		s := stores[name]
-		if seen[s] {
-			continue
-		}
-		seen[s] = true
-		deduped = append(deduped, name)
-	}
-	return deduped
-}
-
 // workStoresByName is State.BeadStores() as work handles from st: the city's
 // work store under cityName, then every rig's under its name, so a rig named
 // like the city replaces it. A city with no work store has no entry. Ranged
 // in sortedWorkStoreNames order, it reads the stores in exactly the order
-// sortedRigNames gives BeadStores(), which first-match lookups depend on.
+// BeadStores() was read in, sorted by name and deduped by store, which
+// first-match lookups depend on.
 func workStoresByName(st storeref.Stores, cityName string) map[string]beads.WorkStore {
 	rigs := st.Rigs()
 	out := make(map[string]beads.WorkStore, len(rigs)+1)
@@ -299,9 +278,9 @@ func workStoresByName(st storeref.Stores, cityName string) map[string]beads.Work
 	return out
 }
 
-// sortedWorkStoreNames is sortedRigNames for work handles: the names in
-// sorted order, keeping only the first of names whose handles share one
-// physical store (beads.PhysicalStoreKey), as in legacy shared-file mode.
+// sortedWorkStoreNames is the names of stores in sorted order, keeping only
+// the first of names whose handles share one physical store
+// (beads.PhysicalStoreKey), as in legacy shared-file mode.
 func sortedWorkStoreNames(stores map[string]beads.WorkStore) []string {
 	names := make([]string, 0, len(stores))
 	for name := range stores {

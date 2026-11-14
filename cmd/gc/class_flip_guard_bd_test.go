@@ -14,8 +14,8 @@ import (
 )
 
 // bdParityWrites returns the bd invocations a parity arm recorded other than
-// the reads the passthrough's own guards and the split city's residency
-// checks make (show, list, query), one argv per entry.
+// the reads the passthrough's own guards, the split city's residency checks and
+// a close's announcement make (show, list, query, dep list), one argv per entry.
 func bdParityWrites(log string) []string {
 	var writes []string
 	for _, line := range strings.Split(log, "\n") {
@@ -23,9 +23,16 @@ func bdParityWrites(log string) []string {
 		if !ok {
 			continue
 		}
-		switch verb, _ := bdRelocatedClassVerbOf(strings.Fields(argv)); verb {
+		verb, rest := bdRelocatedClassVerbOf(strings.Fields(argv))
+		switch verb {
 		case "show", "list", "query", "version":
 			continue
+		case "dep":
+			// The close announcement confirms the closed bead's edges
+			// (bd_close_events.go); `dep add` and `dep remove` stay writes.
+			if len(rest) > 0 && rest[0] == "list" {
+				continue
+			}
 		}
 		writes = append(writes, argv)
 	}

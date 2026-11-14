@@ -84,6 +84,15 @@ const ExitCodeTempFail = 75
 // whose screen is gone). It is an answer, not a failure: an empty screen.
 const ExitCodeNoScreen = 66
 
+// ExitCodeInputOutcome is the exit code of a typed non-success input
+// outcome: under [ProtocolCapabilityInputOutcome], a driving op (nudge,
+// send-keys, interrupt, clear-scrollback) that did not deliver its input
+// exits with it and prints exactly one outcome line naming why. It sits
+// above the sysexits block and below the shell's and the signals' codes, so
+// no killed or unrunnable op produces it; to a gc that does not read the
+// token it is an ordinary failure.
+const ExitCodeInputOutcome = 80
+
 // CapacitySourceExitStatus is the [CapacityError.Source] of a refusal observed
 // as the launched command's exit status.
 const CapacitySourceExitStatus = "exit_status"
@@ -134,6 +143,13 @@ var ErrProcessNotConfirmedDead = errors.New("process not confirmed dead after SI
 // unobserved-delivery conditions with this sentinel so callers can dispatch
 // with errors.Is.
 var ErrNudgeDeliveredUnobserved = errors.New("nudge delivered but unobserved")
+
+// NudgeDelivered reports whether a nudge's err means the nudge reached the
+// session: nil, or [ErrNudgeDeliveredUnobserved] from any runtime. A caller
+// that retries undelivered nudges acks both and never redelivers them.
+func NudgeDelivered(err error) bool {
+	return err == nil || errors.Is(err, ErrNudgeDeliveredUnobserved)
+}
 
 // ErrNudgeDeliveryUnconfirmed reports that a nudge's submit was sent to the
 // session but the provider could not confirm it took: the message may have
