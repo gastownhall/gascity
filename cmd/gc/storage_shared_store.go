@@ -44,6 +44,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -392,14 +393,14 @@ type sharedStoreExclusion struct {
 	Attested bool
 	// token is the identity the lifting attestation named.
 	token string
-	locks []*os.File
+	locks []*coTenantLock
 }
 
 // Release drops the co-tenant locks. The verb releases them when it exits,
 // after its writes and their cleanup, and before its own controller lock.
 func (e sharedStoreExclusion) Release() {
 	for _, lock := range e.locks {
-		lock.Close() //nolint:errcheck // releasing a held lock
+		lock.release()
 	}
 }
 
@@ -492,13 +493,75 @@ func sharedStoreRefusal(cityPath, label, selfRoot string, force storageForce) (s
 	return held, nil
 }
 
-// acquireCoTenantControllerLock takes a co-tenant city's controller lock. A
-// city that never started has no .gc yet, and its first start creates it and
-// then takes the lock, so the directory is created here as that start would:
+// coTenantLocks are the co-tenant controller locks this process holds, by
+// the city's canonical path. A verb can need one co-tenant's lock more than
+// once: a city that shares this city's work store and a rig store is a
+// co-tenant of both, and the reverse holds both exclusions at once. The lock
+// is a flock, and a second flock on a fresh descriptor conflicts even inside
+// this process, so the second take would read as a live co-tenant. Every
+// take in the process shares the one held descriptor instead, and it is
+// closed when the last holder releases it.
+var coTenantLocks struct {
+	sync.Mutex
+	held map[string]*coTenantLockEntry
+}
+
+// coTenantLockEntry is one held co-tenant lock and how many holders share it.
+type coTenantLockEntry struct {
+	file *os.File
+	refs int
+}
+
+// coTenantLock is one holder's share of a co-tenant's controller lock.
+type coTenantLock struct {
+	key      string
+	released bool
+}
+
+// release drops this holder's share; the lock is closed with the last one.
+// A second release of the same share does nothing.
+func (l *coTenantLock) release() {
+	coTenantLocks.Lock()
+	defer coTenantLocks.Unlock()
+	if l.released {
+		return
+	}
+	l.released = true
+	entry := coTenantLocks.held[l.key]
+	if entry == nil {
+		return
+	}
+	entry.refs--
+	if entry.refs > 0 {
+		return
+	}
+	delete(coTenantLocks.held, l.key)
+	entry.file.Close() //nolint:errcheck // releasing a held lock
+}
+
+// acquireCoTenantControllerLock takes a co-tenant city's controller lock, or
+// a share of it when this process already holds it (coTenantLocks). A city
+// that never started has no .gc yet, and its first start creates it and then
+// takes the lock, so the directory is created here as that start would:
 // otherwise the city could start mid-run.
-func acquireCoTenantControllerLock(otherPath string) (*os.File, error) {
+func acquireCoTenantControllerLock(otherPath string) (*coTenantLock, error) {
 	if err := os.MkdirAll(filepath.Join(otherPath, ".gc"), 0o755); err != nil {
 		return nil, fmt.Errorf("creating its runtime directory: %w", err)
 	}
-	return acquireControllerLock(otherPath)
+	key := canonicalIdentityPath(otherPath)
+	coTenantLocks.Lock()
+	defer coTenantLocks.Unlock()
+	if entry := coTenantLocks.held[key]; entry != nil {
+		entry.refs++
+		return &coTenantLock{key: key}, nil
+	}
+	file, err := acquireControllerLock(otherPath)
+	if err != nil {
+		return nil, err
+	}
+	if coTenantLocks.held == nil {
+		coTenantLocks.held = map[string]*coTenantLockEntry{}
+	}
+	coTenantLocks.held[key] = &coTenantLockEntry{file: file, refs: 1}
+	return &coTenantLock{key: key}, nil
 }

@@ -76,7 +76,7 @@ func TestBeadListAssigneeTermsReadsSessionsClass(t *testing.T) {
 	fs, info := splitSessionState(t)
 	srv := New(fs)
 
-	terms := srv.beadListAssigneeTerms(context.Background(), info.ID)
+	terms := srv.beadListAssigneeTerms(context.Background(), srv.state.Stores(), info.ID)
 	if len(terms) < 2 {
 		t.Fatalf("assignee terms = %v; want the session's expanded identity set, not the bare term", terms)
 	}

@@ -87,7 +87,7 @@ func TestStatusSessionSnapshotReadsSessionClassStore(t *testing.T) {
 	}
 	s := &Server{state: st}
 
-	snapshot := s.statusSessionSnapshot(context.Background())
+	snapshot := s.statusSessionSnapshot(context.Background(), s.state.Stores())
 
 	if _, ok := snapshot.bySessionName["session-class-session"]; !ok {
 		t.Errorf("snapshot missing session-class-session; bySessionName = %+v, want the session-class store read", snapshot.bySessionName)
@@ -113,7 +113,7 @@ func TestStatusSessionSnapshotNeverQueriesTheWorkLedger(t *testing.T) {
 	s := &Server{state: st}
 
 	start := time.Now()
-	snapshot := s.statusSessionSnapshot(context.Background())
+	snapshot := s.statusSessionSnapshot(context.Background(), s.state.Stores())
 	elapsed := time.Since(start)
 
 	if calls := work.listCalls.Load(); calls != 0 {
@@ -148,7 +148,7 @@ func TestStatusSessionSnapshotStoreIdentity(t *testing.T) {
 		}
 		s := &Server{state: st}
 
-		_ = s.statusSessionSnapshot(context.Background())
+		_ = s.statusSessionSnapshot(context.Background(), s.state.Stores())
 
 		if observed != st.CityBeadStore() {
 			t.Errorf("read store = %p, want CityBeadStore %p — a city that relocates nothing must stay byte-identical", observed, st.CityBeadStore())
@@ -167,7 +167,7 @@ func TestStatusSessionSnapshotStoreIdentity(t *testing.T) {
 		}
 		s := &Server{state: st}
 
-		_ = s.statusSessionSnapshot(context.Background())
+		_ = s.statusSessionSnapshot(context.Background(), s.state.Stores())
 
 		if observed != beads.Store(sessions) {
 			t.Errorf("read store = %p, want the session-class store %p (work ledger is %p)", observed, sessions, work)
@@ -187,7 +187,7 @@ func TestStatusSessionSnapshotFailsLoudWithoutSessionClassStore(t *testing.T) {
 	}
 	s := &Server{state: sessionClassUnavailableState{st}}
 
-	snapshot := s.statusSessionSnapshot(context.Background())
+	snapshot := s.statusSessionSnapshot(context.Background(), s.state.Stores())
 
 	joined := strings.Join(snapshot.partialErrors, "; ")
 	if !strings.Contains(joined, "sessions: session-class bead store unavailable") {
@@ -208,7 +208,7 @@ func TestStatusSessionSnapshotSilentWhenNoStoreConfigured(t *testing.T) {
 	st := newFakeState(t) // cityBeadStore left nil
 	s := &Server{state: st}
 
-	snapshot := s.statusSessionSnapshot(context.Background())
+	snapshot := s.statusSessionSnapshot(context.Background(), s.state.Stores())
 
 	if len(snapshot.partialErrors) != 0 {
 		t.Errorf("partialErrors = %v, want none for a city with no bead store", snapshot.partialErrors)
