@@ -149,8 +149,10 @@ func TestSplitCityV2DemandIsGatedOffThePassUnderSlowReads(t *testing.T) {
 
 // splitCityV2DemandIsGatedOffThePass runs the v2 gate scenario with every read
 // of the work ledger's backing held for readStall (0: no stall). A non-zero
-// stall also shrinks the lane's source deadline to a tenth of it, so each pass
-// outlives the deadline the way a loaded host's does.
+// stall first sets the lane's source deadline to a tenth of it, the deadline a
+// loaded host's reads outlive, and awaitEveryRead then lifts it: drop or empty
+// that helper and the slow variant fails, because the pinned clock never
+// records the cut-off read as a timeout and the leg goes missing.
 func splitCityV2DemandIsGatedOffThePass(t *testing.T, readStall time.Duration) {
 	t.Helper()
 	cityPath := t.TempDir()
@@ -210,6 +212,7 @@ func splitCityV2DemandIsGatedOffThePass(t *testing.T, readStall time.Duration) {
 	lane, _ := newTestBackstopLane(externalReadsEnv{CityName: "gc", CityPath: cityPath, Cfg: cfg, CityStore: binding})
 	lane.steps = nil
 	if readStall > 0 {
+		// The regression condition; awaitEveryRead below must override it.
 		lane.sourceDeadline = readStall / 10
 		ledgerBacking.stall.Store(int64(readStall))
 	}
