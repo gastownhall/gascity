@@ -513,3 +513,221 @@ func countEntries(env []string, entry string) int {
 	}
 	return n
 }
+
+// expiresAfterFirstCheck is a context whose Err reports nil on its first call
+// and context.Canceled on every later one, and whose Done channel never fires.
+// It models a context that expires after EnterProjectionWindow's up-front
+// check and before its re-check once the token is in hand, the one point at
+// which the caller already holds the token and has to give it back. A context
+// that is canceled before the call cannot reach that branch, because the
+// up-front check returns first.
+type expiresAfterFirstCheck struct {
+	errCalls atomic.Int32
+}
+
+func (*expiresAfterFirstCheck) Deadline() (time.Time, bool) { return time.Time{}, false }
+
+func (*expiresAfterFirstCheck) Done() <-chan struct{} { return nil }
+
+func (*expiresAfterFirstCheck) Value(any) any { return nil }
+
+func (c *expiresAfterFirstCheck) Err() error {
+	if c.errCalls.Add(1) == 1 {
+		return nil
+	}
+	return context.Canceled
+}
+
+// A window whose context expires after it took the token must hand the token
+// back. Left with the failed caller, it would keep every later window out for
+// the life of the process.
+func TestEnterProjectionWindowGivesTheTokenBackWhenTheContextExpiresAfterTheTokenIsTaken(t *testing.T) {
+	assertGateIdle(t)
+	t.Cleanup(func() {
+		// A token lost by the code under test must not also hang every test that
+		// runs after this one: put it back so they fail on their own terms.
+		if len(projectionToken) == 0 {
+			projectionToken <- struct{}{}
+		}
+	})
+	seq := projectionSeq.Load()
+	snapshot := cleanEnvSnapshot.Load()
+
+	ctx := &expiresAfterFirstCheck{}
+	exit, err := EnterProjectionWindow(ctx)
+	if err == nil {
+		exit()
+		t.Fatal("EnterProjectionWindow succeeded although its context expired after the token was taken")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want one that wraps context.Canceled", err)
+	}
+	if exit != nil {
+		t.Error("a failed EnterProjectionWindow returned a non-nil exit")
+	}
+	if calls := ctx.errCalls.Load(); calls < 2 {
+		t.Fatalf("Err was called %d time(s): the re-check after the token was taken did not run", calls)
+	}
+	assertGateIdle(t)
+	if got := projectionSeq.Load(); got != seq {
+		t.Errorf("projection sequence moved from %d to %d on a failed Enter", seq, got)
+	}
+	if cleanEnvSnapshot.Load() != snapshot {
+		t.Error("a failed Enter replaced the clean snapshot")
+	}
+
+	// The token is really back: the next window opens at once, where a lost
+	// token would hold it for the life of the process.
+	reopen, cancel := context.WithTimeout(context.Background(), promptly)
+	defer cancel()
+	next, err := EnterProjectionWindow(reopen)
+	if err != nil {
+		t.Fatalf("the window did not reopen after the failed Enter: %v", err)
+	}
+	next()
+	assertGateIdle(t)
+}
+
+// windowsWaiting counts the goroutines parked inside EnterProjectionWindow,
+// waiting for the token. A test that has to act while a second window waits
+// cannot do it on a fixed sleep: a slow scheduler would let the action run
+// before the wait began, and the test would pass for the wrong reason.
+func windowsWaiting() int {
+	buf := make([]byte, 1<<16)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			buf = buf[:n]
+			break
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+	waiting := 0
+	for _, goroutine := range strings.Split(string(buf), "\n\n") {
+		header, _, _ := strings.Cut(goroutine, "\n")
+		parked := strings.Contains(header, "[select") || strings.Contains(header, "[chan receive")
+		if parked && strings.Contains(goroutine, "execenv.EnterProjectionWindow(") {
+			waiting++
+		}
+	}
+	return waiting
+}
+
+// waitForWaitingWindows returns once at least want goroutines are parked inside
+// EnterProjectionWindow. It re-checks on a ticker until a deadline: the wait is
+// on the condition, not on a fixed pause, so a slow scheduler only makes it take
+// longer.
+func waitForWaitingWindows(t *testing.T, want int) {
+	t.Helper()
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	timeout := time.After(5 * time.Second)
+	for windowsWaiting() < want {
+		select {
+		case <-tick.C:
+		case <-timeout:
+			t.Fatalf("fewer than %d goroutine(s) reached the wait inside EnterProjectionWindow", want)
+		}
+	}
+}
+
+// A window that has to wait for the token must neither touch the snapshot the
+// open window serves nor take its own before it holds the token. Stored before
+// the wait, the snapshot would carry the first window's projection (its
+// credentials, its withheld variables) to the first window's readers at once;
+// taken before the wait, to the second window's readers once it opens.
+func TestAWaitingWindowTakesItsSnapshotOnlyOnceItHoldsTheToken(t *testing.T) {
+	assertGateIdle(t)
+	const (
+		withheld = "GC_EXECENV_ORDER_WITHHELD"
+		added    = "GC_EXECENV_ORDER_ADDED"
+	)
+	t.Setenv(withheld, "ambient")
+	if err := os.Unsetenv(added); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Unsetenv(added) })
+
+	// view is what a reader sees through the package's own accessors.
+	type view struct {
+		environ       []string
+		withheldValue string
+		withheldFound bool
+		addedFound    bool
+	}
+	read := func() view {
+		v := view{environ: Environ()}
+		v.withheldValue, v.withheldFound = LookupEnv(withheld)
+		_, v.addedFound = LookupEnv(added)
+		return v
+	}
+	checkAmbient := func(where string, v view) {
+		t.Helper()
+		if !v.withheldFound || v.withheldValue != "ambient" {
+			t.Errorf("%s: LookupEnv(%s) = %q, %v; want %q, true", where, withheld, v.withheldValue, v.withheldFound, "ambient")
+		}
+		if v.addedFound {
+			t.Errorf("%s: LookupEnv(%s) found the value the first window projected", where, added)
+		}
+		if !slices.Contains(v.environ, withheld+"=ambient") {
+			t.Errorf("%s: Environ lacks %s=ambient", where, withheld)
+		}
+		if leaked := probeEntries(v.environ, added); len(leaked) != 0 {
+			t.Errorf("%s: Environ carries the first window's projection %v", where, leaked)
+		}
+	}
+
+	first := enterWindow(t)
+	// The first window projects the way a native open does: it withholds a
+	// variable the process owns and adds one it does not.
+	if err := os.Unsetenv(withheld); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Setenv(added, "projected-by-the-first-window"); err != nil {
+		t.Fatal(err)
+	}
+
+	already := windowsWaiting()
+	type result struct {
+		err  error
+		view view
+	}
+	got := make(chan result, 1)
+	go func() {
+		second, err := EnterProjectionWindow(context.Background())
+		if err != nil {
+			got <- result{err: err}
+			return
+		}
+		v := read()
+		second()
+		got <- result{view: v}
+	}()
+	waitForWaitingWindows(t, already+1)
+
+	// The second window is waiting. The first still serves its own clean
+	// snapshot: an entry that waits must not have replaced it.
+	var during view
+	within(t, "reading the environment", func() { during = read() })
+	checkAmbient("first window, while the second waits", during)
+
+	// Restore, then exit: the order every window owner keeps.
+	if err := os.Setenv(withheld, "ambient"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Unsetenv(added); err != nil {
+		t.Fatal(err)
+	}
+	first()
+
+	select {
+	case r := <-got:
+		if r.err != nil {
+			t.Fatalf("second window after the first exited: %v", r.err)
+		}
+		checkAmbient("second window, snapshotted after the first restored", r.view)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the second window was not granted after the first exited")
+	}
+	assertGateIdle(t)
+}
