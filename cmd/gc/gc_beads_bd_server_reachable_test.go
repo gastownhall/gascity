@@ -32,6 +32,7 @@ func TestServerReachableReflectsDoltExit(t *testing.T) {
 		t.Fatalf("read script: %v", err)
 	}
 	src := string(scriptBytes)
+	doltClient := extractShellFunction(t, src, "dolt_client")
 	serverSQL := extractShellFunction(t, src, "server_sql")
 	serverReachable := extractShellFunction(t, src, "server_reachable")
 
@@ -52,6 +53,7 @@ func TestServerReachableReflectsDoltExit(t *testing.T) {
 			// connect_host is overridden so the test exercises only the
 			// reachability decision, not host resolution.
 			script := "connect_host() { printf '127.0.0.1'; }\n" +
+				doltClient + "\n" +
 				serverSQL + "\n" +
 				serverReachable + "\n" +
 				"server_reachable\n"
