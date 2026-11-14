@@ -303,3 +303,58 @@ func writeHandoffModeConfig(t *testing.T, cityPath string, cfg *config.City) {
 		t.Fatal(err)
 	}
 }
+
+// A worker site never dials the controller or calls the mode seam: it decides
+// from its own config and fails closed. Each case runs the guard on a real
+// worker-site city, so the arm cannot be satisfied by an always-true or
+// always-false answer.
+func TestWorkerSiteSelfHandoffStagesOnlyForLegacySiteConfig(t *testing.T) {
+	legacyTOML := "[workspace]\nname = \"box-city\"\n\n[beads]\nprovider = \"file\"\n\n[daemon]\nsession_reconciler = \"legacy\"\n"
+	cases := []struct {
+		name    string
+		cfg     *config.City
+		toml    string // rewrites the site's city.toml when set
+		staged  bool
+		useLoad bool // the guard loads the site config itself (no handoffConfig)
+		reason  string
+	}{
+		{name: "legacy site config", cfg: &config.City{Daemon: config.DaemonConfig{SessionReconciler: "legacy"}}, staged: true},
+		{name: "legacy site config loaded from city.toml", toml: legacyTOML, useLoad: true, staged: true},
+		{name: "v2-pinned site config", cfg: &config.City{Daemon: config.DaemonConfig{SessionReconciler: "v2"}}, reason: "worker site"},
+		{name: "unloadable site config", toml: "this is [not valid toml", useLoad: true, reason: "worker site"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir, _ := newWorkerSiteSessionCity(t, nil)
+			if !onWorkerSite(cityDir) {
+				t.Fatal("fixture: the city is not a worker site")
+			}
+			if tc.toml != "" {
+				if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(tc.toml), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			previous := controllerLatchedReconcilerMode
+			t.Cleanup(func() { controllerLatchedReconcilerMode = previous })
+			probes := 0
+			controllerLatchedReconcilerMode = func(string, *config.City) (reconcilerMode, bool) {
+				probes++
+				return reconcilerLegacy, true
+			}
+			var stderr bytes.Buffer
+			r := testRowFirstRestart("gc handoff", "worker", newFakeDrainOps(), &stderr)
+			r.cityPath = cityDir
+			r.handoffConfig = nil
+			if !tc.useLoad {
+				r.handoffConfig = tc.cfg
+			}
+			if got := r.reconcilerStagesSelfHandoff(&stderr); got != tc.staged {
+				t.Errorf("reconcilerStagesSelfHandoff = %v, want %v", got, tc.staged)
+			}
+			if probes != 0 {
+				t.Errorf("controller seam called %d times, want 0 on a worker site", probes)
+			}
+			assertHandoffModeNotice(t, stderr.String(), tc.reason)
+		})
+	}
+}
