@@ -7,14 +7,15 @@
 #
 # This order subscribes to bead.closed events. For each closed bead it
 # resolves the dependents linked by a `blocks` dependency and nudges every
-# open or deferred dependent that no blocker still holds once this one has
-# closed (see still_held): at the assignee when one holds the bead, else at
-# its gc.routed_to target (the graph.v2 claim shape leaves the assignee empty
-# until a session claims the step). A routed target may be a pool base, which
-# nudge_routed_target resolves to its active members. Idempotent: a given
-# (blocker, dependent) pair is nudged at most once. Dedup state lives in
-# $GC_PACK_STATE_DIR/cascade-nudge-on-blocker-close-state.json, so it is
-# both city- and pack-scoped — multi-city installs never cross-pollinate.
+# open, in_progress or deferred dependent that no blocker still holds once
+# this one has closed (see still_held): at the assignee when one holds the
+# bead, else at its gc.routed_to target (the graph.v2 claim shape leaves the
+# assignee empty until a session claims the step). A routed target may be a
+# pool base, which nudge_routed_target resolves to its active members.
+# Idempotent: a given (blocker, dependent) pair is nudged at most once. Dedup
+# state lives in $GC_PACK_STATE_DIR/cascade-nudge-on-blocker-close-state.json,
+# so it is both city- and pack-scoped — multi-city installs never
+# cross-pollinate.
 #
 # Event contract note: the close transition emits `bead.closed`, not
 # `bead.updated` (a closed bead only emits bead.updated on a later
@@ -194,17 +195,17 @@ while IFS= read -r blocker; do
             --direction=up --type=blocks --json 2>/dev/null)" || continue
     if [ -z "$DEPS" ] || [ "$DEPS" = "[]" ]; then continue; fi
 
-    # Dependents that are still open/deferred and have somewhere to send the
-    # wake-up: an assigned dependent is nudged at its assignee; an unassigned
-    # one is nudged at its gc.routed_to target (the graph.v2 claim shape
-    # keeps the assignee empty until a session claims). The kind column
-    # dispatches the two deliveries and keeps every field non-empty, so the
-    # tab-separated read cannot collapse a column; a malformed row (metadata
-    # a string, gc.routed_to a number) is dropped alone, not the blocker's
-    # whole row set.
+    # Dependents that are still open/in_progress/deferred and have somewhere
+    # to send the wake-up: an assigned dependent is nudged at its assignee;
+    # an unassigned one is nudged at its gc.routed_to target (the graph.v2
+    # claim shape keeps the assignee empty until a session claims). The kind
+    # column dispatches the two deliveries and keeps every field non-empty,
+    # so the tab-separated read cannot collapse a column; a malformed row
+    # (metadata a string, gc.routed_to a number) is dropped alone, not the
+    # blocker's whole row set.
     ROWS="$(printf '%s' "$DEPS" \
         | jq -r '.[]
-                 | select(.status == "open" or .status == "deferred")
+                 | select(.status == "open" or .status == "in_progress" or .status == "deferred")
                  | ((.assignee | strings) // "") as $assignee
                  | ((.metadata | objects | .["gc.routed_to"] | strings) // "") as $route
                  | if $assignee != "" then [.id, "assignee", $assignee]
