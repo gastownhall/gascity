@@ -40,7 +40,8 @@ type ScanOptions struct {
 
 // ScanAll scans city-level and rig-exclusive order roots, stamps rig orders,
 // and applies configured order overrides. The returned slice includes orders
-// disabled by overrides; callers choose whether to filter them.
+// disabled by their own file or by overrides; callers choose whether to filter
+// them with orders.FilterEnabled.
 func ScanAll(cityPath string, cfg *config.City, opts ScanOptions) ([]orders.Order, error) {
 	if cfg == nil {
 		cfg = &config.City{}

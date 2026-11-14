@@ -50,6 +50,27 @@ func TestBuildOrderDispatcherOverrideDisablesOrder(t *testing.T) {
 	requireOrderNames(t, mad.aa, "keep")
 }
 
+func TestBuildOrderDispatcherSkipsFileDisabledOrder(t *testing.T) {
+	cityDir, cfg := newOrderEnabledFilterCity(t)
+	path := filepath.Join(cityDir, "orders", "off.toml")
+	if err := os.WriteFile(path, []byte(`[order]
+exec = "scripts/off.sh"
+trigger = "cooldown"
+interval = "1m"
+enabled = false
+`), 0o644); err != nil {
+		t.Fatalf("write order: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	ad := buildOrderDispatcher(nil, cityDir, cfg, events.Discard, &stderr)
+	if ad == nil {
+		t.Fatalf("buildOrderDispatcher returned nil; stderr: %s", stderr.String())
+	}
+	mad := ad.(*memoryOrderDispatcher)
+	requireOrderNames(t, mad.aa, "keep")
+}
+
 func TestControllerStateOrdersOverrideDisablesOrder(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	cityDir, cfg := newOrderEnabledFilterCity(t)

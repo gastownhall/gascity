@@ -306,8 +306,8 @@ one rig's local `orders/` directory.
 
 ## Disabling and skipping orders
 
-Set `enabled = false` in an order's own definition to drop it from scanning
-entirely — it won't appear in `gc order list` or get evaluated:
+Set `enabled = false` in an order's own definition to keep it from running —
+it won't appear in `gc order list` or get evaluated:
 
 ```toml
 [order]
@@ -360,6 +360,15 @@ name = "orphan-sweep"
 rig = "*"
 interval = "10m"
 timeout = "5m"
+```
+
+The reverse works too: `enabled = true` in `[[orders.overrides]]` turns on a
+pack order that ships with `enabled = false`:
+
+```toml
+[[orders.overrides]]
+name = "nightly-bench"
+enabled = true
 ```
 
 To turn a pack's order off, use one mechanism: an override with
