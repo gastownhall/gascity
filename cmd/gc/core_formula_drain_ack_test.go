@@ -185,6 +185,11 @@ func startCoreDrainAckRun(t *testing.T, formulaName, stepRef string) coreDrainAc
 	}
 	for {
 		step, ok := run.nextReadyStep(t)
+		if !ok && run.serveControls(t) {
+			// A scoped formula gates its next step on a scope-check control
+			// bead; the controller serves it between worker steps.
+			continue
+		}
 		if !ok {
 			t.Fatalf("%s: no ready work step before reaching %s:\n%s", formulaName, stepRef, run.report(t))
 		}
@@ -232,27 +237,35 @@ func (r coreDrainAckRun) drainAck(t *testing.T) {
 	var stderr bytes.Buffer
 	releaseUnexecutedClaimsOnDrainAck(testWorkLegs("", nil, r.store, nil), r.session, drainAckReleaseBudget, &stderr)
 	for round := 0; round < 10; round++ {
-		ready, err := r.store.Ready()
-		if err != nil {
-			t.Fatalf("ready: %v", err)
-		}
-		progressed := false
-		for _, b := range ready {
-			if b.Metadata[beadmeta.RootBeadIDMetadataKey] != r.rootID || !beadmeta.IsControlKind(b.Metadata[beadmeta.KindMetadataKey]) {
-				continue
-			}
-			if _, err := dispatch.ProcessControl(beadstest.Graph(r.store), b, dispatch.ProcessOptions{}); err != nil {
-				if errors.Is(err, dispatch.ErrControlPending) {
-					continue
-				}
-				t.Fatalf("ProcessControl(%s): %v", b.ID, err)
-			}
-			progressed = true
-		}
-		if !progressed {
+		if !r.serveControls(t) {
 			return
 		}
 	}
+}
+
+// serveControls runs ProcessControl on every ready control bead of the
+// workflow once, as the controller would, and reports whether any made
+// progress.
+func (r coreDrainAckRun) serveControls(t *testing.T) bool {
+	t.Helper()
+	ready, err := r.store.Ready()
+	if err != nil {
+		t.Fatalf("ready: %v", err)
+	}
+	progressed := false
+	for _, b := range ready {
+		if b.Metadata[beadmeta.RootBeadIDMetadataKey] != r.rootID || !beadmeta.IsControlKind(b.Metadata[beadmeta.KindMetadataKey]) {
+			continue
+		}
+		if _, err := dispatch.ProcessControl(beadstest.Graph(r.store), b, dispatch.ProcessOptions{}); err != nil {
+			if errors.Is(err, dispatch.ErrControlPending) {
+				continue
+			}
+			t.Fatalf("ProcessControl(%s): %v", b.ID, err)
+		}
+		progressed = true
+	}
+	return progressed
 }
 
 func (r coreDrainAckRun) get(t *testing.T, id string) beads.Bead {
