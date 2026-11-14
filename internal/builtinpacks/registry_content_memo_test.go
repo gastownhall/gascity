@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // corruptionTarget is a file present in every materialized synthetic repo.
@@ -70,6 +71,60 @@ func TestValidateSyntheticRepoDetectsSameSizeCorruptionAfterSuccessfulValidation
 	err = ValidateSyntheticRepo(dst, Repository, testCommit)
 	if err == nil {
 		t.Fatal("ValidateSyntheticRepo accepted same-size content corruption after a successful validation")
+	}
+	if !strings.Contains(err.Error(), "content differs") {
+		t.Fatalf("error = %v, want content differs", err)
+	}
+}
+
+// TestValidateSyntheticRepoDetectsMtimeRestoredCorruptionAfterSuccessfulValidation
+// is the same contract for a same-size corruption whose modification time is
+// then put back (os.Chtimes, cp -p, touch -r, rsync --times, a restore from
+// backup), so size and mtime both match the good cache and only the inode
+// change time (ctime) can tell the two apart. Userspace cannot set ctime, and
+// the restoring Chtimes call itself bumps it.
+//
+// It does not cover coarse timestamp granularity (ext3, HFS+, some network
+// mounts), where two writes inside one tick share an mtime AND a ctime without
+// any deliberate restore: that depends on the filesystem's clock and cannot be
+// reproduced portably in a unit test.
+func TestValidateSyntheticRepoDetectsMtimeRestoredCorruptionAfterSuccessfulValidation(t *testing.T) {
+	dst := materializeTestRepo(t)
+	target := filepath.Join(dst, corruptionTarget)
+
+	if err := ValidateSyntheticRepo(dst, Repository, testCommit); err != nil {
+		t.Fatalf("first ValidateSyntheticRepo: %v", err)
+	}
+
+	original, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", target, err)
+	}
+	before, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("Stat(%q): %v", target, err)
+	}
+
+	// Let the filesystem clock tick past the materialization so the rewrite's
+	// ctime is distinguishable from the original on a coarse-clock kernel.
+	time.Sleep(20 * time.Millisecond)
+
+	writeFile(t, target, strings.Repeat("#", len(original)))
+	if err := os.Chtimes(target, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatalf("Chtimes(%q): %v", target, err)
+	}
+
+	after, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("Stat(%q) after restore: %v", target, err)
+	}
+	if after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) {
+		t.Fatalf("restore left size/mtime %d/%v, want the original %d/%v", after.Size(), after.ModTime(), before.Size(), before.ModTime())
+	}
+
+	err = ValidateSyntheticRepo(dst, Repository, testCommit)
+	if err == nil {
+		t.Fatal("ValidateSyntheticRepo accepted same-size corruption with a restored mtime after a successful validation")
 	}
 	if !strings.Contains(err.Error(), "content differs") {
 		t.Fatalf("error = %v, want content differs", err)
