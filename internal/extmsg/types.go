@@ -558,6 +558,11 @@ type BindingService interface {
 	Bind(ctx context.Context, caller Caller, input BindInput) (SessionBindingRecord, error)
 	ResolveByConversation(ctx context.Context, ref ConversationRef) (*SessionBindingRecord, error)
 	ListBySession(ctx context.Context, sessionID string) ([]SessionBindingRecord, error)
+	// ListPublishableBySession returns conversations the selector can publish
+	// into: active 1:1 bindings plus group-participant rooms. Selector may be
+	// a session bead ID, session name, or alias. ListBySession stays exact-ID
+	// 1:1 bindings only.
+	ListPublishableBySession(ctx context.Context, selector string) ([]SessionBindingRecord, error)
 	Touch(ctx context.Context, caller Caller, bindingID string, now time.Time) error
 	Unbind(ctx context.Context, caller Caller, input UnbindInput) ([]SessionBindingRecord, error)
 }
