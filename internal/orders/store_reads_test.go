@@ -2,10 +2,12 @@ package orders
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/convergence"
 )
@@ -781,4 +783,96 @@ func runsContain(runs []OrderRun, id string) bool {
 		}
 	}
 	return false
+}
+
+// TestOpenWorkBlockerReportsOldest pins the telemetry reader's selection rule:
+// among the beads holding an order's open-work gate shut, the OLDEST open run
+// record is reported with its kind, while a closed run record and a plain bead
+// that merely carries the order-run label (no run record, mc-v8g4p) are never
+// named — even when they are older, and even when the wisp walk would say yes.
+func TestOpenWorkBlockerReportsOldest(t *testing.T) {
+	const scoped = "digest"
+	base := time.Date(2030, 8, 21, 9, 0, 0, 0, time.UTC)
+	runLabel := "order-run:" + scoped
+	mem := beads.NewMemStoreFrom(4, []beads.Bead{
+		{
+			ID:        "closed-root",
+			Title:     "closed wisp",
+			Status:    "closed",
+			Labels:    []string{runLabel},
+			Metadata:  map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWisp},
+			CreatedAt: base.Add(-10 * time.Hour),
+		},
+		{
+			ID:        "plain-task",
+			Title:     "plain task carrying the label",
+			Status:    "open",
+			Type:      "task",
+			Labels:    []string{runLabel},
+			CreatedAt: base.Add(-8 * time.Hour),
+		},
+		{
+			ID:        "wisp-root",
+			Title:     "unworked wisp",
+			Status:    "open",
+			Labels:    []string{runLabel},
+			Metadata:  map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWisp},
+			CreatedAt: base.Add(-4 * time.Hour),
+		},
+		{
+			ID:        "tracking",
+			Title:     "order:digest",
+			Status:    "in_progress",
+			Labels:    []string{runLabel, "order-tracking"},
+			CreatedAt: base.Add(-1 * time.Hour),
+		},
+	}, nil)
+	st := NewStoreWithGraph(beads.OrdersStore{Store: mem}, beads.GraphStore{Store: mem})
+
+	var walked []string
+	alwaysOpen := func(_ beads.Store, root beads.Bead) (bool, error) {
+		walked = append(walked, root.ID)
+		return true, nil
+	}
+	got, ok, err := st.OpenWorkBlocker(scoped, alwaysOpen)
+	if err != nil {
+		t.Fatalf("OpenWorkBlocker(): %v", err)
+	}
+	if !ok {
+		t.Fatalf("OpenWorkBlocker() ok = false, want true")
+	}
+	if got.ID != "wisp-root" {
+		t.Fatalf("OpenWorkBlocker() id = %q, want the oldest open run record %q", got.ID, "wisp-root")
+	}
+	if got.Kind != WorkBlockerKindWisp {
+		t.Errorf("OpenWorkBlocker() kind = %q, want %q", got.Kind, WorkBlockerKindWisp)
+	}
+	if !got.CreatedAt.Equal(base.Add(-4 * time.Hour)) {
+		t.Errorf("OpenWorkBlocker() created_at = %s, want %s", got.CreatedAt, base.Add(-4*time.Hour))
+	}
+	for _, id := range walked {
+		if id == "closed-root" || id == "plain-task" {
+			t.Errorf("wisp walk consulted %q, which is not an open run record", id)
+		}
+	}
+
+	// With the wisp walk reporting no open work, the tracking bead is the only
+	// blocker left and is reported as such.
+	got, ok, err = st.OpenWorkBlocker(scoped, func(beads.Store, beads.Bead) (bool, error) { return false, nil })
+	if err != nil {
+		t.Fatalf("OpenWorkBlocker() with closed wisps: %v", err)
+	}
+	if !ok || got.ID != "tracking" || got.Kind != WorkBlockerKindTracking {
+		t.Fatalf("OpenWorkBlocker() with closed wisps = (%+v, %v), want tracking bead of kind %q", got, ok, WorkBlockerKindTracking)
+	}
+
+	// A failing wisp walk propagates rather than being read as "no blocker".
+	walkErr := errors.New("subtree read failed")
+	_, ok, err = st.OpenWorkBlocker(scoped, func(beads.Store, beads.Bead) (bool, error) { return false, walkErr })
+	if !errors.Is(err, walkErr) {
+		t.Fatalf("OpenWorkBlocker() err = %v, want %v", err, walkErr)
+	}
+	if ok {
+		t.Errorf("OpenWorkBlocker() ok = true on error, want false")
+	}
 }

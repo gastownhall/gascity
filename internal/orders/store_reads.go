@@ -713,7 +713,7 @@ func (s *Store) OpenWorkBlocker(scoped string, wispHasOpenWork func(store beads.
 			return WorkBlocker{}, false, fmt.Errorf("listing order work beads: %w", err)
 		}
 		for _, b := range results {
-			if b.Status == "closed" {
+			if b.Status == "closed" || !IsRunRecord(b) { // match HasOpenWork (mc-v8g4p)
 				continue
 			}
 			if beadLabelsContain(b.Labels, labelOrderTracking) {

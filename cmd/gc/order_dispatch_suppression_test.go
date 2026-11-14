@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -670,9 +671,73 @@ func TestOrderSuppressedMessageDegradesToItsPreBlockerText(t *testing.T) {
 	if !strings.HasPrefix(got, want) {
 		t.Fatalf("blocker clause replaced the base message instead of extending it: %q", got)
 	}
-	for _, want := range []string{"sr-iaq7", orders.WorkBlockerKindWisp, "4h0m0s", "reopens when that bead closes"} {
+	for _, want := range []string{"sr-iaq7", orders.WorkBlockerKindWisp, "4h0m0s", "stays shut while that bead is open"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("message %q does not contain %q", got, want)
 		}
+	}
+}
+
+// subtreeFailingStore holds the strict gate shut with an in-flight tracking bead
+// and also carries a molecule root whose subtree read fails. The gate stops at
+// the tracking bead and never walks the root; the blocker lookup evaluates every
+// candidate to find the oldest, so it reaches the root and its read fails.
+type subtreeFailingStore struct {
+	*gateBlockingStore
+}
+
+func (s *subtreeFailingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if _, ok := q.Metadata[beadmeta.RootBeadIDMetadataKey]; ok {
+		return nil, errors.New("subtree read failed")
+	}
+	return s.gateBlockingStore.List(q)
+}
+
+// TestOrderSuppressedStillEmitsWhenBlockerLookupFails is the other half of the
+// best-effort contract: when the blocker lookup itself errors, the alert still
+// goes out exactly once, with no blocker fields and the pre-blocker message.
+func TestOrderSuppressedStillEmitsWhenBlockerLookupFails(t *testing.T) {
+	const scoped = "stuck-order"
+	start := time.Date(2030, 8, 21, 9, 0, 0, 0, time.UTC)
+	inner := newGateBlockingStore(scoped, start.Add(-24*time.Hour))
+	inner.corpus = append(inner.corpus, beads.Bead{
+		ID:        "failing-root",
+		Title:     "molecule whose subtree cannot be read",
+		Status:    "open",
+		Type:      "molecule",
+		Labels:    []string{"order-run:" + scoped},
+		CreatedAt: start.Add(-48 * time.Hour),
+	})
+	store := &subtreeFailingStore{gateBlockingStore: inner}
+	rec := &memRecorder{}
+	m := suppressedOrderDispatcher(t, scoped, store, rec)
+	cityPath := t.TempDir()
+
+	now := start
+	for i := 0; i < orderOpenWorkSuppressionAlertAfter; i++ {
+		m.dispatch(context.Background(), cityPath, now)
+		m.drain(context.Background())
+		if i < orderOpenWorkSuppressionAlertAfter-1 {
+			now = now.Add(time.Minute)
+		}
+	}
+
+	got := rec.suppressedEvents()
+	if len(got) != 1 {
+		t.Fatalf("order.suppressed events = %d, want 1 even though the blocker lookup failed", len(got))
+	}
+	p := decodeSuppressedPayload(t, got[0])
+	if p.BlockerID != "" || p.BlockerKind != "" || p.BlockerTitle != "" || p.BlockerAgeMS != 0 {
+		t.Errorf("failed lookup leaked blocker fields: %+v", p)
+	}
+	want := orderSuppressedMessage(events.OrderSuppressedPayload{
+		Consecutive:     p.Consecutive,
+		FirstSuppressed: p.FirstSuppressed,
+	})
+	if got[0].Message != want {
+		t.Errorf("message = %q, want the pre-blocker text %q", got[0].Message, want)
+	}
+	if strings.Contains(got[0].Message, "blocked by") {
+		t.Errorf("message names a blocker after a failed lookup: %q", got[0].Message)
 	}
 }

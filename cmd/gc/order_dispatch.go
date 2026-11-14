@@ -1956,7 +1956,7 @@ func orderSuppressedMessage(p events.OrderSuppressedPayload) string {
 	if p.BlockerAgeMS > 0 {
 		blocker += fmt.Sprintf(", open for %s", (time.Duration(p.BlockerAgeMS) * time.Millisecond).Round(time.Second))
 	}
-	return msg + blocker + " — the gate reopens when that bead closes"
+	return msg + blocker + " — the gate stays shut while that bead is open"
 }
 
 // openWorkBlockerForAlert resolves the oldest bead holding this order's
