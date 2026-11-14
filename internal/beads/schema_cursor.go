@@ -99,10 +99,10 @@ import (
 // SchemaVersions().
 const (
 	// SchemaCursorMain is schema.LatestVersion() for the pinned library.
-	SchemaCursorMain = 66
+	SchemaCursorMain = 74
 	// SchemaCursorIgnored is schema.LatestIgnoredVersion() for the pinned
 	// library.
-	SchemaCursorIgnored = 26
+	SchemaCursorIgnored = 31
 )
 
 // PinnedSchemaCursors returns the pair a proxied database must already be at
