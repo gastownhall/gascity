@@ -353,6 +353,95 @@ func TestSessionStartAutoHandoffUsesProvidedStoreWithoutOpeningCity(t *testing.T
 	assertAutoHandoffRetainedAddressable(t, store, auto.ID)
 }
 
+// writePrimeInjectCity builds a city whose agent "worker" injects the named
+// fragments after its prompt template. No fragment is defined anywhere, so
+// every named fragment is missing; a fragment named "present" is defined.
+func writePrimeInjectCity(t *testing.T, inject string) {
+	t.Helper()
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	write := func(rel, data string) {
+		path := filepath.Join(cityDir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", path, err)
+		}
+		if err := os.WriteFile(path, []byte(data), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+	write("pack.toml", "[pack]\nname = \"inject-city\"\nschema = 2\n")
+	write("city.toml", "[workspace]\nname = \"inject-city\"\n")
+	write("agents/worker/agent.toml", "prompt_template = \"agents/worker/prompt.template.md\"\ninject_fragments = "+inject+"\n")
+	write("agents/worker/prompt.template.md", "worker-body")
+	write("template-fragments/present.template.md", `{{ define "present" }}present-fragment{{ end }}`)
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_AGENT", "")
+}
+
+func TestPrimeJSONReportsMissingInjectFragment(t *testing.T) {
+	writePrimeInjectCity(t, `["present", "missing-footer"]`)
+
+	var stdout, stderr bytes.Buffer
+	cmd := newPrimeCmd(&stdout, &stderr)
+	cmd.SetOut(&stderr)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"--json", "worker"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("gc prime --json = %v; stderr=%q", err, stderr.String())
+	}
+	var got primeJSONResult
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("--json output is not JSON: %v; stdout=%q", err, stdout.String())
+	}
+	if len(got.PromptWarnings) != 1 || !strings.Contains(got.PromptWarnings[0], `"missing-footer"`) {
+		t.Fatalf("prompt_warnings = %q, want one naming missing-footer; stdout=%q", got.PromptWarnings, stdout.String())
+	}
+	if strings.Contains(got.Content, "missing-footer") {
+		t.Fatalf("content = %q, must not carry the warning text", got.Content)
+	}
+}
+
+func TestPrimePlainTextShowsMissingInjectFragmentOnStdout(t *testing.T) {
+	writePrimeInjectCity(t, `["missing-footer"]`)
+
+	var stdout, stderr bytes.Buffer
+	if code := doPrimeWithMode([]string{"worker"}, &stdout, &stderr, false, false); code != 0 {
+		t.Fatalf("doPrime() = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "worker-body") {
+		t.Fatalf("stdout = %q, want the prompt still rendered", out)
+	}
+	if !strings.Contains(out, `"missing-footer"`) {
+		t.Fatalf("stdout = %q, want a warning naming missing-footer", out)
+	}
+}
+
+func TestPrimeHookModeKeepsMissingInjectFragmentOutOfContext(t *testing.T) {
+	writePrimeInjectCity(t, `["missing-footer"]`)
+
+	var stdout, stderr bytes.Buffer
+	if code := doPrimeWithHookFormat([]string{"worker"}, &stdout, &stderr, true, "", false); code != 0 {
+		t.Fatalf("doPrimeWithHookFormat() = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "missing-footer") {
+		t.Fatalf("hook stdout = %q, must not carry the warning: it is delivered as agent context", stdout.String())
+	}
+}
+
+func TestPrimeCleanInjectIsSilent(t *testing.T) {
+	writePrimeInjectCity(t, `["present"]`)
+
+	var stdout, stderr bytes.Buffer
+	if code := doPrimeWithMode([]string{"worker"}, &stdout, &stderr, false, false); code != 0 {
+		t.Fatalf("doPrime() = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if want := "worker-body\n\npresent-fragment"; stdout.String() != want {
+		t.Fatalf("stdout = %q, want %q (no warning block on a clean render)", stdout.String(), want)
+	}
+}
+
 func TestDoPrimeScopesRigPackFragmentsByCurrentRig(t *testing.T) {
 	clearGCEnv(t)
 

@@ -846,6 +846,38 @@ func TestRenderPromptInjectMissing(t *testing.T) {
 	}
 }
 
+func TestRenderPromptWithMetaReportsMissingInjectFragmentWarning(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/prompts/shared/frag.md.tmpl"] = []byte(`{{ define "footer" }}--- footer ---{{ end }}`)
+	f.Files["/city/prompts/test.md.tmpl"] = []byte("Main body.")
+	var stderr strings.Builder
+	res := renderPromptWithMeta(f, "/city", "", "prompts/test.md.tmpl", PromptContext{}, "", &stderr,
+		nil, []string{"footer", "nonexistent"}, nil)
+	if res.Text != "Main body.\n\n--- footer ---" {
+		t.Errorf("Text = %q, want body plus the fragment that exists", res.Text)
+	}
+	if res.Err != nil {
+		t.Errorf("Err = %v, want nil: a missing fragment must not fail the render", res.Err)
+	}
+	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], `"nonexistent"`) {
+		t.Errorf("Warnings = %q, want exactly one naming %q", res.Warnings, "nonexistent")
+	}
+	if !strings.Contains(stderr.String(), "nonexistent") {
+		t.Errorf("stderr = %q, want the existing warning kept", stderr.String())
+	}
+}
+
+func TestRenderPromptWithMetaCleanRenderHasNoWarnings(t *testing.T) {
+	f := fsys.NewFake()
+	f.Files["/city/prompts/shared/frag.md.tmpl"] = []byte(`{{ define "footer" }}--- footer ---{{ end }}`)
+	f.Files["/city/prompts/test.md.tmpl"] = []byte("Main body.")
+	res := renderPromptWithMeta(f, "/city", "", "prompts/test.md.tmpl", PromptContext{}, "", io.Discard,
+		nil, []string{"footer"}, nil)
+	if len(res.Warnings) != 0 {
+		t.Errorf("Warnings = %q, want none on a clean render", res.Warnings)
+	}
+}
+
 func TestRenderPromptGlobalAndPerAgent(t *testing.T) {
 	f := fsys.NewFake()
 	f.Files["/city/prompts/shared/frag.md.tmpl"] = []byte(

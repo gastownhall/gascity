@@ -150,6 +150,8 @@ type primeJSONResult struct {
 	Content       string            `json:"content"`
 	Bytes         int               `json:"bytes"`
 	PromptBudget  *promptBudgetJSON `json:"prompt_budget,omitempty"`
+	// PromptWarnings lists fragment problems that left the prompt intact.
+	PromptWarnings []string `json:"prompt_warnings,omitempty"`
 }
 
 // promptBudgetJSON is the --strict --json report of the promptDelivery

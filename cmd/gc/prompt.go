@@ -99,6 +99,9 @@ type PromptRenderResult struct {
 	Version string
 	SHA     string
 	Err     error
+	// Warnings lists fragment problems that left the main render intact
+	// (a missing or failing inject fragment), one message per problem.
+	Warnings []string
 }
 
 // renderPrompt reads a prompt template file and renders it with the given
