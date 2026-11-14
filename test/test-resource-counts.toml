@@ -2805,11 +2805,6 @@ tagged = true
 
 [[count]]
 path = "internal/runtime/tmux/startup_test.go"
-resource = "fixed_sleep"
-calls = 1
-
-[[count]]
-path = "internal/runtime/tmux/startup_test.go"
 resource = "subprocess"
 calls = 1
 
