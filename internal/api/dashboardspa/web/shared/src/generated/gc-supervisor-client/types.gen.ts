@@ -126,6 +126,7 @@ export type AgentPatch = {
     ResumeCommand: string | null;
     Rig: string;
     ScaleCheck: string | null;
+    ScaleCheckAuthoritative: boolean | null;
     Scope: string | null;
     Session: string | null;
     SessionLive: Array<string> | null;

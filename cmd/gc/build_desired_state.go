@@ -2646,6 +2646,20 @@ func mergeCollectedDemand(cfg *config.City, in collectedDemand) mergedDemand {
 	poolScaleCheckPartialTemplates := maps.Clone(in.CustomPartials)
 	var scaleCheckDemandByTemplate map[string]scaleCheckDemand
 	var nameRefusals []unplaceableName
+	// Templates that both DECLARED their custom scale_check authoritative and
+	// produced a clean answer on THIS pass. A template qualifies only if its
+	// check ran to completion: a partial (non-zero exit, timeout, unbuildable
+	// env) is explicitly NOT a clean zero, and keeps falling through to the
+	// cold-wake probe.
+	authoritativeScaleCheck := make(map[string]bool, len(in.CustomCounts))
+	for template := range in.CustomCounts {
+		if in.CustomPartials[template] {
+			continue
+		}
+		if agent := findAgentByTemplate(cfg, template); agent != nil && agent.ScaleCheckAuthoritative {
+			authoritativeScaleCheck[template] = true
+		}
+	}
 	if in.DefaultProbed {
 		defaultPartials := in.DefaultPartials
 		if len(in.NameOnlyTemplates) > 0 {
@@ -2672,8 +2686,43 @@ func mergeCollectedDemand(cfg *config.City, in collectedDemand) mergedDemand {
 			// A cold-pool wake probe only wakes the pool from zero; clamp its
 			// contribution to 1 so it never overrides a custom scale_check's
 			// authoritative count for the same template.
+			//
+			// Clamping alone does not deliver that promise. The merge below is
+			// a max(), so clamping to 1 stops the probe overriding a custom
+			// count of 2+ but NOT a custom count of 0: max(0,1) is 1. A custom
+			// check could therefore never answer "no demand" while its pool was
+			// cold, which is the only time this probe runs. The pool drained to
+			// zero, the next pass's probe woke it again, and the woken worker
+			// found the work its own check had already judged unactionable and
+			// drained: in production, 43 spawn/drain cycles in 40 minutes, about
+			// one cold start every 30s, for as long as the work stayed parked.
+			// The probe counts Ready() work matched on gc.routed_to, so it
+			// cannot see the pool-specific state the custom check exists to
+			// read.
+			//
+			// The probe is NOT wrong to raise a zero in general: a rig-scoped
+			// check cannot see work routed to it that lives in the city store,
+			// and without the probe such a pool would never wake at all
+			// (TestBuildDesiredState_ScaleFromZero_CrossRig). The two cases are
+			// told apart by whether the check reads the store the work is in,
+			// which only the city declaring the pool can know, so this is
+			// opt-in per agent via scale_check_authoritative, and every pool
+			// that does not set it keeps the previous behavior.
+			//
+			// A check that failed is still not a zero: it stays partial, falls
+			// through to the probe, and reports the probe's demand exactly as
+			// before (the existing partial-demand guard still decides whether a
+			// fresh session is created). Suppressing a wake on a count we do not
+			// trust would strand routed work with no claimant.
 			if in.ColdWakeTemplates[template] && count > 1 {
 				count = 1
+			}
+			// An authoritative check's count is the last word: the probe may name
+			// work for at most that many seats and never raises the count, so a clean
+			// 0 contributes nothing (mergeScaleCheckDemand ignores count <= 0) while a
+			// positive answer still carries the probe's work/worktree provenance.
+			if in.ColdWakeTemplates[template] && authoritativeScaleCheck[template] && count > scaleCheckCounts[template] {
+				count = scaleCheckCounts[template]
 			}
 			// An on_demand named-session backing template is a singleton: one pool
 			// slot is enough to drain N queued routed tasks sequentially. Clamp to

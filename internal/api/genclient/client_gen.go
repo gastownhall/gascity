@@ -2200,6 +2200,7 @@ type AgentPatch struct {
 	ResumeCommand           *string            `json:"ResumeCommand"`
 	Rig                     string             `json:"Rig"`
 	ScaleCheck              *string            `json:"ScaleCheck"`
+	ScaleCheckAuthoritative *bool              `json:"ScaleCheckAuthoritative"`
 	Scope                   *string            `json:"Scope"`
 	Session                 *string            `json:"Session"`
 	SessionLive             *[]string          `json:"SessionLive"`
