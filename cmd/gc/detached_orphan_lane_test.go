@@ -157,6 +157,80 @@ func TestDetachedOrphanDeltaReadCountDoesNotScaleWithCandidates(t *testing.T) {
 	}
 }
 
+// parkedOpenRow is D-1 as a bd-backed read folds to "open" although the store
+// records it parked: deferred, blocked, in review or testing. sourceStatus is
+// the recorded status; deferred additionally sets IndefinitelyDeferred, as the
+// bd read does. sourceStatus "" with deferred set is a store that reports the
+// deferral without the raw status.
+func parkedOpenRow(sourceStatus string, deferred bool) beads.Bead {
+	b := detachedOrphanWorkBead("D-1")
+	b.SourceStatus = sourceStatus
+	b.IndefinitelyDeferred = deferred
+	return b
+}
+
+// TestLiveOpenCandidatesSingleIDKeepsOnlyRawOpen pins the single-candidate
+// shortcut to the contract the batched read keeps: Status:"open" on a Live
+// List is the store's raw open, so a parked row is not a candidate. The Get
+// the shortcut issues folds the parked statuses to "open", and only
+// IndefinitelyDeferred and SourceStatus still say the row is parked.
+func TestLiveOpenCandidatesSingleIDKeepsOnlyRawOpen(t *testing.T) {
+	cases := []struct {
+		name string
+		row  beads.Bead
+		want bool
+	}{
+		{"open", parkedOpenRow("open", false), true},
+		{"no source status", parkedOpenRow("", false), true},
+		{"deferred", parkedOpenRow("deferred", true), false},
+		{"deferred without source status", parkedOpenRow("", true), false},
+		{"blocked", parkedOpenRow("blocked", false), false},
+		{"review", parkedOpenRow("review", false), false},
+		{"testing", parkedOpenRow("testing", false), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &countingRouteStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{tc.row}, nil)}
+			rows, reads, err := liveOpenCandidates(store, []string{"D-1"})
+			if err != nil {
+				t.Fatalf("liveOpenCandidates: %v", err)
+			}
+			if reads != 1 || store.gets != 1 || store.lists != 0 {
+				t.Fatalf("reads=%d (gets=%d lists=%d), want one Get", reads, store.gets, store.lists)
+			}
+			if got := len(rows) == 1; got != tc.want {
+				t.Fatalf("row kept = %v (rows=%v), want %v", got, rows, tc.want)
+			}
+		})
+	}
+}
+
+// TestDetachedOrphanDeltaLeavesALoneDeferredCandidateUnrouted is the lane-level
+// consequence: with one candidate the re-verify takes the single-ID path, and a
+// deferred bead whose route was cleared must stay unrouted, as it does when it
+// is one of several candidates.
+func TestDetachedOrphanDeltaLeavesALoneDeferredCandidateUnrouted(t *testing.T) {
+	cr, store := detachedOrphanRuntime(t,
+		detachedOrphanSessionBead(),
+		parkedOpenRow("deferred", true))
+	lane := cr.detachedOrphanLaneOf()
+	lane.observe(beadCreatedEvent(t, detachedOrphanWorkBead("D-1")))
+
+	report := cr.sweepDetachedHandoffOrphansDelta()
+	if report.err != nil {
+		t.Fatalf("delta pass: %v", report.err)
+	}
+	if report.candidates != 1 {
+		t.Fatalf("delta pass saw %d candidate(s), want 1", report.candidates)
+	}
+	if report.restored != 0 {
+		t.Fatalf("delta pass restored %d bead(s), want 0 for a deferred bead", report.restored)
+	}
+	if got := mustRoutedTo(t, store, "D-1"); got != "" {
+		t.Fatalf("deferred D-1 gc.routed_to = %q after the delta pass, want empty", got)
+	}
+}
+
 // TestDetachedOrphanBackstopHealsWhatTheEventFeedLost is the control the whole
 // two-lane doctrine rests on. Events CAN be lost — an agent's bd write reaches
 // the journal through a hook chain that can be killed, and graph stores emit no

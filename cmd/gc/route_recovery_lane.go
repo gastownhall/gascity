@@ -948,7 +948,9 @@ func (l *routeRecoveryLane) backstopLeg(leg planeLeg) routeRecoveryReport {
 // One query for the whole set is the point: the scan it replaces issued one Get
 // per candidate, and against a remote ledger a batch of 33 Gets is 33 sequential
 // round trips. A single candidate stays a Get, which is strictly cheaper than a
-// filtered List on a backend that cannot push the IN-list down.
+// filtered List on a backend that cannot push the IN-list down. A Get applies
+// no status filter, so the single-candidate path applies the raw-open one
+// itself (liveRowIsRawOpen).
 //
 // It returns the number of store round trips it made so the caller can budget.
 func liveOpenCandidates(store beads.Store, ids []string) ([]beads.Bead, int, error) {
@@ -963,7 +965,7 @@ func liveOpenCandidates(store beads.Store, ids []string) ([]beads.Bead, int, err
 			}
 			return nil, 1, err
 		}
-		if bead.Status != "open" {
+		if !liveRowIsRawOpen(bead) {
 			return nil, 1, nil
 		}
 		return []beads.Bead{bead}, 1, nil
@@ -973,6 +975,19 @@ func liveOpenCandidates(store beads.Store, ids []string) ([]beads.Bead, int, err
 		return nil, 1, err
 	}
 	return rows, 1, nil
+}
+
+// liveRowIsRawOpen reports whether a row read by id is open in the store's own
+// terms, as a Live Status:"open" List would have kept it. A bd-backed read
+// folds bd's deferred, blocked, review and testing statuses to "open", so the
+// folded Status alone admits parked rows; the deferral flag and the recorded
+// status are what still say the row is parked. A store that records no source
+// status is taken at its folded word.
+func liveRowIsRawOpen(b beads.Bead) bool {
+	if b.Status != "open" || b.IndefinitelyDeferred {
+		return false
+	}
+	return b.SourceStatus == "" || b.SourceStatus == "open"
 }
 
 // routeRestoreOutcome is what one candidate's re-verify decided.
