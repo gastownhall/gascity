@@ -11,11 +11,30 @@ import "encoding/json"
 // current run of refusals, not the emission time, which is already the
 // envelope's Ts. SuppressedForMS is the gap between them, carried explicitly so
 // a reader does not have to do date arithmetic to answer "how long".
+//
+// The Blocker fields name WHAT to act on. The streak fields answer "how long has
+// this order been held back"; they cannot answer "held back by what", and that
+// is the question an operator has to answer before anything changes — the gate
+// reopens when the blocking bead closes, so its id is the whole remedy. They are
+// resolved by a separate best-effort read at emission time (never per tick), so
+// they are omitempty: a lookup that fails or races the blocker closing must
+// leave the event exactly as informative as it was before these existed, never
+// suppress it.
+//
+// BlockerAgeMS is the blocker's own age at emission, which is NOT SuppressedForMS:
+// the streak starts at the first tick on which the order was DUE and refused,
+// while the blocker has usually been open since the previous run poured it. For
+// a 4h cron whose wisp was never worked, the blocker is ~4h older than the
+// streak. Both are carried because the gap between them is itself diagnostic.
 type OrderSuppressedPayload struct {
 	OrderName       string `json:"order_name"`
 	Consecutive     int    `json:"consecutive"`
 	FirstSuppressed string `json:"first_suppressed"`
 	SuppressedForMS int64  `json:"suppressed_for_ms"`
+	BlockerID       string `json:"blocker_id,omitempty"`
+	BlockerKind     string `json:"blocker_kind,omitempty"`
+	BlockerTitle    string `json:"blocker_title,omitempty"`
+	BlockerAgeMS    int64  `json:"blocker_age_ms,omitempty"`
 }
 
 // IsEventPayload marks OrderSuppressedPayload as an events.Payload variant.

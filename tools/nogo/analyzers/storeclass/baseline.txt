@@ -1096,6 +1096,8 @@ cmd/gc/order_dispatch.go	memoryOrderDispatcher.launchResolvedDispatch	raw-param	
 cmd/gc/order_dispatch.go	memoryOrderDispatcher.legacyCityStoreForTarget	raw-param	1
 cmd/gc/order_dispatch.go	memoryOrderDispatcher.legacyCityStoreForTarget	raw-result	1
 cmd/gc/order_dispatch.go	memoryOrderDispatcher.markTrackingFailure	raw-param	1
+cmd/gc/order_dispatch.go	memoryOrderDispatcher.openWorkBlockerForAlert	mint	2
+cmd/gc/order_dispatch.go	memoryOrderDispatcher.openWorkBlockerForAlert	raw-param	1
 cmd/gc/order_dispatch.go	memoryOrderDispatcher.orderFrontDoorFor	raw-param	1
 cmd/gc/order_dispatch.go	memoryOrderDispatcher.ordersStoreFor	raw-param	1
 cmd/gc/order_dispatch.go	memoryOrderDispatcher.ordersStoreFor	raw-result	1
@@ -1760,6 +1762,7 @@ internal/orders/store.go	Store.mixedLegStores	raw-result	1
 internal/orders/store.go	Store.mixedLegStores	unwrap	6
 internal/orders/store_reads.go	Store.HasOpenWork	raw-param	1
 internal/orders/store_reads.go	Store.LastRun	read-marker	1
+internal/orders/store_reads.go	Store.OpenWorkBlocker	raw-param	1
 internal/orders/store_reads.go	lastRunRecords	raw-param	1
 internal/readywork/crossstore.go	crossStore.legIndex	raw-param	1
 internal/readywork/read.go	Leg	raw-field	1
