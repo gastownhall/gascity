@@ -5268,8 +5268,9 @@ func TestRefreshConfiguredNamedStartCandidateAddsCurrentSkillFingerprint(t *test
 }
 
 func TestExecutePlannedStartsClearsLegacyDrainAckAfterProviderStartBeforeMetadataRetry(t *testing.T) {
-	// Batch 1 is the runtime lease record, 2 PreWake, 3 the post-start commit.
-	store := &failNthMetadataBatchStore{MemStore: beads.NewMemStore(), failOn: 3}
+	// Batch 1 is the runtime lease record, 2 PreWake, 3 the pre-launch record
+	// extension, 4 the post-start commit.
+	store := &failNthMetadataBatchStore{MemStore: beads.NewMemStore(), failOn: 4}
 	sp := runtime.NewFake()
 	clk := &clock.Fake{Time: time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC)}
 	tp := TemplateParams{
