@@ -782,6 +782,8 @@ func TestStartCreatesPodsAndWaits(t *testing.T) {
 	fake.setExecResult("gc-test-agent",
 		[]string{"tmux", "has-session", "-t", "main"}, "", nil)
 
+	paneShowsReadyPrompt(fake)
+
 	cfg := runtime.Config{
 		Command:      "claude --settings .gc/settings.json",
 		ProcessNames: []string{"claude"},
@@ -830,6 +832,8 @@ func TestStartDetectsStalePod(t *testing.T) {
 	// After deletion and recreation, tmux works.
 	fake.setExecResult("gc-test-agent",
 		[]string{"tmux", "has-session", "-t", "main"}, "", nil)
+
+	paneShowsReadyPrompt(fake)
 
 	cfg := runtime.Config{
 		Command:      "claude",
@@ -2026,7 +2030,10 @@ func TestStartDetectsImmediateSessionDeath(t *testing.T) {
 	p.postStartSettle = 0 // no delay in tests
 
 	// tmux has-session succeeds during waitForTmux, then fails on post-start check.
+	// The agent has exited by then and taken its session with it, so reading
+	// its pane exits 1 in the pod.
 	hasSessionCalls := 0
+	captures := 0
 	fake.execFunc = func(_ string, cmd []string) (string, error) {
 		if len(cmd) >= 3 && cmd[0] == "tmux" && cmd[1] == "has-session" {
 			hasSessionCalls++
@@ -2034,6 +2041,10 @@ func TestStartDetectsImmediateSessionDeath(t *testing.T) {
 				return "", nil // first call: tmux alive (waitForTmux)
 			}
 			return "", fmt.Errorf("no server running on /tmp/tmux-1000/default")
+		}
+		if len(cmd) >= 2 && cmd[0] == "tmux" && cmd[1] == "capture-pane" {
+			captures++
+			return "", execerr.CodeExitError{Err: errors.New("no server running on /tmp/tmux-1000/default"), Code: 1}
 		}
 		return "", nil
 	}
@@ -2049,6 +2060,9 @@ func TestStartDetectsImmediateSessionDeath(t *testing.T) {
 	}
 	if !errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
 		t.Fatalf("Start error = %v, want ErrSessionDiedDuringStartup", err)
+	}
+	if captures != 1 {
+		t.Errorf("startup-dialog pass read the dead pane %d times, want 1: it must stop at the first failed read", captures)
 	}
 
 	// Pod should have been cleaned up.
@@ -2190,6 +2204,8 @@ func TestStartSucceedsWhenSessionStaysAlive(t *testing.T) {
 	fake.setExecResult("gc-test-agent",
 		[]string{"tmux", "has-session", "-t", "main"}, "", nil)
 
+	paneShowsReadyPrompt(fake)
+
 	cfg := runtime.Config{
 		Command:      "claude --session-id fresh-key",
 		Env:          map[string]string{"GC_AGENT": "deacon", "GC_CITY": "/workspace"},
@@ -2219,6 +2235,8 @@ func TestStartHonorsCancellationDuringPostStartSettle(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 		cancel()
 	}()
+
+	paneShowsReadyPrompt(fake)
 
 	cfg := runtime.Config{
 		Command:      "claude --session-id fresh-key",

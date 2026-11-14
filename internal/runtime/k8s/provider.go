@@ -295,6 +295,18 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// Enable pane logging + run session setup (shared with the relaunch tail).
 	p.runPodPostLaunchSetup(ctx, podName, cfg)
 
+	// Answer startup dialogs (workspace trust, permissions) before the
+	// liveness probe and the initial nudge, matching the tmux adapter.
+	nudgeAllowed := true
+	if k8sAcceptsStartupDialogs(cfg) {
+		allowed, err := p.runStartupDialogPass(ctx, name, cfg)
+		if err != nil {
+			cleanup("startup dialogs canceled")
+			return fmt.Errorf("accepting startup dialogs for session %q: %w", name, err)
+		}
+		nudgeAllowed = allowed
+	}
+
 	requiresPostStartLiveness := k8sRequiresPostStartLiveness(cfg)
 
 	// Post-start liveness check: verify interactive sessions survived startup.
@@ -328,7 +340,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	}
 
 	// Send initial nudge if configured (matches tmux adapter step 6).
-	if cfg.Nudge != "" {
+	if cfg.Nudge != "" && nudgeAllowed {
 		_ = p.Nudge(name, runtime.TextContent(cfg.Nudge))
 	}
 
@@ -421,8 +433,26 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 		return fmt.Errorf("k8s relaunch %q: respawn-pane: %w", name, err)
 	}
 
+	// The warm pane keeps the previous agent's scrollback, whose old prompt
+	// would end the startup-dialog pass before the new agent draws its dialog.
+	acceptDialogs := k8sAcceptsStartupDialogs(cfg)
+	if acceptDialogs {
+		if err := p.clearRelaunchHistory(ctx, name); err != nil {
+			return fmt.Errorf("k8s relaunch %q: clearing history: %w", name, err)
+		}
+	}
+
 	// Re-run the post-launch setup tail (pipe-pane logging + session_setup[/script]).
 	p.runPodPostLaunchSetup(ctx, podName, cfg)
+
+	nudgeAllowed := true
+	if acceptDialogs {
+		allowed, err := p.runStartupDialogPass(ctx, name, cfg)
+		if err != nil {
+			return fmt.Errorf("k8s relaunch %q: accepting startup dialogs: %w", name, err)
+		}
+		nudgeAllowed = allowed
+	}
 
 	// Post-relaunch liveness: detect an agent that dies immediately.
 	if k8sRequiresPostStartLiveness(cfg) {
@@ -442,7 +472,7 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 		}
 	}
 
-	if cfg.Nudge != "" {
+	if cfg.Nudge != "" && nudgeAllowed {
 		_ = p.Nudge(name, runtime.TextContent(cfg.Nudge))
 	}
 	return nil
