@@ -109,8 +109,12 @@ func TestE2E_SuspendResume_Agent(t *testing.T) {
 		t.Fatalf("gc agent suspend failed: %v\noutput: %s", err, out)
 	}
 
-	// Kill it to simulate controller stopping suspended agent.
-	gc(cityDir, "session", "kill", "suspendee") //nolint:errcheck
+	// Kill it to simulate controller stopping suspended agent. A refused kill
+	// must fail here: ignored, it only shows up as a report timeout after resume.
+	out, err = gc(cityDir, "session", "kill", "suspendee")
+	if err != nil {
+		t.Fatalf("gc session kill failed: %v\noutput: %s", err, out)
+	}
 	time.Sleep(500 * time.Millisecond)
 
 	// Remove old report.
@@ -158,8 +162,12 @@ func TestE2E_SuspendResume_City(t *testing.T) {
 		t.Fatalf("gc suspend failed: %v\noutput: %s", err, out)
 	}
 
-	// Kill existing agent.
-	gc(cityDir, "session", "kill", "citysus") //nolint:errcheck
+	// Kill existing agent. A refused kill must fail here: ignored, it only
+	// shows up as a report timeout after resume.
+	out, err = gc(cityDir, "session", "kill", "citysus")
+	if err != nil {
+		t.Fatalf("gc session kill failed: %v\noutput: %s", err, out)
+	}
 	time.Sleep(500 * time.Millisecond)
 
 	// Remove old report.
