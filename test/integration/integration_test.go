@@ -1067,10 +1067,14 @@ func subprocessTestKillSet(procs map[int]procSnapshot, agentScript string, alive
 }
 
 // gc runs the gc binary with the given args. If dir is non-empty, it sets
-// the working directory. Returns combined stdout+stderr and any error.
+// the working directory. A lifecycle verb (start, stop, restart, suspend,
+// resume) given an absolute city path and an empty dir runs in that city, the
+// same directory its env is selected for, so the subprocess never starts in
+// the test's own directory and walks up from there. Returns combined
+// stdout+stderr and any error.
 func gc(dir string, args ...string) (string, error) {
 	envDir := commandCityDirForArgs(dir, args)
-	return runCommand(dir, commandEnvForDir(envDir, false), gcCommandTimeout(args), gcBinary, args...)
+	return runCommand(envDir, commandEnvForDir(envDir, false), gcCommandTimeout(args), gcBinary, args...)
 }
 
 // gcDolt runs the gc binary with the given args using the isolated integration
