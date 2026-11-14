@@ -245,7 +245,8 @@ func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDep
 
 // newTargetResult starts a result for opts.Target with the warnings that hold
 // whatever the sling routes or launches: the target agent, the city or the
-// target's rig is suspended, or the target's pool has max_active_sessions=0.
+// target's rig is suspended, the target's pool has max_active_sessions=0, or
+// the target is a mode=always named session with no live runtime.
 // --force suppresses all of them.
 func newTargetResult(opts SlingOpts, deps SlingDeps) SlingResult {
 	a := opts.Target
@@ -256,7 +257,26 @@ func newTargetResult(opts SlingOpts, deps SlingDeps) SlingResult {
 	result.AgentSuspended = a.Suspended
 	result.CitySuspended, result.SuspendedRig = targetScopeSuspension(fsys.OSFS{}, deps, a)
 	result.PoolEmpty = agentutil.ScaleParamsFor(&a).Max == 0
+	result.NamedSessionNotRunning = alwaysNamedSessionNotRunning(deps, a)
 	return result
+}
+
+// alwaysNamedSessionNotRunning reports whether the target agent is the
+// template of a mode=always named session whose runtime session is not live.
+// The controller restarts such a session on its own schedule, so a bead routed
+// to it sits unclaimed until then. The runtime name is derived from the named
+// session identity, which differs from the agent's qualified name under a
+// custom session_template. A missing config or provider reports false: with
+// nothing to ask, sling does not guess.
+func alwaysNamedSessionNotRunning(deps SlingDeps, a config.Agent) bool {
+	if deps.Cfg == nil || deps.SP == nil {
+		return false
+	}
+	ns := config.FindNamedSession(deps.Cfg, a.QualifiedName())
+	if ns == nil || ns.ModeOrDefault() != "always" {
+		return false
+	}
+	return !deps.SP.IsRunning(config.NamedSessionRuntimeName(deps.CityName, deps.Cfg.Workspace, ns.QualifiedName()))
 }
 
 // withTargetWarnings returns launched with the target and the target warnings
@@ -268,6 +288,7 @@ func withTargetWarnings(launched, from SlingResult) SlingResult {
 	launched.CitySuspended = from.CitySuspended
 	launched.SuspendedRig = from.SuspendedRig
 	launched.PoolEmpty = from.PoolEmpty
+	launched.NamedSessionNotRunning = from.NamedSessionNotRunning
 	return launched
 }
 

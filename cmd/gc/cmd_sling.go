@@ -943,6 +943,9 @@ func printSlingWarnings(result sling.SlingResult, stderr io.Writer) {
 	if result.PoolEmpty {
 		fmt.Fprintf(stderr, "warning: session config %q has max_active_sessions=0 — bead routed but no sessions can claim it\n", result.Target) //nolint:errcheck
 	}
+	if result.NamedSessionNotRunning {
+		fmt.Fprintf(stderr, "warning: named session %q is configured mode=always but has no live runtime — bead routed but may not be picked up until it restarts\n", result.Target) //nolint:errcheck
+	}
 	for _, w := range result.BeadWarnings {
 		fmt.Fprintln(stderr, w) //nolint:errcheck
 	}
@@ -1317,6 +1320,9 @@ func slingJSONWarnings(result sling.SlingResult) []string {
 	}
 	if result.PoolEmpty {
 		warnings = append(warnings, "pool_empty")
+	}
+	if result.NamedSessionNotRunning {
+		warnings = append(warnings, "named_session_not_running")
 	}
 	warnings = append(warnings, result.BeadWarnings...)
 	warnings = append(warnings, result.Deprecations...)
