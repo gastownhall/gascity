@@ -121,7 +121,7 @@ fi
 WORK_BEAD=$(gc bd show "$WORK_BEAD_ID" --json)
 # A run started before the managed key existed still records `work_dir`.
 WORKTREE=$(printf '%s' "$WORK_BEAD" | jq -r '.[0].metadata["gc.work_dir"] // .[0].metadata.work_dir // empty')
-if [ -z "$WORKTREE" ]; then
+if [ -z "$WORKTREE" ] || [ ! -d "$WORKTREE" ]; then
   # gc worktree ensure creates the worktree on an attached, uniquely named
   # branch and records durable ownership provenance. It publishes nothing on
   # the bead, so the evidence below is published in a single update: the
