@@ -148,7 +148,7 @@ export async function fetchSupervisorBead(id: string): Promise<SupervisorBead> {
   }
 }
 
-function defaultBeadFilter(bead: SupervisorBead): boolean {
+export function defaultBeadFilter(bead: SupervisorBead): boolean {
   if (!ENGINEERING_BEAD_TYPES.has(bead.issue_type)) return false;
   if (Array.isArray(bead.labels) && bead.labels.some((label) => label.startsWith('gc:'))) {
     return false;
