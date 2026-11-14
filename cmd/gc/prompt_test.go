@@ -987,6 +987,50 @@ func TestPoolWorkerPromptResolvesClaimProtocolFragment(t *testing.T) {
 	}
 }
 
+// The pool prompt serves both graph.v2 work and legacy molecule assignments.
+// Render the shipped template and fragments so either path losing its claim
+// boundary is visible in the instructions the worker actually receives.
+func TestPoolWorkerPromptDistinguishesGraphStepsFromLegacyMolecules(t *testing.T) {
+	chdirToRealPackageDir(t)
+	coreDir, err := filepath.Abs(filepath.Join("..", "..", "internal", "bootstrap", "packs", "core"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr strings.Builder
+	got := renderPrompt(fsys.OSFS{}, t.TempDir(), "", filepath.Join(coreDir, "assets", "prompts", "pool-worker.template.md"), PromptContext{AgentName: "worker"}, "", &stderr, []string{coreDir}, nil, nil)
+	if stderr.Len() != 0 {
+		t.Fatalf("render pool prompt: %s", stderr.String())
+	}
+	for _, want := range []string{
+		"graph.v2 workflows materialize their steps as individual beads",
+		"gc.root_bead_id",
+		"gc.formula_contract",
+		"Execute only the bead returned by `gc hook --claim`",
+		"After closing a graph.v2 step, run `gc hook --claim --json`",
+		"For a legacy molecule assignment",
+		"gc bd mol current <molecule-id>",
+		"Follow the continuation and drain rules below",
+		"After completing graph.v2 work, claim again through the hook",
+		"A later `gc hook --claim --json` call does not acknowledge drain",
+		"For a legacy molecule assignment, inspect its current molecule position",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("rendered pool prompt missing %q", want)
+		}
+	}
+	for _, stale := range []string{
+		"Steps are NOT",
+		"they exist in the formula definition",
+		"Find it, execute it, close it, and exit",
+		"When you're done, exit",
+		"find your work bead and molecule position",
+	} {
+		if strings.Contains(got, stale) {
+			t.Errorf("rendered pool prompt has stale lifecycle guidance: %q", stale)
+		}
+	}
+}
+
 func TestCoreWorkerPromptsUseHookClaimProtocol(t *testing.T) {
 	chdirToRealPackageDir(t)
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
