@@ -3,8 +3,8 @@ Polecat direct-commit variant — commits directly to base_branch.
 
 Extends mol-polecat-base with a simplified workspace setup (a worktree
 provisioned by `gc worktree ensure` at base_branch HEAD, no pushed feature
-branch) and direct commit+push instead of refinery submission. Designed for small installations where merge review is
-unnecessary.
+branch) and direct commit+push instead of refinery submission. Designed for
+small installations where merge review is unnecessary.
 
 ## Polecat Contract (Direct-Commit Model)
 
@@ -62,16 +62,18 @@ started before the managed key existed still records `work_dir`):
 ```bash
 WORK_BEAD=$(gc bd show "$WORK_BEAD_ID" --json)
 WORKTREE=$(printf '%s' "$WORK_BEAD" | jq -r '.[0].metadata["gc.work_dir"] // .[0].metadata.work_dir // empty')
+[ -d "$WORKTREE" ] || WORKTREE=""
 ```
 
-**If worktree path exists in metadata** — reuse it:
+**If worktree path exists in metadata and the directory is still there** — reuse it:
 ```bash
 cd "$WORKTREE"              # Enter existing worktree
 git pull --rebase origin {{base_branch}}  # Catch up to latest
 ```
 
-**If no worktree** — `gc worktree ensure` creates it on an attached
-`gc-work/<bead>` branch and records durable ownership provenance. It publishes
+**If no worktree, or the recorded directory is gone** — `gc worktree ensure`
+creates it on an attached `gc-work/<bead>` branch and records durable
+ownership provenance. It publishes
 nothing on the bead, so publish the evidence in ONE update: the controller
 refuses a work dir whose evidence is partial, and restarts and work-health
 recovery find the worktree through it.

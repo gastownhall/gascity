@@ -1139,8 +1139,10 @@ deployed bundle provides that body.
 
 The `mol-polecat-*` formulas have the shape these rules exist for. The base
 runs `load-context`, `workspace-setup`, `preflight-tests`, `implement` and
-`self-review`; `mol-polecat-commit` overrides only `workspace-setup` and adds
-a terminal `commit-and-push`; `mol-polecat-report` overrides four of the base
+`self-review`; `mol-polecat-commit` overrides `workspace-setup`, adds a
+terminal `commit-and-push`, and wraps those two in a `body` scope whose
+`cleanup-worktree` teardown removes the worktree on pass or fail;
+`mol-polecat-report` overrides four of the base
 steps and adds a terminal `write-report`. Marking the base's members once
 covers every step a variant leaves alone, and only the overrides and the new
 terminal steps restate membership.
