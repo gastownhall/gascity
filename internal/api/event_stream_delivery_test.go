@@ -193,17 +193,17 @@ func TestCityEventStreamProjectsWorkflowEventsWhenKeepingUp(t *testing.T) {
 	}
 }
 
-// TestProjectWorkflowEventWithSlackSkipsUnderBacklog pins the gate itself: with
+// TestProjectWorkflowEventBoundedSkipsUnderBacklog pins the gate itself: with
 // a backlog the projection is not computed, and — the property that matters —
 // it does not read the bead stores at all.
-func TestProjectWorkflowEventWithSlackSkipsUnderBacklog(t *testing.T) {
+func TestProjectWorkflowEventBoundedSkipsUnderBacklog(t *testing.T) {
 	state := newFakeState(t)
 	gate := newStoreGate(t, 0)
 	state.cityBeadStore = &gatedGetStore{Store: beads.NewMemStore(), gate: gate}
 	state.stores = map[string]beads.Store{}
 	event := events.Event{Type: events.BeadUpdated, Subject: "gcg-1", Seq: 1}
 
-	if projection := projectWorkflowEventWithSlack(state, event, 1); projection != nil {
+	if projection := projectWorkflowEventBounded(context.Background(), state, event, 1); projection != nil {
 		t.Fatalf("projection = %+v, want nil under backlog", projection)
 	}
 	if reads := gate.count(); reads != 0 {

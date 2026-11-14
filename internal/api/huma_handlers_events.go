@@ -394,7 +394,7 @@ func (s *Server) streamEvents(hctx huma.Context, input *EventStreamInput, send s
 				log.Printf("api: events-stream: watcher Next failed: %v", r.err)
 				return
 			}
-			workflow := projectWorkflowEventWithSlack(s.state, r.event, len(ch))
+			workflow := projectWorkflowEventBounded(ctx, s.state, r.event, len(ch))
 			envelope, decodeErr := wireEventFrom(r.event, workflow)
 			if decodeErr != nil {
 				// Strict registry policy (Principle 7): any event type

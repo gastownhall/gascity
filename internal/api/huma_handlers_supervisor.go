@@ -972,7 +972,7 @@ func (sm *SupervisorMux) streamGlobalEvents(hctx huma.Context, input *Supervisor
 			}
 			var wfp *workflowEventProjection
 			if cs := sm.resolver.CityState(r.event.City); cs != nil {
-				wfp = projectWorkflowEventWithSlack(cs, r.event.Event, len(ch))
+				wfp = projectWorkflowEventBounded(streamCtx, cs, r.event.Event, len(ch))
 			}
 			envelope, decodeErr := wireTaggedEventFrom(r.event, wfp)
 			if decodeErr != nil {

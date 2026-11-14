@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/events"
 )
@@ -11,6 +12,13 @@ import (
 // stream's backlog signal: while it holds anything, the subscriber is behind
 // the city and per-event enrichment must not deepen the lag.
 const eventStreamPrefetch = 64
+
+// eventStreamProjectionTimeout bounds how long a send loop waits for one
+// event's workflow projection. It sits well under sseKeepalive so a wedged
+// bead store can delay a frame by at most this long and can never silence the
+// keepalive heartbeat; an event whose projection has not resolved by then is
+// sent without one.
+const eventStreamProjectionTimeout = 3 * time.Second
 
 // streamResult is one watcher result handed to a stream's send loop. A
 // non-nil err is terminal and is the last value on the channel.
@@ -45,8 +53,9 @@ func readEventsAhead[T any](ctx context.Context, next func() (T, error)) <-chan 
 	return ch
 }
 
-// projectWorkflowEventWithSlack computes an event's optional workflow
-// projection only while the subscriber is keeping up (backlog == 0).
+// projectWorkflowEventBounded computes an event's optional workflow projection
+// only while the subscriber is keeping up (backlog == 0), and never waits on it
+// longer than eventStreamProjectionTimeout.
 //
 // Resolving a projection reads the bead stores: when the event payload does not
 // identify the subject as a workflow bead, every store is probed, and a store
@@ -66,9 +75,33 @@ func readEventsAhead[T any](ctx context.Context, next func() (T, error)) <-chan 
 // Note: requires_resync is NOT a general backstop here — projectWorkflowEvent
 // sets it only for bead.updated (convoy_event_stream.go), and it is omitempty,
 // so a dropped bead.created/bead.closed projection carries no resync flag.
-func projectWorkflowEventWithSlack(state State, event events.Event, backlog int) *workflowEventProjection {
+//
+// Slack alone does not cover a subscriber that is caught up while a bead store
+// is wedged. beads.Store.Get takes no context, so projecting inline would park
+// the send loop in the store for as long as the store stays wedged: the event
+// is never sent and the keepalive stops with it. The projection therefore runs
+// on its own goroutine and is raced against eventStreamProjectionTimeout and
+// ctx, the same shape as readEventsAhead.
+//
+// On timeout or cancellation it returns nil and abandons the goroutine, which
+// finishes when the store answers. Its result channel is buffered, so that
+// goroutine never blocks on a send nobody receives and holds nothing beyond
+// the store call itself.
+func projectWorkflowEventBounded(ctx context.Context, state State, event events.Event, backlog int) *workflowEventProjection {
 	if backlog > 0 {
 		return nil
 	}
-	return projectWorkflowEvent(state, event)
+	result := make(chan *workflowEventProjection, 1)
+	go func() { result <- projectWorkflowEvent(state, event) }()
+
+	timer := time.NewTimer(eventStreamProjectionTimeout)
+	defer timer.Stop()
+	select {
+	case projection := <-result:
+		return projection
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return nil
+	}
 }
