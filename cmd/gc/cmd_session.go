@@ -2307,6 +2307,24 @@ its name), a rerun by the alias closes that session.`,
 	return cmd
 }
 
+// configuredNamedSessionStableAddresses names the assignees a close of b
+// leaves claimed: when b is a named-session bead whose identity and backing
+// template are still configured, the controller re-materializes that
+// identity under its configured runtime name, so work addressed to either
+// still has an owner. Any other bead, a removed identity's included, yields
+// nil and its claims release as usual.
+func configuredNamedSessionStableAddresses(b beads.Bead, cfg *config.City, cityName string) []string {
+	if !configuredNamedSessionBeadHasSpec(b, cfg, cityName) {
+		return nil
+	}
+	identity := namedSessionIdentity(b)
+	addresses := []string{identity}
+	if runtimeName := strings.TrimSpace(config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity)); runtimeName != "" && runtimeName != identity {
+		addresses = append(addresses, runtimeName)
+	}
+	return addresses
+}
+
 // cmdSessionClose is the CLI entry point for "gc session close", recorded
 // under the op key key (empty mints one).
 func cmdSessionClose(args []string, key string, stdout, stderr io.Writer, asJSON bool) int {
@@ -2405,8 +2423,11 @@ func cmdSessionClose(args []string, key string, stdout, stderr io.Writer, asJSON
 	// A routeless claim takes the seat's own route, as every controller-side
 	// retirement gives it; a claim no lane serves stays on the closed row and
 	// raises session.stranded_claims, which the controller's detector repeats.
+	// Work addressed to a still-configured named session's stable addresses
+	// is left untouched: the identity's next session serves it.
 	legs := workLegsFromCensus(cityPath, cfg, cityWorkLegOf(beads.WorkStore{Store: store}), rigStores)
-	out := unclaimWorkAssignedToRetiredSessionBeadVia(legs, sessStore, closedSessionBead, retiredSessionFallbackRoute(closedSessionBead), stderr)
+	preserve := configuredNamedSessionStableAddresses(closedSessionBead, cfg, loadedCityName(cfg, cityPath))
+	out := unclaimWorkAssignedToRetiredSessionBeadVia(legs, sessStore, closedSessionBead, retiredSessionFallbackRoute(closedSessionBead), preserve, stderr)
 	if cityErr == nil {
 		strand(&strandedClaimAlerts{rec: openCityRecorderAt(cityPath, stderr)}, releaseSeatOfBead(closedSessionBead), "manual", out, time.Now(), stderr)
 	}
