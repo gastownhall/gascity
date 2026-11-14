@@ -6,6 +6,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 # resolver is deliberately fatal rather than skipping, so the file is retained in
 # the Go package suite and deferred from the hermetic Bazel pilot.
 # gazelle:exclude pinned_module_hostcache_test.go
+# excluded-test-gate: pinned_module_hostcache_test.go test-mac
 
 go_library(
     name = "beadstest",

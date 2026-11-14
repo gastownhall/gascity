@@ -21,6 +21,20 @@ ga-sux0ij). Change all four together: `TestRunnerTestEnvsPinPaneShell` in
 `SHELL`: its panes start with an explicit command, which tmux runs as
 `$SHELL -c`, so they never reach the wizard.
 
+## A gazelle:exclude'd test must be accounted for
+
+`# gazelle:exclude <file>_test.go` takes a test out of Bazel, and nothing then
+says where it runs, so it can go silent without a red build (ga-pftcylx).
+`tools/bazel/gazelle_exclude_guard.py` (run by `make bazel-sync`, so by CI's
+"BUILD files in sync" job) fails unless each excluded file is listed in a
+`*_test` rule's srcs in the same BUILD.bazel, or carries
+`# excluded-test-gate: <file> <make-target>` (a Makefile target that a workflow
+runs with `make`) or `# excluded-test-reason: <file> <why it runs nowhere>`
+beside the directive. A marker with no matching exclude is stale and fails.
+The gate check proves the target exists and a workflow runs it, not that its
+recipe covers the file's package. Only `*_test.go` excludes are guarded.
+`bazel_gazelle_exclude_guard_test.go` pins the cases and the `bazel-sync` wiring.
+
 ## Git hooks chain to beads
 
 Each `.githooks` hook forwards to `.githooks/lib/beads-chain.sh`. Adding a

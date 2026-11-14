@@ -1331,7 +1331,8 @@ help:
 
 ## bazel-sync: regenerate bazel BUILD files (gazelle) and the hermetic repo
 ## source tree used by whole-repo scan guards, apply the hermeticity
-## ledger's go_test tags (test/bazel-hermeticity.toml), and regenerate the
+## ledger's go_test tags (test/bazel-hermeticity.toml), fail on a gazelle:exclude'd
+## test file nothing runs (tools/bazel/gazelle_exclude_guard.py), and regenerate the
 ## integration lane's package suite (//test:integration_packages). Run after
 ## adding packages.
 .PHONY: bazel-sync
@@ -1341,4 +1342,5 @@ bazel-sync:
 	bazel run $(BAZEL_SYNC_FLAGS) //:gazelle
 	python3 tools/bazel/repo_tree.py
 	python3 tools/bazel/hermetic_tags.py
+	python3 tools/bazel/gazelle_exclude_guard.py
 	python3 tools/bazel/integration_suite.py
