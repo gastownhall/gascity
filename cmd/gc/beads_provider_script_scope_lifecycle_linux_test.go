@@ -455,3 +455,53 @@ func providerOwnedDoltPIDsUnderRoot(t *testing.T, root string) []int {
 	}
 	return pids
 }
+
+// providerOwnedLogTailBytes bounds how much of each log providerOwnedLogTails
+// keeps, so a failure message stays readable.
+const providerOwnedLogTailBytes = 8 << 10
+
+// providerOwnedLogTails is a compile-only stub for the RED step.
+func providerOwnedLogTails(_ ...string) string { return "" }
+
+// The real-init test's Dolt server has died mid-init on a remote worker, and
+// t.TempDir removed its log before anyone read it (ga-11kci7u). The failure
+// message must carry the log tails instead.
+func TestProviderOwnedLogTailsKeepsTheEndOfEveryLog(t *testing.T) {
+	root := t.TempDir()
+	logDir := filepath.Join(root, ".gc", "runtime", "packs", "dolt")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "HEAD-MARKER\n" + strings.Repeat("filler line\n", 4*providerOwnedLogTailBytes/len("filler line\n")) + "TAIL-MARKER panic: server died\n"
+	if err := os.WriteFile(filepath.Join(logDir, "dolt.log"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("NOT-A-LOG"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := providerOwnedLogTails(filepath.Join(root, "missing"), root)
+
+	if !strings.Contains(got, filepath.Join(logDir, "dolt.log")) {
+		t.Errorf("tails do not name the log file:\n%s", got)
+	}
+	if !strings.Contains(got, "TAIL-MARKER panic: server died") {
+		t.Errorf("tails dropped the end of the log:\n%s", got)
+	}
+	if strings.Contains(got, "HEAD-MARKER") {
+		t.Errorf("tails kept the head of a log larger than %d bytes", providerOwnedLogTailBytes)
+	}
+	if strings.Contains(got, "NOT-A-LOG") {
+		t.Errorf("tails included a file that is not a log:\n%s", got)
+	}
+}
+
+func TestProviderOwnedLogTailsSaysWhenThereIsNoLog(t *testing.T) {
+	root := t.TempDir()
+
+	got := providerOwnedLogTails(root)
+
+	if !strings.Contains(got, "no log files") || !strings.Contains(got, root) {
+		t.Errorf("want a message naming the roots searched when no log exists, got %q", got)
+	}
+}
