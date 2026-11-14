@@ -1706,6 +1706,9 @@ func TestDoStartSession_TreatsDeadlineAfterReadyAsSuccessWhenSessionAlive(t *tes
 	defer cancel()
 	ops := &fakeStartOps{
 		hasSessionResult: true,
+		// A loaded host can take longer than the 1 ms deadline to reach the
+		// ready wait; the test must still reach it with the context live.
+		createSessionHook: func() { time.Sleep(10 * time.Millisecond) },
 		waitReadyHook: func() {
 			// Block until context expires so ctx.Err() is guaranteed non-nil when
 			// the hook returns. time.Sleep(N) races with the context timer under
@@ -1747,6 +1750,9 @@ func TestDoStartSession_TreatsDeadlineAfterPostReadyAsSuccessWhenSessionAlive(t 
 	postReadyCalls := 0
 	ops := &fakeStartOps{
 		hasSessionResult: true,
+		// A loaded host can take longer than the 1 ms deadline to reach the
+		// post-ready pass; the test must still reach it with the context live.
+		createSessionHook: func() { time.Sleep(10 * time.Millisecond) },
 		acceptStartupDialogsHook: func() {
 			postReadyCalls++
 			if postReadyCalls == 2 {
