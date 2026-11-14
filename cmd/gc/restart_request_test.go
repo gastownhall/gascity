@@ -36,15 +36,27 @@ func testRowFirstRestart(verb, sessionName string, hint drainOps, stderr io.Writ
 		stderr = io.Discard
 	}
 	return rowFirstRestart{
-		verb:        verb,
-		sessionName: sessionName,
-		display:     sessionName,
-		token:       testRestartToken,
-		record:      func(string) error { return nil },
-		hint:        hint,
-		poke:        func(string, reconcilekey.Key) error { return nil },
-		stderr:      stderr,
+		verb:          verb,
+		handoffConfig: &config.City{Daemon: config.DaemonConfig{SessionReconciler: "legacy"}},
+		sessionName:   sessionName,
+		display:       sessionName,
+		token:         testRestartToken,
+		record:        func(string) error { return nil },
+		hint:          hint,
+		poke:          func(string, reconcilekey.Key) error { return nil },
+		stderr:        stderr,
 	}
+}
+
+// answerLegacyController makes the running controller answer that it latched
+// the legacy reconciler. A self handoff stages its brief only when the city is
+// positively legacy, so a test that stages through the real command says so.
+// Tests that swap the seam MUST NOT call t.Parallel().
+func answerLegacyController(t *testing.T) {
+	t.Helper()
+	original := controllerLatchedReconcilerMode
+	t.Cleanup(func() { controllerLatchedReconcilerMode = original })
+	controllerLatchedReconcilerMode = func(string, *config.City) (reconcilerMode, bool) { return reconcilerLegacy, true }
 }
 
 // fencedRecorder records through session.Manager.RequestFreshRestartFenced
@@ -98,6 +110,7 @@ func assertRestartNotRecorded(t *testing.T, fixture explicitRestartFixture) {
 // durable row write followed by a failed poke exits 0 with the pinned
 // warning, and the runtime hint is set (local mode).
 func TestRowFirstRestartDurableWriteFailedPokeExitsZero(t *testing.T) {
+	answerLegacyController(t)
 	for _, v := range restartVerbs {
 		t.Run(v.name, func(t *testing.T) {
 			fixture := newExplicitRestartFixture(t)

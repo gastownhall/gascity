@@ -329,6 +329,7 @@ func TestRestageRoutesEachClassToItsOwnStore(t *testing.T) {
 // writes session-class state they never do: the staged-brief pointer and the
 // restart marker.
 func TestHandoffStagedArmLandsInTheBindingOnAMigratedCity(t *testing.T) {
+	answerLegacyController(t)
 	cityPath, cfg := migratedOneShotCLICity(t)
 	captureCLIStorageStderr(t)
 	t.Setenv("GC_SESSION", "fake")

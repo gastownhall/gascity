@@ -278,6 +278,9 @@ func runHandoff(run handoffRun) (int, handoffOpFields) {
 		stderr:      stderr,
 		ops:         newRestartOps(cfg, cfgErr, sessStore, run.key, current.sessionName, current.display, run.asJSON, run.jsonOut, stderr),
 	}
+	if cfgErr == nil {
+		r.handoffConfig = cfg
+	}
 
 	outcome := doHandoffWithOutcome(msgStore, sessStore, rec, newDrainOps(sp), r, current.display, current.sessionName, args, stdout, stderr)
 	if outcome.code != 0 || !outcome.restartRequested {
@@ -374,6 +377,9 @@ func doHandoffWithOutcome(msgStore, sessStore beads.Store, rec events.Recorder, 
 	}
 
 	staged := newStagedHandoff(restartable, instanceToken, sessionID)
+	if staged.active && !r.reconcilerStagesSelfHandoff(stderr) {
+		staged.active = false
+	}
 
 	// A restartable handoff proposes its restart op, then its notice op,
 	// before the mail (OJ-6). A replay of a successful run sends nothing.
@@ -441,6 +447,43 @@ func doHandoffWithOutcome(msgStore, sessStore beads.Store, rec events.Recorder, 
 
 	staged.announce(rec, stdout, sessionAddress, b.ID)
 	return handoffOutcome{code: 0, restartRequested: true}
+}
+
+// reconcilerStagesSelfHandoff reports whether the city's session reconciler is
+// positively the legacy one, the only reconciler that releases a staged
+// self-handoff brief. The running controller's latched mode decides; with no
+// controller answer, the mode the config would latch. Anything else, a v2
+// reconciler or a mode that cannot be determined, delivers the brief
+// immediately, and one stderr line says which. A caller that wired no mode
+// context is undetermined, never legacy.
+func (r rowFirstRestart) reconcilerStagesSelfHandoff(stderr io.Writer) bool {
+	if onWorkerSite(r.cityPath) {
+		// A worker site never reaches the controller, so it decides from its
+		// own config and fails closed, as restartRecordsOnlyByCAS does.
+		if !workerSiteRunsV2(r.cityPath, r.handoffConfig) {
+			return true
+		}
+		fmt.Fprintln(stderr, "gc handoff: delivering the brief immediately: this worker site's own config does not show a legacy session reconciler, and only a legacy reconciler releases a staged brief") //nolint:errcheck // best-effort stderr
+		return false
+	}
+	if mode, ok := controllerLatchedReconcilerMode(r.cityPath, r.handoffConfig); ok {
+		return r.stagesForMode(mode, stderr)
+	}
+	if r.handoffConfig != nil {
+		if mode, err := latchReconcilerMode(r.handoffConfig, r.cityPath, reconcilerModeLookupEnv); err == nil {
+			return r.stagesForMode(mode, stderr)
+		}
+	}
+	fmt.Fprintln(stderr, "gc handoff: delivering the brief immediately: the city's session reconciler mode is undetermined, and only a legacy reconciler releases a staged brief") //nolint:errcheck // best-effort stderr
+	return false
+}
+
+func (r rowFirstRestart) stagesForMode(mode reconcilerMode, stderr io.Writer) bool {
+	if mode == reconcilerLegacy {
+		return true
+	}
+	fmt.Fprintln(stderr, "gc handoff: delivering the brief immediately: the city runs the v2 session reconciler, which does not release a staged brief") //nolint:errcheck // best-effort stderr
+	return false
 }
 
 // stagedHandoff is a self handoff's staging decision and state. A restartable

@@ -104,6 +104,7 @@ func newExplicitRestartFixture(t *testing.T) explicitRestartFixture {
 }
 
 func TestExplicitRestartCommandsPokeControllerWithoutPeriodicTick(t *testing.T) {
+	answerLegacyController(t)
 	tests := []struct {
 		name string
 		run  func(stdout, stderr *bytes.Buffer) int
