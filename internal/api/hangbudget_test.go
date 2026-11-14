@@ -1,6 +1,13 @@
 package api
 
-import "github.com/gastownhall/gascity/internal/testutil"
+import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"testing"
+
+	"github.com/gastownhall/gascity/internal/testutil"
+)
 
 // hangBudget is the single wall-clock ceiling shared by every test-side wait in
 // this package that is a pure hang detector, including waits that bound an
@@ -41,3 +48,74 @@ import "github.com/gastownhall/gascity/internal/testutil"
 // satisfies the rule; use hangBudget when the wait is purely a hang detector
 // and no assertion depends on how long it took.
 const hangBudget = 6 * testutil.GoroutineRaceTimeout
+
+// TestGeminiRotationStreamWaitsUseHangBudget pins the four Gemini-rotation
+// stream tests to hangBudget for every pure hang-detector wait: the
+// waitForRecorderSubstring timeout and the context.WithTimeout that bounds the
+// SSE handler. Their fixed 1s/1.5s waits inside a 2-3s context failed under
+// fleet load ("stream body missing initial transcript turn"), which the
+// Test deadline rule in TESTING.md forbids for a timer racing a goroutine.
+func TestGeminiRotationStreamWaitsUseHangBudget(t *testing.T) {
+	targets := map[string][]string{
+		"handler_agent_output_test.go": {
+			"TestAgentOutputStreamFollowsRotatedGeminiTranscriptAfterWake",
+			"TestCityScopedAgentOutputStreamFollowsRotatedGeminiTranscriptAfterWake",
+		},
+		"handler_sessions_test.go": {
+			"TestCityScopedSessionStreamReloadsRotatedGeminiTranscriptAcrossRestart",
+			"TestCityScopedSessionStreamFollowsRotatedGeminiTranscriptAfterWake",
+		},
+	}
+	isHangBudget := func(e ast.Expr) bool {
+		id, ok := e.(*ast.Ident)
+		return ok && id.Name == "hangBudget"
+	}
+	for src, names := range targets {
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, src, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", src, err)
+		}
+		for _, name := range names {
+			var fn *ast.FuncDecl
+			for _, d := range file.Decls {
+				if f, ok := d.(*ast.FuncDecl); ok && f.Name.Name == name {
+					fn = f
+				}
+			}
+			if fn == nil {
+				t.Errorf("%s not found in %s; if it moved or was renamed, update this guard", name, src)
+				continue
+			}
+			var waits int
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				var budget ast.Expr
+				switch fun := call.Fun.(type) {
+				case *ast.Ident:
+					if fun.Name == "waitForRecorderSubstring" && len(call.Args) == 4 {
+						budget = call.Args[3]
+					}
+				case *ast.SelectorExpr:
+					if x, ok := fun.X.(*ast.Ident); ok && x.Name == "context" && fun.Sel.Name == "WithTimeout" && len(call.Args) == 2 {
+						budget = call.Args[1]
+					}
+				}
+				if budget == nil {
+					return true
+				}
+				waits++
+				if !isHangBudget(budget) {
+					t.Errorf("%s: wait at %s must use hangBudget, not a fixed duration", name, fset.Position(call.Pos()))
+				}
+				return true
+			})
+			if waits == 0 {
+				t.Errorf("%s: no waitForRecorderSubstring or context.WithTimeout call found; the guard would pass vacuously", name)
+			}
+		}
+	}
+}
