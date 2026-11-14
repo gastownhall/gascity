@@ -74,6 +74,15 @@ silent success, so runnable ephemeral beads are never quietly hidden from the
 orchestrator. A script that cannot serve those ready queries should exit 1 with
 a stderr message instead.
 
+### Lifecycle operations
+
+A lifecycle operation (`init`, `start`, `ensure-ready`, `stop`, `shutdown`)
+reports failure by exiting 1 with the reason on stderr; Gas City surfaces it as
+`exec beads <op>: <stderr>`. Exit 2 means "not applicable" and counts as
+success, so a script that forwards another tool's exit status must never pass a
+raw 2 through: map any failure to exit 1 and name the original status in the
+message.
+
 ## Operations
 
 These are the subcommands a backend implements. Bead reads return a JSON array

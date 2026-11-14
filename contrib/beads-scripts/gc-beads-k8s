@@ -123,6 +123,30 @@ run_bd() {
   fi
 }
 
+# beads_plain_identifier reports whether $1 is a plain identifier: an ASCII
+# letter followed by ASCII letters, digits or underscores. The match runs in the
+# C locale so a locale's collation never widens the ranges or admits a
+# non-ASCII letter.
+beads_plain_identifier() {
+  (
+    LC_ALL=C
+    case "$1" in
+      "" | [!A-Za-z]* | *[!A-Za-z0-9_]*) exit 1 ;;
+    esac
+  )
+}
+
+# beads_init_fail ends the init op with exit 1 after printing bd's own output
+# verbatim and a line naming what failed and its original status.
+beads_init_fail() {
+  local what="$1" rc="$2" out="$3"
+  if [ -n "$out" ]; then
+    printf '%s\n' "$out" >&2
+  fi
+  echo "init: $what failed: exit $rc" >&2
+  exit 1
+}
+
 # bd_to_gc converts a single bd JSON object to Gas City wire format.
 # bd uses "issue_type" where Gas City uses "type".
 # Metadata is reconstructed from both:
@@ -296,17 +320,44 @@ case "$op" in
     dir="${1:?init: missing dir}"
     prefix="${2:?init: missing prefix}"
     scope_root=$(scope_root_arg_or_env "$dir")
-    # Idempotent: bd init may fail if database already exists on the dolt
-    # server. That's fine — just ensure the prefix and custom types are set
-    # for the scope-local workspace root.
-    GC_STORE_ROOT="$scope_root" run_bd init --server --server-host "$DOLT_HOST" --server-port "$DOLT_PORT" \
-      -p "$prefix" --skip-hooks >/dev/null 2>&1 || true
+    # Failures reach gc: gc reads exit 0 as success, 1 as failure with stderr
+    # as the message, and 2 as "not needed" (also success), so a failed bd or
+    # kubectl call is always reported as exit 1 with the original status in
+    # the message, never forwarded raw.
+    #
+    # Re-init is idempotent through bd itself: --init-if-missing exits 0 only
+    # for bd's typed "already initialized" answer. Its text is never matched
+    # here, because real failures (a prefix mismatch, bd's dirty-table refusal
+    # that cmd/gc recovers from by its marker text) contain the same words.
+    #
+    # A recreated pod has a fresh workspace and no project id, and bd refuses
+    # to connect it to the existing database (PROJECT IDENTITY MISMATCH)
+    # unless --database names that database. Every k8s scope's database is
+    # named after its prefix, so a prefix that is a plain identifier selects
+    # the same database the old command did; any other prefix keeps the
+    # command as it was. The name is never arg 3 (gc passes "hq" there for the
+    # city scope).
+    init_rc=0
+    if beads_plain_identifier "$prefix"; then
+      init_out=$(GC_STORE_ROOT="$scope_root" run_bd init --server --server-host "$DOLT_HOST" --server-port "$DOLT_PORT" \
+        -p "$prefix" --skip-hooks --init-if-missing --quiet --database "$prefix" 2>&1) || init_rc=$?
+    else
+      init_out=$(GC_STORE_ROOT="$scope_root" run_bd init --server --server-host "$DOLT_HOST" --server-port "$DOLT_PORT" \
+        -p "$prefix" --skip-hooks --init-if-missing --quiet 2>&1) || init_rc=$?
+    fi
+    if [ "$init_rc" -ne 0 ]; then
+      beads_init_fail "bd init" "$init_rc" "$init_out"
+    fi
     # Register custom bead types required by Gas City (mirrors gc-beads-bd
     # and doctor.RequiredCustomTypes). Without this, bd rejects creates for
     # types like "session" that aren't in the default set. "convergence" is
     # required because gc's convergence handler creates beads with that type.
     custom_types="${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step}"
-    GC_STORE_ROOT="$scope_root" run_bd config set types.custom "$custom_types" >/dev/null 2>&1 || true
+    types_rc=0
+    types_out=$(GC_STORE_ROOT="$scope_root" run_bd config set types.custom "$custom_types" 2>&1) || types_rc=$?
+    if [ "$types_rc" -ne 0 ]; then
+      beads_init_fail "bd config set types.custom" "$types_rc" "$types_out"
+    fi
     ;;
 
   config-set)

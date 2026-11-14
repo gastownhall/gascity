@@ -65,6 +65,8 @@ from the controller's laptop.
 The image must support running as non-root UID 1001 (the pod uses restricted
 Pod Security Standards with `runAsUser: 1001`). Ensure `/workspace` is writable
 by UID 1001 or does not require pre-existing ownership.
+The image's `bd` must be v1.1.0 or newer: `init` passes `--init-if-missing`,
+which older releases reject as an unknown flag.
 
 **Usage:**
 
@@ -99,6 +101,7 @@ provider = "exec:/path/to/contrib/beads-scripts/gc-beads-k8s"
 |-----------|----------|
 | `ensure-ready` / `start` | Create `gc-beads-runner` pod if not Running, wait for Ready, init `.beads/` |
 | `shutdown` / `stop` | `kubectl delete pod gc-beads-runner` |
+| `init` | Run `bd init` and register the custom bead types. Idempotent: re-running on an initialized workspace succeeds. For a prefix that is a plain identifier (an ASCII letter, then letters, digits or underscores) it passes `--database <prefix>`, which re-attaches a recreated pod's fresh workspace to the existing database. Any failure exits 1 with bd's output on stderr and a line naming the failed command and its exit status. |
 
 **Other optional operations:**
 
