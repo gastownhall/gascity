@@ -271,9 +271,12 @@ func reusablePoolSessionInfo(bp *agentBuildParams, cfgAgent *config.Agent, templ
 }
 
 // restartHandedOffInfo reports whether info is a restart handoff still
-// waiting for its fresh start: RestartRequestPatch committed the reset (it is
-// the only writer of reset_committed_at, which CommitStartedPatch clears on
-// the start) and no sleep reason has been stamped since.
+// waiting for its fresh start: a restart handoff committed the reset and no
+// sleep reason has been stamped since. reset_committed_at is written only by
+// handoffs (RestartRequestPatch, Manager.RequestFreshRestart, and the
+// creating/start-pending config-drift resets ConfigDriftResetPatch and
+// ConfigDriftRestartPatch); passive continuation-reset re-arms clear it, as
+// does the start's mint.
 func restartHandedOffInfo(info session.Info) bool {
 	if _, _, ok := resetPendingCommittedAtInfo(info); !ok {
 		return false
