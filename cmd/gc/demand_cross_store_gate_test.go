@@ -135,6 +135,24 @@ func TestV2DemandServesAGateLegsReadyOnlyFromAGatedRecording(t *testing.T) {
 // pass, the exact SQLite binding's included, and the gather counts the same
 // demand from the recording without one read of the ledger's backing.
 func TestSplitCityV2DemandIsGatedOffThePass(t *testing.T) {
+	splitCityV2DemandIsGatedOffThePass(t, 0)
+}
+
+// TestSplitCityV2DemandIsGatedOffThePassUnderSlowReads is the same test on a
+// host too loaded to answer a read inside the lane's source deadline (ga-a6xq8yq5:
+// the flake under the full pre-push suite). The test pins the lane's clock, while
+// the lane's deadline is real time, so a slow leg must still be waited for and
+// recorded, never dropped or stamped a timeout.
+func TestSplitCityV2DemandIsGatedOffThePassUnderSlowReads(t *testing.T) {
+	splitCityV2DemandIsGatedOffThePass(t, 50*time.Millisecond)
+}
+
+// splitCityV2DemandIsGatedOffThePass runs the v2 gate scenario with every read
+// of the work ledger's backing held for readStall (0: no stall). A non-zero
+// stall also shrinks the lane's source deadline to a tenth of it, so each pass
+// outlives the deadline the way a loaded host's does.
+func splitCityV2DemandIsGatedOffThePass(t *testing.T, readStall time.Duration) {
+	t.Helper()
 	cityPath := t.TempDir()
 	maxSessions, minSessions := 5, 0
 	cfg := &config.City{
@@ -191,6 +209,11 @@ func TestSplitCityV2DemandIsGatedOffThePass(t *testing.T) {
 
 	lane, _ := newTestBackstopLane(externalReadsEnv{CityName: "gc", CityPath: cityPath, Cfg: cfg, CityStore: binding})
 	lane.steps = nil
+	if readStall > 0 {
+		lane.sourceDeadline = readStall / 10
+		ledgerBacking.stall.Store(int64(readStall))
+	}
+	awaitEveryRead(lane)
 	now := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
 	demand := func(phase string) []string {
 		t.Helper()
@@ -235,6 +258,9 @@ func TestSplitCityV2DemandIsGatedOffThePass(t *testing.T) {
 	}
 	if got := demand("graph blocker closed"); !slices.Equal(got, want(clean.ID, stranded.ID, held.ID)) {
 		t.Fatalf("graph blocker closed: v2 demand counts %v, want %s, %s and %s", got, clean.ID, stranded.ID, held.ID)
+	}
+	if readStall > 0 && ledgerBacking.stalled.Load() == 0 {
+		t.Fatal("fixture: no pass read the ledger's backing, so the slow-read variant stalled nothing")
 	}
 }
 

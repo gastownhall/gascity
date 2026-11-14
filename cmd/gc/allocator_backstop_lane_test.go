@@ -47,6 +47,9 @@ func newTestBackstopLane(env externalReadsEnv) (*externalReadsLane, *atomic.Int6
 	return lane, wakes
 }
 
+// awaitEveryRead makes a pass on a pinned clock wait for all of its reads.
+func awaitEveryRead(lane *externalReadsLane) *externalReadsLane { return lane }
+
 // at pins the lane's clock to t, once the reads and steps of earlier passes
 // have ended.
 func at(lane *externalReadsLane, t time.Time) *externalReadsLane {
