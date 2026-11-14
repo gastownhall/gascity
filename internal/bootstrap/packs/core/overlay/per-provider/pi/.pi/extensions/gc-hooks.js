@@ -10,21 +10,22 @@
 // Events:
 //   session_start    → gc prime --hook (load context side effects)
 //   session_compact  → gc prime --hook + gc handoff --auto "context cycle"
-//   before_agent_start → gc hook --inject + queued nudges + unread mail
+//   before_agent_start → gc hook --inject + queued nudges + unread mail, as
+//                        system prompt sections (see setContextSections)
 
 const { execFileSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const GC_PI_HOOK_VERSION = 10;
+const GC_PI_HOOK_VERSION = 11;
 // Managed sessions supply the authoritative binary and PATH. Do not prepend
 // ambient host locations here: gc's descendants must inherit the same runtime.
 const GC_BIN = process.env.GC_BIN || "gc";
 let mirrorTempCounter = 0;
 // `gc prime --hook` writes the session's startup context to stdout. pi has no
 // session_start hook surface that can inject into the model's context, so the
-// SessionStart output is parked here and drained into the system prompt by the
-// next before_agent_start. Dropping it would consume auto-handoff mail (gc
+// SessionStart output is parked here and drained into a system prompt section by
+// the next before_agent_start. Dropping it would consume auto-handoff mail (gc
 // archives it once the write succeeds) without ever delivering it.
 let pendingPrimeContext = "";
 
@@ -168,9 +169,33 @@ function appendSystemPrompt(systemPrompt, additions) {
   return [systemPrompt, ...extras].filter(Boolean).join("\n\n");
 }
 
+// The per-prompt context changes between prompts. Returning `systemPrompt`
+// replaces the whole leading system prompt, so every provider misses its prompt
+// cache for the full conversation whenever that text changes. Pi diffs named
+// sections against what the model already has and appends one patch message
+// per changed section, which keeps the cached prefix on models that accept
+// mid-conversation system messages; other models get the sections folded into
+// the leading prompt, as before. An empty value removes its section.
+const CONTEXT_SECTIONS = ["gc-prime", "gc-work", "gc-nudges", "gc-mail"];
+// The session's startup context stays a section for the whole session:
+// dropping it after the first prompt would cost a removal patch and withdraw
+// context the model still needs.
+let sessionPrimeContext = "";
+
+function setContextSections(sections, values) {
+  CONTEXT_SECTIONS.forEach((name, index) => {
+    if (values[index]) {
+      sections[name] = values[index];
+    } else {
+      delete sections[name];
+    }
+  });
+}
+
 module.exports = function gascityPiExtension(pi) {
   pi.on("session_start", (_event, ctx) => {
     pendingPrimeContext = run(["prime", "--hook"], ctx.cwd, hookEnv(ctx, "SessionStart"));
+    sessionPrimeContext = "";
     mirrorTranscript(ctx);
   });
 
@@ -186,6 +211,13 @@ module.exports = function gascityPiExtension(pi) {
     const work = run(["hook", "--inject"], ctx.cwd);
     const nudges = run(["nudge", "drain", "--inject"], ctx.cwd);
     const mail = run(["mail", "check", "--inject"], ctx.cwd);
+    const sections = event.systemPromptOptions && event.systemPromptOptions.sections;
+    if (sections && typeof sections === "object") {
+      sessionPrimeContext = prime || sessionPrimeContext;
+      setContextSections(sections, [sessionPrimeContext, work, nudges, mail]);
+      return;
+    }
+    // Pi without structured sections: replace the prompt as before.
     const systemPrompt = appendSystemPrompt(event.systemPrompt, [prime, work, nudges, mail]);
     if (systemPrompt !== event.systemPrompt) {
       return { systemPrompt };

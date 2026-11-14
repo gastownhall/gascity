@@ -17,6 +17,21 @@ import (
 // provider's prompt-cache prefix survives across turns, including when
 // chat.message runs first and OpenCode's system-list fold is reproduced.
 func TestProviderPluginNodeSuite(t *testing.T) {
+	runNodeSuite(t, "opencode_plugin.test.mjs")
+}
+
+// TestPiHookNodeSuite executes pi_hook.test.mjs under node so the embedded Pi
+// extension is exercised as Pi loads it. The suite pins that the per-prompt
+// context (hook work, nudges, mail) goes into Pi's named system prompt
+// sections instead of a replaced system prompt, so the provider's prompt-cache
+// prefix survives across prompts, and that Pi without sections keeps the old
+// behavior.
+func TestPiHookNodeSuite(t *testing.T) {
+	runNodeSuite(t, "pi_hook.test.mjs")
+}
+
+func runNodeSuite(t *testing.T, name string) {
+	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("the fake gc used by the suite is a POSIX shell script")
 	}
@@ -24,7 +39,7 @@ func TestProviderPluginNodeSuite(t *testing.T) {
 	if err != nil {
 		t.Skip("node not installed; cannot execute the provider plugins")
 	}
-	suite, err := filepath.Abs("opencode_plugin.test.mjs")
+	suite, err := filepath.Abs(name)
 	if err != nil {
 		t.Fatalf("resolving suite path: %v", err)
 	}
