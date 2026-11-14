@@ -160,7 +160,11 @@ mkdir -p "$(dirname "$WT")"
 
 STAGE=""
 
-merge_stage_entry() {
+# Runs in a subshell so each recursive call gets its own SRC/DST/ENTRY:
+# POSIX sh gives functions no local scope, and without the subshell a child
+# merge would overwrite the parent's globals and send later sibling entries
+# to a stale destination.
+merge_stage_entry() (
     SRC="$1"
     DST="$2"
 
@@ -178,7 +182,7 @@ merge_stage_entry() {
         return 0
     fi
     mv "$SRC" "$DST"
-}
+)
 
 restore_stage() {
     [ -n "$STAGE" ] || return 0
