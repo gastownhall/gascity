@@ -2356,6 +2356,7 @@ go_test(
         "sql_open_guard_test.go",
         "stage1_plan_test.go",
         "staged_handoff_lifecycle_test.go",
+        "staged_handoff_mode_test.go",
         "staged_handoff_restage_test.go",
         "staged_handoff_stores_test.go",
         "start_deferral_memo_test.go",
