@@ -4220,6 +4220,95 @@ func TestRouteOrderHistory_MultiOrderFallback(t *testing.T) {
 	}
 }
 
+// sameNameTwoRigsHistoryFixture builds a city whose two rigs each run an order
+// named "digest" and each hold one run of it, returning the order set, the
+// config, and the two run bead IDs keyed by rig. The runs live in the real
+// per-rig file stores the fallback iterator opens, so a history read that
+// reaches both rigs shows both IDs.
+func sameNameTwoRigsHistoryFixture(t *testing.T) (cityPath string, cfg *config.City, aa []orders.Order, runIDs map[string]string) {
+	t.Helper()
+	cityPath = writeOrderHistoryTestCity(t)
+	var err error
+	cfg, err = loadCityConfig(cityPath, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	runIDs = map[string]string{}
+	for _, rig := range []string{"alpha", "beta"} {
+		rigPath := t.TempDir()
+		cfg.Rigs = append(cfg.Rigs, config.Rig{Name: rig, Path: rigPath})
+		aa = append(aa, orders.Order{Name: "digest", Rig: rig, Formula: "mol-digest"})
+		store, err := openStoreAtForCity(rigPath, cityPath)
+		if err != nil {
+			t.Fatalf("openStoreAtForCity(%s): %v", rig, err)
+		}
+		run, err := store.Create(beads.Bead{Title: "digest run " + rig, Labels: []string{"order-run:digest:rig:" + rig}})
+		if err != nil {
+			t.Fatalf("seeding %s run: %v", rig, err)
+		}
+		runIDs[rig] = run.ID
+	}
+	return cityPath, cfg, aa, runIDs
+}
+
+// TestRouteOrderHistory_SameNameInTwoRigsCoversBoth pins the default answer of
+// `gc order history <name>` with no --rig: when the name is carried by orders in
+// more than one rig, the read must cover every one of them, not the first
+// loaded match. The bounded API route is scoped to a single order's scoped name,
+// so taking it here would silently return one rig's runs at exit 0 (ga-2sj2frr).
+func TestRouteOrderHistory_SameNameInTwoRigsCoversBoth(t *testing.T) {
+	t.Setenv("GC_DEBUG", "1")
+	cityPath, cfg, aa, runIDs := sameNameTwoRigsHistoryFixture(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("API reached for a name carried by two rigs with no --rig (%s): it can only answer for one rig's scoped name", r.URL)
+		http.Error(w, "unexpected", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	if got := routeOrderHistory(cityPath, cfg, "digest", "", aa, c, "", orderHistoryBounds{Limit: defaultOrderHistoryLimit}, false, &stdout, &stderr); got != 0 {
+		t.Fatalf("exit = %d, stderr=%q", got, stderr.String())
+	}
+	for rig, id := range runIDs {
+		if !strings.Contains(stdout.String(), id) {
+			t.Errorf("stdout missing rig %s run %s:\n%s", rig, id, stdout.String())
+		}
+	}
+	if !strings.Contains(stderr.String(), "route=fallback reason=multi-rig") {
+		t.Errorf("stderr missing multi-rig fallback route line:\n%s", stderr.String())
+	}
+}
+
+// TestRouteOrderHistory_SameNameWithRigStaysOnAPI keeps the narrow path narrow:
+// an explicit --rig names one order, so the bounded read still goes to the API
+// for exactly that rig's scoped name.
+func TestRouteOrderHistory_SameNameWithRigStaysOnAPI(t *testing.T) {
+	t.Setenv("GC_DEBUG", "1")
+	cityPath, cfg, aa, _ := sameNameTwoRigsHistoryFixture(t)
+
+	var requested []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requested = append(requested, r.URL.Query().Get("scoped_name"))
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"entries": []map[string]any{}})
+	}))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	if got := routeOrderHistory(cityPath, cfg, "digest", "beta", aa, c, "", orderHistoryBounds{Limit: defaultOrderHistoryLimit}, false, &stdout, &stderr); got != 0 {
+		t.Fatalf("exit = %d, stderr=%q", got, stderr.String())
+	}
+	if len(requested) != 1 || requested[0] != "digest:rig:beta" {
+		t.Errorf("API scoped_name requests = %q, want exactly [digest:rig:beta]", requested)
+	}
+	if !strings.Contains(stderr.String(), "route=api") {
+		t.Errorf("stderr missing route=api:\n%s", stderr.String())
+	}
+}
+
 // TestRouteOrderHistory_CacheAgeFooterOnStderr verifies the API render path
 // prints the cache-age footer on stderr, not stdout, when the supervisor
 // reports a cache age more than twice its re-scan interval.
