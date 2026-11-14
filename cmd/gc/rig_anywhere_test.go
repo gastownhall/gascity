@@ -945,6 +945,68 @@ func TestRigAnywhere_RigRemove(t *testing.T) {
 		assertNoGlobalRigEntries(t, gcHome)
 	})
 
+	t.Run("clears_orphaned_site_binding_when_city_toml_has_no_entry", func(t *testing.T) {
+		// Reproduces #8337: city.toml lost its [[rigs]] entry out of band (a
+		// hand edit, a git pull, or a regeneration script), but .gc/site.toml
+		// -- machine-local, untouched by any of those -- still carries the
+		// binding. `gc rig remove` must clean up the orphan instead of just
+		// erroring, matching its own help text ("removes its machine-local
+		// path binding from .gc/site.toml").
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+		resetFlags(t)
+
+		cityPath := setupCity(t, "orphan-city")
+		rigDir := filepath.Join(t.TempDir(), "orphan-rig")
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		sitePath := config.SiteBindingPath(cityPath)
+		siteTOML := "[[rig]]\nname = \"orphan-rig\"\npath = \"" + rigDir + "\"\n"
+		if err := os.WriteFile(sitePath, []byte(siteTOML), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		cityFlag = cityPath
+		var stdout, stderr bytes.Buffer
+		code := cmdRigRemove("orphan-rig", &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("cmdRigRemove = %d, stderr: %s", code, stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "orphaned") {
+			t.Errorf("stdout = %q, want a mention of the orphaned binding cleanup", stdout.String())
+		}
+
+		binding, err := config.LoadSiteBinding(fsys.OSFS{}, cityPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, r := range binding.Rigs {
+			if r.Name == "orphan-rig" {
+				t.Errorf("site binding still carries orphan-rig: %#v", binding.Rigs)
+			}
+		}
+	})
+
+	t.Run("still_errors_when_neither_city_toml_nor_site_binding_has_the_rig", func(t *testing.T) {
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+		resetFlags(t)
+
+		cityPath := setupCity(t, "nowhere-city")
+
+		cityFlag = cityPath
+		var stdout, stderr bytes.Buffer
+		code := cmdRigRemove("nowhere-rig", &stdout, &stderr)
+		if code != 1 {
+			t.Fatalf("cmdRigRemove = %d, want 1 (not found anywhere), stdout: %s", code, stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "not found") {
+			t.Errorf("stderr = %q, want the original not-found message", stderr.String())
+		}
+	})
+
 	t.Run("does_not_scan_unrelated_registered_cities_on_remove", func(t *testing.T) {
 		gcHome := t.TempDir()
 		t.Setenv("GC_HOME", gcHome)
