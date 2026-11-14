@@ -2082,6 +2082,7 @@ go_test(
         "remote_stage_test.go",
         "remote_target_test.go",
         "repro_ga_rble9w_test.go",
+        "repro_sling_diagnostic_swallowed_test.go",
         "requalify_stability_test.go",
         "requalify_v2_test.go",
         "reset_committed_at_consumers_test.go",
