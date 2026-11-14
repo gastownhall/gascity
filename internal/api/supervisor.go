@@ -18,14 +18,25 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 )
 
+// PoolBootStatus reports progress of pool on_boot hooks while a city is in the
+// running_pool_on_boot startup phase. /v0/cities and /health share this one
+// shape; agent names are carried verbatim, so a name containing ':' or '/'
+// needs no escaping or parsing.
+type PoolBootStatus struct {
+	Done  int    `json:"done" doc:"Pool on_boot hooks completed so far."`
+	Total int    `json:"total" doc:"Pool on_boot hooks to run in this phase."`
+	Agent string `json:"agent,omitempty" doc:"Pool agent whose on_boot hook most recently completed. Omitted before the first completion."`
+}
+
 // CityInfo describes a managed city for the /v0/cities endpoint.
 type CityInfo struct {
-	Name            string   `json:"name"`
-	Path            string   `json:"path"`
-	Running         bool     `json:"running"`
-	Status          string   `json:"status,omitempty"`
-	Error           string   `json:"error,omitempty"`
-	PhasesCompleted []string `json:"phases_completed,omitempty"`
+	Name            string          `json:"name"`
+	Path            string          `json:"path"`
+	Running         bool            `json:"running"`
+	Status          string          `json:"status,omitempty" doc:"Current startup phase as a bare phase-name token (for example running_pool_on_boot). Progress within a phase is reported in pool_boot, never packed into this field."`
+	Error           string          `json:"error,omitempty"`
+	PhasesCompleted []string        `json:"phases_completed,omitempty"`
+	PoolBoot        *PoolBootStatus `json:"pool_boot,omitempty" doc:"Pool on_boot hook progress. Present only during the running_pool_on_boot phase."`
 }
 
 // CityResolver provides city lookup for the supervisor API router.

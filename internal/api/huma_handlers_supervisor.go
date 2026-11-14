@@ -49,9 +49,10 @@ type SupervisorHealthOutput struct {
 
 // SupervisorStartup describes the startup readiness of the first city.
 type SupervisorStartup struct {
-	Ready           bool     `json:"ready" doc:"True when the city is running."`
-	Phase           string   `json:"phase,omitempty" doc:"Current phase (when not ready)."`
-	PhasesCompleted []string `json:"phases_completed,omitempty" doc:"Phases completed so far."`
+	Ready           bool            `json:"ready" doc:"True when the city is running."`
+	Phase           string          `json:"phase,omitempty" doc:"Current phase as a bare phase-name token (when not ready). Progress within a phase is reported in pool_boot."`
+	PhasesCompleted []string        `json:"phases_completed,omitempty" doc:"Phases completed so far."`
+	PoolBoot        *PoolBootStatus `json:"pool_boot,omitempty" doc:"Pool on_boot hook progress, copied from the same city entry as /v0/cities. Present only during the running_pool_on_boot phase."`
 }
 
 // SupervisorReadinessInput is the input for GET /v0/readiness.
@@ -277,6 +278,7 @@ func (sm *SupervisorMux) humaHandleHealth(_ context.Context, _ *struct{}) (*Supe
 					Ready:           false,
 					Phase:           c.Status,
 					PhasesCompleted: c.PhasesCompleted,
+					PoolBoot:        c.PoolBoot,
 				}
 			}
 		}
