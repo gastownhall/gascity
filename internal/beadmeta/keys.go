@@ -219,6 +219,7 @@ const (
 	DrainUnprojectedBlockersMetadataKey  = "gc.drain_unprojected_blockers"
 	DurationMsMetadataKey                = "gc.duration_ms"
 	DynamicFragmentMetadataKey           = "gc.dynamic_fragment"
+	ExcludeClaimantsMetadataKey          = "gc.exclude_claimants"
 	ExclusiveDrainReservationMetadataKey = "gc.exclusive_drain_reservation"
 	ExecutionRigContextMetadataKey       = "gc.execution_rig_context"
 	ExecutionRoutedToMetadataKey         = "gc.execution_routed_to"
@@ -674,6 +675,7 @@ var KnownMetadataKeys = []string{
 	DrainUnprojectedBlockersMetadataKey,
 	DurationMsMetadataKey,
 	DynamicFragmentMetadataKey,
+	ExcludeClaimantsMetadataKey,
 	ExclusiveDrainReservationMetadataKey,
 	ExecutionRigContextMetadataKey,
 	ExecutionRoutedToMetadataKey,
