@@ -191,6 +191,7 @@ go_test(
         "storage_example_test.go",
         "storage_section_edit_test.go",
         "storage_test.go",
+        "storehealth_config_test.go",
         "testenv_import_test.go",
         "testutil_test.go",
         "undecoded_test.go",
