@@ -77,8 +77,11 @@ var defaultNudgeSubmitKeySequence = []string{"Enter"}
 // backtrack/edit-previous rather than to submit. Declaring it here (instead of
 // dropping codex from the skip list, which would produce the same two keystrokes
 // today) also keeps the pair RETRYABLE as a unit: sendNudgeSubmitSequence is what
-// the submit-confirm loop and the best-effort fallback re-send, and a re-sent
-// bare Enter would be swallowed exactly like the first one.
+// the submit-confirm loop and the best-effort fallback re-send. Only the FIRST
+// submit of a nudge carries the whole sequence; every retry sends the commit
+// key alone (nudgeSubmitRetryKeySequence), so a retry's Escape cannot fuse with
+// its Enter into Alt+Enter, a newline, when codex's input loop stalls between
+// the two sends (ga-oqhooe).
 //
 // This table does NOT yet contain an entry for the claude-specific stall
 // this patch was scoped to fix (ra-oudpha finding-3 / gascity#5012, #5013's
@@ -97,6 +100,21 @@ var defaultNudgeSubmitKeySequence = []string{"Enter"}
 // NudgeSession.
 var nudgeSubmitKeySequences = map[string][]string{
 	"codex": {"Escape", "Enter"},
+}
+
+// nudgeSubmitRetryKeySequence returns the keys a retried submit sends: the
+// sequence's final (commit) key alone. The leading keys of a multi-key
+// sequence are separated from the commit key by a blind sender-side gap
+// (nudgeSubmitKeySettle); a stalled TUI input loop reads Escape and Enter
+// arriving together as Alt+Enter, a newline that leaves the draft staged. A
+// lone Enter submits that staged draft, so a retry drops the leading keys.
+// A single-key sequence is its own commit key and comes back unchanged, and
+// an empty one stays empty. seq is not modified.
+func nudgeSubmitRetryKeySequence(seq []string) []string {
+	if len(seq) == 0 {
+		return seq
+	}
+	return []string{seq[len(seq)-1]}
 }
 
 // nudgeSubmitKeySequenceForFamily returns the declared submit key sequence
@@ -3027,9 +3045,13 @@ const (
 //     idle->busy transition was observed within the budget; the caller
 //     judges delivery from the pane itself (see nudgeSession).
 //
+// sendSubmit receives the number of submits that already reached the pane: 0
+// for the first, which sends the family's full key sequence, and more for a
+// retry, which sends the commit key alone (nudgeSubmitRetryKeySequence).
+//
 // All side effects are injected so the decision logic is unit-testable without
 // a live tmux server.
-func submitEnterAndConfirm(sendSubmit func() error, wake func(), busy func() (bool, error), sleep func(time.Duration)) (bool, bool, error) {
+func submitEnterAndConfirm(sendSubmit func(attempt int) error, wake func(), busy func() (bool, error), sleep func(time.Duration)) (bool, bool, error) {
 	confirmed, sawIdle, _, err := submitAndConfirm(sendSubmit, wake, busy, nil, sleep)
 	return confirmed, sawIdle, err
 }
@@ -3050,7 +3072,7 @@ func submitEnterAndConfirm(sendSubmit func() error, wake func(), busy func() (bo
 //     hook, a contended host), and an Escape sent into it aborts the turn
 //     before the provider records the message (healthy-direct, 2026-10-15). A
 //     look that fails is not evidence, so it sends nothing either.
-func submitAndConfirm(sendSubmit func() error, wake func(), busy func() (bool, error), mayResend func() (bool, error), sleep func(time.Duration)) (confirmed, sawIdle bool, sent int, err error) {
+func submitAndConfirm(sendSubmit func(attempt int) error, wake func(), busy func() (bool, error), mayResend func() (bool, error), sleep func(time.Duration)) (confirmed, sawIdle bool, sent int, err error) {
 	// Baseline reading before the first send: an idle baseline lets send 0's
 	// own polls confirm, while a busy or failed one leaves the pane needing
 	// an idle reading first.
@@ -3078,7 +3100,10 @@ func submitAndConfirm(sendSubmit func() error, wake func(), busy func() (bool, e
 			}
 		}
 		if resend {
-			if err := sendSubmit(); err != nil {
+			// sent, not the loop index, is the attempt: a first submit held back
+			// by a busy baseline goes out at a later send but is still the
+			// first one that reaches the pane, and it carries the full sequence.
+			if err := sendSubmit(sent); err != nil {
 				if isLookRefusal(err) {
 					// Never re-send into a permission prompt, or into a pane a
 					// look could not read.
@@ -3271,7 +3296,7 @@ func (o stagedDraftOutcome) String() string {
 //
 // All side effects are injected so the decision logic is unit-testable without
 // a live tmux server.
-func recoverStagedDraft(sawIdle bool, sendSubmit func() error, wake func(), observe func() (paneSubmitObservation, error), sleep func(time.Duration)) stagedDraftOutcome {
+func recoverStagedDraft(sawIdle bool, sendSubmit func(attempt int) error, wake func(), observe func() (paneSubmitObservation, error), sleep func(time.Duration)) stagedDraftOutcome {
 	sawDraft := false
 	for sends := 0; ; sends++ {
 		obs, err := observe()
@@ -3293,7 +3318,9 @@ func recoverStagedDraft(sawIdle bool, sendSubmit func() error, wake func(), obse
 		if sends >= submitDraftRecoverySends {
 			return stagedDraftUnresolved
 		}
-		if err := sendSubmit(); err != nil {
+		// recoverStagedDraft runs after the confirm window already sent the
+		// submit, so every send here is a retry.
+		if err := sendSubmit(sends + 1); err != nil {
 			return stagedDraftUnresolved
 		}
 		wake()
@@ -3782,15 +3809,19 @@ func (t *Tmux) nudgeSession(
 	// path sends an interrupting sequence again only when a look right before
 	// the send shows the message still in an idle composer (mayResend below,
 	// see submitAndConfirm). The best-effort fallback below and NudgePane's
-	// retry loop do NOT look; they are safe only for single-key (plain Enter)
-	// sequences, which is what every family without a table entry has. Adding
-	// a multi-key entry for a family that is not submit-verify eligible would
-	// need that gap closed first.
+	// retry loop do NOT look, so their retries send the commit key alone
+	// (nudgeSubmitRetryKeySequence): a lone Enter cannot interrupt a turn.
+	// The same derivation covers every retry on the verified path, where the
+	// look still guards against re-sending into a pane that already submitted.
 	//
 	// Every submit is preceded by a look for a permission prompt: Enter on
 	// one picks its highlighted option (see nudgePromptGuard.refused).
-	sendSubmit := func() error {
-		return prompt.submit(func() error { return t.sendNudgeSubmitSequence(ctx, target, submitKeys) })
+	sendSubmit := func(attempt int) error {
+		keys := submitKeys
+		if attempt > 0 {
+			keys = nudgeSubmitRetryKeySequence(submitKeys)
+		}
+		return prompt.submit(func() error { return t.sendNudgeSubmitSequence(ctx, target, keys) })
 	}
 	wake := func() { t.WakePaneIfDetached(session, target) }
 	if t.submitVerifyEligible(target) {
@@ -3902,7 +3933,7 @@ func (t *Tmux) nudgeSession(
 		if attempt > 0 {
 			time.Sleep(submitReEnterBackoff)
 		}
-		if err := sendSubmit(); err != nil {
+		if err := sendSubmit(attempt); err != nil {
 			if isLookRefusal(err) {
 				return prompt.refused(err)
 			}
@@ -3992,7 +4023,11 @@ func (t *Tmux) NudgePane(pane, message string) error {
 		if attempt > 0 {
 			time.Sleep(200 * time.Millisecond)
 		}
-		if err := t.sendNudgeSubmitSequence(context.Background(), pane, submitKeys); err != nil {
+		keys := submitKeys
+		if attempt > 0 {
+			keys = nudgeSubmitRetryKeySequence(submitKeys)
+		}
+		if err := t.sendNudgeSubmitSequence(context.Background(), pane, keys); err != nil {
 			lastErr = err
 			continue
 		}

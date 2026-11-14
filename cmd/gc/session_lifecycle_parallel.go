@@ -2106,7 +2106,7 @@ func runPreparedStartCandidate(
 	var diedPane string
 	if startedFresh && err == nil && strings.TrimSpace(item.candidate.info.ID) != "" && item.candidate.info.SessionKey != "" {
 		postStartBegin := time.Now()
-		if stabilityWaiter(startCtx, item.candidate.name()) {
+		if stabilityWaiter(ctx, item.candidate.name()) {
 			running := false
 			alive := false
 			if store == nil || strings.TrimSpace(item.candidate.info.ID) == "" {

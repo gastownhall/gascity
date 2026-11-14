@@ -441,6 +441,15 @@ func (s *ProxiedStore) DeleteBatch(ids []string) error {
 	return s.withMutation("delete-batch", func(Store) error { return deleter.DeleteBatch(ids) })
 }
 
+// ForeignIDCreateKeepsRows reports whether CreateWithForeignID keeps the
+// row: only when the write leaf has a foreign-id create of its own. Over a bd
+// leaf it falls back to a plain create, which mints status and creation time.
+// It satisfies ForeignIDCreateFidelity.
+func (s *ProxiedStore) ForeignIDCreateKeepsRows() bool {
+	_, ok := s.writeLeaf().(ForeignIDCreator)
+	return ok
+}
+
 // CreateWithForeignID creates a bead KEEPING another store's id, on the write
 // leaf. It is the class-store migration's copy path, and it is a write like any
 // other.
