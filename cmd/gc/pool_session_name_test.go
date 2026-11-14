@@ -1852,6 +1852,116 @@ func TestReleaseOrphanedPoolAssignments_KeepsCrossStoreEligibleHolderRigWork(t *
 	}
 }
 
+func TestReleaseOrphanedPoolAssignments_RouteNameLivenessHonorsStoreReachability(t *testing.T) {
+	tests := []struct {
+		name          string
+		route         string
+		workStoreRef  string
+		wantReleased  int
+		wantAssignee  string
+		wantWorkState string
+	}{
+		{
+			name:          "city scoped route reaches rig work",
+			route:         "worker",
+			workStoreRef:  "repo",
+			wantAssignee:  "worker",
+			wantWorkState: "in_progress",
+		},
+		{
+			name:          "rig scoped route reaches work in its rig",
+			route:         "repo/worker",
+			workStoreRef:  "repo",
+			wantAssignee:  "repo/worker",
+			wantWorkState: "in_progress",
+		},
+		{
+			name:          "rig scoped route does not reach another rig",
+			route:         "repo/worker",
+			workStoreRef:  "other",
+			wantReleased:  1,
+			wantWorkState: "open",
+		},
+		{
+			name:          "store aware empty ref does not use legacy matching",
+			route:         "repo/worker",
+			workStoreRef:  "",
+			wantReleased:  1,
+			wantWorkState: "open",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			cityStore := beads.NewMemStore()
+			rigStore := beads.NewMemStore()
+			cfg := &config.City{
+				Rigs: []config.Rig{
+					{Name: "repo", Path: t.TempDir()},
+					{Name: "other", Path: t.TempDir()},
+				},
+				Agents: []config.Agent{
+					{Name: "worker", Scope: "city", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
+					{Name: "worker", Dir: "repo", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
+					{Name: "worker", Dir: "other", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
+				},
+			}
+			sessionBead, err := cityStore.Create(beads.Bead{
+				Title:  "live route worker",
+				Type:   sessionBeadType,
+				Status: "open",
+				Metadata: map[string]string{
+					"session_name":         "worker-live",
+					"template":             tt.route,
+					"agent_name":           "worker",
+					poolManagedMetadataKey: boolMetadata(true),
+				},
+			})
+			if err != nil {
+				t.Fatalf("Create session bead: %v", err)
+			}
+			work, err := rigStore.Create(beads.Bead{
+				Title:    "route-name-assigned rig work",
+				Assignee: tt.route,
+				Metadata: map[string]string{"gc.routed_to": tt.route},
+			})
+			if err != nil {
+				t.Fatalf("Create rig work bead: %v", err)
+			}
+			if err := rigStore.Update(work.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+				t.Fatalf("Set rig work status: %v", err)
+			}
+			work, err = rigStore.Get(work.ID)
+			if err != nil {
+				t.Fatalf("Reload rig work bead: %v", err)
+			}
+
+			released := releaseOrphanedPoolAssignmentsFromBeads(
+				cityStore,
+				cfg,
+				cityPath,
+				[]beads.Bead{sessionBead},
+				[]beads.Bead{work},
+				[]beads.Store{rigStore},
+				[]string{tt.workStoreRef},
+				map[string]beads.Store{"repo": rigStore},
+			)
+			if got := len(released); got != tt.wantReleased {
+				t.Fatalf("released %d assignments, want %d", got, tt.wantReleased)
+			}
+
+			got, err := rigStore.Get(work.ID)
+			if err != nil {
+				t.Fatalf("Get rig work bead: %v", err)
+			}
+			if got.Status != tt.wantWorkState || got.Assignee != tt.wantAssignee {
+				t.Fatalf("rig work = status %q assignee %q, want %s/%s", got.Status, got.Assignee, tt.wantWorkState, tt.wantAssignee)
+			}
+		})
+	}
+}
+
 func TestStoreForPoolAssignment_UsesConfiguredHyphenatedIDPrefix(t *testing.T) {
 	cityStore := beads.NewMemStore()
 	rigStore := beads.NewMemStore()
