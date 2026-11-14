@@ -105,13 +105,32 @@ func TestValidateSyntheticRepoDetectsMtimeRestoredCorruptionAfterSuccessfulValid
 		t.Fatalf("Stat(%q): %v", target, err)
 	}
 
-	// Let the filesystem clock tick past the materialization so the rewrite's
-	// ctime is distinguishable from the original on a coarse-clock kernel.
-	time.Sleep(20 * time.Millisecond)
+	ctimeBefore, ok := statCtimeNanos(before)
+	if !ok {
+		t.Skip("platform exposes no ctime; the memo signature cannot see an mtime restore here")
+	}
 
-	writeFile(t, target, strings.Repeat("#", len(original)))
-	if err := os.Chtimes(target, before.ModTime(), before.ModTime()); err != nil {
-		t.Fatalf("Chtimes(%q): %v", target, err)
+	// Rewrite and restore until the rewrite's ctime differs from the original.
+	// On a coarse-clock filesystem a rewrite inside the materialization's own
+	// tick would share its ctime, which is the accidental case this test does
+	// not cover; retrying (not sleeping) steps past that tick.
+	corrupted := strings.Repeat("#", len(original))
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		writeFile(t, target, corrupted)
+		if err := os.Chtimes(target, before.ModTime(), before.ModTime()); err != nil {
+			t.Fatalf("Chtimes(%q): %v", target, err)
+		}
+		info, err := os.Stat(target)
+		if err != nil {
+			t.Fatalf("Stat(%q) after restore: %v", target, err)
+		}
+		if ctime, _ := statCtimeNanos(info); ctime != ctimeBefore {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("ctime of %q never moved off %d after repeated rewrites", target, ctimeBefore)
+		}
 	}
 
 	after, err := os.Stat(target)
