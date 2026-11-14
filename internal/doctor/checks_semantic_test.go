@@ -642,7 +642,7 @@ func TestWorktreeDiskSizeCheck_AllMeasurementsFailedReturnsWarning(t *testing.T)
 // fakeGitWorktree implements gitWorktree for tests. Behaves like the
 // shared admin dir of a multi-worktree repo: list returns the same
 // entries regardless of which path is used to construct it. Per-path
-// "uncommitted/unpushed/stashed" flags drive classifyNested.
+// "uncommitted/unpushed" flags drive classifyNested.
 var _ gitWorktree = (*fakeGitWorktree)(nil)
 
 type fakeGitWorktree struct {
@@ -652,8 +652,6 @@ type fakeGitWorktree struct {
 	uncommitted map[string]bool
 	unpushed    map[string]bool
 	unpushedErr map[string]error
-	stashed     map[string]bool
-	stashedErr  map[string]error
 	removeCalls *[]string // path argument of each WorktreeRemove call
 	removeFrom  *[]string // currentPath (cwd-equivalent) at each remove call
 	removeErr   map[string]error
@@ -674,13 +672,6 @@ func (f *fakeGitWorktree) HasUnpushedCommitsResult() (bool, error) {
 		return false, err
 	}
 	return f.unpushed[f.currentPath], nil
-}
-
-func (f *fakeGitWorktree) HasStashesResult() (bool, error) {
-	if err := f.stashedErr[f.currentPath]; err != nil {
-		return false, err
-	}
-	return f.stashed[f.currentPath], nil
 }
 
 func (f *fakeGitWorktree) WorktreeRemove(path string, _ bool) error {
@@ -804,7 +795,6 @@ func TestNestedWorktreePruneCheck_ClassifiesSafeAndUnsafe(t *testing.T) {
 	safe := pathutil.NormalizePathForCompare(filepath.Join(home, "worktrees", "task-clean"))
 	dirty := pathutil.NormalizePathForCompare(filepath.Join(home, "worktrees", "task-dirty"))
 	unpushed := pathutil.NormalizePathForCompare(filepath.Join(home, "worktrees", "task-unpushed"))
-	stashed := pathutil.NormalizePathForCompare(filepath.Join(home, "worktrees", "task-stashed"))
 	if err := os.MkdirAll(safe, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -812,9 +802,6 @@ func TestNestedWorktreePruneCheck_ClassifiesSafeAndUnsafe(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(unpushed, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(stashed, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -828,11 +815,9 @@ func TestNestedWorktreePruneCheck_ClassifiesSafeAndUnsafe(t *testing.T) {
 					{Path: safe, Branch: "task-clean"},
 					{Path: dirty, Branch: "task-dirty"},
 					{Path: unpushed, Branch: "task-unpushed"},
-					{Path: stashed, Branch: "task-stashed"},
 				},
 				uncommitted: map[string]bool{dirty: true},
 				unpushed:    map[string]bool{unpushed: true},
-				stashed:     map[string]bool{stashed: true},
 				removeCalls: &removes,
 				currentPath: path,
 			}
@@ -854,8 +839,8 @@ func TestNestedWorktreePruneCheck_ClassifiesSafeAndUnsafe(t *testing.T) {
 	if safeCount != 1 {
 		t.Errorf("safeCount = %d, want 1", safeCount)
 	}
-	if unsafeCount != 3 {
-		t.Errorf("unsafeCount = %d, want 3", unsafeCount)
+	if unsafeCount != 2 {
+		t.Errorf("unsafeCount = %d, want 2", unsafeCount)
 	}
 
 	for _, f := range c.findings {
@@ -1112,11 +1097,8 @@ func TestNestedWorktreePruneCheck_ProbeErrorsAreUnsafe(t *testing.T) {
 	dir := t.TempDir()
 	home := makeAgentHome(t, dir, "agent-1")
 	unpushedErr := pathutil.NormalizePathForCompare(filepath.Join(home, "worktrees", "unpushed-error"))
-	stashErr := pathutil.NormalizePathForCompare(filepath.Join(home, "worktrees", "stash-error"))
-	for _, p := range []string{unpushedErr, stashErr} {
-		if err := os.MkdirAll(p, 0o755); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.MkdirAll(unpushedErr, 0o755); err != nil {
+		t.Fatal(err)
 	}
 
 	var removes []string
@@ -1127,10 +1109,8 @@ func TestNestedWorktreePruneCheck_ProbeErrorsAreUnsafe(t *testing.T) {
 				listResp: []git.Worktree{
 					{Path: home, Branch: "h"},
 					{Path: unpushedErr, Branch: "unpushed-error"},
-					{Path: stashErr, Branch: "stash-error"},
 				},
 				unpushedErr: map[string]error{unpushedErr: errors.New("log failed")},
-				stashedErr:  map[string]error{stashErr: errors.New("stash failed")},
 				removeCalls: &removes,
 				currentPath: path,
 			}
@@ -1140,8 +1120,8 @@ func TestNestedWorktreePruneCheck_ProbeErrorsAreUnsafe(t *testing.T) {
 	if r.Status != StatusWarning {
 		t.Fatalf("status = %d, want Warning because probe errors are inspection failures; msg=%s details=%v", r.Status, r.Message, r.Details)
 	}
-	if len(c.findings) != 2 {
-		t.Fatalf("findings = %d, want 2", len(c.findings))
+	if len(c.findings) != 1 {
+		t.Fatalf("findings = %d, want 1", len(c.findings))
 	}
 	for _, f := range c.findings {
 		if f.safeToRm {
@@ -1311,8 +1291,8 @@ func TestNestedWorktreePruneCheck_FixUsesParentForGitContext(t *testing.T) {
 }
 
 // TestNestedWorktreePruneCheck_BrokenRepoGate pins the IsRepo gate that
-// defends against fail-open semantics in HasUnpushedCommits / HasStashes
-// (which return false on git error). A candidate whose admin dir is
+// defends against fail-open semantics in HasUnpushedCommits
+// (which returns false on git error). A candidate whose admin dir is
 // corrupt must not be classified as safe to remove.
 func TestNestedWorktreePruneCheck_BrokenRepoGate(t *testing.T) {
 	dir := t.TempDir()
@@ -1349,6 +1329,120 @@ func TestNestedWorktreePruneCheck_BrokenRepoGate(t *testing.T) {
 	}
 	if c.findings[0].reason != "git status unreadable" {
 		t.Errorf("reason = %q, want %q", c.findings[0].reason, "git status unreadable")
+	}
+}
+
+// TestNestedWorktreePruneCheck_RepoGlobalStashDoesNotBlockReclaim is the
+// doctor twin of the cmd/gc tests
+// TestPruneAgentHomeWorktreeIfSafe_UnrelatedStashDoesNotBlock and
+// ..._StashInsideWorktreeSurvivesPrune (ga-pyp2oh), run on real git because the
+// fakes in this file have no stash probe left to fake. `git stash list` reads
+// refs/stash from the shared git-common-dir, so it answers "does anyone in this
+// repo have a stash" for every nested worktree alike, and `git worktree remove`
+// never touches that ref: a stash gate could only refuse a worktree whose
+// removal loses nothing. A clean, fully pushed nested worktree is therefore
+// reclaimable whatever stash exists in the repo, and Fix must reclaim it without
+// losing the stash. The sibling with real uncommitted work is the control: the
+// gates that remain still keep what they should.
+func TestNestedWorktreePruneCheck_RepoGlobalStashDoesNotBlockReclaim(t *testing.T) {
+	// The check walks <worktrees root>/<rig>/<agent>: pin the root to the
+	// city's own .gc/worktrees whatever the host exports.
+	t.Setenv("GC_WORKTREES_DIR", "")
+	t.Setenv("T3CODE_WORKTREES_DIR", "")
+	t.Setenv("T3CODE_HOME", "")
+
+	gitIn := func(dir string, args ...string) string {
+		t.Helper()
+		return runGitForRigRootBranchTest(t, dir, args...)
+	}
+
+	bare := t.TempDir()
+	gitIn(bare, "init", "--bare")
+	repo := t.TempDir()
+	gitIn(repo, "clone", bare, ".")
+	gitIn(repo, "config", "user.email", "nested-prune@example.invalid")
+	gitIn(repo, "config", "user.name", "Nested Prune Test")
+	gitIn(repo, "config", "commit.gpgsign", "false")
+	gitIn(repo, "commit", "--allow-empty", "-m", "init")
+	gitIn(repo, "push", "origin", "HEAD")
+
+	// An agent home holding two nested worktrees, both fully pushed: their
+	// branches start at the pushed commit.
+	city := t.TempDir()
+	home := filepath.Join(city, ".gc", "worktrees", "demo", "agent-1")
+	if err := os.MkdirAll(filepath.Dir(home), 0o755); err != nil {
+		t.Fatalf("mkdir agent home parent: %v", err)
+	}
+	gitIn(repo, "worktree", "add", "-b", "agent-1-home", home)
+	cleanDir := filepath.Join(home, "worktrees", "task-clean")
+	dirtyDir := filepath.Join(home, "worktrees", "task-dirty")
+	if err := os.MkdirAll(filepath.Dir(cleanDir), 0o755); err != nil {
+		t.Fatalf("mkdir nested worktrees root: %v", err)
+	}
+	gitIn(repo, "worktree", "add", "-b", "task-clean", cleanDir)
+	gitIn(repo, "worktree", "add", "-b", "task-dirty", dirtyDir)
+
+	// Stash work from inside the clean nested worktree: the case the removed
+	// gate nominally existed for. Stashing leaves the worktree clean, so no
+	// other gate keeps it.
+	const stashedLine = "work stashed inside the nested worktree"
+	if err := os.WriteFile(filepath.Join(cleanDir, "stashed.txt"), []byte(stashedLine+"\n"), 0o600); err != nil {
+		t.Fatalf("write stashed file: %v", err)
+	}
+	gitIn(cleanDir, "add", "stashed.txt")
+	gitIn(cleanDir, "stash")
+	if out := gitIn(cleanDir, "status", "--porcelain"); strings.TrimSpace(out) != "" {
+		t.Fatalf("test setup invalid: nested worktree not clean after stash; status=%q", out)
+	}
+	// The aliasing the removed gate tripped over: one stash, visible from
+	// every worktree of the repo.
+	for _, dir := range []string{repo, home, cleanDir, dirtyDir} {
+		if out := gitIn(dir, "stash", "list"); strings.TrimSpace(out) == "" {
+			t.Fatalf("test setup invalid: the stash is not visible from %s, so the repo-global precondition is not met", dir)
+		}
+	}
+	// The control: a sibling with genuinely uncommitted work.
+	if err := os.WriteFile(filepath.Join(dirtyDir, "in-progress.txt"), []byte("not committed\n"), 0o600); err != nil {
+		t.Fatalf("write in-progress file: %v", err)
+	}
+
+	c := NewNestedWorktreePruneCheck(config.DoctorConfig{})
+	ctx := &CheckContext{CityPath: city}
+	r := c.Run(ctx)
+	byName := make(map[string]nestedWorktreeFinding, len(c.findings))
+	for _, f := range c.findings {
+		byName[filepath.Base(f.path)] = f
+	}
+	clean, dirty := byName["task-clean"], byName["task-dirty"]
+	if len(c.findings) != 2 || clean.path == "" || dirty.path == "" {
+		t.Fatalf("findings = %+v, want exactly task-clean and task-dirty", c.findings)
+	}
+	if !clean.safeToRm {
+		t.Fatalf("clean, fully pushed nested worktree refused (%q) because a stash exists in the shared repo; want safe to remove", clean.reason)
+	}
+	if dirty.safeToRm || dirty.reason != "has uncommitted changes" {
+		t.Errorf("dirty nested worktree = {safeToRm: %v, reason: %q}, want kept with reason %q", dirty.safeToRm, dirty.reason, "has uncommitted changes")
+	}
+	if r.Status != StatusWarning {
+		t.Errorf("status = %d, want Warning (one nested worktree safely prunable); msg=%s", r.Status, r.Message)
+	}
+
+	if err := c.Fix(ctx); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	if _, err := os.Stat(cleanDir); !os.IsNotExist(err) {
+		t.Errorf("clean nested worktree %s should have been removed; stat err=%v", cleanDir, err)
+	}
+	if _, err := os.Stat(dirtyDir); err != nil {
+		t.Errorf("nested worktree with uncommitted work %s must survive Fix; stat err=%v", dirtyDir, err)
+	}
+	// The premise the gate's removal rests on: removing the worktree a stash
+	// was made in loses nothing; the entry and its diff are still readable.
+	if out := gitIn(repo, "stash", "list"); strings.TrimSpace(out) == "" {
+		t.Fatal("the stash made inside the removed nested worktree is gone from the shared repo")
+	}
+	if out := gitIn(repo, "stash", "show", "-p", "stash@{0}"); !strings.Contains(out, stashedLine) {
+		t.Errorf("stash lost the work stashed inside the removed nested worktree; stash show -p:\n%s", out)
 	}
 }
 
