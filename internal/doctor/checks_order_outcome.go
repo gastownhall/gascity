@@ -55,8 +55,8 @@ func nearControllerStart(ts time.Time, starts []time.Time, grace time.Duration) 
 
 // consecutiveOrderFailures counts trailing order.failed events for one order.
 //
-// outcomes must hold order.completed and order.failed events ordered by Seq
-// ascending; the walk runs newest-first and stops at the first success.
+// outcomes must hold order.completed, order.failed and order.skipped events in
+// ascending Seq order; the walk runs newest-first and stops at the first success.
 //
 // A success always ends the streak, even if it falls within the post-start grace
 // window. The grace window skips only spurious FAILURES (neither counting them nor
@@ -81,6 +81,10 @@ func consecutiveOrderFailures(outcomes []events.Event, subject string, starts []
 		if event.Subject != subject {
 			continue
 		}
+		// An incomplete declaration does not change the hard-failure streak.
+		if event.Type == events.OrderSkipped {
+			continue
+		}
 		sawOutcome = true
 		if event.Type != events.OrderFailed {
 			break
@@ -97,6 +101,22 @@ func consecutiveOrderFailures(outcomes []events.Event, subject string, starts []
 	}
 
 	return streak, lastMessage, sawOutcome, skipped
+}
+
+// latestIncompleteOrderOutcome returns the newest incomplete declaration after
+// the latest recorded completion. Seq order is authoritative; these events have
+// no run identity, so an interleaved declaration cannot be paired to a run.
+// Hard failures do not clear an incomplete declaration.
+func latestIncompleteOrderOutcome(outcomes []events.Event) (events.Event, bool) {
+	for i := len(outcomes) - 1; i >= 0; i-- {
+		switch outcomes[i].Type {
+		case events.OrderSkipped:
+			return outcomes[i], true
+		case events.OrderCompleted:
+			return events.Event{}, false
+		}
+	}
+	return events.Event{}, false
 }
 
 // classifyOrderOutcome turns one order's failure streak into a doctor result.
@@ -129,7 +149,7 @@ func classifyOrderOutcome(order orders.Order, streak int, threshold int, lastMes
 	return StatusWarning, detail
 }
 
-// OrderOutcomeHealthyCheck reports scheduled orders failing repeatedly.
+// OrderOutcomeHealthyCheck reports repeated failures and recorded incomplete outcomes.
 //
 // Sibling to OrderFiringCurrentCheck, which answers "did it run?" while this
 // answers "did it succeed?". An order that fires faithfully on schedule and fails
@@ -142,7 +162,7 @@ type OrderOutcomeHealthyCheck struct {
 	grace     time.Duration
 }
 
-// NewOrderOutcomeHealthyCheck creates the repeated-order-failure check.
+// NewOrderOutcomeHealthyCheck creates the scheduled-order-outcome check.
 func NewOrderOutcomeHealthyCheck(cfg *config.City, cityPath string) *OrderOutcomeHealthyCheck {
 	return &OrderOutcomeHealthyCheck{
 		cfg:       cfg,
@@ -162,7 +182,7 @@ func (c *OrderOutcomeHealthyCheck) CanFix() bool { return false }
 // Fix is a no-op for the reason given on CanFix.
 func (c *OrderOutcomeHealthyCheck) Fix(_ *CheckContext) error { return nil }
 
-// Run counts each scheduled order's trailing consecutive failures.
+// Run checks each scheduled order's failure streak and incomplete declarations.
 //
 // Unlike order-firing-current this needs no goroutine-plus-timeout guard: that
 // check wraps its work because the order-history resolver opens the beads/Dolt
@@ -226,8 +246,21 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 		monitored++
 
-		streak, lastMessage, sawOutcome, skipped := consecutiveOrderFailures(log.bySubject[order.ScopedName()], order.ScopedName(), log.starts, c.grace)
+		outcomes := log.bySubject[order.ScopedName()]
+		streak, lastMessage, sawOutcome, skipped := consecutiveOrderFailures(outcomes, order.ScopedName(), log.starts, c.grace)
 		status, detail := classifyOrderOutcome(order, streak, c.threshold, lastMessage, sawOutcome, skipped)
+		if declaration, ok := latestIncompleteOrderOutcome(outcomes); ok {
+			incomplete := "recorded incomplete outcome"
+			if strings.TrimSpace(declaration.Message) != "" {
+				incomplete += fmt.Sprintf(": %q", declaration.Message)
+			}
+			if status == StatusWarning {
+				detail += "; " + incomplete
+			} else {
+				detail = fmt.Sprintf("%s: %s", orderDisplayName(order), incomplete)
+			}
+			status = StatusWarning
+		}
 		worst = worseStatus(worst, status)
 		result.Details = append(result.Details, detail)
 		if status != StatusOK {
@@ -253,7 +286,7 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 	if worst == StatusOK {
 		result.Message = "all scheduled orders succeeding"
 	} else {
-		result.Message = fmt.Sprintf("%d order(s) failing repeatedly", failing)
+		result.Message = fmt.Sprintf("%d order(s) have repeated failures or incomplete outcomes", failing)
 		result.FixHint = fmt.Sprintf(orderOutcomeInspectHintFmt, firstFailingHint)
 	}
 	return result
@@ -262,14 +295,14 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 // orderOutcomeLog is everything order-outcome-healthy needs from the event log,
 // gathered in a single read.
 type orderOutcomeLog struct {
-	// bySubject holds each order's order.completed and order.failed events in
+	// bySubject holds each order's completed, failed and skipped events in
 	// Seq order, keyed by the order's scoped name.
 	bySubject map[string][]events.Event
 	// starts holds every controller.started timestamp — see nearControllerStart.
 	starts []time.Time
 }
 
-// readOrderOutcomeLog reads order.completed, order.failed and controller.started
+// readOrderOutcomeLog reads completed, failed, skipped and controller.started events
 // in ONE pass over the log. The log is not rotated in practice and reached
 // 151MB, so each extra pass cost ~30s; the events reader screens raw lines by
 // type before decoding, which is what keeps a single pass cheap.
@@ -281,7 +314,7 @@ func readOrderOutcomeLog(ctx *CheckContext, eventPath string) (orderOutcomeLog, 
 	defer cancel()
 
 	evts, err := events.ReadFilteredContext(goCtx, eventPath, events.Filter{
-		Types: []string{events.OrderCompleted, events.OrderFailed, events.ControllerStarted},
+		Types: []string{events.OrderCompleted, events.OrderFailed, events.OrderSkipped, events.ControllerStarted},
 	})
 	if err != nil {
 		return orderOutcomeLog{}, err
