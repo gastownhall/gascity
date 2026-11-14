@@ -344,6 +344,11 @@ type CityRuntime struct {
 	// unchanged skip is reported once instead of on every sweep. Owned by the
 	// serial tick, like the other per-tick state above.
 	reapSkips *reapSkipTracker
+	// rigReapSkips is reapSkips for reapDetachedRigWorktrees. It is a separate
+	// tracker because endPass forgets every path its pass did not evaluate: one
+	// shared by both reapers would erase the other's history each tick and
+	// re-announce every unchanged skip.
+	rigReapSkips *reapSkipTracker
 
 	convScopes          map[string]*convergenceScope // nil until bead store available; keyed by rig name ("" = city/HQ)
 	convScopesMu        sync.RWMutex                 // guards convScopes map pointer
@@ -611,6 +616,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		trace:                   newSessionReconcilerTraceManager(p.CityPath, p.CityName, p.Stderr),
 		rec:                     p.Rec,
 		reapSkips:               newReapSkipTracker(),
+		rigReapSkips:            newReapSkipTracker(),
 		poolSessions:            p.PoolSessions,
 		forceStopShutdown:       p.ForceStopShutdown,
 		suspendedNames:          suspendedNames,
@@ -1782,6 +1788,18 @@ func (cr *CityRuntime) tickReapClosedBeadWorktrees(p *tickPass) bool {
 			agentHomesReset := cleanupClosedBeadAgentHomeWorktrees(cr.cityPath, cr.cfg, withoutSuspendedRigs(cr.cityPath, cr.cfg, cr.rigBeadStores()), cr.stderr)
 			p.recordPhase(TraceSiteControllerTickPhase, "cleanup_agent_home_worktrees", phaseStart, map[string]any{"reset": agentHomesReset})
 		}
+	}
+	if rigReapEnabled, rigReapDryRun := cr.cfg.Daemon.AutoReapRigWorktreesEnabled(), cr.cfg.Daemon.AutoReapRigWorktreesDryRunEnabled(); rigReapEnabled || rigReapDryRun {
+		// Detached-HEAD rig-root worktrees have their own flags, independent
+		// of the closed-bead reaper above. Real removal supersedes dry-run
+		// when both are set.
+		phaseStart := time.Now()
+		report := reapDetachedRigWorktrees(cr.cfg, buildEffectiveSuspendedRigNames(cr.cfg, loadSuspensionStateBestEffort(cr.cityPath)), liveSessionWorktreeDirs(p.sessionBeads), !rigReapEnabled, cr.rec, cr.rigReapSkips, cr.stderr)
+		p.recordPhase(TraceSiteControllerTickPhase, "reap_detached_rig_worktrees", phaseStart, map[string]any{
+			"reaped":    len(report.Reaped),
+			"protected": len(report.Protected),
+			"dry_run":   !rigReapEnabled,
+		})
 	}
 	return p.ctx.Err() != nil
 }

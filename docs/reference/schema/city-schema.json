@@ -1540,15 +1540,18 @@
         },
         "auto_reap_rig_worktrees": {
           "type": "boolean",
-          "description": "AutoReapRigWorktrees, AutoReapRigWorktreesDryRun and\nAutoReapRigWorktreesMinAgeMinutes configure the detached-HEAD rig-root\nworktree reaper (RED-step stub; documented in the GREEN step).",
+          "description": "AutoReapRigWorktrees controls whether the reconciler patrol removes\ndetached-HEAD git worktrees that sit directly under a rig's own\nworktrees/ directory (\u003crig path\u003e/worktrees/\u003cname\u003e) — the\nagent-improvised deploy-*, review-* and mayor-* checkouts that no\nformula creates and no bead owns. Branch-attached entries there are\nleft to the closed-bead reaper. Independent of\nAutoReapClosedBeadWorktrees. Defaults to false when unset; real\nremoval is opt-in. Every candidate must also clear the min-age\nquarantine, the liveness scan and the git-safety gates (uncommitted\nwork, unreachable commits, stashes).",
           "default": false
         },
         "auto_reap_rig_worktrees_dry_run": {
           "type": "boolean",
+          "description": "AutoReapRigWorktreesDryRun makes the rig-worktree reaper run its full\nclassification and emit bead.worktree.reap_skipped events describing\nwhat it would reap and what it protected, without removing anything.\nDefaults to false when unset. Real removal (AutoReapRigWorktrees)\nsupersedes dry-run when both are true.",
           "default": false
         },
         "auto_reap_rig_worktrees_min_age_minutes": {
-          "type": "integer"
+          "type": "integer",
+          "description": "AutoReapRigWorktreesMinAgeMinutes is the minimum worktree age, in\nminutes, before a rig-root worktree is considered for reaping. These\nworktrees have no owning bead to consult, so this quarantine is the\nprimary guard against reaping a checkout an agent has only just\ncreated. Nil (unset), zero or a negative value defaults to\nDefaultAutoReapRigWorktreesMinAgeMinutes: unlike\nAutoReapClosedBeadWorktreesMinAgeMinutes, zero cannot disable it.",
+          "default": 1440
         },
         "start_ready_timeout": {
           "type": "string",

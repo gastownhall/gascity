@@ -532,10 +532,16 @@ func recordReapSkipped(rec events.Recorder, beadID, path, rig, reason string) {
 	if err != nil {
 		return
 	}
+	// A worktree no bead owns (reapDetachedRigWorktrees) has no bead ID to
+	// name; its directory name stands in so the event keeps a subject.
+	subject := beadID
+	if subject == "" {
+		subject = filepath.Base(path)
+	}
 	rec.Record(events.Event{
 		Type:    events.BeadWorktreeReapSkipped,
 		Actor:   "gc",
-		Subject: beadID,
+		Subject: subject,
 		Payload: raw,
 	})
 }

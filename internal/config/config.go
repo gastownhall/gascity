@@ -3085,12 +3085,31 @@ type DaemonConfig struct {
 	// quarantine entirely (every closed-bead worktree is immediately
 	// eligible for the rest of the gate chain, regardless of age).
 	AutoReapClosedBeadWorktreesMinAgeMinutes *int `toml:"auto_reap_closed_bead_worktrees_min_age_minutes,omitempty" jsonschema:"default=10"`
-	// AutoReapRigWorktrees, AutoReapRigWorktreesDryRun and
-	// AutoReapRigWorktreesMinAgeMinutes configure the detached-HEAD rig-root
-	// worktree reaper (RED-step stub; documented in the GREEN step).
-	AutoReapRigWorktrees              *bool `toml:"auto_reap_rig_worktrees,omitempty" jsonschema:"default=false"`
-	AutoReapRigWorktreesDryRun        *bool `toml:"auto_reap_rig_worktrees_dry_run,omitempty" jsonschema:"default=false"`
-	AutoReapRigWorktreesMinAgeMinutes *int  `toml:"auto_reap_rig_worktrees_min_age_minutes,omitempty"`
+	// AutoReapRigWorktrees controls whether the reconciler patrol removes
+	// detached-HEAD git worktrees that sit directly under a rig's own
+	// worktrees/ directory (<rig path>/worktrees/<name>) — the
+	// agent-improvised deploy-*, review-* and mayor-* checkouts that no
+	// formula creates and no bead owns. Branch-attached entries there are
+	// left to the closed-bead reaper. Independent of
+	// AutoReapClosedBeadWorktrees. Defaults to false when unset; real
+	// removal is opt-in. Every candidate must also clear the min-age
+	// quarantine, the liveness scan and the git-safety gates (uncommitted
+	// work, unreachable commits, stashes).
+	AutoReapRigWorktrees *bool `toml:"auto_reap_rig_worktrees,omitempty" jsonschema:"default=false"`
+	// AutoReapRigWorktreesDryRun makes the rig-worktree reaper run its full
+	// classification and emit bead.worktree.reap_skipped events describing
+	// what it would reap and what it protected, without removing anything.
+	// Defaults to false when unset. Real removal (AutoReapRigWorktrees)
+	// supersedes dry-run when both are true.
+	AutoReapRigWorktreesDryRun *bool `toml:"auto_reap_rig_worktrees_dry_run,omitempty" jsonschema:"default=false"`
+	// AutoReapRigWorktreesMinAgeMinutes is the minimum worktree age, in
+	// minutes, before a rig-root worktree is considered for reaping. These
+	// worktrees have no owning bead to consult, so this quarantine is the
+	// primary guard against reaping a checkout an agent has only just
+	// created. Nil (unset), zero or a negative value defaults to
+	// DefaultAutoReapRigWorktreesMinAgeMinutes: unlike
+	// AutoReapClosedBeadWorktreesMinAgeMinutes, zero cannot disable it.
+	AutoReapRigWorktreesMinAgeMinutes *int `toml:"auto_reap_rig_worktrees_min_age_minutes,omitempty" jsonschema:"default=1440"`
 	// StartReadyTimeout is how long `gc start` and `gc register` wait for
 	// the supervisor to report the city as Running. Cities with many
 	// registered or adopted sessions take longer to start because the
@@ -3173,17 +3192,44 @@ func (d *DaemonConfig) AutoReapClosedBeadWorktreesMinAge() time.Duration {
 	return time.Duration(*d.AutoReapClosedBeadWorktreesMinAgeMinutes) * time.Minute
 }
 
-// DefaultAutoReapRigWorktreesMinAgeMinutes is a RED-step stub.
-const DefaultAutoReapRigWorktreesMinAgeMinutes = 0
+// AutoReapRigWorktreesEnabled reports whether the patrol should remove
+// detached-HEAD worktrees under a rig's worktrees/ directory. Defaults to
+// false when the field is unset (nil).
+func (d *DaemonConfig) AutoReapRigWorktreesEnabled() bool {
+	if d.AutoReapRigWorktrees == nil {
+		return false
+	}
+	return *d.AutoReapRigWorktrees
+}
 
-// AutoReapRigWorktreesEnabled is a RED-step stub that always reports false.
-func (d *DaemonConfig) AutoReapRigWorktreesEnabled() bool { return false }
+// AutoReapRigWorktreesDryRunEnabled reports whether the patrol should run the
+// rig-worktree classification and emit would-reap/protected events without
+// removing anything. Defaults to false when the field is unset (nil). Real
+// removal (AutoReapRigWorktreesEnabled) supersedes dry-run, so callers treat
+// dry-run as active only when this is true AND real reaping is off.
+func (d *DaemonConfig) AutoReapRigWorktreesDryRunEnabled() bool {
+	if d.AutoReapRigWorktreesDryRun == nil {
+		return false
+	}
+	return *d.AutoReapRigWorktreesDryRun
+}
 
-// AutoReapRigWorktreesDryRunEnabled is a RED-step stub that always reports false.
-func (d *DaemonConfig) AutoReapRigWorktreesDryRunEnabled() bool { return false }
+// DefaultAutoReapRigWorktreesMinAgeMinutes is the quarantine window applied
+// when AutoReapRigWorktreesMinAgeMinutes is unset, zero or negative: 24 hours,
+// deliberately far above the closed-bead default because rig-root worktrees
+// have no owning bead to prove they are finished.
+const DefaultAutoReapRigWorktreesMinAgeMinutes = 24 * 60
 
-// AutoReapRigWorktreesMinAge is a RED-step stub that always reports zero.
-func (d *DaemonConfig) AutoReapRigWorktreesMinAge() time.Duration { return 0 }
+// AutoReapRigWorktreesMinAge returns the minimum worktree age before a
+// rig-root worktree is eligible for reaping. An unset, zero or negative
+// setting yields DefaultAutoReapRigWorktreesMinAgeMinutes; the quarantine
+// cannot be disabled.
+func (d *DaemonConfig) AutoReapRigWorktreesMinAge() time.Duration {
+	if d.AutoReapRigWorktreesMinAgeMinutes == nil || *d.AutoReapRigWorktreesMinAgeMinutes <= 0 {
+		return time.Duration(DefaultAutoReapRigWorktreesMinAgeMinutes) * time.Minute
+	}
+	return time.Duration(*d.AutoReapRigWorktreesMinAgeMinutes) * time.Minute
+}
 
 // AutoPruneWorkerDirEnabled reports whether the reconciler should remove a
 // pool-managed session's worker_dir after the session bead is closed. The

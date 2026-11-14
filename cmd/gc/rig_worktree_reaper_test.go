@@ -64,10 +64,10 @@ func (r *rigReapRecorder) ofType(typ string) []events.Event {
 	return out
 }
 
-func runDetachedReap(t *testing.T, cityPath string, cfg *config.City, sessionDirs []string, dryRun bool, rec events.Recorder, skips *reapSkipTracker) (reapReport, string) {
+func runDetachedReap(t *testing.T, cfg *config.City, sessionDirs []string, dryRun bool, rec events.Recorder, skips *reapSkipTracker) (reapReport, string) {
 	t.Helper()
 	var stderr bytes.Buffer
-	report := reapDetachedRigWorktrees(cityPath, cfg, nil, sessionDirs, dryRun, rec, skips, &stderr)
+	report := reapDetachedRigWorktrees(cfg, nil, sessionDirs, dryRun, rec, skips, &stderr)
 	return report, stderr.String()
 }
 
@@ -75,12 +75,12 @@ func runDetachedReap(t *testing.T, cityPath string, cfg *config.City, sessionDir
 // clean, old, detached worktree under <rig>/worktrees is removed, with no
 // owning bead anywhere in sight (eligibility is unconditional).
 func TestReapDetachedRigWorktrees_ReapsIdleDetachedWorktree(t *testing.T) {
-	cityPath, rigRoot := initReapRig(t)
+	_, rigRoot := initReapRig(t)
 	wt := addRigRootWorktree(t, rigRoot, "deploy-abc", true, 48*time.Hour)
 	injectLiveness(t, liveWorktreeState{scanned: true})
 	rec := &rigReapRecorder{}
 
-	report, stderr := runDetachedReap(t, cityPath, rigWorktreeConfig(rigRoot), nil, false, rec, nil)
+	report, stderr := runDetachedReap(t, rigWorktreeConfig(rigRoot), nil, false, rec, nil)
 
 	if len(report.Reaped) != 1 || filepath.Base(report.Reaped[0].Path) != "deploy-abc" {
 		t.Fatalf("Reaped = %+v, want exactly deploy-abc\nstderr:\n%s", report.Reaped, stderr)
@@ -106,11 +106,11 @@ func TestReapDetachedRigWorktrees_ReapsIdleDetachedWorktree(t *testing.T) {
 // belongs to subset A (ga-4wem3l) and this reaper must never touch it, however
 // old and idle it is.
 func TestReapDetachedRigWorktrees_SkipsBranchAttachedWorktree(t *testing.T) {
-	cityPath, rigRoot := initReapRig(t)
+	_, rigRoot := initReapRig(t)
 	wt := addRigRootWorktree(t, rigRoot, "ga-attached01", false, 48*time.Hour)
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
-	report, stderr := runDetachedReap(t, cityPath, rigWorktreeConfig(rigRoot), nil, false, events.Discard, nil)
+	report, stderr := runDetachedReap(t, rigWorktreeConfig(rigRoot), nil, false, events.Discard, nil)
 
 	if len(report.Reaped) != 0 || len(report.Protected) != 0 {
 		t.Fatalf("report = %+v, want branch-attached worktree entirely out of scope\nstderr:\n%s", report, stderr)
@@ -140,7 +140,7 @@ func TestReapDetachedRigWorktrees_IgnoresWorktreesOutsideRigWorktreesDir(t *test
 	backdateWorktreeGitFile(t, nested, 48*time.Hour)
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
-	report, stderr := runDetachedReap(t, cityPath, rigWorktreeConfig(rigRoot), nil, false, events.Discard, nil)
+	report, stderr := runDetachedReap(t, rigWorktreeConfig(rigRoot), nil, false, events.Discard, nil)
 
 	if len(report.Reaped) != 0 || len(report.Protected) != 0 {
 		t.Fatalf("report = %+v, want out-of-scope worktrees ignored\nstderr:\n%s", report, stderr)
@@ -156,11 +156,11 @@ func TestReapDetachedRigWorktrees_IgnoresWorktreesOutsideRigWorktreesDir(t *test
 // quarantine, which is the primary safety net given eligibility is otherwise
 // unconditional.
 func TestReapDetachedRigWorktrees_ProtectsTooYoung(t *testing.T) {
-	cityPath, rigRoot := initReapRig(t)
+	_, rigRoot := initReapRig(t)
 	wt := addRigRootWorktree(t, rigRoot, "review-young", true, time.Hour) // < 24h
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
-	report, _ := runDetachedReap(t, cityPath, rigWorktreeConfig(rigRoot), nil, false, events.Discard, nil)
+	report, _ := runDetachedReap(t, rigWorktreeConfig(rigRoot), nil, false, events.Discard, nil)
 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0 for a worktree inside the quarantine", report.Reaped)
@@ -177,14 +177,14 @@ func TestReapDetachedRigWorktrees_ProtectsTooYoung(t *testing.T) {
 // subset-B quarantine is its own knob: shrinking the closed-bead reaper's
 // min-age must not shrink this one.
 func TestReapDetachedRigWorktrees_MinAgeIsIndependentOfClosedBeadKnob(t *testing.T) {
-	cityPath, rigRoot := initReapRig(t)
+	_, rigRoot := initReapRig(t)
 	wt := addRigRootWorktree(t, rigRoot, "mayor-young", true, time.Hour)
 	injectLiveness(t, liveWorktreeState{scanned: true})
 	cfg := rigWorktreeConfig(rigRoot)
 	zero := 0
 	cfg.Daemon.AutoReapClosedBeadWorktreesMinAgeMinutes = &zero
 
-	report, _ := runDetachedReap(t, cityPath, cfg, nil, false, events.Discard, nil)
+	report, _ := runDetachedReap(t, cfg, nil, false, events.Discard, nil)
 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0: the closed-bead min-age knob must not govern subset B", report.Reaped)
@@ -197,11 +197,11 @@ func TestReapDetachedRigWorktrees_MinAgeIsIndependentOfClosedBeadKnob(t *testing
 // TestReapDetachedRigWorktrees_ProtectsLiveProcess proves the reused liveness
 // gate: a live process cwd inside the worktree vetoes the reap.
 func TestReapDetachedRigWorktrees_ProtectsLiveProcess(t *testing.T) {
-	cityPath, rigRoot := initReapRig(t)
+	_, rigRoot := initReapRig(t)
 	wt := addRigRootWorktree(t, rigRoot, "deploy-live", true, 48*time.Hour)
 	injectLiveness(t, liveWorktreeState{scanned: true, cwds: []string{pathutil.NormalizePathForCompare(wt)}})
 
-	report, _ := runDetachedReap(t, cityPath, rigWorktreeConfig(rigRoot), nil, false, events.Discard, nil)
+	report, _ := runDetachedReap(t, rigWorktreeConfig(rigRoot), nil, false, events.Discard, nil)
 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0 for a live worktree", report.Reaped)
@@ -217,11 +217,11 @@ func TestReapDetachedRigWorktrees_ProtectsLiveProcess(t *testing.T) {
 // TestReapDetachedRigWorktrees_ProtectsActiveSessionDir proves the session
 // cross-check: no live cwd, but an open session records this directory.
 func TestReapDetachedRigWorktrees_ProtectsActiveSessionDir(t *testing.T) {
-	cityPath, rigRoot := initReapRig(t)
+	_, rigRoot := initReapRig(t)
 	wt := addRigRootWorktree(t, rigRoot, "review-sess", true, 48*time.Hour)
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
-	report, _ := runDetachedReap(t, cityPath, rigWorktreeConfig(rigRoot), []string{wt}, false, events.Discard, nil)
+	report, _ := runDetachedReap(t, rigWorktreeConfig(rigRoot), []string{wt}, false, events.Discard, nil)
 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0 when a session claims the worktree", report.Reaped)
@@ -237,11 +237,11 @@ func TestReapDetachedRigWorktrees_ProtectsActiveSessionDir(t *testing.T) {
 // TestReapDetachedRigWorktrees_FailsClosedWhenLivenessUnavailable proves an
 // indeterminate /proc scan protects everything.
 func TestReapDetachedRigWorktrees_FailsClosedWhenLivenessUnavailable(t *testing.T) {
-	cityPath, rigRoot := initReapRig(t)
+	_, rigRoot := initReapRig(t)
 	wt := addRigRootWorktree(t, rigRoot, "deploy-noproc", true, 48*time.Hour)
 	injectLiveness(t, liveWorktreeState{scanned: false})
 
-	report, _ := runDetachedReap(t, cityPath, rigWorktreeConfig(rigRoot), nil, false, events.Discard, nil)
+	report, _ := runDetachedReap(t, rigWorktreeConfig(rigRoot), nil, false, events.Discard, nil)
 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0 when liveness is unavailable", report.Reaped)
@@ -257,14 +257,14 @@ func TestReapDetachedRigWorktrees_FailsClosedWhenLivenessUnavailable(t *testing.
 // TestReapDetachedRigWorktrees_ProtectsUncommittedWork proves the git-safety
 // gate on a dirty tree (an untracked file counts).
 func TestReapDetachedRigWorktrees_ProtectsUncommittedWork(t *testing.T) {
-	cityPath, rigRoot := initReapRig(t)
+	_, rigRoot := initReapRig(t)
 	wt := addRigRootWorktree(t, rigRoot, "deploy-dirty", true, 48*time.Hour)
 	if err := os.WriteFile(filepath.Join(wt, "scratch.txt"), []byte("wip\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
-	report, _ := runDetachedReap(t, cityPath, rigWorktreeConfig(rigRoot), nil, false, events.Discard, nil)
+	report, _ := runDetachedReap(t, rigWorktreeConfig(rigRoot), nil, false, events.Discard, nil)
 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0 for a dirty worktree", report.Reaped)
@@ -281,7 +281,7 @@ func TestReapDetachedRigWorktrees_ProtectsUncommittedWork(t *testing.T) {
 // hazard: a commit made on a detached HEAD is reachable from no ref, and
 // removing the checkout would orphan it.
 func TestReapDetachedRigWorktrees_ProtectsUnreachableCommits(t *testing.T) {
-	cityPath, rigRoot := initReapRig(t)
+	_, rigRoot := initReapRig(t)
 	wt := addRigRootWorktree(t, rigRoot, "deploy-orphan", true, 48*time.Hour)
 	if err := os.WriteFile(filepath.Join(wt, "work.txt"), []byte("work\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -291,7 +291,7 @@ func TestReapDetachedRigWorktrees_ProtectsUnreachableCommits(t *testing.T) {
 	backdateWorktreeGitFile(t, wt, 48*time.Hour)
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
-	report, _ := runDetachedReap(t, cityPath, rigWorktreeConfig(rigRoot), nil, false, events.Discard, nil)
+	report, _ := runDetachedReap(t, rigWorktreeConfig(rigRoot), nil, false, events.Discard, nil)
 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0 for a worktree holding an unreachable commit", report.Reaped)
@@ -308,7 +308,7 @@ func TestReapDetachedRigWorktrees_ProtectsUnreachableCommits(t *testing.T) {
 // the architecture ruling requires. `git stash list` is repo-wide, so any stash
 // in the rig repo protects every candidate there (the safe direction).
 func TestReapDetachedRigWorktrees_ProtectsWhenRepoHasStash(t *testing.T) {
-	cityPath, rigRoot := initReapRig(t)
+	_, rigRoot := initReapRig(t)
 	wt := addRigRootWorktree(t, rigRoot, "deploy-stash", true, 48*time.Hour)
 	if err := os.WriteFile(filepath.Join(rigRoot, "README.md"), []byte("changed\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -316,7 +316,7 @@ func TestReapDetachedRigWorktrees_ProtectsWhenRepoHasStash(t *testing.T) {
 	mustGit(t, rigRoot, "stash", "push", "-m", "ga-juwpxp-test-stash")
 	injectLiveness(t, liveWorktreeState{scanned: true})
 
-	report, _ := runDetachedReap(t, cityPath, rigWorktreeConfig(rigRoot), nil, false, events.Discard, nil)
+	report, _ := runDetachedReap(t, rigWorktreeConfig(rigRoot), nil, false, events.Discard, nil)
 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0 when the repo has a stash", report.Reaped)
@@ -332,13 +332,13 @@ func TestReapDetachedRigWorktrees_ProtectsWhenRepoHasStash(t *testing.T) {
 // TestReapDetachedRigWorktrees_NeverTouchesAgentHomeName proves the
 // session-home guard: a directory named after a configured agent is left alone.
 func TestReapDetachedRigWorktrees_NeverTouchesAgentHomeName(t *testing.T) {
-	cityPath, rigRoot := initReapRig(t)
+	_, rigRoot := initReapRig(t)
 	wt := addRigRootWorktree(t, rigRoot, "builder", true, 48*time.Hour)
 	injectLiveness(t, liveWorktreeState{scanned: true})
 	cfg := rigWorktreeConfig(rigRoot)
 	cfg.Agents = []config.Agent{{Name: "builder", Dir: reapTestRigName}}
 
-	report, _ := runDetachedReap(t, cityPath, cfg, nil, false, events.Discard, nil)
+	report, _ := runDetachedReap(t, cfg, nil, false, events.Discard, nil)
 
 	if len(report.Reaped) != 0 {
 		t.Fatalf("Reaped = %+v, want 0 for an agent-home directory", report.Reaped)
@@ -351,12 +351,12 @@ func TestReapDetachedRigWorktrees_NeverTouchesAgentHomeName(t *testing.T) {
 // TestReapDetachedRigWorktrees_DryRunDeletesNothing proves dry-run reports the
 // would-reap decision as a reap_skipped event and removes nothing.
 func TestReapDetachedRigWorktrees_DryRunDeletesNothing(t *testing.T) {
-	cityPath, rigRoot := initReapRig(t)
+	_, rigRoot := initReapRig(t)
 	wt := addRigRootWorktree(t, rigRoot, "mayor-dry", true, 48*time.Hour)
 	injectLiveness(t, liveWorktreeState{scanned: true})
 	rec := &rigReapRecorder{}
 
-	report, stderr := runDetachedReap(t, cityPath, rigWorktreeConfig(rigRoot), nil, true, rec, nil)
+	report, stderr := runDetachedReap(t, rigWorktreeConfig(rigRoot), nil, true, rec, nil)
 
 	if !report.DryRun || len(report.Reaped) != 1 {
 		t.Fatalf("report = %+v, want DryRun with 1 would-reap entry", report)
@@ -378,12 +378,12 @@ func TestReapDetachedRigWorktrees_DryRunDeletesNothing(t *testing.T) {
 // TestReapDetachedRigWorktrees_SkipsSuspendedRig proves a suspended rig is not
 // swept.
 func TestReapDetachedRigWorktrees_SkipsSuspendedRig(t *testing.T) {
-	cityPath, rigRoot := initReapRig(t)
+	_, rigRoot := initReapRig(t)
 	wt := addRigRootWorktree(t, rigRoot, "deploy-susp", true, 48*time.Hour)
 	injectLiveness(t, liveWorktreeState{scanned: true})
 	var stderr bytes.Buffer
 
-	report := reapDetachedRigWorktrees(cityPath, rigWorktreeConfig(rigRoot), map[string]bool{reapTestRigName: true}, nil, false, events.Discard, nil, &stderr)
+	report := reapDetachedRigWorktrees(rigWorktreeConfig(rigRoot), map[string]bool{reapTestRigName: true}, nil, false, events.Discard, nil, &stderr)
 
 	if len(report.Reaped) != 0 || len(report.Protected) != 0 {
 		t.Fatalf("report = %+v, want a suspended rig skipped", report)
@@ -397,15 +397,15 @@ func TestReapDetachedRigWorktrees_SkipsSuspendedRig(t *testing.T) {
 // reporting is edge-triggered like its sibling: an unchanged protected decision
 // is announced on the first pass only.
 func TestReapDetachedRigWorktrees_SkipTrackerSuppressesRepeats(t *testing.T) {
-	cityPath, rigRoot := initReapRig(t)
+	_, rigRoot := initReapRig(t)
 	addRigRootWorktree(t, rigRoot, "review-steady", true, time.Hour)
 	injectLiveness(t, liveWorktreeState{scanned: true})
 	rec := &rigReapRecorder{}
 	skips := newReapSkipTracker()
 	cfg := rigWorktreeConfig(rigRoot)
 
-	first, _ := runDetachedReap(t, cityPath, cfg, nil, false, rec, skips)
-	second, _ := runDetachedReap(t, cityPath, cfg, nil, false, rec, skips)
+	first, _ := runDetachedReap(t, cfg, nil, false, rec, skips)
+	second, _ := runDetachedReap(t, cfg, nil, false, rec, skips)
 
 	if len(first.Protected) != 1 || len(second.Protected) != 1 {
 		t.Fatalf("Protected counts = %d, %d, want 1 on both passes (report is never suppressed)", len(first.Protected), len(second.Protected))
@@ -418,7 +418,7 @@ func TestReapDetachedRigWorktrees_SkipTrackerSuppressesRepeats(t *testing.T) {
 // TestReapDetachedRigWorktrees_NilConfigIsNoop proves the nil guard.
 func TestReapDetachedRigWorktrees_NilConfigIsNoop(t *testing.T) {
 	var stderr bytes.Buffer
-	report := reapDetachedRigWorktrees(t.TempDir(), nil, nil, nil, false, nil, nil, &stderr)
+	report := reapDetachedRigWorktrees(nil, nil, nil, false, nil, nil, &stderr)
 	if len(report.Reaped) != 0 || len(report.Protected) != 0 {
 		t.Fatalf("report = %+v, want empty", report)
 	}
