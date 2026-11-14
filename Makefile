@@ -349,7 +349,15 @@ LINT_CHANGED_REF ?= HEAD
 LINT_CHANGED_SCOPE ?= worktree
 LINT_FLAGS ?=
 LINT_GOMEMLIMIT ?= 6GiB
-LINT_ENV = GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GOMEMLIMIT=$(LINT_GOMEMLIMIT)
+# golangci-lint's result cache is keyed by module-relative content, but a
+# cached issue keeps the absolute path of the checkout that produced it. Shared
+# across sibling or throwaway checkouts (scratch trees, extra worktrees) it
+# replays paths into a tree that may already be gone, and then the nolint and
+# generated-file processors cannot read the source: every suppressed finding
+# leaks and a clean tree lints red. Keep the cache inside the checkout; a
+# caller that wants one shared sets its own.
+GOLANGCI_LINT_CACHE ?= $(CURDIR)/.cache/golangci-lint
+LINT_ENV = GOFLAGS="$(QUALITY_GATE_GOFLAGS)" GOMEMLIMIT=$(LINT_GOMEMLIMIT) GOLANGCI_LINT_CACHE="$(GOLANGCI_LINT_CACHE)"
 QUALITY_GATE_GOFLAGS = $$(go env GOFLAGS | sed -E 's/(^|[[:space:]])-mod=[^[:space:]]+//g') -mod=readonly
 CI_STATIC_SELECT := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))scripts/ci-static-select
 
@@ -434,7 +442,7 @@ fmt-check-changed: $(GOLANGCI_LINT)
 
 ## fmt: auto-fix formatting
 fmt: $(GOLANGCI_LINT)
-	GOMEMLIMIT=$(LINT_GOMEMLIMIT) $(GOLANGCI_LINT) fmt ./...
+	GOMEMLIMIT=$(LINT_GOMEMLIMIT) GOLANGCI_LINT_CACHE="$(GOLANGCI_LINT_CACHE)" $(GOLANGCI_LINT) fmt ./...
 
 ## TEST_ENV: env -i wrapper for `go test` invocations. Strips host env so
 ## agent-session vars (GC_CITY, GC_HOME, GC_SESSION_ID, ...) cannot leak into
