@@ -13,11 +13,12 @@
 # closes that gap by re-reading bd's live state at the last possible moment
 # before the push leaves the machine.
 #
-# THE EXPORTED FUNCTION: assert_bead_still_claimed. Re-resolves which bead
-# this push is for (branch name, falling back to this session's in-progress
-# assignment), re-reads its live state from bd, and returns non-zero
-# (blocking the push) unless the bead is still open/in_progress, still
-# assigned to one of this session's identities (any of GC_SESSION_NAME,
+# THE EXPORTED FUNCTION: assert_bead_still_claimed [branch...]. Re-resolves
+# which bead this push is for, once per pushed branch it is given (the
+# checked-out branch when given none): branch name, falling back to this
+# session's in-progress assignment. It re-reads its live state from bd, and
+# returns non-zero (blocking the push) unless the bead is still
+# open/in_progress, still assigned to one of this session's identities (any of GC_SESSION_NAME,
 # GC_SESSION_ID, GC_ALIAS, GC_AGENT — mirroring the claim path — or
 # GC_TEMPLATE, for work routed to the whole pool rather than claimed by one
 # instance; see ga-kzl21p), still routed to this session's config identity,
@@ -196,9 +197,11 @@ _pog_ownership_violation() {
     return 0
 }
 
-# _pog_resolve_bead_id: prints the bead id this push should be checked
-# against; prints nothing if none can be resolved. Resolution order:
-#   1. The current branch name, matched against ga-[0-9a-z]{6,}(\.[0-9]+)* —
+# _pog_resolve_bead_id <branch>: prints the bead id a push of <branch> should
+# be checked against; prints nothing if none can be resolved. <branch> is a
+# branch being pushed (ga-bugldjz0), or the checked-out one when the caller
+# was told no pushed branch. Resolution order:
+#   1. The branch name, matched against ga-[0-9a-z]{6,}(\.[0-9]+)* —
 #      the bead's own id format (six characters for legacy ids, seven for
 #      current ones; {6,} takes the whole run, `-` and `/` end it),
 #      extended with zero or more repeated
@@ -275,8 +278,7 @@ _pog_ownership_violation() {
 # that as "nothing to check," which is what lets Layer A wire this in
 # unconditionally without blocking every push in the repo.
 _pog_resolve_bead_id() {
-    local branch=""
-    branch="$(git symbolic-ref --short HEAD 2>/dev/null || git branch --show-current 2>/dev/null || true)"
+    local branch="${1:-}"
 
     local branch_id=""
     if [[ -n "$branch" ]]; then
@@ -411,15 +413,11 @@ _pog_resolve_bead_id() {
     fi
 }
 
-# assert_bead_still_claimed: the exported guard. Returns 0 to allow the
-# push, non-zero to block it. See file header for the full contract.
-assert_bead_still_claimed() {
-    if [[ "${POG_DISABLE:-0}" == "1" ]]; then
-        return 0
-    fi
-
+# _pog_assert_branch_claimed <branch>: the whole guard for one pushed branch.
+# Returns 0 to allow its push, non-zero to block it.
+_pog_assert_branch_claimed() {
     local id
-    id="$(_pog_resolve_bead_id)"
+    id="$(_pog_resolve_bead_id "${1:-}")"
     if [[ "$id" == "$POG_AMBIGUOUS_SENTINEL" ]]; then
         echo "push-ownership-guard: BLOCKED — deploy-gate branch: could not read this session's in-progress assignment (bd unreachable or not on PATH), so ownership cannot be verified; re-run the push first — if it keeps failing, bd/Dolt needs attention. Last resort: git push --no-verify" >&2
         return 1
@@ -448,5 +446,28 @@ assert_bead_still_claimed() {
         echo "push-ownership-guard: BLOCKED — $id $reason. Bypass with: git push --no-verify" >&2
         return 1
     fi
+    return 0
+}
+
+# assert_bead_still_claimed [branch...]: the exported guard. Returns 0 to allow
+# the push, non-zero to block it. See file header for the full contract.
+# Each <branch> is a branch being pushed (the hook's refs/heads/* stdin refs);
+# every one must pass, so one stale bead blocks the push. With none, the bead
+# is resolved from the checked-out branch, which is right only when that is
+# the branch being pushed (rebase-resolve-lib.sh's own push).
+assert_bead_still_claimed() {
+    if [[ "${POG_DISABLE:-0}" == "1" ]]; then
+        return 0
+    fi
+
+    if [[ $# -eq 0 ]]; then
+        _pog_assert_branch_claimed "$(git symbolic-ref --short HEAD 2>/dev/null || git branch --show-current 2>/dev/null || true)"
+        return
+    fi
+
+    local pushed_branch
+    for pushed_branch in "$@"; do
+        _pog_assert_branch_claimed "$pushed_branch" || return 1
+    done
     return 0
 }
