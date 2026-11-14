@@ -1589,6 +1589,14 @@ func routeOrderHistory(cityPath string, cfg *config.City, name, rig string, aa [
 		return doOrderHistoryBounded(name, rig, aa, cachedOrderHistoryStoresResolver(cityPath, cfg, stderr), bounds, jsonOutput, stdout, stderr)
 	}
 
+	// The API read is keyed by one order's scoped name, so with no --rig a name
+	// carried by orders in several rigs would answer for whichever loaded first
+	// and silently omit the rest. Read every matching order locally instead.
+	if rig == "" && countOrdersNamed(aa, name) > 1 {
+		logRoute(stderr, "order history", "fallback", "multi-rig")
+		return doOrderHistoryBounded(name, rig, aa, cachedOrderHistoryStoresResolver(cityPath, cfg, stderr), bounds, jsonOutput, stdout, stderr)
+	}
+
 	// The API has no wire representation for an unlimited read: omitting
 	// `limit` selects the server's own default (20), not "everything". Stay
 	// on the local iterator so `--limit 0` keeps meaning every retained run.
@@ -2139,6 +2147,17 @@ func findOrder(aa []orders.Order, name, rig string) (orders.Order, bool) {
 		}
 	}
 	return orders.Order{}, false
+}
+
+// countOrdersNamed reports how many loaded orders carry name, across every rig.
+func countOrdersNamed(aa []orders.Order, name string) int {
+	n := 0
+	for _, a := range aa {
+		if a.Name == name {
+			n++
+		}
+	}
+	return n
 }
 
 // bdCursorRecentRunsLimit caps the cursor read to the newest tracking beads.

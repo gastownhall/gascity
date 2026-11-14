@@ -4252,6 +4252,21 @@ func sameNameTwoRigsHistoryFixture(t *testing.T) (cityPath string, cfg *config.C
 }
 
 // TestRouteOrderHistory_SameNameInTwoRigsCoversBoth pins the default answer of
+// orderHistoryRoundTripFunc serves the API client in-process, so a test that
+// only needs to see which request arrived starts no listener.
+type orderHistoryRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f orderHistoryRoundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func orderHistoryJSONResponse(r *http.Request, status int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Request:    r,
+	}
+}
+
 // `gc order history <name>` with no --rig: when the name is carried by orders in
 // more than one rig, the read must cover every one of them, not the first
 // loaded match. The bounded API route is scoped to a single order's scoped name,
@@ -4260,12 +4275,10 @@ func TestRouteOrderHistory_SameNameInTwoRigsCoversBoth(t *testing.T) {
 	t.Setenv("GC_DEBUG", "1")
 	cityPath, cfg, aa, runIDs := sameNameTwoRigsHistoryFixture(t)
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c := api.NewCityScopedClientWithHTTPClient("http://example.com", "test-city", &http.Client{Transport: orderHistoryRoundTripFunc(func(r *http.Request) (*http.Response, error) {
 		t.Errorf("API reached for a name carried by two rigs with no --rig (%s): it can only answer for one rig's scoped name", r.URL)
-		http.Error(w, "unexpected", http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-	c := api.NewCityScopedClient(srv.URL, "test-city")
+		return orderHistoryJSONResponse(r, http.StatusInternalServerError, "{}"), nil
+	})})
 
 	var stdout, stderr bytes.Buffer
 	if got := routeOrderHistory(cityPath, cfg, "digest", "", aa, c, "", orderHistoryBounds{Limit: defaultOrderHistoryLimit}, false, &stdout, &stderr); got != 0 {
@@ -4289,13 +4302,10 @@ func TestRouteOrderHistory_SameNameWithRigStaysOnAPI(t *testing.T) {
 	cityPath, cfg, aa, _ := sameNameTwoRigsHistoryFixture(t)
 
 	var requested []string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	c := api.NewCityScopedClientWithHTTPClient("http://example.com", "test-city", &http.Client{Transport: orderHistoryRoundTripFunc(func(r *http.Request) (*http.Response, error) {
 		requested = append(requested, r.URL.Query().Get("scoped_name"))
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"entries": []map[string]any{}})
-	}))
-	defer srv.Close()
-	c := api.NewCityScopedClient(srv.URL, "test-city")
+		return orderHistoryJSONResponse(r, http.StatusOK, `{"entries":[]}`), nil
+	})})
 
 	var stdout, stderr bytes.Buffer
 	if got := routeOrderHistory(cityPath, cfg, "digest", "beta", aa, c, "", orderHistoryBounds{Limit: defaultOrderHistoryLimit}, false, &stdout, &stderr); got != 0 {
