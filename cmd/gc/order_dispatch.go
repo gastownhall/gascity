@@ -3795,7 +3795,7 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 	byOrder := bucketClosedRetentionRuns(runs, onlyOrders)
 
 	cutoff := now.Add(-policy.deleteAfterClose)
-	deleted := 0
+	var cleared []string
 	var retained []string
 	var deleteErr error
 	for _, runs := range byOrder {
@@ -3814,11 +3814,7 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 			if !orderTrackingClosedReferenceTime(run).Before(cutoff) {
 				continue
 			}
-			// deleteWorkflowBead is the graph-aware delete (dep unwind) the
-			// retention prune uses; it stays raw graph residual. A closed
-			// tracking root can still own OPEN steps — the delete refuses
-			// those rather than stranding them (ga-ejwo1q).
-			if err := deleteWorkflowBead(store, run.ID); err != nil {
+			if err := assertWorkflowDeleteLeavesNothingStranded(store, run.ID, nil); err != nil {
 				if errors.Is(err, errWorkflowDeleteLiveDescendants) {
 					retained = append(retained, run.ID)
 					continue
@@ -3826,11 +3822,14 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 				deleteErr = errors.Join(deleteErr, fmt.Errorf("deleting closed order-tracking bead %q: %w", run.ID, err))
 				continue
 			}
-			deleted++
+			cleared = append(cleared, run.ID)
 		}
 	}
 	logRetainedForLiveDescendants(retained)
-	return deleted, deleteErr
+	if err := deleteWorkflowBeadsBatchGuarded(store, cleared); err != nil {
+		return 0, errors.Join(deleteErr, fmt.Errorf("deleting %d closed order-tracking beads: %w", len(cleared), err))
+	}
+	return len(cleared), deleteErr
 }
 
 // logRetainedForLiveDescendants reports the candidates the retention prune
@@ -3874,11 +3873,11 @@ func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, 
 	byOrder := bucketClosedRetentionRuns(runs, onlyOrders)
 
 	cutoff := now.Add(-policy.deleteAfterClose)
-	deleted := 0
+	var cleared []string
 	var retained []string
 	var deleteErr error
 	for _, runs := range byOrder {
-		if deleted >= limit {
+		if len(cleared) >= limit {
 			break
 		}
 		sort.Slice(runs, func(i, j int) bool {
@@ -3893,13 +3892,13 @@ func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, 
 			continue
 		}
 		for _, run := range runs[policy.retainLast:] {
-			if deleted >= limit {
+			if len(cleared) >= limit {
 				break
 			}
 			if !orderTrackingClosedReferenceTime(run).Before(cutoff) {
 				continue
 			}
-			if err := deleteWorkflowBead(store, run.ID); err != nil {
+			if err := assertWorkflowDeleteLeavesNothingStranded(store, run.ID, nil); err != nil {
 				if errors.Is(err, errWorkflowDeleteLiveDescendants) {
 					retained = append(retained, run.ID)
 					continue
@@ -3907,11 +3906,14 @@ func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, 
 				deleteErr = errors.Join(deleteErr, fmt.Errorf("deleting closed order-tracking bead %q: %w", run.ID, err))
 				continue
 			}
-			deleted++
+			cleared = append(cleared, run.ID)
 		}
 	}
 	logRetainedForLiveDescendants(retained)
-	return deleted, deleteErr
+	if err := deleteWorkflowBeadsBatchGuarded(store, cleared); err != nil {
+		return 0, errors.Join(deleteErr, fmt.Errorf("deleting %d closed order-tracking beads: %w", len(cleared), err))
+	}
+	return len(cleared), deleteErr
 }
 
 // countClosedOrderTrackingRetentionEligible returns the number of closed
