@@ -300,6 +300,49 @@ type beadsScriptOptions struct {
 	ListOutput  string
 	ReadyOutput string
 	Stdin       string
+	// ExecRules make the fake kubectl's `exec gc-beads-runner -- sh -c` branch
+	// answer a matching bd call with a chosen status and output instead of the
+	// generic `exit 0`. The first matching rule wins.
+	ExecRules []kubectlExecRule
+}
+
+// kubectlExecRule is one canned answer for the fake kubectl's exec branch.
+type kubectlExecRule struct {
+	// Match is a substring of the call's joined argv. Match the init call by
+	// " init --server" and the types call by "config set types.custom"; neither
+	// text occurs in run_bd's `sh -c` body.
+	Match string
+	// Status is the exit status the fake returns.
+	Status int
+	// Stdout and Stderr are written verbatim before exiting. They travel
+	// through files so multi-line text needs no shell quoting.
+	Stdout string
+	Stderr string
+}
+
+// shellSingleQuote quotes s as one literal bash word.
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// execRulesScript renders opts.ExecRules as bash `if` blocks for the fake
+// kubectl, writing each rule's stdout and stderr text into dir.
+func execRulesScript(t *testing.T, dir string, rules []kubectlExecRule) string {
+	t.Helper()
+	var b strings.Builder
+	for i, rule := range rules {
+		outPath := filepath.Join(dir, fmt.Sprintf("rule%d.stdout", i))
+		errPath := filepath.Join(dir, fmt.Sprintf("rule%d.stderr", i))
+		if err := os.WriteFile(outPath, []byte(rule.Stdout), 0o644); err != nil {
+			t.Fatalf("write rule stdout: %v", err)
+		}
+		if err := os.WriteFile(errPath, []byte(rule.Stderr), 0o644); err != nil {
+			t.Fatalf("write rule stderr: %v", err)
+		}
+		fmt.Fprintf(&b, "  if [[ \"$*\" == *%s* ]]; then\n    cat %s\n    cat %s >&2\n    exit %d\n  fi\n",
+			shellSingleQuote(rule.Match), shellSingleQuote(outPath), shellSingleQuote(errPath), rule.Status)
+	}
+	return b.String()
 }
 
 // podSecurityContext is the subset of a pod's `spec.securityContext` the
@@ -363,7 +406,7 @@ if [[ "$joined" == *" wait --for=condition=Ready pod/gc-beads-runner "* ]]; then
   exit 0
 fi
 if [[ "$joined" == *" exec gc-beads-runner -- sh -c "* ]]; then
-  if [[ "$*" == *" list --json --limit 0 --all"* ]]; then
+%s  if [[ "$*" == *" list --json --limit 0 --all"* ]]; then
     printf '%%s' "$list_output"
     exit 0
   fi
@@ -379,7 +422,7 @@ if [[ "$joined" == *" exec gc-beads-runner -- sh -c "* ]]; then
 fi
 printf 'unexpected kubectl call: %%s\n' "$*" >&2
 exit 1
-`, manifestPath, callLogPath, opts.ListOutput, opts.ReadyOutput, opts.PodPhase)
+`, manifestPath, callLogPath, opts.ListOutput, opts.ReadyOutput, opts.PodPhase, execRulesScript(t, tmpDir, opts.ExecRules))
 	if err := os.WriteFile(fakeKubectl, []byte(kubectlScript), 0o755); err != nil {
 		t.Fatalf("write fake kubectl: %v", err)
 	}
@@ -561,6 +604,244 @@ func TestBeadsScriptListProjectsParentAndPriority(t *testing.T) {
 			}
 			if got[0].Priority == nil || *got[0].Priority != 1 {
 				t.Errorf("priority = %v, want 1", got[0].Priority)
+			}
+		})
+	}
+}
+
+// beadsScriptInitEnv is the projected scope env an init runs under.
+var beadsScriptInitEnv = map[string]string{
+	"GC_CITY_PATH":    "/city",
+	"GC_STORE_ROOT":   "/city/frontend",
+	"GC_BEADS_PREFIX": "fe",
+	"GC_DOLT_HOST":    "canonical-dolt.example.com",
+	"GC_DOLT_PORT":    "4406",
+}
+
+const (
+	// beadsInitCallMatch and beadsTypesCallMatch pick the two bd calls the init
+	// op makes out of the fake kubectl's joined argv.
+	beadsInitCallMatch  = " init --server"
+	beadsTypesCallMatch = "config set types.custom"
+
+	// bdDirtyTablesText is beads' dirty-table refusal, verbatim. cmd/gc matches
+	// its marker by substring, so the init op must pass it through untouched.
+	bdDirtyTablesText = "bd init: pending schema migrations alter pre-existing dirty tables: " +
+		"config, dependencies; run 'bd dolt commit' to commit the working set at the current schema, " +
+		"then re-run the migration (gastownhall/beads#4566)"
+
+	// bdPrefixMismatchText is bd's abort for an initialized workspace asked for
+	// another prefix (architect experiment T4). Its words include "already
+	// initialized", so a script that tolerated that text would swallow it.
+	bdPrefixMismatchText = `Error: workspace already initialized as database "fe", but --prefix "zz" was requested.`
+
+	// bdProjectIdentityMismatchText is what a recreated pod's fresh workspace
+	// gets from every bd call once init has minted it a new project id (E2).
+	bdProjectIdentityMismatchText = "Error: failed to open database: PROJECT IDENTITY MISMATCH — refusing to connect"
+
+	// bdInitInstallerChatter is what a successful fresh init still prints
+	// despite --quiet (architect experiments T9, E5, E7).
+	bdInitInstallerChatter = "Installing git hooks...\nWrote CLAUDE.md\nWrote AGENTS.md\n"
+)
+
+func runBeadsInit(t *testing.T, args []string, rules ...kubectlExecRule) beadsScriptResult {
+	t.Helper()
+	return runBeadsScript(t, beadsScriptOptions{
+		Op:        "init",
+		Args:      args,
+		Env:       beadsScriptInitEnv,
+		ExecRules: rules,
+	})
+}
+
+// requireInitExitOne fails unless the op exited with exactly 1: gc reads exit 2
+// as "not needed", so a failure must never leave the script as anything else.
+func requireInitExitOne(t *testing.T, result beadsScriptResult) {
+	t.Helper()
+	var exitErr *exec.ExitError
+	if !errors.As(result.err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("init error = %v, want exit code 1\noutput:\n%s", result.err, result.output)
+	}
+}
+
+// requireTextBeforeStatusLine fails unless text is in output verbatim and is
+// followed by the status line the op ends with.
+func requireTextBeforeStatusLine(t *testing.T, output, text, status string) {
+	t.Helper()
+	textAt := strings.Index(output, text)
+	if textAt < 0 {
+		t.Fatalf("output lacks bd's text verbatim %q:\n%s", text, output)
+	}
+	if statusAt := strings.Index(output[textAt:], status); statusAt < 0 {
+		t.Fatalf("output lacks %q after bd's text:\n%s", status, output)
+	}
+}
+
+// beadsInitCall returns the call-log line of the bd init call.
+func beadsInitCall(t *testing.T, callLog string) string {
+	t.Helper()
+	var found []string
+	for _, line := range strings.Split(callLog, "\n") {
+		if strings.Contains(line, beadsInitCallMatch) {
+			found = append(found, line)
+		}
+	}
+	if len(found) != 1 {
+		t.Fatalf("want exactly one bd init call, got %d in call log:\n%s", len(found), callLog)
+	}
+	return found[0]
+}
+
+// TestBeadsScriptInitSuccessIsQuiet pins that a successful init prints
+// nothing: --quiet alone still lets bd's installer chatter through.
+func TestBeadsScriptInitSuccessIsQuiet(t *testing.T) {
+	result := runBeadsInit(t, []string{"/city/frontend", "fe"},
+		kubectlExecRule{Match: beadsInitCallMatch, Stdout: bdInitInstallerChatter, Stderr: "Initialized.\n"})
+	if result.err != nil {
+		t.Fatalf("init error = %v\noutput:\n%s", result.err, result.output)
+	}
+	if strings.TrimSpace(result.output) != "" {
+		t.Fatalf("successful init printed output, want none:\n%s", result.output)
+	}
+}
+
+// TestBeadsScriptInitPropagatesBdFailure pins that a failed bd init fails the
+// op: bd's text arrives verbatim (cmd/gc's dirty-table remedy matches it), the
+// status line names the original status, and config set does not run.
+func TestBeadsScriptInitPropagatesBdFailure(t *testing.T) {
+	result := runBeadsInit(t, []string{"/city/frontend", "fe"},
+		kubectlExecRule{Match: beadsInitCallMatch, Status: 1, Stderr: bdDirtyTablesText + "\n"})
+	requireInitExitOne(t, result)
+	requireTextBeforeStatusLine(t, result.output, bdDirtyTablesText, "exit 1")
+	assertCallNotContains(t, result.callLog, "config set")
+}
+
+// TestBeadsScriptInitFailureNeverExitsTwo pins the trap: gc reads a lifecycle
+// op's exit 2 as "not needed" and reports success, so a bd or kubectl status of
+// 2 must leave the script as 1 with the original status named in the message.
+func TestBeadsScriptInitFailureNeverExitsTwo(t *testing.T) {
+	result := runBeadsInit(t, []string{"/city/frontend", "fe"},
+		kubectlExecRule{Match: beadsInitCallMatch, Status: 2, Stderr: "Error: unknown flag: --init-if-missing\n"})
+	requireInitExitOne(t, result)
+	requireTextBeforeStatusLine(t, result.output, "Error: unknown flag: --init-if-missing", "exit 2")
+}
+
+// TestBeadsScriptInitSurfacesTransportFailure pins that a kubectl transport
+// failure (a pod that is not there to exec into) fails the op with its text.
+func TestBeadsScriptInitSurfacesTransportFailure(t *testing.T) {
+	const text = `error: unable to upgrade connection: container not found ("gc-beads-runner")`
+	result := runBeadsInit(t, []string{"/city/frontend", "fe"},
+		kubectlExecRule{Match: beadsInitCallMatch, Status: 1, Stderr: text + "\n"})
+	requireInitExitOne(t, result)
+	requireTextBeforeStatusLine(t, result.output, text, "exit 1")
+}
+
+// TestBeadsScriptInitDoesNotTolerateAlreadyInitializedText pins that the
+// idempotent re-init is bd's own typed answer (--init-if-missing exits 0), not
+// a match on its output: a real failure's message contains the same words.
+func TestBeadsScriptInitDoesNotTolerateAlreadyInitializedText(t *testing.T) {
+	result := runBeadsInit(t, []string{"/city/frontend", "zz"},
+		kubectlExecRule{Match: beadsInitCallMatch, Status: 1, Stderr: bdPrefixMismatchText + "\n"})
+	requireInitExitOne(t, result)
+	requireTextBeforeStatusLine(t, result.output, bdPrefixMismatchText, "exit 1")
+}
+
+// TestBeadsScriptInitUsesInitIfMissing pins the argv of the tolerated case:
+// the new flags go after the existing arguments, so `init --server` still
+// leads. A prefix that is not a plain identifier keeps the line to exactly the
+// old command plus the two flags.
+func TestBeadsScriptInitUsesInitIfMissing(t *testing.T) {
+	result := runBeadsInit(t, []string{"/city/frontend", "my-rig"})
+	if result.err != nil {
+		t.Fatalf("init error = %v\noutput:\n%s", result.err, result.output)
+	}
+	call := beadsInitCall(t, result.callLog)
+	const want = "init --server --server-host canonical-dolt.example.com --server-port 4406 -p my-rig --skip-hooks --init-if-missing --quiet"
+	if !strings.HasSuffix(strings.TrimSpace(call), want) {
+		t.Fatalf("init call = %q, want it to end with %q", call, want)
+	}
+}
+
+// TestBeadsScriptInitPropagatesConfigSetFailure pins that a failed
+// `config set types.custom` fails the op too, with the same shape.
+func TestBeadsScriptInitPropagatesConfigSetFailure(t *testing.T) {
+	result := runBeadsInit(t, []string{"/city/frontend", "fe"},
+		kubectlExecRule{Match: beadsTypesCallMatch, Status: 1, Stderr: bdDirtyTablesText + "\n"})
+	requireInitExitOne(t, result)
+	requireTextBeforeStatusLine(t, result.output, bdDirtyTablesText, "exit 1")
+	assertCallContains(t, result.callLog, beadsTypesCallMatch)
+}
+
+// TestBeadsScriptInitIgnoresConfigSetWarnings pins that the op decides by bd's
+// status, never by stderr being non-empty: a deprecation warning with exit 0
+// (architect experiment T7) is not a failure.
+func TestBeadsScriptInitIgnoresConfigSetWarnings(t *testing.T) {
+	result := runBeadsInit(t, []string{"/city/frontend", "fe"},
+		kubectlExecRule{Match: beadsTypesCallMatch, Status: 0, Stderr: "warning: dolt_server_port is deprecated\n"})
+	if result.err != nil {
+		t.Fatalf("init error = %v, want success on a warning with exit 0\noutput:\n%s", result.err, result.output)
+	}
+	assertCallContains(t, result.callLog, beadsTypesCallMatch)
+}
+
+// TestBeadsScriptInitFailedConfigSetReportsIdentityMismatch is the recreated
+// pod's failure once init stops swallowing it: bd's PROJECT IDENTITY MISMATCH
+// reaches gc instead of vanishing.
+func TestBeadsScriptInitFailedConfigSetReportsIdentityMismatch(t *testing.T) {
+	result := runBeadsInit(t, []string{"/city/frontend", "my-rig"},
+		kubectlExecRule{Match: beadsTypesCallMatch, Status: 1, Stderr: bdProjectIdentityMismatchText + "\n"})
+	requireInitExitOne(t, result)
+	requireTextBeforeStatusLine(t, result.output, bdProjectIdentityMismatchText, "exit 1")
+}
+
+// TestBeadsScriptInitPlainPrefixReattachesDatabase pins --database <prefix> for
+// a plain-identifier prefix, so a recreated pod's fresh workspace adopts the
+// existing database's project id. The name is the prefix, never arg 3: gc
+// passes "hq" there for the city scope while every k8s city's database is
+// named after its prefix.
+func TestBeadsScriptInitPlainPrefixReattachesDatabase(t *testing.T) {
+	for _, prefix := range []string{"fe", "My_Rig2"} {
+		t.Run(prefix, func(t *testing.T) {
+			result := runBeadsInit(t, []string{"/city/frontend", prefix, "hq"})
+			if result.err != nil {
+				t.Fatalf("init error = %v\noutput:\n%s", result.err, result.output)
+			}
+			call := beadsInitCall(t, result.callLog)
+			if !strings.Contains(call, "init --server") {
+				t.Fatalf("init call = %q, want init --server", call)
+			}
+			fields := strings.Fields(call)
+			at := -1
+			for i, field := range fields {
+				if field == "--database" {
+					if at >= 0 {
+						t.Fatalf("init call = %q, want one --database", call)
+					}
+					at = i
+				}
+			}
+			if at < 0 || at+1 >= len(fields) {
+				t.Fatalf("init call = %q, want --database <prefix>", call)
+			}
+			if got := fields[at+1]; got != prefix {
+				t.Fatalf("--database = %q, want the prefix %q (never arg 3)", got, prefix)
+			}
+		})
+	}
+}
+
+// TestBeadsScriptInitOmitsDatabaseForNonIdentifierPrefix pins that any other
+// prefix keeps the command exactly as it was: the script does not copy bd's
+// naming rules for it.
+func TestBeadsScriptInitOmitsDatabaseForNonIdentifierPrefix(t *testing.T) {
+	for _, prefix := range []string{"my-rig", "my.rig", "1rig", "_rig", "rigé"} {
+		t.Run(prefix, func(t *testing.T) {
+			result := runBeadsInit(t, []string{"/city/frontend", prefix, "hq"})
+			if result.err != nil {
+				t.Fatalf("init error = %v\noutput:\n%s", result.err, result.output)
+			}
+			if call := beadsInitCall(t, result.callLog); strings.Contains(call, "--database") {
+				t.Fatalf("init call = %q, want no --database for prefix %q", call, prefix)
 			}
 		})
 	}
