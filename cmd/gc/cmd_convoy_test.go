@@ -13,9 +13,11 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -4061,6 +4063,545 @@ func TestRouteConvoyListAPITextNotesHiddenSynthetic(t *testing.T) {
 	}
 	if !strings.Contains(out, "1 synthetic convoy(s) hidden") {
 		t.Errorf("stdout missing the hidden-synthetic note:\n%s", out)
+	}
+}
+
+// --- gc convoy list --limit ---
+
+// convoyLimitNotice is the stderr line a cut listing prints: the rows shown,
+// the rows the complete listing would print, and the limit that cut it.
+func convoyLimitNotice(shown, total, limit int) string {
+	return fmt.Sprintf("gc convoy list: showing %d of %d open convoys (--limit %d); omit --limit to list all\n", shown, total, limit)
+}
+
+// limitTestConvoy is one convoy a --limit test seeds, in creation order.
+type limitTestConvoy struct {
+	id        string
+	synthetic bool
+}
+
+// limitTestConvoys makes hand-made convoys with the given IDs.
+func limitTestConvoys(ids ...string) []limitTestConvoy {
+	out := make([]limitTestConvoy, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, limitTestConvoy{id: id})
+	}
+	return out
+}
+
+// newLimitTestStore creates the convoys in the order given. MemStore stamps
+// CreatedAt strictly increasing, so a later convoy is a newer one whatever
+// its ID sorts as.
+func newLimitTestStore(t *testing.T, convoys []limitTestConvoy) *beads.MemStore {
+	t.Helper()
+	store := beads.NewMemStore()
+	store.HonorExplicitIDs = true
+	for _, c := range convoys {
+		b := beads.Bead{ID: c.id, Title: "convoy " + c.id, Type: "convoy"}
+		if c.synthetic {
+			b.Metadata = syntheticConvoyMetadata()
+		}
+		if _, err := store.Create(b); err != nil {
+			t.Fatalf("create convoy %s: %v", c.id, err)
+		}
+	}
+	return store
+}
+
+// memberReadCountingStore counts the member reads (a List by parent) made for
+// each convoy.
+type memberReadCountingStore struct {
+	*beads.MemStore
+	mu    sync.Mutex
+	reads map[string]int
+}
+
+func (s *memberReadCountingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.ParentID != "" {
+		s.mu.Lock()
+		s.reads[q.ParentID]++
+		s.mu.Unlock()
+	}
+	return s.MemStore.List(q)
+}
+
+// listLimitedConvoys runs the offline lane over store and returns its exit
+// code and both streams.
+func listLimitedConvoys(store beads.Store, opts convoyListOptions) (code int, stdout, stderr string) {
+	var so, se bytes.Buffer
+	code = doConvoyListAcrossStores([]convoyStoreView{{store: store}}, opts, &so, &se)
+	return code, so.String(), se.String()
+}
+
+// decodeConvoyListJSON decodes the one JSONL line gc convoy list --json prints.
+func decodeConvoyListJSON(t *testing.T, out string) (result convoyListResultJSON, ids []string) {
+	t.Helper()
+	if strings.Count(strings.TrimSuffix(out, "\n"), "\n") != 0 {
+		t.Fatalf("stdout is not one JSONL line:\n%s", out)
+	}
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, out)
+	}
+	for _, c := range result.Convoys {
+		ids = append(ids, c.ID)
+	}
+	return result, ids
+}
+
+// TestConvoyListLimitCutsToTheNewestWithStderrNotice pins the cut itself: the
+// newest N convoys are listed, the cut is loud on stderr and the exit is 0.
+func TestConvoyListLimitCutsToTheNewestWithStderrNotice(t *testing.T) {
+	store := newLimitTestStore(t, limitTestConvoys("gc-a", "gc-b", "gc-c", "gc-d", "gc-e"))
+
+	code, stdout, stderr := listLimitedConvoys(store, convoyListOptions{limit: 2})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
+	}
+	for _, want := range []string{"gc-d", "gc-e"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout missing the newest convoy %s:\n%s", want, stdout)
+		}
+	}
+	for _, old := range []string{"gc-a", "gc-b", "gc-c"} {
+		if strings.Contains(stdout, old) {
+			t.Errorf("stdout lists %s, older than the newest 2:\n%s", old, stdout)
+		}
+	}
+	if want := convoyLimitNotice(2, 5, 2); stderr != want {
+		t.Errorf("stderr = %q, want %q", stderr, want)
+	}
+}
+
+// TestConvoyListLimitJSONCutReportsTruncated pins the --json projection of a
+// cut: still one schema-valid line, summary.total is the complete listing's
+// count and summary.truncated says rows were left out.
+func TestConvoyListLimitJSONCutReportsTruncated(t *testing.T) {
+	store := newLimitTestStore(t, limitTestConvoys("gc-a", "gc-b", "gc-c", "gc-d", "gc-e"))
+
+	code, stdout, stderr := listLimitedConvoys(store, convoyListOptions{jsonOut: true, limit: 2})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
+	}
+	validateJSONAgainstResultSchema(t, []string{"convoy", "list"}, []byte(stdout))
+	result, ids := decodeConvoyListJSON(t, stdout)
+	if want := []string{"gc-d", "gc-e"}; !slices.Equal(ids, want) {
+		t.Errorf("convoys = %v, want %v", ids, want)
+	}
+	if result.Summary.Total != 5 || !result.Summary.Truncated {
+		t.Errorf("summary = %+v, want total 5 (the complete listing) and truncated", result.Summary)
+	}
+	if want := convoyLimitNotice(2, 5, 2); stderr != want {
+		t.Errorf("stderr = %q, want %q", stderr, want)
+	}
+}
+
+// TestConvoyListLimitThatDoesNotCutIsUnchanged pins that a limit the listing
+// fits within (exactly, or with room to spare) and no limit at all print the
+// same bytes as today: no notice, no truncated key.
+func TestConvoyListLimitThatDoesNotCutIsUnchanged(t *testing.T) {
+	store := newLimitTestStore(t, limitTestConvoys("gc-a", "gc-b", "gc-c", "gc-d", "gc-e"))
+
+	for _, jsonOut := range []bool{false, true} {
+		_, want, _ := listLimitedConvoys(store, convoyListOptions{jsonOut: jsonOut})
+		for _, limit := range []int{0, 5, 9} {
+			t.Run(fmt.Sprintf("json=%v/limit=%d", jsonOut, limit), func(t *testing.T) {
+				code, stdout, stderr := listLimitedConvoys(store, convoyListOptions{jsonOut: jsonOut, limit: limit})
+				if code != 0 {
+					t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
+				}
+				if stdout != want {
+					t.Errorf("stdout differs from the unlimited listing\n--- unlimited ---\n%s\n--- limit %d ---\n%s", want, limit, stdout)
+				}
+				if stderr != "" {
+					t.Errorf("stderr = %q, want empty: nothing was cut", stderr)
+				}
+				if strings.Contains(stdout, "truncated") {
+					t.Errorf("stdout mentions truncated though nothing was cut:\n%s", stdout)
+				}
+			})
+		}
+	}
+}
+
+// TestConvoyListLimitKeepsTheNewestByCreationNotByID pins which convoys the
+// cut keeps: the newest by creation time (ID breaking a tie), and they are
+// then printed in the listing's ID order.
+func TestConvoyListLimitKeepsTheNewestByCreationNotByID(t *testing.T) {
+	// Created c, then b, then a: the newest two are a and b, though c has the
+	// highest ID.
+	store := newLimitTestStore(t, limitTestConvoys("gc-c", "gc-b", "gc-a"))
+
+	code, stdout, stderr := listLimitedConvoys(store, convoyListOptions{jsonOut: true, limit: 2})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
+	}
+	result, ids := decodeConvoyListJSON(t, stdout)
+	if want := []string{"gc-a", "gc-b"}; !slices.Equal(ids, want) {
+		t.Errorf("convoys = %v, want %v (the newest two by creation, in ID order)", ids, want)
+	}
+	if result.Summary.Total != 3 || !result.Summary.Truncated {
+		t.Errorf("summary = %+v, want total 3 and truncated", result.Summary)
+	}
+}
+
+// TestConvoyListLimitCountsListedRowsNotHiddenOnes pins that N counts the
+// convoys the listing would print: the synthetic convoys are hidden first, so
+// the newest N synthetic ones never use up the limit.
+func TestConvoyListLimitCountsListedRowsNotHiddenOnes(t *testing.T) {
+	store := newLimitTestStore(t, []limitTestConvoy{
+		{id: "gc-a"},
+		{id: "gc-b"},
+		{id: "gc-c"},
+		{id: "gc-s1", synthetic: true},
+		{id: "gc-s2", synthetic: true},
+	})
+
+	for _, tc := range []struct {
+		name       string
+		opts       convoyListOptions
+		wantIDs    []string
+		wantTotal  int
+		wantHidden int
+		wantNotice string
+	}{
+		{name: "default", opts: convoyListOptions{jsonOut: true, limit: 2}, wantIDs: []string{"gc-b", "gc-c"}, wantTotal: 3, wantHidden: 2, wantNotice: convoyLimitNotice(2, 3, 2)},
+		{name: "include-synthetic", opts: convoyListOptions{jsonOut: true, includeSynthetic: true, limit: 2}, wantIDs: []string{"gc-s1", "gc-s2"}, wantTotal: 5, wantNotice: convoyLimitNotice(2, 5, 2)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, stdout, stderr := listLimitedConvoys(store, tc.opts)
+			if code != 0 {
+				t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
+			}
+			result, ids := decodeConvoyListJSON(t, stdout)
+			if !slices.Equal(ids, tc.wantIDs) {
+				t.Errorf("convoys = %v, want %v", ids, tc.wantIDs)
+			}
+			if result.Summary.Total != tc.wantTotal || result.Summary.HiddenSynthetic != tc.wantHidden || !result.Summary.Truncated {
+				t.Errorf("summary = %+v, want total %d hidden_synthetic %d truncated", result.Summary, tc.wantTotal, tc.wantHidden)
+			}
+			if stderr != tc.wantNotice {
+				t.Errorf("stderr = %q, want %q", stderr, tc.wantNotice)
+			}
+		})
+	}
+
+	t.Run("text keeps the hidden note", func(t *testing.T) {
+		_, stdout, _ := listLimitedConvoys(store, convoyListOptions{limit: 2})
+		if !strings.Contains(stdout, "2 synthetic convoy(s) hidden") {
+			t.Errorf("stdout lost the hidden-synthetic note on a cut:\n%s", stdout)
+		}
+	})
+}
+
+// TestConvoyListLimitReadsMembersOfKeptRowsOnly pins that the cut comes before
+// any per-row read: a convoy the limit leaves out costs no membership read.
+func TestConvoyListLimitReadsMembersOfKeptRowsOnly(t *testing.T) {
+	store := &memberReadCountingStore{
+		MemStore: newLimitTestStore(t, limitTestConvoys("gc-a", "gc-b", "gc-c", "gc-d", "gc-e")),
+		reads:    map[string]int{},
+	}
+
+	if code, _, stderr := listLimitedConvoys(store, convoyListOptions{limit: 2}); code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr: %s", code, stderr)
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if want := map[string]int{"gc-d": 1, "gc-e": 1}; !maps.Equal(store.reads, want) {
+		t.Errorf("member reads = %v, want %v (only the kept convoys)", store.reads, want)
+	}
+}
+
+// TestConvoyListLimitCommandFlag drives the cobra command end to end on a
+// file-store city: --limit is wired, a cut is loud on stderr, and a negative
+// value is a usage error that prints nothing on stdout.
+func TestConvoyListLimitCommandFlag(t *testing.T) {
+	cityDir := t.TempDir()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	for _, title := range []string{"first", "second", "third"} {
+		if _, err := store.Create(beads.Bead{Title: title, Type: "convoy"}); err != nil {
+			t.Fatalf("create convoy %s: %v", title, err)
+		}
+	}
+
+	t.Run("cut", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		if code := run([]string{"convoy", "list", "--json", "--limit", "2"}, &stdout, &stderr); code != 0 {
+			t.Fatalf("exit = %d; stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+		}
+		result, ids := decodeConvoyListJSON(t, stdout.String())
+		if want := []string{"gc-2", "gc-3"}; !slices.Equal(ids, want) {
+			t.Errorf("convoys = %v, want %v", ids, want)
+		}
+		if result.Summary.Total != 3 || !result.Summary.Truncated {
+			t.Errorf("summary = %+v, want total 3 and truncated", result.Summary)
+		}
+		if want := convoyLimitNotice(2, 3, 2); !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
+		}
+	})
+
+	t.Run("negative is a usage error", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"convoy", "list", "--json", "--limit", "-1"}, &stdout, &stderr)
+		if code == 0 {
+			t.Errorf("exit = 0, want a usage error")
+		}
+		if stdout.Len() != 0 {
+			t.Errorf("stdout = %q, want empty", stdout.String())
+		}
+		if want := "gc convoy list: --limit must be 0 or greater, got -1"; !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
+		}
+	})
+}
+
+// convoyLimitPageSize is small enough that five convoys span three pages.
+const convoyLimitPageSize = 2
+
+// convoyLimitAPIFixture serves /convoys in pages of convoyLimitPageSize and
+// /convoy/{id}/check, counting the pages served and the checks per convoy id.
+// The convoys are created a minute apart in the order given.
+type convoyLimitAPIFixture struct {
+	items []map[string]any
+	// partial marks the last page partial, as a supervisor does when a store
+	// it aggregates failed.
+	partial bool
+
+	mu     sync.Mutex
+	pages  int
+	checks map[string]int
+}
+
+func newConvoyLimitAPIFixture(convoys []limitTestConvoy) *convoyLimitAPIFixture {
+	base := time.Date(2026, 4, 23, 10, 0, 0, 0, time.UTC)
+	f := &convoyLimitAPIFixture{checks: map[string]int{}}
+	for i, c := range convoys {
+		item := map[string]any{
+			"id":         c.id,
+			"title":      "convoy " + c.id,
+			"issue_type": "convoy",
+			"status":     "open",
+			"created_at": base.Add(time.Duration(i) * time.Minute).Format(time.RFC3339),
+		}
+		if c.synthetic {
+			item["metadata"] = syntheticConvoyMetadata()
+		}
+		f.items = append(f.items, item)
+	}
+	return f
+}
+
+func (f *convoyLimitAPIFixture) handler(t *testing.T) http.Handler {
+	t.Helper()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/convoys"):
+			start, _ := strconv.Atoi(r.URL.Query().Get("cursor"))
+			end := min(start+convoyLimitPageSize, len(f.items))
+			f.mu.Lock()
+			f.pages++
+			f.mu.Unlock()
+			page := map[string]any{"items": f.items[start:end], "total": len(f.items)}
+			if end < len(f.items) {
+				page["next_cursor"] = strconv.Itoa(end)
+			} else if f.partial {
+				page["partial"] = true
+				page["partial_errors"] = []string{"rig omega: ledger unreadable"}
+			}
+			json.NewEncoder(w).Encode(page) //nolint:errcheck
+		case strings.HasSuffix(r.URL.Path, "/check"):
+			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v0/city/test-city/convoy/"), "/check")
+			f.mu.Lock()
+			f.checks[id]++
+			f.mu.Unlock()
+			json.NewEncoder(w).Encode(map[string]any{"convoy_id": id, "total": 1, "closed": 0, "child_ids": []string{id + "-member"}}) //nolint:errcheck
+		default:
+			http.NotFound(w, r)
+		}
+	})
+}
+
+// routeLimitedConvoyList runs the API lane against fixture.
+func routeLimitedConvoyList(t *testing.T, fixture *convoyLimitAPIFixture, opts convoyListOptions) (code int, stdout, stderr string) {
+	t.Helper()
+	cityPath := writeConvoyTestCity(t)
+	t.Setenv("GC_DEBUG", "1")
+	srv := httptest.NewServer(fixture.handler(t))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+	var so, se bytes.Buffer
+	code = routeConvoyList(cityPath, c, "", opts, &so, &se)
+	return code, so.String(), se.String()
+}
+
+// TestRouteConvoyListLimitChecksOnlyTheKeptRows pins the API lane's cut: every
+// page of /convoys is still read (the total is the complete listing's), but
+// /convoy/{id}/check is asked only about the convoys the limit keeps.
+func TestRouteConvoyListLimitChecksOnlyTheKeptRows(t *testing.T) {
+	fixture := newConvoyLimitAPIFixture(limitTestConvoys("gc-a", "gc-b", "gc-c", "gc-d", "gc-e"))
+
+	code, stdout, stderr := routeLimitedConvoyList(t, fixture, convoyListOptions{jsonOut: true, limit: 2})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q stdout=%q", code, stderr, stdout)
+	}
+	assertRouteLog(t, stderr, "api", "")
+	result, ids := decodeConvoyListJSON(t, stdout)
+	if want := []string{"gc-d", "gc-e"}; !slices.Equal(ids, want) {
+		t.Errorf("convoys = %v, want %v", ids, want)
+	}
+	if result.Summary.Total != 5 || !result.Summary.Truncated {
+		t.Errorf("summary = %+v, want total 5 and truncated", result.Summary)
+	}
+	if want := convoyLimitNotice(2, 5, 2); !strings.Contains(stderr, want) {
+		t.Errorf("stderr = %q, want it to contain %q", stderr, want)
+	}
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	if want := map[string]int{"gc-d": 1, "gc-e": 1}; !maps.Equal(fixture.checks, want) {
+		t.Errorf("/check calls = %v, want %v", fixture.checks, want)
+	}
+	if fixture.pages != 3 {
+		t.Errorf("/convoys pages read = %d, want 3: the cut must come after the whole list is drained", fixture.pages)
+	}
+}
+
+// TestRouteConvoyListLimitThatDoesNotCutIsUnchanged pins the API lane's
+// complete listing: a limit it fits within checks every convoy and prints no
+// notice and no truncated key, as no limit does.
+func TestRouteConvoyListLimitThatDoesNotCutIsUnchanged(t *testing.T) {
+	for _, limit := range []int{0, 5, 9} {
+		t.Run(fmt.Sprintf("limit=%d", limit), func(t *testing.T) {
+			fixture := newConvoyLimitAPIFixture(limitTestConvoys("gc-a", "gc-b", "gc-c", "gc-d", "gc-e"))
+
+			code, stdout, stderr := routeLimitedConvoyList(t, fixture, convoyListOptions{jsonOut: true, limit: limit})
+			if code != 0 {
+				t.Fatalf("exit = %d, want 0; stderr=%q", code, stderr)
+			}
+			result, ids := decodeConvoyListJSON(t, stdout)
+			if want := []string{"gc-a", "gc-b", "gc-c", "gc-d", "gc-e"}; !slices.Equal(ids, want) {
+				t.Errorf("convoys = %v, want %v", ids, want)
+			}
+			if result.Summary.Total != 5 || strings.Contains(stdout, "truncated") {
+				t.Errorf("summary = %+v, want total 5 and no truncated key\n%s", result.Summary, stdout)
+			}
+			if strings.Contains(stderr, "showing") {
+				t.Errorf("stderr = %q, want no cut notice", stderr)
+			}
+			fixture.mu.Lock()
+			defer fixture.mu.Unlock()
+			if len(fixture.checks) != 5 {
+				t.Errorf("/check calls = %v, want one per convoy", fixture.checks)
+			}
+		})
+	}
+}
+
+// TestRouteConvoyListLimitHidesSyntheticBeforeTheCut pins that the API lane's
+// N counts the listed rows too: the newest convoys are synthetic, are hidden,
+// and neither use up the limit nor cost a /check.
+func TestRouteConvoyListLimitHidesSyntheticBeforeTheCut(t *testing.T) {
+	fixture := newConvoyLimitAPIFixture([]limitTestConvoy{
+		{id: "gc-a"},
+		{id: "gc-b"},
+		{id: "gc-c"},
+		{id: "gc-s1", synthetic: true},
+		{id: "gc-s2", synthetic: true},
+	})
+
+	code, stdout, stderr := routeLimitedConvoyList(t, fixture, convoyListOptions{jsonOut: true, limit: 2})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", code, stderr)
+	}
+	result, ids := decodeConvoyListJSON(t, stdout)
+	if want := []string{"gc-b", "gc-c"}; !slices.Equal(ids, want) {
+		t.Errorf("convoys = %v, want %v", ids, want)
+	}
+	if result.Summary.Total != 3 || result.Summary.HiddenSynthetic != 2 || !result.Summary.Truncated {
+		t.Errorf("summary = %+v, want total 3 hidden_synthetic 2 truncated", result.Summary)
+	}
+	if want := convoyLimitNotice(2, 3, 2); !strings.Contains(stderr, want) {
+		t.Errorf("stderr = %q, want it to contain %q", stderr, want)
+	}
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	if want := map[string]int{"gc-b": 1, "gc-c": 1}; !maps.Equal(fixture.checks, want) {
+		t.Errorf("/check calls = %v, want %v", fixture.checks, want)
+	}
+}
+
+// TestRouteConvoyListLimitKeepsTheNewestByCreationNotByID is the API lane's
+// pin of the cut's order: newest by creation time, printed in ID order.
+func TestRouteConvoyListLimitKeepsTheNewestByCreationNotByID(t *testing.T) {
+	fixture := newConvoyLimitAPIFixture(limitTestConvoys("gc-c", "gc-b", "gc-a"))
+
+	code, stdout, stderr := routeLimitedConvoyList(t, fixture, convoyListOptions{jsonOut: true, limit: 2})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", code, stderr)
+	}
+	_, ids := decodeConvoyListJSON(t, stdout)
+	if want := []string{"gc-a", "gc-b"}; !slices.Equal(ids, want) {
+		t.Errorf("convoys = %v, want %v (the newest two by creation, in ID order)", ids, want)
+	}
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	if want := map[string]int{"gc-a": 1, "gc-b": 1}; !maps.Equal(fixture.checks, want) {
+		t.Errorf("/check calls = %v, want %v", fixture.checks, want)
+	}
+}
+
+// TestRouteConvoyListLimitTextCutIsLoudOnStderr pins the human output of an
+// API-lane cut: the table holds the kept rows only and the notice is on stderr.
+func TestRouteConvoyListLimitTextCutIsLoudOnStderr(t *testing.T) {
+	fixture := newConvoyLimitAPIFixture(limitTestConvoys("gc-a", "gc-b", "gc-c", "gc-d", "gc-e"))
+
+	code, stdout, stderr := routeLimitedConvoyList(t, fixture, convoyListOptions{limit: 2})
+	if code != 0 {
+		t.Fatalf("exit = %d, want 0; stderr=%q", code, stderr)
+	}
+	for _, want := range []string{"gc-d", "gc-e"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("stdout missing %s:\n%s", want, stdout)
+		}
+	}
+	if strings.Contains(stdout, "gc-a") || strings.Contains(stdout, "showing") {
+		t.Errorf("stdout lists a cut convoy or carries the notice:\n%s", stdout)
+	}
+	if want := convoyLimitNotice(2, 5, 2); !strings.Contains(stderr, want) {
+		t.Errorf("stderr = %q, want it to contain %q", stderr, want)
+	}
+}
+
+// TestRouteConvoyListLimitPartialListStaysLoud pins that --limit never
+// turns a listing the server marked partial into an answer: a list missing a
+// store's convoys has no "newest N", so the command fails with nothing on
+// stdout and asks /check about nothing.
+func TestRouteConvoyListLimitPartialListStaysLoud(t *testing.T) {
+	fixture := newConvoyLimitAPIFixture(limitTestConvoys("gc-a", "gc-b", "gc-c"))
+	fixture.partial = true
+
+	code, stdout, stderr := routeLimitedConvoyList(t, fixture, convoyListOptions{jsonOut: true, limit: 2})
+	if code != 1 {
+		t.Errorf("exit = %d, want 1; stderr=%q", code, stderr)
+	}
+	if stdout != "" {
+		t.Errorf("stdout = %q, want empty", stdout)
+	}
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	if len(fixture.checks) != 0 {
+		t.Errorf("/check calls = %v, want none", fixture.checks)
 	}
 }
 

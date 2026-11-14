@@ -316,6 +316,7 @@ says how many were hidden; --include-synthetic lists them too.`,
 type convoyListOptions struct {
 	jsonOut          bool
 	includeSynthetic bool
+	limit            int
 }
 
 // withoutSyntheticConvoys drops the synthetic convoys (convoycore.IsSynthetic)
@@ -1246,6 +1247,9 @@ type convoyListSummaryJSON struct {
 	// HiddenSynthetic counts the synthetic convoys left out of Convoys;
 	// --include-synthetic lists them.
 	HiddenSynthetic int `json:"hidden_synthetic,omitempty"`
+	// Truncated is set when --limit cut the listing: Total then counts the
+	// convoys the complete listing would print, not the rows in Convoys.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 type convoyListResultJSON struct {

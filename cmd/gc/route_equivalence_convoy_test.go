@@ -142,7 +142,9 @@ func firstBytes(s string, n int) string {
 
 // TestConvoyListRouteEquivalence pins that gc convoy list prints the same rows
 // in the same order, with child_ids, dangling-track counts and the full total,
-// on the local route and on both API lanes.
+// on the local route and on both API lanes. It runs each listing unlimited, cut
+// by --limit and with a --limit that exactly fits: the cut and the fit print
+// the same stdout on every lane, and the cut alone is loud on stderr.
 func TestConvoyListRouteEquivalence(t *testing.T) {
 	const bulk = 105
 	seed, _, _ := seedConvoyRouteCity(bulk)
@@ -151,34 +153,59 @@ func TestConvoyListRouteEquivalence(t *testing.T) {
 
 	for _, jsonOut := range []bool{true, false} {
 		for _, includeSynthetic := range []bool{false, true} {
-			opts := convoyListOptions{jsonOut: jsonOut, includeSynthetic: includeSynthetic}
-			route := func(c *api.Client, nilReason string, stdout, stderr io.Writer) int {
-				return routeConvoyList(h.cityPath, c, nilReason, opts, stdout, stderr)
+			total := bulk + 2
+			if includeSynthetic {
+				total++
 			}
-			want := runConvoyRoute(local, route)
-			if want.exit != 0 {
-				t.Fatalf("json=%v synthetic=%v: local exit %d, stderr %q", jsonOut, includeSynthetic, want.exit, want.stderr)
-			}
-			if !strings.Contains(want.stderr, "route=fallback reason=controller-down") {
-				t.Errorf("local stderr = %q, want route=fallback reason=controller-down", want.stderr)
-			}
-			if jsonOut {
-				requireConvoyListJSON(t, want.stdout, includeSynthetic, bulk)
-			} else if !strings.Contains(want.stdout, "1/3 closed (1 dangling track)") {
-				t.Errorf("local text = %q, want Alpha's dangling-track suffix", firstBytes(want.stdout, 400))
-			}
-			for _, lane := range apiLanes {
-				label := fmt.Sprintf("json=%v synthetic=%v lane=%s", jsonOut, includeSynthetic, lane.name)
-				got := runConvoyRoute(lane, route)
-				requireConvoyRouteEquivalent(t, label, want, got, jsonOut)
+			for _, limit := range []int{0, 3, total} {
+				opts := convoyListOptions{jsonOut: jsonOut, includeSynthetic: includeSynthetic, limit: limit}
+				route := func(c *api.Client, nilReason string, stdout, stderr io.Writer) int {
+					return routeConvoyList(h.cityPath, c, nilReason, opts, stdout, stderr)
+				}
+				cut := limit > 0 && limit < total
+				want := runConvoyRoute(local, route)
+				if want.exit != 0 {
+					t.Fatalf("json=%v synthetic=%v limit=%d: local exit %d, stderr %q", jsonOut, includeSynthetic, limit, want.exit, want.stderr)
+				}
+				if !strings.Contains(want.stderr, "route=fallback reason=controller-down") {
+					t.Errorf("local stderr = %q, want route=fallback reason=controller-down", want.stderr)
+				}
+				requireConvoyListCutNotice(t, "local", want, cut, limit, total)
+				if jsonOut {
+					requireConvoyListJSON(t, want.stdout, includeSynthetic, bulk, limit)
+				} else if !cut && !strings.Contains(want.stdout, "1/3 closed (1 dangling track)") {
+					t.Errorf("local text = %q, want Alpha's dangling-track suffix", firstBytes(want.stdout, 400))
+				}
+				for _, lane := range apiLanes {
+					label := fmt.Sprintf("json=%v synthetic=%v limit=%d lane=%s", jsonOut, includeSynthetic, limit, lane.name)
+					got := runConvoyRoute(lane, route)
+					requireConvoyRouteEquivalent(t, label, want, got, jsonOut)
+					requireConvoyListCutNotice(t, label, got, cut, limit, total)
+				}
 			}
 		}
 	}
 }
 
+// requireConvoyListCutNotice asserts run's stderr carries the --limit cut
+// notice exactly when the listing was cut. The route harness compares exit and
+// stdout only, so stderr is pinned here.
+func requireConvoyListCutNotice(t *testing.T, label string, run convoyRouteRun, cut bool, limit, total int) {
+	t.Helper()
+	notice := convoyLimitNotice(limit, total, limit)
+	if got := strings.Contains(run.stderr, notice); got != cut {
+		t.Errorf("%s: stderr contains the cut notice = %v, want %v (notice %q)\nstderr: %s", label, got, cut, notice, run.stderr)
+	}
+	if !cut && strings.Contains(run.stderr, "showing") {
+		t.Errorf("%s: stderr = %q, want no cut notice: the listing is complete", label, run.stderr)
+	}
+}
+
 // requireConvoyListJSON checks the local reference document itself: schema
-// valid, every convoy counted, rows in ID order, Alpha's members reported.
-func requireConvoyListJSON(t *testing.T, out string, includeSynthetic bool, bulk int) {
+// valid, every convoy counted, rows in ID order, Alpha's members reported. A
+// limit that cuts leaves total at the complete listing's count, lists limit
+// rows and sets truncated; a limit that fits or none lists every row.
+func requireConvoyListJSON(t *testing.T, out string, includeSynthetic bool, bulk, limit int) {
 	t.Helper()
 	validateJSONAgainstResultSchema(t, []string{"convoy", "list"}, []byte(out))
 	var doc struct {
@@ -191,8 +218,9 @@ func requireConvoyListJSON(t *testing.T, out string, includeSynthetic bool, bulk
 			} `json:"progress"`
 		} `json:"convoys"`
 		Summary struct {
-			Total           int `json:"total"`
-			HiddenSynthetic int `json:"hidden_synthetic"`
+			Total           int  `json:"total"`
+			HiddenSynthetic int  `json:"hidden_synthetic"`
+			Truncated       bool `json:"truncated"`
 		} `json:"summary"`
 	}
 	if err := json.Unmarshal([]byte(out), &doc); err != nil {
@@ -202,20 +230,32 @@ func requireConvoyListJSON(t *testing.T, out string, includeSynthetic bool, bulk
 	if includeSynthetic {
 		wantTotal, wantHidden = bulk+3, 0
 	}
-	if doc.Summary.Total != wantTotal || len(doc.Convoys) != wantTotal {
-		t.Errorf("summary.total = %d, rows = %d, want %d", doc.Summary.Total, len(doc.Convoys), wantTotal)
+	wantRows, wantTruncated := wantTotal, false
+	if limit > 0 && limit < wantTotal {
+		wantRows, wantTruncated = limit, true
+	}
+	if doc.Summary.Total != wantTotal || len(doc.Convoys) != wantRows {
+		t.Errorf("summary.total = %d, rows = %d, want total %d and %d rows", doc.Summary.Total, len(doc.Convoys), wantTotal, wantRows)
+	}
+	if doc.Summary.Truncated != wantTruncated {
+		t.Errorf("summary.truncated = %v, want %v", doc.Summary.Truncated, wantTruncated)
 	}
 	if doc.Summary.HiddenSynthetic != wantHidden {
 		t.Errorf("summary.hidden_synthetic = %d, want %d", doc.Summary.HiddenSynthetic, wantHidden)
 	}
 	ids := make([]string, 0, len(doc.Convoys))
+	sawAlpha := false
 	for _, c := range doc.Convoys {
 		ids = append(ids, c.ID)
 		if c.Title == "Alpha convoy" {
+			sawAlpha = true
 			if len(c.ChildIDs) != 3 || !slices.Contains(c.ChildIDs, "gc-missing") || c.Progress.DanglingTracks != 1 {
 				t.Errorf("Alpha row child_ids = %v, dangling_tracks = %d; want 3 ids incl. gc-missing and 1", c.ChildIDs, c.Progress.DanglingTracks)
 			}
 		}
+	}
+	if !wantTruncated && !sawAlpha {
+		t.Errorf("a complete listing is missing the Alpha convoy")
 	}
 	if !slices.IsSorted(ids) {
 		t.Errorf("convoy IDs are not in ascending order: %v", firstBytes(strings.Join(ids, ","), 200))
