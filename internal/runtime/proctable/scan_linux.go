@@ -195,9 +195,10 @@ func scanProcEntry(root, entryName, id string, incarnationStartedAt time.Time) (
 	if !owned {
 		return runtime.LiveRuntime{}, false, nil
 	}
+	environReadAt := time.Now()
 	env, err := parseEnvironFile(filepath.Join(root, entryName, "environ"))
 	if err != nil {
-		return runtime.LiveRuntime{}, false, unreadableEnvironScanError(root, pid, id, incarnationStartedAt, err)
+		return runtime.LiveRuntime{}, false, unreadableEnvironScanError(root, pid, id, incarnationStartedAt, environReadAt, err)
 	}
 	if root == "/proc" && pid == os.Getpid() {
 		env = mergeCurrentEnv(env)
@@ -278,11 +279,18 @@ func unreadableOwnerScanError(root string, pid int, incarnationStartedAt time.Ti
 }
 
 // unreadableEnvironScanError returns the error a process whose environment
-// could not be read adds to the scan, or nil when the process is proven to
-// predate incarnationStartedAt. A process proven outside the incarnation by its
-// tmux-spawn parent is skipped too, but a failed age proof still leaves the
-// scan incomplete.
-func unreadableEnvironScanError(root string, pid int, id string, incarnationStartedAt time.Time, readErr error) error {
+// could not be read adds to the scan, or nil when the process is proven not
+// to matter. Three proofs excuse it: a permission-denied read of a process
+// proven no runtime at all (unreadableProcessProvenNonRuntime, which runs
+// first and needs no incarnation bound), a process proven to predate
+// incarnationStartedAt, and a process proven outside the incarnation by its
+// tmux-spawn parent. A failed age proof still leaves the scan incomplete.
+// environReadAt is when the failed environ read began; the non-runtime proof
+// only accepts a process that already existed then.
+func unreadableEnvironScanError(root string, pid int, id string, incarnationStartedAt, environReadAt time.Time, readErr error) error {
+	if errors.Is(readErr, fs.ErrPermission) && unreadableProcessProvenNonRuntime(root, pid, environReadAt) {
+		return nil
+	}
 	irrelevant, proofErr := processPredatesIncarnation(root, pid, incarnationStartedAt)
 	if irrelevant {
 		return nil
@@ -299,6 +307,112 @@ func unreadableEnvironScanError(root string, pid int, id string, incarnationStar
 		errs = append(errs, fmt.Errorf("proving tmux parent for pid %d: %w", pid, proofErr))
 	}
 	return errors.Join(append(errs, fmt.Errorf("reading environ for pid %d: %w", pid, readErr))...)
+}
+
+// unreadableProcessProvenNonRuntime reports whether a same-uid process whose
+// environment could not be read (EACCES) is positively proven, from the
+// signals /proc still exposes for it, to be something no gc session runtime
+// can be. An environ read is a ptrace-mode access, so a same-uid process
+// refuses it when it is non-dumpable: a privilege-transitioned exec (sudo), a
+// helper that sets PR_SET_DUMPABLE=0 on itself, or an agent CLI that hardens
+// itself the same way. Non-dumpability alone therefore proves nothing, and an
+// unproven process stays an entry error: the scan keeps failing closed for
+// anything that could be ours. Two shapes are proven:
+//
+//   - The systemd user manager's own cgroup, user@<uid>.service/init.scope,
+//     which holds only `systemd --user` and its non-dumpable `(sd-pam)`
+//     helper. systemd starts every unit, scope and session elsewhere, so no
+//     process gc or tmux launches can live there.
+//   - A credential agent (ssh-agent, gpg-agent and its gpg helpers), named
+//     alike by its comm and by its argv[0]. These set PR_SET_DUMPABLE=0 by
+//     design and never run an agent provider, so even one started from a
+//     session's shell holds no session work for a replacement to race.
+//
+// The proof is bound to the process the environ read failed on: the process
+// it inspects must have started before environReadAt (beyond /proc's clock
+// quantization), and its start identity is read again after the proof, so a
+// pid recycled before or during the proof abandons it rather than resolving
+// it either way. Any read that fails leaves the process unproven.
+func unreadableProcessProvenNonRuntime(root string, pid int, environReadAt time.Time) bool {
+	bootedAt, err := readBootTime(root)
+	if err != nil {
+		return false
+	}
+	before, exists, err := readProcessStat(root, pid)
+	if err != nil || !exists ||
+		!processDefinitelyPredatesIncarnation(processStartedAt(bootedAt, before.StartTicks), environReadAt) {
+		return false
+	}
+	if !userManagerInitScopeProcess(root, pid, os.Geteuid()) && !credentialAgentProcess(root, pid) {
+		return false
+	}
+	after, exists, err := readProcessStat(root, pid)
+	return err == nil && exists && after == before
+}
+
+// userManagerInitScopeProcess reports whether pid sits in uid's systemd user
+// manager's own init.scope (…/user@<uid>.service/init.scope). The scan has
+// already proven pid is uid's, so another user's manager is no proof.
+func userManagerInitScopeProcess(root string, pid, uid int) bool {
+	cgroup, ok := readUnifiedCgroup(root, pid)
+	return ok && isUserManagerInitScope(cgroup, uid)
+}
+
+// readUnifiedCgroup returns pid's cgroup v2 path: the "0::" line, which a
+// unified host's cgroup file holds alone and a hybrid host's beside its v1
+// controller lines. ok is false when there is none or the file is unreadable.
+func readUnifiedCgroup(root string, pid int) (string, bool) {
+	data, err := os.ReadFile(filepath.Join(root, strconv.Itoa(pid), "cgroup"))
+	if err != nil {
+		return "", false
+	}
+	var unified string
+	found := false
+	for _, line := range strings.Split(string(data), "\n") {
+		path, ok := strings.CutPrefix(strings.TrimSpace(line), "0::")
+		if !ok {
+			continue
+		}
+		if found || path == "" {
+			return "", false
+		}
+		unified, found = filepath.Clean(path), true
+	}
+	return unified, found
+}
+
+func isUserManagerInitScope(cgroup string, uid int) bool {
+	if filepath.Base(cgroup) != "init.scope" {
+		return false
+	}
+	return filepath.Base(filepath.Dir(cgroup)) == "user@"+strconv.Itoa(uid)+".service"
+}
+
+// credentialAgents are the non-dumpable credential helpers a host or a
+// session's shell starts that never run an agent provider.
+var credentialAgents = map[string]struct{}{
+	"ssh-agent": {}, "gpg-agent": {}, "scdaemon": {}, "dirmngr": {}, "keyboxd": {},
+}
+
+// credentialAgentProcess reports whether pid's comm and argv[0] basename both
+// name the same credential agent. Requiring both keeps a renamed thread or an
+// unrelated binary that merely shares one of them unproven.
+func credentialAgentProcess(root string, pid int) bool {
+	dir := filepath.Join(root, strconv.Itoa(pid))
+	comm, err := os.ReadFile(filepath.Join(dir, "comm"))
+	if err != nil {
+		return false
+	}
+	name := strings.TrimSpace(string(comm))
+	if _, ok := credentialAgents[name]; !ok {
+		return false
+	}
+	cmdline, err := os.ReadFile(filepath.Join(dir, "cmdline"))
+	if err != nil {
+		return false
+	}
+	argv0, _, _ := strings.Cut(string(cmdline), "\x00")
+	return filepath.Base(strings.TrimSpace(argv0)) == name
 }
 
 const (
