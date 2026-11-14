@@ -192,7 +192,7 @@ func TestHookQueryStaysSingleStorePerStoreForCityScopedAgents(t *testing.T) {
 	}
 	t.Cleanup(func() { hookStoreQueryEnv = prev })
 
-	stores := hookWorkQueryStores(cityPath, cfg, agent, "planner", cityPath, nil, nil, nil)
+	stores := hookWorkQueryStores(cityPath, cfg, agent, cityPath, nil, nil, nil)
 	if len(stores) == 0 {
 		t.Fatal("gc hook built no fan-out legs")
 	}

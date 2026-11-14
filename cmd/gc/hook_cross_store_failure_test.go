@@ -433,11 +433,11 @@ func TestHookWorkQueryStoresSkipsSuspendedRigs(t *testing.T) {
 		return rigs
 	}
 
-	all := hookWorkQueryStores(cityDir, cfg, agent, "worker", cityDir, nil, nil, nil)
+	all := hookWorkQueryStores(cityDir, cfg, agent, cityDir, nil, nil, nil)
 	if got := rigsOf(all); !slices.Equal(got, []string{"riga", "rigb"}) {
 		t.Fatalf("fan-out rigs = %v, want [riga rigb]", got)
 	}
-	serving := hookWorkQueryStores(cityDir, cfg, agent, "worker", cityDir, nil, nil, map[string]bool{"riga": true})
+	serving := hookWorkQueryStores(cityDir, cfg, agent, cityDir, nil, nil, map[string]bool{"riga": true})
 	if got := rigsOf(serving); !slices.Equal(got, []string{"rigb"}) {
 		t.Fatalf("fan-out rigs with riga suspended = %v, want [rigb]", got)
 	}

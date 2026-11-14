@@ -528,9 +528,9 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// for a custom work_query, where both forms are the same string.
 	var stores []hookStore
 	if singleStore := singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, stderr); hookStoresScopeToPrimary(workQuery, singleStore) {
-		stores = []hookStore{hookWorkQueryPrimaryStore(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides)}
+		stores = []hookStore{hookWorkQueryPrimaryStore(cityPath, cfg, &a, workDir, queryEnv, overrides)}
 	} else {
-		stores = hookWorkQueryStores(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides, buildEffectiveSuspendedRigNames(cfg, st))
+		stores = hookWorkQueryStores(cityPath, cfg, &a, workDir, queryEnv, overrides, buildEffectiveSuspendedRigNames(cfg, st))
 	}
 
 	// emitQueryFailure surfaces a killed/timed-out work query on the event bus
