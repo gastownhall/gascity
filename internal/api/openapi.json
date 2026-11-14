@@ -59083,6 +59083,38 @@
             }
           },
           {
+            "description": "Require this label; every one must be on the bead. Repeatable; a comma-separated value is split as bd splits it.",
+            "explode": true,
+            "in": "query",
+            "name": "label",
+            "schema": {
+              "description": "Require this label; every one must be on the bead. Repeatable; a comma-separated value is split as bd splits it.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Require at least one of these labels on the bead. Repeatable; a comma-separated value is split as bd splits it.",
+            "explode": true,
+            "in": "query",
+            "name": "label_any",
+            "schema": {
+              "description": "Require at least one of these labels on the bead. Repeatable; a comma-separated value is split as bd splits it.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          {
             "description": "Order: oldest or newest by created_at. Omitted is the canonical ready order (priority, created_at, id).",
             "explode": false,
             "in": "query",

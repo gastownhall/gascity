@@ -13667,6 +13667,12 @@ type GetV0CityByCityNameWorkReadyParams struct {
 	// ExcludeLabel Drop beads carrying this label. Repeatable.
 	ExcludeLabel *[]string `form:"exclude_label,omitempty" json:"exclude_label,omitempty"`
 
+	// Label Require this label; every one must be on the bead. Repeatable; a comma-separated value is split as bd splits it.
+	Label *[]string `form:"label,omitempty" json:"label,omitempty"`
+
+	// LabelAny Require at least one of these labels on the bead. Repeatable; a comma-separated value is split as bd splits it.
+	LabelAny *[]string `form:"label_any,omitempty" json:"label_any,omitempty"`
+
 	// Sort Order: oldest or newest by created_at. Omitted is the canonical ready order (priority, created_at, id).
 	Sort *GetV0CityByCityNameWorkReadyParamsSort `form:"sort,omitempty" json:"sort,omitempty"`
 
@@ -39865,6 +39871,38 @@ func NewGetV0CityByCityNameWorkReadyRequest(server string, cityName string, para
 		if params.ExcludeLabel != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "exclude_label", *params.ExcludeLabel, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "array", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Label != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "label", *params.Label, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "array", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.LabelAny != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "label_any", *params.LabelAny, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "array", Format: ""}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

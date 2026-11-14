@@ -22365,6 +22365,14 @@ export type GetV0CityByCityNameWorkReadyData = {
          */
         exclude_label?: Array<string> | null;
         /**
+         * Require this label; every one must be on the bead. Repeatable; a comma-separated value is split as bd splits it.
+         */
+        label?: Array<string> | null;
+        /**
+         * Require at least one of these labels on the bead. Repeatable; a comma-separated value is split as bd splits it.
+         */
+        label_any?: Array<string> | null;
+        /**
          * Order: oldest or newest by created_at. Omitted is the canonical ready order (priority, created_at, id).
          */
         sort?: 'oldest' | 'newest';

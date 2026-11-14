@@ -1984,7 +1984,7 @@ esac
 // contracts to this one. The served bytes stay pinned by the workquery
 // goldens.
 func TestEffectiveWorkQueryRoutedTierServesCanonicalPriorityOrder(t *testing.T) {
-	mk := routedReadyTierCommand
+	mk := func(topo QueryTopology) string { return routedReadyTierCommand(topo, PoolDemandServeRulesForQuery()) }
 	for name, got := range map[string]string{
 		"default":   mk(QueryTopology{}),
 		"bd105":     mk(QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}}),
@@ -2963,11 +2963,11 @@ func TestPoolDemandPredicateSharedWithWorkQuery(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			wq := tt.agent.EffectiveWorkQuery()
 			demand := tt.agent.EffectivePoolDemandQuery()
-			workPredicate := bdReadyPoolDemandShell("--limit=20", QueryTopology{})
+			workPredicate := bdReadyPoolDemandShell("--limit=20", QueryTopology{}, PoolDemandServeRulesForQuery())
 			if !strings.Contains(wq, workPredicate) {
 				t.Errorf("EffectiveWorkQuery() missing shared predicate %q in %q", workPredicate, wq)
 			}
-			migrationWorkPredicate := bdReadyPoolDemandMigrationShell("--limit=20", QueryTopology{})
+			migrationWorkPredicate := bdReadyPoolDemandMigrationShell("--limit=20", QueryTopology{}, PoolDemandServeRulesForQuery())
 			if !strings.Contains(wq, migrationWorkPredicate) {
 				t.Errorf("EffectiveWorkQuery() missing shared migration predicate %q in %q", migrationWorkPredicate, wq)
 			}
@@ -2976,11 +2976,11 @@ func TestPoolDemandPredicateSharedWithWorkQuery(t *testing.T) {
 					t.Errorf("EffectiveWorkQuery() missing migration filter fragment %q in %q", want, wq)
 				}
 			}
-			countPredicate := bdReadyPoolDemandShell("--limit 0", QueryTopology{})
+			countPredicate := bdReadyPoolDemandShell("--limit 0", QueryTopology{}, PoolDemandServeRulesForQuery())
 			if !strings.Contains(demand, countPredicate) {
 				t.Errorf("EffectivePoolDemandQuery() missing shared predicate %q in %q", countPredicate, demand)
 			}
-			migrationCountPredicate := bdReadyPoolDemandMigrationShell("--limit 0", QueryTopology{})
+			migrationCountPredicate := bdReadyPoolDemandMigrationShell("--limit 0", QueryTopology{}, PoolDemandServeRulesForQuery())
 			if !strings.Contains(demand, migrationCountPredicate) {
 				t.Errorf("EffectivePoolDemandQuery() missing shared migration predicate %q in %q", migrationCountPredicate, demand)
 			}

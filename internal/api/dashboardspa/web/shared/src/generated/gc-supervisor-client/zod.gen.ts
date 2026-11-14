@@ -11972,6 +11972,8 @@ export const zGetV0CityByCityNameWorkReadyQuery = z.object({
     metadata_field: z.array(z.string()).nullish(),
     exclude_type: z.array(z.string()).nullish(),
     exclude_label: z.array(z.string()).nullish(),
+    label: z.array(z.string()).nullish(),
+    label_any: z.array(z.string()).nullish(),
     sort: z.enum(['oldest', 'newest']).optional(),
     limit: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
     status: z.enum([

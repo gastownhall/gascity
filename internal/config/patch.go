@@ -701,6 +701,14 @@ func applyAgentMutation(a *Agent, p *AgentPatch, sleepSource string) {
 	if p.ScaleCheck != nil {
 		a.ScaleCheck = *p.ScaleCheck
 	}
+	// RouteLabel / RouteLabelAny replace the agent's list wholesale (an explicit
+	// empty list clears it); the validation after patches judges the result.
+	if p.RouteLabel != nil {
+		a.RouteLabel = append([]string(nil), p.RouteLabel...)
+	}
+	if p.RouteLabelAny != nil {
+		a.RouteLabelAny = append([]string(nil), p.RouteLabelAny...)
+	}
 	// OptionDefaults: additive merge (patch keys win).
 	if len(p.OptionDefaults) > 0 {
 		if a.OptionDefaults == nil {

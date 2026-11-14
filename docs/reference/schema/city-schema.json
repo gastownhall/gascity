@@ -225,14 +225,14 @@
             "type": "string"
           },
           "type": "array",
-          "description": "RouteLabel requires every listed label on a bead before this agent's\ngenerated routed-work queries serve it."
+          "description": "RouteLabel requires every listed label on a bead before this agent's\ngenerated routed-work queries serve it, and before the controller counts\nthe bead as demand for this agent. Combines with RouteLabelAny (both must\nhold). Work already assigned to the agent is never narrowed. Entries must\nbe non-blank, with no comma, line break or surrounding whitespace, and the\nfield cannot be combined with a raw work_query or scale_check."
         },
         "route_label_any": {
           "items": {
             "type": "string"
           },
           "type": "array",
-          "description": "RouteLabelAny requires at least one listed label on a bead before this\nagent's generated routed-work queries serve it."
+          "description": "RouteLabelAny requires at least one listed label on a bead before this\nagent's generated routed-work queries serve it, and before the controller\ncounts the bead as demand for this agent. Same entry rules and exclusions\nas RouteLabel."
         },
         "drain_timeout": {
           "type": "string",

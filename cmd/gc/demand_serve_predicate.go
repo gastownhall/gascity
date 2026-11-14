@@ -37,6 +37,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -49,7 +50,25 @@ import (
 
 // demandServableForTemplates reports the template a row is capacity demand for,
 // among the templates a store group is counting, or ok=false when no worker for
-// any of them would be served it.
+// any of them would be served it. It holds every template to the base serving
+// rules; demandServableForTemplateRules adds each template's own route labels.
+func demandServableForTemplates(cfg *config.City, b beads.Bead, templates map[string]struct{}) (string, bool) {
+	base := config.PoolDemandServeRulesForQuery()
+	rules := make(map[string]config.PoolDemandServeRules, len(templates))
+	for name := range templates {
+		rules[name] = base
+	}
+	return demandServableForTemplateRules(cfg, b, rules)
+}
+
+// demandServableForTemplateRules is demandServableForTemplates with each
+// template's own serve rules: the route-independent base exclusions every
+// worker's query enforces (demandRowServable), then the route labels the
+// candidate template's agent requires of the rows it is served
+// (config.PoolDemandServeRulesFor). A row is held to the labels of the template
+// it routes to and never another's; a row that routes to several templates
+// (a gc.routed_to and a legacy gc.run_target) is demand for the first whose own
+// worker would be served it.
 //
 // The route candidate is normalized (agentutil.NormalizePoolRouteTarget) only to
 // bridge the intra-tick window: the same-tick canonicalize pass persists the
@@ -57,27 +76,46 @@ import (
 // THIS tick. Without the collapse, counting only exact forms would leave a "-N"
 // row counted by neither side — invisible dead work, the dead-drop
 // NormalizePoolRouteTarget exists to close.
-func demandServableForTemplates(cfg *config.City, b beads.Bead, templates map[string]struct{}) (string, bool) {
+func demandServableForTemplateRules(cfg *config.City, b beads.Bead, templates map[string]config.PoolDemandServeRules) (string, bool) {
 	if !demandRowServable(b) {
 		return "", false
 	}
 	for _, candidate := range controllerDemandRouteCandidates(b) {
 		normalized := agentutil.NormalizePoolRouteTarget(cfg, candidate)
-		if _, ok := templates[normalized]; ok && controlRowServableByTemplate(cfg, b, normalized) {
-			return normalized, true
+		rules, ok := templates[normalized]
+		if !ok || !routeLabelsServe(rules, b.Labels) || !controlRowServableByTemplate(cfg, b, normalized) {
+			continue
 		}
+		return normalized, true
 	}
 	return "", false
 }
 
-// demandServableForTemplateRules is demandServableForTemplates with each
-// template's own serve rules.
-func demandServableForTemplateRules(cfg *config.City, b beads.Bead, templates map[string]config.PoolDemandServeRules) (string, bool) {
-	names := make(map[string]struct{}, len(templates))
-	for name := range templates {
-		names[name] = struct{}{}
+// demandServeRulesByTemplate resolves each template's serve rules from its
+// agent: the base rules plus the agent's route labels. A template no agent
+// resolves to (a nil cfg, a stale name) is held to the base rules.
+func demandServeRulesByTemplate(cfg *config.City, templates map[string]struct{}) map[string]config.PoolDemandServeRules {
+	rules := make(map[string]config.PoolDemandServeRules, len(templates))
+	for template := range templates {
+		rules[template] = config.PoolDemandServeRulesFor(findAgentByTemplate(cfg, template))
 	}
-	return demandServableForTemplates(cfg, b, names)
+	return rules
+}
+
+// routeLabelsServe reports whether labels satisfy the route label requirements
+// of rules: every RequireLabels entry is present, and at least one
+// RequireAnyLabels entry when there are any. Labels compare exactly, as the
+// generated query's --label / --label-any do.
+func routeLabelsServe(rules config.PoolDemandServeRules, labels []string) bool {
+	for _, required := range rules.RequireLabels {
+		if !slices.Contains(labels, required) {
+			return false
+		}
+	}
+	if len(rules.RequireAnyLabels) == 0 {
+		return true
+	}
+	return slices.ContainsFunc(rules.RequireAnyLabels, func(l string) bool { return slices.Contains(labels, l) })
 }
 
 // controlRowServableByTemplate applies the control-dispatcher ownership rule to

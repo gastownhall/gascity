@@ -2446,12 +2446,16 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 				ready = nil
 			}
 		}
+		// Each template is held to its own agent's serve rules: the base
+		// exclusions plus the route labels its generated queries pass.
+		groupRules := demandServeRulesByTemplate(cfg, group.templates)
 		for _, b := range ready {
 			// AGREEMENT: count only rows a T-worker's own query would serve it.
-			// A routed epic, a bead on a dispatch hold, or a slot-suffixed route
-			// is not capacity demand — it is a seat that spawns, reads empty and
-			// drains, every tick, forever. See demand_serve_predicate.go.
-			template, servable := demandServableForTemplates(cfg, b, group.templates)
+			// A routed epic, a bead on a dispatch hold, a row missing the agent's
+			// route labels, or a slot-suffixed route is not capacity demand — it
+			// is a seat that spawns, reads empty and drains, every tick, forever.
+			// See demand_serve_predicate.go.
+			template, servable := demandServableForTemplateRules(cfg, b, groupRules)
 			if !servable {
 				continue
 			}

@@ -729,6 +729,14 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	}
 	prov.Warnings = append(prov.Warnings, namedSessionWarnings...)
 
+	// Route labels are judged on the effective agents: a patch or a rig override
+	// can add them to an agent whose pack declares a raw work_query.
+	for i := range root.Agents {
+		if err := validateRouteLabels(&root.Agents[i]); err != nil {
+			return nil, nil, err
+		}
+	}
+
 	if err := ValidateGitHubPRMonitors(root); err != nil {
 		return nil, nil, err
 	}

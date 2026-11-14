@@ -3820,10 +3820,16 @@ type Agent struct {
 	// DefaultBranch) before running the command.
 	ScaleCheck string `toml:"scale_check,omitempty"`
 	// RouteLabel requires every listed label on a bead before this agent's
-	// generated routed-work queries serve it.
+	// generated routed-work queries serve it, and before the controller counts
+	// the bead as demand for this agent. Combines with RouteLabelAny (both must
+	// hold). Work already assigned to the agent is never narrowed. Entries must
+	// be non-blank, with no comma, line break or surrounding whitespace, and the
+	// field cannot be combined with a raw work_query or scale_check.
 	RouteLabel []string `toml:"route_label,omitempty"`
 	// RouteLabelAny requires at least one listed label on a bead before this
-	// agent's generated routed-work queries serve it.
+	// agent's generated routed-work queries serve it, and before the controller
+	// counts the bead as demand for this agent. Same entry rules and exclusions
+	// as RouteLabel.
 	RouteLabelAny []string `toml:"route_label_any,omitempty"`
 	// DrainTimeout is the maximum time to wait for a session to finish its
 	// current work before force-killing it during scale-down. Duration string
@@ -4110,6 +4116,8 @@ func (a Agent) Clone() Agent {
 	out.DependsOn = append([]string(nil), a.DependsOn...)
 	out.SharedSkills = append([]string(nil), a.SharedSkills...)
 	out.SharedMCP = append([]string(nil), a.SharedMCP...)
+	out.RouteLabel = append([]string(nil), a.RouteLabel...)
+	out.RouteLabelAny = append([]string(nil), a.RouteLabelAny...)
 	out.Env = deepCopyStringMap(a.Env)
 	out.OptionDefaults = deepCopyStringMap(a.OptionDefaults)
 	out.ReadyDelayMs = copyIntPtr(a.ReadyDelayMs)
@@ -4596,6 +4604,43 @@ func configuredProviderOrder(providers map[string]ProviderSpec) []string {
 // validationAgentKey identifies the canonical route template for an agent.
 type validationAgentKey struct{ dir, binding, name string }
 
+// validateRouteLabels checks an agent's route_label / route_label_any.
+//
+// bd splits a label flag's value on commas, drops blank values and trims
+// surrounding whitespace, so a label containing a comma would silently become
+// two labels and a blank one would silently become none: either widens or
+// narrows routing without saying so, and is rejected. A raw work_query or
+// scale_check replaces the generated discovery contract wholesale, while route
+// labels narrow its routed tier in place; combining them leaves it ambiguous
+// which governs, so that is rejected too rather than given a silent precedence.
+func validateRouteLabels(a *Agent) error {
+	for _, field := range []struct {
+		key    string
+		labels []string
+	}{{"route_label", a.RouteLabel}, {"route_label_any", a.RouteLabelAny}} {
+		for _, label := range field.labels {
+			switch {
+			case strings.TrimSpace(label) == "":
+				return fmt.Errorf("agent %q: %s entries must not be blank", a.QualifiedName(), field.key)
+			case strings.TrimSpace(label) != label:
+				return fmt.Errorf("agent %q: %s entry %q must not have leading or trailing whitespace", a.QualifiedName(), field.key, label)
+			case strings.ContainsAny(label, ",\r\n"):
+				return fmt.Errorf("agent %q: %s entry %q must not contain a comma or a line break", a.QualifiedName(), field.key, label)
+			}
+		}
+	}
+	if len(a.RouteLabel) == 0 && len(a.RouteLabelAny) == 0 {
+		return nil
+	}
+	if strings.TrimSpace(a.WorkQuery) != "" {
+		return fmt.Errorf("agent %q: route_label and route_label_any cannot be combined with work_query; a raw work_query replaces the generated routed tier they narrow", a.QualifiedName())
+	}
+	if strings.TrimSpace(a.ScaleCheck) != "" {
+		return fmt.Errorf("agent %q: route_label and route_label_any cannot be combined with scale_check; a raw scale_check replaces the generated demand count they narrow", a.QualifiedName())
+	}
+	return nil
+}
+
 // ValidateAgents checks agent configurations for errors. It returns an error
 // if any agent is missing required fields, has duplicate canonical identities,
 // or has invalid pool bounds. Uniqueness is keyed on (dir, binding, name), so
@@ -4637,6 +4682,9 @@ func ValidateAgents(agents []Agent) error {
 			// valid
 		default:
 			return fmt.Errorf("agent %q: prompt_mode must be \"arg\", \"flag\", \"none\", or empty, got %q", a.QualifiedName(), a.PromptMode)
+		}
+		if err := validateRouteLabels(&a); err != nil {
+			return err
 		}
 		// Lifecycle enum.
 		switch a.Lifecycle {

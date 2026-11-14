@@ -398,6 +398,12 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 	}
 	dst.MinActiveSessions = src.MinActiveSessions
 	dst.ScaleCheck = src.ScaleCheck
+	if len(src.RouteLabel) > 0 {
+		dst.RouteLabel = append([]string(nil), src.RouteLabel...)
+	}
+	if len(src.RouteLabelAny) > 0 {
+		dst.RouteLabelAny = append([]string(nil), src.RouteLabelAny...)
+	}
 	if len(src.NamepoolNames) > 0 {
 		dst.NamepoolNames = make([]string, len(src.NamepoolNames))
 		copy(dst.NamepoolNames, src.NamepoolNames)

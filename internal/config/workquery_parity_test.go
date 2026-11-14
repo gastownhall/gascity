@@ -33,7 +33,7 @@ func oldEffectiveWorkQuery(a *Agent, topo QueryTopology) string {
 	if legacyTarget == "" {
 		script := standardAssignedWorkQueryScript(topo) +
 			poolDemandOriginGateScriptWithGraphAnchorFallback() +
-			poolDemandFirstRowFunctionScript(topo) +
+			poolDemandFirstRowFunctionScript(topo, PoolDemandServeRulesFor(a)) +
 			assignedGraphWorkflowAnchorReadyFunctionScript(topo) +
 			`probe_assigned_graph_anchor_ready "$1"; ` +
 			graphWorkflowAnchorFallbackBeforeFreshPoolScript() +
@@ -43,7 +43,7 @@ func oldEffectiveWorkQuery(a *Agent, topo QueryTopology) string {
 	}
 	script := legacyControlAssignedWorkQueryScript(topo) +
 		poolDemandOriginGateScriptWithGraphAnchorFallback() +
-		poolDemandFirstRowFunctionScript(topo) +
+		poolDemandFirstRowFunctionScript(topo, PoolDemandServeRulesFor(a)) +
 		assignedGraphWorkflowAnchorReadyFunctionScript(topo) +
 		`probe_assigned_graph_anchor_ready "$1"; ` +
 		`probe_assigned_graph_anchor_ready "$2"; ` +
@@ -83,9 +83,9 @@ func oldEffectiveRoutedPoolQuery(a *Agent, topo QueryTopology) string {
 	target := a.poolDemandTarget()
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
-		return routedPoolWorkQueryCommand(topo, target)
+		return routedPoolWorkQueryCommand(topo, PoolDemandServeRulesFor(a), target)
 	}
-	return routedPoolWorkQueryCommand(topo, target, legacyTarget)
+	return routedPoolWorkQueryCommand(topo, PoolDemandServeRulesFor(a), target, legacyTarget)
 }
 
 func oldEffectivePoolDemandQuery(a *Agent, topo QueryTopology) string {
@@ -93,7 +93,7 @@ func oldEffectivePoolDemandQuery(a *Agent, topo QueryTopology) string {
 		return a.ScaleCheck
 	}
 	target := a.poolDemandTarget()
-	return poolDemandCountShell(target, topo)
+	return poolDemandCountShell(target, topo, PoolDemandServeRulesFor(a))
 }
 
 func oldEffectiveOnDeath(a *Agent, topo QueryTopology) string {

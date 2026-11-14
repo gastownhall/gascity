@@ -17,7 +17,7 @@ import (
 // workquery_assigned_ready_hold_test.go.
 
 func TestBdReadyPoolDemandShellExcludesDispatchHoldLabels(t *testing.T) {
-	got := bdReadyPoolDemandShell("--limit 0", QueryTopology{})
+	got := bdReadyPoolDemandShell("--limit 0", QueryTopology{}, PoolDemandServeRulesForQuery())
 	for _, label := range beadmeta.DispatchHoldLabels {
 		want := `--exclude-label "` + label + `"`
 		if !strings.Contains(got, want) {
@@ -27,7 +27,7 @@ func TestBdReadyPoolDemandShellExcludesDispatchHoldLabels(t *testing.T) {
 }
 
 func TestBdReadyPoolDemandMigrationShellExcludesDispatchHoldLabels(t *testing.T) {
-	got := bdReadyPoolDemandMigrationShell("--limit=20", QueryTopology{})
+	got := bdReadyPoolDemandMigrationShell("--limit=20", QueryTopology{}, PoolDemandServeRulesForQuery())
 	for _, label := range beadmeta.DispatchHoldLabels {
 		want := `--exclude-label "` + label + `"`
 		if !strings.Contains(got, want) {
@@ -37,7 +37,7 @@ func TestBdReadyPoolDemandMigrationShellExcludesDispatchHoldLabels(t *testing.T)
 }
 
 func TestLegacyEphemeralPoolDemandShellRouteScopedExcludesDispatchHoldLabels(t *testing.T) {
-	got := legacyEphemeralPoolDemandShell(20, QueryTopology{})
+	got := legacyEphemeralPoolDemandShell(20, QueryTopology{}, PoolDemandServeRulesForQuery())
 	if !strings.Contains(got, ".labels") {
 		t.Errorf("legacyEphemeralPoolDemandShell() = %q, missing a .labels reference", got)
 	}
@@ -75,7 +75,7 @@ func TestEffectiveRoutedPoolQueryCarriesHoldLabelExclusionForLegacyAlias(t *test
 }
 
 func TestPoolDemandCountShellInheritsDispatchHoldLabelExclusion(t *testing.T) {
-	got := poolDemandCountShell("hello-world/worker", QueryTopology{})
+	got := poolDemandCountShell("hello-world/worker", QueryTopology{}, PoolDemandServeRulesForQuery())
 	for _, label := range beadmeta.DispatchHoldLabels {
 		want := `--exclude-label "` + label + `"`
 		if !strings.Contains(got, want) {
@@ -103,15 +103,15 @@ func TestPoolDemandServeRulesExcludeHumanLabelWithoutMakingItADispatchHold(t *te
 func TestRouteScopedPoolDemandShellsExcludeHumanLabel(t *testing.T) {
 	want := `--exclude-label "human"`
 	for name, got := range map[string]string{
-		"bdReadyPoolDemandShell":          bdReadyPoolDemandShell("--limit 0", QueryTopology{}),
-		"bdReadyPoolDemandMigrationShell": bdReadyPoolDemandMigrationShell("--limit=20", QueryTopology{}),
-		"poolDemandCountShell":            poolDemandCountShell("hello-world/worker", QueryTopology{}),
+		"bdReadyPoolDemandShell":          bdReadyPoolDemandShell("--limit 0", QueryTopology{}, PoolDemandServeRulesForQuery()),
+		"bdReadyPoolDemandMigrationShell": bdReadyPoolDemandMigrationShell("--limit=20", QueryTopology{}, PoolDemandServeRulesForQuery()),
+		"poolDemandCountShell":            poolDemandCountShell("hello-world/worker", QueryTopology{}, PoolDemandServeRulesForQuery()),
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("%s() = %q, missing %q", name, got, want)
 		}
 	}
-	if got := legacyEphemeralPoolDemandShell(20, QueryTopology{}); !strings.Contains(got, `"human"`) {
+	if got := legacyEphemeralPoolDemandShell(20, QueryTopology{}, PoolDemandServeRulesForQuery()); !strings.Contains(got, `"human"`) {
 		t.Errorf("legacyEphemeralPoolDemandShell() = %q, missing the human label in its jq label filter", got)
 	}
 }

@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -268,9 +270,23 @@ type PoolDemandServeRules struct {
 }
 
 // PoolDemandServeRulesFor returns the serving rules of a's routed pool-demand
-// tier: the base rules plus the agent's route label requirements.
-func PoolDemandServeRulesFor(_ *Agent) PoolDemandServeRules {
-	return PoolDemandServeRulesForQuery()
+// tier: the base rules plus the agent's route label requirements
+// (route_label, route_label_any). The label slices are copies, so a caller that
+// edits the result cannot reach the agent. An agent with no route labels gets
+// exactly PoolDemandServeRulesForQuery(), and so a query byte-for-byte the one
+// it had before the fields existed.
+//
+// Only the routed pool-demand tiers take these rules. Work already assigned to
+// the agent (the in_progress and assigned-ready tiers, the graph anchor) and
+// the boot/death recovery hooks are owned work, which a label must never hide.
+func PoolDemandServeRulesFor(a *Agent) PoolDemandServeRules {
+	rules := PoolDemandServeRulesForQuery()
+	if a == nil {
+		return rules
+	}
+	rules.RequireLabels = append([]string(nil), a.RouteLabel...)
+	rules.RequireAnyLabels = append([]string(nil), a.RouteLabelAny...)
+	return rules
 }
 
 // PoolDemandServeRulesForQuery returns the serving rules of the generated
@@ -296,7 +312,50 @@ func (r PoolDemandServeRules) ShellArgs() string {
 	for _, typ := range r.ExcludeTypes {
 		args += " --exclude-type=" + typ
 	}
-	return args + excludeLabelArgs(r.ExcludeLabels)
+	return args + excludeLabelArgs(r.ExcludeLabels) +
+		requireLabelArgs("--label", r.RequireLabels) +
+		requireLabelArgs("--label-any", r.RequireAnyLabels)
+}
+
+// requireLabelArgs renders labels as repeated flag=value arguments. The value
+// is shell-quoted data, never shell syntax, and the flag=value spelling keeps a
+// label that starts with a dash from being read as a flag by either reader.
+func requireLabelArgs(flag string, labels []string) string {
+	var args string
+	for _, label := range labels {
+		args += " " + flag + "=" + shellquote.Quote(label)
+	}
+	return args
+}
+
+// requireLabelsJQClause is the jq counterpart of requireLabelArgs for the
+// bd-1.0.4 ephemeral fallback, which has no reader-side label flags: every
+// RequireLabels entry must be on the row, and at least one RequireAnyLabels
+// entry. Values are embedded as JSON string literals, which jq reads as data.
+func requireLabelsJQClause(rules PoolDemandServeRules) string {
+	var clause string
+	for _, label := range rules.RequireLabels {
+		clause += ` | select(any((.labels // [])[]; . == ` + jqStringLiteral(label) + `))`
+	}
+	if len(rules.RequireAnyLabels) > 0 {
+		conds := make([]string, len(rules.RequireAnyLabels))
+		for i, label := range rules.RequireAnyLabels {
+			conds[i] = `. == ` + jqStringLiteral(label)
+		}
+		clause += ` | select(any((.labels // [])[]; ` + strings.Join(conds, " or ") + `))`
+	}
+	return clause
+}
+
+// jqStringLiteral returns s as a jq string literal. A JSON string is a valid
+// jq string literal, so no byte of s can end the literal early.
+func jqStringLiteral(s string) string {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	// Encoding a string cannot fail.
+	_ = enc.Encode(s)
+	return strings.TrimSuffix(buf.String(), "\n")
 }
 
 // excludeLabelArgs renders labels as the repeated --exclude-label flags both
@@ -309,8 +368,8 @@ func excludeLabelArgs(labels []string) string {
 	return args
 }
 
-func bdReadyPoolDemandShell(limitFlag string, topo QueryTopology) string {
-	return readyReaderCommand(topo.FederatedReady) + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) + ` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$target"` + PoolDemandServeRulesForQuery().ShellArgs() + ` --json ` + limitFlag
+func bdReadyPoolDemandShell(limitFlag string, topo QueryTopology, rules PoolDemandServeRules) string {
+	return readyReaderCommand(topo.FederatedReady) + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) + ` --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$target"` + rules.ShellArgs() + ` --json ` + limitFlag
 }
 
 // bdReadyPoolDemandMigrationShell is a temporary raw compatibility probe for
@@ -323,8 +382,8 @@ func bdReadyPoolDemandShell(limitFlag string, topo QueryTopology) string {
 // retirement-window fallback
 // requires jq in the default worker/reconciler environment; remove it with the
 // Go-side legacy candidates after the backfill completion tracked by ga-dhf44.
-func bdReadyPoolDemandMigrationShell(limitFlag string, topo QueryTopology) string {
-	return readyReaderCommand(topo.FederatedReady) + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) + ` --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$target" --metadata-field "` + beadmeta.KindMetadataKey + `=` + beadmeta.KindWorkflow + `"` + PoolDemandServeRulesForQuery().ShellArgs() + ` --json --sort oldest ` + limitFlag
+func bdReadyPoolDemandMigrationShell(limitFlag string, topo QueryTopology, rules PoolDemandServeRules) string {
+	return readyReaderCommand(topo.FederatedReady) + bdReadyIncludeEphemeralArg(topo.includeEphemeralReady()) + ` --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$target" --metadata-field "` + beadmeta.KindMetadataKey + `=` + beadmeta.KindWorkflow + `"` + rules.ShellArgs() + ` --json --sort oldest ` + limitFlag
 }
 
 func poolDemandMigrationFilterJQ(limit int) string {
@@ -434,11 +493,12 @@ func ephemeralReadyDependencyCandidateFilterJQ(selector string, limit int, exclu
 // workflow run target. A structural workflow latch is dropped whichever route
 // names it (executableWorkflowTopologyJQ) before the worker tier takes its
 // first row, so an older latch cannot displace a routed wisp step.
-func legacyEphemeralPoolDemandFilterJQ(limit int) string {
+func legacyEphemeralPoolDemandFilterJQ(limit int, rules PoolDemandServeRules) string {
 	return legacyEphemeralReadyFilterJQ(
 		`select((.assignee // "") == "")`+
 			` | select((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == $target) or ((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == "") and (`+jqMeta(beadmeta.RunTargetMetadataKey)+` == $target) and (`+jqMeta(beadmeta.KindMetadataKey)+` == "`+beadmeta.KindWorkflow+`") and (`+jqMeta(beadmeta.WorkflowExpandedMetadataKey)+` != "true")))`+
-			` | `+executableWorkflowTopologyJQ(),
+			` | `+executableWorkflowTopologyJQ()+
+			requireLabelsJQClause(rules),
 		limit,
 		true,
 	)
@@ -449,11 +509,11 @@ func legacyEphemeralPoolDemandFilterJQ(limit int) string {
 // statements, each exiting with its own status on failure: piped together, the
 // pipeline's status was jq's, and jq over the empty output of a failed `bd
 // query` succeeds with nothing — a broken scan counted as zero ephemeral demand.
-func legacyEphemeralPoolDemandShell(limit int, topo QueryTopology) string {
+func legacyEphemeralPoolDemandShell(limit int, topo QueryTopology, rules PoolDemandServeRules) string {
 	if topo.includeEphemeralReady() {
 		return `legacy_ephemeral_json="[]"; `
 	}
-	filter := legacyEphemeralPoolDemandFilterJQ(limit)
+	filter := legacyEphemeralPoolDemandFilterJQ(limit, rules)
 	return `legacy_ephemeral_raw=$(` + bdQueryEphemeralStatusShell("open") + `) || exit $?; ` +
 		`legacy_ephemeral_json=$(printf "%s" "$legacy_ephemeral_raw" | jq --arg target "$target" ` + shellquote.Quote(filter) + `) || exit $?; `
 }
@@ -475,11 +535,11 @@ func legacyEphemeralPoolDemandShell(limit int, topo QueryTopology) string {
 // already makes between identities, and both are safe: a work query is a
 // point-in-time probe the caller re-runs, and a stale candidate is settled by
 // the claim that follows it, not by this read.
-func legacyEphemeralPoolDemandFromSnapshotShell(shellVar string, limit int, topo QueryTopology) string {
+func legacyEphemeralPoolDemandFromSnapshotShell(shellVar string, limit int, topo QueryTopology, rules PoolDemandServeRules) string {
 	if topo.includeEphemeralReady() {
 		return shellVar + `=$(printf "[]"); `
 	}
-	filter := legacyEphemeralPoolDemandFilterJQ(limit)
+	filter := legacyEphemeralPoolDemandFilterJQ(limit, rules)
 	return ephemeralStatusSnapshotShell("open_ephemeral", "open") +
 		shellVar + `=$({ printf "%s" "$open_ephemeral" | jq --arg target "$target" ` + shellquote.Quote(filter) + ` 2>/dev/null; } || printf "[]"); `
 }
@@ -488,18 +548,18 @@ func legacyEphemeralPoolDemandFromSnapshotShell(shellVar string, limit int, topo
 // reads the first ready, unassigned, routed bead for the supplied target,
 // prints it, and exits 0. The caller appends a terminal fallthrough
 // (printf "[]") for the empty case.
-func poolDemandFirstRowFunctionScript(topo QueryTopology) string {
+func poolDemandFirstRowFunctionScript(topo QueryTopology, rules PoolDemandServeRules) string {
 	reader := readyReaderCommand(topo.FederatedReady)
 	return `probe_pool_demand() { ` +
 		`target="$1"; ` +
 		`[ -z "$target" ] && return 1; ` +
-		`r=$(` + routedReadyTierCommand(topo) + `)` + workQueryReadFailure(reader) + `; ` +
+		`r=$(` + routedReadyTierCommand(topo, rules) + `)` + workQueryReadFailure(reader) + `; ` +
 		preferExecutablePoolDemandScript() +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=20", topo) + `)` + workQueryReadFailure(reader) + `; ` +
+		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit=20", topo, rules) + `)` + workQueryReadFailure(reader) + `; ` +
 		`r=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(1) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
-		legacyEphemeralPoolDemandFromSnapshotShell("legacy_ephemeral_candidates", 20, topo) +
+		legacyEphemeralPoolDemandFromSnapshotShell("legacy_ephemeral_candidates", 20, topo, rules) +
 		`r=$(printf "%s" "$legacy_ephemeral_candidates" | jq '.[0:1]' 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
 		`return 1; ` +
@@ -534,7 +594,7 @@ func preferExecutablePoolDemandScript() string {
 // none of its own work.
 const RoutedReadyClaimWindow = 20
 
-func routedReadyTierCommand(topo QueryTopology) string {
+func routedReadyTierCommand(topo QueryTopology, rules PoolDemandServeRules) string {
 	// The shared predicate stays order-free so the count-form does no wasted
 	// sorting; the worker first-row path rides the reader's canonical
 	// (priority, created_at, id) default order — both readers default to it
@@ -551,7 +611,7 @@ func routedReadyTierCommand(topo QueryTopology) string {
 	// routed work behind it to fall through to instead of idle-exiting; the
 	// hook layer (filterUnreadyHookCandidates) strips the blocked head from
 	// the result.
-	return bdReadyPoolDemandShell("--limit="+strconv.Itoa(RoutedReadyClaimWindow), topo)
+	return bdReadyPoolDemandShell("--limit="+strconv.Itoa(RoutedReadyClaimWindow), topo, rules)
 }
 
 // poolDemandCountShell emits the reconciler count-form for target: it counts
@@ -567,13 +627,13 @@ func routedReadyTierCommand(topo QueryTopology) string {
 // (TestEffectiveScaleCheckUsesReadyOnly,
 // TestPoolDemandCountFailsWhenTheEphemeralScanFails) — the same discipline
 // workQueryReadFailure gives the worker-side tiers.
-func poolDemandCountShell(target string, topo QueryTopology) string {
+func poolDemandCountShell(target string, topo QueryTopology, rules PoolDemandServeRules) string {
 	countFilter := `(add // []) | unique_by(.id) | map(` + executableWorkflowTopologyJQ() + `) | length`
 	script := `target="$1"; ` +
-		`ready_json=$(` + bdReadyPoolDemandShell("--limit 0", topo) + `) || exit $?; ` +
-		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit 0", topo) + `) || exit $?; ` +
+		`ready_json=$(` + bdReadyPoolDemandShell("--limit 0", topo, rules) + `) || exit $?; ` +
+		`legacy_candidates=$(` + bdReadyPoolDemandMigrationShell("--limit 0", topo, rules) + `) || exit $?; ` +
 		`legacy_json=$(printf "%s" "$legacy_candidates" | ` + poolDemandMigrationFilterJQ(0) + `) || exit $?; ` +
-		legacyEphemeralPoolDemandShell(0, topo) +
+		legacyEphemeralPoolDemandShell(0, topo, rules) +
 		`printf "%s\n%s\n%s\n" "$ready_json" "$legacy_json" "$legacy_ephemeral_json" | ` + shellquote.Join([]string{"jq", "-s", countFilter})
 	return shellquote.Join([]string{"sh", "-c", script, "--", target})
 }
@@ -1190,16 +1250,16 @@ func graphWorkflowAnchorFallbackBeforeFreshPoolScript() string {
 		`printf "%s" "$gc_assigned_workflow_anchor_json"; exit 0; fi; `
 }
 
-func routedPoolWorkQueryProbeScript(topo QueryTopology, targetCount int) string {
-	script := poolDemandOriginGateScript() + poolDemandFirstRowFunctionScript(topo)
+func routedPoolWorkQueryProbeScript(topo QueryTopology, rules PoolDemandServeRules, targetCount int) string {
+	script := poolDemandOriginGateScript() + poolDemandFirstRowFunctionScript(topo, rules)
 	for i := 1; i <= targetCount; i++ {
 		script += fmt.Sprintf(`probe_pool_demand "$%d"; `, i)
 	}
 	return script + `printf "[]"`
 }
 
-func routedPoolWorkQueryCommand(topo QueryTopology, targets ...string) string {
-	args := []string{"sh", "-c", routedPoolWorkQueryProbeScript(topo, len(targets)), "--"}
+func routedPoolWorkQueryCommand(topo QueryTopology, rules PoolDemandServeRules, targets ...string) string {
+	args := []string{"sh", "-c", routedPoolWorkQueryProbeScript(topo, rules, len(targets)), "--"}
 	args = append(args, targets...)
 	return shellquote.Join(args)
 }
@@ -1316,6 +1376,7 @@ func (a *Agent) EffectiveWorkQueryFor(topo QueryTopology) string {
 
 func buildWorkQuery(a *Agent, topo QueryTopology) string {
 	target := a.poolDemandTarget()
+	rules := PoolDemandServeRulesFor(a)
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
 		script := standardAssignedWorkQueryScript(topo) +
@@ -1324,7 +1385,7 @@ func buildWorkQuery(a *Agent, topo QueryTopology) string {
 			// Besides keeping the generated tiers easy to identify mechanically,
 			// function definition order does not change their invocation order:
 			// the anchor probe below still runs first.
-			poolDemandFirstRowFunctionScript(topo) +
+			poolDemandFirstRowFunctionScript(topo, rules) +
 			assignedGraphWorkflowAnchorReadyFunctionScript(topo) +
 			`probe_assigned_graph_anchor_ready "$1"; ` +
 			graphWorkflowAnchorFallbackBeforeFreshPoolScript() +
@@ -1334,7 +1395,7 @@ func buildWorkQuery(a *Agent, topo QueryTopology) string {
 	}
 	script := legacyControlAssignedWorkQueryScript(topo) +
 		poolDemandOriginGateScriptWithGraphAnchorFallback() +
-		poolDemandFirstRowFunctionScript(topo) +
+		poolDemandFirstRowFunctionScript(topo, rules) +
 		assignedGraphWorkflowAnchorReadyFunctionScript(topo) +
 		`probe_assigned_graph_anchor_ready "$1"; ` +
 		`probe_assigned_graph_anchor_ready "$2"; ` +
@@ -1408,9 +1469,9 @@ func buildRoutedPoolQuery(a *Agent, topo QueryTopology) string {
 	target := a.poolDemandTarget()
 	legacyTarget := legacyWorkflowControlQualifiedName(target)
 	if legacyTarget == "" {
-		return routedPoolWorkQueryCommand(topo, target)
+		return routedPoolWorkQueryCommand(topo, PoolDemandServeRulesFor(a), target)
 	}
-	return routedPoolWorkQueryCommand(topo, target, legacyTarget)
+	return routedPoolWorkQueryCommand(topo, PoolDemandServeRulesFor(a), target, legacyTarget)
 }
 
 func legacyWorkflowControlQualifiedName(target string) string {
@@ -1480,7 +1541,7 @@ func (a *Agent) EffectivePoolDemandQueryFor(topo QueryTopology) string {
 
 func buildPoolDemandQuery(a *Agent, topo QueryTopology) string {
 	target := a.poolDemandTarget()
-	return poolDemandCountShell(target, topo)
+	return poolDemandCountShell(target, topo, PoolDemandServeRulesFor(a))
 }
 
 // Query-override names as they are spelled in pack.toml / city.toml, for

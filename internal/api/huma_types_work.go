@@ -11,6 +11,8 @@ type WorkReadyInput struct {
 	MetadataField []string `query:"metadata_field,explode" required:"false" doc:"Require metadata key=value, or a bare key for any non-empty value. Repeatable; every one must hold."`
 	ExcludeType   []string `query:"exclude_type,explode" required:"false" doc:"Drop beads of this issue type. Repeatable."`
 	ExcludeLabel  []string `query:"exclude_label,explode" required:"false" doc:"Drop beads carrying this label. Repeatable."`
+	Label         []string `query:"label,explode" required:"false" doc:"Require this label; every one must be on the bead. Repeatable; a comma-separated value is split as bd splits it."`
+	LabelAny      []string `query:"label_any,explode" required:"false" doc:"Require at least one of these labels on the bead. Repeatable; a comma-separated value is split as bd splits it."`
 	Sort          string   `query:"sort" required:"false" enum:"oldest,newest" doc:"Order: oldest or newest by created_at. Omitted is the canonical ready order (priority, created_at, id)."`
 	Limit         int      `query:"limit" required:"false" minimum:"0" doc:"At most this many rows, cut after the merge and the order; 0 is unlimited."`
 	Status        string   `query:"status" required:"false" enum:"open,in_progress,blocked,closed" doc:"List beads in this status instead of ready work."`
@@ -24,6 +26,8 @@ func (in *WorkReadyInput) readyWorkQuery() readywork.Query {
 		MetadataFields: in.MetadataField,
 		ExcludeTypes:   in.ExcludeType,
 		ExcludeLabels:  in.ExcludeLabel,
+		Labels:         in.Label,
+		AnyLabels:      in.LabelAny,
 		Sort:           in.Sort,
 		Limit:          in.Limit,
 		Status:         in.Status,

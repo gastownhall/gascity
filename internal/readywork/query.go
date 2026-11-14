@@ -87,6 +87,8 @@ type compiled struct {
 	assignee      string
 	excludeTypes  map[string]bool
 	excludeLabels []string
+	labels        []string
+	anyLabels     []string
 	metadata      []metadataFieldFilter
 	status        string
 	sort          string
@@ -134,11 +136,29 @@ func compile(q Query) (compiled, error) {
 			c.excludeLabels = append(c.excludeLabels, label)
 		}
 	}
+	c.labels = splitLabelValues(q.Labels)
+	c.anyLabels = splitLabelValues(q.AnyLabels)
 	return c, nil
 }
 
+// splitLabelValues reads --label / --label-any values the way bd does: each
+// value is split on commas, every piece is trimmed, and blank pieces are
+// dropped, so `--label-any ""` or `--label ,` is no filter at all.
+func splitLabelValues(values []string) []string {
+	var out []string
+	for _, value := range values {
+		for _, piece := range strings.Split(value, ",") {
+			if piece = strings.TrimSpace(piece); piece != "" {
+				out = append(out, piece)
+			}
+		}
+	}
+	return out
+}
+
 // Matcher returns the row predicate of q: --assignee, --unassigned,
-// --exclude-type, --exclude-label and --metadata-field, the predicates a work
+// --exclude-type, --exclude-label, --label, --label-any and --metadata-field,
+// the predicates a work
 // query's tier applies to every candidate. It is what the merged set is filtered
 // by, and it is exported for the reader-agreement checks that hold the
 // controller's demand census to the same predicate a seat claims through.
@@ -169,6 +189,14 @@ func (c compiled) matches(b beads.Bead) bool {
 		if slices.Contains(b.Labels, label) {
 			return false
 		}
+	}
+	for _, label := range c.labels {
+		if !slices.Contains(b.Labels, label) {
+			return false
+		}
+	}
+	if len(c.anyLabels) > 0 && !slices.ContainsFunc(c.anyLabels, func(label string) bool { return slices.Contains(b.Labels, label) }) {
+		return false
 	}
 	return beadMatchesMetadata(b, c.metadata)
 }

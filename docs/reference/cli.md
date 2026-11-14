@@ -3787,6 +3787,7 @@ The flags mirror the "bd ready" contract the default work_query builds:
   gc ready --metadata-field "gc.routed_to=$target" --unassigned \
            --exclude-type=epic --exclude-label "hold:mayor" \
            --exclude-label "hold:external" --exclude-label "human" \
+           [--label "needs-claude-review"] [--label-any "urgent"] \
            --json --limit=20
 
 Rows are emitted in canonical ready order (priority, created_at, id) unless
@@ -3833,6 +3834,8 @@ gc ready [flags]
 | `--exclude-type` | stringArray |  | drop beads of this issue type (repeatable) |
 | `--include-ephemeral` | bool |  | accept --include-ephemeral for bd-ready parity (every leg already spans the wisp tier) |
 | `--json` | bool | `true` | accept --json for bd-ready parity (output is always a JSON array) |
+| `--label` | stringArray |  | require this label; every --label must be on the bead (repeatable, comma-separated values split like bd) |
+| `--label-any` | stringArray |  | require at least one --label-any label on the bead (repeatable, comma-separated values split like bd) |
 | `--limit` | int |  | max beads to return (0 = unlimited) |
 | `--metadata-field` | stringArray |  | require metadata "key=value", or bare "key" for any non-empty value (repeatable) |
 | `--sort` | string |  | sort order: oldest\|newest (default: canonical ready order) |

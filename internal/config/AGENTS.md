@@ -15,6 +15,24 @@ keep already-owned workflow anchors available for continuation. Update the
 shell count and Go predicates together; otherwise an unclaimable latch can
 continually wake replacement workers.
 
+## Route labels (`route_label`, `route_label_any`)
+
+An agent's `route_label` (every label, AND) and `route_label_any` (at least one,
+OR) narrow only the routed pool-demand tier: the generated routed-work readers,
+the count form, and the controller's demand predicate. They ride on
+`PoolDemandServeRules` (`PoolDemandServeRulesFor(agent)`), the same value the
+shell flags are rendered from and `demandServableForTemplateRules` (`cmd/gc`)
+answers with, so a consumer of the routed tier takes the rules, never a
+re-derived label list. Work already assigned to the agent (the in_progress and
+assigned-ready tiers, the graph anchor) and the boot/death hooks are owned work
+and stay unlabeled. Label values reach `bd ready` / `gc ready` as shell-quoted
+`--label=` / `--label-any=` data and reach the legacy ephemeral jq path as JSON
+string literals. `validateRouteLabels` rejects what bd would silently rewrite
+(commas, blanks, surrounding whitespace, line breaks) and any combination with a
+raw `work_query` or `scale_check`; `LoadWithIncludes` runs it on the effective
+agents after patches. The builder and investigator pack queries have pipeline
+stages and stay raw `work_query` overrides, so they cannot take route labels.
+
 ## Adding agent config fields
 
 When adding a field to `config.Agent`, also add it to `AgentPatch` and

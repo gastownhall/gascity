@@ -45,6 +45,14 @@ func (c *Client) ReadyWork(ctx context.Context, q readywork.Query) ([]readywork.
 		labels := slices.Clone(q.ExcludeLabels)
 		params.ExcludeLabel = &labels
 	}
+	if len(q.Labels) > 0 {
+		labels := slices.Clone(q.Labels)
+		params.Label = &labels
+	}
+	if len(q.AnyLabels) > 0 {
+		labels := slices.Clone(q.AnyLabels)
+		params.LabelAny = &labels
+	}
 	if q.Sort != "" {
 		order := genclient.GetV0CityByCityNameWorkReadyParamsSort(q.Sort)
 		params.Sort = &order

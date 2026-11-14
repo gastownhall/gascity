@@ -41,6 +41,7 @@ The flags mirror the "bd ready" contract the default work_query builds:
   gc ready --metadata-field "gc.routed_to=$target" --unassigned \
            --exclude-type=epic --exclude-label "hold:mayor" \
            --exclude-label "hold:external" --exclude-label "human" \
+           [--label "needs-claude-review"] [--label-any "urgent"] \
            --json --limit=20
 
 Rows are emitted in canonical ready order (priority, created_at, id) unless
@@ -129,6 +130,8 @@ func registerReadyFlags(cmd *cobra.Command, flags *readyFlags, includeEphemeral,
 	cmd.Flags().StringArrayVar(&opts.MetadataFields, "metadata-field", nil, "require metadata \"key=value\", or bare \"key\" for any non-empty value (repeatable)")
 	cmd.Flags().StringArrayVar(&opts.ExcludeTypes, "exclude-type", nil, "drop beads of this issue type (repeatable)")
 	cmd.Flags().StringArrayVar(&opts.ExcludeLabels, "exclude-label", nil, "drop beads carrying this label (repeatable)")
+	cmd.Flags().StringArrayVar(&opts.Labels, "label", nil, "require this label; every --label must be on the bead (repeatable, comma-separated values split like bd)")
+	cmd.Flags().StringArrayVar(&opts.AnyLabels, "label-any", nil, "require at least one --label-any label on the bead (repeatable, comma-separated values split like bd)")
 	cmd.Flags().StringVar(&opts.Sort, "sort", "", "sort order: oldest|newest (default: canonical ready order)")
 	cmd.Flags().IntVar(&opts.Limit, "limit", 0, "max beads to return (0 = unlimited)")
 	// --include-ephemeral is accepted for parity with `bd ready`, which the
