@@ -14,7 +14,7 @@ import (
 //     interaction (L4) on the routed leaf (C8.9), and for an interactive
 //     idle session the agent proved idle (SESS-621), whose failure is a
 //     no-op, as legacy's probe is, not a backoff;
-//   - orphaned and suspended: L5, the row's open or in-progress assigned
+//   - orphaned, suspended and the pool-slot drain deadline: L5, the row's open or in-progress assigned
 //     work read live, bounded (SESS-074); work, a failed read or an expired
 //     one refuses.
 //
@@ -51,7 +51,7 @@ func drainBeginNeeds(w *World, it intent) needs {
 			n.IdleShadow = unprovedIdleSleep(w, row.Info, reason)
 		}
 		return n
-	case reason == drainOrphaned || reason == drainSuspended:
+	case reason == drainOrphaned || reason == drainSuspended || reason == drainDeadlineReason:
 		return needs{Legs: legWork}
 	case reason == drainConfigDrift:
 		return needs{Runtime: true, Legs: legAttach | legWork}
@@ -103,7 +103,7 @@ func drainBeginChecks(v txView, reason string, step txStep) txStep {
 			return txStep{Refuse: fv.Reason}
 		}
 	}
-	if (reason == drainOrphaned || reason == drainSuspended || reason == drainConfigDrift) && v.Fence.workHeld() {
+	if (reason == drainOrphaned || reason == drainSuspended || reason == drainConfigDrift || reason == drainDeadlineReason) && v.Fence.workHeld() {
 		return txStep{Refuse: causeHasWork}
 	}
 	step.Facts.Transition = &drainTransition{Name: v.Row.SessionNameMetadata, Reason: reason, Transition: "begin"}

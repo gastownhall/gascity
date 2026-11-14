@@ -130,11 +130,11 @@ func signalNeeds(_ *World, it intent) needs {
 	return n
 }
 
-// signalReadsWork reports a controller signal that reads L5: no-wake-reason
-// and orphaned (v5.10a B). An ack's signal (A11) reads none.
+// signalReadsWork reports a controller signal that reads L5: no-wake-reason,
+// orphaned (v5.10a B) and the pool-slot drain deadline. An ack's signal (A11) reads none.
 func signalReadsWork(it intent) bool {
 	return (it.Kind == intentSignal || it.Kind == intentSignalFresh) &&
-		(it.Reason == decideDrainSignal+reasonNoWake || it.Reason == decideDrainSignal+drainOrphaned)
+		(it.Reason == decideDrainSignal+reasonNoWake || it.Reason == decideDrainSignal+drainOrphaned || it.Reason == decideDrainSignal+drainDeadlineReason)
 }
 
 // redecideSignal is redecideRow, then, for the fresh kind, an idle-respawn

@@ -591,6 +591,7 @@ go_library(
         "reconcile_admit.go",
         "reconcile_arms_baseline.go",
         "reconcile_arms_close.go",
+        "reconcile_arms_deadline.go",
         "reconcile_arms_drain.go",
         "reconcile_arms_drift.go",
         "reconcile_arms_fresh_cycle.go",

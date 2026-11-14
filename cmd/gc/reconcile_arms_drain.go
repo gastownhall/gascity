@@ -74,6 +74,10 @@ func drainPolicyOf(reason string) drainPolicy {
 		return drainPolicy{lostCancels: true, authorized: func(r *rowFacts, _ string) bool { return !driftResolvedOrDeferred(r) }}
 	case executionStalledDrainReason:
 		return drainPolicy{authorized: func(*rowFacts, string) bool { return true }}
+	case drainDeadlineReason:
+		// Not cancelable by a lens: demand for the seat is the wedge the bound
+		// ends (ga-rxhu2). A request whose seat is no longer due is voided.
+		return drainPolicy{authorized: func(r *rowFacts, _ string) bool { return r.drainDeadlineDue() }}
 	case idleRespawnDrainReason:
 		// Eligible (C6d); not cancelable by the wake or assigned-work lenses
 		// (the pending lens still cancels it, DRAIN-022), and a request no

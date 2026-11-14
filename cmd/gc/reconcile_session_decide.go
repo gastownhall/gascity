@@ -230,6 +230,7 @@ var rowArms = []rowArm{
 	{"A19", armDrainVoidCancel},
 	{"A20", armDrainBegin},
 	{"A21", armClose},
+	{"A22", armDrainDeadline},
 }
 
 // decideRow's other reasons.

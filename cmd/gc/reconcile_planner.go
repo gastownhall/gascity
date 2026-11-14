@@ -454,7 +454,7 @@ func (p *planner) applyFacts(f effectFacts, at time.Time) {
 		p.aliasOwed[*f.AliasOwed] = true
 	}
 	if s := f.Stopped; s != nil {
-		recordAgentStop(context.Background(), s.Name, s.Identity, "drain-ack", nil)
+		recordAgentStop(context.Background(), s.Name, s.Identity, s.Reason, nil)
 	}
 	switch {
 	case f.Work == nil:

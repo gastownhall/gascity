@@ -311,6 +311,23 @@ func poolSlotRetireHasAssignedWork(sw *SeatWork, info sessionpkg.Info) (bool, er
 	return seatHasWorkForCloseGate(sw, RefuseScope{ids: poolSlotRetireAssigneeIdentities(info, sw.Legs().cfg)})
 }
 
+// poolSlotRetireDue is gates 1, 3 and 4 of the bound, whole: a seat it owns
+// (poolSlotRetireOwnsSeat) that holds a runtime name, under no advisory hold
+// (poolSlotRetireBlocker), whose unfinalized drain is past the deadline. It
+// returns the drain's age. Legacy's retirement and v2's A22 (armDrainDeadline)
+// both decide through it, so the two bounds never disagree on which seats are
+// due. info.SessionNameMetadata empty means no persisted runtime name, so no
+// pool slot name is held and there is nothing for the bound to free.
+func poolSlotRetireDue(info sessionpkg.Info, cfg *config.City, template string, now time.Time) (time.Duration, bool) {
+	if !poolSlotRetireOwnsSeat(info, cfg, template) || strings.TrimSpace(info.SessionNameMetadata) == "" {
+		return 0, false
+	}
+	if poolSlotRetireBlocker(info, now) != "" {
+		return 0, false
+	}
+	return poolSlotDrainAgePastDeadline(info, now.UTC())
+}
+
 // retirePoolSlotAtDrainDeadline force-retires a pool-managed seat whose drain
 // has outlived poolSlotDrainRetireDeadline, freeing the runtime name its slot
 // is pinned to. It returns the metadata fold for the reconciler's typed
@@ -375,22 +392,11 @@ func retirePoolSlotAtDrainDeadline(
 		return nil, false
 	}
 	template = poolSlotRetireTemplate(info, template)
-	if !poolSlotRetireOwnsSeat(info, cfg, template) {
-		return nil, false
-	}
-	name := strings.TrimSpace(info.SessionNameMetadata)
-	if name == "" {
-		// No persisted runtime name means no pool slot name is being held, so
-		// there is nothing here for this bound to free.
-		return nil, false
-	}
-	if blocker := poolSlotRetireBlocker(info, clk.Now()); blocker != "" {
-		return nil, false
-	}
-	drainAge, overdue := poolSlotDrainAgePastDeadline(info, clk.Now().UTC())
+	drainAge, overdue := poolSlotRetireDue(info, cfg, template, clk.Now())
 	if !overdue {
 		return nil, false
 	}
+	name := strings.TrimSpace(info.SessionNameMetadata)
 
 	hasAssignedWork, err := poolSlotRetireHasAssignedWork(sw, info)
 	if err != nil {

@@ -346,7 +346,7 @@ const executionStalledDrainReason = "execution-stalled"
 
 func drainReasonCancelable(reason string) bool {
 	return reason != "config-drift" && reason != "orphaned" && reason != "suspended" &&
-		reason != executionStalledDrainReason && reason != idleRespawnDrainReason
+		reason != executionStalledDrainReason && reason != idleRespawnDrainReason && reason != drainDeadlineReason
 }
 
 // suspendDrainResumeWakeReason reports whether a wake evaluation is config
@@ -411,7 +411,7 @@ func cancelResumedSuspendDrains(
 }
 
 func pendingDrainReasonCancelable(reason string) bool {
-	return reason != "orphaned" && reason != "suspended" && reason != executionStalledDrainReason
+	return reason != "orphaned" && reason != "suspended" && reason != executionStalledDrainReason && reason != drainDeadlineReason
 }
 
 // liveClaimDrainReasonCancelable is the live-claim cancel lens: the in-flight

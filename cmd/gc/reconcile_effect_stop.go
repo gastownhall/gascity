@@ -81,6 +81,8 @@ func stopLegs(it intent) fenceLegs {
 		return legToken | legAttach | legPending
 	case it.Reason == decideRestartRequested: // A13 (v5.10u): an explicit restart stops an attached session, as legacy's
 		return legToken
+	case deadlineWorkRead(it): // the bound's stop reads the seat's work first (gate 5), as legacy's kill is
+		return legToken | legAttach | legWork
 	}
 	return legToken | legAttach
 }
@@ -480,7 +482,12 @@ func stopCloseStep(v txView, work finalizeWork, probeErr error) txStep {
 	}
 	terminal := session.ClosePatch(v.Now, "drained")
 	maps.Copy(terminal, stopEndPatch()) // a closed row keeps no stop request
-	return txStep{Terminal: terminal, Facts: stopFacts(v, out, nil), Done: true}
+	facts := stopFacts(v, out, nil)
+	if stopReason(v.It) == drainDeadlineReason {
+		terminal[drainFinalizeMetadataKey] = drainFinalizeDeadline // the provenance rides the terminal write, so it never outlives a refused close
+		facts.Events = append(facts.Events, deadlineRetiredEvent(v))
+	}
+	return txStep{Terminal: terminal, Facts: facts, Done: true}
 }
 
 // passStopped hands the stop's outcome to the premise close.
@@ -561,12 +568,18 @@ func stopFacts(v txView, out stopped, kept *beads.Bead) effectFacts {
 	}
 	template := cmp.Or(normalizedSessionTemplateInfo(v.Row, v.World.Env.Cfg), v.Row.Template)
 	f := effectFacts{}
+	// The pool-slot drain deadline's stop is legacy's, recorded as legacy
+	// records it (retirePoolSlotAtDrainDeadline), not as a drain-ack.
+	stoppedBy, message, why := "drain-ack", "drain acknowledged by agent", "drain acknowledged"
+	if stopReason(v.It) == drainDeadlineReason {
+		stoppedBy, message, why = "drain-deadline", "stopped at the pool-slot drain deadline", "drain deadline"
+	}
 	if out.Performed {
-		f.Stopped = &agentStop{Name: strings.TrimSpace(v.Row.SessionName), Identity: sessionAgentMetricIdentityInfo(v.Row, v.World.Env.Cfg)}
+		f.Stopped = &agentStop{Name: strings.TrimSpace(v.Row.SessionName), Identity: sessionAgentMetricIdentityInfo(v.Row, v.World.Env.Cfg), Reason: stoppedBy}
 	}
 	f.Events = append(f.Events, events.Event{
-		Type: events.SessionStopped, Actor: "gc", Subject: template, Message: "drain acknowledged by agent",
-		SessionID: v.Row.ID, Payload: api.SessionLifecyclePayloadJSON(v.Row.ID, template, "drain acknowledged"),
+		Type: events.SessionStopped, Actor: "gc", Subject: template, Message: message,
+		SessionID: v.Row.ID, Payload: api.SessionLifecyclePayloadJSON(v.Row.ID, template, why),
 	})
 	if kept != nil {
 		f.Events = append(f.Events, events.Event{
@@ -581,4 +594,23 @@ func stopFacts(v txView, out stopped, kept *beads.Bead) effectFacts {
 // agentStop is a performed stop, for legacy's stop metric
 // (telemetry.RecordAgentStop): one the fence passed, recorded as before
 // mc-rq4d0 also when the runtime had left the name and no Stop was issued.
-type agentStop struct{ Name, Identity string }
+type agentStop struct{ Name, Identity, Reason string }
+
+// deadlineRetiredEvent is legacy's retirement event
+// (retirePoolSlotAtDrainDeadline), recorded with the close that lands it. The
+// drain's age is counted from the request's stamp, which A22 wrote as the
+// drain_at the seat entered drain at.
+func deadlineRetiredEvent(v txView) events.Event {
+	template := cmp.Or(normalizedSessionTemplateInfo(v.Row, v.World.Env.Cfg), v.Row.Template)
+	name := strings.TrimSpace(v.Row.SessionNameMetadata)
+	var enteredAt string
+	var age time.Duration
+	if req, ok := activeStop(v.World.Census.reread(v.It.Key, v.Row, v.Meta)); ok && !req.At.IsZero() {
+		enteredAt, age = req.At.UTC().Format(time.RFC3339), v.Now.Sub(req.At)
+	}
+	return events.Event{
+		Type: events.SessionPoolSlotRetiredAtDrainDeadline, Actor: "gc", Subject: v.Row.ID, SessionID: v.Row.ID,
+		Message: fmt.Sprintf("pool slot %s retired at the drain deadline after %s in an unfinalized drain", name, age.Round(time.Second)),
+		Payload: api.SessionPoolSlotRetiredAtDrainDeadlinePayloadJSON(v.Row.ID, name, template, enteredAt, age),
+	}
+}

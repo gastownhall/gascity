@@ -14,34 +14,47 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
-// PAR-DRAINDL on the simulator: does v2's own drain chain (A6 heals, A20
-// begin, A11 ack, A4 stop, A21 close) bound how long a pool seat sits in an
+// PAR-DRAINDL on the simulator: does v2 bound how long a pool seat sits in an
 // unfinalized drain, as legacy's retirePoolSlotAtDrainDeadline does at
 // poolSlotDrainRetireDeadline after drain_at (ga-rxhu2: a pool at ZERO seats
 // for 3d10h, every bead routed to the template unclaimable)?
 //
-// The answer is that it does, with no arm of its own: a seat in any drainDeadlineShapes
-// shape is walked to a close by armDrainBegin (begin), armSignal (the stop
-// request, a grace after the begin), armAck (the agent's ack), armStop (the
-// fenced stop: stopFenced, confirmStopped, then stopFinalizeStep's goneNow
-// re-check) and armClose, and a runtime that will not stop keeps its row open
-// with escalateStop's alert (PAR-FORCEKILL accepts that v2 has no force path).
-// Legacy's drain_finalize=deadline write has no v2 counterpart and none is needed.
+// Two answers, one per population:
 //
-// What the fixture models: one pool seat of the "worker" template that no
-// work is routed to, parked in each of the shapes a drain can be left in
-// (drainDeadlineShapes), with its drain begun well before the run (so the
-// legacy bound would already be due) or just now, on a runtime that stops
-// when asked (killable) or one whose Stop fails and which never leaves the
-// name (unkillable), run on the fake clock for several multiples of the
-// deadline.
+//   - A pool no work is routed to: the ordinary chain (armDrainBegin,
+//     armSignal, armAck, armStop, armClose) walks every shape to a close well
+//     inside the deadline, and a runtime that will not stop keeps its row open
+//     with escalateStop's alert.
+//   - A pool with routed work, where the allocation keeps the seat (the
+//     ga-rxhu2 wedge): the seat that carries the drain's provenance (a
+//     "healed awake" row, shape 1) is wanted, so no ordinary arm ever drains
+//     it. That is what A22 (armDrainDeadline) is for: it begins a stop request
+//     that no lens cancels (drainDeadlineReason) once poolSlotRetireDue says
+//     the seat is due, walks it through the same signal, fenced stop and
+//     finalize, and stamps drain_finalize=deadline and emits
+//     SessionPoolSlotRetiredAtDrainDeadline with the close. The pool then
+//     starts a seat for the routed bead under a new session name.
+//
+// There is no force path (PAR-FORCEKILL): a runtime that will not stop keeps
+// its row open, with no close, no stamp and the session.drain_stop_escalated
+// alert. The control test drops the drain arms and shows the seat staying
+// stuck, so the green runs are the arms' doing.
+//
+// What the fixture models: one pool seat of the "worker" template, parked in
+// each of the shapes a drain can be left in (drainDeadlineShapes), with its
+// drain begun well before the run, a minute before the deadline, or just now,
+// on a runtime that stops when asked or one that refuses or ignores a stop,
+// in a pool that has no work routed or one bead routed (gc.routed_to=worker)
+// at max 1 and max 3 seats, run on the fake clock for several multiples of
+// the deadline.
 //
 // What it does not model: a real agent process (the runtime acks nothing
 // unless the row says it did; "attached" is never set, so D6's quiet hold
-// does not apply), a controller restart (the planner's memory is fresh
-// every run), a second seat or a pool that wants the seat (a seat with work
-// is not in a drain the bound would retire), and tmux itself (a runtime that
-// "survives" is the sim's, not a real pane).
+// does not apply), a controller restart (the planner's memory is fresh every
+// run), work assigned to the seat itself (poolSlotRetireHasAssignedWork holds
+// it, read by the begin, the signal and the stop, and is covered where the
+// fence is), and tmux itself (a runtime that "survives" is the sim's, not a
+// real pane).
 
 // drainDeadlineHorizon is how long each fixture runs: four of legacy's
 // deadlines, so a bound that only fires at the deadline has fired twice over.
@@ -55,6 +68,11 @@ const drainFreedWithin = poolSlotDrainRetireDeadline / 3
 // drainDeadlineShape is one way a pool seat is left in a drain.
 type drainDeadlineShape struct {
 	name string
+	// drained marks a seat that carries the drain's provenance
+	// (sleep_reason=drained, as the drain-ack path leaves it): the
+	// population the bound retires. A seat without it is a live seat a
+	// pool that wants it keeps serving, whatever its request says.
+	drained bool
 	// row is the seat gc-1 as the drain left it, drainAge after drain_at.
 	row func(drainAge time.Duration) beads.Bead
 }
@@ -67,13 +85,15 @@ func drainDeadlineShapes() []drainDeadlineShape {
 			// the drain-ack path stamped drain_at and sleep_reason=drained
 			// and cleared last_woke_at, the runtime survived, and the state
 			// heal read the row back to awake over the live runtime.
-			name: "healed awake after a drain, runtime alive",
+			name:    "healed awake after a drain, runtime alive",
+			drained: true,
 			row: func(age time.Duration) beads.Bead {
 				return poolRow("gc-1", "worker", 1, "awake", append(slices.Clone(meta), "sleep_reason", "drained", "drain_at", rowAt(-age))...)
 			},
 		},
 		{
-			name: "drain-ack stop pending",
+			name:    "drain-ack stop pending",
+			drained: true,
 			row: func(age time.Duration) beads.Bead {
 				return poolRow("gc-1", "worker", 1, "draining", append(slices.Clone(meta),
 					"state_reason", session.DrainAckStopPendingReason, "sleep_reason", "drained", "drain_at", rowAt(-age))...)
@@ -158,6 +178,8 @@ type drainRun struct {
 	rt    drainStopMode
 	pool  drainPool
 	arms  func([]rowArm) []rowArm
+	// assigned seeds an in-progress bead assigned to the seat itself.
+	assigned bool
 }
 
 // drainOutcome is what a run left behind.
@@ -196,6 +218,9 @@ func runDrainDeadline(t *testing.T, d drainRun) drainOutcome {
 	rows := []beads.Bead{d.shape.row(d.age)}
 	if d.pool.demand {
 		rows = append(rows, beads.Bead{ID: "gw-1", Title: "work", Type: "task", Status: "open", Metadata: map[string]string{"gc.routed_to": "worker"}})
+	}
+	if d.assigned {
+		rows = append(rows, beads.Bead{ID: "gw-2", Title: "held", Type: "task", Status: "in_progress", Assignee: "s-gc-1"})
 	}
 	out.s = scriptedWith(t, o, []string{"gc-1"}, rows...)
 	out.s.cfg.Agents[0].MaxActiveSessions = intPtr(d.pool.max)
@@ -264,10 +289,13 @@ func (s *sim) startedUnderNewName() (string, bool) {
 }
 
 // retirements counts the events the pool-slot drain deadline records.
-func (o drainOutcome) retirements() int {
+func (o drainOutcome) retirements() int { return o.count(events.SessionPoolSlotRetiredAtDrainDeadline) }
+
+// count is the number of events of one type the run recorded.
+func (o drainOutcome) count(typ string) int {
 	n := 0
 	for _, e := range o.events.Events {
-		if e.Type == events.SessionPoolSlotRetiredAtDrainDeadline {
+		if e.Type == typ {
 			n++
 		}
 	}
@@ -312,6 +340,16 @@ func TestSimPoolSeatInDrainIsFreedWithAKillableRuntime(t *testing.T) {
 				t.Run(fmt.Sprintf("%s, %s, drain begun %s before", shape.name, pool, age), func(t *testing.T) {
 					out := runDrainDeadline(t, drainRun{shape: shape, age: age, rt: runtimeKillable, pool: pool})
 					s, b := out.s, out.s.seatRow(t)
+					if pool.demand && !shape.drained {
+						// The pool wants this live seat for the routed bead: no
+						// drain provenance, so nothing retires it, and the drain
+						// its row recorded is canceled.
+						if b.Status == "closed" || b.Metadata[drainFinalizeMetadataKey] != "" || out.retirements() != 0 || len(s.sp.kills) != 0 {
+							t.Errorf("a wanted live seat was retired: %s %v, kills %+v, %d retirement events", b.Status, b.Metadata, s.sp.kills, out.retirements())
+						}
+						s.noViolations(t)
+						return
+					}
 					bound := drainBound(age, pool)
 					if out.freedAfter < 0 || out.freedAfter > bound {
 						t.Errorf("seat freed after %v (negative: never), now %s %v; want within %v", out.freedAfter, b.Status, b.Metadata, bound)
@@ -365,6 +403,7 @@ func TestSimPoolSeatInDrainStaysOpenOverAnUnkillableRuntime(t *testing.T) {
 					if out.freedAfter >= 0 {
 						t.Errorf("seat freed after %v (%s %v) over a runtime that never stopped: its slot is open while the agent runs", out.freedAfter, b.Status, b.Metadata)
 					}
+					wanted := pool.demand && !shape.drained // a live seat the pool keeps: no stop is due
 					s.sp.mu.Lock()
 					_, alive := s.sp.rts["s-gc-1"]
 					kills := len(s.sp.kills)
@@ -384,17 +423,44 @@ func TestSimPoolSeatInDrainStaysOpenOverAnUnkillableRuntime(t *testing.T) {
 					// Each shape ends in a signaled stop (legacy's stop-pending
 					// projection) that the runtime refuses: the stop is tried, and
 					// D6 alerts once it is 30 minutes old.
+					if wanted {
+						s.noViolations(t)
+						return
+					}
 					if out.stops.Load() == 0 {
 						t.Errorf("no stop was ever attempted")
 					}
 					if got := s.p.metrics.series["stop_escalations"]; got == 0 {
 						t.Errorf("stop_escalations = 0 after %s with the stop outstanding; want D6's alert", drainDeadlineHorizon)
 					}
+					if n := out.count(events.SessionDrainStopEscalated); n == 0 {
+						t.Errorf("no %s event after %s with the stop outstanding", events.SessionDrainStopEscalated, drainDeadlineHorizon)
+					}
 					s.noViolations(t)
 				})
 			}
 		}
 	}
+}
+
+// Kills a v2 that retires a seat past the deadline while work is assigned to
+// it: the bound's begin, signal and stop each read the seat's work (legacy's
+// gate 5), because the close it authorizes cannot be taken back. The seat is
+// due for the whole run, and nothing stops it, closes it or stamps it.
+func TestSimPoolSeatInDrainWithAssignedWorkIsNeverRetired(t *testing.T) {
+	shape := drainDeadlineShapes()[0]
+	out := runDrainDeadline(t, drainRun{shape: shape, age: 2 * poolSlotDrainRetireDeadline, rt: runtimeKillable, pool: drainPool{demand: true, max: 1}, assigned: true})
+	b := out.s.seatRow(t)
+	if b.Status == "closed" || b.Metadata[drainFinalizeMetadataKey] != "" || out.retirements() != 0 {
+		t.Errorf("seat holding assigned work retired: %s %v, %d events", b.Status, b.Metadata, out.retirements())
+	}
+	out.s.sp.mu.Lock()
+	kills := len(out.s.sp.kills)
+	out.s.sp.mu.Unlock()
+	if kills != 0 {
+		t.Errorf("kills %+v over a seat holding assigned work", out.s.sp.kills)
+	}
+	out.s.noViolations(t)
 }
 
 // Kills a fixture that cannot see a wedge: with the arms that finalize a
@@ -410,6 +476,9 @@ func TestSimPoolSeatInDrainControlWithoutTheDrainArmsStaysStuck(t *testing.T) {
 		}
 	}
 	for _, shape := range drainDeadlineShapes() {
+		if !shape.drained {
+			continue // a live seat is kept under demand, so there is no wedge to control for
+		}
 		for _, pool := range drainPools[1:] {
 			t.Run(shape.name+", "+pool.String(), func(t *testing.T) {
 				out := runDrainDeadline(t, drainRun{shape: shape, age: 2 * poolSlotDrainRetireDeadline, rt: runtimeKillable, pool: pool, arms: without("A4", "A11", "A20", "A21", "A22")})

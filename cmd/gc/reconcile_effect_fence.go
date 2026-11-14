@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -113,6 +114,12 @@ func (p *effectPass) readWork(row session.Info, it intent) *txWork {
 	if p.reads.legs.unusable() != nil || p.World.Env == nil {
 		return &txWork{Err: errNoReadStore}
 	}
+	if deadlineWorkRead(it) {
+		// The bound's own probe: every identity the seat claims work under,
+		// as legacy's, because the stop it authorizes cannot be taken back.
+		has, err := poolSlotRetireHasAssignedWork(seatWorkFor(p.reads.legs, releaseScope(row, p.World.Env.Cfg)), row)
+		return &txWork{Free: !has && err == nil, Err: err}
+	}
 	if signalReadsWork(it) {
 		return p.readSignalWork(row, it)
 	}
@@ -136,6 +143,16 @@ func (p *effectPass) readWork(row session.Info, it intent) *txWork {
 	}
 	has, err := sessionHasAssignedWorkInStoresForStatuses(seatWorkFor(p.reads.legs, scope), scope, statuses)
 	return &txWork{Free: !has && err == nil, Err: err}
+}
+
+// deadlineWorkRead reports an intent of the pool-slot drain deadline's chain:
+// its begin, signal, stop or finalize.
+func deadlineWorkRead(it intent) bool {
+	switch it.Kind {
+	case intentDrainBegin, intentSignal, intentStop:
+		return strings.HasSuffix(it.Reason, ":"+drainDeadlineReason)
+	}
+	return false
 }
 
 // readSignalWork is a controller signal's L5 (v5.10a B), legacy DRAIN-005's

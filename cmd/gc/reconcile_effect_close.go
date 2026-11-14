@@ -505,9 +505,35 @@ func (c *closeReleases) cascade(ctx context.Context, it intent) {
 		logRelease(c.stderr, "closing", b.ID, out, err)
 		strand(c.alerts, releaseSeatOfBead(b), strings.TrimSpace(b.Metadata["state"]), out, c.now, c.stderr)
 	}
-	if it.Closing.Kind == closePoolSlot && c.cfg != nil && ctx.Err() == nil && !c.workDirInUse(store, b) {
-		pruneWorktree(sessionInfoFromBead(b), c.cityPath, c.cfg, c.stderr)
+	if it.Closing.Kind == closePoolSlot {
+		c.pruneSlot(ctx, it)
 	}
+}
+
+// pruneSlot reclaims a closed pool seat's worktree, unless another open row
+// is working in it or the row was reopened since its close.
+func (c *closeReleases) pruneSlot(ctx context.Context, it intent) {
+	store := c.stores[it.Key.Leg]
+	if store == nil || c.cfg == nil || ctx.Err() != nil {
+		return
+	}
+	b, err := store.Get(it.Key.ID)
+	if err != nil || b.Status != "closed" || c.workDirInUse(store, b) {
+		return
+	}
+	pruneWorktree(sessionInfoFromBead(b), c.cityPath, c.cfg, c.stderr)
+}
+
+// stopAround runs the stop, then, once a close landed under the pool-slot
+// drain deadline, reclaims the retired seat's worktree: the deadline's close
+// preempts A21's pool-freeable close, the other site that does (legacy's
+// poolSlotRetireWorktreePrune).
+func stopAround(ctx context.Context, a aroundCaps, run func() settlement) settlement {
+	s := run()
+	if s.Closed && a.release != nil && deadlineWorkRead(a.it) {
+		a.release.pruneSlot(ctx, a.it)
+	}
+	return s
 }
 
 // pruneWorktree is pruneAgentHomeWorktreeIfSafeInfo; a test observes it.
