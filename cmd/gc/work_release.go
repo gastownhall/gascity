@@ -19,6 +19,17 @@ package main
 // once the claim is held by a closed row it is stranded work, which
 // session.stranded_claims reports (strandedClaimAlerts), again on D6's
 // cadence until it is rerouted or released.
+//
+// One guard sits above every policy row: a workflow member bound to a root
+// other than itself (beadmeta.IsBoundWorkflowStep) is never detached, on any
+// path, however its route reads (city-8ym). Releasing it is the defect this
+// file existed to not have: a detached step is claimed from the shared pool
+// by a session that never owned its molecule. A bound step keeps its seat
+// for its whole lifetime; on a closed row it is stamped and reported like
+// any kept claim, and the witness's orphan salvage — a supervisor act on a
+// stamped, alerted claim — is the only thing that ever moves one. The one
+// exception is a mol-do-work drain step (stepBoundToSeat): the molecule's
+// designed hand-off at orderly completion.
 
 import (
 	"errors"
@@ -116,7 +127,12 @@ var (
 //     that is gone, and only the dead-assignee sweep would probe it again,
 //     on a pool route alone;
 //   - every release clears the gc.detached of the claim it gives back, in
-//     the same write (releaseServed), so no reopened claim carries a probe.
+//     the same write (releaseServed), so no reopened claim carries a probe;
+//   - above every row: releaseListed keeps a workflow member bound to a
+//     foreign root (keptStepBound) on every path — no policy releases one,
+//     because releasing one detaches a step of a live or dead molecule onto
+//     the shared pool (city-8ym). A mol-do-work drain step is the one
+//     exception: the designed hand-off (stepBoundToSeat).
 var releasePolicies = map[releaseWhy]releasePolicy{
 	releaseKilledSeat:     {statuses: openOrStarted, startedKeeps: true, lane: laneDirect, seatRoute: true},
 	releaseDrainAck:       {statuses: startedOnly, startedNamedKeeps: true, lane: laneCarried, seatRoute: true},
@@ -134,6 +150,7 @@ const (
 	keptUnservedRoute = "unserved-route"
 	keptMoved         = "moved"
 	keptDetachedHeld  = "detached-held" // its gc.detached probe did not attest the runtime dead
+	keptStepBound     = "step-bound"    // a workflow member no release may detach (city-8ym)
 	failedBudget      = "budget"
 )
 
@@ -313,6 +330,21 @@ func ReleaseClaims(sw *SeatWork, scope ReleaseScope, seat releaseSeat, why relea
 	return releaseListed(claims, why, seat, sw.Legs().cfg, opts), err
 }
 
+// stepBoundToSeat reports whether the bead is a workflow member the release
+// seam keeps on its seat (city-8ym): beadmeta.IsBoundWorkflowStep, with one
+// exception — a mol-do-work drain step. The drain step is the molecule's
+// designed hand-off: the close gate excludes a seat's own drain step
+// (notOwnDrainStep) and the close cascade releases it, so the drain phase
+// still runs after the seat that compiled the molecule is gone; a drain step
+// carries no owner context to advance prematurely, unlike a work step, whose
+// precondition context dies with its owner. The match is
+// isSessionOwnDrainStepBead's narrow one — only mol-do-work's drain step,
+// never another formula's step that reuses the id — and a root it cannot
+// read keeps the step bound (fail toward keeping).
+func stepBoundToSeat(store beads.Store, b beads.Bead) bool {
+	return beadmeta.IsBoundWorkflowStep(b.ID, b.Metadata) && !isSessionOwnDrainStepBead(store, b)
+}
+
 // releaseListed is ReleaseClaims' body for claims a caller already listed
 // (the orphan releases list them from the tick's census).
 func releaseListed(claims []seatWorkHit, why releaseWhy, seat releaseSeat, cfg *config.City, opts ReleaseOpts) ReleaseOutcome {
@@ -336,6 +368,16 @@ func releaseListed(claims []seatWorkHit, why releaseWhy, seat releaseSeat, cfg *
 		fallback = seat.fallback
 	}
 	for _, c := range mine {
+		// Above every policy row: a workflow member stays bound to its seat
+		// (city-8ym). Even a route a lane serves is not enough to release
+		// one — the release would detach the step onto the shared pool,
+		// where a session that never owned its molecule claims it. The one
+		// exception is the seat's own mol-do-work drain step, the molecule's
+		// designed hand-off (stepBoundToSeat).
+		if stepBoundToSeat(c.store, c.bead) {
+			keep(c, keptStepBound)
+			continue
+		}
 		if p.startedNamedKeeps && seat.keepsStarted(c.bead) {
 			keep(c, keptStarted)
 			continue
@@ -432,7 +474,8 @@ func namedSessionBacks(cfg *config.City, agent *config.Agent) bool {
 }
 
 // onlyStrandedWork reports that info holds claims, and that every one would
-// stay on its closed row under the cascade's rule (no lane serves it): a
+// stay on its closed row: no lane serves it under the cascade's rule, or it
+// is a workflow member no release can detach (keptStepBound, city-8ym). A
 // close may land over them, keep them and alert (O5, revised). sw's rows are
 // read first, so a served claim among them answers false with no live read;
 // only then is the seat read live, which must agree. A failed read, or no
@@ -446,6 +489,9 @@ func onlyStrandedWork(sw *SeatWork, info sessionpkg.Info) bool {
 			return false
 		}
 		return !slices.ContainsFunc(hits, func(h seatWorkHit) bool {
+			if stepBoundToSeat(h.store, h.bead) {
+				return false // bound: it stays on the closed row under any rule
+			}
 			_, served := releaseRoute(sw.Legs().cfg, h.bead, seat.fallback, laneCarried)
 			return served
 		})
@@ -453,16 +499,26 @@ func onlyStrandedWork(sw *SeatWork, info sessionpkg.Info) bool {
 	return stranded(sw.snapshot(q, false)) && stranded(sw.fresh(scope).match(q, false))
 }
 
-// strand marks each claim out kept because no lane serves it as stranded
-// on seat's closed row, as assigned when it was kept (stampStranded), which
-// the detector reads, and alerts on them for the close kind; a close that
-// kept none ends the seat's episode. A stamp that fails is logged: the claim
+// strand marks each claim a close kept on seat's closed row as stranded
+// there, as assigned when it was kept (stampStranded), which the detector
+// reads, and alerts on them for the close kind; a close that kept none ends
+// the seat's episode. The kept claims are those no lane serves (Unserved),
+// those a workflow binding held (keptStepBound), and those the release's
+// budget ran out on (failedBudget). A stamp that fails is logged: the claim
 // still stays, and the close's own alert names it.
 func strand(alerts *strandedClaimAlerts, seat releaseSeat, kind string, out ReleaseOutcome, now time.Time, stderr io.Writer) {
 	claims := out.Unserved() // none ends the seat's episode
 	left := make(map[string]seatWorkHit, len(out.Kept)+len(out.Failed))
 	for _, k := range out.Kept {
 		left[k.bead.ID] = k
+	}
+	// A workflow member the release kept bound stays too: stamped and named,
+	// since the witness's orphan salvage is the only thing that ever moves
+	// one, and it learns of it here (city-8ym).
+	for _, k := range out.Kept {
+		if out.Why[k.bead.ID] == keptStepBound {
+			claims = append(claims, strandedClaim{id: k.bead.ID, reason: keptStepBound})
+		}
 	}
 	// A claim the release's budget ran out on stays too: stamped and named,
 	// never left on the closed row silent (O5, revised).
@@ -548,7 +604,7 @@ func (a *strandedClaimAlerts) observe(seat releaseSeat, kind string, claims []st
 		Type:      events.SessionStrandedClaims,
 		Actor:     "gc",
 		Subject:   seat.id,
-		Message:   fmt.Sprintf("%s session %s left %d claim(s) no lane serves assigned to it: %s", kind, seat.id, len(claims), set),
+		Message:   fmt.Sprintf("%s session %s left %d stranded claim(s) assigned to it: %s", kind, seat.id, len(claims), set),
 		SessionID: seat.id,
 		Payload:   api.SessionStrandedClaimsPayloadJSON(seat.id, seat.name, seat.template, kind, payload),
 	})
