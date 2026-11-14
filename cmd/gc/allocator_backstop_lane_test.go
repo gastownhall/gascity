@@ -47,8 +47,18 @@ func newTestBackstopLane(env externalReadsEnv) (*externalReadsLane, *atomic.Int6
 	return lane, wakes
 }
 
-// awaitEveryRead makes a pass on a pinned clock wait for all of its reads.
-func awaitEveryRead(lane *externalReadsLane) *externalReadsLane { return lane }
+// awaitEveryRead makes a pass on a pinned clock wait for all of its reads,
+// however loaded the host is. The lane's source deadline is a real-time timer,
+// but collect judges a source's timeout on the lane's clock: a test that pins
+// that clock (at) never sees a read time out there, so a read the timer cuts off
+// is dropped from the recording instead of recorded as a timeout, and the test
+// reads a missing or stale leg. A deadline no test outlives removes the race.
+// Tests that exercise the deadline itself run in a synctest bubble and do not
+// call this.
+func awaitEveryRead(lane *externalReadsLane) *externalReadsLane {
+	lane.sourceDeadline = time.Hour
+	return lane
+}
 
 // at pins the lane's clock to t, once the reads and steps of earlier passes
 // have ended.
