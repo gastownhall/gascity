@@ -4935,9 +4935,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 
 			if trace != nil {
-				trace.RecordDecision(TraceSiteReconcilerWakeDecision, TraceReasonWake, TraceOutcomeStartCandidate, target.tp.TemplateName, name, traceRecordPayload{
+				trace.RecordDecision(TraceSiteReconcilerWakeDecision, TraceReasonWake, TraceOutcomeStartCandidate, target.tp.TemplateName, name, withTraceFields(awakeDecisionTraceFields(decision, hasDec), traceRecordPayload{
 					"should_wake": shouldWake,
-				})
+				}))
 			}
 			if fold := recordCurrentBeadIDOnWake(target.info, sessFront, decision.AssignedWorkBeadID, stderr); fold != nil {
 				tick.apply(target.info.ID, fold)
@@ -5060,7 +5060,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// own ready bead. No nudge, no cancel.
 				fmt.Fprintf(stdout, "Draining session '%s': %s\n", name, idleRespawnDrainReason) //nolint:errcheck
 				if trace != nil {
-					trace.RecordDecision(TraceSiteReconcilerDrainDecision, TraceReasonCode(idleRespawnDrainReason), TraceOutcomeDrain, target.tp.TemplateName, name, nil)
+					trace.RecordDecision(TraceSiteReconcilerDrainDecision, TraceReasonCode(idleRespawnDrainReason), TraceOutcomeDrain, target.tp.TemplateName, name, awakeDecisionTraceFields(decision, hasDec))
 				}
 			} else if !idleAssignedWorkOnly(eval) {
 				// Session is correctly awake. Cancel any non-drift drain
@@ -5150,10 +5150,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				liveClaimVetoApplies(cityPath, cfg, info, suspState) {
 				if vetoed, claimID := liveClaimVeto(cityPath, cfg, store, sw, info, dt, name, reason, stdout, stderr); vetoed {
 					if trace != nil {
-						trace.RecordDecision(TraceSiteReconcilerDrainDecision, TraceReasonCode(reason), TraceOutcomeKeptOpen, target.tp.TemplateName, name, traceRecordPayload{
+						trace.RecordDecision(TraceSiteReconcilerDrainDecision, TraceReasonCode(reason), TraceOutcomeKeptOpen, target.tp.TemplateName, name, withTraceFields(awakeDecisionTraceFields(decision, hasDec), traceRecordPayload{
 							"sleep_intent": intent,
 							"live_claim":   claimID,
-						})
+						}))
 					}
 					continue
 				}
@@ -5182,9 +5182,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if beginSessionDrainInfo(info, sp, dt, reason, clk, defaultDrainTimeout) {
 				fmt.Fprintf(stdout, "Draining session '%s': %s\n", name, reason) //nolint:errcheck
 				if trace != nil {
-					trace.RecordDecision(TraceSiteReconcilerDrainDecision, TraceReasonCode(reason), TraceOutcomeDrain, target.tp.TemplateName, name, traceRecordPayload{
+					trace.RecordDecision(TraceSiteReconcilerDrainDecision, TraceReasonCode(reason), TraceOutcomeDrain, target.tp.TemplateName, name, withTraceFields(awakeDecisionTraceFields(decision, hasDec), traceRecordPayload{
 						"sleep_intent": intent,
-					})
+					}))
 				}
 			}
 		}
