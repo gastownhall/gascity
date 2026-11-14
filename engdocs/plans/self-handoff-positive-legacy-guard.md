@@ -22,9 +22,15 @@ branch and existing PR remain provenance; do not overwrite either.
 Review the combined result as a delta from the already reviewed source. The
 guard and staging implementation go through one fresh deploy gate together.
 The architect's ruling replaces unguarded deploy bead `ga-d83s330p` and old
-guard `ga-ptqkv2w`; verify their live supersession before handing on
+guard `ga-ptqkv2w`; verify their live supersession before the validator starts
 this package. Do not add a dependency requiring either obsolete path to land.
-The two existing `discovered-from` edges carry lineage and are not blockers.
+The source architecture task `ga-di993682` is a same-store `blocks`
+prerequisite while its final handoff remains unresolved. Its exit is the
+recorded RED/control clarification and delivery rail, plus live supersession
+of the obsolete deploy and guard. The direct `discovered-from` edge to
+`ga-i1p65ze` preserves the implementation's operator-origin lineage. The
+validator must read the finalized ruling before testing; closure alone does
+not supply a missing answer.
 
 At the validator-to-builder handoff, explicitly supply the stacked base:
 
