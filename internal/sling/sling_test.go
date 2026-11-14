@@ -4390,6 +4390,105 @@ func TestDoSlingPoolEmptyWarns(t *testing.T) {
 	}
 }
 
+// namedSessionSlingTarget returns a config declaring one named session on a
+// rig-scoped agent, and that agent as a sling target. The target's qualified
+// name ("rig/worker") is not its runtime session name, which is derived from
+// the city name and the session template.
+func namedSessionSlingTarget(mode string) (*config.City, config.Agent) {
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test"},
+		NamedSessions: []config.NamedSession{{Template: "worker", Dir: "rig", Mode: mode}},
+	}
+	return cfg, config.Agent{Name: "worker", Dir: "rig", MaxActiveSessions: intPtr(1)}
+}
+
+func TestDoSlingNamedSessionNotRunningWarns(t *testing.T) {
+	cfg, a := namedSessionSlingTarget("always")
+	runner := newFakeRunner()
+	deps := withStore(testDeps(cfg, runtime.NewFake(), runner.run), seededStore("BL-1"))
+
+	result, err := DoSling(testOpts(a, "BL-1"), deps, nil)
+	if err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+	if !result.NamedSessionNotRunning {
+		t.Error("expected NamedSessionNotRunning=true for a mode=always named session with no runtime")
+	}
+}
+
+func TestDoSlingNamedSessionRunningDoesNotWarn(t *testing.T) {
+	cfg, a := namedSessionSlingTarget("always")
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	// The live runtime is registered under the named session's runtime name,
+	// not its qualified agent name.
+	name := config.NamedSessionRuntimeName("test-city", cfg.Workspace, a.QualifiedName())
+	if name == a.QualifiedName() {
+		t.Fatalf("runtime name %q equals the qualified name; the test cannot tell them apart", name)
+	}
+	if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+		t.Fatalf("starting fake runtime: %v", err)
+	}
+	deps := withStore(testDeps(cfg, sp, runner.run), seededStore("BL-1"))
+
+	result, err := DoSling(testOpts(a, "BL-1"), deps, nil)
+	if err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+	if result.NamedSessionNotRunning {
+		t.Error("NamedSessionNotRunning=true although the always-on session has a live runtime")
+	}
+}
+
+func TestDoSlingNamedSessionNotRunningNoWarnWhenNotAlwaysOn(t *testing.T) {
+	for _, mode := range []string{"", "on_demand"} {
+		t.Run("mode="+mode, func(t *testing.T) {
+			cfg, a := namedSessionSlingTarget(mode)
+			runner := newFakeRunner()
+			deps := withStore(testDeps(cfg, runtime.NewFake(), runner.run), seededStore("BL-1"))
+
+			result, err := DoSling(testOpts(a, "BL-1"), deps, nil)
+			if err != nil {
+				t.Fatalf("DoSling: %v", err)
+			}
+			if result.NamedSessionNotRunning {
+				t.Error("on-demand named session has no runtime at rest; it must not warn")
+			}
+		})
+	}
+}
+
+func TestDoSlingNamedSessionNotRunningNoWarnForPlainPool(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	a := config.Agent{Name: "pool", MaxActiveSessions: intPtr(3)}
+	deps := withStore(testDeps(cfg, runtime.NewFake(), runner.run), seededStore("BL-1"))
+
+	result, err := DoSling(testOpts(a, "BL-1"), deps, nil)
+	if err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+	if result.NamedSessionNotRunning {
+		t.Error("a pool agent with no named session must not warn")
+	}
+}
+
+func TestDoSlingNamedSessionNotRunningForceSuppresses(t *testing.T) {
+	cfg, a := namedSessionSlingTarget("always")
+	runner := newFakeRunner()
+	deps := withStore(testDeps(cfg, runtime.NewFake(), runner.run), seededStore("BL-1"))
+	opts := testOpts(a, "BL-1")
+	opts.Force = true
+
+	result, err := DoSling(opts, deps, nil)
+	if err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+	if result.NamedSessionNotRunning {
+		t.Error("--force must suppress the warning like its sibling target warnings")
+	}
+}
+
 func TestFinalizeAutoConvoy(t *testing.T) {
 	runner := newFakeRunner()
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}

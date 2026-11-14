@@ -252,6 +252,10 @@ type SlingResult struct {
 	BeadWarnings   []string // pre-flight bead state warnings
 	Deprecations   []string // deprecated formula constructs (graph.v2 issue alias)
 
+	// NamedSessionNotRunning: the target is a mode=always named session with
+	// no live runtime, so a routed bead waits for the controller to restart it.
+	NamedSessionNotRunning bool
+
 	// Batch fields (populated by DoSlingBatch).
 	ContainerType string // "convoy", "epic", etc. (batch only)
 	Routed        int
