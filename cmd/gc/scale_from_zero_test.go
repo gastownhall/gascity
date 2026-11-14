@@ -674,12 +674,13 @@ func TestBuildDesiredState_ScaleFromZero_AuthoritativeScaleCheckZeroStaysAsleep(
 	}
 }
 
-// TestBuildDesiredState_ScaleFromZero_AuthoritativeScaleCheckFailureStillWakes
+// TestBuildDesiredState_ScaleFromZero_AuthoritativeScaleCheckFailureKeepsProbeDemand
 // is the other half of the contract: authoritative applies to a real answer,
-// never to a broken one. A check that exits non-zero is partial, not a zero, so
-// the cold-wake probe still wakes the pool and routed work cannot strand behind
-// a check that cannot run.
-func TestBuildDesiredState_ScaleFromZero_AuthoritativeScaleCheckFailureStillWakes(t *testing.T) {
+// never to a broken one. A check that exits non-zero stays partial, not a zero,
+// so it keeps the cold-wake probe's demand of 1 instead of being read as an
+// authoritative 0. Whether that demand creates a session is still decided by
+// the existing partial-read guard, which blocks a fresh create.
+func TestBuildDesiredState_ScaleFromZero_AuthoritativeScaleCheckFailureKeepsProbeDemand(t *testing.T) {
 	tmpDir := t.TempDir()
 	rigPath := tmpDir + "/rigs/rig-A"
 	if err := os.MkdirAll(rigPath, 0o755); err != nil {
