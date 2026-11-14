@@ -1688,3 +1688,57 @@ func TestComposedStartHeartbeatExpiringBeforePreWakeIsNoDrift(t *testing.T) {
 		t.Fatalf("settlement %+v starts %d, want the start landed as on main", s, len(k.starts()))
 	}
 }
+
+// TestStartupHealthRecordFailStampsBackoffAndAlertsOnce pins the v2 writer
+// half of sr-xf2xj: startupHealthRecord.fail stamps the per-failure retry
+// backoff from the second failure on, and emits exactly one
+// session.startup_health_alert per episode on crossing the threshold. A
+// cleared episode starts over and alerts on its own.
+func TestStartupHealthRecordFailStampsBackoffAndAlertsOnce(t *testing.T) {
+	m := beads.NewMemStore()
+	rec := &capturingRecorder{}
+	r := startupHealthRecord{store: m}
+	load := func() session.StartupHealthEpisode {
+		t.Helper()
+		ep, err := sessionFrontDoor(m).LoadStartupHealthEpisode("s-gc-1")
+		if err != nil {
+			t.Fatalf("LoadStartupHealthEpisode: %v", err)
+		}
+		return ep
+	}
+	for i := 0; i < defaultMaxWakeAttempts+1; i++ {
+		if err := r.fail("s-gc-1", "worker", errors.New("boom"), gatherNow.Add(time.Duration(i)*time.Minute), rec, io.Discard); err != nil {
+			t.Fatalf("fail %d: %v", i+1, err)
+		}
+		switch i {
+		case 0:
+			if ep := load(); !ep.BackoffUntil.IsZero() {
+				t.Fatalf("BackoffUntil after the first failure = %v, want zero (a lone flake retries at once)", ep.BackoffUntil)
+			}
+		case 1:
+			ep := load()
+			if want := ep.LastFailureAt.Add(defaultStartupBackoffBase); !ep.BackoffUntil.Equal(want) {
+				t.Fatalf("BackoffUntil after the second failure = %v, want %v (last failure + %v)", ep.BackoffUntil, want, defaultStartupBackoffBase)
+			}
+		}
+	}
+	if alerts := rec.eventsOfType(events.SessionStartupHealthAlert); len(alerts) != 1 {
+		t.Fatalf("recorded %d %s events over one episode, want exactly 1", len(alerts), events.SessionStartupHealthAlert)
+	}
+	if ep := load(); ep.AlertDisposition != session.AlertDispositionSent {
+		t.Fatalf("AlertDisposition = %q, want %q", ep.AlertDisposition, session.AlertDispositionSent)
+	}
+
+	if err := r.clear("s-gc-1"); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	later := gatherNow.Add(time.Hour)
+	for i := 0; i < defaultMaxWakeAttempts; i++ {
+		if err := r.fail("s-gc-1", "worker", errors.New("boom"), later.Add(time.Duration(i)*time.Minute), rec, io.Discard); err != nil {
+			t.Fatalf("second episode fail %d: %v", i+1, err)
+		}
+	}
+	if alerts := rec.eventsOfType(events.SessionStartupHealthAlert); len(alerts) != 2 {
+		t.Fatalf("recorded %d %s events over two episodes, want 2 (a new episode alerts on its own)", len(alerts), events.SessionStartupHealthAlert)
+	}
+}
