@@ -168,7 +168,10 @@ after(() => {
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
-for (const plugin of plugins) {
+// MiMo Code keeps the per-turn text as a trailing system entry, drained once
+// per turn. OpenCode carries it in the user message instead; its tests follow
+// these.
+for (const plugin of plugins.filter((p) => p.name !== "opencode")) {
   describe(`${plugin.name} plugin experimental.chat.system.transform`, { timeout: SUITE_TIMEOUT_MS }, () => {
     let hooks;
 
@@ -605,7 +608,175 @@ for (const plugin of plugins) {
       );
     });
   });
+}
 
+// OpenCode sends the system entries ahead of the conversation
+// (session/llm/request.ts), so per-turn text in the system prompt sits ahead
+// of the whole history: when it changes, the next turn's request shares only
+// the system prompt with the last one, and a provider's prompt cache misses
+// on the entire conversation. The plugin therefore adds the per-turn text
+// (nudges with their clock line, unread mail) to the user message that opens
+// the turn, as a synthetic text part, from chat.message: OpenCode saves
+// output.parts right after that hook returns (session/prompt.ts), and every
+// later request repeats the saved part unchanged.
+describe("opencode plugin per-turn text in the user message", { timeout: SUITE_TIMEOUT_MS }, () => {
+  const opencode = plugins.find((p) => p.name === "opencode");
+  let hooks;
+
+  before(async () => {
+    const staged = stagePlugin(tmp, opencode);
+    const { default: gascityPlugin } = await import(pathToFileURL(staged).href);
+    hooks = await gascityPlugin({ directory: tmp, client: {} });
+  });
+
+  beforeEach(() => {
+    resetDrains(fake);
+    delete process.env.GC_FAKE_MAIL;
+  });
+
+  // A user prompt as chat.message receives it: OpenCode has already given the
+  // message and its parts their ids (createUserMessage) and saves
+  // output.parts, in id order, once the hook returns.
+  function prompt(messageID, text = "do the work", sessionID = "ses_test") {
+    return {
+      message: { id: messageID, sessionID, role: "user" },
+      parts: [{ id: `prt_${messageID.slice(4)}`, sessionID, messageID, type: "text", text }],
+    };
+  }
+
+  async function chatMessage(output) {
+    await hooks["chat.message"]({ sessionID: output.message.sessionID, messageID: output.message.id }, output);
+    return output;
+  }
+
+  async function transform(system, sessionID = "ses_test") {
+    const output = { system };
+    const input = { model: {} };
+    if (sessionID !== null) {
+      input.sessionID = sessionID;
+    }
+    await hooks["experimental.chat.system.transform"](input, output);
+    return output.system;
+  }
+
+  // Reproduces LLMRequestPrep.prepare (opencode session/llm/request.ts):
+  // system[0] is the join of the agent prompt and the environment text; the
+  // transform runs; then system[1..] is folded into one entry only while
+  // system[0] still equals the pre-hook header.
+  async function generate() {
+    const system = [[AGENT_PROMPT, ENVIRONMENT].join("\n")];
+    const header = system[0];
+    await hooks["experimental.chat.system.transform"]({ sessionID: "ses_test", model: {} }, { system });
+    if (system.length > 2 && system[0] === header) {
+      const rest = system.slice(1);
+      system.length = 0;
+      system.push(header, rest.join("\n"));
+    }
+    return system;
+  }
+
+  it("adds the per-turn text to the user message as a synthetic text part", async () => {
+    process.env.GC_FAKE_MAIL = MAIL;
+    const output = await chatMessage(prompt("msg_000000000001"));
+
+    assert.equal(output.parts.length, 2, `expected [user text, per-turn text], got ${JSON.stringify(output.parts)}`);
+    const [user, added] = output.parts;
+    assert.equal(user.text, "do the work", "the user's own text must stay first and unchanged");
+    const { id, ...rest } = added;
+    assert.deepEqual(rest, {
+      sessionID: "ses_test",
+      messageID: "msg_000000000001",
+      type: "text",
+      text: `${CLOCK_PREFIX}1 (epoch 1)\n\n${MAIL}`,
+      synthetic: true,
+    });
+    assert.ok(id.startsWith("prt") && id > user.id, `part id ${id} must sort after the user's ${user.id}`);
+    // OpenCode joins a user message's system field into system[0] on every
+    // generation, which would put the per-turn text back in the system prompt.
+    assert.equal(output.message.system, undefined, "chat.message wrote the message's system field");
+  });
+
+  it("keeps the system prompt byte-identical across turns and generations", async () => {
+    process.env.GC_FAKE_MAIL = MAIL;
+    const systems = [];
+    for (const messageID of ["msg_000000000001", "msg_000000000002"]) {
+      await chatMessage(prompt(messageID));
+      systems.push(await generate(), await generate());
+    }
+    for (const system of systems) {
+      assert.deepEqual(system, [`${ROLE}\n\n${AGENT_PROMPT}\n${ENVIRONMENT}`]);
+    }
+    assert.equal(drainCount(fake), 2, "expected one drain per user message");
+  });
+
+  it("starts turn two's request with turn one's, byte for byte", async () => {
+    // The request a model receives: OpenCode's system entries, then the
+    // conversation. A provider's prompt cache reuses only an identical
+    // prefix, so turn two hits the cache for the whole of turn one's request
+    // only if that request is a prefix of turn two's.
+    process.env.GC_FAKE_MAIL = MAIL;
+    const history = [];
+    async function request() {
+      const system = await generate();
+      return JSON.parse(JSON.stringify([...system.map((text) => ({ role: "system", text })), ...history]));
+    }
+    async function userTurn(messageID) {
+      const output = await chatMessage(prompt(messageID));
+      history.push({ role: "user", parts: output.parts.map((part) => part.text) });
+    }
+
+    await userTurn("msg_000000000001");
+    const turnOne = await request();
+    history.push({ role: "assistant", parts: ["done"] });
+    await userTurn("msg_000000000002");
+    const turnTwo = await request();
+
+    assert.deepEqual(turnTwo.slice(0, turnOne.length), turnOne, "turn two's request rewrote turn one's prefix");
+    assert.notEqual(
+      JSON.stringify(turnTwo).indexOf(`${CLOCK_PREFIX}2 (epoch 2)`),
+      -1,
+      "turn two's per-turn text is missing from its request",
+    );
+  });
+
+  it("drains once per user message and never from a generation", async () => {
+    await chatMessage(prompt("msg_000000000001"));
+    await transform([HEADER]);
+    await transform([HEADER]);
+    // OpenCode's Agent.generate, which drafts an agent config, runs the
+    // transform with no session; it must not consume the agent's nudges.
+    await transform([HEADER], null);
+    assert.equal(drainCount(fake), 1);
+  });
+
+  it("adds nothing when there is no per-turn text", async () => {
+    // GC_INJECT_CLOCK=0 silences the real clock line; the fake honors it the
+    // same way, so with an empty queue and no mail the drain prints nothing.
+    process.env.GC_INJECT_CLOCK = "0";
+    try {
+      const output = await chatMessage(prompt("msg_000000000001"));
+      assert.equal(output.parts.length, 1);
+    } finally {
+      delete process.env.GC_INJECT_CLOCK;
+    }
+  });
+
+  it("does not drain when it has no user message to add the text to", async () => {
+    // The drain consumes the agent's nudges, so draining without a place to
+    // put them would lose them.
+    await hooks["chat.message"]({ sessionID: "ses_test" }, { message: { sessionID: "ses_test" }, parts: [] });
+    await hooks["chat.message"]({ sessionID: "ses_test" }, { message: { id: "msg_000000000001" } });
+    assert.equal(drainCount(fake), 0);
+  });
+
+  it("puts the role prompt once, at the head of system[0]", async () => {
+    process.env.GC_FAKE_MAIL = MAIL;
+    assert.deepEqual(await transform([HEADER]), [`${ROLE}\n\n${HEADER}`]);
+    assert.deepEqual(await transform([]), [ROLE]);
+  });
+});
+
+for (const plugin of plugins) {
   describe(`${plugin.name} plugin session lifecycle events`, { timeout: SUITE_TIMEOUT_MS }, () => {
     // A fresh plugin instance per test: the prime cache is per instance and
     // these tests stamp it.

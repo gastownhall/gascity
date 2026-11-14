@@ -84,8 +84,6 @@ func TestBundledPluginsSurviveFormatterRewrap(t *testing.T) {
       "context cycle",
     )`},
 		{"opencode stdin end", "opencode", stdinEnd, stdinEndRewrapped},
-		{"opencode turn map", "opencode", turnMap, turnMapRewrapped},
-		{"opencode unseen message gate", "opencode", unseenGate, unseenGateRewrapped},
 		{"mimocode stdin end", "mimocode", stdinEnd, stdinEndRewrapped},
 		{"mimocode turn map", "mimocode", turnMap, turnMapRewrapped},
 		{"mimocode unseen message gate", "mimocode", unseenGate, unseenGateRewrapped},

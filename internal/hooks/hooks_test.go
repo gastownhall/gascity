@@ -1903,11 +1903,10 @@ func TestInstallOverlayManagedProviders(t *testing.T) {
 	}
 	opencodeHooks := string(fs.Files["/work/.opencode/plugins/gascity.js"])
 	for _, want := range []string{
-		"const GC_OPENCODE_HOOK_VERSION = 8",
+		"const GC_OPENCODE_HOOK_VERSION = 9",
 		"pending.child.stdin?.end();",
-		"appendVolatileSystem",
-		"const turns = new Map()",
-		"state.userMessageIDs.has(messageID)",
+		"appendVolatilePart",
+		`"chat.message"`,
 		`process.env.GC_BIN || "gc"`,
 		`/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`,
 		`"experimental.session.compacting"`,
@@ -2348,11 +2347,10 @@ export default async function gascityPlugin() {
 		t.Fatal("stale OpenCode managed plugin was preserved; expected managed upgrade")
 	}
 	for _, want := range []string{
-		"const GC_OPENCODE_HOOK_VERSION = 8",
+		"const GC_OPENCODE_HOOK_VERSION = 9",
 		"pending.child.stdin?.end();",
-		"appendVolatileSystem",
-		"const turns = new Map()",
-		"state.userMessageIDs.has(messageID)",
+		"appendVolatilePart",
+		`"chat.message"`,
 		`process.env.GC_BIN || "gc"`,
 		`/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`,
 		`"experimental.session.compacting"`,
@@ -2374,7 +2372,7 @@ export default async function gascityPlugin() {
 
 func TestOpenCodeHookNeedsUpgradeComparesParsedVersion(t *testing.T) {
 	current := []byte(`// Gas City hooks for OpenCode.
-const GC_OPENCODE_HOOK_VERSION = 8;
+const GC_OPENCODE_HOOK_VERSION = 9;
 const GC_BIN = process.env.GC_BIN || "gc";
 const PATH_PREFIX =
   "/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:";
@@ -2389,17 +2387,15 @@ output.context.push(handoff);
 GC_PROVIDER_SESSION_ID;
 GC_PROVIDER_SESSION_ID_REQUIRED;
 pending.child.stdin?.end();
-function appendVolatileSystem(system, volatile) {}
-const turns = new Map();
-if (state.userMessageIDs.has(messageID)) {}
+async function appendVolatilePart(output) {}
+"chat.message";
 `)
-	stale := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 8"), []byte("GC_OPENCODE_HOOK_VERSION = 7"), 1)
-	future := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 8"), []byte("GC_OPENCODE_HOOK_VERSION = 9"), 1)
+	stale := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 9"), []byte("GC_OPENCODE_HOOK_VERSION = 8"), 1)
+	future := bytes.Replace(current, []byte("GC_OPENCODE_HOOK_VERSION = 9"), []byte("GC_OPENCODE_HOOK_VERSION = 10"), 1)
 	missingStderrLog := bytes.Replace(current, []byte("logRunStderr(stderr);\n"), nil, 1)
 	openStdin := bytes.Replace(current, []byte("pending.child.stdin?.end();\n"), nil, 1)
-	volatileInHeader := bytes.Replace(current, []byte("function appendVolatileSystem(system, volatile) {}\n"), nil, 1)
-	sharedTurnState := bytes.Replace(current, []byte("const turns = new Map();\n"), []byte("let drainedTurnID = null;\n"), 1)
-	idOrderTurnGate := bytes.Replace(current, []byte("if (state.userMessageIDs.has(messageID)) {}\n"), []byte("if (messageID <= state.currentTurnID) {}\n"), 1)
+	volatileInSystem := bytes.Replace(current, []byte("async function appendVolatilePart(output) {}\n"), nil, 1)
+	noChatMessage := bytes.Replace(current, []byte("\"chat.message\";\n"), nil, 1)
 
 	if !opencodeHookNeedsUpgrade(stale) {
 		t.Fatal("stale OpenCode hook version did not request upgrade")
@@ -2416,14 +2412,11 @@ if (state.userMessageIDs.has(messageID)) {}
 	if !opencodeHookNeedsUpgrade(openStdin) {
 		t.Fatal("OpenCode hook leaving child stdin open did not request upgrade")
 	}
-	if !opencodeHookNeedsUpgrade(volatileInHeader) {
-		t.Fatal("OpenCode hook that folds the clock line into system[0] did not request upgrade")
+	if !opencodeHookNeedsUpgrade(volatileInSystem) {
+		t.Fatal("OpenCode hook that puts the per-turn text in the system prompt did not request upgrade")
 	}
-	if !opencodeHookNeedsUpgrade(sharedTurnState) {
-		t.Fatal("OpenCode hook with directory-wide turn state did not request upgrade")
-	}
-	if !opencodeHookNeedsUpgrade(idOrderTurnGate) {
-		t.Fatal("OpenCode hook that opens turns by message-id order did not request upgrade")
+	if !opencodeHookNeedsUpgrade(noChatMessage) {
+		t.Fatal("OpenCode hook without a chat.message hook did not request upgrade")
 	}
 }
 

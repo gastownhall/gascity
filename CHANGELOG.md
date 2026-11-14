@@ -1346,6 +1346,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **OpenCode sessions no longer miss the prompt cache on their whole
+  conversation every turn.** The OpenCode plugin put each turn's nudges and
+  unread mail, with the `Current time: ...` line `gc nudge drain --inject`
+  prints on every call, in a trailing system entry. OpenCode sends the system
+  entries ahead of the conversation, so that text changed ahead of the entire
+  history: each turn's first request shared only the system prompt with the
+  previous turn, and a provider's prompt cache missed on, and re-wrote, every
+  earlier message. On Anthropic models that bills the whole conversation at
+  the 1.25x cache-write price instead of the 0.1x cache-read price at the
+  start of every turn, and every nudge or mail wake starts a turn. The plugin
+  now adds that text from `chat.message`, as a synthetic text part of the
+  user message that opens the turn, so it is saved history that later
+  requests repeat unchanged, and the system prompt is the same on every
+  request. It drains once per user message, so the per-session turn
+  tracking is gone, and OpenCode's agent-drafting call no longer consumes
+  nudges. OpenCode hook version 9; `gc` upgrades installed plugins below it
+  or without the `chat.message` handling. The MiMo Code plugin is unchanged.
+  (#8555)
+
 - **Adopting or restarting with a bd store bound to a loopback Dolt server
   gc does not run works.** A store `bd init --server --external` bound to a
   dolt sql-server on `127.0.0.1`/`localhost`/`::1` was classified as gc's own
