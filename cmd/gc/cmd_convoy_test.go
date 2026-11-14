@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/dispatch"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/storeref"
@@ -2256,6 +2257,138 @@ func TestConvoyCheckStampsCloseReason(t *testing.T) {
 	}
 	if got := b.Metadata["close_reason"]; got != convoyAutocloseReason {
 		t.Errorf("metadata.close_reason = %q, want %q", got, convoyAutocloseReason)
+	}
+}
+
+// seedDrainUnitConvoys mints in store a drain control and, for each row
+// status, an open item and the unit convoy that tracks it, the shape a drain's
+// expansion leaves, and records the rows in the control's manifest. It returns
+// the control, its units and their items, in row order.
+func seedDrainUnitConvoys(t *testing.T, store beads.Store, statuses ...string) (beads.Bead, []beads.Bead, []beads.Bead) {
+	t.Helper()
+	control, err := store.Create(beads.Bead{Title: "drain", Type: "task", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindDrain}})
+	requireNoError(t, err)
+	type manifestRow struct {
+		Index        int    `json:"index"`
+		MemberID     string `json:"member_id"`
+		UnitKey      string `json:"unit_key"`
+		UnitConvoyID string `json:"unit_convoy_id"`
+		Status       string `json:"status"`
+	}
+	manifest := struct {
+		Version int           `json:"version"`
+		Rows    []manifestRow `json:"rows"`
+	}{Version: 1}
+	var units, items []beads.Bead
+	for i, status := range statuses {
+		item, err := store.Create(beads.Bead{Title: fmt.Sprintf("item %d", i), Type: "task"})
+		requireNoError(t, err)
+		key := fmt.Sprintf("%s:unit:%d:%s", control.ID, i, item.ID)
+		unit, err := store.Create(beads.Bead{
+			Title: fmt.Sprintf("drain unit %d for %s", i, item.ID),
+			Type:  "convoy",
+			Metadata: map[string]string{
+				beadmeta.SyntheticMetadataKey:      "true",
+				beadmeta.SyntheticKindMetadataKey:  "drain-unit-convoy",
+				beadmeta.DrainControlIDMetadataKey: control.ID,
+				beadmeta.DrainUnitKeyMetadataKey:   key,
+			},
+		})
+		requireNoError(t, err)
+		requireNoError(t, store.DepAdd(unit.ID, item.ID, "tracks"))
+		manifest.Rows = append(manifest.Rows, manifestRow{Index: i, MemberID: item.ID, UnitKey: key, UnitConvoyID: unit.ID, Status: status})
+		units = append(units, unit)
+		items = append(items, item)
+	}
+	data, err := json.Marshal(manifest)
+	requireNoError(t, err)
+	requireNoError(t, store.SetMetadata(control.ID, beadmeta.DrainManifestMetadataKey, string(data)))
+	return beadByID(t, store, control.ID), units, items
+}
+
+// TestConvoyCheckRetiresTheUnitConvoysOfAClosedDrain pins the level-triggered
+// retirement of drain unit convoys (dispatch.DrainUnitConvoyRetirement). A
+// drain never closes the items its units track, so the children rule never
+// completes a unit, and a drain closed by any path but its own close leaves its
+// units open. The check closes every open unit whose drain control has closed,
+// with its row's verdict and the retirement reason, through the plain close and
+// the fenced one alike. It leaves the items, an open drain's units and a unit
+// whose drain control no store holds alone.
+func TestConvoyCheckRetiresTheUnitConvoysOfAClosedDrain(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		store func(t *testing.T) beads.Store
+	}{
+		{name: "unconditional close", store: func(*testing.T) beads.Store { return beads.NewMemStore() }},
+		{name: "fenced close", store: func(t *testing.T) beads.Store {
+			m := beads.NewMemStore()
+			stampedMemStore(t, m)
+			return m
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := tc.store(t)
+			closedDrain, retired, items := seedDrainUnitConvoys(t, store, "succeeded", "failed", "wired")
+			requireNoError(t, store.Close(closedDrain.ID))
+			_, running, _ := seedDrainUnitConvoys(t, store, "wired")
+			orphan, err := store.Create(beads.Bead{
+				Title: "drain unit 0 for a drain no store holds",
+				Type:  "convoy",
+				Metadata: map[string]string{
+					beadmeta.SyntheticKindMetadataKey:  "drain-unit-convoy",
+					beadmeta.DrainControlIDMetadataKey: "gc-999",
+				},
+			})
+			requireNoError(t, err)
+
+			var stdout, stderr bytes.Buffer
+			if code := doConvoyCheck(store, events.Discard, &stdout, &stderr); code != 0 {
+				t.Fatalf("doConvoyCheck = %d, want 0; stderr: %s", code, stderr.String())
+			}
+			for i, want := range []string{beadmeta.OutcomePass, beadmeta.OutcomeFail, beadmeta.OutcomeSkipped} {
+				unit := beadByID(t, store, retired[i].ID)
+				if unit.Status != "closed" || unit.Metadata[beadmeta.OutcomeMetadataKey] != want || unit.Metadata["close_reason"] != dispatch.DrainUnitRetiredCloseReason {
+					t.Errorf("unit %s = status %q gc.outcome %q close_reason %q, want closed/%s with the retirement reason",
+						unit.ID, unit.Status, unit.Metadata[beadmeta.OutcomeMetadataKey], unit.Metadata["close_reason"], want)
+				}
+				if !strings.Contains(stdout.String(), "Auto-closed convoy "+unit.ID) {
+					t.Errorf("stdout does not announce %s:\n%s", unit.ID, stdout.String())
+				}
+				if item := beadByID(t, store, items[i].ID); item.Status == "closed" {
+					t.Errorf("item %s closed; the check retires the unit, not the item it tracks", item.ID)
+				}
+			}
+			if unit := beadByID(t, store, running[0].ID); unit.Status == "closed" {
+				t.Errorf("unit %s of an open drain closed", unit.ID)
+			}
+			if unit := beadByID(t, store, orphan.ID); unit.Status == "closed" {
+				t.Errorf("unit %s closed although no store holds its drain control", unit.ID)
+			}
+			if !strings.Contains(stdout.String(), "3 convoy(s) auto-closed") {
+				t.Errorf("stdout = %q, want three auto-closed convoys", stdout.String())
+			}
+		})
+	}
+}
+
+// TestConvoyCheckNamesADrainUnitWhoseDrainManifestDoesNotParse pins that a
+// closed drain whose manifest does not parse is a failure the check names, not
+// a verdict it invents: the unit stays open and the check exits 1.
+func TestConvoyCheckNamesADrainUnitWhoseDrainManifestDoesNotParse(t *testing.T) {
+	store := beads.NewMemStore()
+	drain, units, _ := seedDrainUnitConvoys(t, store, "succeeded")
+	requireNoError(t, store.SetMetadata(drain.ID, beadmeta.DrainManifestMetadataKey, "{not json"))
+	requireNoError(t, store.Close(drain.ID))
+
+	var stdout, stderr bytes.Buffer
+	if code := doConvoyCheck(store, events.Discard, &stdout, &stderr); code != 1 {
+		t.Fatalf("doConvoyCheck = %d, want 1; stdout: %s stderr: %s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), units[0].ID) || !strings.Contains(stderr.String(), drain.ID) {
+		t.Errorf("stderr does not name the unit %s and its drain %s: %s", units[0].ID, drain.ID, stderr.String())
+	}
+	if unit := beadByID(t, store, units[0].ID); unit.Status == "closed" {
+		t.Errorf("unit %s closed although its drain's manifest does not parse", unit.ID)
 	}
 }
 

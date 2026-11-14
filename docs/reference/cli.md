@@ -1237,6 +1237,10 @@ Scan open convoys and auto-close any where all child issues are resolved.
 Evaluates each open convoy's children. If all children have status
 "closed", the convoy is automatically closed and an event is recorded.
 
+A drain's unit convoy is closed once its drain control has closed,
+whatever the status of the item it tracks, with that item's verdict as
+gc.outcome: a drain never closes the items its unit convoys track.
+
 The check skips a suspended rig's store, naming the rig on stderr, and
 checks its convoys once the rig resumes. A store it cannot open or list,
 or a convoy it cannot read or close, is named on stderr and the check

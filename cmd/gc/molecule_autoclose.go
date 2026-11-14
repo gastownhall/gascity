@@ -307,7 +307,7 @@ func announceClosedMolecule(store beads.Store, rec events.Recorder, mol beads.Be
 	// Capture the pre-close status before closeMoleculeWithReason transitions
 	// the root to closed — it is the from_status of the resolution record.
 	fromStatus := mol.Status
-	closed, err := autocloseCloseIfStill(store, mol.ID, reason, func(b beads.Bead) bool {
+	closed, err := autocloseCloseIfStill(store, mol.ID, reason, nil, func(b beads.Bead) bool {
 		return !convoycore.IsTerminalStatus(b.Status)
 	}, func() error {
 		return closeMoleculeWithReason(store, mol.ID, reason)
