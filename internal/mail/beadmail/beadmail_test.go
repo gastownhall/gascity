@@ -369,6 +369,11 @@ func TestCheckUsesSingleAssigneeMessageScanForSlashRecipient(t *testing.T) {
 			if strings.Contains(cmd, "type=message") && !strings.Contains(cmd, `assignee="`+recipient+`"`) {
 				t.Fatalf("supplemental wisp query = %s, want quoted assignee=%q predicate", cmd, recipient)
 			}
+			// The session-alias lookup may carry the recipient as a quoted
+			// metadata value; it must never appear as a bare clause value.
+			if strings.Contains(cmd, "="+recipient) {
+				t.Fatalf("slash recipient leaked bare into supplemental wisp query: %s", cmd)
+			}
 			return []byte(`[]`), nil
 		}
 		return nil, errors.New("unexpected command: " + cmd)
