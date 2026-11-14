@@ -5326,13 +5326,23 @@ func TestStopManagedCityPreservingSessionsWaitsForRuntimeShutdownOnTimeout(t *te
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 not in PATH")
 	}
+	// The fake service takes serviceExitDelay to exit after SIGTERM, which
+	// outlasts the cancel grace (shutdownTimeout) but not the forced-stop
+	// window (5 x shutdownTimeout). The delay makes "preserve-mode shutdown
+	// waits for the runtime shutdown" deterministic instead of a race against
+	// scheduler jitter (ga-elb781).
+	const (
+		shutdownTimeout  = 20 * time.Millisecond
+		serviceExitDelay = 600 * time.Millisecond
+	)
 	cityPath := t.TempDir()
 	serviceScript := filepath.Join(t.TempDir(), "service.sh")
-	if err := os.WriteFile(serviceScript, []byte(`#!/usr/bin/env python3
+	if err := os.WriteFile(serviceScript, []byte(fmt.Sprintf(`#!/usr/bin/env python3
 import os
 import signal
 import socket
 import sys
+import time
 
 sock_path = os.environ["GC_SERVICE_SOCKET"]
 try:
@@ -5341,6 +5351,7 @@ except FileNotFoundError:
     pass
 
 def stop(_signum, _frame):
+    time.sleep(%.3f)
     sys.exit(0)
 
 signal.signal(signal.SIGTERM, stop)
@@ -5350,7 +5361,7 @@ listener.listen(1)
 while True:
     conn, _ = listener.accept()
     conn.close()
-`), 0o755); err != nil {
+`, serviceExitDelay.Seconds())), 0o755); err != nil {
 		t.Fatalf("WriteFile(service script): %v", err)
 	}
 	var runtimeStdout bytes.Buffer
@@ -5358,7 +5369,7 @@ while True:
 		cityPath: cityPath,
 		cityName: "bright-lights",
 		cfg: &config.City{
-			Daemon: config.DaemonConfig{ShutdownTimeout: "20ms"},
+			Daemon: config.DaemonConfig{ShutdownTimeout: shutdownTimeout.String()},
 			Services: []config.Service{{
 				Name: "bridge",
 				Kind: "proxy_process",
