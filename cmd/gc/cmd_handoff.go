@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
@@ -266,20 +267,18 @@ func runHandoff(run handoffRun) (int, handoffOpFields) {
 	}
 	cfg, cfgErr := loadCityConfig(current.cityPath, stderr)
 	r := rowFirstRestart{
-		verb:        "gc handoff",
-		cityPath:    current.cityPath,
-		sessionName: current.sessionName,
-		display:     current.display,
-		token:       os.Getenv(runtime.InstanceTokenEnv),
-		record:      sessionRestartRecorder(current.cityPath, sessStore, sp, cfg, current.sessionName),
-		check:       sessionRestartChecker(current.cityPath, sessStore, sp, cfg, current.sessionName),
-		hint:        restartHintOps(current.cityPath, sp),
-		poke:        pokeControllerForRestart,
-		stderr:      stderr,
-		ops:         newRestartOps(cfg, cfgErr, sessStore, run.key, current.sessionName, current.display, run.asJSON, run.jsonOut, stderr),
-	}
-	if cfgErr == nil {
-		r.handoffConfig = cfg
+		verb:          "gc handoff",
+		cityPath:      current.cityPath,
+		sessionName:   current.sessionName,
+		display:       current.display,
+		token:         os.Getenv(runtime.InstanceTokenEnv),
+		record:        sessionRestartRecorder(current.cityPath, sessStore, sp, cfg, current.sessionName),
+		check:         sessionRestartChecker(current.cityPath, sessStore, sp, cfg, current.sessionName),
+		hint:          restartHintOps(current.cityPath, sp),
+		poke:          pokeControllerForRestart,
+		stderr:        stderr,
+		ops:           newRestartOps(cfg, cfgErr, sessStore, run.key, current.sessionName, current.display, run.asJSON, run.jsonOut, stderr),
+		handoffConfig: loadedHandoffConfig(cfg, cfgErr),
 	}
 
 	outcome := doHandoffWithOutcome(msgStore, sessStore, rec, newDrainOps(sp), r, current.display, current.sessionName, args, stdout, stderr)
@@ -376,10 +375,7 @@ func doHandoffWithOutcome(msgStore, sessStore beads.Store, rec events.Recorder, 
 		}
 	}
 
-	staged := newStagedHandoff(restartable, instanceToken, sessionID)
-	if staged.active && !r.reconcilerStagesSelfHandoff(stderr) {
-		staged.active = false
-	}
+	staged := r.newGuardedStagedHandoff(restartable, instanceToken, sessionID, stderr)
 
 	// A restartable handoff proposes its restart op, then its notice op,
 	// before the mail (OJ-6). A replay of a successful run sends nothing.
@@ -447,6 +443,25 @@ func doHandoffWithOutcome(msgStore, sessStore beads.Store, rec events.Recorder, 
 
 	staged.announce(rec, stdout, sessionAddress, b.ID)
 	return handoffOutcome{code: 0, restartRequested: true}
+}
+
+// loadedHandoffConfig is the config a self handoff may consult for the
+// reconciler mode: nil when the config did not load, which reads as no mode
+// context.
+func loadedHandoffConfig(cfg *config.City, cfgErr error) *config.City {
+	if cfgErr != nil {
+		return nil
+	}
+	return cfg
+}
+
+// newGuardedStagedHandoff is newStagedHandoff for a self handoff that stages
+// only when the city's reconciler is positively legacy. A caller that does not
+// qualify for staging is never probed.
+func (r rowFirstRestart) newGuardedStagedHandoff(restartable bool, instanceToken, sessionID string, stderr io.Writer) *stagedHandoff {
+	staged := newStagedHandoff(restartable, instanceToken, sessionID)
+	staged.active = staged.active && r.reconcilerStagesSelfHandoff(stderr)
+	return staged
 }
 
 // reconcilerStagesSelfHandoff reports whether the city's session reconciler is
