@@ -390,26 +390,96 @@ func seedDeferredManagedBeadsBeforeProviderReadiness(cityPath string, cfg *confi
 	return nil
 }
 
+// providerReadinessProbeName maps a provider reference to the readiness probe
+// for the CLI that provider launches, or "" when that CLI has no probe. The
+// launched CLI comes from the provider's resolved inheritance chain -- the
+// leaf-most layer that sets path_check, else the leaf-most layer that sets
+// command -- never from the reference's own name. A provider whose effective
+// command is inherited from a custom ancestor, or is a multiword command line,
+// is therefore attributed by the binary it runs.
 func providerReadinessProbeName(ref string, cfg *config.City) string {
-	if api.SupportsProviderReadiness(ref) {
-		return ref
-	}
-	spec, ok := cfg.Providers[ref]
-	if !ok {
+	spec, hasSpec := cfg.Providers[ref]
+	if !hasSpec {
+		if api.SupportsProviderReadiness(ref) {
+			return ref
+		}
 		return ""
 	}
-	candidate := strings.TrimSpace(spec.PathCheck)
-	if candidate == "" {
-		command := strings.TrimSpace(spec.Command)
-		if command != "" && !strings.ContainsAny(command, " \t") {
-			candidate = command
+	resolved, ok := config.ResolvedProviderCached(cfg, ref)
+	if !ok {
+		var err error
+		resolved, err = config.ResolveProviderChain(ref, spec, cfg.Providers)
+		if err != nil {
+			return ""
 		}
 	}
-	candidate = filepath.Base(candidate)
-	if api.SupportsProviderReadiness(candidate) {
-		return candidate
+	layers := providerLaunchLayers(resolved.Chain, cfg.Providers, config.BuiltinFamily(ref, cfg.Providers))
+
+	binary, owner := effectiveProviderLaunchField(layers, func(s config.ProviderSpec) string {
+		return strings.TrimSpace(s.PathCheck)
+	})
+	if binary == "" {
+		var command string
+		command, owner = effectiveProviderLaunchField(layers, func(s config.ProviderSpec) string {
+			return strings.TrimSpace(s.Command)
+		})
+		binary = config.BinaryName(command)
+	}
+	if binary == "" {
+		return ""
+	}
+	// A built-in layer's own default binary can differ from its probe name
+	// (the antigravity built-in launches "agy"), so attribute it to the
+	// built-in that owns it.
+	if owner != "" && api.SupportsProviderReadiness(owner) {
+		return owner
+	}
+	if base := filepath.Base(binary); api.SupportsProviderReadiness(base) {
+		return base
 	}
 	return ""
+}
+
+// providerLaunchLayer is one layer of a provider's resolved inheritance chain.
+// builtin names the built-in the layer comes from, and is empty for a layer
+// declared in [providers.*].
+type providerLaunchLayer struct {
+	spec    config.ProviderSpec
+	builtin string
+}
+
+// providerLaunchLayers lists the specs that contribute to a provider's launch
+// binary, leaf first. A provider with no declared base inherits the built-in
+// it shadows or whose command it names; family is that built-in, and it is
+// appended as the last layer when the chain does not already reach one.
+func providerLaunchLayers(chain []config.HopIdentity, custom map[string]config.ProviderSpec, family string) []providerLaunchLayer {
+	builtins := config.BuiltinProviders()
+	layers := make([]providerLaunchLayer, 0, len(chain)+1)
+	reachesBuiltin := false
+	for _, hop := range chain {
+		if hop.Kind == "builtin" {
+			layers = append(layers, providerLaunchLayer{spec: builtins[hop.Name], builtin: hop.Name})
+			reachesBuiltin = true
+			continue
+		}
+		layers = append(layers, providerLaunchLayer{spec: custom[hop.Name]})
+	}
+	if !reachesBuiltin && family != "" {
+		layers = append(layers, providerLaunchLayer{spec: builtins[family], builtin: family})
+	}
+	return layers
+}
+
+// effectiveProviderLaunchField returns the value of the field from the
+// leaf-most layer that sets it, plus the built-in that layer comes from (empty
+// when a [providers.*] layer sets it).
+func effectiveProviderLaunchField(layers []providerLaunchLayer, field func(config.ProviderSpec) string) (value, builtin string) {
+	for _, layer := range layers {
+		if v := field(layer.spec); v != "" {
+			return v, layer.builtin
+		}
+	}
+	return "", ""
 }
 
 func providerStatusSummary(status string) string {

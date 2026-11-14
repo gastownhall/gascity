@@ -281,6 +281,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	}
 	register(newProviderCatalogDoctorCheck(cityPath))
 	register(newProviderCatalogReadinessAdvisoryCheck(cityPath))
+	register(newProviderLocalAuthCheck(cityPath))
 	register(expandedConfigLoadCheck{})
 	register(&doctor.ImplicitImportCacheCheck{})
 	register(&doctor.DeprecatedAttachmentFieldsCheck{})
