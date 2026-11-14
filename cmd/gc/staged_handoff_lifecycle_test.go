@@ -154,6 +154,7 @@ func TestFailedSelfHandoffRemainsProvisionalAndAuditable(t *testing.T) {
 }
 
 func TestControllerLossLeavesSelfHandoffProvisional(t *testing.T) {
+	answerLegacyController(t)
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
 	t.Setenv("GC_SESSION", "fake")
