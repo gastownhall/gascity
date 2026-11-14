@@ -2632,12 +2632,15 @@ type CityGetResponse struct {
 
 // CityInfo defines model for CityInfo.
 type CityInfo struct {
-	Error           *string   `json:"error,omitempty"`
-	Name            string    `json:"name"`
-	Path            string    `json:"path"`
-	PhasesCompleted *[]string `json:"phases_completed,omitempty"`
-	Running         bool      `json:"running"`
-	Status          *string   `json:"status,omitempty"`
+	Error           *string         `json:"error,omitempty"`
+	Name            string          `json:"name"`
+	Path            string          `json:"path"`
+	PhasesCompleted *[]string       `json:"phases_completed,omitempty"`
+	PoolBoot        *PoolBootStatus `json:"pool_boot,omitempty"`
+	Running         bool            `json:"running"`
+
+	// Status Current startup phase as a bare phase-name token (for example running_pool_on_boot). Progress within a phase is reported in pool_boot, never packed into this field.
+	Status *string `json:"status,omitempty"`
 }
 
 // CityLifecyclePayload defines model for CityLifecyclePayload.
@@ -4618,6 +4621,18 @@ type PendingInteraction struct {
 	Options   *[]string          `json:"options,omitempty"`
 	Prompt    *string            `json:"prompt,omitempty"`
 	RequestId string             `json:"request_id"`
+}
+
+// PoolBootStatus defines model for PoolBootStatus.
+type PoolBootStatus struct {
+	// Agent Pool agent whose on_boot hook most recently completed. Omitted before the first completion.
+	Agent *string `json:"agent,omitempty"`
+
+	// Done Pool on_boot hooks completed so far.
+	Done int64 `json:"done"`
+
+	// Total Pool on_boot hooks to run in this phase.
+	Total int64 `json:"total"`
 }
 
 // PoolLimits defines model for PoolLimits.
@@ -7722,11 +7737,12 @@ type SupervisorStartedPayloadPreviousExit string
 
 // SupervisorStartup defines model for SupervisorStartup.
 type SupervisorStartup struct {
-	// Phase Current phase (when not ready).
+	// Phase Current phase as a bare phase-name token (when not ready). Progress within a phase is reported in pool_boot.
 	Phase *string `json:"phase,omitempty"`
 
 	// PhasesCompleted Phases completed so far.
-	PhasesCompleted *[]string `json:"phases_completed,omitempty"`
+	PhasesCompleted *[]string       `json:"phases_completed,omitempty"`
+	PoolBoot        *PoolBootStatus `json:"pool_boot,omitempty"`
 
 	// Ready True when the city is running.
 	Ready bool `json:"ready"`

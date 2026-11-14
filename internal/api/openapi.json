@@ -1660,10 +1660,15 @@
               "null"
             ]
           },
+          "pool_boot": {
+            "$ref": "#/components/schemas/PoolBootStatus",
+            "description": "Pool on_boot hook progress. Present only during the running_pool_on_boot phase."
+          },
           "running": {
             "type": "boolean"
           },
           "status": {
+            "description": "Current startup phase as a bare phase-name token (for example running_pool_on_boot). Progress within a phase is reported in pool_boot, never packed into this field.",
             "type": "string"
           }
         },
@@ -6923,6 +6928,30 @@
         "required": [
           "request_id",
           "kind"
+        ],
+        "type": "object"
+      },
+      "PoolBootStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "agent": {
+            "description": "Pool agent whose on_boot hook most recently completed. Omitted before the first completion.",
+            "type": "string"
+          },
+          "done": {
+            "description": "Pool on_boot hooks completed so far.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "total": {
+            "description": "Pool on_boot hooks to run in this phase.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "done",
+          "total"
         ],
         "type": "object"
       },
@@ -14895,7 +14924,7 @@
         "additionalProperties": false,
         "properties": {
           "phase": {
-            "description": "Current phase (when not ready).",
+            "description": "Current phase as a bare phase-name token (when not ready). Progress within a phase is reported in pool_boot.",
             "type": "string"
           },
           "phases_completed": {
@@ -14907,6 +14936,10 @@
               "array",
               "null"
             ]
+          },
+          "pool_boot": {
+            "$ref": "#/components/schemas/PoolBootStatus",
+            "description": "Pool on_boot hook progress, copied from the same city entry as /v0/cities. Present only during the running_pool_on_boot phase."
           },
           "ready": {
             "description": "True when the city is running.",

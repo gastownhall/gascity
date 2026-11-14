@@ -615,7 +615,14 @@ export type CityInfo = {
     name: string;
     path: string;
     phases_completed?: Array<string> | null;
+    /**
+     * Pool on_boot hook progress. Present only during the running_pool_on_boot phase.
+     */
+    pool_boot?: PoolBootStatus;
     running: boolean;
+    /**
+     * Current startup phase as a bare phase-name token (for example running_pool_on_boot). Progress within a phase is reported in pool_boot, never packed into this field.
+     */
     status?: string;
 };
 
@@ -2895,6 +2902,21 @@ export type PendingInteraction = {
     options?: Array<string> | null;
     prompt?: string;
     request_id: string;
+};
+
+export type PoolBootStatus = {
+    /**
+     * Pool agent whose on_boot hook most recently completed. Omitted before the first completion.
+     */
+    agent?: string;
+    /**
+     * Pool on_boot hooks completed so far.
+     */
+    done: number;
+    /**
+     * Pool on_boot hooks to run in this phase.
+     */
+    total: number;
 };
 
 export type PoolLimits = {
@@ -6636,13 +6658,17 @@ export type SupervisorStartedPayload = {
 
 export type SupervisorStartup = {
     /**
-     * Current phase (when not ready).
+     * Current phase as a bare phase-name token (when not ready). Progress within a phase is reported in pool_boot.
      */
     phase?: string;
     /**
      * Phases completed so far.
      */
     phases_completed?: Array<string> | null;
+    /**
+     * Pool on_boot hook progress, copied from the same city entry as /v0/cities. Present only during the running_pool_on_boot phase.
+     */
+    pool_boot?: PoolBootStatus;
     /**
      * True when the city is running.
      */

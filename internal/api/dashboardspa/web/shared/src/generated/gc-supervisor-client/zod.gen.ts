@@ -237,15 +237,6 @@ export const zCityGetResponse = z.object({
     version: z.string().optional()
 });
 
-export const zCityInfo = z.object({
-    error: z.string().optional(),
-    name: z.string(),
-    path: z.string(),
-    phases_completed: z.array(z.string()).nullish(),
-    running: z.boolean(),
-    status: z.string().optional()
-});
-
 export const zCityLifecyclePayload = z.object({
     name: z.string(),
     path: z.string()
@@ -1402,6 +1393,22 @@ export const zPendingInteraction = z.object({
     options: z.array(z.string()).nullish(),
     prompt: z.string().optional(),
     request_id: z.string()
+});
+
+export const zPoolBootStatus = z.object({
+    agent: z.string().optional(),
+    done: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    total: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
+});
+
+export const zCityInfo = z.object({
+    error: z.string().optional(),
+    name: z.string(),
+    path: z.string(),
+    phases_completed: z.array(z.string()).nullish(),
+    pool_boot: zPoolBootStatus.optional(),
+    running: z.boolean(),
+    status: z.string().optional()
 });
 
 export const zPoolLimits = z.object({
@@ -3883,6 +3890,7 @@ export const zSupervisorStartedPayload = z.object({
 export const zSupervisorStartup = z.object({
     phase: z.string().optional(),
     phases_completed: z.array(z.string()).nullish(),
+    pool_boot: zPoolBootStatus.optional(),
     ready: z.boolean()
 });
 
