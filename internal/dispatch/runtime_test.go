@@ -13180,3 +13180,254 @@ func TestProcessWorkflowFinalizeDoesNotResolveStoresAboveBlockedSource(t *testin
 		t.Fatalf("resolver asked for %v; the store above a blocked source must never be resolved", resolved)
 	}
 }
+
+const blockedHardFailFormula = `
+formula = "blocked-hard-fail"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "work"
+title = "Work"
+
+[steps.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"
+`
+
+// cookBlockedHardFailWorkflow cooks blockedHardFailFormula into a fresh
+// MemStore with graph apply enabled and returns the store and workflow root.
+func cookBlockedHardFailWorkflow(t *testing.T) (*beads.MemStore, string) {
+	t.Helper()
+	formulatest.EnableV2ForTest(t)
+	prevGraphApply := molecule.IsGraphApplyEnabled()
+	molecule.SetGraphApplyEnabled(true)
+	t.Cleanup(func() { molecule.SetGraphApplyEnabled(prevGraphApply) })
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "blocked-hard-fail.toml"), []byte(blockedHardFailFormula), 0o644); err != nil {
+		t.Fatalf("writing formula: %v", err)
+	}
+	store := beads.NewMemStore()
+	cooked, err := molecule.Cook(context.Background(), beadstest.GraphMolecule(store), "blocked-hard-fail", []string{dir}, molecule.Options{})
+	if err != nil {
+		t.Fatalf("Cook: %v", err)
+	}
+	if cooked.RootID == "" {
+		t.Fatal("Cook returned no root bead")
+	}
+	return store, cooked.RootID
+}
+
+// readyWorkflowMembers returns the members of rootID that Ready() offers,
+// sorted by ID.
+func readyWorkflowMembers(t *testing.T, store *beads.MemStore, rootID string) []beads.Bead {
+	t.Helper()
+	ready, err := store.Ready()
+	if err != nil {
+		t.Fatalf("Ready(): %v", err)
+	}
+	members := make([]beads.Bead, 0, len(ready))
+	for _, b := range ready {
+		if b.Metadata[beadmeta.RootBeadIDMetadataKey] == rootID {
+			members = append(members, b)
+		}
+	}
+	slices.SortFunc(members, func(a, b beads.Bead) int { return strings.Compare(a.ID, b.ID) })
+	return members
+}
+
+// workerAttempt returns the retry attempt among offered that a worker would
+// claim (a non-control bead carrying gc.attempt), or a zero bead.
+func workerAttempt(offered []beads.Bead) beads.Bead {
+	for _, b := range offered {
+		if !beadmeta.IsControlKind(b.Metadata[beadmeta.KindMetadataKey]) && b.Metadata[beadmeta.AttemptMetadataKey] != "" {
+			return b
+		}
+	}
+	return beads.Bead{}
+}
+
+// serveReadyControls serves rootID's controls only from Ready(), as the
+// control dispatcher serves them. Each round it reads what Ready() offers,
+// returns once stop reports true for that offer, and otherwise processes every
+// offered control; it also returns when a round makes no progress. The result
+// is the set of control kinds Ready() offered.
+func serveReadyControls(t *testing.T, store *beads.MemStore, rootID string, stop func(offered []beads.Bead) bool) map[string]bool {
+	t.Helper()
+	offeredKinds := map[string]bool{}
+	const maxRounds = 20
+	for round := 0; round < maxRounds; round++ {
+		offered := readyWorkflowMembers(t, store, rootID)
+		if stop(offered) {
+			break
+		}
+		progressed := false
+		for _, b := range offered {
+			kind := b.Metadata[beadmeta.KindMetadataKey]
+			if !beadmeta.IsControlKind(kind) {
+				continue
+			}
+			offeredKinds[kind] = true
+			_, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, b.ID), ProcessOptions{Work: beadstest.Work(store)})
+			if errors.Is(err, ErrControlPending) {
+				continue
+			}
+			if err != nil {
+				t.Fatalf("ProcessControl(%s kind=%s): %v", b.ID, kind, err)
+			}
+			progressed = true
+		}
+		if !progressed {
+			break
+		}
+	}
+	return offeredKinds
+}
+
+// TestCompiledRetryHardFailWithBlockedWorkOutcomeSettlesThroughReady pins
+// issue #8153 end to end: a worker closes the first attempt of a retry-wrapped
+// step as a hard failure while recording gc.work_outcome=blocked. The controls
+// that consume that verdict are served only from Ready(), as the control
+// dispatcher serves them, so the attempt's blocked work record must not
+// withhold them: the retry control settles the logical step as a hard failure
+// without a second attempt, and the workflow root closes as failed with no
+// manual close.
+func TestCompiledRetryHardFailWithBlockedWorkOutcomeSettlesThroughReady(t *testing.T) {
+	store, rootID := cookBlockedHardFailWorkflow(t)
+
+	// The worker is offered the first attempt and closes it as a hard failure
+	// whose work could not proceed.
+	attempt := workerAttempt(readyWorkflowMembers(t, store, rootID))
+	if attempt.ID == "" {
+		t.Fatalf("Ready() offered no attempt to a worker:\n%s", memberReport(t, store, rootID))
+	}
+	if err := updateMetadataAndClose(beadstest.Graph(store), attempt.ID, map[string]string{
+		beadmeta.OutcomeMetadataKey:       beadmeta.OutcomeFail,
+		beadmeta.FailureClassMetadataKey:  beadmeta.FailureClassHard,
+		beadmeta.FailureReasonMetadataKey: "worktree_unusable",
+		beadmeta.WorkOutcomeMetadataKey:   beadmeta.WorkOutcomeBlocked,
+	}); err != nil {
+		t.Fatalf("worker close %s: %v", attempt.ID, err)
+	}
+
+	offeredKinds := serveReadyControls(t, store, rootID, func(offered []beads.Bead) bool {
+		if again := workerAttempt(offered); again.ID != "" {
+			t.Fatalf("Ready() offered another attempt %s after a hard failure:\n%s", again.ID, memberReport(t, store, rootID))
+		}
+		return mustGetBead(t, store, rootID).Status == "closed"
+	})
+
+	if !offeredKinds[beadmeta.KindRetry] && !offeredKinds[beadmeta.KindRetryEval] {
+		t.Fatalf("Ready() never offered the retry control consuming the failed attempt (offered kinds %v):\n%s", offeredKinds, memberReport(t, store, rootID))
+	}
+	root := mustGetBead(t, store, rootID)
+	if root.Status != "closed" || root.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail {
+		t.Fatalf("root %s status=%q gc.outcome=%q, want closed fail with no manual close:\n%s",
+			rootID, root.Status, root.Metadata[beadmeta.OutcomeMetadataKey], memberReport(t, store, rootID))
+	}
+
+	members, err := molecule.ListSubtree(beadstest.GraphMolecule(store), rootID)
+	if err != nil {
+		t.Fatalf("listing molecule members: %v", err)
+	}
+	var logical beads.Bead
+	attempts := 0
+	for _, m := range members {
+		if m.Metadata[beadmeta.AttemptMetadataKey] != "" && !beadmeta.IsControlKind(m.Metadata[beadmeta.KindMetadataKey]) {
+			attempts++
+		}
+		if m.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindRetry {
+			logical = m
+		}
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want exactly 1 after a hard failure:\n%s", attempts, memberReport(t, store, rootID))
+	}
+	if logical.ID == "" {
+		t.Fatalf("no logical retry step in molecule:\n%s", memberReport(t, store, rootID))
+	}
+	if logical.Status != "closed" ||
+		logical.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail ||
+		logical.Metadata[beadmeta.FinalDispositionMetadataKey] != beadmeta.DispositionHardFail {
+		t.Fatalf("logical step %s status=%q gc.outcome=%q gc.final_disposition=%q, want closed fail hard_fail:\n%s",
+			logical.ID, logical.Status, logical.Metadata[beadmeta.OutcomeMetadataKey],
+			logical.Metadata[beadmeta.FinalDispositionMetadataKey], memberReport(t, store, rootID))
+	}
+	if got := mustGetBead(t, store, attempt.ID).Metadata[beadmeta.WorkOutcomeMetadataKey]; got != beadmeta.WorkOutcomeBlocked {
+		t.Fatalf("attempt %s gc.work_outcome = %q, want the worker's blocked record preserved", attempt.ID, got)
+	}
+}
+
+// TestCompiledRetryAttemptClosedOnlyBlockedRetriesThroughReady is the twin of
+// TestCompiledRetryHardFailWithBlockedWorkOutcomeSettlesThroughReady for a
+// worker that closes the first attempt with only gc.work_outcome=blocked and
+// no gc.outcome. The retry control classifies that close as a transient
+// missing_outcome, so the attempt's blocked work record must not withhold the
+// control from Ready(): the control mints attempt 2, Ready() offers it to a
+// worker, and the workflow root stays open.
+func TestCompiledRetryAttemptClosedOnlyBlockedRetriesThroughReady(t *testing.T) {
+	store, rootID := cookBlockedHardFailWorkflow(t)
+
+	attempt := workerAttempt(readyWorkflowMembers(t, store, rootID))
+	if attempt.ID == "" {
+		t.Fatalf("Ready() offered no attempt to a worker:\n%s", memberReport(t, store, rootID))
+	}
+	if err := updateMetadataAndClose(beadstest.Graph(store), attempt.ID, map[string]string{
+		beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked,
+	}); err != nil {
+		t.Fatalf("worker close %s: %v", attempt.ID, err)
+	}
+
+	var next beads.Bead
+	offeredKinds := serveReadyControls(t, store, rootID, func(offered []beads.Bead) bool {
+		next = workerAttempt(offered)
+		return next.ID != ""
+	})
+
+	if !offeredKinds[beadmeta.KindRetry] && !offeredKinds[beadmeta.KindRetryEval] {
+		t.Fatalf("Ready() never offered the retry control consuming the attempt closed with only a blocked work record (offered kinds %v):\n%s", offeredKinds, memberReport(t, store, rootID))
+	}
+	if next.ID == "" || next.Metadata[beadmeta.RetryAttemptMetadataKey] != "2" {
+		t.Fatalf("Ready() offered attempt %q (gc.retry_attempt=%q) after a missing_outcome close, want attempt 2:\n%s",
+			next.ID, next.Metadata[beadmeta.RetryAttemptMetadataKey], memberReport(t, store, rootID))
+	}
+	if root := mustGetBead(t, store, rootID); root.Status == "closed" {
+		t.Fatalf("root %s closed gc.outcome=%q while attempt 2 is open:\n%s", rootID, root.Metadata[beadmeta.OutcomeMetadataKey], memberReport(t, store, rootID))
+	}
+	if got := mustGetBead(t, store, attempt.ID).Metadata[beadmeta.WorkOutcomeMetadataKey]; got != beadmeta.WorkOutcomeBlocked {
+		t.Fatalf("attempt %s gc.work_outcome = %q, want the worker's blocked record preserved", attempt.ID, got)
+	}
+}
+
+// TestScopeCheckOfferedForAbortScopeMemberClosedOnlyBlocked pins #8153 for a
+// scope member that opted into gc.on_fail=abort_scope and closed with only
+// gc.work_outcome=blocked: its scope-check fails the scope on that close, so
+// Ready() must offer the scope-check instead of stranding it, and processing
+// it aborts the scope and skips the member downstream of it.
+func TestScopeCheckOfferedForAbortScopeMemberClosedOnlyBlocked(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	control, futureMember, _, body := scopeCheckAbortScopeFixture(t, store, map[string]string{
+		beadmeta.StepRefMetadataKey:     "demo.preflight",
+		beadmeta.OnFailMetadataKey:      beadmeta.OnFailAbortScope,
+		beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked,
+	})
+	if !mustReadyContains(t, store, control.ID) {
+		t.Fatalf("Ready() withholds scope-check %s: the abort_scope member's blocked work record strands the control that fails its scope", control.ID)
+	}
+	result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
+	if err != nil {
+		t.Fatalf("ProcessControl(scope-check): %v", err)
+	}
+	if !result.Processed || result.Action != "scope-fail" {
+		t.Fatalf("result = %+v, want processed scope-fail", result)
+	}
+	if after := mustGetBead(t, store, body.ID); after.Status != "closed" || after.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail {
+		t.Fatalf("body = status %q outcome %q, want closed/fail", after.Status, after.Metadata[beadmeta.OutcomeMetadataKey])
+	}
+	if mustReadyContains(t, store, futureMember.ID) {
+		t.Fatalf("downstream member %s is claimable after the abort_scope member's blocked close failed the scope", futureMember.ID)
+	}
+}

@@ -67,6 +67,12 @@ const (
 	CoordinatorPassingVerdictEvidence    = "evidence.reviewer_verdict"
 )
 
+// OnFailAbortScope is the value of OnFailMetadataKey ("gc.on_fail") with which
+// a scope member opts into the fail-closed worker-result contract: unless it
+// is a retry attempt subject, dispatch counts its close as a failure that
+// aborts its scope whenever gc.outcome is not pass, skipped or canceled.
+const OnFailAbortScope = "abort_scope"
+
 // Values of WorkOutcomeMetadataKey ("gc.work_outcome"), the typed work-record
 // close disposition (ADR-0009). Deliberately disjoint from the control-plane
 // OutcomeMetadataKey vocabulary above so the two never collide on one key. Only

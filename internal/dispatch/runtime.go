@@ -1125,7 +1125,7 @@ func preserveScopeCheckForSubject(candidate beads.Bead, deps []beads.Dep, subjec
 // explicit terminal non-failure, so a canceled scope member does not drive the
 // abort-scope failure path.
 func beadOutcomeFailed(subject beads.Bead) bool {
-	onFailAbortScope := strings.TrimSpace(subject.Metadata[beadmeta.OnFailMetadataKey]) == "abort_scope"
+	onFailAbortScope := strings.TrimSpace(subject.Metadata[beadmeta.OnFailMetadataKey]) == beadmeta.OnFailAbortScope
 	if onFailAbortScope && isRetryAttemptSubject(subject) {
 		return false
 	}
@@ -1144,21 +1144,10 @@ func beadOutcomeFailed(subject beads.Bead) bool {
 	}
 }
 
+// isRetryAttemptSubject reports whether subject is an attempt subject whose
+// owning control judges its close (beadmeta.IsRetryAttemptSubject).
 func isRetryAttemptSubject(subject beads.Bead) bool {
-	if subject.Metadata[beadmeta.LogicalBeadIDMetadataKey] == "" {
-		return false
-	}
-	// v1 pattern: attempt beads have gc.kind "retry-run" or "retry-eval".
-	switch subject.Metadata[beadmeta.KindMetadataKey] {
-	case "retry-run", "retry-eval":
-		return true
-	}
-	// v2 pattern: attempt beads keep their original kind but carry gc.attempt
-	// (and, since the counter split, gc.retry_attempt).
-	if subject.Metadata[beadmeta.AttemptMetadataKey] != "" || subject.Metadata[beadmeta.RetryAttemptMetadataKey] != "" {
-		return true
-	}
-	return false
+	return beadmeta.IsRetryAttemptSubject(subject.Metadata)
 }
 
 func processWorkflowFinalize(store beads.GraphStore, bead beads.Bead, opts ProcessOptions) (ControlResult, error) {
@@ -2467,7 +2456,7 @@ func terminalAbortScopeFailure(bead beads.Bead) bool {
 	if bead.Status != "closed" {
 		return false
 	}
-	if strings.TrimSpace(bead.Metadata[beadmeta.OnFailMetadataKey]) != "abort_scope" {
+	if strings.TrimSpace(bead.Metadata[beadmeta.OnFailMetadataKey]) != beadmeta.OnFailAbortScope {
 		return false
 	}
 	if !beadOutcomeFailed(bead) {
