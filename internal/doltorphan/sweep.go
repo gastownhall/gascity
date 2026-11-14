@@ -1,7 +1,8 @@
 // Package doltorphan implements a symptom-based fallback sweep for
 // orphaned dolt store directories: a directory is a removal candidate when
 // it is old, contains a Dolt store (a .dolt/noms directory), and is not held
-// open by any live process. It composes with, but does not replace,
+// open by any live process (no lsof hit, and no flock on the store's
+// .dolt/noms/LOCK, which a running Dolt server holds for its lifetime). It composes with, but does not replace,
 // process-level classification (e.g. cmd/gc's classifyDoltProcess) — this
 // package never inspects or kills processes, it only judges directories that
 // are already symptomatic of abandonment, which is what lets it catch leaks
@@ -19,6 +20,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"time"
+
+	"github.com/dolthub/fslock"
 
 	"github.com/gastownhall/gascity/internal/clock"
 )
@@ -118,6 +121,10 @@ type candidate struct {
 // A .dolt without a noms directory (a sql-server's bookkeeping, Dolt's global
 // config) is not a store, so a directory holding only that is never removed.
 //
+// A store whose .dolt/noms/LOCK is flocked is skipped even when lsof misses
+// it; if that lock cannot be probed the store is skipped and the error
+// reported.
+//
 // If the lsof scan itself fails, Sweep fails closed: nothing is removed
 // this pass (an unverifiable "is this held open" check is treated the
 // same as "yes, it's held").
@@ -182,6 +189,16 @@ func Sweep(cfg SweepConfig) SweepResult {
 			result.Skipped++
 			continue
 		}
+		lockHeld, err := doltLockHeld(c.storeDir)
+		if err != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("probe dolt lock in %s: %w", c.storeDir, err))
+			result.Skipped++
+			continue
+		}
+		if lockHeld {
+			result.Skipped++
+			continue
+		}
 		if err := removeAll(c.storeDir); err != nil {
 			result.Errors = append(result.Errors, fmt.Errorf("remove %s: %w", c.storeDir, err))
 			continue
@@ -189,6 +206,34 @@ func Sweep(cfg SweepConfig) SweepResult {
 		result.Removed = append(result.Removed, c.storeDir)
 	}
 	return result
+}
+
+// doltLockHeld reports whether a live process holds the NBS flock a Dolt
+// server takes on <storeDir>/.dolt/noms/LOCK for its whole lifetime. Unlike
+// the lsof scan, which can miss a server under load, the kernel always knows.
+// A store without a LOCK file is not held; the probe never creates one. Any
+// other probe failure is returned so the caller fails closed.
+func doltLockHeld(storeDir string) (bool, error) {
+	path := filepath.Join(storeDir, ".dolt", "noms", "LOCK")
+	if _, err := os.Lstat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
+	}
+	lock, err := fslock.New(path)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = lock.Close() }()
+	if err := lock.TryLock(); err != nil {
+		if errors.Is(err, fslock.ErrLocked) {
+			return true, nil
+		}
+		return false, err
+	}
+	_ = lock.Unlock()
+	return false, nil
 }
 
 // hasSentinel reports whether dir directly contains sentinelFileName or

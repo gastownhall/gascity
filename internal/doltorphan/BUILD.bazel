@@ -5,7 +5,10 @@ go_library(
     srcs = ["sweep.go"],
     importpath = "github.com/gastownhall/gascity/internal/doltorphan",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/clock"],
+    deps = [
+        "//internal/clock",
+        "@com_github_dolthub_fslock//:fslock",
+    ],
 )
 
 go_test(
