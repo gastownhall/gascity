@@ -329,6 +329,63 @@ func TestAgentListIncludesOwnNamedSessionOfUnlimitedTemplate(t *testing.T) {
 	}
 }
 
+// A bounded template (max_active_sessions set) with its own named session
+// listed its max slots but never the named session itself: #7739 only
+// covered the unlimited branch. The named session is live here, distinct
+// from both slots, so the configured-pool fallback cannot stand in for it.
+func TestAgentListIncludesOwnNamedSessionOfBoundedTemplate(t *testing.T) {
+	state := newFakeState(t)
+	state.cfg.Agents = []config.Agent{
+		{Name: "dispatch", MaxActiveSessions: intPtr(2), MinActiveSessions: intPtr(0)},
+	}
+	state.cfg.NamedSessions = []config.NamedSession{
+		{Template: "dispatch", Mode: "on_demand"},
+	}
+	identity := state.cfg.NamedSessions[0].QualifiedName()
+	if err := state.sp.Start(context.Background(), agentSessionName(state.cityName, identity, ""), runtime.Config{}); err != nil {
+		t.Fatalf("start session for %s: %v", identity, err)
+	}
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	var resp struct {
+		Items []agentResponse `json:"items"`
+		Total int             `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 3 {
+		t.Fatalf("Total = %d, want 3: named session %s plus dispatch-1 and dispatch-2 (items=%+v)", resp.Total, identity, resp.Items)
+	}
+	byName := make(map[string]agentResponse, len(resp.Items))
+	for _, item := range resp.Items {
+		byName[item.Name] = item
+	}
+	item, ok := byName[identity]
+	if !ok {
+		t.Fatalf("no row for named session %s (items=%+v)", identity, resp.Items)
+	}
+	if !item.Running {
+		t.Errorf("%s Running = %v, want true", identity, item.Running)
+	}
+	if item.Pool != identity {
+		t.Errorf("%s Pool = %q, want %q, matching GET /agent/%s", identity, item.Pool, identity, identity)
+	}
+	for _, slot := range []string{"dispatch-1", "dispatch-2"} {
+		if _, ok := byName[slot]; !ok {
+			t.Errorf("no row for bounded slot %s (items=%+v)", slot, resp.Items)
+		}
+	}
+}
+
 // A failed session listing leaves the template's instances unknown, but its
 // own named session comes from config: the roster keeps that row and names
 // the failure in partial_errors rather than dropping the agent.
@@ -455,6 +512,12 @@ func TestExpandAgentListsOwnNamedSessionOfPool(t *testing.T) {
 			want:    []string{"coordinator-gc-7"},
 		},
 		{name: "no session provider lists it once", agent: coordinator, named: ownNamed, noSP: true, want: []string{"coordinator"}},
+		{
+			name:  "bounded pool with own named session",
+			agent: config.Agent{Name: "coordinator", MaxActiveSessions: intPtr(2)},
+			named: ownNamed,
+			want:  []string{"coordinator", "coordinator-1", "coordinator-2"},
+		},
 		{
 			name:  "imported rig agent",
 			agent: config.Agent{Name: "refinery", Dir: "myrig", BindingName: "gs"},

@@ -556,6 +556,10 @@ func TestHandleStatusUnlimitedPoolUsesOpenNonArchivedSessionBeads(t *testing.T) 
 func TestHandleStatusBoundedPoolUsesCachedSessionState(t *testing.T) {
 	state := newFakeState(t)
 	state.cfg.Agents[0].MaxActiveSessions = intPtr(2)
+	// The fixture's own NamedSessions entry templates on this agent, so
+	// bumping it to a bounded pool also makes it the template's own named
+	// session (gascity#9151): expect that row (not live) beside the two
+	// numbered slots below.
 	store := beads.NewMemStore()
 	state.cityBeadStore = store
 	if _, err := store.Create(beads.Bead{
@@ -586,8 +590,8 @@ func TestHandleStatusBoundedPoolUsesCachedSessionState(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if resp.Agents.Total != 2 {
-		t.Fatalf("Agents.Total = %d, want 2 bounded pool slots", resp.Agents.Total)
+	if resp.Agents.Total != 3 {
+		t.Fatalf("Agents.Total = %d, want 3: the template's own named session plus 2 bounded pool slots", resp.Agents.Total)
 	}
 	if resp.Agents.Running != 1 {
 		t.Fatalf("Agents.Running = %d, want 1", resp.Agents.Running)
