@@ -6059,3 +6059,83 @@ func TestUndeliverableHandoffWarningRecognizesPoolSessionBeadID(t *testing.T) {
 		t.Fatalf("another pool's session claim was not reported undeliverable")
 	}
 }
+
+// pokeCounter is a Notifier that counts controller pokes.
+type pokeCounter struct{ pokes int }
+
+func (p *pokeCounter) PokeController(_ string)      { p.pokes++ }
+func (p *pokeCounter) PokeControlDispatch(_ string) {}
+
+// batchPokeFixture returns deps whose notifier counts pokes, a convoy with
+// three open children, and the child IDs.
+func batchPokeFixture(t *testing.T, runner *fakeRunner) (SlingDeps, *pokeCounter, string, []string) {
+	t.Helper()
+	deps := testDeps(&config.City{Workspace: config.Workspace{Name: "test"}}, runtime.NewFake(), runner.run)
+	pc := &pokeCounter{}
+	deps.Notify = pc
+	convoy, err := deps.Store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, title := range []string{"t1", "t2", "t3"} {
+		c, err := deps.Store.Create(beads.Bead{Title: title, Type: "task", ParentID: convoy.ID, Status: "open"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, c.ID)
+	}
+	return deps, pc, convoy.ID, ids
+}
+
+func TestDoSlingBatchPokesControllerOnceForConvoy(t *testing.T) {
+	deps, pc, convoyID, _ := batchPokeFixture(t, newFakeRunner())
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	result, err := DoSlingBatch(SlingOpts{Target: a, BeadOrFormula: convoyID}, deps, deps.Store)
+	if err != nil {
+		t.Fatalf("DoSlingBatch: %v", err)
+	}
+	if result.Routed != 3 {
+		t.Fatalf("Routed = %d, want 3", result.Routed)
+	}
+	if pc.pokes != 1 {
+		t.Errorf("pokes = %d, want exactly 1 for a 3-child convoy", pc.pokes)
+	}
+}
+
+func TestDoSlingBatchSkipPokeSuppressesPoke(t *testing.T) {
+	deps, pc, convoyID, _ := batchPokeFixture(t, newFakeRunner())
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	if _, err := DoSlingBatch(SlingOpts{Target: a, BeadOrFormula: convoyID, SkipPoke: true}, deps, deps.Store); err != nil {
+		t.Fatalf("DoSlingBatch: %v", err)
+	}
+	if pc.pokes != 0 {
+		t.Errorf("pokes = %d, want 0 with SkipPoke", pc.pokes)
+	}
+}
+
+func TestDoSlingBatchDryRunDoesNotPoke(t *testing.T) {
+	deps, pc, convoyID, _ := batchPokeFixture(t, newFakeRunner())
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	if _, err := DoSlingBatch(SlingOpts{Target: a, BeadOrFormula: convoyID, DryRun: true}, deps, deps.Store); err != nil {
+		t.Fatalf("DoSlingBatch: %v", err)
+	}
+	if pc.pokes != 0 {
+		t.Errorf("pokes = %d, want 0 on dry run", pc.pokes)
+	}
+}
+
+func TestDoSlingBatchNoPokeWhenEveryChildFails(t *testing.T) {
+	runner := newFakeRunner()
+	deps, pc, convoyID, ids := batchPokeFixture(t, runner)
+	for _, id := range ids {
+		runner.on(id, fmt.Errorf("runner failed"))
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	if _, err := DoSlingBatch(SlingOpts{Target: a, BeadOrFormula: convoyID}, deps, deps.Store); err == nil {
+		t.Fatal("expected error when every child fails")
+	}
+	if pc.pokes != 0 {
+		t.Errorf("pokes = %d, want 0 when nothing routed", pc.pokes)
+	}
+}
