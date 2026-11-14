@@ -746,19 +746,30 @@ func TestBeadsScriptInitDoesNotTolerateAlreadyInitializedText(t *testing.T) {
 	requireTextBeforeStatusLine(t, result.output, bdPrefixMismatchText, "exit 1")
 }
 
-// TestBeadsScriptInitUsesInitIfMissing pins the argv of the tolerated case:
-// the new flags go after the existing arguments, so `init --server` still
-// leads. A prefix that is not a plain identifier keeps the line to exactly the
-// old command plus the two flags.
+// TestBeadsScriptInitUsesInitIfMissing pins the argv of the tolerated case on
+// both branches: the new flags go after the existing arguments, so
+// `init --server` still leads, and a prefix that is not a plain identifier
+// keeps the line to exactly the old command plus the two flags.
 func TestBeadsScriptInitUsesInitIfMissing(t *testing.T) {
-	result := runBeadsInit(t, []string{"/city/frontend", "my-rig"})
-	if result.err != nil {
-		t.Fatalf("init error = %v\noutput:\n%s", result.err, result.output)
+	const base = "init --server --server-host canonical-dolt.example.com --server-port 4406"
+	tests := []struct {
+		prefix string
+		want   string
+	}{
+		{prefix: "my-rig", want: base + " -p my-rig --skip-hooks --init-if-missing --quiet"},
+		{prefix: "fe", want: base + " -p fe --skip-hooks --init-if-missing --quiet --database fe"},
 	}
-	call := beadsInitCall(t, result.callLog)
-	const want = "init --server --server-host canonical-dolt.example.com --server-port 4406 -p my-rig --skip-hooks --init-if-missing --quiet"
-	if !strings.HasSuffix(strings.TrimSpace(call), want) {
-		t.Fatalf("init call = %q, want it to end with %q", call, want)
+	for _, tt := range tests {
+		t.Run(tt.prefix, func(t *testing.T) {
+			result := runBeadsInit(t, []string{"/city/frontend", tt.prefix})
+			if result.err != nil {
+				t.Fatalf("init error = %v\noutput:\n%s", result.err, result.output)
+			}
+			call := beadsInitCall(t, result.callLog)
+			if !strings.HasSuffix(strings.TrimSpace(call), tt.want) {
+				t.Fatalf("init call = %q, want it to end with %q", call, tt.want)
+			}
+		})
 	}
 }
 
