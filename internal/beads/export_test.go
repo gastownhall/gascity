@@ -121,3 +121,7 @@ func (m *MemStore) WriteRowForTest(id string, mutate func(*Bead)) {
 func (s *BdStore) SetTxProjectionTimeoutForTest(d time.Duration) {
 	s.txProjectionTimeout = d
 }
+
+// BdListAssigneeFanOutLimitForTest is bdListAssigneeFanOutLimit, the most
+// per-assignee bd list reads a fanned-out BdStore List runs at once.
+const BdListAssigneeFanOutLimitForTest = bdListAssigneeFanOutLimit
