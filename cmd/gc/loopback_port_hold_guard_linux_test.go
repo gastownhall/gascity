@@ -356,6 +356,252 @@ func socketInode(fd int) uint64 {
 	return st.Ino
 }
 
+// ownBoundSocket identifies a socket independently of descriptor-number reuse.
+type ownBoundSocket struct {
+	fd     int
+	domain int
+	inode  uint64
+}
+
+// ownLoopbackSockets finds this process's sockets bound to port in domains.
+func ownLoopbackSockets(_ int, _ []int) ([]ownBoundSocket, error) {
+	return nil, errors.New("not implemented")
+}
+
+// socketsStillOpen returns current descriptors whose socket identities were pinned.
+func socketsStillOpen(pinned, now []ownBoundSocket) []ownBoundSocket {
+	var open []ownBoundSocket
+	for _, current := range now {
+		for _, held := range pinned {
+			if current.inode == held.inode {
+				open = append(open, current)
+				break
+			}
+		}
+	}
+	return open
+}
+
+// pinHeldLoopbackSockets requires at least one held socket on every covered family.
+func pinHeldLoopbackSockets(t *testing.T, port int, domains []int) []ownBoundSocket {
+	t.Helper()
+	pinned, err := ownLoopbackSockets(port, domains)
+	if err != nil {
+		t.Fatalf("pin sockets for port %d: %v", port, err)
+	}
+	for _, domain := range domains {
+		found := false
+		for _, socket := range pinned {
+			if socket.domain == domain {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("no held socket on %s:%d", loopbackDomainName(domain), port)
+		}
+	}
+	return pinned
+}
+
+// requireLoopbackSocketsReleased fails for each pinned socket that remains open.
+func requireLoopbackSocketsReleased(t *testing.T, pinned []ownBoundSocket, port int, domains []int) {
+	t.Helper()
+	if len(pinned) == 0 {
+		t.Fatal("release check requires a nonempty socket pin")
+	}
+	now, err := ownLoopbackSockets(port, domains)
+	if err != nil {
+		t.Fatalf("scan released sockets for port %d: %v", port, err)
+	}
+	for _, socket := range socketsStillOpen(pinned, now) {
+		t.Errorf("socket on %s:%d still open: fd=%d inode=%d", loopbackDomainName(socket.domain), port, socket.fd, socket.inode)
+	}
+}
+
+// TestOwnLoopbackSocketsAccountForExactlyTheHold pins the scan's identity and
+// family boundaries, including a released number beside an independently held one.
+func TestOwnLoopbackSocketsAccountForExactlyTheHold(t *testing.T) {
+	portA, fdsA, err := holdLoopbackPortFDs(v4Candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { closeFDs(fdsA) })
+	portB, fdsB, err := holdLoopbackPortFDs(v4Candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { closeFDs(fdsB) })
+	if portA == portB {
+		t.Fatalf("independent holds share port %d", portA)
+	}
+	identities := func(fds []int) ([]int, []ownBoundSocket) {
+		domains := []int{syscall.AF_INET}
+		if len(fds) > 1 {
+			domains = append(domains, syscall.AF_INET6)
+		}
+		var want []ownBoundSocket
+		seen := make(map[uint64]bool)
+		for i, fd := range fds {
+			inode := socketInode(fd)
+			if inode == 0 || seen[inode] {
+				t.Fatalf("held fd %d has zero or duplicate socket inode %d", fd, inode)
+			}
+			seen[inode] = true
+			want = append(want, ownBoundSocket{fd: fd, domain: domains[i], inode: inode})
+		}
+		return domains, want
+	}
+	domainsA, wantA := identities(fdsA)
+	domainsB, wantB := identities(fdsB)
+	requireScan := func(port int, domains []int, want []ownBoundSocket) {
+		t.Helper()
+		got, err := ownLoopbackSockets(port, domains)
+		if err != nil {
+			t.Fatalf("scan port %d: %v", port, err)
+		}
+		if len(got) != len(want) {
+			t.Fatalf("scan port %d = %+v, want exactly %+v", port, got, want)
+		}
+		remaining := make(map[ownBoundSocket]bool)
+		for _, socket := range want {
+			remaining[socket] = true
+		}
+		for _, socket := range got {
+			if !remaining[socket] {
+				t.Fatalf("scan port %d returned unexpected or duplicate socket %+v", port, socket)
+			}
+			delete(remaining, socket)
+		}
+	}
+	requireScan(portA, domainsA, wantA)
+	requireScan(portB, domainsB, wantB)
+	for _, socket := range wantA {
+		requireScan(portA, []int{socket.domain}, []ownBoundSocket{socket})
+	}
+	closeFDs(fdsA)
+	fdsA = nil
+	requireScan(portA, domainsA, nil)
+	requireScan(portB, domainsB, wantB)
+}
+
+// TestReleaseCheckIgnoresAForeignHolderOfTheNumber reproduces durable port reuse
+// with replacement sockets whose identities differ from the released hold's.
+func TestReleaseCheckIgnoresAForeignHolderOfTheNumber(t *testing.T) {
+	port, fds, err := holdLoopbackPortFDs(v4Candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { closeFDs(fds) })
+	domains := []int{syscall.AF_INET}
+	if len(fds) > 1 {
+		domains = append(domains, syscall.AF_INET6)
+	}
+	pinned := pinHeldLoopbackSockets(t, port, domains)
+	closeFDs(fds)
+	fds = nil
+	var replacements []ownBoundSocket
+	var replacementFDs []int
+	t.Cleanup(func() { closeFDs(replacementFDs) })
+	for _, domain := range domains {
+		fd, _, err := rawBind(domain, port, false)
+		switch {
+		case err == nil:
+			replacementFDs = append(replacementFDs, fd)
+			replacements = append(replacements, ownBoundSocket{fd: fd, domain: domain, inode: socketInode(fd)})
+		case errors.Is(err, syscall.EADDRINUSE):
+			// A real foreign holder already supplies the reported collision.
+		default:
+			t.Fatalf("replace %s:%d: %v", loopbackDomainName(domain), port, err)
+		}
+	}
+	requireLoopbackSocketsReleased(t, pinned, port, domains)
+	now, err := ownLoopbackSockets(port, domains)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, replacement := range replacements {
+		found := false
+		for _, socket := range now {
+			if socket == replacement && socket.inode != 0 {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("scan omitted replacement socket %+v: %+v", replacement, now)
+		}
+	}
+	if open := socketsStillOpen(pinned, now); len(open) != 0 {
+		t.Errorf("replacement sockets reported as unreleased hold: %+v", open)
+	}
+}
+
+// TestReleaseCheckDetectsAnUnreleasedOwnSocket pins both an extra bound socket
+// and a duplicate descriptor as leaks, then verifies closing them clears the check.
+func TestReleaseCheckDetectsAnUnreleasedOwnSocket(t *testing.T) {
+	for _, name := range []string{"extra_socket", "dup_descriptor"} {
+		t.Run(name, func(t *testing.T) {
+			port, fds, err := holdLoopbackPortFDs(v4Candidate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { closeFDs(fds) })
+			domains := []int{syscall.AF_INET}
+			if len(fds) > 1 {
+				domains = append(domains, syscall.AF_INET6)
+			}
+			leakedFD := -1
+			t.Cleanup(func() {
+				if leakedFD >= 0 {
+					_ = syscall.Close(leakedFD)
+				}
+			})
+			if name == "extra_socket" {
+				leakedFD, _, err = rawBind(syscall.AF_INET, port, true)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			originalInode := socketInode(fds[0])
+			pinned := pinHeldLoopbackSockets(t, port, domains)
+			if name == "dup_descriptor" {
+				dup, _, errno := syscall.Syscall(syscall.SYS_FCNTL, uintptr(fds[0]), syscall.F_DUPFD_CLOEXEC, 0)
+				if errno != 0 {
+					t.Fatalf("fcntl(F_DUPFD_CLOEXEC): %v", errno)
+				}
+				leakedFD = int(dup)
+				if inode := socketInode(leakedFD); inode == 0 || inode != originalInode {
+					t.Fatalf("dup inode %d, want original inode %d", inode, originalInode)
+				}
+			}
+			want := ownBoundSocket{fd: leakedFD, domain: syscall.AF_INET, inode: socketInode(leakedFD)}
+			if want.inode == 0 {
+				t.Fatal("leaked socket has zero inode")
+			}
+			closeFDs(fds)
+			fds = nil
+			now, err := ownLoopbackSockets(port, domains)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if open := socketsStillOpen(pinned, now); len(open) != 1 || open[0] != want {
+				t.Fatalf("unreleased sockets = %+v, want exactly %+v", open, want)
+			}
+			if err := syscall.Close(leakedFD); err != nil {
+				t.Fatal(err)
+			}
+			leakedFD = -1
+			now, err = ownLoopbackSockets(port, domains)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if open := socketsStillOpen(pinned, now); len(open) != 0 {
+				t.Errorf("sockets remain after closing the leak: %+v", open)
+			}
+		})
+	}
+}
+
 // twinTakenCandidate returns a candidate source for holdLoopbackPortFDs: a
 // SO_REUSEADDR bind(0) on 127.0.0.1 like v4Candidate, whose [::1] twin the first
 // taken candidates find held by a bound-only socket without SO_REUSEADDR. Later
