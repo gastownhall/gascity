@@ -36,8 +36,9 @@ const (
 	// interrupt and clear-scrollback ops instead of tmux over exec. All five
 	// ops are required, so an exit 2 from one is a failure rather than the
 	// unknown-op no-op, and gc sends no tmux commands after selection. With
-	// it, input-fence and proc.provision have no effect: fencing is none and
-	// start is welded. Tmux remains the undeclared default.
+	// it, input-fence has no effect (fencing is none), and start is welded
+	// unless the pack also declares proc.provision and proc.launch. Tmux
+	// remains the undeclared default.
 	ProtocolCapabilityCarrierOps = "carrier.ops"
 	// ProtocolCapabilityInputFence declares that the box's tmux can take
 	// fenced input (RUNTIME-CONTRACT-009): tmux 3.0 or later, the `main`
@@ -76,11 +77,20 @@ const (
 	// `provision` op — a box-without-agent `start` that creates+stages the box
 	// and runs pre_start but does NOT launch the agent (un-weld B3b). With it
 	// declared, the controller provisions via `provision` and then launches the
-	// agent itself by exec-ing `tmux new-session` over the `exec` op (so it also
-	// requires proc.exec); without it, the controller uses the welded `start` op
-	// (compat). It gates TransportCapabilities.SeparableLaunch. carrier.ops
-	// always uses welded start, even with proc.provision and proc.exec.
+	// agent itself: through the `launch` op under proc.launch, otherwise by
+	// exec-ing `tmux new-session` over the `exec` op (which needs proc.exec and
+	// the default tmux carrier). Without a way to launch, the controller uses
+	// the welded `start` op (compat). It gates
+	// TransportCapabilities.SeparableLaunch.
 	ProtocolCapabilityProvision = "proc.provision"
+	// ProtocolCapabilityLaunch declares that the executable implements the
+	// `launch` op: it starts the start config's command in the box
+	// `provision` prepared, replacing a running agent unless the config is
+	// fresh_only (then exit 73), and types nothing. With proc.provision it
+	// replaces the tmux argv the controller otherwise sends over `exec`, so a
+	// pack without tmux in its box can un-weld start; the controller then
+	// delivers the config's first turn itself, through the selected carrier.
+	ProtocolCapabilityLaunch = "proc.launch"
 	// ProtocolCapabilityObserveV1 declares the exec observe contract
 	// reconciler v2 reads (PAR-EXEC): the `observe`, `inventory` and
 	// `kill-object` ops, `fresh_only` honored on `start` and `provision`, and

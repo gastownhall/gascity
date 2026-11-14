@@ -1,11 +1,13 @@
 package runtime
 
 // StartupNudgeHandbackProvider is an optional extension: a leaf whose Start
-// could not type its startup nudge ([Config.Nudge]) because the session's
-// program reported a dialog through the whole startup ladder (design §10.2
-// row A20, under the program-status switch on) hands the nudge back to the
-// Start's caller, which queues it for after the dialog is answered. The
-// Start itself succeeded: a dialog never fails a start. Composites do not
+// could not deliver its startup nudge ([Config.Nudge]) hands the nudge back to
+// the Start's caller, which queues it for later delivery. One cause is a
+// session whose program reported a dialog through the whole startup ladder
+// (design §10.2 row A20, under the program-status switch on); another is an
+// exec pack's un-welded launch whose first turn the runtime refused (busy,
+// pending interaction, rejected, not sent or unavailable). The Start itself
+// succeeded: a refused first turn never fails a start. Composites do not
 // implement it ([TakeStartupNudgeHandback] resolves the leaf).
 type StartupNudgeHandbackProvider interface {
 	// TakeStartupNudgeHandback returns the startup nudge the last Start of

@@ -19,6 +19,7 @@ const ( //nolint:revive // exported requirement IDs are documented by the catalo
 	RequirementRPPVanishedNudgeNotDelivered        RequirementCode = "WC-RPP-001"
 	RequirementRPPTypedOutcomeReachesHandle        RequirementCode = "WC-RPP-002"
 	RequirementRPPUnobservedIsDelivered            RequirementCode = "WC-RPP-003"
+	RequirementRPPRefusedFirstTurnQueued           RequirementCode = "WC-RPP-004"
 	RequirementRPPHostFSTranscriptTurns            RequirementCode = "WC-RPP-005"
 	RequirementRPPHostFSLeftoverReaped             RequirementCode = "WC-RPP-006"
 	RequirementRPPHeldNudgeTypedOnce               RequirementCode = "WC-RPP-012"
@@ -233,6 +234,11 @@ func RPPHandleCatalog() []Requirement {
 			Code:        RequirementRPPUnobservedIsDelivered,
 			Group:       "rpp",
 			Description: "A nudge a pack declaring input-outcome answers delivered_unobserved reaches the handle as runtime.ErrNudgeDeliveredUnobserved, which runtime.NudgeDelivered counts as delivered (never retried); one it answers unconfirmed reaches it as runtime.ErrNudgeDeliveryUnconfirmed, possibly delivered and not counted as delivered.",
+		},
+		{
+			Code:        RequirementRPPRefusedFirstTurnQueued,
+			Group:       "rpp",
+			Description: "On the un-welded launch path (a pack declaring proc.provision and proc.launch), a first turn the pack refuses (busy, pending_interaction, rejected or not_sent) is never typed and never dropped: the start succeeds, and the turn waits in the session's queue as the user's submit (nudgequeue.SourceSubmit), delivered verbatim later.",
 		},
 		{
 			Code:        RequirementRPPHostFSTranscriptTurns,

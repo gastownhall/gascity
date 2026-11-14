@@ -15,6 +15,7 @@ go_library(
         "process_table.go",
         "program_status.go",
         "program_status_fake.go",
+        "unwelded_launch.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/runtimetest",
     visibility = ["//:__subpackages__"],
@@ -39,6 +40,7 @@ go_test(
         "process_table_test.go",
         "program_status_test.go",
         "testenv_import_test.go",
+        "unwelded_launch_test.go",
     ],
     embed = [":runtimetest"],
     deps = [

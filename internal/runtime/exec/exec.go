@@ -78,6 +78,10 @@ type Provider struct {
 	// its host work (provisionBox), so the launch that follows runs their
 	// session_setup on the host (execTransport.Launch).
 	hostSetupDue sync.Map
+
+	// handbacks holds the first turn a separable launch handed back
+	// (startup_ladder.go).
+	handbacks startupHandbacks
 }
 
 type startupWatchEvent struct {
@@ -350,7 +354,7 @@ func classifyExecExit(op string, code int, msg string, strict bool, base error) 
 // exit 2 from it is a failure rather than the forward-compatible no-op.
 func exitTwoIsFailure(op string) bool {
 	switch op {
-	case "start", "provision", "is-attached", "observe", "inventory", "kill-object", serverStopOp:
+	case "start", "provision", launchOp, "is-attached", "observe", "inventory", "kill-object", serverStopOp:
 		return true
 	default:
 		return false
@@ -563,14 +567,17 @@ func startFailureKeepsBox(startErr error, foreignBox bool) bool {
 
 // supportsSeparableLaunch reports whether the pack un-welds provisioning from the
 // agent launch: it must implement the box-without-agent `provision` op
-// (proc.provision) AND the `exec` op (proc.exec) the controller drives the launch
-// over, using the default tmux carrier. carrier.ops never enables it. Otherwise
-// the welded `start` op provisions and launches in one shot (compat). Gates
+// (proc.provision) and a way for the controller to launch the agent: the
+// `launch` op (proc.launch), or the `exec` op (proc.exec) it drives tmux over
+// with the default carrier, which carrier.ops rules out. Otherwise the welded
+// `start` op provisions and launches in one shot (compat). Gates
 // [runtime.TransportCapabilities.SeparableLaunch]. (Un-weld B3b.)
 func (p *Provider) supportsSeparableLaunch() bool {
-	return !p.opsCarrierSelected() &&
-		p.handshakeCapability(runtime.ProtocolCapabilityProvision) &&
-		p.handshakeCapability(runtime.ProtocolCapabilityConnectionExec)
+	if !p.handshakeCapability(runtime.ProtocolCapabilityProvision) {
+		return false
+	}
+	return p.launchDeclared() ||
+		(!p.opsCarrierSelected() && p.handshakeCapability(runtime.ProtocolCapabilityConnectionExec))
 }
 
 // provisionBox creates the box for name. When the pack supports a separable
@@ -580,7 +587,8 @@ func (p *Provider) supportsSeparableLaunch() bool {
 // sharing the host filesystem, and as in Start only into a name the pack
 // reports holding no live box, the host work precedes `provision` and is
 // left out of its config; session_setup then follows the launch
-// (execTransport.Launch).
+// (execTransport.Launch). `provision` is never sent the first turn, which
+// the launch delivers (finishSeparableLaunch).
 func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Config) error {
 	p.rememberReadyPrompt(name, cfg)
 	if !p.supportsSeparableLaunch() {
@@ -588,7 +596,7 @@ func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Co
 	}
 	p.hostSetupDue.Delete(name)
 	hostWork := p.sharesHostFS() && p.holdsNoLiveBox(name)
-	data, err := p.startConfigFor(ctx, name, cfg, hostWork)
+	data, err := p.startConfigFor(ctx, name, withoutNudge(cfg), hostWork)
 	if err != nil {
 		return err
 	}
@@ -601,21 +609,32 @@ func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Co
 	return nil
 }
 
-// launchAgent starts the agent in the in-box tmux session over the `exec` op, for
-// a pack with a separable launch; for a welded pack it is a no-op (provisionBox /
-// Start already launched). The launch is idempotent: it respawns the pane if the
-// session already exists (relaunch into a warm box) and otherwise creates it
-// (first launch after provision). A FreshOnly launch never respawns: an
-// existing agent session fails it, as an ordinary start failure, so
+// launchAgent starts the agent for a pack with a separable launch; for a welded
+// pack it is a no-op (provisionBox / Start already launched). A pack declaring
+// proc.launch is sent the `launch` op (runLaunchOp). Otherwise the agent starts
+// in the in-box tmux session over the `exec` op. The launch is idempotent: it
+// respawns the pane if the session already exists (relaunch into a warm box) and
+// otherwise creates it (first launch after provision). A FreshOnly launch never
+// respawns: an existing agent session fails it, as an ordinary start failure, so
 // startFresh's token-gated cleanup removes the box it provisioned. It then
 // dismisses startup dialogs — the same
 // Go-side orchestration the welded Start runs. The `exec` op runs in the box's
 // working directory and the box env is set at provision time, so neither an
 // explicit -c nor -e is needed (workdir + env are provision-half). (Un-weld B3b.)
+// It clears the turn an earlier launch of name handed back; the first turn
+// itself follows (finishSeparableLaunch).
 func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Config) error {
 	p.rememberReadyPrompt(name, cfg)
 	if !p.supportsSeparableLaunch() {
 		return nil
+	}
+	p.handbacks.set(name, "")
+	if p.launchDeclared() {
+		if err := p.runLaunchOp(ctx, name, cfg); err != nil {
+			return err
+		}
+		p.publishReadyPrompt(ctx, name, cfg)
+		return p.dismissStartupDialogs(ctx, name, cfg)
 	}
 	command := cfg.Command
 	if command == "" {
@@ -644,13 +663,14 @@ func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Con
 }
 
 // Relaunch re-launches the agent for the reconciler's launch-only-drift path
-// ([runtime.RelaunchProvider]). For a separable pack (proc.provision) it respawns
-// the agent in the warm box over the exec op (launchAgent) — no reprovision —
-// and, for a pack sharing the host filesystem, then runs session_setup on the
-// host again, as the launch after provision does and as tmux re-runs it on a
-// relaunch. Pre_start and staging are not redone: the box is warm. A
-// welded pack has no in-place relaunch (the agent is welded into `start`), so it
-// degrades to a full reprovision (Stop+Start), which is still correct. On a
+// ([runtime.RelaunchProvider]). For a separable pack (proc.provision) it
+// relaunches the agent in the warm box (launchAgent) — no reprovision — and,
+// for a pack sharing the host filesystem, then runs session_setup on the host
+// again, as the launch after provision does and as tmux re-runs it on a
+// relaunch, and delivers the first turn (finishSeparableLaunch). Pre_start and
+// staging are not redone: the box is warm. A welded pack has no in-place
+// relaunch (the agent is welded into `start`), so it degrades to a full
+// reprovision (Stop+Start), which is still correct. On a
 // v2-ready welded pack the Start is FreshOnly, after `observe` confirms the
 // name absent.
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
@@ -658,10 +678,7 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 		if err := p.launchAgent(ctx, name, cfg); err != nil {
 			return err
 		}
-		if p.sharesHostFS() {
-			p.runHostSessionSetup(ctx, name, cfg)
-		}
-		return nil
+		return p.finishSeparableLaunch(ctx, name, cfg, p.sharesHostFS())
 	}
 	if err := p.Stop(name); err != nil {
 		return err

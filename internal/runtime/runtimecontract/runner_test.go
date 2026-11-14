@@ -26,12 +26,12 @@ func writeScript(t *testing.T, stateDir string, bodies map[string]string) string
 }
 
 // writeGolden writes the full golden reference: the host-filesystem
-// variant, which declares every token the catalog gates, so it exercises
-// every requirement.
+// variant with input outcomes and the launch op, which declares every token
+// the catalog gates, so it exercises every requirement.
 func writeGolden(t *testing.T) string {
 	t.Helper()
 	state := t.TempDir()
-	return writeScript(t, state, reference.InputOutcomeBodies(reference.HostFSBodies()))
+	return writeScript(t, state, reference.LaunchBodies(reference.InputOutcomeBodies(reference.HostFSBodies())))
 }
 
 func runGolden(t *testing.T, path string) Report {
@@ -85,8 +85,8 @@ func TestRunCoversEveryCatalogRequirementInOrder(t *testing.T) {
 
 func TestGoldenReferenceIsFullyConformant(t *testing.T) {
 	for name, bodies := range map[string]map[string]string{
-		"tmux": reference.InputOutcomeBodies(reference.HostFSBodies()),
-		"ops":  reference.InputOutcomeBodies(reference.NonTmuxHostFSBodies()),
+		"tmux": reference.LaunchBodies(reference.InputOutcomeBodies(reference.HostFSBodies())),
+		"ops":  reference.LaunchBodies(reference.InputOutcomeBodies(reference.NonTmuxHostFSBodies())),
 	} {
 		t.Run(name, func(t *testing.T) {
 			state := t.TempDir()
@@ -367,6 +367,23 @@ func TestEveryRequirementIsGated(t *testing.T) {
 		{ReqObservationPeek, set("peek", `exit 2`), "carrier.ops declared but peek is not implemented"},
 		{ReqObservationClearScrollback, set("clear-scrollback", `exit 2`), "carrier.ops declared but clear-scrollback is not implemented"},
 	}
+	// launchMutants edit the launch golden over input outcomes, whose peek
+	// shows what was typed, the base of the provision group's proc.launch
+	// requirements.
+	l := reference.LaunchBodies(reference.InputOutcomeBodies(reference.Bodies()))
+	ledit := func(op, from, to string) map[string]string {
+		if !strings.Contains(l[op], from) {
+			t.Fatalf("mutant of %s: %q is not in the launch golden body", op, from)
+		}
+		return map[string]string{op: strings.Replace(l[op], from, to, 1)}
+	}
+	launchMutants := []mutant{
+		{ReqProvisionLaunchStartsAgent, set("launch", `cat >/dev/null`), "launch starts no agent"},
+		{ReqProvisionLaunchStartsAgent, ledit("launch", `mv "$box.tmp" "$box"`, `mv "$box.tmp" "$box"; printf %s "$cfg" | sed -n 's/.*"nudge":"\([^"]*\)".*/\1/p' >> "$box/typed"`), "launch types the config's nudge"},
+		{ReqProvisionLaunchStartsAgent, set("launch", `cat >/dev/null; exit 2`), "declared launch is not implemented"},
+		{ReqProvisionLaunchReplaces, ledit("launch", `reap "$box"; rm -rf "$box"; fi; `, `exit 0; fi; `), "launch keeps the old agent"},
+		{ReqProvisionLaunchFreshOnly, ledit("launch", `if [ -n "$fresh" ]; then exit 73; fi; reap`, `if [ -n "$fresh" ]; then exit 0; fi; reap`), "a fresh_only launch on a running agent exits 0"},
+	}
 	// atMostOnceMutants edit the at-most-once golden, whose written nudge
 	// answers delivered_unobserved and keeps no send record.
 	typedLine := `printf '%s\n' "$txt" >> "$box/typed"; `
@@ -403,6 +420,11 @@ func TestEveryRequirementIsGated(t *testing.T) {
 	}
 	for _, m := range opsObservationMutants {
 		all = append(all, gated{m, reference.NonTmuxBodies})
+	}
+	for _, m := range launchMutants {
+		all = append(all, gated{m, func() map[string]string {
+			return reference.LaunchBodies(reference.InputOutcomeBodies(reference.Bodies()))
+		}})
 	}
 	for _, m := range atMostOnceMutants {
 		all = append(all, gated{m, func() map[string]string {
@@ -850,15 +872,24 @@ func TestPortedGroupsGateOnWhatIsDeclared(t *testing.T) {
 
 // Kills a token group that runs for a script not declaring its token: the
 // golden answers every op the group sends, so only the gate can make the
-// group skip, and an undeclared pack is never sent the token's op.
+// group skip, and an undeclared pack is never sent the token's op. The
+// provision group's proc.launch requirements are gated on their own: the
+// provision op itself is optional, not a token.
 func TestEveryTokenGroupSkipsWhenUndeclared(t *testing.T) {
-	for group, token := range map[Group]string{
-		GroupServer: runtime.ProtocolCapabilityServerLifecycle,
-		GroupInput:  runtime.ProtocolCapabilityInputOutcome,
+	launchCodes := map[Code]bool{ReqProvisionLaunchStartsAgent: true, ReqProvisionLaunchReplaces: true, ReqProvisionLaunchFreshOnly: true}
+	for _, tc := range []struct {
+		group Group
+		token string
+		codes map[Code]bool // nil: the whole group
+	}{
+		{GroupServer, runtime.ProtocolCapabilityServerLifecycle, nil},
+		{GroupInput, runtime.ProtocolCapabilityInputOutcome, nil},
+		{GroupProvision, runtime.ProtocolCapabilityLaunch, launchCodes},
 	} {
-		bodies := reference.InputOutcomeBodies(reference.Bodies())
+		group, token := tc.group, tc.token
+		bodies := reference.LaunchBodies(reference.InputOutcomeBodies(reference.Bodies()))
 		var caps []string
-		for _, c := range []string{"observe.v1", "report-attachment", "report-activity", "conformance-faults", "city-scoped", runtime.ProtocolCapabilityServerLifecycle, runtime.ProtocolCapabilityInputOutcome} {
+		for _, c := range []string{"observe.v1", "report-attachment", "report-activity", "conformance-faults", "city-scoped", runtime.ProtocolCapabilityServerLifecycle, runtime.ProtocolCapabilityInputOutcome, runtime.ProtocolCapabilityProvision, runtime.ProtocolCapabilityLaunch} {
 			if c != token {
 				caps = append(caps, `"`+c+`"`)
 			}
@@ -870,7 +901,7 @@ func TestEveryTokenGroupSkipsWhenUndeclared(t *testing.T) {
 		}
 		seen := 0
 		for _, res := range report.Results {
-			if res.Group != group {
+			if res.Group != group || (tc.codes != nil && !tc.codes[res.Code]) {
 				continue
 			}
 			seen++
@@ -987,9 +1018,10 @@ func TestFSHostGroupSkipsWhenUndeclared(t *testing.T) {
 	}
 }
 
-// The base golden, which declares neither fs.host nor input-outcome, fails
-// nothing and skips exactly the fshost and input groups: each token adds a
-// promise, it changes no other. The same holds under either carrier.
+// The base golden, which declares neither fs.host, input-outcome nor
+// proc.launch, fails nothing and skips exactly the fshost and input groups
+// and the proc.launch requirements: each token adds a promise, it changes no
+// other. The same holds under either carrier.
 func TestBaseGoldenSkipsOnlyTheFSHostGroup(t *testing.T) {
 	for name, bodies := range map[string]map[string]string{"tmux": reference.Bodies(), "ops": reference.NonTmuxBodies()} {
 		t.Run(name, func(t *testing.T) {
@@ -999,8 +1031,8 @@ func TestBaseGoldenSkipsOnlyTheFSHostGroup(t *testing.T) {
 				switch {
 				case res.Status == StatusFail:
 					t.Errorf("base golden failed %s: %s", res.Code, res.Detail)
-				case (res.Status == StatusSkip) != (res.Group == GroupFSHost || res.Group == GroupInput):
-					t.Errorf("base golden: %s (%s) = %s, want skip only for the fshost and input groups", res.Code, res.Group, res.Status)
+				case (res.Status == StatusSkip) != (res.Group == GroupFSHost || res.Group == GroupInput || launchRequirement(res.Code)):
+					t.Errorf("base golden: %s (%s) = %s, want skip only for the fshost and input groups and proc.launch", res.Code, res.Group, res.Status)
 				}
 			}
 			if name == "ops" {
@@ -1276,5 +1308,39 @@ func TestFailedFinalServerStopIsAWarning(t *testing.T) {
 	}
 	if len(want) != 2 || len(report.Warnings) != 2 {
 		t.Errorf("cities %v, warnings %q: want 2 of each, the run's city and the probe's", want, report.Warnings)
+	}
+}
+
+// launchRequirement reports a provision-group requirement gated on
+// proc.launch.
+func launchRequirement(code Code) bool {
+	switch code {
+	case ReqProvisionLaunchStartsAgent, ReqProvisionLaunchReplaces, ReqProvisionLaunchFreshOnly:
+		return true
+	default:
+		return false
+	}
+}
+
+// Kills an RPP-PROVISION-001 that still requires an exec-able box from a
+// pack declaring proc.launch without proc.exec, which gc never launches over
+// exec, and one that waives the exec check for a pack declaring proc.exec as
+// well: the launch golden passes with its exec gone, and keeps the check
+// when it declares proc.exec.
+func TestProvisionExecCheckFollowsTheLaunchPath(t *testing.T) {
+	for _, tc := range []struct {
+		extraCap string
+		want     Status
+	}{{"", StatusPass}, {`,"proc.exec"`, StatusFail}} {
+		bodies := reference.LaunchBodies(reference.Bodies())
+		bodies["exec"] = `cat >/dev/null; exit 2`
+		bodies["protocol"] = `echo '{"version":0,"capabilities":["proc.provision","proc.launch"` + tc.extraCap + `]}'`
+		report, err := Run(context.Background(), writeScript(t, t.TempDir(), bodies), Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res := resultFor(t, report, ReqProvisionBoxWithoutAgent); res.Status != tc.want {
+			t.Errorf("proc.launch%s with no exec: %s = %s (%s), want %s", tc.extraCap, res.Code, res.Status, res.Detail, tc.want)
+		}
 	}
 }

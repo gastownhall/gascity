@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
@@ -41,6 +42,7 @@ func TestRPPHandleConformance(t *testing.T) {
 	reporter.Require(t, vanishedNudgeNotDeliveredResult(t))
 	reporter.Require(t, typedOutcomeReachesHandleResult(t))
 	reporter.Require(t, unobservedIsDeliveredResult(t))
+	reporter.Require(t, refusedFirstTurnQueuedResult(t))
 	reporter.Require(t, hostFSTranscriptTurnsResult(t))
 	t.Run(string(RequirementRPPHostFSLeftoverReaped), func(t *testing.T) {
 		requireHostFSLeftoverReaped(t, reporter, goruntime.GOOS)
@@ -84,7 +86,7 @@ func TestRPPHandleCatalogRegistersItsRequirements(t *testing.T) {
 	catalog := RPPHandleCatalog()
 	want := []RequirementCode{
 		RequirementRPPVanishedNudgeNotDelivered, RequirementRPPTypedOutcomeReachesHandle, RequirementRPPUnobservedIsDelivered,
-		RequirementRPPHostFSTranscriptTurns, RequirementRPPHostFSLeftoverReaped, RequirementRPPHeldNudgeTypedOnce,
+		RequirementRPPRefusedFirstTurnQueued, RequirementRPPHostFSTranscriptTurns, RequirementRPPHostFSLeftoverReaped, RequirementRPPHeldNudgeTypedOnce,
 	}
 	if len(catalog) != len(want) {
 		t.Fatalf("RPPHandleCatalog() = %+v, want %v", catalog, want)
@@ -439,4 +441,79 @@ func heldNudgeTypedOnceResult(t *testing.T) Result {
 	}
 	return Pass(rppHandleProfile, RequirementRPPHeldNudgeTypedOnce,
 		"a nudge redelivered while the pack holds the first is unconfirmed both times and typed once")
+}
+
+// rppFirstTurn is the first turn WC-RPP-004 starts its session with.
+const rppFirstTurn = "start on the release checklist"
+
+// refusedFirstTurnQueuedResult evaluates WC-RPP-004 (its refusal half): a
+// session started through a SessionHandle on the golden reference in launch
+// mode (proc.provision with proc.launch, no exec), whose pack refuses the
+// first turn with each refusal word, starts; the turn is not typed, and
+// waits in the session's queue once as the user's submit.
+func refusedFirstTurnQueuedResult(t *testing.T) Result {
+	t.Helper()
+	for _, word := range []runtime.InputOutcome{
+		runtime.InputOutcomeBusy, runtime.InputOutcomePendingInteraction,
+		runtime.InputOutcomeRejected, runtime.InputOutcomeNotSent,
+	} {
+		dir := t.TempDir()
+		stateDir := filepath.Join(dir, "state")
+		if err := os.Mkdir(stateDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		bodies := reference.LaunchBodies(reference.InputOutcomeBodies(reference.Bodies()))
+		bodies["exec"] = `cat >/dev/null; exit 2`
+		script := filepath.Join(dir, "golden")
+		if err := os.WriteFile(script, []byte(reference.Script(stateDir, bodies)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GC_RPP_FAULT", "refuse_"+string(word))
+		cityPath := t.TempDir()
+		sp := sessionexec.NewSeamBackedForCity(script, "rpp-conformance", cityPath)
+		manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(beads.NewMemStore()), sp, sessionpkg.WithCityPath(cityPath),
+			sessionpkg.WithStaleKeyDetectionWaiter(func(context.Context, string) error { return nil }))
+		handle, err := worker.NewSessionHandle(worker.SessionHandleConfig{
+			Manager: manager,
+			Session: worker.SessionSpec{
+				Template: "probe",
+				Title:    "Probe",
+				Command:  "sleep 300",
+				WorkDir:  t.TempDir(),
+				Provider: "generic",
+				Hints:    runtime.Config{Nudge: rppFirstTurn, ReadyDelayMs: 10},
+			},
+		})
+		if err != nil {
+			t.Fatalf("NewSessionHandle: %v", err)
+		}
+		if err := handle.Start(context.Background(), managerActor(t, manager, sessionpkg.ActorOperator)); err != nil {
+			return Fail(rppHandleProfile, RequirementRPPRefusedFirstTurnQueued,
+				fmt.Sprintf("%s: Start = %v, want nil: a refused first turn never fails a start", word, err))
+		}
+		t.Cleanup(func() { _ = handle.StopForShutdown(context.Background()) })
+		typed, _ := filepath.Glob(filepath.Join(stateDir, "city*", "*", "typed"))
+		for _, path := range typed {
+			if data, err := os.ReadFile(path); err == nil && strings.Contains(string(data), rppFirstTurn) {
+				return Fail(rppHandleProfile, RequirementRPPRefusedFirstTurnQueued,
+					fmt.Sprintf("%s: the pack typed the first turn it refused", word))
+			}
+		}
+		state, err := nudgequeue.LoadState(cityPath)
+		if err != nil {
+			t.Fatalf("LoadState: %v", err)
+		}
+		queued := 0
+		for _, item := range state.Pending {
+			if item.Message == rppFirstTurn && item.Source == nudgequeue.SourceSubmit {
+				queued++
+			}
+		}
+		if queued != 1 {
+			return Fail(rppHandleProfile, RequirementRPPRefusedFirstTurnQueued,
+				fmt.Sprintf("%s: the session's queue holds %d copies of the refused first turn as the user's submit (pending %+v), want 1: the turn was dropped", word, queued, state.Pending))
+		}
+	}
+	return Pass(rppHandleProfile, RequirementRPPRefusedFirstTurnQueued,
+		"a first turn the pack refuses busy, pending_interaction, rejected or not_sent is not typed, and is queued once as the user's submit")
 }

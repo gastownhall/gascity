@@ -139,10 +139,21 @@ const (
 	// the controller can launch — and later relaunch — the agent in a warm box
 	// over exec instead of paying a full re-provision on every config change. The
 	// defining behavior: after `provision`, is-running reports false (no agent),
-	// yet the box is exec-able (the controller's launch transport). Optional
-	// (absent = SKIP): a welded `start` pack that launches the agent in one shot
-	// need not implement it. See REQUIREMENTS.md (RUNTIME-RPP-014).
+	// yet the box is exec-able (the controller's launch transport) — under
+	// proc.exec; a pack declaring proc.launch without it is launch-able instead
+	// (RPP-PROVISION-002). Optional (absent = SKIP): a welded `start` pack that
+	// launches the agent in one shot need not implement it. See REQUIREMENTS.md
+	// (RUNTIME-RPP-014).
 	ReqProvisionBoxWithoutAgent Code = "RPP-PROVISION-001"
+
+	// The proc.launch half of the provision group (RUNTIME-RPP-029): the
+	// `launch` op starts the agent in the box provision prepared, replacing a
+	// running one unless fresh_only, and types nothing. Optional: SKIP unless
+	// proc.launch is declared; RPP-PROVISION-003 also SKIPs without
+	// observe.v1, whose identity shows the replacement.
+	ReqProvisionLaunchStartsAgent Code = "RPP-PROVISION-002"
+	ReqProvisionLaunchReplaces    Code = "RPP-PROVISION-003"
+	ReqProvisionLaunchFreshOnly   Code = "RPP-PROVISION-004"
 
 	// The observe group is the observe.v1 profile (PAR-EXEC): what a script
 	// declaring the observe.v1 capability promises reconciler v2. Every
@@ -285,7 +296,10 @@ var catalog = []Requirement{
 	{ReqConnectionExec, GroupConnection, "exec runs a command in the box: command on stdin, combined output on stdout, op exit == command exit (generic exec is optional: absent = SKIP; output and command exit code are checked when present)", true},
 	{ReqConnectionIdleBoundary, GroupConnection, "with idle-boundary declared, the selected carrier reads a started box: tmux main answers has-session and capture over exec; carrier.ops answers is-running true, peek 120 shows the started agent's command line or output, and get-meta answers a non-default ready prompt set-meta stored, byte for byte (undeclared = SKIP)", true},
 
-	{ReqProvisionBoxWithoutAgent, GroupProvision, "provision creates a reachable box WITHOUT launching the agent: after provision, is-running reports false yet the box is exec-able, so the controller launches the agent over exec (absent = SKIP; a welded start pack launches in one shot)", true},
+	{ReqProvisionBoxWithoutAgent, GroupProvision, "provision creates a reachable box WITHOUT launching the agent: after provision, is-running reports false yet the box is exec-able, so the controller launches the agent over exec; a pack declaring proc.launch without proc.exec is launch-able instead (RPP-PROVISION-002) (absent = SKIP; a welded start pack launches in one shot)", true},
+	{ReqProvisionLaunchStartsAgent, GroupProvision, "after provision, launch starts the agent (is-running true) and types nothing, not even the nudge its config carries (declared proc.launch only)", true},
+	{ReqProvisionLaunchReplaces, GroupProvision, "launch without fresh_only on a running agent replaces it: observe shows the new launch's identity (declared proc.launch with observe.v1 only)", true},
+	{ReqProvisionLaunchFreshOnly, GroupProvision, "launch with fresh_only on a running agent exits 73 (declared proc.launch only)", true},
 
 	{ReqObserveDeclaredOpsRespond, GroupObserve, "observe, inventory and kill-object answer (never exit 2) when observe.v1 is declared", true},
 	{ReqObserveAbsentNeverStarted, GroupObserve, "observe on a never-started name answers absent", true},
