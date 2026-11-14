@@ -9,8 +9,23 @@ import "github.com/gastownhall/gascity/internal/beads"
 // so a transient lookup failure can never block or misreport the wake path.
 type noteAuthorLookup func(beadID string) (actor string, err error)
 
-// logDeclinedBeadRewakeIfDetected is a stub for GREEN (ga-jzb1as). It
-// intentionally never logs yet, so TestLogDeclinedBeadRewakeIfDetected's
-// positive-match case stays RED until the real detection lands.
-func logDeclinedBeadRewakeIfDetected(_ beads.Bead, _ noteAuthorLookup, _ func(format string, args ...any)) {
+// logDeclinedBeadRewakeIfDetected logs when a bead's gc.routed_to matches the
+// actor who authored its newest note -- the signature of the declined-bead
+// re-wake loop (gm-6a5dt): a role declines a bead in its own note, but the
+// wake path only reads gc.routed_to and re-wakes the same role anyway. It is
+// a diagnostic side channel only: it never mutates or reroutes the bead, and
+// a lookup failure degrades to a silent skip rather than blocking the wake
+// path that calls it.
+func logDeclinedBeadRewakeIfDetected(b beads.Bead, lookup noteAuthorLookup, logf func(format string, args ...any)) {
+	routedTo := routedToOrLegacyWorkflowTarget(b)
+	if routedTo == "" {
+		return
+	}
+	actor, err := lookup(b.ID)
+	if err != nil || actor == "" {
+		return
+	}
+	if actor == routedTo {
+		logf("declined-bead re-wake loop detected: bead %s is routed_to=%q but its newest note was authored by the same actor %q -- the wake path may be re-waking a role that already declined this bead (gm-6a5dt)", b.ID, routedTo, actor)
+	}
 }
