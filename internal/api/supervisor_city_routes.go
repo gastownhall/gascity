@@ -577,7 +577,7 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	}, (*Server).humaHandleExtMsgGroupEnsure)
 	cityPost(sm, "/extmsg/participants", (*Server).humaHandleExtMsgParticipantUpsert, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable))
 	cityDelete(sm, "/extmsg/participants", (*Server).humaHandleExtMsgParticipantRemove, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable))
-	cityGet(sm, "/extmsg/transcript", (*Server).humaHandleExtMsgTranscriptList, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	cityGet(sm, "/extmsg/transcript", (*Server).humaHandleExtMsgTranscriptList, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable))
 	cityPost(sm, "/extmsg/transcript/ack", (*Server).humaHandleExtMsgTranscriptAck, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable))
 	cityGet(sm, "/extmsg/adapters", (*Server).humaHandleExtMsgAdapterList, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityRegister(sm, huma.Operation{
