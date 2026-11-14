@@ -21,6 +21,7 @@ package main
 
 import (
 	"context"
+	"debug/buildinfo"
 	"errors"
 	"fmt"
 	"os"
@@ -39,6 +40,11 @@ import (
 
 // minGCVersionFileName is the floor's file under the city's .gc.
 const minGCVersionFileName = "min-gc-version"
+
+// splitMinGCVersion is the floor the guided split writes (owner decision Q1,
+// 2026-11-12): the first release that carries this file's reader and the
+// split's relic legs. A floor the file already holds that is higher stays.
+const splitMinGCVersion = "1.6.0"
 
 // minGCVersionPattern is the floor's one accepted shape.
 var minGCVersionPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
@@ -82,9 +88,16 @@ func writeMinGCVersion(cityPath, floor string) error {
 }
 
 // gcVersionCore is the MAJOR.MINOR.PATCH of a gc version string, or false
-// when it has none (a "dev" build).
+// when it has none: a "dev" build, or a Go pseudo-version (owner decision,
+// 2026-11-13: `go install …@<ref>` builds a commit, not the release its
+// prefix names, so it is no more comparable than dev). Releases and release
+// candidates are compared.
 func gcVersionCore(v string) (string, bool) {
-	m := gcVersionCorePattern.FindStringSubmatch(strings.TrimSpace(v))
+	v = strings.TrimSpace(v)
+	if _, pseudo := goPseudoVersionBase(v); pseudo {
+		return "", false
+	}
+	m := gcVersionCorePattern.FindStringSubmatch(v)
 	if m == nil {
 		return "", false
 	}
@@ -97,6 +110,17 @@ func gcVersionCore(v string) (string, bool) {
 func gcVersionBelowFloor(running, floor string) bool {
 	core, ok := gcVersionCore(running)
 	return ok && deps.CompareVersions(core, floor) < 0
+}
+
+// gcVersionForFloor is this gc's version as the floor compares it: the
+// version it was built as when that is a Go pseudo-version, which
+// normalizeVersion strips to the release it is not, and its version
+// otherwise. Boot, doctor and the split all compare through it.
+func gcVersionForFloor() string {
+	if _, pseudo := goPseudoVersionBase(versionBuilt); pseudo {
+		return versionBuilt
+	}
+	return version
 }
 
 // minGCVersionRefusal refuses a gc of version running on a city whose floor
@@ -153,5 +177,20 @@ func probeSessionPathGCVersion(cfg *config.City) (path, version string, err erro
 		return path, "", fmt.Errorf("running %s version: %w", path, err)
 	}
 	version, _, _ = strings.Cut(strings.TrimSpace(string(out)), "\n")
-	return path, strings.TrimSpace(version), nil
+	version = strings.TrimSpace(version)
+	// `gc version` prints the normalized version, which strips a Go
+	// pseudo-version to a release the binary is not (normalizeVersion). The
+	// module version the binary records says which it is: a pseudo-version
+	// that normalizes to the printed line is that build, and the floor
+	// does not compare it (gcVersionCore), as for this gc (gcVersionForFloor).
+	if info, err := sessionPathGCBuildInfo(path); err == nil && info != nil {
+		if _, pseudo := goPseudoVersionBase(info.Main.Version); pseudo && normalizeVersion(info.Main.Version) == normalizeVersion(version) {
+			version = info.Main.Version
+		}
+	}
+	return path, version, nil
 }
+
+// sessionPathGCBuildInfo reads the build information a gc binary records; a
+// test seam.
+var sessionPathGCBuildInfo = buildinfo.ReadFile

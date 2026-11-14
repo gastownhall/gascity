@@ -312,7 +312,7 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 	// A gc older than the split's recorded floor reads none of it, whatever
 	// the config says (storage_min_gc_version.go). One failed stat on a city
 	// that has none.
-	if err := minGCVersionRefusal(cityPath, version); err != nil {
+	if err := minGCVersionRefusal(cityPath, gcVersionForFloor()); err != nil {
 		return nil, fmt.Errorf("%s: %w", logPrefix, err)
 	}
 

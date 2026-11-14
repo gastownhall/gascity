@@ -74,7 +74,11 @@ type rigCensusRow struct {
 	// census: what `gc storage snapshot --rigs` exports for the rig, which
 	// `gc storage preflight --split` sizes.
 	Rows []beads.Bead
-	Err  error
+	// LiveCoTenants names, on a full census under an attestation that lifts
+	// the rig's shared-store refusal, each co-tenant city that is live now
+	// (coTenantLiveness): the import refuses at this rig until it is stopped.
+	LiveCoTenants []string
+	Err           error
 }
 
 // blocking reports whether the row holds the deploy gate (`gc storage
@@ -88,22 +92,29 @@ func (r rigCensusRow) blocking() bool {
 	}
 }
 
-// censusRigs censuses every rig of a split city. full adds the import plan
-// (edges and binding lookups, read-only), which preflight reports.
-func censusRigs(cityPath string, cfg *config.City, target infraBindingTarget, full bool) []rigCensusRow {
+// censusRigs censuses every rig of a split city.
+func censusRigs(cityPath string, cfg *config.City, target infraBindingTarget) []rigCensusRow {
+	return censusRigsAttested(cityPath, cfg, target, false, storageForce{})
+}
+
+// censusRigsAttested is censusRigs, and with full the import plan (edges and
+// binding lookups, read-only) that preflight reports, under the --force
+// attestations of the run it rehearses: a full census judges each rig's
+// shared store as the import will, an attested one lifted.
+func censusRigsAttested(cityPath string, cfg *config.City, target infraBindingTarget, full bool, force storageForce) []rigCensusRow {
 	if cfg == nil {
 		return nil
 	}
 	cityName := loadedCityName(cfg, cityPath)
 	rows := make([]rigCensusRow, 0, len(cfg.Rigs))
 	for _, rig := range cfg.Rigs {
-		rows = append(rows, censusRig(cityPath, cityName, cfg, target, rig, full))
+		rows = append(rows, censusRig(cityPath, cityName, cfg, target, rig, full, force))
 	}
 	return rows
 }
 
-// censusRig censuses one rig. It writes nothing anywhere.
-func censusRig(cityPath, cityName string, cfg *config.City, target infraBindingTarget, rig config.Rig, full bool) rigCensusRow {
+// censusRig censuses one rig. It writes nothing anywhere, and takes no lock.
+func censusRig(cityPath, cityName string, cfg *config.City, target infraBindingTarget, rig config.Rig, full bool, force storageForce) rigCensusRow {
 	row := rigCensusRow{Rig: rig.Name}
 	if strings.TrimSpace(rig.Path) == "" {
 		row.State, row.Why = rigCensusSkipped, "unbound"
@@ -193,10 +204,17 @@ func censusRig(cityPath, cityName string, cfg *config.City, target infraBindingT
 			return row
 		}
 		plan := planRigImportReadingPayloads(ctx, store)
-		if shared, err := rigImportSharedStoreRefusal(env, rig); err != nil {
+		// The import's shared-store check up to its co-tenant locks: the
+		// census writes nothing, so it keeps no co-tenant stopped, and a
+		// rehearsal takes no other city's lock.
+		if finding, err := findSharedStore(cityPath, "rig "+rig.Name, rigStoreRoot(cityPath, rig), force); err != nil {
 			plan.Refusals = append(plan.Refusals, rigImportRefusal{IDs: []string{rig.Name}, Reason: err.Error(), Remedy: "give the rig a store of its own"})
 		} else {
-			shared.Release() // the census writes nothing, so it keeps no co-tenant stopped
+			for _, other := range finding.coTenants() {
+				if why := coTenantLiveness(other); why != "" {
+					row.LiveCoTenants = append(row.LiveCoTenants, other+" ("+why+")")
+				}
+			}
 		}
 		if _, err := rigImportHashConfigOpener(cityPath, cfg, rig); err != nil {
 			plan.Refusals = append(plan.Refusals, rigImportRefusal{IDs: []string{rig.Name}, Reason: err.Error(), Remedy: "serve the rig from a bd or file provider"})
@@ -414,7 +432,7 @@ func (cr *CityRuntime) runRigCensus(ctx context.Context, cfg *config.City, targe
 		if ctx.Err() != nil {
 			return
 		}
-		rows := censusRigs(cityPath, &census, target, false)
+		rows := censusRigs(cityPath, &census, target)
 		recordCensusCleanRows(cityPath, target, census.Rigs, rows, by, stderr, logPrefix)
 		emitRigResidue(rec, stderr, logPrefix, target, rows, unchecked)
 	}()

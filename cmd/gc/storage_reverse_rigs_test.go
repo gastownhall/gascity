@@ -153,7 +153,7 @@ func TestReverseToRigsRoundTripsARigImport(t *testing.T) {
 			t.Fatalf("%s was not retired", path)
 		}
 	}
-	rows := censusRigs(r.request.CityPath, r.cfg, r.target, false)
+	rows := censusRigs(r.request.CityPath, r.cfg, r.target)
 	if rows[0].Rig != "packs" || rows[0].State != rigCensusAwaiting {
 		t.Fatalf("the rig's census after the reverse = %+v, want awaiting import", rows[0])
 	}
@@ -712,7 +712,7 @@ func TestReverseRefusesTheStrandedRowsItWouldReviveInARig(t *testing.T) {
 			work := mustCreateInfraBead(t, rig, beads.Bead{Title: "patrol finding", Type: "task", Metadata: beads.StringMap{beadmeta.RootBeadIDMetadataKey: "gp-root1"}})
 			awaiting := mustCreateInfraBead(t, r.rig("other"), beads.Bead{Title: "mail its relic legs serve", Type: "message", Assignee: "worker"})
 			census := map[string]rigCensusRow{}
-			for _, row := range censusRigs(r.request.CityPath, r.cfg, r.target, false) {
+			for _, row := range censusRigs(r.request.CityPath, r.cfg, r.target) {
 				census[row.Rig] = row
 			}
 			stranded := []string{mail.ID, session.ID, read.ID, work.ID}
@@ -798,7 +798,7 @@ func TestReverseRefusesARigRowUnderAnIDItsImportMoved(t *testing.T) {
 					t.Fatal(err)
 				}
 				stranded := map[string]string{"message": "gp-step1", "task": ""}[again.Type]
-				for _, row := range censusRigs(r.request.CityPath, r.cfg, r.target, false) {
+				for _, row := range censusRigs(r.request.CityPath, r.cfg, r.target) {
 					if row.Rig == "packs" && (strings.Join(row.Reused, ",") != "gp-step1" || strings.Join(row.Stranded, ",") != stranded) {
 						t.Fatalf("the census of rig packs: %s (%v), reused %v, stranded %v, want gp-step1 reused and %q stranded", row.State, row.Err, row.Reused, row.Stranded, stranded)
 					}

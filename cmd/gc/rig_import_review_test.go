@@ -710,7 +710,7 @@ func TestReviewMarkerWithCarriedRowsLeftIsRetained(t *testing.T) {
 	if err := writeInfraClearedNoteAt(loc.NotePath(), infraClearedNote{Complete: true}); err != nil {
 		t.Fatal(err)
 	}
-	rows := censusRigs(f.request.CityPath, f.cfg, f.target, false)
+	rows := censusRigs(f.request.CityPath, f.cfg, f.target)
 	if len(rows) != 1 || rows[0].State != rigCensusRetained || f.relicFree("packs") && rows[0].State == rigCensusImported {
 		t.Fatalf("census = %+v, want retained", rows)
 	}
