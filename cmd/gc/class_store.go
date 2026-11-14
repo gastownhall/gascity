@@ -463,16 +463,18 @@ func refusedExtMsgServices(cause error) *extmsg.Services {
 }
 
 // warnFederationBlindOverrides tells an operator that this agent's own
-// work_query or scale_check will not see the city's relocated coordination
+// work_query or scale_check may not see the city's relocated coordination
 // class.
 //
 // A custom query is returned verbatim, which is the contract and is not being
-// changed here. What is being changed is the SILENCE around it: on a split city
-// the generated query reads every store and the operator's does not, so the two
-// disagree about what is claimable and the override's answer is a short array
-// with nothing to distinguish it from an empty queue. That is the precise
-// failure the federated reader exits non-zero to close, and an override walks
-// straight back into it.
+// changed here, and its shell is never inspected: whether it reads one store or
+// every store is unknowable from here (`gc ready` may be direct, wrapped or
+// piped). So the advisory is conditional. On a split city a custom query that
+// reads one store disagrees with the generated one about what is claimable and
+// returns a short array that cannot be told apart from an empty queue, which is
+// the failure the federated reader exits non-zero to close; one that reads
+// through `gc ready` is unaffected, and the text says so, because an operator
+// who read an unconditional warning as a refusal escalated a healthy queue.
 //
 // Nothing is printed on a city that relocates nothing, which is every city with
 // no [storage] section: FederationBlindOverrides returns nil there, so the
@@ -482,7 +484,7 @@ func warnFederationBlindOverrides(stderr io.Writer, a *config.Agent, topo config
 		return
 	}
 	for _, key := range a.FederationBlindOverrides(topo) {
-		fmt.Fprintf(stderr, "gc hook: agent %q sets a custom %s, which reads one store; this city serves a coordination class from a relocated binding, so that command cannot see graph-class work (the generated query uses %q)\n", //nolint:errcheck // best-effort stderr
-			a.QualifiedName(), key, "gc ready")
+		fmt.Fprintf(stderr, "gc hook: note: agent %q sets a custom %s. If it reads one store rather than through %q, it cannot see graph-class work, because this city serves a coordination class from a relocated binding; a query that reads through %q is unaffected and this note is not an error\n", //nolint:errcheck // best-effort stderr
+			a.QualifiedName(), key, "gc ready", "gc ready")
 	}
 }

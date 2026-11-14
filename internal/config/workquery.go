@@ -1478,16 +1478,18 @@ const (
 	scaleCheckOverrideKey = "scale_check"
 )
 
-// FederationBlindOverrides names the user-supplied query overrides that will not
+// FederationBlindOverrides names the user-supplied query overrides that may not
 // see a relocated coordination class on this topology.
 //
 // A custom work_query or scale_check is returned VERBATIM — that is the
-// contract, and rewriting an operator's shell would be substring surgery on a
-// script this package did not write. But on a split city a verbatim `bd ready`
-// reads one store, so the operator's own command is silently blind to the graph
-// class while the generated one is not. Silence is the defect: the whole point
-// of the federated reader is that a short array cannot be told apart from "no
-// work", and an override reintroduces exactly that, invisibly.
+// contract, and rewriting or parsing an operator's shell would be substring
+// surgery on a script this package did not write. On a split city a verbatim
+// `bd ready` reads one store, so such a command is silently blind to the graph
+// class while the generated one is not; one that reads through `gc ready` is
+// not. Which it is cannot be known here, so every override is named and the
+// caller's advisory must stay conditional. The point of the federated reader is
+// that a short array cannot be told apart from "no work", and a single-store
+// override reintroduces exactly that, invisibly.
 //
 // So the fact is returned instead of guessed at. Callers that hold a real city
 // print it; a single-store city returns nil and nothing is printed anywhere.
