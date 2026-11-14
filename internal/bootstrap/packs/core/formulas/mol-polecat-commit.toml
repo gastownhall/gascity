@@ -1,9 +1,9 @@
 description = """
 Polecat direct-commit variant — commits directly to base_branch.
 
-Extends mol-polecat-base with a simplified workspace setup (worktree on
-base_branch, no feature branch) and direct commit+push instead of refinery
-submission. Designed for small installations where merge review is
+Extends mol-polecat-base with a simplified workspace setup (a worktree
+provisioned by `gc worktree ensure` at base_branch HEAD, no pushed feature
+branch) and direct commit+push instead of refinery submission. Designed for small installations where merge review is
 unnecessary.
 
 ## Polecat Contract (Direct-Commit Model)
@@ -13,7 +13,9 @@ unnecessary.
 3. Commit to base_branch, push, close bead, exit
 4. You are GONE — no refinery step needed
 
-**No feature branch.** Work is committed directly to base_branch.
+**No pushed feature branch.** Work is committed directly to base_branch. The
+worktree sits on a local `gc-work/<bead>` branch that exists only so
+`gc worktree` can own the workspace; it is never pushed.
 Push conflicts are handled by fetch + rebase + retry (up to 3 times).
 
 ## Failure Modes
@@ -55,9 +57,11 @@ fi
 
 **2. Ensure worktree exists.**
 
-Check if `metadata.work_dir` already records your worktree path:
+Check if the bead already records your worktree path (`gc.work_dir`; a run
+started before the managed key existed still records `work_dir`):
 ```bash
-WORKTREE=$(gc bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata.work_dir // empty')
+WORK_BEAD=$(gc bd show "$WORK_BEAD_ID" --json)
+WORKTREE=$(printf '%s' "$WORK_BEAD" | jq -r '.[0].metadata["gc.work_dir"] // .[0].metadata.work_dir // empty')
 ```
 
 **If worktree path exists in metadata** — reuse it:
@@ -65,17 +69,34 @@ WORKTREE=$(gc bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata.work_dir // 
 cd "$WORKTREE"              # Enter existing worktree
 git pull --rebase origin {{base_branch}}  # Catch up to latest
 ```
-If the directory is missing, fall through to create a new one.
 
-**If no worktree** — create one:
+**If no worktree** — `gc worktree ensure` creates it on an attached
+`gc-work/<bead>` branch and records durable ownership provenance. It publishes
+nothing on the bead, so publish the evidence in ONE update: the controller
+refuses a work dir whose evidence is partial, and restarts and work-health
+recovery find the worktree through it.
 ```bash
-WORKTREE_PATH=$(pwd)/worktrees/"$WORK_BEAD_ID"
-git worktree add "$WORKTREE_PATH" --detach origin/{{base_branch}}
-cd "$WORKTREE_PATH"
-```
-Record immediately so restarts and work-health recovery can find it:
-```bash
-gc bd update "$WORK_BEAD_ID" --set-metadata work_dir="$WORKTREE_PATH"
+REPO=$(pwd)
+WORK_ROOT="$REPO/worktrees"
+WORK_BRANCH="gc-work/$WORK_BEAD_ID"
+STORE_REF=$(printf '%s' "$WORK_BEAD" | jq -r '.[0].metadata["gc.root_store_ref"] // "city"')
+ENSURE=$(gc worktree ensure --json --repo "$REPO" --root "$WORK_ROOT" \\
+  --path "$WORK_ROOT/$WORK_BEAD_ID" --branch "$WORK_BRANCH" --base origin/{{base_branch}} \\
+  --bead "$WORK_BEAD_ID" --store-ref "$STORE_REF" --creator mol-polecat-commit \\
+  --owner "${GC_AGENT:-mol-polecat-commit}" --generation 1) || exit 1
+WORKTREE=$(printf '%s' "$ENSURE" | jq -r '.path')
+gc bd update "$WORK_BEAD_ID" \\
+  --set-metadata gc.work_dir="$WORKTREE" \\
+  --set-metadata gc.work_branch="$WORK_BRANCH" \\
+  --set-metadata gc.worktree_repo="$REPO" \\
+  --set-metadata gc.worktree_root="$WORK_ROOT" \\
+  --set-metadata gc.worktree_base_ref="$(printf '%s' "$ENSURE" | jq -r '.provenance.base_ref')" \\
+  --set-metadata gc.worktree_base_sha="$(printf '%s' "$ENSURE" | jq -r '.provenance.base_sha')" \\
+  --set-metadata gc.worktree_creator="$(printf '%s' "$ENSURE" | jq -r '.provenance.creator')" \\
+  --set-metadata gc.worktree_owner="$(printf '%s' "$ENSURE" | jq -r '.provenance.owner')" \\
+  --set-metadata gc.worktree_generation="$(printf '%s' "$ENSURE" | jq -r '.provenance.generation')" \\
+  --set-metadata gc.worktree_lifecycle="$(printf '%s' "$ENSURE" | jq -r '.provenance.lifecycle')" || exit 1
+cd "$WORKTREE"
 ```
 
 **3. Ensure clean working state:**
@@ -90,7 +111,8 @@ git status                  # Should be clean
 Empty setup_command → skip.
 
 **Exit criteria:** In your worktree, at base_branch HEAD, deps installed,
-worktree recorded on the bead."""
+worktree evidence recorded on the bead."""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "setup", "gc.on_fail" = "abort_scope" }
 
 [[steps]]
 id = "commit-and-push"
@@ -130,7 +152,7 @@ for attempt in 1 2 3; do
         echo "Push failed after 3 attempts"
         gc mail send {{escalation_target}} -s "HELP: Push conflict after 3 retries" \
           -m "Issue: $WORK_BEAD_ID. Cannot push to {{base_branch}}."
-        gc bd update "$WORK_BEAD_ID" --append-notes "Push to {{base_branch}} failed after 3 attempts; the unpushed commits remain in $(pwd) (metadata.work_dir)."
+        gc bd update "$WORK_BEAD_ID" --append-notes "Push to {{base_branch}} failed after 3 attempts; the unpushed commits remain in $(pwd) (metadata gc.work_dir)."
         STEP_BEAD_ID=$(gc hook current --id-only) || exit 1
         STEP_BEAD=$(gc bd show "$STEP_BEAD_ID" --json) || exit 1
         printf '%s' "$STEP_BEAD" | jq -e '(if type == "array" then .[0] else . end) | .status == "in_progress" and ((.metadata["gc.step_ref"] // "") | endswith(".commit-and-push"))' >/dev/null || { echo "commit-and-push: current claim $STEP_BEAD_ID is not this in-progress step; not acknowledging drain" >&2; exit 1; }
@@ -145,36 +167,13 @@ for attempt in 1 2 3; do
 done
 ```
 
-**3. Clean up worktree:**
-```bash
-WORKTREE_PATH=$(pwd)
-# --git-common-dir, not --show-toplevel: inside a linked worktree the latter
-# returns the worktree itself, which stops existing halfway through cleanup
-# and is useless for the prune fallback.
-REPO=$(git rev-parse --path-format=absolute --git-common-dir)
-cd ..
-if [ -z "$REPO" ]; then
-    echo "cleanup: could not resolve the owning repo; leaving $WORKTREE_PATH in place" >&2
-elif ! git -C "$REPO" worktree remove --force "$WORKTREE_PATH"; then
-    # A linked worktree's .git is a file; a main checkout's is a directory.
-    # Without this check, a failed remove on a main checkout rm -rf's the repo.
-    if [ -f "$WORKTREE_PATH/.git" ]; then
-        rm -rf "$WORKTREE_PATH"
-        git -C "$REPO" worktree prune
-    else
-        echo "cleanup: refusing to rm -rf $WORKTREE_PATH: not a linked worktree" >&2
-    fi
-fi
-gc bd update "$WORK_BEAD_ID" --unset-metadata work_dir
-```
-
-**4. Close the bead:**
+**3. Close the bead:**
 ```bash
 gc bd update "$WORK_BEAD_ID" --append-notes "Committed directly to {{base_branch}}: <brief summary>"
 gc bd close "$WORK_BEAD_ID" --reason "Committed directly to {{base_branch}}: <brief summary>"
 ```
 
-**5. Close this step, signal reconciler, and exit.**
+**4. Close this step, signal reconciler, and exit.**
 
 `gc runtime drain-ack` gives back every claim this session still holds, so
 close this step first: acking with it still open hands it back to the pool
@@ -193,5 +192,99 @@ exit
 reconciler only restarts you if the pool check command finds more work.
 You are GONE. Done means gone. There is no idle state.
 
-**Exit criteria:** Changes pushed to {{base_branch}}, worktree cleaned up,
-bead closed, this step closed, session exited."""
+The worktree is removed by the `cleanup-worktree` teardown step, which runs
+whether this step passed or failed. Do not remove it here.
+
+**Exit criteria:** Changes pushed to {{base_branch}}, bead closed, this step
+closed, session exited."""
+metadata = { "gc.scope_ref" = "body", "gc.scope_role" = "member", "gc.on_fail" = "abort_scope" }
+
+[[steps]]
+id = "body"
+title = "Worktree body scope"
+needs = ["workspace-setup", "commit-and-push"]
+description = """
+Terminal latch for the worktree body. Paired `scope-check` control beads
+handle fail-fast skipping, close this bead with `gc.outcome=fail|pass`, and
+allow teardown to proceed."""
+metadata = { "gc.kind" = "scope", "gc.scope_name" = "worktree", "gc.scope_role" = "body" }
+
+[[steps]]
+id = "cleanup-worktree"
+title = "Clean up the worktree"
+needs = ["body"]
+description = """
+Remove the worktree after the body reaches terminal state, whether the push
+passed or failed. A dirty worktree, or one holding commits not merged into the
+base (an unpushed failure), is refused by `gc worktree cleanup`, kept with its
+evidence, and left to the reaper.
+
+```bash
+CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
+WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
+if [ -z "$WORK_BEAD_ID" ]; then
+  echo "mol-polecat-commit requires an input convoy with exactly one tracked member" >&2
+  exit 1
+fi
+WORK_BEAD=$(gc bd show "$WORK_BEAD_ID" --json)
+meta() { printf '%s' "$WORK_BEAD" | jq -r --arg k "$1" '.[0].metadata[$k] // empty'; }
+WORKTREE=$(meta gc.work_dir)
+if [ -n "$WORKTREE" ]; then
+  STORE_REF=$(meta gc.root_store_ref)
+  WT_ARGS=(--json --repo "$(meta gc.worktree_repo)" --root "$(meta gc.worktree_root)" \\
+    --path "$WORKTREE" --branch "$(meta gc.work_branch)" --base "$(meta gc.worktree_base_ref)" \\
+    --bead "$WORK_BEAD_ID" --store-ref "${STORE_REF:-city}" --creator "$(meta gc.worktree_creator)" \\
+    --owner "$(meta gc.worktree_owner)" --generation "$(meta gc.worktree_generation)" \\
+    --lifecycle "$(meta gc.worktree_lifecycle)")
+  # gc worktree cleanup is the only remover: no force mode, no recursive-delete fallback.
+  # It is bound to the attempt that created the worktree, so read that id from
+  # the durable provenance.
+  ATTEMPT_ID=$(gc worktree verify "${WT_ARGS[@]}" | jq -r '.provenance.attempt_id // empty')
+  if [ -z "$ATTEMPT_ID" ]; then
+    gc bd update "$WORK_BEAD_ID" --append-notes "cleanup_pending: no provisioning attempt id for $WORKTREE (worktree missing or evidence incomplete); evidence left in place"
+  else
+    CLEANUP=$(gc worktree cleanup "${WT_ARGS[@]}" --attempt-id "$ATTEMPT_ID") || true
+    if [ "$(printf '%s' "$CLEANUP" | jq -r '.removed or .already_absent')" = "true" ]; then
+      gc bd update "$WORK_BEAD_ID" \\
+        --unset-metadata gc.work_dir --unset-metadata gc.work_branch --unset-metadata work_dir \\
+        --unset-metadata gc.worktree_repo --unset-metadata gc.worktree_root \\
+        --unset-metadata gc.worktree_base_ref --unset-metadata gc.worktree_base_sha \\
+        --unset-metadata gc.worktree_creator --unset-metadata gc.worktree_owner \\
+        --unset-metadata gc.worktree_generation --unset-metadata gc.worktree_lifecycle
+    else
+      # Refused on purpose (dirty tree, or work not merged into the base),
+      # reported as cleanup_pending. Keep the evidence: it is the only record of
+      # where that work lives.
+      gc bd update "$WORK_BEAD_ID" --append-notes "cleanup_pending: $WORKTREE kept: $(printf '%s' "$CLEANUP" | jq -r '.error.code // "unknown"')"
+    fi
+  fi
+fi
+```
+
+Close this step with its outcome. The step is retry-managed: a close without
+`gc.outcome` counts as a failed attempt (`missing_outcome`), and once its
+attempts run out the workflow hard-fails even though the work succeeded.
+Close the step bead your claim returned; `gc hook current --id-only` prints it:
+
+```bash
+STEP_BEAD_ID=$(gc hook current --id-only) || exit 1
+gc bd update "$STEP_BEAD_ID" --set-metadata gc.outcome=pass --status=closed
+```
+
+Do not set `gc.failure_class` or `gc.failure_reason` on success: a pass that
+carries them is retried. If the step cannot succeed, close it with
+`gc.outcome=fail`, a short stable `gc.failure_reason`, and
+`gc.failure_class=transient` when a retry can succeed (network, provider,
+flaky checks) or `gc.failure_class=hard` when it cannot (bad input, a broken
+contract):
+
+```bash
+STEP_BEAD_ID=$(gc hook current --id-only) || exit 1
+gc bd update "$STEP_BEAD_ID" --set-metadata gc.outcome=fail --set-metadata gc.failure_class=transient --set-metadata gc.failure_reason="<short_reason>" --status=closed
+```
+"""
+metadata = { "gc.kind" = "cleanup", "gc.scope_ref" = "body", "gc.scope_role" = "teardown" }
+
+[steps.retry]
+max_attempts = 3
+on_exhausted = "hard_fail"

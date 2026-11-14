@@ -118,12 +118,34 @@ if [ -z "$WORK_BEAD_ID" ]; then
   echo "mol-scoped-work requires an input convoy with exactly one tracked member" >&2
   exit 1
 fi
-WORKTREE=$(gc bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata.work_dir // empty')
+WORK_BEAD=$(gc bd show "$WORK_BEAD_ID" --json)
+# A run started before the managed key existed still records `work_dir`.
+WORKTREE=$(printf '%s' "$WORK_BEAD" | jq -r '.[0].metadata["gc.work_dir"] // .[0].metadata.work_dir // empty')
 if [ -z "$WORKTREE" ]; then
-  WORKTREE_PATH=$(pwd)/worktrees/"$WORK_BEAD_ID"
-  git worktree add "$WORKTREE_PATH" --detach origin/{{base_branch}}
-  gc bd update "$WORK_BEAD_ID" --set-metadata work_dir="$WORKTREE_PATH"
-  WORKTREE="$WORKTREE_PATH"
+  # gc worktree ensure creates the worktree on an attached, uniquely named
+  # branch and records durable ownership provenance. It publishes nothing on
+  # the bead, so the evidence below is published in a single update: the
+  # controller refuses a work dir whose evidence is partial.
+  REPO=$(pwd)
+  WORK_ROOT="$REPO/worktrees"
+  WORK_BRANCH="gc-work/$WORK_BEAD_ID"
+  STORE_REF=$(printf '%s' "$WORK_BEAD" | jq -r '.[0].metadata["gc.root_store_ref"] // "city"')
+  ENSURE=$(gc worktree ensure --json --repo "$REPO" --root "$WORK_ROOT" \\
+    --path "$WORK_ROOT/$WORK_BEAD_ID" --branch "$WORK_BRANCH" --base origin/{{base_branch}} \\
+    --bead "$WORK_BEAD_ID" --store-ref "$STORE_REF" --creator mol-scoped-work \\
+    --owner "${GC_AGENT:-mol-scoped-work}" --generation 1) || exit 1
+  WORKTREE=$(printf '%s' "$ENSURE" | jq -r '.path')
+  gc bd update "$WORK_BEAD_ID" \\
+    --set-metadata gc.work_dir="$WORKTREE" \\
+    --set-metadata gc.work_branch="$WORK_BRANCH" \\
+    --set-metadata gc.worktree_repo="$REPO" \\
+    --set-metadata gc.worktree_root="$WORK_ROOT" \\
+    --set-metadata gc.worktree_base_ref="$(printf '%s' "$ENSURE" | jq -r '.provenance.base_ref')" \\
+    --set-metadata gc.worktree_base_sha="$(printf '%s' "$ENSURE" | jq -r '.provenance.base_sha')" \\
+    --set-metadata gc.worktree_creator="$(printf '%s' "$ENSURE" | jq -r '.provenance.creator')" \\
+    --set-metadata gc.worktree_owner="$(printf '%s' "$ENSURE" | jq -r '.provenance.owner')" \\
+    --set-metadata gc.worktree_generation="$(printf '%s' "$ENSURE" | jq -r '.provenance.generation')" \\
+    --set-metadata gc.worktree_lifecycle="$(printf '%s' "$ENSURE" | jq -r '.provenance.lifecycle')" || exit 1
 fi
 cd "$WORKTREE"
 {{setup_command}}
@@ -334,23 +356,39 @@ if [ -z "$WORK_BEAD_ID" ]; then
   echo "mol-scoped-work requires an input convoy with exactly one tracked member" >&2
   exit 1
 fi
-WORKTREE=$(gc bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata.work_dir // empty')
-if [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ]; then
-  # cwd is not guaranteed to be inside the repo at this step, so resolve REPO
-  # off the worktree itself rather than off `pwd`.
-  REPO=$(git -C "$WORKTREE" rev-parse --path-format=absolute --git-common-dir)
-  if [ -z "$REPO" ]; then
-    echo "cleanup: could not resolve the owning repo for $WORKTREE; leaving it registered" >&2
-  elif ! git -C "$REPO" worktree remove --force "$WORKTREE"; then
-    if [ -f "$WORKTREE/.git" ]; then
-      rm -rf "$WORKTREE"
-      git -C "$REPO" worktree prune
+WORK_BEAD=$(gc bd show "$WORK_BEAD_ID" --json)
+meta() { printf '%s' "$WORK_BEAD" | jq -r --arg k "$1" '.[0].metadata[$k] // empty'; }
+WORKTREE=$(meta gc.work_dir)
+if [ -n "$WORKTREE" ]; then
+  STORE_REF=$(meta gc.root_store_ref)
+  WT_ARGS=(--json --repo "$(meta gc.worktree_repo)" --root "$(meta gc.worktree_root)" \\
+    --path "$WORKTREE" --branch "$(meta gc.work_branch)" --base "$(meta gc.worktree_base_ref)" \\
+    --bead "$WORK_BEAD_ID" --store-ref "${STORE_REF:-city}" --creator "$(meta gc.worktree_creator)" \\
+    --owner "$(meta gc.worktree_owner)" --generation "$(meta gc.worktree_generation)" \\
+    --lifecycle "$(meta gc.worktree_lifecycle)")
+  # gc worktree cleanup is the only remover: no force mode, no recursive-delete fallback.
+  # It is bound to the attempt that created the worktree, so read that id from
+  # the durable provenance.
+  ATTEMPT_ID=$(gc worktree verify "${WT_ARGS[@]}" | jq -r '.provenance.attempt_id // empty')
+  if [ -z "$ATTEMPT_ID" ]; then
+    gc bd update "$WORK_BEAD_ID" --append-notes "cleanup_pending: no provisioning attempt id for $WORKTREE (worktree missing or evidence incomplete); evidence left in place"
+  else
+    CLEANUP=$(gc worktree cleanup "${WT_ARGS[@]}" --attempt-id "$ATTEMPT_ID") || true
+    if [ "$(printf '%s' "$CLEANUP" | jq -r '.removed or .already_absent')" = "true" ]; then
+      gc bd update "$WORK_BEAD_ID" \\
+        --unset-metadata gc.work_dir --unset-metadata gc.work_branch --unset-metadata work_dir \\
+        --unset-metadata gc.worktree_repo --unset-metadata gc.worktree_root \\
+        --unset-metadata gc.worktree_base_ref --unset-metadata gc.worktree_base_sha \\
+        --unset-metadata gc.worktree_creator --unset-metadata gc.worktree_owner \\
+        --unset-metadata gc.worktree_generation --unset-metadata gc.worktree_lifecycle
     else
-      echo "cleanup: refusing to rm -rf $WORKTREE: not a linked worktree" >&2
+      # A dirty tree or work not merged into the base is refused on purpose and
+      # reported as cleanup_pending. Keep the evidence: it is the only record of
+      # where that work lives.
+      gc bd update "$WORK_BEAD_ID" --append-notes "cleanup_pending: $WORKTREE kept: $(printf '%s' "$CLEANUP" | jq -r '.error.code // "unknown"')"
     fi
   fi
 fi
-gc bd update "$WORK_BEAD_ID" --unset-metadata work_dir
 ```
 
 Close this step with its outcome. The step is retry-managed: a close without
