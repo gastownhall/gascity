@@ -2050,6 +2050,102 @@ func TestOrphanSweepPreservesLivePoolOwnerInOversizedSessionSnapshot(t *testing.
 	}
 }
 
+// TestOrphanSweepPreservesConfiguredAgentOwnerOnLargeAgentList covers the
+// agent_exists half of gastownhall/gascity#6714, which
+// TestOrphanSweepPreservesLivePoolOwnerInOversizedSessionSnapshot does not
+// reach: agent_exists tested membership in $AGENTS with `printf | grep -Fxq`, so
+// once `gc config explain` listed more than a pipe buffer of agents, grep exited
+// on the early match, printf died of SIGPIPE under pipefail, and a configured
+// agent read as unknown. The owner here has no live session, so only
+// agent_exists can recognize it.
+func TestOrphanSweepPreservesConfiguredAgentOwnerOnLargeAgentList(t *testing.T) {
+	const (
+		configuredOwner = "project-alpha/gastown.refinery"
+		// Well above the 64 KiB pipe buffer, with margin for the pipe form to
+		// fail on every run instead of racing grep's exit.
+		oversizedAgentListBytes = 300_000
+	)
+	for _, tc := range []struct {
+		name      string
+		listBytes int
+	}{
+		{name: "small agent list", listBytes: 1},
+		{name: "agent list above the pipe buffer", listBytes: oversizedAgentListBytes},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			binDir := filepath.Join(root, "bin")
+			if err := os.MkdirAll(binDir, 0o755); err != nil {
+				t.Fatalf("MkdirAll(%s): %v", binDir, err)
+			}
+			for _, name := range []string{"bash", "cat", "dirname", "mktemp", "jq", "awk", "grep", "sed", "rm"} {
+				linkTestPathTool(t, binDir, name)
+			}
+
+			gcLog := filepath.Join(root, "gc.log")
+			if err := os.WriteFile(gcLog, nil, 0o644); err != nil {
+				t.Fatalf("WriteFile(%s): %v", gcLog, err)
+			}
+			writeStrictOrphanSweepGCStub(t, filepath.Join(binDir, "gc"))
+
+			// The owner leads the list, so grep -q exits on its first line while
+			// printf is still writing. The list travels as a file: one environment
+			// string is capped at 128 KiB (MAX_ARG_STRLEN), below what this needs.
+			var explain strings.Builder
+			fmt.Fprintf(&explain, "Agent: %s\n  source: pack\n", configuredOwner)
+			for i, size := 0, 0; size < tc.listBytes; i++ {
+				name := fmt.Sprintf("project-alpha/gastown.filler-%06d", i)
+				fmt.Fprintf(&explain, "Agent: %s\n  source: pack\n", name)
+				size += len(name) + 1
+			}
+			explainFile := filepath.Join(root, "config-explain.txt")
+			if err := os.WriteFile(explainFile, []byte(explain.String()), 0o644); err != nil {
+				t.Fatalf("WriteFile(%s): %v", explainFile, err)
+			}
+
+			// One unrelated live session keeps the session probe from reporting
+			// zero rows, and cannot vouch for the owner.
+			sessionsJSON := orphanSweepSessionListJSON(t, "project-alpha__gastown-keepalive-gc-agentlist")
+			protectedID := "gc-wisp-protected-agent-6714"
+			orphanID := "gc-wisp-orphan-agent-6714"
+			orphanAssignee := "project-alpha__gastown-retired-gc-dead6714"
+			rigJSON := orphanSweepProtectedWispBeadsJSON(t, protectedID, configuredOwner, orphanID, orphanAssignee)
+			env := orphanSweepCleanroomEnv(t, root, binDir, gcLog, orphanSweepCleanroomEnvConfig{
+				hqJSON:             "[]",
+				rigJSON:            rigJSON,
+				hqSessionsJSON:     sessionsJSON,
+				rigSessionsJSON:    sessionsJSON,
+				configuredIdentity: configuredOwner,
+				orphanID:           orphanID,
+				orphanAssignee:     orphanAssignee,
+			})
+			env = append(env, "ORPHAN_SWEEP_CONFIG_EXPLAIN_FILE="+explainFile)
+
+			script := coreScriptPath("orphan-sweep.sh")
+			cmd := exec.Command(script)
+			cmd.Env = env
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("%s failed: %v\n%s", filepath.Base(script), err, orphanSweepFailureContext(out, gcLog))
+			}
+			if got, want := strings.TrimSpace(string(out)), "orphan-sweep: reset 1 orphaned beads"; got != want {
+				t.Fatalf("orphan-sweep output = %q, want %q\n%s", got, want, orphanSweepFailureContext(out, gcLog))
+			}
+			logData, err := os.ReadFile(gcLog)
+			if err != nil {
+				t.Fatalf("ReadFile(%s): %v", gcLog, err)
+			}
+			log := string(logData)
+			if strings.Contains(log, "bd release-if-current "+protectedID+" ") {
+				t.Fatalf("large agent list caused configured owner to be reset\n%s", orphanSweepFailureContext(out, gcLog))
+			}
+			if !strings.Contains(log, "bd release-if-current "+orphanID+" "+orphanAssignee) {
+				t.Fatalf("dead negative-control owner was not reset\n%s", orphanSweepFailureContext(out, gcLog))
+			}
+		})
+	}
+}
+
 func writeStrictOrphanSweepGCStub(t *testing.T, path string) {
 	t.Helper()
 	writeExecutable(t, path, `#!/bin/sh
@@ -2085,6 +2181,10 @@ if [ "$*" = "bd list --rig project-alpha --status=in_progress --json --limit=0" 
   exit 0
 fi
 if [ "$*" = "config explain" ]; then
+  if [ -n "${ORPHAN_SWEEP_CONFIG_EXPLAIN_FILE:-}" ]; then
+    cat "$ORPHAN_SWEEP_CONFIG_EXPLAIN_FILE"
+    exit 0
+  fi
   printf 'Agent: %s\n  source: pack\n' "$ORPHAN_SWEEP_CONFIGURED_IDENTITY"
   exit 0
 fi
