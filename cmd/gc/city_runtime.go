@@ -4009,9 +4009,22 @@ func (cr *CityRuntime) ensureAsyncStartLimiter() *asyncStartLimiter {
 }
 
 // reapStaleSessionBeads reaps stale creating session beads, keeping rows the
-// endpoint capacity breaker or the start-deferral memo holds.
+// endpoint capacity breaker or the start-deferral memo holds, then frees
+// freeable pool slots held by asleep rows with dead runtimes so the same
+// pass's demand create can claim them. Both passes share one open-session
+// ListAll — the pinned tick/startup store-op sequences are unchanged.
 func (cr *CityRuntime) reapStaleSessionBeads(sw *SeatWork) int {
-	return reapStaleSessionBeads(cr.cityPath, cr.sessionsBeadStore().Store, sw, cr.sp, cr.sessionDrains, pendingCreateHold(endpointHoldForRows(cr.cfg, cr.ensureEndpointCapacityGuard()), cr.ensureStartDeferralMemo(), clock.Real{}), clock.Real{}, cr.stderr)
+	if cr.sp == nil {
+		return 0
+	}
+	store := cr.sessionsBeadStore()
+	open, err := loadOpenSessionInfos(store.Store)
+	if err != nil {
+		fmt.Fprintf(cr.stderr, "reapStaleSessionBeads: %v\n", err) //nolint:errcheck
+		return 0
+	}
+	reaped := reapStaleSessionBeadsFromInfos(cr.cityPath, store.Store, open, sw, cr.sp, cr.sessionDrains, pendingCreateHold(endpointHoldForRows(cr.cfg, cr.ensureEndpointCapacityGuard()), cr.ensureStartDeferralMemo(), clock.Real{}), clock.Real{}, cr.stderr)
+	return reaped + reapFreeablePoolSessionSlotsFromInfos(cr.cfg, cr.cityPath, store, open, sw, cr.sp, cr.sessionDrains, clock.Real{}, cr.stderr)
 }
 
 // ensureEndpointCapacityGuard returns the city's endpoint capacity guard,
