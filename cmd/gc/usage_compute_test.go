@@ -1195,7 +1195,7 @@ func drainAckClose(t *testing.T, env *reconcilerTestEnv, id string) {
 	if err := env.store.SetMetadataBatch(id, session.DrainAckStopPendingPatch(env.clk.Now().UTC())); err != nil {
 		t.Fatal(err)
 	}
-	res := finalizeDrainAckStoppedSession(env.cfg, env.store, testSeatWork(env.city, env.cfg, env.store, nil), env.sessionInfo(id),
+	res := finalizeDrainAckStoppedSession(env.city, env.cfg, env.store, testSeatWork(env.city, env.cfg, env.store, nil), env.sessionInfo(id),
 		"worker", true, newFakeDrainOps(), env.dt, env.clk, events.Discard, io.Discard)
 	if !res.closed {
 		t.Fatalf("drain-ack finalize did not close the session: %+v", res)
