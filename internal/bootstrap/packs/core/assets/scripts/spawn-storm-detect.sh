@@ -13,7 +13,8 @@
 # updated_at each bead had when a sweep last found it in the pool, so a bead
 # that waits there counts once, not once per sweep. Closed beads are pruned
 # from both; a suspended rig's beads keep their counts, unread, until the
-# rig resumes.
+# rig resumes. A third file remembers the threshold the last sweep evaluated
+# against and when each tracked bead's current storm began.
 #
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
@@ -43,6 +44,7 @@ fi
 # The ledger stays a plain {id: count} map, which every older copy of this
 # script still reads; the timestamps live beside it.
 SEEN_FILE="$(dirname "$LEDGER")/spawn-storm-seen.json"
+STATE_FILE="$(dirname "$LEDGER")/spawn-storm-state.json"
 mkdir -p "$(dirname "$LEDGER")"
 
 # save_json FILE JSON writes JSON to FILE through a temp file and a rename, so
@@ -95,6 +97,22 @@ SEEN='{}'
 if [ -f "$SEEN_FILE" ]; then
     SEEN=$(cat "$SEEN_FILE")
 fi
+# The threshold the last sweep evaluated against, and when each tracked bead's
+# current storm began. A threshold change is its own edge: the count moves by
+# one per sweep, so a bead already past the new value can never -eq it. With
+# nothing remembered (the first sweep, or the first after an upgrade) there is
+# no change to detect.
+STATE='{}'
+if [ -f "$STATE_FILE" ]; then
+    STATE=$(cat "$STATE_FILE")
+fi
+LAST_THRESHOLD=$(jq -r '.threshold // empty' <<<"$STATE")
+STARTS=$(jq -c '.starts // {}' <<<"$STATE")
+NOW=$(date +%s)
+THRESHOLD_CHANGED=0
+if [ -n "$LAST_THRESHOLD" ] && [ "$LAST_THRESHOLD" != "$THRESHOLD" ]; then
+    THRESHOLD_CHANGED=1
+fi
 
 # Step 3: Count the beads that came back to the pool with rejection metadata
 # (returned for rework, or recovered by a work-health patrol) since the last
@@ -116,20 +134,43 @@ STORMS=0
 RESET=$(jq -c '[.[] | select((.metadata.rejection_reason // "") != "" or (.metadata.recovered // "") != "") | {key: .id, value: (.updated_at // "")}] | from_entries' <<<"$OPEN_BEADS")
 RESET_IDS=$(printf '%s\n%s\n' "$SEEN" "$RESET" | jq -r -n 'input as $seen | input | to_entries[] | select($seen[.key] != .value) | .key')
 SEEN_NEXT=$(printf '%s\n%s\n' "$SEEN" "$RESET" | jq -c -n 'input as $seen | input as $reset | $seen + $reset')
+# A changed threshold reaches every bead in the pool with recovery metadata,
+# not only the ones that came back this sweep: a bead that waits there is not
+# counted again, but it is still a storm the change has to reach.
+CANDIDATE_IDS="$RESET_IDS"
+if [ "$THRESHOLD_CHANGED" -eq 1 ]; then
+    CANDIDATE_IDS=$(printf '%s\n%s\n' "$RESET_IDS" "$(jq -r 'keys[]' <<<"$RESET")" | awk 'NF && !seen[$0]++')
+fi
 while IFS= read -r bead_id; do
     [ -z "$bead_id" ] && continue
 
-    # Increment count for this bead.
+    # Increment count for a bead that came back this sweep.
     PREV=$(echo "$COUNTS" | jq -r --arg id "$bead_id" '.[$id] // 0')
-    NEW=$((PREV + 1))
-    COUNTS=$(echo "$COUNTS" | jq --arg id "$bead_id" --argjson n "$NEW" '.[$id] = $n')
+    COUNTED=0
+    NEW=$PREV
+    if grep -qxF -- "$bead_id" <<<"$RESET_IDS"; then
+        COUNTED=1
+        NEW=$((PREV + 1))
+        COUNTS=$(echo "$COUNTS" | jq --arg id "$bead_id" --argjson n "$NEW" '.[$id] = $n')
+    fi
+
+    # The storm's start names this storm in the dedup key. It lives until the
+    # bead closes (Step 4), so a retry of one storm's alert reuses its key
+    # while a later storm on the same bead gets a fresh one even if the old
+    # alert is still sitting read but unarchived.
+    START=$(jq -r --arg id "$bead_id" --argjson now "$NOW" '.[$id] // $now' <<<"$STARTS")
+    if [ "$NEW" -gt 0 ]; then
+        STARTS=$(jq -c --arg id "$bead_id" --argjson s "$START" '.[$id] = $s' <<<"$STARTS")
+    fi
 
     # Edge-triggered (-eq, not -ge): mail once when the count CROSSES the
     # threshold, not on every 5m sweep for as long as the storm persists.
     # A new storm on the same bead re-alerts because the ledger prunes the
     # count once the bead closes. --dedup guards the repeat-crossing case
     # (ledger reset while the previous mail is still live in the inbox).
-    if [ "$NEW" -eq "$THRESHOLD" ]; then
+    # A changed threshold the count has already reached alerts once as well.
+    if { [ "$COUNTED" -eq 1 ] && [ "$NEW" -eq "$THRESHOLD" ]; } \
+        || { [ "$THRESHOLD_CHANGED" -eq 1 ] && [ "$NEW" -gt 0 ] && [ "$NEW" -ge "$THRESHOLD" ]; }; then
         TITLE_JSON=$(gc bd show "$bead_id" --json 2>/dev/null || true)
         TITLE=$(echo "$TITLE_JSON" | jq -r 'if type == "array" then (.[0].title // "unknown") else "unknown" end' 2>/dev/null || echo "unknown")
         if ! gc mail send "$ESCALATION_TARGET" \
@@ -141,7 +182,7 @@ Recommended actions:
 - Inspect the bead: gc bd show $bead_id --json
 - Check rejection history: metadata.rejection_reason
 - Consider quarantining the bead or investigating the root cause." \
-            --dedup "spawn-storm:$bead_id" \
+            --dedup "spawn-storm:$bead_id:$START:$THRESHOLD" \
             2>/dev/null; then
             # Do not swallow an undeliverable alert — a vanished storm alert
             # is invisible. Surfacing it requires a non-zero exit (see below),
@@ -156,12 +197,16 @@ Recommended actions:
             # failed, the retry is suppressed instead of duplicated. Forget its
             # timestamp too: a bead still waiting in the pool counts only when
             # no timestamp matches, and the retry has to count it again.
-            COUNTS=$(echo "$COUNTS" | jq --arg id "$bead_id" --argjson n "$PREV" '.[$id] = $n')
-            SEEN_NEXT=$(jq -c --arg id "$bead_id" 'del(.[$id])' <<<"$SEEN_NEXT")
+            # A bead that did not come back has no count to roll back; the
+            # threshold left remembered (Step 5) keeps its change pending.
+            if [ "$COUNTED" -eq 1 ]; then
+                COUNTS=$(echo "$COUNTS" | jq --arg id "$bead_id" --argjson n "$PREV" '.[$id] = $n')
+                SEEN_NEXT=$(jq -c --arg id "$bead_id" 'del(.[$id])' <<<"$SEEN_NEXT")
+            fi
         fi
         STORMS=$((STORMS + 1))
     fi
-done <<< "$RESET_IDS"
+done <<< "$CANDIDATE_IDS"
 
 # Step 4: Prune closed beads from ledger.
 # Only check beads actually tracked in the ledger (avoids expensive full scan
@@ -219,6 +264,7 @@ while IFS= read -r tid; do
     fi
     if [ "$BEAD_STATUS" = "closed" ] || [ "$BEAD_STATUS" = "deleted" ]; then
         COUNTS=$(echo "$COUNTS" | jq --arg id "$tid" 'del(.[$id])' 2>/dev/null) || true
+        STARTS=$(jq -c --arg id "$tid" 'del(.[$id])' <<<"$STARTS")
     fi
 done <<< "$PRUNE_IDS"
 
@@ -235,6 +281,17 @@ SEEN_NEXT=$(printf '%s\n%s\n%s\n%s\n' "$COUNTS" "$RESET" "$UNREAD_IDS" "$SEEN_NE
         | ($counts | has($id)) and (.value != "" or ($reset | has($id)) or any($unread[]; . == $id))))')
 save_json "$LEDGER" "$COUNTS"
 save_json "$SEEN_FILE" "$SEEN_NEXT"
+# An undeliverable alert keeps the old threshold remembered, so the change is
+# still pending next sweep; the retry carries the same dedup key. Storm starts
+# are kept only for beads the ledger still tracks.
+SAVE_THRESHOLD="$THRESHOLD"
+if [ "$FAILED" -gt 0 ] && [ -n "$LAST_THRESHOLD" ]; then
+    SAVE_THRESHOLD="$LAST_THRESHOLD"
+fi
+STATE_NEXT=$(printf '%s\n%s\n' "$COUNTS" "$STARTS" | jq -c -n --argjson t "$SAVE_THRESHOLD" '
+    input as $counts | input
+    | {threshold: $t, starts: with_entries(select(.key as $id | $counts | has($id)))}')
+save_json "$STATE_FILE" "$STATE_NEXT"
 
 if [ "$STORMS" -gt 0 ]; then
     echo "spawn-storm-detect: found $STORMS beads exceeding reset threshold"
