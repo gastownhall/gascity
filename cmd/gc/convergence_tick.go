@@ -8,6 +8,7 @@ import (
 	"os/user"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -22,6 +23,13 @@ type convergenceRequest struct {
 	User    string            `json:"user,omitempty"` // resolved client-side for audit attribution
 	Params  map[string]string `json:"params"`         // command-specific parameters
 	replyCh chan convergenceReply
+	// canceled is set by handleConvergeSocketCmd when its 60s reply wait
+	// expires, so the event loop can skip a request whose caller already
+	// gave up on (gastownhall/gascity#8387) instead of still running it: the
+	// value sent on the channel is a copy of this struct, but the pointer is
+	// shared, so a late Store(true) on the sender's side is visible to
+	// whichever side eventually dequeues and processes the request.
+	canceled *atomic.Bool
 }
 
 // convergenceReply is the response from the event loop to a socket command.
@@ -419,6 +427,15 @@ func (cr *CityRuntime) safeHandleConvergenceRequest(ctx context.Context, req con
 func (cr *CityRuntime) handleConvergenceRequest(ctx context.Context, req convergenceRequest) convergenceReply {
 	if cr.convScopes == nil {
 		return convergenceReply{Error: "convergence not available (no bead store)"}
+	}
+	// The socket handler gave up waiting on req.replyCh and already told its
+	// caller this request failed; running it now would silently succeed
+	// behind that caller's back and, on a retry, create a second loop for
+	// the same work (gastownhall/gascity#8387). Skip it instead.
+	if req.canceled != nil && req.canceled.Load() {
+		fmt.Fprintf(cr.stderr, "%s: convergence: skipping %s %s: caller already timed out waiting for the reply\n", //nolint:errcheck
+			cr.logPrefix, req.Command, req.BeadID)
+		return convergenceReply{Error: "request abandoned: caller's reply wait already expired"}
 	}
 
 	// Use client-supplied username for audit attribution; fall back to
