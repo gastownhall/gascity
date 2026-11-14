@@ -1683,6 +1683,17 @@ func (m *memoryOrderDispatcher) reportInapplicable(a orders.Order, target execSt
 // order that has run resumes from its run cursor, catching up on events
 // recorded while no controller watched, and one that has not starts where the
 // new controller began watching.
+//
+// The floor-adjusted start is then clamped down to head if it exceeds it
+// (#8567): if .gc/events.jsonl is lost or replaced while the bead store
+// survives (host move, restore from backup, manual deletion), FileRecorder
+// restarts its seq counter at 1, but the cursor's run-record seq:<N> label
+// keeps the old high value, landing above the new log's head. Left
+// unclamped, that stale cursor matches nothing until the new log's seq
+// climbs back past it, silently stalling the order for however long that
+// takes. Clamping to head instead of 0 matters: 0 would re-match every
+// run record still inside the cursor's scan window on every pass, firing a
+// repeat loop against already-consumed events.
 func (m *memoryOrderDispatcher) eventCheckStart(scoped string, cursor uint64) (start, head uint64, err error) {
 	if m.ep == nil {
 		return cursor, 0, nil
@@ -1704,7 +1715,12 @@ func (m *memoryOrderDispatcher) eventCheckStart(scoped string, cursor uint64) (s
 		}
 		m.eventFloors[scoped] = floor
 	}
-	return max(cursor, floor), head, nil
+	start = max(cursor, floor)
+	if start > head {
+		orderLogf("gc: order dispatch: event cursor for %s (seq:%d) exceeds event log head (seq:%d); dropping stale label and clamping to head", scoped, start, head)
+		start = head
+	}
+	return start, head, nil
 }
 
 // watchEventOrders records the event head as the start of every event order
