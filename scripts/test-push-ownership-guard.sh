@@ -100,6 +100,13 @@ remote_sha() {
 #                                          show-call-count (1-based) so a
 #                                          test can assert exactly how many
 #                                          attempts were made.
+#   <dir>/fake-bd-state/show-json-<id> -- if present, `bd show <id> --json`
+#                                          echoes this instead of show-json, so
+#                                          two beads can read differently in
+#                                          one test (ga-bugldjz0).
+#   <dir>/fake-bd-state/call-log       -- every invocation's args, one line
+#                                          each, so a test can assert WHICH
+#                                          bead id the guard asked about.
 #   <dir>/fake-bd-state/list-json      -- response to `bd list ... --json`
 #                                          (defaults to "[]").
 #   <dir>/fake-bd-state/list-fail-count -- same as show-fail-count, for
@@ -114,6 +121,7 @@ write_fake_bd() {
 #!/usr/bin/env bash
 set -euo pipefail
 state="$(dirname "$0")/fake-bd-state"
+echo "$*" >> "$state/call-log"
 case "$1" in
   show)
     if [ -f "$state/show-sleep" ]; then
@@ -131,6 +139,10 @@ case "$1" in
     fi
     if [ -f "$state/show-exit" ]; then
       exit "$(cat "$state/show-exit")"
+    fi
+    if [ -n "${2:-}" ] && [ -f "$state/show-json-$2" ]; then
+      cat "$state/show-json-$2"
+      exit 0
     fi
     if [ -f "$state/show-json" ]; then
       cat "$state/show-json"
@@ -177,6 +189,15 @@ write_show_json() {
         "$id" "$status" "$assignee" "$routed_to" "$labels" > "$fbd/fake-bd-state/show-json"
 }
 
+# write_show_json_for_id <fake-bd-dir> <id> <status> <assignee> <routed_to>: like
+# write_show_json, but only `bd show <id>` reads it (show-json-<id>).
+write_show_json_for_id() {
+    local fbd="$1" id="$2" status="$3" assignee="$4" routed_to="$5"
+    mkdir -p "$fbd/fake-bd-state"
+    printf '[{"id":"%s","status":"%s","assignee":"%s","metadata":{"gc.routed_to":"%s"},"labels":[]}]' \
+        "$id" "$status" "$assignee" "$routed_to" > "$fbd/fake-bd-state/show-json-$id"
+}
+
 # run_guard <repo> <fake-bd-dir> <gc-agent> <gc-template> [pog-timeout-seconds] [gc-session-id] [gc-session-name]
 #
 # Runs assert_bead_still_claimed with cwd=<repo>, PATH prefixed with
@@ -201,6 +222,20 @@ run_guard() {
             GC_SESSION_ID="$session_id" GC_SESSION_NAME="$session_name" \
             POG_TIMEOUT_SECONDS="$pog_timeout" POG_READ_ATTEMPTS="$read_attempts" LIB="$LIB" \
             bash -c '. "$LIB"; assert_bead_still_claimed'
+    )
+}
+
+# run_guard_refs <repo> <fake-bd-dir> <gc-agent> <gc-template> <branch>...: run_guard
+# for a push of the named branches (what the pre-push hook reads on stdin),
+# whatever the repo's checked-out HEAD is (ga-bugldjz0).
+run_guard_refs() {
+    local repo="$1" fbd="$2" agent="$3" template="$4"
+    shift 4
+    (
+        cd "$repo" || exit 1
+        PATH="$fbd:$PATH" GC_AGENT="$agent" GC_TEMPLATE="$template" \
+            POG_TIMEOUT_SECONDS=5 POG_READ_ATTEMPTS=1 LIB="$LIB" \
+            bash -c '. "$LIB"; assert_bead_still_claimed "$@"' _ "$@"
     )
 }
 
@@ -1136,6 +1171,88 @@ test_allow_when_no_bead_id_resolvable() {
     rm -rf "$repo" "$fbd"
 }
 
+# ga-bugldjz0: the bead is resolved from the ref being PUSHED, not from the
+# checked-out HEAD. Observed: from a checkout sitting on
+# test/ga-quiescence-cache-reconcile, pushing builder/ga-tioxl6 resolved the
+# HEAD branch's "ga-quiescence" and blocked on bd show ga-quiescence.
+test_pushed_ref_resolves_instead_of_head_branch() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "test/ga-quiescence-cache-reconcile")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    write_show_json_for_id "$fbd" "ga-tioxl6" "in_progress" "agent-x" "tmpl-x"
+    out="$(run_guard_refs "$repo" "$fbd" "agent-x" "tmpl-x" "builder/ga-tioxl6" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] && grep -qx "show ga-tioxl6 --json" "$fbd/fake-bd-state/call-log" \
+        && ! grep -q "ga-quiescence" "$fbd/fake-bd-state/call-log"; then
+        record_pass "resolve/pushed-ref-wins-over-head-branch (rc=0, asked about ga-tioxl6 only)"
+    else
+        record_fail "resolve/pushed-ref-wins-over-head-branch" "expected rc=0 asking only about ga-tioxl6, got rc=$rc, calls: $(cat "$fbd/fake-bd-state/call-log" 2>/dev/null | tr '\n' ';'), output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# The pushed ref's bead is the one that gets checked: a stale claim on it
+# blocks even though HEAD's own branch is on a perfectly live bead.
+test_pushed_ref_with_stale_bead_blocks_despite_live_head_bead() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "builder/ga-live001")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    write_show_json_for_id "$fbd" "ga-live001" "in_progress" "agent-x" "tmpl-x"
+    write_show_json_for_id "$fbd" "ga-stale02" "closed" "agent-x" "tmpl-x"
+    out="$(run_guard_refs "$repo" "$fbd" "agent-x" "tmpl-x" "builder/ga-stale02" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] && grep -q "ga-stale02" <<<"$out"; then
+        record_pass "resolve/pushed-ref-stale-bead-blocks-despite-live-head-bead (rc!=0, names ga-stale02)"
+    else
+        record_fail "resolve/pushed-ref-stale-bead-blocks-despite-live-head-bead" "expected a block naming ga-stale02, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# A pushed ref whose bead bd cannot read still blocks, as before, and the
+# message names that bead, not HEAD's.
+test_pushed_ref_unreadable_bead_blocks() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "test/ga-quiescence-cache-reconcile")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    printf '1' > "$fbd/fake-bd-state/show-exit"
+    out="$(run_guard_refs "$repo" "$fbd" "agent-x" "tmpl-x" "builder/ga-tioxl6" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] && grep -q "bd show ga-tioxl6 unreachable" <<<"$out"; then
+        record_pass "resolve/pushed-ref-unreadable-bead-blocks (rc!=0, names ga-tioxl6)"
+    else
+        record_fail "resolve/pushed-ref-unreadable-bead-blocks" "expected a block naming ga-tioxl6, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# Several refs in one push: every one is checked, so one stale bead blocks the
+# push whichever position it holds, and each id is asked about.
+test_pushed_refs_each_checked_any_stale_blocks() {
+    local repo fbd out rc order ok=1 why=""
+    repo="$(new_repo_with_branch "chore/unrelated-cleanup")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    write_show_json_for_id "$fbd" "ga-aaaaaa1" "in_progress" "agent-x" "tmpl-x"
+    write_show_json_for_id "$fbd" "ga-bbbbbb2" "closed" "agent-x" "tmpl-x"
+    for order in "first" "second"; do
+        if [[ "$order" == "first" ]]; then
+            out="$(run_guard_refs "$repo" "$fbd" "agent-x" "tmpl-x" "builder/ga-bbbbbb2" "builder/ga-aaaaaa1" 2>&1)"; rc=$?
+        else
+            out="$(run_guard_refs "$repo" "$fbd" "agent-x" "tmpl-x" "builder/ga-aaaaaa1" "builder/ga-bbbbbb2" 2>&1)"; rc=$?
+        fi
+        if [[ $rc -eq 0 ]] || ! grep -q "ga-bbbbbb2" <<<"$out"; then
+            ok=0; why="stale bead $order: rc=$rc output: $out"
+        fi
+    done
+    if [[ $ok -eq 1 ]]; then
+        record_pass "resolve/pushed-refs-each-checked-any-stale-blocks (stale bead blocks in either position)"
+    else
+        record_fail "resolve/pushed-refs-each-checked-any-stale-blocks" "$why"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
 # Known limitation: the assignee-fallback query filters on
 # --status=in_progress, so it cannot find a bead that has already left that
 # status (e.g. closed by the exact mayor ruling this guard exists to catch)
@@ -1267,6 +1384,49 @@ test_hook_allows_push_on_clean_claim() {
     rm -rf "$remote" "$work" "$fbd"
 }
 
+# setup_hook_push_from_other_branch <pushed-bead-status> <head-bead-status>: the
+# setup_hook_push_scenario clone, but the checkout is then moved onto an
+# unrelated bead-shaped branch (test/ga-quiescence-x, bead ga-quiescence), the
+# way the shared rig checkout sits on someone else's branch, while the pushed
+# branch (bead ga-abc123.1) stays un-checked-out. Echoes the same four fields.
+setup_hook_push_from_other_branch() {
+    local pushed_status="$1" head_status="$2"
+    local remote work fbd branch
+    read -r remote work fbd branch <<<"$(setup_hook_push_scenario "$pushed_status")"
+    git -C "$work" checkout -q -b "test/ga-quiescence-x" main
+    write_show_json_for_id "$fbd" "ga-abc123.1" "$pushed_status" "agent-x" "tmpl-x"
+    write_show_json_for_id "$fbd" "ga-quiescence" "$head_status" "agent-x" "tmpl-x"
+    printf '%s %s %s %s' "$remote" "$work" "$fbd" "$branch"
+}
+
+# ga-bugldjz0 end to end: a live pushed bead goes through even though the
+# checked-out HEAD sits on a branch whose own bead is closed.
+test_hook_allows_push_of_live_branch_from_checkout_on_stale_branch() {
+    local remote work fbd branch out rc
+    read -r remote work fbd branch <<<"$(setup_hook_push_from_other_branch in_progress closed)"
+    out="$(cd "$work" && PATH="$fbd:$PATH" GC_AGENT="agent-x" GC_TEMPLATE="tmpl-x" GC_PREPUSH_SUITE=go GIT_TERMINAL_PROMPT=0 git push origin "$branch" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] && [[ -n "$(remote_sha "$remote" "refs/heads/$branch")" ]]; then
+        record_pass "hook/allows-push-of-live-branch-from-checkout-on-stale-branch"
+    else
+        record_fail "hook/allows-push-of-live-branch-from-checkout-on-stale-branch" "expected successful push, got rc=$rc output=$out"
+    fi
+    rm -rf "$remote" "$work" "$fbd"
+}
+
+# The converse: the guard still stops a stale pushed bead when HEAD's own
+# bead is live, so it guards what leaves the machine, not what is checked out.
+test_hook_blocks_push_of_stale_branch_from_checkout_on_live_branch() {
+    local remote work fbd branch out rc
+    read -r remote work fbd branch <<<"$(setup_hook_push_from_other_branch closed in_progress)"
+    out="$(cd "$work" && PATH="$fbd:$PATH" GC_AGENT="agent-x" GC_TEMPLATE="tmpl-x" GC_PREPUSH_SUITE=go GIT_TERMINAL_PROMPT=0 git push origin "$branch" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] && [[ -z "$(remote_sha "$remote" "refs/heads/$branch")" ]]; then
+        record_pass "hook/blocks-push-of-stale-branch-from-checkout-on-live-branch (rejected, remote untouched)"
+    else
+        record_fail "hook/blocks-push-of-stale-branch-from-checkout-on-live-branch" "expected rejected push with remote untouched, got rc=$rc remote_sha=$(remote_sha "$remote" "refs/heads/$branch") output=$out"
+    fi
+    rm -rf "$remote" "$work" "$fbd"
+}
+
 # ---------------------------------------------------------------------------
 # Static wiring checks — mirrors test-rebase-resolve.sh's style of grepping
 # the real source files rather than re-deriving their behavior.
@@ -1339,11 +1499,17 @@ run_all() {
     test_bead_id_deploy_gate_branch_ignores_ambiguous_inprogress_beads
     test_bead_id_general_branch_ignores_ambiguous_inprogress_beads
     test_retry_recovers_bead_id_fallback_from_transient_failure
+    test_pushed_ref_resolves_instead_of_head_branch
+    test_pushed_ref_with_stale_bead_blocks_despite_live_head_bead
+    test_pushed_ref_unreadable_bead_blocks
+    test_pushed_refs_each_checked_any_stale_blocks
     test_allow_when_no_bead_id_resolvable
     test_fallback_cannot_detect_staleness_after_status_leaves_in_progress
     test_hook_blocks_push_on_stale_claim
     test_hook_no_verify_bypasses_guard
     test_hook_allows_push_on_clean_claim
+    test_hook_allows_push_of_live_branch_from_checkout_on_stale_branch
+    test_hook_blocks_push_of_stale_branch_from_checkout_on_live_branch
     test_pre_push_hook_sources_and_calls_guard
     test_rebase_lib_calls_guard_before_force_with_lease
 
