@@ -218,7 +218,7 @@ formula = "future-expansion"
 type = "expansion"
 
 [requires]
-formula_compiler = ">2.0.0"
+formula_compiler = ">2.1.0"
 
 [[template]]
 id = "{target}.future"
