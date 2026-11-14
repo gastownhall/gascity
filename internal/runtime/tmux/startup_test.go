@@ -1701,21 +1701,15 @@ func TestDoStartSession_ReadyDelayOnly(t *testing.T) {
 	}
 }
 
+// The two deadline tests below expire their context from inside the step under
+// test (newExpiringCtx) instead of arming a wall-clock timeout: a timer can
+// fire during an earlier startup step on a loaded host, which fails the start
+// at that step instead of reaching the one the test names.
 func TestDoStartSession_TreatsDeadlineAfterReadyAsSuccessWhenSessionAlive(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
-	defer cancel()
+	ctx := newExpiringCtx()
 	ops := &fakeStartOps{
 		hasSessionResult: true,
-		// A loaded host can take longer than the 1 ms deadline to reach the
-		// ready wait; the test must still reach it with the context live.
-		createSessionHook: func() { time.Sleep(10 * time.Millisecond) },
-		waitReadyHook: func() {
-			// Block until context expires so ctx.Err() is guaranteed non-nil when
-			// the hook returns. time.Sleep(N) races with the context timer under
-			// high parallel load: if the timer goroutine is delayed, ctx.Err() can
-			// return nil after the sleep, causing an extra acceptStartupDialogs call.
-			<-ctx.Done()
-		},
+		waitReadyHook:    ctx.expire,
 	}
 
 	cfg := runtime.Config{
@@ -1745,20 +1739,10 @@ func TestDoStartSession_TreatsDeadlineAfterReadyAsSuccessWhenSessionAlive(t *tes
 }
 
 func TestDoStartSession_TreatsDeadlineAfterPostReadyAsSuccessWhenSessionAlive(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Millisecond)
-	defer cancel()
-	postReadyCalls := 0
+	ctx := newExpiringCtx()
 	ops := &fakeStartOps{
-		hasSessionResult: true,
-		// A loaded host can take longer than the 1 ms deadline to reach the
-		// post-ready pass; the test must still reach it with the context live.
-		createSessionHook: func() { time.Sleep(10 * time.Millisecond) },
-		acceptStartupDialogsHook: func() {
-			postReadyCalls++
-			if postReadyCalls == 2 {
-				time.Sleep(5 * time.Millisecond)
-			}
-		},
+		hasSessionResult:         true,
+		acceptStartupDialogsHook: expireOnCall(2, ctx.expire),
 	}
 
 	cfg := runtime.Config{
