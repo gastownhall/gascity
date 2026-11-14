@@ -8,6 +8,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/storehealth"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // storeHealthCacheTTL is the refresh interval for the /v0/status
@@ -17,20 +18,27 @@ import (
 const storeHealthCacheTTL = 3 * time.Minute
 
 // cachedStoreHealth returns the memoized StoreHealth block, refreshing
-// when the TTL has elapsed. Concurrent refreshes are coalesced through a
-// singleflight group so a single scan serves every waiting caller. Failed
-// refreshes are returned to the caller and are not cached. Safe for
-// concurrent callers.
+// when the TTL has elapsed. A failed refresh is memoized for the same TTL
+// only when it is a retained-row list overrun (see retainedListOverrun): that
+// measurement cannot finish (a remote ledger whose closed-inclusive count falls
+// back to a list that outlasts its read budget), so retrying it would pay the
+// full budget again, and abandon another ledger walk, on every full status
+// build. Every other failure (a counter-path error or timeout, an unavailable
+// store, a contradicted zero, a list that failed fast) is cheap and often a
+// blip, so it is returned to the caller and retried on the next build rather
+// than held as a partial status for the whole TTL. Concurrent refreshes are
+// coalesced through a singleflight group so a single scan serves every
+// waiting caller. Safe for concurrent callers.
 func (s *Server) cachedStoreHealth(ctx context.Context, now time.Time) (*StatusStoreHealth, error) {
-	if entry := s.cachedStoreHealthEntry(now); entry != nil {
-		return entry, nil
+	if cached, ok := s.cachedStoreHealthOutcome(now); ok {
+		return cached.health, cached.err
 	}
 
 	value, err, _ := s.storeHealthFlight.Do("refresh", func() (any, error) {
 		// Another refresh may have completed between this caller's initial
 		// miss and its election into the singleflight group.
-		if entry := s.cachedStoreHealthEntry(time.Now()); entry != nil {
-			return entry, nil
+		if cached, ok := s.cachedStoreHealthOutcome(time.Now()); ok {
+			return cached.health, cached.err
 		}
 
 		s.storeHealthMu.Lock()
@@ -44,16 +52,16 @@ func (s *Server) cachedStoreHealth(ctx context.Context, now time.Time) (*StatusS
 		// lifetime must not depend on whichever request won the flight. The
 		// store read applies its own bounded timeout downstream.
 		health, err := compute(context.WithoutCancel(ctx))
-		if err != nil {
+		if err != nil && !isRetainedListOverrun(err) {
 			return nil, err
 		}
 		completedAt := time.Now()
 
 		s.storeHealthMu.Lock()
-		s.storeHealthEntry = health
+		s.storeHealthEntry, s.storeHealthErr = health, err
 		s.storeHealthExpires = completedAt.Add(storeHealthCacheTTL)
 		s.storeHealthMu.Unlock()
-		return health, nil
+		return health, err
 	})
 	if err != nil {
 		return nil, err
@@ -61,13 +69,22 @@ func (s *Server) cachedStoreHealth(ctx context.Context, now time.Time) (*StatusS
 	return value.(*StatusStoreHealth), nil
 }
 
-func (s *Server) cachedStoreHealthEntry(now time.Time) *StatusStoreHealth {
+// storeHealthOutcome is one StoreHealth refresh's result: a block, or the
+// failure that left the status body without one.
+type storeHealthOutcome struct {
+	health *StatusStoreHealth
+	err    error
+}
+
+// cachedStoreHealthOutcome returns the memoized refresh outcome while it is
+// fresh; ok is false when there is none to serve.
+func (s *Server) cachedStoreHealthOutcome(now time.Time) (storeHealthOutcome, bool) {
 	s.storeHealthMu.Lock()
 	defer s.storeHealthMu.Unlock()
-	if s.storeHealthEntry != nil && now.Before(s.storeHealthExpires) {
-		return s.storeHealthEntry
+	if (s.storeHealthEntry != nil || s.storeHealthErr != nil) && now.Before(s.storeHealthExpires) {
+		return storeHealthOutcome{health: s.storeHealthEntry, err: s.storeHealthErr}, true
 	}
-	return nil
+	return storeHealthOutcome{}, false
 }
 
 // computeStoreHealth measures the Dolt store on disk and the latest
@@ -83,7 +100,10 @@ func (s *Server) computeStoreHealth(ctx context.Context) (*StatusStoreHealth, er
 	// context/timeout through WalkSize is deferred until it shows up
 	// in profiles.
 	size := storehealth.WalkSize(storehealth.StorePath(cityPath))
-	rows, err := countBeadStoreRows(ctx, s.state, s.state.CityBeadStore())
+	// The city work ledger's leg, or a zero leg when the epoch opened none,
+	// which countBeadStoreRows reports as unavailable.
+	city, _ := cityWorkLeg(s.state.Stores())
+	rows, err := countBeadStoreRows(ctx, s.state, city)
 	if err != nil {
 		return nil, err
 	}
@@ -118,8 +138,8 @@ func statusStoreHealthFromDomain(h storehealth.Health) *StatusStoreHealth {
 	return out
 }
 
-// countBeadStoreRows returns the number of retained beads in store, including
-// open and closed beads. A nil store and measurement failures are returned as
+// countBeadStoreRows returns the number of retained beads in leg's store,
+// including open and closed beads. A zero leg and measurement failures are returned as
 // errors so callers do not mistake an unavailable denominator for zero, and so
 // is a zero the store's own beads.RowWitness contradicts (measuredStoreRows
 // carries why a zero needs corroborating when the other counts do not). Errors
@@ -135,30 +155,34 @@ func statusStoreHealthFromDomain(h storehealth.Health) *StatusStoreHealth {
 // a Counter and for shapes Count reports as unsupported; that path is the
 // store-health block's exposure to ga-cdmx6x's bd-child leak, covered by
 // statusListStoreWithTimeout's state.ScopedStoreLike wiring the same way as
-// the work-count fallback.
-func countBeadStoreRows(ctx context.Context, state State, store beads.Store) (int, error) {
-	if store == nil {
+// the work-count fallback. Every read goes through the leg's strict reader, as
+// the unmarked reads of the raw store did.
+func countBeadStoreRows(ctx context.Context, state State, leg storeref.TypedLeg) (int, error) {
+	if beads.IsNilStore(leg.Strict) {
 		return 0, errors.New("counting retained bead rows: store unavailable")
 	}
 	query := beads.ListQuery{AllowScan: true, IncludeClosed: true}
-	if counter, ok := store.(beads.Counter); ok {
+	if counter, ok := beads.ReaderAs[beads.Counter](leg.Strict); ok {
 		// cachedStoreHealth strips the request deadline, so bound the count
 		// here the same way the status handler bounds its store reads.
 		reqCtx, cancel := context.WithTimeout(ctx, statusStoreReadTimeout)
 		n, err := counter.Count(reqCtx, query)
 		cancel()
 		if err == nil {
-			return measuredStoreRows(store, n, countBranchCounter)
+			return measuredStoreRows(leg.Strict, n, countBranchCounter)
 		}
 		if !errors.Is(err, beads.ErrCountUnsupported) {
 			return 0, fmt.Errorf("counting retained bead rows: %s: %w", countBranchCounter, err)
 		}
 	}
-	list, err := statusListStoreWithTimeout(ctx, state, store, query)
+	list, err := statusListStoreWithTimeout(ctx, state, leg, query)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			err = retainedListOverrun{err: err}
+		}
 		return 0, fmt.Errorf("counting retained bead rows: %s: %w", countBranchList, err)
 	}
-	return measuredStoreRows(store, len(list), countBranchList)
+	return measuredStoreRows(leg.Strict, len(list), countBranchList)
 }
 
 // The two branches countBeadStoreRows can answer from, as they appear in its
@@ -197,13 +221,31 @@ var errRowCountContradicted = errors.New("store answered zero for a whole-ledger
 // keeps the prior behavior and its zero. That is deliberate: a genuinely
 // empty ledger must still report a healthy zero, and RowWitness proves only
 // presence, never absence.
-func measuredStoreRows(store beads.Store, rows int, branch string) (int, error) {
+func measuredStoreRows(store beads.FederatedReader, rows int, branch string) (int, error) {
 	if rows > 0 {
 		return rows, nil
 	}
-	witness, ok := store.(beads.RowWitness)
+	witness, ok := beads.ReaderAs[beads.RowWitness](store)
 	if !ok || !witness.SawRows() {
 		return rows, nil
 	}
 	return 0, fmt.Errorf("counting retained bead rows: %s: %w", branch, errRowCountContradicted)
+}
+
+// retainedListOverrun marks a hydrating-list fallback that outlasted its read
+// budget. It is the one StoreHealth failure cachedStoreHealth memoizes: the
+// failed attempt cost the whole statusStoreReadTimeout and left a ledger walk
+// running that the store may not be able to cancel, and on a ledger that
+// cannot count closed history every retry fails the same way. It wraps the
+// timeout without changing its message.
+type retainedListOverrun struct{ err error }
+
+func (e retainedListOverrun) Error() string { return e.err.Error() }
+
+func (e retainedListOverrun) Unwrap() error { return e.err }
+
+// isRetainedListOverrun reports whether err is a list-fallback overrun.
+func isRetainedListOverrun(err error) bool {
+	var overrun retainedListOverrun
+	return errors.As(err, &overrun)
 }

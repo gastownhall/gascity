@@ -26,6 +26,7 @@ progression.
 2. When the server recorded the request as an operation (the
    `ops.content` rollout gate is `auto` or `require` and the operation
    journal could record it; `engdocs/design/des-o0-api-shadow-ops.md`),
+   or proposed it as a lane op (lane authority, rule 6),
    the `request_id` is the op id and equals `op.id` in the 202 body and
    in the terminal event. Otherwise it is a fresh correlation id from
    `newRequestID()` (crypto/rand hex with a `req-` prefix).
@@ -91,6 +92,22 @@ progression.
    again, use a new key. The cache refuses a retry whose body differs
    from the one it holds for that endpoint and spelling with 422
    `idempotency_mismatch`, as it compares whole request bodies.
+   Under lane authority (`message` listed in `[ops] authoritative`, so the
+   conversation lane delivers `/submit` and `/messages`) every request is
+   a lane op, and that op answers every same-key retry: the cache keeps no
+   answer of a lane request and holds the key only while the request runs
+   (a concurrent same-key request is 409 `in_flight`, or 422
+   `idempotency_mismatch` when its body differs). A retry of an op
+   still open is accepted again, not replayed, and runs its own
+   `resume: true`, which consumes an operator hold placed before the
+   message: the resend a held message's result offers, under the
+   `idempotency_key` of its 202, lets the session start. A retry of a
+   closed op replays it and applies none of its options. `follow_up` and
+   the default intent are one request on the lane, so under one key either
+   answers from the other's op. Once the first request has answered, a
+   retry is 422 `idempotency_mismatch` only when the op's digest differs
+   (another message, or another intent once `follow_up` and the default
+   count as one), not for a body the cache would refuse.
 7. A replay's `error_code` is derived from the stored outcome, which
    keeps the failure's class but not the step that failed, so it can
    differ from the original's: a session closed or gone during the
@@ -113,6 +130,14 @@ progression.
    server recorded operations but for that 409, which it gives in every
    mode, `off` included, while the first request's terminal event is
    kept (rule 9).
+   Under lane authority (rule 6) the cache answers no retry of a lane
+   request, and the op under the key answers one before the
+   pending-interaction check: only a
+   request no op under its key answers is 409 while the session waits on
+   a pending interaction, so a retry of a message that raised an approval
+   gets the op's answer whatever the session waits on. The target is
+   still resolved first, as the op is found through its session, so an
+   unknown target is 404.
 9. The in-flight registry that answers rule 6 is one per city per API
    process, not one per per-city `Server`: the supervisor builds a new
    `Server` when a city's state changes while the old one may still be

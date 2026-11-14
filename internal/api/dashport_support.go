@@ -23,6 +23,8 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/usage"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
@@ -202,10 +204,12 @@ func newSeededState(deps SeededCityDeps) *seededState {
 		s.rigStores = map[string]beads.Store{}
 	}
 	if s.cityStore != nil {
-		// Unrouted on purpose: SeededCityDeps carries one store for every
-		// class, so there is no messaging binding to route to. See the
-		// CityBeadStore doc for what that means for a split-city case.
-		svc := extmsg.NewServices(s.cityStore)
+		// SeededCityDeps carries one store for every class, so there is no
+		// messaging binding to route to: the single-store Stores hand both
+		// classes the city store. See the CityBeadStore doc for what that
+		// means for a split-city case.
+		stores := s.classStores()
+		svc := extmsg.NewServices(stores.Mail(), stores.Sessions())
 		s.extmsgSvc = &svc
 	}
 	return s
@@ -248,41 +252,37 @@ func (s *seededState) IsQuarantined(string) bool      { return false }
 func (s *seededState) ClearCrashHistory(string)       {}
 func (s *seededState) CityBeadStore() beads.Store     { return s.cityStore }
 
-// ScopedStoreLike returns (nil, nil): the seeded stores are in-memory, so there
-// is no bd-CLI subprocess to scope. Callers keep reading through the existing
-// store directly, matching the contract for non-bd-backed stores.
-func (s *seededState) ScopedStoreLike(context.Context, beads.Store) (beads.Store, error) {
-	return nil, nil
+// ScopedStoreLike returns leg unchanged and false: the seeded stores are
+// in-memory, so there is no bd-CLI subprocess to scope. Callers keep reading
+// through leg directly, matching the contract for non-bd-backed stores.
+func (s *seededState) ScopedStoreLike(_ context.Context, leg storeref.TypedLeg) (storeref.TypedLeg, bool, error) {
+	return leg, false, nil
 }
 
-// NudgesBeadStore, SessionsBeadStore, GraphBeadStore and OrdersBeadStore all
-// collapse to the city store on a seeded single-store city, exactly as they do
-// on a default (non-relocated) controller city.
-func (s *seededState) NudgesBeadStore() beads.NudgesStore {
-	return beads.NudgesStore{Store: s.cityStore}
+// classStores mints the seeded city's handles: a single-store topology, so
+// every class handle wraps the city store, exactly as on a default
+// (non-relocated) controller city, and each seeded rig is a rig scope over its
+// own store, by name as the controller lists them, with the configured
+// prefixes, so Stores().Topology(), which the API plans its residency over,
+// carries the prefixes its by-id router routes on.
+func (s *seededState) classStores() storeref.Stores {
+	topo := storeref.Topology{Work: storeref.Leg{Store: s.cityStore}, Rigs: storeref.RigLegs(s.rigStores)}
+	var rigPrefixes map[storeref.StoreRef]string
+	topo.Work.Prefix, rigPrefixes = configuredPrefixes(s.cfg)
+	for i := range topo.Rigs {
+		topo.Rigs[i].Prefix = rigPrefixes[topo.Rigs[i].Ref]
+	}
+	return storeref.NewStores(topo, storeref.StoresOptions{})
 }
+
+// Stores is the seeded city's class handles (classStores). The seeded stores
+// never change, so every call mints the same handles.
+func (s *seededState) Stores() storeref.Stores { return s.classStores() }
 
 // NudgeQueue is the city's state.json queue over the seeded city store.
 func (s *seededState) NudgeQueue() NudgeQueue {
-	return nudgequeue.StateFileQueue{CityPath: s.cityPath, Shadows: s.cityStore}
+	return nudgequeue.StateFileQueue{CityPath: s.cityPath, Shadows: s.classStores().Nudges()}
 }
-
-func (s *seededState) SessionsBeadStore() beads.SessionStore {
-	return beads.SessionStore{Store: s.cityStore}
-}
-
-func (s *seededState) GraphBeadStore() beads.GraphStore {
-	return beads.GraphStore{Store: s.cityStore}
-}
-
-func (s *seededState) OrdersBeadStore() beads.OrdersStore {
-	return beads.OrdersStore{Store: s.cityStore}
-}
-
-// ClassBindingHasLegacyResidents answers true for everything: a seeded city
-// relocates no class, so it contributes no binding and nothing consults this —
-// and a state that censused nothing has cleared nothing.
-func (s *seededState) ClassBindingHasLegacyResidents(beads.Store) bool { return true }
 
 func (s *seededState) Orders() []orders.Order      { return nil }
 func (s *seededState) OrdersAll() []orders.Order   { return nil }
@@ -292,6 +292,12 @@ func (s *seededState) ServiceRegistry() workspacesvc.Registry   { return nil }
 func (s *seededState) ExtMsgServices() *extmsg.Services         { return s.extmsgSvc }
 func (s *seededState) AdapterRegistry() *extmsg.AdapterRegistry { return s.adapterReg }
 func (s *seededState) MaintenanceLoop() MaintenanceProvider     { return nil }
+
+// ApplyStartupPrompt returns hints unchanged: a seeded city renders no startup
+// prompts.
+func (s *seededState) ApplyStartupPrompt(_ session.Info, _ *config.ResolvedProvider, _ string, hints runtime.Config) (runtime.Config, error) {
+	return hints, nil
+}
 
 // RawConfig returns the same snapshot as Config: a seeded city has no separate
 // raw (pre-expansion) config, so provenance reads see the expanded config.

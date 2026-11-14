@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/git"
@@ -459,5 +460,55 @@ func TestTeardownPartialRigRefusesOtherRigDatabaseDrop(t *testing.T) {
 	}
 	if len(dropped) != 1 || dropped[0] != "xdb" {
 		t.Fatalf("dropped = %v, want [xdb]", dropped)
+	}
+}
+
+// TestControllerRigSweepReadsTheCityWorkStore pins the boot sweep to the city
+// work store the controller's Stores hands out (typed-stores T6c): on a split
+// city an orphan in_flight rig-create record in the work store is rolled back
+// in place, the same record shape in the binding is left alone, and a
+// controller with no city store sweeps nothing.
+func TestControllerRigSweepReadsTheCityWorkStore(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := (&controllerState{cityPath: cityPath}).sweepOrphanRigProvisions(context.Background()); err != nil {
+		t.Fatalf("sweep with no city store = %v, want nil", err)
+	}
+
+	seedOrphan := func(store beads.Store) string {
+		t.Helper()
+		orphan, err := store.Create(beads.Bead{
+			Title:  "rig-create orphan",
+			Labels: []string{"gc-idem"},
+			Metadata: map[string]string{
+				"gc.idem.kind":     "rig-create",
+				"gc.idem.city":     filepath.Clean(cityPath),
+				"gc.idem.state":    "in_flight",
+				"gc.idem.rig_name": "web",
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return orphan.ID
+	}
+	stateOf := func(store beads.Store, id string) string {
+		t.Helper()
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got.Metadata["gc.idem.state"]
+	}
+	work, binding := beads.NewMemStore(), beads.NewMemStore()
+	inWork, inBinding := seedOrphan(work), seedOrphan(binding)
+	cs := &controllerState{cityPath: cityPath, cityBeadStore: work, storageRoutes: splitRoutes(binding), cfg: &config.City{}}
+	if err := cs.sweepOrphanRigProvisions(context.Background()); err != nil {
+		t.Fatalf("sweep = %v", err)
+	}
+	if state := stateOf(work, inWork); state != "rolled_back" {
+		t.Errorf("the work store's orphan state = %q, want rolled_back: the sweep did not read the city work store", state)
+	}
+	if state := stateOf(binding, inBinding); state != "in_flight" {
+		t.Errorf("the binding's record state = %q, want in_flight: the sweep read the binding", state)
 	}
 }

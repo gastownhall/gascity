@@ -55,6 +55,9 @@ jobs:
           WORKER_MODE: measure
           RBE_WORKER_DIR: ${{ steps.rbe-worker.outputs.dir }}
           RBE_WORKER_REVISION: ${{ steps.rbe-worker.outputs.sha }}
+          # As a pool worker provisions: Go and dolt from the mirror first
+          # (rbe-worker-pool.yml's RBE_DIST_MIRROR comment).
+          RBE_DIST_MIRROR: ${{ vars.RBE_DIST_MIRROR || '' }}
         run: '"$RBE_WORKER_DIR/blacksmith-worker.sh"'
       # Fresh-on-drift (rbe-reexecution-design.md S3c): what the pool's host is,
       # finer than worker-env, which keys some tools at major version only: every

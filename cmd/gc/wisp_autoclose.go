@@ -10,6 +10,7 @@ import (
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/sling"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/spf13/cobra"
 )
 
@@ -53,9 +54,8 @@ func doWispAutoclose(beadID string, stdout, _ io.Writer) {
 	// wisps instead of silently no-op'ing (#3411).
 	// Attachments are ClassGraph wherever the just-closed bead lives; without
 	// this the hook reads an empty graph on a migrated city and reports success.
-	routeCfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
 	if store, _, ok := autocloseOwningStore(beadID, cityPath); ok {
-		doWispAutocloseWith(store, beadID, stdout, cliGraphStore(store, routeCfg, cityPath))
+		doWispAutocloseWith(store, beadID, stdout, cliStores(cityPath, store))
 		return
 	}
 
@@ -63,7 +63,7 @@ func doWispAutoclose(beadID string, stdout, _ io.Writer) {
 	if err != nil {
 		return
 	}
-	doWispAutocloseWith(store, beadID, stdout, cliGraphStore(store, routeCfg, cityPath))
+	doWispAutocloseWith(store, beadID, stdout, cliStores(cityPath, store))
 }
 
 // doWispAutocloseWith closes any open attached molecule/workflow roots and
@@ -82,13 +82,15 @@ func doWispAutoclose(beadID string, stdout, _ io.Writer) {
 // graph-class store. A closed work bead in a rig store can own graph-workflow
 // attachments that live in the graph store, so the attachment collection,
 // parked-checkpoint guard, subtree close, and spec-sidecar close all run on the
-// graph store. It is required rather than variadic: as a variadic with a
+// graph store. stores is the city's epoch (the controller's, or the one-shot
+// CLI's over the closed bead's store), whose graph handle is that graph
+// store. It is required rather than variadic: as a variadic with a
 // collapse-to-store default, both hook-path callers silently omitted it.
-func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, graphClassStore beads.GraphStore) autocloseRun {
+func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, stores storeref.Stores) autocloseRun {
 	var run autocloseRun
 	// Unwrapped for internal use: the helpers below assert optional store
 	// capabilities, which do not promote through the class wrapper.
-	graphStore := graphClassStore.Store
+	graphStore := stores.Graph().Store
 	if graphStore == nil {
 		graphStore = store
 	}
@@ -99,16 +101,28 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, gra
 		run.note(err)
 		return run
 	}
-	attachments, err := collectAttachedBeads(parent, graphStore, beads.HandlesFor(graphStore).Live)
+	// An attachment lives where it was poured: a graph-class root (a wisp, a
+	// graph.v2 workflow) in the graph store, a v1 POURED molecule (work class,
+	// `gc formula cook --attach`) on the work ledger beside the bead it is
+	// attached to. Each one is read, checked and closed in the store that holds
+	// it. A DB-child attachment shares its parent's ledger, so children are
+	// listed through the parent's own store.
+	located, err := sling.CollectAttachments(parent, beads.HandlesFor(store).Live, graphStore, store)
 	run.note(err)
-	seen := make(map[string]bool, len(attachments))
-	for _, attached := range attachments {
-		seen[attached.ID] = true
+	seen := make(map[string]bool, len(located))
+	for _, a := range located {
+		seen[a.Bead.ID] = true
 	}
-	attachments = append(attachments, collectInputConvoyWorkflowRoots(store, graphStore, parent, seen)...)
-	if err == nil || len(attachments) > 0 {
-		for _, attached := range attachments {
-			parked, err := attachedMoleculeIsParked(graphStore, attached)
+	for _, root := range collectInputConvoyWorkflowRoots(stores, store, graphStore, parent, seen) {
+		located = append(located, sling.AttachedBead{Bead: root, Store: graphStore})
+	}
+	if err == nil || len(located) > 0 {
+		for _, a := range located {
+			attached, attachedStore := a.Bead, a.Store
+			if attachedStore == nil {
+				attachedStore = graphStore
+			}
+			parked, err := attachedMoleculeIsParked(attachedStore, attached)
 			run.note(err)
 			if parked {
 				continue
@@ -125,14 +139,14 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, gra
 			if !parentStill {
 				continue
 			}
-			rootStill, err := autocloseStill(graphStore, attached.ID, func(b beads.Bead) bool {
+			rootStill, err := autocloseStill(attachedStore, attached.ID, func(b beads.Bead) bool {
 				return !convoycore.IsTerminalStatus(attached.Status) || convoycore.IsTerminalStatus(b.Status)
 			})
 			run.note(err)
 			if !rootStill {
 				continue
 			}
-			closed, err := closeAttachedWispSubtree(graphStore, attached)
+			closed, err := closeAttachedWispSubtree(attachedStore, attached)
 			if err != nil || closed == 0 {
 				continue
 			}
@@ -142,7 +156,8 @@ func doWispAutocloseWith(store beads.Store, beadID string, stdout io.Writer, gra
 	if !sourceworkflow.IsWorkflowRoot(parent) {
 		return run
 	}
-	closed, err := sourceworkflow.CloseSpecSidecarsForRoot(graphStore, parent.ID, "")
+	// graphStore may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+	closed, err := sourceworkflow.CloseSpecSidecarsForRoot(beads.GraphMolecule(beads.GraphStore{Store: graphStore}), parent.ID, "")
 	if err != nil || closed == 0 {
 		return run
 	}
@@ -186,7 +201,7 @@ func attachedMoleculeIsParked(store beads.Store, attached beads.Bead) (bool, err
 // runs every formula step in one worker session, so it materializes no step
 // beads and no workflow-finalize control bead to close its root. sling also
 // clears gc.source_bead_id for graph workflows (internal/sling/sling.go), so
-// such a wisp carries no source-bead attachment for collectAttachedBeads to
+// such a wisp carries no source-bead attachment for sling.CollectAttachments to
 // follow. Its only durable link back to the work issue is gc.input_convoy_id ->
 // the tracking convoy whose member is the issue. Without reaping the root here,
 // it outlives its closed issue, re-routes to the pool, and churns a fresh worker
@@ -196,37 +211,38 @@ func attachedMoleculeIsParked(store beads.Store, attached beads.Bead) (bool, err
 // attachedMoleculeIsParked guard, so an orchestrated workflow whose step beads
 // are still in flight stays open and closes later via its workflow-finalize
 // control instead.
-func collectInputConvoyWorkflowRoots(workStore, graphStore beads.Store, parent beads.Bead, seen map[string]bool) []beads.Bead {
+func collectInputConvoyWorkflowRoots(stores storeref.Stores, workStore, graphStore beads.Store, parent beads.Bead, seen map[string]bool) []beads.Bead {
 	// The tracks edge is co-resident with the tracking convoy, and the two
 	// owning candidates differ on a split city: every convoy is WORK class
 	// (coordclass), minted co-resident with the issue it tracks, so a
 	// post-split launch leaves the convoy + edge in the work store — while a
 	// store migrated from the single-store era can hold them on the graph
-	// side. TrackingConvoysForItem is single-store by contract, so probe both.
-	// On a single-store city graphStore == workStore and this collapses to
-	// the pre-split single read.
-	convoys, err := convoycore.TrackingConvoysForItem(workStore, parent.ID)
+	// side. TrackingConvoysOn reads one leg, so the epoch's Convoy(Tracking)
+	// plan probes both: the item's store (strict), then the graph store
+	// (federated), the graph leg dropped when it is the item's store (a
+	// single-store city's one read).
+	plan, err := stores.Plan(storeref.Convoy{Kind: storeref.ConvoyTracking, Scope: storeref.WorkRef, Near: workStore, NearRef: autocloseNearRef})
 	if err != nil {
 		return nil
 	}
-	if graphStore != workStore {
-		graphConvoys, gerr := convoycore.TrackingConvoysForItem(graphStore, parent.ID)
-		if gerr != nil {
-			// Fail closed, matching the workStore posture above: on a partial
-			// view we decline to force-close anything. Leaving the root for a
-			// later close is the recoverable direction — the redundant close
-			// paths reap it once the view is whole again — while silently
-			// narrowing this read to the work leg would force-close a root we
-			// could not fully see. This is also the refused-binding arm: a city
-			// whose split this build must not serve delivers the refusal AS the
-			// graph store (cli_storage_routes.go), so every probe errors here.
-			// The refusal itself was printed once when the verdict was taken;
-			// narrowing to the work leg would be exactly the
-			// looks-like-success answer that file exists to close.
-			return nil
-		}
-		convoys = dedupeConvoysByID(convoys, graphConvoys)
+	tracked, err := storeref.TypedUnion(plan, func(b beads.Bead) string { return b.ID }, func(leg storeref.TypedLeg) ([]beads.Bead, error) {
+		return convoycore.TrackingConvoysOn(leg.Reader, parent.ID)
+	})
+	if err != nil {
+		// Fail closed, on either leg: on a partial view we decline to
+		// force-close anything. Leaving the root for a later close is the
+		// recoverable direction — the redundant close paths reap it once the
+		// view is whole again — while silently narrowing this read to the
+		// work leg would force-close a root we could not fully see. This is
+		// also the refused-binding arm: a city whose split this build must not
+		// serve delivers the refusal AS the graph store
+		// (cli_storage_routes.go), so every probe errors here. The refusal
+		// itself was printed once when the verdict was taken; narrowing to the
+		// work leg would be exactly the looks-like-success answer that file
+		// exists to close.
+		return nil
 	}
+	convoys := tracked.Items
 	var roots []beads.Bead
 	for _, convoy := range convoys {
 		// Roots are graph-class, so the root lookup stays on the graph store
@@ -258,25 +274,6 @@ func collectInputConvoyWorkflowRoots(workStore, graphStore beads.Store, parent b
 		}
 	}
 	return roots
-}
-
-// dedupeConvoysByID merges tracking-convoy lists from the work and graph
-// stores, keeping the first occurrence of each convoy id. A convoy lives in
-// exactly one store, so overlap only happens when the two probes read the same
-// handle — the dedupe keeps the union honest there too.
-func dedupeConvoysByID(lists ...[]beads.Bead) []beads.Bead {
-	seen := make(map[string]bool)
-	var out []beads.Bead
-	for _, list := range lists {
-		for _, c := range list {
-			if seen[c.ID] {
-				continue
-			}
-			seen[c.ID] = true
-			out = append(out, c)
-		}
-	}
-	return out
 }
 
 func closeAttachedWispSubtree(store beads.Store, attached beads.Bead) (int, error) {

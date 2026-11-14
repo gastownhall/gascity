@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "control.go",
         "control_retry.go",
+        "cross_store_gate.go",
         "drain.go",
         "drain_residency.go",
         "fanout.go",
@@ -36,6 +37,20 @@ go_library(
 
 go_test(
     name = "dispatch_test",
+    # The sequential tests build embedded native Dolt stores (the cross-store
+    # gate tests): eight of them take about 85 s of the target's 93 s of test
+    # time. One test process passes in 87 s on a quiet host but overran the
+    # 300 s budget whenever the gate host was loaded, and the t.Parallel tests
+    # behind them never resumed (ga-pxiuas5). Five shards split that
+    # sequential work across five processes: the slowest shard took 31 s on a
+    # quiet host. Pinned to four cores under 16 CPU burners and 4 fsync
+    # writers, the unsharded target timed out at 300.6 s and the five shards
+    # passed in 141 s.
+    # rules_go gives test i of the declaration order to shard i % shard_count.
+    # The eight heaviest tests sit at positions 148, 149, 151, 166, 172, 173,
+    # 180 and 184, which cover all five shards. A test added or removed ahead
+    # of them shifts those positions and can pile several onto one shard
+    # again: recheck the split when the test set changes.
     srcs = [
         "attempt_control_routing_test.go",
         "call_budget_test.go",
@@ -47,9 +62,11 @@ go_test(
         "control_selfclose_test.go",
         "control_test.go",
         "crash_injection_test.go",
+        "cross_store_gate_test.go",
         "drain_conditional_test.go",
         "drain_test.go",
         "fanout_membership_test.go",
+        "finalize_blocked_source_repro_test.go",
         "finalize_quarantined_root_test.go",
         "finalize_query_timeout_tier_repro_test.go",
         "main_test.go",
@@ -58,12 +75,16 @@ go_test(
         "ralph_check_infra_retry_test.go",
         "ralph_check_unlaunchable_test.go",
         "ralph_hard_fail_test.go",
+        "ralph_iteration_drain_test.go",
+        "ralph_iteration_gate_test.go",
         "ralph_retry_iteration_test.go",
         "ralph_test.go",
         "retry_artifact_iteration_test.go",
         "retry_attempt_key_test.go",
+        "retry_clone_worktree_evidence_test.go",
         "retry_test.go",
         "root_view_test.go",
+        "runtime_ralph_finalize_test.go",
         "runtime_test.go",
         "scope_settle_test.go",
         "scope_skip_bd_batch_test.go",
@@ -73,10 +94,12 @@ go_test(
         "zz_boolptr_test.go",
     ],
     embed = [":dispatch"],
+    shard_count = 5,
     deps = [
         "//internal/beadmeta",
         "//internal/beads",
         "//internal/beads/beadstest",
+        "//internal/beads/splittest",
         "//internal/config",
         "//internal/convergence",
         "//internal/convoy",

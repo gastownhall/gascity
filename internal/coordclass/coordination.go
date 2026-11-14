@@ -19,6 +19,9 @@ const (
 	// labelSessionPrefix with a wait's session_id marks a wait without the
 	// gc:wait label (session.IsWaitBead).
 	labelSessionPrefix = "session:"
+	// metaSessionID is the metadata key naming the session a wait belongs to
+	// (session.IsWaitBead).
+	metaSessionID = "session_id"
 )
 
 // CoordinationOwned reports a coordination-class bead only its owning
@@ -47,7 +50,7 @@ func CoordinationOwnedType(typ string) bool {
 func CoordinationOwnedLabel(typ string, labels []string, meta map[string]string) int {
 	t := strings.TrimSpace(typ)
 	waitTyped := strings.EqualFold(t, typeWait) || strings.EqualFold(t, typeWaitLegacy)
-	sessionID := strings.TrimSpace(meta["session_id"])
+	sessionID := strings.TrimSpace(meta[metaSessionID])
 	for i, raw := range labels {
 		l := strings.ToLower(strings.TrimSpace(raw))
 		switch {

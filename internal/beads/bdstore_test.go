@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -2910,27 +2911,54 @@ func TestBdStoreReadyReturnsParseErrorOnMalformedJSON(t *testing.T) {
 // --- Status mapping ---
 
 func TestBdStoreStatusMapping(t *testing.T) {
+	past := time.Now().UTC().Add(-24 * time.Hour)
+	future := time.Now().UTC().Add(24 * time.Hour)
+	now := time.Now().UTC()
 	tests := []struct {
-		bdStatus           string
-		wantStatus         string
-		wantIndefiniteHold bool
+		bdStatus          string
+		bdDeferUntil      *time.Time
+		wantStatus        string
+		wantStoreDeferred bool // IndefinitelyDeferred: the store records the deferral
+		wantDeferred      bool // IsDeferred: either half of the deferral holds
 	}{
-		{"open", "open", false},
-		{"in_progress", "in_progress", false},
-		{"blocked", "open", false},
-		{"deferred", "open", true},
-		{"review", "open", false},
-		{"testing", "open", false},
-		{"closed", "closed", false},
+		{"open", nil, "open", false, false},
+		{"in_progress", nil, "in_progress", false, false},
+		{"blocked", nil, "open", false, false},
+		{"deferred", nil, "open", true, true},
+		// bd's deferred status is a deferral in its own right, dated or not
+		// (#6207): the date only says when bd's sweep may lift it, so both
+		// dated rows stay deferred until the store records the wake.
+		{"deferred", &past, "open", true, true},
+		{"deferred", &future, "open", true, true},
+		// A raw-open row keeps governing a deferral through the date alone:
+		// deferred until the date passes, with no store-recorded hold.
+		{"open", &past, "open", false, false},
+		{"open", &future, "open", false, true},
+		{"review", nil, "open", false, false},
+		{"testing", nil, "open", false, false},
+		{"closed", nil, "closed", false, false},
 	}
 	for _, tt := range tests {
-		t.Run(tt.bdStatus, func(t *testing.T) {
+		name := tt.bdStatus
+		if tt.bdDeferUntil != nil {
+			if tt.bdDeferUntil.After(now) {
+				name += "+future-defer_until"
+			} else {
+				name += "+past-defer_until"
+			}
+		}
+		t.Run(name, func(t *testing.T) {
+			row := fmt.Sprintf(`[{"id":"bd-x","title":"test","status":%q,"issue_type":"task","created_at":"2025-01-15T10:30:00Z"`, tt.bdStatus)
+			if tt.bdDeferUntil != nil {
+				row += fmt.Sprintf(`,"defer_until":%q`, tt.bdDeferUntil.Format(time.RFC3339Nano))
+			}
+			row += `}]`
 			runner := fakeRunner(map[string]struct {
 				out []byte
 				err error
 			}{
 				`bd show --json bd-x`: {
-					out: []byte(fmt.Sprintf(`[{"id":"bd-x","title":"test","status":%q,"issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`, tt.bdStatus)),
+					out: []byte(row),
 				},
 			})
 			s := beads.NewBdStore("/city", runner)
@@ -2941,8 +2969,11 @@ func TestBdStoreStatusMapping(t *testing.T) {
 			if b.Status != tt.wantStatus {
 				t.Errorf("status %q → %q, want %q", tt.bdStatus, b.Status, tt.wantStatus)
 			}
-			if b.IndefinitelyDeferred != tt.wantIndefiniteHold {
-				t.Errorf("IndefinitelyDeferred = %v, want %v", b.IndefinitelyDeferred, tt.wantIndefiniteHold)
+			if b.IndefinitelyDeferred != tt.wantStoreDeferred {
+				t.Errorf("IndefinitelyDeferred = %v, want %v", b.IndefinitelyDeferred, tt.wantStoreDeferred)
+			}
+			if beads.IsDeferred(b, now) != tt.wantDeferred {
+				t.Errorf("IsDeferred(status %q, defer %v) = %v, want %v", tt.bdStatus, tt.bdDeferUntil, beads.IsDeferred(b, now), tt.wantDeferred)
 			}
 			if b.SourceStatus != tt.bdStatus {
 				t.Errorf("SourceStatus = %q, want bd's %q", b.SourceStatus, tt.bdStatus)
@@ -3070,6 +3101,11 @@ func TestBdStorePurge(t *testing.T) {
 	if strings.Contains(args, "--dry-run") {
 		t.Errorf("args = %q, should not contain --dry-run", args)
 	}
+	// A real purge must confirm with --force: unforced bd purge only
+	// previews and exits non-zero when anything matches.
+	if !slices.Contains(gotArgs, "--force") {
+		t.Errorf("args = %q, want --force for a non-dry-run purge", args)
+	}
 	// Dir should be parent of beads dir.
 	if gotDir != "/city/rigs/fe" {
 		t.Errorf("dir = %q, want %q", gotDir, "/city/rigs/fe")
@@ -3098,8 +3134,12 @@ func TestBdStorePurgeDryRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := strings.Join(gotArgs, " ")
-	if !strings.Contains(args, "--dry-run") {
+	if !slices.Contains(gotArgs, "--dry-run") {
 		t.Errorf("args = %q, want --dry-run", args)
+	}
+	// A preview must never confirm the deletion.
+	if slices.Contains(gotArgs, "--force") {
+		t.Errorf("args = %q, dry-run must not contain --force", args)
 	}
 }
 
@@ -5392,6 +5432,30 @@ func TestBdStoreReadyRetryBoundedReturnsErrorAfterExhaustion(t *testing.T) {
 	}
 }
 
+// TestIsIssueTypeRefused pins the classifier for a store refusing a type its
+// registry does not define, however the store wrapped bd's answer.
+func TestIsIssueTypeRefused(t *testing.T) {
+	refusal := errors.New(`Error: invalid issue type "session" (valid: bug, feature, task, epic, chore, decision)`)
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"bd's answer", refusal, true},
+		{"both tiers, hard", fmt.Errorf("bd list both tiers: bd list: %w", refusal), true},
+		{"both tiers, partial", &beads.PartialResultError{Op: "bd list both tiers", Err: fmt.Errorf("bd list: %w", refusal)}, true},
+		{"a failed read is not a refusal", errors.New("bd list: dial tcp 127.0.0.1:3307: connect: connection refused"), false},
+		{"a timeout is not a refusal", errors.New("timed out after 30s"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := beads.IsIssueTypeRefused(tc.err); got != tc.want {
+				t.Fatalf("IsIssueTypeRefused(%v) = %t, want %t", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestIsTimeoutError pins the narrow timeout classifier used to distinguish a
 // store/bd query that ran out of time (a contention signal callers may safely
 // relax for idempotent work) from a genuine store-read failure or a plain
@@ -5670,5 +5734,61 @@ func TestBdStoreTxFailedUpdateIsNotWriteUnconfirmed(t *testing.T) {
 	}
 	if errors.Is(err, beads.ErrWriteUnconfirmed) {
 		t.Fatalf("Tx error = %v, want a failed write, not ErrWriteUnconfirmed", err)
+	}
+}
+
+// bdNotClaimableRefusal is bd's verbatim stderr, as the exec runner folds it
+// into the error, for `bd update <id> --claim --json` refused because the
+// bead's status is not claimable. verb is "updating" on bd's direct update path
+// and "claiming" on its proxied-server path.
+func bdNotClaimableRefusal(verb, id, status string) error {
+	label := "Error updating"
+	if verb == "claiming" {
+		label = "Error claiming"
+	}
+	return fmt.Errorf("exit status 1: %s %s: issue not claimable: status %s\n"+
+		`{"error":"1 of 1 issues failed to update","failed":[{"id":%q,"error":"%s issue: issue not claimable: status %s"}],"schema_version":1}`,
+		label, id, status, id, verb, status)
+}
+
+// TestBdStoreClaimNotClaimableRefusalReturnsFalse pins bd's status refusal as a
+// claim this caller did not win. bd refuses `update --claim` with "issue not
+// claimable: status <status>" when the bead was closed, deferred or set blocked
+// after the caller read it as ready. Like another actor holding the bead, that
+// refusal wrote nothing and leaves nothing for this caller to resolve, so Claim
+// reports ok=false with a nil error, the verdict SQLiteStore.Claim and
+// NativeDoltStore.Claim already return for an ineligible status.
+func TestBdStoreClaimNotClaimableRefusalReturnsFalse(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"closed, direct update path", bdNotClaimableRefusal("updating", "bd-42", "closed")},
+		{"deferred, direct update path", bdNotClaimableRefusal("updating", "bd-42", "deferred")},
+		{"blocked status, proxied server path", bdNotClaimableRefusal("claiming", "bd-42", "blocked")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := func(_, _ string, _ ...string) ([]byte, error) { return nil, tc.err }
+			claimed, ok, err := beads.NewBdStore("/city", runner).Claim("bd-42")
+			if err != nil {
+				t.Fatalf("Claim error = %v, want nil: a status refusal is a claim not won, not a failed write", err)
+			}
+			if ok {
+				t.Fatalf("Claim ok = true, want false; claimed=%+v", claimed)
+			}
+		})
+	}
+}
+
+// TestBdStoreClaimNonRefusalFailureStaysAnError keeps the false verdict to bd's
+// refusals: a claim that failed for any other reason is still an error.
+func TestBdStoreClaimNonRefusalFailureStaysAnError(t *testing.T) {
+	runner := func(_, _ string, _ ...string) ([]byte, error) {
+		return nil, errors.New("exit status 1: Error updating bd-42: updating: table is read only")
+	}
+	_, ok, err := beads.NewBdStore("/city", runner).Claim("bd-42")
+	if err == nil || ok {
+		t.Fatalf("Claim = (ok=%v, err=%v), want an error for a failure that is not a claim refusal", ok, err)
 	}
 }

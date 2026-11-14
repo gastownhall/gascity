@@ -34,7 +34,7 @@ func (c opsRecordingClosingStore) CloseStore() error {
 // but those opts turn on.
 func newTestOpsRecordingCheck(store beads.Store, now time.Time, opts ...rollout.ForTestOption) (*opsRecordingDoctorCheck, *atomic.Int32) {
 	var opens atomic.Int32
-	c := newOpsRecordingDoctorCheck("/no/city", nil, rollout.ForTest(opsGatesOff(opts...)...), nil)
+	c := newOpsRecordingDoctorCheck("/no/city", nil, rollout.ForTest(opsGatesOff(opts...)...), nil, nil)
 	c.open = func() (beads.Store, error) {
 		opens.Add(1)
 		return store, nil
@@ -46,6 +46,7 @@ func newTestOpsRecordingCheck(store beads.Store, now time.Time, opts ...rollout.
 		return s
 	}
 	c.clk = &clock.Fake{Time: now}
+	c.reaperScopes = nil
 	return c, &opens
 }
 
@@ -188,7 +189,7 @@ func TestOpsRecordingDoctorCheck(t *testing.T) {
 
 	t.Run("unresolved gates are not checked", func(t *testing.T) {
 		var opens atomic.Int32
-		c := newOpsRecordingDoctorCheck("/no/city", nil, rollout.ForTest(rollout.WithOpsContent(rollout.Require)), errors.New("bad [ops]"))
+		c := newOpsRecordingDoctorCheck("/no/city", nil, rollout.ForTest(rollout.WithOpsContent(rollout.Require)), errors.New("bad [ops]"), nil)
 		c.open = func() (beads.Store, error) {
 			opens.Add(1)
 			return newOpSweepStore(), nil

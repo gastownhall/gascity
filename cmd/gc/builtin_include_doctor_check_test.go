@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -198,7 +199,7 @@ provider = "file"
 		t.Fatalf("re-reading pack.toml manifest: %v", err)
 	}
 	wantGastown := config.Import{Source: gastownSource, Version: config.BundledSourcePinnedVersion(gastownSource)}
-	if got := packManifest.Imports["gastown"]; got != wantGastown {
+	if got := packManifest.Imports["gastown"]; !sameImport(got, wantGastown) {
 		t.Errorf("pack.toml import gastown after fix = %+v, want %+v (the stripped include's replacement must land)", got, wantGastown)
 	}
 
@@ -281,7 +282,7 @@ provider = "file"
 		t.Fatalf("re-reading pack.toml manifest: %v", err)
 	}
 	wantGastown := config.Import{Source: gastownSource, Version: config.BundledSourcePinnedVersion(gastownSource)}
-	if got := packManifest.Imports["gastown"]; got != wantGastown {
+	if got := packManifest.Imports["gastown"]; !sameImport(got, wantGastown) {
 		t.Errorf("pack.toml import gastown after the migrate→doctor two-step = %+v, want %+v", got, wantGastown)
 	}
 
@@ -459,16 +460,16 @@ source = ".gc/system/packs/core"
 	}
 	wantCore := config.Import{Source: coreSource, Version: config.BundledSourcePinnedVersion(coreSource)}
 	wantBd := config.Import{Source: bdSource, Version: config.BundledSourcePinnedVersion(bdSource)}
-	if got := after.Rigs[0].Imports["core"]; got != wantCore {
+	if got := after.Rigs[0].Imports["core"]; !sameImport(got, wantCore) {
 		t.Errorf("rig import core after fix = %+v, want %+v", got, wantCore)
 	}
-	if got := after.Rigs[0].Imports["bd"]; got != wantBd {
+	if got := after.Rigs[0].Imports["bd"]; !sameImport(got, wantBd) {
 		t.Errorf("rig include bd was not converted to a pinned bundled import: got %+v, want %+v", got, wantBd)
 	}
 	if len(after.Rigs[0].Includes) != 0 {
 		t.Errorf("rig includes after fix = %v, want none", after.Rigs[0].Includes)
 	}
-	if got := after.Defaults.Rig.Imports["core"]; got != wantCore {
+	if got := after.Defaults.Rig.Imports["core"]; !sameImport(got, wantCore) {
 		t.Errorf("default-rig import core after fix = %+v, want %+v", got, wantCore)
 	}
 	if got := after.Workspace.LegacyDefaultRigIncludes(); len(got) != 0 {
@@ -558,10 +559,10 @@ source = "./packs/altbd"
 	if got := after.Workspace.LegacyDefaultRigIncludes(); len(got) != 0 {
 		t.Errorf("workspace.default_rig_includes after fix = %v, want none", got)
 	}
-	if got, want := after.Defaults.Rig.Imports["core"], (config.Import{Source: "./packs/altcore"}); got != want {
+	if got, want := after.Defaults.Rig.Imports["core"], (config.Import{Source: "./packs/altcore"}); !sameImport(got, want) {
 		t.Errorf("occupied default-rig binding core after fix = %+v, want untouched %+v", got, want)
 	}
-	if got := after.Defaults.Rig.Imports["core-2"]; got != wantCore {
+	if got := after.Defaults.Rig.Imports["core-2"]; !sameImport(got, wantCore) {
 		t.Errorf("default-rig import core-2 after fix = %+v, want %+v (migrated include must land on a unique binding)", got, wantCore)
 	}
 	if len(after.Rigs) != 1 {
@@ -570,10 +571,10 @@ source = "./packs/altbd"
 	if got := after.Rigs[0].Includes; len(got) != 0 {
 		t.Errorf("rig includes after fix = %v, want none", got)
 	}
-	if got, want := after.Rigs[0].Imports["bd"], (config.Import{Source: "./packs/altbd"}); got != want {
+	if got, want := after.Rigs[0].Imports["bd"], (config.Import{Source: "./packs/altbd"}); !sameImport(got, want) {
 		t.Errorf("occupied rig binding bd after fix = %+v, want untouched %+v", got, want)
 	}
-	if got := after.Rigs[0].Imports["bd-2"]; got != wantBd {
+	if got := after.Rigs[0].Imports["bd-2"]; !sameImport(got, wantBd) {
 		t.Errorf("rig import bd-2 after fix = %+v, want %+v (migrated include must land on a unique binding)", got, wantBd)
 	}
 
@@ -649,11 +650,11 @@ source = "./packs/standards"
 	if err != nil {
 		t.Fatalf("re-reading pack.toml manifest: %v", err)
 	}
-	if got, want := packManifest.Imports["core"], (config.Import{Source: "./packs/standards"}); got != want {
+	if got, want := packManifest.Imports["core"], (config.Import{Source: "./packs/standards"}); !sameImport(got, want) {
 		t.Errorf("occupied pack.toml binding core after fix = %+v, want untouched %+v", got, want)
 	}
 	wantCore := config.Import{Source: coreSource, Version: config.BundledSourcePinnedVersion(coreSource)}
-	if got := packManifest.Imports["core-2"]; got != wantCore {
+	if got := packManifest.Imports["core-2"]; !sameImport(got, wantCore) {
 		t.Errorf("pack.toml import core-2 after fix = %+v, want %+v (required import must land on a unique binding, not be skipped)", got, wantCore)
 	}
 
@@ -797,6 +798,31 @@ transitive = false
 	}
 	if string(cityData) != cityToml {
 		t.Fatalf("Fix mutated city.toml despite the conflict:\n%s", cityData)
+	}
+}
+
+func TestImportMapsEqualIncludesAgentExclusions(t *testing.T) {
+	base := map[string]config.Import{
+		"shared": {
+			Source:        "../shared",
+			AgentsExclude: []string{"worker"},
+		},
+	}
+	if !importMapsEqual(base, map[string]config.Import{
+		"shared": {
+			Source:        "../shared",
+			AgentsExclude: []string{"worker"},
+		},
+	}) {
+		t.Fatal("importMapsEqual should accept equal agent selectors")
+	}
+	if importMapsEqual(base, map[string]config.Import{
+		"shared": {
+			Source:        "../shared",
+			AgentsExclude: []string{"keeper"},
+		},
+	}) {
+		t.Fatal("importMapsEqual must distinguish agent selectors")
 	}
 }
 
@@ -1465,6 +1491,79 @@ func TestMigrateLegacySystemPacksManifestPreservesImportOptions(t *testing.T) {
 // work this check did not own would turn an advisory warning into a hard
 // "gc doctor --fix" failure whenever an unrelated import is momentarily
 // unresolvable.
+// stubBuiltinImportFixSync stubs step 3 of the builtin-pack-imports Fix so
+// syncImports returns syncErr (or installLockedImports returns installErr).
+func stubBuiltinImportFixSync(t *testing.T, syncErr, installErr error) {
+	t.Helper()
+	prevSync := syncImports
+	prevInstall := installLockedImports
+	t.Cleanup(func() {
+		syncImports = prevSync
+		installLockedImports = prevInstall
+	})
+	syncImports = func(_ string, _ map[string]config.Import, _ packman.InstallMode) (*packman.Lockfile, error) {
+		if syncErr != nil {
+			return nil, syncErr
+		}
+		return &packman.Lockfile{Schema: packman.LockfileSchema, Packs: map[string]packman.LockedPack{}}, nil
+	}
+	installLockedImports = func(_ string) (*packman.Lockfile, error) {
+		if installErr != nil {
+			return nil, installErr
+		}
+		return &packman.Lockfile{Schema: packman.LockfileSchema, Packs: map[string]packman.LockedPack{}}, nil
+	}
+}
+
+func TestBuiltinImportDoctorCheck_FixAuthErrorReportsCredentialHint(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		matched bool
+		sync    bool
+	}{
+		{name: "sync unmatched", matched: false, sync: true},
+		{name: "sync matched", matched: true, sync: true},
+		{name: "install unmatched", matched: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_BEADS", "file")
+			dir := writeBuiltinImportTestCity(t, "[workspace]\nname = \"demo\"\n\n[beads]\nprovider = \"file\"\n")
+			authErr := authErrorSeam(tc.matched)
+			if tc.sync {
+				stubBuiltinImportFixSync(t, authErr, nil)
+			} else {
+				stubBuiltinImportFixSync(t, nil, authErr)
+			}
+			res := runDoctorFix(t, newBuiltinImportDoctorCheck(dir), dir)
+			if res.FixError != authErr.Error() {
+				t.Errorf("FixError = %q, want the unchanged error %q", res.FixError, authErr.Error())
+			}
+			if want := wantDoctorCredentialFixHint(tc.matched); res.FixHint != want {
+				t.Errorf("FixHint = %q, want the gc import install credential hint %q", res.FixHint, want)
+			}
+		})
+	}
+}
+
+func TestBuiltinImportDoctorCheck_FixNonAuthErrorKeepsHint(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := writeBuiltinImportTestCity(t, "[workspace]\nname = \"demo\"\n\n[beads]\nprovider = \"file\"\n")
+	check := newBuiltinImportDoctorCheck(dir)
+	before := check.Run(nil)
+	if before.FixHint == "" {
+		t.Fatalf("precondition: Run() FixHint is empty; result=%#v", before)
+	}
+	syncErr := errors.New("git ls-remote: exit status 1")
+	stubBuiltinImportFixSync(t, syncErr, nil)
+	res := runDoctorFix(t, check, dir)
+	if res.FixError != syncErr.Error() {
+		t.Errorf("FixError = %q, want %q", res.FixError, syncErr.Error())
+	}
+	if res.FixHint != before.FixHint {
+		t.Errorf("FixHint = %q, want the pre-fix hint %q", res.FixHint, before.FixHint)
+	}
+}
+
 func TestBuiltinImportDoctorCheck_FixSkipsResyncWhenNoOwnedMutation(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")

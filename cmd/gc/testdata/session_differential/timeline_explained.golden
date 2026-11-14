@@ -558,6 +558,8 @@ row:gc-1:state legacy="drained" v2="awake" [drain-stop-lag]
 row:gc-1:state_reason legacy="drain-ack-stop-pending" v2="" [drain-stop-lag]
 row:gc-1:status legacy="closed" v2="open" [drain-stop-lag]
 row:gc-1:synced_at legacy="T+4m0s" v2="" [§12.2#51 a7-lag]
+row:gc-1:usage_close_pending legacy="true" v2="" [drain-stop-lag]
+row:gc-1:usage_closed_at legacy="T+4m0s" v2="" [drain-stop-lag]
 runtime:s-gc-1 legacy="" v2="id=gc-1 epoch=1 token=tok-gc-1 alive attached=false" [drain-stop-lag]
 @ +4m10s
 event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"} resolved
@@ -578,6 +580,8 @@ row:gc-1:drain_intent_reason resolved
 row:gc-1:state resolved
 row:gc-1:status resolved
 row:gc-1:synced_at legacy="T+4m0s" v2="T+4m20s" [§12.2#51 a7-lag]
+row:gc-1:usage_close_pending resolved
+row:gc-1:usage_closed_at legacy="T+4m0s" v2="T+4m20s" [drain-stop-lag]
 runtime:s-gc-1 resolved
 @ +4m30s
 event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"} resolved
@@ -600,6 +604,8 @@ row:gc-1:state legacy="drained" v2="awake" [drain-stop-lag]
 row:gc-1:state_reason legacy="drain-ack-stop-pending" v2="" [drain-stop-lag]
 row:gc-1:status legacy="closed" v2="open" [drain-stop-lag]
 row:gc-1:synced_at legacy="T+0s" v2="" [§12.2#51 a7-lag]
+row:gc-1:usage_close_pending legacy="true" v2="" [drain-stop-lag]
+row:gc-1:usage_closed_at legacy="T+0s" v2="" [drain-stop-lag]
 runtime:s-gc-1 legacy="" v2="id=gc-1 epoch=1 token=tok-gc-1 alive attached=false" [drain-stop-lag]
 @ +10s
 event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"} resolved
@@ -620,6 +626,8 @@ row:gc-1:drain_intent_reason resolved
 row:gc-1:state resolved
 row:gc-1:status resolved
 row:gc-1:synced_at legacy="T+0s" v2="T+20s" [§12.2#51 a7-lag]
+row:gc-1:usage_close_pending resolved
+row:gc-1:usage_closed_at legacy="T+0s" v2="T+20s" [drain-stop-lag]
 runtime:s-gc-1 resolved
 ## 1 a minute on (+1m50s)
 @ +30s
@@ -642,6 +650,8 @@ row:gc-1:state legacy="drained" v2="awake" [drain-stop-lag]
 row:gc-1:state_reason legacy="drain-ack-stop-pending" v2="" [drain-stop-lag]
 row:gc-1:status legacy="closed" v2="open" [drain-stop-lag]
 row:gc-1:synced_at legacy="T+0s" v2="" [§12.2#51 a7-lag]
+row:gc-1:usage_close_pending legacy="true" v2="" [drain-stop-lag]
+row:gc-1:usage_closed_at legacy="T+0s" v2="" [drain-stop-lag]
 runtime:s-gc-1 legacy="" v2="id=gc-1 epoch=1 token=tok-gc-1 alive attached=false" [drain-stop-lag]
 @ +10s
 event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"} resolved
@@ -662,6 +672,8 @@ row:gc-1:drain_intent_reason resolved
 row:gc-1:state resolved
 row:gc-1:status resolved
 row:gc-1:synced_at legacy="T+0s" v2="T+20s" [§12.2#51 a7-lag]
+row:gc-1:usage_close_pending resolved
+row:gc-1:usage_closed_at legacy="T+0s" v2="T+20s" [drain-stop-lag]
 runtime:s-gc-1 resolved
 ## 1 past the skewed wake's grace (+16m30s)
 @ +30s
@@ -685,6 +697,8 @@ row:gc-1:state legacy="drained" v2="awake" [drain-stop-lag]
 row:gc-1:state_reason legacy="drain-ack-stop-pending" v2="" [drain-stop-lag]
 row:gc-1:status legacy="closed" v2="open" [drain-stop-lag]
 row:gc-1:synced_at legacy="T+7m0s" v2="" [§12.2#51 a7-lag]
+row:gc-1:usage_close_pending legacy="true" v2="" [drain-stop-lag]
+row:gc-1:usage_closed_at legacy="T+7m0s" v2="" [drain-stop-lag]
 runtime:s-gc-1 legacy="" v2="id=gc-1 epoch=1 token=tok-gc-1 alive attached=false" [drain-stop-lag]
 @ +7m10s
 event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"} resolved
@@ -705,6 +719,8 @@ row:gc-1:drain_intent_reason resolved
 row:gc-1:state resolved
 row:gc-1:status resolved
 row:gc-1:synced_at legacy="T+7m0s" v2="T+7m20s" [§12.2#51 a7-lag]
+row:gc-1:usage_close_pending resolved
+row:gc-1:usage_closed_at legacy="T+7m0s" v2="T+7m20s" [drain-stop-lag]
 runtime:s-gc-1 resolved
 @ +7m30s
 event:session.stopped worker {"reason":"drain acknowledged","session_id":"gc-1","template":"worker"} resolved

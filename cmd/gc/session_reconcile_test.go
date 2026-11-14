@@ -2579,11 +2579,12 @@ func TestHealStatePatchProjectsRuntimeLiveness(t *testing.T) {
 				return b
 			}(),
 			want: map[string]string{
-				"state":                      "asleep",
-				"sleep_reason":               string(sessionpkg.SleepReasonRuntimeMissing),
-				"session_key":                "",
-				"started_config_hash":        "",
-				"continuation_reset_pending": "true",
+				"state":                        "asleep",
+				"sleep_reason":                 string(sessionpkg.SleepReasonRuntimeMissing),
+				"session_key":                  "",
+				"started_config_hash":          "",
+				"continuation_reset_pending":   "true",
+				sessionpkg.ResetCommittedAtKey: "",
 				// Priming markers share started_config_hash's lifetime (S19
 				// Stage 2 C-6): the continuation reset clears them too.
 				sessionpkg.PrimedAtMetadataKey:           "",
@@ -2665,13 +2666,14 @@ func TestHealStatePatchProjectsRuntimeLiveness(t *testing.T) {
 				return b
 			}(),
 			want: map[string]string{
-				"state":                      "asleep",
-				"sleep_reason":               string(sessionpkg.SleepReasonRuntimeMissing),
-				"session_key":                "",
-				"started_config_hash":        "",
-				"continuation_reset_pending": "true",
-				"pending_create_claim":       "",
-				"pending_create_started_at":  "",
+				"state":                        "asleep",
+				"sleep_reason":                 string(sessionpkg.SleepReasonRuntimeMissing),
+				"session_key":                  "",
+				"started_config_hash":          "",
+				"continuation_reset_pending":   "true",
+				"pending_create_claim":         "",
+				"pending_create_started_at":    "",
+				sessionpkg.ResetCommittedAtKey: "",
 				// Priming markers share started_config_hash's lifetime (S19
 				// Stage 2 C-6): the continuation reset clears them too.
 				sessionpkg.PrimedAtMetadataKey:           "",
@@ -3141,6 +3143,56 @@ func TestFindAgentByTemplate(t *testing.T) {
 	}
 	if a := findAgentByTemplate(cfg, ""); a != nil {
 		t.Error("expected nil for empty template")
+	}
+}
+
+func TestFindSessionAgentByTemplate(t *testing.T) {
+	cfg := &config.City{
+		Rigs: []config.Rig{{Name: "rig-0"}, {Name: "rig-1"}},
+		Agents: []config.Agent{
+			{Name: "lead"},
+			{Name: "smith", Dir: "rig-1"},
+			{Name: "smith", Scope: "rig"},
+			{Name: "twin", Scope: "rig"},
+			{Name: "twin", Scope: "rig"},
+		},
+	}
+
+	for _, template := range []string{"lead", "rig-1/smith", " lead "} {
+		want := findAgentByTemplate(cfg, template)
+		if want == nil {
+			t.Fatalf("findAgentByTemplate(%q) = nil, want a configured agent", template)
+		}
+		if got := findSessionAgentByTemplate(cfg, template); got != want {
+			t.Errorf("findSessionAgentByTemplate(%q) = %p, want findAgentByTemplate's %p", template, got, want)
+		}
+	}
+
+	for _, template := range []string{"rig-0/smith", " rig-0/smith "} {
+		got := findSessionAgentByTemplate(cfg, template)
+		if got == nil {
+			t.Fatalf("findSessionAgentByTemplate(%q) = nil, want the rig-stamped copy of the generic rig agent", template)
+		}
+		if got.QualifiedName() != "rig-0/smith" || got.Scope != "rig" {
+			t.Errorf("findSessionAgentByTemplate(%q) = %q (scope %q), want rig-0/smith (scope rig)", template, got.QualifiedName(), got.Scope)
+		}
+		for i := range cfg.Agents {
+			if got == &cfg.Agents[i] {
+				t.Errorf("findSessionAgentByTemplate(%q) returned cfg.Agents[%d], want a synthesized copy", template, i)
+			}
+		}
+	}
+	if cfg.Agents[2].Dir != "" {
+		t.Errorf("generic rig agent Dir = %q after lookup, want it left unbound", cfg.Agents[2].Dir)
+	}
+
+	for _, template := range []string{"", "   ", "rig-9/smith", "rig-0/lead", "rig-0/twin", "rig-0/missing"} {
+		if got := findSessionAgentByTemplate(cfg, template); got != nil {
+			t.Errorf("findSessionAgentByTemplate(%q) = %q, want nil", template, got.QualifiedName())
+		}
+	}
+	if got := findSessionAgentByTemplate(nil, "rig-0/smith"); got != nil {
+		t.Errorf("findSessionAgentByTemplate(nil cfg) = %q, want nil", got.QualifiedName())
 	}
 }
 
@@ -3958,5 +4010,116 @@ func TestRecordFailure_ManualConversationKeepsIdentityAndAccrues(t *testing.T) {
 				t.Errorf("failure accounting changed: %#v", b.Metadata)
 			}
 		})
+	}
+}
+
+// TestHealState_KilledRuntimeExitPreservesResumeIdentity reproduces #7308: a
+// session put to sleep by `gc session kill` (sleep_reason=killed) that is
+// healed alive and then found dead must keep its resume identity, as an
+// operator kill is deliberate like drained or city-stop.
+func TestHealState_KilledRuntimeExitPreservesResumeIdentity(t *testing.T) {
+	clk := &clock.Fake{Time: time.Date(2026, 3, 29, 4, 0, 0, 0, time.UTC)}
+	session := makeBead("b1", map[string]string{
+		"state":               "asleep",
+		"sleep_reason":        "killed",
+		"session_key":         "resume-key",
+		"started_config_hash": "config-hash",
+	})
+
+	for k, v := range healStatePatchFromBead(session, true, clk, 0) {
+		session.Metadata[k] = v
+	}
+	if got := session.Metadata["state"]; got != "awake" {
+		t.Fatalf("after alive heal: state = %q, want awake", got)
+	}
+
+	dead := healStatePatchFromBead(session, false, clk, 0)
+	if v, ok := dead["session_key"]; ok && v == "" {
+		t.Errorf("dead heal cleared session_key; patch = %v", dead)
+	}
+	if v, ok := dead["started_config_hash"]; ok && v == "" {
+		t.Errorf("dead heal cleared started_config_hash; patch = %v", dead)
+	}
+	if dead["continuation_reset_pending"] == "true" {
+		t.Errorf("dead heal set continuation_reset_pending; patch = %v", dead)
+	}
+}
+
+// TestIsUnknownStateInfo pins the population the controller skips as a state
+// it does not manage: every known state and a drain-ack stop-pending row are
+// managed, and the rest (this binary's own archived, closing and plain
+// draining rows, a padded state, a newer version's state) are skipped. The
+// census flag v2 acts on and the v2-migration count agree with it, and
+// unknownStateRefusal refuses each skipped row and no managed one, naming the
+// raw state and the close that releases the row (the rows it spares beyond
+// these: TestUnknownStateRefusalSparesRowsTheReconcilerDoesNotSkip).
+func TestIsUnknownStateInfo(t *testing.T) {
+	var rows []sessionpkg.Info
+	for state := range knownSessionStates {
+		rows = append(rows, sessionpkg.Info{ID: "gc-1", MetadataState: state})
+	}
+	rows = append(rows, sessionpkg.Info{ID: "gc-1", MetadataState: "draining", StateReason: sessionpkg.DrainAckStopPendingReason})
+	managed := len(rows)
+	for _, state := range []string{"archived", "closing", "draining", " active ", "future-state"} {
+		rows = append(rows, sessionpkg.Info{ID: "gc-1", MetadataState: state})
+	}
+	for i, info := range rows {
+		want := i >= managed
+		if got := isUnknownStateInfo(info); got != want {
+			t.Errorf("isUnknownStateInfo(state=%q reason=%q) = %v, want %v", info.MetadataState, info.StateReason, got, want)
+		}
+		if got := newCensusRow(rowKey{}, info).UnknownState; got != want {
+			t.Errorf("census UnknownState(state=%q reason=%q) = %v, want %v", info.MetadataState, info.StateReason, got, want)
+		}
+		if _, got, _, _ := v2SessionMigrationKeys(nil, "", info); got != want {
+			t.Errorf("v2SessionMigrationKeys unknown(state=%q reason=%q) = %v, want %v", info.MetadataState, info.StateReason, got, want)
+		}
+		why := unknownStateRefusal(info)
+		if (why != "") != want {
+			t.Errorf("unknownStateRefusal(state=%q reason=%q) = %q, want refused = %v", info.MetadataState, info.StateReason, why, want)
+		}
+		if want && (!strings.Contains(why, fmt.Sprintf("%q", info.MetadataState)) || !strings.Contains(why, "gc session close gc-1")) {
+			t.Errorf("unknownStateRefusal(state=%q) = %q, want the raw state and `gc session close gc-1` named", info.MetadataState, why)
+		}
+	}
+}
+
+// TestUnknownStateRefusalSparesRowsTheReconcilerDoesNotSkip: the refusal
+// answers only an open row the reconciler leaves alone. A closed row is
+// answered as closed, whatever close code its state carries, and an open
+// interrupted close of this binary's own (a gated close code, or a
+// passthrough sleep reason in the shape its pool close writes) is finished,
+// or rolled back to asleep, rather than skipped, though the census still
+// counts it unknown (v2 refuses to boot over one). The same passthrough code
+// on a configured named row is no interrupted close: the reconciler skips it,
+// and it is refused. Kills a refusal that sends an operator to close an
+// already-closed row, or a session the reconciler is about to restore.
+func TestUnknownStateRefusalSparesRowsTheReconcilerDoesNotSkip(t *testing.T) {
+	for _, state := range []string{"gc_swept", "future-state"} {
+		if why := unknownStateRefusal(sessionpkg.Info{ID: "gc-1", MetadataState: state, Closed: true}); why != "" {
+			t.Errorf("unknownStateRefusal(closed, state=%q) = %q, want none", state, why)
+		}
+	}
+	interrupted := []sessionpkg.Info{{ID: "gc-1", MetadataState: "idle", SleepReason: "idle", PoolManaged: true}}
+	for code := range interruptedCloseGates {
+		interrupted = append(interrupted, sessionpkg.Info{ID: "gc-1", MetadataState: code})
+	}
+	for _, info := range interrupted {
+		if _, ok := interruptedCloseGate(info); !ok {
+			t.Fatalf("fixture state=%q is not an interrupted close", info.MetadataState)
+		}
+		if !isUnknownStateInfo(info) || !newCensusRow(rowKey{}, info).UnknownState {
+			t.Errorf("interrupted close state=%q not counted unknown by the census", info.MetadataState)
+		}
+		if why := unknownStateRefusal(info); why != "" {
+			t.Errorf("unknownStateRefusal(interrupted close state=%q) = %q, want none", info.MetadataState, why)
+		}
+	}
+	named := sessionpkg.Info{ID: "gc-1", MetadataState: "idle", SleepReason: "idle", PoolManaged: true, ConfiguredNamedSession: true}
+	if _, ok := interruptedCloseGate(named); ok {
+		t.Fatal("fixture: a configured named row's passthrough code reads as an interrupted close")
+	}
+	if why := unknownStateRefusal(named); !strings.Contains(why, `"idle"`) || !strings.Contains(why, "gc session close gc-1") {
+		t.Errorf("unknownStateRefusal(named row, state=%q) = %q, want the state and `gc session close gc-1` named", named.MetadataState, why)
 	}
 }

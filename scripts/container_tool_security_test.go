@@ -69,9 +69,9 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 
 func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	const (
-		bdSourceRef    = "9b65b9e198acbcc98e7fd3a87a5d55baa065a572"
-		bdSourceSHA256 = "f176a649d688893026de5a7f4b74af51cf7737ad69fd4fcde3295b123407928f"
-		bdBuild        = "9b65b9e198a"
+		bdSourceRef    = "7ef2fd05eb0cd3bdbde051f93cfc14ccf270cdde"
+		bdSourceSHA256 = "fcf0e7a23c889b24a6c4cc0edb5053a602d3a410dc1fb0c6efaa5574c3118682"
+		bdBuild        = "7ef2fd05eb0"
 		bdBranch       = "HEAD"
 	)
 
@@ -101,6 +101,8 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		goModPinnedArg{"GRPC_VERSION", "google.golang.org/grpc", "v1.83.2"},
 		goModPinnedArg{"THRIFT_VERSION", "github.com/apache/thrift", "v0.24.0"},
 		goModPinnedArg{"XNET_VERSION", "golang.org/x/net", "v0.60.0"},
+		goModPinnedArg{"JOSE_VERSION", "github.com/go-jose/go-jose/v4", "v4.1.6"},
+		goModPinnedArg{"COMPRESS_VERSION", "github.com/klauspost/compress", "v1.20.2"},
 	)
 	for _, want := range []string{
 		"ARG BD_VERSION=" + bdVersion,
@@ -116,6 +118,10 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		`go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/apache/thrift v${THRIFT_VERSION} "`,
 		`go get "golang.org/x/net@v${XNET_VERSION}"`,
 		`go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/net v${XNET_VERSION} "`,
+		`go get "github.com/go-jose/go-jose/v4@v${JOSE_VERSION}"`,
+		`go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/go-jose/go-jose/v4 v${JOSE_VERSION} "`,
+		`go get "github.com/klauspost/compress@v${COMPRESS_VERSION}"`,
+		`go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/klauspost/compress v${COMPRESS_VERSION} "`,
 		`CGO_ENABLED=1 go build`,
 		`-tags="gms_pure_go"`,
 		`-X main.Version=${bd_version}`,
@@ -162,9 +168,11 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		"mcp>=1.30.0",
 		"urllib3>=2.8.0",
 		"fsspec>=2026.6.0",
-		"litellm>=1.89.7",
+		"litellm>=1.106.5",
 		"filelock>=3.29.0,<4",
 		"opentelemetry-api>=1.45.1",
+		"dnspython>=2.9.0",
+		"joserfc>=1.7.5",
 	} {
 		if !strings.Contains(input, want) {
 			t.Errorf("mcp-agent-mail input requirements missing security floor %q", want)
@@ -175,6 +183,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		"cryptography>=50.0.0",
 		"pyjwt>=2.15.0",
 		"fastmcp>=3.4.10",
+		"authlib>=1.9.1",
 	} {
 		if !strings.Contains(overrides, want) {
 			t.Errorf("mcp-agent-mail overrides missing security floor %q", want)
@@ -192,11 +201,14 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		"pyjwt==2.15.1 \\",
 		"urllib3==2.8.0 \\",
 		"fsspec==2026.6.0 \\",
-		"litellm==1.89.7 \\",
+		"litellm==1.106.6 \\",
+		"joserfc==1.7.7 \\",
 		"fastmcp==3.4.10 \\",
 		"fastmcp-slim==3.4.10 \\",
 		"filelock==3.29.0 \\",
 		"opentelemetry-api==1.45.1 \\",
+		"authlib==1.9.1 \\",
+		"dnspython==2.9.0 \\",
 		// Lock-only CVE bumps: no input floor, so this pin is their only guard.
 		"bleach==6.4.0 \\",
 		"h2==4.4.1 \\",
@@ -221,16 +233,26 @@ const mcpMailFilelockExitRegression = ".github/scripts/mcp-mail-filelock-exit-re
 // the "name==version \" line uv writes. Names compare case-insensitively.
 func lockPinnedVersion(t *testing.T, lock, dist string) string {
 	t.Helper()
+	version, ok := lockPin(lock, dist)
+	if !ok {
+		t.Fatalf("%s does not pin %s", mcpMailLockPath, dist)
+	}
+	return version
+}
+
+// lockPin returns the version a hashed requirements lock pins for dist and
+// whether it pins dist at all, matching the "name==version \" line uv writes.
+// Names compare case-insensitively.
+func lockPin(lock, dist string) (string, bool) {
 	for _, line := range strings.Split(lock, "\n") {
 		name, rest, ok := strings.Cut(line, "==")
 		if !ok || !strings.EqualFold(name, dist) {
 			continue
 		}
 		version, _, _ := strings.Cut(rest, " ")
-		return version
+		return version, true
 	}
-	t.Fatalf("%s does not pin %s", mcpMailLockPath, dist)
-	return ""
+	return "", false
 }
 
 // releaseLine returns the first n numeric components of a dotted release.
@@ -325,13 +347,33 @@ func TestContainerScanRunsMCPMailFilelockExitRegression(t *testing.T) {
 const mcpMailSitePackages = "usr/local/lib/python3.12/site-packages/"
 
 // reviewedMCPMailWaivers maps each Python-package waiver for the gc-mcp-mail
-// image to the distribution it covers. Both advisories are fixed only on the
+// image to the distribution it covers. Every advisory is fixed only on the
 // lines TestMCPMailImageHoldsFilelockAndGitPythonOnSafeLines keeps the image
-// off, and neither is reachable from the image; each statement in
-// .trivyignore.yaml gives the reasoning.
+// off. All but the deployment-scoped ones (mcpMailDeploymentScopedWaivers) are
+// unreachable from the image; each statement in .trivyignore.yaml gives the
+// reasoning.
 var reviewedMCPMailWaivers = map[string]string{
-	"CVE-2026-112940": "filelock",  // GHSA-v4x8-3wr5-3wq8, ReadWriteLock only
-	"CVE-2026-114145": "gitpython", // GHSA-83vg-56qc-22m7, submodule clone only
+	"CVE-2026-112940":     "filelock",  // GHSA-v4x8-3wr5-3wq8, ReadWriteLock only
+	"CVE-2026-114145":     "gitpython", // GHSA-83vg-56qc-22m7, submodule clone only
+	"GHSA-23mf-xhv8-69c2": "gitpython", // Head.checkout only
+	"GHSA-f9j4-qggq-h239": "gitpython", // Remote.pull only
+	"GHSA-w8jc-g24h-crhw": "gitpython", // Git.ls_remote, Repo.merge_base, IndexFile.move only
+	"GHSA-m64x-33q8-m5h7": "gitpython", // reachable; deployment-scoped, see below
+}
+
+// mcpMailDeploymentPath is the shipped manifest that runs the gc-mcp-mail image.
+const mcpMailDeploymentPath = "contrib/k8s/mcp-mail-deployment.yaml"
+
+// mcpMailDeploymentScopedWaivers names the mail waivers whose advisory IS
+// reachable from mcp-agent-mail and is accepted only because of how
+// mcpMailDeploymentPath runs the image. GHSA-m64x-33q8-m5h7's regex DoS runs
+// whenever mcp-agent-mail reads a commit, and _latest_git_activity reads
+// commits from the client-supplied workspace path; the manifest mounts no
+// workspace repos, so no foreign commit is visible in the pod. Each statement
+// must name the manifest, and TestMCPMailDeploymentMountsNoWorkspaceRepos holds
+// the manifest to that premise.
+var mcpMailDeploymentScopedWaivers = map[string]bool{
+	"GHSA-m64x-33q8-m5h7": true,
 }
 
 // TestTrivyIgnoreMCPMailWaiversNameTheLockedRelease holds every gc-mcp-mail
@@ -366,6 +408,9 @@ func TestTrivyIgnoreMCPMailWaiversNameTheLockedRelease(t *testing.T) {
 			if len(v.Paths) != 1 || len(v.Purls) != 0 {
 				t.Errorf("%s waives the mail package together with paths %q and purls %q; scope it to the one dist-info path", v.ID, v.Paths, v.Purls)
 			}
+			if mcpMailDeploymentScopedWaivers[v.ID] && !strings.Contains(v.Statement, mcpMailDeploymentPath) {
+				t.Errorf("%s is reachable from mcp-agent-mail and waived only for the shipped deployment; its statement must name %s, the premise it rests on", v.ID, mcpMailDeploymentPath)
+			}
 			found[v.ID] = true
 		}
 	}
@@ -373,6 +418,144 @@ func TestTrivyIgnoreMCPMailWaiversNameTheLockedRelease(t *testing.T) {
 		if !found[id] {
 			t.Errorf(".trivyignore.yaml must waive %s for the locked %s dist-info path while the lock stays on the line that carries it", id, dist)
 		}
+	}
+}
+
+// mcpMailDeploymentMounts is the complete set of volume mounts the shipped
+// gc-mcp-mail deployment may carry: the mail store and scratch space, keyed by
+// volume name with the mount path each must use.
+var mcpMailDeploymentMounts = map[string]string{
+	"mail-data": "/var/lib/mcp-mail",
+	"tmp":       "/tmp",
+}
+
+// mcpMailDeployment is the part of mcpMailDeploymentPath the workspace guard reads.
+type mcpMailDeployment struct {
+	Spec struct {
+		Template struct {
+			Spec struct {
+				Containers     []mcpMailContainer `yaml:"containers"`
+				InitContainers []mcpMailContainer `yaml:"initContainers"`
+				Volumes        []struct {
+					Name     string         `yaml:"name"`
+					HostPath map[string]any `yaml:"hostPath"`
+				} `yaml:"volumes"`
+			} `yaml:"spec"`
+		} `yaml:"template"`
+	} `yaml:"spec"`
+}
+
+type mcpMailContainer struct {
+	Name            string `yaml:"name"`
+	SecurityContext struct {
+		ReadOnlyRootFilesystem bool `yaml:"readOnlyRootFilesystem"`
+	} `yaml:"securityContext"`
+	VolumeMounts []struct {
+		Name      string `yaml:"name"`
+		MountPath string `yaml:"mountPath"`
+	} `yaml:"volumeMounts"`
+}
+
+// mcpMailDeploymentWorkspaceExposures reports every way a parsed deployment
+// could put a git repository the mail server did not write where
+// mcp-agent-mail's _latest_git_activity can open it: a mount beyond
+// mcpMailDeploymentMounts, a volume beyond them, a hostPath volume, or a
+// writable root filesystem.
+func mcpMailDeploymentWorkspaceExposures(dep mcpMailDeployment) []string {
+	var found []string
+	pod := dep.Spec.Template.Spec
+	if len(pod.Containers) == 0 {
+		found = append(found, "the deployment declares no containers")
+	}
+	for _, c := range append(slices.Clone(pod.Containers), pod.InitContainers...) {
+		if !c.SecurityContext.ReadOnlyRootFilesystem {
+			found = append(found, fmt.Sprintf("container %q does not set readOnlyRootFilesystem: true", c.Name))
+		}
+		for _, m := range c.VolumeMounts {
+			if want, ok := mcpMailDeploymentMounts[m.Name]; !ok || m.MountPath != want {
+				found = append(found, fmt.Sprintf("container %q mounts volume %q at %q", c.Name, m.Name, m.MountPath))
+			}
+		}
+	}
+	for _, v := range pod.Volumes {
+		if _, ok := mcpMailDeploymentMounts[v.Name]; !ok {
+			found = append(found, fmt.Sprintf("volume %q is not one of the reviewed mail volumes", v.Name))
+		}
+		if v.HostPath != nil {
+			found = append(found, fmt.Sprintf("volume %q is a hostPath volume", v.Name))
+		}
+	}
+	return found
+}
+
+// TestMCPMailDeploymentMountsNoWorkspaceRepos enforces the premise of the
+// deployment-scoped mail waivers (mcpMailDeploymentScopedWaivers). GitPython
+// 3.1.62's parse_actor_and_date backtracks quadratically on a crafted commit,
+// and mcp-agent-mail reads commits from the client-supplied workspace path, so
+// the image is exposed as soon as the pod can see a repository it did not write.
+// The shipped manifest mounts only the mail store and /tmp on a read-only root.
+// A change that mounts anything else must revisit those waivers first.
+func TestMCPMailDeploymentMountsNoWorkspaceRepos(t *testing.T) {
+	var dep mcpMailDeployment
+	if err := yaml.Unmarshal([]byte(readFile(t, repoRoot(t), mcpMailDeploymentPath)), &dep); err != nil {
+		t.Fatalf("parsing %s: %v", mcpMailDeploymentPath, err)
+	}
+	for _, f := range mcpMailDeploymentWorkspaceExposures(dep) {
+		t.Errorf("%s: %s; the deployment-scoped GitPython waivers in .trivyignore.yaml assume the pod sees no workspace repos, so revisit them before changing this", mcpMailDeploymentPath, f)
+	}
+}
+
+// TestMCPMailDeploymentGuardFlagsWorkspaceExposures drives the deployment guard
+// with a manifest that breaks the premise every way it can, because the shipped
+// manifest alone cannot show the guard catches anything.
+func TestMCPMailDeploymentGuardFlagsWorkspaceExposures(t *testing.T) {
+	const manifest = `
+spec:
+  template:
+    spec:
+      initContainers:
+      - name: seed
+        securityContext:
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+      containers:
+      - name: mcp-mail
+        securityContext:
+          readOnlyRootFilesystem: false
+        volumeMounts:
+        - name: mail-data
+          mountPath: /var/lib/mcp-mail
+        - name: tmp
+          mountPath: /srv
+      volumes:
+      - name: mail-data
+        hostPath:
+          path: /home/agent/repo
+      - name: tmp
+        emptyDir: {}
+      - name: workspace
+        emptyDir: {}
+`
+	var dep mcpMailDeployment
+	if err := yaml.Unmarshal([]byte(manifest), &dep); err != nil {
+		t.Fatalf("parsing test manifest: %v", err)
+	}
+	found := mcpMailDeploymentWorkspaceExposures(dep)
+	for _, want := range []string{
+		`container "mcp-mail" does not set readOnlyRootFilesystem: true`,
+		`container "seed" mounts volume "workspace" at "/workspace"`,
+		`container "mcp-mail" mounts volume "tmp" at "/srv"`,
+		`volume "mail-data" is a hostPath volume`,
+		`volume "workspace" is not one of the reviewed mail volumes`,
+	} {
+		if !slices.Contains(found, want) {
+			t.Errorf("mcpMailDeploymentWorkspaceExposures() did not report %q; got %q", want, found)
+		}
+	}
+	if len(found) != 5 {
+		t.Errorf("mcpMailDeploymentWorkspaceExposures() = %q, want exactly the five exposures", found)
 	}
 }
 
@@ -401,9 +584,34 @@ func TestMCPMailImageUpgradesPatchedOSPackages(t *testing.T) {
 		// gzip CVE-2026-41992; libpcre2-8-0 CVE-2026-86145 and CVE-2026-89161;
 		// libsqlite3-0 CVE-2026-11822 and CVE-2026-11824.
 		"gzip", "libpcre2-8-0", "libsqlite3-0",
+		// apt set, CVE-2026-109518, fixed in 3.0.4.
+		"apt", "libapt-pkg7.0",
 	} {
 		if !strings.Contains(upgrade, "\n    "+pkg+" \\") {
 			t.Errorf("contrib/k8s/Dockerfile.mail --only-upgrade list missing %q", pkg)
+		}
+	}
+}
+
+// TestAgentBaseImageUpgradesPatchedOSPackages guards the --only-upgrade list in
+// Dockerfile.base, which every Ubuntu image (gc-agent-base, gc-agent,
+// gc-controller) inherits. As in Dockerfile.mail, the base image is pinned by
+// digest, so a CVE in a package the base already ships is only cleared by naming
+// the package: the plain install leaves an installed package where it is.
+func TestAgentBaseImageUpgradesPatchedOSPackages(t *testing.T) {
+	dockerfile := readFile(t, repoRoot(t), "contrib/k8s/Dockerfile.base")
+
+	_, upgrade, ok := strings.Cut(dockerfile, "&& apt-get install -y --no-install-recommends --only-upgrade \\")
+	if !ok {
+		t.Fatal("contrib/k8s/Dockerfile.base no longer upgrades any pinned-base OS package")
+	}
+	upgrade, _, _ = strings.Cut(upgrade, "&& rm -rf /var/lib/apt/lists/*")
+	for _, pkg := range []string{
+		// apt set, CVE-2026-109518, fixed in 2.8.4ubuntu0.1.
+		"apt", "libapt-pkg6.0t64",
+	} {
+		if !strings.Contains(upgrade, "\n    "+pkg+" \\") {
+			t.Errorf("contrib/k8s/Dockerfile.base --only-upgrade list missing %q", pkg)
 		}
 	}
 }
@@ -449,7 +657,8 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 		goModPinnedArg{"XTEXT_VERSION", "golang.org/x/text", "v0.42.0"},
 		goModPinnedArg{"XMOD_VERSION", "golang.org/x/mod", "v0.41.0"},
 		goModPinnedArg{"THRIFT_VERSION", "github.com/apache/thrift", "v0.24.0"},
-		goModPinnedArg{"COMPRESS_VERSION", "github.com/klauspost/compress", "v1.18.7"},
+		goModPinnedArg{"COMPRESS_VERSION", "github.com/klauspost/compress", "v1.20.2"},
+		goModPinnedArg{"JOSE_VERSION", "github.com/go-jose/go-jose/v4", "v4.1.6"},
 	)
 
 	// gh needs x/text, x/net and x/mod. Its pinned source selects x/crypto v0.53.0, below
@@ -461,7 +670,8 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 		"golang.org/x/net":  "XNET_VERSION",
 		"golang.org/x/mod":  "XMOD_VERSION",
 		// Both pinned sources select klauspost/compress below 1.18.7 (gh v1.18.6,
-		// Dolt v1.18.0), which CVE-2026-63209 affects.
+		// Dolt v1.18.0), which CVE-2026-63209 affects; GO-2026-6865 affects every
+		// version below 1.20.2.
 		"github.com/klauspost/compress": "COMPRESS_VERSION",
 	}
 	doltModules := map[string]string{
@@ -470,6 +680,8 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 		"golang.org/x/text":             "XTEXT_VERSION",
 		"github.com/apache/thrift":      "THRIFT_VERSION",
 		"github.com/klauspost/compress": "COMPRESS_VERSION",
+		// Dolt's pinned source selects go-jose/v4 4.1.4 (CVE-2026-116587).
+		"github.com/go-jose/go-jose/v4": "JOSE_VERSION",
 	}
 	// Each `go get` is looked for inside its own stanza. gh and Dolt share the x/text
 	// override verbatim, so a file-wide search lets one stand in for the other and a
@@ -658,16 +870,16 @@ func TestTrivyIgnoreRejectsPathPatternAndUnscopedWaivers(t *testing.T) {
 
 // TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools enforces that the rebuilt-from-
 // source tools (bd, dolt, gh) carry no waiver at all. They are rebuilt with the Go
-// 1.27.3 toolchain, which fixes every stdlib CVE listed, and Dockerfile.base forces
+// 1.27.4 toolchain, which fixes every stdlib CVE listed, and Dockerfile.base forces
 // x/crypto, x/net, x/text and thrift forward in the gh and Dolt builds the same way
 // it forces grpc, so a waiver on those paths would let the scan gate mask a regressed
 // rebuild instead of proving the fix holds. The surviving reviewed waivers are the
-// five kubectl entries the v1.36.5 pin does not clear (CVE-2026-78667,
-// CVE-2026-78669, CVE-2026-97031, and the owner-approved CVE-2026-56851 and
-// CVE-2026-111943); kubectl is an upstream-signed prebuilt this repo installs
-// rather than builds, so nothing here can move its dependencies, and a kubectl
-// waiver outside that reviewed set fails here too. gc's module waivers
-// are enforced separately by TestTrivyIgnoreDropsGCModuleWaiversPastThreshold.
+// three kubectl entries the v1.36.6 pin does not clear (CVE-2026-78669, the
+// owner-approved CVE-2026-56851 and CVE-2026-78661); kubectl is an upstream-signed
+// prebuilt this repo installs rather than builds, so nothing here can move its
+// dependencies, and a kubectl waiver outside that reviewed set fails here too.
+// gc's module waivers are enforced separately by
+// TestTrivyIgnoreDropsGCModuleWaiversPastThreshold.
 func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 	root := repoRoot(t)
 
@@ -708,21 +920,23 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 	// Nothing rebuilt from source is waived here any more; only kubectl is, and
 	// kubectl is a prebuilt.
 	reviewedWaivers := map[string]map[string]bool{
-		"CVE-2026-78667": {"usr/local/bin/kubectl": true},
+		// No kubectl release ships x/net >= 0.60.0 yet.
 		"CVE-2026-78669": {"usr/local/bin/kubectl": true},
-		"CVE-2026-97031": {"usr/local/bin/kubectl": true},
-		// Owner-approved 2026-10-25 (code-scanning alerts #481 and #490): no kubectl
-		// release ships x/text >= 0.41.0 or Go >= 1.26.10 yet. Each statement in
-		// .trivyignore.yaml carries the reasoning.
-		"CVE-2026-56851":  {"usr/local/bin/kubectl": true},
-		"CVE-2026-111943": {"usr/local/bin/kubectl": true},
+		// Owner-approved 2026-10-25 (code-scanning alert #481): no kubectl release
+		// ships x/text >= 0.41.0 yet. The statement in .trivyignore.yaml carries the
+		// reasoning.
+		"CVE-2026-56851": {"usr/local/bin/kubectl": true},
+		// Owner-approved 2026-11-06: no kubectl release ships x/net >= 0.62.0 yet,
+		// and the x/net/html parser it fixes is not compiled into kubectl. The
+		// statement in .trivyignore.yaml carries the reasoning.
+		"CVE-2026-78661": {"usr/local/bin/kubectl": true},
 	}
 	foundReviewed := map[string]map[string]bool{}
 
 	for _, v := range doc.Vulnerabilities {
 		for _, p := range v.Paths {
 			if stdlibCVEs[v.ID] && rebuiltPaths[p] {
-				t.Errorf("%s still waives rebuilt tool %q for a Go-stdlib CVE the 1.27.3 rebuild clears; drop the path so the scan proves the fix stays effective", v.ID, p)
+				t.Errorf("%s still waives rebuilt tool %q for a Go-stdlib CVE the 1.27.4 rebuild clears; drop the path so the scan proves the fix stays effective", v.ID, p)
 			}
 			if allowedPaths, ok := reviewedWaivers[v.ID]; ok && allowedPaths[p] {
 				if foundReviewed[v.ID] == nil {

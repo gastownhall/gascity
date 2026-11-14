@@ -11,10 +11,18 @@ bazel_dep(name = "rules_go", version = "0.63.0")
 # from golangci-lint's (a comment trailing `func f(...) {` attaches to the
 # body's first statement). This tree's directives were written against
 # golangci-lint, so the patch adds golangci-lint's ranges as well.
+#
+# The second patch feeds //tools/nogo:main_repo_data (the storeclass
+# baseline) to main-repository nogo actions only, through
+# GC_NOGO_MAIN_REPO_DATA, instead of compiling it into the nogo binary: a
+# baseline edit then re-lints gascity packages, not every external one.
 single_version_override(
     module_name = "rules_go",
     patch_strip = 1,
-    patches = ["//third_party/patches:rules_go_nogo_golangci_nolint.patch"],
+    patches = [
+        "//third_party/patches:rules_go_nogo_golangci_nolint.patch",
+        "//third_party/patches:rules_go_nogo_main_repo_data.patch",
+    ],
     version = "0.63.0",
 )
 bazel_dep(name = "gazelle", version = "0.53.0")
@@ -204,7 +212,7 @@ register_toolchains("@llvm_toolchain//:all")
 go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
 go_sdk.download(
     name = "go_sdk",
-    version = "1.27.3",
+    version = "1.27.4",
 )
 use_repo(go_sdk, "go_sdk")
 
@@ -404,7 +412,7 @@ go_deps.module_override(
     patches = ["//third_party/patches:x_tools_ctrlflow_stdlib_noreturn.patch"],
     path = "golang.org/x/tools",
 )
-use_repo(go_deps, "cc_mvdan_gofumpt", "cc_mvdan_unparam", "co_honnef_go_tools", "com_github_burntsushi_toml", "com_github_cenkalti_backoff_v4", "com_github_danielgtaylor_huma_v2", "com_github_fsnotify_fsnotify", "com_github_gastownhall_gascity_packs", "com_github_go_critic_go_critic", "com_github_go_jose_go_jose_v4", "com_github_go_sql_driver_mysql", "com_github_golang_jwt_jwt_v5", "com_github_golangci_misspell", "com_github_golangci_unconvert", "com_github_google_shlex", "com_github_google_uuid", "com_github_gordonklaus_ineffassign", "com_github_gorilla_websocket", "com_github_hashicorp_go_version", "com_github_invopop_jsonschema", "com_github_kisielk_errcheck", "com_github_masterminds_semver_v3", "com_github_mgechev_revive", "com_github_oapi_codegen_oapi_codegen_v2", "com_github_oapi_codegen_runtime", "com_github_pb33f_libopenapi", "com_github_pb33f_libopenapi_validator", "com_github_rogpeppe_go_internal", "com_github_santhosh_tekuri_jsonschema_v6", "com_github_shirou_gopsutil_v4", "com_github_spf13_cobra", "com_github_spf13_pflag", "com_github_steveyegge_beads", "com_github_stretchr_testify", "in_gopkg_yaml_v3", "io_k8s_api", "io_k8s_apimachinery", "io_k8s_client_go", "io_opentelemetry_go_otel", "io_opentelemetry_go_otel_exporters_otlp_otlplog_otlploghttp", "io_opentelemetry_go_otel_exporters_otlp_otlpmetric_otlpmetrichttp", "io_opentelemetry_go_otel_log", "io_opentelemetry_go_otel_metric", "io_opentelemetry_go_otel_sdk", "io_opentelemetry_go_otel_sdk_log", "io_opentelemetry_go_otel_sdk_metric", "net_pgregory_rapid", "org_codeberg_polyfloyd_go_errorlint", "org_golang_x_mod", "org_golang_x_sync", "org_golang_x_sys", "org_golang_x_term", "org_golang_x_tools", "org_modernc_sqlite")
+use_repo(go_deps, "cc_mvdan_gofumpt", "cc_mvdan_sh_v3", "cc_mvdan_unparam", "co_honnef_go_tools", "com_github_burntsushi_toml", "com_github_cenkalti_backoff_v4", "com_github_danielgtaylor_huma_v2", "com_github_fsnotify_fsnotify", "com_github_gastownhall_gascity_packs", "com_github_go_critic_go_critic", "com_github_go_jose_go_jose_v4", "com_github_go_sql_driver_mysql", "com_github_golang_jwt_jwt_v5", "com_github_golangci_misspell", "com_github_golangci_unconvert", "com_github_google_shlex", "com_github_google_uuid", "com_github_gordonklaus_ineffassign", "com_github_gorilla_websocket", "com_github_hashicorp_go_version", "com_github_invopop_jsonschema", "com_github_itchyny_gojq", "com_github_kisielk_errcheck", "com_github_masterminds_semver_v3", "com_github_mgechev_revive", "com_github_oapi_codegen_oapi_codegen_v2", "com_github_oapi_codegen_runtime", "com_github_pb33f_libopenapi", "com_github_pb33f_libopenapi_validator", "com_github_rogpeppe_go_internal", "com_github_santhosh_tekuri_jsonschema_v6", "com_github_shirou_gopsutil_v4", "com_github_spf13_cobra", "com_github_spf13_pflag", "com_github_steveyegge_beads", "com_github_stretchr_testify", "in_gopkg_yaml_v3", "io_k8s_api", "io_k8s_apimachinery", "io_k8s_client_go", "io_opentelemetry_go_otel", "io_opentelemetry_go_otel_exporters_otlp_otlplog_otlploghttp", "io_opentelemetry_go_otel_exporters_otlp_otlpmetric_otlpmetrichttp", "io_opentelemetry_go_otel_log", "io_opentelemetry_go_otel_metric", "io_opentelemetry_go_otel_sdk", "io_opentelemetry_go_otel_sdk_log", "io_opentelemetry_go_otel_sdk_metric", "net_pgregory_rapid", "org_codeberg_polyfloyd_go_errorlint", "org_golang_x_mod", "org_golang_x_sync", "org_golang_x_sys", "org_golang_x_term", "org_golang_x_tools", "org_modernc_sqlite")
 
 # Pinned prebuilt test-only binaries for hermetic integration/acceptance tests.
 # Same artifacts the go-test CI installs via .github/scripts/install-bd-archive.sh
@@ -412,9 +420,9 @@ use_repo(go_deps, "cc_mvdan_gofumpt", "cc_mvdan_unparam", "co_honnef_go_tools", 
 http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
 http_archive(
-    name = "bd_bin_v1_3_2",
-    urls = ["https://github.com/gastownhall/beads/releases/download/v1.3.2/beads_1.3.2_linux_amd64.tar.gz"],
-    sha256 = "c6ea3281f6ff82628351b2d0967c9eb85862c8a0ec0ebc24e63e645c8b02462e",
+    name = "bd_bin_v1_3_4",
+    urls = ["https://github.com/gastownhall/beads/releases/download/v1.3.4/beads_1.3.4_linux_amd64.tar.gz"],
+    sha256 = "175c26904bde3ff9168d2282ff6b56f17b17f60c22fa5acb3dacc9fb3465303a",
     build_file_content = """
 exports_files(["bd"])
 """,
@@ -480,10 +488,28 @@ openapi_base_spec(
 # lanes no network, so packages come only from committed, integrity-pinned
 # lockfiles fetched here.
 #
-# Node.js 22, sha256-checked by rules_nodejs; it satisfies every workspace's
-# engines (dashboard >=22.13.0, contrib/openclaw-bridge >=22.22.3).
+# Node.js 24; it satisfies every workspace's engines (dashboard >=22.13.0,
+# contrib/openclaw-bridge >=24.22.1 <25, which openclaw 2026.10.8 requires).
+#
+# rules_nodejs 6.7.7 predates 24.22.3 (the 2026-11-11 security release), so
+# the archives and sha256s are listed here, copied from
+# https://nodejs.org/dist/v24.22.3/SHASUMS256.txt (signature checked against
+# github.com/nodejs/release-keys). Drop node_repositories once a rules_nodejs
+# release that knows this version is on the BCR.
 node = use_extension("@rules_nodejs//nodejs:extensions.bzl", "node")
-node.toolchain(node_version = "22.23.4")
+node.toolchain(
+    node_repositories = {
+        "24.22.3-darwin_amd64": ["node-v24.22.3-darwin-x64.tar.gz", "node-v24.22.3-darwin-x64", "977614af0504c81045e7fd85596dbca0e5f951b96681516dadafedcca8c447f7"],
+        "24.22.3-darwin_arm64": ["node-v24.22.3-darwin-arm64.tar.gz", "node-v24.22.3-darwin-arm64", "ff6e17d4874b76d272212b908cc020d6e815fba5a6c7eaaa06add725840307fd"],
+        "24.22.3-linux_amd64": ["node-v24.22.3-linux-x64.tar.xz", "node-v24.22.3-linux-x64", "4f2b175a6d53a5c617a80dba2676238a0688cef28c6da4eba35c7d844e66fcfb"],
+        "24.22.3-linux_arm64": ["node-v24.22.3-linux-arm64.tar.xz", "node-v24.22.3-linux-arm64", "6e51a2ada00f0011cc266f65d98922b403d7ad88f809ca2aa615a5fe1ce6e86c"],
+        "24.22.3-linux_ppc64le": ["node-v24.22.3-linux-ppc64le.tar.xz", "node-v24.22.3-linux-ppc64le", "c4b446699171f64763304a0bc6fb972b0fb4acb1de5358e52b4c52a95883593a"],
+        "24.22.3-linux_s390x": ["node-v24.22.3-linux-s390x.tar.xz", "node-v24.22.3-linux-s390x", "b5dbeb563ffb81946478fd765ae92efc21117e410e4e9b7d966bf59b00cee55d"],
+        "24.22.3-windows_amd64": ["node-v24.22.3-win-x64.zip", "node-v24.22.3-win-x64", "e612af99f626ab415ea225af6bce5c971feb448cb5cae250bb1c3fa50c5f7d9f"],
+        "24.22.3-windows_arm64": ["node-v24.22.3-win-arm64.zip", "node-v24.22.3-win-arm64", "b3cc74a295b39d4f273271e96f58c06dd2b35757ca12abec64c7d0598b434f14"],
+    },
+    node_version = "24.22.3",
+)
 
 # One npm_translate_lock per npm workspace, named npm_<area>, each with:
 #   * package-lock.json kept as the source of truth for local `npm ci`;

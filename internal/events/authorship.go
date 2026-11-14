@@ -130,6 +130,11 @@ var builtinAuthorship = map[string]Authorship{
 	// rows' post-images (DES-O1 D18), never the writer.
 	OpChanged:    AuthorLedger,
 	FactRecorded: AuthorLedger,
+	// The controller's bead event watcher derives both from session beads'
+	// bead.* notifications (cmd/gc session_list_events.go); a writer records
+	// only the bead.* event.
+	SessionCreated: AuthorLedger,
+	SessionClosed:  AuthorLedger,
 
 	// Worker: emitted by session and agent-facing command processes (the
 	// claim hook, mail, handoff, runtime drain, the control-dispatcher
@@ -142,6 +147,7 @@ var builtinAuthorship = map[string]Authorship{
 	SessionDrainFenceUnavailable:   AuthorWorker,
 	WorkStartedUnrecorded:          AuthorWorker,
 	SessionDemandClaimDivergence:   AuthorWorker,
+	SessionProgramStatusShadow:     AuthorWorker,
 	BeadClaimRejected:              AuthorWorker,
 	BeadClaimReleased:              AuthorWorker,
 	BeadClaimFailed:                AuthorWorker,
@@ -158,6 +164,7 @@ var builtinAuthorship = map[string]Authorship{
 	ConvoyCreated:                  AuthorWorker,
 	ConvoyClosed:                   AuthorWorker,
 	ControlStalled:                 AuthorWorker,
+	ControlCheckUnlaunchable:       AuthorWorker,
 	ControlRootSettleFailed:        AuthorWorker,
 	OrderFailed:                    AuthorWorker,
 	WorkerOperation:                AuthorWorker,
@@ -193,6 +200,7 @@ var builtinAuthorship = map[string]Authorship{
 	SessionStranded:                       AuthorController,
 	SessionPoolSlotRetiredAtDrainDeadline: AuthorController,
 	SessionUnknownState:                   AuthorController,
+	SessionConfigDriftDeferred:            AuthorController,
 	SessionWakeRefused:                    AuthorController,
 	SessionResetStalled:                   AuthorController,
 	SessionColdStartTimeout:               AuthorController,
@@ -224,7 +232,10 @@ var builtinAuthorship = map[string]Authorship{
 	WorkReleased:          AuthorController,
 	WorkReleaseUnfinished: AuthorController,
 	WorkEscalated:         AuthorController,
+	WorkRateLimited:       AuthorController,
 	BeadClaimLoopHeld:     AuthorController, // the controller's claim-loop guard (cmd/gc/claim_loop_guard.go)
+	AgentClaimsStalled:    AuthorController, // the controller's claims-stall guard (cmd/gc/claim_stall_guard.go)
+	AgentClaimsResumed:    AuthorController,
 
 	// Controller: the controller, the city, orders, async requests and the
 	// API server's integrations. city.* by D13; gc suspend, gc resume and gc
@@ -282,6 +293,9 @@ var builtinAuthorship = map[string]Authorship{
 	StorageBindingUnconverged:       AuthorController,
 	StorageBindingUncheckable:       AuthorController,
 	StorageBindingNotConfigured:     AuthorController,
+	StorageBindingStranded:          AuthorController,
+	StorageRigImport:                AuthorController,
+	StorageRigResidue:               AuthorController,
 }
 
 func init() {
