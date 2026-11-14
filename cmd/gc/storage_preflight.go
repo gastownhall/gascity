@@ -469,7 +469,8 @@ func preflightWorkStore(request storageOperatorRequest, found *preflightFindings
 		edgeErr = migrationWindowPayloadRefusal(request.CityPath, edgeErr)
 		// The same plan the migration runs, so a hold it would refuse is named
 		// before the window rather than inside it: the cross-boundary plan's
-		// edge holds (D9) and the status holds.
+		// edge holds (D9). The status holds cross as parked holds, which
+		// preflightCopyNotes lists.
 		if edgeErr == nil {
 			holdsErr = infraCopyHoldsRefusal(request.CityPath, request.Cfg, &plan, all, false)
 		}
@@ -544,6 +545,14 @@ func preflightLiveRowIDs(source infraRowLister) ([]string, error) {
 // preflightCopyNotes reports, without blocking, what a copy that clears its
 // holds does to edges the operator may care about.
 func preflightCopyNotes(stdout io.Writer, plan infraCopyPlan, unheldExternal, unheldUnread []string) {
+	// A hold bd keeps in the status crosses parked: deferred to a date no
+	// clock reaches, the hold recorded beside it for the reverse.
+	if parked := infraParkedRows(plan.rows); len(parked) > 0 {
+		preflightNote(stdout, "parked holds", fmt.Sprintf("%d open bead(s) the copy moves are parked by a status the binding cannot record; each crosses deferred until %s, out of every ready view and every read of live work, with its status recorded in %s, and stays parked: the binding refuses to claim it, as bd refuses to claim a parked bead, `gc bd update --status` gives it no status but open or closed, and no gc bd verb clears a binding bead's deferral (`gc bd undefer` and `gc bd update --defer` are refused for it). So release one here before the copy if it is to be worked after it. In the split city a parked bead can only be closed, or returned with its status by `gc storage migrate --to-work`:", len(parked), infraParkedDeferUntil.Format("2006-01-02"), beadmeta.MigratedParkedHoldMetadataKey))
+		for _, line := range parked {
+			fmt.Fprintf(stdout, "%s%s\n", preflightDetailIndent, line) //nolint:errcheck // best-effort stdout
+		}
+	}
 	// An external: reference is carried as it is, and a split city's readers
 	// enforce it, so a moved row waiting on one whose bead no store holds
 	// arrives blocked until something holds and closes it.

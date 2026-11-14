@@ -293,9 +293,10 @@ func (f *graphFrontDoor) Delete(id string) error { return f.engine.Delete(id) }
 
 // Claim is the acquire half of the ownership pair. The deployed semantics are
 // preserved exactly: same-owner reclaim is a no-op that consumes neither a
-// revision nor a claim fence, a foreign holder or a terminal status is a
-// conflict reported as ok=false rather than an error, and the engine's single
-// write connection makes concurrent claims single-winner.
+// revision nor a claim fence, a foreign holder, a terminal status or an open
+// bead deferred into the future (outside the engine's raw open) is a conflict
+// reported as ok=false rather than an error, and the engine's single write
+// connection makes concurrent claims single-winner.
 func (f *graphFrontDoor) Claim(id, assignee string) (beads.Bead, bool, error) {
 	return f.engine.Claim(id, assignee)
 }

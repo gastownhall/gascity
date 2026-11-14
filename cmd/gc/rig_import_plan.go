@@ -265,7 +265,7 @@ func planRigImport(ctx rigPlanContext) rigImportPlan {
 				// rig minted it again after the import.
 				reused = append(reused, b.ID)
 				continue
-			case h.Metadata[infraMigrationStampKey] != "" && beadCopyDifference(b, h) == "":
+			case h.Metadata[infraMigrationStampKey] != "" && beadCopyDifference(infraCarryParkedHold(b), h) == "":
 				plan.Shared = append(plan.Shared, b.ID)
 				inBinding[b.ID] = true
 				continue
@@ -415,7 +415,8 @@ func bindingIDsToProbe(snap rigSnapshot, gen coordclass.Generation) []string {
 
 // rigImportRow returns the form of b the import creates in the binding: the
 // import stamp, the scope when b carries none, the record of the boundary
-// edges not copied, and the create-time dependency shorthands stripped (as
+// edges not copied, a status hold the binding cannot record carried as a
+// parked hold, and the create-time dependency shorthands stripped (as
 // infraMigrationRow strips them).
 func rigImportRow(b beads.Bead, rig string, records []rigCrossEdgeRecord) beads.Bead {
 	metadata := make(beads.StringMap, len(b.Metadata)+3)
@@ -435,7 +436,9 @@ func rigImportRow(b beads.Bead, rig string, records []rigCrossEdgeRecord) beads.
 	b.Dependencies = nil
 	b.Needs = nil
 	b.IsBlocked = nil
-	return b
+	// A hold bd keeps in the status crosses as a parked hold, as the city
+	// copy carries it (ga-uv5rch).
+	return infraCarryParkedHold(b)
 }
 
 // rigImportHashFloor is the bd min_hash_length the rig needs once the

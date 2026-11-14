@@ -1482,12 +1482,17 @@ func (s *SQLiteStore) List(query ListQuery) ([]Bead, error) {
 	}
 	defer rows.Close() //nolint:errcheck
 	var result []Bead
+	parkedLeftOut := sqliteListLeavesOutDeferred(query)
+	now := time.Now().UTC()
 	for rows.Next() {
 		b, err := scanSQLiteBead(rows)
 		if err != nil {
 			return nil, fmt.Errorf("listing sqlite beads: %w", err)
 		}
 		if !query.Matches(b) {
+			continue
+		}
+		if parkedLeftOut && LiveOpenLeavesOut(b, now) {
 			continue
 		}
 		result = append(result, b)
@@ -1624,11 +1629,32 @@ func sqliteListSQL(q ListQuery, projection string) (string, []any) {
 
 // sqliteListCanPushLimit reports whether SQLite can apply q.Limit before the
 // Go-side ListQuery match. A source-side limit is only exact when every active
-// filter is represented by sqliteListSQL: the wisp tier and the seek boundary
-// remain residual filters over decoded Beads. Applying LIMIT before either can
-// discard a later matching row permanently.
+// filter is represented by sqliteListSQL: the wisp tier, the seek boundary and
+// a Live "open"'s deferral (sqliteListLeavesOutDeferred) remain residual
+// filters over decoded Beads. Applying LIMIT before any of them can discard a
+// later matching row permanently.
 func sqliteListCanPushLimit(q ListQuery) bool {
-	return q.TierMode != TierWisps && q.SeekAfter == nil
+	return q.TierMode != TierWisps && q.SeekAfter == nil && !sqliteListLeavesOutDeferred(q)
+}
+
+// sqliteListLeavesOutDeferred reports whether a SQLite store answers q
+// without the rows it holds open but deferred into the future.
+//
+// A Live "open" asks for the backing's own raw open (ListQuery.Live), and its
+// callers, the controller's demand reads, the seat-work gates, route recovery
+// and the orphan sweep, count every row in it as live work; to them a deferred
+// bead is parked (nativeListPushesRawOpen). bd answers by its raw status,
+// which leaves out its deferred status. A SQLite store stores only Gas City's
+// three statuses, so a deferral is its defer_until alone, and the raw open it
+// answers leaves out a row deferred into the future in the same way. A storage
+// migration carries each bead bd parks by its status (blocked, hooked, an
+// undated deferral, and the rest) into a class binding in that form. A row
+// whose deferral is due is open again, as bd's own sweep wakes it.
+//
+// Every other read keeps the row: a non-Live "open", which a CachingStore
+// answers with gc's folded open, and every other status.
+func sqliteListLeavesOutDeferred(q ListQuery) bool {
+	return q.Live && q.Status == "open"
 }
 
 // ListOpen returns non-closed beads in creation order by default.
