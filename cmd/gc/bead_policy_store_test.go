@@ -722,6 +722,33 @@ func TestBeadPolicyStoreCountUnsupportedWithoutInnerCounter(t *testing.T) {
 	}
 }
 
+// TestBeadPolicyStoreCountPassesWholeLedgerTierThrough is the wrapper half of
+// the store-health fix for gastownhall/gascity#7546: the retained-row
+// denominator (unfiltered, unlimited, closed-inclusive) must reach the inner
+// store's Counter with the caller's tier mode, because tier expansion is
+// read-shaping for active class reads and both BdStore and DoltliteReadStore
+// answer exactly TierIssues. Expanded, every controller-opened city's
+// store-health count declined the fast path and hydrated the full closed
+// history inside its 1s budget.
+func TestBeadPolicyStoreCountPassesWholeLedgerTierThrough(t *testing.T) {
+	inner := &countCaptureStore{Store: beads.NewMemStore()}
+	store := wrapStoreWithBeadPolicies(inner, &config.City{})
+
+	counter, ok := store.(beads.Counter)
+	if !ok {
+		t.Fatal("policy store does not implement beads.Counter")
+	}
+	if _, err := counter.Count(context.Background(), beads.ListQuery{AllowScan: true, IncludeClosed: true}); err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+	if inner.gotQuery.TierMode != beads.TierIssues {
+		t.Fatalf("whole-ledger Count TierMode = %v, want the caller's TierIssues passed through", inner.gotQuery.TierMode)
+	}
+	if !inner.gotQuery.IncludeClosed {
+		t.Fatal("whole-ledger Count lost IncludeClosed")
+	}
+}
+
 // witnessCaptureStore is a store that has already handed this process a row,
 // which is the state the store-health count checks a later zero against.
 type witnessCaptureStore struct {
