@@ -2280,6 +2280,7 @@ gc hook [agent] [flags]
 | Subcommand | Description |
 |------------|-------------|
 | [gc hook current](#gc-hook-current) | Print the work bead this session most recently claimed |
+| [gc hook query](#gc-hook-query) | Read one configured work-query tier without claiming |
 | [gc hook run](#gc-hook-run) | Run a managed hook command with a hard timeout |
 
 ## gc hook current
@@ -2307,6 +2308,23 @@ gc hook current [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--id-only` | bool |  | print only the bead id, with no surrounding context |
+
+## gc hook query
+
+Runs the same query policy used by gc hook for the selected tier.
+
+Used by generated prompts to keep routing policy out of the prompt body.
+Resolves the current session and city configuration at execution time, including
+pool routing, claimant exclusions, dependencies, holds and storage topology.
+A custom work_query remains the full discovery contract for every tier.
+
+Prints normalized ready-only output. Exits 0 for work, 1 for an empty result or
+a query error, and 2 when the store is unavailable. Does not claim work;
+use gc hook --claim --json to atomically claim a candidate.
+
+```
+gc hook query <work|assigned-in-progress|assigned-ready|routed-pool> [agent]
+```
 
 ## gc hook run
 

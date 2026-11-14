@@ -1040,13 +1040,13 @@ func findAgentByName(cfg *config.City, name string) (config.Agent, bool) {
 // environment variables when running inside a managed session, falls back
 // to currentRigContext when run manually.
 func buildPrimeContext(cityPath, cityName string, a *config.Agent, rigs []config.Rig, stderr io.Writer) PromptContext {
-	return buildPrimeContextFor(cityPath, cityName, a, rigs, config.QueryTopology{}, stderr)
+	return buildPrimeContextWithIdentity(cityPath, cityName, a, rigs, primeSessionIdentityFromEnv(), stderr)
 }
 
 // primeAgentPromptContext builds the PromptContext gc prime renders an
 // agent's prompt_template with, including the agent's provider identity.
 func primeAgentPromptContext(cityPath, cityName string, cfg *config.City, a *config.Agent, stderr io.Writer) PromptContext {
-	ctx := buildPrimeContextFor(cityPath, cityName, a, cfg.Rigs, cityQueryTopology(cityPath, cfg), stderr)
+	ctx := buildPrimeContext(cityPath, cityName, a, cfg.Rigs, stderr)
 	ctx.ProviderKey, ctx.ProviderDisplayName = providerInfoForAgent(a, &cfg.Workspace, cfg.Providers)
 	ctx.InstructionsFile = instructionsFileForAgent(a, &cfg.Workspace, cfg.Providers)
 	return ctx
@@ -1151,10 +1151,6 @@ func renderPrimeAgentPrompt(cityPath, cityName string, cfg *config.City, a *conf
 		cfg.PackDirsForRig(ctx.RigName), fragments, nil)
 }
 
-func buildPrimeContextFor(cityPath, cityName string, a *config.Agent, rigs []config.Rig, topo config.QueryTopology, stderr io.Writer) PromptContext {
-	return buildPrimeContextWithIdentity(cityPath, cityName, a, rigs, topo, primeSessionIdentityFromEnv(), stderr)
-}
-
 // primeSessionIdentity names the session a prompt context is built for. gc prime
 // runs inside that session and reads it from the environment; a caller that is
 // not running inside the session supplies the session's own values instead of its
@@ -1181,10 +1177,10 @@ func primeSessionIdentityFromEnv() primeSessionIdentity {
 	}
 }
 
-// buildPrimeContextWithIdentity is buildPrimeContextFor for an explicit session
+// buildPrimeContextWithIdentity is buildPrimeContext for an explicit session
 // identity.
-func buildPrimeContextWithIdentity(cityPath, cityName string, a *config.Agent, rigs []config.Rig, topo config.QueryTopology, id primeSessionIdentity, stderr io.Writer) PromptContext {
-	ctx := buildAgentPromptContext(cityPath, cityName, a, rigs, topo, stderr)
+func buildPrimeContextWithIdentity(cityPath, cityName string, a *config.Agent, rigs []config.Rig, id primeSessionIdentity, stderr io.Writer) PromptContext {
+	ctx := buildAgentPromptContext(cityPath, cityName, a, rigs, stderr)
 
 	// Agent identity: prefer GC_ALIAS, then GC_AGENT, else config.
 	if id.Alias != "" {
@@ -1220,7 +1216,7 @@ func buildPrimeContextWithIdentity(cityPath, cityName string, a *config.Agent, r
 // configured rig, and no GC_* session environment is consulted. Callers that
 // survey agents other than the current session (e.g. gc doctor) use this so
 // an ambient session identity cannot leak into another agent's render.
-func buildAgentPromptContext(cityPath, cityName string, a *config.Agent, rigs []config.Rig, topo config.QueryTopology, stderr io.Writer) PromptContext {
+func buildAgentPromptContext(cityPath, cityName string, a *config.Agent, rigs []config.Rig, stderr io.Writer) PromptContext {
 	ctx := PromptContext{
 		CityRoot:      cityPath,
 		AgentName:     a.QualifiedName(),
@@ -1238,15 +1234,10 @@ func buildAgentPromptContext(cityPath, cityName string, a *config.Agent, rigs []
 	}
 
 	ctx.DefaultBranch = defaultBranchForRig(ctx.RigName, rigs, ctx.WorkDir)
-	// The discovery placeholders run verbatim in the agent's own shell, so they
-	// render against the prompt topology — federated for a cross-store-eligible
-	// agent on a city with rigs — not the caller's topology. SlingQuery is not a
-	// discovery reader and keeps the caller's view.
-	promptTopo := promptQueryTopology(topo, a, rigs)
-	ctx.WorkQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "work_query", a.EffectiveWorkQueryFor(promptTopo), stderr)
-	ctx.AssignedInProgressQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "assigned_in_progress_query", a.EffectiveAssignedInProgressQueryFor(promptTopo), stderr)
-	ctx.AssignedReadyQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "assigned_ready_query", a.EffectiveAssignedReadyQueryFor(promptTopo), stderr)
-	ctx.RoutedPoolQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "routed_pool_query", a.EffectiveRoutedPoolQueryFor(promptTopo), stderr)
+	ctx.WorkQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "work_query", promptHookQuery(a, "work"), stderr)
+	ctx.AssignedInProgressQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "assigned_in_progress_query", promptHookQuery(a, "assigned-in-progress"), stderr)
+	ctx.AssignedReadyQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "assigned_ready_query", promptHookQuery(a, "assigned-ready"), stderr)
+	ctx.RoutedPoolQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "routed_pool_query", promptHookQuery(a, "routed-pool"), stderr)
 	ctx.SlingQuery = expandAgentCommandTemplate(cityPath, cityName, a, rigs, "sling_query", a.EffectiveSlingQuery(), stderr)
 	return ctx
 }
