@@ -112,6 +112,28 @@ func expectWord(a inputAnswer, want runtime.InputOutcome, when string) (Status, 
 	return StatusPass, ""
 }
 
+// writtenNudge reads the answer a to a nudge whose text was written to the
+// backend, whose outcome the pack cannot confirm (when says how). A pack may
+// deliver a written nudge at least once, answering exit 80 unconfirmed so gc
+// redelivers it (and de-duplicating the redelivery), or at most once,
+// answering exit 0 delivered or delivered_unobserved so gc never redelivers
+// it. Any other answer, not_sent above all (the text was written), is a
+// non-pass status.
+func writtenNudge(a inputAnswer, when string) (Status, string) {
+	if a.unsupported {
+		return StatusFail, a.op + " " + when + " returned exit 2 although input-outcome is declared; a declared op cannot be unknown"
+	}
+	w, ok := a.word()
+	switch {
+	case a.code == runtime.ExitCodeInputOutcome && ok && w == runtime.InputOutcomeUnconfirmed:
+		return StatusPass, ""
+	case a.code == 0 && (a.stdout == "" || ok && w.Success() && sessionexec.InputOutcomeAllowed(a.op, w)):
+		return StatusPass, ""
+	}
+	return StatusFail, fmt.Sprintf("%s %s answered %s, want exit %d with the outcome %q (at least once) or exit 0 delivered (at most once): the text was written",
+		a.op, when, a, runtime.ExitCodeInputOutcome, runtime.InputOutcomeUnconfirmed)
+}
+
 // startInputBox starts a box for an input probe and returns its name and a
 // cleanup, or a non-pass status.
 func startInputBox(ctx context.Context, r *runner) (string, func(), Status, string) {
@@ -290,8 +312,10 @@ func probeInputUnavailable(ctx context.Context, r *runner, hs runtime.ProtocolIn
 }
 
 // probeInputLostReplyUnknown checks that input written before its reply was
-// lost is never answered not_sent: a nudge is unconfirmed and the other ops
-// exit 1 (outcome unknown). The interrupt is sent last (drivingOps).
+// lost is never answered not_sent: a nudge is unconfirmed (at least once) or
+// delivered and typed exactly once (at most once, writtenNudge), and the
+// other ops exit 1 (outcome unknown). The interrupt is sent last
+// (drivingOps).
 func probeInputLostReplyUnknown(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
 	if ok, detail := inputDeclared(hs, true); !ok {
 		return StatusSkip, detail
@@ -301,15 +325,28 @@ func probeInputLostReplyUnknown(ctx context.Context, r *runner, hs runtime.Proto
 	if status != StatusPass {
 		return status, detail
 	}
-	if status, detail := expectWord(drive(ctx, r, inputFaultLoseReply, "nudge", name, inputText(name)), runtime.InputOutcomeUnconfirmed, "with its reply lost"); status != StatusPass {
+	nudge := drive(ctx, r, inputFaultLoseReply, "nudge", name, inputText(name))
+	if status, detail := writtenNudge(nudge, "with its reply lost"); status != StatusPass {
 		return status, detail
+	}
+	if nudge.code == 0 {
+		// Delivered is final: gc never retries it, so the text must be
+		// typed exactly once. Read before the keys, as an interrupt may end
+		// the box.
+		n, status, detail := typedCount(ctx, r, name, inputText(name))
+		if status != StatusPass {
+			return status, detail
+		}
+		if n != 1 {
+			return StatusFail, fmt.Sprintf("a nudge with its reply lost answered delivered but was typed %d times, want once: gc does not retry a delivered nudge", n)
+		}
 	}
 	for _, op := range drivingOps[1:] {
 		if a := drive(ctx, r, inputFaultLoseReply, op, name, ""); a.code != 1 {
 			return StatusFail, fmt.Sprintf("%s with its reply lost answered %s, want exit 1: the outcome is unknown", op, a)
 		}
 	}
-	return StatusPass, "a lost reply reads unconfirmed for nudge and exit 1 for the other ops"
+	return StatusPass, "a lost reply reads unconfirmed or delivered for nudge and exit 1 for the other ops"
 }
 
 // probeInputExitZeroIsDelivered checks that no exit 0 carries a non-success
@@ -333,8 +370,12 @@ func probeInputExitZeroIsDelivered(ctx context.Context, r *runner, hs runtime.Pr
 	return StatusPass, "no exit 0 carries a non-success word"
 }
 
-// probeInputHeldSendTypedOnce checks that a nudge redelivered while the first
-// is unresolved is unconfirmed and typed once in all.
+// probeInputHeldSendTypedOnce checks that a nudge held unresolved is typed
+// once in all. A pack that answers the held nudge delivered (at most once)
+// is not redelivered by gc, so no second nudge is sent; otherwise the held
+// nudge is unconfirmed (never not_sent: its text was written), and a second
+// identical nudge while it is held is unconfirmed, or delivered without
+// typing it again.
 func probeInputHeldSendTypedOnce(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
 	if ok, detail := inputDeclared(hs, true); !ok {
 		return StatusSkip, detail
@@ -345,20 +386,30 @@ func probeInputHeldSendTypedOnce(ctx context.Context, r *runner, hs runtime.Prot
 		return status, detail
 	}
 	text := inputText(name)
-	if first := drive(ctx, r, inputFaultHoldSend, "nudge", name, text); first.code != 0 && first.code != runtime.ExitCodeInputOutcome {
-		return StatusFail, fmt.Sprintf("a held nudge answered %s, want exit 0 or 80", first)
-	}
-	if status, detail := expectWord(drive(ctx, r, inputFaultHoldSend, "nudge", name, text), runtime.InputOutcomeUnconfirmed, "again while the first is held"); status != StatusPass {
+	first := drive(ctx, r, inputFaultHoldSend, "nudge", name, text)
+	if status, detail := writtenNudge(first, "while held"); status != StatusPass {
 		return status, detail
+	}
+	atMostOnce := first.code == 0
+	if !atMostOnce {
+		if status, detail := writtenNudge(drive(ctx, r, inputFaultHoldSend, "nudge", name, text), "again while the first is held"); status != StatusPass {
+			return status, detail
+		}
 	}
 	n, status, detail := typedCount(ctx, r, name, text)
 	if status != StatusPass {
 		return status, detail
 	}
+	if atMostOnce {
+		if n != 1 {
+			return StatusFail, fmt.Sprintf("a held nudge answered delivered was typed %d times after release, want once", n)
+		}
+		return StatusPass, "a held nudge answered delivered (at most once: no retry to de-duplicate) is typed once"
+	}
 	if n != 1 {
 		return StatusFail, fmt.Sprintf("a nudge sent twice while the first was held was typed %d times after release, want once", n)
 	}
-	return StatusPass, "a redelivered nudge is unconfirmed while the first is held, and typed once"
+	return StatusPass, "a redelivered nudge is de-duplicated while the first is held, and typed once"
 }
 
 // probeInputExit80OneLine checks that every exit 80 carries exactly one
