@@ -633,8 +633,17 @@ func materializeFS(src fs.FS, dst string) error {
 // files. Verifying content costs an os.ReadFile of every file in the pack, and
 // a single config load runs the full ValidateSyntheticRepo repeatedly. The
 // materialized cache is immutable for a given binary unless something rewrites
-// it, and any rewrite changes a file's size or mtime, so an unchanged signature
-// means the content verified earlier in this process is still on disk.
+// it, and any rewrite changes a file's size, mtime or ctime, so an unchanged
+// signature means the content verified earlier in this process is still on disk.
+//
+// ctime is what makes a deliberate mtime restore (os.Chtimes, cp -p, touch -r,
+// rsync --times, a restore from backup) visible: userspace cannot set it, and
+// the restoring call itself bumps it. It does NOT eliminate the accidental
+// case on a coarse-timestamp filesystem (ext3, HFS+, some network mounts),
+// where two writes inside one tick share an mtime and a ctime; that stays
+// bounded only by this memo being process-local. Where the platform exposes no
+// ctime (Windows) the signature is size and mtime alone, so the restore case
+// stays open there. See statCtimeNanos.
 //
 // The signature is deliberately RECOMPUTED ON EVERY CALL rather than trusting
 // the memo outright, because the cache self-heal contract requires that a file
@@ -681,7 +690,11 @@ func validatePackFiles(pack Pack, dst string) error {
 		if !info.Mode().IsRegular() || info.Mode().Perm() != want.perm.Perm() {
 			return fmt.Errorf("bundled pack cache %q file %s has mode %s, expected %s", pack.Name, rel, info.Mode().Perm(), want.perm.Perm())
 		}
-		fmt.Fprintf(&sig, "%s:%d:%d;", rel, info.Size(), info.ModTime().UnixNano())
+		fmt.Fprintf(&sig, "%s:%d:%d", rel, info.Size(), info.ModTime().UnixNano())
+		if ctime, ok := statCtimeNanos(info); ok {
+			fmt.Fprintf(&sig, ":%d", ctime)
+		}
+		sig.WriteByte(';')
 	}
 
 	memoKey := dst + "\x00" + pack.Name

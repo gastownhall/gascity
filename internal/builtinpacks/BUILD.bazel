@@ -2,7 +2,11 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "builtinpacks",
-    srcs = ["registry.go"],
+    srcs = [
+        "fingerprint_ctime_unix.go",
+        "fingerprint_ctime_windows.go",
+        "registry.go",
+    ],
     importpath = "github.com/gastownhall/gascity/internal/builtinpacks",
     visibility = ["//:__subpackages__"],
     deps = [
