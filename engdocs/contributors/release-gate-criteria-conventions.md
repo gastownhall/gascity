@@ -34,6 +34,57 @@ The general principle behind the example: "tests pass" must mean "the
 gate's actual required checks passed," not "a command I chose passed."
 Don't let convenience substitute for coverage.
 
+## The diff-owned-SKIP rule
+
+A diff-owned `t.Skip` is a criterion-3 ("Tests pass") FAIL. If the diff adds
+a test, or turns an existing test into a skip, the skip does not satisfy
+criterion 3 — regardless of whether the skip is conditional or unconditional.
+
+Non-diff-owned/ambient skips (platform checks, privilege checks, helper-
+process guards, live-provider opt-ins, and other suite-controlled skips that
+predate the diff) are tolerated and counted, not excused away silently. A
+gate record's `skip_justification` field is where they're counted and
+explained — but that field is an **attestation of zero diff-owned skips**
+("not applicable — zero skips", "none required for diff-owned coverage; zero
+focused tests skipped"), not a waiver slot. As of 2026-09-09,
+`skip_justification` appeared on 46 `release-gates/*.md` records and
+"diff-owned" on 79; every sampled `skip_justification` record attests zero
+diff-owned skips.
+
+**Why**: a diff-owned test that FAILS is loud — it blocks the gate and forces
+the implementation to land. A diff-owned test that is SKIPPED is silent — it
+can ship indefinitely while the gate record makes the change look covered.
+That asymmetry is why diff-owned skips get different treatment from ambient
+ones.
+
+**The sanctioned alternative for forward-written tests**: when a test lands
+ahead of its implementation, write it to FAIL with an honest not-implemented
+sentinel, not to SKIP. `be-x5jqd.1` ("Un-skip Phase 0 R16 CAS + R20 epoch
+conformance tests") is the model: forward tests landed failing with an
+explicit not-implemented message, then were un-skipped for real as each
+implementation piece landed behind them.
+
+**Waiver authority**: a reviewer or deployer cannot waive a diff-owned skip
+by recording its own determination — a role cannot manufacture its own waiver
+by asserting one in its own review notes (`be-i4p79`, MAYOR RULING
+2026-09-09 08:48Z: "A reviewer recording its own determination is not a
+mayor/operator grant, and treating it as one would let a role manufacture its
+own waiver"). For this repo there is no waiver path at all: under the
+operator rulings of 2026-09-18 and 2026-09-26 a gascity gate treats any
+`waiver_ref` as `none`, so the remedy for a diff-owned skip is the ordinary
+one — land the implementation and un-skip the test, convert the skip to a
+not-implemented failure, or take the test out of the diff. `none` /
+`none required` is the value a gate record carries; an empty `waiver_ref` is
+not an oversight to fill in later. Records written before those rulings show
+the older mayor-adjudication form, for example
+`release-gates/ga-0cx0oh-session-roster-batching-gate.md`: `waiver_ref:
+ga-n3gt3w mayor adjudication dated 2026-08-21 for the named host tmux and
+bd-manifest failures; ...`. They are history, not a pattern to copy.
+
+See `ga-xfet6h` (the builder escalation that surfaced this gap) and
+`be-i4p79` (an independent mayor ruling on the same principle, ~52 minutes
+earlier) for the rulings this section documents.
+
 ## Why this doc exists
 
 Two independent gate files recorded "Tests pass: PASS" against suites
