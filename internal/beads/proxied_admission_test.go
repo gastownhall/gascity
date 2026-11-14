@@ -221,6 +221,16 @@ func baseAdmissionInput(f *admissionFixture, ops *admissionOps) AdmissionInput {
 	}
 }
 
+// ownerAdmissionInput is baseAdmissionInput for a long-lived open: the only
+// shape that may spend the recover rung (see
+// TestZombieLadderLeavesTheRecoverToALongLivedOwner). Rows that exercise the
+// recover itself start from it.
+func ownerAdmissionInput(f *admissionFixture, ops *admissionOps) AdmissionInput {
+	in := baseAdmissionInput(f, ops)
+	in.LongLived = true
+	return in
+}
+
 // TestAdmitTable is the admission decision table.
 //
 // Every row asserts a verdict AND a cost, because the two are the point
@@ -484,7 +494,7 @@ func TestAdmitTable(t *testing.T) {
 		probes := 0
 		var waits []time.Duration
 
-		in := baseAdmissionInput(f, ops)
+		in := ownerAdmissionInput(f, ops)
 		in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
 			probes++
 			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeAcceptedNoGreeting}
@@ -1024,7 +1034,7 @@ func TestZombieLadderRecoversWhenBdReportsThePingFailed(t *testing.T) {
 			recovered = true
 			return nil
 		}}
-		in := baseAdmissionInput(f, ops)
+		in := ownerAdmissionInput(f, ops)
 		in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
 			if !recovered {
 				return silent
@@ -1050,7 +1060,7 @@ func TestZombieLadderRecoversWhenBdReportsThePingFailed(t *testing.T) {
 	t.Run("a recover that does not fix it is terminal, and neither rung is spent twice", func(t *testing.T) {
 		f := newAdmissionFixture(t, "-1")
 		ops := &admissionOps{onPing: bdSaysNo}
-		in := baseAdmissionInput(f, ops)
+		in := ownerAdmissionInput(f, ops)
 		in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult { return silent }
 
 		_, err := Admit(context.Background(), in)
@@ -1092,11 +1102,99 @@ func TestZombieLadderRecoversWhenBdReportsThePingFailed(t *testing.T) {
 		// recovers in the same pass.
 		f := newAdmissionFixture(t, "-1")
 		ops := &admissionOps{onPing: func() error { return fmt.Errorf("ping %s: %w", f.scopeRoot, bdSaysNo()) }}
-		in := baseAdmissionInput(f, ops)
+		in := ownerAdmissionInput(f, ops)
 		in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult { return silent }
 		_, _ = Admit(context.Background(), in)
 		if pings, recovers := ops.counts(); pings != 1 || recovers != 1 {
 			t.Fatalf("a wrapped bd-reported failure spent %d ping(s) and %d recover(s), want 1 and 1", pings, recovers)
+		}
+	})
+}
+
+// TestZombieLadderLeavesTheRecoverToALongLivedOwner pins who may spend the
+// recover rung: only a long-lived open.
+//
+// The recover is `bd dolt stop` then `bd ping`, and the ledger that bounds it
+// to once per generation is process-local. A one-shot command is a fresh
+// process every time, so a city whose sessions run dozens of one-shot gc
+// commands a minute had every one of them able to stop the same zombie's Dolt,
+// each with an empty ledger. Cycling the server is the long-lived owner's job
+// (the controller's health loop recovers provider-owned scopes on its own
+// schedule). A one-shot still spends the ping, which is no more than a bd fork
+// does on the same proxy, and then takes the bd front door, non-terminally.
+func TestZombieLadderLeavesTheRecoverToALongLivedOwner(t *testing.T) {
+	bdSaysNo := func() error {
+		return ProviderReportedFailure(errors.New("provider-owned beads probe: Error: ping: invalid connection"))
+	}
+	silent := func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+		return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeAcceptedNoGreeting}
+	}
+
+	for _, tc := range []struct {
+		name   string
+		onPing func() error
+	}{
+		{name: "bd reports the ping failed (the real zombie)", onPing: bdSaysNo},
+		{name: "the ping succeeds and the proxy is still silent"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newAdmissionFixture(t, "-1")
+			ops := &admissionOps{onPing: tc.onPing}
+			in := baseAdmissionInput(f, ops)
+			in.Probe = silent
+			in.LongLived = false
+
+			for open := 1; open <= 3; open++ {
+				_, err := Admit(context.Background(), in)
+				verdict, ok := ProxiedVerdictOf(err)
+				if !ok {
+					t.Fatalf("one-shot open %d = %v, want a typed verdict", open, err)
+				}
+				if verdict.Terminal() {
+					t.Fatalf("one-shot open %d = %+v, want non-terminal: the one-shot never asked bd to recover, "+
+						"so it has learned nothing that ends the lane", open, verdict)
+				}
+			}
+			if pings, recovers := ops.counts(); pings != 1 || recovers != 0 {
+				t.Fatalf("three one-shot opens spent %d ping(s) and %d recover(s), want 1 and 0: "+
+					"a one-shot never issues `bd dolt stop`", pings, recovers)
+			}
+
+			// The rung the one-shot declined is still there for the owner:
+			// a long-lived open in the same process spends it once.
+			in.LongLived = true
+			_, err := Admit(context.Background(), in)
+			verdict, ok := ProxiedVerdictOf(err)
+			if !ok || verdict.Verdict != ProxiedVerdictProxyZombie || !verdict.Terminal() {
+				t.Fatalf("long-lived open = %v, want a terminal proxy_zombie after its recover", err)
+			}
+			if pings, recovers := ops.counts(); pings != 1 || recovers != 1 {
+				t.Fatalf("after the long-lived open: %d ping(s) and %d recover(s), want 1 and 1", pings, recovers)
+			}
+		})
+	}
+
+	t.Run("a one-shot still pings a stopped proxy back", func(t *testing.T) {
+		f := newAdmissionFixture(t, "-1")
+		f.removeRecord()
+		ops := &admissionOps{onPing: func() error {
+			f.writeRecord(6003, "66778899")
+			return nil
+		}}
+		in := baseAdmissionInput(f, ops)
+		in.LongLived = false
+		served := 0
+		in.Probe = servedProbe(pinnedCursors(), &served)
+
+		pin, err := Admit(context.Background(), in)
+		if err != nil {
+			t.Fatalf("one-shot open of a stopped proxy = %v, want admitted after one ping", err)
+		}
+		if pin.PoolKey().PID != 6003 {
+			t.Fatalf("admitted pid %d, want the proxy the ping started (6003)", pin.PoolKey().PID)
+		}
+		if pings, recovers := ops.counts(); pings != 1 || recovers != 0 {
+			t.Fatalf("the open spent %d ping(s) and %d recover(s), want 1 and 0", pings, recovers)
 		}
 	})
 }
@@ -1235,7 +1333,7 @@ func TestZombieLadderEndsTheLaneOnlyOnARecoverBdRefused(t *testing.T) {
 				recovered = true
 				return nil
 			}
-			in := baseAdmissionInput(f, ops)
+			in := ownerAdmissionInput(f, ops)
 			in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
 				if recovered {
 					return proxyendpoint.ServedProbeForTest(pinnedCursors(), proxyendpoint.CursorReality{})
@@ -1328,7 +1426,7 @@ func TestZombieLadderReadmitsWhenARefusedRecoverMovedTheGeneration(t *testing.T)
 			up.Store(true)
 			return coldStartTimedOut()
 		}
-		in := baseAdmissionInput(f, ops)
+		in := ownerAdmissionInput(f, ops)
 		in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
 			if up.Load() {
 				return proxyendpoint.ServedProbeForTest(pinnedCursors(), proxyendpoint.CursorReality{})
@@ -1356,7 +1454,15 @@ func TestZombieLadderReadmitsWhenARefusedRecoverMovedTheGeneration(t *testing.T)
 			f.writeRecord(6002, "55667788")
 			return coldStartTimedOut()
 		}
-		in := baseAdmissionInput(f, ops)
+		in := ownerAdmissionInput(f, ops)
+		// A long-lived open waits out the refusing port to the drain ceiling;
+		// the fixture clock moves with every sleep so that costs no wall time.
+		clock := time.Now()
+		in.Now = func() time.Time { return clock }
+		in.Sleep = func(_ context.Context, d time.Duration) error {
+			clock = clock.Add(d)
+			return nil
+		}
 		// The zombie greets nothing; after the recover the new record's port
 		// refuses until its backend is up.
 		in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
@@ -1386,7 +1492,7 @@ func TestZombieLadderReadmitsWhenARefusedRecoverMovedTheGeneration(t *testing.T)
 	t.Run("control: a refusal that left the generation where it was is terminal", func(t *testing.T) {
 		f := newAdmissionFixture(t, "-1")
 		ops := &admissionOps{onPing: bdSaysNo, onRecov: coldStartTimedOut}
-		in := baseAdmissionInput(f, ops)
+		in := ownerAdmissionInput(f, ops)
 		in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
 			return proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeAcceptedNoGreeting}
 		}
@@ -1422,7 +1528,7 @@ func TestZombieLadderAimsItsRecoverAtTheZombieItSaw(t *testing.T) {
 		healthy.Store(true)
 		return fmt.Errorf("provider-owned beads recover: %w", ErrRecoverTargetMoved)
 	}
-	in := baseAdmissionInput(f, ops)
+	in := ownerAdmissionInput(f, ops)
 	in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
 		if healthy.Load() {
 			return proxyendpoint.ServedProbeForTest(pinnedCursors(), proxyendpoint.CursorReality{})
@@ -1536,12 +1642,12 @@ func TestZombieLadderLeavesTheSharedRootsRecoverToTheCity(t *testing.T) {
 		// the package-level sets.
 		observed, recoveredSet := NewGenerationSet(), NewGenerationSet()
 
-		city := baseAdmissionInput(f, cityOps)
+		city := ownerAdmissionInput(f, cityOps)
 		city.CityRoot = f.scopeRoot
 		city.Probe = probe
 		city.Observed, city.Recovered = observed, recoveredSet
 
-		rigIn := baseAdmissionInput(f, rigOps)
+		rigIn := ownerAdmissionInput(f, rigOps)
 		rigIn.ScopeRoot = rig
 		rigIn.Database = "rig"
 		rigIn.CityRoot = f.scopeRoot
@@ -1644,7 +1750,7 @@ func TestZombieLadderLeavesTheSharedRootsRecoverToTheCity(t *testing.T) {
 		city := newAdmissionFixture(t, "-1")
 		rig := newAdmissionFixture(t, "-1")
 		ops := &admissionOps{onPing: bdSaysNo}
-		in := baseAdmissionInput(rig, ops)
+		in := ownerAdmissionInput(rig, ops)
 		in.CityRoot = city.scopeRoot
 		in.Probe = func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult { return silent }
 		if _, err := Admit(context.Background(), in); err == nil {
@@ -1699,12 +1805,12 @@ func TestZombieLadderNeverEndsTheLaneOnARecoverStillInFlight(t *testing.T) {
 		// ONE pair of ledgers, as in production.
 		observed, recoveredSet := NewGenerationSet(), NewGenerationSet()
 
-		city := baseAdmissionInput(f, cityOps)
+		city := ownerAdmissionInput(f, cityOps)
 		city.CityRoot = f.scopeRoot
 		city.Probe = probe
 		city.Observed, city.Recovered = observed, recoveredSet
 
-		rigIn := baseAdmissionInput(f, rigOps)
+		rigIn := ownerAdmissionInput(f, rigOps)
 		rigIn.ScopeRoot = rig
 		rigIn.Database = "rig"
 		rigIn.CityRoot = f.scopeRoot
