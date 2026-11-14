@@ -66,14 +66,32 @@ func TestWatchdogTriggersOnlyOnCompletedCIRuns(t *testing.T) {
 	}
 }
 
+// TestWatchdogPermissionsAreMinimal pins the token scope at both levels.
+// checks: write is held by the one job only, never by the workflow (#5413
+// scoped it down from the workflow level), so every other job added later
+// starts read-only.
 func TestWatchdogPermissionsAreMinimal(t *testing.T) {
-	permissions, ok := loadWatchdogWorkflow(t)["permissions"].(map[string]any)
-	if !ok {
-		t.Fatal("watchdog permissions are not a mapping")
+	workflow := loadWatchdogWorkflow(t)
+	cases := []struct {
+		level       string
+		permissions any
+		want        map[string]any
+	}{
+		{"workflow", workflow["permissions"], map[string]any{"actions": "read"}},
+		{
+			"job " + watchdogJobID,
+			job(t, workflow, watchdogJobID)["permissions"],
+			map[string]any{"checks": "write", "actions": "read"},
+		},
 	}
-	want := map[string]any{"checks": "write", "actions": "read"}
-	if !reflect.DeepEqual(permissions, want) {
-		t.Fatalf("watchdog permissions = %#v, want exactly %#v", permissions, want)
+	for _, tc := range cases {
+		got, ok := tc.permissions.(map[string]any)
+		if !ok {
+			t.Fatalf("watchdog %s permissions are not a mapping", tc.level)
+		}
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Fatalf("watchdog %s permissions = %#v, want exactly %#v", tc.level, got, tc.want)
+		}
 	}
 }
 
