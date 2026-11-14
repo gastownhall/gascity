@@ -9883,6 +9883,15 @@ EOF
       esac
     done
     printf 'gc dolt-state recover-managed\n' >> "$invocation_file"
+    if [ -n "${GC_FAKE_RECOVER_DEFER:-}" ]; then
+      printf 'had_pid\ttrue\n'
+      printf 'ready\tfalse\n'
+      printf 'pid\t4242\n'
+      printf 'port\t3311\n'
+      printf 'healthy\tfalse\n'
+      printf '%%s\n' "$GC_FAKE_RECOVER_DEFER" >&2
+      exit 1
+    fi
     printf 'diagnosed_read_only\t%%s\n' "${GC_FAKE_RECOVER_DIAGNOSED_READ_ONLY:-false}"
     printf 'had_pid\ttrue\n'
     printf 'forced\tfalse\n'
@@ -11152,6 +11161,51 @@ func TestGcBeadsBdRecoverUsesGCBinRecoverManagedHelperWhenAvailable(t *testing.T
 	}
 	if !strings.Contains(strings.TrimSpace(string(invocation)), "gc dolt-state recover-managed") {
 		t.Fatalf("gc invocation missing recover-managed helper: %s", string(invocation))
+	}
+}
+
+func TestGcBeadsBdRecoverHelperDeferralPreservesStderrWithoutShellFallback(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	materializeBuiltinPacksForTest(t, cityPath)
+	script := gcBeadsBdScriptPath(cityPath)
+
+	binDir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	invocationFile := filepath.Join(t.TempDir(), "gc-invocation")
+	fakeGC := writeFakeManagedConfigWriterGC(t, binDir, invocationFile)
+	const deferral = "managed dolt (pid 4242, port 3311) is live and listening but failed its SQL check (timeout); deferring restart until it has been unresponsive for 3m0s (so far 30s)"
+
+	env := sanitizedBaseEnv(
+		"GC_CITY_PATH="+cityPath,
+		"GC_BIN="+fakeGC,
+		"GC_FAKE_RECOVER_DEFER="+deferral,
+		"PATH="+strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)),
+	)
+	cmd := exec.Command(script, "recover")
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("gc-beads-bd recover succeeded on a deferral; want failure\n%s", out)
+	}
+	if !strings.Contains(string(out), deferral) {
+		t.Fatalf("recover output dropped the helper's deferral stderr:\n%s", out)
+	}
+	if !strings.Contains(string(out), "dolt recovery via gc helper failed") {
+		t.Fatalf("recover output missing the helper failure:\n%s", out)
+	}
+	invocation, readErr := os.ReadFile(invocationFile)
+	if readErr != nil {
+		t.Fatalf("ReadFile(invocation): %v", readErr)
+	}
+	calls := strings.Split(strings.TrimSpace(string(invocation)), "\n")
+	if calls[len(calls)-1] != "gc dolt-state recover-managed" || strings.Count(string(invocation), "recover-managed") != 1 {
+		t.Fatalf("gc invocations = %q, want the recover-managed helper once and last (no shell fallback)", calls)
 	}
 }
 
@@ -13280,9 +13334,6 @@ func TestHealthBeadsProviderSkipsRecoverWhenBreakerOpen(t *testing.T) {
 	opsFile := writeBreakerAwarePreflightFakes(t, cityPath,
 		"failed to open database: dolt circuit breaker is open: server appears down, failing fast (cooldown 5s)")
 
-	cityKey := normalizePathForCompare(cityPath)
-	t.Cleanup(func() { lastBeadsProviderRecover.Delete(cityKey) })
-
 	err := healthBeadsProvider(cityPath)
 	if err == nil {
 		t.Fatalf("healthBeadsProvider() error = nil, want breaker-open health err")
@@ -13299,8 +13350,8 @@ func TestHealthBeadsProviderSkipsRecoverWhenBreakerOpen(t *testing.T) {
 	if len(opLines) != 1 || opLines[0] != "health" {
 		t.Fatalf("provider ops = %q, want only health (recover must be skipped when breaker open)", string(ops))
 	}
-	if _, loaded := lastBeadsProviderRecover.Load(cityKey); loaded {
-		t.Fatalf("breaker-skip should NOT update lastBeadsProviderRecover for %q", cityPath)
+	if reserved := readProviderRecoveryHistory(t, cityPath).LastProviderAttemptAt; reserved != nil {
+		t.Fatalf("breaker-skip should NOT reserve a provider recovery attempt for %q (got %v)", cityPath, reserved)
 	}
 }
 
@@ -13308,9 +13359,6 @@ func TestHealthBeadsProviderBacksOffSecondRecoverWithinCooldown(t *testing.T) {
 	cityPath := t.TempDir()
 	writeMinimalCityToml(t, cityPath)
 	opsFile := writeBreakerAwarePreflightFakes(t, cityPath, "unhealthy")
-
-	cityKey := normalizePathForCompare(cityPath)
-	t.Cleanup(func() { lastBeadsProviderRecover.Delete(cityKey) })
 
 	t0 := time.Unix(1_700_000_000, 0).UTC()
 	clock := []time.Time{t0, t0.Add(5 * time.Second)}
@@ -13348,9 +13396,6 @@ func TestHealthBeadsProviderAllowsRecoverAfterCooldown(t *testing.T) {
 	cityPath := t.TempDir()
 	writeMinimalCityToml(t, cityPath)
 	opsFile := writeBreakerAwarePreflightFakes(t, cityPath, "unhealthy")
-
-	cityKey := normalizePathForCompare(cityPath)
-	t.Cleanup(func() { lastBeadsProviderRecover.Delete(cityKey) })
 
 	t0 := time.Unix(1_700_000_000, 0).UTC()
 	clock := []time.Time{t0, t0.Add(60 * time.Second)}

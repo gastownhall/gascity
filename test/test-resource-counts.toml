@@ -120,7 +120,7 @@ medium = 1
 [[count]]
 path = "cmd/gc/beads_provider_lifecycle_test.go"
 resource = "subprocess"
-calls = 51
+calls = 52
 medium = 8
 
 [[count]]
@@ -128,6 +128,11 @@ path = "cmd/gc/beads_provider_ready_topology_test.go"
 resource = "subprocess"
 calls = 1
 medium = 1
+
+[[count]]
+path = "cmd/gc/beads_provider_recover_cooldown_test.go"
+resource = "subprocess"
+calls = 1
 
 [[count]]
 path = "cmd/gc/beads_provider_script_scope_lifecycle_linux_test.go"
@@ -792,6 +797,31 @@ calls = 3
 [[count]]
 path = "cmd/gc/dolt_project_id_test.go"
 resource = "subprocess"
+calls = 2
+
+[[count]]
+path = "cmd/gc/dolt_recover_managed_test.go"
+resource = "net_listen"
+calls = 1
+
+[[count]]
+path = "cmd/gc/dolt_recover_unresponsive_reset_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "cmd/gc/dolt_recover_unresponsive_reset_test.go"
+resource = "slow_process_gate"
+calls = 1
+
+[[count]]
+path = "cmd/gc/dolt_recover_unresponsive_reset_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "cmd/gc/dolt_recover_unresponsive_test.go"
+resource = "net_listen"
 calls = 2
 
 [[count]]

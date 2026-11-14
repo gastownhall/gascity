@@ -2929,6 +2929,18 @@ type DaemonConfig struct {
 	// that budget can be cut short on that path even though the direct
 	// stop/unregister path always honors the full grace.
 	DoltStopTimeout string `toml:"dolt_stop_timeout,omitempty" jsonschema:"default=30s"`
+	// DoltUnresponsiveRestartAfter is how long recovery observes an owned,
+	// live, listening managed dolt server that keeps failing SQL probes before
+	// it stops and restarts that server. A probe that times out under load
+	// says nothing about whether the server answers a moment later, so a
+	// single failure no longer restarts it. The window is measured in wall
+	// time for one server instance (PID, process start time, and port).
+	// Duration string (e.g., "180s", "5m"). Defaults to "180s". Set to "0s"
+	// to restart on the first failed probe. Negative values are rejected at
+	// config load; malformed values warn and fall back to the default. If a
+	// fragment listed in `include` defines `[daemon]`, its table replaces the
+	// root's, so set this key in that fragment.
+	DoltUnresponsiveRestartAfter string `toml:"dolt_unresponsive_restart_after,omitempty" jsonschema:"default=180s"`
 	// DoltStartAddressInUseRetryWindow is how long the managed dolt start
 	// path waits on the originally requested port when dolt reports it in
 	// use ("address already in use", or "Port N already in use." from dolt
@@ -3346,6 +3358,19 @@ const DefaultDoltStopTimeout = 30 * time.Second
 // upstream rather than silently overriding it here.
 func (d *DaemonConfig) DoltStopTimeoutDuration() time.Duration {
 	return durationOr(d.DoltStopTimeout, DefaultDoltStopTimeout)
+}
+
+// DefaultDoltUnresponsiveRestartAfter is how long recovery observes a live,
+// listening managed dolt that fails SQL probes before restarting it when no
+// value is configured.
+const DefaultDoltUnresponsiveRestartAfter = 180 * time.Second
+
+// DoltUnresponsiveRestartAfterDuration returns the managed-dolt unresponsive
+// window as a time.Duration. Defaults to DefaultDoltUnresponsiveRestartAfter
+// (180s) when empty or unparseable. Zero is allowed and means recovery
+// restarts on the first failed probe.
+func (d *DaemonConfig) DoltUnresponsiveRestartAfterDuration() time.Duration {
+	return durationOr(d.DoltUnresponsiveRestartAfter, DefaultDoltUnresponsiveRestartAfter)
 }
 
 // DefaultDoltStartAddressInUseRetryWindow is the per-port retry window used
