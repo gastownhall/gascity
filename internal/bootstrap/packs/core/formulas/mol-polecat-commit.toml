@@ -69,10 +69,17 @@ If the directory is missing, fall through to create a new one.
 
 **If no worktree** — create one:
 ```bash
-WORKTREE_PATH=$(pwd)/worktrees/"$WORK_BEAD_ID"
+case "${GC_DIR:-}" in
+  /*) ;;
+  *) echo "mol-polecat-commit: GC_DIR must be the absolute session work dir to place the per-bead worktree; got '${GC_DIR:-}'" >&2; exit 1 ;;
+esac
+WORKTREE_PATH="$GC_DIR/worktrees/$WORK_BEAD_ID"
 git worktree add "$WORKTREE_PATH" --detach origin/{{base_branch}}
 cd "$WORKTREE_PATH"
 ```
+The path is anchored on `$GC_DIR` (your session work dir), not the current
+directory: an earlier step or your prompt may have `cd`'d elsewhere.
+
 Record immediately so restarts and work-health recovery can find it:
 ```bash
 gc bd update "$WORK_BEAD_ID" --set-metadata work_dir="$WORKTREE_PATH"
