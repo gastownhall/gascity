@@ -6,6 +6,9 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -400,7 +403,7 @@ func TestGcBeadsBdProviderOwnedRealInitIgnoresAncestorBeadsWorkspace(t *testing.
 				}
 			})
 			if out, err := runProviderOwnedScriptOp(t, env, "init", dir, "hq", "hq"); err != nil {
-				t.Fatalf("gc-beads-bd init below an ancestor bd workspace: %v\n%s", err, out)
+				t.Fatalf("gc-beads-bd init below an ancestor bd workspace: %v\n%s\nlogs under the test dirs:\n%s", err, out, providerOwnedLogTails(parent, home))
 			}
 			meta, ok, err := contract.LoadMetadataState(fsys.OSFS{}, filepath.Join(dir, ".beads", "metadata.json"))
 			if err != nil || !ok {
@@ -420,7 +423,7 @@ func TestGcBeadsBdProviderOwnedRealInitIgnoresAncestorBeadsWorkspace(t *testing.
 				t.Fatalf("ancestor metadata changed by scope init:\nbefore: %s\nafter:  %s (err %v)", ancestorMetadata, after, err)
 			}
 			if out, err := runProviderOwnedScriptOp(t, env, "health"); err != nil {
-				t.Fatalf("gc-beads-bd health after init: %v\n%s", err, out)
+				t.Fatalf("gc-beads-bd health after init: %v\n%s\nlogs under the test dirs:\n%s", err, out, providerOwnedLogTails(parent, home))
 			}
 		})
 	}
@@ -460,8 +463,53 @@ func providerOwnedDoltPIDsUnderRoot(t *testing.T, root string) []int {
 // keeps, so a failure message stays readable.
 const providerOwnedLogTailBytes = 8 << 10
 
-// providerOwnedLogTails is a compile-only stub for the RED step.
-func providerOwnedLogTails(_ ...string) string { return "" }
+// providerOwnedLogTails renders the last providerOwnedLogTailBytes of every
+// *.log file under roots, for a failure message. A failing init has to carry
+// its Dolt server log in the message: t.TempDir removes the log with the
+// directory, so nothing is left to read once the test has failed. A file
+// reachable from two roots is shown once, and one that cannot be read is
+// named with its error.
+func providerOwnedLogTails(roots ...string) string {
+	var b strings.Builder
+	seen := map[string]bool{}
+	for _, root := range roots {
+		_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() || !strings.HasSuffix(path, ".log") || seen[path] {
+				return nil // an unreadable directory or a missing root has no log to show
+			}
+			seen[path] = true
+			tail, err := readFileTail(path, int64(providerOwnedLogTailBytes))
+			if err != nil {
+				fmt.Fprintf(&b, "--- %s: %v\n", path, err)
+				return nil
+			}
+			fmt.Fprintf(&b, "--- %s (last %d bytes)\n%s\n", path, len(tail), tail)
+			return nil
+		})
+	}
+	if b.Len() == 0 {
+		return "no log files under " + strings.Join(roots, ", ")
+	}
+	return b.String()
+}
+
+// readFileTail returns at most the last n bytes of the file at path.
+func readFileTail(path string, n int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close() //nolint:errcheck // read-only handle
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	buf := make([]byte, min(n, info.Size()))
+	if _, err := f.ReadAt(buf, info.Size()-int64(len(buf))); err != nil && !errors.Is(err, io.EOF) {
+		return nil, err
+	}
+	return buf, nil
+}
 
 // The real-init test's Dolt server has died mid-init on a remote worker, and
 // t.TempDir removed its log before anyone read it (ga-11kci7u). The failure
