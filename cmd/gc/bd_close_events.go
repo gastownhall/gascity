@@ -59,7 +59,7 @@ func announceBdPassthroughCloses(cityPath string, store beads.Store, before map[
 		return
 	}
 	emitter := &emittingClassStore{Store: store, cityPath: cityPath}
-	closed := closedSnapshots(emitter, targets)
+	closed := closedSnapshots(emitter, targets, before)
 	emissions := make([]classStoreEmission, 0, len(closed))
 	for _, bead := range closed {
 		emissions = append(emissions, classStoreEmission{eventType: events.BeadClosed, bead: bead})
@@ -69,15 +69,81 @@ func announceBdPassthroughCloses(cityPath string, store beads.Store, before map[
 
 // closedSnapshots reads ids back after a close and returns, in input order,
 // the ones that now read closed, each with its edge set confirmed.
-func closedSnapshots(emitter *emittingClassStore, ids []string) []beads.Bead {
-	read := readBackRows(emitter, ids, events.BeadClosed)
-	var closed []beads.Bead
+//
+// The edges of an id whose pre-close row (before) carried none are read at the
+// same time as the rows, not after them. A close does not change a bead's
+// edges, so that read does not wait on the read-back, and on a bd-backed store
+// each read is its own bd subprocess: read one after the other, they put two
+// serial round trips after every close of an edgeless bead, on top of the
+// guard's read and the close itself (ga-b5kq9js).
+func closedSnapshots(emitter *emittingClassStore, ids []string, before map[string]beads.Bead) []beads.Bead {
+	var edgeless []string
 	for _, id := range ids {
-		if bead, ok := read[id]; ok && beadStatusIsClosed(bead.Status) {
-			closed = append(closed, bead)
+		if len(before[id].Dependencies) == 0 {
+			edgeless = append(edgeless, id)
 		}
 	}
-	return withConfirmedEdgesBatch(emitter, closed)
+	edgesRead := make(chan downEdgesRead, 1)
+	go func() { edgesRead <- emitter.readDownEdges(edgeless) }()
+	read := readBackRows(emitter, ids, events.BeadClosed)
+	edges := <-edgesRead
+	var closed []beads.Bead
+	for _, id := range ids {
+		bead, ok := read[id]
+		if !ok || !beadStatusIsClosed(bead.Status) {
+			continue
+		}
+		switch {
+		case len(bead.Dependencies) > 0:
+			bead.Needs = nil
+		case edges.answered[id]:
+			bead.Dependencies = edges.deps[id]
+			if bead.Dependencies == nil {
+				bead.Dependencies = []beads.Dep{}
+			}
+			bead.Needs = nil
+		default:
+			bead = emitter.withConfirmedEdges(bead)
+		}
+		closed = append(closed, bead)
+	}
+	return closed
+}
+
+// downEdgesRead is the DOWN edges of a set of beads. answered names the beads
+// the read covered, with or without edges; a bead it does not name was not
+// read, and its edges are still unknown.
+type downEdgesRead struct {
+	deps     map[string][]beads.Dep
+	answered map[string]bool
+}
+
+// readDownEdges reads the DOWN edges of ids: in one batched read where the store
+// has one, and with DepList for a single id. A failed read answers for no bead,
+// so each is confirmed on its own afterwards.
+func (s *emittingClassStore) readDownEdges(ids []string) downEdgesRead {
+	var deps map[string][]beads.Dep
+	switch len(ids) {
+	case 0:
+		return downEdgesRead{}
+	case 1:
+		got, err := s.DepList(ids[0], "down")
+		if err != nil {
+			return downEdgesRead{}
+		}
+		deps = map[string][]beads.Dep{ids[0]: got}
+	default:
+		batch, ok := batchDownEdges(s.Store, ids)
+		if !ok {
+			return downEdgesRead{}
+		}
+		deps = batch
+	}
+	answered := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		answered[id] = true
+	}
+	return downEdgesRead{deps: deps, answered: answered}
 }
 
 // readBackRows reads ids back after a write: in one batched read where the

@@ -164,7 +164,7 @@ func armCreatingHeal(r *rowFacts) (intent, bool) {
 	if strings.TrimSpace(info.MetadataState) != string(session.StateCreating) || info.PendingCreateClaim || r.wake() || !r.freshGoneOrClassified() {
 		return intent{}, false
 	}
-	return r.heal(intentRowHealFresh, decideCreatingHeal, asleepHealPatch(info))
+	return r.heal(intentRowHealFresh, decideCreatingHeal, asleepHealPatch(info, r.w.Now))
 }
 
 // armDeadRuntimeHeal is SESS-531, legacy's heal of a committed row whose
@@ -309,7 +309,7 @@ func deadRuntimePatch(r *rowFacts, heal bool) (patch session.MetadataPatch, clas
 	info := r.row.Info
 	patch = session.MetadataPatch{}
 	if heal {
-		patch = asleepHealPatch(info)
+		patch = asleepHealPatch(info, r.w.Now)
 	}
 	if session.DispositionOfInfo(info).IdleStop {
 		// SESS-532: an idle stop was pending, so the death is the idle
@@ -345,7 +345,7 @@ func deadRuntimePatch(r *rowFacts, heal bool) (patch session.MetadataPatch, clas
 			failures, _ := strconv.Atoi(folded.ResumeFailures)
 			backstop, count := resumeBackstop(failures, kept, resumeFailure{counted: folded.ResumeLaunch == "true"})
 			if !kept || backstop {
-				maps.Copy(patch, session.ConversationResetPatch(true))
+				maps.Copy(patch, session.ConversationResetPatch(true, r.w.Now))
 				count = 0
 			}
 			maps.Copy(patch, resumeFailuresPatch(folded, count))
@@ -357,7 +357,7 @@ func deadRuntimePatch(r *rowFacts, heal bool) (patch session.MetadataPatch, clas
 		accrual = session.WakeFailureAccrualPatch(attempts, defaultMaxWakeAttempts, until)
 	case session.ExitChurn:
 		if folded := foldInfo(info, patch); strings.TrimSpace(folded.SessionKey) != "" && !session.HasStartedManualConversation(folded) {
-			maps.Copy(patch, session.ConversationResetPatch(false))
+			maps.Copy(patch, session.ConversationResetPatch(false, r.w.Now))
 		}
 		cycles, _ := strconv.Atoi(info.ChurnCount)
 		accrual = session.ChurnAccrualPatch(cycles, defaultMaxChurnCycles, until)
@@ -558,7 +558,7 @@ func armCurrentBead(r *rowFacts) (intent, bool) {
 // sleep ended, the runtime-missing reason and the continuation reset, which a
 // named mode=always row and a committed manual conversation skip
 // (session.PreserveConversationOnRuntimeLoss).
-func asleepHealPatch(info session.Info) session.MetadataPatch {
+func asleepHealPatch(info session.Info, now time.Time) session.MetadataPatch {
 	patch := session.MetadataPatch{"state": string(session.StateAsleep)}
 	reason := strings.TrimSpace(info.SleepReason)
 	if strings.TrimSpace(info.SessionKey) == "" && strings.TrimSpace(info.StartedConfigHash) == "" || session.SleepReasonKeepsContinuation(reason) {
@@ -570,6 +570,6 @@ func asleepHealPatch(info session.Info) session.MetadataPatch {
 	if session.PreserveConversationOnRuntimeLoss(info) {
 		return patch
 	}
-	maps.Copy(patch, session.ConversationResetPatch(true))
+	maps.Copy(patch, session.ConversationResetPatch(true, now))
 	return patch
 }

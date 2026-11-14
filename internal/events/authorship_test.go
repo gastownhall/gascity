@@ -27,8 +27,8 @@ func TestEveryKnownEventTypeHasAnAuthorship(t *testing.T) {
 }
 
 // TestEveryDeclaredEventTypeHasAnAuthorship covers what KnownEventTypes
-// leaves out on purpose (ProviderHealthGateAlert and ReconcilerAlert have no
-// typed payload yet): every string constant declared in events.go is an event
+// leaves out on purpose (ProviderHealthGateAlert, ReconcilerAlert and
+// SessionStartupHealthAlert have no typed payload yet): every string constant declared in events.go is an event
 // type, and each needs an authorship whether or not it is listed.
 func TestEveryDeclaredEventTypeHasAnAuthorship(t *testing.T) {
 	declared := declaredEventTypes(t)

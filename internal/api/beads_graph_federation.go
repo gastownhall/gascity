@@ -21,7 +21,12 @@ import (
 // split-strict gate the graph handle reads the work store's class view, a
 // store of its own, so a gate fixture keeps its split shape.
 func relocatedGraphStore(state State) (beads.GraphStore, bool) {
-	st := state.Stores()
+	return relocatedGraphIn(state.Stores())
+}
+
+// relocatedGraphIn is relocatedGraphStore over one epoch st, for a request
+// that reads its other stores from st too.
+func relocatedGraphIn(st storeref.Stores) (beads.GraphStore, bool) {
 	graph := st.Graph()
 	if beads.IsNilStore(graph) || beads.SameStore(graph, st.Work()) {
 		return beads.GraphStore{}, false

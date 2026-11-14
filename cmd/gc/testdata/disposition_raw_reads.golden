@@ -10,7 +10,6 @@ cmd/gc/doctor_startup_health.go 3
 cmd/gc/pool_desired_state.go 3
 cmd/gc/reconcile_arms_drain.go 3
 cmd/gc/reconcile_arms_heals.go 1
-cmd/gc/reconcile_arms_start.go 1
 cmd/gc/reconcile_effect_heal.go 1
 cmd/gc/reconcile_session_decide.go 2
 cmd/gc/reconcile_startup_health.go 1
@@ -19,8 +18,8 @@ cmd/gc/session_beads.go 1
 cmd/gc/session_lifecycle_parallel.go 2
 cmd/gc/session_pool_drain_deadline.go 1
 cmd/gc/session_reconcile.go 7
-cmd/gc/session_reconciler.go 11
+cmd/gc/session_reconciler.go 10
 cmd/gc/session_sleep.go 4
 internal/session/lifecycle_projection.go 12
 internal/session/manager.go 4
-internal/session/startup_health.go 2
+internal/session/startup_health.go 4

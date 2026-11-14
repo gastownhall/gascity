@@ -221,8 +221,17 @@ gc_harness_run_supervised() {
     *m*) monitor_was_on=1 ;;
   esac
   set -m
+  # Bash resets an inherited-but-not-locally-reinstalled trap to SIG_DFL for an
+  # async subshell (`cmd &`), so the job takes QUIT's default disposition —
+  # terminate plus core dump — even though the caller trapped QUIT before
+  # backgrounding it. gc_harness_watchdog signals this job's group directly
+  # (never the caller's own pid), so it is this subshell, not the caller, that
+  # needs its own trap reinstalled. `exit 131` (128+SIGQUIT) reproduces the
+  # signal's own exit-status convention without leaving QUIT uncaught; the
+  # group teardown below (gc_harness_terminate_group) already runs
+  # unconditionally once `wait` returns, so this trap does not duplicate it.
   gc_harness_launch_begin run
-  "$@" &
+  ( trap 'exit 131' QUIT; "$@" ) &
   gc_harness_launch_publish
   local job_pgid="$gc_harness_supervised_pgid"
   if (( monitor_was_on == 0 )); then

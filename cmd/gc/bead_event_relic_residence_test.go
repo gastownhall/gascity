@@ -242,7 +242,10 @@ func TestRelicIDCollisionInferredCloseAutoclosesTheRelic(t *testing.T) {
 			if len(stores) != 2 || stores[0] != work || stores[1] != f.binding {
 				t.Fatalf("event stores for colliding id %s = %d store(s), want the work store, then the binding", f.stepID, len(stores))
 			}
-			owner, live, err := liveCloseOwner(stores, f.stepID, f.binding)
+			f.cs.mu.RLock()
+			route := f.cs.beadEventRouteLocked(f.stepID)
+			f.cs.mu.RUnlock()
+			owner, live, err := liveCloseOwner(f.cs.Stores(), route, stores, f.stepID, f.binding)
 			if err != nil || owner != f.binding || live.Status != "closed" {
 				t.Fatalf("close owner for %s = (%T, %q, %v), want the binding's closed row", f.stepID, owner, live.Status, err)
 			}
@@ -303,5 +306,118 @@ func TestUnownedBeadEventBroadcastIsUnchangedWithoutRoutes(t *testing.T) {
 	}
 	if got := cs.beadEventStores(""); len(got) != 2 {
 		t.Fatalf("broadcast stores = %d, want the two work stores", len(got))
+	}
+}
+
+// TestRelicCloseUnderAnUnboundRigAutoclosesItsRoot is the round-2 review's M1
+// repro: a relic whose id carries the prefix of a configured rig this
+// controller holds no store for (an unbound rig). Its event route is empty
+// (the prefix owns the id, the store is absent), so the relic binding is the
+// only store that can confirm the close: the CloseOwner plan is the relic
+// alone, and the root autocloses, on the event path and on the sweep, as it
+// did before the CloseOwner conversion.
+func TestRelicCloseUnderAnUnboundRigAutoclosesItsRoot(t *testing.T) {
+	syncAutoclose(t)
+	for _, path := range []string{"event", "sweep"} {
+		t.Run(path, func(t *testing.T) {
+			f := newRelicEventFixture(t, false)
+			f.cs.cfg.Rigs = append(f.cs.cfg.Rigs, config.Rig{Name: "beta", Path: t.TempDir(), Prefix: "rb"})
+			creator := f.binding.(beads.ForeignIDCreator)
+			root, err := creator.CreateWithForeignID(beads.Bead{ID: "rb-901", Title: "Formula: mol-unbound", Type: "molecule", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWisp}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			step, err := creator.CreateWithForeignID(beads.Bead{ID: "rb-902", Title: "Step 1", Type: "step", ParentID: root.ID, Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = splittest.TakeResidenceViolations(f.binding)
+			if err := f.binding.Close(step.ID); err != nil {
+				t.Fatal(err)
+			}
+			f.cs.mu.RLock()
+			route := f.cs.beadEventRouteLocked(step.ID)
+			f.cs.mu.RUnlock()
+			if len(route) != 0 {
+				t.Fatalf("precondition: the unbound rig's id has route %v, want none", route)
+			}
+			switch path {
+			case "event":
+				payload, err := json.Marshal(beads.Bead{ID: step.ID, Title: "Step 1", Type: "step", Status: "closed"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Actor: "agent", Subject: step.ID, Payload: payload})
+			case "sweep":
+				f.cs.autocloseSweepOf().deferID(step.ID, sweepTestClock(0))
+				if got := f.cs.runAutocloseSweepPass(sweepTestClock(0)); got.Ran != 1 {
+					t.Fatalf("sweep pass = %+v, want the relic's close confirmed and its autoclose run", got)
+				}
+			}
+			if got, err := f.binding.Get(root.ID); err != nil || got.Status != "closed" {
+				t.Fatalf("relic root %s under an unbound rig = %q (%v) after its only step closed, want closed", root.ID, got.Status, err)
+			}
+		})
+	}
+}
+
+// TestRouteRowCloseBesideARelicAutoclosesTheWorkMolecule (round 3): a work
+// bead reuses a proven relic's id, and it is the WORK row that closes while
+// the relic stays open. The close is confirmed on its prefix route, so the
+// event path (or the sweep) computes that route and the work molecule
+// autocloses there and then: on the event path the close is settled by the
+// event's own run, under its actor, and owes the sweep nothing. Without the
+// route the plan is the relic alone, whose open row refutes the close.
+func TestRouteRowCloseBesideARelicAutoclosesTheWorkMolecule(t *testing.T) {
+	syncAutoclose(t)
+	for _, path := range []string{"event", "sweep"} {
+		t.Run(path, func(t *testing.T) {
+			f := newRelicEventFixture(t, false)
+			work := f.cs.cityBeadStore
+			creator, ok := work.(beads.ForeignIDCreator)
+			if !ok {
+				t.Fatalf("work leaf %T cannot pin an id", work)
+			}
+			hq := config.EffectiveHQPrefix(f.cs.cfg)
+			root, err := creator.CreateWithForeignID(beads.Bead{ID: hq + "-960", Title: "work molecule", Type: "molecule"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A v1 poured molecule's step: work class (no gc.root_bead_id),
+			// found through its legacy parent beside it.
+			if _, err := creator.CreateWithForeignID(beads.Bead{ID: f.openID, Title: "Step 1", Type: "step", ParentID: root.ID}); err != nil {
+				t.Fatal(err)
+			}
+			if err := work.Close(f.openID); err != nil {
+				t.Fatal(err)
+			}
+			stores := f.cs.beadEventStores(f.openID)
+			if !storesInclude(stores, f.binding) {
+				t.Fatalf("precondition: %s is not a proven relic (event stores %d)", f.openID, len(stores))
+			}
+			switch path {
+			case "event":
+				payload, err := json.Marshal(beads.Bead{ID: f.openID, Title: "Step 1", Type: "step", Status: "closed"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.cs.applyBeadEventToStores(events.Event{Type: events.BeadClosed, Actor: "agent", Subject: f.openID, Payload: payload})
+				sweep := f.cs.autocloseSweepOf()
+				if !sweep.hasRan(f.openID) || sweep.isPending(f.openID) {
+					t.Errorf("the event's own run did not settle %s (ran=%v pending=%v): the close was left to the sweep", f.openID, sweep.hasRan(f.openID), sweep.isPending(f.openID))
+				}
+			case "sweep":
+				f.cs.autocloseSweepOf().deferID(f.openID, sweepTestClock(0))
+				if got := f.cs.runAutocloseSweepPass(sweepTestClock(0)); got.Ran != 1 || got.Refuted != 0 {
+					t.Fatalf("sweep pass = %+v, want the work row's close confirmed and its autoclose run", got)
+				}
+			}
+			if got, err := work.Get(root.ID); err != nil || got.Status != "closed" {
+				t.Fatalf("work molecule %s = %q (%v) after its only step closed beside an open relic, want closed", root.ID, got.Status, err)
+			}
+			if got, _ := f.binding.Get(f.openID); got.Status == "closed" {
+				t.Fatalf("the open relic %s was closed", f.openID)
+			}
+		})
 	}
 }

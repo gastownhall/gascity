@@ -389,7 +389,7 @@ DoctorConfig holds settings for the gc doctor surface.
 |-------|------|----------|---------|-------------|
 | `worktree_rig_warn_size` | string |  | `10GB` | WorktreeRigWarnSize is the per-rig warning threshold for a worktree population's total disk footprint. Reported by the worktree-disk-size check for .gc/worktrees/&lt;rig&gt;/, and by the rig:&lt;rig&gt;:worktrees check for the per-bead worktrees at &lt;rig&gt;/worktrees/. Go-style human size string ("10GB", "500MB"). Empty or unparseable falls back to the default (10 GB). |
 | `worktree_rig_error_size` | string |  | `50GB` | WorktreeRigErrorSize is the per-rig error threshold. When a rig worktree population exceeds this, the reporting check errors rather than warns. Empty or unparseable falls back to the default (50 GB). |
-| `nested_worktree_prune` | boolean |  | `false` | NestedWorktreePrune escalates the nested-worktree-prune check from warning to error severity when safely-prunable nested worktrees are present, so CI / scripted doctor runs fail until the operator runs `gc doctor --fix`. Actual removal still requires --fix; this flag does not auto-prune. Safety is enforced by mechanical checks (no uncommitted changes, no unpushed commits, no stashes) — never by role identity. |
+| `nested_worktree_prune` | boolean |  | `false` | NestedWorktreePrune escalates the nested-worktree-prune check from warning to error severity when safely-prunable nested worktrees are present, so CI / scripted doctor runs fail until the operator runs `gc doctor --fix`. Actual removal still requires --fix; this flag does not auto-prune. Safety is enforced by mechanical checks (no uncommitted changes, no unpushed commits) — never by role identity. |
 | `check` | []LocalDoctorCheck |  |  | Checks holds city-local inline doctor checks declared via [[doctor.check]] in city.toml. |
 
 ## DoltConfig
@@ -529,6 +529,7 @@ Import defines a named import of another pack.
 |-------|------|----------|---------|-------------|
 | `source` | string | **yes** |  | Source is the durable authored pack location: a local path, a remote git URL, or a dereferenceable GitHub tree URL for a pack below a repository root, such as "https://github.com/org/repo/tree/main/packs/foo". Registry handles are lookup-only in this release wave; authored [imports.*] entries store the resolved source plus optional version. |
 | `version` | string |  |  | Version is an optional semver constraint for git-backed imports (e.g., "^1.2"). Empty for local paths. "sha:&lt;hex&gt;" pins a specific commit. |
+| `agents_exclude` | []string |  |  | AgentsExclude removes named agent templates from this import edge. Selectors are matched against each agent's local name before the import binding is applied; other imported resources remain visible. |
 
 ## K8sConfig
 

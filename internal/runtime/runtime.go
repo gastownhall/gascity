@@ -84,6 +84,15 @@ const ExitCodeTempFail = 75
 // whose screen is gone). It is an answer, not a failure: an empty screen.
 const ExitCodeNoScreen = 66
 
+// ExitCodeInputOutcome is the exit code of a typed non-success input
+// outcome: under [ProtocolCapabilityInputOutcome], a driving op (nudge,
+// send-keys, interrupt, clear-scrollback) that did not deliver its input
+// exits with it and prints exactly one outcome line naming why. It sits
+// above the sysexits block and below the shell's and the signals' codes, so
+// no killed or unrunnable op produces it; to a gc that does not read the
+// token it is an ordinary failure.
+const ExitCodeInputOutcome = 80
+
 // CapacitySourceExitStatus is the [CapacityError.Source] of a refusal observed
 // as the launched command's exit status.
 const CapacitySourceExitStatus = "exit_status"
@@ -119,6 +128,14 @@ func IsProviderCapacity(err error) bool { return errors.Is(err, ErrProviderCapac
 // dispatch with errors.Is.
 var ErrSessionNotFound = errors.New("session not found")
 
+// ErrProcessNotConfirmedDead reports that a provider-managed process was sent
+// SIGKILL but had not left the run/ready set when the bounded reap wait ran
+// out (a process in uninterruptible sleep can outlive its own SIGKILL). The
+// process may still be alive, so the error is retryable and is never "gone":
+// [IsSessionGone] is false for it, and a teardown caller must keep the
+// session's bookkeeping instead of treating Stop as having succeeded.
+var ErrProcessNotConfirmedDead = errors.New("process not confirmed dead after SIGKILL")
+
 // ErrNudgeDeliveredUnobserved reports that a nudge reached the session and
 // was consumed, but the provider never observed the session start the turn.
 // Delivery is proven, so callers must treat the nudge as delivered and must
@@ -126,6 +143,13 @@ var ErrSessionNotFound = errors.New("session not found")
 // unobserved-delivery conditions with this sentinel so callers can dispatch
 // with errors.Is.
 var ErrNudgeDeliveredUnobserved = errors.New("nudge delivered but unobserved")
+
+// NudgeDelivered reports whether a nudge's err means the nudge reached the
+// session: nil, or [ErrNudgeDeliveredUnobserved] from any runtime. A caller
+// that retries undelivered nudges acks both and never redelivers them.
+func NudgeDelivered(err error) bool {
+	return err == nil || errors.Is(err, ErrNudgeDeliveredUnobserved)
+}
 
 // ErrNudgeDeliveryUnconfirmed reports that a nudge's submit was sent to the
 // session but the provider could not confirm it took: the message may have
@@ -290,6 +314,12 @@ func MetaValue(v string, err error) (string, error) {
 // A wrap over a join is judged by the join, not by the wrap's text. An error
 // tree with no join keeps the single-error rule below.
 func IsSessionGone(err error) bool {
+	// A process that may still be alive is never gone, whatever else the error
+	// says: a join with a "not found" leaf or a wrapped ErrSessionNotFound must
+	// not certify it dead.
+	if errors.Is(err, ErrProcessNotConfirmedDead) {
+		return false
+	}
 	switch wrapped := err.(type) { //nolint:errorlint // walks the error tree by hand: every leaf of a join must be gone, which errors.Is cannot express
 	case nil:
 		return false

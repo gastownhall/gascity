@@ -99,6 +99,11 @@ func (c *storageSplitCheck) versionFloor(f *storageSplitFindings) {
 
 // unsplit is the verdict of a city with no [storage].
 func (c *storageSplitCheck) unsplit(f *storageSplitFindings) string {
+	// A reverse past its R4 has removed [storage] and is not finished.
+	if err := storageReverseRefusal(c.cityPath, ""); err != nil {
+		f.errs = append(f.errs, err.Error())
+		return ""
+	}
 	if blocked, held := revertHoldingNote(storageSplitNone, c.cityPath); held {
 		f.errs = append(f.errs, preflightAdviceDetail(blocked))
 		return ""
