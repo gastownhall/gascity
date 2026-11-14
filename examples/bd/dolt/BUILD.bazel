@@ -147,6 +147,7 @@ go_test(
     ) + [
         "//:engdocs_dolt_maintenance",
         "//:go.mod",
+        "//examples/bd:assets/scripts/dolt-enospc.sh",
         "//examples/bd:assets/scripts/dolt-fsync-stall.sh",
         "//internal/bootstrap/packs/core:pack_files",
     ] + select({

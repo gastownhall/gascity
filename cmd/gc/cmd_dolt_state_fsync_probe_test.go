@@ -616,7 +616,9 @@ func TestGcBeadsBdRecoverENOSPCWinsOverFsyncStall(t *testing.T) {
 	if err := os.WriteFile(f.logFile, []byte("fatal: no space left on device\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	out, err := f.recover(t, false, "FAKE_PROBE_MODE=unfinished")
+	// ENOSPC evidence counts only while the data dir is short of free space;
+	// a floor above any real disk's free space keeps it short here.
+	out, err := f.recover(t, false, "FAKE_PROBE_MODE=unfinished", "GC_DOLT_WARN_FREE_BYTES=4611686018427387904")
 	if err == nil {
 		t.Fatalf("recover succeeded despite ENOSPC; output:\n%s", out)
 	}
