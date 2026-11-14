@@ -201,7 +201,7 @@ func (r *rowFacts) driftRepair(cfg runtime.Config, stored, core string) (intent,
 		return intent{}, false
 	}
 	res, _ := r.w.Templates.lookup(info)
-	patch := session.ConfigDriftAsleepResetPatch("")
+	patch := session.ConfigDriftAsleepResetPatch("", now)
 	if !restartKeyMints(res.TP, info) {
 		patch["session_key"] = "" // the start launches bare, its provider minting its own
 	}
