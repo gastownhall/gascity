@@ -26,6 +26,10 @@ type DiscoveredDoctor struct {
 	BindingName string
 	// Warmup mirrors `doctor.toml`'s `warmup` field. False by default.
 	Warmup bool
+	// ConfigValidate opts into explicit validation with synchronous resolved input.
+	ConfigValidate bool
+	// ConfigValidateFormulas are opaque formula identifiers requested by the pack.
+	ConfigValidateFormulas []string
 }
 
 type doctorManifest struct {
@@ -33,7 +37,9 @@ type doctorManifest struct {
 	Run         string `toml:"run"`
 	Fix         string `toml:"fix"`
 	// Warmup opts this check into the `gc start` warm-up scan. Default false.
-	Warmup bool `toml:"warmup"`
+	Warmup                 bool     `toml:"warmup"`
+	ConfigValidate         bool     `toml:"config_validate"`
+	ConfigValidateFormulas []string `toml:"config_validate_formulas"`
 }
 
 func resolveContainedDoctorPath(kind, packDir, checkDir, relPath string) (string, error) {
@@ -106,11 +112,14 @@ func discoveredDoctorFromDir(fs fsys.FS, packDir, checkDir, name, packName strin
 	description := ""
 	fixRel := ""
 	warmup := false
+	var manifest doctorManifest
 
 	manifestPath := filepath.Join(checkDir, "doctor.toml")
 	if data, err := fs.ReadFile(manifestPath); err == nil {
-		var manifest doctorManifest
 		if _, err := toml.Decode(string(data), &manifest); err != nil {
+			return DiscoveredDoctor{}, false, fmt.Errorf("doctor/%s/doctor.toml: %w", name, err)
+		}
+		if err := validateDoctorFormulaInputs(manifest.ConfigValidate, manifest.ConfigValidateFormulas); err != nil {
 			return DiscoveredDoctor{}, false, fmt.Errorf("doctor/%s/doctor.toml: %w", name, err)
 		}
 		description = manifest.Description
@@ -160,14 +169,33 @@ func discoveredDoctorFromDir(fs fsys.FS, packDir, checkDir, name, packName strin
 	}
 
 	return DiscoveredDoctor{
-		Name:        name,
-		Description: description,
-		RunScript:   runPath,
-		FixScript:   fixPath,
-		HelpFile:    helpFile,
-		SourceDir:   checkDir,
-		PackDir:     packDir,
-		PackName:    packName,
-		Warmup:      warmup,
+		Name:                   name,
+		Description:            description,
+		RunScript:              runPath,
+		FixScript:              fixPath,
+		HelpFile:               helpFile,
+		SourceDir:              checkDir,
+		PackDir:                packDir,
+		PackName:               packName,
+		Warmup:                 warmup,
+		ConfigValidate:         manifest.ConfigValidate,
+		ConfigValidateFormulas: manifest.ConfigValidateFormulas,
 	}, true, nil
+}
+
+func validateDoctorFormulaInputs(enabled bool, names []string) error {
+	if len(names) > 0 && !enabled {
+		return fmt.Errorf("config_validate_formulas requires config_validate = true")
+	}
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("config_validate_formulas contains an empty formula name")
+		}
+		if seen[name] {
+			return fmt.Errorf("config_validate_formulas repeats formula %q", name)
+		}
+		seen[name] = true
+	}
+	return nil
 }

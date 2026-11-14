@@ -1152,6 +1152,11 @@ type PackDoctorEntry struct {
 	// scan. Default false. The check still runs on demand via `gc doctor`
 	// regardless of this flag.
 	Warmup bool `toml:"warmup,omitempty"`
+	// ConfigValidate opts this diagnostic into explicit config show --validate.
+	ConfigValidate bool `toml:"config_validate,omitempty"`
+	// ConfigValidateFormulas names the compiled formula inputs supplied per rig.
+	// Formula policy remains in the diagnostic script.
+	ConfigValidateFormulas []string `toml:"config_validate_formulas,omitempty"`
 }
 
 // PackRuntimeEntry declares a pack-shipped runtime provider executable

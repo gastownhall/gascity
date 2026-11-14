@@ -1,12 +1,16 @@
 package doctor
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/execgrace"
 )
 
 // PackScriptCheck implements Check by running a script shipped with
@@ -72,9 +76,7 @@ func (c *PackScriptCheck) Fix(ctx *CheckContext) error {
 	cmd := exec.Command(c.FixScript) //nolint:gosec // path from pack config
 	cmd.Dir = c.PackDir
 	cmd.Env = append(cmd.Environ(), citylayout.PackRuntimeEnv(ctx.CityPath, c.PackName)...)
-	cmd.Env = append(cmd.Env,
-		"GC_PACK_DIR="+c.PackDir,
-	)
+	cmd.Env = append(withoutConfigValidationMarker(cmd.Env), "GC_PACK_DIR="+c.PackDir)
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -93,13 +95,43 @@ func (c *PackScriptCheck) Fix(ctx *CheckContext) error {
 
 // Run executes the pack script and interprets its output.
 func (c *PackScriptCheck) Run(ctx *CheckContext) *CheckResult {
-	cmd := exec.Command(c.Script) //nolint:gosec // script path from pack config
+	return c.runScript(ctx, exec.Command(c.Script), nil, false)
+}
+
+// RunConfigValidation supplies fresh resolved input to the explicitly opted-in
+// diagnostic. The deadline bounds the subprocess; fixes are never dispatched.
+func (c *PackScriptCheck) RunConfigValidation(ctx context.Context, cityPath string, input []byte, timeout time.Duration) *CheckResult {
+	bounded, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	cmd := exec.CommandContext(bounded, c.Script)
+	execgrace.Apply(cmd, 100*time.Millisecond)
+	result := c.runScript(&CheckContext{CityPath: cityPath}, cmd, input, true)
+	if bounded.Err() != nil {
+		result.Status = StatusError
+		result.Message = fmt.Sprintf("config validation script: %v (limit %s)", bounded.Err(), timeout)
+	}
+	return result
+}
+
+func withoutConfigValidationMarker(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		if !strings.HasPrefix(entry, "GC_CONFIG_VALIDATION=") {
+			out = append(out, entry)
+		}
+	}
+	return out
+}
+
+func (c *PackScriptCheck) runScript(ctx *CheckContext, cmd *exec.Cmd, input []byte, validation bool) *CheckResult {
 	cmd.Dir = c.PackDir
 	cmd.Env = append(cmd.Environ(), citylayout.PackRuntimeEnv(ctx.CityPath, c.PackName)...)
-	cmd.Env = append(cmd.Env,
-		"GC_PACK_DIR="+c.PackDir,
-	)
+	cmd.Env = append(withoutConfigValidationMarker(cmd.Env), "GC_PACK_DIR="+c.PackDir)
 
+	if validation {
+		cmd.Stdin = bytes.NewReader(input)
+		cmd.Env = append(cmd.Env, "GC_CONFIG_VALIDATION=1")
+	}
 	out, err := cmd.CombinedOutput()
 	exitCode := 0
 	if err != nil {
