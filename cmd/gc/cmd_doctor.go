@@ -729,6 +729,9 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 	ctx := &doctor.CheckContext{CityPath: cityPath, Verbose: opts.Verbose}
 	cfg, cfgErr := loadCityConfig(cityPath, stderr)
 	if cfgErr == nil {
+		emitAlwaysFreshAdvisories(stderr, cfg)
+	}
+	if cfgErr == nil {
 		resolveRigPaths(cityPath, cfg.Rigs)
 	}
 	controllerRunning := doctor.IsControllerRunning(cityPath)
