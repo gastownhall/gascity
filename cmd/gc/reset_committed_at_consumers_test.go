@@ -151,3 +151,40 @@ func TestRecordResetStallIgnoresHandoffStampAfterFreshWakeDrain(t *testing.T) {
 		t.Errorf("control: recorded events = %#v, want one %s", rec.Events, events.SessionResetStalled)
 	}
 }
+
+// TestRecordResetStallMeasuresFreshRestartStamp pins `gc session reset` on a
+// row that is not alive: Manager.RequestFreshRestart stamps reset_committed_at
+// as a real handoff, so the stall check stays quiet inside startup_timeout and
+// fires once past it.
+func TestRecordResetStallMeasuresFreshRestartStamp(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	rec := events.NewFake()
+	env.cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "worker", StartCommand: "true"}},
+		Session:   config.SessionConfig{StartupTimeout: "60s"},
+	}
+	stampedAt := env.clk.Now().UTC()
+	reset := env.createSessionBead("worker", "worker")
+	// The metadata Manager.RequestFreshRestart writes.
+	env.setSessionMetadata(&reset, map[string]string{
+		"restart_requested":            "true",
+		"continuation_reset_pending":   "true",
+		sessionpkg.ResetCommittedAtKey: stampedAt.Format(time.RFC3339),
+	})
+
+	check := func(now time.Time) {
+		recordResetStallIfDue(env.city, env.store, env.sp, env.cfg, sessiontest.SeedBead(t, reset), "worker", "worker",
+			false, false, env.cfg.Session.StartupTimeoutDuration(), now, env.dt, rec, &env.stderr, nil)
+	}
+
+	check(stampedAt.Add(30 * time.Second))
+	if len(rec.Events) != 0 {
+		t.Fatalf("inside startup_timeout: recorded events = %#v, want none", rec.Events)
+	}
+
+	check(stampedAt.Add(2 * time.Minute))
+	if len(rec.Events) != 1 || rec.Events[0].Type != events.SessionResetStalled {
+		t.Errorf("past startup_timeout: recorded events = %#v, want one %s", rec.Events, events.SessionResetStalled)
+	}
+}

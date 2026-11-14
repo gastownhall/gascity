@@ -228,7 +228,9 @@ func exitAccrual(counterKey string, next, threshold int, sleepReason string, unt
 // started_config_hash so the next start runs as a first start instead of
 // resuming a conversation that no longer exists; churn keeps the hash. It is a
 // passive re-arm, not a restart handoff, so it clears reset_committed_at
-// rather than inheriting an earlier handoff's stamp (gascity#4067).
+// rather than inheriting an earlier handoff's stamp (gascity#4067). now is
+// accepted for signature parity with the other re-arm patches; a passive reset
+// clears reset_committed_at rather than stamping it.
 func ConversationResetPatch(clearStartedConfigHash bool, _ time.Time) MetadataPatch {
 	patch := MetadataPatch{
 		"session_key":                "",
