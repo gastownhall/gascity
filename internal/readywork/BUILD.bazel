@@ -26,6 +26,7 @@ go_test(
         "enrich_test.go",
         "federate_test.go",
         "handle_legs_test.go",
+        "label_test.go",
         "pushdown_test.go",
         "query_test.go",
         "testenv_import_test.go",

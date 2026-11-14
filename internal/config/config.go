@@ -835,6 +835,12 @@ type AgentOverride struct {
 	// ScaleCheck overrides the shell command whose output reports new
 	// unassigned session demand for bead-backed reconciliation.
 	ScaleCheck *string `toml:"scale_check,omitempty"`
+	// RouteLabel requires every listed label on a bead before this agent's
+	// generated routed-work queries serve it.
+	RouteLabel []string `toml:"route_label,omitempty"`
+	// RouteLabelAny requires at least one listed label on a bead before this
+	// agent's generated routed-work queries serve it.
+	RouteLabelAny []string `toml:"route_label_any,omitempty"`
 	// OptionDefaults adds or overrides provider option defaults for this agent.
 	// Keys are option keys, values are choice values. Merges additively
 	// (override keys win over existing agent keys).
@@ -3813,6 +3819,12 @@ type Agent struct {
 	// session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName,
 	// DefaultBranch) before running the command.
 	ScaleCheck string `toml:"scale_check,omitempty"`
+	// RouteLabel requires every listed label on a bead before this agent's
+	// generated routed-work queries serve it.
+	RouteLabel []string `toml:"route_label,omitempty"`
+	// RouteLabelAny requires at least one listed label on a bead before this
+	// agent's generated routed-work queries serve it.
+	RouteLabelAny []string `toml:"route_label_any,omitempty"`
 	// DrainTimeout is the maximum time to wait for a session to finish its
 	// current work before force-killing it during scale-down. Duration string
 	// (e.g., "5m", "30m", "1h"). Defaults to "5m".

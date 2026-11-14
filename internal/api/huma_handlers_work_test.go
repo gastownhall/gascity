@@ -109,6 +109,8 @@ func TestReadyWorkSendsEveryQueryFieldToTheController(t *testing.T) {
 		MetadataFields: []string{"gc.routed_to=pool/a,b", "gc.kind"},
 		ExcludeTypes:   []string{"epic", "molecule"},
 		ExcludeLabels:  []string{"hold:mayor", "human"},
+		Labels:         []string{"needs-claude-review", "team:a"},
+		AnyLabels:      []string{"urgent", "vip"},
 		Sort:           readywork.SortOldest,
 		Limit:          20,
 		Status:         readywork.StatusInProgress,

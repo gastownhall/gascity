@@ -458,6 +458,24 @@
           "Rig": {
             "type": "string"
           },
+          "RouteLabel": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "RouteLabelAny": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "ScaleCheck": {
             "type": [
               "string",
@@ -629,7 +647,9 @@
           "InjectFragmentsAppend",
           "MaxActiveSessions",
           "MinActiveSessions",
-          "ScaleCheck"
+          "ScaleCheck",
+          "RouteLabel",
+          "RouteLabelAny"
         ],
         "type": "object"
       },

@@ -125,6 +125,8 @@ export type AgentPatch = {
     Provider: string | null;
     ResumeCommand: string | null;
     Rig: string;
+    RouteLabel: Array<string> | null;
+    RouteLabelAny: Array<string> | null;
     ScaleCheck: string | null;
     Scope: string | null;
     Session: string | null;

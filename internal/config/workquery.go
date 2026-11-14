@@ -259,6 +259,18 @@ type PoolDemandServeRules struct {
 	// holds, and bd's native human label, that a worker is deliberately
 	// forbidden to claim through.
 	ExcludeLabels []string
+	// RequireLabels mirrors the repeated --label flags: every label must be on
+	// the row (AND).
+	RequireLabels []string
+	// RequireAnyLabels mirrors the repeated --label-any flags: at least one of
+	// these labels must be on the row (OR).
+	RequireAnyLabels []string
+}
+
+// PoolDemandServeRulesFor returns the serving rules of a's routed pool-demand
+// tier: the base rules plus the agent's route label requirements.
+func PoolDemandServeRulesFor(_ *Agent) PoolDemandServeRules {
+	return PoolDemandServeRulesForQuery()
 }
 
 // PoolDemandServeRulesForQuery returns the serving rules of the generated

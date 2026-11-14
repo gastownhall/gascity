@@ -172,6 +172,12 @@ type AgentPatch struct {
 	// unassigned session demand for bead-backed reconciliation. Supports the
 	// same Go template placeholders as Agent.scale_check.
 	ScaleCheck *string `toml:"scale_check,omitempty"`
+	// RouteLabel requires every listed label on a bead before this agent's
+	// generated routed-work queries serve it.
+	RouteLabel []string `toml:"route_label,omitempty"`
+	// RouteLabelAny requires at least one listed label on a bead before this
+	// agent's generated routed-work queries serve it.
+	RouteLabelAny []string `toml:"route_label_any,omitempty"`
 	// OptionDefaults adds or overrides provider option defaults for this agent.
 	// Keys are option keys, values are choice values. Merges additively
 	// (patch keys win over existing agent keys).

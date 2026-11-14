@@ -62,6 +62,10 @@ type Query struct {
 	ExcludeTypes []string
 	// ExcludeLabels drops beads carrying any of these labels.
 	ExcludeLabels []string
+	// Labels keeps only beads carrying every one of these labels.
+	Labels []string
+	// AnyLabels keeps only beads carrying at least one of these labels.
+	AnyLabels []string
 	// Sort is "" for the canonical ready order (priority, created_at, id),
 	// SortOldest, or SortNewest.
 	Sort string

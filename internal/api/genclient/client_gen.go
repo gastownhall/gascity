@@ -2199,6 +2199,8 @@ type AgentPatch struct {
 	Provider                *string            `json:"Provider"`
 	ResumeCommand           *string            `json:"ResumeCommand"`
 	Rig                     string             `json:"Rig"`
+	RouteLabel              *[]string          `json:"RouteLabel"`
+	RouteLabelAny           *[]string          `json:"RouteLabelAny"`
 	ScaleCheck              *string            `json:"ScaleCheck"`
 	Scope                   *string            `json:"Scope"`
 	Session                 *string            `json:"Session"`

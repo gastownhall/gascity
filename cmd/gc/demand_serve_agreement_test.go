@@ -694,16 +694,20 @@ func readerArgsForMarker(t *testing.T, query, marker, target string) []string {
 	if end < 0 {
 		t.Fatalf("tier carrying %s has no --json terminator:\n%s", marker, query)
 	}
-	return splitShellWords(strings.ReplaceAll(rest[:end], "$target", target))
+	flags := strings.ReplaceAll(rest[:end], "$target", target)
+	// A tier inside the sh -c wrapper has its single quotes escaped as '\'';
+	// undo that so a quoted label value reads as the one word it is.
+	return splitShellWords(unescapeShellSingleQuotes(flags))
 }
 
-// splitShellWords is the minimal double-quote-aware tokenizer the generated
-// query's flag section needs (the builders quote metadata and label values and
-// nothing else).
+// splitShellWords is the minimal quote-aware tokenizer the generated query's
+// flag section needs (the builders quote metadata and label values with double
+// quotes, and route-label values with single quotes, and nothing else).
 func splitShellWords(s string) []string {
 	var out []string
 	var cur strings.Builder
 	quoted := false
+	single := false
 	flush := func() {
 		if cur.Len() > 0 {
 			out = append(out, cur.String())
@@ -712,9 +716,11 @@ func splitShellWords(s string) []string {
 	}
 	for _, r := range s {
 		switch {
-		case r == '"':
+		case r == '"' && !single:
 			quoted = !quoted
-		case r == ' ' && !quoted:
+		case r == '\'' && !quoted:
+			single = !single
+		case r == ' ' && !quoted && !single:
 			flush()
 		default:
 			cur.WriteRune(r)

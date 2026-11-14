@@ -21,13 +21,19 @@ import (
 
 // fakeFilteringReader stands in for both `bd` and `gc`. `ready` and `list`
 // filter the rows in $FAKE_ROWS by --status (default open), --assignee,
-// --unassigned, every --metadata-field key=value and every --exclude-label,
-// then apply --limit, in file order; `query` answers the ephemeral tier with
+// --unassigned, every --metadata-field key=value, every --exclude-label, every
+// --label (all must be on the row) and every --label-any (one must be), then
+// apply --limit, in file order; --label and --label-any may repeat and, like
+// bd's, split their value on commas; `query` answers the ephemeral tier with
 // the rows in $FAKE_WISPS whose status is the one its expression names; `show`
 // reports no dependencies; anything else is empty. Every call is logged to
 // $FAKE_READ_LOG as "<binary> <args>".
 const fakeFilteringReader = `#!/bin/sh
 printf '%s %s\n' "${0##*/}" "$*" >> "$FAKE_READ_LOG"
+if [ -n "${FAKE_ARGV_LOG:-}" ]; then
+  printf '%s\n' "${0##*/}" >> "$FAKE_ARGV_LOG"
+  for arg in "$@"; do printf '  %s\n' "$arg" >> "$FAKE_ARGV_LOG"; done
+fi
 case "$1" in
   ready|list) ;;
   query)
@@ -40,7 +46,7 @@ case "$1" in
   *) printf '[]'; exit 0 ;;
 esac
 shift
-status=open; assignee=""; unassigned=false; meta='[]'; excl='[]'; limit=0
+status=open; assignee=""; unassigned=false; meta='[]'; excl='[]'; req='[]'; anyl='[]'; limit=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --status) shift; status=$1 ;;
@@ -48,13 +54,18 @@ while [ $# -gt 0 ]; do
     --unassigned) unassigned=true ;;
     --metadata-field) shift; meta=$(printf '%s' "$meta" | jq -c --arg kv "$1" '. + [$kv]') ;;
     --exclude-label) shift; excl=$(printf '%s' "$excl" | jq -c --arg l "$1" '. + [$l]') ;;
+    --label) shift; req=$(printf '%s' "$req" | jq -c --arg l "$1" '. + ($l | split(","))') ;;
+    --label=*) req=$(printf '%s' "$req" | jq -c --arg l "${1#--label=}" '. + ($l | split(","))') ;;
+    --label-any) shift; anyl=$(printf '%s' "$anyl" | jq -c --arg l "$1" '. + ($l | split(","))') ;;
+    --label-any=*) anyl=$(printf '%s' "$anyl" | jq -c --arg l "${1#--label-any=}" '. + ($l | split(","))') ;;
     --limit=*) limit=${1#--limit=} ;;
     --limit) shift; limit=$1 ;;
   esac
   shift
 done
 jq -c --arg st "$status" --arg a "$assignee" --argjson u "$unassigned" \
-  --argjson meta "$meta" --argjson excl "$excl" --argjson lim "$limit" '
+  --argjson meta "$meta" --argjson excl "$excl" --argjson req "$req" --argjson anyl "$anyl" \
+  --argjson lim "$limit" '
   [.[] | . as $row | select(
     ($row.status == $st)
     and ($a == "" or ($row.assignee // "") == $a)
@@ -62,6 +73,8 @@ jq -c --arg st "$status" --arg a "$assignee" --argjson u "$unassigned" \
     and all($meta[]; . as $kv | ($kv | index("=")) as $i |
       (($row.metadata // {})[$kv[:$i]] // "") == $kv[$i+1:])
     and ([($row.labels // [])[] | select(IN($excl[]))] | length) == 0
+    and all($req[]; . as $l | ($row.labels // []) | any(. == $l))
+    and (($anyl | length) == 0 or ([($row.labels // [])[] | select(IN($anyl[]))] | length) > 0)
   )] | if $lim > 0 then .[:$lim] else . end' "$FAKE_ROWS"
 `
 

@@ -69,6 +69,11 @@ func newReadyWorkSplitFixture(t *testing.T) readyWorkSplitFixture {
 		mustCreateReadyBead(t, store, beads.Bead{Title: "plain", Type: "task"})
 		mustCreateReadyBead(t, store, beads.Bead{Title: "assigned", Type: "task", Assignee: f.assignee})
 		mustCreateReadyBead(t, store, beads.Bead{Title: "routed", Type: "task", Metadata: map[string]string{"gc.routed_to": f.routedTo}})
+		// Labeled routed work, so the label predicates have rows to keep and
+		// rows to drop on every leg (ga-878prh.1).
+		mustCreateReadyBead(t, store, beads.Bead{Title: "review", Type: "task", Labels: []string{"review"}, Metadata: map[string]string{"gc.routed_to": f.routedTo}})
+		mustCreateReadyBead(t, store, beads.Bead{Title: "review urgent", Type: "task", Labels: []string{"review", "urgent"}, Metadata: map[string]string{"gc.routed_to": f.routedTo}})
+		mustCreateReadyBead(t, store, beads.Bead{Title: "urgent held", Type: "task", Labels: []string{"urgent", "hold:mayor"}, Metadata: map[string]string{"gc.routed_to": f.routedTo}})
 		claimed := mustCreateReadyBead(t, store, beads.Bead{Title: "claimed", Type: "task"})
 		if err := store.Update(claimed.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &f.assignee}); err != nil {
 			t.Fatalf("claim in store %d: %v", i, err)
@@ -133,6 +138,9 @@ func readyWorkQueries(f readyWorkSplitFixture) []readywork.Query {
 		{MetadataFields: []string{"gc.routed_to=" + f.routedTo}, Unassigned: true, ExcludeTypes: []string{"epic"}, ExcludeLabels: []string{"hold:mayor"}, Limit: 20},
 		{MetadataFields: []string{"gc.routed_to=" + f.routedTo}, Unassigned: true, Sort: readywork.SortOldest, Limit: 20},
 		{Status: readywork.StatusOpen},
+		{Labels: []string{"review"}},
+		{AnyLabels: []string{"urgent", "absent"}, Limit: 5},
+		{MetadataFields: []string{"gc.routed_to=" + f.routedTo}, Unassigned: true, ExcludeLabels: []string{"hold:mayor"}, Labels: []string{"review"}, AnyLabels: []string{"urgent"}, Limit: 20},
 	}
 }
 

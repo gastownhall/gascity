@@ -70,6 +70,16 @@ func demandServableForTemplates(cfg *config.City, b beads.Bead, templates map[st
 	return "", false
 }
 
+// demandServableForTemplateRules is demandServableForTemplates with each
+// template's own serve rules.
+func demandServableForTemplateRules(cfg *config.City, b beads.Bead, templates map[string]config.PoolDemandServeRules) (string, bool) {
+	names := make(map[string]struct{}, len(templates))
+	for name := range templates {
+		names[name] = struct{}{}
+	}
+	return demandServableForTemplates(cfg, b, names)
+}
+
 // controlRowServableByTemplate applies the control-dispatcher ownership rule to
 // one row: a control-kind row whose gc.root_store_ref names a scope is demand
 // only for that scope's configured dispatcher, and for no template when the

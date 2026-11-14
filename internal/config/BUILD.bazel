@@ -177,6 +177,7 @@ go_test(
         "revision_test.go",
         "rig_federation_test.go",
         "rig_merge_strategy_test.go",
+        "route_label_test.go",
         "service_test.go",
         "session_model_phase0_spec_test.go",
         "session_setup_path_test.go",
