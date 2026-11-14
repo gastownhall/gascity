@@ -2288,6 +2288,19 @@ func newSessionCloseCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Close a session permanently",
 		Long: `End a conversation. Stops the runtime if active and closes the bead.
 
+Open and in-progress work assigned to the closed session (its ID or session
+name) is released: it reopens unassigned on the route it carries, and work
+with no route of its own takes the session's template as its route. Work whose
+route no agent serves stays assigned to the closed session and is reported as
+stranded (session.stranded_claims).
+
+A still-configured named session keeps the work assigned to its configured
+named identity and its runtime name: that work stays assigned, and the
+controller creates the session again to serve it. Once the named session is
+removed from config, a close releases that work too. To restart a named
+session and keep the same session bead and its assignments, use gc session
+kill.
+
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor). A rerun
 with the same --key replays the close only when it names the session by its
 ID: a closed session's alias no longer resolves to it, and once another
@@ -2405,8 +2418,11 @@ func cmdSessionClose(args []string, key string, stdout, stderr io.Writer, asJSON
 	// A routeless claim takes the seat's own route, as every controller-side
 	// retirement gives it; a claim no lane serves stays on the closed row and
 	// raises session.stranded_claims, which the controller's detector repeats.
+	// Work assigned to a still-configured named session's identity stays
+	// assigned: the controller re-materializes the identity to serve it.
 	legs := workLegsFromCensus(cityPath, cfg, cityWorkLegOf(beads.WorkStore{Store: store}), rigStores)
-	out := unclaimWorkAssignedToRetiredSessionBeadVia(legs, sessStore, closedSessionBead, retiredSessionFallbackRoute(closedSessionBead), stderr)
+	keep := closedNamedSessionKeptAssignees(closedSessionBead, cfg, loadedCityName(cfg, cityPath))
+	out := unclaimWorkAssignedToRetiredSessionBeadVia(legs, sessStore, closedSessionBead, retiredSessionFallbackRoute(closedSessionBead), keep, stderr)
 	if cityErr == nil {
 		strand(&strandedClaimAlerts{rec: openCityRecorderAt(cityPath, stderr)}, releaseSeatOfBead(closedSessionBead), "manual", out, time.Now(), stderr)
 	}
