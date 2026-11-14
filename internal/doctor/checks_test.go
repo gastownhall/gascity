@@ -4487,6 +4487,101 @@ func TestDoltVersionCheck_Timeout(t *testing.T) {
 	if !strings.Contains(r.Message, "timed out") {
 		t.Fatalf("message = %q, want timeout warning", r.Message)
 	}
+	// A timeout is not a failed invocation: dolt is installed and ran.
+	if !strings.Contains(r.Message, "installed") || strings.Contains(r.Message, "invoke dolt version") {
+		t.Fatalf("message = %q, want a timeout message that says dolt is installed, not an invoke failure", r.Message)
+	}
+}
+
+// installConfigGatedDolt puts a stub dolt first on PATH that behaves like the
+// real one on a slow network: `dolt version` blocks (the latest-release lookup,
+// which has no timeout of its own) unless the global config under
+// $DOLT_ROOT_PATH sets versioncheck.disabled. STUB_DOLT_FAST=1 answers at once
+// regardless. Every call records the DOLT_ROOT_PATH and DOLT_DISABLE_EVENT_FLUSH
+// it ran with, one per line, in the returned file.
+func installConfigGatedDolt(t *testing.T) (recordPath string) {
+	t.Helper()
+	binDir := t.TempDir()
+	recordPath = filepath.Join(t.TempDir(), "probe-env")
+	script := `#!/bin/sh
+printf 'root=%s\nflush=%s\n' "$DOLT_ROOT_PATH" "$DOLT_DISABLE_EVENT_FLUSH" > "$STUB_DOLT_RECORD"
+if [ "$STUB_DOLT_FAST" = 1 ]; then
+	echo "dolt version 2.6.1"
+	exit 0
+fi
+if [ -n "$DOLT_ROOT_PATH" ] && grep -q '"versioncheck.disabled":"true"' "$DOLT_ROOT_PATH/.dolt/config_global.json" 2>/dev/null; then
+	echo "dolt version 2.6.1"
+	exit 0
+fi
+exec sleep 30
+`
+	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("STUB_DOLT_RECORD", recordPath)
+	return recordPath
+}
+
+func readProbeEnv(t *testing.T, recordPath string) map[string]string {
+	t.Helper()
+	data, err := os.ReadFile(recordPath)
+	if err != nil {
+		t.Fatalf("the stub dolt never ran: %v", err)
+	}
+	got := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		k, v, _ := strings.Cut(line, "=")
+		got[k] = v
+	}
+	return got
+}
+
+// The user's dolt global config does not disable the release check, so an
+// unisolated probe would block on the network and time out.
+func TestDoltVersionCheck_ProbeIsolatedFromUserDoltConfig(t *testing.T) {
+	oldTimeout := doltVersionCommandTimeout
+	doltVersionCommandTimeout = 2 * time.Second
+	t.Cleanup(func() { doltVersionCommandTimeout = oldTimeout })
+
+	userRoot := t.TempDir()
+	t.Setenv("DOLT_ROOT_PATH", userRoot)
+	t.Setenv("DOLT_DISABLE_EVENT_FLUSH", "")
+	recordPath := installConfigGatedDolt(t)
+
+	r := NewDoltVersionCheck().Run(&CheckContext{})
+	if r.Status != StatusOK || !strings.Contains(r.Message, "2.6.1") {
+		t.Fatalf("status = %d, message = %q, want OK for dolt 2.6.1 (the probe must not depend on the user's dolt config)", r.Status, r.Message)
+	}
+	got := readProbeEnv(t, recordPath)
+	if got["flush"] != "1" {
+		t.Errorf("DOLT_DISABLE_EVENT_FLUSH = %q, want 1 (dolt forks a detached send-metrics otherwise)", got["flush"])
+	}
+	if got["root"] == "" || got["root"] == userRoot {
+		t.Errorf("DOLT_ROOT_PATH = %q, want a throwaway directory, not the user's %q", got["root"], userRoot)
+	}
+	if _, err := os.Stat(got["root"]); !os.IsNotExist(err) {
+		t.Errorf("throwaway DOLT_ROOT_PATH %q still exists after the check (stat err = %v)", got["root"], err)
+	}
+}
+
+// When the throwaway directory cannot be made the probe runs as it always did.
+func TestDoltVersionCheck_ProbeFallsBackWhenThrowawayRootFails(t *testing.T) {
+	userRoot := t.TempDir()
+	t.Setenv("DOLT_ROOT_PATH", userRoot)
+	t.Setenv("DOLT_DISABLE_EVENT_FLUSH", "")
+	t.Setenv("TMPDIR", filepath.Join(t.TempDir(), "missing"))
+	recordPath := installConfigGatedDolt(t)
+	t.Setenv("STUB_DOLT_FAST", "1")
+
+	r := NewDoltVersionCheck().Run(&CheckContext{})
+	if r.Status != StatusOK || !strings.Contains(r.Message, "2.6.1") {
+		t.Fatalf("status = %d, message = %q, want OK from the unisolated fallback", r.Status, r.Message)
+	}
+	got := readProbeEnv(t, recordPath)
+	if got["root"] != userRoot || got["flush"] != "" {
+		t.Errorf("probe env = %v, want the caller's environment untouched (root=%q, flush empty)", got, userRoot)
+	}
 }
 
 func TestDoltVersionCheck_ParseError(t *testing.T) {
