@@ -163,7 +163,7 @@ func (g *foreignClaimGate) claimMayStillBeHeld(assignee, workID string, liveAssi
 		g.protected.add(assignee, workID)
 		return true
 	}
-	return memoizedLiveOpenSessionAssignmentExists(liveAssignee, assignee, g.sessionStore.Store, assignee)
+	return memoizedLiveOpenSessionAssignmentExists(liveAssignee, assignee, g.sessionStore.Store, g.cfg, assignee)
 }
 
 func (g *foreignClaimGate) observable(assignee string) bool {
