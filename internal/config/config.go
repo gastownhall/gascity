@@ -3085,6 +3085,12 @@ type DaemonConfig struct {
 	// quarantine entirely (every closed-bead worktree is immediately
 	// eligible for the rest of the gate chain, regardless of age).
 	AutoReapClosedBeadWorktreesMinAgeMinutes *int `toml:"auto_reap_closed_bead_worktrees_min_age_minutes,omitempty" jsonschema:"default=10"`
+	// AutoReapRigWorktrees, AutoReapRigWorktreesDryRun and
+	// AutoReapRigWorktreesMinAgeMinutes configure the detached-HEAD rig-root
+	// worktree reaper (RED-step stub; documented in the GREEN step).
+	AutoReapRigWorktrees              *bool `toml:"auto_reap_rig_worktrees,omitempty" jsonschema:"default=false"`
+	AutoReapRigWorktreesDryRun        *bool `toml:"auto_reap_rig_worktrees_dry_run,omitempty" jsonschema:"default=false"`
+	AutoReapRigWorktreesMinAgeMinutes *int  `toml:"auto_reap_rig_worktrees_min_age_minutes,omitempty"`
 	// StartReadyTimeout is how long `gc start` and `gc register` wait for
 	// the supervisor to report the city as Running. Cities with many
 	// registered or adopted sessions take longer to start because the
@@ -3166,6 +3172,18 @@ func (d *DaemonConfig) AutoReapClosedBeadWorktreesMinAge() time.Duration {
 	}
 	return time.Duration(*d.AutoReapClosedBeadWorktreesMinAgeMinutes) * time.Minute
 }
+
+// DefaultAutoReapRigWorktreesMinAgeMinutes is a RED-step stub.
+const DefaultAutoReapRigWorktreesMinAgeMinutes = 0
+
+// AutoReapRigWorktreesEnabled is a RED-step stub that always reports false.
+func (d *DaemonConfig) AutoReapRigWorktreesEnabled() bool { return false }
+
+// AutoReapRigWorktreesDryRunEnabled is a RED-step stub that always reports false.
+func (d *DaemonConfig) AutoReapRigWorktreesDryRunEnabled() bool { return false }
+
+// AutoReapRigWorktreesMinAge is a RED-step stub that always reports zero.
+func (d *DaemonConfig) AutoReapRigWorktreesMinAge() time.Duration { return 0 }
 
 // AutoPruneWorkerDirEnabled reports whether the reconciler should remove a
 // pool-managed session's worker_dir after the session bead is closed. The

@@ -8729,3 +8729,85 @@ func TestOrdersConfig_EffectiveMaxDispatchesPerTick(t *testing.T) {
 		t.Fatalf("DefaultMaxOrderDispatchesPerTick = %d, want 4", DefaultMaxOrderDispatchesPerTick)
 	}
 }
+
+func TestDaemonAutoReapRigWorktreesDefault(t *testing.T) {
+	d := DaemonConfig{}
+	if d.AutoReapRigWorktreesEnabled() {
+		t.Errorf("AutoReapRigWorktreesEnabled() = true, want false (default)")
+	}
+}
+
+func TestDaemonAutoReapRigWorktreesExplicitTrue(t *testing.T) {
+	v := true
+	d := DaemonConfig{AutoReapRigWorktrees: &v}
+	if !d.AutoReapRigWorktreesEnabled() {
+		t.Errorf("AutoReapRigWorktreesEnabled() = false, want true")
+	}
+}
+
+func TestDaemonAutoReapRigWorktreesDryRunDefault(t *testing.T) {
+	d := DaemonConfig{}
+	if d.AutoReapRigWorktreesDryRunEnabled() {
+		t.Errorf("AutoReapRigWorktreesDryRunEnabled() = true, want false (default)")
+	}
+}
+
+func TestDaemonAutoReapRigWorktreesDryRunExplicitTrue(t *testing.T) {
+	v := true
+	d := DaemonConfig{AutoReapRigWorktreesDryRun: &v}
+	if !d.AutoReapRigWorktreesDryRunEnabled() {
+		t.Errorf("AutoReapRigWorktreesDryRunEnabled() = false, want true")
+	}
+}
+
+func TestDaemonAutoReapRigWorktreesMinAgeDefaultIsMoreConservativeThanClosedBead(t *testing.T) {
+	d := DaemonConfig{}
+	got := d.AutoReapRigWorktreesMinAge()
+	want := time.Duration(DefaultAutoReapRigWorktreesMinAgeMinutes) * time.Minute
+	if got != want {
+		t.Errorf("AutoReapRigWorktreesMinAge() = %v, want %v (default)", got, want)
+	}
+	if got <= d.AutoReapClosedBeadWorktreesMinAge() {
+		t.Errorf("rig-worktree min-age default %v must exceed the closed-bead default %v", got, d.AutoReapClosedBeadWorktreesMinAge())
+	}
+}
+
+func TestDaemonAutoReapRigWorktreesMinAgeExplicitValue(t *testing.T) {
+	v := 90
+	d := DaemonConfig{AutoReapRigWorktreesMinAgeMinutes: &v}
+	if got := d.AutoReapRigWorktreesMinAge(); got != 90*time.Minute {
+		t.Errorf("AutoReapRigWorktreesMinAge() = %v, want 90m", got)
+	}
+}
+
+// Unlike the closed-bead knob, an explicit zero must NOT disable the
+// quarantine: subset B has no owning bead, so min-age is its only guard
+// against reaping a worktree an agent just created.
+func TestDaemonAutoReapRigWorktreesMinAgeExplicitZeroFallsBackToDefault(t *testing.T) {
+	v := 0
+	d := DaemonConfig{AutoReapRigWorktreesMinAgeMinutes: &v}
+	want := time.Duration(DefaultAutoReapRigWorktreesMinAgeMinutes) * time.Minute
+	if got := d.AutoReapRigWorktreesMinAge(); got != want {
+		t.Errorf("AutoReapRigWorktreesMinAge() = %v, want default %v for explicit zero", got, want)
+	}
+}
+
+func TestDaemonAutoReapRigWorktreesTOMLRoundTrip(t *testing.T) {
+	cfg, err := Parse([]byte(`
+[workspace]
+name = "t"
+
+[daemon]
+auto_reap_rig_worktrees = true
+auto_reap_rig_worktrees_dry_run = true
+auto_reap_rig_worktrees_min_age_minutes = 120
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	d := cfg.Daemon
+	if !d.AutoReapRigWorktreesEnabled() || !d.AutoReapRigWorktreesDryRunEnabled() || d.AutoReapRigWorktreesMinAge() != 120*time.Minute {
+		t.Errorf("parsed daemon = enabled:%v dry:%v minage:%v, want true/true/2h",
+			d.AutoReapRigWorktreesEnabled(), d.AutoReapRigWorktreesDryRunEnabled(), d.AutoReapRigWorktreesMinAge())
+	}
+}
