@@ -120,3 +120,24 @@ The plumbing to get a per-tick `runtimeQueryPartial` to the reconciler arms
 `Liveness.RuntimePartial` field) is the shared prerequisite for 1-5; it is the
 load-bearing design step and should be reviewed on its own before the arms are
 converted.
+
+**Not the same seam as ObserveLivenessBounded.** runtime.ObservationStatus,
+BoundedLivenessObserver, and ObserveLivenessBounded (added for the
+doctor-layer bounded liveness checks, gastownhall/gascity#5742) look similar
+-- another optional provider interface via type-assert reporting a liveness
+failure -- but they are a distinct primitive for a distinct call shape:
+a bounded, occasional, per-target probe that spawns a goroutine and races a
+context.WithTimeout on every call (mirroring OrderFiringCurrentCheck.Run();
+appropriate for gc doctor's bounded, human-invoked checks). Arms 1-5 read
+liveness once per session per reconcile tick, for every session, on the
+existing synchronous, cached path (workerSessionTargetRunningWithConfig ->
+worker.ObserveHandle -> ... -> StateCache) -- the same path that already
+carries runtime.ErrRuntimeUnavailable for free today (see that sentinel's
+doc comment in internal/runtime/runtime.go), just not yet surfaced past
+StateCache. Wrapping that per-tick path in ObserveLivenessBounded's per-call
+goroutine+timeout would be a real cost regression, not a simplification. Build
+arms 1-5 against Liveness.RuntimePartial, populated from the existing
+ErrRuntimeUnavailable signal already flowing through StateCache -- not
+against ObserveLivenessBounded. (Follow-up arm 1's state_cache.go Degraded()
+accessor is internal to StateCache and doesn't reach runtime.Provider at all,
+so this question doesn't apply to it either way.)
