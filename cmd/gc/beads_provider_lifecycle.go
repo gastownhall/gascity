@@ -1391,7 +1391,24 @@ func runProviderOwnedScopeLifecycleOpGuarded(parent context.Context, cityPath, s
 	if !strings.HasPrefix(provider, "exec:") {
 		return fmt.Errorf("provider-owned scope requires an exec beads provider")
 	}
-	if !providerOwnedOpRetires(op) {
+	if providerOwnedOpRetires(op) {
+		// An embedded-Dolt scope keeps its store in-process: there is no
+		// server to stop and `bd dolt stop` refuses outright. A scope that
+		// ended up provider-owned and embedded — an interrupted init
+		// completed by an external `bd init`, a bd-side handoff, a manual
+		// migration — retires nothing, so the provider call is skipped
+		// entirely rather than spending a semaphore slot and an exec on a
+		// no-op. `recover` is not a retiring op: it still reaches the
+		// script, which skips the retire and pings so the op reports the
+		// store's real state.
+		embedded, err := scopeMetadataRecordsEmbeddedDolt(fsys.OSFS{}, scopeRoot)
+		if err != nil {
+			return err
+		}
+		if embedded {
+			return nil
+		}
+	} else {
 		// Refuse before the semaphore and before any bd invocation so the
 		// refusal cannot leave a half-created store behind.
 		if err := validateProviderOwnedProxiedScopeStore(cityPath, scopeRoot); err != nil {

@@ -13688,6 +13688,77 @@ func TestGcBeadsBdProviderOwnedLifecycleUsesBdBoundary(t *testing.T) {
 	}
 }
 
+// An embedded-mode scope has no Dolt server at all — bd runs it in-process —
+// so `bd dolt stop` refuses outright. A provider-owned scope that ended up
+// embedded (interrupted init completed by an external `bd init`, a bd-side
+// handoff, a manual migration) must therefore retire nothing. Recover keeps
+// its ping: reporting the store's real state is still the op's job.
+func TestGcBeadsBdProviderOwnedRetireSkipsEmbeddedScope(t *testing.T) {
+	scriptPath := filepath.Join(repoRootForLint(t), "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")
+	cityDir := t.TempDir()
+	scopeDir := filepath.Join(cityDir, "rigs", "provider")
+	beadsDir := filepath.Join(scopeDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"),
+		[]byte(`{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"hq"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// provider_owned_scope_is_local needs the config to classify the scope at
+	// all; an embedded binding records no endpoint keys in it.
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("# bd-managed config\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tt := range []struct {
+		name      string
+		op        string
+		transport string
+		want      []string
+	}{
+		{name: "stop issues no bd command", op: "stop", want: nil},
+		{name: "shutdown issues no bd command", op: "shutdown", want: nil},
+		{name: "journaled direct stop issues no bd command", op: "stop", transport: "direct", want: nil},
+		{name: "recover skips the retire but still pings", op: "recover", want: []string{"ping"}},
+		{name: "start still pings", op: "start", want: []string{"ping"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			logPath := filepath.Join(t.TempDir(), "bd.log")
+			bdPath := filepath.Join(t.TempDir(), "bd")
+			if err := os.WriteFile(bdPath, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> "+strconv.Quote(logPath)+"\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(scriptPath, tt.op)
+			cmd.Env = sanitizedBaseEnv(
+				"GC_CITY_PATH="+cityDir,
+				"BEADS_DIR="+beadsDir,
+				"BD_BIN="+bdPath,
+				"GC_BEADS_PROVIDER_OWNED=1",
+				"GC_BEADS_PROXIED_IDLE_TIMEOUT=0",
+				"GC_BEADS_TARGET=local",
+			)
+			if tt.transport != "" {
+				cmd.Env = append(cmd.Env, "GC_BEADS_TRANSPORT="+tt.transport)
+			}
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("gc-beads-bd %s: %v\n%s", tt.op, err, out)
+			}
+			data, err := os.ReadFile(logPath)
+			if os.IsNotExist(err) && len(tt.want) == 0 {
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := strings.FieldsFunc(strings.TrimSpace(string(data)), func(r rune) bool { return r == '\n' })
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Fatalf("bd commands = %#v, want %#v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses(t *testing.T) {
 	skipSlowCmdGCTest(t, "runs the real bd provider lifecycle; run make test-cmd-gc-process for full coverage")
 	bdPath := func() string {

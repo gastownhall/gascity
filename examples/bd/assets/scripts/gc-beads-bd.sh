@@ -728,6 +728,17 @@ scope_is_proxied() {
     return 1
 }
 
+# scope_is_embedded reports whether the scope's persisted metadata records the
+# embedded Dolt mode — the dolt backend with dolt_mode embedded. The persisted
+# binding is the authority, the same rule ensureCanonicalScopeMetadata applies
+# in Go (scopeMetadataRecordsEmbeddedDolt): an embedded bd keeps its store
+# in-process, so there is no server, proxy, or child for a lifecycle op to act
+# on.
+scope_is_embedded() {
+    scope_backend_is_dolt "$1" || return 1
+    [ "$(normalize_dolt_mode "$(read_metadata_string_field "$1/.beads/metadata.json" dolt_mode)")" = "embedded" ]
+}
+
 write_doltlite_metadata() {
     local dir="$1" database="$2" metadata_path tmp project_id
     metadata_path="$dir/.beads/metadata.json"
@@ -5310,6 +5321,16 @@ release_fresh_beads_dir_anchor() {
 # surfaces with bd's own diagnostics.
 provider_owned_retire_local_dolt() {
     local dir="$1" out status
+    # An embedded scope keeps its Dolt in-process: there is no server to
+    # stop and `bd dolt stop` refuses outright ("not supported in embedded
+    # mode"). A provider-owned scope that ended up embedded — an interrupted
+    # init completed by an external `bd init`, a bd-side handoff, a manual
+    # migration — retires nothing. Skipping here rather than tolerating the
+    # refusal text keeps stop, shutdown, and the recover retire honest
+    # without string-matching bd's diagnostics.
+    if scope_is_embedded "$dir"; then
+        return 0
+    fi
     set +e
     out=$(run_provider_owned_bd "$dir" dolt stop 2>&1)
     status=$?
