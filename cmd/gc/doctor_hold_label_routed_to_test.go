@@ -307,3 +307,421 @@ type holdLabelListErrorStore struct {
 func (s holdLabelListErrorStore) List(beads.ListQuery) ([]beads.Bead, error) {
 	return nil, errors.New("listing failed")
 }
+
+// holdLabelStores returns a store factory over a fixed set of per-path stores.
+func holdLabelStores(stores map[string]beads.Store) func(string) (beads.Store, error) {
+	return func(path string) (beads.Store, error) {
+		store, ok := stores[path]
+		if !ok {
+			return nil, fmt.Errorf("unexpected store path %q", path)
+		}
+		return store, nil
+	}
+}
+
+// holdLabelRoute returns the gc.routed_to metadata of bead id in store.
+func holdLabelRoute(t *testing.T, store beads.Store, id string) string {
+	t.Helper()
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("get %s: %v", id, err)
+	}
+	return b.Metadata["gc.routed_to"]
+}
+
+// holdLabelBoundCity binds planner (as an agent and, with the same canonical,
+// a named session) and reviewer (as a named session only) under ops, plus a
+// rig-scoped worker under ops in the repo rig at rigDir.
+func holdLabelBoundCity(rigDir string) *config.City {
+	return &config.City{
+		Agents: []config.Agent{
+			{Name: "planner", BindingName: "ops"},
+			{Name: "worker", Dir: "repo", BindingName: "ops"},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "planner", BindingName: "ops"},
+			{Template: "reviewer", BindingName: "ops"},
+		},
+		Rigs: []config.Rig{{Name: "repo", Path: rigDir}},
+	}
+}
+
+// TestHoldLabelRoutedToCheckAcceptsBindingQualifiedRoute covers ga-tkxbic: in
+// a binding-prefixed city the canonical gc.routed_to for hold:<agent> is the
+// binding-qualified form, which v2-routed-to-namespace requires. The hold
+// check must accept it, and --fix must not regress it to the short form.
+func TestHoldLabelRoutedToCheckAcceptsBindingQualifiedRoute(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{Agents: []config.Agent{{Name: "dog", BindingName: "gastown"}}}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{{
+		ID: "H-1", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:dog"},
+		Metadata: map[string]string{"gc.routed_to": "gastown.dog"},
+	}}, nil)
+	factory := func(string) (beads.Store, error) { return store, nil }
+
+	if res := newV2RoutedToNamespaceCheck(cfg, cityDir, factory).Run(&doctor.CheckContext{}); res.Status != doctor.StatusOK {
+		t.Fatalf("v2-routed-to-namespace status = %v, want OK for canonical route: %#v", res.Status, res)
+	}
+	check := newHoldLabelRoutedToCheck(cfg, cityDir, factory)
+	if res := check.Run(&doctor.CheckContext{}); res.Status != doctor.StatusOK {
+		t.Errorf("hold-label-routed-to status = %v, want OK for binding-qualified gc.routed_to: %#v", res.Status, res)
+	}
+	if err := check.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	got, err := store.Get("H-1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if route := got.Metadata["gc.routed_to"]; route != "gastown.dog" {
+		t.Fatalf("after Fix gc.routed_to = %q, want canonical %q", route, "gastown.dog")
+	}
+}
+
+// TestHoldLabelRoutedToCheckAcceptsCanonicalBoundRoutes covers ga-tkxbic AC-1
+// across city and rig stores: a hold value bound under a binding is satisfied
+// by its binding-qualified gc.routed_to, whether the binding comes from an
+// agent, a named session only, or a dir-qualified rig agent. An already
+// qualified hold value and an exact short-form route stay accepted. Neither
+// Run nor Fix may touch any of these routes.
+func TestHoldLabelRoutedToCheckAcceptsCanonicalBoundRoutes(t *testing.T) {
+	cityDir, rigDir := t.TempDir(), t.TempDir()
+	held := func(id, hold, route string) beads.Bead {
+		return beads.Bead{
+			ID: id, Title: "held", Type: "task", Status: "open", Labels: []string{"hold:" + hold},
+			Metadata: map[string]string{"gc.routed_to": route},
+		}
+	}
+	cityStore := beads.NewMemStoreFrom(0, []beads.Bead{
+		held("Q-1", "planner", "ops.planner"),
+		held("Q-2", "reviewer", "ops.reviewer"),
+		held("Q-3", "ops.planner", "ops.planner"),
+		held("Q-4", "planner", "planner"),
+	}, nil)
+	rigStore := beads.NewMemStoreFrom(0, []beads.Bead{
+		held("RQ-1", "repo/worker", "repo/ops.worker"),
+		held("RQ-2", "planner", "ops.planner"),
+	}, nil)
+	check := newHoldLabelRoutedToCheck(holdLabelBoundCity(rigDir), cityDir,
+		holdLabelStores(map[string]beads.Store{cityDir: cityStore, rigDir: rigStore}))
+
+	if res := check.Run(&doctor.CheckContext{}); res.Status != doctor.StatusOK {
+		t.Fatalf("Run status = %v, want OK for canonical bound routes: %#v", res.Status, res)
+	}
+	if err := check.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	for _, tc := range []struct {
+		store beads.Store
+		id    string
+		want  string
+	}{
+		{cityStore, "Q-1", "ops.planner"},
+		{cityStore, "Q-2", "ops.reviewer"},
+		{cityStore, "Q-3", "ops.planner"},
+		{cityStore, "Q-4", "planner"},
+		{rigStore, "RQ-1", "repo/ops.worker"},
+		{rigStore, "RQ-2", "ops.planner"},
+	} {
+		if got := holdLabelRoute(t, tc.store, tc.id); got != tc.want {
+			t.Errorf("%s gc.routed_to = %q after Fix, want unchanged %q", tc.id, got, tc.want)
+		}
+	}
+}
+
+// TestHoldLabelRoutedToCheckRepairsToCanonicalBoundRoute covers ga-tkxbic
+// AC-2: when a bound hold value's gc.routed_to is missing or names another
+// route, the check reports it with the binding-qualified repair and Fix
+// writes that canonical route, in city and rig stores alike, so both the hold
+// check and v2-routed-to-namespace then report OK.
+func TestHoldLabelRoutedToCheckRepairsToCanonicalBoundRoute(t *testing.T) {
+	cityDir, rigDir := t.TempDir(), t.TempDir()
+	cfg := holdLabelBoundCity(rigDir)
+	cityStore := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "M-1", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"}},
+		{
+			ID: "M-2", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"},
+			Metadata: map[string]string{"gc.routed_to": "someone-else"},
+		},
+		{ID: "M-3", Title: "held", Type: "task", Status: "blocked", Labels: []string{"hold:reviewer"}},
+	}, nil)
+	rigStore := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "RM-1", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:repo/worker"}},
+		{
+			ID: "RM-2", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"},
+			Metadata: map[string]string{"gc.routed_to": "repo/ops.worker"},
+		},
+	}, nil)
+	factory := holdLabelStores(map[string]beads.Store{cityDir: cityStore, rigDir: rigStore})
+	check := newHoldLabelRoutedToCheck(cfg, cityDir, factory)
+
+	res := check.Run(&doctor.CheckContext{})
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("Run status = %v, want warning: %#v", res.Status, res)
+	}
+	details := strings.Join(res.Details, "\n")
+	for _, want := range []string{
+		`city bead M-1 has hold:planner but gc.routed_to=""; use "ops.planner"`,
+		`city bead M-2 has hold:planner but gc.routed_to="someone-else"; use "ops.planner"`,
+		`city bead M-3 has hold:reviewer but gc.routed_to=""; use "ops.reviewer"`,
+		`rig repo bead RM-1 has hold:repo/worker but gc.routed_to=""; use "repo/ops.worker"`,
+		`rig repo bead RM-2 has hold:planner but gc.routed_to="repo/ops.worker"; use "ops.planner"`,
+	} {
+		if !strings.Contains(details, want) {
+			t.Errorf("details missing %q:\n%s", want, details)
+		}
+	}
+
+	if err := check.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	for _, tc := range []struct {
+		store beads.Store
+		id    string
+		want  string
+	}{
+		{cityStore, "M-1", "ops.planner"},
+		{cityStore, "M-2", "ops.planner"},
+		{cityStore, "M-3", "ops.reviewer"},
+		{rigStore, "RM-1", "repo/ops.worker"},
+		{rigStore, "RM-2", "ops.planner"},
+	} {
+		if got := holdLabelRoute(t, tc.store, tc.id); got != tc.want {
+			t.Errorf("%s gc.routed_to = %q after Fix, want canonical %q", tc.id, got, tc.want)
+		}
+	}
+	if res := check.Run(&doctor.CheckContext{}); res.Status != doctor.StatusOK {
+		t.Errorf("post-fix hold-label-routed-to status = %v, want OK: %#v", res.Status, res)
+	}
+	if res := newV2RoutedToNamespaceCheck(cfg, cityDir, factory).Run(&doctor.CheckContext{}); res.Status != doctor.StatusOK {
+		t.Errorf("post-fix v2-routed-to-namespace status = %v, want OK: %#v", res.Status, res)
+	}
+}
+
+// TestHoldLabelRoutedToFixReportsCanonicalWriteFailure pins that a failed
+// canonical repair surfaces as a Fix error naming the bead.
+func TestHoldLabelRoutedToFixReportsCanonicalWriteFailure(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{Agents: []config.Agent{{Name: "planner", BindingName: "ops"}}}
+	store := holdLabelSetMetadataErrorStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "W-1", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"}},
+	}, nil)}
+	check := newHoldLabelRoutedToCheck(cfg, cityDir, holdLabelStores(map[string]beads.Store{cityDir: store}))
+
+	err := check.Fix(&doctor.CheckContext{})
+	if err == nil {
+		t.Fatal("Fix error = nil, want metadata write failure")
+	}
+	if got := err.Error(); !strings.Contains(got, "city bead W-1") || !strings.Contains(got, "write refused") {
+		t.Fatalf("Fix error = %q, want bead and write failure detail", got)
+	}
+}
+
+type holdLabelSetMetadataErrorStore struct {
+	beads.Store
+}
+
+func (s holdLabelSetMetadataErrorStore) SetMetadata(string, string, string) error {
+	return errors.New("write refused")
+}
+
+// TestHoldLabelRoutedToFixConvergesWithV2RoutedToNamespace covers ga-tkxbic
+// AC-3: gc doctor --fix runs v2-routed-to-namespace before
+// hold-label-routed-to, and each check verifies only itself, so the two
+// checks must agree on the canonical route. One fix pass leaves every held
+// route binding-qualified, and a second pass finds nothing to fix. Either
+// registration order converges.
+func TestHoldLabelRoutedToFixConvergesWithV2RoutedToNamespace(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		namespaceLast bool
+	}{
+		{name: "namespace then hold"},
+		{name: "hold then namespace", namespaceLast: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			cfg := &config.City{Agents: []config.Agent{{Name: "planner", BindingName: "ops"}}}
+			store := beads.NewMemStoreFrom(0, []beads.Bead{
+				{
+					ID: "C-1", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"},
+					Metadata: map[string]string{"gc.routed_to": ""},
+				},
+				{
+					ID: "C-2", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"},
+					Metadata: map[string]string{"gc.routed_to": "planner"},
+				},
+				{
+					ID: "C-3", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"},
+					Metadata: map[string]string{"gc.routed_to": "ops.planner"},
+				},
+			}, nil)
+			factory := holdLabelStores(map[string]beads.Store{cityDir: store})
+			namespace := newV2RoutedToNamespaceCheck(cfg, cityDir, factory)
+			hold := newHoldLabelRoutedToCheck(cfg, cityDir, factory)
+			d := &doctor.Doctor{}
+			if tc.namespaceLast {
+				d.Register(hold)
+				d.Register(namespace)
+			} else {
+				d.Register(namespace)
+				d.Register(hold)
+			}
+
+			d.RunCollect(&doctor.CheckContext{}, true)
+			for _, id := range []string{"C-1", "C-2", "C-3"} {
+				if got := holdLabelRoute(t, store, id); got != "ops.planner" {
+					t.Errorf("after first fix pass %s gc.routed_to = %q, want ops.planner", id, got)
+				}
+			}
+
+			second := d.RunCollect(&doctor.CheckContext{}, true)
+			if second.Warned != 0 || second.Fixed != 0 {
+				t.Errorf("second fix pass Warned=%d Fixed=%d, want 0 and 0: %#v", second.Warned, second.Fixed, second.Results)
+			}
+			for _, res := range second.Results {
+				if res.Status != doctor.StatusOK {
+					t.Errorf("second fix pass %s status = %v, want OK: %#v", res.Name, res.Status, res)
+				}
+			}
+		})
+	}
+}
+
+// TestHoldLabelRoutedToCheckLeavesAmbiguousBoundHoldUntouched covers
+// ga-tkxbic AC-4: when the hold value is bound under two bindings, a route
+// naming neither candidate has no single repair. Run lists both choices, Fix
+// leaves the metadata alone without failing, and the warning survives
+// doctor's verifying re-run. A route already equal to either candidate, or to
+// the hold value itself, satisfies the hold check, and an ambiguous hold does
+// not block repairing a uniquely bound one in the same scan.
+func TestHoldLabelRoutedToCheckLeavesAmbiguousBoundHoldUntouched(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{Agents: []config.Agent{
+		{Name: "planner", BindingName: "ops"},
+		{Name: "planner", BindingName: "other"},
+		{Name: "worker", BindingName: "ops"},
+	}}
+	held := func(id, hold, route string) beads.Bead {
+		return beads.Bead{
+			ID: id, Title: "held", Type: "task", Status: "open", Labels: []string{"hold:" + hold},
+			Metadata: map[string]string{"gc.routed_to": route},
+		}
+	}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		held("A-1", "planner", ""),
+		held("A-2", "planner", "someone-else"),
+		held("A-3", "planner", "ops.planner"),
+		held("A-4", "planner", "other.planner"),
+		held("A-5", "worker", ""),
+		held("A-6", "planner", "planner"),
+	}, nil)
+	factory := holdLabelStores(map[string]beads.Store{cityDir: store})
+	check := newHoldLabelRoutedToCheck(cfg, cityDir, factory)
+
+	res := check.Run(&doctor.CheckContext{})
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("Run status = %v, want warning: %#v", res.Status, res)
+	}
+	details := strings.Join(res.Details, "\n")
+	for _, want := range []string{
+		`city bead A-1 has hold:planner but gc.routed_to=""; use one of ops.planner, other.planner`,
+		`city bead A-2 has hold:planner but gc.routed_to="someone-else"; use one of ops.planner, other.planner`,
+		`city bead A-5 has hold:worker but gc.routed_to=""; use "ops.worker"`,
+	} {
+		if !strings.Contains(details, want) {
+			t.Errorf("details missing %q:\n%s", want, details)
+		}
+	}
+	for _, notWant := range []string{"A-3", "A-4", "A-6"} {
+		if strings.Contains(details, notWant) {
+			t.Errorf("details should not mention %q:\n%s", notWant, details)
+		}
+	}
+
+	if err := check.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("Fix: %v (ambiguity alone is not an operational error)", err)
+	}
+	for id, want := range map[string]string{
+		"A-1": "", "A-2": "someone-else", "A-3": "ops.planner",
+		"A-4": "other.planner", "A-5": "ops.worker", "A-6": "planner",
+	} {
+		if got := holdLabelRoute(t, store, id); got != want {
+			t.Errorf("%s gc.routed_to = %q after Fix, want %q", id, got, want)
+		}
+	}
+
+	d := &doctor.Doctor{}
+	d.Register(check)
+	report := d.RunCollect(&doctor.CheckContext{}, true)
+	if report.Warned != 1 || report.Fixed != 0 || len(report.Results) != 1 {
+		t.Fatalf("doctor --fix Warned=%d Fixed=%d results=%d, want the unresolved warning kept: %#v",
+			report.Warned, report.Fixed, len(report.Results), report.Results)
+	}
+	verified := strings.Join(report.Results[0].Details, "\n")
+	for _, id := range []string{"A-1", "A-2"} {
+		if !strings.Contains(verified, "city bead "+id+" ") {
+			t.Errorf("verified details missing %s:\n%s", id, verified)
+		}
+	}
+
+	namespace := newV2RoutedToNamespaceCheck(cfg, cityDir, factory).Run(&doctor.CheckContext{})
+	want := `city bead A-6 has gc.routed_to="planner"; use one of ops.planner, other.planner`
+	if !strings.Contains(strings.Join(namespace.Details, "\n"), want) {
+		t.Errorf("v2-routed-to-namespace details missing %q: %#v", want, namespace)
+	}
+}
+
+// TestHoldLabelRoutedToCheckBackfillsUnboundHoldVerbatim covers ga-tkxbic
+// AC-5: a hold value with no binding-qualified alias keeps the original
+// verbatim backfill. That includes a value bound under a binding but shadowed
+// by an unbound agent of the same name, which owns the short route, so
+// v2-routed-to-namespace stays OK after the repair too.
+func TestHoldLabelRoutedToCheckBackfillsUnboundHoldVerbatim(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{Agents: []config.Agent{
+		{Name: "planner"},
+		{Name: "planner", BindingName: "ops"},
+		{Name: "reviewer", BindingName: "ops"},
+	}}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		{ID: "U-1", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"}},
+		{
+			ID: "U-2", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"},
+			Metadata: map[string]string{"gc.routed_to": "ops.reviewer"},
+		},
+		{ID: "U-3", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:qa-lead"}},
+	}, nil)
+	factory := holdLabelStores(map[string]beads.Store{cityDir: store})
+	check := newHoldLabelRoutedToCheck(cfg, cityDir, factory)
+
+	res := check.Run(&doctor.CheckContext{})
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("Run status = %v, want warning: %#v", res.Status, res)
+	}
+	details := strings.Join(res.Details, "\n")
+	for _, want := range []string{
+		`city bead U-1 has hold:planner but gc.routed_to=""; use "planner"`,
+		`city bead U-2 has hold:planner but gc.routed_to="ops.reviewer"; use "planner"`,
+		`city bead U-3 has hold:qa-lead but gc.routed_to=""; use "qa-lead"`,
+	} {
+		if !strings.Contains(details, want) {
+			t.Errorf("details missing %q:\n%s", want, details)
+		}
+	}
+
+	if err := check.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	for id, want := range map[string]string{"U-1": "planner", "U-2": "planner", "U-3": "qa-lead"} {
+		if got := holdLabelRoute(t, store, id); got != want {
+			t.Errorf("%s gc.routed_to = %q after Fix, want verbatim %q", id, got, want)
+		}
+	}
+	if res := check.Run(&doctor.CheckContext{}); res.Status != doctor.StatusOK {
+		t.Errorf("post-fix hold-label-routed-to status = %v, want OK: %#v", res.Status, res)
+	}
+	if res := newV2RoutedToNamespaceCheck(cfg, cityDir, factory).Run(&doctor.CheckContext{}); res.Status != doctor.StatusOK {
+		t.Errorf("post-fix v2-routed-to-namespace status = %v, want OK: %#v", res.Status, res)
+	}
+}
