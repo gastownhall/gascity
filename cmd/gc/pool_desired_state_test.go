@@ -1894,6 +1894,8 @@ func TestComputePoolDesiredStates_PostCreateProtectionBindingPreservesScaleDeman
 	result := computePoolDesiredStatesAt(
 		cfg,
 		work,
+		nil,
+		nil,
 		sessionInfosFromBeads([]beads.Bead{protected}),
 		map[string]int{"claude": 1},
 		demand,
@@ -1928,6 +1930,8 @@ func TestComputePoolDesiredStates_PostCreateProtectionAdvancesDemandIndex(t *tes
 
 	result := computePoolDesiredStatesAt(
 		cfg,
+		nil,
+		nil,
 		nil,
 		sessionInfosFromBeads([]beads.Bead{protected}),
 		map[string]int{"claude": 2},
@@ -1975,6 +1979,8 @@ func TestComputePoolDesiredStates_PostCreateProtectionAllocatesDemandByTriggerId
 
 	result := computePoolDesiredStatesAt(
 		cfg,
+		nil,
+		nil,
 		nil,
 		sessionInfosFromBeads([]beads.Bead{protected}),
 		map[string]int{"claude": 2},
@@ -2032,6 +2038,8 @@ func TestComputePoolDesiredStates_PostCreateProtectionRebindsUnmatchedConcreteDe
 
 			result := computePoolDesiredStatesAt(
 				cfg,
+				nil,
+				nil,
 				nil,
 				sessionInfosFromBeads([]beads.Bead{protected}),
 				map[string]int{"claude": 2},
