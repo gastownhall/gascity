@@ -13,11 +13,6 @@ import (
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
-// noMailStore is the zero mail handle, what a reconcile pass carries when its
-// caller supplied none (withHandoffMailStore). The zero handle is the only one
-// with no dynamic store type, so comparing against it cannot panic.
-var noMailStore beads.MailStore
-
 // releaseStagedSelfHandoffs scans this tick's session rows for a durably
 // staged self-handoff (Info.HandoffStagedMessageID set) and, for each one,
 // either releases it to a genuine successor, marks it failed on timeout, or
@@ -62,7 +57,11 @@ func releaseStagedSelfHandoffs(mailStore beads.MailStore, sessions beads.Session
 			continue
 		}
 
-		if mailStore == noMailStore {
+		// The zero mail handle is what a reconcile pass carries when its caller
+		// supplied none (withHandoffMailStore). It is a presence check, not a
+		// store-identity question, and the zero handle has no dynamic store type,
+		// so the comparison cannot panic.
+		if mailStore == (beads.MailStore{}) {
 			log.Printf("releaseStagedSelfHandoffs: no mail store to load staged message %s for session %s; leaving it staged", messageID, sessionAddress)
 			continue
 		}
