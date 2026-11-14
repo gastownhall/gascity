@@ -159,6 +159,10 @@ func TestWorkflowConsumersErrorInjection(t *testing.T) {
 	}
 }
 
+// censusRefs are a whole-split census's work legs, by ref (cmd/gc WorkLegs
+// without the graph binding).
+var censusRefs = []StoreRef{WorkRef, RigRef("alpha"), RigRef("bravo")}
+
 // TestIntentKindsErrorInjection: each molecule kind and OrderRuns with one
 // leg failing, run through the executor its consumers use.
 func TestIntentKindsErrorInjection(t *testing.T) {
@@ -211,12 +215,12 @@ func TestIntentKindsErrorInjection(t *testing.T) {
 			`error: reading "ga-1" from class:gmnos: leg down`,
 		},
 		{
-			"Roots, a rig fails", func(topoFixture) Intent { return Molecule{Kind: MoleculeRoots} },
+			"Roots, a rig fails", func(topoFixture) Intent { return Molecule{Kind: MoleculeRoots, Work: censusRefs} },
 			RigRef("alpha"), noSeed, union,
 			`visited [class:gmnos, the city work store, rig:alpha, rig:bravo] partial [rig:alpha]`,
 		},
 		{
-			"Roots, the graph fails", func(topoFixture) Intent { return Molecule{Kind: MoleculeRoots} },
+			"Roots, the graph fails", func(topoFixture) Intent { return Molecule{Kind: MoleculeRoots, Work: censusRefs} },
 			"class:gmnos", noSeed, union,
 			`visited [class:gmnos] partial [] error: reading class:gmnos: leg down`,
 		},
@@ -235,6 +239,54 @@ func TestIntentKindsErrorInjection(t *testing.T) {
 			"OrderRuns(pours), the work leg fails", func(topoFixture) Intent { return OrderRuns{PoursWork: func() bool { return true }} },
 			WorkRef, noSeed, union,
 			`visited [class:gmnos, the city work store] partial [] error: reading the city work store: leg down`,
+		},
+		{
+			"Convoy(Parent), near fails", func(f topoFixture) Intent {
+				return Convoy{Kind: ConvoyParent, ID: "ga-1", Near: f.bindings["class:gmnos"], NearRef: "class:gmnos"}
+			}, "class:gmnos", WorkRef, firstOwner,
+			`error: reading "ga-1" from class:gmnos: leg down`,
+		},
+		{
+			"Convoy(Parent), near misses, the home holds it", func(f topoFixture) Intent {
+				return Convoy{Kind: ConvoyParent, ID: "ga-1", Near: f.bindings["class:gmnos"], NearRef: "class:gmnos"}
+			}, RigRef("bravo"), WorkRef, firstOwner,
+			`owner the city work store`,
+		},
+		{
+			"Convoy(Parent), the home fails", func(f topoFixture) Intent {
+				return Convoy{Kind: ConvoyParent, ID: "ga-1", Near: f.bindings["class:gmnos"], NearRef: "class:gmnos"}
+			}, WorkRef, noSeed, firstOwner,
+			`error: reading "ga-1" from the city work store: leg down`,
+		},
+		{
+			"Convoy(Tracking), the graph fails", func(f topoFixture) Intent {
+				return Convoy{Kind: ConvoyTracking, Near: f.work, NearRef: WorkRef}
+			}, "class:gmnos", noSeed, union,
+			`visited [the city work store, class:gmnos] partial [] error: reading class:gmnos: leg down`,
+		},
+		{
+			"Convoy(Tracking), near fails", func(f topoFixture) Intent {
+				return Convoy{Kind: ConvoyTracking, Near: f.work, NearRef: WorkRef}
+			}, WorkRef, noSeed, union,
+			`visited [the city work store] partial [] error: reading the city work store: leg down`,
+		},
+		{
+			"Convoy(Children), elsewhere fails", func(f topoFixture) Intent {
+				return Convoy{Kind: ConvoyChildren, Near: f.work, NearRef: WorkRef, Elsewhere: f.bindings["class:gmnos"]}
+			}, "class:gmnos", noSeed, union,
+			`visited [the city work store, class:gmnos] partial [] error: reading class:gmnos: leg down`,
+		},
+		{
+			"CloseOwner, the route fails", func(topoFixture) Intent {
+				return CloseOwner{ID: "ga-1", Route: []StoreRef{WorkRef}, Relic: "class:gmnos"}
+			}, WorkRef, "class:gmnos", firstOwner,
+			`error: reading "ga-1" from the city work store: leg down`,
+		},
+		{
+			"CloseOwner, the relic fails", func(topoFixture) Intent {
+				return CloseOwner{ID: "ga-1", Route: []StoreRef{WorkRef}, Relic: "class:gmnos"}
+			}, "class:gmnos", noSeed, firstOwner,
+			`error: reading "ga-1" from class:gmnos: leg down`,
 		},
 	}
 	for _, tc := range cases {

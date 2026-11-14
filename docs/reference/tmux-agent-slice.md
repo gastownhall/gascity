@@ -77,10 +77,112 @@ lingering so the user manager (and the agents) survive logout:
 loginctl enable-linger <user>
 ```
 
+## City infrastructure (GC_INFRA_SLICE)
+
+A cgroup-wide kill of an agent's scope kills everything in it. If that agent
+started the city's managed Dolt server (a `gc` or `bd` call that autostarts
+it), the store would go down with the agent. So a gc command run from inside
+an agent session starts the managed Dolt server in a transient scope of its
+own:
+
+```
+systemd-run --user --scope --slice=${GC_INFRA_SLICE:-gascity-infra.slice} --collect --quiet \
+  --unit=gascity-infra-<random>.scope --description="gascity infra: managed dolt for city <path>" -- <command>
+```
+
+gc wraps the spawn only when both hold:
+
+1. **The gc process runs inside an agent session**: it carries the
+   `GC_SESSION_ID` gc gives every session. Other gc processes (the
+   supervisor, whether a bare fork or a systemd/launchd service; a CLI run
+   from a login shell; the bd provider script the supervisor launches) have
+   no session cgroup to escape, so their spawns stay exactly as before.
+2. **The move suits the gc process's cgroup**: it can neither shorten the
+   server's life nor undo where the operator placed it.
+
+Scopes live under `user@<uid>.service`, which systemd stops, with every
+scope in it, when the user's last session ends, unless the user lingers
+(`/var/lib/systemd/linger/<user>`, set by `loginctl enable-linger <user>`).
+Where the gc process runs decides condition 2:
+
+| Where the gc process runs | Condition 2 holds |
+|---|---|
+| Under `user@<uid>.service` (a `GC_AGENT_SLICE` pane scope, tmux's own pane scopes) | always: it dies with the user manager anyway |
+| A login session's scope (`user-<uid>.slice/session-<id>.scope`) | when the user lingers: without lingering the session's scope can outlive logout (`KillUserProcesses=no`) while a user scope would not |
+| Anywhere else: a system service or slice (the supervisor run as a system service, whose agents share its cgroup), a container's root cgroup | only when `GC_INFRA_SLICE` names a slice and the user lingers |
+
+A gc process outside the user's own sessions has no session cgroup to
+escape. Moving its server would only trade the cgroup the operator chose,
+with that cgroup's limits and memory protection, for the user manager's
+slice, so gc leaves the server in place unless the operator names a slice.
+
+| Spawn | Wrapped from a session |
+|---|---|
+| Managed Dolt server (or its scope watchdog, whose server inherits its scope) | yes |
+| `gc supervisor start` fork, and the fork `gc start` falls back to | no |
+| Supervisor respawn after `gc start` detects drift | no |
+| The nudge poller and bd's db-proxy child | no |
+| The bd pack's shell-native Dolt fallback (`gc-beads-bd.sh` with no `gc` helper resolved) | no: out of scope |
+
+The supervisor is never wrapped, not even when forked from a session: every
+session it starts would follow it into the infra slice. A supervisor forked
+from a session stays in that session's cgroup, as before.
+
+gc ships no unit for the infra slice. `systemd-run` creates it implicitly,
+with no resource limits and no memory protection (`MemoryLow=0`), and
+systemd removes it again when it is empty. A store moved there leaves the
+agent's cgroup and its limits, but nothing reserves memory for it. Defining
+a `gascity-infra.slice` unit (or naming another slice in `GC_INFRA_SLICE`)
+is up to the operator and outside what gc configures.
+
+Where systemd-oomd runs with its packaged defaults (Fedora, and Ubuntu
+with the `systemd-oomd` package), it also watches every
+`user@<uid>.service`: the `user@.service.d/10-oomd-user-service-defaults.conf`
+drop-in sets `ManagedOOMMemoryPressure=kill` with a 50% limit. Under
+sustained memory pressure systemd-oomd kills cgroups inside the user
+manager, a store in the infra slice included. Moving a store there from a
+login session's scope puts it under that watch.
+
+Unlike `GC_AGENT_SLICE`, scoping is on by default. `GC_INFRA_SLICE` names
+the slice, and naming one, even `gascity-infra.slice`, also opts in a gc
+process outside the user's own sessions (condition 2).
+`GC_INFRA_SLICE=off` (or `0`, `false`) turns scoping off: every spawn
+stays in its caller's cgroup exactly as before, and gc never probes the
+user manager. When scoping does not apply (condition 2 does not hold; no
+`systemd-run`; no user bus; macOS) gc checks once per process (the
+`systemd-run` probe is bounded at 5 seconds) and starts the server
+unwrapped exactly as before, warning only when `GC_INFRA_SLICE` names a
+slice.
+
+### Finding a scoped server after it exits
+
+A scope has no restart policy, and `--collect` removes the unit once its
+processes exit, so `systemctl --user status` has nothing to show for a
+scoped server that died. What survives:
+
+- The unit name, recorded with the server's PID in the managed Dolt state
+  (`infra_scope` in `.gc/runtime/packs/dolt/dolt-state.json` and
+  `dolt-provider-state.json`). When the store is not reachable, `gc doctor`'s
+  `dolt-server` check names that scope and the commands below.
+- The user manager's journal records for the scope, found by its unit name
+  (`journalctl --user-unit=gascity-infra-<random>.scope`) or, for every
+  infra scope, by its description (`journalctl -g 'gascity infra:'`). The
+  unit name is random per spawn, so a restart never collides with a scope
+  still being torn down.
+- The server's own output, which goes to the managed `dolt.log` as for an
+  unscoped server.
+
+On a host that keeps no per-user journal files, the user manager's records
+land only in the system journal, so reading them needs journal read access
+(membership in the `adm` or `systemd-journal` group). `journalctl -g` also
+needs a journalctl built with PCRE2; `--user-unit` does not.
+
 ## Resource attribution
 
-Scopes are created with systemd auto-generated names (`run-rNNNNNNNN.scope`),
-so `systemd-cgls --user` shows anonymous units under the slice rather than
+Agent pane scopes (`GC_AGENT_SLICE`) are created with systemd auto-generated
+names (`run-rNNNNNNNN.scope`); infra scopes are named `gascity-infra-<random>.scope`
+and carry a `gascity infra:` description. For agent pane scopes,
+`systemd-cgls --user` shows anonymous units under the slice rather than
 per-agent names. To attribute a scope to an agent session, list the
 processes inside it:
 

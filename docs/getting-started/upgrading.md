@@ -157,6 +157,19 @@ gc bd --rig my-project recompute-blocked       # repeat for each rig
 Each run reports how many rows it corrected, or
 `is_blocked already consistent — nothing to recompute.`
 
+## Your city's storage stays as it was
+
+New cities are created split: `gc init` writes a `[storage]` section that keeps
+work in the work ledger and puts sessions, mail, workflow steps, order runs and
+queued nudges in a local store under `.gc/store`. An upgrade never adds that
+section to an existing city, so a city created before it keeps every bead in
+its work ledger and runs as it did.
+
+To move an existing city's infrastructure beads onto their own store, follow
+[Move a City's Infrastructure Classes onto Their Own Store](/runbooks/split-storage-classes):
+author the section, rehearse with `gc storage preflight`, stop the city, run
+`gc storage migrate --from-work --fleet-stopped`, then start it again.
+
 ## Optional: hand the city's Dolt process to Beads
 
 New cities run a Dolt store that `bd` owns. An

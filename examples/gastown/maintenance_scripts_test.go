@@ -6348,6 +6348,7 @@ func TestReaperOrderAndScriptDefaults(t *testing.T) {
 		{envName: "GC_REAPER_MAX_AGE", want: "24h"},
 		{envName: "GC_REAPER_PURGE_AGE", want: "168h"},
 		{envName: "GC_REAPER_STALE_ISSUE_AGE", want: "720h"},
+		{envName: "GC_REAPER_STALE_ISSUE_BURST_MAX", want: "25"},
 	} {
 		if got := extractShellDefault(t, script, check.envName); got != check.want {
 			t.Errorf("%s default = %q, want %q", check.envName, got, check.want)
@@ -7950,9 +7951,9 @@ const maintenanceBdAppliedIDsJSON = `    if [ -n "${BD_CLOSE_FAIL:-}" ]; then
 //     ("rig:api") the way gc refuses a rig with no path binding;
 //   - fails for scopes listed in FAKE_UNREACHABLE_SCOPES or in the
 //     unreachable-scopes file next to the stub (writeUnreachableScopesStub);
-//   - refuses `sql` for scopes listed in FAKE_SQL_UNSUPPORTED_SCOPES the way
-//     bd does for an embedded store (or an HTTP workspace), which still
-//     serves its other verbs;
+//   - refuses `sql` for scopes listed in FAKE_SQL_UNSUPPORTED_SCOPES with
+//     bd's refusal for an embedded store, which still serves its other verbs
+//     (an HTTP workspace refuses `sql` with other text, not modeled here);
 //   - hands every other verb to the `bd` test double on PATH (a default one
 //     is installed next to gc unless the test brings its own), exporting the
 //     scope as GC_FAKE_SCOPE.

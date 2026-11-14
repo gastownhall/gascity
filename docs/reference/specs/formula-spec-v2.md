@@ -724,7 +724,7 @@ iteration while budget remains, and exhaustion closes the step as failed.
 
 | Key | Purpose |
 |---|---|
-| `max_attempts` | Total run/check attempts including the first (≥ 1) |
+| `max_attempts` | Total run/check attempts including the first (≥ 1); an integer, or a `"{{name}}"` var placeholder resolved at compile time |
 | `check.mode` | Checker implementation; only `"exec"` is supported |
 | `check.path` | Repo-relative or absolute script path to execute |
 | `check.timeout` | Script execution bound (e.g. `"2m"`); takes precedence over the step's `timeout` |
@@ -747,6 +747,17 @@ mode = "exec"
 path = "scripts/verify.sh"
 timeout = "2m"
 ```
+
+`max_attempts` may instead name a formula var, written as a single
+`"{{name}}"` placeholder (`max_attempts = "{{attempts}}"`). The compiler
+substitutes the var's value (the caller's `--var`, else the declared default)
+before materialization, so the control bead and spec sidecar carry a literal
+count. In an expansion template the var resolves against the expansion's vars
+(its defaults and the rule's or step's overrides) before the invoking
+formula's; when one expansion invokes another, the outer expansion's vars come
+before the root formula's. The value must be an integer ≥ 1; a missing,
+non-integer, or smaller value fails compilation, unless the step's `condition`
+(section 1.5) excludes the check. Any other string is a parse error.
 
 Materialization: the compiler emits a spec sidecar (`<step>.spec`, kind
 `spec`, carrying the serialized step definition), the first iteration
