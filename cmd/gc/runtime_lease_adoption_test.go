@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -1037,6 +1038,101 @@ func TestBatchedStartsExtendTheirRecordBeforeLaunch(t *testing.T) {
 				expires, err := time.Parse(time.RFC3339, meta[sessionpkg.RuntimeLeaseExpiresKey])
 				if err != nil || expires.Before(floor) {
 					t.Errorf("%s: record expires at %q (%v) at Start, want at least %v: the last prepare's end plus the TTL", name, meta[sessionpkg.RuntimeLeaseExpiresKey], err, floor.Format(time.RFC3339))
+				}
+			}
+		})
+	}
+}
+
+// takenOverKeys are the row's keys a start that lost its record to another
+// holder leaves to that holder: the record and the lifecycle facts.
+var takenOverKeys = []string{
+	sessionpkg.RuntimeLeaseHolderKey, sessionpkg.RuntimeLeaseEpochKey, sessionpkg.RuntimeLeaseExpiresKey,
+	sessionpkg.RuntimeLeaseTTLKey, sessionpkg.RuntimeLeaseFlockKey,
+	"state", "generation", "instance_token", "last_woke_at", "pending_create_claim", "started_config_hash", "wake_attempts",
+}
+
+// TestBatchedStartSkipsALaunchWhoseRecordWasTakenOver (AC-3): a start whose
+// row record another holder took while its batch prepared is never launched.
+// It leaves the row to the taker, is no wake failure and no restart, releases
+// its slot and flock, and is logged deferred; the batch's other starts launch.
+func TestBatchedStartSkipsALaunchWhoseRecordWasTakenOver(t *testing.T) {
+	for _, async := range []bool{false, true} {
+		mode := map[bool]string{false: "sync", true: "async"}[async]
+		t.Run(mode, func(t *testing.T) {
+			f := newLeasedBatchFixture(t, beads.NewMemStore())
+			f.cfg.Daemon.SessionCircuitBreaker = true
+			identities := map[string]string{}
+			for i := range f.cands {
+				name := f.cands[i].tp.SessionName
+				identities[name] = "x04u8f-" + mode + "-" + name
+				if err := f.store.SetMetadataBatch(f.ids[name], map[string]string{sessionpkg.NamedSessionIdentityMetadata: identities[name]}); err != nil {
+					t.Fatal(err)
+				}
+				f.cands[i].info.ConfiguredNamedIdentity = identities[name]
+			}
+			restarts := func(name string) int {
+				return len(defaultSessionCircuitBreaker().entrySnapshot(identities[name]).entryRestarts())
+			}
+			before := map[string]int{}
+			for name := range f.ids {
+				before[name] = restarts(name)
+			}
+			var calls int
+			var lost string
+			var takenOver map[string]string
+			resolver := func(c startCandidate, _ *config.City) string {
+				if calls++; calls == 1 {
+					lost = c.tp.SessionName
+				}
+				if calls == 3 {
+					if err := f.store.SetMetadataBatch(f.ids[lost], map[string]string{sessionpkg.RuntimeLeaseHolderKey: "other/1/n", sessionpkg.RuntimeLeaseEpochKey: "9"}); err != nil {
+						t.Fatal(err)
+					}
+					takenOver = mustGetBead(t, f.store, f.ids[lost]).Metadata
+				}
+				return ""
+			}
+			limiter := f.run(t, async, withTaskWorkDirResolver(resolver))
+			if calls != 3 {
+				t.Fatalf("prepared %d candidates, want 3; log %q", calls, f.log.String())
+			}
+			for name := range f.ids {
+				_, started := f.sp.rowAtStart(name)
+				if started == (name == lost) {
+					t.Errorf("%s: Start called = %v, want %v; log %q", name, started, name != lost, f.log.String())
+				}
+			}
+			meta := mustGetBead(t, f.store, f.ids[lost]).Metadata
+			for _, key := range takenOverKeys {
+				if meta[key] != takenOver[key] {
+					t.Errorf("%s: %s = %q, want the taker's %q", lost, key, meta[key], takenOver[key])
+				}
+			}
+			episodes, err := f.store.List(beads.ListQuery{Type: sessionpkg.StartupHealthEpisodeType, IncludeClosed: true})
+			if err != nil || len(episodes) != 0 {
+				t.Errorf("startup-health episodes = %v (%v), want none", episodes, err)
+			}
+			if !regexp.MustCompile(`session=` + lost + ` [^\n]*outcome=deferred_by_runtime_lease`).MatchString(f.log.String()) {
+				t.Errorf("log %q, want %s's start logged deferred_by_runtime_lease", f.log.String(), lost)
+			}
+			for name := range f.ids {
+				grew := restarts(name) > before[name]
+				if grew == (name == lost) {
+					t.Errorf("%s: circuit restarts %d -> %d, want counted only for a launched start", name, before[name], restarts(name))
+				}
+			}
+			_, release, err := tryRuntimeLease(f.store, f.city, lost, "", 0)
+			if err != nil {
+				t.Fatalf("%s's flock after its skipped launch: %v, want released", lost, err)
+			}
+			release()
+			if async {
+				limiter.mu.Lock()
+				inFlight := limiter.inFlight
+				limiter.mu.Unlock()
+				if inFlight != 0 {
+					t.Errorf("async slots in flight = %d, want every slot released", inFlight)
 				}
 			}
 		})
