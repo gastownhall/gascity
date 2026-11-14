@@ -804,15 +804,11 @@ func TestTickDebouncer_RearmsAfterFire(t *testing.T) {
 	d := newTickDebouncer()
 	debounce := 20 * time.Millisecond
 	d.arm(debounce)
-	if got := drainFiredCount(d, debounce+50*time.Millisecond); got != 1 {
-		t.Fatalf("first burst fired count = %d, want 1", got)
-	}
+	requireOneFire(t, d, "first burst")
 	// Second burst should arm a fresh timer — the AfterFunc callback must
 	// have cleared the internal timer pointer.
 	d.arm(debounce)
-	if got := drainFiredCount(d, debounce+50*time.Millisecond); got != 1 {
-		t.Fatalf("second burst fired count = %d, want 1", got)
-	}
+	requireOneFire(t, d, "second burst")
 }
 
 func TestTickDebouncer_IndependentInstances(t *testing.T) {
@@ -821,11 +817,23 @@ func TestTickDebouncer_IndependentInstances(t *testing.T) {
 	debounce := 20 * time.Millisecond
 	a.arm(debounce)
 	b.arm(debounce)
-	if got := drainFiredCount(a, debounce+50*time.Millisecond); got != 1 {
-		t.Fatalf("a fired count = %d, want 1", got)
+	requireOneFire(t, a, "a")
+	requireOneFire(t, b, "b (independent timer state)")
+}
+
+// requireOneFire waits for the debouncer to fire and then checks that no
+// second fire follows. The wait bound is generous because an AfterFunc can
+// run far past its delay on a loaded host; a fixed observation window sized
+// near the debounce read that lateness as a missing fire.
+func requireOneFire(t *testing.T, d *tickDebouncer, what string) {
+	t.Helper()
+	select {
+	case <-d.fired():
+	case <-time.After(10 * time.Second):
+		t.Fatalf("%s: debouncer did not fire within 10s", what)
 	}
-	if got := drainFiredCount(b, 5*time.Millisecond); got != 1 {
-		t.Fatalf("b fired count = %d, want 1 (independent timer state)", got)
+	if got := drainFiredCount(d, 50*time.Millisecond); got != 0 {
+		t.Fatalf("%s: fired %d extra time(s), want exactly 1", what, got)
 	}
 }
 
