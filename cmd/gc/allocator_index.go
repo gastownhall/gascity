@@ -24,6 +24,8 @@ import (
 type passIndex struct {
 	// agents memoizes findAgentByTemplate by template.
 	agents map[string]*config.Agent
+	// sessionAgents memoizes findSessionAgentByTemplate by template.
+	sessionAgents map[string]*config.Agent
 	// rowsByTemplate holds the decidable rows' indexes by resolved template
 	// (the Entry's, resolvedSessionTemplateInfo's).
 	rowsByTemplate map[string][]int
@@ -97,7 +99,7 @@ func (c freshCursor) resumes(usedSlots map[int]bool) bool {
 }
 
 func newPassIndex() *passIndex {
-	return &passIndex{agents: make(map[string]*config.Agent)}
+	return &passIndex{agents: make(map[string]*config.Agent), sessionAgents: make(map[string]*config.Agent)}
 }
 
 // slotTemplateMemo memoizes the slot helpers' stored-template match,
@@ -134,6 +136,20 @@ func (p *decidePass) agentByTemplate(template string) *config.Agent {
 	if !ok {
 		agent = findAgentByTemplate(p.cfg, template)
 		p.index.agents[template] = agent
+	}
+	return agent
+}
+
+// sessionAgentByTemplate is findSessionAgentByTemplate, through the index's
+// memo when the pass has one.
+func (p *decidePass) sessionAgentByTemplate(template string) *config.Agent {
+	if p.index == nil {
+		return findSessionAgentByTemplate(p.cfg, template)
+	}
+	agent, ok := p.index.sessionAgents[template]
+	if !ok {
+		agent = findSessionAgentByTemplate(p.cfg, template)
+		p.index.sessionAgents[template] = agent
 	}
 	return agent
 }

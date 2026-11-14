@@ -141,6 +141,15 @@ type AwakeSessionBead struct {
 	ContinuationResetPending  bool      // continuation_reset_pending metadata is set
 	CurrentlyProcessingBeadID string    // work bead the session is currently processing
 	PostCreateProtected       bool      // fresh successful pool create; preferred for scaled slots during grace
+	// ExplicitWakeStartable is true for an ExplicitWake row whose agent can
+	// start it (sessionAgentCanStart): the agent findSessionAgentByTemplate
+	// resolves for Template, the way the session was built, is configured
+	// and not suspended, its rig included. A rig's session of a scope="rig"
+	// agent with no dir resolves to the agent's rig-stamped copy, which
+	// carries the rig. The explicit-wake arm wakes only such a row, so the
+	// controller starts the explicit wakes the wake verdict
+	// (wakeWillNotStart) does not refuse on agent or rig.
+	ExplicitWakeStartable bool
 }
 
 // AwakeWorkBead represents a work bead with an assignee.
@@ -310,7 +319,7 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 		if !bead.ExplicitWake || bead.State == "closed" || bead.DependencyOnly {
 			continue
 		}
-		if agent, ok := agentsByName[bead.Template]; ok && !agent.Suspended {
+		if bead.ExplicitWakeStartable {
 			desired[key(bead)] = "explicit-wake"
 		}
 	}

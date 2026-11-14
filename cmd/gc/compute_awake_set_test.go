@@ -691,18 +691,43 @@ func TestNamedOnDemand_ExplicitWakeWakesWithoutDemand(t *testing.T) {
 		Agents:        []AwakeAgent{{QualifiedName: "hello-world/refinery"}},
 		NamedSessions: []AwakeNamedSession{{Identity: "hello-world/refinery", Template: "hello-world/refinery", Mode: "on_demand"}},
 		SessionBeads: []AwakeSessionBead{{
-			ID:            "mc-1",
-			SessionName:   "hello-world--refinery",
-			Template:      "hello-world/refinery",
-			State:         "asleep",
-			ExplicitWake:  true,
-			NamedIdentity: "hello-world/refinery",
-			WaitHold:      true,
+			ID:                    "mc-1",
+			SessionName:           "hello-world--refinery",
+			Template:              "hello-world/refinery",
+			State:                 "asleep",
+			ExplicitWake:          true,
+			ExplicitWakeStartable: true,
+			NamedIdentity:         "hello-world/refinery",
+			WaitHold:              true,
 		}},
 		Now: now,
 	})
 	assertAwake(t, result, "hello-world--refinery")
 	assertReason(t, result, "hello-world--refinery", "explicit-wake")
+}
+
+// TestNamedOnDemand_ExplicitWakeWhoseAgentCannotStartStaysAsleep pins that
+// the explicit-wake arm acts on the bridge's verdict on the row's agent
+// (ExplicitWakeStartable: resolved as the session was built, its rig's
+// suspension included), not on the agent list: neither an unsuspended agent
+// of the template's exact name nor one of its base name wakes a row whose
+// agent cannot start, such as a rig's session of a scope="rig" agent with no
+// dir on a suspended rig, or a template whose rig is not configured.
+func TestNamedOnDemand_ExplicitWakeWhoseAgentCannotStartStaysAsleep(t *testing.T) {
+	result := computeAwakeSetChecked(t, AwakeInput{
+		Agents:        []AwakeAgent{{QualifiedName: "rig-a/worker"}, {QualifiedName: "worker"}},
+		NamedSessions: []AwakeNamedSession{{Identity: "rig-a/worker", Template: "rig-a/worker", Mode: "on_demand"}},
+		SessionBeads: []AwakeSessionBead{{
+			ID:            "mc-1",
+			SessionName:   "rig-a--worker",
+			Template:      "rig-a/worker",
+			State:         "asleep",
+			ExplicitWake:  true,
+			NamedIdentity: "rig-a/worker",
+		}},
+		Now: now,
+	})
+	assertAsleep(t, result, "rig-a--worker")
 }
 
 func TestNamedOnDemand_WorkDone_StaysAwakeUntilIdle(t *testing.T) {
