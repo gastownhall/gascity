@@ -445,8 +445,9 @@ stubbed `ExecRunner`) with no external infrastructure dependencies. See
   false positives, but also no idle kills).
 
 - **A heartbeat outranks a quiet pane**: `gc runtime heartbeat` sets
-  `held_until` on the session bead, and while it is in the future neither
-  the idle timeout nor the execution-stalled backstop (the claim
+  `held_until` on the session bead, and while that hold is in force (a
+  deadline in the future and inside the heartbeat horizon, with no
+  `sleep_intent` set) neither the idle timeout nor the execution-stalled backstop (the claim
   nudge-then-drain escalation for a pool slot that holds a claim) acts on
   the session. An adapter with a long silent turn should call the
   heartbeat rather than fabricate pane output to keep `GetLastActivity()`
