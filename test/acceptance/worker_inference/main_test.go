@@ -43,6 +43,9 @@ type providerSetup struct {
 }
 
 func TestMain(m *testing.M) {
+	if err := dolttest.ArmOwnerReaper(); err != nil {
+		panic("worker-inference: arming owner reaper: " + err.Error())
+	}
 	tmpRoot, err := acceptanceTempRoot()
 	if err != nil {
 		panic("worker-inference: preparing temp root: " + err.Error())
