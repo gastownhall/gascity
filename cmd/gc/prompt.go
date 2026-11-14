@@ -231,16 +231,24 @@ func renderPromptWithMeta(fs fsys.FS, cityPath, cityName, templatePath string, c
 		}
 	}
 
-	// Append injected fragments.
+	// Append injected fragments. A fragment that is missing or fails to
+	// execute is skipped, never fatal: it is reported on stderr and in
+	// Warnings so `gc prime` can show it (a missing fragment must not block
+	// startup).
+	var warnings []string
 	for _, name := range injectFragments {
 		frag := tmpl.Lookup(name)
 		if frag == nil {
-			fmt.Fprintf(stderr, "gc: inject_fragment %q: template not found\n", name) //nolint:errcheck // best-effort stderr
+			msg := fmt.Sprintf("inject_fragment %q: template not found", name)
+			fmt.Fprintf(stderr, "gc: %s\n", msg) //nolint:errcheck // best-effort stderr
+			warnings = append(warnings, msg)
 			continue
 		}
 		var fbuf bytes.Buffer
 		if err := frag.Execute(&fbuf, td); err != nil {
-			fmt.Fprintf(stderr, "gc: inject_fragment %q: %v\n", name, err) //nolint:errcheck // best-effort stderr
+			msg := fmt.Sprintf("inject_fragment %q: %v", name, err)
+			fmt.Fprintf(stderr, "gc: %s\n", msg) //nolint:errcheck // best-effort stderr
+			warnings = append(warnings, msg)
 			continue
 		}
 		buf.WriteString("\n\n")
@@ -249,9 +257,10 @@ func renderPromptWithMeta(fs fsys.FS, cityPath, cityName, templatePath string, c
 
 	rendered := buf.String()
 	return PromptRenderResult{
-		Text:    rendered,
-		Version: fm.Version,
-		SHA:     promptmeta.SHA(rendered),
+		Text:     rendered,
+		Version:  fm.Version,
+		SHA:      promptmeta.SHA(rendered),
+		Warnings: warnings,
 	}
 }
 

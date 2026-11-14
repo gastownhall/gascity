@@ -3667,8 +3667,10 @@ to empty output from valid conditional logic, or on suspended states
 
 Fragments appended to the prompt (global_fragments, inject_fragments,
 append_fragments) do not fail --strict: one that is missing or fails to
-render is reported on stderr and left out of the prompt. gc lint
-reports a pack's missing or failing inject_fragments and
+render is reported on stderr and left out of the prompt. A manual run
+also lists it after the prompt, and --json lists it in prompt_warnings;
+--hook output never carries it (it is delivered to the agent as context).
+gc lint reports a pack's missing or failing inject_fragments and
 append_fragments.
 
 ```

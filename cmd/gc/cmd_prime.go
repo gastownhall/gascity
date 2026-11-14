@@ -103,8 +103,10 @@ to empty output from valid conditional logic, or on suspended states
 
 Fragments appended to the prompt (global_fragments, inject_fragments,
 append_fragments) do not fail --strict: one that is missing or fails to
-render is reported on stderr and left out of the prompt. gc lint
-reports a pack's missing or failing inject_fragments and
+render is reported on stderr and left out of the prompt. A manual run
+also lists it after the prompt, and --json lists it in prompt_warnings;
+--hook output never carries it (it is delivered to the agent as context).
+gc lint reports a pack's missing or failing inject_fragments and
 append_fragments.`,
 		Args: cobra.MaximumNArgs(1),
 	}
@@ -115,19 +117,20 @@ append_fragments.`,
 			// consuming run here would archive durable handoff mail before
 			// the real stdout write — and even on success would eat the
 			// continuation the next SessionStart hook must deliver.
-			code, budget := doPrimeWithHookFormatOpts(args, &buf, stderr, hookMode, hookFormat, strictMode, false)
+			code, budget, warnings := doPrimeWithHookFormatOpts(args, &buf, stderr, hookMode, hookFormat, strictMode, false)
 			if code != 0 {
 				return errExit
 			}
 			agentName, _ := primeInvocationAgentName(args)
 			return writeCLIJSONLineOrErr(stdout, stderr, "gc prime", primeJSONResult{
-				SchemaVersion: "1",
-				Agent:         agentName,
-				Hook:          hookMode,
-				HookFormat:    hookFormat,
-				Content:       buf.String(),
-				Bytes:         buf.Len(),
-				PromptBudget:  budget,
+				SchemaVersion:  "1",
+				Agent:          agentName,
+				Hook:           hookMode,
+				HookFormat:     hookFormat,
+				Content:        buf.String(),
+				Bytes:          buf.Len(),
+				PromptBudget:   budget,
+				PromptWarnings: warnings,
 			})
 		}
 		if doPrimeWithHookFormat(args, stdout, stderr, hookMode, hookFormat, strictMode) != 0 {
@@ -273,7 +276,15 @@ func primeInvocationAgentName(args []string) (string, bool) {
 }
 
 func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode bool, hookFormat string, strictMode bool) int {
-	code, _ := doPrimeWithHookFormatOpts(args, stdout, stderr, hookMode, hookFormat, strictMode, true)
+	code, _, warnings := doPrimeWithHookFormatOpts(args, stdout, stderr, hookMode, hookFormat, strictMode, true)
+	// Hook stdout is delivered to the agent as context, so warnings stay on
+	// stderr there; a person running gc prime by hand gets them on stdout.
+	if !hookMode && len(warnings) > 0 {
+		fmt.Fprintln(stdout, "\n\ngc prime: prompt warnings (the prompt above is rendered without the affected fragments):") //nolint:errcheck // best-effort stdout
+		for _, w := range warnings {
+			fmt.Fprintf(stdout, "  - %s\n", w) //nolint:errcheck // best-effort stdout
+		}
+	}
 	return code
 }
 
@@ -285,8 +296,9 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 //
 // The second return value is the --strict prompt-delivery budget decision
 // (ga-q8wgom.1.2), non-nil only when strictMode is true and an agent with a
-// prompt_template was resolved.
-func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode bool, hookFormat string, strictMode, consumeHandoff bool) (int, *promptBudgetJSON) {
+// prompt_template was resolved. The third is the render's fragment warnings
+// (a missing or failing inject fragment); the caller decides where to show them.
+func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode bool, hookFormat string, strictMode, consumeHandoff bool) (int, *promptBudgetJSON, []string) {
 	// One composed city-config load for the whole invocation: the session
 	// proof, the provider-key write, the mail and step-reminder injections and
 	// every store open each loaded it again (see invocationConfigMemo).
@@ -318,7 +330,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 		// prompt still gets it.
 		if len(args) == 0 && !hookHasManagedIdentity() {
 			writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "", nil)
-			return 0, nil
+			return 0, nil, nil
 		}
 	}
 	// In non-strict mode, hook side effects fire eagerly (existing behavior).
@@ -344,15 +356,15 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 	if err != nil {
 		if strictMode {
 			fmt.Fprintf(stderr, "gc prime: no city config found: %v\n", err) //nolint:errcheck
-			return 1, nil
+			return 1, nil, nil
 		}
 		if hookMode && primeHookSessionStart(hookContext) {
 			writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "", nil)
-			return 0, nil
+			return 0, nil, nil
 		}
 		injection := primeHookContextSuffix("", nil, nil, hookMode, hookContext, stderr, consumeHandoff)
 		writePrimePromptWithFormat(stdout, "", "", defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
-		return 0, nil
+		return 0, nil, nil
 	}
 	hookSideEffectCityPath = cityPath
 	// The step reminder is the slowest read a hook makes: in process it opens
@@ -379,7 +391,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 		sessionStart = primeHookLiveManagedSession(cityPath, stderr)
 		if sessionStart == nil {
 			writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "", nil)
-			return 0, nil
+			return 0, nil, nil
 		}
 	}
 	if !strictMode && primeHookSessionStart(hookContext) {
@@ -389,11 +401,11 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 	if err != nil {
 		if strictMode {
 			fmt.Fprintf(stderr, "gc prime: loading city config: %v\n", err) //nolint:errcheck
-			return 1, nil
+			return 1, nil, nil
 		}
 		injection := primeHookContextSuffix(cityPath, sessionStart, stepLookup, hookMode, hookContext, stderr, consumeHandoff)
 		writePrimePromptWithFormat(stdout, "", "", defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
-		return 0, nil
+		return 0, nil, nil
 	}
 	resolveRigPaths(cityPath, cfg.Rigs)
 
@@ -407,7 +419,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 		if strictMode {
 			runHookSideEffects()
 		}
-		return 0, nil
+		return 0, nil, nil
 	}
 
 	cityName := loadedCityName(cfg, cityPath)
@@ -440,16 +452,16 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 		switch {
 		case agentName == "":
 			fmt.Fprintf(stderr, "gc prime: --strict requires an agent name (from args, GC_ALIAS, or GC_AGENT)\n") //nolint:errcheck
-			return 1, nil
+			return 1, nil, nil
 		case len(resolvedAgents) == 0:
 			fmt.Fprintf(stderr, "gc prime: agent %q not found in city config\n", agentName) //nolint:errcheck
-			return 1, nil
+			return 1, nil, nil
 		}
 		// A prompt_template that cannot be read, parsed, or executed is a
 		// strict failure; an empty render from valid template logic is not.
 		// Check it here, before hook side effects and before any stdout write.
 		if !primeStrictTemplatesRender(cityPath, cityName, cfg, resolvedAgents, hookMode, sessionTemplateContext, stderr) {
-			return 1, nil
+			return 1, nil, nil
 		}
 		// Strict preconditions passed; now it's safe to update provider resume metadata.
 		runHookSideEffects()
@@ -457,7 +469,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 
 	for _, a := range resolvedAgents {
 		if isAgentEffectivelySuspendedWith(cfg, cityPath, &a, loadSuspensionStateBestEffort(cityPath)) {
-			return 0, nil
+			return 0, nil, nil
 		}
 		resolved, rErr := config.ResolveProvider(&a, &cfg.Workspace, cfg.Providers, exec.LookPath)
 		if rErr == nil && hookMode {
@@ -489,7 +501,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			// starts: the chat is a live session gc started, so nudges
 			// queued for it still reach it.
 			writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "", nil)
-			return 0, nil
+			return 0, nil, nil
 		}
 		ctx, rendered := primeAgentPrompt(cityPath, cityName, cfg, &a, hookMode || sessionTemplateContext, stderr)
 		if rendered.Text == "" {
@@ -504,12 +516,12 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			var budgetErr error
 			budget, budgetErr = reportPromptDeliveryBudget(rendered.Text, &a, cfg, resolved, stderr)
 			if budgetErr != nil {
-				return 1, budget
+				return 1, budget, nil
 			}
 		}
 		injection := primeHookContextSuffix(cityPath, sessionStart, stepLookup, hookMode, hookContext, stderr, consumeHandoff)
 		writePrimePromptWithFormat(stdout, cityName, ctx.AgentName, rendered.Text, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
-		return 0, budget
+		return 0, budget, rendered.Warnings
 	}
 
 	// Fallback: default run-once prompt. Under strict, this is only reached
@@ -519,7 +531,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 	// output even under --strict.
 	injection := primeHookContextSuffix(cityPath, sessionStart, stepLookup, hookMode, hookContext, stderr, consumeHandoff)
 	writePrimePromptWithFormat(stdout, cityName, agentName, defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
-	return 0, nil
+	return 0, nil, nil
 }
 
 func primeAgentCandidates(agentName string, hookMode bool, cityPath string) []string {
