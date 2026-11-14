@@ -123,6 +123,38 @@ var (
 		}
 		return pid, true
 	}
+	// The system-scope twins below exist because a supervisor may be owned by
+	// a system unit instead of a user unit (city-8xj7). They are separate seams
+	// rather than a scope parameter on the user-scope functions: the user-scope
+	// ones are stubbed by existing tests, and threading a scope argument
+	// through them would silently redefine what those stubs mean. A host with
+	// no system unit answers "absent" from LoadState and never reaches the
+	// active/MainPID probes.
+	supervisorSystemctlSystemUnitExists = func(service string) bool {
+		out, err := exec.Command("systemctl", "show", service, "--property=LoadState", "--value").Output()
+		if err != nil {
+			return false
+		}
+		// "not-found" (no such unit) and "masked" (deliberately disabled) are
+		// both "not a unit that owns anything"; anything else means a real
+		// unit definition was loaded.
+		state := strings.TrimSpace(string(out))
+		return state != "" && state != "not-found" && state != "masked"
+	}
+	supervisorSystemctlSystemActive = func(service string) bool {
+		return exec.Command("systemctl", "is-active", "--quiet", service).Run() == nil
+	}
+	supervisorSystemctlSystemMainPID = func(service string) (int, bool) {
+		out, err := exec.Command("systemctl", "show", service, "--property=MainPID", "--value").Output()
+		if err != nil {
+			return 0, false
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(out)))
+		if err != nil {
+			return 0, false
+		}
+		return pid, true
+	}
 	// supervisorSystemctlUserAvailable probes whether a per-user systemd
 	// instance is reachable. `systemctl --user show-environment` exits
 	// non-zero when there is no user manager (e.g. running as a service
@@ -1016,20 +1048,30 @@ func supervisorPreForkOwnershipWarning() string {
 }
 
 // supervisorUnitOwnershipStatus reports how a live supervisor PID relates to
-// gc's own systemd user unit, for `gc supervisor status` and the doctor
-// check. Status is one of:
-//   - "owned": the unit is installed and active, and the live supervisor PID
-//     is its MainPID or a descendant of it (a wrapper such as sg can be
-//     MainPID with gc as its child) — systemd's Restart=always is protecting
-//     it.
-//   - "outside_unit": the unit is installed but the live PID is neither its
+// the systemd unit that is supposed to own it, for `gc supervisor status` and
+// the doctor check. Both scopes that can hold a supervisor unit are consulted —
+// the per-user unit gc installs and a system-scope unit of the same name. Status
+// is one of:
+//   - "owned": a unit in either scope is installed and active, and the live
+//     supervisor PID is its MainPID or a descendant of it (a wrapper such as
+//     sg can be MainPID with gc as its child) — systemd's Restart=always is
+//     protecting it.
+//   - "outside_unit": a unit is installed but the live PID is neither its
 //     MainPID nor a descendant of it: the unit is inactive, the supervisor was
 //     forked from a tmux pane, or its parent exited and it was reparented —
 //     the ga-s434i0 defect shape. Sitting in the unit's cgroup does not count,
 //     because KillMode=process leaves such processes behind in it.
-//   - "no_unit": no unit is installed; the supervisor is intentionally
-//     unmanaged (e.g. `gc supervisor start` on a workstation that never ran
-//     `gc supervisor install`).
+//   - "no_unit": no unit is installed in either scope; the supervisor is
+//     intentionally unmanaged (e.g. `gc supervisor start` on a workstation
+//     that never ran `gc supervisor install`).
+//
+// Scope is reported alongside Status. It matters to the operator because the
+// remedy differs: a system-scope unit is managed by root's systemd and cannot
+// be reclaimed with `systemctl --user start`. Before Scope existed the check
+// consulted only the user scope, so a supervisor correctly owned by a system
+// unit read as a permanent false "outside_unit" (city-8xj7) whose hint told
+// the operator to start the user unit — which, with both units installed, is
+// the two-unit crash loop city-5tas/city-irg6 exist to prevent.
 //
 // ProbeErr is set when the live PID's ancestry could not be read, so an
 // "outside_unit" result is unverified rather than proven.
@@ -1039,25 +1081,101 @@ type supervisorUnitOwnershipStatus struct {
 	UnitActive bool
 	UnitPID    int
 	ProbeErr   error
+	// Scope is "user" or "system" — which systemd scope Unit was found in.
+	// Empty when Status is "no_unit".
+	Scope string
 }
 
+// supervisorDetermineUnitOwnership resolves which systemd unit owns livePID by
+// asking both scopes that can hold a supervisor unit: the per-user unit gc
+// installs, and a system unit of the same name.
+//
+// The system scope is consulted because a host may install the supervisor as a
+// system unit (root-owned, started at boot) rather than a user unit. In that
+// shape the user-scope lookup alone finds no unit and reports "no_unit" — or,
+// if a stale user unit file is still on disk, reports "outside_unit" against a
+// unit that is not managing anything. Both are wrong: the process IS owned and
+// IS protected by Restart=always, just by a unit gc does not install (city-8xj7).
+//
+// "no_unit" is returned only when neither scope has a unit. When units exist in
+// both scopes and neither owns the process, an active unit outranks an inactive
+// one: a unit that is running yet tracking a different PID is a live
+// misconfiguration, while an inactive unit beside it is only a leftover file.
 func supervisorDetermineUnitOwnership(livePID int) supervisorUnitOwnershipStatus {
-	if _, err := os.Stat(supervisorSystemdServicePath()); err != nil {
+	unit := supervisorSystemdServiceName()
+	user := supervisorUserScopeOwnership(livePID, unit)
+	system := supervisorSystemScopeOwnership(livePID, unit)
+
+	// Whichever unit is actually protecting the process wins. The user scope is
+	// tested first only because that is the scope gc installs into, so it is the
+	// intended owner in the unlikely case both manage the same process.
+	if user != nil && user.Status == "owned" {
+		return *user
+	}
+	if system != nil && system.Status == "owned" {
+		return *system
+	}
+	if user == nil && system == nil {
 		return supervisorUnitOwnershipStatus{Status: "no_unit"}
 	}
-	unit := supervisorSystemdServiceName()
+	// Neither owns it. Report an installed-and-active unit before an inactive
+	// one, and then prefer gc's own user unit, so the message names the unit an
+	// operator can act on rather than a stale leftover.
+	if user != nil && user.UnitActive {
+		return *user
+	}
+	if system != nil && system.UnitActive {
+		return *system
+	}
+	if user != nil {
+		return *user
+	}
+	return *system
+}
+
+// supervisorUserScopeOwnership reports what gc's per-user unit says about
+// livePID, or nil when no user unit file is installed.
+func supervisorUserScopeOwnership(livePID int, unit string) *supervisorUnitOwnershipStatus {
+	if _, err := os.Stat(supervisorSystemdServicePath()); err != nil {
+		return nil
+	}
 	if !supervisorSystemctlActive(unit) {
-		return supervisorUnitOwnershipStatus{Status: "outside_unit", Unit: unit}
+		return &supervisorUnitOwnershipStatus{Status: "outside_unit", Unit: unit, Scope: "user"}
 	}
 	pid, ok := supervisorSystemctlMainPID(unit)
 	if !ok {
 		pid = 0
 	}
-	owned, err := supervisorProcessDescendsFrom(livePID, pid)
+	owned, probeErr := supervisorProcessDescendsFrom(livePID, pid)
 	if owned {
-		return supervisorUnitOwnershipStatus{Status: "owned", Unit: unit, UnitActive: true, UnitPID: pid}
+		return &supervisorUnitOwnershipStatus{Status: "owned", Unit: unit, UnitActive: true, UnitPID: pid, Scope: "user"}
 	}
-	return supervisorUnitOwnershipStatus{Status: "outside_unit", Unit: unit, UnitActive: true, UnitPID: pid, ProbeErr: err}
+	return &supervisorUnitOwnershipStatus{Status: "outside_unit", Unit: unit, UnitActive: true, UnitPID: pid, ProbeErr: probeErr, Scope: "user"}
+}
+
+// supervisorSystemScopeOwnership reports what a system-scope unit of the same
+// name says about livePID, or nil when there is no system unit to consult.
+//
+// The unit is looked up by name; `systemctl show` reports LoadState=not-found
+// for a name with no system unit, which is how absence is detected without
+// probing a fixed file path (a system unit can live in /etc/systemd/system or
+// /usr/lib/systemd/system).
+func supervisorSystemScopeOwnership(livePID int, unit string) *supervisorUnitOwnershipStatus {
+	if !supervisorSystemctlSystemUnitExists(unit) {
+		return nil
+	}
+	if !supervisorSystemctlSystemActive(unit) {
+		return &supervisorUnitOwnershipStatus{Status: "outside_unit", Unit: unit, Scope: "system"}
+	}
+	pid, ok := supervisorSystemctlSystemMainPID(unit)
+	if !ok {
+		pid = 0
+	}
+	owned, probeErr := supervisorProcessDescendsFrom(livePID, pid)
+	if owned {
+		return &supervisorUnitOwnershipStatus{Status: "owned", Unit: unit, UnitActive: true, UnitPID: pid, Scope: "system"}
+	}
+	return &supervisorUnitOwnershipStatus{Status: "outside_unit", Unit: unit, UnitActive: true, UnitPID: pid, ProbeErr: probeErr, Scope: "system"}
 }
 
 // supervisorUnitAncestryMaxHops bounds the parent walk in
