@@ -1346,6 +1346,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`GET .../agents` and rig agent counts drop a bounded pool's own named
+  session.** A `[[named_session]]` whose template sets `max_active_sessions`
+  was live and doing claimed work, but never appeared on the Agents page or
+  in rig agent counts — #7739 added the row only for unlimited pools. The
+  bounded branch now lists it alongside its numbered slots, the same as the
+  unlimited branch already did.
+
 - **Adopting or restarting with a bd store bound to a loopback Dolt server
   gc does not run works.** A store `bd init --server --external` bound to a
   dolt sql-server on `127.0.0.1`/`localhost`/`::1` was classified as gc's own
