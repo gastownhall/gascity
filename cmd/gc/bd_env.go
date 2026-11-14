@@ -956,15 +956,7 @@ func applyCanonicalScopeBackendEnv(env map[string]string, cityPath, scopeRoot st
 	}
 	switch meta.Backend {
 	case "", "dolt":
-		clearProjectedBeadsBackendEnv(env)
-		target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, cityPath, scopeRoot)
-		if err != nil {
-			return true, err
-		}
-		applyCanonicalDoltTargetEnv(env, target)
-		applyCanonicalDoltAuthEnv(env, cityPath, scopeRoot, target)
-		mirrorBeadsDoltScopeEnv(env, target)
-		return true, nil
+		return true, applyScopeRecordedDoltTargetEnv(env, cityPath, scopeRoot)
 	case "doltlite":
 		clearProjectedDoltEnv(env)
 		env["GC_BEADS_BACKEND"] = "doltlite"
@@ -1851,9 +1843,60 @@ func applyResolvedRigDoltEnvContext(ctx context.Context, env map[string]string, 
 		mirrorBeadsDoltScopeEnv(env, target)
 		return nil
 	}
+	// A rig bd owns, recorded in direct server mode with a Dolt backend
+	// (scopeRecordsBdOwnedDirectServer), dials the binding bd recorded for it,
+	// not the city's: bd's own config.yaml names no gc endpoint, so the rig
+	// reads as legacy-minimal, and inheriting the city target would point bd
+	// at a server that holds none of the rig's databases. Such a rig whose
+	// recorded binding cannot be resolved is an error rather than a silent
+	// fall-through to the city target.
+	if bdOwned, err := scopeRecordsBdOwnedDirectServer(cityPath, rigPath); err != nil {
+		return err
+	} else if bdOwned {
+		return applyScopeRecordedDoltTargetEnv(env, cityPath, rigPath)
+	}
 	// Rigs without local endpoint authority inherit the resolved city target.
 	// A minimal local .beads/config.yaml must not suppress valid city compat fallback.
 	return applyResolvedCityDoltEnvContext(ctx, env, cityPath, allowRecovery)
+}
+
+// scopeRecordsBdOwnedDirectServer reports whether scopeRoot is bd's
+// (scopeIsBdOwnedDirectExternal) AND its metadata.json records a Dolt-backed
+// store in direct server mode. The second half scopes the projection: a
+// proxied scope's metadata may carry a host and port (bd's sidecar upstream),
+// and a doltlite scope is never given Dolt env.
+func scopeRecordsBdOwnedDirectServer(cityPath, scopeRoot string) (bool, error) {
+	// Classify first: it reads only a persisted server binding, so a scope on
+	// a storage binding gc does not model (a hosted "postgres" backend) is
+	// answered false before the strict metadata load below would reject it.
+	if bdOwned, err := scopeIsBdOwnedDirectExternal(cityPath, scopeRoot); err != nil || !bdOwned {
+		return false, err
+	}
+	meta, ok, err := contract.LoadMetadataState(fsys.OSFS{}, scopeMetadataJSONPath(scopeRoot))
+	if err != nil || !ok {
+		return false, err
+	}
+	if !strings.EqualFold(strings.TrimSpace(meta.DoltMode), "server") {
+		return false, nil
+	}
+	backend := strings.TrimSpace(meta.Backend)
+	return backend == "" || backend == "dolt", nil
+}
+
+// applyScopeRecordedDoltTargetEnv projects the Dolt target recorded for
+// scopeRoot (contract.ResolveDoltConnectionTarget, which reads its canonical
+// config or bd's metadata.json binding) with its auth. The canonical
+// projection's Dolt arm and a bd-owned direct-server rig share it.
+func applyScopeRecordedDoltTargetEnv(env map[string]string, cityPath, scopeRoot string) error {
+	clearProjectedBeadsBackendEnv(env)
+	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, cityPath, scopeRoot)
+	if err != nil {
+		return err
+	}
+	applyCanonicalDoltTargetEnv(env, target)
+	applyCanonicalDoltAuthEnv(env, cityPath, scopeRoot, target)
+	mirrorBeadsDoltScopeEnv(env, target)
+	return nil
 }
 
 // applyLegacyRigExternalTarget projects a legacy config.Rig{DoltHost,DoltPort}
