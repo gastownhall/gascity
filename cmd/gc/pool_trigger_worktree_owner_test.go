@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -254,6 +255,149 @@ func TestWorktreeSpecForBeadRejectsWorkBranchPlusOneOtherKey(t *testing.T) {
 	}
 	if spec != nil {
 		t.Fatalf("spec = %+v, want nil alongside the error", spec)
+	}
+}
+
+// TestWorktreeSpecForBeadTreatsConflictingUnownedWorkDirsAsUnmanaged covers
+// a bead whose gc.work_dir and work_dir disagree while it carries no
+// ownership evidence (none of the nine keys, or only gc.work_branch). That is
+// the shape a non-pool session's run-identity stamp leaves behind: it rewrites
+// gc.work_dir to its own cwd and keeps the creator's work_dir. Neither path
+// claims ownership, so the pool must plan the seat unmanaged rather than fail
+// closed on every tick when the bead routes back to a pool.
+func TestWorktreeSpecForBeadTreatsConflictingUnownedWorkDirsAsUnmanaged(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		extra map[string]string
+	}{
+		{name: "no ownership keys"},
+		{name: "work_branch only", extra: map[string]string{beadmeta.WorkBranchMetadataKey: "work/gc-test"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			metadata := map[string]string{
+				beadmeta.WorkDirMetadataKey:       "/agents/refinery",
+				beadmeta.LegacyWorkDirMetadataKey: "/worktrees/polecat-1",
+			}
+			for k, v := range tc.extra {
+				metadata[k] = v
+			}
+			bead := beads.Bead{ID: "gc-test", Metadata: metadata}
+
+			spec, err := worktreeSpecForBead(bead, "rig:gascity")
+			if err != nil {
+				t.Fatalf("worktreeSpecForBead: %v, want disagreeing paths without ownership evidence to be treated as unmanaged", err)
+			}
+			if spec != nil {
+				t.Fatalf("spec = %+v, want nil so the seat spawns unmanaged instead of starving", spec)
+			}
+		})
+	}
+}
+
+// TestWorktreeSpecForBeadRejectsConflictingWorkDirsWithOwnershipEvidence pins
+// the boundary of the carve-out above: once the bead published any ownership
+// key beyond gc.work_branch, disagreeing paths are competing claims and must
+// still fail closed with the conflict error.
+func TestWorktreeSpecForBeadRejectsConflictingWorkDirsWithOwnershipEvidence(t *testing.T) {
+	full := map[string]string{
+		beadmeta.WorkBranchMetadataKey:         "work/gc-test",
+		beadmeta.WorktreeRootMetadataKey:       "/worktrees",
+		beadmeta.WorktreeRepoMetadataKey:       "/repos/gascity",
+		beadmeta.WorktreeBaseRefMetadataKey:    "main",
+		beadmeta.WorktreeBaseSHAMetadataKey:    strings.Repeat("a", 40),
+		beadmeta.WorktreeCreatorMetadataKey:    "gc-sling",
+		beadmeta.WorktreeOwnerMetadataKey:      "gc-sling",
+		beadmeta.WorktreeGenerationMetadataKey: "7",
+		beadmeta.WorktreeLifecycleMetadataKey:  worktree.LifecycleActive,
+	}
+	for _, tc := range []struct {
+		name     string
+		evidence map[string]string
+	}{
+		{name: "complete evidence", evidence: full},
+		{name: "work_branch plus owner", evidence: map[string]string{
+			beadmeta.WorkBranchMetadataKey:    "work/gc-test",
+			beadmeta.WorktreeOwnerMetadataKey: "gc-sling",
+		}},
+		{name: "single non-branch key", evidence: map[string]string{
+			beadmeta.WorktreeLifecycleMetadataKey: worktree.LifecycleActive,
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			metadata := map[string]string{
+				beadmeta.WorkDirMetadataKey:       "/worktrees/gc-test",
+				beadmeta.LegacyWorkDirMetadataKey: "/worktrees/gc-other",
+			}
+			for k, v := range tc.evidence {
+				metadata[k] = v
+			}
+			bead := beads.Bead{ID: "gc-test", Metadata: metadata}
+
+			spec, err := worktreeSpecForBead(bead, "rig:gascity")
+			if err == nil || !strings.Contains(err.Error(), "conflicting") {
+				t.Fatalf("spec = %+v err = %v, want the conflicting work_dir error", spec, err)
+			}
+			if spec != nil {
+				t.Fatalf("spec = %+v, want nil alongside the error", spec)
+			}
+		})
+	}
+}
+
+// TestWorktreeSpecForBeadEvidenceErrorsNameMatchedPathKey checks that the
+// incomplete-evidence error names the work_dir spelling actually read, so a
+// bead that only carries the legacy key is not reported as gc.work_dir.
+func TestWorktreeSpecForBeadEvidenceErrorsNameMatchedPathKey(t *testing.T) {
+	bead := beads.Bead{ID: "gc-test", Metadata: map[string]string{
+		beadmeta.LegacyWorkDirMetadataKey:     "/worktrees/gc-test",
+		beadmeta.WorktreeLifecycleMetadataKey: worktree.LifecycleActive,
+	}}
+
+	_, err := worktreeSpecForBead(bead, "rig:gascity")
+	if err == nil {
+		t.Fatal("err = nil, want partial ownership evidence to fail closed")
+	}
+	if want := "has " + beadmeta.LegacyWorkDirMetadataKey + "="; !strings.Contains(err.Error(), want) {
+		t.Fatalf("error = %v, want it to name the matched key (%q)", err, want)
+	}
+}
+
+// TestNonPoolRunStampKeepsUnownedBeadPlannable replays the write order that
+// starved a pool: a worker leaves work_dir on a bead with no ownership
+// evidence, a non-pool session then runs the bead and stamps gc.work_dir with
+// its own cwd, and the bead is routed back to a pool. The pool must still be
+// able to plan a seat for it.
+func TestNonPoolRunStampKeepsUnownedBeadPlannable(t *testing.T) {
+	const (
+		sessionName = "refinery"
+		refineryDir = "/home/ds/agents/refinery"
+		polecatTree = "/home/ds/gascity-worktrees/polecat-1"
+	)
+	run := beads.Bead{
+		ID: "gc-run", Type: "task", Status: "in_progress", Assignee: sessionName,
+		Metadata: map[string]string{
+			beadmeta.LegacyWorkDirMetadataKey: polecatTree,
+			beadmeta.WorkBranchMetadataKey:    "polecat/gc-run",
+		},
+	}
+	mem := beads.NewMemStoreFrom(0, []beads.Bead{run}, nil)
+	sessions := newSessionBeadSnapshot([]beads.Bead{stampTestSession(sessionName, refineryDir)})
+
+	stampRunSessionIdentity(gaConfig(), []beads.Bead{run}, []beads.Store{mem}, sessions, io.Discard)
+
+	got, err := mem.Get(run.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", run.ID, err)
+	}
+	if got.Metadata[beadmeta.WorkDirMetadataKey] != refineryDir {
+		t.Fatalf("gc.work_dir = %q, want the non-pool observability stamp %q", got.Metadata[beadmeta.WorkDirMetadataKey], refineryDir)
+	}
+	spec, err := worktreeSpecForBead(got, "rig:gascity")
+	if err != nil {
+		t.Fatalf("worktreeSpecForBead after non-pool stamp: %v, want the bead to stay plannable as unmanaged", err)
+	}
+	if spec != nil {
+		t.Fatalf("spec = %+v, want nil (unmanaged)", spec)
 	}
 }
 
