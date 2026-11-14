@@ -18,6 +18,7 @@ go_test(
     deps = [
         "//internal/clock",
         "//internal/testenv",
+        "@com_github_dolthub_fslock//:fslock",
     ],
 )
 

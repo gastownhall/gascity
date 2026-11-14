@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dolthub/fslock"
+
 	"github.com/gastownhall/gascity/internal/clock"
 )
 
@@ -1025,4 +1027,93 @@ func TestSweep_DoltDirIsNeverDescendedInto(t *testing.T) {
 
 		requireSweepLeftTreeAlone(t, result, top, before)
 	})
+}
+
+// holdDoltLock takes the exclusive flock a live dolt sql-server holds on
+// <store>/.dolt/noms/LOCK for its lifetime, from this test process, and
+// releases it when the test ends. It creates the LOCK file as dolt does.
+func holdDoltLock(t *testing.T, storeDir string) {
+	t.Helper()
+	lock, err := fslock.New(filepath.Join(storeDir, ".dolt", "noms", "LOCK"))
+	if err != nil {
+		t.Fatalf("fslock.New: %v", err)
+	}
+	if err := lock.TryLock(); err != nil {
+		t.Fatalf("TryLock: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = lock.Unlock()
+		_ = lock.Close()
+	})
+}
+
+// A live dolt server keeps the NBS flock even when lsof misses its open
+// files (the live-load flake of ga-yxgivi): the lock alone must keep the
+// store.
+func TestSweep_RespectsDoltLockEvenWhenLsofMissesIt(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().Add(-2 * time.Hour)
+	dir := mkStoreDir(t, root, "live1", 1, old)
+	holdDoltLock(t, dir)
+	ageTree(t, dir)
+	before := snapshot(t, dir)
+
+	result := Sweep(SweepConfig{Root: root, RunLsof: noLsofHits})
+
+	if len(result.Removed) != 0 || len(result.Errors) != 0 {
+		t.Fatalf("result = %+v, want nothing removed or reported (flock-held)", result)
+	}
+	if result.Skipped != 1 {
+		t.Fatalf("Skipped = %d, want 1 (flock-held)", result.Skipped)
+	}
+	if after := snapshot(t, dir); !slices.Equal(before, after) {
+		t.Fatalf("tree changed: before=%v after=%v", before, after)
+	}
+}
+
+// A LOCK file left behind by a dead server is not held: the store is still
+// an orphan and is reaped.
+func TestSweep_RemovesWhenDoltLockFileExistsButIsUnheld(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().Add(-2 * time.Hour)
+	dir := mkStoreDir(t, root, "stale1", 1, old)
+	writeFile(t, filepath.Join(dir, ".dolt", "noms", "LOCK"))
+	ageTree(t, dir)
+
+	result := Sweep(SweepConfig{Root: root, RunLsof: noLsofHits})
+
+	if len(result.Errors) != 0 {
+		t.Fatalf("unexpected errors: %v", result.Errors)
+	}
+	if len(result.Removed) != 1 || result.Removed[0] != dir {
+		t.Fatalf("Removed = %v, want [%s]", result.Removed, dir)
+	}
+	requireNotExist(t, dir)
+}
+
+// If the lock cannot be probed (here LOCK is a directory, so it cannot be
+// opened), the store is kept and the failure reported, never removed.
+func TestSweep_DoltLockProbeErrorFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().Add(-2 * time.Hour)
+	dir := mkStoreDir(t, root, "unprobeable1", 1, old)
+	mkdirs(t, filepath.Join(dir, ".dolt", "noms", "LOCK"))
+	ageTree(t, dir)
+	before := snapshot(t, dir)
+
+	result := Sweep(SweepConfig{Root: root, RunLsof: noLsofHits})
+
+	if len(result.Errors) == 0 {
+		t.Fatalf("Errors empty, want the probe failure reported")
+	}
+	if len(result.Removed) != 0 {
+		t.Fatalf("Removed = %v, want none (probe failed closed)", result.Removed)
+	}
+	if result.Skipped != 1 {
+		t.Fatalf("Skipped = %d, want 1", result.Skipped)
+	}
+	requireExist(t, dir)
+	if after := snapshot(t, dir); !slices.Equal(before, after) {
+		t.Fatalf("tree changed: before=%v after=%v", before, after)
+	}
 }
