@@ -2880,6 +2880,86 @@ func TestWaitForSupervisorCityAbsoluteCeilingErrorNamesStalledPhaseAndPoolBootCo
 	}
 }
 
+func TestWaitForSupervisorCityAbsoluteCeilingErrorDistinguishesNoProgressEver(t *testing.T) {
+	oldRunning := supervisorCityRunningHook
+	oldAlive := supervisorAliveHook
+	oldPoll := supervisorCityPollInterval
+	oldCeiling := supervisorCityAbsoluteCeiling
+	t.Cleanup(func() {
+		supervisorCityRunningHook = oldRunning
+		supervisorAliveHook = oldAlive
+		supervisorCityPollInterval = oldPoll
+		supervisorCityAbsoluteCeiling = oldCeiling
+	})
+
+	// The supervisor is alive but never reports a status for the city:
+	// no progress was ever observed, so the error must say so instead of
+	// rendering an empty `last known status ""`.
+	supervisorCityRunningHook = func(string) (bool, string, bool) {
+		return false, "", false
+	}
+	supervisorAliveHook = func() int { return 4242 }
+	supervisorCityPollInterval = time.Millisecond
+	supervisorCityAbsoluteCeiling = 5 * time.Millisecond
+
+	err := waitForSupervisorCity(t.TempDir(), true, time.Hour, io.Discard)
+	if err == nil {
+		t.Fatal("waitForSupervisorCity returned nil, want absolute-ceiling error")
+	}
+	got := err.Error()
+	for _, want := range []string{"5ms", "never reported", "gc trace"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("error = %q, want %q", got, want)
+		}
+	}
+	if strings.Contains(got, "last known status") {
+		t.Fatalf("error = %q, no-progress case must not claim a last known status", got)
+	}
+}
+
+func TestWaitForSupervisorCityAbsoluteCeilingErrorKeepsEarlierStatusWhenFinalPollUnknown(t *testing.T) {
+	oldRunning := supervisorCityRunningHook
+	oldAlive := supervisorAliveHook
+	oldPoll := supervisorCityPollInterval
+	oldCeiling := supervisorCityAbsoluteCeiling
+	t.Cleanup(func() {
+		supervisorCityRunningHook = oldRunning
+		supervisorAliveHook = oldAlive
+		supervisorCityPollInterval = oldPoll
+		supervisorCityAbsoluteCeiling = oldCeiling
+	})
+
+	// Progress is observed once, then the city drops out of the
+	// supervisor's view. The ceiling error must still name the phase that
+	// was reached, and must not be reported as "never reported". A nil
+	// stdout also pins that progress tracking does not depend on printing.
+	calls := 0
+	supervisorCityRunningHook = func(string) (bool, string, bool) {
+		calls++
+		if calls == 1 {
+			return false, "running_pool_on_boot:3/9:brief-shuffler", true
+		}
+		return false, "", false
+	}
+	supervisorAliveHook = func() int { return 4242 }
+	supervisorCityPollInterval = time.Millisecond
+	supervisorCityAbsoluteCeiling = 20 * time.Millisecond
+
+	err := waitForSupervisorCity(t.TempDir(), true, time.Hour, nil)
+	if err == nil {
+		t.Fatal("waitForSupervisorCity returned nil, want absolute-ceiling error")
+	}
+	got := err.Error()
+	for _, want := range []string{"20ms", "running_pool_on_boot", "3/9", "gc trace"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("error = %q, want %q", got, want)
+		}
+	}
+	if strings.Contains(got, "never reported") {
+		t.Fatalf("error = %q, progress was observed so it must not say \"never reported\"", got)
+	}
+}
+
 func TestWaitForSupervisorCityAbsoluteCeilingNotAppliedToStopWait(t *testing.T) {
 	// wantRunning=false is the stop-wait path and must remain governed
 	// only by the existing per-tick timeout — the ceiling is scoped to
