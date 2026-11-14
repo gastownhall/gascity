@@ -717,7 +717,7 @@ func matchConfiguredBeadPrefixBySuffix(cfg *config.City, beadID string, requireV
 		}
 		if requireValidSuffix {
 			suffix := beadID[len(lp)+1:]
-			if !validBeadSuffix(suffix) {
+			if !ValidBeadSuffix(suffix) {
 				continue
 			}
 		}
@@ -750,14 +750,35 @@ func configuredBeadPrefixes(cfg *config.City) []string {
 	return out
 }
 
-// validBeadSuffix reports whether suffix is a plausible bead-ID suffix:
+// BeadIDMatchesPrefix reports whether beadID is an ID of prefix's mint: the
+// prefix (case-insensitive), a dash, and a suffix passing the bead-suffix
+// shape gate. This is the ONE dash-append gate for prefixes that live outside
+// city config: gc bd's routes.jsonl arm matches a registered route the same
+// way matchConfiguredBeadPrefixBySuffix matches a configured prefix, so a
+// prefix route registration spells and a prefix city config declares can
+// never disagree about which IDs they select (city-fr3t).
+func BeadIDMatchesPrefix(beadID, prefix string) bool {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return false
+	}
+	lower := strings.ToLower(strings.TrimSpace(beadID))
+	if !strings.HasPrefix(lower, strings.ToLower(prefix)+"-") {
+		return false
+	}
+	return ValidBeadSuffix(beadID[len(prefix)+1:])
+}
+
+// ValidBeadSuffix reports whether suffix is a plausible bead-ID suffix:
 // a non-empty alphanumeric base of at most 8 characters, optionally
 // followed by ".child" hierarchical parts. The hierarchical portion is
 // not validated, matching BeadIDParts which truncates at the first dot before
 // validating the base. This is the configured-prefix suffix gate for
-// LooksLikeConfiguredBeadID; it does not try to distinguish hash-like IDs from
-// prose because the prefix has already matched city config.
-func validBeadSuffix(suffix string) bool {
+// LooksLikeConfiguredBeadID and the suffix half of BeadIDMatchesPrefix; it
+// does not try to distinguish hash-like IDs from prose because the prefix
+// has already matched city config (or, for BeadIDMatchesPrefix, a registered
+// route).
+func ValidBeadSuffix(suffix string) bool {
 	base := suffix
 	if dot := strings.IndexByte(suffix, '.'); dot > 0 {
 		base = suffix[:dot]
