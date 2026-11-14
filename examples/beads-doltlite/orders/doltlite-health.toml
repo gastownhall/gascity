@@ -1,0 +1,5 @@
+[order]
+description = "Check doltlite database health periodically"
+trigger = "cooldown"
+interval = "60s"
+exec = "gc beads-doltlite health --json"
