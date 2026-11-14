@@ -70,7 +70,7 @@ func newOwnerlessReap(cityPath string, cfg *config.City, sessions beads.Store, r
 	}
 	return &ownerlessReap{
 		sightings: sightings,
-		lookup:    func() ownerLookup { return sessionOwnerLookup(cityPath, cfg, sessions, rigs()) },
+		lookup:    func() ownerLookup { return sessionOwnerLookup(cityPath, cfg, sessions, rigs(), nil) },
 		rec:       rec,
 		gap:       max(ownerlessReapConfirmAfter, patrol),
 		grace:     ownerlessAgeGrace(cfg),
@@ -261,15 +261,27 @@ func (o *ownerlessSightings) end() {
 // ownerLookup is every store a session row can live in (the sessions
 // binding, the city work store and every rig store, suspended rigs
 // included: storeref's session plan), or why they could not all be opened.
+// skipped names each rig whose store the caller left unread on purpose,
+// with why ("rig dormant not checked: suspended"): a row there can be
+// neither found nor ruled out.
 type ownerLookup struct {
-	stores []beads.Store
-	err    error
+	stores  []beads.Store
+	skipped []string
+	err     error
 }
 
 // notFound reports that no store holds row ownerID, on a live read of each:
-// every one answers beads.ErrNotFound. A store that errors, a lookup missing
-// a store, or no store at all proves nothing, so the owner is not missing.
+// every one answers beads.ErrNotFound. A store that errors, a skipped rig,
+// a lookup missing a store, or no store at all proves nothing, so the owner
+// is not missing.
 func (l ownerLookup) notFound(ownerID string) bool {
+	return len(l.skipped) == 0 && l.absentFromRead(ownerID)
+}
+
+// absentFromRead reports that every store the lookup read answers
+// beads.ErrNotFound for ownerID. Unlike notFound it says nothing of the
+// skipped rigs, so it proves the owner missing only when none was skipped.
+func (l ownerLookup) absentFromRead(ownerID string) bool {
 	if l.err != nil || len(l.stores) == 0 {
 		return false
 	}
@@ -283,22 +295,29 @@ func (l ownerLookup) notFound(ownerID string) bool {
 
 // sessionOwnerLookup is the lookup over cityPath's session plan: sessions
 // leads, then the work store and every rig store (suspended ones too: a row
-// in a suspended rig still owns its runtime). A configured rig whose store
-// is not open fails the lookup, which then proves no owner missing.
-func sessionOwnerLookup(cityPath string, cfg *config.City, sessions beads.Store, rigs map[string]beads.Store) ownerLookup {
+// in a suspended rig still owns its runtime). A configured rig in skipped
+// (why the caller did not open it) is recorded as skipped, and the lookup
+// then proves no owner missing. Any other configured rig whose store is not
+// open fails the lookup.
+func sessionOwnerLookup(cityPath string, cfg *config.City, sessions beads.Store, rigs map[string]beads.Store, skipped map[string]error) ownerLookup {
+	l := ownerLookup{}
 	if cfg != nil {
 		for _, rig := range cfg.Rigs {
-			if strings.TrimSpace(rig.Path) != "" && rigs[rig.Name] == nil {
-				// A row in that rig cannot be ruled out: no owner is provable.
-				return ownerLookup{err: fmt.Errorf("rig %s's store is not open", rig.Name)}
+			if strings.TrimSpace(rig.Path) == "" || rigs[rig.Name] != nil {
+				continue
 			}
+			if why, ok := skipped[rig.Name]; ok {
+				l.skipped = append(l.skipped, fmt.Sprintf("rig %s %v", rig.Name, why))
+				continue
+			}
+			// A row in that rig cannot be ruled out: no owner is provable.
+			return ownerLookup{err: fmt.Errorf("rig %s's store is not open", rig.Name)}
 		}
 	}
 	legs, err := sessionCensusStoreCandidates(cityPath, cfg, sessions, rigs, nil)
 	if err != nil {
 		return ownerLookup{err: err}
 	}
-	l := ownerLookup{}
 	for _, leg := range legs {
 		if leg.store != nil {
 			l.stores = append(l.stores, leg.store)
@@ -373,8 +392,9 @@ func reapOwnerlessRuntime(store beads.Store, cityPath, name, ownerID, nameOwnerI
 
 // ownerlessRuntimeFindings lists the runtimes sp lists for cityPath that no
 // row owns: no readable GC_SESSION_ID, or one no session store holds
-// (owners), each with why the tick leaves it (or that it reaps it). The
-// doctor's finding.
+// (owners), each with why the tick leaves it (or that it reaps it). One
+// whose owner no read store holds while a rig was skipped is unprovable,
+// naming the rigs not checked, and is not classified. The doctor's finding.
 func ownerlessRuntimeFindings(owners ownerLookup, sp runtime.Provider, cityPath string, now time.Time, grace time.Duration) ([]string, error) {
 	names, err := sp.ListRunning("")
 	if err != nil && !runtime.IsPartialListError(err) {
@@ -391,7 +411,10 @@ func ownerlessRuntimeFindings(owners ownerLookup, sp runtime.Provider, cityPath 
 		case id == "":
 			findings = append(findings, fmt.Sprintf("%s: no GC_SESSION_ID; no owner can be proven", name))
 			continue
-		case !owners.notFound(id):
+		case !owners.absentFromRead(id):
+			continue
+		case len(owners.skipped) > 0:
+			findings = append(findings, fmt.Sprintf("%s: session bead %s not found in any store read; unprovable (%s)", name, id, strings.Join(owners.skipped, ", ")))
 			continue
 		}
 		v := classifyOwnerlessRuntime(sp, cityPath, name, id, now, grace)
