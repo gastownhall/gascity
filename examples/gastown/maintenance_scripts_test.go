@@ -7512,6 +7512,328 @@ exit 0
 	}
 }
 
+// spawnStormFixture drives spawn-storm-detect.sh across several sweeps against
+// one state directory. Each sweep answers `gc ready` with the beads in pool,
+// every one carrying recovery metadata and an updated_at that differs from the
+// last sweep's (unless held), so a bead in pool is a fresh comeback each time.
+// The stub bd reports every shown bead with the status in statusFile, so a test
+// can move a bead from open to closed between sweeps.
+type spawnStormFixture struct {
+	t          *testing.T
+	cityDir    string
+	binDir     string
+	stateDir   string
+	gcLog      string
+	statusFile string
+	pool       []string
+	sweeps     int
+	holdStamp  bool
+}
+
+func newSpawnStormFixture(t *testing.T) *spawnStormFixture {
+	t.Helper()
+	fx := &spawnStormFixture{
+		t:        t,
+		cityDir:  t.TempDir(),
+		binDir:   t.TempDir(),
+		stateDir: t.TempDir(),
+		gcLog:    filepath.Join(t.TempDir(), "gc.log"),
+		pool:     []string{"ga-loop"},
+	}
+	fx.statusFile = filepath.Join(fx.binDir, "status")
+	fx.setStatus("open")
+	writeExecutable(t, filepath.Join(fx.binDir, "bd"), `#!/bin/sh
+case "$1" in
+  show)
+    printf '[{"id":"%s","status":"%s","title":"Looping bead"}]\n' "$2" "$(cat "$SPAWN_STORM_STATUS")"
+    ;;
+esac
+exit 0
+`)
+	writeSpawnStormGCStub(t, filepath.Join(fx.binDir, "gc"), `#!/bin/sh
+printf '%s\n' "$*" >> "$GC_CALL_LOG"
+if [ "${1:-}" = "mail" ] && [ -n "${SPAWN_STORM_MAIL_FAIL:-}" ]; then
+  printf 'mail backend unavailable\n' >&2
+  exit 1
+fi
+exit 0
+`)
+	return fx
+}
+
+func (fx *spawnStormFixture) write(path, body string) {
+	fx.t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		fx.t.Fatal(err)
+	}
+}
+
+func (fx *spawnStormFixture) setStatus(body string) { fx.t.Helper(); fx.write(fx.statusFile, body) }
+
+// seed writes the ledger and, when state is non-empty, the sidecar state file.
+func (fx *spawnStormFixture) seed(ledger, state string) {
+	fx.t.Helper()
+	fx.write(filepath.Join(fx.stateDir, "spawn-storm-counts.json"), ledger)
+	if state != "" {
+		fx.write(filepath.Join(fx.stateDir, "spawn-storm-state.json"), state)
+	}
+}
+
+// readyJSON is what `gc ready --unassigned --json` answers this sweep.
+func (fx *spawnStormFixture) readyJSON() string {
+	rows := make([]string, 0, len(fx.pool))
+	for _, id := range fx.pool {
+		rows = append(rows, fmt.Sprintf(`{"id":%q,"status":"open","updated_at":"2026-11-03T07:%02d:00Z","metadata":{"recovered":"true"}}`, id, fx.sweeps))
+	}
+	return "[" + strings.Join(rows, ",") + "]"
+}
+
+// sweep runs the script once at the given threshold.
+func (fx *spawnStormFixture) sweep(threshold string, mailFails bool) ([]byte, error) {
+	fx.t.Helper()
+	if !fx.holdStamp {
+		fx.sweeps++
+	}
+	env := map[string]string{
+		"GC_CITY":                fx.cityDir,
+		"GC_CITY_PATH":           fx.cityDir,
+		"GC_PACK_STATE_DIR":      fx.stateDir,
+		"GC_CALL_LOG":            fx.gcLog,
+		"SPAWN_STORM_STATUS":     fx.statusFile,
+		"SPAWN_STORM_THRESHOLD":  threshold,
+		"SPAWN_STORM_READY_JSON": fx.readyJSON(),
+		"PATH":                   fx.binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+	if mailFails {
+		env["SPAWN_STORM_MAIL_FAIL"] = "1"
+	}
+	return runScriptResult(fx.t, coreScriptPath("spawn-storm-detect.sh"), env)
+}
+
+// mustSweep is a sweep that has to exit 0.
+func (fx *spawnStormFixture) mustSweep(threshold string) {
+	fx.t.Helper()
+	if out, err := fx.sweep(threshold, false); err != nil {
+		fx.t.Fatalf("spawn-storm-detect failed: %v\n%s", err, out)
+	}
+}
+
+// dedupKeys returns the --dedup key of every alert attempted so far, in order.
+func (fx *spawnStormFixture) dedupKeys() []string {
+	fx.t.Helper()
+	data, err := os.ReadFile(fx.gcLog)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		fx.t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	var keys []string
+	for _, m := range regexp.MustCompile(`--dedup (\S+)`).FindAllStringSubmatch(string(data), -1) {
+		keys = append(keys, m[1])
+	}
+	return keys
+}
+
+func (fx *spawnStormFixture) ledger() map[string]int {
+	fx.t.Helper()
+	return readSpawnStormLedger(fx.t, filepath.Join(fx.stateDir, "spawn-storm-counts.json"))
+}
+
+// state returns the sidecar state the detector remembers across sweeps: the
+// threshold it last evaluated against and, per tracked bead, when the current
+// storm began (unix seconds).
+func (fx *spawnStormFixture) state() (threshold int, starts map[string]int64) {
+	fx.t.Helper()
+	data, err := os.ReadFile(filepath.Join(fx.stateDir, "spawn-storm-state.json"))
+	if err != nil {
+		fx.t.Fatalf("ReadFile(state): %v", err)
+	}
+	var st struct {
+		Threshold int              `json:"threshold"`
+		Starts    map[string]int64 `json:"starts"`
+	}
+	if err := json.Unmarshal(data, &st); err != nil {
+		fx.t.Fatalf("Unmarshal(state): %v\n%s", err, data)
+	}
+	return st.Threshold, st.Starts
+}
+
+// TestSpawnStormDetectAlertsOnceWhenThresholdChangesMidStorm pins item 1 of
+// the #6306 follow-up. The count moves by exactly one per sweep, so a bead
+// already past a changed threshold can never -eq it: the change itself has to
+// be an edge. It fires whichever way the threshold moved, once per change.
+func TestSpawnStormDetectAlertsOnceWhenThresholdChangesMidStorm(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		before, after string
+	}{
+		{"lowered below the count", "10", "3"},
+		{"raised but still under the count", "2", "4"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newSpawnStormFixture(t)
+			// Count 4 -> 5 on the sweep below; both thresholds were already passed.
+			fx.seed(`{"ga-loop":4}`, `{"threshold":`+tc.before+`,"starts":{"ga-loop":1700000000}}`)
+
+			fx.mustSweep(tc.after)
+			if got := len(fx.dedupKeys()); got != 1 {
+				t.Fatalf("alerts after threshold %s -> %s with count 5 = %d, want 1", tc.before, tc.after, got)
+			}
+			if got := fx.ledger()["ga-loop"]; got != 5 {
+				t.Fatalf("ledger count = %d, want 5", got)
+			}
+
+			// Same threshold, count still climbing: the change was one edge, not a level.
+			fx.mustSweep(tc.after)
+			if got := len(fx.dedupKeys()); got != 1 {
+				t.Fatalf("alerts after a second sweep at the unchanged threshold = %d, want 1", got)
+			}
+		})
+	}
+}
+
+// TestSpawnStormDetectThresholdChangeAlertsABeadWaitingInThePool: a bead that
+// sits in the pool unwritten is not counted again, so it is not among the
+// sweep's comebacks, but it is still a storm the change has to reach.
+func TestSpawnStormDetectThresholdChangeAlertsABeadWaitingInThePool(t *testing.T) {
+	fx := newSpawnStormFixture(t)
+	fx.holdStamp = true
+	fx.sweeps = 1
+	fx.seed(`{"ga-loop":5}`, `{"threshold":10,"starts":{"ga-loop":1700000000}}`)
+	fx.write(filepath.Join(fx.stateDir, "spawn-storm-seen.json"), `{"ga-loop":"2026-11-03T07:01:00Z"}`)
+
+	fx.mustSweep("3")
+
+	if got := len(fx.dedupKeys()); got != 1 {
+		t.Fatalf("alerts for a bead waiting in the pool after threshold 10 -> 3 = %d, want 1", got)
+	}
+	if got := fx.ledger()["ga-loop"]; got != 5 {
+		t.Fatalf("ledger count = %d, want 5: a bead that did not come back is not counted", got)
+	}
+	fx.mustSweep("3")
+	if got := len(fx.dedupKeys()); got != 1 {
+		t.Fatalf("alerts after a second sweep at the unchanged threshold = %d, want 1", got)
+	}
+}
+
+// TestSpawnStormDetectThresholdChangeStaysQuietBelowCount: a change the count
+// has not reached is not a storm, and the new value is still remembered.
+func TestSpawnStormDetectThresholdChangeStaysQuietBelowCount(t *testing.T) {
+	fx := newSpawnStormFixture(t)
+	fx.seed(`{"ga-loop":4}`, `{"threshold":2,"starts":{"ga-loop":1700000000}}`)
+
+	fx.mustSweep("9")
+
+	if keys := fx.dedupKeys(); len(keys) != 0 {
+		t.Fatalf("alerted at count 5 under threshold 9: %v", keys)
+	}
+	if got, _ := fx.state(); got != 9 {
+		t.Fatalf("remembered threshold = %d, want 9", got)
+	}
+}
+
+// TestSpawnStormDetectNoRememberedThresholdIsNotAChange: the first sweep after
+// an upgrade has nothing to compare against, so it must not read as a change
+// and re-alert every storm already in the ledger.
+func TestSpawnStormDetectNoRememberedThresholdIsNotAChange(t *testing.T) {
+	fx := newSpawnStormFixture(t)
+	fx.seed(`{"ga-loop":4}`, "")
+
+	fx.mustSweep("2")
+
+	if keys := fx.dedupKeys(); len(keys) != 0 {
+		t.Fatalf("alerted on a sweep with no remembered threshold: %v", keys)
+	}
+	threshold, starts := fx.state()
+	if threshold != 2 {
+		t.Fatalf("remembered threshold = %d, want 2", threshold)
+	}
+	if starts["ga-loop"] <= 0 {
+		t.Fatalf("no storm start recorded for ga-loop: %v", starts)
+	}
+}
+
+// TestSpawnStormDetectRetriesThresholdChangeAlertWhenUndeliverable: the change
+// edge has no count to roll back for a bead that did not come back, so the
+// remembered threshold is what keeps it pending. It must stay put on a failed
+// send, and the retry must use the same dedup key so a mail that did land is
+// suppressed instead of duplicated.
+func TestSpawnStormDetectRetriesThresholdChangeAlertWhenUndeliverable(t *testing.T) {
+	fx := newSpawnStormFixture(t)
+	fx.seed(`{"ga-loop":4}`, `{"threshold":2,"starts":{"ga-loop":1700000000}}`)
+
+	if out, err := fx.sweep("3", true); err == nil {
+		t.Fatalf("exited 0 with an undeliverable alert; want non-zero\n%s", out)
+	}
+	if got, _ := fx.state(); got != 2 {
+		t.Fatalf("remembered threshold = %d after a failed send, want 2 so the change stays pending", got)
+	}
+
+	fx.mustSweep("3")
+	keys := fx.dedupKeys()
+	if len(keys) != 2 {
+		t.Fatalf("alert attempts = %v, want the failed send and one retry", keys)
+	}
+	if keys[0] != keys[1] {
+		t.Fatalf("retry used a different dedup key: %q then %q", keys[0], keys[1])
+	}
+	if got, _ := fx.state(); got != 3 {
+		t.Fatalf("remembered threshold = %d after delivery, want 3", got)
+	}
+}
+
+// TestSpawnStormDetectDedupKeyNamesTheStorm pins item 2: the key carries the
+// storm's recorded start, so it names one storm and not just one bead.
+func TestSpawnStormDetectDedupKeyNamesTheStorm(t *testing.T) {
+	fx := newSpawnStormFixture(t)
+	fx.seed(`{"ga-loop":1}`, `{"threshold":2,"starts":{"ga-loop":1700000000}}`)
+
+	fx.mustSweep("2")
+
+	keys := fx.dedupKeys()
+	if len(keys) != 1 || !strings.HasPrefix(keys[0], "spawn-storm:ga-loop:1700000000") {
+		t.Fatalf("dedup keys = %v, want one starting spawn-storm:ga-loop:1700000000", keys)
+	}
+}
+
+// TestSpawnStormDetectNewStormAfterCloseGetsDistinctKey: a read-but-unarchived
+// alert stays live after its bead closes, so the next storm on the same bead
+// must not share its dedup key. The close also has to forget the old start.
+func TestSpawnStormDetectNewStormAfterCloseGetsDistinctKey(t *testing.T) {
+	fx := newSpawnStormFixture(t)
+	fx.seed(`{"ga-loop":2}`, `{"threshold":1,"starts":{"ga-loop":1700000000}}`)
+
+	// The first storm ends: ga-loop leaves the pool and closes.
+	fx.pool = nil
+	fx.setStatus("closed")
+	fx.mustSweep("1")
+	if _, ok := fx.ledger()["ga-loop"]; ok {
+		t.Fatalf("closed bead still in the ledger")
+	}
+	if _, starts := fx.state(); starts != nil {
+		if _, ok := starts["ga-loop"]; ok {
+			t.Fatalf("closed bead's storm start was not forgotten: %v", starts)
+		}
+	}
+
+	// A second storm on the same bead.
+	fx.pool = []string{"ga-loop"}
+	fx.setStatus("open")
+	fx.mustSweep("1")
+
+	keys := fx.dedupKeys()
+	if len(keys) != 1 {
+		t.Fatalf("alerts for the second storm = %v, want 1", keys)
+	}
+	if !strings.HasPrefix(keys[0], "spawn-storm:ga-loop:") || strings.HasPrefix(keys[0], "spawn-storm:ga-loop:1700000000") {
+		t.Fatalf("second storm reused the first storm's dedup key: %q", keys[0])
+	}
+	if _, starts := fx.state(); starts["ga-loop"] <= 1700000000 {
+		t.Fatalf("second storm's start not recorded: %v", starts)
+	}
+}
+
 func runScript(t *testing.T, script string, env map[string]string) {
 	t.Helper()
 	out, err := runScriptResult(t, script, env)
