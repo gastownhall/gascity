@@ -5328,11 +5328,13 @@ func TestStopManagedCityPreservingSessionsWaitsForRuntimeShutdownOnTimeout(t *te
 	}
 	// The fake service takes serviceExitDelay to exit after SIGTERM, which
 	// outlasts the cancel grace (shutdownTimeout) but not the forced-stop
-	// window (5 x shutdownTimeout). The delay makes "preserve-mode shutdown
-	// waits for the runtime shutdown" deterministic instead of a race against
-	// scheduler jitter (ga-elb781).
+	// window (5 x shutdownTimeout = 2s). The delay makes "preserve-mode
+	// shutdown waits for the runtime shutdown" deterministic, and the window
+	// leaves ~1.4s of scheduler jitter before the wait is abandoned. A
+	// tens-of-milliseconds window flaked under CPU contention (ga-elb781).
+	// mc.done never closes, so the call always runs the whole window.
 	const (
-		shutdownTimeout  = 20 * time.Millisecond
+		shutdownTimeout  = 400 * time.Millisecond
 		serviceExitDelay = 600 * time.Millisecond
 	)
 	cityPath := t.TempDir()
