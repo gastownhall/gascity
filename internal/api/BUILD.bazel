@@ -594,6 +594,7 @@ go_test(
         "workflow_legs_reference_test.go",
         "workflow_legs_test.go",
         "writeauth_test.go",
+        "zz_repro_bead_list_ids_test.go",
     ],
     data = glob(
         ["**"],
