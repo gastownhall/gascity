@@ -358,3 +358,35 @@ func TestStartupHealthEpisodesCheckNeverLeaksLastDetail(t *testing.T) {
 		t.Errorf("FixHint leaks LastDetail: %q", result.FixHint)
 	}
 }
+
+// TestStartupHealthEpisodesCheckReportsTheEffectiveHoldNotJustTheQuarantine
+// pins that the rendered detail names the instant starts are ACTUALLY held
+// until. Past the threshold the quarantine is re-stamped at a fixed 5m on
+// every failure while the retry backoff keeps growing to its 30m cap, so
+// rendering QuarantinedUntil alone would tell an operator starts resume in
+// five minutes when the gate will in fact refuse for half an hour (sr-xf2xj).
+func TestStartupHealthEpisodesCheckReportsTheEffectiveHoldNotJustTheQuarantine(t *testing.T) {
+	cityDir := t.TempDir()
+	mem := beads.NewMemStore()
+	now := time.Now().UTC().Truncate(time.Second)
+	backoffUntil := now.Add(30 * time.Minute)
+	seedStartupHealthEpisode(t, mem, session.StartupHealthEpisode{
+		SessionName:      "chaos-worker-held",
+		ConsecutiveCount: 8,
+		Kind:             session.FailureKindTimeout,
+		FirstFailureAt:   now.Add(-2 * time.Hour),
+		LastFailureAt:    now,
+		QuarantinedUntil: now.Add(5 * time.Minute),
+		BackoffUntil:     backoffUntil,
+	})
+
+	result := newStartupHealthEpisodesCheck(&config.City{}, cityDir, func(_ string) (beads.Store, error) {
+		return mem, nil
+	}).Run(&doctor.CheckContext{})
+
+	details := strings.Join(result.Details, "\n")
+	if !strings.Contains(details, "held_until="+backoffUntil.Format(time.RFC3339)) {
+		t.Errorf("Details must report the effective hold (backoff, %s), not just the quarantine:\n%s",
+			backoffUntil.Format(time.RFC3339), details)
+	}
+}

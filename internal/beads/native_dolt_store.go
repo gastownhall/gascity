@@ -367,6 +367,10 @@ type NativeDoltStore struct {
 	// pushes no type: a store whose setting could not be read, or one built
 	// directly over a storage value.
 	listPushableTypes map[string]bool
+	// infraTypes is the scope's types.infra setting as CreatedForm reads
+	// it, once (createdFormInfraTypes).
+	infraTypesOnce sync.Once
+	infraTypes     map[string]bool
 
 	// typePushdownOff latches when the backend refused a pushed issue type:
 	// the scope was provisioned without gc's type vocabulary. Listings then

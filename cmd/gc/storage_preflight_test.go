@@ -455,6 +455,25 @@ func TestStoragePreflightIsReachableFromTheCommandTree(t *testing.T) {
 	}
 }
 
+// refuseRealStoreOpens fails the test if a store is opened through the real
+// openers: a scope (rig) store or the work store. A fixture city's provider is
+// not running, so a real open starts it, and on a host with dolt installed the
+// managed server outlives the test (ga-683m7f). A fixture that needs a store
+// stubs its opener after this runs.
+func refuseRealStoreOpens(t *testing.T) {
+	t.Helper()
+	prevScope, prevSource := openStorageScopeStore, openInfraMigrationSource
+	openStorageScopeStore = func(storePath, _ string) (beads.Store, error) {
+		t.Errorf("opened the real store at %s, which starts the fixture city's provider; stub it in the fixture", storePath)
+		return nil, fmt.Errorf("a real store open at %s in a test that runs no provider", storePath)
+	}
+	openInfraMigrationSource = func(string) (beads.Store, error) {
+		t.Error("opened the real work store, which starts the fixture city's provider; stub it in the fixture")
+		return nil, errors.New("a real work-store open in a test that runs no provider")
+	}
+	t.Cleanup(func() { openStorageScopeStore, openInfraMigrationSource = prevScope, prevSource })
+}
+
 // TestPreflightRefusesEveryCityTheMigrationRefuses is the drift guard for this
 // verb's whole reason to exist.
 //
@@ -492,6 +511,9 @@ func TestStoragePreflightIsReachableFromTheCommandTree(t *testing.T) {
 // compile-time beads.DepMetadataWriter assertion in sqlite_store_graph_apply.go.
 // A destination that could reach an operator without one does not exist, so
 // there is no window this omission could cost.
+//
+// No leg runs against a live city, so no leg may open a real store
+// (refuseRealStoreOpens): a fixture that needs one stubs it.
 func TestPreflightRefusesEveryCityTheMigrationRefuses(t *testing.T) {
 	cases := []struct {
 		name string
@@ -571,7 +593,11 @@ func TestPreflightRefusesEveryCityTheMigrationRefuses(t *testing.T) {
 		}},
 		{"a rig prefix in a reserved class namespace", `"gcg"`, func(t *testing.T) storageOperatorRequest {
 			request, cfg, _ := preflightReadyCity(t, 1)
-			cfg.Rigs = []config.Rig{{Name: "reserved", Prefix: "gcg", Path: t.TempDir()}}
+			rigPath := t.TempDir()
+			cfg.Rigs = []config.Rig{{Name: "reserved", Prefix: "gcg", Path: rigPath}}
+			// The plan block does not end the report, so the preflight leg
+			// censuses this rig.
+			stubStorageScopeStore(t, rigPath, func() beads.Store { return beads.NewMemStore() })
 			return request
 		}},
 		{"a remote stage", "remote stage of city controller-city", func(t *testing.T) storageOperatorRequest {
@@ -661,6 +687,7 @@ func TestPreflightRefusesEveryCityTheMigrationRefuses(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			refuseRealStoreOpens(t)
 			var migrateStdout, migrateStderr bytes.Buffer
 			if code := doStorageMigrate(context.Background(), tc.build(t), &migrateStdout, &migrateStderr); code == 0 {
 				t.Fatalf("this fixture does not make the migration refuse, so it proves nothing about preflight: %s", migrateStdout.String())
@@ -716,6 +743,7 @@ func TestPreflightRefusesEveryCityTheMigrationRefuses(t *testing.T) {
 	}
 	for _, tc := range controls {
 		t.Run("control: "+tc.name, func(t *testing.T) {
+			refuseRealStoreOpens(t)
 			var migrateStdout, migrateStderr bytes.Buffer
 			if code := doStorageMigrate(context.Background(), tc.build(t), &migrateStdout, &migrateStderr); code != 0 {
 				t.Fatalf("the control city does not migrate, so the refusal cases above prove nothing: %s", migrateStderr.String())
@@ -888,12 +916,14 @@ func TestPreflightNamesRigResidueOnAConvergedCityWithoutBlocking(t *testing.T) {
 // these would stop me" would appear to list checks that do not exist.
 func TestPreflightBlockIndentsAWrappedRefusalUnderTheDetailColumn(t *testing.T) {
 	var stdout bytes.Buffer
-	if code := preflightBlock(&stdout, "destination", errors.New("first line\nsecond line")); code == 0 {
-		t.Fatal("preflightBlock returned a clearing exit code")
+	var found preflightFindings
+	found.block(&stdout, "destination", errors.New("first line\nsecond line"))
+	if code := found.finish(&stdout); code == 0 {
+		t.Fatal("a report with a blocked check returned a clearing exit code")
 	}
 	lines := strings.Split(stdout.String(), "\n")
 	if len(lines) < 2 {
-		t.Fatalf("preflightBlock printed no continuation: %q", stdout.String())
+		t.Fatalf("the block printed no continuation: %q", stdout.String())
 	}
 	if !strings.HasPrefix(lines[0], "  "+preflightBlockTag) {
 		t.Fatalf("first line is not a check row: %q", lines[0])

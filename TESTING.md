@@ -1740,6 +1740,7 @@ all-source audit while staying outside untagged and Small debt.
 | Medium owner | `internal/runtime/exec` package `exec` | TestMain: tmux | ga-cp3hwi | runtime exec TestMain is the checked Medium owner that confines the exec op's tmux clients to a private socket root; TestMain points the binary at a private TMUX_TMPDIR and drops TMUX/TMUX_PANE before any test runs, so the tmux commands the exec provider sends over a host-run exec op never reach the developer's tmux server; TestExecOpTmuxClientsCannotReachTheHostServer guards it | P0.4c-tmux | 2026-12-31 |
 | Medium owner | `internal/runtime/herdr` package `herdr` | TestServerAliveDetectsLiveServer: net_listen | ga-cp3hwi | herdr live-server liveness regression is a checked Medium stream-listener owner; the Unix stream listener is confined to TestServerAliveDetectsLiveServer and closed by test cleanup | P0.4c-listener | 2026-12-31 |
 | Medium owner | `internal/runtime/herdr` package `herdr` | TestServerAliveRejectsStaleSocket: net_listen | ga-cp3hwi | herdr stale-socket liveness regression is a checked Medium stream-listener owner; the Unix stream listener is confined to TestServerAliveRejectsStaleSocket and closed before liveness detection | P0.4c-listener | 2026-12-31 |
+| Medium owner | `internal/runtime/k8s` package `k8s` | TestDynamicUserWrapperPreservesCommand: subprocess | ga-cp3hwi | Kubernetes launch-command transport regression is a checked Medium subprocess owner; the /bin/sh executions are confined to TestDynamicUserWrapperPreservesCommand; test-owned su and tmux scripts receive a private PATH and temporary files, so a real shell verifies the decoded command reaches tmux as one argument | P0.4b | 2026-12-31 |
 | Medium owner | `internal/runtime/tmux` package `tmux` | TestMain: environment, tmux | ga-cp3hwi | runtime tmux TestMain is the checked Medium owner for isolated tmux process and socket cleanup; only declared environment and tmux calls lexically inside TestMain leave Small debt | P0.4c-tmux | 2026-12-31 |
 | Medium owner | `internal/session/sessiontest` package `sessiontest_test` | TestNoCityRefusalWithoutTheGateExits: subprocess | ga-cp3hwi | the no-city gate's unarmed self-test is a checked Medium subprocess owner; the probe process is confined to TestNoCityRefusalWithoutTheGateExits, which re-execs the test binary on its own probe: a refusal in a binary that does not run the gate exits that binary, so only a real child run shows it failing before its test can pass | P0.4b | 2026-12-31 |
 | Medium owner | `internal/session` package `session` | TestNoCityGateFailsTheRun: subprocess | ga-cp3hwi | the no-city gate's self-test is a checked Medium subprocess owner; the probe processes are confined to TestNoCityGateFailsTheRun, which re-execs the test binary on its own probe: the gate decides the exit code of a whole test binary after its last test, so only a real child run shows an undeclared refusal failing a run whose tests all pass | P0.4b | 2026-12-31 |
@@ -2473,6 +2474,26 @@ results, event streams, OpenAPI/response agreement, cross-route lifecycle
 coherence, and end-to-end provider wiring. Do not put low-level edge cases
 here. Corrupt files, exact parser failures, request validation branches, and
 single handler error cases belong in unit tests next to the implementation.
+
+#### Infrastructure scope PID identity (`cmd/gc/infra_scope_integration_test.go`)
+
+`TestInfraScopedManagedDoltPIDIdentityUnderRealSystemd` wraps a stand-in
+managed Dolt server in a throwaway systemd user scope and checks that the PID
+gc records is the post-exec server, alone in its scope, and accepted by gc's
+start-identity and command-line ownership checks. It needs a reachable
+systemd user manager and the user bus passed into the test, so it skips in
+every CI lane and in default local sweeps. Run it locally:
+
+```bash
+bazel test --config=ci --config=integration --strategy=TestRunner=local \
+  --test_env=XDG_RUNTIME_DIR --test_env=DBUS_SESSION_BUS_ADDRESS \
+  --test_filter=TestInfraScopedManagedDoltPIDIdentityUnderRealSystemd \
+  //cmd/gc:gc_test
+```
+
+Its scope is created under `gascity-test.slice`, so on hosts that define that
+slice the slice's limits bound it. It starts no real Dolt, city or supervisor,
+and it does not cover PID-namespace (bwrap `--unshare-pid`) seats.
 
 #### Dashboard serve-level projection tests (`test/dashport`)
 

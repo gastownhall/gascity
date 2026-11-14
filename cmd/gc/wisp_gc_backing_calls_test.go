@@ -106,7 +106,7 @@ func TestWispGCWorkArmBackingCallsPerPass(t *testing.T) {
 				calls.Store(0)
 				withCloseAbandonedEnforced(t, func() {
 					withCloseAbandonedTTL(t, 5*time.Minute, func() {
-						if _, err := gc.pass(context.Background(), legs, e.graphStore(), time.Hour, now); err != nil {
+						if _, err := gc.pass(context.Background(), testWispGCRoots(e.graphStore(), legs), legs, e.graphStore(), time.Hour, now); err != nil {
 							t.Logf("pass: %v", err)
 						}
 					})
@@ -201,7 +201,7 @@ func TestWispGCGraphArmHolderGuardBackingCallsPerTick(t *testing.T) {
 				t.Helper()
 				calls.Store(0)
 				withCloseAbandonedTTL(t, 5*time.Minute, func() {
-					if _, err := gc.runGC(legs, beads.GraphStore{Store: graph}, beads.SessionStore{}, beads.MailStore{}, now); err != nil {
+					if _, err := gc.runGC(testWispGCRoots(graph, legs), legs, beads.GraphStore{Store: graph}, beads.SessionStore{}, beads.MailStore{}, now); err != nil {
 						t.Logf("runGC: %v", err)
 					}
 				})
