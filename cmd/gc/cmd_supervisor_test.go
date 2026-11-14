@@ -7402,19 +7402,7 @@ const ephemeralPortThresholdForTest = 32768
 
 func freeEphemeralLoopbackPort(t *testing.T) int {
 	t.Helper()
-	for i := 0; i < 20; i++ {
-		l, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatalf("Listen: %v", err)
-		}
-		port := l.Addr().(*net.TCPAddr).Port
-		_ = l.Close()
-		if port >= ephemeralPortThresholdForTest {
-			return port
-		}
-	}
-	t.Skip("could not allocate a port >= 32768 in 20 tries")
-	return 0
+	return holdLoopbackPort(t, ephemeralPortThresholdForTest)
 }
 
 func freeLowLoopbackPort(t *testing.T) int {
