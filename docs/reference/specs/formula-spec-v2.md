@@ -807,7 +807,7 @@ that run as an infrastructure outcome rather than a verdict:
 |---|---|---|
 | `0` | Pass — the step closes | n/a |
 | `75` | Infrastructure unreachable; the check produced no verdict | **No** — re-run attempt-free |
-| any other nonzero except `78` carrying a typed infrastructure string on stderr | Infrastructure unreachable, via the stderr fallback below | **No** — re-run attempt-free |
+| any other nonzero except `78` carrying a typed infrastructure string on stderr | Infrastructure unreachable, via the stderr fallback below (internal fallback; not a compatibility guarantee — write against exit 75 instead) | **No** — re-run attempt-free |
 | `78` | The check cannot run on this machine as configured (for example, a module its interpreter needs is missing); the check produced no verdict | **No**, and no infrastructure budget either. The step stays open and the steps that need it stay blocked; the first non-blank stderr line, clipped, is included in `gc.control_pending_reason`. Re-run every sweep until it exits with any other status |
 | any other nonzero | Fail — the verdict is "not yet" | Yes |
 | none: the script ran past `check.timeout` and was stopped | No verdict | **No** — re-run attempt-free under the same budget |
@@ -1328,3 +1328,9 @@ formula "<name>" root is a molecule container, not Ready-visible work; scale-fro
 | Authored `gc.output_json_required` fan-out | Deprecated; `gc lint` warns (section 3.4) | `drain` (section 3.3) |
 | `{{issue}}` variable | Deprecated one-release compat alias (section 1.4) | `{{convoy_id}}` derivation |
 | `gc.model` step metadata | Deprecated; `gc doctor` migrates (section 2) | `opt_model` |
+
+Exit 75's meaning in a `check` script (infrastructure unreachable, no verdict,
+attempt-free re-run; section 3.1) is part of the `formula_compiler` contract.
+Changing or retiring it is a breaking change, handled like every entry above:
+a new contract version plus an entry in this table, never a silent edit. The
+stderr fallback in the same section is not part of the contract.

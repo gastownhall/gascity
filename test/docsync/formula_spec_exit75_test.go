@@ -25,7 +25,7 @@ func readFormulaSpecV2(t *testing.T) string {
 // it carries no compatibility guarantee. A gate-script author who reads only
 // the table must not take it for as durable as the exit-75 row.
 func TestFormulaSpecStderrFallbackRowIsMarkedInternal(t *testing.T) {
-	const rowPrefix = "| any other nonzero carrying a typed infrastructure string on stderr"
+	const rowPrefix = "| any other nonzero except `78` carrying a typed infrastructure string on stderr"
 	for _, line := range strings.Split(readFormulaSpecV2(t), "\n") {
 		if !strings.HasPrefix(line, rowPrefix) {
 			continue
