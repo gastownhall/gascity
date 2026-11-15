@@ -1,3 +1,10 @@
+//go:build unix
+
+// Every assertion here is about POSIX mode bits, euid ownership and umask.
+// Windows enforces the same privacy contract through an owner-only, protected
+// DACL, which cannot be expressed as a mode, so it is covered by an equivalent
+// suite in privatedir_windows_test.go rather than shared with this one.
+
 package runtime
 
 import (
