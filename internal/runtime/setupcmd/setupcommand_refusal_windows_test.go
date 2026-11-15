@@ -1,6 +1,6 @@
 //go:build windows
 
-package runtime
+package setupcmd
 
 import (
 	"context"
@@ -12,8 +12,8 @@ import (
 // TestRunSetupCommandRefusesPOSIXShell pins that a setup command naming a
 // POSIX shell is refused rather than handed to whatever sh PATH offers.
 func TestRunSetupCommandRefusesPOSIXShell(t *testing.T) {
-	err := RunSetupCommand(context.Background(), "bash ./setup.sh", nil, 10*time.Second)
+	err := Run(context.Background(), "bash ./setup.sh", nil, fixed(10*time.Second))
 	if err == nil || !strings.Contains(err.Error(), "refused") {
-		t.Fatalf("RunSetupCommand = %v, want a refusal", err)
+		t.Fatalf("Run = %v, want a refusal", err)
 	}
 }

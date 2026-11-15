@@ -150,8 +150,6 @@ go_test(
         "seam_adapter_test.go",
         "session_events_contract_test.go",
         "session_events_merge_test.go",
-        "setupcommand_refusal_windows_test.go",
-        "setupcommand_windows_test.go",
         "shellcommand_gcalias_windows_test.go",
         "shellcommand_windows_test.go",
         "shellfixture_unix_test.go",

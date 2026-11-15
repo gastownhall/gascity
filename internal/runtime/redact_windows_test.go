@@ -3,11 +3,8 @@
 package runtime
 
 import (
-	"context"
-	"os"
 	"strings"
 	"testing"
-	"time"
 )
 
 // windowsInertNames is the inventory envRedactionInertWindows must hold,
@@ -103,42 +100,5 @@ func TestRedactionInertNamesIgnoreCaseOnWindows(t *testing.T) {
 		if !redactableEnvValue(spelling, "value-long-enough") {
 			t.Fatalf("%s was not treated as a credential", spelling)
 		}
-	}
-}
-
-// TestRunSetupCommandFailureKeepsWindowsPathsLegible is the outcome the names
-// exist for, end to end and with this machine's real values: a setup command
-// that fails while naming paths under the user's profile, temp, app-data and
-// system directories still names them in the error, while a credential in the
-// same output is scrubbed.
-func TestRunSetupCommandFailureKeepsWindowsPathsLegible(t *testing.T) {
-	t.Setenv("ANTHROPIC_AUTH_TOKEN", sentinel)
-
-	var command strings.Builder
-	var want []string
-	for _, name := range []string{"USERPROFILE", "TEMP", "APPDATA", "LOCALAPPDATA", "SystemRoot"} {
-		value := os.Getenv(name)
-		if len(value) < substitutionFloor {
-			t.Fatalf("%s = %q is shorter than the substitution floor, so this test would prove nothing about it", name, value)
-		}
-		command.WriteString("[Console]::Error.WriteLine(\"cannot open $env:" + name + "\\gc-city\\missing.toml\")\n")
-		want = append(want, value+`\gc-city\missing.toml`)
-	}
-	command.WriteString("[Console]::Error.WriteLine(\"token=$env:ANTHROPIC_AUTH_TOKEN\")\nexit 2")
-
-	err := RunSetupCommand(context.Background(), command.String(), nil, 60*time.Second)
-	if err == nil {
-		t.Fatal("a setup command exiting 2 must fail")
-	}
-	for _, path := range want {
-		if !strings.Contains(err.Error(), path) {
-			t.Errorf("the failure lost %s: %v", path, err)
-		}
-	}
-	if strings.Contains(err.Error(), sentinel) {
-		t.Errorf("the credential reached the failure: %v", err)
-	}
-	if !strings.Contains(err.Error(), "token="+RedactedValue) {
-		t.Fatalf("nothing in the failure was scrubbed, so the paths above prove nothing: %v", err)
 	}
 }

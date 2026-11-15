@@ -13,7 +13,7 @@ import (
 
 // TestCoreOrdersRefusedOnWindowsAreTheScriptOrders pins which of the core
 // pack's orders Windows refuses to run: the thirteen whose program is a POSIX
-// shell script, until they are ported, and none of the four that run gc.
+// shell script, until they are ported, and none of the five that run gc.
 func TestCoreOrdersRefusedOnWindowsAreTheScriptOrders(t *testing.T) {
 	want := []string{
 		"cascade-nudge-on-blocker-close", "cross-rig-deps", "gate-sweep", "jsonl-export",
@@ -40,7 +40,7 @@ func TestCoreOrdersRefusedOnWindowsAreTheScriptOrders(t *testing.T) {
 	if !slices.Equal(refused, want) {
 		t.Errorf("Windows refuses %q; want the script orders %q", refused, want)
 	}
-	if runnable := strings.Join(runnable, " "); runnable != "beads-health convoy-autoclose-backstop nudge-mail-sweep order-tracking-sweep" {
-		t.Errorf("Windows runs %q; want the four gc orders", runnable)
+	if runnable := strings.Join(runnable, " "); runnable != "beads-health binding-snapshot convoy-autoclose-backstop nudge-mail-sweep order-tracking-sweep" {
+		t.Errorf("Windows runs %q; want the five gc orders", runnable)
 	}
 }

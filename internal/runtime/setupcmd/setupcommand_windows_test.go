@@ -1,6 +1,6 @@
 //go:build windows
 
-package runtime
+package setupcmd
 
 import (
 	"context"
@@ -19,9 +19,8 @@ import (
 // still run, still report its working directory, and still fail with its own
 // exit code.
 //
-// RunSetupCommand is the lifecycle runner every host-side provider delegates
-// to, so a Windows host that needs a POSIX shell here does not have a working
-// supervisor no matter what the rest of the suite reports.
+// Run is the shared host-side lifecycle runner, so a Windows host that needs
+// a POSIX shell here does not have a working supervisor.
 func TestRunSetupCommandRunsWithoutPosixShellOnPath(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("PATH", "")
@@ -33,9 +32,10 @@ func TestRunSetupCommandRunsWithoutPosixShellOnPath(t *testing.T) {
 		}
 	}
 
-	if err := RunSetupCommand(context.Background(), fixturePrintCwdToFile, map[string]string{
+	command := `[System.IO.File]::WriteAllText((Join-Path $PWD.Path 'out.txt'), $PWD.Path)`
+	if err := Run(context.Background(), command, map[string]string{
 		"GC_DIR": dir,
-	}, 30*time.Second); err != nil {
+	}, fixed(30*time.Second)); err != nil {
 		t.Fatalf("setup command failed with no POSIX shell on PATH: %v", err)
 	}
 	data, err := os.ReadFile(filepath.Join(dir, "out.txt"))
@@ -46,7 +46,8 @@ func TestRunSetupCommandRunsWithoutPosixShellOnPath(t *testing.T) {
 		t.Errorf("working directory = %q, want %q", strings.TrimSpace(string(data)), dir)
 	}
 
-	err = RunSetupCommand(context.Background(), fixtureBothStreamsExit3, nil, 30*time.Second)
+	command = "[Console]::Out.WriteLine('out')\n[Console]::Error.WriteLine('err')\nexit 3"
+	err = Run(context.Background(), command, nil, fixed(30*time.Second))
 	if err == nil {
 		t.Fatal("a setup command exiting 3 must fail with no POSIX shell on PATH")
 	}
@@ -66,7 +67,7 @@ func TestRunSetupCommandReportsMissingInterpreter(t *testing.T) {
 	t.Setenv("PATH", "")
 	t.Setenv("SystemRoot", t.TempDir())
 
-	err := RunSetupCommand(context.Background(), "exit 0", nil, 5*time.Second)
+	err := Run(context.Background(), "exit 0", nil, fixed(5*time.Second))
 	if err == nil {
 		t.Fatal("a setup command with no interpreter must fail")
 	}
