@@ -50,7 +50,7 @@ func TestCustomTypesCheck_MissingTypes(t *testing.T) {
 	// this check StatusOK, defeating the assertion below. Pin a test-owned
 	// HOME so that fallback file doesn't exist. See ga-zxpfic and
 	// TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext.
-	testOwnedHome(t)
+	pinEmbeddedBDHome(t)
 
 	dir := guardedWorkspaceDir(t)
 	beadsDir := filepath.Join(dir, ".beads")
@@ -319,7 +319,7 @@ func TestCustomTypesCheck_TableDrift(t *testing.T) {
 	// to the shared server regardless of the vars above. Pin a test-owned
 	// HOME so that fallback file doesn't exist. See ga-zxpfic and
 	// TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext.
-	testOwnedHome(t)
+	pinEmbeddedBDHome(t)
 
 	dir := guardedWorkspaceDir(t)
 
@@ -411,7 +411,7 @@ func TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext(t *testing.T) {
 		t.Setenv(key, "")
 	}
 
-	home := testOwnedHome(t)
+	home := pinEmbeddedBDHome(t)
 
 	dir := guardedWorkspaceDir(t)
 
@@ -482,6 +482,9 @@ func TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint(t *testing.T) 
 	} {
 		unsetEnvForTest(t, key)
 	}
+	// Deliberately testOwnedHome, not pinEmbeddedBDHome: this workspace is
+	// server-bound, and in bd's test mode a server-bound bd dials the
+	// 127.0.0.1:1 sentinel instead of the fixture's server (ga-u5azpz).
 	testOwnedHome(t)
 	t.Setenv("BD_BACKUP_ENABLED", "false")
 	t.Setenv("BEADS_BACKUP_ENABLED", "false")

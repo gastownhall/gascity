@@ -36,9 +36,13 @@ func guardedWorkspaceDir(t *testing.T) string {
 }
 
 // pinEmbeddedBDHome is testOwnedHome for the fixtures that run a real bd in an
-// embedded workspace. It must also put bd in test mode for the subprocesses
-// those fixtures spawn; see TestPinEmbeddedBDHomeRunsBDSubprocessesInTestMode.
+// embedded workspace. It also puts bd in test mode so no bd the fixture spawns
+// leaves a detached `bd send-metrics` child writing $HOME/.beads/eventsData
+// after the test returns (ga-u5azpz; the cmd/gc counterpart is
+// pinTestOwnedBDHome, ga-1f81md). Do NOT use it for a server-bound workspace:
+// in test mode bd dials the 127.0.0.1:1 sentinel there and breaks.
 func pinEmbeddedBDHome(t *testing.T) string {
 	t.Helper()
+	t.Setenv(beadstest.EnvBeadsTestMode, "1")
 	return testOwnedHome(t)
 }
