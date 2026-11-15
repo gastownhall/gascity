@@ -2339,12 +2339,12 @@ func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL, unreadMailTTL time.Duration, mail
 // store alone leaves it open forever.
 //
 // The targets are the order-tracking sweep's (suspended rigs left untouched),
-// deduplicated by the same key and opened through openStoreAtForCity. The city config is read with
-// config.LoadWithIncludes, not loadCityConfig, for the reason the sweep's own
-// TTL helpers do: loadCityConfig stomps process-wide feature-flag globals. A
-// config that will not load leaves the sweep on the city store alone, with a
-// note; a rig whose store will not open is reported and skipped, so one bad rig
-// does not stop the rest.
+// deduplicated by the same key and opened through openStoreAtForCity. The city
+// config is read with config.LoadWithIncludes, not loadCityConfig, for the
+// reason the sweep's own TTL helpers do: loadCityConfig stomps process-wide
+// feature-flag globals. A config that will not load leaves the sweep on the city
+// store alone, with a note; a rig whose store will not open is reported and
+// skipped, so one bad rig does not stop the rest.
 func nudgeSweepRigScopesForCity(cityPath string, stderr io.Writer) ([]nudgeSweepScope, func()) {
 	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
