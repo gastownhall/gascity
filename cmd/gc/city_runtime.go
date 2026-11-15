@@ -4266,15 +4266,6 @@ func poolSessionBeadRuntimeRunningInfo(info sessionpkg.Info, sp runtime.Provider
 	return obs.Running, err
 }
 
-// pendingCreateClaimStillLeasedForSweepInfo keeps pending_create_claim
-// protection aligned with the reconciler: start-in-flight claims stay protected
-// for the provider-start lease, never-started creates get the longer queue
-// lease, and stale claims stop blocking pool-slot recovery. It reads the typed
-// session.Info via pendingCreateLeaseActiveInfo.
-func pendingCreateClaimStillLeasedForSweepInfo(info sessionpkg.Info, startupTimeout time.Duration) bool {
-	return pendingCreateLeaseActiveInfo(info, nil, startupTimeout)
-}
-
 // isStaleCreating mirrors staleCreatingState in session_reconcile.go without
 // requiring a clock.Clock dependency. It prefers the per-attempt
 // pending_create_started_at marker and falls back to CreatedAt for older beads
@@ -4298,13 +4289,7 @@ func isStaleCreatingInfo(i sessionpkg.Info) bool {
 
 // isStaleCreatingInfoAt is isStaleCreatingInfo at now.
 func isStaleCreatingInfoAt(i sessionpkg.Info, now time.Time) bool {
-	if started, ok := parseRFC3339Metadata(i.PendingCreateStartedAt); ok {
-		return !now.Before(started.Add(staleCreatingStateTimeout))
-	}
-	if i.CreatedAt.IsZero() {
-		return true
-	}
-	return !now.Before(i.CreatedAt.Add(staleCreatingStateTimeout))
+	return sessionpkg.CreateAttemptStale(i, now)
 }
 
 // parseRFC3339Metadata parses an RFC3339 timestamp metadata value. A missing,

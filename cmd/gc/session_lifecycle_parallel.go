@@ -53,9 +53,10 @@ const (
 
 // staleKeyDetectDelay is how long production waits after starting a session
 // before checking if it died immediately (stale resume key detection). It
-// matches the same value in internal/session/chat.go. Tests inject a waiter
-// instead of mutating this policy.
-const staleKeyDetectDelay = 2 * time.Second
+// is internal/session's StaleKeyDetectDelay, the same value the in-flight
+// pending-create lease window is derived from. Tests inject a waiter instead of
+// mutating this policy.
+const staleKeyDetectDelay = sessionpkg.StaleKeyDetectDelay
 
 type startStabilityWaiter func(context.Context, string) bool
 

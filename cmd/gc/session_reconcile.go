@@ -240,7 +240,7 @@ func sessionStartRequested(i sessionpkg.Info, staleCreating bool) bool {
 // not from the bead row's CreatedAt, so configured named-session reopens get a
 // fresh window each time the bead is reopened. Pending creates that never
 // reached preWakeCommit use pendingCreateNeverStartedTimeout instead.
-const staleCreatingStateTimeout = time.Minute
+const staleCreatingStateTimeout = sessionpkg.StaleCreatingTimeout
 
 // stalePendingCreateTimeout is the longer grace window applied by
 // reapStaleSessionBeads to a started pending-create bead — one that holds

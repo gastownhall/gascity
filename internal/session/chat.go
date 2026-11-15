@@ -22,7 +22,7 @@ import (
 
 // staleKeyDetectDelay is the immutable production window between a keyed
 // session start and the liveness probe that detects a stale resume key.
-const staleKeyDetectDelay = 2 * time.Second
+const staleKeyDetectDelay = StaleKeyDetectDelay
 
 // StaleKeyDetectionWaiter waits until a started keyed session is ready for its
 // stale-resume-key liveness probe. Implementations must return the context

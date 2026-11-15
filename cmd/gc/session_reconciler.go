@@ -1573,7 +1573,7 @@ func pendingCreateLeaseActive(i sessionpkg.Info, inFlight, neverStartedExpired, 
 // to startDeferralHoldCeiling. The memo is in-memory and read by the
 // reconciler and the reaper; a reader that sees only the bead (gc session wake)
 // still judges the row by this lease alone, and a restart forgets the memo.
-const pendingCreateNeverStartedTimeout = 10 * time.Minute
+const pendingCreateNeverStartedTimeout = sessionpkg.NeverStartedCreateLease
 
 // wakeUndesiredGrace is how long a live session woken recently is spared the
 // undesired (orphaned/suspended) drain begin (INC-003, ga-qgtb3). Undesiredness

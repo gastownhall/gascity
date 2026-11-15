@@ -413,26 +413,21 @@ func sessionWakeStuckInFlightInfo(info session.Info) bool {
 }
 
 // sessionWakeCreateAbandonedInfo reports whether an in-flight create is
-// genuinely abandoned and so may be acted on by the CLI.
-//
-// Mirrors the sweep's gate order in city_runtime.go:2853-2857: the
-// pending-create lease is checked FIRST, staleness second. Checking only
-// staleness rejects a create the reconciler still protects, because
-// pendingCreateNeverStartedTimeout (10m) is deliberately longer than
-// staleCreatingStateTimeout (1m).
+// genuinely abandoned and so may be acted on by the CLI. It is the shared
+// session.DetectAbandonedCreate rule judged against the wall clock, the same
+// rule gc status and gc doctor report, so a create the reconciler still leases
+// is never rejected and a started-then-wedged one (a claim with last_woke_at,
+// no longer in flight) is. It does not mirror the sweep, which keeps its own
+// lease read.
 func sessionWakeCreateAbandonedInfo(info session.Info, startupTimeout time.Duration) bool {
-	return sessionWakeStuckInFlightInfo(info) &&
-		!pendingCreateClaimStillLeasedForSweepInfo(info, startupTimeout) &&
-		isStaleCreatingInfo(info)
+	_, abandoned := session.DetectAbandonedCreate(info, time.Now(), startupTimeout)
+	return abandoned
 }
 
-// stuckCreatingSinceInfo returns the timestamp isStaleCreatingInfo measures
-// staleness from (the per-attempt pending_create_started_at marker, falling
-// back to CreatedAt), so the CLI's rejection message names exactly what was
-// checked instead of duplicating the staleness decision itself.
+// stuckCreatingSinceInfo returns the timestamp the abandoned-create rule
+// measures staleness from (the per-attempt pending_create_started_at marker,
+// falling back to CreatedAt), so the CLI's rejection message names exactly what
+// was checked instead of duplicating the staleness decision itself.
 func stuckCreatingSinceInfo(info session.Info) time.Time {
-	if started, ok := parseRFC3339Metadata(info.PendingCreateStartedAt); ok {
-		return started
-	}
-	return info.CreatedAt
+	return session.CreateAttemptAnchor(info)
 }
