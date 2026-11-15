@@ -1378,25 +1378,22 @@ func TestResolveTemplatePromptTemplateStillRendersProbedDefaultBranch(t *testing
 	}
 }
 
-// installBlockingGitForTemplate puts a fake git first on PATH that logs every
-// invocation and then execs sleep, standing in for a git that never answers
-// (a wedged filesystem or an unresponsive remote helper).
-func installBlockingGitForTemplate(t *testing.T) string {
+// installBlockingGitForTemplate puts a fake git first on PATH that execs
+// sleep, standing in for a git that never answers (a wedged filesystem or an
+// unresponsive remote helper). It keeps no call log: the probe deadline kills
+// it, possibly before a first write, so a test counts spawns with
+// answerLaterProbes instead.
+func installBlockingGitForTemplate(t *testing.T) {
 	t.Helper()
 	if goruntime.GOOS == "windows" {
 		t.Skip("shell-script fake git is not portable to windows")
 	}
 	binDir := t.TempDir()
-	logPath := filepath.Join(t.TempDir(), "git-calls.log")
-	script := "#!/bin/sh\n" +
-		"printf '%s\\n' \"$*\" >> \"$GC_TEST_GIT_LOG\"\n" +
-		"exec sleep 60\n"
+	script := "#!/bin/sh\nexec sleep 60\n"
 	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0o755); err != nil {
 		t.Fatalf("write blocking fake git: %v", err)
 	}
-	t.Setenv("GC_TEST_GIT_LOG", logPath)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return logPath
 }
 
 // newProbeTestParams returns build params with a fresh probe latch, a tiny
@@ -1421,8 +1418,7 @@ func countLines(s string) int {
 // lifts bp's deadline to the default, returning the new fake's call log. A
 // test that tripped the latch with the blocking fake then proves whether a
 // later call spawns git from this log, which a slow process start cannot
-// empty: the blocking fake's own log can miss its line when the deadline
-// kills the process before its first write.
+// empty.
 func answerLaterProbes(t *testing.T, bp *agentBuildParams) string {
 	t.Helper()
 	gitLog := installRecordingGitForTemplate(t, "develop")
