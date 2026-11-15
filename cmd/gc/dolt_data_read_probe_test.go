@@ -324,3 +324,26 @@ func TestManagedDoltDataReadProbeReportsOnlyErrorLinesBounded(t *testing.T) {
 		t.Errorf("len(Err) = %d, want the signature kept and the text bounded to 600 bytes", len(got.Err))
 	}
 }
+
+// A failure that names no chunk-store signature is reported by its error lines
+// alone. The CLI runner returns the rows of the statements that succeeded before
+// the failure, and a row is table content, not a diagnostic: it must not ride into
+// the warning. (The test above reaches the signature tier of the text reduction;
+// this one reaches the tier below it.)
+func TestManagedDoltDataReadProbeUnclassifiedFailureReportsErrorLinesNotRows(t *testing.T) {
+	out := "id\n--\nrow-one\nrow-two\nERROR 1105 (HY000): connection reset by peer\n"
+	ops := dataReadOps([]managedDoltTableRef{{DB: "gascity", Table: "wisps"}},
+		func(string, []string) error { return errors.New(out) }, nil)
+	got := managedDoltDataReadProbeWith(ops)
+	if got.Err != "" {
+		t.Fatalf("probe = %+v, want an inconclusive warning, not a failure", got)
+	}
+	if !strings.Contains(got.Warning, "connection reset by peer") {
+		t.Errorf("Warning = %q, want the error line kept", got.Warning)
+	}
+	for _, row := range []string{"row-one", "row-two"} {
+		if strings.Contains(got.Warning, row) {
+			t.Errorf("Warning = %q carries %q: a row from before the failure must not ride along", got.Warning, row)
+		}
+	}
+}
