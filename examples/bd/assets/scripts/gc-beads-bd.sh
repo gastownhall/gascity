@@ -4126,6 +4126,11 @@ run_bd_doltlite() {
         unset BEADS_DOLT_DATABASE BEADS_DOLT_PORT
         unset BEADS_DOLT_SERVER_DATABASE BEADS_DOLT_SERVER_HOST BEADS_DOLT_SERVER_MODE BEADS_DOLT_SERVER_PORT BEADS_DOLT_SERVER_SOCKET BEADS_DOLT_SERVER_USER BEADS_DOLT_PASSWORD
         export BEADS_DOLT_AUTO_START=0
+        # The arm's only bd entry (init, prefix probe, maintenance), so every
+        # step shares one policy: bd never roots a DoltLite scope in the
+        # user-level shared server, whatever the caller's environment or
+        # ~/.beads/config.yaml says. Mirrors cmd/gc's doltlite env projection.
+        pin_proxied_shared_server_off
         trace_bd_argv "$@"
         "${BD_BIN:-bd}" "$@"
     )
@@ -4148,6 +4153,54 @@ run_bd_doltlite_init() {
         return 0
     fi
     run_bd_doltlite "$dir" init --quiet -p "$prefix" --database "$database" --skip-hooks --skip-agents || die "bd doltlite init failed for $dir"
+}
+
+# doltlite_store_path names the physical DoltLite store file bd creates for a
+# scope. It mirrors doltliteDBPath (internal/beads/doltlite_read_store.go): the
+# file is named after the metadata dolt_database, which write_doltlite_metadata
+# takes from the arm's database.
+doltlite_store_path() {
+    local dir="$1" database="$2"
+    printf '%s\n' "$dir/.beads/doltlite/$database.db"
+}
+
+# require_doltlite_store_observed refuses to label a scope doltlite unless bd
+# actually created the DoltLite store file. A bd without DoltLite support runs
+# an ordinary embedded-Dolt init and answers config get issue_prefix over that
+# store, so neither a successful init nor a ready prefix proves the label true.
+# The phrase "doltlite store not created" is stable: tests and the doltlite
+# init smoke test match on it.
+require_doltlite_store_observed() {
+    local dir="$1" database="$2" store bd_version
+    store=$(doltlite_store_path "$dir" "$database")
+    [ -f "$store" ] && return 0
+    bd_version=$(run_bd_doltlite "$dir" version 2>/dev/null | head -n 1) || true
+    die "doltlite store not created: $store is missing after bd init; refusing to label $dir/.beads/metadata.json as doltlite (bd version: ${bd_version:-unknown})"
+}
+
+# write_doltlite_metadata_verified writes the doltlite label and reopens the
+# scope through bd. When the reopen fails, only this function's own write is
+# undone: the prior metadata.json bytes come back, or the file goes away if it
+# was absent. bd's own writes stay untouched.
+write_doltlite_metadata_verified() {
+    local dir="$1" prefix="$2" database="$3"
+    local metadata_path="$dir/.beads/metadata.json" saved="" had_prior=false
+    if [ -f "$metadata_path" ]; then
+        had_prior=true
+        saved=$(mktemp "$metadata_path.saved.XXXXXX") || die "cannot save $metadata_path before the doltlite label write"
+        cp -p "$metadata_path" "$saved" || { rm -f "$saved"; die "cannot save $metadata_path before the doltlite label write"; }
+    fi
+    if write_doltlite_metadata "$dir" "$database" && doltlite_bd_schema_ready "$dir" "$prefix"; then
+        [ -z "$saved" ] || rm -f "$saved"
+        return 0
+    fi
+    if [ "$had_prior" = true ]; then
+        mv -f "$saved" "$metadata_path"
+    else
+        rm -f "$metadata_path"
+    fi
+    rm -f "$metadata_path.tmp.$$"
+    die "bd cannot reopen $dir after the doltlite label write; restored $metadata_path"
 }
 
 ensure_doltlite_bd_schema() {
@@ -4422,7 +4475,8 @@ op_init() {
             already_ready=true
         fi
         ensure_doltlite_bd_schema "$dir" "$prefix" "$database"
-        write_doltlite_metadata "$dir" "$database"
+        require_doltlite_store_observed "$dir" "$database"
+        write_doltlite_metadata_verified "$dir" "$prefix" "$database"
         if [ "$already_ready" = true ]; then
             run_doltlite_existing_db_maintenance "$dir"
         fi

@@ -119,17 +119,23 @@ func TestEnsureGCOwnedScopeSharedServerOffPinsManagedServerScopes(t *testing.T) 
 // store is gc's own Dolt. Everything else keeps the operator's resolution:
 // no env opt-out, and a config.yaml gc leaves byte-for-byte alone (the user's
 // `dolt.shared-server: true` in it survives).
+//
+// One exception is on the env side only: a DoltLite store has no server to
+// share, so gc's own runtime env pins shared-server mode off for it whoever
+// owns the scope (applyDoltliteScopeEnv, the same pair gc-beads-bd.sh pins for
+// its doltlite arm). Its config.yaml is still left alone.
 func TestUnownedServerScopesKeepBdSharedServerResolution(t *testing.T) {
 	cases := []struct {
-		name     string
-		metadata string
-		config   string
+		name          string
+		metadata      string
+		config        string
+		runtimePinned bool
 	}{
-		{"no gc endpoint marker", serverModeHQMetadata, "issue_prefix: hq\ndolt.mode: server\n"},
-		{"explicit external endpoint", serverModeHQMetadata, explicitServerRigConfig},
-		{"city canonical external endpoint", serverModeHQMetadata, "issue_prefix: hq\ngc.endpoint_origin: city_canonical\ndolt.host: db.example.test\ndolt.port: 3307\n"},
-		{"doltlite store under a managed marker", `{"database":"doltlite","backend":"doltlite","dolt_database":"hq"}`, managedServerCityConfig},
-		{"externally bound store under a managed marker", completeStorageBindingJSON, managedServerCityConfig},
+		{"no gc endpoint marker", serverModeHQMetadata, "issue_prefix: hq\ndolt.mode: server\n", false},
+		{"explicit external endpoint", serverModeHQMetadata, explicitServerRigConfig, false},
+		{"city canonical external endpoint", serverModeHQMetadata, "issue_prefix: hq\ngc.endpoint_origin: city_canonical\ndolt.host: db.example.test\ndolt.port: 3307\n", false},
+		{"doltlite store under a managed marker", `{"database":"doltlite","backend":"doltlite","dolt_database":"hq"}`, managedServerCityConfig, true},
+		{"externally bound store under a managed marker", completeStorageBindingJSON, managedServerCityConfig, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -139,7 +145,11 @@ func TestUnownedServerScopesKeepBdSharedServerResolution(t *testing.T) {
 			writeScopeConfigYAML(t, cityPath, body)
 
 			runtimeEnv, _ := bdRuntimeEnvWithErrorNoRecovery(cityPath)
-			assertNoSharedServerOptOut(t, "gc runtime env", runtimeEnv)
+			if tc.runtimePinned {
+				assertSharedServerPinnedOff(t, "gc runtime env", runtimeEnv)
+			} else {
+				assertNoSharedServerOptOut(t, "gc runtime env", runtimeEnv)
+			}
 			sessionEnv, _ := sessionBackendEnvWithError(cityPath, "", nil)
 			assertNoSharedServerOptOut(t, "agent session env", sessionEnv)
 
