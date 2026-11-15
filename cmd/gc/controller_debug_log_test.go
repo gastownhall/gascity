@@ -56,3 +56,34 @@ func TestPoolCountLogIsGatedOnGCDebugAndSorted(t *testing.T) {
 		t.Fatalf("GC_DEBUG pool counts = %q, want %q (sorted, zero counts omitted)", loud.String(), want)
 	}
 }
+
+// beads.Bead.Status collapses bd's deferred status into "open" (mapBdStatus), so
+// a bd-deferred assigned bead used to print as a bare status=open, which read
+// as the controller counting it as open named work (ga-0o3uby). The dump now
+// carries the deferral so the two are told apart in the log.
+func TestAssignedWorkDumpMarksDeferredBeads(t *testing.T) {
+	rows := []beads.Bead{
+		{ID: "hw-open", Status: "open", Assignee: "who"},
+		{ID: "hw-deferred", Status: "open", Assignee: "who", IndefinitelyDeferred: true},
+	}
+
+	t.Setenv("GC_DEBUG", "1")
+	var out bytes.Buffer
+	logAssignedWorkBeads(&out, rows, 1)
+
+	var openLine, deferredLine string
+	for _, line := range strings.Split(out.String(), "\n") {
+		switch {
+		case strings.Contains(line, "hw-open "):
+			openLine = line
+		case strings.Contains(line, "hw-deferred "):
+			deferredLine = line
+		}
+	}
+	if !strings.Contains(deferredLine, "status=open deferred=true") {
+		t.Errorf("deferred bead line = %q, want it to carry %q", deferredLine, "status=open deferred=true")
+	}
+	if !strings.Contains(openLine, "status=open deferred=false") {
+		t.Errorf("open bead line = %q, want it to carry %q", openLine, "status=open deferred=false")
+	}
+}

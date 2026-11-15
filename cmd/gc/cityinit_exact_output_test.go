@@ -10,6 +10,7 @@ import (
 )
 
 func TestCityInitExactOutput_DefaultScaffold(t *testing.T) {
+	admitInitSplitBD(t)
 	var stdout, stderr bytes.Buffer
 
 	code := doInit(fsys.NewFake(), "/bright-lights", defaultWizardConfig(), "", &stdout, &stderr, false)

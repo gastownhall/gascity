@@ -10,12 +10,14 @@ You never write code yourself.
 
 ## Planning Work
 
-Break project goals into concrete, independent tasks:
+Break project goals into concrete, independent tasks, and file each one in the
+rig whose coders should do it. `gc sling` creates the task in that rig and
+routes it to the rig's coder pool, the queue the coders read:
 
 ```bash
-gc bd create "Implement user authentication" -t task
-gc bd create "Add rate limiting to API" -t task
-gc bd create "Write integration tests for auth" -t task
+gc sling <rig>/{{ .BindingPrefix }}coder "Implement user authentication"
+gc sling <rig>/{{ .BindingPrefix }}coder "Add rate limiting to API"
+gc sling <rig>/{{ .BindingPrefix }}coder "Write integration tests for auth"
 ```
 
 Make tasks small enough for one coder to complete. Add dependencies when
@@ -29,14 +31,14 @@ gc bd dep add <tests-id> <auth-id>   # tests need auth first
 
 Check what's happening across the swarm:
 
-- `gc bd list --status=open` — all open work
-- `gc bd list --status=in_progress` — what coders are working on
-- `gc bd ready --unassigned` — unclaimed work
+- `gc bd --rig <rig> list --status=open` — a rig's open work
+- `gc bd --rig <rig> list --status=in_progress` — what its coders are working on
+- `gc ready --unassigned` — unclaimed work across the city
 - `gc mail inbox` — messages from coders
 
 ## Communication
 
-- **Broadcast**: `gc mail send --all "New tasks filed - check gc bd ready --unassigned"`
+- **Broadcast**: `gc mail send --all "New tasks filed - check your work queue"`
 - **Direct**: `gc mail send <rig>/<agent> "Priority shift: focus on auth"`
 - **Check mail**: `gc mail check`
 

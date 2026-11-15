@@ -252,11 +252,11 @@ func (s *seededState) IsQuarantined(string) bool      { return false }
 func (s *seededState) ClearCrashHistory(string)       {}
 func (s *seededState) CityBeadStore() beads.Store     { return s.cityStore }
 
-// ScopedStoreLike returns (nil, nil): the seeded stores are in-memory, so there
-// is no bd-CLI subprocess to scope. Callers keep reading through the existing
-// store directly, matching the contract for non-bd-backed stores.
-func (s *seededState) ScopedStoreLike(context.Context, beads.Store) (beads.Store, error) {
-	return nil, nil
+// ScopedStoreLike returns leg unchanged and false: the seeded stores are
+// in-memory, so there is no bd-CLI subprocess to scope. Callers keep reading
+// through leg directly, matching the contract for non-bd-backed stores.
+func (s *seededState) ScopedStoreLike(_ context.Context, leg storeref.TypedLeg) (storeref.TypedLeg, bool, error) {
+	return leg, false, nil
 }
 
 // classStores mints the seeded city's handles: a single-store topology, so
@@ -283,11 +283,6 @@ func (s *seededState) Stores() storeref.Stores { return s.classStores() }
 func (s *seededState) NudgeQueue() NudgeQueue {
 	return nudgequeue.StateFileQueue{CityPath: s.cityPath, Shadows: s.classStores().Nudges()}
 }
-
-// ClassBindingHasLegacyResidents answers true for everything: a seeded city
-// relocates no class, so it contributes no binding and nothing consults this —
-// and a state that censused nothing has cleared nothing.
-func (s *seededState) ClassBindingHasLegacyResidents(beads.Store) bool { return true }
 
 func (s *seededState) Orders() []orders.Order      { return nil }
 func (s *seededState) OrdersAll() []orders.Order   { return nil }

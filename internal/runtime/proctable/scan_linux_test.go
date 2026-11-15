@@ -958,25 +958,6 @@ func TestScanWithRootReportsStartIdentity(t *testing.T) {
 	}
 }
 
-// entryErrorPIDs returns the pid of every [EntryError] in err's tree, in
-// order. Tests assert on it instead of searching the message, which carries
-// the fixture path.
-func entryErrorPIDs(err error) []int {
-	var pids []int
-	switch e := err.(type) { //nolint:errorlint // walks the joined error tree by hand; errors.As finds only the first entry
-	case nil:
-	case *EntryError:
-		pids = append(pids, e.PID)
-	case interface{ Unwrap() []error }:
-		for _, child := range e.Unwrap() {
-			pids = append(pids, entryErrorPIDs(child)...)
-		}
-	case interface{ Unwrap() error }:
-		pids = entryErrorPIDs(e.Unwrap())
-	}
-	return pids
-}
-
 // TestOrphanCandidateScanReadsOnlyReparentedProcesses (mc-ygved): the
 // empty-id scan reports the roots reparented to init or the user subreaper
 // and reads no other process's environment: a non-candidate whose environ
