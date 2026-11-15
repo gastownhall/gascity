@@ -13610,19 +13610,28 @@ func TestGcBeadsBdProviderOwnedLifecycleUsesBdBoundary(t *testing.T) {
 	// Init is the one place GC states an idle policy. Both proxied targets own
 	// a local proxy plus its Dolt child, so both are initialized with bd's
 	// never-idle timeout; direct targets have no proxy to keep resident.
+	//
+	// It is also the one place the script states bd's init auto-start policy,
+	// and only for a direct external target: bd's init AutoStart ignores
+	// --external, so with BEADS_DOLT_AUTO_START unset a dead endpoint gets a
+	// repo-local Dolt started on the named port and the scope is bound to it.
+	// sanitizedBaseEnv leaves the variable unset, which is that precondition.
 	for _, tt := range []struct {
-		name      string
-		transport string
-		target    string
-		wantIdle  bool
-		wantArgs  []string
+		name          string
+		transport     string
+		target        string
+		env           []string
+		wantIdle      bool
+		wantArgs      []string
+		wantAutoStart string
 	}{
-		{name: "proxied local init pins the proxy resident", transport: "proxied", target: "local", wantIdle: true},
+		{name: "proxied local init pins the proxy resident", transport: "proxied", target: "local", wantIdle: true, wantAutoStart: "UNSET"},
 		{
 			name: "proxied external init pins its local proxy resident", transport: "proxied", target: "external", wantIdle: true,
-			wantArgs: []string{"--proxied-server-external-host upstream.example.invalid", "--proxied-server-external-port 3306"},
+			wantArgs:      []string{"--proxied-server-external-host upstream.example.invalid", "--proxied-server-external-port 3306"},
+			wantAutoStart: "UNSET",
 		},
-		{name: "direct local init has no proxy to pin", transport: "direct", target: "local"},
+		{name: "direct local init has no proxy to pin", transport: "direct", target: "local", wantAutoStart: "UNSET"},
 		{
 			// bd persists the endpoint it was given at init and nowhere else.
 			// Without --server-host/--server-port it took its own default,
@@ -13630,17 +13639,41 @@ func TestGcBeadsBdProviderOwnedLifecycleUsesBdBoundary(t *testing.T) {
 			// upstream at all — so the city said "external" and talked to a
 			// Dolt it had just started next to itself.
 			name: "direct external init hands bd the upstream to persist", transport: "direct", target: "external",
-			wantArgs: []string{"--external", "--server-host upstream.example.invalid", "--server-port 3306"},
+			wantArgs:      []string{"--external", "--server-host upstream.example.invalid", "--server-port 3306"},
+			wantAutoStart: "0",
+		},
+		{
+			// An assignment, never a default: a caller's 1 must not win.
+			name: "direct external init pins auto start off over a caller's 1", transport: "direct", target: "external",
+			env:           []string{"BEADS_DOLT_AUTO_START=1"},
+			wantArgs:      []string{"--external", "--server-host upstream.example.invalid", "--server-port 3306"},
+			wantAutoStart: "0",
+		},
+		{
+			name: "direct external socket init pins auto start off", transport: "direct", target: "external",
+			env:           []string{"BEADS_DOLT_SERVER_SOCKET=/nonexistent/dolt.sock"},
+			wantArgs:      []string{"--external", "--server-socket /nonexistent/dolt.sock"},
+			wantAutoStart: "0",
+		},
+		{
+			// bd must stay free to start the server it owns: a local init
+			// strips the variable rather than pinning it.
+			name: "direct local init leaves auto start to bd over a caller's 0", transport: "direct", target: "local",
+			env:           []string{"BEADS_DOLT_AUTO_START=0"},
+			wantAutoStart: "UNSET",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			logPath := filepath.Join(t.TempDir(), "bd.log")
+			autoStartPath := filepath.Join(t.TempDir(), "autostart.log")
 			bdPath := filepath.Join(t.TempDir(), "bd")
-			if err := os.WriteFile(bdPath, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> "+strconv.Quote(logPath)+"\n"), 0o755); err != nil {
+			bdScript := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + strconv.Quote(logPath) +
+				"\nprintf '%s\\n' \"${BEADS_DOLT_AUTO_START-UNSET}\" >> " + strconv.Quote(autoStartPath) + "\n"
+			if err := os.WriteFile(bdPath, []byte(bdScript), 0o755); err != nil {
 				t.Fatal(err)
 			}
 			cmd := exec.Command(scriptPath, "init", scopeDir, "prov")
-			cmd.Env = sanitizedBaseEnv(
+			cmd.Env = append(sanitizedBaseEnv(
 				"GC_CITY_PATH="+cityDir,
 				"BEADS_DIR="+filepath.Join(scopeDir, ".beads"),
 				"BD_BIN="+bdPath,
@@ -13652,9 +13685,16 @@ func TestGcBeadsBdProviderOwnedLifecycleUsesBdBoundary(t *testing.T) {
 				"GC_BEADS_PROXY_EXTERNAL_PORT=3306",
 				"GC_DOLT_HOST=upstream.example.invalid",
 				"GC_DOLT_PORT=3306",
-			)
+			), tt.env...)
 			if out, err := cmd.CombinedOutput(); err != nil {
 				t.Fatalf("gc-beads-bd init: %v\n%s", err, out)
+			}
+			autoStart, err := os.ReadFile(autoStartPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.TrimSpace(string(autoStart)); got != tt.wantAutoStart {
+				t.Fatalf("bd init saw BEADS_DOLT_AUTO_START = %q, want %q", got, tt.wantAutoStart)
 			}
 			data, err := os.ReadFile(logPath)
 			if err != nil {
