@@ -215,6 +215,7 @@ func TestHookContinuationNudgeEnqueueClosesOnlyOpenedHandle(t *testing.T) {
 		name        string
 		sessionName string
 		transport   string
+		dispatcher  string
 		// assignee returns the claim assignee given the session bead ID.
 		assignee    func(id string) string
 		wantSession string
@@ -248,13 +249,29 @@ func TestHookContinuationNudgeEnqueueClosesOnlyOpenedHandle(t *testing.T) {
 			assignee:    func(string) string { return alias },
 			wantPoller:  false,
 		},
+		{
+			name:        "supervisor queues for alias without poller",
+			sessionName: runtimeName,
+			dispatcher:  "supervisor",
+			assignee:    func(string) string { return alias },
+		},
+		{
+			name:        "supervisor queues for session bead ID without poller",
+			sessionName: runtimeName,
+			dispatcher:  "supervisor",
+			assignee:    func(id string) string { return id },
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			clearGCEnv(t)
 			t.Setenv("GC_BEADS", "file")
 			cityDir := t.TempDir()
-			if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n"), 0o644); err != nil {
+			cityTOML := "[workspace]\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n"
+			if tc.dispatcher != "" {
+				cityTOML += "\n[daemon]\nnudge_dispatcher = \"" + tc.dispatcher + "\"\n"
+			}
+			if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o644); err != nil {
 				t.Fatalf("WriteFile(city.toml): %v", err)
 			}
 			t.Setenv("GC_CITY", cityDir)
@@ -318,7 +335,7 @@ func TestHookContinuationNudgeEnqueueClosesOnlyOpenedHandle(t *testing.T) {
 					t.Fatalf("startNudgePoller sessions = %v, want [%s]", pollerSessions, tc.wantSession)
 				}
 			} else if len(pollerSessions) != 0 {
-				t.Fatalf("startNudgePoller sessions = %v, want none for acp transport", pollerSessions)
+				t.Fatalf("startNudgePoller sessions = %v, want none for transport=%q dispatcher=%q", pollerSessions, tc.transport, tc.dispatcher)
 			}
 			if opens != 1 {
 				t.Fatalf("opens = %d, want 1", opens)
