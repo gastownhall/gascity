@@ -84,19 +84,29 @@ const (
 // absent table.
 var managedDoltMissingObjectPattern = regexp.MustCompile(`(table|database) '[^']*' (doesn't|does not) exist`)
 
+// managedDoltServerEOFPattern matches the server's own "Error 1105 (HY000): EOF",
+// which dolt answers when the chunk read behind a statement hits a truncated
+// file. The error number is part of the match: an EOF a client reports for
+// itself ("EOF", "unexpected EOF") is a dropped connection, which says nothing
+// about the data. The SQLState is optional because drivers differ on printing it.
+var managedDoltServerEOFPattern = regexp.MustCompile(`error 1105( \([a-z0-9]+\))?: eof\b`)
+
 // managedDoltDataReadErrorMaxBytes bounds the error text a probe report carries.
 const managedDoltDataReadErrorMaxBytes = 512
 
 // classifyManagedDoltDataReadText sorts a read error: a table or database that
 // is not there is healthy (the table is created lazily and may be dropped), a
-// chunk-store signature (including a missing root hash) is data loss, and
-// anything else is inconclusive.
+// chunk-store signature (a missing root hash, or the "checksum error" and
+// server-side EOF that damaged table data answers with while the server stays
+// up) is data loss, and anything else is inconclusive.
 func classifyManagedDoltDataReadText(text string) managedDoltDataReadErrorKind {
 	msg := strings.ToLower(text)
 	switch {
 	case strings.Contains(msg, "empty chunk returned"),
 		strings.Contains(msg, "required but not found"),
-		strings.Contains(msg, "root hash doesn't exist"):
+		strings.Contains(msg, "root hash doesn't exist"),
+		strings.Contains(msg, "checksum error"),
+		managedDoltServerEOFPattern.MatchString(msg):
 		return managedDoltDataReadErrorChunk
 	case strings.Contains(msg, "table not found"),
 		strings.Contains(msg, "database not found"),
@@ -182,7 +192,11 @@ func managedDoltLeafReadStatementsFor(db string, tables []string) []string {
 func managedDoltDataReadProbeWith(ops managedDoltDataReadOps) managedDoltDataReadResult {
 	refs, err := ops.listTables()
 	if err != nil {
-		return managedDoltDataReadResult{Warning: "discovering dolt-ignored tables: " + managedDoltDataReadErrorText(err)}
+		text := "discovering dolt-ignored tables: " + managedDoltDataReadErrorText(err)
+		if classifyManagedDoltDataReadText(text) == managedDoltDataReadErrorChunk {
+			return managedDoltDataReadResult{Err: text}
+		}
+		return managedDoltDataReadResult{Warning: text}
 	}
 	var dbs []string
 	byDB := map[string][]string{}
