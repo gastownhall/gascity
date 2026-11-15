@@ -83,6 +83,12 @@ func TestNudgeSessionAuthFailureAndFallbackVerdicts(t *testing.T) {
 			header:  []string{"❯ if the CLI says please run /login, tell the operator", ""},
 			want:    ErrNudgeSubmitDeliveredUnobserved,
 		},
+		{
+			name:    "multi-paragraph echo quoting please run /login is not a banner",
+			message: "check the deploy\n\nif the CLI says please run /login, tell the operator",
+			header:  []string{"❯ check the deploy", "", "  if the CLI says please run /login, tell the operator", ""},
+			want:    ErrNudgeSubmitDeliveredUnobserved,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {

@@ -6326,6 +6326,7 @@ func authBannerRegion(lines []string, message string) []string {
 
 	sent := strings.Join(strings.Fields(message), " ")
 	echo := -1
+	consumed := ""
 	if sent != "" {
 	search:
 		for i := len(above) - 1; i >= 0; i-- {
@@ -6337,6 +6338,7 @@ func authBannerRegion(lines []string, message string) []string {
 				rest = strings.Join(strings.Fields(rest), " ")
 				if rest != "" && strings.HasPrefix(sent, rest) {
 					echo = i
+					consumed = rest
 					break search
 				}
 			}
@@ -6348,13 +6350,25 @@ func authBannerRegion(lines []string, message string) []string {
 		}
 		return above
 	}
-	// Skip the echo's wrapped continuation rows: each is a piece of message.
+	// Skip the rest of the echo: its wrapped rows and, for a multi-paragraph
+	// message, the blank rows between paragraphs. Rows are consumed in order
+	// against the collapsed message, so the skip ends exactly where the echo
+	// does and blank rows after the full echo stay in the region.
 	start := echo + 1
-	for start < len(above) {
+	for start < len(above) && consumed != sent {
 		row := strings.Join(strings.Fields(above[start]), " ")
-		if row == "" || !strings.Contains(sent, row) {
+		if row == "" {
+			if len(consumed) >= len(sent) {
+				break
+			}
+			start++
+			continue
+		}
+		candidate := consumed + " " + row
+		if !strings.HasPrefix(sent, candidate) {
 			break
 		}
+		consumed = candidate
 		start++
 	}
 	return above[start:]
