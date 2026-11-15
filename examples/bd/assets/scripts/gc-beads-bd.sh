@@ -2418,10 +2418,24 @@ city_health_data_dir() {
 # (managed servers only), the database is in the catalog, and its default
 # branch head resolves. Prints the failure and returns 1 when any fails.
 check_city_database() {
-    local db="$1" data_dir="$2" host output head
+    local db="$1" data_dir="$2" host output head db_lower entry entry_name found
     if [ -n "$data_dir" ] && [ ! -d "$data_dir/$db/.dolt" ]; then
-        echo "database \"$db\" absent from data dir $data_dir"
-        return 1
+        # Dolt matches database names case-insensitively, so a repository
+        # directory that differs only in case counts.
+        found=false
+        db_lower=$(printf '%s' "$db" | tr '[:upper:]' '[:lower:]')
+        for entry in "$data_dir"/*/; do
+            [ -d "$entry" ] || continue
+            entry_name=$(basename "$entry")
+            if [ "$(printf '%s' "$entry_name" | tr '[:upper:]' '[:lower:]')" = "$db_lower" ] && [ -d "$data_dir/$entry_name/.dolt" ]; then
+                found=true
+                break
+            fi
+        done
+        if [ "$found" != "true" ]; then
+            echo "database \"$db\" absent from data dir $data_dir"
+            return 1
+        fi
     fi
     host=$(connect_host)
     if ! output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
@@ -4930,7 +4944,7 @@ fi
 
 # op_recover stops the dolt server, restarts it, and verifies health.
 op_recover() {
-    local read_only_status
+    local read_only_status recover_db recover_data_dir recover_db_failure
 
     if is_remote; then
         die "recovery not supported for remote dolt servers"
@@ -4966,6 +4980,20 @@ op_recover() {
             echo "detected read-only dolt server — restarting" >&2
         fi
         DOLT_PORT="$GC_RECOVER_PORT"
+        # The helper's recovery health check proves only the server. A
+        # server that answers SQL while the city database is still missing
+        # or unreadable is not recovered.
+        recover_db=$(city_health_database)
+        if [ -n "$recover_db" ]; then
+            recover_data_dir=$(city_health_data_dir)
+            if load_health_check_from_gc "$recover_db" "$recover_data_dir"; then
+                if [ "$GC_HEALTH_DATABASE_READY" != "true" ]; then
+                    die "dolt city database still unavailable after recovery: ${GC_HEALTH_DATABASE_ERROR:-health check did not report database \"$recover_db\"}"
+                fi
+            elif ! recover_db_failure=$(check_city_database "$recover_db" "$recover_data_dir"); then
+                die "dolt city database still unavailable after recovery: $recover_db_failure"
+            fi
+        fi
         return 0
     elif [ "$GC_RECOVER_MANAGED_USED" = "true" ]; then
         if [ "$GC_RECOVER_DIAGNOSED_READ_ONLY" = "true" ]; then

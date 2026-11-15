@@ -12,6 +12,24 @@ import (
 // the combined output, which ends in "status=<op_health exit code>".
 func gcBeadsBdHealthHarness(t *testing.T, metadata, config, gcBin, dataDir string, env ...string) string {
 	t.Helper()
+	return gcBeadsBdOpHarness(t, "op_health", "", metadata, config, gcBin, dataDir, env...)
+}
+
+// gcBeadsBdRecoverStubs make op_recover take the gc helper recovery path and
+// report that recovery succeeded, so the test sees only what op_recover does
+// after the helper returns.
+const gcBeadsBdRecoverStubs = `is_remote() { return 1; }
+recovery_should_skip_due_to_enospc() { return 1; }
+recovery_should_skip_due_to_fsync_stall() { return 1; }
+load_recover_managed_from_gc() { GC_RECOVER_PORT=3311; GC_RECOVER_DIAGNOSED_READ_ONLY=false; return 0; }
+`
+
+// gcBeadsBdOpHarness runs op from the bundled gc-beads-bd prelude with the
+// shared health stubs plus stubs, for a city whose .beads/metadata.json and
+// config.yaml are given. It returns the combined output, which ends in
+// "status=<op exit code>".
+func gcBeadsBdOpHarness(t *testing.T, op, stubs, metadata, config, gcBin, dataDir string, env ...string) string {
+	t.Helper()
 	cityPath := t.TempDir()
 	materializeBuiltinPacksForTest(t, cityPath)
 	scriptData, err := os.ReadFile(bundledGcBeadsBdScriptForTest(t))
@@ -48,8 +66,9 @@ tcp_check() { return 0; }
 do_query_probe() { return 0; }
 check_read_only() { return 1; }
 get_connection_count() { return 1; }
+` + stubs + `
 set +e
-(op_health)
+(` + op + `)
 status=$?
 set -e
 printf 'status=%s\n' "$status"
@@ -57,7 +76,7 @@ printf 'status=%s\n' "$status"
 	if err := os.WriteFile(harness, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	return string(runShHarness(t, harness, "op_health", append(sanitizedBaseEnv(env...), "GC_BIN="+gcBin)))
+	return string(runShHarness(t, harness, op, append(sanitizedBaseEnv(env...), "GC_BIN="+gcBin)))
 }
 
 // writeFakeHealthCheckGC writes a gc helper whose `dolt-state health-check`
@@ -208,5 +227,53 @@ func TestGcBeadsBdHealthFallbackFailsClosedWhenRepositoryMissingOnDisk(t *testin
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	if !strings.Contains(out, "status=0") {
 		t.Fatalf("op_health output = %s, want success once hq is on disk with a resolvable head", out)
+	}
+}
+
+func TestGcBeadsBdRecoverFailsWhenCityDatabaseStillUnavailable(t *testing.T) {
+	gcBin, argvFile := writeFakeHealthCheckGC(t,
+		"query_ready\ttrue\\nread_only\tunknown\\nconnection_count\t5\\ndatabase\thq\\ndatabase_ready\tfalse\\n"+
+			"database_error\tdatabase \"hq\" default branch head unresolvable: Error 1049 (HY000): database not found: hq\\n")
+	dataDir := t.TempDir()
+
+	out := gcBeadsBdOpHarness(t, "op_recover", gcBeadsBdRecoverStubs, cityMetadataHQ,
+		"issue_prefix: hq\ngc.endpoint_origin: managed_city\n", gcBin, dataDir)
+	if !strings.Contains(out, "status=1") {
+		t.Fatalf("op_recover output = %s, want failure while hq is still unavailable after recovery", out)
+	}
+	if !strings.Contains(out, "still unavailable after recovery") || !strings.Contains(out, "database not found: hq") {
+		t.Fatalf("op_recover output = %s, want the post-recovery database failure named", out)
+	}
+	argv, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatalf("ReadFile(argv): %v", err)
+	}
+	if !strings.Contains(string(argv), "--database hq --data-dir "+dataDir) {
+		t.Fatalf("health-check argv = %q, want --database hq --data-dir %s", argv, dataDir)
+	}
+}
+
+func TestGcBeadsBdRecoverSucceedsWhenCityDatabaseReady(t *testing.T) {
+	gcBin, _ := writeFakeHealthCheckGC(t,
+		"query_ready\ttrue\\nread_only\tfalse\\nconnection_count\t5\\ndatabase\thq\\ndatabase_ready\ttrue\\n")
+
+	out := gcBeadsBdOpHarness(t, "op_recover", gcBeadsBdRecoverStubs, cityMetadataHQ,
+		"issue_prefix: hq\ngc.endpoint_origin: managed_city\n", gcBin, t.TempDir())
+	if !strings.Contains(out, "status=0") {
+		t.Fatalf("op_recover output = %s, want success once hq is ready", out)
+	}
+}
+
+func TestGcBeadsBdHealthFallbackAcceptsRepositoryDifferingOnlyInCase(t *testing.T) {
+	binDir := writeFallbackHeadDolt(t, "")
+	dataDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dataDir, "HQ", ".dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	out := gcBeadsBdHealthHarness(t, cityMetadataHQ, "issue_prefix: hq\ngc.endpoint_origin: managed_city\n", "", dataDir,
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if !strings.Contains(out, "status=0") {
+		t.Fatalf("op_health output = %s, want success for data dir entry HQ", out)
 	}
 }

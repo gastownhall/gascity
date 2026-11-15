@@ -82,16 +82,15 @@ func TestManagedDoltHealthCheckForProvesCityDatabase(t *testing.T) {
 	bt := "`"
 	cityProbe := bt + "hq" + bt + "." + bt + managedDoltProbeTable + bt
 	tests := []struct {
-		name          string
-		head          string
-		write         string
-		read          string
-		wantReady     bool
-		wantReadOnly  string
-		wantErrParts  []string
-		wantWrite     bool
-		wantReadBack  bool
-		wantNoCatalog bool
+		name         string
+		head         string
+		write        string
+		read         string
+		wantReady    bool
+		wantReadOnly string
+		wantErrParts []string
+		wantWrite    bool
+		wantReadBack bool
 	}{
 		{
 			name: "healthy", head: "ok", write: "ok", read: "ok",
