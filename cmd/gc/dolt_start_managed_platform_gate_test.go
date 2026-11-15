@@ -10,9 +10,9 @@ import (
 // TestStartManagedDoltProcessRefusedWithoutNativeIdentity pins that the three
 // managed-Dolt lifecycle verbs agree about whether a platform can run one.
 //
-// Stop and inspect have always been fenced by the native-identity gate. Start
-// was not, so where the gate fails a start could still succeed and leave a
-// server holding the data directory's exclusive lock and a runtime-state record
+// Stop and inspect are fenced by the native-identity gate; start must be too.
+// Otherwise, where the gate fails, a start could succeed and leave a server
+// holding the data directory's exclusive lock and a runtime-state record
 // claiming it is running — while the only two operations that could stop it or
 // even report on it refused to touch it.
 //

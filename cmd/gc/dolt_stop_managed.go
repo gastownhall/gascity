@@ -101,9 +101,13 @@ func stopManagedDoltProcessWithOptions(cityPath, port string, clearPublishedStat
 	}
 	report := managedDoltStopReport{}
 	targetPID := 0
-	var identityErr error
+	// identityErr accumulates every undecided ownership check; lastIdentityErr
+	// holds only the most recent call's, so a single check site can tell
+	// "not ours" from "cannot tell".
+	var identityErr, lastIdentityErr error
 	strictTarget := func(pid int) bool {
-		controllable, err := managedDoltProcessControllable(pid, layout)
+		controllable, err := managedDoltProcessControllableFn(pid, layout)
+		lastIdentityErr = err
 		if err != nil {
 			identityErr = errors.Join(identityErr, err)
 			return false
@@ -187,6 +191,11 @@ func stopManagedDoltProcessWithOptions(cityPath, port string, clearPublishedStat
 			}
 			waitForManagedDoltProcessExit(targetPID, time.Second, managedStopPIDAlive)
 		} else {
+			// An ownership read that failed is not evidence the PID was
+			// reused: the process is still alive and may still be ours.
+			if lastIdentityErr != nil {
+				return report, fmt.Errorf("cannot confirm whether pid %d is still ours after SIGTERM; refusing to clear managed state: %w", targetPID, lastIdentityErr)
+			}
 			managedDoltCleanupLogf("skipping SIGKILL of pid %d: no longer an owned managed dolt process (PID reused)", targetPID)
 		}
 	}
@@ -196,6 +205,9 @@ func stopManagedDoltProcessWithOptions(cityPath, port string, clearPublishedStat
 	// still guarantees the dir is released before we report success.
 	if strictTarget(targetPID) {
 		return report, fmt.Errorf("pid %d still alive after forced stop", targetPID)
+	}
+	if lastIdentityErr != nil {
+		return report, fmt.Errorf("cannot confirm whether pid %d is still ours after SIGTERM; refusing to clear managed state: %w", targetPID, lastIdentityErr)
 	}
 	// The server process is gone, but descendants (e.g. dolt gc workers) can
 	// still hold the store lock while finishing a write. Block until release
@@ -257,6 +269,10 @@ func managedDoltStopFields(report managedDoltStopReport) []string {
 		"forced\t" + strconv.FormatBool(report.Forced),
 	}
 }
+
+// managedDoltProcessControllableFn is the ownership check the stop path uses;
+// tests replace it to make ownership undecidable at a chosen point.
+var managedDoltProcessControllableFn = managedDoltProcessControllable
 
 // managedDoltProcessControllable reports whether pid is a live process this
 // city may signal.
