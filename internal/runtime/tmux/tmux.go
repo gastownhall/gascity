@@ -3890,8 +3890,10 @@ func (t *Tmux) nudgeSession(
 			// delivered-but-unobserved below, or as a lost submit that a
 			// resend might fix. Neither is true: no retry clears it. Look for
 			// the banner first, on this already-failed path only, so the
-			// confirmed hot path pays nothing.
-			if lines, capErr := t.CapturePaneLines(target, promptObservationLines); capErr == nil && paneContainsAuthFailure(lines) {
+			// confirmed hot path pays nothing. Only the reply region of this
+			// submit is searched (authBannerRegion): an older banner, the
+			// composer, and the nudge's own echoed text are not evidence.
+			if lines, capErr := t.CapturePaneLines(target, promptObservationLines); capErr == nil && paneContainsAuthFailure(authBannerRegion(lines, message)) {
 				return fmt.Errorf("%w: session %q", ErrNudgeSubmitAuthFailed, session)
 			}
 			// The window may have expired inside a large paste's ingest with
@@ -6284,6 +6286,78 @@ func paneContainsAuthFailure(lines []string) bool {
 		}
 	}
 	return false
+}
+
+// authBannerTailLines bounds authBannerRegion when no echo of the sent message
+// is visible above the composer.
+const authBannerTailLines = 15
+
+// authBannerRegion returns the captured lines that can only hold the
+// provider's reply to message: the transcript between the last echo of
+// message and the live composer. The composer box (located as
+// paneShowsDrainedComposer locates it) is dropped, so a staged draft is never
+// read as a banner, and so are the echo and its wrapped rows, so a nudge that
+// quotes a banner does not match itself. Without a visible echo, only the
+// authBannerTailLines rows above the composer are kept, so a banner from an
+// earlier turn far up the scrollback does not count.
+func authBannerRegion(lines []string, message string) []string {
+	cut := len(lines)
+	live := -1
+	for i, line := range lines {
+		for _, marker := range stagedDraftMarkers {
+			if matchesPromptPrefix(line, marker.promptPrefix) {
+				live = i
+			}
+		}
+	}
+	if live >= 0 {
+		cut = live
+		frameStart := live
+		for frameStart > 0 && !isDialogRule(lines[frameStart-1]) {
+			frameStart--
+		}
+		if frameStart > 0 {
+			if _, ok := readClaudeInput(lines[frameStart-1:]); ok {
+				cut = frameStart - 1
+			}
+		}
+	}
+	above := lines[:cut]
+
+	sent := strings.Join(strings.Fields(message), " ")
+	echo := -1
+	if sent != "" {
+	search:
+		for i := len(above) - 1; i >= 0; i-- {
+			for _, marker := range stagedDraftMarkers {
+				rest, ok := promptLineRest(above[i], marker.promptPrefix)
+				if !ok {
+					continue
+				}
+				rest = strings.Join(strings.Fields(rest), " ")
+				if rest != "" && strings.HasPrefix(sent, rest) {
+					echo = i
+					break search
+				}
+			}
+		}
+	}
+	if echo < 0 {
+		if len(above) > authBannerTailLines {
+			return above[len(above)-authBannerTailLines:]
+		}
+		return above
+	}
+	// Skip the echo's wrapped continuation rows: each is a piece of message.
+	start := echo + 1
+	for start < len(above) {
+		row := strings.Join(strings.Fields(above[start]), " ")
+		if row == "" || !strings.Contains(sent, row) {
+			break
+		}
+		start++
+	}
+	return above[start:]
 }
 
 // paneShowsDrainedComposer reports whether the last visible composer is bare.

@@ -52,6 +52,8 @@ func TestNudgeSessionAuthFailureAndFallbackVerdicts(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		banner     string
+		header     []string // pane transcript; defaults to just banner
+		message    string   // defaults to "auth-submit-probe"
 		keepDraft  bool
 		captureErr bool
 		confirm    bool
@@ -64,6 +66,23 @@ func TestNudgeSessionAuthFailureAndFallbackVerdicts(t *testing.T) {
 		{name: "failed auth capture keeps drained verdict", banner: banner, captureErr: true, want: ErrNudgeSubmitDeliveredUnobserved},
 		{name: "failed auth capture keeps staged verdict", banner: banner, keepDraft: true, captureErr: true, want: ErrNudgeSubmitUnconfirmed},
 		{name: "confirmed turn ignores historical auth banner", banner: banner, confirm: true},
+		{
+			name:   "unconfirmed fresh submit ignores banner above its echo",
+			header: []string{banner, "", "✻ Crunched for 0s · done 8:46 AM", "", "❯ auth-submit-probe", ""},
+			want:   ErrNudgeSubmitDeliveredUnobserved,
+		},
+		{
+			name:      "staged draft quoting authentication_error is not a banner",
+			message:   "investigate the authentication_error in the deploy log",
+			keepDraft: true,
+			want:      ErrNudgeSubmitUnconfirmed,
+		},
+		{
+			name:    "drained echo quoting please run /login is not a banner",
+			message: "if the CLI says please run /login, tell the operator",
+			header:  []string{"❯ if the CLI says please run /login, tell the operator", ""},
+			want:    ErrNudgeSubmitDeliveredUnobserved,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -71,13 +90,20 @@ func TestNudgeSessionAuthFailureAndFallbackVerdicts(t *testing.T) {
 				pane.sessionName = t.Name()
 				t.Cleanup(func() { sessionNudgeLocks.Delete(pane.sessionName) })
 				pane.header = []string{tc.banner}
+				if tc.header != nil {
+					pane.header = tc.header
+				}
+				message := tc.message
+				if message == "" {
+					message = "auth-submit-probe"
+				}
 				if tc.captureErr {
 					pane.captureErr = errors.New("capture-pane: transient read failure")
 				}
 				tm := newFakeClaudeTmux(pane.fakeClaudePane)
 				tm.exec = pane
 
-				err := tm.NudgeSession(pane.sessionName, "auth-submit-probe")
+				err := tm.NudgeSession(pane.sessionName, message)
 
 				if !errors.Is(err, tc.want) {
 					t.Fatalf("NudgeSession = %v, want %v", err, tc.want)

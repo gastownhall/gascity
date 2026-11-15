@@ -63,3 +63,23 @@ func TestProductionCanClassifyAuthDeadPane(t *testing.T) {
 		t.Fatal("paneContainsAuthFailure = false on a real captured auth-dead pane, want true")
 	}
 }
+
+// TestPaneContainsAuthFailureMatchesEverySignatureInAnyCase pins each banner
+// signature, matched case-insensitively.
+func TestPaneContainsAuthFailureMatchesEverySignatureInAnyCase(t *testing.T) {
+	for _, line := range []string{
+		"● LOGIN Expired",
+		"● Error: Please Run /LOGIN to continue",
+		"API Error: 401 OAuth Token Has EXPIRED",
+		`{"type":"error","error":{"type":"Authentication_Error"}}`,
+	} {
+		t.Run(line, func(t *testing.T) {
+			if !paneContainsAuthFailure([]string{"", line, ""}) {
+				t.Fatalf("paneContainsAuthFailure(%q) = false, want true", line)
+			}
+		})
+	}
+	if paneContainsAuthFailure([]string{"● Done", "❯ "}) {
+		t.Fatal("paneContainsAuthFailure matched a pane with no auth banner")
+	}
+}
