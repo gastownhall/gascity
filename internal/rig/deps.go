@@ -115,6 +115,12 @@ type Deps struct {
 	StoreContract func(cityPath string) bool
 	// DoltSkip reports GC_DOLT=skip (cmd/gc gcDoltSkip). nil = false.
 	DoltSkip func() bool
+	// VerifyRigPath re-checks, after step 10 has created the rig directory, that
+	// the path still resolves where the earlier pre-write check promised (API:
+	// assertRigPathWithinCity). nil = skip. It is detect-only: a returned error
+	// aborts Provision before any later step, and nothing is deleted, renamed or
+	// modified. It does not close a swap-and-restore race.
+	VerifyRigPath func(rigPath string) error
 	// PostProvision runs caller-specific side effects after the core writes
 	// succeed (CLI: hooks/formulas/.env/reload; API: the mutateAndPoke config
 	// commit + reconciler Poke). nil = skip. Its error does NOT trigger rollback
