@@ -8729,3 +8729,34 @@ func TestOrdersConfig_EffectiveMaxDispatchesPerTick(t *testing.T) {
 		t.Fatalf("DefaultMaxOrderDispatchesPerTick = %d, want 4", DefaultMaxOrderDispatchesPerTick)
 	}
 }
+
+func TestParseWorkQueryUnfilteredOptOut(t *testing.T) {
+	cfg, err := Parse([]byte(`
+[workspace]
+name = "test"
+
+[[agent]]
+name = "wide"
+work_query_unfiltered = true
+
+[[agent]]
+name = "narrow"
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	got := map[string]bool{}
+	for _, a := range cfg.Agents {
+		f := reflect.ValueOf(a).FieldByName("WorkQueryUnfiltered")
+		if !f.IsValid() {
+			t.Fatal("Agent has no WorkQueryUnfiltered field")
+		}
+		got[a.Name] = f.Bool()
+	}
+	if !got["wide"] {
+		t.Error("agent wide: WorkQueryUnfiltered = false, want true from work_query_unfiltered = true")
+	}
+	if got["narrow"] {
+		t.Error("agent narrow: WorkQueryUnfiltered = true, want false when the key is omitted")
+	}
+}
