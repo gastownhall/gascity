@@ -116,12 +116,20 @@ func TestInfraScopedManagedDoltPIDIdentityUnderRealSystemd(t *testing.T) {
 	// before they adopt or signal a recorded PID) accepts the post-exec
 	// process as this layout's managed server.
 	layout := managedDoltRuntimeLayout{DataDir: filepath.Join(dir, "data"), ConfigFile: configFile}
-	if !managedDoltProcessOwnedWithStateDir(started.PID, layout, layout.DataDir) {
+	owned, err := managedDoltProcessOwnedWithStateDir(started.PID, layout, layout.DataDir)
+	if err != nil {
+		t.Fatalf("ownership check for pid %d: %v", started.PID, err)
+	}
+	if !owned {
 		args, _ := processArgs(started.PID)
 		t.Fatalf("ownership check rejected the scoped spawn (pid %d, args %q)", started.PID, args)
 	}
 	other := managedDoltRuntimeLayout{DataDir: layout.DataDir, ConfigFile: filepath.Join(dir, "other-config.yaml")}
-	if managedDoltProcessOwnedWithStateDir(started.PID, other, other.DataDir) {
+	otherOwned, err := managedDoltProcessOwnedWithStateDir(started.PID, other, other.DataDir)
+	if err != nil {
+		t.Fatalf("ownership check (other config) for pid %d: %v", started.PID, err)
+	}
+	if otherOwned {
 		t.Fatalf("ownership check accepted the scoped spawn for a different config file")
 	}
 

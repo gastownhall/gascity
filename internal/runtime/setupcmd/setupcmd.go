@@ -55,7 +55,8 @@ type Options struct {
 	Clock execgrace.Clock
 }
 
-// Run executes command with `sh -c` under opts' budget. The command's
+// Run executes command through [runtime.ShellCommandContext] under opts' budget.
+// A command refused by [runtime.ShellCommandUnavailable] starts nothing. The command's
 // environment is the process environment ([execenv.Environ]) overlaid with env
 // (last wins); its working directory is env["GC_DIR"] when that exists, else
 // opts.FallbackDir.
@@ -75,6 +76,9 @@ func Run(ctx context.Context, command string, env map[string]string, opts Option
 	if opts.Timeout <= 0 {
 		return fmt.Errorf("setup command timeout must be positive, got %v", opts.Timeout)
 	}
+	if reason := runtime.ShellCommandUnavailable(command); reason != "" {
+		return fmt.Errorf("setup command refused: %s", reason)
+	}
 	// Read the base env before arming the deadline: execenv.Environ waits out
 	// an in-flight process-env projection, and that wait is not the command's.
 	baseEnv := execenv.Environ()
@@ -90,7 +94,10 @@ func Run(ctx context.Context, command string, env map[string]string, opts Option
 		runCtx, cancel = context.WithTimeout(ctx, opts.Timeout)
 		defer cancel()
 	}
-	c := exec.CommandContext(runCtx, "sh", "-c", command)
+	c, err := runtime.ShellCommandContext(runCtx, command)
+	if err != nil {
+		return err
+	}
 	c.Dir = workDir(env, opts.FallbackDir)
 	c.Env = baseEnv
 	for k, v := range env {

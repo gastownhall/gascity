@@ -92,13 +92,20 @@ func TestOutputTail(t *testing.T) {
 // in env["GC_DIR"] when it exists, so relative paths in a setup command
 // resolve against the session directory.
 func TestRunUsesGCDIRAsWorkingDirectory(t *testing.T) {
-	dir := t.TempDir()
-	fallback := t.TempDir()
-	if err := Run(context.Background(), "pwd > out.txt", map[string]string{"GC_DIR": dir},
-		Options{Timeout: 5 * time.Second, FallbackDir: fallback}); err != nil {
-		t.Fatalf("Run: %v", err)
+	for _, name := range []string{"plain", "rig dir with spaces"} {
+		t.Run(name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), name)
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			fallback := t.TempDir()
+			if err := Run(context.Background(), "pwd > out.txt", map[string]string{"GC_DIR": dir},
+				Options{Timeout: 5 * time.Second, FallbackDir: fallback}); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			assertRecordedDir(t, filepath.Join(dir, "out.txt"), dir)
+		})
 	}
-	assertRecordedDir(t, filepath.Join(dir, "out.txt"), dir)
 }
 
 // TestRunFallsBackWhenGCDIRMissing pins the not-yet-created-workDir fallback:

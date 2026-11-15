@@ -30,7 +30,7 @@ func TestFormatBeaconAt_WithPrimeInstruction(t *testing.T) {
 	if !strings.HasPrefix(got, "[bright-lights] worker \u2022 2026-02-26T15:30:00") {
 		t.Errorf("beacon should start with identification, got %q", got)
 	}
-	if !strings.Contains(got, "gc prime`") {
+	if !strings.Contains(got, GCCommandName+" prime`") {
 		t.Errorf("beacon should include gc prime instruction, got %q", got)
 	}
 }
