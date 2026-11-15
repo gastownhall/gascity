@@ -62,8 +62,10 @@ var nudgeQueueRawAccessAllowed = map[string]map[string]int{
 	"nudge_queue_seam.go": {"fileNudgeQueue{}": 1, "nudgeFrontDoor": 1},
 	// The shadow front door's definition and its two leaf helpers.
 	"nudge_beads.go": {"nudgequeue.NewStore": 1, "nudgeFrontDoor": 2},
-	// The legacy shadow sweep reads shadows, not the queue (DES-NQ D11).
-	"nudge_mail_sweep.go": {"nudgequeue.NewStore": 2},
+	// The legacy shadow sweep reads shadows, not the queue (DES-NQ D11): one
+	// store per phase of the sweep, one of the count, and one per extra rig
+	// store in sweepScopeNudgeShadows.
+	"nudge_mail_sweep.go": {"nudgequeue.NewStore": 3},
 	// The mail-sweep watchdog's snapshot in runNudgeMailSweepWatchdog;
 	// city_runtime.go is owned by the session-reconciler work, which has not
 	// yet taken the one-line change to openNudgeQueue (V2-14). Exactly one.
