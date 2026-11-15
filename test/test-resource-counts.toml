@@ -2964,7 +2964,7 @@ calls = 14
 [[count]]
 path = "internal/worker/adapters/zcode/adapter_test.go"
 resource = "subprocess"
-calls = 2
+calls = 3
 
 [[count]]
 path = "internal/worker/fake/spec_test.go"
