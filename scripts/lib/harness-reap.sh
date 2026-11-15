@@ -19,9 +19,27 @@
 # Portability: macOS has no setsid(1), so process-group isolation is done with
 # bash job control (`set -m`), which is POSIX and works under bash 3.2 — the
 # oldest bash the shard runner is tested against (see findBash32 in
-# scripts/test_go_test_shard_test.go).
+# scripts/test_go_test_shard_test.go). The watchdog's process identity reads
+# /proc/PID/stat on Linux and `ps -o pgid=,lstart=` on macOS and the BSDs; a
+# host with neither runs unguarded by the watchdog and says so.
 #
-# Self-test: scripts/harness_reap_test.go (run by go test ./scripts).
+# Watchdog identity rule (ga-plyjh4): the watchdog never signals a process
+# group by number alone. A group number can be reused by a stranger once every
+# member of the original group has exited, and kill -0 cannot tell the two
+# apart. Before each signal the watchdog proves that a process it recorded as a
+# member of the run, identified by pid and start token, is still alive in that
+# group. When it cannot, it prints one refusal line and sends nothing:
+#
+#   harness watchdog: LABEL: not signalling process group N: REASON
+#
+# where REASON is one of: no identity supplied, identity unreadable, leader
+# gone, leader identity changed (pid reused), leader left the group, no
+# verified member survives. At arm time an unreadable identity prints
+# "harness watchdog disarmed: cannot read the run's process identity (REASON)"
+# instead, with the extra reason "unsupported platform".
+#
+# Self-tests: scripts/harness_reap_test.go and
+# scripts/harness_watchdog_identity_test.go (run by bazel test //scripts:scripts_test).
 
 # PID of the supervised run's process-group leader, published so a caller's
 # signal trap can tear the group down. Empty when no run is in flight.
@@ -178,20 +196,335 @@ gc_harness_terminate_supervised() {
   gc_harness_terminate_group "${gc_harness_supervised_pgid:-}" "$drain_ticks"
 }
 
+# Process identity: how the watchdog proves a process-group number still names
+# the group it was started for (ga-plyjh4, ga-66qxub).
+#
+# A process-group number can be handed to an unrelated group once every member
+# of the original has exited, so "a group with this number exists" (kill -0)
+# proves nothing about whose group it is. A process is identified instead by
+# (pid, start token): a pid reused by a stranger carries a different token. The
+# kernel never reallocates a number while any process still has it as its pid
+# or group, so a verified live member of the original group proves the number
+# is still the original group's.
+#
+# The token is field 22 of /proc/PID/stat (start time in ticks) on Linux, and
+# `ps -o lstart=` on macOS and the BSDs. Linux does not use ps lstart: its
+# resolution is one second, too coarse to tell a reused pid apart.
+
+# gc_harness_identity_source is set by gc_harness_select_identity_source to
+# "procfs", "ps" or "none". The detection result is cached across calls made in
+# one shell.
+gc_harness_identity_source=""
+gc_harness_identity_source_detected=""
+
+# gc_harness_select_identity_source sets gc_harness_identity_source:
+# procfs when /proc/self/stat yields the 22 fields, ps when the BSD ps form
+# prints a line for this shell, none otherwise. GC_TEST_HARNESS_IDENTITY_SOURCE
+# (procfs|ps|none) forces a branch for tests and is inert when unset.
+gc_harness_select_identity_source() {
+  case "${GC_TEST_HARNESS_IDENTITY_SOURCE:-}" in
+    procfs|ps|none)
+      gc_harness_identity_source="${GC_TEST_HARNESS_IDENTITY_SOURCE}"
+      return 0
+      ;;
+  esac
+  if [[ -z "$gc_harness_identity_source_detected" ]]; then
+    local IFS=$' \t\n' line="" rest="" detected="none"
+    if { IFS= read -r line; } 2>/dev/null < /proc/self/stat; then
+      rest="${line##*) }"
+      if [[ "$rest" != "$line" ]]; then
+        # shellcheck disable=SC2086 # word splitting is the point: fields of a stat or ps line
+        set -- $rest
+        if (( $# >= 20 )); then
+          detected=procfs
+        fi
+      fi
+    fi
+    if [[ "$detected" == none ]] && [[ -n "$(LC_ALL=C ps -o pgid=,lstart= -p "$$" 2>/dev/null)" ]]; then
+      detected="ps"
+    fi
+    gc_harness_identity_source_detected="$detected"
+  fi
+  gc_harness_identity_source="$gc_harness_identity_source_detected"
+}
+
+# gc_harness_read_identity reads the process group and start token of pid into
+# gc_harness_identity_pgrp and gc_harness_identity_token, in one snapshot, and
+# fails when the process is absent or the platform is unsupported. It spawns
+# nothing on the procfs path.
+gc_harness_identity_pgrp=""
+gc_harness_identity_token=""
+gc_harness_read_identity() {
+  local IFS=$' \t\n' pid="${1:-}" line="" rest="" result=""
+  gc_harness_identity_pgrp=""
+  gc_harness_identity_token=""
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  gc_harness_select_identity_source
+  case "$gc_harness_identity_source" in
+    procfs)
+      { IFS= read -r line; } 2>/dev/null < "/proc/$pid/stat" || return 1
+      # The command name (field 2) may hold spaces and parentheses, so strip
+      # through the last ") " rather than splitting from the left. What is
+      # left starts at field 3: the state, so PGRP is $3 and the start time
+      # (field 22) is ${20}.
+      rest="${line##*) }"
+      [[ "$rest" != "$line" ]] || return 1
+      # shellcheck disable=SC2086 # word splitting is the point: fields of a stat or ps line
+      set -- $rest
+      (( $# >= 20 )) || return 1
+      [[ "$3" =~ ^[0-9]+$ && "${20}" =~ ^[0-9]+$ ]] || return 1
+      gc_harness_identity_pgrp="$3"
+      gc_harness_identity_token="${20}"
+      ;;
+    ps)
+      result="$(LC_ALL=C ps -o pgid=,lstart= -p "$pid" 2>/dev/null)" || return 1
+      # shellcheck disable=SC2086 # word splitting is the point: fields of a stat or ps line
+      set -- $result
+      (( $# >= 2 )) || return 1
+      [[ "$1" =~ ^[0-9]+$ ]] || return 1
+      gc_harness_identity_pgrp="$1"
+      gc_harness_identity_token="${*:2}"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# gc_harness_proc_identity prints "PGRP TOKEN" for pid and returns 0, or
+# returns non-zero when the process is absent or its identity unreadable.
+gc_harness_proc_identity() {
+  gc_harness_read_identity "${1:-}" || return 1
+  printf '%s %s\n' "$gc_harness_identity_pgrp" "$gc_harness_identity_token"
+}
+
+# gc_harness_group_members prints "PID TOKEN" for every process currently in
+# process group pgid. One ps(1) pass lists the host; on Linux each member's
+# token then comes from /proc, on BSD from the same ps call.
+gc_harness_group_members() {
+  local IFS=$' \t\n' pgid="${1:-}" listing="" pid="" pg="" rest=""
+  [[ "$pgid" =~ ^[0-9]+$ ]] || return 1
+  gc_harness_select_identity_source
+  case "$gc_harness_identity_source" in
+    procfs)
+      listing="$(ps -A -o pid=,pgid= 2>/dev/null)" || return 1
+      while read -r pid pg rest; do
+        [[ "$pg" == "$pgid" ]] || continue
+        gc_harness_read_identity "$pid" || continue
+        [[ "$gc_harness_identity_pgrp" == "$pgid" ]] || continue
+        printf '%s %s\n' "$pid" "$gc_harness_identity_token"
+      done <<< "$listing"
+      ;;
+    ps)
+      listing="$(LC_ALL=C ps -A -o pid=,pgid=,lstart= 2>/dev/null)" || return 1
+      while read -r pid pg rest; do
+        [[ "$pg" == "$pgid" ]] || continue
+        # shellcheck disable=SC2086 # word splitting is the point: fields of a stat or ps line
+        set -- $rest
+        (( $# > 0 )) || continue
+        printf '%s %s\n' "$pid" "$*"
+      done <<< "$listing"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# gc_harness_watchdog_refuse prints the one-line refusal for a group the
+# watchdog will not signal. The wording is contract: tests and operators match
+# on it.
+gc_harness_watchdog_refuse() {
+  printf 'harness watchdog: %s: not signalling process group %s: %s\n' "${1}" "${2}" "${3}" >&2
+}
+
+# gc_harness_watchdog_refresh renews the watchdog's lease on its process group.
+# It is a helper of gc_harness_watchdog and works on that function's locals
+# (proven, refresh_state, refresh_reason) through bash's dynamic scoping.
+#
+# proven is a set of "PID TOKEN" lines: processes known to belong to the run,
+# the leader alone at the start. A refresh:
+#   1. finds the group absent (kill -0), or
+#   2. enumerates the group's current members (candidates), then
+#   3. verifies each proven member: alive, same token, still in the group.
+# If at least one verifies, the number is pinned, because a verified live
+# member keeps the kernel from reusing it, and proven becomes all candidates
+# (plus the verified members). Candidates are never trusted on their own:
+# otherwise a stranger group that took the number would be adopted. If none
+# verifies while the group exists, the group is unproven.
+#
+# refresh_state is set to absent, pinned or unproven; on unproven,
+# refresh_reason names why. When the leader is the only member ever recorded
+# the reason is the leader's own failure mode, otherwise "no verified member
+# survives".
+gc_harness_watchdog_refresh() {
+  local IFS=$' \t\n' pgid="${1}" candidates="" verified="" pid="" token="" ident=""
+  local why="" leader_reason="" count=0 first_pid="" found=0 cpid=""
+  refresh_state=""
+  refresh_reason=""
+  if ! gc_harness_group_alive "$pgid"; then
+    refresh_state=absent
+    return 0
+  fi
+  candidates="$(gc_harness_group_members "$pgid")" || candidates=""
+  while read -r pid token; do
+    [[ -n "$pid" ]] || continue
+    count=$(( count + 1 ))
+    first_pid="$pid"
+    if ident="$(gc_harness_proc_identity "$pid")"; then
+      if [[ "${ident#* }" != "$token" ]]; then
+        why="leader identity changed (pid reused)"
+      elif [[ "${ident%% *}" != "$pgid" ]]; then
+        why="leader left the group"
+      else
+        verified="${verified}${pid} ${token}"$'\n'
+        continue
+      fi
+    elif kill -0 "$pid" 2>/dev/null; then
+      why="identity unreadable"
+    else
+      why="leader gone"
+    fi
+    if [[ "$pid" == "$pgid" ]]; then
+      leader_reason="$why"
+    fi
+  done <<< "$proven"
+  if [[ -z "$verified" ]]; then
+    refresh_state=unproven
+    if (( count == 1 )) && [[ "$first_pid" == "$pgid" && -n "$leader_reason" ]]; then
+      refresh_reason="$leader_reason"
+    else
+      refresh_reason="no verified member survives"
+    fi
+    return 0
+  fi
+  # Lease renewed: the verified members pin the number, so everything in the
+  # group right now belongs to the run.
+  proven="$candidates"
+  [[ -z "$proven" ]] || proven="${proven}"$'\n'
+  while read -r pid token; do
+    [[ -n "$pid" ]] || continue
+    found=0
+    while read -r cpid _; do
+      if [[ "$cpid" == "$pid" ]]; then
+        found=1
+      fi
+    done <<< "$candidates"
+    if (( found == 0 )); then
+      proven="${proven}${pid} ${token}"$'\n'
+    fi
+  done <<< "$verified"
+  refresh_state=pinned
+}
+
 # gc_harness_watchdog kills process group pgid once fire_after seconds have
-# passed. SIGQUIT goes first on purpose: the Go runtime answers it by dumping
-# every goroutine's stack, which names the wedged test in the shard log. That
-# is the only artifact that answers "which test wedges" for a hang that
-# defeats -test.timeout, and kit-k72d had to be diagnosed without it.
+# passed, but only while it can prove the group is still the one it was
+# started for (see "Process identity" above). SIGQUIT goes first on purpose:
+# the Go runtime answers it by dumping every goroutine's stack, which names the
+# wedged test in the shard log. That is the only artifact that answers "which
+# test wedges" for a hang that defeats -test.timeout, and kit-k72d had to be
+# diagnosed without it.
+#
+#   gc_harness_watchdog PGID FIRE_AFTER QUIT_GRACE LABEL LEADER_IDENTITY [TICK]
+#
+# LEADER_IDENTITY is the "PGRP TOKEN" the group leader had when the watchdog
+# was armed (gc_harness_proc_identity). An empty or absent identity refuses.
+# TICK (default 30 seconds) is how often the lease is renewed while waiting;
+# a group that has vanished releases the watchdog at the next tick instead of
+# the end of the budget. The schedule is otherwise unchanged: QUIT at
+# FIRE_AFTER, KILL QUIT_GRACE later, each preceded by a fresh proof and sent
+# with nothing in between. On a failed proof the watchdog prints one refusal
+# line and stops without signalling. It returns 0 on every path.
 gc_harness_watchdog() {
-  local pgid="${1}" fire_after="${2}" quit_grace="${3}" label="${4}"
-  sleep "$fire_after"
-  gc_harness_group_alive "$pgid" || return 0
+  local pgid="${1:-}" fire_after="${2:-0}" quit_grace="${3:-0}" label="${4:-}"
+  local leader_identity="${5:-}" tick="${6:-30}"
+  local proven="" refresh_state="" refresh_reason="" slept=0 chunk=0
+  [[ "$tick" =~ ^[1-9][0-9]*$ ]] || tick=30
+  if [[ -z "$leader_identity" || "$leader_identity" != *" "* \
+    || "${leader_identity%% *}" != "$pgid" || -z "${leader_identity#* }" ]]; then
+    gc_harness_watchdog_refuse "$label" "$pgid" "no identity supplied"
+    return 0
+  fi
+  proven="${pgid} ${leader_identity#* }"$'\n'
+
+  while :; do
+    chunk=$(( fire_after - slept ))
+    if (( chunk > tick )); then
+      chunk="$tick"
+    fi
+    if (( chunk > 0 )); then
+      sleep "$chunk"
+    fi
+    slept=$(( slept + chunk ))
+    gc_harness_watchdog_refresh "$pgid"
+    case "$refresh_state" in
+      absent)
+        return 0
+        ;;
+      unproven)
+        gc_harness_watchdog_refuse "$label" "$pgid" "$refresh_reason"
+        return 0
+        ;;
+    esac
+    if (( slept >= fire_after )); then
+      break
+    fi
+  done
+
   printf 'harness watchdog: %s exceeded its %ss budget and defeated go'\''s own -timeout; dumping goroutine stacks (SIGQUIT) then killing the process group\n' \
     "$label" "$fire_after" >&2
   gc_harness_signal_group "$pgid" QUIT
   sleep "$quit_grace"
+  gc_harness_watchdog_refresh "$pgid"
+  case "$refresh_state" in
+    absent)
+      return 0
+      ;;
+    unproven)
+      gc_harness_watchdog_refuse "$label" "$pgid" "$refresh_reason"
+      return 0
+      ;;
+  esac
   gc_harness_signal_group "$pgid" KILL
+  return 0
+}
+
+# gc_harness_arm_identity reads the identity of the just-launched run leader
+# pid for the watchdog. On success it sets gc_harness_arm_identity_value to
+# "PGRP TOKEN" and returns 0. Otherwise it returns 1 with
+# gc_harness_arm_reason set: "gone" when the leader has already exited (nothing
+# to guard, and no notice is due), or the disarm reason: "unsupported
+# platform", "identity unreadable" or "leader left the group". The run leader
+# must be in its own group (pgrp equal to pid); it is read up to three times,
+# 20ms apart, only while that is not yet true.
+gc_harness_arm_identity_value=""
+gc_harness_arm_reason=""
+gc_harness_arm_identity() {
+  local pid="${1:-}" attempt=0
+  gc_harness_arm_identity_value=""
+  gc_harness_arm_reason=""
+  gc_harness_select_identity_source
+  if [[ "$gc_harness_identity_source" == none ]]; then
+    gc_harness_arm_reason="unsupported platform"
+    return 1
+  fi
+  while :; do
+    if gc_harness_read_identity "$pid"; then
+      if [[ "$gc_harness_identity_pgrp" == "$pid" ]]; then
+        gc_harness_arm_identity_value="${gc_harness_identity_pgrp} ${gc_harness_identity_token}"
+        return 0
+      fi
+      gc_harness_arm_reason="leader left the group"
+    elif kill -0 "$pid" 2>/dev/null; then
+      gc_harness_arm_reason="identity unreadable"
+    else
+      gc_harness_arm_reason="gone"
+      return 1
+    fi
+    attempt=$(( attempt + 1 ))
+    (( attempt < 3 )) || return 1
+    sleep 0.02
+  done
 }
 
 # gc_harness_run_supervised runs a command in its own process group under a
@@ -247,15 +580,25 @@ gc_harness_run_supervised() {
   # caller's stdout pipe, which keeps the caller's read blocked for the full
   # remaining budget. That is the very failure this file exists to prevent,
   # reintroduced one level up.
+  #
+  # It is armed with the leader's identity, read now while the leader is
+  # certainly the process this run launched. A watchdog that cannot read it is
+  # not armed at all (the sweep stays the backstop), and says so, rather than
+  # signalling a group number it cannot vouch for.
   local watchdog_pgid=""
   if [[ -n "$deadline" ]]; then
-    set -m
-    gc_harness_launch_begin watchdog
-    gc_harness_watchdog "$job_pgid" "$deadline" "$quit_grace" "$label" &
-    gc_harness_launch_publish
-    watchdog_pgid="$gc_harness_watchdog_pgid"
-    if (( monitor_was_on == 0 )); then
-      set +m
+    if gc_harness_arm_identity "$job_pgid"; then
+      set -m
+      gc_harness_launch_begin watchdog
+      gc_harness_watchdog "$job_pgid" "$deadline" "$quit_grace" "$label" "$gc_harness_arm_identity_value" &
+      gc_harness_launch_publish
+      watchdog_pgid="$gc_harness_watchdog_pgid"
+      if (( monitor_was_on == 0 )); then
+        set +m
+      fi
+    elif [[ "$gc_harness_arm_reason" != gone ]]; then
+      printf 'harness watchdog disarmed: cannot read the run'\''s process identity (%s)\n' \
+        "$gc_harness_arm_reason" >&2
     fi
   fi
 
