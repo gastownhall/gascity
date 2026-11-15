@@ -253,7 +253,7 @@ func planFor(i Intent, t Topology) (ResolvedPlan, error) {
 		return planCensus(in, t)
 	case Class:
 		return planClass(in, t)
-	case Molecule, OrderRuns, Workflow, Convoy, CloseOwner:
+	case Molecule, OrderRuns, Workflow, Convoy, CloseOwner, OrderHistory:
 		// These decide relocation by handle identity and read their legs from
 		// the minted handles, which a Topology does not carry (OD-T7-5).
 		return ResolvedPlan{}, fmt.Errorf("storeref: %T is planned over a city's Stores (Stores.Plan), not over a Topology", i)
