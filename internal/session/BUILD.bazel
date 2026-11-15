@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "session",
     srcs = [
+        "abandoned_create.go",
         "actor.go",
         "address_directory.go",
         "alias.go",
@@ -120,6 +121,7 @@ go_library(
 go_test(
     name = "session_test",
     srcs = [
+        "abandoned_create_test.go",
         "acp_permission_test.go",
         "actor_fence_test.go",
         "actor_test.go",

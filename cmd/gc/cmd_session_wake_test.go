@@ -343,6 +343,7 @@ func TestDoSessionWake_StuckInFlightAgeGate(t *testing.T) {
 		state     string
 		claim     bool
 		startedAt string
+		lastWoke  string
 		wantCode  int
 	}{
 		{name: "fresh creating wakes normally", state: "creating", startedAt: freshStart, wantCode: 0},
@@ -354,6 +355,13 @@ func TestDoSessionWake_StuckInFlightAgeGate(t *testing.T) {
 		// never-started lease (pendingCreateNeverStartedTimeout, 10m), with
 		// no last_woke_at. The sweep skips this bead; the CLI must agree.
 		{name: "leased never-started create wakes normally", state: "creating", claim: true, startedAt: leasedStart, wantCode: 0},
+		// Row C: the provider start was attempted (last_woke_at set, claim
+		// held), then the session wedged. A nil-clock lease read treated every
+		// such row as leased forever; with the explicit-now rule it is
+		// abandoned once the attempt is older than staleCreatingStateTimeout.
+		{name: "started-then-wedged create rejects wake", state: "creating", claim: true, startedAt: staleStart, lastWoke: staleStart, wantCode: 1},
+		{name: "started-then-wedged start-pending rejects wake", state: "start-pending", claim: true, startedAt: staleStart, lastWoke: staleStart, wantCode: 1},
+		{name: "in-flight provider start still wakes normally", state: "creating", claim: true, startedAt: staleStart, lastWoke: freshStart, wantCode: 0},
 	}
 
 	for _, tt := range tests {
@@ -363,7 +371,7 @@ func TestDoSessionWake_StuckInFlightAgeGate(t *testing.T) {
 				"template":                  "worker",
 				"state":                     tt.state,
 				"pending_create_started_at": tt.startedAt,
-				"last_woke_at":              "",
+				"last_woke_at":              tt.lastWoke,
 			}
 			if tt.claim {
 				metadata["pending_create_claim"] = "true"

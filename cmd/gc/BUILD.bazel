@@ -1006,6 +1006,7 @@ go_test(
     name = "gc_test",
     size = "large",
     srcs = [
+        "abandoned_create_parity_test.go",
         "acp_route_seed_test.go",
         "actor_helpers_test.go",
         "adoption_barrier_test.go",
