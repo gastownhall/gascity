@@ -44,6 +44,7 @@ go_test(
     name = "convergence_test",
     srcs = [
         "acl_test.go",
+        "artifact_fifo_unix_test.go",
         "artifact_test.go",
         "authorship_test.go",
         "capture_test.go",

@@ -26,6 +26,9 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/execenv"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // Version identifies the grant exec contract. It is echoed to the grant command
@@ -139,16 +142,25 @@ func validateTokenShape(token string) error {
 	return nil
 }
 
-// runGrantCommand runs command via "sh -c" with the request binding JSON in
-// GC_GRANT_INFO (env only — never argv, so the request is not visible in `ps`).
-// Inherited GC_*_INFO variables are stripped so a nested exec cannot read a
-// stale request. cmd.Output captures stderr into the returned error on failure.
+// runGrantCommand runs command through the platform's command interpreter
+// (runtime.ShellCommandContext: "sh -c" on Unix, PowerShell on Windows) with
+// the request binding JSON in GC_GRANT_INFO (env only — never argv, so the
+// request is not visible in `ps`). A command the platform refuses
+// (runtime.ShellCommandUnavailable) starts nothing. Inherited GC_*_INFO
+// variables are stripped so a nested exec cannot read a stale request.
+// cmd.Output captures stderr into the returned error on failure.
 func runGrantCommand(ctx context.Context, command string, info GrantInfo) (string, error) {
+	if reason := runtime.ShellCommandUnavailable(command); reason != "" {
+		return "", fmt.Errorf("clientgrant: grant command refused: %s", reason)
+	}
 	payload, err := json.Marshal(info)
 	if err != nil {
 		return "", fmt.Errorf("clientgrant: encoding grant info: %w", err)
 	}
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd, err := runtime.ShellCommandContext(ctx, command)
+	if err != nil {
+		return "", fmt.Errorf("clientgrant: running grant command: %w", err)
+	}
 	cmd.Env = append(strippedEnv(), GrantInfoEnv+"="+string(payload))
 	out, err := cmd.Output()
 	if err != nil {
@@ -165,7 +177,7 @@ func strippedEnv() []string {
 	out := make([]string, 0, len(src))
 	for _, kv := range src {
 		key, _, _ := strings.Cut(kv, "=")
-		if strings.HasPrefix(key, "GC_") && strings.HasSuffix(key, "_INFO") {
+		if execenv.IsExecRequestKey(key) {
 			continue
 		}
 		out = append(out, kv)

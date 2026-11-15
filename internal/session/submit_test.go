@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
+	"github.com/gastownhall/gascity/internal/nudgepoller"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
@@ -2663,86 +2664,69 @@ func TestCrashedAgentStopAndKillFencesStillRefuse(t *testing.T) {
 	}
 }
 
-func TestIsGoTestExecutableForBazelRunfilesSymlink(t *testing.T) {
-	dir := t.TempDir()
-	realBin := filepath.Join(dir, "bin", "session_test_", "session_test")
-	spyBin := filepath.Join(dir, "spy", "session_test")
-	// A real gc started by a bazel integration test runs with TEST_SRCDIR set
-	// and is exec'd through its runfiles symlink; only the _test name gate
-	// keeps it from being treated as a test binary.
-	gcBin := filepath.Join(dir, "bin", "gc_", "gc")
-	for _, p := range []string{realBin, spyBin, gcBin} {
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			t.Fatalf("MkdirAll: %v", err)
-		}
-		if err := os.WriteFile(p, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-			t.Fatalf("WriteFile: %v", err)
-		}
+// TestIsGoTestExecutableRecognizesRunfilesSymlink pins the spawn gate for a
+// test binary reached through a symlink, the way bazel execs a test through its
+// runfiles path under local execution. The gate compares by file identity, so a
+// symlink to the running test binary must still be refused.
+func TestIsGoTestExecutableRecognizesRunfilesSymlink(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
 	}
-	// Bazel's test-setup.sh execs the test via its runfiles path, which is a
-	// symlink to the built binary under local (non-RBE) execution, while
-	// os.Executable reports the resolved target.
-	runfilesLink := filepath.Join(dir, "runfiles", "_main", "internal", "session", "session_test")
-	if err := os.MkdirAll(filepath.Dir(runfilesLink), 0o755); err != nil {
+	link := filepath.Join(t.TempDir(), "runfiles", "_main", "internal", "session", "session_test")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
 	}
-	if err := os.Symlink(realBin, runfilesLink); err != nil {
-		t.Fatalf("Symlink: %v", err)
+	if err := os.Symlink(exe, link); err != nil {
+		t.Skipf("cannot symlink the running test binary: %v", err)
 	}
-	gcRunfilesLink := filepath.Join(dir, "runfiles", "_main", "cmd", "gc", "gc_", "gc")
-	if err := os.MkdirAll(filepath.Dir(gcRunfilesLink), 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
-	}
-	if err := os.Symlink(gcBin, gcRunfilesLink); err != nil {
-		t.Fatalf("Symlink: %v", err)
-	}
-	resolvedReal, err := filepath.EvalSymlinks(realBin)
-	if err != nil {
-		t.Fatalf("EvalSymlinks: %v", err)
-	}
-	resolvedGC, err := filepath.EvalSymlinks(gcBin)
-	if err != nil {
-		t.Fatalf("EvalSymlinks: %v", err)
-	}
-	const srcdir = "/runfiles"
-
-	tests := []struct {
-		name       string
-		path       string
-		argv0      string
-		testSrcdir string
-		want       bool
-	}{
-		{"go test binary", filepath.Join(dir, "session.test"), "/elsewhere/x", "", true},
-		{"bazel direct exec", realBin, realBin, srcdir, true},
-		{"bazel runfiles symlink exec", resolvedReal, runfilesLink, srcdir, true},
-		{"symlink exec outside bazel", resolvedReal, runfilesLink, "", false},
-		{"renamed spy binary", spyBin, runfilesLink, srcdir, false},
-		{"renamed spy binary direct argv0", spyBin, realBin, srcdir, false},
-		{"unresolvable argv0", resolvedReal, filepath.Join(dir, "missing", "session_test"), srcdir, false},
-		{"production gc binary", "/usr/local/bin/gc", "/usr/local/bin/gc", "", false},
-		{"gc under bazel runfiles symlink exec", resolvedGC, gcRunfilesLink, srcdir, false},
-		{"gc under bazel direct exec", resolvedGC, resolvedGC, srcdir, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := isGoTestExecutableFor(tt.path, tt.argv0, tt.testSrcdir); got != tt.want {
-				t.Fatalf("isGoTestExecutableFor(%q, %q, %q) = %v, want %v", tt.path, tt.argv0, tt.testSrcdir, got, tt.want)
-			}
-		})
+	if !nudgepoller.IsGoTestExecutable(link) {
+		t.Fatalf("nudgepoller.IsGoTestExecutable(%q) = false for a symlink to the running test binary %q", link, exe)
 	}
 }
 
-// TestIsGoTestExecutableRecognizesRunningTestBinary pins the argv0 and
-// TEST_SRCDIR wiring in isGoTestExecutable, which the table above bypasses by
-// calling isGoTestExecutableFor. Plain go test names the binary *.test, which
-// matches without that wiring, so the wiring is only exercised under bazel.
+// TestIsGoTestExecutableRecognizesRunningTestBinary pins the spawn gate
+// ensureSessionSubmitPoller uses against the running test binary itself.
 func TestIsGoTestExecutableRecognizesRunningTestBinary(t *testing.T) {
 	exe, err := os.Executable()
 	if err != nil {
 		t.Fatalf("os.Executable: %v", err)
 	}
-	if !isGoTestExecutable(exe) {
-		t.Fatalf("isGoTestExecutable(%q) = false (argv0 %q, TEST_SRCDIR %q), want true for the running test binary", exe, os.Args[0], os.Getenv("TEST_SRCDIR"))
+	if !nudgepoller.IsGoTestExecutable(exe) {
+		t.Fatalf("nudgepoller.IsGoTestExecutable(%q) = false (argv0 %q, TEST_SRCDIR %q), want true for the running test binary", exe, os.Args[0], os.Getenv("TEST_SRCDIR"))
+	}
+}
+
+// TestEnsureSessionSubmitPollerRefusesOnUnidentifiablePID pins the singleton
+// gate's refusal: a recorded PID that is live but whose identity cannot be read
+// must not be replaced, or two pollers would deliver the same nudges.
+func TestEnsureSessionSubmitPollerRefusesOnUnidentifiablePID(t *testing.T) {
+	cityPath := t.TempDir()
+	const sessionName = "s-test"
+	const agentName = "session-id"
+	pidPath := sessionSubmitPollerPIDPath(cityPath, sessionName, agentName)
+	if err := os.MkdirAll(filepath.Dir(pidPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	original := fmt.Sprintf("%d\n", os.Getpid())
+	if err := os.WriteFile(pidPath, []byte(original), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	orig := submitPollerIdentity
+	t.Cleanup(func() { submitPollerIdentity = orig })
+	submitPollerIdentity = func(int, func([]string) bool) (bool, error) {
+		return false, errors.New("unreadable")
+	}
+
+	err := ensureSessionSubmitPoller(cityPath, agentName, sessionName)
+	if err == nil || !strings.Contains(err.Error(), "checking for an existing nudge poller") {
+		t.Fatalf("ensureSessionSubmitPoller error = %v, want refusal on unidentifiable PID", err)
+	}
+	data, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatalf("ReadFile(pidfile): %v", err)
+	}
+	if string(data) != original {
+		t.Fatalf("pidfile = %q, want original %q left in place", data, original)
 	}
 }

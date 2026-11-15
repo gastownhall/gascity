@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -136,6 +137,10 @@ func execCommandRunner(parent context.Context, env map[string]string, withoutAmb
 		}
 
 		cmd := exec.CommandContext(ctx, execName, args...)
+		if err := execenv.CheckBatchFileArgs(cmd); err != nil {
+			trace("refused", err)
+			return nil, fmt.Errorf("running %s: %w", name, err)
+		}
 		cmd.WaitDelay = 2 * time.Second
 		prepareCommandForTimeout(cmd)
 		cmd.Dir = dir

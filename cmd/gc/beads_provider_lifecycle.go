@@ -2772,7 +2772,12 @@ func managedDoltRuntimeProcessOwned(state doltRuntimeState, layout managedDoltRu
 	if holderPID > 0 && holderPID != state.PID {
 		return false
 	}
-	owned, deleted := inspectManagedDoltOwnership(state.PID, layout)
+	owned, deleted, err := inspectManagedDoltOwnership(state.PID, layout)
+	if err != nil {
+		// Ownership undecided: refuse to adopt the process as ours. This gate
+		// only grants trust, so declining is the safe direction.
+		return false
+	}
 	if deleted {
 		return false
 	}
