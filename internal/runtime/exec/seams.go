@@ -15,9 +15,9 @@ import (
 // Exec is the first REAL decomposition (subprocess was degenerate): Place.Exec
 // is the live RPP `exec` op, and the Attachment's driving verbs are real — they
 // reuse the provider's existing public methods, which already drive an in-box
-// tmux session via the carrier over the exec op and fall back to the dedicated
-// wire ops when the pack does not declare proc.exec. So the WHERE is the pack
-// (Runtime), the connection is Place.Exec, and the HOW is tmux (Transport).
+// tmux session over exec by default, falling back only on ErrExecUnsupported.
+// An explicit carrier.ops declaration instead selects the dedicated ops.
+// The WHERE is the pack, the connection is Place.Exec, and the HOW is selected.
 //
 // Like subprocess, the pack's `start` op welds provision+launch (it launches the
 // agent in tmux session "main"), so Transport.Launch is a no-op and
@@ -178,7 +178,12 @@ func (t *execTransport) Attach(_ context.Context, _ runtime.Place, name string) 
 	return t.p.Attach(name)
 }
 
-func (t *execTransport) Name() string { return "tmux" }
+func (t *execTransport) Name() string {
+	if t.p.opsCarrierSelected() {
+		return "ops"
+	}
+	return "tmux"
+}
 
 func (t *execTransport) Capabilities() runtime.TransportCapabilities {
 	return runtime.TransportCapabilities{
@@ -207,13 +212,13 @@ type execAttachment struct {
 var _ runtime.Attachment = (*execAttachment)(nil)
 
 // The five driving verbs reuse the provider's existing public methods, which
-// drive the in-box tmux session via the carrier over the exec op and fall back
-// to the dedicated wire ops when the pack does not declare proc.exec.
+// use the selected carrier. The undeclared default tries tmux over exec and
+// falls back to dedicated ops only on ErrExecUnsupported.
 func (a *execAttachment) Peek(_ context.Context, lines int) (string, error) {
 	return a.p.Peek(a.name, lines)
 }
 
-// Nudge delivers content as input to the in-box tmux session.
+// Nudge delivers content as input through the selected carrier.
 func (a *execAttachment) Nudge(_ context.Context, content []runtime.ContentBlock) error {
 	return a.p.Nudge(a.name, content)
 }

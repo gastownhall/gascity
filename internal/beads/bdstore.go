@@ -700,10 +700,15 @@ func (s *BdStore) SetPurgeRunner(fn PurgeRunnerFunc) {
 // Purge runs "bd purge" to remove closed ephemeral beads from the given
 // beads directory. Uses a 60-second timeout as a safety circuit breaker.
 // The beadsDir is the .beads/ directory path; bd runs from its parent.
+// A real purge passes --force: without it bd purge only previews and exits
+// non-zero when anything matches. A dry run passes --dry-run and never
+// --force.
 func (s *BdStore) Purge(beadsDir string, dryRun bool) (PurgeResult, error) {
 	args := []string{"purge", "--json"}
 	if dryRun {
 		args = append(args, "--dry-run")
+	} else {
+		args = append(args, "--force")
 	}
 
 	dir := filepath.Dir(beadsDir)
@@ -1103,6 +1108,16 @@ func (e *PartialResultError) Unwrap() error {
 func IsPartialResult(err error) bool {
 	var partial *PartialResultError
 	return errors.As(err, &partial)
+}
+
+// IsIssueTypeRefused reports whether err is a store refusing a bead type its
+// type registry does not define. bd validates a list's --type, like a
+// create's, against the store's built-in and custom types and answers
+// `invalid issue type "<type>"`; a store gc does not serve (an adopted rig
+// store, until gc's types are registered) keeps bd's own registry. The
+// refusal proves the store holds no row of that type, since bd creates none.
+func IsIssueTypeRefused(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "invalid issue type")
 }
 
 // IsTimeoutError reports whether err was caused by a store/bd query exceeding
@@ -2991,6 +3006,13 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 	return filtered, nil
 }
 
+// bdListAssigneeFanOutLimit bounds how many of listViaBDListFannedOutByAssignee's
+// per-assignee bd list reads run at once. A session's own inbox reads three
+// routes (id, alias, session name), which fit in one round; a mailbox with a
+// long alias history reads more, and the bound keeps that read from forking
+// one bd subprocess per route at once.
+const bdListAssigneeFanOutLimit = 4
+
 // listViaBDListFannedOutByAssignee serves a List query with two or more
 // Assignees as one independently-predicated `bd list --assignee=X` read per
 // entry of assignees, the distinct set listViaBDList picked, instead of the
@@ -3019,32 +3041,58 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 // read answered from one table, as every --type=message read is.
 //
 // A hard error from any one read fails the whole List and discards the rows
-// the earlier reads returned, as a hard error fails the single scan and
+// the other reads returned, as a hard error fails the single scan and
 // NativeDoltStore's fan-out.
+//
+// The reads run concurrently, at most bdListAssigneeFanOutLimit at once: each
+// is its own bd subprocess round trip, and a session's own inbox reads three
+// routes on every mail hook and prime, so read in series they cost those
+// hooks two extra round trips each (ga-59slarrd). Like listTierPair's two
+// halves, they share the store's CommandRunner. Their results are combined in
+// assignees' order whatever order they finish in, so the copy a union keeps,
+// the error a failed List reports and the partial-result error stay those of
+// the first read in that order.
 func (s *BdStore) listViaBDListFannedOutByAssignee(query ListQuery, assignees []string) ([]Bead, error) {
+	type assigneeRead struct {
+		rows    []Bead
+		partial *PartialResultError
+		err     error
+	}
+	reads := make([]assigneeRead, len(assignees))
+	slots := make(chan struct{}, bdListAssigneeFanOutLimit)
+	var wg sync.WaitGroup
+	for i, assignee := range assignees {
+		single := query
+		single.Assignees = nil
+		single.Assignee = assignee
+		single.Limit = 0
+		wg.Add(1)
+		slots <- struct{}{}
+		go func(read *assigneeRead) {
+			defer wg.Done()
+			defer func() { <-slots }()
+			read.rows, read.partial, read.err = s.fetchViaBDList(single)
+		}(&reads[i])
+	}
+	wg.Wait()
 	var (
 		merged  []Bead
 		partial *PartialResultError
 	)
 	seen := make(map[string]bool)
-	for _, assignee := range assignees {
-		single := query
-		single.Assignees = nil
-		single.Assignee = assignee
-		single.Limit = 0
-		rows, perCallPartial, err := s.fetchViaBDList(single)
-		if err != nil {
-			return nil, err
+	for _, read := range reads {
+		if read.err != nil {
+			return nil, read.err
 		}
-		for _, row := range rows {
+		for _, row := range read.rows {
 			if seen[row.ID] {
 				continue
 			}
 			seen[row.ID] = true
 			merged = append(merged, row)
 		}
-		if perCallPartial != nil && partial == nil {
-			partial = perCallPartial
+		if read.partial != nil && partial == nil {
+			partial = read.partial
 		}
 	}
 	if query.Sort == SortDefault {

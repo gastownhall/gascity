@@ -29,6 +29,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/platform/localsocket"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/testutil"
@@ -295,20 +296,20 @@ func TestSupervisorSocketPathForDirLongDirFallsBackToHashedTempPath(t *testing.T
 	base := shortTempDir(t, "gc-supervisor-long-")
 
 	longDir := filepath.Join(base, "segment")
-	for len(filepath.Join(longDir, "supervisor.sock")) <= supervisorSocketPathLimit {
+	for len(filepath.Join(longDir, "supervisor.sock")) <= localsocket.PathLimit {
 		longDir = filepath.Join(longDir, "segment")
 	}
 	otherLongDir := filepath.Join(base, "other-segment")
-	for len(filepath.Join(otherLongDir, "supervisor.sock")) <= supervisorSocketPathLimit {
+	for len(filepath.Join(otherLongDir, "supervisor.sock")) <= localsocket.PathLimit {
 		otherLongDir = filepath.Join(otherLongDir, "segment")
 	}
 
 	got := supervisorSocketPathForDir(longDir)
-	if dir := filepath.Dir(got); dir != filepath.Join("/tmp", "gascity-supervisor") {
+	if dir := filepath.Dir(got); dir != localsocket.FallbackDir("gascity-supervisor") {
 		t.Fatalf("supervisorSocketPathForDir(%q) = %q, want under /tmp/gascity-supervisor", longDir, got)
 	}
-	if len(got) > supervisorSocketPathLimit {
-		t.Fatalf("fallback socket path length = %d, want <= %d: %s", len(got), supervisorSocketPathLimit, got)
+	if len(got) > localsocket.PathLimit {
+		t.Fatalf("fallback socket path length = %d, want <= %d: %s", len(got), localsocket.PathLimit, got)
 	}
 
 	if again := supervisorSocketPathForDir(longDir); again != got {
@@ -5325,13 +5326,25 @@ func TestStopManagedCityPreservingSessionsWaitsForRuntimeShutdownOnTimeout(t *te
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 not in PATH")
 	}
+	// The fake service takes serviceExitDelay to exit after SIGTERM, which
+	// outlasts the cancel grace (shutdownTimeout) but not the forced-stop
+	// window (5 x shutdownTimeout = 2s). The delay makes "preserve-mode
+	// shutdown waits for the runtime shutdown" deterministic, and the window
+	// leaves ~1.4s of scheduler jitter before the wait is abandoned. A
+	// tens-of-milliseconds window flaked under CPU contention (ga-elb781).
+	// mc.done never closes, so the call always runs the whole window.
+	const (
+		shutdownTimeout  = 400 * time.Millisecond
+		serviceExitDelay = 600 * time.Millisecond
+	)
 	cityPath := t.TempDir()
 	serviceScript := filepath.Join(t.TempDir(), "service.sh")
-	if err := os.WriteFile(serviceScript, []byte(`#!/usr/bin/env python3
+	if err := os.WriteFile(serviceScript, []byte(fmt.Sprintf(`#!/usr/bin/env python3
 import os
 import signal
 import socket
 import sys
+import time
 
 sock_path = os.environ["GC_SERVICE_SOCKET"]
 try:
@@ -5340,6 +5353,7 @@ except FileNotFoundError:
     pass
 
 def stop(_signum, _frame):
+    time.sleep(%.3f)
     sys.exit(0)
 
 signal.signal(signal.SIGTERM, stop)
@@ -5349,7 +5363,7 @@ listener.listen(1)
 while True:
     conn, _ = listener.accept()
     conn.close()
-`), 0o755); err != nil {
+`, serviceExitDelay.Seconds())), 0o755); err != nil {
 		t.Fatalf("WriteFile(service script): %v", err)
 	}
 	var runtimeStdout bytes.Buffer
@@ -5357,7 +5371,7 @@ while True:
 		cityPath: cityPath,
 		cityName: "bright-lights",
 		cfg: &config.City{
-			Daemon: config.DaemonConfig{ShutdownTimeout: "20ms"},
+			Daemon: config.DaemonConfig{ShutdownTimeout: shutdownTimeout.String()},
 			Services: []config.Service{{
 				Name: "bridge",
 				Kind: "proxy_process",
@@ -7388,19 +7402,7 @@ const ephemeralPortThresholdForTest = 32768
 
 func freeEphemeralLoopbackPort(t *testing.T) int {
 	t.Helper()
-	for i := 0; i < 20; i++ {
-		l, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			t.Fatalf("Listen: %v", err)
-		}
-		port := l.Addr().(*net.TCPAddr).Port
-		_ = l.Close()
-		if port >= ephemeralPortThresholdForTest {
-			return port
-		}
-	}
-	t.Skip("could not allocate a port >= 32768 in 20 tries")
-	return 0
+	return holdLoopbackPort(t, ephemeralPortThresholdForTest)
 }
 
 func freeLowLoopbackPort(t *testing.T) int {
@@ -7429,7 +7431,7 @@ func TestRunSupervisorWarnsOnEphemeralAPIPort(t *testing.T) {
 		t.Fatal(err)
 	}
 	// sockPath may resolve outside t.TempDir() when GC_HOME exceeds
-	// supervisorSocketPathLimit and the fallback triggers, so Go's own
+	// localsocket.PathLimit and the fallback triggers, so Go's own
 	// cleanup will not reap it.
 	t.Cleanup(func() { _ = os.RemoveAll(sockPath) })
 	if err := os.WriteFile(filepath.Join(sockPath, "sentinel"), []byte("x"), 0o644); err != nil {
@@ -7461,7 +7463,7 @@ func TestRunSupervisorNoWarningForLowAPIPort(t *testing.T) {
 		t.Fatal(err)
 	}
 	// sockPath may resolve outside t.TempDir() when GC_HOME exceeds
-	// supervisorSocketPathLimit and the fallback triggers, so Go's own
+	// localsocket.PathLimit and the fallback triggers, so Go's own
 	// cleanup will not reap it.
 	t.Cleanup(func() { _ = os.RemoveAll(sockPath) })
 	if err := os.WriteFile(filepath.Join(sockPath, "sentinel"), []byte("x"), 0o644); err != nil {

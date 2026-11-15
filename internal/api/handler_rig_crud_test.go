@@ -31,6 +31,35 @@ func TestHandleRigCreate(t *testing.T) {
 	}
 }
 
+// Every new city is born split, where rig provisioning refuses a rig whose
+// prefix is in a reserved namespace before writing anything. The client chose
+// or derived that prefix, so the create answers 400 with the refusal, which
+// names the fix, rather than a 500.
+func TestHandleRigCreate_ReservedPrefixOnASplitCityIsABadRequest(t *testing.T) {
+	fs := newFakeMutatorState(t)
+	fs.createRigErr = reservedPrefixRigAddRefusal(t)
+	h := newTestCityHandler(t, fs)
+
+	body := `{"name":"graphql-code-generator","path":"/tmp/graphql-code-generator"}`
+	req := newPostRequest(cityURL(fs, "/rigs"), strings.NewReader(body))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusBadRequest, w.Body.String())
+	}
+	for _, want := range []string{"gcg", "gc rig add --prefix"} {
+		if !strings.Contains(w.Body.String(), want) {
+			t.Errorf("body %s does not carry the refusal's %q", w.Body.String(), want)
+		}
+	}
+	for _, r := range fs.cfg.Rigs {
+		if r.Name == "graphql-code-generator" {
+			t.Error("the refused create added the rig")
+		}
+	}
+}
+
 func TestHandleRigCreate_MissingName(t *testing.T) {
 	fs := newFakeMutatorState(t)
 	h := newTestCityHandler(t, fs)

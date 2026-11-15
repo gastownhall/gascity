@@ -58,11 +58,11 @@ func recordCurrentBeadIDOnWake(info sessionpkg.Info, sessFront *sessionpkg.Store
 // close time or the live assignee after checking status.
 //
 // The topology only names which store owns the row. The row is then read from
-// that store with its cache layers peeled (uncachedBeadStore), as
-// freshAnchorBeadTerminal does: a rig leg is a CachingStore whose Get answers
-// a primed, undirtied row without a backing read, and a handoff or close made
-// by another process (`bd update --assignee`, `bd close`) reaches the backing
-// store alone. A cached row would report the old assignee and keep row A
+// that store's live reader (beads.LiveFor: past its policy and cache layers,
+// and any class layer above them), as freshAnchorBeadTerminal does: a rig leg
+// is a CachingStore whose Get answers a primed, undirtied row without a
+// backing read, and a handoff or close made by another process (`bd update
+// --assignee`, `bd close`) reaches the backing store alone. A cached row would report the old assignee and keep row A
 // deferring on a bead this session no longer owns.
 //
 // assignee is the live, trimmed assignee. ga-pvjbx3 Q3: the guard defers on an
@@ -83,7 +83,7 @@ func prevAssignedBeadStatus(topo storeref.Topology, id string) (open bool, assig
 	if err != nil {
 		return false, "", time.Time{}, err
 	}
-	b, err := uncachedBeadStore(owner.Store).Get(id)
+	b, err := beads.LiveFor(owner.Resident).Get(id)
 	if err != nil {
 		return false, "", time.Time{}, err
 	}
@@ -151,8 +151,8 @@ func sessionHasFreshInProgressClaim(sw *SeatWork, info sessionpkg.Info) (bool, e
 // already established that the session holds no claim a kill could cost.
 //
 // The topology only names which store owns the anchor. The row is then read
-// from that store with its cache layers peeled (uncachedBeadStore), and the
-// row the owner probe may already have read is discarded: a rig leg is a
+// from that store's live reader (beads.LiveFor), and the row the owner probe
+// may already have read is discarded: a rig leg is a
 // CachingStore whose Get answers a primed, undirtied row without a backing
 // read, and a close made by another process (`bd close`) reaches the backing
 // store alone. Reading through the cache would report that closed anchor as
@@ -162,7 +162,7 @@ func freshAnchorBeadTerminal(topo storeref.Topology, anchorID string) (bool, err
 	if err != nil {
 		return false, err
 	}
-	anchor, err := uncachedBeadStore(owner.Store).Get(anchorID)
+	anchor, err := beads.LiveFor(owner.Resident).Get(anchorID)
 	if err != nil {
 		return false, err
 	}

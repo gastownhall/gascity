@@ -169,6 +169,35 @@ func conditionToolLinksMatch(dir string, tools map[string]string) bool {
 	return true
 }
 
+// ConditionActor is the BEADS_ACTOR a condition script runs as when the
+// process that runs it sets none. It is the default the controller's own bd
+// calls use (applyControllerBdEnv and defaultSupervisorBeadsActor in cmd/gc).
+const ConditionActor = "controller"
+
+// conditionActor returns the BEADS_ACTOR a condition script runs as: that of
+// the process running the script when set, otherwise ConditionActor. Environ
+// passes no other session-scoped identity key (execenv.SessionScopedEnvKeys),
+// so gc's eventActor attributes the script's writes to this actor, and bd
+// checks the script's closes against it. The process that runs the script
+// decides which actor that is:
+//
+//   - The controller runs convergence gates and triggers. A supervisor sets
+//     its BEADS_ACTOR to "controller" unless an operator set another; a
+//     standalone controller (gc start --foreground) sets none, so its scripts
+//     get ConditionActor.
+//   - The control dispatcher runs ralph checks inside its own managed session,
+//     so a check script runs as that session's identity, the actor of the
+//     dispatcher's own writes, and bd lets it close what that session holds.
+//   - gc converge test-gate and test-trigger, and gc convoy control for one
+//     bead, run the script in the caller's process: it runs as the caller's
+//     BEADS_ACTOR, or as ConditionActor from a shell that sets none.
+func conditionActor() string {
+	if actor := strings.TrimSpace(os.Getenv("BEADS_ACTOR")); actor != "" {
+		return actor
+	}
+	return ConditionActor
+}
+
 // ConditionEnv builds the environment variables for a gate condition script.
 // All bead-derived values are passed as env vars — never interpolated into commands.
 type ConditionEnv struct {
@@ -222,8 +251,9 @@ func conditionBeadsCredentialsFile() string {
 
 // Environ returns the environment variable slice for exec.Cmd.
 // Only whitelisted variables: PATH (safe default), HOME, TMPDIR, convergence
-// vars, Dolt/Beads connection env, the resolved beads credentials file, and
-// GC_INTEGRATION_REAL_BD when present for integration-test bd shims.
+// vars, BEADS_ACTOR (conditionActor), Dolt/Beads connection env, the resolved
+// beads credentials file, and GC_INTEGRATION_REAL_BD when present for
+// integration-test bd shims.
 func (ce ConditionEnv) Environ() []string {
 	// Use CityPath as HOME to sandbox gate scripts from the
 	// controller's home directory (which may contain .ssh, .gnupg, etc).
@@ -241,6 +271,7 @@ func (ce ConditionEnv) Environ() []string {
 		"GC_HOME=" + conditionGCHome(),
 		"TMPDIR=" + os.TempDir(),
 		"BEADS_DIR=" + filepath.Join(storePath, ".beads"),
+		"BEADS_ACTOR=" + conditionActor(),
 		"GC_BEAD_ID=" + ce.BeadID,
 		"GC_ITERATION=" + strconv.Itoa(ce.Iteration),
 		"GC_WISP_ID=" + ce.WispID,
