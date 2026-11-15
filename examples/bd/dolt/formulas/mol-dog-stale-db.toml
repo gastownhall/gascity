@@ -422,10 +422,25 @@ fi
 # close withdraws the outcome, so the wisp it leaves open carries none, as on
 # every other fail-open path.
 gc bd update "$WORK_BEAD" --set-metadata gc.outcome=pass
-if ! gc bd close "$WORK_BEAD" --reason "Stale DB scan complete (orphans=${ORPHAN_TOTAL}, applied=${APPLIED}, escalated=${ESCALATED})"; then
+CLOSE_RC=0
+CLOSE_OUT=$(gc bd close "$WORK_BEAD" --reason "Stale DB scan complete (orphans=${ORPHAN_TOTAL}, applied=${APPLIED}, escalated=${ESCALATED})" 2>&1) || CLOSE_RC=$?
+if [ "$CLOSE_RC" -ne 0 ]; then
+  [ -z "$CLOSE_OUT" ] || printf '%s\n' "$CLOSE_OUT" >&2
   run_or_warn "withdraw pass outcome" gc bd update "$WORK_BEAD" --unset-metadata gc.outcome
+  # The event stream is what the operator watches, so a failed close says so
+  # there, in bd's own words: the last three lines, minus the version-warning
+  # noise that rides on nearly every bd call, capped at 400 bytes. Event only,
+  # once, no retry: the wisp stays open for the next patrol.
+  CLOSE_DETAIL=$(printf '%s\n' "$CLOSE_OUT" | { grep -Ev ' WARN |^[[:space:]]*$' || true; } | tail -n 3 | tr '\n' ' ')
+  CLOSE_DETAIL="${CLOSE_DETAIL% }"
+  CLOSE_DETAIL="${CLOSE_DETAIL:0:400}"
+  CLOSE_SUFFIX=""
+  if [ -n "$CLOSE_DETAIL" ]; then CLOSE_SUFFIX=": ${CLOSE_DETAIL}"; fi
+  run_or_warn "emit close failure escalation" gc event emit mol-dog-stale-db.escalate \
+    --message "work bead ${WORK_BEAD} close failed (exit ${CLOSE_RC}); it may still be open${CLOSE_SUFFIX}"
   fail_open_after_drain "gc bd close failed; leaving work bead open"
 fi
+[ -z "$CLOSE_OUT" ] || printf '%s\n' "$CLOSE_OUT"
 drain_ack_once # drain-ack before normal exit
 exit
 ```
