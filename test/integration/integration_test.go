@@ -1540,7 +1540,7 @@ func buildIntegrationEnv(gcHome, runtimeDir string, useDolt bool) []string {
 	}
 	env = append(env, "GC_HOME="+gcHome)
 	// gc-beads-bd.sh serializes forced reinits on a per-database flock under
-	// $TMPDIR by default, shared by every process on the host. Every test city
+	// /tmp by default, shared by every process on the host. Every test city
 	// initializes the same "hq" database on its own Dolt server, so concurrent
 	// test actions on one worker would queue on one lock (and fail after its
 	// 60s budget under load). Cities that share a Dolt server share a GC_HOME,

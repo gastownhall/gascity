@@ -2015,8 +2015,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shows only when init fails. Init's migration steps also wait up to
   `GC_DOLT_INIT_LOCK_TIMEOUT_MS` for a concurrent initializer's reset or
   forced reinit to finish, and fail closed if it does not. That lock lives in
-  a per-user `gc-beads-bd-init-locks-<uid>` directory under `$TMPDIR` or
-  `/tmp` unless `GC_DOLT_INIT_LOCK_DIR` names another; where `flock` is
+  a per-user `gc-beads-bd-init-locks-<uid>` directory under `/tmp`, not
+  `$TMPDIR`, unless `GC_DOLT_INIT_LOCK_DIR` names another; where `flock` is
   installed, init fails naming the lock file when it cannot create it.
   Without `flock`, init refuses to reset an interrupted bootstrap and says
   how to install it (#5926).

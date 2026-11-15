@@ -49,17 +49,20 @@
 #       revalidate-then-force sequence, the interrupted-bootstrap reset)
 #       holds it exclusive, so a destructive step never lands on another
 #       initializer's in-flight migration (default:
-#       gc-beads-bd-init-locks-<uid> under $TMPDIR or /tmp, one directory
-#       per OS user, because a lock directory or file another user or a
-#       sudo run created is not writable by this one; initializers running
-#       as different OS users share a lock only when this names one
-#       directory they can all write to). Where flock is installed, init
-#       must be able to create its lock file here, and fails naming the
-#       file when it cannot. Not under GC_CITY_PATH on purpose: two
-#       cities/worktrees that share one managed Dolt server can target the
-#       same dolt_database from different city paths, so the lock must
-#       resolve to the same file for both regardless of which city each
-#       process was invoked from.
+#       /tmp/gc-beads-bd-init-locks-<uid>, one directory per OS user,
+#       because a lock directory or file another user or a sudo run created
+#       is not writable by this one). Where flock is installed, init must
+#       be able to create its lock file here, and fails naming the file
+#       when it cannot. Neither GC_CITY_PATH nor $TMPDIR is consulted, on
+#       purpose: two cities/worktrees that share one managed Dolt server can
+#       target the same dolt_database from different city paths or with
+#       different TMPDIRs, so the lock must resolve to the same file for
+#       both regardless of which city or environment each process was
+#       invoked from. Residual limits: initializers running as different OS
+#       users share a lock only when this names one directory they can all
+#       write to; and initializers whose /tmp is a private mount namespace
+#       (systemd PrivateTmp, a container) share no path at all, which only
+#       a server-side lock could fix.
 #   GC_DOLT_INIT_LOCK_TIMEOUT_MS — wait budget for that lock before op_init
 #       gives up on a concurrent initializer and fails closed instead of
 #       proceeding unprotected, in milliseconds (default: 60000).
@@ -91,11 +94,12 @@ DOLT_LOGLEVEL="${GC_DOLT_LOGLEVEL:-warning}"
 LSOF_TIMEOUT_SECONDS="${GC_LSOF_TIMEOUT_SECONDS:-2}"
 CONCURRENT_START_READY_TIMEOUT_MS="${GC_DOLT_CONCURRENT_START_READY_TIMEOUT_MS:-}"
 LOCK_RELEASE_TIMEOUT_MS="${GC_DOLT_LOCK_RELEASE_TIMEOUT_MS:-60000}"
-# Deliberately NOT derived from GC_CITY_PATH — see op_init's use of this for
-# why (two cities/worktrees sharing one managed Dolt server must resolve to
-# the same lock file despite having different city paths). The per-user
-# default is resolved by acquire_init_lock, so invocations that never take
-# the lock never run id(1).
+# Deliberately NOT derived from GC_CITY_PATH or TMPDIR — see op_init's use of
+# this for why (two cities/worktrees sharing one managed Dolt server must
+# resolve to the same lock file despite having different city paths or
+# TMPDIRs). The per-user default (/tmp/gc-beads-bd-init-locks-<uid>) is
+# resolved by acquire_init_lock, so invocations that never take the lock
+# never run id(1).
 INIT_LOCK_DIR="${GC_DOLT_INIT_LOCK_DIR:-}"
 INIT_LOCK_TIMEOUT_MS="${GC_DOLT_INIT_LOCK_TIMEOUT_MS:-60000}"
 BEADS_BACKEND="${GC_BEADS_BACKEND:-${BEADS_BACKEND:-dolt}}"
@@ -1137,7 +1141,7 @@ acquire_init_lock() {
         exclusive) mode_flag=-x ;;
         *) die "acquire_init_lock: unknown lock mode '$mode'" ;;
     esac
-    [ -n "$INIT_LOCK_DIR" ] || INIT_LOCK_DIR="${TMPDIR:-/tmp}/gc-beads-bd-init-locks-$(id -u)"
+    [ -n "$INIT_LOCK_DIR" ] || INIT_LOCK_DIR="/tmp/gc-beads-bd-init-locks-$(id -u)"
     local init_lock_file="$INIT_LOCK_DIR/$db.lock"
     case "$INIT_LOCK_TIMEOUT_MS" in
         ''|*[!0-9]*) INIT_LOCK_TIMEOUT_MS=60000 ;;

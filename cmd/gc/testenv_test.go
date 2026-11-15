@@ -369,7 +369,10 @@ func writeTestGitIdentity(homeDir string) error {
 // identity and beads.role = maintainer, then returns extra env entries suitable
 // for appending to sanitizedBaseEnv. Use this for any test that runs the real
 // gc-beads-bd.sh op_init, which calls ensure_beads_role and requires a writable
-// global git config.
+// global git config. It also pins the init lock directory to one under the
+// test's own temp dir: the default is a per-user directory under /tmp shared
+// with every other process on the host, and a later GC_DOLT_INIT_LOCK_DIR
+// entry still overrides it.
 func gcBeadsBdTestHomeEnv(t *testing.T) []string {
 	t.Helper()
 	homeDir := filepath.Join(t.TempDir(), "home")
@@ -382,6 +385,7 @@ func gcBeadsBdTestHomeEnv(t *testing.T) []string {
 	return []string{
 		"HOME=" + homeDir,
 		"GIT_CONFIG_GLOBAL=" + filepath.Join(homeDir, ".gitconfig"),
+		"GC_DOLT_INIT_LOCK_DIR=" + filepath.Join(homeDir, "dolt-init-locks"),
 	}
 }
 

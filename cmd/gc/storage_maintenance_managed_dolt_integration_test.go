@@ -85,6 +85,11 @@ func newManagedDoltWindowCity(t *testing.T) managedDoltWindowCity {
 	}
 	t.Setenv("HOME", homeDir)
 	t.Setenv("DOLT_ROOT_PATH", homeDir)
+	// init's lock lives in /tmp by default, shared with the host's own
+	// initializers: keep this test's inits (the script's and the provider's)
+	// in a directory of their own.
+	initLockDir := filepath.Join(homeDir, "dolt-init-locks")
+	t.Setenv("GC_DOLT_INIT_LOCK_DIR", initLockDir)
 	t.Setenv("PATH", strings.Join([]string{filepath.Dir(bdPath), filepath.Dir(doltPath), os.Getenv("PATH")}, string(os.PathListSeparator)))
 	port := freeDoltTestPort(t)
 	t.Setenv("GC_DOLT_PORT", strconv.Itoa(port))
@@ -117,8 +122,8 @@ func newManagedDoltWindowCity(t *testing.T) managedDoltWindowCity {
 		"GC_BEADS": "bd", "GC_DOLT": "", "GC_BIN": gcBin,
 		"GC_CITY": cityPath, "GC_CITY_PATH": cityPath,
 		"GC_BEADS_TRANSPORT": "direct", "GC_BEADS_TARGET": "local",
-		"GC_DOLT_PORT": strconv.Itoa(port),
-		"HOME":         homeDir, "DOLT_ROOT_PATH": homeDir, "PATH": os.Getenv("PATH"),
+		"GC_DOLT_PORT": strconv.Itoa(port), "GC_DOLT_INIT_LOCK_DIR": initLockDir,
+		"HOME": homeDir, "DOLT_ROOT_PATH": homeDir, "PATH": os.Getenv("PATH"),
 	})
 	runScript := func(args ...string) {
 		t.Helper()

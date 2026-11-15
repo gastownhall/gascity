@@ -766,6 +766,82 @@ MY_CUSTOM_VAR = "/path/to/thing"
 MY_CUSTOM_VAR = "$MY_CUSTOM_VAR"
 ```
 
+## Store Initialization Fails on an Init Lock or a Migration That Never Settles
+
+Symptom: initializing a store with the built-in `bd` provider stops with one
+of these errors:
+
+```text
+could not open init lock for database '<db>' (<lock file>): <error>; set GC_DOLT_INIT_LOCK_DIR to a directory this user can write to.
+```
+
+```text
+could not acquire init lock for database '<db>' (<lock file>) within <N>s; a concurrent initializer may be stuck. inspect the store with 'bd dolt status' before retrying, or raise GC_DOLT_INIT_LOCK_TIMEOUT_MS.
+```
+
+```text
+database '<db>' has a schema_migrations cursor in progress but it never settled; refusing to force-reinitialize (data-safety).
+```
+
+Cause: initializers of one database take turns. Each holds a per-database lock
+file while it migrates the schema or resets state, so a reset never lands on
+another initializer's migration in flight. Three settings govern that, and each
+error points at one:
+
+| Variable | Default | What it controls |
+|---|---|---|
+| `GC_DOLT_INIT_LOCK_DIR` | `/tmp/gc-beads-bd-init-locks-<uid>` | The directory holding the lock files. The default is one directory per OS user. It does not depend on the city path or on `TMPDIR`, so every initializer of a database finds the same file. |
+| `GC_DOLT_INIT_LOCK_TIMEOUT_MS` | `60000` | How long init waits for a lock another initializer holds before it gives up with an error. |
+| `GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS` | `120000` | The longest init waits between observed advances of a mid-migration database's `schema_migrations` cursor. |
+
+- The first error means this OS user cannot create the lock directory or file,
+  for example because another user or a `sudo` run created it.
+- The second means another initializer has held the lock past the wait budget.
+- The third means the database was left partway through a migration. The wait
+  is progress-based: every observed advance of the cursor resets the cap, so a
+  migration that keeps advancing is waited out in full. A migration that stops
+  advancing is given up on sooner, after 8 consecutive unchanged reads, which
+  takes a few seconds. The cap itself only bounds a wait whose cursor reads keep
+  failing outright.
+
+Fix: inspect the store before changing anything. From the affected city or rig
+directory:
+
+```bash
+bd dolt status
+```
+
+If a concurrent initializer is still working, let it finish and rerun the
+command. Then, by error:
+
+- **Could not open the lock:** make the directory named in the error writable by
+  the user running init, or set `GC_DOLT_INIT_LOCK_DIR` to a directory that user
+  can write to. Initializers of one database that run as different OS users
+  share a lock only when every one of them names the same directory they can
+  all write to. Initializers that see different `/tmp` directories, such as a
+  service with a private `/tmp`, share no lock at all.
+- **Could not acquire the lock:** raise `GC_DOLT_INIT_LOCK_TIMEOUT_MS` only when
+  `bd dolt status` shows the other initializer is making progress.
+- **Cursor never settled:** raising `GC_DOLT_SCHEMA_SETTLE_TIMEOUT_MS` does not
+  help a migration that has stopped advancing. Inspect the stalled migration
+  with `bd dolt status`.
+
+Do not delete lock files, and do not point initializers of one database at
+different lock directories: either one removes the exclusion the lock provides.
+
+These settings apply to the built-in `bd` provider's init only. Set them in the
+environment of the process that runs init:
+
+```bash
+export GC_DOLT_INIT_LOCK_TIMEOUT_MS=120000
+```
+
+then rerun the command that failed. When the supervisor runs init, the variable
+has to be in the supervisor's own environment: see
+[A Custom Environment Variable Doesn't Reach Agent Sessions](#a-custom-environment-variable-doesnt-reach-agent-sessions)
+for setting it there and keeping it across a restart with `GC_SUPERVISOR_ENV`
+and `gc supervisor install`.
+
 ## Supervisor Log Written Twice (journald + supervisor.log)
 
 `gc supervisor run` tees its output into `${GC_HOME}/supervisor.log`
