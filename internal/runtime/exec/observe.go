@@ -324,7 +324,7 @@ func (p *Provider) startFresh(ctx context.Context, name string, cfg runtime.Conf
 }
 
 // createFresh creates the box and launches the agent: `provision` then a
-// fresh launchAgent and its first turn for a separable pack, otherwise the
+// fresh launchAgent and its first turn's handback for a separable pack, otherwise the
 // welded `start` op followed by finishStart, as Start runs it. For a pack
 // sharing the host filesystem the host work comes first and session_setup
 // last, as in Start.
@@ -341,7 +341,8 @@ func (p *Provider) createFresh(ctx context.Context, name string, cfg runtime.Con
 		if err := p.launchAgent(ctx, name, cfg); err != nil {
 			return err
 		}
-		return p.finishSeparableLaunch(ctx, name, cfg, hostWork)
+		p.finishSeparableLaunch(ctx, name, cfg, hostWork)
+		return nil
 	}
 	data, err := p.startConfigFor(ctx, name, cfg, hostWork)
 	if err != nil {

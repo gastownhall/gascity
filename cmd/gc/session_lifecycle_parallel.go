@@ -2036,8 +2036,9 @@ func runPreparedStartCandidate(
 	startCallBegin := time.Now()
 	startedFresh, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter, warmClaim)
 	startCtxErr := startCtx.Err()
-	// A startup nudge the session's program held back behind a dialog
-	// (program_status = "on", row A20) is queued, never typed or failed.
+	// A startup nudge the runtime handed back (one held behind a dialog
+	// under program_status = "on", row A20, or an un-welded exec launch's
+	// first turn) is queued, never typed or failed.
 	if qerr := queueStartupNudgeHandback(cityPath, cfg, sp, item.candidate.info, item.candidate.name(), item.cfg.Env[runtime.InstanceTokenEnv], err == nil, time.Now()); qerr != nil {
 		log.Printf("gc start: %v", qerr)
 	}

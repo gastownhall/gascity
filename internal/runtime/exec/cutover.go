@@ -94,7 +94,7 @@ func (s *seamBackedProvider) Start(ctx context.Context, name string, cfg runtime
 
 // TakeStartupNudgeHandback passes through to the underlying provider: the
 // first turn a separable launch handed back (startup_ladder.go).
-func (s *seamBackedProvider) TakeStartupNudgeHandback(name string) (string, bool) {
+func (s *seamBackedProvider) TakeStartupNudgeHandback(name string) (runtime.StartupNudge, bool) {
 	return s.raw.TakeStartupNudgeHandback(name)
 }
 

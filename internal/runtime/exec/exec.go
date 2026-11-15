@@ -588,7 +588,7 @@ func (p *Provider) supportsSeparableLaunch() bool {
 // reports holding no live box, the host work precedes `provision` and is
 // left out of its config; session_setup then follows the launch
 // (execTransport.Launch). `provision` is never sent the first turn, which
-// the launch delivers (finishSeparableLaunch).
+// the launch hands back for its caller to queue (finishSeparableLaunch).
 func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Config) error {
 	p.rememberReadyPrompt(name, cfg)
 	if !p.supportsSeparableLaunch() {
@@ -621,14 +621,14 @@ func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Co
 // Go-side orchestration the welded Start runs. The `exec` op runs in the box's
 // working directory and the box env is set at provision time, so neither an
 // explicit -c nor -e is needed (workdir + env are provision-half). (Un-weld B3b.)
-// It clears the turn an earlier launch of name handed back; the first turn
-// itself follows (finishSeparableLaunch).
+// It clears the turn an earlier launch of name handed back; this launch's own
+// is handed back after it (finishSeparableLaunch).
 func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Config) error {
 	p.rememberReadyPrompt(name, cfg)
 	if !p.supportsSeparableLaunch() {
 		return nil
 	}
-	p.handbacks.set(name, "")
+	p.handbacks.set(name, runtime.StartupNudge{})
 	if p.launchDeclared() {
 		if err := p.runLaunchOp(ctx, name, cfg); err != nil {
 			return err
@@ -667,7 +667,8 @@ func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Con
 // relaunches the agent in the warm box (launchAgent) — no reprovision — and,
 // for a pack sharing the host filesystem, then runs session_setup on the host
 // again, as the launch after provision does and as tmux re-runs it on a
-// relaunch, and delivers the first turn (finishSeparableLaunch). Pre_start and
+// relaunch, and hands the first turn back for its caller to queue
+// (finishSeparableLaunch). Pre_start and
 // staging are not redone: the box is warm. A welded pack has no in-place
 // relaunch (the agent is welded into `start`), so it degrades to a full
 // reprovision (Stop+Start), which is still correct. On a
@@ -678,7 +679,8 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 		if err := p.launchAgent(ctx, name, cfg); err != nil {
 			return err
 		}
-		return p.finishSeparableLaunch(ctx, name, cfg, p.sharesHostFS())
+		p.finishSeparableLaunch(ctx, name, cfg, p.sharesHostFS())
+		return nil
 	}
 	if err := p.Stop(name); err != nil {
 		return err
@@ -1181,18 +1183,13 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 // declaration it tries tmux over exec, then nudge on ErrExecUnsupported.
 // Empty content is a no-op.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
-	return p.nudgeWithContext(context.Background(), name, content)
-}
-
-// nudgeWithContext is Nudge bounded by ctx.
-func (p *Provider) nudgeWithContext(ctx context.Context, name string, content []runtime.ContentBlock) error {
 	if p.opsCarrierSelected() {
-		return p.carrier().Nudge(ctx, name, content)
+		return p.carrier().Nudge(context.Background(), name, content)
 	}
-	if err := p.carrier().Nudge(ctx, name, content); !errors.Is(err, runtime.ErrExecUnsupported) {
+	if err := p.carrier().Nudge(context.Background(), name, content); !errors.Is(err, runtime.ErrExecUnsupported) {
 		return err
 	}
-	return p.nudgeOp(ctx, name, content)
+	return p.nudgeOp(context.Background(), name, content)
 }
 
 // SetMeta stores a key-value pair: script set-meta <name> <key>

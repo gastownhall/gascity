@@ -24,14 +24,20 @@ func StartupTurnLaunchID(sp runtime.Provider, name, startToken string) string {
 
 // StartupHandbackItems is what a handed-back startup nudge is queued as.
 // turn is the deferred submit that carries the handed-back text whole; it
-// becomes the startup turn of launchID. When that text is exactly the
+// becomes the startup turn of launchID, held until notBefore when that is
+// later than its deliver-after (a runtime that cannot tell when its agent
+// takes input gives its first turn an earliest send time). When that text is
+// exactly the
 // composition of initialMessage (SplitInitialMessage), the one-shot message
 // is split off as its own plain submit, messageID, so it never rides in a
 // turn a claim may drop: it follows the turn by a nanosecond with the same
 // session, epoch and deliver-after, and the turn is left out when nothing
 // else is in it.
-func StartupHandbackItems(turn nudgequeue.Item, launchID, initialMessage, messageID string) []nudgequeue.Item {
+func StartupHandbackItems(turn nudgequeue.Item, notBefore time.Time, launchID, initialMessage, messageID string) []nudgequeue.Item {
 	turn.Reference = nudgequeue.StartupTurnReference(launchID)
+	if notBefore.After(turn.DeliverAfter) {
+		turn.DeliverAfter = notBefore.UTC()
+	}
 	text, split := SplitInitialMessage(turn.Message, initialMessage)
 	if !split {
 		return []nudgequeue.Item{turn}
@@ -49,22 +55,25 @@ func StartupHandbackItems(turn nudgequeue.Item, launchID, initialMessage, messag
 // startupTurn is the first turn a Start that succeeded handed back
 // (runtime.TakeStartupNudgeHandback): under program_status = "on", one its
 // program held back behind a dialog through the whole startup ladder, never
-// typed (design §10.2 row A20). It is taken right after that Start, while
+// typed (design §10.2 row A20); on an exec pack's un-welded launch, every
+// first turn, which that Start never types. It is taken right after that
+// Start, while
 // the slot is still that launch's, and bound then to the launch it came from
 // (StartupTurnLaunchID). ok is false when the Start handed nothing back.
 type startupTurn struct {
 	text, launchID string
+	notBefore      time.Time
 	ok             bool
 }
 
 // takeStartupTurn takes the first turn the Start of sessName that just
 // succeeded, under startToken, handed back, bound to its launch.
 func (m *Manager) takeStartupTurn(sessName, startToken string) startupTurn {
-	text, ok := runtime.TakeStartupNudgeHandback(m.sp, sessName)
+	nudge, ok := runtime.TakeStartupNudgeHandback(m.sp, sessName)
 	if !ok {
 		return startupTurn{}
 	}
-	return startupTurn{text: text, launchID: StartupTurnLaunchID(m.sp, sessName, startToken), ok: true}
+	return startupTurn{text: nudge.Text, notBefore: nudge.NotBefore, launchID: StartupTurnLaunchID(m.sp, sessName, startToken), ok: true}
 }
 
 // settleStartupTurnLocked ends a start of sessName: turn, the first turn the
@@ -93,10 +102,10 @@ func (m *Manager) queueStartupTurnLocked(ctx context.Context, b beads.Bead, sess
 		log.Printf("session: %q: reading its initial message to split from the startup nudge: %v", sessName, err)
 	}
 	items := StartupHandbackItems(newDeferredSubmitItem(b, turn.text, nudgequeue.SourceSubmit, now),
-		turn.launchID, overrides[InitialMessageOverrideKey], newDeferredSubmitID())
+		turn.notBefore, turn.launchID, overrides[InitialMessageOverrideKey], newDeferredSubmitID())
 	queued, err := m.enqueueDeferredItemsLocked(b, sessName, items)
 	if err != nil {
-		log.Printf("session: %q: started, but queueing the startup nudge its program's dialog held back failed: %v", sessName, err)
+		log.Printf("session: %q: started, but queueing its handed-back startup nudge failed: %v", sessName, err)
 	}
 	if rec, ok := ctx.Value(startupNudgeRecorderKey{}).(*startupNudgeRecorder); ok && queued {
 		rec.queued = true

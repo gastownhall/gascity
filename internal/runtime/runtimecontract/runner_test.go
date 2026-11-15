@@ -384,6 +384,7 @@ func TestEveryRequirementIsGated(t *testing.T) {
 		{ReqProvisionLaunchReplaces, ledit("launch", `reap "$box"; rm -rf "$box"; fi; `, `exit 0; fi; `), "launch keeps the old agent"},
 		{ReqProvisionLaunchFreshOnly, ledit("launch", `if [ -n "$fresh" ]; then exit 73; fi; reap`, `if [ -n "$fresh" ]; then exit 0; fi; reap`), "a fresh_only launch on a running agent exits 0"},
 		{ReqProvisionLaunchFreshOnly, ledit("launch", `if [ -d "$box" ]; then if [ -n "$fresh" ]; then exit 73; fi; reap`, `if [ -n "$fresh" ]; then exit 73; fi; if [ -d "$box" ]; then reap`), "every fresh_only launch exits 73, even into a box with no agent"},
+		{ReqProvisionLaunchFreshOnly, set("provision", `case "$(cat)" in *'"fresh_only":true'*) exit 1 ;; esac`), "provision refuses the fresh_only config gc's fresh start sends it"},
 	}
 	// atMostOnceMutants edit the at-most-once golden, whose written nudge
 	// answers delivered_unobserved and keeps no send record.

@@ -2,8 +2,7 @@ package exec
 
 import (
 	"context"
-	"errors"
-	"os"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -11,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/runtimecontract/reference"
 )
 
 // launchPackCaps is the handshake of a pack without tmux in its box that
@@ -22,8 +22,8 @@ const launchPackCaps = `{"version":0,"capabilities":["proc.provision","proc.laun
 // $dir/input (one line per nudge or send-keys, in order), and launch shows
 // the bypass-permissions dialog when $dir/dialog-at-start exists, until
 // Enter answers it. exec answers exit 2: there is no exec, and no tmux.
-func launchPackOps(overrides map[string]string) map[string]string {
-	ops := map[string]string{
+func launchPackOps() map[string]string {
+	return map[string]string{
 		"provision":  `cat > "$dir/provision.stdin"`,
 		"launch":     `cat > "$dir/launch.stdin"; : > "$dir/running"; if [ -f "$dir/dialog-at-start" ]; then : > "$dir/dialog"; fi`,
 		"exec":       `cat > /dev/null; exit 2`,
@@ -33,10 +33,6 @@ func launchPackOps(overrides map[string]string) map[string]string {
 		"send-keys":  `shift 2; echo "keys $*" >> "$dir/input"; if [ "$1" = Enter ]; then rm -f "$dir/dialog"; fi`,
 		"nudge":      `txt=$(cat); echo "nudge $txt" >> "$dir/input"`,
 	}
-	for op, body := range overrides {
-		ops[op] = body
-	}
-	return ops
 }
 
 // inputLines is the input the pack was given, in order.
@@ -56,7 +52,7 @@ func inputLines(t *testing.T, dir string) []string {
 // proc.provision with proc.exec or proc.launch, and carrier.ops no longer
 // welds a pack declaring proc.launch.
 func TestLaunchOpReplacesTmuxArgv(t *testing.T) {
-	script, dir := observePack(t, launchPackCaps, launchPackOps(nil))
+	script, dir := observePack(t, launchPackCaps, launchPackOps())
 	p := NewProvider(script)
 	if _, tp := p.Seams(); !tp.Capabilities().SeparableLaunch {
 		t.Fatal("SeparableLaunch = false for proc.provision + proc.launch")
@@ -91,189 +87,115 @@ func TestLaunchOpReplacesTmuxArgv(t *testing.T) {
 		{`{"version":0,"capabilities":["proc.provision"]}`, false},
 		{`{"version":0,"capabilities":["proc.launch"]}`, false},
 	} {
-		script, _ := observePack(t, tc.caps, launchPackOps(nil))
+		script, _ := observePack(t, tc.caps, launchPackOps())
 		if _, tp := NewProvider(script).Seams(); tp.Capabilities().SeparableLaunch != tc.separable {
 			t.Errorf("handshake %s: SeparableLaunch = %v, want %v", tc.caps, !tc.separable, tc.separable)
 		}
 	}
 }
 
-// Kills an un-welded start that never delivers its first turn (the startup
-// prompt rides in it for a pack runtime), types it before the startup
-// dialog is answered, types it twice, or still sends it to provision or
-// launch, which cannot type it: gc sends it once, through the nudge op,
-// after the dialog pass.
-func TestUnweldedPathDeliversFirstTurn(t *testing.T) {
-	script, dir := observePack(t, launchPackCaps, launchPackOps(nil))
+// isNudgeLine reports a pack input line that is a typed nudge.
+func isNudgeLine(line string) bool { return strings.HasPrefix(line, "nudge ") }
+
+// Kills an un-welded start that types its first turn (the startup prompt
+// rides in it for a pack runtime), loses it, hands it back twice, leaves the
+// dialog unanswered, or still sends it to provision or launch, which cannot
+// type it: Start answers the dialog and types nothing else, and hands the
+// turn back once for its caller to queue. A pack without an idle boundary
+// has the turn held until ready_delay_ms after the launch.
+func TestUnweldedStartQueuesFirstTurn(t *testing.T) {
+	script, dir := observePack(t, launchPackCaps, launchPackOps())
 	writeFile(t, filepath.Join(dir, "dialog-at-start"), "")
-	cfg := runtime.Config{Command: "agent", Nudge: "first turn", EmitsPermissionWarning: true, ReadyDelayMs: 10}
-	if err := NewSeamBacked(script).Start(t.Context(), "s", cfg); err != nil {
+	sp := NewSeamBacked(script)
+	cfg := runtime.Config{Command: "agent", Nudge: "first turn", EmitsPermissionWarning: true, ReadyDelayMs: 500}
+	began := time.Now()
+	if err := sp.Start(t.Context(), "s", cfg); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	got := inputLines(t, dir)
-	enter, nudge := slices.Index(got, "keys Enter"), slices.Index(got, "nudge first turn")
-	if enter < 0 || nudge < 0 || enter > nudge {
-		t.Fatalf("input = %q, want the dialog answered (Enter) before the first turn is typed", got)
-	}
-	nudges := 0
-	for _, line := range got {
-		if strings.HasPrefix(line, "nudge ") {
-			nudges++
-		}
-	}
-	if nudges != 1 {
-		t.Errorf("input = %q: the first turn was typed %d times, want once", got, nudges)
+	if got := inputLines(t, dir); !slices.Contains(got, "keys Enter") || slices.ContainsFunc(got, isNudgeLine) {
+		t.Fatalf("input = %q, want the dialog answered (Enter) and no turn typed", got)
 	}
 	for _, op := range []string{"provision", "launch"} {
 		if sent := readLog(t, filepath.Join(dir, op+".stdin")); strings.Contains(sent, `"nudge"`) {
-			t.Errorf("%s stdin = %q: gc delivers the first turn itself, so it leaves nudge out", op, sent)
+			t.Errorf("%s stdin = %q: gc queues the first turn itself, so it leaves nudge out", op, sent)
 		}
 	}
+	turn, ok := runtime.TakeStartupNudgeHandback(sp, "s")
+	if !ok || turn.Text != "first turn" {
+		t.Fatalf("handback = %+v, %v; want the first turn", turn, ok)
+	}
+	if floor := began.Add(500 * time.Millisecond); turn.NotBefore.Before(floor) {
+		t.Errorf("NotBefore = %s, want no earlier than %s: a pack without an idle boundary holds the turn ready_delay_ms past the launch", turn.NotBefore, floor)
+	}
+	if _, again := runtime.TakeStartupNudgeHandback(sp, "s"); again {
+		t.Error("the handback was taken twice")
+	}
 
-	script, dir = observePack(t, launchPackCaps, launchPackOps(nil))
-	if err := NewSeamBacked(script).Start(t.Context(), "quiet", runtime.Config{Command: "agent"}); err != nil {
+	// A start without a first turn hands nothing back; a later start
+	// replaces what an earlier one left untaken.
+	if err := sp.Start(t.Context(), "quiet", runtime.Config{Command: "agent"}); err != nil {
 		t.Fatalf("Start without a first turn: %v", err)
 	}
-	if got := inputLines(t, dir); len(got) != 0 {
-		t.Errorf("input = %q, want nothing typed for a start without a first turn", got)
+	if turn, ok := runtime.TakeStartupNudgeHandback(sp, "quiet"); ok {
+		t.Errorf("handback %+v for a start without a first turn", turn)
 	}
-}
-
-// Kills an un-welded first turn the runtime refused that is dropped,
-// retried, or left to a later start; one delivered (or delivered
-// unobserved, or possibly delivered) that is handed back, which would type
-// it twice; and a gone answer read as a started session: a refused turn is
-// handed back once (runtime.TakeStartupNudgeHandback, which the
-// orchestrator queues as the user's submit), and gone is the agent dying
-// during startup.
-func TestUnweldedFirstTurnHandedBackOnRefusal(t *testing.T) {
-	caps := `{"version":0,"capabilities":["proc.provision","proc.launch","input-outcome"]}`
-	for _, tc := range []struct {
-		answer   string // the nudge op's outcome; "" is a plain exit 0
-		handBack bool
-		died     bool
-	}{
-		{answer: "busy", handBack: true},
-		{answer: "pending_interaction", handBack: true},
-		{answer: "rejected", handBack: true},
-		{answer: "not_sent", handBack: true},
-		{answer: "unavailable", handBack: true},
-		{answer: "delivered_unobserved"},
-		{answer: "unconfirmed"},
-		{answer: ""},
-		{answer: "gone", died: true},
-	} {
-		t.Run("answer "+tc.answer, func(t *testing.T) {
-			nudge := `txt=$(cat); echo "nudge $txt" >> "$dir/input"; `
-			switch tc.answer {
-			case "":
-			case "delivered_unobserved":
-				nudge += `echo '{"outcome":"delivered_unobserved"}'`
-			default:
-				nudge += `echo '{"outcome":"` + tc.answer + `"}'; exit 80`
-			}
-			script, dir := observePack(t, caps, launchPackOps(map[string]string{"nudge": nudge}))
-			sp := NewSeamBacked(script)
-			err := sp.Start(t.Context(), "s", runtime.Config{Command: "agent", Nudge: "first turn"})
-			if tc.died != errors.Is(err, runtime.ErrSessionDiedDuringStartup) || (!tc.died && err != nil) {
-				t.Fatalf("Start = %v, want died during startup %v", err, tc.died)
-			}
-			if tc.died && !slices.Contains(opsRan(t, dir), "stop") {
-				t.Error("a start whose agent died left its box: no stop ran")
-			}
-			if got := inputLines(t, dir); len(got) != 1 {
-				t.Errorf("input = %q, want one attempt at the first turn", got)
-			}
-			turn, ok := runtime.TakeStartupNudgeHandback(sp, "s")
-			if ok != tc.handBack || (ok && turn != "first turn") {
-				t.Fatalf("handback = %q, %v; want handed back %v", turn, ok, tc.handBack)
-			}
-			if _, again := runtime.TakeStartupNudgeHandback(sp, "s"); again {
-				t.Error("the handback was taken twice")
-			}
-		})
-	}
-
-	// A start clears what an earlier start of the name left untaken, so a
-	// stale turn is never queued after a later, delivered, one.
-	answer := filepath.Join(t.TempDir(), "answer")
-	writeFile(t, answer, "busy")
-	nudge := `txt=$(cat); w=$(cat "` + answer + `"); if [ "$w" != ok ]; then echo "{\"outcome\":\"$w\"}"; exit 80; fi`
-	script, _ := observePack(t, caps, launchPackOps(map[string]string{"nudge": nudge}))
-	sp := NewSeamBacked(script)
 	if err := sp.Start(t.Context(), "s", runtime.Config{Command: "agent", Nudge: "stale turn"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(answer, []byte("ok"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := sp.Start(t.Context(), "s", runtime.Config{Command: "agent", Nudge: "fresh turn"}); err != nil {
+	if err := sp.Start(t.Context(), "s", runtime.Config{Command: "agent"}); err != nil {
 		t.Fatal(err)
 	}
 	if turn, ok := runtime.TakeStartupNudgeHandback(sp, "s"); ok {
-		t.Errorf("handback %q left over from an earlier start", turn)
+		t.Errorf("handback %q left over from an earlier start", turn.Text)
+	}
+
+	// A separable Relaunch hands its first turn back the same way.
+	if err := NewProvider(script).Relaunch(t.Context(), "s", runtime.Config{Command: "agent", Nudge: "relaunch turn"}); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	if got := inputLines(t, dir); slices.ContainsFunc(got, isNudgeLine) {
+		t.Errorf("input = %q: a relaunch typed its first turn", got)
+	}
+}
+
+// Kills a ready floor on a pack whose idle boundary the queue reads: its
+// handed-back turn waits for the session's idle, not a fixed delay.
+func TestUnweldedIdleBoundaryTurnHasNoFloor(t *testing.T) {
+	script, _ := observePack(t, launchIdlePackCaps, launchPackOps())
+	sp := NewSeamBacked(script)
+	if err := sp.Start(t.Context(), "s", runtime.Config{Command: "agent", Nudge: "first turn", ReadyDelayMs: 500}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	turn, ok := runtime.TakeStartupNudgeHandback(sp, "s")
+	if !ok || turn.Text != "first turn" || !turn.NotBefore.IsZero() {
+		t.Fatalf("handback = %+v, %v; want the first turn with no NotBefore", turn, ok)
 	}
 }
 
 // launchIdlePackCaps is a pack without tmux that un-welds start under
-// carrier.ops and declares the idle triple, so gc's readiness wait before the
-// first turn is the carrier's idle wait.
+// carrier.ops and declares the idle triple, so the queue's idle wait gates
+// its handed-back first turn.
 const launchIdlePackCaps = `{"version":0,"capabilities":["proc.provision","proc.launch","carrier.ops","report-activity","report-attachment","idle-boundary","input-outcome"]}`
 
-// Kills a readiness wait capped by the start's own deadline: an agent that
-// never reads idle ran the wait into the start's ctx, which failed the start
-// and tore its box down. The wait stays inside the start budget, its timeout
-// is not a failure, and the single first-turn attempt decides the outcome:
-// a busy answer is handed back.
-func TestUnweldedReadinessWaitStaysInsideStartBudget(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		nudge    string
-		handBack bool
-	}{
-		{name: "delivered", nudge: `txt=$(cat); echo "nudge $txt" >> "$dir/input"`},
-		{name: "busy", nudge: `txt=$(cat); echo "nudge $txt" >> "$dir/input"; echo '{"outcome":"busy"}'; exit 80`, handBack: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			script, dir := observePack(t, launchIdlePackCaps, launchPackOps(map[string]string{
-				"peek":  `echo "Thinking (esc to interrupt)"`,
-				"nudge": tc.nudge,
-			}))
-			sp := NewSeamBacked(script)
-			ctx, cancel := context.WithTimeout(t.Context(), 4*time.Second)
+// Kills a first turn lost to the start's deadline (review round 2's HIGH):
+// under fs.host a slow host session_setup spent the rest of the start's
+// ctx, the nudge op never forked, Start returned nil and nothing was handed
+// back. Start no longer sends the turn, so whatever the setup spends, the
+// turn is handed back, and the fresh (createFresh) start does the same.
+func TestUnweldedSlowHostSetupStillHandsBackFirstTurn(t *testing.T) {
+	for _, fresh := range []bool{false, true} {
+		t.Run(fmt.Sprintf("fresh_only=%v", fresh), func(t *testing.T) {
+			sp, _, _ := hostFSGoldenFixtureWith(t, func(b map[string]string) { reference.LaunchBodies(b) })
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 			defer cancel()
-			if err := sp.Start(ctx, "s", runtime.Config{Command: "agent", Nudge: "first turn"}); err != nil {
-				t.Fatalf("Start = %v, want success: a readiness wait that runs out is not a failure", err)
+			cfg := runtime.Config{WorkDir: t.TempDir(), Command: "sleep 300", Nudge: "first turn", SessionSetup: []string{"sleep 3"}, FreshOnly: fresh}
+			t.Cleanup(func() { _ = sp.Stop("s") })
+			if err := sp.Start(ctx, "s", cfg); err != nil {
+				t.Fatalf("Start = %v, want nil: a session_setup that outlives the start's ctx is a warning", err)
 			}
-			if slices.Contains(opsRan(t, dir), "stop") {
-				t.Error("the start tore its box down")
-			}
-			if got := inputLines(t, dir); !slices.Equal(got, []string{"nudge first turn"}) {
-				t.Errorf("input = %q, want the first turn attempted once", got)
-			}
-			if _, ok := runtime.TakeStartupNudgeHandback(sp, "s"); ok != tc.handBack {
-				t.Errorf("handed back = %v, want %v", ok, tc.handBack)
+			if turn, ok := runtime.TakeStartupNudgeHandback(sp, "s"); !ok || turn.Text != "first turn" {
+				t.Fatalf("handback = %+v, %v; want the first turn: it was lost to the start's deadline", turn, ok)
 			}
 		})
-	}
-}
-
-// Kills a first turn sent outside the start's ctx: a nudge op that hangs
-// held Start past its deadline for the whole op timeout. A first turn cut off
-// by the deadline may have been typed, so it is not handed back.
-func TestUnweldedFirstTurnBoundedByStartContext(t *testing.T) {
-	script, _ := observePack(t, launchPackCaps, launchPackOps(map[string]string{
-		"nudge": `cat > /dev/null; exec sleep 30`,
-	}))
-	sp := NewSeamBacked(script)
-	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
-	defer cancel()
-	began := time.Now()
-	_ = sp.Start(ctx, "s", runtime.Config{Command: "agent", Nudge: "first turn"})
-	if elapsed := time.Since(began); elapsed > 10*time.Second {
-		t.Errorf("Start took %s with a 2s ctx: the first turn is bounded by the start's ctx", elapsed)
-	}
-	if turn, ok := runtime.TakeStartupNudgeHandback(sp, "s"); ok {
-		t.Errorf("handback %q: a turn cut off mid-send may have been typed", turn)
 	}
 }

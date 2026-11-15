@@ -151,17 +151,15 @@ var _ runtime.Transport = (*execTransport)(nil)
 // launched it), so launchAgent is a no-op here. After a separable launch into a
 // box whose provision config gc stripped of its host work (provisionBox), gc
 // runs the session_setup it left out of that config, as the welded Start does
-// after its `start` op, then delivers the config's first turn
-// (finishSeparableLaunch).
+// after its `start` op, then hands the config's first turn back for the
+// Start's caller to queue (finishSeparableLaunch).
 func (t *execTransport) Launch(ctx context.Context, place runtime.Place, spec runtime.LaunchSpec) (runtime.Attachment, error) {
 	name := placeName(place)
 	_, hostSetup := t.p.hostSetupDue.LoadAndDelete(name)
 	if err := t.p.launchAgent(ctx, name, spec.Config); err != nil {
 		return nil, err
 	}
-	if err := t.p.finishSeparableLaunch(ctx, name, spec.Config, hostSetup); err != nil {
-		return nil, err
-	}
+	t.p.finishSeparableLaunch(ctx, name, spec.Config, hostSetup)
 	return &execAttachment{p: t.p, name: name}, nil
 }
 

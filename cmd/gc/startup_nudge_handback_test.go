@@ -3,13 +3,16 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // handbackNudge is the startup nudge the tests' leaves hand back.
@@ -147,4 +150,121 @@ func TestLegacyRelaunchQueuesTheHandedBackStartupNudge(t *testing.T) {
 	}
 	wantQueuedHandbacks(t, env.city, env.cfg, env.sessionInfo(sess.ID), time.Now(), 1)
 	wantNoTurnBoundToTheConfig(t, env.city)
+}
+
+// handbackQueueHarness is a started session whose leaf handed back its
+// startup nudge after a Start, as an exec pack's un-welded launch hands back
+// every first turn, and the poller's view of it once its pane is idle.
+type handbackQueueHarness struct {
+	dir    string
+	store  beads.NudgesStore
+	fake   *runtime.Fake
+	info   session.Info
+	target nudgeTarget
+	obs    worker.LiveObservation
+}
+
+// newHandbackQueueHarness starts a session whose Start handed nudge back,
+// and queues it as every start path's caller does.
+func newHandbackQueueHarness(t *testing.T, nudge runtime.StartupNudge) handbackQueueHarness {
+	t.Helper()
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), testOperatorIn(t, dir), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fake.SetStartupNudgeHandbackAt(info.SessionName, nudge)
+	if err := queueStartupNudgeHandback(dir, nil, runtime.FullFake{Fake: fake}, info, info.SessionName, "", true, time.Now()); err != nil {
+		t.Fatalf("queueStartupNudgeHandback: %v", err)
+	}
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
+	return handbackQueueHarness{
+		dir:    dir,
+		store:  store,
+		fake:   fake,
+		info:   info,
+		target: nudgeTarget{cityPath: dir, agent: config.Agent{Name: "worker"}, sessionID: info.ID, resolved: &config.ResolvedProvider{Name: "codex"}, sessionName: info.SessionName},
+		obs:    worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince},
+	}
+}
+
+// pass runs one poller pass and returns whether it delivered and the texts
+// the runtime was sent.
+func (h handbackQueueHarness) pass(t *testing.T) (bool, []string) {
+	t.Helper()
+	before := len(h.fake.SnapshotCalls())
+	delivered, err := tryDeliverQueuedNudgesByPoller(h.target, h.store, h.store, h.fake, 3*time.Second, h.obs)
+	if err != nil {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
+	}
+	var sent []string
+	for _, call := range h.fake.SnapshotCalls()[before:] {
+		if call.Method == "Nudge" || call.Method == "NudgeNow" {
+			sent = append(sent, call.Message)
+		}
+	}
+	return delivered, sent
+}
+
+// wantQueueEmpty fails unless h's queue holds nothing for its session.
+func (h handbackQueueHarness) wantQueueEmpty(t *testing.T) {
+	t.Helper()
+	pending, inFlight, dead, err := listQueuedNudgesForTarget(h.dir, h.target, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending)+len(inFlight)+len(dead) != 0 {
+		t.Fatalf("queue = %d pending, %d in flight, %d dead; want empty: the handed-back turn was acked once", len(pending), len(inFlight), len(dead))
+	}
+}
+
+// Kills a handed-back first turn the queue never delivers, delivers twice,
+// or sends before the earliest send time its runtime gave it (an exec pack
+// without an idle boundary holds the turn ready_delay_ms past the launch):
+// the poller holds it until NotBefore, then sends it once, verbatim, and
+// acks it.
+func TestQueueDeliversHandedBackFirstTurnOnceAfterReadiness(t *testing.T) {
+	notBefore := time.Now().Add(time.Second)
+	h := newHandbackQueueHarness(t, runtime.StartupNudge{Text: handbackNudge, NotBefore: notBefore})
+
+	if delivered, sent := h.pass(t); delivered || len(sent) != 0 {
+		t.Fatalf("pass before NotBefore = delivered %v, sent %q; want the turn held until ready_delay_ms has passed", delivered, sent)
+	}
+	time.Sleep(time.Until(notBefore))
+	delivered, sent := h.pass(t)
+	if !delivered || len(sent) != 1 || sent[0] != handbackNudge {
+		t.Fatalf("pass at NotBefore = delivered %v, sent %q; want the first turn once, verbatim", delivered, sent)
+	}
+	if delivered, sent := h.pass(t); delivered || len(sent) != 0 {
+		t.Fatalf("pass after delivery = delivered %v, sent %q; want nothing: the turn is delivered once", delivered, sent)
+	}
+	h.wantQueueEmpty(t)
+}
+
+// Kills a handed-back first turn that a runtime refusal drops, dead-letters
+// or acks as delivered: the queue releases a turn the runtime refused
+// (pending interaction) and a later pass delivers it once.
+func TestQueueRetriesRefusedHandedBackFirstTurn(t *testing.T) {
+	h := newHandbackQueueHarness(t, runtime.StartupNudge{Text: handbackNudge})
+	h.fake.NudgeErrors = map[string]error{h.info.SessionName: fmt.Errorf("%w: a dialog is up", runtime.ErrNudgeRefusedPendingInteraction)}
+	if delivered, _ := h.pass(t); delivered {
+		t.Fatal("a refused first turn was acked as delivered")
+	}
+	h.fake.NudgeErrors = nil
+	delivered, sent := h.pass(t)
+	if !delivered || len(sent) != 1 || sent[0] != handbackNudge {
+		t.Fatalf("retry = delivered %v, sent %q; want the first turn delivered once", delivered, sent)
+	}
+	if delivered, sent := h.pass(t); delivered || len(sent) != 0 {
+		t.Fatalf("pass after delivery = delivered %v, sent %q; want nothing", delivered, sent)
+	}
+	h.wantQueueEmpty(t)
 }

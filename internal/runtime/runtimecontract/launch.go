@@ -46,9 +46,11 @@ func launchDeclared(hs runtime.ProtocolInfo) (Status, string, bool) {
 }
 
 // provisionAndLaunch provisions name, then launches its agent with cfg,
-// returning a failing status when either op does not succeed.
+// returning a failing status when either op does not succeed. A fresh_only
+// cfg is provisioned fresh_only too, the sequence gc's fresh start
+// (createFresh) runs.
 func provisionAndLaunch(ctx context.Context, r *runner, name string, cfg launchConfig) (Status, string) {
-	switch prov := r.provision(ctx, name); {
+	switch prov := r.provision(ctx, name, cfg.FreshOnly); {
 	case prov.unsupported:
 		return StatusFail, "provision returned exit 2; proc.launch launches into the box provision prepares, so it needs provision"
 	case prov.err != nil:

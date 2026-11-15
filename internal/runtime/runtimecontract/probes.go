@@ -412,7 +412,7 @@ func opsReadyPromptStore(ctx context.Context, r *runner, name string) (Status, s
 // implement provision and is driven through start instead.
 func probeProvision(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
 	name := r.nextName()
-	prov := r.provision(ctx, name)
+	prov := r.provision(ctx, name, false)
 	switch {
 	case prov.unsupported && hs.Has(runtime.ProtocolCapabilityProvision):
 		return StatusFail, "provision returned exit 2 although the handshake declares proc.provision; a declared op cannot be unknown"

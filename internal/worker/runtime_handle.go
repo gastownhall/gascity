@@ -117,10 +117,10 @@ func (h *RuntimeHandle) StartResolved(ctx context.Context, by sessionpkg.Actor, 
 	err = h.provider.Start(ctx, h.sessionName, startCfg)
 	// A runtime-only handle has no session row to queue a startup nudge
 	// for: one the runtime handed back (its program held it behind a
-	// dialog, under program_status "on", or an exec pack's runtime refused
-	// it on the un-welded launch path) is dropped, and said so.
+	// dialog, under program_status "on", or an exec pack's un-welded
+	// launch, which hands back every first turn) is dropped, and said so.
 	if nudge, ok := runtime.TakeStartupNudgeHandback(h.provider, h.sessionName); ok && err == nil {
-		log.Printf("worker: %q: started without its startup nudge, which its runtime handed back undelivered; a runtime-only handle has no session queue to hold it (%d bytes dropped)", h.sessionName, len(nudge))
+		log.Printf("worker: %q: started without its startup nudge, which its runtime handed back undelivered; a runtime-only handle has no session queue to hold it (%d bytes dropped)", h.sessionName, len(nudge.Text))
 	}
 	return err
 }

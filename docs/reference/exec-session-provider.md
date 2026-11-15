@@ -196,23 +196,30 @@ conformance requirements (`002` to `004` only for `proc.launch`).
 **The first turn on the un-welded path.** `provision` runs before any agent
 exists and `launch` types nothing, so the orchestrator delivers the start
 config's `nudge` itself, and leaves it out of the config it sends to
-`provision` and `launch`. After the launch it publishes the ready prompt and
-answers startup dialogs, then waits for the agent: with `idle-boundary`
-declared, for the selected carrier to read it idle, otherwise for
-`ready_delay_ms`. The wait is at most 60 seconds and at most half of what is
-left of the start's deadline, so it runs out inside the start budget; a wait
-that runs out is not a failure, and the first turn's answer decides the
-outcome. Under `fs.host` it then runs `session_setup` on the host. Last, it
-sends the first turn once, within the start's deadline, through the path
-every later nudge takes (see [Startup Hints](#startup-hints)). It reads the answer as the [typed input
-outcomes](#typed-input-outcomes-input-outcome) say:
+`provision` and `launch`. The start never types it. After the launch the
+orchestrator publishes the ready prompt, answers startup dialogs and, under
+`fs.host`, runs `session_setup` on the host. The start then ends, and the
+first turn waits in the session's nudge queue as the user's submit. The
+queue delivers it through the path every later nudge takes (see [Startup
+Hints](#startup-hints)), once the session takes input:
 
-| First-turn answer | Effect |
-|-------------------|--------|
-| delivered, `delivered_unobserved` | Done. |
-| `unconfirmed`, or a failure from a script without `input-outcome` | A warning. The turn is not sent again, so it is never delivered twice. |
-| `busy`, `pending_interaction`, `rejected`, `not_sent`, `unavailable` | Nothing was typed. The start succeeds, and the turn waits in the session's queue as the user's submit, delivered later. |
-| `gone` | The agent died during startup: the start fails and the box is torn down. |
+- With `idle-boundary` declared, the queue waits for the session to read idle.
+- Without it, the queue sends the turn no earlier than `ready_delay_ms` after
+  the launch.
+
+The queue reads the answer as the [typed input
+outcomes](#typed-input-outcomes-input-outcome) say: delivered and
+`delivered_unobserved` are final, a refusal (`busy`, `pending_interaction`,
+`rejected`, `not_sent`, `unavailable`) typed nothing and is retried, and the
+turn is acked once.
+
+Because the turn is queued, no start deadline can cut it off or lose it, for
+example to a slow host `session_setup`. The cost is latency: the turn lands
+one queue poll after the start returns, not inside the start as the tmux
+provider's startup nudge does. The start no longer watches the agent while
+it waits for the turn. An agent that dies during startup is found by the
+reconciler's liveness checks like any other dead session, and the queue
+releases its queued turn under its `gone` rule.
 
 **The connection primitive (slim RPP).** `exec` is the connection op
 (`RPP-CONN-001`). It is optional; conformance checks output and command exit
@@ -266,7 +273,7 @@ Capabilities:
 | `carrier.ops` | Selects the five required dedicated driving ops, with no tmux commands; an exit 2 from one is a failure. Start stays welded with `proc.provision` unless the script also declares `proc.launch`. Fenced input is refused, even with `input-fence`. With `idle-boundary`, the script also keeps each session's ready prompt with `set-meta` and `get-meta` (see [Idle sleep](#idle-sleep)). No token means the tmux-first default; unknown tokens are ignored. |
 | `idle-boundary` | Declares that the selected carrier can answer `Peek`. Full idle sleep also needs `report-activity`, `report-attachment` and either `carrier.ops` or the default carrier's `proc.exec`. `RPP-CONN-002` checks tmux main and capture over `exec` for the default carrier; for `carrier.ops`, it checks `is-running`, `peek <name> 120` showing the started agent's command line or output, and that `set-meta` and `get-meta` round-trip a non-default ready prompt byte for byte, which `gc runtime check` requires too. Neither probe classifies the ready prompt. |
 | `input-fence` | With `proc.exec` and without `carrier.ops`, declares that the box's tmux can hold an input fence, so gc sends nudges, keys and interrupts only to the agent incarnation they are meant for (see [Fenced input over `exec`](#fenced-input-over-exec)). Without it, gc touches no fence in the box, and a fenced request to the runtime is refused (`ErrInputFenceUnsupported`); unfenced input is unaffected. |
-| `proc.provision` | The script implements the box-without-agent `provision` op (see Operations), so the orchestrator provisions the box, then launches the agent and delivers its first turn itself. Also requires a way to launch: `proc.launch`, or `proc.exec` with the default tmux carrier. Without one, `start` provisions and launches in one op. |
+| `proc.provision` | The script implements the box-without-agent `provision` op (see Operations), so the orchestrator provisions the box, then launches the agent and queues its first turn itself. Also requires a way to launch: `proc.launch`, or `proc.exec` with the default tmux carrier. Without one, `start` provisions and launches in one op. |
 | `proc.launch` | The script implements the `launch` op (see Operations), which starts the agent in the box `provision` prepared, replacing a running one unless `fresh_only`, and types nothing. With `proc.provision`, the orchestrator launches through it instead of sending tmux launch argv over `exec`. A pack without tmux in its box declares `carrier.ops` too, since the default carrier still answers dialogs and types the first turn with tmux over `exec`. Without `proc.provision` it has no effect. |
 | `proc.stream` | Reserved (connection-plane family, parallel to `env.*`): declares the persistent bidirectional `stream` connection op (ACP over a stream, tmux pipe-pane). Sets `CanStream`. The `stream` op and its capability-gated conformance entry land with the connection rewrite. |
 | `tty.attach` | Reserved: declares an interactive PTY `attach` connection op. Sets `CanAttachTTY`. |
@@ -726,9 +733,9 @@ Scripts may handle these hints or ignore them:
   the agent is ready. gc does not send it through the `nudge` operation
   when `start` returns, so a script that wants the agent to receive it
   types it in itself, in `start`, once the agent is ready. On the un-welded
-  path gc delivers it itself after `launch` (see [the first turn on the
-  un-welded path](#operations)) and never sends it to `provision` or
-  `launch`. Later nudges,
+  path gc queues it after `launch` and its queue delivers it (see [the first
+  turn on the un-welded path](#operations)); gc never sends it to
+  `provision` or `launch`. Later nudges,
   such as `gc session nudge`, use the selected carrier. Under `carrier.ops`
   that is the `nudge` operation. Otherwise gc types them through tmux over
   `exec`, and uses the `nudge` operation when the runtime does not implement

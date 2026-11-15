@@ -22,8 +22,9 @@ const handbackStartNudge = "start working"
 // a failed start's handback.
 type handbackStartProvider struct {
 	*runtime.Fake
-	nudge string
-	fail  error
+	nudge     string
+	notBefore time.Time
+	fail      error
 }
 
 func (p *handbackStartProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
@@ -40,12 +41,12 @@ func (p *handbackStartProvider) Start(ctx context.Context, name string, cfg runt
 		}
 	}
 	if p.nudge != "" {
-		p.SetStartupNudgeHandback(name, p.nudge)
+		p.SetStartupNudgeHandbackAt(name, runtime.StartupNudge{Text: p.nudge, NotBefore: p.notBefore})
 	}
 	return nil
 }
 
-func (p *handbackStartProvider) TakeStartupNudgeHandback(name string) (string, bool) {
+func (p *handbackStartProvider) TakeStartupNudgeHandback(name string) (runtime.StartupNudge, bool) {
 	return runtime.FullFake{Fake: p.Fake}.TakeStartupNudgeHandback(name)
 }
 
@@ -135,6 +136,25 @@ func TestSessionStartsQueueTheHandedBackStartupNudge(t *testing.T) {
 		}
 		wantHandbacksQueued(t, mgr, b.ID, 1)
 	})
+}
+
+// Kills a session-manager start that queues a handed-back startup nudge
+// ready at once although its runtime gave it an earliest send time (an exec
+// pack without an idle boundary holds its first turn ready_delay_ms past the
+// launch): the queued submit is not delivered before NotBefore.
+func TestSessionStartQueuesTheHandbackNotBefore(t *testing.T) {
+	stubSubmitPoller(t)
+	notBefore := time.Now().Add(time.Minute).UTC().Truncate(time.Second)
+	sp := &handbackStartProvider{Fake: runtime.NewFake(), nudge: handbackStartNudge, notBefore: notBefore}
+	mgr := newTestManager(t, beads.NewMemStore(), sp)
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	wantHandbacksQueued(t, mgr, info.ID, 1)
+	if got := queuedHandbacks(t, mgr, info.ID)[0].DeliverAfter; got.Before(notBefore) {
+		t.Fatalf("queued DeliverAfter = %s, want no earlier than the handback's NotBefore %s", got, notBefore)
+	}
 }
 
 // Kills a stop with a restart on failure that hard-restarts a session whose
@@ -286,7 +306,7 @@ func TestStartupTurnLaunchIDReadsTheRuntimeFirst(t *testing.T) {
 		t.Fatalf("with no token anywhere = %q, want none", got)
 	}
 	turn := nudgequeue.Item{ID: "t", Message: handbackStartNudge, Source: nudgequeue.SourceSubmit}
-	if items := StartupHandbackItems(turn, "", "", "m"); len(items) != 1 || items[0].Reference != nil {
+	if items := StartupHandbackItems(turn, time.Time{}, "", "", "m"); len(items) != 1 || items[0].Reference != nil {
 		t.Fatalf("an unbound turn = %+v, want one plain submit", items)
 	}
 }
@@ -298,7 +318,7 @@ func TestStartupHandbackItemsSplitTheInitialMessage(t *testing.T) {
 	base := nudgequeue.Item{ID: "t", SessionID: "s-1", ContinuationEpoch: "2", Source: nudgequeue.SourceSubmit, CreatedAt: now, DeliverAfter: now.Add(time.Second)}
 	composed := base
 	composed.Message = AppendInitialMessage(handbackStartNudge, "hello")
-	items := StartupHandbackItems(composed, "L1", "hello", "m")
+	items := StartupHandbackItems(composed, time.Time{}, "L1", "hello", "m")
 	if len(items) != 2 {
 		t.Fatalf("items = %+v, want the turn and the message", items)
 	}
@@ -310,14 +330,22 @@ func TestStartupHandbackItemsSplitTheInitialMessage(t *testing.T) {
 		msg.SessionID != "s-1" || msg.ContinuationEpoch != "2" || !msg.DeliverAfter.Equal(turn.DeliverAfter) || !msg.CreatedAt.Equal(now.Add(time.Nanosecond)) {
 		t.Fatalf("message = %+v, want an unbound submit a nanosecond after the turn", msg)
 	}
+	notBefore := now.Add(time.Minute)
+	held := StartupHandbackItems(composed, notBefore, "L1", "hello", "m")
+	if len(held) != 2 || !held[0].DeliverAfter.Equal(notBefore) || !held[1].DeliverAfter.Equal(notBefore) {
+		t.Fatalf("items held until %s = %+v, want the turn and the message both deliverable no earlier", notBefore, held)
+	}
+	if early := StartupHandbackItems(composed, now, "L1", "hello", "m"); !early[0].DeliverAfter.Equal(base.DeliverAfter) {
+		t.Fatalf("a NotBefore before the item's deliver-after moved it to %s, want %s", early[0].DeliverAfter, base.DeliverAfter)
+	}
 	alone := base
 	alone.Message = AppendInitialMessage("", "hello")
-	if items := StartupHandbackItems(alone, "L1", "hello", "m"); len(items) != 1 || items[0].Reference != nil || items[0].Message != "hello" {
+	if items := StartupHandbackItems(alone, time.Time{}, "L1", "hello", "m"); len(items) != 1 || items[0].Reference != nil || items[0].Message != "hello" {
 		t.Fatalf("a message with no turn = %+v, want the message alone", items)
 	}
 	plain := base
 	plain.Message = handbackStartNudge + "\n\nUser message:\nhello"
-	if items := StartupHandbackItems(plain, "L1", "hello", "m"); len(items) != 1 || items[0].Message != plain.Message {
+	if items := StartupHandbackItems(plain, time.Time{}, "L1", "hello", "m"); len(items) != 1 || items[0].Message != plain.Message {
 		t.Fatalf("text that is not the composition = %+v, want it whole", items)
 	}
 }

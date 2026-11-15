@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -21,60 +22,67 @@ const unweldedFirstTurn = "unwelded launch contract first turn"
 // then launches the agent into it separately (an exec pack declaring
 // proc.provision), the RUNTIME-CONTRACT-020 runtime.
 type UnweldedLaunchFixture struct {
-	// New returns a provider holding no session, and a reader of the input
-	// it typed into a session: one entry per nudge (its text) or keys
-	// call, in order. With refuse set, the runtime answers every nudge
-	// with that outcome instead of delivering it; New may skip t for a
-	// word it cannot produce.
-	New func(t *testing.T, refuse runtime.InputOutcome) (runtime.Provider, func(name string) []string)
+	// New returns a provider holding no session, a reader of the input it
+	// typed into a session (one entry per nudge, its text, or keys call, in
+	// order), and accept, which makes the runtime take input from then on.
+	// With refuse set, the runtime answers every nudge with that outcome
+	// instead of delivering it until accept is called; New may skip t for
+	// a word it cannot produce.
+	New func(t *testing.T, refuse runtime.InputOutcome) (sp runtime.Provider, input func(name string) []string, accept func())
 	// Config is the start config of a session; dialog asks for an agent
 	// that shows a startup dialog at launch, which the runtime's dialog
 	// pass answers with keys. The cases add the first turn.
 	Config func(t *testing.T, dialog bool) runtime.Config
+	// ReadyFloor says the runtime cannot tell when its agent takes input
+	// (no idle boundary), so the turn it hands back must not be sent
+	// before the config's ReadyDelayMs has passed since the start.
+	ReadyFloor bool
 }
 
-// unweldedRefusals are the outcomes of a first turn the runtime did not
-// take, which the un-welded path hands back.
+// unweldedRefusals are the outcomes of a nudge the runtime did not take,
+// which the queue holding the handed-back first turn retries.
 var unweldedRefusals = []runtime.InputOutcome{
 	runtime.InputOutcomePendingInteraction, runtime.InputOutcomeBusy,
 	runtime.InputOutcomeRejected, runtime.InputOutcomeNotSent,
 }
 
 // RunUnweldedLaunchContract runs the RUNTIME-CONTRACT-020 cases: on the
-// un-welded launch path the runtime delivers the start config's first turn
-// itself, once, after the startup dialog pass (FirstTurnDelivered,
-// DialogAtStart); a first turn the runtime refused is handed back to the
-// Start's caller ([runtime.TakeStartupNudgeHandback]) and never dropped or
-// typed, the start succeeding (RefusedHandedBack); and a gone answer is the
-// agent dying during startup ([runtime.ErrSessionDiedDuringStartup]).
+// un-welded launch path Start types nothing and hands the start config's
+// first turn back to its caller ([runtime.TakeStartupNudgeHandback]) once
+// (FirstTurnQueued); the startup dialog is answered at the start, before the
+// queued turn is sent (DialogAtStart); the caller's queue, sending the
+// handed-back turn through Nudge no earlier than its NotBefore, delivers it
+// once (QueueDeliversOnce); and a turn the runtime refuses is answered with
+// a typed refusal that types nothing, so the queue retries it and a later
+// send delivers it once (RefusedRetriedByQueue).
 func RunUnweldedLaunchContract(t *testing.T, f UnweldedLaunchFixture) {
 	t.Helper()
-	t.Run("UnweldedLaunch_FirstTurnDelivered", func(t *testing.T) {
-		sp, input := f.New(t, "")
-		if err := checkFirstTurnDelivered(t, sp, input, f.Config(t, false)); err != nil {
+	t.Run("UnweldedLaunch_FirstTurnQueued", func(t *testing.T) {
+		sp, input, _ := f.New(t, "")
+		if err := checkFirstTurnQueued(t, sp, input, f.Config(t, false)); err != nil {
 			t.Error(err)
 		}
 	})
 	t.Run("UnweldedLaunch_DialogAtStart", func(t *testing.T) {
-		sp, input := f.New(t, "")
+		sp, input, _ := f.New(t, "")
 		if err := checkDialogAtStart(t, sp, input, f.Config(t, true)); err != nil {
 			t.Error(err)
 		}
 	})
+	t.Run("UnweldedLaunch_QueueDeliversOnce", func(t *testing.T) {
+		sp, input, _ := f.New(t, "")
+		if err := checkQueueDeliversOnce(t, sp, input, f.Config(t, false), f.ReadyFloor); err != nil {
+			t.Error(err)
+		}
+	})
 	for _, word := range unweldedRefusals {
-		t.Run("UnweldedLaunch_RefusedHandedBack_"+string(word), func(t *testing.T) {
-			sp, input := f.New(t, word)
-			if err := checkRefusedHandedBack(t, sp, input, f.Config(t, false), word); err != nil {
+		t.Run("UnweldedLaunch_RefusedRetriedByQueue_"+string(word), func(t *testing.T) {
+			sp, input, accept := f.New(t, word)
+			if err := checkRefusedRetriedByQueue(t, sp, input, accept, f.Config(t, false), word); err != nil {
 				t.Error(err)
 			}
 		})
 	}
-	t.Run("UnweldedLaunch_GoneDiesDuringStartup", func(t *testing.T) {
-		sp, _ := f.New(t, runtime.InputOutcomeGone)
-		if err := checkGoneDiesDuringStartup(t, sp, f.Config(t, false)); err != nil {
-			t.Error(err)
-		}
-	})
 }
 
 // startUnwelded starts the contract session on sp with cfg and its first
@@ -97,25 +105,55 @@ func firstTurns(input []string) int {
 	return n
 }
 
-// checkFirstTurnDelivered reports how sp breaks FirstTurnDelivered.
-func checkFirstTurnDelivered(t *testing.T, sp runtime.Provider, input func(string) []string, cfg runtime.Config) error {
+// takeQueuedTurn takes the turn the contract session's Start handed back,
+// failing unless it is the first turn, handed back once.
+func takeQueuedTurn(sp runtime.Provider) (runtime.StartupNudge, error) {
+	turn, ok := runtime.TakeStartupNudgeHandback(sp, unweldedLaunchSession)
+	if !ok || turn.Text != unweldedFirstTurn {
+		return turn, fmt.Errorf("runtime contract 020: handback after Start = %q, %v; want the first turn: the Start's caller had nothing to queue, so the turn was lost", turn.Text, ok)
+	}
+	if again, ok := runtime.TakeStartupNudgeHandback(sp, unweldedLaunchSession); ok {
+		return turn, fmt.Errorf("runtime contract 020: the handback was taken twice (%q), which queues the turn twice", again.Text)
+	}
+	return turn, nil
+}
+
+// sendQueued sends turn as the queue does: no earlier than its NotBefore,
+// through Nudge.
+func sendQueued(sp runtime.Provider, turn runtime.StartupNudge) error {
+	if wait := time.Until(turn.NotBefore); wait > 0 {
+		time.Sleep(wait)
+	}
+	return sp.Nudge(unweldedLaunchSession, runtime.TextContent(turn.Text))
+}
+
+// checkFirstTurnQueued reports how sp breaks FirstTurnQueued.
+func checkFirstTurnQueued(t *testing.T, sp runtime.Provider, input func(string) []string, cfg runtime.Config) error {
 	if err := startUnwelded(t, sp, cfg); err != nil {
 		return fmt.Errorf("runtime contract 020: Start = %w, want nil", err)
 	}
-	if got := input(unweldedLaunchSession); firstTurns(got) != 1 {
-		return fmt.Errorf("runtime contract 020: input %q holds the first turn %d times, want once", got, firstTurns(got))
+	if got := input(unweldedLaunchSession); firstTurns(got) != 0 {
+		return fmt.Errorf("runtime contract 020: input %q after Start holds the first turn: Start types nothing, its caller's queue sends the turn", got)
 	}
-	if turn, ok := runtime.TakeStartupNudgeHandback(sp, unweldedLaunchSession); ok {
-		return fmt.Errorf("runtime contract 020: a delivered first turn was also handed back (%q), which delivers it twice", turn)
-	}
-	return nil
+	_, err := takeQueuedTurn(sp)
+	return err
 }
 
-// checkDialogAtStart reports how sp breaks DialogAtStart: the dialog's keys
-// precede the first turn, which is typed once.
+// checkDialogAtStart reports how sp breaks DialogAtStart: Start answers the
+// dialog, and the queued turn, sent after, is typed once behind its keys.
 func checkDialogAtStart(t *testing.T, sp runtime.Provider, input func(string) []string, cfg runtime.Config) error {
 	if err := startUnwelded(t, sp, cfg); err != nil {
 		return fmt.Errorf("runtime contract 020: Start with a startup dialog = %w, want nil", err)
+	}
+	if got := input(unweldedLaunchSession); len(got) == 0 {
+		return errors.New("runtime contract 020: Start typed nothing into the startup dialog: the dialog pass answers it at the start")
+	}
+	turn, err := takeQueuedTurn(sp)
+	if err != nil {
+		return err
+	}
+	if err := sendQueued(sp, turn); err != nil && !runtime.NudgeDelivered(err) {
+		return fmt.Errorf("runtime contract 020: sending the queued first turn after the dialog = %w, want delivered", err)
 	}
 	got := input(unweldedLaunchSession)
 	switch at := slices.Index(got, unweldedFirstTurn); {
@@ -127,33 +165,56 @@ func checkDialogAtStart(t *testing.T, sp runtime.Provider, input func(string) []
 	return nil
 }
 
-// checkRefusedHandedBack reports how sp breaks RefusedHandedBack for a first
-// turn refused with word.
-func checkRefusedHandedBack(t *testing.T, sp runtime.Provider, input func(string) []string, cfg runtime.Config, word runtime.InputOutcome) error {
+// checkQueueDeliversOnce reports how sp breaks QueueDeliversOnce.
+func checkQueueDeliversOnce(t *testing.T, sp runtime.Provider, input func(string) []string, cfg runtime.Config, readyFloor bool) error {
+	began := time.Now()
 	if err := startUnwelded(t, sp, cfg); err != nil {
-		return fmt.Errorf("runtime contract 020: Start whose first turn was refused %s = %w, want nil: a refused turn never fails a start", word, err)
+		return fmt.Errorf("runtime contract 020: Start = %w, want nil", err)
 	}
-	if got := input(unweldedLaunchSession); firstTurns(got) != 0 {
-		return fmt.Errorf("runtime contract 020: input %q holds a first turn the runtime refused %s", got, word)
+	turn, err := takeQueuedTurn(sp)
+	if err != nil {
+		return err
 	}
-	turn, ok := runtime.TakeStartupNudgeHandback(sp, unweldedLaunchSession)
-	if !ok || turn != unweldedFirstTurn {
-		return fmt.Errorf("runtime contract 020: handback after a first turn refused %s = %q, %v; want the first turn: it was dropped", word, turn, ok)
+	if floor := began.Add(time.Duration(cfg.ReadyDelayMs) * time.Millisecond); readyFloor && turn.NotBefore.Before(floor) {
+		return fmt.Errorf("runtime contract 020: the handed-back turn may be sent at %s, before ready_delay_ms (%d) has passed since the start (%s): a runtime without an idle boundary holds it that long", turn.NotBefore.Format(time.RFC3339Nano), cfg.ReadyDelayMs, floor.Format(time.RFC3339Nano))
 	}
-	if _, again := runtime.TakeStartupNudgeHandback(sp, unweldedLaunchSession); again {
-		return errors.New("runtime contract 020: the handback was taken twice")
+	if err := sendQueued(sp, turn); err != nil && !runtime.NudgeDelivered(err) {
+		return fmt.Errorf("runtime contract 020: sending the queued first turn = %w, want delivered", err)
+	}
+	if got := input(unweldedLaunchSession); firstTurns(got) != 1 {
+		return fmt.Errorf("runtime contract 020: input %q holds the first turn %d times after the queue sent it, want once", got, firstTurns(got))
 	}
 	return nil
 }
 
-// checkGoneDiesDuringStartup reports how sp breaks GoneDiesDuringStartup.
-func checkGoneDiesDuringStartup(t *testing.T, sp runtime.Provider, cfg runtime.Config) error {
-	err := startUnwelded(t, sp, cfg)
-	if !errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
-		return fmt.Errorf("runtime contract 020: Start whose first turn found the session gone = %w, want runtime.ErrSessionDiedDuringStartup", err)
+// checkRefusedRetriedByQueue reports how sp breaks RefusedRetriedByQueue for
+// a turn refused with word.
+func checkRefusedRetriedByQueue(t *testing.T, sp runtime.Provider, input func(string) []string, accept func(), cfg runtime.Config, word runtime.InputOutcome) error {
+	if err := startUnwelded(t, sp, cfg); err != nil {
+		return fmt.Errorf("runtime contract 020: Start of a runtime refusing input %s = %w, want nil: Start types nothing, so a refusal never fails it", word, err)
 	}
-	if turn, ok := runtime.TakeStartupNudgeHandback(sp, unweldedLaunchSession); ok {
-		return fmt.Errorf("runtime contract 020: a failed start handed back %q", turn)
+	turn, err := takeQueuedTurn(sp)
+	if err != nil {
+		return err
+	}
+	err = sendQueued(sp, turn)
+	switch {
+	case err == nil:
+		return fmt.Errorf("runtime contract 020: a queued first turn refused %s read as delivered, so the queue acks a turn never typed", word)
+	case runtime.NudgeDelivered(err):
+		return fmt.Errorf("runtime contract 020: a queued first turn refused %s read as delivered (%w), so the queue acks a turn never typed", word, err)
+	case !errors.Is(err, word.Sentinel()):
+		return fmt.Errorf("runtime contract 020: a queued first turn refused %s = %w, want the %s refusal sentinel, which the queue retries", word, err, word)
+	}
+	if got := input(unweldedLaunchSession); firstTurns(got) != 0 {
+		return fmt.Errorf("runtime contract 020: input %q holds a first turn the runtime refused %s", got, word)
+	}
+	accept()
+	if err := sendQueued(sp, turn); err != nil && !runtime.NudgeDelivered(err) {
+		return fmt.Errorf("runtime contract 020: the queue's retry of a turn refused %s = %w, want delivered once the runtime takes input", word, err)
+	}
+	if got := input(unweldedLaunchSession); firstTurns(got) != 1 {
+		return fmt.Errorf("runtime contract 020: input %q holds the first turn %d times after the retry, want once", got, firstTurns(got))
 	}
 	return nil
 }

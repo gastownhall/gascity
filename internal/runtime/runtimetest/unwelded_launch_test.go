@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
@@ -58,29 +59,28 @@ func goldenInput(t *testing.T, state string) func(string) []string {
 // TestUnweldedLaunchContractOnExec runs RUNTIME-CONTRACT-020 over the
 // seam-backed exec provider and the golden reference in launch mode,
 // proc.provision with proc.launch and no exec: gc launches the agent with
-// the launch op, delivers the first turn through the nudge op after the
-// dialog pass, and hands back a turn the pack refused.
+// the launch op, answers the dialog, and hands the first turn back, which
+// the contract's stand-in queue sends through the nudge op. The golden in
+// this mode has no idle boundary, so the turn carries ready_delay_ms.
 func TestUnweldedLaunchContractOnExec(t *testing.T) {
 	RunUnweldedLaunchContract(t, UnweldedLaunchFixture{
-		New: func(t *testing.T, refuse runtime.InputOutcome) (runtime.Provider, func(string) []string) {
+		New: func(t *testing.T, refuse runtime.InputOutcome) (runtime.Provider, func(string) []string, func()) {
 			script, state := unweldedGolden(t)
-			switch refuse {
-			case "":
-			case runtime.InputOutcomeGone:
-				t.Setenv("GC_RPP_FAULT", "dead")
-			default:
+			if refuse != "" {
 				t.Setenv("GC_RPP_FAULT", "refuse_"+string(refuse))
 			}
-			return sessionexec.NewSeamBacked(script), goldenInput(t, state)
+			accept := func() { t.Setenv("GC_RPP_FAULT", "") }
+			return sessionexec.NewSeamBacked(script), goldenInput(t, state), accept
 		},
 		Config: func(t *testing.T, dialog bool) runtime.Config {
-			cfg := runtime.Config{WorkDir: t.TempDir(), Command: "sleep 300", ReadyDelayMs: 10}
+			cfg := runtime.Config{WorkDir: t.TempDir(), Command: "sleep 300", ReadyDelayMs: 50}
 			if dialog {
 				cfg.EmitsPermissionWarning = true
 				cfg.Env = map[string]string{reference.StartupDialogEnv: "1"}
 			}
 			return cfg
 		},
+		ReadyFloor: true,
 	})
 }
 
@@ -90,16 +90,21 @@ func TestUnweldedLaunchContractOnExec(t *testing.T) {
 type unweldedFake struct {
 	*runtime.Fake
 	refuse         runtime.InputOutcome
-	typesTwice     bool // types the first turn twice
-	beforeDialog   bool // types the first turn before answering the dialog
-	dropsRefusal   bool // hands back nothing for a refused turn
-	typesRefusal   bool // types a refused turn anyway
-	failsOnRefusal bool // fails the start whose turn was refused
-	goneStarts     bool // reads gone as a started session
+	typesAtStart   bool // types the first turn in Start
+	dropsTurn      bool // hands back nothing
+	handsBackTwice bool // hands the turn back on every take
+	skipsDialog    bool // leaves the startup dialog unanswered
+	typesTwice     bool // a nudge types its text twice
+	noFloor        bool // hands the turn back without its ready floor
+	typesRefusal   bool // types a nudge it refuses
+	untypedRefusal bool // refuses with an untyped error
+	refusalOK      bool // answers a refused nudge nil
+	failsStart     bool // fails Start while refusing input
 
 	mu       sync.Mutex
+	accepted bool
 	typed    []string
-	handback map[string]string
+	handback map[string]runtime.StartupNudge
 }
 
 func (f *unweldedFake) Start(ctx context.Context, name string, cfg runtime.Config) error {
@@ -108,50 +113,65 @@ func (f *unweldedFake) Start(ctx context.Context, name string, cfg runtime.Confi
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	dialog := cfg.EmitsPermissionWarning
-	if dialog && f.beforeDialog {
-		f.typed = append(f.typed, cfg.Nudge)
-		dialog = false
-	}
-	if dialog {
+	if cfg.EmitsPermissionWarning && !f.skipsDialog {
 		f.typed = append(f.typed, "Enter")
 	}
-	switch f.refuse {
-	case "":
-		if !f.beforeDialog || !cfg.EmitsPermissionWarning {
-			f.typed = append(f.typed, cfg.Nudge)
-		}
-		if f.typesTwice {
-			f.typed = append(f.typed, cfg.Nudge)
-		}
-		return nil
-	case runtime.InputOutcomeGone:
-		if f.goneStarts {
-			return nil
-		}
-		return fmt.Errorf("%w: %s", runtime.ErrSessionDiedDuringStartup, name)
-	}
-	if f.typesRefusal {
+	if f.typesAtStart {
 		f.typed = append(f.typed, cfg.Nudge)
 	}
-	if !f.dropsRefusal {
-		if f.handback == nil {
-			f.handback = map[string]string{}
-		}
-		f.handback[name] = cfg.Nudge
-	}
-	if f.failsOnRefusal {
+	if f.failsStart && f.refuse != "" {
 		return fmt.Errorf("first turn refused %s", f.refuse)
+	}
+	if !f.dropsTurn {
+		turn := runtime.StartupNudge{Text: cfg.Nudge}
+		if !f.noFloor {
+			turn.NotBefore = time.Now().Add(time.Duration(cfg.ReadyDelayMs) * time.Millisecond)
+		}
+		if f.handback == nil {
+			f.handback = map[string]runtime.StartupNudge{}
+		}
+		f.handback[name] = turn
 	}
 	return nil
 }
 
-func (f *unweldedFake) TakeStartupNudgeHandback(name string) (string, bool) {
+func (f *unweldedFake) TakeStartupNudgeHandback(name string) (runtime.StartupNudge, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	nudge, ok := f.handback[name]
-	delete(f.handback, name)
+	if !f.handsBackTwice {
+		delete(f.handback, name)
+	}
 	return nudge, ok
+}
+
+func (f *unweldedFake) Nudge(_ string, content []runtime.ContentBlock) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	text := content[0].Text
+	if f.refuse != "" && !f.accepted {
+		if f.typesRefusal {
+			f.typed = append(f.typed, text)
+		}
+		switch {
+		case f.refusalOK:
+			return nil
+		case f.untypedRefusal:
+			return fmt.Errorf("refused %s", f.refuse)
+		}
+		return fmt.Errorf("%w: refused", f.refuse.Sentinel())
+	}
+	f.typed = append(f.typed, text)
+	if f.typesTwice {
+		f.typed = append(f.typed, text)
+	}
+	return nil
+}
+
+func (f *unweldedFake) accept() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.accepted = true
 }
 
 func (f *unweldedFake) input(string) []string {
@@ -163,45 +183,36 @@ func (f *unweldedFake) input(string) []string {
 // Kills a RUNTIME-CONTRACT-020 check that passes a runtime breaking the duty
 // it names, and one that fails a runtime keeping it.
 func TestUnweldedLaunchChecksCatchTheirViolation(t *testing.T) {
-	cfg := runtime.Config{Command: "agent"}
+	cfg := runtime.Config{Command: "agent", ReadyDelayMs: 20}
 	dialogCfg := runtime.Config{Command: "agent", EmitsPermissionWarning: true}
 	refused := runtime.InputOutcomeBusy
+	queued := func(t *testing.T, f *unweldedFake) error { return checkFirstTurnQueued(t, f, f.input, cfg) }
+	dialog := func(t *testing.T, f *unweldedFake) error { return checkDialogAtStart(t, f, f.input, dialogCfg) }
+	once := func(t *testing.T, f *unweldedFake) error { return checkQueueDeliversOnce(t, f, f.input, cfg, true) }
+	retried := func(t *testing.T, f *unweldedFake) error {
+		return checkRefusedRetriedByQueue(t, f, f.input, f.accept, cfg, refused)
+	}
 	for _, tc := range []struct {
 		name   string
 		fake   *unweldedFake
 		check  func(t *testing.T, f *unweldedFake) error
 		wantOK bool
 	}{
-		{"delivered", &unweldedFake{}, func(t *testing.T, f *unweldedFake) error {
-			return checkFirstTurnDelivered(t, f, f.input, cfg)
-		}, true},
-		{"typed twice", &unweldedFake{typesTwice: true}, func(t *testing.T, f *unweldedFake) error {
-			return checkFirstTurnDelivered(t, f, f.input, cfg)
-		}, false},
-		{"dialog answered first", &unweldedFake{}, func(t *testing.T, f *unweldedFake) error {
-			return checkDialogAtStart(t, f, f.input, dialogCfg)
-		}, true},
-		{"typed before the dialog", &unweldedFake{beforeDialog: true}, func(t *testing.T, f *unweldedFake) error {
-			return checkDialogAtStart(t, f, f.input, dialogCfg)
-		}, false},
-		{"refusal handed back", &unweldedFake{refuse: refused}, func(t *testing.T, f *unweldedFake) error {
-			return checkRefusedHandedBack(t, f, f.input, cfg, refused)
-		}, true},
-		{"refusal dropped", &unweldedFake{refuse: refused, dropsRefusal: true}, func(t *testing.T, f *unweldedFake) error {
-			return checkRefusedHandedBack(t, f, f.input, cfg, refused)
-		}, false},
-		{"refusal typed", &unweldedFake{refuse: refused, typesRefusal: true}, func(t *testing.T, f *unweldedFake) error {
-			return checkRefusedHandedBack(t, f, f.input, cfg, refused)
-		}, false},
-		{"refusal fails the start", &unweldedFake{refuse: refused, failsOnRefusal: true}, func(t *testing.T, f *unweldedFake) error {
-			return checkRefusedHandedBack(t, f, f.input, cfg, refused)
-		}, false},
-		{"gone dies", &unweldedFake{refuse: runtime.InputOutcomeGone}, func(t *testing.T, f *unweldedFake) error {
-			return checkGoneDiesDuringStartup(t, f, cfg)
-		}, true},
-		{"gone starts", &unweldedFake{refuse: runtime.InputOutcomeGone, goneStarts: true}, func(t *testing.T, f *unweldedFake) error {
-			return checkGoneDiesDuringStartup(t, f, cfg)
-		}, false},
+		{"queued", &unweldedFake{}, queued, true},
+		{"typed at start", &unweldedFake{typesAtStart: true}, queued, false},
+		{"turn dropped", &unweldedFake{dropsTurn: true}, queued, false},
+		{"handed back twice", &unweldedFake{handsBackTwice: true}, queued, false},
+		{"dialog answered at start", &unweldedFake{}, dialog, true},
+		{"dialog left", &unweldedFake{skipsDialog: true}, dialog, false},
+		{"typed before the dialog", &unweldedFake{typesAtStart: true}, dialog, false},
+		{"delivered once", &unweldedFake{}, once, true},
+		{"delivered twice", &unweldedFake{typesTwice: true}, once, false},
+		{"no ready floor", &unweldedFake{noFloor: true}, once, false},
+		{"refusal retried", &unweldedFake{refuse: refused}, retried, true},
+		{"refusal typed", &unweldedFake{refuse: refused, typesRefusal: true}, retried, false},
+		{"refusal untyped", &unweldedFake{refuse: refused, untypedRefusal: true}, retried, false},
+		{"refusal reads delivered", &unweldedFake{refuse: refused, refusalOK: true}, retried, false},
+		{"refusal fails the start", &unweldedFake{refuse: refused, failsStart: true}, retried, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.fake.Fake = runtime.NewFake()
