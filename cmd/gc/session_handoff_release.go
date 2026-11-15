@@ -134,13 +134,7 @@ func releaseStagedSelfHandoffs(mailStore beads.MailStore, sessions beads.Session
 			continue
 		}
 
-		marker := map[string]string{handoffReleaseAttemptedAtKey: now.Format(time.RFC3339)}
-		if writer != nil {
-			err = writer.UpdateIfMatch(sessionID, live.Revision, beads.UpdateOpts{Metadata: marker})
-		} else {
-			err = sessions.SetMetadataBatch(sessionID, marker)
-		}
-		if err != nil {
+		if err := recordHandoffReleaseAttempt(sessions, writer, live, now); err != nil {
 			log.Printf("releaseStagedSelfHandoffs: recording release-attempt for session %s: %v", sessionAddress, err)
 			continue
 		}
@@ -151,6 +145,18 @@ func releaseStagedSelfHandoffs(mailStore beads.MailStore, sessions beads.Session
 		failed++
 	}
 	return released, failed
+}
+
+// recordHandoffReleaseAttempt stamps the release-attempt marker on the session
+// row that live was read from. With a conditional writer the stamp lands only
+// while the row is still at live's revision; without one it is written
+// unconditionally, after the caller's live re-read.
+func recordHandoffReleaseAttempt(sessions beads.SessionStore, writer beads.ConditionalWriter, live beads.Bead, now time.Time) error {
+	marker := map[string]string{handoffReleaseAttemptedAtKey: now.Format(time.RFC3339)}
+	if writer != nil {
+		return writer.UpdateIfMatch(live.ID, live.Revision, beads.UpdateOpts{Metadata: marker})
+	}
+	return sessions.SetMetadataBatch(live.ID, marker)
 }
 
 // liveStagedHandoffRow re-reads the session row through the live handle and
