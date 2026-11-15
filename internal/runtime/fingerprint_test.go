@@ -594,11 +594,66 @@ func TestCoreFingerprintDriftNamesTheMovedField(t *testing.T) {
 	}
 }
 
-// TestCoreFingerprintDriftNamesEveryCoreField runs every field of the
-// partition's case table, which covers each field hashed into the core, and
-// requires the breakdown to name a drifted field for each.
+// coreFieldBreakdownKey maps every field of coreFieldHalf to the
+// CoreFingerprintBreakdown key that names it when it drifts. Most fields keep
+// their own name; FingerprintExtra is FPExtra, and the three fields folded into
+// the overlay-providers hash share OverlayProviders.
+var coreFieldBreakdownKey = map[string]string{
+	"Command":              "Command",
+	"Lifecycle":            "Lifecycle",
+	"Upstream":             "Upstream",
+	"OperatorEnv":          "OperatorEnv",
+	"MCPServers":           "MCPServers",
+	"AcceptStartupDialogs": "AcceptStartupDialogs",
+	"MouseOn":              "MouseOn",
+	"SessionSetup":         "SessionSetup",
+	"SessionSetupScript":   "SessionSetupScript",
+	"Env":                  "Env",
+	"FingerprintExtra":     "FPExtra",
+	"PreStart":             "PreStart",
+	"OverlayDir":           "OverlayDir",
+	"CopyFiles":            "CopyFiles",
+	"ProviderName":         "OverlayProviders",
+	"ProviderOverlayName":  "OverlayProviders",
+	"InstallAgentHooks":    "OverlayProviders",
+}
+
+// TestCoreFingerprintDriftNamesEveryCoreField requires every field hashed into
+// the core (every coreFieldHalf entry, whether or not partitionHalfCases has a
+// row for it) to have a key in CoreFingerprintBreakdown, so a core drift never
+// logs without a drifted field. Each field the partition table mutates must
+// then drift exactly that key.
 func TestCoreFingerprintDriftNamesEveryCoreField(t *testing.T) {
 	base := goldenFixtures()["comprehensive"]
+	// Optional fields enter the breakdown only when set; set each one the
+	// fixture leaves empty so every key is present.
+	full := base
+	full.Upstream = "bedrock"
+	fields := CoreFingerprintBreakdown(full).Fields
+
+	claimed := map[string]bool{}
+	for field := range coreFieldHalf {
+		key, ok := coreFieldBreakdownKey[field]
+		if !ok {
+			t.Errorf("core field %s has no entry in coreFieldBreakdownKey: give it a key in CoreFingerprintBreakdown and map it here", field)
+			continue
+		}
+		claimed[key] = true
+		if _, ok := fields[key]; !ok {
+			t.Errorf("core field %s maps to breakdown key %q, which CoreFingerprintBreakdown does not emit (an optional field must also be set in this test's config)", field, key)
+		}
+	}
+	for field := range coreFieldBreakdownKey {
+		if _, ok := coreFieldHalf[field]; !ok {
+			t.Errorf("coreFieldBreakdownKey maps %s, which coreFieldHalf does not classify as a core field", field)
+		}
+	}
+	for key := range fields {
+		if !claimed[key] {
+			t.Errorf("breakdown key %q is not mapped from any core field", key)
+		}
+	}
+
 	stored := CoreFingerprintBreakdown(base)
 	for _, tc := range partitionHalfCases {
 		t.Run(tc.field, func(t *testing.T) {
@@ -607,8 +662,9 @@ func TestCoreFingerprintDriftNamesEveryCoreField(t *testing.T) {
 			if CoreFingerprint(base) == CoreFingerprint(current) {
 				t.Fatal("the mutation did not move the core fingerprint")
 			}
-			if got := CoreFingerprintDriftFields(stored, current); len(got) == 0 {
-				t.Fatal("the core fingerprint moved but the breakdown names no drifted field")
+			want := coreFieldBreakdownKey[tc.field]
+			if got := CoreFingerprintDriftFields(stored, current); !slices.Equal(got, []string{want}) {
+				t.Fatalf("CoreFingerprintDriftFields = %v, want [%s]", got, want)
 			}
 		})
 	}
