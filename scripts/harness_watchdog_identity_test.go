@@ -503,6 +503,8 @@ gc_harness_watchdog "$test_pgid" 4 1 identity-test "$test_identity" 1
 
 // V11 is a real kernel PID-reuse reproduction, entirely inside a user and
 // PID namespace. Every group signal below is confined to that namespace.
+// GC_TEST_HARNESS_REQUIRE_PID_REUSE=1 makes unavailable namespace controls
+// fail the dedicated local proof rather than skip it.
 func TestHarnessWatchdogDoesNotSignalRecycledGroup(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("user and PID namespaces are Linux-only")
@@ -515,7 +517,13 @@ func TestHarnessWatchdogDoesNotSignalRecycledGroup(t *testing.T) {
 	for path, body := range map[string]string{
 		runner: `#!/usr/bin/env bash
 source "$1"
-gc_harness_run_supervised identity-test 4 1 -- bash -c 'echo $$ > "$1/job.pid"; sleep 2' bash "$2"
+gc_harness_run_supervised identity-test 4 1 -- bash -c '
+  work="$1"
+  IFS= read -r stat < "/proc/$$/stat"
+  rest="${stat##*) }"; set -- $rest
+  printf "%s\n" "$3" > "$work/job.pgid"
+  sleep 2
+' bash "$2"
 `,
 		strangerScript: `#!/usr/bin/env bash
 trap 'echo QUIT >> "$1/stranger.log"; exit 73' QUIT
@@ -535,9 +543,9 @@ work=%q
 set -m
 bash %q %q "$work" > "$work/runner.log" 2>&1 & runner=$!
 set +m
-for i in $(seq 1 100); do [[ -s "$work/job.pid" ]] && break; sleep 0.02; done
-[[ -s "$work/job.pid" ]] || exit 82
-old="$(cat "$work/job.pid")"
+for i in $(seq 1 100); do [[ -s "$work/job.pgid" ]] && break; sleep 0.02; done
+[[ -s "$work/job.pgid" ]] || exit 82
+old="$(cat "$work/job.pgid")"
 kill -KILL "$runner"; wait "$runner" 2>/dev/null || true
 for i in $(seq 1 150); do kill -0 -- -"$old" 2>/dev/null || break; sleep 0.02; done
 if kill -0 -- -"$old" 2>/dev/null; then echo ORIGINAL_GROUP_REMAINS; exit 83; fi
@@ -557,8 +565,11 @@ cat "$work/runner.log"
 		t.Fatal(err)
 	}
 	script := fmt.Sprintf(`
-if ! unshare --user --map-root-user --pid --fork --mount-proc bash -c 'true' >/dev/null 2>&1; then
-  echo "UNSHARE_UNAVAILABLE: user and PID namespace creation denied"
+if ! unshare --user --map-root-user --pid --fork --mount-proc bash -ec '
+  echo 400 > /proc/sys/kernel/pid_max
+  echo 100 > /proc/sys/kernel/ns_last_pid
+' >/dev/null 2>&1; then
+  echo "UNSHARE_UNAVAILABLE: user/PID namespaces or pid_max/ns_last_pid writes denied"
   exit 77
 fi
 unshare --user --map-root-user --pid --fork --mount-proc bash %q
@@ -566,6 +577,9 @@ unshare --user --map-root-user --pid --fork --mount-proc bash %q
 	out, err := runHarnessScript(t, script)
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) && exitErr.ExitCode() == 77 {
+		if os.Getenv("GC_TEST_HARNESS_REQUIRE_PID_REUSE") == "1" {
+			t.Fatalf("contained PID reuse required but unavailable: %s", strings.TrimSpace(out))
+		}
 		t.Skip(strings.TrimSpace(out))
 	}
 	if err != nil {
