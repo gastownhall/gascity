@@ -2485,7 +2485,7 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(cfg *config.City, now time.Time
 // orderTrackingSweepStores does; a rig with no live store this pass is skipped
 // rather than opened.
 func (cr *CityRuntime) nudgeSweepRigScopes(cfg *config.City) []nudgeSweepScope {
-	rigStores := cr.rigBeadStores()
+	rigStores := cr.rigBeadStores() // residency:allow — the open rig frame the nudge-shadow sweep reads stale shadows over; it resolves no bead
 	var scopes []nudgeSweepScope
 	for _, target := range orderTrackingSweepTargetsForConfig(cr.cityPath, cfg) {
 		if target.target.ScopeKind != "rig" {

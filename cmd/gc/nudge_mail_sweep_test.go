@@ -1671,6 +1671,12 @@ func writeNudgeSweepRigCity(t *testing.T, rigNames ...string) (string, map[strin
 
 // createStaleNudgeShadow opens the store at scopeRoot and files one open
 // gc:nudge shadow in it.
+// nudgeSweepAnyAgeTTL is the smallest TTL the CLI accepts. A shadow written by
+// createStaleNudgeShadow is older than it by the time the sweep runs (the file
+// store writes between the two take far longer than a nanosecond), so the tests
+// need no wall-clock wait to age a shadow.
+const nudgeSweepAnyAgeTTL = time.Nanosecond
+
 func createStaleNudgeShadow(t *testing.T, scopeRoot, cityDir, nudgeID string) (beads.Store, string) {
 	t.Helper()
 	store, err := openStoreAtForCity(scopeRoot, cityDir)
@@ -1693,10 +1699,9 @@ func TestCmdOrderSweepNudgeMail_ClosesStaleShadowsInRigStores(t *testing.T) {
 	cityStore, cityBead := createStaleNudgeShadow(t, cityDir, cityDir, "city-1")
 	alphaStore, alphaBead := createStaleNudgeShadow(t, rigs["alpha"], cityDir, "alpha-1")
 	betaStore, betaBead := createStaleNudgeShadow(t, rigs["beta"], cityDir, "beta-1")
-	time.Sleep(20 * time.Millisecond) // age the shadows past the 1ms TTL below
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderSweepNudgeMail(time.Millisecond, 0, 0, true, true, false, false, &stdout, &stderr)
+	code := cmdOrderSweepNudgeMail(nudgeSweepAnyAgeTTL, 0, 0, true, true, false, false, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderSweepNudgeMail = %d; stderr: %s", code, stderr.String())
 	}
@@ -1720,7 +1725,7 @@ func TestCmdOrderSweepNudgeMail_ClosesStaleShadowsInRigStores(t *testing.T) {
 	// A second run is a no-op, and the dry-run twin enumerates the same stores.
 	stdout.Reset()
 	stderr.Reset()
-	if code := cmdOrderSweepNudgeMail(time.Millisecond, 0, 0, true, true, true, false, &stdout, &stderr); code != 0 {
+	if code := cmdOrderSweepNudgeMail(nudgeSweepAnyAgeTTL, 0, 0, true, true, true, false, &stdout, &stderr); code != 0 {
 		t.Fatalf("dry-run = %d; stderr: %s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "nothing to close") {
@@ -1732,10 +1737,9 @@ func TestCmdOrderSweepNudgeMail_DryRunSeesRigStores(t *testing.T) {
 	cityDir, rigs := writeNudgeSweepRigCity(t, "alpha")
 	_, _ = createStaleNudgeShadow(t, cityDir, cityDir, "city-1")
 	alphaStore, alphaBead := createStaleNudgeShadow(t, rigs["alpha"], cityDir, "alpha-1")
-	time.Sleep(20 * time.Millisecond)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdOrderSweepNudgeMail(time.Millisecond, 0, 0, true, true, true, false, &stdout, &stderr); code != 0 {
+	if code := cmdOrderSweepNudgeMail(nudgeSweepAnyAgeTTL, 0, 0, true, true, true, false, &stdout, &stderr); code != 0 {
 		t.Fatalf("dry-run = %d; stderr: %s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "would close 2 nudge bead(s)") {
