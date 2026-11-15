@@ -290,6 +290,66 @@ func TestPreCommitRegeneratesDashboardClientOnSpecChange(t *testing.T) {
 	}
 }
 
+// TestPreCommitStagesEveryFileGenschemaWrites pins the hook's staged list to
+// cmd/genschema's own output list. genschema rewrites every file it names, so a
+// file the hook regenerates but never stages leaves the worktree dirty after a
+// "successful" hooked commit, and make check-schema and CI's preflight-generated
+// job then fail on git diff --exit-code docs/reference/ (ga-35kaho: a new Agent
+// field changed pack-schema.{json,txt}, which the hook did not stage).
+func TestPreCommitStagesEveryFileGenschemaWrites(t *testing.T) {
+	repoRoot := repoRoot(t)
+
+	src, err := os.ReadFile(filepath.Join(repoRoot, "cmd", "genschema", "main.go"))
+	if err != nil {
+		t.Fatalf("read genschema main.go: %v", err)
+	}
+	listStart := strings.Index(string(src), "files := []string{")
+	if listStart < 0 {
+		t.Fatal("cmd/genschema/main.go no longer has a `files := []string{` output list; update this test to read the new one")
+	}
+	list := string(src)[listStart:]
+	listEnd := strings.Index(list, "\n\t}")
+	if listEnd < 0 {
+		t.Fatal("cmd/genschema's files list is not closed by a tab-indented `}`; update this test to read it")
+	}
+	list = list[:listEnd]
+	var outputs []string
+	for _, line := range strings.Split(list, "\n") {
+		line = strings.Trim(strings.TrimSpace(line), `",`)
+		if strings.HasPrefix(line, "docs/") {
+			outputs = append(outputs, line)
+		}
+	}
+	if len(outputs) == 0 {
+		t.Fatal("found no docs/ outputs in cmd/genschema's files list")
+	}
+
+	hook, err := os.ReadFile(filepath.Join(repoRoot, ".githooks", "pre-commit"))
+	if err != nil {
+		t.Fatalf("read pre-commit hook: %v", err)
+	}
+	content := string(hook)
+	genIdx := strings.Index(content, "go run ./cmd/genschema")
+	if genIdx < 0 {
+		t.Fatal("pre-commit hook must run go run ./cmd/genschema")
+	}
+	// The `git add` line that follows the genschema run.
+	rest := content[genIdx:]
+	addIdx := strings.Index(rest, "git add ")
+	if addIdx < 0 {
+		t.Fatal("pre-commit hook must stage genschema's outputs after running it")
+	}
+	addLine := rest[addIdx:]
+	if nl := strings.Index(addLine, "\n"); nl >= 0 {
+		addLine = addLine[:nl]
+	}
+	for _, out := range outputs {
+		if !strings.Contains(addLine, out) {
+			t.Errorf("pre-commit hook regenerates %s via cmd/genschema but does not stage it; its `git add` after genschema is %q", out, addLine)
+		}
+	}
+}
+
 func TestPreCommitReachesDashboardBlockWhenOnlySpecFileStaged(t *testing.T) {
 	repoRoot := repoRoot(t)
 	hookPath := filepath.Join(repoRoot, ".githooks", "pre-commit")
@@ -462,6 +522,8 @@ func TestPreCommitFailsClosedWhenGoBlockStagesSpecAsSideEffectAndNpmAbsent(t *te
 		filepath.Join(tmpRepo, "internal", "api", "genclient", "client_gen.go"),
 		filepath.Join(tmpRepo, "docs", "reference", "schema", "city-schema.json"),
 		filepath.Join(tmpRepo, "docs", "reference", "schema", "city-schema.txt"),
+		filepath.Join(tmpRepo, "docs", "reference", "schema", "pack-schema.json"),
+		filepath.Join(tmpRepo, "docs", "reference", "schema", "pack-schema.txt"),
 		filepath.Join(tmpRepo, "docs", "reference", "config.md"),
 		filepath.Join(tmpRepo, "docs", "reference", "cli.md"),
 	}
