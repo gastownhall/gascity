@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/pathutil"
@@ -1194,6 +1195,138 @@ func TestLintAcceptsShippedHookMatchers(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+// requireNoTerminalControls fails when text carries a control character a
+// terminal would act on. The newline that ends each diagnostic line is the one
+// control character stderr legitimately holds.
+func requireNoTerminalControls(t *testing.T, text string) {
+	t.Helper()
+	for i, r := range text {
+		if r != '\n' && unicode.IsControl(r) {
+			t.Fatalf("output has control character %U at byte %d, want it rendered as an escape:\n%q", r, i, text)
+		}
+	}
+}
+
+func TestFormatLintDiagnosticEscapesControlCharacters(t *testing.T) {
+	tests := []struct {
+		name string
+		diag lintDiagnostic
+		want string
+	}{
+		{"escape in message", lintDiagnostic{Path: "p", Message: "a\x1b[2Kb"}, `p: a\x1b[2Kb`},
+		{"delete", lintDiagnostic{Path: "p", Message: "a\x7fb"}, `p: a\x7fb`},
+		{"c1 control sequence introducer", lintDiagnostic{Path: "p", Message: "a\u009bb"}, `p: a\x9bb`},
+		{"carriage return cannot rewrite the line", lintDiagnostic{Path: "p", Message: "ok\rfake"}, `p: ok\x0dfake`},
+		{"newline cannot forge a second diagnostic", lintDiagnostic{Path: "p", Message: "a\nq: forged"}, `p: a\x0aq: forged`},
+		{"escape in path", lintDiagnostic{Path: "d\x1b[H/s.json", Line: 3, Message: "m"}, `d\x1b[H/s.json:3: m`},
+		{"escape in warning message", lintDiagnostic{Severity: "warning", Path: "p", Message: "a\x1bb"}, `p: warning: a\x1bb`},
+		{"printable and non-ASCII text is kept", lintDiagnostic{Path: "p", Message: "héllo 日本 \\ \"q\""}, `p: héllo 日本 \ "q"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatLintDiagnostic(tt.diag)
+			if got != tt.want {
+				t.Fatalf("formatLintDiagnostic = %q, want %q", got, tt.want)
+			}
+			requireNoTerminalControls(t, got)
+			if strings.Contains(got, "\n") {
+				t.Fatalf("formatLintDiagnostic = %q, want a single line", got)
+			}
+		})
+	}
+}
+
+// Pack-controlled text from a .claude/settings.json reaches stderr through the
+// bare-hook message, the matcher messages and the regexp parse error. None of
+// it may carry a raw control character, and each line must still say where the
+// problem is.
+func TestLintHookDiagnosticsEscapeControlCharacters(t *testing.T) {
+	loc := filepath.Join(".claude", "settings.json")
+	tests := []struct {
+		name     string
+		settings string
+		wantExit bool
+		want     []string
+	}{
+		{
+			name:     "event name on a bare hook entry",
+			settings: `{"hooks":{"Evil\u001b[2K":[{"type":"command","command":"true"}]}}`,
+			wantExit: true,
+			want:     []string{loc + `: hooks.Evil\x1b[2K[0] is a bare hook entry`},
+		},
+		{
+			name:     "event name on a matcher message",
+			settings: `{"hooks":{"Evil\u001b[2K":[{"matcher":"Bash(*bd mol pour*)","hooks":[{"type":"command","command":"true"}]}]}}`,
+			wantExit: true,
+			want:     []string{loc + `: hooks.Evil\x1b[2K[0] matcher`},
+		},
+		{
+			name:     "regexp parse error echoing the matcher",
+			settings: `{"hooks":{"PreToolUse":[{"matcher":"[\u001b[2K","hooks":[{"type":"command","command":"true"}]}]}}`,
+			wantExit: true,
+			want:     []string{loc + `: hooks.PreToolUse[0] matcher`, `\x1b[2K`},
+		},
+		{
+			name:     "c1 control and delete in an event name",
+			settings: `{"hooks":{"Evil\u009b\u007f":[{"matcher":"Bash(*x*)","hooks":[{"type":"command","command":"true"}]}]}}`,
+			wantExit: true,
+			want:     []string{loc + `: hooks.Evil\x9b\x7f[0] matcher`},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			packDir := writeLintHookSettings(t, tt.settings)
+
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"lint", packDir}, &stdout, &stderr)
+			if (code != 0) != tt.wantExit {
+				t.Fatalf("gc lint = %d, wantFailure=%v\nstdout:\n%s\nstderr:\n%q", code, tt.wantExit, stdout.String(), stderr.String())
+			}
+			requireNoTerminalControls(t, stderr.String())
+			for _, want := range tt.want {
+				if !strings.Contains(stderr.String(), want) {
+					t.Errorf("stderr missing %q:\n%q", want, stderr.String())
+				}
+			}
+		})
+	}
+}
+
+// The JSON report is a machine format that encoding/json already escapes, so
+// the human-output escaping must not leak into it: a consumer decoding the
+// report still gets the original text.
+func TestLintJSONKeepsOriginalControlCharacters(t *testing.T) {
+	packDir := writeLintHookSettings(t, `{"hooks":{"Evil\u001b[2K":[{"type":"command","command":"true"}]}}`)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"lint", packDir, "--json"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("gc lint --json = 0, want the bare hook entry to fail\nstdout:\n%s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), `Evil\u001b[2K`) {
+		t.Errorf("JSON report missing the JSON-escaped event name:\n%s", stdout.String())
+	}
+	if strings.Contains(stdout.String(), `\x1b`) {
+		t.Errorf("JSON report carries the human escape \\x1b:\n%s", stdout.String())
+	}
+	var report struct {
+		Packs []struct {
+			Diagnostics []struct {
+				Message string `json:"message"`
+			} `json:"diagnostics"`
+		} `json:"packs"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
+	}
+	if len(report.Packs) != 1 || len(report.Packs[0].Diagnostics) != 1 {
+		t.Fatalf("unexpected JSON diagnostics: %s", stdout.String())
+	}
+	if got := report.Packs[0].Diagnostics[0].Message; !strings.Contains(got, "Evil\x1b[2K") {
+		t.Errorf("decoded message = %q, want the original ESC byte", got)
 	}
 }
 
