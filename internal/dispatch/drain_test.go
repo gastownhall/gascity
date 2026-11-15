@@ -16,6 +16,7 @@ import (
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
+	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/molecule"
 )
@@ -1447,6 +1448,67 @@ func TestProcessDrainExclusiveFailsClosedForInvalidItemFormula(t *testing.T) {
 		after := mustGetBead(t, store, member.ID)
 		if got := strings.TrimSpace(after.Metadata["gc.exclusive_drain_reservation"]); got != "" {
 			t.Fatalf("member %s reservation = %q, want released", member.ID, got)
+		}
+	}
+}
+
+// TestProcessDrainSharedFailsClosedForOneShotItemRoute: a shared drain stamps
+// every executable item step with its shared continuation group, and a
+// one-shot pool cannot honor "same session" (ga-sj2h8f.1). Routing the item
+// through the real graph binding must close the drain as a hard failure with
+// its own coded reason and the offending step as subject, not the generic
+// invalid_drain_item_formula, so an operator can tell the two apart.
+func TestProcessDrainSharedFailsClosedForOneShotItemRoute(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	store, drain := seedDrainWorkflow(t)
+	if err := store.SetMetadata(drain.ID, "gc.drain_context", "shared"); err != nil {
+		t.Fatalf("SetMetadata(shared): %v", err)
+	}
+	prepare := func(recipe *formula.Recipe, _ beads.Bead) error {
+		for i := range recipe.Steps {
+			step := &recipe.Steps[i]
+			if !isSharedDrainExecutableStep(step) {
+				continue
+			}
+			if err := graphroute.ApplyGraphRouteBinding(step, graphroute.GraphRouteBinding{
+				QualifiedName:     "worker",
+				MetadataOnly:      true,
+				ContinuationGroup: step.Metadata[beadmeta.ContinuationGroupMetadataKey],
+				IndependentSteps:  true,
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, drain.ID), ProcessOptions{
+		Work:               beadstest.Work(store),
+		FormulaSearchPaths: []string{dir},
+		PrepareRecipe:      prepare,
+	})
+	if err != nil {
+		t.Fatalf("ProcessControl(one-shot shared drain): %v", err)
+	}
+	if result.Action != "drain-failed" {
+		t.Fatalf("Action = %q, want drain-failed", result.Action)
+	}
+	drain = mustGetBead(t, store, drain.ID)
+	if drain.Status != "closed" || drain.Metadata["gc.outcome"] != "fail" || drain.Metadata["gc.failure_class"] != "hard" {
+		t.Fatalf("drain = status %q outcome %q class %q, want closed/fail/hard", drain.Status, drain.Metadata["gc.outcome"], drain.Metadata["gc.failure_class"])
+	}
+	const wantReason = "drain_item_one_shot_continuation_group"
+	if got := drain.Metadata["gc.failure_reason"]; got != wantReason {
+		t.Fatalf("gc.failure_reason = %q, want %q", got, wantReason)
+	}
+	if got := drain.Metadata["gc.failure_subject"]; !strings.HasSuffix(got, "work") {
+		t.Fatalf("gc.failure_subject = %q, want the offending item step (…work)", got)
+	}
+	for _, row := range mustDrainManifest(t, drain).Rows {
+		if row.Status != "failed" || row.Failure != wantReason {
+			t.Fatalf("row = %+v, want failed with %s", row, wantReason)
 		}
 	}
 }

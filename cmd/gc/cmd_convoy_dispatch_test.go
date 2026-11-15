@@ -1816,21 +1816,13 @@ func TestDecorateDrainItemRecipeDoesNotFallbackToControllerAssignee(t *testing.T
 }
 
 // TestDecorateDrainItemRecipeSharedContinuationGroupFollowsPoolLifecycle pins
-// the interaction between a shared drain and pool routing as it behaves after
-// #6360: decorateDrainItemRecipe copies the step's own continuation pair into
-// the binding, so ApplyGraphRouteBinding takes its stamp arm and BOTH pool
-// lifecycles keep the pair -- the one-shot mark changes nothing here, because
-// its only consumer is the refuse arm, which the copied group discharges
-// before it is reached.
-//
-// The one-shot expectation used to read "drops both". Measured after the
-// rebase it does not: gc.continuation_group stays drain:gc-ctl with
-// gc.session_affinity=require. That is the surviving #5584 exposure (a step
-// pinned require to a session that exits after one bounded invocation), and
-// whether the router's own drain bookkeeping should be clearable for an
-// IndependentSteps route is an open maintainer call -- it cannot be answered
-// without editing the branch #6360 asked us to keep verbatim. This test
-// records the behavior; it does not bless it.
+// the interaction between a shared drain and pool routing: decorateDrainItemRecipe
+// copies the step's own continuation pair into the binding, and a one-shot pool
+// refuses any non-empty group (ga-sj2h8f.1), because no runtime survives to
+// carry the shared session into the next step. A persistent pool keeps the pair.
+// Before ga-sj2h8f.1 the one-shot pool kept it too: gc.continuation_group stayed
+// drain:gc-ctl with gc.session_affinity=require, pinning siblings to a session
+// that exits after one invocation.
 func TestDecorateDrainItemRecipeSharedContinuationGroupFollowsPoolLifecycle(t *testing.T) {
 	zero := 0
 	three := 3
@@ -1839,12 +1831,12 @@ func TestDecorateDrainItemRecipeSharedContinuationGroupFollowsPoolLifecycle(t *t
 		lifecycle    string
 		wantGroup    string
 		wantAffinity string
+		wantRefused  bool
 	}{
 		{
-			name:         "one-shot pool also keeps the shared drain group",
-			lifecycle:    config.AgentLifecycleOneShot,
-			wantGroup:    "drain:gc-ctl",
-			wantAffinity: "require",
+			name:        "one-shot pool refuses the shared drain group",
+			lifecycle:   config.AgentLifecycleOneShot,
+			wantRefused: true,
 		},
 		{
 			name:         "persistent pool keeps the shared drain group",
@@ -1902,7 +1894,14 @@ func TestDecorateDrainItemRecipeSharedContinuationGroupFollowsPoolLifecycle(t *t
 				},
 			}
 
-			if err := decorateDrainItemRecipe(recipe, source, store, "city:test", "test", t.TempDir(), cfg); err != nil {
+			err := decorateDrainItemRecipe(recipe, source, store, "city:test", "test", t.TempDir(), cfg)
+			if tt.wantRefused {
+				if !errors.Is(err, graphroute.ErrIndependentStepsContinuationGroup) {
+					t.Fatalf("decorateDrainItemRecipe error = %v, want ErrIndependentStepsContinuationGroup", err)
+				}
+				return
+			}
+			if err != nil {
 				t.Fatalf("decorateDrainItemRecipe: %v", err)
 			}
 

@@ -4,6 +4,7 @@
 package graphroute
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -41,6 +42,26 @@ type Deps struct {
 	CityPath              string
 	DirectSessionResolver DirectSessionResolver
 }
+
+// ErrIndependentStepsContinuationGroup is wrapped by the error
+// ApplyGraphRouteBinding returns when a step routed to a one-shot pool
+// (IndependentSteps) carries a continuation group.
+var ErrIndependentStepsContinuationGroup = errors.New("continuation group on a one-shot pool route")
+
+// IndependentStepsGroupError reports the step and group behind
+// ErrIndependentStepsContinuationGroup.
+type IndependentStepsGroupError struct {
+	StepID string
+	Group  string
+}
+
+// Error implements error.
+func (e *IndependentStepsGroupError) Error() string {
+	return fmt.Sprintf("graphroute: step %q: %v %q", e.StepID, ErrIndependentStepsContinuationGroup, e.Group)
+}
+
+// Unwrap lets errors.Is match ErrIndependentStepsContinuationGroup.
+func (e *IndependentStepsGroupError) Unwrap() error { return ErrIndependentStepsContinuationGroup }
 
 // GraphRouteBinding captures how a graph.v2 step is routed to an agent.
 type GraphRouteBinding struct {
