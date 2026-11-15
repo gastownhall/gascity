@@ -855,3 +855,120 @@ func TestAttachmentProbeListsChildrenThroughTheWorkStore(t *testing.T) {
 		t.Fatalf("findBlockingAttachment = %+v, %v; want the molecule child %s listed through the work store", att, err, child.ID)
 	}
 }
+
+// TestCheckNoMoleculeChildrenAllowLiveWorkflowOverATarget pins the guard the v1
+// cook --attach arm runs over the molecule target it also grafts through: the
+// same refusal, burn and probe rules for a work-class and a graph-class target,
+// a live workflow attachment never refused, and an absent target an error
+// rather than a silent pass.
+func TestCheckNoMoleculeChildrenAllowLiveWorkflowOverATarget(t *testing.T) {
+	classes := map[string]func(beads.Store) beads.MoleculeTarget{
+		"work":  func(s beads.Store) beads.MoleculeTarget { return beads.WorkMolecule(beadstest.Work(s)) },
+		"graph": func(s beads.Store) beads.MoleculeTarget { return beads.GraphMolecule(beadstest.Graph(s)) },
+	}
+	mkMolecule := func(t *testing.T, s beads.Store) beads.Bead {
+		t.Helper()
+		root, err := s.Create(beads.Bead{Title: "attached molecule", Type: "molecule"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return root
+	}
+	for class, mk := range classes {
+		t.Run(class+"/unassigned burns the stale molecule and clears both references", func(t *testing.T) {
+			s := beads.NewMemStore()
+			root := mkMolecule(t, s)
+			src, err := s.Create(beads.Bead{Title: "source", Type: "task", Metadata: map[string]string{
+				beadmeta.MoleculeIDMetadataKey: root.ID,
+				"workflow_id":                  root.ID,
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var result SlingResult
+			if err := CheckNoMoleculeChildrenAllowLiveWorkflow(mk(s), src.ID, &result); err != nil {
+				t.Fatalf("guard refused an unassigned source's idle molecule: %v", err)
+			}
+			if !slices.Equal(result.AutoBurned, []string{root.ID}) {
+				t.Errorf("AutoBurned = %v, want [%s]", result.AutoBurned, root.ID)
+			}
+			if got, _ := s.Get(root.ID); got.Status != "closed" {
+				t.Errorf("stale molecule status = %q, want closed", got.Status)
+			}
+			got, err := s.Get(src.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, key := range []string{beadmeta.MoleculeIDMetadataKey, "workflow_id"} {
+				if v := got.Metadata[key]; v != "" {
+					t.Errorf("source %s = %q after the burn, want it cleared", key, v)
+				}
+			}
+		})
+		t.Run(class+"/assigned refuses a live molecule", func(t *testing.T) {
+			s := beads.NewMemStore()
+			root := mkMolecule(t, s)
+			src, err := s.Create(beads.Bead{Title: "source", Type: "task", Assignee: "someone", Metadata: map[string]string{beadmeta.MoleculeIDMetadataKey: root.ID}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var result SlingResult
+			err = CheckNoMoleculeChildrenAllowLiveWorkflow(mk(s), src.ID, &result)
+			var molErr *MoleculeAttachedError
+			if !errors.As(err, &molErr) || molErr.AttachmentID != root.ID {
+				t.Fatalf("err = %v, want *MoleculeAttachedError naming %s", err, root.ID)
+			}
+			if len(result.AutoBurned) != 0 {
+				t.Errorf("burned %v for an assigned source", result.AutoBurned)
+			}
+			if got, _ := s.Get(root.ID); got.Status == "closed" {
+				t.Error("the live molecule was burned")
+			}
+		})
+		t.Run(class+"/a live workflow_id is not a downward attachment", func(t *testing.T) {
+			s := beads.NewMemStore()
+			wf, err := s.Create(beads.Bead{Title: "workflow", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:            beadmeta.KindWorkflow,
+				beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2,
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			src, err := s.Create(beads.Bead{Title: "source", Type: "task", Assignee: "someone", Metadata: map[string]string{"workflow_id": wf.ID}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var result SlingResult
+			if err := CheckNoMoleculeChildrenAllowLiveWorkflow(mk(s), src.ID, &result); err != nil {
+				t.Fatalf("guard refused a live workflow_id: %v", err)
+			}
+			if len(result.AutoBurned) != 0 {
+				t.Errorf("burned %v for a live workflow", result.AutoBurned)
+			}
+			if got, _ := s.Get(wf.ID); got.Status == "closed" {
+				t.Error("the live workflow was burned")
+			}
+		})
+		t.Run(class+"/an unreadable attachment fails closed", func(t *testing.T) {
+			const unreadableID = "gcg-77"
+			s := beads.NewMemStore()
+			src, err := s.Create(beads.Bead{Title: "source", Type: "task", Metadata: map[string]string{beadmeta.MoleculeIDMetadataKey: unreadableID}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var result SlingResult
+			err = CheckNoMoleculeChildrenAllowLiveWorkflow(mk(oneIDUnreadableStore{Store: s, failID: unreadableID}), src.ID, &result)
+			var probeErr *AttachmentProbeError
+			if !errors.As(err, &probeErr) {
+				t.Fatalf("err = %v, want *AttachmentProbeError", err)
+			}
+		})
+	}
+	t.Run("an absent target is an error naming the bead", func(t *testing.T) {
+		var result SlingResult
+		err := CheckNoMoleculeChildrenAllowLiveWorkflow(beads.MoleculeTarget{}, "gc-1", &result)
+		if err == nil || !strings.Contains(err.Error(), "gc-1") {
+			t.Fatalf("err = %v, want an error naming gc-1", err)
+		}
+	})
+}

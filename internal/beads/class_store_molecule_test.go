@@ -67,3 +67,44 @@ func TestMoleculeTargetForwardsGuardedBatchDiscovery(t *testing.T) {
 		}
 	}
 }
+
+// TestMoleculeTargetHandleProjections pins the class-faithful way back to the
+// handle a molecule target was built from: a work target yields only a work
+// handle, a graph target only a graph handle, both over the store the target
+// wraps, and an absent target yields neither, so a zero handle never becomes
+// a present one.
+func TestMoleculeTargetHandleProjections(t *testing.T) {
+	mem := NewMemStore()
+	for name, tc := range map[string]struct {
+		target    MoleculeTarget
+		wantWork  bool
+		wantGraph bool
+	}{
+		"a work target":     {WorkMolecule(WorkStore{mem}), true, false},
+		"a graph target":    {GraphMolecule(GraphStore{mem}), false, true},
+		"the zero target":   {MoleculeTarget{}, false, false},
+		"over a zero work":  {WorkMolecule(WorkStore{}), false, false},
+		"over a zero graph": {GraphMolecule(GraphStore{}), false, false},
+	} {
+		work, gotWork := tc.target.WorkHandle()
+		graph, gotGraph := tc.target.GraphHandle()
+		if gotWork != tc.wantWork {
+			t.Errorf("%s: WorkHandle present = %v, want %v", name, gotWork, tc.wantWork)
+		}
+		if gotGraph != tc.wantGraph {
+			t.Errorf("%s: GraphHandle present = %v, want %v", name, gotGraph, tc.wantGraph)
+		}
+		if gotWork && work.Store != Store(mem) {
+			t.Errorf("%s: WorkHandle wraps a different store than the target", name)
+		}
+		if gotGraph && graph.Store != Store(mem) {
+			t.Errorf("%s: GraphHandle wraps a different store than the target", name)
+		}
+		if !gotWork && work != (WorkStore{}) {
+			t.Errorf("%s: an absent WorkHandle is not the zero handle", name)
+		}
+		if !gotGraph && graph != (GraphStore{}) {
+			t.Errorf("%s: an absent GraphHandle is not the zero handle", name)
+		}
+	}
+}

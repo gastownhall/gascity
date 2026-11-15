@@ -47,3 +47,9 @@ var _ GuardedBatcherHandleProvider = MoleculeTarget{}
 func (t MoleculeTarget) GuardedBatcherHandle() (GuardedBatcher, bool) {
 	return GuardedBatcherFor(t.Store)
 }
+
+// WorkHandle is compile-only scaffolding for the RED test; GREEN replaces it.
+func (t MoleculeTarget) WorkHandle() (WorkStore, bool) { return WorkStore{}, false }
+
+// GraphHandle is compile-only scaffolding for the RED test; GREEN replaces it.
+func (t MoleculeTarget) GraphHandle() (GraphStore, bool) { return GraphStore{}, false }

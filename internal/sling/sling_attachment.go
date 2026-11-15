@@ -996,3 +996,9 @@ func routedStateWarnings(b beads.Bead, beadID string) []string {
 	}
 	return warnings
 }
+
+// CheckNoMoleculeChildrenAllowLiveWorkflow is compile-only scaffolding for the RED test; GREEN replaces it.
+func CheckNoMoleculeChildrenAllowLiveWorkflow(target beads.MoleculeTarget, beadID string, result *SlingResult) error {
+	_, _, _ = target, beadID, result
+	return nil
+}
