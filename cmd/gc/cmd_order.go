@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/executionevent"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/orderdiscovery"
@@ -2323,17 +2325,88 @@ func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL, unreadMailTTL time.Duration, mail
 	// resolveCLIStorageRoutes doc).
 	nudges := cliNudgesStore(store, nil, cityPath)
 	mail := cliMailStore(store, nil, cityPath)
+	scopes, closeScopes := nudgeSweepRigScopesForCity(cityPath, stderr)
+	defer closeScopes()
 	if dryRun {
-		return cmdOrderSweepNudgeMailDryRun(nudges, mail, statePtr, now, nudgeTTL, mailTTL, unreadMailTTL, quiet, stdout, stderr)
+		return cmdOrderSweepNudgeMailDryRun(nudges, mail, statePtr, now, nudgeTTL, mailTTL, unreadMailTTL, quiet, stdout, stderr, scopes...)
 	}
-	return cmdOrderSweepNudgeMailRun(nudges, mail, statePtr, now, nudgeTTL, mailTTL, unreadMailTTL, quiet, stdout, stderr)
+	return cmdOrderSweepNudgeMailRun(nudges, mail, statePtr, now, nudgeTTL, mailTTL, unreadMailTTL, quiet, stdout, stderr, scopes...)
 }
 
-func cmdOrderSweepNudgeMailDryRun(nudges beads.NudgesStore, mail beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL, unreadMailTTL time.Duration, quiet bool, stdout, stderr io.Writer, _ ...nudgeSweepScope) int {
-	counts, err := countStaleNudgeMail(nudges, mail, nudgeState, now, nudgeTTL, mailTTL, unreadMailTTL, nudgeMailSweepCloseBudget)
+// nudgeSweepRigScopesForCity opens every rig's work store, in config order, as
+// an extra scope for the nudge sweep, and returns a func that closes them. A
+// rig-born gc:nudge shadow lives in the rig's own store, so a sweep of the city
+// store alone leaves it open forever.
+//
+// The targets are the order-tracking sweep's (suspended rigs left untouched),
+// deduplicated by the same key and opened through openStoreAtForCity. The city config is read with
+// config.LoadWithIncludes, not loadCityConfig, for the reason the sweep's own
+// TTL helpers do: loadCityConfig stomps process-wide feature-flag globals. A
+// config that will not load leaves the sweep on the city store alone, with a
+// note; a rig whose store will not open is reported and skipped, so one bad rig
+// does not stop the rest.
+func nudgeSweepRigScopesForCity(cityPath string, stderr io.Writer) ([]nudgeSweepScope, func()) {
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
-		fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		if !errors.Is(err, fs.ErrNotExist) {
+			fmt.Fprintf(stderr, "nudge-mail-sweep: %v; sweeping the city store only\n", err) //nolint:errcheck // best-effort stderr
+		}
+		return nil, func() {}
+	}
+	var scopes []nudgeSweepScope
+	var closers []func()
+	seen := map[string]struct{}{}
+	for _, target := range orderTrackingSweepTargetsForConfig(cityPath, cfg) {
+		if target.target.ScopeKind != "rig" {
+			continue
+		}
+		key := orderStoreTargetKey(target.target)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		store, openErr := openStoreAtForCity(target.target.ScopeRoot, cityPath)
+		if openErr != nil {
+			fmt.Fprintf(stderr, "nudge-mail-sweep: ERROR opening %s store: %v — skipping\n", target.label, openErr) //nolint:errcheck // best-effort stderr
+			continue
+		}
+		closers = append(closers, func() { closeBeadStoreHandle(store) }) //nolint:errcheck // best-effort
+		// Route the rig's work store to the nudges class the way the city's is: a
+		// city that relocates nudges answers every rig with the relocated store,
+		// which the sweep then reads once.
+		scopes = append(scopes, nudgeSweepScope{Label: target.label, Store: cliNudgesStore(store, nil, cityPath)})
+	}
+	return scopes, func() {
+		for _, closeStore := range closers {
+			closeStore()
+		}
+	}
+}
+
+// printNudgeSweepScopeLines writes one line per extra store that closed (or, in
+// a dry run, would close) nudge shadows, below the summary line. A city with no
+// such closes prints nothing here, which keeps its output unchanged.
+func printNudgeSweepScopeLines(stdout io.Writer, closed []nudgeSweepScopeClosed, verb string) {
+	for _, c := range closed {
+		fmt.Fprintf(stdout, "  %s: %s %d nudge bead(s)\n", c.Label, verb, c.Closed) //nolint:errcheck // best-effort stdout
+	}
+}
+
+func cmdOrderSweepNudgeMailDryRun(nudges beads.NudgesStore, mail beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL, unreadMailTTL time.Duration, quiet bool, stdout, stderr io.Writer, scopes ...nudgeSweepScope) int {
+	counts, err := countStaleNudgeMail(nudges, mail, nudgeState, now, nudgeTTL, mailTTL, unreadMailTTL, nudgeMailSweepCloseBudget, scopes...)
+	if err != nil {
+		// Same split as the run: a joined error is one or more stores that could
+		// not be read, reported while the rest are still counted; anything else
+		// is a failed listing of the primary store and fails the command.
+		type unwrapper interface{ Unwrap() []error }
+		u, ok := err.(unwrapper)
+		if !ok {
+			fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		for _, e := range u.Unwrap() {
+			fmt.Fprintf(stderr, "nudge-mail-sweep: ERROR %v — skipping\n", e) //nolint:errcheck // best-effort stderr
+		}
 	}
 	if quiet {
 		return 0
@@ -2344,11 +2417,12 @@ func cmdOrderSweepNudgeMailDryRun(nudges beads.NudgesStore, mail beads.MailStore
 	}
 	fmt.Fprintf(stdout, "[DRY RUN] nudge-mail-sweep: would close %d nudge bead(s), %d mail bead(s)  (no changes made)\n", //nolint:errcheck
 		counts.NudgeClosed, counts.MailClosed)
+	printNudgeSweepScopeLines(stdout, counts.ScopeNudgeClosed, "would close")
 	return 0
 }
 
-func cmdOrderSweepNudgeMailRun(nudges beads.NudgesStore, mail beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL, unreadMailTTL time.Duration, quiet bool, stdout, stderr io.Writer, _ ...nudgeSweepScope) int {
-	result, sweepErr := sweepStaleNudgeMail(nudges, mail, nudgeState, now, nudgeTTL, mailTTL, unreadMailTTL, nudgeMailSweepCloseBudget)
+func cmdOrderSweepNudgeMailRun(nudges beads.NudgesStore, mail beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL, unreadMailTTL time.Duration, quiet bool, stdout, stderr io.Writer, scopes ...nudgeSweepScope) int {
+	result, sweepErr := sweepStaleNudgeMail(nudges, mail, nudgeState, now, nudgeTTL, mailTTL, unreadMailTTL, nudgeMailSweepCloseBudget, scopes...)
 
 	if sweepErr != nil {
 		// Per-bead errors are joined via errors.Join (Unwrap() []error): print each
@@ -2381,5 +2455,6 @@ func cmdOrderSweepNudgeMailRun(nudges beads.NudgesStore, mail beads.MailStore, n
 	}
 	fmt.Fprintf(stdout, "nudge-mail-sweep: closed %d nudge bead(s), %d mail bead(s)  %s\n", //nolint:errcheck // best-effort stdout
 		result.NudgeClosed, result.MailClosed, budgetLine)
+	printNudgeSweepScopeLines(stdout, result.ScopeNudgeClosed, "closed")
 	return 0
 }

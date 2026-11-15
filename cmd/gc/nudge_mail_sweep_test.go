@@ -1658,6 +1658,11 @@ func writeNudgeSweepRigCity(t *testing.T, rigNames ...string) (string, map[strin
 			t.Fatal(err)
 		}
 		paths[name] = rigDir
+		// A file-provider rig reads its own beads.json only once that file exists;
+		// without it the rig opens the city's file and the three scopes are one store.
+		if err := ensurePersistedScopeLocalFileStore(rigDir); err != nil {
+			t.Fatal(err)
+		}
 		toml += fmt.Sprintf("\n[[rigs]]\nname = %q\npath = %q\n", name, rigDir)
 	}
 	writeFile(t, filepath.Join(cityDir, "city.toml"), toml)

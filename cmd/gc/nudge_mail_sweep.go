@@ -174,7 +174,16 @@ func nudgeMailSweepUnreadMailTTLForCity(cityPath string, fallback time.Duration,
 // class); the mail and unread-mail phases from the strongly-typed mailStore
 // (the messaging class). Both wrap the same underlying work store until
 // either class relocates, so behavior is unchanged today.
-func sweepStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL, unreadMailTTL time.Duration, limit int, _ ...nudgeSweepScope) (nudgeMailSweepResult, error) {
+//
+// scopes are extra stores, in the order given (a rig's work store each), whose
+// stale gc:nudge shadows the nudge phase also closes after the nudgeStore's own:
+// a rig-born shadow lives in the rig's store, where a city-only sweep never
+// looks. The live-ID exclusion applies to every store, and limit is one budget
+// across all of them, the nudgeStore first. A scope whose store is the nudgeStore
+// or an earlier scope is skipped, and a scope that cannot be listed adds an error
+// to the returned join and does not stop the others. The mail phases stay on
+// mailStore alone.
+func sweepStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL, unreadMailTTL time.Duration, limit int, scopes ...nudgeSweepScope) (nudgeMailSweepResult, error) {
 	var result nudgeMailSweepResult
 	var beadErrs []error
 
@@ -203,6 +212,7 @@ func sweepStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore
 		}
 		result.NudgeClosed++
 	}
+	beadErrs = append(beadErrs, sweepScopeNudgeShadows(&result, nudgeStore, scopes, liveIDs, nudgeCutoff, now, limit, false)...)
 
 	// Phase 2: close read mail beads. The candidate query + close-with-reason
 	// loop live inside the messaging edge (beadmail); only the shared close
@@ -254,9 +264,11 @@ func sweepStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore
 // caps closes; pass 0 for no cap. mailTTL <= 0 and unreadMailTTL <= 0 skip
 // their phases exactly as in the sweep. The nudge phase is counted from the typed
 // nudgeStore (nudges class); the mail and unread-mail phases from the typed
-// mailStore (messaging class).
-func countStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL, unreadMailTTL time.Duration, limit int, _ ...nudgeSweepScope) (nudgeMailSweepResult, error) {
+// mailStore (messaging class). scopes are enumerated exactly as the sweep does,
+// so a dry run counts the same stores the run would close in.
+func countStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL, unreadMailTTL time.Duration, limit int, scopes ...nudgeSweepScope) (nudgeMailSweepResult, error) {
 	var result nudgeMailSweepResult
+	var scopeErrs []error
 
 	liveIDs := liveNudgeIDSet(nudgeState)
 	nq := nudgequeue.NewStore(nudgeStore)
@@ -276,6 +288,7 @@ func countStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore
 		}
 		result.NudgeClosed++
 	}
+	scopeErrs = append(scopeErrs, sweepScopeNudgeShadows(&result, nudgeStore, scopes, liveIDs, nudgeCutoff, now, limit, true)...)
 
 	if mailTTL > 0 {
 		mailCutoff := now.Add(-mailTTL)
@@ -308,7 +321,77 @@ func countStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore
 			result.MailClosed += unreadCount
 		}
 	}
-	return result, nil
+	return result, errors.Join(scopeErrs...)
+}
+
+// sweepScopeNudgeShadows is the nudge phase over the extra stores: it closes
+// (dryRun false) or counts (dryRun true) the stale gc:nudge shadows in each scope,
+// in order, and adds them to result.NudgeClosed and result.ScopeNudgeClosed.
+// result.NudgeClosed on entry is what the nudgeStore already used of the shared
+// limit (0 means no cap). The nudgeStore itself is passed only so a scope that is
+// that store, or an earlier scope, is skipped rather than read twice.
+//
+// A scope that cannot be listed, or a bead that cannot be closed, is returned as
+// an error and the sweep moves on, so one unreadable rig never hides the rest.
+func sweepScopeNudgeShadows(result *nudgeMailSweepResult, nudgeStore beads.NudgesStore, scopes []nudgeSweepScope, liveIDs map[string]bool, cutoff, now time.Time, limit int, dryRun bool) []error {
+	var errs []error
+	seen := []beads.NudgesStore{nudgeStore}
+	for _, scope := range scopes {
+		if scope.Store == (beads.NudgesStore{}) || nudgeSweepStoreSeen(seen, scope.Store) {
+			continue
+		}
+		seen = append(seen, scope.Store)
+		budget := 0
+		if limit > 0 {
+			if budget = limit - result.NudgeClosed - result.MailClosed; budget <= 0 {
+				break
+			}
+		}
+		nq := nudgequeue.NewStore(scope.Store)
+		shadows, err := nq.StaleShadowsBefore(cutoff, budget, liveIDs)
+		if err != nil {
+			prefix := "nudge-mail-sweep"
+			if dryRun {
+				prefix += " (dry-run)"
+			}
+			errs = append(errs, fmt.Errorf("%s: listing stale nudge beads in %s: %w", prefix, scope.Label, err))
+			continue
+		}
+		closed := 0
+		for _, shadow := range shadows {
+			if limit > 0 && result.NudgeClosed+result.MailClosed >= limit {
+				break
+			}
+			if !shadow.Open {
+				continue
+			}
+			if !dryRun {
+				if err := nq.SweepStale(shadow.BeadID, nudgeMailSweepNudgeCloseReason, now); err != nil {
+					errs = append(errs, fmt.Errorf("%s: %w", scope.Label, err))
+					continue
+				}
+			}
+			closed++
+			result.NudgeClosed++
+		}
+		if closed > 0 {
+			result.ScopeNudgeClosed = append(result.ScopeNudgeClosed, nudgeSweepScopeClosed{Label: scope.Label, Closed: closed})
+		}
+	}
+	return errs
+}
+
+// nudgeSweepStoreSeen reports whether handle reads a store that one of seen
+// already reads. beads.SameStore compares the physical stores under the class
+// handles, and a store it cannot compare reads as unseen, so it is swept rather
+// than skipped.
+func nudgeSweepStoreSeen(seen []beads.NudgesStore, handle beads.NudgesStore) bool {
+	for _, s := range seen {
+		if beads.SameStore(s, handle) {
+			return true
+		}
+	}
+	return false
 }
 
 // liveNudgeIDSet returns the set of nudge IDs whose shadow the stale-shadow

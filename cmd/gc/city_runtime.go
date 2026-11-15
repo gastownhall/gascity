@@ -2465,14 +2465,40 @@ func (cr *CityRuntime) runNudgeMailSweepWatchdog(cfg *config.City, now time.Time
 
 	mailTTL := nudgeMailSweepMailTTLForConfig(cfg, cr.stderr)
 	unreadMailTTL := nudgeMailSweepUnreadMailTTLForConfig(cfg, cr.stderr)
-	result, sweepErr := sweepStaleNudgeMail(nudgeStore, mailStore, statePtr, now, nudgeMailSweepDefaultNudgeTTL, mailTTL, unreadMailTTL, nudgeMailSweepWatchdogCloseBudget)
+	result, sweepErr := sweepStaleNudgeMail(nudgeStore, mailStore, statePtr, now, nudgeMailSweepDefaultNudgeTTL, mailTTL, unreadMailTTL, nudgeMailSweepWatchdogCloseBudget, cr.nudgeSweepRigScopes(cfg)...)
 	if sweepErr != nil && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog: %v\n", cr.logPrefix, sweepErr) //nolint:errcheck // best-effort stderr
 	}
 	total := result.NudgeClosed + result.MailClosed
 	if total > 0 && cr.stderr != nil {
 		fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog closed %d nudge bead(s), %d mail bead(s)\n", cr.logPrefix, result.NudgeClosed, result.MailClosed) //nolint:errcheck // best-effort stderr
+		for _, c := range result.ScopeNudgeClosed {
+			fmt.Fprintf(cr.stderr, "%s: nudge-mail-sweep watchdog: %s: closed %d nudge bead(s)\n", cr.logPrefix, c.Label, c.Closed) //nolint:errcheck // best-effort stderr
+		}
 	}
+}
+
+// nudgeSweepRigScopes returns the rig work stores the nudge-mail sweep watchdog
+// closes stale gc:nudge shadows in, beside the nudges store: a rig-born shadow
+// lives in the rig's own store. The stores are the ones the controller already
+// holds (rigBeadStores), in config order and with suspended rigs left alone, as
+// orderTrackingSweepStores does; a rig with no live store this pass is skipped
+// rather than opened.
+func (cr *CityRuntime) nudgeSweepRigScopes(cfg *config.City) []nudgeSweepScope {
+	rigStores := cr.rigBeadStores()
+	var scopes []nudgeSweepScope
+	for _, target := range orderTrackingSweepTargetsForConfig(cr.cityPath, cfg) {
+		if target.target.ScopeKind != "rig" {
+			continue
+		}
+		if store := rigStores[target.target.RigName]; store != nil {
+			// Route the rig's work store to the nudges class the way the city's is:
+			// a city that relocates nudges answers every rig with the relocated
+			// store, which the sweep then reads once.
+			scopes = append(scopes, nudgeSweepScope{Label: target.label, Store: scopeStores(cr.cityPath, cr.storageRoutes, store).Nudges()})
+		}
+	}
+	return scopes
 }
 
 func (cr *CityRuntime) orderTrackingSweepStores(cfg *config.City) ([]beads.Store, []orderTrackingSweepTarget, func(), error) { //nolint:unparam // targets slice returned for callers that need sweep scope metadata; current call sites discard it
