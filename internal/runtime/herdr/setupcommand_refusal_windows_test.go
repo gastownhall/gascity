@@ -31,7 +31,7 @@ func TestSetupCommandsRefusePOSIXShell(t *testing.T) {
 // is refused before anything is typed into the pane.
 func TestLaunchRawRefusesPOSIXShell(t *testing.T) {
 	p := newTestProvider(t, time.Second)
-	if err := p.launchRaw(context.Background(), "unused-pane", "bash"); err == nil || !strings.Contains(err.Error(), "refused") {
+	if err := p.launchRaw(context.Background(), "unused-session", "unused-pane", "bash"); err == nil || !strings.Contains(err.Error(), "refused") {
 		t.Fatalf("launchRaw = %v, want a refusal", err)
 	}
 }

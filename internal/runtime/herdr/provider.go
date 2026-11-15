@@ -248,7 +248,7 @@ func (p *Provider) launchCommand(ctx context.Context, name string, spec launchSp
 			_ = p.c.tabClose(ctx, placed.TabID)
 		}
 	case spec.Raw != "":
-		err = p.launchRaw(ctx, paneID, spec.Raw)
+		err = p.launchRaw(ctx, name, paneID, spec.Raw)
 	default:
 		// Empty command: the pane's own shell is the session.
 	}

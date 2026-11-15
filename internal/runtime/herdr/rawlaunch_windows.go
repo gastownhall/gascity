@@ -25,7 +25,7 @@ import (
 // shell that echoes a failed line puts text on screen that can read as the
 // command's own output. A command the platform refuses
 // ([runtime.ShellCommandUnavailable]) is not typed at all.
-func (p *Provider) launchRaw(ctx context.Context, paneID, raw string) error {
+func (p *Provider) launchRaw(ctx context.Context, _, paneID, raw string) error {
 	if reason := runtime.ShellCommandUnavailable(raw); reason != "" {
 		return fmt.Errorf("raw command refused: %s", reason)
 	}
