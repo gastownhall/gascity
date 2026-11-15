@@ -2,6 +2,8 @@ package overlay
 
 import (
 	"encoding/json"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -59,6 +61,32 @@ func TestFindBareHookEntries_MultipleCategoriesSorted(t *testing.T) {
 	// Deterministic, sorted by category: PreToolUse before Stop.
 	if bare[0].Category != "PreToolUse" || bare[1].Category != "Stop" {
 		t.Errorf("categories not sorted: %+v", bare)
+	}
+}
+
+// A bare entry has neither key: an entry with only one of them is not bare, and
+// a category whose value is not an array holds no entries to inspect.
+func TestFindBareHookEntries_RequiresNeitherKey(t *testing.T) {
+	tests := []struct {
+		name string
+		doc  string
+		want []BareHookEntry
+	}{
+		{"matcher without hooks is not bare", `{"hooks":{"PreToolUse":[{"matcher":"Bash"}]}}`, nil},
+		{"hooks without matcher is not bare", `{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"ok"}]}]}}`, nil},
+		{"non-array category is ignored", `{"hooks":{"Stop":"x"}}`, nil},
+		{"non-array category does not hide a bare sibling", `{"hooks":{"Stop":"x","PreToolUse":[{"type":"command","command":"bare"}]}}`, []BareHookEntry{{Category: "PreToolUse", Index: 0}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := FindBareHookEntries([]byte(tt.doc))
+			if err != nil {
+				t.Fatalf("FindBareHookEntries: %v", err)
+			}
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("bare entries = %+v, want %+v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -125,6 +153,7 @@ func TestFindInvalidHookMatchers_Classification(t *testing.T) {
 		{"truncated name is an exact name, not a prefix", "PreToolUse", "Bas", SeverityWarning, "no known Claude Code tool"},
 		{"unknown tool on PostToolUseFailure", "PostToolUseFailure", "Frobnicate", SeverityWarning, "no known Claude Code tool"},
 		{"unknown tools on PermissionRequest", "PermissionRequest", "Frobnicate|Quux", SeverityWarning, "no known Claude Code tool"},
+		{"unknown tool on PermissionDenied", "PermissionDenied", "Frobnicate", SeverityWarning, "no known Claude Code tool"},
 		{"grouped regex over unknown tools only warns", "PreToolUse", "Future(Tool)", SeverityWarning, "no known Claude Code tool"},
 		{"grouped alternation over unknown tools only warns", "PreToolUse", "Browser(Open|Close)", SeverityWarning, "no known Claude Code tool"},
 		{"suffixed grouped regex over unknown tools only warns", "PreToolUse", "Browser(Open|Close).*", SeverityWarning, "no known Claude Code tool"},
@@ -141,6 +170,7 @@ func TestFindInvalidHookMatchers_Classification(t *testing.T) {
 		{"pipe list of exact names", "PreToolUse", "Edit|Write", "", ""},
 		{"comma list of exact names", "PreToolUse", "Edit, Write", "", ""},
 		{"exact list with one real tool", "PreToolUse", "Edit|Frobnicate", "", ""},
+		{"comma list with one real tool and no space", "PreToolUse", "Edit,Frobnicate", "", ""},
 		{"prefix regex", "PreToolUse", "Notebook.*", "", ""},
 		{"grouped prefix regex", "PreToolUse", "Notebook(Edit|Read)", "", ""},
 		{"grouped prefix regex over Task tools", "PreToolUse", "Task(Create|Update)", "", ""},
@@ -236,6 +266,9 @@ func TestFindInvalidHookMatchers_OrdersFindingsByCategoryThenIndex(t *testing.T)
 		got := findings[i]
 		if got.Category != w.category || got.Index != w.index || got.Severity != w.severity {
 			t.Errorf("findings[%d] = %s[%d] %q, want %s[%d] %q", i, got.Category, got.Index, got.Severity, w.category, w.index, w.severity)
+		}
+		if loc := fmt.Sprintf("hooks.%s[%d]", w.category, w.index); !strings.Contains(got.Message, loc) {
+			t.Errorf("findings[%d] message = %q, want it to name %s", i, got.Message, loc)
 		}
 	}
 }
