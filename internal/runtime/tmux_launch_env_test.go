@@ -6,11 +6,19 @@ import (
 	"testing"
 )
 
+// The state is read with show-environment -s, which prints each value
+// double-quoted for a POSIX shell: $, `, \ and " are backslash-escaped and a
+// newline stays literal inside the quotes; a removed key prints as unset.
 func TestParseTmuxLaunchEnvState(t *testing.T) {
-	out := "A=1\nB=x=y\nEMPTY=\n-GONE\n@gc_launch_env_keys=B A\n"
+	out := `A="1"; export A;` + "\n" +
+		`B="x=y"; export B;` + "\n" +
+		`EMPTY=""; export EMPTY;` + "\n" +
+		`Q="a\"b\$c\` + "`" + `d\\e;f"; export Q;` + "\n" +
+		"unset GONE;\n" +
+		"@gc_launch_env_keys=B A\n"
 	st := ParseTmuxLaunchEnvState(out)
-	if want := map[string]string{"A": "1", "B": "x=y", "EMPTY": ""}; !reflect.DeepEqual(st.Env, want) {
-		t.Errorf("Env = %v, want %v", st.Env, want)
+	if want := map[string]string{"A": "1", "B": "x=y", "EMPTY": "", "Q": "a\"b$c`d\\e;f"}; !reflect.DeepEqual(st.Env, want) {
+		t.Errorf("Env = %q, want %q", st.Env, want)
 	}
 	if !st.Removed["GONE"] || len(st.Removed) != 1 {
 		t.Errorf("Removed = %v, want GONE", st.Removed)
@@ -18,8 +26,60 @@ func TestParseTmuxLaunchEnvState(t *testing.T) {
 	if want := []string{"A", "B"}; !slices.Equal(st.Recorded, want) {
 		t.Errorf("Recorded = %v, want %v", st.Recorded, want)
 	}
-	if st := ParseTmuxLaunchEnvState("A=1\n@gc_launch_env_keys=\n"); len(st.Recorded) != 0 {
+	if st := ParseTmuxLaunchEnvState(`A="1"; export A;` + "\n@gc_launch_env_keys=\n"); len(st.Recorded) != 0 {
 		t.Errorf("an empty record read as %v", st.Recorded)
+	}
+}
+
+// A multi-line value is one entry: none of its later lines reads as a key of
+// its own, a removal mark, or the record.
+func TestParseTmuxLaunchEnvStateMultiLineValue(t *testing.T) {
+	ml := "line1\nB=spurious\n-GHOST\nunset A;\n@gc_launch_env_keys=B\nend"
+	out := "ML=\"" + ml + "\"; export ML;\n" +
+		"unset R;\n" +
+		"@gc_launch_env_keys=ML\n"
+	st := ParseTmuxLaunchEnvState(out)
+	if want := map[string]string{"ML": ml}; !reflect.DeepEqual(st.Env, want) {
+		t.Errorf("Env = %q, want %q", st.Env, want)
+	}
+	if want := map[string]bool{"R": true}; !reflect.DeepEqual(st.Removed, want) {
+		t.Errorf("Removed = %v, want %v", st.Removed, want)
+	}
+	if want := []string{"ML"}; !slices.Equal(st.Recorded, want) {
+		t.Errorf("Recorded = %v, want %v", st.Recorded, want)
+	}
+}
+
+// An unterminated quoted value (output cut short) yields no entry, and does
+// not swallow the lines after it as its value.
+func TestParseTmuxLaunchEnvStateUnterminatedValue(t *testing.T) {
+	st := ParseTmuxLaunchEnvState("A=\"cut\nshort")
+	if len(st.Env) != 0 || len(st.Removed) != 0 || len(st.Recorded) != 0 {
+		t.Errorf("state = %+v, want empty", st)
+	}
+}
+
+func TestTmuxLaunchEnvStateArgsReadsQuotedValues(t *testing.T) {
+	args := TmuxLaunchEnvStateArgs("s", "p")
+	if want := []string{"show-environment", "-s", "-t", "s", ";"}; !slices.Equal(args[:len(want)], want) {
+		t.Errorf("state read = %q, want it to start %q", args, want)
+	}
+}
+
+// The planner, fed what tmux prints for a session whose launch set a
+// multi-line value, sees the value unchanged and plans nothing.
+func TestPlanTmuxLaunchEnvUnchangedMultiLineValue(t *testing.T) {
+	ml := "line1\nB=spurious\n-GHOST\nend"
+	st := ParseTmuxLaunchEnvState("A=\"1\"; export A;\nML=\"" + ml + "\"; export ML;\n@gc_launch_env_keys=A ML\n")
+	if cmds := PlanTmuxLaunchEnv("s", "p", st, map[string]string{"A": "1", "ML": ml}, nil); cmds != nil {
+		t.Errorf("plan = %q, want nothing", cmds)
+	}
+	want := [][]string{
+		{"set-environment", "-t", "s", "-u", "ML"},
+		{"set-option", "-t", "p", TmuxLaunchEnvKeysOption, "A"},
+	}
+	if cmds := PlanTmuxLaunchEnv("s", "p", st, map[string]string{"A": "1"}, nil); !reflect.DeepEqual(cmds, want) {
+		t.Errorf("plan for a dropped multi-line key =\n  %q\nwant\n  %q", cmds, want)
 	}
 }
 

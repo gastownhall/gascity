@@ -110,12 +110,7 @@ func (b *podBox) tmux(args []string) (string, error) {
 			if b.showFails {
 				return "", errors.New("command terminated with exit code 1")
 			}
-			for _, k := range slices.Sorted(maps.Keys(b.session)) {
-				out.WriteString(k + "=" + b.session[k] + "\n")
-			}
-			for _, k := range slices.Sorted(maps.Keys(b.removed)) {
-				out.WriteString("-" + k + "\n")
-			}
+			out.WriteString(showEnvironment(b.session, b.removed, slices.Contains(c, "-s")))
 		case "display-message":
 			out.WriteString(strings.ReplaceAll(c[len(c)-1], "#{"+runtime.TmuxLaunchEnvKeysOption+"}", b.record) + "\n")
 		case "set-option":
@@ -149,6 +144,30 @@ func (b *podBox) tmux(args []string) (string, error) {
 		}
 	}
 	return out.String(), nil
+}
+
+// showEnvironment prints a session environment as tmux's show-environment
+// does: raw KEY=value and -KEY lines, or with -s (shell) the double-quoted
+// form, which escapes $, `, \ and " and keeps a newline literal inside the
+// quotes. tmux sorts the entries by name.
+func showEnvironment(env map[string]string, removed map[string]bool, shell bool) string {
+	var out strings.Builder
+	for _, k := range slices.Sorted(maps.Keys(env)) {
+		if !shell {
+			out.WriteString(k + "=" + env[k] + "\n")
+			continue
+		}
+		v := strings.NewReplacer(`\`, `\\`, `$`, `\$`, "`", "\\`", `"`, `\"`).Replace(env[k])
+		out.WriteString(k + `="` + v + `"; export ` + k + ";\n")
+	}
+	for _, k := range slices.Sorted(maps.Keys(removed)) {
+		if shell {
+			out.WriteString("unset " + k + ";\n")
+		} else {
+			out.WriteString("-" + k + "\n")
+		}
+	}
+	return out.String()
 }
 
 func (b *podBox) envScripts() []string {
@@ -275,6 +294,35 @@ func TestProvider_RelaunchUnchangedEnvWritesNothing(t *testing.T) {
 	}
 	if !box.respawned {
 		t.Error("Relaunch did not respawn the agent")
+	}
+}
+
+// A multi-line value a relaunch put in the session environment reads back as
+// itself: the next relaunch with the same env writes nothing.
+func TestProvider_RelaunchUnchangedMultiLineEnvWritesNothing(t *testing.T) {
+	fake := newFakeK8sOps()
+	p := newProviderWithOps(fake)
+	env := map[string]string{"GC_CITY": "/city", "GC_AGENT": "a", "GC_NOTE": "v1"}
+	box := newPodBox(t, p, fake, env)
+	next := maps.Clone(env)
+	next["GC_NOTE"] = "line1\nGC_CITY=spurious\n-GC_AGENT\nend"
+	if err := p.Relaunch(context.Background(), "s", runtime.Config{Command: "agent", Env: next}); err != nil {
+		t.Fatalf("first Relaunch: %v", err)
+	}
+	if got := box.session["GC_NOTE"]; got != next["GC_NOTE"] {
+		t.Fatalf("session GC_NOTE = %q, want %q", got, next["GC_NOTE"])
+	}
+	before := len(box.envScripts())
+	if err := p.Relaunch(context.Background(), "s", runtime.Config{Command: "agent", Env: next}); err != nil {
+		t.Fatalf("second Relaunch: %v", err)
+	}
+	if got := box.envScripts()[before:]; len(got) != 0 {
+		t.Errorf("unchanged relaunch wrote %q, want nothing", got)
+	}
+	for _, k := range []string{"GC_CITY", "GC_AGENT"} {
+		if box.respawnEnv[k] != env[k] {
+			t.Errorf("respawned agent %s = %q, want %q", k, box.respawnEnv[k], env[k])
+		}
 	}
 }
 

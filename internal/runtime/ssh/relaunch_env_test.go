@@ -135,14 +135,7 @@ func (b *envBox) one(c []string) (string, int) {
 		if b.showFails {
 			return "", 1
 		}
-		var out strings.Builder
-		for _, k := range slices.Sorted(maps.Keys(b.session)) {
-			out.WriteString(k + "=" + b.session[k] + "\n")
-		}
-		for _, k := range slices.Sorted(maps.Keys(b.removed)) {
-			out.WriteString("-" + k + "\n")
-		}
-		return out.String(), 0
+		return showEnvironment(b.session, b.removed, slices.Contains(c, "-s")), 0
 	case "display-message":
 		return strings.ReplaceAll(c[len(c)-1], "#{"+runtime.TmuxLaunchEnvKeysOption+"}", b.record) + "\n", 0
 	case "set-option":
@@ -199,6 +192,30 @@ func (b *envBox) envWriteCalls() [][]string {
 		}
 	}
 	return out
+}
+
+// showEnvironment prints a session environment as tmux's show-environment
+// does: raw KEY=value and -KEY lines, or with -s (shell) the double-quoted
+// form, which escapes $, `, \ and " and keeps a newline literal inside the
+// quotes. tmux sorts the entries by name.
+func showEnvironment(env map[string]string, removed map[string]bool, shell bool) string {
+	var out strings.Builder
+	for _, k := range slices.Sorted(maps.Keys(env)) {
+		if !shell {
+			out.WriteString(k + "=" + env[k] + "\n")
+			continue
+		}
+		v := strings.NewReplacer(`\`, `\\`, `$`, `\$`, "`", "\\`", `"`, `\"`).Replace(env[k])
+		out.WriteString(k + `="` + v + `"; export ` + k + ";\n")
+	}
+	for _, k := range slices.Sorted(maps.Keys(removed)) {
+		if shell {
+			out.WriteString("unset " + k + ";\n")
+		} else {
+			out.WriteString("-" + k + "\n")
+		}
+	}
+	return out.String()
 }
 
 func relaunchCfg(env map[string]string) runtime.Config {
@@ -346,6 +363,34 @@ func TestProvider_RelaunchUnchangedEnvWritesNothing(t *testing.T) {
 	}
 	if !box.respawned {
 		t.Error("Relaunch did not respawn the agent")
+	}
+}
+
+// A multi-line launch env value reads back as itself: a relaunch with the same
+// env writes nothing, and none of the value's later lines reads as a key the
+// session holds or hides.
+func TestProvider_RelaunchUnchangedMultiLineEnvWritesNothing(t *testing.T) {
+	box := newEnvBox(nil)
+	p := providerWith(box.f)
+	ctx := context.Background()
+	env := map[string]string{"GC_AGENT": "a", "GC_NOTE": "line1\nGC_RIG=spurious\n-GC_AGENT\nend"}
+	if err := p.Start(ctx, "s", runtime.Config{Command: "agent", Env: env}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := p.Relaunch(ctx, "s", relaunchCfg(env)); err != nil {
+		t.Fatalf("first Relaunch: %v", err)
+	}
+	before := len(box.envWriteCalls())
+	if err := p.Relaunch(ctx, "s", relaunchCfg(env)); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	if writes := box.envWriteCalls()[before:]; len(writes) != 0 {
+		t.Errorf("unchanged relaunch wrote %q, want no env or record writes", writes)
+	}
+	for k, v := range env {
+		if box.respawnEnv[k] != v {
+			t.Errorf("respawned agent %s = %q, want %q", k, box.respawnEnv[k], v)
+		}
 	}
 }
 
