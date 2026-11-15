@@ -34,3 +34,11 @@ func guardedWorkspaceDir(t *testing.T) string {
 	t.Helper()
 	return beadstest.GuardedBdWorkspaceDir(t)
 }
+
+// pinEmbeddedBDHome is testOwnedHome for the fixtures that run a real bd in an
+// embedded workspace. It must also put bd in test mode for the subprocesses
+// those fixtures spawn; see TestPinEmbeddedBDHomeRunsBDSubprocessesInTestMode.
+func pinEmbeddedBDHome(t *testing.T) string {
+	t.Helper()
+	return testOwnedHome(t)
+}
