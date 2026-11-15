@@ -1,3 +1,9 @@
+//go:build unix
+
+// These drive scripts/test-go-test-shard, a POSIX shell harness, and assert
+// that it reaps a test tree via process groups and signals. Both the harness
+// and the mechanism it is being held to are Unix-only.
+
 package scripts_test
 
 import (

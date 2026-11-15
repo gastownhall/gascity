@@ -22,6 +22,10 @@ import (
 //
 // The package had no test for the deletion class; it was covered only
 // implicitly by the per-file Lstat.
+//
+// The path the validator names comes from the Lstat error, so it is spelled in
+// the host's separators. Comparing through filepath.ToSlash asserts the path
+// rather than the separator, and is an identity on Unix.
 func TestValidateSyntheticRepoRejectsDeletedFile(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -62,7 +66,7 @@ func TestValidateSyntheticRepoRejectsDeletedFile(t *testing.T) {
 			if strings.Contains(err.Error(), "unexpected") {
 				t.Fatalf("error = %v, want a missing-file rejection, not an unexpected-path one", err)
 			}
-			if !strings.Contains(err.Error(), tc.remove) {
+			if !strings.Contains(filepath.ToSlash(err.Error()), tc.remove) {
 				t.Fatalf("error = %v, want it to name the missing path %s relative to the cache root", err, tc.remove)
 			}
 		})

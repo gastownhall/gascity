@@ -10,6 +10,7 @@ go_library(
         "mcp_project_plan.go",
         "mcp_project_safety.go",
         "mcp_read.go",
+        "mcp_read_open_unix.go",
         "mcp_resolve.go",
         "mcp_runtime.go",
         "skills.go",

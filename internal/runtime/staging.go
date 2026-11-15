@@ -121,7 +121,14 @@ func stageCopyFiles(workDir string, copyFiles []CopyEntry) error {
 		if sameFile(cf.Src, effectiveDst) {
 			continue
 		}
-		if err := StagePath(cf.Src, dst); err != nil {
+		relPath, err := filepath.Rel(workDir, effectiveDst)
+		if err != nil || strings.HasPrefix(relPath, ".."+string(filepath.Separator)) || relPath == ".." {
+			relPath = cf.RelDst
+			if relPath == "" {
+				relPath = filepath.Base(effectiveDst)
+			}
+		}
+		if err := StagePathWithRel(cf.Src, dst, relPath); err != nil {
 			return fmt.Errorf("copy file %q -> %q: %w", cf.Src, dst, err)
 		}
 	}
@@ -421,8 +428,14 @@ func StageDir(srcDir, dstDir string) error {
 // StagePath copies a file or directory and returns any per-file warnings as an
 // error so callers can fail fast instead of ignoring partial staging.
 func StagePath(src, dst string) error {
+	return StagePathWithRel(src, dst, "")
+}
+
+// StagePathWithRel copies a file or directory and applies platform adaptation
+// for single files using relPath as the destination-relative path.
+func StagePathWithRel(src, dst, relPath string) error {
 	var stderr bytes.Buffer
-	if err := overlay.CopyFileOrDir(src, dst, &stderr); err != nil {
+	if err := overlay.CopyFileOrDirWithRel(src, dst, relPath, &stderr); err != nil {
 		return err
 	}
 	if stderr.Len() > 0 {
