@@ -913,6 +913,22 @@ func configSelectsHostedBeadsCredentialProvider(cfg *config.City) bool {
 		binding.Auth == config.StorageAuthCredentialProvider
 }
 
+// applyDoltliteScopeEnv projects a DoltLite-labeled scope's bd environment: no
+// Dolt server endpoint, the doltlite backend named under both prefixes, the
+// native-open mirror, and bd's user-level shared-server mode pinned off. The
+// pin goes last and is the only copy of it for DoltLite: gc-beads-bd.sh pins the
+// same pair for every bd call of its doltlite arm, so init and steady state run
+// under one policy (a polluted ~/.beads/config.yaml or inherited
+// BEADS_DOLT_SHARED_SERVER=1 would otherwise start the host shared Dolt server
+// for a scope that has no server).
+func applyDoltliteScopeEnv(env map[string]string) {
+	clearProjectedDoltEnv(env)
+	env["GC_BEADS_BACKEND"] = "doltlite"
+	env["BEADS_BACKEND"] = "doltlite"
+	mirrorBeadsDoltEnv(env)
+	applyProxiedSharedServerOptOut(env)
+}
+
 // applyCanonicalScopeBackendEnv dispatches to the appropriate backend
 // helper based on the scope's MetadataState.Backend.
 //
@@ -948,10 +964,7 @@ func applyCanonicalScopeBackendEnv(env map[string]string, cityPath, scopeRoot st
 	if resolved.State.EndpointOrigin == contract.EndpointOriginInheritedCity &&
 		(meta.Backend == "" || meta.Backend == "doltlite") &&
 		cityUsesDoltliteBeadsBackend(cityPath) {
-		clearProjectedDoltEnv(env)
-		env["GC_BEADS_BACKEND"] = "doltlite"
-		env["BEADS_BACKEND"] = "doltlite"
-		mirrorBeadsDoltEnv(env)
+		applyDoltliteScopeEnv(env)
 		return true, nil
 	}
 	switch meta.Backend {
@@ -966,10 +979,7 @@ func applyCanonicalScopeBackendEnv(env map[string]string, cityPath, scopeRoot st
 		mirrorBeadsDoltScopeEnv(env, target)
 		return true, nil
 	case "doltlite":
-		clearProjectedDoltEnv(env)
-		env["GC_BEADS_BACKEND"] = "doltlite"
-		env["BEADS_BACKEND"] = "doltlite"
-		mirrorBeadsDoltEnv(env)
+		applyDoltliteScopeEnv(env)
 		return true, nil
 	default:
 		return true, unprojectableBackendError(meta.Backend, scopeRoot)
@@ -1951,10 +1961,7 @@ func bdRuntimeEnvForRigReportingContext(ctx context.Context, cityPath string, cf
 	rigDoltlite := scopeBackendIsDoltlite(cityPath, rigPath)
 	cityDoltlite := scopeBackendIsDoltlite(cityPath, cityPath)
 	if rigDoltlite || (cityDoltlite && !scopeOverridesCityBackend(cityPath, rigPath)) {
-		clearProjectedDoltEnv(env)
-		env["GC_BEADS_BACKEND"] = "doltlite"
-		env["BEADS_BACKEND"] = "doltlite"
-		mirrorBeadsDoltEnv(env)
+		applyDoltliteScopeEnv(env)
 		return env, false, nil
 	}
 	// Each proxied workspace has its own proxy root, so a rig answers from its
@@ -2162,10 +2169,7 @@ func bdRuntimeEnvWithErrorRecoveryContext(ctx context.Context, cityPath string, 
 		return env, err
 	}
 	if scopeBackendIsDoltlite(cityPath, cityPath) {
-		clearProjectedDoltEnv(env)
-		env["GC_BEADS_BACKEND"] = "doltlite"
-		env["BEADS_BACKEND"] = "doltlite"
-		mirrorBeadsDoltEnv(env)
+		applyDoltliteScopeEnv(env)
 		return env, nil
 	}
 	// bd owns a proxied scope's listener and its readiness. Answer from the
