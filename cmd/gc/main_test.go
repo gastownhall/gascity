@@ -285,6 +285,10 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
+	testInitLockDir = filepath.Join(testTempRoot, "dolt-init-locks")
+	if err := os.Setenv("GC_DOLT_INIT_LOCK_DIR", testInitLockDir); err != nil {
+		panic(err)
+	}
 	tmuxSocketParentRoot := os.Getenv(testTmuxSocketParentRootEnv)
 	if tmuxSocketParentRoot == "" {
 		tmuxSocketParentRoot = "/tmp"

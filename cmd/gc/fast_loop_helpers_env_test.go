@@ -1,6 +1,9 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -212,5 +215,65 @@ func TestSanitizedBaseEnv_AddsManagedDoltTestControl(t *testing.T) {
 
 func isSanitizedBaseEnvTestControl(kv string) bool {
 	return strings.HasPrefix(kv, managedDoltTestModeEnv+"=") ||
-		strings.HasPrefix(kv, managedDoltTestParentPIDEnv+"=")
+		strings.HasPrefix(kv, managedDoltTestParentPIDEnv+"=") ||
+		strings.HasPrefix(kv, "GC_DOLT_INIT_LOCK_DIR=")
+}
+
+// sanitizedBaseEnv strips GC_*, which would hand every init child the script's
+// default lock directory: a per-user directory in /tmp shared with the host's
+// own initializers and every other test binary. The helper must put the run's
+// private directory back, or such a test queues on a real initializer's lock.
+func TestSanitizedBaseEnv_PinsInitLockDirToThePerRunDirectory(t *testing.T) {
+	const key = "GC_DOLT_INIT_LOCK_DIR"
+	// A value from the caller's shell must not decide where the lock lives.
+	t.Setenv(key, "/pretend/shell/lock-dir")
+
+	values := func(env []string) []string {
+		var got []string
+		for _, kv := range env {
+			if v, ok := strings.CutPrefix(kv, key+"="); ok {
+				got = append(got, v)
+			}
+		}
+		return got
+	}
+
+	got := values(sanitizedBaseEnv())
+	if len(got) != 1 {
+		t.Fatalf("sanitizedBaseEnv carries %d %s entries %q, want exactly 1", len(got), key, got)
+	}
+	dir := got[0]
+	if dir == "" || !filepath.IsAbs(dir) {
+		t.Fatalf("%s = %q, want a non-empty absolute path", key, dir)
+	}
+	hostDefault := "/tmp/gc-beads-bd-init-locks-" + strconv.Itoa(os.Geteuid())
+	if dir == hostDefault || strings.HasPrefix(dir, hostDefault+string(filepath.Separator)) {
+		t.Fatalf("%s = %q is the host's real init-lock directory (%s)", key, dir, hostDefault)
+	}
+	if dir == "/pretend/shell/lock-dir" {
+		t.Fatalf("%s = %q came from the caller's environment, not from the test run", key, dir)
+	}
+	if dir != testInitLockDir {
+		t.Fatalf("%s = %q, want TestMain's per-run directory %q", key, dir, testInitLockDir)
+	}
+	if again := values(sanitizedBaseEnv()); len(again) != 1 || again[0] != dir {
+		t.Fatalf("second call: %s = %q, want %q", key, again, dir)
+	}
+
+	over := values(sanitizedBaseEnv(key + "=/explicit/dir"))
+	if len(over) == 0 || over[len(over)-1] != "/explicit/dir" {
+		t.Fatalf("an explicit extra must be the last %s value, got %q", key, over)
+	}
+	empty := values(sanitizedBaseEnv(key + "="))
+	if len(empty) == 0 || empty[len(empty)-1] != "" {
+		t.Fatalf("an explicit empty extra must be the last %s value, got %q", key, empty)
+	}
+}
+
+// The TestMain export reaches children built from os.Environ(), which never
+// pass through sanitizedBaseEnv.
+func TestMainExportsThePerRunInitLockDir(t *testing.T) {
+	if got := os.Getenv("GC_DOLT_INIT_LOCK_DIR"); got == "" || got != testInitLockDir {
+		t.Fatalf("GC_DOLT_INIT_LOCK_DIR = %q, want TestMain's per-run directory %q", got, testInitLockDir)
+	}
 }

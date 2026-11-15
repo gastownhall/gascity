@@ -23,6 +23,12 @@ func skipSlowCmdGCTest(t *testing.T, reason string) {
 	}
 }
 
+// testInitLockDir is the directory every test child's gc-beads-bd init lock
+// lives in. TestMain sets it, under the run's own temp root, and exports it as
+// GC_DOLT_INIT_LOCK_DIR: the script's default is a per-user directory in /tmp
+// that the host's own initializers and every other test binary share.
+var testInitLockDir string
+
 // sanitizedBaseEnv returns os.Environ() with every GC_*/BEADS_* entry
 // filtered out, followed by the given extras. Use this to build the
 // `Env` for any exec.Cmd that runs the real gc-beads-bd lifecycle script
@@ -46,9 +52,15 @@ func sanitizedBaseEnv(extra ...string) []string {
 		}
 		filtered = append(filtered, kv)
 	}
+	// An empty value would select the script's default lock directory, the
+	// real one on this host, so refuse it rather than share it silently.
+	if testInitLockDir == "" {
+		panic("sanitizedBaseEnv: testInitLockDir is empty; TestMain sets it before any test runs")
+	}
 	filtered = append(filtered,
 		managedDoltTestModeEnv+"=1",
 		managedDoltTestParentPIDEnv+"="+strconv.Itoa(os.Getpid()),
+		"GC_DOLT_INIT_LOCK_DIR="+testInitLockDir,
 	)
 	return append(filtered, extra...)
 }
