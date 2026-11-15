@@ -283,6 +283,11 @@ func canonicalKimiSessionRoot(root string) string {
 	if root == "" {
 		return ""
 	}
+	// Absolute first: EvalSymlinks keeps a relative path relative, so without it
+	// a relative and an absolute spelling of one root would be two dedup keys.
+	if abs, err := filepath.Abs(root); err == nil {
+		root = abs
+	}
 	if resolved, err := filepath.EvalSymlinks(root); err == nil {
 		return filepath.Clean(resolved)
 	}
