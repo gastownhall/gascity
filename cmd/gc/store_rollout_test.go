@@ -26,6 +26,19 @@ func TestResolvedConditionalWritesMode(t *testing.T) {
 			t.Fatalf("mode = %q, want unset", got)
 		}
 	})
+	t.Run("unset config value resolves auto", func(t *testing.T) {
+		cfg, err := config.Parse([]byte("[workspace]\nname = \"t\"\n"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := resolvedConditionalWritesMode(cfg); got != gate.Auto {
+			t.Fatalf("mode = %q, want auto (the default since mc-dpo2b)", got)
+		}
+		cfg.Beads.ConditionalWrites = "off"
+		if got := resolvedConditionalWritesMode(cfg); got != gate.Off {
+			t.Fatalf("explicit off: mode = %q, want off", got)
+		}
+	})
 	t.Run("resolved config value threads through", func(t *testing.T) {
 		cfg, err := config.Parse([]byte("[workspace]\nname = \"t\"\n\n[beads]\nconditional_writes = \"require\"\n"))
 		if err != nil {
@@ -689,6 +702,11 @@ func TestConditionalWritesDegradedRecorder(t *testing.T) {
 			t.Fatal("want nil callback for busless paths")
 		}
 	})
+	t.Run("the builtin default records nothing", func(t *testing.T) {
+		if cb := conditionalWritesDegradedRecorder(events.NewFake(), rollout.ForTest(), "rig/r1"); cb != nil {
+			t.Fatal("want nil callback when auto is only the builtin default")
+		}
+	})
 	t.Run("records the typed event with wire vocabulary", func(t *testing.T) {
 		fake := events.NewFake()
 		cfg, err := config.Parse([]byte("[workspace]\nname = \"t\"\n\n[beads]\nconditional_writes = \"auto\"\n"))
@@ -737,5 +755,61 @@ func TestConditionalWritesEventStoreKind(t *testing.T) {
 		if got := conditionalWritesEventStoreKind(in); got != want {
 			t.Errorf("conditionalWritesEventStoreKind(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestDefaultConditionalWritesStayQuietOnAnExecStore pins that the builtin
+// default auto treats a store that cannot carry the mode as off. An exec
+// store cannot, and every CLI command opens one per scope, so a city that
+// never set conditional_writes would otherwise log a WARN and record a
+// beads.conditional_writes.degraded event on every command. An explicit
+// "auto" stays loud. The open logs on slog.Default, which the test swaps for
+// a recorder (so it cannot run in parallel).
+func TestDefaultConditionalWritesStayQuietOnAnExecStore(t *testing.T) {
+	for _, tc := range []struct {
+		name, beads string
+		wantLoud    bool
+	}{
+		{name: "unset", beads: "", wantLoud: false},
+		{name: "explicit auto", beads: "conditional_writes = \"auto\"\n", wantLoud: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearGCEnv(t)
+			cityDir := t.TempDir()
+			toml := "[workspace]\nname = \"t\"\n\n[beads]\nprovider = \"exec:noop.sh\"\n" + tc.beads
+			if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			logs := &captureHandler{}
+			prev := slog.Default()
+			slog.SetDefault(slog.New(logs))
+			t.Cleanup(func() { slog.SetDefault(prev) })
+
+			for range 2 {
+				if _, err := openStoreResultAtForCityWithConfig(cityDir, cityDir, nil, gate.ModeUnset, false, false, false, nil); err != nil {
+					t.Fatalf("open: %v", err)
+				}
+			}
+
+			warns := 0
+			for _, r := range logs.records {
+				if r.Message == "conditional_writes degraded at open" && r.Level >= slog.LevelWarn {
+					warns++
+				}
+			}
+			recorded, err := events.ReadFiltered(filepath.Join(cityDir, ".gc", "events.jsonl"), events.Filter{Type: events.BeadsConditionalWritesDegraded})
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("reading events: %v", err)
+			}
+			if tc.wantLoud {
+				if warns != 2 || len(recorded) != 2 {
+					t.Fatalf("explicit auto: %d WARNs and %d degraded events over two opens, want 2 and 2", warns, len(recorded))
+				}
+				return
+			}
+			if warns != 0 || len(recorded) != 0 {
+				t.Fatalf("default auto: %d WARNs and %d degraded events over two opens, want none", warns, len(recorded))
+			}
+		})
 	}
 }

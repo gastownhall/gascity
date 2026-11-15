@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams } from 'react-router';
 import { GC_EVENT_PREFIX } from 'gas-city-dashboard-shared';
 import { formatApiError } from '../api/client';
 import { getActiveCity } from '../api/cityBase';
@@ -645,7 +645,10 @@ export function BeadsPage() {
               >
                 {filteredDispatchAgents.map((agent) => (
                   <option key={agent.name} value={agent.name}>
-                    {agent.display_name ?? agent.name}
+                    {/* display_name is the provider's label (e.g. "Claude Code"), not the agent's. */}
+                    {agent.display_name && agent.display_name !== agent.name
+                      ? `${agent.name} (${agent.display_name})`
+                      : agent.name}
                   </option>
                 ))}
               </select>

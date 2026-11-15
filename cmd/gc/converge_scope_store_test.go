@@ -7,18 +7,13 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// scopeGraphStore is the routing half of the convergence-residence split, shared
-// with control dispatch. The controller's city scope writes convergence roots
-// into the graph binding (buildConvergenceScopes); `gc converge` has to read and
-// write the same one. When it does not, the CLI reads the work ledger for
-// relocated graph ids and reports every live convergence root as missing —
-// #5125's bug class, and the reason a `gc converge status` can look clean while
-// the engine is stranding.
-//
-// The rig arm is the other half of the same rule: class routing is city-keyed,
-// so there is ONE graph binding per city. Routing rig scopes through it would
-// merge every rig's convergence loops into a ledger keyed by nothing.
-func TestScopeGraphStoreRoutesCityToGraphAndRigToWork(t *testing.T) {
+// The routing half of the convergence-residence split, shared with control
+// dispatch: the controller writes a scope's convergence roots where the S4
+// placement rule says (buildConvergenceScopes), and `gc converge` has to read
+// the same place. When it does not, the CLI reports every live root as missing
+// — #5125's bug class, and the reason a `gc converge status` can look clean
+// while the engine is stranding.
+func TestControlGraphStoreFollowsThePlacementRule(t *testing.T) {
 	class := beads.NewMemStore()
 
 	t.Run("split city scope takes the graph binding", func(t *testing.T) {
@@ -26,70 +21,84 @@ func TestScopeGraphStoreRoutesCityToGraphAndRigToWork(t *testing.T) {
 		work := beads.NewMemStore()
 		seedCLIStorageRoutes(t, cityPath, splitEnvRoutes(class))
 
-		got := scopeGraphStore(cityPath, cityPath, nil, work)
-		if !sameStorePtr(got, class) {
-			t.Error("the city scope did not resolve to the graph binding; " +
-				"the CLI would read the work ledger for relocated graph ids and report every live convergence root as missing")
+		if got := controlGraphStore(cityPath, cityPath, nil, work); !sameStorePtr(got, class) {
+			t.Error("the city scope did not resolve to the graph binding")
 		}
 	})
 
-	t.Run("split rig scope keeps its own work ledger", func(t *testing.T) {
+	t.Run("split rig scope takes the graph binding too", func(t *testing.T) {
 		cityPath := t.TempDir()
 		rig := beads.NewMemStore()
 		seedCLIStorageRoutes(t, cityPath, splitEnvRoutes(class))
 
-		got := scopeGraphStore(cityPath, filepath.Join(cityPath, "rigs", "ra"), nil, rig)
-		if !sameStorePtr(got, rig) {
-			t.Error("the rig scope was routed off its own work ledger; " +
-				"there is one graph binding per city, so every rig's convergence loops would collapse into it")
+		if got := controlGraphStore(cityPath, filepath.Join(cityPath, "rigs", "ra"), nil, rig); !sameStorePtr(got, class) {
+			t.Error("the rig scope stayed on its own store; under the S4 placement rule a split city creates every graph root in the binding, at every scope, and rig stores hold only work")
 		}
 	})
 
-	t.Run("single-store city scope is identity", func(t *testing.T) {
+	t.Run("single-store scopes are identity", func(t *testing.T) {
 		cityPath := t.TempDir()
 		work := beads.NewMemStore()
 		seedCLIStorageRoutes(t, cityPath, nil)
 
-		got := scopeGraphStore(cityPath, cityPath, nil, work)
-		if !sameStorePtr(got, work) {
-			t.Error("a city that relocates nothing must get its own store back unchanged; " +
-				"the class resolver's identity branch is what keeps this fix invisible to every single-store city")
+		if got := controlGraphStore(cityPath, cityPath, nil, work); !sameStorePtr(got, work) {
+			t.Error("a city that relocates nothing must get its own store back unchanged")
+		}
+		rig := beads.NewMemStore()
+		if got := controlGraphStore(cityPath, filepath.Join(cityPath, "rigs", "ra"), nil, rig); !sameStorePtr(got, rig) {
+			t.Error("a rig of a city that relocates nothing must get its own store back unchanged")
 		}
 	})
 }
 
-// TestConvergeRigScopeIgnoresPathBasedCityTest pins the one place converge's
-// scope test is deliberately NOT scopeGraphStore's.
+// TestConvergeRigScopeSelectsByNameNotPath pins that converge's rig leg is
+// selected by rig NAME. Nothing forbids registering a rig at the city root,
+// where its path IS the city path; the controller's scope map keys on the rig
+// name, so the CLI must too.
 //
-// scopeGraphStore decides city-ness by PATH, which is right for control
-// dispatch. Convergence has a second constraint: the controller's scope map
-// keys on rig NAME (buildConvergenceScopes), and nothing forbids registering a
-// rig at the city root. For such a rig the path test says "city" — so routing
-// the CLI's rig leg by path alone would read the graph binding while the
-// controller writes that rig's roots to its own store. That is the exact
-// read/write asymmetry this change removes, reintroduced through the back door.
-//
-// This is the assertion that fails if someone later "simplifies" the rig
-// short-circuit in openConvergeStore away as redundant.
-func TestConvergeRigScopeIgnoresPathBasedCityTest(t *testing.T) {
-	cityPath := t.TempDir()
-	class := beads.NewMemStore()
-	rigAtCityRoot := beads.NewMemStore()
-	seedCLIStorageRoutes(t, cityPath, splitEnvRoutes(class))
+// On a single-store city the named rig reads its own store untouched. On a
+// split city it reads the binding filtered to rig:<name> — never the city
+// scope's rows, which a path-based test would hand it.
+func TestConvergeRigScopeSelectsByNameNotPath(t *testing.T) {
+	t.Run("single-store: the named rig keeps its own store", func(t *testing.T) {
+		cityPath := t.TempDir()
+		rigAtCityRoot := beads.NewMemStore()
+		seedCLIStorageRoutes(t, cityPath, nil)
+		if got := convergeScopeStore(cityPath, "rig-at-city-root", cityPath, rigAtCityRoot); !sameStorePtr(got.(beads.Store), rigAtCityRoot) {
+			t.Error("a rig of a single-store city was routed off its own store")
+		}
+	})
 
-	// The premise: by path alone this scope reads as the city, so the shared
-	// helper routes it. Without this control the test below could pass because
-	// the routes were never seeded rather than because the guard held.
-	if routed := scopeGraphStore(cityPath, cityPath, nil, rigAtCityRoot); !sameStorePtr(routed, class) {
-		t.Fatal("premise failed: scopeGraphStore did not route a city-path scope to the binding, " +
-			"so this test cannot distinguish the rig guard from an unseeded route")
-	}
+	t.Run("split: the named rig reads only its own scope from the binding", func(t *testing.T) {
+		cityPath := t.TempDir()
+		class := newSplitEnvClassLeaf(t)
+		seedCLIStorageRoutes(t, cityPath, splitEnvRoutes(class))
+		cityLoop, err := class.Create(beads.Bead{Title: "city loop", Type: "convergence"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rigLoop, err := class.Create(beads.Bead{Title: "rig loop", Type: "convergence", Metadata: map[string]string{
+			"gc.root_store_ref": "rig:rig-at-city-root",
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
 
-	// openConvergeStore's rig leg returns the scope store untouched for any
-	// non-empty rig name, whatever its path resolves to.
-	if got := convergeScopeStore(cityPath, "rig-at-city-root", cityPath, rigAtCityRoot); !sameStorePtr(got, rigAtCityRoot) {
-		t.Error("a rig registered at the city root was routed to the city graph binding; " +
-			"the controller keys convergence scopes by rig name and writes that rig's roots to its own store, " +
-			"so the CLI would read a database the controller never writes for it")
-	}
+		rigReader := convergeScopeStore(cityPath, "rig-at-city-root", cityPath, beads.NewMemStore())
+		got, err := rigReader.List(beads.ListQuery{Type: "convergence"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ids := controlLegIDs(got); len(ids) != 1 || ids[0] != rigLoop.ID {
+			t.Errorf("rig scope listed %v, want only its own loop %s (the city loop %s belongs to the city scope)", ids, rigLoop.ID, cityLoop.ID)
+		}
+		cityReader := convergeScopeStore(cityPath, "", cityPath, beads.NewMemStore())
+		got, err = cityReader.List(beads.ListQuery{Type: "convergence"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ids := controlLegIDs(got); len(ids) != 1 || ids[0] != cityLoop.ID {
+			t.Errorf("city scope listed %v, want only the city loop %s", ids, cityLoop.ID)
+		}
+	})
 }

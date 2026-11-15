@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -2491,6 +2490,75 @@ func TestRewriteBdHeartbeatArgs(t *testing.T) {
 	})
 }
 
+// TestBdAssigneeShapeRefusal pins the crn-23jqc defense-in-depth fix: `gc bd
+// update` refuses a non-empty --assignee value with an empty rig or role
+// segment (e.g. "cairn/", "/pm", "a//b") instead of forwarding it to bd,
+// while still allowing the documented "" clear idiom and any properly-
+// segmented value through. Such a malformed value is invisible to both
+// standard discovery tiers (exact --assignee=<role> match and --unassigned),
+// so a bead written with it becomes silently unreachable -- the 2026-08-15
+// cairn incident this bead defends against. The guard resolves the verb
+// through bdflags.SplitGlobalFlags, so a global flag before `update` (e.g.
+// `--actor bob update ...`) cannot bypass it.
+func TestBdAssigneeShapeRefusal(t *testing.T) {
+	// Fake bd that echoes its argv to stdout and exits 0 -- proves a case
+	// reached the exec.Command forward, as opposed to being refused first.
+	const echoArgsFakeBdScript = `#!/bin/sh
+echo "$@"
+exit 0
+`
+	cases := []struct {
+		name    string
+		args    []string
+		refused bool
+	}{
+		{"trailing-slash-empty-role", []string{"update", "demo-abc", "--assignee=cairn/"}, true},
+		{"leading-slash-empty-rig-space-form", []string{"update", "demo-abc", "--assignee", "/pm"}, true},
+		{"double-slash-empty-middle-segment", []string{"update", "demo-abc", "--assignee=a//b"}, true},
+		{"short-form-separated", []string{"update", "demo-abc", "-a", "/pm"}, true},
+		{"short-form-inline", []string{"update", "demo-abc", "-a=cairn/"}, true},
+		{"empty-value-clears-assignee", []string{"update", "demo-abc", "--assignee="}, false},
+		{"fully-qualified-value", []string{"update", "demo-abc", "--assignee=cairn/pm"}, false},
+		{"bare-role-no-rig", []string{"update", "demo-abc", "--assignee=deep-investigator"}, false},
+		{"claim-passes-through", []string{"update", "demo-abc", "--claim"}, false},
+		{"non-update-subcommand-forwards", []string{"create", "x", "--assignee=cairn/"}, false},
+		{"global-value-flag-before-verb", []string{"--actor", "bob", "update", "demo-abc", "--assignee=cairn/"}, true},
+		{"global-bool-flag-before-verb", []string{"--json", "update", "demo-abc", "--assignee", "/pm"}, true},
+		{"global-inline-value-before-verb", []string{"--format=json", "update", "demo-abc", "-a=a//b"}, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			silentFallbackTestSetup(t, echoArgsFakeBdScript)
+
+			var stdout, stderr bytes.Buffer
+			got := doBd(tc.args, &stdout, &stderr)
+
+			if tc.refused {
+				if got == 0 {
+					t.Fatalf("doBd(%v) = 0, want non-zero (refused)", tc.args)
+				}
+				if !strings.Contains(stderr.String(), "empty rig or role segment") {
+					t.Fatalf("stderr = %q, want empty-rig-or-role-segment refusal", stderr.String())
+				}
+				if !strings.Contains(stderr.String(), "crn-23jqc") {
+					t.Fatalf("stderr = %q, want crn-23jqc reference", stderr.String())
+				}
+				if stdout.String() != "" {
+					t.Fatalf("stdout = %q, want empty -- bd must never be invoked on a refusal", stdout.String())
+				}
+				return
+			}
+			if got != 0 {
+				t.Fatalf("doBd(%v) = %d, want 0 (forwarded); stderr=%q", tc.args, got, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), tc.args[1]) {
+				t.Fatalf("stdout = %q, want forwarded args echoed by fake bd", stdout.String())
+			}
+		})
+	}
+}
+
 // TestBdMutationWriteID covers the compatibility shim (first-ID extraction).
 func TestBdMutationWriteID(t *testing.T) {
 	t.Run("extracts id from write subcommands", func(t *testing.T) {
@@ -2835,7 +2903,12 @@ func TestDoBdReleaseIfCurrentUpdatesOnlyMatchingAssignment(t *testing.T) {
 	}
 }
 
-func TestDoBdReleaseIfCurrentWorksForBdStoreFallback(t *testing.T) {
+// TestDoBdReleaseIfCurrentRefusesAnOldBdWithoutSQL is the CLI twin of the
+// store-level floor: a bd below 1.3.0 rejects the conditional-release flags,
+// and the command must fail with the typed refusal naming the floor. It must
+// never reach `bd sql` (or, on this embedded-Dolt rig, the `dolt sql` CLI): no
+// release path writes the row behind bd's back.
+func TestDoBdReleaseIfCurrentRefusesAnOldBdWithoutSQL(t *testing.T) {
 	clearInheritedBeadsEnv(t)
 	origCityFlag := cityFlag
 	origRigFlag := rigFlag
@@ -2872,9 +2945,9 @@ prefix = "fe"
 	}
 	fakeBin := t.TempDir()
 	sqlLog := filepath.Join(fakeBin, "sql.log")
-	// bd 1.0.4 — the contract-tested minimum (deps.env BD_PREV_VERSION) — has no
-	// conditional-release flags and rejects them the way its flag parser does,
-	// which is what latches the store onto the raw-SQL path this test pins.
+	// A bd older than 1.3.0 has no conditional-release flags and rejects them
+	// the way its flag parser does. The sql branch only records a call, so the
+	// test can prove none happened.
 	fakeBD := "#!/bin/sh\n" +
 		"if [ \"$1\" = \"update\" ]; then\n" +
 		"  printf 'unknown flag: --if-assignee\\n' >&2\n" +
@@ -2907,22 +2980,19 @@ prefix = "fe"
 
 	target := execStoreTarget{ScopeRoot: rigDir, ScopeKind: "rig", Prefix: "fe"}
 	var stdout, stderr bytes.Buffer
-	if got := doBdReleaseIfCurrent(cityDir, nil, target, "fe-abc", "worker-1", &stdout, &stderr); got != 0 {
-		t.Fatalf("doBdReleaseIfCurrent = %d, want 0; stderr=%q", got, stderr.String())
+	if got := doBdReleaseIfCurrent(cityDir, nil, target, "fe-abc", "worker-1", &stdout, &stderr); got != 1 {
+		t.Fatalf("doBdReleaseIfCurrent = %d, want 1; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
 	}
-	if strings.TrimSpace(stdout.String()) != "released" {
-		t.Fatalf("output = %q, want released", stdout.String())
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want nothing on a refusal", stdout.String())
 	}
-	query, err := os.ReadFile(sqlLog)
-	if err != nil {
-		t.Fatalf("read SQL log: %v", err)
+	for _, want := range []string{beads.ErrConditionalReleaseUnsupported.Error(), "bd >= 1.3.0"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want it to contain %q", stderr.String(), want)
+		}
 	}
-	// The release mints a fresh revision so the pre-release token is stale, so
-	// the token itself is not pinnable — everything around it is.
-	gotQuery := strings.TrimSpace(string(query))
-	wantQuery := regexp.MustCompile(`^UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP, revision = -?\d+ WHERE id = 'fe-abc' AND status = 'in_progress' AND assignee = 'worker-1'$`)
-	if !wantQuery.MatchString(gotQuery) {
-		t.Fatalf("SQL query = %q, want match for %s", gotQuery, wantQuery)
+	if _, err := os.Stat(sqlLog); !os.IsNotExist(err) {
+		t.Fatalf("an old bd reached `bd sql` (log stat err=%v)", err)
 	}
 }
 
@@ -2962,12 +3032,18 @@ prefix = "fe"
 	fakeBin := t.TempDir()
 	argvLog := filepath.Join(fakeBin, "argv.log")
 	// A capable bd: the verb is understood, and the precondition miss is
-	// reported the way bd reports it — exit 13, nothing written.
+	// reported the way bd reports it — exit 13, nothing written. It holds the
+	// bead, now claimed by someone else, and answers show for it: the verdict
+	// is read back before "skipped" is printed.
 	fakeBD := "#!/bin/sh\n" +
 		"printf ' %s' \"$@\" >> " + strconv.Quote(argvLog) + "\n" +
 		"if [ \"$1\" = \"update\" ]; then\n" +
 		"  printf 'assignee mismatch\\n' >&2\n" +
 		"  exit 13\n" +
+		"fi\n" +
+		"if [ \"$1\" = \"show\" ]; then\n" +
+		"  printf '[{\"id\":\"fe-abc\",\"status\":\"in_progress\",\"assignee\":\"worker-2\"}]\\n'\n" +
+		"  exit 0\n" +
 		"fi\n" +
 		"printf 'unexpected bd args:' >&2\n" +
 		"printf ' %s' \"$@\" >&2\n" +

@@ -27,10 +27,10 @@ diff -ruN a/go/tools/builders/nogo_main.go b/go/tools/builders/nogo_main.go
 +var staticcheckCheck = regexp.MustCompile(`^(SA|S|ST|QF)[0-9]+$`)
 +
 +// nolintCovers reports whether a directive naming linters (nil: all) covers
-+// the analyzer. As in golangci-lint, `staticcheck` names every staticcheck
-+// check. (gascity third_party/patches)
++// the analyzer, as golangci-lint does (`staticcheck` names every staticcheck
++// check), except storeclass: its shrink-only baseline is its only exemption.
 +func nolintCovers(linters map[string]bool, analyzer string) bool {
-+	return linters == nil || linters[analyzer] || (linters["staticcheck"] && staticcheckCheck.MatchString(analyzer))
++	return analyzer != "storeclass" && (linters == nil || linters[analyzer] || (linters["staticcheck"] && staticcheckCheck.MatchString(analyzer)))
 +}
 +
 +// addGolangciNolintRanges adds golangci-lint's nolint ranges for f, which the

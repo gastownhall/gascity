@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # scope_bd.sh — the bead-store front door for the core maintenance orders.
 #
-# Sourced by reaper.sh and jsonl-export.sh. Every bead scope (the city and each
-# rig) is reached only through `gc bd --city <city> [--rig <rig>] <verb>`; bd
-# picks the transport (proxied, direct server, embedded) for that scope. The
-# maintenance scripts therefore carry no Dolt ports, no SQL connections of
-# their own and no topology branches.
+# Sourced by reaper.sh, jsonl-export.sh and gate-sweep.sh. Every bead scope
+# (the city and each rig) is reached only through
+# `gc bd --city <city> [--rig <rig>] <verb>`; bd picks the transport (proxied,
+# direct server, embedded) for that scope. The maintenance scripts therefore
+# carry no Dolt ports, no SQL connections of their own and no topology
+# branches.
 #
 # Mutations go through gc bd verbs only (close, update, purge, prune, delete),
 # which own their commits in every bd mode. `gc bd sql` is used for read-only
@@ -27,6 +28,10 @@ SCOPE_LAST_ERROR=""
 # (a file- or exec-backed store): there is nothing for these orders to do
 # there, which is not a failure.
 SCOPE_NOT_BD=0
+# SCOPE_SQL_UNSUPPORTED is 1 when the scope's bd store is reachable but bd
+# refuses its sql verb there (a store in bd's embedded mode). Selections that need
+# SQL cannot run against it, which is a property of the store, not a failure.
+SCOPE_SQL_UNSUPPORTED=0
 
 # core_rig_names prints one configured rig name per line. Suspended rigs are
 # left out: gc does not touch a suspended scope, because any bd read restarts
@@ -106,6 +111,7 @@ scope_resolve_db() {
     SCOPE_DB=""
     SCOPE_LAST_ERROR=""
     SCOPE_NOT_BD=0
+    SCOPE_SQL_UNSUPPORTED=0
     local err_file
     err_file=$(mktemp)
     if ! out=$(scope_sql_read csv "SELECT DATABASE()" 2>"$err_file"); then
@@ -114,6 +120,7 @@ scope_resolve_db() {
         SCOPE_LAST_ERROR="$out"
         case "$out" in
             *"only supported for bd-backed beads providers"*) SCOPE_NOT_BD=1 ;;
+            *"sql' is not yet supported in embedded mode"*) SCOPE_SQL_UNSUPPORTED=1 ;;
         esac
         return 1
     fi

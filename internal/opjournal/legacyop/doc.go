@@ -16,11 +16,12 @@
 // (recorded or not) or replay a stored or in-flight outcome, and returns an
 // error only for refusals a caller maps to its wire. Finish closes the op
 // from the legacy result, or, on the API, leaves a client-keyed op open for a
-// same-key retry to adopt; CLI ops always close.
+// same-key retry to adopt before its finish_by; CLI ops always close.
 //
 // The ops are acceptance records: their executor is legacy:api or legacy:cli,
 // so a lane never takes one; only their legacy path, an API adopter (Adopt;
-// the CLI never adopts) or the sweeper (Sweep, at finish_by) closes one.
+// the CLI never adopts), the sweeper (Sweep, past finish_by) or a same-key
+// Admit past finish_by closes one.
 // Delivered text never carries an op id, key or marker: this package never
 // sees the text a runtime receives.
 //

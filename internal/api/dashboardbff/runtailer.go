@@ -18,6 +18,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/platform/livefile"
 	"github.com/gastownhall/gascity/internal/runproj"
 )
 
@@ -170,7 +171,7 @@ func (m *runTailerManager) ensure(name, eventsPath string) *cityRunTailer {
 		ok = false
 	}
 	if !ok {
-		t = &cityRunTailer{name: name, eventsPath: eventsPath, mgr: m, readyCh: make(chan struct{}), doneCh: make(chan struct{}), snapshotCache: newRunSnapshotCache(), detailMemo: newRunDetailMemo(), unknownRuns: newUnknownRunGrace()}
+		t = &cityRunTailer{name: name, eventsPath: eventsPath, mgr: m, readyCh: make(chan struct{}), doneCh: make(chan struct{}), syncCh: make(chan chan struct{}), snapshotCache: newRunSnapshotCache(), detailMemo: newRunDetailMemo(), unknownRuns: newUnknownRunGrace()}
 		m.cities[name] = t
 	}
 	m.startLocked(t)
@@ -187,7 +188,10 @@ type cityRunTailer struct {
 	started bool
 	readyCh chan struct{} // closed once the cold replay attempt completes
 	doneCh  chan struct{} // closed after the path-bound loop exits
-	cancel  context.CancelFunc
+	// syncCh carries catch-up requests (see sync): the loop folds the log
+	// through its current end, publishes, and closes each request's channel.
+	syncCh chan chan struct{}
+	cancel context.CancelFunc
 
 	// snapshotCache caches the folded run snapshot (and the formula target
 	// derived from it) per fold generation so a same-generation repeat request
@@ -246,7 +250,7 @@ type tailState struct {
 }
 
 // captureTailCursor snapshots the active log's byte size and identity from a
-// SINGLE os.Stat so the resume offset and the rotation-detection identity always
+// SINGLE livefile.Stat so the resume offset and rotation-detection identity always
 // describe the same file. Splitting them across two stats (a size stat then an
 // identity stat) let a rotation land between the two and pair the old file's
 // larger offset with the fresh file's identity; the first foldNext then saw no
@@ -256,7 +260,7 @@ type tailState struct {
 // rotation before it yields a consistent size+identity for the new active file.
 func captureTailCursor(path string) *tailState {
 	st := &tailState{}
-	if info, err := os.Stat(path); err == nil {
+	if info, err := livefile.Stat(path); err == nil {
 		st.offset = info.Size()
 		st.activeInfo = info
 	}
@@ -338,7 +342,64 @@ func (t *cityRunTailer) loop(ctx context.Context, wg *sync.WaitGroup) {
 		case <-poll.C:
 			t.foldNext(proj, st)
 			t.logDecodeMisses(proj, st)
+		case done := <-t.syncCh:
+			// Coalesce every request already waiting into this one fold: each
+			// asked for the log through a point at or before now.
+			waiting := []chan struct{}{done}
+			for drained := false; !drained; {
+				select {
+				case more := <-t.syncCh:
+					waiting = append(waiting, more)
+				default:
+					drained = true
+				}
+			}
+			t.foldNext(proj, st)
+			t.logDecodeMisses(proj, st)
+			for _, w := range waiting {
+				close(w)
+			}
 		}
+	}
+}
+
+// sync folds everything appended to the event log before the call and
+// publishes the result before it returns, so a writer that recorded its events
+// synchronously (a POST /runs/{id}/cancel through the supervisor's cache) reads
+// its own write on the next GET instead of waiting out runTailPollInterval. It
+// costs one stat and a read of the bytes appended since the last fold — no
+// store access — and concurrent requests share one fold. It reports false
+// when the tailer is not running or ctx ended first; the projection then
+// catches up on its next poll as before.
+func (t *cityRunTailer) sync(ctx context.Context) bool {
+	t.mgr.mu.Lock()
+	started := t.started
+	t.mgr.mu.Unlock()
+	if !started {
+		return false
+	}
+	select {
+	case <-t.readyCh:
+	case <-t.doneCh:
+		return false
+	case <-ctx.Done():
+		return false
+	}
+	done := make(chan struct{})
+	select {
+	case t.syncCh <- done:
+	case <-t.doneCh:
+		return false
+	case <-ctx.Done():
+		return false
+	}
+	select {
+	case <-done:
+		return true
+	case <-t.doneCh:
+		return false
+	case <-ctx.Done():
+		return false
 	}
 }
 
@@ -380,7 +441,7 @@ var readTailEvents = events.ReadFrom
 // sequence, then re-tails the fresh active file from the top; the seq filter
 // drops the overlap the catch-up already folded.
 func (t *cityRunTailer) foldNext(proj *runproj.Projector, st *tailState) {
-	info, statErr := os.Stat(t.eventsPath)
+	info, statErr := livefile.Stat(t.eventsPath)
 	if statErr != nil && st.activeInfo != nil {
 		// Once an active file has existed, an unavailable path can be the
 		// rename/recreate seam of a rotation. ReadFrom intentionally treats
@@ -443,7 +504,7 @@ func (t *cityRunTailer) foldNext(proj *runproj.Projector, st *tailState) {
 		return
 	}
 	if statErr == nil {
-		verifiedInfo, verifyErr := os.Stat(t.eventsPath)
+		verifiedInfo, verifyErr := livefile.Stat(t.eventsPath)
 		if verifyErr != nil {
 			t.markIncrementalReadFailure(&st.tailReadFailed, "active-log verification", verifyErr)
 			return
@@ -484,13 +545,23 @@ func (t *cityRunTailer) foldNext(proj *runproj.Projector, st *tailState) {
 // (session.updated / .woke / .stopped / .crashed / …).
 const sessionEventPrefix = "session."
 
+// sessionObservationEvents are session.* events that observe a session
+// without changing it: they move no session link, so they never refresh the
+// sessions enrichment. The program-status shadow records a comparison at
+// every decision point, often several a second city-wide; refreshing on each
+// would drop the sessions cache on every tail poll.
+var sessionObservationEvents = map[string]bool{
+	events.SessionProgramStatusShadow: true,
+}
+
 // containsSessionEvent reports whether any freshly-folded event is a session
 // lifecycle event. Such events do not change the bead fold, so build() ignores
 // them, but they change the live session enrichment the detail projection layers
 // on — the reason foldNext refreshes sessions and wakes the detail stream.
+// Observation-only session events (sessionObservationEvents) do not count.
 func containsSessionEvent(fresh []events.Event) bool {
 	for i := range fresh {
-		if strings.HasPrefix(fresh[i].Type, sessionEventPrefix) {
+		if strings.HasPrefix(fresh[i].Type, sessionEventPrefix) && !sessionObservationEvents[fresh[i].Type] {
 			return true
 		}
 	}

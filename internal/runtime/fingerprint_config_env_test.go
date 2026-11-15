@@ -99,3 +99,40 @@ func TestOperatorAuthoredEnvFingerprintTreatsNilAndEmptyAsEquivalent(t *testing.
 		}
 	}
 }
+
+// TestDoltPortProjectionDoesNotDriftAgentFingerprint guards the upgrade path
+// of gastownhall/gascity#1656: gc now withholds the projected Dolt port from
+// a gc-managed mirrored scope's session env, so the same agent config exists
+// in the wild with the port projected (base) and withheld (empty). Neither
+// shape may change the agent's identity — nothing drains on the upgrade, and
+// nothing drains when a managed Dolt restart moves the port.
+func TestDoltPortProjectionDoesNotDriftAgentFingerprint(t *testing.T) {
+	base := Config{Command: "agent", Env: map[string]string{"BEADS_DIR": "/city/.beads"}}
+	projected := map[string]string{"BEADS_DIR": "/city/.beads"}
+	for key, value := range map[string]string{
+		"GC_DOLT_PORT":           "45217",
+		"BEADS_DOLT_SERVER_PORT": "45217",
+		"BEADS_DOLT_PORT":        "45217",
+	} {
+		projected[key] = value
+	}
+	withheld := map[string]string{"BEADS_DIR": "/city/.beads"}
+	for _, key := range []string{"GC_DOLT_PORT", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT"} {
+		withheld[key] = ""
+	}
+
+	one := base
+	one.Env = projected
+	two := base
+	two.Env = withheld
+
+	if got, want := CoreFingerprint(one), CoreFingerprint(two); got != want {
+		t.Errorf("CoreFingerprint depends on the projected Dolt port: got %q want %q", got, want)
+	}
+	if got, want := ConfigFingerprint(one), ConfigFingerprint(two); got != want {
+		t.Errorf("ConfigFingerprint depends on the projected Dolt port: got %q want %q", got, want)
+	}
+	if got, want := LaunchFingerprint(one), LaunchFingerprint(two); got != want {
+		t.Errorf("LaunchFingerprint depends on the projected Dolt port: got %q want %q", got, want)
+	}
+}

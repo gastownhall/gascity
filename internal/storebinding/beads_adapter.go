@@ -130,12 +130,12 @@ func (b *beadsMessagingFrontDoorBinder) BindSessions(sessions SessionsAddressDir
 	if nilInterface(sessions) {
 		return MessagingFrontDoors{}, errors.New("binding beads messaging: sessions directory is required")
 	}
-	services, err := extmsg.NewServicesWithSessionDirectory(b.messaging, sessions)
+	services, err := extmsg.NewServicesWithSessionDirectory(beads.MailStore{Store: b.messaging}, sessions)
 	if err != nil {
 		return MessagingFrontDoors{}, fmt.Errorf("binding beads messaging services: %w", err)
 	}
 	return MessagingFrontDoors{
-		Mail:             beadmail.NewWithSessionDirectory(b.messaging, sessions),
+		Mail:             beadmail.NewWithSessionDirectory(beads.MailStore{Store: b.messaging}, sessions),
 		Bindings:         services.Bindings,
 		DeliveryContexts: services.Delivery,
 		Groups:           services.Groups,

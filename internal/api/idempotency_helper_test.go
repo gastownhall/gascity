@@ -132,6 +132,28 @@ func TestWithIdempotency_ErrorReleasesReservation(t *testing.T) {
 	}
 }
 
+func TestWithIdempotencyKeeping_UnkeptSuccessReleasesReservation(t *testing.T) {
+	s := newIdemTestServer()
+	body := map[string]string{"a": "1"}
+	final := func(v idemVal) bool { return v.Body != "open" }
+	calls := 0
+	run := func(result string) (idemVal, error) {
+		return withIdempotencyKeeping(s.idem, "/v0/things", "key-1", body,
+			func() (idemVal, error) { calls++; return idemVal{ID: "t1", Body: result}, nil }, final)
+	}
+	if got, err := run("open"); err != nil || got.Body != "open" {
+		t.Fatalf("provisional call = %+v, %v; want its own answer", got, err)
+	}
+	// Not cached: a retry runs create again and answers what it finds now.
+	if got, err := run("done"); err != nil || got.Body != "done" || calls != 2 {
+		t.Fatalf("retry = %+v, %v after %d creates; want create run again", got, err, calls)
+	}
+	// A kept success is cached as withIdempotency caches it.
+	if got, err := run("other"); err != nil || got.Body != "done" || calls != 2 {
+		t.Fatalf("replay = %+v, %v after %d creates; want the kept answer", got, err, calls)
+	}
+}
+
 func TestWithIdempotency_PanicReleasesReservation(t *testing.T) {
 	s := newIdemTestServer()
 	body := map[string]string{"a": "1"}

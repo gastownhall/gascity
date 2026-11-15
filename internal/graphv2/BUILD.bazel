@@ -24,9 +24,12 @@ go_test(
     embed = [":graphv2"],
     deps = [
         "//internal/beads",
+        "//internal/beads/beadstest",
         "//internal/convoy",
         "//internal/coordclass",
+        "//internal/formula",
         "//internal/formulatest",
+        "//internal/molecule",
         "//internal/testenv",
     ],
 )

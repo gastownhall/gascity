@@ -130,9 +130,11 @@ package main
 //
 // Skipping the funnel skips its writes too, and one of them is load-bearing.
 // On a split it serves, the boot gate records the served-binding note once the
-// binding has opened (recordServedBinding), and nothing outside the funnel
-// writes it: the controller's boot and every one-shot command reach it the
-// same way. The note is the city's record that it served the split, and every
+// binding has opened (recordServedBinding): the controller's boot and every
+// one-shot command reach it the same way. `gc storage migrate` writes it too,
+// when its migration converges; but a city migrated by an EARLIER build
+// (v1.5.0/v1.5.1, whose migrate wrote no note) and not booted since has none,
+// and for that city the funnel is the note's only writer. The note is the city's record that it served the split, and every
 // later re-point is held against it: to another binding, provider or
 // location, or back to work. A migrated city's revert is held first by the
 // cleared note its migration wrote (revertHoldingNote), but the runbook's
@@ -140,8 +142,9 @@ package main
 // split never had one. From there the served-binding note is the revert's only
 // hold, and without it a city pointed back at work reads as one that never
 // split — here, twinNoSplit — and is served from the work store with no
-// refusal. A city nothing has booted since its cutover has no served-binding
-// note yet, and by-id reads that skipped the funnel would keep it absent.
+// refusal. Such an earlier-build city, not booted since its cutover, has no
+// served-binding note yet, and by-id reads that skipped the funnel would keep
+// it absent.
 //
 // So twinNone skips only once the note is on disk and reads cleanly
 // (servedBindingNoteIsOnDisk). Until then the door takes the funnel: a served
@@ -248,8 +251,9 @@ func byIDResidencyTopology(cityPath string, cfg *config.City, work beads.Store, 
 // false is always safe: it sends the caller into the funnel, which is the
 // path every answer took before. It is returned for a reserved id, an empty id
 // set, a census that proved a twin or could not decide, a split whose
-// served-binding note is not on disk yet (the funnel is the note's only writer:
-// "The skip waits for the served-binding note" above), and for the two states
+// served-binding note is not on disk yet (for a city an earlier build migrated
+// and nothing has booted since, the funnel is the note's only writer: "The
+// skip waits for the served-binding note" above), and for the two states
 // in which this process already holds the city's routes (a resolved funnel, or
 // a controller's registration) — there the census would open a second handle
 // on a binding root that is already open, and the routes answer cheaply anyway.
@@ -613,7 +617,42 @@ func migrationCopyManifest(cityPath string, cfg *config.City) (manifest map[stri
 	if err != nil || !recorded {
 		return nil, false
 	}
-	return proven, true
+	return unionRigImportManifests(proven, cityPath, cfg, target), true
+}
+
+// unionRigImportManifests adds to the city manifest's ids every id a rig
+// import recorded (S4b design §3.5): an id-level consumer reads the union of
+// the city manifest and the rig manifests, so an imported rig row the binding
+// has since collected is still known to have been delivered. A rig manifest
+// that cannot be read adds nothing; its ids keep the binding-held half of the
+// proof.
+func unionRigImportManifests(proven map[string]bool, cityPath string, cfg *config.City, target infraBindingTarget) map[string]bool {
+	if cfg == nil {
+		return proven
+	}
+	var union map[string]bool
+	for _, rig := range cfg.Rigs {
+		if !rigNameIsFileSafe(rig.Name) {
+			continue
+		}
+		manifest, _, err := newRigImportLocation(target, cityPath, rig.Name).readManifest()
+		if err != nil || manifest == nil || len(manifest.IDs) == 0 {
+			continue
+		}
+		if union == nil {
+			union = make(map[string]bool, len(proven)+len(manifest.IDs))
+			for id := range proven {
+				union[id] = true
+			}
+		}
+		for id := range manifest.IDs {
+			union[id] = true
+		}
+	}
+	if union == nil {
+		return proven
+	}
+	return union
 }
 
 // refusedBindingIsAlreadyOnDisk reports whether this city's configured binding

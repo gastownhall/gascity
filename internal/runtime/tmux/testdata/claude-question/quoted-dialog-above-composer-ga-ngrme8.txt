@@ -1,0 +1,13 @@
+⏺ The bead's pane capture reads:
+  ←  ☐ Q1  ☐ Q2  ✔ Submit  →
+  Which approach would you prefer for this feature?
+  ❯ 1. Alpha approach (Recommended)
+  2. Beta variant
+  Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+  Do you want to proceed?
+  ❯ 1. Yes
+  2. No
+────────────────────────────────────────────────────────────────────────────
+❯
+────────────────────────────────────────────────────────────────────────────
+  -- INSERT -- ⏵⏵ bypass permissions on (shift+tab to cycle)

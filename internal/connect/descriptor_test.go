@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -17,14 +18,24 @@ func validDescriptor() Descriptor {
 		Generation: 7,
 		Contract:   Contract,
 		Credential: "file:/home/agent/.config/gascity/connect/maintainer-city/mc-abc12/bearer",
-		Ledgers: []DescriptorLedger{{
-			Scope:          ScopeCity,
-			URL:            "https://ctl.example.ts.net:7491",
-			ProjectID:      "proj-7d2e",
-			CAFile:         "/home/agent/.config/gascity/connect/maintainer-city/mc-abc12/ca-city.pem",
-			AllowPlaintext: false,
-			Workspaces:     []string{"/data/cities/mc", "/data/cities/mc/rigs/app"},
-		}},
+		Ledgers: []DescriptorLedger{
+			{
+				Scope:          ScopeCity,
+				Classes:        []string{"work"},
+				URL:            "https://ctl.example.ts.net:7491",
+				ProjectID:      "proj-7d2e",
+				CAFile:         "/home/agent/.config/gascity/connect/maintainer-city/mc-abc12/ca-city.pem",
+				AllowPlaintext: false,
+				Workspaces:     []string{"/data/cities/mc", "/data/cities/mc/rigs/app"},
+			},
+			{
+				Scope:      BindingScope("infra"),
+				Classes:    []string{"graph", "sessions", "messaging", "orders", "nudges"},
+				URL:        "https://infra.example.ts.net:7492",
+				ProjectID:  "proj-91c0",
+				Workspaces: []string{"/data/cities/mc/.gc/storage/infra"},
+			},
+		},
 	}
 }
 
@@ -115,6 +126,9 @@ func TestDecodeDescriptorStrictRefusals(t *testing.T) {
 	}
 	drop := func(line string) string { return replace(line+"\n", "") }
 	ledgerAt := strings.Index(golden, "[[ledger]]")
+	if strings.Count(golden, "[[ledger]]") != 2 {
+		t.Fatal("the golden must hold the city ledger and the binding:infra ledger")
+	}
 	cases := map[string]string{
 		"empty":                    "",
 		"not toml":                 "schema = = 1",
@@ -166,7 +180,13 @@ func TestDecodeDescriptorStrictRefusals(t *testing.T) {
 		"relative workspace":       replace(`"/data/cities/mc/rigs/app"`, `"rigs/app"`),
 		"unclean workspace":        replace(`"/data/cities/mc/rigs/app"`, `"/data/cities/mc/rigs/../rigs/app"`),
 		"duplicate workspace":      replace(`"/data/cities/mc/rigs/app"`, `"/data/cities/mc"`),
-		"two ledgers":              golden + "\n" + golden[ledgerAt:],
+		"duplicate ledgers":        golden + "\n" + golden[ledgerAt:],
+		"missing ledger classes":   drop(`classes = ["work"]`),
+		"classes as string":        replace(`classes = ["work"]`, `classes = "work"`),
+		"classes as ints":          replace(`classes = ["work"]`, `classes = [1]`),
+		"empty classes":            replace(`classes = ["work"]`, `classes = []`),
+		"unknown class":            replace(`classes = ["work"]`, `classes = ["work", "mail"]`),
+		"case-variant classes key": replace(`classes = ["work"]`, `Classes = ["work"]`),
 		"case-variant key":         replace(`plane = "worker"`, `PLANE = "worker"`),
 		"case-variant schema":      replace("schema = 1", "Schema = 1"),
 		"case-variant ledger key":  replace(`ca_file = "/home`, `CA_FILE = "/home`),
@@ -206,5 +226,116 @@ func TestValidCityName(t *testing.T) {
 		if ValidCityName(name) {
 			t.Errorf("ValidCityName(%q) = true, want false", name)
 		}
+	}
+}
+
+// TestDescriptorLedgerRules is DES-CN §10 CN-1c's cross-ledger table for the
+// descriptor.
+func TestDescriptorLedgerRules(t *testing.T) {
+	infra := func(d *Descriptor) *DescriptorLedger { return &d.Ledgers[1] }
+	refused := []struct {
+		name   string
+		mutate func(*Descriptor)
+		want   string
+	}{
+		{"no ledgers", func(d *Descriptor) { d.Ledgers = nil }, "no ledgers"},
+		{"two city ledgers", func(d *Descriptor) { infra(d).Scope = ScopeCity }, `ledger[1]: scope "city" duplicates ledger[0]`},
+		{"no city ledger", func(d *Descriptor) { d.Ledgers[0].Scope = BindingScope("primary") }, `no "city" ledger`},
+		{"duplicate binding scope", func(d *Descriptor) {
+			infra(d).Classes = []string{"graph", "sessions", "messaging", "orders"}
+			d.Ledgers = append(d.Ledgers, DescriptorLedger{
+				Scope: BindingScope("infra"), Classes: []string{"nudges"}, URL: "https://other.example.ts.net",
+				ProjectID: "proj-other", Workspaces: []string{"/data/cities/mc/.gc/storage/other"},
+			})
+		}, `ledger[2]: scope "binding:infra" duplicates ledger[1]`},
+		{"empty binding name", func(d *Descriptor) { infra(d).Scope = "binding:" }, "ledger[1]: scope is neither"},
+		{"reserved binding name", func(d *Descriptor) { infra(d).Scope = "binding:work" }, "ledger[1]: scope is neither"},
+		{"dot-dot binding name", func(d *Descriptor) { infra(d).Scope = "binding:.." }, "ledger[1]: scope is neither"},
+		{"all-dots binding name", func(d *Descriptor) { infra(d).Scope = "binding:..." }, "ledger[1]: scope is neither"},
+		{"slash in binding name", func(d *Descriptor) { infra(d).Scope = "binding:a/b" }, "ledger[1]: scope is neither"},
+		{"bare binding", func(d *Descriptor) { infra(d).Scope = "infra" }, "ledger[1]: scope is neither"},
+		{"rig scope", func(d *Descriptor) { infra(d).Scope = "rig:app" }, "ledger[1]: scope is neither"},
+		{"empty classes on a binding beside a full city", func(d *Descriptor) {
+			d.Ledgers[0].Classes = StorageClasses()
+			infra(d).Classes = nil
+		}, "ledger[1]: classes is empty"},
+		{"class in two ledgers", func(d *Descriptor) { d.Ledgers[0].Classes = []string{"work", "graph"} }, `ledger[1]: class "graph" is also on ledger[0]`},
+		{"work off the city ledger", func(d *Descriptor) {
+			d.Ledgers[0].Classes, infra(d).Classes = []string{"graph"}, []string{"work", "sessions", "messaging", "orders", "nudges"}
+		}, `ledger[1]: class "work" is not on the "city" ledger`},
+		{"class missing", func(d *Descriptor) { infra(d).Classes = []string{"graph"} }, "is on no ledger"},
+		{"class twice in one ledger", func(d *Descriptor) { infra(d).Classes = append(infra(d).Classes, "orders") }, `ledger[1]: class "orders" is listed twice`},
+		{"duplicate url", func(d *Descriptor) { infra(d).URL = d.Ledgers[0].URL }, "ledger[1]: url duplicates ledger[0]'s"},
+		{"duplicate project id", func(d *Descriptor) { infra(d).ProjectID = d.Ledgers[0].ProjectID }, "ledger[1]: project_id duplicates ledger[0]'s"},
+		{"workspace under two ledgers", func(d *Descriptor) { infra(d).Workspaces = []string{"/data/cities/mc"} }, "ledger[1]: workspace"},
+		{"second ledger plaintext url", func(d *Descriptor) { infra(d).URL = "http://infra.example.ts.net:7492" }, "ledger[1]: url is http"},
+	}
+	for _, tc := range refused {
+		t.Run(tc.name, func(t *testing.T) {
+			d := validDescriptor()
+			tc.mutate(&d)
+			err := d.Validate()
+			if !errors.Is(err, ErrDescriptorInvalid) {
+				t.Fatalf("Validate = %v, want ErrDescriptorInvalid", err)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Validate = %v, want it to contain %q", err, tc.want)
+			}
+			if _, err := EncodeDescriptor(d); !errors.Is(err, ErrDescriptorInvalid) {
+				t.Fatalf("EncodeDescriptor = %v, want ErrDescriptorInvalid", err)
+			}
+		})
+	}
+	cityOnly := validDescriptor()
+	cityOnly.Ledgers = cityOnly.Ledgers[:1]
+	cityOnly.Ledgers[0].Classes = StorageClasses()
+	if err := cityOnly.Validate(); err != nil {
+		t.Fatalf("a city-only descriptor refused: %v", err)
+	}
+}
+
+// TestEncodeDescriptorCanonicalOrder: ledgers, classes and workspaces encode
+// in canonical order whatever order they were found in.
+func TestEncodeDescriptorCanonicalOrder(t *testing.T) {
+	want, err := EncodeDescriptor(validDescriptor())
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := validDescriptor()
+	d.Ledgers = append(d.Ledgers, DescriptorLedger{
+		Scope: BindingScope("a-queue"), Classes: []string{"nudges"}, URL: "https://q.example.ts.net",
+		ProjectID: "proj-q", Workspaces: []string{"/data/cities/mc/.gc/storage/q"},
+	})
+	d.Ledgers[1].Classes = []string{"orders", "messaging", "graph", "sessions"}
+	slices.Reverse(d.Ledgers)
+	got, err := EncodeDescriptor(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(got)
+	city, queue, infra := strings.Index(text, `scope = "city"`), strings.Index(text, `scope = "binding:a-queue"`), strings.Index(text, `scope = "binding:infra"`)
+	if city < 0 || city > queue || queue > infra {
+		t.Fatalf("ledgers not in canonical order:\n%s", text)
+	}
+	if !strings.Contains(text, `classes = ["graph", "sessions", "messaging", "orders"]`) {
+		t.Fatalf("classes not in StorageClasses() order:\n%s", text)
+	}
+	if d.Ledgers[0].Scope != BindingScope("a-queue") || d.Ledgers[1].Classes[0] != "orders" {
+		t.Fatal("EncodeDescriptor mutated its argument")
+	}
+	decoded, err := DecodeDescriptor(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := EncodeDescriptor(decoded)
+	if err != nil || !bytes.Equal(again, got) {
+		t.Fatalf("canonical round trip is not byte-identical (%v):\n%s", err, again)
+	}
+
+	shuffled := validDescriptor()
+	slices.Reverse(shuffled.Ledgers)
+	slices.Reverse(shuffled.Ledgers[0].Classes)
+	if got, err := EncodeDescriptor(shuffled); err != nil || !bytes.Equal(got, want) {
+		t.Fatalf("shuffled golden encodes differently (%v):\n%s", err, got)
 	}
 }

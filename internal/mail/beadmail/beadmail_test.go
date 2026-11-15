@@ -11,9 +11,21 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/session"
 )
+
+// newTestProvider is the stateless provider over one store serving both the
+// messaging and the sessions class, as a single-store city's store does.
+func newTestProvider(store beads.Store) *Provider {
+	return NewWithStores(beadstest.Mail(store), beadstest.Sessions(store))
+}
+
+// newTestCachedProvider is newTestProvider with the session enumeration cache.
+func newTestCachedProvider(store beads.Store) *Provider {
+	return NewCachedWithStores(beadstest.Mail(store), beadstest.Sessions(store))
+}
 
 // noListScanStore errors when List is called without a filter, proving that
 // Inbox/Count/All use targeted type queries instead of broad scans.
@@ -64,7 +76,7 @@ func (s noCloseAllStore) CloseAll(_ []string, _ map[string]string) (int, error) 
 
 func TestInboxDoesNotCallBroadList(t *testing.T) {
 	base := beads.NewMemStore()
-	p := New(noListScanStore{MemStore: base})
+	p := newTestProvider(noListScanStore{MemStore: base})
 
 	if _, err := p.Send("human", "mayor", "", "targeted"); err != nil {
 		t.Fatal(err)
@@ -81,7 +93,7 @@ func TestInboxDoesNotCallBroadList(t *testing.T) {
 
 func TestMessageCreatedInWispTier(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	sent, err := p.Send("human", "mayor", "hello", "body")
 	if err != nil {
@@ -117,7 +129,7 @@ func TestProviderWithSessionDirectoryKeepsMessageRowsInMessaging(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := NewWithSessionDirectory(messaging, session.NewStore(beads.SessionStore{Store: sessions}))
+	p := NewWithSessionDirectory(beadstest.Mail(messaging), session.NewStore(beadstest.Sessions(sessions)))
 	message, err := p.Send("split-sender", sessionBead.ID, "subject", "body")
 	if err != nil {
 		t.Fatalf("Send: %v", err)
@@ -136,7 +148,7 @@ func TestProviderWithSessionDirectoryKeepsMessageRowsInMessaging(t *testing.T) {
 
 func TestInboxUsesSingleBothTierMessageScanAcrossRoutes(t *testing.T) {
 	store := &messageListProbeStore{MemStore: beads.NewMemStore()}
-	p := New(store)
+	p := newTestProvider(store)
 
 	sessionBead, err := store.Create(beads.Bead{
 		Type:   session.BeadType,
@@ -196,7 +208,7 @@ func TestInboxBypassesPrimedCacheForFreshMessages(t *testing.T) {
 		t.Fatalf("Create message in backing store: %v", err)
 	}
 
-	msgs, err := New(cache).Inbox("mayor")
+	msgs, err := newTestProvider(cache).Inbox("mayor")
 	if err != nil {
 		t.Fatalf("Inbox: %v", err)
 	}
@@ -207,7 +219,7 @@ func TestInboxBypassesPrimedCacheForFreshMessages(t *testing.T) {
 
 func TestInboxIncludesEphemeralMessages(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 	recipient := "agent-a"
 
 	ephemeral, err := store.Create(beads.Bead{
@@ -234,7 +246,7 @@ func TestInboxIncludesEphemeralMessages(t *testing.T) {
 
 func TestInboxRecipientsDedupesRoutesAndReadFiltering(t *testing.T) {
 	store := &messageListProbeStore{MemStore: beads.NewMemStore()}
-	p := New(store)
+	p := newTestProvider(store)
 
 	sessionBead, err := store.Create(beads.Bead{
 		Type:   session.BeadType,
@@ -279,7 +291,7 @@ func TestInboxRecipientsDedupesRoutesAndReadFiltering(t *testing.T) {
 
 func TestInboxRecipientsEmptyReturnsAllUnreadMessages(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	if _, err := p.Send("human", "mayor", "", "one"); err != nil {
 		t.Fatalf("Send mayor: %v", err)
@@ -321,7 +333,7 @@ func TestCheckDoesNotUseMessageLabelSupplement(t *testing.T) {
 		}
 		return nil, errors.New("unexpected command: " + cmd)
 	}
-	p := New(beads.NewBdStore(t.TempDir(), runner))
+	p := newTestProvider(beads.NewBdStore(t.TempDir(), runner))
 
 	msgs, err := p.Check("mayor")
 	if err != nil {
@@ -351,14 +363,17 @@ func TestCheckUsesSingleAssigneeMessageScanForSlashRecipient(t *testing.T) {
 			messageListCalls++
 			return []byte(`[{"id":"msg-w","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"gascity/workflows.codex-max","from":"human","created_at":"2026-01-02T03:04:05Z","ephemeral":true}]`), nil
 		case strings.Contains(cmd, "bd query --json"):
-			if strings.Contains(cmd, recipient) {
-				t.Fatalf("slash recipient leaked into supplemental wisp query: %s", cmd)
+			// A slash recipient is not a bare bd query token; it must reach
+			// the wisp query as a quoted predicate, not be dropped (which
+			// would read every open ephemeral message).
+			if strings.Contains(cmd, "type=message") && !strings.Contains(cmd, `assignee="`+recipient+`"`) {
+				t.Fatalf("supplemental wisp query = %s, want quoted assignee=%q predicate", cmd, recipient)
 			}
 			return []byte(`[]`), nil
 		}
 		return nil, errors.New("unexpected command: " + cmd)
 	}
-	p := New(beads.NewBdStore(t.TempDir(), runner))
+	p := newTestProvider(beads.NewBdStore(t.TempDir(), runner))
 
 	msgs, err := p.Check(recipient)
 	if err != nil {
@@ -391,7 +406,7 @@ func TestCheckUsesSingleBothTierBdMessageScan(t *testing.T) {
 		}
 		return nil, errors.New("unexpected command: " + cmd)
 	}
-	p := New(beads.NewBdStore(t.TempDir(), runner))
+	p := newTestProvider(beads.NewBdStore(t.TempDir(), runner))
 
 	msgs, err := p.Check("mayor")
 	if err != nil {
@@ -407,7 +422,7 @@ func TestCheckUsesSingleBothTierBdMessageScan(t *testing.T) {
 
 func TestMessageQueriesUseBothTiers(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	wisp, err := store.Create(beads.Bead{
 		Title:       "wisp status",
@@ -477,7 +492,7 @@ func hasMailMessageID(messages []mail.Message, id string) bool {
 
 func TestCountDoesNotCallBroadList(t *testing.T) {
 	base := beads.NewMemStore()
-	p := New(noListScanStore{MemStore: base})
+	p := newTestProvider(noListScanStore{MemStore: base})
 
 	if _, err := p.Send("human", "mayor", "", "count me"); err != nil {
 		t.Fatal(err)
@@ -494,7 +509,7 @@ func TestCountDoesNotCallBroadList(t *testing.T) {
 
 func TestAllDoesNotCallBroadList(t *testing.T) {
 	base := beads.NewMemStore()
-	p := New(noListScanStore{MemStore: base})
+	p := newTestProvider(noListScanStore{MemStore: base})
 
 	if _, err := p.Send("human", "mayor", "", "all msg"); err != nil {
 		t.Fatal(err)
@@ -513,7 +528,7 @@ func TestAllDoesNotCallBroadList(t *testing.T) {
 
 func TestCountEmptyRecipient(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	if _, err := p.Send("human", "mayor", "", "msg1"); err != nil {
 		t.Fatal(err)
@@ -533,7 +548,7 @@ func TestCountEmptyRecipient(t *testing.T) {
 
 func TestAllEmptyRecipient(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	if _, err := p.Send("human", "mayor", "", "msg1"); err != nil {
 		t.Fatal(err)
@@ -555,7 +570,7 @@ func TestAllEmptyRecipient(t *testing.T) {
 
 func TestSend(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	m, err := p.Send("human", "mayor", "Hello", "hello there")
 	if err != nil {
@@ -601,7 +616,7 @@ func TestSend(t *testing.T) {
 
 func TestSendStoresStableSessionRouteWithoutChangingDisplaySender(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	sender, err := store.Create(beads.Bead{
 		Type:   session.BeadType,
@@ -640,7 +655,7 @@ func TestSendStoresStableSessionRouteWithoutChangingDisplaySender(t *testing.T) 
 
 func TestReplyUsesStoredSenderSessionIDAfterAliasRename(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	sender, err := store.Create(beads.Bead{
 		Type:   session.BeadType,
@@ -706,7 +721,7 @@ func TestReplyUsesStoredSenderSessionIDAfterAliasRename(t *testing.T) {
 
 func TestSendFallsBackToLiteralSenderWhenSessionIdentifierIsAmbiguous(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	for i := 0; i < 2; i++ {
 		if _, err := store.Create(beads.Bead{
@@ -738,7 +753,7 @@ func TestSendFallsBackToLiteralSenderWhenSessionIdentifierIsAmbiguous(t *testing
 
 func TestInboxFallsBackToLiteralRecipientWhenSessionIdentifierIsAmbiguous(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	for i := 0; i < 2; i++ {
 		if _, err := store.Create(beads.Bead{
@@ -766,7 +781,7 @@ func TestInboxFallsBackToLiteralRecipientWhenSessionIdentifierIsAmbiguous(t *tes
 }
 
 func TestSendRejectsEmptyRecipient(t *testing.T) {
-	p := New(beads.NewMemStore())
+	p := newTestProvider(beads.NewMemStore())
 	if _, err := p.Send("human", "", "subject", "body"); err == nil {
 		t.Fatal("Send with empty recipient should error")
 	}
@@ -774,7 +789,7 @@ func TestSendRejectsEmptyRecipient(t *testing.T) {
 
 func TestGetRejectsNonMessageType(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	b, err := store.Create(beads.Bead{Title: "task", Type: "task"})
 	if err != nil {
@@ -797,7 +812,7 @@ func TestGetRejectsNonMessageType(t *testing.T) {
 
 func TestInboxEmpty(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	msgs, err := p.Inbox("mayor")
 	if err != nil {
@@ -810,7 +825,7 @@ func TestInboxEmpty(t *testing.T) {
 
 func TestInboxFilters(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	// Message to mayor.
 	if _, err := p.Send("human", "mayor", "", "for mayor"); err != nil {
@@ -837,7 +852,7 @@ func TestInboxFilters(t *testing.T) {
 
 func TestInboxExcludesRead(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	m, err := p.Send("human", "mayor", "", "will be read")
 	if err != nil {
@@ -861,7 +876,7 @@ func TestInboxExcludesRead(t *testing.T) {
 
 func TestGet(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	sent, err := p.Send("human", "mayor", "Subject", "body")
 	if err != nil {
@@ -885,7 +900,7 @@ func TestGet(t *testing.T) {
 
 func TestGetNotFound(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	_, err := p.Get("gc-999")
 	if err == nil {
@@ -897,7 +912,7 @@ func TestGetNotFound(t *testing.T) {
 
 func TestRead(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	sent, err := p.Send("human", "mayor", "Sub", "read me")
 	if err != nil {
@@ -930,7 +945,7 @@ func TestRead(t *testing.T) {
 
 func TestReadDoesNotClose(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	sent, err := p.Send("human", "mayor", "", "still accessible")
 	if err != nil {
@@ -954,7 +969,7 @@ func TestReadDoesNotClose(t *testing.T) {
 
 func TestReadAlreadyRead(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	sent, err := p.Send("human", "mayor", "", "old news")
 	if err != nil {
@@ -975,7 +990,7 @@ func TestReadAlreadyRead(t *testing.T) {
 
 func TestReadNotFound(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	_, err := p.Read("gc-999")
 	if err == nil {
@@ -987,7 +1002,7 @@ func TestReadNotFound(t *testing.T) {
 
 func TestMarkReadMarkUnread(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	sent, err := p.Send("human", "mayor", "", "toggle me")
 	if err != nil {
@@ -1023,7 +1038,7 @@ func TestMarkReadMarkUnread(t *testing.T) {
 
 func TestArchive(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	sent, err := p.Send("human", "mayor", "", "dismiss me")
 	if err != nil {
@@ -1046,13 +1061,81 @@ func TestArchive(t *testing.T) {
 	}
 }
 
+// TestArchiveUnreadMarksReadFirst covers archiving an unread
+// message marks it read before closing it, so the dismissed message is not
+// left unread forever (the read-gated retention sweep never reclaims unread
+// mail). Both the by-id and the filtered archive paths do it.
+func TestArchiveUnreadMarksReadFirst(t *testing.T) {
+	store := beads.NewMemStore()
+	p := newTestProvider(store)
+	byID, err := p.Send("human", "mayor", "", "archive by id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Send("human", "mayor", "noise: filtered", "archive by filter"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := p.Archive(byID.ID); err != nil {
+		t.Fatalf("Archive: %v", err)
+	}
+	_, results, err := p.ArchiveMatching(ArchiveFilter{Recipients: []string{"mayor"}, SubjectPrefix: "noise:", Limit: 10})
+	if err != nil {
+		t.Fatalf("ArchiveMatching: %v", err)
+	}
+	if len(results) != 1 || results[0].Err != nil {
+		t.Fatalf("ArchiveMatching results = %+v, want one success", results)
+	}
+
+	for _, id := range []string{byID.ID, results[0].ID} {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("store.Get(%s): %v", id, err)
+		}
+		if b.Status != "closed" {
+			t.Errorf("%s status = %q, want closed", id, b.Status)
+		}
+		if !hasLabel(b.Labels, "read") || b.Metadata[mail.ReadMetadataKey] != "true" {
+			t.Errorf("%s labels = %v, mail.read = %q; want read before archive", id, b.Labels, b.Metadata[mail.ReadMetadataKey])
+		}
+	}
+}
+
+// TestArchiveUnreadReadWriteFailureLeavesMessageOpen covers the mark-read
+// write archive makes before it closes an unread message: when that write
+// fails, Archive reports it and never closes the message, so it stays in the
+// inbox rather than being archived unread.
+func TestArchiveUnreadReadWriteFailureLeavesMessageOpen(t *testing.T) {
+	store := &writeCountingStore{readCountingStore: &readCountingStore{MemStore: beads.NewMemStore()}}
+	p := newTestProvider(store)
+	m, err := p.Send("human", "mayor", "", "archive me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.updateErr = errors.New("read write refused")
+
+	if err := p.Archive(m.ID); err == nil || !strings.Contains(err.Error(), "read write refused") {
+		t.Fatalf("Archive = %v, want the read-write failure reported", err)
+	}
+	if store.closes != 0 {
+		t.Errorf("Close calls = %d, want 0 after the read write failed", store.closes)
+	}
+	b, err := store.MemStore.Get(m.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if b.Status != "open" {
+		t.Errorf("status after a failed read write = %q, want open", b.Status)
+	}
+}
+
 func TestArchiveRepairsOpenMessageMissingFromDirectLookup(t *testing.T) {
 	store := beads.NewMemStore()
 	cs := beads.NewCachingStoreForTest(store, nil)
 	if err := cs.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime: %v", err)
 	}
-	sender := New(store)
+	sender := newTestProvider(store)
 	sent, err := sender.Send("human", "worker", "", "dismiss me")
 	if err != nil {
 		t.Fatal(err)
@@ -1073,7 +1156,7 @@ func TestArchiveRepairsOpenMessageMissingFromDirectLookup(t *testing.T) {
 		t.Fatalf("precondition: cached Get error = %v, want ErrNotFound", err)
 	}
 
-	p := New(cs)
+	p := newTestProvider(cs)
 	if err := p.Archive(sent.ID); err != nil {
 		t.Fatalf("Archive: %v", err)
 	}
@@ -1109,7 +1192,7 @@ func TestArchiveRepairsOpenMessageMissingFromDirectLookup(t *testing.T) {
 // operations or thread lookup, while explicit Archive must still delete it.
 func TestLegacyClosedMessageBeadTreatedAsRemoved(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	legacy, err := p.Send("alice", "bob", "legacy", "closed by an old release")
 	if err != nil {
@@ -1213,7 +1296,7 @@ func messageIDsOf(msgs []mail.Message) []string {
 
 func TestArchiveCandidatesUseBothTiers(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	wisp, err := store.Create(beads.Bead{
 		Title:       "dismiss wisp",
@@ -1245,7 +1328,7 @@ func TestArchiveCandidatesUseBothTiers(t *testing.T) {
 
 func TestArchiveNonMessage(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	// Create a task bead (not a message).
 	b, err := store.Create(beads.Bead{Title: "a task"})
@@ -1261,7 +1344,7 @@ func TestArchiveNonMessage(t *testing.T) {
 
 func TestArchiveAlreadyClosed(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	sent, err := p.Send("human", "mayor", "", "old")
 	if err != nil {
@@ -1286,7 +1369,7 @@ func TestArchiveAlreadyClosed(t *testing.T) {
 
 func TestArchiveAlreadyDeleted(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	sent, err := p.Send("human", "mayor", "", "old")
 	if err != nil {
@@ -1304,7 +1387,7 @@ func TestArchiveAlreadyDeleted(t *testing.T) {
 
 func TestArchiveNotFound(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	err := p.Archive("gc-999")
 	if !errors.Is(err, mail.ErrAlreadyArchived) {
@@ -1314,7 +1397,7 @@ func TestArchiveNotFound(t *testing.T) {
 
 func TestArchiveRetainsBodyReadableAfterClose(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	sent, err := p.Send("human", "mayor", "", "dismiss me")
 	if err != nil {
@@ -1347,7 +1430,7 @@ func TestArchiveRetainsBodyReadableAfterClose(t *testing.T) {
 
 func TestArchiveManyClosesAndRetains(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	a, err := p.Send("human", "mayor", "", "first")
 	if err != nil {
@@ -1380,7 +1463,7 @@ func TestArchiveManyClosesAndRetains(t *testing.T) {
 
 func TestArchiveManyReportsPerIDResults(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	a, err := p.Send("human", "mayor", "", "first")
 	if err != nil {
@@ -1431,7 +1514,7 @@ func TestArchiveManyReportsPerIDResults(t *testing.T) {
 // ErrAlreadyArchived without mutating it).
 func TestArchiveDoubleArchiveRetainsBody(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	sent, err := p.Send("human", "mayor", "", "archive twice")
 	if err != nil {
@@ -1459,7 +1542,7 @@ func TestArchiveDoubleArchiveRetainsBody(t *testing.T) {
 
 func TestArchiveManyDoesNotUseCloseAll(t *testing.T) {
 	store := noCloseAllStore{MemStore: beads.NewMemStore(), t: t}
-	p := New(store)
+	p := newTestProvider(store)
 
 	a, err := p.Send("human", "mayor", "", "first")
 	if err != nil {
@@ -1484,7 +1567,7 @@ func TestArchiveManyDoesNotUseCloseAll(t *testing.T) {
 func TestArchiveMatchingSkipsPerMessageGet(t *testing.T) {
 	base := beads.NewMemStore()
 	store := noMessageGetStore{MemStore: base}
-	p := New(store)
+	p := newTestProvider(store)
 
 	matchingA, err := p.Send("human", "human", "Dolt health advisory one", "first")
 	if err != nil {
@@ -1554,7 +1637,7 @@ func (s noMessageGetStore) Get(id string) (beads.Bead, error) {
 
 func TestDelete(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	sent, err := p.Send("human", "mayor", "", "delete me")
 	if err != nil {
@@ -1578,7 +1661,7 @@ func TestDelete(t *testing.T) {
 
 func TestReply(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	sent, err := p.Send("alice", "bob", "Hello", "first message")
 	if err != nil {
@@ -1645,7 +1728,7 @@ func TestReply(t *testing.T) {
 // non-empty title (e.g. BdStore → `bd create`) don't reject the reply.
 func TestReplyDerivesSubjectFromOriginal(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	sent, err := p.Send("alice", "bob", "Hello", "first message")
 	if err != nil {
@@ -1665,7 +1748,7 @@ func TestReplyDerivesSubjectFromOriginal(t *testing.T) {
 // through unchanged — no automatic "Re:" prefixing.
 func TestReplyPreservesExplicitSubject(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	sent, err := p.Send("alice", "bob", "Hello", "first message")
 	if err != nil {
@@ -1686,7 +1769,7 @@ func TestReplyPreservesExplicitSubject(t *testing.T) {
 // the caller omits the subject.
 func TestReplyAvoidsDoubleRePrefix(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	sent, err := p.Send("alice", "bob", "Re: Hello", "body")
 	if err != nil {
@@ -1707,7 +1790,7 @@ func TestReplyAvoidsDoubleRePrefix(t *testing.T) {
 // don't enforce title). The reply still gets a non-empty title.
 func TestReplyFallsBackToBodyWhenOriginalTitleEmpty(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	// Create a message bead directly without a title.
 	orig, err := store.Create(beads.Bead{
@@ -1765,7 +1848,7 @@ func TestReplyAgainstBdStoreValidatesTitle(t *testing.T) {
 		}
 		return nil, errors.New("unexpected bd subcommand: " + args[0])
 	}
-	p := New(beads.NewBdStore(t.TempDir(), runner))
+	p := newTestProvider(beads.NewBdStore(t.TempDir(), runner))
 
 	// Reply with empty subject — must succeed because the provider derives
 	// "Re: Hello" from the original message.
@@ -1780,7 +1863,7 @@ func TestReplyAgainstBdStoreValidatesTitle(t *testing.T) {
 
 func TestReplyPrefersStoredSenderSessionID(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	sender, err := store.Create(beads.Bead{
 		Type:   session.BeadType,
@@ -1854,7 +1937,7 @@ func TestReplyPrefersStoredSenderSessionID(t *testing.T) {
 
 func TestReplyToClosedSenderSessionIsDiscoverableByHistoricalAlias(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	sender, err := store.Create(beads.Bead{
 		Type:   session.BeadType,
@@ -1933,7 +2016,7 @@ func TestReplyToClosedSenderSessionIsDiscoverableByHistoricalAlias(t *testing.T)
 
 func TestRecipientRoutesPreferLiveSessionOverClosedHistory(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	closed, err := store.Create(beads.Bead{
 		Type:   session.BeadType,
@@ -1994,7 +2077,7 @@ func TestRecipientRoutesPreferLiveSessionOverClosedHistory(t *testing.T) {
 
 func TestInboxByCurrentSessionAliasAvoidsBroadSessionScan(t *testing.T) {
 	store := noBroadSessionRouteStore{MemStore: beads.NewMemStore(), t: t}
-	p := New(store)
+	p := newTestProvider(store)
 
 	closed, err := store.Create(beads.Bead{
 		Type:   session.BeadType,
@@ -2055,7 +2138,7 @@ func TestInboxByCurrentSessionAliasAvoidsBroadSessionScan(t *testing.T) {
 
 func TestInboxByClosedCurrentSessionAliasAvoidsBroadSessionScan(t *testing.T) {
 	store := noBroadSessionRouteStore{MemStore: beads.NewMemStore(), t: t}
-	p := New(store)
+	p := newTestProvider(store)
 
 	closed, err := store.Create(beads.Bead{
 		Type:   session.BeadType,
@@ -2095,7 +2178,7 @@ func TestInboxByClosedCurrentSessionAliasAvoidsBroadSessionScan(t *testing.T) {
 
 func TestInboxByHistoricalAliasFallsBackToSessionScan(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	live, err := store.Create(beads.Bead{
 		Type:   session.BeadType,
@@ -2133,7 +2216,7 @@ func TestInboxByHistoricalAliasFallsBackToSessionScan(t *testing.T) {
 
 func TestRecipientRoutesPreferCurrentAddressOverHistoricalAliasAmbiguity(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	historical, err := store.Create(beads.Bead{
 		Type:   session.BeadType,
@@ -2191,7 +2274,7 @@ func TestRecipientRoutesPreferCurrentAddressOverHistoricalAliasAmbiguity(t *test
 
 func TestRecipientRoutesPreferClosedCurrentAddressOverLiveHistoricalAlias(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	liveHistorical, err := store.Create(beads.Bead{
 		Type:   session.BeadType,
@@ -2254,7 +2337,7 @@ func TestRecipientRoutesPreferClosedCurrentAddressOverLiveHistoricalAlias(t *tes
 
 func TestThread(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	sent, err := p.Send("alice", "bob", "Hello", "first")
 	if err != nil {
@@ -2283,7 +2366,7 @@ func TestThread(t *testing.T) {
 
 func TestThreadEmpty(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	msgs, err := p.Thread("nonexistent")
 	if err != nil {
@@ -2300,7 +2383,7 @@ func TestThreadEmpty(t *testing.T) {
 // message-ID to its thread label and return the thread.
 func TestThreadAcceptsMessageIDOfOriginal(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	sent, err := p.Send("alice", "bob", "Hello", "first")
 	if err != nil {
@@ -2328,7 +2411,7 @@ func TestThreadAcceptsMessageIDOfOriginal(t *testing.T) {
 func TestThreadSurfacesNonNotFoundStoreErrors(t *testing.T) {
 	mem := beads.NewMemStore()
 	failing := &getErrorStore{MemStore: mem, getErr: errors.New("simulated I/O failure")}
-	p := New(failing)
+	p := newTestProvider(failing)
 
 	_, err := p.Thread("anything")
 	if err == nil {
@@ -2341,7 +2424,7 @@ func TestThreadSurfacesNonNotFoundStoreErrors(t *testing.T) {
 
 func TestThreadRejectsNonMessageBeadID(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 	task, err := store.Create(beads.Bead{
 		Title:  "not mail",
 		Type:   "task",
@@ -2375,7 +2458,7 @@ func (s *getErrorStore) Get(_ string) (beads.Bead, error) {
 // reply should both surface the full thread.
 func TestThreadAcceptsMessageIDOfReply(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	sent, err := p.Send("alice", "bob", "Hello", "first")
 	if err != nil {
@@ -2402,7 +2485,7 @@ func TestThreadAcceptsMessageIDOfReply(t *testing.T) {
 
 func TestCount(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	if _, err := p.Send("alice", "bob", "", "msg1"); err != nil {
 		t.Fatal(err)
@@ -2434,7 +2517,7 @@ func TestCount(t *testing.T) {
 
 func TestCountRecipientsEmptyDoesNotCountAllMessages(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 	if _, err := p.Send("human", "mayor", "", "msg"); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
@@ -2452,7 +2535,7 @@ func TestCountRecipientsEmptyDoesNotCountAllMessages(t *testing.T) {
 
 func TestCheck(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	if _, err := p.Send("human", "mayor", "", "check me"); err != nil {
 		t.Fatal(err)
@@ -2484,11 +2567,11 @@ func TestCheck(t *testing.T) {
 
 func TestCheckAutoHandoffsReturnsOnlyUnreadDeliveryMarkedMail(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 	if _, err := p.Send("human", "worker", "ordinary", "leave this for normal mail injection"); err != nil {
 		t.Fatalf("Send ordinary: %v", err)
 	}
-	missingArchiveMarker, err := p.SendHandoff(mail.HandoffIntent{
+	missingArchiveMarker, _, err := p.SendHandoff(mail.HandoffIntent{
 		From:        "worker",
 		To:          "worker",
 		Subject:     "not deliverable",
@@ -2498,7 +2581,7 @@ func TestCheckAutoHandoffsReturnsOnlyUnreadDeliveryMarkedMail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SendHandoff missing archive marker: %v", err)
 	}
-	auto, err := p.SendHandoff(mail.HandoffIntent{
+	auto, _, err := p.SendHandoff(mail.HandoffIntent{
 		From:        "worker",
 		To:          "worker",
 		Subject:     "context cycle",
@@ -2509,7 +2592,7 @@ func TestCheckAutoHandoffsReturnsOnlyUnreadDeliveryMarkedMail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SendHandoff auto: %v", err)
 	}
-	readAuto, err := p.SendHandoff(mail.HandoffIntent{
+	readAuto, _, err := p.SendHandoff(mail.HandoffIntent{
 		From:        "worker",
 		To:          "worker",
 		Subject:     "already delivered",
@@ -2576,7 +2659,7 @@ func TestProvider_DefaultProviderSeesNewHistoricalAliasSessionAcrossCalls(t *tes
 	// runs before the matching session exists, later lookups must see newly
 	// created sessions instead of reusing a stale provider-lifetime snapshot.
 	store := &countingSessionListStore{MemStore: beads.NewMemStore()}
-	p := New(store)
+	p := newTestProvider(store)
 
 	if _, err := p.Inbox("old-route"); err != nil {
 		t.Fatalf("initial Inbox(old-route): %v", err)
@@ -2643,7 +2726,7 @@ func TestProviderCached_BroadSessionListCachedAcrossInboxCalls(t *testing.T) {
 		t.Fatalf("Create session B: %v", err)
 	}
 
-	p := NewCached(store)
+	p := newTestCachedProvider(store)
 
 	// Exercise three independent Inbox calls that each force the
 	// alias-history fallback (no current alias matches "old-route" or
@@ -2672,7 +2755,7 @@ func TestProviderCached_BroadSessionListCacheConcurrentAccess(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Create session: %v", err)
 	}
-	p := NewCached(store)
+	p := newTestCachedProvider(store)
 
 	const workers = 16
 	errs := make(chan error, workers)
@@ -2699,7 +2782,7 @@ func TestProviderCached_BroadSessionListCacheConcurrentAccess(t *testing.T) {
 
 func TestProviderCached_RefreshSeesNewHistoricalAliasSession(t *testing.T) {
 	store := &countingSessionListStore{MemStore: beads.NewMemStore()}
-	p := NewCached(store)
+	p := newTestCachedProvider(store)
 	advance := setCachedProviderClock(t, p, time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
 
 	if _, err := p.Inbox("old-route"); err != nil {
@@ -2736,7 +2819,7 @@ func TestProviderCached_RefreshSeesNewHistoricalAliasSession(t *testing.T) {
 
 func TestProviderCached_RefreshRemovesClosedSessionFromLiveHistoricalMatch(t *testing.T) {
 	store := &countingSessionListStore{MemStore: beads.NewMemStore()}
-	p := NewCached(store)
+	p := newTestCachedProvider(store)
 	advance := setCachedProviderClock(t, p, time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
 
 	oldSession, err := store.Create(beads.Bead{
@@ -2802,7 +2885,7 @@ func TestProviderCached_ExpiredRefreshConcurrentAccessScansOnce(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Create session: %v", err)
 	}
-	p := NewCached(store)
+	p := newTestCachedProvider(store)
 	advance := setCachedProviderClock(t, p, time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC))
 	if _, err := p.Inbox("old-route"); err != nil {
 		t.Fatalf("prime Inbox(old-route): %v", err)
@@ -2846,7 +2929,7 @@ func TestProviderCached_ExpiredRefreshConcurrentAccessScansOnce(t *testing.T) {
 // alias). Undeliverable as a recipient: literal address only.
 func TestRecipientRoutesAreLiteralWhenTwoLiveSessionsClaimTheAddress(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 	mustCreateSessionBead(t, store, map[string]string{"session_name": "contended"})
 	mustCreateSessionBead(t, store, map[string]string{"alias": "contended"})
 
@@ -2859,7 +2942,7 @@ func TestRecipientRoutesAreLiteralWhenTwoLiveSessionsClaimTheAddress(t *testing.
 // and canonical session_name owns the identifier.
 func TestSenderResolvesToTheSessionNameOwnerWhenAnAliasContendsForIt(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 	named := mustCreateSessionBead(t, store, map[string]string{"session_name": "contended"})
 	mustCreateSessionBead(t, store, map[string]string{"alias": "contended"})
 
@@ -2880,7 +2963,7 @@ func TestSenderResolvesToTheSessionNameOwnerWhenAnAliasContendsForIt(t *testing.
 // session is gone; its identity is not, so the message still carries it.
 func TestSenderResolvesTheBeadIDOfAClosedSession(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 	sender := mustCreateSessionBead(t, store, map[string]string{"alias": "retired-sender", "session_name": "retired-gc-1"})
 	if err := store.Close(sender.ID); err != nil {
 		t.Fatalf("Close session: %v", err)
@@ -2907,7 +2990,7 @@ func TestSenderResolvesTheBeadIDOfAClosedSession(t *testing.T) {
 // privileged over the alias that shadows it.
 func TestRecipientRoutesAreLiteralWhenAnAliasShadowsAnotherSessionsBeadID(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 	target := mustCreateSessionBead(t, store, map[string]string{"session_name": "target-name"})
 	mustCreateSessionBead(t, store, map[string]string{"alias": target.ID})
 
@@ -2921,7 +3004,7 @@ func TestRecipientRoutesAreLiteralWhenAnAliasShadowsAnotherSessionsBeadID(t *tes
 // yields: the session_name-only session owns the identifier.
 func TestSenderPrefersASessionNameOnlyClaimOverADualAliasClaim(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 	mustCreateSessionBead(t, store, map[string]string{"alias": "shared-name", "session_name": "shared-name"})
 	nameOnly := mustCreateSessionBead(t, store, map[string]string{"session_name": "shared-name"})
 
@@ -2942,7 +3025,7 @@ func TestSenderPrefersASessionNameOnlyClaimOverADualAliasClaim(t *testing.T) {
 // answer to the address, so mail refuses to choose between their mailboxes.
 func TestRecipientRoutesAreLiteralForADualClaimAndASessionNameOnlyClaim(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 	mustCreateSessionBead(t, store, map[string]string{"alias": "shared-name", "session_name": "shared-name"})
 	mustCreateSessionBead(t, store, map[string]string{"session_name": "shared-name"})
 
@@ -2956,7 +3039,7 @@ func TestRecipientRoutesAreLiteralForADualClaimAndASessionNameOnlyClaim(t *testi
 // address that session answers to.
 func TestRecipientRoutesCarryEveryAddressOfAnUncontendedSession(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 	only := mustCreateSessionBead(t, store, map[string]string{
 		"alias":         "current-alias",
 		"session_name":  "canonical-name",
@@ -2983,7 +3066,7 @@ func mustCreateSessionBead(t *testing.T, store beads.Store, metadata map[string]
 
 func TestSendDedupedSuppressesWhileLiveCopyExists(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	first, suppressed, err := p.SendDeduped("controller", "mayor", "quarantine: hq", "marker exists", "dolt-compact-quarantine:hq")
 	if err != nil {
@@ -3021,7 +3104,7 @@ func TestSendDedupedSuppressesWhileLiveCopyExists(t *testing.T) {
 
 func TestSendDedupedReadButUnarchivedStillSuppresses(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	first, _, err := p.SendDeduped("controller", "mayor", "quarantine: hq", "marker exists", "dolt-compact-quarantine:hq")
 	if err != nil {
@@ -3041,7 +3124,7 @@ func TestSendDedupedReadButUnarchivedStillSuppresses(t *testing.T) {
 
 func TestSendDedupedResendsAfterArchive(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	first, _, err := p.SendDeduped("controller", "mayor", "quarantine: hq", "marker exists", "dolt-compact-quarantine:hq")
 	if err != nil {
@@ -3064,7 +3147,7 @@ func TestSendDedupedResendsAfterArchive(t *testing.T) {
 
 func TestSendDedupedScopedByKeyAndRecipient(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	if _, _, err := p.SendDeduped("controller", "mayor", "quarantine: hq", "b", "dolt-compact-quarantine:hq"); err != nil {
 		t.Fatalf("seed SendDeduped: %v", err)
@@ -3096,7 +3179,7 @@ func TestSendDedupedScopedByKeyAndRecipient(t *testing.T) {
 // the stored assignee passes the other four dedup tests and fails this one.
 func TestSendDedupedSuppressesAcrossRoutesToOneMailbox(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	sessionBead, err := store.Create(beads.Bead{
 		Type:   session.BeadType,
@@ -3140,7 +3223,7 @@ func TestSendDedupedSuppressesAcrossRoutesToOneMailbox(t *testing.T) {
 }
 
 func TestSendDedupedRequiresKey(t *testing.T) {
-	p := New(beads.NewMemStore())
+	p := newTestProvider(beads.NewMemStore())
 	if _, _, err := p.SendDeduped("controller", "mayor", "s", "b", "  "); err == nil {
 		t.Fatal("SendDeduped with blank key succeeded; want error")
 	}

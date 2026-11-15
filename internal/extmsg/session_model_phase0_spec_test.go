@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // Phase 0 spec coverage from engdocs/design/session-model-unification.md:
@@ -13,7 +14,7 @@ import (
 func TestPhase0Bindings_HandleInboundNormalizedTargetsExactBoundSession(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := testConversationRef()
 	if _, err := fabric.Bindings.Bind(context.Background(), testControllerCaller(), BindInput{
 		Conversation: ref,
@@ -40,7 +41,7 @@ func TestPhase0Bindings_HandleInboundNormalizedTargetsExactBoundSession(t *testi
 func TestPhase0Bindings_HandleInboundNormalizedWithoutBindingLeavesTargetEmpty(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := testConversationRef()
 
 	result, err := HandleInboundNormalized(context.Background(), InboundDeps{Services: fabric}, ExternalInboundMessage{

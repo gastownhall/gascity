@@ -1,5 +1,5 @@
 import { cleanup, render, screen } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AttentionProvider } from '../attention/context';
 import type { AttentionContributor, AttentionItem } from '../attention/compose';
@@ -67,10 +67,7 @@ function renderHeader(contributors: readonly AttentionContributor[]) {
     <ThemeProvider>
       <ViewingAsProvider>
         <AttentionProvider contributors={contributors}>
-          <MemoryRouter
-            initialEntries={['/runs']}
-            future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
-          >
+          <MemoryRouter initialEntries={['/runs']}>
             <Header />
           </MemoryRouter>
         </AttentionProvider>

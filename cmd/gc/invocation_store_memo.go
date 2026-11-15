@@ -37,8 +37,13 @@ import (
 // open with MaxOpenConns=1) then serializes those callers on that connection. So no caller may hold a
 // transaction or a connection-scoped operation open while it calls code that
 // opens the same scope: under the memo that open is the same pool, and the
-// inner call would wait on the outer one's connection forever. The hook verbs
-// in invocationStoreMemoCommands make one store call at a time.
+// inner call would wait on the outer one's connection forever. The commands
+// in invocationStoreMemoCommands hold no transaction or connection-scoped
+// operation across another store call. Where they make calls concurrently —
+// the step reminder's per-identity listings (stepResolution.rootViaRoutedBridge)
+// and the storage routes resolved alongside the city store open
+// (prewarmCLIStorageRoutes) — each call stands alone, so a single-connection
+// store runs them one after another.
 //
 // The memo is opt-in per command. run() enables it only for the one-shot verbs
 // in invocationStoreMemoCommands; long-lived entry points (the supervisor and
@@ -46,11 +51,15 @@ import (
 // close and reopen is really closed and reopened.
 
 // invocationStoreMemoCommands are the command paths run() opens the memo for:
-// the session-side hook verbs, each of which runs once and exits.
+// the session-side hook verbs and `gc mail count`, each of which runs once and
+// exits. `gc mail count` looks its target up locally before it asks the
+// supervisor, and its local path opens the city store for the mail provider
+// and for the target again.
 var invocationStoreMemoCommands = map[string]bool{
 	"gc handoff":     true,
 	"gc hook":        true,
 	"gc mail check":  true,
+	"gc mail count":  true,
 	"gc mail send":   true,
 	"gc nudge drain": true,
 	"gc prime":       true,

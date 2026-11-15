@@ -37,6 +37,24 @@ type ConditionalWritesDegradedPayload struct {
 // IsEventPayload marks ConditionalWritesDegradedPayload as an events.Payload variant.
 func (ConditionalWritesDegradedPayload) IsEventPayload() {}
 
+// OpsRecordingDegradedPayload is the typed payload for ops.recording_degraded
+// events (DES-O0API §10.4): an op store failure the API or the controller's
+// op sweeper degraded past under one ops gate. In auto the request ran
+// unrecorded (or its op stayed open for the sweeper); in require it was
+// refused before any effect.
+type OpsRecordingDegradedPayload struct {
+	Gate    string `json:"gate" enum:"ops.content,ops.control,ops.lifecycle" doc:"The ops rollout gate whose recording degraded."`
+	Mode    string `json:"mode" enum:"auto,require" doc:"The gate's resolved mode."`
+	Surface string `json:"surface" enum:"api,controller" doc:"Which producer degraded: the API server or the controller's op sweeper."`
+	Stage   string `json:"stage" enum:"open,propose,close,adopt,sweep" doc:"The recording step that failed."`
+	Reason  string `json:"reason" doc:"Reason class: conditional_writes_unsupported, type_unregistered, no_namespace, store_error or contention."`
+	Detail  string `json:"detail,omitempty" doc:"The store error's text, at most 512 bytes."`
+}
+
+// IsEventPayload marks OpsRecordingDegradedPayload as an events.Payload variant.
+func (OpsRecordingDegradedPayload) IsEventPayload() {}
+
 func init() {
 	RegisterPayload(BeadsConditionalWritesDegraded, ConditionalWritesDegradedPayload{})
+	RegisterPayload(OpsRecordingDegraded, OpsRecordingDegradedPayload{})
 }

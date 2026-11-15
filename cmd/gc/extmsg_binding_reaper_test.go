@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -32,7 +33,7 @@ func TestReapStaleExtmsgBindingsRepointsRespawnedSession(t *testing.T) {
 		ConversationID: "C0B25SS12CD",
 		Kind:           extmsg.ConversationRoom,
 	}
-	svc := extmsg.NewServices(store).Bindings
+	svc := extmsg.NewServices(beadstest.Mail(store), beadstest.Sessions(store)).Bindings
 	if _, err := svc.Bind(context.Background(), extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}, extmsg.BindInput{
 		Conversation: ref,
 		SessionID:    oldSession.ID,
@@ -56,7 +57,7 @@ func TestReapStaleExtmsgBindingsRepointsRespawnedSession(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	reapStaleExtmsgBindings(context.Background(), beads.SessionStore{Store: store}, now, &stderr)
+	reapStaleExtmsgBindings(context.Background(), beadstest.Mail(store), beadstest.Sessions(store), now, &stderr)
 
 	got, err := svc.ResolveByConversation(context.Background(), ref)
 	if err != nil {
@@ -69,7 +70,7 @@ func TestReapStaleExtmsgBindingsRepointsRespawnedSession(t *testing.T) {
 
 func TestReapStaleExtmsgBindingsNilStoreNoPanic(_ *testing.T) {
 	// Defensive: a tick before the bead store is wired must be a no-op.
-	reapStaleExtmsgBindings(context.Background(), beads.SessionStore{}, time.Now(), nil)
+	reapStaleExtmsgBindings(context.Background(), beads.MailStore{}, beads.SessionStore{}, time.Now(), nil)
 }
 
 func TestReapStaleExtmsgParticipantsMigratesMembershipToRespawn(t *testing.T) {
@@ -91,7 +92,7 @@ func TestReapStaleExtmsgParticipantsMigratesMembershipToRespawn(t *testing.T) {
 		ConversationID: "C0B25SS12CD",
 		Kind:           extmsg.ConversationRoom,
 	}
-	fabric := extmsg.NewServices(store)
+	fabric := extmsg.NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "test"}
 	group, err := fabric.Groups.EnsureGroup(context.Background(), caller, extmsg.EnsureGroupInput{
 		RootConversation: ref,
@@ -127,7 +128,7 @@ func TestReapStaleExtmsgParticipantsMigratesMembershipToRespawn(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	reapStaleExtmsgParticipants(context.Background(), beads.SessionStore{Store: store}, &stderr)
+	reapStaleExtmsgParticipants(context.Background(), beadstest.Mail(store), beadstest.Sessions(store), &stderr)
 
 	// Persistent heal: the participant now points at the respawned bead.
 	bead, err := store.Get(participant.ID)
@@ -159,5 +160,5 @@ func TestReapStaleExtmsgParticipantsMigratesMembershipToRespawn(t *testing.T) {
 
 func TestReapStaleExtmsgParticipantsNilStoreNoPanic(_ *testing.T) {
 	// Defensive: a tick before the bead store is wired must be a no-op.
-	reapStaleExtmsgParticipants(context.Background(), beads.SessionStore{}, nil)
+	reapStaleExtmsgParticipants(context.Background(), beads.MailStore{}, beads.SessionStore{}, nil)
 }

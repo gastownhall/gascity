@@ -423,6 +423,49 @@ func TestInventoryLane_NestedCompositeListsEachLeafOnce(t *testing.T) {
 	}
 }
 
+// Kills: a listed name the inventory omits read as gone, or a fact
+// concluded from the omission. The tmux inventory omits a session whose line
+// it cannot parse; the name stays listed and its facts are not refreshed: a
+// name never enriched is unknown, and one enriched before keeps the last
+// pass's facts, alive or dead, until they age out (the §3.2 Unknown
+// verdict will replace that carry-over). Its siblings are enriched as usual.
+func TestInventoryLane_OmittedNameKeepsItsLastFacts(t *testing.T) {
+	sp := newScriptedInventoryProvider("gc-a", "gc-corpse", "gc-b", "gc-new")
+	sp.inventory["gc-corpse"] = runtime.InventoryEntry{Incarnation: "gc-corpse:1", DeadKnown: true, AllPanesDead: true, AttachedKnown: true}
+	delete(sp.inventory, "gc-new")
+	cr := inventoryLaneTestRuntime(t, sp, nil)
+	clk := &clock.Fake{Time: obsTestEpoch}
+	useInventoryClock(cr, clk)
+	runTestInventoryPass(cr)
+
+	sp.mu.Lock()
+	delete(sp.inventory, "gc-a")
+	delete(sp.inventory, "gc-corpse")
+	sp.mu.Unlock()
+	clk.Advance(inventoryLaneInterval)
+	runTestInventoryPass(cr)
+
+	snap := cr.inventoryLane.cache.Snapshot()
+	for _, tc := range []struct {
+		name    string
+		running ObsFact
+		at      time.Time
+	}{
+		{"gc-a", ObsYes, obsTestEpoch},
+		{"gc-corpse", ObsNo, obsTestEpoch},
+		{"gc-b", ObsYes, obsTestEpoch.Add(inventoryLaneInterval)},
+		{"gc-new", ObsUnknown, time.Time{}},
+	} {
+		obs := snap.ByName[tc.name]
+		if obs.Listed.Value != ObsYes {
+			t.Errorf("%s listed = %v, want yes", tc.name, obs.Listed.Value)
+		}
+		if obs.Running.Value != tc.running || !obs.Running.ObservedAt.Equal(tc.at) {
+			t.Errorf("%s running = %v at %v, want %v at %v", tc.name, obs.Running.Value, obs.Running.ObservedAt, tc.running, tc.at)
+		}
+	}
+}
+
 // Kills: a stale owner after a respawn. Each incarnation's identity is read,
 // and the legacy owner fact is derived from that read.
 func TestInventoryLane_AttributionOncePerIncarnation(t *testing.T) {

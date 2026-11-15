@@ -498,7 +498,7 @@ func TestBeadsNudgeQueueAckAndReleaseAreDurable(t *testing.T) {
 	if err := queue.Ack([]string{"n-ack"}, "delivered", "", "commit"); err != nil {
 		t.Fatalf("Ack: %v", err)
 	}
-	if err := queue.ReleaseClaims([]string{"n-release"}); err != nil {
+	if err := queue.ReleaseClaims([]string{"n-release"}, time.Time{}); err != nil {
 		t.Fatalf("ReleaseClaims: %v", err)
 	}
 
@@ -948,7 +948,7 @@ func TestBeadsNudgeQueueRetriesOrdinaryFailuresAfterAFenceMismatch(t *testing.T)
 // TestNudgeLeaseRoundTrips pins the lease codec the delivery axis rests on.
 func TestNudgeLeaseRoundTrips(t *testing.T) {
 	now := time.Now().UTC()
-	lease, err := newNudgeLease(now, nudgeQueueClaimLease)
+	lease, err := newNudgeLease(now)
 	if err != nil {
 		t.Fatalf("newNudgeLease: %v", err)
 	}
@@ -959,7 +959,7 @@ func TestNudgeLeaseRoundTrips(t *testing.T) {
 	if !parsed.claimedAt.Equal(lease.claimedAt) || !parsed.until.Equal(lease.until) {
 		t.Fatalf("lease round-trip = %+v, want %+v", parsed, lease)
 	}
-	other, err := newNudgeLease(now, nudgeQueueClaimLease)
+	other, err := newNudgeLease(now)
 	if err != nil {
 		t.Fatalf("newNudgeLease: %v", err)
 	}
@@ -1111,5 +1111,41 @@ func evalDeployedPolicyConstant(expr ast.Expr) (int64, error) {
 		return evalDeployedPolicyConstant(node.X)
 	default:
 		return 0, fmt.Errorf("unsupported expression %s", types.ExprString(expr))
+	}
+}
+
+func TestIsNudgeQueueRecord(t *testing.T) {
+	store := openNudgeQueueStore(t, t.TempDir())
+	queue := newNudgeQueue(t, store)
+	now := time.Now().UTC()
+	if err := queue.Enqueue(testNudgeItem("n-rec", "", now)); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	record, err := store.Get(nudgeQueueBeadID("n-rec"))
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !IsNudgeQueueRecord(record) {
+		t.Errorf("IsNudgeQueueRecord(%+v) = false, want true", record)
+	}
+	shadowID, _, err := nudgequeue.NewStore(beads.NudgesStore{Store: store}).Save(testNudgeItem("n-shadow", "", now))
+	if err != nil {
+		t.Fatalf("legacy Save: %v", err)
+	}
+	shadow, err := store.Get(shadowID)
+	if err != nil {
+		t.Fatalf("Get shadow: %v", err)
+	}
+	if IsNudgeQueueRecord(shadow) {
+		t.Error("IsNudgeQueueRecord(gc:nudge shadow) = true, want false")
+	}
+	for _, b := range []beads.Bead{
+		{Type: "task", Labels: []string{nudgeQueueLabel}},
+		{Type: nudgeQueueBeadType, Labels: []string{"gc:nudge"}},
+		{Type: nudgeQueueBeadType},
+	} {
+		if IsNudgeQueueRecord(b) {
+			t.Errorf("IsNudgeQueueRecord(%+v) = true, want false", b)
+		}
 	}
 }

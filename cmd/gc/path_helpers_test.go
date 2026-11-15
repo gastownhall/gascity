@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gastownhall/gascity/test/tmuxtest"
+	"github.com/rogpeppe/go-internal/testscript"
 )
 
 // doltLeakGuardGraceInitialInterval and doltLeakGuardGraceMaxElapsedTime
@@ -135,7 +136,7 @@ func requireNoLeakedDoltAfterForPaths(t *testing.T, paths ...string) {
 }
 
 type doltLeakGuardedTestingM struct {
-	m        *testing.M
+	m        testscript.TestingM
 	tempRoot string
 	// sourceRoot is the package directory the test binary runs in. A managed
 	// dolt provider handed a city root of "" or "." resolves it to this
@@ -153,9 +154,21 @@ type doltLeakGuardedTestingM struct {
 	sourceRoot   string
 	checkoutRoot string
 	cleanupPaths []string
+	// diag receives runWith's verdict diagnostics; nil is os.Stderr. The
+	// guard's own unit tests capture it, so the failures they inject do not
+	// print as real ones in the package's output.
+	diag io.Writer
 }
 
-func newDoltLeakGuardedTestingM(m *testing.M, tempRoot string, cleanupPaths ...string) *doltLeakGuardedTestingM {
+// diagWriter is where runWith reports a scan failure or a leak.
+func (g *doltLeakGuardedTestingM) diagWriter() io.Writer {
+	if g.diag != nil {
+		return g.diag
+	}
+	return os.Stderr
+}
+
+func newDoltLeakGuardedTestingM(m testscript.TestingM, tempRoot string, cleanupPaths ...string) *doltLeakGuardedTestingM {
 	// A failure here must not be fatal: os.Getwd only fails in exotic cases
 	// (an unlinked cwd), and losing the second root degrades the guard to its
 	// previous tempRoot-only behavior rather than breaking every test run.
@@ -231,7 +244,7 @@ func (g *doltLeakGuardedTestingM) runWith(
 
 	initial, initialErr := snapshotDoltProcessesForConfigRoots(enumerate, g.leakRoots())
 	if initialErr != nil {
-		fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: initial scan failed: %v\n", initialErr) //nolint:errcheck
+		fmt.Fprintf(g.diagWriter(), "cmd/gc test dolt leak guard: initial scan failed: %v\n", initialErr) //nolint:errcheck
 	}
 
 	code := runTests()
@@ -240,11 +253,11 @@ func (g *doltLeakGuardedTestingM) runWith(
 	if initialErr == nil {
 		leaked, finalErr := g.waitForFinalScanToClear(enumerate, initial, graceInitialInterval, graceMaxElapsedTime)
 		if finalErr != nil {
-			fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: final scan failed: %v\n", finalErr) //nolint:errcheck
+			fmt.Fprintf(g.diagWriter(), "cmd/gc test dolt leak guard: final scan failed: %v\n", finalErr) //nolint:errcheck
 			guardFailed = true
 		} else if len(leaked) > 0 {
-			fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: leaked %d dolt sql-server process(es) under %s\n", len(leaked), strings.Join(g.nonEmptyLeakRoots(), ", ")) //nolint:errcheck
-			writeDoltLeakReport(os.Stderr, leaked)
+			fmt.Fprintf(g.diagWriter(), "cmd/gc test dolt leak guard: leaked %d dolt sql-server process(es) under %s\n", len(leaked), strings.Join(g.nonEmptyLeakRoots(), ", ")) //nolint:errcheck
+			writeDoltLeakReport(g.diagWriter(), leaked)
 			reapLeaks(leaked)
 			guardFailed = true
 		}

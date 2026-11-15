@@ -53,13 +53,29 @@ CITY_RUNTIME_DIR="${GC_CITY_RUNTIME_DIR:-$GC_CITY_PATH/.gc/runtime}"
 PACK_STATE_DIR="${GC_PACK_STATE_DIR:-$CITY_RUNTIME_DIR/packs/dolt}"
 LOG_FILE="${GC_DOLT_LOG_FILE:-$PACK_STATE_DIR/dolt.log}"
 BD_SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$GC_BEADS_BD_SCRIPT")" && pwd)"
+DOLT_PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)}"
 if [ ! -f "$BD_SCRIPT_DIR/dolt-enospc.sh" ]; then
   # GC_BEADS_BD_SCRIPT may be the stable city shim; the helper ships next
   # to the real script in the bd pack (the sibling of this dolt pack).
-  DOLT_PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)}"
   BD_SCRIPT_DIR="$(CDPATH= cd -- "$DOLT_PACK_DIR/../assets/scripts" 2>/dev/null && pwd || printf '%s' "$BD_SCRIPT_DIR")"
 fi
 . "$BD_SCRIPT_DIR/dolt-enospc.sh"
+# The fsync-stall helper is resolved on its own: a shim directory can carry
+# dolt-enospc.sh without it.
+FSYNC_STALL_HELPER="$BD_SCRIPT_DIR/dolt-fsync-stall.sh"
+if [ ! -f "$FSYNC_STALL_HELPER" ]; then
+  FSYNC_STALL_HELPER="$(CDPATH= cd -- "$DOLT_PACK_DIR/../assets/scripts" 2>/dev/null && pwd || printf '%s' "$BD_SCRIPT_DIR")/dolt-fsync-stall.sh"
+fi
+if [ -f "$FSYNC_STALL_HELPER" ]; then
+  . "$FSYNC_STALL_HELPER"
+else
+  # Fail open like every other fsync-stall failure: restart must stay usable
+  # when the helper is not shipped beside the pack.
+  recovery_should_skip_due_to_fsync_stall() {
+    echo "warning: fsync-stall guard skipped: dolt-fsync-stall.sh not found beside the bd pack" >&2
+    return 1
+  }
+fi
 
 if recovery_should_skip_due_to_enospc; then
   if [ "$force_restart" != "true" ]; then
@@ -68,6 +84,27 @@ if recovery_should_skip_due_to_enospc; then
     exit 1
   fi
   echo "gc dolt restart: --force set; restarting despite recent ENOSPC evidence" >&2
+fi
+
+# Restarting a Dolt that is blocked on a stalled fsync cannot fix storage and
+# adds recovery fsync load to it. The data directory follows runtime.sh:
+# GC_DOLT_DATA_DIR first, else the city's beads store when it exists, else the
+# pack state directory's dolt-data.
+DATA_DIR="${GC_DOLT_DATA_DIR:-$GC_CITY_PATH/.beads/dolt}"
+if [ -z "${GC_DOLT_DATA_DIR:-}" ] && [ ! -d "$DATA_DIR" ]; then
+  if [ -d "$PACK_STATE_DIR" ] || [ ! -d "$GC_CITY_PATH/.gc/dolt-data" ]; then
+    DATA_DIR="$PACK_STATE_DIR/dolt-data"
+  else
+    DATA_DIR="$GC_CITY_PATH/.gc/dolt-data"
+  fi
+fi
+if recovery_should_skip_due_to_fsync_stall; then
+  if [ "$force_restart" != "true" ]; then
+    echo "gc dolt restart: Dolt's data directory fsync is stalled; refusing restart because it adds recovery fsync load to storage that is already stalled" >&2
+    echo "  run gc dolt restart --force only if a restart is still required" >&2
+    exit 1
+  fi
+  echo "gc dolt restart: --force set; restarting despite a stalled data directory fsync" >&2
 fi
 
 # Stop. Exit 2 from gc-beads-bd stop means "nothing was running" — a

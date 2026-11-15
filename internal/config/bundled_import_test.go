@@ -420,6 +420,26 @@ func TestIsBundledSourceAtCanonicalPin(t *testing.T) {
 	}
 }
 
+// TestReleasedBundledPinsServeEmbeddedContent pins every bundled pin a
+// released gc wrote as canonical: each keeps meaning "the pack bundled with
+// gc", so a city that release created loads on this build instead of reading
+// as deliberately pinned to an old commit (RELEASING.md, "Re-pin the bundled
+// packs"). Releases cut from a hotfix branch re-pin in [release-only]
+// commits that never reach main, so main has to list their pins itself.
+func TestReleasedBundledPinsServeEmbeddedContent(t *testing.T) {
+	coreSource := bundledPackSource()
+	for _, tc := range []struct{ release, commit string }{
+		{"v1.5.0", "f895c0ff47d6ee9334ed282a416387eb5b084d24"},
+		{"hotfix/1.5.1 274c1cfb70", "3dcfe0969e26aac651c5c65c0a5d73f2d8cc16c5"},
+		{"hotfix/1.5.1 40404c6cfd", "505dcdcbce087c7b29c6a6eeb4ca37fe646b5e42"},
+		{"v1.5.1", "2e643dc2eb5ff84d9853ecaa6961a87a8e4043ae"},
+	} {
+		if !IsBundledSourceAtCanonicalPin(coreSource, tc.commit) {
+			t.Errorf("%s's pin sha:%s is not canonical on this build: append it to SupersededBundledPackImportVersions", tc.release, tc.commit)
+		}
+	}
+}
+
 func lastSupersededCommit(pins []string) string {
 	if len(pins) == 0 {
 		return ""

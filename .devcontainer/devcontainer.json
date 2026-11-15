@@ -1,6 +1,6 @@
 {
   "name": "Gas City",
-  "image": "mcr.microsoft.com/devcontainers/go:1.26-ubuntu-24.04",
+  "image": "mcr.microsoft.com/devcontainers/go:1.27-ubuntu-24.04",
   "features": {
     "ghcr.io/devcontainers/features/common-utils:2": {
       "installZsh": true,

@@ -43,6 +43,14 @@ func decodeOneJSONLine(t *testing.T, stdout *bytes.Buffer) map[string]any {
 func validateManagementJSONPayload(t *testing.T, command []string, stdout *bytes.Buffer) map[string]any {
 	t.Helper()
 	payload := decodeOneJSONLine(t, stdout)
+	validateJSONAgainstBuiltinSchema(t, command, stdout.Bytes())
+	return payload
+}
+
+// validateJSONAgainstBuiltinSchema validates raw, one JSON document in any
+// whitespace layout, against command's built-in result schema.
+func validateJSONAgainstBuiltinSchema(t *testing.T, command []string, raw []byte) {
+	t.Helper()
 	schemaRaw, err := readBuiltinSchema(command, jsonSchemaResultRole)
 	if err != nil {
 		t.Fatalf("read schema for %v: %v", command, err)
@@ -51,9 +59,9 @@ func validateManagementJSONPayload(t *testing.T, command []string, stdout *bytes
 	if err != nil {
 		t.Fatalf("parse schema for %v: %v", command, err)
 	}
-	instance, err := jsonschema.UnmarshalJSON(bytes.NewReader(stdout.Bytes()))
+	instance, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
 	if err != nil {
-		t.Fatalf("parse payload for %v: %v\n%s", command, err, stdout.String())
+		t.Fatalf("parse payload for %v: %v\n%s", command, err, raw)
 	}
 	compiler := jsonschema.NewCompiler()
 	schemaURL := strings.Join(command, "/") + "/result.schema.json"
@@ -65,9 +73,8 @@ func validateManagementJSONPayload(t *testing.T, command []string, stdout *bytes
 		t.Fatalf("compile schema for %v: %v", command, err)
 	}
 	if err := compiled.Validate(instance); err != nil {
-		t.Fatalf("payload for %v does not validate: %v\n%s", command, err, stdout.String())
+		t.Fatalf("payload for %v does not validate: %v\n%s", command, err, raw)
 	}
-	return payload
 }
 
 func runManagementJSONPayload(t *testing.T, cityPath string, args ...string) map[string]any {

@@ -145,6 +145,15 @@ type SupervisorMux struct {
 	// the State pointer changes (city restarted → new controllerState).
 	cacheMu sync.RWMutex
 	cache   map[string]cachedCityServer
+	// cityOps is each city's operation-journal state, keyed by city path
+	// (name when the path is empty) and guarded by cacheMu. It outlives the
+	// city's cached Servers: a replaced Server's deliveries still hold their
+	// in-flight entries, and adoption must see them (DES-O0API I3). Its live
+	// Server is the city's cached Server, published and retired with the
+	// cache entry under cacheMu. Entries are never removed: a delivery may
+	// outlive every Server of its city, and the entry it holds must stay
+	// where a same-key retry after the city comes back looks for it.
+	cityOps map[string]*cityOps
 
 	// idem caches responses for Idempotency-Key replay on supervisor-scope
 	// create endpoints (POST /v0/city). Per-city creates use the per-city
@@ -180,6 +189,7 @@ func NewSupervisorMux(resolver CityResolver, initializer cityInitializer, readOn
 		humaMux:     humaMux,
 		humaAPI:     newSupervisorHumaAPI(humaMux, readOnly),
 		cache:       make(map[string]cachedCityServer),
+		cityOps:     make(map[string]*cityOps),
 		idem:        newIdempotencyCache(30 * time.Minute),
 	}
 	sm.registerSupervisorRoutes()
@@ -430,9 +440,22 @@ func (sm *SupervisorMux) Serve(lis net.Listener) error {
 	return sm.server.Serve(lis)
 }
 
-// Shutdown gracefully shuts down the server.
+// Shutdown gracefully shuts down the server, then every city's background
+// op-close retries.
 func (sm *SupervisorMux) Shutdown(ctx context.Context) error {
-	return sm.server.Shutdown(ctx)
+	err := sm.server.Shutdown(ctx)
+	sm.cacheMu.RLock()
+	cities := make([]*cityOps, 0, len(sm.cityOps))
+	for _, c := range sm.cityOps {
+		cities = append(cities, c)
+	}
+	sm.cacheMu.RUnlock()
+	// A city's shutdown records its kept terminal events: event-log writes,
+	// outside cacheMu.
+	for _, c := range cities {
+		c.shutdown()
+	}
+	return err
 }
 
 // ServeHTTP delegates every request to humaMux. Every typed
@@ -452,9 +475,7 @@ func (sm *SupervisorMux) serveCityRequest(w http.ResponseWriter, r *http.Request
 	t0 := time.Now()
 	state := sm.resolver.CityState(cityName)
 	if state == nil {
-		sm.cacheMu.Lock()
-		delete(sm.cache, cityName)
-		sm.cacheMu.Unlock()
+		sm.dropCityServer(cityName)
 		problemCityNotFound.writeTo(w)
 		return
 	}
@@ -477,7 +498,11 @@ func (sm *SupervisorMux) serveCityRequest(w http.ResponseWriter, r *http.Request
 }
 
 // getCityServer returns a cached per-city Server, creating one if the
-// cache is empty or the State pointer changed (city was restarted).
+// cache is empty or the State pointer changed (city was restarted). Every
+// Server of one city shares its operation-journal state; the cached one is
+// the city's live Server, which the deliveries of a replaced one report and
+// close through. A new Server records the terminal events its city kept
+// while no event log took them before it serves the request that built it.
 func (sm *SupervisorMux) getCityServer(name string, state State) *Server {
 	sm.cacheMu.RLock()
 	if cached, ok := sm.cache[name]; ok && cached.state == state {
@@ -486,10 +511,7 @@ func (sm *SupervisorMux) getCityServer(name string, state State) *Server {
 	}
 	sm.cacheMu.RUnlock()
 
-	srv := New(state)
-	if sm.readOnly {
-		srv = NewReadOnly(state)
-	}
+	srv := newCityServer(state, sm.readOnly, sm.cityOpsFor(name, state))
 	// Thread the dashboard link base (if the dashboard is mounted on this
 	// process) into the per-city handler host. WithDashboardBase runs before
 	// Serve, and per-city servers are built lazily per request, so every
@@ -498,15 +520,54 @@ func (sm *SupervisorMux) getCityServer(name string, state State) *Server {
 	srv.runCensusSource = sm.runCensusSource
 
 	sm.cacheMu.Lock()
-	defer sm.cacheMu.Unlock()
 	// A concurrent miss may have installed a Server for this State while this
 	// candidate was being built. Return the published instance so per-city
 	// caches and refresh coalescing remain process-unique.
 	if cached, ok := sm.cache[name]; ok && cached.state == state {
+		sm.cacheMu.Unlock()
 		return cached.srv
 	}
+	prev, replaced := sm.cache[name]
 	sm.cache[name] = cachedCityServer{state: state, srv: srv}
+	// Publish before retiring, so the city has a live Server throughout.
+	srv.publishOps()
+	if replaced {
+		prev.srv.retireOps()
+	}
+	sm.cacheMu.Unlock()
+	// Event-log writes, outside cacheMu, which every city request takes.
+	srv.flushOps()
 	return srv
+}
+
+// cityOpsFor returns the city's shared operation-journal state, creating it
+// on first use.
+func (sm *SupervisorMux) cityOpsFor(name string, state State) *cityOps {
+	key := state.CityPath()
+	if key == "" {
+		key = name
+	}
+	sm.cacheMu.Lock()
+	defer sm.cacheMu.Unlock()
+	c, ok := sm.cityOps[key]
+	if !ok {
+		c = newCityOps()
+		sm.cityOps[key] = c
+	}
+	return c
+}
+
+// dropCityServer removes name's cached Server, leaving the city with no live
+// Server: the city is no longer known or running. Its operation-journal state
+// stays, so a city that comes back still sees the deliveries the old Server
+// is finishing, and their close retries close through the new Server.
+func (sm *SupervisorMux) dropCityServer(name string) {
+	sm.cacheMu.Lock()
+	defer sm.cacheMu.Unlock()
+	if cached, ok := sm.cache[name]; ok {
+		cached.srv.retireOps()
+		delete(sm.cache, name)
+	}
 }
 
 // buildMultiplexer creates a Multiplexer from all running cities'

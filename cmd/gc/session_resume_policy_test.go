@@ -27,7 +27,7 @@ func TestCmdSessionSubmitResumesHeldSession(t *testing.T) {
 	})
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionSubmit([]string{killPokeSessionIdentity, "hello"}, sessionpkg.SubmitIntentDefault, false, &stdout, &stderr); code != 0 {
+	if code := cmdSessionSubmit([]string{killPokeSessionIdentity, "hello"}, sessionpkg.SubmitIntentDefault, "", false, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdSessionSubmit = %d; stderr=%s", code, stderr.String())
 	}
 	final := mustGetBead(t, store, bead.ID)

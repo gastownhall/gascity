@@ -1561,6 +1561,7 @@ func scanBead(rows interface{ Scan(...any) error }) (Bead, error) {
 		p := int(priority.Int64)
 		b.Priority = &p
 	}
+	b.SourceStatus = b.Status
 	b.Status = mapBdStatus(b.Status)
 	b.CloseReason = bdCloseReason(b.Status, closeReason)
 	b.CreatedAt = parseDBTime(createdRaw).Truncate(time.Second)

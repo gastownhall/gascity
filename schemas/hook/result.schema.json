@@ -32,6 +32,7 @@
         "claimed",
         "existing_assignment",
         "ready_assignment",
+        "started_claim_held",
         "no_work",
         "claims_errored",
         "stale_session",
@@ -63,6 +64,12 @@
       "items": {
         "type": "string"
       }
+    },
+    "work_dir": {
+      "type": "string"
+    },
+    "work_branch": {
+      "type": "string"
     },
     "drain_acknowledged": {
       "type": "boolean"

@@ -126,5 +126,21 @@ func (s *NativeDoltStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, e
 		}
 		enriched[i].IsBlocked = cloneBoolPtr(&blocked)
 	}
+	if err := vetoReadyProjectionWorkOutcomes(enriched, s.filterReadyProjectionByWorkOutcome); err != nil {
+		return items, err
+	}
 	return enriched, nil
+}
+
+// filterReadyProjectionByWorkOutcome is filterReadyByWorkOutcome in its own
+// withReadRetry. That filter must not re-enter withReadRetry, and the projection
+// read above already ran inside one, so it gets a separate one here.
+func (s *NativeDoltStore) filterReadyProjectionByWorkOutcome(candidates []Bead) ([]Bead, error) {
+	var kept []Bead
+	err := s.withReadRetry(func(ctx context.Context, storage beadslib.Storage) error {
+		var err error
+		kept, err = s.filterReadyByWorkOutcome(ctx, storage, candidates)
+		return err
+	})
+	return kept, err
 }

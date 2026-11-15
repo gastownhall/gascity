@@ -25,6 +25,21 @@
     },
     "subject": {
       "type": "string"
+    },
+    "op_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "notice_op_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "key": {
+      "type": "string",
+      "minLength": 1
+    },
+    "replayed": {
+      "type": "boolean"
     }
   },
   "additionalProperties": true

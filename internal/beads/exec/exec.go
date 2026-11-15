@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/execenv"
 )
 
 // Store implements [beads.Store] by delegating each operation to a
@@ -35,6 +36,15 @@ type Store struct {
 	// restart, which is an accepted limitation for this delegating store.
 	localMu      sync.Mutex
 	localStrings map[string]map[string]string
+
+	// payloadBlind is DeclarePayloadBlind's grant.
+	payloadBlind bool
+
+	// importMu guards the remembered answer to whether the script offers the
+	// optional import op (ImportSupported).
+	importMu    sync.Mutex
+	importKnown bool
+	importOK    bool
 }
 
 // SetEnv sets environment variables passed to the script process.
@@ -104,6 +114,9 @@ func (s *Store) run(stdinData []byte, args ...string) (string, error) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, s.script, args...)
+	if err := execenv.CheckBatchFileArgs(cmd); err != nil {
+		return "", fmt.Errorf("exec beads %s: %w", args[0], err)
+	}
 	// WaitDelay ensures Go forcibly closes I/O pipes after the context
 	// expires, even if grandchild processes still hold them open.
 	cmd.WaitDelay = 2 * time.Second
@@ -289,6 +302,11 @@ func (s *Store) Get(id string) (beads.Bead, error) {
 
 // Update modifies fields of an existing bead: script update <id> (stdin: JSON)
 func (s *Store) Update(id string, opts beads.UpdateOpts) error {
+	// The exec protocol's update document has no removal field; a script
+	// would see only the sets and report success with the keys still set.
+	if len(opts.UnsetMetadata) > 0 {
+		return fmt.Errorf("exec beads update %q: %w", id, beads.ErrUnsetMetadataUnsupported)
+	}
 	data, err := marshalUpdate(opts)
 	if err != nil {
 		return fmt.Errorf("exec beads update: marshaling: %w", err)
@@ -599,5 +617,28 @@ func (s *Store) DepList(id, direction string) ([]beads.Dep, error) {
 	return deps, nil
 }
 
-// Compile-time interface check.
-var _ beads.Store = (*Store)(nil)
+// DeclarePayloadBlind records that this store's provider keeps no dependency
+// payload anywhere it could be read from: the exec protocol has no payload
+// field (a create request carries none and dep-add takes three arguments), and
+// the provider is not backed by bd, where a graph plan can have written one.
+// Whether the provider is bd-backed is the caller's knowledge, not the
+// protocol's, so the store declares nothing until the caller that built it
+// grants it (cmd/gc's exec store opener).
+func (s *Store) DeclarePayloadBlind() {
+	s.payloadBlind = true
+}
+
+// DepMetadataAbsentByProtocol reports the declaration DeclarePayloadBlind
+// granted.
+func (s *Store) DepMetadataAbsentByProtocol() (string, bool) {
+	if s == nil || !s.payloadBlind {
+		return "", false
+	}
+	return "exec", true
+}
+
+// Compile-time interface checks.
+var (
+	_ beads.Store                       = (*Store)(nil)
+	_ beads.DepMetadataAbsentByProtocol = (*Store)(nil)
+)

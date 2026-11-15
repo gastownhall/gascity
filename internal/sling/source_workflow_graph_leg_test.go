@@ -41,8 +41,7 @@ func newLiveWorkflowRoot(t *testing.T, store beads.Store, sourceBeadID, sourceSt
 func TestListSourceWorkflowRootsKeepsStrictStoreFailureFatal(t *testing.T) {
 	scanErr := errors.New("graph binding unreachable")
 	var warnings []string
-	deps := SlingDeps{
-		Store:    beads.NewMemStore(),
+	deps := withStore(SlingDeps{
 		StoreRef: "city:test",
 		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
 			return []SourceWorkflowStore{
@@ -57,7 +56,7 @@ func TestListSourceWorkflowRootsKeepsStrictStoreFailureFatal(t *testing.T) {
 		SourceWorkflowStoreScanWarning: func(storeRef string, _ error) {
 			warnings = append(warnings, storeRef)
 		},
-	}
+	}, beads.NewMemStore())
 
 	_, err := listSourceWorkflowRoots(deps, "mc-source")
 	if !errors.Is(err, scanErr) {
@@ -80,8 +79,7 @@ func TestListSourceWorkflowRootsStillToleratesNonStrictLegFailure(t *testing.T) 
 	root := newLiveWorkflowRoot(t, graphStore, "mc-source", "city:test")
 
 	var warnings []string
-	deps := SlingDeps{
-		Store:    sourceStore,
+	deps := withStore(SlingDeps{
 		StoreRef: "city:test",
 		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
 			return []SourceWorkflowStore{
@@ -96,7 +94,7 @@ func TestListSourceWorkflowRootsStillToleratesNonStrictLegFailure(t *testing.T) 
 		SourceWorkflowStoreScanWarning: func(storeRef string, _ error) {
 			warnings = append(warnings, storeRef)
 		},
-	}
+	}, sourceStore)
 
 	err := checkLegacySourceWorkflowConflict(deps, "mc-source", "", false)
 	var conflictErr *sourceworkflow.ConflictError
@@ -120,8 +118,7 @@ func TestListSourceWorkflowRootsNamesOneRootOnceAcrossOverlappingLegs(t *testing
 	store := beads.NewMemStore()
 	root := newLiveWorkflowRoot(t, store, "mc-source", "city:test")
 
-	deps := SlingDeps{
-		Store:    store,
+	deps := withStore(SlingDeps{
 		StoreRef: "city:test",
 		SourceWorkflowStores: func() ([]SourceWorkflowStore, error) {
 			return []SourceWorkflowStore{
@@ -130,7 +127,7 @@ func TestListSourceWorkflowRootsNamesOneRootOnceAcrossOverlappingLegs(t *testing
 			}, nil
 		},
 		SourceWorkflowStoreScanWarning: func(string, error) {},
-	}
+	}, store)
 
 	err := checkLegacySourceWorkflowConflict(deps, "mc-source", "", false)
 	var conflictErr *sourceworkflow.ConflictError

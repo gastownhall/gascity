@@ -38,6 +38,7 @@ go_test(
     name = "extmsg_test",
     srcs = [
         "agent_binding_test.go",
+        "binding_lock_pool_test.go",
         "binding_survival_test.go",
         "default_route_test.go",
         "extmsg_test.go",
@@ -54,9 +55,11 @@ go_test(
     embed = [":extmsg"],
     deps = [
         "//internal/beads",
+        "//internal/beads/beadstest",
         "//internal/events",
         "//internal/session",
         "//internal/testenv",
+        "//internal/testutil",
     ],
 )
 

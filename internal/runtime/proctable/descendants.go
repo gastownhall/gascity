@@ -8,18 +8,41 @@ type ProcessRecord struct {
 	PPID      int
 	PGID      int
 	StartTime string // opaque host-local process-start identity
-	Name      string // basename of the process's command
-	SessionID string // GC_SESSION_ID from the process's env, if present ("" if absent/unreadable)
+	// SessionLeader reports that the process leads its own session: it called
+	// setsid, which is how a daemon detaches from whatever started it.
+	SessionLeader bool
+	Name          string // basename of the process's command
+	SessionID     string // GC_SESSION_ID from the process's env, if present ("" if absent/unreadable)
+	// SessionIDUnknown marks a process that was seen but whose environment
+	// could not be read, so an empty SessionID says nothing about whether it
+	// carries one. Only a snapshot returned with ErrScanIncomplete sets it;
+	// Unix snapshots report an unreadable environment as absent.
+	SessionIDUnknown bool
 }
 
 // SnapshotProcesses returns one host-wide process snapshot. Each record
-// includes pid, ppid, process group, start identity, command basename, and any
-// readable GC_SESSION_ID. Unlike ScanBySessionID, this is a plain read of the
-// process table with no GC_SESSION_ID filtering and no liveScanGuard: it powers
-// read-only liveness checks and identity-fenced teardown, not the orphan sweep
-// that guard protects against.
+// includes pid, ppid, process group, start identity, session leadership,
+// command basename, and any readable GC_SESSION_ID. Unlike ScanBySessionID,
+// this is a plain read of the process table with no GC_SESSION_ID filtering
+// and no liveScanGuard: it powers read-only liveness checks and
+// identity-fenced teardown, not the orphan sweep that guard protects against.
+//
+// When some processes could be seen but not inspected, the full set of records
+// is returned together with an error matching ErrScanIncomplete, and the
+// records that could not be inspected are marked SessionIDUnknown. Any other
+// error means there is no snapshot.
 func SnapshotProcesses() ([]ProcessRecord, error) {
 	return snapshotProcesses()
+}
+
+// SnapshotProcessTree is SnapshotProcesses without Name and SessionID: the
+// pid, ppid, process group, session leadership and start identity of every
+// process, read from the kernel's process table alone. It never reads a
+// process's environment or command, so a process wedged in its own memory
+// cannot stall it, and it runs no helper program. Use it to walk a process
+// tree on a kill path.
+func SnapshotProcessTree() ([]ProcessRecord, error) {
+	return snapshotProcessTree()
 }
 
 // DescendantAlive reports whether any process reachable from roots (each root
@@ -34,7 +57,7 @@ func DescendantAlive(records []ProcessRecord, roots []int, names []string) bool 
 	}
 	want := make(map[string]bool, len(names))
 	for _, n := range names {
-		want[n] = true
+		want[processNameKey(n)] = true
 	}
 	byPID := make(map[int]ProcessRecord, len(records))
 	children := make(map[int][]int, len(records))
@@ -53,7 +76,7 @@ func DescendantAlive(records []ProcessRecord, roots []int, names []string) bool 
 			continue
 		}
 		visited[pid] = true
-		if r, ok := byPID[pid]; ok && want[r.Name] {
+		if r, ok := byPID[pid]; ok && want[processNameKey(r.Name)] {
 			return true
 		}
 		stack = append(stack, children[pid]...)

@@ -17,9 +17,10 @@ type Services struct {
 }
 
 // NewServices creates binding, delivery, and group services that share the
-// same per-fabric binding lock pool.
-func NewServices(store beads.Store, opts ...BindingServiceOption) Services {
-	return newServicesWithSessionDirectory(store, session.NewStore(beads.SessionStore{Store: store}), opts...)
+// same per-fabric binding lock pool, persisting in messaging and reading
+// identity and liveness from the sessions directory over sessions.
+func NewServices(messaging beads.MailStore, sessions beads.SessionStore, opts ...BindingServiceOption) Services {
+	return newServicesWithSessionDirectory(messaging, session.NewStore(sessions), opts...)
 }
 
 // NewServicesWithSessionDirectory creates the split Messaging/Sessions form:
@@ -27,14 +28,14 @@ func NewServices(store beads.Store, opts ...BindingServiceOption) Services {
 // transcripts persist only in messaging, while identity and liveness reads use
 // the typed Sessions directory. It rejects a nil (including typed-nil)
 // directory rather than silently falling back to the wrong persistence class.
-func NewServicesWithSessionDirectory(messaging beads.Store, sessions session.AddressDirectory, opts ...BindingServiceOption) (Services, error) {
+func NewServicesWithSessionDirectory(messaging beads.MailStore, sessions session.AddressDirectory, opts ...BindingServiceOption) (Services, error) {
 	if nilAddressDirectory(sessions) {
 		return Services{}, errors.New("extmsg services: session address directory is required")
 	}
 	return newServicesWithSessionDirectory(messaging, sessions, opts...), nil
 }
 
-func newServicesWithSessionDirectory(store beads.Store, sessions session.AddressDirectory, opts ...BindingServiceOption) Services {
+func newServicesWithSessionDirectory(store beads.MailStore, sessions session.AddressDirectory, opts ...BindingServiceOption) Services {
 	locks := sharedBindingLockPool(store)
 	transcript := newTranscriptService(store, locks)
 	delivery := newDeliveryContextService(store, locks, transcript)

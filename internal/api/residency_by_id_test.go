@@ -8,6 +8,7 @@ import (
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/storeref/storereftest"
@@ -23,7 +24,8 @@ import (
 // test file: reaching a plan's legs directly is exactly what the residency
 // boundary forbids of a consumer.
 func (s *Server) beadStoresForID(id string) []beads.Store {
-	plan, err := storeref.Plan(storeref.ByID{ID: id, WorkAxis: apiWorkAxis{s}}, s.residencyTopology())
+	st := s.state.Stores()
+	plan, err := storeref.Plan(storeref.ByID{ID: id, WorkAxis: apiWorkAxis{s: s, st: st}}, st.Topology())
 	if err != nil {
 		return nil
 	}
@@ -427,8 +429,8 @@ func TestBeadDualResidentAnswersFromTheBinding(t *testing.T) {
 	s := New(st)
 	storereftest.RunBindingWins(t,
 		storereftest.BindingWinsStores{
-			Binding:       graph,
-			Work:          city,
+			Binding:       beadstest.Resident(graph),
+			Work:          beadstest.Work(city),
 			DualID:        id,
 			BindingTitle:  "class-resident under a work prefix",
 			WorkOnlyID:    "mc-workonly1",

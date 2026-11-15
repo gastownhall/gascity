@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
+
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -138,7 +140,7 @@ func TestSessionStopInFlightReturnsConflict(t *testing.T) {
 
 	firstDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() { firstDone <- postSessionAction(t, h, url, "stop-1", "") }()
-	<-blocking.entered
+	requireProviderEntered(t, blocking.entered, firstDone)
 
 	inFlightDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() { inFlightDone <- postSessionAction(t, h, url, "stop-1", "") }()
@@ -169,7 +171,7 @@ func TestSessionStopInFlightReturnsConflict(t *testing.T) {
 
 func suspendForWakeTest(t *testing.T, fs *fakeState, id string) {
 	t.Helper()
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 	if err := mgr.Suspend(context.Background(), testOperatorIn(t, fs.cityPath), id, false); err != nil {
 		t.Fatalf("Suspend: %v", err)
 	}
@@ -279,7 +281,7 @@ func TestSessionWakeInFlightReturnsConflict(t *testing.T) {
 
 	firstDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() { firstDone <- postSessionAction(t, h, url, "wake-1", "") }()
-	<-state.entered
+	requireProviderEntered(t, state.entered, firstDone)
 
 	inFlightDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() { inFlightDone <- postSessionAction(t, h, url, "wake-1", "") }()

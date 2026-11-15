@@ -407,6 +407,38 @@ The first standardization wave may still choose to normalize existing JSON
 surfaces when the benefit is high, but that choice must be visible and
 reviewable. Hidden JSON shape changes are not acceptable.
 
+### Route invariance (#8453)
+
+A routed read (one that can answer through the supervisor API or through a
+direct read of the city) prints one JSON document on every route. Rules:
+
+- The command's local shape, as its `schemas/<command>/result.schema.json`
+  declares it, is the contract on every route. The API route fills that shape
+  on the client from typed wire fields; when the wire lacks a field the local
+  route prints, add it to the wire as an optional field.
+- Data only the server has (`_cache_age_s`, `running`, and similar freshness or
+  liveness observations) appears only as optional keys the schema declares. The
+  direct read never computes them: a CLI-process liveness probe gives confident
+  false negatives. Use one struct for both routes with `omitempty` pointers for
+  these keys (the `gc rig list` pattern, #2490).
+- Keys the API deliberately redacts are the one shape exception: `gc session
+  list` prints `command`, `session_key` and `resume_*` only on the direct read,
+  and its schema marks them local-only. Known value differences that remain
+  are listed in `docs/guides/using-json-from-gc.md` ("Same Output On Every
+  Route"); a fix for one should remove it from that list.
+- Consumers must ignore unknown keys. `schema_version` is bumped only for a
+  breaking change inside the schema.
+- Every route or shape change gets an Upgrading Note in `CHANGELOG.md`.
+- `GC_NO_API=1` and remote targets (`--city-url`, `--city-name`, `GC_CITY_URL`,
+  contexts) choose the route, not the shape. The only shape that depends on the
+  target is the `gc beads list`/`show --format=json` envelope, printed for
+  remote targets only.
+- Every routed read is registered with a same-state local/API comparison test
+  in `routedReadRegistry` (`cmd/gc/route_equivalence_registry_test.go`);
+  `TestEveryRoutedReadHasARouteEquivalenceTest` fails for a command name passed
+  to `routeRead`, `routeReadCmd`, `routeReadCmdWithHooks`, `logRoute` or
+  `logRouteTo` that is not registered.
+
 ## Extensibility
 
 New built-in CLI commands should pick up JSON support through a shared local pattern rather than inventing command-specific output plumbing.

@@ -13,7 +13,7 @@ import { AttentionProvider } from '../attention/context';
 import type { AttentionContributor } from '../attention/compose';
 import { RunsPage } from './Runs';
 import { RunSummaryProvider } from '../runs/runSummarySubscription';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import { NowProvider } from '../contexts/NowContext';
 import {
   loadSupervisorRunSummaryActiveSource,
@@ -199,10 +199,7 @@ afterEach(() => {
 
 function mount(initialPath = '/runs', contributors: readonly AttentionContributor[] = []) {
   return render(
-    <MemoryRouter
-      initialEntries={[initialPath]}
-      future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
-    >
+    <MemoryRouter initialEntries={[initialPath]}>
       <NowProvider intervalMs={1_000_000}>
         <AttentionProvider contributors={contributors}>
           <RunSummaryProvider>

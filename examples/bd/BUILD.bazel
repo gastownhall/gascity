@@ -5,6 +5,7 @@ go_library(
     srcs = ["embed.go"],
     embedsrcs = [
         "assets/scripts/dolt-enospc.sh",
+        "assets/scripts/dolt-fsync-stall.sh",
         "assets/scripts/gc-beads-bd.sh",
         "doctor/check-bd/doctor.toml",
         "doctor/check-bd/run.sh",

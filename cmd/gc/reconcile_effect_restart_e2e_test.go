@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -82,7 +83,7 @@ func TestDriftRelaunchThroughTheEffectPass(t *testing.T) {
 				p.seam = func(_ context.Context, at txSeam, _ intent, _, _ int) error {
 					if at == seamAfterCall && leaf.CountCalls("Relaunch", "s-gc-1") == 1 {
 						p.seam = nil
-						if _, err := session.WriteKillFence(store, it.Key.ID, gatherNow); err != nil {
+						if _, err := session.WriteKillFence(beadstest.Sessions(store), it.Key.ID, gatherNow); err != nil {
 							t.Error(err)
 						}
 					}

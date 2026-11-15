@@ -7,9 +7,9 @@ import (
 )
 
 // decideRow's restart-requested arm (CONTRACT v5 §4 A13, v5.10q; plan
-// C7a-2a): a row carrying restart_requested=true, which `gc session reset`,
-// `gc runtime request-restart` and `gc handoff` write through
-// Manager.RequestFreshRestart, goes through the stop verb with the restart
+// C7a-2a): a row carrying restart_requested=true, which `gc session reset`
+// writes through Manager.RequestFreshRestart and `gc runtime request-restart`
+// and `gc handoff` through Manager.RequestFreshRestartFenced, goes through the stop verb with the restart
 // handoff finalize (legacy's restart block, session_reconciler.go). A live
 // runtime is stopped first; a gone one is confirmed gone and handed off,
 // and A18 starts the row a pass later (legacy starts it in the same tick).
@@ -17,6 +17,14 @@ import (
 // handoff set beside the row's, triggers it too when the row write failed
 // (C7a-2b): the inventory reads it, and the stop clears it. SESS-612's
 // fresh-mode cycle (reconcile_arms_fresh_cycle.go) is C7a-2c.
+//
+// Deprecated (SG-3; the reconciler-v2 owner's ruling of 2026-10-27,
+// condition 2): the session row's restart_requested is the sole restart
+// authority. Since SG-3 the CLI records it first, fenced to the caller's
+// incarnation, and sets GC_RESTART_REQUESTED only as a local-mode hint. This
+// arm stays unchanged for one release so that older CLI and agent binaries
+// mid-upgrade, which may leave only the runtime's marker, still restart.
+// Remove it in the release after the one that ships SG-3 (bead ga-fz2pkq).
 
 // A13's reasons.
 const (
@@ -74,6 +82,7 @@ func armRestartRequested(r *rowFacts) (intent, bool) {
 // holds the row's other arms (SESS-612's cycle) nor fires on a later unpin
 // (the #7879 review; legacy clears it).
 func (r *rowFacts) restartPending() bool {
+	// The runtime-marker clause is deprecated (runtimeRestartRequested).
 	return (r.rowRestartRequested() || r.runtimeRestartRequested() && !r.pinnedCollateral()) && !operatorDormantStop(r.row.Info, r.w.Now) && !r.drained()
 }
 
@@ -107,6 +116,14 @@ func (r *rowFacts) rowRestartRequested() bool {
 // runtime while it runs: alive, or a zombie whose pane is up, as legacy
 // reads it only on a running runtime. A corpse's marker is never read, so
 // a corpse the stop leaves (an attached one) restarts nothing again.
+//
+// Deprecated (SG-3; the reconciler-v2 owner's ruling of 2026-10-27,
+// condition 2): the session row's restart_requested is the sole restart
+// authority. Since SG-3 the CLI records it first, fenced to the caller's
+// incarnation, and sets GC_RESTART_REQUESTED only as a local-mode hint. This
+// arm stays unchanged for one release so that older CLI and agent binaries
+// mid-upgrade, which may leave only the runtime's marker, still restart.
+// Remove it in the release after the one that ships SG-3 (bead ga-fz2pkq).
 func (r *rowFacts) runtimeRestartRequested() bool {
 	if r.entry == nil || r.w.Obs == nil {
 		return false

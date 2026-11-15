@@ -6,6 +6,15 @@ the machinery beneath the **Pack** primitive and the universal activation
 mechanism (capabilities activate from section presence — no capability
 flags). Architecture: `engdocs/architecture/config.md`.
 
+## Workflow topology is not fresh worker demand
+
+Pool demand counts, controller demand, and hook claims must all exclude
+expanded workflow roots, scopes, and specs even when they retain a route.
+Keep never-expanded root-only workflows executable for compatibility, and
+keep already-owned workflow anchors available for continuation. Update the
+shell count and Go predicates together; otherwise an unclaimable latch can
+continually wake replacement workers.
+
 ## Adding agent config fields
 
 When adding a field to `config.Agent`, also add it to `AgentPatch` and
@@ -31,6 +40,15 @@ When adding a field to `config.Rig`, also add the corresponding optional
 field to `RigPatch` and wire the merge into `applyRigPatch` so layered
 configs (fragments, patches) can override it. No field-sync test exists for
 Rig today; the patch path must be checked manually.
+
+Exception: `federation` and `namespace` (`internal/config/rig_federation.go`)
+are deliberately absent from `RigPatch`. They decide which rows of a shared
+bead store the city may act on, so only the rig's own `[[rigs]]` entry may set
+them; a pack-level patch must not be able to drop the guard. Their checks run
+in `ValidateRigFederation` on every load and in `ValidateRigFederationLayout`
+beside each `ValidateRigs` call. Unlike `ValidateRigs`, a layout failure on
+reload is a refusal (`tryReloadConfig`), not a warning: a running city must
+not adopt a config that start would refuse.
 
 ## Adding `.gc/site.toml` fields
 

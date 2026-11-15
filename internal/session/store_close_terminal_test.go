@@ -1,7 +1,9 @@
 package session
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -459,5 +461,119 @@ func TestCommitCloseFallbackChecksTheRowFirst(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// unconfirmedTxStore is a store whose Tx reports a bd staged Tx's read-back
+// timeout: every write it applied committed, but the store stopped waiting to
+// read the last one back, so the Tx answers ErrWriteUnconfirmed. apply decides
+// which of the callback's writes landed first: all of them (the close landed,
+// the post-close update's read-back lagged) or the metadata only (the
+// pre-close update's read-back lagged, so the close never ran). nil applies
+// nothing and fails the Tx outright, as a refused write does.
+type unconfirmedTxStore struct {
+	beads.Store
+	apply func(tx beads.Tx, id string, patch map[string]string) error
+	fail  error
+}
+
+func (s *unconfirmedTxStore) Tx(_ string, fn func(beads.Tx) error) error {
+	rec := &recordingTx{}
+	if err := fn(rec); err != nil {
+		return err
+	}
+	if s.apply == nil {
+		return s.fail
+	}
+	if err := s.Store.Tx("applied", func(tx beads.Tx) error { return s.apply(tx, rec.id, rec.patch) }); err != nil {
+		return err
+	}
+	return fmt.Errorf("updating bead %q: %w: waiting for tx update projection: %w", rec.id, beads.ErrWriteUnconfirmed, context.DeadlineExceeded)
+}
+
+// recordingTx captures the close Tx's staged metadata and target.
+type recordingTx struct {
+	beads.Tx
+	id    string
+	patch map[string]string
+}
+
+func (r *recordingTx) SetMetadataBatch(id string, kvs map[string]string) error {
+	r.id, r.patch = id, kvs
+	return nil
+}
+
+func (r *recordingTx) Close(id string) error {
+	r.id = id
+	return nil
+}
+
+func applyMetadataAndClose(tx beads.Tx, id string, patch map[string]string) error {
+	if err := tx.SetMetadataBatch(id, patch); err != nil {
+		return err
+	}
+	return tx.Close(id)
+}
+
+func applyMetadataOnly(tx beads.Tx, id string, patch map[string]string) error {
+	return tx.SetMetadataBatch(id, patch)
+}
+
+// TestCommitCloseLandsWhenAnUnconfirmedTxLeftTheRowClosed is the regression
+// for POST /session/{id}/close answering 500 "waiting for tx update
+// projection: context deadline exceeded" for a close that had landed. A Tx
+// whose last read-back timed out is not a failed close: CommitClose re-reads
+// the row, and a closed row is the close landing.
+func TestCommitCloseLandsWhenAnUnconfirmedTxLeftTheRowClosed(t *testing.T) {
+	backing := beads.NewMemStore()
+	created := seedOpenSession(t, backing, "s-unconfirmed")
+	front := NewStore(beads.SessionStore{Store: &unconfirmedTxStore{Store: backing, apply: applyMetadataAndClose}})
+
+	res, err := front.CommitClose(Decide(decidedOn(t, backing, created.ID), FactsLegacyClose), failedCreateTerminalPatch(), closeTestNow)
+	if err != nil || res != CommitLanded {
+		t.Fatalf("CommitClose = (%v, %v), want landed: the row reads closed", res, err)
+	}
+	got, err := backing.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed", got.Status)
+	}
+}
+
+// TestCommitCloseReportsAnUnconfirmedTxThatLeftTheRowOpen: when the re-read
+// shows the row still open (the read-back that timed out came before the
+// close), the close did not land, and CommitClose keeps ErrWriteUnconfirmed so
+// the caller can answer "retry" rather than "failed".
+func TestCommitCloseReportsAnUnconfirmedTxThatLeftTheRowOpen(t *testing.T) {
+	backing := beads.NewMemStore()
+	created := seedOpenSession(t, backing, "s-unconfirmed-open")
+	front := NewStore(beads.SessionStore{Store: &unconfirmedTxStore{Store: backing, apply: applyMetadataOnly}})
+
+	res, err := front.CommitClose(Decide(decidedOn(t, backing, created.ID), FactsLegacyClose), failedCreateTerminalPatch(), closeTestNow)
+	if !errors.Is(err, beads.ErrWriteUnconfirmed) || res == CommitLanded {
+		t.Fatalf("CommitClose = (%v, %v), want ErrWriteUnconfirmed and not landed", res, err)
+	}
+}
+
+// TestCommitCloseReportsAFailedTx: a Tx the store refused committed nothing
+// and stays an error; the re-read is only for an unconfirmed write.
+func TestCommitCloseReportsAFailedTx(t *testing.T) {
+	backing := beads.NewMemStore()
+	created := seedOpenSession(t, backing, "s-failed")
+	refused := errors.New("updating bead: exit status 1: disk full")
+	front := NewStore(beads.SessionStore{Store: &unconfirmedTxStore{Store: backing, fail: refused}})
+
+	res, err := front.CommitClose(Decide(decidedOn(t, backing, created.ID), FactsLegacyClose), failedCreateTerminalPatch(), closeTestNow)
+	if !errors.Is(err, refused) || errors.Is(err, beads.ErrWriteUnconfirmed) || res == CommitLanded {
+		t.Fatalf("CommitClose = (%v, %v), want the refused write's error", res, err)
+	}
+	got, err := backing.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatal("row closed after a refused Tx")
 	}
 }

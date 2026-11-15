@@ -19,18 +19,33 @@
 #
 #   pin [BUILD]       Print //platforms:rbe_worker's worker-env pin (BUILD
 #                     defaults to platforms/BUILD.bazel; "none" if it has none).
-#   preflight BASE_BUILD CHANGED
+#   preflight BASE_BUILD CHANGED [MERGED_ONTO_BUILD]
 #                     bazel.yml's lanes and worker-host job. Writes to
 #                     $GITHUB_OUTPUT:
 #                     pin-moved=true if this checkout pins another host than
 #                     BASE_BUILD (the default branch's platforms/BUILD.bazel,
-#                     whose pin the pool workers check against);
+#                     whose pin the pool workers check against) because this
+#                     change moves the pin;
 #                     measure=true if pin-moved, or if CHANGED (a file of
 #                     changed paths) names the worker host's definition;
 #                     drift-issue, the URL of an open drift issue for this pin.
 #                     Exits 1 if that issue exists and the run executes
 #                     remotely (WORKER_ENV_REMOTE=true) on the default
 #                     branch's pin: its actions would only queue.
+#                     MERGED_ONTO_BUILD is platforms/BUILD.bazel at the
+#                     commit the checkout was merged onto (bazel.yml's
+#                     base-sha); absent means BASE_BUILD. A checkout whose
+#                     pin differs from BASE_BUILD's but equals
+#                     MERGED_ONTO_BUILD's has a STALE BASE: the default
+#                     branch re-pinned after the run chose its base, and this
+#                     change did not move the pin. pin-moved stays false, and
+#                     with WORKER_ENV_REMOTE=true the preflight exits 1
+#                     naming the cure (Re-run all jobs, or push a commit):
+#                     no pool worker serves this checkout, so its remote
+#                     actions would only queue, and skipping them would pass
+#                     the run with zero tests. A stale base is the
+#                     checkout's; "stale host/image" (report) is the
+#                     worker's.
 #
 # A drift issue carries the label rbe-worker-env-drift and the title
 # "rbe worker-env drift: <pin>", one per pinned host (drift-issue protocol v1:
@@ -80,11 +95,16 @@ open_issue() {
 cmd_pin() { pin_of "${1:-$BUILD}"; }
 
 cmd_preflight() {
-	local base_build=${1:?usage: worker-env-drift preflight BASE_BUILD CHANGED} changed=${2:?usage: worker-env-drift preflight BASE_BUILD CHANGED}
-	local pin base moved=false measure=false issue
+	local usage="usage: worker-env-drift preflight BASE_BUILD CHANGED [MERGED_ONTO_BUILD]"
+	local base_build=${1:?$usage} changed=${2:?$usage} onto_build=${3:-$1}
+	local pin base onto moved=false measure=false stale=false issue
 	pin=$(pin_of "$BUILD")
 	base=$(pin_of "$base_build")
-	[ "$pin" = "$base" ] || moved=true measure=true
+	onto=$(pin_of "$onto_build")
+	if [ "$pin" != "$base" ]; then
+		measure=true
+		if [ "$pin" = "$onto" ]; then stale=true; measure=false; else moved=true; fi
+	fi
 	if grep -qE "$HOST_PATHS" "$changed"; then measure=true; fi
 	if ! issue=$(open_issue "$pin"); then
 		echo "::warning title=rbe worker-env preflight::could not list drift issues"
@@ -98,6 +118,13 @@ cmd_preflight() {
 	if [ "$moved" = true ]; then
 		echo "::warning title=rbe worker-env pin moved::this change pins worker-env=$pin, the default branch $base. Pool workers check against the default branch's pin, so none can run these actions before this merges: the remote bazel suite is skipped here and runs on the default branch after merge. This job measures its own Blacksmith host against the new manifest instead."
 		echo "rbe worker-env: the pin moves from \`$base\` to \`$pin\`; remote bazel suite skipped, host measured instead." | summary
+	elif [ "$stale" = true ]; then
+		if [ "${WORKER_ENV_REMOTE:-}" = true ]; then
+			echo "::error title=rbe worker-env stale base::the default branch pins worker-env=$base, this checkout $pin: main re-pinned after this run chose its base commit. No pool worker serves this checkout, so its remote actions would only queue. Re-run all jobs (not 'Re-run failed jobs', which reuses the old base) or push a commit."
+			echo "rbe worker-env: stale base, this checkout pins \`$pin\` and the default branch \`$base\`; not run. Re-run all jobs (not 'Re-run failed jobs') or push a commit." | summary
+			return 1
+		fi
+		echo "::notice title=rbe worker-env stale base::the default branch pins worker-env=$base, this checkout $pin: main re-pinned after this run chose its base commit. This run does not execute remotely, so it is unaffected."
 	elif [ -n "$issue" ] && [ "${WORKER_ENV_REMOTE:-}" = true ]; then
 		echo "::error title=rbe worker-env drift::$issue: pool workers measure another host than the pin $pin, so remote actions would only queue. Re-pin (TESTING.md \"Re-pinning the RBE worker host\") or close the issue once workers match again."
 		echo "rbe worker-env: not executing remotely, $pin has an open drift issue: $issue" | summary

@@ -98,7 +98,8 @@ type activityTracker struct {
 // start seeds the map synchronously and launches the tracking loop, once.
 // Every caller of the first wave blocks on the seed, so no consumer ever
 // reads a cold zero for a session that is observably live. seedName is the
-// session the caller actually wants: herdr's own agent detection can lag
+// herdr registry name (herdrAgentName form, the key entries are stored
+// under) of the session the caller actually wants: herdr's own agent detection can lag
 // pane creation by a poll or two, so the seed retries until seedName appears
 // or the retry budget elapses, rather than trusting a single poll.
 func (a *activityTracker) start(p *Provider, seedName string) {

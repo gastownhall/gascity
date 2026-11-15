@@ -46,7 +46,7 @@ func newSplitFederationState(t *testing.T) *fakeState {
 
 // newLegacyFederationState returns a fakeState shaped like a legacy
 // single-store city: the graph class is NOT relocated, so
-// GraphBeadStore() == CityBeadStore() and the infra arm never fires.
+// Stores().Graph() == CityBeadStore() and the infra arm never fires.
 func newLegacyFederationState(t *testing.T) *fakeState {
 	t.Helper()
 	fs := newFakeState(t)
@@ -231,7 +231,7 @@ func TestBeadListRigScopedReadExcludesGraphLeg(t *testing.T) {
 }
 
 // TestBeadReadyLegacyCityUnchanged is the single-store byte-identity half. On a
-// legacy city GraphBeadStore() == CityBeadStore(), so the infra arm never fires
+// legacy city Stores().Graph() == CityBeadStore(), so the infra arm never fires
 // and the response is what it was before this leg existed.
 //
 // It is also the mutation-killer for the arm's identity guard: drop
@@ -348,13 +348,17 @@ func TestBeadReadyWorkStoresDownButGraphUpIsPartial200(t *testing.T) {
 	}
 }
 
-// TestBeadListLegacyCityDoesNotSmuggleCityStore is the mutation-killer for the
-// list arm's `graph != CityBeadStore()` identity guard. It pins the byte-identity
-// property directly: on a legacy city the graph arm must not change WHICH stores
-// the fan-out reads. Here BeadStores() deliberately does not carry the city
-// store, so an unguarded arm would mint a synthetic leg pointing at it and the
-// city's beads would appear in a response that never contained them.
-func TestBeadListLegacyCityDoesNotSmuggleCityStore(t *testing.T) {
+// TestBeadListLegacyCityHasNoGraphLeg pins the byte-identity property of the
+// list's relocation guard (storeref's WorkList tail, by handle identity since
+// T7e.2; the arm's `graph != CityBeadStore()` guard before): on a legacy city
+// the graph arm must not change WHICH stores the fan-out reads, so the legs
+// are the city and the rig alone, and each bead is listed once. It does not
+// kill a graph tail kept on an unrelocated city by itself: there the tail is
+// the city store, which the plan's dedupe drops. The equivalence tables
+// (work_federation_legs_*, work_federation_handlers_*), whose gate shapes
+// read the graph through a view of its own, do.
+func TestBeadListLegacyCityHasNoGraphLeg(t *testing.T) {
+	t7dGateOff(t)
 	fs := newLegacyFederationState(t)
 	cityBead, err := fs.cityBeadStore.Create(beads.Bead{Type: "task", Title: "city work"})
 	if err != nil {
@@ -365,15 +369,32 @@ func TestBeadListLegacyCityDoesNotSmuggleCityStore(t *testing.T) {
 		t.Fatalf("seed rig work: %v", err)
 	}
 
-	body := getListBody(t, fs, "/beads")
-	if !bodyContainsBeadID(body.Items, rigBead.ID) {
-		t.Fatalf("list items = %+v, want the rig bead %q", body.Items, rigBead.ID)
+	legs := beadListFanOut(fs.Stores(), fs.cityName, "")
+	var labels []string
+	for _, leg := range legs {
+		labels = append(labels, leg.label)
+		if leg.graph {
+			t.Errorf("a legacy city's fan-out has a graph leg over %v: the graph arm minted a leg at the city store", leg.leg.Ref)
+		}
 	}
-	if bodyContainsBeadID(body.Items, cityBead.ID) {
-		t.Fatalf("list items include city bead %q, which is not in BeadStores() — the graph arm minted a leg on a legacy city, so it is no longer byte-identical", cityBead.ID)
+	if len(legs) != 2 {
+		t.Fatalf("legacy fan-out legs = %v, want the city and the rig alone", labels)
 	}
-	if body.Total != 1 {
-		t.Fatalf("list total = %d, want 1", body.Total)
+
+	rec := httptest.NewRecorder()
+	newTestCityHandler(t, fs).ServeHTTP(rec, httptest.NewRequest("GET", cityURL(fs, "/beads"), nil))
+	if rec.Code != 200 {
+		t.Fatalf("GET /beads status = %d, want 200 (body=%q)", rec.Code, rec.Body.String())
+	}
+	var body listBody
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode /beads: %v", err)
+	}
+	if !bodyContainsBeadID(body.Items, rigBead.ID) || !bodyContainsBeadID(body.Items, cityBead.ID) {
+		t.Fatalf("list items = %+v, want the city bead %q and the rig bead %q", body.Items, cityBead.ID, rigBead.ID)
+	}
+	if body.Total != 2 {
+		t.Fatalf("list total = %d, want 2", body.Total)
 	}
 }
 

@@ -143,6 +143,33 @@ func TestCleanupClosedBeadAgentHomeWorktrees_SkipsWithoutMarker(t *testing.T) {
 	}
 }
 
+func TestCleanupClosedBeadAgentHomeWorktrees_UsesConfiguredWorktreesRoot(t *testing.T) {
+	cityPath := t.TempDir()
+	worktreesRoot := filepath.Join(t.TempDir(), "configured-worktrees")
+	t.Setenv("GC_WORKTREES_DIR", worktreesRoot)
+	builderWTPath := filepath.Join(worktreesRoot, "ga-rig", "builder")
+	if err := os.MkdirAll(builderWTPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(builderWTPath, worktreeStaleFileName), []byte("branch=HEAD\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := newAgentWorktreeGitProbe
+	t.Cleanup(func() { newAgentWorktreeGitProbe = orig })
+	newAgentWorktreeGitProbe = func(string) agentWorktreeGitProbe {
+		return &fakeAgentWorktreeGit{isRepo: true, currentBranch: "HEAD"}
+	}
+
+	cleaned := cleanupClosedBeadAgentHomeWorktrees(cityPath, agentHomeConfig(), map[string]beads.Store{"ga-rig": beads.NewMemStore()}, nil)
+	if cleaned != 1 {
+		t.Fatalf("cleaned = %d, want 1", cleaned)
+	}
+	if _, err := os.Stat(filepath.Join(builderWTPath, worktreeStaleFileName)); !os.IsNotExist(err) {
+		t.Fatalf("configured-root marker was not removed: %v", err)
+	}
+}
+
 // TestCleanupClosedBeadAgentHomeWorktrees_SkipsNonSessionHomes verifies that
 // non-session-home directories (per-bead worktrees) are not touched.
 func TestCleanupClosedBeadAgentHomeWorktrees_SkipsNonSessionHomes(t *testing.T) {

@@ -10,10 +10,10 @@ on:
       - reopened
       - synchronize
       - ready_for_review
-  # Merge queue (dormant until a ruleset enables one; TESTING.md "Merge
-  # queue"): the four required Analyze checks, and the ruleset's
-  # code_scanning rule, need results on every queue entry's merge-group
-  # commit.
+  # Merge queue (TESTING.md "Merge queue"): the four Analyze checks are
+  # required, so every queue entry's merge-group commit needs them to report,
+  # but a merge group analyzes nothing (the analyze job's merge-group step
+  # says why).
   merge_group:
     types: [checks_requested]
   schedule:
@@ -49,7 +49,8 @@ jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
     needs: runner-policy
-    runs-on: ${{ needs.runner-policy.outputs.runner_16vcpu }}
+    # A merge group runs only the merge-group step: a 2 vCPU runner.
+    runs-on: ${{ github.event_name == 'merge_group' && needs.runner-policy.outputs.runner_2vcpu || needs.runner-policy.outputs.runner_16vcpu }}
     timeout-minutes: 30
     permissions:
       actions: read
@@ -68,7 +69,18 @@ jobs:
           - language: python
             build-mode: none
     steps:
+      # A merge group reports each required Analyze check without analyzing
+      # (TESTING.md "Merge queue"): every queued pull request's own run
+      # analyzed it, and the push to main analyzes the merged commit. Every
+      # other step skips on merge_group (scripts/codeql_merge_group_test.go).
+      - name: Merge group (the pull request's analysis stands)
+        id: merge-group
+        if: github.event_name == 'merge_group'
+        run: |
+          echo "Merge group: no CodeQL analysis here. Each queued pull request's own run analyzed it, and the push to main analyzes the merged commit." >> "$GITHUB_STEP_SUMMARY"
+
       - name: Checkout
+        if: github.event_name != 'merge_group'
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       # Go leg only: warm caches for the autobuild. The Go autobuilder runs
@@ -80,24 +92,25 @@ jobs:
       #   - setup-go: the go.mod toolchain instead of a download, before
       #     init so CodeQL wraps that go;
       #   - go-mod-download: the shared module cache, restored on every
-      #     event and saved only by push and schedule runs after go mod
-      #     verify (the composite's trust note);
+      #     event that analyzes and saved only by push and schedule runs
+      #     after go mod verify (the composite's trust note);
       #   - the build cache: on Blacksmith, GOCACHEPROG (blacksmithd) already
       #     serves it, as for every Go job here; elsewhere (runner_policy.py's
       #     GitHub-hosted labels) an actions/cache entry keyed on go.mod and
-      #     go.sum, restored on every event, saved only by a push to main.
+      #     go.sum, restored on every event that analyzes, saved only by a
+      #     push to main.
       - name: Set up Go
-        if: matrix.language == 'go'
+        if: matrix.language == 'go' && github.event_name != 'merge_group'
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: go.mod
           cache: false
       - name: Restore Go modules
-        if: matrix.language == 'go'
+        if: matrix.language == 'go' && github.event_name != 'merge_group'
         uses: ./.github/actions/go-mod-download
       - name: Go build cache backend
         id: gocache
-        if: matrix.language == 'go'
+        if: matrix.language == 'go' && github.event_name != 'merge_group'
         run: |
           prog="$(go env GOCACHEPROG)"
           dir="$(go env GOCACHE)"
@@ -119,17 +132,18 @@ jobs:
             codeql-go-build-v1-${{ runner.os }}-
 
       - name: Initialize CodeQL
+        if: github.event_name != 'merge_group'
         uses: github/codeql-action/init@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
 
       - name: Autobuild
-        if: matrix.build-mode == 'autobuild'
+        if: matrix.build-mode == 'autobuild' && github.event_name != 'merge_group'
         uses: github/codeql-action/autobuild@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4
 
       # Only a push to main that missed the exact key writes the build cache
-      # (pull_request and merge_group runs restore it, never write it).
+      # (pull_request runs restore it, never write it).
       - name: Save Go build cache
         if: matrix.language == 'go' && steps.gocache.outputs.managed == 'false' && steps.gocache-restore.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -138,6 +152,7 @@ jobs:
           key: codeql-go-build-v1-${{ runner.os }}-${{ hashFiles('go.mod', 'go.sum') }}
 
       - name: Perform CodeQL Analysis
+        if: github.event_name != 'merge_group'
         uses: github/codeql-action/analyze@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4
         with:
           category: "/language:${{ matrix.language }}"

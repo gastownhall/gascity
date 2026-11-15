@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // unreadableStore stands in for a named class whose backend is unavailable:
@@ -62,7 +63,7 @@ func seedCrossClassConvoy(t *testing.T) (convoyStore *beads.MemStore, memberStor
 func TestMembersInUnnamedClassContributesEmpty(t *testing.T) {
 	convoyStore, memberStore, convoyID, memberID := seedCrossClassConvoy(t)
 
-	members, err := MembersIn(MemberClasses{Convoy: convoyStore}, convoyID, true)
+	members, err := MembersIn(MemberClasses{Convoy: beadstest.Work(convoyStore)}, convoyID, true)
 	if err != nil {
 		t.Fatalf("MembersIn over the convoy class alone: %v", err)
 	}
@@ -96,8 +97,8 @@ func TestMembersInNamedClassMaterializesMember(t *testing.T) {
 	convoyStore, memberStore, convoyID, memberID := seedCrossClassConvoy(t)
 
 	members, err := MembersIn(MemberClasses{
-		Convoy: convoyStore,
-		Work:   []beads.Store{memberStore},
+		Convoy: beadstest.Work(convoyStore),
+		Work:   []beads.WorkStore{beadstest.Work(memberStore)},
 	}, convoyID, true)
 	if err != nil {
 		t.Fatalf("MembersIn spanning the work class: %v", err)
@@ -123,8 +124,8 @@ func TestMembersInNamedClassFailureStaysAnError(t *testing.T) {
 	broken := &unreadableStore{err: fmt.Errorf("dial work store: connection refused")}
 
 	members, err := MembersIn(MemberClasses{
-		Convoy: convoyStore,
-		Work:   []beads.Store{broken},
+		Convoy: beadstest.Work(convoyStore),
+		Work:   []beads.WorkStore{beadstest.Work(broken)},
 	}, convoyID, true)
 	if err == nil {
 		t.Fatalf("MembersIn = %+v, nil; want the participating class's read failure", members)
@@ -156,8 +157,8 @@ func TestTrackItemInRefusesCrossClassEdgeBeforeWriting(t *testing.T) {
 	}
 
 	err = TrackItemIn(MemberClasses{
-		Convoy: convoyStore,
-		Work:   []beads.Store{memberStore},
+		Convoy: beadstest.Work(convoyStore),
+		Work:   []beads.WorkStore{beadstest.Work(memberStore)},
 	}, convoy.ID, "fe-1")
 	if !errors.Is(err, ErrMemberNotCoResident) {
 		t.Fatalf("TrackItemIn err = %v, want ErrMemberNotCoResident", err)
@@ -179,7 +180,7 @@ func TestTrackItemInWritesSameClassEdge(t *testing.T) {
 	convoy, _ := store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
 	member, _ := store.Create(beads.Bead{Title: "item"})
 
-	if err := TrackItemIn(MemberClasses{Convoy: store, Work: []beads.Store{store}}, convoy.ID, member.ID); err != nil {
+	if err := TrackItemIn(MemberClasses{Convoy: beadstest.Work(store), Work: []beads.WorkStore{beadstest.Work(store)}}, convoy.ID, member.ID); err != nil {
 		t.Fatalf("TrackItemIn: %v", err)
 	}
 	requireTracksDep(t, store, convoy.ID, member.ID)
@@ -202,7 +203,7 @@ func TestResolveMemberDuplicateResidenceIsTypedError(t *testing.T) {
 		t.Fatalf("seed duplicate: %v", err)
 	}
 
-	classes := MemberClasses{Convoy: first, Graph: second}
+	classes := MemberClasses{Convoy: beadstest.Work(first), Graph: beadstest.Graph(second)}
 	_, _, err = classes.resolveMember(bead.ID)
 	if !errors.Is(err, ErrDuplicateResidence) {
 		t.Fatalf("resolveMember err = %v, want ErrDuplicateResidence", err)
@@ -236,7 +237,7 @@ func TestCandidatesNamesEachHandleOnce(t *testing.T) {
 	store := beads.NewMemStore()
 	bead, _ := store.Create(beads.Bead{Title: "item"})
 
-	classes := MemberClasses{Convoy: store, Work: []beads.Store{store}, Graph: store}
+	classes := MemberClasses{Convoy: beadstest.Work(store), Work: []beads.WorkStore{beadstest.Work(store)}, Graph: beadstest.Graph(store)}
 	if got := len(classes.candidates()); got != 1 {
 		t.Fatalf("candidates = %d, want 1: the same handle named three times is one store", got)
 	}
@@ -252,7 +253,7 @@ func TestCandidatesSkipsUnnamedAndTypedNilClasses(t *testing.T) {
 	store := beads.NewMemStore()
 	var typedNil *beads.MemStore
 
-	classes := MemberClasses{Convoy: store, Work: []beads.Store{typedNil, nil}, Graph: typedNil}
+	classes := MemberClasses{Convoy: beadstest.Work(store), Work: []beads.WorkStore{beadstest.Work(typedNil), beadstest.Work(nil)}, Graph: beadstest.Graph(typedNil)}
 	cands := classes.candidates()
 	if len(cands) != 1 {
 		t.Fatalf("candidates = %d (%+v), want only the named convoy handle", len(cands), cands)
@@ -271,7 +272,7 @@ func TestResolveMemberPrefixOwnerIsRecordedOwnership(t *testing.T) {
 	graph := &prefixStore{Store: graphBacking, prefix: "gcg"}
 	work := &unreadableStore{err: fmt.Errorf("dial work store: connection refused")}
 
-	classes := MemberClasses{Convoy: graph, Work: []beads.Store{work}}
+	classes := MemberClasses{Convoy: beadstest.Work(graph), Work: []beads.WorkStore{beadstest.Work(work)}}
 	got, owner, err := classes.resolveMember(graphID)
 	if err != nil {
 		t.Fatalf("resolveMember: %v", err)
@@ -293,8 +294,8 @@ func TestResolveMemberPrefixOwnerIsRecordedOwnership(t *testing.T) {
 func TestConvoyClassHandleIsRequired(t *testing.T) {
 	var typedNil *beads.MemStore
 	for name, classes := range map[string]MemberClasses{
-		"unnamed":   {Work: []beads.Store{beads.NewMemStore()}},
-		"typed nil": {Convoy: typedNil},
+		"unnamed":   {Work: []beads.WorkStore{beadstest.Work(beads.NewMemStore())}},
+		"typed nil": {Convoy: beadstest.Work(typedNil)},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := MembersIn(classes, "gc-1", true); !errors.Is(err, ErrNoConvoyClass) {
@@ -322,15 +323,19 @@ func TestConvoyClassHandleIsRequired(t *testing.T) {
 func TestMembersInParticipantFailureOutranksAFoundOwnerInEitherOrder(t *testing.T) {
 	orders := []struct {
 		name  string
-		build func(owner, broken beads.Store) []beads.Store
+		build func(owner, broken beads.Store) []beads.WorkStore
 	}{
 		{
-			name:  "broken scope probed first",
-			build: func(owner, broken beads.Store) []beads.Store { return []beads.Store{broken, owner} },
+			name: "broken scope probed first",
+			build: func(owner, broken beads.Store) []beads.WorkStore {
+				return []beads.WorkStore{beadstest.Work(broken), beadstest.Work(owner)}
+			},
 		},
 		{
-			name:  "owning scope probed first",
-			build: func(owner, broken beads.Store) []beads.Store { return []beads.Store{owner, broken} },
+			name: "owning scope probed first",
+			build: func(owner, broken beads.Store) []beads.WorkStore {
+				return []beads.WorkStore{beadstest.Work(owner), beadstest.Work(broken)}
+			},
 		},
 	}
 	for _, order := range orders {
@@ -339,7 +344,7 @@ func TestMembersInParticipantFailureOutranksAFoundOwnerInEitherOrder(t *testing.
 			broken := &unreadableStore{err: fmt.Errorf("dial rig work store: connection refused")}
 
 			members, err := MembersIn(MemberClasses{
-				Convoy: convoyStore,
+				Convoy: beadstest.Work(convoyStore),
 				Work:   order.build(memberStore, broken),
 			}, convoyID, true)
 			if err == nil {

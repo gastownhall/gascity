@@ -33,18 +33,32 @@ trace() {
     printf '%s %s\n' "$(date -u "$TRACE_TIME_FORMAT")" "$*" >> "$TRACE_FILE"
 }
 
-if ! command -v timeout >/dev/null 2>&1; then
-    if command -v gtimeout >/dev/null 2>&1; then
-        timeout() {
-            gtimeout "$@"
-        }
+# bounded SECS CMD... runs CMD under a wall-clock limit, exiting 124 when it
+# overruns, as GNU timeout does. macOS has no timeout (Homebrew's coreutils
+# names it gtimeout), so it falls back to gtimeout, then python3, and runs CMD
+# unbounded only when none is installed (the same order as the dolt pack's
+# _bounded.sh). A top-level function, so the harness tests run the real one.
+bounded() {
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$@"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        gtimeout "$@"
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -c '
+import subprocess, sys
+proc = subprocess.Popen(sys.argv[2:])
+try:
+    sys.exit(proc.wait(timeout=float(sys.argv[1])))
+except subprocess.TimeoutExpired:
+    proc.kill()
+    proc.wait()
+    sys.exit(124)
+' "$@"
     else
-        timeout() {
-            shift
-            "$@"
-        }
+        shift
+        "$@"
     fi
-fi
+}
 
 current_port_file() {
     if [ -f "$GC_CITY/.beads/dolt-server.port" ]; then
@@ -212,7 +226,7 @@ set_formula_verdict() {
 # which read does not collapse, so an empty outcome cannot shift the assignee.
 read_bead_state() {
     local line=""
-    line=$(timeout 10 bd show --json "$1" 2>/dev/null | json_payload | jq -r '
+    line=$(bounded 10 bd show --json "$1" 2>/dev/null | json_payload | jq -r '
         (if type == "array" then .[0] else . end)
         | [(.status // ""), ((.metadata // {})["gc.outcome"] // ""), (.assignee // "")]
         | join("\u001f")' 2>/dev/null || true)
@@ -223,7 +237,7 @@ read_bead_state() {
 }
 
 refresh_bead_json() {
-    timeout 10 bd show --json "$1" 2>/dev/null
+    bounded 10 bd show --json "$1" 2>/dev/null
 }
 
 owned_status_ok() {
@@ -317,9 +331,9 @@ is_currently_blocked() {
     local blocked_json=""
 
     if [ -n "$root_id" ]; then
-        blocked_json=$(timeout 10 bd blocked --json --parent "$root_id" 2>/dev/null || true)
+        blocked_json=$(bounded 10 bd blocked --json --parent "$root_id" 2>/dev/null || true)
     else
-        blocked_json=$(timeout 10 bd blocked --json 2>/dev/null || true)
+        blocked_json=$(bounded 10 bd blocked --json 2>/dev/null || true)
     fi
 
     printf '%s\n' "$blocked_json" | json_payload | jq -e --arg id "$bead_id" '
@@ -342,7 +356,7 @@ hook_poll_due() {
 # default work query) and fails when there are none.
 fetch_routed_queue() {
     local routed=""
-    routed=$(timeout 10 bd ready --metadata-field "gc.routed_to=$1" --unassigned --exclude-type=epic --json --limit=0 2>/dev/null) || return 1
+    routed=$(bounded 10 bd ready --metadata-field "gc.routed_to=$1" --unassigned --exclude-type=epic --json --limit=0 2>/dev/null) || return 1
     routed=$(printf '%s\n' "$routed" | json_payload | jq -c '
         [ (if type == "array" then .[]? else . end)
           | select(([ (.labels // [])[] | select(startswith("hold:")) ] | length) == 0) ]
@@ -363,7 +377,7 @@ fetch_ready_queue() {
     # dispatcher. Read that assigned queue directly so empty polls do not spend
     # their budget in gc hook/native-store preflight. Keep the full hook path
     # available for tests that explicitly need generic routed work.
-    if ready=$(timeout 10 bd ready --assignee="$ASSIGNEE" --json --limit=0 2>/dev/null); then
+    if ready=$(bounded 10 bd ready --assignee="$ASSIGNEE" --json --limit=0 2>/dev/null); then
         if printf '%s\n' "$ready" | json_payload | jq -e 'if type == "array" then length > 0 else . != null end' >/dev/null 2>&1; then
             printf '%s\n' "$ready"
             return 0
@@ -376,7 +390,7 @@ fetch_ready_queue() {
         if [ "$hook_due" != "true" ]; then
             return 0
         fi
-        timeout "$HOOK_TIMEOUT" gc hook 2>/dev/null
+        bounded "$HOOK_TIMEOUT" gc hook 2>/dev/null
         return $?
     fi
     return 1
@@ -391,7 +405,7 @@ fetch_in_progress_queue() {
     # (#6324), not the runtime GC_SESSION_NAME (<template>-<beadID>). Listing
     # by the session name never finds this session's own claim, so a pool
     # worker restarted mid-step skips its in_progress bead forever.
-    timeout 10 bd list --assignee "$BEADS_ACTOR" --status=in_progress --json 2>/dev/null
+    bounded 10 bd list --assignee "$BEADS_ACTOR" --status=in_progress --json 2>/dev/null
 }
 
 select_candidate_from_queue() {
@@ -531,7 +545,7 @@ while true; do
     if [ "$is_claimable_work" = "true" ] && [ "$owns_bead" != "true" ]; then
         candidate_route=$(printf '%s\n' "$bead_json" | jq -r '(.metadata // {})["gc.routed_to"] // ""' 2>/dev/null || true)
         ack_drain_if_idle || true
-        if ! claimed=$(timeout 10 bd update "$bead_id" --claim --json 2>/dev/null); then
+        if ! claimed=$(bounded 10 bd update "$bead_id" --claim --json 2>/dev/null); then
             trace "claim-miss bead=$bead_id assignee=$ASSIGNEE"
             sleep 0.2
             continue
@@ -555,7 +569,7 @@ while true; do
     if [ -n "$root_id" ] && [ "$root_id" = "$CACHED_ROOT_ID" ]; then
         target_id="$CACHED_TARGET_ID"
     elif [ -n "$root_id" ]; then
-        if ! root_json=$(timeout 10 bd show --json "$root_id" 2>/dev/null); then
+        if ! root_json=$(bounded 10 bd show --json "$root_id" 2>/dev/null); then
             trace "root-show-failed bead=$bead_id root=$root_id"
             sleep 1
             continue
@@ -567,7 +581,7 @@ while true; do
         fi
     fi
     if [ -n "$target_id" ]; then
-        if ! target_json=$(timeout 10 bd show --json "$target_id" 2>/dev/null); then
+        if ! target_json=$(bounded 10 bd show --json "$target_id" 2>/dev/null); then
             trace "target-show-failed bead=$bead_id target=$target_id"
             sleep 1
             continue
@@ -578,7 +592,7 @@ while true; do
     if is_currently_blocked "$bead_id" "$root_id"; then
         trace "skip-blocked bead=$bead_id ref=$ref assignee=$ASSIGNEE"
         if [ "$is_claimable_work" = "true" ]; then
-            if ! timeout 10 bd update "$bead_id" --assignee "" --status open >/dev/null 2>&1; then
+            if ! bounded 10 bd update "$bead_id" --assignee "" --status open >/dev/null 2>&1; then
                 trace "release-failed bead=$bead_id ref=$ref"
             else
                 trace "released bead=$bead_id ref=$ref"
@@ -664,7 +678,7 @@ while true; do
     # false positives. Teardown beads must still run after body failure.
     sibling_hard_fail="false"
     if [ "$kind" != "cleanup" ] && [ -n "$root_id" ]; then
-        if sibling_json=$(timeout 10 bd list --all --limit=0 --json 2>/dev/null); then
+        if sibling_json=$(bounded 10 bd list --all --limit=0 --json 2>/dev/null); then
             if printf '%s\n' "$sibling_json" | json_payload | jq -e \
                 --arg root "$root_id" --arg self "$bead_id" '
                     if type == "array" then

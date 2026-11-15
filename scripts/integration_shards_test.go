@@ -239,7 +239,9 @@ func fileAppliesOnLinuxAMD64(t *testing.T, path string, tags map[string]bool) bo
 	if expr == nil {
 		return true
 	}
-	return expr.Eval(func(tag string) bool { return tags[tag] })
+	// The Go toolchain satisfies "unix" on linux, so it is true here whatever
+	// tags holds.
+	return expr.Eval(func(tag string) bool { return tag == "unix" || tags[tag] })
 }
 
 // leadingGoBuildConstraint returns the //go:build expression in data's
@@ -319,6 +321,16 @@ func TestIntegrationFileAppliesOnLinuxAMD64(t *testing.T) {
 		{
 			name: "go:build integration && darwin never applies on linux",
 			path: writeFile("darwin_tagged_test.go", "//go:build integration && darwin\n\npackage integration\n"),
+			want: false,
+		},
+		{
+			name: "go:build integration && unix applies on linux",
+			path: writeFile("unix_tagged_test.go", "//go:build integration && unix\n\npackage integration\n"),
+			want: true,
+		},
+		{
+			name: "go:build integration && !unix never applies on linux",
+			path: writeFile("not_unix_tagged_test.go", "//go:build integration && !unix\n\npackage integration\n"),
 			want: false,
 		},
 		{

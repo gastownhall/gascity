@@ -68,7 +68,7 @@ func tallyV2SessionMigration(cfg *config.City, cityName string, rows []session.I
 // v2SessionMigrationKeys is what one open row counts under: an unknown state,
 // its pool-slot session name, its configured named identity ("" for none).
 func v2SessionMigrationKeys(cfg *config.City, cityName string, info session.Info) (state string, unknown bool, slot, named string) {
-	if !isKnownStateInfo(info) && !isDrainAckStopPendingInfo(info) {
+	if isUnknownStateInfo(info) {
 		state, unknown = info.MetadataState, true
 	}
 	if name := strings.TrimSpace(info.SessionName); name != "" && strings.TrimSpace(info.PoolSlot) != "" {
@@ -96,6 +96,6 @@ func (m v2SessionMigration) refusal() error {
 		states = " (" + states[1:] + ")"
 	}
 	return fmt.Errorf("enterprise-era session rows: %d open row(s) in a state main does not know%s, %d pool-slot session name(s) shared by open rows, "+
-		"%d configured named session(s) claimed by more than one open row; v2 refuses to boot over them: run gc doctor --check v2-session-migration to list them, or remove session_reconciler to run legacy",
+		"%d configured named session(s) claimed by more than one open row; v2 refuses to boot over them: run gc doctor --check v2-session-migration to list them, or set session_reconciler = \"legacy\"",
 		total, states, len(m.SharedSlotNames), len(m.DuplicateNamed))
 }

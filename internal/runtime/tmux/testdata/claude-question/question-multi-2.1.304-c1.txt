@@ -1,0 +1,18 @@
+⏺ I have a few questions before I plan this.
+
+────────────────────────────────────────────────────────────
+ ←  ☐ Scope  ☐ Approach  ☐ Timing  ✔ Submit  →
+
+Which scope should the change cover?
+
+❯ 1. Small
+     Only the bug fix
+  2. Medium
+     Fix plus regression tests
+  3. Large
+     Fix, tests and a refactor
+  4. Type something.
+────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel

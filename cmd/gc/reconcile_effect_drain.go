@@ -1,6 +1,10 @@
 package main
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/gastownhall/gascity/internal/session"
+)
 
 // The drain effects (CONTRACT v5 D1, D2, F1, F4). A begin is its arm decided
 // again inside the CAS (redecideRow) on the fresh row, then its reason's
@@ -44,6 +48,7 @@ func drainBeginNeeds(w *World, it intent) needs {
 		}
 		if row, ok := w.Census.Rows[it.Key]; ok {
 			_, n.Idle = idleProof(w, row.Info, reason)
+			n.IdleShadow = unprovedIdleSleep(w, row.Info, reason)
 		}
 		return n
 	case reason == drainOrphaned || reason == drainSuspended:
@@ -52,6 +57,15 @@ func drainBeginNeeds(w *World, it intent) needs {
 		return needs{Runtime: true, Legs: legAttach | legWork}
 	}
 	return needs{}
+}
+
+// unprovedIdleSleep reports an idle begin of info for reason that no idle
+// proof gates (idleProof): it is decided on idleness all the same, so under
+// the program-status shadow switch the record's sleep proof is taken beside
+// it (proved_idle).
+func unprovedIdleSleep(w *World, info session.Info, reason string) bool {
+	_, probe := idleProof(w, info, reason)
+	return reason == drainIdle && !probe
 }
 
 // redecideDrainBegin is redecideRow, then the begin's legs for its reason;
@@ -77,6 +91,11 @@ func drainBeginChecks(v txView, reason string, step txStep) txStep {
 		// would hold its restarts, heals and cancels for minutes (C6a2 review).
 		if _, probe := idleProof(v.World, v.Row, reason); probe && !v.Fence.Idle {
 			return txStep{Cause: causeNotIdle}
+		}
+		// An unproved idle sleep goes ahead as idle; the step carries that so
+		// the transaction records it beside the record's sleep proof.
+		if unprovedIdleSleep(v.World, v.Row, reason) {
+			step.IdleSleep = idleSleepProved
 		}
 	}
 	if reason == drainConfigDrift {

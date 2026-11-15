@@ -79,8 +79,8 @@ func TestParse(t *testing.T) {
 }
 
 func TestCheckFinalMinimum(t *testing.T) {
-	if ManagedMin != "2.1.0" {
-		t.Fatalf("ManagedMin = %q, want 2.1.0", ManagedMin)
+	if ManagedMin != "2.6.0" {
+		t.Fatalf("ManagedMin = %q, want 2.6.0", ManagedMin)
 	}
 
 	tests := []struct {
@@ -88,12 +88,16 @@ func TestCheckFinalMinimum(t *testing.T) {
 		input   string
 		wantErr error
 	}{
-		{name: "at floor", input: "dolt version 2.1.0"},
-		{name: "above floor", input: "dolt version 2.1.1"},
+		{name: "at floor", input: "dolt version 2.6.0"},
+		{name: "above floor", input: "dolt version 2.6.1"},
+		{name: "multi-digit patch above floor", input: "dolt version 2.6.10"},
+		{name: "multi-digit minor above floor", input: "dolt version 2.10.0"},
+		{name: "last release below floor", input: "dolt version 2.5.1", wantErr: ErrBelowMinimum},
+		{name: "previous floor", input: "dolt version 2.1.0", wantErr: ErrBelowMinimum},
 		{name: "below floor", input: "dolt version 2.0.6", wantErr: ErrBelowMinimum},
-		{name: "pre-release at floor", input: "dolt version 2.1.0-rc1", wantErr: ErrPreRelease},
-		{name: "pre-release with build metadata at floor", input: "dolt version 2.1.0-rc1+build.5", wantErr: ErrPreRelease},
-		{name: "pre-release above floor", input: "dolt version 2.1.1-rc1", wantErr: ErrPreRelease},
+		{name: "pre-release at floor", input: "dolt version 2.6.0-rc1", wantErr: ErrPreRelease},
+		{name: "pre-release with build metadata at floor", input: "dolt version 2.6.0-rc1+build.5", wantErr: ErrPreRelease},
+		{name: "pre-release above floor", input: "dolt version 2.6.1-rc1", wantErr: ErrPreRelease},
 	}
 
 	for _, tt := range tests {

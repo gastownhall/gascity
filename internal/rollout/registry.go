@@ -19,12 +19,17 @@ func ptr[T any](v T) *T { return &v }
 // phantom Spec that leaks into a sibling's ForTest defaults.
 var specs = []Spec{
 	{
-		Key:            keyBeadsConditionalWrites,
-		Category:       InfraRollout,
-		ConfigPath:     "beads.conditional_writes",
-		EnvOverride:    envBeadsConditionalWrites,
-		EnvSemantics:   EnvOverrides,
-		Default:        Default{Mode: ptr(Off)},
+		Key:          keyBeadsConditionalWrites,
+		Category:     InfraRollout,
+		ConfigPath:   "beads.conditional_writes",
+		EnvOverride:  envBeadsConditionalWrites,
+		EnvSemantics: EnvOverrides,
+		// Auto by default (mc-dpo2b), ahead of the VersionAnchor graduation,
+		// so an unset session_reconciler can resolve to v2 (which never
+		// writes blind): every store takes CAS where it is capable. Where it
+		// is not, the builtin default runs as off, quietly; only an explicit
+		// auto degrades loudly (cmd/gc conditionalWritesDefaultAuto).
+		Default:        Default{Mode: ptr(Auto)},
 		Owner:          Owner{Bead: "ga-1ypn4t", GitHub: "@gastownhall/gascity-admin"},
 		Expires:        "2027-01-15",
 		VersionAnchor:  "BD_CONDITIONAL_WRITES_MIN_VERSION",
@@ -75,6 +80,54 @@ var specs = []Spec{
 			"older schema the city is not ready to migrate yet), not a mixed-fleet rollout with a " +
 			"planned end date; this is a standing per-city escape hatch, not a migration gate, so " +
 			"it carries no Expires/VersionAnchor.",
+	},
+	{
+		Key:            keyOpsContent,
+		Category:       InfraRollout,
+		ConfigPath:     "ops.content",
+		EnvOverride:    envOpsContent,
+		EnvSemantics:   EnvOverrides,
+		Default:        Default{Mode: ptr(Auto)},
+		Owner:          Owner{Bead: "ga-x1i8ww", GitHub: "@gastownhall/gascity-admin"},
+		Expires:        "2027-06-30",
+		VersionAnchor:  "internal/opjournal/legacyop",
+		SelectsBetween: [2]string{"legacy message delivery with no op row", "the same delivery recorded as a message op (auto shadow, require durable)"},
+		Justification: "Record each message delivery as an operation-journal op beside its legacy " +
+			"execution (O0 shadow ops), so a retry dedupes across restarts and every request gets " +
+			"one typed outcome; auto by default since X12 passed (OJ-8), require opt-in. Retires in OJ-21 with the legacy content " +
+			"executors; internal/opjournal/legacyop itself goes with the last ops gate in OJ-22.",
+	},
+	{
+		Key:            keyOpsControl,
+		Category:       InfraRollout,
+		ConfigPath:     "ops.control",
+		EnvOverride:    envOpsControl,
+		EnvSemantics:   EnvOverrides,
+		Default:        Default{Mode: ptr(Auto)},
+		Owner:          Owner{Bead: "ga-x1i8ww", GitHub: "@gastownhall/gascity-admin"},
+		Expires:        "2027-06-30",
+		VersionAnchor:  "internal/opjournal/legacyop",
+		SelectsBetween: [2]string{"legacy interrupt and respond handling with no op row", "the same request recorded as an interrupt or respond op (auto shadow, require durable)"},
+		Justification: "Record each interrupt and respond request as an operation-journal op beside its legacy " +
+			"execution (O0 shadow ops), so a retry dedupes across restarts and every request gets " +
+			"one typed outcome; auto by default since X12 passed (OJ-8), require opt-in. Retires in OJ-21 with the legacy control " +
+			"executors; internal/opjournal/legacyop itself goes with the last ops gate in OJ-22.",
+	},
+	{
+		Key:            keyOpsLifecycle,
+		Category:       InfraRollout,
+		ConfigPath:     "ops.lifecycle",
+		EnvOverride:    envOpsLifecycle,
+		EnvSemantics:   EnvOverrides,
+		Default:        Default{Mode: ptr(Auto)},
+		Owner:          Owner{Bead: "ga-x1i8ww", GitHub: "@gastownhall/gascity-admin"},
+		Expires:        "2027-06-30",
+		VersionAnchor:  "internal/opjournal/legacyop",
+		SelectsBetween: [2]string{"legacy wake, suspend, restart, kill and close handling with no op row", "the same request recorded as a lifecycle op (auto shadow, require durable)"},
+		Justification: "Record each wake, suspend, restart, kill and close request as an operation-journal op " +
+			"beside its legacy execution (O0 shadow ops), so a retry dedupes across restarts and " +
+			"every request gets one typed outcome; auto by default since X12 passed (OJ-8), require opt-in. Retires in OJ-22 " +
+			"with the legacy lifecycle executors, deleting internal/opjournal/legacyop.",
 	},
 }
 

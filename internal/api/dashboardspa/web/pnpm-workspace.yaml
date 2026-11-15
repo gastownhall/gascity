@@ -14,3 +14,12 @@ linkWorkspacePackages: true
 allowBuilds:
   esbuild: false
   fsevents: false
+
+# Security pin, mirrored by package.json "overrides" for npm so both lockfiles
+# resolve the same tree (lockfiles_in_sync_test): @hey-api/openapi-ts pins
+# js-yaml exactly through @hey-api/json-schema-ref-parser (4.1.1 in 0.97.x,
+# 4.2.0 in 0.99.0), below the fixes for GHSA-h67p-54hq-rp68,
+# GHSA-52cp-r559-cp3m, GHSA-5p4m-2wfm-xmqj and GHSA-2883-xcg3-v3hh (4.3.2).
+# Drop both once the ref-parser pins js-yaml >= 4.3.2.
+overrides:
+  js-yaml: ^4.3.2

@@ -1,0 +1,8 @@
+# Top-level internal/api tests whose failures under GC_TEST_SPLIT_STRICT=1 are known
+# flakes, not gate findings: test, tab, the bead that owns the flake, tab, the
+# reason. A listed test's failure is reported (KNOWN FLAKY) but does not fail
+# the TESTS verdict, and scripts/split-strict-baseline never bakes it into the
+# known failures. Flake policy: Bazel retries are pinned off repo-wide
+# (scripts/bazel_no_flaky_retries_test.go), so the lane does not retry; a test
+# that flakes is listed here with an owner bead, and leaves when the bead
+# closes.

@@ -136,7 +136,7 @@ func newContractHarness(t *testing.T) *contractHarness {
 		}
 	})
 
-	wiring, err := newControllerWiring(cfg, func(string) (string, bool) { return "", false }, stderr)
+	wiring, err := newControllerWiring(cfg, "", func(string) (string, bool) { return "", false }, stderr)
 	if err != nil {
 		t.Fatalf("controller wiring: %v", err)
 	}
@@ -163,7 +163,7 @@ func newContractHarness(t *testing.T) *contractHarness {
 			}
 		},
 		// No managed Dolt: the file provider owns the city's beads.
-		ManagedDoltHealth: func(string) error { return nil },
+		ManagedDoltHealth: func(context.Context, string) error { return nil },
 		ManagedDoltOwned:  func(string) (bool, error) { return false, nil },
 		ManagedDoltPort:   func(string) string { return "" },
 		LogPrefix:         "gc api-contract",

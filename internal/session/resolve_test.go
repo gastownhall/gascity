@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -29,7 +30,7 @@ func TestResolveSessionID_DirectLookup(t *testing.T) {
 		Labels: []string{session.LabelSession},
 	})
 
-	id, err := session.ResolveSessionID(store, b.ID)
+	id, err := session.ResolveSessionID(beadstest.Sessions(store), b.ID)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -45,7 +46,7 @@ func TestResolveSessionIDByExactID_OnlyAcceptsSessionBeads(t *testing.T) {
 		Labels: []string{"other"},
 	})
 
-	_, err := session.ResolveSessionIDByExactID(store, task.ID)
+	_, err := session.ResolveSessionIDByExactID(beadstest.Sessions(store), task.ID)
 	if !errors.Is(err, session.ErrSessionNotFound) {
 		t.Fatalf("ResolveSessionIDByExactID(task) = %v, want ErrSessionNotFound", err)
 	}
@@ -62,7 +63,7 @@ func TestResolveSessionIDByExactID_ResolvesEmptyTypeWithoutPersisting(t *testing
 		t.Fatal(err)
 	}
 
-	id, err := session.ResolveSessionIDByExactID(store, b.ID)
+	id, err := session.ResolveSessionIDByExactID(beadstest.Sessions(store), b.ID)
 	if err != nil {
 		t.Fatalf("ResolveSessionIDByExactID() error = %v", err)
 	}
@@ -86,7 +87,7 @@ func TestResolveSessionID_Alias(t *testing.T) {
 		},
 	})
 
-	id, err := session.ResolveSessionID(store, "overseer")
+	id, err := session.ResolveSessionID(beadstest.Sessions(store), "overseer")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -117,7 +118,7 @@ func TestResolveSessionID_UsesTargetedAliasLookup(t *testing.T) {
 		},
 	})
 
-	id, err := session.ResolveSessionID(store, "overseer")
+	id, err := session.ResolveSessionID(beadstest.Sessions(store), "overseer")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -139,7 +140,7 @@ func TestResolveSessionIDAllowClosed_UsesTargetedSessionNameLookup(t *testing.T)
 		t.Fatal(err)
 	}
 
-	id, err := session.ResolveSessionIDAllowClosed(store, "sky")
+	id, err := session.ResolveSessionIDAllowClosed(beadstest.Sessions(store), "sky")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -159,7 +160,7 @@ func TestResolveSessionID_DoesNotResolveExactQualifiedTemplate(t *testing.T) {
 		},
 	})
 
-	_, err := session.ResolveSessionID(store, "myrig/worker")
+	_, err := session.ResolveSessionID(beadstest.Sessions(store), "myrig/worker")
 	if !errors.Is(err, session.ErrSessionNotFound) {
 		t.Fatalf("ResolveSessionID(exact template) = %v, want ErrSessionNotFound", err)
 	}
@@ -175,7 +176,7 @@ func TestResolveSessionID_DoesNotResolveTemplateBasename(t *testing.T) {
 		},
 	})
 
-	_, err := session.ResolveSessionID(store, "worker")
+	_, err := session.ResolveSessionID(beadstest.Sessions(store), "worker")
 	if err == nil {
 		t.Fatal("expected agent name to stay unresolved")
 	}
@@ -197,7 +198,7 @@ func TestResolveSessionID_DoesNotResolveExactAgentName(t *testing.T) {
 		},
 	})
 
-	_, err := session.ResolveSessionID(store, "myrig/worker-1")
+	_, err := session.ResolveSessionID(beadstest.Sessions(store), "myrig/worker-1")
 	if !errors.Is(err, session.ErrSessionNotFound) {
 		t.Fatalf("ResolveSessionID(exact agent_name) = %v, want ErrSessionNotFound", err)
 	}
@@ -228,7 +229,7 @@ func TestResolveSessionID_DoesNotResolveExactTemplateWithOpenCandidate(t *testin
 		},
 	})
 
-	_, err := session.ResolveSessionID(store, "gascity/claude")
+	_, err := session.ResolveSessionID(beadstest.Sessions(store), "gascity/claude")
 	if !errors.Is(err, session.ErrSessionNotFound) {
 		t.Fatalf("ResolveSessionID(exact template) = %v, want ErrSessionNotFound", err)
 	}
@@ -245,7 +246,7 @@ func TestResolveSessionID_SessionNameExactMatch(t *testing.T) {
 		},
 	})
 
-	id, err := session.ResolveSessionID(store, "s-gc-123")
+	id, err := session.ResolveSessionID(beadstest.Sessions(store), "s-gc-123")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -263,7 +264,7 @@ func TestResolveSessionID_SessionNameExactMatchAcceptsTypeOnlySessionBead(t *tes
 		},
 	})
 
-	id, err := session.ResolveSessionID(store, "s-gc-legacy")
+	id, err := session.ResolveSessionID(beadstest.Sessions(store), "s-gc-legacy")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -281,7 +282,7 @@ func TestResolveSessionID_AliasExactMatchAcceptsTypeOnlySessionBead(t *testing.T
 		},
 	})
 
-	id, err := session.ResolveSessionID(store, "legacy")
+	id, err := session.ResolveSessionID(beadstest.Sessions(store), "legacy")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -300,7 +301,7 @@ func TestResolveSessionID_TrimsMetadataIdentifier(t *testing.T) {
 		},
 	})
 
-	id, err := session.ResolveSessionID(store, " worker ")
+	id, err := session.ResolveSessionID(beadstest.Sessions(store), " worker ")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -312,7 +313,7 @@ func TestResolveSessionID_TrimsMetadataIdentifier(t *testing.T) {
 func TestResolveSessionID_WhitespaceOnlyIdentifierDoesNotList(t *testing.T) {
 	store := &listCountingStore{Store: beads.NewMemStore()}
 
-	_, err := session.ResolveSessionID(store, "   ")
+	_, err := session.ResolveSessionID(beadstest.Sessions(store), "   ")
 	if !errors.Is(err, session.ErrSessionNotFound) {
 		t.Fatalf("ResolveSessionID(whitespace) = %v, want ErrSessionNotFound", err)
 	}
@@ -339,7 +340,7 @@ func TestResolveSessionID_PrefersSessionNameOverAlias(t *testing.T) {
 		},
 	})
 
-	id, err := session.ResolveSessionID(store, "worker")
+	id, err := session.ResolveSessionID(beadstest.Sessions(store), "worker")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -366,7 +367,7 @@ func TestResolveSessionID_PrefersSessionNameOverDualAliasSessionNameBead(t *test
 		},
 	})
 
-	id, err := session.ResolveSessionID(store, "worker")
+	id, err := session.ResolveSessionID(beadstest.Sessions(store), "worker")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -393,7 +394,7 @@ func TestResolveSessionID_DualAliasSessionNameBeadWinsWhenNoOtherSessionNameMatc
 		},
 	})
 
-	id, err := session.ResolveSessionID(store, "worker")
+	id, err := session.ResolveSessionID(beadstest.Sessions(store), "worker")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -413,7 +414,7 @@ func TestResolveSessionID_DoesNotResolveHistoricalAlias(t *testing.T) {
 		},
 	})
 
-	_, err := session.ResolveSessionID(store, "mayor")
+	_, err := session.ResolveSessionID(beadstest.Sessions(store), "mayor")
 	if !errors.Is(err, session.ErrSessionNotFound) {
 		t.Fatalf("ResolveSessionID(historical alias) = %v, want ErrSessionNotFound", err)
 	}
@@ -437,7 +438,7 @@ func TestResolveSessionID_PrefersCurrentAliasOverHistoricalAlias(t *testing.T) {
 		},
 	})
 
-	id, err := session.ResolveSessionID(store, "mayor")
+	id, err := session.ResolveSessionID(beadstest.Sessions(store), "mayor")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -458,7 +459,7 @@ func TestResolveSessionID_DoesNotResolveClosedSessionNameByDefault(t *testing.T)
 	})
 	_ = store.Close(b.ID)
 
-	_, err := session.ResolveSessionID(store, "sky")
+	_, err := session.ResolveSessionID(beadstest.Sessions(store), "sky")
 	if err == nil {
 		t.Fatal("expected closed named session to stay hidden from live resolver")
 	}
@@ -479,7 +480,7 @@ func TestResolveSessionIDAllowClosed_ResolvesClosedSessionName(t *testing.T) {
 	})
 	_ = store.Close(b.ID)
 
-	id, err := session.ResolveSessionIDAllowClosed(store, "sky")
+	id, err := session.ResolveSessionIDAllowClosed(beadstest.Sessions(store), "sky")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -503,7 +504,7 @@ func TestResolveSessionIDAllowClosed_OpenHitStaysCacheServed(t *testing.T) {
 	}
 	backing.listCalls = nil
 
-	id, err := session.ResolveSessionIDAllowClosed(cache, "sky")
+	id, err := session.ResolveSessionIDAllowClosed(beadstest.Sessions(cache), "sky")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -527,7 +528,7 @@ func TestResolveSessionIDAllowClosed_DoesNotResolveClosedHistoricalAlias(t *test
 	})
 	_ = store.Close(b.ID)
 
-	_, err := session.ResolveSessionIDAllowClosed(store, "mayor")
+	_, err := session.ResolveSessionIDAllowClosed(beadstest.Sessions(store), "mayor")
 	if !errors.Is(err, session.ErrSessionNotFound) {
 		t.Fatalf("ResolveSessionIDAllowClosed(historical alias) = %v, want ErrSessionNotFound", err)
 	}
@@ -551,7 +552,7 @@ func TestResolveSessionIDAllowClosed_DoesNotUseLiveTemplateOverClosedSessionName
 		},
 	})
 
-	id, err := session.ResolveSessionIDAllowClosed(store, "worker")
+	id, err := session.ResolveSessionIDAllowClosed(beadstest.Sessions(store), "worker")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -578,7 +579,7 @@ func TestResolveSessionIDAllowClosed_ClosedExactBeatsLiveSuffixMatch(t *testing.
 		},
 	})
 
-	id, err := session.ResolveSessionIDAllowClosed(store, "worker")
+	id, err := session.ResolveSessionIDAllowClosed(beadstest.Sessions(store), "worker")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -604,7 +605,7 @@ func TestResolveSessionID_AliasAmbiguous(t *testing.T) {
 		},
 	})
 
-	_, err := session.ResolveSessionID(store, "worker")
+	_, err := session.ResolveSessionID(beadstest.Sessions(store), "worker")
 	if err == nil {
 		t.Fatal("expected ambiguity error")
 	}
@@ -615,7 +616,7 @@ func TestResolveSessionID_AliasAmbiguous(t *testing.T) {
 
 func TestResolveSessionID_NotFound(t *testing.T) {
 	store := beads.NewMemStore()
-	_, err := session.ResolveSessionID(store, "nonexistent")
+	_, err := session.ResolveSessionID(beadstest.Sessions(store), "nonexistent")
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -641,7 +642,7 @@ func TestResolveSessionID_Ambiguous(t *testing.T) {
 		},
 	})
 
-	_, err := session.ResolveSessionID(store, "worker")
+	_, err := session.ResolveSessionID(beadstest.Sessions(store), "worker")
 	if err == nil {
 		t.Fatal("expected ambiguity error")
 	}
@@ -666,7 +667,7 @@ func TestResolveSessionID_ResolvesEmptyTypeDirectLookup(t *testing.T) {
 	}
 
 	// Direct lookup by bead ID should resolve despite the empty type.
-	id, err := session.ResolveSessionID(store, b.ID)
+	id, err := session.ResolveSessionID(beadstest.Sessions(store), b.ID)
 	if err != nil {
 		t.Fatalf("expected resolution to succeed, got: %v", err)
 	}
@@ -696,7 +697,7 @@ func TestResolveSessionID_ResolvesEmptyTypeAliasLookup(t *testing.T) {
 	}
 
 	// Alias lookup should still resolve via the gc:session label.
-	id, err := session.ResolveSessionID(store, "overseer")
+	id, err := session.ResolveSessionID(beadstest.Sessions(store), "overseer")
 	if err != nil {
 		t.Fatalf("expected resolution to succeed, got: %v", err)
 	}
@@ -727,7 +728,7 @@ func TestResolveSessionID_SkipsEmptyTypeWithoutLabel(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := session.ResolveSessionID(store, b.ID)
+	_, err := session.ResolveSessionID(beadstest.Sessions(store), b.ID)
 	if err == nil {
 		t.Fatal("expected not found for non-session bead with empty type")
 	}
@@ -790,7 +791,7 @@ func TestRepairEmptyType(t *testing.T) {
 	// Re-read so the local copy has the empty type.
 	b, _ = store.Get(b.ID)
 
-	session.RepairEmptyType(store, &b)
+	session.RepairEmptyType(beadstest.Sessions(store), &b)
 
 	// In-memory bead should be repaired.
 	if b.Type != session.BeadType {
@@ -811,7 +812,7 @@ func TestRepairEmptyType_NoopForNonEmpty(t *testing.T) {
 	})
 
 	// Should be a no-op when type is already set.
-	session.RepairEmptyType(store, &b)
+	session.RepairEmptyType(beadstest.Sessions(store), &b)
 	if b.Type != session.BeadType {
 		t.Errorf("type = %q, want %q", b.Type, session.BeadType)
 	}
@@ -834,7 +835,7 @@ func TestResolveSessionID_BoundedListCalls(t *testing.T) {
 		Metadata: map[string]string{"alias": "mayor"},
 	})
 	store := &listCountingStore{Store: inner}
-	id, err := session.ResolveSessionID(store, "mayor")
+	id, err := session.ResolveSessionID(beadstest.Sessions(store), "mayor")
 	if err != nil || id != target.ID {
 		t.Fatalf("resolve failed: id=%q err=%v", id, err)
 	}
@@ -862,7 +863,7 @@ func TestResolveSessionID_SkipsClosedBeads(t *testing.T) {
 	})
 	_ = store.Close(b.ID)
 
-	_, err := session.ResolveSessionID(store, "worker")
+	_, err := session.ResolveSessionID(beadstest.Sessions(store), "worker")
 	if err == nil {
 		t.Fatal("expected not found for closed session")
 	}
@@ -952,7 +953,7 @@ func TestResolveSessionIDByExactID_ReadPathDoesNotWriteStore(t *testing.T) {
 	b := newEmptyTypeSessionBead(t, inner, nil)
 	store := &mutationRecordingStore{Store: inner}
 
-	id, err := session.ResolveSessionIDByExactID(store, b.ID)
+	id, err := session.ResolveSessionIDByExactID(beadstest.Sessions(store), b.ID)
 	if err != nil {
 		t.Fatalf("ResolveSessionIDByExactID() error = %v", err)
 	}
@@ -969,7 +970,7 @@ func TestResolveSessionID_MetadataReadPathDoesNotWriteStore(t *testing.T) {
 	b := newEmptyTypeSessionBead(t, inner, map[string]string{"session_name": "mayor"})
 	store := &mutationRecordingStore{Store: inner}
 
-	id, err := session.ResolveSessionID(store, "mayor")
+	id, err := session.ResolveSessionID(beadstest.Sessions(store), "mayor")
 	if err != nil {
 		t.Fatalf("ResolveSessionID() error = %v", err)
 	}
@@ -989,7 +990,7 @@ func TestResolveSessionIDAllowClosed_ReadPathDoesNotWriteStore(t *testing.T) {
 	}
 	store := &mutationRecordingStore{Store: inner}
 
-	id, err := session.ResolveSessionIDAllowClosed(store, "overseer")
+	id, err := session.ResolveSessionIDAllowClosed(beadstest.Sessions(store), "overseer")
 	if err != nil {
 		t.Fatalf("ResolveSessionIDAllowClosed() error = %v", err)
 	}
@@ -1005,7 +1006,7 @@ func TestResolveSessionBeadByExactID_NormalizesEmptyTypeInMemory(t *testing.T) {
 	store := beads.NewMemStore()
 	b := newEmptyTypeSessionBead(t, store, nil)
 
-	got, id, err := session.ResolveSessionBeadByExactID(store, b.ID)
+	got, id, err := session.ResolveSessionBeadByExactID(beadstest.Sessions(store), b.ID)
 	if err != nil {
 		t.Fatalf("ResolveSessionBeadByExactID() error = %v", err)
 	}
@@ -1047,7 +1048,7 @@ func TestRepairEmptyType_StoreFailureIsLoggedAndPatchesInMemory(t *testing.T) {
 	log.SetOutput(&buf)
 	defer log.SetOutput(prev)
 
-	session.RepairEmptyType(store, &b)
+	session.RepairEmptyType(beadstest.Sessions(store), &b)
 
 	if b.Type != session.BeadType {
 		t.Errorf("in-memory type = %q, want %q", b.Type, session.BeadType)

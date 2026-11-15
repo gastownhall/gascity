@@ -398,7 +398,7 @@ func TestNudgeRefusesDrainedConnection(t *testing.T) {
 	if current, _ := sc.turns(); current != nil || sc.isBusy() {
 		t.Fatalf("Nudge opened turn %+v on a drained connection", current)
 	}
-	if sc.setActivePrompt(9) {
+	if _, ok := sc.setActivePrompt(9); ok {
 		t.Fatal("setActivePrompt accepted a prompt on a drained connection")
 	}
 }

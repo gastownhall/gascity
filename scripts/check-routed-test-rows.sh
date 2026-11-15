@@ -11,6 +11,12 @@
 #     controller-down      — apiClient returns nil, fallback, exit 0
 #     escape-hatch         — GC_NO_API=1, fallback, exit 0
 #
+# A row is present in a file only when it is declared as a test-case name:
+# `name: "<row>"` (any spacing after the colon). The same words also appear in
+# unrelated files as ordinary values (a `wantReason: "controller-down"` refusal
+# string, a reason argument passed to a route helper); those are not matrix rows
+# and must not enroll a file in, or fail it against, the matrix.
+#
 # Semantics (two layers):
 #
 #   1. MANIFEST (scripts/routed-test-rows.manifest) — a checked-in list of the
@@ -43,11 +49,13 @@ required_rows=(
     "escape-hatch"
 )
 
-# count_rows FILE -> echoes how many of the six required rows the file contains.
+# count_rows FILE -> echoes how many of the six required rows the file declares
+# as a test-case name. Row names contain only [a-z0-9-], so they are safe in a
+# regular expression.
 count_rows() {
     local file="$1" present=0 row
     for row in "${required_rows[@]}"; do
-        if grep -Fq "$row" "$file"; then
+        if grep -Eq "name:[[:space:]]*\"$row\"" "$file"; then
             present=$((present + 1))
         fi
     done

@@ -216,9 +216,15 @@ data_dir: %q
 # shrinking both the unclean-stop corruption window and the recovery blast
 # radius (#3176). Historically OFF to work around dolt#10944 (load-avg gating
 # that never fired); fixed upstream in dolt 2.0.3 and the managed floor is
-# 2.1.0+. Scheduled compaction (gc dolt compact) still handles history
+# 2.6.0+. Scheduled compaction (gc dolt compact) still handles history
 # flattening — see #1918, #1200 for that lineage. Override via city.toml
 # [dolt] auto_gc_enabled or GC_DOLT_AUTO_GC_ENABLED.
+#
+# Hazard: Dolt's generational GC makes a separate pass over dolt_ignore'd
+# tables and the working set that no table-level retention policy protects, so
+# auto-GC can destroy dolt_ignore'd data (ga-vrq5pu: mail and wisps). A city
+# that keeps state in dolt_ignore'd tables should override auto_gc_enabled to
+# false.
 behavior:
   auto_gc_behavior:
     enable: %t

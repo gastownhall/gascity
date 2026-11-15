@@ -5,10 +5,12 @@ package proctable
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // spawnReparentedChild starts a long-lived `sleep` from a short-lived shell so
@@ -30,6 +32,7 @@ func spawnReparentedChild(t *testing.T, env []string) int {
 		t.Fatalf("parse child pid from %q: %v", out, err)
 	}
 	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	waitForExecedSleep(t, pid)
 	// ga-961qe1 / ga-cfr67u: this spawns a generic, un-setsid'd sleep 300
 	// that is indistinguishable BY NAME from any other test's target —
 	// including this file's own TestSetsidDoesNotPreventOrphanSelection,
@@ -39,6 +42,34 @@ func spawnReparentedChild(t *testing.T, env []string) int {
 	// process name to tell two spawnReparentedChild children apart.
 	t.Logf("spawnReparentedChild: spawned pid=%d (generic sleep 300, un-setsid'd)", pid)
 	return pid
+}
+
+// waitForExecedSleep returns once pid has finished exec'ing sleep. sh echoes $!
+// as soon as it forks, so when the launcher exits the child may still be a copy
+// of sh, or be partway through its execve. Partway through, the kernel already
+// names the process sleep but reports an empty /proc/<pid>/environ (or refuses
+// to open it), and a scan that reads it then declines the process without any
+// error. A sandbox's near-empty /proc reaches the child inside that window
+// (ga-lt0wedw); the host's full /proc rarely does.
+func waitForExecedSleep(t *testing.T, pid int) {
+	t.Helper()
+	dir := filepath.Join("/proc", strconv.Itoa(pid))
+	deadline := time.After(10 * time.Second)
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for {
+		comm, _ := os.ReadFile(filepath.Join(dir, "comm"))
+		environ, _ := os.ReadFile(filepath.Join(dir, "environ"))
+		if strings.TrimSpace(string(comm)) == "sleep" && len(environ) > 0 {
+			return
+		}
+		select {
+		case <-tick.C:
+		case <-deadline:
+			t.Fatalf("pid %d never finished exec'ing sleep: comm=%q, environ %d bytes",
+				pid, strings.TrimSpace(string(comm)), len(environ))
+		}
+	}
 }
 
 func scanFindsPID(t *testing.T, sessionID string, pid int) bool {

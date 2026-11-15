@@ -3,9 +3,11 @@ package overlay
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestCopyDir_RecursiveCopy(t *testing.T) {
@@ -455,5 +457,119 @@ func assertFileContent(t *testing.T, path, want string) {
 	}
 	if string(data) != want {
 		t.Errorf("%q content = %q, want %q", path, string(data), want)
+	}
+}
+
+// ubsPackSettings is the ubs pack overlay's .claude/settings.json: a single
+// bare PreToolUse entry, staged into every agent workdir on each tick (#3862).
+const ubsPackSettings = `{"hooks":{"PreToolUse":[{"type":"command","command":"if echo \"$TOOL_INPUT\" | grep -q 'git commit'; then ubs --staged --format=json 2>/dev/null || true; fi"}]}}`
+
+func TestCopyDirForProviders_ClaudeBareHookStableAcrossTicks(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+	writeFile(t, filepath.Join(src, ".claude", "settings.json"), ubsPackSettings)
+	settings := filepath.Join(dst, ".claude", "settings.json")
+
+	var first []byte
+	for tick := 0; tick < 25; tick++ {
+		if err := CopyDirForProvidersWithSkip(src, dst, []string{"claude"}, nil, io.Discard); err != nil {
+			t.Fatalf("tick %d: CopyDirForProvidersWithSkip: %v", tick, err)
+		}
+		data, err := os.ReadFile(settings)
+		if err != nil {
+			t.Fatalf("tick %d: reading settings: %v", tick, err)
+		}
+		if tick == 0 {
+			first = data
+			continue
+		}
+		if !bytes.Equal(data, first) {
+			t.Fatalf("tick %d rewrote settings with different bytes:\n%s\nwant:\n%s", tick, data, first)
+		}
+	}
+
+	var doc struct {
+		Hooks map[string][]map[string]any `json:"hooks"`
+	}
+	if err := json.Unmarshal(first, &doc); err != nil {
+		t.Fatalf("unmarshal settings: %v", err)
+	}
+	arr := doc.Hooks["PreToolUse"]
+	if len(arr) != 1 {
+		t.Fatalf("PreToolUse entries = %d, want 1:\n%s", len(arr), first)
+	}
+	if _, hasMatcher := arr[0]["matcher"]; hasMatcher {
+		t.Errorf("staged entry carries matcher %v, want matcherless {\"hooks\":[...]} wrapper", arr[0]["matcher"])
+	}
+	inner, ok := arr[0]["hooks"].([]any)
+	if !ok || len(inner) != 1 {
+		t.Fatalf("staged entry hooks = %v, want one wrapped ubs entry", arr[0]["hooks"])
+	}
+	if got := inner[0].(map[string]any)["command"]; got != `if echo "$TOOL_INPUT" | grep -q 'git commit'; then ubs --staged --format=json 2>/dev/null || true; fi` {
+		t.Errorf("wrapped command = %v, want the ubs command", got)
+	}
+}
+
+func TestCopyDirForProviders_ClaudeLegacyBloatHealsInOneTick(t *testing.T) {
+	src := t.TempDir()
+	dst := t.TempDir()
+	writeFile(t, filepath.Join(src, ".claude", "settings.json"), ubsPackSettings)
+	legacy := `{"matcher":"","hooks":[` + ubsBareEntry + `]}`
+	bloat := make([]string, 40)
+	for i := range bloat {
+		bloat[i] = legacy
+	}
+	writeFile(t, filepath.Join(dst, ".claude", "settings.json"), `{"hooks":{"PreToolUse":[`+joinJSON(bloat)+`]}}`)
+
+	if err := CopyDirForProvidersWithSkip(src, dst, []string{"claude"}, nil, io.Discard); err != nil {
+		t.Fatalf("CopyDirForProvidersWithSkip: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dst, ".claude", "settings.json"))
+	if err != nil {
+		t.Fatalf("reading settings: %v", err)
+	}
+	var doc struct {
+		Hooks map[string][]map[string]any `json:"hooks"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("unmarshal settings: %v", err)
+	}
+	arr := doc.Hooks["PreToolUse"]
+	if len(arr) != 1 {
+		t.Fatalf("PreToolUse entries = %d, want 1 (40 legacy copies must heal)", len(arr))
+	}
+	if _, hasMatcher := arr[0]["matcher"]; hasMatcher {
+		t.Errorf("surviving entry carries matcher %v, want matcherless wrapper", arr[0]["matcher"])
+	}
+	if !bytes.Contains(data, []byte("ubs --staged")) {
+		t.Errorf("surviving entry lost the ubs command:\n%s", data)
+	}
+}
+
+func TestCopyDirForProviders_UnchangedMergeDoesNotRewrite(t *testing.T) {
+	// A steady-state tick whose merge result equals the destination must leave
+	// the file alone, so a running Claude session never reads a truncated
+	// settings file mid-rewrite.
+	src := t.TempDir()
+	dst := t.TempDir()
+	writeFile(t, filepath.Join(src, ".claude", "settings.json"), ubsPackSettings)
+	settings := filepath.Join(dst, ".claude", "settings.json")
+
+	if err := CopyDirForProvidersWithSkip(src, dst, []string{"claude"}, nil, io.Discard); err != nil {
+		t.Fatalf("first stage: %v", err)
+	}
+	past := time.Now().Add(-time.Hour).Truncate(time.Second)
+	if err := os.Chtimes(settings, past, past); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+	if err := CopyDirForProvidersWithSkip(src, dst, []string{"claude"}, nil, io.Discard); err != nil {
+		t.Fatalf("second stage: %v", err)
+	}
+	info, err := os.Stat(settings)
+	if err != nil {
+		t.Fatalf("stat settings: %v", err)
+	}
+	if !info.ModTime().Equal(past) {
+		t.Errorf("settings mtime = %v, want %v (unchanged merge must not rewrite the file)", info.ModTime(), past)
 	}
 }

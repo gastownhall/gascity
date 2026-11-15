@@ -1,3 +1,5 @@
+//go:build unix
+
 package dolt_test
 
 import (

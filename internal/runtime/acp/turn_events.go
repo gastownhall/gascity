@@ -191,15 +191,10 @@ func (s *turnEventSource) completed(rec *turnRecord, outcome turnOutcome, now ti
 		TurnID:    rec.ID,
 		Time:      now,
 	}
-	switch {
-	case outcome.state == turnFailed:
-		ev.Status = runtime.TurnStatusFailed
+	ev.Status = turnStatus(outcome.state, outcome.stopReason)
+	if ev.Status == runtime.TurnStatusFailed {
 		ev.Error = outcome.err
-	case outcome.stopReason == acpStopReasonCanceled:
-		ev.Status = runtime.TurnStatusCancelled
-		ev.StopReason = outcome.stopReason
-	default:
-		ev.Status = runtime.TurnStatusCompleted
+	} else {
 		ev.StopReason = outcome.stopReason
 	}
 	if u := outcome.usage; u != nil {
