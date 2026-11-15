@@ -16,29 +16,10 @@ const (
 
 // DispatchHoldLabels is the complete set of hold label values naming a bead
 // whose required next actor or condition is, by construction, not the worker
-// looking at it. Two different questions consume this list, and they answer
-// oppositely — conflating them is what produced both ga-5736js and gas-kg6:
-//
-//   - "Is this bead WORK for whoever is asking?" — always no. Route-scoped,
-//     unassigned automatic dispatch (Tier 3 pool-demand queries and the
-//     control dispatcher's routed/run-target tiers) must exclude these
-//     (ga-5736js), and so must every path that serves a bead to an agent as
-//     work — including the assignee-scoped crash-recovery tier, the
-//     assigned-ready tier (assignedReadyTierCommand and its bd-1.0.4 wisp
-//     probe ephemeralAssignedReadyProbeScript, #8010), the `gc hook --claim`
-//     result (gas-kg6) and the continuation-group siblings a claim pre-assigns
-//     (preassignHookContinuationGroup, #6026). A held bead handed back as work
-//     cannot be advanced, is never released, and so is re-served forever.
-//
-//   - "Does a session still need to EXIST for this bead?" — hold is
-//     irrelevant; the assignment is a real ownership fact either way. The
-//     demand/liveness tier that answers this (filterReadyByAssignee) stays
-//     hold-transparent by design and must never filter on this list
-//     (ga-5736js), or a parked bead's owner would go invisible to the pool and
-//     to crash recovery.
-//
-// The short rule: filter on holds when deciding what to DO, never when
-// deciding who EXISTS.
+// looking at it. It is the canonical hold taxonomy
+// (engdocs/contributors/hold-label-conventions.md) and is fixed at the two
+// values; the paths that decide what to DO read ParkedLabels, which adds bd's
+// human label.
 //
 // Waking a session for assigned OPEN work is a "what to DO" decision: the only
 // thing the woken session can do with the row is ask its hook for it, and the
@@ -49,18 +30,54 @@ const (
 var DispatchHoldLabels = []string{HoldMayorLabel, HoldExternalLabel}
 
 // HumanLabel is bd's native label for a bead waiting on a person's decision
-// (`bd human list` enumerates the beads that carry it). It is deliberately NOT a
-// dispatch hold and is absent from DispatchHoldLabels: that list is fixed at the
-// two canonical holds, and the hook's held-candidate filter and the in_progress
-// serve gate iterate it, so adding human there would also park beads already
-// assigned to an agent. Route-scoped, unassigned dispatch excludes it all the
-// same, for the reason it excludes a hold: a worker cannot advance a bead that
-// is waiting on a person, and serving it back on every tick burns a turn each
-// time (ga-7yfnyv). The assignee-scoped tiers stay transparent to it. The
-// dead-assignee sweep (releaseOrphanedPoolAssignments) skips it too: released,
-// it would be served to no one, and its holder may be a person, whom no session
-// answers to.
+// (`bd human list` enumerates the beads that carry it). It is not a dispatch
+// hold and is absent from DispatchHoldLabels: it is not a third hold value, bd
+// sets it (not `bd set-state`), and the hold doctor checks do not look at it.
+// It is parked all the same: ParkedLabels names it beside the holds, so every
+// path that decides what to DO with a bead refuses it for the reason it refuses
+// a hold. The dead-assignee sweep (releaseOrphanedPoolAssignments) skips it
+// too: released, it would be served to no one, and its holder may be a person,
+// whom no session answers to.
 const HumanLabel = "human"
+
+// ParkedLabels is the one list of labels that park a bead: the dispatch holds
+// followed by HumanLabel. A parked bead is waiting on a required next actor or
+// condition that is, by construction, not the worker looking at it. Two
+// different questions consume it, and they answer oppositely; conflating them
+// is what produced both ga-5736js and gas-kg6:
+//
+//   - "Is this bead WORK for whoever is asking?" Always no. Route-scoped,
+//     unassigned automatic dispatch (Tier 3 pool-demand queries and the control
+//     dispatcher's routed/run-target tiers) excludes these (ga-5736js), and so
+//     does every path that serves a bead to an agent as work: the in_progress
+//     crash-recovery tier and its wisp probes, the `gc hook` seam that every
+//     hook path runs through (the claim, cross-store federation and plain
+//     `gc hook`). A parked bead handed back as work cannot be advanced, is
+//     never released, and so is re-served forever.
+//     The assigned-ready tier (assignedReadyTierCommand and its bd-1.0.4 wisp
+//     probe, #8010) drops the dispatch holds only: it stays transparent to
+//     human, and its Go-side strip is the seam above.
+//
+//   - "Does a session still need to EXIST for this bead?" Parking is
+//     irrelevant; the assignment is a real ownership fact either way. The
+//     demand/liveness tier that answers this (filterReadyByAssignee) never
+//     filters on this list (ga-5736js), or a parked bead's owner would go
+//     invisible to the pool and to crash recovery.
+//
+// The short rule: filter on parked labels when deciding what to DO, never when
+// deciding who EXISTS.
+//
+// It is built from DispatchHoldLabels without aliasing it, so appending the
+// human label cannot reach the canonical hold list.
+var ParkedLabels = append(append([]string(nil), DispatchHoldLabels...), HumanLabel)
+
+// HasParkedLabel reports whether labels carry one of ParkedLabels: a dispatch
+// hold (HasDispatchHold: trimmed, case-insensitive) or the human label
+// (HasHumanLabel: trimmed, exact). It is the label comparison the hook's serve
+// filter answers with.
+func HasParkedLabel(labels []string) bool {
+	return HasDispatchHold(labels) || HasHumanLabel(labels)
+}
 
 // HasHumanLabel reports whether labels carry HumanLabel. It compares the way
 // the route-scoped serve filter does (bd's --exclude-label, mirrored by the
@@ -77,8 +94,9 @@ func HasHumanLabel(labels []string) bool {
 
 // HasDispatchHold reports whether labels carry one of DispatchHoldLabels. It is
 // the label comparison the hold-aware WORK-SERVING decisions answer with: the
-// hook's serve filter (isHeldHookCandidate), continuation-group pre-assignment
-// (preassignHookContinuationGroup), and three controller gates over OPEN rows —
+// hook's serve filter (isHeldHookCandidate, through HasParkedLabel),
+// continuation-group pre-assignment (preassignHookContinuationGroup), and three
+// controller gates over OPEN rows —
 // wake readiness and the keep-awake probe (both through assignedOpenWorkHeld)
 // and the drain-ack claimability classifier (classifyDemandRowClaimability).
 // So held OPEN assigned work is never wake readiness, keep-awake work or a
@@ -110,11 +128,3 @@ func HasDispatchHold(labels []string) bool {
 	}
 	return false
 }
-
-// ParkedLabels is the "what to DO" list. RED-step stub: deliberately wrong
-// (holds only) so the tests that name it compile and fail; GREEN replaces it.
-var ParkedLabels = DispatchHoldLabels
-
-// HasParkedLabel reports whether labels park a bead. RED-step stub: deliberately
-// wrong (holds only); GREEN replaces it.
-func HasParkedLabel(labels []string) bool { return HasDispatchHold(labels) }
