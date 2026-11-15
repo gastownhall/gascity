@@ -135,6 +135,81 @@ func TestDockerSessionProtocol(t *testing.T) {
 		}
 	})
 
+	t.Run("cities_on_one_host_keep_their_containers_apart", func(t *testing.T) {
+		fixture := newDockerProtocolFixture(t, fakeSource)
+		fixture.allowImage(t)
+		fixture.writeState(t, "prompt-output", ">\n")
+		ctx, cancel := context.WithTimeout(context.Background(), testutil.ExecRaceTimeout)
+		defer cancel()
+
+		// Two cities that share a name, as gc runs the adapter for each.
+		cityA, cityB := filepath.Join(t.TempDir(), "a"), filepath.Join(t.TempDir(), "b")
+		inCity := func(city string, args []string, stdin []byte) string {
+			t.Helper()
+			cmd := exec.CommandContext(ctx, adapter, args...)
+			cmd.Dir = root
+			cmd.Env = append(fixture.env(), "GC_EXEC_CITY_NAME=city", "GC_EXEC_CITY_PATH="+city)
+			cmd.Stdin = bytes.NewReader(stdin)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("%v in city %s: %v\noutput:\n%s\ndocker calls:\n%s",
+					args, city, err, out, formatDockerProtocolCalls(fixture.calls(t)))
+			}
+			return strings.TrimSpace(string(out))
+		}
+		config := dockerProtocolStartConfig(t, fixture.workDir, "> ")
+		inCity(cityA, []string{"start", "mayor"}, config)
+		inCity(cityB, []string{"start", "mayor"}, config)
+
+		names := map[string]string{} // city path -> container name
+		for _, call := range fixture.calls(t) {
+			if len(call) == 0 || call[0] != "run" {
+				continue
+			}
+			var name, city string
+			for i := 1; i+1 < len(call); i++ {
+				switch {
+				case call[i] == "--name":
+					name = call[i+1]
+				case call[i] == "--label" && strings.HasPrefix(call[i+1], "gc.city="):
+					city = strings.TrimPrefix(call[i+1], "gc.city=")
+				}
+			}
+			names[city] = name
+		}
+		if len(names) != 2 || names[cityA] == "" || names[cityB] == "" || names[cityA] == names[cityB] {
+			t.Fatalf("container names by gc.city label = %q, want one each for %s and %s", names, cityA, cityB)
+		}
+		for city, name := range names {
+			if !strings.HasSuffix(name, "--mayor") {
+				t.Errorf("city %s container = %q, want <city key>--mayor", city, name)
+			}
+		}
+
+		for _, city := range []string{cityA, cityB} {
+			if got := inCity(city, []string{"list-running", ""}, nil); got != "mayor" {
+				t.Errorf("list-running in city %s = %q, want only its own session, mayor", city, got)
+			}
+			if got := inCity(city, []string{"is-running", "mayor"}, nil); got != "true" {
+				t.Errorf("is-running mayor in city %s = %q, want true", city, got)
+			}
+		}
+
+		inCity(cityA, []string{"stop", "mayor"}, nil)
+		if got := inCity(cityA, []string{"is-running", "mayor"}, nil); got != "false" {
+			t.Errorf("after its stop, is-running mayor in city %s = %q, want false", cityA, got)
+		}
+		if got := inCity(cityB, []string{"is-running", "mayor"}, nil); got != "true" {
+			t.Errorf("after city %s stopped its mayor, is-running mayor in city %s = %q, want true", cityA, cityB, got)
+		}
+
+		// Without a city (an older gc, or the script run by hand), the name is the session's.
+		out, err := run(ctx, fixture, adapter, []string{"is-running", names[cityB]}, nil)
+		if err != nil || strings.TrimSpace(string(out)) != "true" {
+			t.Errorf("without a city, is-running %s = %q (%v), want true: names stay as they were", names[cityB], out, err)
+		}
+	})
+
 	t.Run("prompt_semantics_conform_to_native_tmux", func(t *testing.T) {
 		tests := []struct {
 			name   string

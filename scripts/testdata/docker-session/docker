@@ -10,8 +10,9 @@ containers_dir="$state_dir/containers"
 tmux_dir="$state_dir/tmux"
 container_ids_dir="$state_dir/container-ids"
 container_names_dir="$state_dir/container-names"
+labels_dir="$state_dir/labels"
 mkdir -p "$calls_dir" "$containers_dir" "$tmux_dir" \
-    "$container_ids_dir" "$container_names_dir"
+    "$container_ids_dir" "$container_names_dir" "$labels_dir"
 
 original_argv=("$@")
 
@@ -114,6 +115,9 @@ if [[ "$1" == "run" ]]; then
     saw_init=0
     saw_managed_label=0
     saw_agent_label=0
+    saw_city_label=0
+    agent_label=""
+    city_label=""
     saw_name=0
     saw_network=0
     saw_user=0
@@ -150,6 +154,12 @@ if [[ "$1" == "run" ]]; then
                     gc.agent=*)
                         [[ $saw_agent_label -eq 0 && -n "${value#gc.agent=}" ]] || unsupported
                         saw_agent_label=1
+                        agent_label="${value#gc.agent=}"
+                        ;;
+                    gc.city=*)
+                        [[ $saw_city_label -eq 0 && -n "${value#gc.city=}" ]] || unsupported
+                        saw_city_label=1
+                        city_label="${value#gc.city=}"
                         ;;
                     *)
                         unsupported
@@ -212,7 +222,25 @@ if [[ "$1" == "run" ]]; then
     printf 'running\n' > "$containers_dir/$cname"
     printf '%s\n' "$cname" > "$container_ids_dir/$container_id"
     printf '%s\n' "$container_id" > "$container_names_dir/$cname"
+    printf '%s\n%s\n' "$agent_label" "$city_label" > "$labels_dir/$cname"
     printf '%s\n' "$container_id"
+    exit 0
+fi
+
+# The scoped list-running query: the running containers whose gc.city label
+# is the given path, by their gc.agent label.
+if [[ $# -eq 7 && "$1" == "ps" && \
+    "$2" == "--filter" && "$3" == "status=running" && \
+    "$4" == "--filter" && "$5" == label=gc.city=?* && \
+    "$6" == "--format" && "$7" == '{{.Label "gc.agent"}}' ]]; then
+    want_city="${5#label=gc.city=}"
+    for container_path in "$containers_dir"/*; do
+        [[ -e "$container_path" ]] || continue
+        cname="${container_path##*/}"
+        [[ "$(<"$container_path")" == "running" && -r "$labels_dir/$cname" ]] || continue
+        { IFS= read -r agent; IFS= read -r city; } < "$labels_dir/$cname"
+        [[ "$city" != "$want_city" ]] || printf '%s\n' "$agent"
+    done
     exit 0
 fi
 
@@ -239,7 +267,7 @@ if [[ $# -eq 3 && "$1" == "rm" && "$2" == "-f" ]]; then
         IFS= read -r container_id < "$container_names_dir/$cname"
     fi
     rm -f "$containers_dir/$cname" "$tmux_dir/$cname" \
-        "$container_names_dir/$cname"
+        "$container_names_dir/$cname" "$labels_dir/$cname"
     if [[ -n "$container_id" ]]; then
         rm -f "$container_ids_dir/$container_id"
     fi
