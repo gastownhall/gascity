@@ -59,6 +59,7 @@ go_test(
         "process_env_setup_test.go",
         "processtree_test.go",
         "provider_live_test.go",
+        "rawlaunch_test.go",
         "redaction_test.go",
         "seedmeta_test.go",
         "staleserver_test.go",

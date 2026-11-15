@@ -226,6 +226,12 @@ func TestPaneRunsCommand(t *testing.T) {
 	if paneRunsCommand(nil, raw) {
 		t.Error("empty foreground must not read as launched")
 	}
+	// An exec-optimized `sh -c '<loop>'` re-execs under a name and argv that
+	// differ from the typed wrapper; argv[2] no longer matches exactly.
+	reexec := []proc{{PID: 100, Name: "sh", Argv: []string{"/bin/sh", "-c", raw + " "}}}
+	if paneRunsCommand(reexec, raw) {
+		t.Error("non-identical -c script must not read as the launched command")
+	}
 }
 
 // paneRootReplaced spots a launch whose command exec'd straight through the
@@ -240,6 +246,34 @@ func TestPaneRootReplaced(t *testing.T) {
 	}
 	if paneRootReplaced(100, nil) {
 		t.Error("no root visible: want not replaced")
+	}
+}
+
+// The launched `exec /bin/sh -c <loop>` leaves the pane root named like an
+// interactive shell (sh), so the name test alone is blind to it; its argv
+// (`-c <script>`) tells it apart from an interactive shell.
+func TestPaneRootReplacedByShellCScript(t *testing.T) {
+	loop := []proc{{PID: 100, Name: "sh", Argv: []string{"/bin/sh", "-c", "while true; do sleep 1; done"}}}
+	if !paneRootReplaced(100, loop) {
+		t.Error("root `sh -c <script>`: want replaced")
+	}
+	loopWithChild := append([]proc{{PID: 101, Name: "sleep", Argv: []string{"sleep", "1"}}}, loop...)
+	if !paneRootReplaced(100, loopWithChild) {
+		t.Error("root `sh -c <script>` with a child: want replaced")
+	}
+	// Interactive shells never carry -c, nor does a bare login shell.
+	for _, argv := range [][]string{{"-zsh"}, {"/bin/sh"}, {"bash", "--login"}, {"/bin/zsh", "-i"}, nil} {
+		if paneRootReplaced(100, []proc{{PID: 100, Name: "sh", Argv: argv}}) {
+			t.Errorf("interactive shell argv %q: want not replaced", argv)
+		}
+	}
+	// -c as the final argument has no script to run: not a launch.
+	if paneRootReplaced(100, []proc{{PID: 100, Name: "bash", Argv: []string{"bash", "-c"}}}) {
+		t.Error("`-c` with no script: want not replaced")
+	}
+	// A shell-init child that is itself `sh -c` is not the root.
+	if paneRootReplaced(100, []proc{{PID: 100, Name: "zsh", Argv: []string{"-zsh"}}, {PID: 102, Name: "sh", Argv: []string{"sh", "-c", "sw_vers"}}}) {
+		t.Error("`sh -c` child of an interactive root: want not replaced")
 	}
 }
 

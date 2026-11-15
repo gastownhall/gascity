@@ -37,6 +37,9 @@ type Provider struct {
 	// act is the tracker-backed activity source behind GetLastActivity /
 	// CanReportActivity (#4217); started lazily on first GetLastActivity.
 	act activityTracker
+	// launchWait overrides rawLaunchWait, the bound on how long Start's raw
+	// path waits for the typed launch to land; zero means rawLaunchWait.
+	launchWait time.Duration
 }
 
 // defaultSetupTimeout mirrors the tmux provider's [session] setup_timeout
@@ -823,6 +826,13 @@ func (p *Provider) waitPaneShellReady(ctx context.Context, paneID string) {
 // cannot confirm the launch). The bound only bites on a wedged shell, after
 // which Start proceeds best-effort (the reconciler tolerates a slow launch).
 const rawLaunchWait = 15 * time.Second
+
+// rawLaunchWarningOut receives the raw-launch-unconfirmed diagnostic (a var so
+// tests can capture it).
+var rawLaunchWarningOut io.Writer = os.Stderr
+
+// reportRawLaunch waits for a raw launch to land and reports one that did not.
+func (p *Provider) reportRawLaunch(_ context.Context, _, _, _ string) {}
 
 // waitPaneLaunched polls the pane until the launched `/bin/sh -c <raw>` shows
 // up in its foreground (exec preserves argv), the pane is gone (the command

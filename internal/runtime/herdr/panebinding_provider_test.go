@@ -192,6 +192,8 @@ agent_prompt)
     printf '%s' '{"result":{"type":"agent_prompted"}}'
   fi ;;
 pane_run)
+  # launch_unlanded: the typed launch never executes (a wedged pane shell).
+  if [ -e "$STATE/launch_unlanded" ]; then exit 0; fi
   : > "$STATE/busy"
   printf '%s' "$4" | sed -e 's|^exec /bin/sh -c ||' -e "s/^'//" -e "s/'\$//" > "$STATE/rawcmd"
   exit 0 ;;
