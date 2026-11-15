@@ -270,11 +270,23 @@ func paneRunsCommand(fg []proc, raw string) bool {
 // is visible in the foreground and is no longer an interactive shell — a raw
 // launch that exec'd straight through the `/bin/sh -c` wrapper (e.g.
 // `exec sleep 120`). Shell-init children keep the root a shell, so they never
-// read as replaced.
+// read as replaced. A root named like a shell but running `-c <script>` is the
+// wrapper itself (an exec-optimized `sh -c '<loop>'` keeps the name `sh`), so
+// it reads as replaced too: an interactive shell never carries `-c`.
 func paneRootReplaced(shellPID int, fg []proc) bool {
 	for _, pr := range fg {
 		if pr.PID == shellPID {
-			return !interactiveShells[strings.TrimPrefix(pr.Name, "-")]
+			return !interactiveShells[strings.TrimPrefix(pr.Name, "-")] || runsCScript(pr.Argv)
+		}
+	}
+	return false
+}
+
+// runsCScript reports whether argv invokes a shell on a `-c <script>`.
+func runsCScript(argv []string) bool {
+	for i := 1; i+1 < len(argv); i++ {
+		if argv[i] == "-c" {
+			return true
 		}
 	}
 	return false
