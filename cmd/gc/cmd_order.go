@@ -2329,7 +2329,7 @@ func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL, unreadMailTTL time.Duration, mail
 	return cmdOrderSweepNudgeMailRun(nudges, mail, statePtr, now, nudgeTTL, mailTTL, unreadMailTTL, quiet, stdout, stderr)
 }
 
-func cmdOrderSweepNudgeMailDryRun(nudges beads.NudgesStore, mail beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL, unreadMailTTL time.Duration, quiet bool, stdout, stderr io.Writer) int {
+func cmdOrderSweepNudgeMailDryRun(nudges beads.NudgesStore, mail beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL, unreadMailTTL time.Duration, quiet bool, stdout, stderr io.Writer, _ ...nudgeSweepScope) int {
 	counts, err := countStaleNudgeMail(nudges, mail, nudgeState, now, nudgeTTL, mailTTL, unreadMailTTL, nudgeMailSweepCloseBudget)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -2347,7 +2347,7 @@ func cmdOrderSweepNudgeMailDryRun(nudges beads.NudgesStore, mail beads.MailStore
 	return 0
 }
 
-func cmdOrderSweepNudgeMailRun(nudges beads.NudgesStore, mail beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL, unreadMailTTL time.Duration, quiet bool, stdout, stderr io.Writer) int {
+func cmdOrderSweepNudgeMailRun(nudges beads.NudgesStore, mail beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL, unreadMailTTL time.Duration, quiet bool, stdout, stderr io.Writer, _ ...nudgeSweepScope) int {
 	result, sweepErr := sweepStaleNudgeMail(nudges, mail, nudgeState, now, nudgeTTL, mailTTL, unreadMailTTL, nudgeMailSweepCloseBudget)
 
 	if sweepErr != nil {

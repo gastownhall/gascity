@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -1274,5 +1275,545 @@ func TestRunNudgeMailSweepWatchdog_ExplicitZeroDisablesMailSweep(t *testing.T) {
 	}
 	if got.Status != "open" {
 		t.Errorf("mail-old status = %s, want open (explicit retention_ttl=0 must disable the mail-close phase)", got.Status)
+	}
+}
+
+// --- Rig-store coverage (ga-efp2w7) ---
+//
+// A rig's nudge shadows are born in the rig's own work store, so a sweep that
+// reads only the city store leaves them open forever. The sweep takes the
+// nudges-class store first and then every rig store (nudgeSweepScope) under
+// one shared close budget.
+
+// nudgeScopeStale returns n stale open nudge shadows whose bead ids and nudge
+// ids both start with prefix, so a bead in one store can never be mistaken for
+// another's.
+func nudgeScopeStale(prefix string, n int, now time.Time) []beads.Bead {
+	seed := make([]beads.Bead, n)
+	for i := range seed {
+		id := fmt.Sprintf("%s-%d", prefix, i)
+		seed[i] = nudgeSeed(id, id, now.Add(-nudgeMailSweepDefaultNudgeTTL-time.Second))
+	}
+	return seed
+}
+
+func nudgeScopeOf(label string, store beads.Store) nudgeSweepScope {
+	return nudgeSweepScope{Label: label, Store: beads.NudgesStore{Store: store}}
+}
+
+func mustBeadStatus(t *testing.T, store beads.Store, id string) string {
+	t.Helper()
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", id, err)
+	}
+	return b.Status
+}
+
+func TestSweepStaleNudgeMail_ClosesStaleShadowInEveryRigStore(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	city := beads.NewMemStoreFrom(100, nudgeScopeStale("gm", 1, now), nil)
+	rigA := beads.NewMemStoreFrom(100, nudgeScopeStale("ga", 2, now), nil)
+	rigB := beads.NewMemStoreFrom(100, nudgeScopeStale("gb", 1, now), nil)
+
+	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: city}, beads.MailStore{Store: city}, nil, now,
+		nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepDefaultUnreadMailTTL, nudgeMailSweepWatchdogCloseBudget,
+		nudgeScopeOf(`rig "a"`, rigA), nudgeScopeOf(`rig "b"`, rigB))
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if result.NudgeClosed != 4 {
+		t.Fatalf("NudgeClosed = %d, want 4 (1 city + 2 rig a + 1 rig b)", result.NudgeClosed)
+	}
+	for store, ids := range map[beads.Store][]string{city: {"gm-0"}, rigA: {"ga-0", "ga-1"}, rigB: {"gb-0"}} {
+		for _, id := range ids {
+			b, err := store.Get(id)
+			if err != nil {
+				t.Fatalf("Get(%s): %v", id, err)
+			}
+			if b.Status != "closed" || b.Metadata["state"] != "gc-swept" || b.Metadata["terminal_reason"] != "gc-swept-stale" ||
+				b.Metadata["close_reason"] != nudgeMailSweepNudgeCloseReason {
+				t.Errorf("%s: status=%q state=%q terminal_reason=%q close_reason=%q, want the gc-swept vocabulary",
+					id, b.Status, b.Metadata["state"], b.Metadata["terminal_reason"], b.Metadata["close_reason"])
+			}
+		}
+	}
+	want := []nudgeSweepScopeClosed{{Label: `rig "a"`, Closed: 2}, {Label: `rig "b"`, Closed: 1}}
+	if fmt.Sprint(result.ScopeNudgeClosed) != fmt.Sprint(want) {
+		t.Errorf("ScopeNudgeClosed = %v, want %v", result.ScopeNudgeClosed, want)
+	}
+}
+
+func TestSweepStaleNudgeMail_LiveRigNudgeIDsAreNotClosedInAnyStore(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	city := beads.NewMemStoreFrom(100, nudgeScopeStale("gm", 1, now), nil)
+	rigA := beads.NewMemStoreFrom(100, nudgeScopeStale("ga", 2, now), nil)
+	rigB := beads.NewMemStoreFrom(100, nudgeScopeStale("gb", 2, now), nil)
+	// ga-0 is Pending and gb-0 is InFlight: each lives in a rig store, and the
+	// live set is the city's flock queue, so it has to protect them there.
+	state := &nudgequeue.State{
+		Pending:  []nudgequeue.Item{{ID: "ga-0"}},
+		InFlight: []nudgequeue.Item{{ID: "gb-0"}},
+	}
+
+	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: city}, beads.MailStore{Store: city}, state, now,
+		nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepDefaultUnreadMailTTL, nudgeMailSweepWatchdogCloseBudget,
+		nudgeScopeOf(`rig "a"`, rigA), nudgeScopeOf(`rig "b"`, rigB))
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if result.NudgeClosed != 3 {
+		t.Errorf("NudgeClosed = %d, want 3 (gm-0, ga-1, gb-1)", result.NudgeClosed)
+	}
+	if got := mustBeadStatus(t, rigA, "ga-0"); got != "open" {
+		t.Errorf("Pending rig nudge ga-0 status = %q, want open", got)
+	}
+	if got := mustBeadStatus(t, rigB, "gb-0"); got != "open" {
+		t.Errorf("InFlight rig nudge gb-0 status = %q, want open", got)
+	}
+	if got := mustBeadStatus(t, rigA, "ga-1"); got != "closed" {
+		t.Errorf("non-live rig nudge ga-1 status = %q, want closed", got)
+	}
+}
+
+func TestSweepStaleNudgeMail_RigStoresShareOneBudgetCityFirst(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	city := beads.NewMemStoreFrom(100, append(nudgeScopeStale("gm", 3, now), mailSeed("mail-1", now.Add(-nudgeMailSweepDefaultMailTTL-time.Second))), nil)
+	rigA := beads.NewMemStoreFrom(100, nudgeScopeStale("ga", 3, now), nil)
+	rigB := beads.NewMemStoreFrom(100, nudgeScopeStale("gb", 3, now), nil)
+
+	const budget = 4
+	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: city}, beads.MailStore{Store: city}, nil, now,
+		nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepDefaultUnreadMailTTL, budget,
+		nudgeScopeOf(`rig "a"`, rigA), nudgeScopeOf(`rig "b"`, rigB))
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if got := result.NudgeClosed + result.MailClosed; got != budget {
+		t.Fatalf("total closes = %d, want exactly the shared budget %d (a per-store budget would close more)", got, budget)
+	}
+	closedIn := func(store beads.Store, prefix string, n int) int {
+		c := 0
+		for i := 0; i < n; i++ {
+			if mustBeadStatus(t, store, fmt.Sprintf("%s-%d", prefix, i)) == "closed" {
+				c++
+			}
+		}
+		return c
+	}
+	if got := closedIn(city, "gm", 3); got != 3 {
+		t.Errorf("city closed %d of 3, want all 3 (the city is swept first)", got)
+	}
+	if got := closedIn(rigA, "ga", 3); got != 1 {
+		t.Errorf("rig a closed %d, want the 1 remaining budget slot", got)
+	}
+	if got := closedIn(rigB, "gb", 3); got != 0 {
+		t.Errorf("rig b closed %d, want 0 once the budget is spent", got)
+	}
+	if result.MailClosed != 0 {
+		t.Errorf("MailClosed = %d, want 0 once the nudge phase spent the budget", result.MailClosed)
+	}
+}
+
+// nudgeSweepListFailsOnLabel fails only the stale-shadow listing, so a store
+// that can be reached for everything else still reads as down for this sweep.
+type nudgeSweepListFailsOnLabel struct {
+	*beads.MemStore
+}
+
+func (s *nudgeSweepListFailsOnLabel) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Label == nudgeBeadLabel {
+		return nil, fmt.Errorf("rig store offline")
+	}
+	return s.MemStore.List(q)
+}
+
+func TestSweepStaleNudgeMail_FailingRigStoreDoesNotStopTheOthers(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	city := beads.NewMemStoreFrom(100, nudgeScopeStale("gm", 1, now), nil)
+	rigA := &nudgeSweepListFailsOnLabel{MemStore: beads.NewMemStoreFrom(100, nudgeScopeStale("ga", 1, now), nil)}
+	rigB := beads.NewMemStoreFrom(100, nudgeScopeStale("gb", 1, now), nil)
+
+	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: city}, beads.MailStore{Store: city}, nil, now,
+		nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepDefaultUnreadMailTTL, nudgeMailSweepWatchdogCloseBudget,
+		nudgeScopeOf(`rig "a"`, rigA), nudgeScopeOf(`rig "b"`, rigB))
+	if err == nil {
+		t.Fatal("a rig store that cannot be listed must surface in the returned error")
+	}
+	if !strings.Contains(err.Error(), `rig "a"`) || !strings.Contains(err.Error(), "rig store offline") {
+		t.Errorf("error = %q, want it to name the failing store and carry the cause", err)
+	}
+	// A joined error is the CLI's "report each, keep going" shape; a bare error
+	// would read as fatal there and fail the whole run.
+	var joined interface{ Unwrap() []error }
+	if !errors.As(err, &joined) {
+		t.Errorf("error %T does not unwrap to a []error, so the CLI would treat one rig failure as fatal", err)
+	}
+	if result.NudgeClosed != 2 {
+		t.Errorf("NudgeClosed = %d, want 2 (city and rig b still swept)", result.NudgeClosed)
+	}
+	if got := mustBeadStatus(t, rigB, "gb-0"); got != "closed" {
+		t.Errorf("rig b after rig a failed: gb-0 status = %q, want closed", got)
+	}
+	if got := mustBeadStatus(t, city, "gm-0"); got != "closed" {
+		t.Errorf("city: gm-0 status = %q, want closed", got)
+	}
+}
+
+func TestSweepStaleNudgeMail_RigStoreEqualToNudgesStoreIsSweptOnce(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	// A relocated-nudges city hands the sweep the relocated store first. A rig
+	// scope that resolves to that same store, or the same rig listed twice,
+	// must not be listed and closed a second time.
+	relocated := beads.NewMemStoreFrom(100, nudgeScopeStale("gn", 2, now), nil)
+	rig := beads.NewMemStoreFrom(100, nudgeScopeStale("ga", 1, now), nil)
+	scopes := []nudgeSweepScope{nudgeScopeOf("city store", relocated), nudgeScopeOf(`rig "a"`, rig), nudgeScopeOf(`rig "a" again`, rig)}
+
+	result, err := sweepStaleNudgeMail(beads.NudgesStore{Store: relocated}, beads.MailStore{Store: relocated}, nil, now,
+		nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepDefaultUnreadMailTTL, nudgeMailSweepWatchdogCloseBudget, scopes...)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if result.NudgeClosed != 3 {
+		t.Errorf("NudgeClosed = %d, want 3 (each bead closed once)", result.NudgeClosed)
+	}
+	want := []nudgeSweepScopeClosed{{Label: `rig "a"`, Closed: 1}}
+	if fmt.Sprint(result.ScopeNudgeClosed) != fmt.Sprint(want) {
+		t.Errorf("ScopeNudgeClosed = %v, want %v", result.ScopeNudgeClosed, want)
+	}
+}
+
+func TestCountStaleNudgeMail_RigStoresMatchSweepAndSecondRunClosesNothing(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	city := beads.NewMemStoreFrom(100, nudgeScopeStale("gm", 2, now), nil)
+	rigA := beads.NewMemStoreFrom(100, nudgeScopeStale("ga", 3, now), nil)
+	rigB := beads.NewMemStoreFrom(100, nudgeScopeStale("gb", 1, now), nil)
+	scopes := []nudgeSweepScope{nudgeScopeOf(`rig "a"`, rigA), nudgeScopeOf(`rig "b"`, rigB)}
+	args := func() (beads.NudgesStore, beads.MailStore) {
+		return beads.NudgesStore{Store: city}, beads.MailStore{Store: city}
+	}
+
+	n, m := args()
+	counted, err := countStaleNudgeMail(n, m, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepDefaultUnreadMailTTL, nudgeMailSweepWatchdogCloseBudget, scopes...)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if got := mustBeadStatus(t, rigA, "ga-0"); got != "open" {
+		t.Fatalf("dry-run closed a rig bead (status %q)", got)
+	}
+	swept, err := sweepStaleNudgeMail(n, m, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepDefaultUnreadMailTTL, nudgeMailSweepWatchdogCloseBudget, scopes...)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if counted.NudgeClosed != 6 || counted.NudgeClosed != swept.NudgeClosed {
+		t.Errorf("dry-run counted %d, sweep closed %d, want both 6", counted.NudgeClosed, swept.NudgeClosed)
+	}
+	if fmt.Sprint(counted.ScopeNudgeClosed) != fmt.Sprint(swept.ScopeNudgeClosed) {
+		t.Errorf("dry-run per-store counts %v differ from the sweep's %v", counted.ScopeNudgeClosed, swept.ScopeNudgeClosed)
+	}
+	again, err := sweepStaleNudgeMail(n, m, nil, now, nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepDefaultUnreadMailTTL, nudgeMailSweepWatchdogCloseBudget, scopes...)
+	if err != nil {
+		t.Fatalf("second sweep: %v", err)
+	}
+	if again.NudgeClosed != 0 || len(again.ScopeNudgeClosed) != 0 {
+		t.Errorf("second sweep closed %d (%v), want 0", again.NudgeClosed, again.ScopeNudgeClosed)
+	}
+}
+
+func TestCountStaleNudgeMail_FailingRigStoreIsIsolatedLikeTheSweep(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	city := beads.NewMemStoreFrom(100, nudgeScopeStale("gm", 1, now), nil)
+	rigA := &nudgeSweepListFailsOnLabel{MemStore: beads.NewMemStoreFrom(100, nudgeScopeStale("ga", 1, now), nil)}
+	rigB := beads.NewMemStoreFrom(100, nudgeScopeStale("gb", 1, now), nil)
+
+	counted, err := countStaleNudgeMail(beads.NudgesStore{Store: city}, beads.MailStore{Store: city}, nil, now,
+		nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepDefaultUnreadMailTTL, nudgeMailSweepWatchdogCloseBudget,
+		nudgeScopeOf(`rig "a"`, rigA), nudgeScopeOf(`rig "b"`, rigB))
+	if err == nil || !strings.Contains(err.Error(), `rig "a"`) {
+		t.Fatalf("dry-run error = %v, want one naming rig a", err)
+	}
+	if counted.NudgeClosed != 2 {
+		t.Errorf("dry-run counted %d, want 2 (city and rig b)", counted.NudgeClosed)
+	}
+}
+
+func TestCmdOrderSweepNudgeMailRun_CityOnlyOutputIsByteStable(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	newCity := func() *beads.MemStore {
+		return beads.NewMemStoreFrom(100, []beads.Bead{
+			nudgeSeed("n1", "nudge-1", now.Add(-nudgeMailSweepDefaultNudgeTTL-time.Second)),
+			mailSeed("m1", now.Add(-nudgeMailSweepDefaultMailTTL-time.Second)),
+		}, nil)
+	}
+	const want = "nudge-mail-sweep: closed 1 nudge bead(s), 1 mail bead(s)  [budget: 2/50 used]\n"
+
+	run := func(scopes ...nudgeSweepScope) string {
+		city := newCity()
+		var stdout, stderr bytes.Buffer
+		if code := cmdOrderSweepNudgeMailRun(beads.NudgesStore{Store: city}, beads.MailStore{Store: city}, nil, now,
+			nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepDefaultUnreadMailTTL, false, &stdout, &stderr, scopes...); code != 0 {
+			t.Fatalf("exit %d, stderr %q", code, stderr.String())
+		}
+		return stdout.String()
+	}
+	if got := run(); got != want {
+		t.Errorf("city-only output = %q, want %q", got, want)
+	}
+	// A healthy rig with nothing stale must not change a byte either.
+	quietRig := beads.NewMemStoreFrom(100, nil, nil)
+	if got := run(nudgeScopeOf(`rig "a"`, quietRig)); got != want {
+		t.Errorf("output with a clean rig = %q, want the city-only %q", got, want)
+	}
+}
+
+func TestCmdOrderSweepNudgeMailRun_ReportsRigClosesPerStore(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	city := beads.NewMemStoreFrom(100, nudgeScopeStale("gm", 1, now), nil)
+	rigA := beads.NewMemStoreFrom(100, nudgeScopeStale("ga", 2, now), nil)
+	rigB := beads.NewMemStoreFrom(100, nil, nil)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdOrderSweepNudgeMailRun(beads.NudgesStore{Store: city}, beads.MailStore{Store: city}, nil, now,
+		nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepDefaultUnreadMailTTL, false, &stdout, &stderr,
+		nudgeScopeOf(`rig "a"`, rigA), nudgeScopeOf(`rig "b"`, rigB))
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "nudge-mail-sweep: closed 3 nudge bead(s), 0 mail bead(s)  [budget: 3/50 used]\n") {
+		t.Errorf("summary line missing or wrong (the total must include rig closes): %q", out)
+	}
+	if !strings.Contains(out, `rig "a": closed 2 nudge bead(s)`) {
+		t.Errorf("no per-store line for rig a: %q", out)
+	}
+	if strings.Contains(out, `rig "b"`) {
+		t.Errorf("rig b closed nothing and must not be reported: %q", out)
+	}
+}
+
+func TestCmdOrderSweepNudgeMailRun_FailingRigStoreReportsAndExitsZero(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	city := beads.NewMemStoreFrom(100, nudgeScopeStale("gm", 1, now), nil)
+	rigA := &nudgeSweepListFailsOnLabel{MemStore: beads.NewMemStoreFrom(100, nudgeScopeStale("ga", 1, now), nil)}
+
+	var stdout, stderr bytes.Buffer
+	code := cmdOrderSweepNudgeMailRun(beads.NudgesStore{Store: city}, beads.MailStore{Store: city}, nil, now,
+		nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepDefaultUnreadMailTTL, false, &stdout, &stderr,
+		nudgeScopeOf(`rig "a"`, rigA))
+	if code != 0 {
+		t.Errorf("exit %d, want 0: one unreadable rig must not fail the run (same as a per-bead error)", code)
+	}
+	if !strings.Contains(stderr.String(), `rig "a"`) || !strings.Contains(stderr.String(), "ERROR") {
+		t.Errorf("stderr = %q, want an ERROR line naming rig a", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "closed 1 nudge bead(s)") {
+		t.Errorf("stdout = %q, want the city close still reported", stdout.String())
+	}
+}
+
+func TestCmdOrderSweepNudgeMailDryRun_CountsRigStores(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	city := beads.NewMemStoreFrom(100, nudgeScopeStale("gm", 1, now), nil)
+	rigA := beads.NewMemStoreFrom(100, nudgeScopeStale("ga", 2, now), nil)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdOrderSweepNudgeMailDryRun(beads.NudgesStore{Store: city}, beads.MailStore{Store: city}, nil, now,
+		nudgeMailSweepDefaultNudgeTTL, nudgeMailSweepDefaultMailTTL, nudgeMailSweepDefaultUnreadMailTTL, false, &stdout, &stderr,
+		nudgeScopeOf(`rig "a"`, rigA))
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "[DRY RUN] nudge-mail-sweep: would close 3 nudge bead(s), 0 mail bead(s)  (no changes made)\n") {
+		t.Errorf("dry-run summary must count rig stores: %q", out)
+	}
+	if !strings.Contains(out, `rig "a": would close 2 nudge bead(s)`) {
+		t.Errorf("no per-store dry-run line for rig a: %q", out)
+	}
+	if got := mustBeadStatus(t, rigA, "ga-0"); got != "open" {
+		t.Errorf("dry-run closed a rig bead (status %q)", got)
+	}
+}
+
+// writeNudgeSweepRigCity lays out a file-backed city whose city.toml registers
+// the named rigs, in order, and returns the city path and each rig's path.
+func writeNudgeSweepRigCity(t *testing.T, rigNames ...string) (string, map[string]string) {
+	t.Helper()
+	cityDir := t.TempDir()
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv("GC_EVENTS", "")
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_CITY_ROOT", cityDir)
+	t.Setenv("GC_RIG", "")
+	t.Setenv("GC_RIG_ROOT", "")
+	t.Chdir(cityDir)
+
+	toml := "[workspace]\nname = \"test-city\"\n"
+	paths := map[string]string{}
+	for _, name := range rigNames {
+		rigDir := filepath.Join(t.TempDir(), name)
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		paths[name] = rigDir
+		toml += fmt.Sprintf("\n[[rigs]]\nname = %q\npath = %q\n", name, rigDir)
+	}
+	writeFile(t, filepath.Join(cityDir, "city.toml"), toml)
+	return cityDir, paths
+}
+
+// createStaleNudgeShadow opens the store at scopeRoot and files one open
+// gc:nudge shadow in it.
+func createStaleNudgeShadow(t *testing.T, scopeRoot, cityDir, nudgeID string) (beads.Store, string) {
+	t.Helper()
+	store, err := openStoreAtForCity(scopeRoot, cityDir)
+	if err != nil {
+		t.Fatalf("openStoreAtForCity(%s): %v", scopeRoot, err)
+	}
+	b, err := store.Create(beads.Bead{
+		Type:     nudgeBeadType,
+		Labels:   []string{nudgeBeadLabel, "nudge:" + nudgeID},
+		Metadata: map[string]string{"nudge_id": nudgeID, "state": "queued"},
+	})
+	if err != nil {
+		t.Fatalf("Create nudge shadow in %s: %v", scopeRoot, err)
+	}
+	return store, b.ID
+}
+
+func TestCmdOrderSweepNudgeMail_ClosesStaleShadowsInRigStores(t *testing.T) {
+	cityDir, rigs := writeNudgeSweepRigCity(t, "alpha", "beta")
+	cityStore, cityBead := createStaleNudgeShadow(t, cityDir, cityDir, "city-1")
+	alphaStore, alphaBead := createStaleNudgeShadow(t, rigs["alpha"], cityDir, "alpha-1")
+	betaStore, betaBead := createStaleNudgeShadow(t, rigs["beta"], cityDir, "beta-1")
+	time.Sleep(20 * time.Millisecond) // age the shadows past the 1ms TTL below
+
+	var stdout, stderr bytes.Buffer
+	code := cmdOrderSweepNudgeMail(time.Millisecond, 0, 0, true, true, false, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdOrderSweepNudgeMail = %d; stderr: %s", code, stderr.String())
+	}
+	for name, probe := range map[string]struct {
+		store beads.Store
+		id    string
+	}{"city": {cityStore, cityBead}, "rig alpha": {alphaStore, alphaBead}, "rig beta": {betaStore, betaBead}} {
+		if got := mustBeadStatus(t, probe.store, probe.id); got != "closed" {
+			t.Errorf("%s shadow %s status = %q, want closed", name, probe.id, got)
+		}
+	}
+	if !strings.Contains(stdout.String(), "closed 3 nudge bead(s)") {
+		t.Errorf("stdout = %q, want a total of 3 nudge closes", stdout.String())
+	}
+	for _, label := range []string{`rig "alpha"`, `rig "beta"`} {
+		if !strings.Contains(stdout.String(), label+": closed 1 nudge bead(s)") {
+			t.Errorf("stdout = %q, want a per-store line for %s", stdout.String(), label)
+		}
+	}
+
+	// A second run is a no-op, and the dry-run twin enumerates the same stores.
+	stdout.Reset()
+	stderr.Reset()
+	if code := cmdOrderSweepNudgeMail(time.Millisecond, 0, 0, true, true, true, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("dry-run = %d; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "nothing to close") {
+		t.Errorf("dry-run after a sweep = %q, want nothing to close", stdout.String())
+	}
+}
+
+func TestCmdOrderSweepNudgeMail_DryRunSeesRigStores(t *testing.T) {
+	cityDir, rigs := writeNudgeSweepRigCity(t, "alpha")
+	_, _ = createStaleNudgeShadow(t, cityDir, cityDir, "city-1")
+	alphaStore, alphaBead := createStaleNudgeShadow(t, rigs["alpha"], cityDir, "alpha-1")
+	time.Sleep(20 * time.Millisecond)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdOrderSweepNudgeMail(time.Millisecond, 0, 0, true, true, true, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("dry-run = %d; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "would close 2 nudge bead(s)") {
+		t.Errorf("dry-run stdout = %q, want 2 candidates (city + rig alpha)", stdout.String())
+	}
+	if got := mustBeadStatus(t, alphaStore, alphaBead); got != "open" {
+		t.Errorf("dry-run closed the rig shadow (status %q)", got)
+	}
+}
+
+func TestRunNudgeMailSweepWatchdog_ClosesStaleShadowsInRigStores(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	cityPath := t.TempDir()
+	city := beads.NewMemStoreFrom(100, nudgeScopeStale("gm", 1, now), nil)
+	alpha := beads.NewMemStoreFrom(100, nudgeScopeStale("ga", 2, now), nil)
+	beta := beads.NewMemStoreFrom(100, nudgeScopeStale("gb", 1, now), nil)
+
+	var stderr bytes.Buffer
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "alpha", Path: filepath.Join(cityPath, "alpha")},
+			{Name: "beta", Path: filepath.Join(cityPath, "beta")},
+		},
+	}
+	cr := &CityRuntime{
+		cityPath:            cityPath,
+		cityName:            "test-city",
+		cfg:                 cfg,
+		standaloneCityStore: city,
+		standaloneRigStores: map[string]beads.Store{"alpha": alpha, "beta": beta},
+		stdout:              io.Discard,
+		stderr:              &stderr,
+		logPrefix:           "gc test",
+	}
+	cr.runNudgeMailSweepWatchdog(cfg, now)
+
+	for store, ids := range map[beads.Store][]string{city: {"gm-0"}, alpha: {"ga-0", "ga-1"}, beta: {"gb-0"}} {
+		for _, id := range ids {
+			if got := mustBeadStatus(t, store, id); got != "closed" {
+				t.Errorf("watchdog left %s %q, want closed", id, got)
+			}
+		}
+	}
+	if !strings.Contains(stderr.String(), "closed 4 nudge bead(s)") {
+		t.Errorf("watchdog log = %q, want a total of 4 nudge closes", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `rig "alpha": closed 2 nudge bead(s)`) {
+		t.Errorf("watchdog log = %q, want a per-store line for rig alpha", stderr.String())
+	}
+}
+
+func TestRunNudgeMailSweepWatchdog_UnreadableRigDoesNotBlockTheRest(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	cityPath := t.TempDir()
+	city := beads.NewMemStoreFrom(100, nudgeScopeStale("gm", 1, now), nil)
+	bad := &nudgeSweepListFailsOnLabel{MemStore: beads.NewMemStoreFrom(100, nudgeScopeStale("ga", 1, now), nil)}
+	good := beads.NewMemStoreFrom(100, nudgeScopeStale("gb", 1, now), nil)
+
+	var stderr bytes.Buffer
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "bad", Path: filepath.Join(cityPath, "bad")},
+			{Name: "good", Path: filepath.Join(cityPath, "good")},
+		},
+	}
+	cr := &CityRuntime{
+		cityPath:            cityPath,
+		cityName:            "test-city",
+		cfg:                 cfg,
+		standaloneCityStore: city,
+		standaloneRigStores: map[string]beads.Store{"bad": bad, "good": good},
+		stdout:              io.Discard,
+		stderr:              &stderr,
+		logPrefix:           "gc test",
+	}
+	cr.runNudgeMailSweepWatchdog(cfg, now)
+
+	if got := mustBeadStatus(t, good, "gb-0"); got != "closed" {
+		t.Errorf("good rig shadow status = %q, want closed despite the bad rig", got)
+	}
+	if !strings.Contains(stderr.String(), `rig "bad"`) {
+		t.Errorf("watchdog log = %q, want the failing rig named", stderr.String())
 	}
 }

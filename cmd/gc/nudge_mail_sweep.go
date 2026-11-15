@@ -51,6 +51,24 @@ const (
 type nudgeMailSweepResult struct {
 	NudgeClosed int
 	MailClosed  int
+	// ScopeNudgeClosed lists the nudge closes made in non-city stores, in sweep
+	// order, one entry per store that closed anything. NudgeClosed already
+	// includes them.
+	ScopeNudgeClosed []nudgeSweepScopeClosed
+}
+
+// nudgeSweepScope is one extra store, beyond the nudges-class store, whose stale
+// gc:nudge shadows a sweep closes: a rig's work store.
+type nudgeSweepScope struct {
+	Label string
+	Store beads.NudgesStore
+}
+
+// nudgeSweepScopeClosed is the number of nudge shadows a sweep closed (or, in a
+// dry run, would close) in the extra store labeled Label.
+type nudgeSweepScopeClosed struct {
+	Label  string
+	Closed int
 }
 
 // nudgeMailSweepMailTTLForConfig resolves the mail-close TTL for the
@@ -156,7 +174,7 @@ func nudgeMailSweepUnreadMailTTLForCity(cityPath string, fallback time.Duration,
 // class); the mail and unread-mail phases from the strongly-typed mailStore
 // (the messaging class). Both wrap the same underlying work store until
 // either class relocates, so behavior is unchanged today.
-func sweepStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL, unreadMailTTL time.Duration, limit int) (nudgeMailSweepResult, error) {
+func sweepStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL, unreadMailTTL time.Duration, limit int, _ ...nudgeSweepScope) (nudgeMailSweepResult, error) {
 	var result nudgeMailSweepResult
 	var beadErrs []error
 
@@ -237,7 +255,7 @@ func sweepStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore
 // their phases exactly as in the sweep. The nudge phase is counted from the typed
 // nudgeStore (nudges class); the mail and unread-mail phases from the typed
 // mailStore (messaging class).
-func countStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL, unreadMailTTL time.Duration, limit int) (nudgeMailSweepResult, error) {
+func countStaleNudgeMail(nudgeStore beads.NudgesStore, mailStore beads.MailStore, nudgeState *nudgequeue.State, now time.Time, nudgeTTL, mailTTL, unreadMailTTL time.Duration, limit int, _ ...nudgeSweepScope) (nudgeMailSweepResult, error) {
 	var result nudgeMailSweepResult
 
 	liveIDs := liveNudgeIDSet(nudgeState)
