@@ -4514,6 +4514,69 @@ func TestOrderTrackingRetentionFallbackStopsAtFirstDeleteFailure(t *testing.T) {
 	}
 }
 
+// orderTrackingRetentionLateStepStore seeds an open step under lateRoot right
+// after the first gc.root_bead_id query for it (the per-run screen), so only a
+// set-level re-check immediately before the batch delete can see it.
+type orderTrackingRetentionLateStepStore struct {
+	*orderTrackingRetentionBatchStore
+	lateRoot    string
+	rootQueries int
+}
+
+func (s *orderTrackingRetentionLateStepStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	got, err := s.MemStore.List(q)
+	if err != nil || q.Metadata[beadmeta.RootBeadIDMetadataKey] != s.lateRoot {
+		return got, err
+	}
+	s.rootQueries++
+	if s.rootQueries == 1 {
+		if _, cerr := s.Create(beads.Bead{
+			Title: "late step", Status: "open", Type: "task", Ephemeral: true,
+			Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: s.lateRoot},
+		}); cerr != nil {
+			return nil, cerr
+		}
+	}
+	return got, nil
+}
+
+func TestOrderTrackingRetentionBatchRechecksStrandsBeforeDelete(t *testing.T) {
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	for _, bounded := range []bool{false, true} {
+		t.Run(fmt.Sprintf("bounded=%t", bounded), func(t *testing.T) {
+			store := &orderTrackingRetentionLateStepStore{
+				orderTrackingRetentionBatchStore: &orderTrackingRetentionBatchStore{
+					orderTrackingRetentionDeleteStore: newOrderTrackingRetentionDeleteStore(now, minClosedOrderTrackingRetained+3, ""),
+				},
+				lateRoot: "alpha-00",
+			}
+			policy := orderTrackingRetentionPolicy{deleteAfterClose: 24 * time.Hour}
+			var deleted int
+			var err error
+			if bounded {
+				deleted, err = sweepClosedOrderTrackingRetentionBounded(store, now, policy, nil, 3)
+			} else {
+				deleted, err = sweepClosedOrderTrackingRetention(store, now, policy, nil)
+			}
+			if deleted != 0 || !errors.Is(err, errWorkflowDeleteLiveDescendants) {
+				t.Fatalf("sweep = (%d, %v), want (0, %v)", deleted, err, errWorkflowDeleteLiveDescendants)
+			}
+			if store.rootQueries < 2 {
+				t.Fatalf("root-bead-id queries for %s = %d, want the per-run screen and the set-level re-check", store.lateRoot, store.rootQueries)
+			}
+			if len(store.batches) != 0 || store.deleteCalls != 0 {
+				t.Fatalf("DeleteBatch calls = %d, Delete calls = %d, want 0 and 0", len(store.batches), store.deleteCalls)
+			}
+			for i := range 3 {
+				id := fmt.Sprintf("alpha-%02d", i)
+				if _, err := store.Get(id); err != nil {
+					t.Fatalf("Get(%q): %v, want the expired run kept", id, err)
+				}
+			}
+		})
+	}
+}
+
 func TestOrderTrackingRetentionFallsBackWithoutBatchDeleter(t *testing.T) {
 	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
 	for _, bounded := range []bool{false, true} {

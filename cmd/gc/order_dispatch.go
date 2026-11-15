@@ -3826,7 +3826,7 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 		}
 	}
 	logRetainedForLiveDescendants(retained)
-	if err := deleteWorkflowBeadsBatchGuarded(store, cleared); err != nil {
+	if err := deleteWorkflowBeadsBatch(store, cleared); err != nil {
 		return 0, errors.Join(deleteErr, fmt.Errorf("deleting %d closed order-tracking beads: %w", len(cleared), err))
 	}
 	return len(cleared), deleteErr
@@ -3910,7 +3910,7 @@ func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, 
 		}
 	}
 	logRetainedForLiveDescendants(retained)
-	if err := deleteWorkflowBeadsBatchGuarded(store, cleared); err != nil {
+	if err := deleteWorkflowBeadsBatch(store, cleared); err != nil {
 		return 0, errors.Join(deleteErr, fmt.Errorf("deleting %d closed order-tracking beads: %w", len(cleared), err))
 	}
 	return len(cleared), deleteErr
