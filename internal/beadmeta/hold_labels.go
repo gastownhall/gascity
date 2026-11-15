@@ -110,3 +110,11 @@ func HasDispatchHold(labels []string) bool {
 	}
 	return false
 }
+
+// ParkedLabels is the "what to DO" list. RED-step stub: deliberately wrong
+// (holds only) so the tests that name it compile and fail; GREEN replaces it.
+var ParkedLabels = DispatchHoldLabels
+
+// HasParkedLabel reports whether labels park a bead. RED-step stub: deliberately
+// wrong (holds only); GREEN replaces it.
+func HasParkedLabel(labels []string) bool { return HasDispatchHold(labels) }
