@@ -1977,6 +1977,7 @@ go_test(
         "prompt_missing_template_test.go",
         "prompt_query_topology_pins_test.go",
         "prompt_query_topology_test.go",
+        "prompt_render_error_reconcile_test.go",
         "prompt_render_error_test.go",
         "prompt_rollout_boundary_test.go",
         "prompt_test.go",
