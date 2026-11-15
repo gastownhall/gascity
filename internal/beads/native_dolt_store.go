@@ -114,15 +114,16 @@ func withNativeDoltOpenEnvAndCredentialCommand(ctx context.Context, env map[stri
 		return nil, err
 	}
 	return func() {
+		defer exit()
 		restore()
-		exit()
 	}, nil
 }
 
 // withNativeDoltOpenEnvAndCredentialCommandLocked projects the scoped native
 // open environment while the caller holds the projection window. The
-// window-aware form is used by hermetic opens, which must withhold the whole BEADS_ namespace
-// and project the selected keys as one indivisible environment transition.
+// window-aware form is used by hermetic opens, which must withhold the whole
+// BEADS_ namespace and project the selected keys as one indivisible
+// environment transition.
 // BDAllowRemoteMigrateEnvKey is projected from env as well, so the linked
 // library sees it only when the caller decided it.
 func withNativeDoltOpenEnvAndCredentialCommandLocked(env map[string]string, credentialCommand string) (func(), error) {

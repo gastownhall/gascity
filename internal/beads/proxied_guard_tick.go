@@ -49,15 +49,15 @@ import (
 //
 // A re-pin needs a fresh library handle against the new generation's port, and
 // opening one means the hermetic env window: a process-global environment
-// mutation inside the execenv projection window. While the native leaf is still serving the
-// tick deliberately does NOT perform it. It re-runs ADMISSION (file reads plus
-// one probe session — no library, no fork) and then marks the native handle's
-// pool stale, so the next READ reconnects through the injected reopen hook on
-// the CALLER's goroutine, which is where every other library open in this
-// package already happens. A background goroutine that mutated the process
-// environment at an arbitrary moment would be a new class of hazard for every
-// concurrent scope open and bd-child env build in the process, to save a re-pin
-// a few milliseconds.
+// mutation inside the execenv projection window. While the native leaf is
+// still serving the tick deliberately does NOT perform it. It re-runs
+// ADMISSION (file reads plus one probe session — no library, no fork) and then
+// marks the native handle's pool stale, so the next READ reconnects through
+// the injected reopen hook on the CALLER's goroutine, which is where every
+// other library open in this package already happens. A background goroutine
+// that mutated the process environment at an arbitrary moment would be a new
+// class of hazard for every concurrent scope open and bd-child env build in
+// the process, to save a re-pin a few milliseconds.
 //
 // There is exactly one state where that argument does not hold, and the tick
 // does open the library there: a handle that has ALREADY stood down

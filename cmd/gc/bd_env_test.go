@@ -5741,9 +5741,9 @@ func stubAmbientNativeDoltOpenEnv(t *testing.T, ambient map[string]string) {
 // ambient BEADS_* fallback on the scope env-build path, and the ambient BD_BIN
 // pin, reads through the native-open env guard. gc ready opens its rig stores
 // concurrently, and a native open projects its scope's socket, credential
-// command and credentials file into the process env inside the execenv projection
-// window for the whole library open; a proxied native open withholds every BD_* key
-// for that window instead. A bare os.Getenv in a second scope's concurrent env
+// command and credentials file into the process env inside the execenv
+// projection window for the whole library open; a proxied native open withholds
+// every BD_* key for that window instead. A bare os.Getenv in a second scope's concurrent env
 // build would adopt the first scope's endpoint or credentials, or lose the
 // operator's bd pin. Each BEADS_* case holds another scope's projection in the
 // process env and asserts the build carries this scope's own ambient value, or
