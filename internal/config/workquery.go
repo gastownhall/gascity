@@ -170,12 +170,11 @@ func labelMatchCondsJQ(labels []string) string {
 	return strings.Join(conds, " or ")
 }
 
-// holdLabelMatchCondsJQ is labelMatchCondsJQ over the
-// beadmeta.DispatchHoldLabels values, e.g.
-// `. == "hold:mayor" or . == "hold:external"`. Shared by every jq-based hold
-// filter so the label set is spelled exactly once.
-func holdLabelMatchCondsJQ() string {
-	return labelMatchCondsJQ(beadmeta.DispatchHoldLabels)
+// parkedLabelMatchCondsJQ is labelMatchCondsJQ over the beadmeta.ParkedLabels
+// values, e.g. `. == "hold:mayor" or . == "hold:external" or . == "human"`, so
+// the Tier-1 serve gate spells the parked set exactly once.
+func parkedLabelMatchCondsJQ() string {
+	return labelMatchCondsJQ(beadmeta.ParkedLabels)
 }
 
 // excludeLabelsJQClause returns a jq select(...) clause dropping beads that
@@ -188,12 +187,19 @@ func excludeLabelsJQClause(labels []string) string {
 }
 
 // excludeHoldLabelsJQClause is excludeLabelsJQClause over the
-// beadmeta.DispatchHoldLabels values alone, for the assignee-scoped probes (the
-// in_progress ones and the bd-1.0.4 assigned-ready wisp probe): they must drop
-// a held bead and nothing else, so they never take the pool-demand serve rules'
-// wider label set.
+// beadmeta.DispatchHoldLabels values alone, for the bd-1.0.4 assigned-ready wisp
+// probe: the assigned-ready tier drops a held bead and nothing else, and stays
+// transparent to the human label.
 func excludeHoldLabelsJQClause() string {
 	return excludeLabelsJQClause(beadmeta.DispatchHoldLabels)
+}
+
+// excludeParkedLabelsJQClause is excludeLabelsJQClause over the
+// beadmeta.ParkedLabels values, for the in_progress serve paths (the federated
+// candidates window and the ephemeral probes): a bead parked on a hold or on a
+// person is not work for its own assignee.
+func excludeParkedLabelsJQClause() string {
+	return excludeLabelsJQClause(beadmeta.ParkedLabels)
 }
 
 // mailMessageBeadType is the issue_type every mail bead carries
@@ -212,15 +218,15 @@ func excludeMailMessagesJQClause() string {
 	return ` | select(((.issue_type // .type // "") | tostring | gsub("^\\s+|\\s+$"; "") | ascii_downcase) != "` + mailMessageBeadType + `")`
 }
 
-// heldLabelCountJQ counts how many beadmeta.DispatchHoldLabels values the FIRST
-// row of a work-query result carries. The in_progress serve gate reads it off
-// the candidate row it already holds, so the hold check costs no extra bd call.
+// heldLabelCountJQ counts how many beadmeta.ParkedLabels values the FIRST row of
+// a work-query result carries. The in_progress serve gate reads it off the
+// candidate row it already holds, so the parked check costs no extra bd call.
 // `.[0].labels // []` absorbs both an absent row and bd's null-valued labels
 // field; a non-JSON payload makes jq fail and the gate falls back to 0, which is
 // the fail-open behavior TestInProgressTierServesUnparseableHeldCandidateFailOpen
 // pins.
 func heldLabelCountJQ() string {
-	return `[ (.[0].labels // [])[] | select(` + holdLabelMatchCondsJQ() + `) ] | length`
+	return `[ (.[0].labels // [])[] | select(` + parkedLabelMatchCondsJQ() + `) ] | length`
 }
 
 // openBlockerCountJQ counts the blockers in a blocked_by array that are not
@@ -268,7 +274,7 @@ func PoolDemandServeRulesForQuery() PoolDemandServeRules {
 	return PoolDemandServeRules{
 		RequireUnassigned: true,
 		ExcludeTypes:      []string{"epic"},
-		ExcludeLabels:     append(append([]string(nil), beadmeta.DispatchHoldLabels...), beadmeta.HumanLabel),
+		ExcludeLabels:     append([]string(nil), beadmeta.ParkedLabels...),
 	}
 }
 
@@ -675,13 +681,13 @@ func standardAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo QueryTop
 //
 // The federated read is not one row. `gc ready` merges every store into one
 // ready-ordered answer, so --limit=1 there is one row for the whole city, and
-// the serve gate skips that row when it is blocked or held: a claim the session
+// the serve gate skips that row when it is blocked or parked: a claim the session
 // could resume, in another store or further down the same one, was then never
 // read, and the fresh-claim tiers behind it handed the session another bead —
 // the accumulation this tier exists to stop. A single-store `bd list` answers
 // for one store, and `gc hook` runs it once per store, so there one store's
 // blocked row never costs another store its read. The federated form reads the
-// candidates window instead, with the dispatch holds excluded and the answer
+// candidates window instead, with the parked labels excluded and the answer
 // ended at its first unblocked row (`gc ready --until-unblocked`), and keeps
 // its first servable row (servableInProgressRowsScript).
 //
@@ -689,12 +695,12 @@ func standardAssignedInProgressWorkQueryScriptDeferringGraphAnchor(topo QueryTop
 // read whose rows' blockers it cannot resolve, so a window read whole failed on
 // a row the tier never serves: a claim behind the session's resumable one,
 // blocked by a bead no store holds, hid the resumable claim and failed the
-// query. With the holds excluded the first unblocked row is the first servable
+// query. With the parked labels excluded the first unblocked row is the first servable
 // one, so a row past it is never resolved, and one at or ahead of it still
 // fails the query, as the one-row read did.
 func assignedInProgressTierCommand(shellVar string, topo QueryTopology) string {
 	if topo.FederatedReady {
-		return assignedInProgressRead(shellVar, topo, excludeLabelArgs(beadmeta.DispatchHoldLabels)+" --until-unblocked", inProgressCandidatesLimit) +
+		return assignedInProgressRead(shellVar, topo, excludeLabelArgs(beadmeta.ParkedLabels)+" --until-unblocked", inProgressCandidatesLimit) +
 			servableInProgressRowsScript(1)
 	}
 	return assignedInProgressRead(shellVar, topo, "", 1)
@@ -727,10 +733,10 @@ const inProgressCandidatesLimit = 20
 // It reads each row the way the gate reads a federated row: the carried
 // blocked_by, where an open blocker skips the row (the reader attaches the field
 // to every row with a blocking edge, so a row without it has none), and the
-// dispatch hold labels. On the tier's own read the reader has already excluded
-// the holds and ended the answer at its first unblocked row, so the row kept is
-// that one; on the candidates read behind a graph anchor every servable row is
-// kept. It runs before the gate, not instead of it: the row it keeps still goes
+// parked labels (beadmeta.ParkedLabels). On the tier's own read the reader has
+// already excluded them and ended the answer at its first unblocked row, so the
+// row kept is that one; on the candidates read behind a graph anchor every
+// servable row is kept. It runs before the gate, not instead of it: the row it keeps still goes
 // through inProgressBlockedByEnrichmentScript, which falls back to `bd show`
 // for a row that carries no blocked_by.
 //
@@ -744,7 +750,7 @@ const inProgressCandidatesLimit = 20
 // row becomes "[]", so the tier falls through to the ready tiers, as it did when
 // its one row was blocked.
 func servableInProgressRowsScript(limit int) string {
-	filter := `[.[] | select(((.blocked_by // []) | ` + openBlockerCountJQ + `) == 0)` + excludeHoldLabelsJQClause() + excludeMailMessagesJQClause() + `]`
+	filter := `[.[] | select(((.blocked_by // []) | ` + openBlockerCountJQ + `) == 0)` + excludeParkedLabelsJQClause() + excludeMailMessagesJQClause() + `]`
 	if limit > 0 {
 		filter += ` | .[:` + strconv.Itoa(limit) + `]`
 	}
@@ -808,9 +814,9 @@ func standardAssignedInProgressWorkQueryScript(topo QueryTopology) string {
 // any non-closed blocker counts.
 //
 // When checkHold is true, the same serve gate also skips a candidate parked
-// on a canonical dispatch hold (beadmeta.DispatchHoldLabels), read off the
-// candidate row this tier already holds — no extra bd call (gas-kg6). A held
-// bead has no blocking dependency, so the blocked_by gate alone let it
+// on a canonical dispatch hold or on a person (beadmeta.ParkedLabels), read off
+// the candidate row this tier already holds — no extra bd call (gas-kg6). A
+// parked bead has no blocking dependency, so the blocked_by gate alone let it
 // through and the tier re-served it on every tick; because the tier
 // short-circuits with `exit 0`, that also starved the ready tiers below it,
 // and a worker that correctly parked its bead could never reach its own
@@ -1015,8 +1021,8 @@ func legacyControlAssignedReadyWorkQueryScript(topo QueryTopology) string {
 
 // ephemeralAssignedInProgressProbeScript is the ephemeral-store sibling of the
 // `bd list --status in_progress` crash-recovery query, in the same tier-1 slot.
-// It excludes candidates parked on a canonical dispatch hold
-// (beadmeta.DispatchHoldLabels) inside its own jq selection, the equivalent
+// It excludes candidates parked on a canonical dispatch hold or on a person
+// (beadmeta.ParkedLabels) inside its own jq selection, the equivalent
 // fall-through to the bd-list tier's nheld serve gate (gas-kg6, #5114 review):
 // without it a held ephemeral bead exited the script as the sole candidate, the
 // Go-side filter then stripped it, and the hook reported no_work while ready
@@ -1036,7 +1042,7 @@ func legacyControlAssignedReadyWorkQueryScript(topo QueryTopology) string {
 // re-served on every hook tick (ga-qjozkw).
 func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology) string {
 	_ = topo
-	filter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + excludeMailMessagesJQClause() + `] | .[:1]`
+	filter := `[.[] | select((.assignee // "") == $id)` + excludeParkedLabelsJQClause() + excludeMailMessagesJQClause() + `] | .[:1]`
 	// federated=false: this row comes from `bd query`, which never carries a
 	// resolved blocked_by, so the carried-lookup branch would only ever fall
 	// through to bd show — skip straight to it. checkHold=false: the filter
@@ -1054,7 +1060,7 @@ func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology)
 
 func ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor(shellVar string, topo QueryTopology) string {
 	_ = topo
-	baseFilter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + excludeMailMessagesJQClause() + `]`
+	baseFilter := `[.[] | select((.assignee // "") == $id)` + excludeParkedLabelsJQClause() + excludeMailMessagesJQClause() + `]`
 	return ephemeralStatusSnapshotShell("gc_open_ephemeral_in_progress", "in_progress") +
 		`r=$(printf "%s" "$gc_open_ephemeral_in_progress" | jq --arg id "$` + shellVar + `" ` + shellquote.Quote(baseFilter+` | .[:1]`) + ` 2>/dev/null); ` +
 		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +

@@ -24,7 +24,7 @@ import (
 func TestAssignedInProgressTierFederatesOnSplitTopology(t *testing.T) {
 	for _, shellVar := range []string{"id", "cand"} {
 		got := assignedInProgressTierCommand(shellVar, QueryTopology{FederatedReady: true})
-		want := `r=$(gc ready --status in_progress --assignee="$` + shellVar + `" --exclude-type=message --exclude-label "hold:mayor" --exclude-label "hold:external" --until-unblocked --json --limit=20)` +
+		want := `r=$(gc ready --status in_progress --assignee="$` + shellVar + `" --exclude-type=message --exclude-label "hold:mayor" --exclude-label "hold:external" --exclude-label "human" --until-unblocked --json --limit=20)` +
 			workQueryReadFailure("gc ready --status in_progress") + `; ` +
 			servableInProgressRowsScript(1)
 		if got != want {

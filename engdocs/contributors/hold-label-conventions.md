@@ -84,8 +84,11 @@ worth a bug report, not a pattern to follow.
 different:**
 
 - `human` — answers "who executes this" (a human merge/PR action needed),
-  not "what is this bead waiting on." It is not a hold state. Keep
-  `human-hold` retired; that one named the hold.
+  not "what is this bead waiting on." It is not a hold state: it is not a
+  third value of `DispatchHoldLabels`, `bd set-state` does not set it, and the
+  hold doctor checks do not look at it. Keep `human-hold` retired; that one
+  named the hold. The serve paths still treat it as parked; see "This is a
+  data convention, not SDK behavior" below.
 - `mpr-human-hold` and other `mpr-*` labels — owned end-to-end by the
   `maintainer-pr-review` pack, with its own metadata namespace and its own
   clearing tool. Not a generic bd hold label.
@@ -114,12 +117,17 @@ or cares who "mayor" is, and renaming the seat would not change a line of it.
 Do not re-spell either literal at a call site — import the constants, so the
 label set stays defined exactly once.
 
-Two questions consume that list and they answer oppositely; `DispatchHoldLabels`
-documents the split in full. In short: filter on holds when deciding what an
-agent should **do** (route-scoped dispatch, and any path serving a bead as
-work — `ga-5736js`, `gas-kg6`), never when deciding which sessions still need
-to **exist** (pool demand and crash-recovery accounting stay hold-transparent,
-or a parked bead's owner goes invisible).
+Two questions consume the parked list and they answer oppositely;
+`ParkedLabels` documents the split in full. `ParkedLabels` is
+`DispatchHoldLabels` plus bd's native `human` label, built without changing the
+hold list. In short: filter on parked labels when deciding what an agent
+should **do** (route-scoped dispatch, the in_progress crash-recovery tier and
+its wisp probes, and the `gc hook` seam every hook path runs through —
+`ga-5736js`, `gas-kg6`), never when deciding which sessions still need to
+**exist** (pool demand and the assignee-scoped liveness tier stay
+transparent, or a parked bead's owner goes invisible). The assigned-ready tier
+drops the two holds only: it stays transparent to `human`, and the hook's
+strip is what refuses a `human` row it serves.
 
 Restoring a lost pool route is a **do** decision too. A pack that parks
 finished work on a hold usually clears its `gc.routed_to` at the same time,

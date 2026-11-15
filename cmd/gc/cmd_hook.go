@@ -1940,9 +1940,10 @@ func isSelfBlockedHookCandidate(item map[string]any) bool {
 	return false
 }
 
-// isHeldHookCandidate reports whether item carries a canonical dispatch hold
-// label (beadmeta.DispatchHoldLabels) — a bead deliberately parked because its
-// required next actor or condition is, by construction, not this session.
+// isHeldHookCandidate reports whether item carries a parked label
+// (beadmeta.ParkedLabels: a canonical dispatch hold, or bd's human label) — a
+// bead deliberately parked because its required next actor or condition is, by
+// construction, not this session.
 //
 // Serving one as work is never right for ANY hook path: the assignee cannot
 // advance it, and because the assignment is never released the same bead comes
@@ -1953,18 +1954,19 @@ func isSelfBlockedHookCandidate(item map[string]any) bool {
 // hold dimension is filtered here, in the one seam every hook path already runs
 // through (the claim, the cross-store federation, and plain `gc hook`).
 //
-// Only the two canonical values match: each label is trimmed and compared
-// whole, case-insensitively, against the shared beadmeta constants, so
-// unrelated labels that merely look hold-ish (`mpr-human-hold`, the routing
-// label `needs-mayor`) are ordinary work and must not be stranded.
+// Only the canonical values match: each label is trimmed and compared whole
+// against the shared beadmeta constants (the holds case-insensitively, human
+// exactly), so unrelated labels that merely look hold-ish (`needs-human`,
+// `human-hold`, `mpr-human-hold`, the routing label `needs-mayor`) are ordinary
+// work and must not be stranded.
 //
 // An absent or null labels field means "no labels", never "unknown" — bd emits
 // labels:null for an unlabeled bead — so this fails open exactly like the
 // is_blocked projection above it.
 //
 // Scope (ga-5736js): this filters what the hook SERVES as work, on every hook
-// path. The controller applies the same predicate (beadmeta.HasDispatchHold)
-// to assigned OPEN work, so a held OPEN row carries no wake readiness, does not
+// path. The controller applies the dispatch-hold half of the predicate
+// (beadmeta.HasDispatchHold) to assigned OPEN work, so a held OPEN row carries no wake readiness, does not
 // keep its assignee awake, and is not a drain-ack strand. The rest of the
 // assignment's accounting stays hold-transparent: the assigned-work snapshot,
 // orphan release, pool accounting and the in_progress tiers still count it, so
@@ -1980,11 +1982,11 @@ func isHeldHookCandidate(item map[string]any) bool {
 			labels = append(labels, label)
 		}
 	}
-	// One predicate for "held": the controller's wake-demand and drain-ack
-	// claimability gates (assignedOpenWorkHeld, classifyDemandRowClaimability)
-	// answer with the same function, so they cannot drift from what the hook
-	// actually refuses to serve.
-	return beadmeta.HasDispatchHold(labels)
+	// One predicate for "parked": it is the dispatch-hold predicate the
+	// controller's wake-demand and drain-ack claimability gates
+	// (assignedOpenWorkHeld, classifyDemandRowClaimability) answer with, plus
+	// the human label.
+	return beadmeta.HasParkedLabel(labels)
 }
 
 // isClosedHookCandidate reports whether item is a closed bead. Defense-in-depth
