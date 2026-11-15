@@ -19,7 +19,7 @@ func sweepClosedOrderTrackingRetentionAcrossStores(stores []beads.Store, now tim
 	return planClosedOrderTrackingRetentionAcrossStores(stores, now, policy, onlyOrders, orderTrackingRetentionRunBudget).execute()
 }
 
-func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (int, error) {
+func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (int, error) { //nolint:unparam // onlyOrders is nil at every current call site; kept for parity with the bounded variant
 	return sweepClosedOrderTrackingRetentionBounded(store, now, policy, onlyOrders, orderTrackingRetentionRunBudget)
 }
 
