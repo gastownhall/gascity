@@ -556,6 +556,14 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 		}
 	}
 
+	// Abandoned creates: present only when the session rows were read, so an
+	// absent block means unknown, never zero. Lite polls and a suspended city
+	// (which reads no store) leave it absent.
+	var stuckCreating *StatusStuckCreating
+	if !lite && !citySuspended && sessionSnapshot.measured {
+		stuckCreating = statusStuckCreatingBlock(sessionSnapshot)
+	}
+
 	uptime := int(time.Since(s.state.StartedAt()).Seconds())
 	versions := s.resolveComponentVersions()
 
@@ -595,7 +603,23 @@ func (s *Server) buildStatusBody(ctx context.Context, lite bool) StatusBody {
 		RigDetails:          rigDetails,
 		NamedSessionDetails: namedSessionDetails,
 		SessionCountsDetail: sessionCounts,
+		StuckCreating:       stuckCreating,
 	}
+}
+
+// statusStuckCreatingBlock projects a measured snapshot's abandoned creates
+// onto the wire block. Sessions is never nil, so a measured zero serializes as
+// [] and not null.
+func statusStuckCreatingBlock(snapshot statusSessionSnapshot) *StatusStuckCreating {
+	rows := make([]StatusStuckCreatingSession, 0, len(snapshot.stuckCreating))
+	for _, a := range snapshot.stuckCreating {
+		row := StatusStuckCreatingSession{ID: a.ID, Template: a.Template, State: string(a.State)}
+		if !a.Since.IsZero() {
+			row.Since = a.Since.UTC().Format(time.RFC3339)
+		}
+		rows = append(rows, row)
+	}
+	return &StatusStuckCreating{Sessions: rows, Complete: snapshot.complete}
 }
 
 type cityBeadsDiagnosticProvider interface {
@@ -717,6 +741,18 @@ type statusSessionSnapshot struct {
 	bySessionName map[string]statusSessionInfo
 	byTemplate    map[string][]statusSessionInfo
 	partialErrors []string
+	// measured says the session rows were actually read (or there is no city
+	// store, so nothing can be stuck). It is an explicit flag because it cannot
+	// be derived from partialErrors: a partial read that still carried rows is
+	// measured and has partial errors, a timeout is not measured and has them
+	// too.
+	measured bool
+	// complete is measured with no partial errors: the rows are every row.
+	complete bool
+	// stuckCreating is every abandoned create among the raw rows, taken before
+	// the closed, empty-name, archived and duplicate-name filters below drop
+	// them. Meaningful only when measured.
+	stuckCreating []session.AbandonedCreate
 }
 
 type statusSessionInfo struct {
@@ -831,7 +867,10 @@ func (s *Server) statusSessionSnapshot(ctx context.Context, st storeref.Stores) 
 		// what kept this mis-routing invisible.
 		if !beads.IsNilStore(st.Work()) {
 			snapshot.partialErrors = []string{"sessions: session-class bead store unavailable"}
+			return snapshot
 		}
+		// No city store at all: nothing can be stuck, which is a measurement.
+		snapshot.measured, snapshot.complete = true, true
 		return snapshot
 	}
 
@@ -892,6 +931,14 @@ func (s *Server) statusSessionSnapshot(ctx context.Context, st storeref.Stores) 
 	for _, partialErr := range partialErrors {
 		snapshot.partialErrors = append(snapshot.partialErrors, fmt.Sprintf("sessions: %s", partialErr))
 	}
+
+	snapshot.measured = true
+	snapshot.complete = len(partialErrors) == 0
+	var startupTimeout time.Duration
+	if cfg := s.state.Config(); cfg != nil {
+		startupTimeout = cfg.Session.StartupTimeoutDuration()
+	}
+	snapshot.stuckCreating = session.DetectAbandonedCreates(infos, time.Now(), startupTimeout)
 
 	seenSessionName := make(map[string]bool, len(infos))
 	for _, sessInfo := range infos {

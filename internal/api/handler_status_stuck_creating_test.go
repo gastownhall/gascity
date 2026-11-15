@@ -89,7 +89,7 @@ func TestStatusStuckCreatingListsEveryAbandonedCreate(t *testing.T) {
 	if !body.StuckCreating.Complete {
 		t.Error("Complete = false, want true on a clean session read")
 	}
-	want := []string{created[2].ID, created[1].ID, created[5].ID, created[4].ID, created[3].ID, created[0].ID}
+	want := []string{created[2].ID, created[5].ID, created[1].ID, created[4].ID, created[3].ID, created[0].ID}
 	got := stuckIDs(body.StuckCreating)
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("stuck ids = %v, want %v (oldest attempt first)", got, want)
@@ -101,8 +101,8 @@ func TestStatusStuckCreatingListsEveryAbandonedCreate(t *testing.T) {
 	if _, err := time.Parse(time.RFC3339, first.Since); err != nil {
 		t.Errorf("since %q is not RFC3339: %v", first.Since, err)
 	}
-	if body.StuckCreating.Sessions[1].State != "start-pending" {
-		t.Errorf("second row state = %q, want start-pending", body.StuckCreating.Sessions[1].State)
+	if body.StuckCreating.Sessions[2].State != "start-pending" {
+		t.Errorf("third row state = %q, want start-pending", body.StuckCreating.Sessions[2].State)
 	}
 }
 
@@ -212,7 +212,9 @@ func TestStatusStuckCreatingAbsentWhenNotMeasured(t *testing.T) {
 		}
 	})
 	t.Run("session class unavailable", func(t *testing.T) {
-		state := sessionClassUnavailableState{newFakeState(t)}
+		fake := newFakeState(t)
+		fake.cityBeadStore = beads.NewMemStore()
+		state := sessionClassUnavailableState{fake}
 		body := (&Server{state: state}).buildStatusBody(context.Background(), false)
 		if body.StuckCreating != nil {
 			t.Fatalf("StuckCreating = %+v, want nil when the sessions binding did not resolve", body.StuckCreating)

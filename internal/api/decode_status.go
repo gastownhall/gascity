@@ -1,6 +1,8 @@
 package api
 
 import (
+	"time"
+
 	"github.com/gastownhall/gascity/internal/api/genclient"
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -89,11 +91,39 @@ func statusViewFromGen(body *genclient.StatusBody) StatusView {
 		}
 		out.StoreHealth = &view
 	}
+	if body.StuckCreating != nil {
+		out.StuckCreating = statusStuckCreatingViewFromGen(body.StuckCreating)
+	}
 	if body.Beads != nil {
 		out.Beads = statusBeadsDiagnosticFromGen(body.Beads)
 	}
 	if body.ConditionalWrites != nil {
 		out.ConditionalWrites = statusConditionalWritesFromGen(body.ConditionalWrites)
+	}
+	return out
+}
+
+// statusStuckCreatingViewFromGen translates the generated abandoned-create
+// block. The caller passes only a present block: an absent one stays a nil
+// view (unknown) and never becomes an empty measured one. A null session list
+// decodes as empty; an unparseable since decodes as the zero time, which the
+// renderer shows as an unknown age.
+func statusStuckCreatingViewFromGen(g *genclient.StatusStuckCreating) *StatusStuckCreatingView {
+	out := &StatusStuckCreatingView{Sessions: []StatusStuckCreatingSessionView{}, Complete: g.Complete}
+	if g.Sessions == nil {
+		return out
+	}
+	for _, s := range *g.Sessions {
+		row := StatusStuckCreatingSessionView{ID: s.Id, State: string(s.State)}
+		if s.Template != nil {
+			row.Template = *s.Template
+		}
+		if s.Since != nil {
+			if t, err := time.Parse(time.RFC3339, *s.Since); err == nil {
+				row.Since = t
+			}
+		}
+		out.Sessions = append(out.Sessions, row)
 	}
 	return out
 }

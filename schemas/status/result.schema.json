@@ -339,6 +339,55 @@
         }
       }
     },
+    "stuck_creating": {
+      "type": "object",
+      "description": "Sessions whose in-flight create is abandoned (state creating or start-pending, no live lease, attempt stale). Absent means not measured (unknown), never zero. Present with complete=true is authoritative, and an empty list is a measured zero. Present with complete=false means a partial session read: the list is a lower bound.",
+      "additionalProperties": false,
+      "required": [
+        "sessions",
+        "complete"
+      ],
+      "properties": {
+        "sessions": {
+          "type": "array",
+          "description": "Every abandoned create found, oldest first. An empty array (never null) when none.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "state"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "Session bead id (the argument gc session close takes)."
+              },
+              "template": {
+                "type": "string",
+                "description": "Agent template the session was created for."
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "creating",
+                  "start-pending"
+                ],
+                "description": "Raw lifecycle state."
+              },
+              "since": {
+                "type": "string",
+                "description": "RFC3339 UTC start of the current create attempt. Omitted when the bead carries no anchor."
+              }
+            }
+          }
+        },
+        "complete": {
+          "type": "boolean",
+          "description": "True when the session read covered every session, so an empty list is a measured zero. False means a partial read: the list is a lower bound."
+        }
+      }
+    },
     "agents": {
       "type": "array",
       "description": "Configured agents visible to the city.",
