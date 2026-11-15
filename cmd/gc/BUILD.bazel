@@ -1063,6 +1063,7 @@ go_test(
         "api_state_wake_refusal_test.go",
         "apiroute_test.go",
         "assigned_hold_repro_test.go",
+        "assigned_human_parked_test.go",
         "assigned_work_class_binding_test.go",
         "assigned_work_defer_tracker_test.go",
         "assigned_work_hold_wake_test.go",

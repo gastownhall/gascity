@@ -116,16 +116,40 @@ func TestRouteScopedPoolDemandShellsExcludeHumanLabel(t *testing.T) {
 	}
 }
 
-func TestAssigneeScopedProbesStayHumanTransparent(t *testing.T) {
+// TestAssigneeScopedReadyProbesStayHumanTransparent: the assigned-ready tiers
+// answer "who EXISTS" alongside "what to DO" and keep serving a human-labeled
+// assignment; only the in_progress serve paths park it.
+func TestAssigneeScopedReadyProbesStayHumanTransparent(t *testing.T) {
 	for name, got := range map[string]string{
 		"ephemeralAssignedReadyProbeScript":       ephemeralAssignedReadyProbeScript("cand", QueryTopology{}),
-		"ephemeralAssignedInProgressProbeScript":  ephemeralAssignedInProgressProbeScript("cand", QueryTopology{}),
 		"assignedReadyTierCommand/bd104":          assignedReadyTierCommand("cand", QueryTopology{}),
 		"assignedReadyTierCommand/bd105":          assignedReadyTierCommand("cand", QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}}),
 		"assignedReadyTierCommand/bd105federated": assignedReadyTierCommand("cand", QueryTopology{Beads: BeadsConfig{BDCompatibility: BeadsBDCompatibility105}, FederatedReady: true}),
 	} {
 		if strings.Contains(got, `"human"`) {
-			t.Errorf("%s() = %q, assignee-scoped tier must stay human-transparent", name, got)
+			t.Errorf("%s() = %q, assigned-ready tier must stay human-transparent", name, got)
 		}
+	}
+}
+
+// TestInProgressServePathsCarryHumanLabel: the in_progress serve paths park a
+// human-labeled bead the way they park a dispatch hold.
+func TestInProgressServePathsCarryHumanLabel(t *testing.T) {
+	for name, got := range map[string]string{
+		"ephemeralAssignedInProgressProbeScript":                     ephemeralAssignedInProgressProbeScript("cand", QueryTopology{}),
+		"ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor": ephemeralAssignedInProgressProbeScriptDeferringGraphAnchor("cand", QueryTopology{}),
+		"heldLabelCountJQ": heldLabelCountJQ(),
+	} {
+		if !strings.Contains(got, `"human"`) {
+			t.Errorf("%s() = %q, missing the human label", name, got)
+		}
+	}
+}
+
+// TestPoolDemandServeRulesExcludeParkedLabels: the route-scoped rules read the
+// one shared list, and the list is the dispatch holds followed by human.
+func TestPoolDemandServeRulesExcludeParkedLabels(t *testing.T) {
+	if got := PoolDemandServeRulesForQuery().ExcludeLabels; !slices.Equal(got, beadmeta.ParkedLabels) {
+		t.Errorf("PoolDemandServeRulesForQuery().ExcludeLabels = %v, want beadmeta.ParkedLabels %v", got, beadmeta.ParkedLabels)
 	}
 }

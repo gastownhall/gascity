@@ -176,3 +176,77 @@ esac
 		t.Fatalf("unparseable bd list stdout was not served unchanged: got %q, want %q", out, blob)
 	}
 }
+
+// bd's native human label parks a bead for a person, and the crash-recovery
+// tier treats it exactly like a dispatch hold: re-serving the owner its own
+// human-labeled in_progress bead every tick starves the ready tiers behind it.
+// The tests below EXECUTE the generated shell against a fake bd, like the
+// dispatch-hold tests above.
+
+// TestInProgressTierFallsThroughWhenHumanLabeled: a human-labeled candidate
+// does not swallow the tick; the ready tier still serves the worker's other work.
+func TestInProgressTierFallsThroughWhenHumanLabeled(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; the work-query shell requires it")
+	}
+	script := standardAssignedWorkQueryScript(QueryTopology{}) + `printf "[]"`
+	out := runShellWithFakeBd(t, script, map[string]string{"GC_SESSION_ID": "sess-1"}, fakeBdHeldInProgress(beadmeta.HumanLabel))
+
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &rows); err != nil {
+		t.Fatalf("tier output is not a JSON array: %v (output %q)", err, out)
+	}
+	if len(rows) != 1 || rows[0]["id"] != "wk-2" {
+		t.Fatalf("human-labeled in_progress candidate did not fall through to the ready tier; got %q", out)
+	}
+}
+
+// TestInProgressTierServesHumanNearMissLabels is the negative control: the
+// match is the exact label, so look-alikes, a hold-ish routing label and a
+// null label list are all still served.
+func TestInProgressTierServesHumanNearMissLabels(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; the work-query shell requires it")
+	}
+	for _, labels := range []string{
+		`["needs-human"]`, `["human-hold"]`, `["mpr-human-hold"]`, `["needs-mayor"]`, `null`,
+	} {
+		t.Run(labels, func(t *testing.T) {
+			bdScript := `#!/bin/sh
+case "$1" in
+  list) printf '%s' '[{"id":"wk-1","status":"in_progress","assignee":"sess-1","labels":` + labels + `}]' ;;
+  show) printf '%s' '[{"id":"wk-1","status":"in_progress","dependencies":[]}]' ;;
+  *) printf '[]' ;;
+esac
+`
+			script := standardAssignedInProgressWorkQueryScript(QueryTopology{}) + `printf "[]"`
+			out := runShellWithFakeBd(t, script, map[string]string{"GC_SESSION_ID": "sess-1"}, bdScript)
+
+			var rows []map[string]any
+			if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &rows); err != nil {
+				t.Fatalf("tier output is not a JSON array: %v (output %q)", err, out)
+			}
+			if len(rows) != 1 || rows[0]["id"] != "wk-1" {
+				t.Fatalf("labels %s parked the bead; crash recovery must still serve it; got %q", labels, out)
+			}
+		})
+	}
+}
+
+// TestEphemeralInProgressProbeFallsThroughWhenHumanLabeled is the wisp probe's
+// twin of the Tier-1 test above.
+func TestEphemeralInProgressProbeFallsThroughWhenHumanLabeled(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq not available; the work-query shell requires it")
+	}
+	script := standardAssignedWorkQueryScript(QueryTopology{}) + `printf "[]"`
+	out := runShellWithFakeBd(t, script, map[string]string{"GC_SESSION_ID": "sess-1"}, fakeBdHeldEphemeralInProgress(beadmeta.HumanLabel))
+
+	var rows []map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &rows); err != nil {
+		t.Fatalf("tier output is not a JSON array: %v (output %q)", err, out)
+	}
+	if len(rows) != 1 || rows[0]["id"] != "wk-2" {
+		t.Fatalf("human-labeled ephemeral in_progress candidate did not fall through to the ready tier; got %q", out)
+	}
+}

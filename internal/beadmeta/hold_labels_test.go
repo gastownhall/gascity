@@ -64,3 +64,42 @@ func TestHasHumanLabel(t *testing.T) {
 		}
 	}
 }
+
+// TestParkedLabelsAreHoldsThenHuman pins the shared "what to DO" list: the
+// dispatch holds in order, then bd's human label, without aliasing or mutating
+// DispatchHoldLabels.
+func TestParkedLabelsAreHoldsThenHuman(t *testing.T) {
+	want := []string{HoldMayorLabel, HoldExternalLabel, HumanLabel}
+	if len(ParkedLabels) != len(want) {
+		t.Fatalf("ParkedLabels = %#v, want %#v", ParkedLabels, want)
+	}
+	for i, v := range want {
+		if ParkedLabels[i] != v {
+			t.Fatalf("ParkedLabels[%d] = %q, want %q", i, ParkedLabels[i], v)
+		}
+	}
+	if len(DispatchHoldLabels) != 2 {
+		t.Fatalf("DispatchHoldLabels = %#v, must stay the two canonical holds", DispatchHoldLabels)
+	}
+}
+
+func TestHasParkedLabel(t *testing.T) {
+	cases := []struct {
+		name   string
+		labels []string
+		want   bool
+	}{
+		{"nil", nil, false},
+		{"unrelated", []string{"mysql-cutover", "needs-mayor"}, false},
+		{"near misses", []string{"needs-human", "human-hold", "mpr-human-hold", "Human"}, false},
+		{"human", []string{"x", HumanLabel}, true},
+		{"human space trimmed", []string{" human "}, true},
+		{"hold mayor", []string{HoldMayorLabel}, true},
+		{"hold case and space folded", []string{"  Hold:External "}, true},
+	}
+	for _, tc := range cases {
+		if got := HasParkedLabel(tc.labels); got != tc.want {
+			t.Errorf("%s: HasParkedLabel(%q) = %v, want %v", tc.name, tc.labels, got, tc.want)
+		}
+	}
+}
