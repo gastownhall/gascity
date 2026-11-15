@@ -42,9 +42,20 @@ func SignalProcessGroup(cmd *exec.Cmd, sig syscall.Signal) error {
 // cannot, instead of returning nil and letting a caller record a stop that did
 // not happen.
 //
+// Once the grace period has run out, every error it returns satisfies
+// errors.Is([ErrProcessNotConfirmedDead]), which is what callers check to tell
+// an incomplete stop from a clean one. The wait after the kill is bounded by
+// [ManagedProcessReapGrace].
+//
 // Callers that own their child should use processgroup.TerminateManagedCommand,
 // which terminates the owning Job Object and confirms the tree is empty.
 func TerminateManagedProcess(cmd *exec.Cmd, done <-chan struct{}, grace time.Duration) error {
+	return terminateManagedProcessGraces(cmd, done, grace, ManagedProcessReapGrace)
+}
+
+// terminateManagedProcessGraces is TerminateManagedProcess with the post-kill
+// reap wait named, so tests can run it in milliseconds.
+func terminateManagedProcessGraces(cmd *exec.Cmd, done <-chan struct{}, grace, reapGrace time.Duration) error {
 	timer := time.NewTimer(grace)
 	defer timer.Stop()
 
@@ -57,10 +68,17 @@ func TerminateManagedProcess(cmd *exec.Cmd, done <-chan struct{}, grace time.Dur
 	if cmd == nil || cmd.Process == nil {
 		return nil
 	}
-	incomplete := fmt.Errorf("descendants of pid %d cannot be reaped through this entry point on Windows; use an owned process group", cmd.Process.Pid)
+	pid := cmd.Process.Pid
+	incomplete := fmt.Errorf("%w: descendants of pid %d cannot be reaped through this entry point on Windows; use an owned process group", ErrProcessNotConfirmedDead, pid)
 	if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
 		return errors.Join(incomplete, err)
 	}
-	<-done
-	return incomplete
+	reap := time.NewTimer(reapGrace)
+	defer reap.Stop()
+	select {
+	case <-done:
+		return incomplete
+	case <-reap.C:
+		return fmt.Errorf("%w: pid %d still running %v after kill", ErrProcessNotConfirmedDead, pid, reapGrace)
+	}
 }
