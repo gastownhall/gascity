@@ -492,10 +492,10 @@ The status values mean:
 | MAINT-027 Dolt preflight | inherited | - |
 | MAINT-028/029 orders lane, route delta | done / inherited | - |
 | MAINT-030 snapshots feed decisions | off until P3 (the v2 tick reads a cached snapshot for maintenance only) | - |
-| MAINT-031 corpse close | done: A21 and C3 (`kept_owners.tsv`) | - |
+| MAINT-031 corpse close | done: A21 (`armClose`, `reconcile_arms_close.go`) and C3 (`kept_owners.tsv`) | - |
 | MAINT-032/033/035/037 closed-bead reaper, process orphans, worktree reaper, extmsg reapers | inherited | `TestCityRuntimeTickV2RunsMaintenancePhasesOnly` |
-| MAINT-034 stale creating | done: A10 and C3 rollback (`kept_owners.tsv`) | - |
-| MAINT-036 drain-ack finalize | done: A4 and `reconcile_finalize.go` (D4) | - |
+| MAINT-034 stale creating | done: A10 (`armRollback`) and C3 rollback (`kept_owners.tsv`) | - |
+| MAINT-036 drain-ack finalize | done: A4 (`armStop`, `reconcile_arms_stop.go`) and `finalizePatch` (`reconcile_finalize.go`, D4) | - |
 | MAINT-038 `beadReconcileTick` gating | P2-4, P2-8, P2-9 | `TestCityRuntimeV2StartupSkipsLegacyBootReconcile`, `TestLegacySessionEntryGuardBlocksAndCountsUnderV2`, `TestV2LegacySessionEntriesReportedInTrace` |
 | MAINT-039/040/041/043 completions, wisp GC, services, convergence | inherited | `TestCityRuntimeTickV2RunsMaintenancePhasesOnly` |
 | MAINT-042 chat auto-suspend | refused under v2 until PAR-CHAT (`v2LatchRefusals`) | `TestV2LatchRefusesEachDeferredFeature` |

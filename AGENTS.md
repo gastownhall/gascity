@@ -27,7 +27,7 @@ next to that code; read the matching file before changing it.
 | Asked to run or try Gas City, not change it | README "Get it running" (no build) |
 | `internal/api/`, `internal/events/`, `internal/extmsg/`, CLI code that constructs events or calls the API client, the OpenAPI spec, or the dashboard | `internal/api/AGENTS.md` |
 | `internal/config/` (agent or rig config fields) | `internal/config/AGENTS.md` |
-| `internal/session/`, a legacy session-pass step | `internal/session/AGENTS.md` |
+| `internal/session/` | `internal/session/AGENTS.md` |
 | `internal/sessionlog/` | `internal/sessionlog/AGENTS.md` |
 | `internal/runtime/acp/` | `internal/runtime/acp/AGENTS.md` |
 | Session creation or lifecycle from `cmd/gc` or `internal/api` | `internal/worker/AGENTS.md` |
@@ -150,6 +150,8 @@ Violating any fails the build. Details live in the linked files.
 - **Agent config field sync.** A new `config.Agent` field is wired in every
   copy and merge site (`TestAgentFieldSync` and siblings;
   `internal/config/AGENTS.md`).
+- **Legacy session-pass parity.** Every legacy session-pass step names its
+  v2 counterpart (`internal/session/AGENTS.md`).
 
 **Session-first (completed `dd90ac0a` on Mar 8 2026).** The former Agent
 Protocol primitive was removed; responsibilities moved to
@@ -172,8 +174,6 @@ These decisions are final. Do not revisit them.
 - **Mayor is overseer, not worker.** The mayor plans; coding agents work.
 - **`internal/` packages for now.** SDK exports (`pkg/`) are future work.
   Everything is private to the `gc` binary until the API stabilizes.
-- **ZERO hardcoded roles.** Roles are pure configuration. No role name
-  appears in Go source code.
 
 ## Key design principles
 

@@ -7,8 +7,8 @@ import (
 )
 
 // pendingTriage is the marker for a key whose v2 answer waits on the
-// architect's per-item ruling (ga-a8dp0uk8).
-const pendingTriage = "ruling-pending:ga-a8dp0uk8: awaiting the architect's per-item ruling: a v2 writer, a ledger row or an accepted reason"
+// per-item ruling on ga-a8dp0uk8.
+const pendingTriage = "ruling-pending:ga-a8dp0uk8: awaiting the per-item ruling on ga-a8dp0uk8: a v2 writer, a ledger row or an accepted reason"
 
 // legacyOnlyMarkers names, for each registry key that only the legacy session
 // reconciler pass writes, where the v2 reconciler answers it: a ledger row
@@ -36,7 +36,7 @@ func buildLegacyOnlyMarkers() map[string]string {
 		"session_circuit_state", "session_circuit_reset_generation", "session_circuit_last_restart",
 		"session_circuit_last_progress", "session_circuit_last_observed", "session_circuit_progress_signature")
 	mark(pendingTriage,
-		"slept_at", "reset_committed_at", "stranded_event_emitted_at", beadmeta.InfraMigratedFromMetadataKey,
+		"slept_at", "stranded_event_emitted_at", beadmeta.InfraMigratedFromMetadataKey,
 		"mcp_identity", "mcp_servers_snapshot", "provider_terminal_error", "provider_terminal_error_at",
 		"session_health", "session_health_reason", "session_drainable",
 		"drain_reminder_at", "drain_reminder_count", "drain_reminder_drain", "drain_reminder_failed",

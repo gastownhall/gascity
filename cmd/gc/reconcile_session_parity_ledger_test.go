@@ -294,7 +294,7 @@ func TestParityLegacyOnlyTableCatches(t *testing.T) {
 		{"duplicate id", append([]parityLegacyRow{good}, good), "duplicate id"},
 		{"no witness", mut(func(r *parityLegacyRow) { r.Witness = nil }), "needs legacy symbols and v2 witness symbols"},
 		{"no status", mut(func(r *parityLegacyRow) { r.V2Status = " " }), "no v2 status"},
-		{"malformed owner", mut(func(r *parityLegacyRow) { r.Owner = "the C5b follow-up PR" }), "is not a bead id"},
+		{"malformed owner", mut(func(r *parityLegacyRow) { r.Owner = "the follow-up PR" }), "is not a bead id"},
 		{"accepted without a reason", mut(func(r *parityLegacyRow) { r.Disposition, r.Owner = legacyOnlyAccepted, "" }), "accepted row has no reason"},
 		{"unknown disposition", mut(func(r *parityLegacyRow) { r.Disposition = "later" }), "neither open nor accepted"},
 		{"legacy symbol gone", mut(func(r *parityLegacyRow) { r.Legacy = []string{"nonexistentStep"} }), "legacy symbol nonexistentStep is no longer declared"},
@@ -467,6 +467,7 @@ var eventFileClass = map[string]string{
 	"session_list_events.go":                fileOutside,
 	"session_pool_drain_deadline.go":        fileLegacy,
 	"session_reconciler.go":                 fileLegacy,
+	"startup_health_backoff.go":             fileOutside, // shared helper: v2 reconcile_startup_health.go and legacy session_lifecycle_parallel.go both call it
 	"storage_boot.go":                       fileOutside,
 	"store_rollout.go":                      fileOutside,
 	"work_ladder_lane.go":                   fileOutside,
@@ -484,7 +485,7 @@ var legacyEventCover = map[string]string{
 	"SessionWakeRefused":                    "ledger:PAR-WAKEREF",
 	"SessionPoolSlotRetiredAtDrainDeadline": "ledger:PAR-DRAINDL",
 	"ProviderHealthGateAlert":               "ledger:PAR-PROVHEALTH",
-	"SessionResetStalled":                   "ruling-pending:ga-a8dp0uk8: awaiting the architect's per-item ruling on session.reset_stalled",
+	"SessionResetStalled":                   "ruling-pending:ga-a8dp0uk8: awaiting the per-item ruling on session.reset_stalled",
 }
 
 // eventEmission is what one file's literals say.
