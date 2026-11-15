@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 const (
@@ -551,3 +552,35 @@ func assertNoEventType(t *testing.T, got []events.Event, eventType string) {
 }
 
 var _ runtime.Provider = (*stagedHandoffStoppedProvider)(nil)
+
+// TestMintedButUnstartedTokenDoesNotReleaseStagedBrief puts the row in the
+// state preWakePatch leaves before the runtime starts: a freshly minted
+// instance_token, state creating with a pending-create stamp, and a runtime
+// that does not carry the new token. A differing token alone is not proof a
+// successor runs, so the brief stays staged.
+func TestMintedButUnstartedTokenDoesNotReleaseStagedBrief(t *testing.T) {
+	env, sessionBead, message := newStagedSuccessorReconcileScenario(t, "origin-instance", "origin-instance")
+	recorder := events.NewFake()
+	env.rec = recorder
+
+	now := env.clk.Now().UTC().Format(time.RFC3339)
+	env.setSessionMetadata(&sessionBead, map[string]string{
+		"instance_token":            "minted-instance",
+		"state":                     "creating",
+		"pending_create_started_at": now,
+		"pending_create_claim":      "true",
+		"last_woke_at":              now,
+	})
+
+	rows := sessionpkg.ReconcileRowsFromBeads([]beads.Bead{sessionBead})
+	if released, _ := releaseStagedSelfHandoffs(beads.MailStore{Store: env.store}, beads.SessionStore{Store: env.store}, rows, env.cfg, env.clk, recorder); released != 0 {
+		t.Fatalf("releaseStagedSelfHandoffs released %d briefs to a token no runtime started under", released)
+	}
+	env.reconcile([]beads.Bead{sessionBead})
+
+	assertHandoffProvisionalRecord(t, mustGet(t, env.store, message.ID), "origin-instance")
+	if visible, err := newTestBeadMail(env.store).CheckAutoHandoffs([]string{"worker"}); err != nil || len(visible) != 0 {
+		t.Fatalf("CheckAutoHandoffs before the successor started = (%#v, %v), want nothing", visible, err)
+	}
+	assertEventCount(t, recorder.Events, redSessionHandoffReleasedEvent, 0)
+}

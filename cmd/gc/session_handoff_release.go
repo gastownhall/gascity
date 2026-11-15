@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -31,8 +32,15 @@ import (
 //
 // A staged handoff is released only when the session bead's current
 // instance_token differs from the token recorded on the message at staging
-// time -- proof a later, genuine successor incarnation has adopted the
-// session, never the incarnation that staged it. Absent that proof, a
+// time and the row shows a confirmed start (sessionStartConfirmed) -- proof a
+// later, genuine successor incarnation runs the session, never the
+// incarnation that staged it nor a token minted for a start that has not
+// happened. A brief that a later staging closed or superseded is never
+// released or written off. Before either write, the row is re-read live and
+// the write is skipped unless the row still points at the evaluated brief
+// and has not written it off; where the sessions store resolves a
+// conditional writer, the write itself is conditional too
+// (clearStagedHandoffPointer, UpdateIfMatch). Absent that proof, a
 // handoff stays staged until either a successor arrives or
 // controllerRestartTimeout(cfg) elapses since it was staged, at which point
 // it is marked failed (audited via handoffReleaseAttemptedAtKey so a later
@@ -70,10 +78,39 @@ func releaseStagedSelfHandoffs(mailStore beads.MailStore, sessions beads.Session
 			log.Printf("releaseStagedSelfHandoffs: loading staged message %s for session %s: %v", messageID, sessionAddress, err)
 			continue
 		}
+		if message.Status == "closed" || strings.TrimSpace(message.Metadata[mail.SupersededByMetadataKey]) != "" {
+			// A later staging superseded this brief after the tick's snapshot
+			// was taken. It is terminal: never release it or write it off.
+			continue
+		}
 		currentToken := strings.TrimSpace(row.Info.InstanceToken)
 		stagedForToken := message.Metadata[mail.StagedForTokenMetadataKey]
+		successorStarted := currentToken != "" && currentToken != stagedForToken && sessionStartConfirmed(row.Info)
 
-		if currentToken != "" && currentToken != stagedForToken {
+		var stagedAt time.Time
+		if !successorStarted {
+			stagedAt, err = time.Parse(time.RFC3339, strings.TrimSpace(row.Info.HandoffStageCommittedAt))
+			if err != nil || now.Sub(stagedAt) < controllerRestartTimeout(cfg) {
+				// Not timed out yet (or no parseable stage time to measure from):
+				// wait for a successor on a later tick.
+				continue
+			}
+		}
+
+		// The row is this tick's snapshot; gc handoff may have restaged since.
+		// Re-read it live and act only while it still points at the brief
+		// evaluated above and nothing has written that brief off.
+		live, ok := liveStagedHandoffRow(sessions, sessionID, messageID, sessionAddress)
+		if !ok {
+			continue
+		}
+		writer, _, err := beads.ResolveConditionalWriter(sessions)
+		if err != nil {
+			log.Printf("releaseStagedSelfHandoffs: resolving conditional writer for session %s: %v", sessionAddress, err)
+			continue
+		}
+
+		if successorStarted {
 			if err := mailStore.Update(message.ID, beads.UpdateOpts{
 				RemoveLabels: []string{mail.StagedHandoffLabel},
 				Metadata:     map[string]string{mail.StagedMetadataKey: "false"},
@@ -81,10 +118,7 @@ func releaseStagedSelfHandoffs(mailStore beads.MailStore, sessions beads.Session
 				log.Printf("releaseStagedSelfHandoffs: releasing staged message %s for session %s: %v", message.ID, sessionAddress, err)
 				continue
 			}
-			if err := sessions.SetMetadataBatch(sessionID, map[string]string{
-				handoffStagedMessageIDKey:  "",
-				handoffStageCommittedAtKey: "",
-			}); err != nil {
+			if err := clearStagedHandoffPointer(sessions, writer, live, messageID); err != nil {
 				log.Printf("releaseStagedSelfHandoffs: clearing staged markers on session %s: %v", sessionAddress, err)
 				continue
 			}
@@ -100,15 +134,13 @@ func releaseStagedSelfHandoffs(mailStore beads.MailStore, sessions beads.Session
 			continue
 		}
 
-		stagedAt, err := time.Parse(time.RFC3339, strings.TrimSpace(row.Info.HandoffStageCommittedAt))
-		if err != nil || now.Sub(stagedAt) < controllerRestartTimeout(cfg) {
-			// Not timed out yet (or no parseable stage time to measure from):
-			// wait for a successor on a later tick.
-			continue
+		marker := map[string]string{handoffReleaseAttemptedAtKey: now.Format(time.RFC3339)}
+		if writer != nil {
+			err = writer.UpdateIfMatch(sessionID, live.Revision, beads.UpdateOpts{Metadata: marker})
+		} else {
+			err = sessions.SetMetadataBatch(sessionID, marker)
 		}
-		if err := sessions.SetMetadataBatch(sessionID, map[string]string{
-			handoffReleaseAttemptedAtKey: now.Format(time.RFC3339),
-		}); err != nil {
+		if err != nil {
 			log.Printf("releaseStagedSelfHandoffs: recording release-attempt for session %s: %v", sessionAddress, err)
 			continue
 		}
@@ -119,4 +151,71 @@ func releaseStagedSelfHandoffs(mailStore beads.MailStore, sessions beads.Session
 		failed++
 	}
 	return released, failed
+}
+
+// liveStagedHandoffRow re-reads the session row through the live handle and
+// returns it only while it still points at messageID and carries no
+// release-attempt marker. Anything else means the tick's snapshot is stale (a
+// restage landed, or an earlier pass wrote the brief off), so the caller
+// leaves the row alone this tick.
+func liveStagedHandoffRow(sessions beads.SessionStore, sessionID, messageID, sessionAddress string) (beads.Bead, bool) {
+	live, err := beads.HandlesFor(sessions).Live.Get(sessionID)
+	if err != nil {
+		log.Printf("releaseStagedSelfHandoffs: re-reading session %s: %v", sessionAddress, err)
+		return beads.Bead{}, false
+	}
+	if pointer := strings.TrimSpace(live.Metadata[handoffStagedMessageIDKey]); pointer != messageID {
+		log.Printf("releaseStagedSelfHandoffs: session %s now stages %q, not %s; skipping the stale snapshot this tick", sessionAddress, pointer, messageID)
+		return beads.Bead{}, false
+	}
+	if strings.TrimSpace(live.Metadata[handoffReleaseAttemptedAtKey]) != "" {
+		log.Printf("releaseStagedSelfHandoffs: session %s already wrote off staged message %s; skipping the stale snapshot this tick", sessionAddress, messageID)
+		return beads.Bead{}, false
+	}
+	return live, true
+}
+
+// clearStagedHandoffPointer clears the session's staged-brief pointer and its
+// stage time. With a conditional writer it swaps the pointer only while it
+// still names messageID, and clears the stage time only after that swap wins
+// and only while it is still the value live read, so a newer brief's pointer
+// is never wiped. Without one it writes both keys, after the caller's live
+// re-read.
+func clearStagedHandoffPointer(sessions beads.SessionStore, writer beads.ConditionalWriter, live beads.Bead, messageID string) error {
+	if writer == nil {
+		return sessions.SetMetadataBatch(live.ID, map[string]string{
+			handoffStagedMessageIDKey:  "",
+			handoffStageCommittedAtKey: "",
+		})
+	}
+	swapped, err := writer.CompareAndSetMetadataKey(live.ID, handoffStagedMessageIDKey, messageID, "")
+	if err != nil {
+		return err
+	}
+	if !swapped {
+		return fmt.Errorf("session %s no longer stages %s", live.ID, messageID)
+	}
+	if _, err := writer.CompareAndSetMetadataKey(live.ID, handoffStageCommittedAtKey, live.Metadata[handoffStageCommittedAtKey], ""); err != nil {
+		return err
+	}
+	return nil
+}
+
+// sessionStartConfirmed reports whether info shows a confirmed runtime start:
+// state active (or its awake alias) with no pending-create claim or
+// pending-create start time, the state ConfirmStartedPatch and
+// CommitStartedPatch leave. preWakePatch mints the successor's instance_token
+// before the runtime starts and leaves the row creating with a
+// pending_create_started_at stamp, so a differing token alone is not proof a
+// successor runs. Of the plan's two options this takes the start-confirmed
+// predicate read from the projected Info, which needs no extra store or
+// runtime read; awake alone is not enough, because a heal can mark a
+// still-claimed creation awake before the provider start returns.
+func sessionStartConfirmed(info sessionpkg.Info) bool {
+	switch info.State {
+	case sessionpkg.StateActive, sessionpkg.StateAwake:
+	default:
+		return false
+	}
+	return !info.PendingCreateClaim && strings.TrimSpace(info.PendingCreateStartedAt) == ""
 }

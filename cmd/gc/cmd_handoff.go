@@ -709,11 +709,19 @@ func createHandoffMailWithDedup(msgStore, sessStore beads.Store, rec events.Reco
 		return msg, true, true
 	}
 	if stagedForToken != "" {
+		// The create above already carried mail.StagedHandoffLabel, which hides
+		// the brief on every mail surface from its first persisted state. This
+		// write records the token only a successor may release it to; if it
+		// fails, the brief is still hidden by its label, and it is closed so no
+		// open, unreferenced brief is left behind.
 		if err := msgStore.SetMetadataBatch(msg.ID, map[string]string{
 			mail.StagedMetadataKey:         "true",
 			mail.StagedForTokenMetadataKey: stagedForToken,
 		}); err != nil {
 			fmt.Fprintf(stderr, "gc handoff: staging mail: %v\n", err) //nolint:errcheck // best-effort stderr
+			if closeErr := msgStore.Close(msg.ID); closeErr != nil {
+				fmt.Fprintf(stderr, "gc handoff: closing unstaged brief %s: %v\n", msg.ID, closeErr) //nolint:errcheck // best-effort stderr
+			}
 			return mail.Message{}, false, false
 		}
 		return msg, false, true

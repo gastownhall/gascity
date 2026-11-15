@@ -526,3 +526,76 @@ func adoptHandoffSuccessor(t *testing.T, env *reconcilerTestEnv, sessionBead *be
 		t.Fatalf("SetMeta(GC_INSTANCE_TOKEN): %v", err)
 	}
 }
+
+// TestStaleTimeoutTickDoesNotWriteOffRestagedBrief runs the release on rows
+// snapshotted while brief A had timed out, after gc handoff restaged to B.
+// The stale tick must not stamp B's row as written off, so B is still released
+// once a successor arrives.
+func TestStaleTimeoutTickDoesNotWriteOffRestagedBrief(t *testing.T) {
+	env, sessionBead := newHandoffReconcileSession(t, "origin-instance")
+	recorder := events.NewFake()
+	env.rec = recorder
+
+	mustStageSelfHandoff(t, env.store, recorder, nil, "first brief")
+	first := onlyOpenHandoffMessage(t, env.store)
+	env.setSessionMetadata(&sessionBead, map[string]string{
+		redHandoffStageCommittedAtKey: env.clk.Now().Add(-controllerRestartTimeout(env.cfg) - time.Second).Format(time.RFC3339),
+	})
+	snapshot, err := env.store.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("get session snapshot: %v", err)
+	}
+	staleRows := sessionpkg.ReconcileRowsFromBeads([]beads.Bead{snapshot})
+
+	mustStageSelfHandoff(t, env.store, recorder, nil, "second brief")
+	second := onlyOpenHandoffMessage(t, env.store)
+	assertHandoffSuperseded(t, env.store, first.ID, second.ID)
+
+	released, failed := releaseStagedSelfHandoffs(beads.MailStore{Store: env.store}, beads.SessionStore{Store: env.store}, staleRows, env.cfg, env.clk, recorder)
+	if released != 0 || failed != 0 {
+		t.Fatalf("stale tick = (released=%d, failed=%d), want (0, 0)", released, failed)
+	}
+	restaged := mustGet(t, env.store, sessionBead.ID)
+	if marker := restaged.Metadata[redHandoffReleaseAttemptedAtKey]; marker != "" {
+		t.Fatalf("stale timeout tick wrote off the restaged brief: marker %q", marker)
+	}
+	assertSessionStagesHandoff(t, env.store, sessionBead.ID, second.ID)
+	assertEventCount(t, recorder.Events, redSessionHandoffFailedEvent, 0)
+
+	adoptHandoffSuccessor(t, env, &restaged, "late-successor-instance")
+	env.reconcile([]beads.Bead{restaged})
+	assertHandoffReleased(t, env.store, sessionBead.ID, second.ID)
+}
+
+// TestStaleReleaseTickDoesNotClearNewerPointer runs the release on rows
+// snapshotted while brief A was releasable, after gc handoff restaged to B.
+// The stale tick must leave the pointer naming B and must not release A,
+// which the restage closed and superseded.
+func TestStaleReleaseTickDoesNotClearNewerPointer(t *testing.T) {
+	env, sessionBead := newHandoffReconcileSession(t, "origin-instance")
+	recorder := events.NewFake()
+	env.rec = recorder
+
+	mustStageSelfHandoff(t, env.store, recorder, nil, "first brief")
+	first := onlyOpenHandoffMessage(t, env.store)
+	// The tick saw a successor already holding the session, so A was
+	// releasable in its snapshot.
+	snapshot, err := env.store.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("get session snapshot: %v", err)
+	}
+	snapshot.Metadata["instance_token"] = "successor-instance"
+	staleRows := sessionpkg.ReconcileRowsFromBeads([]beads.Bead{snapshot})
+
+	mustStageSelfHandoff(t, env.store, recorder, nil, "second brief")
+	second := onlyOpenHandoffMessage(t, env.store)
+
+	released, failed := releaseStagedSelfHandoffs(beads.MailStore{Store: env.store}, beads.SessionStore{Store: env.store}, staleRows, env.cfg, env.clk, recorder)
+	if released != 0 || failed != 0 {
+		t.Fatalf("stale tick = (released=%d, failed=%d), want (0, 0)", released, failed)
+	}
+	assertSessionStagesHandoff(t, env.store, sessionBead.ID, second.ID)
+	assertHandoffSuperseded(t, env.store, first.ID, second.ID)
+	assertHandoffProvisionalRecord(t, mustGet(t, env.store, second.ID), "origin-instance")
+	assertEventCount(t, recorder.Events, redSessionHandoffReleasedEvent, 0)
+}

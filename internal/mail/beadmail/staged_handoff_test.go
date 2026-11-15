@@ -16,6 +16,21 @@ const (
 
 func newStagedHandoff(t *testing.T) (*Provider, *beads.MemStore, mail.Message) {
 	t.Helper()
+	provider, store, message := newLabelOnlyStagedHandoff(t)
+	if err := store.SetMetadataBatch(message.ID, map[string]string{
+		redStagedHandoffMetadataKey: "true",
+		redStagedForTokenKey:        "origin-instance",
+	}); err != nil {
+		t.Fatalf("stage handoff metadata: %v", err)
+	}
+	return provider, store, message
+}
+
+// newLabelOnlyStagedHandoff creates a staged brief as the create alone leaves
+// it: the staged label is on the bead, but the separate write that sets
+// mail.staged has not landed yet.
+func newLabelOnlyStagedHandoff(t *testing.T) (*Provider, *beads.MemStore, mail.Message) {
+	t.Helper()
 	store := beads.NewMemStore()
 	provider := newTestProvider(store)
 	message, _, err := provider.SendHandoff(mail.HandoffIntent{
@@ -32,12 +47,6 @@ func newStagedHandoff(t *testing.T) (*Provider, *beads.MemStore, mail.Message) {
 	})
 	if err != nil {
 		t.Fatalf("SendHandoff: %v", err)
-	}
-	if err := store.SetMetadataBatch(message.ID, map[string]string{
-		redStagedHandoffMetadataKey: "true",
-		redStagedForTokenKey:        "origin-instance",
-	}); err != nil {
-		t.Fatalf("stage handoff metadata: %v", err)
 	}
 	return provider, store, message
 }
@@ -131,11 +140,47 @@ func TestStagedHandoffIsInvisibleAcrossEveryMailReadSurface(t *testing.T) {
 		},
 	}
 
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			provider, _, message := newStagedHandoff(t)
-			test.check(t, provider, message)
+	shapes := []struct {
+		name  string
+		stage func(t *testing.T) (*Provider, *beads.MemStore, mail.Message)
+	}{
+		{name: "label and metadata", stage: newStagedHandoff},
+		{name: "label before metadata", stage: newLabelOnlyStagedHandoff},
+	}
+	for _, shape := range shapes {
+		t.Run(shape.name, func(t *testing.T) {
+			for _, test := range tests {
+				t.Run(test.name, func(t *testing.T) {
+					provider, _, message := shape.stage(t)
+					test.check(t, provider, message)
+				})
+			}
 		})
+	}
+}
+
+func TestReleasedStagedHandoffIsVisible(t *testing.T) {
+	provider, store, message := newStagedHandoff(t)
+	if err := store.Update(message.ID, beads.UpdateOpts{
+		RemoveLabels: []string{redStagedHandoffLabel},
+		Metadata:     map[string]string{redStagedHandoffMetadataKey: "false"},
+	}); err != nil {
+		t.Fatalf("release handoff: %v", err)
+	}
+
+	checked, err := provider.Check("worker")
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if len(checked) != 1 || checked[0].ID != message.ID {
+		t.Fatalf("Check = %#v, want released handoff %q", checked, message.ID)
+	}
+	auto, err := provider.CheckAutoHandoffs([]string{"worker"})
+	if err != nil {
+		t.Fatalf("CheckAutoHandoffs: %v", err)
+	}
+	if len(auto) != 1 || auto[0].ID != message.ID {
+		t.Fatalf("CheckAutoHandoffs = %#v, want released handoff %q", auto, message.ID)
 	}
 }
 

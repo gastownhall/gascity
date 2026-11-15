@@ -953,10 +953,15 @@ func isRemovedMessageBead(b beads.Bead) bool {
 // isStagedHandoff reports whether b is a self-handoff message bead staged
 // durably ahead of a restart request. A staged message remains open in the
 // store but must be invisible on every read surface until the reconciler
-// releases it to a genuine successor incarnation (flipping
-// [stagedHandoffMetadataKey] from "true" to "false").
+// releases it to a genuine successor incarnation.
+//
+// Either marker hides it. [mail.StagedHandoffLabel] is written in the same
+// create as the bead, so the brief is hidden from its first persisted state,
+// before the separate write that sets [stagedHandoffMetadataKey] to "true".
+// Release removes the label and flips the metadata to "false", so a released
+// brief carries neither; a superseded brief keeps both and stays hidden.
 func isStagedHandoff(b beads.Bead) bool {
-	return b.Metadata[stagedHandoffMetadataKey] == "true"
+	return b.Metadata[stagedHandoffMetadataKey] == "true" || hasLabel(b.Labels, mail.StagedHandoffLabel)
 }
 
 // deriveReplyTitle returns a non-empty title for a reply message. Callers
