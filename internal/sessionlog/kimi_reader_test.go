@@ -635,6 +635,34 @@ func TestKimiDiscoveredPathsStayUnderLexicalSearchRoot(t *testing.T) {
 	}
 }
 
+// A relative and an absolute spelling of one search root reach one transcript,
+// so they are one session: the unambiguous lookup must not report two. The
+// returned path still keeps the caller's own (lexical) spelling of the root.
+func TestFindKimiSessionFileIfUnambiguousIgnoresRootSpelling(t *testing.T) {
+	isolateKimiSearchRoots(t)
+	absRoot := t.TempDir()
+	t.Chdir(filepath.Dir(absRoot))
+	relRoot := filepath.Base(absRoot)
+	workDir := "/tmp/gascity/phase1/kimi-spelling"
+	workHash := kimiWorkDirHash(workDir)
+	const sessionID = "session-key"
+	writeKimiContext(t, filepath.Join(absRoot, workHash, sessionID, "context.jsonl"), []string{
+		`{"role":"user","content":"spelling"}`,
+	})
+
+	if got, want := FindKimiSessionFileIfUnambiguous([]string{relRoot}, workDir),
+		filepath.Join(relRoot, workHash, sessionID, "context.jsonl"); got != want {
+		t.Errorf("FindKimiSessionFileIfUnambiguous(relative root) = %q, want lexical %q", got, want)
+	}
+	got := FindKimiSessionFileIfUnambiguous([]string{relRoot, absRoot}, workDir)
+	if got == "" {
+		t.Fatal("FindKimiSessionFileIfUnambiguous(relative and absolute spelling of one root) = \"\", want the one transcript (false ambiguity)")
+	}
+	if want := filepath.Join(absRoot, workHash, sessionID, "context.jsonl"); !samePath(got, want) {
+		t.Errorf("FindKimiSessionFileIfUnambiguous() = %q, want the transcript at %q", got, want)
+	}
+}
+
 // Lexical recursion must keep the canonical-keyed cycle protection: a link
 // from the search root to itself and a link from an account root back to the
 // search root both resolve to an already-visited directory.
