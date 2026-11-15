@@ -2279,6 +2279,130 @@ func TestOrderTrackingSweepWatchdogClosesAllStaleTracking(t *testing.T) {
 	}
 }
 
+// An exec order that runs past the watchdog's stale window is still in flight:
+// its tracking bead is the order's single-flight gate, so the watchdog must
+// leave it open while this controller runs the dispatch, or the next due tick
+// fires a second run of the order beside the first. That holds across a
+// dispatcher rebuild (reload or rescan) that lands while the run is in flight.
+func TestOrderTrackingSweepWatchdogSkipsTrackingOfAnInFlightDispatch(t *testing.T) {
+	for _, rebuild := range []bool{false, true} {
+		for _, pass := range staleWatchdogPasses {
+			name := pass.name
+			if rebuild {
+				name += " after a dispatcher rebuild"
+			}
+			t.Run(name, func(t *testing.T) {
+				store := beads.NewMemStore()
+				order := orders.Order{
+					Name:     "long-exec",
+					Trigger:  "cooldown",
+					Interval: "1m",
+					Exec:     "scripts/long.sh",
+					Timeout:  "1h",
+				}
+				var starts atomic.Int32
+				started := make(chan struct{}, 2)
+				release := make(chan struct{})
+				newDispatcher := func() *memoryOrderDispatcher {
+					return &memoryOrderDispatcher{
+						aa:      []orders.Order{order},
+						storeFn: func(_ execStoreTarget) (beads.Store, error) { return store, nil },
+						execRun: func(ctx context.Context, _, _ string, _ []string) ([]byte, error) {
+							starts.Add(1)
+							started <- struct{}{}
+							select {
+							case <-release:
+							case <-ctx.Done():
+							}
+							return nil, nil
+						},
+						rec:    &memRecorder{},
+						stderr: lockedStderr(&bytes.Buffer{}),
+						cfg:    &config.City{},
+					}
+				}
+				first := newDispatcher()
+				cr := &CityRuntime{
+					cityName:            "test-city",
+					cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+					standaloneCityStore: store,
+					od:                  first,
+					stdout:              io.Discard,
+					stderr:              io.Discard,
+					logPrefix:           "gc test",
+				}
+				cityDir := t.TempDir()
+				start := time.Now()
+				first.dispatch(context.Background(), cityDir, start)
+				awaitClose(t, started, "first exec run start")
+				defer func() {
+					close(release)
+					first.drain(context.Background())
+					if live, ok := cr.od.(*memoryOrderDispatcher); ok {
+						live.drain(context.Background())
+					}
+				}()
+				open, err := store.List(beads.ListQuery{Label: labelOrderTracking})
+				if err != nil || len(open) != 1 {
+					t.Fatalf("tracking beads after the first dispatch = %d (err %v), want 1", len(open), err)
+				}
+				trackingID := open[0].ID
+
+				if rebuild {
+					cr.replaceOrderDispatcher(newDispatcher())
+				}
+				runStaleWatchdogPass(cr, pass.read, start.Add(orderTrackingSweepWatchdogStaleAfter+time.Minute))
+				if got := statusOf(t, store, trackingID); got == "closed" {
+					t.Fatalf("tracking bead %s of the running dispatch = %q after the watchdog pass, want it left open while the run is in flight", trackingID, got)
+				}
+
+				cr.od.dispatch(context.Background(), cityDir, start.Add(orderTrackingSweepWatchdogStaleAfter+2*time.Minute))
+				all, err := store.List(beads.ListQuery{Label: labelOrderTracking, IncludeClosed: true})
+				if err != nil {
+					t.Fatalf("List(tracking): %v", err)
+				}
+				if len(all) != 1 || starts.Load() != 1 {
+					t.Fatalf("tracking beads = %d, exec starts = %d after the next due tick, want 1 and 1: the order was dispatched again while its first run was in flight", len(all), starts.Load())
+				}
+			})
+		}
+	}
+}
+
+// Once a dispatch has finished, a tracking bead it failed to close is no
+// longer protected: the watchdog closes it at the stale window as before.
+func TestOrderTrackingSweepWatchdogClosesTrackingOfAFinishedDispatch(t *testing.T) {
+	store := beads.NewMemStore()
+	m := &memoryOrderDispatcher{
+		storeFn: func(_ execStoreTarget) (beads.Store, error) { return store, nil },
+		rec:     &memRecorder{},
+		stderr:  lockedStderr(&bytes.Buffer{}),
+		cfg:     &config.City{},
+	}
+	tracking, err := store.Create(beads.Bead{
+		Title:  "order:long-exec",
+		Labels: []string{"order-run:long-exec", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create(tracking): %v", err)
+	}
+	done := m.trackInflightRun(tracking.ID, nil)
+	done()
+	cr := &CityRuntime{
+		cityName:            "test-city",
+		cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+		standaloneCityStore: store,
+		od:                  m,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+		logPrefix:           "gc test",
+	}
+	cr.runOrderTrackingSweepWatchdog(cr.cfg, tracking.CreatedAt.Add(orderTrackingSweepWatchdogStaleAfter+time.Second))
+	if got := statusOf(t, store, tracking.ID); got != "closed" {
+		t.Fatalf("tracking bead of a finished dispatch = %q after the watchdog pass, want closed", got)
+	}
+}
+
 // policyWrappedPrimedCache builds the production controller store stack: a
 // bead-policy wrapper over a CachingStore fully primed to its live snapshot.
 // Order-tracking beads the dispatcher writes through its uncached handle land

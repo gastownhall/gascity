@@ -2130,7 +2130,8 @@ func (cr *CityRuntime) rescanOrderDispatcherIfDue(cityRoot string, cfg *config.C
 
 // replaceOrderDispatcher installs next as the active order dispatcher, carrying
 // warm last-run data, active gate-backoff state, open-work suppression
-// streaks, event floors and starts, and already-reported inapplicable orders from the outgoing dispatcher so a rebuild (reload or rescan) reuses
+// streaks, event floors and starts, already-reported inapplicable orders, and the
+// set of runs still in flight from the outgoing dispatcher so a rebuild (reload or rescan) reuses
 // them instead of cold-starting (#3201).
 // Call after draining the outgoing dispatcher.
 func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
@@ -2141,6 +2142,7 @@ func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
 			nextMem.carryOpenWorkSuppressionFrom(prev)
 			nextMem.carryEventFloorsFrom(prev)
 			nextMem.carryInapplicableReportsFrom(prev)
+			nextMem.carryInflightRunsFrom(prev)
 		}
 	}
 	cr.od = next
@@ -2280,7 +2282,14 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(cfg *config.City, now time.
 	if !now.Before(cr.orderSweepWatchdogNotClosedDue) {
 		read = staleTrackingReadNotClosed
 	}
-	result, sweepErr := sweepStaleOrderTrackingAcrossStoresLimit(stores, nil, now, orderTrackingSweepWatchdogStaleAfter, nil, orderTrackingWatchdogMetadataInitiator, false, orderTrackingSweepCloseBudget, read)
+	// The live dispatcher's in-flight set also holds the runs of the
+	// dispatchers it replaced (carryInflightRunsFrom), so a run that outlives
+	// a rebuild keeps its gate.
+	var inFlight func(string) bool
+	if live, ok := cr.od.(*memoryOrderDispatcher); ok && live != nil {
+		inFlight = live.trackingRunInFlight
+	}
+	result, sweepErr := sweepStaleOrderTrackingAcrossStoresLimit(stores, nil, now, orderTrackingSweepWatchdogStaleAfter, nil, orderTrackingWatchdogMetadataInitiator, false, orderTrackingSweepCloseBudget, read, inFlight)
 	if read == staleTrackingReadNotClosed {
 		complete := storeErr == nil && sweepErr == nil && result.trackingClosed < orderTrackingSweepCloseBudget
 		cr.scheduleOrderSweepWatchdogNotClosed(now, complete)

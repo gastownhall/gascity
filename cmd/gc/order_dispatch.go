@@ -391,6 +391,51 @@ type memoryOrderDispatcher struct {
 	inflightMu   sync.Mutex
 	inflightN    int
 	inflightDone chan struct{} // closed when inflightN returns to 0; nil when idle
+
+	// inflightRuns holds the tracking ids of the dispatches this controller is
+	// running, so the stale-tracking watchdog leaves their beads open: the
+	// open tracking bead is the order's single-flight gate, and an exec order
+	// may run for its whole timeout, well past the watchdog's stale window.
+	// Created on first use (inflightRunSet) and guarded by cacheMu. The set
+	// locks itself, so carryInflightRunsFrom hands it across dispatcher
+	// rebuilds, and a run the outgoing dispatcher still holds stays protected.
+	inflightRuns *inflightRunSet
+}
+
+// inflightRunSet is the set of tracking ids whose dispatch is still running.
+type inflightRunSet struct {
+	mu  sync.Mutex
+	ids map[string]int
+}
+
+func (s *inflightRunSet) add(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ids == nil {
+		s.ids = make(map[string]int)
+	}
+	s.ids[id]++
+}
+
+func (s *inflightRunSet) remove(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ids[id] <= 1 {
+		delete(s.ids, id)
+		return
+	}
+	s.ids[id]--
+}
+
+// contains reports whether id's dispatch is still running. A nil set holds
+// nothing.
+func (s *inflightRunSet) contains(id string) bool {
+	if s == nil {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ids[id] > 0
 }
 
 type orderDispatchTrackingIndex struct {
@@ -1193,8 +1238,60 @@ func (m *memoryOrderDispatcher) launchResolvedDispatch(ctx context.Context, stor
 		return orders.OrderRun{}, err
 	}
 	m.addInflight()
+	onDone = m.trackInflightRun(trackingRun.ID, onDone)
 	m.launchDispatchOne(ctx, store, target, a, cityPath, trackingRun.ID, vars, execEnv, onDone)
 	return trackingRun, nil
+}
+
+// trackInflightRun records trackingID as running and returns onDone wrapped to
+// drop it again before onDone runs. The launched goroutine calls it after
+// dispatchOne has returned, so the id is dropped only once the dispatch's own
+// tracking-bead close has been attempted: a bead that close failed to reach is
+// then the stale watchdog's to recover.
+func (m *memoryOrderDispatcher) trackInflightRun(trackingID string, onDone func()) func() {
+	runs := m.inflightRunSet()
+	runs.add(trackingID)
+	return func() {
+		runs.remove(trackingID)
+		if onDone != nil {
+			onDone()
+		}
+	}
+}
+
+// inflightRunSet returns the dispatcher's in-flight run set, creating it on
+// first use.
+func (m *memoryOrderDispatcher) inflightRunSet() *inflightRunSet {
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	if m.inflightRuns == nil {
+		m.inflightRuns = &inflightRunSet{}
+	}
+	return m.inflightRuns
+}
+
+// carryInflightRunsFrom shares prev's in-flight run set with m, so the runs
+// prev launched stay protected from the stale watchdog after m replaces it.
+func (m *memoryOrderDispatcher) carryInflightRunsFrom(prev *memoryOrderDispatcher) {
+	if m == nil || prev == nil {
+		return
+	}
+	runs := prev.inflightRunSet()
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	m.inflightRuns = runs
+}
+
+// trackingRunInFlight reports whether the dispatch that owns trackingID is
+// still running in this controller.
+func (m *memoryOrderDispatcher) trackingRunInFlight(trackingID string) bool {
+	if m == nil {
+		return false
+	}
+	m.cacheMu.Lock()
+	runs := m.inflightRuns
+	m.cacheMu.Unlock()
+	return runs.contains(trackingID)
 }
 
 // cancel signals all in-flight dispatchOne goroutines to terminate. Safe
@@ -3523,18 +3620,20 @@ func (r staleTrackingRead) runs(front *orders.Store, cutoff time.Time) ([]orders
 }
 
 func sweepStaleOrderTrackingAcrossStores(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, includeWispSubtrees bool) (orderTrackingSweepResult, error) {
-	return sweepStaleOrderTrackingAcrossStoresLimit(stores, wispStore, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWispSubtrees, 0, staleTrackingReadNotClosed)
+	return sweepStaleOrderTrackingAcrossStoresLimit(stores, wispStore, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWispSubtrees, 0, staleTrackingReadNotClosed, nil)
 }
 
 // sweepStaleOrderTrackingAcrossStoresLimit applies limit only to
 // order-tracking bead closes. Wisp subtree recovery is operator-scoped by
 // order name and closes complete stale subtrees when explicitly requested.
-func sweepStaleOrderTrackingAcrossStoresLimit(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, read staleTrackingRead) (orderTrackingSweepResult, error) {
-	return sweepStaleOrderTrackingAcrossStoresLimitMode(stores, wispStore, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, false, read)
+// inFlight, when non-nil, names the tracking ids whose dispatch is still
+// running in this process; the sweep leaves those open however old they are.
+func sweepStaleOrderTrackingAcrossStoresLimit(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, read staleTrackingRead, inFlight func(trackingID string) bool) (orderTrackingSweepResult, error) {
+	return sweepStaleOrderTrackingAcrossStoresLimitMode(stores, wispStore, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, false, read, inFlight)
 }
 
 func sweepStaleOrderTrackingAcrossStoresDryRun(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, includeWispSubtrees bool) (orderTrackingSweepResult, error) {
-	return sweepStaleOrderTrackingAcrossStoresLimitMode(stores, wispStore, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWispSubtrees, 0, true, staleTrackingReadNotClosed)
+	return sweepStaleOrderTrackingAcrossStoresLimitMode(stores, wispStore, now, staleAfter, onlyOrders, orderTrackingSweepMetadataInitiator, includeWispSubtrees, 0, true, staleTrackingReadNotClosed, nil)
 }
 
 // sweepStaleOrderTrackingAcrossStoresLimitMode sweeps two coordination classes,
@@ -3566,7 +3665,7 @@ func sweepStaleOrderTrackingAcrossStoresDryRun(stores []beads.Store, wispStore b
 // and multiply the reported count. When it is itself one of the swept stores the
 // loop has already covered it, and the hoisted pass is skipped for the same
 // count-once reason.
-func sweepStaleOrderTrackingAcrossStoresLimitMode(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, dryRun bool, read staleTrackingRead) (orderTrackingSweepResult, error) {
+func sweepStaleOrderTrackingAcrossStoresLimitMode(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, dryRun bool, read staleTrackingRead, inFlight func(trackingID string) bool) (orderTrackingSweepResult, error) {
 	if staleAfter <= 0 {
 		return orderTrackingSweepResult{}, fmt.Errorf("stale-after must be positive")
 	}
@@ -3587,7 +3686,7 @@ func sweepStaleOrderTrackingAcrossStoresLimitMode(stores []beads.Store, wispStor
 				break
 			}
 		}
-		partial, err := sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, perStoreWisps, remainingLimit, dryRun, read)
+		partial, err := sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, perStoreWisps, remainingLimit, dryRun, read, inFlight)
 		result.trackingClosed += partial.trackingClosed
 		result.wispClosed += partial.wispClosed
 		if err != nil {
@@ -3638,14 +3737,14 @@ func orderTrackingSweepStoreLabel(store beads.Store, index int) string {
 // order-tracking bead closes. Wisp subtree recovery is order-scoped and closes
 // complete stale subtrees when includeWispSubtrees is set.
 func sweepStaleOrderTrackingWithOptionsLimit(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int) (orderTrackingSweepResult, error) {
-	return sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, false, staleTrackingReadNotClosed)
+	return sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, false, staleTrackingReadNotClosed, nil)
 }
 
 func sweepStaleOrderTrackingWithOptionsLimitDryRun(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int) (orderTrackingSweepResult, error) {
-	return sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, true, staleTrackingReadNotClosed)
+	return sweepStaleOrderTrackingWithOptionsLimitMode(store, now, staleAfter, onlyOrders, initiator, includeWispSubtrees, limit, true, staleTrackingReadNotClosed, nil)
 }
 
-func sweepStaleOrderTrackingWithOptionsLimitMode(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, dryRun bool, read staleTrackingRead) (orderTrackingSweepResult, error) {
+func sweepStaleOrderTrackingWithOptionsLimitMode(store beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, initiator string, includeWispSubtrees bool, limit int, dryRun bool, read staleTrackingRead, inFlight func(trackingID string) bool) (orderTrackingSweepResult, error) {
 	if staleAfter <= 0 {
 		return orderTrackingSweepResult{}, fmt.Errorf("stale-after must be positive")
 	}
@@ -3681,6 +3780,13 @@ func sweepStaleOrderTrackingWithOptionsLimitMode(store beads.Store, now time.Tim
 			if _, ok := onlyOrders[run.Scoped]; !ok {
 				continue
 			}
+		}
+		// A dispatch still running holds its order's single-flight gate
+		// through this bead; closing it would let the next due tick fire a
+		// second run beside the first. Age alone cannot tell: an exec order
+		// may run for its whole timeout.
+		if inFlight != nil && inFlight(run.ID) {
+			continue
 		}
 		ids = append(ids, run.ID)
 		if limit > 0 && len(ids) >= limit {
