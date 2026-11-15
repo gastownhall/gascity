@@ -125,6 +125,14 @@ func (s *Server) extmsgSessionHandleForResolvedID(resolvedID, fallback string) s
 // peer members can self-silence on off-target messages (see #2484). Outbound
 // reply broadcasts and self-update notifications pass "" because they are
 // not addressed to a specific agent.
+//
+// An explicit target that names a live session outside the membership (an
+// out-of-process adapter that resolved the address itself, such as a reply to
+// a question that session asked in a channel bound to another agent) is
+// notified too, after the members: otherwise the one session the message is
+// addressed to never hears it, while the members are told it is not for them.
+// It is resolved without materializing, so an address can reach an existing
+// session but never create one.
 func (s *Server) extmsgNotifyMembers(
 	ctx context.Context,
 	conv extmsg.ConversationRef,
@@ -144,6 +152,11 @@ func (s *Server) extmsgNotifyMembers(
 	}
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "extmsg-notify"}
 	explicitTargetSessionID := extmsgNotifyExplicitTargetSessionID(ctx, svc, conv, explicitTarget)
+	if explicitTargetSessionID == "" && strings.TrimSpace(explicitTarget) != "" {
+		if id, err := s.resolveSessionTargetIDWithContext(ctx, store, strings.TrimSpace(explicitTarget), apiSessionResolveOptions{}); err == nil {
+			explicitTargetSessionID = strings.TrimSpace(id)
+		}
+	}
 	members, err := svc.Transcript.ListMemberships(ctx, caller, conv)
 	if err != nil {
 		log.Printf("extmsg: ListMemberships failed for %s/%s: %v", conv.Provider, conv.ConversationID, err)
@@ -161,7 +174,12 @@ func (s *Server) extmsgNotifyMembers(
 		}
 	}
 
+	var notifiedMu sync.Mutex
+	notified := map[string]bool{}
 	notifyResolved := func(sessionSelector, resolvedID string) {
+		notifiedMu.Lock()
+		notified[resolvedID] = true
+		notifiedMu.Unlock()
 		handle := s.extmsgSessionHandleForResolvedID(resolvedID, sessionSelector)
 		nudge := s.extmsgNotice(extmsgNotifyReminder{
 			Provider:                conv.Provider,
@@ -211,6 +229,10 @@ func (s *Server) extmsgNotifyMembers(
 		}(m.SessionID)
 	}
 	wg.Wait()
+
+	if explicitTargetSessionID != "" && !notified[explicitTargetSessionID] && explicitTargetSessionID != excludedResolvedID {
+		notifyResolved(strings.TrimSpace(explicitTarget), explicitTargetSessionID)
+	}
 }
 
 func extmsgNotifyExplicitTargetSessionID(ctx context.Context, svc *extmsg.Services, conv extmsg.ConversationRef, explicitTarget string) string {
