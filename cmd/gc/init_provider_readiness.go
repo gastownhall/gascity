@@ -713,13 +713,14 @@ func checkHardDependencies(cityPath string) []missingDep {
 		// journal error before lifecycle work begins.
 		bdRequiredVersion = bdFreshProviderMinVersion
 	}
-	runtimes := citySessionRuntimeNames(cityPath)
+	selectionCfg, selectionCfgOK := initSessionSelectionConfig(cityPath)
+	runtimes := sessionRuntimeNamesFromConfig(selectionCfg, selectionCfgOK)
 
 	deps := []dep{
 		{
 			name:        "tmux",
 			installHint: "https://github.com/tmux/tmux/wiki/Installing",
-			condition:   func() bool { return selectionResolvesToTmux(runtimes) },
+			condition:   func() bool { return selectionResolvesToTmux(runtimes, selectionCfg) },
 		},
 		{
 			name:        "herdr",
@@ -817,14 +818,36 @@ func checkHardDependencies(cityPath string) []missingDep {
 	return missing
 }
 
+// initSessionSelectionConfig loads the config that decides this city's
+// session runtime selection. It prefers the composed config, so agents and
+// pack-declared runtimes that arrive through includes and imports are seen as
+// startup sees them. When composition fails (for example before a fresh
+// init has installed its imports) it falls back to the raw city.toml, so a
+// selection written there directly is still honored. The bool reports whether
+// any config was readable.
+func initSessionSelectionConfig(cityPath string) (*config.City, bool) {
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err == nil && cfg != nil {
+		return cfg, true
+	}
+	return initConfigForBdTooling(cityPath)
+}
+
 // citySessionRuntimeNames returns the runtime selection names this city would
 // resolve: the city-level session provider, the GC_SESSION override that wins
-// over it, and every per-agent session override.
+// over it, and every per-agent session override, including agents composed in
+// from includes and packs.
 //
 // The empty selection is reported as the platform runtime default. Unix keeps
 // that default empty, which resolves through the runtime registry's tmux
 // fallback. Windows resolves it to herdr before the registry.
 func citySessionRuntimeNames(cityPath string) map[string]bool {
+	return sessionRuntimeNamesFromConfig(initSessionSelectionConfig(cityPath))
+}
+
+// sessionRuntimeNamesFromConfig is citySessionRuntimeNames over an already
+// loaded config; ok reports whether cfg was readable.
+func sessionRuntimeNamesFromConfig(cfg *config.City, ok bool) map[string]bool {
 	names := map[string]bool{}
 	add := func(raw string) {
 		name := strings.TrimSpace(raw)
@@ -834,8 +857,7 @@ func citySessionRuntimeNames(cityPath string) map[string]bool {
 		names[name] = true
 	}
 
-	cfg, ok := initConfigForBdTooling(cityPath)
-	if !ok {
+	if !ok || cfg == nil {
 		// Without a readable config the selection is unknown. Report the same
 		// platform default that runtime provider construction would use.
 		add(effectiveProviderName(""))
@@ -865,13 +887,21 @@ func citySessionRuntimeNames(cityPath string) map[string]bool {
 //   - A name the registry does not resolve is not rejected. It falls through
 //     to the tmux fallback, so such a city still runs on tmux.
 //
-// Resolution is asked of the live registry rather than a second copy of the
-// name list, so registering a provider cannot leave this check behind. It has
-// to be Resolves rather than Has: "exec:" and "ssh:" are registered as
-// prefixes, and testing exact membership would misread those real providers as
-// unresolved and demand tmux for them.
-func selectionResolvesToTmux(names map[string]bool) bool {
-	reg := buildRuntimeRegistry()
+// Resolution is asked of the same per-city registry startup uses
+// (runtimeRegistryForCity: the builtins plus the city's pack-declared
+// [runtimes.<name>] entries) rather than a second copy of the name list, so
+// registering a provider, builtin or pack-declared, cannot leave this check
+// behind. A nil cfg resolves against the builtins. If the city's registry
+// cannot be built, the builtin registry is used instead, which can only
+// over-require tmux, never under-require it. It has to be Resolves rather
+// than Has: "exec:" and "ssh:" are registered as prefixes, and testing exact
+// membership would misread those real providers as unresolved and demand tmux
+// for them.
+func selectionResolvesToTmux(names map[string]bool, cfg *config.City) bool {
+	reg, err := runtimeRegistryForCity(cfg)
+	if err != nil || reg == nil {
+		reg = buildRuntimeRegistry()
+	}
 	for name := range names {
 		if name == "tmux" || name == "hybrid" {
 			return true

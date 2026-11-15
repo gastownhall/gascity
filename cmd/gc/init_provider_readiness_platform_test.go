@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // Dependency checks are platform-, provider- and feature-aware: a Windows
@@ -329,5 +332,83 @@ func TestCheckHardDependenciesAsksForTheManagedLifecycleOnlyWhereGcRunsTheServer
 				t.Fatalf("a %s city reported %v, want no %q requirement: gc runs no Dolt server for it", tc.name, missingDepNames(got), managedDoltLifecycleDep)
 			}
 		})
+	}
+}
+
+// writeCityFiles writes each path→body pair under a fresh city directory.
+func writeCityFiles(t *testing.T, files map[string]string) string {
+	t.Helper()
+	dir := t.TempDir()
+	for rel, body := range files {
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("creating %s: %v", filepath.Dir(rel), err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("writing %s: %v", rel, err)
+		}
+	}
+	return dir
+}
+
+// TestCheckHardDependenciesResolvesPackDeclaredRuntimes holds that readiness
+// resolves a selection against the same per-city registry startup uses. A
+// pack-declared runtime is a real provider; reading it as unresolved would
+// send the city to the tmux fallback and demand tmux it never runs.
+func TestCheckHardDependenciesResolvesPackDeclaredRuntimes(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "")
+	stubMissingTools(t, "tmux")
+
+	dir := writeCityFiles(t, map[string]string{
+		"packs/rtpack/pack.toml": "[pack]\nname = \"rtpack\"\nschema = 1\n\n" +
+			"[runtimes.myrt]\ncommand = \"scripts/provider.sh\"\n",
+		"city.toml": "[workspace]\nname = \"scratch\"\n\n[beads]\nprovider = \"file\"\n\n" +
+			"[session]\nprovider = \"myrt\"\n\n[imports.rtpack]\nsource = \"packs/rtpack\"\n",
+	})
+
+	if got := checkHardDependencies(dir); containsDep(got, "tmux") {
+		t.Fatalf("a city selecting pack runtime myrt reported %v, want no tmux requirement", missingDepNames(got))
+	}
+}
+
+// TestCheckHardDependenciesHonorsIncludedAgentSessionOverrides covers an
+// agent that arrives through composition rather than city.toml itself. Its
+// tmux pin is invisible to a raw parse, and missing it would let a city pass
+// readiness without the backend one of its agents runs on.
+func TestCheckHardDependenciesHonorsIncludedAgentSessionOverrides(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "")
+	stubMissingTools(t, "tmux")
+
+	dir := writeCityFiles(t, map[string]string{
+		"agents.toml": "[[agent]]\nname = \"pinned\"\nsession = \"tmux\"\n",
+		"city.toml": "include = [\"agents.toml\"]\n\n[workspace]\nname = \"scratch\"\n\n" +
+			"[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"subprocess\"\n",
+	})
+
+	if got := checkHardDependencies(dir); !containsDep(got, "tmux") {
+		t.Fatalf("an included agent pinned to tmux reported %v, want tmux missing", missingDepNames(got))
+	}
+}
+
+// TestCheckHardDependenciesFallsBackToRawConfigWhenCompositionFails holds the
+// conservative side: a city whose composition cannot load still has its raw
+// selection honored, rather than reading as no selection at all.
+func TestCheckHardDependenciesFallsBackToRawConfigWhenCompositionFails(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "")
+	stubMissingTools(t, "tmux")
+
+	dir := writeCityFiles(t, map[string]string{
+		"city.toml": "include = [\"missing-fragment.toml\"]\n\n[workspace]\nname = \"scratch\"\n\n" +
+			"[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"tmux\"\n",
+	})
+	if _, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml")); err == nil {
+		t.Fatal("composition with a missing include loaded; the fixture no longer exercises the fallback")
+	}
+
+	if got := checkHardDependencies(dir); !containsDep(got, "tmux") {
+		t.Fatalf("a tmux city with unreadable composition reported %v, want tmux missing", missingDepNames(got))
 	}
 }
