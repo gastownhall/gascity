@@ -8747,11 +8747,7 @@ name = "narrow"
 	}
 	got := map[string]bool{}
 	for _, a := range cfg.Agents {
-		f := reflect.ValueOf(a).FieldByName("WorkQueryUnfiltered")
-		if !f.IsValid() {
-			t.Fatal("Agent has no WorkQueryUnfiltered field")
-		}
-		got[a.Name] = f.Bool()
+		got[a.Name] = a.WorkQueryUnfiltered
 	}
 	if !got["wide"] {
 		t.Error("agent wide: WorkQueryUnfiltered = false, want true from work_query_unfiltered = true")

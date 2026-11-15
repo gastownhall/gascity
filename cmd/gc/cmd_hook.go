@@ -649,6 +649,7 @@ func hookDiscoveryVisibility(city *hookCity, cityName string, a *config.Agent, i
 		SeatInManagedWorktree: sync.OnceValue(func() bool {
 			return hookSeatManaged(hookDiscoveryLabel, seat().WorkDir, hookClaimSeatInManagedWorktree, stderr)
 		}),
+		Unfiltered: a.WorkQueryUnfiltered,
 	}
 }
 
@@ -1409,6 +1410,11 @@ type hookVisibility struct {
 	// unassigned candidate bound to no worktree whose session the controller
 	// starts in another directory, and nil answers false.
 	SeatInManagedWorktree func() bool
+	// Unfiltered is the agent's work_query_unfiltered opt-out
+	// (config.Agent.WorkQueryUnfiltered): the route/identity filter keeps a
+	// candidate routed or assigned to another agent. The pool-seat check
+	// (leavesToAnotherSession) still applies.
+	Unfiltered bool
 }
 
 // leavesToAnotherSession reports whether a pool session's listing leaves
@@ -1815,7 +1821,8 @@ func filterUnreadyHookCandidates(output string, now time.Time) string {
 // and items that fail to decode as a beads.Bead all pass through unchanged -
 // and is a no-op entirely when visibility carries no identity/route context,
 // since a filter that can silently empty an agent's queue is a worse outage
-// than the over-serving it replaces.
+// than the over-serving it replaces. visibility.Unfiltered (the agent's
+// work_query_unfiltered) skips the route/identity drop, not the seat check.
 func filterForeignHookCandidates(output string, visibility hookVisibility) string {
 	if output == "" {
 		return output
@@ -1843,7 +1850,7 @@ func filterForeignHookCandidates(output string, visibility hookVisibility) strin
 			filtered = append(filtered, obj)
 			continue
 		}
-		if !hookCandidateVisible(candidate, visibility.Identities, visibility.RouteTargets) {
+		if !visibility.Unfiltered && !hookCandidateVisible(candidate, visibility.Identities, visibility.RouteTargets) {
 			continue
 		}
 		if visibility.leavesToAnotherSession(candidate) {

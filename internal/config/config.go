@@ -714,6 +714,9 @@ type AgentOverride struct {
 	Scope *string `toml:"scope,omitempty"`
 	// Suspended sets the agent's suspended state.
 	Suspended *bool `toml:"suspended,omitempty"`
+	// WorkQueryUnfiltered sets the agent's work_query_unfiltered opt-out
+	// (see Agent.WorkQueryUnfiltered).
+	WorkQueryUnfiltered *bool `toml:"work_query_unfiltered,omitempty"`
 	// Pool overrides legacy [pool] fields that map to session scaling.
 	Pool *PoolOverride `toml:"pool,omitempty"`
 	// Env adds or overrides environment variables.
@@ -3878,6 +3881,13 @@ type Agent struct {
 	// $GC_ALIAS set to that identity, while $GC_AGENT keeps the session's
 	// runtime value.
 	WorkQuery string `toml:"work_query,omitempty"`
+	// WorkQueryUnfiltered opts this agent out of the plain `gc hook <agent>`
+	// display filter that drops candidates routed to, or assigned to, another
+	// agent or session. Set it when a custom work_query deliberately surfaces
+	// work that is not routed to this agent (for example a cross-store query).
+	// It affects only the display path: `gc hook --claim` applies its own
+	// claim-door checks regardless.
+	WorkQueryUnfiltered bool `toml:"work_query_unfiltered,omitempty"`
 	// SlingQuery is the command template to route a bead to this session config.
 	// If it contains Go template placeholders, gc expands them using the same
 	// PathContext fields as work_dir and session_setup (Agent, AgentBase,

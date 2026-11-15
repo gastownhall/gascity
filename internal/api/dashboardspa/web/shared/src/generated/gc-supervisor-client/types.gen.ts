@@ -143,6 +143,7 @@ export type AgentPatch = {
     Upstream: string | null;
     WakeMode: string | null;
     WorkDir: string | null;
+    WorkQueryUnfiltered: boolean | null;
 };
 
 export type AgentPatchSetInputBody = {

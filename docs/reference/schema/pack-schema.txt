@@ -174,6 +174,10 @@
           "type": "string",
           "description": "WorkQuery is the shell command template to find available work for this\nagent. If it contains Go template placeholders, gc expands them using\nthe same PathContext fields as work_dir and session_setup (Agent,\nAgentBase, Rig, RigRoot, CityRoot, CityName, DefaultBranch) before\nprobe, hook, and prompt-context execution. Used by gc hook and available in prompt\ntemplates as {{.WorkQuery}}.\nIf unset, Gas City uses a three-tier default query:\n  1. in_progress work assigned to this session/alias (crash recovery)\n  2. ready work assigned to this session/alias (pre-assigned work)\n  3. ready unassigned work with gc.routed_to=\u003cqualified-name\u003e\nWhen the controller probes for demand without session context, only the\nrouted_to tier applies. Override to integrate with external task systems.\nA custom query that looks up assigned work should read $GC_ALIAS: under\ngc hook --claim, a single-slot pool session the supervisor collapsed onto\nthe agent's canonical [[named_session]] identity runs the query with\n$GC_ALIAS set to that identity, while $GC_AGENT keeps the session's\nruntime value."
         },
+        "work_query_unfiltered": {
+          "type": "boolean",
+          "description": "WorkQueryUnfiltered opts this agent out of the plain `gc hook \u003cagent\u003e`\ndisplay filter that drops candidates routed to, or assigned to, another\nagent or session. Set it when a custom work_query deliberately surfaces\nwork that is not routed to this agent (for example a cross-store query).\nIt affects only the display path: `gc hook --claim` applies its own\nclaim-door checks regardless."
+        },
         "sling_query": {
           "type": "string",
           "description": "SlingQuery is the command template to route a bead to this session config.\nIf it contains Go template placeholders, gc expands them using the same\nPathContext fields as work_dir and session_setup (Agent, AgentBase,\nRig, RigRoot, CityRoot, CityName, DefaultBranch) before replacing {}\nwith the bead ID. Used by gc sling to make a bead visible to the target's work_query.\nThe placeholder {} is replaced with the bead ID at runtime.\nDefault for all agents:\n\"bd update {} --set-metadata gc.routed_to=\u003cqualified-name\u003e\".\nRouting is metadata-based; sling stamps the target template and the\nreconciler/scale_check paths decide when sessions are created.\nCustom sling_query and work_query can be overridden independently."
@@ -409,6 +413,10 @@
         "suspended": {
           "type": "boolean",
           "description": "Suspended overrides the agent's suspended state."
+        },
+        "work_query_unfiltered": {
+          "type": "boolean",
+          "description": "WorkQueryUnfiltered overrides the agent's work_query_unfiltered opt-out\n(see Agent.WorkQueryUnfiltered)."
         },
         "pool": {
           "$ref": "#/$defs/PoolOverride",

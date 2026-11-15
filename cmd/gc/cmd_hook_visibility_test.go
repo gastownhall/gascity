@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"reflect"
 	"testing"
 	"time"
 
@@ -546,17 +545,6 @@ func TestFilterForeignHookCandidatesLegacyWorkflowControlAliasMatched(t *testing
 
 // --- work_query_unfiltered opt-out (ga-ocee69) ------------------------------
 
-// setBoolField sets the named bool field on the struct v points at, failing the
-// test when the field does not exist.
-func setBoolField(t *testing.T, v any, name string, value bool) {
-	t.Helper()
-	f := reflect.ValueOf(v).Elem().FieldByName(name)
-	if !f.IsValid() {
-		t.Fatalf("%T has no %s field", v, name)
-	}
-	f.SetBool(value)
-}
-
 // A candidate routed to another agent and unassigned is dropped from the plain
 // gc hook listing by default and kept when the agent opts out with
 // work_query_unfiltered.
@@ -592,7 +580,7 @@ func TestFilterForeignHookCandidatesWorkQueryUnfilteredOptOut(t *testing.T) {
 
 	t.Run("opt-out keeps every candidate", func(t *testing.T) {
 		visibility := newVisibility()
-		setBoolField(t, &visibility, "Unfiltered", true)
+		visibility.Unfiltered = true
 		got := idsOf(t, filterForeignHookCandidates(raw, visibility))
 		if len(got) != 2 || got[0] != "ga-foreign" || got[1] != "ga-theirs" {
 			t.Errorf("kept %v, want [ga-foreign ga-theirs]", got)
@@ -606,14 +594,10 @@ func TestHookDiscoveryVisibilityCarriesWorkQueryUnfiltered(t *testing.T) {
 	city := newHookCity(t.TempDir(), &config.City{})
 	for _, want := range []bool{false, true} {
 		a := config.Agent{Name: "pack-author"}
-		setBoolField(t, &a, "WorkQueryUnfiltered", want)
+		a.WorkQueryUnfiltered = want
 		got := hookDiscoveryVisibility(city, "test", &a, []string{"pack-author"}, []string{"pack-author"}, &bytes.Buffer{})
-		f := reflect.ValueOf(got).FieldByName("Unfiltered")
-		if !f.IsValid() {
-			t.Fatal("hookVisibility has no Unfiltered field")
-		}
-		if f.Bool() != want {
-			t.Errorf("WorkQueryUnfiltered=%v: visibility.Unfiltered = %v", want, f.Bool())
+		if got.Unfiltered != want {
+			t.Errorf("WorkQueryUnfiltered=%v: visibility.Unfiltered = %v", want, got.Unfiltered)
 		}
 	}
 }
