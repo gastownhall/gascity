@@ -109,7 +109,7 @@ calls = 4
 [[count]]
 path = "cmd/gc/beads_provider_lifecycle_test.go"
 resource = "net_listen"
-calls = 2
+calls = 1
 
 [[count]]
 path = "cmd/gc/beads_provider_lifecycle_test.go"
@@ -284,7 +284,7 @@ calls = 2
 [[count]]
 path = "cmd/gc/cmd_dolt_state_test.go"
 resource = "fixed_sleep"
-calls = 8
+calls = 4
 
 [[count]]
 path = "cmd/gc/cmd_dolt_state_test.go"
@@ -299,7 +299,7 @@ calls = 5
 [[count]]
 path = "cmd/gc/cmd_dolt_state_test.go"
 resource = "subprocess"
-calls = 6
+calls = 2
 
 [[count]]
 path = "cmd/gc/cmd_event_emit_test.go"
@@ -665,7 +665,7 @@ calls = 11
 [[count]]
 path = "cmd/gc/cmd_supervisor_test.go"
 resource = "net_listen"
-calls = 7
+calls = 6
 
 [[count]]
 path = "cmd/gc/cmd_supervisor_writeauth_reload_test.go"
@@ -886,11 +886,6 @@ calls = 5
 
 [[count]]
 path = "cmd/gc/fast_loop_helpers_test.go"
-resource = "fixed_sleep"
-calls = 1
-
-[[count]]
-path = "cmd/gc/fast_loop_helpers_test.go"
 resource = "net_listen"
 calls = 1
 
@@ -898,11 +893,6 @@ calls = 1
 path = "cmd/gc/fast_loop_helpers_test.go"
 resource = "slow_process_gate"
 calls = 2
-
-[[count]]
-path = "cmd/gc/fast_loop_helpers_test.go"
-resource = "subprocess"
-calls = 1
 
 [[count]]
 path = "cmd/gc/gc_beads_bd_bind_host_test.go"
