@@ -76,8 +76,9 @@ func TmuxLaunchEnvStateArgs(session, pane string) []string {
 // show-environment -s prints a set key as KEY="value"; export KEY; with $, `,
 // \ and " backslash-escaped and any newline literal inside the quotes, and a
 // removed key as unset KEY;. A value therefore ends at its closing quote, not
-// at the end of a line. An entry that is cut short or not of either shape is
-// skipped.
+// at the end of a line. A line of neither shape is skipped; a value with no
+// closing quote (output cut short) ends the read, since all that follows its
+// opening quote would be value.
 func ParseTmuxLaunchEnvState(out string) TmuxLaunchEnvState {
 	st := TmuxLaunchEnvState{Env: map[string]string{}, Removed: map[string]bool{}}
 	for rest := out; rest != ""; {
