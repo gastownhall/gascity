@@ -842,7 +842,9 @@ func nativeListLimitPushdown(query ListQuery) int {
 		// keeps the smaller-id tie members at the boundary and drops the larger-id
 		// ties, so an exact or cursor-paginated caller loses rows across the page
 		// seam. Only push the limit when the caller opted into a bounded
-		// newest-by-created_at sample (aggregates); otherwise fetch the full set
+		// newest-by-created_at sample (aggregates over created_at, or a
+		// created_at-bound walk that tolerates skipping boundary ties for one
+		// pass; see ListQuery.AllowBackingCreatedLimit); otherwise fetch the full set
 		// and let ApplyListQuery cut the exact (created_at DESC, id DESC) prefix.
 		if query.AllowBackingCreatedLimit {
 			return query.Limit

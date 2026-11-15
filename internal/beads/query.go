@@ -150,11 +150,16 @@ type ListQuery struct {
 	// members at the boundary and drop the larger-id ties an exact or
 	// cursor-paginated caller needs, so it is OFF by default: exact/paginated
 	// reads fetch the full candidate set and let ApplyListQuery cut the exact
-	// (created_at DESC, id DESC) prefix. Only a caller that folds the bounded rows
-	// into a max over the created_at sort key ITSELF may set it true — every
-	// dropped boundary tie shares the surviving rows' created_at, so the max is
-	// unchanged (e.g. the order dispatcher's RecentRunsAll/LastRun, which reduce to
-	// max(created_at)). A caller that reduces over a DIFFERENT column must NOT set
+	// (created_at DESC, id DESC) prefix. Only two kinds of caller may set it true.
+	// One folds the bounded rows into a max over the created_at sort key ITSELF —
+	// every dropped boundary tie shares the surviving rows' created_at, so the max
+	// is unchanged (e.g. the order dispatcher's RecentRunsAll/LastRun, which reduce
+	// to max(created_at)). The other pages by created_at bound, not by cursor, and
+	// tolerates skipping, for one pass, the boundary ties a page drops: it reads
+	// the next page strictly before the page's oldest created_at, and a later pass
+	// starts again from its own bound and sees them (e.g. the order-tracking
+	// retention walk, orders.Store.ClosedRunsCreatedBefore, whose skipped rows
+	// stay for the next sweep). A caller that reduces over a DIFFERENT column must NOT set
 	// it: the order dispatcher's event cursor (Cursor/bdCursor) reduces to max(seq)
 	// via MaxSeqFromLabels, and because seq is forward-only the max-seq run is the
 	// newest largest-id row — exactly the tie member a bounded id-ASC read drops —

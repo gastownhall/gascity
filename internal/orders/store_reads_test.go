@@ -841,8 +841,11 @@ func TestClosedRunsCreatedBeforePagesNewestFirst(t *testing.T) {
 	}
 
 	for _, q := range spy.queries {
-		if q.Limit != 3 || q.CreatedBefore.IsZero() || !q.IncludeClosed || q.Status != "" || q.TierMode != beads.TierBoth || q.Sort != beads.SortCreatedDesc {
-			t.Fatalf("query = %+v, want a bounded created-desc both-tier listing of every status before a bound", q)
+		// AllowBackingCreatedLimit is what lets a native store push the limit
+		// down for a created-desc read; without it the store reads every
+		// tracking bead before the bound and cuts the page in Go.
+		if q.Limit != 3 || q.CreatedBefore.IsZero() || !q.IncludeClosed || q.Status != "" || q.TierMode != beads.TierBoth || q.Sort != beads.SortCreatedDesc || !q.AllowBackingCreatedLimit {
+			t.Fatalf("query = %+v, want a bounded created-desc both-tier listing of every status before a bound, with the backing limit allowed", q)
 		}
 	}
 }

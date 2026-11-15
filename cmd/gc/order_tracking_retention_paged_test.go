@@ -3,11 +3,39 @@ package main
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
+
+// The retention prune's per-call entry points, as tests drive it: shorthands
+// over planClosedOrderTrackingRetentionAcrossStores and execute, the path gc
+// order sweep-tracking and the watchdog take.
+
+func sweepClosedOrderTrackingRetentionAcrossStores(stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (orderTrackingRetentionSweepResult, error) {
+	return planClosedOrderTrackingRetentionAcrossStores(stores, now, policy, onlyOrders, orderTrackingRetentionRunBudget).execute()
+}
+
+func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (int, error) {
+	return sweepClosedOrderTrackingRetentionBounded(store, now, policy, onlyOrders, orderTrackingRetentionRunBudget)
+}
+
+func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}, limit int) (int, error) {
+	if store == nil {
+		return 0, fmt.Errorf("bead store unavailable")
+	}
+	deadline := orderTrackingRetentionClock().Add(orderTrackingRetentionSelectBudget)
+	ids, readErr, checkErr := selectClosedOrderTrackingRetention(store, now, policy, onlyOrders, limit, deadline)
+	return deleteClosedOrderTrackingRetention(store, ids, errors.Join(readErr, checkErr))
+}
+
+func countClosedOrderTrackingRetentionEligible(stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (int, error) {
+	plan := planClosedOrderTrackingRetentionAcrossStores(stores, now, policy, onlyOrders, orderTrackingRetentionRunBudget)
+	return plan.eligible(), plan.readErr()
+}
 
 // errRetentionReadTooLarge stands in for a store whose read budget a listing
 // of the whole retained tracking history does not fit.
@@ -209,5 +237,128 @@ func TestOrderTrackingRetentionWalksPastAPageOfKeptRuns(t *testing.T) {
 	left := retentionStoreIDs(t, store.mem)
 	if len(left) != 61*minClosedOrderTrackingRetained {
 		t.Fatalf("%d tracking beads left, want %d", len(left), 61*minClosedOrderTrackingRetained)
+	}
+}
+
+// retentionCostStore charges a fake wall clock for every metadata-filtered
+// read (the strand checks), the reads a native store answers by scanning the
+// retained history, and can fail the strand check of one bead.
+type retentionCostStore struct {
+	*retentionReadBudgetStore
+	clock     *time.Time
+	readCost  time.Duration
+	metaReads int
+	failRoot  string
+}
+
+func (s *retentionCostStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if len(q.Metadata) > 0 {
+		s.metaReads++
+		*s.clock = s.clock.Add(s.readCost)
+		if s.failRoot != "" && q.Metadata[beadmeta.RootBeadIDMetadataKey] == s.failRoot {
+			return nil, errors.New("descendant read budget exhausted")
+		}
+	}
+	return s.retentionReadBudgetStore.List(q)
+}
+
+func useRetentionClock(t *testing.T, at *time.Time) {
+	t.Helper()
+	prev := orderTrackingRetentionClock
+	orderTrackingRetentionClock = func() time.Time { return *at }
+	t.Cleanup(func() { orderTrackingRetentionClock = prev })
+}
+
+// When judging candidates is slow, a run stops choosing at the selection's
+// time budget and deletes what it chose, so its selection and its delete end
+// inside the watchdog's stale-after; the backlog still drains over runs.
+func TestOrderTrackingRetentionRunStopsChoosingAtItsTimeBudget(t *testing.T) {
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	policy := orderTrackingRetentionPolicy{deleteAfterClose: 24 * time.Hour}
+	const perOrder = 260
+	var seed []beads.Bead
+	for _, order := range []string{"alpha", "beta", "gamma"} {
+		for i := range perOrder {
+			seed = append(seed, retentionRun(order, i, now.Add(-72*time.Hour+time.Duration(i)*time.Minute)))
+		}
+	}
+	clock := now
+	useRetentionClock(t, &clock)
+	const readCost = 2 * time.Second
+	store := &retentionCostStore{retentionReadBudgetStore: newRetentionReadBudgetStore(seed), clock: &clock, readCost: readCost}
+	stores := []beads.Store{store}
+
+	// Each chosen candidate costs one strand-check read while choosing and
+	// one at delete time.
+	perRun := int(orderTrackingRetentionSelectBudget/readCost) + 1
+	eligible := 3 * (perOrder - minClosedOrderTrackingRetained)
+	runs := 0
+	for deleted := -1; deleted != 0; runs++ {
+		if runs > 100 {
+			t.Fatal("retention did not settle in 100 runs")
+		}
+		start := clock
+		plan := planClosedOrderTrackingRetentionAcrossStores(stores, now, policy, nil, orderTrackingRetentionRunBudget)
+		chosen := clock.Sub(start)
+		if err := plan.readErr(); err != nil {
+			t.Fatalf("run %d: plan: %v", runs+1, err)
+		}
+		result, err := plan.execute()
+		if err != nil {
+			t.Fatalf("run %d: execute: %v", runs+1, err)
+		}
+		deleted = result.deleted
+		if deleted != plan.eligible() {
+			t.Fatalf("run %d: deleted %d, plan chose %d", runs+1, deleted, plan.eligible())
+		}
+		if deleted > perRun {
+			t.Fatalf("run %d: deleted %d, want at most %d inside the time budget", runs+1, deleted, perRun)
+		}
+		if chosen > orderTrackingRetentionSelectBudget+readCost {
+			t.Fatalf("run %d: choosing took %v, want at most %v", runs+1, chosen, orderTrackingRetentionSelectBudget+readCost)
+		}
+		if total := clock.Sub(start); total >= orderTrackingSweepWatchdogStaleAfter {
+			t.Fatalf("run %d: took %v, want under the watchdog's stale-after %v", runs+1, total, orderTrackingSweepWatchdogStaleAfter)
+		}
+	}
+	if minRuns := (eligible + perRun - 1) / perRun; runs-1 < minRuns {
+		t.Fatalf("drained in %d runs, want at least %d at %d per run", runs-1, minRuns, perRun)
+	}
+	if left := retentionStoreIDs(t, store.mem); len(left) != 3*minClosedOrderTrackingRetained {
+		t.Fatalf("%d tracking beads left, want %d", len(left), 3*minClosedOrderTrackingRetained)
+	}
+}
+
+// A strand check that cannot be read keeps its own candidate and is
+// reported, but it does not make the count unreliable: the confirm gate
+// still passes and the run deletes the rest of its batch.
+func TestOrderTrackingRetentionFailedStrandCheckKeepsOnlyItsCandidate(t *testing.T) {
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	policy := orderTrackingRetentionPolicy{deleteAfterClose: 24 * time.Hour}
+	var seed []beads.Bead
+	for i := range 40 {
+		seed = append(seed, retentionRun("alpha", i, now.Add(-72*time.Hour+time.Duration(i)*time.Minute)))
+	}
+	clock := now
+	useRetentionClock(t, &clock)
+	const failing = "alpha-0017"
+	store := &retentionCostStore{retentionReadBudgetStore: newRetentionReadBudgetStore(seed), clock: &clock, failRoot: failing}
+
+	plan := planClosedOrderTrackingRetentionAcrossStores([]beads.Store{store}, now, policy, nil, orderTrackingRetentionRunBudget)
+	if err := plan.readErr(); err != nil {
+		t.Fatalf("readErr = %v, want nil: a failed strand check does not fail the confirm gate", err)
+	}
+	if want := 40 - minClosedOrderTrackingRetained - 1; plan.eligible() != want {
+		t.Fatalf("eligible = %d, want %d", plan.eligible(), want)
+	}
+	result, err := plan.execute()
+	if err == nil || !strings.Contains(err.Error(), failing) {
+		t.Fatalf("execute error = %v, want one naming %s", err, failing)
+	}
+	if result.deleted != plan.eligible() {
+		t.Fatalf("deleted = %d, want %d", result.deleted, plan.eligible())
+	}
+	if left := retentionStoreIDs(t, store.mem); !left[failing] || len(left) != minClosedOrderTrackingRetained+1 {
+		t.Fatalf("left %d beads (has %s: %t), want the floor and %s", len(left), failing, left[failing], failing)
 	}
 }

@@ -125,7 +125,21 @@ const (
 	// recent-history floor: the floor's runs and room for the order's wisp
 	// roots, which carry the same label.
 	orderTrackingRetentionFloorReadLimit = 64
+	// orderTrackingRetentionSelectBudget bounds the wall time one retention
+	// plan spends choosing candidates. Every candidate costs store reads of
+	// its own (the floor, the strand check), and the delete re-checks each
+	// chosen bead once more, so a run is bounded by time as well as by count:
+	// a run that judges candidates past this budget deletes what it has
+	// chosen and leaves the rest to the next run. It sits well inside the
+	// watchdog's stale-after (orderTrackingSweepWatchdogStaleAfter), so the
+	// selection and the delete together end before the watchdog would close
+	// the run's tracking bead.
+	orderTrackingRetentionSelectBudget = 40 * time.Second
 )
+
+// orderTrackingRetentionClock is the wall clock the retention selection's
+// time budget reads. Tests replace it.
+var orderTrackingRetentionClock = time.Now
 
 // defaultOrderTrackingDeleteAfterClose is derived from the canonical config
 // constant so both load-time defaults and the runtime fallback stay in sync.
@@ -3749,16 +3763,24 @@ type orderTrackingRetentionLeg struct {
 	store beads.Store
 	label string
 	ids   []string
-	err   error
+	// readErr is a failed history or floor read: the selection may have
+	// missed candidates, so the count is not reliable.
+	readErr error
+	// checkErr is a failed strand check: those candidates are kept and
+	// reported, and the rest of the selection stands.
+	checkErr error
 }
 
 // planClosedOrderTrackingRetentionAcrossStores selects, across stores, at
 // most limit expired closed order-tracking beads that sit below their order's
 // recent-history floor and own no open step. The limit is shared: each store
-// gets what the stores before it left.
+// gets what the stores before it left. So is the time budget
+// (orderTrackingRetentionSelectBudget), except that each store judges at
+// least one candidate, so a store late in the list still makes progress.
 func planClosedOrderTrackingRetentionAcrossStores(stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}, limit int) orderTrackingRetentionPlan {
 	var plan orderTrackingRetentionPlan
 	selected := 0
+	deadline := orderTrackingRetentionClock().Add(orderTrackingRetentionSelectBudget)
 	for i, store := range stores {
 		if store == nil {
 			continue
@@ -3767,13 +3789,14 @@ func planClosedOrderTrackingRetentionAcrossStores(stores []beads.Store, now time
 		if remaining <= 0 {
 			break
 		}
-		ids, err := selectClosedOrderTrackingRetention(store, now, policy, onlyOrders, remaining)
+		ids, readErr, checkErr := selectClosedOrderTrackingRetention(store, now, policy, onlyOrders, remaining, deadline)
 		selected += len(ids)
 		plan.legs = append(plan.legs, orderTrackingRetentionLeg{
-			store: store,
-			label: orderTrackingSweepStoreLabel(store, i),
-			ids:   ids,
-			err:   err,
+			store:    store,
+			label:    orderTrackingSweepStoreLabel(store, i),
+			ids:      ids,
+			readErr:  readErr,
+			checkErr: checkErr,
 		})
 	}
 	return plan
@@ -3788,12 +3811,15 @@ func (p orderTrackingRetentionPlan) eligible() int {
 	return n
 }
 
-// readErr joins the errors the plan's stores met while selecting.
+// readErr joins the history and floor read errors the plan's stores met
+// while selecting: the errors that leave the count unreliable. A failed
+// strand check is not one of them; it keeps its candidate, and execute
+// reports it.
 func (p orderTrackingRetentionPlan) readErr() error {
 	var errs []error
 	for _, leg := range p.legs {
-		if leg.err != nil {
-			errs = append(errs, fmt.Errorf("order-tracking %s: %w", leg.label, leg.err))
+		if leg.readErr != nil {
+			errs = append(errs, fmt.Errorf("order-tracking %s: %w", leg.label, leg.readErr))
 		}
 	}
 	return errors.Join(errs...)
@@ -3806,7 +3832,7 @@ func (p orderTrackingRetentionPlan) execute() (orderTrackingRetentionSweepResult
 	result := orderTrackingRetentionSweepResult{}
 	var errs []error
 	for _, leg := range p.legs {
-		n, err := deleteClosedOrderTrackingRetention(leg.store, leg.ids, leg.err)
+		n, err := deleteClosedOrderTrackingRetention(leg.store, leg.ids, errors.Join(leg.readErr, leg.checkErr))
 		result.deleted += n
 		if err != nil {
 			errs = append(errs, fmt.Errorf("pruning closed order-tracking %s: %w", leg.label, err))
@@ -3817,40 +3843,18 @@ func (p orderTrackingRetentionPlan) execute() (orderTrackingRetentionSweepResult
 	return result, errors.Join(errs...)
 }
 
-func sweepClosedOrderTrackingRetentionAcrossStores(stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (orderTrackingRetentionSweepResult, error) {
-	return planClosedOrderTrackingRetentionAcrossStores(stores, now, policy, onlyOrders, orderTrackingRetentionRunBudget).execute()
-}
-
-// sweepClosedOrderTrackingRetentionAcrossStoresBounded is the watchdog variant
-// of sweepClosedOrderTrackingRetentionAcrossStores. It stops once the total
-// deletion count across all stores reaches limit, returning the partial deleted
-// count with a nil error on budget exhaustion. Store errors are returned as
-// normal; deletion errors within budget are propagated.
+// sweepClosedOrderTrackingRetentionAcrossStoresBounded is the watchdog's
+// retention prune: the plan gc order sweep-tracking executes, with the
+// watchdog's own budget. It stops once the total deletion count across all
+// stores reaches limit, returning the partial deleted count with a nil error
+// on budget exhaustion. Store errors are returned as normal; deletion errors
+// within budget are propagated.
 func sweepClosedOrderTrackingRetentionAcrossStoresBounded(stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}, limit int) (int, error) { //nolint:unparam // onlyOrders is nil at all current call sites; preserved for API parity with the unbounded variant
 	if limit <= 0 {
 		return 0, nil
 	}
 	result, err := planClosedOrderTrackingRetentionAcrossStores(stores, now, policy, onlyOrders, limit).execute()
 	return result.deleted, err
-}
-
-// sweepClosedOrderTrackingRetention prunes one store, at most
-// orderTrackingRetentionRunBudget beads per call: a larger backlog drains over
-// successive calls.
-func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (int, error) { //nolint:unparam // onlyOrders is nil at all current call sites; preserved for API parity with the bounded variant
-	return sweepClosedOrderTrackingRetentionBounded(store, now, policy, onlyOrders, orderTrackingRetentionRunBudget)
-}
-
-// sweepClosedOrderTrackingRetentionBounded is the per-store bounded variant of
-// sweepClosedOrderTrackingRetention. It stops deleting once limit deletions have
-// occurred within this store call. On budget exhaustion it returns the partial
-// count with a nil error; delete errors are still propagated.
-func sweepClosedOrderTrackingRetentionBounded(store beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}, limit int) (int, error) {
-	if store == nil {
-		return 0, fmt.Errorf("bead store unavailable")
-	}
-	ids, err := selectClosedOrderTrackingRetention(store, now, policy, onlyOrders, limit)
-	return deleteClosedOrderTrackingRetention(store, ids, err)
 }
 
 // deleteClosedOrderTrackingRetention deletes the beads a selection chose and
@@ -3884,12 +3888,19 @@ func deleteClosedOrderTrackingRetention(store beads.Store, ids []string, selErr 
 // order's order-run label (orderTrackingRetentionFloorReadLimit beads), made
 // only when the runs already read do not settle the floor. The legacy bucket
 // has no label to read by, and its floor is the runs the walk has read.
-func selectClosedOrderTrackingRetention(store beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}, limit int) ([]string, error) {
+//
+// Judging a candidate costs store reads of its own, so the walk also stops
+// at deadline (read from orderTrackingRetentionClock), once it has judged at
+// least one candidate; a zero deadline sets no time bound. readErr is a
+// failed history or floor read, after which candidates may have been missed.
+// checkErr is a failed strand check; that candidate is kept, and the walk
+// goes on.
+func selectClosedOrderTrackingRetention(store beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}, limit int, deadline time.Time) (ids []string, readErr, checkErr error) {
 	if store == nil {
-		return nil, fmt.Errorf("bead store unavailable")
+		return nil, fmt.Errorf("bead store unavailable"), nil
 	}
 	if policy.deleteAfterClose <= 0 || limit <= 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	// retainLast is intentionally package-internal and hardcoded; config can
 	// shorten the TTL but cannot remove the recent-history floor.
@@ -3905,10 +3916,14 @@ func selectClosedOrderTrackingRetention(store beads.Store, now time.Time, policy
 		labelRead:  make(map[string]bool),
 	}
 	var cleared, retained []string
-	var errs []error
+	var readErrs, checkErrs []error
+	judged := 0
+	outOfTime := func() bool {
+		return judged > 0 && !deadline.IsZero() && !orderTrackingRetentionClock().Before(deadline)
+	}
 	before := cutoff
 	for range orderTrackingRetentionMaxPages {
-		if len(cleared) >= limit {
+		if len(cleared) >= limit || outOfTime() {
 			break
 		}
 		// A scope leg of the retention sweep reads pre-cutover tracking relics;
@@ -3920,7 +3935,7 @@ func selectClosedOrderTrackingRetention(store beads.Store, now time.Time, policy
 			return listErr
 		})
 		if err != nil {
-			errs = append(errs, fmt.Errorf("listing closed order-tracking beads: %w", err))
+			readErrs = append(readErrs, fmt.Errorf("listing closed order-tracking beads: %w", err))
 			break
 		}
 		// Every run of the page joins the floor before any candidate of the
@@ -3942,12 +3957,13 @@ func selectClosedOrderTrackingRetention(store beads.Store, now time.Time, policy
 			}
 		}
 		for _, c := range candidates {
-			if len(cleared) >= limit {
+			if len(cleared) >= limit || outOfTime() {
 				break
 			}
+			judged++
 			below, err := floor.below(c.bucket, c.run)
 			if err != nil {
-				errs = append(errs, fmt.Errorf("reading the retention floor of %q: %w", c.bucket, err))
+				readErrs = append(readErrs, fmt.Errorf("reading the retention floor of %q: %w", c.bucket, err))
 				continue
 			}
 			if !below {
@@ -3958,7 +3974,7 @@ func selectClosedOrderTrackingRetention(store beads.Store, now time.Time, policy
 					retained = append(retained, c.run.ID)
 					continue
 				}
-				errs = append(errs, fmt.Errorf("deleting closed order-tracking bead %q: %w", c.run.ID, err))
+				checkErrs = append(checkErrs, fmt.Errorf("deleting closed order-tracking bead %q: %w", c.run.ID, err))
 				continue
 			}
 			cleared = append(cleared, c.run.ID)
@@ -3972,7 +3988,7 @@ func selectClosedOrderTrackingRetention(store beads.Store, now time.Time, policy
 		before = page.Oldest
 	}
 	logRetainedForLiveDescendants(retained)
-	return cleared, errors.Join(errs...)
+	return cleared, errors.Join(readErrs...), errors.Join(checkErrs...)
 }
 
 // orderTrackingRetentionFloor holds, per retention bucket, the closed runs a
@@ -4047,16 +4063,6 @@ func logRetainedForLiveDescendants(ids []string) {
 		return
 	}
 	log.Printf("order-tracking retention: retained %d expired closed root(s) that still own open steps (deleting them would strand the steps): %s", len(ids), strings.Join(ids, ","))
-}
-
-// countClosedOrderTrackingRetentionEligible returns the number of closed
-// order-tracking beads across stores that one
-// sweepClosedOrderTrackingRetentionAcrossStores call would delete. It performs
-// no deletions. It selects with the sweep's own planner, so the count is the
-// sweep's batch, at most orderTrackingRetentionRunBudget.
-func countClosedOrderTrackingRetentionEligible(stores []beads.Store, now time.Time, policy orderTrackingRetentionPolicy, onlyOrders map[string]struct{}) (int, error) {
-	plan := planClosedOrderTrackingRetentionAcrossStores(stores, now, policy, onlyOrders, orderTrackingRetentionRunBudget)
-	return plan.eligible(), plan.readErr()
 }
 
 // orderTrackingRetentionBucketKey is the retention bucket of run: its order
