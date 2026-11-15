@@ -123,8 +123,8 @@ compiler appends a `workflow-finalize` **control step** that depends on the last
 steps in your graph. Agents never work on it; the orchestrator completes it once
 everything upstream is done, recording the workflow's outcome and closing it.
 
-For the next few examples, keep the `mayor` from earlier tutorials and add a
-generic worker so you have a second execution target:
+Keep the `mayor` from earlier tutorials and add a generic worker, a second
+execution target that the later tutorials route work to:
 
 ```shell
 ~/my-city
@@ -157,7 +157,7 @@ session.](/diagrams/excalidraw-rendered/formula-apply-pipeline.svg)
 ```shell
 ~/my-city
 $ gc sling mayor pancakes --formula
-Started workflow mc-btj (formula "pancakes") → mayor
+Started workflow gcg-1025 (formula "pancakes") → mayor
 ```
 
 The root bead stays open — blocked on the finalize step — until every step
@@ -176,41 +176,29 @@ vocabulary in older formulas and messages; v2 formulas start workflows.
 [Tutorial 06](/tutorials/06-beads) shows how both shapes land in the bead store.
 </Accordion>
 
-To create the workflow's beads _without_ routing them — to inspect first, or
-route the work yourself — use `gc formula cook`: same compilation, same beads,
-no routing.
+To see exactly what a formula produces without starting it, use
+`gc formula cook`: same compilation, same beads, no routing.
 
 ```shell
 ~/my-city
 $ gc formula cook pancakes
-Root: mc-79s
+Root: gcg-2049
 Created: 7
-pancakes -> mc-79s
-pancakes.combine -> mc-265
-pancakes.cook -> mc-nia
-pancakes.dry -> mc-b8g
-pancakes.serve -> mc-k3q
-pancakes.wet -> mc-0ez
-pancakes.workflow-finalize -> mc-9vb
-
-~/my-city
-$ gc sling worker mc-79s
-Auto-convoy mc-ygc
-Slung mc-79s → worker
+pancakes -> gcg-2049
+pancakes.combine -> gcg-2052
+pancakes.cook -> gcg-2053
+pancakes.dry -> gcg-2050
+pancakes.serve -> gcg-2054
+pancakes.wet -> gcg-2051
+pancakes.workflow-finalize -> gcg-2055
 ```
 
-Replace `mc-79s` with the `Root:` ID your own `gc formula cook` printed.
-
 `Created: 7` is the root plus your five steps plus the finalize step, each with
-its own bead ID. Slinging the cooked root routes it like any other bead — and
-because that's a plain bead sling, you get an auto-convoy tracking it (the
-`--formula` path doesn't create one).
-
-Cook in the scope where the work belongs. Running `gc formula cook` inside a rig
-directory creates the beads in that rig's store (`mp-` prefixes for
-`my-project`), and `gc sling` refuses to route a rig's bead to an agent that
-reads a different store. We cooked in the city, so the city-scoped `worker` can
-take it.
+its own bead ID. A workflow's beads live in the city's infrastructure store,
+which is why their IDs start `gcg-` ([Tutorial 06](/tutorials/06-beads) covers
+the city's two stores). Nothing routes a cooked workflow, and `gc sling` won't
+route one by hand: it routes work beads, the tasks you and your agents reason
+about. To run a formula, sling it as shown above.
 
 ## Variables
 
@@ -239,19 +227,19 @@ title = "Say hello to {{name}}"
 ```shell
 ~/my-city
 $ gc formula cook greeting --var name="Alice"
-Root: mc-tmf
+Root: gcg-5121
 Created: 3
-greeting -> mc-tmf
-greeting.say-hello -> mc-oyr
-greeting.workflow-finalize -> mc-5x2
+greeting -> gcg-5121
+greeting.say-hello -> gcg-5122
+greeting.workflow-finalize -> gcg-5123
 
 ~/my-city
 $ gc formula cook greeting
-Root: mc-h2g
+Root: gcg-6145
 Created: 3
-greeting -> mc-h2g
-greeting.say-hello -> mc-9qb
-greeting.workflow-finalize -> mc-gxo
+greeting -> gcg-6145
+greeting.say-hello -> gcg-6146
+greeting.workflow-finalize -> gcg-6147
 ```
 
 `cook` doesn't echo the substituted titles. To preview the expansion, use `gc
@@ -317,19 +305,19 @@ Pass variables with `--var`:
 ```shell
 ~/my-city
 $ gc formula cook feature-work --var title="Auth overhaul" --var branch="develop"
-Root: mc-qnf
+Root: gcg-7169
 Created: 3
-feature-work -> mc-qnf
-feature-work.implement -> mc-35h
-feature-work.workflow-finalize -> mc-2fp
+feature-work -> gcg-7169
+feature-work.implement -> gcg-7170
+feature-work.workflow-finalize -> gcg-7171
 
 ~/my-city
 $ gc formula cook feature-work --var title="Auth overhaul" --var priority="critical"
-Root: mc-d1s
+Root: gcg-8193
 Created: 3
-feature-work -> mc-d1s
-feature-work.implement -> mc-ej5
-feature-work.workflow-finalize -> mc-6gi
+feature-work -> gcg-8193
+feature-work.implement -> gcg-8194
+feature-work.workflow-finalize -> gcg-8195
 ```
 
 `gc formula show` previews the substituted recipe and the declared variables;

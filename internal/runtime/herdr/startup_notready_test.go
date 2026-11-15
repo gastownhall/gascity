@@ -140,7 +140,8 @@ const (
 // notReadyFake writes a fake herdr for the not-ready re-prompt. It counts the
 // `agent prompt --wait` calls in a state file; the Nth (1-based) succeeds when
 // N >= succeedOn (never when succeedOn is 0) and stalls otherwise. `pane read`
-// runs screenScript, a sh snippet that sees the prompt count so far as $N.
+// runs screenScript, a sh snippet that sees the prompt count so far as $N and
+// the trace file's path as $TRACE.
 // `agent get` reports an idle agent, `agent wait` times out, and every argv is
 // appended to the returned trace.
 func notReadyFake(t *testing.T, succeedOn int, screenScript string) (bin, trace string) {
@@ -149,6 +150,7 @@ func notReadyFake(t *testing.T, succeedOn int, screenScript string) (bin, trace 
 	trace = filepath.Join(dir, "verbs")
 	count := filepath.Join(dir, "n")
 	script := "#!/bin/sh\n" +
+		"TRACE=" + trace + "\n" +
 		"for a in \"$@\"; do echo \"$a\" >> " + trace + "; done\n" +
 		"echo '---' >> " + trace + "\n" +
 		"N=$(cat " + count + " 2>/dev/null || echo 0)\n" +
@@ -212,6 +214,27 @@ func TestDeliverStartupTurnRepromptsATurnRejectedAsNotReady(t *testing.T) {
 	}
 	if strings.Contains(got, "send-keys") {
 		t.Fatalf("a rejected turn was answered with an Enter, not a re-prompt:\n%s", got)
+	}
+}
+
+// (a2) A turn typed before the agent's TUI was up stalls with nothing on
+// screen; the recovery Enter is what submits it, and the agent rejects it as
+// not ready then. The rejection is caught after that Enter's wait times out,
+// and the turn is prompted again rather than answered with another Enter.
+func TestDeliverStartupTurnRepromptsWhenRecoveryEnterSurfacesRejection(t *testing.T) {
+	bin, trace := notReadyFake(t, 2,
+		`    if grep -q '^send-keys$' "$TRACE"; then echo 'Managed account policy is still loading.'; fi; echo '> '`)
+	c := notReadyClient(bin, time.Minute)
+
+	if err := c.deliverStartupTurn(context.Background(), "w1:p1", "first turn", bindModeAgent, []string{notReadyMarker}, "> "); err != nil {
+		t.Fatalf("deliverStartupTurn: %v", err)
+	}
+	got := readTrace(t, trace)
+	if n := promptCount(got); n != 2 {
+		t.Fatalf("prompts = %d, want 2 (one re-prompt after the recovery Enter):\n%s", n, got)
+	}
+	if n := strings.Count(got, "\nsend-keys\n"); n != 1 {
+		t.Fatalf("send-keys = %d, want exactly 1 recovery Enter:\n%s", n, got)
 	}
 }
 

@@ -90,6 +90,14 @@ when the context ends. Take the bound from the caller's own context.
   `CurrentTurn`'s failure direction, an idle reading it did not get leaving
   the turn open.
 
+The worker operation event names its session from the persisted record only
+(`sessionRecordPersisted`), never `sessionRecordViaManager`: the live overlay
+(`Manager.EnrichInfo`) makes provider calls that cannot be canceled, and the
+event is named before and after every operation, so a wedged provider would hold
+a kill on the reconciler tick or a start on its async slot before the operation
+ran (`SESSION-RUNTIME-034`). Do not add a provider call to
+`populateOperationEventIdentity`.
+
 ## Turn sources
 
 A session's turns come from the routed runtime's protocol, else from the

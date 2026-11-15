@@ -60,7 +60,10 @@ func TestBeadsProxiedIgnoresUserLevelSharedServer(t *testing.T) {
 		}
 	})
 
-	city.Init("claude")
+	// Single-store: this test's subject is bd's proxied server, and its PATH
+	// carries both the real bd and the tool-home wrapper around it, which a
+	// split city's gc bd refuses.
+	city.InitSingleStore("claude")
 	city.RigAdd(rigDir, "")
 
 	for _, scope := range []struct{ label, root string }{{"city", cityRoot}, {"rig", rigDir}} {

@@ -59,6 +59,12 @@ import (
 // with the store named: an unreachable store reported as a missing bead is the
 // root-loss shape this lane exists to prevent.
 func (s *Server) resolveBeadOwner(id string) (beads.ResidentStore, beads.Bead, error) {
+	return s.resolveBeadOwnerIn(s.state.Stores(), id)
+}
+
+// resolveBeadOwnerIn is resolveBeadOwner over one epoch st, for a request that
+// reads its other stores from st too (the work-record close gate).
+func (s *Server) resolveBeadOwnerIn(st storeref.Stores, id string) (beads.ResidentStore, beads.Bead, error) {
 	if strings.TrimSpace(id) == "" {
 		// The router never dispatches a by-id handler with an empty path
 		// segment, so this is unreachable in practice. It answers "absent"
@@ -67,7 +73,6 @@ func (s *Server) resolveBeadOwner(id string) (beads.ResidentStore, beads.Bead, e
 		// branch is a poor place to change a status code.
 		return beads.ResidentStore{}, beads.Bead{}, apierr.BeadNotFound.Msg("bead " + id + " not found")
 	}
-	st := s.state.Stores()
 	plan, err := storeref.Plan(storeref.ByID{ID: id, WorkAxis: apiWorkAxis{s: s, st: st}}, st.Topology())
 	if err != nil {
 		return beads.ResidentStore{}, beads.Bead{}, apierr.Internal.Msg(err.Error())

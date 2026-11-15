@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "catalog.go",
         "fshost.go",
+        "input.go",
         "observe.go",
         "ported.go",
         "probes.go",
@@ -27,6 +28,7 @@ go_test(
     name = "runtimecontract_test",
     srcs = [
         "lockstep_test.go",
+        "nontmux_test.go",
         "runner_test.go",
         "screen_reference_test.go",
         "screen_script_test.go",

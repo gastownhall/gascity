@@ -4826,7 +4826,7 @@ func TestBeadEventStoresIgnoreReservedPrefixesWithoutARelocation(t *testing.T) {
 		beadStores:    map[string]beads.Store{},
 		storageRoutes: nil, // no [storage] section
 	}
-	if store, known := cs.beadEventConfiguredStoreLocked("gcg-1"); known {
+	if store, _, _, known := cs.beadEventConfiguredStoreLocked("gcg-1"); known {
 		t.Errorf("a city that relocates nothing claimed to own %q (store=%v); the reserved-prefix arm must be gated on an actual relocation", "gcg-1", store)
 	}
 }

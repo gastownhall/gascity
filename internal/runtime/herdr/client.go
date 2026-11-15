@@ -649,6 +649,10 @@ func (c *client) deliverStartupTurn(ctx context.Context, paneID, text, mode stri
 	first := time.Now()
 	giveUp := c.notReadyGiveUp(ctx, first)
 	for attempt := 1; ; attempt++ {
+		// Read the pre-submit baseline first, so the wait bound below is
+		// computed after that pane read and still ends startupDeadlineMargin
+		// before the deadline.
+		before, berr := c.countNotReadyMarkers(ctx, paneID, notReadyMarkers)
 		timeoutMS := startupTimeoutMS(ctx, startupPromptConfirmTimeoutMS)
 		if timeoutMS <= herdrStateChangeWindowMS {
 			err := c.agentPrompt(ctx, paneID, text)
@@ -670,7 +674,6 @@ func (c *client) deliverStartupTurn(ctx context.Context, paneID, text, mode stri
 			args = append(args, "--until", s)
 		}
 		args = append(args, "--timeout", strconv.Itoa(timeoutMS))
-		before, berr := c.countNotReadyMarkers(ctx, paneID, notReadyMarkers)
 		_, err := c.run(ctx, args...)
 		if err == nil {
 			if attempt > 1 {

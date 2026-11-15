@@ -316,6 +316,7 @@ func recoverManagedDoltRepairRuntimeStateForHealthyPort(cityPath, requestedPort 
 	if !ok {
 		return nil
 	}
+	repaired = keepRecordedInfraScope(layout.StateFile, repaired)
 	if err := writeDoltRuntimeStateFile(layout.StateFile, repaired); err != nil {
 		return fmt.Errorf("repair provider dolt runtime state: %w", err)
 	}

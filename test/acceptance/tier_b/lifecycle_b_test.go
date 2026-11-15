@@ -254,7 +254,9 @@ func TestLifecycle_DrainAckResponsiveRespawn(t *testing.T) {
 func runResponsiveRespawn(t *testing.T, patrolInterval string, maxRespawnLatency, firstMarkerTimeout time.Duration) {
 	t.Helper()
 	c := helpers.NewCity(t, testEnvB)
-	c.Init("claude")
+	// Single-store: writeRespawnPoolConfig replaces city.toml with a fixture
+	// of its own and seeds the work file store directly.
+	c.InitSingleStore("claude")
 
 	scriptCmd, markersPath := writeRespawnMarkerScript(t, c)
 	writeRespawnPoolConfig(t, c, scriptCmd, patrolInterval)
