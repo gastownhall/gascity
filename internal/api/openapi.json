@@ -13991,6 +13991,10 @@
             "description": "True when the city is suspended: the body was built without reading any bead store (a read would restart its retired bd proxy), so work, mail, session-count and store-health figures are absent.",
             "type": "boolean"
           },
+          "stuck_creating": {
+            "$ref": "#/components/schemas/StatusStuckCreating",
+            "description": "Sessions whose in-flight create is abandoned. Omitted when not measured (lite mode, the session read failed or timed out, the city is suspended, or a server predating this field): absent means UNKNOWN, never zero."
+          },
           "suspended": {
             "description": "Whether the city is suspended.",
             "type": "boolean"
@@ -14323,6 +14327,60 @@
           "ratio_mb_per_row",
           "warning",
           "threshold_mb_per_row"
+        ],
+        "type": "object"
+      },
+      "StatusStuckCreating": {
+        "additionalProperties": false,
+        "properties": {
+          "complete": {
+            "description": "True when the session read covered every session, so an empty list is a measured zero. False means a partial read: the list is a lower bound.",
+            "type": "boolean"
+          },
+          "sessions": {
+            "description": "Every abandoned create found, oldest first. Serialized as [] (never null) when none.",
+            "items": {
+              "$ref": "#/components/schemas/StatusStuckCreatingSession"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "sessions",
+          "complete"
+        ],
+        "type": "object"
+      },
+      "StatusStuckCreatingSession": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "description": "Session bead id (the argument gc session close takes).",
+            "type": "string"
+          },
+          "since": {
+            "description": "RFC3339 UTC start of the current create attempt. Omitted when the bead carries no anchor.",
+            "type": "string"
+          },
+          "state": {
+            "description": "Raw lifecycle state.",
+            "enum": [
+              "creating",
+              "start-pending"
+            ],
+            "type": "string"
+          },
+          "template": {
+            "description": "Agent template the session was created for.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "state"
         ],
         "type": "object"
       },

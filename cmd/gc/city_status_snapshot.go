@@ -69,12 +69,15 @@ type cityStatusSnapshot struct {
 	// ConditionalWrites is the daemon's latched §12.5 snapshot; nil on the
 	// local fallback path (a stopped controller has no latched state to show).
 	ConditionalWrites *api.StatusConditionalWrites
-	Agents            []cityStatusAgentRow
-	Rigs              []StatusRigJSON
-	NamedSessions     []cityStatusNamedSession
-	Partial           bool
-	PartialErrors     []string
-	Summary           StatusSummaryJSON
+	// StuckCreating is the abandoned-create block. Nil means not measured
+	// (unknown), never zero.
+	StuckCreating *api.StatusStuckCreatingView
+	Agents        []cityStatusAgentRow
+	Rigs          []StatusRigJSON
+	NamedSessions []cityStatusNamedSession
+	Partial       bool
+	PartialErrors []string
+	Summary       StatusSummaryJSON
 }
 
 type cityStatusAgentRow struct {
@@ -181,6 +184,7 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 		Suspended:       suspended,
 	}
 	snapshot.APIURL = cityStatusAPIURL(cfg, snapshot.Controller, stderr)
+	snapshot.StuckCreating = stuckCreatingFromSessionSnapshot(store != nil, cfg, statusSnapshot, cityStatusNow())
 	snapshot.CityName = loadedCityName(cfg, cityPath)
 	registerStatusProviderACPRoutes(sp, statusSnapshot, snapshot.CityName, cfg)
 	if snapshot.Controller.Running && cityPath != "" {
@@ -505,6 +509,7 @@ func cityStatusJSONFromSnapshot(snapshot cityStatusSnapshot, summary StatusSumma
 		Health:            HealthJSON{Usable: running && !snapshot.Suspended, Degraded: degraded, Signals: signals},
 		Beads:             snapshot.Beads,
 		ConditionalWrites: snapshot.ConditionalWrites,
+		StuckCreating:     stuckCreatingWire(snapshot.StuckCreating),
 		Agents:            agents,
 		Rigs:              rigs,
 		Summary:           summary,
@@ -638,6 +643,7 @@ func renderCityStatusText(snapshot cityStatusSnapshot, dops drainOps, stdout io.
 
 	renderStoreHealthBlock(stdout, snapshot.Summary.StoreHealth)
 	renderConditionalWritesBlock(stdout, snapshot.ConditionalWrites)
+	renderStuckCreatingBlock(stdout, snapshot.StuckCreating, cityStatusNow())
 }
 
 // renderConditionalWritesBlock prints the daemon's latched conditional-writes

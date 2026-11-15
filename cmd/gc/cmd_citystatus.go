@@ -37,11 +37,14 @@ type StatusJSON struct {
 	Beads         *beads.BeadsDiagnostic `json:"beads,omitempty"`
 	// ConditionalWrites mirrors the API status block verbatim (§12.5).
 	ConditionalWrites *api.StatusConditionalWrites `json:"conditional_writes,omitempty"`
-	Agents            []StatusAgentJSON            `json:"agents"`
-	Rigs              []StatusRigJSON              `json:"rigs"`
-	Summary           StatusSummaryJSON            `json:"summary"`
-	Partial           bool                         `json:"partial,omitempty"`
-	PartialErrors     []string                     `json:"partial_errors,omitempty"`
+	// StuckCreating mirrors the API status block (same names, same three
+	// states): absent means not measured, never zero.
+	StuckCreating *api.StatusStuckCreating `json:"stuck_creating,omitempty"`
+	Agents        []StatusAgentJSON        `json:"agents"`
+	Rigs          []StatusRigJSON          `json:"rigs"`
+	Summary       StatusSummaryJSON        `json:"summary"`
+	Partial       bool                     `json:"partial,omitempty"`
+	PartialErrors []string                 `json:"partial_errors,omitempty"`
 }
 
 type WorkspaceJSON struct {
@@ -339,6 +342,7 @@ func snapshotFromStatusView(cityPath string, v api.StatusView) cityStatusSnapsho
 		Controller:        controllerStatusForCity(cityPath),
 		Beads:             v.Beads,
 		ConditionalWrites: v.ConditionalWrites,
+		StuckCreating:     v.StuckCreating,
 		Partial:           v.Partial,
 		PartialErrors:     append([]string(nil), v.PartialErrors...),
 		Summary: StatusSummaryJSON{

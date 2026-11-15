@@ -180,6 +180,24 @@ type StatusBody struct {
 	NamedSessionDetails []StatusNamedSessionDetail `json:"named_session_details,omitempty" doc:"Per-named-session detail. Empty when none configured."`
 	SessionCountsDetail *StatusSessionCountsDetail `json:"session_counts_detail,omitempty" doc:"Active/suspended session counts. Omitted when unavailable."`
 	ConditionalWrites   *StatusConditionalWrites   `json:"conditional_writes,omitempty" doc:"Conditional-writes (CAS) rollout state: the daemon's boot-latched mode plus per-store capability verdicts. Omitted when the server predates the surface."`
+	StuckCreating       *StatusStuckCreating       `json:"stuck_creating,omitempty" doc:"Sessions whose in-flight create is abandoned. Omitted when not measured (lite mode, the session read failed or timed out, the city is suspended, or a server predating this field): absent means UNKNOWN, never zero."`
+}
+
+// StatusStuckCreating is the measured-state block for abandoned session
+// creates. Its presence means the session read was taken; Complete says
+// whether that read covered every session.
+type StatusStuckCreating struct {
+	Sessions []StatusStuckCreatingSession `json:"sessions" doc:"Every abandoned create found, oldest first. Serialized as [] (never null) when none."`
+	Complete bool                         `json:"complete" doc:"True when the session read covered every session, so an empty list is a measured zero. False means a partial read: the list is a lower bound."`
+}
+
+// StatusStuckCreatingSession is one session whose in-flight create is
+// abandoned.
+type StatusStuckCreatingSession struct {
+	ID       string `json:"id" doc:"Session bead id (the argument gc session close takes)."`
+	Template string `json:"template,omitempty" doc:"Agent template the session was created for."`
+	State    string `json:"state" enum:"creating,start-pending" doc:"Raw lifecycle state."`
+	Since    string `json:"since,omitempty" doc:"RFC3339 UTC start of the current create attempt. Omitted when the bead carries no anchor."`
 }
 
 // StatusConditionalWrites is the daemon's own latched conditional-writes

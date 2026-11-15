@@ -9,9 +9,11 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/convergence"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 )
 
@@ -273,4 +275,63 @@ func validateJSONAgainstResultSchemaE(command []string, data []byte) error {
 		return err
 	}
 	return nil
+}
+
+// TestStatusJSONStuckCreatingValidatesDeclaredSchema runs the local-fallback
+// status --json over a city holding an abandoned session create and validates
+// the populated stuck_creating block against the declared schema. The schema
+// forbids undeclared properties, so it only fails on output that actually
+// carries the block; the shared case above runs over a city with no stuck
+// session and cannot catch a schema that fell behind.
+func TestStatusJSONStuckCreatingValidatesDeclaredSchema(t *testing.T) {
+	clearGCEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+
+	cityPath := t.TempDir()
+	writeManagementJSONTestCity(t, cityPath, "[workspace]\nname = \"test-city\"\n")
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("open city store: %v", err)
+	}
+	stuck, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"state":                     "creating",
+			"template":                  "myrig/worker",
+			"session_name":              "stuck-session",
+			"pending_create_started_at": time.Now().Add(-3 * time.Hour).UTC().Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create stuck session bead: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--city", cityPath, "status", "--json"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("status --json = %d; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+	var payload struct {
+		StuckCreating *struct {
+			Sessions []struct {
+				ID       string `json:"id"`
+				Template string `json:"template"`
+				State    string `json:"state"`
+				Since    string `json:"since"`
+			} `json:"sessions"`
+			Complete bool `json:"complete"`
+		} `json:"stuck_creating"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode status --json: %v\n%s", err, stdout.String())
+	}
+	if payload.StuckCreating == nil || !payload.StuckCreating.Complete || len(payload.StuckCreating.Sessions) != 1 {
+		t.Fatalf("stuck_creating = %+v, want one session in a complete block\n%s", payload.StuckCreating, stdout.String())
+	}
+	row := payload.StuckCreating.Sessions[0]
+	if row.ID != stuck.ID || row.State != "creating" || row.Template != "myrig/worker" || row.Since == "" {
+		t.Fatalf("row = %+v, want %s / creating / myrig/worker / a since", row, stuck.ID)
+	}
+	validateJSONAgainstResultSchema(t, []string{"status"}, stdout.Bytes())
 }

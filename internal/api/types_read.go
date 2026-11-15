@@ -4,6 +4,7 @@ import (
 	"math"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -77,9 +78,29 @@ type StatusView struct {
 	// ConditionalWrites is the daemon's latched §12.5 snapshot, verbatim from
 	// the wire (the view reuses the wire struct — it is already CLI-shaped).
 	ConditionalWrites *StatusConditionalWrites
-	Summary           StatusSummaryView
-	Partial           bool
-	PartialErrors     []string
+	// StuckCreating is the abandoned-create block. Nil means the server did
+	// not measure it (unknown), never zero; a non-nil value with Complete
+	// and no sessions is a measured zero.
+	StuckCreating *StatusStuckCreatingView
+	Summary       StatusSummaryView
+	Partial       bool
+	PartialErrors []string
+}
+
+// StatusStuckCreatingView is the CLI-facing abandoned-create block. Complete
+// false means a partial session read: Sessions is a lower bound.
+type StatusStuckCreatingView struct {
+	Sessions []StatusStuckCreatingSessionView
+	Complete bool
+}
+
+// StatusStuckCreatingSessionView is one abandoned create. Since is the zero
+// time when the bead carried no anchor.
+type StatusStuckCreatingSessionView struct {
+	ID       string
+	Template string
+	State    string
+	Since    time.Time
 }
 
 // StatusAgentView is the CLI-facing per-agent row.

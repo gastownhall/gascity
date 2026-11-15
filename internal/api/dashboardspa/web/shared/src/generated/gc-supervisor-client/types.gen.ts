@@ -6191,6 +6191,10 @@ export type StatusBody = {
      */
     stores_not_read?: boolean;
     /**
+     * Sessions whose in-flight create is abandoned. Omitted when not measured (lite mode, the session read failed or timed out, the city is suspended, or a server predating this field): absent means UNKNOWN, never zero.
+     */
+    stuck_creating?: StatusStuckCreating;
+    /**
      * Whether the city is suspended.
      */
     suspended: boolean;
@@ -6385,6 +6389,36 @@ export type StatusStoreHealth = {
      * True when maintenance is overdue. Meaningless unless rows_measured is true.
      */
     warning: boolean;
+};
+
+export type StatusStuckCreating = {
+    /**
+     * True when the session read covered every session, so an empty list is a measured zero. False means a partial read: the list is a lower bound.
+     */
+    complete: boolean;
+    /**
+     * Every abandoned create found, oldest first. Serialized as [] (never null) when none.
+     */
+    sessions: Array<StatusStuckCreatingSession> | null;
+};
+
+export type StatusStuckCreatingSession = {
+    /**
+     * Session bead id (the argument gc session close takes).
+     */
+    id: string;
+    /**
+     * RFC3339 UTC start of the current create attempt. Omitted when the bead carries no anchor.
+     */
+    since?: string;
+    /**
+     * Raw lifecycle state.
+     */
+    state: 'creating' | 'start-pending';
+    /**
+     * Agent template the session was created for.
+     */
+    template?: string;
 };
 
 export type StatusWorkCounts = {

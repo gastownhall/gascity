@@ -3654,6 +3654,18 @@ export const zStatusStoreHealth = z.object({
     warning: z.boolean()
 });
 
+export const zStatusStuckCreatingSession = z.object({
+    id: z.string(),
+    since: z.string().optional(),
+    state: z.enum(['creating', 'start-pending']),
+    template: z.string().optional()
+});
+
+export const zStatusStuckCreating = z.object({
+    complete: z.boolean(),
+    sessions: z.array(zStatusStuckCreatingSession).nullable()
+});
+
 export const zStatusWorkCounts = z.object({
     in_progress: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     open: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
@@ -3682,6 +3694,7 @@ export const zStatusBody = z.object({
     session_counts_detail: zStatusSessionCountsDetail.optional(),
     store_health: zStatusStoreHealth.optional(),
     stores_not_read: z.boolean().optional(),
+    stuck_creating: zStatusStuckCreating.optional(),
     suspended: z.boolean(),
     uptime_sec: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     version: z.string().optional(),

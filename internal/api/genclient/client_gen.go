@@ -1731,6 +1731,24 @@ func (e StatusConditionalWritesOrigin) Valid() bool {
 	}
 }
 
+// Defines values for StatusStuckCreatingSessionState.
+const (
+	Creating     StatusStuckCreatingSessionState = "creating"
+	StartPending StatusStuckCreatingSessionState = "start-pending"
+)
+
+// Valid indicates whether the value is a known member of the StatusStuckCreatingSessionState enum.
+func (e StatusStuckCreatingSessionState) Valid() bool {
+	switch e {
+	case Creating:
+		return true
+	case StartPending:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for SubmitIntent.
 const (
 	Default      SubmitIntent = "default"
@@ -7324,7 +7342,8 @@ type StatusBody struct {
 	StoreHealth         *StatusStoreHealth         `json:"store_health,omitempty"`
 
 	// StoresNotRead True when the city is suspended: the body was built without reading any bead store (a read would restart its retired bd proxy), so work, mail, session-count and store-health figures are absent.
-	StoresNotRead *bool `json:"stores_not_read,omitempty"`
+	StoresNotRead *bool                `json:"stores_not_read,omitempty"`
+	StuckCreating *StatusStuckCreating `json:"stuck_creating,omitempty"`
 
 	// Suspended Whether the city is suspended.
 	Suspended bool `json:"suspended"`
@@ -7492,6 +7511,33 @@ type StatusStoreHealth struct {
 	// Warning True when maintenance is overdue. Meaningless unless rows_measured is true.
 	Warning bool `json:"warning"`
 }
+
+// StatusStuckCreating defines model for StatusStuckCreating.
+type StatusStuckCreating struct {
+	// Complete True when the session read covered every session, so an empty list is a measured zero. False means a partial read: the list is a lower bound.
+	Complete bool `json:"complete"`
+
+	// Sessions Every abandoned create found, oldest first. Serialized as [] (never null) when none.
+	Sessions *[]StatusStuckCreatingSession `json:"sessions"`
+}
+
+// StatusStuckCreatingSession defines model for StatusStuckCreatingSession.
+type StatusStuckCreatingSession struct {
+	// Id Session bead id (the argument gc session close takes).
+	Id string `json:"id"`
+
+	// Since RFC3339 UTC start of the current create attempt. Omitted when the bead carries no anchor.
+	Since *string `json:"since,omitempty"`
+
+	// State Raw lifecycle state.
+	State StatusStuckCreatingSessionState `json:"state"`
+
+	// Template Agent template the session was created for.
+	Template *string `json:"template,omitempty"`
+}
+
+// StatusStuckCreatingSessionState Raw lifecycle state.
+type StatusStuckCreatingSessionState string
 
 // StatusWorkCounts defines model for StatusWorkCounts.
 type StatusWorkCounts struct {

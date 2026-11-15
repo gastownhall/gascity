@@ -2,6 +2,7 @@ package api
 
 import (
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/api/genclient"
 )
@@ -186,4 +187,63 @@ func TestStatusViewFromGenMapsSessionID(t *testing.T) {
 	if got.Agents[1].SessionID != "" {
 		t.Fatalf("Agents[1].SessionID = %q, want empty", got.Agents[1].SessionID)
 	}
+}
+
+// TestStatusViewFromGenStuckCreating pins the three measured states of the
+// abandoned-create block across the decode: an absent block is nil (unknown,
+// never an empty measured block), a present empty complete block is a
+// measured zero, and a present block keeps its rows, its anchor times and its
+// complete flag.
+func TestStatusViewFromGenStuckCreating(t *testing.T) {
+	t.Run("absent decodes to nil", func(t *testing.T) {
+		got := statusViewFromGen(&genclient.StatusBody{Name: "city"})
+		if got.StuckCreating != nil {
+			t.Fatalf("StuckCreating = %+v, want nil (not measured)", got.StuckCreating)
+		}
+	})
+	t.Run("present empty complete is a measured zero", func(t *testing.T) {
+		empty := []genclient.StatusStuckCreatingSession{}
+		got := statusViewFromGen(&genclient.StatusBody{StuckCreating: &genclient.StatusStuckCreating{Sessions: &empty, Complete: true}})
+		if got.StuckCreating == nil {
+			t.Fatal("StuckCreating = nil, want a measured block")
+		}
+		if !got.StuckCreating.Complete || len(got.StuckCreating.Sessions) != 0 {
+			t.Fatalf("StuckCreating = %+v, want complete and empty", *got.StuckCreating)
+		}
+	})
+	t.Run("null sessions list still decodes as a present block", func(t *testing.T) {
+		got := statusViewFromGen(&genclient.StatusBody{StuckCreating: &genclient.StatusStuckCreating{Complete: true}})
+		if got.StuckCreating == nil || len(got.StuckCreating.Sessions) != 0 {
+			t.Fatalf("StuckCreating = %+v, want a present, empty block", got.StuckCreating)
+		}
+	})
+	t.Run("rows keep their fields and a partial read stays a lower bound", func(t *testing.T) {
+		since := "2026-11-15T09:00:00Z"
+		badSince := "not-a-time"
+		tmpl := "myrig/worker"
+		rows := []genclient.StatusStuckCreatingSession{
+			{Id: "gc-1", Template: &tmpl, State: "creating", Since: &since},
+			{Id: "gc-2", State: "start-pending", Since: &badSince},
+			{Id: "gc-3", State: "creating"},
+		}
+		got := statusViewFromGen(&genclient.StatusBody{StuckCreating: &genclient.StatusStuckCreating{Sessions: &rows, Complete: false}})
+		sc := got.StuckCreating
+		if sc == nil || len(sc.Sessions) != 3 {
+			t.Fatalf("StuckCreating = %+v, want 3 rows", sc)
+		}
+		if sc.Complete {
+			t.Error("Complete = true, want false")
+		}
+		first := sc.Sessions[0]
+		wantSince := time.Date(2026, 11, 15, 9, 0, 0, 0, time.UTC)
+		if first.ID != "gc-1" || first.Template != tmpl || first.State != "creating" || !first.Since.Equal(wantSince) {
+			t.Errorf("row 0 = %+v, want gc-1 / %s / creating / %s", first, tmpl, wantSince)
+		}
+		if sc.Sessions[1].State != "start-pending" || !sc.Sessions[1].Since.IsZero() {
+			t.Errorf("row 1 = %+v, want start-pending with a zero since (unparseable)", sc.Sessions[1])
+		}
+		if !sc.Sessions[2].Since.IsZero() || sc.Sessions[2].Template != "" {
+			t.Errorf("row 2 = %+v, want no since and no template", sc.Sessions[2])
+		}
+	})
 }
