@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -17,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // moleculeAutocloseReason is the close_reason metadata value stamped on
@@ -78,10 +78,10 @@ func doMoleculeAutoclose(beadID string, stdout, stderr io.Writer) {
 	// rig-store closes autoclose their molecule roots instead of silently
 	// no-op'ing (#3411).
 	// The root is ClassGraph wherever the just-closed bead lives, so the graph
-	// leg routes off the owning store rather than following it.
-	routeCfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	// leg routes off the owning store rather than following it: the plans are
+	// over the one-shot epoch for that store (cliStores).
 	if store, dir, ok := autocloseOwningStore(beadID, cityPath); ok {
-		doMoleculeAutocloseWith(store, autocloseStoreRef(dir, cityPath), rec, beadID, stdout, cliGraphStore(store, routeCfg, cityPath))
+		doMoleculeAutocloseWith(store, autocloseStoreRef(dir, cityPath), rec, beadID, stdout, cliStores(cityPath, store))
 		return
 	}
 
@@ -89,7 +89,7 @@ func doMoleculeAutoclose(beadID string, stdout, stderr io.Writer) {
 	if err != nil {
 		return
 	}
-	doMoleculeAutocloseWith(store, autocloseStoreRef(storeRoot, cityPath), rec, beadID, stdout, cliGraphStore(store, routeCfg, cityPath))
+	doMoleculeAutocloseWith(store, autocloseStoreRef(storeRoot, cityPath), rec, beadID, stdout, cliStores(cityPath, store))
 }
 
 // autocloseStoreRef resolves the store-ref label ("city:<name>" / "rig:<name>")
@@ -120,12 +120,15 @@ func autocloseStoreRef(storeRoot, cityPath string) string {
 // owns it) and resolves/closes its molecule or graph-workflow root through the
 // graph-class store. A closed bead can be a work/source bead in a rig store
 // while the molecule root it belongs to lives in the graph store, so the
-// source-bead reverse scan and the root walk run on the graph store. It is a
-// required parameter for the reason given on doWispAutocloseWith.
-func doMoleculeAutocloseWith(store beads.Store, storeRef string, rec events.Recorder, beadID string, stdout io.Writer, graphClassStore beads.GraphStore) autocloseRun {
+// source-bead reverse scan and the root walk run on the graph store. stores
+// is the city's epoch (the controller's, or the one-shot CLI's over the
+// closed bead's store): its graph handle is that graph store, and the root
+// and parent lookups are its Molecule plans. It is a required parameter for
+// the reason given on doWispAutocloseWith.
+func doMoleculeAutocloseWith(store beads.Store, storeRef string, rec events.Recorder, beadID string, stdout io.Writer, stores storeref.Stores) autocloseRun {
 	var run autocloseRun
 	// Unwrapped for internal use; see doWispAutocloseWith.
-	graphStore := graphClassStore.Store
+	graphStore := stores.Graph().Store
 	if graphStore == nil {
 		graphStore = store
 	}
@@ -146,6 +149,26 @@ func doMoleculeAutocloseWith(store beads.Store, storeRef string, rec events.Reco
 	// close them once their own subtree is terminal.
 	autocloseRootsForSourceBead(graphStore, storeRef, rec, beadID, stdout, &run)
 
+	// locate resolves id over the epoch's molecule plan of kind
+	// (MoleculeParentNear: the closed bead's own store, then graph;
+	// MoleculeRootNear: graph, then the closed bead's own store) and returns
+	// the row and the writable handle on the store that holds it, so the
+	// subtree walk and the close run where the molecule lives. Only a
+	// not-found moves the lookup on; any other read error is the answer (a
+	// store that failed to answer is not proof the bead is elsewhere). When
+	// graph is the closed bead's store the plan is one leg.
+	locate := func(kind storeref.MoleculeKind, id string) (beads.Bead, beads.ResidentStore, error) {
+		plan, err := stores.Plan(storeref.Molecule{Kind: kind, Scope: storeref.WorkRef, Near: store, NearRef: autocloseNearRef})
+		if err != nil {
+			return beads.Bead{}, beads.ResidentStore{}, err
+		}
+		owner, err := storeref.ResolveOwnerRow(plan, id)
+		if err != nil {
+			return beads.Bead{}, beads.ResidentStore{}, err
+		}
+		return owner.Bead, owner.Resident, nil
+	}
+
 	rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 	if rootID == "" {
 		// Legacy fallback for pre-metadata beads: react only to typed
@@ -159,7 +182,7 @@ func doMoleculeAutocloseWith(store beads.Store, storeRef string, rec events.Reco
 		// A parent shares its child's ledger, so the closed bead's own store
 		// answers first. That is where a v1 POURED molecule lives: its beads
 		// are work class and stay on the work ledger even on a split city.
-		parent, parentStore, err := autocloseLocate(bead.ParentID, store, graphStore)
+		parent, parentStore, err := locate(storeref.MoleculeParentNear, bead.ParentID)
 		if err != nil {
 			run.note(err)
 			return run
@@ -170,7 +193,7 @@ func doMoleculeAutocloseWith(store beads.Store, storeRef string, rec events.Reco
 	// gc.root_bead_id names a graph-class root, so the graph store answers
 	// first; the closed bead's own store is the fallback for a root that
 	// shares its ledger (a single-store city, or a rig-scope graph root).
-	root, rootStore, err := autocloseLocate(rootID, graphStore, store)
+	root, rootStore, err := locate(storeref.MoleculeRootNear, rootID)
 	if err != nil {
 		run.note(err)
 		return run
@@ -179,27 +202,8 @@ func doMoleculeAutocloseWith(store beads.Store, storeRef string, rec events.Reco
 	return run
 }
 
-// autocloseLocate reads id from the first of two stores that holds it and
-// returns that store, so the subtree walk and the close run where the root
-// lives. Only a not-found passes the lookup on; any other read error is the
-// answer (a store that failed to answer is not proof the bead is elsewhere).
-// When first and second are the same store it is read once.
-func autocloseLocate(id string, first, second beads.Store) (beads.Bead, beads.Store, error) {
-	// A two-store residence probe: a miss on the first store is covered by
-	// the second.
-	b, err := beads.FederatedGet(first, id)
-	if err == nil {
-		return b, first, nil
-	}
-	if !errors.Is(err, beads.ErrNotFound) || second == nil || sameBeadStore(first, second) {
-		return beads.Bead{}, first, err
-	}
-	b, err = beads.FederatedGet(second, id)
-	if err != nil {
-		return beads.Bead{}, second, err
-	}
-	return b, second, nil
-}
+// autocloseNearRef names the closed bead's own store in an autoclose plan.
+const autocloseNearRef = storeref.StoreRef("the closed bead's store")
 
 func autocloseMoleculeIfComplete(store beads.Store, rec events.Recorder, mol beads.Bead, stdout io.Writer, run *autocloseRun) {
 	if mol.Type != "molecule" {
@@ -358,7 +362,7 @@ func closeMoleculeWithReason(store beads.Store, id, reason string) error {
 	if err := store.SetMetadata(id, "close_reason", reason); err != nil {
 		return fmt.Errorf("stamping molecule %s close reason: %w", id, err)
 	}
-	if closer, ok := store.(explicitReasonCloser); ok {
+	if closer, ok := beads.As[explicitReasonCloser](store); ok {
 		return closer.CloseWithReason(id, reason)
 	}
 	return store.Close(id)

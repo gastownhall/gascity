@@ -6,6 +6,7 @@ import (
 	osexec "os/exec"
 	"path/filepath"
 	goruntime "runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -113,12 +114,14 @@ func TestProcessScanConditionalOnHandshake(t *testing.T) {
 // TestExecProcessTableScannerContract runs RUNTIME-CONTRACT-024 against the
 // production seam-backed exec provider over the host-filesystem golden
 // reference, and its base variant as the pack whose boxes do not share the
-// host.
+// host. The golden pack declares no proc.exec, so it is read as running its
+// agent outside tmux and the scanner fences tmux subtrees.
 func TestExecProcessTableScannerContract(t *testing.T) {
 	runtimetest.RunProcessTableScannerContract(t, runtimetest.ProcessTableScannerFixtures{
-		Scanning:    func(t *testing.T) runtime.Provider { return newScanPack(t, true, nil).sp },
-		NotScanning: func(t *testing.T) runtime.Provider { return newScanPack(t, false, nil).sp },
-		StartConfig: scanStartConfig,
+		Scanning:           func(t *testing.T) runtime.Provider { return newScanPack(t, true, nil).sp },
+		FencesTmuxSubtrees: true,
+		NotScanning:        func(t *testing.T) runtime.Provider { return newScanPack(t, false, nil).sp },
+		StartConfig:        scanStartConfig,
 	})
 }
 
@@ -426,5 +429,136 @@ func TestProcessScanSessionScanWaitsOutTheSweepBound(t *testing.T) {
 	}
 	if pidutil.AliveWithStartTime(l.PID, l.Identity) {
 		t.Fatalf("the leftover pid %d still runs after TerminateRuntime", l.PID)
+	}
+}
+
+// inBoxTmuxProcRoot is a fake procfs of a host-sharing box whose agent
+// founded a tmux server: the holder runs the box's program (11, with a
+// child and a tmux client), the server (20, adopted by init, carrying the
+// session's GC_SESSION_ID as a server founded in the box does) runs a pane
+// bash (21) running vim (22), and a leftover (30) was adopted by init.
+func inBoxTmuxProcRoot(t *testing.T, sessionID string) string {
+	t.Helper()
+	root := t.TempDir()
+	env := []string{"GC_SESSION_ID=" + sessionID, "GC_SESSION_NAME=box", "GC_CITY_PATH=/city"}
+	runtimetest.WriteFakeProcEntry(t, root, 10, 1, "holder", nil)
+	runtimetest.WriteFakeProcEntry(t, root, 11, 10, "sh", env)
+	runtimetest.WriteFakeProcEntry(t, root, 12, 11, "sleep", env)
+	runtimetest.WriteFakeProcEntry(t, root, 13, 11, "tmux: client", env)
+	runtimetest.WriteFakeProcEntry(t, root, 20, 1, "tmux: server", env)
+	runtimetest.WriteFakeProcEntry(t, root, 21, 20, "bash", env)
+	runtimetest.WriteFakeProcEntry(t, root, 22, 21, "vim", env)
+	runtimetest.WriteFakeProcEntry(t, root, 30, 1, "sleep", env)
+	return root
+}
+
+// Kills an exec scanner that reports a process under a tmux server as a
+// host-sharing session's root: an agent's `tmux new -d` founds a server that
+// carries the session's GC_SESSION_ID, so the shared scan reads its pane as
+// the session's root, untracked once the box is gone, and a start's orphan
+// kill, the orphan sweep or the drain-ack escalation would end the pane's
+// process group. The box's program under its holder and its adopted
+// leftover are still found, untracked once the pack lists no box, and the
+// tmux server, its client and every pane process never are.
+func TestProcessScanNeverReportsTmuxSubtrees(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("reads a fake /proc, which only the linux scanner reads")
+	}
+	p := newScanPack(t, true, nil)
+	proctable.SetScanRootForTesting(t, inBoxTmuxProcRoot(t, "sid-box"))
+	for _, tc := range []struct {
+		id   string
+		want []int
+	}{
+		{"sid-box", []int{11, 30}},
+		{"", []int{30}},
+	} {
+		found, err := p.sp.FindRuntimesBySessionID(tc.id)
+		if err != nil {
+			t.Fatalf("FindRuntimesBySessionID(%q): %v", tc.id, err)
+		}
+		var pids []int
+		for _, r := range found {
+			if r.IsTracked || r.LiveUnlisted {
+				t.Errorf("root %+v: want untracked, not LiveUnlisted: the pack lists no box", r)
+			}
+			pids = append(pids, r.PID)
+		}
+		if !slices.Equal(pids, tc.want) {
+			t.Errorf("FindRuntimesBySessionID(%q) roots = %v, want %v: nothing under a tmux server is a host-sharing session's root", tc.id, pids, tc.want)
+		}
+	}
+}
+
+// boxTmuxProcRoot is a fake procfs holding a box's program under the pack's
+// holder, which runs under the pack's own multiplexer (5, a tmux started
+// without session identity, as the exec docs ask of a process serving
+// several boxes), and an agent (21, with a child 22) that is a pane of a tmux
+// server (20, adopted by init) carrying the session's GC_SESSION_ID, as
+// gc's `tmux new-session -d -s main` founds it in the box's environment;
+// 30 is a leftover adopted by init.
+func boxTmuxProcRoot(t *testing.T, sessionID string) string {
+	t.Helper()
+	root := t.TempDir()
+	env := []string{"GC_SESSION_ID=" + sessionID, "GC_SESSION_NAME=box", "GC_CITY_PATH=/city"}
+	runtimetest.WriteFakeProcEntry(t, root, 5, 1, "tmux: server", []string{"PATH=/usr/bin"})
+	runtimetest.WriteFakeProcEntry(t, root, 10, 5, "holder", nil)
+	runtimetest.WriteFakeProcEntry(t, root, 11, 10, "sh", env)
+	runtimetest.WriteFakeProcEntry(t, root, 20, 1, "tmux: server", env)
+	runtimetest.WriteFakeProcEntry(t, root, 21, 20, "claude", env)
+	runtimetest.WriteFakeProcEntry(t, root, 22, 21, "node", env)
+	runtimetest.WriteFakeProcEntry(t, root, 30, 1, "sleep", env)
+	return root
+}
+
+// Kills a scanner that fences the agent of a pack whose agent runs in its
+// box's tmux. A pack declaring proc.exec without carrier.ops is driven over
+// tmux session main in its box, and with proc.provision gc itself launches
+// the agent there: the agent is a pane of a tmux server carrying the
+// session's GC_SESSION_ID, so the scan reports it, untracked once the pack
+// lists no box, and the next start's orphan kill ends a stale incarnation's
+// agent. carrier.ops sends no tmux command, and a pack without proc.exec is
+// read as running its agent outside tmux, so both keep the fence. Every pack
+// still finds the box's program under its holder, whose multiplexer carries
+// no session's id.
+func TestProcessScanReportsTheAgentInTheBoxsTmux(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("reads a fake /proc, which only the linux scanner reads")
+	}
+	const base = `"observe.v1","report-attachment","report-activity","conformance-faults","city-scoped","server-lifecycle","fs.host"`
+	for _, tc := range []struct {
+		name   string
+		caps   string
+		fences bool
+		want   []int
+	}{
+		{"proc.exec and proc.provision: gc launches the agent in tmux main", `,"proc.exec","proc.provision"`, false, []int{11, 21, 30}},
+		{"proc.exec, welded start", `,"proc.exec"`, false, []int{11, 21, 30}},
+		{"proc.exec with carrier.ops", `,"proc.exec","carrier.ops"`, true, []int{11, 30}},
+		{"no proc.exec", "", true, []int{11, 30}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newScanPack(t, true, map[string]string{"protocol": `echo '{"version":0,"capabilities":[` + base + tc.caps + `],"locality":"local"}'`})
+			for label, fence := range map[string]runtime.TmuxSubtreeFence{"raw": p.sp.raw, "seam-backed": p.sp} {
+				if got := fence.FencesTmuxSubtrees(); got != tc.fences {
+					t.Fatalf("%s: FencesTmuxSubtrees = %t, want %t", label, got, tc.fences)
+				}
+			}
+			proctable.SetScanRootForTesting(t, boxTmuxProcRoot(t, "sid-box"))
+			found, err := p.sp.FindRuntimesBySessionID("sid-box")
+			if err != nil {
+				t.Fatalf("FindRuntimesBySessionID: %v", err)
+			}
+			var pids []int
+			for _, r := range found {
+				if r.IsTracked || r.LiveUnlisted {
+					t.Errorf("root %+v: want untracked, not LiveUnlisted: the pack lists no box", r)
+				}
+				pids = append(pids, r.PID)
+			}
+			if !slices.Equal(pids, tc.want) {
+				t.Errorf("FindRuntimesBySessionID roots = %v, want %v", pids, tc.want)
+			}
+		})
 	}
 }

@@ -1,13 +1,13 @@
-//go:build !linux && !darwin
+//go:build !linux && !darwin && !windows
 
 package proctable
 
-import "errors"
+import "fmt"
 
 // rootArgv is unavailable on platforms without process table access; the
 // scanner reports no roots there either.
-func rootArgv(int) ([]string, error) {
-	return nil, errors.New("proctable: argv unavailable on this platform")
+func rootArgv(pid int) ([]string, error) {
+	return nil, fmt.Errorf("proctable: argv for PID %d: %w", pid, ErrUnsupported)
 }
 
 func rootStartIdentity(int) string { return "" }

@@ -236,7 +236,7 @@ func (p *Provider) peekBox(name string, lines int) (string, error) {
 	case stateAbsent:
 		return "", nil
 	}
-	return p.peekOp(name, lines)
+	return p.peekOp(context.Background(), name, lines)
 }
 
 // killObjectRequest is `kill-object`'s stdin.

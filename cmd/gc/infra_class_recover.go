@@ -861,6 +861,10 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if err := storageReverseRefusal(request.CityPath, target.Root); err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if !ok {
 		reportUnresolvedInfraBinding(request, logPrefix, stdout, stderr)
 		return 1

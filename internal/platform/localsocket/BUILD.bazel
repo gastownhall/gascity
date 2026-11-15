@@ -14,6 +14,7 @@ go_test(
     name = "localsocket_test",
     srcs = [
         "localsocket_test.go",
+        "localsocket_unix_test.go",
         "testenv_import_test.go",
     ],
     embed = [":localsocket"],

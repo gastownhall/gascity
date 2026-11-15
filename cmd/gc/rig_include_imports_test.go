@@ -284,7 +284,7 @@ func TestRigAddIncludeBindingOverrideBundled(t *testing.T) {
 	}
 	imports := cfg.Rigs[0].Imports
 	want := config.Import{Source: bundled, Version: config.PublicGastownPackVersion}
-	if got := imports["tools"]; got != want {
+	if got := imports["tools"]; !sameImport(got, want) {
 		t.Fatalf("rig imports[tools] = %+v, want %+v", got, want)
 	}
 	if _, ok := imports["gastown"]; ok {
@@ -484,7 +484,7 @@ func TestRigAddIncludeRemoteMatchesImportAdd(t *testing.T) {
 	if code := run([]string{"--city", city2, "--rig", "myproj", "import", "add", repo.source}, &stdout, &stderr); code != 0 {
 		t.Fatalf("gc import add --rig = %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
 	}
-	if viaImportAdd := rigDemoImport(t, city2, "myproj"); viaImportAdd != viaInclude {
+	if viaImportAdd := rigDemoImport(t, city2, "myproj"); !sameImport(viaImportAdd, viaInclude) {
 		t.Fatalf("rig add --include wrote %+v, gc import add --rig wrote %+v; they must match", viaInclude, viaImportAdd)
 	}
 }
@@ -580,7 +580,7 @@ func TestRigAddIncludeRefSourceStaysOutOfLock(t *testing.T) {
 	refSource := repo.source + "#v0.4.0"
 
 	rigAddIncludes(t, cityPath, "alpha", "demo="+refSource)
-	if got := rigDemoImport(t, cityPath, "alpha"); got != (config.Import{Source: refSource}) {
+	if got := rigDemoImport(t, cityPath, "alpha"); !sameImport(got, config.Import{Source: refSource}) {
 		t.Fatalf("alpha import = %+v, want %q as given with no version", got, refSource)
 	}
 	lock, err := packman.ReadLockfile(fsys.OSFS{}, cityPath)

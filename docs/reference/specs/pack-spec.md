@@ -266,6 +266,7 @@ selector are part of the same source string.
 |---|---|---|---|
 | `source` | string | yes | Durable source for the pack root. Must not be empty. GitHub-hosted packs below a repository root should use dereferenceable `/tree/<ref>/<path>` URLs. |
 | `version` | string | no | Compatibility constraint for versioned sources. |
+| `agents_exclude` | array of strings | no | Local agent names to remove on this import edge. Invalid names fail loading; valid unmatched names warn and do nothing. Backing named sessions are removed with their excluded agents. |
 
 Public import TOML must not use fields named `path`, `ref`, `commit`, or
 `hash`. Registry handles such as `main:gascity` are command-time lookup handles
@@ -493,10 +494,13 @@ time or via the `pack-runtimes` doctor check below. Pack authors can
 self-verify ahead of production: `gc runtime check <name>` resolves the
 declaration and smoke-tests it by invoking the runtime's `nudge` operation
 against a throwaway conformance session, failing the run (`required: nudge`)
-when nudge is absent or broken. That smoke-tests the operation, not that an
-oversized prompt reroutes end to end — a pack that never runs it and
-declares `nudge-fallback` falsely still will not fail until an oversized
-prompt actually reaches that runtime at session start.
+when nudge is absent or broken. A runtime whose handshake declares
+`carrier.ops` reports the same probe as `capability carrier.ops: nudge`,
+alongside that carrier's other required driving operations. That
+smoke-tests the operation, not that an oversized prompt reroutes end to
+end — a pack that never runs it and declares `nudge-fallback` falsely still
+will not fail until an oversized prompt actually reaches that runtime at
+session start.
 
 City composition registers declared runtimes into a city-wide selection
 registry (`City.Runtimes`), including runtimes declared by rig-imported packs.
@@ -846,6 +850,11 @@ top-level `[imports.<binding>]` in `pack.toml`.
 If a pack import has an empty binding name or empty `source`, loading must
 fail.
 
+An import may set `agents_exclude` to a list of local agent names. Selectors
+are validated with the agent-name grammar; an invalid selector fails loading,
+while a valid selector that matches no agent is a warning and otherwise has no
+effect.
+
 ### 2.2. Versioning
 
 `PackImport.version` is a compatibility constraint for versioned sources.
@@ -917,6 +926,16 @@ When loading a pack for a rig-level surface:
 2. The loader drops agents and named sessions whose `scope` is `city`.
 3. For kept agents and named sessions whose `dir` is empty, the loader sets
    `dir` to the consuming rig's `name`.
+
+After cached results are retrieved and `transitive = false` filtering is
+applied, each import edge applies its `agents_exclude` selectors before
+binding stamping or dependency qualification. Matching uses the agent's local
+`name`, not its eventual qualified name. Named sessions whose backing
+`template` has a matching local name are removed with the agent. The filter is
+edge-local: importing the same source twice may exclude different agents on
+each edge. Providers, commands, doctors, runtimes, skills, formulas, orders,
+globals, requirements, and other non-agent content are unaffected. A cached
+pack result is never mutated by this filtering.
 
 Agents contributed by an `[imports.<binding>]` table are stamped with that
 binding at both the city level and the rig level. The consuming surface's own
