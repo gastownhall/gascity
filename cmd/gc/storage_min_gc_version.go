@@ -183,10 +183,20 @@ func probeSessionPathGCVersion(cfg *config.City) (path, version string, err erro
 	// module version the binary records says which it is: a pseudo-version
 	// that normalizes to the printed line is that build, and the floor
 	// does not compare it (gcVersionCore), as for this gc (gcVersionForFloor).
-	if info, err := sessionPathGCBuildInfo(path); err == nil && info != nil {
-		if _, pseudo := goPseudoVersionBase(info.Main.Version); pseudo && normalizeVersion(info.Main.Version) == normalizeVersion(version) {
-			version = info.Main.Version
-		}
+	//
+	// A gc whose build information cannot be read (a wrapper script that
+	// execs the real binary) cannot be told from such a build, so its line
+	// is not a version the floor may hold it to: the probe reports why, and
+	// the callers note it rather than refuse it.
+	info, err := sessionPathGCBuildInfo(path)
+	if err == nil && info == nil {
+		err = errors.New("none recorded")
+	}
+	if err != nil {
+		return path, version, fmt.Errorf("%s prints version %s, and its Go build information cannot be read (%w), so whether that is a release or a pseudo-version build is not known", path, version, err)
+	}
+	if _, pseudo := goPseudoVersionBase(info.Main.Version); pseudo && normalizeVersion(info.Main.Version) == normalizeVersion(version) {
+		version = info.Main.Version
 	}
 	return path, version, nil
 }

@@ -491,7 +491,7 @@ func TestStorageSplitJournalJudge(t *testing.T) {
 		{"configuring, file as before", splitJudgement{journal: at(splitPhaseConfiguring), sha: "before"}, splitFresh, "starting it over", ""},
 		{"configuring, file written", splitJudgement{journal: at(splitPhaseConfiguring), authored: true, splitting: true, sha: "after"}, splitResume, "", ""},
 		{"configuring, the split's storage edited", splitJudgement{journal: at(splitPhaseConfiguring), authored: true, splitting: true, sha: "other"}, splitRefuse, "", "neither the file the split recorded"},
-		{"configuring, file edited, no storage", splitJudgement{journal: at(splitPhaseConfiguring), sha: "other"}, splitFresh, "starting a new split", ""},
+		{"configuring, file edited, no storage", splitJudgement{journal: at(splitPhaseConfiguring), sha: "other"}, splitFresh, "before it wrote city.toml, and city.toml has changed since; starting a new split", ""},
 		{"configured, as written", splitJudgement{journal: at(splitPhaseConfigured), authored: true, splitting: true, sha: "after"}, splitResume, "", ""},
 		{"city converged, edited", splitJudgement{journal: at(splitPhaseCityConverged), authored: true, splitting: true, sha: "edited"}, splitResume, "in place and keeps the change", ""},
 		{"rigs imported, as written", splitJudgement{journal: at(splitPhaseRigsImported), authored: true, splitting: true, sha: "after"}, splitResume, "", ""},

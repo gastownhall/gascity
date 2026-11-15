@@ -134,9 +134,16 @@ func (c *storageSplitCheck) splitJournalHint(j storageSplitJournal) string {
 	case j.Phase == splitPhaseRigsImported:
 		return ""
 	case j.Phase == splitPhaseAbandoning:
+		if state, err := readInfraConvergenceState(j.target()); err == nil && splitAbandoningConverged(j, state == infraConvergenceMarked) {
+			return fmt.Sprintf("the abandon of the guided split %s stopped, and binding %s has converged since, so it holds this city's infrastructure state; `%s` resumes the split from %s", j.Run, j.Binding, j.continueInstruction(), j.AbandonedFrom)
+		}
 		return fmt.Sprintf("the guided split %s is being abandoned; `%s` finishes it", j.Run, storageSplitAbandonInstruction())
 	case splitPhaseRank[j.Phase] < splitPhaseRank[splitPhaseConfiguring] && c.cfg != nil && c.cfg.Storage != nil:
 		return fmt.Sprintf("the guided split %s stopped at %s, before it wrote city.toml, and city.toml authors [storage] it did not write; `%s` closes the split and changes nothing else", j.Run, j.Phase, storageSplitAbandonInstruction())
+	case splitPhaseRank[j.Phase] <= splitPhaseRank[splitPhaseConfiguring] && (c.cfg == nil || c.cfg.Storage == nil):
+		// The judge starts such a split over (a boot may have served the
+		// city unsplit since); it is not continued.
+		return fmt.Sprintf("the guided split %s stopped at %s, before it wrote city.toml; `%s` starts it over, and `%s` closes it", j.Run, j.Phase, j.continueInstruction(), storageSplitAbandonInstruction())
 	}
 	return fmt.Sprintf("the guided split %s stopped at %s; `%s` continues it", j.Run, j.Phase, j.continueInstruction())
 }

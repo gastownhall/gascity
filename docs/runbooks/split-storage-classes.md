@@ -66,6 +66,14 @@ does not read the split, so it writes infrastructure beads into the work
 store, where they are stranded. The rehearsal checks only the first `gc` on
 the session PATH.
 
+Two kinds of build have no release version to compare, and are reported
+rather than refused: a `dev` build, and a `go install …@<ref>` build, whose
+Go pseudo-version (`v1.5.2-0.<date>-<commit>`) names a commit, not the
+release its prefix suggests, though `gc version` prints only that prefix. A
+`gc` the rehearsal cannot read the build of (a wrapper script around the
+real binary) is reported too. Make sure each such gc is built from a commit
+that has the split.
+
 In order, under one controller lock and one maintenance window, it:
 
 1. rehearses the split (`gc storage preflight --split`) and refuses, writing

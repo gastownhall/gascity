@@ -48,17 +48,20 @@ func TestProbeSessionPathGCVersionReadsAPseudoVersionBuild(t *testing.T) {
 	printed := normalizeVersion(pseudoBuilt)
 	for _, tc := range []struct {
 		name, printed, built, want string
+		unreadable                 bool
 	}{
-		{"pseudo-version build", printed, pseudoBuilt, pseudoBuilt},
-		{"release build", "1.5.2", "v1.5.2", "1.5.2"},
-		{"pseudo-version of another base", printed, "v1.4.0-0.20261113052233-a07d754c75ab", printed},
-		{"no build info", printed, "", printed},
+		{"pseudo-version build", printed, pseudoBuilt, pseudoBuilt, false},
+		{"release build", "1.5.2", "v1.5.2", "1.5.2", false},
+		{"pseudo-version of another base", printed, "v1.4.0-0.20261113052233-a07d754c75ab", printed, false},
+		// A wrapper script, say: its line is reported, with why it is not a
+		// version the floor may hold it to (NIT 1).
+		{"no build info", printed, "", printed, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			gc := fakeSessionPathGC(t, tc.printed, tc.built)
 			path, got, err := probeSessionPathGCVersion(nil)
-			if err != nil || path != gc || got != tc.want {
-				t.Fatalf("probe = %q, %q, %v; want %q, %q", path, got, err, gc, tc.want)
+			if (err != nil) != tc.unreadable || path != gc || got != tc.want {
+				t.Fatalf("probe = %q, %q, %v; want %q, %q, error %t", path, got, err, gc, tc.want, tc.unreadable)
 			}
 		})
 	}
@@ -137,4 +140,21 @@ func TestCoTenantLivenessAsksTheControllerFirst(t *testing.T) {
 	if why := coTenantLiveness(t.TempDir()); why != "" {
 		t.Fatalf("liveness of a city with no controller and no lock = %q", why)
 	}
+}
+
+// TestStorageSplitNotesAPathGCItCannotRead (NIT 1): a gc on the session PATH
+// whose build information cannot be read (a wrapper script around a
+// pseudo-version build) prints a release line below the floor, and the
+// split notes it rather than blocking on it.
+func TestStorageSplitNotesAPathGCItCannotRead(t *testing.T) {
+	c := newGuidedSplitCity(t)
+	fakeSessionPathGC(t, "1.5.2", "")
+	prev := minGCVersionPathProbe
+	t.Cleanup(func() { minGCVersionPathProbe = prev })
+	minGCVersionPathProbe = probeSessionPathGCVersion
+	code, stdout, stderr := c.split(splitOptions{})
+	if code != 0 || strings.Contains(stdout, "[BLOCK]") || !strings.Contains(stdout, "build information cannot be read") {
+		t.Fatalf("split with a wrapper gc on the session PATH = %d:\n%s\n%s", code, stdout, stderr)
+	}
+	c.assertSplit()
 }
