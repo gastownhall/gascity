@@ -164,6 +164,43 @@ func installedAdapter(t *testing.T) string {
 	return adapterPath
 }
 
+// leakProbeTest is the test the leak probe re-runs in a child test binary. Any
+// test that goes through newHarness installs the adapter; this one is the
+// cheapest that does.
+const leakProbeTest = "TestResumeUsesSingleArgvForm"
+
+// TestAdapterInstallDirDoesNotOutliveTheTestBinary re-runs this test binary
+// with a private TMPDIR and checks that the adapter's install directory is gone
+// once the child exits. Without it the directory stays behind on every run, one
+// per binary, and /tmp is RAM-backed on the fleet hosts (ga-an5qa6).
+func TestAdapterInstallDirDoesNotOutliveTheTestBinary(t *testing.T) {
+	t.Parallel()
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("locate the test binary: %v", err)
+	}
+	tmp := t.TempDir()
+	cmd := exec.Command(exe, "-test.v", "-test.count=1", "-test.run=^"+leakProbeTest+"$")
+	cmd.Env = append(os.Environ(), "TMPDIR="+tmp)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("child test binary failed: %v\n%s", err, out)
+	}
+	// A renamed probe test would run nothing, install nothing and so "pass".
+	if !strings.Contains(string(out), "--- PASS: "+leakProbeTest) {
+		t.Fatalf("child test binary did not run %s:\n%s", leakProbeTest, out)
+	}
+
+	left, err := filepath.Glob(filepath.Join(tmp, "zcode-adapter-*"))
+	if err != nil {
+		t.Fatalf("glob %s: %v", tmp, err)
+	}
+	if len(left) != 0 {
+		t.Errorf("adapter install dir outlived the test binary: %v", left)
+	}
+}
+
 type harness struct {
 	t         *testing.T
 	home      string
