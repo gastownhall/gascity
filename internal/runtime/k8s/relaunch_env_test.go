@@ -319,9 +319,9 @@ func TestProvider_RelaunchUnchangedMultiLineEnvWritesNothing(t *testing.T) {
 	if got := box.envScripts()[before:]; len(got) != 0 {
 		t.Errorf("unchanged relaunch wrote %q, want nothing", got)
 	}
-	for _, k := range []string{"GC_CITY", "GC_AGENT"} {
-		if box.respawnEnv[k] != env[k] {
-			t.Errorf("respawned agent %s = %q, want %q", k, box.respawnEnv[k], env[k])
+	for _, k := range []string{"GC_CITY", "GC_AGENT"} { // named in the value's later lines
+		if box.respawnEnv[k] != box.podEnv[k] {
+			t.Errorf("respawned agent %s = %q, want the pod's %q", k, box.respawnEnv[k], box.podEnv[k])
 		}
 	}
 }
