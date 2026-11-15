@@ -2565,6 +2565,12 @@ calls = 1
 tagged = true
 
 [[count]]
+path = "internal/runtime/process_control_windows_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "internal/runtime/proctable/console_windows_test.go"
 resource = "subprocess"
 calls = 2
