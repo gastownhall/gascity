@@ -8,6 +8,7 @@ go_library(
         "carrier_fence.go",
         "composite_forward.go",
         "control_socket.go",
+        "control_socket_other.go",
         "dialog.go",
         "dialog_midsession.go",
         "envsecret.go",
@@ -17,6 +18,7 @@ go_library(
         "fence.go",
         "fingerprint.go",
         "fingerprint_partition.go",
+        "gccommand_other.go",
         "held_files.go",
         "idle_boundary.go",
         "import_trust.go",
@@ -38,6 +40,7 @@ go_library(
         "protocol.go",
         "provider_core.go",
         "redact.go",
+        "redact_unix.go",
         "router.go",
         "runtime.go",
         "seam_adapter.go",
@@ -45,7 +48,12 @@ go_library(
         "session_events.go",
         "session_events_merge.go",
         "session_object.go",
+        "shellcommand.go",
+        "shellcommand_unix.go",
+        "shellunavailable_other.go",
         "staging.go",
+        "staging_tracked.go",
+        "staging_tracked_other.go",
         "startup_hints.go",
         "startup_nudge_handback.go",
         "steer.go",
@@ -62,7 +70,10 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/overlay"],
+    deps = [
+        "//internal/execenv",
+        "//internal/overlay",
+    ],
 )
 
 go_test(
@@ -107,7 +118,9 @@ go_test(
         "nudge_delivery_test.go",
         "privatedir_test.go",
         "probe_test.go",
+        "process_control_reap_test.go",
         "process_env_guard_test.go",
+        "process_not_confirmed_dead_test.go",
         "process_table_scanner_test.go",
         "program_status_decide_optin_test.go",
         "program_status_fingerprint_test.go",
@@ -124,6 +137,9 @@ go_test(
         "seam_adapter_test.go",
         "session_events_contract_test.go",
         "session_events_merge_test.go",
+        "shellfixture_unix_test.go",
+        "shellquote_arg_test.go",
+        "shellquote_arg_unix_test.go",
         "staging_hash_test.go",
         "staging_preserve_test.go",
         "staging_skip_mergeable_test.go",
@@ -159,7 +175,55 @@ go_test(
         "//internal/runtime/t3bridge",
         "//internal/runtime/tmux",
         "//internal/testenv",
-    ],
+        "//internal/testutil",
+    ] + select({
+        "@rules_go//go/platform:aix": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:android": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:darwin": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:dragonfly": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:freebsd": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:illumos": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:ios": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:js": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:linux": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:netbsd": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:openbsd": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:osx": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:plan9": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:qnx": [
+            "//internal/shellquote",
+        ],
+        "@rules_go//go/platform:solaris": [
+            "//internal/shellquote",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 filegroup(

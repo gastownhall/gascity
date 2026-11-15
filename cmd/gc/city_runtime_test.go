@@ -4721,7 +4721,7 @@ func (f fixedWispGC) shouldRun(time.Time) bool {
 	return true
 }
 
-func (f fixedWispGC) runGC(wispGCLegs, beads.GraphStore, beads.SessionStore, beads.MailStore, time.Time) (int, error) {
+func (f fixedWispGC) runGC(wispGCRoots, wispGCLegs, beads.GraphStore, beads.SessionStore, beads.MailStore, time.Time) (int, error) {
 	return f.purged, f.err
 }
 

@@ -82,6 +82,27 @@ func (w *tutorialWorkspace) noteWarning(format string, args ...any) {
 	w.warnings = append(w.warnings, fmt.Sprintf(format, args...))
 }
 
+// citiesBornSplit reports whether gc init gives this run's tutorial cities the
+// split storage the pages describe: whenever gc runs bd's own Go binary. A
+// split city's gc bd refuses the tool-home wrapper, so on the wrapper gc init
+// starts a city single-store, and newTutorialBaseEnv keeps gc on the wrapper
+// only in host mode off a CI runner. With the real bd a single-store city
+// fails the split-only checks: CI installs a bd that gc pins.
+func (w *tutorialWorkspace) citiesBornSplit() bool {
+	return w.env.Env.RunsRealBD()
+}
+
+// splitOnly reports whether a page's split-only claim applies to this run's
+// cities. When it does not, it records the skipped check, so a failing run's
+// diagnostics say which of the page's claims went unchecked.
+func (w *tutorialWorkspace) splitOnly(claim string) bool {
+	if w.citiesBornSplit() {
+		return true
+	}
+	w.noteWarning("tutorial city is single-store (host mode off a CI runner keeps gc on the tool-home bd wrapper); skipped the split-only check that %s", claim)
+	return false
+}
+
 func (w *tutorialWorkspace) noteDiagnostic(format string, args ...any) {
 	w.diagMu.Lock()
 	defer w.diagMu.Unlock()

@@ -1070,6 +1070,12 @@ TOTAL_EXPORTED=0
 TOTAL_DBS=0
 FAILED_DBS=""
 FAILED_DB_COUNT=0
+# A scope bd serves without SQL (embedded mode) cannot be named for the
+# archive, so it is not exported. That is not a failure, but the scope counts
+# toward TOTAL_DBS and every summary and snapshot commit names it, so a run
+# never claims coverage the archive does not have.
+NOT_ARCHIVED_SCOPES=""
+NOT_ARCHIVED_COUNT=0
 HALTED=0
 STAGE_PATHS=()
 HALT_DB=""
@@ -1085,6 +1091,24 @@ record_failed_db() {
     FAILED_DB_COUNT=$((FAILED_DB_COUNT + 1))
     FAILED_DBS="${FAILED_DBS}$1
 "
+}
+
+record_not_archived_scope() {
+    NOT_ARCHIVED_COUNT=$((NOT_ARCHIVED_COUNT + 1))
+    NOT_ARCHIVED_SCOPES="${NOT_ARCHIVED_SCOPES:+$NOT_ARCHIVED_SCOPES }$1"
+}
+
+# coverage_gaps prints the suffix that summaries and snapshot commits end
+# with: the counted scopes the archive does not hold, those bd serves without
+# SQL and then those that failed. It prints nothing when every counted scope
+# was exported.
+coverage_gaps() {
+    if [ -n "$NOT_ARCHIVED_SCOPES" ]; then
+        printf ', not archived (bd embedded mode): %s' "$NOT_ARCHIVED_SCOPES"
+    fi
+    if [ -n "$FAILED_DBS" ]; then
+        printf ', failed: %s' "$(printf '%s' "$FAILED_DBS" | tr '\n' ' ')"
+    fi
 }
 
 # read_source_issue_count counts the scope's durable issues with the same
@@ -1212,6 +1236,13 @@ while IFS= read -r SCOPE_SPEC; do
             order_outcome_scope_skipped "$SCOPE_LABEL" "not a bd bead store"
             continue
         fi
+        if [ "$SCOPE_SQL_UNSUPPORTED" -eq 1 ]; then
+            echo "jsonl-export: $SCOPE_LABEL is a bd store that serves no SQL (embedded mode); its database cannot be named for the archive, so it is not archived"
+            TOTAL_DBS=$((TOTAL_DBS + 1))
+            record_not_archived_scope "$SCOPE_LABEL"
+            order_outcome_scope_skipped "$SCOPE_LABEL" "bead store serves no SQL (bd embedded mode)"
+            continue
+        fi
         echo "jsonl-export: $SCOPE_LABEL unreachable through gc bd: $SCOPE_LAST_ERROR" >&2
         TOTAL_DBS=$((TOTAL_DBS + 1))
         record_failed_db "$SCOPE_LABEL"
@@ -1275,9 +1306,10 @@ done <<EOF
 $SCOPE_SPECS
 EOF
 
+EXPORTED_DBS=$((TOTAL_DBS - FAILED_DB_COUNT - NOT_ARCHIVED_COUNT))
 if [ "$TOTAL_DBS" -eq 0 ]; then
     order_outcome_set skipped "no bd bead store to export"
-elif [ "$FAILED_DB_COUNT" -ge "$TOTAL_DBS" ]; then
+elif [ "$EXPORTED_DBS" -eq 0 ]; then
     order_outcome_set skipped "no bead scope could be exported"
 fi
 
@@ -1296,9 +1328,8 @@ fi
 # until a later run pushes the archive forward.
 if [ "$HALTED" -eq 1 ]; then
     if ! git diff --cached --quiet 2>/dev/null; then
-        EXPORTED_DBS=$((TOTAL_DBS - FAILED_DB_COUNT))
         commit_archive_snapshot \
-            "[HALT] backup $(date -u +%Y-%m-%dT%H:%M:%SZ): exported=$EXPORTED_DBS/$TOTAL_DBS records=$TOTAL_EXPORTED (spike detected; push skipped)" \
+            "[HALT] backup $(date -u +%Y-%m-%dT%H:%M:%SZ): exported=$EXPORTED_DBS/$TOTAL_DBS records=$TOTAL_EXPORTED (spike detected; push skipped)$(coverage_gaps)" \
             "HALT baseline" || {
             discard_staged_archive_outputs
             exit 1
@@ -1313,7 +1344,7 @@ if [ "$HALTED" -eq 1 ]; then
     fi
     # Pack only after the alert is sent or saved for retry: the commit above
     # already advanced the baseline, so this spike is never detected again.
-    SUMMARY="jsonl — HALTED on spike detection"
+    SUMMARY="jsonl — HALTED on spike detection$(coverage_gaps)"
     maintain_archive_or_exit "$SUMMARY"
     maintenance_done "$SUMMARY"
     exit 0
@@ -1329,9 +1360,8 @@ if git diff --cached --quiet 2>/dev/null; then
         else
             PUSH_STATUS="skipped (local-only)"
         fi
-        if [ -n "$FAILED_DBS" ]; then
-            EXPORTED_DBS=$((TOTAL_DBS - FAILED_DB_COUNT))
-            SUMMARY="jsonl — exported $EXPORTED_DBS/$TOTAL_DBS, records: $TOTAL_EXPORTED, push: $PUSH_STATUS, failed: $(printf '%s' "$FAILED_DBS" | tr '\n' ' ')"
+        if [ -n "$FAILED_DBS$NOT_ARCHIVED_SCOPES" ]; then
+            SUMMARY="jsonl — exported $EXPORTED_DBS/$TOTAL_DBS, records: $TOTAL_EXPORTED, push: $PUSH_STATUS$(coverage_gaps)"
         else
             SUMMARY="jsonl — no changes, push: $PUSH_STATUS"
         fi
@@ -1340,9 +1370,8 @@ if git diff --cached --quiet 2>/dev/null; then
         echo "jsonl-export: $SUMMARY"
         exit 0
     fi
-    if [ -n "$FAILED_DBS" ]; then
-        EXPORTED_DBS=$((TOTAL_DBS - FAILED_DB_COUNT))
-        SUMMARY="jsonl — exported $EXPORTED_DBS/$TOTAL_DBS, records: $TOTAL_EXPORTED, push: skipped, failed: $(printf '%s' "$FAILED_DBS" | tr '\n' ' ')"
+    if [ -n "$FAILED_DBS$NOT_ARCHIVED_SCOPES" ]; then
+        SUMMARY="jsonl — exported $EXPORTED_DBS/$TOTAL_DBS, records: $TOTAL_EXPORTED, push: skipped$(coverage_gaps)"
         maintain_archive_or_exit "$SUMMARY"
         maintenance_done "$SUMMARY"
         echo "jsonl-export: $SUMMARY"
@@ -1355,9 +1384,8 @@ if git diff --cached --quiet 2>/dev/null; then
     exit 0
 fi
 
-EXPORTED_DBS=$((TOTAL_DBS - FAILED_DB_COUNT))
 commit_archive_snapshot \
-    "backup $(date -u +%Y-%m-%dT%H:%M:%SZ): exported=$EXPORTED_DBS/$TOTAL_DBS records=$TOTAL_EXPORTED" \
+    "backup $(date -u +%Y-%m-%dT%H:%M:%SZ): exported=$EXPORTED_DBS/$TOTAL_DBS records=$TOTAL_EXPORTED$(coverage_gaps)" \
     "archive snapshot" || {
     discard_staged_archive_outputs
     exit 1
@@ -1373,10 +1401,7 @@ else
     PUSH_STATUS="skipped (local-only)"
 fi
 
-SUMMARY="jsonl — exported $EXPORTED_DBS/$TOTAL_DBS, records: $TOTAL_EXPORTED, push: $PUSH_STATUS"
-if [ -n "$FAILED_DBS" ]; then
-    SUMMARY="$SUMMARY, failed: $(printf '%s' "$FAILED_DBS" | tr '\n' ' ')"
-fi
+SUMMARY="jsonl — exported $EXPORTED_DBS/$TOTAL_DBS, records: $TOTAL_EXPORTED, push: $PUSH_STATUS$(coverage_gaps)"
 
 # After the push, so a packing failure never holds back the new snapshot.
 maintain_archive_or_exit "$SUMMARY"

@@ -237,7 +237,9 @@ func (r *rowFacts) startIntent(reason string) (intent, bool) {
 		return intent{Reason: decideStartQuarantine}, true
 	}
 	name := strings.TrimSpace(info.SessionName)
-	if until := r.w.Episodes[startupHealthEpisodeKey(info, name)].QuarantinedUntil; now.Before(until) {
+	// StartHoldUntil is the later of the threshold quarantine and the
+	// per-failure retry backoff (sr-xf2xj), as legacy's start gate reads it.
+	if until := r.w.Episodes[startupHealthEpisodeKey(info, name)].StartHoldUntil(); now.Before(until) {
 		r.after(requeueUntil(now, until))
 		return intent{Reason: decideStartEpisode}, true
 	}

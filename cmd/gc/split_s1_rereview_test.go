@@ -385,8 +385,8 @@ func TestRevertOfACityThisBuildMigrated(t *testing.T) {
 	}}}
 	_ = os.Remove(infraClearedNotePath(cityPath))
 	_, err := storageBootGate(cityPath, allWork, "gc start", nil, &bytes.Buffer{})
-	if err == nil || !strings.Contains(err.Error(), bornSplitServedNotePath(cityPath)) {
-		t.Errorf("revert with only the cleared note removed = %v, want the served-note hold naming %s", err, bornSplitServedNotePath(cityPath))
+	if err == nil || !strings.Contains(err.Error(), bornSplitServedNotePath(cityPath)) || !strings.Contains(err.Error(), storageReverseInstruction(reverseToWork, nil)) {
+		t.Errorf("revert with only the cleared note removed = %v, want the served-note hold naming %s and the reverse", err, bornSplitServedNotePath(cityPath))
 	}
 	if err := os.Remove(bornSplitServedNotePath(cityPath)); err != nil {
 		t.Fatal(err)
@@ -426,7 +426,7 @@ func TestInitFromASplitSourceHonorsItsExplicitPrefix(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(src, "city.toml"), []byte(body), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			err := initFromReservedPrefixRefusal(fsysOSFSForTest(), filepath.Join(src, "city.toml"), filepath.Join(t.TempDir(), tc.cityName), tc.cityName)
+			err := initFromReservedPrefixRefusal(fsysOSFSForTest(), filepath.Join(src, "city.toml"), filepath.Join(t.TempDir(), tc.cityName), tc.cityName, false)
 			if (err != nil) != tc.refused {
 				t.Errorf("refusal = %v, want refused=%v", err, tc.refused)
 			}
@@ -435,7 +435,9 @@ func TestInitFromASplitSourceHonorsItsExplicitPrefix(t *testing.T) {
 }
 
 // Plain `gc init --file` of a split template into a reserved-deriving name is
-// refused before anything is created (the check split-by-default needs).
+// refused before anything is created (the check split-by-default needs). Its
+// remedy names neither --storage nor --prefix: gc init refuses both with
+// --file, whose template owns the prefix and [storage].
 func TestInitFromASplitTemplateFileRefusesAReservedDerivedPrefix(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	tmpl := filepath.Join(t.TempDir(), "template.toml")
@@ -449,6 +451,11 @@ func TestInitFromASplitTemplateFileRefusesAReservedDerivedPrefix(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "gcg") || strings.Contains(stderr.String(), "site.toml") {
 		t.Errorf("stderr = %q, want the new-city refusal naming gcg", stderr.String())
+	}
+	for _, flag := range []string{"--storage", "--prefix"} {
+		if strings.Contains(stderr.String(), flag) {
+			t.Errorf("the --file refusal names %s, which gc init refuses with --file: %q", flag, stderr.String())
+		}
 	}
 	if _, err := os.Stat(cityPath); err == nil {
 		t.Error("the refused init created the city directory")

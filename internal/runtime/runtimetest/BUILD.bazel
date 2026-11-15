@@ -35,6 +35,7 @@ go_test(
         "conformance_test.go",
         "contracts_test.go",
         "host_staging_test.go",
+        "input_outcome_exec_test.go",
         "process_table_test.go",
         "program_status_test.go",
         "testenv_import_test.go",
@@ -43,7 +44,9 @@ go_test(
     deps = [
         "//internal/execenv",
         "//internal/runtime",
+        "//internal/runtime/exec",
         "//internal/runtime/proctable",
+        "//internal/runtime/runtimecontract/reference",
         "//internal/testenv",
     ],
 )
