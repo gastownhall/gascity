@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -8930,21 +8931,41 @@ func TestGcBeadsBdInitNamesAnUnopenableInitLock(t *testing.T) {
 }
 
 // TestGcBeadsBdInitKeepsItsDefaultInitLockPerOSUser pins where init's lock
-// lives when GC_DOLT_INIT_LOCK_DIR is unset: in a directory of this OS user's
-// own under $TMPDIR, so a lock directory or file another user (or a sudo run)
-// created under the same $TMPDIR never stops this user's init.
+// lives when GC_DOLT_INIT_LOCK_DIR is unset: in /tmp/gc-beads-bd-init-locks-<uid>,
+// a directory of this OS user's own, so a lock directory or file another user
+// (or a sudo run) created never stops this user's init. $TMPDIR is deliberately
+// not consulted: every initializer of one store must find the same lock file
+// whatever its own environment, or one lock silently becomes two.
+//
+// The default is the real /tmp directory, which belongs to the host's own
+// initializers, so the test never stats, removes or renames anything in it: a
+// recording mkdir stub shows which directory init asked for, and the test then
+// only lets init create it and open hq.lock for append.
 func TestGcBeadsBdInitKeepsItsDefaultInitLockPerOSUser(t *testing.T) {
 	h := newGcBeadsBdHealTest(t, true, 0, "init-done", "reset-done")
 	writeExecutable(t, filepath.Join(h.binDir, "flock"), "#!/bin/sh\nexit 0\n")
+	realMkdir, err := exec.LookPath("mkdir")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mkdirOperands := filepath.Join(t.TempDir(), "mkdir-operands")
+	writeExecutable(t, filepath.Join(h.binDir, "mkdir"), fmt.Sprintf(
+		"#!/bin/sh\nfor a in \"$@\"; do printf '%%s\\n' \"$a\" >>'%s'; done\nexec '%s' \"$@\"\n",
+		mkdirOperands, realMkdir))
 	tmp := t.TempDir()
 
 	out, err := h.runInit(t, "GC_DOLT_INIT_LOCK_DIR=", "TMPDIR="+tmp)
 	if err != nil {
 		t.Fatalf("gc-beads-bd init failed: %v\n%s", err, out)
 	}
-	lockFile := filepath.Join(tmp, fmt.Sprintf("gc-beads-bd-init-locks-%d", os.Geteuid()), "hq.lock")
-	if _, err := os.Stat(lockFile); err != nil {
-		t.Fatalf("expected init's lock at %s: %v\noutput:\n%s", lockFile, err, out)
+	wantDir := fmt.Sprintf("/tmp/gc-beads-bd-init-locks-%d", os.Geteuid())
+	operands := readGcBeadsBdHealTestLog(t, mkdirOperands)
+	if !slices.Contains(strings.Split(operands, "\n"), wantDir) {
+		t.Fatalf("expected init to create its lock directory %s; mkdir operands:\n%s\noutput:\n%s", wantDir, operands, out)
+	}
+	ignored := filepath.Join(tmp, fmt.Sprintf("gc-beads-bd-init-locks-%d", os.Geteuid()))
+	if _, err := os.Stat(ignored); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("init's lock directory followed $TMPDIR to %s (stat err = %v); it must not consult TMPDIR\noutput:\n%s", ignored, err, out)
 	}
 }
 
