@@ -101,7 +101,7 @@ func Provision(deps Deps, req ProvisionRequest) (config.Rig, ProvisionResult, er
 	}
 
 	// Step 10: create the rig directory when missing.
-	if err := createRigDirIfMissing(fs, rigPath, rigPathExists); err != nil {
+	if err := createRigDirIfMissing(fs, rigPath, rigPathExists, deps.VerifyRigPath); err != nil {
 		return config.Rig{}, result, err
 	}
 
@@ -560,13 +560,27 @@ func resolveGitDefaultBranch(deps Deps, req ProvisionRequest, rigPath string) (h
 }
 
 // createRigDirIfMissing creates the rig directory when the earlier stat (or a
-// clone) did not already materialize it.
-func createRigDirIfMissing(fs fsys.FS, rigPath string, rigPathExists bool) error {
+// clone) did not already materialize it. When it creates the directory and
+// verify is non-nil, verify re-checks the path after the write and its error is
+// returned.
+//
+// The re-check is detect-only and fail-loud: a mismatch is a returned error,
+// and nothing is deleted, renamed or modified, so content that escaped is left
+// for the operator to inspect. It narrows the window to a path that is still
+// misplaced after the write; it does NOT close swap-and-restore, where an
+// attacker redirects the path between the pre-write check and the write and
+// restores it before this check runs.
+func createRigDirIfMissing(fs fsys.FS, rigPath string, rigPathExists bool, verify func(rigPath string) error) error {
 	if rigPathExists {
 		return nil
 	}
 	if err := fs.MkdirAll(rigPath, 0o755); err != nil {
 		return fmt.Errorf("creating %s: %w", rigPath, err)
+	}
+	if verify != nil {
+		if err := verify(rigPath); err != nil {
+			return fmt.Errorf("verifying created rig directory %s: %w", rigPath, err)
+		}
 	}
 	return nil
 }

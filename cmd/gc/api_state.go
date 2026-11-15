@@ -2952,6 +2952,16 @@ func (cs *controllerState) ProvisionRigFromGit(ctx context.Context, r config.Rig
 		return config.Rig{}, fmt.Errorf("%w: %w", rig.ErrCloneFailed, err)
 	}
 
+	// Re-run the pre-clone containment check now that the clone has written the
+	// destination. Detect-only and fail-loud: a mismatch is returned and nothing
+	// is deleted, renamed or modified (the rollback re-asserts containment before
+	// any RemoveAll, so it refuses an escaped dir too). This does NOT close
+	// swap-and-restore: a path redirected between the pre-clone check and the
+	// clone, then restored before this check, passes both.
+	if err := assertRigPathWithinCity(cs.cityPath, r.Path); err != nil {
+		return config.Rig{}, fmt.Errorf("post-clone containment re-check: %w", err)
+	}
+
 	// Provision under the guard. The freshly-cloned dir exists (with .git), so
 	// rig.Provision flows it through the git-detect / fresh-add path — git_url
 	// never enters ProvisionRequest, so nothing here can regress the sync path.
@@ -3336,6 +3346,10 @@ func (cs *controllerState) rigProvisionDeps(editCfg *config.City, r config.Rig, 
 			return normalizeCanonicalBdScopeFiles(cp, c, io.Discard)
 		},
 		PrepareAdopt: prepareRigAdoptProviderState,
+		// Re-run the pre-write containment check after the rig directory is
+		// created. Detect-only; see rig.createRigDirIfMissing for what it does
+		// not cover.
+		VerifyRigPath: func(p string) error { return assertRigPathWithinCity(cs.cityPath, p) },
 		ReadStorePrefix: func(p string) (string, error) {
 			return rigAdoptStorePrefix(cs.cityPath, p)
 		},
