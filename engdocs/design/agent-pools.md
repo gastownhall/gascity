@@ -174,8 +174,8 @@ Graph steps routed to a pool remain unassigned until a concrete session
 claims them. Continuation is always formula-declared: Go propagates a group
 the authored recipe already carries and never manufactures one. The
 `IndependentSteps` mark, derived from the agent's `lifecycle`, is what lets
-the routing layer tell a formula-declared group (which must never be lost
-silently) apart from the router's own transient drain bookkeeping (#6360).
+the routing layer refuse a continuation group on a pool that cannot honor it
+(#6360).
 
 - The default long-lived lifecycle propagates a formula-declared
   `gc.continuation_group` and pins `gc.session_affinity=require` alongside it.
@@ -189,12 +189,18 @@ silently) apart from the router's own transient drain bookkeeping (#6360).
   runtime survives to carry session affinity into the next step. A one-shot
   pool step that declares no continuation group therefore stays metadata-only
   and unassigned, so any fresh session may claim the next ready step.
-- A step that *does* declare a group keeps it. Where honoring a step would
-  mean losing a formula-declared group instead, `ApplyGraphRouteBinding`
-  returns an error naming the step and the group rather than clearing it --
-  dropping a formula's drain contract silently is a routing decision Go is
-  not entitled to make. The `drain:`-prefixed value the router itself stamps
-  is the one group it may clear and replace.
+- A step routed to a one-shot pool that carries *any* non-empty
+  `gc.continuation_group` is refused: `ApplyGraphRouteBinding` returns an
+  error naming the step, the group and the one-shot lifecycle. A group means
+  "same session" and a one-shot pool gives every claim a fresh one, so the
+  two cannot both be honored; clearing the group would drop a formula's
+  contract silently, and which of the two configs wins is not a Go judgment.
+  There is no exemption by value: the `drain:`-prefixed group a shared drain
+  stamps is a declared contract like an authored one. A shared drain whose
+  item route is one-shot closes as a hard failure with
+  `gc.failure_reason=drain_item_one_shot_continuation_group` and the offending
+  step as `gc.failure_subject`. Fix it by routing the step to a long-lived
+  agent, or setting the drain's `context="separate"`.
 
 A formula routed to a one-shot pool must therefore persist every input a
 later step needs in the work artifact or bead graph rather than relying on a

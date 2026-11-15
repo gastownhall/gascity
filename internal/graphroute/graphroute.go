@@ -55,9 +55,13 @@ type IndependentStepsGroupError struct {
 	Group  string
 }
 
-// Error implements error.
+// Error implements error. The text names the step, the group and the agent
+// lifecycle, and points at the two ways out.
 func (e *IndependentStepsGroupError) Error() string {
-	return fmt.Sprintf("graphroute: step %q: %v %q", e.StepID, ErrIndependentStepsContinuationGroup, e.Group)
+	return fmt.Sprintf("graphroute: step %q carries continuation group %q but is routed to a one-shot pool, "+
+		"whose every claim gets a fresh session that cannot share a session with the next step; "+
+		"route it to a long-lived agent, or for a shared drain set context=%q",
+		e.StepID, e.Group, beadmeta.DrainContextSeparate)
 }
 
 // Unwrap lets errors.Is match ErrIndependentStepsContinuationGroup.
@@ -82,10 +86,9 @@ type GraphRouteBinding struct {
 	// re-decorated step's stale group is cleared rather than preserved.
 	ContinuationGroup string
 	// IndependentSteps marks a one-shot pool step: each claim gets a fresh
-	// session, so a formula-declared continuation group can never be honored
-	// here. ApplyGraphRouteBinding uses this to tell a formula-declared group
-	// (which would silently be lost) apart from the router's own transient
-	// drain bookkeeping (which is always safe to clear and replace).
+	// session, so a continuation group can never be honored here.
+	// ApplyGraphRouteBinding refuses any non-empty group on such a step,
+	// whatever its spelling, rather than silently dropping it or keeping it.
 	IndependentSteps bool
 }
 
@@ -197,8 +200,9 @@ func parseGraphStepRouteTarget(step *formula.RecipeStep, routeVars map[string]st
 }
 
 // ApplyGraphRouteBinding sets the routing metadata on a recipe step. It
-// returns an error if honoring the binding would silently destroy a
-// formula-declared continuation group (see IndependentSteps).
+// returns an *IndependentStepsGroupError (wrapping
+// ErrIndependentStepsContinuationGroup) when an IndependentSteps pool route
+// would carry a continuation group (see IndependentSteps).
 func ApplyGraphRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding) error {
 	// Clear any prior session back-references so the metadata always matches
 	// the current binding when a step is re-decorated (#2843).
@@ -231,18 +235,25 @@ func ApplyGraphRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding)
 		// and affinity together (the pinned pair, per
 		// beadmeta.SessionAffinityMetadataKeys) so no stale group survives to
 		// mis-vacuum later pool claims.
-		if group := strings.TrimSpace(binding.ContinuationGroup); group != "" {
+		group := strings.TrimSpace(binding.ContinuationGroup)
+		if binding.IndependentSteps {
+			// IndependentSteps means each claim of this pool step gets a fresh
+			// session, so "same session" cannot be honored, and clearing the
+			// group would drop a formula's contract with no signal (#5584).
+			// Which of the two wins is configuration, not a Go judgment, so
+			// any group is an error: no exemption by spelling, the drain-
+			// stamped value included. A direct caller that passes a bare
+			// binding and a step carrying a stale group gets the same refusal.
+			if group == "" {
+				group = strings.TrimSpace(step.Metadata[beadmeta.ContinuationGroupMetadataKey])
+			}
+			if group != "" {
+				return &IndependentStepsGroupError{StepID: step.ID, Group: group}
+			}
+		}
+		if group != "" {
 			step.Metadata[beadmeta.ContinuationGroupMetadataKey] = group
 			step.Metadata[beadmeta.SessionAffinityMetadataKey] = "require"
-		} else if stale := strings.TrimSpace(step.Metadata[beadmeta.ContinuationGroupMetadataKey]); binding.IndependentSteps && stale != "" && !strings.HasPrefix(stale, "drain:") {
-			// IndependentSteps means each claim of this pool step gets a fresh
-			// session, so a formula-declared continuation group can never be
-			// honored here. The unconditional clear below would silently
-			// destroy that formula's drain contract with no signal (#5584).
-			// A "drain:"-prefixed value is the router's own transient
-			// bookkeeping (sharedDrainContinuationGroup in
-			// internal/dispatch/drain.go), always safe to clear and replace.
-			return fmt.Errorf("graphroute: step %q is IndependentSteps-routed but formula-declared continuation group %q would be silently dropped", step.ID, stale)
 		} else {
 			for _, key := range beadmeta.SessionAffinityMetadataKeys {
 				delete(step.Metadata, key)
@@ -276,8 +287,8 @@ func ApplyGraphRouteBinding(step *formula.RecipeStep, binding GraphRouteBinding)
 // agent. Pool routes stay metadata-only; a one-shot pool additionally marks
 // each graph step IndependentSteps, because no runtime survives to carry
 // session affinity into the next step. IndependentSteps does not authorize
-// dropping a formula-declared continuation group: ApplyGraphRouteBinding
-// refuses that loudly instead of silently clearing the group.
+// dropping a continuation group: ApplyGraphRouteBinding refuses any group on
+// such a route loudly instead of silently clearing or keeping it.
 func GraphRouteBindingForAgent(agentCfg config.Agent) GraphRouteBinding {
 	binding := GraphRouteBinding{QualifiedName: agentutil.RoutedToIdentity(&agentCfg)}
 	if agentCfg.SupportsInstanceExpansion() {

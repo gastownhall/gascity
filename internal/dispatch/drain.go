@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
@@ -1975,7 +1976,16 @@ func closeDrainReservationFailure(store beads.GraphStore, bead beads.Bead, manif
 }
 
 func closeDrainItemFormulaFailure(store beads.GraphStore, bead beads.Bead, manifest drainManifest, err error, opts ProcessOptions) (ControlResult, error) {
-	const failureReason = "invalid_drain_item_formula"
+	failureReason := "invalid_drain_item_formula"
+	failureSubject := manifest.Formula
+	var groupErr *graphroute.IndependentStepsGroupError
+	if errors.As(err, &groupErr) {
+		// A shared drain stamps a continuation group on every item step, and a
+		// one-shot pool cannot honor it (ga-sj2h8f.1). Name that conflict
+		// apart from a broken item formula, with the offending step as subject.
+		failureReason = "drain_item_one_shot_continuation_group"
+		failureSubject = groupErr.StepID
+	}
 	if closeErr := closeOpenDrainItemRoots(store, &manifest, failureReason); closeErr != nil {
 		return ControlResult{}, fmt.Errorf("%s: closing partial drain item roots after %w: %w", bead.ID, err, closeErr)
 	}
@@ -1991,8 +2001,8 @@ func closeDrainItemFormulaFailure(store beads.GraphStore, bead beads.Bead, manif
 		beadmeta.FailureReasonMetadataKey: failureReason,
 		drainManifestMetadataKey:          string(data),
 	}
-	if manifest.Formula != "" {
-		metadata[beadmeta.FailureSubjectMetadataKey] = manifest.Formula
+	if failureSubject != "" {
+		metadata[beadmeta.FailureSubjectMetadataKey] = failureSubject
 	}
 	if releaseErr := releaseDrainReservations(store, bead.ID, manifest, opts); releaseErr != nil {
 		return ControlResult{}, fmt.Errorf("%s: releasing reservations after %w: %w", bead.ID, err, releaseErr)

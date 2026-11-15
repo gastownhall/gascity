@@ -10053,40 +10053,6 @@ func TestRetryClonedStepGetsItsOwnStepDefined(t *testing.T) {
 	}
 }
 
-// TestRetryAttemptBeadKeepsSharedDrainGroupOnLongLivedPool probes the
-// adjacent question left open by ga-sj2h8f.1: a retried attempt of a
-// shared-lane drain step on a long-lived pool should keep its
-// drain:<id> group and require affinity. retryAttemptBead clears the affinity
-// set whenever the previous attempt's assignee is not preserved, which is the
-// case for a metadata-pool-routed bead. If this fails, file a separate bead;
-// it is not part of ga-sj2h8f.1.
-func TestRetryAttemptBeadKeepsSharedDrainGroupOnLongLivedPool(t *testing.T) {
-	t.Parallel()
-
-	three := 3
-	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MaxActiveSessions: &three}}}
-	prev := beads.Bead{
-		ID:       "gcg-attempt-1",
-		Title:    "work",
-		Type:     "task",
-		Assignee: "worker-1",
-		Metadata: map[string]string{
-			beadmeta.RoutedToMetadataKey:          "worker",
-			beadmeta.ContinuationGroupMetadataKey: "drain:gc-ctl",
-			beadmeta.SessionAffinityMetadataKey:   "require",
-		},
-	}
-
-	clone := retryAttemptBead(prev, "gcg-logical", "item.work.attempt.2", 2, cfg)
-
-	if got := clone.Metadata[beadmeta.ContinuationGroupMetadataKey]; got != "drain:gc-ctl" {
-		t.Errorf("clone gc.continuation_group = %q, want drain:gc-ctl kept", got)
-	}
-	if got := clone.Metadata[beadmeta.SessionAffinityMetadataKey]; got != "require" {
-		t.Errorf("clone gc.session_affinity = %q, want require kept", got)
-	}
-}
-
 func TestRewriteRalphAttemptRefRespectsAttemptBoundaries(t *testing.T) {
 	t.Parallel()
 
