@@ -50,10 +50,10 @@ func TestParseTmuxLaunchEnvStateMultiLineValue(t *testing.T) {
 	}
 }
 
-// An unterminated quoted value (output cut short) yields no entry, and does
-// not swallow the lines after it as its value.
+// An unterminated quoted value (output cut short) yields no entry: what
+// follows its opening quote is all value, so nothing after it is read.
 func TestParseTmuxLaunchEnvStateUnterminatedValue(t *testing.T) {
-	st := ParseTmuxLaunchEnvState("A=\"cut\nshort")
+	st := ParseTmuxLaunchEnvState("A=\"cut\nunset B;\n@gc_launch_env_keys=A")
 	if len(st.Env) != 0 || len(st.Removed) != 0 || len(st.Recorded) != 0 {
 		t.Errorf("state = %+v, want empty", st)
 	}

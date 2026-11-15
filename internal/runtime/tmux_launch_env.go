@@ -23,8 +23,8 @@ import (
 const TmuxLaunchEnvKeysOption = "@gc_launch_env_keys"
 
 // tmuxLaunchEnvKeysLine prefixes the record's line in the state read's output.
-// No show-environment line can start with it: those are KEY=value or -KEY, and
-// "@" starts no environment variable name.
+// No show-environment -s entry can start with it: those are KEY="value"; ... or
+// unset KEY;, and "@" starts no environment variable name.
 const tmuxLaunchEnvKeysLine = TmuxLaunchEnvKeysOption + "="
 
 // launchIdentityEnvKeys name the session incarnation. A relaunch keeps the
@@ -59,35 +59,78 @@ type TmuxLaunchEnvState struct {
 // invocation, so a relaunch costs a single read and sees the two as one
 // snapshot. session is the -t target for show-environment, pane the
 // target-pane form for display-message.
+//
+// The environment is read in its shell form (-s), which double-quotes each
+// value: the raw form prints a value as is, so one holding a newline cannot be
+// told apart from the entries after it.
 func TmuxLaunchEnvStateArgs(session, pane string) []string {
 	return []string{
-		"show-environment", "-t", session, ";",
+		"show-environment", "-s", "-t", session, ";",
 		"display-message", "-p", "-t", pane, tmuxLaunchEnvKeysLine + "#{" + TmuxLaunchEnvKeysOption + "}",
 	}
 }
 
 // ParseTmuxLaunchEnvState reads the output of [TmuxLaunchEnvStateArgs].
 // Output without the record's line reads as no record.
+//
+// show-environment -s prints a set key as KEY="value"; export KEY; with $, `,
+// \ and " backslash-escaped and any newline literal inside the quotes, and a
+// removed key as unset KEY;. A value therefore ends at its closing quote, not
+// at the end of a line. An entry that is cut short or not of either shape is
+// skipped.
 func ParseTmuxLaunchEnvState(out string) TmuxLaunchEnvState {
 	st := TmuxLaunchEnvState{Env: map[string]string{}, Removed: map[string]bool{}}
-	for _, line := range strings.Split(out, "\n") {
+	for rest := out; rest != ""; {
+		entry := rest // the output from this line on
+		var line string
+		line, rest, _ = strings.Cut(rest, "\n")
 		line = strings.TrimRight(line, "\r")
-		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), tmuxLaunchEnvKeysLine); ok {
-			st.Recorded = strings.Fields(rest)
+		if keys, ok := strings.CutPrefix(strings.TrimSpace(line), tmuxLaunchEnvKeysLine); ok {
+			st.Recorded = strings.Fields(keys)
 			sort.Strings(st.Recorded)
 			continue
 		}
-		if key, ok := strings.CutPrefix(line, "-"); ok {
-			if tmuxEnvNameRe.MatchString(key) {
+		if key, ok := strings.CutPrefix(line, "unset "); ok {
+			if key, ok = strings.CutSuffix(key, ";"); ok && tmuxEnvNameRe.MatchString(key) {
 				st.Removed[key] = true
 			}
 			continue
 		}
-		if key, val, ok := strings.Cut(line, "="); ok && tmuxEnvNameRe.MatchString(key) {
-			st.Env[key] = val
+		key, _, ok := strings.Cut(line, `="`)
+		if !ok || !tmuxEnvNameRe.MatchString(key) {
+			continue
 		}
+		// The value may run past this line: scan from the opening quote
+		// through the rest of the output.
+		val, after, ok := unquoteTmuxShellValue(entry[len(key)+len(`="`):])
+		if !ok {
+			break // cut short: nothing after it can be read as an entry
+		}
+		st.Env[key] = val
+		_, rest, _ = strings.Cut(after, "\n") // the "; export KEY;" tail
 	}
 	return st
+}
+
+// unquoteTmuxShellValue reads a double-quoted value from s, which starts just
+// after the opening quote, the way a POSIX shell does: a backslash before $, `,
+// " or \ yields that character, and any other byte, a newline included, is
+// itself. It returns the value and what follows the closing quote, or ok false
+// when s has no closing quote.
+func unquoteTmuxShellValue(s string) (val, after string, ok bool) {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c == '"':
+			return b.String(), s[i+1:], true
+		case c == '\\' && i+1 < len(s) && strings.IndexByte("$`\"\\", s[i+1]) >= 0:
+			i++
+			b.WriteByte(s[i])
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return "", "", false
 }
 
 // TmuxLaunchEnvRecordArgs returns the tmux arguments that set pane's session
