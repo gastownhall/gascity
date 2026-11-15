@@ -170,9 +170,24 @@ func requalifiedSpecRuntimeNameInfo(info session.Info, cfg *config.City, cityNam
 // session resolves to when a requalification renamed the row in place and it
 // kept the bare form's runtime name (requalifiedSpecRuntimeNameInfo), else
 // sessionName itself. The runtime is still observed under sessionName.
+//
+// A configured named session row whose runtime carries a bead-scoped name
+// (PoolSessionName, stamped when its seat is materialized by the pool create
+// path) resolves to its named session's runtime name too: buildIdleTracker and
+// its siblings register a named session under that name alone — a singleton
+// (max_active_sessions = 1) gets no template fallback — so without this the
+// row matches no setting, is never idle-checked, never aged out, and a
+// mode="always" row loses its exemption. Only the row's own bead-scoped name
+// (infoOwnsPoolSessionName) maps: any other runtime name that is not the named
+// one is a reconfiguration the sweep owns, and stays sessionName.
 func lifecycleSessionNameInfo(info session.Info, cfg *config.City, cityName, sessionName string) string {
 	if name := requalifiedSpecRuntimeNameInfo(info, cfg, cityName); name != "" {
 		return name
+	}
+	if isNamedSessionInfo(info) && infoOwnsPoolSessionName(info) {
+		if spec, ok := findNamedSessionSpec(cfg, cityName, namedSessionIdentityInfo(info)); ok && spec.Named != nil {
+			return config.NamedSessionRuntimeName(cityName, cfg.Workspace, spec.Named.QualifiedName())
+		}
 	}
 	return sessionName
 }

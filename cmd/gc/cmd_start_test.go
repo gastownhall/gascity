@@ -2264,3 +2264,66 @@ func TestStartStandaloneBuildsSessionProviderFromResolvedCityConfig(t *testing.T
 		t.Errorf("city path = %q, want %q", gotCityPath, cityPath)
 	}
 }
+
+// A named on_demand singleton (max_active_sessions = 1, so no instance
+// expansion and no template fallback) whose row was minted with a bead-scoped
+// runtime name — "<template>-<beadID>", what the pool create path stamps —
+// still carries its configured named identity. Its lifecycle settings are
+// registered under the named runtime name only, so the lookup must resolve the
+// row to that name or the session is never idle-checked and runs until some
+// other reaper (config drift) happens to end it.
+func TestLifecycleSessionNameInfo_NamedSingletonWithBeadScopedRuntimeName(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{},
+		Agents: []config.Agent{{
+			Name:              "kb-writer",
+			Dir:               "st",
+			MaxActiveSessions: intPtr(1),
+			IdleTimeout:       "15m",
+			MaxSessionAge:     "1h",
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "kb-writer",
+			Dir:      "st",
+			Mode:     "on_demand",
+		}},
+	}
+	cityName := "city"
+	template := cfg.Agents[0].QualifiedName()
+	namedSession := config.NamedSessionRuntimeName(cityName, cfg.Workspace, template)
+	runtimeName := PoolSessionName(template, "gc-7")
+	if runtimeName == namedSession {
+		t.Fatalf("fixture: runtime name %q must differ from the named runtime name", runtimeName)
+	}
+	info := sessionInfoFromBead(beads.Bead{
+		ID:     "gc-7",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"template":                  template,
+			"agent_name":                template,
+			"session_name":              runtimeName,
+			"session_origin":            "named",
+			"configured_named_session":  "true",
+			"configured_named_identity": template,
+			"configured_named_mode":     "on_demand",
+		},
+	})
+
+	lifecycleName := lifecycleSessionNameInfo(info, cfg, cityName, runtimeName)
+	if lifecycleName != namedSession {
+		t.Fatalf("lifecycleSessionNameInfo = %q, want the named runtime name %q", lifecycleName, namedSession)
+	}
+
+	now := time.Date(2026, 11, 15, 18, 0, 0, 0, time.UTC)
+	sp := runtime.NewFake()
+	startFakeSession(t, sp, runtimeName)
+	sp.SetActivity(runtimeName, now.Add(-6*time.Hour))
+	idle, ok := buildIdleTracker(cfg, cityName, "", sp).(*memoryIdleTracker)
+	if !ok {
+		t.Fatalf("buildIdleTracker returned %T, want *memoryIdleTracker", idle)
+	}
+	if !idle.checkIdleUnder(runtimeName, lifecycleName, template, "", "", sp, now) {
+		t.Fatalf("named singleton %q (lifecycle name %q) idle 6h did not trip its 15m idle_timeout", runtimeName, lifecycleName)
+	}
+}
