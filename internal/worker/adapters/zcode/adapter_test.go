@@ -146,7 +146,22 @@ var (
 	adapterOnce sync.Once
 	adapterPath string
 	adapterErr  error
+	// adapterDir is the install directory, kept so TestMain can remove it. It
+	// is set before Install runs so a half-made directory is removed too.
+	adapterDir string
 )
+
+// TestMain removes the adapter's install directory once every test has run;
+// nothing else does, and the directory would otherwise outlive the binary.
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if adapterDir != "" {
+		if err := os.RemoveAll(adapterDir); err != nil {
+			fmt.Fprintf(os.Stderr, "zcode adapter_test: remove %s: %v\n", adapterDir, err)
+		}
+	}
+	os.Exit(code)
+}
 
 func installedAdapter(t *testing.T) string {
 	t.Helper()
@@ -156,6 +171,7 @@ func installedAdapter(t *testing.T) string {
 			adapterErr = err
 			return
 		}
+		adapterDir = dir
 		adapterPath, adapterErr = zcodeadapter.Install(dir)
 	})
 	if adapterErr != nil {
