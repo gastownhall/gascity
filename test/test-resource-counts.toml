@@ -758,13 +758,16 @@ calls = 1
 path = "cmd/gc/dolt_lifecycle_race_test.go"
 resource = "fixed_sleep"
 calls = 1
-tagged = true
+
+[[count]]
+path = "cmd/gc/dolt_lifecycle_race_test.go"
+resource = "slow_process_gate"
+calls = 3
 
 [[count]]
 path = "cmd/gc/dolt_lifecycle_race_test.go"
 resource = "subprocess"
 calls = 2
-tagged = true
 
 [[count]]
 path = "cmd/gc/dolt_preflight_cleanup_test.go"
