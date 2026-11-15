@@ -157,6 +157,17 @@ func (a SessionLogAdapter) CodexTailUsage(path, cursorID string) ([]sessionlog.T
 	return sessionlog.ExtractCodexTailUsageFromSearchPaths(a.SearchPaths, path)
 }
 
+// OpenCodeTailUsage reads per-invocation token usage from a mirrored OpenCode
+// session export. Validation merges the OpenCode mirror root
+// (~/.local/share/gascity/opencode-transcripts) with the configured search
+// paths. cursorID is accepted for signature symmetry with TailUsage: the export
+// is a single JSON document parsed whole, so there is no window to grow and the
+// caller's cursor filter alone decides what is new.
+func (a SessionLogAdapter) OpenCodeTailUsage(path, cursorID string) ([]sessionlog.TailUsage, error) {
+	_ = cursorID
+	return sessionlog.ExtractOpenCodeTailUsageFromSearchPaths(a.SearchPaths, path)
+}
+
 // InvocationUsage reads per-invocation token usage from a discovered
 // transcript using the SAME extractor the prompt-op telemetry gate uses for
 // the provider's invocation-usage family (invocationUsageSpecs). It returns
@@ -337,27 +348,21 @@ func (a SessionLogAdapter) LoadHistory(req LoadRequest) (*HistorySnapshot, error
 		}
 	}
 
-	entries := normalizeHistoryEntries(req.Provider, path, session.ID, session.Messages)
-	contextEntries := entries
+	// Detached (Codex) usage belongs to the full parsed transcript. Attach it
+	// before paging so every page shows its own turns' model and usage, and
+	// off-page invocations cannot land on unrelated assistants.
+	contextEntries := normalizeHistoryEntries(req.Provider, path, fullSession.ID, fullSession.Messages)
+	contextEntries = attachTailUsageToAssistantEntries(contextEntries, fullSession.DetachedUsage)
+	entries := contextEntries
 	if paged {
-		// Pair tool_result blocks whose tool_use is off the current page against
-		// the full session (already read above — no extra I/O), so paginated
-		// structured pages keep typed command/diff/read/task results instead of
-		// degrading to plain text at page boundaries.
-		contextEntries = normalizeHistoryEntries(req.Provider, path, fullSession.ID, fullSession.Messages)
+		entries = normalizeHistoryEntries(req.Provider, path, session.ID, session.Messages)
+		copyHistoryInvocationMetadata(entries, contextEntries)
 	}
+	// Pair tool_result blocks whose tool_use is off the current page against
+	// the full session (already read above — no extra I/O), so paginated
+	// structured pages keep typed command/diff/read/task results instead of
+	// degrading to plain text at page boundaries.
 	entries = attachStructuredToolDataWithContext(entries, contextEntries)
-	if beforeID == "" {
-		// Detached (Codex) usage is extracted from the file tail — the newest
-		// turns. It belongs only to a page that includes the tail. On an older
-		// "before" page the tail usages are for newer, off-page turns and would
-		// be mis-attributed onto earlier assistants, so skip attachment there;
-		// those older turns have no tail-extractable usage to show anyway.
-		entries, err = attachDetachedProviderUsage(req.Provider, path, entries)
-		if err != nil {
-			return nil, err
-		}
-	}
 	compactionCount, lastEntryID, pendingIDs := transcriptGlobalFacts(fullSession.Messages)
 
 	tailMeta, err := historyTailMeta(req.Provider, path)
@@ -502,6 +507,12 @@ func normalizeEntry(provider, path, sessionID string, order int, entry *sessionl
 	}
 	normalized.Model, normalized.StopReason, normalized.Usage = historyEntryMetadata(entry)
 	normalized.SystemEvent = historySystemEventFromSessionLog(entry.SystemEvent)
+	if isProviderFailureReply(entry) {
+		// A provider writes its own failure as an assistant row; it is a
+		// system event, not a completion of the turn.
+		normalized.Kind = "system"
+		normalized.Actor = ActorSystem
+	}
 
 	blocks := normalizeBlocks(entry)
 	normalized.Blocks = blocks
@@ -512,6 +523,12 @@ func normalizeEntry(provider, path, sessionID string, order int, entry *sessionl
 		normalized.UserPrompt = parseHistoryUserPrompt(normalized.Text)
 	}
 	return normalized
+}
+
+// isProviderFailureReply reports whether entry is an assistant row the
+// transcript reader marked as a provider failure.
+func isProviderFailureReply(entry *sessionlog.Entry) bool {
+	return entry.Type == "assistant" && entry.SystemEvent != nil && entry.SystemEvent.Category == "provider_error"
 }
 
 func normalizedHistoryEntryID(entry *sessionlog.Entry, order int) string {
@@ -530,66 +547,60 @@ func historySystemEventFromSessionLog(event *sessionlog.SystemEvent) *HistorySys
 	}
 }
 
-func attachDetachedProviderUsage(provider, path string, entries []HistoryEntry) ([]HistoryEntry, error) {
-	if sessionlog.IsACPCapturePath(path) {
-		// An ACP capture carries its usage on the turn's entries.
-		return entries, nil
+// copyHistoryInvocationMetadata copies model and usage attached to the full
+// transcript's entries onto the matching entries of a page.
+func copyHistoryInvocationMetadata(page, full []HistoryEntry) {
+	byID := make(map[string]*HistoryEntry, len(full))
+	for i := range full {
+		if full[i].Model != "" || full[i].Usage != nil {
+			byID[full[i].ID] = &full[i]
+		}
 	}
-	family, supported := InvocationUsageFamily(provider)
-	if !supported || family != "codex" {
-		return entries, nil
+	for i := range page {
+		if source, ok := byID[page[i].ID]; ok {
+			page[i].Model, page[i].Usage = source.Model, source.Usage
+		}
 	}
-	usages, err := sessionlog.ExtractCodexTailUsage(path)
-	if err != nil {
-		return nil, fmt.Errorf("extract codex tail usage: %w", err)
-	}
-	return attachTailUsageToAssistantEntries(entries, usages), nil
 }
 
+// attachTailUsageToAssistantEntries attaches each usage to the latest
+// assistant entry still lacking metadata that is newer than the previous
+// attachment and not newer than the usage. Usages and entries are both in
+// transcript order, so one forward pass suffices. A usage with no such entry
+// is dropped rather than landing on an earlier row of the turn.
 func attachTailUsageToAssistantEntries(entries []HistoryEntry, usages []sessionlog.TailUsage) []HistoryEntry {
 	if len(entries) == 0 || len(usages) == 0 {
 		return entries
 	}
-	nextStart := 0
+	next, candidate := 0, -1
 	for _, usage := range usages {
 		usageTime, ok := tailUsageTimestamp(usage)
 		if !ok {
 			continue
 		}
-		target := latestAssistantEntryBefore(entries, nextStart, usageTime)
-		if target < 0 {
-			target = latestAssistantEntryBefore(entries, 0, usageTime)
+		for ; next < len(entries); next++ {
+			entry := entries[next]
+			if entry.Timestamp != nil && entry.Timestamp.After(usageTime) {
+				break
+			}
+			if entry.Actor == ActorAssistant && entry.Timestamp != nil && (entry.Usage == nil || entry.Model == "") {
+				candidate = next
+			}
 		}
-		if target < 0 {
+		if candidate < 0 || entries[candidate].Timestamp.After(usageTime) {
 			continue
 		}
-		if entries[target].Model == "" {
-			entries[target].Model = usage.Model
+		target := &entries[candidate]
+		if target.Model == "" {
+			target.Model = usage.Model
 		}
-		if entries[target].Usage == nil {
-			entries[target].Usage = historyUsageFromTailUsage(usage)
-			enrichUsageContext(entries[target].Usage, entries[target].Model)
+		if target.Usage == nil {
+			target.Usage = historyUsageFromTailUsage(usage)
+			enrichUsageContext(target.Usage, target.Model)
 		}
-		nextStart = target + 1
+		candidate = -1
 	}
 	return entries
-}
-
-func latestAssistantEntryBefore(entries []HistoryEntry, start int, usageTime time.Time) int {
-	target := -1
-	for idx := start; idx < len(entries); idx++ {
-		entry := entries[idx]
-		if entry.Timestamp != nil && entry.Timestamp.After(usageTime) {
-			break
-		}
-		if entry.Actor != ActorAssistant || entry.Timestamp == nil {
-			continue
-		}
-		if entry.Usage == nil || entry.Model == "" {
-			target = idx
-		}
-	}
-	return target
 }
 
 func tailUsageTimestamp(usage sessionlog.TailUsage) (time.Time, bool) {

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -153,7 +154,7 @@ func TestLaunchWorkflowLegitimateDistinctLaunchesAllowed(t *testing.T) {
 	}
 
 	// Relaunch after the prior root is closed: never blocked (I6).
-	if _, err := sourceworkflow.CloseWorkflowSubtree(deps.Store, rootA.RootID); err != nil {
+	if _, err := sourceworkflow.CloseWorkflowSubtree(beadstest.GraphMolecule(deps.Store), rootA.RootID); err != nil {
 		t.Fatalf("close root A: %v", err)
 	}
 	relaunch, err := InstantiateSlingFormula(context.Background(), "graph-work", []string{formulaDir}, optsA, "", "default", "", a, deps)

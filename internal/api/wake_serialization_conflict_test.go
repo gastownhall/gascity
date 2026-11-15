@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -41,7 +42,7 @@ func (s *wakeBatchConflictStore) SetMetadataBatch(id string, kvs map[string]stri
 func TestHandleSessionWake_SerializationConflictIsDeclaredRetryable503(t *testing.T) {
 	fs := newSessionFakeState(t)
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Conflicted")
-	if err := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath)).Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
+	if err := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath)).Suspend(context.Background(), testOperatorIn(t, fs.cityPath), info.ID, false); err != nil {
 		t.Fatalf("suspend session: %v", err)
 	}
 	conflicts := &wakeBatchConflictStore{Store: fs.cityBeadStore, sessionID: info.ID}

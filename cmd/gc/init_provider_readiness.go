@@ -661,10 +661,15 @@ var initRunVersion = func(binary string) (string, error) {
 // Minimum versions for beads-provider binaries.
 const (
 	doltMinVersion = doltversion.ManagedMin // sql-server features used by gc-beads-bd
-	bdMinVersion   = "1.0.4"                // BdStore shell-out interface, including bd create --id
+	// bdMinVersion is the minimum supported bd (deps.env BD_PREV_VERSION). It
+	// is 1.3.0 because BdStore.ReleaseIfCurrent needs bd's --if-assignee /
+	// --if-status preconditions and has no path without them; 1.3.0 is the
+	// first tested release carrying them (bd 1.2.2 re-released 1.1.2).
+	// It may not drop below beads.BdConditionalReleaseMinVersion.
+	bdMinVersion = "1.3.0"
 	// Fresh provider-owned scopes use bd's persisted ownership and transport
-	// contract, introduced with the 1.3 release candidate. Existing ready
-	// stores retain the established compatibility floor.
+	// contract, introduced with the 1.3 release candidate. It equals the init
+	// floor today; it stays a separate anchor so it can move independently.
 	bdFreshProviderMinVersion = "1.3.0"
 )
 

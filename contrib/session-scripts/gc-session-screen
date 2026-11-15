@@ -1,109 +1,564 @@
 #!/usr/bin/env bash
 # gc-session-screen — GNU screen session provider for Gas City.
 #
-# Implements the exec session provider protocol.
-# See docs/exec-session-protocol.md for the full protocol specification.
+# Implements the exec session provider protocol, including the observe.v1
+# profile reconciler v2 reads. See docs/reference/exec-session-provider.md
+# for the full protocol specification.
 #
-# Dependencies: screen, jq, bash
+# Dependencies: bash, screen, jq, flock, procps ps and kill, awk, cksum,
+# uname (Linux: /proc).
+#
+# Declares observe.v1 and report-attachment, so it is v2-ready; city-scoped
+# (each city gets its own private screen socket directory, so its listing
+# holds only the boxes gc started for it); conformance-faults; and locality
+# "local": its boxes run on gc's host. `gc runtime conformance
+# gc-session-screen` gates every observe.v1 requirement.
 #
 # Usage: GC_SESSION=exec:/path/to/gc-session-screen gc start <city>
+#
+# State: <home>/.gcss, where <home> is the user's home directory from the
+# password database, never from the caller's environment: the supervisor, a
+# cron job and a sudo shell resolve one directory, so none of them can read a
+# box as absent and start a twin. GC_EXEC_STATE_DIR overrides it, and then
+# must be the same for every gc process of the city. It is a 0700 directory
+# owned by the user (the script refuses a symlink or another owner's
+# directory; to keep state elsewhere, set GC_EXEC_STATE_DIR rather than link
+# it). Per city and host it holds <key>, the city's screen sockets
+# (SCREENDIR) and nothing else, and <key>.meta, each box's metadata, written
+# 0600 by rename, so no write follows a link. <key> is the 8 hex digits of
+# the cksum of `uname -n` and GC_EXEC_CITY_PATH. The host is in the key so two
+# hosts sharing a home never list each other's sockets, which screen would
+# read as dead and wipe. A socket path is "<state>/<key>/<pid>.<name>" and
+# must fit 107 bytes, so with the default state a name fits in 83 bytes less
+# the length of <home>: 71 under /home/ubuntu. To reach a box with screen
+# directly, point SCREENDIR at <state>/<key>; `gc session attach` does it for
+# you.
+#
+# Upgrading from the previous version: stop the city with the OLD script in
+# place (`gc stop <city>`: the controller and every session), then replace
+# the file and start the city again. The previous version kept its boxes in
+# the user's default screen directory, which this version does not list, so
+# replacing the file under a running controller starts every session twice.
+# For the same reason, stop the city before upgrading from a gc that does
+# not set GC_EXEC_CITY_PATH, or renaming the host: either changes the key.
 #
 # --- Gas Town feature parity notes ---
 #
 # The tmux provider (internal/session/tmux/) includes significant Gas Town
-# theming and orchestration that this script does not yet implement:
-#
-# NOT IMPLEMENTED — Theming:
-#   - Status bar colors (10-color palette with FNV-32a consistent hashing)
-#   - Special role themes (Mayor=gold, Deacon=purple, Dog=brown)
-#   - Role emoji in status bar (Mayor=hat, Crew=construction worker, etc.)
-#   - Dynamic status-right with gt status-line output + clock
-#   - Screen's hardstatus/caption could support a subset of this.
-#
-# NOT IMPLEMENTED — Keybindings:
-#   - Mail click binding (left-click status bar → mail popup)
-#   - Feed binding (Ctrl-b a → activity feed)
-#   - Agent switcher (Ctrl-b g → agent menu popup)
-#   - Session cycling (Ctrl-b n/p → cycle related sessions)
-#   - Screen supports custom keybindings via 'bindkey'.
-#
-# NOT IMPLEMENTED — Session lifecycle:
-#   - Remain-on-exit (pane stays visible after process exits for forensics)
-#   - Auto-respawn hook (persistent agents restart after 3s debounce)
-#   - Zombie detection (session exists but agent process dead)
-#   - Screen supports 'zombie' mode and 'idle' commands for some of this.
-#
-# NOT IMPLEMENTED — Session naming:
-#   - Name validation (alphanumeric + underscore/hyphen only)
-#   - Exact-match session lookup (screen -list grep is fuzzy)
-#
-# SUPPORTED by screen but not wired up:
-#   - Mouse mode (screen has limited mouse support)
-#   - UTF-8 mode (screen -U flag)
-#   - Activity timestamps (screen 'idle' command)
+# theming and orchestration that this script does not implement: status-bar
+# theming and role themes, keybindings (mail, feed, agent switcher, session
+# cycling), remain-on-exit, and auto-respawn. Screen supports subsets of
+# these (hardstatus/caption, bindkey, zombie mode, idle).
 
 set -euo pipefail
+umask 077
 
 op="${1:?missing operation}"
 name="${2:-}"
 
-# State directory for metadata sidecar files.
-STATE_DIR="${GC_EXEC_STATE_DIR:-${TMPDIR:-/tmp}/gc-session-screen}"
-mkdir -p "$STATE_DIR"
+# The handshake reads no state and answers the same for every city, so it is
+# answered before any state is set up.
+if [ "$op" = protocol ]; then
+  echo '{"version":0,"capabilities":["observe.v1","report-attachment","conformance-faults","city-scoped"],"locality":"local"}'
+  exit 0
+fi
+
+IDENTITY_KEYS="GC_SESSION_ID GC_RUNTIME_EPOCH GC_INSTANCE_TOKEN GT_PROCESS_NAMES"
+META_KEYS="$IDENTITY_KEYS GC_CITY_PATH GC_BIN"
+
+die() { echo "gc-session-screen: $*" >&2; exit 1; }
+
+# private_dir makes $1 a 0700 directory owned by this user, refusing a
+# symlink or someone else's directory.
+private_dir() {
+  [ -L "$1" ] && die "$1 is a symlink"
+  mkdir -p -m 700 "$1"
+  { [ -d "$1" ] && [ -O "$1" ]; } || die "$1 is not a directory owned by this user"
+  chmod 700 "$1"
+}
+
+# user_home prints the user's home directory from the password database
+# (getent, else /etc/passwd), ignoring $HOME.
+user_home() {
+  local h="" uid
+  uid=$(id -u)
+  if command -v getent >/dev/null 2>&1; then
+    h=$(getent passwd "$uid" | cut -d: -f6) || h=""
+  fi
+  if [ -z "$h" ] && [ -r /etc/passwd ]; then
+    h=$(awk -F: -v uid="$uid" '$3 == uid { print $6; exit }' /etc/passwd) || h=""
+  fi
+  case "$h" in
+    /*) printf %s "$h" ;;
+    *) return 1 ;;
+  esac
+}
+
+if [ -n "${GC_EXEC_STATE_DIR:-}" ]; then
+  STATE_ROOT=$GC_EXEC_STATE_DIR
+else
+  home=$(user_home) || die "cannot find the home directory of $(id -un)"
+  STATE_ROOT=$home/.gcss
+fi
+private_dir "$STATE_ROOT"
+host=$(uname -n) || die "cannot read the host name"
+crc=$(printf '%s\n%s' "$host" "${GC_EXEC_CITY_PATH:-}" | cksum | cut -d' ' -f1)
+case "$crc" in "" | *[!0-9]*) die "cannot key the city's state" ;; esac
+CITY_KEY=$(printf %08x "$crc")
+# The socket directory is kept short, apart from the metadata: every byte of
+# its path is a byte less for a session name.
+META=$STATE_ROOT/$CITY_KEY.meta
+private_dir "$META"
+private_dir "$STATE_ROOT/$CITY_KEY"
+export SCREENDIR=$STATE_ROOT/$CITY_KEY
+
+# PROC is the process filesystem (the script's tests run a copy pointing it
+# at a fixture). BOOT is this boot's id: a process start time read from /proc
+# counts from boot, so a record from another boot names no process that runs
+# now.
+PROC=/proc
+# PROCFS is set where procfs is mounted: there a pid with no $PROC/<pid> is
+# no process, read with no fork; ps answers only where there is none.
+PROCFS=""
+if [ -d "$PROC/self" ]; then PROCFS=y; fi
+BOOT=-
+if [ -r "$PROC/sys/kernel/random/boot_id" ]; then
+  IFS= read -r BOOT < "$PROC/sys/kernel/random/boot_id" || BOOT=-
+  BOOT=${BOOT:--}
+fi
+
+# The conformance kit's fault injection: under GC_RPP_FAULT=unavailable the
+# backend itself fails, so every op that reads it answers as it would on a
+# real outage.
+if [ "${GC_RPP_FAULT:-}" = unavailable ]; then
+  screen() { echo "screen: backend unavailable (GC_RPP_FAULT)" >&2; return 1; }
+fi
+
+# valid_name refuses a name that could escape the state directory.
+valid_name() {
+  case "$1" in
+    "" | . | .. | */* | *[[:cntrl:]]*) die "invalid session name" ;;
+  esac
+}
+
+# write_file writes $2 to $1 by rename: the new file is 0600 (umask) and a
+# link at $1 is replaced, never followed.
+write_file() {
+  local tmp="$1.tmp.$$"
+  printf %s "$2" > "$tmp"
+  mv -f "$tmp" "$1"
+}
+
+# read_into sets REPLY to file $1's content ("" when absent), with no fork.
+read_into() {
+  REPLY=""
+  if [ -f "$1" ]; then IFS= read -r -d '' REPLY < "$1" || true; fi
+}
+
+# json_str prints $1 as a JSON string, with no fork.
+json_str() {
+  local s=$1
+  s=${s//\\/\\\\}; s=${s//\"/\\\"}
+  s=${s//$'\n'/\\n}; s=${s//$'\r'/\\r}; s=${s//$'\t'/\\t}
+  s=${s//[[:cntrl:]]/}
+  printf '"%s"' "$s"
+}
+
+# lock serializes ops on one name (start, stop, kill-object), so a
+# fresh_only start checks and creates atomically.
+lock() {
+  exec 9>"$META/$1.lock"
+  flock 9
+}
+
+# load_rows reads `screen -ls` once into ROWS, one "<pid>\t<name>\t<status>"
+# line per session, parsed from the exact "\t<pid>.<name>\t(...)\t(<status>)"
+# rows (a name is everything after the pid's dot). An answer that is neither
+# a listing nor "No Sockets found" fails, so no caller reads it as an empty
+# fleet.
+load_rows() {
+  local out
+  out=$(screen -ls 2>&1) || true
+  case "$out" in
+    *"No Sockets found"*) ROWS=""; return 0 ;;
+    *"There is a screen on"* | *"There are screens on"*) ;;
+    *) echo "gc-session-screen: screen -ls: unrecognized answer" >&2; return 1 ;;
+  esac
+  ROWS=$(printf '%s\n' "$out" | tr -d '\r' | awk -F'\t' '$2 ~ /^[0-9]+\./ {
+    dot = index($2, "."); status = $NF; gsub(/^\(|\)$/, "", status)
+    print substr($2, 1, dot - 1) "\t" substr($2, dot + 1) "\t" status }')
+}
+
+# rows_of prints ROWS' rows of name $1 (the name is passed through the
+# environment, so awk interprets no escapes in it).
+rows_of() {
+  [ -n "$ROWS" ] || return 0
+  printf '%s\n' "$ROWS" | ROW_NAME=$1 awk -F'\t' '$2 == ENVIRON["ROW_NAME"]'
+}
+
+# one_row sets PID and STATUS to name $1's only row; it returns 1 when the
+# name has no row and 2 when it has more than one (no single box to answer
+# for).
+one_row() {
+  local r
+  r=$(rows_of "$1")
+  [ -n "$r" ] || return 1
+  [ "$(printf '%s\n' "$r" | wc -l)" -eq 1 ] || return 2
+  PID=${r%%$'\t'*}
+  STATUS=${r##*$'\t'}
+}
+
+# classify sets STATE (running, dead or unknown) and ATTACHED (yes, no or
+# unknown) from a screen status. "Private" and "Remote or dead" sessions
+# cannot be read, so both are unknown.
+classify() {
+  case "$1" in
+    Detached | "Multi, detached") STATE=running; ATTACHED=no ;;
+    Attached | "Multi, attached") STATE=running; ATTACHED=yes ;;
+    "Dead ???") STATE=dead; ATTACHED=no ;;
+    *) STATE=unknown; ATTACHED=unknown ;;
+  esac
+}
+
+# start_of sets START to process $1's start time (from /proc, or ps where
+# there is none); empty when no such process runs. A zombie (state Z or X in
+# /proc) has exited: only its reaping is pending, which on a host without a
+# reaper never comes.
+start_of() {
+  local stat rest
+  local -a fields
+  START=""
+  if [ -r "$PROC/$1/stat" ]; then
+    # A process that exits mid-read is simply gone.
+    { IFS= read -r stat < "$PROC/$1/stat"; } 2>/dev/null || return 0
+    rest=${stat##*) }
+    read -r -a fields <<< "$rest"
+    case "${fields[0]:-}" in Z | X) return 0 ;; esac
+    START=${fields[19]:-}
+  elif [ -z "$PROCFS" ]; then
+    START=$(ps -o lstart= -p "$1" 2>/dev/null | tr -s ' ' | sed 's/^ //;s/ $//') || START=""
+  fi
+}
+
+# created_of sets CREATED to a box's creation time: its screen process's
+# start, or for a dead box the start recorded when it was created. Empty when
+# neither is known.
+created_of() {
+  local pid=$1 boxname=$2 state=$3
+  CREATED=""
+  if [ "$state" = dead ]; then
+    read_into "$META/$boxname.boxpid"
+    if [ "${REPLY%% *}" = "$pid" ]; then CREATED=${REPLY#* }; fi
+    return 0
+  fi
+  start_of "$pid"
+  CREATED=$START
+}
+
+# window_of sets WPID and WSTART to the window process recorded at name
+# $1's start ("<boot id> <pid> <start time>"), both empty when there is no
+# record or it is from another boot (its process is gone).
+window_of() {
+  local rest
+  WPID="" WSTART=""
+  read_into "$META/$1.window"
+  [ "${REPLY%% *}" = "$BOOT" ] || return 0
+  rest=${REPLY#* }
+  WPID=${rest%% *}
+  WSTART=${rest#* }
+}
+
+# window_alive succeeds while the window process recorded at name $1's start
+# (this boot, its pid and its start time) still runs. A box screen lists dead
+# whose agent ignored the hangup still has its agent: it is not dead, and
+# not free.
+window_alive() {
+  window_of "$1"
+  [ -n "$WPID" ] || return 1
+  start_of "$WPID"
+  [ -n "$START" ] && [ "$START" = "$WSTART" ]
+}
+
+# kill_wait ends process $1, if it still started at $2: TERM, then KILL
+# after 2s. It succeeds once that process is gone.
+kill_wait() {
+  local pid=$1 want=$2 i sig
+  start_of "$pid"
+  [ -n "$START" ] && [ "$START" = "$want" ] || return 0
+  for sig in TERM KILL; do
+    env kill -s "$sig" -- "$pid" 2>/dev/null || true
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+      start_of "$pid"
+      [ "$START" = "$want" ] || return 0
+      sleep 0.1
+    done
+  done
+  return 1
+}
+
+# is_stray succeeds when process $1 is name $2's own SCREEN: its exact argv
+# (read from /proc, never procps' rendering, which can be a path or "?" for
+# bytes the locale cannot show) is <screen> -dmS <name> <its wrapper>. The
+# wrapper path is unique to the city and name; argv[0] is whatever the screen
+# binary is called (SCREEN, a path, a wrapped binary's name).
+is_stray() {
+  local -a argv=()
+  local arg
+  [ -r "$PROC/$1/cmdline" ] || return 1
+  # read -d '', not mapfile -d (bash 4.4): macOS ships bash 3.2. arg is
+  # cleared before each read: a read error leaves it holding the last one.
+  { while arg=; IFS= read -r -d '' arg || [ -n "$arg" ]; do
+      argv[${#argv[@]}]=$arg
+    done < "$PROC/$1/cmdline"; } 2>/dev/null || return 1
+  [ "${#argv[@]}" -eq 4 ] && [ "${argv[1]}" = -dmS ] &&
+    [ "${argv[2]}" = "$2" ] && [ "${argv[3]}" = "$META/$2.wrapper.sh" ]
+}
+
+# stray_kill ends name $1's own SCREEN process and its window when its start
+# timed out: screen -dmS has returned, so that SCREEN runs unless it died. It
+# fails when the process table cannot be read or a process survives.
+stray_kill() {
+  local snap pid p kids want
+  snap=$(ps -e -o pid= -o ppid=) || return 1
+  while read -r pid _; do
+    [ -n "$pid" ] && is_stray "$pid" "$1" || continue
+    kids=$(printf '%s\n' "$snap" | awk -v p="$pid" '$2 == p { print $1 }')
+    for p in $kids $pid; do
+      start_of "$p"
+      want=$START
+      [ -n "$want" ] || continue
+      kill_wait "$p" "$want" || return 1
+    done
+  done <<< "$snap"
+}
+
+# agent_states reads one process snapshot and, for each "<root pid> <names>
+# [<gc binary>]" line on stdin (names comma-separated), prints "<root pid>
+# alive|dead": alive when any descendant of the root matches a name as gc's
+# process table does (internal/runtime/proctable): the command's base name,
+# argv[0]'s base name, or, under a node/bun/npx/deno interpreter, the first
+# script argument's base name, with or without its extension. As there,
+# "kimi" also accepts "kimi-code", and "gc" also accepts the base name of the
+# gc binary the box runs (its GC_BIN, a renamed or wrapped gc). It fails
+# when the snapshot cannot be read, which leaves every agent unknown.
+agent_states() {
+  local procs
+  # One snapshot in fixed columns (pid, ppid, comm, args): a command name
+  # may hold spaces ("tmux: server"), so columns are read by position.
+  procs=$(ps -ww -e -o pid:10= -o ppid:10= -o comm:16= -o args=) || return 1
+  awk '
+    function base(p,   n, a) { n = split(p, a, "/"); return a[n] }
+    function noext(b,   i) { i = match(b, /\.[^.]*$/); return i > 0 ? substr(b, 1, i - 1) : b }
+    function matches(pid,   c, n, argv, a0, i, t, b) {
+      c = base(comm[pid]); if (c != "" && (c in want)) return 1
+      n = split(args[pid], argv, " "); if (n == 0) return 0
+      a0 = base(argv[1]); if (a0 in want) return 1
+      if (!(a0 in interp)) return 0
+      for (i = 2; i <= n; i++) {
+        t = argv[i]
+        if (t == "" || substr(t, 1, 1) == "-" || (t in runner)) continue
+        b = base(t); if ((b in want) || (noext(b) in want)) return 1
+        break
+      }
+      return 0
+    }
+    BEGIN { interp["node"]; interp["bun"]; interp["npx"]; interp["deno"]; runner["run"]; runner["exec"]; runner["x"] }
+    function trim(x) { sub(/^ +/, "", x); sub(/ +$/, "", x); return x }
+    FILENAME == ARGV[1] {
+      pid = trim(substr($0, 1, 10)); ppid = trim(substr($0, 12, 10))
+      comm[pid] = trim(substr($0, 23, 16)); args[pid] = trim(substr($0, 40))
+      kids[ppid] = kids[ppid] " " pid; next
+    }
+    {
+      root = $1; split("", want); n = split($2, ns, ",")
+      for (i = 1; i <= n; i++) {
+        if (ns[i] == "") continue
+        want[ns[i]]
+        if (ns[i] == "kimi") want["kimi-code"]
+        if (ns[i] == "gc" && $3 != "" && $3 != "-") want[base($3)]
+      }
+      state = "dead"; split("", seen); queue = kids[root]
+      while (queue != "" && state == "dead") {
+        sub(/^ +/, "", queue); p = queue; sub(/ .*/, "", p); sub(/^[^ ]+/, "", queue)
+        if (p == "" || (p in seen)) continue
+        seen[p]; if (matches(p)) state = "alive"; queue = queue kids[p]
+      }
+      print root " " state
+    }' <(printf '%s\n' "$procs") -
+}
+
+# identity_of sets IDENT to a box's identity JSON: its metadata once start
+# seeded it, else the exports of its wrapper (a box whose metadata was lost,
+# or started before identity was seeded), else null (not readable yet, or
+# a screen gc did not start).
+identity_of() {
+  local boxname=$1 k sep="" json="{"
+  if [ -f "$META/$boxname.identity" ]; then
+    for k in $IDENTITY_KEYS; do
+      if [ -f "$META/$boxname.meta.$k" ]; then
+        read_into "$META/$boxname.meta.$k"
+        json+="$sep\"$k\":$(json_str "$REPLY")"; sep=","
+      fi
+    done
+    IDENT="$json}"
+  elif [ -f "$META/$boxname.wrapper.sh" ]; then
+    IDENT=$(
+      set +u
+      # The script runs with its caller's environment (a gc CLI inside an
+      # agent session carries that session's identity): only the wrapper's
+      # exports may name the box.
+      for k in $IDENTITY_KEYS; do unset "$k"; done
+      eval "$(grep -E '^export (GC_SESSION_ID|GC_RUNTIME_EPOCH|GC_INSTANCE_TOKEN|GT_PROCESS_NAMES)=' "$META/$boxname.wrapper.sh" || true)"
+      for k in $IDENTITY_KEYS; do
+        if [ -n "${!k:-}" ]; then json+="$sep\"$k\":$(json_str "${!k}")"; sep=","; fi
+      done
+      # A wrapper with no identity in it proves no identity: unreadable.
+      if [ -z "$sep" ]; then printf null; else printf '%s}' "$json"; fi
+    )
+  else
+    IDENT=null
+  fi
+}
+
+# procs_of sets PROCS to a box's stored process names (GT_PROCESS_NAMES)
+# and GCBIN to the gc binary it runs (GC_BIN, "-" when unknown).
+procs_of() {
+  read_into "$META/$1.meta.GT_PROCESS_NAMES"
+  PROCS=${REPLY// /}
+  read_into "$META/$1.meta.GC_BIN"
+  GCBIN=${REPLY// /}
+  GCBIN=${GCBIN:--}
+}
+
+# forget removes a box's metadata (not its lock).
+forget() {
+  rm -f "$META/$1.identity" "$META/$1.wrapper.sh" "$META/$1.boxpid" "$META/$1.window" "$META/$1".meta.*
+}
+
+# forget_stale forgets name $1's start record (its window and box records,
+# identity, wrapper and seeded metadata) once the window process it
+# recorded is gone and no box holds the name. Under the name's lock, taken
+# without waiting (a busy name is left for a later call): the record $2, as
+# inventory read it, must be unchanged, so no start has run since (a start
+# rewrites it); and a fresh listing must show no row of the name, since
+# inventory's own predates the lock (a box started since may be dead and
+# still hold it). Records otherwise pile up, one per pool session name, each
+# costing every inventory a read, and each wrapper keeping a session's env.
+# The lock and the keys gc set (set-meta) stay until a start or stop clears
+# them: gc reads a drain ack after its box is gone.
+forget_stale() {
+  (
+    exec 9>"$META/$1.lock"
+    flock -n 9 || exit 0
+    read_into "$META/$1.window"
+    # An empty record proves nothing: a start may have removed the one
+    # inventory read.
+    [ -n "$2" ] && [ "$REPLY" = "$2" ] || exit 0
+    if window_alive "$1"; then exit 0; fi
+    load_rows || exit 0
+    [ -z "$(rows_of "$1")" ] || exit 0
+    rm -f "$META/$1.identity" "$META/$1.wrapper.sh" "$META/$1.boxpid" "$META/$1.window"
+    for k in $META_KEYS; do rm -f "$META/$1.meta.$k"; done
+  ) || true
+}
+
+# gone_after waits (up to 2s) for name $1 to hold no row.
+gone_after() {
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    load_rows || return 1
+    [ -z "$(rows_of "$1")" ] && return 0
+    sleep 0.2
+  done
+  return 1
+}
+
+# target sets TARGET to name's exact "<pid>.<name>" session, returning 1
+# when it has no single row.
+target() {
+  load_rows || exit 1
+  one_row "$1" || return 1
+  TARGET="$PID.$1"
+}
 
 case "$op" in
   start)
-    # Read JSON config from stdin.
     config=$(cat)
-    work_dir=$(echo "$config" | jq -r '.work_dir // empty')
-    command=$(echo "$config" | jq -r '.command // empty')
-    env_json=$(echo "$config" | jq -r '.env // {} | to_entries[] | "\(.key)=\(.value)"' 2>/dev/null || true)
+    valid_name "$name"
+    work_dir=$(jq -r '.work_dir // empty' <<< "$config")
+    command=$(jq -r '.command // empty' <<< "$config")
+    fresh_only=$(jq -r '.fresh_only // false' <<< "$config")
 
-    if [ -z "$name" ]; then
-      echo "start: missing session name" >&2
-      exit 1
+    # A screen socket is "$SCREENDIR/<pid>.<name>", and a Unix socket path
+    # longer than 107 bytes cannot be created: screen would start nothing.
+    # Counted in bytes, whatever the locale.
+    sock_bytes=$(LC_ALL=C; s="$SCREENDIR/1234567.$name"; printf %s "${#s}")
+    if [ "$sock_bytes" -gt 107 ]; then
+      die "start: the screen socket path for $name would exceed 107 bytes; use a shorter GC_EXEC_STATE_DIR or session name"
     fi
 
-    # Check if session already exists.
-    if screen -list 2>/dev/null | grep -q "[[:space:]]${name}[[:space:]]"; then
-      echo "session \"$name\" already exists" >&2
-      exit 1
+    lock "$name"
+    # A held name refuses the start; a listing that cannot be read refuses
+    # it too, rather than read as vacant. A name is held while a box lists
+    # it, and while the window process its last start recorded runs: an
+    # agent that ignores the hangup outlives its box, listed dead or not
+    # listed at all. Under fresh_only the refusal is exit 73, and nothing is
+    # touched: v2 removes a dead box itself, by its object. A legacy start
+    # wipes a name only dead boxes hold (as a reboot leaves them) and starts
+    # once they are gone.
+    load_rows || exit 1
+    held=$(rows_of "$name")
+    if [ -n "$held" ] || window_alive "$name"; then
+      if [ "$fresh_only" = true ]; then
+        echo "session \"$name\" already exists" >&2
+        exit 73
+      fi
+      if [ -n "$held" ] && printf '%s\n' "$held" | awk -F'\t' '$3 != "Dead ???" { live = 1 } END { exit !live }'; then
+        die "session \"$name\" already exists"
+      fi
+      if window_alive "$name"; then
+        die "session \"$name\" has no live box, but its agent still runs"
+      fi
+      while IFS=$'\t' read -r pid _ _; do
+        [ -n "$pid" ] || continue
+        screen -wipe "$pid.$name" >/dev/null 2>&1 || true
+      done <<< "$held"
+      gone_after "$name" || die "start: the dead session $name could not be wiped"
     fi
 
-    # Build a wrapper script that sets env vars, cd, and exec the command.
-    wrapper="$STATE_DIR/${name}.wrapper.sh"
+    # Seed the identity before the box exists, so the first observe that
+    # sees the box reads it.
+    forget "$name"
+    for k in $META_KEYS; do
+      v=$(jq -r --arg k "$k" '.env[$k] // empty' <<< "$config")
+      if [ -n "$v" ]; then write_file "$META/$name.meta.$k" "$v"; fi
+    done
+    if [ ! -f "$META/$name.meta.GT_PROCESS_NAMES" ]; then
+      names=$(jq -r '.process_names // [] | join(",")' <<< "$config")
+      if [ -n "$names" ]; then write_file "$META/$name.meta.GT_PROCESS_NAMES" "$names"; fi
+    fi
+
+    # The wrapper exports the session env, enters the work dir and runs the
+    # command.
     {
       echo "#!/bin/sh"
-      # Export environment variables.
-      if [ -n "$env_json" ]; then
-        while IFS= read -r line; do
-          echo "export '$line'"
-        done <<< "$env_json"
-      fi
-      # Change to working directory.
-      if [ -n "$work_dir" ]; then
-        echo "cd '$work_dir'"
-      fi
-      # Run the command or default shell.
-      if [ -n "$command" ]; then
-        echo "exec $command"
-      else
-        echo "exec \$SHELL"
-      fi
-    } > "$wrapper"
-    chmod +x "$wrapper"
+      jq -r '.env // {} | to_entries[] | select(.key | test("^[A-Za-z_][A-Za-z0-9_]*$")) | "export \(.key)=\(.value | @sh)"' <<< "$config"
+      if [ -n "$work_dir" ]; then printf 'cd %q\n' "$work_dir"; fi
+      if [ -n "$command" ]; then echo "exec $command"; else echo "exec \$SHELL"; fi
+    } > "$META/$name.wrapper.sh.tmp.$$"
+    chmod 700 "$META/$name.wrapper.sh.tmp.$$"
+    mv -f "$META/$name.wrapper.sh.tmp.$$" "$META/$name.wrapper.sh"
+    write_file "$META/$name.identity" ""
 
-    # Copy overlay_dir contents into agent working directory.
-    overlay_dir=$(echo "$config" | jq -r '.overlay_dir // ""')
+    # Copy overlay_dir and copy_files into the agent's work dir.
+    overlay_dir=$(jq -r '.overlay_dir // ""' <<< "$config")
     if [ -n "$overlay_dir" ] && [ -d "$overlay_dir" ] && [ -n "$work_dir" ]; then
       cp -r "$overlay_dir/." "$work_dir/" 2>/dev/null || true
     fi
-
-    # Copy copy_files entries into agent working directory.
-    echo "$config" | jq -c '.copy_files // [] | .[]' 2>/dev/null | while IFS= read -r entry; do
+    jq -c '.copy_files // [] | .[]' <<< "$config" 2>/dev/null | while IFS= read -r entry; do
       [ -z "$entry" ] && continue
-      src=$(echo "$entry" | jq -r '.src')
-      rel_dst=$(echo "$entry" | jq -r '.rel_dst // ""')
+      src=$(jq -r '.src' <<< "$entry")
+      rel_dst=$(jq -r '.rel_dst // ""' <<< "$entry")
       dst="${work_dir:-.}"
       [ -n "$rel_dst" ] && dst="$dst/$rel_dst"
       if [ -d "$src" ]; then
@@ -115,113 +570,348 @@ case "$op" in
       fi
     done
 
-    screen -dmS "$name" "$wrapper"
+    if ! screen -dmS "$name" "$META/$name.wrapper.sh"; then
+      forget "$name"
+      die "screen -dmS $name failed"
+    fi
+    # Wait for the box to appear, and record its process and start time, so
+    # a dead box keeps its object. A box that never appears is a failed
+    # start.
+    up=""
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+      load_rows || break
+      if one_row "$name"; then
+        created_of "$PID" "$name" running
+        if [ -n "$CREATED" ]; then write_file "$META/$name.boxpid" "$PID $CREATED"; fi
+        up=y
+        break
+      fi
+      sleep 0.1
+    done
+    if [ -z "$up" ]; then
+      # Still under the lock, end this start's own SCREEN, so no box can
+      # appear after the failure. Only once it is gone is the identity
+      # removed; otherwise the outcome is ambiguous and the identity stays.
+      stray_kill "$name" || die "start: screen started no session $name within 2s, and its screen could not be ended"
+      forget "$name"
+      die "start: screen started no session $name within 2s"
+    fi
+    # Record the window process (the wrapper, which execs the agent), so a
+    # box screen later lists dead is not read free while its agent runs.
+    for i in 1 2 3 4 5; do
+      wpid=$(ps -e -o pid= -o ppid= | awk -v p="$PID" '$2 == p { print $1; exit }') || wpid=""
+      if [ -n "$wpid" ]; then
+        start_of "$wpid"
+        if [ -n "$START" ]; then write_file "$META/$name.window" "$BOOT $wpid $START"; fi
+        break
+      fi
+      sleep 0.1
+    done
     ;;
 
   stop)
-    if [ -z "$name" ]; then
-      echo "stop: missing session name" >&2
-      exit 1
+    valid_name "$name"
+    lock "$name"
+    # Idempotent: a name no box holds stops nothing. Quit every exact row of
+    # the name (wipe a dead one), and remove its metadata only once the box
+    # is gone.
+    load_rows || exit 1
+    while IFS=$'\t' read -r pid _ status; do
+      [ -n "$pid" ] || continue
+      if [ "$status" = "Dead ???" ]; then
+        screen -wipe "$pid.$name" >/dev/null 2>&1 || true
+      else
+        screen -S "$pid.$name" -X quit >/dev/null 2>&1 || true
+      fi
+    done <<< "$(rows_of "$name")"
+    gone_after "$name" || die "stop: $name is still held"
+    # An agent that ignored the hangup (or outlived a dead box) is ended too.
+    window_of "$name"
+    if [ -n "$WPID" ]; then
+      kill_wait "$WPID" "$WSTART" || die "stop: the agent of $name survived its kill"
     fi
-    # Idempotent: no error if session doesn't exist.
-    screen -S "$name" -X quit 2>/dev/null || true
-    # Clean up wrapper and metadata.
-    rm -f "$STATE_DIR/${name}.wrapper.sh"
-    rm -f "$STATE_DIR/${name}".meta.*
+    forget "$name"
+    ;;
+
+  is-running)
+    valid_name "$name"
+    load_rows || exit 1
+    if one_row "$name"; then
+      classify "$STATUS"
+      case "$STATE" in
+        running) echo true ;;
+        dead) echo false ;;
+        *) die "is-running: cannot read $name" ;;
+      esac
+    elif [ $? -eq 1 ]; then
+      echo false
+    else
+      die "is-running: $name is held by more than one box"
+    fi
+    ;;
+
+  is-attached)
+    # Any client, attached by any means, is an attached box; a session
+    # screen cannot read answers nothing, which callers read as attached.
+    valid_name "$name"
+    load_rows || exit 1
+    if one_row "$name"; then
+      classify "$STATUS"
+      case "$ATTACHED" in
+        yes) echo true ;;
+        no) echo false ;;
+        *) die "is-attached: cannot read $name" ;;
+      esac
+    elif [ $? -eq 1 ]; then
+      echo false
+    else
+      die "is-attached: $name is held by more than one box"
+    fi
+    ;;
+
+  observe)
+    valid_name "$name"
+    names=$(cat | tr -d ' \r' | tr '\n' ',' | sed 's/^,*//;s/,*$//')
+    load_rows || exit 1
+    rc=0; one_row "$name" || rc=$?
+    if [ "$rc" -eq 1 ]; then
+      # No box, but the agent of the last one may outlive it.
+      if window_alive "$name"; then
+        echo '{"state":"unknown","reason":"agent outlived its box"}'
+      else
+        echo '{"state":"absent"}'
+      fi
+      exit 0
+    fi
+    if [ "$rc" -ne 0 ]; then echo '{"state":"unknown","reason":"repeated name"}'; exit 0; fi
+    classify "$STATUS"
+    created_of "$PID" "$name" "$STATE"
+    if [ "$STATE" = unknown ] || [ -z "$CREATED" ]; then echo '{"state":"unknown"}'; exit 0; fi
+    if [ "$STATE" = dead ] && window_alive "$name"; then
+      echo '{"state":"unknown","reason":"dead box with a live agent"}'
+      exit 0
+    fi
+    out="{\"state\":\"$STATE\",\"object\":{\"id\":\"$PID\",\"created\":$(json_str "$CREATED")}"
+    if [ "$STATE" = running ] && [ -n "$names" ]; then
+      procs_of "$name"
+      if agent=$(printf '%s %s %s\n' "$PID" "$names" "$GCBIN" | agent_states); then
+        out+=",\"agent\":\"${agent#* }\""
+      fi
+    fi
+    identity_of "$name"
+    printf '%s,"identity":%s}\n' "$out" "$IDENT"
+    ;;
+
+  inventory)
+    # One screen -ls and one process snapshot, whatever the number of
+    # boxes. A repeated name fails the whole answer: completeness cannot be
+    # proven for it.
+    load_rows || exit 1
+    if [ -n "$ROWS" ] && [ -n "$(printf '%s\n' "$ROWS" | cut -f2 | sort | uniq -d)" ]; then
+      die "inventory: a session name is held by more than one box"
+    fi
+    # No associative arrays: macOS ships bash 3.2. A pid is an integer, so
+    # agent states are kept in an indexed array by pid.
+    specs=""; agent_of=()
+    while IFS=$'\t' read -r pid sname status; do
+      [ -n "$pid" ] || continue
+      classify "$status"
+      [ "$STATE" = running ] || continue
+      procs_of "$sname"
+      [ -n "$PROCS" ] && specs+="$pid $PROCS $GCBIN"$'\n'
+    done <<< "$ROWS"
+    if [ -n "$specs" ] && states=$(printf '%s' "$specs" | agent_states); then
+      while read -r pid state; do agent_of[pid]=$state; done <<< "$states"
+    fi
+    out='{"complete":true,"sessions":['; sep=""
+    while IFS=$'\t' read -r pid sname status; do
+      [ -n "$pid" ] || continue
+      classify "$status"
+      created_of "$pid" "$sname" "$STATE"
+      if [ "$STATE" = dead ] && window_alive "$sname"; then STATE=unknown; fi
+      if [ "$STATE" = unknown ] || [ -z "$CREATED" ]; then
+        out+="$sep{\"name\":$(json_str "$sname"),\"state\":\"unknown\"}"; sep=","
+        continue
+      fi
+      attached=null
+      case "$ATTACHED" in yes) attached=true ;; no) attached=false ;; esac
+      entry="{\"name\":$(json_str "$sname"),\"state\":\"$STATE\",\"object\":{\"id\":\"$pid\",\"created\":$(json_str "$CREATED")},\"attached\":$attached"
+      if [ -n "${agent_of[$pid]:-}" ]; then entry+=",\"agent\":\"${agent_of[$pid]}\""; fi
+      identity_of "$sname"
+      out+="$sep$entry,\"identity\":$IDENT}"; sep=","
+    done <<< "$ROWS"
+    # A name no box lists is still held while the window process its last
+    # start recorded runs (its agent outlived the box): it is listed
+    # unknown, never left out of a complete answer. Once that process is
+    # gone, the name's start record is forgotten (forget_stale), so no later
+    # inventory reads it again. The names no box lists are found in one awk
+    # pass over the records' names and the listing, not a scan per record.
+    unlisted=$(
+      for rec in "$META"/*.window; do
+        [ -f "$rec" ] || continue
+        rec=${rec##*/}
+        printf '%s\n' "${rec%.window}"
+      done | awk -F'\t' 'FILENAME == ARGV[1] { listed[$2]; next } !($0 in listed)' <(printf '%s\n' "$ROWS") -
+    )
+    while IFS= read -r sname; do
+      [ -n "$sname" ] || continue
+      if ! window_alive "$sname"; then
+        read_into "$META/$sname.window"
+        forget_stale "$sname" "$REPLY"
+        continue
+      fi
+      out+="$sep{\"name\":$(json_str "$sname"),\"state\":\"unknown\"}"; sep=","
+    done <<< "$unlisted"
+    printf '%s]}\n' "$out"
+    ;;
+
+  kill-object)
+    req=$(cat)
+    valid_name "$name"
+    id=$(jq -r '.object.id // empty' <<< "$req")
+    want_created=$(jq -r '.object.created // empty' <<< "$req")
+    mode=$(jq -r '.mode // empty' <<< "$req")
+    [ -n "$id" ] && [ -n "$want_created" ] || die "kill-object: no object"
+    lock "$name"
+    # Re-check under the lock, then kill the exact object: the pid and its
+    # creation time must still be the name's only row. Never kill by name.
+    load_rows || exit 1
+    rc=0; one_row "$name" || rc=$?
+    if [ "$rc" -eq 1 ]; then echo gone; exit 0; fi
+    [ "$rc" -eq 0 ] || die "kill-object: $name is held by more than one box"
+    classify "$STATUS"
+    [ "$STATE" != unknown ] || die "kill-object: cannot read $name"
+    created_of "$PID" "$name" "$STATE"
+    if [ "$PID" != "$id" ] || [ "$CREATED" != "$want_created" ]; then echo gone; exit 0; fi
+    case "$mode" in
+      corpse)
+        if [ "$STATE" != dead ] || window_alive "$name"; then echo live; exit 0; fi
+        screen -wipe "$PID.$name" >/dev/null 2>&1 || true
+        gone_after "$name" || die "kill-object: the dead box $PID.$name is still listed"
+        forget "$name"
+        echo killed
+        ;;
+      zombie)
+        if [ "$STATE" != running ] || [ "$ATTACHED" != no ]; then echo changed; exit 0; fi
+        procs_of "$name"
+        # Kill only a box whose agent is known dead: no stored process
+        # names, or a process snapshot that cannot be read, is "changed".
+        [ -n "$PROCS" ] || { echo changed; exit 0; }
+        agent=$(printf '%s %s %s\n' "$PID" "$PROCS" "$GCBIN" | agent_states) || { echo changed; exit 0; }
+        [ "${agent#* }" = dead ] || { echo changed; exit 0; }
+        screen -S "$PID.$name" -X quit >/dev/null 2>&1 || true
+        gone_after "$name" || die "kill-object: $PID.$name survived its kill"
+        # A window that ignored the hangup is ended too, as stop ends it:
+        # its record is dropped only once it is gone.
+        window_of "$name"
+        if [ -n "$WPID" ]; then
+          kill_wait "$WPID" "$WSTART" || die "kill-object: the window of $PID.$name survived its kill"
+        fi
+        forget "$name"
+        echo killed
+        ;;
+      *)
+        die "kill-object: unknown mode \"$mode\""
+        ;;
+    esac
     ;;
 
   interrupt)
     if [ -z "$name" ]; then exit 0; fi
-    # Send Ctrl-C (0x03) to the session.
-    screen -S "$name" -X stuff $'\x03' 2>/dev/null || true
-    ;;
-
-  is-running)
-    if [ -z "$name" ]; then
-      echo "false"
-      exit 0
-    fi
-    if screen -list 2>/dev/null | grep -q "[[:space:]]${name}[[:space:]]"; then
-      echo "true"
-    else
-      echo "false"
-    fi
+    valid_name "$name"
+    target "$name" || exit 0
+    # Send Ctrl-C (0x03) to the exact session.
+    screen -S "$TARGET" -X stuff $'\x03' 2>/dev/null || true
     ;;
 
   attach)
-    if [ -z "$name" ]; then
-      echo "attach: missing session name" >&2
-      exit 1
-    fi
-    exec screen -r "$name"
+    valid_name "$name"
+    target "$name" || die "attach: no single session $name"
+    exec screen -r "$TARGET"
     ;;
 
   process-alive)
-    # Read process names from stdin (one per line).
-    if [ -z "$name" ]; then
-      echo "true"
-      exit 0
+    # Legacy liveness: an agent that cannot be read reads alive.
+    names=$(cat | tr -d ' \r' | tr '\n' ',' | sed 's/^,*//;s/,*$//')
+    if [ -z "$name" ] || [ -z "$names" ]; then echo true; exit 0; fi
+    valid_name "$name"
+    target "$name" || { echo false; exit 0; }
+    procs_of "$name"
+    if agent=$(printf '%s %s %s\n' "$PID" "$names" "$GCBIN" | agent_states) && [ "${agent#* }" = dead ]; then
+      echo false
+    else
+      echo true
     fi
-    process_names=()
-    while IFS= read -r pname; do
-      [ -n "$pname" ] && process_names+=("$pname")
-    done
-    if [ ${#process_names[@]} -eq 0 ]; then
-      echo "true"
-      exit 0
-    fi
-    # Find the screen session's PID and check its process tree.
-    screen_pid=$(screen -list 2>/dev/null | grep "[[:space:]]${name}[[:space:]]" | awk '{print $1}' | cut -d. -f1)
-    if [ -z "$screen_pid" ]; then
-      echo "false"
-      exit 0
-    fi
-    # Walk the process tree looking for any matching process name.
-    for pname in "${process_names[@]}"; do
-      if pgrep -P "$screen_pid" -f "$pname" >/dev/null 2>&1; then
-        echo "true"
-        exit 0
-      fi
-    done
-    echo "false"
     ;;
 
   nudge)
     if [ -z "$name" ]; then exit 0; fi
+    valid_name "$name"
     msg=$(cat)
-    # Type the message followed by Enter into the screen session.
-    screen -S "$name" -X stuff "${msg}
+    target "$name" || exit 0
+    # Type the message followed by Enter into the exact session.
+    screen -S "$TARGET" -X stuff "${msg}
 " 2>/dev/null || true
     ;;
 
   set-meta)
+    valid_name "$name"
     key="${3:?set-meta: missing key}"
+    valid_name "$key"
     value=$(cat)
-    echo -n "$value" > "$STATE_DIR/${name}.meta.${key}"
+    write_file "$META/$name.meta.$key" "$value"
     ;;
 
   get-meta)
+    valid_name "$name"
     key="${3:?get-meta: missing key}"
-    meta_file="$STATE_DIR/${name}.meta.${key}"
-    if [ -f "$meta_file" ]; then
-      cat "$meta_file"
-    fi
-    # Empty stdout = not set (per protocol).
+    valid_name "$key"
+    # Empty stdout = not set (per protocol), for an unknown session too.
+    read_into "$META/$name.meta.$key"
+    printf %s "$REPLY"
     ;;
 
   remove-meta)
+    valid_name "$name"
     key="${3:?remove-meta: missing key}"
-    rm -f "$STATE_DIR/${name}.meta.${key}"
+    valid_name "$key"
+    rm -f "$META/$name.meta.$key"
     ;;
 
   peek)
     lines="${3:-0}"
-    if [ -z "$name" ]; then
-      exit 0
-    fi
-    # Use hardcopy to capture screen content.
+    if [ -z "$name" ]; then exit 0; fi
+    valid_name "$name"
+    # No box, or a dead one (screen cannot read a dead session's screen):
+    # exit 66, no screen. A screen that cannot be read is a failure, never
+    # an empty screen.
+    load_rows || exit 1
+    rc=0; one_row "$name" || rc=$?
+    if [ "$rc" -eq 1 ]; then exit 66; fi
+    [ "$rc" -eq 0 ] || die "peek: $name is held by more than one box"
+    classify "$STATUS"
+    case "$STATE" in
+      dead) exit 66 ;;
+      unknown) die "peek: cannot read $name" ;;
+    esac
+    # Use hardcopy to capture the exact session's content. screen -X exits
+    # 0 once the command is sent, whether or not SCREEN writes the file (it
+    # cannot write the path, or it is stopped), and SCREEN may still be
+    # writing it (a long scrollback); a blank screen still writes its empty
+    # lines. So the capture counts once it is non-empty and its size holds
+    # across 50ms; one that stays empty, or never settles within about 1s,
+    # is a failure, never an empty or partial screen.
     tmp=$(mktemp)
-    screen -S "$name" -X hardcopy -h "$tmp" 2>/dev/null || { rm -f "$tmp"; exit 0; }
+    screen -S "$PID.$name" -X hardcopy -h "$tmp" 2>/dev/null || { rm -f "$tmp"; die "peek: cannot read the screen of $name"; }
+    size="" settled=""
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+      sleep 0.05
+      [ -s "$tmp" ] || continue
+      now=$(wc -c < "$tmp")
+      if [ "$now" = "$size" ]; then settled=y; break; fi
+      size=$now
+    done
+    [ -n "$settled" ] || { rm -f "$tmp"; die "peek: screen wrote no settled capture of $name"; }
     if [ "$lines" -gt 0 ] 2>/dev/null; then
       tail -n "$lines" "$tmp"
     else
@@ -231,15 +921,16 @@ case "$op" in
     ;;
 
   list-running)
+    # Older gc lists through this op; gc that reads observe.v1 lists
+    # through inventory.
     prefix="${name:-}"
-    # Parse screen -list output, filter by prefix.
-    screen -list 2>/dev/null | grep -oP '\d+\.\K[^\t]+' | while IFS= read -r sess; do
+    load_rows || exit 1
+    [ -n "$ROWS" ] || exit 0
+    printf '%s\n' "$ROWS" | cut -f2 | while IFS= read -r sess; do
       if [ -z "$prefix" ] || [[ "$sess" == "$prefix"* ]]; then
         echo "$sess"
       fi
     done
-    # Exit 0 even if no sessions found.
-    exit 0
     ;;
 
   get-last-activity)
@@ -253,11 +944,12 @@ case "$op" in
     src="${3:-}"
     rel_dst="${4:-}"
     if [ -z "$name" ] || [ -z "$src" ]; then exit 0; fi
-    # Read work_dir from the wrapper script (first cd line).
-    wrapper="$STATE_DIR/${name}.wrapper.sh"
+    valid_name "$name"
+    # Read work_dir from the wrapper script's cd line.
     work_dir=""
-    if [ -f "$wrapper" ]; then
-      work_dir=$(grep "^cd " "$wrapper" | head -1 | sed "s/^cd '//;s/'$//")
+    if [ -f "$META/$name.wrapper.sh" ]; then
+      work_dir=$(sed -n 's/^cd //p' "$META/$name.wrapper.sh" | head -1)
+      work_dir=$(eval "printf %s $work_dir")
     fi
     [ -z "$work_dir" ] && exit 0
     dst="$work_dir"

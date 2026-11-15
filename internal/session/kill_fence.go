@@ -109,7 +109,7 @@ var ErrKillFenceSuperseded = errors.New("session row changed underneath the kill
 // on the revision of the row it observed, so it cannot silently overwrite a
 // transition that landed between the read and the write; otherwise it is the
 // same unconditional batch write the post-kill sync always was.
-func WriteKillFence(store beads.Store, sessionID string, now time.Time) (*KillFence, error) {
+func WriteKillFence(store beads.SessionStore, sessionID string, now time.Time) (*KillFence, error) {
 	patch := KillPendingPatch(now)
 	patch["synced_at"] = now.UTC().Format(time.RFC3339)
 	fence := &KillFence{sessionID: sessionID, sleptAt: patch["slept_at"]}
@@ -154,7 +154,7 @@ func (f *KillFence) Owns(b beads.Bead) bool {
 // Clear lifts the fence after the runtime is confirmed gone. The row keeps the
 // asleep/killed intent; only the kill-pending marker goes, handing the session
 // back to the ordinary lifecycle rules (which is what restarts it).
-func (f *KillFence) Clear(store beads.Store) error {
+func (f *KillFence) Clear(store beads.SessionStore) error {
 	return ApplyKillFencePatch(store, f.sessionID, func(b beads.Bead) (map[string]string, bool) {
 		if !f.Owns(b) {
 			return nil, false
@@ -167,7 +167,7 @@ func (f *KillFence) Clear(store beads.Store) error {
 // alive, so the row does not claim a runtime is gone when it is not. It only
 // touches a row that still carries this kill's fence: if anything else has
 // rewritten the row since, that newer state is left alone.
-func (f *KillFence) Rollback(store beads.Store) error {
+func (f *KillFence) Rollback(store beads.SessionStore) error {
 	return ApplyKillFencePatch(store, f.sessionID, func(b beads.Bead) (map[string]string, bool) {
 		if !f.Owns(b) {
 			return nil, false
@@ -190,7 +190,7 @@ func (f *KillFence) Rollback(store beads.Store) error {
 // resolves a conditional writer (re-reading and re-deciding on a precondition
 // failure), unconditionally otherwise. decide returning false means the row no
 // longer qualifies and nothing is written (ErrKillFenceSuperseded).
-func ApplyKillFencePatch(store beads.Store, sessionID string, decide func(beads.Bead) (map[string]string, bool)) error {
+func ApplyKillFencePatch(store beads.SessionStore, sessionID string, decide func(beads.Bead) (map[string]string, bool)) error {
 	writer, _, err := beads.ResolveConditionalWriter(store)
 	if err != nil {
 		return err

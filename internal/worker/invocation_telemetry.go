@@ -2,18 +2,22 @@ package worker
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/pricing"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/usage"
+	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
 
 var (
@@ -54,6 +58,13 @@ func defaultPricingRegistry() *pricing.Registry {
 //
 //   - claude: Manager.TranscriptPath (session-key stat or ambiguity-guarded
 //     project-slug listing — cheap) + the Claude JSONL tail extractor.
+//   - opencode: the session's own export, mirrored under the OpenCode
+//     transcript root as <session_key>.json. Resolved by that key alone via
+//     sessionlog.FindOpenCodeSessionFileByID; a keyed miss (or no key yet)
+//     records nothing. Never by workdir, because sessions sharing a workdir
+//     would otherwise be attributed each other's export. The whole
+//     export is parsed (it is one JSON document, not an append-only log) and
+//     the provider-reported cost is preferred over the price table.
 //   - codex: identity-first. When the session bead carries a session_key
 //     (captured from the codex hook; codex rollout filenames end in the
 //     same uuid), the rollout is resolved by that suffix via
@@ -181,6 +192,7 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 	if agentName == "" {
 		agentName = strings.TrimSpace(info.SessionName)
 	}
+	formulaName := resolveFormulaName(h.resolveBead, h.formulaMemo, pr.Metadata, id)
 	// Model usage facts flow to the configured usage sink (gc costs / external
 	// aggregators), independent of the metrics above and of operation-event
 	// recording: a sink-only handle (CLI factory path) still emits. Resolved once
@@ -196,17 +208,12 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 		telemetry.RecordInvocationTokens(ctx, labels,
 			int64(u.InputTokens), int64(u.OutputTokens),
 			int64(u.CacheReadTokens), int64(u.CacheCreationTokens))
-		cost, priced := h.pricing.Estimate(providerFamily, u.Model, pricing.Usage{
-			PromptTokens:        u.InputTokens,
-			CompletionTokens:    u.OutputTokens,
-			CacheReadTokens:     u.CacheReadTokens,
-			CacheCreationTokens: u.CacheCreationTokens,
-		})
+		cost, priced := invocationCost(h.pricing, providerFamily, u)
 		if priced {
 			telemetry.RecordInvocationCostEstimate(ctx, labels, cost)
 		}
 		if emitFacts {
-			h.recordModelUsageFact(modelUsageFact(u, pr.Metadata, id, id, info.SessionName, providerFamily, cost, priced, now))
+			h.recordModelUsageFact(modelUsageFact(u, pr.Metadata, id, id, info.SessionName, providerFamily, cost, priced, now, formulaName))
 		}
 	}
 	// Best-effort: a failed cursor write means the next prompt op may
@@ -216,6 +223,23 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 		slog.Debug("persisting invocation usage cursor failed; next prompt op may re-record",
 			slog.String("session_id", id), slog.Any("error", err))
 	}
+}
+
+// invocationCost prices one invocation. A cost the provider's own transcript
+// recorded (OpenCode) wins over the price table: it reflects the upstream the
+// session actually routed through, which a static (family, model) table cannot
+// know. Without one the registry decides, and a miss is reported unpriced so
+// the fact keeps its tokens and is flagged rather than zero-filled.
+func invocationCost(registry *pricing.Registry, family string, u sessionlog.TailUsage) (float64, bool) {
+	if u.HasReportedCost {
+		return u.ReportedCostUSD, true
+	}
+	return registry.Estimate(family, u.Model, pricing.Usage{
+		PromptTokens:        u.InputTokens,
+		CompletionTokens:    u.OutputTokens,
+		CacheReadTokens:     u.CacheReadTokens,
+		CacheCreationTokens: u.CacheCreationTokens,
+	})
 }
 
 // modelUsageFact builds a model usage Fact from one transcript invocation. The
@@ -234,7 +258,7 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 // read as "not measured", never as a free invocation. At prefers the
 // transcript entry's own Timestamp when the extractor populated one, falling
 // back to now for providers whose tail extraction leaves it zero.
-func modelUsageFact(u sessionlog.TailUsage, meta map[string]string, beadID, sessionID, worker, providerFamily string, cost float64, priced bool, now time.Time) usage.Fact {
+func modelUsageFact(u sessionlog.TailUsage, meta map[string]string, beadID, sessionID, worker, providerFamily string, cost float64, priced bool, now time.Time, formulaName string) usage.Fact {
 	// beadID and sessionID are the session bead id and the run-id fallback — the
 	// same fields the retired ResolveRunID(bead.Metadata, bead.ID, sessionID) read
 	// from the raw bead. At the sole production call site they are equal (the
@@ -259,6 +283,7 @@ func modelUsageFact(u sessionlog.TailUsage, meta map[string]string, beadID, sess
 		SessionID: strings.TrimSpace(sessionID),
 		// StepID intentionally unset — run-level attribution (see body note).
 		Worker:              strings.TrimSpace(worker),
+		FormulaName:         strings.TrimSpace(formulaName),
 		Kind:                usage.KindModel,
 		Model:               strings.TrimSpace(u.Model),
 		Provider:            strings.TrimSpace(providerFamily),
@@ -306,6 +331,10 @@ var invocationUsageSpecs = map[string]invocationUsageSpec{
 		discover: discoverCodexInvocationTranscript,
 		extract:  SessionLogAdapter.CodexTailUsage,
 	},
+	"opencode": {
+		discover: discoverOpenCodeInvocationTranscript,
+		extract:  SessionLogAdapter.OpenCodeTailUsage,
+	},
 }
 
 // invocationUsageFamily resolves a provider string to its registered
@@ -316,8 +345,11 @@ func invocationUsageFamily(provider string) string {
 	if strings.Contains(strings.ToLower(provider), "claude") {
 		return "claude"
 	}
-	if sessionlog.ProviderFamily(provider) == "codex" {
+	switch sessionlog.ProviderFamily(provider) {
+	case "codex":
 		return "codex"
+	case "opencode":
+		return "opencode"
 	}
 	return ""
 }
@@ -385,6 +417,94 @@ func discoverCodexInvocationTranscript(h *SessionHandle, _ string, createdAt tim
 		anchor,
 		codexInvocationDiscoveryWindow,
 	)
+}
+
+// actingBeadID returns the work bead the controller says the session is on:
+// the processing pointer (session.CurrentBeadIDKey), else the pool trigger
+// (gc.trigger_bead_id). Processing wins and there is no liveness check: the
+// terminal sweep recovers usage after the work closed and the pointer still
+// names it. The claim pointer is deliberately never read.
+func actingBeadID(meta map[string]string) string {
+	if id := strings.TrimSpace(meta[sessionpkg.CurrentBeadIDKey]); id != "" {
+		return id
+	}
+	return strings.TrimSpace(meta[beadmeta.TriggerBeadIDMetadataKey])
+}
+
+// errFormulaBeadAbsent is formulaOfActingBead's verdict that the acting bead or
+// its run root does not exist where the resolver looks. It is an error so the
+// memo does not keep it: the bead may be reachable on a later lookup.
+var errFormulaBeadAbsent = errors.New("usage attribution: acting bead or run root not found")
+
+// resolveFormulaName returns the formula the session's acting bead belongs to:
+// the gc.formula_name stamped on the acting bead's run root, empty when the
+// session has no acting bead, the bead or its root is gone, or the root was
+// not compiled from a formula. The session bead is never consulted: the
+// compiler stamps the name on the run root, and the session bead carries no
+// run chain of its own.
+//
+// It runs once per non-empty batch of invocations, after the empty-batch
+// returns, so a tick that has nothing to record pays no read. The walk costs at
+// most two reads (the acting bead, then its root when that differs) and the
+// memo makes a warm lookup free. beads.ErrNotFound is the normal miss (a
+// purged or burned wisp, or a bead in a rig that is not serving): it leaves the
+// label empty without a warning and is not remembered, so a bead that becomes
+// reachable later is attributed. Any other error leaves the label empty, warns
+// once for the batch, and is not remembered either, so the fact is still
+// emitted whole.
+func resolveFormulaName(resolve func(id string) (beads.Bead, error), memo *FormulaNameMemo, meta map[string]string, sessionID string) string {
+	actingID := actingBeadID(meta)
+	if actingID == "" || resolve == nil {
+		return ""
+	}
+	name, err := memo.resolve(actingID, func() (string, error) {
+		return formulaOfActingBead(resolve, actingID)
+	})
+	if errors.Is(err, errFormulaBeadAbsent) {
+		return ""
+	}
+	if err != nil {
+		slog.Warn("usage attribution: formula lookup failed; recording the fact without a formula name",
+			slog.String("session_id", sessionID), slog.String("acting_bead_id", actingID), slog.Any("error", err))
+		return ""
+	}
+	return name
+}
+
+// formulaOfActingBead walks acting bead -> run root and returns the root's
+// trimmed gc.formula_name. A bead that is its own root carries its own stamp.
+func formulaOfActingBead(resolve func(id string) (beads.Bead, error), actingID string) (string, error) {
+	acting, err := resolve(actingID)
+	if errors.Is(err, beads.ErrNotFound) {
+		slog.Debug("usage attribution: acting bead not found", slog.String("acting_bead_id", actingID))
+		return "", errFormulaBeadAbsent
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading acting bead: %w", err)
+	}
+	rootID := beadmeta.ResolveRunID(acting.Metadata, acting.ID, "")
+	if rootID == acting.ID {
+		return strings.TrimSpace(acting.Metadata[beadmeta.FormulaNameMetadataKey]), nil
+	}
+	root, err := resolve(rootID)
+	if errors.Is(err, beads.ErrNotFound) {
+		slog.Debug("usage attribution: run root not found",
+			slog.String("acting_bead_id", actingID), slog.String("root_bead_id", rootID))
+		return "", errFormulaBeadAbsent
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading run root %q: %w", rootID, err)
+	}
+	return strings.TrimSpace(root.Metadata[beadmeta.FormulaNameMetadataKey]), nil
+}
+
+// discoverOpenCodeInvocationTranscript resolves an OpenCode session's mirrored
+// export by its session_key, which names the file. A keyed miss returns "" with
+// NO workdir fallback: the newest export in a shared workdir may belong to
+// another conversation, and attributing it would be misattribution. A session
+// without a key yet likewise records nothing.
+func discoverOpenCodeInvocationTranscript(h *SessionHandle, _ string, _ time.Time, meta map[string]string) string {
+	return sessionlog.FindOpenCodeSessionFileByID(h.adapter.SearchPaths, strings.TrimSpace(meta["session_key"]))
 }
 
 // usageIdentity returns the dedup identity of one invocation: the provider
@@ -527,6 +647,28 @@ func usagesSinceCursor(usages []sessionlog.TailUsage, cursor string) []sessionlo
 // the session_key, work dir, and cursor all read from it), and now stamps the
 // emitted facts.
 func (f *Factory) SweepSessionModelUsage(ctx context.Context, id string, meta map[string]string, now time.Time) (emitted int, settled bool, err error) {
+	return f.sweepSessionModelUsage(ctx, id, meta, now, f.discoverSweepTranscript)
+}
+
+// SweepClosedIntervalModelUsage is SweepSessionModelUsage for the awake
+// interval a session close ended, which the row may have left since: meta is
+// that interval's view of the row (session.UsageClosedIntervalMetadata).
+// Discovery reads meta alone (discoverClosedIntervalTranscript), so a reopened
+// row's newer conversation never stands in for the closed one.
+func (f *Factory) SweepClosedIntervalModelUsage(ctx context.Context, id string, meta map[string]string, now time.Time) (emitted int, settled bool, err error) {
+	return f.sweepSessionModelUsage(ctx, id, meta, now, f.discoverClosedIntervalTranscript)
+}
+
+// sweepSessionModelUsage is the sweep both entry points share, over the
+// transcript discovery that resolves the path and classifies a miss
+// (discoverSweepTranscript's results).
+func (f *Factory) sweepSessionModelUsage(
+	ctx context.Context,
+	id string,
+	meta map[string]string,
+	now time.Time,
+	discover func(family, id string, meta map[string]string, now time.Time) (path string, scanClean, emptyIsPermanent bool),
+) (emitted int, settled bool, err error) {
 	id = strings.TrimSpace(id)
 	if f == nil || id == "" || meta == nil {
 		return 0, true, nil
@@ -545,7 +687,7 @@ func (f *Factory) SweepSessionModelUsage(ctx context.Context, id string, meta ma
 			slog.String("session_id", id), slog.String("provider", strings.TrimSpace(meta["provider"])))
 		return 0, true, nil
 	}
-	path, scanClean, emptyIsPermanent := f.discoverSweepTranscript(family, id, meta, now)
+	path, scanClean, emptyIsPermanent := discover(family, id, meta, now)
 	keyless := strings.TrimSpace(meta["session_key"]) == ""
 	keylessCodex := family == "codex" && keyless
 	keylessClaude := family == "claude" && keyless
@@ -679,14 +821,10 @@ func (f *Factory) sweepResolvedTranscript(ctx context.Context, family, id string
 	}
 	workerName := strings.TrimSpace(meta["session_name"])
 	agentName := sweepAgentName(meta)
+	formulaName := resolveFormulaName(f.resolveBead, f.formulaMemo, meta, id)
 	lastRecorded := ""
 	for _, u := range pending {
-		cost, priced := registry.Estimate(family, u.Model, pricing.Usage{
-			PromptTokens:        u.InputTokens,
-			CompletionTokens:    u.OutputTokens,
-			CacheReadTokens:     u.CacheReadTokens,
-			CacheCreationTokens: u.CacheCreationTokens,
-		})
+		cost, priced := invocationCost(registry, family, u)
 		// Mirror the prompt-op seam's OTel metrics so the agents this sweep recovers
 		// facts for also get live gc.agent.tokens.* / cost series — the family keys
 		// the label identically to the emitted fact's Provider so metrics and facts
@@ -703,7 +841,7 @@ func (f *Factory) sweepResolvedTranscript(ctx context.Context, family, id string
 		if priced {
 			telemetry.RecordInvocationCostEstimate(ctx, labels, cost)
 		}
-		fact := modelUsageFact(u, meta, id, id, workerName, family, cost, priced, now)
+		fact := modelUsageFact(u, meta, id, id, workerName, family, cost, priced, now, formulaName)
 		if recErr := sink.Record(ctx, fact); recErr != nil {
 			// Stop at the first failure and advance the cursor only through the last
 			// success, so the next sweep resumes here instead of skipping the gap.
@@ -728,7 +866,9 @@ func (f *Factory) sweepResolvedTranscript(ctx context.Context, family, id string
 
 // discoverSweepTranscript resolves the transcript for the end-of-interval model
 // sweep: claude through the manager's keyed lookup, codex through the captured
-// session_key matched against the rollout filename suffix. The codex lookup is
+// session_key matched against the rollout filename suffix, opencode through the
+// session_key that names its mirrored export (keyed only; a miss is transient
+// and never falls back to the workdir). The codex lookup is
 // bounded to the awake interval's day window via
 // sessionlog.FindCodexSessionFileByID(notBefore=awake_started_at,
 // notAfter=slept_at||now) — NOT the unbounded date-tree walk — because this runs
@@ -761,8 +901,8 @@ func (f *Factory) sweepResolvedTranscript(ctx context.Context, family, id string
 // same-cwd rollout, making the singleton non-definitive), so the caller retries
 // rather than recording or settling either. For the claude manager lookup it is
 // false when the transcript lookup returned an error — a store read failure, which
-// says nothing about whether a transcript exists. The keyed codex lookup always
-// returns scanClean true.
+// says nothing about whether a transcript exists. The keyed codex and opencode
+// lookups always return scanClean true.
 //
 // The returned emptyIsPermanent is meaningful only when path is empty on a CLEAN
 // lookup: it reports whether a retry could ever resolve the miss. It is true for
@@ -793,6 +933,13 @@ func (f *Factory) discoverSweepTranscript(family, id string, meta map[string]str
 		scanPath, scanClean := sessionlog.FindCodexSessionFileNearScan(
 			f.searchPaths, workDir, notBefore, codexInvocationDiscoveryWindow)
 		return scanPath, scanClean, true
+	case "opencode":
+		// Keyed only, like discoverOpenCodeInvocationTranscript: the export is
+		// named for the session_key, and the manager's workdir fallback could
+		// hand back another conversation's export. A miss (or no key yet) is
+		// transient — the export may not be mirrored yet.
+		return sessionlog.FindOpenCodeSessionFileByID(
+			f.searchPaths, strings.TrimSpace(meta["session_key"])), true, false
 	default:
 		path, lookup, terr := f.manager.TranscriptPathClassified(id, f.searchPaths)
 		if terr != nil {
@@ -812,6 +959,29 @@ func (f *Factory) discoverSweepTranscript(family, id string, meta map[string]str
 	}
 }
 
+// discoverClosedIntervalTranscript is discoverSweepTranscript for the interval
+// a session close ended. Codex and opencode already resolve from meta. Claude
+// resolves by meta's session_key alone: the manager's lookup reads the row's
+// current key, which a reopen's fresh wake replaces, and on a keyed miss it
+// lists the session history of the work dir, a read a closed interval would
+// repeat on every retry. A keyed miss stays transient (the transcript may not
+// be on disk yet); without a key nothing names the closed conversation's
+// transcript, so the miss is permanent.
+func (f *Factory) discoverClosedIntervalTranscript(family, id string, meta map[string]string, now time.Time) (path string, scanClean, emptyIsPermanent bool) {
+	if family != "claude" {
+		return f.discoverSweepTranscript(family, id, meta, now)
+	}
+	key := strings.TrimSpace(meta["session_key"])
+	if key == "" {
+		return "", true, true
+	}
+	searchPaths := f.searchPaths
+	if len(searchPaths) == 0 {
+		searchPaths = sessionlog.DefaultSearchPaths()
+	}
+	return workertranscript.DiscoverKeyedPath(searchPaths, family, meta["work_dir"], key), true, false
+}
+
 // sweepAgentName resolves the metric AgentName label for a swept session from
 // its metadata, mirroring the prompt-op seam's agent_name → alias → session_name
 // fallback so the gc.agent.tokens.* series carry the same identity from either
@@ -826,24 +996,19 @@ func sweepAgentName(meta map[string]string) string {
 }
 
 // sweepIntervalWindow derives the codex discovery date window from a terminal
-// session's awake interval: [awake_started_at, slept_at]. slept_at is refreshed
-// by both SleepPatch and AcknowledgeDrainPatch, so a drained session tightens
-// notAfter from now to its drain-ack time. When slept_at is missing or not after
-// the start (a terminal exit that does not refresh it, or a value carried over
-// from a prior awake interval), it falls back to now as the interval end, so
-// notAfter is always set and never reversed — FindCodexSessionFileByID requires
+// session's awake interval: [awake_started_at, sessionpkg.UsageIntervalEnd].
+// slept_at is refreshed by both SleepPatch and AcknowledgeDrainPatch, so a
+// drained session tightens notAfter from now to its drain-ack time, and a usage
+// close marker bounds a session closed straight from a live state. When neither
+// lies after the start (a terminal exit that does not refresh slept_at, or a
+// value carried over from a prior awake interval), it falls back to now as the
+// interval end, so notAfter is always set and never reversed — FindCodexSessionFileByID requires
 // a non-zero notAfter and refuses a reversed range. The finder pads both ends by
 // a local day, so an off-by-seconds bound — including the tighter drain-ack
 // bound — cannot drop the rollout's day directory.
 func sweepIntervalWindow(meta map[string]string, now time.Time) (notBefore, notAfter time.Time) {
-	notAfter = now
 	if started, err := time.Parse(time.RFC3339, strings.TrimSpace(meta["awake_started_at"])); err == nil {
 		notBefore = started
 	}
-	if sleptRaw := strings.TrimSpace(meta["slept_at"]); sleptRaw != "" {
-		if slept, err := time.Parse(time.RFC3339, sleptRaw); err == nil && slept.After(notBefore) {
-			notAfter = slept
-		}
-	}
-	return notBefore, notAfter
+	return notBefore, sessionpkg.UsageIntervalEnd(meta, notBefore, now)
 }

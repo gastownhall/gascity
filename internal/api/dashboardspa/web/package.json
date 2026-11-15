@@ -38,5 +38,8 @@
     "prettier": "^3.8.3",
     "typescript": "^5.6.3",
     "typescript-eslint": "^8.59.4"
+  },
+  "overrides": {
+    "js-yaml": "^4.3.2"
   }
 }

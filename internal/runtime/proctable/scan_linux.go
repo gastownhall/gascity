@@ -13,17 +13,30 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // ScanBySessionID returns live agent root processes whose environment carries
-// GC_SESSION_ID equal to id. Empty id returns all roots with any GC_SESSION_ID.
+// GC_SESSION_ID equal to id. Empty id is the orphan sweep's scan: the roots
+// with any GC_SESSION_ID that were reparented away from their spawner, to
+// init or the user subreaper ([OrphanCandidate]), the only roots the sweep
+// may reap. It reads a process's environment only when its parent makes it
+// a candidate, so a host's other processes cost one stat read each, not an
+// environ read (mc-ygved).
 func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	if err := liveScanGuard(); err != nil {
 		return []runtime.LiveRuntime{}, err
 	}
+	if id == "" {
+		return scanOrphanCandidatesWithRoot(scanRoot, detectSubreaper(os.Getpid()))
+	}
 	return scanWithRoot(scanRoot, id)
 }
+
+// detectSubreaper is the user subreaper the empty-id scan counts as an
+// orphan parent (a systemd --user supervisor); a test sets its fixture's.
+var detectSubreaper = pidutil.DetectUserSubreaperPID
 
 // ScanBySessionIDSince scans for an exact session incarnation. Inspection
 // failures from processes proven to predate incarnationStartedAt do not make
@@ -36,10 +49,12 @@ func ScanBySessionIDSince(id string, incarnationStartedAt time.Time) ([]runtime.
 }
 
 // IsScanRoot reports whether pid should be treated as an agent root. A root
-// carries a GC_SESSION_ID, is not itself infrastructure — a tmux server or
-// client is never a root, whoever its parent is — and sits outside its
-// parent's envelope: the parent is gone, carries a different GC_SESSION_ID,
-// is infrastructure, or cannot be read (permission denied).
+// carries a GC_SESSION_ID, is neither infrastructure nor a program-status
+// companion — a tmux server or client is never a root, whoever its parent
+// is, the relay is looked through, and a tap belongs to its tmux server — and
+// sits outside its parent's envelope: the parent is gone, carries a different
+// GC_SESSION_ID, is infrastructure or the relay, or cannot be read
+// (permission denied).
 func IsScanRoot(pid int) bool {
 	if err := liveScanGuard(); err != nil {
 		return false
@@ -61,7 +76,7 @@ func IsScanRoot(pid int) bool {
 	if sessionID == "" {
 		return false
 	}
-	if isInfrastructureProcess(scanRoot, pid) {
+	if isInfrastructureProcess(scanRoot, pid) || isProgramStatusCompanion(scanRoot, pid) {
 		return false
 	}
 	isRoot, err := isRootWithSessionID(scanRoot, pid, sessionID)
@@ -73,6 +88,43 @@ func scanWithRoot(root, id string) ([]runtime.LiveRuntime, error) {
 }
 
 func scanWithRootSince(root, id string, incarnationStartedAt time.Time) ([]runtime.LiveRuntime, error) {
+	return scanEntries(root, id, incarnationStartedAt, nil)
+}
+
+// scanOrphanCandidatesWithRoot is the all-roots scan restricted to processes
+// reparented to init or subreaperPID (OrphanCandidate), each decided on its
+// stat before anything else is read. A stat that cannot be read is the
+// entry's error, as an unreadable owner is: the scan stays fail-closed.
+//
+// A process whose parent is the program-status relay is decided on the
+// relay's parent, as the scan reports it (see effectiveParent): an orphaned
+// relay's program is the orphan. Each parent's relay check is read once per
+// scan.
+func scanOrphanCandidatesWithRoot(root string, subreaperPID int) ([]runtime.LiveRuntime, error) {
+	relays := make(map[int]bool)
+	return scanEntries(root, "", time.Time{}, func(pid int) (bool, error) {
+		ppid, ok, err := readParentPID(filepath.Join(root, strconv.Itoa(pid), "stat"))
+		if err != nil || !ok {
+			return false, err // a vanished process is no candidate; a failed read is the entry's error
+		}
+		if OrphanCandidate(ppid, subreaperPID) {
+			return true, nil
+		}
+		relay, seen := relays[ppid]
+		if !seen {
+			relay = ppid > 1 && isProgramStatusRelay(root, ppid)
+			relays[ppid] = relay
+		}
+		if !relay {
+			return false, nil
+		}
+		return OrphanCandidate(effectiveParent(root, ppid), subreaperPID), nil
+	})
+}
+
+// scanEntries scans root's entries for id's roots; candidate, when set,
+// decides first whether an entry is read at all.
+func scanEntries(root, id string, incarnationStartedAt time.Time, candidate func(pid int) (bool, error)) ([]runtime.LiveRuntime, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return []runtime.LiveRuntime{}, fmt.Errorf("enumerating %s: %w", root, err)
@@ -88,6 +140,16 @@ func scanWithRootSince(root, id string, incarnationStartedAt time.Time) ([]runti
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
+		}
+		if pid, perr := strconv.Atoi(entry.Name()); candidate != nil && perr == nil && pid > 1 {
+			keep, err := candidate(pid)
+			if err != nil {
+				scanErr = errors.Join(scanErr, &EntryError{PID: pid, Err: fmt.Errorf("reading parent for pid %d: %w", pid, err)})
+				continue
+			}
+			if !keep {
+				continue
+			}
 		}
 		live, reported, err := scanProcEntry(root, entry.Name(), id, incarnationStartedAt)
 		if err != nil {
@@ -158,6 +220,12 @@ func scanProcEntry(root, entryName, id string, incarnationStartedAt time.Time) (
 	if isInfrastructureProcess(root, pid) {
 		return runtime.LiveRuntime{}, false, nil
 	}
+	// Neither program-status companion is a root: the relay is looked
+	// through (IsProgramStatusRelayArgv), and the program it runs is reported
+	// in its place; a tap belongs to its tmux server (IsProgramStatusTapArgv).
+	if isProgramStatusCompanion(root, pid) {
+		return runtime.LiveRuntime{}, false, nil
+	}
 	rootProcess, err := isRootWithSessionID(root, pid, sessionID)
 	if err != nil {
 		return runtime.LiveRuntime{}, false, fmt.Errorf("checking root for pid %d: %w", pid, err)
@@ -170,14 +238,18 @@ func scanProcEntry(root, entryName, id string, incarnationStartedAt time.Time) (
 	if city == "" {
 		city = env["GC_CITY"]
 	}
-	ppid, _, startIdentity, _, _ := readProcStatIdentity(filepath.Join(root, entryName, "stat"))
+	stat, _, _ := readProcStat(filepath.Join(root, entryName, "stat"))
+	ppid := effectiveParent(root, stat.ppid)
 	comm, _ := os.ReadFile(filepath.Join(root, entryName, "comm"))
 	return runtime.LiveRuntime{
 		SessionID: sessionID,
 		City:      city,
 		Epoch:     epoch,
 		PID:       pid,
-		PPID:      ppid,
+		// A relay's program reports the relay's parent (effectiveParent), so
+		// it reads as the relay itself would have: owned while the relay's
+		// tmux server is its parent, an orphan once the relay is adopted.
+		PPID: ppid,
 		// Read from the SAME ppid that is reported above, so a caller fencing
 		// on this field is fencing on the parent it was told about. A pid <= 1
 		// parent is init or an unreadable stat, never the provider's server, so
@@ -185,7 +257,7 @@ func scanProcEntry(root, entryName, id string, incarnationStartedAt time.Time) (
 		ParentIsProviderInfrastructure: ppid > 1 && isInfrastructureProcess(root, ppid),
 		// The same token ProcessIdentity and RootStartIdentity read, so a
 		// killer can re-check it against the live process.
-		StartIdentity: startIdentity,
+		StartIdentity: stat.startTime,
 		Name:          strings.TrimSpace(string(comm)),
 	}, true, nil
 }
@@ -580,10 +652,40 @@ func isRootWithSessionID(root string, pid int, sessionID string) (bool, error) {
 	case err != nil:
 		return false, err
 	}
-	if parentEnv["GC_SESSION_ID"] == sessionID && isInfrastructureProcess(root, ppid) {
+	if parentEnv["GC_SESSION_ID"] == sessionID && (isInfrastructureProcess(root, ppid) || isProgramStatusRelay(root, ppid)) {
 		return true, nil
 	}
 	return parentEnv["GC_SESSION_ID"] != sessionID, nil
+}
+
+// isProgramStatusRelay reports whether pid is gc's program-status relay
+// (IsProgramStatusRelayArgv). An unreadable argv reports false.
+func isProgramStatusRelay(root string, pid int) bool {
+	argv, err := readArgv(root, pid)
+	return err == nil && IsProgramStatusRelayArgv(argv)
+}
+
+// isProgramStatusCompanion reports whether pid is gc's program-status relay
+// or tap (IsProgramStatusRelayArgv, IsProgramStatusTapArgv), reading its argv
+// once. An unreadable argv reports false.
+func isProgramStatusCompanion(root string, pid int) bool {
+	argv, err := readArgv(root, pid)
+	return err == nil && (IsProgramStatusRelayArgv(argv) || IsProgramStatusTapArgv(argv))
+}
+
+// effectiveParent is the parent the scan reports for a process whose parent
+// is ppid: ppid itself, or, when ppid is the program-status relay, the
+// relay's own parent (0 when it cannot be read). The relay is looked
+// through, so its program stands where the relay stood.
+func effectiveParent(root string, ppid int) int {
+	if ppid <= 1 || !isProgramStatusRelay(root, ppid) {
+		return ppid
+	}
+	grand, ok, err := readParentPID(filepath.Join(root, strconv.Itoa(ppid), "stat"))
+	if err != nil || !ok {
+		return 0
+	}
+	return grand
 }
 
 // isInfrastructureProcess reports whether pid's comm names infrastructure (a
@@ -597,46 +699,59 @@ func isInfrastructureProcess(root string, pid int) bool {
 }
 
 func readParentPID(path string) (int, bool, error) {
-	ppid, _, _, ok, err := readProcStatIdentity(path)
-	return ppid, ok, err
+	stat, ok, err := readProcStat(path)
+	return stat.ppid, ok, err
 }
 
-func readProcStatIdentity(path string) (ppid, pgid int, startTime string, ok bool, err error) {
+// procStat is what the scanner and the snapshots read from one
+// /proc/<pid>/stat record.
+type procStat struct {
+	ppid      int
+	pgid      int
+	sid       int // session ID: the PID of the session's leader
+	startTime string
+}
+
+func readProcStat(path string) (procStat, bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return 0, 0, "", false, nil
+			return procStat{}, false, nil
 		}
-		return 0, 0, "", false, err
+		return procStat{}, false, err
 	}
-	ppid, pgid, startTime, ok, err = parseProcStatIdentity(string(data))
+	stat, err := parseProcStat(string(data))
 	if err != nil {
-		return 0, 0, "", false, fmt.Errorf("parsing %s: %w", path, err)
+		return procStat{}, false, fmt.Errorf("parsing %s: %w", path, err)
 	}
-	return ppid, pgid, startTime, ok, nil
+	return stat, true, nil
 }
 
-func parseProcStatIdentity(text string) (ppid, pgid int, startTime string, ok bool, err error) {
+func parseProcStat(text string) (procStat, error) {
 	closeParen := strings.LastIndexByte(text, ')')
 	if closeParen < 0 || closeParen+1 >= len(text) {
-		return 0, 0, "", false, fmt.Errorf("malformed proc stat record")
+		return procStat{}, fmt.Errorf("malformed proc stat record")
 	}
 	fields := strings.Fields(text[closeParen+1:])
 	const startTimeIndexAfterComm = 19
 	if len(fields) <= startTimeIndexAfterComm {
-		return 0, 0, "", false, fmt.Errorf("malformed proc stat record: got %d post-comm fields", len(fields))
+		return procStat{}, fmt.Errorf("malformed proc stat record: got %d post-comm fields", len(fields))
 	}
-	ppid, err = strconv.Atoi(fields[1])
+	ppid, err := strconv.Atoi(fields[1])
 	if err != nil {
-		return 0, 0, "", false, fmt.Errorf("parsing proc stat ppid: %w", err)
+		return procStat{}, fmt.Errorf("parsing proc stat ppid: %w", err)
 	}
-	pgid, err = strconv.Atoi(fields[2])
+	pgid, err := strconv.Atoi(fields[2])
 	if err != nil {
-		return 0, 0, "", false, fmt.Errorf("parsing proc stat pgid: %w", err)
+		return procStat{}, fmt.Errorf("parsing proc stat pgid: %w", err)
 	}
-	startTime = fields[startTimeIndexAfterComm]
+	sid, err := strconv.Atoi(fields[3])
+	if err != nil {
+		return procStat{}, fmt.Errorf("parsing proc stat session: %w", err)
+	}
+	startTime := fields[startTimeIndexAfterComm]
 	if startTime == "" {
-		return 0, 0, "", false, fmt.Errorf("proc stat start time is empty")
+		return procStat{}, fmt.Errorf("proc stat start time is empty")
 	}
-	return ppid, pgid, startTime, true, nil
+	return procStat{ppid: ppid, pgid: pgid, sid: sid, startTime: startTime}, nil
 }

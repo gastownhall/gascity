@@ -1,0 +1,103 @@
+package main
+
+import (
+	"sync"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/storebinding"
+)
+
+// nudgeQueueHandle is the city's nudge queue as one invocation sees it.
+type nudgeQueueHandle struct {
+	// Queue is the queue's contract surface.
+	Queue storebinding.NudgeQueue
+	// Location tells an operator where a queued item lives.
+	Location string
+	// Skips persists the dispatch tick's skip counters, an operator
+	// diagnostic outside the queue contract.
+	Skips nudgeDispatchSkipRecorder
+	// Repin moves in-flight claims onto a new delivery key without a
+	// maintenance pass or a store open (rekeyQueuedNudgesAfterFailedBookkeeping).
+	Repin nudgeClaimRepinner
+	// Probe answers what a claim would claim, from a lock-free snapshot (the
+	// poll loop's due-work gate, nudgePollGate, and the starvation check,
+	// queuedNudgeStarvedForTarget).
+	Probe nudgeClaimProber
+}
+
+// nudgeClaimProber reports, without the queue lock and without claiming, what
+// ClaimBatch for ct at now would claim.
+type nudgeClaimProber interface {
+	// WouldClaimBatch reports whether ClaimBatch would claim anything.
+	WouldClaimBatch(ct storebinding.ClaimTarget, now time.Time) (bool, error)
+	// NextBatch returns the items ClaimBatch would claim, in queue order.
+	NextBatch(ct storebinding.ClaimTarget, now time.Time) ([]nudgequeue.Item, error)
+}
+
+// nudgeDispatchSkipRecorder persists and reads the dispatch skip counters.
+type nudgeDispatchSkipRecorder interface {
+	RecordDispatchSkips(map[string]int64) error
+	DispatchSkips() (map[string]int64, error)
+}
+
+// nudgeClaimRepinner pins in-flight claims to a delivery key, all or nothing.
+type nudgeClaimRepinner interface {
+	RepinClaims(ids []string, batch string) error
+}
+
+// openNudgeQueue is the only constructor of the city's nudge queue in cmd/gc.
+// store is the nudges-class store the caller already holds. With the zero
+// value, Enqueue opens its own to save the shadow, and the verbs whose commit
+// owes shadow debts open their own after the queue lock to pay them
+// (settleNudgeShadowDebts). WithdrawQueuedWaitNudges does not, and reaches
+// shadows only through a caller-passed store: with the zero value it retires
+// the queue item and leaves its shadow open, as does Rollback of an item no
+// longer queued.
+//
+// It builds the file queue only.
+func openNudgeQueue(cityPath string, store beads.NudgesStore) nudgeQueueHandle {
+	q := &fileNudgeQueue{cityPath: cityPath, store: store, clk: clock.Real{}}
+	return nudgeQueueHandle{
+		Queue:    q,
+		Location: q.location(),
+		Skips:    q,
+		Repin:    q,
+		Probe:    q,
+	}
+}
+
+// nudgeShadows is the shadow projection over store. It takes no city path, so
+// the wait helpers that hold only a store reach it.
+func nudgeShadows(store beads.NudgesStore) storebinding.NudgeShadows {
+	return nudgeFrontDoor(store)
+}
+
+// claimTarget is the contract's view of t: its queue keys, its fence, and a
+// census of cityPath's sessions, taken at most once, that lets it adopt a
+// superseded session's nudges. A target that carries a census of its own
+// (fenceCensus, the dispatcher's skip-only snapshot census) answers with it
+// instead.
+func (t nudgeTarget) claimTarget(cityPath string) storebinding.ClaimTarget {
+	if t.fenceCensus != nil {
+		return storebinding.ClaimTarget{
+			QueueKeys:         t.queueKeys(),
+			SessionID:         t.sessionID,
+			ContinuationEpoch: t.continuationEpoch,
+			LiveFenceSessions: t.fenceCensus,
+		}
+	}
+	var once sync.Once
+	var ids map[string]struct{}
+	return storebinding.ClaimTarget{
+		QueueKeys:         t.queueKeys(),
+		SessionID:         t.sessionID,
+		ContinuationEpoch: t.continuationEpoch,
+		LiveFenceSessions: func() (map[string]struct{}, bool) {
+			once.Do(func() { ids = liveNudgeFenceSessionIDsForCity(cityPath) })
+			return ids, ids != nil
+		},
+	}
+}

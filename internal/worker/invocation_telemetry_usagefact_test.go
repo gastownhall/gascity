@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -49,7 +50,7 @@ func newUsageFactHandle(t *testing.T) (handle *SessionHandle, transcriptPath, si
 
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithCityPath(t.TempDir()))
 	h, err := NewSessionHandle(SessionHandleConfig{
 		Manager:     manager,
 		SearchPaths: []string{searchBase},
@@ -212,9 +213,9 @@ func TestModelUsageFact(t *testing.T) {
 	}
 	// modelUsageFact resolves RunID from the run chain; StepID is intentionally
 	// left unset — model usage is attributed at run level, not per formula step.
-	bead := beads.Bead{ID: "b1", Metadata: map[string]string{"molecule_id": "mol-7"}}
+	bead := beads.Bead{ID: "b1", Metadata: map[string]string{"molecule_id": "mol-7", "gc.formula_name": "my-formula"}}
 
-	priced := modelUsageFact(u, bead.Metadata, bead.ID, "session-1", "myrig/polecat-1", "claude", 0.02, true, now)
+	priced := modelUsageFact(u, bead.Metadata, bead.ID, "session-1", "myrig/polecat-1", "claude", 0.02, true, now, bead.Metadata["gc.formula_name"])
 	if priced.Kind != usage.KindModel {
 		t.Fatalf("kind = %q", priced.Kind)
 	}
@@ -235,6 +236,9 @@ func TestModelUsageFact(t *testing.T) {
 	if priced.Worker != "myrig/polecat-1" || priced.Model != "claude-opus-4-7" || priced.Provider != "claude" {
 		t.Fatalf("identity wrong: %+v", priced)
 	}
+	if priced.FormulaName != "my-formula" {
+		t.Fatalf("FormulaName = %q, want my-formula (propagated from gc.formula_name metadata)", priced.FormulaName)
+	}
 	if priced.InputTokens != 100 || priced.OutputTokens != 50 || priced.CacheReadTokens != 10 || priced.CacheCreationTokens != 5 {
 		t.Fatalf("tokens wrong: %+v", priced)
 	}
@@ -254,7 +258,7 @@ func TestModelUsageFact(t *testing.T) {
 	}
 
 	// Unpriced collapses cost to zero regardless of the cost argument.
-	unp := modelUsageFact(u, bead.Metadata, bead.ID, "session-1", "w", "claude", 0.02, false, now)
+	unp := modelUsageFact(u, bead.Metadata, bead.ID, "session-1", "w", "claude", 0.02, false, now, "")
 	if !unp.Unpriced || unp.CostUSDEstimate != 0 {
 		t.Fatalf("unpriced fact must zero the cost and set the flag: %+v", unp)
 	}
@@ -276,7 +280,7 @@ func TestModelUsageFactPrefersEntryTimestampOverNow(t *testing.T) {
 	}
 	bead := beads.Bead{ID: "b1", Metadata: map[string]string{"molecule_id": "mol-7"}}
 
-	f := modelUsageFact(u, bead.Metadata, bead.ID, "session-1", "w", "claude", 0.02, true, now)
+	f := modelUsageFact(u, bead.Metadata, bead.ID, "session-1", "w", "claude", 0.02, true, now, "")
 	if f.At != entryTime.UnixMilli() {
 		t.Fatalf("At = %d, want the entry's own timestamp %d, not now (%d)", f.At, entryTime.UnixMilli(), now.UnixMilli())
 	}
@@ -285,7 +289,7 @@ func TestModelUsageFactPrefersEntryTimestampOverNow(t *testing.T) {
 	// extraction doesn't populate it) must fall back to now unchanged.
 	uNoTimestamp := u
 	uNoTimestamp.Timestamp = time.Time{}
-	fallback := modelUsageFact(uNoTimestamp, bead.Metadata, bead.ID, "session-1", "w", "claude", 0.02, true, now)
+	fallback := modelUsageFact(uNoTimestamp, bead.Metadata, bead.ID, "session-1", "w", "claude", 0.02, true, now, "")
 	if fallback.At != now.UnixMilli() {
 		t.Fatalf("At = %d, want now (%d) when Timestamp is zero", fallback.At, now.UnixMilli())
 	}
@@ -731,7 +735,7 @@ func TestMessageRecordsWrappedCodexModelFactViaLadder(t *testing.T) {
 	sinkPath := filepath.Join(t.TempDir(), "usage.jsonl")
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithCityPath(t.TempDir()))
 	h, err := NewSessionHandle(SessionHandleConfig{
 		Manager:     manager,
 		SearchPaths: []string{searchBase},
@@ -1748,5 +1752,92 @@ func TestFactorySweepWithoutCursorMatchesFixedTailWindow(t *testing.T) {
 	wantCursor := fmt.Sprintf("msg-%02d", backlog-1)
 	if got := after.Metadata[sessionpkg.MetadataKeyInvocationUsageCursor]; got != wantCursor {
 		t.Fatalf("persisted cursor = %q, want %q (the newest entry)", got, wantCursor)
+	}
+}
+
+// TestFactorySweepClosedIntervalModelUsageClaudeReadsTheIntervalKey pins the
+// closed-interval sweep's claude discovery: the transcript resolves by the
+// interval's own session_key, not the newer one a reopened row runs under,
+// and never through the session List the manager's lookup falls back to on a
+// keyed miss (store.fail rejects every List). A keyed miss stays transient;
+// a keyless interval is a permanent miss.
+func TestFactorySweepClosedIntervalModelUsageClaudeReadsTheIntervalKey(t *testing.T) {
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+	sinkPath := filepath.Join(t.TempDir(), "usage.jsonl")
+	store := &listErrStore{Store: beads.NewMemStore()}
+	factory, err := NewFactory(FactoryConfig{
+		CityPath:    t.TempDir(),
+		Store:       store,
+		Provider:    runtime.NewFake(),
+		SearchPaths: []string{searchBase},
+		UsageSink:   usage.NewLocalSink(sinkPath),
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+	h, err := factory.Session(SessionSpec{
+		Profile:  ProfileClaudeTmuxCLI,
+		Template: "probe",
+		Title:    "one",
+		Command:  "claude",
+		WorkDir:  workDir,
+		Provider: "claude",
+	})
+	if err != nil {
+		t.Fatalf("Session: %v", err)
+	}
+	if err := h.Start(context.Background(), handleActor(t, h, sessionpkg.ActorAgent)); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	id := h.sessionID
+	slugDir := filepath.Join(searchBase, sessionlog.ProjectSlug(workDir))
+	if err := os.MkdirAll(slugDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeWorkerTestJSONL(t, filepath.Join(slugDir, "closed-key.jsonl"), []map[string]any{
+		usageEntryWithMessageID("u1", "msg-1", 100, 50, 0, 0),
+		usageEntryWithMessageID("u2", "msg-2", 200, 100, 0, 0),
+	})
+	writeWorkerTestJSONL(t, filepath.Join(slugDir, "newer-key.jsonl"), []map[string]any{
+		usageEntryWithMessageID("u3", "msg-3", 300, 150, 0, 0),
+	})
+	if err := store.SetMetadata(id, "session_key", "newer-key"); err != nil {
+		t.Fatal(err)
+	}
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	interval := map[string]string{}
+	for k, v := range b.Metadata {
+		interval[k] = v
+	}
+	interval["session_key"] = "closed-key"
+	store.fail = true
+
+	emitted, settled, err := factory.SweepClosedIntervalModelUsage(context.Background(), id, interval, time.Unix(1, 0).UTC())
+	if err != nil || !settled || emitted != 2 {
+		t.Fatalf("closed-key sweep = %d, settled %t, %v; want 2 facts, settled", emitted, settled, err)
+	}
+	facts, _, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reqs []string
+	for _, f := range facts {
+		reqs = append(reqs, f.UpstreamReqID)
+	}
+	if got := strings.Join(reqs, ","); got != "msg-1,msg-2" {
+		t.Fatalf("swept invocations = %s, want msg-1,msg-2 from the closed interval's transcript", got)
+	}
+
+	interval["session_key"] = "absent-key"
+	if emitted, settled, err := factory.SweepClosedIntervalModelUsage(context.Background(), id, interval, time.Unix(2, 0).UTC()); err != nil || settled || emitted != 0 {
+		t.Fatalf("keyed miss = %d, settled %t, %v; want nothing recorded and unsettled", emitted, settled, err)
+	}
+	interval["session_key"] = ""
+	if emitted, settled, err := factory.SweepClosedIntervalModelUsage(context.Background(), id, interval, time.Unix(3, 0).UTC()); err != nil || !settled || emitted != 0 {
+		t.Fatalf("keyless interval = %d, settled %t, %v; want nothing recorded and settled", emitted, settled, err)
 	}
 }

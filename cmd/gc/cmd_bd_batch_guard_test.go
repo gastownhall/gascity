@@ -9,12 +9,15 @@ import (
 )
 
 // writeBatchGuardBdStub replaces the fixture's bd with one that logs every
-// call and answers `show` from the case arms given.
+// call and answers `show` from the case arms given. A show arm can read the
+// call log through $LOG, to answer differently once a write has been logged,
+// and `dep list` answers an empty edge set, as bd does for a bead without edges.
 func writeBatchGuardBdStub(t *testing.T, showArms string) string {
 	t.Helper()
 	binDir := t.TempDir()
 	logPath := filepath.Join(t.TempDir(), "bd-calls.log")
-	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + logPath + "\n" +
+	script := "#!/bin/sh\nLOG=" + logPath + "\nprintf '%s\\n' \"$*\" >> \"$LOG\"\n" +
+		"if [ \"$1\" = dep ]; then\n  printf '[]\\n'\n  exit 0\nfi\n" +
 		"if [ \"$1\" = show ]; then\n  case \"$*\" in\n" + showArms + "\n  esac\n  exit 0\nfi\nexit 0\n"
 	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
@@ -40,11 +43,17 @@ func TestGcBdBulkCloseVerifiesIDsWithOneShow(t *testing.T) {
 		t.Fatal(err)
 	}
 	log := string(data)
-	if got := strings.Count(log, "show "); got != 1 {
-		t.Fatalf("bd show ran %d times, want 1 batched verification:\n%s", got, log)
-	}
-	if !strings.Contains(log, "close demo-a demo-wisp-b demo-c --reason stale") {
+	verify, after, found := strings.Cut(log, "close demo-a demo-wisp-b demo-c --reason stale")
+	if !found {
 		t.Fatalf("the verified close was not forwarded to bd:\n%s", log)
+	}
+	if got := strings.Count(verify, "show "); got != 1 {
+		t.Fatalf("bd show ran %d times before the close, want 1 batched verification:\n%s", got, log)
+	}
+	// The close announcement (bd_close_events.go) reads the rows back the
+	// same way: one batched read, not one per id.
+	if got := strings.Count(after, "show "); got != 1 {
+		t.Fatalf("bd show ran %d times after the close, want 1 batched read-back:\n%s", got, log)
 	}
 }
 

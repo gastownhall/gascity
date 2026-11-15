@@ -98,6 +98,21 @@ func hookDeadlineLeavesArchiveTime(now, start time.Time) (bool, error) {
 	return deadline.Sub(now) >= hookArchiveMargin(deadline, start), nil
 }
 
+// hookWorkEnd is when work this process does inside a hook must be done: the
+// deadline gc hook run handed it, less the archive margin, so the process
+// still exits with its output kept. ok is false outside a hook. A deadline
+// that does not parse leaves no time: the end is now.
+func hookWorkEnd() (end time.Time, ok bool) {
+	deadline, has, err := inheritedHookDeadline()
+	if err != nil {
+		return time.Now(), true
+	}
+	if !has {
+		return time.Time{}, false
+	}
+	return deadline.Add(-hookArchiveMargin(deadline, hookProcessStart)), true
+}
+
 // hookDeadlineStillLeavesTime reports, now, whether the archive margin still
 // remains before the deadline gc hook run handed this process. It gates the
 // optional writes that follow a destructive step already taken — the archive's

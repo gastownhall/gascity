@@ -1,7 +1,15 @@
 package orders
 
 import (
+	"context"
+	"errors"
+	"reflect"
+	"slices"
 	"testing"
+	"time"
+
+	beadslib "github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/issueops"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -121,5 +129,142 @@ func TestListTrackingUnlimitedStaysUnlimited(t *testing.T) {
 		if q.Limit != 0 {
 			t.Fatalf("query %d: Limit = %d, want 0 (unlimited opt-out)", i, q.Limit)
 		}
+	}
+}
+
+// nativeTrackingLedger is a native Dolt storage whose reader answers a listing
+// as bd's does for the requests the sweep readers send: a named status selects
+// only the rows recorded with it, while no status (the native store always sends
+// AllFlag) selects every status, closed included. It keeps the id of every row
+// it serves, which is every row the native store decodes.
+type nativeTrackingLedger struct {
+	beadslib.Storage
+	rows   []*beadslib.Issue
+	served []string
+}
+
+func (l *nativeTrackingLedger) IssueReader() (issueops.Reader, error) { return l, nil }
+
+func (l *nativeTrackingLedger) List(_ context.Context, req issueops.ListRequest) (issueops.IssuePage, error) {
+	page := issueops.IssuePage{Items: []*issueops.IssueWithCounts{}}
+	for _, row := range l.rows {
+		if req.Status != "" && string(row.Status) != req.Status {
+			continue
+		}
+		if len(req.Labels) > 0 && !slices.Contains(row.Labels, req.Labels[0]) {
+			continue
+		}
+		issue := *row
+		page.Items = append(page.Items, &issueops.IssueWithCounts{Issue: &issue})
+		l.served = append(l.served, row.ID)
+	}
+	return page, nil
+}
+
+func (l *nativeTrackingLedger) Ready(context.Context, issueops.ReadyRequest) (issueops.IssuePage, error) {
+	return issueops.IssuePage{}, errors.New("nativeTrackingLedger serves listings only")
+}
+
+func (l *nativeTrackingLedger) Get(context.Context, issueops.GetRequest) (*issueops.IssueDetails, error) {
+	return nil, errors.New("nativeTrackingLedger serves listings only")
+}
+
+// servedStatus reports whether the ledger served a row recorded with status.
+func (l *nativeTrackingLedger) servedStatus(status beadslib.Status) bool {
+	for _, row := range l.rows {
+		if row.Status == status && slices.Contains(l.served, row.ID) {
+			return true
+		}
+	}
+	return false
+}
+
+func nativeTrackingRow(id string, status beadslib.Status, created time.Time) *beadslib.Issue {
+	return &beadslib.Issue{
+		ID:        id,
+		Title:     "order:digest",
+		Status:    status,
+		IssueType: "task",
+		Labels:    []string{"order-run:digest", "order-tracking"},
+		CreatedAt: created,
+		NoHistory: true,
+	}
+}
+
+// TestStaleOpenRunsDecodesNoClosedRowOnNativeDolt guards the stale watchdog's
+// read, which runs every 30 s against every swept store. A native Dolt listing
+// cannot exclude a status, so a query that does not name one hands the store
+// every retained closed tracking bead (a week of runs by default) to decode and
+// then drop in Go: the per-tick full-history hydrate sr-dp9o removed from the
+// dispatch index. Each of the sweep's queries names its status, so the reader
+// serves no closed row.
+func TestStaleOpenRunsDecodesNoClosedRowOnNativeDolt(t *testing.T) {
+	created := time.Now().Add(-time.Hour)
+	ledger := &nativeTrackingLedger{rows: []*beadslib.Issue{
+		nativeTrackingRow("gc-done-1", beadslib.StatusClosed, created),
+		nativeTrackingRow("gc-claimed", beadslib.StatusInProgress, created.Add(2*time.Minute)),
+		nativeTrackingRow("gc-done-2", beadslib.StatusClosed, created.Add(time.Minute)),
+		nativeTrackingRow("gc-open", beadslib.StatusOpen, created.Add(time.Minute)),
+	}}
+	store := beads.NewNativeDoltStoreOverStorageForTest(ledger)
+
+	runs, err := ordersStoreOver(store).StaleOpenRuns(time.Now())
+	if err != nil {
+		t.Fatalf("StaleOpenRuns(): %v", err)
+	}
+	if got, want := runIDs(runs), []string{"gc-open", "gc-claimed"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("StaleOpenRuns() IDs = %v, want the open and in_progress beads oldest-first %v", got, want)
+	}
+	if ledger.servedStatus(beadslib.StatusClosed) {
+		t.Fatalf("StaleOpenRuns() had the native store decode closed rows (served %v); every query must name the status it reads", ledger.served)
+	}
+
+	// The control: a query that names no status is served the closed rows, so
+	// the ledger above would have caught one.
+	ledger.served = nil
+	if _, err := store.List(beads.ListQuery{Label: "order-tracking", Live: true, TierMode: beads.TierBoth}); err != nil {
+		t.Fatalf("List(not closed): %v", err)
+	}
+	if !ledger.servedStatus(beadslib.StatusClosed) {
+		t.Fatalf("a not-closed listing was served %v, want the closed rows too; the ledger no longer models the native request", ledger.served)
+	}
+}
+
+// TestNotClosedSweepReadsListAHandParkedTrackingBeadOnNativeDolt pins which
+// reads see a tracking bead parked by hand (blocked, deferred, ...). No Gas City
+// writer parks one, but it still holds the strict open-work gate, which counts
+// every not-closed tracking bead, and native and bd rows read it as "open". A
+// parked status is in neither of the watchdog read's exact queries, so the
+// reads that ask for every not-closed status must list it: the on-demand
+// sweep's, which releases the order once the bead is stale, and the boot orphan
+// sweep's.
+func TestNotClosedSweepReadsListAHandParkedTrackingBeadOnNativeDolt(t *testing.T) {
+	created := time.Now().Add(-time.Hour)
+	ledger := &nativeTrackingLedger{rows: []*beadslib.Issue{
+		nativeTrackingRow("gc-open", beadslib.StatusOpen, created),
+		nativeTrackingRow("gc-parked", beadslib.StatusBlocked, created.Add(time.Minute)),
+	}}
+	st := ordersStoreOver(beads.NewNativeDoltStoreOverStorageForTest(ledger))
+
+	stale, err := st.StaleOpenRuns(time.Now())
+	if err != nil {
+		t.Fatalf("StaleOpenRuns(): %v", err)
+	}
+	if got, want := runIDs(stale), []string{"gc-open"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("StaleOpenRuns() IDs = %v, want %v (a parked status is in neither exact query)", got, want)
+	}
+	notClosed, err := st.StaleNotClosedRuns(time.Now())
+	if err != nil {
+		t.Fatalf("StaleNotClosedRuns(): %v", err)
+	}
+	if got, want := runIDs(notClosed), []string{"gc-open", "gc-parked"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("StaleNotClosedRuns() IDs = %v, want %v: the on-demand sweep's read must list every not-closed status the gate counts, a parked one included", got, want)
+	}
+	orphaned, err := st.OrphanedOpenRuns()
+	if err != nil {
+		t.Fatalf("OrphanedOpenRuns(): %v", err)
+	}
+	if got, want := runIDs(orphaned), []string{"gc-open", "gc-parked"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("OrphanedOpenRuns() IDs = %v, want %v: the boot sweep's read must list every not-closed status, a parked one included", got, want)
 	}
 }

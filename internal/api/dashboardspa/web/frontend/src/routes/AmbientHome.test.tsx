@@ -7,7 +7,7 @@ import type {
   RunSummary,
   SourceState,
 } from 'gas-city-dashboard-shared';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter } from 'react-router';
 import { setActiveCity } from '../api/cityBase';
 import { invalidateKey } from '../api/cache';
 import { NowProvider } from '../contexts/NowContext';
@@ -212,10 +212,7 @@ function censusUnavailableSource(lanes: RunLane[]): SourceState<RunSummary> {
 
 function mount() {
   return render(
-    <MemoryRouter
-      initialEntries={['/']}
-      future={{ v7_relativeSplatPath: true, v7_startTransition: true }}
-    >
+    <MemoryRouter initialEntries={['/']}>
       <NowProvider intervalMs={1_000_000}>
         <AmbientHomePage />
       </NowProvider>

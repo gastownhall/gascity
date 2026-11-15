@@ -304,3 +304,37 @@ func TestApplyOverrides_PreservesNotFoundSubstring(t *testing.T) {
 		})
 	}
 }
+
+// TestApplyOverridesAppliesEveryMatchAfterBadOverride pins that an override
+// naming an absent order (a retired order, a typo) or no order at all neither
+// stops the overrides listed after it nor hides the other bad entries.
+func TestApplyOverridesAppliesEveryMatchAfterBadOverride(t *testing.T) {
+	t.Parallel()
+
+	aa := []Order{{Name: "mol-x"}, {Name: "poll", Interval: "1m"}}
+	err := ApplyOverrides(aa, []Override{
+		{Name: "retired"},
+		{Name: "mol-x", Enabled: boolPtr(false)},
+		{Name: "typo", Rig: RigWildcard},
+		{},
+		{Name: "poll", Interval: strPtr("10s")},
+	})
+	if err == nil {
+		t.Fatal("ApplyOverrides succeeded; want the bad overrides reported")
+	}
+	for _, want := range []string{
+		`orders.overrides[0]: order "retired" not found`,
+		`orders.overrides[2]: order "typo" not found`,
+		`orders.overrides[3]: name is required`,
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing %q", err.Error(), want)
+		}
+	}
+	if aa[0].IsEnabled() {
+		t.Error("mol-x still enabled: the enabled=false override after a bad one was skipped")
+	}
+	if aa[1].Interval != "10s" {
+		t.Errorf("poll Interval = %q, want %q", aa[1].Interval, "10s")
+	}
+}

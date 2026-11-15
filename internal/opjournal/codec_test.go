@@ -505,3 +505,225 @@ func TestArrivalSeqIsNeverOpMetadata(t *testing.T) {
 		t.Fatalf("DecodeOp parsed %s: %v", forged, err)
 	}
 }
+
+// laneSample is sampleOp executed by the conversation lane.
+func laneSample(t *testing.T) Op {
+	t.Helper()
+	op := sampleOp(t)
+	op.Executor = ExecutorLane
+	return op
+}
+
+// deliveredOutcome is a succeeded outcome with a delivery record and a link.
+func deliveredOutcome() Outcome {
+	return Outcome{Arm: ArmSucceeded, Result: Result{
+		Generation: 3, ContextEpoch: 1, Turn: "turn-1",
+		Delivery:  RecordedDelivery{Seq: 4, At: t0, Ack: AckDelivered, MessageID: "42", MessageAt: t0.Add(time.Millisecond)},
+		TurnLink:  LinkCorrelated,
+		TurnBasis: BasisHistoryDiff,
+	}}
+}
+
+func TestLaneFieldsRoundTrip(t *testing.T) {
+	op := laneSample(t)
+	op.Status = StatusAccepted
+	op.Attempt = 3
+	op.RetryAt = t0.Add(time.Minute)
+	op.Failures = 2
+	op.MaybeDelivered = 3
+	op.DeliveryKey = op.ID + ":7"
+	op.LastError = "transient: pane busy"
+	b := encode(t, op)
+	for k, want := range map[string]string{
+		keyRetryAt: formatTime(op.RetryAt), keyFailures: "2", keyMaybeDelivered: "3",
+		keyDeliveryKey: op.ID + ":7", keyLastError: "transient: pane busy",
+	} {
+		if b.Metadata[k] != want {
+			t.Errorf("%s = %q, want %q", k, b.Metadata[k], want)
+		}
+	}
+	got, err := DecodeOp(b)
+	if err != nil || !reflect.DeepEqual(got, op) {
+		t.Fatalf("round trip = %+v, %v\nwant %+v", got, err, op)
+	}
+
+	closedOp := laneSample(t)
+	closedOp.Status = StatusClosed
+	closedOp.Attempt = 1
+	closedOp.Outcome = deliveredOutcome()
+	b = encode(t, closedOp)
+	for k, want := range map[string]string{
+		keyResultDeliverySeq: "4", keyResultDeliveredAt: formatTime(t0), keyResultAck: "delivered",
+		keyResultMessageID: "42", keyResultMessageAt: formatTime(t0.Add(time.Millisecond)),
+		keyResultTurnLink: "correlated", keyResultTurnBasis: "history_diff", keyResultTurn: "turn-1",
+	} {
+		if b.Metadata[k] != want {
+			t.Errorf("%s = %q, want %q", k, b.Metadata[k], want)
+		}
+	}
+	got, err = DecodeOp(b)
+	if err != nil || !reflect.DeepEqual(got, closedOp) {
+		t.Fatalf("round trip = %+v, %v\nwant %+v", got, err, closedOp)
+	}
+}
+
+func TestLaneFieldRefusals(t *testing.T) {
+	cases := map[string]func(*Op){
+		"key without a number":     func(op *Op) { op.DeliveryKey = op.ID },
+		"key number zero":          func(op *Op) { op.DeliveryKey = op.ID + ":0" },
+		"key number not canonical": func(op *Op) { op.DeliveryKey = op.ID + ":01" },
+		"key head not an op id":    func(op *Op) { op.DeliveryKey = "gc-1:1" },
+		"negative failures":        func(op *Op) { op.Failures = -1 },
+		"maybe above attempt":      func(op *Op) { op.MaybeDelivered = op.Attempt + 1 },
+		"negative maybe":           func(op *Op) { op.MaybeDelivered = -1 },
+		"last error bad token":     func(op *Op) { op.LastError = "Bad Token: x" },
+		"last error control":       func(op *Op) { op.LastError = "transient: a\nb" },
+		"last error too long":      func(op *Op) { op.LastError = "transient: " + strings.Repeat("x", maxLastErrorLen) },
+		"lane fields on a legacy op": func(op *Op) {
+			op.Executor = ExecutorLegacyAPI
+			op.Status = StatusSubmitted
+			op.Failures = 1
+		},
+		"retry_at on a legacy op": func(op *Op) {
+			op.Executor = ExecutorLegacy
+			op.Status = StatusSubmitted
+			op.RetryAt = t0
+		},
+		"delivery on a legacy op": func(op *Op) {
+			op.Executor = ExecutorLegacy
+			op.Status = StatusClosed
+			op.Outcome = deliveredOutcome()
+		},
+		"delivery on a failed outcome": func(op *Op) {
+			op.Status = StatusClosed
+			op.Outcome = Outcome{Arm: ArmFailed, Reason: ReasonPoison, Result: Result{Delivery: deliveredOutcome().Result.Delivery}}
+		},
+		"delivery without seq": func(op *Op) {
+			op.Status = StatusClosed
+			op.Outcome = deliveredOutcome()
+			op.Outcome.Result.Delivery.Seq = 0
+		},
+		"delivery without time": func(op *Op) {
+			op.Status = StatusClosed
+			op.Outcome = deliveredOutcome()
+			op.Outcome.Result.Delivery.At = time.Time{}
+		},
+		"unknown ack": func(op *Op) {
+			op.Status = StatusClosed
+			op.Outcome = deliveredOutcome()
+			op.Outcome.Result.Delivery.Ack = "telepathy"
+		},
+		"link without delivery": func(op *Op) {
+			op.Status = StatusClosed
+			op.Outcome = Outcome{Arm: ArmSucceeded, Result: Result{Turn: "t", TurnLink: LinkExact, TurnBasis: BasisRuntimeTurn}}
+		},
+		"link without basis": func(op *Op) {
+			op.Status = StatusClosed
+			op.Outcome = deliveredOutcome()
+			op.Outcome.Result.TurnBasis = ""
+		},
+		"basis without link": func(op *Op) {
+			op.Status = StatusClosed
+			op.Outcome = deliveredOutcome()
+			op.Outcome.Result.TurnLink = ""
+		},
+		"none with a turn": func(op *Op) {
+			op.Status = StatusClosed
+			op.Outcome = deliveredOutcome()
+			op.Outcome.Result.TurnLink = LinkNone
+		},
+		"exact without a turn": func(op *Op) {
+			op.Status = StatusClosed
+			op.Outcome = deliveredOutcome()
+			op.Outcome.Result.Turn = ""
+		},
+		"unknown link": func(op *Op) {
+			op.Status = StatusClosed
+			op.Outcome = deliveredOutcome()
+			op.Outcome.Result.TurnLink = "psychic"
+		},
+		"delivery time past year 9999": func(op *Op) {
+			op.Status = StatusClosed
+			op.Outcome = deliveredOutcome()
+			op.Outcome.Result.Delivery.At = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+		},
+		"message time past year 9999": func(op *Op) {
+			op.Status = StatusClosed
+			op.Outcome = deliveredOutcome()
+			op.Outcome.Result.Delivery.MessageAt = time.Date(10000, 1, 1, 0, 0, 0, 0, time.UTC)
+		},
+		"message time before year 0": func(op *Op) {
+			op.Status = StatusClosed
+			op.Outcome = deliveredOutcome()
+			op.Outcome.Result.Delivery.MessageAt = time.Date(-1, 1, 1, 0, 0, 0, 0, time.UTC)
+		},
+	}
+	for name, change := range cases {
+		op := laneSample(t)
+		op.Status = StatusAccepted
+		op.Attempt = 2
+		change(&op)
+		if _, err := EncodeOp(op); err == nil {
+			t.Errorf("%s: EncodeOp accepted %+v", name, op)
+		}
+	}
+}
+
+func TestLaneFieldsOnLifecycleOpsAreRefused(t *testing.T) {
+	op := lifecycleSample(t)
+	op.Executor = ExecutorLane
+	op.Failures = 1
+	if _, err := EncodeOp(op); err == nil {
+		t.Fatal("EncodeOp accepted a lifecycle op with failures")
+	}
+}
+
+func TestDecodeUnknownAckOrLinkIsUnsupported(t *testing.T) {
+	op := laneSample(t)
+	op.Status = StatusClosed
+	op.Attempt = 1
+	op.Outcome = deliveredOutcome()
+	for _, key := range []string{keyResultAck, keyResultTurnLink} {
+		b := encode(t, op)
+		b.Metadata = maps.Clone(b.Metadata)
+		b.Metadata[key] = "from_the_future"
+		_, err := DecodeOp(b)
+		if !errors.Is(err, ErrUnsupportedValue) || errors.Is(err, ErrCorruptOp) {
+			t.Errorf("%s from_the_future: DecodeOp = %v, want ErrUnsupportedValue and not ErrCorruptOp", key, err)
+		}
+	}
+	b := encode(t, op)
+	b.Metadata = maps.Clone(b.Metadata)
+	b.Metadata[keyMaybeDelivered] = "2"
+	if _, err := DecodeOp(b); !errors.Is(err, ErrCorruptOp) {
+		t.Errorf("maybe_delivered above attempt: DecodeOp = %v, want ErrCorruptOp", err)
+	}
+}
+
+func TestLaneFieldsAreOutsideTheDigest(t *testing.T) {
+	op := laneSample(t)
+	want := RequestDigest(op)
+	op.Status = StatusClosed
+	op.Attempt = 2
+	op.Failures = 1
+	op.MaybeDelivered = 1
+	op.DeliveryKey = op.ID + ":3"
+	op.LastError = "lease_expired"
+	op.Outcome = deliveredOutcome()
+	if got := RequestDigest(op); got != want {
+		t.Fatalf("lane fields changed the request digest: %s != %s", got, want)
+	}
+}
+
+func TestOutcomeEqualComparesInstants(t *testing.T) {
+	a := deliveredOutcome()
+	b := deliveredOutcome()
+	b.Result.Delivery.At = a.Result.Delivery.At.In(time.FixedZone("x", 3600))
+	if !a.Equal(b) {
+		t.Fatal("Equal refused the same instant in another zone")
+	}
+	b.Result.Delivery.Seq++
+	if a.Equal(b) {
+		t.Fatal("Equal accepted another seq")
+	}
+}

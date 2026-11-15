@@ -340,6 +340,22 @@ func TestWokenRowClearsIdleStopPending(t *testing.T) {
 	}
 }
 
+// TestWorkKeptRowClearsIdleStopPending (SESS-616; #8416 review N2). Kills a
+// leftover legacy idle-stop-pending mark surviving on a row v2 keeps running
+// for its work: no drain of the row runs, so the idle stop never ends, and
+// the mark holds the work ladder's gate on the very claim that keeps the
+// row, with no signal. A kept row without the mark is held as before.
+func TestWorkKeptRowClearsIdleStopPending(t *testing.T) {
+	kept := func(e *selectionEntry) { undesired(drainOrphaned)(e); e.OpenWork = &assignedWorkView{BeadID: "w"} }
+	if it, _ := decideDrain(t, nil, kept); it.Kind != "" || it.Reason != decideDrainWorkKept {
+		t.Fatalf("%+v, want the row kept", it)
+	}
+	it, _ := decideDrain(t, []string{"sleep_intent", sleepIntentIdle}, kept)
+	if w := it.folded(); it.Kind != intentRowHeal || it.Reason != decideIdleStopClear || len(w) != 1 || w["sleep_intent"] != "" || !it.Class.Has("sleep_intent") {
+		t.Fatalf("with idle-stop-pending: %+v, want the sleep_intent clear alone", it)
+	}
+}
+
 // TestEmptyGenerationDrainsAtZero. Kills a row with no generation pinned
 // undrained: legacy drains it at generation 0, and so does the request.
 func TestEmptyGenerationDrainsAtZero(t *testing.T) {

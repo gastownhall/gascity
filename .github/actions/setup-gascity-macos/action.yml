@@ -26,7 +26,7 @@ inputs:
   claude-version:
     description: Claude Code version to install with the native binary installer
     required: false
-    default: "2.1.123"
+    default: "2.1.308"
   install-system-deps:
     description: Whether to run brew to install tmux, jq, and flock
     required: false

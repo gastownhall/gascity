@@ -8,13 +8,14 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
 func TestBindingServiceBindAgentNameCreatesAgentBinding(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	svc := fabric.Bindings
 	ref := testConversationRef()
 
@@ -90,7 +91,7 @@ func TestBindingServiceBindAgentNameCreatesAgentBinding(t *testing.T) {
 func TestBindingServiceBindRequiresExactlyOneTarget(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	svc := NewServices(store).Bindings
+	svc := NewServices(beadstest.Mail(store), beadstest.Sessions(store)).Bindings
 	ref := testConversationRef()
 
 	if _, err := svc.Bind(context.Background(), testControllerCaller(), BindInput{
@@ -113,7 +114,7 @@ func TestBindingServiceBindRequiresExactlyOneTarget(t *testing.T) {
 func TestBindingServiceAgentBindingSurvivesSessionRetirement(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	svc := fabric.Bindings
 	agentRef := testConversationRef()
 	sessionRef := testConversationRef()
@@ -138,7 +139,7 @@ func TestBindingServiceAgentBindingSurvivesSessionRetirement(t *testing.T) {
 	// session-keyed binding dies with it; the agent binding and its
 	// membership survive — conversation continuity does not depend on
 	// session continuity.
-	if err := CloseSessionBindings(context.Background(), store, "sess-live-1", testNow().Add(time.Minute)); err != nil {
+	if err := CloseSessionBindings(context.Background(), beadstest.Mail(store), beadstest.Sessions(store), "sess-live-1", testNow().Add(time.Minute)); err != nil {
 		t.Fatalf("CloseSessionBindings: %v", err)
 	}
 
@@ -169,7 +170,7 @@ func TestBindingServiceAgentBindingSurvivesSessionRetirement(t *testing.T) {
 func TestBindingServiceUnbindAgentBindingByConversation(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	svc := fabric.Bindings
 	ref := testConversationRef()
 
@@ -204,7 +205,7 @@ func TestBindingServiceUnbindAgentBindingByConversation(t *testing.T) {
 func TestBindingServiceUnbindByAgentName(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	svc := NewServices(store).Bindings
+	svc := NewServices(beadstest.Mail(store), beadstest.Sessions(store)).Bindings
 	agentRef := testConversationRef()
 	otherRef := testConversationRef()
 	otherRef.ConversationID = "thread-2"
@@ -247,7 +248,7 @@ func TestBindingServiceUnbindByAgentName(t *testing.T) {
 func TestHandleInboundNormalizedAgentBindingRoutesAgentTarget(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := testConversationRef()
 
 	if _, err := fabric.Bindings.Bind(context.Background(), testControllerCaller(), BindInput{

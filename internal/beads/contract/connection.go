@@ -61,6 +61,10 @@ func managedCityHostRequiresLocalPID(host string) bool {
 	return DoltHostIsLocal(host)
 }
 
+// DefaultDoltDatabase is the database a scope's Dolt target names when its
+// .beads/metadata.json pins none: bd's own default.
+const DefaultDoltDatabase = "beads"
+
 // DoltConnectionTarget is the resolved connection info for a beads scope.
 type DoltConnectionTarget struct {
 	Host string
@@ -120,6 +124,15 @@ func (e *InvalidCanonicalConfigError) Unwrap() error {
 
 // ResolveDoltConnectionTarget returns the effective Dolt target for a scope.
 func ResolveDoltConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string) (DoltConnectionTarget, error) {
+	return resolveDoltConnectionTarget(fs, cityRoot, scopeRoot, contractPortReachable)
+}
+
+func resolveDoltConnectionTarget(
+	fs fsys.FS,
+	cityRoot,
+	scopeRoot string,
+	portReachable func(host, port string) bool,
+) (DoltConnectionTarget, error) {
 	cfgPath := filepath.Join(scopeRoot, ".beads", "config.yaml")
 	cfg, ok, err := ReadConfigState(fs, cfgPath)
 	if err != nil {
@@ -152,7 +165,7 @@ func ResolveDoltConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string) (DoltCo
 	target := DoltConnectionTarget{
 		EndpointOrigin: cfg.EndpointOrigin,
 		EndpointStatus: cfg.EndpointStatus,
-		Database:       "beads",
+		Database:       DefaultDoltDatabase,
 		User:           strings.TrimSpace(cfg.DoltUser),
 	}
 	if db, ok, err := ReadDoltDatabase(fs, filepath.Join(scopeRoot, ".beads", "metadata.json")); err != nil {
@@ -192,7 +205,7 @@ func ResolveDoltConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string) (DoltCo
 			}
 			return target, nil
 		}
-		port, err := readManagedRuntimePort(fs, cityRoot)
+		port, err := readManagedRuntimePort(fs, cityRoot, portReachable)
 		if err != nil {
 			// No runtime state of gc's own. A scope whose store bd owns never
 			// has one: bd records the server it started, or the upstream it was
@@ -227,7 +240,15 @@ func ResolveDoltConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string) (DoltCo
 	case EndpointOriginCityCanonical, EndpointOriginExplicit:
 		return populateExternalTarget(target, cfg)
 	case EndpointOriginInheritedCity:
-		return resolveInheritedCityConnectionTarget(fs, cityRoot, scopeRoot, target, cfg, gcCanonicalInheritedRig)
+		return resolveInheritedCityConnectionTarget(
+			fs,
+			cityRoot,
+			scopeRoot,
+			target,
+			cfg,
+			gcCanonicalInheritedRig,
+			portReachable,
+		)
 	default:
 		return DoltConnectionTarget{}, fmt.Errorf("unsupported endpoint origin %q for %s", cfg.EndpointOrigin, cfgPath)
 	}
@@ -677,7 +698,15 @@ func deriveLegacyConnectionConfig(fs fsys.FS, cityRoot, scopeRoot string, cfg Co
 	return derived
 }
 
-func resolveInheritedCityConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string, target DoltConnectionTarget, rigCfg ConfigState, gcCanonicalRig bool) (DoltConnectionTarget, error) {
+func resolveInheritedCityConnectionTarget(
+	fs fsys.FS,
+	cityRoot,
+	scopeRoot string,
+	target DoltConnectionTarget,
+	rigCfg ConfigState,
+	gcCanonicalRig bool,
+	portReachable func(host, port string) bool,
+) (DoltConnectionTarget, error) {
 	// A rig whose store bd owns carries its own binding, so that binding
 	// outranks anything inherited. Without this a bd-owned direct rig resolves
 	// to the city's server, where its database does not exist.
@@ -717,7 +746,7 @@ func resolveInheritedCityConnectionTarget(fs fsys.FS, cityRoot, scopeRoot string
 		if cityState.EndpointStatus != "" {
 			target.EndpointStatus = cityState.EndpointStatus
 		}
-		port, err := readManagedRuntimePort(fs, cityRoot)
+		port, err := readManagedRuntimePort(fs, cityRoot, portReachable)
 		if err != nil {
 			return DoltConnectionTarget{}, err
 		}
@@ -890,14 +919,23 @@ func validateSocketTarget(socket, host, port string) error {
 //
 // Two facts together make that call, and neither is enough alone:
 //
-//   - metadata.json carries a usable persisted server binding naming a host
-//     that is neither loopback nor gc's own managed host. A gc-managed legacy
-//     scope also carries a binding — bd's `init --server` records whichever
-//     server it was pointed at, gc's included — so the host is what separates
-//     "someone else's server" from "a stale copy of gc's".
-//   - config.yaml is not gc-authoritative. gc writes its endpoint keys into
-//     every scope it canonicalises; a scope carrying only bd's template (or no
-//     config at all) has never been claimed.
+//   - metadata.json carries a usable persisted server binding that is not a
+//     record of gc's own managed server. A gc-managed legacy scope also
+//     carries a binding — bd's `init --server` records whichever server it was
+//     pointed at, gc's included. A non-loopback host is gc's only when it is
+//     gc's managed host. A loopback host is no evidence either way, because a
+//     dolt sql-server an operator runs on this machine is spelled exactly like
+//     gc's own; such a binding is gc's only when its port is one gc recorded
+//     for the city's managed Dolt (cityRecordsManagedDoltPort).
+//   - config.yaml carries no claim of gc's. gc stamps its endpoint origin into
+//     every scope it canonicalises, and a stamped config stays gc's even when
+//     it has drifted out of validity (scopeConfigClaimedByGC); a scope
+//     carrying only bd's template (or no config at all) has never been
+//     claimed.
+//
+// gc's runtime record is read last, and only for a loopback binding on a scope
+// gc never claimed, so a record gc cannot read fails only the classification
+// it would decide.
 //
 // Callers use it to keep the boot-time canonicalizer off such a scope. Stamping
 // gc's endpoint origin into it is not merely cosmetic: `gc.endpoint_origin` is
@@ -913,19 +951,50 @@ func ScopeCarriesBdOwnedDirectBinding(fs fsys.FS, cityRoot, scopeRoot, issuePref
 	if err != nil || !ok {
 		return false, err
 	}
-	if !bindingNamesForeignServer(binding) {
+	if !bindingMayNameForeignServer(binding) {
 		return false, nil
+	}
+	claimed, err := scopeConfigClaimedByGC(fs, cityRoot, scopeRoot, issuePrefix)
+	if err != nil || claimed {
+		return false, err
+	}
+	if !DoltHostIsLocal(binding.DoltHost) {
+		return true, nil
+	}
+	recorded, err := cityRecordsManagedDoltPort(fs, cityRoot, binding.DoltPort)
+	if err != nil {
+		return false, err
+	}
+	return !recorded, nil
+}
+
+// scopeConfigClaimedByGC reports whether a scope's config.yaml carries gc's
+// claim. gc.endpoint_origin is gc's own stamp, so a config carrying one is
+// claimed whether or not it still validates: an inherited_city mirror the
+// city's endpoint has moved away from is drift the boot sync re-mirrors, and
+// validating it here would fail the classification before that repair runs. A
+// config without the stamp is claimed when it resolves as authoritative, which
+// is how a legacy gc config carries its endpoint.
+func scopeConfigClaimedByGC(fs fsys.FS, cityRoot, scopeRoot, issuePrefix string) (bool, error) {
+	cfg, ok, err := ReadConfigState(fs, filepath.Join(scopeRoot, ".beads", "config.yaml"))
+	if err != nil || !ok {
+		return false, err
+	}
+	if cfg.EndpointOrigin != "" {
+		return true, nil
 	}
 	resolved, err := ResolveScopeConfigState(fs, cityRoot, scopeRoot, issuePrefix)
 	if err != nil {
 		return false, err
 	}
-	return resolved.Kind != ScopeConfigAuthoritative, nil
+	return resolved.Kind == ScopeConfigAuthoritative, nil
 }
 
-// bindingNamesForeignServer reports whether a persisted binding points at a
-// server outside gc's managed lifecycle.
-func bindingNamesForeignServer(binding ConfigState) bool {
+// bindingMayNameForeignServer reports whether a persisted binding can point at
+// a server outside gc's managed lifecycle, from the binding alone. A loopback
+// host answers true here; ScopeCarriesBdOwnedDirectBinding settles it against
+// gc's runtime record.
+func bindingMayNameForeignServer(binding ConfigState) bool {
 	if strings.TrimSpace(binding.DoltSocket) != "" {
 		return false
 	}
@@ -934,9 +1003,43 @@ func bindingNamesForeignServer(binding ConfigState) bool {
 		return false
 	}
 	if DoltHostIsLocal(host) {
-		return false
+		return true
 	}
 	return !strings.EqualFold(host, managedCityHost())
+}
+
+// managedRuntimeRecordFiles are the records gc's managed Dolt lifecycle keeps
+// for a city under .gc/runtime/packs/dolt: the published runtime state and the
+// provider's own state, which a clean stop leaves behind with running:false.
+var managedRuntimeRecordFiles = []string{"dolt-state.json", "dolt-provider-state.json"}
+
+// cityRecordsManagedDoltPort reports whether port is one gc recorded for the
+// city's own managed Dolt, live or not. A record that exists but cannot be read
+// or parsed is an error naming the file: it is gc's own evidence, and guessing
+// past it would decide who owns a store on nothing.
+func cityRecordsManagedDoltPort(fs fsys.FS, cityRoot, port string) (bool, error) {
+	if strings.TrimSpace(cityRoot) == "" {
+		return false, nil
+	}
+	port = strings.TrimSpace(port)
+	for _, name := range managedRuntimeRecordFiles {
+		path := filepath.Join(cityRoot, ".gc", "runtime", "packs", "dolt", name)
+		data, err := fs.ReadFile(path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return false, fmt.Errorf("reading managed dolt runtime record %s: %w", path, err)
+		}
+		var state managedRuntimeState
+		if err := json.Unmarshal(data, &state); err != nil {
+			return false, fmt.Errorf("parsing managed dolt runtime record %s: %w", path, err)
+		}
+		if state.Port > 0 && strconv.Itoa(state.Port) == port {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // bdExternalBindingTarget resolves the external upstream bd persisted for a
@@ -1057,12 +1160,16 @@ func readProviderOwnedServerPort(fs fsys.FS, scopeRoot string) (string, bool) {
 	return port, true
 }
 
-func readManagedRuntimePort(fs fsys.FS, cityRoot string) (string, error) {
+func readManagedRuntimePort(
+	fs fsys.FS,
+	cityRoot string,
+	portReachable func(host, port string) bool,
+) (string, error) {
 	state, err := readManagedRuntimeState(fs, cityRoot)
 	if err != nil {
 		return "", err
 	}
-	if !validManagedRuntimeState(state, cityRoot) {
+	if !validManagedRuntimeState(state, cityRoot, portReachable) {
 		return "", fmt.Errorf("%w", ErrManagedRuntimeUnavailable)
 	}
 	return strconv.Itoa(state.Port), nil
@@ -1090,7 +1197,11 @@ func readManagedRuntimeState(fs fsys.FS, cityRoot string) (managedRuntimeState, 
 	return state, nil
 }
 
-func validManagedRuntimeState(state managedRuntimeState, cityRoot string) bool {
+func validManagedRuntimeState(
+	state managedRuntimeState,
+	cityRoot string,
+	portReachable func(host, port string) bool,
+) bool {
 	if !state.Running || state.Port <= 0 || state.PID <= 0 {
 		return false
 	}
@@ -1102,7 +1213,7 @@ func validManagedRuntimeState(state managedRuntimeState, cityRoot string) bool {
 	if managedCityHostRequiresLocalPID(host) && !contractPIDAlive(state.PID) {
 		return false
 	}
-	return contractPortReachable(host, strconv.Itoa(state.Port))
+	return portReachable(host, strconv.Itoa(state.Port))
 }
 
 func contractPIDAlive(pid int) bool {

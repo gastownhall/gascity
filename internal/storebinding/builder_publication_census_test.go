@@ -651,6 +651,7 @@ func TestSingleCompositionRoot(t *testing.T) {
 	registrySites := map[string]int{}
 	operationSites := map[string]int{}
 	packageFiles := 0
+	arity := censusRegistryOperationArity(t)
 
 	for _, source := range censusSources(t) {
 		inPackage := filepath.Dir(source.rel) == censusPackageDir
@@ -673,7 +674,7 @@ func TestSingleCompositionRoot(t *testing.T) {
 			continue
 		}
 		for _, call := range censusCalls(file) {
-			if call.selector == "" || !censusRegistryOperations[call.name] {
+			if !censusIsRegistryOperation(call, arity) {
 				continue
 			}
 			operationSites[source.rel]++
@@ -694,6 +695,65 @@ func TestSingleCompositionRoot(t *testing.T) {
 	}
 	if declarations := censusDeclarations(t, "NewProviderRegistry"); declarations != 1 {
 		t.Fatalf("registry has %d constructors, want exactly one", declarations)
+	}
+}
+
+// censusRegistryOperationArity resolves, from the registry's own method
+// declarations, how many arguments each censused registry operation takes. It
+// fails closed when an operation is not declared on the registry, because the
+// census would then match it on name alone or not at all.
+func censusRegistryOperationArity(t *testing.T) map[string]int {
+	t.Helper()
+	methods := packageReceiverFuncDecls(t, "ProviderRegistry")
+	arity := make(map[string]int, len(censusRegistryOperations))
+	for name := range censusRegistryOperations {
+		method, ok := methods[name]
+		if !ok {
+			t.Fatalf("ProviderRegistry declares no %s method; the registry census is resolving the wrong contract", name)
+		}
+		params := 0
+		for _, field := range method.Type.Params.List {
+			if len(field.Names) == 0 {
+				params++
+				continue
+			}
+			params += len(field.Names)
+		}
+		arity[name] = params
+	}
+	return arity
+}
+
+// censusIsRegistryOperation reports whether call has the shape of a registry
+// operation: a method call named for one, with the argument count the
+// registry declares for it.
+func censusIsRegistryOperation(call censusCall, arity map[string]int) bool {
+	if call.selector == "" || !censusRegistryOperations[call.name] {
+		return false
+	}
+	return call.args == arity[call.name]
+}
+
+// TestRegistryCensusTellsAQueueLookupFromARegistryLookup pins the arity rule:
+// the registry's one-argument Lookup is censused wherever it appears, and the
+// nudge queue's two-argument Lookup is not a registry operation at all.
+func TestRegistryCensusTellsAQueueLookupFromARegistryLookup(t *testing.T) {
+	arity := censusRegistryOperationArity(t)
+	source := censusSource{rel: "cmd/gc/other.go", src: []byte(`package main
+import sb "github.com/gastownhall/gascity/internal/storebinding"
+func wire(registry *sb.ProviderRegistry, queue sb.NudgeQueue) {
+	_, _ = registry.Lookup(name)
+	_, _ = queue.Lookup(ids, now)
+	_ = registry.Freeze()
+}`)}
+	got := map[string]int{}
+	for _, call := range censusCalls(censusParse(t, source)) {
+		if censusIsRegistryOperation(call, arity) {
+			got[call.name]++
+		}
+	}
+	if got["Lookup"] != 1 || got["Freeze"] != 1 {
+		t.Fatalf("registry operations found = %v, want the registry's Lookup and Freeze once each and the queue's Lookup not at all", got)
 	}
 }
 
@@ -879,6 +939,10 @@ type censusSource struct {
 type censusCall struct {
 	name     string
 	selector string
+	// args is the call's argument count. A registry operation is the call
+	// shape the registry declares, so an unrelated method that shares a
+	// registry verb's name (NudgeQueue.Lookup) is told apart by its arity.
+	args int
 }
 
 func censusModuleRoot(t *testing.T) string {
@@ -1004,13 +1068,13 @@ func censusCalls(file *ast.File) []censusCall {
 		}
 		switch function := call.Fun.(type) {
 		case *ast.Ident:
-			calls = append(calls, censusCall{name: function.Name})
+			calls = append(calls, censusCall{name: function.Name, args: len(call.Args)})
 		case *ast.SelectorExpr:
 			receiver := "?"
 			if identifier, ok := function.X.(*ast.Ident); ok {
 				receiver = identifier.Name
 			}
-			calls = append(calls, censusCall{name: function.Sel.Name, selector: receiver})
+			calls = append(calls, censusCall{name: function.Sel.Name, selector: receiver, args: len(call.Args)})
 		}
 		return true
 	})

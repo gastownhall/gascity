@@ -69,7 +69,7 @@ func TestBeadsInitTopologyMatrix(t *testing.T) {
 		})
 
 		t.Run("rig-inherits", func(t *testing.T) {
-			out, err := run.GC("rig", "add", rigDir)
+			out, err := run.RigAdd(t, rigDir)
 			if err != nil {
 				t.Fatalf("gc rig add on a %s city: %v\n%s", topo.Name, err, out)
 			}

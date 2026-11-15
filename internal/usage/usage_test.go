@@ -46,8 +46,9 @@ func TestModelAndComputeKeysDoNotCollide(t *testing.T) {
 func TestUsageFactJSONRoundTrip(t *testing.T) {
 	in := Fact{
 		RunID: "run-1", SessionID: "session-1", StepID: "bead-9", Worker: "s-bead-9", City: "demo",
-		Kind:     KindModel,
-		Upstream: "manifold", Model: "coder", Backing: "claude-opus-4-8", Provider: "anthropic",
+		FormulaName: "my-formula",
+		Kind:        KindModel,
+		Upstream:    "manifold", Model: "coder", Backing: "claude-opus-4-8", Provider: "anthropic",
 		InputTokens: 100, OutputTokens: 200, CacheReadTokens: 50, CacheCreationTokens: 10,
 		CostUSDEstimate: 0.0042, Unpriced: false,
 		UpstreamReqID: "msg-abc", At: 1_700_000_000_000,

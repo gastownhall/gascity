@@ -30,25 +30,57 @@ func overrideBootstrapPacks(t *testing.T, names ...string) {
 	t.Cleanup(func() { bootstrap.BootstrapPacks = prev })
 }
 
-func TestReadSkillDescription(t *testing.T) {
+func TestReadSkillFrontmatter(t *testing.T) {
 	t.Parallel()
+	// boundary builds a frontmatter whose line at index lineIdx (the
+	// opening delimiter is index 0) is `name: edge`, padded with
+	// unrelated keys so it straddles the 64-line scan cap.
+	boundary := func(lineIdx int) string {
+		var b strings.Builder
+		b.WriteString("---\n")
+		for i := 1; i < lineIdx; i++ {
+			b.WriteString("pad: x\n")
+		}
+		b.WriteString("name: edge\n---\n")
+		return b.String()
+	}
 	cases := []struct {
 		name string
 		body string
-		want string
+		want skillFrontmatter
 	}{
-		{"plain", "---\nname: x\ndescription: A plan\n---\nbody\n", "A plan"},
-		{"quoted double", "---\nname: x\ndescription: \"A plan\"\n---\n", "A plan"},
-		{"quoted single", "---\nname: x\ndescription: 'A plan'\n---\n", "A plan"},
-		{"no frontmatter", "no dashes here\ndescription: ignored\n", ""},
-		{"missing description", "---\nname: x\n---\nbody\n", ""},
-		{"frontmatter trailing CRLF", "---\r\nname: x\r\ndescription: win\r\n---\r\n", "win"},
-		{"description after closing", "---\nname: x\n---\ndescription: outside\n", ""},
-		{"empty value", "---\ndescription:\n---\n", ""},
+		{"plain", "---\nname: x\ndescription: A plan\n---\nbody\n", skillFrontmatter{Name: "x", Description: "A plan"}},
+		{"quoted double", "---\nname: x\ndescription: \"A plan\"\n---\n", skillFrontmatter{Name: "x", Description: "A plan"}},
+		{"quoted single", "---\nname: x\ndescription: 'A plan'\n---\n", skillFrontmatter{Name: "x", Description: "A plan"}},
+		{"quoted double name", "---\nname: \"gc-work\"\n---\n", skillFrontmatter{Name: "gc-work"}},
+		{"quoted single name", "---\nname: 'gc-work'\n---\n", skillFrontmatter{Name: "gc-work"}},
+		{"no frontmatter", "no dashes here\nname: ignored\ndescription: ignored\n", skillFrontmatter{}},
+		{"opening delimiter not first line", "\n---\nname: x\ndescription: d\n---\n", skillFrontmatter{}},
+		{"missing description", "---\nname: x\n---\nbody\n", skillFrontmatter{Name: "x"}},
+		{"missing name", "---\ndescription: only\n---\n", skillFrontmatter{Description: "only"}},
+		{"frontmatter trailing CRLF", "---\r\nname: x\r\ndescription: win\r\n---\r\n", skillFrontmatter{Name: "x", Description: "win"}},
+		{"description after closing", "---\nname: x\n---\ndescription: outside\n", skillFrontmatter{Name: "x"}},
+		{"name after closing", "---\ndescription: d\n---\nname: outside\n", skillFrontmatter{Description: "d"}},
+		{"empty value", "---\ndescription:\n---\n", skillFrontmatter{}},
 		// Regression for pass-1 Claude review: UTF-8 BOM emitted by
 		// Windows editors / some export pipelines must not blind
 		// the frontmatter detector.
-		{"utf-8 bom", "\ufeff---\nname: x\ndescription: survived bom\n---\n", "survived bom"},
+		{"utf-8 bom", "\ufeff---\nname: x\ndescription: survived bom\n---\n", skillFrontmatter{Name: "x", Description: "survived bom"}},
+		{"name after description", "---\ndescription: d\nname: late\n---\n", skillFrontmatter{Name: "late", Description: "d"}},
+		{"nested name is not the skill name", "---\nmetadata:\n  name: inner\ndescription: d\n---\n", skillFrontmatter{Description: "d"}},
+		{"nested then top-level name", "---\nmetadata:\n  name: inner\nname: outer\n---\n", skillFrontmatter{Name: "outer"}},
+		{"namespace key is not name", "---\nnamespace: ns\n---\n", skillFrontmatter{}},
+		{"first name wins even when empty", "---\nname:\nname: second\n---\n", skillFrontmatter{}},
+		{"first name wins", "---\nname: first\nname: second\n---\n", skillFrontmatter{Name: "first"}},
+		{"first description wins even when empty", "---\ndescription:\ndescription: second\n---\n", skillFrontmatter{}},
+		// The description match stays indentation-tolerant and keeps
+		// block-scalar indicators and inline comments literally.
+		{"indented description", "---\nname: x\n  description: indented\n---\n", skillFrontmatter{Name: "x", Description: "indented"}},
+		{"block scalar indicator", "---\ndescription: >\n  folded text\n---\n", skillFrontmatter{Description: ">"}},
+		{"inline comment kept", "---\ndescription: plan # note\n---\n", skillFrontmatter{Description: "plan # note"}},
+		{"unclosed frontmatter", "---\nname: x\ndescription: d\n", skillFrontmatter{Name: "x", Description: "d"}},
+		{"name on last scanned line", boundary(63), skillFrontmatter{Name: "edge"}},
+		{"name past the scan cap", boundary(64), skillFrontmatter{}},
 	}
 	for _, c := range cases {
 		c := c
@@ -58,14 +90,14 @@ func TestReadSkillDescription(t *testing.T) {
 			if err := os.WriteFile(path, []byte(c.body), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			got := readSkillDescription(path)
+			got := readSkillFrontmatter(path)
 			if got != c.want {
-				t.Fatalf("got %q, want %q", got, c.want)
+				t.Fatalf("got %+v, want %+v", got, c.want)
 			}
 		})
 	}
-	if got := readSkillDescription(filepath.Join(t.TempDir(), "missing.md")); got != "" {
-		t.Errorf("missing file: got %q", got)
+	if got := readSkillFrontmatter(filepath.Join(t.TempDir(), "missing.md")); got != (skillFrontmatter{}) {
+		t.Errorf("missing file: got %+v", got)
 	}
 }
 
@@ -89,6 +121,31 @@ func TestReadSkillDirPopulatesDescription(t *testing.T) {
 	}
 	if entries[0].Description != "Plan the work" {
 		t.Errorf("Description = %q, want %q", entries[0].Description, "Plan the work")
+	}
+	if entries[0].FrontmatterName != "plan" {
+		t.Errorf("FrontmatterName = %q, want %q", entries[0].FrontmatterName, "plan")
+	}
+
+	// A directory basename that differs from the frontmatter name keeps
+	// the basename as Name and reports the frontmatter name separately.
+	renamedRoot := t.TempDir()
+	renamedDir := filepath.Join(renamedRoot, "work-dir")
+	if err := os.MkdirAll(renamedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(renamedDir, "SKILL.md"),
+		[]byte("---\nname: gc-work\ndescription: Working with beads\n---\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	renamed, err := readSkillDir(renamedRoot, "city")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(renamed) != 1 || renamed[0].Name != "work-dir" || renamed[0].FrontmatterName != "gc-work" {
+		t.Fatalf("entries = %+v, want one entry Name=work-dir FrontmatterName=gc-work", renamed)
+	}
+	if renamed[0].Description != "Working with beads" {
+		t.Errorf("Description = %q, want %q", renamed[0].Description, "Working with beads")
 	}
 }
 
@@ -344,6 +401,43 @@ func TestLoadCityCatalogImportedPackSkills(t *testing.T) {
 
 	if len(cat.OwnedRoots) != 2 {
 		t.Fatalf("owned roots = %v, want 2 roots", cat.OwnedRoots)
+	}
+}
+
+// TestLoadCityCatalogImportedSkillKeepsFrontmatterName pins that binding
+// qualification renames only the catalog entry: the imported skill's
+// SKILL.md `name:` survives as FrontmatterName for prompt rendering.
+func TestLoadCityCatalogImportedSkillKeepsFrontmatterName(t *testing.T) {
+	t.Setenv("GC_HOME", "")
+	importedPack := t.TempDir()
+	importedDir := filepath.Join(importedPack, "skills")
+	mkSkill(t, importedDir, "gc-work")
+
+	cat, err := LoadCityCatalog("", config.DiscoveredSkillCatalog{
+		SourceDir:   importedDir,
+		PackDir:     importedPack,
+		PackName:    "core",
+		BindingName: "core",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cat.Entries) != 1 {
+		t.Fatalf("entries = %+v, want 1", cat.Entries)
+	}
+	wantSource, err := filepath.Abs(filepath.Join(importedDir, "gc-work"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := SkillEntry{
+		Name:            "core.gc-work",
+		Source:          wantSource,
+		Origin:          "core",
+		Description:     "test skill",
+		FrontmatterName: "gc-work",
+	}
+	if got := cat.Entries[0]; got != want {
+		t.Fatalf("entry = %+v, want %+v", got, want)
 	}
 }
 
@@ -1394,4 +1488,155 @@ func setupBootstrapHome(t *testing.T, packs map[string][]string) string {
 // so the rest of the helpers don't need to know about that surface.
 func globalRepoCachePathHelper(gcHome, source, commit string) string {
 	return config.GlobalRepoCachePath(gcHome, source, commit)
+}
+
+// sinkSnapshot records every sink entry: a symlink's target, or "file"/"dir".
+func sinkSnapshot(t *testing.T, sink string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	entries, err := os.ReadDir(sink)
+	if os.IsNotExist(err) {
+		return out
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		path := filepath.Join(sink, e.Name())
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch {
+		case info.Mode()&os.ModeSymlink != 0:
+			target, err := os.Readlink(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out[e.Name()] = "-> " + target
+		case info.IsDir():
+			out[e.Name()] = "dir"
+		default:
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out[e.Name()] = "file " + string(data)
+		}
+	}
+	return out
+}
+
+// A DryRun reports what a real pass does, and writes nothing.
+func TestRunDryRunReportsThePassWithoutWriting(t *testing.T) {
+	t.Parallel()
+	src := t.TempDir()
+	for _, name := range []string{"keep", "drift-from", "drift-to", "fresh"} {
+		mkSkill(t, src, name)
+	}
+	sink := filepath.Join(t.TempDir(), "skills")
+	if err := os.MkdirAll(sink, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustSymlink(t, filepath.Join(src, "keep"), filepath.Join(sink, "keep"))
+	mustSymlink(t, filepath.Join(src, "drift-from"), filepath.Join(sink, "drift"))
+	mustSymlink(t, filepath.Join(src, "drift-from"), filepath.Join(sink, "orphan"))
+	if err := os.WriteFile(filepath.Join(sink, "mine"), []byte("user content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	req := Request{
+		SinkDir: sink,
+		Desired: []SkillEntry{
+			{Name: "keep", Source: filepath.Join(src, "keep"), Origin: "city"},
+			{Name: "drift", Source: filepath.Join(src, "drift-to"), Origin: "city"},
+			{Name: "fresh", Source: filepath.Join(src, "fresh"), Origin: "city"},
+			{Name: "mine", Source: filepath.Join(src, "fresh"), Origin: "city"},
+		},
+		OwnedRoots: []string{src},
+	}
+	before := sinkSnapshot(t, sink)
+
+	dry := req
+	dry.DryRun = true
+	plan, err := Run(dry)
+	if err != nil {
+		t.Fatalf("DryRun: %v", err)
+	}
+	if after := sinkSnapshot(t, sink); !reflect.DeepEqual(before, after) {
+		t.Fatalf("DryRun wrote to the sink:\nbefore: %v\nafter:  %v", before, after)
+	}
+	if _, err := os.Stat(filepath.Join(sink, ownershipManifestFile)); !os.IsNotExist(err) {
+		t.Fatalf("DryRun wrote the ownership manifest, stat err = %v", err)
+	}
+
+	applied, err := Run(req)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for name, got := range map[string][2][]string{
+		"Created":      {plan.Created, applied.Created},
+		"Relinked":     {plan.Relinked, applied.Relinked},
+		"Removed":      {plan.Removed, applied.Removed},
+		"Materialized": {plan.Materialized, applied.Materialized},
+	} {
+		if !reflect.DeepEqual(got[0], got[1]) {
+			t.Errorf("%s: DryRun %v, real pass %v", name, got[0], got[1])
+		}
+	}
+	if !reflect.DeepEqual(plan.Created, []string{"fresh"}) || !reflect.DeepEqual(plan.Relinked, []string{"drift"}) || !reflect.DeepEqual(plan.Removed, []string{"orphan"}) {
+		t.Fatalf("plan = created %v, relinked %v, removed %v", plan.Created, plan.Relinked, plan.Removed)
+	}
+	if got := skippedToNames(plan.Skipped); !reflect.DeepEqual(got, []string{"mine"}) {
+		t.Fatalf("plan skipped = %v, want mine", got)
+	}
+}
+
+// A DryRun neither creates a missing sink nor migrates a legacy stub, but it
+// plans the links the real pass would create there.
+func TestRunDryRunPlansMissingSinkAndLegacyStub(t *testing.T) {
+	t.Parallel()
+	src := t.TempDir()
+	mkSkill(t, src, "gc-work")
+	mkSkill(t, src, "alpha")
+	sink := filepath.Join(t.TempDir(), "claude", "skills")
+	missing := filepath.Join(t.TempDir(), "agents", "skills")
+	if err := os.MkdirAll(filepath.Join(sink, "gc-work"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sink, "gc-work", "SKILL.md"), []byte(legacyStubBodies["gc-work"]), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	stub, err := Run(Request{
+		SinkDir:     sink,
+		Desired:     []SkillEntry{{Name: "gc-work", Source: filepath.Join(src, "gc-work"), Origin: "core"}},
+		OwnedRoots:  []string{src},
+		LegacyNames: LegacyStubNames(),
+		DryRun:      true,
+	})
+	if err != nil {
+		t.Fatalf("DryRun with legacy stub: %v", err)
+	}
+	if !reflect.DeepEqual(stub.LegacyMigrated, []string{"gc-work"}) || !reflect.DeepEqual(stub.Created, []string{"gc-work"}) {
+		t.Fatalf("plan = migrated %v, created %v; want gc-work in both", stub.LegacyMigrated, stub.Created)
+	}
+	if info, err := os.Lstat(filepath.Join(sink, "gc-work")); err != nil || !info.IsDir() {
+		t.Fatalf("DryRun touched the legacy stub: info=%v err=%v", info, err)
+	}
+
+	fresh, err := Run(Request{
+		SinkDir:    missing,
+		Desired:    []SkillEntry{{Name: "alpha", Source: filepath.Join(src, "alpha"), Origin: "city"}},
+		OwnedRoots: []string{src},
+		DryRun:     true,
+	})
+	if err != nil {
+		t.Fatalf("DryRun into a missing sink: %v", err)
+	}
+	if !reflect.DeepEqual(fresh.Created, []string{"alpha"}) {
+		t.Fatalf("plan created = %v, want alpha", fresh.Created)
+	}
+	if _, err := os.Stat(missing); !os.IsNotExist(err) {
+		t.Fatalf("DryRun created the sink, stat err = %v", err)
+	}
 }

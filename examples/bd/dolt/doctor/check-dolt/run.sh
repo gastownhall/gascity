@@ -80,11 +80,13 @@ if [ -z "$version" ]; then
     exit 1
 fi
 
-# Require the managed bd/Dolt compatibility floor. This preserves the
+# Require the managed bd/Dolt compatibility floor (internal/doltversion
+# ManagedMin): 2.6.0 is the first Dolt built with a Go toolchain that
+# distrusts the compromised eMudhra CA intermediates. It also preserves the
 # original guard for the upstream GC/writer deadlock fixed in dolthub/dolt
 # commit ccf7bde206 (PR #10876) and keeps managed backup sync on the pinned
 # Dolt release line.
-required="2.1.0"
+required="2.6.0"
 
 parse_dolt_version() {
     local input="$1"
@@ -140,7 +142,7 @@ if [ "$parse_status" -ne 0 ]; then
 fi
 if version_lt "$ver_str" "$required"; then
     echo "dolt $ver_str is too old (need >= $required) — upgrade required"
-    echo "Reason: Gas City requires final Dolt >= $required for managed bd/Dolt; releases before 1.86.2 also have a GC/writer deadlock that hangs sql-server during dolt_backup sync under heavy commit load. See dolthub/dolt commit ccf7bde206."
+    echo "Reason: Gas City requires final Dolt >= $required for managed bd/Dolt: it is the first Dolt built with a Go toolchain that distrusts the compromised eMudhra CA intermediates. Releases before 1.86.2 also have a GC/writer deadlock that hangs sql-server during dolt_backup sync under heavy commit load. See dolthub/dolt commit ccf7bde206."
     echo "Install: https://github.com/dolthub/dolt/releases"
     exit 2
 fi

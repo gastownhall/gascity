@@ -980,3 +980,32 @@ func TestRollbackAfterFailedCreateKeepsWorktreeWithUnreadableProvenance(t *testi
 		t.Errorf("rival worktree removed on inconclusive ownership: %v", statErr)
 	}
 }
+
+// ReadProvenanceAt reads the record Ensure published from the worktree's
+// private git directory, the one `git rev-parse --absolute-git-dir` names from
+// inside it, and reports a directory with no record as fs.ErrNotExist.
+func TestReadProvenanceAtReadsEnsureRecordFromGitDir(t *testing.T) {
+	repo, base := initTestRepo(t)
+	root := t.TempDir()
+	wt := filepath.Join(root, "gc-test")
+	rep, err := Ensure(managedSpec(repo, root, wt, "work/gc-test", base))
+	if err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+	gitDir := strings.TrimSpace(runGit(t, wt, "rev-parse", "--absolute-git-dir"))
+	got, err := ReadProvenanceAt(gitDir)
+	if err != nil {
+		t.Fatalf("ReadProvenanceAt(%q): %v", gitDir, err)
+	}
+	if !provenanceEqual(got, *rep.Provenance) {
+		t.Fatalf("ReadProvenanceAt = %+v, want Ensure's record %+v", got, *rep.Provenance)
+	}
+	if got.BeadID != "gc-test" || got.AttemptID == "" {
+		t.Fatalf("ReadProvenanceAt = %+v, want bead gc-test with an attempt id", got)
+	}
+
+	mainGitDir := strings.TrimSpace(runGit(t, repo, "rev-parse", "--absolute-git-dir"))
+	if _, err := ReadProvenanceAt(mainGitDir); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("ReadProvenanceAt(main checkout git dir) error = %v, want fs.ErrNotExist", err)
+	}
+}

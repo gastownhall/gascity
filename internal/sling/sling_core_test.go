@@ -109,7 +109,7 @@ func TestDoSlingDefaultFormulaFallsBackToPlainRouteWhenMoleculeAttached(t *testi
 	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
 	runner := newFakeRunner()
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
-	deps.Store = store
+	deps = withStore(deps, store)
 
 	a := config.Agent{Name: "builder", MaxActiveSessions: intPtr(1), DefaultSlingFormula: stringPtr("code-review")}
 	opts := SlingOpts{Target: a, BeadOrFormula: "BL-1", NoConvoy: true}
@@ -180,7 +180,7 @@ func TestDoSlingDefaultFormulaFallsBackToPlainRouteWhenMoleculeAttachedGraphV2Fo
 	}
 	runner := newFakeRunner()
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
-	deps.Store = store
+	deps = withStore(deps, store)
 
 	a := config.Agent{Name: "builder", MaxActiveSessions: intPtr(1), DefaultSlingFormula: stringPtr("graph-review")}
 	opts := SlingOpts{Target: a, BeadOrFormula: "BL-1", NoConvoy: true}

@@ -1882,10 +1882,6 @@ func TestFileStoreSaveRenameFails(t *testing.T) {
 // TestFileStoreConcurrentCreateWithFlock verifies that two FileStore instances
 // backed by flock on the same file produce unique IDs (no collisions).
 func TestFileStoreConcurrentCreateWithFlock(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("flock not available on Windows")
-	}
-
 	dir := t.TempDir()
 	beadsPath := filepath.Join(dir, "beads.json")
 	lockPath := beadsPath + ".lock"
@@ -1953,10 +1949,6 @@ func TestFileStoreConcurrentCreateWithFlock(t *testing.T) {
 // This regression covers the default locker path for OS-backed file stores.
 // It fails on branches where callers must inject locking manually.
 func TestFileStoreConcurrentCreateUsesDefaultLock(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("flock not available on Windows")
-	}
-
 	dir := t.TempDir()
 	beadsPath := filepath.Join(dir, "beads.json")
 
@@ -2156,4 +2148,14 @@ func TestFileStoreRevisionContinuityAcrossDowngradeRewrite(t *testing.T) {
 	if again.Revision != reloaded.Revision {
 		t.Fatalf("re-seed not deterministic: %d then %d", reloaded.Revision, again.Revision)
 	}
+}
+
+func TestFileStoreGuardedBatchConformance(t *testing.T) {
+	beadstest.RunGuardedBatchConformance(t, "FileStore", func(st *testing.T) beads.Store {
+		s, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(st.TempDir(), "beads.json"))
+		if err != nil {
+			st.Fatal(err)
+		}
+		return s
+	})
 }

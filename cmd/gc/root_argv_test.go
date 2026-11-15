@@ -88,6 +88,8 @@ func TestRootCommandOptionsSkipPackDiscoveryForBuiltinCommands(t *testing.T) {
 		{name: "scoped mail", args: []string{"--city", "/tmp/city", "mail", "check", "--inject"}, skip: true},
 		{name: "session start prime hook", args: []string{"prime", "--hook", "--hook-format", "codex"}, skip: true},
 		{name: "scoped prime", args: []string{"--city", "/tmp/city", "prime", "worker"}, skip: true},
+		{name: "work query ready read", args: []string{"ready", "--assignee=x", "--json", "--limit=1"}, skip: true},
+		{name: "scoped ready", args: []string{"--city", "/tmp/city", "ready", "--status", "in_progress"}, skip: true},
 		{name: "ordinary", args: []string{"status"}},
 		{name: "metrics is city value", args: []string{"--city", "metrics", "status"}},
 		{name: "bd is city value", args: []string{"--city", "bd", "status"}},
@@ -100,6 +102,7 @@ func TestRootCommandOptionsSkipPackDiscoveryForBuiltinCommands(t *testing.T) {
 		{name: "bd after unknown flag", args: []string{"--unknown", "bd"}},
 		{name: "mail after unknown flag", args: []string{"--unknown", "mail"}},
 		{name: "prime is rig value", args: []string{"--rig=x", "--rig", "prime", "status"}},
+		{name: "ready is city value", args: []string{"--city", "ready", "status"}},
 	}
 
 	for _, test := range tests {

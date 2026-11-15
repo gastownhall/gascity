@@ -2,6 +2,7 @@ package opjournal
 
 import (
 	"errors"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -50,11 +51,11 @@ func TestParseLeaseRefusals(t *testing.T) {
 // bound counts runes, not bytes; a longer lease is refused on encode and reads
 // back as a corrupt row.
 func TestLeaseIsBoundedByTheAssigneeLimit(t *testing.T) {
-	conv := strings.Repeat("é", 100) // 100 runes, 200 bytes
+	conv := strings.Repeat("é", 80) // 80 runes, 160 bytes
 	lease := func(nonce int) Lease {
-		return Lease{Lane: "conversation", Conversation: conv, Generation: 7, Nonce: strings.Repeat("n", nonce), Deadline: t0}
+		return Lease{Lane: "conversation", Conversation: conv, Generation: math.MaxInt64, Nonce: strings.Repeat("n", nonce), Deadline: t0}
 	}
-	atLimit, over := lease(118), lease(119)
+	atLimit, over := lease(120), lease(121)
 	if n := utf8.RuneCountInString(atLimit.String()); n != 255 {
 		t.Fatalf("setup: lease is %d runes, want 255", n)
 	}

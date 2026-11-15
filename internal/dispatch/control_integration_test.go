@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/session"
@@ -150,7 +151,7 @@ func TestSpawnNextAttemptPreservesTopLevelStepContract(t *testing.T) {
 						},
 					})
 
-					if err := spawnNextAttempt(t.Context(), store, control, attempt, ProcessOptions{}); err != nil {
+					if err := spawnNextAttempt(t.Context(), beadstest.Graph(store), control, attempt, ProcessOptions{Work: beadstest.Work(store)}); err != nil {
 						t.Fatalf("spawnNextAttempt: %v", err)
 					}
 
@@ -193,7 +194,7 @@ func TestRetryLifecycleTransientThenPass(t *testing.T) {
 	})
 	mustDep(t, store, control.ID, attempt1.ID, "blocks")
 
-	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	result, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("processRetryControl attempt 1: %v", err)
 	}
@@ -234,7 +235,7 @@ func TestRetryLifecycleTransientThenPass(t *testing.T) {
 	mustClose(t, store, attempt2.ID)
 
 	// Process control again — should see attempt 2 passed.
-	result2, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	result2, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("processRetryControl attempt 2: %v", err)
 	}
@@ -297,7 +298,7 @@ func closedRootRetryControl(t *testing.T, store beads.Store) beads.Bead {
 // which must retry into attempt 2, then closes attempt 2 as passed.
 func retryIntoPassedSecondAttempt(t *testing.T, store beads.Store, controlID string) beads.Bead {
 	t.Helper()
-	result, err := processRetryControl(store, mustGet(t, store, controlID), ProcessOptions{})
+	result, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, controlID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("processRetryControl attempt 1: %v", err)
 	}
@@ -322,7 +323,7 @@ func retryIntoPassedSecondAttempt(t *testing.T, store beads.Store, controlID str
 // evaluate the passed attempt 2: a pass that closes the control.
 func requireSecondAttemptEvaluated(t *testing.T, store beads.Store, controlID string) {
 	t.Helper()
-	result, err := processRetryControl(store, mustGet(t, store, controlID), ProcessOptions{})
+	result, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, controlID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("processRetryControl attempt 2: %v", err)
 	}
@@ -344,7 +345,7 @@ func TestRetryLifecycleClosedWorkflowRootEvaluatesSecondAttemptOnce(t *testing.T
 	requireSecondAttemptEvaluated(t, store, control.ID)
 
 	control = mustGet(t, store, control.ID)
-	if err := spawnNextAttempt(t.Context(), store, control, 2, ProcessOptions{}); err != nil {
+	if err := spawnNextAttempt(t.Context(), beadstest.Graph(store), control, 2, ProcessOptions{Work: beadstest.Work(store)}); err != nil {
 		t.Fatalf("replay spawnNextAttempt attempt 2: %v", err)
 	}
 	all, err := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true, TierMode: beads.TierBoth})
@@ -406,7 +407,7 @@ func TestRetryLifecycleClosedWorkflowRootReturnsDependencyReadError(t *testing.T
 	readErr := errors.New("connection refused")
 	store := failGetStore{Store: base, failID: attempt2.ID, err: readErr}
 	before := mustGet(t, base, control.ID)
-	_, err := processRetryControl(store, before, ProcessOptions{})
+	_, err := processRetryControl(beadstest.Graph(store), before, ProcessOptions{Work: beadstest.Work(store)})
 	if !errors.Is(err, readErr) {
 		t.Fatalf("processRetryControl attempt 2 error = %v, want the dependency read error", err)
 	}
@@ -454,7 +455,7 @@ func TestNestedRalphUnderRetryAdvancesPastSecondIterationThroughProcessControl(t
 	})
 	mustDep(t, store, outer.ID, outerAttempt1.ID, "blocks")
 
-	result, err := ProcessControl(store, mustGet(t, store, outer.ID), opts)
+	result, err := ProcessControl(beadstest.Graph(store), mustGet(t, store, outer.ID), opts)
 	if err != nil {
 		t.Fatalf("ProcessControl outer: %v", err)
 	}
@@ -493,7 +494,7 @@ func TestNestedRalphUnderRetryAdvancesPastSecondIterationThroughProcessControl(t
 		}
 		mustClose(t, store, current.ID)
 
-		result, err := ProcessControl(store, mustGet(t, store, inner.ID), opts)
+		result, err := ProcessControl(beadstest.Graph(store), mustGet(t, store, inner.ID), opts)
 		if err != nil {
 			t.Fatalf("ProcessControl inner after iteration %d: %v", iteration, err)
 		}
@@ -544,7 +545,7 @@ func TestRetryLifecycleAttachedAttemptExemptFromFalseScopeAbort(t *testing.T) {
 	})
 	mustDep(t, store, control.ID, attempt1.ID, "blocks")
 
-	result1, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	result1, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("processRetryControl attempt 1: %v", err)
 	}
@@ -576,7 +577,7 @@ func TestRetryLifecycleAttachedAttemptExemptFromFalseScopeAbort(t *testing.T) {
 	}
 	mustClose(t, store, attempt2.ID)
 
-	result2, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	result2, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("processRetryControl attempt 2: %v", err)
 	}
@@ -619,7 +620,7 @@ func TestRetryLifecycleAttachedAttemptExemptFromFalseScopeAbort(t *testing.T) {
 	})
 	mustDep(t, store, scopeCheck.ID, attempt2.ID, "blocks")
 
-	scResult, err := processScopeCheck(store, mustGet(t, store, scopeCheck.ID), ProcessOptions{})
+	scResult, err := processScopeCheck(beadstest.Graph(store), mustGet(t, store, scopeCheck.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("processScopeCheck: %v", err)
 	}
@@ -656,7 +657,7 @@ func TestRetryLifecycleAttachedAttemptExemptFromFalseScopeAbort(t *testing.T) {
 	mustDep(t, store, finalizer.ID, control.ID, "blocks")
 	mustDep(t, store, finalizer.ID, submission.ID, "blocks")
 
-	finalResult, err := ProcessControl(store, mustGet(t, store, finalizer.ID), ProcessOptions{})
+	finalResult, err := ProcessControl(beadstest.Graph(store), mustGet(t, store, finalizer.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
 	}
@@ -687,7 +688,7 @@ func TestRetryLifecycleRequiredOutputMissingDoesNotPass(t *testing.T) {
 	})
 	mustDep(t, store, control.ID, attempt1.ID, "blocks")
 
-	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	result, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("processRetryControl attempt 1: %v", err)
 	}
@@ -707,7 +708,7 @@ func TestRetryLifecycleRequiredOutputMissingDoesNotPass(t *testing.T) {
 	}
 	mustClose(t, store, attempt2.ID)
 
-	result2, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	result2, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("processRetryControl attempt 2: %v", err)
 	}
@@ -752,7 +753,7 @@ func TestRetryLifecycleExhaustion(t *testing.T) {
 	})
 	mustDep(t, store, control.ID, attempt1.ID, "blocks")
 
-	result1, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	result1, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("round 1: %v", err)
 	}
@@ -771,7 +772,7 @@ func TestRetryLifecycleExhaustion(t *testing.T) {
 	}
 	mustClose(t, store, attempt2.ID)
 
-	result2, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	result2, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("round 2: %v", err)
 	}
@@ -790,7 +791,7 @@ func TestRetryLifecycleExhaustion(t *testing.T) {
 	}
 	mustClose(t, store, attempt3.ID)
 
-	result3, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	result3, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("round 3: %v", err)
 	}
@@ -861,7 +862,7 @@ func TestRetryLifecycleEpochAdvancesPerAttempt(t *testing.T) {
 			mustClose(t, store, attempt.ID)
 		}
 
-		_, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+		_, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 		if err != nil {
 			t.Fatalf("processRetryControl round %d: %v", i, err)
 		}
@@ -1109,7 +1110,7 @@ func TestSpawnNextAttemptPropagatesRoutingMetadata(t *testing.T) {
 	mustDep(t, store, control.ID, attempt1.ID, "blocks")
 
 	// Process — should spawn attempt 2 with routing labels.
-	_, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	_, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("processRetryControl: %v", err)
 	}
@@ -1230,7 +1231,7 @@ max_active_sessions = 1
 	})
 	mustDep(t, store, control.ID, attempt1.ID, "blocks")
 
-	if _, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{CityPath: cityPath}); err != nil {
+	if _, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath}); err != nil {
 		t.Fatalf("processRetryControl: %v", err)
 	}
 
@@ -1247,6 +1248,253 @@ max_active_sessions = 1
 	}
 	if got := attempt2.Metadata["gc.continuation_group"]; got != "" {
 		t.Errorf("attempt 2 gc.continuation_group = %q, want unset for one_shot lifecycle target", got)
+	}
+}
+
+// namedWorkerSessionCity writes a city that imports a pack binding "gs" whose
+// "worker" target is a named session, so the session's qualified identity is
+// gs.worker while a formula addresses it by its bare name. It returns the city
+// path and a sessions store holding that named session's canonical bead. The
+// sessions store is its own store, apart from the graph store a test
+// dispatches over, so a step that routes to the bead can only have resolved
+// it through ProcessOptions.Sessions.
+func namedWorkerSessionCity(t *testing.T) (cityPath string, sessions *beads.MemStore, sessionID string) {
+	t.Helper()
+	dir := t.TempDir()
+	cityPath = filepath.Join(dir, "city")
+	packDir := filepath.Join(dir, "pk")
+	for _, d := range []string{cityPath, packDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`
+[workspace]
+name = "test-city"
+
+[daemon]
+formula_v2 = true
+
+[imports.gs]
+source = "../pk"
+
+[[agent]]
+name = "control-dispatcher"
+max_active_sessions = 1
+`), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(packDir, "pack.toml"), []byte(`
+[pack]
+name = "pk"
+schema = 1
+
+[[agent]]
+name = "worker"
+scope = "city"
+max_active_sessions = 1
+
+[[named_session]]
+template = "worker"
+mode = "on_demand"
+scope = "city"
+`), 0o644); err != nil {
+		t.Fatalf("write pack.toml: %v", err)
+	}
+	cfg, err := loadAttemptRouteConfigE(cityPath)
+	if err != nil {
+		t.Fatalf("load city: %v", err)
+	}
+	spec, ok := session.FindNamedSessionSpec(cfg, cfg.EffectiveCityName(), "gs.worker")
+	if !ok {
+		t.Fatal("fixture: no gs.worker named session spec")
+	}
+	sessions = beads.NewMemStoreFrom(5000, nil, nil)
+	named, err := sessions.Create(beads.Bead{
+		Title:  "worker",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name":              spec.SessionName,
+			"template":                  spec.Agent.QualifiedName(),
+			"configured_named_session":  "true",
+			"configured_named_identity": spec.Identity,
+			"configured_named_mode":     "on_demand",
+			"state":                     "asleep",
+			"continuity_eligible":       "true",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create named session: %v", err)
+	}
+	return cityPath, sessions, named.ID
+}
+
+// TestProcessControlRetryRoutesAttemptThroughSessions pins that a retry's
+// next attempt resolves a named-session target through ProcessOptions.Sessions,
+// on both routing paths. A work step is assigned the canonical session bead's
+// id, which only the sessions store holds. A control step (a nested retry) is
+// stamped with the target as written: without the session it would resolve
+// to the binding-qualified gs.worker instead (applyAttemptControlStepRoute).
+func TestProcessControlRetryRoutesAttemptThroughSessions(t *testing.T) {
+	t.Parallel()
+
+	cityPath, sessions, sessionID := namedWorkerSessionCity(t)
+	store := beads.NewMemStore()
+	spec := &formula.Step{
+		ID:    "run",
+		Title: "Run",
+		Type:  "task",
+		Retry: &formula.RetrySpec{MaxAttempts: 3},
+		Children: []*formula.Step{
+			{ID: "review", Title: "Review", Type: "task", Retry: &formula.RetrySpec{MaxAttempts: 2}, Metadata: map[string]string{"gc.run_target": "worker"}},
+			{ID: "summarize", Title: "Summarize", Type: "task", Metadata: map[string]string{"gc.run_target": "worker"}},
+		},
+	}
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal step spec: %v", err)
+	}
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{"gc.kind": "workflow"},
+	})
+	control := mustCreate(t, store, beads.Bead{
+		Title: "run retry",
+		Metadata: map[string]string{
+			"gc.kind":             "retry",
+			"gc.root_bead_id":     root.ID,
+			"gc.step_ref":         "mol-test.run",
+			"gc.step_id":          "run",
+			"gc.max_attempts":     "3",
+			"gc.source_step_spec": string(specJSON),
+			"gc.control_epoch":    "1",
+		},
+	})
+	attempt1 := makeAttemptBead(t, store, root.ID, "mol-test.run.attempt.1", 1, map[string]string{
+		"gc.outcome":        "fail",
+		"gc.failure_class":  "transient",
+		"gc.failure_reason": "timeout",
+	})
+	mustDep(t, store, control.ID, attempt1.ID, "blocks")
+
+	if _, err := ProcessControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{
+		Work:     beadstest.Work(store),
+		Sessions: beadstest.Sessions(sessions),
+		CityPath: cityPath,
+	}); err != nil {
+		t.Fatalf("ProcessControl(retry): %v", err)
+	}
+
+	work := findAttemptByRef(t, store, root.ID, "mol-test.run.attempt.2.summarize")
+	if work.ID == "" {
+		t.Fatal("attempt 2 work step not created")
+	}
+	if work.Assignee != sessionID {
+		t.Fatalf("attempt 2 work step assignee = %q, want the named session's id %q from ProcessOptions.Sessions", work.Assignee, sessionID)
+	}
+	if got := work.Metadata["gc.routed_to"]; got != "" {
+		t.Fatalf("attempt 2 work step gc.routed_to = %q, want none for a direct session route", got)
+	}
+	nested := findAttemptByRef(t, store, root.ID, "mol-test.run.attempt.2.review")
+	if nested.ID == "" {
+		t.Fatal("attempt 2 nested retry control not created")
+	}
+	if got := nested.Metadata["gc.execution_routed_to"]; got != "worker" {
+		t.Fatalf("attempt 2 nested retry gc.execution_routed_to = %q, want the target as written (worker) for a session resolved through ProcessOptions.Sessions", got)
+	}
+}
+
+// TestProcessControlFanoutRoutesFragmentThroughSessions is the fanout half of
+// TestProcessControlRetryRoutesAttemptThroughSessions: a fragment's work step
+// is assigned the canonical session bead's id, and its control step is
+// stamped with the target as written, both from ProcessOptions.Sessions.
+func TestProcessControlFanoutRoutesFragmentThroughSessions(t *testing.T) {
+	t.Parallel()
+
+	cityPath, sessions, sessionID := namedWorkerSessionCity(t)
+	expansion := `
+formula = "expansion-review"
+type = "expansion"
+version = 2
+contract = "graph.v2"
+
+[[template]]
+id = "{target}.review"
+title = "Review {reviewer}"
+metadata = { "gc.run_target" = "{reviewer}" }
+
+[[template]]
+id = "{target}.recheck"
+title = "Recheck {reviewer}"
+metadata = { "gc.run_target" = "{reviewer}" }
+retry = { max_attempts = 2 }
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "expansion-review.toml"), []byte(expansion), 0o644); err != nil {
+		t.Fatalf("write expansion formula: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "workflow",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":             "workflow",
+			"gc.formula_contract": "graph.v2",
+		},
+	})
+	source := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title:  "survey",
+		Type:   "task",
+		Status: "closed",
+		Metadata: map[string]string{
+			"gc.root_bead_id": workflow.ID,
+			"gc.step_ref":     "demo.survey",
+			"gc.outcome":      "pass",
+			"gc.output_json":  `{"items":[{"name":"worker"}]}`,
+		},
+	})
+	fanout := mustCreateWorkflowBead(t, store, beads.Bead{
+		Title: "Expand fanout for survey",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":                "fanout",
+			"gc.root_bead_id":        workflow.ID,
+			"gc.control_for":         "demo.survey",
+			"gc.execution_routed_to": "worker",
+			"gc.for_each":            "output.items",
+			"gc.bond":                "expansion-review",
+			"gc.bond_vars":           `{"reviewer":"{item.name}"}`,
+			"gc.fanout_mode":         "parallel",
+		},
+	})
+	mustDepAdd(t, store, fanout.ID, source.ID, "blocks")
+
+	result, err := ProcessControl(beadstest.Graph(store), fanout, ProcessOptions{
+		Work:               beadstest.Work(store),
+		Sessions:           beadstest.Sessions(sessions),
+		CityPath:           cityPath,
+		FormulaSearchPaths: []string{cityPath},
+	})
+	if err != nil {
+		t.Fatalf("ProcessControl(fanout spawn): %v", err)
+	}
+	if !result.Processed || result.Action != "fanout-spawn" {
+		t.Fatalf("result = %+v, want processed fanout-spawn", result)
+	}
+	member := findAttemptByRef(t, store, workflow.ID, "expansion-review.demo.survey.item.1.review")
+	if member.ID == "" {
+		t.Fatal("member step not created")
+	}
+	if member.Assignee != sessionID {
+		t.Fatalf("member assignee = %q, want the named session's id %q from ProcessOptions.Sessions", member.Assignee, sessionID)
+	}
+	retry := findAttemptByRef(t, store, workflow.ID, "expansion-review.demo.survey.item.1.recheck")
+	if retry.ID == "" {
+		t.Fatal("member retry control not created")
+	}
+	if got := retry.Metadata["gc.execution_routed_to"]; got != "worker" {
+		t.Fatalf("member retry gc.execution_routed_to = %q, want the target as written (worker) for a session resolved through ProcessOptions.Sessions", got)
 	}
 }
 
@@ -1341,7 +1589,7 @@ max_active_sessions = 1
 		},
 	})
 
-	if err := spawnNextAttempt(t.Context(), store, control, 2, ProcessOptions{CityPath: cityPath}); err != nil {
+	if err := spawnNextAttempt(t.Context(), beadstest.Graph(store), control, 2, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath}); err != nil {
 		t.Fatalf("spawnNextAttempt: %v", err)
 	}
 
@@ -1407,7 +1655,7 @@ max_active_sessions = 1
 	assertSpawnedSpecClosedAndUnrouted(t, store, root.ID, "review-claude")
 	assertSpawnedSpecClosedAndUnrouted(t, store, root.ID, "review-codex")
 
-	claudeSpec, err := findSpecBead(store, claude)
+	claudeSpec, err := findSpecBead(beadstest.Graph(store), claude)
 	if err != nil {
 		t.Fatalf("findSpecBead(review-claude): %v", err)
 	}
@@ -1415,7 +1663,7 @@ max_active_sessions = 1
 		t.Fatalf("review-claude spec status = %q, want closed", claudeSpec.Status)
 	}
 
-	codexSpec, err := findSpecBead(store, codex)
+	codexSpec, err := findSpecBead(beadstest.Graph(store), codex)
 	if err != nil {
 		t.Fatalf("findSpecBead(review-codex): %v", err)
 	}
@@ -1502,7 +1750,7 @@ func TestSpawnNextAttemptRouteConfigLoadFailureIsTransient(t *testing.T) {
 		},
 	})
 
-	err = spawnNextAttempt(t.Context(), store, control, 2, ProcessOptions{CityPath: cityPath})
+	err = spawnNextAttempt(t.Context(), beadstest.Graph(store), control, 2, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err == nil {
 		t.Fatal("spawnNextAttempt: want error on malformed route config, got nil")
 	}
@@ -1558,7 +1806,7 @@ func TestSpawnNextAttemptRoutesDirectSessionRetryControlViaDispatcher(t *testing
 		},
 	})
 
-	if err := spawnNextAttempt(t.Context(), store, control, 2, testProcessOptionsWithControlDispatcher("")); err != nil {
+	if err := spawnNextAttempt(t.Context(), beadstest.Graph(store), control, 2, testProcessOptionsWithControlDispatcher("")); err != nil {
 		t.Fatalf("spawnNextAttempt: %v", err)
 	}
 
@@ -1614,7 +1862,7 @@ func TestSpawnNextAttemptAttachesDrainControl(t *testing.T) {
 		},
 	})
 
-	if err := spawnNextAttempt(t.Context(), store, control, 2, testProcessOptionsWithControlDispatcher("")); err != nil {
+	if err := spawnNextAttempt(t.Context(), beadstest.Graph(store), control, 2, testProcessOptionsWithControlDispatcher("")); err != nil {
 		t.Fatalf("spawnNextAttempt: %v", err)
 	}
 
@@ -1658,7 +1906,7 @@ func TestResolveAttemptRouteBinding_ConfigTargetBeatsCollidingSessionAlias(t *te
 		}},
 	}
 
-	binding, ok := resolveAttemptRouteBinding("gascity/claude", cfg, store)
+	binding, ok := resolveAttemptRouteBinding("gascity/claude", cfg, beadstest.Sessions(store))
 	if !ok {
 		t.Fatal("resolveAttemptRouteBinding did not resolve config target")
 	}
@@ -1705,7 +1953,7 @@ func TestResolveAttemptRouteBinding_NamedSessionTargetUsesCanonicalBeadID(t *tes
 	}
 
 	startCalls := store.calls
-	binding, ok := resolveAttemptRouteBinding("worker", cfg, store)
+	binding, ok := resolveAttemptRouteBinding("worker", cfg, beadstest.Sessions(store))
 	if !ok {
 		t.Fatal("resolveAttemptRouteBinding did not resolve named target")
 	}
@@ -1753,7 +2001,7 @@ func TestResolveAttemptRouteBinding_NamedSessionTargetWithoutCanonicalBeadUsesMe
 		}},
 	}
 
-	binding, ok := resolveAttemptRouteBinding("worker", cfg, store)
+	binding, ok := resolveAttemptRouteBinding("worker", cfg, beadstest.Sessions(store))
 	if !ok {
 		t.Fatal("resolveAttemptRouteBinding did not resolve named target")
 	}
@@ -1784,7 +2032,7 @@ func TestApplyAttemptStepRoute_SingleSessionConfigAgentRoutesUnassigned(t *testi
 		}},
 	}
 
-	binding, ok := resolveAttemptRouteBinding("gc.run-operator", cfg, store)
+	binding, ok := resolveAttemptRouteBinding("gc.run-operator", cfg, beadstest.Sessions(store))
 	if !ok {
 		t.Fatal("resolveAttemptRouteBinding did not resolve config-agent target")
 	}
@@ -1793,7 +2041,7 @@ func TestApplyAttemptStepRoute_SingleSessionConfigAgentRoutesUnassigned(t *testi
 	}
 
 	step := &formula.RecipeStep{ID: "s1", Metadata: map[string]string{}}
-	applyAttemptStepRoute(step, "gc.run-operator", cfg, store)
+	applyAttemptStepRoute(step, "gc.run-operator", cfg, beadstest.Sessions(store))
 	if step.Assignee != "" {
 		t.Fatalf("Assignee = %q, want empty (delivered via gc.routed_to; session binds on claim)", step.Assignee)
 	}
@@ -1830,7 +2078,7 @@ func TestApplyAttemptControlStepRoute_ConfiguredControlDispatcherUsesMetadataRou
 			"gc.routed_to": "stale-route",
 		},
 	}
-	if err := applyAttemptControlStepRoute(step, "gascity/claude", cfg, beads.NewMemStore()); err != nil {
+	if err := applyAttemptControlStepRoute(step, "gascity/claude", cfg, beadstest.Sessions(beads.NewMemStore())); err != nil {
 		t.Fatalf("applyAttemptControlStepRoute: %v", err)
 	}
 
@@ -1884,7 +2132,7 @@ func TestApplyAttemptControlStepRoute_UsesExecutionRigContextForDirectSessionTar
 		},
 	}
 
-	if err := applyAttemptControlStepRoute(step, sessionBead.ID, cfg, store); err != nil {
+	if err := applyAttemptControlStepRoute(step, sessionBead.ID, cfg, beadstest.Sessions(store)); err != nil {
 		t.Fatalf("applyAttemptControlStepRoute: %v", err)
 	}
 
@@ -1939,7 +2187,7 @@ func TestApplyAttemptControlStepRoute_UsesRigDispatcherForRigExecution(t *testin
 			"gc.routed_to": "stale-route",
 		},
 	}
-	if err := applyAttemptControlStepRoute(step, "fixture/superpowers.brainstorming", cfg, beads.NewMemStore()); err != nil {
+	if err := applyAttemptControlStepRoute(step, "fixture/superpowers.brainstorming", cfg, beadstest.Sessions(beads.NewMemStore())); err != nil {
 		t.Fatalf("applyAttemptControlStepRoute: %v", err)
 	}
 
@@ -1979,7 +2227,7 @@ func TestApplyAttemptControlStepRoute_UsesOwningStoreScopeOverExecutionScope(t *
 		"gc.routed_to":      "stale-route",
 	}}
 
-	if err := applyAttemptControlStepRoute(step, "city-worker", cfg, beads.NewMemStore()); err != nil {
+	if err := applyAttemptControlStepRoute(step, "city-worker", cfg, beadstest.Sessions(beads.NewMemStore())); err != nil {
 		t.Fatalf("applyAttemptControlStepRoute: %v", err)
 	}
 	if got := step.Metadata["gc.routed_to"]; got != "fixture/core.control-dispatcher" {
@@ -2014,7 +2262,7 @@ func TestApplyAttemptControlStepRoute_UsesCityStoreScopeOverRigExecution(t *test
 		beadmeta.RootStoreRefMetadataKey: "city:maintainer-city",
 	}}
 
-	if err := applyAttemptControlStepRoute(step, "fixture/worker", cfg, beads.NewMemStore()); err != nil {
+	if err := applyAttemptControlStepRoute(step, "fixture/worker", cfg, beadstest.Sessions(beads.NewMemStore())); err != nil {
 		t.Fatalf("applyAttemptControlStepRoute: %v", err)
 	}
 	if got := step.Metadata[beadmeta.RoutedToMetadataKey]; got != "core.control-dispatcher" {
@@ -2039,7 +2287,7 @@ func TestApplyAttemptControlStepRoute_RejectsMissingOwningStoreDispatcher(t *tes
 		"gc.root_store_ref": "rig:fixture",
 	}}
 
-	err := applyAttemptControlStepRoute(step, "city-worker", cfg, beads.NewMemStore())
+	err := applyAttemptControlStepRoute(step, "city-worker", cfg, beadstest.Sessions(beads.NewMemStore()))
 	if err == nil || !strings.Contains(err.Error(), `control-dispatcher agent for rig "fixture" not found`) {
 		t.Fatalf("applyAttemptControlStepRoute error = %v, want missing fixture dispatcher", err)
 	}
@@ -2134,7 +2382,7 @@ max_active_sessions = 1
 		},
 	})
 
-	if err := spawnNextAttempt(t.Context(), store, control, 2, ProcessOptions{CityPath: cityPath}); err != nil {
+	if err := spawnNextAttempt(t.Context(), beadstest.Graph(store), control, 2, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath}); err != nil {
 		t.Fatalf("spawnNextAttempt: %v", err)
 	}
 
@@ -2178,7 +2426,7 @@ func TestApplyAttemptControlStepRoute_MinimalRigScopedDispatcherUsesMetadataRout
 			"gc.routed_to": "stale-route",
 		},
 	}
-	if err := applyAttemptControlStepRoute(step, "gascity/claude", cfg, beads.NewMemStore()); err != nil {
+	if err := applyAttemptControlStepRoute(step, "gascity/claude", cfg, beadstest.Sessions(beads.NewMemStore())); err != nil {
 		t.Fatalf("applyAttemptControlStepRoute: %v", err)
 	}
 
@@ -2251,7 +2499,7 @@ func TestApplyAttemptControlStepRoute_KeepsControlBeadsOnDispatcherForNamedExecu
 		Metadata: map[string]string{"gc.kind": "scope-check"},
 	}
 
-	if err := applyAttemptControlStepRoute(step, "worker", cfg, store); err != nil {
+	if err := applyAttemptControlStepRoute(step, "worker", cfg, beadstest.Sessions(store)); err != nil {
 		t.Fatalf("applyAttemptControlStepRoute: %v", err)
 	}
 
@@ -2339,7 +2587,7 @@ func TestRetryIdempotencyKeyPreventsDoubleSpawn(t *testing.T) {
 	mustDep(t, store, control.ID, attempt1.ID, "blocks")
 
 	// Process once — spawns attempt 2.
-	_, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	_, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("first process: %v", err)
 	}
@@ -2352,7 +2600,7 @@ func TestRetryIdempotencyKeyPreventsDoubleSpawn(t *testing.T) {
 	// processRetryControl with the same attempt (attempt 1 still closed, attempt 2
 	// still open) will find attempt 2 as the latest and see it's not closed.
 	// This verifies the pending guard.
-	_, err = processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	_, err = processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if !errors.Is(err, ErrControlPending) {
 		t.Fatalf("second process error = %v, want %v", err, ErrControlPending)
 	}

@@ -179,6 +179,11 @@ func TestLoadBaseReadsSpecAtGitRef(t *testing.T) {
 	isolateGit(t)
 	t.Chdir(t.TempDir())
 	runGit(t, "init", "--quiet")
+	// internal/testenv's git template must reach this repo, or each commit below
+	// starts detached auto-maintenance that races t.TempDir's cleanup (ga-zoe1wr).
+	if got := strings.TrimSpace(runGit(t, "config", "--local", "--get", "maintenance.auto")); got != "false" {
+		t.Fatalf("maintenance.auto in the fixture repo = %q, want %q", got, "false")
+	}
 	runGit(t, "config", "user.name", "openapi-breaking test")
 	runGit(t, "config", "user.email", "test@example.com")
 	commitSpec := func(content, msg string) string {
@@ -219,12 +224,14 @@ func TestLoadBaseReadsSpecAtGitRef(t *testing.T) {
 // isolateGit points every git subprocess in the test, loadBase's included, at
 // the repository in the working directory. A test run from a git hook
 // inherits GIT_DIR, GIT_INDEX_FILE, and friends for the outer repository.
-// System and global git config are ignored too.
+// System and global git config are ignored too. GIT_TEMPLATE_DIR is kept:
+// internal/testenv points it at the template that turns git auto-maintenance
+// off in the repos this test makes (ga-zoe1wr).
 func isolateGit(t *testing.T) {
 	t.Helper()
 	for _, kv := range os.Environ() {
 		key, _, _ := strings.Cut(kv, "=")
-		if !strings.HasPrefix(key, "GIT_") {
+		if !strings.HasPrefix(key, "GIT_") || key == "GIT_TEMPLATE_DIR" {
 			continue
 		}
 		t.Setenv(key, "") // restores the inherited value after the test

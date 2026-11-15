@@ -214,3 +214,29 @@ func TestSocketPoolSharesTheIdleBound(t *testing.T) {
 		}
 	}
 }
+
+// TestOpenPrivateIsOutsideTheRegistry: a private handle is a fresh
+// single-connection pool the registry neither holds nor hands out, so
+// Shutdown leaves it open and Open never returns it.
+func TestOpenPrivateIsOutsideTheRegistry(t *testing.T) {
+	t.Cleanup(Shutdown)
+	before := Len()
+	private, err := OpenPrivate("127.0.0.1", "3306", "root", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = private.Close() })
+	if Len() != before {
+		t.Fatalf("OpenPrivate added a registry entry: %d -> %d", before, Len())
+	}
+	if got := private.Stats().MaxOpenConnections; got != 1 {
+		t.Fatalf("MaxOpenConnections = %d, want 1", got)
+	}
+	shared, err := Open("127.0.0.1", "3306", "root", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if shared == private {
+		t.Fatal("Open handed out the private handle")
+	}
+}

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -1011,7 +1012,7 @@ func newSessionChaosHarness(t *testing.T, seed int64) *sessionChaosHarness {
 	return &sessionChaosHarness{
 		t:        t,
 		env:      env,
-		manager:  sessionpkg.NewManagerWithOptions(env.store, env.sp, sessionpkg.WithClock(env.clk), sessionpkg.WithCityPath(env.city)),
+		manager:  sessionpkg.NewManagerWithOptions(beadstest.Sessions(env.store), env.sp, sessionpkg.WithClock(env.clk), sessionpkg.WithCityPath(env.city)),
 		rng:      rand.New(rand.NewSource(seed)), //nolint:gosec // deterministic test chaos, not security-sensitive.
 		seed:     seed,
 		template: template,

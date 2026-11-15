@@ -7,7 +7,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/fsys"
-	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
@@ -41,7 +40,7 @@ func TestStatusOnASuspendedCityReadsNoStore(t *testing.T) {
 	rig := &readCountingStore{Store: beads.NewMemStore()}
 	state.cityBeadStore = city
 	state.stores = map[string]beads.Store{"myrig": rig}
-	state.cityMailProv = beadmail.New(city)
+	state.cityMailProv = newTestBeadMail(city)
 	suspended := true
 	if err := suspensionstate.SetCitySuspended(fsys.OSFS{}, state.cityPath, &suspended); err != nil {
 		t.Fatal(err)

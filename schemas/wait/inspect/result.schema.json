@@ -54,6 +54,9 @@
         "registered_epoch": {
           "type": "string"
         },
+        "registered_reset_pending": {
+          "type": "boolean"
+        },
         "delivery_attempt": {
           "type": "string"
         },

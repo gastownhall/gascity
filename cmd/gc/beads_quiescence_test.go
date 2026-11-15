@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
@@ -114,6 +115,125 @@ func TestBeadsQuiescenceRetiresOnlyAfterInFlightStoreWorkFinishes(t *testing.T) 
 	cr.enterBeadsQuiescenceIfDue(context.Background())
 	if ops := providerOpsLogged(t, logPath); ops != "stop" {
 		t.Fatalf("provider ops = %q, want one stop once the store work finished", ops)
+	}
+}
+
+// leaseClearGate is a session store whose runtime lease clear (the write a
+// RuntimeLease's Release makes) blocks until released, so a test can hold an
+// async stop between its kill and that write.
+type leaseClearGate struct {
+	*beads.MemStore
+	cleared chan struct{} // closed when the clear is first attempted
+	release chan struct{} // closed to let it land
+	once    sync.Once
+}
+
+func newLeaseClearGate(mem *beads.MemStore) *leaseClearGate {
+	return &leaseClearGate{MemStore: mem, cleared: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (g *leaseClearGate) SetMetadataBatch(id string, kvs map[string]string) error {
+	if holder, ok := kvs[sessionpkg.RuntimeLeaseHolderKey]; ok && holder == "" {
+		g.once.Do(func() { close(g.cleared) })
+		<-g.release
+	}
+	return g.MemStore.SetMetadataBatch(id, kvs)
+}
+
+// A quiescent city retires its pairs only once its off-tick session lifecycle
+// work has finished. An async drain-ack stop confirms its runtime dead, which
+// empties the provider's session list, and only then releases its runtime
+// lease, a write to the session store. Retired before that write, the pair is
+// restarted by it and stays up until the next retire stops it again
+// (acceptance: TestProxiedSuspensionIsQuiescenceSuspendedCity, whose window
+// caught the lease clear's update and show, then a second dolt stop;
+// ga-v3bt9i).
+func TestBeadsQuiescenceRetiresOnlyAfterAnAsyncDrainAckStopReleasesItsLease(t *testing.T) {
+	cr, sp, _, logPath := quiescenceRuntime(t, "")
+	t.Setenv("GC_SUSPENDED", "1")
+	cr.cs = &controllerState{beadsQuiescent: new(atomic.Bool)}
+	oldPoke := drainAckAsyncStopPokeController
+	drainAckAsyncStopPokeController = func(string, reconcilekey.Key) error { return nil }
+	t.Cleanup(func() { drainAckAsyncStopPokeController = oldPoke })
+
+	mem := beads.NewMemStore()
+	stop := drainAckStopPendingForTest(t, mem, "gc-worker", "worker", "")
+	store := newLeaseClearGate(mem)
+	if err := sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatal(err)
+	}
+	queueDrainAckAsyncStop(cr.cityPath, store, sp, &config.City{}, stop, "worker", nil, &cr.asyncStops, nil, io.Discard)
+	t.Cleanup(func() { // never leave the stop blocked behind a failed assertion
+		select {
+		case <-store.release:
+		default:
+			close(store.release)
+		}
+		cr.asyncStops.wait(5 * time.Second)
+	})
+	select {
+	case <-store.cleared:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the async drain-ack stop never reached its lease release")
+	}
+	if running, _ := sp.ListRunning(""); len(running) != 0 {
+		t.Fatalf("runtime still listed after the stop confirmed it dead: %v", running)
+	}
+
+	for i := 0; i < 3; i++ {
+		if !cr.enterBeadsQuiescenceIfDue(context.Background()) {
+			t.Fatal("a suspended city with nothing running is not quiescent")
+		}
+	}
+	if ops := providerOpsLogged(t, logPath); ops != "" {
+		t.Fatalf("provider ops while an async drain-ack stop had its lease release still to write = %q, want none", ops)
+	}
+
+	close(store.release)
+	if !cr.asyncStops.wait(5 * time.Second) {
+		t.Fatal("the async drain-ack stop did not finish after its lease release landed")
+	}
+	cr.enterBeadsQuiescenceIfDue(context.Background())
+	if ops := providerOpsLogged(t, logPath); ops != "" {
+		t.Fatalf("provider ops on the first tick with no lifecycle work in flight = %q, want none yet", ops)
+	}
+	cr.enterBeadsQuiescenceIfDue(context.Background())
+	if ops := providerOpsLogged(t, logPath); ops != "stop" {
+		t.Fatalf("provider ops = %q, want one stop once the async stop finished", ops)
+	}
+}
+
+// An async start dispatched before the city went quiescent holds the retire
+// as an async stop does: it holds the runtime lease from dispatch through its
+// commit, and its runtime is not yet listed while it launches, so the city
+// reads quiescent while its PreWake commit and lease release are still to be
+// written.
+func TestBeadsQuiescenceRetiresOnlyAfterInFlightAsyncStartsFinish(t *testing.T) {
+	cr, _, _, logPath := quiescenceRuntime(t, "")
+	t.Setenv("GC_SUSPENDED", "1")
+	cr.cs = &controllerState{beadsQuiescent: new(atomic.Bool)}
+
+	done, ok := cr.asyncStarts.start()
+	if !ok {
+		t.Fatal("the async start tracker refused a start")
+	}
+	for i := 0; i < 3; i++ {
+		if !cr.enterBeadsQuiescenceIfDue(context.Background()) {
+			t.Fatal("a suspended city with nothing running is not quiescent")
+		}
+	}
+	if ops := providerOpsLogged(t, logPath); ops != "" {
+		t.Fatalf("provider ops while an async start was in flight = %q, want none", ops)
+	}
+
+	done()
+	cr.enterBeadsQuiescenceIfDue(context.Background())
+	if ops := providerOpsLogged(t, logPath); ops != "" {
+		t.Fatalf("provider ops on the first tick with no start in flight = %q, want none yet", ops)
+	}
+	cr.enterBeadsQuiescenceIfDue(context.Background())
+	if ops := providerOpsLogged(t, logPath); ops != "stop" {
+		t.Fatalf("provider ops = %q, want one stop once the start finished", ops)
 	}
 }
 

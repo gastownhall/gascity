@@ -102,8 +102,8 @@ func (f *embeddedPinsFixture) run(args ...string) (string, error) {
 // TestCheckEmbeddedPins pins the release-time guard that keeps the versions gc
 // embeds from silently drifting behind the latest release: the bundled
 // core/bd/dolt pin must name a commit with the embedded content, examples must
-// not carry a superseded bundled pin, and bd/dolt must match the latest beads
-// release and the Dolt version it qualifies.
+// not carry a superseded bundled pin, bd must match the latest beads release,
+// and Dolt must be at least the version that release qualifies.
 func TestCheckEmbeddedPins(t *testing.T) {
 	t.Run("current pins pass", func(t *testing.T) {
 		f := newEmbeddedPinsFixture(t)
@@ -183,10 +183,31 @@ func TestCheckEmbeddedPins(t *testing.T) {
 		if err == nil {
 			t.Fatalf("stale bd/dolt pins passed:\n%s", out)
 		}
-		for _, want := range []string{"BD_VERSION=v1.3.0, latest beads release is v1.3.1", "DOLT_VERSION=2.1.7, beads v1.3.1 qualifies Dolt 2.2.0"} {
+		for _, want := range []string{"BD_VERSION=v1.3.0, latest beads release is v1.3.1", "DOLT_VERSION=2.1.7 is older than Dolt 2.2.0, which beads v1.3.1 qualifies"} {
 			if !strings.Contains(out, want) {
 				t.Errorf("output missing %q:\n%s", want, out)
 			}
+		}
+	})
+
+	// Gas City's own Dolt floor (TestDoltVersionPins) can sit above the Dolt
+	// beads qualifies: deps.env pins 2.6.0 while beads v1.3.4 qualifies 2.2.0.
+	t.Run("a Dolt newer than beads qualifies passes", func(t *testing.T) {
+		f := newEmbeddedPinsFixture(t)
+		f.write("deps.env", "DOLT_VERSION=2.6.0\nBD_VERSION=v1.3.1\n")
+		f.commit("newer dolt")
+		if out, err := f.run("--skip-bundled"); err != nil {
+			t.Fatalf("a Dolt above the qualified 2.2.0 failed: %v\n%s", err, out)
+		}
+	})
+
+	t.Run("a Dolt that is not a release version fails", func(t *testing.T) {
+		f := newEmbeddedPinsFixture(t)
+		f.write("deps.env", "DOLT_VERSION=2.6.0-rc1\nBD_VERSION=v1.3.1\n")
+		f.commit("pre-release dolt")
+		out, err := f.run("--skip-bundled")
+		if err == nil || !strings.Contains(out, "DOLT_VERSION=2.6.0-rc1 is not a release version") {
+			t.Fatalf("err = %v, want a non-release Dolt failure:\n%s", err, out)
 		}
 	})
 }

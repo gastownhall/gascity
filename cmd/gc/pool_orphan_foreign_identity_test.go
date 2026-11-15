@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -1010,11 +1011,11 @@ func TestReleaseOrphanedPoolAssignments_ProvenanceReadBudget(t *testing.T) {
 	// answers to, and one whose closed record answers under its alias.
 	unit := &provenanceLookupStore{Store: beads.NewMemStore()}
 	seedSeatSessionBead(t, unit.Store, false, map[string]string{"alias": "repo/nux"})
-	if found, err := session.HasRecordAnsweringTo(unit, "repo/dalinar"); err != nil || found {
+	if found, err := session.HasRecordAnsweringTo(beadstest.Sessions(unit), "repo/dalinar"); err != nil || found {
 		t.Fatalf("fixture: miss lookup = %v, %v; want no record", found, err)
 	}
 	missReads := len(unit.closedQueries)
-	if found, err := session.HasRecordAnsweringTo(unit, "repo/nux"); err != nil || !found {
+	if found, err := session.HasRecordAnsweringTo(beadstest.Sessions(unit), "repo/nux"); err != nil || !found {
 		t.Fatalf("fixture: hit lookup = %v, %v; want the seat's record", found, err)
 	}
 	hitReads := len(unit.closedQueries) - missReads

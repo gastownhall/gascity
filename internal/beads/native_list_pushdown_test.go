@@ -3,6 +3,7 @@ package beads
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -89,6 +90,14 @@ func TestNativeListPlanPushesEveryExactFilter(t *testing.T) {
 			name:  "gc open is every bd status but two, so it stays client-side",
 			query: ListQuery{Status: "open", Label: "gc:session"},
 			want:  []planShape{{}},
+		},
+		{
+			// sr-i54yd: a Live read is owed the backing's raw answer, as BdStore's
+			// --status=open gives it, so a parked (blocked/deferred) bead is not
+			// live work to a lifecycle gate.
+			name:  "a Live open is bd's raw open, pushed",
+			query: ListQuery{Status: "open", Assignee: "worker", Live: true},
+			want:  []planShape{{assignee: "worker", status: "open"}},
 		},
 		{
 			name:  "a registered non-infra type is pushed",
@@ -688,6 +697,7 @@ func randomPushdownQuery(rng *rand.Rand) ListQuery {
 		IncludeClosed: rng.Intn(2) == 0,
 		TierMode:      TierMode(rng.Intn(3)),
 		AllowScan:     true,
+		Live:          rng.Intn(2) == 0,
 	}
 	switch rng.Intn(4) {
 	case 0:
@@ -716,7 +726,8 @@ func randomPushdownQuery(rng *rand.Rand) ListQuery {
 // THE PROPERTY: for any query, the pushed-down store answers exactly what
 // ApplyListQuery answers over every row, including the pinned rows the request
 // must keep lifting and the durable infra-typed rows a pushed infra type would
-// lose.
+// lose. A Live "open" is answered over the rows whose RAW status is open
+// (nativeListPushesRawOpen).
 func TestNativeDoltStoreListPushdownAnswersTheUnpushedQuery(t *testing.T) {
 	rng := rand.New(rand.NewSource(20261010))
 	for round := 0; round < 40; round++ {
@@ -725,13 +736,14 @@ func TestNativeDoltStoreListPushdownAnswersTheUnpushedQuery(t *testing.T) {
 		store := newNativeDoltStoreForTest(&nativeDoltReaderSpy{list: reader.list})
 
 		all := make([]Bead, 0, len(rows))
+		rawOpen := make(map[string]bool, len(rows))
 		for _, issue := range rows {
 			bead, err := beadFromNativeIssue(cloneNativeIssueForTest(issue))
 			if err != nil {
 				t.Fatalf("beadFromNativeIssue: %v", err)
 			}
-			bead.Revision = 0
 			all = append(all, bead)
+			rawOpen[issue.ID] = issue.Status == beadslib.StatusOpen
 		}
 		// The unpushed answer is one unfiltered request's rows, in the order
 		// that request answers in, through ApplyListQuery.
@@ -745,7 +757,16 @@ func TestNativeDoltStoreListPushdownAnswersTheUnpushedQuery(t *testing.T) {
 			if err != nil {
 				t.Fatalf("List(%+v): %v", query, err)
 			}
-			want := ApplyListQuery(all, query)
+			candidates := all
+			if nativeListPushesRawOpen(query) {
+				candidates = nil
+				for _, b := range all {
+					if rawOpen[b.ID] {
+						candidates = append(candidates, b)
+					}
+				}
+			}
+			want := ApplyListQuery(candidates, query)
 			if gotIDs, wantIDs := beadIDsInOrder(got), beadIDsInOrder(want); !slices.Equal(gotIDs, wantIDs) {
 				t.Fatalf("List(%+v)\n got  %v\n want %v", query, gotIDs, wantIDs)
 			}
@@ -767,6 +788,270 @@ func beadIDsInOrder(items []Bead) []string {
 		ids = append(ids, b.ID)
 	}
 	return ids
+}
+
+// sr-i54yd: a seat whose only assigned beads are parked (blocked, deferred)
+// holds no live work. The Live read every seat-work gate issues must not
+// answer them as "open", or the seat never drains and never takes a config
+// change; the cached (non-Live) read keeps gc's folded "open".
+func TestNativeDoltStoreLiveOpenExcludesRawParkedStatuses(t *testing.T) {
+	reader := filteringReader{rows: []*beadslib.Issue{
+		{ID: "gc-open", Title: "open", Status: beadslib.StatusOpen, IssueType: "task", Assignee: "worker"},
+		{ID: "gc-blocked", Title: "blocked", Status: beadslib.StatusBlocked, IssueType: "task", Assignee: "worker"},
+		{ID: "gc-deferred", Title: "deferred", Status: beadslib.StatusDeferred, IssueType: "task", Assignee: "worker"},
+	}}
+	store := newNativeDoltStoreForTest(&nativeDoltReaderSpy{list: reader.list})
+
+	live, err := store.List(ListQuery{Assignee: "worker", Status: "open", TierMode: TierBoth, Live: true})
+	if err != nil {
+		t.Fatalf("Live List: %v", err)
+	}
+	if got := sortedBeadIDs(live); !slices.Equal(got, []string{"gc-open"}) {
+		t.Fatalf("Live List(open) = %v, want only the raw-open row", got)
+	}
+
+	folded, err := store.List(ListQuery{Assignee: "worker", Status: "open", TierMode: TierBoth})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	got := sortedBeadIDs(folded)
+	slices.Sort(got)
+	if want := []string{"gc-blocked", "gc-deferred", "gc-open"}; !slices.Equal(got, want) {
+		t.Fatalf("List(open) = %v, want gc's folded open %v", got, want)
+	}
+}
+
+// countingNativeRows is a native reader over rows another process may change
+// between calls: list answers as filteringReader does, and get counts the
+// point reads a CachingStore above it pays.
+type countingNativeRows struct {
+	rows []*beadslib.Issue
+	gets int
+}
+
+func (r *countingNativeRows) store() *NativeDoltStore {
+	return newNativeDoltStoreForTest(&nativeDoltReaderSpy{list: r.list, get: r.get})
+}
+
+func (r *countingNativeRows) list(ctx context.Context, req issueops.ListRequest) (issueops.IssuePage, error) {
+	return filteringReader{rows: r.rows}.list(ctx, req)
+}
+
+func (r *countingNativeRows) get(_ context.Context, req issueops.GetRequest) (*issueops.IssueDetails, error) {
+	r.gets++
+	for _, issue := range r.rows {
+		if issue.ID == req.ID {
+			return &issueops.IssueDetails{Issue: *cloneNativeIssueForTest(issue)}, nil
+		}
+	}
+	return nil, fmt.Errorf("%w: %s", issueops.ErrNotFound, req.ID)
+}
+
+func (r *countingNativeRows) setStatus(t *testing.T, id string, status beadslib.Status) {
+	t.Helper()
+	for _, issue := range r.rows {
+		if issue.ID == id {
+			issue.Status = status
+			return
+		}
+	}
+	t.Fatalf("no row %s", id)
+}
+
+func newParkedRowsForTest() *countingNativeRows {
+	return &countingNativeRows{rows: []*beadslib.Issue{
+		{ID: "gc-open", Title: "open", Status: beadslib.StatusOpen, IssueType: "task"},
+		{ID: "gc-blocked", Title: "blocked", Status: beadslib.StatusBlocked, IssueType: "task"},
+		{ID: "gc-deferred", Title: "deferred", Status: beadslib.StatusDeferred, IssueType: "task"},
+		{ID: "gc-hooked", Title: "hooked", Status: "hooked", IssueType: "task"},
+	}}
+}
+
+// A CachingStore over a native store must not pay for the parked rows a Live
+// "open" omits by design. The cache holds them folded to "open", so its
+// stale-row sweep took each one for a row another process had changed and
+// read it back, on every call: the read folded it to "open" again, so the
+// sweep never converged (PR #7809 review).
+func TestCachingStoreOverNativeLiveOpenSkipsParkedRows(t *testing.T) {
+	primed := func(t *testing.T, extra ...*beadslib.Issue) (*countingNativeRows, *CachingStore) {
+		t.Helper()
+		reader := newParkedRowsForTest()
+		reader.rows = append(reader.rows, extra...)
+		cache := NewCachingStoreForTest(reader.store(), nil)
+		if err := cache.Prime(context.Background()); err != nil {
+			t.Fatalf("Prime: %v", err)
+		}
+		reader.gets = 0
+		return reader, cache
+	}
+	// live and cached list one gc status ("" for every nonclosed one), Live or
+	// from the cache.
+	live := func(t *testing.T, cache *CachingStore, status string) []string {
+		t.Helper()
+		items, err := cache.List(ListQuery{Status: status, TierMode: TierBoth, Live: true, AllowScan: true})
+		if err != nil {
+			t.Fatalf("Live List(%q): %v", status, err)
+		}
+		return sortedBeadIDs(items)
+	}
+	cached := func(t *testing.T, cache *CachingStore, status string) []string {
+		t.Helper()
+		items, err := cache.List(ListQuery{Status: status, TierMode: TierBoth, AllowScan: true})
+		if err != nil {
+			t.Fatalf("List(%q): %v", status, err)
+		}
+		return sortedBeadIDs(items)
+	}
+
+	t.Run("parked rows cost no read", func(t *testing.T) {
+		reader, cache := primed(t)
+		for call := 1; call <= 3; call++ {
+			if got := live(t, cache, "open"); !slices.Equal(got, []string{"gc-open"}) {
+				t.Fatalf("call %d: Live List(open) = %v, want only the raw-open row", call, got)
+			}
+			if reader.gets != 0 {
+				t.Fatalf("call %d: %d backing Gets, want 0", call, reader.gets)
+			}
+		}
+		if got, want := cached(t, cache, "open"), []string{"gc-blocked", "gc-deferred", "gc-hooked", "gc-open"}; !slices.Equal(got, want) {
+			t.Fatalf("cached List(open) = %v, want gc's folded open %v", got, want)
+		}
+	})
+
+	t.Run("a raw-open row another process closed is still caught", func(t *testing.T) {
+		reader, cache := primed(t)
+		reader.setStatus(t, "gc-open", beadslib.StatusClosed)
+		if got := live(t, cache, "open"); len(got) != 0 {
+			t.Fatalf("Live List(open) = %v, want none", got)
+		}
+		if reader.gets != 1 {
+			t.Fatalf("%d backing Gets, want 1 for the row that left the page", reader.gets)
+		}
+		if got, want := cached(t, cache, "open"), []string{"gc-blocked", "gc-deferred", "gc-hooked"}; !slices.Equal(got, want) {
+			t.Fatalf("cached List(open) = %v, want %v: the close was not installed", got, want)
+		}
+	})
+
+	t.Run("a raw-open row another process parked costs one read", func(t *testing.T) {
+		reader, cache := primed(t)
+		reader.setStatus(t, "gc-open", beadslib.StatusBlocked)
+		for call := 1; call <= 3; call++ {
+			if got := live(t, cache, "open"); len(got) != 0 {
+				t.Fatalf("call %d: Live List(open) = %v, want none", call, got)
+			}
+		}
+		if reader.gets != 1 {
+			t.Fatalf("%d backing Gets over 3 calls, want 1: the first read records the parked status", reader.gets)
+		}
+	})
+
+	t.Run("a parked row another process closed is left to reconcile", func(t *testing.T) {
+		reader, cache := primed(t)
+		reader.setStatus(t, "gc-blocked", beadslib.StatusClosed)
+		if got := live(t, cache, "open"); !slices.Equal(got, []string{"gc-open"}) {
+			t.Fatalf("Live List(open) = %v, want only the raw-open row", got)
+		}
+		if reader.gets != 0 {
+			t.Fatalf("%d backing Gets, want 0: the sweep skips a row last read parked", reader.gets)
+		}
+		cache.ReconcileNowForTest()
+		if got, want := cached(t, cache, "open"), []string{"gc-deferred", "gc-hooked", "gc-open"}; !slices.Equal(got, want) {
+			t.Fatalf("cached List(open) after reconcile = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("a parked row another process claimed is left to reconcile", func(t *testing.T) {
+		reader, cache := primed(t)
+		reader.setStatus(t, "gc-blocked", beadslib.StatusInProgress)
+		if got := live(t, cache, "open"); !slices.Equal(got, []string{"gc-open"}) {
+			t.Fatalf("Live List(open) = %v, want only the raw-open row", got)
+		}
+		if reader.gets != 0 {
+			t.Fatalf("%d backing Gets, want 0: the sweep skips a row last read parked", reader.gets)
+		}
+		cache.ReconcileNowForTest()
+		if got := cached(t, cache, "in_progress"); !slices.Equal(got, []string{"gc-blocked"}) {
+			t.Fatalf("cached List(in_progress) after reconcile = %v, want the claimed row", got)
+		}
+	})
+
+	// The sweep skips a row only when the Live read names a status and the row
+	// was last read with another one. A row recorded with the named status, and
+	// any row under a status-less Live read, is still read back when it leaves
+	// the page.
+	t.Run("a Live in_progress read still catches an in_progress row another process closed", func(t *testing.T) {
+		reader, cache := primed(t, &beadslib.Issue{ID: "gc-claimed", Title: "claimed", Status: beadslib.StatusInProgress, IssueType: "task"})
+		reader.setStatus(t, "gc-claimed", beadslib.StatusClosed)
+		if got := live(t, cache, "in_progress"); len(got) != 0 {
+			t.Fatalf("Live List(in_progress) = %v, want none", got)
+		}
+		if reader.gets != 1 {
+			t.Fatalf("%d backing Gets, want 1 for the row that left the page", reader.gets)
+		}
+		if got := cached(t, cache, "in_progress"); len(got) != 0 {
+			t.Fatalf("cached List(in_progress) = %v, want none: the close was not installed", got)
+		}
+	})
+
+	t.Run("a status-less Live read still catches a row another process closed", func(t *testing.T) {
+		reader, cache := primed(t)
+		reader.setStatus(t, "gc-open", beadslib.StatusClosed)
+		want := []string{"gc-blocked", "gc-deferred", "gc-hooked"}
+		if got := live(t, cache, ""); !slices.Equal(got, want) {
+			t.Fatalf("Live List() = %v, want %v", got, want)
+		}
+		if reader.gets != 1 {
+			t.Fatalf("%d backing Gets, want 1 for the row that left the page", reader.gets)
+		}
+		if got := cached(t, cache, ""); !slices.Equal(got, want) {
+			t.Fatalf("cached List() = %v, want %v: the close was not installed", got, want)
+		}
+	})
+
+	// A non-Live read the cache cannot serve falls back to a Live one, which
+	// is bd's raw open, so the answer depends on cache health (ga-4w9wpf).
+	t.Run("a non-Live open read is folded warm and raw cold", func(t *testing.T) {
+		reader := newParkedRowsForTest()
+		cache := NewCachingStoreForTest(reader.store(), nil)
+		if got := cached(t, cache, "open"); !slices.Equal(got, []string{"gc-open"}) {
+			t.Fatalf("cold List(open) = %v, want bd's raw open from the Live fallback", got)
+		}
+		if err := cache.Prime(context.Background()); err != nil {
+			t.Fatalf("Prime: %v", err)
+		}
+		if got, want := cached(t, cache, "open"), []string{"gc-blocked", "gc-deferred", "gc-hooked", "gc-open"}; !slices.Equal(got, want) {
+			t.Fatalf("warm List(open) = %v, want gc's folded open %v", got, want)
+		}
+	})
+}
+
+// An explicit transition supersedes the status a store recorded, as it does
+// the indefinite deferral.
+func TestSetBeadStatusClearsSourceStatus(t *testing.T) {
+	t.Parallel()
+	b := Bead{ID: "gc-1", Status: "open", SourceStatus: "blocked"}
+	setBeadStatus(&b, "open")
+	if b.SourceStatus != "" {
+		t.Fatalf("SourceStatus after setBeadStatus(open) = %q, want empty", b.SourceStatus)
+	}
+}
+
+// An event's status may be bd's raw one or gc's folded one, so merging it
+// drops the recorded status until the next backing read; an event without a
+// status keeps it.
+func TestMergeCacheEventPatchSourceStatus(t *testing.T) {
+	t.Parallel()
+	base := Bead{ID: "gc-1", Title: "task", Status: "open", SourceStatus: "blocked"}
+	for _, tt := range []struct{ name, payload, want string }{
+		{"folded open", `{"id":"gc-1","status":"open"}`, ""},
+		{"raw blocked", `{"id":"gc-1","status":"blocked"}`, ""},
+		{"no status", `{"id":"gc-1","title":"renamed"}`, "blocked"},
+	} {
+		patch, fields := decodeCloseReasonPatch(t, json.RawMessage(tt.payload))
+		if got := mergeCacheEventPatch(base, patch, fields).SourceStatus; got != tt.want {
+			t.Errorf("%s: merged SourceStatus = %q, want %q", tt.name, got, tt.want)
+		}
+	}
 }
 
 func TestNativeDoltStoreListKeepsAPinnedInProgressRow(t *testing.T) {

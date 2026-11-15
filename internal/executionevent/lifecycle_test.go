@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
@@ -57,14 +58,14 @@ func TestEmitCompletedUsesPhysicalSnapshotOncePerFact(t *testing.T) {
 	step.Metadata[beadmeta.SessionIDMetadataKey] = "gcs-session"
 	rec := events.NewFake()
 	var idx CompletedFactIndex
-	if idx.EmitCompleted(rec, graph, step, "close-hook") {
+	if idx.EmitCompleted(rec, beadstest.Graph(graph), step, "close-hook") {
 		t.Fatal("an open step emitted completed")
 	}
 	step.Status = "closed"
-	if !idx.EmitCompleted(rec, graph, step, "close-hook") {
+	if !idx.EmitCompleted(rec, beadstest.Graph(graph), step, "close-hook") {
 		t.Fatal("close did not emit completed")
 	}
-	if idx.EmitCompleted(rec, graph, step, "cache-reconcile") {
+	if idx.EmitCompleted(rec, beadstest.Graph(graph), step, "cache-reconcile") {
 		t.Fatal("a replayed close emitted a second fact")
 	}
 	if len(rec.Events) != 1 {
@@ -76,7 +77,7 @@ func TestEmitCompletedUsesPhysicalSnapshotOncePerFact(t *testing.T) {
 	}
 	legacy := step
 	legacy.Metadata = map[string]string{beadmeta.RootBeadIDMetadataKey: "unknown", beadmeta.StepIDMetadataKey: "other"}
-	if idx.EmitCompleted(rec, graph, legacy, "close-hook") {
+	if idx.EmitCompleted(rec, beadstest.Graph(graph), legacy, "close-hook") {
 		t.Fatal("unresolved close emitted")
 	}
 }
@@ -94,7 +95,7 @@ func TestEmitCompletedSkipsAJournaledFactAndKeepsTheIndexCold(t *testing.T) {
 	step.Metadata[beadmeta.SessionIDMetadataKey] = "gcs-session"
 	rec := events.NewFake()
 	var idx CompletedFactIndex
-	if !idx.EmitCompleted(rec, graph, step, "close-hook") {
+	if !idx.EmitCompleted(rec, beadstest.Graph(graph), step, "close-hook") {
 		t.Fatal("close did not emit completed")
 	}
 	if idx.loaded {
@@ -113,7 +114,7 @@ func TestEmitCompletedSkipsAJournaledFactAndKeepsTheIndexCold(t *testing.T) {
 	if !warm.warm(journaled) {
 		t.Fatal("warm failed")
 	}
-	if warm.EmitCompleted(journaled, graph, step, "close-hook") {
+	if warm.EmitCompleted(journaled, beadstest.Graph(graph), step, "close-hook") {
 		t.Fatal("a journaled fact was emitted again")
 	}
 }

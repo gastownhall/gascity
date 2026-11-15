@@ -9,7 +9,10 @@
     "action": { "const": "suspend" },
     "session_id": { "type": "string", "minLength": 1 },
     "state": { "type": "string" },
-    "mode": { "enum": ["managed", "direct"] }
+    "mode": { "enum": ["managed", "direct"] },
+    "op_id": { "type": "string", "minLength": 1 },
+    "key": { "type": "string", "minLength": 1 },
+    "replayed": { "type": "boolean" }
   },
   "required": ["schema_version", "ok", "command", "action", "session_id"],
   "additionalProperties": true

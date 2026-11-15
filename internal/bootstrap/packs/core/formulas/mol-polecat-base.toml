@@ -338,15 +338,15 @@ BODY
 Commit types: feat, fix, refactor, perf, test, docs, chore
 
 **Examples of strong subjects + bodies:**
-- `fix(session): preserve lifecycle metadata during crash adoption (ga-xxxx)`
+- `fix(session): preserve lifecycle metadata during crash adoption (<bead-id>)`
   body: explains the stale session projection, the resume path that
   lost metadata, the projection update, and the focused adoption test
-- `perf(events): batch typed payload registration lookups (ga-xxxx)`
+- `perf(events): batch typed payload registration lookups (<bead-id>)`
   body: cites the event fan-out profile, names the registry call site
   that drove the regression, and notes why the cache stays read-only
 
 **Weak commits to avoid** (refinery/reviewer can't tell what's going on):
-- `fix: stuff (ga-xxxx)`
+- `fix: stuff (<bead-id>)`
 - `perf: speed up the slow loop`
 - `refactor` with no body
 

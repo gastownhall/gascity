@@ -135,7 +135,7 @@ func cmdRuntimeHeartbeat(duration time.Duration, jsonOutput bool, stdout, stderr
 // idle-timeout and max-session-age timers for the specified duration.
 // Extracted for testability.
 func doRuntimeHeartbeat(sessStore beads.Store, duration time.Duration, display, sessionName string, jsonOutput bool, stdout, stderr io.Writer) int {
-	sessionID, err := session.ResolveSessionID(sessStore, sessionName)
+	sessionID, err := session.ResolveSessionID(beads.SessionStore{Store: sessStore}, sessionName)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc runtime heartbeat: resolving session %q: %v\n", display, err) //nolint:errcheck
 		return 1

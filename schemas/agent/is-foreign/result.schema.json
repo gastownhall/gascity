@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Verdict from 'gc agent is-foreign': whether this city can vouch for a claim's assignee. The EXIT CODE is the primary contract for shell callers (0 local, 1 foreign, 2 cannot answer), and this document is emitted for all three. 'ok' is true whenever the verb ran: a 'foreign' verdict is an answer, not a failure.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "ok",
+    "identity",
+    "verdict",
+    "reason",
+    "roster_source"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1"
+    },
+    "ok": {
+      "const": true
+    },
+    "identity": {
+      "type": "string",
+      "description": "The identity asked about, echoed back."
+    },
+    "verdict": {
+      "type": "string",
+      "description": "Matches the exit code. 'local' means this city can vouch for the identity (its roster resolves it, or one of its own session records answers to it), NOT that it is alive. 'foreign' means protect it. 'unknown' means this city cannot answer; protect it.",
+      "enum": [
+        "local",
+        "foreign",
+        "unknown"
+      ]
+    },
+    "reason": {
+      "type": "string",
+      "description": "The test that decided the verdict. 'roster' and 'session_record' are local; 'foreign_binding' (another city's canonical naming, ga-8yi7ne; 'detail' names the binding) and 'absent_from_roster' (possibly one of ours whose config and records are gone) are foreign; 'no_config' (bad usage, an unresolvable city, or a city config that would not load or carries no roster; 'detail' says which) and 'lookup_failed' are unknown.",
+      "enum": [
+        "roster",
+        "session_record",
+        "foreign_binding",
+        "absent_from_roster",
+        "no_config",
+        "lookup_failed"
+      ]
+    },
+    "detail": {
+      "type": "string",
+      "description": "The reason's subject: the matched session record ID, the foreign binding, or why the verb could not answer."
+    },
+    "roster_source": {
+      "type": "string",
+      "description": "Where the roster was read from, with resolved agent and rig counts so a surprising verdict can be triaged from this document alone. A roster reporting 0 agents is a config-resolution failure wearing a successful load."
+    },
+    "city_name": {
+      "type": "string"
+    }
+  }
+}

@@ -235,8 +235,8 @@ func TestSimSuspendDuringADeferredFreshCycle(t *testing.T) {
 
 // TestPinnedRuntimeMarkerHoldsNoCycle (the #7879 review): a pinned
 // configured named row with no explicit reset ignores its runtime's
-// restart marker, so the marker is no pending restart: SESS-612's cycle
-// still decides, and an unpin later finds no request to fire.
+// restart marker, so the marker is no pending restart: the pass clears it
+// (mc-nm6yt), and SESS-612's cycle decides once it is gone.
 func TestPinnedRuntimeMarkerHoldsNoCycle(t *testing.T) {
 	c := freshCase(t, "configured_named_session", "true", "configured_named_identity", "worker", "pin_awake", "true")
 	id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
@@ -245,7 +245,12 @@ func TestPinnedRuntimeMarkerHoldsNoCycle(t *testing.T) {
 	if r.restartPending() {
 		t.Fatal("a pinned row's runtime marker reads as a pending restart")
 	}
+	if it, ok := armRestartRequested(r); !ok || it.Kind != intentMarkerClear {
+		t.Fatalf("armRestartRequested = (%q, %q) %v, want the marker cleared first (mc-nm6yt)", it.Kind, it.Reason, ok)
+	}
+	c.w.Obs = newObserveCache().publish(censusNow, map[string]InventoryAttrs{"s-heal": {DeadKnown: true, Identity: id}}, completeBackend("tmux", "s-heal"))
+	r = &rowFacts{w: c.w, k: c.k, entry: c.a.Snapshot.Entries[c.k], row: c.w.Census.Rows[c.k], found: true}
 	if it, ok := armRestartRequested(r); !ok || it.Reason != decideFreshCycle {
-		t.Fatalf("armRestartRequested = (%q, %q) %v, want the fresh cycle", it.Kind, it.Reason, ok)
+		t.Fatalf("armRestartRequested = (%q, %q) %v, want the fresh cycle once the marker is gone", it.Kind, it.Reason, ok)
 	}
 }

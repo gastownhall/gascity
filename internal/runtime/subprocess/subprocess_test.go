@@ -619,6 +619,102 @@ func TestStopKillsProcessGroupDescendants(t *testing.T) {
 	t.Fatalf("child process %d still alive after Stop killed the parent session", childPID)
 }
 
+func TestStopKillsGroupMemberThatOutlivesItsLeader(t *testing.T) {
+	dir := t.TempDir()
+	childPIDPath := filepath.Join(dir, "child.pid")
+
+	p := newTestProvider(t)
+	// The leader (the provider's sh) dies on SIGTERM; its child ignores
+	// SIGTERM and stays in the session's process group.
+	if err := p.Start(context.Background(), "outlives-leader", runtime.Config{
+		Command: "sh -c 'trap \"\" TERM; echo $$ > " + childPIDPath + "; exec sleep 3600' & wait",
+		WorkDir: dir,
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	var childPID int
+	if !pollUntil(5*time.Second, func() bool {
+		data, err := os.ReadFile(childPIDPath)
+		if err != nil {
+			return false
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		childPID = pid
+		return err == nil && pid > 0
+	}) {
+		t.Fatal("timed out waiting for child PID marker")
+	}
+	t.Cleanup(func() { _ = syscall.Kill(childPID, syscall.SIGKILL) })
+
+	oldGrace := sessionStopGrace
+	sessionStopGrace = 200 * time.Millisecond
+	t.Cleanup(func() { sessionStopGrace = oldGrace })
+	if err := p.Stop("outlives-leader"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	if !pollUntil(sessionStopGrace+3*time.Second, func() bool { return syscall.Kill(childPID, syscall.Signal(0)) != nil }) {
+		t.Fatalf("group member %d still alive after Stop: the leader exited on SIGTERM and the group was never killed", childPID)
+	}
+}
+
+func TestStopReturnsPromptlyWhenTheWholeGroupExitsOnSIGTERM(t *testing.T) {
+	dir := t.TempDir()
+	childPIDPath := filepath.Join(dir, "child.pid")
+
+	p := newTestProvider(t)
+	if err := p.Start(context.Background(), "cooperative-group", runtime.Config{
+		Command: "sleep 3600 & echo $! > " + childPIDPath + "; wait",
+		WorkDir: dir,
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	var childPID int
+	if !pollUntil(5*time.Second, func() bool {
+		data, err := os.ReadFile(childPIDPath)
+		if err != nil {
+			return false
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		childPID = pid
+		return err == nil && pid > 0
+	}) {
+		t.Fatal("timed out waiting for child PID marker")
+	}
+	t.Cleanup(func() { _ = syscall.Kill(childPID, syscall.SIGKILL) })
+
+	oldGrace := sessionStopGrace
+	sessionStopGrace = 5 * time.Second
+	t.Cleanup(func() { sessionStopGrace = oldGrace })
+	started := time.Now()
+	if err := p.Stop("cooperative-group"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed >= sessionStopGrace/2 {
+		t.Fatalf("Stop took %s for a group that exits on SIGTERM; want well under the %s grace", elapsed, sessionStopGrace)
+	}
+	if !pollUntil(3*time.Second, func() bool { return syscall.Kill(childPID, syscall.Signal(0)) != nil }) {
+		t.Fatalf("group member %d still alive after Stop", childPID)
+	}
+}
+
+// pollUntil checks cond every 25ms until it holds or d passes.
+func pollUntil(d time.Duration, cond func() bool) bool {
+	deadline := time.NewTimer(d)
+	defer deadline.Stop()
+	tick := time.NewTicker(25 * time.Millisecond)
+	defer tick.Stop()
+	for !cond() {
+		select {
+		case <-deadline.C:
+			return cond()
+		case <-tick.C:
+		}
+	}
+	return true
+}
+
 func TestStopIdempotent(t *testing.T) {
 	p := newTestProvider(t)
 	if err := p.Stop("nonexistent"); err != nil {

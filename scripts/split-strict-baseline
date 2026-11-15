@@ -1,0 +1,316 @@
+#!/usr/bin/env python3
+"""split-strict-baseline: regenerate, or check, a package's split-strict gate inputs.
+
+Usage:
+  scripts/split-strict-baseline <package-dir> <run> <run> [<run>...]
+  scripts/split-strict-baseline --check <package-dir> <run> [<run>...]
+  scripts/split-strict-baseline --check-caps <package-dir> <run> [<run>...]
+
+<package-dir> is cmd/gc or internal/api. Each <run> is the bazel-testlogs tree
+(or a copy of it, e.g. the split-strict lane's bazel-split-strict-testlogs
+artifact) of one FULL GC_TEST_SPLIT_STRICT=1 run of that package, every
+shard. The gate prints its observed tables into each shard's test.log; the
+script reads them from there (or from split-strict-observed.tsv files).
+
+Regenerate (default) rewrites, keeping each file's header comments:
+
+  <package-dir>/testdata/split_strict_baseline.tsv
+      one row per key seen in any run. A key the old baseline lists keeps its
+      verdict and note; a key new on any of its six columns (a new caller
+      too) gets "triage", which fails the ratchet until someone rules on it.
+      A five-column match only adds a hint to the note. A fixture row is bound to the tests that reached it
+      (its scope); every other verdict is scoped to any test ("*"). max_lines
+      and max_caller_lines are the distinct lines of the key's function and of
+      its caller across the runs.
+  <package-dir>/testdata/split_strict_known_failures.list
+      every top-level test that failed in EVERY run, with the reason kept from
+      the old list. A test new to the list gets "UNTRIAGED: " and its first
+      logged message, which is not a ruling: it fails the gate's TESTS verdict
+      (and the package's TestSplitStrictGateInputsParse) until someone
+      replaces it with why the test fails under the gate.
+
+It needs at least two runs, and refuses (exit 1) when a test failed in some
+runs but not all and is not in split_strict_known_flaky.list: a flake is
+never baked in as a known failure.
+
+--check is the downward ratchet (the nightly lane runs it). It changes
+nothing and exits 1 when a baseline row was not reached by any run (fixed, or
+renamed: drop it), when a known failure passed in every run (remove it), when
+a known failure did not run at all, or when a baselined function (or caller)
+is reached at more distinct lines than its cap across all shards and runs:
+the gate checks the caps per shard only. The PR lane runs it on every
+shard's log too, as --check-caps: the line caps alone.
+
+Rows are sorted in byte order (LC_ALL=C). Review the result with git diff.
+"""
+
+import collections
+import glob
+import io
+import os
+import re
+import sys
+import zipfile
+
+OBSERVED = "split-strict-observed.tsv"
+TABLE_BEGIN = "SPLIT-STRICT TABLE BEGIN "
+TABLE_END = "SPLIT-STRICT TABLE END"
+TABLES = (OBSERVED, "split-strict-relics.tsv")
+FAIL = re.compile(r"^--- FAIL: (Test[^\s/]+) \(")
+PASS = re.compile(r"^--- (?:PASS|SKIP): (Test[^\s/]+) \(")
+# The top-level test the following lines belong to: one that starts (RUN),
+# resumes (CONT) or names itself before output interleaved with another
+# parallel test's (NAME). A subtest's line names its top-level test; a bare
+# NAME is output no test owns.
+CURRENT = re.compile(r"^=== (?:RUN|CONT|NAME)\s*(Test[^\s/]*)?")
+MESSAGE = re.compile(r"^\s+\S+_test\.go:\d+: (.+)$")
+# The reason a test new to a known-failures list gets (splittest.UntriagedReason).
+UNTRIAGED = "UNTRIAGED:"
+
+
+def header(path):
+    lines = []
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                if not line.startswith("#"):
+                    break
+                lines.append(line)
+    return "".join(lines)
+
+
+def tables_in_log(text):
+    """Yield the observed and relic tables a gate run printed into a log."""
+    rows = None
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(TABLE_BEGIN) and stripped[len(TABLE_BEGIN):] in TABLES:
+            rows = []
+        elif stripped == TABLE_END and rows is not None:
+            yield "\n".join(rows) + "\n"
+            rows = None
+        elif rows is not None:
+            rows.append(line)
+
+
+class Run:
+    """One full run: its observed rows and its test outcomes."""
+
+    def __init__(self, path):
+        self.path = path
+        self.tables = []
+        self.failed = set()
+        self.passed = set()
+        self.messages = {}
+        logs = glob.glob(os.path.join(path, "**", "test.log"), recursive=True)
+        for log in logs:
+            with open(log, encoding="utf-8", errors="replace") as f:
+                text = f.read()
+            self.tables.extend(tables_in_log(text))
+            current = None
+            for line in text.splitlines():
+                m = CURRENT.match(line)
+                if m:
+                    current = m.group(1)
+                    continue
+                m = MESSAGE.match(line)
+                if m and current and current not in self.messages:
+                    self.messages[current] = m.group(1).strip()
+                m = FAIL.match(line)
+                if m:
+                    self.failed.add(m.group(1))
+                    continue
+                m = PASS.match(line)
+                if m:
+                    self.passed.add(m.group(1))
+        if not self.tables:
+            for name in TABLES:
+                for p in glob.glob(os.path.join(path, "**", name), recursive=True):
+                    with open(p, encoding="utf-8") as f:
+                        self.tables.append(f.read())
+            for z in glob.glob(os.path.join(path, "**", "outputs.zip"), recursive=True):
+                with zipfile.ZipFile(z) as archive:
+                    for name in archive.namelist():
+                        if name.endswith(TABLES):
+                            self.tables.append(archive.read(name).decode("utf-8"))
+        self.passed -= self.failed
+
+
+def ints(field):
+    return {int(n) for n in field.split(",") if n}
+
+
+def read_list(path, fields):
+    out = {}
+    if not os.path.exists(path):
+        return out
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.rstrip("\n")
+            if not line.strip() or line.startswith("#"):
+                continue
+            cols = line.split("\t")
+            if len(cols) == fields:
+                out[cols[0]] = cols[1:]
+    return out
+
+
+def main(argv):
+    args = argv[1:]
+    check = False
+    caps_only = False
+    if args and args[0] in ("--check", "--check-caps"):
+        check = True
+        caps_only = args[0] == "--check-caps"
+        args = args[1:]
+    if len(args) < (2 if check else 3):
+        sys.stderr.write(__doc__)
+        return 2
+    pkg = args[0].rstrip("/")
+    runs = [Run(p) for p in args[1:]]
+    testdata = os.path.join(pkg, "testdata")
+    baseline_path = os.path.join(testdata, "split_strict_baseline.tsv")
+    known_path = os.path.join(testdata, "split_strict_known_failures.list")
+    flaky_path = os.path.join(testdata, "split_strict_known_flaky.list")
+    for run in runs:
+        if not run.tables:
+            sys.stderr.write("split-strict-baseline: no observed tables in %s\n" % run.path)
+            return 1
+
+    old = {}
+    old5 = collections.defaultdict(set)
+    site_caps = collections.defaultdict(int)
+    caller_caps = collections.defaultdict(int)
+    if os.path.exists(baseline_path):
+        with open(baseline_path, encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("#") or not line.strip():
+                    continue
+                cols = line.rstrip("\n").split("\t")
+                if len(cols) == 12:
+                    old[tuple(cols[:6])] = (cols[10], cols[11])
+                    old5[tuple(cols[:5])].add((cols[10], cols[11]))
+                    fn = (cols[0], cols[1])
+                    site_caps[fn] = max(site_caps[fn], int(cols[6] or 0))
+                    caller_caps[cols[5]] = max(caller_caps[cols[5]], int(cols[7] or 0))
+    known = read_list(known_path, 2)
+    flaky = read_list(flaky_path, 3)
+
+    lines = collections.defaultdict(set)
+    caller_lines = collections.defaultdict(set)
+    tests = collections.defaultdict(set)
+    for run in runs:
+        for table in run.tables:
+            for line in io.StringIO(table):
+                if line.startswith("#") or not line.strip():
+                    continue
+                cols = line.rstrip("\n").split("\t")
+                if len(cols) != 12:
+                    continue
+                key = tuple(cols[:6])
+                lines[key] |= ints(cols[6])
+                caller_lines[key] |= ints(cols[7])
+                tests[key] |= {t for t in cols[10].split(",") if t}
+
+    failed_all = set.intersection(*(r.failed for r in runs))
+    failed_any = set.union(*(r.failed for r in runs))
+    passed_all = set.intersection(*(r.passed for r in runs))
+    ran_any = set.union(*(r.passed | r.failed for r in runs))
+
+    if check:
+        problems = []
+        for key in [] if caps_only else sorted(set(old) - set(lines)):
+            problems.append("UNREACHED baseline row (fixed or renamed; drop it): %s" % "\t".join(key))
+        for name in [] if caps_only else sorted(known):
+            if name in passed_all:
+                problems.append("NOW PASSING known failure (remove it): %s" % name)
+            elif name not in ran_any:
+                problems.append("NOT RUN known failure (renamed or deleted?): %s" % name)
+        for key in [] if caps_only else sorted(set(lines) - set(old)):
+            problems.append("NEW key not in the baseline: %s" % "\t".join(key))
+        # The gate caps lines per shard; a line reached only in another
+        # shard escapes it. Cap the union over every shard and run here,
+        # over the baselined keys, as the gate does.
+        seen_site = collections.defaultdict(set)
+        seen_caller = collections.defaultdict(set)
+        for key, ls in lines.items():
+            if key not in old:
+                continue
+            seen_site[(key[0], key[1])] |= ls
+            if key[5] != "-":
+                seen_caller[key[5]] |= caller_lines[key]
+        for fn in sorted(seen_site):
+            ls = seen_site[fn]
+            if len(ls) > site_caps[fn]:
+                problems.append("LINES %s %s: %d distinct line(s) (%s) across shards, cap %d"
+                                % (fn[0], fn[1], len(ls), ",".join(str(n) for n in sorted(ls)), site_caps[fn]))
+        for caller in sorted(seen_caller):
+            ls = seen_caller[caller]
+            if len(ls) > caller_caps[caller]:
+                problems.append("CALLER LINES %s: %d distinct line(s) (%s) across shards, cap %d"
+                                % (caller, len(ls), ",".join(str(n) for n in sorted(ls)), caller_caps[caller]))
+        for line in problems:
+            print(line)
+        what = "combined line caps" if caps_only else "downward ratchet"
+        print("split-strict %s for %s: %s (%d problem(s), %d run(s))" % (what, pkg, "FAIL" if problems else "PASS", len(problems), len(runs)))
+        return 1 if problems else 0
+
+    flaked = sorted((failed_any - failed_all) - set(flaky))
+    if flaked:
+        sys.stderr.write("split-strict-baseline: refusing: these tests failed in some runs but not all, and are not in %s:\n  %s\n"
+                         "List each with its owner bead, or fix the flake, then regenerate.\n" % (flaky_path, "\n  ".join(flaked)))
+        return 1
+
+    func_lines = collections.defaultdict(set)
+    caller_func_lines = collections.defaultdict(set)
+    for key, ls in lines.items():
+        func_lines[(key[0], key[1])] |= ls
+        if key[5] != "-":
+            caller_func_lines[key[5]] |= caller_lines[key]
+
+    rows = []
+    triage = 0
+    for key in lines:
+        if key in old:
+            verdict, note = old[key]
+        else:
+            # A key new on all six columns is a new path (a new caller): it
+            # is never pre-adjudicated. A five-column match is only a hint.
+            verdict, note = "triage", "unadjudicated"
+            hints = sorted(old5.get(key[:5], ()))
+            if hints:
+                note += "; same site via another caller was " + " | ".join("%s: %s" % h for h in hints)
+            triage += 1
+        scope = ",".join(sorted(tests[key])) if verdict == "fixture" else "*"
+        rows.append("\t".join(list(key) + [
+            str(len(func_lines[(key[0], key[1])])),
+            str(len(caller_func_lines[key[5]])) if key[5] != "-" else "0",
+            str(len(tests[key])), scope, verdict, note]))
+    rows.sort(key=lambda r: r.encode("utf-8"))
+    # Read the header before opening for write: "w" truncates the file.
+    kept = header(baseline_path)
+    with open(baseline_path, "w", encoding="utf-8") as f:
+        f.write(kept + "".join(r + "\n" for r in rows))
+
+    entries = []
+    untriaged = 0
+    for name in sorted(failed_all - set(flaky), key=lambda s: s.encode("utf-8")):
+        reason = known.get(name, [""])[0]
+        if not reason:
+            message = next((r.messages[name] for r in runs if name in r.messages), "no failure message in the log")
+            reason = UNTRIAGED + " " + message.replace("\t", " ")[:160]
+        if reason.startswith(UNTRIAGED):
+            untriaged += 1
+        entries.append("%s\t%s\n" % (name, reason))
+    # Read the header before opening for write: "w" truncates the file.
+    kept = header(known_path)
+    with open(known_path, "w", encoding="utf-8") as f:
+        f.write(kept + "".join(entries))
+
+    sys.stderr.write("split-strict-baseline: %d key(s) (%d to triage) in %s; %d known failure(s) (%d untriaged) in %s; %d run(s) agreed\n"
+                     % (len(rows), triage, baseline_path, len(entries), untriaged, known_path, len(runs)))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

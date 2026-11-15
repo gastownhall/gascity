@@ -1,11 +1,11 @@
+//go:build unix
+
 package main
 
 import (
-	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 )
@@ -153,35 +153,6 @@ func TestEnsureDoltIdentityErrorMessages(t *testing.T) {
 	}
 }
 
-// runGCBeadsBdCommand runs one program under the given environment and returns
-// its stdout, stderr and run error separately. The gc-beads-bd shell tests all
-// route through this one command construction rather than building their own,
-// so the untagged subprocess census carries a single call site for the family
-// instead of one per test file.
-func runGCBeadsBdCommand(t *testing.T, env []string, name string, args ...string) (string, string, error) {
-	t.Helper()
-	cmd := exec.Command(name, args...)
-	cmd.Env = env
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	return stdout.String(), stderr.String(), err
-}
-
-func extractShellFunction(t *testing.T, script, name string) string {
-	t.Helper()
-	// Match the function header and capture lines until the matching
-	// closing brace at column 0. The script uses the conventional
-	// `name() {` ... `\n}` shape.
-	pattern := regexp.MustCompile(`(?ms)^` + regexp.QuoteMeta(name) + `\(\)\s*\{.*?\n\}`)
-	loc := pattern.FindStringIndex(script)
-	if loc == nil {
-		t.Fatalf("could not find shell function %q in script", name)
-	}
-	return script[loc[0]:loc[1]]
-}
-
 func writeFakeDolt(t *testing.T, dir, name, email string) {
 	t.Helper()
 	body := `#!/usr/bin/env bash
@@ -239,13 +210,6 @@ func emitGetIf(value string) string {
 		return "            exit 1"
 	}
 	return "            echo " + value + "; exit 0"
-}
-
-func writeExecutable(t *testing.T, path, body string) {
-	t.Helper()
-	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
-		t.Fatalf("write %s: %v", path, err)
-	}
 }
 
 func logContains(path, want string) bool {

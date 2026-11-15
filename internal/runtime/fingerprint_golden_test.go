@@ -61,6 +61,16 @@ func goldenFixtures() map[string]Config {
 				{RelDst: "hooks/empty", Probed: true, ContentHash: ""}, // HASH_UNAVAILABLE sentinel
 			},
 		},
+		// The FingerprintExtra change policy: one key of each family. A
+		// policy edit moves these hashes, and with them every stored hash
+		// of such a config, so it needs a FingerprintVersion bump.
+		"extra-policy": {
+			Command: "agent",
+			FingerprintExtra: map[string]string{
+				"pool.min": "0", "pool.max": "2", "skills:x": "h1",
+				"wake_mode": "fresh", "depends_on": "db", "mcp:x": "m1",
+			},
+		},
 		// Boundary: nil vs empty Env must hash identically (asserted below).
 		"env-nil":   {Env: nil},
 		"env-empty": {Env: map[string]string{}},
@@ -124,8 +134,8 @@ func TestFingerprintVersionPin(t *testing.T) {
 	// The version namespaces stored hashes; an UNINTENTIONAL bump during the
 	// de-conflation forces a city-wide metadata rebaseline. An intentional bump
 	// is a deliberate edit to this assertion + a golden regen.
-	if FingerprintVersion != "v6" {
-		t.Errorf("FingerprintVersion = %q, want v6", FingerprintVersion)
+	if FingerprintVersion != "v7" {
+		t.Errorf("FingerprintVersion = %q, want v7", FingerprintVersion)
 	}
 }
 

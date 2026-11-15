@@ -134,6 +134,39 @@ func TestProviderProcessPassthroughEnvPinsControllerOnlyKeysEmpty(t *testing.T) 
 	}
 }
 
+// A controller started from an agent's pane carries that pane's demand-spawn
+// keys, and they describe that pane's spawn, not the session being built. The
+// keys are spelled out rather than read from DemandSpawnEnvKeys, so a key
+// dropped from the list fails here (gastownhall/gascity#5738).
+func TestProviderProcessPassthroughEnvWithholdsInheritedDemandSpawnKeys(t *testing.T) {
+	keys := []string{
+		"GC_SPAWN_ORIGIN",
+		"GC_TRIGGER_BEAD_ID",
+		"GC_TRIGGER_WORK_BEAD_ID",
+		"GC_TRIGGER_BEAD_STORE_REF",
+		"GC_TRIGGER_WORK_STORE_REF",
+	}
+	for _, key := range keys {
+		t.Setenv(key, "ga-foreign")
+	}
+
+	got := ProviderProcessPassthroughEnv()
+
+	for _, key := range keys {
+		if val, ok := got[key]; !ok || val != "" {
+			t.Errorf("ProviderProcessPassthroughEnv()[%s] = (%q, present=%v), want (\"\", true): an omitted key is an inherited key", key, val, ok)
+		}
+		if !IsDemandSpawnEnv(key) {
+			t.Errorf("IsDemandSpawnEnv(%q) = false, want true", key)
+		}
+	}
+	for _, key := range []string{"GC_TRIGGER", "GC_SPAWN_ORIGIN_X", "GC_BEAD_ID", "GC_SESSION_ID"} {
+		if IsDemandSpawnEnv(key) {
+			t.Errorf("IsDemandSpawnEnv(%q) = true, want false (exact names only)", key)
+		}
+	}
+}
+
 // Pinning the keys is not enough on its own: config-authored values are expanded
 // against the controller process, so "$GC_CONTROLLER_TOKEN" would copy the token
 // into a session variable no key-level guard is watching.

@@ -655,7 +655,7 @@ func TestIsMessageBead(t *testing.T) {
 // silently diverge the retention path from the read path.
 func TestRetentionSweptReadMailStaysAddressableUntilPurge(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	sent, err := p.Send("alice", "bob", "aged", "read long ago")
 	if err != nil {
@@ -747,7 +747,7 @@ func TestRetentionSweptReadMailStaysAddressableUntilPurge(t *testing.T) {
 // has no "until purge" bound.
 func TestRetentionSweptUnreadMailStaysAddressable(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	sent, err := p.Send("alice", "bob", "aged", "never read by anyone")
 	if err != nil {

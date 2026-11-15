@@ -12,17 +12,41 @@ import (
 // @@datadir read without a running Dolt server.
 var managedDoltServingDataDirFn = managedDoltServingDataDir
 
+// managedDoltServingDataDirDirectFn is the seam used by tests to observe the
+// driver-connection path that a configured managed password selects.
+var managedDoltServingDataDirDirectFn = managedDoltServingDataDirDirect
+
 // managedDoltServingDataDir asks the managed Dolt SQL server bound to the
 // city's managed port for its active data directory (`SELECT @@datadir`). Host
-// and user are left empty so runManagedDoltSQLContext applies the canonical
-// managed defaults (managedDoltConnectHost + root) and the managed password,
-// identically to the other health probes. The query is bounded by ctx.
+// and user are left empty so the canonical managed defaults
+// (managedDoltConnectHost + root) apply. Like the other health probes, a
+// configured managed password selects the pooled driver connection, which
+// keeps it away from the dolt CLI. The query is bounded by ctx.
 func managedDoltServingDataDir(ctx context.Context, port string) (string, error) {
+	if managedDoltPassword() != "" {
+		return managedDoltServingDataDirDirectFn(ctx, port)
+	}
 	out, err := runManagedDoltSQLContext(ctx, "", port, "", "-r", "csv", "-q", "SELECT @@datadir")
 	if err != nil {
 		return "", err
 	}
 	return firstManagedDoltCSVValue(out), nil
+}
+
+// managedDoltServingDataDirDirect reads @@datadir over the pooled driver
+// connection, bounded by both ctx and managedDoltSQLCommandTimeout.
+func managedDoltServingDataDirDirect(ctx context.Context, port string) (string, error) {
+	db, err := managedDoltOpenDB("", port, "")
+	if err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(ctx, managedDoltSQLCommandTimeout)
+	defer cancel()
+	var dataDir string
+	if err := db.QueryRowContext(ctx, "SELECT @@datadir").Scan(&dataDir); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(dataDir), nil
 }
 
 // firstManagedDoltCSVValue returns the first data cell of a single-column CSV

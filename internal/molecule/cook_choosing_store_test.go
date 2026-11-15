@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/formula"
 )
 
@@ -45,9 +46,9 @@ func TestCookChoosingStoreInstantiatesIntoTheStoreTheChooserPicked(t *testing.T)
 
 	var sawRecipe *formula.Recipe
 	result, store, err := CookChoosingStore(context.Background(), "chooser-e2e", []string{dir}, Options{Title: "Auth Flow"},
-		func(recipe *formula.Recipe) beads.Store {
+		func(recipe *formula.Recipe) beads.MoleculeTarget {
 			sawRecipe = recipe
-			return picked
+			return beadstest.GraphMolecule(picked)
 		})
 	if err != nil {
 		t.Fatalf("CookChoosingStore: %v", err)
@@ -58,7 +59,7 @@ func TestCookChoosingStoreInstantiatesIntoTheStoreTheChooserPicked(t *testing.T)
 	if sawRecipe.Name != "chooser-e2e" {
 		t.Errorf("the chooser saw recipe %q, want the compiled chooser-e2e", sawRecipe.Name)
 	}
-	if store != beads.Store(picked) {
+	if !beads.SameStore(store, picked) {
 		t.Errorf("CookChoosingStore returned a store the chooser did not pick; a caller stamping --meta on result.RootID would write to a store that has never held it")
 	}
 	if _, err := picked.Get(result.RootID); err != nil {
@@ -87,9 +88,9 @@ func TestCookChoosingStoreCallsTheChooserOnceAfterValidation(t *testing.T) {
 
 	calls := 0
 	if _, _, err := CookChoosingStore(context.Background(), "chooser-once", []string{dir}, Options{},
-		func(*formula.Recipe) beads.Store {
+		func(*formula.Recipe) beads.MoleculeTarget {
 			calls++
-			return store
+			return beadstest.GraphMolecule(store)
 		}); err != nil {
 		t.Fatalf("CookChoosingStore: %v", err)
 	}
@@ -118,14 +119,14 @@ title = "Implement {{who}}"
 	}
 	calls = 0
 	_, chosen, err := CookChoosingStore(context.Background(), "chooser-strict", []string{strictDir}, Options{},
-		func(*formula.Recipe) beads.Store {
+		func(*formula.Recipe) beads.MoleculeTarget {
 			calls++
-			return store
+			return beadstest.GraphMolecule(store)
 		})
 	if err == nil {
 		t.Fatal("a recipe with an unsatisfied required var cooked successfully")
 	}
-	if chosen != nil {
+	if !chosen.Absent() {
 		t.Error("a failed CookChoosingStore returned a non-nil store")
 	}
 	if calls != 0 {
@@ -140,9 +141,9 @@ func TestCookChoosingStoreDoesNotChooseWhenCompileFails(t *testing.T) {
 	store := beads.NewMemStore()
 	called := false
 	_, chosen, err := CookChoosingStore(context.Background(), "no-such-formula", []string{t.TempDir()}, Options{},
-		func(*formula.Recipe) beads.Store {
+		func(*formula.Recipe) beads.MoleculeTarget {
 			called = true
-			return store
+			return beadstest.GraphMolecule(store)
 		})
 	if err == nil {
 		t.Fatal("compiling a formula that does not exist succeeded")
@@ -150,7 +151,7 @@ func TestCookChoosingStoreDoesNotChooseWhenCompileFails(t *testing.T) {
 	if called {
 		t.Error("the chooser ran for a formula that never compiled")
 	}
-	if chosen != nil {
+	if !chosen.Absent() {
 		t.Error("a failed CookChoosingStore returned a non-nil store")
 	}
 	if beadCount(t, store) != 0 {
@@ -165,14 +166,14 @@ func TestCookChoosingStoreDoesNotChooseWhenCompileFails(t *testing.T) {
 func TestCookChoosingStoreRefusesANilChoice(t *testing.T) {
 	dir := writeChooserFormula(t, "chooser-nil")
 	_, store, err := CookChoosingStore(context.Background(), "chooser-nil", []string{dir}, Options{},
-		func(*formula.Recipe) beads.Store { return nil })
+		func(*formula.Recipe) beads.MoleculeTarget { return beads.MoleculeTarget{} })
 	if err == nil {
 		t.Fatal("a nil store choice was accepted")
 	}
 	if !strings.Contains(err.Error(), "chooser-nil") {
 		t.Errorf("the refusal does not name the formula: %v", err)
 	}
-	if store != nil {
+	if !store.Absent() {
 		t.Error("a failed CookChoosingStore returned a non-nil store")
 	}
 }
@@ -189,7 +190,7 @@ func TestCookChoosingStoreRequiresAChooser(t *testing.T) {
 	if !strings.Contains(err.Error(), "StoreChooser") {
 		t.Errorf("the refusal does not name the missing chooser: %v", err)
 	}
-	if store != nil {
+	if !store.Absent() {
 		t.Error("a failed CookChoosingStore returned a non-nil store")
 	}
 }
@@ -201,7 +202,7 @@ func TestCookStillWritesIntoTheStoreItWasGiven(t *testing.T) {
 	dir := writeChooserFormula(t, "chooser-cook")
 	store := beads.NewMemStore()
 
-	result, err := Cook(context.Background(), store, "chooser-cook", []string{dir}, Options{Title: "Auth Flow"})
+	result, err := Cook(context.Background(), beadstest.GraphMolecule(store), "chooser-cook", []string{dir}, Options{Title: "Auth Flow"})
 	if err != nil {
 		t.Fatalf("Cook: %v", err)
 	}
@@ -221,14 +222,14 @@ func TestCookChoosingStoreReturnsNoStoreWhenInstantiateFails(t *testing.T) {
 	picked := &errStore{Store: beads.NewMemStore(), failOnCreate: 2}
 
 	result, store, err := CookChoosingStore(context.Background(), "chooser-instantiate-fail", []string{dir}, Options{},
-		func(*formula.Recipe) beads.Store { return picked })
+		func(*formula.Recipe) beads.MoleculeTarget { return beadstest.GraphMolecule(picked) })
 	if err == nil {
 		t.Fatal("instantiating into a store whose create fails succeeded")
 	}
 	if result != nil {
 		t.Error("a failed CookChoosingStore returned a non-nil result")
 	}
-	if store != nil {
+	if !store.Absent() {
 		t.Error("a failed CookChoosingStore returned the store it chose; the caller would stamp metadata onto a root the failure says is not there")
 	}
 }
@@ -238,7 +239,7 @@ func TestCookChoosingStoreReturnsNoStoreWhenInstantiateFails(t *testing.T) {
 // chooser that appears nowhere in the call they wrote.
 func TestCookRefusesANilStoreInItsOwnTerms(t *testing.T) {
 	dir := writeChooserFormula(t, "chooser-cook-nil")
-	_, err := Cook(context.Background(), nil, "chooser-cook-nil", []string{dir}, Options{})
+	_, err := Cook(context.Background(), beads.MoleculeTarget{}, "chooser-cook-nil", []string{dir}, Options{})
 	if err == nil {
 		t.Fatal("Cook accepted a nil store")
 	}

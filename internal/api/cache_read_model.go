@@ -5,27 +5,25 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
-// cachedListStore is the optional read-model cache capability: a store that can
-// answer a ListQuery from its in-memory cache, reporting whether the cache was
-// clean enough to serve it. The session read model now peeks this seam inside
-// session.Store.ListAll; other read-model consumers (agents, orders) still assert
-// it directly on the raw store.
-type cachedListStore interface {
-	CachedList(beads.ListQuery) ([]beads.Bead, bool)
-}
-
 // sessionReadModelListings is the typed read-model feed: the cache-first union
 // (session.Store.ListAllWithResponses) projected to (Info, PersistedResponse)
 // rows, wrapped in the same partial-result envelope as sessionReadModelRows. It
 // is the typed twin of sessionReadModelRows — the pre-joined pair per row means
 // the response builder never needs a bead index to re-attach the persisted
 // projection. The cache-first tier (#3939/#3941) is preserved inside
-// Store.ListAll: a warm cachedListStore serves the whole list with zero
+// Store.ListAll: a warm beads.CachedLister serves the whole list with zero
 // store.List calls (pinned by TestSessionReadModelListingsWarmCacheZeroStoreList).
-func sessionReadModelListings(sessFront *session.Store) ([]session.ListedSession, []string, error) {
+//
+// stateFilter is the caller's list filter, applied later by
+// filterEnrichReadModel. Only a filter that can keep a closed session
+// (session.StateFilterIncludesClosed: "all", or a "closed" entry) reads closed
+// rows; the cache holds no closed rows, so such a request reads the store. The
+// default and every other filter read open rows only, cache-first.
+func sessionReadModelListings(sessFront *session.Store, stateFilter string) ([]session.ListedSession, []string, error) {
 	rows, err := sessFront.ListAllWithResponses(session.ListAllOptions{
-		Sort:       beads.SortCreatedDesc,
-		CacheFirst: true,
+		IncludeClosed: session.StateFilterIncludesClosed(stateFilter),
+		Sort:          beads.SortCreatedDesc,
+		CacheFirst:    true,
 	})
 	if err == nil {
 		return rows, nil, nil

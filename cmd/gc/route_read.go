@@ -25,6 +25,17 @@ type errorAfterFetch struct{ Detail string }
 
 func (e errorAfterFetch) Error() string { return e.Detail }
 
+// reportedErrorAfterFetch is errorAfterFetch for a command that reports its
+// own failure: routeRead logs route=api reason=error and returns Report(),
+// which prints the failure the way the command's local read does (e.g. the
+// --json error document) and returns its exit code. Detail is the error text.
+type reportedErrorAfterFetch struct {
+	Detail string
+	Report func() int
+}
+
+func (e *reportedErrorAfterFetch) Error() string { return e.Detail }
+
 // routeRead runs the canonical read-path routing ladder shared by every routed
 // read command, so the "try the API, classify the error, fall back to the local
 // path" fork lives in ONE place instead of being copy-pasted per command. It is
@@ -66,6 +77,11 @@ func routeRead(c *api.Client, cmdName, nilReason string, stderr io.Writer, apiFe
 		}
 		logRoute(stderr, cmdName, "fallback", faf.Reason)
 		return localRender()
+	}
+	var reaf *reportedErrorAfterFetch
+	if errors.As(err, &reaf) {
+		logRoute(stderr, cmdName, "api", "error")
+		return reaf.Report()
 	}
 	var eaf errorAfterFetch
 	if errors.As(err, &eaf) || !api.ShouldFallbackForRead(c, err) {

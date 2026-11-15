@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"errors"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
@@ -66,8 +68,8 @@ func TestConvoyResolutionServesTheBindingCopy(t *testing.T) {
 
 	storereftest.RunBindingWins(t,
 		storereftest.BindingWinsStores{
-			Binding:       classStore,
-			Work:          work,
+			Binding:       beadstest.Resident(classStore),
+			Work:          beadstest.Work(work),
 			DualID:        resident.ID,
 			BindingTitle:  "the class-binding copy",
 			WorkOnlyID:    control.ID,
@@ -724,5 +726,36 @@ func TestResolveOwningStoreDirSkipsTheRigProbeForAReservedID(t *testing.T) {
 	}
 	if store != binding {
 		t.Errorf("the resolver returned %p, want the binding %p", store, binding)
+	}
+}
+
+// TestResolveOwningStoreDirBindingProbeLeavesASuspendedRigUnopened: the
+// binding leg's rig-collision probe is a by-id read like the scan, so it
+// leaves a suspended rig's store unopened too — reading it would restart the
+// rig's bd pair, and the probe runs on every close bd's hook resolves.
+func TestResolveOwningStoreDirBindingProbeLeavesASuspendedRigUnopened(t *testing.T) {
+	t.Setenv("GC_SUSPENDED", "")
+	cityPath, rigPath, cfg, binding := bindingHitCity(t)
+	cfg.Rigs[0].SuspendedOnStart = true
+	resident, err := binding.Create(beads.Bead{Title: "the binding's copy", Type: "task"})
+	if err != nil {
+		t.Fatalf("seeding the binding: %v", err)
+	}
+	open := storesByDir(t, nil)
+	var opened []string
+	recording := func(dir string) (beads.Store, error) {
+		opened = append(opened, dir)
+		return open(dir)
+	}
+
+	store, _, err := resolveOwningStoreDir(resident.ID, cfg, cityPath, recording)
+	if err != nil {
+		t.Fatalf("resolveOwningStoreDir(%s): %v", resident.ID, err)
+	}
+	if store != binding {
+		t.Errorf("the resolver returned %p, want the binding %p", store, binding)
+	}
+	if slices.Contains(opened, rigPath) {
+		t.Fatalf("opened %v: the binding probe opened the suspended rig's store", opened)
 	}
 }

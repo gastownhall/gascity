@@ -73,7 +73,7 @@ max_active_sessions = 1
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionClose([]string{sessionBead.ID}, &stdout, &stderr); code != 0 {
+	if code := cmdSessionClose([]string{sessionBead.ID}, "", &stdout, &stderr, false); code != 0 {
 		t.Fatalf("cmdSessionClose = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 
@@ -162,7 +162,7 @@ func TestCmdSessionCloseClearsClaimInTheSessionStoreOnAMigratedCity(t *testing.T
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionClose([]string{sessionBead.ID}, &stdout, &stderr); code != 0 {
+	if code := cmdSessionClose([]string{sessionBead.ID}, "", &stdout, &stderr, false); code != 0 {
 		t.Fatalf("cmdSessionClose = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 	if strings.Contains(stderr.String(), "clearing current claim") {
@@ -245,7 +245,7 @@ func TestDrainAckReleaseReadsTheWorkStoreOnAMigratedCity(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	releaseUnexecutedClaimsForSessionStore(cityPath, servingRigsCity(cfg, "worker"), work, nil, "worker-draining", &stderr)
+	releaseUnexecutedClaimsForSessionStore(cityPath, servingRigsCity(cfg, "worker"), work, nil, "worker-draining", drainAckCaller{}, &stderr)
 
 	got, err := work.Get(claimed.ID)
 	if err != nil {
@@ -295,7 +295,7 @@ func TestCmdSessionCloseWithoutConfigRefusesOnlyOverClaims(t *testing.T) {
 			}
 			appendCityTOML(t, cityDir, "\n[[[not toml\n")
 			var stdout, stderr bytes.Buffer
-			code := cmdSessionClose([]string{seat.ID}, &stdout, &stderr)
+			code := cmdSessionClose([]string{seat.ID}, "", &stdout, &stderr, false)
 			refused := strings.Contains(stderr.String(), "refusing to close")
 			if holds && (code == 0 || !refused) || !holds && (code != 0 || refused) {
 				t.Fatalf("cmdSessionClose = %d, stderr %q; want refused %t", code, stderr.String(), holds)

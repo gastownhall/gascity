@@ -1,4 +1,4 @@
-//go:build integration || dolt_integration
+//go:build (integration || dolt_integration) && unix
 
 package dolt_test
 
@@ -228,6 +228,13 @@ func doltServerHeadForCompactTest(t *testing.T, doltPath string, port int) strin
 // test sql-server and returns the CSV rows without the header.
 func doltServerQueryForCompactTest(t *testing.T, doltPath string, port int, query string) []string {
 	t.Helper()
+	return doltServerQueryDBForCompactTest(t, doltPath, port, "beads", query)
+}
+
+// doltServerQueryDBForCompactTest runs query against db on the test
+// sql-server and returns the CSV rows without the header.
+func doltServerQueryDBForCompactTest(t *testing.T, doltPath string, port int, db, query string) []string {
+	t.Helper()
 	ctx, cancel := doltCallContext(t)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, doltPath,
@@ -235,7 +242,7 @@ func doltServerQueryForCompactTest(t *testing.T, doltPath string, port int, quer
 		"--port", fmt.Sprintf("%d", port),
 		"--user", "root",
 		"--no-tls",
-		"--use-db", "beads",
+		"--use-db", db,
 		"sql", "-r", "csv", "-q", query,
 	)
 	cmd.Env = append(filteredEnv("DOLT_CLI_PASSWORD"), "DOLT_CLI_PASSWORD=", "NO_COLOR=1")
@@ -276,6 +283,7 @@ func runCompactScriptForRealDoltTest(t *testing.T, doltPath, root, cityPath, dat
 		"GC_DOLT_COMPACT_SKIP_FETCH",
 		"GC_DOLT_COMPACT_CALL_TIMEOUT_SECS",
 		"GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS",
+		"GC_DOLT_COMPACT_MIN_FREE_BYTES",
 	),
 		"PATH="+filepath.Dir(doltPath)+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+cityPath,
@@ -288,6 +296,7 @@ func runCompactScriptForRealDoltTest(t *testing.T, doltPath, root, cityPath, dat
 		"GC_DOLT_MANAGED_LOCAL=1",
 		"GC_DOLT_COMPACT_CALL_TIMEOUT_SECS=30",
 		"GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS=30",
+		"GC_DOLT_COMPACT_MIN_FREE_BYTES=0",
 	)
 	cmd.Env = append(cmd.Env, extraEnv...)
 	out, err := cmd.CombinedOutput()

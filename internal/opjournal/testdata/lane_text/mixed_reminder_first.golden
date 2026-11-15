@@ -1,0 +1,10 @@
+<system-reminder>
+You have 2 deferred reminders that were queued until a safe boundary:
+
+- [mail] You have 2 unread messages.
+- [planner] Wrap up: the session drains at 18:00.
+
+Handle them after this turn.
+</system-reminder>
+
+Please rebase onto main and rerun the tests.

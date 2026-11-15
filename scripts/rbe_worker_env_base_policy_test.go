@@ -8,16 +8,20 @@ import (
 	"testing"
 )
 
-// worker-env tiers (rbe-reexecution-design.md (c)). rbe-west's pool workers
-// also advertise worker-env-base: the pinned manifest without its go and dolt
-// lines. An action that sends it without worker-env (beads) runs with the
-// host's go and dolt hidden by the action launcher, which reads both
-// properties from NativeLink as RBE_X_WORKER_ENV and RBE_X_WORKER_ENV_BASE.
-// An action's own environment wins over those, so only a deliberate RBE_X_*
-// in a Bazel file could steer the launcher; none may exist (invariant I-f).
-// gascity's tests run the host go and dolt (repository lint, drift binaries,
-// managed Dolt), so its platform keeps the full worker-env until they are
-// hermetic (the design's F8).
+// worker-env tiers (rbe-reexecution-design.md (c)). The design has rbe-west's
+// pool workers also advertise worker-env-base, the pinned manifest without
+// its go and dolt lines, for actions that send it without worker-env (beads):
+// they run with the host's go and dolt hidden by the action launcher, which
+// reads both properties from NativeLink as RBE_X_WORKER_ENV and
+// RBE_X_WORKER_ENV_BASE. rbe-worker reverted that tier before any pin carried
+// it (rbe-worker#7, until it can canary), so today the workers advertise
+// worker-env alone and beads sends the full pin too (TESTING.md "Re-pinning
+// the RBE worker host"). These tests hold for when the tier returns. An
+// action's own environment wins over those properties, so only a deliberate
+// RBE_X_* in a Bazel file could steer the launcher; none may exist
+// (invariant I-f). gascity's tests run the host go and dolt (repository lint,
+// drift binaries, managed Dolt), so its platform keeps the full worker-env
+// until they are hermetic (the design's F8).
 
 // TestRBEXControlValuesNeverInBazelFiles: no .bazelrc, BUILD, .bzl or
 // MODULE.bazel names an RBE_X_ variable. Under Bazel the walk sees the

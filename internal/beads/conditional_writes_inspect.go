@@ -24,7 +24,8 @@ type ConditionalWritesInspection struct {
 	// Mode is the factory-stamped gate mode; ModeUnset when the store carries
 	// no stamp (a legacy open — the write path never fences it).
 	Mode gate.Mode
-	// Defaulted marks a ModeUnset→Off factory mapping (unthreaded open path).
+	// Defaulted marks a mode no operator chose: a ModeUnset→Off factory
+	// mapping (unthreaded open path) or the builtin default.
 	Defaulted bool
 	// StoreKind names the resolved store type in the diagnostic vocabulary
 	// (BdStore, MemStore, ...; %T for build-tagged types).

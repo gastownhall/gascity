@@ -7,7 +7,10 @@
     "ok": { "const": true },
     "command": { "const": "session kill" },
     "action": { "const": "kill" },
-    "session_id": { "type": "string", "minLength": 1 }
+    "session_id": { "type": "string", "minLength": 1 },
+    "op_id": { "type": "string", "minLength": 1 },
+    "key": { "type": "string", "minLength": 1 },
+    "replayed": { "type": "boolean" }
   },
   "required": ["schema_version", "ok", "command", "action", "session_id"],
   "additionalProperties": true

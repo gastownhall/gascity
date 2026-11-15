@@ -131,8 +131,9 @@ func (s *sim) checkStarts() {
 // Current, or the own-runtime exception's StaleSelf with epoch =
 // generation), any corpse (the corpse exception) or the row's own zombie
 // (the start recycle's and the close's), or a pending create's bead-scoped
-// name (C8.2(a)), and never an attached one. The own-runtime exception to
-// I5 is D1b's to model with the effects it covers.
+// name (C8.2(a)) but for a live incarnation of the row's own session while
+// that session's work is in progress (#2081), and never an attached one. The
+// own-runtime exception to I5 is D1b's to model with the effects it covers.
 func (s *sim) checkDestructive() {
 	kills := s.sp.kills[min(s.killsChecked, len(s.sp.kills)):] // each judged once, on the rows before its step
 	s.killsChecked = len(s.sp.kills)
@@ -154,6 +155,11 @@ func (s *sim) checkDestructive() {
 		case k.Method == "KillZombieObject" && k.Hit.zombie && k.Hit.id != "" && k.Hit.id == s.rowNamedEver(k.Name).ID:
 			// The row's own zombie: the start recycle's and the close's, the
 			// row closed meanwhile included (its zombie stays its own).
+		case workingIncarnation(s.prev, row, k.Hit):
+			// #2081: the rollback holds over a live incarnation of the row's
+			// own session while that session's work is in progress, whatever
+			// name it runs under.
+			s.failf("I4 I-fence", "v2 %s on %s hit %s/%s/%s, a live incarnation of row %s's session whose work is in progress", k.Method, k.Name, k.Hit.id, k.Hit.epoch, k.Hit.token, row.ID)
 		case k.Method == "Stop" && row.Metadata["pending_create_claim"] == "true" && ownsName(sessionInfoFromBead(row), k.Name) && (!closed || own || k.Effect == intentRollback):
 			// C8.2(a): a pending create's rollback stops its bead-scoped name
 			// whoever runs under it (C3, S1's Foreign row), as legacy does;
