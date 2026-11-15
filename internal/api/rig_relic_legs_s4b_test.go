@@ -52,7 +52,7 @@ func TestWorkflowStoresKeepEveryRigLegOnASingleStoreCity(t *testing.T) {
 func TestOrderStoresDropARelicFreeRigLeg(t *testing.T) {
 	state, _, _ := newS4APIState(t, true)
 	order := orders.Order{Name: "nightly", Rig: "myrig"}
-	infos, err := orderStoreInfosForState(state, order)
+	infos, err := orderLegsFor(state.Stores(), state.CityName(), order.Rig)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,7 @@ func TestOrderStoresDropARelicFreeRigLeg(t *testing.T) {
 		t.Fatalf("a rig awaiting import lost its order leg: %v", workflowStoreRefs(infos))
 	}
 	state.relicFree["myrig"] = true
-	infos, err = orderStoreInfosForState(state, order)
+	infos, err = orderLegsFor(state.Stores(), state.CityName(), order.Rig)
 	if err != nil {
 		t.Fatal(err)
 	}

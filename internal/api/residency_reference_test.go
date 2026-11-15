@@ -66,7 +66,7 @@ func referenceResidencyTopology(s *Server) storeref.Topology {
 
 	if cfg != nil {
 		for _, rig := range cfg.Rigs {
-			store := s.state.BeadStore(rig.Name)
+			store := t7b2FrozenBeadStore(s.state, rig.Name)
 			if store == nil || store == city {
 				continue
 			}
@@ -259,7 +259,7 @@ func referenceConfiguredPrefixLegs(s *Server) []storeref.Leg {
 		})
 	}
 	for _, rig := range cfg.Rigs {
-		store := s.state.BeadStore(rig.Name)
+		store := t7b2FrozenBeadStore(s.state, rig.Name)
 		if store == nil {
 			continue
 		}

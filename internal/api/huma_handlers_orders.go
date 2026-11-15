@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
-	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/events"
@@ -155,11 +154,13 @@ func (s *Server) refreshOrderCheckResponseInBackground(cacheKey string) {
 func (s *Server) buildOrderCheckBody(fresh bool) OrderCheckListBody {
 	aa := s.state.Orders()
 	ep := s.state.EventProvider()
+	// One epoch for the body: every order's legs from the same stores.
+	st := s.state.Stores()
 
 	now := time.Now()
 	checks := make([]orderCheckResponse, 0, len(aa))
 	for _, a := range aa {
-		storeInfos, err := orderStoreInfosForState(s.state, a)
+		storeInfos, err := orderLegsFor(st, s.state.CityName(), a.Rig)
 		if err != nil {
 			storeInfos = nil
 		}
@@ -234,7 +235,9 @@ func checkOrderTriggerForAPI(a orders.Order, now time.Time, history []orderHisto
 	if a.Trigger == "event" {
 		var cursor uint64
 		if fresh {
-			cursor = orders.CursorAcross(orderFrontDoorsFromWorkflowInfos(infos))(a.ScopedName())
+			// Each leg read strict, as the front doors over the raw stores
+			// were: the cursor read carried no marker.
+			cursor = orders.CursorAcrossLegs(strictOrderLegs(infos))(a.ScopedName())
 		} else {
 			labelSets := make([][]string, 0, len(history))
 			for _, row := range history {
@@ -279,7 +282,9 @@ func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryIn
 	// The gate and the cache age are the city work store's, while the rows
 	// come from the order's store infos (E1: preserved, a follow-up reports
 	// the serving store's cache).
-	work := s.state.Stores().Work()
+	// One epoch for the request: the cache gate and the order's legs.
+	st := s.state.Stores()
+	work := st.Work()
 	if err := cacheLiveOr503(work); err != nil {
 		return nil, err
 	}
@@ -319,7 +324,7 @@ func (s *Server) humaHandleOrderHistory(_ context.Context, input *OrderHistoryIn
 			orderDef.Rig = scopedName[idx+5:]
 		}
 	}
-	storeInfos, err := orderStoreInfosForState(s.state, orderDef)
+	storeInfos, err := orderLegsFor(st, s.state.CityName(), orderDef.Rig)
 	if err != nil {
 		if errors.Is(err, errNoOrderStores) {
 			return nil, apierr.ServiceUnavailable.Msg(err.Error())
@@ -406,12 +411,13 @@ func (s *Server) humaHandleOrderHistoryDetail(_ context.Context, input *OrderHis
 }, error,
 ) {
 	// The bead this reads is an order-tracking bead, which on a split city lives in
-	// the orders binding. workflowStores leads with the GRAPH binding, so without
-	// the orders leg this only finds one because the shape this build serves
-	// happens to serve both classes from one store — the co-residency the feed
-	// already refuses to rely on.
-	storeInfos := appendOrdersClassStoreInfo(workflowWritableStores(s.state), s.state, workflowCityScopeRef(s.state.CityName()))
-	if input.StoreRef != "" {
+	// the orders binding. The workflow legs lead with the GRAPH binding, so the
+	// every-order legs add the orders leg after them (deduped where one binding
+	// serves both) rather than rely on that co-residency.
+	var storeInfos []workflowStoreInfo
+	if input.StoreRef == "" {
+		storeInfos = everyOrderLegs(s.state.Stores(), s.state.CityName())
+	} else {
 		info, ok := workflowStoreByRef(s.state, input.StoreRef)
 		if !ok {
 			return nil, apierr.ScopeNotFound.Msg("store_ref does not resolve to a known scope")
@@ -457,95 +463,11 @@ type orderHistoryStoreBead struct {
 	bead     beads.Bead
 }
 
-func orderStoreInfosForState(state State, a orders.Order) ([]workflowStoreInfo, error) {
-	cityName := workflowCityScopeRef(state.CityName())
-	infos := make([]workflowStoreInfo, 0, 2)
-	// A rig order's tracking beads are born in the orders binding on a split
-	// city; the rig store holds only pre-split history, and none once the rig
-	// is imported or proven clean (the S4 relic-free predicate).
-	if strings.TrimSpace(a.Rig) != "" && !rigGraphLegRetired(state, a.Rig) {
-		if rigStore := state.BeadStore(a.Rig); rigStore != nil {
-			infos = append(infos, workflowStoreInfo{
-				ref:       "rig:" + a.Rig,
-				scopeKind: beadmeta.ScopeKindRig,
-				scopeRef:  a.Rig,
-				store:     rigStore,
-			})
-		}
-	}
-
-	if cityStore := state.CityBeadStore(); cityStore != nil {
-		infos = append(infos, workflowStoreInfo{
-			ref:       "city:" + cityName,
-			scopeKind: beadmeta.ScopeKindCity,
-			scopeRef:  cityName,
-			store:     cityStore,
-		})
-	}
-
-	infos = appendOrdersClassStoreInfo(infos, state, cityName)
-
-	if len(infos) == 0 {
-		return nil, errNoOrderStores
-	}
-	return infos, nil
-}
-
 // ordersClassStoreRefPrefix distinguishes the orders binding from the scope
 // stores in a store_ref. It names the class rather than a scope because one
 // binding serves every scope, and a ref that claimed a scope would tell an
 // operator to look in the wrong database.
 const ordersClassStoreRefPrefix = "orders"
-
-// appendOrdersClassStoreInfo adds the orders-class binding to an order read's
-// store list, unless the list already reads it.
-//
-// The controller creates every order-tracking bead in this store, so a read that
-// skips it reports a split city's orders as never having run — `gc order check`
-// through the API sees no last run and calls a just-fired order due, and
-// `gc order history` returns nothing. The scope stores stay in the list because a
-// converged city holds the pre-cutover history in them.
-//
-// Skipped whenever the binding is one of the stores already present, which is
-// every city that relocates nothing: Stores().Orders() wraps CityBeadStore()
-// there, so the read stays byte-identical rather than scanning one database
-// twice.
-func appendOrdersClassStoreInfo(infos []workflowStoreInfo, state State, cityName string) []workflowStoreInfo {
-	ordersStore := state.Stores().Orders().Store
-	if ordersStore == nil {
-		return infos
-	}
-	for _, info := range infos {
-		// By physical identity: a workflow leg's store is its handle
-		// (workflowWritableStores), and == never matches a handle.
-		if beads.SameStore(info.store, ordersStore) {
-			return infos
-		}
-	}
-	return append(infos, workflowStoreInfo{
-		ref:       ordersClassStoreRefPrefix + ":" + cityName,
-		scopeKind: beadmeta.ScopeKindCity,
-		scopeRef:  cityName,
-		store:     ordersStore,
-	})
-}
-
-// orderFrontDoorsFromWorkflowInfos wraps the order read path's store infos as
-// order front doors for the mixed orders+graph Cursor read. Each store is used
-// as both the orders leg and the graph leg (single-store colocation dedups to one
-// read); a graph-store split would supply a distinct graph leg here.
-func orderFrontDoorsFromWorkflowInfos(infos []workflowStoreInfo) []*orders.Store {
-	out := make([]*orders.Store, 0, len(infos))
-	for _, info := range infos {
-		if info.store != nil {
-			out = append(out, orders.NewStoreWithGraph(
-				beads.OrdersStore{Store: info.store},
-				beads.GraphStore{Store: info.store},
-			))
-		}
-	}
-	return out
-}
 
 func orderHistoryBeadsAcrossStoreInfosForCheck(infos []workflowStoreInfo, scopedName string, limit int, beforeTime time.Time, fresh bool) ([]orderHistoryStoreBead, error) {
 	if fresh {
@@ -563,7 +485,7 @@ func orderHistoryBeadsAcrossStoreInfosCachedFirst(infos []workflowStoreInfo, sco
 	seen := make(map[string]bool)
 	results := make([]orderHistoryStoreBead, 0)
 	for i, info := range infos {
-		if info.store == nil {
+		if beads.IsNilStore(info.leg.Reader) {
 			continue
 		}
 		query := beads.ListQuery{
@@ -578,25 +500,20 @@ func orderHistoryBeadsAcrossStoreInfosCachedFirst(infos []workflowStoreInfo, sco
 			rows []beads.Bead
 			err  error
 		)
-		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
-		// rows only as pre-split copies, so beads.RelicRead counts the read as
-		// debt; on the class binding the same read is legitimate.
 		// One leg of the order-history federation (rig and city scopes for
-		// pre-cutover history, the orders binding): each leg holds only its
-		// own rows.
-		err = beads.RelicRead(func() error {
-			var listErr error
-			if cached, ok := beads.As[beads.CachedLister](info.store); ok {
-				var cacheOK bool
-				rows, cacheOK = cached.CachedList(query)
-				if !cacheOK {
-					rows, listErr = info.store.List(query)
-				}
-			} else {
-				rows, listErr = info.store.List(query)
+		// pre-cutover history, the orders binding), read in its plan role: a
+		// relocated city's scope legs are relic legs (S4 debt: they hold these
+		// rows only as pre-split copies), the binding federated. The cache-first
+		// lister is the leg's own, so the cached read keeps that role.
+		if cached, ok := beads.ReaderAs[beads.CachedLister](info.leg.Reader); ok {
+			var cacheOK bool
+			rows, cacheOK = cached.CachedList(query)
+			if !cacheOK {
+				rows, err = info.leg.Reader.List(query)
 			}
-			return listErr
-		})
+		} else {
+			rows, err = info.leg.Reader.List(query)
+		}
 		if err != nil {
 			if i == 0 && len(rows) == 0 {
 				return nil, err
@@ -637,26 +554,18 @@ func orderHistoryBeadsAcrossStoreInfos(infos []workflowStoreInfo, scopedName str
 	seen := make(map[string]bool)
 	results := make([]orderHistoryStoreBead, 0)
 	for i, info := range infos {
-		if info.store == nil {
+		if beads.IsNilStore(info.leg.Reader) {
 			continue
 		}
-		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
-		// rows only as pre-split copies, so beads.RelicRead counts the read as
-		// debt; on the class binding the same read is legitimate.
-		// One leg of the order-history federation; each leg holds only its
-		// own rows.
-		var rows []beads.Bead
-		err := beads.RelicRead(func() error {
-			var listErr error
-			rows, listErr = info.store.List(beads.ListQuery{
-				Label:         label,
-				CreatedBefore: beforeTime,
-				Limit:         limit,
-				IncludeClosed: true,
-				Sort:          beads.SortCreatedDesc,
-				TierMode:      beads.TierBoth,
-			})
-			return listErr
+		// One leg of the order-history federation, read in its plan role;
+		// each leg holds only its own rows.
+		rows, err := info.leg.Reader.List(beads.ListQuery{
+			Label:         label,
+			CreatedBefore: beforeTime,
+			Limit:         limit,
+			IncludeClosed: true,
+			Sort:          beads.SortCreatedDesc,
+			TierMode:      beads.TierBoth,
 		})
 		if err != nil {
 			if i == 0 && len(rows) == 0 {
@@ -696,14 +605,12 @@ func orderHistoryBeadAcrossStoreInfos(infos []workflowStoreInfo, beadID string) 
 
 	var lastErr error
 	for _, info := range infos {
-		if info.store == nil {
+		if beads.IsNilStore(info.leg.Reader) {
 			continue
 		}
-		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
-		// rows only as pre-split copies, so beads.RelicRead counts the read as
-		// debt; on the class binding the same read is legitimate.
-		// A residence probe over the order-history legs.
-		bead, err := beads.RelicGet(info.store, beadID)
+		// A residence probe over the order-history legs, each read in its
+		// plan role.
+		bead, err := info.leg.Reader.Get(beadID)
 		if err == nil {
 			return orderHistoryStoreBead{storeRef: info.ref, bead: bead}, nil
 		}

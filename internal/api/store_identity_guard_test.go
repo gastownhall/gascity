@@ -16,9 +16,7 @@ import (
 // correctly; each is rewritten to beads.SameStore or beads.PhysicalStoreKey
 // by the PR that hands it a class handle. The table only shrinks: a new
 // comparison uses SameStore.
-var reviewedStoreIdentitySites = map[string]beadstest.IdentitySite{
-	"handler_convoy_dispatch.go workflowStoreByRef eq": {Count: 1, Reason: "orders store == CityBeadStore(): a raw unwrap; T7f orders legs"},
-}
+var reviewedStoreIdentitySites = map[string]beadstest.IdentitySite{}
 
 // TestStoreIdentityGuard holds internal/api's store comparisons to the
 // reviewed table.
