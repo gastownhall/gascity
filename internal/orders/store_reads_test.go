@@ -782,3 +782,96 @@ func runsContain(runs []OrderRun, id string) bool {
 	}
 	return false
 }
+
+// TestClosedRunsCreatedBeforePagesNewestFirst proves the retention page reads
+// at most limit tracking beads created before the bound, newest first, counts
+// the open ones in Rows without returning them, and reports the oldest
+// bead's CreatedAt as the next bound. Each read is one bounded listing.
+func TestClosedRunsCreatedBeforePagesNewestFirst(t *testing.T) {
+	base := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	var seed []beads.Bead
+	for i := range 6 {
+		status := "closed"
+		if i == 3 {
+			status = "open"
+		}
+		seed = append(seed, beads.Bead{
+			ID:        "run-" + string(rune('a'+i)),
+			Title:     "order:a",
+			Status:    status,
+			CreatedAt: base.Add(time.Duration(i) * time.Hour),
+			Labels:    []string{"order-run:a", "order-tracking"},
+		})
+	}
+	spy := &listSpyStore{Store: beads.NewMemStoreFrom(100, seed, nil)}
+	front := NewStore(beads.OrdersStore{Store: spy})
+
+	// Bound before run-f: run-e, run-d (open), run-c.
+	page, err := front.ClosedRunsCreatedBefore(base.Add(5*time.Hour), 3)
+	if err != nil {
+		t.Fatalf("ClosedRunsCreatedBefore: %v", err)
+	}
+	if page.Rows != 3 {
+		t.Fatalf("Rows = %d, want 3", page.Rows)
+	}
+	var got []string
+	for _, r := range page.Runs {
+		got = append(got, r.ID)
+		if r.Scoped != "a" {
+			t.Fatalf("run %s Scoped = %q, want a", r.ID, r.Scoped)
+		}
+	}
+	if want := []string{"run-e", "run-c"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Runs = %v, want %v (closed only, newest first)", got, want)
+	}
+	if want := base.Add(2 * time.Hour); !page.Oldest.Equal(want) {
+		t.Fatalf("Oldest = %v, want %v", page.Oldest, want)
+	}
+
+	next, err := front.ClosedRunsCreatedBefore(page.Oldest, 3)
+	if err != nil {
+		t.Fatalf("ClosedRunsCreatedBefore(next): %v", err)
+	}
+	got = got[:0]
+	for _, r := range next.Runs {
+		got = append(got, r.ID)
+	}
+	if want := []string{"run-b", "run-a"}; next.Rows != 2 || !reflect.DeepEqual(got, want) {
+		t.Fatalf("next page = %d rows %v, want 2 rows %v", next.Rows, got, want)
+	}
+
+	for _, q := range spy.queries {
+		if q.Limit != 3 || q.CreatedBefore.IsZero() || !q.IncludeClosed || q.Status != "" || q.TierMode != beads.TierBoth || q.Sort != beads.SortCreatedDesc {
+			t.Fatalf("query = %+v, want a bounded created-desc both-tier listing of every status before a bound", q)
+		}
+	}
+}
+
+// TestNewestClosedRunsKeepsOnlyClosedTrackingRuns proves the floor read lists
+// the order's newest order-run-labeled beads within limit and returns only the
+// closed tracking beads among them: a wisp root with the same label and an
+// open tracking bead take part in the limit but are not returned.
+func TestNewestClosedRunsKeepsOnlyClosedTrackingRuns(t *testing.T) {
+	base := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	seed := []beads.Bead{
+		{ID: "t1", Title: "order:a", Status: "closed", CreatedAt: base, Labels: []string{"order-run:a", "order-tracking"}},
+		{ID: "t2", Title: "order:a", Status: "closed", CreatedAt: base.Add(time.Hour), Labels: []string{"order-run:a", "order-tracking"}},
+		{ID: "w3", Title: "wisp", Status: "closed", CreatedAt: base.Add(2 * time.Hour), Labels: []string{"order-run:a"}},
+		{ID: "t4", Title: "order:a", Status: "open", CreatedAt: base.Add(3 * time.Hour), Labels: []string{"order-run:a", "order-tracking"}},
+		{ID: "t5", Title: "order:a", Status: "closed", CreatedAt: base.Add(4 * time.Hour), Labels: []string{"order-run:a", "order-tracking"}},
+		{ID: "b1", Title: "order:b", Status: "closed", CreatedAt: base.Add(5 * time.Hour), Labels: []string{"order-run:b", "order-tracking"}},
+	}
+	front := NewStore(beads.OrdersStore{Store: beads.NewMemStoreFrom(100, seed, nil)})
+
+	runs, err := front.NewestClosedRuns("a", 4)
+	if err != nil {
+		t.Fatalf("NewestClosedRuns: %v", err)
+	}
+	var got []string
+	for _, r := range runs {
+		got = append(got, r.ID)
+	}
+	if want := []string{"t5", "t2"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("NewestClosedRuns(a, 4) = %v, want %v", got, want)
+	}
+}
