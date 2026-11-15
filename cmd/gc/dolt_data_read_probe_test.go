@@ -347,3 +347,61 @@ func TestManagedDoltDataReadProbeUnclassifiedFailureReportsErrorLinesNotRows(t *
 		}
 	}
 }
+
+// A dolt server whose table data was damaged in place after it came up (so the
+// first read has to come off disk cold) answers the probe statement with these
+// verbatim texts, recorded on a scratch dolt 2.6.0 server (ga-4ymxxmkn): the
+// chunk reads fail, the server stays up and COUNT(*) still answers. Each is data
+// loss, not an inconclusive read.
+func TestManagedDoltDataReadProbeServerChunkReadErrorsAreFailures(t *testing.T) {
+	const stmt = "error on line 1 for query SELECT * FROM `gascity`.`wisps` LIMIT 1: "
+	for name, msg := range map[string]string{
+		"checksum":            stmt + "Error 1105 (HY000): checksum error",
+		"checksum-no-state":   stmt + "Error 1105: checksum error",
+		"eof":                 stmt + "Error 1105 (HY000): EOF",
+		"eof-driver-no-state": "Error 1105: EOF",
+	} {
+		t.Run(name, func(t *testing.T) {
+			ops := dataReadOps([]managedDoltTableRef{{DB: "gascity", Table: "wisps"}},
+				func(string, []string) error { return errors.New(msg) }, nil)
+			got := managedDoltDataReadProbeWith(ops)
+			if got.Warning != "" || !strings.Contains(got.Err, "gascity: ") || !strings.Contains(got.Err, msg[strings.LastIndex(msg, "Error 1105"):]) {
+				t.Errorf("probe = %+v, want a failure carrying %q", got, msg)
+			}
+		})
+	}
+}
+
+// The server's own "Error 1105 ...: EOF" is a chunk read failure, but an EOF a
+// client reports for itself is a dropped connection, which says nothing about
+// the data.
+func TestManagedDoltDataReadProbeConnectionLevelEOFStaysInconclusive(t *testing.T) {
+	for _, msg := range []string{
+		"EOF",
+		"unexpected EOF",
+		"error on line 1 for query SELECT * FROM `gascity`.`wisps` LIMIT 1: unexpected EOF",
+		"Error 1105 (HY000): unexpected EOF",
+		"invalid connection",
+		"read tcp 127.0.0.1:41522->127.0.0.1:3307: read: connection reset by peer",
+	} {
+		ops := dataReadOps([]managedDoltTableRef{{DB: "gascity", Table: "wisps"}},
+			func(string, []string) error { return errors.New(msg) }, nil)
+		got := managedDoltDataReadProbeWith(ops)
+		if got.Err != "" || !strings.Contains(got.Warning, msg) {
+			t.Errorf("%q: probe = %+v, want an inconclusive warning carrying the text", msg, got)
+		}
+	}
+}
+
+// A chunk-store signature in the discovery query's own failure is data loss too:
+// the catalog read is as much a read of the store as the leaf read.
+func TestManagedDoltDataReadProbeDiscoveryChunkErrorIsFailure(t *testing.T) {
+	ops := managedDoltDataReadOps{
+		listTables: func() ([]managedDoltTableRef, error) { return nil, errors.New(testEmptyChunkErr) },
+		readBatch:  func(string, []string) error { t.Fatal("read attempted after failed discovery"); return nil },
+	}
+	got := managedDoltDataReadProbeWith(ops)
+	if got.Warning != "" || !strings.Contains(got.Err, testEmptyChunkErr) {
+		t.Fatalf("probe = %+v, want a failure carrying the discovery error", got)
+	}
+}
