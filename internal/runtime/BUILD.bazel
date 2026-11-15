@@ -46,6 +46,8 @@ go_library(
         "session_events_merge.go",
         "session_object.go",
         "staging.go",
+        "staging_tracked.go",
+        "staging_tracked_other.go",
         "startup_hints.go",
         "startup_nudge_handback.go",
         "steer.go",
@@ -62,7 +64,10 @@ go_library(
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime",
     visibility = ["//:__subpackages__"],
-    deps = ["//internal/overlay"],
+    deps = [
+        "//internal/execenv",
+        "//internal/overlay",
+    ],
 )
 
 go_test(
@@ -161,6 +166,7 @@ go_test(
         "//internal/runtime/t3bridge",
         "//internal/runtime/tmux",
         "//internal/testenv",
+        "//internal/testutil",
     ],
 )
 
