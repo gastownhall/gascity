@@ -186,7 +186,9 @@ func TestExecMissingSessionInputContract(t *testing.T) {
 
 // TestSeamNudgeSpawnCount pins the cost of the seam-backed driving verbs and
 // pure reads on a warm v0 pack: one presence probe and the op itself, with
-// no second is-running and no wasted exec spawn per call.
+// no second is-running and no wasted exec spawn per call. A pure read
+// repeated within the read cache's TTL spawns nothing; a driving verb's
+// presence probe asks the script every time.
 func TestSeamNudgeSpawnCount(t *testing.T) {
 	f := newV0PackFixture(t)
 	f.run(t, "live")
@@ -202,22 +204,24 @@ func TestSeamNudgeSpawnCount(t *testing.T) {
 	cases := []struct {
 		name string
 		call func() error
-		want []string
+		// want is the first call's spawns; again, the same call's straight
+		// after it.
+		want, again []string
 	}{
-		{"Nudge", func() error { return f.sp.Nudge("live", runtime.TextContent("hello")) }, []string{"is-running", "nudge"}},
-		{"SendKeys", func() error { return f.sp.SendKeys("live", "Enter") }, []string{"is-running", "send-keys"}},
-		{"Interrupt", func() error { return f.sp.Interrupt("live") }, []string{"is-running", "interrupt"}},
-		{"ClearScrollback", func() error { return f.sp.ClearScrollback("live") }, []string{"is-running", "clear-scrollback"}},
-		{"GetLastActivity", func() error { _, err := f.sp.GetLastActivity("live"); return err }, []string{"get-last-activity"}},
-		{"IsAttached", func() error { f.sp.IsAttached("live"); return nil }, nil},
+		{"Nudge", func() error { return f.sp.Nudge("live", runtime.TextContent("hello")) }, []string{"is-running", "nudge"}, []string{"is-running", "nudge"}},
+		{"SendKeys", func() error { return f.sp.SendKeys("live", "Enter") }, []string{"is-running", "send-keys"}, []string{"is-running", "send-keys"}},
+		{"Interrupt", func() error { return f.sp.Interrupt("live") }, []string{"is-running", "interrupt"}, []string{"is-running", "interrupt"}},
+		{"ClearScrollback", func() error { return f.sp.ClearScrollback("live") }, []string{"is-running", "clear-scrollback"}, []string{"is-running", "clear-scrollback"}},
+		{"GetLastActivity", func() error { _, err := f.sp.GetLastActivity("live"); return err }, []string{"get-last-activity"}, nil},
+		{"IsAttached", func() error { f.sp.IsAttached("live"); return nil }, nil, nil},
 	}
 	for _, tc := range cases {
-		for round := 1; round <= 2; round++ {
+		for round, want := range [][]string{tc.want, tc.again} {
 			if err := tc.call(); err != nil {
-				t.Fatalf("%s round %d: %v", tc.name, round, err)
+				t.Fatalf("%s round %d: %v", tc.name, round+1, err)
 			}
-			if got := readOpLog(t, f.opLog); !slices.Equal(got, tc.want) {
-				t.Errorf("%s round %d spawned %v, want %v", tc.name, round, got, tc.want)
+			if got := readOpLog(t, f.opLog); !slices.Equal(got, want) {
+				t.Errorf("%s round %d spawned %v, want %v", tc.name, round+1, got, want)
 			}
 		}
 	}

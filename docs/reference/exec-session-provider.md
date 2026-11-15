@@ -196,6 +196,34 @@ four driving ops. With `idle-boundary`, both checkers also require the
 [ready-prompt store](#idle-sleep). `watch-startup` stays a dedicated streaming
 op for either carrier.
 
+### Read caching
+
+gc keeps the answers of four reads for a short time and answers a repeat
+of the same read from them instead of running the script again:
+`is-running`, `process-alive`, `get-meta` and `get-last-activity`. One
+controller pass, or one API request, asks these about the same session
+several times; against an exec script each ask is a process, so the cache
+works like the tmux provider's state cache (`GC_TMUX_CACHE_TTL`).
+
+- A repeat is the same operation with the same arguments and stdin
+  (`get-meta` for another key, or `process-alive` for other process names,
+  is a new read).
+- An answer is kept for `GC_EXEC_CACHE_TTL`, read from gc's own
+  environment: 2 seconds by default, a Go duration (`500ms`, `5s`) or
+  whole milliseconds (`1500`). `0` turns the cache off.
+- Only a read that succeeded is kept. Concurrent identical reads run the
+  script once.
+- Any other operation gc runs through the script, `exec` included, clears
+  the cache before and after it runs, so a read never answers from before
+  a change gc made.
+- The reads that decide what gc does to a box — whether a start may use
+  the name, and whether a box is still there before input goes to it —
+  always run the script.
+
+A change gc did not make (the agent exiting, another gc process writing
+metadata) shows up within one TTL. A script does not need to do anything
+for this; it should still answer every read from the box's real state.
+
 ### Protocol Handshake (`protocol`)
 
 The `protocol` operation declares which Runtime Provider Protocol version
@@ -1352,6 +1380,9 @@ script can budget its own inner calls by it. gc counts it from just before
 the spawn, so it is an upper bound; an operation whose deadline has passed
 before it is spawned is not run at all. It is informational: no handshake
 capability declares or gates it.
+
+`GC_EXEC_CACHE_TTL` is a setting for gc itself, not for scripts: it
+sets how long gc reuses a read's answer (see [Read caching](#read-caching)).
 
 A session a script starts may live in a cgroup of its own that the script
 kills whole when it stops the session. The city's store is not caught in

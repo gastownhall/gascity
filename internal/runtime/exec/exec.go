@@ -77,6 +77,10 @@ type Provider struct {
 	// its host work (provisionBox), so the launch that follows runs their
 	// session_setup on the host (execTransport.Launch).
 	hostSetupDue sync.Map
+
+	// reads keeps the answers of the plain reads for a short TTL
+	// (read_cache.go); nil reads through.
+	reads *readCache
 }
 
 type startupWatchEvent struct {
@@ -96,6 +100,7 @@ func NewProvider(script string, opts ...Option) *Provider {
 		timeout:      30 * time.Second,
 		startTimeout: 120 * time.Second,
 		setupTimeout: defaultSetupTimeout,
+		reads:        newReadCache(readCacheTTLFromEnv()),
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -172,10 +177,31 @@ func (p *Provider) runWithContext(parent context.Context, dur time.Duration, std
 	return p.runCapped(parent, dur, 0, stdinData, args...)
 }
 
+// cachedRun is run for one of the plain reads the read cache keeps
+// (readCacheOps): an identical read within the TTL answers from the cache.
+func (p *Provider) cachedRun(stdinData []byte, args ...string) (string, error) {
+	return p.reads.read(readCacheKey(stdinData, args...), func() (string, error) {
+		return p.run(stdinData, args...)
+	})
+}
+
+// freshRun is run for a plain read whose answer decides what gc does to a
+// box: it always asks the script, and refreshes the read cache.
+func (p *Provider) freshRun(stdinData []byte, args ...string) (string, error) {
+	return p.reads.fresh(readCacheKey(stdinData, args...), func() (string, error) {
+		return p.run(stdinData, args...)
+	})
+}
+
 // runCapped is runWithContext with stdout capped at limit bytes (0: no
 // cap). Output past the cap is discarded and fails the op, without echoing
-// any of it.
+// any of it. An op that may change a session clears the read cache before
+// and after it runs.
 func (p *Provider) runCapped(parent context.Context, dur time.Duration, limit int, stdinData []byte, args ...string) (string, error) {
+	if len(args) > 0 && !opLeavesStateAlone(args[0]) {
+		p.reads.invalidate()
+		defer p.reads.invalidate()
+	}
 	env := p.opEnv()
 	ctx, cancel := context.WithTimeout(parent, dur)
 	defer cancel()
@@ -1016,9 +1042,10 @@ func (p *Provider) Interrupt(name string) error {
 }
 
 // IsRunning checks if the session is alive: script is-running <name>
-// Returns true only if stdout is "true". Errors → false.
+// Returns true only if stdout is "true". Errors → false. An identical read
+// within the read cache's TTL answers from the cache (read_cache.go).
 func (p *Provider) IsRunning(name string) bool {
-	running, _ := p.isRunningOp(name)
+	running, _ := parseIsRunning(p.cachedRun(nil, "is-running", name))
 	return running
 }
 
@@ -1073,9 +1100,15 @@ func (p *Provider) holdsNoLiveBox(name string) bool {
 // whether there was one. Only a literal "true" or "false" is an answer; an op
 // error, an unknown op (exit 2 on a pack with no is-running), or empty output
 // means the adapter could not tell. [Provider.IsRunning] flattens that to a
-// bool because its callers only need "treat as not running".
+// bool because its callers only need "treat as not running". Its callers
+// decide what gc does to the box, so it always asks the script.
 func (p *Provider) isRunningOp(name string) (running, definite bool) {
-	out, err := p.run(nil, "is-running", name)
+	return parseIsRunning(p.freshRun(nil, "is-running", name))
+}
+
+// parseIsRunning reads an is-running op's result: a literal "true" or
+// "false" is a definite answer, anything else none.
+func parseIsRunning(out string, err error) (running, definite bool) {
 	if err != nil {
 		return false, false
 	}
@@ -1137,7 +1170,7 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 		return true
 	}
 	stdin := []byte(strings.Join(processNames, "\n"))
-	out, err := p.run(stdin, "process-alive", name)
+	out, err := p.cachedRun(stdin, "process-alive", name)
 	if err != nil {
 		return false
 	}
@@ -1171,9 +1204,10 @@ func (p *Provider) SetMeta(name, key, value string) error {
 }
 
 // GetMeta retrieves a metadata value: script get-meta <name> <key>
-// Returns ("", nil) if stdout is empty.
+// Returns ("", nil) if stdout is empty. An identical read within the read
+// cache's TTL answers from the cache.
 func (p *Provider) GetMeta(name, key string) (string, error) {
-	return p.run(nil, "get-meta", name, key)
+	return p.cachedRun(nil, "get-meta", name, key)
 }
 
 // RemoveMeta removes a metadata key: script remove-meta <name> <key>
@@ -1291,8 +1325,9 @@ func (p *Provider) SleepCapability(string) runtime.SessionSleepCapability {
 
 // GetLastActivity returns the last activity time: script get-last-activity <name>
 // Expects RFC3339 on stdout, or empty for unsupported. Malformed → zero time.
+// An identical read within the read cache's TTL answers from the cache.
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {
-	out, err := p.run(nil, "get-last-activity", name)
+	out, err := p.cachedRun(nil, "get-last-activity", name)
 	if err != nil {
 		return time.Time{}, err
 	}
@@ -1344,6 +1379,10 @@ func (p *Provider) Exec(ctx context.Context, name string, argv []string) ([]byte
 		return nil, 0, fmt.Errorf("%w: %s exec %s", runtime.ErrExecUnsupported, p.script, name)
 	}
 	command := shellQuote(argv)
+	// A command in the box may change what the plain reads answer (a
+	// launch, keys to the agent), so it clears the read cache like a write.
+	p.reads.invalidate()
+	defer p.reads.invalidate()
 	env := p.opEnv()
 	cmdCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
