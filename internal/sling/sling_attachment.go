@@ -433,17 +433,29 @@ func CloseAttachedSubtree(store beads.Store, attached beads.Bead) (int, error) {
 	return molecule.CloseSubtree(storeMolecule, attached.ID)
 }
 
-func clearAttachmentMetadata(store beads.WorkStore, parent beads.Bead, attached beads.Bead) error {
-	if store == (beads.WorkStore{}) || strings.TrimSpace(parent.ID) == "" || strings.TrimSpace(attached.ID) == "" {
+// setParentMetadata writes a parent's metadata through the scope's work handle
+// when it has one, else its graph handle; a scope with neither writes nothing.
+func (s attachmentScope) setParentMetadata(id, key, value string) error {
+	switch {
+	case s.work != (beads.WorkStore{}):
+		return s.work.SetMetadata(id, key, value)
+	case s.graph != (beads.GraphStore{}):
+		return s.graph.SetMetadata(id, key, value)
+	}
+	return nil
+}
+
+func clearAttachmentMetadata(scope attachmentScope, parent beads.Bead, attached beads.Bead) error {
+	if strings.TrimSpace(parent.ID) == "" || strings.TrimSpace(attached.ID) == "" {
 		return nil
 	}
 	if strings.TrimSpace(parent.Metadata["workflow_id"]) == attached.ID {
-		if err := store.SetMetadata(parent.ID, "workflow_id", ""); err != nil {
+		if err := scope.setParentMetadata(parent.ID, "workflow_id", ""); err != nil {
 			return err
 		}
 	}
 	if strings.TrimSpace(parent.Metadata[beadmeta.MoleculeIDMetadataKey]) == attached.ID {
-		if err := store.SetMetadata(parent.ID, beadmeta.MoleculeIDMetadataKey, ""); err != nil {
+		if err := scope.setParentMetadata(parent.ID, beadmeta.MoleculeIDMetadataKey, ""); err != nil {
 			return err
 		}
 	}
@@ -491,7 +503,7 @@ func checkNoMoleculeChildren(q BeadQuerier, beadID string, scope attachmentScope
 		if parentUnassigned && located.Store != nil {
 			if held, unreadable = attachmentActiveWork(located); len(held) == 0 && unreadable == nil {
 				if _, burnErr := CloseAttachedSubtree(located.Store, attached); burnErr == nil {
-					if clearErr := clearAttachmentMetadata(scope.work, parent, attached); clearErr != nil {
+					if clearErr := clearAttachmentMetadata(scope, parent, attached); clearErr != nil {
 						return clearErr
 					}
 					result.AutoBurned = append(result.AutoBurned, attached.ID)
@@ -654,7 +666,7 @@ func checkBatchNoMoleculeChildren(q BeadChildQuerier, open []beads.Bead, scope a
 			if childUnassigned && located.Store != nil {
 				if held, unreadable = attachmentActiveWork(located); len(held) == 0 && unreadable == nil {
 					if _, burnErr := CloseAttachedSubtree(located.Store, attached); burnErr == nil {
-						if clearErr := clearAttachmentMetadata(scope.work, child, attached); clearErr != nil {
+						if clearErr := clearAttachmentMetadata(scope, child, attached); clearErr != nil {
 							return clearErr
 						}
 						result.AutoBurned = append(result.AutoBurned, attached.ID)
@@ -997,8 +1009,25 @@ func routedStateWarnings(b beads.Bead, beadID string) []string {
 	return warnings
 }
 
-// CheckNoMoleculeChildrenAllowLiveWorkflow is compile-only scaffolding for the RED test; GREEN replaces it.
+// attachmentScopeOf is the one-sided scope of a molecule target: the handle it
+// was built from, in the slot of its class. The other slot stays zero, which
+// stores() and the lookups skip.
+func attachmentScopeOf(t beads.MoleculeTarget) attachmentScope {
+	var scope attachmentScope
+	scope.work, _ = t.WorkHandle()
+	scope.graph, _ = t.GraphHandle()
+	return scope
+}
+
+// CheckNoMoleculeChildrenAllowLiveWorkflow runs the attach guard over the
+// store a molecule target wraps, for a caller that grafts through that same
+// target: it refuses a source bead that already carries a live molecule, burns
+// an unassigned source's idle one (recorded in result.AutoBurned), and never
+// treats a live workflow attachment as a downward one. An absent target is an
+// error naming beadID, not a pass.
 func CheckNoMoleculeChildrenAllowLiveWorkflow(target beads.MoleculeTarget, beadID string, result *SlingResult) error {
-	_, _, _ = target, beadID, result
-	return nil
+	if target.Absent() {
+		return fmt.Errorf("checking attachments of %s: no store to read them from", beadID)
+	}
+	return checkNoMoleculeChildren(target, beadID, attachmentScopeOf(target), result, true)
 }

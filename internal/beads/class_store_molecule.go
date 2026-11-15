@@ -48,8 +48,22 @@ func (t MoleculeTarget) GuardedBatcherHandle() (GuardedBatcher, bool) {
 	return GuardedBatcherFor(t.Store)
 }
 
-// WorkHandle is compile-only scaffolding for the RED test; GREEN replaces it.
-func (t MoleculeTarget) WorkHandle() (WorkStore, bool) { return WorkStore{}, false }
+// WorkHandle is the work handle this target was built from: present only for a
+// present work-class target. A graph-class or absent target yields none, so a
+// zero handle never becomes a present one.
+func (t MoleculeTarget) WorkHandle() (WorkStore, bool) {
+	if t.Absent() || t.graph {
+		return WorkStore{}, false
+	}
+	return WorkStore{Store: t.Store}, true
+}
 
-// GraphHandle is compile-only scaffolding for the RED test; GREEN replaces it.
-func (t MoleculeTarget) GraphHandle() (GraphStore, bool) { return GraphStore{}, false }
+// GraphHandle is the graph handle this target was built from: present only for
+// a present graph-class target. A work-class or absent target yields none, so
+// a zero handle never becomes a present one.
+func (t MoleculeTarget) GraphHandle() (GraphStore, bool) {
+	if t.Absent() || !t.graph {
+		return GraphStore{}, false
+	}
+	return GraphStore{Store: t.Store}, true
+}
