@@ -1,7 +1,7 @@
 package doctor
 
 import (
-	"os/exec"
+	"os"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
@@ -27,13 +27,11 @@ func TestPinEmbeddedBDHomeRunsBDSubprocessesInTestMode(t *testing.T) {
 	t.Setenv(beadstest.EnvBeadsTestMode, "")
 	pinEmbeddedBDHome(t)
 
-	probe := `printf %s "${` + beadstest.EnvBeadsTestMode + `-unset}"`
-	out, err := exec.Command("sh", "-c", probe).Output()
-	if err != nil {
-		t.Fatalf("probe subprocess: %v", err)
-	}
-	if got := string(out); got != "1" {
-		t.Errorf("subprocess sees %s=%q, want %q", beadstest.EnvBeadsTestMode, got, "1")
+	// The fixtures start bd with exec.Command and no explicit Env, so a child
+	// sees exactly this process's environment. Asserting on it in-process avoids
+	// a probe subprocess, which the source-level resource census would count.
+	if got := os.Getenv(beadstest.EnvBeadsTestMode); got != "1" {
+		t.Errorf("a bd subprocess would see %s=%q, want %q", beadstest.EnvBeadsTestMode, got, "1")
 	}
 }
 
@@ -47,12 +45,7 @@ func TestPinEmbeddedBDHomeOwnsHome(t *testing.T) {
 	if home == "" {
 		t.Fatal("pinEmbeddedBDHome returned an empty HOME")
 	}
-	probe := `printf %s "$HOME"`
-	out, err := exec.Command("sh", "-c", probe).Output()
-	if err != nil {
-		t.Fatalf("probe subprocess: %v", err)
-	}
-	if got := string(out); got != home {
-		t.Errorf("subprocess HOME = %q, want the test-owned %q", got, home)
+	if got := os.Getenv("HOME"); got != home {
+		t.Errorf("a bd subprocess would see HOME=%q, want the test-owned %q", got, home)
 	}
 }
