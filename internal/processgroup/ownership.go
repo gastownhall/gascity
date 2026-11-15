@@ -1,6 +1,16 @@
 package processgroup
 
-import "errors"
+import (
+	"errors"
+	"time"
+)
+
+// ErrProcessNotConfirmedDead reports that a command outlived its forced kill
+// and the bounded reap wait. Its ownership must be preserved for a retry.
+var ErrProcessNotConfirmedDead = errors.New("process not confirmed dead after SIGKILL")
+
+// ManagedProcessReapGrace bounds the confirmation wait after a forced kill.
+const ManagedProcessReapGrace = 3 * time.Second
 
 // ErrUnsupported reports that a process-control operation has no implementation
 // on this platform. Callers must surface it rather than treating it as success:

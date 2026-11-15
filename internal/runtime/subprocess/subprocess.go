@@ -196,7 +196,7 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 		// wait for reap the way terminateSessionConn does.
 		if processgroup.HoldsTree(existing.cmd) {
 			if err := processgroup.TerminateManagedCommand(existing.cmd, existing.pgid, existing.done, runtime.ManagedProcessStopGrace, processgroup.Options{}); err != nil {
-				return fmt.Errorf("stopping what the previous session %q left running: %w", name, err)
+				return fmt.Errorf("stopping what the previous session %q left running: %w", name, processStopError(err))
 			}
 		}
 		delete(p.procs, name)
@@ -1135,10 +1135,17 @@ var sessionStopGrace = runtime.ManagedProcessStopGrace
 // without waiting for reap.
 func terminateSessionConn(sc *sessionConn) error {
 	err := processgroup.TerminateManagedCommand(sc.cmd, sc.pgid, sc.done, sessionStopGrace, processgroup.Options{})
-	if errors.Is(err, runtime.ErrProcessNotConfirmedDead) {
-		return err
+	if err != nil {
+		return processStopError(err)
 	}
 	<-sc.reaped
+	return err
+}
+
+func processStopError(err error) error {
+	if errors.Is(err, processgroup.ErrProcessNotConfirmedDead) {
+		return fmt.Errorf("%w: %w", runtime.ErrProcessNotConfirmedDead, err)
+	}
 	return err
 }
 

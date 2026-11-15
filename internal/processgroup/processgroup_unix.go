@@ -227,14 +227,20 @@ func InterruptCommand(cmd *exec.Cmd, knownPGID int, opts Options) error {
 //
 // done must be closed by whoever reaps cmd. Waiting on it rather than polling
 // liveness is what makes the returned nil mean "observed exited" instead of
-// "stopped looking".
+// "stopped looking". A command that outlives SIGKILL yields
+// [ErrProcessNotConfirmedDead] after [ManagedProcessReapGrace].
 func TerminateManagedCommand(cmd *exec.Cmd, knownPGID int, done <-chan struct{}, grace time.Duration, opts Options) error {
-	if cmd == nil || cmd.Process == nil {
-		return nil
-	}
-	pgid, err := resolveGroupID(cmd, knownPGID)
-	if err != nil && !errors.Is(err, syscall.ESRCH) {
-		return err
+	return terminateManagedCommandGraces(cmd, knownPGID, done, grace, ManagedProcessReapGrace, opts)
+}
+
+func terminateManagedCommandGraces(cmd *exec.Cmd, knownPGID int, done <-chan struct{}, grace, reapGrace time.Duration, opts Options) error {
+	var pgid int
+	if cmd != nil && cmd.Process != nil {
+		var err error
+		pgid, err = resolveGroupID(cmd, knownPGID)
+		if err != nil && !errors.Is(err, syscall.ESRCH) {
+			return err
+		}
 	}
 	if pgid > 0 && !unsafeGroup(pgid, opts) {
 		if termErr := opts.kill(-pgid, syscall.SIGTERM); termErr != nil && !errors.Is(termErr, syscall.ESRCH) {
@@ -258,8 +264,14 @@ func TerminateManagedCommand(cmd *exec.Cmd, knownPGID int, done <-chan struct{},
 	if err := KillCommandGroup(cmd, pgid, opts); err != nil {
 		return err
 	}
-	<-done
-	return nil
+	reap := time.NewTimer(reapGrace)
+	defer reap.Stop()
+	select {
+	case <-done:
+		return nil
+	case <-reap.C:
+		return fmt.Errorf("%w: still running %v after SIGKILL", ErrProcessNotConfirmedDead, reapGrace)
+	}
 }
 
 // groupGoneBefore polls process group pgid until it has no members (true) or

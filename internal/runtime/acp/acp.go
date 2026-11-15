@@ -1334,7 +1334,7 @@ func handleControlConn(conn net.Conn, cmd *exec.Cmd, pgid int, done <-chan struc
 	case controlTurn:
 		fmt.Fprintf(conn, "%s\n", owner.turn()) //nolint:errcheck
 	case "stop":
-		reply(processgroup.TerminateManagedCommand(cmd, pgid, done, stopGrace, processgroup.Options{}))
+		reply(processStopError(processgroup.TerminateManagedCommand(cmd, pgid, done, stopGrace, processgroup.Options{})))
 	case "interrupt":
 		// The settle can take the whole cancel_timeout plus the SIGINT
 		// retries, far longer than the caller's socket deadline, and the
@@ -1503,5 +1503,12 @@ func isPipeWriteError(err error) bool {
 // terminateProcess requests a cooperative stop and, after grace, force-reaps the
 // owned process tree.
 func terminateProcess(sc *sessionConn, grace time.Duration) error {
-	return processgroup.TerminateManagedCommand(sc.cmd, sc.pgid, sc.done, grace, processgroup.Options{})
+	return processStopError(processgroup.TerminateManagedCommand(sc.cmd, sc.pgid, sc.done, grace, processgroup.Options{}))
+}
+
+func processStopError(err error) error {
+	if errors.Is(err, processgroup.ErrProcessNotConfirmedDead) {
+		return fmt.Errorf("%w: %w", runtime.ErrProcessNotConfirmedDead, err)
+	}
+	return err
 }

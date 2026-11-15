@@ -3,6 +3,7 @@ package acp
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -10,8 +11,22 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/processgroup"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
+
+func TestProcessStopErrorPreservesCauses(t *testing.T) {
+	cause := fmt.Errorf("reaping owned tree: %w", processgroup.ErrProcessNotConfirmedDead)
+	err := processStopError(cause)
+	if !errors.Is(err, runtime.ErrProcessNotConfirmedDead) || !errors.Is(err, cause) || runtime.IsSessionGone(err) {
+		t.Fatalf("processStopError(%v) = %v, want retryable runtime error preserving its cause", cause, err)
+	}
+	for _, other := range []error{nil, processgroup.ErrNotOwned, processgroup.ErrUnsupported} {
+		if got := processStopError(other); !errors.Is(got, other) {
+			t.Errorf("processStopError(%v) = %v, want original error preserved", other, got)
+		}
+	}
+}
 
 // hangGuard bounds a call that must return once the process is declared not
 // confirmed dead. The reap grace is real here (the provider has no seam for it),
