@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"text/template"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/bdflags"
 	"github.com/gastownhall/gascity/internal/citylayout"
@@ -834,12 +836,36 @@ func writeLintHuman(stdout, stderr io.Writer, report lintReport) {
 	}
 }
 
+// escapeTerminalControls renders every control character (C0, DEL and C1) and
+// every invalid UTF-8 byte in s as a \xNN escape. Diagnostics echo text taken
+// from the pack under lint, which may be untrusted; written raw, that text
+// could move the cursor, erase lint lines or start a forged one.
+func escapeTerminalControls(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		switch {
+		case r == utf8.RuneError && size == 1:
+			fmt.Fprintf(&b, `\x%02x`, s[i])
+		case unicode.IsControl(r):
+			fmt.Fprintf(&b, `\x%02x`, r)
+		default:
+			b.WriteString(s[i : i+size])
+		}
+		i += size
+	}
+	return b.String()
+}
+
+// formatLintDiagnostic renders a diagnostic as one line of human output. The
+// JSON report is not routed through it: encoding/json escapes control
+// characters itself.
 func formatLintDiagnostic(diagnostic lintDiagnostic) string {
-	path := diagnostic.Path
+	path := escapeTerminalControls(diagnostic.Path)
 	if strings.TrimSpace(path) == "" {
 		path = "gc lint"
 	}
-	message := diagnostic.Message
+	message := escapeTerminalControls(diagnostic.Message)
 	if message == "" {
 		message = "lint failed"
 	}

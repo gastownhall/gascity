@@ -1219,6 +1219,7 @@ func TestFormatLintDiagnosticEscapesControlCharacters(t *testing.T) {
 		{"escape in message", lintDiagnostic{Path: "p", Message: "a\x1b[2Kb"}, `p: a\x1b[2Kb`},
 		{"delete", lintDiagnostic{Path: "p", Message: "a\x7fb"}, `p: a\x7fb`},
 		{"c1 control sequence introducer", lintDiagnostic{Path: "p", Message: "a\u009bb"}, `p: a\x9bb`},
+		{"invalid utf-8 byte is a c1 control on a legacy terminal", lintDiagnostic{Path: "p", Message: "a\x9bb"}, `p: a\x9bb`},
 		{"carriage return cannot rewrite the line", lintDiagnostic{Path: "p", Message: "ok\rfake"}, `p: ok\x0dfake`},
 		{"newline cannot forge a second diagnostic", lintDiagnostic{Path: "p", Message: "a\nq: forged"}, `p: a\x0aq: forged`},
 		{"escape in path", lintDiagnostic{Path: "d\x1b[H/s.json", Line: 3, Message: "m"}, `d\x1b[H/s.json:3: m`},
