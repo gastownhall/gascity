@@ -58,10 +58,13 @@ func defaultPricingRegistry() *pricing.Registry {
 //
 //   - claude: Manager.TranscriptPath (session-key stat or ambiguity-guarded
 //     project-slug listing — cheap) + the Claude JSONL tail extractor.
-//   - copilot: exact session_key plus matching workdir through the existing
-//     Copilot keyed finder. No key or keyed miss records nothing; there is no
-//     workdir-only fallback. The shared bounded cursor scan reads usage records,
-//     and pricing comes only from the registry, never Copilot's multiplier.
+//   - copilot: the conversation id the stock sessionStart hook captured for the
+//     row's current runtime incarnation (copilot_transcript, never session_key)
+//     plus the matching workdir through the existing Copilot keyed finder. No
+//     identity, an earlier incarnation's identity or a keyed miss records
+//     nothing; there is no workdir-only fallback. The shared bounded cursor scan
+//     reads usage records, and pricing comes only from the registry, never
+//     Copilot's multiplier.
 //   - opencode: the session's own export, mirrored under the OpenCode
 //     transcript root as <session_key>.json. Resolved by that key alone via
 //     sessionlog.FindOpenCodeSessionFileByID; a keyed miss (or no key yet)
@@ -946,7 +949,7 @@ func (f *Factory) discoverSweepTranscript(family, id string, meta map[string]str
 	case "copilot":
 		// Captured identity only: never the manager's workdir-only fallback.
 		return sessionlog.FindCopilotSessionFileByID(f.searchPaths,
-			contract.WorkerDirFromMetadata(meta), strings.TrimSpace(meta["session_key"])), true, false
+			contract.WorkerDirFromMetadata(meta), sessionpkg.CopilotTranscriptID(meta)), true, false
 	case "opencode":
 		// Keyed only, like discoverOpenCodeInvocationTranscript: the export is
 		// named for the session_key, and the manager's workdir fallback could
@@ -1027,9 +1030,10 @@ func sweepIntervalWindow(meta map[string]string, now time.Time) (notBefore, notA
 	return notBefore, sessionpkg.UsageIntervalEnd(meta, notBefore, now)
 }
 
-// discoverCopilotInvocationTranscript resolves only the captured provider key.
-// No key or keyed miss means no attribution, even in a shared working directory.
+// discoverCopilotInvocationTranscript resolves only the conversation the row's
+// current incarnation captured. No identity, a stale one or a keyed miss means
+// no attribution, even in a shared working directory.
 func discoverCopilotInvocationTranscript(h *SessionHandle, _ string, _ time.Time, meta map[string]string) string {
 	return sessionlog.FindCopilotSessionFileByID(h.adapter.SearchPaths,
-		contract.WorkerDirFromMetadata(meta), strings.TrimSpace(meta["session_key"]))
+		contract.WorkerDirFromMetadata(meta), sessionpkg.CopilotTranscriptID(meta))
 }

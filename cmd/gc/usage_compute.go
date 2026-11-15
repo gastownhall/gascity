@@ -458,7 +458,7 @@ func (cr *CityRuntime) settleClosedInterval(
 	}
 	// One attempt per liveModelSweepMinInterval per session; the first is never
 	// floored, whatever the live lane's memo for the interval says.
-	memo := cr.liveSweepMemoFor(b.ID, awakeStart, strings.TrimSpace(interval["session_key"]))
+	memo := cr.liveSweepMemoFor(b.ID, awakeStart, usageConversationKey(interval))
 	if memo.settleAttempted && now.Before(memo.nextSweepAt) {
 		return
 	}
@@ -598,7 +598,7 @@ func (cr *CityRuntime) sweepLiveSessionModelUsage(
 	if awakeStart == "" {
 		return
 	}
-	memo := cr.liveSweepMemoFor(b.ID, awakeStart, strings.TrimSpace(b.Metadata["session_key"]))
+	memo := cr.liveSweepMemoFor(b.ID, awakeStart, usageConversationKey(b.Metadata))
 	if memo.settledMiss || now.Before(memo.nextSweepAt) {
 		return
 	}
@@ -632,6 +632,17 @@ func (cr *CityRuntime) sweepLiveSessionModelUsage(
 	if _, _, err := factory.SweepSessionModelUsageAtPath(ctx, b.ID, b.Metadata, memo.path, now); err != nil {
 		logf("usage: live model-usage sweep for session %s failed; will retry: %v", b.ID, err)
 	}
+}
+
+// usageConversationKey names the conversation a usage sweep memo describes: the
+// provider session key, or for a Copilot row, which never carries one, its
+// per-incarnation transcript identity. A replacement conversation therefore
+// invalidates the memoized transcript path instead of sweeping a stale one.
+func usageConversationKey(meta map[string]string) string {
+	if key := strings.TrimSpace(meta["session_key"]); key != "" {
+		return key
+	}
+	return strings.TrimSpace(meta[session.MetadataKeyCopilotTranscript])
 }
 
 // liveSweepMemoFor returns the session's memo for the given awake epoch and

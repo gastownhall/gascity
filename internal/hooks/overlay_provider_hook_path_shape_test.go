@@ -30,7 +30,7 @@ func TestOverlayProviderHookCommandsAppendPathAndUseGCBinVar(t *testing.T) {
 
 	copilotGot := extractCopilotOverlayCommands(t)
 	copilotWant := map[string]string{
-		"copilot sessionStart":                     `export PATH="$PATH:$HOME/go/bin:$HOME/.local/bin" && "${GC_BIN:-gc}" prime --hook`,
+		"copilot sessionStart":                     `export PATH="$PATH:$HOME/go/bin:$HOME/.local/bin" && GC_COPILOT_TRANSCRIPT_CAPTURE=1 "${GC_BIN:-gc}" prime --hook`,
 		"copilot preCompact":                       `export PATH="$PATH:$HOME/go/bin:$HOME/.local/bin" && "${GC_BIN:-gc}" handoff --auto "context cycle"`,
 		"copilot userPromptSubmitted[nudge drain]": `export PATH="$PATH:$HOME/go/bin:$HOME/.local/bin" && "${GC_BIN:-gc}" hook run --timeout 15s --timeout-exit-code 0 -- nudge drain --inject`,
 		"copilot userPromptSubmitted[mail check]":  `export PATH="$PATH:$HOME/go/bin:$HOME/.local/bin" && "${GC_BIN:-gc}" hook run --timeout 15s --timeout-exit-code 0 -- mail check --inject`,

@@ -330,8 +330,9 @@ func TestUpdateRowFencedRepairsTypeInTheCAS(t *testing.T) {
 	}
 }
 
-// Copilot capture is an identity command, not an unfenced marker write.
-func TestCaptureCopilotSessionKeyLifecycle(t *testing.T) {
+// Copilot capture is an identity command, not an unfenced marker write, and it
+// records a transcript identity for usage attribution: never the launch key.
+func TestCaptureCopilotTranscriptLifecycle(t *testing.T) {
 	for _, backend := range rowFenceBackends() {
 		t.Run(backend.name, func(t *testing.T) {
 			store, backing := backend.open(t)
@@ -339,34 +340,57 @@ func TestCaptureCopilotSessionKeyLifecycle(t *testing.T) {
 			if err := backing.SetMetadataBatch(b.ID, map[string]string{"provider_kind": "copilot", "session_name": "copilot-seat", "generation": "2", "instance_token": "fixture-token"}); err != nil {
 				t.Fatal(err)
 			}
+			rowMeta := func() map[string]string {
+				t.Helper()
+				got, err := backing.Get(b.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return got.Metadata
+			}
 			front := NewStore(beads.SessionStore{Store: store})
 			capture := func(key string) (bool, error) {
-				return front.CaptureCopilotSessionKey(b.ID, "copilot-seat", "2", "fixture-token", key)
+				return front.CaptureCopilotTranscript(b.ID, "copilot-seat", "2", "fixture-token", key)
 			}
 			if wrote, err := capture("provider-a"); err != nil || !wrote {
 				t.Fatalf("startup = (%v,%v)", wrote, err)
 			}
+			if meta := rowMeta(); meta[MetadataKeyCopilotTranscript] != "2:provider-a" || meta["session_key"] != "" {
+				t.Fatalf("after startup copilot_transcript=%q session_key=%q; want the identity and no launch key", meta[MetadataKeyCopilotTranscript], meta["session_key"])
+			}
 			if wrote, err := capture("provider-a"); err != nil || wrote {
-				t.Fatalf("resume = (%v,%v)", wrote, err)
+				t.Fatalf("repeat = (%v,%v)", wrote, err)
 			}
 			if wrote, err := capture("provider-b"); err == nil || wrote {
 				t.Fatalf("conflict = (%v,%v)", wrote, err)
 			}
-			if err := backing.SetMetadataBatch(b.ID, map[string]string{"generation": "3", "instance_token": "fresh-token", "session_key": ""}); err != nil {
+			if got := CopilotTranscriptID(rowMeta()); got != "provider-a" {
+				t.Fatalf("identity after conflict = %q, want provider-a", got)
+			}
+			// A fresh incarnation mints a new generation and token. The identity
+			// the earlier one captured is not readable by it, and the earlier
+			// incarnation cannot capture again.
+			if err := backing.SetMetadataBatch(b.ID, map[string]string{"generation": "3", "instance_token": "fresh-token"}); err != nil {
 				t.Fatal(err)
+			}
+			if got := CopilotTranscriptID(rowMeta()); got != "" {
+				t.Fatalf("fresh incarnation reads the earlier identity %q", got)
 			}
 			if wrote, err := capture("provider-a"); err == nil || wrote {
 				t.Fatalf("stale capture = (%v,%v)", wrote, err)
 			}
 			front = NewStore(beads.SessionStore{Store: backing})
-			if wrote, err := front.CaptureCopilotSessionKey(b.ID, "copilot-seat", "3", "fresh-token", "provider-b"); err != nil || !wrote {
-				t.Fatalf("fresh restart = (%v,%v)", wrote, err)
+			if wrote, err := front.CaptureCopilotTranscript(b.ID, "copilot-seat", "3", "fresh-token", "provider-b"); err != nil || !wrote {
+				t.Fatalf("fresh incarnation = (%v,%v)", wrote, err)
+			}
+			if meta := rowMeta(); CopilotTranscriptID(meta) != "provider-b" || meta["session_key"] != "" {
+				t.Fatalf("after fresh incarnation id=%q session_key=%q", CopilotTranscriptID(meta), meta["session_key"])
 			}
 		})
 	}
 }
 
-func TestCaptureCopilotSessionKeyRejectsUnprovenIdentity(t *testing.T) {
+func TestCaptureCopilotTranscriptRejectsUnprovenIdentity(t *testing.T) {
 	for _, tc := range []struct{ name, key, value string }{
 		{"name", "session_name", "another-seat"}, {"provider", "provider_kind", "codex"},
 		{"state", "state", "suspended"}, {"closed", "__status", "closed"},
@@ -392,29 +416,41 @@ func TestCaptureCopilotSessionKeyRejectsUnprovenIdentity(t *testing.T) {
 				}
 			}
 			front := NewStore(beads.SessionStore{Store: store})
-			wrote, err := front.CaptureCopilotSessionKey(b.ID, "copilot-seat", "2", "fixture-token", "provider-a")
+			wrote, err := front.CaptureCopilotTranscript(b.ID, "copilot-seat", "2", "fixture-token", "provider-a")
 			if err == nil || wrote {
 				t.Fatalf("capture = (%v,%v)", wrote, err)
 			}
 			got, _ := store.Get(b.ID)
-			if got.Metadata["session_key"] != "" {
-				t.Fatal("rejected capture wrote a key")
+			if got.Metadata[MetadataKeyCopilotTranscript] != "" {
+				t.Fatal("rejected capture wrote an identity")
 			}
 		})
 	}
 	for _, generation := range []string{"", "0", "-1", "bad"} {
 		store, _ := rowFenceBackends()[0].open(t)
-		if wrote, err := NewStore(beads.SessionStore{Store: store}).CaptureCopilotSessionKey("absent", "copilot-seat", generation, "fixture-token", "provider-a"); err == nil || wrote {
+		if wrote, err := NewStore(beads.SessionStore{Store: store}).CaptureCopilotTranscript("absent", "copilot-seat", generation, "fixture-token", "provider-a"); err == nil || wrote {
 			t.Fatalf("invalid epoch %q = (%v,%v)", generation, wrote, err)
+		}
+	}
+	// An id that is the session's own, or could leave the transcript directory,
+	// names no conversation.
+	store, _ := rowFenceBackends()[0].open(t)
+	b, err := store.Create(sessionBeadFixture("copilot-seat", "open", map[string]string{"session_name": "copilot-seat", "provider_kind": "copilot", "state": "active", "generation": "2", "instance_token": "fixture-token"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, conversation := range []string{"", b.ID, "a/b", `a\b`, "../x", "a b"} {
+		if wrote, err := NewStore(beads.SessionStore{Store: store}).CaptureCopilotTranscript(b.ID, "copilot-seat", "2", "fixture-token", conversation); err == nil || wrote {
+			t.Fatalf("conversation %q = (%v,%v)", conversation, wrote, err)
 		}
 	}
 	// Even an ordinary store with conditional writes off must never write blind.
 	mem := beads.NewMemStore()
-	b, err := mem.Create(sessionBeadFixture("copilot-seat", "open", map[string]string{"session_name": "copilot-seat", "provider_kind": "copilot", "state": "active", "generation": "2", "instance_token": "fixture-token"}))
+	m, err := mem.Create(sessionBeadFixture("copilot-seat", "open", map[string]string{"session_name": "copilot-seat", "provider_kind": "copilot", "state": "active", "generation": "2", "instance_token": "fixture-token"}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrote, err := NewStore(beads.SessionStore{Store: mem}).CaptureCopilotSessionKey(b.ID, "copilot-seat", "2", "fixture-token", "provider-a")
+	wrote, err := NewStore(beads.SessionStore{Store: mem}).CaptureCopilotTranscript(m.ID, "copilot-seat", "2", "fixture-token", "provider-a")
 	if wrote || !beads.IsConditionalWriteUnsupported(err) {
 		t.Fatalf("unfenced backend = (%v,%v)", wrote, err)
 	}
@@ -434,7 +470,7 @@ func (s *copilotCaptureInterleaving) UpdateIfMatch(id string, rev int64, opts be
 	return s.rowWriteRecorder.UpdateIfMatch(id, rev, opts)
 }
 
-func TestCaptureCopilotSessionKeyLostCAS(t *testing.T) {
+func TestCaptureCopilotTranscriptLostCAS(t *testing.T) {
 	for _, restart := range []bool{false, true} {
 		t.Run(map[bool]string{false: "competing-first-capture", true: "fresh-restart"}[restart], func(t *testing.T) {
 			raw, _ := rowFenceBackends()[0].open(t)
@@ -444,31 +480,34 @@ func TestCaptureCopilotSessionKeyLostCAS(t *testing.T) {
 			}
 			interleaved := &copilotCaptureInterleaving{rowWriteRecorder: &rowWriteRecorder{Store: raw}}
 			interleaved.before = func() {
-				patch := map[string]string{"session_key": "winner"}
 				if restart {
-					patch = map[string]string{"session_key": "", "generation": "3", "instance_token": "fresh-token"}
+					if err := raw.SetMetadataBatch(b.ID, map[string]string{"generation": "3", "instance_token": "fresh-token"}); err != nil {
+						t.Fatal(err)
+					}
+					return
 				}
-				if err := raw.SetMetadataBatch(b.ID, patch); err != nil {
-					t.Fatal(err)
+				// Another process captures first, by its own conditional write.
+				if wrote, err := NewStore(beads.SessionStore{Store: raw}).CaptureCopilotTranscript(b.ID, "copilot-seat", "2", "fixture-token", "winner"); err != nil || !wrote {
+					t.Fatalf("competing capture = (%v,%v)", wrote, err)
 				}
 			}
-			wrote, err := NewStore(beads.SessionStore{Store: interleaved}).CaptureCopilotSessionKey(b.ID, "copilot-seat", "2", "fixture-token", "loser")
+			wrote, err := NewStore(beads.SessionStore{Store: interleaved}).CaptureCopilotTranscript(b.ID, "copilot-seat", "2", "fixture-token", "loser")
 			if wrote || err == nil {
 				t.Fatalf("lost CAS = (%v,%v)", wrote, err)
 			}
 			got, _ := raw.Get(b.ID)
-			want := "winner"
+			want := "2:winner"
 			if restart {
 				want = ""
 			}
-			if got.Metadata["session_key"] != want {
-				t.Fatal("stale capture replaced the current key")
+			if got.Metadata[MetadataKeyCopilotTranscript] != want {
+				t.Fatalf("identity after the lost CAS = %q, want %q", got.Metadata[MetadataKeyCopilotTranscript], want)
 			}
 		})
 	}
 }
 
-func TestCaptureCopilotSessionKeyPermittedStates(t *testing.T) {
+func TestCaptureCopilotTranscriptPermittedStates(t *testing.T) {
 	for _, state := range []State{StateActive, StateAwake, StateCreating, StateStartPending} {
 		t.Run(string(state), func(t *testing.T) {
 			store, _ := rowFenceBackends()[0].open(t)
@@ -476,8 +515,32 @@ func TestCaptureCopilotSessionKeyPermittedStates(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if wrote, err := NewStore(beads.SessionStore{Store: store}).CaptureCopilotSessionKey(b.ID, "copilot-seat", "2", "fixture-token", "provider-a"); err != nil || !wrote {
+			if wrote, err := NewStore(beads.SessionStore{Store: store}).CaptureCopilotTranscript(b.ID, "copilot-seat", "2", "fixture-token", "provider-a"); err != nil || !wrote {
 				t.Fatalf("capture = %v,%v", wrote, err)
+			}
+		})
+	}
+}
+
+// Attribution reads an identity only for the generation that captured it.
+func TestCopilotTranscriptIDRequiresCurrentGeneration(t *testing.T) {
+	for _, tc := range []struct {
+		name, transcript, generation, want string
+	}{
+		{"current", "2:conv-a", "2", "conv-a"},
+		{"padded", " 2:conv-a ", " 2 ", "conv-a"},
+		{"later generation", "2:conv-a", "3", ""},
+		{"no generation", "2:conv-a", "", ""},
+		{"no identity", "", "2", ""},
+		{"unscoped identity", "conv-a", "2", ""},
+		{"zero generation", "0:conv-a", "0", ""},
+		{"escaping id", "2:../conv-a", "2", ""},
+		{"nested id", "2:a/b", "2", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			meta := map[string]string{MetadataKeyCopilotTranscript: tc.transcript, "generation": tc.generation}
+			if got := CopilotTranscriptID(meta); got != tc.want {
+				t.Fatalf("CopilotTranscriptID = %q, want %q", got, tc.want)
 			}
 		})
 	}

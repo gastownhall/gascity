@@ -771,9 +771,15 @@ func mergeCopilotSearchPaths(extraPaths []string) []string {
 // ExtractCopilotTailUsageFromSearchPaths reads the persisted session.usage_record
 // shape reported in gastownhall/gascity#9064, bounded to a validated Copilot
 // transcript and the same cursor-growth limit as Claude usage. Only data.usage
-// with an exact apiCallId is accepted. Copilot cost is a billing multiplier,
-// never ReportedCostUSD. Malformed or unsupported rows are skipped, as in the
-// other JSONL usage readers; I/O and scanner failures are returned.
+// with a model, an exact apiCallId and integer input and output counts is
+// accepted. The reporter observed inputTokens >= cacheReadTokens +
+// cacheWriteTokens on every record it checked, so a row that breaks that
+// relation, or carries a negative count, is skipped rather than guessed at; no
+// relation between reasoning and output tokens is documented, so reasoning is
+// reported as given. Copilot cost is a billing multiplier, never
+// ReportedCostUSD. Skipped rows are not logged: no existing privacy-safe
+// diagnostic distinguishes them from an empty transcript. I/O and scanner
+// failures are returned.
 func ExtractCopilotTailUsageFromSearchPaths(searchPaths []string, path, cursorID string) ([]TailUsage, error) {
 	safePath, err := validateSearchPathFile(mergeCopilotSearchPaths(searchPaths), path)
 	if err != nil {
@@ -812,7 +818,7 @@ func parseCopilotUsage(data []byte) ([]TailUsage, error) {
 			continue
 		}
 		input, output := *u.Input, *u.Output
-		if input < 0 || output < 0 || u.CacheRead < 0 || u.CacheWrite < 0 || u.Reasoning < 0 || u.Reasoning > output || u.CacheRead > input || u.CacheWrite > input-u.CacheRead || (input == 0 && output == 0) {
+		if input < 0 || output < 0 || u.CacheRead < 0 || u.CacheWrite < 0 || u.Reasoning < 0 || u.CacheRead > input || u.CacheWrite > input-u.CacheRead || (input == 0 && output == 0) {
 			continue
 		}
 		seen[id] = true

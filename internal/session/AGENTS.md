@@ -171,9 +171,14 @@ resume backstop (a refusal, or the third resume-shaped failure in a row) is
 its only automatic reset, whatever the provider; `gc session reset` is the
 explicit one.
 
-## Copilot provider-key capture
+## Copilot transcript identity
 
-The stock Copilot SessionStart hook reaches `Store.CaptureCopilotSessionKey`
-through the session-class front door. Keep the exact runtime incarnation and
-empty-key checks inside `UpdateRowFenced`; never replace them with a marker
-write or a work-directory lookup. See `SESSION-ID-COPILOT-KEY`.
+The stock Copilot `sessionStart` hook reaches `Store.CaptureCopilotTranscript`
+through the session-class front door and records `copilot_transcript`, the
+Copilot `sessionId` scoped to the runtime incarnation, for usage attribution.
+It is not `session_key`: that key drives launch and resume, so writing it for
+Copilot would change how Copilot starts. Keep the exact runtime incarnation
+checks inside `UpdateRowFenced`; never replace them with a marker write or a
+work-directory lookup, and never fall back to the newest transcript of a work
+directory. Read the identity only through `CopilotTranscriptID`, which refuses
+one a different generation captured. See `SESSION-ID-015`.

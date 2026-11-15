@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -259,6 +260,36 @@ func TestInvocationUsageFamilyCopilot(t *testing.T) {
 	}
 }
 
+// bindCopilotTranscript stands in for the hook's capture: copilot_transcript is
+// a CAS-only key, so a fixture writes it by a conditional verb, scoped to the
+// generation the row is at, exactly as the capture does.
+func bindCopilotTranscript(t *testing.T, store *beads.MemStore, id, generation, conversation string) {
+	t.Helper()
+	if err := store.SetMetadata(id, "generation", generation); err != nil {
+		t.Fatal(err)
+	}
+	row, err := store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := ""
+	if conversation != "" {
+		value = sessionpkg.CopilotTranscriptRef{Generation: mustParseGeneration(t, generation), ConversationID: conversation}.String()
+	}
+	if err := store.UpdateIfMatch(id, row.Revision, beads.UpdateOpts{Metadata: map[string]string{sessionpkg.MetadataKeyCopilotTranscript: value}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func mustParseGeneration(t *testing.T, generation string) int64 {
+	t.Helper()
+	n, err := strconv.ParseInt(generation, 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
 func TestFactorySweepSessionModelUsageCopilotSharedWorkdir(t *testing.T) {
 	root, workDir := t.TempDir(), t.TempDir()
 	sinkPath := filepath.Join(t.TempDir(), "usage.jsonl")
@@ -267,28 +298,29 @@ func TestFactorySweepSessionModelUsageCopilotSharedWorkdir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	newSession := func(key string) *SessionHandle {
+	newSession := func(conversation string) *SessionHandle {
 		t.Helper()
-		h, err := factory.Session(SessionSpec{Profile: Profile("copilot/tmux-cli"), Template: "probe", Title: key, Command: "copilot", WorkDir: workDir, Provider: "copilot"})
+		h, err := factory.Session(SessionSpec{Profile: Profile("copilot/tmux-cli"), Template: "probe", Title: conversation, Command: "copilot", WorkDir: workDir, Provider: "copilot"})
 		if err != nil {
 			t.Fatal(err)
 		}
 		if err := h.Start(context.Background(), handleActor(t, h, sessionpkg.ActorAgent)); err != nil {
 			t.Fatal(err)
 		}
-		if err := store.SetMetadataBatch(h.sessionID, map[string]string{"session_key": key, "molecule_id": "run-" + key}); err != nil {
+		if err := store.SetMetadata(h.sessionID, "molecule_id", "run-"+conversation); err != nil {
 			t.Fatal(err)
 		}
+		bindCopilotTranscript(t, store, h.sessionID, "1", conversation)
 		return h
 	}
 	a, b := newSession("seat-a"), newSession("seat-b")
-	write := func(key, calls string) {
+	write := func(conversation, calls string) {
 		t.Helper()
-		dir := filepath.Join(root, key)
+		dir := filepath.Join(root, conversation)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		start := fmt.Sprintf(`{"type":"session.start","data":{"sessionId":%q,"context":{"cwd":%q}}}`+"\n", key, workDir)
+		start := fmt.Sprintf(`{"type":"session.start","data":{"sessionId":%q,"context":{"cwd":%q}}}`+"\n", conversation, workDir)
 		if err := os.WriteFile(filepath.Join(dir, "events.jsonl"), []byte(start+calls), 0o644); err != nil {
 			t.Fatal(err)
 		}
@@ -296,24 +328,36 @@ func TestFactorySweepSessionModelUsageCopilotSharedWorkdir(t *testing.T) {
 	call := func(id string) string {
 		return fmt.Sprintf(`{"type":"session.usage_record","id":%q,"timestamp":"2026-11-10T21:22:22.735Z","data":{"usage":{"model":"fixture-unpriced-model","inputTokens":100,"outputTokens":10,"cacheReadTokens":30,"cacheWriteTokens":20,"cost":15,"apiCallId":%q}}}`+"\n", "event-"+id, id)
 	}
+	sweep := func(h *SessionHandle) int {
+		t.Helper()
+		row, err := store.Get(h.sessionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		emitted, _, err := factory.SweepSessionModelUsage(context.Background(), row.ID, row.Metadata, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return emitted
+	}
+	factCount := func() int {
+		t.Helper()
+		facts, warnings, err := usage.ReadFacts(sinkPath)
+		if err != nil || len(warnings) != 0 {
+			t.Fatalf("facts = %v,%v", warnings, err)
+		}
+		return len(facts)
+	}
 	write("seat-a", call("call-a1"))
 	write("seat-b", call("call-b1"))
 	// Prompt-operation accounting records A's latest completed invocation.
 	a.recordInvocationTelemetry(context.Background())
 	write("seat-a", call("call-a1")+call("call-a2")+call("call-a2"))
-	now := time.Now()
-	for _, tc := range []struct {
-		h    *SessionHandle
-		want int
-	}{{a, 1}, {b, 1}} {
-		row, err := store.Get(tc.h.sessionID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		emitted, settled, err := factory.SweepSessionModelUsage(context.Background(), row.ID, row.Metadata, now)
-		if err != nil || !settled || emitted != tc.want {
-			t.Fatalf("sweep = %d,%v,%v; want %d", emitted, settled, err, tc.want)
-		}
+	if got := sweep(a); got != 1 {
+		t.Fatalf("seat A sweep = %d, want its one new call", got)
+	}
+	if got := sweep(b); got != 1 {
+		t.Fatalf("seat B sweep = %d, want its one call", got)
 	}
 	facts, warnings, err := usage.ReadFacts(sinkPath)
 	if err != nil || len(warnings) != 0 || len(facts) != 1+2 {
@@ -335,17 +379,41 @@ func TestFactorySweepSessionModelUsageCopilotSharedWorkdir(t *testing.T) {
 		t.Fatal("cursor did not advance")
 	}
 	// Repeated terminal sweeps do not emit previously recorded calls.
-	if emitted, _, err := factory.SweepSessionModelUsage(context.Background(), row.ID, row.Metadata, now); err != nil || emitted != 0 {
-		t.Fatalf("repeat = %d,%v", emitted, err)
+	if got := sweep(a); got != 0 {
+		t.Fatalf("repeat sweep = %d", got)
 	}
-	// No key and a missing exact key must never borrow either same-cwd log.
-	for _, key := range []string{"", "missing"} {
-		if err := store.SetMetadata(a.sessionID, "session_key", key); err != nil {
-			t.Fatal(err)
+	if row.Metadata["session_key"] != "" {
+		t.Fatalf("session_key = %q; usage attribution must not give a Copilot row a launch key", row.Metadata["session_key"])
+	}
+
+	// A fresh incarnation (generation 2) must not read the conversation the
+	// earlier one captured, even though that log keeps growing in the shared
+	// work directory.
+	write("seat-a", call("call-a1")+call("call-a2")+call("call-a3"))
+	if err := store.SetMetadata(a.sessionID, "generation", "2"); err != nil {
+		t.Fatal(err)
+	}
+	if got := sweep(a); got != 0 {
+		t.Fatalf("stale identity swept %d calls from the earlier conversation", got)
+	}
+	a.recordInvocationTelemetry(context.Background())
+	if got := factCount(); got != 3 {
+		t.Fatalf("stale identity recorded a prompt-operation fact: %d facts", got)
+	}
+	// Once the new incarnation captures its own conversation, only that log counts.
+	write("seat-a-2", call("call-n1"))
+	bindCopilotTranscript(t, store, a.sessionID, "2", "seat-a-2")
+	if got := sweep(a); got != 1 {
+		t.Fatalf("new conversation sweep = %d, want its one call", got)
+	}
+	// No identity and an identity with no log must never borrow either same-cwd log.
+	for _, conversation := range []string{"missing", ""} {
+		bindCopilotTranscript(t, store, a.sessionID, "2", conversation)
+		if got := sweep(a); got != 0 {
+			t.Fatalf("identity %q swept %d calls", conversation, got)
 		}
-		row, _ := store.Get(a.sessionID)
-		if emitted, _, err := factory.SweepSessionModelUsage(context.Background(), row.ID, row.Metadata, now); err != nil || emitted != 0 {
-			t.Fatalf("key %q = %d,%v", key, emitted, err)
-		}
+	}
+	if got := factCount(); got != 4 {
+		t.Fatalf("facts = %d, want the three earlier ones and the new conversation's call", got)
 	}
 }

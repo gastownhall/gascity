@@ -2484,6 +2484,18 @@ const MetadataKeyUsageClosedAwakeStartedAt = "usage_closed_awake_started_at"
 // usage close ended, kept by the row's reopen; see UsageReopenPatch.
 const MetadataKeyUsageClosedSessionKey = "usage_closed_session_key"
 
+// MetadataKeyCopilotTranscript names the Copilot conversation whose transcript
+// the row's runtime incarnation produced, as a CopilotTranscriptRef. Only usage
+// attribution reads it. It is deliberately not session_key: the launch and
+// resume machinery keys off session_key, and attributing usage must not change
+// how a Copilot session starts or resumes.
+const MetadataKeyCopilotTranscript = "copilot_transcript"
+
+// MetadataKeyUsageClosedCopilotTranscript is the copilot_transcript of the
+// interval a pending usage close ended, kept by the row's reopen; see
+// UsageReopenPatch.
+const MetadataKeyUsageClosedCopilotTranscript = "usage_closed_copilot_transcript"
+
 // PersistInvocationUsageCursor stores the invocation-usage telemetry cursor
 // on an existing session. Unlike PersistSessionKey it overwrites any
 // existing value — the cursor advances with every recorded invocation.

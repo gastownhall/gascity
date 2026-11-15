@@ -325,17 +325,25 @@ func assertJSONHasInt(t *testing.T, raw json.RawMessage, key string, want int) {
 	}
 }
 
-// The fixture shape comes from gastownhall/gascity#9064; its values are synthetic.
+// The first record is the one the reporter of gastownhall/gascity#9064 pasted,
+// redacted as posted ("msg_011C…", "aaebcbb3-…"). The rest are synthetic
+// boundary rows. The only persisted-record relation the reporter documented is
+// inputTokens >= cacheReadTokens + cacheWriteTokens on every record checked;
+// this does not validate any wider persisted schema.
 func TestExtractCopilotTailUsageAccounting(t *testing.T) {
 	path := writeCopilotJSONL(t,
 		`{"type":"session.start","data":{"selectedModel":"unrelated"}}`,
-		`{"type":"session.usage_record","id":"event-a","timestamp":"2026-11-10T21:22:22.735Z","data":{"usage":{"model":"fixture-model","inputTokens":100,"outputTokens":20,"cacheReadTokens":30,"cacheWriteTokens":10,"reasoningTokens":5,"cost":15.0,"apiCallId":"call-a"}}}`,
-		`{"type":"session.usage_record","id":"duplicate-event","data":{"usage":{"model":"fixture-model","inputTokens":999,"outputTokens":1,"apiCallId":"call-a"}}}`,
-		`{"type":"session.usage_record","id":"event-b","data":{"usage":{"model":"next-model","inputTokens":7,"outputTokens":3,"apiCallId":"call-b"}}}`,
-		`{"type":"session.usage_record","data":{"usage":{"model":"bad","inputTokens":1,"outputTokens":2,"cacheReadTokens":3,"apiCallId":"bad"}}}`,
+		`{"type":"session.usage_record","data":{"usage":{"model":"claude-opus-5.5","inputTokens":33701,"outputTokens":134,"cacheReadTokens":0,"cacheWriteTokens":33697,"reasoningTokens":0,"cost":15.0,"apiCallId":"msg_011C…"}},"id":"aaebcbb3-…","timestamp":"2026-11-10T21:22:22.735Z"}`,
+		`{"type":"session.usage_record","data":{"usage":{"model":"claude-opus-5.5","inputTokens":999,"outputTokens":1,"apiCallId":"msg_011C…"}}}`,
+		// Input exactly covered by cache reads and writes: the invariant's boundary.
+		`{"type":"session.usage_record","data":{"usage":{"model":"next-model","inputTokens":40,"outputTokens":3,"cacheReadTokens":30,"cacheWriteTokens":10,"reasoningTokens":5,"apiCallId":"call-boundary"}}}`,
+		// Past the boundary, negative, incomplete or non-integer rows are skipped.
+		`{"type":"session.usage_record","data":{"usage":{"model":"bad","inputTokens":40,"outputTokens":2,"cacheReadTokens":30,"cacheWriteTokens":11,"apiCallId":"bad-cache-sum"}}}`,
+		`{"type":"session.usage_record","data":{"usage":{"model":"bad","inputTokens":1,"outputTokens":2,"cacheReadTokens":3,"apiCallId":"bad-read"}}}`,
 		`{"type":"session.usage_record","data":{"usage":{"model":"bad","inputTokens":1,"outputTokens":2}}}`,
-		`{"type":"session.usage_record","data":{"usage":{"model":"bad","inputTokens":"no","outputTokens":2,"apiCallId":"bad"}}}`,
-		`{"type":"session.usage_record","data":{"usage":{"model":"bad","inputTokens":-1,"outputTokens":2,"apiCallId":"bad"}}}`,
+		`{"type":"session.usage_record","data":{"usage":{"inputTokens":1,"outputTokens":2,"apiCallId":"no-model"}}}`,
+		`{"type":"session.usage_record","data":{"usage":{"model":"bad","inputTokens":"no","outputTokens":2,"apiCallId":"bad-type"}}}`,
+		`{"type":"session.usage_record","data":{"usage":{"model":"bad","inputTokens":-1,"outputTokens":2,"apiCallId":"bad-negative"}}}`,
 		`{malformed`,
 	)
 	got, err := ExtractCopilotTailUsageFromSearchPaths([]string{filepath.Dir(path)}, path, "")
@@ -343,11 +351,13 @@ func TestExtractCopilotTailUsageAccounting(t *testing.T) {
 		t.Fatalf("usage = %+v,%v", got, err)
 	}
 	a := got[0]
-	if a.MessageID != "call-a" || a.EntryUUID != "call-a" || a.Model != "fixture-model" || a.InputTokens != 60 || a.OutputTokens != 20 || a.CacheReadTokens != 30 || a.CacheCreationTokens != 10 || a.ReasoningTokens != 5 || a.Timestamp.IsZero() || a.HasReportedCost || a.ReportedCostUSD != 0 {
-		t.Fatalf("accounting = %+v", a)
+	if a.MessageID != "msg_011C…" || a.EntryUUID != "msg_011C…" || a.Model != "claude-opus-5.5" || a.InputTokens != 4 || a.OutputTokens != 134 || a.CacheReadTokens != 0 || a.CacheCreationTokens != 33697 || a.ReasoningTokens != 0 || a.Timestamp.IsZero() || a.HasReportedCost || a.ReportedCostUSD != 0 {
+		t.Fatalf("reporter record accounting = %+v", a)
 	}
-	if got[1].MessageID != "call-b" {
-		t.Fatalf("file order = %+v", got)
+	// The relation at its boundary leaves no uncached input; reasoning above
+	// output is reported as given, not treated as a malformed record.
+	if b := got[1]; b.MessageID != "call-boundary" || b.InputTokens != 0 || b.OutputTokens != 3 || b.CacheReadTokens != 30 || b.CacheCreationTokens != 10 || b.ReasoningTokens != 5 {
+		t.Fatalf("boundary accounting = %+v", b)
 	}
 	if _, err := ExtractCopilotTailUsageFromSearchPaths([]string{t.TempDir()}, path, ""); err == nil {
 		t.Fatal("escaped path accepted")

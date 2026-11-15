@@ -346,14 +346,15 @@ func TestLifecycleTransitionPatchesSetCompleteMetadata(t *testing.T) {
 			name:  "close",
 			patch: ClosePatch(now, "orphaned"),
 			want: MetadataPatch{
-				"state":                         "orphaned",
-				"close_reason":                  "session orphaned: configured agent removed",
-				"closed_at":                     now.Format(time.RFC3339),
-				"synced_at":                     now.Format(time.RFC3339),
-				"usage_close_pending":           "true",
-				"usage_closed_at":               now.Format(time.RFC3339Nano),
-				"usage_closed_awake_started_at": "",
-				"usage_closed_session_key":      "",
+				"state":                           "orphaned",
+				"close_reason":                    "session orphaned: configured agent removed",
+				"closed_at":                       now.Format(time.RFC3339),
+				"synced_at":                       now.Format(time.RFC3339),
+				"usage_close_pending":             "true",
+				"usage_closed_at":                 now.Format(time.RFC3339Nano),
+				"usage_closed_awake_started_at":   "",
+				"usage_closed_session_key":        "",
+				"usage_closed_copilot_transcript": "",
 			},
 		},
 		{
@@ -960,7 +961,7 @@ func TestClosePatchStampsUsageCloseMarker(t *testing.T) {
 		}
 	}
 	failed := ClosePatch(now, string(StateFailedCreate))
-	for _, key := range []string{"usage_close_pending", "usage_closed_at", "usage_closed_awake_started_at", "usage_closed_session_key"} {
+	for _, key := range []string{"usage_close_pending", "usage_closed_at", "usage_closed_awake_started_at", "usage_closed_session_key", "usage_closed_copilot_transcript"} {
 		if v, ok := failed[key]; ok {
 			t.Errorf("ClosePatch(failed-create) writes %s=%q, want the key absent", key, v)
 		}
@@ -1022,7 +1023,68 @@ func TestUsageClosedIntervalSurvivesTheReopen(t *testing.T) {
 			t.Fatalf("UsageCloseClearPatch sets %s=%q, want it cleared", k, v)
 		}
 	}
-	if len(UsageCloseClearPatch()) != 4 {
-		t.Fatalf("UsageCloseClearPatch = %v, want the marker and the kept start and key", UsageCloseClearPatch())
+	if len(UsageCloseClearPatch()) != 5 {
+		t.Fatalf("UsageCloseClearPatch = %v, want the marker and the kept start, key and Copilot identity", UsageCloseClearPatch())
+	}
+}
+
+// TestUsageClosedIntervalKeepsCopilotTranscript pins the Copilot conversation a
+// pending usage close ended across its row's reopen. The reopened row's fresh
+// wake mints a new generation and captures a new conversation before the usage
+// lane settles the closed interval; the interval view must still name the
+// closed conversation, and must never lend it the newer one.
+func TestUsageClosedIntervalKeepsCopilotTranscript(t *testing.T) {
+	closeAt := time.Date(2026, 9, 24, 10, 0, 0, 0, time.UTC)
+	reopen := func(closed map[string]string) map[string]string {
+		reopened := map[string]string{}
+		for k, v := range closed {
+			reopened[k] = v
+		}
+		for k, v := range UsageReopenPatch(closed) {
+			reopened[k] = v
+		}
+		// The fresh wake: a new interval, generation and captured conversation.
+		reopened["awake_started_at"] = "2026-09-24T10:05:00Z"
+		reopened["generation"] = "3"
+		reopened[MetadataKeyCopilotTranscript] = "3:conv-new"
+		return reopened
+	}
+
+	closed := map[string]string{"awake_started_at": "2026-09-24T09:50:00Z", "generation": "2", "state": "drained", MetadataKeyCopilotTranscript: "2:conv-old"}
+	for k, v := range ClosePatch(closeAt, "drained") {
+		closed[k] = v
+	}
+	if got := UsageReopenPatch(closed)[MetadataKeyUsageClosedCopilotTranscript]; got != "2:conv-old" {
+		t.Fatalf("UsageReopenPatch kept Copilot identity %q, want 2:conv-old", got)
+	}
+	reopened := reopen(closed)
+	if got := CopilotTranscriptID(reopened); got != "conv-new" {
+		t.Fatalf("the reopened row's own identity = %q, want conv-new", got)
+	}
+	interval := UsageClosedIntervalMetadata(reopened)
+	if got := CopilotTranscriptID(interval); got != "conv-old" {
+		t.Fatalf("interval view identity = %q, want the closed conversation conv-old", got)
+	}
+	if reopened[MetadataKeyCopilotTranscript] != "3:conv-new" || reopened["generation"] != "3" {
+		t.Fatal("UsageClosedIntervalMetadata modified the row's own metadata")
+	}
+
+	// A closed interval that never captured an identity must not be handed the
+	// newer interval's.
+	bare := map[string]string{"awake_started_at": "2026-09-24T09:50:00Z", "generation": "2", "state": "drained"}
+	for k, v := range ClosePatch(closeAt, "drained") {
+		bare[k] = v
+	}
+	if got := CopilotTranscriptID(UsageClosedIntervalMetadata(reopen(bare))); got != "" {
+		t.Fatalf("interval without an identity read %q from the newer conversation", got)
+	}
+
+	// The row's next close ended its current interval and drops what the earlier
+	// reopen kept.
+	for k, v := range ClosePatch(closeAt.Add(time.Hour), "drained") {
+		reopened[k] = v
+	}
+	if got := CopilotTranscriptID(UsageClosedIntervalMetadata(reopened)); got != "conv-new" {
+		t.Fatalf("after a second close the interval view identity = %q, want the row's own conv-new", got)
 	}
 }

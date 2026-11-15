@@ -1815,6 +1815,7 @@ func TestEmitDueComputeFactsSettlesClosedIntervalAfterTheRowStartsAgain(t *testi
 			for _, key := range []string{
 				session.MetadataKeyUsageClosePending, session.MetadataKeyUsageClosedAt,
 				session.MetadataKeyUsageClosedAwakeStartedAt, session.MetadataKeyUsageClosedSessionKey,
+				session.MetadataKeyUsageClosedCopilotTranscript,
 			} {
 				if v := got.Metadata[key]; v != "" {
 					t.Fatalf("%s = %q after settling, want cleared", key, v)
@@ -1940,6 +1941,29 @@ func TestEmitDueComputeFactsSettlesClosedClaudeIntervalByKey(t *testing.T) {
 			}
 			if pending := got.Metadata[session.MetadataKeyUsageClosePending]; (pending == "") != c.settled {
 				t.Fatalf("usage_close_pending = %q, want settled=%t", pending, c.settled)
+			}
+		})
+	}
+}
+
+// A live-sweep memo caches a transcript path, so its conversation key must
+// change with the conversation: the provider key where a row has one, a Copilot
+// row's per-incarnation identity where it has not.
+func TestUsageConversationKey(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		meta map[string]string
+		want string
+	}{
+		{"provider key", map[string]string{"session_key": " key-1 "}, "key-1"},
+		{"provider key wins", map[string]string{"session_key": "key-1", session.MetadataKeyCopilotTranscript: "2:conv-a"}, "key-1"},
+		{"copilot identity", map[string]string{session.MetadataKeyCopilotTranscript: "2:conv-a"}, "2:conv-a"},
+		{"later copilot incarnation", map[string]string{session.MetadataKeyCopilotTranscript: "3:conv-b"}, "3:conv-b"},
+		{"neither", map[string]string{}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := usageConversationKey(tc.meta); got != tc.want {
+				t.Fatalf("usageConversationKey = %q, want %q", got, tc.want)
 			}
 		})
 	}

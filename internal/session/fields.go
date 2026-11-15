@@ -425,6 +425,10 @@ var registry = slices.Concat([]Field{
 
 	// Launch configuration.
 	{Key: "session_key", Class: ClassLaunchConfig, Premise: true, Writers: sites(op(srcManager, "Manager.PersistSessionKey"))},
+	// The Copilot conversation a runtime incarnation hosts, read only by usage
+	// attribution; never the launch key. Written by the session-class front door's
+	// capture, by a CAS on the row.
+	{Key: MetadataKeyCopilotTranscript, Class: ClassAdvisory, CASOnly: true, Writers: sites(op("internal/session/store.go", "Store.CaptureCopilotTranscript"))},
 	{Key: "alias", Class: ClassAssignmentIdentity, Writers: sites(legacy(srcPoolNames, "createPoolSessionBeadWithIdentifiers"), v2("cmd/gc/allocator_create_named.go", "createEffects.writeNamed"))},
 	// A requalified named session's prior bare identity is read from its alias
 	// history into the narrow release scope (gastownhall/gascity#5957).
@@ -533,7 +537,7 @@ var registry = slices.Concat([]Field{
 		MetadataKeyUsageClosePending, MetadataKeyUsageClosedAt),
 	same(ClassAdvisory, false, sites(legacy(srcTransition, "ClosePatch"), op(srcManager, "Manager.CloseDetailed"), legacy(srcBeads, "reopenNamedSessionBatch"),
 		legacy("cmd/gc/usage_compute.go", "CityRuntime.settleClosedInterval")),
-		MetadataKeyUsageClosedAwakeStartedAt, MetadataKeyUsageClosedSessionKey),
+		MetadataKeyUsageClosedAwakeStartedAt, MetadataKeyUsageClosedSessionKey, MetadataKeyUsageClosedCopilotTranscript),
 	same(ClassAdvisory, false, sites(legacy(srcReconciler, "recordNamedSessionConfigDriftDeferredAt"), legacy(srcReconciler, "recordConfigDriftHeldWorkEpisode"),
 		legacy("cmd/gc/config_drift_episode.go", "driftEpisodePatch"), v2("cmd/gc/reconcile_arms_drift.go", "rowFacts.driftHeldWork")), "config_drift_deferred_at", "config_drift_deferred_key"),
 	same(ClassAdvisory, false, sites(legacy(srcReconciler, "recordConfigDriftHeldWorkEpisode"), legacy("cmd/gc/config_drift_episode.go", "driftEpisodePatch"),

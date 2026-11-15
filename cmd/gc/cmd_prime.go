@@ -60,7 +60,17 @@ type primeHookContext struct {
 	Source            string
 	HookEventName     string
 	ProviderSessionID string
+	// CopilotSessionID is Copilot's camelCase sessionId, kept apart from
+	// ProviderSessionID: it names a transcript for usage attribution, not a
+	// provider resume key.
+	CopilotSessionID string
 }
+
+// copilotTranscriptCaptureEnv marks the stock Copilot sessionStart hook entry
+// as the one invocation allowed to record Copilot's transcript identity. It is
+// internal to that entry and is not a hook event name: it does not select the
+// SessionStart prime path.
+const copilotTranscriptCaptureEnv = "GC_COPILOT_TRANSCRIPT_CAPTURE"
 
 // newPrimeCmd creates the "gc prime [agent-name]" command.
 func newPrimeCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -334,6 +344,9 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			return
 		}
 		persistPrimeHookProviderSessionKeyAtCity(hookContext.ProviderSessionID, hookSideEffectCityPath, stderr)
+		if strings.TrimSpace(os.Getenv(copilotTranscriptCaptureEnv)) == "1" {
+			persistPrimeHookCopilotTranscriptAtCity(hookContext.CopilotSessionID, hookSideEffectCityPath, stderr)
+		}
 	}
 	if !strictMode && !primeHookSessionStart(hookContext) {
 		runHookSideEffects()
@@ -815,12 +828,9 @@ func readPrimeHookContext() primeHookContext {
 		if providerSessionID == "" {
 			providerSessionID = strings.TrimSpace(input.ConversationID)
 		}
-		if copilotID := strings.TrimSpace(input.CopilotSessionID); copilotID != "" {
-			// Conflicting aliases cannot establish one authoritative provider key.
-			if providerSessionID != "" && providerSessionID != copilotID {
-				return ctx
-			}
-			providerSessionID = copilotID
+		// Conflicting aliases cannot establish one authoritative Copilot id.
+		if copilotID := strings.TrimSpace(input.CopilotSessionID); copilotID != "" && (providerSessionID == "" || providerSessionID == copilotID) {
+			ctx.CopilotSessionID = copilotID
 		}
 		if providerSessionID != "" {
 			ctx.ProviderSessionID = providerSessionID
@@ -952,22 +962,6 @@ func persistPrimeHookProviderSessionKeyAtCity(hookProviderSessionID, cityPath st
 		warn("%v", err)
 		return
 	}
-	if sessionProviderFamily(info) == "copilot" {
-		// Copilot's SessionStart payload owns this ID, not generic provider env.
-		// The stock overlay supplies the event name missing from that payload.
-		if strings.TrimSpace(os.Getenv("GC_HOOK_EVENT_NAME")) != "SessionStart" {
-			warn("Copilot capture requires the managed SessionStart hook")
-			return
-		}
-		_, err := sessFront.CaptureCopilotSessionKey(gcSessionID,
-			strings.TrimSpace(os.Getenv("GC_SESSION_NAME")),
-			strings.TrimSpace(os.Getenv("GC_RUNTIME_EPOCH")),
-			os.Getenv("GC_INSTANCE_TOKEN"), strings.TrimSpace(hookProviderSessionID))
-		if err != nil {
-			warn("%v", err)
-		}
-		return
-	}
 	if fromHookStdin && !providerAcceptsHookStdinSessionID(sessionProviderFamily(info)) {
 		warn("hook stdin provider session id is only accepted for codex/cursor/claude session %q", gcSessionID)
 		return
@@ -987,6 +981,56 @@ func persistPrimeHookProviderSessionKeyAtCity(hookProviderSessionID, cityPath st
 	// routine capture is not something the operator needs to be told about.
 	if stderr != nil && gcDebugEnabled() {
 		fmt.Fprintf(stderr, "gc prime --hook: persisted resume session_key for %s session %q\n", sessionProviderFamily(info), gcSessionID) //nolint:errcheck // hook diagnostics are best effort.
+	}
+}
+
+// persistPrimeHookCopilotTranscriptAtCity records the Copilot sessionId that the
+// stock sessionStart hook delivered as the transcript identity of the managed
+// runtime incarnation running it. It never writes session_key, so Copilot's
+// launch flags, resume and prompt delivery are untouched. Diagnostics go to
+// stderr only for a genuinely managed invocation: a human-launched Copilot in a
+// directory gc staged has no session identity and stays silent, since the
+// provider surfaces hook stderr in its own UI.
+func persistPrimeHookCopilotTranscriptAtCity(conversationID, cityPath string, stderr io.Writer) {
+	gcSessionID := strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
+	warn := func(format string, args ...any) {
+		if stderr == nil {
+			return
+		}
+		fmt.Fprintf(stderr, "gc prime --hook: Copilot transcript identity not recorded: "+format+"\n", args...) //nolint:errcheck // hook diagnostics are best effort.
+	}
+	if gcSessionID == "" {
+		if hookHasManagedIdentity() {
+			warn("GC_SESSION_ID is empty")
+		}
+		return
+	}
+	if conversationID == "" {
+		warn("hook stdin carries no single sessionId for session %q", gcSessionID)
+		return
+	}
+	if cityPath == "" {
+		resolved, err := resolveCity()
+		if err != nil {
+			warn("resolving city for session %q: %v", gcSessionID, err)
+			return
+		}
+		cityPath = resolved
+	}
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		warn("opening city store for session %q: %v", gcSessionID, err)
+		return
+	}
+	// Route the write through the session coordination-class store, as the
+	// provider-key write does, so a relocated session class receives it.
+	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	sessFront := sessionFrontDoor(cliSessionStore(store, cfg, cityPath))
+	if _, err := sessFront.CaptureCopilotTranscript(gcSessionID,
+		strings.TrimSpace(os.Getenv("GC_SESSION_NAME")),
+		strings.TrimSpace(os.Getenv("GC_RUNTIME_EPOCH")),
+		os.Getenv("GC_INSTANCE_TOKEN"), conversationID); err != nil {
+		warn("%v", err)
 	}
 }
 
