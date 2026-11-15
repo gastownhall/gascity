@@ -36,6 +36,9 @@ type Provider struct {
 	// act is the tracker-backed activity source behind GetLastActivity /
 	// CanReportActivity (#4217); started lazily on first GetLastActivity.
 	act activityTracker
+	// launchWait overrides rawLaunchWait, the bound on how long Start's raw
+	// path waits for the typed launch to land; zero means rawLaunchWait.
+	launchWait time.Duration
 }
 
 // defaultSetupTimeout mirrors the tmux provider's [session] setup_timeout

@@ -4,11 +4,20 @@ package herdr
 
 import (
 	"context"
+	"io"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
+
+// rawLaunchWarningOut receives the raw-launch-unconfirmed diagnostic (a var so
+// tests can capture it).
+var rawLaunchWarningOut io.Writer = os.Stderr
+
+// reportRawLaunch waits for a raw launch to land and reports one that did not.
+func (p *Provider) reportRawLaunch(_ context.Context, _, _, _ string) {}
 
 // launchRaw execs the raw command through the pane's shell, so the pane's root
 // process becomes the command: when it exits the pane (and tab) close,

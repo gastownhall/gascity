@@ -111,6 +111,7 @@ go_test(
         "provider_live_test.go",
         "provider_live_windows_test.go",
         "rawlaunch_other_test.go",
+        "rawlaunch_test.go",
         "rawlaunch_windows_test.go",
         "redaction_test.go",
         "registry_stop_cleanup_windows_test.go",
