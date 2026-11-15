@@ -5155,6 +5155,14 @@ run_provider_owned_bd() {
             unset BEADS_DOLT_SERVER_HOST BEADS_DOLT_SERVER_PORT BEADS_DOLT_SERVER_SOCKET
             unset BEADS_DOLT_AUTO_START
         fi
+        if [ "${GC_BEADS_PROVIDER_INIT:-}" = "1" ] && [ "${GC_BEADS_TRANSPORT:-}" = "direct" ] && [ "${GC_BEADS_TARGET:-}" = "external" ]; then
+            # bd's init AutoStart ignores --external, so with this unset a dead
+            # endpoint gets a repo-local Dolt started on the named port and the
+            # scope bound to it. An assignment, not a default: a caller's 1 must
+            # not win. Init only: a completed init records the endpoint, and bd
+            # then refuses to auto-start for an external binding on its own.
+            export BEADS_DOLT_AUTO_START=0
+        fi
         if [ "${GC_BEADS_TRANSPORT:-}" = "proxied" ]; then
             export BEADS_DOLT_PROXIED_SERVER=1
         else
