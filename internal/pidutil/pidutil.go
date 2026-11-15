@@ -59,7 +59,7 @@ func psTimeout() time.Duration {
 var readProcStat = os.ReadFile
 
 // readPIDStat reads pid's /proc stat record through readProcStat. Windows never
-// consults /proc (see procfs_windows.go), so there it fails without touching
+// consults /proc (the Windows port, PR 23), so there it fails without touching
 // the filesystem.
 func readPIDStat(pid int) ([]byte, error) {
 	if runtime.GOOS == "windows" {

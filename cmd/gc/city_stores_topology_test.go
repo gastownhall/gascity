@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -446,7 +447,8 @@ func TestStoresEpochSurvivesAnUnchangedSuspensionSet(t *testing.T) {
 
 // TestCityRuntimeStoresCarryTheStateSuspension: a runtime with a controller
 // state mints through the state's epoch (storesOver), suspension included:
-// cr.cityStores() marks the suspended rig, a Roots plan leaves it out, and
+// cr.cityStores() marks the suspended rig, a plan that skips suspended rigs
+// leaves it out, and
 // alternating cs.Stores() and cr.cityStores() share one epoch.
 func TestCityRuntimeStoresCarryTheStateSuspension(t *testing.T) {
 	saved := splitStrictSeam
@@ -467,13 +469,15 @@ func TestCityRuntimeStoresCarryTheStateSuspension(t *testing.T) {
 	if len(topo.Rigs) != 2 || topo.Rigs[0].Ref != storeref.RigRef("live") || topo.Rigs[0].Suspended || !topo.Rigs[1].Suspended {
 		t.Fatalf("runtime topology rigs = %+v; want live serving, parked suspended", topo.Rigs)
 	}
-	plan, err := cr.cityStores().Plan(storeref.Molecule{Kind: storeref.MoleculeRoots})
+	// A plan that skips suspended rigs leaves parked out. (Molecule{Roots}
+	// takes its work legs from the census by ref since T7b.1, so a Workflow
+	// reader that skips suspended rigs shows the epoch's suspension here.)
+	plan, err := cr.cityStores().Plan(storeref.Workflow{SuspendedRigs: storeref.WorkflowSkipsSuspendedRigs})
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = `Union(first-leg-wins): class:gmnos[Authority,Fatal,federated] > ""[V1,PartialDegrade,federated] > rig:live[V1,PartialDegrade,federated]`
-	if got := plan.String(); got != want {
-		t.Errorf("Roots through the runtime:\n got  %s\n want %s", got, want)
+	if got := plan.String(); !strings.Contains(got, "rig:live[") || strings.Contains(got, "rig:parked") {
+		t.Errorf("a suspension-skipping plan through the runtime = %s; want rig:live read and rig:parked left out", got)
 	}
 	epoch := cs.stores.current.Load()
 	for range 3 {

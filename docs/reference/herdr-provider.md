@@ -181,9 +181,9 @@ Within the single per-city herdr session-server, gc places agents so the
 workspace/tab structure mirrors the town:
 
 - **One workspace per rig**, plus one for the town (mayor and town-level
-  agents). Under the default `session_template` (`{{.Agent}}`), town-level
-  agents currently each get their own workspace instead
-  ([#8933](https://github.com/gastownhall/gascity/issues/8933)).
+  agents), named for the city. This holds under the default
+  `session_template` (`{{.Agent}}`) too, where a town-level runtime name
+  carries no city prefix.
 - **One tab per agent.** Rig polecats land in their rig's workspace as
   `polecat-<themed-name>` tabs; the placement is display-only and does not
   change agent identity.

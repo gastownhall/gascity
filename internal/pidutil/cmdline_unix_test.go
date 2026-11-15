@@ -5,8 +5,8 @@ package pidutil
 // Reading another process's argv needs /proc, kern.procargs2, or ps. Windows
 // has none of them -- Cmdline reports ErrUnsupported there rather than
 // guessing -- so these cases, and the ps-stub fixtures they rely on, only
-// mean anything on Unix. The Windows contract is pinned separately in
-// pidutil_windows_test.go: unreadable argv must surface as an error, never as
+// mean anything on Unix. The Windows contract is pinned by the Windows port
+// (PR 23): unreadable argv must surface as an error, never as
 // a clean 'not my process'.
 import (
 	"os"

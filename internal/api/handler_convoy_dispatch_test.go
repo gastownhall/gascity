@@ -959,7 +959,7 @@ func TestWorkflowStoreByRef(t *testing.T) {
 	if cityInfo.ref != "city:city" || cityInfo.scopeKind != "city" || cityInfo.scopeRef != "city" {
 		t.Fatalf("city info = %+v, want city:city", cityInfo)
 	}
-	if cityInfo.store != state.cityBeadStore {
+	if !beads.SameStore(cityInfo.store, state.cityBeadStore) {
 		t.Fatal("city store mismatch")
 	}
 
@@ -970,7 +970,7 @@ func TestWorkflowStoreByRef(t *testing.T) {
 	if rigInfo.ref != "rig:alpha" || rigInfo.scopeKind != "rig" || rigInfo.scopeRef != "alpha" {
 		t.Fatalf("rig info = %+v, want rig:alpha", rigInfo)
 	}
-	if rigInfo.store != state.stores["alpha"] {
+	if !beads.SameStore(rigInfo.store, state.stores["alpha"]) {
 		t.Fatal("rig store mismatch")
 	}
 
@@ -1008,7 +1008,7 @@ func TestWorkflowStoreByRefResolvesTheOrdersBinding(t *testing.T) {
 	if info.ref != "orders:bright-lights" || info.scopeKind != "city" || info.scopeRef != "bright-lights" {
 		t.Fatalf("orders info = %+v, want orders:bright-lights", info)
 	}
-	if info.store != beads.Store(binding) {
+	if !beads.SameStore(info.store, binding) {
 		t.Fatal("orders store mismatch")
 	}
 
@@ -1030,7 +1030,7 @@ func TestWorkflowStoreByRefResolvesTheGraphBinding(t *testing.T) {
 	state.cfg.Rigs = nil
 
 	info, ok := workflowStoreByRef(state, "graph:bright-lights")
-	if !ok || info.store != beads.Store(binding) {
+	if !ok || !beads.SameStore(info.store, binding) {
 		t.Fatalf("workflowStoreByRef(graph:bright-lights) = %+v, %v; want the graph binding", info, ok)
 	}
 }

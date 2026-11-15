@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -21,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/testutil"
@@ -70,12 +70,17 @@ func holdControllerLock(t *testing.T, cityDir string) {
 	if err != nil {
 		t.Fatalf("open lock file: %v", err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	lock, err := filelock.Acquire(f, filelock.Options{
+		Mode:        filelock.Exclusive,
+		NonBlocking: true,
+		Label:       path,
+	})
+	if err != nil {
 		_ = f.Close()
-		t.Fatalf("flock: %v", err)
+		t.Fatalf("lock controller lock file: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = lock.Release()
 		_ = f.Close()
 	})
 }
@@ -4591,5 +4596,59 @@ func TestRigDoltServerCheck_NonDoltRigIsNotApplicable(t *testing.T) {
 	}
 	if !strings.Contains(r.Message, "not applicable") {
 		t.Fatalf("message = %q, want a not-applicable answer", r.Message)
+	}
+}
+
+// TestDoltServerCheck_UnreachableManagedDoltNamesItsInfraScope: a managed
+// Dolt server gc started in a transient systemd user scope leaves no unit
+// behind once it exits (--collect). When the store is not reachable, doctor
+// names the recorded scope and where its journal records are.
+func TestDoltServerCheck_UnreachableManagedDoltNamesItsInfraScope(t *testing.T) {
+	const unit = "gascity-infra-0123456789abcdef.scope"
+	for _, tc := range []struct {
+		name       string
+		infraScope string
+	}{
+		{name: "started in an infra scope", infraScope: unit},
+		{name: "started unscoped"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := setupCity(t, "[workspace]\nname = \"test\"\n")
+			fs := fsys.OSFS{}
+			writeDoctorCanonicalConfig(t, fs, dir, contract.ConfigState{
+				IssuePrefix:    "gc",
+				EndpointOrigin: contract.EndpointOriginManagedCity,
+				EndpointStatus: contract.EndpointStatusVerified,
+			})
+			writeDoctorCanonicalMetadata(t, fs, dir, "hq")
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("listen: %v", err)
+			}
+			port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+			_ = ln.Close()
+			runtimeDir := filepath.Join(dir, ".gc", "runtime", "packs", "dolt")
+			if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			state := fmt.Sprintf(`{"running":true,"pid":%d,"port":%s,"data_dir":%q,"infra_scope":%q}`,
+				os.Getpid(), port, filepath.Join(dir, ".beads", "dolt"), tc.infraScope)
+			if err := os.WriteFile(filepath.Join(runtimeDir, "dolt-state.json"), []byte(state), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			r := NewDoltServerCheck(dir, false).Run(&CheckContext{})
+			if r.Status != StatusError {
+				t.Fatalf("status = %d, want Error; msg = %s", r.Status, r.Message)
+			}
+			mentions := strings.Contains(r.FixHint, "journalctl --user-unit="+unit) &&
+				strings.Contains(r.FixHint, fmt.Sprintf("pid %d", os.Getpid()))
+			if want := tc.infraScope != ""; mentions != want {
+				t.Fatalf("fix hint names the infra scope journal = %t, want %t; hint = %q", mentions, want, r.FixHint)
+			}
+			if tc.infraScope == "" && strings.Contains(r.FixHint, "journalctl") {
+				t.Fatalf("fix hint for an unscoped server mentions journalctl: %q", r.FixHint)
+			}
+		})
 	}
 }

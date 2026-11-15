@@ -838,7 +838,8 @@ func RunSessionTests(t *testing.T, sp runtime.Provider, cfg runtime.Config, name
 	})
 
 	t.Run("Nudge_RunningSession", func(t *testing.T) {
-		if err := sp.Nudge(name, runtime.TextContent("hello")); err != nil {
+		// A delivery whose turn start went unobserved is still a delivery.
+		if err := sp.Nudge(name, runtime.TextContent("hello")); !runtime.NudgeDelivered(err) {
 			t.Errorf("Nudge: %v", err)
 		}
 	})

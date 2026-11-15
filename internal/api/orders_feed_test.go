@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/orders"
 )
 
@@ -340,7 +341,7 @@ func TestListActiveWorkflowProjectionBeadsExcludesBlocked(t *testing.T) {
 		},
 	}
 
-	got, err := listActiveWorkflowProjectionBeads(store)
+	got, err := listActiveWorkflowProjectionBeads(beadstest.StrictLeg(store))
 	if err != nil {
 		t.Fatalf("listActiveWorkflowProjectionBeads: %v", err)
 	}

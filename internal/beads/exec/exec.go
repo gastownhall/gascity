@@ -38,6 +38,12 @@ type Store struct {
 
 	// payloadBlind is DeclarePayloadBlind's grant.
 	payloadBlind bool
+
+	// importMu guards the remembered answer to whether the script offers the
+	// optional import op (ImportSupported).
+	importMu    sync.Mutex
+	importKnown bool
+	importOK    bool
 }
 
 // SetEnv sets environment variables passed to the script process.
