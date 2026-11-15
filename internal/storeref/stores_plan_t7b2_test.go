@@ -187,7 +187,9 @@ func TestMoleculeAtClassifiesTheRoot(t *testing.T) {
 		if target.IsGraph() != tc.graph {
 			t.Errorf("%s: IsGraph = %v, want %v", tc.name, target.IsGraph(), tc.graph)
 		}
-		if res, ok := target.Raw().(beads.ResidentStore); !ok || res.Ref() != "rig:alpha" || !beads.SameStore(target, owner) {
+		// By identity: SameStore sees through every class layer, so it cannot
+		// tell the owner handle from owner.Raw().
+		if target.Raw() != beads.Store(owner) {
 			t.Errorf("%s: the target wraps %T, want the owner handle itself", tc.name, target.Raw())
 		}
 		if target.Absent() {
@@ -218,8 +220,11 @@ func TestMoleculeAtKeepsTheOwnersLegRoleAndFence(t *testing.T) {
 	if got := store.last(t); got != beads.RelicLegRole {
 		t.Errorf("a read through the target ran in role %v, want the owner leg's relic role", got)
 	}
-	if got := target.ConditionalWritesResolveTarget(); !beads.SameStore(got, store) {
-		t.Errorf("the target's fence resolves to %T, want the leg's store", got)
+	// The fence target is the owner handle itself, by identity (SameStore
+	// would accept owner.Raw(), the leg layer beneath it, as well), and the
+	// store under it is the leg's.
+	if got := target.ConditionalWritesResolveTarget(); got != beads.Store(owner) || !beads.SameStore(got, store) {
+		t.Errorf("the target's fence resolves to %T, want the owner handle over the leg's store", got)
 	}
 }
 
