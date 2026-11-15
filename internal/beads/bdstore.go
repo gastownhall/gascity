@@ -3114,7 +3114,51 @@ func (s *BdStore) listViaBDListFannedOutByAssignee(query ListQuery, assignees []
 // assignee fan-out above can combine several independently-predicated reads'
 // raw rows before a single applyListQuery pass runs over all of them,
 // instead of each read sorting and limiting on its own.
+//
+// A query with IDs is pushed to bd as --id, one read per chunk of at most
+// bdListIDsChunkSize ids (see bdListIDChunks), so bd returns the named rows
+// rather than the whole status/tier corpus. The chunks' rows are unioned by ID
+// and any chunk's hard error fails the whole read; the caller's applyListQuery
+// still cuts the union exactly, so --id only narrows what is fetched. Every
+// chunk reads unbounded (bdListRequiresClientLimit): a per-chunk limit would
+// truncate the union. SortDefault restores bd's default order across chunks,
+// as the assignee fan-out does for its union, so a Limit keeps the right prefix.
 func (s *BdStore) fetchViaBDList(query ListQuery) ([]Bead, *PartialResultError, error) {
+	if len(query.IDs) == 0 {
+		return s.fetchViaBDListOnce(query)
+	}
+	chunks := bdListIDChunks(query.IDs)
+	var (
+		merged  []Bead
+		partial *PartialResultError
+	)
+	seen := make(map[string]struct{})
+	for _, chunk := range chunks {
+		single := query
+		single.IDs = chunk
+		rows, rowsPartial, err := s.fetchViaBDListOnce(single)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, row := range rows {
+			if _, dup := seen[row.ID]; !dup {
+				seen[row.ID] = struct{}{}
+				merged = append(merged, row)
+			}
+		}
+		if rowsPartial != nil && partial == nil {
+			partial = rowsPartial
+		}
+	}
+	if len(chunks) > 1 && query.Sort == SortDefault {
+		sortBeadsNativeListDefaultOrder(merged)
+	}
+	return merged, partial, nil
+}
+
+// fetchViaBDListOnce is one `bd list` subprocess read for query, whose IDs, if
+// any, are already one normalized chunk.
+func (s *BdStore) fetchViaBDListOnce(query ListQuery) ([]Bead, *PartialResultError, error) {
 	serverQuery, clientFilteredAssignees := bdServerQueryForAssignees(query)
 	limit := serverQuery.Limit
 	if bdListRequiresClientLimit(query, serverQuery, clientFilteredAssignees) {
@@ -3135,6 +3179,9 @@ func (s *BdStore) fetchViaBDList(query ListQuery) ([]Bead, *PartialResultError, 
 	}
 	if serverQuery.IncludeClosed || serverQuery.Status == "closed" {
 		args = append(args, "--all")
+	}
+	if len(serverQuery.IDs) > 0 {
+		args = append(args, "--id", strings.Join(serverQuery.IDs, ","))
 	}
 	if !serverQuery.CreatedBefore.IsZero() {
 		args = append(args, "--created-before", serverQuery.CreatedBefore.Format(time.RFC3339Nano))
@@ -3203,9 +3250,9 @@ func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssig
 	if serverQuery.SeekAfter != nil {
 		return true
 	}
-	// IDs is a Go-side-only residual filter (see ListQuery.Matches): bd list
-	// has no --id flag, so a bd-side limit could truncate before the
-	// matching IDs are even fetched.
+	// IDs goes to bd as --id, one read per chunk (fetchViaBDList), and
+	// ListQuery.Matches stays the exact filter. A bd-side limit would cut each
+	// chunk before the union is deduped, sorted and limited once.
 	if len(serverQuery.IDs) > 0 {
 		return true
 	}
