@@ -64,6 +64,7 @@ func TestStaleDBFormulaRuntimeContract(t *testing.T) {
 		`maintenance_notice "MAINTENANCE_WARN: $ORPHAN_TOTAL Dolt orphan(s) seen this scan`,
 		`maintenance_notice "MAINTENANCE_DONE: stale-db - orphans: ${ORPHAN_TOTAL}, applied: ${APPLIED}, escalated: ${ESCALATED}"`,
 		`escalated=${ESCALATED}`,
+		`work bead ${WORK_BEAD} close failed`,
 	} {
 		if !strings.Contains(desc, want) {
 			t.Errorf("formula step missing %q", want)
@@ -1342,6 +1343,9 @@ func TestStaleDBFormulaRecordsTheOutcomeBeforeTheReasonedClose(t *testing.T) {
 	if strings.Contains(log, staleDBOutcomeWithdrawal("bead-1")) {
 		t.Fatalf("a close that succeeded took its outcome back\nlog:\n%s\noutput:\n%s", log, out)
 	}
+	if escalates := staleDBEscalateEvents(log); len(escalates) != 0 {
+		t.Fatalf("a close that succeeded emitted an escalate event: %q\nlog:\n%s", escalates, log)
+	}
 }
 
 type staleDBFailureCase struct {
@@ -1351,7 +1355,9 @@ type staleDBFailureCase struct {
 	applyExit    string
 	failContains string
 	// failExit is the status of the injected failure; empty means 70.
-	failExit     string
+	failExit string
+	// failStderr is written to stderr by the injected failure, before it exits.
+	failStderr   string
 	wantNote     string
 	wantLog      string
 	forbidLog    string
@@ -1479,14 +1485,20 @@ func TestStaleDBFormulaSuccessPathFailuresDrainAck(t *testing.T) {
 		forbid      string
 		// then is a write that must follow the failed one.
 		then string
+		// escalate, when set, is what the one escalate event must contain.
+		escalate []string
+		// quiet means the run must emit no escalate event at all.
+		quiet bool
 	}{
 		{
-			name: "scan event failure",
-			fail: "gc event emit mol-dog-stale-db.scan",
+			name:  "scan event failure",
+			fail:  "gc event emit mol-dog-stale-db.scan",
+			quiet: true,
 		},
 		{
-			name: "scan note failure",
-			fail: staleDBReportWrite,
+			name:  "scan note failure",
+			fail:  staleDBReportWrite,
+			quiet: true,
 		},
 		{
 			name:        "outcome write failure",
@@ -1499,6 +1511,7 @@ func TestStaleDBFormulaSuccessPathFailuresDrainAck(t *testing.T) {
 			fail:        staleDBCloseWrite("bead-1"),
 			wantFailure: true,
 			then:        staleDBOutcomeWithdrawal("bead-1"),
+			escalate:    []string{"bead-1", "close failed (exit 70)"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1526,6 +1539,127 @@ func TestStaleDBFormulaSuccessPathFailuresDrainAck(t *testing.T) {
 			}
 			if !tc.wantFailure && !strings.Contains(log, staleDBCloseWrite("bead-1")) {
 				t.Fatalf("%q path did not close work after nonessential failure\nlog:\n%s\noutput:\n%s", tc.fail, log, out)
+			}
+			escalates := staleDBEscalateEvents(log)
+			if tc.quiet && len(escalates) != 0 {
+				t.Fatalf("%q is non-fatal but emitted an escalate event: %q\nlog:\n%s", tc.fail, escalates, log)
+			}
+			if len(tc.escalate) > 0 {
+				if len(escalates) != 1 {
+					t.Fatalf("%q emitted %d escalate events, want exactly 1: %q\nlog:\n%s\noutput:\n%s", tc.fail, len(escalates), escalates, log, out)
+				}
+				for _, want := range tc.escalate {
+					if !strings.Contains(escalates[0], want) {
+						t.Errorf("escalate event %q does not contain %q", escalates[0], want)
+					}
+				}
+			}
+		})
+	}
+}
+
+// staleDBEscalateEvents returns the logged mol-dog-stale-db.escalate emissions.
+func staleDBEscalateEvents(log string) []string {
+	var events []string
+	for _, line := range strings.Split(log, "\n") {
+		if strings.HasPrefix(line, "gc event emit mol-dog-stale-db.escalate") {
+			events = append(events, line)
+		}
+	}
+	return events
+}
+
+// TestStaleDBFormulaCloseFailureEscalatesWithBDsOwnError pins what the escalate
+// event for a failed work-bead close says. The two live failures behind it had
+// different causes and an identical clean event stream, so the event carries bd's
+// own words; the host's version-warning noise rides on nearly every bd call and
+// would otherwise crowd the real error out of the bounded message.
+func TestStaleDBFormulaCloseFailureEscalatesWithBDsOwnError(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash not found: %v", err)
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skipf("jq not found: %v", err)
+	}
+
+	cleanScan := `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":0,"failed":[],"skipped":[]},"purge":{"bytes_reclaimed":0},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":0,"bytes_freed_rss":0,"errors_total":0}}`
+	warn1 := `2026/10/03 07:02:54 WARN native_store_unavailable gate=version_compat reason="bd version differs from linked beads library version" scope=/home/jaword/projects/gc-management`
+	warn2 := `2026/10/03 07:02:55 WARN native_store_unavailable gate=native_open reason="schema version mismatch: database is at v22, binary knows up to v21" scope=/home/jaword/projects/gc-management`
+	realErr := `cannot close bead-1: assignee is "sess-9", actor is "actor-1"; reclaim or use --force to override`
+
+	for _, tc := range []struct {
+		name   string
+		stderr string
+		exit   string
+		want   []string
+		forbid []string
+		// short means the whole escalate line must stay under a bound.
+		maxLine int
+	}{
+		{
+			name:   "real error behind version warnings",
+			stderr: warn1 + "\n" + warn2 + "\n" + realErr,
+			exit:   "1",
+			want:   []string{"bead-1", "close failed (exit 1)", "cannot close bead-1", "actor is"},
+			forbid: []string{"native_store_unavailable"},
+		},
+		{
+			name:   "only the last three lines",
+			stderr: "e1\ne2\ne3\ne4\ne5",
+			exit:   "1",
+			want:   []string{"e3 e4 e5"},
+			forbid: []string{"e2"},
+		},
+		{
+			name:    "long error is bounded",
+			stderr:  strings.Repeat("x", 2000),
+			exit:    "1",
+			want:    []string{"close failed (exit 1)"},
+			maxLine: 600,
+		},
+		{
+			name:   "only warnings leaves no dangling detail",
+			stderr: warn1 + "\n" + warn2,
+			exit:   "2",
+			want:   []string{"close failed (exit 2)"},
+			forbid: []string{"(exit 2):", "native_store_unavailable"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			log, out, err := runStaleDBFormulaFailureCase(t, staleDBFailureCase{
+				scanJSON:     cleanScan,
+				failContains: staleDBCloseWrite("bead-1"),
+				failExit:     tc.exit,
+				failStderr:   tc.stderr,
+			})
+			if err == nil {
+				t.Fatalf("rendered script exited successfully after a failed close\nlog:\n%s\noutput:\n%s", log, out)
+			}
+			escalates := staleDBEscalateEvents(log)
+			if len(escalates) != 1 {
+				t.Fatalf("got %d escalate events, want exactly 1: %q\nlog:\n%s\noutput:\n%s", len(escalates), escalates, log, out)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(escalates[0], want) {
+					t.Errorf("escalate event %q does not contain %q", escalates[0], want)
+				}
+			}
+			for _, bad := range tc.forbid {
+				if strings.Contains(escalates[0], bad) {
+					t.Errorf("escalate event %q contains %q", escalates[0], bad)
+				}
+			}
+			if tc.maxLine > 0 && len(escalates[0]) >= tc.maxLine {
+				t.Errorf("escalate event is %d bytes, want under %d", len(escalates[0]), tc.maxLine)
+			}
+			if n := strings.Count(log, "gc runtime drain-ack"); n != 1 {
+				t.Errorf("drain-ack ran %d times, want 1\nlog:\n%s", n, log)
+			}
+			if n := strings.Count(log, staleDBCloseWrite("bead-1")); n != 1 {
+				t.Errorf("close was attempted %d times, want 1 (no retry)\nlog:\n%s", n, log)
+			}
+			if tc.name == "real error behind version warnings" && !strings.Contains(string(out), "reclaim or use --force") {
+				t.Errorf("bd's error did not reach stderr for the session transcript\noutput:\n%s", out)
 			}
 		})
 	}
@@ -1556,6 +1690,7 @@ set -euo pipefail
 maybe_fail() {
   local rendered="$1"
   if [ -n "${GC_TEST_FAIL_CONTAINS:-}" ] && [[ "$rendered" == *"$GC_TEST_FAIL_CONTAINS"* ]]; then
+    if [ -n "${GC_TEST_FAIL_STDERR:-}" ]; then printf '%s\n' "$GC_TEST_FAIL_STDERR" >&2; fi
     exit "${GC_TEST_FAIL_EXIT:-70}"
   fi
 }
@@ -1607,7 +1742,7 @@ esac
 
 	cmd := exec.Command("bash", "-s")
 	cmd.Stdin = strings.NewReader(script)
-	cmd.Env = append(staleDBFilteredEnv("GC_BEAD_ID", "PATH", "TMPDIR", "GC_TEST_LOG", "GC_TEST_SCAN_JSON", "GC_TEST_SCAN_EXIT", "GC_TEST_APPLY_JSON", "GC_TEST_APPLY_EXIT", "GC_TEST_FAIL_CONTAINS", "GC_TEST_FAIL_EXIT"),
+	cmd.Env = append(staleDBFilteredEnv("GC_BEAD_ID", "PATH", "TMPDIR", "GC_TEST_LOG", "GC_TEST_SCAN_JSON", "GC_TEST_SCAN_EXIT", "GC_TEST_APPLY_JSON", "GC_TEST_APPLY_EXIT", "GC_TEST_FAIL_CONTAINS", "GC_TEST_FAIL_EXIT", "GC_TEST_FAIL_STDERR"),
 		"GC_BEAD_ID="+tc.beadID,
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"TMPDIR="+dir,
@@ -1618,6 +1753,7 @@ esac
 		"GC_TEST_APPLY_EXIT="+tc.applyExit,
 		"GC_TEST_FAIL_CONTAINS="+tc.failContains,
 		"GC_TEST_FAIL_EXIT="+tc.failExit,
+		"GC_TEST_FAIL_STDERR="+tc.failStderr,
 	)
 	cmd.Env = append(cmd.Env, tc.env...)
 	out, err := cmd.CombinedOutput()
