@@ -5,7 +5,10 @@ the session's mutable current-claim stamp. Apply the root predicate before
 frontier selection, every claim tier, continuation reservation and delivery.
 Scoped v2 results distinguish live-root wait from terminal completion and never
 acknowledge drain or fall back to generic acquisition. Store failures are errors;
-unscoped acquisition retains the v1 contract.
+unscoped acquisition retains the v1 contract. `--root` refuses `--worktree`
+before resolving any store: `--worktree` provisions a checkout per claimed bead
+ID, so the steps of one workflow would not share a tree. Unscoped
+`--claim --worktree` is unchanged.
 
 Resolve scoped candidates against the current work leg before domain checks.
 Only proven `ErrNotFound` permits trying the next leg; every other read error

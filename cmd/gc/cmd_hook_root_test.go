@@ -753,3 +753,34 @@ func TestHookRootFlagValidation(t *testing.T) {
 		}
 	}
 }
+
+// --worktree provisions a checkout per claimed bead ID, so a continued
+// workflow's steps would each land in a separate tree. The pair is refused
+// before any city or store is resolved, in either flag order and with --json.
+func TestHookRootRefusesWorktree(t *testing.T) {
+	t.Setenv("GC_CITY", t.TempDir())
+	for _, args := range [][]string{
+		{"--claim", "--root", "root-a", "--worktree"},
+		{"--claim", "--worktree", "--root", "root-a", "--json"},
+	} {
+		var out, errOut bytes.Buffer
+		cmd := newHookCmd(&out, &errOut)
+		cmd.SetArgs(args)
+		if err := cmd.Execute(); err == nil {
+			t.Fatalf("accepted --root with --worktree: %v", args)
+		}
+		if out.Len() != 0 {
+			t.Fatalf("refused flags %v produced a result: %s", args, &out)
+		}
+		if got := errOut.String(); !strings.Contains(got, "--root cannot be combined with --worktree") {
+			t.Fatalf("flags %v: stderr = %q, want the --root/--worktree refusal", args, got)
+		}
+	}
+	var out, errOut bytes.Buffer
+	if code := cmdHookWithOptions(nil, hookCommandOptions{Claim: true, JSON: true, Worktree: true, RootBeadID: "root-a"}, &out, &errOut); code != 1 {
+		t.Fatalf("cmdHookWithOptions code = %d, want 1; stderr=%q", code, &errOut)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("refused options produced a result: %s", &out)
+	}
+}

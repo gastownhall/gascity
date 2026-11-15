@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "catalog.go",
         "fshost.go",
+        "input.go",
         "observe.go",
         "ported.go",
         "probes.go",

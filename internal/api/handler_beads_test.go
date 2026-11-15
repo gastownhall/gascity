@@ -2072,7 +2072,7 @@ func TestBeadListAssigneeTermsIncludesAllSessionIdentityForms(t *testing.T) {
 	}
 	srv := New(state)
 
-	terms := srv.beadListAssigneeTerms(context.Background(), "worker")
+	terms := srv.beadListAssigneeTerms(context.Background(), srv.state.Stores(), "worker")
 	got := make(map[string]bool, len(terms))
 	for _, term := range terms {
 		got[term] = true

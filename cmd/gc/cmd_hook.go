@@ -32,6 +32,7 @@ func newHookCmd(stdout, stderr io.Writer) *cobra.Command {
 	var drainAck bool
 	var jsonOut bool
 	var rootID string
+	var worktree bool
 	cmd := &cobra.Command{
 		Use:   "hook [agent]",
 		Short: "Find routed work for an agent",
@@ -65,7 +66,8 @@ root is terminal. Every result echoes root_bead_id. Wait reasons are
 workflow_blocked, workflow_no_ready, or different_workflow_assignment when
 this session already owns work in another workflow. Wait never acquires other
 work or acknowledges a drain. A missing root or failed store read exits
-nonzero. --root requires --claim and refuses --drain-ack. Without --root,
+nonzero. --root requires --claim and refuses --drain-ack and --worktree
+(--worktree provisions a separate checkout per claimed bead). Without --root,
 generic acquisition retains schema_version "1". After continuation completes
 or is released, the caller may explicitly invoke generic acquisition.
 
@@ -114,6 +116,7 @@ The agent is determined from $GC_AGENT or a positional argument.`,
 				Claim:      claim,
 				DrainAck:   drainAck,
 				JSON:       jsonOut,
+				Worktree:   worktree,
 				RootBeadID: strings.TrimSpace(rootID),
 			}
 			// exitForCode, not `!= 0 → errExit`: the store-unavailable
@@ -129,6 +132,7 @@ The agent is determined from $GC_AGENT or a positional argument.`,
 	cmd.Flags().StringVar(&rootID, "root", "", "with --claim, continue only this workflow root; emit v2 work/wait/complete results")
 	cmd.Flags().BoolVar(&drainAck, "drain-ack", false, "with --claim, acknowledge runtime drain when no work is available")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit a JSON protocol result (always with --claim; on the discovery door only for a drain refusal)")
+	cmd.Flags().BoolVar(&worktree, "worktree", false, "with --claim, create or verify a gc-owned git worktree for the claimed work (Git LFS content is not smudged)")
 	if flag := cmd.Flags().Lookup("hook-format"); flag != nil {
 		flag.Hidden = true
 	}
@@ -310,6 +314,7 @@ type hookCommandOptions struct {
 	Claim      bool
 	DrainAck   bool
 	JSON       bool
+	Worktree   bool
 	DrainAckFn hookDrainAckFunc
 	RootBeadID string
 }
@@ -330,6 +335,13 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		fmt.Fprintln(stderr, "gc hook: --root requires --claim and cannot be combined with --drain-ack or --inject") //nolint:errcheck
 		return 1
 	}
+	// --worktree provisions a fresh checkout per claimed bead ID, so each step
+	// of a continued workflow would land in its own tree without the earlier
+	// steps' changes. Refuse the pair before any store is read.
+	if opts.RootBeadID != "" && opts.Worktree {
+		fmt.Fprintln(stderr, "gc hook: --root cannot be combined with --worktree: --worktree provisions a separate checkout per claimed bead, so workflow steps would not share one") //nolint:errcheck
+		return 1
+	}
 	if opts.Inject {
 		return 0
 	}
@@ -343,6 +355,10 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	_ = opts.HookFormat
 	if opts.DrainAck && !opts.Claim {
 		fmt.Fprintln(stderr, "gc hook: --drain-ack requires --claim") //nolint:errcheck
+		return 1
+	}
+	if opts.Worktree && !opts.Claim {
+		fmt.Fprintln(stderr, "gc hook: --worktree requires --claim") //nolint:errcheck
 		return 1
 	}
 
@@ -622,7 +638,25 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			// The fenced row, so the worktree check costs no extra read.
 			PoolSeat: hookClaimPoolSeatFor(cityPath, cityName, cfg.Rigs, fencedSession, &a),
 		}
-		return claimHookWork(city, workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
+		var provisionWorktree hookProvisionWorktreeFunc
+		if opts.Worktree {
+			resolved, err := config.ResolveProvider(&a, &cfg.Workspace, cfg.Providers, exec.LookPath)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc hook: resolving provider for worktree staging: %v\n", err) //nolint:errcheck
+				return 1
+			}
+			provisionWorktree, err = newHookClaimWorktreeProvisioner(cityPath, cityName, cfg, &a, resolvedAgentName, resolved)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc hook: %v\n", err) //nolint:errcheck
+				return 1
+			}
+			for i := range stores {
+				if stores[i].storeRef == "" {
+					stores[i].storeRef = primaryHookStoreRef(cityPath, cfg, agentForQuery, stores[i].dir, stores[i].env)
+				}
+			}
+		}
+		return claimHookWorkProvisioning(city, workQuery, workDir, queryEnv, stores, claimOpts, provisionWorktree, emitQueryFailure, stdout, stderr)
 	}
 	// The discovery door is fenced too: a draining seat must not be handed its
 	// preassigned continuation sibling by the packs' post-close `gc hook`.
@@ -909,6 +943,13 @@ func hookClaimSessionEligibility(info session.Info, instanceToken string) (hookC
 // city that relocates nothing the route is nil and the ops are the work-store
 // ops alone.
 func claimHookWork(city *hookCity, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
+	return claimHookWorkProvisioning(city, workQuery, workDir, queryEnv, stores, claimOpts, nil, emitFailure, stdout, stderr)
+}
+
+// claimHookWorkProvisioning is claimHookWork with the claimed bead's worktree
+// provisioned before its receipt is delivered (gc hook --claim --worktree).
+// A nil provisionWorktree is the plain claim.
+func claimHookWorkProvisioning(city *hookCity, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, provisionWorktree hookProvisionWorktreeFunc, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
 	// The city relocates a class and its front door could not be projected.
 	// Claiming through the work store anyway would write ownership into a
 	// ledger that does not hold the bead, which is the wrong-answer lane this
@@ -919,7 +960,9 @@ func claimHookWork(city *hookCity, workQuery, workDir string, queryEnv []string,
 	// Work-store writes announce themselves to the city's event log so the run
 	// views see a claim within a poll (hook_claim_bead_events.go). They are
 	// wrapped before the class route, whose binding writes announce themselves.
-	ops, proceed := routedHookClaimOps(withHookClaimBeadEvents(city.claimOps(), city.path), opened, err, city.recorder, stderr)
+	base := city.claimOps()
+	base.ProvisionWorktree = provisionWorktree
+	ops, proceed := routedHookClaimOps(withHookClaimBeadEvents(base, city.path), opened, err, city.recorder, stderr)
 	if !proceed {
 		return 1
 	}
@@ -1031,6 +1074,7 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 		if len(claimStore.env) > 0 {
 			storeOpts.Env = claimStore.env
 		}
+		storeOpts.StoreRef = claimStore.storeRef
 		storeDir := workDir
 		if dir := strings.TrimSpace(claimStore.dir); dir != "" {
 			storeDir = dir

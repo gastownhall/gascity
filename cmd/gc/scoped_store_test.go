@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 func noopBdRunner() beads.CommandRunner {
@@ -615,5 +616,59 @@ func TestScopedStoreLikeRebuildsBehindTheGatesView(t *testing.T) {
 				t.Fatalf("policy=%v %s: clone policy-wrapped = %v", policy, name, wrapped)
 			}
 		}
+	}
+}
+
+// controllerStateWorkLeg is store as the one work leg of a city that holds
+// nothing else, as the API's status readers receive a plan's leg.
+func controllerStateWorkLeg(t *testing.T, store beads.Store) storeref.TypedLeg {
+	t.Helper()
+	st := storeref.NewStores(storeref.Topology{Work: storeref.Leg{Ref: storeref.WorkRef, Store: store}}, storeref.StoresOptions{})
+	plan, err := st.Plan(storeref.WorkFederation{Kind: storeref.WorkScope, Scope: storeref.WorkRef})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var leg storeref.TypedLeg
+	storeref.EachTypedLeg(plan, func(l storeref.TypedLeg) { leg = l })
+	return leg
+}
+
+// TestControllerStateScopedStoreLikeClonesABdBackedLegThroughItsHandle pins
+// the typed api.State.ScopedStoreLike (typed-stores T7e.2, R12): handed a plan
+// leg over a bd-backed store, it binds the leg to the ctx-bound clone and
+// reports it cloned. The bind reaches scopedStoreLike with the raw store the
+// plan leg holds, not the class handle the epoch hands out, which
+// bdStoreBacking answers "not bd" for, so the clone would silently turn off.
+// The bound leg keeps the leg's ref, role and gate role.
+func TestControllerStateScopedStoreLikeClonesABdBackedLegThroughItsHandle(t *testing.T) {
+	cityDir := t.TempDir()
+	writeMinimalCityToml(t, cityDir)
+	cs := &controllerState{cityPath: cityDir, cfg: &config.City{}}
+	existing := beads.NewBdStore(cityDir, noopBdRunner())
+	leg := controllerStateWorkLeg(t, existing)
+
+	if scoped, err := scopedStoreLike(context.Background(), cityDir, cs.cfg, beads.WorkStore{Store: existing}); err != nil || scoped != nil {
+		t.Fatalf("scopedStoreLike over the class handle = %v, %v; want (nil, nil), the R12 trap this method avoids", scoped, err)
+	}
+	bound, cloned, err := cs.ScopedStoreLike(context.Background(), leg)
+	if err != nil || !cloned {
+		t.Fatalf("ScopedStoreLike = cloned %v, %v; want the ctx-bound clone", cloned, err)
+	}
+	if beads.SameStore(bound.Strict, existing) || !strings.HasPrefix(beads.PhysicalStoreKey(bound.Strict), "*beads.BdStore:") {
+		t.Fatalf("bound leg reads %s, want a new bd store, not %s", beads.PhysicalStoreKey(bound.Strict), beads.PhysicalStoreKey(existing))
+	}
+	if bound.Ref != leg.Ref || bound.Role != leg.Role || bound.OnError != leg.OnError || bound.Reader.Role() != leg.Reader.Role() {
+		t.Fatalf("bound leg = %v/%v/%v/%v, want the leg's %v/%v/%v/%v", bound.Ref, bound.Role, bound.OnError, bound.Reader.Role(), leg.Ref, leg.Role, leg.OnError, leg.Reader.Role())
+	}
+
+	mem := controllerStateWorkLeg(t, beads.NewMemStore())
+	if got, cloned, err := cs.ScopedStoreLike(context.Background(), mem); err != nil || cloned || !beads.SameStore(got.Strict, mem.Strict) {
+		t.Fatalf("ScopedStoreLike over a MemStore = cloned %v, %v; want the leg unchanged", cloned, err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got, cloned, err := cs.ScopedStoreLike(ctx, leg); !errors.Is(err, context.Canceled) || err.Error() != context.Canceled.Error() || cloned || !beads.IsNilStore(got.Strict) {
+		t.Fatalf("ScopedStoreLike under a canceled ctx = cloned %v, %v; want context.Canceled, unwrapped, and a zero leg", cloned, err)
 	}
 }
