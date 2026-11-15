@@ -9194,6 +9194,12 @@ func TestGcBeadsBdInitDoltliteInitializesDelegatedBdWrites(t *testing.T) {
 	)...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		// The init arm fails closed when the bd on PATH leaves no DoltLite
+		// store behind (every stock bd). That is a missing capability of this
+		// host, not a defect of the script; any other failure is one.
+		if strings.Contains(string(out), doltliteInitCapabilityPhrase) {
+			t.Skipf("bd on PATH (%s) cannot create a DoltLite store; init failed closed: %s", bdPath, strings.TrimSpace(string(out)))
+		}
 		t.Fatalf("gc-beads-bd doltlite init failed: %v\n%s", err, out)
 	}
 
