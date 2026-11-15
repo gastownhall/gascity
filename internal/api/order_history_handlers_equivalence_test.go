@@ -12,7 +12,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/orders"
-	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // The T7d.2 equivalence table: every function T7d.2 converts, run beside its
@@ -109,56 +108,72 @@ func t7d2History(out *OrderHistoryListOutput, err error) string {
 	return t7d2Canonical(out, err)
 }
 
-// t7d2MovedVerdicts is the declared verdict oracle: a store an order-history
-// or workflow plan reads through a federated leg may read federated where
-// main's marker read it relic; a store that one plan reads relic and another
-// federated (the gate's two views of one store) may read either. A strict
-// read is never rewritten.
-func t7d2MovedVerdicts(fx t7dFixture, frozen, live []string) ([]string, []string) {
+// t7d2Verdicts is the declared verdict oracle, built from the declared rule
+// and the fixture, never from the plans under test (t7b2-design.md Q7, owner
+// decisions 2026-11-13). A non-strict read of the live code must read:
+//
+//   - federated on a binding store (the graph and orders bindings, a plane's
+//     refusal);
+//   - federated on a scope store (the city's, a rig's) of a city whose graph
+//     is not relocated (by handle identity, as the plans decide it);
+//   - federated on a relic-free rig a reader that keeps retired rigs reads
+//     (the detail by a workflow store_ref);
+//   - relic on every other scope store of a relocated city.
+//
+// A strict read stays strict, exactly, on both sides. Main's non-strict
+// verdicts were its RelicRead marker's; once the live verdict is judged, both
+// logs' non-strict verdicts compare as one class.
+//
+// The limit: the log names the physical store under the gate's views, not the
+// view a read went through. Under the gate on a city that has no binding, one
+// op reads the city store through its work view (a relic scope leg) and its
+// class view (the graph or orders leg, federated), and both log "city";
+// there, and only there, either verdict is accepted.
+func t7d2Verdicts(t *testing.T, name string, fx t7dFixture, keepsRetired bool, frozen, live []string) ([]string, []string) {
+	t.Helper()
 	st := fx.state.Stores()
-	reads := storeref.WorkflowReadsSuspendedRigs
-	intents := []storeref.Intent{
-		storeref.OrderHistory{Kind: storeref.OrderHistoryAll, SuspendedRigs: reads},
-		storeref.Workflow{IncludeRetiredRigs: true, SuspendedRigs: reads},
+	relocated := !beads.SameStore(st.Graph(), st.Work())
+	_, hasBinding := fx.tops["binding"]
+	relicFree := map[string]bool{}
+	if rs, ok := fx.state.(relicReportingState); ok {
+		relicFree["alpha"] = rs.relicFree["alpha"]
+		relicFree["named"] = rs.relicFree[fx.state.CityName()]
 	}
-	for _, o := range t7d2Orders(fx.state.CityName()) {
-		scope := storeref.WorkRef
-		if o.Rig != "" {
-			scope = storeref.RigRef(o.Rig)
+	expect := func(store string) string {
+		switch store {
+		case "binding", "orders", "refused":
+			return "federated"
 		}
-		intents = append(intents, storeref.OrderHistory{Kind: storeref.OrderHistoryOne, Scope: scope, SuspendedRigs: reads})
-	}
-	federated, relic := map[string]bool{}, map[string]bool{}
-	for _, in := range intents {
-		plan, err := st.Plan(in)
-		if err != nil {
-			continue
-		}
-		for _, l := range plan.Legs {
-			name, _, _ := strings.Cut(fx.name(l.Leg.Store), "/")
-			switch l.Gate {
-			case beads.FederatedLegRole:
-				federated[name] = true
-			case beads.RelicLegRole:
-				relic[name] = true
-			}
+		switch {
+		case !relocated:
+			return "federated"
+		case splittest.GateEnabled() && !hasBinding && strings.HasPrefix(store, "city"):
+			return "relic|federated"
+		case keepsRetired && relicFree[store]:
+			return "federated"
+		default:
+			return "relic"
 		}
 	}
-	norm := func(log []string, rewrite bool) []string {
+	norm := func(log []string, judge bool) []string {
 		out := make([]string, len(log))
 		for i, entry := range log {
-			name, _, _ := strings.Cut(entry, " ")
-			switch {
-			case federated[name] && relic[name]:
-				entry = strings.Replace(strings.Replace(entry, "[relic]", "[relic|federated]", 1), "[federated]", "[relic|federated]", 1)
-			case federated[name] && rewrite:
-				entry = strings.Replace(entry, "[relic]", "[federated]", 1)
+			cut := strings.LastIndex(entry, " [")
+			verdict := entry[cut+2 : len(entry)-1]
+			if verdict != "strict" {
+				store, _, _ := strings.Cut(entry, " ")
+				want := expect(store)
+				accepted := verdict == want || (want == "relic|federated" && (verdict == "relic" || verdict == "federated"))
+				if judge && !accepted {
+					t.Errorf("%s: read %q verdict %s, want %s", name, entry[:cut], verdict, want)
+				}
+				entry = entry[:cut] + " [non-strict]"
 			}
 			out[i] = entry
 		}
 		return out
 	}
-	return norm(frozen, true), norm(live, false)
+	return norm(frozen, false), norm(live, true)
 }
 
 // t7d2Op is one converted function, frozen and live.
@@ -166,6 +181,9 @@ type t7d2Op struct {
 	name         string
 	frozen, live func(fx t7dFixture) string
 	writes       bool
+	// keepsRetired is a reader that keeps relic-free rigs (federated tails):
+	// the detail by a workflow store_ref.
+	keepsRetired bool
 }
 
 func t7d2Ops(city string) []t7d2Op {
@@ -207,12 +225,16 @@ func t7d2Ops(city string) []t7d2Op {
 	for _, id := range []string{"tc-or1", "gcg-or1", "al-or1", "or-or1", "al-ra0", "gcg-w1", "tc-w0", "or-w2", "tx-rn0", "missing"} {
 		for _, ref := range []string{"", "city:" + city, "rig:alpha", "rig:" + city, "orders:" + city, "graph:" + city, "orders:elsewhere"} {
 			in := OrderHistoryDetailInput{BeadID: id, StoreRef: ref}
+			// A workflow store_ref resolves over the workflow legs with retired
+			// rigs kept.
+			keepsRetired := ref != "" && !strings.HasPrefix(ref, "orders:")
 			ops = append(ops, t7d2Op{
 				name: "humaHandleOrderHistoryDetail " + id + " ref=" + ref,
 				frozen: func(fx t7dFixture) string {
 					return t7d2Canonical(t7d2FrozenHumaHandleOrderHistoryDetail(ctx, New(fx.state), &in))
 				},
-				live: func(fx t7dFixture) string { return t7d2Canonical(New(fx.state).humaHandleOrderHistoryDetail(ctx, &in)) },
+				live:         func(fx t7dFixture) string { return t7d2Canonical(New(fx.state).humaHandleOrderHistoryDetail(ctx, &in)) },
+				keepsRetired: keepsRetired,
 			})
 		}
 	}
@@ -294,7 +316,7 @@ func TestOrderHistoryHandlersMatchTheFrozenReaders(t *testing.T) {
 								continue
 							}
 							w, g := t7dSortDepRuns(*ffx.log), t7dSortDepRuns(*lfx.log)
-							w, g = t7d2MovedVerdicts(ffx, w, g)
+							w, g = t7d2Verdicts(t, name, lfx, op.keepsRetired, w, g)
 							switch {
 							case shape.cached && op.writes:
 								w, g = t7dOpSet(w), t7dOpSet(g)

@@ -667,8 +667,8 @@ type workflowLegQuery struct {
 // writable handle on an entry's leg, minted only for the legs a caller writes
 // to: storeref.WalkOwner stopped on the plan leg over the entry's store (by
 // identity; a plan reads each store once), so its reads are strict
-// (OD-T7-3), as the raw store's were. An entry with no leg (an order entry,
-// a zero entry) matches no plan leg and gets the zero handle.
+// (OD-T7-3), as the raw store's were. An entry with no leg (a zero entry)
+// matches no plan leg and gets the zero handle.
 //
 // A plan the epoch cannot make (no store at all) is no legs, as the hand
 // list was empty.

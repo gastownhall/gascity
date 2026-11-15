@@ -138,10 +138,10 @@ func TestFakeStateStoresWrapTheResidueAccessors(t *testing.T) {
 
 // reviewedResidueCallers are this package's production calls of State's raw
 // store accessors, keyed "file func method" (typed-stores T6 plan, OD-2). It
-// cannot reach zero before the last of them converts: the order readers'
-// store infos (T7f), the orders-class workflow ref (T7d-blocked) and sling's
-// source workflow stores (T7i). ScopedStoreLike takes and returns a typed leg
-// since T7e.2, so it is no longer residue. The table only shrinks: a new
+// cannot reach zero before the last of them converts: sling's source workflow
+// stores (T7i). The order readers and the orders-class workflow ref read
+// OrderHistory legs since T7d.2, and BeadStore left State with them;
+// ScopedStoreLike takes and returns a typed leg since T7e.2. The table only shrinks: a new
 // caller takes its class handle from Stores().
 var reviewedResidueCallers = map[string]int{
 	// Not the accessor: SeededCityDeps' field of the same name, read by the

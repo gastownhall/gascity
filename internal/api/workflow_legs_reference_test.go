@@ -46,14 +46,15 @@ package api
 // The copies keep main's code, read markers included: markers in test files
 // are neither linted (storeclass) nor ledgered (reviewedMarkers).
 //
-// The copies reach two api split-strict keys nothing else does: the frozen
-// order detail and order feed read through the order readers T7d leaves
-// marked, from a test, so their caller is "-"
-// (internal/api/testdata/split_strict_baseline.tsv:
-// api.orderHistoryBeadAcrossStoreInfos get relic:work orders -, and
-// orders.(*Store).ListTracking list relic:work orders -). Deleting this file
-// (with the T7f conversion of those readers, or once T7j retires the markers)
-// leaves both rows unreached: regenerate the api inputs in the same change.
+// The copies reach one api split-strict key production no longer does: the
+// frozen order feed reads orders.(*Store).ListTracking under main's relic
+// marker, from a test, so its caller is "-"
+// (internal/api/testdata/split_strict_baseline.tsv: orders.(*Store).ListTracking
+// list relic:work orders -); T7d.2's frozen feed copy
+// (order_history_handlers_reference_test.go) reaches it too. Deleting both
+// files leaves the row unreached: regenerate the api inputs in the same change.
+// (The frozen order detail's marked key went with T7d.2: its reader is now a
+// frozen copy of main too.)
 
 import (
 	"context"

@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
@@ -192,5 +193,66 @@ func TestOrderHistoryCachedFirstReadsInTheLegRole(t *testing.T) {
 		if len(store.roles) != 1 || store.roles[0] != tc.want {
 			t.Errorf("%s leg: cache-first reads ran in roles %v, want one %v", tc.name, store.roles, tc.want)
 		}
+	}
+}
+
+// TestOrderHistoryLabelsLegsByStoreIdentityUnderAGraphRefusal pins the
+// labeling rule (order_history_legs.go): Authority legs are told apart by
+// store identity, never by ref. Graph and orders share one binding and the
+// plane refuses graph alone, so the graph leg is the refusal and the orders
+// leg the binding itself: two Authority legs under one ref. A labeler keyed
+// on Holds(ref) names both graph:, and the binding's tracking rows would be
+// published under the wrong store_ref.
+func TestOrderHistoryLabelsLegsByStoreIdentityUnderAGraphRefusal(t *testing.T) {
+	t7dGateOff(t)
+	state := newFakeState(t)
+	state.cityName = t7dCity
+	state.cityBeadStore = beads.NewMemStore()
+	binding := beads.NewMemStore()
+	state.graphBeadStore, state.ordersBeadStore = binding, binding
+	state.stores, state.cfg.Rigs = nil, nil
+	log := &[]string{}
+	refusal := t7dRefusingStore{&t7dRecordingStore{Store: beads.NewMemStore(), name: "refused", log: log}}
+	state.classRefusals = map[coordclass.Class]storeref.RefusingClassStore{coordclass.ClassGraph: refusal}
+	tracking, err := binding.Create(beads.Bead{Title: "order:nightly", Labels: []string{"order-run:nightly", "order-tracking"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := binding.Close(tracking.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// The refs, in plan order: the graph refusal, the city, the orders binding.
+	if got, want := t7d2Refs(everyOrderLegs(state.Stores(), state.CityName())), "graph:"+t7dCity+" city:"+t7dCity+" orders:"+t7dCity; got != want {
+		t.Fatalf("every-order legs = %s, want %s", got, want)
+	}
+
+	// The feed publishes the binding's tracking bead under orders:<city>, as
+	// main did.
+	feedRef := func(res orderRunFeedResult, err error) string {
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, item := range res.Items {
+			if item.BeadID == tracking.ID {
+				return item.StoreRef
+			}
+		}
+		return ""
+	}
+	live := feedRef(buildOrderRunFeedItems(state, "city", t7dCity, 0))
+	frozen := feedRef(t7d2FrozenBuildOrderRunFeedItems(state, "city", t7dCity, 0))
+	if live != "orders:"+t7dCity || live != frozen {
+		t.Errorf("the feed names the tracking bead's store %q, main %q; want orders:%s", live, frozen, t7dCity)
+	}
+
+	// The detail takes that ref back to the binding.
+	info, ok := workflowStoreByRef(state, live)
+	if !ok || !beads.SameStore(info.leg.Reader, binding) {
+		t.Fatalf("workflowStoreByRef(%q) = %v; want the orders binding", live, ok)
+	}
+	detail, err := New(state).humaHandleOrderHistoryDetail(context.Background(), &OrderHistoryDetailInput{BeadID: tracking.ID, StoreRef: live})
+	if err != nil || detail.Body.BeadID != tracking.ID || detail.Body.StoreRef != live {
+		t.Errorf("detail via %q = %+v, %v; want the tracking bead under its own ref", live, detail, err)
 	}
 }
