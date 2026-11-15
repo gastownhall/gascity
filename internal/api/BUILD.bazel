@@ -461,6 +461,8 @@ go_test(
         "nudge_queue_state_test.go",
         "openapi_response_validation_test.go",
         "openapi_sync_test.go",
+        "order_history_legs_equivalence_test.go",
+        "order_history_legs_reference_test.go",
         "orders_class_store_test.go",
         "orders_feed_test.go",
         "pack_source_policy_test.go",

@@ -331,3 +331,60 @@ const (
 )
 
 func (WorkFederation) intent() {}
+
+// OrderHistoryKind is which order-history federation an OrderHistory intent
+// plans. Each kind is the leg list one family of API order readers reads
+// today, its order pinned here (t7b2-design.md §2).
+type OrderHistoryKind int
+
+const (
+	// OrderHistoryOne is one order's run history (GET /v0/orders/history,
+	// /v0/orders/check): Scope's rig work store, then the city work store,
+	// then the city's orders placement. The scope legs take the Workflow rule
+	// with retired rigs dropped: RoleRelic on a city whose graph is relocated
+	// by handle identity, a rig proven relic-free dropped, RoleFederationTail
+	// otherwise; the city is never retired (OD-T7-11). A Scope rig this epoch
+	// did not open is no leg, not an error: an order names its rig from
+	// config, and its city and binding history are still read. A rig named
+	// like the city is read as any rig.
+	OrderHistoryOne OrderHistoryKind = iota
+
+	// OrderHistoryAll is every order's history (the run detail and the order
+	// feed): the legs Workflow plans with retired rigs dropped, then the
+	// city's orders placement.
+	OrderHistoryAll
+)
+
+// String renders the kind.
+func (k OrderHistoryKind) String() string {
+	switch k {
+	case OrderHistoryOne:
+		return "One"
+	case OrderHistoryAll:
+		return "All"
+	default:
+		return "OrderHistoryKind(?)"
+	}
+}
+
+// OrderHistory is the order-history federation: where an order's tracking
+// rows, written before and after the split, may live. The city's orders
+// placement is RoleAuthority and federated, planned last, and dropped by
+// Plan's dedupe wherever another leg already reads its store (a city that
+// relocates nothing; graph and orders on one binding), exactly as the API
+// appended it. Every leg is PolicyFatal: each reader keeps its own toleration
+// (the first leg's failure is fatal to a history list, later ones are logged)
+// in its visitor.
+type OrderHistory struct {
+	Kind OrderHistoryKind
+
+	// Scope is OrderHistoryOne's order scope: WorkRef for a city order, a
+	// rig ref for a rig order.
+	Scope StoreRef
+
+	// SuspendedRigs is the reader's choice about suspended rigs. It has no
+	// default: the zero value is a plan error.
+	SuspendedRigs WorkflowSuspendedRigs
+}
+
+func (OrderHistory) intent() {}

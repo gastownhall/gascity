@@ -534,18 +534,25 @@ func lastRunRecords(store beads.Store, label string, n int) ([]beads.Bead, error
 		// closed-history read comes back as a partial result holding only the
 		// cached open rows, which would read as surviving rows and shorten the
 		// cooldown or regress the cursor.
-		return beads.HandlesFor(store).Live.List(beads.ListQuery{
-			Label:         label,
-			Limit:         limit,
-			IncludeClosed: true,
-			Sort:          beads.SortCreatedDesc,
-			TierMode:      beads.TierBoth,
-			// Aggregate read over the newest rows. For LastRun it reduces to
-			// max(CreatedAt), so the backing tie-break at the boundary is
-			// irrelevant; for Cursor see its own note.
-			AllowBackingCreatedLimit: n == 1,
-		})
+		return beads.HandlesFor(store).Live.List(runRecordQuery(label, limit, n))
 	}, n)
+}
+
+// runRecordQuery is lastRunRecords' read of up to limit beads carrying label
+// for n run records: newest first, both tiers, closed included. CursorAcrossLegs
+// reads the same query over a leg.
+func runRecordQuery(label string, limit, n int) beads.ListQuery {
+	return beads.ListQuery{
+		Label:         label,
+		Limit:         limit,
+		IncludeClosed: true,
+		Sort:          beads.SortCreatedDesc,
+		TierMode:      beads.TierBoth,
+		// Aggregate read over the newest rows. For LastRun it reduces to
+		// max(CreatedAt), so the backing tie-break at the boundary is
+		// irrelevant; for Cursor see its own note.
+		AllowBackingCreatedLimit: n == 1,
+	}
 }
 
 // NewestRunRecords is list's run records (IsRunRecord), up to n, newest
@@ -592,26 +599,37 @@ func (s *Store) Cursor(name string) EventCursor {
 		// events. Fetch the full candidate set so ApplyListQuery cuts the canonical
 		// (created_at DESC, id DESC) prefix, which keeps the max-seq run at the
 		// front (the Limit is an exact client-side cap).
-		results, err := lastRunRecords(store, label, 10)
-		if err != nil {
-			if len(results) == 0 {
-				runtimeHelpersLogf("orders: cursor lookup failed for %s: %v", name, err)
-				continue
-			}
-			runtimeHelpersLogf("orders: cursor lookup partially failed for %s: %v", name, err)
-		}
-		if len(results) == 0 {
-			continue
-		}
-		labelSets := make([][]string, 0, len(results))
-		for _, b := range results {
-			labelSets = append(labelSets, b.Labels)
-		}
-		if seq := MaxSeqFromLabels(labelSets); seq > latest {
+		results, err := lastRunRecords(store, label, cursorRunRecords)
+		if seq := cursorSeq(name, results, err); seq > latest {
 			latest = seq
 		}
 	}
 	return EventCursor(latest)
+}
+
+// cursorRunRecords is how many of an order's newest run records a cursor read
+// takes from one leg.
+const cursorRunRecords = 10
+
+// cursorSeq is one leg's cursor: the max seq across the run records it
+// returned. A failed read is logged; its partial rows still count, and with
+// none the leg contributes 0.
+func cursorSeq(name string, results []beads.Bead, err error) uint64 {
+	if err != nil {
+		if len(results) == 0 {
+			runtimeHelpersLogf("orders: cursor lookup failed for %s: %v", name, err)
+			return 0
+		}
+		runtimeHelpersLogf("orders: cursor lookup partially failed for %s: %v", name, err)
+	}
+	if len(results) == 0 {
+		return 0
+	}
+	labelSets := make([][]string, 0, len(results))
+	for _, b := range results {
+		labelSets = append(labelSets, b.Labels)
+	}
+	return MaxSeqFromLabels(labelSets)
 }
 
 // HasOpenWork reports whether any in-flight work exists for the scoped order:
