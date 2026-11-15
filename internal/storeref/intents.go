@@ -245,3 +245,89 @@ const (
 
 func (Convoy) intent()     {}
 func (CloseOwner) intent() {}
+
+// WorkKind is which work federation a WorkFederation intent plans. Each kind
+// is the leg list one family of API readers federates over today, its order
+// pinned here (t7b3-design.md §2).
+type WorkKind int
+
+const (
+	// WorkList is the work ledger as GET /v0/beads lists it and /status
+	// counts it: the city and every rig the epoch opened, in name order, the
+	// city listed under CityName (a rig of that name replaces it, as
+	// State.BeadStores' alias does), then the graph placement
+	// (RoleFederationTail) when it is relocated by handle identity.
+	WorkList WorkKind = iota
+
+	// WorkSweep is every store that can hold work assigned to one session (the
+	// API's retired-session hand-off). On a city whose graph is relocated by
+	// handle identity: the city, the rigs ascending, the graph placement, then
+	// the sessions placement. Otherwise the sessions placement alone: the one
+	// store the sweep always read there (OD-T7e-3 keeps this leg set; no mail,
+	// orders or nudges binding holds assigned work).
+	WorkSweep
+
+	// WorkScope is Scope's work store alone: a rig-scoped GET /v0/beads, the
+	// city ledger store_health measures, status's city ready leg.
+	WorkScope
+)
+
+// String renders the kind.
+func (k WorkKind) String() string {
+	switch k {
+	case WorkList:
+		return "List"
+	case WorkSweep:
+		return "Sweep"
+	case WorkScope:
+		return "Scope"
+	default:
+		return "WorkKind(?)"
+	}
+}
+
+// WorkFederation is the work ledger's federation for the API's list, count
+// and sweep readers. The city and rig legs are RoleAuthority (each is its
+// scope's work authority) and the graph and sessions legs RoleFederationTail,
+// so a reader tells the tail by its role. Every leg is PolicyFatal and
+// federated: each leg holds only its own rows by design, and whether a leg's
+// failure is tolerated is each reader's rule, kept in its visitor. No leg is
+// ever a relic leg: these readers ask for work, which a scope store
+// legitimately holds.
+type WorkFederation struct {
+	Kind WorkKind
+
+	// Scope is WorkScope's scope: WorkRef or a rig ref.
+	Scope StoreRef
+
+	// CityName is the name WorkList lists the city under, among the rigs.
+	CityName string
+
+	// SuspendedRigs is the reader's choice about suspended rigs, for WorkList
+	// and WorkSweep. It has no default: the zero value is a plan error.
+	SuspendedRigs WorkSuspendedRigs
+
+	// Skip is the rigs WorkSkipsRigs leaves unread, by ref: the caller's own
+	// census of suspended rigs (the API reads effective suspension from disk
+	// per request; the epoch's Leg.Suspended is the controller's per-tick
+	// publication, and the two can disagree). A skipped rig is dropped before
+	// the legs are deduped, so a store it shares with a rig that is read is
+	// still read through that rig. A ref the epoch did not open is ignored;
+	// WorkRef is a plan error, since the city is never skipped, and so is any
+	// Skip under WorkReadsSuspendedRigs, which reads every rig.
+	Skip []StoreRef
+}
+
+// WorkSuspendedRigs is a WorkFederation reader's choice about suspended rigs.
+type WorkSuspendedRigs int
+
+const (
+	// WorkSuspendedRigsUnset is no choice; Stores.Plan refuses it.
+	WorkSuspendedRigsUnset WorkSuspendedRigs = iota
+	// WorkReadsSuspendedRigs reads every rig the epoch opened.
+	WorkReadsSuspendedRigs
+	// WorkSkipsRigs leaves the rigs WorkFederation.Skip names unread.
+	WorkSkipsRigs
+)
+
+func (WorkFederation) intent() {}

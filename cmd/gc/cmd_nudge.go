@@ -32,7 +32,6 @@ import (
 	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
-	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storebinding"
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -1567,11 +1566,11 @@ func deliverSessionNudgeLegacy(target nudgeTarget, store beads.Store, sp runtime
 		Delivery: delivery,
 		Source:   "session",
 	})
-	if err != nil && errors.Is(err, tmux.ErrNudgeSubmitDeliveredUnobserved) {
-		// The submit Enter was delivered and the composer drained; only the
-		// busy-indicator OBSERVATION timed out. Delivery is proven, so this
-		// must report success like any other delivered nudge, not a CLI
-		// failure — fall through to the normal success path below.
+	if err != nil && runtime.NudgeDelivered(err) {
+		// The nudge reached the session; only the turn start went unobserved
+		// (any runtime's runtime.ErrNudgeDeliveredUnobserved). Delivery is
+		// proven, so this must report success like any other delivered nudge,
+		// not a CLI failure — fall through to the normal success path below.
 		result.Delivered = true
 		err = nil
 	}
@@ -2279,11 +2278,12 @@ func deliverMailNotifyLegacy(target nudgeTarget, store beads.Store, sp runtime.P
 				Wake:     worker.NudgeWakeLiveOnly,
 			})
 			delivered := nudgeErr == nil && result.Delivered
-			// The submit Enter can be delivered and the composer drained with
-			// only the busy-indicator OBSERVATION timing out. Delivery is
-			// proven either way, so this must not fall through to the queue
-			// path below and duplicate the mail notification.
-			unobservedButDelivered := errors.Is(nudgeErr, tmux.ErrNudgeSubmitDeliveredUnobserved)
+			// The nudge can reach the session with only its turn start going
+			// unobserved (runtime.ErrNudgeDeliveredUnobserved, from any
+			// runtime). Delivery is proven either way, so this must not fall
+			// through to the queue path below and duplicate the mail
+			// notification.
+			unobservedButDelivered := nudgeErr != nil && runtime.NudgeDelivered(nudgeErr)
 			if delivered || unobservedButDelivered {
 				telemetry.RecordNudge(context.Background(), target.agentKey(), nil)
 				var sessFront *session.Store
@@ -2741,12 +2741,12 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 			}
 			return false, bookkeepErr
 		}
-		if errors.Is(err, tmux.ErrNudgeSubmitDeliveredUnobserved) {
-			// The submit Enter was delivered and the composer drained; only the
-			// busy-indicator OBSERVATION timed out. Delivery is proven, so this
-			// must ack like a success, not run through failedQueuedNudge's
-			// attempt-counting/dead-letter path — that would re-inject the same
-			// reminder on the next pass.
+		if runtime.NudgeDelivered(err) {
+			// The nudge reached the session; only the turn start went
+			// unobserved (runtime.ErrNudgeDeliveredUnobserved, from any
+			// runtime). Delivery is proven, so this must ack like a success,
+			// not run through failedQueuedNudge's attempt-counting/dead-letter
+			// path — that would re-inject the same reminder on the next pass.
 			stampLastNudgeDeliveredAt(deliverySessFront, target.sessionID, time.Now())
 			ackErr := ackQueuedNudgesWithOutcome(target.cityPath, queuedNudgeIDs(items), "injected_unobserved", "", "provider-nudge-return")
 			return true, errors.Join(bookkeepErr, ackErr)

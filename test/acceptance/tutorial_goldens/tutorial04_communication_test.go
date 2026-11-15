@@ -275,7 +275,9 @@ func TestTutorial04Communication(t *testing.T) {
 		ws.noteDiagnostic("final mayor logs:\n%s", mayorLogs)
 	}
 	if tutorialMailID != "" {
-		if mailBead, err := ws.runShell("bd show "+tutorialMailID+" --json", ""); err == nil {
+		// gc bd show answers a split city's mail id (gcg-) from the
+		// infrastructure store, which raw bd does not read.
+		if mailBead, err := ws.runShell("gc bd show "+tutorialMailID+" --json", ""); err == nil {
 			ws.noteDiagnostic("tutorial mail bead:\n%s", mailBead)
 		}
 	}

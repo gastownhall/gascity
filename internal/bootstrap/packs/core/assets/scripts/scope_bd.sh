@@ -28,6 +28,10 @@ SCOPE_LAST_ERROR=""
 # (a file- or exec-backed store): there is nothing for these orders to do
 # there, which is not a failure.
 SCOPE_NOT_BD=0
+# SCOPE_SQL_UNSUPPORTED is 1 when the scope's bd store is reachable but bd
+# refuses its sql verb there (a store in bd's embedded mode). Selections that need
+# SQL cannot run against it, which is a property of the store, not a failure.
+SCOPE_SQL_UNSUPPORTED=0
 
 # core_rig_names prints one configured rig name per line. Suspended rigs are
 # left out: gc does not touch a suspended scope, because any bd read restarts
@@ -107,6 +111,7 @@ scope_resolve_db() {
     SCOPE_DB=""
     SCOPE_LAST_ERROR=""
     SCOPE_NOT_BD=0
+    SCOPE_SQL_UNSUPPORTED=0
     local err_file
     err_file=$(mktemp)
     if ! out=$(scope_sql_read csv "SELECT DATABASE()" 2>"$err_file"); then
@@ -115,6 +120,7 @@ scope_resolve_db() {
         SCOPE_LAST_ERROR="$out"
         case "$out" in
             *"only supported for bd-backed beads providers"*) SCOPE_NOT_BD=1 ;;
+            *"sql' is not yet supported in embedded mode"*) SCOPE_SQL_UNSUPPORTED=1 ;;
         esac
         return 1
     fi

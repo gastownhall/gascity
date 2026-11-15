@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"maps"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -21,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/lanesubmit"
+	"github.com/gastownhall/gascity/internal/storeref"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -196,32 +196,42 @@ func (s *Server) reassignContinuityIneligibleNamedSessionState(ctx context.Conte
 
 // handOffRetiredNamedSessionState moves what each retired row still holds to
 // replacementID: its open work in every store that can hold it
-// (retiredSessionWorkStores), through moveWork, its waits, and its
+// (retiredSessionSweep), through moveWork, its waits, and its
 // external-message bindings and participants. Every step runs whatever an
-// earlier one did, and the failures are joined. A store that cannot be read (a
-// rig store that failed to open answers every read with an error until the
-// controller reopens its stores) must not keep the binding's graph steps, the
-// waits or the bindings on an id no session answers to; what that store holds
-// moves on a later materializing resolve of the identity
+// earlier one did, and the failures are joined: every sweep leg is visited
+// whatever another returned. A store that cannot be read (a rig store that
+// failed to open answers every read with an error until the controller
+// reopens its stores) must not keep the binding's graph steps, the waits or
+// the bindings on an id no session answers to; what that store holds moves
+// on a later materializing resolve of the identity
 // (handOffReleasedNamedSessionPredecessors).
-func (s *Server) handOffRetiredNamedSessionState(ctx context.Context, store beads.SessionStore, retired []session.Info, replacementID string, moveWork func(store beads.Store, oldID, newID string) error) error {
+func (s *Server) handOffRetiredNamedSessionState(ctx context.Context, store beads.SessionStore, retired []session.Info, replacementID string, moveWork func(store beads.ResidentStore, oldID, newID string) error) error {
 	if store == (beads.SessionStore{}) || strings.TrimSpace(replacementID) == "" || len(retired) == 0 {
 		return nil
 	}
 	now := time.Now().UTC()
-	workStores := s.retiredSessionWorkStores(store)
-	// The bindings and participants are messaging-class: they move in the
-	// city's messaging store, which is the sessions store on every topology
-	// the routes serve (one store unsplit, one binding split; typed-stores T6
-	// plan, R13). Reading Stores() again here, mid-request, is deliberate and
-	// benign: an epoch swapped since store was read serves the same database,
-	// so the bindings move in the store they live in either way. T7 threads
-	// the request's Stores through instead.
-	messaging := s.state.Stores().Mail()
+	// One epoch for the sweep's legs and the messaging store (t7b3-design.md
+	// Q7). The bindings and participants are messaging-class: they move in
+	// the city's messaging store, which is the sessions store on every
+	// topology the routes serve (one store unsplit, one binding split;
+	// typed-stores T6 plan, R13).
+	st := s.state.Stores()
+	sweep, sweepErr := st.Plan(retiredSessionSweep(st, s.loadCacheColdRigs()))
+	messaging := st.Mail()
 	var errs []error
+	if sweepErr != nil {
+		errs = append(errs, fmt.Errorf("planning the retired-session work sweep: %w", sweepErr))
+	}
 	for _, info := range retired {
-		for _, workStore := range workStores {
-			if err := moveWork(workStore, info.ID, replacementID); err != nil {
+		if sweepErr == nil {
+			// The visitor keeps each leg's error and returns nil, so every
+			// leg is swept whatever another returned.
+			if _, err := storeref.Sweep(sweep, func(_ storeref.TypedLeg, work beads.ResidentStore) error {
+				if err := moveWork(work, info.ID, replacementID); err != nil {
+					errs = append(errs, err)
+				}
+				return nil
+			}); err != nil {
 				errs = append(errs, err)
 			}
 		}
@@ -285,8 +295,9 @@ func releasedNamedSessionPredecessors(store beads.SessionStore, identity, canoni
 	return retired, nil
 }
 
-// retiredSessionWorkStores lists, once each, every store that can hold work
-// assigned to a session.
+// retiredSessionSweep is the federation of every store that can hold work
+// assigned to a session, over st (storeref.WorkSweep), with cold (the rigs
+// suspended by effective state, cacheColdRigNames) left unread.
 //
 // On a city that relocates nothing it is the sessions store alone — the one
 // store this sweep always read, exactly as before, rigs or no rigs.
@@ -297,48 +308,19 @@ func releasedNamedSessionPredecessors(store beads.SessionStore, identity, canoni
 // assigned to an id no session answers to (write-audit B7). Named-session work
 // is not pool-routed, so the orphan lane never rescues it. So a split city
 // sweeps the city work store, the store of every rig not suspended by effective
-// state, the graph store and the sessions store. A rig suspended by effective
-// state (cacheColdRigNames) is left untouched, as status and the active-bead
-// lookup leave it: it has no cache, and any read of its store restarts its
-// retired proxy and Dolt. A store it shares with a rig that is not suspended,
-// as in legacy shared-file mode, is swept through that rig. Its work moves on
-// the first materializing resolve of the identity after it resumes
-// (handOffReleasedNamedSessionPredecessors).
+// state, the graph store and the sessions store, each once. A rig suspended by
+// effective state is left untouched, as status and the active-bead lookup
+// leave it: it has no cache, and any read of its store restarts its retired
+// proxy and Dolt. It drops before the legs are deduped by store, so a store it
+// shares with a rig that is not suspended, as in legacy shared-file mode, is
+// swept through that rig. Its work moves on the first materializing resolve of
+// the identity after it resumes (handOffReleasedNamedSessionPredecessors).
 //
-// residency:allow — a write sweep over every store that can hold work assigned
-// to one session id, not a residency answer: each store is listed by assignee,
-// so a store that holds nothing for the id costs one query and changes nothing.
-func (s *Server) retiredSessionWorkStores(sessions beads.Store) []beads.Store {
-	if _, relocated := relocatedGraphStore(s.state); !relocated {
-		return []beads.Store{sessions} // residency:allow — a city that relocates nothing sweeps the one sessions store it always swept
-	}
-	var out []beads.Store
-	add := func(store beads.Store) {
-		if store == nil {
-			return
-		}
-		// SameStore, not ==: a class handle over a store already listed is
-		// that store, and sweeping it twice moves nothing more.
-		for _, listed := range out {
-			if beads.SameStore(listed, store) {
-				return
-			}
-		}
-		out = append(out, store)
-	}
-	add(s.state.CityBeadStore())
-	cold := s.loadCacheColdRigs()
-	stores := s.state.BeadStores() // residency:allow — the reassign sweep above: every store that can hold the retired session's work
-	// Cold names drop before add dedupes the stores, so a store a cold rig
-	// shares stays reachable through a rig that is not.
-	for _, rigName := range slices.Sorted(maps.Keys(stores)) {
-		if !cold[rigName] {
-			add(stores[rigName])
-		}
-	}
-	add(s.state.Stores().Graph().Store)
-	add(sessions)
-	return out
+// The leg set stays the work, graph and sessions stores (OD-T7e-3): no mail,
+// orders or nudges store holds assigned work.
+func retiredSessionSweep(st storeref.Stores, cold map[string]bool) storeref.WorkFederation {
+	skip, _ := coldRigRefs(st, cold)
+	return storeref.WorkFederation{Kind: storeref.WorkSweep, SuspendedRigs: storeref.WorkSkipsRigs, Skip: skip}
 }
 
 // retiredSessionWorkStatuses are the statuses of the work a retired session
@@ -357,8 +339,8 @@ var retiredSessionWorkStatuses = []string{"open", "in_progress"}
 // raw open, leaves it out (nativeListPushesRawOpen), so it stays assigned. It
 // does not count as held: a retired row holding only parked work would
 // otherwise pay the live read on every pass and move nothing.
-func reassignHeldOpenWorkAssignedToSession(store beads.Store, oldID, newID string) error {
-	if store == nil || strings.TrimSpace(oldID) == "" || strings.TrimSpace(newID) == "" {
+func reassignHeldOpenWorkAssignedToSession(store beads.ResidentStore, oldID, newID string) error {
+	if beads.IsNilStore(store) || strings.TrimSpace(oldID) == "" || strings.TrimSpace(newID) == "" {
 		return nil
 	}
 	for _, status := range retiredSessionWorkStatuses {
@@ -377,8 +359,11 @@ func reassignHeldOpenWorkAssignedToSession(store beads.Store, oldID, newID strin
 	return nil
 }
 
-func reassignOpenWorkAssignedToSession(store beads.Store, oldID, newID string) error {
-	if store == nil || strings.TrimSpace(oldID) == "" || strings.TrimSpace(newID) == "" {
+// reassignOpenWorkAssignedToSession moves the open and in-progress work store
+// holds for oldID to newID, reading it live, through the sweep leg's writable
+// handle: its reads carry the leg's role, its writes go to the leg's store.
+func reassignOpenWorkAssignedToSession(store beads.ResidentStore, oldID, newID string) error {
+	if beads.IsNilStore(store) || strings.TrimSpace(oldID) == "" || strings.TrimSpace(newID) == "" {
 		return nil
 	}
 	for _, status := range retiredSessionWorkStatuses {

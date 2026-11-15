@@ -29,18 +29,7 @@ import (
 
 func freeLoopbackPort(t *testing.T) string {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
-	defer func() {
-		_ = listener.Close()
-	}()
-	addr, ok := listener.Addr().(*net.TCPAddr)
-	if !ok {
-		t.Fatalf("listener addr = %T, want *net.TCPAddr", listener.Addr())
-	}
-	return strconv.Itoa(addr.Port)
+	return strconv.Itoa(reserveRandomTCPPort(t))
 }
 
 func setScopedBeadsProviderForTest(t *testing.T, scopeRoot, provider string) {

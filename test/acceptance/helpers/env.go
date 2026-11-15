@@ -283,7 +283,8 @@ func (e *Env) homeIsIsolated() bool {
 // returning the Env for chaining. It is for the tiers that drive a real
 // provider CLI authenticated through that home (tier C, tutorial goldens,
 // worker inference); those runs are not hermetic, and no Bazel CI lane runs
-// them. bd and dolt children still get the tool home.
+// them. bd and dolt children still get the tool home, unless the tier hands
+// gc the real bd again on a CI runner (WithRealBD).
 func (e *Env) WithHostHome() *Env {
 	home, err := os.UserHomeDir()
 	if err != nil || strings.TrimSpace(home) == "" {
@@ -315,15 +316,17 @@ func (e *Env) WithHostHome() *Env {
 // operator's home out of reach only because NewEnv isolated gc's HOME and
 // pinned bd's shared-server mode and metrics off, so it panics on an Env whose
 // gc has any other HOME, and leaving that HOME (WithHostHome, With("HOME"),
-// Without("HOME")) drops back to the wrapper. A failed bd init also no longer
-// prints its dolt logs (ParseBDInitDiagnostics); a test that needs them calls
-// WithWrappedBD.
+// Without("HOME")) drops back to the wrapper. The exception is a CI runner
+// (HostHomeIsDisposable), whose home is discarded with it: there a host-home
+// tier that drives a split city calls WithRealBD again after WithHostHome. A
+// failed bd init also no longer prints its dolt logs (ParseBDInitDiagnostics);
+// a test that needs them calls WithWrappedBD.
 func (e *Env) WithRealBD(bdPath string) *Env {
 	if !filepath.IsAbs(bdPath) {
 		panic(fmt.Sprintf("acceptance: WithRealBD needs an absolute bd path, got %q (gc ignores a relative BD_BIN)", bdPath))
 	}
-	if !e.homeIsIsolated() {
-		panic(fmt.Sprintf("acceptance: WithRealBD on an Env whose gc HOME %q is not NewEnv's isolated home: an unwrapped bd would resolve user-level state there", e.vars["HOME"]))
+	if !e.homeIsIsolated() && !HostHomeIsDisposable() {
+		panic(fmt.Sprintf("acceptance: WithRealBD on an Env whose gc HOME %q is not NewEnv's isolated home, off a CI runner: an unwrapped bd would resolve user-level state there", e.vars["HOME"]))
 	}
 	dir, err := linkRealBD(filepath.Join(e.vars["GC_HOME"], realBDDirName), bdPath)
 	if err != nil {
