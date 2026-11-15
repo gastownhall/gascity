@@ -344,11 +344,18 @@ func TestHookClaimWorktreeFailureReleasesClaim(t *testing.T) {
 				}
 				return p.provision(b, opts, ops, dir, stderr)
 			}
-			ops.StampWorkMeta = func(context.Context, string, []string, string, string, map[string]string) error {
-				if failure != "publication" {
-					t.Fatal("unexpected metadata publication after provisioning failure")
+			// Publication runs before staging, so the staging case publishes
+			// complete evidence and only the publication case fails here.
+			var published map[string]string
+			ops.StampWorkMeta = func(_ context.Context, _ string, _ []string, _ string, _ string, patch map[string]string) error {
+				if failure == "publication" {
+					return errors.New("publication unavailable")
 				}
-				return errors.New("publication unavailable")
+				if failure == "checkout" {
+					t.Fatal("unexpected metadata publication after checkout failure")
+				}
+				published = maps.Clone(patch)
+				return nil
 			}
 			ops.Release = func(_ context.Context, dir string, env []string, id, assignee string) (bool, error) {
 				if dir != repo || hookClaimEnvValue(env, "BEADS_DIR") != "claim-store" {
@@ -375,10 +382,58 @@ func TestHookClaimWorktreeFailureReleasesClaim(t *testing.T) {
 			if len(rec.claimReleased) != 1 || len(rec.stepsStarted) != 0 {
 				t.Fatalf("lifecycle after failed provision: released=%v started=%v", rec.claimReleased, rec.stepsStarted)
 			}
-			if failure != "checkout" {
-				if _, err := os.Stat(filepath.Join(p.root, held.ID, ".git")); err != nil {
-					t.Fatalf("test did not fail after worktree creation: %v", err)
+			wtPath := filepath.Join(p.root, held.ID)
+			switch failure {
+			case "publication":
+				// The unpublished worktree was clean, so it was rolled back:
+				// no orphan blocks a later claimer with a different owner.
+				if _, err := os.Stat(wtPath); !os.IsNotExist(err) {
+					t.Fatalf("unpublished worktree %q survived failed publication (err=%v)", wtPath, err)
 				}
+				if got := testutil.RunGit(t, repo, "branch", "--list", "gc/rig/work-1"); strings.TrimSpace(got) != "" {
+					t.Fatalf("attempt-created branch survived failed publication: %q", got)
+				}
+			case "staging":
+				if _, err := os.Stat(filepath.Join(wtPath, ".git")); err != nil {
+					t.Fatalf("published worktree missing after staging failure: %v", err)
+				}
+				for _, key := range []string{
+					beadmeta.WorkDirMetadataKey,
+					beadmeta.LegacyWorkDirMetadataKey,
+					beadmeta.WorkBranchMetadataKey,
+					beadmeta.RootStoreRefMetadataKey,
+					beadmeta.WorktreeRepoMetadataKey,
+					beadmeta.WorktreeRootMetadataKey,
+					beadmeta.WorktreeBaseRefMetadataKey,
+					beadmeta.WorktreeBaseSHAMetadataKey,
+					beadmeta.WorktreeCreatorMetadataKey,
+					beadmeta.WorktreeOwnerMetadataKey,
+					beadmeta.WorktreeGenerationMetadataKey,
+					beadmeta.WorktreeLifecycleMetadataKey,
+				} {
+					if strings.TrimSpace(published[key]) == "" {
+						t.Fatalf("published patch missing %s: %#v", key, published)
+					}
+				}
+				t.Run("reclaim-by-other-owner-reuses-evidence", func(t *testing.T) {
+					other := p
+					other.owner = "other"
+					other.runtimeConfig.OverlayDir = ""
+					reuseOps := hookClaimOps{
+						StampWorkMeta: func(context.Context, string, []string, string, string, map[string]string) error {
+							t.Fatal("StampWorkMeta was called while reusing published evidence")
+							return nil
+						},
+					}
+					bead := beads.Bead{ID: held.ID, Metadata: maps.Clone(published)}
+					provisioned, _, err := other.provision(bead, hookClaimOptions{Assignee: "other", StoreRef: "rig:rig"}, reuseOps, repo, io.Discard)
+					if err != nil {
+						t.Fatalf("re-claim by another owner: %v", err)
+					}
+					if provisioned.WorkDir != published[beadmeta.WorkDirMetadataKey] {
+						t.Fatalf("re-claim WorkDir = %q, want %q", provisioned.WorkDir, published[beadmeta.WorkDirMetadataKey])
+					}
+				})
 			}
 		})
 	}

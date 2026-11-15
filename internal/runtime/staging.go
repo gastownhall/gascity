@@ -176,11 +176,8 @@ func WithPreserve(preserve PreserveFunc) StageOption {
 }
 
 // WithSkipTrackedOverlays makes provider-overlay staging leave files alone when
-// the destination worktree tracks their paths. The default is platform-specific:
-// Windows enables this protection for every provider overlay staging call
-// because NTFS case folding can otherwise clobber repository-owned files; other
-// platforms opt in for managed worker worktrees while preserving historical
-// session/home staging behavior.
+// the destination worktree tracks their paths. Non-Windows platforms default
+// to off (staging_tracked_other.go); managed worker worktrees opt in.
 func WithSkipTrackedOverlays() StageOption {
 	return func(c *stageConfig) {
 		c.skipTracked = true

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -132,19 +133,25 @@ func (p hookClaimWorktreeProvisioner) provision(bead beads.Bead, opts hookClaimO
 	if err != nil {
 		return hookProvisionedWorktree{}, bead, err
 	}
-	stageConfig := p.runtimeConfig
-	stageConfig.WorkDir = report.Path
-	if err := runtime.StageSessionWorkDirWithWarnings(stageConfig, stderr, runtime.WithSkipTrackedOverlays()); err != nil {
-		return hookProvisionedWorktree{}, bead, fmt.Errorf("staging overlays into %q: %w", report.Path, err)
-	}
+	// Publication comes before staging. A failed publication leaves the new
+	// worktree clean, so RollbackAttempt (which refuses dirty trees) can remove
+	// it; once staging has written overlay files the tree is dirty and can no
+	// longer be rolled back. Published evidence is reusable by any claimer, so
+	// a staging failure after publication is recovered by the next claim
+	// through reusePublishedEvidence (Verify + restage).
 	patch, err := hookWorktreeMetadataPatch(spec, report)
 	if err != nil {
-		return hookProvisionedWorktree{}, bead, err
+		return hookProvisionedWorktree{}, bead, rollbackCreatedHookWorktree(spec, report, err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 	defer cancel()
 	if err := ops.StampWorkMeta(ctx, dir, opts.Env, beadID, opts.Assignee, patch); err != nil {
-		return hookProvisionedWorktree{}, bead, fmt.Errorf("publishing worktree metadata: %w", err)
+		return hookProvisionedWorktree{}, bead, rollbackCreatedHookWorktree(spec, report, fmt.Errorf("publishing worktree metadata: %w", err))
+	}
+	stageConfig := p.runtimeConfig
+	stageConfig.WorkDir = report.Path
+	if err := runtime.StageSessionWorkDirWithWarnings(stageConfig, stderr, runtime.WithSkipTrackedOverlays()); err != nil {
+		return hookProvisionedWorktree{}, bead, fmt.Errorf("staging overlays into %q: %w", report.Path, err)
 	}
 	updated := bead
 	if updated.Metadata == nil {
@@ -154,6 +161,20 @@ func (p hookClaimWorktreeProvisioner) provision(bead beads.Bead, opts hookClaimO
 	}
 	maps.Copy(updated.Metadata, patch)
 	return hookProvisionedWorktree{WorkDir: report.Path, WorkBranch: report.Branch}, updated, nil
+}
+
+// rollbackCreatedHookWorktree removes a worktree this provision attempt
+// created before its evidence was published, so a later claimer with a
+// different owner is not blocked by an unpublished orphan. A reused worktree
+// is left alone. A failed rollback is joined to the original error.
+func rollbackCreatedHookWorktree(spec worktree.Spec, report worktree.Report, origErr error) error {
+	if !report.Created {
+		return origErr
+	}
+	if rbErr := worktree.RollbackAttempt(spec, report); rbErr != nil {
+		return errors.Join(origErr, fmt.Errorf("rolling back created worktree: %w", rbErr))
+	}
+	return origErr
 }
 
 func (p hookClaimWorktreeProvisioner) claimStoreRef(opts hookClaimOptions, dir string) string {
