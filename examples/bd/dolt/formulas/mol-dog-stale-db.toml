@@ -423,7 +423,9 @@ fi
 # every other fail-open path.
 gc bd update "$WORK_BEAD" --set-metadata gc.outcome=pass
 CLOSE_RC=0
-CLOSE_OUT=$(gc bd close "$WORK_BEAD" --reason "Stale DB scan complete (orphans=${ORPHAN_TOTAL}, applied=${APPLIED}, escalated=${ESCALATED})" 2>&1) || CLOSE_RC=$?
+CLOSE_FILE="$TMP_DIR/close.out"
+gc bd close "$WORK_BEAD" --reason "Stale DB scan complete (orphans=${ORPHAN_TOTAL}, applied=${APPLIED}, escalated=${ESCALATED})" > "$CLOSE_FILE" 2>&1 || CLOSE_RC=$?
+CLOSE_OUT=$(cat "$CLOSE_FILE")
 if [ "$CLOSE_RC" -ne 0 ]; then
   [ -z "$CLOSE_OUT" ] || printf '%s\n' "$CLOSE_OUT" >&2
   run_or_warn "withdraw pass outcome" gc bd update "$WORK_BEAD" --unset-metadata gc.outcome
