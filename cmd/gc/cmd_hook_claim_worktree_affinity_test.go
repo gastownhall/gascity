@@ -1242,7 +1242,7 @@ func TestPreassignHookContinuationGroupSkipsSiblingsBoundToAnotherWorktree(t *te
 					return nil
 				},
 			}
-			assigned, err := preassignHookContinuationGroup(claimed, affinitySeatOpts(tc.seatDir), ops, ".")
+			assigned, _, err := preassignHookContinuationGroup(claimed, affinitySeatOpts(tc.seatDir), ops, ".")
 			if err != nil {
 				t.Fatalf("preassignHookContinuationGroup: %v", err)
 			}

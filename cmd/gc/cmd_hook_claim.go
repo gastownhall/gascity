@@ -1668,7 +1668,7 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	}
 	stampHookSessionCurrentClaim(bead, opts, ops, stderr)
 	publishHookClaimRunMap(bead, opts, ops, stderr)
-	assigned, err := preassignHookContinuationGroup(bead, opts, ops, dir)
+	assigned, pinned, err := preassignHookContinuationGroup(bead, opts, ops, dir)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook --claim: preassigning continuation group for %s: %v\n", bead.ID, err) //nolint:errcheck
 		return 1
@@ -1705,13 +1705,21 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	// Only after the result was delivered: an undelivered claim is released
 	// above, and a nudge for a claim this session no longer holds would wake it
 	// for work it does not own.
-	// The gate is "a workflow root was delivered AND this claim freshly pinned
-	// at least one continuation sibling to this session". gc.kind=workflow has
-	// several writers (formula compile, API convoy dispatch, orders feed), and
-	// continuation groups are formula-declared (internal/graphroute), so the
-	// len(assigned) conjunct is what scopes this: the nudge only ever reaches a
-	// session that now owns pinned sibling work.
-	if len(assigned) > 0 && bead.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow {
+	// The gate is "a workflow root was delivered AND this session now owns
+	// pinned continuation sibling work". gc.kind=workflow has several writers
+	// (formula compile, API convoy dispatch, orders feed), and continuation
+	// groups are formula-declared (internal/graphroute), so the sibling
+	// conjunct is what scopes this: the nudge only ever reaches a session that
+	// owns pinned sibling work. Owning it means either this claim freshly pinned
+	// a sibling (assigned), or this claim was minted and the open siblings were
+	// already pinned to this same assignee (pinned): an earlier claim of the
+	// root pinned them, then its result was not delivered and the claim was
+	// unwound, so that claim never nudged and this delivered re-claim is the
+	// first that can. An adopted claim (existing_assignment) never takes the
+	// second branch: its first delivery already nudged. If the two ever
+	// disagree, one extra nudge costs a no-op hook re-entry and a missed one
+	// strands the pinned work, so the gate errs toward the extra nudge.
+	if bead.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindWorkflow && (len(assigned) > 0 || (minted && pinned > 0)) {
 		ops.EnqueueContinuationNudge(opts.Assignee, bead.ID, stderr)
 	}
 	return 0
@@ -2209,17 +2217,21 @@ func writeHookClaimDrain(label, reason string, jsonOut, drainAck bool, drainAckF
 	return 1
 }
 
-func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string) ([]string, error) {
+// preassignHookContinuationGroup pins the open, unassigned siblings of bead's
+// continuation group to this seat and returns their IDs (assigned). pinned
+// counts the other open, non-held siblings that were already pinned to this
+// same assignee, which the nudge gate reads after an unwound claim.
+func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string) (assigned []string, pinned int, err error) {
 	rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 	group := strings.TrimSpace(bead.Metadata[beadmeta.ContinuationGroupMetadataKey])
 	if rootID == "" || group == "" {
-		return nil, nil
+		return nil, 0, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 	defer cancel()
 	siblings, err := ops.ListContinuation(ctx, dir, opts.Env, rootID, group)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	pinAssignee := continuationPinAssignee(opts)
 	// A pin is a claim made on the sibling's behalf, so it answers to the same
@@ -2249,8 +2261,16 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 		teardown, err := molecule.IsTeardownTailMember(workflowStore, sibling)
 		return err != nil || !teardown
 	}
-	assigned := make([]string, 0, len(siblings))
+	assigned = make([]string, 0, len(siblings))
 	for _, sibling := range siblings {
+		if strings.TrimSpace(sibling.ID) != "" &&
+			sibling.ID != bead.ID &&
+			strings.TrimSpace(sibling.Assignee) == pinAssignee &&
+			strings.EqualFold(strings.TrimSpace(sibling.Status), "open") &&
+			!beadmeta.HasDispatchHold(sibling.Labels) {
+			pinned++
+			continue
+		}
 		if strings.TrimSpace(sibling.ID) == "" ||
 			sibling.ID == bead.ID ||
 			strings.TrimSpace(sibling.Assignee) != "" ||
@@ -2270,11 +2290,11 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 			continue
 		}
 		if err := ops.AssignContinuation(ctx, dir, opts.Env, sibling.ID, pinAssignee); err != nil {
-			return assigned, fmt.Errorf("assigning %s: %w", sibling.ID, err)
+			return assigned, pinned, fmt.Errorf("assigning %s: %w", sibling.ID, err)
 		}
 		assigned = append(assigned, sibling.ID)
 	}
-	return assigned, nil
+	return assigned, pinned, nil
 }
 
 // retireDoneWorkflowCandidates drops every candidate this session would serve
@@ -4192,10 +4212,11 @@ func emitClaimReclaimedStale(rec events.Recorder, beadID, previousOwner, newAssi
 // pool agent re-enters its hook after claiming the workflow root and propels
 // the root → step-1 transition without an external gc session nudge. The city
 // path is resolved from the environment so this call is self-contained — the
-// same pattern as hookEmitClaimRejected / openCityRecorder. Best-effort: any
-// error is swallowed so a nudge-queue failure never blocks the claim, and a
-// lane notice the op journal refuses is only warned of on stderr
-// (continuationNudgeEnqueueAt).
+// same pattern as hookEmitClaimRejected / openCityRecorder. Best-effort for
+// the claim, not silent: the result is already delivered, so a city that does
+// not resolve, a config that does not load, a queue that does not persist and
+// a lane notice the op journal refuses are each warned of once on stderr, with
+// the root and the cause, and never fail the claim (continuationNudgeEnqueueAt).
 // ACP sessions: maybeStartNudgePoller is a no-op for acp transport; configure
 // daemon.nudge_dispatcher = "supervisor" for reliable queued delivery.
 // On a worker site it queues nothing and starts no poller: the box's nudge
@@ -4205,6 +4226,7 @@ func emitClaimReclaimedStale(rec events.Recorder, beadID, previousOwner, newAssi
 func hookContinuationNudgeEnqueue(assignee, rootID string, stderr io.Writer) {
 	cityPath, err := resolveCity()
 	if err != nil {
+		warnContinuationRefused(stderr, rootID, fmt.Errorf("resolving the city: %w", err))
 		return
 	}
 	continuationNudgeEnqueueAt(cityPath, assignee, rootID, stderr)
@@ -4226,15 +4248,30 @@ const hookClaimContinuationText = "Work slung. Check your hook."
 // generation and delivered only while it runs (live_only), as the queue item
 // was. A notice the lane refuses, and a nudge store or session provider that
 // does not open, are warned of on stderr, and nothing is queued; a session
-// with no row, or one no lane serves, takes the queue path.
+// with no row, or one no lane serves, takes the queue path. A city config that
+// does not load is warned of the same way and queues nothing: the config picks
+// the nudge dispatcher and the lane rules, so guessing the legacy poller mode
+// without it could start a poller the city does not want. A queue write that
+// fails is warned of, and starts no poller.
+//
+// The controller poke after a queued item is the one failure left unreported,
+// on purpose: it only shortens the wait for the next tick, the item is already
+// durable, and no running controller or supervisor is a normal state of a city
+// (the poller or the supervisor dispatcher delivers either way). A warning on
+// every claim for a stopped controller would bury the warnings that mean a
+// nudge was lost.
 func continuationNudgeEnqueueAt(cityPath, assignee, rootID string, stderr io.Writer) {
 	if onWorkerSite(cityPath) {
 		return
 	}
 	// Load cfg so maybeStartNudgePoller can skip the sidecar when the city
-	// uses daemon.nudge_dispatcher = "supervisor". A nil cfg (load error)
-	// falls through to legacy mode with no behavior change.
-	cfg, _ := loadCityConfig(cityPath, io.Discard)
+	// uses daemon.nudge_dispatcher = "supervisor". Without it the dispatcher
+	// mode and lane rules are unknown, so a load error stops here.
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil {
+		warnContinuationRefused(stderr, rootID, fmt.Errorf("loading the city config: %w", err))
+		return
+	}
 	target := nudgeTarget{
 		cityPath:    cityPath,
 		sessionName: assignee,
@@ -4278,10 +4315,11 @@ func continuationNudgeEnqueueAt(cityPath, assignee, rootID string, stderr io.Wri
 	// session ID, agent identity, and session name for the session.
 	item := newQueuedNudgeWithOptions(assignee, hookClaimContinuationText, "hook-claim-continuation", time.Now(), queuedNudgeOptionsFromTarget(target))
 	if err := enqueueQueuedNudgeWithStore(cityPath, store, item); err != nil {
+		warnContinuationRefused(stderr, rootID, fmt.Errorf("queueing the nudge: %w", err))
 		return
 	}
 	maybeStartNudgePoller(target)
-	_ = pokeController(cityPath)
+	_ = pokeController(cityPath) // best-effort wake; see the poke policy above
 }
 
 // continuationLaneNoticeIn is continuationLaneNotice under the city's session
