@@ -3090,7 +3090,7 @@ func TestDeliverMailNotifyRegisteredCitySupervisorDownRequestsWake(t *testing.T)
 		t.Fatalf("loadCityConfig: %v", err)
 	}
 	nudges := openNudgeBeadStore(cityDir)
-	target, err := resolveNudgeTargetInStore(cityDir, cfg, nudges, "mayor", false, nil)
+	target, err := resolveNudgeTargetInStore(cityDir, cfg, nudges, "mayor", false, false, nil)
 	if err != nil {
 		t.Fatalf("resolveNudgeTargetInStore: %v", err)
 	}
