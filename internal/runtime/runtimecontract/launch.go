@@ -148,3 +148,52 @@ func probeLaunchFreshOnly(ctx context.Context, r *runner, hs runtime.ProtocolInf
 	}
 	return StatusPass, "a fresh_only launch starts an agent in a provisioned box and exits 73 on a running one"
 }
+
+// launchIdentity is the identity the identity probe writes as gc writes a
+// launch's (exec's publishLaunchIdentity), counters before the token.
+var launchIdentity = []struct{ key, value string }{
+	{runtime.RuntimeEpochEnv, "7"},
+	{runtime.ContinuationEpochEnv, "3"},
+	{runtime.InstanceTokenEnv, "gc-rpp-launch-identity"},
+}
+
+// probeLaunchIdentity: a pack that un-welds start keeps the launch identity
+// gc writes after the launch. Its first turn is queued bound to that
+// identity and judged and fenced by get-meta reads of it, so after
+// provision (and launch, under proc.launch, whose own env carries another
+// token) get-meta answers each key as set-meta stored it.
+func probeLaunchIdentity(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
+	if !hs.SeparableLaunch() {
+		return StatusSkip, "start is welded: the handshake does not un-weld it (proc.provision with proc.launch, or with proc.exec under the default carrier)"
+	}
+	name := r.nextName()
+	defer r.stop(ctx, name)
+	if hs.Has(runtime.ProtocolCapabilityLaunch) {
+		cfg := launchConfig{Env: map[string]string{runtime.InstanceTokenEnv: "gc-rpp-launch-own-token"}}
+		if status, detail := provisionAndLaunch(ctx, r, name, cfg); status != StatusPass {
+			return status, detail
+		}
+	} else {
+		switch prov := r.provision(ctx, name, false); {
+		case prov.unsupported:
+			return StatusFail, "provision returned exit 2 although the handshake declares proc.provision"
+		case prov.err != nil:
+			return StatusFail, "provision failed: " + prov.err.Error()
+		}
+	}
+	for _, id := range launchIdentity {
+		if err := r.setMeta(ctx, name, id.key, id.value); err != nil {
+			return StatusFail, fmt.Sprintf("set-meta %s after the launch: %v; a pack that un-welds start keeps the identity gc writes", id.key, err)
+		}
+	}
+	for _, id := range launchIdentity {
+		got, err := r.getMeta(ctx, name, id.key)
+		switch {
+		case err != nil:
+			return StatusFail, fmt.Sprintf("get-meta %s after the launch: %v; gc judges the queued first turn by it", id.key, err)
+		case got != id.value:
+			return StatusFail, fmt.Sprintf("get-meta %s after the launch = %q, want %q as set-meta stored it", id.key, got, id.value)
+		}
+	}
+	return StatusPass, "get-meta answers the launch identity set-meta stored"
+}

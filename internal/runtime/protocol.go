@@ -251,6 +251,21 @@ func (pi ProtocolInfo) SharesHostFS() bool {
 	return pi.DeclaresLocal() && pi.Has(ProtocolCapabilityFSHost)
 }
 
+// SeparableLaunch reports whether the handshake un-welds start: it declared
+// [ProtocolCapabilityProvision] and a way for the controller to launch the
+// agent in the box, the `launch` op ([ProtocolCapabilityLaunch]) or the
+// `exec` op ([ProtocolCapabilityConnectionExec]) driven over the default tmux
+// carrier, which [ProtocolCapabilityCarrierOps] rules out. Such a pack's
+// first turn is delivered from the queue, bound to the launch identity gc
+// records with set-meta, so its metadata ops are required.
+func (pi ProtocolInfo) SeparableLaunch() bool {
+	if !pi.Has(ProtocolCapabilityProvision) {
+		return false
+	}
+	return pi.Has(ProtocolCapabilityLaunch) ||
+		(pi.Has(ProtocolCapabilityConnectionExec) && !pi.Has(ProtocolCapabilityCarrierOps))
+}
+
 // Has reports whether the handshake declared the given capability.
 func (pi ProtocolInfo) Has(capability string) bool {
 	for _, c := range pi.Capabilities {

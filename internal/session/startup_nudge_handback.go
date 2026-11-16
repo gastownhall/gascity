@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"log"
 	"time"
 
@@ -14,10 +15,19 @@ import (
 // of session name binds to (nudgequeue.StartupTurnReference): the id of the
 // launch the runtime reports running (runtime.ReadLaunchID, the read a claim
 // judges it by), else of startToken, the instance token the start carried,
-// else none, and the turn is queued as a plain submit.
+// else none, and the turn is queued as a plain submit. A runtime that keeps
+// no session metadata (runtime.ErrMetaUnsupported) binds none either: no
+// claim could ever read its launch, so a bound turn would only be held, and
+// the session's sends with it, until it expired.
 func StartupTurnLaunchID(sp runtime.Provider, name, startToken string) string {
 	if id, ok := runtime.ReadLaunchID(sp, name); ok {
 		return id
+	}
+	if sp != nil && name != "" {
+		if _, err := sp.GetMeta(name, runtime.InstanceTokenEnv); errors.Is(err, runtime.ErrMetaUnsupported) {
+			log.Printf("session: %q: the runtime keeps no session metadata, so its startup turn is queued unbound to its launch: %v", name, err)
+			return ""
+		}
 	}
 	return runtime.LaunchID(startToken)
 }

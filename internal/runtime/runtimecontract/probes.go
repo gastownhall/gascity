@@ -35,6 +35,7 @@ var probes = map[Code]probe{
 	ReqProvisionLaunchStartsAgent: probeLaunchStartsAgent,
 	ReqProvisionLaunchReplaces:    probeLaunchReplaces,
 	ReqProvisionLaunchFreshOnly:   probeLaunchFreshOnly,
+	ReqProvisionLaunchIdentity:    probeLaunchIdentity,
 
 	ReqObserveDeclaredOpsRespond:   probeObserveDeclaredOps,
 	ReqObserveAbsentNeverStarted:   probeObserveAbsentNeverStarted,

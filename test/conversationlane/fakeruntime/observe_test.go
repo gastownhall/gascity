@@ -46,6 +46,8 @@ func TestObserveProfileIsConformant(t *testing.T) {
 		// The profile does not declare proc.launch.
 		runtimecontract.ReqProvisionLaunchStartsAgent: true, runtimecontract.ReqProvisionLaunchReplaces: true,
 		runtimecontract.ReqProvisionLaunchFreshOnly: true,
+		// Nor proc.provision: its start is welded.
+		runtimecontract.ReqProvisionLaunchIdentity:  true,
 		runtimecontract.ReqObserveFaultsReadUnknown: true, runtimecontract.ReqObserveCityScoped: true,
 		runtimecontract.ReqObserveInventoryHasActivity:  true,
 		runtimecontract.ReqDiscoveryFailureIsNotAbsence: true,

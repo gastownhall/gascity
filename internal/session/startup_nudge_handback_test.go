@@ -311,6 +311,25 @@ func TestStartupTurnLaunchIDReadsTheRuntimeFirst(t *testing.T) {
 	}
 }
 
+// noMetaProvider is a Fake that keeps no session metadata: every GetMeta
+// answers runtime.ErrMetaUnsupported.
+type noMetaProvider struct{ *runtime.Fake }
+
+func (noMetaProvider) GetMeta(string, string) (string, error) {
+	return "", runtime.ErrMetaUnsupported
+}
+
+// Kills a turn bound to the start's token on a runtime that keeps no session
+// metadata (an exec pack whose get-meta answers exit 2): no claim can ever
+// read its launch, so it held the turn, and every send behind it, until the
+// turn expired. Such a turn is queued as a plain submit.
+func TestStartupTurnLaunchIDWithoutMetadataIsUnbound(t *testing.T) {
+	sp := noMetaProvider{runtime.NewFake()}
+	if got := StartupTurnLaunchID(sp, "s-1", "tok-start"); got != "" {
+		t.Fatalf("on a runtime without metadata = %q, want no launch: the turn is a plain submit", got)
+	}
+}
+
 // Kills a one-shot initial message carried inside a turn a claim may drop,
 // or split from text it was not composed into.
 func TestStartupHandbackItemsSplitTheInitialMessage(t *testing.T) {

@@ -156,6 +156,15 @@ const (
 	ReqProvisionLaunchReplaces    Code = "RPP-PROVISION-003"
 	ReqProvisionLaunchFreshOnly   Code = "RPP-PROVISION-004"
 
+	// A pack that un-welds start (proc.provision with proc.launch, or with
+	// proc.exec under the default carrier) has its first turn queued bound
+	// to the launch identity gc writes with set-meta after the launch, and
+	// judged and fenced by get-meta reads of it: after provision (and launch,
+	// under proc.launch), get-meta answers each identity key set-meta
+	// stored. Optional: SKIP unless the handshake un-welds start. Such a
+	// pack's meta group fails on exit 2 too, as under observe.v1.
+	ReqProvisionLaunchIdentity Code = "RPP-PROVISION-005"
+
 	// The observe group is the observe.v1 profile (PAR-EXEC): what a script
 	// declaring the observe.v1 capability promises reconciler v2. Every
 	// requirement is Optional (SKIP when observe.v1 is not declared); a
@@ -301,6 +310,7 @@ var catalog = []Requirement{
 	{ReqProvisionLaunchStartsAgent, GroupProvision, "after provision, launch starts the agent (is-running true) and types nothing, not even the nudge its config carries (declared proc.launch only)", true},
 	{ReqProvisionLaunchReplaces, GroupProvision, "launch without fresh_only on a running agent replaces it: observe shows the new launch's identity (declared proc.launch with observe.v1 only)", true},
 	{ReqProvisionLaunchFreshOnly, GroupProvision, "launch with fresh_only into the box provision just prepared starts the agent (is-running true), and on a running agent exits 73 (declared proc.launch only)", true},
+	{ReqProvisionLaunchIdentity, GroupProvision, "a pack that un-welds start keeps the launch identity gc writes: after provision (and launch under proc.launch), get-meta answers GC_RUNTIME_EPOCH, GC_CONTINUATION_EPOCH and GC_INSTANCE_TOKEN as set-meta stored them, never exit 2 (un-welded start only)", true},
 
 	{ReqObserveDeclaredOpsRespond, GroupObserve, "observe, inventory and kill-object answer (never exit 2) when observe.v1 is declared", true},
 	{ReqObserveAbsentNeverStarted, GroupObserve, "observe on a never-started name answers absent", true},
