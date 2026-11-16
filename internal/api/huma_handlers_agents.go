@@ -312,7 +312,7 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 				}
 			}
 
-			if running && provider == "claude" && canAttributeSession(a, ea.qualifiedName, cfg, s.state.CityPath()) {
+			if running && isClaudeFamilyProvider(provider, cfg) && canAttributeSession(a, ea.qualifiedName, cfg, s.state.CityPath()) {
 				s.enrichSessionMeta(&resp, a, ea.qualifiedName)
 			}
 			obs := observeProgram(program, resp.Activity)
@@ -457,7 +457,7 @@ func (s *Server) agentByName(ctx context.Context, name string) (*IndexOutput[age
 	}
 	resp.State = computeAgentState(suspended, quarantined, effectiveRunning, resp.ActiveBead, lastActivity, program)
 
-	if running && provider == "claude" && canAttributeSession(agentCfg, name, cfg, s.state.CityPath()) {
+	if running && isClaudeFamilyProvider(provider, cfg) && canAttributeSession(agentCfg, name, cfg, s.state.CityPath()) {
 		s.enrichSessionMeta(&resp, agentCfg, name)
 	}
 	obs := observeProgram(program, resp.Activity)

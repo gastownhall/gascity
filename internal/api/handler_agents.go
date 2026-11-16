@@ -707,10 +707,20 @@ func (s *Server) enrichSessionMeta(resp *agentResponse, agentCfg config.Agent, q
 	resp.Activity = meta.Activity
 }
 
+// isClaudeFamilyProvider reports whether a provider name resolves to the
+// claude built-in family, so a wrapped provider (base = "builtin:claude")
+// counts as claude. A name with no resolvable family reads as not claude.
+func isClaudeFamilyProvider(name string, cfg *config.City) bool {
+	if name == "" || cfg == nil {
+		return false
+	}
+	return config.BuiltinFamily(name, cfg.Providers) == "claude"
+}
+
 // canAttributeSession reports whether session file attribution is unambiguous
-// for the given agent in its rig. Returns false when multiple Claude agents
-// or multi-session instances share the same rig directory, since we can't
-// reliably determine which session file belongs to which agent.
+// for the given agent in its rig. Returns false when multiple Claude-family
+// agents or multi-session instances share the same rig directory, since we
+// can't reliably determine which session file belongs to which agent.
 func canAttributeSession(agentCfg config.Agent, qualifiedName string, cfg *config.City, cityPath string) bool {
 	// Multi-session agents derive per-instance workdirs from the qualified
 	// name, but the API only has the base config when attributing list rows.
@@ -724,8 +734,17 @@ func canAttributeSession(agentCfg config.Agent, qualifiedName string, cfg *confi
 		return false
 	}
 	count := 0
+	// The family lookup clones the built-in provider table on every call, so
+	// resolve each distinct provider name once per attribution check.
+	claudeFamily := make(map[string]bool)
 	for _, a := range cfg.Agents {
-		if agentProviderName(&a, cfg) == "claude" {
+		providerName := agentProviderName(&a, cfg)
+		isClaude, seen := claudeFamily[providerName]
+		if !seen {
+			isClaude = isClaudeFamilyProvider(providerName, cfg)
+			claudeFamily[providerName] = isClaude
+		}
+		if isClaude {
 			if isMultiSessionAgent(a) {
 				if multiSessionSharesWorkDir(cityPath, cityName, target, a, cfg.Rigs) {
 					return false
