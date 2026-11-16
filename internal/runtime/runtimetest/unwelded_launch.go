@@ -54,9 +54,20 @@ var unweldedRefusals = []runtime.InputOutcome{
 // handed-back turn through Nudge no earlier than its NotBefore, delivers it
 // once (QueueDeliversOnce); and a turn the runtime refuses is answered with
 // a typed refusal that types nothing, so the queue retries it and a later
-// send delivers it once (RefusedRetriedByQueue).
+// send delivers it once (RefusedRetriedByQueue); and the launch is
+// identified from the moment Start returns: the instance token and both
+// epochs its config carried are what [runtime.ReadLaunchID] and
+// [runtime.ReadInputFence] read, the reads the queue binds, judges and
+// fences the handed-back turn by, and a relaunch's replace them
+// (LaunchIdentified).
 func RunUnweldedLaunchContract(t *testing.T, f UnweldedLaunchFixture) {
 	t.Helper()
+	t.Run("UnweldedLaunch_LaunchIdentified", func(t *testing.T) {
+		sp, _, _ := f.New(t, "")
+		if err := checkLaunchIdentified(t, sp, f.Config(t, false)); err != nil {
+			t.Error(err)
+		}
+	})
 	t.Run("UnweldedLaunch_FirstTurnQueued", func(t *testing.T) {
 		sp, input, _ := f.New(t, "")
 		if err := checkFirstTurnQueued(t, sp, input, f.Config(t, false)); err != nil {
@@ -217,4 +228,57 @@ func checkRefusedRetriedByQueue(t *testing.T, sp runtime.Provider, input func(st
 		return fmt.Errorf("runtime contract 020: input %q holds the first turn %d times after the retry, want once", got, firstTurns(got))
 	}
 	return nil
+}
+
+// withLaunchIdentity is cfg carrying the identity of one launch: its
+// instance token and both epochs.
+func withLaunchIdentity(cfg runtime.Config, token string, generation, epoch int) runtime.Config {
+	env := make(map[string]string, len(cfg.Env)+3)
+	for k, v := range cfg.Env {
+		env[k] = v
+	}
+	env[runtime.InstanceTokenEnv] = token
+	env[runtime.RuntimeEpochEnv] = fmt.Sprint(generation)
+	env[runtime.ContinuationEpochEnv] = fmt.Sprint(epoch)
+	cfg.Env = env
+	return cfg
+}
+
+// wantLaunchIdentified reports how sp's reads of the contract session miss
+// the launch cfg started (after says when).
+func wantLaunchIdentified(sp runtime.Provider, cfg runtime.Config, after string) error {
+	token := cfg.Env[runtime.InstanceTokenEnv]
+	if id, ok := runtime.ReadLaunchID(sp, unweldedLaunchSession); !ok || id != runtime.LaunchID(token) {
+		return fmt.Errorf("runtime contract 020: ReadLaunchID %s = %q, %v; want this launch's %q: the queue holds a turn whose launch it cannot read, and drops one bound to the launch it reads", after, id, ok, runtime.LaunchID(token))
+	}
+	want, _ := runtime.InputFenceFromEnv(cfg.Env)
+	if got, ok := runtime.ReadInputFence(sp, unweldedLaunchSession); !ok || got.Digest() != want.Digest() {
+		return fmt.Errorf("runtime contract 020: ReadInputFence %s = %s, %v; want this launch's %s: the queue's pre-send read releases the turn on every pass, or fences it to another incarnation", after, got, ok, want)
+	}
+	return nil
+}
+
+// checkLaunchIdentified reports how sp breaks LaunchIdentified.
+func checkLaunchIdentified(t *testing.T, sp runtime.Provider, cfg runtime.Config) error {
+	first := withLaunchIdentity(cfg, "contract-020-first-launch", 3, 2)
+	if err := startUnwelded(t, sp, first); err != nil {
+		return fmt.Errorf("runtime contract 020: Start = %w, want nil", err)
+	}
+	if err := wantLaunchIdentified(sp, first, "after Start"); err != nil {
+		return err
+	}
+	if _, err := takeQueuedTurn(sp); err != nil {
+		return err
+	}
+	r, ok := sp.(runtime.RelaunchProvider)
+	if !ok {
+		return nil
+	}
+	second := withLaunchIdentity(cfg, "contract-020-second-launch", 4, 5)
+	second.Nudge = unweldedFirstTurn
+	if err := r.Relaunch(context.Background(), unweldedLaunchSession, second); err != nil {
+		return fmt.Errorf("runtime contract 020: Relaunch = %w, want nil", err)
+	}
+	runtime.TakeStartupNudgeHandback(sp, unweldedLaunchSession)
+	return wantLaunchIdentified(sp, second, "after a Relaunch")
 }

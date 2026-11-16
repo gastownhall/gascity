@@ -100,6 +100,9 @@ type unweldedFake struct {
 	untypedRefusal bool // refuses with an untyped error
 	refusalOK      bool // answers a refused nudge nil
 	failsStart     bool // fails Start while refusing input
+	noIdentity     bool // records no identity a get-meta reads
+	keepsIdentity  bool // a relaunch leaves the first launch's identity
+	noEpochs       bool // records the token but neither epoch
 
 	mu       sync.Mutex
 	accepted bool
@@ -122,6 +125,7 @@ func (f *unweldedFake) Start(ctx context.Context, name string, cfg runtime.Confi
 	if f.failsStart && f.refuse != "" {
 		return fmt.Errorf("first turn refused %s", f.refuse)
 	}
+	f.publishIdentity(name, cfg)
 	if !f.dropsTurn {
 		turn := runtime.StartupNudge{Text: cfg.Nudge}
 		if !f.noFloor {
@@ -131,6 +135,29 @@ func (f *unweldedFake) Start(ctx context.Context, name string, cfg runtime.Confi
 			f.handback = map[string]runtime.StartupNudge{}
 		}
 		f.handback[name] = turn
+	}
+	return nil
+}
+
+// publishIdentity records cfg's launch identity as get-meta answers it,
+// unless the fake breaks that duty.
+func (f *unweldedFake) publishIdentity(name string, cfg runtime.Config) {
+	if f.noIdentity {
+		return
+	}
+	for _, key := range []string{runtime.InstanceTokenEnv, runtime.RuntimeEpochEnv, runtime.ContinuationEpochEnv} {
+		if f.noEpochs && key != runtime.InstanceTokenEnv {
+			continue
+		}
+		_ = f.SetMeta(name, key, cfg.Env[key])
+	}
+}
+
+func (f *unweldedFake) Relaunch(_ context.Context, name string, cfg runtime.Config) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.keepsIdentity {
+		f.publishIdentity(name, cfg)
 	}
 	return nil
 }
@@ -189,6 +216,7 @@ func TestUnweldedLaunchChecksCatchTheirViolation(t *testing.T) {
 	queued := func(t *testing.T, f *unweldedFake) error { return checkFirstTurnQueued(t, f, f.input, cfg) }
 	dialog := func(t *testing.T, f *unweldedFake) error { return checkDialogAtStart(t, f, f.input, dialogCfg) }
 	once := func(t *testing.T, f *unweldedFake) error { return checkQueueDeliversOnce(t, f, f.input, cfg, true) }
+	identified := func(t *testing.T, f *unweldedFake) error { return checkLaunchIdentified(t, f, cfg) }
 	retried := func(t *testing.T, f *unweldedFake) error {
 		return checkRefusedRetriedByQueue(t, f, f.input, f.accept, cfg, refused)
 	}
@@ -208,6 +236,10 @@ func TestUnweldedLaunchChecksCatchTheirViolation(t *testing.T) {
 		{"delivered once", &unweldedFake{}, once, true},
 		{"delivered twice", &unweldedFake{typesTwice: true}, once, false},
 		{"no ready floor", &unweldedFake{noFloor: true}, once, false},
+		{"launch identified", &unweldedFake{}, identified, true},
+		{"launch unreadable", &unweldedFake{noIdentity: true}, identified, false},
+		{"relaunch reads the old launch", &unweldedFake{keepsIdentity: true}, identified, false},
+		{"fence without its epochs", &unweldedFake{noEpochs: true}, identified, false},
 		{"refusal retried", &unweldedFake{refuse: refused}, retried, true},
 		{"refusal typed", &unweldedFake{refuse: refused, typesRefusal: true}, retried, false},
 		{"refusal untyped", &unweldedFake{refuse: refused, untypedRefusal: true}, retried, false},

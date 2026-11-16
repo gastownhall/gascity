@@ -203,9 +203,24 @@ first turn waits in the session's nudge queue as the user's submit. The
 queue delivers it through the path every later nudge takes (see [Startup
 Hints](#startup-hints)), once the session takes input:
 
-- With `idle-boundary` declared, the queue waits for the session to read idle.
+- With `idle-boundary` declared, the queue's own readiness gate decides when
+  the session takes input.
 - Without it, the queue sends the turn no earlier than `ready_delay_ms` after
-  the launch.
+  the start's dialog pass ends.
+
+The turn is bound to the launch that produced it, and the queue keeps it
+first:
+
+| Rule | What the queue does |
+|---|---|
+| Identity | Right after the launch, the orchestrator writes the launch's `GC_INSTANCE_TOKEN`, `GC_RUNTIME_EPOCH` and `GC_CONTINUATION_EPOCH` with `set-meta`. The queue reads them back with `get-meta` to tell which launch runs now. |
+| Delivery | The turn goes only to the launch that produced it, alone, and before every other queued item of the session. The send is fenced to that launch when the pack declares `input-fence`. |
+| Replacement | When another launch replaces the session first, the old turn is dropped (`stale-launch`) and the new launch's own turn goes instead. |
+| Ordering | Reminders queued earlier, and messages sent to the session while its turn is still queued, wait behind the turn. |
+| Unreadable identity | While `get-meta` cannot answer the token, the queue neither sends nor drops the turn, and the session's other queued items wait behind it, until the read answers or the turn expires (24 hours). `gc nudge drop` removes it. |
+
+A script that un-welds start must therefore keep `set-meta` and `get-meta`
+working for every box, as the [metadata requirements](#conformance) state.
 
 The queue reads the answer as the [typed input
 outcomes](#typed-input-outcomes-input-outcome) say: delivered and
@@ -215,11 +230,19 @@ turn is acked once.
 
 Because the turn is queued, no start deadline can cut it off or lose it, for
 example to a slow host `session_setup`. The cost is latency: the turn lands
-one queue poll after the start returns, not inside the start as the tmux
-provider's startup nudge does. The start no longer watches the agent while
-it waits for the turn. An agent that dies during startup is found by the
-reconciler's liveness checks like any other dead session, and the queue
-releases its queued turn under its `gone` rule.
+after the start returns, on the queue's next delivery pass, not inside the
+start as the tmux provider's startup nudge does. Under the supervisor's
+nudge dispatcher, a turn not yet due when it is queued waits for the
+dispatcher's next tick. An agent that dies during startup is found by the
+orchestrator's liveness checks like any other dead session; the next start's
+launch then drops its turn. Until the start returns, the turn is held only
+in the orchestrator's memory, so an orchestrator restart in that window
+loses it, as it would lose a turn typed inside the start.
+
+A pack that cannot fence input (`carrier.ops`, or no `input-fence`) has its
+turn checked against the live launch just before the send, not at the
+keystroke. A replacement launch that starts in that window can still receive
+the old launch's turn.
 
 **The connection primitive (slim RPP).** `exec` is the connection op
 (`RPP-CONN-001`). It is optional; conformance checks output and command exit

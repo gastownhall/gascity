@@ -162,6 +162,7 @@ type handbackQueueHarness struct {
 	info   session.Info
 	target nudgeTarget
 	obs    worker.LiveObservation
+	launch string // the started launch's id
 }
 
 // newHandbackQueueHarness starts a session whose Start handed nudge back,
@@ -180,6 +181,22 @@ func newHandbackQueueHarness(t *testing.T, nudge runtime.StartupNudge) handbackQ
 	if err := mgr.Start(context.Background(), testOperatorIn(t, dir), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
+	// The launch's identity, as the exec leaf publishes it: the turn is
+	// bound to it, and the poller's claim and pre-send read find it live.
+	var env map[string]string
+	for _, call := range fake.SnapshotCalls() {
+		if call.Method == "Start" && call.Name == info.SessionName {
+			env = call.Config.Env
+		}
+	}
+	if env[runtime.InstanceTokenEnv] == "" {
+		t.Fatal("the session started with no instance token")
+	}
+	for _, key := range []string{runtime.InstanceTokenEnv, runtime.RuntimeEpochEnv, runtime.ContinuationEpochEnv} {
+		if err := fake.SetMeta(info.SessionName, key, env[key]); err != nil {
+			t.Fatal(err)
+		}
+	}
 	fake.SetStartupNudgeHandbackAt(info.SessionName, nudge)
 	if err := queueStartupNudgeHandback(dir, nil, runtime.FullFake{Fake: fake}, info, info.SessionName, "", true, time.Now()); err != nil {
 		t.Fatalf("queueStartupNudgeHandback: %v", err)
@@ -193,6 +210,7 @@ func newHandbackQueueHarness(t *testing.T, nudge runtime.StartupNudge) handbackQ
 		info:   info,
 		target: nudgeTarget{cityPath: dir, agent: config.Agent{Name: "worker"}, sessionID: info.ID, resolved: &config.ResolvedProvider{Name: "codex"}, sessionName: info.SessionName},
 		obs:    worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince},
+		launch: runtime.LaunchID(env[runtime.InstanceTokenEnv]),
 	}
 }
 
@@ -234,6 +252,16 @@ func (h handbackQueueHarness) wantQueueEmpty(t *testing.T) {
 func TestQueueDeliversHandedBackFirstTurnOnceAfterReadiness(t *testing.T) {
 	notBefore := time.Now().Add(time.Second)
 	h := newHandbackQueueHarness(t, runtime.StartupNudge{Text: handbackNudge, NotBefore: notBefore})
+	pending, _, _, err := listQueuedNudgesForTarget(h.dir, h.target, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || !pending[0].DeliverAfter.Equal(notBefore.UTC()) {
+		t.Fatalf("queued %+v; want the turn once, due at its NotBefore %s", pending, notBefore)
+	}
+	if launch, ok := nudgequeue.StartupTurnLaunch(pending[0]); !ok || launch != h.launch {
+		t.Fatalf("queued turn bound to %q (%v); want the launch the runtime reads", launch, ok)
+	}
 
 	if delivered, sent := h.pass(t); delivered || len(sent) != 0 {
 		t.Fatalf("pass before NotBefore = delivered %v, sent %q; want the turn held until ready_delay_ms has passed", delivered, sent)

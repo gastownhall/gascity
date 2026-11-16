@@ -454,8 +454,10 @@ const rppFirstTurnReadyDelay = 300
 // SessionHandle on the golden reference in launch mode (proc.provision with
 // proc.launch, no exec) starts without typing its first turn, which waits in
 // the session's queue once as the user's submit, not due before
-// ready_delay_ms past the start. Sent as the queue sends it, through the
-// handle, it is typed once (the delivered half); a pack refusing it with
+// ready_delay_ms past the start, bound to the launch the runtime reads as
+// running, so a claim supplying that read (LiveLaunch) takes it alone. Sent
+// as the queue sends it, through the handle and fenced by the pre-send
+// read, it is typed once (the delivered half); a pack refusing it with
 // each refusal word answers with that typed refusal and types nothing, so
 // the queue keeps it for a retry (the refusal half).
 func firstTurnQueuedResult(t *testing.T) Result {
@@ -526,16 +528,40 @@ func firstTurnQueuedResult(t *testing.T) Result {
 			return Fail(rppHandleProfile, RequirementRPPFirstTurnQueued,
 				fmt.Sprintf("%s: the session's queue holds %d copies of the first turn as the user's submit (pending %+v), want 1", label, len(queued), state.Pending))
 		}
+		turn := queued[0]
 		floor := began.Add(rppFirstTurnReadyDelay * time.Millisecond)
-		if queued[0].DeliverAfter.Before(floor) {
+		if turn.DeliverAfter.Before(floor) {
 			return Fail(rppHandleProfile, RequirementRPPFirstTurnQueued,
-				fmt.Sprintf("%s: the queued first turn is due at %s, before ready_delay_ms past the start (%s): a pack without an idle boundary holds it that long", label, queued[0].DeliverAfter, floor))
+				fmt.Sprintf("%s: the queued first turn is due at %s, before ready_delay_ms past the start (%s): a pack without an idle boundary holds it that long", label, turn.DeliverAfter, floor))
+		}
+		info, err := manager.Get(turn.SessionID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", turn.SessionID, err)
+		}
+		// The claim's LiveLaunch, as cmd/gc supplies it, must name the
+		// launch the turn is bound to, or the queue holds the turn until it
+		// expires (or drops it as another launch's).
+		bound, isTurn := nudgequeue.StartupTurnLaunch(turn)
+		live, known := runtime.ReadLaunchID(sp, info.SessionName)
+		judgement := nudgequeue.JudgeStartupTurns(turn.SessionID, state.Pending, nil, turn.DeliverAfter,
+			nudgequeue.LiveLaunch{Asked: true, ID: live, Known: known, Seen: map[string]bool{turn.ID: true}})
+		if !isTurn || !known || bound != live || judgement.Claim != turn.ID {
+			return Fail(rppHandleProfile, RequirementRPPFirstTurnQueued,
+				fmt.Sprintf("%s: the queued first turn is bound to launch %q (startup turn %v) and the live launch reads %q (%v): a claim judges it %+v, want it claimed alone", label, bound, isTurn, live, known, judgement))
+		}
+		// The pre-send read the queue fences the send with.
+		fence, ok := runtime.ReadInputFence(sp, info.SessionName)
+		if !ok || runtime.LaunchID(fence.Token) != bound {
+			return Fail(rppHandleProfile, RequirementRPPFirstTurnQueued,
+				fmt.Sprintf("%s: the pre-send fence read = %s, %v; want the turn's launch, or the queue releases it on every pass", label, fence, ok))
 		}
 		result, err := handle.Nudge(context.Background(), managerActor(t, manager, sessionpkg.ActorAgent), worker.NudgeRequest{
-			Text:     queued[0].Message,
-			Delivery: worker.NudgeDeliveryImmediate,
-			Source:   "queue",
-			Wake:     worker.NudgeWakeLiveOnly,
+			Text:          turn.Message,
+			Delivery:      worker.NudgeDeliveryDefault,
+			Source:        "queue",
+			Wake:          worker.NudgeWakeLiveOnly,
+			Fence:         fence,
+			AllowUnfenced: true,
 		})
 		switch {
 		case word == "" && (err != nil || !result.Delivered):
@@ -553,7 +579,7 @@ func firstTurnQueuedResult(t *testing.T) Result {
 		}
 	}
 	return Pass(rppHandleProfile, RequirementRPPFirstTurnQueued,
-		"Start types no first turn; it is queued once as the user's submit, due no earlier than ready_delay_ms past the start; sent through the handle it is typed once, and a refusal types nothing and reaches the queue as its typed sentinel")
+		"Start types no first turn; it is queued once as the user's submit, due no earlier than ready_delay_ms past the start and bound to the launch the runtime reads, which a claim takes alone; sent fenced through the handle it is typed once, and a refusal types nothing and reaches the queue as its typed sentinel")
 }
 
 // typedFirstTurns counts rppFirstTurn in the input the golden typed into

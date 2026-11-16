@@ -3,6 +3,7 @@ package exec
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -58,6 +59,35 @@ func (p *Provider) runLaunchOp(ctx context.Context, name string, cfg runtime.Con
 	return p.publishInputFence(ctx, name, cfg)
 }
 
+// launchIdentityKeys are the identity keys a separable launch publishes
+// with set-meta (publishLaunchIdentity), in the order they are written: the
+// counters before the token, so a reader that sees the new token sees the
+// counters of its launch.
+var launchIdentityKeys = []string{runtime.RuntimeEpochEnv, runtime.ContinuationEpochEnv, runtime.InstanceTokenEnv}
+
+// publishLaunchIdentity records, with set-meta, the identity of the agent a
+// separable launch of name just started: the instance token and both epochs
+// cfg.Env carries. The launch hands its first turn back bound to that token
+// (runtime.ReadLaunchID), and the queue judges and fences the turn by the
+// same get-meta reads (runtime.ReadInputFence), so they must answer this
+// launch from the moment Start returns, never a launch it replaced, whatever
+// the pack's own launch op stored. A key cfg.Env does not carry is left as
+// the box holds it (a warm relaunch without a token keeps the box's). A
+// failed write is reported, not returned: the agent runs, and a queue that
+// cannot read its launch holds its first turn, never sends it elsewhere.
+func (p *Provider) publishLaunchIdentity(name string, cfg runtime.Config) {
+	for _, key := range launchIdentityKeys {
+		value, ok := cfg.Env[key]
+		if !ok || value == "" {
+			continue
+		}
+		if err := p.SetMeta(name, key, value); err != nil {
+			fmt.Fprintf(os.Stderr, "exec provider: session %q: publishing the launch's %s: %v; its queued first turn waits until get-meta answers it\n", name, key, err)
+			return
+		}
+	}
+}
+
 // withoutNudge is cfg without its first turn, which a separable launch hands
 // back for its caller to queue (finishSeparableLaunch), so `provision` is
 // never sent it.
@@ -71,14 +101,15 @@ func withoutNudge(cfg runtime.Config) runtime.Config {
 // turn, which the Start's caller queues and the queue delivers once the agent
 // takes input. Start never types the turn, so no deadline of its own can cut
 // it off or lose it. A pack without an idle boundary, whose readiness the
-// queue cannot read, has the turn held until ReadyDelayMs after the launch
-// (StartupNudge.NotBefore). A welded pack's start op already did all of it,
-// so there it does nothing.
+// queue cannot read, has the turn held until ReadyDelayMs past the end of
+// the launch's dialog pass (StartupNudge.NotBefore). A welded pack's start
+// op already did all of it, so there it does nothing.
 func (p *Provider) finishSeparableLaunch(ctx context.Context, name string, cfg runtime.Config, hostSetup bool) {
 	if !p.supportsSeparableLaunch() {
 		return
 	}
-	launched := time.Now()
+	// The launch and its dialog pass are done; the floor counts from here.
+	dialogsDone := time.Now()
 	if hostSetup {
 		p.runHostSessionSetup(ctx, name, cfg)
 	}
@@ -87,7 +118,7 @@ func (p *Provider) finishSeparableLaunch(ctx context.Context, name string, cfg r
 	}
 	turn := runtime.StartupNudge{Text: cfg.Nudge}
 	if delay := time.Duration(cfg.ReadyDelayMs) * time.Millisecond; delay > 0 && !p.idleBoundaryDeclared() {
-		turn.NotBefore = launched.Add(delay)
+		turn.NotBefore = dialogsDone.Add(delay)
 	}
 	p.handbacks.set(name, turn)
 }

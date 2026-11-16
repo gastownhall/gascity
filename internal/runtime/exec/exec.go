@@ -79,6 +79,14 @@ type Provider struct {
 	// session_setup on the host (execTransport.Launch).
 	hostSetupDue sync.Map
 
+	// weldedProvision holds the names provisionBox started with the welded
+	// `start` op, because the handshake did not then declare a separable
+	// launch: that op launched the agent and took the first turn, so the
+	// launch that follows must not launch again or hand the turn back, even
+	// if a handshake retry has declared a separable launch since
+	// (execTransport.Launch).
+	weldedProvision sync.Map
+
 	// handbacks holds the first turn a separable launch handed back
 	// (startup_ladder.go).
 	handbacks startupHandbacks
@@ -591,8 +599,13 @@ func (p *Provider) supportsSeparableLaunch() bool {
 // the launch hands back for its caller to queue (finishSeparableLaunch).
 func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Config) error {
 	p.rememberReadyPrompt(name, cfg)
+	p.weldedProvision.Delete(name)
 	if !p.supportsSeparableLaunch() {
-		return p.Start(ctx, name, cfg)
+		if err := p.Start(ctx, name, cfg); err != nil {
+			return err
+		}
+		p.weldedProvision.Store(name, struct{}{})
+		return nil
 	}
 	p.hostSetupDue.Delete(name)
 	hostWork := p.sharesHostFS() && p.holdsNoLiveBox(name)
@@ -633,6 +646,7 @@ func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Con
 		if err := p.runLaunchOp(ctx, name, cfg); err != nil {
 			return err
 		}
+		p.publishLaunchIdentity(name, cfg)
 		p.publishReadyPrompt(ctx, name, cfg)
 		return p.dismissStartupDialogs(ctx, name, cfg)
 	}
@@ -658,6 +672,7 @@ func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Con
 	} else if code != 0 {
 		return fmt.Errorf("exec provider: launching agent in %q: tmux exited %d", name, code)
 	}
+	p.publishLaunchIdentity(name, cfg)
 	p.publishReadyPrompt(ctx, name, cfg)
 	return p.dismissStartupDialogs(ctx, name, cfg)
 }

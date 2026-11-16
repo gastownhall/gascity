@@ -199,3 +199,100 @@ func TestUnweldedSlowHostSetupStillHandsBackFirstTurn(t *testing.T) {
 		})
 	}
 }
+
+// identityPackOps is launchPackOps with a metadata store ($dir/meta.<key>)
+// whose launch op records no identity of its own.
+func identityPackOps() map[string]string {
+	ops := launchPackOps()
+	ops["set-meta"] = `v=$(cat); printf %s "$v" > "$dir/meta.$3"`
+	ops["get-meta"] = `if [ -f "$dir/meta.$3" ]; then cat "$dir/meta.$3"; fi`
+	return ops
+}
+
+// identityConfig is a start config carrying one launch's identity.
+func identityConfig(token string, generation, epoch int) runtime.Config {
+	return runtime.Config{Command: "agent", Nudge: "first turn", Env: map[string]string{
+		runtime.InstanceTokenEnv:     token,
+		runtime.RuntimeEpochEnv:      fmt.Sprint(generation),
+		runtime.ContinuationEpochEnv: fmt.Sprint(epoch),
+	}}
+}
+
+// Kills an un-welded launch whose identity the queue cannot read when Start
+// returns (PR 1's claim then holds the handed-back turn until it expires, and
+// the pre-send fence read releases it on every pass): Start and a Relaunch
+// publish the instance token and both epochs of the launch they ran, so
+// runtime.ReadLaunchID and runtime.ReadInputFence answer that launch, never
+// the one it replaced.
+func TestUnweldedLaunchPublishesItsIdentity(t *testing.T) {
+	script, _ := observePack(t, launchPackCaps, identityPackOps())
+	sp := NewSeamBacked(script)
+	first := identityConfig("tok-first", 3, 2)
+	if err := sp.Start(t.Context(), "s", first); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	wantIdentity := func(cfg runtime.Config, after string) {
+		t.Helper()
+		if id, ok := runtime.ReadLaunchID(sp, "s"); !ok || id != runtime.LaunchID(cfg.Env[runtime.InstanceTokenEnv]) {
+			t.Fatalf("ReadLaunchID %s = %q, %v; want the launch's id", after, id, ok)
+		}
+		want, _ := runtime.InputFenceFromEnv(cfg.Env)
+		if got, ok := runtime.ReadInputFence(sp, "s"); !ok || got != want {
+			t.Fatalf("ReadInputFence %s = %v, %v; want %v", after, got, ok, want)
+		}
+	}
+	wantIdentity(first, "after Start")
+	second := identityConfig("tok-second", 4, 5)
+	if err := sp.(runtime.RelaunchProvider).Relaunch(t.Context(), "s", second); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	wantIdentity(second, "after Relaunch")
+}
+
+// Kills a launch after a Provision the welded `start` op served (the
+// handshake failed then, so it did not declare a separable launch) that
+// launches the agent again, or hands the first turn back, once a handshake
+// retry declares one: the welded op already started the agent with the turn
+// in its config, so a second launch would replace it and queue the turn a
+// second time.
+func TestLaunchAfterWeldedProvisionLaunchesNothing(t *testing.T) {
+	old := handshakeNow
+	now := time.Now()
+	handshakeNow = func() time.Time { return now }
+	t.Cleanup(func() { handshakeNow = old })
+	ops := launchPackOps()
+	ops["start"] = `cat > "$dir/start.stdin"; : > "$dir/running"`
+	dir := t.TempDir()
+	handshake := filepath.Join(dir, "handshake")
+	writeFile(t, handshake, "not json")
+	script, packDir := observePack(t, "", ops)
+	// observePack's empty handshake answers exit 2; serve it from a file
+	// instead, so the test can turn it valid between Provision and Launch.
+	body := readLog(t, script)
+	body = strings.Replace(body, `[ "$op" = protocol ] && exit 2`, fmt.Sprintf(`if [ "$op" = protocol ]; then cat %q; exit 0; fi`, handshake), 1)
+	writeFile(t, script, body)
+
+	p := NewProvider(script)
+	rt, tp := p.Seams()
+	place, err := rt.Provision(t.Context(), "s", runtime.ProvisionRequest{Config: runtime.Config{Command: "agent", Nudge: "first turn"}})
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if got := opsRan(t, packDir); !slices.Contains(got, "start") || slices.Contains(got, "provision") {
+		t.Fatalf("ops = %v, want the welded start while the handshake fails", got)
+	}
+	writeFile(t, handshake, launchPackCaps)
+	now = now.Add(HandshakeRetryAfter + time.Second)
+	if !tp.Capabilities().SeparableLaunch {
+		t.Fatal("the handshake retry did not declare a separable launch: the fixture does not model the flip")
+	}
+	if _, err := tp.Launch(t.Context(), place, runtime.LaunchSpec{Config: runtime.Config{Command: "agent", Nudge: "first turn"}}); err != nil {
+		t.Fatalf("Launch: %v", err)
+	}
+	if got := opsRan(t, packDir); slices.Contains(got, "launch") {
+		t.Fatalf("ops = %v: the launch after a welded provision launched the agent again", got)
+	}
+	if turn, ok := p.TakeStartupNudgeHandback("s"); ok {
+		t.Fatalf("handback = %q after a welded provision: the welded start took the first turn", turn.Text)
+	}
+}
