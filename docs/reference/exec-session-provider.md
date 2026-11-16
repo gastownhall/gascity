@@ -190,8 +190,9 @@ config change relaunches the agent in the warm box instead of reprovisioning
 
 Without either, or with `carrier.ops` and only `proc.exec`, the welded `start`
 op provisions and launches, and the orchestrator issues no `provision` or
-separate launch. The ops are gated by the `RPP-PROVISION-001` to `004`
-conformance requirements (`002` to `004` only for `proc.launch`).
+separate launch. The ops are gated by the `RPP-PROVISION-001` to `005`
+conformance requirements (`002` to `004` only for `proc.launch`, `005` only
+for a pack that un-welds start).
 
 **The first turn on the un-welded path.** `provision` runs before any agent
 exists and `launch` types nothing, so the orchestrator delivers the start
@@ -206,27 +207,38 @@ Hints](#startup-hints)), once the session takes input:
 - With `idle-boundary` declared, the queue's own readiness gate decides when
   the session takes input.
 - Without it, the queue sends the turn no earlier than `ready_delay_ms` after
-  the start's dialog pass ends.
+  the start's dialog pass ends. On a pack with neither an idle boundary nor
+  an activity clock (`report-activity`), the queue cannot see the session go
+  quiet, so the turn can wait for its starvation bypass, up to 2 minutes
+  past that floor.
 
 The turn is bound to the launch that produced it, and the queue keeps it
 first:
 
 | Rule | What the queue does |
 |---|---|
-| Identity | Right after the launch, the orchestrator writes the launch's `GC_INSTANCE_TOKEN`, `GC_RUNTIME_EPOCH` and `GC_CONTINUATION_EPOCH` with `set-meta`. The queue reads them back with `get-meta` to tell which launch runs now. |
+| Identity | Before the launch, the orchestrator removes the box's `GC_INSTANCE_TOKEN` with `remove-meta`, so no read answers the launch being replaced. Right after the launch it writes the new launch's `GC_RUNTIME_EPOCH`, `GC_CONTINUATION_EPOCH` and then `GC_INSTANCE_TOKEN` with `set-meta`; if a write fails it removes the token again rather than leave a mixed identity. The queue reads them back with `get-meta` to tell which launch runs now. |
 | Delivery | The turn goes only to the launch that produced it, alone, and before every other queued item of the session. The send is fenced to that launch when the pack declares `input-fence`. |
 | Replacement | When another launch replaces the session first, the old turn is dropped (`stale-launch`) and the new launch's own turn goes instead. |
 | Ordering | Reminders queued earlier, and messages sent to the session while its turn is still queued, wait behind the turn. |
 | Unreadable identity | While `get-meta` cannot answer the token, the queue neither sends nor drops the turn, and the session's other queued items wait behind it, until the read answers or the turn expires (24 hours). `gc nudge drop` removes it. |
 
-A script that un-welds start must therefore keep `set-meta` and `get-meta`
-working for every box, as the [metadata requirements](#conformance) state.
+A script that un-welds start must therefore implement `set-meta`, `get-meta`
+and `remove-meta` for every box. For such a script, exit 2 from one of them
+is a missing store, not an unknown op: conformance fails the metadata
+requirements on it, as it does under `observe.v1`, and `RPP-PROVISION-005`
+checks that `get-meta` answers the identity keys `set-meta` stored after the
+launch. The orchestrator reports such an exit 2 as a missing store too. A
+session whose runtime keeps no metadata has its first turn queued as a
+plain submit, without the rules above.
 
 The queue reads the answer as the [typed input
 outcomes](#typed-input-outcomes-input-outcome) say: delivered and
 `delivered_unobserved` are final, a refusal (`busy`, `pending_interaction`,
 `rejected`, `not_sent`, `unavailable`) typed nothing and is retried, and the
-turn is acked once.
+turn is acked once. `unconfirmed` (the submit may or may not have taken) is
+retried too, so delivery is at least once: a turn answered `unconfirmed` can
+be typed twice.
 
 Because the turn is queued, no start deadline can cut it off or lose it, for
 example to a slow host `session_setup`. The cost is latency: the turn lands
@@ -242,7 +254,9 @@ loses it, as it would lose a turn typed inside the start.
 A pack that cannot fence input (`carrier.ops`, or no `input-fence`) has its
 turn checked against the live launch just before the send, not at the
 keystroke. A replacement launch that starts in that window can still receive
-the old launch's turn.
+the old launch's turn. If the `remove-meta` before a launch fails (it is
+reported, not fatal), `get-meta` answers the replaced launch until the new
+identity is written, and the same can happen in that window.
 
 **The connection primitive (slim RPP).** `exec` is the connection op
 (`RPP-CONN-001`). It is optional; conformance checks output and command exit

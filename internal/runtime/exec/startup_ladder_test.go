@@ -2,6 +2,7 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -177,9 +178,8 @@ func TestUnweldedIdleBoundaryTurnHasNoFloor(t *testing.T) {
 // its handed-back first turn.
 const launchIdlePackCaps = `{"version":0,"capabilities":["proc.provision","proc.launch","carrier.ops","report-activity","report-attachment","idle-boundary","input-outcome"]}`
 
-// Kills a first turn lost to the start's deadline (review round 2's HIGH):
-// under fs.host a slow host session_setup spent the rest of the start's
-// ctx, the nudge op never forked, Start returned nil and nothing was handed
+// Kills a first turn lost to the start's deadline: under fs.host a slow
+// host session_setup spent the rest of the start's ctx, the nudge op never forked, Start returned nil and nothing was handed
 // back. Start no longer sends the turn, so whatever the setup spends, the
 // turn is handed back, and the fresh (createFresh) start does the same.
 func TestUnweldedSlowHostSetupStillHandsBackFirstTurn(t *testing.T) {
@@ -219,7 +219,7 @@ func identityConfig(token string, generation, epoch int) runtime.Config {
 }
 
 // Kills an un-welded launch whose identity the queue cannot read when Start
-// returns (PR 1's claim then holds the handed-back turn until it expires, and
+// returns (the queue's claim then holds the handed-back turn until it expires, and
 // the pre-send fence read releases it on every pass): Start and a Relaunch
 // publish the instance token and both epochs of the launch they ran, so
 // runtime.ReadLaunchID and runtime.ReadInputFence answer that launch, never
@@ -294,5 +294,96 @@ func TestLaunchAfterWeldedProvisionLaunchesNothing(t *testing.T) {
 	}
 	if turn, ok := p.TakeStartupNudgeHandback("s"); ok {
 		t.Fatalf("handback = %q after a welded provision: the welded start took the first turn", turn.Text)
+	}
+}
+
+// Kills a pack that un-welds start but answers its metadata ops exit 2,
+// read as the forward-compatible no-op: the launch's identity write is
+// reported done and every read answers unset, so the claim cannot read the
+// launch its first turn is bound to and holds the turn, and the sends
+// behind it, until the turn expires. Such a pack's metadata ops are
+// required (runtime.ErrMetaUnsupported), whether it launches through the
+// launch op or tmux over exec; a welded pack's exit 2 stays the no-op.
+func TestUnweldedPackMetaExitTwoIsUnsupported(t *testing.T) {
+	for _, tc := range []struct {
+		caps     string
+		unwelded bool
+	}{
+		{launchPackCaps, true},
+		{`{"version":0,"capabilities":["proc.provision","proc.exec"]}`, true},
+		{`{"version":0,"capabilities":["proc.provision","proc.exec","carrier.ops"]}`, false},
+		{`{"version":0,"capabilities":["proc.exec"]}`, false},
+	} {
+		script, _ := observePack(t, tc.caps, launchPackOps())
+		p := NewProvider(script)
+		_, getErr := p.GetMeta("s", runtime.InstanceTokenEnv)
+		setErr := p.SetMeta("s", runtime.InstanceTokenEnv, "tok")
+		removeErr := p.RemoveMeta("s", runtime.InstanceTokenEnv)
+		for op, err := range map[string]error{"get-meta": getErr, "set-meta": setErr, "remove-meta": removeErr} {
+			if got := errors.Is(err, runtime.ErrMetaUnsupported); got != tc.unwelded {
+				t.Errorf("handshake %s: %s exit 2 = %v; want ErrMetaUnsupported %v", tc.caps, op, err, tc.unwelded)
+			}
+		}
+	}
+}
+
+// Kills a separable launch that leaves the replaced launch's token readable
+// while the new agent starts, or a mixed identity after a failed write: a
+// claim in that window judges an older queued turn live (on a pack that
+// cannot fence it is typed into the new agent), and a fenced send against
+// new counters and the old token misses and dead-letters the live turn.
+// The launch withdraws the token before the agent starts, and a write that
+// fails leaves no token, so the queue reads the launch unknown and holds.
+func TestUnweldedLaunchWithdrawsTheReplacedToken(t *testing.T) {
+	ops := identityPackOps()
+	ops["launch"] = `cat > "$dir/launch.stdin"; : > "$dir/running"; if [ -f "$dir/meta.` + runtime.InstanceTokenEnv + `" ]; then cp "$dir/meta.` + runtime.InstanceTokenEnv + `" "$dir/token-at-launch"; else rm -f "$dir/token-at-launch"; fi`
+	ops["set-meta"] = `if [ -f "$dir/fail-set.$3" ]; then echo "store down" >&2; exit 1; fi; ` + ops["set-meta"]
+	ops["remove-meta"] = `rm -f "$dir/meta.$3"`
+	script, dir := observePack(t, launchPackCaps, ops)
+	sp := NewSeamBacked(script)
+	if err := sp.Start(t.Context(), "s", identityConfig("tok-first", 3, 2)); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	relaunch := sp.(runtime.RelaunchProvider)
+	if err := relaunch.Relaunch(t.Context(), "s", identityConfig("tok-second", 4, 5)); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	if seen := readLog(t, filepath.Join(dir, "token-at-launch")); seen != "" {
+		t.Fatalf("the launch op ran while get-meta still answered token %q: the replaced launch's token must be withdrawn first", seen)
+	}
+	if id, ok := runtime.ReadLaunchID(sp, "s"); !ok || id != runtime.LaunchID("tok-second") {
+		t.Fatalf("ReadLaunchID after the relaunch = %q, %v; want the second launch", id, ok)
+	}
+
+	writeFile(t, filepath.Join(dir, "fail-set."+runtime.ContinuationEpochEnv), "")
+	if err := relaunch.Relaunch(t.Context(), "s", identityConfig("tok-third", 5, 6)); err != nil {
+		t.Fatalf("Relaunch with a failing store: %v", err)
+	}
+	if id, ok := runtime.ReadLaunchID(sp, "s"); ok {
+		t.Fatalf("ReadLaunchID after a failed identity write = %q; want unknown, never a mixed or replaced identity", id)
+	}
+}
+
+// Kills a welded-provision marker that outlives its box: every welded seam
+// start stores one, and only a Launch, which a welded pack's start never
+// runs, cleared it, so the provider kept one per session name for its
+// lifetime. Stop forgets it.
+func TestStopForgetsTheWeldedProvisionMarker(t *testing.T) {
+	ops := launchPackOps()
+	ops["start"] = `cat > /dev/null; : > "$dir/running"`
+	script, _ := observePack(t, `{"version":0,"capabilities":[]}`, ops)
+	p := NewProvider(script)
+	rt, _ := p.Seams()
+	if _, err := rt.Provision(t.Context(), "s", runtime.ProvisionRequest{Config: runtime.Config{Command: "agent"}}); err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if _, marked := p.weldedProvision.Load("s"); !marked {
+		t.Fatal("a welded provision stored no marker: the fixture does not model the welded path")
+	}
+	if err := p.Stop("s"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if _, marked := p.weldedProvision.Load("s"); marked {
+		t.Fatal("the welded-provision marker outlived Stop")
 	}
 }
