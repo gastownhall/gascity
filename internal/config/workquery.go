@@ -977,15 +977,17 @@ func (a *Agent) hasConfiguredPoolTemplate() bool {
 
 // templateAssignedReadyTierScript adds a fallback read for ready work
 // assigned directly to a pool's shared template identity. A configured
-// ephemeral pool member ($GC_TEMPLATE set, $GC_SESSION_ORIGIN ephemeral)
-// queries the template identity only after every concrete identity above it
-// has come up empty, so ready work assigned to the template — not yet
-// claimed down to any specific instance — stays discoverable. It runs after
-// the graph-anchor tiers, so an anchored session resumes its own workflow before
-// it looks at template work. Named/manual
-// sessions and non-pool agents never match the case guard, and a session
-// from a different pool never matches the exact-assignee read, so the tier
-// is a no-op for them.
+// pool member ($GC_TEMPLATE set, $GC_SESSION_ORIGIN "ephemeral" or unset,
+// mirroring the pool-demand gate) queries the template identity only after
+// every concrete identity above it has come up empty, so ready work assigned
+// to the template — not yet claimed down to any specific instance — stays
+// discoverable. Like the concrete-identity loop, it follows the ordinary
+// ready read with the ephemeral (wisp) probe on non-1.0.5 bd compatibility,
+// so template-assigned wisps are found there too. It runs after the
+// graph-anchor tiers, so an anchored session resumes its own workflow before
+// it looks at template work. Named/manual sessions and non-pool agents never
+// match the case guard, and a session from a different pool never matches
+// the exact-assignee read, so the tier is a no-op for them.
 func templateAssignedReadyTierScript(a *Agent, topo QueryTopology) string {
 	if !a.hasConfiguredPoolTemplate() {
 		return ""
@@ -993,7 +995,9 @@ func templateAssignedReadyTierScript(a *Agent, topo QueryTopology) string {
 	return `if [ -n "$GC_TEMPLATE" ]; then case "$GC_SESSION_ORIGIN" in ` +
 		`ephemeral|"") ` +
 		assignedReadyTierCommand("GC_TEMPLATE", topo) +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0 ;; ` +
+		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		ephemeralAssignedReadyProbeScript("GC_TEMPLATE", topo) +
+		`;; ` +
 		`esac; fi; `
 }
 

@@ -376,3 +376,73 @@ func TestPoolMemberAnchoredWorkflowPrecedesTemplateAssignedReadyWork(t *testing.
 		})
 	}
 }
+
+// poolTemplateEphemeralFakeBD models a default-compatibility (non-1.0.5)
+// single store: every ordinary `bd ready` read is empty, and the open
+// ephemeral snapshot (`bd query ... status=open`) returns the rows in
+// $OPEN_EPHEMERAL_ROWS. Template-assigned wisps are therefore reachable only
+// through the ephemeral probe.
+const poolTemplateEphemeralFakeBD = `#!/bin/sh
+set -eu
+case "$1" in
+  query)
+    case "$*" in
+      *"status=open"*) printf '%s' "${OPEN_EPHEMERAL_ROWS:-[]}" ;;
+      *) printf '[]' ;;
+    esac
+    ;;
+  *) printf '[]' ;;
+esac
+`
+
+func openEphemeralRow(id, assignee string) string {
+	return `{"id":"` + id + `","status":"open","issue_type":"task","ephemeral":true,"assignee":"` + assignee + `","dependency_count":0}`
+}
+
+// TestPoolMemberDefaultCompatDiscoversTemplateAssignedEphemeralReadyWork
+// covers the default (non-1.0.5) bd compatibility, where ordinary ready reads
+// omit wisps and the concrete-identity loop follows each read with the
+// ephemeral probe. The shared-template tier must do the same, or wisps
+// assigned to the template stay invisible on default-compat cities.
+func TestPoolMemberDefaultCompatDiscoversTemplateAssignedEphemeralReadyWork(t *testing.T) {
+	templateRow := openEphemeralRow("ga-template-wisp", poolTemplateReadyAssignee)
+	concreteRow := openEphemeralRow("ga-concrete-wisp", poolMemberReadyAssignee)
+	tests := []struct {
+		name   string
+		rows   string
+		origin string
+		want   string
+	}{
+		{name: "template_wisp", rows: "[" + templateRow + "]", origin: "ephemeral", want: "ga-template-wisp"},
+		{name: "unset_origin_template_wisp", rows: "[" + templateRow + "]", origin: "", want: "ga-template-wisp"},
+		{name: "concrete_wisp_wins", rows: "[" + templateRow + "," + concreteRow + "]", origin: "ephemeral", want: "ga-concrete-wisp"},
+		{name: "named_origin_gets_nothing", rows: "[" + templateRow + "]", origin: "named", want: ""},
+	}
+	for _, tt := range tests {
+		for _, shape := range poolReadyQueryShapes() {
+			t.Run(tt.name+"/"+shape.name, func(t *testing.T) {
+				env := poolMemberReadyEnv("")
+				env["GC_SESSION_ORIGIN"] = tt.origin
+				env["OPEN_EPHEMERAL_ROWS"] = tt.rows
+				res := runGeneratedQueryWithBD(t, shape.build(configuredPoolTemplateAgent(), QueryTopology{}), env, fakeBDEmpty, poolTemplateEphemeralFakeBD)
+				if res.exit != 0 {
+					t.Fatalf("generated query exited %d: stderr=%q stdout=%q", res.exit, res.stderr, res.stdout)
+				}
+				if tt.want == "" {
+					if output := strings.TrimSpace(res.stdout); output != "" && output != "[]" {
+						t.Fatalf("generated query output = %q, want no shared-template ephemeral fallback", res.stdout)
+					}
+					return
+				}
+				if !strings.Contains(res.stdout, tt.want) {
+					t.Fatalf("generated query output = %q, want %q", res.stdout, tt.want)
+				}
+				for _, other := range []string{"ga-template-wisp", "ga-concrete-wisp"} {
+					if other != tt.want && strings.Contains(res.stdout, other) {
+						t.Fatalf("generated query output = %q, want only %q", res.stdout, tt.want)
+					}
+				}
+			})
+		}
+	}
+}
