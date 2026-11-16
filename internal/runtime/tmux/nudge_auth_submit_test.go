@@ -89,6 +89,11 @@ func TestNudgeSessionAuthFailureAndFallbackVerdicts(t *testing.T) {
 			header:  []string{"❯ check the deploy", "", "  if the CLI says please run /login, tell the operator", ""},
 			want:    ErrNudgeSubmitDeliveredUnobserved,
 		},
+		{
+			name:   "no-echo fallback ignores a banner more than authBannerTailLines above the composer",
+			header: append([]string{banner}, make([]string, authBannerTailLines+2)...),
+			want:   ErrNudgeSubmitDeliveredUnobserved,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {

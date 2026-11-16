@@ -116,3 +116,12 @@ Full shared-skip comparison inventory retained: 647 lines; /var/tmp/gc-gate-ga-5
 Full native-skip comparison inventory retained: 144 lines; /var/tmp/gc-gate-ga-5z4gvto2-l52lq6tj/native-skip-comparison/comparison.json; SHA256 9c8f81c1893c440bf94bdb07871d4d960f600d9bc241b4446102164becf0666a.
 Full by-name test evidence retained: 11 lines; /var/tmp/gc-gate-ga-5z4gvto2-l52lq6tj/by-name-final.txt; SHA256 1e69ce0ef5599af89e0244bdd577e5b4fe322e7de6198291623b989b514ca969.
 Full action artifact integrity audit retained: 7 lines; /var/tmp/gc-gate-ga-5z4gvto2-l52lq6tj/artifact-digest-audit.json; SHA256 cab4166ed0f15f3c54ab2622b6d78bb55031bf72d7b0550ac2425c9e03d30c40.
+
+## Addendum (maintainer)
+
+The evidence above is unchanged and was recorded against reviewed source `2da8ba53`. Since then:
+
+- Head `ed1e485` adds `authBannerRegion` scoping after reviewed source `2da8ba53`.
+- The accepted limit "historical or quoted supported banner text in the last 120 lines" is superseded. Detection now examines only the rows between this nudge's last echo and the composer; with no echo, the 15 rows (`authBannerTailLines`) above the composer. With no echo, a banner from an earlier turn within those 15 rows still counts, including when the draft is staged.
+- `TestPaneContainsAuthFailureMatchesEverySignatureInAnyCase` and the new `TestNudgeSessionAuthFailureAndFallbackVerdicts` row "no-echo fallback ignores a banner more than authBannerTailLines above the composer" are not in this gate's by-name list.
+- The merge stays held until a deploy-gate clearance names the exact final PR head.

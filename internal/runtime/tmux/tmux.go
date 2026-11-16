@@ -3893,6 +3893,9 @@ func (t *Tmux) nudgeSession(
 			// confirmed hot path pays nothing. Only the reply region of this
 			// submit is searched (authBannerRegion): an older banner, the
 			// composer, and the nudge's own echoed text are not evidence.
+			// Known limit of the no-echo fallback: with no echo visible, a
+			// banner from an earlier turn within authBannerTailLines rows of
+			// the composer still counts, even when the draft is staged.
 			if lines, capErr := t.CapturePaneLines(target, promptObservationLines); capErr == nil && paneContainsAuthFailure(authBannerRegion(lines, message)) {
 				return fmt.Errorf("%w: session %q", ErrNudgeSubmitAuthFailed, session)
 			}
