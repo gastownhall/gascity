@@ -1,3 +1,8 @@
+//go:build !windows
+
+// The Windows Go fake herdr draws no startup dialogs, and these cases signal
+// through FIFOs.
+
 package herdr
 
 import (
