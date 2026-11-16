@@ -126,3 +126,50 @@ func TestStateFileQueueWithdrawQueuedWaitNudges(t *testing.T) {
 		})
 	}
 }
+
+// Kills a listing that leaks another agent's items, serves an expired live
+// item as pending, or takes the queue lock: ListForAgent reads state.json
+// as is and buckets the agent's items as of now.
+func TestStateFileQueueListForAgent(t *testing.T) {
+	now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	city := t.TempDir()
+	pending := deferredTestItem("p", now)
+	expired := deferredTestItem("x", now.Add(-2*time.Hour))
+	inFlight := deferredTestItem("f", now)
+	dead := deferredTestItem("d", now)
+	other := deferredTestItem("o", now)
+	other.Agent = "beta"
+	if err := WithState(city, func(state *State) error {
+		state.Pending = []Item{pending, expired, other}
+		state.InFlight = []Item{inFlight}
+		state.Dead = []Item{dead}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := lockState(city, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+	gotPending, gotInFlight, gotDead, err := StateFileQueue{CityPath: city}.ListForAgent("alpha", now)
+	if err != nil {
+		t.Fatalf("ListForAgent under a held lock: %v", err)
+	}
+	ids := func(items []Item) []string {
+		var out []string
+		for _, item := range items {
+			out = append(out, item.ID)
+		}
+		return out
+	}
+	if got := ids(gotPending); len(got) != 1 || got[0] != "p" {
+		t.Errorf("pending = %v, want [p]", got)
+	}
+	if got := ids(gotInFlight); len(got) != 1 || got[0] != "f" {
+		t.Errorf("in flight = %v, want [f]", got)
+	}
+	if got := ids(gotDead); len(got) != 2 || got[0] != "x" || got[1] != "d" {
+		t.Errorf("dead = %v, want [x d]: the expired live item reads dead", got)
+	}
+}

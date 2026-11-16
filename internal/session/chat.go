@@ -1448,7 +1448,7 @@ func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, by Actor, id strin
 	} else if err != nil {
 		return false, err
 	}
-	if started.queued {
+	if started.queued || m.startupTurnQueuedLocked(b, sessName) {
 		return false, nil // not delivered: the caller queues it behind the first turn
 	}
 	if transportFromMetadata(b) == "acp" {
@@ -1586,11 +1586,12 @@ func (m *Manager) sendLocked(ctx context.Context, by Actor, id string, b beads.B
 	if verifyDeferredDialogs {
 		m.dismissKnownDialogsLocked(ctx, sessName, codexDeferredDialogDelay)
 	}
-	if started.queued {
-		// The start this send made queued the session's first turn: the
-		// message waits behind it in the queue rather than reach the agent
-		// ahead of its startup prompt. Nothing was typed, so the dialogs
-		// stay unverified until a send types.
+	if started.queued || m.startupTurnQueuedLocked(b, sessName) {
+		// The session's first turn is still queued, by the start this send
+		// made or by an earlier one (an un-welded exec launch hands back
+		// every first turn): the message waits behind it in the queue
+		// rather than reach the agent ahead of its startup prompt. Nothing
+		// was typed, so the dialogs stay unverified until a send types.
 		return true, m.enqueueDeferredSubmitLocked(b, sessName, message, queueSource)
 	}
 	if err := m.pendingInteractionLocked(sessName); err != nil {

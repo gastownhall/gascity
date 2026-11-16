@@ -708,3 +708,99 @@ func TestACreateWhoseConfirmFailsQueuesNoTurn(t *testing.T) {
 		t.Fatalf("queued %+v; want no turn for a launch the create took down", it)
 	}
 }
+
+// typedLive returns the texts calls typed into a session.
+func typedLive(calls []runtime.Call) []string {
+	var typed []string
+	for _, call := range calls {
+		if call.Method == "Nudge" || call.Method == "NudgeNow" {
+			typed = append(typed, call.Message)
+		}
+	}
+	return typed
+}
+
+// Kills a direct send to a running session that types ahead of a first turn
+// an earlier start queued (every un-welded exec launch hands its first turn
+// back, so the window lasts until the queue delivers it): a Send and a
+// wait-idle nudge to a session whose startup turn is still queued type
+// nothing and leave their text behind it; a turn that expired or belongs to
+// another session holds nothing; once the turn is gone, the send types live.
+func TestSendToARunningSessionWaitsBehindItsQueuedStartupTurn(t *testing.T) {
+	stubSubmitPoller(t)
+	sp := &handbackStartProvider{Fake: runtime.NewFake(), nudge: handbackStartNudge}
+	mgr := newTestManager(t, beads.NewMemStore(), sp)
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if items := queuedHandbacks(t, mgr, info.ID); len(items) != 1 || !nudgequeue.IsStartupTurn(items[0]) {
+		t.Fatalf("queued %+v; want the create's startup turn", items)
+	}
+	city, err := mgr.CityDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hints := runtime.Config{WorkDir: info.WorkDir}
+	send := func(message string) (bool, []string) {
+		t.Helper()
+		before := len(sp.SnapshotCalls())
+		outcome, err := mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, message, BuildResumeCommand(info), hints)
+		if err != nil {
+			t.Fatalf("Send(%q): %v", message, err)
+		}
+		return outcome.Queued, typedLive(sp.SnapshotCalls()[before:])
+	}
+	if queued, typed := send("hello"); !queued || len(typed) != 0 {
+		t.Fatalf("Send behind a queued startup turn = queued %v, typed %q; want it queued, nothing typed", queued, typed)
+	}
+	b, sessName, err := mgr.sessionBead(info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := len(sp.SnapshotCalls())
+	delivered, err := mgr.tryWaitIdleNudgeLocked(context.Background(), testActor(mgr, ActorOperator), info.ID, b, deferredNudgeSource, sessName, "reminder", BuildResumeCommand(info), hints)
+	if err != nil || delivered {
+		t.Fatalf("wait-idle nudge behind a queued startup turn = delivered %v, %v; want undelivered, for its caller to queue", delivered, err)
+	}
+	if typed := typedLive(sp.SnapshotCalls()[before:]); len(typed) != 0 {
+		t.Fatalf("wait-idle nudge typed %q ahead of the startup turn", typed)
+	}
+	if items := queuedHandbacks(t, mgr, info.ID); len(items) != 2 || !nudgequeue.IsStartupTurn(items[0]) || items[1].Message != "hello" {
+		t.Fatalf("queued %+v; want the startup turn, then the message", items)
+	}
+
+	setTurns := func(edit func(turn *nudgequeue.Item)) {
+		t.Helper()
+		if err := nudgequeue.WithState(city.Path(), func(state *nudgequeue.State) error {
+			var kept []nudgequeue.Item
+			for _, item := range state.Pending {
+				if nudgequeue.IsStartupTurn(item) {
+					edit(&item)
+				}
+				if item.ID != "" {
+					kept = append(kept, item)
+				}
+			}
+			state.Pending = kept
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setTurns(func(turn *nudgequeue.Item) { turn.SessionID = "another-session" })
+	if queued, typed := send("to me"); queued || len(typed) != 1 {
+		t.Fatalf("Send beside another session's turn = queued %v, typed %q; want it typed live", queued, typed)
+	}
+	setTurns(func(turn *nudgequeue.Item) {
+		turn.SessionID = info.ID
+		turn.ExpiresAt = time.Now().Add(-time.Minute)
+	})
+	if queued, typed := send("expired"); queued || len(typed) != 1 {
+		t.Fatalf("Send behind an expired turn = queued %v, typed %q; want it typed live", queued, typed)
+	}
+	setTurns(func(turn *nudgequeue.Item) { *turn = nudgequeue.Item{} })
+	if queued, typed := send("after"); queued || len(typed) != 1 || typed[0] != "after" {
+		t.Fatalf("Send once the turn is gone = queued %v, typed %q; want it typed live", queued, typed)
+	}
+}

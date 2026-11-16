@@ -54,6 +54,23 @@ func IsStartupTurn(item Item) bool {
 	return ok
 }
 
+// HasLiveStartupTurn reports whether items, read from a queue at now, hold a
+// startup turn of session sessionID that is still to be delivered: one not
+// expired, fenced to sessionID or unfenced. A send typed straight into that
+// session would reach its agent ahead of the turn, so the sender queues it
+// instead, where the claim's barrier delivers the turn first.
+func HasLiveStartupTurn(sessionID string, items []Item, now time.Time) bool {
+	for _, item := range items {
+		if !IsStartupTurn(item) || expiredAt(item, now) {
+			continue
+		}
+		if item.SessionID == "" || item.SessionID == sessionID {
+			return true
+		}
+	}
+	return false
+}
+
 // LiveLaunch is what a claim learned about the launch its target runs now.
 type LiveLaunch struct {
 	// Asked reports that the claim asked. A judgement made before the ask
