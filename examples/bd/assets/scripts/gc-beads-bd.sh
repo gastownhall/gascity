@@ -3666,10 +3666,6 @@ op_start() {
             if [ "$GC_PROBE_PORT_HOLDER_OWNED" = "true" ]; then
                 graceful_stop_owned_pid "$holder" || \
                     die "could not stop dolt server (PID $holder) holding port $DOLT_PORT without risking journal corruption (check $LOG_FILE)"
-            else
-                if [ -z "$gc_helper_bin" ]; then
-                    leave_foreign_port_holder_alone "$holder"
-                fi
             fi
         fi
     else
