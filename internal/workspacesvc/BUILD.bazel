@@ -10,6 +10,7 @@ go_library(
         "proxy_process_linux.go",
         "proxy_process_other.go",
         "publication.go",
+        "reap_key_darwin.go",
         "reap_key_other.go",
         "registry.go",
         "types.go",
