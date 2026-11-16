@@ -256,7 +256,7 @@ func newRealBdStoreWorkspace(t *testing.T, prefix string) *beads.BdStore {
 // TestBdStoreMailWispInsertIsolatesHOMEFromSharedServerConfig mirrors
 // TestBdStoreMailWispInsert but deliberately points env's HOME at a
 // shared-server config.yaml before running the exact same
-// runBDInit/configureCustomTypes/pinnedBdStoreCommandRunnerWithEnv chain.
+// runBDInit/configureCustomTypes/isolatedBdStoreCommandRunner chain.
 //
 // newIsolatedToolEnv sets env's own HOME explicitly (via isolateGCHomeEnv/
 // integrationEnvFor), so t.Setenv("HOME", ...) cannot reach it. This test
@@ -313,7 +313,7 @@ func TestBdStoreMailWispInsertIsolatesHOMEFromSharedServerConfig(t *testing.T) {
 	if isoHome == pollutedHome {
 		t.Fatalf("isolateBdHomeEnv left HOME at the polluted %s; env has no GC_HOME to isolate to", pollutedHome)
 	}
-	store := beads.NewBdStore(wsDir, pinnedBdStoreCommandRunnerWithEnv(map[string]string{"HOME": isoHome}))
+	store := beads.NewBdStore(wsDir, isolatedBdStoreCommandRunner(env))
 
 	sent, err := store.Create(beads.Bead{
 		Title:     "home-isolation probe",

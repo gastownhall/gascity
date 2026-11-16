@@ -596,30 +596,6 @@ func isolatedBdStoreCommandRunner(env []string) beads.CommandRunner {
 	return beads.ExecCommandRunnerWithExactEnvContext(context.Background(), bdEnv)
 }
 
-// pinnedBdStoreCommandRunnerWithEnv keeps direct BdStore integration tests on
-// the same bd shim used by their setup commands. The default runner resolves
-// the ambient process PATH before its per-command environment applies, so
-// using it directly could select a host bd whose schema knowledge predates the
-// pinned Beads module that created the test database. overrides (layered over
-// beadstest.BdSubprocessEnv's defaults) are applied on top of the inherited
-// process environment of every bd invocation; callers pin HOME there so a
-// shared-server config.yaml in the ambient HOME cannot divert them. Its
-// workspaces are bound to a Dolt server (bd init --server-port), so test mode
-// is off unless an override says otherwise: see beadstest.EnvBeadsTestMode.
-func pinnedBdStoreCommandRunnerWithEnv(overrides map[string]string) beads.CommandRunner {
-	env := map[string]string{beadstest.EnvBeadsTestMode: "0"}
-	for k, v := range overrides {
-		env[k] = v
-	}
-	runner := beads.ExecCommandRunnerWithEnv(beadstest.BdSubprocessEnv(env))
-	return func(dir, name string, args ...string) ([]byte, error) {
-		if name == "bd" {
-			name = bdBinary
-		}
-		return runner(dir, name, args...)
-	}
-}
-
 func pinnedIntegrationBeadsModuleVersion() (string, error) {
 	// `go mod edit -json` reads go.mod alone. `go list -m` would fetch the
 	// module's .info from the proxy, which fails where tests have no network
