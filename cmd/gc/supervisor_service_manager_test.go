@@ -89,6 +89,7 @@ func TestSupervisorInstallRefusesWithoutAServiceManager(t *testing.T) {
 // failure would appear as sessions that never come up rather than as an
 // install error.
 func TestNoWindowsServiceRegistration(t *testing.T) {
+	// Windows service support is planned for a later PR; until then this keeps registration from landing piecemeal.
 	root := repoRoot(t)
 	banned := []string{
 		"golang.org/x/sys/windows/svc",
