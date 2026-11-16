@@ -3733,7 +3733,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		// same claim snapshot, and a partial one would read an advanced step
 		// as absent, so it does not run then.
 		if !result.StoreQueryPartial && !result.SessionQueryPartial {
-			nudgeOutstandingStartupKickoffs(cr.sp, cr.cfg, sessStore, stalledPoolBeads, claimWork, time.Now(), cr.rec, cr.stdout)
+			nudgeOutstandingStartupKickoffs(cr.sp, cr.cfg, sessStore, stalledPoolBeads, claimWork, false, time.Now(), cr.rec, cr.stdout)
 		}
 	}
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_stalled_pool_claims", phaseStart, nil)

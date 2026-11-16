@@ -2378,6 +2378,7 @@ go_test(
         "startup_health_materialization_test.go",
         "startup_health_reconcile_test.go",
         "startup_kickoff_nudge_test.go",
+        "startup_kickoff_wiring_test.go",
         "startup_nudge_handback_test.go",
         "startup_prompt_contract_test.go",
         "startup_prompt_delivery_test.go",

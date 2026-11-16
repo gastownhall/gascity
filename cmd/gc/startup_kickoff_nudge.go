@@ -40,10 +40,12 @@ func nudgeOutstandingStartupKickoffs(
 	store beads.Store,
 	sessionBeads []beads.Bead,
 	boundSteps []beads.Bead,
+	partial bool,
 	now time.Time,
 	rec events.Recorder,
 	stdout io.Writer,
 ) {
+	_ = partial // compile-only until the partial-snapshot guard lands
 	if sp == nil || cfg == nil || store == nil {
 		return // hot reconcile path: never panic on a half-built dependency
 	}

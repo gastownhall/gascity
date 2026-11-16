@@ -20,21 +20,8 @@ import (
 // the named/direct sibling to the pool claim/continuation and execution
 // backstops: it re-nudges a named/direct session whose bound step hasn't
 // advanced past an outstanding startup kickoff, and gives up (with a typed
-// event) after the shared max-attempts cap.
-
-// wantStartupKickoffGivenUpEventType pins the literal value GREEN is expected
-// to register as events.SessionStartupKickoffGivenUp (AC4). RED asserts
-// against this literal instead of importing the not-yet-existing events
-// symbol, so this step's diff stays entirely inside _test.go files.
-const wantStartupKickoffGivenUpEventType = "session.startup_kickoff_given_up"
-
-// startupKickoffGivenUpPayload mirrors the JSON shape GREEN is expected to
-// register as events.SessionStartupKickoffGivenUpPayload (AC4).
-type startupKickoffGivenUpPayload struct {
-	SessionID   string `json:"session_id"`
-	BoundStepID string `json:"bound_step_id"`
-	Attempts    int    `json:"attempts"`
-}
+// event) after the shared max-attempts cap. The wiring rows (tick and
+// external-reads lane) are in startup_kickoff_wiring_test.go.
 
 func startupKickoffTestCfg() *config.City {
 	return &config.City{Agents: []config.Agent{{
@@ -91,14 +78,14 @@ func TestNudgeOutstandingStartupKickoffs_WaitsThenNudgesAfterGrace(t *testing.T)
 	clk := &clock.Fake{Time: base}
 	var out bytes.Buffer
 
-	nudgeOutstandingStartupKickoffs(sp, cfg, store, []beads.Bead{session}, boundSteps, clk.Now(), rec, &out)
+	nudgeOutstandingStartupKickoffs(sp, cfg, store, []beads.Bead{session}, boundSteps, false, clk.Now(), rec, &out)
 	if got := sp.CountCalls("Nudge", "session-a"); got != 0 {
 		t.Fatalf("Nudge calls inside grace = %d, want 0", got)
 	}
 
 	clk.Advance(idleClaimNudgeGrace + time.Second)
 	session = mustGetStartupKickoffBead(t, store, session.ID)
-	nudgeOutstandingStartupKickoffs(sp, cfg, store, []beads.Bead{session}, boundSteps, clk.Now(), rec, &out)
+	nudgeOutstandingStartupKickoffs(sp, cfg, store, []beads.Bead{session}, boundSteps, false, clk.Now(), rec, &out)
 	if got := sp.CountCalls("Nudge", "session-a"); got != 1 {
 		t.Fatalf("Nudge calls after grace = %d, want 1", got)
 	}
@@ -131,7 +118,7 @@ func TestNudgeOutstandingStartupKickoffs_NoOpWhenBoundStepAlreadyAdvanced(t *tes
 	now := base.Add(2 * idleClaimNudgeBackoff)
 	var out bytes.Buffer
 
-	nudgeOutstandingStartupKickoffs(sp, cfg, store, []beads.Bead{session}, boundSteps, now, rec, &out)
+	nudgeOutstandingStartupKickoffs(sp, cfg, store, []beads.Bead{session}, boundSteps, false, now, rec, &out)
 	if got := sp.CountCalls("Nudge", "session-a"); got != 0 {
 		t.Fatalf("Nudge calls once the bound step advanced = %d, want 0", got)
 	}
@@ -165,7 +152,7 @@ func TestNudgeOutstandingStartupKickoffs_GivesUpAndEmitsTypedEventAtCap(t *testi
 	now := base.Add(2 * idleClaimNudgeBackoff)
 	var out bytes.Buffer
 
-	nudgeOutstandingStartupKickoffs(sp, cfg, store, []beads.Bead{session}, boundSteps, now, rec, &out)
+	nudgeOutstandingStartupKickoffs(sp, cfg, store, []beads.Bead{session}, boundSteps, false, now, rec, &out)
 	if got := sp.CountCalls("Nudge", "session-a"); got != 0 {
 		t.Fatalf("Nudge calls at exhaustion = %d, want 0 (giving up is not another delivery attempt)", got)
 	}
@@ -180,19 +167,22 @@ func TestNudgeOutstandingStartupKickoffs_GivesUpAndEmitsTypedEventAtCap(t *testi
 
 	var givenUp []events.Event
 	for _, e := range rec.Events {
-		if e.Type == wantStartupKickoffGivenUpEventType {
+		if e.Type == events.SessionStartupKickoffGivenUp {
 			givenUp = append(givenUp, e)
 		}
 	}
 	if len(givenUp) != 1 {
 		t.Fatalf("session.startup_kickoff_given_up events = %d, want exactly 1", len(givenUp))
 	}
+	if givenUp[0].Actor != "gc" {
+		t.Fatalf("given-up event actor = %q, want %q", givenUp[0].Actor, "gc")
+	}
 	if givenUp[0].Subject != "step-a" || givenUp[0].SessionID != session.ID {
 		t.Fatalf("given-up event subject=%q sessionID=%q, want subject=%q sessionID=%q",
 			givenUp[0].Subject, givenUp[0].SessionID, "step-a", session.ID)
 	}
 
-	var payload startupKickoffGivenUpPayload
+	var payload events.SessionStartupKickoffGivenUpPayload
 	if err := json.Unmarshal(givenUp[0].Payload, &payload); err != nil {
 		t.Fatalf("unmarshaling given-up payload: %v", err)
 	}
@@ -219,7 +209,7 @@ func TestNudgeOutstandingStartupKickoffs_NeverRenudgesAfterGivenUp(t *testing.T)
 	for range 5 {
 		now = now.Add(idleClaimNudgeBackoff)
 		session = mustGetStartupKickoffBead(t, store, session.ID)
-		nudgeOutstandingStartupKickoffs(sp, cfg, store, []beads.Bead{session}, boundSteps, now, rec, &out)
+		nudgeOutstandingStartupKickoffs(sp, cfg, store, []beads.Bead{session}, boundSteps, false, now, rec, &out)
 	}
 
 	if got := sp.CountCalls("Nudge", "session-a"); got != 0 {
@@ -227,7 +217,7 @@ func TestNudgeOutstandingStartupKickoffs_NeverRenudgesAfterGivenUp(t *testing.T)
 	}
 	var givenUp int
 	for _, e := range rec.Events {
-		if e.Type == wantStartupKickoffGivenUpEventType {
+		if e.Type == events.SessionStartupKickoffGivenUp {
 			givenUp++
 		}
 	}
@@ -250,7 +240,7 @@ func TestNudgeOutstandingStartupKickoffs_ExcludesPoolManagedSessions(t *testing.
 	now := base.Add(24 * time.Hour)
 	var out bytes.Buffer
 
-	nudgeOutstandingStartupKickoffs(sp, cfg, store, []beads.Bead{session}, boundSteps, now, rec, &out)
+	nudgeOutstandingStartupKickoffs(sp, cfg, store, []beads.Bead{session}, boundSteps, false, now, rec, &out)
 	if got := sp.CountCalls("Nudge", "session-a"); got != 0 {
 		t.Fatalf("Nudge calls for a pool-managed session = %d, want 0; pool backstops own delivery there, not this one", got)
 	}
@@ -280,8 +270,105 @@ func TestNudgeOutstandingStartupKickoffs_FreshBindIgnoresStaleLastNudgeTimestamp
 	rec := events.NewFake()
 	var out bytes.Buffer
 
-	nudgeOutstandingStartupKickoffs(sp, cfg, store, []beads.Bead{session}, boundSteps, rebindAt, rec, &out)
+	nudgeOutstandingStartupKickoffs(sp, cfg, store, []beads.Bead{session}, boundSteps, false, rebindAt, rec, &out)
 	if got := sp.CountCalls("Nudge", "session-a"); got != 0 {
 		t.Fatalf("Nudge calls immediately after a fresh rebind = %d, want 0; grace must be measured from the new cycle, not a stale last-nudge timestamp carried over from the previous one", got)
+	}
+}
+
+// A due nudge with no text to deliver gives up at once: the engine calls
+// exhausted without spending an attempt, so the kickoff latches given_up with
+// Attempts=0 and the typed event says so.
+func TestNudgeOutstandingStartupKickoffs_EmptyNudgeTextGivesUpAtOnce(t *testing.T) {
+	sp := runningStartupKickoffFake(t)
+	cfg := &config.City{Agents: []config.Agent{{Name: "agent-a"}}}
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	session := namedDirectSessionBead("step-a", base)
+	boundSteps := []beads.Bead{{ID: "step-a", Status: "open"}}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{session}, nil)
+	rec := events.NewFake()
+	var out bytes.Buffer
+
+	nudgeOutstandingStartupKickoffs(sp, cfg, store, []beads.Bead{session}, boundSteps, false, base.Add(idleClaimNudgeGrace+time.Second), rec, &out)
+	if got := sp.CountCalls("Nudge", "session-a"); got != 0 {
+		t.Fatalf("Nudge calls with no nudge text = %d, want 0", got)
+	}
+	session = mustGetStartupKickoffBead(t, store, session.ID)
+	if got := session.Metadata[startupKickoffStateKey]; got != startupKickoffStateGivenUp {
+		t.Fatalf("startup kickoff state = %q, want %q", got, startupKickoffStateGivenUp)
+	}
+	if got := session.Metadata[startupKickoffAttemptsKey]; got != "0" {
+		t.Fatalf("startup kickoff attempts = %q, want %q", got, "0")
+	}
+	var givenUp []events.Event
+	for _, e := range rec.Events {
+		if e.Type == events.SessionStartupKickoffGivenUp {
+			givenUp = append(givenUp, e)
+		}
+	}
+	if len(givenUp) != 1 {
+		t.Fatalf("session.startup_kickoff_given_up events = %d, want exactly 1", len(givenUp))
+	}
+	var payload events.SessionStartupKickoffGivenUpPayload
+	if err := json.Unmarshal(givenUp[0].Payload, &payload); err != nil {
+		t.Fatalf("unmarshaling given-up payload: %v", err)
+	}
+	if payload.Attempts != 0 {
+		t.Fatalf("given-up payload attempts = %d, want 0", payload.Attempts)
+	}
+}
+
+// A bound step that is not open, or that the snapshot does not hold, has
+// advanced: the kickoff latches confirmed without a nudge or an event.
+func TestNudgeOutstandingStartupKickoffs_LatchesConfirmedWhenBoundStepNotOpenOrAbsent(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		steps []beads.Bead
+	}{
+		{name: "closed", steps: []beads.Bead{{ID: "step-a", Status: "closed"}}},
+		{name: "absent", steps: []beads.Bead{{ID: "other-step", Status: "open"}}},
+		{name: "empty snapshot"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runningStartupKickoffFake(t)
+			base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+			session := namedDirectSessionBead("step-a", base)
+			store := beads.NewMemStoreFrom(0, []beads.Bead{session}, nil)
+			rec := events.NewFake()
+			var out bytes.Buffer
+
+			nudgeOutstandingStartupKickoffs(sp, startupKickoffTestCfg(), store, []beads.Bead{session}, tc.steps, false, base.Add(time.Hour), rec, &out)
+			if got := sp.CountCalls("Nudge", "session-a"); got != 0 {
+				t.Fatalf("Nudge calls = %d, want 0", got)
+			}
+			if got := mustGetStartupKickoffBead(t, store, session.ID).Metadata[startupKickoffStateKey]; got != startupKickoffStateConfirmed {
+				t.Fatalf("startup kickoff state = %q, want %q", got, startupKickoffStateConfirmed)
+			}
+			if len(rec.Events) != 0 {
+				t.Fatalf("recorded events = %d, want 0", len(rec.Events))
+			}
+		})
+	}
+}
+
+// A partial snapshot cannot tell an advanced step from an unread one, so the
+// backstop does nothing: the kickoff is not confirmed, nudged or given up.
+func TestNudgeOutstandingStartupKickoffs_PartialSnapshotIsNoOp(t *testing.T) {
+	sp := runningStartupKickoffFake(t)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	session := namedDirectSessionBead("step-a", base)
+	store := beads.NewMemStoreFrom(0, []beads.Bead{session}, nil)
+	rec := events.NewFake()
+	var out bytes.Buffer
+
+	nudgeOutstandingStartupKickoffs(sp, startupKickoffTestCfg(), store, []beads.Bead{session}, nil, true, base.Add(time.Hour), rec, &out)
+	if got := sp.CountCalls("Nudge", "session-a"); got != 0 {
+		t.Fatalf("Nudge calls on a partial snapshot = %d, want 0", got)
+	}
+	if got := mustGetStartupKickoffBead(t, store, session.ID).Metadata[startupKickoffStateKey]; got != startupKickoffStatePending {
+		t.Fatalf("startup kickoff state on a partial snapshot = %q, want untouched %q", got, startupKickoffStatePending)
+	}
+	if len(rec.Events) != 0 {
+		t.Fatalf("recorded events = %d, want 0", len(rec.Events))
 	}
 }
