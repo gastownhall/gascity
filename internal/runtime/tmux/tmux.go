@@ -5463,27 +5463,6 @@ func (t *Tmux) WaitForCommand(ctx context.Context, session string, excludeComman
 	return fmt.Errorf("timeout waiting for command (still running excluded command)")
 }
 
-// WaitForShellReady polls until the pane is running a shell command.
-// Useful for waiting until a process has exited and returned to shell.
-func (t *Tmux) WaitForShellReady(session string, timeout time.Duration) error {
-	shells := supportedShells
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		cmd, err := t.GetPaneCommand(session)
-		if err != nil {
-			time.Sleep(pollInterval)
-			continue
-		}
-		for _, shell := range shells {
-			if cmd == shell {
-				return nil
-			}
-		}
-		time.Sleep(pollInterval)
-	}
-	return fmt.Errorf("timeout waiting for shell")
-}
-
 // WaitForRuntimeReady polls until the runtime's prompt indicator appears in the pane.
 // Runtime is ready when we see the configured prompt prefix at the start of a line.
 //
