@@ -229,6 +229,19 @@ func TestBeadsQuiescenceRetiresOnlyAfterTheBeadEventWatcherFinishesEarlierEvents
 		pokeCh:         make(chan struct{}, 1),
 	}
 	cr.cs = cs
+	// The watcher hands a bead.closed's live confirmation to this dispatch and
+	// moves on, so its caught-up signal can fire while that run still holds
+	// store work. autocloseDone closes when the run has returned, after its
+	// store work ended: the one signal that the run is finished.
+	autocloseDone := make(chan struct{})
+	prevDispatch := beadCloseAutocloseDispatch
+	beadCloseAutocloseDispatch = func(fn func()) {
+		go func() {
+			defer close(autocloseDone)
+			fn()
+		}()
+	}
+	t.Cleanup(func() { beadCloseAutocloseDispatch = prevDispatch })
 	startQuiescenceEventWatcher(t, cs, ep)
 	// Release the backing before canceling/joining the watcher on any failure.
 	t.Cleanup(gate.unblock)
@@ -246,6 +259,7 @@ func TestBeadsQuiescenceRetiresOnlyAfterTheBeadEventWatcherFinishesEarlierEvents
 
 	gate.unblock()
 	awaitClose(t, ep.caughtUp, "bead event watcher finishing its backlog")
+	awaitClose(t, autocloseDone, "bead close confirmation finishing its live read")
 	assertQuiescentReaderRetired(t, cr, logPath)
 }
 
