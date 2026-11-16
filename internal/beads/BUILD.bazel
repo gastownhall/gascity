@@ -183,6 +183,8 @@ go_test(
         "filestore_atomic_close_test.go",
         "filestore_foreign_id_test.go",
         "filestore_guarded_batch_test.go",
+        "filestore_lockwait_internal_test.go",
+        "filestore_lockwait_test.go",
         "filestore_test.go",
         "guarded_batch_export_test.go",
         "guarded_batch_test.go",
@@ -348,6 +350,7 @@ go_test(
     # heavy_tests.txt apart.
     shard_count = 11,
     deps = [
+        "//internal/bazeltest",
         "//internal/beadmeta",
         "//internal/beads/beadstest",
         "//internal/beads/contract",
@@ -378,7 +381,6 @@ go_test(
             "@io_opentelemetry_go_otel_sdk_log//:log",
         ],
         "@rules_go//go/platform:android": [
-            "//internal/bazeltest",
             "//internal/processgroup/processgrouptest",
             "@io_opentelemetry_go_otel//attribute",
             "@io_opentelemetry_go_otel_log//global",
@@ -421,7 +423,6 @@ go_test(
             "@io_opentelemetry_go_otel_sdk_log//:log",
         ],
         "@rules_go//go/platform:linux": [
-            "//internal/bazeltest",
             "//internal/processgroup/processgrouptest",
             "@io_opentelemetry_go_otel//attribute",
             "@io_opentelemetry_go_otel_log//global",

@@ -1,6 +1,7 @@
 package beads_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -74,8 +75,8 @@ type errLocker struct {
 	unlockErr error
 }
 
-func (l errLocker) Lock() error   { return l.lockErr }
-func (l errLocker) Unlock() error { return l.unlockErr }
+func (l errLocker) Lock(context.Context) error { return l.lockErr }
+func (l errLocker) Unlock() error              { return l.unlockErr }
 
 // TestFileStoreIDPrefix pins the multi-rig collision fix: a file store opened
 // with WithFileStoreIDPrefix mints under that prefix, so two rig stores in one

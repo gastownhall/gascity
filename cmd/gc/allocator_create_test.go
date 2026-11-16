@@ -699,6 +699,7 @@ func TestCreateEffect_RefusedWriteFailsNoWriteAndBacksOff(t *testing.T) {
 		"sqlite store closed":            fmt.Errorf("sqlite store: %w", beads.ErrStoreClosed),
 		"native Dolt store closed":       fmt.Errorf("native Dolt store: %w", beads.ErrStoreClosed),
 		"sqlite busy retries exhausted":  fmt.Errorf("sqlite create: begin tx: %w", beads.ErrSQLiteBusyExhausted),
+		"store lock wait timed out":      fmt.Errorf("file store write lock beads.json: %w: %w", beads.ErrStoreTimeout, context.DeadlineExceeded),
 	} {
 		t.Run(name, func(t *testing.T) {
 			mem := beads.NewMemStore()
@@ -1283,6 +1284,22 @@ func TestCreateEffect_UnprovenBusyWriteIsAmbiguous(t *testing.T) {
 	h.reserve(t, "c1")
 	busy := errors.New("bd create: database is locked (5) (SQLITE_BUSY)")
 	h.runAll(t, &createPass{cfg: cfg, store: refusingCreateStore{Store: beads.NewMemStore(), err: busy}}, workerPlan(cfg, "c1", 1))
+	if e := h.entry(t); !e.Ambiguous {
+		t.Fatalf("settlement %+v, want ambiguous", e)
+	}
+	h.assertNoRefusal(t)
+}
+
+// Kills: a bare context deadline read as a write that committed nothing. Only
+// a store that can prove the write did not happen wraps ErrStoreTimeout; a
+// deadline from any other writer (a bd subprocess killed mid-write) proves
+// nothing, so it stays ambiguous.
+func TestCreateEffect_UnprovenDeadlineWriteIsAmbiguous(t *testing.T) {
+	cfg := workerCity(2)
+	h := newCreateHarness(t, nil)
+	h.reserve(t, "c1")
+	deadline := fmt.Errorf("bd create: %w", context.DeadlineExceeded)
+	h.runAll(t, &createPass{cfg: cfg, store: refusingCreateStore{Store: beads.NewMemStore(), err: deadline}}, workerPlan(cfg, "c1", 1))
 	if e := h.entry(t); !e.Ambiguous {
 		t.Fatalf("settlement %+v, want ambiguous", e)
 	}

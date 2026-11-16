@@ -20,7 +20,7 @@ func (fs *FileStore) ApplyGuarded(ctx context.Context, b GuardedBatch) (GuardedR
 	}
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
-	if err := fs.locker.Lock(); err != nil {
+	if err := fs.locker.Lock(context.Background()); err != nil {
 		return GuardedResult{}, err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock

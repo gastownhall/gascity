@@ -148,6 +148,7 @@ type FileStore struct {
 	path      string
 	locker    Locker // cross-process file lock; nopLocker when unset
 	freshness fileFreshness
+	lockWait  time.Duration // bound on a writer's lock wait; 0 keeps the default
 }
 
 var _ ConditionalAssignmentReleaser = (*FileStore)(nil)
@@ -199,6 +200,18 @@ func WithFileStoreIDPrefix(prefix string) FileStoreOption {
 			s.IDPrefix = normalizeIDPrefix(prefix)
 		}
 	}
+}
+
+// WithFileStoreLockWait bounds how long a writer waits for the store lock.
+// Stub: the option is recorded and not yet enforced.
+func WithFileStoreLockWait(d time.Duration) FileStoreOption {
+	return func(s *FileStore) { s.lockWait = d }
+}
+
+// lockForWrite is the one place a writer takes the store lock. Stub: it takes
+// nothing and returns a no-op unlock until the bounded wait lands.
+func (fs *FileStore) lockForWrite() (unlock func(), err error) {
+	return func() {}, nil
 }
 
 // OpenFileStore opens or creates a file-backed bead store at path. All file
@@ -345,7 +358,7 @@ func (fs *FileStore) refreshReadStateLocked() error {
 func (fs *FileStore) Create(b Bead) (Bead, error) {
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
-	if err := fs.locker.Lock(); err != nil {
+	if err := fs.locker.Lock(context.Background()); err != nil {
 		return Bead{}, err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
@@ -369,7 +382,7 @@ func (fs *FileStore) Create(b Bead) (Bead, error) {
 func (fs *FileStore) Update(id string, opts UpdateOpts) error {
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
-	if err := fs.locker.Lock(); err != nil {
+	if err := fs.locker.Lock(context.Background()); err != nil {
 		return err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
@@ -392,7 +405,7 @@ func (fs *FileStore) Update(id string, opts UpdateOpts) error {
 func (fs *FileStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
-	if err := fs.locker.Lock(); err != nil {
+	if err := fs.locker.Lock(context.Background()); err != nil {
 		return false, err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
@@ -416,7 +429,7 @@ func (fs *FileStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error)
 func (fs *FileStore) Close(id string) error {
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
-	if err := fs.locker.Lock(); err != nil {
+	if err := fs.locker.Lock(context.Background()); err != nil {
 		return err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
@@ -439,7 +452,7 @@ func (fs *FileStore) Close(id string) error {
 func (fs *FileStore) Reopen(id string) error {
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
-	if err := fs.locker.Lock(); err != nil {
+	if err := fs.locker.Lock(context.Background()); err != nil {
 		return err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
@@ -462,7 +475,7 @@ func (fs *FileStore) Reopen(id string) error {
 func (fs *FileStore) Delete(id string) error {
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
-	if err := fs.locker.Lock(); err != nil {
+	if err := fs.locker.Lock(context.Background()); err != nil {
 		return err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
@@ -484,7 +497,7 @@ func (fs *FileStore) Delete(id string) error {
 func (fs *FileStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
-	if err := fs.locker.Lock(); err != nil {
+	if err := fs.locker.Lock(context.Background()); err != nil {
 		return 0, err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
@@ -510,7 +523,7 @@ func (fs *FileStore) CloseAll(ids []string, metadata map[string]string) (int, er
 func (fs *FileStore) SetMetadata(id, key, value string) error {
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
-	if err := fs.locker.Lock(); err != nil {
+	if err := fs.locker.Lock(context.Background()); err != nil {
 		return err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
@@ -533,7 +546,7 @@ func (fs *FileStore) SetMetadata(id, key, value string) error {
 func (fs *FileStore) SetMetadataBatch(id string, kvs map[string]string) error {
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
-	if err := fs.locker.Lock(); err != nil {
+	if err := fs.locker.Lock(context.Background()); err != nil {
 		return err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
@@ -664,7 +677,7 @@ func (fs *FileStore) Ping() error {
 func (fs *FileStore) DepAdd(issueID, dependsOnID, depType string) error {
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
-	if err := fs.locker.Lock(); err != nil {
+	if err := fs.locker.Lock(context.Background()); err != nil {
 		return err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
@@ -687,7 +700,7 @@ func (fs *FileStore) DepAdd(issueID, dependsOnID, depType string) error {
 func (fs *FileStore) DepRemove(issueID, dependsOnID string) error {
 	fs.fmu.Lock()
 	defer fs.fmu.Unlock()
-	if err := fs.locker.Lock(); err != nil {
+	if err := fs.locker.Lock(context.Background()); err != nil {
 		return err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock

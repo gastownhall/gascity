@@ -62,6 +62,16 @@ var ErrReadyContextUnsupported = errors.New("context-aware ready unsupported")
 // handle has been closed.
 var ErrStoreClosed = errors.New("bead store closed")
 
+// ErrStoreTimeout reports that a store operation (a single transaction or a
+// lock wait) gave up on a lock or on its own deadline before committing
+// anything, so the write did not happen. It does not cover earlier committed
+// parts of a multi-transaction operation (DeleteBatch reports those in
+// BatchDeleteError.Committed). Only a store that can prove the write did not
+// happen returns it, and ExecStore never does. Callers wrap it together with
+// the ctx error (multi-%w), so errors.Is(err, context.DeadlineExceeded) also
+// holds.
+var ErrStoreTimeout = errors.New("store operation timed out")
+
 // ErrSQLiteBusyExhausted marks a SQLiteStore write whose every attempt failed
 // with SQLITE_BUSY, so it committed nothing: each attempt is one transaction,
 // and SQLite applies no statement, and commits no transaction, that reports

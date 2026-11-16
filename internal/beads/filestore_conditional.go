@@ -1,6 +1,9 @@
 package beads
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 // FileStore embeds *MemStore, which implements ConditionalWriter — but the
 // promoted methods would write straight to the in-memory MemStore, bypassing
@@ -30,7 +33,7 @@ func (fs *FileStore) UpdateIfMatch(id string, expectedRevision int64, opts Updat
 	if fs.DisableConditionalWrites {
 		return ErrConditionalWriteUnsupported
 	}
-	if err := fs.locker.Lock(); err != nil {
+	if err := fs.locker.Lock(context.Background()); err != nil {
 		return err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
@@ -56,7 +59,7 @@ func (fs *FileStore) CloseIfMatch(id string, expectedRevision int64) error {
 	if fs.DisableConditionalWrites {
 		return ErrConditionalWriteUnsupported
 	}
-	if err := fs.locker.Lock(); err != nil {
+	if err := fs.locker.Lock(context.Background()); err != nil {
 		return err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
@@ -82,7 +85,7 @@ func (fs *FileStore) DeleteIfMatch(id string, expectedRevision int64) error {
 	if fs.DisableConditionalWrites {
 		return ErrConditionalWriteUnsupported
 	}
-	if err := fs.locker.Lock(); err != nil {
+	if err := fs.locker.Lock(context.Background()); err != nil {
 		return err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
@@ -113,7 +116,7 @@ func (fs *FileStore) CloseWithMetadataIfMatch(id string, expectedRevision int64,
 	if fs.DisableConditionalWrites {
 		return Bead{}, ErrConditionalWriteUnsupported
 	}
-	if err := fs.locker.Lock(); err != nil {
+	if err := fs.locker.Lock(context.Background()); err != nil {
 		return Bead{}, err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
@@ -141,7 +144,7 @@ func (fs *FileStore) CompareAndSetMetadataKey(id, key, expected, next string) (b
 	if fs.DisableConditionalWrites {
 		return false, ErrConditionalWriteUnsupported
 	}
-	if err := fs.locker.Lock(); err != nil {
+	if err := fs.locker.Lock(context.Background()); err != nil {
 		return false, err
 	}
 	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
