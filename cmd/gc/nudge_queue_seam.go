@@ -1,7 +1,6 @@
 package main
 
 import (
-	"os"
 	"sync"
 	"time"
 
@@ -117,13 +116,4 @@ func nudgeLaunchReader(t nudgeTarget, sp runtime.Provider) func() (string, bool)
 		return nil
 	}
 	return func() (string, bool) { return runtime.ReadLaunchID(sp, t.sessionName) }
-}
-
-// nudgeOwnLaunchReader answers the launch of the process it runs in, from its
-// own GC_INSTANCE_TOKEN: the hook drain of its own session reads no runtime.
-func nudgeOwnLaunchReader() func() (string, bool) {
-	return func() (string, bool) {
-		id := runtime.LaunchID(os.Getenv(runtime.InstanceTokenEnv))
-		return id, id != ""
-	}
 }

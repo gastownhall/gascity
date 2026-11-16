@@ -122,8 +122,8 @@ func (nudgeManualDropCause) Is(target error) bool { return target == errNudgeSes
 var errNudgeManualDrop error = nudgeManualDropCause{}
 
 // nudgeStaleLaunchCause is the failure cause of a startup turn whose fenced
-// send missed its launch (runtime.ErrFenceMismatch): the launch it belongs to
-// is gone, so, like a fence mismatch, the turn is dead-lettered on the first
+// send missed its launch (runtime.ErrFenceMismatch) on proof that the launch
+// it belongs to is gone (fenceMissProvesLaunchGone), so, like a fence mismatch, the turn is dead-lettered on the first
 // failure, as stale-launch (nudgequeue.StaleLaunchReason).
 type nudgeStaleLaunchCause struct{}
 
@@ -923,14 +923,14 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		return 0
 	}
 
-	// The hook drain of its own session judges its startup turns by its own
-	// launch; an explicit drain of another session reads none and holds them.
-	var launch func() (string, bool)
-	if len(args) == 0 {
-		launch = nudgeOwnLaunchReader()
-	}
+	// A drain reads no runtime, so it supplies no live launch and its claim
+	// holds the session's startup turns (and the items behind them) for the
+	// claims that read the runtime (the poller, the dispatcher). Its own
+	// GC_INSTANCE_TOKEN, fixed when its process started, is no read taken
+	// after the claim's snapshot: a hook of a replaced launch judging by it
+	// would drop the replacement's turn.
 	now := time.Now()
-	items, err := claimDueQueuedNudgesForTarget(target.cityPath, target, launch, now)
+	items, err := claimDueQueuedNudgesForTarget(target.cityPath, target, nil, now)
 	if err != nil {
 		if inject {
 			fmt.Fprintf(stderr, "gc nudge drain: claiming queued nudges: %v\n", err) //nolint:errcheck
@@ -2643,6 +2643,11 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	if err != nil || len(items) == 0 {
 		return false, err
 	}
+	if gate.dropOnly {
+		// The queue changed since the gate looked: what the claim took
+		// waits for the session's quiet, handed back uncharged.
+		return false, releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items))
+	}
 	deliveryStore := store
 	if deliveryStore == nil {
 		deliveryStore = openNudgeBeadStore(target.cityPath).Store
@@ -2761,6 +2766,13 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 		AllowUnfenced: !fence.IsZero(),
 	})
 	if err != nil && !fence.IsZero() && errors.Is(err, runtime.ErrFenceMismatch) {
+		if !fenceMissProvesLaunchGone(err) {
+			// The runtime cannot tell which launch runs: that proves
+			// nothing, so the turn is handed back unsent and uncharged
+			// after the retry delay, for the next claim to judge.
+			relErr := releaseQueuedNudgeClaimsUntil(target.cityPath, queuedNudgeIDs(items), time.Now().Add(defaultQueuedNudgeRetryDelay))
+			return false, errors.Join(bookkeepErr, relErr)
+		}
 		// Another launch runs where the turn's was: the failure below
 		// dead-letters it, never typed into the replacement.
 		err = errNudgeStaleLaunch
@@ -2804,6 +2816,16 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 	telemetry.RecordNudge(context.Background(), target.agentKey(), nil)
 	stampLastNudgeDeliveredAt(deliverySessFront, target.sessionID, time.Now())
 	return true, errors.Join(bookkeepErr, ackQueuedNudges(target.cityPath, queuedNudgeIDs(items)))
+}
+
+// fenceMissProvesLaunchGone reports whether err, a fenced send's miss
+// (runtime.ErrFenceMismatch), proves the fenced launch gone: the runtime
+// found no session, a dead agent, or another launch's fence. A miss the
+// runtime could not prove (runtime.FenceFoundUnproven, or one that names
+// nothing found) does not.
+func fenceMissProvesLaunchGone(err error) bool {
+	var miss *runtime.FenceMismatchError
+	return errors.As(err, &miss) && miss.Found != "" && miss.Found != runtime.FenceFoundUnproven
 }
 
 // startupTurnFence is the fence a delivery led by item is sent under: none
@@ -2892,6 +2914,10 @@ type queuedNudgeGate struct {
 	// starved, if that is what opened the gate; zero when the session was
 	// quiet.
 	starvedAsOf time.Time
+	// dropOnly is set when the gate opened only for a claim that would
+	// dead-letter a stale startup turn and deliver nothing: the pass hands
+	// back anything its claim took after all.
+	dropOnly bool
 }
 
 // admit is the gate's answer, right before the send, for delivery, the items
@@ -2927,14 +2953,32 @@ func (g queuedNudgeGate) admit(target nudgeTarget, sp runtime.Provider, delivery
 // (starvedQueuedNudgeBypass): a turn running, on the screen or, for a
 // provider declaring hold_mid_turn under the switch on, in the program's
 // own record, holds the pass before it claims, and admit asks again before
-// it sends.
+// it sends. A claim that would deliver nothing and only dead-letter a stale
+// startup turn types nothing, so the gate opens for it (dropOnly): left
+// undone, that turn would read as due work on every tick until the session
+// idled.
 func queuedNudgeGateFor(target nudgeTarget, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation, now time.Time) (queuedNudgeGate, error) {
 	if pollerSessionIdleEnough(target, sp, quiescence, obs) {
 		return queuedNudgeGate{open: true}, nil
 	}
-	starved, err := queuedNudgeStarvedForTarget(target, nudgeLaunchReader(target, sp), now)
-	if err != nil || !starved {
+	launch := nudgeLaunchReader(target, sp)
+	batch, err := queuedNudgeNextBatch(target, launch, now)
+	if err != nil {
 		return queuedNudgeGate{}, err
+	}
+	if len(batch) == 0 {
+		probe := target
+		if probe.starvationCensus != nil {
+			probe.fenceCensus = probe.starvationCensus
+		}
+		dropOnly, err := openNudgeQueue(target.cityPath, beads.NudgesStore{}).Probe.WouldClaimBatch(probe.claimTarget(target.cityPath, launch), now)
+		if err != nil {
+			return queuedNudgeGate{}, fmt.Errorf("reading queued nudges for %s: %w", target.agentKey(), err)
+		}
+		return queuedNudgeGate{open: dropOnly, dropOnly: dropOnly}, nil
+	}
+	if delivery, _ := nextQueuedDeliveryGroup(batch); !queuedNudgeDeliveryStarved(delivery, now) {
+		return queuedNudgeGate{}, nil
 	}
 	_, hold, err := starvedQueuedNudgeBypass(target, sp, now)
 	if err != nil {
@@ -2962,15 +3006,27 @@ func queuedNudgeGateFor(target nudgeTarget, sp runtime.Provider, quiescence time
 // re-taken on every tick while an earlier deferral's deliver_after is still in
 // the future.
 func queuedNudgeStarvedForTarget(target nudgeTarget, launch func() (string, bool), now time.Time) (bool, error) {
+	batch, err := queuedNudgeNextBatch(target, launch, now)
+	if err != nil {
+		return false, err
+	}
+	delivery, _ := nextQueuedDeliveryGroup(batch)
+	return queuedNudgeDeliveryStarved(delivery, now), nil
+}
+
+// queuedNudgeNextBatch is the batch the next pass's claim for target would
+// take, from the claim's own dry run on a lock-free snapshot, its fences
+// judged by the starvation census when the caller holds one
+// (queuedNudgeStarvedForTarget).
+func queuedNudgeNextBatch(target nudgeTarget, launch func() (string, bool), now time.Time) ([]queuedNudge, error) {
 	if target.starvationCensus != nil {
 		target.fenceCensus = target.starvationCensus
 	}
 	batch, err := openNudgeQueue(target.cityPath, beads.NudgesStore{}).Probe.NextBatch(target.claimTarget(target.cityPath, launch), now)
 	if err != nil {
-		return false, fmt.Errorf("reading queued nudges for %s: %w", target.agentKey(), err)
+		return nil, fmt.Errorf("reading queued nudges for %s: %w", target.agentKey(), err)
 	}
-	delivery, _ := nextQueuedDeliveryGroup(batch)
-	return queuedNudgeDeliveryStarved(delivery, now), nil
+	return batch, nil
 }
 
 // queuedNudgeDeliveryStarved reports whether delivery, the items one delivery

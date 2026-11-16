@@ -200,6 +200,25 @@ func TestAReplacedLaunchsReleasedTurnIsNeverTyped(t *testing.T) {
 	}
 }
 
+// Kills a busy session's closed quiescence gate keeping a stale turn alive:
+// a claim that would only dead-letter it types nothing, so the pass runs it
+// past the gate, and the turn stops reading as due work on every tick.
+func TestABusySessionStillDropsAStaleTurn(t *testing.T) {
+	h := newLaunchHarness(t)
+	h.handBack(t, "first launch's turn")
+	t1 := h.turnID(t, "first launch's turn")
+	h.relaunch(t, "tok-second-launch")
+	busy := time.Now()
+	h.fake.Activity = map[string]time.Time{h.info.SessionName: busy}
+	h.obs.LastActivity = &busy
+	if delivered, sent := h.pass(t, h.sp); delivered || len(sent) != 0 {
+		t.Fatalf("pass = delivered %v, sent %+v; want nothing typed into the busy session", delivered, sent)
+	}
+	if reason := h.deadReason(t, t1); reason != nudgequeue.StaleLaunchReason {
+		t.Fatalf("the replaced launch's turn is dead with %q, want %q", reason, nudgequeue.StaleLaunchReason)
+	}
+}
+
 // Kills an unfenced startup turn send, a send into a launch the pre-send read
 // did not prove, and a fence miss that retries: the send carries the live
 // fence; a pre-send read that shows another launch hands the turn back
@@ -245,6 +264,38 @@ func TestAStartupTurnIsSentFencedToItsLaunch(t *testing.T) {
 		}
 		if reason := h.deadReason(t, id); reason != nudgequeue.StaleLaunchReason {
 			t.Fatalf("the missed turn is dead with %q, want %q", reason, nudgequeue.StaleLaunchReason)
+		}
+	})
+	t.Run("an unproven miss", func(t *testing.T) {
+		h := newLaunchHarness(t)
+		h.handBack(t, "the turn")
+		id := h.turnID(t, "the turn")
+		// The runtime reports the turn's launch, but its send-time check
+		// cannot tell which incarnation runs: the miss proves nothing.
+		env := h.startEnv(t)
+		unproven := map[string]string{}
+		for key, value := range env {
+			if key != runtime.InstanceTokenEnv {
+				unproven[key] = value
+			}
+		}
+		if err := h.fake.Stop(h.info.SessionName); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.fake.Start(context.Background(), h.info.SessionName, runtime.Config{Env: unproven}); err != nil {
+			t.Fatal(err)
+		}
+		h.publish(t, env)
+		before := time.Now()
+		if delivered, sent := h.pass(t, h.sp); delivered || len(sent) != 0 {
+			t.Fatalf("pass = delivered %v, sent %+v; want the miss to type nothing", delivered, sent)
+		}
+		if reason := h.deadReason(t, id); reason != "" {
+			t.Fatalf("the unproven miss dead-lettered the turn with %q; want it handed back", reason)
+		}
+		state := h.state(t)
+		if len(state.Pending) != 1 || state.Pending[0].ID != id || state.Pending[0].Attempts != 0 || !state.Pending[0].DeliverAfter.After(before) {
+			t.Fatalf("pending = %+v; want the turn handed back uncharged, after the retry delay", state.Pending)
 		}
 	})
 }
@@ -423,32 +474,28 @@ func TestPollGateReadsNoLaunchWhileNoTurnIsDue(t *testing.T) {
 	}
 }
 
-// Kills a hook drain that judges its turns by any launch but its own: the
-// drain of its own session reads its own GC_INSTANCE_TOKEN, takes its live
-// turn (which it leaves to the poller as a user's submit) and drops a turn
-// of a launch that is gone.
-func TestHookDrainJudgesByItsOwnLaunch(t *testing.T) {
+// Kills a drain that drops a startup turn on the strength of its own
+// GC_INSTANCE_TOKEN: a hook of a replaced launch would kill the
+// replacement's turn. The drain's claim supplies no launch, so it holds the
+// session's turns and the reminder behind them, and drops nothing.
+func TestADrainNeverDropsAStartupTurn(t *testing.T) {
 	h := newLaunchHarness(t)
-	t.Setenv(runtime.InstanceTokenEnv, "tok-hook")
+	t.Setenv(runtime.InstanceTokenEnv, "tok-replaced-launch")
 	agent := h.target.agentKey()
-	stale := newQueuedNudgeWithOptions(agent, "a gone launch's turn", nudgequeue.SourceSubmit, time.Now().Add(-time.Minute), queuedNudgeOptionsFromTarget(h.target))
-	stale.Reference = nudgequeue.StartupTurnReference(runtime.LaunchID("tok-gone"))
-	live := newQueuedNudgeWithOptions(agent, "the hook's turn", nudgequeue.SourceSubmit, time.Now(), queuedNudgeOptionsFromTarget(h.target))
-	live.Reference = nudgequeue.StartupTurnReference(runtime.LaunchID("tok-hook"))
-	for _, item := range []queuedNudge{stale, live} {
+	turn := newQueuedNudgeWithOptions(agent, "the replacement's turn", nudgequeue.SourceSubmit, time.Now().Add(-time.Minute), queuedNudgeOptionsFromTarget(h.target))
+	turn.Reference = nudgequeue.StartupTurnReference(runtime.LaunchID("tok-replacement"))
+	reminder := newQueuedNudgeWithOptions(agent, "a reminder", "sling", time.Now().Add(-time.Minute), queuedNudgeOptionsFromTarget(h.target))
+	for _, item := range []queuedNudge{turn, reminder} {
 		if err := openNudgeQueue(h.dir, beads.NudgesStore{}).Queue.EnqueueDeferred(item); err != nil {
 			t.Fatal(err)
 		}
 	}
-	claimed, err := claimDueQueuedNudgesForTarget(h.dir, h.target, nudgeOwnLaunchReader(), time.Now())
-	if err != nil || len(claimed) != 1 || claimed[0].ID != live.ID {
-		t.Fatalf("drain claim = %v, %v; want the hook's own launch's turn", queuedNudgeIDs(claimed), err)
+	claimed, err := claimDueQueuedNudgesForTarget(h.dir, h.target, nil, time.Now())
+	if err != nil || len(claimed) != 0 {
+		t.Fatalf("drain claim = %v, %v; want the session held", queuedNudgeIDs(claimed), err)
 	}
-	if _, submits := splitQueuedUserSubmits(claimed); len(submits) != 1 {
-		t.Fatalf("the drain would inject the turn as context; want it released to the poller as a submit")
-	}
-	if reason := h.deadReason(t, stale.ID); reason != nudgequeue.StaleLaunchReason {
-		t.Fatalf("the gone launch's turn is dead with %q, want %q", reason, nudgequeue.StaleLaunchReason)
+	if dead := h.state(t).Dead; len(dead) != 0 {
+		t.Fatalf("dead = %+v; want nothing dropped", dead)
 	}
 }
 

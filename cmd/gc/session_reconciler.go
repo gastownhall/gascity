@@ -7943,7 +7943,9 @@ func relaunchAgentForLaunchDrift(
 	relaunchErr := r.Relaunch(ctx, name, prepared.cfg)
 	// A startup nudge the session's program held back behind a dialog
 	// (program_status = "on", row A20) is queued, never typed or failed.
-	if err := queueStartupNudgeHandback(cityPath, cfg, sp, preparedInfo, name, prepared.cfg.Env[runtime.InstanceTokenEnv], relaunchErr == nil, time.Now()); err != nil {
+	// A warm relaunch keeps the box's token, never the config's, so the turn
+	// binds to the live token alone (else it is queued untagged).
+	if err := queueStartupNudgeHandback(cityPath, cfg, sp, preparedInfo, name, "", relaunchErr == nil, time.Now()); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: relaunch %s: %v\n", name, err) //nolint:errcheck
 	}
 	if err := relaunchErr; err != nil {

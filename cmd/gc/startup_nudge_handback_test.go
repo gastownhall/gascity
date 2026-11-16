@@ -107,7 +107,24 @@ func TestV2RelaunchQueuesTheHandedBackStartupNudge(t *testing.T) {
 				t.Fatalf("relaunch %+v (%v); want landed %v", out, err, !tc.refuse)
 			}
 			wantQueuedHandbacks(t, c.w.CityPath, c.w.Env.Cfg, row, gatherNow, tc.queued)
+			wantNoTurnBoundToTheConfig(t, c.w.CityPath)
 		})
+	}
+}
+
+// wantNoTurnBoundToTheConfig fails if a turn a warm relaunch handed back is
+// bound to a launch: the box publishes no token, and a warm relaunch keeps
+// the box's token, never the config's, so the turn is queued untagged.
+func wantNoTurnBoundToTheConfig(t *testing.T, dir string) {
+	t.Helper()
+	state, err := nudgequeue.LoadState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range state.Pending {
+		if launch, ok := nudgequeue.StartupTurnLaunch(item); ok {
+			t.Fatalf("queued %+v bound to launch %q; want it untagged", item, launch)
+		}
 	}
 }
 
@@ -129,4 +146,5 @@ func TestLegacyRelaunchQueuesTheHandedBackStartupNudge(t *testing.T) {
 		t.Fatalf("not relaunched; stderr=%s", env.stderr.String())
 	}
 	wantQueuedHandbacks(t, env.city, env.cfg, env.sessionInfo(sess.ID), time.Now(), 1)
+	wantNoTurnBoundToTheConfig(t, env.city)
 }
