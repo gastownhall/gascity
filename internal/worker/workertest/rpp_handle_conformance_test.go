@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	goruntime "runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -554,6 +555,17 @@ func firstTurnQueuedResult(t *testing.T) Result {
 		if !ok || runtime.LaunchID(fence.Token) != bound {
 			return Fail(rppHandleProfile, RequirementRPPFirstTurnQueued,
 				fmt.Sprintf("%s: the pre-send fence read = %s, %v; want the turn's launch, or the queue releases it on every pass", label, fence, ok))
+		}
+		// The queue claims the turn before it sends it: in flight, it no
+		// longer holds the live-only send that carries it.
+		if err := nudgequeue.WithState(cityPath, func(state *nudgequeue.State) error {
+			state.Pending = slices.DeleteFunc(state.Pending, func(item nudgequeue.Item) bool { return item.ID == turn.ID })
+			claimed := turn
+			claimed.LeaseUntil = time.Now().Add(time.Minute)
+			state.InFlight = append(state.InFlight, claimed)
+			return nil
+		}); err != nil {
+			t.Fatalf("claiming the queued first turn: %v", err)
 		}
 		result, err := handle.Nudge(context.Background(), managerActor(t, manager, sessionpkg.ActorAgent), worker.NudgeRequest{
 			Text:          turn.Message,

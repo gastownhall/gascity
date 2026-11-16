@@ -43,11 +43,11 @@ func (m *Manager) deferredQueue() DeferredSubmitQueue {
 	return nudgequeue.StateFileQueue{CityPath: m.cityPath}
 }
 
-// deferredSubmitLister is a DeferredSubmitQueue that also lists what it
-// holds for a queue key: pending, in flight and dead, as of now. The city's
-// nudge queues (file and beads) and StateFileQueue are listers.
-type deferredSubmitLister interface {
-	ListForAgent(agent string, now time.Time) (pending, inFlight, dead []nudgequeue.Item, err error)
+// deferredSubmitSnapshotter is a DeferredSubmitQueue that can read what it
+// holds without maintaining it: the city's nudge queues (file and beads) and
+// StateFileQueue are snapshotters.
+type deferredSubmitSnapshotter interface {
+	Snapshot() (nudgequeue.State, error)
 }
 
 // startupTurnQueuedLocked reports whether b's session sessName still has a
@@ -55,29 +55,38 @@ type deferredSubmitLister interface {
 // first turn of a launch that handed it back, such as every un-welded exec
 // launch, which is delivered from the queue once the agent takes input. A
 // send typed into the running session now would reach the agent ahead of
-// it, so the send queues its text behind it instead. It reads the keys the
-// session's items are queued under (its alias, else its id); a queue that
-// cannot list reads as no turn, and one whose read fails reads as a turn,
-// since a queued send is delivered in order either way.
-func (m *Manager) startupTurnQueuedLocked(b beads.Bead, sessName string) bool {
-	lister, ok := m.deferredQueue().(deferredSubmitLister)
+// it, so the send queues its text behind it, or reports it undelivered,
+// instead. inFlightToo counts a turn the queue is delivering now as well; a
+// live-only send leaves it out, since the queue's own delivery of the turn,
+// and of the items it holds behind the turn, runs with the turn in flight.
+// It takes one pure snapshot of the queue, never the maintaining listing,
+// and looks under the keys the session's items are queued under (its alias
+// and its id). A queue that cannot snapshot reads as no turn, and one whose
+// read fails reads as a turn, logged, since a queued send is delivered in
+// order either way.
+func (m *Manager) startupTurnQueuedLocked(b beads.Bead, sessName string, inFlightToo bool) bool {
+	snap, ok := m.deferredQueue().(deferredSubmitSnapshotter)
 	if !ok || b.ID == "" {
 		return false
 	}
+	state, err := snap.Snapshot()
+	if err != nil {
+		log.Printf("session: %q: reading the queue for a startup turn to send behind: %v; holding the send", sessName, err)
+		return true
+	}
+	alias := strings.TrimSpace(b.Metadata["alias"])
+	mine := func(items []nudgequeue.Item) []nudgequeue.Item {
+		var out []nudgequeue.Item
+		for _, item := range items {
+			if item.Agent == b.ID || (alias != "" && item.Agent == alias) {
+				out = append(out, item)
+			}
+		}
+		return out
+	}
 	now := time.Now().UTC()
-	keys := []string{b.ID}
-	if alias := strings.TrimSpace(b.Metadata["alias"]); alias != "" && alias != b.ID {
-		keys = append(keys, alias)
+	if nudgequeue.HasLiveStartupTurn(b.ID, mine(state.Pending), now) {
+		return true
 	}
-	for _, key := range keys {
-		pending, inFlight, _, err := lister.ListForAgent(key, now)
-		if err != nil {
-			log.Printf("session: %q: reading the queue for a startup turn to send behind: %v; queueing the send", sessName, err)
-			return true
-		}
-		if nudgequeue.HasLiveStartupTurn(b.ID, pending, now) || nudgequeue.HasLiveStartupTurn(b.ID, inFlight, now) {
-			return true
-		}
-	}
-	return false
+	return inFlightToo && nudgequeue.HasLiveStartupTurn(b.ID, mine(state.InFlight), now)
 }

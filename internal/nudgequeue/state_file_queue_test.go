@@ -127,22 +127,17 @@ func TestStateFileQueueWithdrawQueuedWaitNudges(t *testing.T) {
 	}
 }
 
-// Kills a listing that leaks another agent's items, serves an expired live
-// item as pending, or takes the queue lock: ListForAgent reads state.json
-// as is and buckets the agent's items as of now.
-func TestStateFileQueueListForAgent(t *testing.T) {
+// Kills a snapshot that takes the queue lock or runs maintenance: Snapshot
+// reads state.json as is, under a held lock, expired items included.
+func TestStateFileQueueSnapshot(t *testing.T) {
 	now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
 	city := t.TempDir()
 	pending := deferredTestItem("p", now)
 	expired := deferredTestItem("x", now.Add(-2*time.Hour))
 	inFlight := deferredTestItem("f", now)
-	dead := deferredTestItem("d", now)
-	other := deferredTestItem("o", now)
-	other.Agent = "beta"
 	if err := WithState(city, func(state *State) error {
-		state.Pending = []Item{pending, expired, other}
+		state.Pending = []Item{pending, expired}
 		state.InFlight = []Item{inFlight}
-		state.Dead = []Item{dead}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -152,24 +147,11 @@ func TestStateFileQueueListForAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer unlock()
-	gotPending, gotInFlight, gotDead, err := StateFileQueue{CityPath: city}.ListForAgent("alpha", now)
+	state, err := StateFileQueue{CityPath: city}.Snapshot()
 	if err != nil {
-		t.Fatalf("ListForAgent under a held lock: %v", err)
+		t.Fatalf("Snapshot under a held lock: %v", err)
 	}
-	ids := func(items []Item) []string {
-		var out []string
-		for _, item := range items {
-			out = append(out, item.ID)
-		}
-		return out
-	}
-	if got := ids(gotPending); len(got) != 1 || got[0] != "p" {
-		t.Errorf("pending = %v, want [p]", got)
-	}
-	if got := ids(gotInFlight); len(got) != 1 || got[0] != "f" {
-		t.Errorf("in flight = %v, want [f]", got)
-	}
-	if got := ids(gotDead); len(got) != 2 || got[0] != "x" || got[1] != "d" {
-		t.Errorf("dead = %v, want [x d]: the expired live item reads dead", got)
+	if len(state.Pending) != 2 || len(state.InFlight) != 1 || len(state.Dead) != 0 {
+		t.Fatalf("Snapshot = %d pending, %d in flight, %d dead; want 2, 1, 0: as stored, unmaintained", len(state.Pending), len(state.InFlight), len(state.Dead))
 	}
 }
