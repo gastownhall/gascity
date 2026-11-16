@@ -51,11 +51,12 @@ func stubSQLiteBusySleep(t *testing.T, onSleep func()) *int {
 	t.Helper()
 	sleeps := 0
 	prev := sqliteBusySleep
-	sqliteBusySleep = func(time.Duration) {
+	sqliteBusySleep = func(context.Context, time.Duration) error {
 		sleeps++
 		if onSleep != nil {
 			onSleep()
 		}
+		return nil
 	}
 	t.Cleanup(func() { sqliteBusySleep = prev })
 	return &sleeps

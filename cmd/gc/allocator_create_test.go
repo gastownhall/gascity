@@ -686,7 +686,8 @@ func TestCreateEffect_LockedReadFailureBacksOffFenceRead(t *testing.T) {
 // from the P3-6b review): it would hold the token until resolved and skip
 // the create backoff, so the planner re-plans the identity at pass rate. A gate
 // refusal, a code-less not-found, a lost fence, a store that cannot fence, a
-// closed store and a SQLite write out of busy retries fail the entry with no
+// closed store, a SQLite write out of busy retries and a SQLite operation that
+// gave up on its own deadline fail the entry with no
 // row and back off the identity, as fence-read: none proves the name taken
 // (F3).
 func TestCreateEffect_RefusedWriteFailsNoWriteAndBacksOff(t *testing.T) {
@@ -699,6 +700,7 @@ func TestCreateEffect_RefusedWriteFailsNoWriteAndBacksOff(t *testing.T) {
 		"sqlite store closed":            fmt.Errorf("sqlite store: %w", beads.ErrStoreClosed),
 		"native Dolt store closed":       fmt.Errorf("native Dolt store: %w", beads.ErrStoreClosed),
 		"sqlite busy retries exhausted":  fmt.Errorf("sqlite create: begin tx: %w", beads.ErrSQLiteBusyExhausted),
+		"sqlite store operation timeout": fmt.Errorf("sqlite create: %w: %w", beads.ErrStoreTimeout, context.DeadlineExceeded),
 	} {
 		t.Run(name, func(t *testing.T) {
 			mem := beads.NewMemStore()
@@ -1283,6 +1285,23 @@ func TestCreateEffect_UnprovenBusyWriteIsAmbiguous(t *testing.T) {
 	h.reserve(t, "c1")
 	busy := errors.New("bd create: database is locked (5) (SQLITE_BUSY)")
 	h.runAll(t, &createPass{cfg: cfg, store: refusingCreateStore{Store: beads.NewMemStore(), err: busy}}, workerPlan(cfg, "c1", 1))
+	if e := h.entry(t); !e.Ambiguous {
+		t.Fatalf("settlement %+v, want ambiguous", e)
+	}
+	h.assertNoRefusal(t)
+}
+
+// Kills: a bare context deadline read as a write that committed nothing. Only
+// a store that proves it gave up before committing says so (ErrStoreTimeout);
+// an error that wraps only context.DeadlineExceeded (an exec store whose
+// subprocess outlived its context) stays ambiguous, since the write may have
+// landed.
+func TestCreateEffect_UnprovenDeadlineWriteIsAmbiguous(t *testing.T) {
+	cfg := workerCity(2)
+	h := newCreateHarness(t, nil)
+	h.reserve(t, "c1")
+	deadline := fmt.Errorf("bd create: %w", context.DeadlineExceeded)
+	h.runAll(t, &createPass{cfg: cfg, store: refusingCreateStore{Store: beads.NewMemStore(), err: deadline}}, workerPlan(cfg, "c1", 1))
 	if e := h.entry(t); !e.Ambiguous {
 		t.Fatalf("settlement %+v, want ambiguous", e)
 	}

@@ -295,7 +295,7 @@ func TestSQLiteStoreGraphCookUnderConcurrentWriter(t *testing.T) {
 		t.Skip("seeds a large store")
 	}
 	prevSleep := sqliteBusySleep
-	sqliteBusySleep = func(time.Duration) {}
+	sqliteBusySleep = func(context.Context, time.Duration) error { return nil }
 	t.Cleanup(func() { sqliteBusySleep = prevSleep })
 
 	dir := t.TempDir()

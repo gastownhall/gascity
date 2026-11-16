@@ -289,6 +289,7 @@ go_test(
         "schema_cursor_drift_test.go",
         "session_key_hook_bd_integration_test.go",
         "session_key_hook_test.go",
+        "sqlite_ctx_guard_test.go",
         "sqlite_sequence_floor_lock_test.go",
         "sqlite_sequence_test.go",
         "sqlite_snapshot_test.go",
@@ -303,6 +304,7 @@ go_test(
         "sqlite_store_hardening_test.go",
         "sqlite_store_list_assignees_test.go",
         "sqlite_store_noop_write_test.go",
+        "sqlite_store_op_timeout_test.go",
         "sqlite_store_readonly_uri_test.go",
         "sqlite_store_ready_test.go",
         "sqlite_store_revision_differential_test.go",
@@ -348,6 +350,7 @@ go_test(
     # heavy_tests.txt apart.
     shard_count = 11,
     deps = [
+        "//internal/bazeltest",
         "//internal/beadmeta",
         "//internal/beads/beadstest",
         "//internal/beads/contract",
@@ -378,7 +381,6 @@ go_test(
             "@io_opentelemetry_go_otel_sdk_log//:log",
         ],
         "@rules_go//go/platform:android": [
-            "//internal/bazeltest",
             "//internal/processgroup/processgrouptest",
             "@io_opentelemetry_go_otel//attribute",
             "@io_opentelemetry_go_otel_log//global",
@@ -421,7 +423,6 @@ go_test(
             "@io_opentelemetry_go_otel_sdk_log//:log",
         ],
         "@rules_go//go/platform:linux": [
-            "//internal/bazeltest",
             "//internal/processgroup/processgrouptest",
             "@io_opentelemetry_go_otel//attribute",
             "@io_opentelemetry_go_otel_log//global",

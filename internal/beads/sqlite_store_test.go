@@ -930,12 +930,12 @@ func TestIsSQLiteBusy(t *testing.T) {
 func TestRetryOnBusy(t *testing.T) {
 	var slept []time.Duration
 	prevSleep := sqliteBusySleep
-	sqliteBusySleep = func(d time.Duration) { slept = append(slept, d) }
+	sqliteBusySleep = func(_ context.Context, d time.Duration) error { slept = append(slept, d); return nil }
 	t.Cleanup(func() { sqliteBusySleep = prevSleep })
 
 	t.Run("succeeds_immediately", func(t *testing.T) {
 		calls := 0
-		err := retryOnBusy(func() error {
+		err := retryOnBusy(context.Background(), func() error {
 			calls++
 			return nil
 		})
@@ -950,7 +950,7 @@ func TestRetryOnBusy(t *testing.T) {
 	t.Run("retries_on_busy_then_succeeds", func(t *testing.T) {
 		calls := 0
 		busyErr := errors.New("database is locked (5) (SQLITE_BUSY)")
-		err := retryOnBusy(func() error {
+		err := retryOnBusy(context.Background(), func() error {
 			calls++
 			if calls < 3 {
 				return busyErr
@@ -968,7 +968,7 @@ func TestRetryOnBusy(t *testing.T) {
 	t.Run("exhausts_retries_and_returns_busy_error", func(t *testing.T) {
 		calls := 0
 		busyErr := errors.New("database is locked (5) (SQLITE_BUSY)")
-		err := retryOnBusy(func() error {
+		err := retryOnBusy(context.Background(), func() error {
 			calls++
 			return busyErr
 		})
@@ -986,7 +986,7 @@ func TestRetryOnBusy(t *testing.T) {
 	t.Run("backs_off_exponentially_with_bounded_jitter", func(t *testing.T) {
 		slept = nil
 		busyErr := errors.New("database is locked (517)")
-		_ = retryOnBusy(func() error { return busyErr })
+		_ = retryOnBusy(context.Background(), func() error { return busyErr })
 		if len(slept) != sqliteBusyRetryAttempts {
 			t.Fatalf("slept %d times, want %d", len(slept), sqliteBusyRetryAttempts)
 		}
@@ -1005,7 +1005,7 @@ func TestRetryOnBusy(t *testing.T) {
 
 	t.Run("does_not_retry_non_busy_error", func(t *testing.T) {
 		calls := 0
-		err := retryOnBusy(func() error {
+		err := retryOnBusy(context.Background(), func() error {
 			calls++
 			return errors.New("something else went wrong")
 		})
