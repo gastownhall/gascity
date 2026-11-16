@@ -3078,7 +3078,7 @@ calls = 5
 [[count]]
 path = "scripts/add_testenv_import_test.go"
 resource = "subprocess"
-calls = 1
+calls = 2
 medium = 1
 
 [[count]]
