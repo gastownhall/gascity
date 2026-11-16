@@ -16,10 +16,14 @@ the others' in-progress caches. The incident (vp-g96b, 2026-06-13) produced
 ~10 cascading cache-miss errors across the executor pool.
 
 **Just run `go build` / `make` — do NOT set `GOCACHE` yourself.** The host `go`
-shim already routes the default `GOCACHE` to a shared **on-disk** cache
-(`~/.cache/go-build`) and pins compile/link temp to disk
-(`GOTMPDIR=/var/tmp/gotmp`). A warm shared cache is faster and is never
-corrupted by a normal build.
+shim already routes the default `GOCACHE` to a shared cache
+(`~/.cache/go-build`) and pins compile/link temp to `GOTMPDIR=/var/tmp/gotmp`.
+Both are their own RAM-backed tmpfs mount (`/etc/fstab`, gm-cdpprm), not disk.
+So both count against host RAM (tmpfs pages are swappable, so they add to swap
+pressure) and both are empty after every reboot, which makes the first build
+after a reboot cold. A full `/var/tmp/gotmp` fails the build with `ENOSPC`
+instead of breaking the harness; that is why it is a mount of its own. A warm
+shared cache is faster and is never corrupted by a normal build.
 
 **Never point `GOCACHE` (or `TMPDIR`) at `/tmp`.** `/tmp` is a size-capped
 RAM-backed tmpfs (61G) shared by the whole fleet — including the harness's
@@ -33,7 +37,9 @@ defeats it.
 **If you truly need an isolated cold build** (a from-scratch compile without
 `go clean -cache`), put the throwaway cache **on disk** and remove it
 unconditionally with a `trap`, and redirect `TMPDIR` to the same dir so the
-linker's own scratch also stays off tmpfs:
+linker's own scratch also stays off tmpfs. `/var/tmp` itself is the btrfs root
+disk; only its `/var/tmp/gotmp` subdirectory is a tmpfs mount, so do not point
+the throwaway cache there:
 
 ```bash
 tmp=$(mktemp -d -p /var/tmp) && trap 'rm -rf "$tmp"' EXIT
