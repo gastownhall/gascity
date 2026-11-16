@@ -534,7 +534,7 @@ cmd/gc/cmd_doctor.go	openStoreForCity	raw-result	2
 cmd/gc/cmd_doctor.go	perRunStoreFactory	raw-field	1
 cmd/gc/cmd_doctor.go	perRunStoreFactory	raw-param	1
 cmd/gc/cmd_doctor.go	perRunStoreFactory	raw-result	2
-cmd/gc/cmd_doctor_skill_sinks.go	doctorLiveSessionSinks	mint	1
+cmd/gc/cmd_doctor_live_sessions.go	doctorLiveSessionInfos	mint	1
 cmd/gc/cmd_events_reemit_execution.go	openExistingExecutionReemitStore	raw-result	1
 cmd/gc/cmd_events_reemit_execution.go	projectExecutionReemitRun	raw-param	1
 cmd/gc/cmd_formula.go	closeFormulaCookFailedGraphV2Roots	mint	1

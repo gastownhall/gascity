@@ -2700,9 +2700,14 @@ resource = "fixed_sleep"
 calls = 1
 
 [[count]]
+path = "internal/runtime/subprocess/subprocess_private_unix_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
 path = "internal/runtime/subprocess/subprocess_test.go"
 resource = "fixed_sleep"
-calls = 10
+calls = 6
 
 [[count]]
 path = "internal/runtime/subprocess/subprocess_test.go"
@@ -3044,6 +3049,11 @@ path = "internal/workspacesvc/proxy_process_pdeathsig_linux_test.go"
 resource = "subprocess"
 calls = 1
 tagged = true
+
+[[count]]
+path = "internal/workspacesvc/proxy_process_reap_test.go"
+resource = "fixed_sleep"
+calls = 1
 
 [[count]]
 path = "internal/workspacesvc/proxy_process_test.go"
