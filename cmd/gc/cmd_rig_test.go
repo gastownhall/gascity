@@ -130,6 +130,73 @@ func TestDoRigAdd_Basic(t *testing.T) {
 	}
 }
 
+// TestDoRigAdd_WaitsForControllerReload pins that `gc rig add` returns only
+// after the running controller has applied the new rig. A reload that is merely
+// queued leaves the controller serving `gc ready` from the pre-rig config until
+// its reconcile tick starts the reload, so work created in the rig right after
+// the add is missing from a controller-served answer.
+func TestDoRigAdd_WaitsForControllerReload(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	rigPath := filepath.Join(t.TempDir(), "my-frontend")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "bd")
+
+	oldSend := sendReloadControlRequestHook
+	t.Cleanup(func() { sendReloadControlRequestHook = oldSend })
+	var requests []reloadControlRequest
+	sendReloadControlRequestHook = func(_ string, req reloadControlRequest) (reloadControlReply, error) {
+		requests = append(requests, req)
+		return reloadControlReply{Outcome: reloadOutcomeApplied}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
+	}
+	if len(requests) != 1 {
+		t.Fatalf("controller reload requests = %d (%+v), want exactly 1", len(requests), requests)
+	}
+	if !requests[0].Wait || requests[0].Timeout == "" {
+		t.Errorf("reload request = %+v, want Wait with a Timeout so the rig is served before rig add returns", requests[0])
+	}
+}
+
+// TestDoRigAdd_AddsRigWhenControllerUnavailable pins that waiting for the
+// reload never turns a stopped controller into a failed add: the rig is in
+// city.toml and a later controller start reads it.
+func TestDoRigAdd_AddsRigWhenControllerUnavailable(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	rigPath := filepath.Join(t.TempDir(), "my-frontend")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "bd")
+
+	oldSend := sendReloadControlRequestHook
+	t.Cleanup(func() { sendReloadControlRequestHook = oldSend })
+	sendReloadControlRequestHook = func(string, reloadControlRequest) (reloadControlReply, error) {
+		return reloadControlReply{}, errControllerUnavailable
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("doRigAdd returned %d with no controller, stderr: %s", code, stderr.String())
+	}
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "my-frontend") {
+		t.Errorf("city.toml should contain the rig:\n%s", data)
+	}
+}
+
 func TestDoRigAdd_PreservesComments(t *testing.T) {
 	cityPath := t.TempDir()
 	cityToml := `# This is a city-level rationale comment.
