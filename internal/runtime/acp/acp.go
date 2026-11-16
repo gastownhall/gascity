@@ -154,7 +154,8 @@ func (p *Provider) SupportsTransport(transport string) bool {
 
 // Start spawns an ACP agent process, performs the JSON-RPC handshake, and
 // optionally sends the initial nudge. Returns an error if a session with
-// that name already exists or the handshake fails.
+// that name already exists, the handshake fails, or the initial nudge cannot
+// be delivered; a start that fails after spawning the agent stops it.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("acp start for %q: %w", name, err)
@@ -522,10 +523,56 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	releaseStartup()
 
 	// Keep delivery bound to this incarnation if Stop and a retry interleave.
+	// A startup prompt the agent never received fails the start rather than
+	// leaving a session that silently lacks it; every such error precedes the
+	// prompt's delivery, so the caller's retry delivers it exactly once.
 	if cfg.Nudge != "" {
-		_ = p.nudgeConn(name, sc, runtime.TextContent(cfg.Nudge))
+		if err := p.nudgeConn(name, sc, runtime.TextContent(cfg.Nudge)); err != nil {
+			err = fmt.Errorf("delivering the startup prompt to %q: %w", name, err)
+			if stopErr := p.abandonStartup(name, sc); stopErr != nil {
+				err = errors.Join(err, fmt.Errorf("stopping %q after the failed delivery: %w", name, stopErr))
+			}
+			return err
+		}
 	}
 
+	return nil
+}
+
+// abandonStartup ends sc, the connection Start committed for name, when Start
+// cannot complete it. It acts on sc alone: when a concurrent Stop has already
+// taken sc, that Stop owns its teardown and a replacement may own name.
+func (p *Provider) abandonStartup(name string, sc *sessionConn) error {
+	lock, err := p.lockLifecycle(name, false)
+	if err != nil {
+		return err
+	}
+	defer lock.Close() //nolint:errcheck
+
+	p.mu.Lock()
+	if p.conns[name] != sc {
+		p.mu.Unlock()
+		return nil
+	}
+	delete(p.conns, name)
+	delete(p.workDirs, name)
+	p.mu.Unlock()
+
+	_ = sc.stdin.Close()
+	if err := terminateProcess(sc, p.cfg.stopGrace()); err != nil && !runtime.IsSessionGone(err) {
+		// As in Stop: keep a tree that is still held reachable, so a retry
+		// acts on the same tree rather than finding nothing.
+		if processgroup.HoldsTree(sc.cmd) {
+			p.mu.Lock()
+			if _, replaced := p.conns[name]; !replaced {
+				p.conns[name] = sc
+			}
+			p.mu.Unlock()
+		}
+		return err
+	}
+	p.cleanupOwnMeta(name, sc.token)
+	sc.emitClosed()
 	return nil
 }
 
