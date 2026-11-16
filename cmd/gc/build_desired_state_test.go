@@ -723,7 +723,10 @@ func TestCollectAssignedWorkBeadsUsesCachedInProgressReadModel(t *testing.T) {
 	}
 }
 
-func TestCollectAssignedWorkBeadsReprimesWhenCachedInProgressDirty(t *testing.T) {
+// A dirty partial cache cannot answer the in-progress read, and the cached
+// handle no longer primes inline to recover (that stalled the tick): the
+// collector reads live instead, and the answer is still complete.
+func TestCollectAssignedWorkBeadsReadsLiveWhenCachedInProgressDirty(t *testing.T) {
 	backing := &demandRefreshFailStore{Store: beads.NewMemStore()}
 	work, err := backing.Create(beads.Bead{
 		Title: "handoff becomes active",
@@ -746,16 +749,13 @@ func TestCollectAssignedWorkBeadsReprimesWhenCachedInProgressDirty(t *testing.T)
 
 	got, partial := collectAssignedWorkBeads(&config.City{}, cache)
 	if partial {
-		t.Fatal("collectAssignedWorkBeads reported partial with successful cache reprime")
+		t.Fatal("collectAssignedWorkBeads reported partial with a successful live fallback")
 	}
 	if len(got) != 1 || got[0].ID != work.ID || got[0].Status != "in_progress" || got[0].Assignee != "repo/refinery" {
-		t.Fatalf("collectAssignedWorkBeads returned %#v, want reprime in-progress %s", got, work.ID)
+		t.Fatalf("collectAssignedWorkBeads returned %#v, want live in-progress %s", got, work.ID)
 	}
-	if backing.liveInProgressIssueLists != 0 {
-		t.Fatalf("live issue in_progress list calls = %d, want shared cache reprime", backing.liveInProgressIssueLists)
-	}
-	if backing.liveInProgressWispLists != 0 {
-		t.Fatalf("live wisp in_progress list calls = %d, want shared cache reprime", backing.liveInProgressWispLists)
+	if backing.liveInProgressIssueLists == 0 {
+		t.Fatalf("live issue in_progress list calls = 0, want a live fallback while the cache is dirty and unprimed")
 	}
 }
 
@@ -830,8 +830,10 @@ func TestDefaultScaleCheckCountsKeepsCachedRowsWhenLiveFreshnessFails(t *testing
 	}
 	const template = "gascity/workflows.codex-min"
 	cache := beads.NewCachingStoreForTest(backing, nil)
-	if err := cache.PrimeActive(); err != nil {
-		t.Fatalf("PrimeActive: %v", err)
+	// The cached Ready read serves only a fully primed cache and never primes
+	// inline; a partial (PrimeActive) cache would send it to the backing store.
+	if err := cache.Prime(t.Context()); err != nil {
+		t.Fatalf("Prime: %v", err)
 	}
 
 	counts, partialTemplates, errs := defaultScaleCheckCounts([]defaultScaleCheckTarget{{
@@ -1664,8 +1666,10 @@ func TestDefaultScaleCheckCountsHonorsCachedWriteThroughDependencies(t *testing.
 		t.Fatalf("create blocked: %v", err)
 	}
 	cache := beads.NewCachingStoreForTest(backing, nil)
-	if err := cache.PrimeActive(); err != nil {
-		t.Fatalf("PrimeActive: %v", err)
+	// The cached Ready read serves only a fully primed cache and never primes
+	// inline; a partial (PrimeActive) cache would send it to the backing store.
+	if err := cache.Prime(t.Context()); err != nil {
+		t.Fatalf("Prime: %v", err)
 	}
 	if err := cache.DepAdd(blocked.ID, blocker.ID, "blocks"); err != nil {
 		t.Fatalf("DepAdd: %v", err)

@@ -126,8 +126,9 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		"reconcileGate":   true, // reconcile-loop gate, fixed at construction
 		"now":             true, // the clock (WithClock), fixed at construction
 		"onChange":        true, "problemf": true, "problemLog": true,
+		"liveRefresh":        true, // live-list refresh cursors and log window, per instance; not cache state
 		"lastReconcileLogAt": true, "primeMu": true, "primeRunning": true,
-		"primeCycle": true, "lastFullPrimeStartedAt": true, "primeRetryDelay": true,
+		"primeCycle": true, "primeRetryDelay": true,
 		"lifecycleMu": true, "lifecycleWG": true, "cancelFn": true, "stopCh": true,
 		"stopped": true, "latencyWindow": true, "latencyDriverActive": true,
 		"applyEventBeforeCommitForTest": true,

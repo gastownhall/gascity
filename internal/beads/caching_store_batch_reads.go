@@ -1,5 +1,7 @@
 package beads
 
+import "time"
+
 // The CachingStore's batched reads.
 //
 // The cache wraps its backing store as a concrete type, so an optional
@@ -136,18 +138,29 @@ type backingRead struct {
 // missing bead, a substring collision and a transient failure each surface
 // with Get's own error.
 func (c *CachingStore) readBackingRows(ids []string) []backingRead {
-	reads := make([]backingRead, len(ids))
+	return c.readBackingRowsUntil(ids, time.Time{})
+}
+
+// readBackingRowsUntil is readBackingRows with a time box: it stops before
+// starting a Get once deadline has passed, and answers only the ids it read,
+// a prefix of ids. A zero deadline reads every id. The batched read is one
+// round trip and is never cut; a Get in flight at the deadline finishes.
+func (c *CachingStore) readBackingRowsUntil(ids []string, deadline time.Time) []backingRead {
+	reads := make([]backingRead, 0, len(ids))
 	prefetched, err := PrefetchExact(c.backing, ids)
 	if err != nil {
 		prefetched = nil
 	}
-	for i, id := range ids {
+	for _, id := range ids {
 		if bead, ok := prefetched[id]; ok {
-			reads[i] = backingRead{bead: bead}
+			reads = append(reads, backingRead{bead: bead})
 			continue
 		}
+		if !deadline.IsZero() && !c.clockNow().Before(deadline) {
+			break
+		}
 		bead, err := c.backing.Get(id)
-		reads[i] = backingRead{bead: bead, err: err}
+		reads = append(reads, backingRead{bead: bead, err: err})
 	}
 	return reads
 }

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sort"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -333,35 +335,113 @@ func (c *CachingStore) cacheServableForListQueryLocked(query ListQuery) bool {
 	return slices.Contains(partialPrimeStatuses, query.Status)
 }
 
+// liveRefreshBudget is how long a live list's stale-row refresh keeps starting
+// point reads. The refresh is cache maintenance: its rows never join the
+// list's answer, and the cache's own reconciler corrects whatever it leaves.
+const liveRefreshBudget = 2 * time.Second
+
+// liveRefreshState is where a time-boxed stale-row refresh resumes, and when
+// it last logged that it stopped early. Guarded by mu; not cache state.
+type liveRefreshState struct {
+	mu          sync.Mutex
+	parentAfter string
+	liveAfter   string
+	lastLogAt   time.Time
+}
+
+// staleRowReads is what a live list's stale-row refresh read: the rows the
+// backing store still holds and the ids it no longer has, for the parent's
+// children and for the rows a live query omits.
+type staleRowReads struct {
+	refreshedParents map[string]Bead
+	removedParents   map[string]struct{}
+	refreshedLive    map[string]Bead
+	removedLive      map[string]struct{}
+}
+
+// readStaleRows point-reads the cached rows a live list found stale. One time
+// box (liveRefreshBudget) covers both lists, checked before each read, so a
+// slow backing Get costs at most the budget plus the read in flight. Rows left
+// unread keep the cache's copy; each list resumes after the last id its
+// previous call read, so a row the live list keeps omitting is not starved by
+// the others. A cut refresh is logged, not counted as a cache problem.
+func (c *CachingStore) readStaleRows(query ListQuery, items []Bead) staleRowReads {
+	out := staleRowReads{
+		refreshedParents: make(map[string]Bead),
+		removedParents:   make(map[string]struct{}),
+		refreshedLive:    make(map[string]Bead),
+		removedLive:      make(map[string]struct{}),
+	}
+	deadline := c.clockNow().Add(liveRefreshBudget)
+	skipped := c.readStaleIDs(c.staleParentCacheIDs(query.ParentID, items), &c.liveRefresh.parentAfter,
+		deadline, "refresh parent cache during list", out.refreshedParents, out.removedParents)
+	skipped += c.readStaleIDs(c.staleLiveCacheIDs(query, items), &c.liveRefresh.liveAfter,
+		deadline, "refresh live cache during list", out.refreshedLive, out.removedLive)
+	if skipped > 0 {
+		c.logLiveRefreshCut(skipped)
+	}
+	return out
+}
+
+// readStaleIDs reads ids in sorted order from just after *after, files each
+// answer under refreshed or removed (a read error is a cache problem under
+// op), moves *after to the last id read, and returns how many ids it left.
+func (c *CachingStore) readStaleIDs(ids []string, after *string, deadline time.Time, op string,
+	refreshed map[string]Bead, removed map[string]struct{},
+) int {
+	if len(ids) == 0 {
+		return 0
+	}
+	sort.Strings(ids)
+	c.liveRefresh.mu.Lock()
+	start := sort.Search(len(ids), func(i int) bool { return ids[i] > *after })
+	c.liveRefresh.mu.Unlock()
+	ordered := append(slices.Clone(ids[start:]), ids[:start]...)
+	reads := c.readBackingRowsUntil(ordered, deadline)
+	for i, read := range reads {
+		id := ordered[i]
+		switch {
+		case read.err == nil:
+			refreshed[id] = cloneBead(read.bead)
+		case errors.Is(read.err, ErrNotFound):
+			removed[id] = struct{}{}
+		default:
+			c.recordProblem(op, fmt.Errorf("%s: %w", id, read.err))
+		}
+	}
+	c.liveRefresh.mu.Lock()
+	switch {
+	case len(reads) == len(ordered):
+		*after = ""
+	case len(reads) > 0:
+		*after = ordered[len(reads)-1]
+	}
+	c.liveRefresh.mu.Unlock()
+	return len(ordered) - len(reads)
+}
+
+// logLiveRefreshCut logs, at most once per cacheProblemLogWindow, that a live
+// list's refresh stopped at its time box with skipped rows unread. It does not
+// touch the problem counters: ProblemCount and LastProblemAt drive the
+// reconciler's backoff, and a slow point read is not a failing cache.
+func (c *CachingStore) logLiveRefreshCut(skipped int) {
+	now := c.clockNow()
+	c.liveRefresh.mu.Lock()
+	if !c.liveRefresh.lastLogAt.IsZero() && now.Sub(c.liveRefresh.lastLogAt) < cacheProblemLogWindow {
+		c.liveRefresh.mu.Unlock()
+		return
+	}
+	c.liveRefresh.lastLogAt = now
+	c.liveRefresh.mu.Unlock()
+	if c.problemf != nil {
+		c.problemf(fmt.Sprintf("live list refresh stopped after %s for store %q: %d stale rows not re-read", liveRefreshBudget, c.idPrefix, skipped))
+	}
+}
+
 func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq, startScan uint64, items []Bead) []Bead {
-	refreshedParents := make(map[string]Bead)
-	removedParents := make(map[string]struct{})
-	refreshedLiveMissing := make(map[string]Bead)
-	removedLiveMissing := make(map[string]struct{})
-	staleParents := c.staleParentCacheIDs(query.ParentID, items)
-	for i, read := range c.readBackingRows(staleParents) {
-		id := staleParents[i]
-		switch {
-		case read.err == nil:
-			refreshedParents[id] = cloneBead(read.bead)
-		case errors.Is(read.err, ErrNotFound):
-			removedParents[id] = struct{}{}
-		default:
-			c.recordProblem("refresh parent cache during list", fmt.Errorf("%s: %w", id, read.err))
-		}
-	}
-	staleLive := c.staleLiveCacheIDs(query, items)
-	for i, read := range c.readBackingRows(staleLive) {
-		id := staleLive[i]
-		switch {
-		case read.err == nil:
-			refreshedLiveMissing[id] = cloneBead(read.bead)
-		case errors.Is(read.err, ErrNotFound):
-			removedLiveMissing[id] = struct{}{}
-		default:
-			c.recordProblem("refresh live cache during list", fmt.Errorf("%s: %w", id, read.err))
-		}
-	}
+	stale := c.readStaleRows(query, items)
+	refreshedParents, removedParents := stale.refreshedParents, stale.removedParents
+	refreshedLiveMissing, removedLiveMissing := stale.refreshedLive, stale.removedLive
 	if len(items) == 0 && len(refreshedParents) == 0 && len(removedParents) == 0 &&
 		len(refreshedLiveMissing) == 0 && len(removedLiveMissing) == 0 {
 		return items

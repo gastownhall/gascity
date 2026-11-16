@@ -239,8 +239,9 @@ func TestDemandReadTrace_RecordsEveryLegOpTierRows(t *testing.T) {
 		}
 	}
 	rigStore := beads.NewCachingStoreForTest(backing, nil)
-	if err := rigStore.PrimeActive(); err != nil {
-		t.Fatalf("PrimeActive: %v", err)
+	// The cached handle serves only a fully primed cache (no inline prime).
+	if err := rigStore.Prime(t.Context()); err != nil {
+		t.Fatalf("Prime: %v", err)
 	}
 	tracer, cycle := demandTraceCycle(t, cityDir, clk)
 	sessionSnapshot, err := loadSessionBeadSnapshot(cityStore)

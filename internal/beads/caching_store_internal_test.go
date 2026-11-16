@@ -385,73 +385,6 @@ func TestCachingStoreListLiveInvalidatesCachedRowsMissingFromBacking(t *testing.
 	}
 }
 
-func TestCachingStoreHandlesCachedReadsShareFullPrime(t *testing.T) {
-	t.Parallel()
-
-	mem := NewMemStore()
-	bead, err := mem.Create(Bead{Title: "cached work"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	backing := &blockingPrimeListStore{
-		Store:   mem,
-		started: make(chan struct{}),
-		release: make(chan struct{}),
-	}
-	cache := NewCachingStoreForTest(backing, nil)
-	handles := cache.Handles()
-
-	var wg sync.WaitGroup
-	errs := make(chan error, 3)
-	wg.Add(3)
-	go func() {
-		defer wg.Done()
-		rows, err := handles.Cached.List(ListQuery{Status: "open"})
-		if err == nil && (len(rows) != 1 || rows[0].ID != bead.ID) {
-			err = fmt.Errorf("cached List rows = %#v, want %s", rows, bead.ID)
-		}
-		errs <- err
-	}()
-	go func() {
-		defer wg.Done()
-		rows, err := handles.Cached.Ready()
-		if err == nil && (len(rows) != 1 || rows[0].ID != bead.ID) {
-			err = fmt.Errorf("cached Ready rows = %#v, want %s", rows, bead.ID)
-		}
-		errs <- err
-	}()
-	go func() {
-		defer wg.Done()
-		if _, err := handles.Cached.DepList(bead.ID, "down"); err != nil {
-			errs <- err
-			return
-		}
-		errs <- nil
-	}()
-
-	select {
-	case <-backing.started:
-	case <-time.After(time.Second):
-		t.Fatal("cached reads did not start shared full prime")
-	}
-	time.Sleep(25 * time.Millisecond)
-	if got := backing.primeListCalls.Load(); got != 1 {
-		t.Fatalf("prime list calls while cached reads blocked = %d, want 1", got)
-	}
-
-	close(backing.release)
-	wg.Wait()
-	close(errs)
-	for err := range errs {
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	if got := backing.primeListCalls.Load(); got != 1 {
-		t.Fatalf("total prime list calls = %d, want 1", got)
-	}
-}
-
 func TestCachingStoreHandlesCachedListUsesActiveSnapshotAfterPrimeActive(t *testing.T) {
 	t.Parallel()
 
@@ -592,56 +525,9 @@ func TestCachingStoreHandlesCachedReadDoesNotPrimeWhenDegraded(t *testing.T) {
 	}
 }
 
-func TestCachingStoreHandlesCachedReadsSuppressRecentPartialPrimeRetry(t *testing.T) {
-	t.Parallel()
-
-	mem := NewMemStore()
-	bead, err := mem.Create(Bead{Title: "cached work"})
-	if err != nil {
-		t.Fatalf("Create: %v", err)
-	}
-	backing := &countingPartialFullPrimeStore{
-		partialListErrorStore: &partialListErrorStore{
-			Store:            mem,
-			partialAllowScan: true,
-			partialRows:      []Bead{bead},
-		},
-	}
-	cache := NewCachingStoreForTest(backing, nil)
-	if err := cache.Prime(context.Background()); err != nil {
-		t.Fatalf("Prime: %v", err)
-	}
-	if got := backing.primeListCalls.Load(); got != 1 {
-		t.Fatalf("prime list calls after partial Prime = %d, want 1", got)
-	}
-
-	for i := 0; i < 2; i++ {
-		if _, err := cache.Handles().Cached.List(ListQuery{Status: "open"}); !errors.Is(err, ErrCacheUnavailable) {
-			t.Fatalf("Cached.List attempt %d error = %v, want ErrCacheUnavailable", i+1, err)
-		}
-	}
-	if got := backing.primeListCalls.Load(); got != 1 {
-		t.Fatalf("prime list calls after suppressed cached reads = %d, want 1", got)
-	}
-
-	backing.partialAllowScan = false
-	cache.primeMu.Lock()
-	cache.lastFullPrimeStartedAt = time.Now().Add(-cacheLazyFullPrimeRetryInterval - time.Second)
-	cache.primeMu.Unlock()
-
-	rows, err := cache.Handles().Cached.List(ListQuery{Status: "open"})
-	if err != nil {
-		t.Fatalf("Cached.List after retry interval: %v", err)
-	}
-	if len(rows) != 1 || rows[0].ID != bead.ID {
-		t.Fatalf("Cached.List rows after retry = %#v, want %s", rows, bead.ID)
-	}
-	if got := backing.primeListCalls.Load(); got != 2 {
-		t.Fatalf("prime list calls after retry interval = %d, want 2", got)
-	}
-}
-
-func TestCachingStoreHandlesCachedListHardPrimeFailureReturnsCacheUnavailable(t *testing.T) {
+// A cache that never primed answers the cached handle with ErrCacheUnavailable
+// without reading the backing store, and the live handle still answers.
+func TestCachingStoreHandlesCachedListOnUnprimedCacheFallsBackToLive(t *testing.T) {
 	t.Parallel()
 
 	mem := NewMemStore()
@@ -663,17 +549,12 @@ func TestCachingStoreHandlesCachedListHardPrimeFailureReturnsCacheUnavailable(t 
 		err:   errors.New("full scan unavailable"),
 	}
 	cache := NewCachingStoreForTest(backing, nil)
-	cache.primeRetryDelay = func(int) time.Duration { return 0 }
 
-	_, err = cache.Handles().Cached.List(ListQuery{Status: "in_progress"})
-	if !errors.Is(err, ErrCacheUnavailable) {
+	if _, err := cache.Handles().Cached.List(ListQuery{Status: "in_progress"}); !errors.Is(err, ErrCacheUnavailable) {
 		t.Fatalf("Cached.List error = %v, want ErrCacheUnavailable", err)
 	}
-	if !strings.Contains(err.Error(), "full scan unavailable") {
-		t.Fatalf("Cached.List error = %v, want hard prime cause preserved", err)
-	}
-	if got := backing.primeListCalls.Load(); got != 3 {
-		t.Fatalf("full-prime list calls = %d, want 3 retries", got)
+	if got := backing.primeListCalls.Load(); got != 0 {
+		t.Fatalf("full-prime list calls = %d, want 0: the cached handle must not prime", got)
 	}
 
 	rows, err := cache.Handles().Live.List(ListQuery{Status: "in_progress"})
@@ -707,7 +588,6 @@ func TestCachingStorePrimeWaiterReturnsGenerationError(t *testing.T) {
 	close(cycle.done)
 	cache.primeCycle = &fullPrimeCycle{done: make(chan struct{})}
 	cache.primeRunning = true
-	cache.lastFullPrimeStartedAt = time.Now()
 	cache.primeMu.Unlock()
 
 	if err := <-waitErr; !errors.Is(err, firstErr) {
@@ -728,6 +608,9 @@ func TestCachingStoreHandlesReadLogicalStoreWithoutTierFlags(t *testing.T) {
 		t.Fatalf("Create wisp: %v", err)
 	}
 	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
 
 	cachedRows, err := cache.Handles().Cached.List(ListQuery{Status: "open"})
 	if err != nil {
@@ -819,18 +702,6 @@ func (s *blockingPrimeListStore) List(query ListQuery) ([]Bead, error) {
 		<-s.release
 	}
 	return s.Store.List(query)
-}
-
-type countingPartialFullPrimeStore struct {
-	*partialListErrorStore
-	primeListCalls atomic.Int64
-}
-
-func (s *countingPartialFullPrimeStore) List(query ListQuery) ([]Bead, error) {
-	if query.AllowScan && query.SkipLabels && query.TierMode == TierBoth {
-		s.primeListCalls.Add(1)
-	}
-	return s.partialListErrorStore.List(query)
 }
 
 type hardFailFullPrimeStore struct {

@@ -195,17 +195,20 @@ type CachingStore struct {
 	problemf       func(string)
 	problemLog     map[string]cacheProblemLogState
 
+	// liveRefresh is where the live-list stale-row refresh resumes and when it
+	// last logged a truncation (liveRefreshState).
+	liveRefresh liveRefreshState
+
 	// lastReconcileLogAt rate-limits the per-reconcile success log line
 	// emitted by runReconciliation. Without this, a busy cache at SMALL
 	// cadence (30 s) would still produce 2 lines/min — and at faster test
 	// cadences would flood logs. cacheReconcileSuccessLogWindow caps the
 	// rate at one line per minute, matching cacheProblemLogWindow.
-	lastReconcileLogAt     time.Time
-	primeMu                sync.Mutex
-	primeRunning           bool
-	primeCycle             *fullPrimeCycle
-	lastFullPrimeStartedAt time.Time
-	primeRetryDelay        func(attempt int) time.Duration
+	lastReconcileLogAt time.Time
+	primeMu            sync.Mutex
+	primeRunning       bool
+	primeCycle         *fullPrimeCycle
+	primeRetryDelay    func(attempt int) time.Duration
 
 	lifecycleMu sync.Mutex
 	lifecycleWG sync.WaitGroup
@@ -474,15 +477,14 @@ type CacheStats struct {
 }
 
 const (
-	maxCacheSyncFailures            = 5
-	cacheReconcilePollInterval      = 5 * time.Second
-	cacheReconcileIntervalSmall     = 30 * time.Second
-	cacheLazyFullPrimeRetryInterval = cacheReconcileIntervalSmall
-	cacheReconcileIntervalMedium    = 60 * time.Second
-	cacheReconcileIntervalLarge     = 120 * time.Second
-	cacheProblemLogWindow           = time.Minute
-	cacheReconcileBaseBackoff       = 2 * time.Second
-	cacheReconcileMaxBackoff        = 10 * time.Minute
+	maxCacheSyncFailures         = 5
+	cacheReconcilePollInterval   = 5 * time.Second
+	cacheReconcileIntervalSmall  = 30 * time.Second
+	cacheReconcileIntervalMedium = 60 * time.Second
+	cacheReconcileIntervalLarge  = 120 * time.Second
+	cacheProblemLogWindow        = time.Minute
+	cacheReconcileBaseBackoff    = 2 * time.Second
+	cacheReconcileMaxBackoff     = 10 * time.Minute
 	// cacheReconcileSuccessLogWindow rate-limits the per-reconcile success
 	// log line. Reuses the one-minute pattern from cacheProblemLogWindow so
 	// the reconciler's footprint in the operator-visible log stays bounded
@@ -1846,75 +1848,22 @@ func (c *CachingStore) waitForFullPrimeDone(ctx context.Context, cycle *fullPrim
 	return cycle.err
 }
 
-func (c *CachingStore) ensureFullPrime(ctx context.Context) error {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if c.cacheFullyPrimed() {
-		return nil
-	}
-	if err := c.beginCacheWorker(); err != nil {
-		return errors.Join(ErrCacheUnavailable, err)
-	}
-	defer c.endCacheWorker()
-	if err := c.cacheContextErr(ctx); err != nil {
-		return errors.Join(ErrCacheUnavailable, err)
-	}
-	cycle, owner, suppressed := c.beginLazyFullPrime(c.clockNow())
-	if suppressed {
-		return ErrCacheUnavailable
-	}
-	var err error
-	if owner {
-		err = c.prime(ctx)
-		c.finishFullPrime(cycle, err)
-	} else {
-		err = c.waitForFullPrimeDone(ctx, cycle)
-	}
-	if err != nil {
-		return errors.Join(ErrCacheUnavailable, fmt.Errorf("prime cache: %w", err))
-	}
-	if !c.cacheFullyPrimed() {
-		return ErrCacheUnavailable
-	}
-	return nil
-}
-
-func (c *CachingStore) beginLazyFullPrime(now time.Time) (*fullPrimeCycle, bool, bool) {
-	c.mu.RLock()
-	state := c.state
-	partial := c.primePartialErr != nil
-	c.mu.RUnlock()
-
-	if state == cacheDegraded {
-		return nil, false, true
-	}
-
-	c.primeMu.Lock()
-	defer c.primeMu.Unlock()
-	if c.primeRunning {
-		return c.primeCycle, false, state != cacheUninitialized
-	}
-	if c.lastFullPrimeStartedAt.IsZero() {
-		return c.startFullPrimeLocked(), true, false
-	}
-	if now.Sub(c.lastFullPrimeStartedAt) < cacheLazyFullPrimeRetryInterval && (state != cacheUninitialized || partial) {
-		return nil, false, true
-	}
-	return c.startFullPrimeLocked(), true, false
-}
-
 func (c *CachingStore) startFullPrimeLocked() *fullPrimeCycle {
 	cycle := &fullPrimeCycle{done: make(chan struct{})}
 	c.primeRunning = true
 	c.primeCycle = cycle
-	c.lastFullPrimeStartedAt = c.clockNow()
 	return cycle
 }
 
 func (c *CachingStore) cacheFullyPrimed() bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	return c.cacheFullyPrimedLocked()
+}
+
+// cacheFullyPrimedLocked reports whether the cache is live and its prime read
+// every row. Caller must hold c.mu.
+func (c *CachingStore) cacheFullyPrimedLocked() bool {
 	return c.state == cacheLive && c.primePartialErr == nil
 }
 

@@ -47,6 +47,14 @@ func TestCachingStorePartialPrimeDoesNotClaimCompleteNonclosedList(t *testing.T)
 		t.Fatalf("Count after partial prime = %d, want 3", count)
 	}
 
+	// The cached handle never primes: a partial cache cannot answer a scan, so
+	// the caller reads live; once the cache is fully primed it answers.
+	if _, err := cache.Handles().Cached.List(query); !errors.Is(err, ErrCacheUnavailable) {
+		t.Fatalf("Cached.List on a partial cache error = %v, want ErrCacheUnavailable", err)
+	}
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
 	cached, err := cache.Handles().Cached.List(query)
 	if err != nil {
 		t.Fatalf("Cached.List: %v", err)
@@ -85,6 +93,14 @@ func TestCachingStorePartialPrimeRefusesUnknownDependencyStatus(t *testing.T) {
 		t.Fatalf("cachedReadyOnly error = %v, want ErrCacheUnavailable", err)
 	}
 
+	// The cached handle never primes: a partial cache answers
+	// ErrCacheUnavailable, and a fully primed one judges the live blocker.
+	if _, err := cache.Handles().Cached.Ready(); !errors.Is(err, ErrCacheUnavailable) {
+		t.Fatalf("Cached.Ready on a partial cache error = %v, want ErrCacheUnavailable", err)
+	}
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
 	ready, err := cache.Handles().Cached.Ready()
 	if err != nil {
 		t.Fatalf("Cached.Ready: %v", err)

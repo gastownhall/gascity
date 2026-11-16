@@ -2,7 +2,6 @@ package beads
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 )
@@ -137,34 +136,29 @@ type cachedStoreReader struct {
 	store *CachingStore
 }
 
+// Get, List, Ready and DepList answer from the cache alone. They never prime:
+// a cache that is not fully primed (uninitialized, partial, degraded, or live
+// with a partial prime error) answers ErrCacheUnavailable at once and the
+// caller reads live. Priming is Prime, PrimeActive and the reconciler's work,
+// off the caller's goroutine.
 func (r cachedStoreReader) Get(id string) (Bead, error) {
-	if err := r.store.ensureFullPrime(context.Background()); err != nil {
-		return Bead{}, err
-	}
 	return r.store.cachedGetOnly(id)
 }
 
 func (r cachedStoreReader) List(query ListQuery) ([]Bead, error) {
-	rows, err := r.store.cachedListOnly(logicalCachedListQuery(query))
-	if err == nil || !errors.Is(err, ErrCacheUnavailable) {
-		return rows, err
-	}
-	if err := r.store.ensureFullPrime(context.Background()); err != nil {
-		return nil, err
-	}
 	return r.store.cachedListOnly(logicalCachedListQuery(query))
 }
 
 func (r cachedStoreReader) Ready(query ...ReadyQuery) ([]Bead, error) {
-	if err := r.store.ensureFullPrime(context.Background()); err != nil {
-		return nil, err
+	if !r.store.cacheFullyPrimed() {
+		return nil, fmt.Errorf("listing ready beads from cache: %w", ErrCacheUnavailable)
 	}
 	return r.store.cachedReadyOnly(r.store.readyTier(readyQueryFromArgs(query)))
 }
 
 func (r cachedStoreReader) DepList(id, direction string) ([]Dep, error) {
-	if err := r.store.ensureFullPrime(context.Background()); err != nil {
-		return nil, err
+	if !r.store.cacheFullyPrimed() {
+		return nil, fmt.Errorf("listing dependencies from cache: %w", ErrCacheUnavailable)
 	}
 	return r.store.cachedDepListOnly(id, direction)
 }
@@ -220,6 +214,11 @@ func logicalCachedListQuery(query ListQuery) ListQuery {
 func (c *CachingStore) cachedGetOnly(id string) (Bead, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	// Without this an unprimed cache would answer ErrNotFound for a bead that
+	// exists, and callers fall back to a live read only on ErrCacheUnavailable.
+	if !c.cacheFullyPrimedLocked() {
+		return Bead{}, fmt.Errorf("getting bead %q from cache: %w", id, ErrCacheUnavailable)
+	}
 	if _, deleted := c.deletedSeq[id]; deleted {
 		return Bead{}, ErrNotFound
 	}

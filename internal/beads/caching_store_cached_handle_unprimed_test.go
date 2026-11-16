@@ -95,8 +95,11 @@ func TestCachedHandleDeclinesUnlessFullyPrimedWithoutReadingBacking(t *testing.T
 			h := cache.Handles().Cached
 
 			calls := map[string]func() error{
-				"Get":     func() error { _, err := h.Get(bead.ID); return err },
-				"List":    func() error { _, err := h.List(ListQuery{Status: "open"}); return err },
+				"Get": func() error { _, err := h.Get(bead.ID); return err },
+				// A scan is a query a partial cache cannot answer (it holds only the
+				// open and in-progress rows); a status query it does answer is
+				// served from the partial cache before and after.
+				"List":    func() error { _, err := h.List(ListQuery{AllowScan: true}); return err },
 				"Ready":   func() error { _, err := h.Ready(); return err },
 				"DepList": func() error { _, err := h.DepList(bead.ID, "down"); return err },
 				// The lookup under Get has no state check of its own: on an
