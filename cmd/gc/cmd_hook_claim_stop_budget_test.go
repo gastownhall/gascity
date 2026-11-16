@@ -10,20 +10,21 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// slowReadStore delays every read and ignores the caller's context, the way a
-// loaded store does, so the stop gate's ancestry read can outlast the budget.
+// slowReadStore holds every read until the read's own budget has expired, then
+// answers anyway, the way a loaded store does: it ignores the caller's deadline.
+// That makes the stop gate's ancestry read outlast the budget without sleeping.
 type slowReadStore struct {
 	beads.Store
-	delay time.Duration
+	budget context.Context
 }
 
 func (s slowReadStore) Get(id string) (beads.Bead, error) {
-	time.Sleep(s.delay)
+	<-s.budget.Done()
 	return s.Store.Get(id)
 }
 
 func (s slowReadStore) List(q beads.ListQuery) ([]beads.Bead, error) {
-	time.Sleep(s.delay)
+	<-s.budget.Done()
 	return s.Store.List(q)
 }
 
@@ -42,8 +43,8 @@ func TestHookClaimStopGateReadDoesNotSpendTheCASBudget(t *testing.T) {
 	f.served = []string{step.ID}
 
 	ops := f.ops()
-	ops.WorkflowStore = func(context.Context, string, []string, string, string) beads.Store {
-		return slowReadStore{Store: f.store, delay: 300 * time.Millisecond}
+	ops.WorkflowStore = func(ctx context.Context, _ string, _ []string, _ string, _ string) beads.Store {
+		return slowReadStore{Store: f.store, budget: ctx}
 	}
 	innerClaim := ops.Claim
 	ops.Claim = func(ctx context.Context, dir string, env []string, id, assignee string) (beads.Bead, bool, error) {
