@@ -47,7 +47,36 @@ type client struct {
 	// unixListening is serverConfirmedDead's kernel listener check, a test
 	// override; nil selects runtime.UnixPathListening.
 	unixListening func(path string) (bool, error)
+
+	// Test overrides for the bounded CLI runner and the server-readiness poll;
+	// zero selects the package default.
+	cliTimeout    time.Duration // herdrCLIDefaultTimeout
+	cliMargin     time.Duration // herdrCLITimeoutMargin
+	cliWaitDelay  time.Duration // herdrCLIWaitDelay
+	readyAttempts int           // serverReadyAttempts
+	readyInterval time.Duration // serverReadyInterval
 }
+
+// Server readiness poll: serverReadyAttempts probes, serverReadyInterval apart.
+const (
+	serverReadyAttempts = 40
+	serverReadyInterval = 250 * time.Millisecond
+)
+
+// readyPoll returns the readiness poll's attempt count and interval.
+func (c *client) readyPoll() (int, time.Duration) {
+	attempts, interval := c.readyAttempts, c.readyInterval
+	if attempts <= 0 {
+		attempts = serverReadyAttempts
+	}
+	if interval <= 0 {
+		interval = serverReadyInterval
+	}
+	return attempts, interval
+}
+
+// ensureServer ensures the shared server is running, honoring ctx.
+func (c *client) ensureServer(_ context.Context) error { return c.startServer() }
 
 func newClient(session, cityRoot string) *client {
 	return &client{session: session, bin: "herdr", cityRoot: cityRoot, settleDelay: submitSettleDelay, rejectDelay: startupNotReadyRetryDelay, notReadyBudget: startupNotReadyBudget, dialUnix: dialUnix}
@@ -1439,7 +1468,8 @@ func (c *client) startServer() error {
 		return fmt.Errorf("herdr server start: %w", err)
 	}
 	_ = cmd.Process.Release() // detach; herdr owns the daemon lifetime
-	for i := 0; i < 40; i++ {
+	attempts, interval := c.readyPoll()
+	for i := 0; i < attempts; i++ {
 		alive, err := c.probeServer()
 		if err != nil {
 			return fmt.Errorf("herdr server for session %q: %w", c.session, err)
@@ -1447,7 +1477,7 @@ func (c *client) startServer() error {
 		if alive {
 			return nil
 		}
-		time.Sleep(250 * time.Millisecond)
+		time.Sleep(interval)
 	}
 	return fmt.Errorf("herdr server for session %q did not become ready on %q", c.session, c.socketPath())
 }

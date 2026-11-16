@@ -51,6 +51,8 @@ go_test(
         "agent_info_test.go",
         "agent_name_taken_test.go",
         "agentname_test.go",
+        "bounded_exec_test.go",
+        "bounded_lookup_test.go",
         "claude_text_test.go",
         "client_test.go",
         "conformance_test.go",
@@ -58,9 +60,11 @@ go_test(
         "dial_bound_test.go",
         "effectiveworkdir_test.go",
         "endpoint_other_test.go",
+        "ensure_server_test.go",
         "errorcode_test.go",
         "events_live_test.go",
         "events_test.go",
+        "exec_site_guard_test.go",
         "fakeherdr_other_test.go",
         "fakeherdr_test.go",
         "identity_meta_test.go",
@@ -91,6 +95,7 @@ go_test(
         "startup_notready_test.go",
         "testenv_import_test.go",
     ],
+    data = glob(["*.go"]),  # exec_site_guard_test.go scans the package's own sources
     embed = [":herdr"],
     deps = [
         "//internal/execenv",

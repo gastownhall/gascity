@@ -32,7 +32,8 @@ type Provider struct {
 	// fixed wall-clock deadline with "no output for setupTimeout" (idle)
 	// plus this absolute ceiling.
 	setupMaxTimeout time.Duration
-	mu              sync.Mutex // serializes workspace/tab find-or-create across concurrent Starts
+	listDeadline    time.Duration // test override for herdrListDeadline; zero selects the default
+	mu              sync.Mutex    // serializes workspace/tab find-or-create across concurrent Starts
 	// act is the tracker-backed activity source behind GetLastActivity /
 	// CanReportActivity (#4217); started lazily on first GetLastActivity.
 	act activityTracker
