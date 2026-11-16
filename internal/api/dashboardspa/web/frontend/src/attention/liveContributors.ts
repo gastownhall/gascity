@@ -160,6 +160,7 @@ export async function fetchBeadsAttention(
       }),
       listDecisionBeads(cityName, decisionLabel, signal),
       listEscalationBeads(cityName, signal),
+      listGateBeads(cityName, signal),
       listCitySessions(cityName),
     ] as const);
   throwIfAborted(signal);
@@ -172,7 +173,7 @@ export async function fetchBeadsAttention(
     reads = await read();
     throwIfAborted(signal);
   }
-  const [list, decisions, escalations, sessions] = reads;
+  const [list, decisions, escalations, gates, sessions] = reads;
   const facts: BeadsAttentionFacts = { nowMs: Date.now(), decisionLabel };
   const cityUnavailable = reads.find(isCityUnavailableRead);
   if (cityUnavailable !== undefined && cityUnavailable.status === 'rejected') {
@@ -183,6 +184,7 @@ export async function fetchBeadsAttention(
       error,
       decisionsError: error,
       escalationsError: error,
+      gatesError: error,
     };
   }
   if (list.status === 'fulfilled') {
@@ -205,6 +207,11 @@ export async function fetchBeadsAttention(
   // workers would read as sessionless — degrades silently: the selector then
   // skips the session-dependent stall checks (waiting-human still works)
   // rather than raising false stalled alerts or a fourth error identity.
+  if (gates.status === 'fulfilled') {
+    facts.gates = gates.value.items ?? [];
+  } else {
+    facts.gatesError = formatApiError(gates.reason, 'human gate queue unavailable');
+  }
   if (sessions.status === 'fulfilled' && sessions.value.partial !== true) {
     facts.sessions = sessions.value.items ?? [];
   }
@@ -249,6 +256,20 @@ async function listDecisionBeads(cityName: string, decisionLabel: string, signal
     cityName,
     {
       label: decisionLabel,
+      status: 'open',
+    },
+    signal,
+  );
+}
+
+// Open human gates: the `type=gate` filter returns them even though the general
+// list drops non-engineering types. Filtering to gc.gate_type=human happens in
+// the selector (humanGateRow), so this query stays a plain type+status read.
+async function listGateBeads(cityName: string, signal?: AbortSignal) {
+  return supervisorApi().listBeads(
+    cityName,
+    {
+      type: 'gate',
       status: 'open',
     },
     signal,

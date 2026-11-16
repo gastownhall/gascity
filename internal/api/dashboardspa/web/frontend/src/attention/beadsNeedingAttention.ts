@@ -130,6 +130,8 @@ export interface BeadAttentionInputs {
   beads: readonly Bead[];
   /** The dedicated open-`gc:escalation` queue (help-request / escalation). */
   escalations: readonly Bead[];
+  /** The open human-gate queue (`type=gate`, gc.gate_type=human); see humanGateRow. */
+  gates?: readonly Bead[];
   /** City sessions for liveness checks; omit when the session read failed. */
   sessions?: readonly BeadAttentionSession[];
 }
@@ -146,6 +148,10 @@ export function selectBeadsNeedingAttention(
   const rows: BeadAttentionRow[] = [];
   for (const bead of inputs.escalations) {
     const row = escalatedRow(bead);
+    if (row !== null) rows.push(row);
+  }
+  for (const bead of inputs.gates ?? []) {
+    const row = humanGateRow(bead, nowMs);
     if (row !== null) rows.push(row);
   }
   // waiting-human is checked first: a held bead may also be open+unassigned
@@ -193,6 +199,26 @@ function escalatedRow(bead: Bead): BeadAttentionRow | null {
     reason: 'escalated',
     severity: 'attention',
     summary: `${bead.title} — escalation raised`,
+    updatedAt: bead.updated_at ?? bead.created_at,
+  };
+}
+
+// Human gate: an open bead with gc.gate_type=human is waiting on the operator
+// by definition. It is attention immediately, not after an aging window. Gates
+// reach this function from their own queue because the general bead list drops
+// non-engineering types (gascity#9177).
+function humanGateRow(bead: Bead, nowMs: number): BeadAttentionRow | null {
+  if (bead.status !== 'open') return null;
+  if (bead.metadata?.['gc.gate_type'] !== 'human') return null;
+  const ageMs = elapsedSince(bead.created_at, nowMs);
+  return {
+    beadId: bead.id,
+    reason: 'waiting-human',
+    severity: 'attention',
+    summary:
+      ageMs === null
+        ? `${bead.title} — waiting on operator`
+        : `${bead.title} — waiting on operator for ${formatElapsed(ageMs)}`,
     updatedAt: bead.updated_at ?? bead.created_at,
   };
 }

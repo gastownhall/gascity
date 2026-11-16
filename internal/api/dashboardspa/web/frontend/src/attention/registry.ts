@@ -115,6 +115,15 @@ export interface BeadsAttentionFacts {
   decisionsError?: string;
   /** Failure of the dedicated escalation-queue fetch, independent of `error`. */
   escalationsError?: string;
+  /**
+   * The open human-gate queue (gascity#9177): gate beads with
+   * `gc.gate_type=human`, fetched with the dedicated `type=gate` filter because
+   * the general bead list keeps only engineering types. Each is an operator
+   * attention item as soon as it is created.
+   */
+  gates?: readonly Bead[];
+  /** Failure of the dedicated human-gate fetch, independent of `error`. */
+  gatesError?: string;
 }
 
 export interface MailAttentionFacts {
@@ -421,6 +430,16 @@ function deriveBeadsAttention(facts: BeadsAttentionFacts | undefined): readonly 
       }),
     );
   }
+  if (facts.gatesError !== undefined && facts.gatesError.length > 0) {
+    items.push(
+      domainAttention('beads', {
+        id: 'beads:gates-unavailable',
+        title: 'Human gate queue unavailable',
+        summary: facts.gatesError,
+        href: '/beads',
+      }),
+    );
+  }
   for (const decision of facts.decisions ?? []) {
     items.push(mayorDecisionAttention(decision));
   }
@@ -439,6 +458,7 @@ function deriveBeadsAttention(facts: BeadsAttentionFacts | undefined): readonly 
     {
       beads: generic,
       escalations: facts.escalations ?? [],
+      gates: facts.gates ?? [],
       ...(facts.sessions === undefined ? {} : { sessions: facts.sessions }),
     },
     nowMs,
