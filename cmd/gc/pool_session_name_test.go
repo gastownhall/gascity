@@ -2904,3 +2904,56 @@ func TestDirectSessionBeadIDCandidates_SkipsFlagLikeCandidates(t *testing.T) {
 		}
 	}
 }
+
+// TestClearCurrentBeadIDWhenUnassignedDropsStaleAnchor covers the stale-stamp
+// case from gascity#6410: a session stamped bead X while it held X, then X
+// moved to another session. With no assigned work left, the reconciler's clear
+// must drop the stamp so the open session stops shielding X from release.
+func TestClearCurrentBeadIDWhenUnassignedDropsStaleAnchor(t *testing.T) {
+	store := beads.NewMemStore()
+	sess, err := store.Create(beads.Bead{
+		Title:  "worker session",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "th-worker",
+			"template":     "worker",
+			"state":        "creating",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+	front := sessionFrontDoor(store)
+	if err := front.RecordCurrentBead(sess.ID, "bd-x"); err != nil {
+		t.Fatalf("RecordCurrentBead: %v", err)
+	}
+	info, err := front.Get(sess.ID)
+	if err != nil {
+		t.Fatalf("Get session: %v", err)
+	}
+	if info.CurrentlyProcessingBeadID != "bd-x" {
+		t.Fatalf("precondition: CurrentlyProcessingBeadID = %q, want bd-x", info.CurrentlyProcessingBeadID)
+	}
+
+	// Still holding assigned work: the stamp must stay.
+	if patch := clearCurrentBeadIDWhenUnassigned(info, front, true, nil); patch != nil {
+		t.Fatalf("clear with assigned work returned %v, want nil", patch)
+	}
+
+	// No assigned work left: the stamp must go.
+	patch := clearCurrentBeadIDWhenUnassigned(info, front, false, nil)
+	if patch == nil {
+		t.Fatal("clear without assigned work returned nil, want a patch")
+	}
+	if got := patch[session.CurrentBeadIDKey]; got != "" {
+		t.Fatalf("patch[%s] = %q, want empty", session.CurrentBeadIDKey, got)
+	}
+	reloaded, err := front.Get(sess.ID)
+	if err != nil {
+		t.Fatalf("Reload session: %v", err)
+	}
+	if reloaded.CurrentlyProcessingBeadID != "" {
+		t.Fatalf("CurrentlyProcessingBeadID = %q after clear, want empty", reloaded.CurrentlyProcessingBeadID)
+	}
+}
