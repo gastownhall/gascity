@@ -299,12 +299,12 @@ func lockBridgeAuth(ctx context.Context) error {
 // unlockBridgeAuth releases authSem.
 func unlockBridgeAuth() { <-authSem }
 
+// issueT3WebSocketToken returns a ws token for wsURL's server, from the cache
+// when it holds one for that server with more than a minute left. The auth
+// lock covers only the cache read and the cache store, never the HTTP round
+// trip, so a slow fetch for one server does not hold up a caller whose token
+// is cached, and a ctx that ends bounds every wait.
 func issueT3WebSocketToken(ctx context.Context, wsURL string) (string, error) {
-	if err := lockBridgeAuth(ctx); err != nil {
-		return "", err
-	}
-	defer unlockBridgeAuth()
-
 	parsed, err := url.Parse(wsURL)
 	if err != nil {
 		return "", fmt.Errorf("parse ws url: %w", err)
@@ -322,12 +322,17 @@ func issueT3WebSocketToken(ctx context.Context, wsURL string) (string, error) {
 	parsed.Fragment = ""
 	baseURL := strings.TrimRight(parsed.String(), "/")
 
-	now := time.Now()
+	if err := lockBridgeAuth(ctx); err != nil {
+		return "", err
+	}
 	if cachedBridgeWSToken != "" &&
 		cachedBridgeWSTokenBaseURL == baseURL &&
-		cachedBridgeWSTokenExpiresAt.Sub(now) > time.Minute {
-		return cachedBridgeWSToken, nil
+		time.Until(cachedBridgeWSTokenExpiresAt) > time.Minute {
+		token := cachedBridgeWSToken
+		unlockBridgeAuth()
+		return token, nil
 	}
+	unlockBridgeAuth()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL, bytes.NewReader([]byte("{}")))
 	if err != nil {
@@ -358,9 +363,13 @@ func issueT3WebSocketToken(ctx context.Context, wsURL string) (string, error) {
 	}
 	expiresAt, err := time.Parse(time.RFC3339, strings.TrimSpace(payload.ExpiresAt))
 	if err == nil {
+		if err := lockBridgeAuth(ctx); err != nil {
+			return "", err
+		}
 		cachedBridgeWSToken = strings.TrimSpace(payload.Token)
 		cachedBridgeWSTokenBaseURL = baseURL
 		cachedBridgeWSTokenExpiresAt = expiresAt
+		unlockBridgeAuth()
 	}
 	return payload.Token, nil
 }
@@ -1289,6 +1298,7 @@ func (p *Provider) rpcCallOnceCtx(ctx context.Context, method string, params map
 			"payload": payload,
 			"headers": []interface{}{},
 		}
+		_ = conn.SetWriteDeadline(time.Now().Add(bridgeWSWriteTimeout))
 		if err := conn.WriteJSON(request); err != nil {
 			// A failed write left T3 at most part of the message, which it
 			// cannot dispatch, so the walk goes on even with stopAfterWrite.
@@ -2762,13 +2772,38 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 }
 
 // Start creates or reuses a T3 thread for the named session and dispatches the
-// startup prompt and any nudge.
-func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) error {
-	fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) called, wsURL=%s\n", name, resolveWsURL())
-
+// startup prompt and any nudge. It stops at the first phase boundary after ctx
+// ends: the worktree this call created is removed and the error wraps ctx's
+// error. A reused thread is not interrupted once its reuse begins.
+func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	var envelope StartupEnvelope
 	hasWorktree := false
 	var cwd, branch, newBranch, desiredPath string
+
+	var worktreePath, worktreeBranch string
+	rollback := func() {
+		if worktreePath != "" {
+			_ = p.rpcRemoveWorktree(cwd, worktreePath)
+		}
+	}
+	fail := func(err error) error {
+		rollback()
+		return softenBridgeStartupError(err)
+	}
+	// ctxEnded rolls back and returns the start's ctx error once ctx has ended.
+	// The error carries the session name only and is not softened: a start
+	// whose ctx ended is not a bridge that is still initializing.
+	ctxEnded := func() error {
+		if err := ctx.Err(); err != nil {
+			rollback()
+			return fmt.Errorf("t3bridge: start %q: %w", name, err)
+		}
+		return nil
+	}
+	if err := ctxEnded(); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) called, wsURL=%s\n", name, resolveWsURL())
 
 	// Try reading a pre-built envelope from env first.
 	if envJSON := cfg.Env["GC_STARTUP_ENVELOPE"]; envJSON != "" {
@@ -2834,14 +2869,10 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 		}
 	}
 
-	var worktreePath, worktreeBranch string
-	fail := func(err error) error {
-		if worktreePath != "" {
-			_ = p.rpcRemoveWorktree(cwd, worktreePath)
-		}
-		return softenBridgeStartupError(err)
-	}
 	if hasWorktree && cwd != "" {
+		if err := ctxEnded(); err != nil {
+			return err
+		}
 		var err error
 		worktreePath, worktreeBranch, err = p.rpcCreateWorktree(cwd, branch, newBranch, desiredPath)
 		if err != nil {
@@ -2864,9 +2895,7 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 
 	envelopeJSON, err := json.Marshal(envelope)
 	if err != nil {
-		if worktreePath != "" {
-			_ = p.rpcRemoveWorktree(cwd, worktreePath)
-		}
+		rollback()
 		return fmt.Errorf("t3bridge: encode startup envelope: %w", err)
 	}
 	if cfg.Env == nil {
@@ -2874,6 +2903,9 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 	}
 	cfg.Env["GC_STARTUP_ENVELOPE"] = string(envelopeJSON)
 
+	if err := ctxEnded(); err != nil {
+		return err
+	}
 	snapshot, err := p.rpcSnapshot()
 	if err != nil {
 		return fail(fmt.Errorf("t3bridge: load snapshot: %w", err))
@@ -2954,6 +2986,9 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 
 	projectID = resolveActiveProjectID(snapshot, projectWorkspaceRoot)
 	if projectID == "" {
+		if err := ctxEnded(); err != nil {
+			return err
+		}
 		projectID = uuid.NewString()
 		fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) creating project id=%s title=%s root=%s\n", name, projectID, projectTitle, projectWorkspaceRoot) //nolint:errcheck
 		if err := p.dispatchProjectCreate(projectID, projectTitle, projectWorkspaceRoot, providerName, modelName); err != nil {
@@ -2961,6 +2996,9 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 		}
 	}
 
+	if err := ctxEnded(); err != nil {
+		return err
+	}
 	threadID = uuid.NewString()
 	createBranch := ""
 	createWorktreePath := ""
@@ -3010,10 +3048,16 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 		"workDir":     cfg.WorkDir,
 		"sessionName": name,
 	})
+	if err := ctxEnded(); err != nil {
+		return err
+	}
 	p.ensureEventWatcher(name, cfg, binding, envelope, providerName)
 
 	if prompt := strings.TrimSpace(envelope.Startup.StartupPrompt); prompt != "" {
 		fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) sending startup prompt thread=%s len=%d\n", name, threadID, len(prompt)) //nolint:errcheck
+		if err := ctxEnded(); err != nil {
+			return err
+		}
 		if err := p.dispatchTurnStart(threadID, prompt, providerName, modelName, p.freshTurnStartIDs()); err != nil {
 			return fail(err)
 		}
@@ -3027,6 +3071,9 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 	}
 	if nudgeText != "" {
 		fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) sending nudge thread=%s len=%d\n", name, threadID, len(nudgeText)) //nolint:errcheck
+		if err := ctxEnded(); err != nil {
+			return err
+		}
 		if err := p.dispatchTurnStart(threadID, nudgeText, providerName, modelName, p.freshTurnStartIDs()); err != nil {
 			return fail(err)
 		}
