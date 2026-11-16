@@ -63,6 +63,12 @@ const (
 	recentStartGracePeriod   = 30 * time.Second
 )
 
+// bridgeWSWriteTimeout bounds one WebSocket request write: a peer that
+// completes the upgrade and then stops reading fails the write at this
+// deadline instead of holding the call open. It is a var so tests can shorten
+// it.
+var bridgeWSWriteTimeout = 5 * time.Second
+
 // Provider wraps an exec.Provider, moving the T3-specific lifecycle and turn
 // operations into native Go WebSocket calls while leaving a small helper
 // surface on the internal exec shim.
