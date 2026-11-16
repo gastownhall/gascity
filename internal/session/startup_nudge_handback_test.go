@@ -621,3 +621,62 @@ func TestACreateWhoseRowWasReMintedQueuesTheTurn(t *testing.T) {
 	}
 	wantOneStartupTurn(t, mgr, all[0].ID, liveToken(t, sp.Fake, "named-worker"))
 }
+
+// confirmFailingStore fails every metadata batch write once armed: a store
+// (with no conditional writes) that loses the create's confirm with a plain
+// error.
+type confirmFailingStore struct {
+	*beads.MemStore
+	armed bool
+}
+
+var errConfirmStoreDown = errors.New("database is locked")
+
+func (s *confirmFailingStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if s.armed {
+		return errConfirmStoreDown
+	}
+	return s.MemStore.SetMetadataBatch(id, kvs)
+}
+
+// armingHandbackProvider is a handback leaf whose Start, once it succeeded,
+// arms store: the create's confirm then fails with a plain store error.
+type armingHandbackProvider struct {
+	*handbackStartProvider
+	store *confirmFailingStore
+}
+
+func (p *armingHandbackProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := p.handbackStartProvider.Start(ctx, name, cfg); err != nil {
+		return err
+	}
+	p.store.armed = true
+	return nil
+}
+
+// Kills a create that queues the first turn of a launch it then takes down:
+// a confirm that fails with a plain store error (not a re-mint) stops the
+// runtime and rolls the row back, so no turn is queued for it.
+func TestACreateWhoseConfirmFailsQueuesNoTurn(t *testing.T) {
+	stubSubmitPoller(t)
+	store := &confirmFailingStore{MemStore: beads.NewMemStore()}
+	sp := &armingHandbackProvider{handbackStartProvider: &handbackStartProvider{Fake: runtime.NewFake(), nudge: handbackStartNudge}, store: store}
+	mgr := newTestManager(t, store, sp)
+	_, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if !errors.Is(err, errConfirmStoreDown) || errors.Is(err, ErrMintSuperseded) {
+		t.Fatalf("CreateSession with a failing confirm = %v; want the store's error, not a re-mint", err)
+	}
+	all, err := store.List(beads.ListQuery{Type: BeadType, IncludeClosed: true})
+	if err != nil || len(all) != 1 {
+		t.Fatalf("rows %v (%v); want the created row", all, err)
+	}
+	if all[0].Status != "closed" {
+		t.Fatalf("row %s is %q; want it rolled back (closed)", all[0].ID, all[0].Status)
+	}
+	if name := all[0].Metadata["session_name"]; name == "" || sp.IsRunning(name) {
+		t.Fatalf("runtime %q still running; want the create to stop it", name)
+	}
+	for _, it := range queuedHandbacks(t, mgr, all[0].ID) {
+		t.Fatalf("queued %+v; want no turn for a launch the create took down", it)
+	}
+}
