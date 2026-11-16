@@ -660,12 +660,13 @@ func (s *NativeDoltStore) stampCreator(issue *beadslib.Issue) {
 
 // metadataWithFrom returns metadata with a non-empty from also written under
 // the "from" key, the shape BdStore writes a sender in, unless the caller
-// already set that key. The input map is never mutated.
+// already set a non-empty value under that key, matching BdStore.Create. The
+// input map is never mutated.
 func metadataWithFrom(metadata map[string]string, from string) map[string]string {
 	if from == "" {
 		return metadata
 	}
-	if _, set := metadata["from"]; set {
+	if metadata["from"] != "" {
 		return metadata
 	}
 	merged := make(map[string]string, len(metadata)+1)

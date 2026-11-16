@@ -179,7 +179,7 @@ func TestNativeStampCreatorFillsOnlyAnEmptyCreatedBy(t *testing.T) {
 }
 
 // metadataWithFrom mirrors a sender under metadata["from"], the shape BdStore
-// writes. A caller-set key wins, an empty sender is a no-op, and the input map is
+// writes. A non-empty caller-set key wins, an empty sender is a no-op, and the input map is
 // never mutated.
 func TestMetadataWithFrom(t *testing.T) {
 	t.Run("an empty sender returns the input untouched", func(t *testing.T) {
@@ -213,6 +213,16 @@ func TestMetadataWithFrom(t *testing.T) {
 		got := metadataWithFrom(in, reviewerTestSender)
 		if got["from"] != "caller-set" {
 			t.Errorf("from = %q, want the caller-set value kept", got["from"])
+		}
+	})
+	t.Run("an empty caller-set from is filled, as BdStore does", func(t *testing.T) {
+		in := map[string]string{"from": ""}
+		got := metadataWithFrom(in, reviewerTestSender)
+		if got["from"] != reviewerTestSender {
+			t.Errorf("from = %q, want %q filled over the empty caller-set value", got["from"], reviewerTestSender)
+		}
+		if v, ok := in["from"]; !ok || v != "" || len(in) != 1 {
+			t.Errorf("the input map was mutated: %v", in)
 		}
 	})
 }
