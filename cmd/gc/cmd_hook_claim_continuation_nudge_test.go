@@ -175,6 +175,91 @@ func TestHookClaimExistingAssignmentDoesNotEnqueueContinuationNudge(t *testing.T
 	}
 }
 
+func TestHookClaimFreshClaimNudgesOnlyRunnablePinnedContinuation(t *testing.T) {
+	const slot = "gascity/worker/slot-0"
+	const sessionID = "session-1"
+	tests := []struct {
+		name            string
+		sessionID       string
+		siblingID       string
+		siblingAssignee string
+		siblingStatus   string
+		labels          []string
+		stepClaim       bool
+		wantNudges      int
+	}{
+		{name: "fresh workflow claim with session-name pin", wantNudges: 1},
+		{name: "fresh workflow claim with session-ID pin", sessionID: sessionID, siblingAssignee: sessionID, wantNudges: 1},
+		{name: "sibling belongs to another claimant", siblingAssignee: "other-worker"},
+		{name: "alias pin does not match explicit session ID", sessionID: sessionID},
+		{name: "sibling is closed", siblingStatus: "closed"},
+		{name: "sibling is already running", siblingStatus: "in_progress"},
+		{name: "sibling has mayor dispatch hold", labels: []string{"hold:mayor"}},
+		{name: "sibling has external dispatch hold", labels: []string{"hold:external"}},
+		{name: "root is not a continuation sibling", siblingID: "root-1"},
+		{name: "step claim does not propel pinned siblings", stepClaim: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			candidates := workflowRootCandidates()
+			if tt.stepClaim {
+				candidates = stepBeadCandidates()
+			}
+			sibling := beads.Bead{
+				ID: "sib-1", Status: "open", Assignee: slot,
+				Labels: tt.labels, Metadata: candidates[0].Metadata,
+			}
+			if tt.siblingID != "" {
+				sibling.ID = tt.siblingID
+			}
+			if tt.siblingAssignee != "" {
+				sibling.Assignee = tt.siblingAssignee
+			}
+			if tt.siblingStatus != "" {
+				sibling.Status = tt.siblingStatus
+			}
+			var enqueued []string
+			ops := buildContinuationNudgeOps(candidates, nil, &enqueued)
+			ops.ListContinuation = func(context.Context, string, []string, string, string) ([]beads.Bead, error) {
+				return []beads.Bead{sibling}, nil
+			}
+			ops.AssignContinuation = func(_ context.Context, _ string, _ []string, beadID, _ string) error {
+				t.Errorf("already-pinned sibling %s must not be reassigned", beadID)
+				return nil
+			}
+
+			// An unwound claim can leave its sibling pins behind. A freshly
+			// minted re-claim must wake them after delivering its result. Prefer
+			// one extra nudge to a missed wake (ga-um2lyu item 4); the adopted
+			// existing_assignment path has its own no-repeat test above.
+			var stdout, stderr bytes.Buffer
+			code := doHookClaim("query", ".", hookClaimOptions{
+				Assignee: slot, SessionID: tt.sessionID,
+				IdentityCandidates: []string{slot}, RouteTargets: []string{"route-1"}, JSON: true,
+			}, ops, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("doHookClaim() = %d, want delivered claim; stderr=%s", code, stderr.String())
+			}
+			var result hookClaimJSONResult
+			if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+				t.Fatalf("decoding claim result: %v; stdout=%s", err, stdout.String())
+			}
+			if !result.OK || result.Reason != "claimed" || result.BeadID != candidates[0].ID {
+				t.Fatalf("result = %+v, want freshly minted claim of %s", result, candidates[0].ID)
+			}
+			if len(result.ContinuationAssigned) != 0 {
+				t.Fatalf("new continuation assignments = %v, want none", result.ContinuationAssigned)
+			}
+			if len(enqueued) != tt.wantNudges {
+				t.Fatalf("continuation nudges = %v, want %d", enqueued, tt.wantNudges)
+			}
+			if tt.wantNudges == 1 && enqueued[0] != slot+" for root-1" {
+				t.Fatalf("nudge = %q, want claimant %s for root-1", enqueued[0], slot)
+			}
+		})
+	}
+}
+
 // TestHookClaimZeroContinuationDoesNotEnqueueContinuationNudge verifies that claiming a
 // workflow root that has NO unassigned siblings does NOT enqueue a nudge.
 // An empty continuation means the session has no further work queued and
