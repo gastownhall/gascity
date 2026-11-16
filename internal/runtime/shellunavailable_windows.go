@@ -80,10 +80,11 @@ type psScan struct {
 	frames     []byte // '(' paren, 'P' param block, '{' block, 's' switch body, 't' hashtable, '"' string, 'h' here-string
 	switchAt   int    // frame depth whose next { is a switch body, or -1
 	paramAt    int    // frame depth whose next ( is a param block, or -1
+	blockAt    int    // frame depth whose next { is a statement block, or -1
 }
 
 func scanPowerShellCommand(command string) *psScan {
-	p := &psScan{s: normalizePowerShellQuotes(command), switchAt: -1, paramAt: -1}
+	p := &psScan{s: normalizePowerShellQuotes(command), switchAt: -1, paramAt: -1, blockAt: -1}
 	atCmd, call := true, false
 	for p.i < len(p.s) {
 		if top := p.top(); top == '"' || top == 'h' {
@@ -99,7 +100,13 @@ func scanPowerShellCommand(command string) *psScan {
 		case c == ' ' || c == '\t' || c == '\v' || c == '\f':
 			p.i++
 			call = wasCall
-		case c == '\r' || c == '\n' || c == ';':
+		case c == ';':
+			p.i++
+			if p.blockAt == len(p.frames) {
+				p.blockAt = -1
+			}
+			atCmd = p.top() != 't'
+		case c == '\r' || c == '\n':
 			p.i++
 			atCmd = p.top() != 't'
 		case c == '=' && p.top() == 't':
@@ -131,7 +138,11 @@ func scanPowerShellCommand(command string) *psScan {
 				atCmd = true
 			}
 		case c == '`' && (p.peek(1) == '\n' || p.peek(1) == '\r'):
-			p.i += 2 // line continuation
+			if p.peek(1) == '\r' && p.peek(2) == '\n' {
+				p.i += 3 // line continuation
+			} else {
+				p.i += 2 // line continuation
+			}
 			call = wasCall
 		case c == ')' || c == '}':
 			p.i++
@@ -161,6 +172,10 @@ func scanPowerShellCommand(command string) *psScan {
 				p.switchAt = -1
 				p.push('s')
 				atCmd = false
+			case p.blockAt == len(p.frames):
+				p.blockAt = -1
+				p.push('{')
+				atCmd = true
 			case atCmd && !wasCall && p.top() != 's' && p.top() != 't':
 				p.unresolved = true // a script block that is never invoked
 				p.i--
@@ -255,18 +270,21 @@ func (p *psScan) keyword(word string) (atCmd bool, ok bool) {
 		p.unresolved = true // the script may shadow any program name
 		p.skipSpace()
 		p.readBareWord()
+		p.blockAt = len(p.frames)
 		return false, true
 	case "begin", "process", "end", "dynamicparam", "clean":
-		p.skipSpace()
-		return false, p.peek(0) == '{'
+		p.blockAt = len(p.frames)
+		return false, true
 	case "switch":
 		p.switchAt = len(p.frames)
 		return false, true
 	case "param":
 		p.paramAt = len(p.frames)
 		return false, true
-	case "if", "elseif", "else", "while", "for", "foreach", "do", "until", "try", "catch", "finally",
-		"trap", "data", "using", "class", "enum", "break", "continue", "exit":
+	case "if", "elseif", "else", "while", "for", "foreach", "do", "try", "catch", "finally", "trap":
+		p.blockAt = len(p.frames)
+		return false, true
+	case "until", "data", "using", "class", "enum", "break", "continue", "exit":
 		return false, true
 	}
 	return false, false
@@ -381,7 +399,7 @@ func (p *psScan) peekString() (value string, static bool, sub bool) {
 // joining embedded static quoted parts as PowerShell does.
 func (p *psScan) readBareWord() string {
 	var b strings.Builder
-	for p.i < len(p.s) && strings.IndexByte(" \t\v\f\r\n;|&(){}>", p.s[p.i]) < 0 {
+	for p.i < len(p.s) && strings.IndexByte(" \t\v\f\r\n;|&(){}>", p.s[p.i]) < 0 && (p.s[p.i] != '=' || p.top() != 't') {
 		switch c := p.s[p.i]; {
 		case c == '`' && p.i+1 < len(p.s):
 			b.WriteString(backtickEscape(p.s[p.i+1]))

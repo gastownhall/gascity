@@ -108,6 +108,10 @@ func TestPowerShellCommandScannerMatchesParser(t *testing.T) {
 		"[string]$x = bash -c x",
 		"$h = @{ a = 'b'; c = (sh -c x) }",
 		"$h = @{ a = bash -c x }",
+		"if ($true)\n{ bash -c x }",
+		"try\n{ bash -c x }\ncatch\n{ sh -c x }",
+		"@{ a=bash -c x }",
+		"Write-Output `\r\n bash",
 	}
 	for _, shell := range powerShells(t) {
 		t.Run(filepath.Base(shell), func(t *testing.T) {

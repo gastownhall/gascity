@@ -67,6 +67,13 @@ func TestShellCommandUnavailableRefusesPosixShellPrograms(t *testing.T) {
 		`& "$env:PACK_DIR\scripts\x.sh"`,
 		`& "$env:GIT\bin\bash.exe" -lc true`,
 		`if ($x) { & "${env:PACK_DIR}/assets/x.sh" }`,
+		"if ($true)\n{ bash -c harmless }",
+		"if ($true)\r\n{ bash -c harmless }",
+		"foreach ($x in 1)\n{ sh -c harmless }",
+		"try\n{ bash -c harmless }\ncatch\n{ sh -c harmless }",
+		"function f\n{ bash -c harmless }",
+		"@{ a=bash }",
+		"@{a=sh}",
 	}
 	for _, command := range refused {
 		if reason := ShellCommandUnavailable(command); !strings.Contains(reason, "POSIX shell") {
@@ -92,6 +99,7 @@ func TestShellCommandUnavailableRefusesPosixShellPrograms(t *testing.T) {
 		"{ bash -c harmless }",
 		"switch ($x) { sh { 'a' } default { 'b' } }",
 		"Write-Output `\n bash",
+		"Write-Output `\r\n bash",
 		"@{ sh = 1 }",
 		"Write-Output @'\nplain text\nbash\n'@",
 		"Write-Output @'\na line it's\na line bash\n'@",
