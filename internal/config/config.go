@@ -3918,7 +3918,11 @@ type Agent struct {
 	// idle-timeout ladder may defer on the same assigned-work bead
 	// (DecideIdleTimeout's AssignedWorkHas rung) before the reconciler
 	// overrides the defer and forces a stop via DecideAssignedWorkExhausted.
-	// Nil means use the built-in default. Without this backstop a session
+	// Nil means use the built-in default: 3 consecutive ticks, additionally
+	// capped at 120 seconds of wall clock from the first deferring tick (the
+	// count alone is a loose bound, since ticks can be minutes apart). An
+	// explicit value counts ticks only, with no wall-clock cap. Without this
+	// backstop a session
 	// anchored to a bead that never clears assigned-work (e.g. a bead stuck
 	// open due to an upstream status-mapping bug) would defer indefinitely,
 	// reproducing the unbounded wake/idle-kill treadmill ga-3ox7rk fixed at

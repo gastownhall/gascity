@@ -13,7 +13,14 @@ import (
 // out of the box instead of requiring every agent to opt in.
 const defaultAssignedWorkDeferLimit = 3
 
-// defaultAssignedWorkDeferWindow is declared for the RED tests; recordDefer does not consult it yet.
+// defaultAssignedWorkDeferWindow caps, in wall-clock time, a defer streak
+// governed by the built-in default limit. The count alone is a poor bound:
+// reconcile ticks run far apart (about 200 s in practice, not the nominal
+// 30 s patrol interval), so three ticks can stretch a stuck session's
+// deferral to ten minutes or more. A default-limit streak is therefore also
+// exhausted once this much time has passed since its first deferring tick.
+// Explicit limits (setLimit, setLimitForTemplate) count ticks only: an
+// operator who set a number gets that number.
 const defaultAssignedWorkDeferWindow = 120 * time.Second
 
 // assignedWorkDeferTracker records, per session name, the number of
@@ -45,6 +52,12 @@ type assignedWorkDeferTracker interface {
 	// session's previously recorded anchor — including first sight — the
 	// count resets to zero before this defer is counted, so a fresh anchor
 	// bead always starts at one.
+	//
+	// now is the reconciler clock's current time. It stamps the streak's
+	// first deferring tick; when the limit resolved to the built-in default
+	// (not an explicit session or template limit), the streak is also
+	// exhausted once now is defaultAssignedWorkDeferWindow or more past that
+	// first tick, whatever the count.
 	recordDefer(sessionName, template, anchorBeadID string, now time.Time) (exhausted bool)
 
 	// reset clears sessionName's consecutive-defer count and remembered
@@ -77,6 +90,9 @@ type assignedWorkDeferTracker interface {
 type assignedWorkDeferState struct {
 	anchorBeadID string
 	count        int
+	// firstDeferAt is when the streak's first defer was recorded; it is
+	// discarded with the rest of the state on reset or an anchor change.
+	firstDeferAt time.Time
 }
 
 // memoryAssignedWorkDeferTracker is the production implementation of
@@ -131,30 +147,38 @@ func (m *memoryAssignedWorkDeferTracker) exemptTemplateFallbackForSession(sessio
 	m.templateFallbackExemptions[sessionName] = true
 }
 
-// limitFor resolves sessionName's consecutive-defer limit. Callers must hold
-// m.mu.
-func (m *memoryAssignedWorkDeferTracker) limitFor(sessionName, template string) int {
+// limitFor resolves sessionName's consecutive-defer limit and reports whether
+// it was explicitly configured (per session or per template) rather than the
+// built-in default. Callers must hold m.mu.
+func (m *memoryAssignedWorkDeferTracker) limitFor(sessionName, template string) (limit int, explicit bool) {
 	if limit, ok := m.limits[sessionName]; ok {
-		return limit
+		return limit, true
 	}
 	if !m.templateFallbackExemptions[sessionName] && template != "" {
 		if limit, ok := m.templateLimits[template]; ok {
-			return limit
+			return limit, true
 		}
 	}
-	return defaultAssignedWorkDeferLimit
+	return defaultAssignedWorkDeferLimit, false
 }
 
-func (m *memoryAssignedWorkDeferTracker) recordDefer(sessionName, template, anchorBeadID string, _ time.Time) bool {
+func (m *memoryAssignedWorkDeferTracker) recordDefer(sessionName, template, anchorBeadID string, now time.Time) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	st := m.state[sessionName]
 	if st.anchorBeadID != anchorBeadID {
 		st = assignedWorkDeferState{anchorBeadID: anchorBeadID}
 	}
+	if st.count == 0 {
+		st.firstDeferAt = now
+	}
 	st.count++
 	m.state[sessionName] = st
-	return st.count > m.limitFor(sessionName, template)
+	limit, explicit := m.limitFor(sessionName, template)
+	if st.count > limit {
+		return true
+	}
+	return !explicit && now.Sub(st.firstDeferAt) >= defaultAssignedWorkDeferWindow
 }
 
 func (m *memoryAssignedWorkDeferTracker) reset(sessionName string) {
