@@ -600,3 +600,37 @@ func TestStopStaleConnectionPreservesNewIncarnation(t *testing.T) {
 		t.Errorf("stale Stop removed replacement metadata: %q, %v", got, err)
 	}
 }
+
+// A startup prompt the agent never received is a failed start, not a silent
+// one: Start reports it and ends the agent, so a retry can deliver the prompt.
+func TestStartupUndeliveredPromptFailsStart(t *testing.T) {
+	p := newTestProvider(t)
+	p.cfg.HandshakeTimeout = testutil.ExecRaceTimeout
+	name := testName()
+	ctx := testingContext(t)
+	var started *sessionConn
+	// Answering nothing leaves the connection without an ACP session id, so
+	// the startup prompt cannot be sent.
+	p.handshakeFunc = func(_ context.Context, sc *sessionConn, _ string, _ []runtime.MCPServerConfig) error {
+		started = sc
+		return nil
+	}
+	cfg := runtime.Config{Command: fixtureIdleAgentCommand, WorkDir: t.TempDir(), Nudge: "initial prompt"}
+	err := p.Start(ctx, name, cfg)
+	t.Cleanup(func() { _ = p.Stop(name) })
+	if err == nil || !strings.Contains(err.Error(), "startup prompt") {
+		t.Fatalf("Start = %v, want the undelivered startup prompt reported", err)
+	}
+	select {
+	case <-started.done:
+	case <-ctx.Done():
+		t.Fatal("the agent is still running after its start failed")
+	}
+	if p.IsRunning(name) {
+		t.Error("IsRunning = true after the start failed")
+	}
+	cfg.Nudge = ""
+	if err := p.Start(ctx, name, cfg); err != nil {
+		t.Errorf("retry Start = %v, want the name released", err)
+	}
+}

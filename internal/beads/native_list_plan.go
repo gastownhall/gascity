@@ -212,7 +212,7 @@ func (s *NativeDoltStore) loadListPushableTypes(ctx context.Context) {
 // type: the wire's validation problem, or the local filter builder's
 // unknown-type error, which carries no sentinel.
 func nativeListTypeRefused(err error) bool {
-	return errors.Is(err, issueops.ErrValidation) || strings.Contains(err.Error(), "invalid issue type")
+	return errors.Is(err, issueops.ErrValidation) || IsIssueTypeRefused(err)
 }
 
 // NativeListRequestKeyed reports whether req carries a predicate that narrows

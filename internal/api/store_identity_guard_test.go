@@ -17,9 +17,7 @@ import (
 // by the PR that hands it a class handle. The table only shrinks: a new
 // comparison uses SameStore.
 var reviewedStoreIdentitySites = map[string]beadstest.IdentitySite{
-	"handler_beads.go sortedRigNames map-key":          {Count: 1, Reason: "dedupes the raw BeadStores() map by value; T7 (sortedRigNames is residue)"},
 	"handler_convoy_dispatch.go workflowStoreByRef eq": {Count: 1, Reason: "orders store == CityBeadStore(): a raw unwrap; T7f orders legs"},
-	"handler_status.go Server.statusWorkCounts eq":     {Count: 1, Reason: "q.store == graph over raw work-count legs; T7 status federation"},
 }
 
 // TestStoreIdentityGuard holds internal/api's store comparisons to the
@@ -73,33 +71,28 @@ func TestWorkRecordLegacyRepoDirMatchesARigThroughAHandle(t *testing.T) {
 		state.cfg.Rigs = []config.Rig{{Name: "myrig", Path: rigPath}, {Name: "unbound"}}
 		s := New(state)
 		dirs := s.workRecordScopeDirs()
-		if got := s.workRecordLegacyRepoDir(wrap(state.BeadStore("myrig")), dirs); got != rigPath {
+		if got := s.workRecordLegacyRepoDir(s.state.Stores(), beadstest.Resident(wrap(state.BeadStore("myrig"))), dirs); got != rigPath {
 			t.Errorf("%s over the rig's store: repo dir %q, want the rig checkout %q", name, got, rigPath)
 		}
-		if got := s.workRecordLegacyRepoDir(wrap(beads.NewMemStore()), dirs); got != dirs.CityDir() {
+		if got := s.workRecordLegacyRepoDir(s.state.Stores(), beadstest.Resident(wrap(beads.NewMemStore())), dirs); got != dirs.CityDir() {
 			t.Errorf("%s over another store: repo dir %q, want the city checkout %q", name, got, dirs.CityDir())
 		}
 	}
 }
 
-// TestRetiredSessionWorkStoresDedupesAHandleOverAListedStore pins
-// retiredSessionWorkStores's dedupe to SameStore (typed-stores T6 plan, R3): a
-// sessions store handed in as a class handle over a store the sweep already
-// lists is that store, so the sweep lists it once. slices.Contains compared
-// the handle with ==, never equal to the raw store, and swept it twice.
-func TestRetiredSessionWorkStoresDedupesAHandleOverAListedStore(t *testing.T) {
+// TestRetiredSessionSweepVisitsAStoreOnce pins the sweep's dedupe to store
+// identity (beads.SameStore, typed-stores T6 plan, R3): on a city whose graph
+// is relocated, the sessions placement is the city store and rig zz sits over
+// it too (legacy shared-file mode), so the sweep visits the city store once,
+// then the graph binding.
+func TestRetiredSessionSweepVisitsAStoreOnce(t *testing.T) {
+	t7dGateOff(t)
 	state := newFakeState(t)
-	state.cityBeadStore = beads.NewMemStore()
-	state.graphBeadStore = beads.NewMemStore()
-	s := New(state)
-	raw := s.retiredSessionWorkStores(state.CityBeadStore())
-	handle := s.retiredSessionWorkStores(beadstest.Sessions(state.CityBeadStore()))
-	if len(handle) != len(raw) {
-		t.Fatalf("the sweep over a sessions handle lists %d stores, over the raw store %d: the handle was listed beside the store it wraps", len(handle), len(raw))
-	}
-	for i := range raw {
-		if !beads.SameStore(handle[i], raw[i]) {
-			t.Errorf("store %d: %v, want %v", i, handle[i], raw[i])
-		}
+	city, graph := beads.NewMemStore(), beads.NewMemStore()
+	state.cityBeadStore, state.graphBeadStore = city, graph
+	state.stores = map[string]beads.Store{"zz": city}
+	got := retiredSessionSwept(t, New(state))
+	if len(got) != 2 || !beads.SameStore(got[0], city) || !beads.SameStore(got[1], graph) {
+		t.Fatalf("the sweep visits %v, want the city store once, then the graph binding", got)
 	}
 }

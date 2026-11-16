@@ -1457,6 +1457,7 @@ export const zAgentPatch = z.object({
     ResumeCommand: z.string().nullable(),
     Rig: z.string(),
     ScaleCheck: z.string().nullable(),
+    ScaleCheckAuthoritative: z.boolean().nullable(),
     Scope: z.string().nullable(),
     Session: z.string().nullable(),
     SessionLive: z.array(z.string()).nullable(),

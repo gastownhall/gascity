@@ -62,6 +62,11 @@ resource = "net_listen"
 calls = 8
 
 [[count]]
+path = "cmd/gc/bd_env_workspace_env_lock_test.go"
+resource = "net_listen"
+calls = 1
+
+[[count]]
 path = "cmd/gc/beads_provider_lifecycle_initlock_unix_test.go"
 resource = "slow_process_gate"
 calls = 1
@@ -104,7 +109,7 @@ calls = 4
 [[count]]
 path = "cmd/gc/beads_provider_lifecycle_test.go"
 resource = "net_listen"
-calls = 2
+calls = 1
 
 [[count]]
 path = "cmd/gc/beads_provider_lifecycle_test.go"
@@ -279,7 +284,7 @@ calls = 2
 [[count]]
 path = "cmd/gc/cmd_dolt_state_test.go"
 resource = "fixed_sleep"
-calls = 8
+calls = 4
 
 [[count]]
 path = "cmd/gc/cmd_dolt_state_test.go"
@@ -294,7 +299,7 @@ calls = 5
 [[count]]
 path = "cmd/gc/cmd_dolt_state_test.go"
 resource = "subprocess"
-calls = 6
+calls = 2
 
 [[count]]
 path = "cmd/gc/cmd_event_emit_test.go"
@@ -660,7 +665,7 @@ calls = 11
 [[count]]
 path = "cmd/gc/cmd_supervisor_test.go"
 resource = "net_listen"
-calls = 7
+calls = 6
 
 [[count]]
 path = "cmd/gc/cmd_supervisor_writeauth_reload_test.go"
@@ -881,11 +886,6 @@ calls = 5
 
 [[count]]
 path = "cmd/gc/fast_loop_helpers_test.go"
-resource = "fixed_sleep"
-calls = 1
-
-[[count]]
-path = "cmd/gc/fast_loop_helpers_test.go"
 resource = "net_listen"
 calls = 1
 
@@ -893,11 +893,6 @@ calls = 1
 path = "cmd/gc/fast_loop_helpers_test.go"
 resource = "slow_process_gate"
 calls = 2
-
-[[count]]
-path = "cmd/gc/fast_loop_helpers_test.go"
-resource = "subprocess"
-calls = 1
 
 [[count]]
 path = "cmd/gc/gc_beads_bd_bind_host_test.go"
@@ -955,6 +950,12 @@ tagged = true
 path = "cmd/gc/infra_copy_manifest_test.go"
 resource = "fixed_sleep"
 calls = 1
+
+[[count]]
+path = "cmd/gc/infra_scope_integration_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
 
 [[count]]
 path = "cmd/gc/init_provider_readiness_test.go"
@@ -1337,6 +1338,11 @@ calls = 1
 path = "cmd/gc/sling_remote_test.go"
 resource = "http_test_server"
 calls = 6
+
+[[count]]
+path = "cmd/gc/socket_mode_unix_test.go"
+resource = "listener_helper"
+calls = 1
 
 [[count]]
 path = "cmd/gc/status_provider_test.go"
@@ -2183,7 +2189,7 @@ calls = 2
 [[count]]
 path = "internal/doctor/checks_test.go"
 resource = "net_listen"
-calls = 8
+calls = 9
 
 [[count]]
 path = "internal/doctor/checks_test.go"
@@ -2216,6 +2222,17 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
+path = "internal/genshell/genshell_concurrency_windows_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/genshell/genshell_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "internal/git/git_test.go"
 resource = "subprocess"
 calls = 3
@@ -2223,7 +2240,7 @@ calls = 3
 [[count]]
 path = "internal/gitcred/autherror_test.go"
 resource = "subprocess"
-calls = 2
+calls = 1
 
 [[count]]
 path = "internal/githubmonitor/client_test.go"
@@ -2272,6 +2289,12 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
+path = "internal/overlay/platform_windows_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "internal/packregistry/catalog_test.go"
 resource = "fixed_sleep"
 calls = 1
@@ -2289,12 +2312,17 @@ calls = 1
 [[count]]
 path = "internal/pidutil/cmdline_portable_test.go"
 resource = "fixed_sleep"
-calls = 2
+calls = 1
 
 [[count]]
-path = "internal/pidutil/cmdline_portable_test.go"
+path = "internal/pidutil/cmdline_unix_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
+path = "internal/pidutil/cmdline_unix_test.go"
 resource = "subprocess"
-calls = 2
+calls = 1
 
 [[count]]
 path = "internal/pidutil/environ_darwin_test.go"
@@ -2310,12 +2338,29 @@ calls = 2
 [[count]]
 path = "internal/pidutil/pidutil_test.go"
 resource = "subprocess"
-calls = 4
+calls = 2
+
+[[count]]
+path = "internal/pidutil/testcmd_unix_test.go"
+resource = "subprocess"
+calls = 2
 
 [[count]]
 path = "internal/processgroup/processgroup_unix_test.go"
 resource = "subprocess"
 calls = 1
+
+[[count]]
+path = "internal/processgroup/processgroup_windows_test.go"
+resource = "fixed_sleep"
+calls = 12
+tagged = true
+
+[[count]]
+path = "internal/processgroup/processgroup_windows_test.go"
+resource = "subprocess"
+calls = 13
+tagged = true
 
 [[count]]
 path = "internal/productmetrics/control_unix_test.go"
@@ -2351,6 +2396,12 @@ calls = 1
 path = "internal/productmetrics/transport_test.go"
 resource = "http_test_server"
 calls = 9
+
+[[count]]
+path = "internal/runtime/acl_windows_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
 
 [[count]]
 path = "internal/runtime/acp/acp_test.go"
@@ -2438,6 +2489,18 @@ resource = "fixed_sleep"
 calls = 10
 
 [[count]]
+path = "internal/runtime/herdr/attach_live_windows_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
+
+[[count]]
+path = "internal/runtime/herdr/endpoint_windows_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "internal/runtime/herdr/events_live_test.go"
 resource = "fixed_sleep"
 calls = 1
@@ -2463,9 +2526,21 @@ resource = "fixed_sleep"
 calls = 1
 
 [[count]]
+path = "internal/runtime/herdr/launchspec_windows_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "internal/runtime/herdr/panebinding_live_test.go"
 resource = "fixed_sleep"
 calls = 3
+
+[[count]]
+path = "internal/runtime/herdr/panebinding_live_windows_test.go"
+resource = "fixed_sleep"
+calls = 4
+tagged = true
 
 [[count]]
 path = "internal/runtime/herdr/panebinding_provider_test.go"
@@ -2476,6 +2551,12 @@ calls = 1
 path = "internal/runtime/herdr/provider_live_test.go"
 resource = "fixed_sleep"
 calls = 2
+
+[[count]]
+path = "internal/runtime/herdr/provider_live_windows_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
 
 [[count]]
 path = "internal/runtime/herdr/staleserver_test.go"
@@ -2499,6 +2580,12 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
+path = "internal/runtime/k8s/pod_prompt_test.go"
+resource = "subprocess"
+calls = 1
+medium = 1
+
+[[count]]
 path = "internal/runtime/k8s/provider_test.go"
 resource = "fixed_sleep"
 calls = 1
@@ -2514,6 +2601,30 @@ resource = "fixed_sleep"
 calls = 1
 
 [[count]]
+path = "internal/runtime/privatedir_windows_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/runtime/process_control_windows_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/runtime/proctable/console_windows_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
+path = "internal/runtime/proctable/identity_windows_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
 path = "internal/runtime/proctable/kill_unix_test.go"
 resource = "fixed_sleep"
 calls = 1
@@ -2522,6 +2633,24 @@ calls = 1
 path = "internal/runtime/proctable/kill_unix_test.go"
 resource = "subprocess"
 calls = 2
+
+[[count]]
+path = "internal/runtime/proctable/kill_windows_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
+
+[[count]]
+path = "internal/runtime/proctable/kill_windows_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
+path = "internal/runtime/proctable/proctable_windows_test.go"
+resource = "subprocess"
+calls = 3
+tagged = true
 
 [[count]]
 path = "internal/runtime/proctable/supervisor_fork_orphan_repro_test.go"
@@ -2554,6 +2683,11 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
+path = "internal/runtime/runtimetest/input_outcome_exec_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "internal/runtime/runtimetest/osc7501emitter/main_test.go"
 resource = "subprocess"
 calls = 1
@@ -2562,6 +2696,18 @@ calls = 1
 path = "internal/runtime/runtimetest/process_table_test.go"
 resource = "subprocess"
 calls = 1
+
+[[count]]
+path = "internal/runtime/shellcommand_windows_test.go"
+resource = "subprocess"
+calls = 4
+tagged = true
+
+[[count]]
+path = "internal/runtime/shellunavailable_parser_windows_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
 
 [[count]]
 path = "internal/runtime/ssh/process_alive_script_test.go"
@@ -2576,6 +2722,12 @@ tagged = true
 
 [[count]]
 path = "internal/runtime/ssh/ssh_localhost_integration_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/runtime/staging_tracked_windows_test.go"
 resource = "subprocess"
 calls = 1
 tagged = true
@@ -2596,9 +2748,14 @@ resource = "fixed_sleep"
 calls = 1
 
 [[count]]
+path = "internal/runtime/subprocess/subprocess_private_unix_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
 path = "internal/runtime/subprocess/subprocess_test.go"
 resource = "fixed_sleep"
-calls = 10
+calls = 6
 
 [[count]]
 path = "internal/runtime/subprocess/subprocess_test.go"
@@ -2806,12 +2963,12 @@ calls = 1
 medium = 1
 
 [[count]]
-path = "internal/session/submit_test.go"
+path = "internal/session/submit_poller_identity_unix_test.go"
 resource = "fixed_sleep"
 calls = 1
 
 [[count]]
-path = "internal/session/submit_test.go"
+path = "internal/session/submit_poller_identity_unix_test.go"
 resource = "subprocess"
 calls = 1
 
@@ -2940,6 +3097,11 @@ path = "internal/workspacesvc/proxy_process_pdeathsig_linux_test.go"
 resource = "subprocess"
 calls = 1
 tagged = true
+
+[[count]]
+path = "internal/workspacesvc/proxy_process_reap_test.go"
+resource = "fixed_sleep"
+calls = 1
 
 [[count]]
 path = "internal/workspacesvc/proxy_process_test.go"

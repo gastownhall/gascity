@@ -102,24 +102,16 @@ func workspacePinnedBdBinary(cityPath string) (string, error) {
 	if pinned != "" {
 		return pinned, nil
 	}
-	// This re-stats and re-parses the city.toml that
-	// workspacePinnedBdBinaryOptional already read, solely to re-answer whether
-	// workspace.env configured a PATH at all. The duplicate is deliberate: it
-	// keeps the optional resolver's contract to a single answer ("which bd is
-	// pinned") rather than returning an intermediate signal that exists only
-	// for this one strict caller. Both loads use the no-refresh loader, which
-	// omits the managed-provider-shim rewrite the full loader performs, so what
-	// repeats here is a parse and not a side effect.
-	if _, err := os.Stat(filepath.Join(cityPath, "city.toml")); errors.Is(err, os.ErrNotExist) {
-		return "", nil
-	} else if err != nil {
-		return "", err
-	}
-	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	// Re-ask the memoized root-file table, solely to re-answer whether
+	// workspace.env configured a PATH at all. The optional resolver's contract
+	// stays a single answer ("which bd is pinned") rather than returning an
+	// intermediate signal that exists only for this one strict caller. The
+	// second lookup is a stat plus a map clone, not a re-parse.
+	table, err := workspaceEnvTable(cityPath)
 	if err != nil {
 		return "", err
 	}
-	if _, configured := cfg.Workspace.Env["PATH"]; configured {
+	if _, configured := expandEnvMap(table)["PATH"]; configured {
 		return "", fmt.Errorf("workspace.env PATH is configured but contains no executable bd at an absolute path")
 	}
 	return "", nil
@@ -153,16 +145,17 @@ func workspacePinnedBdBinaryOptional(cityPath string) (string, error) {
 	} else if err != nil {
 		return "", err
 	}
-	// Resolving an executable is an environment-only operation. Use the
-	// no-refresh loader here: the full loader rewrites the generated managed
-	// provider shim as a config-load side effect, which can race an in-flight
-	// lifecycle operation and replace a caller's already-selected provider
-	// entrypoint.
-	cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	// Resolving an executable is an environment-only operation, and
+	// [workspace.env] lives in the root city.toml alone. Read that table
+	// directly: a composed load resolves imports and packs, takes the repo-cache
+	// lock, and would queue every bd call behind a `gc import install` clone
+	// (#7170). The table is memoized raw; expansion reads the process
+	// environment and so runs on every call.
+	table, err := workspaceEnvTable(cityPath)
 	if err != nil {
 		return "", err
 	}
-	env := expandEnvMap(cfg.Workspace.Env)
+	env := expandEnvMap(table)
 	if raw := strings.TrimSpace(env["BD_BIN"]); raw != "" {
 		if !filepath.IsAbs(raw) {
 			return "", fmt.Errorf("workspace.env BD_BIN must be an absolute executable path")

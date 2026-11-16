@@ -262,6 +262,11 @@ func mutationError(err error) error {
 		return huma.Error409Conflict(msg)
 	case errors.Is(err, configedit.ErrValidation):
 		return huma.Error400BadRequest(msg)
+	case errors.Is(err, config.ErrReservedBeadPrefix):
+		// A rig prefix in a split city's reserved namespace, refused before
+		// anything was written: the client chose or derived it, and the
+		// refusal names the prefix field that fixes it.
+		return huma.Error400BadRequest(msg)
 	case errors.Is(err, config.ErrPatchTargetNotFound):
 		// A patch named a target absent from the merged config; the edit was
 		// rolled back, so this is the client's error.

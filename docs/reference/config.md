@@ -111,6 +111,7 @@ Agent defines a configured agent in the city.
 | `max_active_sessions` | integer |  |  | MaxActiveSessions is the agent-level cap on concurrent sessions. Nil means inherit from rig, then workspace, then unlimited. Replaces pool.max. |
 | `min_active_sessions` | integer |  |  | MinActiveSessions is the minimum number of sessions to keep alive. Agent-level only. Counts against rig/workspace caps. Replaces pool.min. This controls pool sessions independently of [[named_session]] mode="always"; both produce sessions, and gc doctor reports accidental combinations. |
 | `scale_check` | string |  |  | ScaleCheck is a shell command template whose output reports new unassigned session demand. In bead-backed reconciliation this is additive: assigned work is resumed separately, and ScaleCheck reports only how many new generic sessions to start, still bounded by all cap levels. Legacy no-store evaluation continues to treat the output as the desired session count. If it contains Go template placeholders, gc expands them using the same PathContext fields as work_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName, DefaultBranch) before running the command. |
+| `scale_check_authoritative` | boolean |  |  | ScaleCheckAuthoritative makes this pool's ScaleCheck the last word on new demand, its zeros included.  By default a cold pool with a custom ScaleCheck is ALSO probed by gc's own Ready()/gc.routed_to count, merged with max(). That default exists for a real case: a rig-scoped check cannot see work routed to it that lives in the city store, so without the probe such a pool would never wake (TestBuildDesiredState_ScaleFromZero_CrossRig). But max() means a custom check can never answer "no demand" while cold — max(0,1) is 1 — so a pool whose check deliberately withholds demand is re-woken every tick, finds the work its own check already judged unactionable, and drains. Measured in production: 43 spawn/drain cycles in 40 minutes, one Claude cold start every ~30s, for as long as a review was outstanding.  Set this only when the check reads the same store the routed work lives in — then the probe can discover nothing the check has not already weighed, and its disagreement is pure churn. A check that FAILS is still not a zero: it stays partial and falls through to the probe exactly as without this flag, so it adds no new way to strand routed work. |
 | `drain_timeout` | string |  | `5m` | DrainTimeout is the maximum time to wait for a session to finish its current work before force-killing it during scale-down. Duration string (e.g., "5m", "30m", "1h"). Defaults to "5m". |
 | `on_boot` | string |  |  | OnBoot is a shell command template run once at controller startup for this agent. If it contains Go template placeholders, gc expands them using the same PathContext fields as work_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName, DefaultBranch) before running the command. |
 | `on_death` | string |  |  | OnDeath is a shell command template run when a session dies unexpectedly. If it contains Go template placeholders, gc expands them using the same PathContext fields as work_dir and session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName, DefaultBranch) before running the command. |
@@ -217,6 +218,7 @@ AgentOverride modifies a pack-stamped agent for a specific rig.
 | `max_active_sessions` | integer |  |  | MaxActiveSessions overrides the agent-level cap on concurrent sessions. |
 | `min_active_sessions` | integer |  |  | MinActiveSessions overrides the minimum number of sessions to keep alive. |
 | `scale_check` | string |  |  | ScaleCheck overrides the shell command whose output reports new unassigned session demand for bead-backed reconciliation. |
+| `scale_check_authoritative` | boolean |  |  | ScaleCheckAuthoritative overrides whether this pool's ScaleCheck is the last word on new demand, its zeros included. See Agent. |
 | `option_defaults` | map[string]string |  |  | OptionDefaults adds or overrides provider option defaults for this agent. Keys are option keys, values are choice values. Merges additively (override keys win over existing agent keys). Example: option_defaults = &#123; model = "sonnet" &#125; |
 
 ## AgentPatch
@@ -278,6 +280,7 @@ AgentPatch modifies existing agents identified by rig scope and Name.
 | `max_active_sessions` | integer |  |  | MaxActiveSessions overrides the agent-level cap on concurrent sessions. |
 | `min_active_sessions` | integer |  |  | MinActiveSessions overrides the minimum number of sessions to keep alive. |
 | `scale_check` | string |  |  | ScaleCheck overrides the command template whose output reports new unassigned session demand for bead-backed reconciliation. Supports the same Go template placeholders as Agent.scale_check. |
+| `scale_check_authoritative` | boolean |  |  | ScaleCheckAuthoritative overrides whether this pool's ScaleCheck is the last word on new demand, its zeros included. See Agent. |
 | `option_defaults` | map[string]string |  |  | OptionDefaults adds or overrides provider option defaults for this agent. Keys are option keys, values are choice values. Merges additively (patch keys win over existing agent keys). Example: option_defaults = &#123; model = "sonnet" &#125; |
 
 ## BeadPolicyConfig
@@ -390,7 +393,7 @@ DoctorConfig holds settings for the gc doctor surface.
 |-------|------|----------|---------|-------------|
 | `worktree_rig_warn_size` | string |  | `10GB` | WorktreeRigWarnSize is the per-rig warning threshold for a worktree population's total disk footprint. Reported by the worktree-disk-size check for .gc/worktrees/&lt;rig&gt;/, and by the rig:&lt;rig&gt;:worktrees check for the per-bead worktrees at &lt;rig&gt;/worktrees/. Go-style human size string ("10GB", "500MB"). Empty or unparseable falls back to the default (10 GB). |
 | `worktree_rig_error_size` | string |  | `50GB` | WorktreeRigErrorSize is the per-rig error threshold. When a rig worktree population exceeds this, the reporting check errors rather than warns. Empty or unparseable falls back to the default (50 GB). |
-| `nested_worktree_prune` | boolean |  | `false` | NestedWorktreePrune escalates the nested-worktree-prune check from warning to error severity when safely-prunable nested worktrees are present, so CI / scripted doctor runs fail until the operator runs `gc doctor --fix`. Actual removal still requires --fix; this flag does not auto-prune. Safety is enforced by mechanical checks (no uncommitted changes, no unpushed commits, no stashes) — never by role identity. |
+| `nested_worktree_prune` | boolean |  | `false` | NestedWorktreePrune escalates the nested-worktree-prune check from warning to error severity when safely-prunable nested worktrees are present, so CI / scripted doctor runs fail until the operator runs `gc doctor --fix`. Actual removal still requires --fix; this flag does not auto-prune. Safety is enforced by mechanical checks (no uncommitted changes, no unpushed commits) — never by role identity. |
 | `check` | []LocalDoctorCheck |  |  | Checks holds city-local inline doctor checks declared via [[doctor.check]] in city.toml. |
 
 ## DoltConfig
@@ -530,6 +533,7 @@ Import defines a named import of another pack.
 |-------|------|----------|---------|-------------|
 | `source` | string | **yes** |  | Source is the durable authored pack location: a local path, a remote git URL, or a dereferenceable GitHub tree URL for a pack below a repository root, such as "https://github.com/org/repo/tree/main/packs/foo". Registry handles are lookup-only in this release wave; authored [imports.*] entries store the resolved source plus optional version. |
 | `version` | string |  |  | Version is an optional semver constraint for git-backed imports (e.g., "^1.2"). Empty for local paths. "sha:&lt;hex&gt;" pins a specific commit. |
+| `agents_exclude` | []string |  |  | AgentsExclude removes named agent templates from this import edge. Selectors are matched against each agent's local name before the import binding is applied; other imported resources remain visible. |
 
 ## K8sConfig
 
@@ -770,6 +774,7 @@ ProviderSpec defines a named provider's startup parameters.
 | `prompt_flag` | string |  |  | PromptFlag is the CLI flag used when prompt_mode is "flag" (e.g. "--prompt"). |
 | `ready_delay_ms` | integer |  |  | ReadyDelayMs is milliseconds to wait after launch before the provider is considered ready. |
 | `ready_prompt_prefix` | string |  |  | ReadyPromptPrefix is the string prefix that indicates the provider is ready for input. |
+| `not_ready_markers` | []string |  |  | NotReadyMarkers lists text the provider prints when it discards a submitted prompt because it is not ready for input yet, although its input prompt is already showing (Copilot prints "Managed account policy is still loading" until its policy loads). A runtime that sees one appear after delivering the startup prompt delivers the prompt again. |
 | `process_names` | []string |  |  | ProcessNames lists process names to look for when checking if the provider is running. |
 | `emits_permission_warning` | boolean |  |  | EmitsPermissionWarning is tri-state: nil = inherit, &true = enable, &false = explicit disable. |
 | `accept_startup_dialogs` | boolean |  |  | AcceptStartupDialogs is tri-state: nil = default startup dialog handling, &true = force dialog acceptance, &false = suppress it for providers that handle permissions entirely through launch flags. |

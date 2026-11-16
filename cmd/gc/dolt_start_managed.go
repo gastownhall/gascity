@@ -56,6 +56,9 @@ type managedDoltStartedProcess struct {
 	// these before signaling WatchdogPID. Zero/empty when there is no watchdog.
 	WatchdogStartTimeTicks uint64
 	WatchdogStartIdentity  string
+	// InfraScope names the transient systemd user scope unit the spawn runs
+	// in (see infraArgv); empty when it was spawned unscoped.
+	InfraScope string
 }
 
 // defaultManagedDoltBindHost is the listener host a managed dolt sql-server
@@ -107,6 +110,12 @@ var (
 	managedDoltStartSQLServerFn = startManagedDoltSQLServer
 	managedDoltWaitForReadyFn   = waitForManagedDoltReady
 	managedDoltLogSuffixFn      = managedDoltLogSuffix
+
+	// The platform gate is indirected for the same reason, with one
+	// difference worth stating: a test that stubs it is not bypassing a
+	// safety check, because the hazard the gate guards is an unmanageable
+	// live server, and a test that also stubs the spawn never creates one.
+	managedDoltNativeIdentitySupportedFn = managedDoltNativeIdentitySupported
 )
 
 // init is the re-entry point for the dolt-managed-test watchdog. The watchdog
@@ -150,6 +159,16 @@ func startManagedDoltProcess(cityPath, host, port, user, logLevel string, timeou
 
 //nolint:unparam // archiveLevel is an explicit override hook; current callers use config/env fallback.
 func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel string, archiveLevel int, timeout time.Duration, publish bool) (managedDoltStartReport, error) {
+	// Refuse to start what this platform cannot afterwards stop or identify.
+	// The stop and inspect paths are both fenced by the same gate, so where it
+	// fails a successful start leaves a database server holding the data
+	// directory's exclusive lock, a PID file, and a runtime-state record
+	// claiming it is running — none of which any supported operation can act
+	// on again. Refusing here is recoverable; an unmanageable server writing
+	// into a live data directory is not.
+	if err := managedDoltNativeIdentitySupportedFn(); err != nil {
+		return managedDoltStartReport{}, err
+	}
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
 		return managedDoltStartReport{}, err
@@ -239,11 +258,12 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 			return report, fmt.Errorf("write pid file: %w", err)
 		}
 		if err := writeDoltRuntimeStateFile(layout.StateFile, doltRuntimeState{
-			Running:   true,
-			PID:       started.PID,
-			Port:      currentPort,
-			DataDir:   layout.DataDir,
-			StartedAt: time.Now().UTC().Format(time.RFC3339),
+			Running:    true,
+			PID:        started.PID,
+			Port:       currentPort,
+			DataDir:    layout.DataDir,
+			StartedAt:  time.Now().UTC().Format(time.RFC3339),
+			InfraScope: started.InfraScope,
 		}); err != nil {
 			terminateManagedDoltStartedProcess(started)
 			_ = os.Remove(layout.PIDFile)
@@ -446,7 +466,7 @@ func startManagedDoltSQLServer(cityPath, configFile, logFilePath string, logFile
 	if managedDoltScopeWatchdogEnabled() {
 		return startManagedDoltSQLServerWithScopeWatchdog(cityPath, configFile, logFilePath, logFile)
 	}
-	cmd := exec.Command("dolt", "sql-server", "--config", configFile)
+	cmd, infraScopeUnit := infraCommand(managedDoltInfraDescription(cityPath), "dolt", "sql-server", "--config", configFile)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
@@ -470,6 +490,7 @@ func startManagedDoltSQLServer(cityPath, configFile, logFilePath string, logFile
 		PID:            pid,
 		StartTimeTicks: startTimeTicks,
 		StartIdentity:  startIdentity,
+		InfraScope:     infraScopeUnit,
 	}
 	// Reap the child when it exits so it does not linger as a zombie under a
 	// non-reaping PID-1 controller. This server is managed out-of-band by PID

@@ -451,7 +451,7 @@ func ownerSocket(t *testing.T, p *Provider, name string, sc *sessionConn) {
 	t.Helper()
 	var owned atomic.Pointer[sessionConn]
 	owned.Store(sc)
-	lis, err := p.startControlSocket(name, &exec.Cmd{}, make(chan struct{}), p.ownedControlCommands(name, &owned))
+	lis, err := p.startControlSocket(name, &exec.Cmd{}, 0, make(chan struct{}), p.ownedControlCommands(name, &owned))
 	if err != nil {
 		t.Fatalf("startControlSocket: %v", err)
 	}

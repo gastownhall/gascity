@@ -36,6 +36,10 @@ func rigImportStamp(rig string) string { return "rig:" + rig }
 // rigScopeRef is the gc.root_store_ref value of rig's scope.
 func rigScopeRef(rig string) string { return rigGraphScope(rig).rootStoreRef("") }
 
+// rigReusedIDRemedy is the fix of a rig row under an id the rig's import
+// moved for a different bead.
+const rigReusedIDRemedy = "re-create each rig row under a new id (the import raised the rig's minimum id length so this does not recur), then re-run"
+
 // rigSnapshot is one read of a rig store: every row of both tiers, closed
 // included, and the DOWN edges of every row.
 type rigSnapshot struct {
@@ -312,7 +316,7 @@ func planRigImport(ctx rigPlanContext) rigImportPlan {
 		plan.Refusals = append(plan.Refusals, rigImportRefusal{
 			IDs:    reused,
 			Reason: "the rig minted each of these ids again after an earlier import moved the bead that first held it",
-			Remedy: "re-create each rig row under a new id (the import raised the rig's minimum id length so this does not recur), then re-run",
+			Remedy: rigReusedIDRemedy,
 		})
 	}
 	if len(foreign) > 0 {

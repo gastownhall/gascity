@@ -382,17 +382,71 @@ func TestNewEnvKeepsTheProviderDoublesFirst(t *testing.T) {
 	assertFirstPathBDIs(t, env, bd)
 }
 
-// An unwrapped bd resolves user-level state under gc's HOME, so WithRealBD
-// refuses an Env whose gc HOME is anything but NewEnv's isolated one — the
-// operator's own (WithHostHome) above all.
+// An unwrapped bd resolves user-level state under gc's HOME, so off a CI runner
+// WithRealBD refuses an Env whose gc HOME is anything but NewEnv's isolated one
+// — the operator's own (WithHostHome) above all. The developer's opt-in to host
+// Claude state does not lend that home to bd.
 func TestWithRealBDRefusesAHomeThatIsNotTheIsolatedOne(t *testing.T) {
-	env := NewEnv("", t.TempDir(), t.TempDir()).With("HOME", t.TempDir())
-	defer func() {
-		if recover() == nil {
-			t.Fatal("WithRealBD accepted an Env whose gc HOME is not NewEnv's isolated home")
+	for name, hostClaudeOptIn := range map[string]string{"dev box": "", "host Claude opt-in": "1"} {
+		t.Run(name, func(t *testing.T) {
+			devBox(t)
+			t.Setenv(EnvAllowHostClaude, hostClaudeOptIn)
+			if HostHomeIsDisposable() {
+				t.Fatalf("HostHomeIsDisposable() off a CI runner (%s=%q)", EnvAllowHostClaude, hostClaudeOptIn)
+			}
+			env := NewEnv("", t.TempDir(), t.TempDir()).With("HOME", t.TempDir())
+			defer func() {
+				if recover() == nil {
+					t.Fatal("WithRealBD accepted an Env whose gc HOME is not NewEnv's isolated home")
+				}
+			}()
+			env.WithRealBD(filepath.Join(t.TempDir(), "bd"))
+		})
+	}
+}
+
+// A CI runner's home is discarded with it, so there a host-home tier that
+// drives a split city hands gc the real bd again after WithHostHome, which on
+// its own still drops back to the wrapper. bd's shared-server mode and metrics
+// stay pinned off under that home.
+func TestWithRealBDRunsUnderTheHostHomeOnACIRunner(t *testing.T) {
+	devBox(t)
+	t.Setenv("GITHUB_ACTIONS", "true")
+	if !HostHomeIsDisposable() {
+		t.Fatal("HostHomeIsDisposable() = false with GITHUB_ACTIONS=true")
+	}
+	hostHome := hostHomeWithBdSharedServer(t)
+	bd := writeFakeBD(t)
+	t.Setenv("GC_ACCEPTANCE_BD_BIN", bd)
+
+	env := NewEnv("", t.TempDir(), t.TempDir()).WithHostHome()
+	assertWrappedBD(t, env, bd)
+
+	env.WithRealBD(bd)
+
+	if got := env.Get("HOME"); got != hostHome {
+		t.Fatalf("HOME = %q, want the host home %q", got, hostHome)
+	}
+	if !env.RunsRealBD() || env.Get("BD_BIN") != bd {
+		t.Fatalf("RunsRealBD() = %v with BD_BIN %q, want the real bd %s", env.RunsRealBD(), env.Get("BD_BIN"), bd)
+	}
+	assertFirstPathBDIs(t, env, bd)
+	for key, want := range map[string]string{bdSharedServerConfigEnv: "false", bdDisableMetricsEnv: "1"} {
+		if got := env.Get(key); got != want {
+			t.Errorf("%s = %q under the host home, want %q", key, got, want)
 		}
-	}()
-	env.WithRealBD(filepath.Join(t.TempDir(), "bd"))
+	}
+}
+
+// Only the exact GITHUB_ACTIONS=true marks a disposable host home.
+func TestHostHomeIsDisposableNeedsTheExactSpelling(t *testing.T) {
+	devBox(t)
+	for _, val := range []string{"1", "TRUE", "yes", ""} {
+		t.Setenv("GITHUB_ACTIONS", val)
+		if HostHomeIsDisposable() {
+			t.Errorf("HostHomeIsDisposable() with GITHUB_ACTIONS=%q", val)
+		}
+	}
 }
 
 func TestWithRealBDRefusesARelativePath(t *testing.T) {

@@ -340,6 +340,7 @@ func installOverlayManaged(fs fsys.FS, cityDir, workDir, provider string) error 
 		if err != nil {
 			return fmt.Errorf("reading %s: %w", name, err)
 		}
+		data = overlay.AdaptSettingsForPlatform(filepath.FromSlash(rel), data)
 		dst := filepath.Join(workDir, filepath.FromSlash(rel))
 		if provider == "antigravity" && rel == path.Join(".agents", "hooks.json") {
 			return writeJSONOverlayManaged(fs, dst, data)
