@@ -2477,6 +2477,18 @@ resource = "fixed_sleep"
 calls = 10
 
 [[count]]
+path = "internal/runtime/herdr/attach_live_windows_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
+
+[[count]]
+path = "internal/runtime/herdr/endpoint_windows_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "internal/runtime/herdr/events_live_test.go"
 resource = "fixed_sleep"
 calls = 1
@@ -2502,9 +2514,21 @@ resource = "fixed_sleep"
 calls = 1
 
 [[count]]
+path = "internal/runtime/herdr/launchspec_windows_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "internal/runtime/herdr/panebinding_live_test.go"
 resource = "fixed_sleep"
 calls = 3
+
+[[count]]
+path = "internal/runtime/herdr/panebinding_live_windows_test.go"
+resource = "fixed_sleep"
+calls = 4
+tagged = true
 
 [[count]]
 path = "internal/runtime/herdr/panebinding_provider_test.go"
@@ -2515,6 +2539,12 @@ calls = 1
 path = "internal/runtime/herdr/provider_live_test.go"
 resource = "fixed_sleep"
 calls = 2
+
+[[count]]
+path = "internal/runtime/herdr/provider_live_windows_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
 
 [[count]]
 path = "internal/runtime/herdr/staleserver_test.go"
