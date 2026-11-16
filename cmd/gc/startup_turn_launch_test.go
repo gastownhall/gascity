@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -476,26 +478,72 @@ func TestPollGateReadsNoLaunchWhileNoTurnIsDue(t *testing.T) {
 
 // Kills a drain that drops a startup turn on the strength of its own
 // GC_INSTANCE_TOKEN: a hook of a replaced launch would kill the
-// replacement's turn. The drain's claim supplies no launch, so it holds the
-// session's turns and the reminder behind them, and drops nothing.
+// replacement's turn. The real hook drain of its own session (no args,
+// inject), run in the replaced launch's environment, supplies no launch to
+// its claim, so it holds the session's turn and the reminder behind it:
+// nothing is dead-lettered and nothing is claimed.
 func TestADrainNeverDropsAStartupTurn(t *testing.T) {
-	h := newLaunchHarness(t)
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_INJECT_CONTEXT", "")
+	cityDir := t.TempDir()
+	writeNamedSessionCityTOML(t, cityDir)
+	t.Setenv("GC_CITY", cityDir)
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	created, err := store.Create(beads.Bead{
+		Title:  "Session: worker",
+		Type:   session.BeadType,
+		Status: "open",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name": "worker-session",
+			"agent_name":   "worker",
+			"template":     "worker",
+			"state":        string(session.StateActive),
+		},
+	})
+	if err != nil {
+		t.Fatalf("store.Create session: %v", err)
+	}
+	// The hook runs in the replaced launch's environment; the queued turn is
+	// the replacement's.
+	t.Setenv("GC_SESSION_ID", created.ID)
 	t.Setenv(runtime.InstanceTokenEnv, "tok-replaced-launch")
-	agent := h.target.agentKey()
-	turn := newQueuedNudgeWithOptions(agent, "the replacement's turn", nudgequeue.SourceSubmit, time.Now().Add(-time.Minute), queuedNudgeOptionsFromTarget(h.target))
+	opts := queuedNudgeOptions{SessionID: created.ID}
+	turn := newQueuedNudgeWithOptions("worker", "the replacement's turn", nudgequeue.SourceSubmit, time.Now().Add(-time.Minute), opts)
 	turn.Reference = nudgequeue.StartupTurnReference(runtime.LaunchID("tok-replacement"))
-	reminder := newQueuedNudgeWithOptions(agent, "a reminder", "sling", time.Now().Add(-time.Minute), queuedNudgeOptionsFromTarget(h.target))
+	reminder := newQueuedNudgeWithOptions("worker", "a reminder", "sling", time.Now().Add(-time.Minute), opts)
+	queue := openNudgeQueue(cityDir, beads.NudgesStore{Store: store}).Queue
 	for _, item := range []queuedNudge{turn, reminder} {
-		if err := openNudgeQueue(h.dir, beads.NudgesStore{}).Queue.EnqueueDeferred(item); err != nil {
+		if err := queue.EnqueueDeferred(item); err != nil {
 			t.Fatal(err)
 		}
 	}
-	claimed, err := claimDueQueuedNudgesForTarget(h.dir, h.target, nil, time.Now())
-	if err != nil || len(claimed) != 0 {
-		t.Fatalf("drain claim = %v, %v; want the session held", queuedNudgeIDs(claimed), err)
+	withNudgeDrainHookStdin(t, []byte(`{"hook_event_name":"UserPromptSubmit"}`))
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdNudgeDrainWithFormat(nil, true, "", &stdout, &stderr); code != 0 {
+		t.Fatalf("cmdNudgeDrainWithFormat = %d, want 0; stderr=%s", code, stderr.String())
 	}
-	if dead := h.state(t).Dead; len(dead) != 0 {
-		t.Fatalf("dead = %+v; want nothing dropped", dead)
+	if strings.Contains(stdout.String(), "a reminder") {
+		t.Fatalf("stdout = %q; want the reminder held behind the turn", stdout.String())
+	}
+	state, err := nudgequeue.LoadState(cityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Dead) != 0 {
+		t.Fatalf("dead = %+v; want nothing dropped", state.Dead)
+	}
+	if len(state.InFlight) != 0 {
+		t.Fatalf("in flight = %+v; want nothing claimed", state.InFlight)
+	}
+	if len(state.Pending) != 2 {
+		t.Fatalf("pending = %+v; want the turn and the reminder still queued", state.Pending)
 	}
 }
 
