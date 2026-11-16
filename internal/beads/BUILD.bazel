@@ -43,9 +43,6 @@ go_library(
         "@rules_go//go/platform:linux": [
             "@org_golang_x_sys//unix",
         ],
-        "@rules_go//go/platform:windows": [
-            "//internal/platform/filelock",
-        ],
         "//conditions:default": [],
     }),
 )
