@@ -1323,6 +1323,113 @@ func TestAgentModelAndContext(t *testing.T) {
 	}
 }
 
+// TestAgentEnrichmentFollowsClaudeFamilyNotProviderName pins that session-meta
+// enrichment (model, context window) keys on the provider's built-in family,
+// not on its raw name, for both GET /agent/{name} and GET /agents. The wire
+// "provider" field keeps the configured name.
+func TestAgentEnrichmentFollowsClaudeFamilyNotProviderName(t *testing.T) {
+	claudeBase, codexBase := "builtin:claude", "builtin:codex"
+	const wantModel = "claude-opus-4-5-20251101"
+	cases := []struct {
+		name      string
+		providers []string // per-agent provider; agent i is "worker<i>" in myrig
+		wantModel []string // expected Model per agent ("" = not enriched)
+	}{
+		{name: "wrapped claude alone is enriched", providers: []string{"claude-wrap"}, wantModel: []string{wantModel}},
+		{name: "wrapped claude sharing a workdir with raw claude is not enriched", providers: []string{"claude-wrap", "claude"}, wantModel: []string{"", ""}},
+		{name: "codex wrapper is never enriched from a claude session file", providers: []string{"codex-wrap"}, wantModel: []string{""}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			state := newFakeState(t)
+			state.cfg.Providers = map[string]config.ProviderSpec{
+				"claude-wrap": {Base: &claudeBase},
+				"codex-wrap":  {Base: &codexBase},
+			}
+			state.cfg.Rigs = []config.Rig{{Name: "myrig", Path: "/tmp/myrig"}}
+			state.cfg.Agents = nil
+			var names []string
+			for i, provider := range tc.providers {
+				name := fmt.Sprintf("worker%d", i)
+				names = append(names, name)
+				state.cfg.Agents = append(state.cfg.Agents, config.Agent{
+					Name: name, Dir: "myrig", Provider: provider, MaxActiveSessions: intPtr(1),
+				})
+				state.sp.Start(context.Background(), "myrig--"+name, runtime.Config{}) //nolint:errcheck
+			}
+
+			searchDir := t.TempDir()
+			slugDir := filepath.Join(searchDir, sessionlog.ProjectSlug("/tmp/myrig"))
+			if err := os.MkdirAll(slugDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			line := `{"type":"assistant","message":{"role":"assistant","model":"` + wantModel + `","usage":{"input_tokens":10000}}}` + "\n"
+			if err := os.WriteFile(filepath.Join(slugDir, "test-session.jsonl"), []byte(line), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			srv := New(state)
+			srv.sessionLogSearchPaths = []string{searchDir}
+			h := newTestCityHandlerWith(t, state, srv)
+
+			check := func(label string, resp agentResponse, i int) {
+				t.Helper()
+				if resp.Provider != tc.providers[i] {
+					t.Errorf("%s: wire provider = %q, want %q (the configured name)", label, resp.Provider, tc.providers[i])
+				}
+				if resp.Model != tc.wantModel[i] {
+					t.Errorf("%s: Model = %q, want %q", label, resp.Model, tc.wantModel[i])
+				}
+				if (tc.wantModel[i] != "") != (resp.ContextPct != nil) {
+					t.Errorf("%s: ContextPct set = %v, want %v", label, resp.ContextPct != nil, tc.wantModel[i] != "")
+				}
+			}
+
+			for i, name := range names {
+				req := httptest.NewRequest("GET", cityURL(state, "/agent/myrig/"+name), nil)
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, req)
+				if rec.Code != http.StatusOK {
+					t.Fatalf("GET agent %s: status = %d; body: %s", name, rec.Code, rec.Body.String())
+				}
+				var resp agentResponse
+				if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+					t.Fatalf("decode: %v", err)
+				}
+				check("detail "+name, resp, i)
+			}
+
+			req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("GET agents: status = %d; body: %s", rec.Code, rec.Body.String())
+			}
+			var list struct {
+				Items []agentResponse `json:"items"`
+			}
+			if err := json.NewDecoder(rec.Body).Decode(&list); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if len(list.Items) != len(names) {
+				t.Fatalf("list items = %d, want %d", len(list.Items), len(names))
+			}
+			for i, name := range names {
+				var found bool
+				for _, item := range list.Items {
+					if item.Name == "myrig/"+name {
+						check("list "+name, item, i)
+						found = true
+					}
+				}
+				if !found {
+					t.Errorf("list: agent myrig/%s missing", name)
+				}
+			}
+		})
+	}
+}
+
 func TestAgentActivityFromSessionLog(t *testing.T) {
 	state := newFakeState(t)
 	state.cfg.Workspace.Provider = "claude"

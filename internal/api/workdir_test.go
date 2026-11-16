@@ -82,6 +82,106 @@ func TestCanAttributeSessionRejectsSharedSingleSlotPoolTemplate(t *testing.T) {
 	}
 }
 
+// wrappedProviders declares one provider per family outcome the attribution
+// count must tell apart: a claude wrapper, a codex wrapper, and a wrapper whose
+// base names no provider (its family is undetermined, which reads as not
+// claude).
+func wrappedProviders() map[string]config.ProviderSpec {
+	claudeBase, codexBase, missingBase := "builtin:claude", "builtin:codex", "builtin:no-such-provider"
+	return map[string]config.ProviderSpec{
+		"claude-wrap": {Base: &claudeBase},
+		"codex-wrap":  {Base: &codexBase},
+		"broken-wrap": {Base: &missingBase},
+	}
+}
+
+func TestCanAttributeSessionCountsClaudeFamilyProviders(t *testing.T) {
+	pool := func(provider string) config.Agent {
+		return config.Agent{
+			Name: "polecat", Dir: "demo", Provider: provider,
+			MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2),
+		}
+	}
+	named := func(name, provider string) config.Agent {
+		return config.Agent{Name: name, Dir: "demo", Provider: provider, MaxActiveSessions: intPtr(1)}
+	}
+	cases := []struct {
+		name              string
+		workspaceProvider string
+		agents            []config.Agent
+		// want[i] is canAttributeSession for agents[i]; every agent shares
+		// the rig root unless it is a pool template, which is never
+		// attributed itself (want is ignored for it).
+		want []bool
+	}{
+		{
+			name:   "wrapped claude next to raw claude on one workdir: neither is attributable",
+			agents: []config.Agent{named("refinery", "claude"), named("observer", "claude-wrap")},
+			want:   []bool{false, false},
+		},
+		{
+			name:   "two wrapped claude agents on one workdir: neither is attributable",
+			agents: []config.Agent{named("refinery", "claude-wrap"), named("observer", "claude-wrap")},
+			want:   []bool{false, false},
+		},
+		{
+			name:              "workspace default wrapped claude next to raw claude: neither is attributable",
+			workspaceProvider: "claude-wrap",
+			agents:            []config.Agent{named("refinery", ""), named("observer", "claude")},
+			want:              []bool{false, false},
+		},
+		{
+			name:   "wrapped claude pool template shares the rig root with a raw claude agent",
+			agents: []config.Agent{named("refinery", "claude"), pool("claude-wrap")},
+			want:   []bool{false, false},
+		},
+		{
+			name:   "raw claude pool template shares the rig root with a wrapped claude agent",
+			agents: []config.Agent{named("refinery", "claude-wrap"), pool("claude")},
+			want:   []bool{false, false},
+		},
+		{
+			name:   "wrapped claude pool template shares the rig root with a wrapped claude agent",
+			agents: []config.Agent{named("refinery", "claude-wrap"), pool("claude-wrap")},
+			want:   []bool{false, false},
+		},
+		{
+			name:   "wrapped claude agent alone on its workdir is attributable",
+			agents: []config.Agent{named("refinery", "claude-wrap")},
+			want:   []bool{true},
+		},
+		{
+			name:   "codex wrapper next to claude on one workdir does not count: claude stays attributable",
+			agents: []config.Agent{named("refinery", "claude"), named("observer", "codex-wrap")},
+			want:   []bool{true, true},
+		},
+		{
+			name:   "wrapper with an unresolvable base reads as not claude: claude stays attributable",
+			agents: []config.Agent{named("refinery", "claude"), named("observer", "broken-wrap")},
+			want:   []bool{true, true},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			cfg := &config.City{
+				Workspace: config.Workspace{Provider: tc.workspaceProvider},
+				Providers: wrappedProviders(),
+				Rigs:      []config.Rig{{Name: "demo", Path: filepath.Join(t.TempDir(), "demo-repo")}},
+				Agents:    tc.agents,
+			}
+			for i, a := range tc.agents {
+				if isMultiSessionAgent(a) {
+					continue
+				}
+				if got := canAttributeSession(a, "demo/"+a.Name, cfg, cityPath); got != tc.want[i] {
+					t.Errorf("canAttributeSession(%s) = %v, want %v", a.Name, got, tc.want[i])
+				}
+			}
+		})
+	}
+}
+
 func TestResolveSessionTemplateUsesConfiguredWorkDir(t *testing.T) {
 	state := newFakeState(t)
 	state.cfg.Agents[0].WorkDir = ".gc/worktrees/{{.Rig}}/{{.AgentBase}}"
