@@ -945,13 +945,13 @@ func TestLegacySessionEntryGuardBlocksAndCountsUnderV2(t *testing.T) {
 	})
 }
 
-// Kills: the demand build reading the session snapshot loaded before the
-// dead-runtime corpse cleanup. A pool session that exits seconds after its
-// creation_complete is still inside the post-create protection window, so a
-// stale snapshot counts the row the cleanup just closed as a fresh session
-// and the tick mints a successor for it. With no work, that successor exits
-// the same way and the template respawns forever.
-func TestCityRuntimeTickDoesNotRespawnPoolSessionClosedAsDeadRuntime(t *testing.T) {
+// newDeadRuntimeCorpseFixture builds a runtime over one pool session row
+// (awake, creation_complete five seconds old, so inside the post-create
+// protection window) whose pane is kept but dead: the row a one-shot worker
+// leaves when it exits seconds after its start. The pool has no work, so its
+// demand is zero once that row is closed.
+func newDeadRuntimeCorpseFixture(t *testing.T) (cr *CityRuntime, store beads.Store, corpseID string, stderr *lockedBuffer) {
+	t.Helper()
 	t.Setenv(fsPressureThresholdEnv, "100")
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
@@ -966,7 +966,7 @@ func TestCityRuntimeTickDoesNotRespawnPoolSessionClosedAsDeadRuntime(t *testing.
 	_ = f.Close()
 	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
 
-	store := beads.NewMemStore()
+	store = beads.NewMemStore()
 	justCompleted := time.Now().Add(-5 * time.Second).UTC().Format(time.RFC3339)
 	corpse, err := store.Create(beads.Bead{
 		Title:  "worker",
@@ -995,8 +995,8 @@ func TestCityRuntimeTickDoesNotRespawnPoolSessionClosedAsDeadRuntime(t *testing.
 	sp.visible["worker-1"] = true
 	sp.dead["worker-1"] = true
 
-	stderr := &lockedBuffer{}
-	cr := newTestCityRuntime(t, CityRuntimeParams{
+	stderr = &lockedBuffer{}
+	cr = newTestCityRuntime(t, CityRuntimeParams{
 		CityPath:                cityPath,
 		CityName:                "test-city",
 		TomlPath:                tomlPath,
@@ -1016,18 +1016,19 @@ func TestCityRuntimeTickDoesNotRespawnPoolSessionClosedAsDeadRuntime(t *testing.
 	cs.cityBeadStore = store
 	cr.setControllerState(cs)
 	cr.sessionDrains = newDrainTracker()
+	return cr, store, corpse.ID, stderr
+}
 
-	runFixtureTick(cr, "patrol")
-
-	got, err := store.Get(corpse.ID)
+// assertDeadRuntimeCorpseClosedWithoutSuccessor fails unless the corpse row
+// is closed and no open session bead exists for its template.
+func assertDeadRuntimeCorpseClosedWithoutSuccessor(t *testing.T, store beads.Store, corpseID, pass string, stderr *lockedBuffer) {
+	t.Helper()
+	got, err := store.Get(corpseID)
 	if err != nil {
 		t.Fatalf("Get(corpse): %v", err)
 	}
 	if got.Status != "closed" {
-		t.Fatalf("corpse row status = %q, want closed\nstderr:\n%s", got.Status, stderr.String())
-	}
-	if n := cr.demandSnapshot.result.PoolDesiredCounts["worker"]; n != 0 {
-		t.Errorf("poolDesired[worker] = %d, want 0: the row closed as dead-runtime was counted as fresh demand", n)
+		t.Fatalf("corpse row status = %q after the %s, want closed\nstderr:\n%s", got.Status, pass, stderr.String())
 	}
 	open, err := loadSessionBeads(store)
 	if err != nil {
@@ -1035,7 +1036,39 @@ func TestCityRuntimeTickDoesNotRespawnPoolSessionClosedAsDeadRuntime(t *testing.
 	}
 	for _, b := range open {
 		if b.Metadata["template"] == "worker" {
-			t.Errorf("tick created successor session %s (session_name %q) with no demand\nstderr:\n%s", b.ID, b.Metadata["session_name"], stderr.String())
+			t.Errorf("%s created successor session %s (session_name %q) with no demand\nstderr:\n%s", pass, b.ID, b.Metadata["session_name"], stderr.String())
 		}
 	}
+}
+
+// Kills: the demand build reading the session snapshot loaded before the
+// dead-runtime corpse cleanup. A pool session that exits seconds after its
+// creation_complete is still inside the post-create protection window, so a
+// stale snapshot counts the row the cleanup just closed as a fresh session
+// and the tick mints a successor for it. With no work, that successor exits
+// the same way and the template respawns forever.
+func TestCityRuntimeTickDoesNotRespawnPoolSessionClosedAsDeadRuntime(t *testing.T) {
+	cr, store, corpseID, stderr := newDeadRuntimeCorpseFixture(t)
+
+	runFixtureTick(cr, "patrol")
+
+	assertDeadRuntimeCorpseClosedWithoutSuccessor(t, store, corpseID, "tick", stderr)
+	if n := cr.demandSnapshot.result.PoolDesiredCounts["worker"]; n != 0 {
+		t.Errorf("poolDesired[worker] = %d, want 0: the row closed as dead-runtime was counted as fresh demand", n)
+	}
+}
+
+// Kills: the startup step's demand build reading the session snapshot loaded
+// before the dead-runtime corpse cleanup (the reload dropped from the cleanup
+// phase, or a startup-only copy of that phase without it). A controller that
+// boots over a pool row whose worker exited seconds earlier closes the row,
+// then counts it as a fresh session and mints a successor with no work.
+func TestCityRuntimeStartupDoesNotRespawnPoolSessionClosedAsDeadRuntime(t *testing.T) {
+	cr, store, corpseID, stderr := newDeadRuntimeCorpseFixture(t)
+
+	if !cr.startupReconcile(context.Background()) {
+		t.Fatalf("the startup step did not complete\nstderr:\n%s", stderr.String())
+	}
+
+	assertDeadRuntimeCorpseClosedWithoutSuccessor(t, store, corpseID, "startup", stderr)
 }
