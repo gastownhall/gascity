@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
@@ -224,6 +225,7 @@ func TestCmdSessionKill_ClearsCircuitBreaker(t *testing.T) {
 		t.Fatalf("precondition: expected breaker OPEN for %q after 4 restarts", identity)
 	}
 
+	registerSessionResetTestRuntime(t, cityDir)
 	lis, err := startControllerSocket(
 		cityDir,
 		controllerHostingStandalone,
@@ -400,6 +402,7 @@ func TestCmdSessionKill_ClearsCircuitBreakerForAsleepNamedSession(t *testing.T) 
 		t.Fatalf("precondition: expected breaker OPEN for %q after 4 restarts", identity)
 	}
 
+	registerSessionResetTestRuntime(t, cityDir)
 	lis, err := startControllerSocket(
 		cityDir,
 		controllerHostingStandalone,
@@ -947,15 +950,32 @@ func TestCmdSessionReset_RollsBackStuckPendingCreate(t *testing.T) {
 	if got.Status != "closed" {
 		t.Fatalf("status = %q, want closed: reset left the unfinished create holding its claim (pending_create_claim=%q)", got.Status, got.Metadata["pending_create_claim"])
 	}
-	if err := session.EnsureAliasAvailable(reloaded, "sky", ""); err != nil {
+	if err := session.EnsureAliasAvailable(beadstest.Sessions(reloaded), "sky", ""); err != nil {
 		t.Fatalf("alias still held after reset: %v", err)
 	}
 }
 
+// registerSessionResetTestRuntime registers a single-store runtime for cityDir
+// over a store opened at the city, as a real controller registers its runtime:
+// the controller socket's session commands answer from that registration.
+func registerSessionResetTestRuntime(t *testing.T, cityDir string) {
+	t.Helper()
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt(%s): %v", cityDir, err)
+	}
+	registerResidencyRoutes(cityDir, nil, func() beads.Store { return store })
+	t.Cleanup(func() {
+		unregisterResidencyRoutes(cityDir, nil)
+		_ = closeBeadStoreHandle(store)
+	})
+}
+
 // startSessionResetTestController serves the real controller socket for
-// cityDir until the test ends.
+// cityDir until the test ends, behind a registered runtime.
 func startSessionResetTestController(t *testing.T, cityDir string) {
 	t.Helper()
+	registerSessionResetTestRuntime(t, cityDir)
 	lis, err := startControllerSocket(
 		cityDir,
 		controllerHostingStandalone,
@@ -973,4 +993,105 @@ func startSessionResetTestController(t *testing.T, cityDir string) {
 		lis.Close()                              //nolint:errcheck
 		os.Remove(controllerSocketPath(cityDir)) //nolint:errcheck
 	})
+}
+
+// TestCmdSessionReset_RefusesUnknownStateRowWithoutWriting: a reset of a row
+// in a state the controller skips is refused before any write. It names the
+// raw state and the close that releases the row, queues no fresh restart,
+// rotates nothing, records no op, and sends the controller nothing past the
+// liveness probe: no circuit-breaker reset for the named row and no keyed
+// reconcile poke. Kills a reset that queues a restart the controller never
+// applies.
+func TestCmdSessionReset_RefusesUnknownStateRowWithoutWriting(t *testing.T) {
+	h := newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": "auto"})
+	c := newCLIOpCity(t, h, map[string]string{"state": "future-state", "session_key": "original-key"})
+
+	sockPath := controllerSocketPath(c.dir)
+	lis, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatalf("Listen(%q): %v", sockPath, err)
+	}
+	t.Cleanup(func() { os.Remove(sockPath) }) //nolint:errcheck
+	commands := make(chan string, 16)
+	go func() {
+		defer close(commands)
+		for {
+			conn, err := lis.Accept()
+			if err != nil {
+				return
+			}
+			buf := make([]byte, 512)
+			n, _ := conn.Read(buf)
+			cmd := string(buf[:n])
+			commands <- cmd
+			reply := "ok\n"
+			switch {
+			case cmd == "ping\n":
+				reply = "123\n"
+			case strings.HasPrefix(cmd, "session-circuit-reset:"):
+				reply = `{"outcome":"ok"}` + "\n"
+			}
+			conn.Write([]byte(reply)) //nolint:errcheck
+			conn.Close()              //nolint:errcheck
+		}
+	}()
+
+	var stdout, stderr bytes.Buffer
+	code := cmdSessionReset([]string{c.bead.ID}, "", &stdout, &stderr, false)
+	lis.Close() //nolint:errcheck
+	if code != 1 {
+		t.Fatalf("cmdSessionReset = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{
+		"gc session reset: session " + c.bead.ID + " cannot be reset: ",
+		`"future-state"`,
+		"gc session close " + c.bead.ID,
+	} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr missing %q:\n%s", want, stderr.String())
+		}
+	}
+	var got []string
+	for cmd := range commands {
+		got = append(got, cmd)
+	}
+	if len(got) != 2 || got[0] != "ping\n" || got[1] != "poke\n" {
+		t.Fatalf("controller commands = %q, want only the ping and poke liveness probe", got)
+	}
+	if ops := cliOpRows(t, h.opStore); len(ops) != 0 {
+		t.Fatalf("op rows = %+v, want none", ops)
+	}
+	row, err := c.reloadSessions(t).Get(c.bead.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", c.bead.ID, err)
+	}
+	for key, want := range map[string]string{
+		"state": "future-state", "restart_requested": "", "continuation_reset_pending": "", "session_key": "original-key",
+	} {
+		if row.Metadata[key] != want {
+			t.Errorf("%s = %q, want %q", key, row.Metadata[key], want)
+		}
+	}
+}
+
+// TestCmdSessionReset_ClosedRowIsAnsweredClosedWhateverItsCloseCode: a closed
+// row whose state carries a close code the controller does not manage (the
+// pool sweep's gc_swept) is answered "session is closed", as any closed row
+// is, not refused as a row the controller skips: a close of it does nothing.
+// Kills a refusal that sends an operator to close an already-closed row.
+func TestCmdSessionReset_ClosedRowIsAnsweredClosedWhateverItsCloseCode(t *testing.T) {
+	h := newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": "auto"})
+	c := newCLIOpCity(t, h, map[string]string{"state": "gc_swept"})
+	if err := c.sessions.Close(c.bead.ID); err != nil {
+		t.Fatalf("Close(%s): %v", c.bead.ID, err)
+	}
+	startSessionResetTestController(t, c.dir)
+
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionReset([]string{c.bead.ID}, "", &stdout, &stderr, false); code != 1 {
+		t.Fatalf("cmdSessionReset = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "session is closed") || strings.Contains(stderr.String(), "skips it") {
+		t.Fatalf("stderr = %q, want the closed answer, not the skipped-state refusal", stderr.String())
+	}
 }

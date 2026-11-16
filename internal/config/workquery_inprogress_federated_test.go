@@ -146,11 +146,12 @@ func TestSingleStoreInProgressTierStillShellsBdList(t *testing.T) {
 }
 
 // fakeGCInProgressWindow answers `gc ready --status in_progress` with the rows
-// in $FAKE_GC_IN_PROGRESS_ROWS the way the real reader answers them: rows
-// carrying an --exclude-label label dropped, then bounded by --limit (after the
-// merge and the order, so a --limit=1 read is the first row and nothing else),
-// then, under --until-unblocked, ended at the first row with no blocker that is
-// not closed. A row marked "unresolvable" is one whose blocker no store holds:
+// in $FAKE_GC_IN_PROGRESS_ROWS the way the real reader answers them: rows whose
+// issue_type an --exclude-type names (matched exactly) or carrying an
+// --exclude-label label dropped, then bounded by --limit (after the merge and
+// the order, so a --limit=1 read is the first row and nothing else), then,
+// under --until-unblocked, ended at the first row with no blocker that is not
+// closed. A row marked "unresolvable" is one whose blocker no store holds:
 // the read fails when it has to resolve that row, which is every row of the
 // window, or under --until-unblocked every row up to the cut. Every other
 // `gc ready` answers an empty array, so only the crash-recovery tier can decide
@@ -164,18 +165,22 @@ esac
 limit=0
 until=false
 excluded='[]'
+excluded_types='[]'
 prev=
 for arg in "$@"; do
   [ "$prev" = --exclude-label ] && excluded=$(printf '%s' "$excluded" | jq -c --arg label "$arg" '. + [$label]')
+  [ "$prev" = --exclude-type ] && excluded_types=$(printf '%s' "$excluded_types" | jq -c --arg t "$arg" '. + [$t]')
   case "$arg" in
+    --exclude-type=*) excluded_types=$(printf '%s' "$excluded_types" | jq -c --arg t "${arg#--exclude-type=}" '. + [$t]') ;;
     --limit=*) limit="${arg#--limit=}" ;;
     --until-unblocked) until=true ;;
   esac
   prev="$arg"
 done
-rows=$(printf '%s' "$FAKE_GC_IN_PROGRESS_ROWS" | jq -c --argjson excluded "$excluded" --argjson limit "$limit" --argjson until "$until" '
+rows=$(printf '%s' "$FAKE_GC_IN_PROGRESS_ROWS" | jq -c --argjson excluded "$excluded" --argjson excluded_types "$excluded_types" --argjson limit "$limit" --argjson until "$until" '
   def unblocked: ([(.blocked_by // [])[] | select(((.status // "") | ascii_downcase) != "closed")] | length) == 0;
-  [.[] | select(([(.labels // [])[] | . as $label | select($excluded | index($label) != null)] | length) == 0)]
+  [.[] | select((.issue_type // "") as $t | $excluded_types | index($t) == null)
+       | select(([(.labels // [])[] | . as $label | select($excluded | index($label) != null)] | length) == 0)]
   | (if $limit > 0 then .[:$limit] else . end)
   | if $until then
       reduce .[] as $row ({rows: [], done: false};
@@ -226,6 +231,11 @@ type federatedInProgressQuery struct {
 // the combined work_query — for a plain agent and for the legacy
 // control-dispatcher shape, whose tier loops over two candidate identities.
 func federatedInProgressQueries() []federatedInProgressQuery {
+	return federatedInProgressQueriesFor(federatedTopology())
+}
+
+// federatedInProgressQueriesFor is federatedInProgressQueries on topo.
+func federatedInProgressQueriesFor(topo QueryTopology) []federatedInProgressQuery {
 	var out []federatedInProgressQuery
 	for _, shape := range []struct {
 		name  string
@@ -235,8 +245,8 @@ func federatedInProgressQueries() []federatedInProgressQuery {
 		{"legacy control", &Agent{Name: ControlDispatcherAgentName, Dir: "rig"}},
 	} {
 		out = append(out,
-			federatedInProgressQuery{shape.name + "/assigned_in_progress_query", shape.agent.EffectiveAssignedInProgressQueryFor(federatedTopology()), true},
-			federatedInProgressQuery{shape.name + "/work_query", shape.agent.EffectiveWorkQueryFor(federatedTopology()), false},
+			federatedInProgressQuery{shape.name + "/assigned_in_progress_query", shape.agent.EffectiveAssignedInProgressQueryFor(topo), true},
+			federatedInProgressQuery{shape.name + "/work_query", shape.agent.EffectiveWorkQueryFor(topo), false},
 		)
 	}
 	return out

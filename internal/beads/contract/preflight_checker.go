@@ -420,7 +420,7 @@ func (c PreflightChecker) checkIdentityMatch(scope string, metadata preflightMet
 // activation: its verdict (not checkBDVersionHint's) decides PASS/FAIL.
 //
 // beads' own rule (internal/storage/schema/schema.go, vendored at
-// github.com/steveyegge/beads@v1.3.2):
+// github.com/steveyegge/beads@v1.3.4):
 //   - DB schema AHEAD of the linked library's LatestVersion() (or, on the
 //     ignored lane, LatestIgnoredVersion()) is always refused: CheckForwardDrift
 //     (schema.go:161, backed by checkSchemaSkew, schema.go:133) runs
@@ -629,7 +629,7 @@ func newerSemverCompatibleBD(bdVersion, libraryVersion string) bool {
 // same-series pin move must re-prove the schema premise for its own pair.
 //
 // gascity's own pins do not currently produce that pairing (BD_VERSION and
-// BD_CURRENT_VERSION are both v1.3.2), so this widening is not load-bearing
+// BD_CURRENT_VERSION are both v1.3.4), so this widening is not load-bearing
 // for the current bump. It is kept so that an operator running a bd from
 // elsewhere in a series whose schema identity has been checked is not refused
 // a native store for a skew that pair does not carry.

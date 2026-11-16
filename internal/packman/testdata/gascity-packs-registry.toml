@@ -1,5 +1,6 @@
 # Copy of gastownhall/gascity-packs registry.toml at 33da48cd9ec44e1de75fe598f520b9b9333ee469 (2026-10-05),
-# plus the gastown 0.1.11 and 0.1.12 and gascity 0.1.7 releases verbatim from 427c2dedce37 (2026-10-29).
+# plus the gastown 0.1.11 and 0.1.12 and gascity 0.1.7 releases verbatim from 427c2dedce37 (2026-10-29),
+# plus the gastown 0.1.13 release verbatim from gascity-packs #596.
 # Refresh it when the registry publishes releases the import tests should cover.
 schema = 1
 
@@ -140,6 +141,13 @@ schema = 1
     commit = "cb6a612882b8402569c495c90ab75bb257a51bdc"
     hash = "sha256:9d45214f8e4d997ff84b9daf0e92917141fddda03be132d28382f7ea0c6252d4"
     description = "Maintenance release for Gas City 1.5.x, cut from 0.1.11: every shipped gastown bead command goes through gc bd (backport of 9b4df3e), so split-store cities reach graph steps from the polecat and witness prompts, the polecat-work and witness-patrol formulas, the review check scripts (which now read molecules through a federated gc ready union) and the churn watcher; the refinery duplicate-bug check filters with --title-contains, a flag that exists."
+
+  [[pack.release]]
+    version = "0.1.13"
+    ref = "release/gastown-0.1.11"
+    commit = "66897e7132c9d1160509ee47dd1b935bbd3b9664"
+    hash = "sha256:94d13e12240ac83a15aba51802bdb6b9e5bca50f3845a233a7a2c8cb81dc6ae5"
+    description = "Maintenance release cut from 0.1.12: the witness liveness map never lets a closed session or closed session bead displace a live owner (gastownhall/gascity#8453)."
 
 [[pack]]
   name = "cass"

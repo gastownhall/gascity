@@ -450,7 +450,7 @@ func routeWaitList(cityPath string, c *api.Client, nilReason, stateFilter, sessi
 		if err == nil {
 			logRoute(stderr, cmdName, "api", "")
 			emitWaitListPartialNotice(stderr, cr.Body)
-			return renderWaitList(cityPath, cr.Body.Waits, cr.AgeSeconds, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
+			return renderWaitList(cityPath, cr.Body.Waits, cr.AgeSeconds, cr.Refresh, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
 		}
 		// Rung 2: an old server lacks /v0/waits (404 with no problem+json body);
 		// serve via the generic gc:wait beads endpoint instead.
@@ -459,7 +459,7 @@ func routeWaitList(cityPath string, c *api.Client, nilReason, stateFilter, sessi
 			if lerr == nil {
 				logRoute(stderr, cmdName, "api-legacy", "route-missing")
 				emitWaitListPartialNotice(stderr, lr.Body)
-				return renderWaitList(cityPath, lr.Body.Waits, lr.AgeSeconds, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
+				return renderWaitList(cityPath, lr.Body.Waits, lr.AgeSeconds, lr.Refresh, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
 			}
 			err = lerr
 		}
@@ -477,9 +477,9 @@ func routeWaitList(cityPath string, c *api.Client, nilReason, stateFilter, sessi
 
 // emitWaitListPartialNotice surfaces a degraded (partial) wait read on stderr
 // without failing the command, matching the generic /beads partial contract: the
-// surviving rows still render, and the operator sees the degradation. The typed
-// /waits rung carries Partial/PartialErrors; the legacy generic-beads rung never
-// sets them, so this is a no-op there.
+// surviving rows still render, and the operator sees the degradation. Both the
+// typed /waits rung and the legacy generic-beads rung carry
+// Partial/PartialErrors.
 func emitWaitListPartialNotice(stderr io.Writer, wl api.WaitList) {
 	if !wl.Partial {
 		return
@@ -493,8 +493,10 @@ func emitWaitListPartialNotice(stderr io.Writer, wl api.WaitList) {
 
 // renderWaitList applies the idempotent client-side stable ascending sort and
 // state/session filter over already-projected WaitInfo, so the typed rung, the
-// legacy rung, and the local fallback produce byte-identical output.
-func renderWaitList(cityPath string, waits []sessionpkg.WaitInfo, ageSeconds float64, stateFilter, sessionFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
+// legacy rung, and the local fallback produce byte-identical output. Human
+// output is followed by the cache-age footer on stderr when the server's cache
+// is behind (writeCacheAgeFooter).
+func renderWaitList(cityPath string, waits []sessionpkg.WaitInfo, ageSeconds float64, refresh api.CacheRefresh, stateFilter, sessionFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
 	items := append([]sessionpkg.WaitInfo(nil), waits...)
 	sort.SliceStable(items, func(i, j int) bool { return items[i].CreatedAt.Before(items[j].CreatedAt) })
 	filtered := filterWaitListItems(items, stateFilter, sessionFilter)
@@ -502,9 +504,7 @@ func renderWaitList(cityPath string, waits []sessionpkg.WaitInfo, ageSeconds flo
 		return writeWaitListJSON(stdout, stderr, cityPath, filtered)
 	}
 	writeWaitListTable(filtered, stdout)
-	if ageSeconds > cacheAgeBannerThresholdSeconds {
-		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", ageSeconds) //nolint:errcheck
-	}
+	writeCacheAgeFooter(stderr, ageSeconds, refresh)
 	return 0
 }
 
@@ -607,7 +607,7 @@ func routeWaitInspect(cityPath string, c *api.Client, nilReason, waitID string, 
 		cr, err := c.GetWait(waitID)
 		if err == nil {
 			logRoute(stderr, cmdName, "api", "")
-			return renderWaitInspect(cityPath, cr.Body, cr.AgeSeconds, jsonOutput, stdout, stderr)
+			return renderWaitInspect(cityPath, cr.Body, cr.AgeSeconds, cr.Refresh, jsonOutput, stdout, stderr)
 		}
 		var naw *api.NotAWaitError
 		if errors.As(err, &naw) {
@@ -619,7 +619,7 @@ func routeWaitInspect(cityPath string, c *api.Client, nilReason, waitID string, 
 			lr, lerr := c.GetWaitViaBead(waitID)
 			if lerr == nil {
 				logRoute(stderr, cmdName, "api-legacy", "route-missing")
-				return renderWaitInspect(cityPath, lr.Body, lr.AgeSeconds, jsonOutput, stdout, stderr)
+				return renderWaitInspect(cityPath, lr.Body, lr.AgeSeconds, lr.Refresh, jsonOutput, stdout, stderr)
 			}
 			if errors.As(lerr, &naw) {
 				logRoute(stderr, cmdName, "api-legacy", "error")
@@ -640,14 +640,15 @@ func routeWaitInspect(cityPath string, c *api.Client, nilReason, waitID string, 
 	return doWaitInspectFallback(cityPath, waitID, jsonOutput, stdout, stderr)
 }
 
-func renderWaitInspect(cityPath string, wait sessionpkg.WaitInfo, ageSeconds float64, jsonOutput bool, stdout, stderr io.Writer) int {
+// renderWaitInspect prints one wait as JSON or a human detail block; the human
+// block is followed by the cache-age footer on stderr when the server's cache
+// is behind (writeCacheAgeFooter).
+func renderWaitInspect(cityPath string, wait sessionpkg.WaitInfo, ageSeconds float64, refresh api.CacheRefresh, jsonOutput bool, stdout, stderr io.Writer) int {
 	if jsonOutput {
 		return writeWaitInspectJSON(stdout, stderr, cityPath, wait)
 	}
 	writeWaitDetail(wait, stdout)
-	if ageSeconds > cacheAgeBannerThresholdSeconds {
-		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", ageSeconds) //nolint:errcheck
-	}
+	writeCacheAgeFooter(stderr, ageSeconds, refresh)
 	return 0
 }
 
@@ -681,31 +682,36 @@ func doWaitInspectFallback(cityPath, waitID string, jsonOutput bool, stdout, std
 }
 
 func writeWaitDetail(w sessionpkg.WaitInfo, stdout io.Writer) {
+	epoch := w.RegisteredEpoch
+	if w.RegisteredResetPending {
+		epoch += " (registered during a pending reset)"
+	}
 	fmt.Fprintf(stdout, "Wait:       %s\n", w.ID)                                        //nolint:errcheck
 	fmt.Fprintf(stdout, "Session:    %s\n", w.SessionID)                                 //nolint:errcheck
 	fmt.Fprintf(stdout, "State:      %s\n", w.State)                                     //nolint:errcheck
 	fmt.Fprintf(stdout, "Kind:       %s\n", w.Kind)                                      //nolint:errcheck
 	fmt.Fprintf(stdout, "Deps:       %s (%s)\n", strings.Join(w.DepIDs, ","), w.DepMode) //nolint:errcheck
-	fmt.Fprintf(stdout, "Epoch:      %s\n", w.RegisteredEpoch)                           //nolint:errcheck
+	fmt.Fprintf(stdout, "Epoch:      %s\n", epoch)                                       //nolint:errcheck
 	fmt.Fprintf(stdout, "Attempt:    %s\n", w.DeliveryAttempt)                           //nolint:errcheck
 	fmt.Fprintf(stdout, "Nudge:      %s\n", w.NudgeID)                                   //nolint:errcheck
 	fmt.Fprintf(stdout, "Note:       %s\n", w.Note)                                      //nolint:errcheck
 }
 
 type waitJSON struct {
-	ID              string   `json:"id"`
-	SessionID       string   `json:"session_id"`
-	SessionName     string   `json:"session_name,omitempty"`
-	State           string   `json:"state"`
-	Kind            string   `json:"kind"`
-	DepIDs          []string `json:"dep_ids,omitempty"`
-	DepMode         string   `json:"dep_mode,omitempty"`
-	RegisteredEpoch string   `json:"registered_epoch,omitempty"`
-	DeliveryAttempt string   `json:"delivery_attempt,omitempty"`
-	NudgeID         string   `json:"nudge_id,omitempty"`
-	Note            string   `json:"note,omitempty"`
-	Status          string   `json:"status"`
-	CreatedAt       string   `json:"created_at,omitempty"`
+	ID                     string   `json:"id"`
+	SessionID              string   `json:"session_id"`
+	SessionName            string   `json:"session_name,omitempty"`
+	State                  string   `json:"state"`
+	Kind                   string   `json:"kind"`
+	DepIDs                 []string `json:"dep_ids,omitempty"`
+	DepMode                string   `json:"dep_mode,omitempty"`
+	RegisteredEpoch        string   `json:"registered_epoch,omitempty"`
+	RegisteredResetPending bool     `json:"registered_reset_pending,omitempty"`
+	DeliveryAttempt        string   `json:"delivery_attempt,omitempty"`
+	NudgeID                string   `json:"nudge_id,omitempty"`
+	Note                   string   `json:"note,omitempty"`
+	Status                 string   `json:"status"`
+	CreatedAt              string   `json:"created_at,omitempty"`
 }
 
 type waitListJSONEnvelope struct {
@@ -722,19 +728,20 @@ type waitInspectJSONEnvelope struct {
 
 func waitJSONFromInfo(w sessionpkg.WaitInfo) waitJSON {
 	return waitJSON{
-		ID:              w.ID,
-		SessionID:       w.SessionID,
-		SessionName:     w.SessionName,
-		State:           w.State,
-		Kind:            w.Kind,
-		DepIDs:          w.DepIDs,
-		DepMode:         w.DepMode,
-		RegisteredEpoch: w.RegisteredEpoch,
-		DeliveryAttempt: w.DeliveryAttempt,
-		NudgeID:         w.NudgeID,
-		Note:            w.Note,
-		Status:          w.Status,
-		CreatedAt:       formatOptionalTime(w.CreatedAt),
+		ID:                     w.ID,
+		SessionID:              w.SessionID,
+		SessionName:            w.SessionName,
+		State:                  w.State,
+		Kind:                   w.Kind,
+		DepIDs:                 w.DepIDs,
+		DepMode:                w.DepMode,
+		RegisteredEpoch:        w.RegisteredEpoch,
+		RegisteredResetPending: w.RegisteredResetPending,
+		DeliveryAttempt:        w.DeliveryAttempt,
+		NudgeID:                w.NudgeID,
+		Note:                   w.Note,
+		Status:                 w.Status,
+		CreatedAt:              formatOptionalTime(w.CreatedAt),
 	}
 }
 
@@ -1193,7 +1200,7 @@ func prepareWaitWakeStateHooked(sessFront *sessionpkg.Store, dependencies waitDe
 				continue
 			}
 		}
-		if epoch := wait.RegisteredEpoch; epoch != "" && sessionInfo.ContinuationEpoch != "" && epoch != sessionInfo.ContinuationEpoch {
+		if wait.ContinuationStale(sessionInfo) {
 			if err := sessFront.CancelWait(wait.ID, now, "continuation-stale"); err != nil {
 				return nil, err
 			}
@@ -1374,6 +1381,9 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 		if !cachedSessionCanReceiveWaitNudge(sessionInfo) {
 			continue
 		}
+		if wait.HeldForPendingReset(sessionInfo) {
+			continue
+		}
 		nudgeID := waitNudgeID(wait)
 		if nudgeID == "" {
 			continue
@@ -1430,7 +1440,7 @@ func dispatchReadyWaitNudgesWithSnapshot(cityPath string, cfg *config.City, sess
 		item := newQueuedNudgeWithOptions(waitNudgeAgent(sessionInfo), message, "wait", now, queuedNudgeOptions{
 			ID:                nudgeID,
 			SessionID:         sessionID,
-			ContinuationEpoch: wait.RegisteredEpoch,
+			ContinuationEpoch: wait.DeliveryEpoch(sessionInfo),
 			Reference:         &nudgeReference{Kind: "bead", ID: wait.ID},
 		})
 		if err := enqueueQueuedNudgeWithStore(cityPath, nudges, item); err != nil {

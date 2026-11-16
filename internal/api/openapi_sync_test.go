@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -319,5 +320,43 @@ func TestOpenAPIBeadCloseReasonContract(t *testing.T) {
 	}
 	if reason, ok := body.Properties["reason"]; !ok || reason.Type != "string" {
 		t.Fatalf("close request body properties = %+v, want a string reason", body.Properties)
+	}
+}
+
+// TestSessionWakeAndResetDescribeTheSkippedStateRefusal pins the served
+// contract of the two verbs that refuse a row in a state the controller
+// skips: each route's description names that 409 and the close that
+// releases the row.
+func TestSessionWakeAndResetDescribeTheSkippedStateRefusal(t *testing.T) {
+	sm := api.NewSupervisorMux(emptyTestResolver{}, nil, false, "", "", time.Time{})
+	rec := httptest.NewRecorder()
+	sm.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/openapi.json", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /openapi.json returned %d: %s", rec.Code, rec.Body.String())
+	}
+	var spec struct {
+		Paths map[string]map[string]struct {
+			Description string `json:"description"`
+		} `json:"paths"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &spec); err != nil {
+		t.Fatalf("parse live spec: %v", err)
+	}
+	for _, verb := range []string{"wake", "reset"} {
+		suffix := "/session/{id}/" + verb
+		found := false
+		for path, ops := range spec.Paths {
+			if !strings.HasSuffix(path, suffix) {
+				continue
+			}
+			found = true
+			desc := ops["post"].Description
+			if !strings.Contains(desc, "a state the controller skips") || !strings.Contains(desc, "gc session close") {
+				t.Errorf("POST %s description = %q, want the 409 for a state the controller skips and `gc session close` named", path, desc)
+			}
+		}
+		if !found {
+			t.Fatalf("no path ends in %s", suffix)
+		}
 	}
 }

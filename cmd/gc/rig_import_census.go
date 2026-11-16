@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -53,8 +54,10 @@ const (
 
 // rigCensusRow is one rig's census.
 type rigCensusRow struct {
-	Rig      string
-	State    rigCensusState
+	Rig   string
+	State rigCensusState
+	// Why says why the rig is skipped or retained, or why an awaiting rig
+	// was not recorded clean (recordCensusClean).
 	Why      string
 	Infra    int
 	Open     int
@@ -67,6 +70,10 @@ type rigCensusRow struct {
 	Reused []string
 	// Plan is the import's plan, on a full census (preflight).
 	Plan *rigImportPlan
+	// Rows is every row the rig's store holds, of every class, on a full
+	// census: what `gc storage snapshot --rigs` exports for the rig, which
+	// `gc storage preflight --split` sizes.
+	Rows []beads.Bead
 	Err  error
 }
 
@@ -134,6 +141,7 @@ func censusRig(cityPath, cityName string, cfg *config.City, target infraBindingT
 	var snap rigSnapshot
 	if full {
 		snap, err = readRigSnapshot(store)
+		row.Rows = snap.rows
 	} else {
 		var listed []beads.Bead
 		listed, err = store.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
@@ -143,30 +151,9 @@ func censusRig(cityPath, cityName string, cfg *config.City, target infraBindingT
 		row.State, row.Err = rigCensusUnreachable, fmt.Errorf("listing rig %s: %w", rig.Name, err)
 		return row
 	}
-	gen := coordclass.CurrentGeneration
-	if manifest != nil {
-		gen = manifest.Generation
-	}
-	for _, b := range snap.rows {
-		if manifest != nil && manifest.Match(b) == infraManifestReusedID {
-			row.Reused = append(row.Reused, b.ID)
-		}
-		if coordclass.ClassifyAt(b, gen) == coordclass.ClassWork {
-			continue
-		}
-		row.Infra++
-		if rigRowOpen(b) {
-			row.Open++
-		}
-		if manifest != nil && manifest.Carried(b) {
-			row.Retained = append(row.Retained, b.ID)
-		} else {
-			row.Stranded = append(row.Stranded, b.ID)
-		}
-	}
-	sort.Strings(row.Retained)
-	sort.Strings(row.Stranded)
-	sort.Strings(row.Reused)
+	classes := classifyRigRows(snap.rows, manifest)
+	row.Infra, row.Open = classes.Infra, classes.Open
+	row.Stranded, row.Retained, row.Reused = classes.Stranded, classes.Retained, classes.Reused
 	clean := fileExists(loc.CleanPath())
 	switch {
 	case fileExists(loc.InFlightPath()):
@@ -206,8 +193,10 @@ func censusRig(cityPath, cityName string, cfg *config.City, target infraBindingT
 			return row
 		}
 		plan := planRigImportReadingPayloads(ctx, store)
-		if err := rigImportSharedStoreRefusal(env, rig); err != nil {
+		if shared, err := rigImportSharedStoreRefusal(env, rig); err != nil {
 			plan.Refusals = append(plan.Refusals, rigImportRefusal{IDs: []string{rig.Name}, Reason: err.Error(), Remedy: "give the rig a store of its own"})
+		} else {
+			shared.Release() // the census writes nothing, so it keeps no co-tenant stopped
 		}
 		if _, err := rigImportHashConfigOpener(cityPath, cfg, rig); err != nil {
 			plan.Refusals = append(plan.Refusals, rigImportRefusal{IDs: []string{rig.Name}, Reason: err.Error(), Remedy: "serve the rig from a bd or file provider"})
@@ -215,6 +204,53 @@ func censusRig(cityPath, cityName string, cfg *config.City, target infraBindingT
 		row.Plan = &plan
 	}
 	return row
+}
+
+// rigRowClasses is a rig store's rows classified against its import
+// manifest: what the census reports, and what a reverse checks before it
+// gives the rig every class back (reverseRun.rigStoreLeftovers).
+type rigRowClasses struct {
+	// Infra counts the infrastructure rows, under the manifest's generation,
+	// and Open the open ones among them.
+	Infra, Open int
+	// Stranded are the infrastructure rows the import never carried, and
+	// Retained those it carried, sorted.
+	Stranded, Retained []string
+	// Reused names rows, of any class, under an id the import moved for a
+	// different bead (same id, another created_at), sorted.
+	Reused []string
+}
+
+// classifyRigRows classifies rows, every row of a rig's store, against the
+// rig's import manifest, nil when it has none: then every infrastructure
+// row, under the current generation, is one no import carried.
+func classifyRigRows(rows []beads.Bead, manifest *infraCopyManifest) rigRowClasses {
+	var c rigRowClasses
+	gen := coordclass.CurrentGeneration
+	if manifest != nil {
+		gen = manifest.Generation
+	}
+	for _, b := range rows {
+		if manifest != nil && manifest.Match(b) == infraManifestReusedID {
+			c.Reused = append(c.Reused, b.ID)
+		}
+		if coordclass.ClassifyAt(b, gen) == coordclass.ClassWork {
+			continue
+		}
+		c.Infra++
+		if rigRowOpen(b) {
+			c.Open++
+		}
+		if manifest != nil && manifest.Carried(b) {
+			c.Retained = append(c.Retained, b.ID)
+		} else {
+			c.Stranded = append(c.Stranded, b.ID)
+		}
+	}
+	sort.Strings(c.Retained)
+	sort.Strings(c.Stranded)
+	sort.Strings(c.Reused)
+	return c
 }
 
 // rigCensusLine renders one row for an operator.
@@ -229,6 +265,11 @@ func rigCensusLine(r rigCensusRow) string {
 	case rigCensusUnreachable:
 		return fmt.Sprintf("rig %s: UNREACHABLE — %v", r.Rig, r.Err)
 	case rigCensusAwaiting:
+		if r.Why != "" {
+			// The import refuses the rig for the same reason, which names
+			// its own remedy.
+			return fmt.Sprintf("rig %s: awaiting import (%d infrastructure bead(s), %d open), not recorded clean: %s", r.Rig, r.Infra, r.Open, r.Why)
+		}
 		return fmt.Sprintf("rig %s: awaiting import (%d infrastructure bead(s), %d open); run `%s`", r.Rig, r.Infra, r.Open, rigImportInstruction(r.Rig))
 	case rigCensusRetained:
 		if r.Why != "" {
@@ -291,13 +332,14 @@ func rigBootRefusal(cityPath string, target infraBindingTarget) error {
 	return errors.New(strings.Join(reasons, "; "))
 }
 
-// rigResidueCensusDone is a test seam: closed when a boot census finishes.
+// rigResidueCensusDone is a test seam: called when a controller census (at
+// boot, or for a resumed rig) finishes.
 var rigResidueCensusDone = func() {}
 
 // startRigResidueCensus runs the controller's one rig containment census, in
 // the background so boot never waits on a rig store. A suspended rig is not
 // opened (reading it would restart its retired proxy and Dolt); it is named
-// unchecked.
+// unchecked and censused when it resumes (censusResumedRigs).
 func (cr *CityRuntime) startRigResidueCensus(ctx context.Context) {
 	cfg, cityPath := cr.cfg, cr.cityPath
 	if cfg == nil || len(cfg.Rigs) == 0 || cityPath == "" {
@@ -317,16 +359,145 @@ func (cr *CityRuntime) startRigResidueCensus(ctx context.Context) {
 		}
 		rigs = append(rigs, rig)
 	}
+	cr.rigCensusDeferred = make(map[string]bool, len(unchecked))
+	for _, name := range unchecked {
+		cr.rigCensusDeferred[name] = true
+	}
+	cr.runRigCensus(ctx, cfg, target, rigs, unchecked, "the controller's boot census")
+}
+
+// censusResumedRigs runs, once, the census the boot skipped for a suspended
+// rig, on the first tick that finds neither the rig nor the city suspended, so
+// a rig suspended at boot (one added to a born-split city before its first
+// start, say) is recorded clean or named as residue when it resumes rather
+// than at the next boot. A rig no longer configured is forgotten unopened.
+func (cr *CityRuntime) censusResumedRigs(ctx context.Context, citySuspended bool, suspendedRigs map[string]bool) {
+	if len(cr.rigCensusDeferred) == 0 || cr.cfg == nil || citySuspended {
+		return
+	}
+	configured := make(map[string]bool, len(cr.cfg.Rigs))
+	var resumed []config.Rig
+	for _, rig := range cr.cfg.Rigs {
+		configured[rig.Name] = true
+		if cr.rigCensusDeferred[rig.Name] && !suspendedRigs[rig.Name] {
+			resumed = append(resumed, rig)
+		}
+	}
+	for name := range cr.rigCensusDeferred {
+		if !configured[name] {
+			delete(cr.rigCensusDeferred, name)
+		}
+	}
+	if len(resumed) == 0 {
+		return
+	}
+	target, ok, err := resolveInfraBindingTarget(cr.cityPath, cr.cfg)
+	if err != nil || !ok {
+		return
+	}
+	for _, rig := range resumed {
+		delete(cr.rigCensusDeferred, rig.Name)
+	}
+	cr.runRigCensus(ctx, cr.cfg, target, resumed, nil, "the controller's census when the rig resumed")
+}
+
+// runRigCensus censuses rigs in the background: it records clean each one
+// with nothing to import (recordCensusCleanRows; by names the census in the
+// record) and publishes storage.rig_residue for each that holds the deploy
+// gate, naming unchecked the suspended rigs it left cold.
+func (cr *CityRuntime) runRigCensus(ctx context.Context, cfg *config.City, target infraBindingTarget, rigs []config.Rig, unchecked []string, by string) {
 	census := *cfg
 	census.Rigs = rigs
-	rec, stderr, logPrefix := cr.rec, cr.stderr, cr.logPrefix
+	cityPath, rec, stderr, logPrefix := cr.cityPath, cr.rec, cr.stderr, cr.logPrefix
 	go func() {
 		defer rigResidueCensusDone()
 		if ctx.Err() != nil {
 			return
 		}
-		emitRigResidue(rec, stderr, logPrefix, target, censusRigs(cityPath, &census, target, false), unchecked)
+		rows := censusRigs(cityPath, &census, target, false)
+		recordCensusCleanRows(cityPath, target, census.Rigs, rows, by, stderr, logPrefix)
+		emitRigResidue(rec, stderr, logPrefix, target, rows, unchecked)
 	}()
+}
+
+// recordCensusCleanRows records clean every censused rig with nothing to
+// import (recordCensusClean) and marks its row clean, so a rig added before
+// the binding converged, or one whose add-time census failed, is not asked to
+// be imported. A rig that cannot be recorded keeps its row and is warned on;
+// one the record's gate refuses keeps its row, which says why.
+func recordCensusCleanRows(cityPath string, target infraBindingTarget, rigs []config.Rig, rows []rigCensusRow, by string, stderr io.Writer, logPrefix string) {
+	byName := make(map[string]config.Rig, len(rigs))
+	for _, rig := range rigs {
+		byName[rig.Name] = rig
+	}
+	for i := range rows {
+		rig, ok := byName[rows[i].Rig]
+		if !ok {
+			continue
+		}
+		recorded, err := recordCensusClean(cityPath, target, rig, &rows[i], by)
+		switch {
+		case err != nil:
+			if stderr != nil {
+				fmt.Fprintf(stderr, "%s: storage: rig %s: warning: recording it clean: %v\n", logPrefix, rows[i].Rig, err) //nolint:errcheck // best-effort stderr
+			}
+		case recorded:
+			if stderr != nil {
+				fmt.Fprintf(stderr, "%s: storage: rig %s: recorded clean — its store holds no infrastructure bead\n", logPrefix, rows[i].Rig) //nolint:errcheck // best-effort stderr
+			}
+		}
+	}
+}
+
+// recordCensusClean writes rig's clean record when its census found it
+// awaiting import with no infrastructure row (closed rows and both tiers
+// counted), and marks the row clean: the record `gc storage migrate
+// --from-rigs` writes for such a rig (importRig, plan.Infra == 0), behind the
+// same gate (rigCleanRecordRefusal), so a rig with nothing to import is never
+// asked to be imported. Only that state is promoted, and only beside a
+// converged binding. A rig with an infrastructure row, a census error, or any
+// record or cleared note of its own (the import's to resolve: a complete note
+// without a marker is a lost marker the import refuses) keeps its state. A
+// rig the gate refuses (a store another registered city also uses, or one it
+// cannot rule out as one) stays awaiting import, the refusal as its row's
+// Why. The import's other refusals guard the rows it moves (id minting,
+// scope stamps, edge payloads), and such a rig moves none. A record path that
+// cannot be stat'ed is an error, not proof of absence. by names the census in
+// the record. It reports whether it wrote the record.
+func recordCensusClean(cityPath string, target infraBindingTarget, rig config.Rig, row *rigCensusRow, by string) (bool, error) {
+	if row.State != rigCensusAwaiting || row.Err != nil || row.Infra != 0 || len(row.Reused) != 0 {
+		return false, nil
+	}
+	if !rigNameIsFileSafe(rig.Name) || strings.TrimSpace(rig.Path) == "" {
+		return false, nil
+	}
+	state, err := readInfraConvergenceState(target)
+	if err != nil {
+		return false, err
+	}
+	if state != infraConvergenceMarked {
+		return false, nil
+	}
+	loc := newRigImportLocation(target, cityPath, rig.Name)
+	for _, path := range []string{loc.MarkerPath(), loc.CleanPath(), loc.NotePath()} {
+		present, err := infraPathExists(path)
+		if err != nil {
+			return false, fmt.Errorf("checking rig %s's record %s: %w", rig.Name, path, err)
+		}
+		if present {
+			return false, nil
+		}
+	}
+	if err := rigCleanRecordRefusal(rigImportEnv{CityPath: cityPath}, loc, rig); err != nil {
+		row.Why = err.Error()
+		return false, nil
+	}
+	line := fmt.Sprintf("rig %s holds no infrastructure bead (%s, %s)", rig.Name, by, time.Now().UTC().Format(time.RFC3339))
+	if err := loc.writeRecord(loc.CleanPath(), line, rigStoreRoot(cityPath, rig)); err != nil {
+		return false, err
+	}
+	row.State = rigCensusClean
+	return true, nil
 }
 
 // emitRigResidue publishes storage.rig_residue for every rig whose census
@@ -352,25 +523,13 @@ func emitRigResidue(rec events.Recorder, stderr io.Writer, logPrefix string, tar
 	}
 	if len(unchecked) > 0 && stderr != nil {
 		sort.Strings(unchecked)
-		fmt.Fprintf(stderr, "%s: storage: suspended rig(s) %s were not censused at boot; `gc storage status` reports them\n", logPrefix, strings.Join(unchecked, ", ")) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: storage: suspended rig(s) %s were not censused at boot; each is censused when it resumes\n", logPrefix, strings.Join(unchecked, ", ")) //nolint:errcheck // best-effort stderr
 	}
 }
 
-// rigStoreListsEmpty reports whether the rig's store holds no row at all,
-// closed and both tiers included. A store that cannot be opened, listed or
-// closed is not proven empty.
-func rigStoreListsEmpty(cityPath string, r config.Rig) bool {
-	// A scope with no store on disk at all holds no row, and opening it
-	// would only create (or start a server for) the store being asked about.
+// rigScopeHasNoStore reports whether the rig's scope has no store on disk at
+// all, so it holds no row.
+func rigScopeHasNoStore(cityPath string, r config.Rig) bool {
 	root := resolveStoreScopeRoot(cityPath, r.Path)
-	if !fileExists(filepath.Join(root, ".beads")) && !fileExists(filepath.Join(root, ".gc", "beads.json")) {
-		return true
-	}
-	store, err := openStorageScopeStore(r.Path, cityPath)
-	if err != nil {
-		return false
-	}
-	rows, listErr := store.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
-	closeErr := closeBeadStoreHandle(store)
-	return listErr == nil && closeErr == nil && len(rows) == 0
+	return !fileExists(filepath.Join(root, ".beads")) && !fileExists(filepath.Join(root, ".gc", "beads.json"))
 }

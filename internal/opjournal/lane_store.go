@@ -15,7 +15,7 @@ import (
 // (no batch applier behind the CLI) is refused without running NewStore's
 // conditional-write probe.
 func NewLaneStore(store beads.SessionStore, clk clock.Clock, opts ...Option) (*Store, error) {
-	if isNilStore(store.Store) {
+	if beads.IsNilStore(store) {
 		return nil, errors.New("opening lane store: store is required")
 	}
 	batcher, ok := beads.GuardedBatcherFor(store)

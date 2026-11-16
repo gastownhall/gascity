@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -40,10 +41,12 @@ type laneHostEnvFake struct {
 	enqueued []reconcilekey.Key
 }
 
-func (e *laneHostEnvFake) SessionsBeadStore() beads.SessionStore {
+// Stores is a single-store city over the env's store, with no projection: its
+// sessions handle wraps exactly the store a test set.
+func (e *laneHostEnvFake) Stores() storeref.Stores {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return beads.SessionStore{Store: e.store}
+	return storeref.NewStores(storeref.Topology{Work: storeref.Leg{Ref: storeref.WorkRef, Store: e.store}}, storeref.StoresOptions{})
 }
 
 // setStore replaces the sessions store the env answers.
@@ -52,7 +55,7 @@ func (e *laneHostEnvFake) setStore(store beads.Store) {
 	defer e.mu.Unlock()
 	e.store = store
 }
-func (e *laneHostEnvFake) SessionProvider() runtime.Provider { return e.f.sp }
+func (e *laneHostEnvFake) SessionProvider() runtime.Provider { return e.f.runtime() }
 func (e *laneHostEnvFake) Config() *config.City              { return e.f.cfg }
 func (e *laneHostEnvFake) CityPath() string                  { return e.f.dir }
 func (e *laneHostEnvFake) Enqueue(keys ...reconcilekey.Key) {
@@ -1124,7 +1127,7 @@ func TestStartConversationLaneHostDelivers(t *testing.T) {
 	f.clk.mu.Lock()
 	f.clk.now = time.Now().UTC()
 	f.clk.mu.Unlock()
-	f.cfg.Ops.Authoritative = []string{"message"}
+	f.cfg.Ops.Authoritative = config.OpsKinds("message")
 	st := f.laneStore(t)
 	op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hello"))
 	cs := &controllerState{cityBeadStore: f.store, cfg: f.cfg, sp: f.sp, cityPath: f.dir, beadsQuiescent: new(atomic.Bool)}
@@ -1181,7 +1184,7 @@ func TestStartConversationLaneHostReadsStopRequestsByItsLatchedMode(t *testing.T
 		f.clk.mu.Lock()
 		f.clk.now = time.Now().UTC()
 		f.clk.mu.Unlock()
-		f.cfg.Ops.Authoritative = []string{"message"}
+		f.cfg.Ops.Authoritative = config.OpsKinds("message")
 		st := f.laneStore(t)
 		op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hello"))
 		cs := &controllerState{cityBeadStore: f.store, cfg: f.cfg, sp: f.sp, cityPath: f.dir, beadsQuiescent: new(atomic.Bool)}
@@ -2099,5 +2102,133 @@ func TestLedgerFeedRingsTheLaneHost(t *testing.T) {
 				t.Fatalf("doorbell rang for %q, want %q: the out-of-band row once, the echo never", rung, want)
 			}
 		})
+	}
+}
+
+// TestLaneHostLatchesTheDefaultKinds pins OJ-21 21a's controller half: with
+// [ops] authoritative unset, a lane host over a SQLite sessions store latches
+// message, interrupt and respond (lane-status says kinds_default), and one
+// over a store the default does not cover runs none and stays quiet.
+func TestLaneHostLatchesTheDefaultKinds(t *testing.T) {
+	if kinds, unset := laneHostConfiguredKinds(&config.City{}); kinds != nil || !unset {
+		t.Fatalf("unset config: kinds %v, unset %v; want nil and unset", kinds, unset)
+	}
+	if kinds, unset := laneHostConfiguredKinds(&config.City{Ops: config.OpsConfig{Authoritative: config.OpsKinds()}}); len(kinds) != 0 || unset {
+		t.Fatalf("[]: kinds %v, unset %v; want an explicit empty list", kinds, unset)
+	}
+	if _, unset := laneHostConfiguredKinds(nil); unset {
+		t.Fatal("a nil config serves the default")
+	}
+
+	t.Run("sqlite", func(t *testing.T) {
+		f := newLaneFixtureOver(t, newLaneKindsSQLiteStore(t))
+		hh := newLaneHostHarness(t, f)
+		hh.h.kindsUnset = true
+		hh.start()
+		if got := hh.h.runningKinds(); !slices.Equal(got, laneDefaultKinds) {
+			t.Fatalf("running kinds = %v, want the default %v", got, laneDefaultKinds)
+		}
+		if st := hh.h.status(time.Now()); !st.KindsDefault || st.State != laneHostStateRunning {
+			t.Fatalf("status = %+v, want running with kinds_default", st)
+		}
+		if logs := hh.logLines(); len(logs) != 0 {
+			t.Fatalf("logs = %q, want none with no legacy key set", logs)
+		}
+		// The default delivers: a lane op proposed with nothing listed is
+		// taken and delivered.
+		st := f.laneStore(t)
+		op := f.propose(t, st, f.msg("k-default", opjournal.RolePrompt, "hello"))
+		hh.h.Poke(f.id)
+		if p := hh.nextPass(t); p.out.err != nil || p.out.res.Done != opjournal.DoneAccepted {
+			t.Fatalf("pass = %+v, want accepted", p.out)
+		}
+		if got := f.get(t, st, op.ID); got.Outcome.Arm != opjournal.ArmSucceeded {
+			t.Fatalf("op = %+v, want delivered", got.Outcome)
+		}
+	})
+	t.Run("not sqlite", func(t *testing.T) {
+		f := newLaneFixture(t)
+		hh := newLaneHostHarness(t, f)
+		hh.h.kindsUnset = true
+		hh.start()
+		if got := hh.h.runningKinds(); len(got) != 0 {
+			t.Fatalf("running kinds = %v, want none: the store keeps legacy delivery", got)
+		}
+		if st := hh.h.status(time.Now()); st.KindsDefault {
+			t.Fatalf("status = %+v, want no default", st)
+		}
+	})
+	t.Run("incapable store stays off and quiet", func(t *testing.T) {
+		f := newLaneFixture(t)
+		hh := newLaneHostHarness(t, f)
+		hh.h.kindsUnset = true
+		hh.env.setStore(beads.NewBdStore(t.TempDir(), func(string, string, ...string) ([]byte, error) {
+			return nil, errors.New("the bd CLI must not run")
+		}))
+		hh.start()
+		hh.h.wg.Wait()
+		if st := hh.h.status(time.Now()); st.State != laneHostStateOff || len(st.Kinds) != 0 {
+			t.Fatalf("status = %+v, want off with no kinds (no refusal)", st)
+		}
+		if logs := hh.logLines(); len(logs) != 0 {
+			t.Fatalf("logs = %q, want none", logs)
+		}
+	})
+}
+
+// TestExplicitEmptyAuthoritativeRollsBackAndWarns: [ops] authoritative = []
+// over a SQLite sessions store runs no kind on the lane (the one-release
+// rollback) and the host warns, once, that the rollback goes away next
+// release; legacy keys a lane-run city still sets are warned too.
+func TestExplicitEmptyAuthoritativeRollsBackAndWarns(t *testing.T) {
+	f := newLaneFixtureOver(t, newLaneKindsSQLiteStore(t))
+	f.cfg.Ops.Authoritative = config.OpsKinds()
+	hh := newLaneHostHarness(t, f)
+	hh.start()
+	if got := hh.h.runningKinds(); len(got) != 0 {
+		t.Fatalf("running kinds = %v, want none under the rollback", got)
+	}
+	logs := hh.logLines()
+	if len(logs) != 1 || !strings.Contains(logs[0], "authoritative = [] keeps message, interrupt and respond on legacy delivery") {
+		t.Fatalf("logs = %q, want the rollback warning once", logs)
+	}
+	hh.h.decide()
+	if again := hh.logLines(); len(again) != 1 {
+		t.Fatalf("logs after a second decide = %q, want the warning only once", again)
+	}
+
+	g := newLaneFixtureOver(t, newLaneKindsSQLiteStore(t))
+	g.cfg.Daemon.NudgeDispatcher = "supervisor"
+	gh := newLaneHostHarness(t, g)
+	gh.h.kindsUnset = true
+	gh.start()
+	if logs := gh.logLines(); len(logs) != 1 || !strings.Contains(logs[0], "[daemon] nudge_dispatcher is deprecated") || strings.Contains(logs[0], "remove it") {
+		t.Fatalf("logs = %q, want the nudge_dispatcher deprecation, without asking for removal", logs)
+	}
+}
+
+// laneStoreWithoutBatches is a store whose guarded batches are hidden: a lane
+// host refuses to run over it.
+type laneStoreWithoutBatches struct{ beads.Store }
+
+// TestLaneHostServesTheSessionsBindingOnASplitCity pins the lane host's
+// sessions reads to the sessions class on a split city (typed-stores T6c):
+// the host decides to run over the sessions binding, which holds guarded
+// batches, though the work store beside it does not, and its op store opens
+// over that binding.
+func TestLaneHostServesTheSessionsBindingOnASplitCity(t *testing.T) {
+	binding := newLaneTestStore()
+	f := newLaneFixtureOver(t, binding)
+	work := laneStoreWithoutBatches{beads.NewMemStore()}
+	cs := &controllerState{cityBeadStore: work, storageRoutes: splitRoutes(binding), cfg: f.cfg, sp: f.sp, cityPath: f.dir, beadsQuiescent: new(atomic.Bool)}
+	h := newConversationLaneHost(cs, []string{"message"}, session.StopRequestsLive)
+	if state := h.decide(); state != laneHostStateRunning {
+		t.Fatalf("decide = %q (%s), want running over the sessions binding", state, h.reason)
+	}
+	if _, _, err := h.store(); err != nil {
+		t.Fatalf("store = %v, want the op store opened over the sessions binding", err)
+	}
+	if !sameBeadStore(h.stOver, binding) {
+		t.Errorf("the op store opened over %T, want the sessions binding", h.stOver)
 	}
 }

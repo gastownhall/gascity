@@ -1,10 +1,13 @@
 package api
 
 import (
+	"encoding/json"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/genclient"
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 func TestBeadsFromGenList_Valid(t *testing.T) {
@@ -148,5 +151,78 @@ func TestBeadFromGenPtr_Valid(t *testing.T) {
 	b := beadFromGenPtr(g)
 	if b.ID != "gc-99" || b.Title != "ok" || b.Type != "task" {
 		t.Errorf("beadFromGenPtr = %+v", b)
+	}
+}
+
+// TestBeadFromGenRoundTripsEveryBeadJSONField proves the API decode keeps every
+// JSON-visible beads.Bead field, so a bead the supervisor serves prints the same
+// document as the direct store read. The reflect guard fails the test when a new
+// field is added to beads.Bead without being set here (and so without being
+// proven to survive the decode). The one exception is IsBlocked, which is set in
+// the fixture and must NOT survive the decode.
+func TestBeadFromGenRoundTripsEveryBeadJSONField(t *testing.T) {
+	priority := 2
+	blocked := true
+	created := time.Date(2026, 4, 20, 12, 0, 0, 0, time.UTC)
+	deferUntil := created.Add(2 * time.Hour)
+	want := beads.Bead{
+		ID:           "gc-1",
+		Title:        "every field",
+		Status:       "closed",
+		Type:         "task",
+		Priority:     &priority,
+		CreatedAt:    created,
+		UpdatedAt:    created.Add(time.Minute),
+		Assignee:     "worker-1",
+		From:         "sender",
+		ParentID:     "gc-0",
+		Ref:          "step-1",
+		Needs:        []string{"gc-2"},
+		Description:  "desc",
+		Labels:       []string{"a", "b"},
+		Metadata:     beads.StringMap{"k": "v"},
+		Dependencies: []beads.Dep{{IssueID: "gc-1", DependsOnID: "gc-2", Type: "blocks"}},
+		Ephemeral:    true,
+		NoHistory:    true,
+		DeferUntil:   &deferUntil,
+		IsBlocked:    &blocked,
+		CloseReason:  "done",
+	}
+	rv := reflect.ValueOf(want)
+	for i := 0; i < rv.NumField(); i++ {
+		f := rv.Type().Field(i)
+		if tag := f.Tag.Get("json"); tag == "-" || tag == "" {
+			continue
+		}
+		if rv.Field(i).IsZero() {
+			t.Fatalf("fixture leaves JSON field %s zero; set it so the round trip covers it", f.Name)
+		}
+	}
+	wireJSON, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	var g genclient.Bead
+	if err := json.Unmarshal(wireJSON, &g); err != nil {
+		t.Fatalf("unmarshal into genclient.Bead: %v", err)
+	}
+	if g.IsBlocked == nil {
+		t.Fatal("fixture is_blocked did not reach the wire; the drop below proves nothing")
+	}
+	// is_blocked is a cache-only readiness value: the server's CachingStore
+	// stamps it on open rows over the bd and native-Dolt backends, but no
+	// direct store read carries it, so decoding it would make a local city's
+	// output differ by route (#8453).
+	want.IsBlocked = nil
+	wantJSON, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("marshal expected bead: %v", err)
+	}
+	gotJSON, err := json.Marshal(beadFromGen(g))
+	if err != nil {
+		t.Fatalf("marshal decoded bead: %v", err)
+	}
+	if string(gotJSON) != string(wantJSON) {
+		t.Fatalf("decoded bead JSON differs:\n got %s\nwant %s", gotJSON, wantJSON)
 	}
 }

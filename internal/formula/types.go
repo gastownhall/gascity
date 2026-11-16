@@ -30,6 +30,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -706,8 +707,71 @@ type RalphSpec struct {
 	// MaxAttempts bounds the total number of run/check attempts, including the first.
 	MaxAttempts int `json:"max_attempts,omitempty" toml:"max_attempts,omitempty"`
 
+	// MaxAttemptsVar names the formula var that supplies MaxAttempts when the
+	// formula writes max_attempts = "{{name}}". Compile resolves it to
+	// MaxAttempts and clears it before the check is expanded.
+	MaxAttemptsVar string `json:"-" toml:"-"`
+
+	// maxAttemptsVarValue is MaxAttemptsVar's value in the var scope of the
+	// expansion that defines the step, recorded when that expansion is
+	// applied; maxAttemptsVarBound reports that it was. Compile resolves an
+	// unbound var against the vars it compiles with.
+	maxAttemptsVarValue string
+	maxAttemptsVarBound bool
+
 	// Check defines how each attempt is validated.
 	Check *RalphCheckSpec `json:"check,omitempty" toml:"check,omitempty"`
+}
+
+// maxAttemptsVarPattern matches a max_attempts value that is exactly one
+// {{name}} formula-var placeholder.
+var maxAttemptsVarPattern = regexp.MustCompile(`^\{\{([a-zA-Z_][a-zA-Z0-9_]*)\}\}$`)
+
+// UnmarshalJSON accepts max_attempts as an integer or as a single
+// "{{name}}" formula-var placeholder.
+func (r *RalphSpec) UnmarshalJSON(data []byte) error {
+	type ralphAlias RalphSpec
+	var decoded struct {
+		ralphAlias
+		MaxAttempts json.RawMessage `json:"max_attempts,omitempty"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*r = RalphSpec(decoded.ralphAlias)
+	raw := decoded.MaxAttempts
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	if raw[0] != '"' {
+		if err := json.Unmarshal(raw, &r.MaxAttempts); err != nil {
+			return fmt.Errorf("max_attempts: expected an integer or a \"{{var}}\" placeholder: %w", err)
+		}
+		return nil
+	}
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil {
+		return fmt.Errorf("max_attempts: %w", err)
+	}
+	match := maxAttemptsVarPattern.FindStringSubmatch(text)
+	if match == nil {
+		return fmt.Errorf("max_attempts: string value %q must be a single \"{{var}}\" placeholder; write a literal count as an integer", text)
+	}
+	r.MaxAttemptsVar = match[1]
+	return nil
+}
+
+// MarshalJSON writes an unresolved MaxAttemptsVar back as its "{{name}}"
+// placeholder so a parsed formula round-trips.
+func (r RalphSpec) MarshalJSON() ([]byte, error) {
+	type ralphAlias RalphSpec
+	if r.MaxAttemptsVar == "" {
+		return json.Marshal(ralphAlias(r))
+	}
+	return json.Marshal(struct {
+		ralphAlias
+		MaxAttempts string `json:"max_attempts"`
+	}{ralphAlias: ralphAlias(r), MaxAttempts: "{{" + r.MaxAttemptsVar + "}}"})
 }
 
 // RalphCheckSpec defines the validation step for a Ralph attempt.
@@ -1637,7 +1701,7 @@ func validateOnComplete(oc *OnCompleteSpec, errs *[]string, prefix string) {
 }
 
 func validateRalph(spec *RalphSpec, errs *[]string, prefix string, step *Step) {
-	if spec.MaxAttempts < 1 {
+	if spec.MaxAttemptsVar == "" && spec.MaxAttempts < 1 {
 		*errs = append(*errs, fmt.Sprintf("%s.check: max_attempts must be >= 1", prefix))
 	}
 	if spec.Check == nil {

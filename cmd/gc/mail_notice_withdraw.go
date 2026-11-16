@@ -38,8 +38,9 @@ import (
 const mailNoticeWithdrawReason = "the mail it announces was read or archived"
 
 // withMailNoticeWithdrawal makes a read, mark-read, archive or delete of a
-// message through p cancel the open lane notices it caused, when cfg's [ops]
-// authoritative lists message; otherwise it returns p unchanged. sessions is
+// message through p cancel the open lane notices it caused, when the lane
+// executes message for cfg over sessions (cliLaneExecutesMessage); otherwise
+// it returns p unchanged. sessions is
 // the sessions-class store the notices live in. Failures are logged to warn
 // and never fail the mail operation.
 //
@@ -50,7 +51,7 @@ const mailNoticeWithdrawReason = "the mail it announces was read or archived"
 // its handoff archives withdraw too. Any other provider is wrapped, keeping
 // its optional mail.DedupSender and mail.MultiRecipientInboxer.
 func withMailNoticeWithdrawal(p mail.Provider, sessions beads.Store, cfg *config.City, warn io.Writer) mail.Provider {
-	if p == nil || isNilBeadStore(sessions) || !cliLaneExecutesMessage(cfg) {
+	if p == nil || isNilBeadStore(sessions) || !cliLaneExecutesMessage(cfg, sessions) {
 		return p
 	}
 	if bp, ok := p.(*beadmail.Provider); ok {
@@ -82,10 +83,10 @@ func withMailNoticeWithdrawal(p mail.Provider, sessions beads.Store, cfg *config
 
 // withBeadMailNoticeWithdrawal is withMailNoticeWithdrawal for a caller that
 // keeps calling the bead mail provider's own methods, such as the SessionStart
-// handoff archive: it registers the withdrawal as bp's consumed hook when cfg's
-// [ops] authoritative lists message, and returns bp.
+// handoff archive: it registers the withdrawal as bp's consumed hook when the
+// lane executes message for cfg over sessions, and returns bp.
 func withBeadMailNoticeWithdrawal(bp *beadmail.Provider, sessions beads.Store, cfg *config.City, warn io.Writer) *beadmail.Provider {
-	if bp == nil || isNilBeadStore(sessions) || !cliLaneExecutesMessage(cfg) {
+	if bp == nil || isNilBeadStore(sessions) || !cliLaneExecutesMessage(cfg, sessions) {
 		return bp
 	}
 	w := &mailNoticeWithdrawer{Provider: bp, sessions: sessions, warn: warn}

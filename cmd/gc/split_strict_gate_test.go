@@ -60,12 +60,16 @@ func init() {
 // it is given (see splittest.Projection for root and front).
 type splitStrictGate struct{}
 
-func (splitStrictGate) workView(store beads.Store) beads.Store {
+func (splitStrictGate) WorkView(store beads.Store) beads.Store {
 	return splittest.ProjectionOf(store).WorkViewOf(store)
 }
 
-func (splitStrictGate) classView(store beads.Store) beads.Store {
+func (splitStrictGate) ClassView(store beads.Store) beads.Store {
 	return splittest.ProjectionOf(store).ClassViewOf(store)
+}
+
+func (splitStrictGate) ViewFront(store beads.Store) (beads.Store, func(beads.Store) beads.Store, bool) {
+	return splittest.ViewFront(store)
 }
 
 // splitStrictTestsM runs the package's tests under every TestMain check and
@@ -151,7 +155,7 @@ func TestSplitStrictSeamIsInstalledOnlyUnderTheGate(t *testing.T) {
 		if splitStrictSeam != nil {
 			t.Fatal("the seam is installed although the gate is off")
 		}
-		if cs.CityBeadStore() != beads.Store(store) || cs.SessionsBeadStore().Store != beads.Store(store) {
+		if cs.CityBeadStore() != beads.Store(store) || cs.Stores().Sessions().Store != beads.Store(store) {
 			t.Fatal("accessors wrap the store although the gate is off")
 		}
 		return
@@ -160,7 +164,7 @@ func TestSplitStrictSeamIsInstalledOnlyUnderTheGate(t *testing.T) {
 	if cs.CityBeadStore() != p.WorkView() {
 		t.Fatal("CityBeadStore does not hand out the gate's work view")
 	}
-	if cs.SessionsBeadStore().Store != p.ClassView() || cs.GraphBeadStore().Store != p.ClassView() {
+	if cs.Stores().Sessions().Store != p.ClassView() || cs.Stores().Graph().Store != p.ClassView() {
 		t.Fatal("the class accessors do not hand out the gate's class view")
 	}
 }
@@ -183,7 +187,7 @@ func TestSplitStrictControllerSharesOneProjection(t *testing.T) {
 		t.Fatal("no city store")
 	}
 	work := cs.CityBeadStore()
-	sessions := cs.SessionsBeadStore().Store
+	sessions := cs.Stores().Sessions().Store
 	if splittest.ProjectionOf(work) != splittest.ProjectionOf(sessions) {
 		t.Fatal("the work and sessions accessors resolved to different projections")
 	}
@@ -212,8 +216,8 @@ type taggedView struct {
 	class bool
 }
 
-func (taggedSeam) workView(store beads.Store) beads.Store { return &taggedView{Store: store} }
-func (taggedSeam) classView(store beads.Store) beads.Store {
+func (taggedSeam) WorkView(store beads.Store) beads.Store { return &taggedView{Store: store} }
+func (taggedSeam) ClassView(store beads.Store) beads.Store {
 	return &taggedView{Store: store, class: true}
 }
 

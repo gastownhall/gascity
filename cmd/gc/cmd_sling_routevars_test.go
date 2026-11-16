@@ -8,11 +8,13 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/formulatest"
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sling"
 )
 
@@ -72,7 +74,7 @@ func TestDecorateGraphWorkflowRecipeSubstitutesRouteTargetsWithinRigContext(t *t
 		t.Fatalf("expected non-empty sessions for frontend agents, got claude=%q codex=%q", claudeSession, codexSession)
 	}
 
-	if err := graphroute.DecorateGraphWorkflowRecipe(recipe, graphroute.GraphWorkflowRouteVars(recipe, nil), "", "", "", "", "frontend/claude", claudeSession, store, cfg.Workspace.Name, cfg, cliGraphrouteDeps("")); err != nil {
+	if err := graphroute.DecorateGraphWorkflowRecipe(recipe, graphroute.GraphWorkflowRouteVars(recipe, nil), "", "", "", "", "frontend/claude", claudeSession, beadstest.Sessions(store), cfg.Workspace.Name, cfg, cliGraphrouteDeps("")); err != nil {
 		t.Fatalf("graphroute.DecorateGraphWorkflowRecipe: %v", err)
 	}
 	root := recipe.StepByID("demo")
@@ -178,15 +180,14 @@ type = "task"
 	config.InjectImplicitAgents(cfg)
 	addTestControlDispatcherAgents(cfg, "", "frontend")
 
-	deps := slingDeps{
+	deps := slingDepsWithStore(slingDeps{
 		CityName: "test-city",
 		CityPath: "/city",
 		Cfg:      cfg,
-		Store:    store,
 		StoreRef: "city:test-city",
 		Resolver: cliAgentResolver{},
 		Notify:   cliNotifier{},
-	}
+	}, store)
 
 	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1)}
 	result, err := sling.InstantiateSlingFormula(
@@ -225,5 +226,66 @@ type = "task"
 	// graphroute.DecorateGraphWorkflowRecipe and preserved in the graph apply plan.
 	if got := stepNode.Metadata["gc.routed_to"]; got != "worker" {
 		t.Fatalf("gc.routed_to = %q, want %q; full metadata = %v", got, "worker", stepNode.Metadata)
+	}
+}
+
+// A formulas v2 run_target built from a var default that references the
+// injected {{binding_prefix}} routes to the bound agent.
+func TestSlingRoutesThroughVarDefaultBuiltFromBindingPrefix(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	applyFeatureFlags(cfg)
+	t.Cleanup(func() { applyFeatureFlags(&config.City{}) })
+	cfg.FormulaLayers.City = []string{testFormulaDir(t)}
+	reviewer := config.Agent{Name: "reviewer", BindingName: "ops", MaxActiveSessions: intPtr(1)}
+	cfg.Agents = append(cfg.Agents, reviewer)
+
+	graphFormula := `
+formula = "bound-review"
+version = 2
+contract = "graph.v2"
+
+[vars.review_target]
+default = "{{binding_prefix}}reviewer"
+
+[[steps]]
+id = "review"
+title = "Review"
+metadata = { "gc.run_target" = "{{review_target}}" }
+`
+	if err := os.WriteFile(filepath.Join(cfg.FormulaLayers.City[0], "bound-review.toml"), []byte(graphFormula), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	deps, stdout, stderr := testDeps(cfg, sp, runner.run)
+	deps = slingDepsWithStore(deps, beads.NewMemStoreFrom(1, []beads.Bead{
+		{ID: "BL-42", Title: "Work", Type: "task", Status: "open"},
+	}, nil))
+	config.InjectImplicitAgents(cfg)
+	addTestControlDispatcherAgents(cfg, "", "frontend")
+	opts := testOpts(reviewer, "BL-42")
+	opts.OnFormula = "bound-review"
+	opts.ScopeKind = "city"
+	opts.ScopeRef = "test-city"
+	if code := doSling(opts, deps, nil, stdout, stderr); code != 0 {
+		t.Fatalf("doSling returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	all, err := deps.Store.List(beads.ListQuery{AllowScan: true, TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	found := false
+	for _, b := range all {
+		if b.Title != "Review" {
+			continue
+		}
+		found = true
+		if got := b.Metadata["gc.routed_to"]; got != "ops.reviewer" {
+			t.Fatalf("review step gc.routed_to = %q, want ops.reviewer", got)
+		}
+	}
+	if !found {
+		t.Fatal("review step bead not found")
 	}
 }

@@ -47,14 +47,14 @@ func unitRestart(t *testing.T, c *cliOpCity, verb string, stderr io.Writer, onPo
 	r := testRowFirstRestart(verb, c.name, newFakeDrainOps(), stderr)
 	r.display = killPokeSessionIdentity
 	r.token = cliOpRestartToken
-	r.record = fencedRecorder(t, c.store, runtime.NewFake(), c.bead.ID)
+	r.record = fencedRecorder(t, c.sessions, runtime.NewFake(), c.bead.ID)
 	r.poke = func(string, reconcilekey.Key) error {
 		if onPoke != nil {
 			onPoke()
 		}
 		return nil
 	}
-	r.ops = newRestartOps(nil, nil, c.store, "", c.name, killPokeSessionIdentity, false, io.Discard, stderr)
+	r.ops = newRestartOps(nil, nil, c.sessions, "", c.name, killPokeSessionIdentity, false, io.Discard, stderr)
 	return r
 }
 
@@ -166,12 +166,12 @@ func TestHandoffRecordsRestartThenNotice(t *testing.T) {
 		if len(notice) != 1 || notice[0].Status != opjournal.StatusClosed {
 			t.Errorf("notice ops at the row write = %+v, want one closed", notice)
 		}
-		if mails := listOpenMessagesBothTiers(t, c.store); len(mails) != 1 {
+		if mails := listOpenMessagesBothTiers(t, c.mail); len(mails) != 1 {
 			t.Errorf("mail beads at the row write = %d, want 1", len(mails))
 		}
 		return write(token)
 	}
-	outcome := doHandoffWithOutcome(c.store, c.store, events.NewFake(), newFakeDrainOps(), r, killPokeSessionIdentity, c.name, []string{"context cycle"}, &stdout, &stderr)
+	outcome := doHandoffWithOutcome(c.mail, c.sessions, events.NewFake(), newFakeDrainOps(), r, killPokeSessionIdentity, c.name, []string{"context cycle"}, &stdout, &stderr)
 	if outcome.code != 0 || !outcome.restartRequested {
 		t.Fatalf("outcome = %+v; stderr=%s", outcome, stderr.String())
 	}
@@ -266,7 +266,7 @@ func TestHandoffMailFailureClosesBothOps(t *testing.T) {
 	h, c := restartOpsCity(t, restartOpsEnv(), nil)
 	var stdout, stderr bytes.Buffer
 	r := unitRestart(t, c, "gc handoff", &stderr, nil)
-	outcome := doHandoffWithOutcome(handoffMailFailingStore{c.store}, c.store, events.NewFake(), newFakeDrainOps(), r, killPokeSessionIdentity, c.name, []string{"context cycle"}, &stdout, &stderr)
+	outcome := doHandoffWithOutcome(handoffMailFailingStore{c.mail}, c.sessions, events.NewFake(), newFakeDrainOps(), r, killPokeSessionIdentity, c.name, []string{"context cycle"}, &stdout, &stderr)
 	if outcome.code != 1 || outcome.restartRequested {
 		t.Fatalf("outcome = %+v, want 1 and no restart", outcome)
 	}
@@ -321,7 +321,7 @@ func TestHandoffAutoOpensNoOpStore(t *testing.T) {
 	if h.opens != 0 {
 		t.Fatalf("op store opened %d times on the hook path", h.opens)
 	}
-	if mails := listOpenMessagesBothTiers(t, c.reload(t)); len(mails) != 1 {
+	if mails := listOpenMessagesBothTiers(t, c.reloadMail(t)); len(mails) != 1 {
 		t.Fatalf("auto mail beads = %d, want 1", len(mails))
 	}
 }
@@ -365,7 +365,7 @@ func TestHandoffKeyRefusesAutoAndTarget(t *testing.T) {
 		if !strings.Contains(stderr.String(), errHandoffKeyWithoutOps.Error()) {
 			t.Fatalf("stderr = %q, want the --key refusal", stderr.String())
 		}
-		if mails := listOpenMessagesBothTiers(t, c.reload(t)); len(mails) != 0 || h.opens != 0 {
+		if mails := listOpenMessagesBothTiers(t, c.reloadMail(t)); len(mails) != 0 || h.opens != 0 {
 			t.Fatalf("mail %d, op store opens %d; want nothing written", len(mails), h.opens)
 		}
 	}
@@ -383,7 +383,7 @@ func TestHandoffReplaySendsNoMail(t *testing.T) {
 	if r.code != 0 || r.stdout != "Handoff: restart requested.\n" || !strings.Contains(r.stderr, "replayed op "+restart[0].ID) || !strings.Contains(r.stderr, "gc handoff: a replay sends no mail") {
 		t.Fatalf("replay = %d stdout %q stderr %q", r.code, r.stdout, r.stderr)
 	}
-	if mails := listOpenMessagesBothTiers(t, c.reload(t)); len(mails) != 1 {
+	if mails := listOpenMessagesBothTiers(t, c.reloadMail(t)); len(mails) != 1 {
 		t.Fatalf("mail beads = %d, want the first run's only", len(mails))
 	}
 }
@@ -434,7 +434,7 @@ func TestRestartVerbsDoNotReplayEachOthersKey(t *testing.T) {
 					t.Fatalf("restart op %s = %s %+v, want closed succeeded", op.ID, op.Status, op.Outcome)
 				}
 			}
-			if mails := listOpenMessagesBothTiers(t, c.reload(t)); len(mails) != tc.wantMails {
+			if mails := listOpenMessagesBothTiers(t, c.reloadMail(t)); len(mails) != tc.wantMails {
 				t.Fatalf("mail beads = %d, want %d", len(mails), tc.wantMails)
 			}
 		})
@@ -492,7 +492,7 @@ func TestSessionResetKeyCannotNameARestartRequestsOp(t *testing.T) {
 				if len(restart) != 1 || restart[0].ClientKey != resetKey || restart[0].Status != opjournal.StatusClosed || restart[0].Outcome.Arm != opjournal.ArmSucceeded {
 					t.Fatalf("restart ops = %+v, want only the %s's, closed succeeded", restart, verb.name)
 				}
-				if mails := listOpenMessagesBothTiers(t, c.reload(t)); len(mails) != verb.mails {
+				if mails := listOpenMessagesBothTiers(t, c.reloadMail(t)); len(mails) != verb.mails {
 					t.Fatalf("mail beads = %d, want %d", len(mails), verb.mails)
 				}
 			})
@@ -599,7 +599,7 @@ func TestHandoffSameKeyRerunWithAnotherSubjectReplays(t *testing.T) {
 	if !strings.Contains(stderr, "gc handoff: a replay sends no mail") {
 		t.Fatalf("replay stderr %q, want the no-mail note", stderr)
 	}
-	if mails := listOpenMessagesBothTiers(t, c.reload(t)); len(mails) != 1 || mails[0].Title != "subject A" {
+	if mails := listOpenMessagesBothTiers(t, c.reloadMail(t)); len(mails) != 1 || mails[0].Title != "subject A" {
 		t.Fatalf("mail beads = %+v, want the first run's subject A only", mails)
 	}
 }
@@ -638,7 +638,7 @@ func sweepRestartOpAfterRowWrite(t *testing.T, h *cliOpHarness, r *rowFirstResta
 func restartFresh(t *testing.T, c *cliOpCity, epoch int) {
 	t.Helper()
 	const token = "tok-cli-op-successor"
-	if err := c.reload(t).SetMetadataBatch(c.bead.ID, map[string]string{
+	if err := c.reloadSessions(t).SetMetadataBatch(c.bead.ID, map[string]string{
 		"restart_requested": "", "continuation_reset_pending": "", "continuation_epoch": strconv.Itoa(epoch),
 		"generation": "5", "instance_token": token,
 	}); err != nil {
@@ -669,7 +669,7 @@ func TestHandoffSweptRestartOpReplaysWhenTheRowShowsTheRestart(t *testing.T) {
 		{name: "restart ran", content: "auto", after: ran, shows: "ran"},
 		{name: "restart pending", content: "auto", shows: "still pending"},
 		{name: "restart never ran", content: "auto", after: func(t *testing.T, _ *cliOpHarness, c *cliOpCity) {
-			if err := c.reload(t).SetMetadataBatch(c.bead.ID, map[string]string{"restart_requested": "", "continuation_reset_pending": ""}); err != nil {
+			if err := c.reloadSessions(t).SetMetadataBatch(c.bead.ID, map[string]string{"restart_requested": "", "continuation_reset_pending": ""}); err != nil {
 				t.Fatalf("withdrawing the restart request: %v", err)
 			}
 		}},
@@ -687,9 +687,9 @@ func TestHandoffSweptRestartOpReplaysWhenTheRowShowsTheRestart(t *testing.T) {
 			rows := h.opStore
 			var stderr bytes.Buffer
 			r := unitRestart(t, c, "gc handoff", &stderr, nil)
-			r.ops = newRestartOps(nil, nil, c.store, "k-swept", c.name, killPokeSessionIdentity, false, io.Discard, &stderr)
+			r.ops = newRestartOps(nil, nil, c.sessions, "k-swept", c.name, killPokeSessionIdentity, false, io.Discard, &stderr)
 			sweepRestartOpAfterRowWrite(t, h, &r)
-			outcome := doHandoffWithOutcome(c.store, c.store, events.NewFake(), newFakeDrainOps(), r, killPokeSessionIdentity, c.name, []string{"context cycle"}, io.Discard, &stderr)
+			outcome := doHandoffWithOutcome(c.mail, c.sessions, events.NewFake(), newFakeDrainOps(), r, killPokeSessionIdentity, c.name, []string{"context cycle"}, io.Discard, &stderr)
 			if outcome.code != 0 || !outcome.restartRequested {
 				t.Fatalf("first run = %+v; stderr=%s", outcome, stderr.String())
 			}
@@ -715,7 +715,7 @@ func TestHandoffSweptRestartOpReplaysWhenTheRowShowsTheRestart(t *testing.T) {
 			if tc.warnings != "" && !strings.Contains(rerun.stderr, tc.warnings) {
 				t.Fatalf("rerun stderr %q, want %q", rerun.stderr, tc.warnings)
 			}
-			if mails := listOpenMessagesBothTiers(t, c.reload(t)); len(mails) != 1 {
+			if mails := listOpenMessagesBothTiers(t, c.reloadMail(t)); len(mails) != 1 {
 				t.Fatalf("mail beads = %d, want the first run's only", len(mails))
 			}
 			if ops := cliOpRows(t, rows); len(ops) != len(restart)+len(notice) {
@@ -749,7 +749,7 @@ func TestRequestRestartSweptRestartOpReplaysOnlyWhilePending(t *testing.T) {
 			h, c := restartOpsCity(t, restartOpsEnv(), nil)
 			var stderr bytes.Buffer
 			r := unitRestart(t, c, "gc runtime request-restart", &stderr, nil)
-			r.ops = newRestartOps(nil, nil, c.store, "k-swept", c.name, killPokeSessionIdentity, false, io.Discard, &stderr)
+			r.ops = newRestartOps(nil, nil, c.sessions, "k-swept", c.name, killPokeSessionIdentity, false, io.Discard, &stderr)
 			sweepRestartOpAfterRowWrite(t, h, &r)
 			if code := doRuntimeRequestRestart(r, events.Discard, io.Discard); code != 0 {
 				t.Fatalf("first run = %d; stderr=%s", code, stderr.String())
@@ -892,8 +892,8 @@ func TestHandoffJSONMailFailureWritesOneRecord(t *testing.T) {
 	h, c := restartOpsCity(t, restartOpsEnv(), nil)
 	var stdout, stderr, jsonOut bytes.Buffer
 	r := unitRestart(t, c, "gc handoff", &stderr, nil)
-	r.ops = newRestartOps(nil, nil, c.store, "", c.name, killPokeSessionIdentity, true, &jsonOut, &stderr)
-	outcome := doHandoffWithOutcome(handoffMailFailingStore{c.store}, c.store, events.NewFake(), newFakeDrainOps(), r, killPokeSessionIdentity, c.name, []string{"context cycle"}, &stdout, &stderr)
+	r.ops = newRestartOps(nil, nil, c.sessions, "", c.name, killPokeSessionIdentity, true, &jsonOut, &stderr)
+	outcome := doHandoffWithOutcome(handoffMailFailingStore{c.mail}, c.sessions, events.NewFake(), newFakeDrainOps(), r, killPokeSessionIdentity, c.name, []string{"context cycle"}, &stdout, &stderr)
 	if outcome.code != 1 {
 		t.Fatalf("outcome = %+v, want 1", outcome)
 	}
@@ -931,7 +931,7 @@ func TestHandoffKeyOnASessionTheControllerDoesNotRestartWarns(t *testing.T) {
 				t.Fatalf("run %d: exit %d, stderr %q; want 0 and %q", i+1, r.code, r.stderr, want)
 			}
 		}
-		if mails := listOpenMessagesBothTiers(t, c.reload(t)); len(mails) != 2 {
+		if mails := listOpenMessagesBothTiers(t, c.reloadMail(t)); len(mails) != 2 {
 			t.Fatalf("mails = %d, want 2 (nothing dedups an unrecorded key)", len(mails))
 		}
 		if rows := cliOpRows(t, h.opStore); len(rows) != 0 {
@@ -975,7 +975,7 @@ func TestHandoffContentRequireRidesAnUnrecordedRestart(t *testing.T) {
 			if ops := cliOpRows(t, rows); len(ops) != 0 {
 				t.Fatalf("ops = %d, want none", len(ops))
 			}
-			if mails := listOpenMessagesBothTiers(t, c.reload(t)); len(mails) != 1 {
+			if mails := listOpenMessagesBothTiers(t, c.reloadMail(t)); len(mails) != 1 {
 				t.Fatalf("mail beads = %d, want 1", len(mails))
 			}
 			if m := c.row(t).Metadata; m["restart_requested"] != "true" {
@@ -1034,7 +1034,7 @@ func TestHandoffNoticeRefusalReportsTheRestartOp(t *testing.T) {
 	}
 	wantNothingRan := func(run string) {
 		t.Helper()
-		if mails := listOpenMessagesBothTiers(t, c.reload(t)); len(mails) != 0 {
+		if mails := listOpenMessagesBothTiers(t, c.reloadMail(t)); len(mails) != 0 {
 			t.Fatalf("%s: mail beads = %d, want none", run, len(mails))
 		}
 		if m := c.row(t).Metadata; m["restart_requested"] != "" {

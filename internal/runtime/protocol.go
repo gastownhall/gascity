@@ -28,17 +28,36 @@ const (
 	// carrying the in-box command's exit code. The controller uses this to read
 	// an exec-op exit of 2 as the command's own exit code rather than the RPP
 	// "unknown op" sentinel (ErrExecUnsupported) — disambiguating the overloaded
-	// exit 2 at the exec-connection seam. exec stays optional; an executable that
-	// omits this capability is driven via the dedicated ops (the fallback path).
+	// exit 2 at the exec-connection seam. Without carrier.ops, driving tries
+	// tmux over exec even when proc.exec is undeclared; only ErrExecUnsupported
+	// enables dedicated-op fallback.
 	ProtocolCapabilityConnectionExec = "proc.exec"
+	// ProtocolCapabilityCarrierOps selects dedicated nudge, peek, send-keys,
+	// interrupt and clear-scrollback ops instead of tmux over exec. All five
+	// ops are required, so an exit 2 from one is a failure rather than the
+	// unknown-op no-op, and gc sends no tmux commands after selection. With
+	// it, input-fence and proc.provision have no effect: fencing is none and
+	// start is welded. Tmux remains the undeclared default.
+	ProtocolCapabilityCarrierOps = "carrier.ops"
 	// ProtocolCapabilityInputFence declares that the box's tmux can take
 	// fenced input (RUNTIME-CONTRACT-009): tmux 3.0 or later, the `main`
 	// session present when `start` returns, and `sh`. Declared with
-	// proc.exec, it makes gc publish each agent pane's input fence and guard
+	// proc.exec and without carrier.ops, it makes gc publish each agent pane's input fence and guard
 	// fenced input over the exec connection (InputFencingAtomic); without it
 	// the pack reports InputFencingNone, and starts and launches touch no
 	// fence.
 	ProtocolCapabilityInputFence = "input-fence"
+	// ProtocolCapabilityIdleBoundary declares that the selected carrier can
+	// answer Peek for the agent. The default tmux carrier needs proc.exec and
+	// the in-box session `main`; carrier.ops reads through the peek op instead,
+	// and keeps each session's ready prompt in the pack's metadata, so it also
+	// needs set-meta and get-meta to round-trip GC_READY_PROMPT_PREFIX byte
+	// for byte. With report-activity and report-attachment this enables
+	// WaitForIdle, ready-prompt recovery, the idle-proof budget and full idle
+	// sleep. RPP-CONN-002 proves the selected carrier's liveness and read (and
+	// the carrier.ops prompt store, which `gc runtime check` requires too),
+	// separately from production's prompt classification.
+	ProtocolCapabilityIdleBoundary = "idle-boundary"
 	// The proc.* / tty.* tokens below form the connection-plane capability
 	// family — a dotted namespace parallel to the env.* family, distinct from
 	// the flat session-control tokens above. They are reserved now and gain
@@ -59,9 +78,142 @@ const (
 	// declared, the controller provisions via `provision` and then launches the
 	// agent itself by exec-ing `tmux new-session` over the `exec` op (so it also
 	// requires proc.exec); without it, the controller uses the welded `start` op
-	// (compat). It gates TransportCapabilities.SeparableLaunch.
+	// (compat). It gates TransportCapabilities.SeparableLaunch. carrier.ops
+	// always uses welded start, even with proc.provision and proc.exec.
 	ProtocolCapabilityProvision = "proc.provision"
+	// ProtocolCapabilityObserveV1 declares the exec observe contract
+	// reconciler v2 reads (PAR-EXEC): the `observe`, `inventory` and
+	// `kill-object` ops, `fresh_only` honored on `start` and `provision`, and
+	// exit 2 from a declared op read as a failure, never as the unknown-op
+	// no-op. With report-attachment it makes an exec runtime v2-ready.
+	ProtocolCapabilityObserveV1 = "observe.v1"
+	// ProtocolCapabilityServerLifecycle declares that the executable owns a
+	// server its boxes run under and implements the `server-stop` op, which
+	// gc runs after it stops the city's sessions (`gc stop`, the
+	// controller's shutdown) to end that server. It exits 0 only when the
+	// server is gone and no session the executable started for the city
+	// remains, and 0 again when there is no server (idempotent). With it the
+	// exec provider's TeardownServer runs `server-stop`; without it,
+	// TeardownServer sends nothing.
+	ProtocolCapabilityServerLifecycle = "server-lifecycle"
+	// ProtocolCapabilityFSHost declares that the executable's boxes share the
+	// controller's host filesystem: they run on the controller's host, as the
+	// controller's user, with the controller's view of the filesystem, so the
+	// work_dir, HOME and transcript paths gc holds name the same files inside
+	// the box. It narrows [ProtocolLocalityLocal], which says only that boxes
+	// run on the controller's host (a container on that host is local too, and
+	// must not declare fs.host unless it shares that view and user). It is
+	// read only through [ProtocolInfo.SharesHostFS], never on its own: with
+	// it, gc stages the work dir and runs pre_start and session_setup on the
+	// host itself and leaves that work out of the start config.
+	ProtocolCapabilityFSHost = "fs.host"
+	// ProtocolCapabilityInputOutcome declares that the executable answers
+	// the four driving ops (nudge, send-keys, interrupt and clear-scrollback)
+	// with a typed input outcome: exit 0 when the input was delivered (one
+	// optional stdout line may refine a nudge to delivered_unobserved), and
+	// [ExitCodeInputOutcome] with exactly one JSON outcome line naming every
+	// other outcome. The words are [InputOutcome]s, each the projection of
+	// one runtime sentinel. A gc that does not read the token sees exit 80 as
+	// an ordinary failure, so a refusal never reads as delivered.
+	ProtocolCapabilityInputOutcome = "input-outcome"
 )
+
+// InputOutcome is one word of the input-outcome wire
+// ([ProtocolCapabilityInputOutcome]). Each word names exactly one existing
+// runtime sentinel ([InputOutcome.Sentinel]); the wire adds no meaning of
+// its own.
+type InputOutcome string
+
+// The input-outcome words. The two delivered words travel on exit 0, every
+// other word on [ExitCodeInputOutcome].
+const (
+	// InputOutcomeDelivered is input the runtime delivered: nil.
+	InputOutcomeDelivered InputOutcome = "delivered"
+	// InputOutcomeDeliveredUnobserved is a nudge delivered without the
+	// runtime observing the turn start: [ErrNudgeDeliveredUnobserved].
+	InputOutcomeDeliveredUnobserved InputOutcome = "delivered_unobserved"
+	// InputOutcomeUnconfirmed is a nudge whose submit may or may not have
+	// taken: [ErrNudgeDeliveryUnconfirmed].
+	InputOutcomeUnconfirmed InputOutcome = "unconfirmed"
+	// InputOutcomeNotSent is input that never reached the session and a
+	// retry may get past: [ErrNudgeNotSent].
+	InputOutcomeNotSent InputOutcome = "not_sent"
+	// InputOutcomeRejected is input the runtime will never accept as given:
+	// [ErrNudgeRejected].
+	InputOutcomeRejected InputOutcome = "rejected"
+	// InputOutcomeBusy is a nudge deferred because the session is running a
+	// turn its submit would interrupt: [ErrSessionBusy].
+	InputOutcomeBusy InputOutcome = "busy"
+	// InputOutcomePendingInteraction is a nudge refused because the session
+	// waits on an interaction the text would answer:
+	// [ErrNudgeRefusedPendingInteraction].
+	InputOutcomePendingInteraction InputOutcome = "pending_interaction"
+	// InputOutcomeUnavailable is input the runtime could not deliver because
+	// it could not reach its backend: [ErrRuntimeUnavailable].
+	InputOutcomeUnavailable InputOutcome = "unavailable"
+	// InputOutcomeGone is input to a name no running box holds: none holds
+	// it, or the box that does is dead (the name held, nothing running in
+	// it, as observe reports `dead`): [ErrSessionNotFound].
+	InputOutcomeGone InputOutcome = "gone"
+)
+
+// inputOutcomeSentinels is the projection: each word and the sentinel it
+// names, in wire order.
+var inputOutcomeSentinels = []struct {
+	word     InputOutcome
+	sentinel error
+}{
+	{InputOutcomeDelivered, nil},
+	{InputOutcomeDeliveredUnobserved, ErrNudgeDeliveredUnobserved},
+	{InputOutcomeUnconfirmed, ErrNudgeDeliveryUnconfirmed},
+	{InputOutcomeNotSent, ErrNudgeNotSent},
+	{InputOutcomeRejected, ErrNudgeRejected},
+	{InputOutcomeBusy, ErrSessionBusy},
+	{InputOutcomePendingInteraction, ErrNudgeRefusedPendingInteraction},
+	{InputOutcomeUnavailable, ErrRuntimeUnavailable},
+	{InputOutcomeGone, ErrSessionNotFound},
+}
+
+// InputOutcomes returns every input-outcome word, in wire order.
+func InputOutcomes() []InputOutcome {
+	out := make([]InputOutcome, len(inputOutcomeSentinels))
+	for i, e := range inputOutcomeSentinels {
+		out[i] = e.word
+	}
+	return out
+}
+
+// Known reports whether o is a word of the vocabulary.
+func (o InputOutcome) Known() bool {
+	for _, e := range inputOutcomeSentinels {
+		if e.word == o {
+			return true
+		}
+	}
+	return false
+}
+
+// Sentinel returns the runtime sentinel o names: nil for
+// [InputOutcomeDelivered] and for a word outside the vocabulary.
+func (o InputOutcome) Sentinel() error {
+	for _, e := range inputOutcomeSentinels {
+		if e.word == o {
+			return e.sentinel
+		}
+	}
+	return nil
+}
+
+// Success reports whether o is a delivered word, the only words an exit 0
+// may carry.
+func (o InputOutcome) Success() bool {
+	return o == InputOutcomeDelivered || o == InputOutcomeDeliveredUnobserved
+}
+
+// ProtocolLocalityLocal is the handshake locality of an executable whose
+// boxes run on the controller's host. Any other value, or none, reads as
+// remote.
+const ProtocolLocalityLocal = "local"
 
 // ProtocolInfo is the parsed `protocol` handshake response. The zero
 // value is the contract for executables that do not implement the
@@ -69,6 +221,24 @@ const (
 type ProtocolInfo struct {
 	Version      int      `json:"version"`
 	Capabilities []string `json:"capabilities,omitempty"`
+	// Locality is where the executable's boxes run, when it says:
+	// [ProtocolLocalityLocal], or anything else for remote.
+	Locality string `json:"locality,omitempty"`
+}
+
+// DeclaresLocal reports whether the handshake declared its boxes local to
+// the controller's host. An absent or unknown locality is remote.
+func (pi ProtocolInfo) DeclaresLocal() bool {
+	return pi.Locality == ProtocolLocalityLocal
+}
+
+// SharesHostFS reports whether the handshake declared that its boxes share
+// the controller's host filesystem and user: locality=local narrowed by
+// [ProtocolCapabilityFSHost]. It is the one reader of that token, so
+// locality and the token are never checked apart; fs.host without
+// locality=local reads as undeclared.
+func (pi ProtocolInfo) SharesHostFS() bool {
+	return pi.DeclaresLocal() && pi.Has(ProtocolCapabilityFSHost)
 }
 
 // Has reports whether the handshake declared the given capability.

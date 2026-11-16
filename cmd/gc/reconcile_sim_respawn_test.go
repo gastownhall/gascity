@@ -137,6 +137,7 @@ func (s *sim) workerObject() int64 {
 // pre-empting a requested respawn, with I25 (one begin per bead; no signal
 // over a held claim) and every other invariant checked.
 func TestSimIdleRespawnLifecycle(t *testing.T) {
+	skipOnSimExecLeaf(t, "Full sleep capability, which the idle respawn needs")
 	t.Run("respawns once", func(t *testing.T) {
 		s := respawnSim(t)
 		first := s.workerObject()

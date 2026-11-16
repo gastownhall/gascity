@@ -6,6 +6,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
@@ -21,15 +22,19 @@ type nudgeQueueHandle struct {
 	// Repin moves in-flight claims onto a new delivery key without a
 	// maintenance pass or a store open (rekeyQueuedNudgesAfterFailedBookkeeping).
 	Repin nudgeClaimRepinner
-	// Probe answers whether a claim would claim anything, from a lock-free
-	// snapshot (the poll loop's due-work gate, nudgePollGate).
+	// Probe answers what a claim would claim, from a lock-free snapshot (the
+	// poll loop's due-work gate, nudgePollGate, and the starvation check,
+	// queuedNudgeStarvedForTarget).
 	Probe nudgeClaimProber
 }
 
-// nudgeClaimProber reports, without the queue lock and without claiming,
-// whether ClaimBatch for ct at now would claim anything.
+// nudgeClaimProber reports, without the queue lock and without claiming, what
+// ClaimBatch for ct at now would claim.
 type nudgeClaimProber interface {
+	// WouldClaimBatch reports whether ClaimBatch would claim anything.
 	WouldClaimBatch(ct storebinding.ClaimTarget, now time.Time) (bool, error)
+	// NextBatch returns the items ClaimBatch would claim, in queue order.
+	NextBatch(ct storebinding.ClaimTarget, now time.Time) ([]nudgequeue.Item, error)
 }
 
 // nudgeDispatchSkipRecorder persists and reads the dispatch skip counters.
@@ -45,33 +50,14 @@ type nudgeClaimRepinner interface {
 
 // openNudgeQueue is the only constructor of the city's nudge queue in cmd/gc.
 // store is the nudges-class store the caller already holds. With the zero
-// value, Enqueue opens its own to save the shadow, the verbs whose commit owes
-// shadow debts open their own after the queue lock to pay them
-// (settleNudgeShadowDebts), and so does the shim's import (importMigrated),
-// which saves the moved items' shadows. WithdrawQueuedWaitNudges does not, and
-// reaches shadows only through a caller-passed store: with the zero value it
-// retires the queue item and leaves its shadow open, as does Rollback of an
-// item no longer queued.
+// value, Enqueue opens its own to save the shadow, and the verbs whose commit
+// owes shadow debts open their own after the queue lock to pay them
+// (settleNudgeShadowDebts). WithdrawQueuedWaitNudges does not, and reaches
+// shadows only through a caller-passed store: with the zero value it retires
+// the queue item and leaves its shadow open, as does Rollback of an item no
+// longer queued.
 //
-// It builds the file queue only: the beads queue, its shadow view
-// (storebinding.NewBeadsNudgeFrontDoors) and the shim that moves live work
-// between the two (shimNudgeQueue) have no production caller yet. The change
-// that selects the queue by mode here owes three more things (ga-w0hgvz):
-//
-//   - In beads mode, the wait helpers' shadow reads (nudgeShadows) must go
-//     through that view: a moved item's legacy gc:nudge shadow stays open, so
-//     a direct read sees the item still queued and never finalizes its wait.
-//     The view's Save confirms a record in any state, even one retired
-//     migrated; Find is the state-aware read.
-//   - A shim pass must run in the configured mode's direction from the site
-//     that reads the mode.
-//   - file → beads must reinstate a record retired "migrated"
-//     (ReinstateMigrated, DES-NQ D12), or a quick flip back strands the
-//     batch in the file queue (the shim header).
-//   - The shim reads the beads queue through ListLive, which only the
-//     concrete queue has, so the caller type-asserts it: add ListLive to the
-//     contract, or have NewBeadsNudgeFrontDoors return a queue the shim takes
-//     as it is.
+// It builds the file queue only.
 func openNudgeQueue(cityPath string, store beads.NudgesStore) nudgeQueueHandle {
 	q := &fileNudgeQueue{cityPath: cityPath, store: store, clk: clock.Real{}}
 	return nudgeQueueHandle{

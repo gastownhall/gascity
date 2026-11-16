@@ -43,6 +43,37 @@ func TestSupervisorForkEnv(t *testing.T) {
 			},
 		},
 		{
+			// The launching pane's demand-spawn keys describe that pane's
+			// spawn. A supervisor carrying them would start a tmux server
+			// holding them, and every session it starts would inherit them
+			// (gastownhall/gascity#5738).
+			name: "drops the launching pane's demand-spawn keys",
+			parent: []string{
+				"PATH=/bin",
+				"GC_SPAWN_ORIGIN=demand",
+				"GC_TRIGGER_BEAD_ID=ga-pane",
+				"GC_TRIGGER_WORK_BEAD_ID=ga-pane",
+				"GC_TRIGGER_BEAD_STORE_REF=city",
+				"GC_TRIGGER_WORK_STORE_REF=city",
+				"GC_TRIGGER_EXTRA=kept",
+				"HOME=/home/x",
+			},
+			check: func(t *testing.T, got []string) {
+				for _, kv := range got {
+					key, _, _ := strings.Cut(kv, "=")
+					switch key {
+					case "GC_SPAWN_ORIGIN", "GC_TRIGGER_BEAD_ID", "GC_TRIGGER_WORK_BEAD_ID", "GC_TRIGGER_BEAD_STORE_REF", "GC_TRIGGER_WORK_STORE_REF":
+						t.Fatalf("supervisorForkEnv result %v still carries %s", got, kv)
+					}
+				}
+				for _, want := range []string{"PATH=/bin", "GC_TRIGGER_EXTRA=kept", "HOME=/home/x"} {
+					if !containsExactly(got, want) {
+						t.Fatalf("supervisorForkEnv result %v dropped %s (the exclusion must be by exact name)", got, want)
+					}
+				}
+			},
+		},
+		{
 			name:   "adds preserve-var when absent",
 			parent: []string{"PATH=/bin"},
 			check: func(t *testing.T, got []string) {

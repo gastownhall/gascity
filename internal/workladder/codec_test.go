@@ -3,6 +3,7 @@ package workladder
 import (
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -54,10 +55,17 @@ func TestLadderRoundTrip(t *testing.T) {
 		{Key: ClaimKey{Store: "", Bead: "c"}, Kind: KindClaim, Rung: RungEscalated, Since: t0, Recycles: 1, Seed: SrcCurrentlyProcessing},
 		{Key: key("d"), Kind: KindClaim, Rung: RungClaimed, Since: t0.Add(123456789 * time.Nanosecond), Unreleased: true, Refused: 2},
 		{Key: key("e"), Kind: KindClaim, Rung: RungStarted, Since: t0, Seed: SrcClaimSession},
+		{Key: key("f"), Kind: KindClaim, Rung: RungStarted, Since: t0, Attempts: 2, Last: t0.Add(time.Hour), AwaitsHuman: true},
 	}, Release: &ReleaseMark{Key: key("d"), Gen: 9, At: t0}, LastNudge: t0.Add(time.Second), RecycledGen: 8}
-	got, err := DecodeLadder(EncodeLadder(r))
+	text := EncodeLadder(r)
+	got, err := DecodeLadder(text)
 	if err != nil {
 		t.Fatalf("round trip: %v", err)
+	}
+	// Only a wait writes the field, so a cell with none reads the same to
+	// a build that predates it.
+	if strings.Count(text, `"awaits_human"`) != 1 || !strings.Contains(text, `"awaits_human":true`) {
+		t.Fatalf("cell %s: want awaits_human on the waiting entry alone", text)
 	}
 	want := r
 	want.Entries = sortedEntries(r.Entries)

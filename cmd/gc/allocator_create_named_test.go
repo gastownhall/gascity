@@ -1351,7 +1351,7 @@ func TestCreateEffect_NamedConcurrentWithCLIMaterializeYieldsOneCanonical(t *tes
 			store, cityPath := beads.NewMemStore(), t.TempDir()
 			seedClosedNamedRow(t, store, cfg, nil)
 			race(t, store, cityPath, func() {
-				if _, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, "mayor"); err != nil {
+				if _, err := resolveSessionIDMaterializingNamed(cityPath, cfg, store, "mayor", nil); err != nil {
 					t.Errorf("CLI materialize: %v", err)
 				}
 			})

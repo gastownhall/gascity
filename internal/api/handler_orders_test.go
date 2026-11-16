@@ -1875,3 +1875,71 @@ func TestHandleOrderCheckIgnoresAForgedRunLabel(t *testing.T) {
 		t.Fatalf("check %+v (last_run %v), want due with the real run's %s", c, c.LastRun, want)
 	}
 }
+
+// TestHandleOrderHistoryCreatedAtKeepsSubSecondPrecision pins that each
+// entry's created_at, and the run detail's, carries the run bead's full
+// creation time. gc order history --json prints created_at with sub-second
+// precision on its local route, so the API route can print the same value
+// only when the wire keeps it (#8453), and a client joining list rows to
+// detail rows sees one time per run.
+func TestHandleOrderHistoryCreatedAtKeepsSubSecondPrecision(t *testing.T) {
+	fs := newFakeState(t)
+	fs.cityBeadStore = beads.NewMemStore()
+	fs.autos = []orders.Order{{Name: "digest", Formula: "mol-digest"}}
+	created := time.Date(2026, 11, 1, 12, 30, 45, 123456789, time.UTC)
+	run, err := fs.cityBeadStore.Create(beads.Bead{
+		Title:     "order:digest",
+		Labels:    []string{"order-run:digest", "order-tracking"},
+		NoHistory: true,
+		CreatedAt: created,
+	})
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	stored, err := fs.cityBeadStore.Get(run.ID)
+	if err != nil {
+		t.Fatalf("get run: %v", err)
+	}
+	if stored.CreatedAt.Nanosecond() == 0 {
+		t.Fatalf("store dropped the sub-second creation time (%v); the test needs it", stored.CreatedAt)
+	}
+
+	h := newTestCityHandler(t, fs)
+	req := httptest.NewRequest(http.MethodGet, cityURL(fs, "/orders/history?scoped_name=digest"), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var resp struct {
+		Entries []struct {
+			CreatedAt string `json:"created_at"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(resp.Entries) != 1 {
+		t.Fatalf("len(entries) = %d, want 1; body = %s", len(resp.Entries), w.Body.String())
+	}
+	want := stored.CreatedAt.Format(time.RFC3339Nano)
+	if resp.Entries[0].CreatedAt != want {
+		t.Fatalf("created_at = %q, want %q", resp.Entries[0].CreatedAt, want)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, cityURL(fs, "/order/history/"+run.ID), nil)
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("detail status = %d, want %d; body = %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	var detail struct {
+		CreatedAt string `json:"created_at"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("unmarshal detail: %v", err)
+	}
+	if detail.CreatedAt != want {
+		t.Fatalf("detail created_at = %q, want %q, the list entry's", detail.CreatedAt, want)
+	}
+}

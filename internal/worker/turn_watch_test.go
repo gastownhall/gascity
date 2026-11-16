@@ -8,12 +8,14 @@ import (
 	"log"
 	"log/slog"
 	"os"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -126,6 +128,41 @@ func TestWatchTurnsTranscriptOverlayEndsAQuietTurn(t *testing.T) {
 	ended := receiveTurnUpdate(t, ch)
 	if ended.Err != nil || ended.History.Current.Active() || len(ended.History.Recent) != 1 || !ended.History.Recent[0].Inferred {
 		t.Fatalf("update = %+v, want the quiet turn ended, inferred", ended)
+	}
+}
+
+// The follower's fold tells the watcher how a turn stopped at an API error
+// ended, as a scan tells CurrentTurn: failed on the error, at the error.
+func TestWatchTurnsTranscriptOverlayEndsAStoppedTurnFailed(t *testing.T) {
+	idle := newIdleScript(idleAnswer{idle: true})
+	clock := newManualTurnClock(time.Date(2026, 10, 13, 6, 0, 0, 0, time.UTC))
+	s := newTurnSession(t, runtime.NewFakeProfile(runtime.ProfileTmux, idle), "claude", "")
+	s.handle.turns.timing = clock.timing()
+	const refusedAt = "2026-10-13T05:59:59.500Z"
+	path := s.writeTranscript(t, "claude", claudePrompt(claudeTurn1, "2026-10-13T05:59:59.000Z"), claudeAPIError(refusedAt, "rate_limit", 429, "API Error: 429"))
+	ageTranscript(t, path, clock.now())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := s.handle.WatchTurns(ctx)
+	if err != nil {
+		t.Fatalf("WatchTurns: %v", err)
+	}
+	if first := receiveTurnUpdate(t, ch); first.History.Current.TurnID != claudeTurn1 {
+		t.Fatalf("first update = %+v, want the open turn", first)
+	}
+	ask := clock.nextAsk(t)
+	clock.advance(3 * time.Second)
+	ask.fire <- clock.now()
+	clock.nextAsk(t)
+	ended := receiveTurnUpdate(t, ch)
+	want := runtime.EndedTurn{
+		TurnID: claudeTurn1, StartedAt: mustTurnTime(t, "2026-10-13T05:59:59.000Z"), EndedAt: mustTurnTime(t, refusedAt),
+		Status: runtime.TurnStatusFailed, Inferred: true,
+		Failure: runtime.TurnFailure{Code: "rate_limit", HTTPStatus: 429, RateLimited: true, Message: "API Error: 429"},
+	}
+	if ended.Err != nil || ended.History.Current.Active() || len(ended.History.Recent) != 1 || !reflect.DeepEqual(ended.History.Recent[0], want) {
+		t.Fatalf("update = %+v, want the stopped turn ended failed at its error %+v", ended, want)
 	}
 }
 
@@ -630,7 +667,7 @@ func TestWatchTurnsClosesWhileTheStoreStalls(t *testing.T) {
 				s.writeCompletedTurn(t, tc.provider)
 			}
 			store := newStallingTurnStore(t, s.store)
-			s.handle.manager = sessionpkg.NewManagerWithOptions(store, s.sp, sessionpkg.WithCityPath(t.TempDir()))
+			s.handle.manager = sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), s.sp, sessionpkg.WithCityPath(t.TempDir()))
 			clock := newManualTurnClock(time.Date(2026, 10, 13, 6, 0, 0, 0, time.UTC))
 			s.handle.turns.timing = clock.timing()
 			ctx, cancel := context.WithCancel(context.Background())

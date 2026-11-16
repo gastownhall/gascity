@@ -1507,3 +1507,36 @@ func TestOpenStoreAtForCityProxiedFlagOnLeavesNonProxiedScopesAlone(t *testing.T
 		})
 	}
 }
+
+// TestOpenStoreAtForCityForceProxiedNativeTakesTheLaneForThatOpenAlone: the
+// storage migration's maintenance window turns the proxied-native lane on for
+// its own opens, with the process flag off, and only for those opens.
+func TestOpenStoreAtForCityForceProxiedNativeTakesTheLaneForThatOpenAlone(t *testing.T) {
+	t.Setenv(nativeForceFallbackEnv, "")
+	t.Setenv(proxiedNativeEnv, "")
+	scope := proxiedScopeFixture(t)
+	proxied, fallback := NewMemStore(), NewMemStore()
+	open := func(force bool) StoreOpenResult {
+		t.Helper()
+		result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+			ScopeRoot:          scope,
+			Provider:           "bd",
+			PreflightChecker:   refusingPreflightChecker(t),
+			ForceProxiedNative: force,
+			OpenBdStore:        func() (Store, error) { return fallback, nil },
+			OpenProxiedStore: func(context.Context, bool) (Store, ProxiedOpenReport, error) {
+				return proxied, proxiedOpenReportFixture(), nil
+			},
+		})
+		if err != nil {
+			t.Fatalf("OpenStoreAtForCity(force=%v): %v", force, err)
+		}
+		return result
+	}
+	if got := open(true); got.Store != Store(proxied) || got.Diagnostic.Store != BeadsStoreNameNativeDoltStore {
+		t.Fatalf("forced open = %T (%s), want the proxied store on the native lane", got.Store, got.Diagnostic.Store)
+	}
+	if got := open(false); got.Store != Store(fallback) {
+		t.Fatalf("unforced open with the flag off = %T, want the bd fallback", got.Store)
+	}
+}

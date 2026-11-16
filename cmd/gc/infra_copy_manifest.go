@@ -158,6 +158,11 @@ const (
 	infraManifestScopePrefix          = "#gc:scope "
 	infraManifestScopeAnnotatedPrefix = "#gc:scope-annotated "
 	infraManifestGatePrefix           = "#gc:gate "
+	// infraManifestPayloadBlindPrefix records that the copy's source declared
+	// its protocol carries no dependency payload (#gc:source-payload-blind
+	// exec), so its edges were copied carrying none by declaration, not by a
+	// read.
+	infraManifestPayloadBlindPrefix = "#gc:source-payload-blind "
 )
 
 // infraManifestClockSlack absorbs timestamp granularity: the work store
@@ -198,6 +203,9 @@ type infraCopyManifest struct {
 	// Gates names the cross-store gates a rig import minted in the binding
 	// (#gc:gate). They are not rig rows: no containment verdict reads them.
 	Gates map[string]bool
+	// SourcePayloadBlind names the protocol a payload-blind source declared
+	// (#gc:source-payload-blind); empty for a source the copy read.
+	SourcePayloadBlind string
 }
 
 // infraManifestMatch is how one work-store row relates to the manifest.
@@ -327,9 +335,10 @@ func writeInfraCopyManifest(target infraBindingTarget, ids []string) error {
 // bound of every id created does not record (see "Legacy entries" above).
 // generation is the classifier generation the copy selected its rows with
 // (see "The classifier generation").
-func writeInfraCopyManifestRecord(target infraBindingTarget, ids []string, created map[string]time.Time, generation coordclass.Generation) error {
+// extra are annotation lines, as writeInfraCopyManifestFileAt takes them.
+func writeInfraCopyManifestRecord(target infraBindingTarget, ids []string, created map[string]time.Time, generation coordclass.Generation, extra ...string) error {
 	now := time.Now().UTC()
-	return writeInfraCopyManifestFile(target, ids, created, now, now, generation)
+	return writeInfraCopyManifestFile(target, ids, created, now, now, generation, extra...)
 }
 
 // rewriteInfraCopyManifest rewrites the manifest previous was read from as
@@ -344,7 +353,11 @@ func rewriteInfraCopyManifest(target infraBindingTarget, previous infraCopyManif
 	if writtenAt.IsZero() {
 		writtenAt = time.Now().UTC()
 	}
-	return writeInfraCopyManifestFile(target, ids, created, writtenAt, previous.LegacyBound, previous.Generation)
+	var extra []string
+	if previous.SourcePayloadBlind != "" {
+		extra = append(extra, infraManifestPayloadBlindPrefix+previous.SourcePayloadBlind)
+	}
+	return writeInfraCopyManifestFile(target, ids, created, writtenAt, previous.LegacyBound, previous.Generation, extra...)
 }
 
 // writeInfraCopyManifestFile writes the manifest. It is written atomically
@@ -353,9 +366,10 @@ func rewriteInfraCopyManifest(target infraBindingTarget, previous infraCopyManif
 // truncated manifest that reads as complete. created records each id's
 // created_at, a zero one for a bead that carries none (#gc:no-created-at).
 // legacyBound is persisted for the ids it does not record, the legacy
-// entries; zero means none is known, and they are unbounded.
-func writeInfraCopyManifestFile(target infraBindingTarget, ids []string, created map[string]time.Time, writtenAt, legacyBound time.Time, generation coordclass.Generation) error {
-	return writeInfraCopyManifestFileAt(target.Root, target.ManifestPath(), ids, created, writtenAt, legacyBound, generation, nil)
+// entries; zero means none is known, and they are unbounded. extra are
+// annotation lines, as writeInfraCopyManifestFileAt takes them.
+func writeInfraCopyManifestFile(target infraBindingTarget, ids []string, created map[string]time.Time, writtenAt, legacyBound time.Time, generation coordclass.Generation, extra ...string) error {
+	return writeInfraCopyManifestFileAt(target.Root, target.ManifestPath(), ids, created, writtenAt, legacyBound, generation, extra)
 }
 
 // writeInfraCopyManifestFileAt is writeInfraCopyManifestFile for a manifest
@@ -544,6 +558,8 @@ func readInfraCopyManifestRecordAt(path, markerPath string) (infraCopyManifest, 
 				manifest.Gates = map[string]bool{}
 			}
 			manifest.Gates[fields[0]] = true
+		case strings.HasPrefix(line, infraManifestPayloadBlindPrefix):
+			manifest.SourcePayloadBlind = strings.TrimSpace(strings.TrimPrefix(line, infraManifestPayloadBlindPrefix))
 		case strings.HasPrefix(line, infraManifestScopePrefix):
 			manifest.Scope = strings.TrimSpace(strings.TrimPrefix(line, infraManifestScopePrefix))
 		case strings.HasPrefix(line, "#"):

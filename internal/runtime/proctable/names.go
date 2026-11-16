@@ -1,14 +1,40 @@
 package proctable
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
+
+// gcProcessName is the process name packs declare for gc itself.
+const gcProcessName = "gc"
+
+// selfExecutableName is the basename of this process's executable, or "" when
+// it cannot be read. Sessions run gc as "$GC_BIN", which both session-launch
+// surfaces (cmd/gc/template_resolve.go, internal/api/session_runtime.go) set to
+// this same os.Executable(); when that read fails they set no GC_BIN, so there
+// is no executable name to alias.
+var selfExecutableName = sync.OnceValue(func() string {
+	exe, err := os.Executable()
+	if err != nil || exe == "" {
+		return ""
+	}
+	return filepath.Base(exe)
+})
 
 // ProcessNameSet builds the set of process names a liveness check accepts,
 // trimming blanks. Shared by the local tmux provider's process state and the
-// ssh provider's remote process tree, so both judge a pane alike.
+// ssh provider's remote process tree, so both judge a pane alike. The name
+// "gc" also accepts this gc executable's own basename, which differs when the
+// binary is renamed or wrapped (a Nix wrapProgram target is ".gc-wrapped").
 func ProcessNameSet(names []string) map[string]struct{} {
+	return processNameSet(names, selfExecutableName())
+}
+
+// processNameSet is ProcessNameSet with the running gc executable's basename
+// given as self ("" when unknown).
+func processNameSet(names []string, self string) map[string]struct{} {
 	set := make(map[string]struct{}, len(names))
 	for _, name := range names {
 		if name = strings.TrimSpace(name); name != "" {
@@ -17,6 +43,9 @@ func ProcessNameSet(names []string) map[string]struct{} {
 			// Keep existing provider process_names valid for both CLIs.
 			if name == "kimi" {
 				set["kimi-code"] = struct{}{}
+			}
+			if name == gcProcessName && self != "" {
+				set[self] = struct{}{}
 			}
 		}
 	}

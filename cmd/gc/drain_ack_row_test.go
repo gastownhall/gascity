@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -338,8 +339,8 @@ func runDrainAck(t *testing.T, store beads.Store, id string, ack func(drainOps, 
 // TestRuntimeDrainAckModeSwitch drives the real entry point (runtimeDrainAck:
 // mode, checkDrainAckRowAt's open and check, the release, the row CAS, the
 // env ack) over temp cities. A legacy city, including one naming v2 that this
-// build will not latch, is the frozen pre-E3 drain-ack in every case and
-// writes no row. A v2 city releases before the row ack lands and is otherwise
+// build will not latch, is the frozen pre-E3 drain-ack followed by the read-back
+// of GC_DRAIN_ACK in every case and writes no row. A v2 city releases before the row ack lands and is otherwise
 // the oracle (whose release ran on the unacked row, with the city path and
 // the session name, never the display alias), or refuses with nothing
 // written. Kills: strict-always and legacy-always mode mutants, a legacy row
@@ -390,8 +391,10 @@ func TestRuntimeDrainAckModeSwitch(t *testing.T) {
 
 				switch {
 				case !city.strict:
-					if !reflect.DeepEqual(got, oracle) || ack != noRowAck {
-						t.Fatalf("legacy drain-ack diverged from pre-E3 or wrote the row (%q):\n got %+v\nwant %+v", ack, got, oracle)
+					want := oracle
+					want.calls = append(slices.Clone(oracle.calls), runtime.Call{Method: "GetMeta", Name: tc.sessionName, Key: "GC_DRAIN_ACK"})
+					if !reflect.DeepEqual(got, want) || ack != noRowAck {
+						t.Fatalf("legacy drain-ack diverged from pre-E3 plus its read-back or wrote the row (%q):\n got %+v\nwant %+v", ack, got, want)
 					}
 				case tc.v2Refusal != "":
 					if got.code != drainAckRefused || len(got.releases)+len(got.calls)+got.pokes != 0 || ack != noRowAck ||
@@ -821,12 +824,12 @@ func TestDrainAckStrictConfig(t *testing.T) {
 		if tc.refused {
 			cfg.ChatSessions.IdleTimeout = "30m"
 		}
-		if got := drainAckStrictConfig(cfg); got != tc.want {
+		if got := drainAckStrictConfig(cfg, ""); got != tc.want {
 			t.Errorf("drainAckStrictConfig(%q, refused %v) = %v, want %v", tc.value, tc.refused, got, tc.want)
 		}
 	}
 	// An unset key that resolves to v2 (mc-dpo2b) is as strict as "v2".
-	if cfg := v2DefaultCity(nil); !drainAckStrictConfig(cfg) {
+	if cfg := v2DefaultCity(nil); !drainAckStrictConfig(cfg, "") {
 		t.Error("drainAckStrictConfig(unset, resolving to v2) = false, want true")
 	}
 	if _, strict := drainAckCityMode(t.TempDir()); strict {
@@ -842,11 +845,11 @@ func TestDrainAckStrictConfigReadsTheProcessEnv(t *testing.T) {
 	original := reconcilerModeLookupEnv
 	t.Cleanup(func() { reconcilerModeLookupEnv = original })
 	reconcilerModeLookupEnv = envOf(nil)
-	if !drainAckStrictConfig(v2DefaultCity(nil)) {
+	if !drainAckStrictConfig(v2DefaultCity(nil), "") {
 		t.Fatal("drainAckStrictConfig(default-v2 city, empty env) = false, want true")
 	}
 	reconcilerModeLookupEnv = envOf(map[string]string{"GC_BEADS_CONDITIONAL_WRITES": "off"})
-	if drainAckStrictConfig(v2DefaultCity(nil)) {
+	if drainAckStrictConfig(v2DefaultCity(nil), "") {
 		t.Error("drainAckStrictConfig(default-v2 city, GC_BEADS_CONDITIONAL_WRITES=off) = true, want the legacy fallback")
 	}
 }

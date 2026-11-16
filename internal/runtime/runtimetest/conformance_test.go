@@ -230,3 +230,17 @@ func TestRunProviderTestsWithOptionsSkipsClassifiedStartErrors(t *testing.T) {
 		},
 	})
 }
+
+// TestRunSessionTestsAcceptsDeliveredUnobservedNudge pins Nudge_RunningSession
+// to runtime.NudgeDelivered: a nudge delivered with its turn start
+// unobserved (the delivered_unobserved answer RPP-INPUT-001 allows) passes
+// the case it backs.
+func TestRunSessionTestsAcceptsDeliveredUnobservedNudge(t *testing.T) {
+	fake := runtime.NewFake()
+	cfg := runtime.Config{}
+	if err := fake.Start(context.Background(), "unobserved", cfg); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fake.NudgeErrors = map[string]error{"unobserved": runtime.ErrNudgeDeliveredUnobserved}
+	t.Run("session", func(t *testing.T) { RunSessionTests(t, fake, cfg, "unobserved") })
+}

@@ -925,7 +925,7 @@ func TestComputeNamedSessionDemandMatchesInlineBlock(t *testing.T) {
 			counts[tmpl] = r.IntN(3)
 		}
 		var gotErr, wantErr bytes.Buffer
-		got := computeNamedSessionDemand("city", f.cityPath, f.cfg, f.store, f.suspendedRigPaths, defaults, work, refs, ready, counts, &gotErr)
+		got := computeNamedSessionDemand("city", f.cityPath, f.cfg, f.store, nil, f.suspendedRigPaths, defaults, work, refs, ready, counts, &gotErr)
 		want := computeNamedSessionDemandPreRefactor("city", f.cityPath, f.cfg, f.store, f.suspendedRigPaths, defaults, work, refs, ready, counts, &wantErr)
 		// The block logs while ranging over a map, so compare log lines as a set.
 		if !reflect.DeepEqual(got, want) || !reflect.DeepEqual(sortedLines(gotErr.String()), sortedLines(wantErr.String())) {

@@ -131,9 +131,11 @@ func TestWorkerSiteSendersDialNothing(t *testing.T) {
 		t.Errorf("pokeSupervisor = %v, want errWorkerSiteNoController", err)
 	}
 	pingNudgeWakeSocket(cityDir)
-	var pinOut bytes.Buffer
-	pokeSessionPinController(nil, cityDir, "s-1", "gc session pin", &pinOut)
-	assertWorkerSitePokeNotice(t, pinOut.String())
+	for _, created := range []bool{false, true} {
+		var pinOut bytes.Buffer
+		pokeSessionPinController(nil, cityDir, session.Info{ID: "s-1"}, "gc session pin", created, &pinOut)
+		assertWorkerSitePokeNotice(t, pinOut.String())
+	}
 
 	if got := dials.Load(); got != 0 {
 		t.Errorf("worker-site senders dialed %d times, want 0", got)

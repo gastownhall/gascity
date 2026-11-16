@@ -382,6 +382,42 @@ func TestUntilUnblockedWithNoUnblockedRowAnswersTheWholeWindow(t *testing.T) {
 	}
 }
 
+// TestUntilUnblockedDropsAnExcludedTypeBeforeTheCut pins that --exclude-type
+// drops a row before the cut, not after it. The crash-recovery tier excludes
+// type message this way: a session's claimed mail wisp has no blocker, so as
+// the first unblocked row it would end the answer, and the claim behind it
+// would never be read (#5815). The read without the flag is the control.
+func TestUntilUnblockedDropsAnExcludedTypeBeforeTheCut(t *testing.T) {
+	store := beads.NewMemStore()
+	inProgress := StatusInProgress
+	// Mail carries no priority, which the ready order reads as 2, so it sorts
+	// ahead of the P3 claim.
+	mail := mustCreate(t, store, beads.Bead{Title: "claimed mail", Type: "message", Ephemeral: true})
+	if err := store.Update(mail.ID, beads.UpdateOpts{Status: &inProgress}); err != nil {
+		t.Fatalf("claim %s: %v", mail.ID, err)
+	}
+	claim := inProgressRow(t, store, "resumable claim", 3)
+	legs := []Leg{testLeg("city", store)}
+
+	q := inProgressWindow(20)
+	rows, err := ReadUntilUnblocked(context.Background(), legs, q)
+	if err != nil {
+		t.Fatalf("Read(--until-unblocked): %v", err)
+	}
+	if got := rowIDs(rows); !slices.Equal(got, []string{mail.ID}) {
+		t.Fatalf("control: Read(--until-unblocked) = %v, want the answer ended at the unblocked mail row %s", got, mail.ID)
+	}
+
+	q.ExcludeTypes = []string{"message"}
+	rows, err = ReadUntilUnblocked(context.Background(), legs, q)
+	if err != nil {
+		t.Fatalf("Read(--until-unblocked --exclude-type=message): %v", err)
+	}
+	if got := rowIDs(rows); !slices.Equal(got, []string{claim.ID}) {
+		t.Fatalf("Read(--until-unblocked --exclude-type=message) = %v, want the claim %s behind the dropped mail", got, claim.ID)
+	}
+}
+
 // failingDepListStore fails DepList for one row.
 type failingDepListStore struct {
 	*beads.MemStore

@@ -13,7 +13,9 @@ package main
 // formula mints the infrastructure-class steps.
 
 import (
+	"context"
 	"encoding/json"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -393,4 +395,66 @@ func TestGcBdBurnJudgeCoversAProxiedServerCascade(t *testing.T) {
 	}
 
 	checkForwardedWispDelete(t, in, must, realBdPour(t, must, "wisp"))
+}
+
+// TestGcBdSplitJudgesMetadataAsTheStoresReadItBack pins the fact the
+// --metadata judges rest on against the pinned bd: bd stores a JSON null
+// inside --metadata as JSON null, the bd CLI reads it back as "" and the
+// native Dolt store as the text "null" (beads.MetadataReadings, in that
+// order), and the two readings classify the row differently. The judge
+// refuses the create and the update that would write it.
+func TestGcBdSplitJudgesMetadataAsTheStoresReadItBack(t *testing.T) {
+	ws, _, must := realBdWorkspace(t)
+	null := `{"gc.root_bead_id":null}`
+	notFound := splitTestDeps(nil, func(string) (beads.Bead, bdReadResult) { return beads.Bead{}, bdReadNotFound })
+	createArgv := []string{"create", "--title", "x", "--metadata", null, "--json"}
+	if g := bdClassFlipGuard(splitGuardTestCity(), ws, createArgv, notFound); g.refusal == "" {
+		t.Fatal("the judge forwarded a create whose metadata a native Dolt store reads as graph-class")
+	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(must(createArgv...), &created); err != nil || created.ID == "" {
+		t.Fatalf("decoding the create: %v", err)
+	}
+	var plain struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(must("create", "--title", "y", "--json"), &plain); err != nil || plain.ID == "" {
+		t.Fatalf("decoding the create: %v", err)
+	}
+	updateArgv := []string{"update", plain.ID, "--metadata", null, "--json"}
+	readPlain := splitTestDeps(nil, func(id string) (beads.Bead, bdReadResult) {
+		if id == plain.ID {
+			return realBdShow(t, must, id), bdReadFound
+		}
+		return beads.Bead{}, bdReadNotFound
+	})
+	if g := bdClassFlipGuard(splitGuardTestCity(), ws, updateArgv, readPlain); g.refusal == "" {
+		t.Fatal("the judge forwarded an update whose metadata a native Dolt store reads as graph-class")
+	}
+	must(updateArgv...)
+
+	native, err := beads.OpenNativeDoltStoreAtWithoutAmbientEnv(context.Background(), ws)
+	if err != nil {
+		t.Fatalf("opening the workspace natively: %v", err)
+	}
+	t.Cleanup(func() { _ = native.CloseStore() })
+	want, err := beads.MetadataReadings([]byte(null))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{created.ID, plain.ID} {
+		cli := realBdShow(t, must, id)
+		nat, err := native.Get(id)
+		if err != nil {
+			t.Fatalf("native read of %s: %v", id, err)
+		}
+		if !maps.Equal(cli.Metadata, want[0]) || !maps.Equal(nat.Metadata, want[1]) {
+			t.Errorf("%s reads back %q through the bd CLI and %q natively, want %q and %q", id, cli.Metadata, nat.Metadata, want[0], want[1])
+		}
+		if coordclass.Classify(cli) != coordclass.ClassWork || coordclass.Classify(nat) != coordclass.ClassGraph {
+			t.Errorf("%s is %s through the bd CLI and %s natively, want work and graph", id, coordclass.Classify(cli), coordclass.Classify(nat))
+		}
+	}
 }

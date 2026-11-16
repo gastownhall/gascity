@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
@@ -58,6 +59,10 @@ const (
 	simRigLeg  = "rig-a"
 )
 
+// simLeafOverride, when set, is every sim's leaf that its options leave
+// unset (reconcile_sim_exec_test.go reruns scenarios on it).
+var simLeafOverride func(*simProvider) runtime.Provider
+
 // simStaleEvents lets a step deliver an event older than its row's backing:
 // a reorder, or a duplicate after a newer write (v5 §11 H2).
 // GC_V2_SIM_NO_STALE_EVENTS=1 turns it off.
@@ -85,9 +90,11 @@ type simRuntime struct {
 }
 
 // simStart and simKill are the spy's records of a Start and of a
-// destructive call, with the runtime it hit.
+// destructive call, with the runtime it hit. A Start records the command it
+// launched and the work dir it launched in.
 type simStart struct {
 	Name, ID, Token              string
+	Command, WorkDir             string
 	FreshOnly, External, Created bool
 }
 
@@ -296,7 +303,7 @@ func (p *simProvider) Start(_ context.Context, name string, cfg runtime.Config) 
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	s := simStart{Name: name, ID: cfg.Env["GC_SESSION_ID"], Token: cfg.Env["GC_INSTANCE_TOKEN"], FreshOnly: cfg.FreshOnly, External: p.external}
+	s := simStart{Name: name, ID: cfg.Env["GC_SESSION_ID"], Token: cfg.Env["GC_INSTANCE_TOKEN"], Command: cfg.Command, WorkDir: cfg.WorkDir, FreshOnly: cfg.FreshOnly, External: p.external}
 	err := p.nextStart
 	p.nextStart = nil
 	if err == nil && p.rts[name] != nil {
@@ -396,6 +403,7 @@ type sim struct {
 	obsClk   *clock.Fake
 	cfg      *config.City
 	sp       *simProvider
+	leaf     runtime.Provider // the provider v2 runs on: sp, or sp as a profiled backend (simOpts.profile)
 	legs     []*simLeg
 	env      gatherEnv
 	p        *planner
@@ -463,7 +471,9 @@ type sim struct {
 // simOpts scripts a run: rows replaces the seeded rows, and the other fields
 // seed one fault into the code under test through a test seam.
 type simOpts struct {
-	rows     func(s *sim) (city, rig []beads.Bead)
+	rows func(s *sim) (city, rig []beads.Bead)
+	// deps seeds the city leg's dependencies before its cache is primed.
+	deps     []beads.Dep
 	inflight func(*inflightMap) plannerInflight
 	specs    func(map[string]effectSpec)
 	// rowLock replaces runTx's session mutation lock, unobserved.
@@ -472,6 +482,9 @@ type simOpts struct {
 	// noPendingCreates seeds no pending creates (reconcile_sim_pending_test.go):
 	// the floored corpus keeps its floor members' acks in reach.
 	noPendingCreates bool
+	// leaf, when set, is the provider v2 runs on, built over the sim's
+	// runtime (reconcile_sim_exec_test.go); otherwise it runs on sp itself.
+	leaf func(*simProvider) runtime.Provider
 }
 
 func newSim(t *testing.T, seed uint64, o simOpts) *sim {
@@ -482,6 +495,13 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 	}
 	s.lag = s.rng.IntN(2) == 0
 	s.sp = &simProvider{Fake: runtime.NewFake(), rts: make(map[string]*simRuntime), changed: make(map[string]uint64), now: s.clk.Now}
+	s.leaf = s.sp
+	if o.leaf == nil {
+		o.leaf = simLeafOverride
+	}
+	if o.leaf != nil {
+		s.leaf = o.leaf(s.sp)
+	}
 	s.cfg = workerCity(3)
 	s.cfg.Daemon.PatrolInterval, s.cfg.Daemon.ProbeConcurrency = simPatrol.String(), intPtr(1)
 	s.cfg.Rigs = []config.Rig{{Name: simRigLeg, Path: t.TempDir()}}
@@ -492,7 +512,11 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 	s.noPendingCreates = o.noPendingCreates
 	city, rig := o.rows(s)
 	for name, rows := range map[string][]beads.Bead{simCityLeg: city, simRigLeg: rig} {
-		m := beads.NewMemStoreFrom(0, rows, nil)
+		var deps []beads.Dep
+		if name == simCityLeg {
+			deps = o.deps
+		}
+		m := beads.NewMemStoreFrom(0, rows, deps)
 		if err := beads.StampOpenedStore(m, "MemStore", gate.Require, false, nil, nil); err != nil {
 			t.Fatalf("stamp: %v", err)
 		}
@@ -509,7 +533,7 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 
 	s.lane = newRuntimeInventoryLane(simPatrol, io.Discard, "sim")
 	s.lane.clock, s.lane.cache = s.obsClk, NewObservationCache(s.obsClk, 2*simPatrol, "sim")
-	s.envNow = &reconcileEnv{Gen: 1, Cfg: s.cfg, SP: s.sp}
+	s.envNow = &reconcileEnv{Gen: 1, Cfg: s.cfg, SP: s.leaf}
 	s.env = gatherEnv{
 		CityPath: t.TempDir(), CityName: "test-city",
 		Env:          func() *reconcileEnv { return s.envNow }, // a config drift swaps it (reconcile_sim_drift_test.go)
@@ -853,10 +877,10 @@ func (s *sim) inventory() {
 	l := s.lane
 	s.obsClk.Time = s.clk.Now()
 	l.seq++
-	if !sameInventoryProvider(s.sp, l.lastProvider) {
-		l.lastProvider, l.providerGen = s.sp, l.providerGen+1
+	if !sameInventoryProvider(s.leaf, l.lastProvider) {
+		l.lastProvider, l.providerGen = s.leaf, l.providerGen+1
 	}
-	listing, _ := l.listBounded(context.Background(), s.sp) // the fake answers at once
+	listing, _ := l.listBounded(context.Background(), s.leaf) // the fake answers at once
 	s.sp.listed()
 	h := heldListing{listing: listing, started: s.clk.Now(), version: s.sp.version}
 	if s.lag && s.rng.IntN(2) == 0 {
@@ -927,7 +951,7 @@ var externalOps = []struct {
 		s.setMeta(l, b.ID, "quarantined_until", s.rel(time.Duration(1+s.rng.IntN(120))*time.Second), "sleep_reason", "quarantine")
 	}},
 	{"kill", func(s *sim, l *simLeg, b beads.Bead) { // gc session kill: the fence, then the stop
-		if _, err := session.WriteKillFence(l.backing, b.ID, s.clk.Now()); err != nil && !errors.Is(err, session.ErrKillFenceSuperseded) {
+		if _, err := session.WriteKillFence(beadstest.Sessions(l.backing), b.ID, s.clk.Now()); err != nil && !errors.Is(err, session.ErrKillFenceSuperseded) {
 			s.t.Fatal(err)
 		}
 		_ = s.sp.Stop(b.Metadata["session_name"])

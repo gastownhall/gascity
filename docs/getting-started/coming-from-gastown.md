@@ -65,10 +65,11 @@ The five tables map Gas Town onto Gas City one domain at a time. Every entry on 
 | Run a one-shot job | A formula or exec order, dispatched on demand | [Tutorial 07 — Orders](/tutorials/07-orders), [Tutorial 05 — Formulas](/tutorials/05-formulas) |
 | Watch live agent output | `gc session attach <name>` (interactive) or `gc session peek <name>` (snapshot) | [`gc session attach`](/reference/cli#gc-session-attach) |
 
-A first work cycle — start the city, hand the mayor a task, watch it land:
+A first work cycle — create the city, hand the mayor a task, watch it land:
 
 ```bash
-gc start                                  # boots the city under the supervisor, reconciles
+gc init ~/my-city --template gascity --default-provider claude   # creates and starts the city
+cd ~/my-city
 gc sling mayor "add a /health endpoint"   # creates a task bead from text, routes it to mayor
 gc session list                           # see what's running (mayor, pools, …)
 gc session attach mayor                    # interactive live view of the mayor working

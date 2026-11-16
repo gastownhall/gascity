@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/platform/livefile"
 )
 
 // backfillConcurrency bounds how many watchers may actively read archive/rotating
@@ -147,10 +149,10 @@ type segmentReader struct {
 // touches windows a live backfill can still need (and the monotonic cursor makes
 // a re-listed duplicate harmless).
 func openSegmentReader(src backfillSource) (*segmentReader, error) {
-	f, err := os.Open(src.path)
+	f, err := livefile.Open(src.path)
 	kind := src.kind
 	if err != nil && os.IsNotExist(err) && src.fallbackPath != "" {
-		f, err = os.Open(src.fallbackPath)
+		f, err = livefile.Open(src.fallbackPath)
 		kind = sourceArchive
 	}
 	if err != nil {

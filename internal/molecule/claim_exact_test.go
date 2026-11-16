@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 func strp(s string) *string { return &s }
@@ -47,7 +48,7 @@ func TestClaimExact_FirstClaimFromEmptyGeneration(t *testing.T) {
 		Assignee: strp("worker-9"),
 	}
 
-	got, outcome, err := ClaimExact(store, b.ID, want, "", onSuccess)
+	got, outcome, err := ClaimExact(beadstest.GraphMolecule(store), b.ID, want, "", onSuccess)
 	if err != nil {
 		t.Fatalf("ClaimExact: %v", err)
 	}
@@ -79,7 +80,7 @@ func TestClaimExact_PreconditionMismatchFailsClosedWithoutWrite(t *testing.T) {
 	}
 	onSuccess := beads.UpdateOpts{Assignee: strp("worker-9")}
 
-	got, outcome, err := ClaimExact(store, b.ID, want, "", onSuccess)
+	got, outcome, err := ClaimExact(beadstest.GraphMolecule(store), b.ID, want, "", onSuccess)
 	if err != nil {
 		t.Fatalf("ClaimExact: %v", err)
 	}
@@ -112,7 +113,7 @@ func TestClaimExact_EachPreconditionFieldMismatchesIndependently(t *testing.T) {
 			store := beads.NewMemStore()
 			b := mustCreateExactClaimBead(t, store)
 
-			got, outcome, err := ClaimExact(store, b.ID, tc.want, "", beads.UpdateOpts{Assignee: strp("worker-9")})
+			got, outcome, err := ClaimExact(beadstest.GraphMolecule(store), b.ID, tc.want, "", beads.UpdateOpts{Assignee: strp("worker-9")})
 			if err != nil {
 				t.Fatalf("ClaimExact: %v", err)
 			}
@@ -138,7 +139,7 @@ func TestClaimExact_ReservedGenerationKeyInOnSuccessIsRejected(t *testing.T) {
 		Metadata: map[string]string{beadmeta.ClaimGenerationMetadataKey: "999"},
 	}
 
-	got, outcome, err := ClaimExact(store, b.ID, ClaimExactPreconditions{}, "", onSuccess)
+	got, outcome, err := ClaimExact(beadstest.GraphMolecule(store), b.ID, ClaimExactPreconditions{}, "", onSuccess)
 	if !errors.Is(err, ErrClaimGenerationReserved) {
 		t.Fatalf("err = %v, want ErrClaimGenerationReserved", err)
 	}
@@ -175,7 +176,7 @@ func TestClaimExact_NonPositiveStoredGenerationFailsClosed(t *testing.T) {
 				t.Fatalf("create bead: %v", err)
 			}
 
-			got, outcome, err := ClaimExact(store, b.ID, ClaimExactPreconditions{}, bad, beads.UpdateOpts{Assignee: strp("worker-9")})
+			got, outcome, err := ClaimExact(beadstest.GraphMolecule(store), b.ID, ClaimExactPreconditions{}, bad, beads.UpdateOpts{Assignee: strp("worker-9")})
 			if err == nil {
 				t.Fatalf("expected an error for stored generation %q", bad)
 			}
@@ -196,7 +197,7 @@ func TestClaimExact_StaleGenerationFailsClosedWithoutFallback(t *testing.T) {
 	store := beads.NewMemStore()
 	b := mustCreateExactClaimBead(t, store)
 
-	first, outcome, err := ClaimExact(store, b.ID, ClaimExactPreconditions{}, "", beads.UpdateOpts{Assignee: strp("worker-1")})
+	first, outcome, err := ClaimExact(beadstest.GraphMolecule(store), b.ID, ClaimExactPreconditions{}, "", beads.UpdateOpts{Assignee: strp("worker-1")})
 	if err != nil || outcome != ClaimExactClaimed {
 		t.Fatalf("setup claim failed: outcome=%q err=%v", outcome, err)
 	}
@@ -206,7 +207,7 @@ func TestClaimExact_StaleGenerationFailsClosedWithoutFallback(t *testing.T) {
 	}
 
 	// Retry with the now-stale fromGeneration ("") instead of the current "1".
-	got, outcome, err := ClaimExact(store, b.ID, ClaimExactPreconditions{}, "", beads.UpdateOpts{Assignee: strp("worker-2")})
+	got, outcome, err := ClaimExact(beadstest.GraphMolecule(store), b.ID, ClaimExactPreconditions{}, "", beads.UpdateOpts{Assignee: strp("worker-2")})
 	if err != nil {
 		t.Fatalf("ClaimExact: %v", err)
 	}
@@ -233,13 +234,13 @@ func TestClaimExact_RetryAtLandedGenerationIsStaleNotReclaimed(t *testing.T) {
 	b := mustCreateExactClaimBead(t, store)
 
 	onSuccess := beads.UpdateOpts{Assignee: strp("worker-1")}
-	first, outcome, err := ClaimExact(store, b.ID, ClaimExactPreconditions{}, "", onSuccess)
+	first, outcome, err := ClaimExact(beadstest.GraphMolecule(store), b.ID, ClaimExactPreconditions{}, "", onSuccess)
 	if err != nil || outcome != ClaimExactClaimed {
 		t.Fatalf("setup claim failed: outcome=%q err=%v", outcome, err)
 	}
 	firstGen := first.Metadata[beadmeta.ClaimGenerationMetadataKey]
 
-	got, outcome, err := ClaimExact(store, b.ID, ClaimExactPreconditions{}, "", onSuccess)
+	got, outcome, err := ClaimExact(beadstest.GraphMolecule(store), b.ID, ClaimExactPreconditions{}, "", onSuccess)
 	if err != nil {
 		t.Fatalf("ClaimExact retry: %v", err)
 	}
@@ -259,7 +260,7 @@ func TestClaimExact_UnsupportedStoreFailsClosedNoFallback(t *testing.T) {
 	store.DisableConditionalWrites = true
 	b := mustCreateExactClaimBead(t, store)
 
-	got, outcome, err := ClaimExact(store, b.ID, ClaimExactPreconditions{}, "", beads.UpdateOpts{Assignee: strp("worker-9")})
+	got, outcome, err := ClaimExact(beadstest.GraphMolecule(store), b.ID, ClaimExactPreconditions{}, "", beads.UpdateOpts{Assignee: strp("worker-9")})
 	if err == nil {
 		t.Fatal("expected an error when the store cannot support conditional writes")
 	}
@@ -276,7 +277,7 @@ func TestClaimExact_UnsupportedStoreFailsClosedNoFallback(t *testing.T) {
 
 func TestClaimExact_UnknownBeadReturnsError(t *testing.T) {
 	store := beads.NewMemStore()
-	_, _, err := ClaimExact(store, "does-not-exist", ClaimExactPreconditions{}, "", beads.UpdateOpts{})
+	_, _, err := ClaimExact(beadstest.GraphMolecule(store), "does-not-exist", ClaimExactPreconditions{}, "", beads.UpdateOpts{})
 	if err == nil {
 		t.Fatal("expected an error for an unknown bead id")
 	}
@@ -300,7 +301,7 @@ func TestClaimExact_ConcurrentExactClaimsExactlyOneWinner(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			assignee := "worker-" + strconv.Itoa(i)
-			_, outcome, err := ClaimExact(store, b.ID, ClaimExactPreconditions{}, "", beads.UpdateOpts{Assignee: strp(assignee)})
+			_, outcome, err := ClaimExact(beadstest.GraphMolecule(store), b.ID, ClaimExactPreconditions{}, "", beads.UpdateOpts{Assignee: strp(assignee)})
 			if err != nil {
 				t.Errorf("attempt %d: ClaimExact: %v", i, err)
 				return
@@ -346,7 +347,7 @@ type raceBeforeUpdateIfMatchStore struct {
 func (s *raceBeforeUpdateIfMatchStore) UpdateIfMatch(id string, expectedRevision int64, opts beads.UpdateOpts) error {
 	if !s.raced && id == s.targetID {
 		s.raced = true
-		_, outcome, err := ClaimExact(s.MemStore, id, ClaimExactPreconditions{}, s.racedFromGen, beads.UpdateOpts{Assignee: strp("worker-B")})
+		_, outcome, err := ClaimExact(beadstest.GraphMolecule(s.MemStore), id, ClaimExactPreconditions{}, s.racedFromGen, beads.UpdateOpts{Assignee: strp("worker-B")})
 		if err != nil {
 			return fmt.Errorf("test setup: racer B claim: %w", err)
 		}
@@ -375,7 +376,7 @@ func TestClaimExact_StaleWriterCannotOverwriteLaterWinnersEffects(t *testing.T) 
 		racedFromGen: "", // the generation both A and B observe before either writes
 	}
 
-	gotA, outcomeA, errA := ClaimExact(racer, b.ID, ClaimExactPreconditions{}, "", beads.UpdateOpts{Assignee: strp("worker-A")})
+	gotA, outcomeA, errA := ClaimExact(beadstest.GraphMolecule(racer), b.ID, ClaimExactPreconditions{}, "", beads.UpdateOpts{Assignee: strp("worker-A")})
 	if errA != nil {
 		t.Fatalf("ClaimExact (A): %v", errA)
 	}
@@ -412,7 +413,7 @@ func TestClaimExact_MaxInt64GenerationFailsClosed(t *testing.T) {
 		t.Fatalf("create bead: %v", err)
 	}
 
-	got, outcome, err := ClaimExact(store, b.ID, ClaimExactPreconditions{}, strconv.FormatInt(math.MaxInt64, 10), beads.UpdateOpts{Assignee: strp("worker-9")})
+	got, outcome, err := ClaimExact(beadstest.GraphMolecule(store), b.ID, ClaimExactPreconditions{}, strconv.FormatInt(math.MaxInt64, 10), beads.UpdateOpts{Assignee: strp("worker-9")})
 	if err == nil {
 		t.Fatal("expected an error advancing math.MaxInt64")
 	}

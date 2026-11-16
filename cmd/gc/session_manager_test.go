@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -11,10 +12,10 @@ import (
 
 func newSessionManagerWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City) *session.Manager {
 	if cfg == nil {
-		return session.NewManagerWithOptions(store, sp, session.WithCityPath(cityPath))
+		return session.NewManagerWithOptions(beadstest.Sessions(store), sp, session.WithCityPath(cityPath))
 	}
 	rigContext := currentRigContext(cfg)
-	return session.NewManagerWithOptions(store, sp, session.WithCityPath(cityPath), session.WithTransportPolicyResolver(func(template, provider string) (string, bool) {
+	return session.NewManagerWithOptions(beadstest.Sessions(store), sp, session.WithCityPath(cityPath), session.WithTransportPolicyResolver(func(template, provider string) (string, bool) {
 		agentCfg, ok := resolveAgentIdentity(cfg, template, rigContext)
 		if ok {
 			resolved, err := config.ResolveProvider(

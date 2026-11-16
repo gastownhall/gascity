@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -30,7 +31,7 @@ func TestControllerStateExposesTheRunningLaneHost(t *testing.T) {
 	}
 
 	f := newLaneFixture(t)
-	f.cfg.Ops.Authoritative = []string{"message"}
+	f.cfg.Ops.Authoritative = config.OpsKinds("message")
 	cs = &controllerState{cityBeadStore: f.store, cfg: f.cfg, sp: f.sp, cityPath: f.dir, beadsQuiescent: new(atomic.Bool)}
 	ctx, cancel := context.WithCancel(context.Background())
 	h := cs.startConversationLaneHost(ctx, reconcilerLegacy)
@@ -74,7 +75,7 @@ func TestControllerAwaitConversationOpReturnsAtClose(t *testing.T) {
 		t.Fatalf("await with no host = %v, want errNoLaneHost", err)
 	}
 	f := newLaneFixture(t)
-	f.cfg.Ops.Authoritative = []string{"message", "interrupt"}
+	f.cfg.Ops.Authoritative = config.OpsKinds("message", "interrupt")
 	cs := &controllerState{cityBeadStore: f.store, cfg: f.cfg, sp: f.sp, cityPath: f.dir, beadsQuiescent: new(atomic.Bool)}
 	ctx, cancel := context.WithCancel(context.Background())
 	h := cs.startConversationLaneHost(ctx, reconcilerLegacy)

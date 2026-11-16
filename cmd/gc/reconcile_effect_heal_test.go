@@ -4,11 +4,14 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/auto"
 	"github.com/gastownhall/gascity/internal/session"
@@ -220,6 +223,64 @@ func TestHealRefusalsAlertAtTheCap(t *testing.T) {
 				}
 				if got := len(f.alerts(t)); got != want {
 					t.Fatalf("after %d refusals: %d alerts, want %d", i, got, want)
+				}
+			}
+		})
+	}
+}
+
+// Kills (PR-3b review SHOULD 2) a peek hold kept silent: a start's recycle
+// or A12's classification whose refusals in a row reach the backoff's cap
+// with the latest a peek-error alerts, naming the session, the peek error
+// and the remedy, whatever the causes before it, and again every
+// peekHeldRepeat refusals while it stays one; never for another cause or
+// kind.
+func TestPeekHoldAlertsAtTheCap(t *testing.T) {
+	peekErr := errors.New("exec provider pack peek s-gc-1: backend unavailable")
+	peek := func(n int) []string { return slices.Repeat([]string{causePeekError}, n) }
+	for _, c := range []struct {
+		name   string
+		kind   string
+		causes []string
+		alerts []int // the refusal numbers that alert
+	}{
+		{"start", intentStart, peek(14), []int{6, 12}},
+		{"zombie", intentZombie, peek(8), []int{6}},
+		{"peek-error after mixed causes", intentStart, append(slices.Repeat([]string{causeLivenessUnknown}, 6), peek(8)...), []int{7, 13}},
+		{"another cause", intentStart, slices.Repeat([]string{causeLivenessUnknown}, 8), nil},
+		{"another kind", intentStop, peek(8), nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newObserveFixture(t)
+			want := 0
+			for i, cause := range c.causes {
+				f.clk.Advance(10 * time.Minute) // past the last backoff
+				f.p.settlements.post(settlement{Key: rowKeyOf("gc-1"), Kind: c.kind, Outcome: settledRefused, Cause: cause, Err: peekErr})
+				f.p.drainSettlements(f.clk.Now())
+				if slices.Contains(c.alerts, i+1) {
+					want++
+				}
+				alerts := f.alerts(t)
+				if len(alerts) != want {
+					t.Fatalf("after %d refusals: alerts %v, want %d %s", i+1, alerts, want, alertPeekHeld)
+				}
+				for _, a := range alerts {
+					if a != alertPeekHeld {
+						t.Fatalf("alert %s, want %s", a, alertPeekHeld)
+					}
+				}
+			}
+			if want == 0 {
+				return
+			}
+			for _, e := range f.ev.Events {
+				if e.Type != events.ReconcilerAlert {
+					continue
+				}
+				for _, part := range []string{"gc-1", peekErr.Error(), "gc session suspend gc-1", "without reading its screen"} {
+					if !strings.Contains(e.Message, part) {
+						t.Fatalf("alert %q does not name %q", e.Message, part)
+					}
 				}
 			}
 		})
@@ -442,6 +503,7 @@ func TestOnlyFreshKindsRestOnTheRuntime(t *testing.T) {
 		{"creating heal", newHealCase(t, livenessGone, desireNone, "state", "creating"), intentRowHealFresh, restRuntime},
 		{"dead-runtime heal", newHealCase(t, livenessGone, desireSleep, "state", "active"), intentRowHealFresh, restRuntime},
 		{"awake heal", ownRuntimeCase(t, "tok-3", "state", "asleep", "sleep_reason", "idle"), intentRowHealFresh, restRuntime},
+		{"parked clear", parkedClearCase(t), intentRowHealFresh, restRuntime},
 		{"stranded clear", newHealCase(t, livenessAlive, desireKeep, "state", "active", strandedEventEmittedKey, rowAt(-time.Hour)), intentRowHeal, 0},
 		{"claim clear", newHealCase(t, livenessAlive, desireKeep, "state", "active", "pending_create_claim", "true"), intentRowHeal, 0},
 	} {
@@ -516,6 +578,7 @@ func TestFreshHealDecideMatchesItsArmOnTheFreshRead(t *testing.T) {
 		"asleep, own":  func() *healCase { return ownRuntimeCase(t, "tok-3", "state", "asleep", "sleep_reason", "idle") },
 		"squatted":     func() *healCase { return squatterCase(t, foreignEnv, desireNone) },
 		"ownerless":    func() *healCase { return squatterCase(t, ownerlessEnv, desireNone) },
+		"parked":       func() *healCase { return parkedClearCase(t) },
 	}
 	for rowName, row := range rows {
 		for rtName, sp := range runtimes {

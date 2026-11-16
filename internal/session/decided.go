@@ -170,7 +170,7 @@ func (m *Manager) killPremiseHolds(ctx context.Context, id string) error {
 	if d.info.ID != id {
 		return fmt.Errorf("%w: session %q: the kill was decided on session %q", ErrKillPremiseMoved, id, d.info.ID)
 	}
-	holds, err := NewStore(beads.SessionStore{Store: m.store}).Holds(d)
+	holds, err := NewStore(m.store).Holds(d)
 	if err != nil {
 		return err
 	}

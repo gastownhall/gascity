@@ -441,7 +441,9 @@ type cancelRunResult struct {
 // open workflow roots of its tree it closes, deepest first and the run root
 // last.
 type runCancelTarget struct {
-	store     beads.Store
+	// store is the writable handle on the workflow leg the run root was
+	// found on, strict as the raw store was (workflowLegs).
+	store     beads.ResidentStore
 	root      beads.Bead
 	workflows []string
 }
@@ -485,21 +487,13 @@ type runCancelTarget struct {
 func (s *Server) cancelRun(runID string, interrupt func(holders []string)) (cancelRunResult, error) {
 	var res cancelRunResult
 	var targets []runCancelTarget
-	for _, info := range s.workflowStores() {
-		if info.store == nil {
-			continue
-		}
-		// Relic leg (S4 debt) on a scope store: a city or rig ledger holds these
-		// rows only as pre-split copies, so beads.RelicRead counts the read as
-		// debt; on the class binding the same read is legitimate.
-		// One leg of the workflowStores federation (graph, city, rigs): the
-		// root probes miss on every leg but the one that owns the run.
-		var roots []beads.Bead
-		err := beads.RelicRead(func() error {
-			var findErr error
-			roots, findErr = findWorkflowRoots(info.store, runID)
-			return findErr
-		})
+	legs, resident := workflowLegs(s.state.Stores(), s.state.CityName(), workflowLegQuery{})
+	for _, info := range legs {
+		// One leg of the workflowStores federation (graph, city, rigs), read
+		// in its plan role (a scope leg of a split city is a relic leg, S4
+		// debt): the root probes miss on every leg but the one that owns the
+		// run.
+		roots, err := findWorkflowRoots(info.leg.Reader, runID)
 		if err != nil {
 			return res, err
 		}
@@ -508,7 +502,7 @@ func (s *Server) cancelRun(runID string, interrupt func(holders []string)) (canc
 			if isClosedStatus(root.Status) {
 				continue // already terminal — nothing to wind down
 			}
-			targets = append(targets, runCancelTarget{store: info.store, root: root})
+			targets = append(targets, runCancelTarget{store: resident(info), root: root})
 		}
 	}
 	if len(targets) == 0 {
@@ -539,7 +533,8 @@ func (s *Server) cancelRun(runID string, interrupt func(holders []string)) (canc
 
 	for _, target := range targets {
 		for _, rootID := range target.workflows {
-			n, err := cancelWorkflowRoot(target.store, rootID)
+			// target.store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+			n, err := cancelWorkflowRoot(beads.GraphMolecule(beads.GraphStore{Store: target.store}), rootID)
 			res.closed += n
 			if err != nil {
 				return res, err
@@ -555,7 +550,7 @@ func (s *Server) cancelRun(runID string, interrupt func(holders []string)) (canc
 // teardown tail. A nested drain item root is canceled exactly like the run
 // root: it is a workflow root in its own right, so its own controls read
 // gc.cancel_requested off it and its own teardown tail still runs.
-func cancelWorkflowRoot(store beads.Store, rootID string) (int, error) {
+func cancelWorkflowRoot(store beads.MoleculeTarget, rootID string) (int, error) {
 	exclude, err := molecule.TeardownTailExclusion(store, rootID)
 	if err != nil {
 		return 0, err
@@ -580,7 +575,8 @@ func cancelWorkflowRoot(store beads.Store, rootID string) (int, error) {
 // gc.root_bead_id) rather than from a further subtree read, which the close
 // makes for itself, so that no read beyond the walk delays the interrupts.
 func planRunCancel(target *runCancelTarget) ([]string, error) {
-	tree, err := sourceworkflow.WorkflowTree(target.store, target.root.ID)
+	// target.store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+	tree, err := sourceworkflow.WorkflowTree(beads.GraphMolecule(beads.GraphStore{Store: target.store}), target.root.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -651,8 +647,8 @@ func (s *Server) interruptRunHolders(ctx context.Context, runID string, holders 
 			unique = append(unique, holder)
 		}
 	}
-	store := s.state.SessionsBeadStore().Store
-	if store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		for _, holder := range unique {
 			fail(holder, errors.New("no session store configured"))
 		}
@@ -732,7 +728,7 @@ func holderHasNoTurn(info session.Info, sp runtime.Provider) bool {
 // so a graph.v2-only root — one the Run resource lists but that lacks the
 // gc.kind=workflow marker — is still cancellable, not a false 404. A non-NotFound
 // store error is returned so the caller reports a 5xx.
-func findWorkflowRoots(store beads.Store, runID string) ([]beads.Bead, error) {
+func findWorkflowRoots(store beads.FederatedReader, runID string) ([]beads.Bead, error) {
 	var roots []beads.Bead
 	seen := map[string]bool{}
 	add := func(root beads.Bead) {

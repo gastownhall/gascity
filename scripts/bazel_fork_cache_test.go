@@ -6,6 +6,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -31,17 +32,13 @@ import (
 const (
 	bazelForkCacheLine = "build --config=fork-cache"
 	// zstd cache transfers: only the anonymous fork cache (rbe-cache :8443)
-	// can advertise a compressor, so only fork-cache may ask for one, and
-	// only while cache-zstd-probe.sh finds it advertised (a probe, not a
-	// repository variable: fork pull_request runs see no vars). Trusted
-	// remote-exec and rbe-fork never: their schedulers advertise none, and
-	// Bazel then refuses the remote. bazel.yml's lane step bazelCacheZstdStep
-	// appends bazelCacheZstdLine to .bazelrc.local in the lanes that use
-	// fork-cache.
+	// advertises a compressor, so only fork-cache asks for one, in .bazelrc
+	// itself (contributors, pre-push and fork CI alike). Trusted remote-exec
+	// and rbe-fork never: their schedulers advertise none, and Bazel then
+	// refuses the remote. cache-zstd-probe.sh is the operator's check that
+	// rbe-cache still advertises it (TestCacheProbes); nothing in CI runs it.
 	bazelCacheZstdLine     = "build:fork-cache --remote_cache_compression"
 	bazelCacheZstdProbe    = "tools/rbe/cache-zstd-probe.sh"
-	bazelCacheZstdStep     = "Fork cache zstd transfers"
-	bazelCacheZstdStepIf   = "needs.rbe.outputs.mode == 'cache' || steps.bazel-fallback.outcome == 'success'"
 	forkCacheMaxTimeoutSec = 15
 	// The farm admits 16 connections per source IP and Blacksmith runners
 	// share egress IPs.
@@ -68,11 +65,17 @@ func runWorkflowStepScript(t *testing.T, dir, script string, env map[string]stri
 }
 
 // bazelCacheZstdProbeStub stands in for cache-zstd-probe.sh: it counts its
-// runs and passes only for BAZEL_TEST_PROBE=zstd (rbe-cache advertising
-// zstd). TestCacheProbes runs the real probe.
+// runs, says why on stderr as the real probe does, and passes only for
+// BAZEL_TEST_PROBE=zstd (rbe-cache advertising zstd). TestCacheProbes runs
+// the real probe.
 const bazelCacheZstdProbeStub = `#!/usr/bin/env bash
 echo probe >>probe.log
-[ "${BAZEL_TEST_PROBE:-}" = zstd ]
+if [ "${BAZEL_TEST_PROBE:-}" = zstd ]; then
+	echo "rbe-cache zstd probe: stub advertises zstd; fork-cache can use it" >&2
+	exit 0
+fi
+echo "rbe-cache zstd probe: stub not advertised; fork-cache builds run locally" >&2
+exit 1
 `
 
 // bazelCacheRRCProbeStub stands in for cache-rrc-probe.sh: it counts its
@@ -138,19 +141,17 @@ func runBazelRCLocalStepProbes(t *testing.T, script string, env map[string]strin
 	return run
 }
 
-// runBazelRCLocalStep is runBazelRCLocalStepProbes for the zstd probe alone:
-// the .bazelrc.local lines and how often the step ran that probe.
-func runBazelRCLocalStep(t *testing.T, script string, env map[string]string) ([]string, int) {
+// runBazelRCLocalStep is runBazelRCLocalStepProbes for the .bazelrc.local
+// lines alone.
+func runBazelRCLocalStep(t *testing.T, script string, env map[string]string) []string {
 	t.Helper()
-	run := runBazelRCLocalStepProbes(t, script, env)
-	return run.lines, run.zstdProbes
+	return runBazelRCLocalStepProbes(t, script, env).lines
 }
 
 // bazelRCLocalLaneSteps are the only steps anywhere in bazel.yml that may
-// write .bazelrc.local, all in the lane job: the fork cache's zstd line and
-// the remote repo contents cache readers, trusted and fork-cache
-// (bazel_rrc_test.go).
-var bazelRCLocalLaneSteps = []string{bazelCacheZstdStep, bazelRRCReadStep, bazelForkRRCReadStep}
+// write .bazelrc.local, all in the lane job: the remote repo contents cache
+// readers, trusted and fork-cache (bazel_rrc_test.go).
+var bazelRCLocalLaneSteps = []string{bazelRRCReadStep, bazelForkRRCReadStep}
 
 // bazelRCLocalLaneStep returns bazel.yml's lane step name (one of
 // bazelRCLocalLaneSteps), after checking that no step outside
@@ -179,41 +180,6 @@ func bazelRCLocalLaneStep(t *testing.T, name string) multiLaneStep {
 		t.Fatalf("%s: the lane job has no %q step", bazelMultiLaneWorkflow, name)
 	}
 	return *found
-}
-
-// bazelCacheZstdLaneStep returns bazel.yml's lane step that writes the fork
-// cache's zstd line to .bazelrc.local.
-func bazelCacheZstdLaneStep(t *testing.T) multiLaneStep {
-	t.Helper()
-	return bazelRCLocalLaneStep(t, bazelCacheZstdStep)
-}
-
-// TestBazelForkCacheZstdStep: the lane step that may ask rbe-cache for zstd
-// runs exactly where the lane uses fork-cache (mode cache, or a fork lane
-// that fell back to it), reads no repository variable (fork runs see none),
-// probes once, and writes bazelCacheZstdLine only when the probe passes.
-func TestBazelForkCacheZstdStep(t *testing.T) {
-	step := bazelCacheZstdLaneStep(t)
-	if step.If != bazelCacheZstdStepIf {
-		t.Errorf("%q runs if %q; want %q (the lanes setup-bazel attaches fork-cache to)", step.Name, step.If, bazelCacheZstdStepIf)
-	}
-	for k, v := range step.Env {
-		if strings.Contains(v, "vars.") || strings.Contains(v, "secrets.") {
-			t.Errorf("%q env %s = %q; fork runs see no vars or secrets", step.Name, k, v)
-		}
-	}
-	if want := "if bash " + bazelCacheZstdProbe + "; then"; strings.Count(step.Run, want) != 1 {
-		t.Errorf("%q does not gate the fork cache's zstd line on %q once", step.Name, want)
-	}
-	for probe, want := range map[string][]string{"": nil, "zstd": {bazelCacheZstdLine}} {
-		got, probes := runBazelRCLocalStep(t, step.Run, map[string]string{"BAZEL_TEST_PROBE": probe})
-		if probes != 1 {
-			t.Errorf("probe %q: the step probed rbe-cache %d times, want once", probe, probes)
-		}
-		if !slices.Equal(got, want) {
-			t.Errorf("probe %q: .bazelrc.local %q, want %q", probe, got, want)
-		}
-	}
 }
 
 const (
@@ -245,10 +211,12 @@ esac
 // cache with no local-result uploads, both local fallbacks (without them a
 // closed endpoint fails every action in GetCapabilities), the failure
 // circuit breaker and a short --remote_timeout (a slow endpoint), few
-// connections, no credentials, and an executor reset to none: a machine whose
-// own rc (~/.bazelrc, /etc/bazel.bazelrc) names an executor would otherwise
-// execute remotely against the read-only cache, whose CAS refuses the input
-// upload (FindMissingBlobs PERMISSION_DENIED). No .bazelrc line may select
+// connections, zstd transfers (rbe-cache serves zstd; without the flag
+// contributors read identity), no credentials, and an executor reset to
+// none: a machine whose own rc (~/.bazelrc, /etc/bazel.bazelrc) names an
+// executor would otherwise execute remotely against the read-only cache,
+// whose CAS refuses the input upload (FindMissingBlobs PERMISSION_DENIED).
+// No .bazelrc line may select
 // it: setup-bazel's rc (bazel.yml mode cache) and the pre-push suite's
 // command line do.
 func checkBazelForkCacheConfig(bazelrc string) []error {
@@ -279,9 +247,6 @@ func checkBazelForkCacheConfig(bazelrc string) []error {
 	}
 	for _, flag := range opts {
 		name, value, _ := strings.Cut(flag, "=")
-		if strings.Contains(name, "remote_cache_compression") {
-			errs = append(errs, errors.New("fork-cache sets "+flag+"; bazel.yml's lanes add it while rbe-cache advertises zstd, so rollback needs no revert"))
-		}
 		if (name == "--remote_executor" && value != "") || strings.HasPrefix(name, "--tls_") || strings.HasSuffix(name, "_header") ||
 			strings.HasPrefix(name, "--credential_helper") || strings.HasPrefix(name, "--google_") || strings.HasPrefix(name, "--bes_") {
 			errs = append(errs, errors.New("fork-cache sets "+flag+"; the fork cache is anonymous and executes nothing remotely"))
@@ -301,6 +266,8 @@ func checkBazelForkCacheConfig(bazelrc string) []error {
 		// each refusal counts against the circuit breaker checked below.
 		"build_event_json_file_path_conversion":   false,
 		"build_event_binary_file_path_conversion": false,
+		// rbe-cache serves zstd; without it contributors read identity.
+		"remote_cache_compression": true,
 	} {
 		if got, set := forkCacheBoolFinal(opts, name); !set || got != want {
 			form := "--" + name
@@ -365,6 +332,7 @@ func TestBazelForkCacheConfig(t *testing.T) {
 		"build:fork-cache --nobuild_event_json_file_path_conversion\n" +
 		"build:fork-cache --nobuild_event_binary_file_path_conversion\n" +
 		"build:fork-cache --remote_max_connections=4\n" +
+		"build:fork-cache --remote_cache_compression\n" +
 		"build:remote-exec --remote_timeout=3600\n" +
 		"try-import %workspace%/.bazelrc.local\n"
 	if errs := checkBazelForkCacheConfig(good); len(errs) != 0 {
@@ -395,7 +363,8 @@ func TestBazelForkCacheConfig(t *testing.T) {
 		"header":              good + "build:fork-cache --remote_header=x-api-key=abc\n",
 		"cache header":        good + "build:fork-cache --remote_cache_header=x-api-key=abc\n",
 		"credential helper":   good + "build:fork-cache --credential_helper=/x\n",
-		"zstd in .bazelrc":    good + "build:fork-cache --remote_cache_compression\n",
+		"no zstd":             drop("build:fork-cache --remote_cache_compression"),
+		"zstd off":            good + "build:fork-cache --noremote_cache_compression\n",
 		"plain build expands": good + "build --config=fork-cache\n",
 		"common expands":      good + "common --config fork-cache\n",
 		"config expands":      good + "build:ci --config=fork-cache\n",
@@ -407,14 +376,28 @@ func TestBazelForkCacheConfig(t *testing.T) {
 }
 
 // TestBazelRemoteCacheCompressionOnlyForkCache: --remote_cache_compression
-// appears in one place, the lane's zstd step's fork-cache line behind the
-// probe. No .bazelrc config and no other workflow or action may set it,
-// since every other remote (rbe-west's trusted schedulers on :443, rbe-fork
-// on :8444) advertises no compressor and Bazel then refuses the remote.
+// appears in one place, .bazelrc's fork-cache line. No other .bazelrc config
+// and no workflow, action, git hook (the pre-push suite is
+// .githooks/lib/push-suite.sh), rbe tool or make target may set it, since
+// every other remote (rbe-west's trusted schedulers on :443, rbe-fork on
+// :8444) advertises no compressor and Bazel then refuses the remote.
 func TestBazelRemoteCacheCompressionOnlyForkCache(t *testing.T) {
 	root := repoRoot(t)
-	files := []string{".bazelrc"}
-	for _, pattern := range []string{".github/workflows/*.yml", ".github/workflows/*.yaml", ".github/actions/*/action.yml", ".github/actions/*/action.yaml"} {
+	files := []string{".bazelrc", "Makefile"}
+	for _, dir := range []string{".githooks", "tools/rbe"} {
+		err := filepath.WalkDir(filepath.Join(root, dir), func(path string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return err
+			}
+			rel, err := filepath.Rel(root, path)
+			files = append(files, rel)
+			return err
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", dir, err)
+		}
+	}
+	for _, pattern := range []string{".github/workflows/*.yml", ".github/workflows/*.yaml", ".github/actions/*/*"} {
 		m, err := filepath.Glob(filepath.Join(root, pattern))
 		if err != nil {
 			t.Fatal(err)
@@ -435,12 +418,8 @@ func TestBazelRemoteCacheCompressionOnlyForkCache(t *testing.T) {
 			}
 		}
 	}
-	want := "echo '" + bazelCacheZstdLine + "' >> .bazelrc.local"
-	if len(found) != 1 || !strings.HasPrefix(found[0], bazelMultiLaneWorkflow+":") || !strings.HasSuffix(found[0], want) {
-		t.Errorf("--remote_cache_compression set at %q; want only bazel.yml's %s", found, want)
-	}
-	if step := bazelCacheZstdLaneStep(t); !strings.Contains(step.Run, want) {
-		t.Errorf("%q does not write %s", step.Name, want)
+	if len(found) != 1 || !strings.HasPrefix(found[0], ".bazelrc:") || !strings.HasSuffix(found[0], ": "+bazelCacheZstdLine) {
+		t.Errorf("--remote_cache_compression set at %q; want only .bazelrc's %s", found, bazelCacheZstdLine)
 	}
 }
 
@@ -686,9 +665,9 @@ func cacheZstdProbeCases(t *testing.T, serve capsServer) {
 		if stdout != "" {
 			t.Errorf("probe wrote stdout %q; the rc step would write it to .bazelrc.local", stdout)
 		}
-		verdict := "; the fork cache stays identity\n"
+		verdict := "; fork-cache builds run locally\n"
 		if want {
-			verdict = "; the fork cache uses zstd\n"
+			verdict = "; fork-cache can use it\n"
 		}
 		if !strings.HasPrefix(stderr, "rbe-cache zstd probe: ") || !strings.HasSuffix(stderr, verdict) {
 			t.Errorf("probe stderr %q; want one verdict line ending %q", stderr, verdict)

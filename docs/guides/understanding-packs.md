@@ -112,7 +112,7 @@ The same URL also opens the pack directory in a browser.
 
 The Gas City pack expects the binding `gc`: its skills surface as `gc.<skill>`
 (for example `gc.mayor`) and its commands as `gc gc <command>`. Cities created
-by gc v1.4.x bound it as `[imports.gascity]`; `gc doctor --fix` renames that
+by older releases bound it as `[imports.gascity]`; `gc doctor --fix` renames that
 key to `gc` (see the `gascity-pack-binding` check in
 [Troubleshooting](/getting-started/troubleshooting)).
 

@@ -30,6 +30,7 @@ go_test(
     deps = [
         "//internal/beadmeta",
         "//internal/beads",
+        "//internal/beads/beadstest",
         "//internal/events",
         "//internal/testenv",
     ],

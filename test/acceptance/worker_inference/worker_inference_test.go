@@ -1992,7 +1992,7 @@ func leadingWhitespace(line string) string {
 }
 
 func closeLiveSessionsByTemplate(cityDir, template string) error {
-	sessionsOut, commandErr := runGCWithTimeout(liveControlTimeout, liveEnv, cityDir, "session", "list", "--json")
+	sessionsOut, commandErr := runGCWithTimeout(liveControlTimeout, liveSessionListEnv(), cityDir, "session", "list", "--json")
 	sessions, parseErr := parseSessionListJSON(sessionsOut)
 	if parseErr != nil {
 		if isBootstrapSessionListError(parseErr) {
@@ -2464,7 +2464,7 @@ func startManagedInferenceSession(
 		statusNow, _ := runGCWithTimeout(10*time.Second, liveEnv, c.Dir, "status")
 		statusOut = strings.TrimSpace(statusNow)
 
-		sessionsOut, sessionsErr := runGCWithTimeout(liveControlTimeout, liveEnv, c.Dir, "session", "list", "--json")
+		sessionsOut, sessionsErr := runGCWithTimeout(liveControlTimeout, liveSessionListEnv(), c.Dir, "session", "list", "--json")
 		sessionListJSON = strings.TrimSpace(sessionsOut)
 		if sessionsErr != nil {
 			statusOut = strings.TrimSpace(statusOut + "\nSESSIONS_ERR: " + sessionsErr.Error())
@@ -2849,7 +2849,7 @@ func runFreshInitSlingWorkForTarget(t *testing.T, provider, slingTarget, prompt,
 			lastStatus = strings.TrimSpace(statusOut + "\nERR: " + statusErr.Error())
 		}
 
-		sessionsOut, sessionsErr := runGCWithTimeout(liveControlTimeout, liveEnv, c.Dir, "session", "list", "--json")
+		sessionsOut, sessionsErr := runGCWithTimeout(liveControlTimeout, liveSessionListEnv(), c.Dir, "session", "list", "--json")
 		lastSessionJSON = strings.TrimSpace(sessionsOut)
 		if sessionsErr != nil {
 			lastSessionJSON = strings.TrimSpace(sessionsOut + "\nERR: " + sessionsErr.Error())
@@ -4138,7 +4138,7 @@ func waitForSessionFreshReset(cityDir, identity, previousSessionKey string) (ses
 }
 
 func sessionStateSnapshot(cityDir, identity, expectedSessionName string, requireRunning bool) (sessionJSON, string, error) {
-	sessionsOut, sessionsErr := runGCWithTimeout(10*time.Second, liveEnv, cityDir, "session", "list", "--json")
+	sessionsOut, sessionsErr := runGCWithTimeout(10*time.Second, liveSessionListEnv(), cityDir, "session", "list", "--json")
 	lastSessions := strings.TrimSpace(sessionsOut)
 	if sessionsErr != nil {
 		statusOut, statusErr := runGCWithTimeout(10*time.Second, liveEnv, cityDir, "status")
@@ -5646,6 +5646,14 @@ type beadJSON struct {
 	Title    string         `json:"title"`
 	Labels   []string       `json:"labels"`
 	Metadata map[string]any `json:"metadata"`
+}
+
+// liveSessionListEnv is liveEnv pinned to the local `gc session list` read
+// (GC_NO_API=1). A supervisor-hosted city otherwise lists through the
+// supervisor API, which redacts session_key, and these checks read it: the
+// fresh-reset check needs it to rotate.
+func liveSessionListEnv() *helpers.Env {
+	return liveEnv.Clone().With("GC_NO_API", "1")
 }
 
 type sessionJSON struct {

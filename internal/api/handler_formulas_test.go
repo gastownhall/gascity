@@ -786,6 +786,55 @@ title = "Inspect {{convoy_id}}"
 	}
 }
 
+func TestFormulaPreviewResolvesConvoyDerivedDefaultOnGetAndPost(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+
+	state := newFakeState(t)
+	state.cityBeadStore = beads.NewMemStore()
+	formulaDir := t.TempDir()
+	state.cfg.FormulaLayers.City = []string{formulaDir}
+
+	writeTestFormula(t, formulaDir, "graph-subject", `
+formula = "graph-subject"
+version = 2
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[vars.subject]
+default = "{{convoy_id}}"
+
+[[steps]]
+id = "inspect"
+title = "Inspect {{subject}}"
+`)
+	convoy, err := state.cityBeadStore.Create(beads.Bead{Title: "input", Type: "convoy"})
+	if err != nil {
+		t.Fatalf("Create(convoy): %v", err)
+	}
+	h := newTestCityHandler(t, state)
+
+	get := httptest.NewRequest(http.MethodGet, cityURL(state, "/formulas/graph-subject?scope_kind=city&scope_ref=test-city&target="+convoy.ID), nil)
+	post := httptest.NewRequest(http.MethodPost, cityURL(state, "/formulas/graph-subject/preview"),
+		bytes.NewBufferString(fmt.Sprintf(`{"scope_kind":"city","scope_ref":"test-city","target":%q}`, convoy.ID)))
+	post.Header.Set("Content-Type", "application/json")
+	post.Header.Set("X-GC-Request", "true")
+	for _, req := range []*http.Request{get, post} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status = %d, want 200: %s", req.Method, rec.Code, rec.Body.String())
+		}
+		var detail formulaDetailResponse
+		if err := json.NewDecoder(rec.Body).Decode(&detail); err != nil {
+			t.Fatalf("Decode(%s detail): %v", req.Method, err)
+		}
+		if len(detail.Steps) != 1 || detail.Steps[0].Title != "Inspect "+convoy.ID {
+			t.Fatalf("%s steps = %+v, want the default resolved against the target convoy", req.Method, detail.Steps)
+		}
+	}
+}
+
 func TestFormulaDetailGraphV2TargetlessAcceptsAgentTarget(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 

@@ -129,10 +129,10 @@ func (g *graphStores) storeFor(id string) (beads.Store, error) {
 
 // memberClasses names the classes a convoy expansion spans. Naming a class is
 // what makes it participate; an unnamed Graph leaves members as placeholders.
-func (g *graphStores) memberClasses(convoyStore beads.Store) convoycore.MemberClasses {
+func (g *graphStores) memberClasses(convoyStore beads.WorkStore) convoycore.MemberClasses {
 	// A constructor INPUT, not a residency answer: it names the legs convoycore
 	// resolves against, and storeFor above is this type's actual answer.
-	return convoycore.MemberClasses{Convoy: convoyStore, Work: []beads.Store{g.work}, Graph: g.graph} // residency:allow — constructor input to convoycore.MemberClasses
+	return convoycore.MemberClasses{Convoy: convoyStore, Work: []beads.WorkStore{{Store: g.work}}, Graph: beads.GraphStore{Store: g.graph}} // residency:allow — constructor input to convoycore.MemberClasses
 }
 
 // openRigAwareStore opens a bead store, routing to the correct rig directory
@@ -341,7 +341,7 @@ func resolveGraphInput(stores *graphStores, args []string, stderr io.Writer) ([]
 		if beads.IsContainerType(b.Type) {
 			// Membership edges come from the convoy's own store; members
 			// resolve across both legs.
-			children, err := convoycore.MembersIn(stores.memberClasses(store), b.ID, false)
+			children, err := convoycore.MembersIn(stores.memberClasses(beads.WorkStore{Store: store}), b.ID, false)
 			if err != nil {
 				return nil, fmt.Errorf("expanding %s %s: %w", b.Type, b.ID, err)
 			}

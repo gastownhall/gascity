@@ -341,40 +341,36 @@ tcp_check() {
 }
 
 # run_with_timeout runs "$@" and sends it TERM once timeout_seconds elapse
-# (after 1s when sleep rejects the duration), returning its status. The
-# watchdog's sleep inherits every caller descriptor above 2 (op_start's fd 9
-# lock), so it must not outlive the call: the TERM that stops the watchdog
-# KILLs and reaps that sleep. KILL because a child that has forked but not
-# yet exec'd sleep runs the inherited trap and would swallow TERM. `stopped`
-# covers a TERM that lands before sleep_pid is set.
+# (after 1s when timeout_seconds is not a plain number of seconds), returning
+# its status. The timer is a `sleep` started by this function, so the caller
+# can KILL it the moment the command exits: it inherits every caller
+# descriptor above 2 (op_start's fd 9 lock) and must not outlive the call.
+# The stopper in front of it in the pipeline blocks writing into the pipe
+# until the sleep exits, then TERMs the command if it is still running. The
+# stopper holds those descriptors too: `wait` on the pipeline's pid waits for
+# both of its processes (bash and dash alike), so neither outlives the call.
+# No step depends on a process acting on a signal it traps: on macOS a
+# watchdog subshell that trapped the caller's TERM sometimes stayed blocked on
+# its sleep for the whole timeout.
 run_with_timeout() {
     local timeout_seconds="$1"
     shift
+    case "$timeout_seconds" in
+        '' | . | *[!0-9.]* | *.*.*) timeout_seconds=1 ;;
+    esac
     "$@" &
     local cmd_pid=$!
-    (
-        stopped=
-        sleep_pid=
-        trap 'stopped=1; [ -z "$sleep_pid" ] || kill -s KILL "$sleep_pid" 2>/dev/null || true' TERM
-        for duration in "$timeout_seconds" 1; do
-            [ -z "$stopped" ] || break
-            sleep "$duration" 2>/dev/null &
-            sleep_pid=$!
-            [ -z "$stopped" ] || kill -s KILL "$sleep_pid" 2>/dev/null || true
-            if wait "$sleep_pid"; then
-                sleep_pid=
-                break
-            fi
-            wait "$sleep_pid" 2>/dev/null || true
-            sleep_pid=
-        done
-        [ -n "$stopped" ] || kill "$cmd_pid" 2>/dev/null || true
-    ) </dev/null >/dev/null 2>&1 &
-    local watchdog_pid=$!
+    # shellcheck disable=SC2216 # sleep is the pipe's reader on purpose
+    {
+        trap '' PIPE
+        while printf '%8191s\n' ''; do :; done
+        ! kill -0 "$cmd_pid" || kill "$cmd_pid" || true
+    } </dev/null 2>/dev/null | sleep "$timeout_seconds" >/dev/null 2>&1 &
+    local sleep_pid=$!
     local status=0
     wait "$cmd_pid" || status=$?
-    kill "$watchdog_pid" 2>/dev/null || true
-    wait "$watchdog_pid" 2>/dev/null || true
+    kill -s KILL "$sleep_pid" 2>/dev/null || true
+    wait "$sleep_pid" 2>/dev/null || true
     return "$status"
 }
 
@@ -2233,6 +2229,12 @@ data_dir: "$DATA_DIR"
 # 2.6.0+. Scheduled compaction (gc dolt compact) still handles history
 # flattening — see #1918, #1200 for that lineage. Override via city.toml
 # [dolt] auto_gc_enabled or GC_DOLT_AUTO_GC_ENABLED.
+#
+# Hazard: Dolt's generational GC makes a separate pass over dolt_ignore'd
+# tables and the working set that no table-level retention policy protects, so
+# auto-GC can destroy dolt_ignore'd data (ga-vrq5pu: mail and wisps). A city
+# that keeps state in dolt_ignore'd tables should override auto_gc_enabled to
+# false.
 behavior:
   auto_gc_behavior:
     enable: $auto_gc_enabled
@@ -2355,14 +2357,19 @@ check_read_only() {
 }
 
 load_health_check_from_gc() {
-    local gc_bin host output key value
+    local gc_bin host output key value health_db="${1:-}" health_data_dir="${2:-}"
     host=$(connect_host)
     gc_bin=$(resolve_gc_helper_bin)
     [ -n "$gc_bin" ] || return 1
-    output=$("$gc_bin" dolt-state health-check --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --check-read-only </dev/null 2>/dev/null) || return 1
+    set -- --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --check-read-only
+    [ -n "$health_db" ] && set -- "$@" --database "$health_db"
+    [ -n "$health_data_dir" ] && set -- "$@" --data-dir "$health_data_dir"
+    output=$("$gc_bin" dolt-state health-check "$@" </dev/null 2>/dev/null) || return 1
     GC_HEALTH_QUERY_READY="false"
     GC_HEALTH_READ_ONLY=""
     GC_HEALTH_CONNECTION_COUNT=""
+    GC_HEALTH_DATABASE_READY=""
+    GC_HEALTH_DATABASE_ERROR=""
     while IFS="$(printf '	')" read -r key value; do
         case "$key" in
             query_ready)
@@ -2374,11 +2381,75 @@ load_health_check_from_gc() {
             connection_count)
                 GC_HEALTH_CONNECTION_COUNT="$value"
                 ;;
+            database_ready)
+                GC_HEALTH_DATABASE_READY="$value"
+                ;;
+            database_error)
+                GC_HEALTH_DATABASE_ERROR="$value"
+                ;;
         esac
     done <<EOF
 $output
 EOF
     return 0
+}
+
+# city_health_database prints the city scope's Dolt database: the one every
+# city-level bead read and write goes through. A server can answer SQL while
+# this database is missing from its catalog or its default branch head will
+# not resolve, so health has to prove the database itself, not just the
+# server. Empty until the city scope names a database.
+city_health_database() {
+    read_existing_dolt_database "$GC_CITY_PATH/.beads/metadata.json"
+}
+
+# city_health_data_dir prints the data dir that must hold the city database's
+# repository on disk. Only a gc-managed local server keeps its data under
+# DATA_DIR; an external endpoint, loopback or not, keeps its databases
+# somewhere this script cannot see, so the on-disk check is skipped for it.
+city_health_data_dir() {
+    is_remote && return 0
+    [ "$(beads_config_value "$GC_CITY_PATH/.beads/config.yaml" gc.endpoint_origin)" = "managed_city" ] || return 0
+    printf '%s\n' "$DATA_DIR"
+}
+
+# check_city_database is the helper-less form of the database checks
+# `gc dolt-state health-check --database` runs: the repository is on disk
+# (managed servers only), the database is in the catalog, and its default
+# branch head resolves. Prints the failure and returns 1 when any fails.
+check_city_database() {
+    local db="$1" data_dir="$2" host output head db_lower entry entry_name found
+    if [ -n "$data_dir" ] && [ ! -d "$data_dir/$db/.dolt" ]; then
+        # Dolt matches database names case-insensitively, so a repository
+        # directory that differs only in case counts.
+        found=false
+        db_lower=$(printf '%s' "$db" | tr '[:upper:]' '[:lower:]')
+        for entry in "$data_dir"/*/; do
+            [ -d "$entry" ] || continue
+            entry_name=$(basename "$entry")
+            if [ "$(printf '%s' "$entry_name" | tr '[:upper:]' '[:lower:]')" = "$db_lower" ] && [ -d "$data_dir/$entry_name/.dolt" ]; then
+                found=true
+                break
+            fi
+        done
+        if [ "$found" != "true" ]; then
+            echo "database \"$db\" absent from data dir $data_dir"
+            return 1
+        fi
+    fi
+    host=$(connect_host)
+    if ! output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+        sql -r csv -q "USE $(quote_dolt_identifier "$db"); SELECT DOLT_HASHOF('HEAD') AS head" 2>&1); then
+        echo "database \"$db\" default branch head unresolvable: $(printf '%s' "$output" | tr '\n' ' ')"
+        return 1
+    fi
+    head=$(printf '%s\n' "$output" | tail -n 1 | tr -d '[:space:]')
+    case "$head" in
+        ''|*[!0-9a-v]*) ;;
+        *) [ "${#head}" -eq 32 ] && return 0 ;;
+    esac
+    echo "database \"$db\" default branch head unresolvable: unexpected head \"$head\""
+    return 1
 }
 
 load_wait_ready_from_gc() {
@@ -2736,7 +2807,8 @@ find_dolt_pid() {
 # Resolution order:
 #   1. State file has a reachable port + PID is alive → reuse it
 #   2. GC_DOLT_PORT env var (initial/operator override) → use it
-#   3. Hash GC_CITY_PATH into range 10000–60000, probe with lsof, increment until free
+#   3. State file has a port nothing listens on (its server died) → reuse it
+#   4. Hash GC_CITY_PATH into range 10000–60000, probe with lsof, increment until free
 allocate_port() {
     local gc_bin helper_port
     gc_bin=$(resolve_gc_helper_bin)
@@ -2767,7 +2839,23 @@ allocate_port() {
         return
     fi
 
-    # 3. Deterministic hash of city path, probe until free.
+    # 3. The port a dead server recorded, when it is a valid TCP port (a
+    # decimal integer from 1 to 65535) and free. Running sessions pin the port
+    # they were spawned with, so a restart must come back on it.
+    if [ -f "$STATE_FILE" ]; then
+        local recorded_port
+        recorded_port=$(load_state_field port)
+        case "$recorded_port" in
+            ''|*[!0-9]*|0*) recorded_port="" ;;
+        esac
+        if [ -n "$recorded_port" ] && [ "$recorded_port" -le 65535 ] &&
+            ! run_lsof -nP -iTCP:"$recorded_port" -sTCP:LISTEN >/dev/null 2>&1; then
+            echo "$recorded_port"
+            return
+        fi
+    fi
+
+    # 4. Deterministic hash of city path, probe until free.
     local hash_val
     hash_val=$(printf '%s' "$GC_CITY_PATH" | cksum | awk '{print $1 % 50000 + 10000}')
     local port="$hash_val"
@@ -3243,6 +3331,91 @@ finish_interrupted_journal_recovery() {
     return "$missing"
 }
 
+# jsonl_archive_dir prints the git repository the core jsonl-export order
+# archives each bead scope into, resolved the way that order resolves it:
+# GC_JSONL_ARCHIVE_REPO (relative to the city, where the order runs); else
+# the core pack's archive when it is a git repository; else the archive a
+# city migrated from the gastown maintenance pack, or from before packs,
+# kept; else the core pack's path.
+jsonl_archive_dir() {
+    local archive_runtime archive_dir
+    if [ -n "${GC_JSONL_ARCHIVE_REPO:-}" ]; then
+        case "$GC_JSONL_ARCHIVE_REPO" in
+            /*) printf '%s\n' "$GC_JSONL_ARCHIVE_REPO" ;;
+            *) printf '%s\n' "$GC_CITY_PATH/$GC_JSONL_ARCHIVE_REPO" ;;
+        esac
+        return 0
+    fi
+    archive_runtime="${GC_CITY_RUNTIME_DIR:-$GC_CITY_PATH/.gc/runtime}"
+    for archive_dir in "$archive_runtime/packs/core/jsonl-archive" \
+        "$archive_runtime/packs/maintenance/jsonl-archive" \
+        "$GC_CITY_PATH/.gc/jsonl-archive"; do
+        if [ -d "$archive_dir/.git" ]; then
+            printf '%s\n' "$archive_dir"
+            return 0
+        fi
+    done
+    printf '%s\n' "$archive_runtime/packs/core/jsonl-archive"
+}
+
+# print_manual_journal_recovery_steps tells the operator how to recover
+# database $1 alone after start-time recovery failed closed: $2 is the
+# recovery timestamp for the staging and aside names and $3 the URL to
+# restore from, the one the manual restore command names, or <url>. The data
+# dir is shared by every database the managed server hosts, so the steps
+# never act on $DATA_DIR itself and name each sibling database to leave in
+# place. Like the runbook's Step 4 block, they restore into a staging
+# directory next to $DATA_DIR and register the store's backups again on the
+# restored copy there, since a restored copy has none; only then do they move
+# the store aside and the copy in. An operator pastes them as one block, which
+# runs on past a failed command, so each command checks for itself that the
+# ones before it worked: a failed restore removes the staging directory and
+# the partial copy dolt leaves in it; the swap runs only when the restored
+# copy is there and the aside path is free; the store moves back when the
+# copy cannot move in; and `gc start` runs only with the database in place,
+# so it never finds the database missing and initializes it empty.
+# The JSONL fallback names the export the core jsonl-export order keeps of a
+# bead store, which it files under the database's SQL name (Dolt serves
+# directory my-db as my_db).
+print_manual_journal_recovery_steps() {
+    local manual_db="$1" manual_ts="$2" manual_url="$3" manual_state manual_dir manual_name manual_backup manual_siblings="" manual_jsonl
+    local manual_staging="$DATA_DIR.restore.$manual_ts" manual_aside="$PACK_STATE_DIR/corrupt-aside/$manual_db.$manual_ts" manual_store="$DATA_DIR/$manual_db"
+    for manual_dir in "$DATA_DIR"/*/; do
+        [ -d "$manual_dir/.dolt" ] || continue
+        manual_name=$(basename "$manual_dir")
+        [ "$manual_name" = "$manual_db" ] && continue
+        manual_siblings="$manual_siblings $manual_name"
+    done
+    manual_state="$manual_store/.dolt/repo_state.json"
+    manual_jsonl="$(jsonl_archive_dir)/$(printf '%s' "$manual_db" | tr '-' '_')/issues.jsonl"
+    if [ -n "$manual_siblings" ]; then
+        journal_recovery_note "$DATA_DIR is shared; leave these databases in place:$manual_siblings"
+    fi
+    journal_recovery_note "do not move, delete or re-create $DATA_DIR itself"
+    journal_recovery_note "to restore '$manual_db' alone, from a backup that holds a copy of '$manual_db': restore it into a staging directory, register its backups again there (a restored copy has none), then swap it in for the store"
+    journal_recovery_note "each command checks that the ones before it worked, so $manual_store stays in place until the swap: a failed restore removes $manual_staging (then try another backup), the swap runs only when the restored copy is there, and the store moves back from $manual_aside when the copy cannot move in"
+    journal_recovery_note "\"gc start\" runs only with $manual_store in place; if it does not run, move $manual_aside or the restored copy $manual_staging/$manual_db to $manual_store first"
+    journal_recovery_note "  gc stop"
+    journal_recovery_note "  mkdir \"$manual_staging\""
+    journal_recovery_note "  (cd \"$manual_staging\" && dolt backup restore '$manual_url' $manual_db) || rm -rf \"$manual_staging\""
+    for manual_name in default "${manual_db}-backup"; do
+        [ -f "$manual_state" ] && backup_registry_has_backup "$manual_state" "$manual_name" || continue
+        manual_backup=$(backup_registry_backup_url "$manual_state" "$manual_name")
+        [ -n "$manual_backup" ] || continue
+        journal_recovery_note "  (cd \"$manual_staging/$manual_db\" && dolt backup add $manual_name '$manual_backup')"
+    done
+    journal_recovery_note "  mkdir -p \"$PACK_STATE_DIR/corrupt-aside\""
+    journal_recovery_note "  [ -d \"$manual_staging/$manual_db\" ] && [ ! -e \"$manual_aside\" ] && mv \"$manual_store\" \"$manual_aside\" && mv \"$manual_staging/$manual_db\" \"$manual_store\" && rmdir \"$manual_staging\""
+    journal_recovery_note "  [ -e \"$manual_store\" ] || mv \"$manual_aside\" \"$manual_store\""
+    journal_recovery_note "  [ -d \"$manual_store\" ] && gc start"
+    if [ -f "$manual_jsonl" ]; then
+        journal_recovery_note "with no backup, rebuild '$manual_db' from its last JSONL export, $manual_jsonl (the dolt pack's docs/journal-corruption-recovery.md, Step 4b)"
+    else
+        journal_recovery_note "'$manual_db' has no JSONL export at $manual_jsonl"
+    fi
+    journal_recovery_note "a database that is not a bead store has no JSONL archive; restore it from a backup only"
+}
+
 # attempt_journal_corruption_recovery scans the data dir for databases whose
 # noms journal dolt refuses to load and restores each from its registered
 # local backup (#3176): bd's canonical `default` backup when present, else
@@ -3263,11 +3436,12 @@ finish_interrupted_journal_recovery() {
 # existing path, which mv would move the source into.
 # Fail-closed: when the selected backup is unusable or the restore does not
 # succeed, the function returns 1 so the server cannot come up silently
-# missing a database. Returns 0 only when at least one database was
-# restored and none were left unrecoverable. Every step is reported through
-# journal_recovery_note, so it reaches $LOG_FILE as well as stderr: restored
-# copies are missing all writes since the last backup sync, and operators
-# must know that.
+# missing a database, and a refusal or a failed restore prints the steps that
+# recover that database alone (print_manual_journal_recovery_steps). Returns
+# 0 only when at least one database was restored and none were left
+# unrecoverable. Every step is reported through journal_recovery_note, so it
+# reaches $LOG_FILE as well as stderr: restored copies are missing all writes
+# since the last backup sync, and operators must know that.
 attempt_journal_corruption_recovery() {
     local aside_root="${PACK_STATE_DIR:?}/corrupt-aside" staging="${PACK_STATE_DIR:?}/restore-staging" ready="${PACK_STATE_DIR:?}/restore-ready"
     local ts db_dir db aside sel backup_name url refusal manual_url manual_hint limit began recovered=0
@@ -3312,7 +3486,8 @@ attempt_journal_corruption_recovery() {
         if [ -n "$refusal" ]; then
             journal_recovery_note "NOT auto-recovering '$db': $refusal"
             journal_recovery_note "candidate backups checked: default, ${db}-backup; registered backups: $(backup_registry_summary "$db_dir")"
-            journal_recovery_note "manual recovery required: move $DATA_DIR/$db aside, then run \"dolt backup restore '$manual_url' $db\" from $DATA_DIR$manual_hint"
+            journal_recovery_note "manual recovery required: restore '$db' with \"dolt backup restore '$manual_url' $db\" in a staging directory and swap the copy in for $DATA_DIR/$db, as the steps below do$manual_hint"
+            print_manual_journal_recovery_steps "$db" "$ts" "$manual_url"
             return 1
         fi
         if [ "$limit" -gt 0 ]; then
@@ -3328,6 +3503,10 @@ attempt_journal_corruption_recovery() {
                 journal_recovery_note "backup restore of '$db' did not finish within ${limit}s and was stopped; $DATA_DIR/$db is untouched. Run \"gc dolt start\", which lets the restore run to completion, then \"gc start\""
             else
                 journal_recovery_note "backup restore failed for '$db' (see $LOG_FILE); $DATA_DIR/$db is untouched; not retrying"
+                # Every registered backup is listed, so another one can be
+                # tried by hand.
+                journal_recovery_note "registered backups: $(backup_registry_summary "$db_dir")"
+                print_manual_journal_recovery_steps "$db" "$ts" '<url>'
             fi
             return 1
         fi
@@ -4626,16 +4805,25 @@ op_store_bridge() {
     return $?
 }
 op_health() {
-    local conn_count="" read_only_status
+    local conn_count="" read_only_status health_db health_data_dir db_failure
 
     # TCP check.
     if ! tcp_check; then
         die "dolt server not reachable on $(connect_host):$DOLT_PORT"
     fi
 
-    if load_health_check_from_gc; then
+    health_db=$(city_health_database)
+    health_data_dir=""
+    [ -n "$health_db" ] && health_data_dir=$(city_health_data_dir)
+
+    if load_health_check_from_gc "$health_db" "$health_data_dir"; then
         if [ "$GC_HEALTH_QUERY_READY" != "true" ]; then
             die "dolt query probe failed (information_schema.SCHEMATA)"
+        fi
+        # Fail closed: a requested database the helper did not report ready
+        # is unhealthy, whether it reported a failure or nothing at all.
+        if [ -n "$health_db" ] && [ "$GC_HEALTH_DATABASE_READY" != "true" ]; then
+            die "dolt city database unavailable: ${GC_HEALTH_DATABASE_ERROR:-health check did not report database \"$health_db\"}"
         fi
         if ! is_remote && [ "$GC_HEALTH_READ_ONLY" = "true" ]; then
             die "dolt server is in read-only mode"
@@ -4648,6 +4836,10 @@ op_health() {
         # Query probe.
         if ! do_query_probe; then
             die "dolt query probe failed (information_schema.SCHEMATA)"
+        fi
+
+        if [ -n "$health_db" ] && ! db_failure=$(check_city_database "$health_db" "$health_data_dir"); then
+            die "dolt city database unavailable: $db_failure"
         fi
 
         # Imposter detection disabled: TCP + query probe passed, server is
@@ -4752,7 +4944,7 @@ fi
 
 # op_recover stops the dolt server, restarts it, and verifies health.
 op_recover() {
-    local read_only_status
+    local read_only_status recover_db recover_data_dir recover_db_failure
 
     if is_remote; then
         die "recovery not supported for remote dolt servers"
@@ -4788,6 +4980,20 @@ op_recover() {
             echo "detected read-only dolt server — restarting" >&2
         fi
         DOLT_PORT="$GC_RECOVER_PORT"
+        # The helper's recovery health check proves only the server. A
+        # server that answers SQL while the city database is still missing
+        # or unreadable is not recovered.
+        recover_db=$(city_health_database)
+        if [ -n "$recover_db" ]; then
+            recover_data_dir=$(city_health_data_dir)
+            if load_health_check_from_gc "$recover_db" "$recover_data_dir"; then
+                if [ "$GC_HEALTH_DATABASE_READY" != "true" ]; then
+                    die "dolt city database still unavailable after recovery: ${GC_HEALTH_DATABASE_ERROR:-health check did not report database \"$recover_db\"}"
+                fi
+            elif ! recover_db_failure=$(check_city_database "$recover_db" "$recover_data_dir"); then
+                die "dolt city database still unavailable after recovery: $recover_db_failure"
+            fi
+        fi
         return 0
     elif [ "$GC_RECOVER_MANAGED_USED" = "true" ]; then
         if [ "$GC_RECOVER_DIAGNOSED_READ_ONLY" = "true" ]; then

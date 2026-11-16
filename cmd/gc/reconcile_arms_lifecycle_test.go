@@ -448,11 +448,21 @@ func TestSidecarRestartMarkerFallback(t *testing.T) {
 	if err := batched.Fake.SetMeta("other", "GC_RESTART_REQUESTED", "1"); err != nil {
 		t.Fatal(err)
 	}
-	attrs := map[string]InventoryAttrs{"asked": {}, "quiet": {}, "unreadable": {}, "other": {}}
-	hosts := map[string]runtime.Provider{"asked": side, "quiet": side, "unreadable": side, "other": batched}
+	// A v2-ready exec leaf reads identity, but its GetMeta forks a script:
+	// it is never read per name per pass (PAR-EXEC §13.5 15).
+	execFake := runtime.NewFake()
+	if err := execFake.SetMeta("boxed", "GC_RESTART_REQUESTED", "1"); err != nil {
+		t.Fatal(err)
+	}
+	execLeaf := runtime.NewFakeProfile(runtime.ProfileExecV2, runtime.FullFake{Fake: execFake})
+	attrs := map[string]InventoryAttrs{"asked": {}, "quiet": {}, "unreadable": {}, "other": {}, "boxed": {}}
+	hosts := map[string]runtime.Provider{"asked": side, "quiet": side, "unreadable": side, "other": batched, "boxed": execLeaf}
 	readSidecarRestartMarkers(context.Background(), attrs, hosts, 2)
-	if !attrs["asked"].RestartRequested || attrs["quiet"].RestartRequested || attrs["unreadable"].RestartRequested || attrs["other"].RestartRequested {
+	if !attrs["asked"].RestartRequested || attrs["quiet"].RestartRequested || attrs["unreadable"].RestartRequested || attrs["other"].RestartRequested || attrs["boxed"].RestartRequested {
 		t.Fatalf("attrs %+v, want only the sidecar's readable marked name set", attrs)
+	}
+	if got := execFake.CountCalls("GetMeta", "boxed"); got != 0 {
+		t.Fatalf("exec leaf: %d GetMeta reads, want none", got)
 	}
 }
 

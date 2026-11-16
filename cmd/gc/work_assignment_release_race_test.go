@@ -1122,6 +1122,68 @@ func TestReleaseWorkBead_ContinuationGroupNeverRidesASecondWrite(t *testing.T) {
 	})
 }
 
+// TestReleaseDetachedWorkBead_ClearsTheProbeInTheReleaseWrite covers the third
+// disjunct of singleWriteRequired: a release that clears a dead gc.detached
+// lands as ONE write. On the two-write path a failed second write would reopen
+// the bead still carrying the dead probe, and once that probe's socket is gone
+// it would hold the bead's next claim for good.
+func TestReleaseDetachedWorkBead_ClearsTheProbeInTheReleaseWrite(t *testing.T) {
+	store := &failSecondWriteStore{MemStore: beads.NewMemStore()}
+	claimed := seedClaimedBead(t, store, "retired-session")
+	if err := store.SetMetadata(claimed.ID, beadmeta.DetachedMetadataKey, "tmux:gascity:soak-loop"); err != nil {
+		t.Fatalf("seed gc.detached: %v", err)
+	}
+	claimed.Metadata = map[string]string{beadmeta.DetachedMetadataKey: "tmux:gascity:soak-loop"}
+	store.updateCalls = 0
+
+	wa := workAssignmentForStore(beads.WorkStore{Store: store})
+	// runTargetFallback is empty and there is no group, so only the detached
+	// clear can force the single-write path.
+	if err := wa.ReleaseDetachedWorkBead(claimed, ""); err != nil {
+		t.Fatalf("ReleaseDetachedWorkBead: %v", err)
+	}
+	if store.updateCalls != 1 {
+		t.Fatalf("write calls = %d, want 1 combined release write", store.updateCalls)
+	}
+	got, err := store.Get(claimed.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Assignee != "" || got.Status != "open" || got.Metadata[beadmeta.DetachedMetadataKey] != "" {
+		t.Fatalf("status=%q assignee=%q gc.detached=%q, want released with gc.detached cleared", got.Status, got.Assignee, got.Metadata[beadmeta.DetachedMetadataKey])
+	}
+}
+
+// TestReleaseOrphanedPoolAssignment_ClearsTheProbeInTheReleaseWrite is the
+// orphan sweep's twin of TestReleaseDetachedWorkBead_ClearsTheProbeInTheReleaseWrite:
+// the store offers ReleaseIfCurrent and fails a metadata-only write, the
+// shape of a failed clear after the conditional release. The dead
+// gc.detached must go in the release write itself, or the bead reopens
+// still carrying it.
+func TestReleaseOrphanedPoolAssignment_ClearsTheProbeInTheReleaseWrite(t *testing.T) {
+	store := &failSecondWriteStore{MemStore: beads.NewMemStore()}
+	claimed := seedClaimedBead(t, store, "retired-session")
+	if err := store.SetMetadata(claimed.ID, beadmeta.DetachedMetadataKey, "tmux:gascity:soak-loop"); err != nil {
+		t.Fatalf("seed gc.detached: %v", err)
+	}
+	claimed.Metadata = map[string]string{beadmeta.DetachedMetadataKey: "tmux:gascity:soak-loop"}
+	store.updateCalls = 0
+
+	if !releaseOrphanedPoolAssignment(store, claimed, true) {
+		t.Fatal("releaseOrphanedPoolAssignment = false, want the dead claim released")
+	}
+	if store.updateCalls != 1 {
+		t.Fatalf("write calls = %d, want 1 combined release write", store.updateCalls)
+	}
+	got, err := store.Get(claimed.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Assignee != "" || got.Status != "open" || got.Metadata[beadmeta.DetachedMetadataKey] != "" {
+		t.Fatalf("status=%q assignee=%q gc.detached=%q, want released with gc.detached cleared", got.Status, got.Assignee, got.Metadata[beadmeta.DetachedMetadataKey])
+	}
+}
+
 // legacyClaimStore is a stamped MemStore holding one claimed row at revision
 // 0, the default a legacy native row keeps until its first write.
 func legacyClaimStore(t *testing.T) (*beads.MemStore, beads.Bead) {

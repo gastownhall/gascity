@@ -14,8 +14,8 @@ import (
 )
 
 // bdParityWrites returns the bd invocations a parity arm recorded other than
-// the reads the passthrough's own guards and the split city's residency
-// checks make (show, list, query), one argv per entry.
+// the reads the passthrough's own guards, the split city's residency checks and
+// a close's announcement make (show, list, query, dep list), one argv per entry.
 func bdParityWrites(log string) []string {
 	var writes []string
 	for _, line := range strings.Split(log, "\n") {
@@ -23,9 +23,16 @@ func bdParityWrites(log string) []string {
 		if !ok {
 			continue
 		}
-		switch verb, _ := bdRelocatedClassVerbOf(strings.Fields(argv)); verb {
+		verb, rest := bdRelocatedClassVerbOf(strings.Fields(argv))
+		switch verb {
 		case "show", "list", "query", "version":
 			continue
+		case "dep":
+			// The close announcement confirms the closed bead's edges
+			// (bd_close_events.go); `dep add` and `dep remove` stay writes.
+			if len(rest) > 0 && rest[0] == "list" {
+				continue
+			}
 		}
 		writes = append(writes, argv)
 	}
@@ -185,8 +192,9 @@ func TestGcBdRefusesAClassFlipOnASplitCity(t *testing.T) {
 
 // TestGcBdImportSkipInfraImportsOnlyTheWorkRows pins the recovery runbook on a
 // split city end to end: --skip-infra hands bd a work-only copy of the archive
-// (never the original path) and reports what it left out; the flag itself
-// never reaches bd, on either kind of city.
+// (never the original path; the copy keeps the archive's name, which bd
+// records in its history) and reports what it left out; the flag itself never
+// reaches bd, on either kind of city.
 func TestGcBdImportSkipInfraImportsOnlyTheWorkRows(t *testing.T) {
 	archive := `{"id":"demo-1","title":"w","issue_type":"task"}` + "\n" +
 		`{"id":"demo-2","title":"step","issue_type":"task","metadata":{"gc.root_bead_id":"demo-0"}}` + "\n" +
@@ -202,7 +210,7 @@ func TestGcBdImportSkipInfraImportsOnlyTheWorkRows(t *testing.T) {
 		t.Fatalf("exit %d; stderr=%q", res.code, res.stderr)
 	}
 	w := bdParityWrites(res.bd)
-	if len(w) != 1 || strings.Contains(w[0], "archive.jsonl") || strings.Contains(w[0], "--skip-infra") || !strings.Contains(w[0], "gc-bd-import-work-") {
+	if len(w) != 1 || slices.Contains(strings.Fields(w[0]), "archive.jsonl") || strings.Contains(w[0], "--skip-infra") || !strings.Contains(w[0], "/gc-bd-judged-") || !strings.HasSuffix(w[0], "/archive.jsonl") {
 		t.Fatalf("bd ran %v, want one import of the work-only copy", w)
 	}
 	for _, want := range []string{"importing 1 row(s)", "left out 2 row(s)", "1 graph", "1 sessions"} {

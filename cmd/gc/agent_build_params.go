@@ -86,6 +86,13 @@ type agentBuildParams struct {
 	// may still be reused, and dependency-floor prerequisites are exempt.
 	poolSessionCreateBudget *poolplan.CreateBudget
 
+	// retiredPoolSeats holds, by session bead ID, the pool seats legacy
+	// realization retired this build to free a slot of a full pool
+	// (poolSeatsElsewhere.freeSlot): the session overlay leaves them out of
+	// the desired set. DesiredStateResult.RetiredPoolSeats carries them to the
+	// refresh, whose build params set it from there.
+	retiredPoolSeats map[string]bool
+
 	// poolScaleCheckPartialTemplates holds pool templates whose scale_check
 	// returned a partial result this build cycle. selectOrPlanPoolSessionBead
 	// refuses new creates for these templates; existing-session reuse is

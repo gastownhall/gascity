@@ -15,7 +15,7 @@ import (
 // learns so with one read and opens the lane store only when there is work.
 // A failed read is returned, never read as "no ops".
 func HasOpenLaneOps(store beads.SessionStore, conversation string) (bool, error) {
-	if isNilStore(store.Store) {
+	if beads.IsNilStore(store) {
 		return false, errors.New("probing for open lane ops: store is required")
 	}
 	if err := validateConversation(conversation); err != nil {

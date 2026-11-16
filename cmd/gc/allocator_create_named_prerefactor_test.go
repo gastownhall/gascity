@@ -15,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -37,7 +38,7 @@ func reopenClosedConfiguredNamedSessionBeadPreRefactor(
 	if stderr == nil {
 		stderr = io.Discard
 	}
-	bead, ok, err := session.FindClosedNamedSessionBeadForSessionName(store, identity, sessionName)
+	bead, ok, err := session.FindClosedNamedSessionBeadForSessionName(beadstest.Sessions(store), identity, sessionName)
 	if err != nil {
 		fmt.Fprintf(stderr, "session beads: finding closed configured named session %q: %v\n", identity, err) //nolint:errcheck
 		return beads.Bead{}, "", false
@@ -57,11 +58,11 @@ func reopenClosedConfiguredNamedSessionBeadPreRefactor(
 	}
 	var reopened beads.Bead
 	err = session.WithCitySessionIdentifierLocks(cityPath, []string{identity, sessionName}, func() error {
-		if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, identity, bead.ID, identity); err != nil {
+		if err := session.EnsureAliasAvailableWithConfigForOwner(beadstest.Sessions(store), cfg, identity, bead.ID, identity); err != nil {
 			fmt.Fprintf(stderr, "session beads: alias %q for %s unavailable during reopen: %v\n", identity, identity, err) //nolint:errcheck
 			return nil
 		}
-		if err := session.EnsureSessionNameAvailableWithConfigForOwner(store, cfg, sessionName, bead.ID, identity); err != nil {
+		if err := session.EnsureSessionNameAvailableWithConfigForOwner(beadstest.Sessions(store), cfg, sessionName, bead.ID, identity); err != nil {
 			fmt.Fprintf(stderr, "session beads: session_name %q for %s unavailable during reopen: %v\n", sessionName, identity, err) //nolint:errcheck
 			return nil
 		}

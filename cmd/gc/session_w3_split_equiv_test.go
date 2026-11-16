@@ -227,7 +227,11 @@ func rawPoolTriggerBindingPatchRef(sb beads.Bead, request SessionRequest, workDi
 			request.SessionBeadID == sb.ID &&
 			rawState == session.StateActive &&
 			sb.Metadata["wake_mode"] != "fresh"
-		if existingWorkDir != "" && (oldWorkBeadID == workBeadID || liveResumeContinuation) {
+		parkedResumeContinuation := request.ParkedContinuation &&
+			request.Tier == "resume" &&
+			request.SessionBeadID == sb.ID &&
+			sb.Metadata["wake_mode"] != "fresh"
+		if existingWorkDir != "" && (oldWorkBeadID == workBeadID || liveResumeContinuation || parkedResumeContinuation) {
 			targetWorkDir = existingWorkDir
 		}
 		if strings.TrimSpace(sb.Metadata[beadmeta.WorkDirMetadataKey]) != targetWorkDir {
@@ -267,6 +271,20 @@ func TestComputePoolTriggerBindingPatchMatchesRaw(t *testing.T) {
 			beadmeta.WorkDirMetadataKey:             "/gc/old-with-title",
 			beadmeta.LegacyWorkDirMetadataKey:       "/gc/old-with-title",
 		}},
+		"parked": {ID: "s-parked", Type: session.BeadType, Status: "open", Labels: []string{session.LabelSession}, Metadata: map[string]string{
+			"state":                                 string(session.StateAsleep),
+			"sleep_reason":                          "idle",
+			beadmeta.TriggerBeadIDMetadataKey:       "wb-old",
+			beadmeta.TriggerBeadStoreRefMetadataKey: "rig-old",
+			beadmeta.WorkDirMetadataKey:             "/gc/old-with-title",
+			beadmeta.LegacyWorkDirMetadataKey:       "/gc/old-with-title",
+		}},
+		"parked-fresh": {ID: "s-parked", Type: session.BeadType, Status: "open", Labels: []string{session.LabelSession}, Metadata: map[string]string{
+			"state":                           string(session.StateAsleep),
+			"wake_mode":                       "fresh",
+			beadmeta.TriggerBeadIDMetadataKey: "wb-old",
+			beadmeta.WorkDirMetadataKey:       "/gc/old-with-title",
+		}},
 	}
 	requests := map[string]SessionRequest{
 		"clear":             {WorkBeadID: ""},
@@ -277,6 +295,9 @@ func TestComputePoolTriggerBindingPatchMatchesRaw(t *testing.T) {
 		"pack":              {WorkBeadID: "wb-new", WorkPack: "pack-new"},
 		"workspace":         {WorkBeadID: "wb-new", WorkPack: "pack-new", WorkWorkspace: "ws-new"},
 		"live-retry":        {Tier: "resume", SessionBeadID: "s-live", WorkBeadID: "wb-new"},
+		"parked-resume":     {Tier: "resume", SessionBeadID: "s-parked", WorkBeadID: "wb-new", ParkedContinuation: true},
+		"parked-unflagged":  {Tier: "resume", SessionBeadID: "s-parked", WorkBeadID: "wb-new"},
+		"parked-other-tier": {Tier: "new", SessionBeadID: "s-parked", WorkBeadID: "wb-new", ParkedContinuation: true},
 	}
 	workDirs := []string{"", "/gc/old", "/gc/new"}
 	for bn, sb := range bases {

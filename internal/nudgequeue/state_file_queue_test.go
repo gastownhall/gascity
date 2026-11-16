@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 func deferredTestItem(id string, deliverAfter time.Time) Item {
@@ -103,7 +104,7 @@ func TestStateFileQueueWithdrawQueuedWaitNudges(t *testing.T) {
 			}
 			queue := StateFileQueue{CityPath: city}
 			if withShadows {
-				queue.Shadows = store
+				queue.Shadows = beadstest.Nudges(store)
 			}
 			if err := queue.WithdrawQueuedWaitNudges([]string{item.ID}); err != nil {
 				t.Fatalf("WithdrawQueuedWaitNudges: %v", err)

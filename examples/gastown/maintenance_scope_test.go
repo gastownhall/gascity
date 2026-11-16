@@ -1,3 +1,5 @@
+//go:build unix
+
 package gastown_test
 
 import (
@@ -810,8 +812,97 @@ func TestReaperTypeSafeSessionPruneDeletesThroughBd(t *testing.T) {
 	if strings.Contains(f.read(t, f.doltLog), "DELETE FROM") {
 		t.Fatalf("type-safe session prune sent SQL DML:\n%s", f.read(t, f.doltLog))
 	}
-	if !strings.Contains(f.read(t, f.gcLog), "sessions-pruned:2") {
-		t.Fatalf("summary did not count the deleted sessions:\n%s", f.read(t, f.gcLog))
+	gcLog := f.read(t, f.gcLog)
+	if !strings.Contains(gcLog, "sessions-pruned:2") {
+		t.Fatalf("summary did not count the deleted sessions:\n%s", gcLog)
+	}
+	if strings.Contains(gcLog, "ESCALATION") {
+		t.Fatalf("a counted two-id batch was escalated as a reaper anomaly:\n%s", gcLog)
+	}
+}
+
+// A one-id --from-file batch takes bd's single-id delete path, whose --json
+// reply is {"deleted":"<id>",...} with no deleted_count. The reaper must
+// count that batch as one deletion, not escalate it as a failed prune.
+func TestReaperTypeSafeSessionPruneCountsSingleIDBatch(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "batches")
+	f := newScopeFixture(t, `
+  *"issue_type='session'"*"LIMIT 500"*)
+    n=0
+    [ -f "`+stateFile+`" ] && n=$(cat "`+stateFile+`")
+    if [ "$n" = "0" ]; then
+      printf '1' > "`+stateFile+`"
+      printf 'id\ngc-session-1\n'
+    else
+      printf 'id\n'
+    fi
+    ;;`)
+	f.env["GC_REAPER_SESSION_BEAD_PATTERN"] = ""
+	f.runReaper(t)
+
+	if !strings.Contains(f.read(t, f.bdLog), "args=delete --force --json --from-file ") {
+		t.Fatalf("type-safe session prune did not delete through bd:\n%s", f.read(t, f.bdLog))
+	}
+	gcLog := f.read(t, f.gcLog)
+	if strings.Contains(gcLog, "type-safe session prune failed") {
+		t.Fatalf("a successful one-id delete was escalated as a failed prune:\n%s", gcLog)
+	}
+	if strings.Contains(gcLog, "ESCALATION") {
+		t.Fatalf("a successful one-id delete raised a reaper escalation:\n%s", gcLog)
+	}
+	if !strings.Contains(gcLog, "sessions-pruned:1") {
+		t.Fatalf("summary did not count the one deleted session:\n%s", gcLog)
+	}
+}
+
+// A zero-exit delete reply with neither deleted_count nor a non-empty string
+// deleted is not a counted deletion: the reaper records an anomaly and stops
+// after that one call. A batch reply counting zero stops without an anomaly.
+func TestReaperTypeSafeSessionPruneRejectsUncountedDeleteReply(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		reply     string
+		wantAnoms bool
+	}{
+		{name: "empty object", reply: `{}`, wantAnoms: true},
+		{name: "empty deleted string", reply: `{"deleted":""}`, wantAnoms: true},
+		{name: "not json", reply: `not json`, wantAnoms: true},
+		{name: "zero count batch", reply: `{"deleted":["gc-session-1"],"deleted_count":0}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The selection returns a row twice so a reply wrongly counted as a
+			// deletion would loop into a second delete call.
+			stateFile := filepath.Join(t.TempDir(), "batches")
+			f := newScopeFixture(t, `
+  *"issue_type='session'"*"LIMIT 500"*)
+    n=0
+    [ -f "`+stateFile+`" ] && n=$(cat "`+stateFile+`")
+    printf '%s' $((n + 1)) > "`+stateFile+`"
+    if [ "$n" -lt 2 ]; then
+      printf 'id\ngc-session-1\n'
+    else
+      printf 'id\n'
+    fi
+    ;;`)
+			f.env["GC_REAPER_SESSION_BEAD_PATTERN"] = ""
+			f.env["BD_DELETE_JSON"] = tc.reply
+			f.runReaper(t)
+
+			bdLog := f.read(t, f.bdLog)
+			if got := strings.Count(bdLog, "args=delete --force --json --from-file "); got != 1 {
+				t.Fatalf("delete calls = %d, want 1:\n%s", got, bdLog)
+			}
+			gcLog := f.read(t, f.gcLog)
+			if failed := strings.Contains(gcLog, "type-safe session prune failed after 0 deletions"); failed != tc.wantAnoms {
+				t.Fatalf("prune failure recorded = %v, want %v:\n%s", failed, tc.wantAnoms, gcLog)
+			}
+			if escalated := strings.Contains(gcLog, "ESCALATION: Reaper anomalies detected"); escalated != tc.wantAnoms {
+				t.Fatalf("escalated = %v, want %v:\n%s", escalated, tc.wantAnoms, gcLog)
+			}
+			if !strings.Contains(gcLog, "sessions-pruned:0") {
+				t.Fatalf("summary counted an uncounted delete reply:\n%s", gcLog)
+			}
+		})
 	}
 }
 
@@ -1238,6 +1329,9 @@ func TestReaperRunBudgetDeclaresPartialAndCarriesWorkForward(t *testing.T) {
 	if !ok || out.Outcome != "skipped" || !out.hasScope("rig:api", "run budget exhausted before this scope") {
 		t.Fatalf("outcome = %+v (declared %v), want skipped carrying the rig to the next run", out, ok)
 	}
+	if gcLog := f.read(t, f.gcLog); !strings.Contains(gcLog, "budget_skipped:") || !strings.Contains(gcLog, "rig:api@all") {
+		t.Fatalf("summary does not name the scope the budget skipped whole:\n%s", gcLog)
+	}
 	if strings.Contains(f.read(t, f.gcLog), "ESCALATION") {
 		t.Fatalf("a spent run budget is not an anomaly:\n%s", f.read(t, f.gcLog))
 	}
@@ -1259,4 +1353,160 @@ exit 0
 	if gcLog := f.read(t, f.gcLog); !strings.Contains(gcLog, "session bead prune failed (pattern=gm-*)") || !strings.Contains(gcLog, "database is locked") {
 		t.Fatalf("a failed bd prune must be escalated with bd's error, not counted as 0:\n%s", gcLog)
 	}
+}
+
+// TestMaintenanceOrdersSkipStoresThatServeNoSQLQuietly covers bd stores in
+// embedded mode (bd init): gc bd serves their verbs, but bd refuses `bd sql`
+// there. Such a store is reachable, so the orders must not report it
+// unreachable or failed, and a fresh city must not mail an escalation for it
+// (ga-ksebj). Neither order can select from it, so it is declared skipped. A
+// store bd cannot reach at all is still escalated and failed when it follows
+// an SQL-less one.
+//
+// jsonl-export cannot name such a store's database for the archive, so the
+// store is not archived. Its summary and snapshot commit count the store and
+// name it, on the first run and on a run with nothing new to commit, so the
+// archive never claims coverage it does not have.
+func TestMaintenanceOrdersSkipStoresThatServeNoSQLQuietly(t *testing.T) {
+	const sqlLessReason = "bead store serves no SQL (bd embedded mode)"
+	for _, tc := range []struct {
+		name        string
+		rigs        string // the rig objects gc rig list prints; none when empty
+		sqlLess     string // scopes whose store refuses bd sql
+		unreachable string // a scope bd cannot reach
+		outcome     string
+		summary     string // jsonl-export's summary on both runs
+		subject     string // jsonl-export's snapshot commit after its timestamp; no commit when empty
+	}{
+		{
+			name:    "embedded rig beside a server-mode city",
+			rigs:    `{"name":"api"}`,
+			sqlLess: "rig:api",
+			outcome: "partial",
+			summary: "jsonl — exported 1/2, records: 0, push: skipped (local-only), not archived (bd embedded mode): rig:api",
+			subject: "exported=1/2 records=0, not archived (bd embedded mode): rig:api",
+		},
+		{
+			name:        "embedded rig before an unreachable rig",
+			rigs:        `{"name":"a"},{"name":"b"}`,
+			sqlLess:     "rig:a",
+			unreachable: "rig:b",
+			outcome:     "partial",
+			summary:     "jsonl — exported 1/3, records: 0, push: skipped (local-only), not archived (bd embedded mode): rig:a, failed: rig:b",
+			subject:     "exported=1/3 records=0, not archived (bd embedded mode): rig:a, failed: rig:b",
+		},
+		{
+			name:    "embedded city without rigs",
+			sqlLess: "city",
+			outcome: "skipped",
+			summary: "jsonl — exported 0/1, records: 0, push: skipped, not archived (bd embedded mode): city",
+		},
+		{
+			name:    "embedded city and rig",
+			rigs:    `{"name":"api"}`,
+			sqlLess: "city rig:api",
+			outcome: "skipped",
+			summary: "jsonl — exported 0/2, records: 0, push: skipped, not archived (bd embedded mode): city rig:api",
+		},
+	} {
+		for _, script := range []string{"reaper.sh", "jsonl-export.sh"} {
+			t.Run(tc.name+"/"+script, func(t *testing.T) {
+				f := newScopeFixture(t, "")
+				if tc.rigs != "" {
+					f.env["FAKE_RIG_LIST_JSON"] = `{"rigs":[` + tc.rigs + `]}`
+				}
+				f.env["FAKE_SQL_UNSUPPORTED_SCOPES"] = tc.sqlLess
+				f.env["FAKE_UNREACHABLE_SCOPES"] = tc.unreachable
+				archive := filepath.Join(f.cityDir, "archive")
+				jsonlScopeEnv(t, f, archive)
+				runScript(t, coreScriptPath(script), f.env)
+
+				gcLog := f.read(t, f.gcLog)
+				out, ok := f.outcome(t)
+				if !ok || out.Outcome != tc.outcome {
+					t.Fatalf("outcome = %+v (declared %v), want %s", out, ok, tc.outcome)
+				}
+				for _, scope := range strings.Fields(tc.sqlLess) {
+					if !out.hasScope(scope, sqlLessReason) || strings.Contains(gcLog, scope+": bead store unreachable") {
+						t.Fatalf("%s must be skipped as serving no SQL, not as unreachable; outcome %+v:\n%s", scope, out, gcLog)
+					}
+				}
+				if tc.unreachable != "" && !out.hasScope(tc.unreachable, "bead store unreachable") {
+					t.Fatalf("outcome = %+v, want %s skipped as unreachable", out, tc.unreachable)
+				}
+
+				escalated := strings.Contains(gcLog, "ESCALATION")
+				switch script {
+				case "reaper.sh":
+					if escalated != (tc.unreachable != "") || (escalated && !strings.Contains(gcLog, tc.unreachable+": bead store unreachable through gc bd")) {
+						t.Fatalf("escalated = %v, want an escalation only for the unreachable store:\n%s", escalated, gcLog)
+					}
+					// The session-bead prune counts its candidates in the city
+					// store, so an SQL-less city skips it without a query.
+					if strings.Contains(" "+tc.sqlLess+" ", " city ") && strings.Contains(gcLog, "session_prune_candidates") {
+						t.Fatalf("reaper queried an SQL-less city for session prune candidates:\n%s", gcLog)
+					}
+				case "jsonl-export.sh":
+					if escalated {
+						t.Fatalf("jsonl-export escalated:\n%s", gcLog)
+					}
+					// The second run has nothing new to commit.
+					runScript(t, coreScriptPath(script), f.env)
+					if got := maintenanceDoneSummaries(f.read(t, f.gcLog)); len(got) != 2 || got[0] != tc.summary || got[1] != tc.summary {
+						t.Fatalf("summaries = %q, want %q on both runs", got, tc.summary)
+					}
+					if tc.subject != "" {
+						if subject := runGitOut(t, archive, "log", "-1", "--format=%s"); !strings.HasSuffix(subject, ": "+tc.subject) {
+							t.Fatalf("snapshot commit = %q, want it to end %q", subject, tc.subject)
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestJsonlExportHaltNamesScopesItCannotArchive covers a run that halts on a
+// spike after it visited an SQL-less scope: the halt summary and the [HALT]
+// baseline commit still name the scope the archive does not hold.
+func TestJsonlExportHaltNamesScopesItCannotArchive(t *testing.T) {
+	cityDir := t.TempDir()
+	binDir := t.TempDir()
+	gcLog := filepath.Join(t.TempDir(), "gc.log")
+	archiveRepo := filepath.Join(cityDir, "archive")
+	initSeedArchive(t, archiveRepo, 100)
+	writeMultiRecordDoltStub(t, binDir, 10)
+	writeJsonlExportGCStub(t, binDir)
+	env := jsonlExportEnv(t, cityDir, binDir, t.TempDir(), archiveRepo, gcLog, filepath.Join(t.TempDir(), "gc-mail.log"))
+	// The city store serves no SQL. The rig's store is the archived beads
+	// database, whose drop from 100 records to 10 halts the run.
+	env["FAKE_SQL_UNSUPPORTED_SCOPES"] = "city"
+	env["FAKE_RIG_LIST_JSON"] = `{"rigs":[{"name":"api"}]}`
+	env["FAKE_SCOPE_DBS"] = "rig:api=beads"
+	runScript(t, coreScriptPath("jsonl-export.sh"), env)
+
+	const gap = ", not archived (bd embedded mode): city"
+	gcData, err := os.ReadFile(gcLog)
+	if err != nil {
+		t.Fatalf("ReadFile(gc log): %v", err)
+	}
+	if got, want := maintenanceDoneSummaries(string(gcData)), "jsonl — HALTED on spike detection"+gap; len(got) != 1 || got[0] != want {
+		t.Fatalf("summaries = %q, want [%q]", got, want)
+	}
+	subject := runGitOut(t, archiveRepo, "log", "-1", "--format=%s")
+	if want := "exported=1/2 records=10 (spike detected; push skipped)" + gap; !strings.HasPrefix(subject, "[HALT]") || !strings.HasSuffix(subject, want) {
+		t.Fatalf("HALT baseline commit = %q, want a [HALT] commit ending %q", subject, want)
+	}
+}
+
+// maintenanceDoneSummaries returns the MAINTENANCE_DONE summaries in a gc call
+// log, in order, without the space a scope list leaves at the end.
+func maintenanceDoneSummaries(gcLog string) []string {
+	var summaries []string
+	for _, line := range strings.Split(gcLog, "\n") {
+		if _, summary, ok := strings.Cut(line, "MAINTENANCE_DONE: "); ok {
+			summaries = append(summaries, strings.TrimSpace(summary))
+		}
+	}
+	return summaries
 }

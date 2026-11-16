@@ -329,6 +329,74 @@ func TestDetachedHandoffOrphanCandidateHonorsOnlyCanonicalHolds(t *testing.T) {
 	}
 }
 
+// A graph.v2 workflow that wraps a work bead takes over its routing: the sling
+// restamp moves the route to gc.execution_routed_to and clears gc.routed_to and
+// gc.run_target, so the workflow's executable step is the bead's only demand
+// unit. A bead a worker claimed before the wrap still carries that claim's
+// branch and session back-reference, which is the detached-orphan signature, so
+// without a gate the sweep re-stamps the old pool route and the pool counts one
+// job twice. Fails without the gate (restored=2).
+//
+// A workflow member is the control: a step a retry or ralph control spawned
+// carries gc.execution_routed_to beside its own gc.routed_to and, like every
+// workflow member, gc.root_bead_id. One that lost its route is still restored.
+func TestSweepDetachedHandoffOrphans_SkipsGraphWorkflowSource(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "polecat session",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "gastown__polecat-th-src",
+			"template":     "gascity/gastown.polecat",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	source, err := store.Create(beads.Bead{
+		Title:  "work a graph workflow wrapped",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.WorkBranchMetadataKey:        "polecat/ga-src",
+			beadmeta.SessionIDMetadataKey:         sessionBead.ID,
+			beadmeta.SessionNameMetadataKey:       sessionBead.Metadata["session_name"],
+			beadmeta.ExecutionRoutedToMetadataKey: "gascity/gastown.polecat",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create source bead: %v", err)
+	}
+	member, err := store.Create(beads.Bead{
+		Title:  "attempt step that lost its route",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.WorkBranchMetadataKey:        "polecat/ga-step",
+			beadmeta.SessionIDMetadataKey:         sessionBead.ID,
+			beadmeta.SessionNameMetadataKey:       sessionBead.Metadata["session_name"],
+			beadmeta.ExecutionRoutedToMetadataKey: "gascity/gastown.polecat",
+			beadmeta.RootBeadIDMetadataKey:        "WF-1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create member bead: %v", err)
+	}
+
+	n, err := sweepDetachedHandoffOrphans(store)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("restored=%d, want 1 (the workflow member only)", n)
+	}
+	if got := mustRoutedTo(t, store, source.ID); got != "" {
+		t.Errorf("wrapped source gc.routed_to=%q, want empty (its workflow's step is its only demand unit)", got)
+	}
+	if got := mustRoutedTo(t, store, member.ID); got != "gascity/gastown.polecat" {
+		t.Errorf("workflow member gc.routed_to=%q, want gascity/gastown.polecat (a member's empty route is still a lost one)", got)
+	}
+}
+
 // A bead with no branch set is not a completed-work bead and must be skipped.
 func TestSweepDetachedHandoffOrphans_SkipsNoBranch(t *testing.T) {
 	store := beads.NewMemStore()

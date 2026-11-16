@@ -87,12 +87,15 @@ func (cr *CityRuntime) setBeadsQuiescent(quiescent bool) {
 // quiescent city stops every suspended scope's pair it has not stopped yet and
 // reports true, and the tick then runs no phase at all. The decision reads the
 // suspension state file and the runtime provider's session list, never a bead
-// store.
+// store; a rig the boot census skipped as suspended and that has since resumed
+// is censused in the background (censusResumedRigs).
 func (cr *CityRuntime) enterBeadsQuiescenceIfDue(ctx context.Context) bool {
 	suspended := suspendedBeadsScopes(cr.cityPath, cr.cfg)
 	cr.retiredScopes.forgetResumed(suspended)
 	cr.repairResumedScopes(suspended)
-	cr.cs.setSuspendedRigs(buildEffectiveSuspendedRigNames(cr.cfg, loadSuspensionStateBestEffort(cr.cityPath)))
+	suspendedRigs := buildEffectiveSuspendedRigNames(cr.cfg, loadSuspensionStateBestEffort(cr.cityPath))
+	cr.cs.setSuspendedRigs(suspendedRigs)
+	cr.censusResumedRigs(ctx, suspended.City(), suspendedRigs)
 	quiescent := false
 	if suspended.City() {
 		running, err := cr.sp.ListRunning("")
@@ -103,11 +106,23 @@ func (cr *CityRuntime) enterBeadsQuiescenceIfDue(ctx context.Context) bool {
 		return false
 	}
 	// Store work dispatched before the city went quiescent (an autoclose run
-	// for a drained session's wisp) may still be reading; work dispatched
-	// from now on defers itself. The pairs go once none has been in flight
-	// for a whole tick, so no straggler read restarts them.
-	cr.retireSuspendedScopes(ctx, suspended, func(string) bool { return !cr.cs.storeWorkInFlight() })
+	// for a drained session's wisp) may still be reading, and so may a
+	// session start or stop the tick handed to its own goroutine; work
+	// dispatched from now on defers itself. The pairs go once none has been
+	// in flight for a whole tick, so no straggler read or write restarts them.
+	cr.retireSuspendedScopes(ctx, suspended, func(string) bool { return !cr.offTickStoreWorkInFlight() })
 	return true
+}
+
+// offTickStoreWorkInFlight reports whether the controller has store work running
+// outside its tick: dispatched store work (autoclose runs, completion facts), or
+// an async session start or drain-ack stop. Those last two hold a runtime lease
+// from dispatch until they return, and a drain-ack stop confirms its runtime
+// dead, which empties the provider's session list, before its lease release
+// writes the session store; so a city can read quiescent while either still has
+// a write to make.
+func (cr *CityRuntime) offTickStoreWorkInFlight() bool {
+	return cr.cs.storeWorkInFlight() || cr.asyncStarts.busy() || cr.asyncStops.busy()
 }
 
 // resumeRepairBlockedFlags and resumeRepairCandidates are the resume path's

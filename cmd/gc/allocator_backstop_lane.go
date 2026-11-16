@@ -410,6 +410,11 @@ type externalReadsLane struct {
 	stranded *strandedClaimAlerts
 	// deadAssigneeKeeps dedupes the orphan-release step's keep log.
 	deadAssigneeKeeps deadAssigneeKeepLog
+	// turnReaderFor is the work ladder's turn source for a pass over env;
+	// nil reads no turns, and the ladder judges progress on the activity
+	// clock alone. ladderTurns caches what it read, per seat.
+	turnReaderFor func(env externalReadsEnv) ladderTurnReader
+	ladderTurns   ladderTurns
 }
 
 // sourceRead is one read in flight.

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -184,7 +185,7 @@ func TestFindClosedNamedSessionBeadForSessionName_PrefersMatchingCanonicalCandid
 		t.Fatalf("Close(canonical): %v", err)
 	}
 
-	found, ok, err := FindClosedNamedSessionBeadForSessionName(store, "mayor", "test-city--mayor")
+	found, ok, err := FindClosedNamedSessionBeadForSessionName(beadstest.Sessions(store), "mayor", "test-city--mayor")
 	if err != nil {
 		t.Fatalf("FindClosedNamedSessionBeadForSessionName: %v", err)
 	}
@@ -216,7 +217,7 @@ func TestFindClosedNamedSessionBeadForSessionName_SkipsTerminalRetiredCandidate(
 		t.Fatalf("Close(orphaned): %v", err)
 	}
 
-	found, ok, err := FindClosedNamedSessionBeadForSessionName(store, "mayor", "test-city--mayor")
+	found, ok, err := FindClosedNamedSessionBeadForSessionName(beadstest.Sessions(store), "mayor", "test-city--mayor")
 	if err != nil {
 		t.Fatalf("FindClosedNamedSessionBeadForSessionName: %v", err)
 	}
@@ -245,7 +246,7 @@ func TestFindClosedNamedSessionBeadForSessionName_SkipsFailedCreateCandidate(t *
 		t.Fatalf("Close(failed-create): %v", err)
 	}
 
-	found, ok, err := FindClosedNamedSessionBeadForSessionName(store, "mayor", "test-city--mayor")
+	found, ok, err := FindClosedNamedSessionBeadForSessionName(beadstest.Sessions(store), "mayor", "test-city--mayor")
 	if err != nil {
 		t.Fatalf("FindClosedNamedSessionBeadForSessionName: %v", err)
 	}
@@ -287,7 +288,7 @@ func TestFindClosedNamedSessionBead_PrefersNewestClosedCanonical(t *testing.T) {
 		t.Fatalf("Close(newer): %v", err)
 	}
 
-	found, ok, err := FindClosedNamedSessionBead(store, "mayor")
+	found, ok, err := FindClosedNamedSessionBead(beadstest.Sessions(store), "mayor")
 	if err != nil {
 		t.Fatalf("FindClosedNamedSessionBead: %v", err)
 	}
@@ -429,7 +430,7 @@ func TestFindClosedNamedSessionBead_AcceptsLegacySessionType(t *testing.T) {
 		t.Fatalf("Close(legacy): %v", err)
 	}
 
-	found, ok, err := FindClosedNamedSessionBead(store, "mayor")
+	found, ok, err := FindClosedNamedSessionBead(beadstest.Sessions(store), "mayor")
 	if err != nil {
 		t.Fatalf("FindClosedNamedSessionBead: %v", err)
 	}
@@ -472,7 +473,7 @@ func TestLookupConfiguredNamedSession_BoundedConflictQueries(t *testing.T) {
 		t.Fatalf("Create(conflict): %v", err)
 	}
 
-	lookup, err := LookupConfiguredNamedSession(store, spec)
+	lookup, err := LookupConfiguredNamedSession(beadstest.Sessions(store), spec)
 	if err != nil {
 		t.Fatalf("LookupConfiguredNamedSession: %v", err)
 	}
@@ -510,7 +511,7 @@ func TestLookupConfiguredNamedSession_AcceptsTypeOnlyCanonicalBead(t *testing.T)
 		t.Fatalf("Create(canonical): %v", err)
 	}
 
-	lookup, err := LookupConfiguredNamedSession(store, spec)
+	lookup, err := LookupConfiguredNamedSession(beadstest.Sessions(store), spec)
 	if err != nil {
 		t.Fatalf("LookupConfiguredNamedSession: %v", err)
 	}
@@ -557,7 +558,7 @@ func TestLookupConfiguredNamedSession_AliasOnlyBeadWithoutOtherSignalsConflicts(
 		t.Fatalf("Create(aliasOnly): %v", err)
 	}
 
-	lookup, err := LookupConfiguredNamedSession(store, spec)
+	lookup, err := LookupConfiguredNamedSession(beadstest.Sessions(store), spec)
 	if err != nil {
 		t.Fatalf("LookupConfiguredNamedSession: %v", err)
 	}
@@ -594,7 +595,7 @@ func TestLookupConfiguredNamedSession_UnrelatedAliasOnlyBeadNotTrustedAsSelf(t *
 		t.Fatalf("Create(decoy): %v", err)
 	}
 
-	lookup, err := LookupConfiguredNamedSession(store, spec)
+	lookup, err := LookupConfiguredNamedSession(beadstest.Sessions(store), spec)
 	if err != nil {
 		t.Fatalf("LookupConfiguredNamedSession: %v", err)
 	}
@@ -639,7 +640,7 @@ func TestLookupConfiguredNamedSession_DifferentIdentitySimilarAliasStillConflict
 		t.Fatalf("Create(conflict): %v", err)
 	}
 
-	lookup, err := LookupConfiguredNamedSession(store, spec)
+	lookup, err := LookupConfiguredNamedSession(beadstest.Sessions(store), spec)
 	if err != nil {
 		t.Fatalf("LookupConfiguredNamedSession: %v", err)
 	}
@@ -678,7 +679,7 @@ func TestLookupConfiguredNamedSession_AliasMatchWithMismatchedSessionNameStillCo
 		t.Fatalf("Create(squatter): %v", err)
 	}
 
-	lookup, err := LookupConfiguredNamedSession(store, spec)
+	lookup, err := LookupConfiguredNamedSession(beadstest.Sessions(store), spec)
 	if err != nil {
 		t.Fatalf("LookupConfiguredNamedSession: %v", err)
 	}
@@ -733,7 +734,7 @@ func TestLookupConfiguredNamedSession_SessionNameConflictReportedOverBareAliasMa
 		t.Fatalf("Create(session_name conflict): %v", err)
 	}
 
-	lookup, err := LookupConfiguredNamedSession(store, spec)
+	lookup, err := LookupConfiguredNamedSession(beadstest.Sessions(store), spec)
 	if err != nil {
 		t.Fatalf("LookupConfiguredNamedSession: %v", err)
 	}
@@ -751,7 +752,7 @@ func TestLookupConfiguredNamedSession_SessionNameConflictReportedOverBareAliasMa
 func TestLookupConfiguredNamedSession_EmptySpecNoListCall(t *testing.T) {
 	store := &listCountingStore{MemStore: beads.NewMemStore()}
 
-	lookup, err := LookupConfiguredNamedSession(store, NamedSessionSpec{})
+	lookup, err := LookupConfiguredNamedSession(beadstest.Sessions(store), NamedSessionSpec{})
 	if err != nil {
 		t.Fatalf("LookupConfiguredNamedSession(empty): %v", err)
 	}
@@ -839,7 +840,7 @@ func TestNamedSessionResolutionCandidates_SingleListByLabel(t *testing.T) {
 		Identity:    "mayor",
 		SessionName: "test-city--mayor",
 	}
-	got, err := NamedSessionResolutionCandidates(store, spec)
+	got, err := NamedSessionResolutionCandidates(beadstest.Sessions(store), spec)
 	if err != nil {
 		t.Fatalf("NamedSessionResolutionCandidates: %v", err)
 	}
@@ -876,7 +877,7 @@ func TestNamedSessionResolutionCandidates_SingleListByLabel(t *testing.T) {
 
 func TestNamedSessionResolutionCandidates_EmptySpecNoListCall(t *testing.T) {
 	store := &listCountingStore{MemStore: beads.NewMemStore()}
-	got, err := NamedSessionResolutionCandidates(store, NamedSessionSpec{})
+	got, err := NamedSessionResolutionCandidates(beadstest.Sessions(store), NamedSessionSpec{})
 	if err != nil {
 		t.Fatalf("NamedSessionResolutionCandidates(empty): %v", err)
 	}
@@ -889,7 +890,7 @@ func TestNamedSessionResolutionCandidates_EmptySpecNoListCall(t *testing.T) {
 }
 
 func TestNamedSessionResolutionCandidates_NilStore(t *testing.T) {
-	got, err := NamedSessionResolutionCandidates(nil, NamedSessionSpec{Identity: "mayor"})
+	got, err := NamedSessionResolutionCandidates(beads.SessionStore{}, NamedSessionSpec{Identity: "mayor"})
 	if err != nil {
 		t.Fatalf("NamedSessionResolutionCandidates(nil): %v", err)
 	}
@@ -1240,7 +1241,7 @@ func TestClosedNamedSessionBeadIndexMatchesPerIdentityLookup(t *testing.T) {
 	create("closed", meta(idTwoFallback, nil), BeadType, []string{LabelSession})
 	beadTwoFallbackWinner := create("closed", meta(idTwoFallback, nil), BeadType, []string{LabelSession})
 
-	idx, err := BuildClosedNamedSessionBeadIndex(store)
+	idx, err := BuildClosedNamedSessionBeadIndex(beadstest.Sessions(store))
 	if err != nil {
 		t.Fatalf("BuildClosedNamedSessionBeadIndex: %v", err)
 	}
@@ -1268,7 +1269,7 @@ func TestClosedNamedSessionBeadIndexMatchesPerIdentityLookup(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			refBead, refOK, err := FindClosedNamedSessionBeadForSessionName(store, tt.identity, "")
+			refBead, refOK, err := FindClosedNamedSessionBeadForSessionName(beadstest.Sessions(store), tt.identity, "")
 			if err != nil {
 				t.Fatalf("FindClosedNamedSessionBeadForSessionName(%q): %v", tt.identity, err)
 			}
@@ -1326,13 +1327,13 @@ func TestClosedNamedSessionBeadIndexMissesBeadWithNeitherTypeNorLabel(t *testing
 		t.Fatalf("Close(%s): %v", b.ID, err)
 	}
 
-	if _, ok, err := FindClosedNamedSessionBeadForSessionName(store, identity, ""); err != nil {
+	if _, ok, err := FindClosedNamedSessionBeadForSessionName(beadstest.Sessions(store), identity, ""); err != nil {
 		t.Fatalf("FindClosedNamedSessionBeadForSessionName(%q): %v", identity, err)
 	} else if !ok {
 		t.Fatalf("reference lookup ok = false, want true (identity=%q) — this fixture must be reachable by the per-identity query for the gap it pins to be meaningful", identity)
 	}
 
-	idx, err := BuildClosedNamedSessionBeadIndex(store)
+	idx, err := BuildClosedNamedSessionBeadIndex(beadstest.Sessions(store))
 	if err != nil {
 		t.Fatalf("BuildClosedNamedSessionBeadIndex: %v", err)
 	}

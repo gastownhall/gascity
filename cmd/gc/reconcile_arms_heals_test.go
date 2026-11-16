@@ -369,7 +369,7 @@ func TestAsleepHealPatchMatchesLegacy(t *testing.T) {
 						info.CreatedAt = gatherNow.Add(-time.Hour)
 						info.ConfiguredNamedSession, info.ConfiguredNamedMode = mode != "", mode
 						info.SessionOrigin, info.ManualSessionMetadata = manual.SessionOrigin, manual.ManualSessionMetadata
-						if got, want := asleepHealPatch(info), legacyHeal(info); !maps.Equal(got, want) {
+						if got, want := asleepHealPatch(info, gatherNow), legacyHeal(info); !maps.Equal(got, want) {
 							t.Errorf("%s/%q/%+v/%q/%+v: patch %v, legacy %v", state, reason, cont, mode, manual, got, want)
 						}
 					}
@@ -402,7 +402,7 @@ func TestAsleepHealPatchKeepsKilledContinuation(t *testing.T) {
 			SessionKey: "resume-key", StartedConfigHash: "config-hash", CreatedAt: gatherNow.Add(-time.Hour),
 		}
 		want := session.MetadataPatch{"state": string(session.StateAsleep)}
-		if got := asleepHealPatch(info); !maps.Equal(got, want) {
+		if got := asleepHealPatch(info, gatherNow); !maps.Equal(got, want) {
 			t.Errorf("%s: patch %v, want %v", state, got, want)
 		}
 	}
@@ -586,6 +586,19 @@ func awakeHealCases(t *testing.T, state string) {
 			}
 		})
 	}
+}
+
+// parkedClearCase is a pool seat parked on pre-assigned blocked work
+// (ga-ylpbsy.16) that still carries the marker a stranded pass left: A21
+// proposes the parked clear, a fresh heal.
+func parkedClearCase(t *testing.T) *healCase {
+	t.Helper()
+	slept := gatherNow.Add(-time.Hour)
+	c := newHealCase(t, livenessGone, desireSleep, "pool_managed", "true", "pool_slot", "1", "state", "asleep", "sleep_reason", "idle",
+		"slept_at", slept.UTC().Format(time.RFC3339), strandedEventEmittedKey, rowAt(-time.Hour))
+	e := c.a.Snapshot.Entries[c.k]
+	e.Template, e.Park = "worker", parkVerdict{Eligible: true, Parked: true, Until: slept.Add(parkedWorkMaxHold)}
+	return c
 }
 
 // ownRuntimeCase is a row whose runtime the inventory reads alive at
@@ -944,6 +957,7 @@ func TestNoArmActsOnACensusOnlyRow(t *testing.T) {
 		{"A19 drain void", decideDrainVoid + drainSuspended, func(t *testing.T) *healCase {
 			return newHealCase(t, livenessAlive, desireWake, append([]string{"state", "active"}, intentAt(drainSuspended, "3")...)...)
 		}},
+		{"A21 parked clear", decideParkedClear, parkedClearCase},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := tc.row(t)

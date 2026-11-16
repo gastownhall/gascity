@@ -16,7 +16,6 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/mail"
-	"github.com/gastownhall/gascity/internal/mail/beadmail"
 )
 
 type primeHookFailWriter struct {
@@ -953,7 +952,7 @@ provider = "exec:/not-used-by-auto-handoff"
 			if !ok {
 				t.Fatal("createHandoffMail(auto) failed")
 			}
-			ordinary, err := beadmail.New(store).Send("human", sessionID, "ordinary", "leave this for UserPromptSubmit")
+			ordinary, err := newTestBeadMail(store).Send("human", sessionID, "ordinary", "leave this for UserPromptSubmit")
 			if err != nil {
 				t.Fatalf("Send ordinary mail: %v", err)
 			}
@@ -1080,7 +1079,7 @@ prompt_template = "prompts/worker.md"
 	if !ok {
 		t.Fatal("createHandoffMail(auto) failed")
 	}
-	ordinary, err := beadmail.New(store).Send("human", sessionID, "ordinary", "review the auth PR")
+	ordinary, err := newTestBeadMail(store).Send("human", sessionID, "ordinary", "review the auth PR")
 	if err != nil {
 		t.Fatalf("Send ordinary mail: %v", err)
 	}

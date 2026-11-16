@@ -87,15 +87,26 @@ func (t *Tmux) turnRunning(target, family string) (bool, error) {
 // from its agent pane the way the nudge's turn guard reads it before typing
 // (paneShowsRunningTurn): for Codex the status rows right above its live
 // composer, so a Working row an earlier turn left in the scrollback is not a
-// running turn; for every other family a busy indicator anywhere in the
-// capture, as SnapshotIdle reads it. A pane that cannot be resolved or
-// captured is an error, never a reading.
+// running turn; for Claude a busy indicator anywhere in the capture, as
+// SnapshotIdle reads it. A family whose busy reading this leaf does not trust
+// (busyReadingTrusted), and a pane whose family cannot be told, is
+// [runtime.ErrIdleIndeterminate] without a capture: the scan cannot say
+// whether its turn runs. The family is SnapshotIdle's (busyTrustFamily). A
+// pane that cannot be resolved or captured, or whose family cannot be read,
+// is an error, never a reading.
 func (t *Tmux) TurnRunning(session string) (bool, error) {
 	target, err := t.agentInputTarget(session)
 	if err != nil {
 		return false, err
 	}
-	return t.turnRunning(target, t.nudgeSubmitFamily(target))
+	family, err := t.busyTrustFamily(target)
+	if err != nil {
+		return false, fmt.Errorf("turn of session %q: %w", session, err)
+	}
+	if !busyReadingTrusted(family) {
+		return false, fmt.Errorf("turn of session %q: provider family %q: %w", session, family, runtime.ErrIdleIndeterminate)
+	}
+	return t.turnRunning(target, family)
 }
 
 // codexTurnStatusRows bounds the rows read above Codex's live composer for
@@ -267,42 +278,26 @@ func heldCodexRollout(panePID int) string {
 }
 
 // selectHeldCodexRollout returns the one Codex rollout that root or any of
-// its descendants in records holds open, per openFiles. Two different
-// rollouts held in the tree, or a process whose open files cannot be read,
-// return "": a guess could judge this submit by another conversation's
-// record.
+// its descendants in records holds open, per openFiles, read as
+// treeHeldFiles reads the tree: a process whose open files the current user
+// may not read, such as a root-owned sandbox wrapper above Codex or a zombie,
+// is skipped. Two different rollouts held in the tree, or a process whose
+// open files cannot be read for any other reason, return "": a guess could
+// judge this submit by another conversation's record.
 func selectHeldCodexRollout(records []proctable.ProcessRecord, root int, openFiles func(int) ([]string, error)) string {
-	children := make(map[int][]int, len(records))
-	for _, r := range records {
-		if r.PID != root {
-			children[r.PPID] = append(children[r.PPID], r.PID)
-		}
+	files, err := treeHeldFiles(records, root, openFiles)
+	if err != nil {
+		return ""
 	}
 	held := ""
-	seen := map[int]bool{root: true}
-	queue := []int{root}
-	for len(queue) > 0 {
-		pid := queue[0]
-		queue = queue[1:]
-		files, err := openFiles(pid)
-		if err != nil {
+	for _, file := range files {
+		if !isCodexRolloutPath(file) {
+			continue
+		}
+		if held != "" {
 			return ""
 		}
-		for _, file := range files {
-			if !isCodexRolloutPath(file) || file == held {
-				continue
-			}
-			if held != "" {
-				return ""
-			}
-			held = file
-		}
-		for _, child := range children[pid] {
-			if !seen[child] {
-				seen[child] = true
-				queue = append(queue, child)
-			}
-		}
+		held = file
 	}
 	return held
 }

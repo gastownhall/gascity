@@ -245,7 +245,7 @@ func TestWorkLadderNudgesDirectlyWithoutAMessageLane(t *testing.T) {
 	}
 }
 
-func TestWorkLadderNudgesAProtocolModeSeatDirectly(t *testing.T) {
+func TestWorkLadderNudgesAnUnservedProtocolSeatDirectly(t *testing.T) {
 	lc := newLadderLaneCity(t, "message")
 	lc.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
 	lc.startedClaim()

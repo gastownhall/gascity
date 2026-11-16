@@ -43,13 +43,12 @@ func canonicalSingletonPoolAgent() config.Agent {
 
 func slingEnvTestDeps(t *testing.T, cityPath string) SlingDeps {
 	t.Helper()
-	return SlingDeps{
+	return withStore(SlingDeps{
 		CityName: "test-city",
 		CityPath: cityPath,
 		Cfg:      &config.City{Workspace: config.Workspace{Name: "test-city"}},
-		Store:    beads.NewMemStore(),
 		StoreRef: "city:test-city",
-	}
+	}, beads.NewMemStore())
 }
 
 func TestResolveSlingEnv_SingleSession_NoMolecule(t *testing.T) {

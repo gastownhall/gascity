@@ -1,11 +1,9 @@
 package materialize
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
-	"syscall"
 
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -87,11 +85,8 @@ func readRegularFile(fs fsys.FS, path string) ([]byte, error) {
 }
 
 func readRegularOSFile(path string) ([]byte, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	f, err := openRegularNoFollow(path)
 	if err != nil {
-		if errors.Is(err, syscall.ELOOP) {
-			return nil, &NotRegularFileError{Path: path, Mode: os.ModeSymlink}
-		}
 		return nil, err
 	}
 	defer f.Close() //nolint:errcheck // read-only

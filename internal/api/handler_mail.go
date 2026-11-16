@@ -80,8 +80,8 @@ func (s *Server) resolveMailSendRecipientWithContext(ctx context.Context, recipi
 	if recipient == "human" {
 		return recipient, nil
 	}
-	store := s.state.SessionsBeadStore().Store
-	if store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		resolved, err := mail.ResolveRecipient(recipient, agentEntries(s.state.Config()))
 		if err != nil {
 			return "", errMailNoBeadStore
@@ -106,7 +106,7 @@ func (s *Server) resolveMailSendRecipientWithContext(ctx context.Context, recipi
 	} else if !errors.Is(err, session.ErrSessionNotFound) {
 		return "", err
 	}
-	if address, ok, err := s.configuredMailRecipientAddress(store, recipient); err != nil {
+	if address, ok, err := s.configuredMailRecipientAddress(recipient); err != nil {
 		return "", err
 	} else if ok {
 		return address, nil
@@ -140,14 +140,14 @@ func (s *Server) refuseUnconfiguredMailSender(ctx context.Context, from string) 
 	if _, err := mail.ResolveRecipient(from, agentEntries(cfg)); err == nil {
 		return nil
 	}
-	if store := s.state.SessionsBeadStore().Store; store != nil {
-		if _, ok, err := s.configuredMailRecipientAddress(store, from); err != nil {
+	if store := s.state.Stores().Sessions(); store != (beads.SessionStore{}) {
+		if _, ok, err := s.configuredMailRecipientAddress(from); err != nil {
 			return apierr.Internal.Msg(err.Error())
 		} else if ok {
 			return nil
 		}
 		if id, err := s.resolveSessionTargetIDWithContext(ctx, store, from, apiSessionResolveOptions{}); err == nil {
-			if info, getErr := session.NewStore(beads.SessionStore{Store: store}).Get(id); getErr == nil {
+			if info, getErr := session.NewStore(store).Get(id); getErr == nil {
 				if _, ok := findAgentByQualifiedTemplate(cfg, info.Template); ok {
 					return nil
 				}
@@ -187,8 +187,8 @@ func (s *Server) resolveMailQueryWithContext(ctx context.Context, recipient stri
 	if recipient == "human" {
 		return apiMailQuery{recipients: []string{"human"}}
 	}
-	store := s.state.SessionsBeadStore().Store
-	if store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		if resolved, err := mail.ResolveRecipient(recipient, agentEntries(s.state.Config())); err == nil {
 			if resolved == recipient {
 				return apiMailQuery{recipients: []string{resolved}}
@@ -200,7 +200,7 @@ func (s *Server) resolveMailQueryWithContext(ctx context.Context, recipient stri
 		}
 		return apiMailQuery{recipients: []string{recipient}}
 	}
-	if spec, ok, err := s.findNamedSessionSpecForTarget(store, recipient); err == nil && ok {
+	if spec, ok, err := s.findNamedSessionSpecForTarget(recipient); err == nil && ok {
 		if q, listErr := s.mailQueryForNamedSession(store, spec, recipient); listErr == nil && len(q.recipients) > 0 {
 			return q
 		}
@@ -224,7 +224,7 @@ func (s *Server) resolveMailQueryWithContext(ctx context.Context, recipient stri
 // through the session that holds it now, so another live session's mail stays
 // out, as it does for a query naming the incarnation by id. With no live
 // incarnation the routes alone are the mailbox.
-func (s *Server) mailQueryForNamedSession(store beads.Store, spec apiNamedSessionSpec, recipient string) (apiMailQuery, error) {
+func (s *Server) mailQueryForNamedSession(store beads.SessionStore, spec apiNamedSessionSpec, recipient string) (apiMailQuery, error) {
 	candidates, err := s.namedSessionIncarnations(store, spec)
 	if err != nil {
 		return apiMailQuery{}, err
@@ -256,7 +256,7 @@ func (s *Server) mailQueryForNamedSession(store beads.Store, spec apiNamedSessio
 
 // namedSessionIncarnations returns the session beads, open and closed, of the
 // configured named session spec, once each.
-func (s *Server) namedSessionIncarnations(store beads.Store, spec apiNamedSessionSpec) ([]beads.Bead, error) {
+func (s *Server) namedSessionIncarnations(store beads.SessionStore, spec apiNamedSessionSpec) ([]beads.Bead, error) {
 	identity := apiNormalizeSessionTarget(spec.Identity)
 	if identity == "" {
 		return nil, nil
@@ -326,9 +326,9 @@ type apiResolvedMailTarget struct {
 // it needs an Info-taking mailbox twin fed by a metadata-filtered store list (the
 // HasOpenSessionNamed precedent), deferred to the WI-2 mail residual; until then the
 // codec stays confined to the bead-form accessors here.
-func (s *Server) resolveLiveConfiguredNamedMailTarget(store beads.Store, identifier string) (apiResolvedMailTarget, bool, error) {
+func (s *Server) resolveLiveConfiguredNamedMailTarget(store beads.SessionStore, identifier string) (apiResolvedMailTarget, bool, error) {
 	identifier = apiNormalizeSessionTarget(identifier)
-	if store == nil || identifier == "" || identifier == "human" || strings.Contains(identifier, "/") {
+	if store == (beads.SessionStore{}) || identifier == "" || identifier == "human" || strings.Contains(identifier, "/") {
 		return apiResolvedMailTarget{}, false, nil
 	}
 	identities := s.configuredNamedMailIdentities(identifier)
@@ -391,12 +391,12 @@ func (s *Server) resolveLiveConfiguredNamedMailTarget(store beads.Store, identif
 	}
 }
 
-func (s *Server) configuredMailRecipientAddress(store beads.Store, identifier string) (string, bool, error) {
+func (s *Server) configuredMailRecipientAddress(identifier string) (string, bool, error) {
 	identifier = apiNormalizeSessionTarget(identifier)
 	if identifier == "" || identifier == "human" {
 		return "", false, nil
 	}
-	spec, ok, err := s.findNamedSessionSpecForTarget(store, identifier)
+	spec, ok, err := s.findNamedSessionSpecForTarget(identifier)
 	if err != nil || !ok {
 		return "", false, err
 	}

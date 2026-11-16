@@ -44,7 +44,7 @@ func (s WorkflowStop) Outcome() string {
 // with the teardown tail exempted: teardown runs after its root reaches a
 // terminal state by contract, so a settled or canceled root is the condition
 // it waits for, not a reason to skip it.
-func WorkflowStopReason(store beads.Store, bead beads.Bead) (WorkflowStop, error) {
+func WorkflowStopReason(store beads.MoleculeTarget, bead beads.Bead) (WorkflowStop, error) {
 	stop, err := StoppedWorkflowAncestor(store, bead)
 	if err != nil || !stop.Stopped() {
 		return WorkflowStop{}, err
@@ -74,8 +74,8 @@ func WorkflowStopReason(store beads.Store, bead beads.Bead) (WorkflowStop, error
 // maxWorkflowStopHops: this is a gate on starting work, and an unreadable
 // ancestry is not evidence that the workflow stopped. Any other read error is
 // returned.
-func StoppedWorkflowAncestor(store beads.Store, bead beads.Bead) (WorkflowStop, error) {
-	if store == nil {
+func StoppedWorkflowAncestor(store beads.MoleculeTarget, bead beads.Bead) (WorkflowStop, error) {
+	if store.Absent() {
 		return WorkflowStop{}, nil
 	}
 	current := bead
@@ -132,7 +132,7 @@ func workflowRootStop(root beads.Bead) (WorkflowStop, bool) {
 	return WorkflowStop{}, false
 }
 
-func getWorkflowLink(store beads.Store, id string) (beads.Bead, bool, error) {
+func getWorkflowLink(store beads.MoleculeTarget, id string) (beads.Bead, bool, error) {
 	b, err := store.Get(id)
 	if err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
@@ -147,7 +147,7 @@ func getWorkflowLink(store beads.Store, id string) (beads.Bead, bool, error) {
 // tail as TeardownTailExclusion defines it. The cheap arm answers for a bead
 // that carries gc.scope_role=teardown itself; an attempt linked to a teardown
 // step only by gc.step_id needs the subtree read.
-func IsTeardownTailMember(store beads.Store, bead beads.Bead) (bool, error) {
+func IsTeardownTailMember(store beads.MoleculeTarget, bead beads.Bead) (bool, error) {
 	if bead.Metadata[beadmeta.ScopeRoleMetadataKey] == beadmeta.ScopeRoleTeardown {
 		return true, nil
 	}

@@ -57,6 +57,7 @@ type fakeStartOps struct {
 
 	isSessionRunningResult     *bool
 	isRuntimeRunningResult     bool
+	isRuntimeRunningErr        error
 	killErr                    error
 	waitCommandErr             error
 	acceptStartupDialogsErr    error
@@ -140,13 +141,13 @@ func (f *fakeStartOps) isSessionRunning(name string) bool {
 	return *f.isSessionRunningResult
 }
 
-func (f *fakeStartOps) isRuntimeRunning(name string, processNames []string) bool {
+func (f *fakeStartOps) isRuntimeRunning(name string, processNames []string) (bool, error) {
 	f.calls = append(f.calls, startCall{
 		method:       "isRuntimeRunning",
 		name:         name,
 		processNames: processNames,
 	})
-	return f.isRuntimeRunningResult
+	return f.isRuntimeRunningResult, f.isRuntimeRunningErr
 }
 
 func (f *fakeStartOps) killSession(name string) error {
@@ -2758,6 +2759,28 @@ func TestEnsureFreshSession_HealthyExisting(t *testing.T) {
 	}
 
 	// Should not kill or recreate.
+	assertCallSequence(t, ops, []string{"createSession", "isSessionRunning", "isRuntimeRunning"})
+}
+
+// A held session whose agent liveness cannot be read (the process table did
+// not answer) is refused like a live one: the error says the name is taken
+// and carries the runtime.ErrRuntimeUnavailable cause, and nothing is killed
+// or recreated. Kills reading a failed liveness read as a zombie.
+func TestEnsureFreshSession_UnknownLivenessRefusesHeldName(t *testing.T) {
+	running := true
+	ops := &fakeStartOps{
+		isSessionRunningResult: &running,
+		createErrs:             []error{ErrSessionExists},
+		isRuntimeRunningErr:    fmt.Errorf("%w: reading the process table: signal: killed", runtime.ErrRuntimeUnavailable),
+	}
+
+	err := ensureFreshSession(ops, "test", runtime.Config{
+		Command:      "claude",
+		ProcessNames: []string{"claude"},
+	})
+	if !errors.Is(err, runtime.ErrSessionExists) || !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("ensureFreshSession = %v, want runtime.ErrSessionExists carrying runtime.ErrRuntimeUnavailable", err)
+	}
 	assertCallSequence(t, ops, []string{"createSession", "isSessionRunning", "isRuntimeRunning"})
 }
 

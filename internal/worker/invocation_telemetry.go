@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	"github.com/gastownhall/gascity/internal/usage"
+	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
 
 var (
@@ -646,6 +647,28 @@ func usagesSinceCursor(usages []sessionlog.TailUsage, cursor string) []sessionlo
 // the session_key, work dir, and cursor all read from it), and now stamps the
 // emitted facts.
 func (f *Factory) SweepSessionModelUsage(ctx context.Context, id string, meta map[string]string, now time.Time) (emitted int, settled bool, err error) {
+	return f.sweepSessionModelUsage(ctx, id, meta, now, f.discoverSweepTranscript)
+}
+
+// SweepClosedIntervalModelUsage is SweepSessionModelUsage for the awake
+// interval a session close ended, which the row may have left since: meta is
+// that interval's view of the row (session.UsageClosedIntervalMetadata).
+// Discovery reads meta alone (discoverClosedIntervalTranscript), so a reopened
+// row's newer conversation never stands in for the closed one.
+func (f *Factory) SweepClosedIntervalModelUsage(ctx context.Context, id string, meta map[string]string, now time.Time) (emitted int, settled bool, err error) {
+	return f.sweepSessionModelUsage(ctx, id, meta, now, f.discoverClosedIntervalTranscript)
+}
+
+// sweepSessionModelUsage is the sweep both entry points share, over the
+// transcript discovery that resolves the path and classifies a miss
+// (discoverSweepTranscript's results).
+func (f *Factory) sweepSessionModelUsage(
+	ctx context.Context,
+	id string,
+	meta map[string]string,
+	now time.Time,
+	discover func(family, id string, meta map[string]string, now time.Time) (path string, scanClean, emptyIsPermanent bool),
+) (emitted int, settled bool, err error) {
 	id = strings.TrimSpace(id)
 	if f == nil || id == "" || meta == nil {
 		return 0, true, nil
@@ -664,7 +687,7 @@ func (f *Factory) SweepSessionModelUsage(ctx context.Context, id string, meta ma
 			slog.String("session_id", id), slog.String("provider", strings.TrimSpace(meta["provider"])))
 		return 0, true, nil
 	}
-	path, scanClean, emptyIsPermanent := f.discoverSweepTranscript(family, id, meta, now)
+	path, scanClean, emptyIsPermanent := discover(family, id, meta, now)
 	keyless := strings.TrimSpace(meta["session_key"]) == ""
 	keylessCodex := family == "codex" && keyless
 	keylessClaude := family == "claude" && keyless
@@ -936,6 +959,29 @@ func (f *Factory) discoverSweepTranscript(family, id string, meta map[string]str
 	}
 }
 
+// discoverClosedIntervalTranscript is discoverSweepTranscript for the interval
+// a session close ended. Codex and opencode already resolve from meta. Claude
+// resolves by meta's session_key alone: the manager's lookup reads the row's
+// current key, which a reopen's fresh wake replaces, and on a keyed miss it
+// lists the session history of the work dir, a read a closed interval would
+// repeat on every retry. A keyed miss stays transient (the transcript may not
+// be on disk yet); without a key nothing names the closed conversation's
+// transcript, so the miss is permanent.
+func (f *Factory) discoverClosedIntervalTranscript(family, id string, meta map[string]string, now time.Time) (path string, scanClean, emptyIsPermanent bool) {
+	if family != "claude" {
+		return f.discoverSweepTranscript(family, id, meta, now)
+	}
+	key := strings.TrimSpace(meta["session_key"])
+	if key == "" {
+		return "", true, true
+	}
+	searchPaths := f.searchPaths
+	if len(searchPaths) == 0 {
+		searchPaths = sessionlog.DefaultSearchPaths()
+	}
+	return workertranscript.DiscoverKeyedPath(searchPaths, family, meta["work_dir"], key), true, false
+}
+
 // sweepAgentName resolves the metric AgentName label for a swept session from
 // its metadata, mirroring the prompt-op seam's agent_name → alias → session_name
 // fallback so the gc.agent.tokens.* series carry the same identity from either
@@ -950,24 +996,19 @@ func sweepAgentName(meta map[string]string) string {
 }
 
 // sweepIntervalWindow derives the codex discovery date window from a terminal
-// session's awake interval: [awake_started_at, slept_at]. slept_at is refreshed
-// by both SleepPatch and AcknowledgeDrainPatch, so a drained session tightens
-// notAfter from now to its drain-ack time. When slept_at is missing or not after
-// the start (a terminal exit that does not refresh it, or a value carried over
-// from a prior awake interval), it falls back to now as the interval end, so
-// notAfter is always set and never reversed — FindCodexSessionFileByID requires
+// session's awake interval: [awake_started_at, sessionpkg.UsageIntervalEnd].
+// slept_at is refreshed by both SleepPatch and AcknowledgeDrainPatch, so a
+// drained session tightens notAfter from now to its drain-ack time, and a usage
+// close marker bounds a session closed straight from a live state. When neither
+// lies after the start (a terminal exit that does not refresh slept_at, or a
+// value carried over from a prior awake interval), it falls back to now as the
+// interval end, so notAfter is always set and never reversed — FindCodexSessionFileByID requires
 // a non-zero notAfter and refuses a reversed range. The finder pads both ends by
 // a local day, so an off-by-seconds bound — including the tighter drain-ack
 // bound — cannot drop the rollout's day directory.
 func sweepIntervalWindow(meta map[string]string, now time.Time) (notBefore, notAfter time.Time) {
-	notAfter = now
 	if started, err := time.Parse(time.RFC3339, strings.TrimSpace(meta["awake_started_at"])); err == nil {
 		notBefore = started
 	}
-	if sleptRaw := strings.TrimSpace(meta["slept_at"]); sleptRaw != "" {
-		if slept, err := time.Parse(time.RFC3339, sleptRaw); err == nil && slept.After(notBefore) {
-			notAfter = slept
-		}
-	}
-	return notBefore, notAfter
+	return notBefore, sessionpkg.UsageIntervalEnd(meta, notBefore, now)
 }

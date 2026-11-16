@@ -376,14 +376,25 @@ func TestTearDownManualRowRuntime_Edges(t *testing.T) {
 	})
 }
 
+// heldTeardownHold is the one hold kind a held releaseRowOwnedRuntimeLeased
+// case logs: kind, or row_moved_on for a row that moved on since the snapshot.
+func heldTeardownHold(kind string) string {
+	if kind == "" {
+		return "row_moved_on.pending_create_teardown"
+	}
+	return kind
+}
+
 // TestReleaseRowOwnedRuntimeLeased_ManualRowDecidesAgainUnderTheFlock: a tick
 // decides from its snapshot, so a start that commits the row (or a writer that
 // closes it) after the snapshot must not have its box stopped. The tick
 // re-reads the row under the name's flock and stops only while it still
-// matches; a re-read that fails holds the row.
+// matches; a re-read that fails holds the row, and so does a row that moved
+// on, saying so.
 //
-// Kills: no fresh re-read under the flock; manualTeardownSnapshotCurrent
-// without any one of its terms; a failed re-read that tears down.
+// Kills: no fresh re-read under the flock; teardownSnapshotCurrent
+// without any one of its terms; a failed re-read that tears down; a moved-on
+// hold that logs nothing.
 func TestReleaseRowOwnedRuntimeLeased_ManualRowDecidesAgainUnderTheFlock(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -393,7 +404,8 @@ func TestReleaseRowOwnedRuntimeLeased_ManualRowDecidesAgainUnderTheFlock(t *test
 		// store, when set, is the store the row is re-read from.
 		store    func(store beads.Store, id string) beads.Store
 		wantStop bool
-		// wantHold, when set, is the one hold kind the tick logs.
+		// wantHold is the one hold kind a held case logs; unset, the row
+		// moved on (heldTeardownHold).
 		wantHold string
 	}{
 		{name: "row unchanged", wantStop: true},
@@ -459,10 +471,168 @@ func TestReleaseRowOwnedRuntimeLeased_ManualRowDecidesAgainUnderTheFlock(t *test
 			if !tc.wantStop && !env.sp.IsRunning(name) {
 				t.Fatal("the box of a row that moved on was stopped")
 			}
-			if tc.wantHold != "" && (len(holds) != 1 || holds[0] != tc.wantHold) {
-				t.Fatalf("holds = %q, want [%s]; stderr=%s", holds, tc.wantHold, stderr.String())
+			if want := heldTeardownHold(tc.wantHold); !tc.wantStop && (len(holds) != 1 || holds[0] != want) {
+				t.Fatalf("holds = %q, want [%s]; stderr=%s", holds, want, stderr.String())
 			}
 		})
+	}
+}
+
+// TestReleaseRowOwnedRuntimeLeased_PoolRowDecidesAgainUnderTheFlock: a tick
+// decides a bead-scoped pool row's teardown from its snapshot too, so a start
+// that commits the row (or a writer that re-wakes it) after the snapshot and
+// releases the name's flock must not have its box stopped (#7751). The tick
+// re-reads the row under the flock and stops only while it still matches, or
+// once it is closed: the name embeds the row's bead ID, so nothing else
+// addresses a box left under it (ga-vcjr9). A re-read that fails holds the
+// row, and so does a row that moved on, saying so.
+//
+// Kills: no fresh re-read for pool rows; teardownSnapshotCurrent without any
+// one of its terms; a closed pool row's box left running; a failed re-read
+// that tears down; a moved-on hold that logs nothing.
+func TestReleaseRowOwnedRuntimeLeased_PoolRowDecidesAgainUnderTheFlock(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		after func(t *testing.T, env *reconcilerTestEnv, session *beads.Bead)
+		// meta, when set, is written to the row after the snapshot.
+		meta map[string]string
+		// store, when set, is the store the row is re-read from.
+		store    func(store beads.Store, id string) beads.Store
+		wantStop bool
+		// wantHold is the one hold kind a held case logs; unset, the row
+		// moved on (heldTeardownHold).
+		wantHold string
+	}{
+		{name: "row unchanged", wantStop: true},
+		{
+			name: "row closed",
+			after: func(t *testing.T, env *reconcilerTestEnv, session *beads.Bead) {
+				if err := env.store.Close(session.ID); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantStop: true,
+		},
+		{
+			name: "start committed",
+			after: func(_ *testing.T, env *reconcilerTestEnv, session *beads.Bead) {
+				env.setSessionMetadata(session, map[string]string{"state": string(sessionpkg.StateActive), "pending_create_claim": ""})
+			},
+		},
+		{
+			name: "row re-woken",
+			after: func(_ *testing.T, env *reconcilerTestEnv, session *beads.Bead) {
+				env.setSessionMetadata(session, map[string]string{"last_woke_at": env.clk.Now().UTC().Format(time.RFC3339)})
+			},
+		},
+		// Each changes one compared field alone. last_woke_at has one-second
+		// resolution, so two wakes in the same second differ only in token
+		// and generation.
+		{name: "instance token rotated", meta: map[string]string{"instance_token": "test-token-2"}},
+		{name: "generation bumped", meta: map[string]string{"generation": "2"}},
+		{name: "claim cleared", meta: map[string]string{"pending_create_claim": ""}},
+		{name: "active with its claim kept", meta: map[string]string{"state": string(sessionpkg.StateActive)}},
+		{
+			name: "re-read fails",
+			store: func(store beads.Store, id string) beads.Store {
+				return &failingGetStore{Store: store, failID: id, err: errors.New("store unavailable")}
+			},
+			wantHold: "row_reread_failed.pending_create_teardown",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, session, name := newRestartedPendingCreate(t, rowPool)
+			snapshot := env.sessionInfo(session.ID)
+			if tc.after != nil {
+				tc.after(t, env, &session)
+			}
+			if tc.meta != nil {
+				env.setSessionMetadata(&session, tc.meta)
+			}
+			store := env.store
+			if tc.store != nil {
+				store = tc.store(env.store, session.ID)
+			}
+			var stderr bytes.Buffer
+			var holds []string
+			hold := func(kind, line string) {
+				holds = append(holds, kind)
+				fmt.Fprintln(&stderr, line) //nolint:errcheck
+			}
+			released := releaseRowOwnedRuntimeLeased(env.city, store, snapshot, execProfile(env.sp), &stderr, hold)
+			stops := countCalls(env.sp, "Stop")
+			if tc.wantStop {
+				if stops != 1 || !released || env.sp.IsRunning(name) {
+					t.Fatalf("stops=%d released=%v running=%v, want one stop and the row released; stderr=%s", stops, released, env.sp.IsRunning(name), stderr.String())
+				}
+				return
+			}
+			if stops != 0 || released {
+				t.Fatalf("stops=%d released=%v, want no stop and the row held; stderr=%s", stops, released, stderr.String())
+			}
+			if !env.sp.IsRunning(name) {
+				t.Fatal("the box of a row that moved on was stopped")
+			}
+			if want := heldTeardownHold(tc.wantHold); len(holds) != 1 || holds[0] != want {
+				t.Fatalf("holds = %q, want [%s]; stderr=%s", holds, want, stderr.String())
+			}
+		})
+	}
+}
+
+// commitOnLivenessProvider is a remote runtime with no is-running: every box
+// reads not running. Its first liveness read runs commit, standing in for a
+// start that commits the row after a pass listed it and before the pass
+// reaches the row's teardown.
+type commitOnLivenessProvider struct {
+	runtime.Provider
+	commit func()
+}
+
+func (p *commitOnLivenessProvider) IsRunning(string) bool {
+	if p.commit != nil {
+		p.commit()
+		p.commit = nil
+	}
+	return false
+}
+
+// TestReapStaleSessionBeads_PoolRowCommittedAfterListKeepsItsRuntime: the
+// stuck-creating reaper decides from the rows it listed, so a bead-scoped pool
+// row whose start commits it active after the list must not have its box
+// stopped or the row closed.
+//
+// Kills: the reaper's pool teardown stopping from its listed snapshot.
+func TestReapStaleSessionBeads_PoolRowCommittedAfterListKeepsItsRuntime(t *testing.T) {
+	env, session, name := newRestartedPendingCreate(t, rowPool)
+	// The store stamps CreatedAt from the wall clock.
+	clk := &clock.Fake{Time: time.Now().Add(24 * time.Hour)}
+	sp := &commitOnLivenessProvider{Provider: execProfile(env.sp), commit: func() {
+		env.setSessionMetadata(&session, map[string]string{
+			"state":                     string(sessionpkg.StateActive),
+			"state_reason":              "creation_complete",
+			"pending_create_claim":      "",
+			"pending_create_started_at": "",
+			"instance_token":            "test-token-2",
+			"generation":                "2",
+			"last_woke_at":              clk.Now().UTC().Format(time.RFC3339),
+		})
+	}}
+
+	reaped := reapStaleSessionBeads(env.city, env.store, testSeatWork(env.city, nil, env.store, nil), sp, env.dt, nil, clk, &env.stderr)
+
+	if sp.commit != nil {
+		t.Fatal("fixture: the reaper never read the row's liveness, so the commit never landed")
+	}
+	if n := countCalls(env.sp, "Stop"); n != 0 || !env.sp.IsRunning(name) {
+		t.Fatalf("Stop called %d times, running=%v; want the committed start's box left running; stderr=%s", n, env.sp.IsRunning(name), env.stderr.String())
+	}
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reaped != 0 || got.Status == "closed" || got.Metadata["state"] != string(sessionpkg.StateActive) {
+		t.Fatalf("reaped=%d status=%s state=%q, want the row open and active; stderr=%s", reaped, got.Status, got.Metadata["state"], env.stderr.String())
 	}
 }
 

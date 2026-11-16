@@ -156,7 +156,7 @@ func (r *restartWriteRefusal) peek() (answered bool, refusal error) {
 	if r.answered {
 		return true, r.refusal
 	}
-	writer, _, err := beads.ResolveConditionalWriter(beads.SessionStore{Store: r.m.store})
+	writer, _, err := beads.ResolveConditionalWriter(r.m.store)
 	switch {
 	case err != nil:
 		r.answered, r.refusal = true, err

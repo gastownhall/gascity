@@ -568,6 +568,16 @@ func TestFencedDeliverNowSendOutageQueues(t *testing.T) {
 	expectFence(t, x, out, err, "N(msg)", TurnInterruptReport{Outcome: TurnInterruptNoTurn}, true, false)
 }
 
+// TestFencedDeliverNowQueuesWhenSendRefusedBehindPending (row A21): a
+// pending interaction that opened after the up-front look refuses the
+// send; the message is queued for after it is answered, never dropped.
+func TestFencedDeliverNowQueuesWhenSendRefusedBehindPending(t *testing.T) {
+	x := newFenceFixture(t, fenceFixtureOpts{})
+	x.f.NudgeErrors[x.info.SessionName] = fmt.Errorf("%w: approval open", runtime.ErrNudgeRefusedPendingInteraction)
+	out, err := x.submit(t, fenceMsg)
+	expectFence(t, x, out, err, "N(msg)", TurnInterruptReport{Outcome: TurnInterruptNoTurn}, true, false)
+}
+
 func TestFencedDeliverNowSendFailureReturnsTheError(t *testing.T) {
 	x := newFenceFixture(t, fenceFixtureOpts{})
 	rejected := errors.New("thread rejected the message")

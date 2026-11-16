@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	storebindingsqlite "github.com/gastownhall/gascity/internal/storebinding/sqlite"
@@ -29,10 +30,10 @@ func TestPersistedTranscriptMetaSnapshotReadsLegacySessionsDB(t *testing.T) {
 	legacyTranscriptMetaInsert(t, databasePath, "current", "legacy-overwrite", "wrong-key")
 
 	before := legacyTranscriptMetaHash(t, databasePath)
-	manager := session.NewManagerWithOptions(beads.NewMemStoreFrom(1, []beads.Bead{{
+	manager := session.NewManagerWithOptions(beadstest.Sessions(beads.NewMemStoreFrom(1, []beads.Bead{{
 		ID: "current", Type: session.BeadType, Status: "closed", Labels: []string{session.LabelSession},
 		Metadata: map[string]string{"provider": "current-provider", "session_key": "current-key", "work_dir": "/current"},
-	}}, nil), runtime.NewFake(), session.WithCityPath(city))
+	}}, nil)), runtime.NewFake(), session.WithCityPath(city))
 
 	legacy, err := storebindingsqlite.ReadLegacySessionsSnapshot(city)
 	if err != nil {

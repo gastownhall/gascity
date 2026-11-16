@@ -1741,6 +1741,10 @@ scrollback line unrelated to any modal
 scrollback line unrelated to any modal
 comment: and a third names Wait for limit to reset as the confirm arm`
 
+// claudeSpendLimitModal is Claude's spend-limit modal, a rate-limit screen
+// with a reset rather than a terminal error.
+const claudeSpendLimitModal = "What do you want to do?\nUsage credit balance: $573.37\n❯ Adjust monthly spend limit: $1503.19\n  Wait for limit to reset      Resets Jul 12 at 11pm (America/Los_Angeles)\nEnter to confirm · Esc to cancel"
+
 func TestContainsProviderRateLimitScreen(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -1752,7 +1756,7 @@ func TestContainsProviderRateLimitScreen(t *testing.T) {
 		{name: "claude hit limit", content: "You've hit your limit, Pro plan", want: true},
 		{name: "claude rate limit options", content: "/rate-limit-options", want: true},
 		{name: "provider menu shape", content: "Rate limit reached\n1. Keep trying\n2. Stop", want: true},
-		{name: "claude spend limit modal", content: "What do you want to do?\nUsage credit balance: $573.37\n❯ Adjust monthly spend limit: $1503.19\n  Wait for limit to reset      Resets Jul 12 at 11pm (America/Los_Angeles)\nEnter to confirm · Esc to cancel", want: true},
+		{name: "claude spend limit modal", content: claudeSpendLimitModal, want: true},
 		{name: "spend limit words without reset option", content: "notes mention Adjust monthly spend limit and Usage credit balance while documenting billing", want: false},
 		{name: "spend limit tokens scattered across unrelated scrollback", content: spendLimitTokensScatteredScrollback, want: false},
 		{name: "generic crash output", content: "worker failed while parsing rate limit config", want: false},
@@ -1924,5 +1928,123 @@ func TestContainsFeedbackSurveyModal(t *testing.T) {
 				t.Fatalf("ContainsFeedbackSurveyModal(%q) = %v, want %v", tt.content, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestProviderTerminalErrorReasonCreditBalance pins the exhausted-credit arm:
+// Claude Code's credit stop, shown as its own error line, is a terminal
+// quota_exceeded error, while text that only quotes the phrasing is not.
+// Multi-line fixtures are joined from quoted strings so viewing this file in a
+// pane never renders a matching stop line itself.
+func TestProviderTerminalErrorReasonCreditBalance(t *testing.T) {
+	t.Parallel()
+	const apiCreditError = `API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}}`
+	const tuiStop = "  ⎿  Credit balance too low · Add funds: https://platform.claude.com/settings/billing"
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{name: "tui stop after a tool call", content: strings.Join([]string{
+			"⏺ Bash(make test)",
+			tuiStop,
+			"",
+			"╭──────────────────────────────╮",
+			"│ >                            │",
+			"╰──────────────────────────────╯",
+			"  ? for shortcuts",
+		}, "\n"), want: "quota_exceeded"},
+		{name: "tui stop alone", content: tuiStop, want: "quota_exceeded"},
+		{name: "tui stop with ascii marker padding", content: "  ⎿  Credit balance too low · Add funds: https://platform.claude.com/settings/billing", want: "quota_exceeded"},
+		{name: "tui stop without marker", content: "Credit balance too low · Add funds: https://platform.claude.com/settings/billing", want: "quota_exceeded"},
+		{name: "tui stop with url clipped", content: "  ⎿  Credit balance too low · Add fu", want: "quota_exceeded"},
+		{name: "tui stop clipped at separator", content: "  ⎿  Credit balance too low ·", want: "quota_exceeded"},
+		{name: "tui stop upper case", content: "  ⎿  CREDIT BALANCE TOO LOW · ADD FUNDS", want: "quota_exceeded"},
+		{name: "headless stop alone", content: "Credit balance is too low", want: "quota_exceeded"},
+		{name: "headless stop after output", content: strings.Join([]string{
+			"Reading files...",
+			"Credit balance is too low",
+		}, "\n"), want: "quota_exceeded"},
+		{name: "headless stop under marker", content: "  ⎿  Credit balance is too low", want: "quota_exceeded"},
+		{name: "startup death error", content: strings.Join([]string{
+			`session died during startup: session "worker"; last pane output:`,
+			"⎿  Credit balance too low · Add funds: https://platform.claude.com/settings/billing",
+		}, "\n"), want: "quota_exceeded"},
+		{name: "startup death error with diagnostic", content: strings.Join([]string{
+			`session died during startup: session "worker"; diagnostic written to /tmp/city/.gc/crash/worker.log; last pane output:`,
+			"⎿  Credit balance too low · Add funds: https://platform.claude.com/settings/billing",
+			"",
+			"> ",
+		}, "\n"), want: "quota_exceeded"},
+		{name: "api error on one line under marker", content: "  ⎿  " + apiCreditError, want: "quota_exceeded"},
+		{name: "api error wrapped between words", content: strings.Join([]string{
+			"⏺ Bash(make test)",
+			`  ⎿  API Error: 400 {"type":"error","error":{"type":"invalid_request_error",`,
+			`     "message":"Your credit balance is too low to`,
+			`     access the Anthropic API. Please go to Plans & Billing to upgrade or`,
+			`     purchase credits."}}`,
+		}, "\n"), want: "quota_exceeded"},
+		{name: "api error wrapped mid-word", content: strings.Join([]string{
+			`  ⎿  API Error: 400 {"type":"error","error":{"type":"invalid_request_error",`,
+			`     "message":"Your credit balance is too lo`,
+			`     w to access the Anthropic API. Please go to Plans & Billing to upgrade `,
+			`     or purchase credits."}}`,
+			"",
+			"> ",
+		}, "\n"), want: "quota_exceeded"},
+		{name: "grep hit on the tui stop", content: "internal/runtime/x.go:12:  // Credit balance too low · Add funds", want: ""},
+		{name: "grep hit on the headless stop", content: "docs/x.md:3:Credit balance is too low", want: ""},
+		{name: "mid-line prose with the headless phrase", content: "The run stopped: credit balance is too low on that key.", want: ""},
+		{name: "mid-line prose with the tui phrase", content: "I saw Credit balance too low earlier", want: ""},
+		{name: "wrapped prose starting a line with the tui phrase", content: strings.Join([]string{
+			"The alert went out because the",
+			"credit balance too low warning fired",
+		}, "\n"), want: ""},
+		{name: "wrapped prose starting a line with the headless phrase", content: strings.Join([]string{
+			"I doubt the",
+			"credit balance is too low to matter here",
+		}, "\n"), want: ""},
+		{name: "api sentence in prose", content: "The docs say: Your credit balance is too low to access the Anthropic API.", want: ""},
+		{name: "api sentence on an unindented line after an api error", content: strings.Join([]string{
+			"  ⎿  API Error: 400 bad request",
+			"Your credit balance is too low to access the Anthropic API.",
+		}, "\n"), want: ""},
+		{name: "api sentence after a blank line following an api error", content: strings.Join([]string{
+			"  ⎿  API Error: 400 bad request",
+			"",
+			"     Your credit balance is too low to access the Anthropic API.",
+		}, "\n"), want: ""},
+		{name: "api sentence past the continuation bound", content: strings.Join([]string{
+			"  ⎿  API Error: 400 bad request",
+			"     one",
+			"     two",
+			"     three",
+			"     four",
+			"     five",
+			"     Your credit balance is too low to access the Anthropic API.",
+		}, "\n"), want: ""},
+		{name: "api sentence under a 5xx api error", content: "  ⎿  API Error: 529 Your credit balance is too low to access the Anthropic API.", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ProviderTerminalErrorReason(tt.content); got != tt.want {
+				t.Errorf("ProviderTerminalErrorReason(%q) = %q, want %q", tt.content, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestProviderTerminalErrorReasonSpendLimitModalIsNotTerminal pins that the
+// credit-balance arm leaves Claude's spend-limit modal ("Usage credit balance")
+// to the rate-limit classifier: callers check terminal first, so a terminal hit
+// would permanently steal a screen that resets on its own.
+func TestProviderTerminalErrorReasonSpendLimitModalIsNotTerminal(t *testing.T) {
+	t.Parallel()
+	if got := ProviderTerminalErrorReason(claudeSpendLimitModal); got != "" {
+		t.Errorf("ProviderTerminalErrorReason(spend-limit modal) = %q, want \"\"", got)
+	}
+	if !ContainsProviderRateLimitScreen(claudeSpendLimitModal) {
+		t.Error("ContainsProviderRateLimitScreen(spend-limit modal) = false, want true")
 	}
 }

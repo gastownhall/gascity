@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -994,7 +995,7 @@ func sessionMutationLockHeld(id string) bool {
 func (s *turnSession) onLockedLoad(t *testing.T, onLocked func() error) {
 	t.Helper()
 	store := &lockedLoadStore{Store: s.store, id: s.info.ID, onLocked: onLocked}
-	s.handle.manager = sessionpkg.NewManagerWithOptions(store, s.sp, sessionpkg.WithCityPath(t.TempDir()))
+	s.handle.manager = sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), s.sp, sessionpkg.WithCityPath(t.TempDir()))
 }
 
 // startSharedRead puts a shared read of key in flight that answers stale only

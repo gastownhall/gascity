@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -103,7 +104,7 @@ func TestAPIKillUnderFenceIsNotACrash(t *testing.T) {
 				w.pass()
 				atStop, _ = w.store.Get("gc-1")
 			}
-			mgr := session.NewManagerWithOptions(w.store, sp, session.WithCityPath(cityPath), session.WithClock(w.clk))
+			mgr := session.NewManagerWithOptions(beadstest.Sessions(w.store), sp, session.WithCityPath(cityPath), session.WithClock(w.clk))
 			kill := func(ctx context.Context, by session.Actor) error { return mgr.Kill(ctx, by, "gc-1") }
 			if err := mgr.KillFenced(context.Background(), testActorIn(t, session.ActorOperator, cityPath), "gc-1", kill); err != nil {
 				t.Fatalf("KillFenced: %v", err)
@@ -265,7 +266,7 @@ func TestKilledWokenSeatRestartsAsANewIncarnationInBothModes(t *testing.T) {
 				if b := get(t, w.store); !w.sp.IsRunning(c.sessionName) || b.Metadata["generation"] != "1" {
 					t.Fatalf("premise: the seat runs at generation 1 before the kill (row %v)", b.Metadata)
 				}
-				mgr := session.NewManagerWithOptions(w.store, w.sp, session.WithCityPath(cityPath), session.WithClock(w.clk))
+				mgr := session.NewManagerWithOptions(beadstest.Sessions(w.store), w.sp, session.WithCityPath(cityPath), session.WithClock(w.clk))
 				kill := func(ctx context.Context, by session.Actor) error { return mgr.Kill(ctx, by, c.id) }
 				if err := mgr.KillFenced(context.Background(), testActorIn(t, session.ActorOperator, cityPath), c.id, kill); err != nil {
 					t.Fatalf("KillFenced: %v", err)
@@ -404,7 +405,7 @@ func TestKillFenceLiftsAfterTheLeaseInBothModes(t *testing.T) {
 			store := &fenceLiftStore{Store: w.store}
 			lifted := false
 			store.lifted = func() { lifted = true; w.atLift() }
-			mgr := session.NewManagerWithOptions(store, w.sp, session.WithCityPath(cityPath), session.WithClock(w.clk))
+			mgr := session.NewManagerWithOptions(beadstest.Sessions(store), w.sp, session.WithCityPath(cityPath), session.WithClock(w.clk))
 			kill := func(ctx context.Context, by session.Actor) error { return mgr.Kill(ctx, by, "gc-1") }
 			if err := mgr.KillFenced(context.Background(), testActorIn(t, session.ActorOperator, cityPath), "gc-1", kill); err != nil {
 				t.Fatalf("KillFenced: %v", err)
@@ -463,7 +464,7 @@ func TestV2KillFenceGraceRecoversAFailedLeaseRelease(t *testing.T) {
 	s := w.s
 	w.settle(t, f.Name)
 	store := s.legs[0].backing
-	mgr := session.NewManagerWithOptions(leaseClearRefusingStore{store}, w.sp, session.WithCityPath(cityPath), session.WithClock(s.clk))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(leaseClearRefusingStore{store}), w.sp, session.WithCityPath(cityPath), session.WithClock(s.clk))
 	kill := func(ctx context.Context, by session.Actor) error { return mgr.Kill(ctx, by, "gc-1") }
 	if err := mgr.KillFenced(context.Background(), testActorIn(t, session.ActorOperator, cityPath), "gc-1", kill); err != nil {
 		t.Fatalf("KillFenced: %v", err)

@@ -699,11 +699,10 @@ func TestStepRotationDrivesCatchUpDespiteReusedInode(t *testing.T) {
 	}
 	rec.WaitForRotations() // archive-1 (seq 1..4) exists; active holds the anchor
 
-	info, err := os.Stat(path)
+	_, activeInode, err := statInode(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	activeInode := inodeOf(info)
 	if activeInode == 0 {
 		t.Skip("inode unavailable on this platform")
 	}
@@ -770,11 +769,10 @@ func TestWatchConclusionWindowRotationNotLost(t *testing.T) {
 	}
 	rec.WaitForRotations() // archive-1 (seq 1..4); active holds the anchor (seq 5)
 
-	info, err := os.Stat(path)
+	_, activeInode, err := statInode(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	activeInode := inodeOf(info)
 	if activeInode == 0 {
 		t.Skip("inode unavailable on this platform")
 	}

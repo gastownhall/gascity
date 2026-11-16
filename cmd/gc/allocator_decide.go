@@ -122,6 +122,9 @@ type demandView struct {
 	// probes (demandProbeStores): K1's lane reads them, and gather's
 	// lane-fed check reuses them rather than build the targets again.
 	ProbeStores []beads.Store
+	// ClaimedDemand is the default-probe demand gather dropped as work this
+	// pass already reads as claimed (withoutClaimedDemand), by template.
+	ClaimedDemand map[string]claimedDemandCut
 }
 
 // endpointView is one endpoint's breaker as the pass reads it.
@@ -184,6 +187,8 @@ type decidePass struct {
 	poolStates  []PoolDesiredState
 	poolDesired map[string]int
 	poolWork    []beads.Bead
+	// parked is the pass's park verdicts (parkSeats), by session bead ID.
+	parked parkedSeats
 	// inFlight are the planning reservations of the in-flight creates the
 	// census does not show yet (inFlightCreates), and standIns the templates
 	// of the pending-create rows the pool ones stand in for, by stand-in ID.
@@ -639,6 +644,7 @@ func (p *decidePass) classify(decisions map[string]AwakeDecision) {
 			e.Config = &ref
 			e.Normalize = sel.normalize
 		}
+		e.Park = p.parked[info.ID]
 		d := decisions[info.ID]
 		if d.HasAssignedWork || d.AssignedWorkBeadID != "" {
 			e.AssignedWork = &assignedWorkView{BeadID: d.AssignedWorkBeadID, Claimed: d.AssignedWorkClaimed, RequiresFreshCycle: d.RequiresFreshCycle}

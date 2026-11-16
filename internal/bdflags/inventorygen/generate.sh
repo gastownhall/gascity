@@ -12,6 +12,8 @@
 #   enterprise,nometrics,gms_pure_go). Build tags add and remove commands.
 #   e.g. generate.sh bd-1.3.2=/src/beads@v1.3.2#gms_pure_go \
 #     bd-1.3.0-enterprise-77612097cec0=/src/bd-enterprise@77612097cec0#enterprise,nometrics,gms_pure_go
+# Each dump is built with the Go toolchain the bd ref's go.mod names, so a
+# re-dump of the same ref reproduces its provenance byte for byte.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 out_dir="$here/../inventory"
@@ -28,7 +30,8 @@ for spec in "$@"; do
   git -C "$repo" archive "$ref" | tar -x -C "$tmp"
   cp "$here/dump.go.tmpl" "$tmp/cmd/bd/zz_gc_inventory_dump.go"
   commit="$(git -C "$repo" rev-parse "$ref^{commit}")"
-  (cd "$tmp" && GC_BD_INVENTORY_DUMP="$out_dir/$name.json" GC_BD_INVENTORY_COMMIT="$commit" GC_BD_INVENTORY_TAGS="$tags" \
+  toolchain="$(sed -n 's/^toolchain //p' "$tmp/go.mod")"
+  (cd "$tmp" && GOTOOLCHAIN="${toolchain:-local}" GC_BD_INVENTORY_DUMP="$out_dir/$name.json" GC_BD_INVENTORY_COMMIT="$commit" GC_BD_INVENTORY_TAGS="$tags" \
     go run -tags "$tags" ./cmd/bd </dev/null)
   # The binary embeds the gzipped copy; the JSON is what reviewers diff.
   gzip -n -9 -c "$out_dir/$name.json" >"$out_dir/$name.json.gz"

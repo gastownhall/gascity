@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -663,5 +665,89 @@ func TestDrainReminderQuietHoldHoldsOnAttachProbeError(t *testing.T) {
 	}
 	if got := e.meta(drainReminderHoldKey); got != drainReminderHoldAttachUnknown {
 		t.Errorf("%s = %q, want %q", drainReminderHoldKey, got, drainReminderHoldAttachUnknown)
+	}
+}
+
+// Kills a drain_reminder shadow point wired off the path the reminder
+// decides on (ga-f4ovjm.75). The reminder's one record-comparable decision
+// is its pending-dialog hold, and the only production way into it is the
+// legacy stop-pending re-examination's live-wedge arm
+// (finalizeDrainAckStopPendingSessions). Driven there under the shadow
+// switch, a wedged row with a permission dialog open records one
+// drain_reminder comparison, the screen's hold beside the record's blocked
+// hold; with the switch off nothing is recorded, and the reminder decides
+// the same either way: held, nothing typed.
+func TestFinalizeDrainAckStopPendingRecordsTheDrainReminderShadow(t *testing.T) {
+	run := func(t *testing.T, shadow bool) ([]runtime.ProgramStatusComparison, int, string) {
+		t.Helper()
+		e := newDrainReminderEnv(t)
+		e.setMeta(map[string]string{"work_dir": t.TempDir(), "provider": "claude"})
+		e.sp.SetPendingInteraction(e.name, pendingCallerApproval)
+		e.sp.SetProgramPane(e.name, runtime.ProgramPaneRow{
+			Mode: runtime.ProgramStatusShadow, CaptureGate: true, PaneID: "%3", PanePipe: true, Tap: "r1.%3",
+			TapLiveness: runtime.ProgramTapAlive, RecordForm: runtime.ProgramRecordDecoded,
+			Record: runtime.ProgramStatus{
+				State: runtime.ProgramBlocked, Kind: runtime.ProgramBlockPermission, Nonce: "r1.%3", Seq: 2,
+				TurnStarts: 1, Progress: -1, Reported: true, Since: time.Now(),
+			},
+		})
+		var mu sync.Mutex
+		var got []runtime.ProgramStatusComparison
+		if shadow {
+			e.sp.ProgramShadowSink = func(c runtime.ProgramStatusComparison) {
+				mu.Lock()
+				defer mu.Unlock()
+				got = append(got, c)
+			}
+		}
+		cfg := &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
+		// The queued async stop takes the runtime lease in the city's lock
+		// dir: let it finish before the dir is removed.
+		tracker := &asyncStartTracker{}
+		// The full fake is the leaf that answers the program-status shadow,
+		// as the tmux leaf does in production.
+		finalizeDrainAckStopPendingSessions(
+			t.TempDir(), cfg, runtime.FullFake{Fake: e.sp}, beads.SessionStore{Store: e.store}, testSeatWork(t.TempDir(), cfg, beads.SessionStore{Store: e.store}, nil),
+			[]sessionpkg.Info{e.info()}, nil, newDrainTracker(), tracker,
+			e.clk, nil, e.out,
+		)
+		tracker.wait(5 * time.Second)
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(got), len(e.nudges()), e.meta(drainReminderHoldKey)
+	}
+
+	offGot, offNudges, offHold := run(t, false)
+	got, nudges, hold := run(t, true)
+	if nudges != 0 || offNudges != 0 || hold != drainReminderHoldPending || offHold != hold {
+		t.Fatalf("shadow typed %d (hold %q), off typed %d (hold %q); want both held %q with nothing typed",
+			nudges, hold, offNudges, offHold, drainReminderHoldPending)
+	}
+	if len(offGot) != 0 {
+		t.Fatalf("the switch off recorded %+v", offGot)
+	}
+	rem := atPoint(got, runtime.ProgramPointDrainReminder)
+	if len(rem) != 1 {
+		t.Fatalf("drain_reminder comparisons %+v, want exactly one", got)
+	}
+	if c := rem[0]; c.Scrape != runtime.ProgramVerdictHold || c.Program != runtime.ProgramVerdictHold || c.Family != "claude" || c.Session != "gc-city-worker-1" {
+		t.Fatalf("comparison %+v, want drain_reminder hold/hold for claude on the wedged row", c)
+	}
+}
+
+// Pins why drain_reminder is silent under session_reconciler = "v2"
+// (ga-f4ovjm.75): the reminder's only caller is the legacy
+// finalize_drain_ack_stop_pending tick phase, a session phase with no
+// maintenance part, which the v2 controller does not run. v2 answers an
+// outstanding stop with D6's alert (planner.escalateStop), which reminds no
+// agent, so a drain exercise against a v2 city owes no drain_reminder
+// record. If the reminder ever runs under v2, the shadow targets'
+// expectation for the point changes with it.
+func TestDrainReminderRunsOnlyUnderTheLegacySessionReconciler(t *testing.T) {
+	if !slices.Contains(tickPhaseNames(legacyTickPhases), "finalize_drain_ack_stop_pending") {
+		t.Fatal("the legacy tick lost finalize_drain_ack_stop_pending, the drain reminder's only caller")
+	}
+	if slices.Contains(tickPhaseNames(v2TickPhases), "finalize_drain_ack_stop_pending") {
+		t.Fatal("the v2 tick runs finalize_drain_ack_stop_pending: the drain reminder now decides under v2")
 	}
 }

@@ -17,7 +17,11 @@ import (
 // both take it from newControllerWiring, so neither can wire a channel the
 // other forgets.
 type controllerWiring struct {
-	mode                        reconcilerMode
+	mode reconcilerMode
+	// reason is why the latch resolved mode; a default v2 may still fall back
+	// (applyV2DefaultBootFallback), which sets fellBack.
+	reason                      reconcilerModeReason
+	fellBack                    bool
 	lookupEnv                   func(string) (string, bool)
 	pokeCh, controlDispatcherCh chan struct{}
 	wake                        *controllerWake
@@ -35,24 +39,25 @@ type controllerWiring struct {
 // lookupEnv carries the developer override (latchReconcilerMode). It logs the
 // latch's boot warnings (reconcilerBootWarnings) once, here, the one latch
 // both controller entry points share.
-func newControllerWiring(cfg *config.City, lookupEnv func(string) (string, bool), stderr io.Writer) (*controllerWiring, error) {
-	return newControllerWiringLoggingTo(cfg, lookupEnv, stderr, stderr)
+func newControllerWiring(cfg *config.City, cityPath string, lookupEnv func(string) (string, bool), stderr io.Writer) (*controllerWiring, error) {
+	return newControllerWiringLoggingTo(cfg, cityPath, lookupEnv, stderr, stderr)
 }
 
 // newControllerWiringLoggingTo is newControllerWiring with the boot lines on
 // bootLog, so the supervisor can name the city in them and log them once
 // across init retries (logSupervisorReconcilerBoot).
-func newControllerWiringLoggingTo(cfg *config.City, lookupEnv func(string) (string, bool), stderr, bootLog io.Writer) (*controllerWiring, error) {
-	res, err := resolveReconcilerMode(cfg, lookupEnv)
+func newControllerWiringLoggingTo(cfg *config.City, cityPath string, lookupEnv func(string) (string, bool), stderr, bootLog io.Writer) (*controllerWiring, error) {
+	res, err := resolveReconcilerMode(cfg, cityPath, lookupEnv)
 	if err != nil {
 		return nil, err
 	}
 	mode := res.Mode
-	for _, w := range reconcilerBootWarnings(cfg, res) {
+	for _, w := range reconcilerBootWarnings(cfg, lookupEnv, res) {
 		fmt.Fprintf(bootLog, "warning: %s\n", w) //nolint:errcheck // best-effort log
 	}
 	w := &controllerWiring{
 		mode:                mode,
+		reason:              res.Reason,
 		lookupEnv:           lookupEnv,
 		pokeCh:              make(chan struct{}, 1),
 		controlDispatcherCh: make(chan struct{}, 1),
@@ -79,6 +84,7 @@ func newControllerWiringLoggingTo(cfg *config.City, lookupEnv func(string) (stri
 func (w *controllerWiring) runtimeParams(p CityRuntimeParams) CityRuntimeParams {
 	p.ReconcilerMode = w.mode
 	p.ReconcilerLookupEnv = w.lookupEnv
+	p.ReconcilerV2FellBack = w.fellBack
 	p.Wake = w.wake
 	p.V2 = w.v2
 	p.ConfigDirty = w.configDirty

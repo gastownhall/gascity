@@ -197,7 +197,7 @@ func preserveAttachedNativeStepTopology(parent beads.Bead, recipe *formula.Recip
 // ExternalDeps. A prerequisite contributes only when it belongs to the same
 // execution root and has a native identity; otherwise the target fact is
 // omitted rather than publishing an incomplete dependency set as authoritative.
-func applyExternalNativeStepDependencies(store beads.Store, rootID string, steps []formula.RecipeStep, externalDeps []ExternalDep) error {
+func applyExternalNativeStepDependencies(store beads.MoleculeTarget, rootID string, steps []formula.RecipeStep, externalDeps []ExternalDep) error {
 	type accumulator struct {
 		complete     bool
 		dependencies []string

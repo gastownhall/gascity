@@ -11,6 +11,9 @@ GOLANGCI_LINT := $(BIN_DIR)/golangci-lint
 OASDIFF := $(BIN_DIR)/oasdiff
 
 BINARY     := gc
+# COMPANION is gc's OSC 7501 capture companion. It is pure Go and is built,
+# installed and removed alongside gc, which looks it up next to itself.
+COMPANION  := gc-osc7501
 BUILD_DIR  := bin
 INSTALL_DIR := $(BIN_DIR)
 
@@ -133,11 +136,13 @@ BAZEL_TEST = $(BAZEL) test $(BAZEL_FLAGS) --keep_going
 bazel-tmpdir:
 	@mkdir -p /tmp/bt
 
-## build: compile gc binary with version metadata
+## build: compile gc and its gc-osc7501 companion with version metadata
 build:
 	go build -buildvcs=false -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/gc
+	CGO_ENABLED=0 go build -buildvcs=false -ldflags "-X main.version=$(VERSION)" -o $(BUILD_DIR)/$(COMPANION) ./cmd/gc-osc7501
 ifeq ($(shell uname),Darwin)
 	@scripts/sign-darwin-local.sh $(BUILD_DIR)/$(BINARY)
+	@GC_SIGN_IDENTIFIER=com.gascity.gc-osc7501 scripts/sign-darwin-local.sh $(BUILD_DIR)/$(COMPANION)
 endif
 
 ## check-self-contained: assert the built gc binary is self-contained (Linux/Nix ICU rpath).
@@ -168,27 +173,33 @@ ifneq ($(_NIX_ICU_DEV),)
 		echo "OK: $$bin self-contained (RUNPATH present + clean-env boot passes)"
 endif
 
-## install: build and install gc to GOPATH/bin (same location as go install)
+## install: build and install gc and gc-osc7501 to GOPATH/bin (same location as go install)
 install: check-self-contained
 	@mkdir -p $(INSTALL_DIR)
 	@set -e; \
-		tmp="$(INSTALL_DIR)/.$(BINARY).tmp.$$$$"; \
-		trap 'rm -f "$$tmp"' EXIT INT TERM HUP; \
-		cp -f "$(BUILD_DIR)/$(BINARY)" "$$tmp"; \
-		chmod 0755 "$$tmp"; \
-		mv -f "$$tmp" "$(INSTALL_DIR)/$(BINARY)"; \
-		trap - EXIT INT TERM HUP
-	@# Migrate from old install location: replace stale binary with symlink
+		for bin in $(BINARY) $(COMPANION); do \
+			tmp="$(INSTALL_DIR)/.$$bin.tmp.$$$$"; \
+			trap 'rm -f "$$tmp"' EXIT INT TERM HUP; \
+			cp -f "$(BUILD_DIR)/$$bin" "$$tmp"; \
+			chmod 0755 "$$tmp"; \
+			mv -f "$$tmp" "$(INSTALL_DIR)/$$bin"; \
+			trap - EXIT INT TERM HUP; \
+		done
+	@# Migrate from old install location: replace stale binary with symlink.
+	@# The companion is linked beside gc, because gc looks for it next to the
+	@# path it was started by.
 	@if [ "$(INSTALL_DIR)" != "$(HOME)/.local/bin" ]; then \
-		if [ -f "$(HOME)/.local/bin/$(BINARY)" ] || [ -L "$(HOME)/.local/bin/$(BINARY)" ]; then \
-			rm -f "$(HOME)/.local/bin/$(BINARY)"; \
-		fi; \
-		if [ -d "$(HOME)/.local/bin" ]; then \
-			ln -sf "$(INSTALL_DIR)/$(BINARY)" "$(HOME)/.local/bin/$(BINARY)"; \
-			echo "Symlinked $(HOME)/.local/bin/$(BINARY) -> $(INSTALL_DIR)/$(BINARY)"; \
-		fi; \
+		for bin in $(BINARY) $(COMPANION); do \
+			if [ -f "$(HOME)/.local/bin/$$bin" ] || [ -L "$(HOME)/.local/bin/$$bin" ]; then \
+				rm -f "$(HOME)/.local/bin/$$bin"; \
+			fi; \
+			if [ -d "$(HOME)/.local/bin" ]; then \
+				ln -sf "$(INSTALL_DIR)/$$bin" "$(HOME)/.local/bin/$$bin"; \
+				echo "Symlinked $(HOME)/.local/bin/$$bin -> $(INSTALL_DIR)/$$bin"; \
+			fi; \
+		done; \
 	fi
-	@echo "Installed $(BINARY) to $(INSTALL_DIR)/$(BINARY)"
+	@echo "Installed $(BINARY) and $(COMPANION) to $(INSTALL_DIR)"
 
 ## generate: regenerate JSON schemas and reference docs
 generate:
@@ -201,7 +212,7 @@ check-schema: generate
 
 ## clean: remove build artifacts
 clean:
-	rm -f $(BUILD_DIR)/$(BINARY)
+	rm -f $(BUILD_DIR)/$(BINARY) $(BUILD_DIR)/$(COMPANION)
 
 ## complexity: print an advisory cyclomatic complexity report for shipped Go
 complexity:
@@ -755,7 +766,7 @@ test-bd-cli-contract-home-isolation:
 ## is the only contract that needs a real CAS-capable bd. Every pinned bd
 ## (BD_PREV_VERSION, BD_VERSION and BD_CURRENT_REF) carries
 ## `--if-assignee`/`--if-status`, so the row's capability skip fires on none
-## of them. CI runs the row only against the BD_CURRENT_REF bd (v1.3.2):
+## of them. CI runs the row only against the BD_CURRENT_REF bd (v1.3.4):
 ## strictly in //internal/beads:bd_conditional_release_contract_test, and in
 ## the integration-packages lane. A BD_PREV_VERSION cell is ga-7ryjc6.
 ## GC_REQUIRE_BD_CONDITIONAL_RELEASE=1 turns the row's capability skip into a
@@ -1023,12 +1034,28 @@ $(GOLANGCI_LINT):
 
 ## install-oapi-codegen: install pinned oapi-codegen so the spec→client drift
 ## test (TestGeneratedClientInSync) can regenerate client_gen.go without skipping.
+# Retries like $(GOLANGCI_LINT): spec-ci installs this on every CI run, and the
+# tool's own module graph (not gascity's go.sum) comes from the module proxy,
+# so one transient proxy stream error would otherwise fail the required Check.
 .PHONY: install-oapi-codegen
 install-oapi-codegen:
-	@if ! command -v oapi-codegen >/dev/null; then \
-		echo "Installing oapi-codegen..." >&2; \
-		go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.6.0; \
-	fi
+	@if command -v oapi-codegen >/dev/null; then exit 0; fi; \
+	echo "Installing oapi-codegen..." >&2; \
+	attempt=1; max_attempts=5; delay=2; \
+	while [ $$attempt -le $$max_attempts ]; do \
+		echo "oapi-codegen install attempt $$attempt/$$max_attempts" >&2; \
+		if go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.6.0; then \
+			exit 0; \
+		fi; \
+		if [ $$attempt -lt $$max_attempts ]; then \
+			echo "oapi-codegen install failed; retrying in $${delay}s..." >&2; \
+			sleep $$delay; \
+		fi; \
+		attempt=$$((attempt + 1)); \
+		delay=$$((delay * 2)); \
+	done; \
+	echo "ERROR: failed to install oapi-codegen after $$max_attempts attempts" >&2; \
+	exit 1
 
 ## install-oasdiff: install the pinned oasdiff used by openapi-breaking-check.
 ## Reinstalls when the binary on disk is a different version.

@@ -9,9 +9,9 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/mail"
-	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -30,7 +30,7 @@ func TestSelfReadsAgreeOnTheSessionInbox(t *testing.T) {
 	for name, authoritative := range map[string][]string{"message unlisted": nil, "message listed": {"message"}} {
 		t.Run(name, func(t *testing.T) {
 			cfg := &config.City{}
-			cfg.Ops.Authoritative = authoritative
+			cfg.Ops.Authoritative = config.OpsKinds(authoritative...)
 			selfReadsAgreeOnTheSessionInbox(t, func(p mail.Provider, store beads.Store) mail.Provider {
 				return withMailNoticeWithdrawal(p, store, cfg, io.Discard)
 			})
@@ -41,7 +41,7 @@ func TestSelfReadsAgreeOnTheSessionInbox(t *testing.T) {
 func selfReadsAgreeOnTheSessionInbox(t *testing.T, wrap func(mail.Provider, beads.Store) mail.Provider) {
 	clearGCEnv(t)
 	store := beads.NewMemStore()
-	mp := wrap(beadmail.New(store), store)
+	mp := wrap(newTestBeadMail(store), store)
 	createSession := func(metadata map[string]string, closed bool) string {
 		t.Helper()
 		b, err := store.Create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: metadata})
@@ -69,7 +69,7 @@ func selfReadsAgreeOnTheSessionInbox(t *testing.T, wrap func(mail.Provider, bead
 	want := []string{sent["sky"], sent[predecessor], sent["runtime-pred"]}
 	sort.Strings(want)
 
-	info, _, err := session.ResolveSessionRecordByExactID(store, self)
+	info, _, err := session.ResolveSessionRecordByExactID(beadstest.Sessions(store), self)
 	if err != nil {
 		t.Fatalf("ResolveSessionRecordByExactID: %v", err)
 	}

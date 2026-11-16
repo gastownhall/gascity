@@ -153,7 +153,9 @@ func TestCmdStopBodyTeardownRunsAfterStopOrphansBeforeBeadsShutdown(t *testing.T
 // runtime.ServerLifecycleProvider. The type assertion must yield ok=false and
 // skip teardown silently: no panic, no error in stderr.
 //
-// This is the normal case for non-tmux providers (subprocess, exec, K8s, Fake).
+// This is the normal case for non-tmux providers (subprocess, K8s, Fake); an exec
+// pack that does not declare server-lifecycle answers nil without an op
+// (TestGCStopSendsNoServerStopToUndeclaredPack).
 func TestCmdStopBodySkipsTeardownForNonLifecycleProvider(t *testing.T) {
 	cityDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
