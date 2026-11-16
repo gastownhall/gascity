@@ -3032,13 +3032,11 @@ medium = 1
 path = "internal/workspacesvc/orphan_reap_test.go"
 resource = "fixed_sleep"
 calls = 5
-tagged = true
 
 [[count]]
 path = "internal/workspacesvc/orphan_reap_test.go"
 resource = "subprocess"
 calls = 2
-tagged = true
 
 [[count]]
 path = "internal/workspacesvc/proxy_process_pdeathsig_linux_test.go"
