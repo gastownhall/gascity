@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	goruntime "runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,10 +39,13 @@ func TestRPPHandleConformance(t *testing.T) {
 		"tier": "worker-core",
 	})
 	reporter.Require(t, vanishedNudgeNotDeliveredResult(t))
+	reporter.Require(t, typedOutcomeReachesHandleResult(t))
+	reporter.Require(t, unobservedIsDeliveredResult(t))
 	reporter.Require(t, hostFSTranscriptTurnsResult(t))
 	t.Run(string(RequirementRPPHostFSLeftoverReaped), func(t *testing.T) {
 		requireHostFSLeftoverReaped(t, reporter, goruntime.GOOS)
 	})
+	reporter.Require(t, heldNudgeTypedOnceResult(t))
 }
 
 // requireHostFSLeftoverReaped records WC-RPP-006 on goos. Where the row is
@@ -78,7 +82,10 @@ func TestRPPHostFSLeftoverReapedSkipsWithoutProcfs(t *testing.T) {
 
 func TestRPPHandleCatalogRegistersItsRequirements(t *testing.T) {
 	catalog := RPPHandleCatalog()
-	want := []RequirementCode{RequirementRPPVanishedNudgeNotDelivered, RequirementRPPHostFSTranscriptTurns, RequirementRPPHostFSLeftoverReaped}
+	want := []RequirementCode{
+		RequirementRPPVanishedNudgeNotDelivered, RequirementRPPTypedOutcomeReachesHandle, RequirementRPPUnobservedIsDelivered,
+		RequirementRPPHostFSTranscriptTurns, RequirementRPPHostFSLeftoverReaped, RequirementRPPHeldNudgeTypedOnce,
+	}
 	if len(catalog) != len(want) {
 		t.Fatalf("RPPHandleCatalog() = %+v, want %v", catalog, want)
 	}
@@ -291,4 +298,145 @@ func vanishedNudgeNotDeliveredResult(t *testing.T) Result {
 	}
 	return Pass(rppHandleProfile, RequirementRPPVanishedNudgeNotDelivered,
 		"a live session takes the nudge; one that vanished after the liveness read refuses it with runtime.ErrSessionNotFound")
+}
+
+// rppOutcomePack writes the golden reference in input-outcome mode over the
+// dedicated driving ops (carrier.ops), whose nudge answers the word in
+// $S/answer when that file exists (exit 0 for a success word, exit 80
+// otherwise), so a check can make the pack answer any word. It returns the
+// script and the answer file.
+func rppOutcomePack(t *testing.T) (script, answer string) {
+	t.Helper()
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, "state")
+	if err := os.Mkdir(stateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bodies := reference.InputOutcomeBodies(reference.NonTmuxBodies())
+	bodies["nudge"] = `if [ -f "$S/answer" ]; then cat >/dev/null; w=$(cat "$S/answer"); printf '{"outcome":"%s","detail":"the pack answered"}\n' "$w"; case "$w" in delivered*) exit 0 ;; esac; exit 80; fi; ` + bodies["nudge"]
+	script = filepath.Join(dir, "golden")
+	if err := os.WriteFile(script, []byte(reference.Script(stateDir, bodies)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return script, filepath.Join(stateDir, "answer")
+}
+
+// rppOutcomeHandle starts a session on script and returns a RuntimeHandle
+// over the real seam-backed exec provider, and the provider.
+func rppOutcomeHandle(t *testing.T, script string) (*worker.RuntimeHandle, runtime.Provider) {
+	t.Helper()
+	sp := sessionexec.NewSeamBackedForCity(script, "rpp-conformance", t.TempDir())
+	cfg := runtime.Config{WorkDir: t.TempDir(), Command: "sleep 300", ProcessNames: []string{"sleep"}, AcceptStartupDialogs: new(bool)}
+	if err := sp.Start(context.Background(), rppSessionName, cfg); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = sp.Stop(rppSessionName) })
+	handle, err := worker.NewRuntimeHandle(worker.RuntimeHandleConfig{
+		Provider:     sp,
+		SessionName:  rppSessionName,
+		ProviderName: "rpp-reference",
+		ProcessNames: cfg.ProcessNames,
+	})
+	if err != nil {
+		t.Fatalf("NewRuntimeHandle: %v", err)
+	}
+	return handle, sp
+}
+
+// rppAnsweredNudge nudges a fresh outcome pack session, whose pack answers
+// word, through a RuntimeHandle.
+func rppAnsweredNudge(t *testing.T, word runtime.InputOutcome) (worker.NudgeResult, error) {
+	t.Helper()
+	script, answer := rppOutcomePack(t)
+	handle, _ := rppOutcomeHandle(t, script)
+	if err := os.WriteFile(answer, []byte(word), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return handle.Nudge(context.Background(), testAgent(t), worker.NudgeRequest{
+		Text:     "check deploy status",
+		Delivery: worker.NudgeDeliveryImmediate,
+		Source:   "mail",
+	})
+}
+
+// typedOutcomeReachesHandleResult evaluates WC-RPP-002: each non-success
+// word the pack answers reaches the handle as its sentinel, undelivered.
+func typedOutcomeReachesHandleResult(t *testing.T) Result {
+	t.Helper()
+	for _, tc := range []struct {
+		word runtime.InputOutcome
+		want []error
+	}{
+		{runtime.InputOutcomeBusy, []error{runtime.ErrSessionBusy}},
+		{runtime.InputOutcomeUnavailable, []error{runtime.ErrRuntimeUnavailable}},
+		{runtime.InputOutcomePendingInteraction, []error{runtime.ErrNudgeRefusedPendingInteraction, sessionpkg.ErrPendingInteraction}},
+		{runtime.InputOutcomeNotSent, []error{runtime.ErrNudgeNotSent}},
+		{runtime.InputOutcomeRejected, []error{runtime.ErrNudgeRejected}},
+		{runtime.InputOutcomeGone, []error{runtime.ErrSessionNotFound}},
+	} {
+		result, err := rppAnsweredNudge(t, tc.word)
+		if result.Delivered || runtime.NudgeDelivered(err) {
+			return Fail(rppHandleProfile, RequirementRPPTypedOutcomeReachesHandle,
+				fmt.Sprintf("%s: nudge = (delivered=%t, %v), want undelivered", tc.word, result.Delivered, err))
+		}
+		for _, want := range tc.want {
+			if !errors.Is(err, want) {
+				return Fail(rppHandleProfile, RequirementRPPTypedOutcomeReachesHandle,
+					fmt.Sprintf("%s: nudge error %v does not wrap %v", tc.word, err, want))
+			}
+		}
+	}
+	return Pass(rppHandleProfile, RequirementRPPTypedOutcomeReachesHandle,
+		"busy, unavailable, pending_interaction, not_sent, rejected and gone each reach the handle as their sentinel, undelivered")
+}
+
+// unobservedIsDeliveredResult evaluates WC-RPP-003: delivered_unobserved
+// counts as delivered, unconfirmed does not.
+func unobservedIsDeliveredResult(t *testing.T) Result {
+	t.Helper()
+	_, err := rppAnsweredNudge(t, runtime.InputOutcomeDeliveredUnobserved)
+	if !errors.Is(err, runtime.ErrNudgeDeliveredUnobserved) || !runtime.NudgeDelivered(err) {
+		return Fail(rppHandleProfile, RequirementRPPUnobservedIsDelivered,
+			fmt.Sprintf("delivered_unobserved: nudge error %v, want runtime.ErrNudgeDeliveredUnobserved counted as delivered", err))
+	}
+	result, err := rppAnsweredNudge(t, runtime.InputOutcomeUnconfirmed)
+	if result.Delivered || !errors.Is(err, runtime.ErrNudgeDeliveryUnconfirmed) || runtime.NudgeDelivered(err) {
+		return Fail(rppHandleProfile, RequirementRPPUnobservedIsDelivered,
+			fmt.Sprintf("unconfirmed: nudge = (delivered=%t, %v), want runtime.ErrNudgeDeliveryUnconfirmed, not counted as delivered", result.Delivered, err))
+	}
+	return Pass(rppHandleProfile, RequirementRPPUnobservedIsDelivered,
+		"delivered_unobserved counts as delivered; unconfirmed is possibly delivered and not counted")
+}
+
+// heldNudgeTypedOnceResult evaluates WC-RPP-012: a nudge sent twice through
+// the handle while the pack holds the first (hold_send) is unconfirmed both
+// times and typed once after the hold is released.
+func heldNudgeTypedOnceResult(t *testing.T) Result {
+	t.Helper()
+	script, _ := rppOutcomePack(t)
+	handle, sp := rppOutcomeHandle(t, script)
+	const text = "check deploy status, held"
+	t.Setenv("GC_RPP_FAULT", "hold_send")
+	for i := 1; i <= 2; i++ {
+		result, err := handle.Nudge(context.Background(), testAgent(t), worker.NudgeRequest{
+			Text:     text,
+			Delivery: worker.NudgeDeliveryImmediate,
+			Source:   "queue",
+		})
+		if result.Delivered || !errors.Is(err, runtime.ErrNudgeDeliveryUnconfirmed) {
+			return Fail(rppHandleProfile, RequirementRPPHeldNudgeTypedOnce,
+				fmt.Sprintf("nudge %d while held = (delivered=%t, %v), want runtime.ErrNudgeDeliveryUnconfirmed", i, result.Delivered, err))
+		}
+	}
+	t.Setenv("GC_RPP_FAULT", "")
+	screen, err := sp.Peek(rppSessionName, 0)
+	if err != nil {
+		t.Fatalf("Peek: %v", err)
+	}
+	if n := strings.Count(screen, text); n != 1 {
+		return Fail(rppHandleProfile, RequirementRPPHeldNudgeTypedOnce,
+			fmt.Sprintf("the held nudge was typed %d times after release, want once (screen %q)", n, screen))
+	}
+	return Pass(rppHandleProfile, RequirementRPPHeldNudgeTypedOnce,
+		"a nudge redelivered while the pack holds the first is unconfirmed both times and typed once")
 }

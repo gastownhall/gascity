@@ -5,12 +5,17 @@ go_library(
     srcs = ["clientauth.go"],
     importpath = "github.com/gastownhall/gascity/internal/clientauth",
     visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/execenv",
+        "//internal/runtime",
+    ],
 )
 
 go_test(
     name = "clientauth_test",
     srcs = [
         "clientauth_test.go",
+        "exec_fixture_other_test.go",
         "testenv_import_test.go",
     ],
     embed = [":clientauth"],

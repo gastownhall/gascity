@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/execenv"
 )
 
 // Provider implements [events.Provider] by delegating to a user-supplied script.
@@ -114,6 +115,9 @@ func (p *Provider) LatestSeq() (uint64, error) {
 func (p *Provider) Watch(ctx context.Context, afterSeq uint64) (events.Watcher, error) {
 	p.ensureRunning()
 	cmd := exec.CommandContext(ctx, p.script, "watch", fmt.Sprintf("%d", afterSeq))
+	if err := execenv.CheckBatchFileArgs(cmd); err != nil {
+		return nil, fmt.Errorf("exec events provider watch: %w", err)
+	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("exec events provider: stdout pipe: %w", err)
@@ -148,6 +152,9 @@ func (p *Provider) run(stdinData []byte, args ...string) (string, error) {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, p.script, args...)
+	if err := execenv.CheckBatchFileArgs(cmd); err != nil {
+		return "", fmt.Errorf("exec events provider %s: %w", args[0], err)
+	}
 	cmd.WaitDelay = 2 * time.Second
 
 	var stdout, stderr bytes.Buffer

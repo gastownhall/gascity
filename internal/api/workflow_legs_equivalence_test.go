@@ -9,6 +9,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -54,8 +55,15 @@ func (r *t7dRecordingStore) note(op string, arg any) {
 	case marker == beads.FederatedReadMarker, marker == beads.NoReadMarker && role == beads.FederatedLegRole:
 		verdict = "federated"
 	}
-	*r.log = append(*r.log, fmt.Sprintf("%s %s %+v [%s]", r.name, op, arg, verdict))
+	entry := fmt.Sprintf("%s %s %+v [%s]", r.name, op, arg, verdict)
+	t7dLogMu.Lock()
+	defer t7dLogMu.Unlock()
+	*r.log = append(*r.log, entry)
 }
+
+// t7dLogMu guards every fixture log: a reader may read from several
+// goroutines (the cross-store ready gate's blocker reads, T7e).
+var t7dLogMu sync.Mutex
 
 func (r *t7dRecordingStore) Get(id string) (beads.Bead, error) {
 	r.note("Get", id)

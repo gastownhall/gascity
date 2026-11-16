@@ -744,6 +744,85 @@ func NewExternalFake() *Fake { return nil }
 	}
 }
 
+func TestDiscoverRuntimeProviderDoublesImportsProcessGroupDeclarations(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{
+			name: "valid aliases",
+			source: `package processgroup
+import ("errors"; "time")
+var ErrProcessNotConfirmedDead = errors.New("not confirmed dead")
+const ManagedProcessReapGrace = 3 * time.Second
+func ignoredBody() { missingBodySymbol() }
+`,
+		},
+		{
+			name: "missing alias target",
+			source: `package processgroup
+const ManagedProcessReapGrace = 3
+`,
+			want: "undefined: processgroup.ErrProcessNotConfirmedDead",
+		},
+		{
+			name: "invalid dependency declaration",
+			source: `package processgroup
+var ErrProcessNotConfirmedDead MissingType
+const ManagedProcessReapGrace = 3
+`,
+			want: "type-check declaration dependency",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			dir := filepath.Join(root, "runtime")
+			files := map[string]string{
+				"runtime/runtime.go": `package runtime
+import "github.com/gastownhall/gascity/internal/processgroup"
+type Provider interface { Run() }
+var ErrProcessNotConfirmedDead = processgroup.ErrProcessNotConfirmedDead
+const ManagedProcessReapGrace = processgroup.ManagedProcessReapGrace
+`,
+				"runtime/fake.go": `package runtime
+type Fake struct{}
+func (*Fake) Run() {}
+func NewFake() *Fake { return nil }
+`,
+				"processgroup/ownership.go": tt.source,
+			}
+			for name, source := range files {
+				path := filepath.Join(root, name)
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(source), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := DiscoverRuntimeProviderDoubles(dir)
+			if tt.want != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.want) {
+					t.Fatalf("DiscoverRuntimeProviderDoubles() error = %v, want containing %q", err, tt.want)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("DiscoverRuntimeProviderDoubles: %v", err)
+			}
+			want := []ReusableDouble{{
+				Type:         repoSymbol("internal/runtime", "Fake"),
+				Constructors: []SymbolRef{repoSymbol("internal/runtime", "NewFake")},
+			}}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("doubles = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
 func TestDiscoverRuntimeProviderDoublesFailsClosed(t *testing.T) {
 	const provider = `package runtime
 type Provider interface { Run() }

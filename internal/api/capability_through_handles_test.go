@@ -88,24 +88,24 @@ func TestAPICapabilitiesReachTheStoreThroughAHandle(t *testing.T) {
 			store := &capabilityStore{MemStore: beads.NewMemStore()}
 
 			// handler_status.go statusStoredWorkCounts: Counter.
-			if _, err := statusStoredWorkCounts(ctx, state, wrap(store)); err != nil || store.counts.Load() == 0 {
+			if _, err := statusStoredWorkCounts(ctx, state, testWorkLeg(t, wrap(store))); err != nil || store.counts.Load() == 0 {
 				t.Errorf("statusStoredWorkCounts made %d counts (%v), want the Counter path", store.counts.Load(), err)
 			}
 			// store_health.go countBeadStoreRows: Counter.
 			store.counts.Store(0)
-			if n, err := countBeadStoreRows(ctx, state, wrap(store)); err != nil || n != 7 || store.counts.Load() != 1 {
+			if n, err := countBeadStoreRows(ctx, state, testWorkLeg(t, wrap(store))); err != nil || n != 7 || store.counts.Load() != 1 {
 				t.Errorf("countBeadStoreRows = %d after %d counts (%v), want the Counter's 7", n, store.counts.Load(), err)
 			}
 			// huma_handlers_beads.go beadListLegCount: Counter.
-			if n, ok := beadListLegCount(ctx, wrap(store), "", &BeadListInput{}); !ok || n != 7 {
+			if n, ok := beadListLegCount(ctx, testWorkLeg(t, wrap(store)), "", &BeadListInput{}); !ok || n != 7 {
 				t.Errorf("beadListLegCount = %d, %v; want the Counter's 7", n, ok)
 			}
 			// handler_status.go statusReadyStoreWithTimeout: ContextReadyReader.
-			if _, err := statusReadyStoreWithTimeout(ctx, state, wrap(store)); err != nil || store.readyCtx.Load() != 1 {
+			if _, err := statusReadyStoreWithTimeout(ctx, state, testWorkLeg(t, wrap(store))); err != nil || store.readyCtx.Load() != 1 {
 				t.Errorf("statusReadyStoreWithTimeout made %d context-aware ready reads (%v), want 1", store.readyCtx.Load(), err)
 			}
 			// store_health.go measuredStoreRows: RowWitness.
-			if _, err := measuredStoreRows(wrap(store), 0, countBranchCounter); !errors.Is(err, errRowCountContradicted) {
+			if _, err := measuredStoreRows(testWorkLeg(t, wrap(store)).Strict, 0, countBranchCounter); !errors.Is(err, errRowCountContradicted) {
 				t.Errorf("measuredStoreRows over a witness that saw rows = %v, want errRowCountContradicted", err)
 			}
 			// huma_handlers_orders.go orderHistoryBeadsAcrossStoreInfosCachedFirst: CachedLister.

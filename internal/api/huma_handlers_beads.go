@@ -45,7 +45,10 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	}
 	index := s.latestIndex()
 
-	work := s.state.Stores().Work()
+	// One epoch for the request: the cache gate, the legs and the freshness
+	// headers read the same stores.
+	st := s.state.Stores()
+	work := st.Work()
 	if err := cacheLiveOr503(work); err != nil {
 		return nil, err
 	}
@@ -91,17 +94,8 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 		}
 	}
 
-	stores := s.state.BeadStores()
-	assigneeTerms := s.beadListAssigneeTerms(ctx, input.Assignee)
-	var rigNames []string
-	if input.Rig != "" {
-		if _, ok := stores[input.Rig]; ok {
-			rigNames = []string{input.Rig}
-		}
-	} else {
-		rigNames = sortedRigNames(stores)
-	}
-	legs := beadListFanOut(s.state, stores, rigNames, input.Rig != "")
+	assigneeTerms := s.beadListAssigneeTerms(ctx, st, input.Assignee)
+	legs := beadListFanOut(st, s.state.CityName(), input.Rig)
 
 	var all []beads.Bead
 
@@ -182,13 +176,9 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 			pa.attempt()
 			// One leg of the /beads fan-out (work legs, then the class
 			// binding): each lists only its own rows, so a type or label the
-			// other legs own misses here by design.
-			var list []beads.Bead
-			err := beads.FederatedRead(func() error {
-				var listErr error
-				list, listErr = leg.store.List(query)
-				return listErr
-			})
+			// other legs own misses here by design. The plan minted the leg
+			// federated, so the gate reads it that way.
+			list, err := leg.leg.Reader.List(query)
 			if err != nil {
 				if leg.graph {
 					// The graph leg is the execution DAG, not a rig: any degraded
@@ -398,14 +388,19 @@ func mintNextCursor(page []beads.Bead, hasMore bool) string {
 type beadListLeg struct {
 	// label is what a degraded read is reported under in partial_errors.
 	label string
-	store beads.Store
+	leg   storeref.TypedLeg
 	// graph marks the relocated graph plane, which does not degrade: it either
 	// answers or the request fails loud (see graphPlaneUnavailable).
 	graph bool
 }
 
-// beadListFanOut builds the ordered leg list for a bead-list request: the work
-// stores in rigNames order, then the relocated graph store last.
+// beadListFanOut builds the ordered leg list for a bead-list request from one
+// epoch st (storeref.WorkList): the city and every rig the epoch opened, in
+// name order with the city under cityName (a rig of that name replaces it),
+// deduped by store, then the relocated graph store last. Suspended rigs are
+// listed, as BeadStores() listed them. A rig-scoped request reads the one
+// store rig names (storeref.WorkScope), or nothing for a name no store
+// answers to.
 //
 // Graph-class beads (gcg- molecule roots, steps, control beads) live in the
 // relocated graph store on a split city, and BeadStores() does not include it —
@@ -417,17 +412,31 @@ type beadListLeg struct {
 //
 // A rig-scoped request gets no graph leg: it is asking for one rig, and the
 // graph plane is not a rig.
-func beadListFanOut(state State, stores map[string]beads.Store, rigNames []string, rigScoped bool) []beadListLeg {
-	legs := make([]beadListLeg, 0, len(rigNames)+1)
-	for _, rigName := range rigNames {
-		legs = append(legs, beadListLeg{label: "rig " + rigName, store: stores[rigName]})
+//
+// The only error a plan over the epoch's own scopes returns is that it has no
+// store left to read, which is an empty fan-out: an empty 200, as an empty
+// BeadStores() served.
+func beadListFanOut(st storeref.Stores, cityName, rig string) []beadListLeg {
+	in := storeref.WorkFederation{Kind: storeref.WorkList, CityName: cityName, SuspendedRigs: storeref.WorkReadsSuspendedRigs}
+	if rig != "" {
+		scope, ok := workScopeByName(st, cityName, rig)
+		if !ok {
+			return nil
+		}
+		in = storeref.WorkFederation{Kind: storeref.WorkScope, Scope: scope}
 	}
-	if rigScoped {
-		return legs
+	plan, err := st.Plan(in)
+	if err != nil {
+		return nil
 	}
-	if graph, ok := relocatedGraphStore(state); ok {
-		legs = append(legs, beadListLeg{label: "graph", store: graph, graph: true})
-	}
+	var legs []beadListLeg
+	storeref.EachTypedLeg(plan, func(l storeref.TypedLeg) {
+		if l.Role == storeref.RoleFederationTail {
+			legs = append(legs, beadListLeg{label: "graph", leg: l, graph: true})
+			return
+		}
+		legs = append(legs, beadListLeg{label: "rig " + workLegName(l, cityName), leg: l})
+	})
 	return legs
 }
 
@@ -454,7 +463,7 @@ func beadListFanOut(state State, stores map[string]beads.Store, rigNames []strin
 func beadListBounding(ctx context.Context, legs []beadListLeg, assignee string, input *BeadListInput) (on bool, counts map[int]int, hydrate map[int]bool) {
 	counts = make(map[int]int, len(legs))
 	for i, leg := range legs {
-		n, ok := beadListLegCount(ctx, leg.store, assignee, input)
+		n, ok := beadListLegCount(ctx, leg.leg, assignee, input)
 		if ok {
 			counts[i] = n
 			continue
@@ -472,9 +481,11 @@ func beadListBounding(ctx context.Context, legs []beadListLeg, assignee string, 
 
 // beadListLegCount returns one leg's exact un-seeked count, reporting false when
 // the store implements no Counter or cannot count this query shape exactly
-// (ErrCountUnsupported).
-func beadListLegCount(ctx context.Context, store beads.Store, assignee string, input *BeadListInput) (int, bool) {
-	counter, ok := beads.As[beads.Counter](store)
+// (ErrCountUnsupported). The count is taken through the leg's strict reader,
+// as an unmarked count of the store was: the store's own Counter, which the
+// split-strict gate polices.
+func beadListLegCount(ctx context.Context, leg storeref.TypedLeg, assignee string, input *BeadListInput) (int, bool) {
+	counter, ok := beads.ReaderAs[beads.Counter](leg.Strict)
 	if !ok {
 		return 0, false
 	}
@@ -525,12 +536,12 @@ func readyFederationQuery() beads.ReadyQuery {
 //     relocated graph store. The CLI composite's legs are work-then-infra, the
 //     same relative order, so on a rig-less city the two sequences agree.
 //     GET /v0/beads federates the same legs in the same order.
-//   - Frame: every rig BeadStores holds, suspended ones included. `gc ready`
-//     deliberately does not match this: it federates the serving rigs only,
-//     the frame the controller's demand census reads, so a suspended rig's own
-//     rows are in this answer and absent from the CLI's (ga-h07n0z; see
-//     readyServingRigs in cmd/gc/ready_federation.go). CLI == API holds over a
-//     city with no suspended rig.
+//   - Frame: every rig Stores().Rigs() lists, suspended ones included.
+//     `gc ready` deliberately does not match this: it federates the serving
+//     rigs only, the frame the controller's demand census reads, so a
+//     suspended rig's own rows are in this answer and absent from the CLI's
+//     (ga-h07n0z; see readyServingRigs in cmd/gc/ready_federation.go).
+//     CLI == API holds over a city with no suspended rig.
 //   - Within a leg: whatever order that leg's own Ready reader emits. For a
 //     work store (CachingStore.Ready) and for the canonical relocated binding
 //     (beads.SQLiteStore.Ready) alike that is the canonical (priority ASC,
@@ -575,8 +586,12 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	}
 	index := s.latestIndex()
 
-	stores := s.state.BeadStores()
-	rigNames := sortedRigNames(stores)
+	// One epoch for the request: the work legs, the graph leg and its
+	// reserved prefixes all come from st.
+	st := s.state.Stores()
+	cityName := s.state.CityName()
+	stores := workStoresByName(st, cityName)
+	rigNames := sortedWorkStoreNames(stores)
 	var pa partialAggregator
 	// Each leg's rows are kept by leg so a split city can pass them through the
 	// cross-store rule before they merge (below).
@@ -585,53 +600,53 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 		rows []beads.Bead
 	}
 	var legs []readyLeg
-	federate := func(label string, store beads.Store) {
-		if store == nil {
+	federate := func(leg readywork.Leg) {
+		if beads.IsNilStore(leg.Store) {
 			return
 		}
 		pa.attempt()
-		ready, err := beads.ReadyPreferCache(store, readyFederationQuery())
+		ready, err := beads.ReadyPreferCache(leg.Store, readyFederationQuery())
 		if err != nil {
 			if beads.IsPartialResult(err) && len(ready) > 0 {
-				pa.record(label, err)
+				pa.record(leg.Label, err)
 				pa.success()
 			} else {
-				pa.record(label, err)
+				pa.record(leg.Label, err)
 				return
 			}
 		} else {
 			pa.success()
 		}
-		legs = append(legs, readyLeg{leg: readywork.Leg{Label: label, Store: store}, rows: ready})
+		legs = append(legs, readyLeg{leg: leg, rows: ready})
 	}
 	// City-scope ready work (graph.v2 molecules in a single-HQ city, control
 	// beads) lives in the city store, so federate it explicitly first or HTTP
-	// `bd ready` would never surface it. In production BeadStores() also returns
-	// the city store keyed by CityName() (cmd/gc/api_state.go), so skip that
-	// duplicate key in the rig loop below to avoid querying it twice.
-	federate("city", s.state.CityBeadStore())
-	cityName := s.state.CityName()
+	// `bd ready` would never surface it. workStoresByName also lists the city
+	// work store under cityName, as BeadStores() does (cmd/gc/api_state.go),
+	// so skip that name in the rig loop below to avoid querying it twice.
+	// Every leg is a class handle and reads strict, as the raw stores did.
+	federate(readywork.Leg{Label: "city", Store: st.Work()})
 	for _, rigName := range rigNames {
 		if rigName == cityName {
-			continue // city store already federated explicitly above; production
-			// BeadStores() also returns it under cityName (cmd/gc/api_state.go)
+			continue // city store already federated explicitly above; a rig
+			// named like the city replaces it under that name, and is skipped
 		}
-		federate("rig "+rigName, stores[rigName])
+		federate(readywork.Leg{Label: "rig " + rigName, Store: stores[rigName]})
 	}
 	// Split city: graph-class ready work (gcg- steps, control beads, molecule
-	// roots) lives in the relocated graph store, which BeadStores() does not
+	// roots) lives in the relocated graph store, which the work stores do not
 	// include — federate it or the whole execution DAG is invisible behind an
 	// authoritative-looking 200. It runs LAST so the merged order stays a leg
 	// concatenation whose prefix is exactly what a legacy city serves, and it
 	// does NOT go through federate(): the graph leg has no partial tier.
-	if graph, ok := relocatedGraphStore(s.state); ok {
+	if graph, ok := relocatedGraphIn(st); ok {
 		pa.attempt()
 		ready, err := beads.ReadyPreferCache(graph, readyFederationQuery())
 		if err != nil {
 			return nil, graphPlaneUnavailable("ready", err, pa.messages()...)
 		}
 		pa.success()
-		legs = append(legs, readyLeg{leg: readywork.Leg{Label: "graph", Store: graph, ClassBinding: true, ReservedPrefixes: graphBindingPrefixes(s.state.Stores())}, rows: ready})
+		legs = append(legs, readyLeg{leg: readywork.Leg{Label: "graph", Store: graph, ClassBinding: true, ReservedPrefixes: graphBindingPrefixes(st)}, rows: ready})
 	}
 	if pa.totalOutage() {
 		return nil, pa.outageError()
@@ -864,7 +879,9 @@ func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInpu
 // comes back as the bead's close_reason on GET and on bead.closed.
 func (s *Server) humaHandleBeadClose(ctx context.Context, input *BeadCloseInput) (*OKResponse, error) {
 	id := input.ID
-	store, current, err := s.resolveBeadOwner(id)
+	// One epoch for the owner and the close gate's rig match.
+	st := s.state.Stores()
+	store, current, err := s.resolveBeadOwnerIn(st, id)
 	if err != nil {
 		return nil, err
 	}
@@ -879,7 +896,7 @@ func (s *Server) humaHandleBeadClose(ctx context.Context, input *BeadCloseInput)
 	if reason != "" {
 		submitted = map[string]string{"close_reason": reason}
 	}
-	if err := s.gateWorkRecordClose(ctx, id, store, current, submitted); err != nil {
+	if err := s.gateWorkRecordClose(ctx, st, id, store, current, submitted); err != nil {
 		return nil, err
 	}
 	// Only a close that happens stamps a reason. On a bead that is not closed,
@@ -1006,7 +1023,10 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 		opts.ParentID = &parent
 	}
 
-	store, current, err := s.resolveBeadOwner(id)
+	// One epoch for the owner and, on a closing update, the close gate's rig
+	// match.
+	st := s.state.Stores()
+	store, current, err := s.resolveBeadOwnerIn(st, id)
 	if err != nil {
 		return nil, err
 	}
@@ -1032,7 +1052,7 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 		// This spelling closes the bead, so it answers to the same contract as
 		// the close route. body.Metadata rides along because the documented
 		// atomic close stamps the work record in this very request.
-		if err := s.gateWorkRecordClose(ctx, id, store, current, body.Metadata); err != nil {
+		if err := s.gateWorkRecordClose(ctx, st, id, store, current, body.Metadata); err != nil {
 			return nil, err
 		}
 	}

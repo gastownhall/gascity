@@ -306,7 +306,7 @@ func TestWorkArmStopsMidPass(t *testing.T) {
 		withWorkArmBudget(t, 5, func() {
 			enforcedLane(t, func() {
 				withCloseAbandonedTTL(t, 5*time.Minute, func() {
-					_, _ = gc.pass(ctx, legs, e.graphStore(), time.Hour, time.Now().Add(2*time.Hour))
+					_, _ = gc.pass(ctx, testWispGCRoots(e.graphStore(), legs), legs, e.graphStore(), time.Hour, time.Now().Add(2*time.Hour))
 				})
 			})
 		})
@@ -547,7 +547,7 @@ func TestWorkArmStopsBetweenListings(t *testing.T) {
 	gc := newWorkMoleculeGC()
 	gc.legCursor = legIndex(t, legs, "rig:rig-A")
 	enforcedLane(t, func() {
-		_, _ = gc.pass(ctx, legs, e.graphStore(), time.Hour, time.Now().Add(2*time.Hour))
+		_, _ = gc.pass(ctx, testWispGCRoots(e.graphStore(), legs), legs, e.graphStore(), time.Hour, time.Now().Add(2*time.Hour))
 	})
 	// The open listing is one List per status (open, in_progress); the
 	// closed listing would be a third.

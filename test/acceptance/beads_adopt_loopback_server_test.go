@@ -86,6 +86,10 @@ func newLoopbackServerAdoption(t *testing.T, name string, initArgs func(up *help
 		}
 	})
 
+	// gc init's default: a born-split city, which runs the v2 session
+	// reconciler. Its boot census reads the adopted rig's sessions leg, which
+	// must answer although the store does not define gc's bead types until
+	// registerRigTypes runs, or the city never becomes ready.
 	args := []string{"init", "--skip-provider-readiness", "--no-start", "--provider", "claude"}
 	if initArgs != nil {
 		args = append(args, initArgs(up)...)

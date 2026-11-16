@@ -89,7 +89,7 @@ type wizardConfig struct {
 	startCommand     string                // custom start command (workspace-level)
 	bootstrapProfile string                // hosted bootstrap profile, or "" for local defaults
 	hostedDolt       hostedDoltInitOptions // external/hosted Dolt ledger endpoint (disabled when zero)
-	storage          initStorageChoice     // --storage; "" means initStorageDefault
+	storage          initStorageChoice     // --storage; initStorageUnset when not given
 	prefix           string                // --prefix; "" derives the bead prefix from the city name
 	err              error
 }
@@ -448,11 +448,12 @@ committed workspace — e.g. from a bootstrap.sh shipped in the repo).`,
 	cmd.Flags().BoolVar(&preserveExisting, "preserve-existing", false, "keep any pre-authored pack.toml, city.toml, or agent prompt files instead of overwriting them")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON summary")
 	cmd.Flags().BoolVar(&assumeYesForSupervisorCycle, "yes", false, "bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail)")
-	cmd.Flags().StringVar(&storageFlag, "storage", "", "storage layout for the new city: single (every class on the work ledger; the default) or split (infrastructure classes in a local SQLite store under .gc/store; on a bd work store it needs a bd a split city's gc bd runs, bd >= "+initSplitBDMinVersion+" or the pinned Enterprise build, else the city starts single-store; refused for remote session runtimes)")
+	cmd.Flags().StringVar(&storageFlag, "storage", "", "storage layout for the new city: split (the default: infrastructure classes in a local SQLite store under .gc/store; on a bd work store it needs a bd a split city's gc bd runs, bd >= "+initSplitBDMinVersion+" or the pinned Enterprise build, else the city starts single-store with a notice; a remote session runtime, or a city name that derives a reserved bead prefix, starts single-store too, and an explicit split is refused there) or single (every class on the work ledger)")
 	cmd.Flags().StringVar(&prefixFlag, "prefix", "", "bead ID prefix for the new city (default: derived from the city name)")
 	cmd.MarkFlagsMutuallyExclusive("file", "from")
-	// --from copies its source verbatim and never adds the split (a K8S pod
-	// inits with --from); --file's source config owns both settings.
+	// --from never adds the split (a K8S pod inits with --from), and keeps a
+	// source's split unless this host could not serve it
+	// (initFromSplitStorageNotice); --file's source config owns both settings.
 	for _, initFlag := range []string{"storage", "prefix"} {
 		cmd.MarkFlagsMutuallyExclusive(initFlag, "from")
 		cmd.MarkFlagsMutuallyExclusive(initFlag, "file")
@@ -488,6 +489,7 @@ type initJSONResult struct {
 	DefaultProvider  string   `json:"default_provider,omitempty"`
 	Providers        []string `json:"providers,omitempty"`
 	BootstrapProfile string   `json:"bootstrap_profile,omitempty"`
+	Storage          string   `json:"storage,omitempty"`
 }
 
 func writeInitJSONOrExit(code int, jsonOut bool, args []string, nameOverride, templateName, defaultProvider string, providers []string, bootstrapProfile, mode string, stdout io.Writer) error {
@@ -498,6 +500,10 @@ func writeInitJSONOrExit(code int, jsonOut bool, args []string, nameOverride, te
 		return nil
 	}
 	cityPath, err := initTargetPath(args)
+	if err != nil {
+		return err
+	}
+	storage, err := initStorageLayout(cityPath)
 	if err != nil {
 		return err
 	}
@@ -512,6 +518,7 @@ func writeInitJSONOrExit(code int, jsonOut bool, args []string, nameOverride, te
 		DefaultProvider:  strings.TrimSpace(defaultProvider),
 		Providers:        append([]string(nil), providers...),
 		BootstrapProfile: strings.TrimSpace(bootstrapProfile),
+		Storage:          storage,
 	})
 }
 
@@ -1483,11 +1490,13 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 		cfg.Storage = storage
 	}
 	cityPrefix := strings.TrimSpace(cfg.Workspace.Prefix)
-	// A split city (--storage=split) may not carry a reserved bead prefix, so
-	// the new city is never given one it would then be refused for. The city
-	// shape is built, and this runs, before the scaffold, so a refusal leaves
-	// nothing behind.
-	if err := initReservedPrefixRefusal(fs, "", &cfg, cityName, cityPrefix); err != nil {
+	// A split city may not carry a reserved bead prefix, so the new city is
+	// never given one it would then be refused for. A default init whose name
+	// derives one already starts single-store (resolveInitStorage), so this
+	// refuses an explicit --storage=split or --prefix. The city shape is
+	// built, and this runs, before the scaffold, so a refusal leaves nothing
+	// behind.
+	if err := plainInitReservedPrefixRefusal(cfg, cityName, cityPrefix); err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1918,9 +1927,18 @@ func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverri
 		fmt.Fprintf(stderr, "gc init --from: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// Decided before anything is copied, so a source the copy cannot be made
+	// from leaves no destination behind, and the reserved-prefix check judges
+	// the city the copy becomes.
+	storageNotice, err := initFromSplitStorageNotice(fs, srcToml, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc init --from: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	dropStorage := storageNotice != ""
 	// Refused before anything is copied, so a refusal leaves no destination
 	// behind and the corrected retry is not "already initialized".
-	if err := initFromReservedPrefixRefusal(fs, srcToml, cityPath, nameOverride); err != nil {
+	if err := initFromReservedPrefixRefusal(fs, srcToml, cityPath, nameOverride, dropStorage); err != nil {
 		fmt.Fprintf(stderr, "gc init --from: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1934,10 +1952,14 @@ func doInitFromDirWithOptionsFSInternal(fs fsys.FS, srcDir, cityPath, nameOverri
 	}
 
 	copiedToml := filepath.Join(cityPath, "city.toml")
-	cfg, cityName, cityPrefix, persistSiteIdentity, rigSiteBindings, err := rewriteCopiedInitFromIdentity(fs, cityPath, nameOverride)
+	cfg, cityName, cityPrefix, persistSiteIdentity, rigSiteBindings, err := rewriteCopiedInitFromIdentity(fs, cityPath, nameOverride, dropStorage)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	if dropStorage {
+		fmt.Fprintln(stderr, storageNotice)                                                                            //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc init --from: the copy leaves out the [storage] of %s, which is unchanged.\n", srcToml) //nolint:errcheck // best-effort stderr
 	}
 	// A remote stage is recorded before anything else runs in it, so no
 	// later step (nor a one-shot gc racing this init) can reach storage
@@ -2073,8 +2095,14 @@ func doInitFromDirWithOptionsInternal(srcDir, cityPath, nameOverride string, std
 // for both the pack.toml and the legacy (no pack.toml) layout, so it can run
 // before anything is copied. A [storage] in a source include fragment counts:
 // fragments resolve against the source directory exactly as they will
-// against the copy.
-func initFromReservedPrefixRefusal(fs fsys.FS, srcToml, cityPath, nameOverride string) error {
+// against the copy. A copy that leaves out the source's [storage]
+// (dropStorage) starts single-store, which no reserved prefix refuses:
+// initFromSplitStorageNotice leaves it out only when no include fragment
+// declares any part of it.
+func initFromReservedPrefixRefusal(fs fsys.FS, srcToml, cityPath, nameOverride string, dropStorage bool) error {
+	if dropStorage {
+		return nil
+	}
 	data, err := fs.ReadFile(srcToml)
 	if err != nil {
 		return nil // the copy and its own parse report this
@@ -2090,29 +2118,43 @@ func initFromReservedPrefixRefusal(fs fsys.FS, srcToml, cityPath, nameOverride s
 // before its storage and prefix are resolved. Production leaves it a no-op.
 var initCityConfigHook = func(*config.City) {}
 
-// initReservedPrefixRefusal is the R10 check every city-creating init path
-// shares (gc init, gc init --file, gc init --from): cfg is the config the new
-// city gets, tomlPath the file its include fragments resolve against ("" when
-// it has none), cityName and cityPrefix the identity init gives it. The
-// remedy it names is renaming the city or changing the source config — never
-// a file of the city being created, which does not exist yet.
+// initReservedPrefixRefusal is the R10 check gc init --file and gc init --from
+// share: cfg is the config the new city gets, tomlPath the file its include
+// fragments resolve against, cityName and cityPrefix the identity init gives
+// it. The remedy it names is renaming the city or changing the source config —
+// never a file of the city being created, which does not exist yet, and never
+// --prefix or --storage, which both paths refuse.
 func initReservedPrefixRefusal(fs fsys.FS, tomlPath string, cfg *config.City, cityName, cityPrefix string) error {
 	if cfg == nil {
 		return nil
 	}
-	next := *cfg
-	next.Workspace.Name = cityName
-	next.ResolvedWorkspaceName = cityName
-	next.ResolvedWorkspacePrefix = strings.TrimSpace(cityPrefix)
+	next := withNewCityIdentity(*cfg, cityName, cityPrefix)
 	return config.ReservedPrefixSplitRefusalForNewCity(fs, tomlPath, &next)
 }
 
+// plainInitReservedPrefixRefusal is the R10 check of a plain gc init, which
+// builds cfg from a built-in template: its remedy names renaming the city,
+// --prefix or --storage=single.
+func plainInitReservedPrefixRefusal(cfg config.City, cityName, cityPrefix string) error {
+	next := withNewCityIdentity(cfg, cityName, cityPrefix)
+	return config.ReservedPrefixSplitRefusalForPlainInit(&next)
+}
+
+// withNewCityIdentity returns cfg carrying the identity init gives a new city.
+func withNewCityIdentity(cfg config.City, cityName, cityPrefix string) config.City {
+	cfg.Workspace.Name = cityName
+	cfg.ResolvedWorkspaceName = cityName
+	cfg.ResolvedWorkspacePrefix = strings.TrimSpace(cityPrefix)
+	return cfg
+}
+
 // rewriteCopiedInitFromIdentity rewrites the copied city.toml with the resolved
-// city identity. When the source declares rig paths, those paths are stripped
-// from cfg and persisted to .gc/site.toml instead; the stripped bindings are
-// returned so later writers of the same city.toml can re-supply them and avoid
-// erasing the site bindings just written.
-func rewriteCopiedInitFromIdentity(fs fsys.FS, cityPath, nameOverride string) (*config.City, string, string, bool, []config.Rig, error) {
+// city identity, and without its [storage] when dropStorage is set. When the
+// source declares rig paths, those paths are stripped from cfg and persisted
+// to .gc/site.toml instead; the stripped bindings are returned so later
+// writers of the same city.toml can re-supply them and avoid erasing the site
+// bindings just written.
+func rewriteCopiedInitFromIdentity(fs fsys.FS, cityPath, nameOverride string, dropStorage bool) (*config.City, string, string, bool, []config.Rig, error) {
 	copiedToml := filepath.Join(cityPath, "city.toml")
 	data, err := fs.ReadFile(copiedToml)
 	if err != nil {
@@ -2121,6 +2163,9 @@ func rewriteCopiedInitFromIdentity(fs fsys.FS, cityPath, nameOverride string) (*
 	cfg, err := config.Parse(data)
 	if err != nil {
 		return nil, "", "", false, nil, err
+	}
+	if dropStorage {
+		cfg.Storage = nil
 	}
 
 	cityName := resolveCityName(nameOverride, "", cityPath)
