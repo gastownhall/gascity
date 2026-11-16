@@ -13,6 +13,7 @@ go_library(
         "probe.go",
         "probe_testing.go",
         "record.go",
+        "session.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/beads/proxyendpoint",
     visibility = ["//:__subpackages__"],
@@ -38,6 +39,7 @@ go_test(
         "probe_session_test.go",
         "probe_test.go",
         "record_test.go",
+        "session_test.go",
         "testenv_import_test.go",
     ],
     data = [

@@ -385,6 +385,10 @@ const (
 	// listenerAnswersPingThenResets completes the handshake, answers the Ping,
 	// and resets the connection before the session's first statement.
 	listenerAnswersPingThenResets
+	// listenerRejectsUnknownDatabase greets, reads the login and answers it
+	// with the server's own ERR 1049 (unknown database): what a live proxy
+	// relays from Dolt when the login names a database that does not exist.
+	listenerRejectsUnknownDatabase
 )
 
 // probeListener is one loopback listener standing in for a proxy's data port.
@@ -437,6 +441,9 @@ func startProbeListener(t *testing.T, behavior probeListenerBehavior) probeListe
 					return
 				case listenerGreetsThenResets, listenerAnswersPingThenResets:
 					serveThenReset(conn, behavior == listenerAnswersPingThenResets)
+					return
+				case listenerRejectsUnknownDatabase:
+					serveUnknownDatabase(conn)
 					return
 				}
 				// No greeting, ever: the read returns only when the client
@@ -501,6 +508,22 @@ func serveThenReset(conn net.Conn, answerPing bool) {
 	if tcp, ok := conn.(*net.TCPConn); ok {
 		_ = tcp.SetLinger(0) //nolint:errcheck // the reset is best effort; a FIN still ends the session
 	}
+}
+
+// serveUnknownDatabase greets, discards the login, and answers it with ERR 1049
+// ("Unknown database", SQLSTATE 42000), which go-sql-driver surfaces as a
+// *mysql.MySQLError from the handshake.
+func serveUnknownDatabase(conn net.Conn) {
+	if writeMySQLPacket(conn, 0, mysqlGreeting()) != nil {
+		return
+	}
+	if skipMySQLPacket(conn) != nil {
+		return
+	}
+	payload := []byte{0xff}
+	payload = binary.LittleEndian.AppendUint16(payload, 1049)
+	payload = append(payload, "#42000Unknown database 'gone'"...)
+	_ = writeMySQLPacket(conn, 2, payload) //nolint:errcheck // the client's close ends the fixture's session
 }
 
 // mysqlGreeting is a protocol-10 handshake offering mysql_native_password with
