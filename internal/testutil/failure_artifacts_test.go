@@ -4,10 +4,15 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
 )
+
+// bazelUndeclaredOutputsEnv is the variable Bazel sets for every test; its
+// contents survive the run as test.outputs/outputs.zip.
+const bazelUndeclaredOutputsEnv = "TEST_UNDECLARED_OUTPUTS_DIR"
 
 type fakeFailureReporter struct {
 	name   string
@@ -113,6 +118,7 @@ func TestSaveFailureDiagnosticsSkipsPassingTests(t *testing.T) {
 
 func TestSaveFailureDiagnosticsWithoutArtifactDirIsNoop(t *testing.T) {
 	t.Setenv(FailureArtifactDirEnv, "")
+	t.Setenv(bazelUndeclaredOutputsEnv, "")
 	dir := managedDoltTree(t)
 	before := listFiles(t, dir)
 
@@ -250,6 +256,7 @@ func TestSaveDiagnosticsReportsRemovedSourceDir(t *testing.T) {
 
 func TestSaveDiagnosticsUnsetArtifactDirReturnsNil(t *testing.T) {
 	t.Setenv(FailureArtifactDirEnv, "")
+	t.Setenv(bazelUndeclaredOutputsEnv, "")
 
 	if err := saveDiagnostics("TestX", filepath.Join(t.TempDir(), "missing")); err != nil {
 		t.Fatalf("saveDiagnostics with no artifact dir = %v, want nil", err)
@@ -261,5 +268,58 @@ func TestSaveDiagnosticsHealthyTreeReturnsNil(t *testing.T) {
 
 	if err := saveDiagnostics("TestX", managedDoltTree(t)); err != nil {
 		t.Fatalf("saveDiagnostics = %v", err)
+	}
+}
+
+// TestSaveDiagnosticsDestination pins where saveDiagnostics writes: the
+// explicit variable first, Bazel's $TEST_UNDECLARED_OUTPUTS_DIR when that is
+// empty or whitespace, and nowhere when neither is set. Bazel keeps the
+// fallback directory as test.outputs/outputs.zip, so a failing Bazel run keeps
+// the logs instead of deleting them with the temp dir.
+func TestSaveDiagnosticsDestination(t *testing.T) {
+	tests := []struct {
+		name         string
+		explicit     string // "" leaves the variable empty
+		undeclared   string
+		wantExplicit bool
+		wantFallback bool
+	}{
+		{name: "explicit variable wins over the fallback", explicit: "set", undeclared: "set", wantExplicit: true},
+		{name: "fallback when the explicit variable is empty", undeclared: "set", wantFallback: true},
+		{name: "fallback when the explicit variable is whitespace", explicit: "  \t", undeclared: "set", wantFallback: true},
+		{name: "explicit variable alone", explicit: "set", wantExplicit: true},
+		{name: "neither set is a no-op"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			explicitDir, fallbackDir := t.TempDir(), t.TempDir()
+			explicit, undeclared := tt.explicit, ""
+			if tt.explicit == "set" {
+				explicit = explicitDir
+			}
+			if tt.undeclared == "set" {
+				undeclared = fallbackDir
+			}
+			t.Setenv(FailureArtifactDirEnv, explicit)
+			t.Setenv(bazelUndeclaredOutputsEnv, undeclared)
+			dir := managedDoltTree(t)
+
+			if err := saveDiagnostics("TestX", dir); err != nil {
+				t.Fatalf("saveDiagnostics = %v", err)
+			}
+
+			gotExplicit := len(listFiles(t, explicitDir)) > 0
+			gotFallback := len(listFiles(t, fallbackDir)) > 0
+			if gotExplicit != tt.wantExplicit || gotFallback != tt.wantFallback {
+				t.Fatalf("wrote explicit=%v fallback=%v, want explicit=%v fallback=%v",
+					gotExplicit, gotFallback, tt.wantExplicit, tt.wantFallback)
+			}
+			if tt.wantFallback {
+				got := listFiles(t, filepath.Join(fallbackDir, "TestX", "gc-acceptance-123"))
+				if !slices.Contains(got, "gc-home_supervisor.log") || !slices.Contains(got, "env.txt") {
+					t.Fatalf("fallback dir files = %v, want the allowlisted logs and env.txt", got)
+				}
+			}
+		})
 	}
 }
