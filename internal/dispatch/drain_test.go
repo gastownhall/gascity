@@ -666,6 +666,83 @@ func TestProcessDrainExclusiveReservationConflictFailsClosed(t *testing.T) {
 	}
 }
 
+func TestProcessDrainExclusiveReservationTakesOverClosedOwner(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	store, drain := seedDrainWorkflow(t)
+	if err := store.SetMetadata(drain.ID, "gc.drain_member_access", "exclusive"); err != nil {
+		t.Fatalf("SetMetadata(exclusive): %v", err)
+	}
+	root := mustGetBead(t, store, drain.Metadata["gc.root_bead_id"])
+	members, err := convoycore.MembersIn(convoycore.MemberClasses{Convoy: beadstest.Work(store)}, root.Metadata["gc.input_convoy_id"], false)
+	if err != nil {
+		t.Fatalf("Members: %v", err)
+	}
+	// An earlier drain was stopped from outside: its control is closed and
+	// it never released its members.
+	oldDrain, err := store.Create(beads.Bead{Title: "old drain", Type: "control"})
+	if err != nil {
+		t.Fatalf("Create(old drain): %v", err)
+	}
+	if err := store.Close(oldDrain.ID); err != nil {
+		t.Fatalf("Close(old drain): %v", err)
+	}
+	if err := store.SetMetadata(members[1].ID, "gc.exclusive_drain_reservation", oldDrain.ID); err != nil {
+		t.Fatalf("SetMetadata(reservation): %v", err)
+	}
+
+	result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
+	if err != nil {
+		t.Fatalf("ProcessControl(closed owner): %v", err)
+	}
+	if result.Action == "drain-reservation-failed" {
+		t.Fatalf("Action = %q, want the drain to take over the closed reservation", result.Action)
+	}
+	drain = mustGetBead(t, store, drain.ID)
+	if drain.Metadata["gc.failure_reason"] == "exclusive_reservation_conflict" {
+		t.Fatalf("drain = %+v, want no reservation conflict from a closed owner", drain)
+	}
+	secondMember := mustGetBead(t, store, members[1].ID)
+	if got := strings.TrimSpace(secondMember.Metadata["gc.exclusive_drain_reservation"]); got == oldDrain.ID {
+		t.Fatalf("second member still reserved by closed drain %s", oldDrain.ID)
+	}
+}
+
+func TestProcessDrainExclusiveReservationLiveOwnerStillConflicts(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	dir := t.TempDir()
+	writeDrainItemFormula(t, dir)
+	store, drain := seedDrainWorkflow(t)
+	if err := store.SetMetadata(drain.ID, "gc.drain_member_access", "exclusive"); err != nil {
+		t.Fatalf("SetMetadata(exclusive): %v", err)
+	}
+	root := mustGetBead(t, store, drain.Metadata["gc.root_bead_id"])
+	members, err := convoycore.MembersIn(convoycore.MemberClasses{Convoy: beadstest.Work(store)}, root.Metadata["gc.input_convoy_id"], false)
+	if err != nil {
+		t.Fatalf("Members: %v", err)
+	}
+	liveDrain, err := store.Create(beads.Bead{Title: "live drain", Type: "control"})
+	if err != nil {
+		t.Fatalf("Create(live drain): %v", err)
+	}
+	if err := store.SetMetadata(members[1].ID, "gc.exclusive_drain_reservation", liveDrain.ID); err != nil {
+		t.Fatalf("SetMetadata(reservation): %v", err)
+	}
+
+	result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, drain.ID), ProcessOptions{Work: beadstest.Work(store), FormulaSearchPaths: []string{dir}})
+	if err != nil {
+		t.Fatalf("ProcessControl(live owner): %v", err)
+	}
+	if result.Action != "drain-reservation-failed" {
+		t.Fatalf("Action = %q, want drain-reservation-failed for a live owner", result.Action)
+	}
+	secondMember := mustGetBead(t, store, members[1].ID)
+	if got := secondMember.Metadata["gc.exclusive_drain_reservation"]; got != liveDrain.ID {
+		t.Fatalf("second member reservation = %q, want live drain kept", got)
+	}
+}
+
 func TestProcessDrainSeparateCompletesAfterItemRootsClose(t *testing.T) {
 	formulatest.EnableV2ForTest(t)
 	dir := t.TempDir()

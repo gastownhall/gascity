@@ -1768,12 +1768,63 @@ func reserveDrainMember(store beads.GraphStore, control, member beads.Bead, opts
 	}
 	owner := strings.TrimSpace(current.Metadata[beadmeta.ExclusiveDrainReservationMetadataKey])
 	if owner != "" && owner != control.ID {
-		return drainReservationError{ControlID: control.ID, MemberID: member.ID, Owner: owner}
+		closed, err := drainControlClosed(store, owner)
+		if err != nil {
+			return fmt.Errorf("%s: checking reservation owner %s of member %s: %w", control.ID, owner, member.ID, err)
+		}
+		if !closed {
+			return drainReservationError{ControlID: control.ID, MemberID: member.ID, Owner: owner}
+		}
+		return takeOverClosedDrainReservation(memberStore, owner, control, member)
 	}
 	if owner == control.ID {
 		return nil
 	}
 	return claimDrainReservation(memberStore, control, member)
+}
+
+// drainControlClosed reports whether the drain control that holds a reservation
+// is closed. A control closed outside the drain processor (gc convoy delete,
+// run cancel) never releases its members, so its reservation is dead. A control
+// that cannot be found is not treated as closed; that keeps the conflict.
+func drainControlClosed(store beads.GraphStore, controlID string) (bool, error) {
+	control, err := store.Get(controlID)
+	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return control.Status == "closed", nil
+}
+
+// takeOverClosedDrainReservation moves a reservation from a closed owner to
+// control. With a conditional writer the move is a value-CAS from the old owner.
+// Without one it is the same unconditional legacy write as claimDrainReservation,
+// after re-reading that the old owner still holds the slot.
+func takeOverClosedDrainReservation(memberStore beads.Store, oldOwner string, control, member beads.Bead) error {
+	writer, _, err := beads.ResolveConditionalWriter(memberStore)
+	if err != nil {
+		return fmt.Errorf("%s: taking over reservation on %s: %w", control.ID, member.ID, err)
+	}
+	if writer != nil {
+		ok, casErr := writer.CompareAndSetMetadataKey(member.ID, beadmeta.ExclusiveDrainReservationMetadataKey, oldOwner, control.ID)
+		if casErr != nil {
+			return fmt.Errorf("%s: taking over reservation on %s: %w", control.ID, member.ID, casErr)
+		}
+		if !ok {
+			return drainReservationError{ControlID: control.ID, MemberID: member.ID, Owner: oldOwner}
+		}
+		return nil
+	}
+	current, err := memberStore.Get(member.ID)
+	if err != nil {
+		return fmt.Errorf("%s: reloading member %s for reservation takeover: %w", control.ID, member.ID, err)
+	}
+	if strings.TrimSpace(current.Metadata[beadmeta.ExclusiveDrainReservationMetadataKey]) != oldOwner {
+		return drainReservationError{ControlID: control.ID, MemberID: member.ID, Owner: strings.TrimSpace(current.Metadata[beadmeta.ExclusiveDrainReservationMetadataKey])}
+	}
+	return memberStore.SetMetadata(member.ID, beadmeta.ExclusiveDrainReservationMetadataKey, control.ID)
 }
 
 // claimDrainReservation claims the empty reservation slot. When the member's
