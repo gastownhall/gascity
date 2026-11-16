@@ -39,12 +39,14 @@ const nudgeQueueBatchKeyPrefix = "nudge-batch-"
 
 // ClaimBatch claims target's next delivery batch.
 //
-// It reads the target's candidates with one keyed List per queue key. For each
+// It reads the target's candidates with one keyed List per queue key. The
+// target session's startup turns are judged first (judgeStartup): while one
+// stands, the claim is that turn alone as a batch of one, or nothing. For each
 // distinct batch key among the candidates, in canonical candidate order, it
 // reads the batch's members; the first batch that can be claimed whole (no
 // member in flight, every live member due, addressed to one of the target's
-// keys and passing the fence) is claimed: every member, under its key, and
-// nothing else. If one of those writes loses to another claimant, what this
+// keys, passing the fence, and none a startup turn) is claimed: every member,
+// under its key, and nothing else. If one of those writes loses to another claimant, what this
 // call took is released with the pin kept, and it returns no items and no
 // error: the batch waits for the next pass. Otherwise it mints a new key and
 // claims every due unpinned candidate under it; a lost write there skips that
@@ -60,6 +62,18 @@ func (q *beadsNudgeQueue) ClaimBatch(target ClaimTarget, now time.Time) ([]nudge
 	entries, corrupt, err := q.keyedEntries(target.QueueKeys, now)
 	if err != nil {
 		return nil, err
+	}
+	turn, hold, entries, skipped, err := q.judgeStartup(target, entries, now)
+	corrupt = append(corrupt, skipped...)
+	if err != nil {
+		return nil, err
+	}
+	if hold {
+		claimed, err := q.claimStartupTurn(turn, now)
+		if err != nil {
+			return claimed, err
+		}
+		return claimed, nudgeQueueQuarantined("ClaimBatch", corrupt)
 	}
 	fence := newNudgeClaimFence(target)
 	candidates, err := q.claimCandidates(entries, fence, now)
@@ -96,6 +110,18 @@ func (q *beadsNudgeQueue) ClaimBatch(target ClaimTarget, now time.Time) ([]nudge
 	return claimed, nudgeQueueQuarantined("ClaimBatch", corrupt)
 }
 
+// claimStartupTurn claims a startup turn as a batch of one: under the batch
+// it is pinned to, or a newly minted one. A nil turn claims nothing.
+func (q *beadsNudgeQueue) claimStartupTurn(turn *nudgeQueueEntry, now time.Time) ([]nudgequeue.Item, error) {
+	if turn == nil {
+		return nil, nil
+	}
+	if key := turn.item.DeliveryBatch; key != "" {
+		return q.claimResumedBatch(key, []nudgeQueueEntry{*turn}, now)
+	}
+	return q.claimNewBatch([]nudgeQueueEntry{*turn}, now)
+}
+
 // wholeBatch reads the open members of batch key and reports whether target
 // can claim them whole: none in flight, and every live member due, addressed
 // to one of target's keys, and passing the fence. Members past their deadline
@@ -119,7 +145,7 @@ func (q *beadsNudgeQueue) wholeBatch(key string, target ClaimTarget, fence *nudg
 		if nudgeQueueItemExpired(entry.item, now) {
 			continue
 		}
-		if entry.state == nudgeQueueInFlight || entry.item.DeliverAfter.After(now) ||
+		if entry.state == nudgeQueueInFlight || entry.item.DeliverAfter.After(now) || nudgequeue.IsStartupTurn(entry.item) ||
 			!nudgeQueueKeysContain(target.QueueKeys, entry.item.Agent) || !fence.passes(entry.item) {
 			return nil, false, nil, nil
 		}

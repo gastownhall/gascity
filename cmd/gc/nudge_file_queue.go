@@ -162,7 +162,7 @@ func maintainNudgeQueue(state *nudgeQueueState, ledger *nudgeShadowLedger, now, 
 
 func claimDueQueuedNudgesMatching(cityPath string, now time.Time, match func(queuedNudge) bool) ([]queuedNudge, error) {
 	plain := func(item queuedNudge, _ func() map[string]struct{}) bool { return match(item) }
-	return claimDueQueuedNudges(cityPath, now, plain, nil, nil)
+	return claimDueQueuedNudges(cityPath, now, plain, nil, nil, nil)
 }
 
 // nudgeClaimMatch is a claim predicate given the claim's Leg-B census (see
@@ -221,6 +221,96 @@ func (c *nudgeClaimCensus) liveSessionsFor(fence nudgeClaimFence) map[string]str
 	return c.live
 }
 
+// nudgeClaimLaunch is a claim's judgement of its target session's startup
+// turns (nudgequeue.JudgeStartupTurns). The live launch is read the way the
+// census is: outside the queue lock, after a dry run that met a due turn and
+// recorded the turns it saw (members). The locked run judges only those
+// turns by the answer; a turn first seen after the read is held.
+type nudgeClaimLaunch struct {
+	target nudgeTarget
+	read   func() (string, bool)
+	launch nudgequeue.LiveLaunch
+	// needed and members are what the last run before the read found: a
+	// due turn, and the session's turns it saw.
+	needed  bool
+	members []string
+	// dropped reports that the last run dead-lettered a turn.
+	dropped bool
+}
+
+// judge judges state's startup turns at now and dead-letters the ones it
+// finds stale or superseded, their shadow debts taken by ledger. It returns
+// the turn to claim alone (empty for none) and whether the claim must take
+// nothing else.
+func (l *nudgeClaimLaunch) judge(state *nudgeQueueState, ledger *nudgeShadowLedger, now time.Time) (string, bool) {
+	l.dropped = false
+	var pending, inFlight []queuedNudge
+	for _, item := range state.Pending {
+		if l.target.matchesQueueAgent(item.Agent) {
+			pending = append(pending, item)
+		}
+	}
+	for _, item := range state.InFlight {
+		if !l.target.matchesQueueAgent(item.Agent) {
+			continue
+		}
+		if item.LeaseUntil.After(now) {
+			inFlight = append(inFlight, item)
+		} else {
+			pending = append(pending, item)
+		}
+	}
+	judgement := nudgequeue.JudgeStartupTurns(l.target.sessionID, pending, inFlight, now, l.launch)
+	if !l.launch.Asked {
+		l.needed, l.members = judgement.NeedsLaunch, judgement.Members
+	}
+	drop := make(map[string]string, len(judgement.Stale)+len(judgement.Superseded))
+	for _, id := range judgement.Stale {
+		drop[id] = nudgequeue.StaleLaunchReason
+	}
+	for _, id := range judgement.Superseded {
+		drop[id] = nudgequeue.SupersededReason
+	}
+	if len(drop) == 0 {
+		return judgement.Claim, judgement.Hold
+	}
+	l.dropped = true
+	deadLetter := func(item queuedNudge, reason string) {
+		item.ClaimedAt, item.LeaseUntil = time.Time{}, time.Time{}
+		item.DeadAt = now.UTC()
+		item.LastError = reason
+		ledger.owe(&item, terminalStateForDeadQueuedNudge(item), reason, "", now)
+		state.Dead = append(state.Dead, item)
+	}
+	kept := state.Pending[:0]
+	for _, item := range state.Pending {
+		if reason, ok := drop[item.ID]; ok {
+			deadLetter(item, reason)
+			continue
+		}
+		kept = append(kept, item)
+	}
+	state.Pending = kept
+	inFlightKept := state.InFlight[:0]
+	for _, item := range state.InFlight {
+		// A stale turn is dropped in flight too; a superseded one only when
+		// its lease has lapsed, which the judgement read as pending.
+		if reason, ok := drop[item.ID]; ok && (reason == nudgequeue.StaleLaunchReason || !item.LeaseUntil.After(now)) {
+			deadLetter(item, reason)
+			continue
+		}
+		inFlightKept = append(inFlightKept, item)
+	}
+	state.InFlight = inFlightKept
+	sortQueuedNudges(state)
+	return judgement.Claim, judgement.Hold
+}
+
+// ask reads the live launch once, for the turns the last run saw.
+func (l *nudgeClaimLaunch) ask() {
+	l.launch = storebinding.AskLiveLaunch(storebinding.ClaimTarget{LiveLaunch: l.read}, l.members)
+}
+
 // nudgeClaimRun is one claim, run as a pure queue callback: the whole-queue
 // maintenance pass, then the claim.
 type nudgeClaimRun struct {
@@ -231,12 +321,13 @@ type nudgeClaimRun struct {
 	batchTarget *nudgeTarget
 
 	census  nudgeClaimCensus
+	launch  *nudgeClaimLaunch
 	ledger  *nudgeShadowLedger
 	claimed []queuedNudge
 }
 
-func newNudgeClaimRun(cityPath string, now time.Time, match nudgeClaimMatch, readCensus func() (map[string]struct{}, bool), batchTarget *nudgeTarget) *nudgeClaimRun {
-	return &nudgeClaimRun{cityPath: cityPath, now: now, match: match, readCensus: readCensus, batchTarget: batchTarget, ledger: newNudgeShadowLedger(now)}
+func newNudgeClaimRun(cityPath string, now time.Time, match nudgeClaimMatch, readCensus func() (map[string]struct{}, bool), launch *nudgeClaimLaunch, batchTarget *nudgeTarget) *nudgeClaimRun {
+	return &nudgeClaimRun{cityPath: cityPath, now: now, match: match, readCensus: readCensus, launch: launch, batchTarget: batchTarget, ledger: newNudgeShadowLedger(now)}
 }
 
 // run is the claim's queue callback. Its maintenance budget starts when the
@@ -250,27 +341,55 @@ func (r *nudgeClaimRun) run(state *nudgeQueueState) error {
 		r.census.recordFences(state)
 	}
 	maintainNudgeQueue(state, r.ledger, r.now, time.Now().Add(nudgeEnqueueMaintenanceBudget), clock.Real{})
-	r.claimed = claimQueuedNudges(state, r.now, func(item queuedNudge) bool {
+	match := func(item queuedNudge) bool {
 		fence := nudgeClaimFence{id: item.ID, sessionID: item.SessionID}
 		return r.match(item, func() map[string]struct{} { return r.census.liveSessionsFor(fence) })
-	}, r.batchTarget)
+	}
+	if r.launch != nil {
+		turn, hold := r.launch.judge(state, r.ledger, r.now)
+		if hold {
+			r.claimed = claimQueuedNudges(state, r.now, func(item queuedNudge) bool { return item.ID == turn }, r.batchTarget)
+			return nil
+		}
+		// A startup turn is the judgement's to claim: none is left to the
+		// claim below, another session's included.
+		judged := match
+		match = func(item queuedNudge) bool { return !nudgequeue.IsStartupTurn(item) && judged(item) }
+	}
+	r.claimed = claimQueuedNudges(state, r.now, match, r.batchTarget)
 	return nil
 }
 
 // dryRun runs the claim on a lock-free snapshot and reports whether it would
 // change the queue. When the snapshot has a candidate only the census can
-// decide, it reads the census once, outside any lock, and runs again.
+// decide, or a due startup turn only the live launch can judge, it reads what
+// it needs once, outside any lock, and runs again.
 func (r *nudgeClaimRun) dryRun() (bool, error) {
 	changed, err := nudgequeue.DryRun(r.cityPath, r.run)
-	if err != nil || !r.census.needed || r.census.read || r.readCensus == nil {
-		return changed, err
+	for reads := 0; err == nil && reads < 2; reads++ {
+		readLaunch := r.launch != nil && r.launch.needed && !r.launch.launch.Asked
+		readCensus := r.census.needed && !r.census.read && r.readCensus != nil
+		if !readLaunch && !readCensus {
+			break
+		}
+		if readLaunch {
+			r.launch.ask()
+		}
+		if readCensus {
+			live, ok := r.readCensus()
+			if !ok {
+				live = nil
+			}
+			r.census.read, r.census.live = true, live
+		}
+		changed, err = nudgequeue.DryRun(r.cityPath, r.run)
 	}
-	live, ok := r.readCensus()
-	if !ok {
-		live = nil
-	}
-	r.census.read, r.census.live = true, live
-	return nudgequeue.DryRun(r.cityPath, r.run)
+	return changed, err
+}
+
+// dropsStartupTurn reports that the last run dead-lettered a startup turn.
+func (r *nudgeClaimRun) dropsStartupTurn() bool {
+	return r.launch != nil && r.launch.dropped
 }
 
 // claimDueQueuedNudges claims every due nudge match accepts and pins nothing,
@@ -278,12 +397,14 @@ func (r *nudgeClaimRun) dryRun() (bool, error) {
 // (claimDueQueuedNudgeBatchForTarget). A claim that would change nothing (no
 // claimable item, no maintenance to persist) is answered from a lock-free
 // snapshot and takes no lock; otherwise the claim runs again under the lock,
-// with the census its dry run read, and that run's answer is authoritative. A
-// Leg-B candidate whose fence is not one of the snapshot read before the
-// census (an item queued or re-fenced since) has no census and stays pending
-// for the next pass.
-func claimDueQueuedNudges(cityPath string, now time.Time, match nudgeClaimMatch, readCensus func() (map[string]struct{}, bool), batchTarget *nudgeTarget) ([]queuedNudge, error) {
-	r := newNudgeClaimRun(cityPath, now, match, readCensus, batchTarget)
+// with the census and live launch its dry run read, and that run's answer is
+// authoritative. A Leg-B candidate whose fence is not one of the snapshot read
+// before the census (an item queued or re-fenced since) has no census and
+// stays pending for the next pass; so does a startup turn first seen after
+// the live launch was read. Given launch, the target session's startup turns
+// are judged first (nudgeClaimLaunch).
+func claimDueQueuedNudges(cityPath string, now time.Time, match nudgeClaimMatch, readCensus func() (map[string]struct{}, bool), launch *nudgeClaimLaunch, batchTarget *nudgeTarget) ([]queuedNudge, error) {
+	r := newNudgeClaimRun(cityPath, now, match, readCensus, launch, batchTarget)
 	if changed, err := r.dryRun(); err == nil && !changed {
 		return nil, nil
 	}
@@ -1193,6 +1314,12 @@ func fileClaimMatcher(ct storebinding.ClaimTarget) nudgeClaimMatch {
 	}
 }
 
+// fileClaimLaunch is the startup-turn judgement of a claim for ct, reading
+// ct's LiveLaunch.
+func fileClaimLaunch(ct storebinding.ClaimTarget) *nudgeClaimLaunch {
+	return &nudgeClaimLaunch{target: fileClaimTarget(ct), read: ct.LiveLaunch}
+}
+
 func (q *fileNudgeQueue) location() string { return nudgequeue.StatePath(q.cityPath) }
 
 // Enqueue queues item, saving its shadow first.
@@ -1205,9 +1332,10 @@ func (q *fileNudgeQueue) EnqueueDeferred(item nudgequeue.Item) error {
 	return nudgequeue.StateFileQueue{CityPath: q.cityPath}.EnqueueDeferred(item)
 }
 
-// ClaimDue claims every due nudge ct may take and pins nothing.
+// ClaimDue claims every due nudge ct may take and pins nothing, judging ct's
+// session's startup turns first (fileClaimLaunch).
 func (q *fileNudgeQueue) ClaimDue(ct storebinding.ClaimTarget, now time.Time) ([]nudgequeue.Item, error) {
-	return claimDueQueuedNudges(q.cityPath, now, fileClaimMatcher(ct), ct.LiveFenceSessions, nil)
+	return claimDueQueuedNudges(q.cityPath, now, fileClaimMatcher(ct), ct.LiveFenceSessions, fileClaimLaunch(ct), nil)
 }
 
 // ClaimBatch claims ct's next delivery batch. It keeps the file queue's batch
@@ -1217,28 +1345,40 @@ func (q *fileNudgeQueue) ClaimDue(ct storebinding.ClaimTarget, now time.Time) ([
 // be asked about a member that is not yet due.
 func (q *fileNudgeQueue) ClaimBatch(ct storebinding.ClaimTarget, now time.Time) ([]nudgequeue.Item, error) {
 	target := fileClaimTarget(ct)
-	return claimDueQueuedNudges(q.cityPath, now, fileClaimMatcher(ct), ct.LiveFenceSessions, &target)
+	return claimDueQueuedNudges(q.cityPath, now, fileClaimMatcher(ct), ct.LiveFenceSessions, fileClaimLaunch(ct), &target)
 }
 
 // WouldClaimBatch reports, from a lock-free snapshot, whether ClaimBatch for
-// ct at now would claim anything. It claims nothing and writes nothing; ct's
-// census is asked only for a due candidate fenced to another session, as
-// ClaimBatch asks it.
+// ct at now would claim anything, or would dead-letter a startup turn of ct's
+// session (so the pass that drops it runs). It claims nothing and writes
+// nothing; ct's census and live launch are asked as ClaimBatch asks them.
 func (q *fileNudgeQueue) WouldClaimBatch(ct storebinding.ClaimTarget, now time.Time) (bool, error) {
-	batch, err := q.NextBatch(ct, now)
-	return len(batch) > 0, err
+	r, err := q.previewBatch(ct, now)
+	if err != nil {
+		return false, err
+	}
+	return len(r.claimed) > 0 || r.dropsStartupTurn(), nil
 }
 
 // NextBatch returns, from a lock-free snapshot, the items ClaimBatch for ct at
 // now would claim, in queue order. It claims nothing and writes nothing, and
-// asks ct's census as ClaimBatch asks it.
+// asks ct's census and live launch as ClaimBatch asks them.
 func (q *fileNudgeQueue) NextBatch(ct storebinding.ClaimTarget, now time.Time) ([]nudgequeue.Item, error) {
-	target := fileClaimTarget(ct)
-	r := newNudgeClaimRun(q.cityPath, now, fileClaimMatcher(ct), ct.LiveFenceSessions, &target)
-	if _, err := r.dryRun(); err != nil {
+	r, err := q.previewBatch(ct, now)
+	if err != nil {
 		return nil, err
 	}
 	return r.claimed, nil
+}
+
+// previewBatch is ClaimBatch's dry run for ct at now.
+func (q *fileNudgeQueue) previewBatch(ct storebinding.ClaimTarget, now time.Time) (*nudgeClaimRun, error) {
+	target := fileClaimTarget(ct)
+	r := newNudgeClaimRun(q.cityPath, now, fileClaimMatcher(ct), ct.LiveFenceSessions, fileClaimLaunch(ct), &target)
+	if _, err := r.dryRun(); err != nil {
+		return nil, err
+	}
+	return r, nil
 }
 
 // ListForAgent lists the items addressed to exactly agent. The empty agent
@@ -1261,21 +1401,30 @@ func (q *fileNudgeQueue) Lookup(ids []string, now time.Time) (map[string]nudgequ
 }
 
 // DueKeys reads, without the lock, the agents of the pending items due by now
-// and of the in-flight items whose lease ran out before now.
+// and of the in-flight items whose lease ran out before now, leaving out the
+// items a startup turn that is not yet claimable holds
+// (nudgequeue.StartupBarrier).
 func (q *fileNudgeQueue) DueKeys(now time.Time) ([]string, error) {
 	state, err := nudgequeue.LoadState(q.cityPath)
 	if err != nil {
 		return nil, err
 	}
+	var barrier nudgequeue.StartupBarrier
+	for _, item := range state.Pending {
+		barrier.Add(item, false, now)
+	}
+	for _, item := range state.InFlight {
+		barrier.Add(item, true, now)
+	}
 	due := map[string]bool{}
 	for _, item := range state.Pending {
-		if item.Agent == "" || (!item.DeliverAfter.IsZero() && item.DeliverAfter.After(now)) {
+		if item.Agent == "" || (!item.DeliverAfter.IsZero() && item.DeliverAfter.After(now)) || barrier.Holds(item) {
 			continue
 		}
 		due[item.Agent] = true
 	}
 	for _, item := range state.InFlight {
-		if item.Agent == "" || item.LeaseUntil.IsZero() || !item.LeaseUntil.Before(now) {
+		if item.Agent == "" || item.LeaseUntil.IsZero() || !item.LeaseUntil.Before(now) || barrier.Holds(item) {
 			continue
 		}
 		due[item.Agent] = true

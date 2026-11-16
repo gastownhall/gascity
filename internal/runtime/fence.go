@@ -379,3 +379,54 @@ func InterruptWithContext(ctx context.Context, p Provider, name string) error {
 	}
 	return p.Interrupt(name)
 }
+
+// launchIDTag versions the LaunchID format. Queued items carry launch ids in
+// this format, so a new format needs a new tag and a new queue reference kind.
+const launchIDTag = "gascity/launch/v1"
+
+// LaunchID is the public identity of the launch an instance token names: the
+// first 16 hex characters of sha256 over the length-prefixed tag and token,
+// the construction Digest uses, domain-separated from it. It is safe to store
+// and log where the token, a capability, is not; it is equal exactly when the
+// tokens are. The empty token has no launch: its LaunchID is "".
+func LaunchID(token string) string {
+	if token == "" {
+		return ""
+	}
+	sum := sha256.Sum256(fenceLP(fenceLP(nil, launchIDTag), token))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+// ReadLaunchID reads the LaunchID of the launch running as session name: one
+// GetMeta of its InstanceTokenEnv through p. It reports false when that read
+// cannot name a launch: no session, a runtime that cannot answer, no token,
+// or a runtime that keeps no session metadata.
+func ReadLaunchID(p Provider, name string) (string, bool) {
+	if p == nil || name == "" {
+		return "", false
+	}
+	token, err := p.GetMeta(name, InstanceTokenEnv)
+	if err != nil || token == "" {
+		return "", false
+	}
+	return LaunchID(token), true
+}
+
+// ReadInputFence reads the fence of the incarnation running as session name:
+// its InstanceTokenEnv, RuntimeEpochEnv and ContinuationEpochEnv through p,
+// read as InputFenceFromEnv reads an environment. It reports false when the
+// token cannot be read (see ReadLaunchID) or a counter's read fails.
+func ReadInputFence(p Provider, name string) (InputFence, bool) {
+	if p == nil || name == "" {
+		return InputFence{}, false
+	}
+	env := make(map[string]string, 3)
+	for _, key := range []string{InstanceTokenEnv, RuntimeEpochEnv, ContinuationEpochEnv} {
+		value, err := p.GetMeta(name, key)
+		if err != nil {
+			return InputFence{}, false
+		}
+		env[key] = value
+	}
+	return InputFenceFromEnv(env)
+}

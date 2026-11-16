@@ -159,7 +159,7 @@ func TestNudgesSuiteRejectsBrokenQueues(t *testing.T) {
 		{
 			name:   "a claim that ignores the session fence",
 			defect: NudgesDefectClaimIgnoresFence,
-			want:   []string{"ClaimDueAdoptsANudgeFencedToASupersededSession", "ClaimDueHonorsTheSessionFence"},
+			want:   []string{"AnotherSessionsTurnIsNeitherClaimedNorDroppedNorAdopted", "ClaimDueAdoptsANudgeFencedToASupersededSession", "ClaimDueHonorsTheSessionFence"},
 		},
 		{
 			name:   "a failure report that includes the retried items",
@@ -177,6 +177,21 @@ func TestNudgesSuiteRejectsBrokenQueues(t *testing.T) {
 				"ClaimBatchWaitsOnASplitBatch",
 				"RecordFailureRejectionUnpins",
 				"ReleaseClaimsHonorsNotBefore",
+			},
+		},
+		{
+			name:   "a claim that ignores the launch a startup turn is bound to",
+			defect: NudgesDefectClaimIgnoresLaunch,
+			want: []string{
+				"AFailedTurnOfAReplacedLaunchIsDroppedNotRedelivered",
+				"ALapsedTurnOfAReplacedLaunchIsDroppedNotRedelivered",
+				"AReleasedTurnOfAReplacedLaunchIsDroppedNotRedelivered",
+				"ATurnFirstSeenAfterTheReadIsHeldNotDropped",
+				"AnInFlightTurnOfAReplacedLaunchDiesAtTheReplacementsClaim",
+				"ConcurrentClaimsNeverDeliverAStaleTurnTwice",
+				"TheBarrierReleases",
+				"TheInitialMessageWaitsBehindItsTurnAndOutlivesIt",
+				"TheNewestTurnOfOneLaunchWins",
 			},
 		},
 	}
