@@ -25,11 +25,23 @@ func TestProviderOpTimeoutInitGetsLongWindow(t *testing.T) {
 	}
 }
 
+// beadsMaxOpenDuration mirrors beads' maxOpenDuration: the longest a single
+// bd ping's open may take (a 45s open deadline, 5s SIGKILL confirmation and
+// 5s marker clear). It is the be-6qvlzq contract; a change there reopens that
+// ruling, so update this constant deliberately and tell beads and the
+// architect.
+const beadsMaxOpenDuration = 55 * time.Second
+
+// proxiedReadinessOpWork is the allowance for the rest of bd ping after the
+// open: one probe ping at its 10s cap plus process start, schema reads,
+// SELECT 1 and kill.
+const proxiedReadinessOpWork = 20 * time.Second
+
 // A proxied scope's readiness is one `bd ping`, and that ping can legitimately
-// block for ~45s on a cold start (beads waits up to 15s for the proxy endpoint
-// and then up to 30s for the Dolt child). The generic 30s budget killed it
-// partway through, so the owned proxied readiness ops get at least 60s while
-// direct scopes keep the generic budget unchanged.
+// block for up to beads' maxOpenDuration on a cold start. The generic 30s
+// budget killed it partway through, so the owned proxied readiness ops get a
+// floor that clears maxOpenDuration plus the work after the open, while direct
+// scopes keep the generic budget unchanged.
 func TestProviderOwnedOpTimeoutWidensProxiedReadiness(t *testing.T) {
 	for _, op := range []string{"health", "ensure-ready", "probe"} {
 		if got := providerOwnedOpTimeout(op, true); got != providerOwnedProxiedOpMinTimeout {
@@ -49,7 +61,13 @@ func TestProviderOwnedOpTimeoutWidensProxiedReadiness(t *testing.T) {
 	if got := providerOwnedOpTimeout("stop", true); got != providerOpTimeout("stop") {
 		t.Errorf("providerOwnedOpTimeout(stop, proxied) = %v, want the generic %v", got, providerOpTimeout("stop"))
 	}
-	if providerOwnedProxiedOpMinTimeout < 60*time.Second {
-		t.Errorf("providerOwnedProxiedOpMinTimeout = %v, want at least 60s to cover beads' 15s+30s internal deadlines", providerOwnedProxiedOpMinTimeout)
+	if want := beadsMaxOpenDuration + proxiedReadinessOpWork; providerOwnedProxiedOpMinTimeout < want {
+		t.Errorf("providerOwnedProxiedOpMinTimeout = %v, want at least %v: beads' maxOpenDuration (%v) plus %v for the rest of bd ping",
+			providerOwnedProxiedOpMinTimeout, want, beadsMaxOpenDuration, proxiedReadinessOpWork)
+	}
+	// The floor must leave the long-lived admission lane a rung above it.
+	if providerOwnedProxiedOpMinTimeout >= proxiedLongLivedAdmissionBudget {
+		t.Errorf("providerOwnedProxiedOpMinTimeout = %v, want below proxiedLongLivedAdmissionBudget (%v)",
+			providerOwnedProxiedOpMinTimeout, proxiedLongLivedAdmissionBudget)
 	}
 }
