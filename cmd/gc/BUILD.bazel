@@ -1341,6 +1341,7 @@ go_test(
         "cmd_hook_claim_runmap_test.go",
         "cmd_hook_claim_session_fence_test.go",
         "cmd_hook_claim_stamp_test.go",
+        "cmd_hook_claim_stop_budget_test.go",
         "cmd_hook_claim_test.go",
         "cmd_hook_claim_turnbound_test.go",
         "cmd_hook_claim_work_branch_test.go",
