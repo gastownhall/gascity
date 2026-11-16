@@ -2359,6 +2359,7 @@ go_test(
         "soft_reload_test.go",
         "sole_class_binding_test.go",
         "split_binding_read_tier_test.go",
+        "split_binding_store_work_test.go",
         "split_low_severity_test.go",
         "split_s1_rereview_test.go",
         "split_s1_review_test.go",
