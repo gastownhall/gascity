@@ -283,6 +283,15 @@ func TestBdStoreMailWispInsertIsolatesHOMEFromSharedServerConfig(t *testing.T) {
 	// Pollute the process HOME too, so the BdStore runner below inherits it
 	// unless its own HOME pin wins.
 	t.Setenv("HOME", pollutedHome)
+	// Agent sessions export these too. They name an unrelated, unreachable
+	// database and actor, so any that reaches bd from the test process
+	// misdirects the store and the test fails.
+	t.Setenv("BEADS_DIR", filepath.Join(pollutedHome, "ambient-beads-dir"))
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+	t.Setenv("GC_DOLT_HOST", "127.0.0.1")
+	t.Setenv("GC_DOLT_PORT", "1")
+	t.Setenv("BEADS_ACTOR", "ambient-actor")
 
 	rootDir := t.TempDir()
 	doltDataDir := filepath.Join(rootDir, "dolt")
