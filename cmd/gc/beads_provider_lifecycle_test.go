@@ -12859,7 +12859,7 @@ func TestAcquireProviderSemaphoreHonorsContextDeadline(t *testing.T) {
 // city: it takes the city's single lifecycle slot for the whole health
 // operation, then re-checks every scope's readiness under it. A provider-owned
 // scope's readiness op takes the same slot, so it used to queue behind its own
-// caller and only give up at the 60s proxied budget — reporting the store not
+// caller and only give up at providerOwnedProxiedOpMinTimeout — reporting the store not
 // ready for a server that had just come back.
 func TestOwnedScopeReadinessDoesNotQueueBehindItsOwnHealthSlot(t *testing.T) {
 	city := t.TempDir()

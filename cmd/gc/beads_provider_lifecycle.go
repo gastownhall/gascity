@@ -4091,7 +4091,8 @@ func runtimeEnvEntriesToMap(environ []string) map[string]string {
 // budget expires and then reports a queueing failure for work its own holder is
 // in the middle of. A legacy city's health ran into exactly that when one of its
 // rigs was provider-owned — the post-recover readiness re-check takes the slot
-// health is holding — and reported the store not ready 60s after the managed
+// health is holding — and reported the store not ready only once the proxied
+// readiness floor (providerOwnedProxiedOpMinTimeout) ran out, after the managed
 // server had come back.
 type providerSemaphoreHolder struct{ city string }
 
@@ -4177,13 +4178,18 @@ var providerOpTimeout = func(op string) time.Duration {
 	}
 }
 
-// providerOwnedProxiedOpMinTimeout floors the readiness budget for a bd-owned
-// proxied scope. The single `bd ping` that serves as readiness opens beads'
-// UOW provider, which waits up to 15s for the proxy endpoint and then up to
-// 30s for the Dolt child to report ready — about 45s on a cold start. The
-// generic 30s budget SIGKILLs that wait partway through and reports a failure
-// for a store that was about to come up.
-const providerOwnedProxiedOpMinTimeout = 60 * time.Second
+// providerOwnedProxiedOpMinTimeout floors the readiness budget (ensure-ready,
+// health, probe) for a bd-owned proxied scope. Each is one `bd ping`, and
+// beads' maxOpenDuration (55s) is the longest a single ping's open may take.
+// The floor adds a 20s allowance for the rest of the ping: one probe ping at
+// its 10s cap plus process start, schema reads, SELECT 1 and kill. The generic
+// 30s budget SIGKILLs the open partway through and reports a failure for a
+// store that was about to come up.
+//
+// The floor stays below the 120s that start, recover and init get and below
+// proxiedLongLivedAdmissionBudget. beads' maxOpenDuration comment names this
+// constant, so do not rename it.
+const providerOwnedProxiedOpMinTimeout = 75 * time.Second
 
 // providerOwnedOpTimeout returns the context timeout for a provider-owned
 // lifecycle operation. Direct scopes keep the generic budget; a proxied scope

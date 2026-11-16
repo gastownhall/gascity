@@ -286,10 +286,12 @@ controller's long-lived handles read through bd, with verdict
 served natively.
 
 Readiness is a single `bd ping`, with no outer retry loop: bd's provider open
-already waits up to 15s for the proxy endpoint and then up to 30s for the Dolt
-child. Gas City widens the operation budget to 60s for owned proxied
-start/ensure-ready/health/recover instead of stacking a second wait on top of
-bd's.
+can block for up to beads' `maxOpenDuration` (55s) while the proxy endpoint and
+the Dolt child come up. Gas City raises the operation budget instead of stacking
+a second wait on top of bd's: `providerOwnedProxiedOpMinTimeout` (75s, the
+`maxOpenDuration` plus a 20s allowance for the rest of the ping) is the floor for
+an owned proxied scope's ensure-ready, health and probe. Start, recover and init
+already get 120s and stop stays 30s.
 
 Never call `bd dolt start` or `bd dolt status` on a proxied scope: neither is
 proxied-aware in rc.2, and `start` would launch a second unmanaged `sql-server`

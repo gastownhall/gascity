@@ -5549,11 +5549,11 @@ op_provider_owned_lifecycle() {
             ;;
         proxied)
             case "$op" in
-                # One ping is the whole readiness wait: bd's provider open
-                # already blocks for the proxy endpoint and then for the Dolt
-                # child to report ready (~45s worst case on a cold start). An
-                # outer retry loop would only stack another wait on top of it,
-                # so GC widens the op budget instead (providerOwnedOpTimeout).
+                # One ping is the whole readiness wait: bd's provider open can
+                # block for up to beads' maxOpenDuration while the proxy
+                # endpoint and the Dolt child come up. An outer retry loop
+                # would only stack another wait on top of it, so GC raises the
+                # op budget instead (providerOwnedOpTimeout).
                 start|ensure-ready|health|probe) run_provider_owned_bd "$dir" ping ;;
                 # A proxied external scope still owns its local proxy child.
                 # bd dolt stop retires that proxy without issuing a lifecycle
