@@ -53,8 +53,9 @@ The script receives the operation name as its first argument:
 
 The script is exec'd directly — no shell. Mutations pass their payload as JSON
 on **stdin**; reads return JSON on **stdout**. Each invocation has a 30-second
-timeout. The script is spawned fresh per operation; there is no long-lived
-process to manage.
+timeout, and `SetMetadataBatch` runs its `set-metadata` calls under one overall
+deadline of four times that (120 seconds by default). The script is spawned
+fresh per operation; there is no long-lived process to manage.
 
 ## Exit Codes
 
@@ -104,6 +105,10 @@ extra work:
   applies the status/assignee/metadata filter after the script returns.
 - `CloseAll` is a sequence of `close` calls; `SetMetadataBatch` a sequence of
   `set-metadata` calls (neither is atomic — design scripts to be idempotent).
+  `SetMetadataBatch` applies the keys in sorted order. When its overall
+  deadline expires, the call fails with an error that says how many keys were
+  applied and that the outcome of the key in flight is unknown, so a retry
+  restarts at the first key and the script must be idempotent.
 - `Tx` runs its callback sequentially against the same store; writes are not
   grouped into a single transaction.
 - `Ping` runs `list` to confirm the script is reachable.

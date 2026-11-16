@@ -65,6 +65,13 @@ func (s *Store) IDPrefix() string {
 	return strings.TrimSpace(s.env["GC_BEADS_PREFIX"])
 }
 
+// execBatchBudgetMultiple is how many per-call timeouts [Store.SetMetadataBatch]
+// allows for its whole sequence of set-metadata calls: room for four slow
+// calls, so with the default 30 s per-call timeout a batch is bounded at 120 s.
+// Production batch sizes and script latency are unmeasured; the multiple is
+// reviewed with the code.
+const execBatchBudgetMultiple = 4
+
 // NewStore returns a Store that delegates to the given script.
 // The script path may be absolute, relative, or a bare name resolved via
 // exec.LookPath.
@@ -110,7 +117,13 @@ func stripExecEnvKey(key string) bool {
 // called with contract flags, exit code 2 means the invocation was rejected and
 // must surface as an error instead of silently returning empty data.
 func (s *Store) run(stdinData []byte, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+	return s.runWithin(context.Background(), stdinData, args...)
+}
+
+// runWithin is run under a parent context: the call is bounded by the sooner of
+// the per-call timeout and the parent's deadline.
+func (s *Store) runWithin(parent context.Context, stdinData []byte, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(parent, s.timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, s.script, args...)
@@ -507,22 +520,58 @@ func (s *Store) ListByMetadata(filters map[string]string, limit int, opts ...bea
 
 // SetMetadata sets a key-value metadata pair: script set-metadata <id> <key> (stdin: value)
 func (s *Store) SetMetadata(id, key, value string) error {
-	_, err := s.run([]byte(value), "set-metadata", id, key)
+	return s.setMetadataWithin(context.Background(), id, key, value)
+}
+
+// setMetadataWithin is SetMetadata bounded by the parent context's deadline as
+// well as the per-call timeout.
+func (s *Store) setMetadataWithin(ctx context.Context, id, key, value string) error {
+	_, err := s.runWithin(ctx, []byte(value), "set-metadata", id, key)
 	if err != nil {
 		return fmt.Errorf("setting metadata on %q: %w", id, err)
 	}
 	return nil
 }
 
-// SetMetadataBatch sets multiple key-value metadata pairs on a bead.
-// Delegates to sequential SetMetadata calls.
+// SetMetadataBatch sets multiple key-value metadata pairs on a bead, one
+// set-metadata call per key in sorted key order, all under one deadline of
+// [execBatchBudgetMultiple] per-call timeouts. The batch is not atomic. A key
+// that fails on its own returns that call's error and the remaining keys do not
+// run. When the batch deadline expires the error wraps
+// [context.DeadlineExceeded] and reports how many keys were applied; the
+// outcome of the call in flight, if any, is unknown because the script may have
+// written before it was killed.
 func (s *Store) SetMetadataBatch(id string, kvs map[string]string) error {
-	for k, v := range kvs {
-		if err := s.SetMetadata(id, k, v); err != nil {
+	keys := make([]string, 0, len(kvs))
+	for k := range kvs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	batchCtx, cancel := context.WithTimeout(context.Background(), execBatchBudgetMultiple*s.timeout)
+	defer cancel()
+
+	for applied, k := range keys {
+		if err := batchCtx.Err(); err != nil {
+			return batchDeadlineError(id, err, applied, len(keys))
+		}
+		if err := s.setMetadataWithin(batchCtx, id, k, kvs[k]); err != nil {
+			// The batch deadline is read from the context, never from err: run
+			// formats a killed script's failure as plain text.
+			if ctxErr := batchCtx.Err(); ctxErr != nil {
+				return batchDeadlineError(id, ctxErr, applied, len(keys))
+			}
 			return err
 		}
 	}
 	return nil
+}
+
+// batchDeadlineError reports a SetMetadataBatch whose overall deadline expired.
+// It names the bead and two counts only: never a key, a value or script output.
+func batchDeadlineError(id string, ctxErr error, applied, total int) error {
+	return fmt.Errorf("exec beads set-metadata batch on %q: %w after %d of %d keys applied; the outcome of the key in flight, if any, is unknown",
+		id, ctxErr, applied, total)
 }
 
 // SetLocalString sets a clone-local string value for a bead. See
