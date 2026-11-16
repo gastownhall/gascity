@@ -696,6 +696,7 @@ go_library(
         "session_state_helpers.go",
         "session_target.go",
         "session_template_start.go",
+        "session_timing_drift.go",
         "session_types.go",
         "session_wake.go",
         "session_worktree_prune.go",

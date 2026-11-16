@@ -83,6 +83,11 @@ var (
 // sessiontmux.Config with resolved durations and defaults. If the
 // config has no explicit socket name, cityName is used. cityPath, when set,
 // supplies the runtime root for per-session start-crash diagnostics.
+//
+// The provider copies these values once, when it is built. A new
+// provider-construction-time [session] field needs a row in sessionTimingKeys
+// (session_timing_drift.go), or the reload notice stays silent about it;
+// TestSessionTimingReloadProviderFieldsHaveCoverage fails until it has one.
 func tmuxConfigFromSession(sc config.SessionConfig, cityName, cityPath string) sessiontmux.Config {
 	socketName := sc.Socket
 	if socketName == "" {

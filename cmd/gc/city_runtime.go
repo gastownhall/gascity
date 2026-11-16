@@ -138,6 +138,10 @@ type CityRuntime struct {
 	// reconcilerDrift holds the boot-latched session reconciler and warns once
 	// per transition when a reload names another one.
 	reconcilerDrift reconcilerModeDrift
+	// sessionTiming holds the [session] timing values the running base
+	// session provider was built with and warns on every reload while the
+	// config on disk resolves to others.
+	sessionTiming sessionTimingDrift
 	// legacySessionEntries counts entries into a legacy session-reconciler
 	// path that legacySessionEntry refused because the controller runs v2;
 	// legacySessionEntryLogged holds the sites already reported.
@@ -590,6 +594,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 		configRev:               p.ConfigRev,
 		configDirty:             configDirty,
 		configDebounce:          p.ConfigDebounce,
+		sessionTiming:           newSessionTimingDrift(p.SP, p.Cfg),
 		reconcilerDrift:         reconcilerModeDrift{running: p.ReconcilerMode, cityPath: p.CityPath, lookupEnv: p.ReconcilerLookupEnv, fellBack: p.ReconcilerV2FellBack},
 		cfg:                     p.Cfg,
 		sp:                      p.SP,
@@ -2753,6 +2758,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 				Warnings: warnings,
 			}
 		}
+		cr.sessionTiming.report(result.Cfg, appendWarning)
 		if cr.cs != nil && cr.cs.storeMetadataChanged(result.Cfg) {
 			// Rig metadata may be adopted live; the city's store binding may
 			// not, since rebinding the city store is restart-only.
@@ -3054,6 +3060,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 		fmt.Fprintf(cr.stdout, "Session provider swapped to %s.\n", displayProviderName(pendingProviderName)) //nolint:errcheck
 		*lastProviderName = pendingProviderName
 	}
+	cr.sessionTiming.publishAndReport(nextSp, nextCfg, appendWarning)
 
 	cr.poolSessions = computePoolSessions(nextCfg, cr.cityName, cr.cityPath, nextSp)
 	cr.publishPoolDeathHandlers(computePoolDeathHandlers(nextCfg, cr.cityName, cityRoot, nextSp, cr.stderr))
