@@ -34,21 +34,32 @@ func startDetachedProbeTmuxServer(t *testing.T, socket, session string) {
 }
 
 // AC-2: against a real tmux server, a session whose name is only a prefix of
-// a hosted session is dead and the hosted session is alive, with TMPDIR set
-// apart from TMUX_TMPDIR.
+// a hosted session, or would select it through target syntax, is dead and the
+// hosted session is alive, with TMPDIR set apart from TMUX_TMPDIR.
 func TestProbeDetachedWork_RealTmuxMatchesSessionExactly(t *testing.T) {
 	tmuxtest.RequireTmux(t)
-	root := shortTmuxTmpDir(t)
-	t.Setenv("TMUX_TMPDIR", root)
-	socket := "gcdp-" + filepath.Base(root)
-	startDetachedProbeTmuxServer(t, socket, "soak-loop-2")
-	t.Setenv("TMPDIR", t.TempDir())
-
-	if got := probeDetachedWork(context.Background(), "tmux:"+socket+":soak-loop"); got.Status != detachedProbeDead {
-		t.Fatalf("prefix-only session: Status = %q, want %q (err=%v)", got.Status, detachedProbeDead, got.Err)
+	tests := []struct {
+		name    string
+		session string
+		want    detachedProbeStatus
+	}{
+		{name: "prefix only is dead", session: "soak-loop", want: detachedProbeDead},
+		{name: "hosted session is alive", session: "soak-loop-2", want: detachedProbeAlive},
+		{name: "equals prefix is literal", session: "=soak-loop-2", want: detachedProbeDead},
+		{name: "star is literal", session: "soak-*", want: detachedProbeDead},
 	}
-	if got := probeDetachedWork(context.Background(), "tmux:"+socket+":soak-loop-2"); got.Status != detachedProbeAlive {
-		t.Fatalf("hosted session: Status = %q, want %q (err=%v)", got.Status, detachedProbeAlive, got.Err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := shortTmuxTmpDir(t)
+			t.Setenv("TMUX_TMPDIR", root)
+			socket := "gcdp-" + filepath.Base(root)
+			startDetachedProbeTmuxServer(t, socket, "soak-loop-2")
+			t.Setenv("TMPDIR", t.TempDir())
+
+			if got := probeDetachedWork(context.Background(), "tmux:"+socket+":"+tt.session); got.Status != tt.want {
+				t.Fatalf("session %q: Status = %q, want %q (err=%v)", tt.session, got.Status, tt.want, got.Err)
+			}
+		})
 	}
 }
 

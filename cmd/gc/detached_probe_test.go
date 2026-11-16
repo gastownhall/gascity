@@ -141,16 +141,24 @@ func TestProbeDetachedWork_UnobservableServerIsNeverDead(t *testing.T) {
 
 // AC-2: a server answering at the canonical socket path decides the session by
 // its exact name, whatever TMPDIR holds: listed is alive, and a server that
-// lists only a longer name sharing its prefix, or nothing, is dead.
+// lists only a longer name sharing its prefix, or nothing, is dead. Target
+// prefixes and glob characters are literal parts of the queried name.
 func TestProbeDetachedWork_AnsweringServerDecidesByExactSessionName(t *testing.T) {
 	tests := []struct {
 		name     string
+		session  string
 		sessions []string
 		want     detachedProbeStatus
 	}{
-		{name: "server lists the session", sessions: []string{"soak-loop-2", "soak-loop"}, want: detachedProbeAlive},
-		{name: "server lists only a prefix match", sessions: []string{"soak-loop-2"}, want: detachedProbeDead},
-		{name: "server lists no sessions", want: detachedProbeDead},
+		{name: "server lists the session", session: "soak-loop", sessions: []string{"soak-loop-2", "soak-loop"}, want: detachedProbeAlive},
+		{name: "server lists only a prefix match", session: "soak-loop", sessions: []string{"soak-loop-2"}, want: detachedProbeDead},
+		{name: "server lists no sessions", session: "soak-loop", want: detachedProbeDead},
+		{name: "equals prefix is literal", session: "=soak-loop", sessions: []string{"soak-loop", "soak-loop-2"}, want: detachedProbeDead},
+		{name: "star is literal", session: "soak-*", sessions: []string{"soak-loop", "soak-loop-2"}, want: detachedProbeDead},
+		{name: "question mark is literal", session: "soak-loo?", sessions: []string{"soak-loop", "soak-loop-2"}, want: detachedProbeDead},
+		{name: "character class is literal", session: "soak-[a-z]oop", sessions: []string{"soak-loop", "soak-loop-2"}, want: detachedProbeDead},
+		{name: "listed equals name is alive", session: "=soak-loop", sessions: []string{"soak-loop", "=soak-loop"}, want: detachedProbeAlive},
+		{name: "listed star name is alive", session: "soak-*", sessions: []string{"soak-loop", "soak-*"}, want: detachedProbeAlive},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -159,7 +167,7 @@ func TestProbeDetachedWork_AnsweringServerDecidesByExactSessionName(t *testing.T
 			t.Setenv("FAKE_TMUX_ARGS", argsPath)
 			t.Setenv("TMPDIR", t.TempDir())
 
-			got := probeDetachedWork(context.Background(), "tmux:gascity:soak-loop")
+			got := probeDetachedWork(context.Background(), "tmux:gascity:"+tt.session)
 			if got.Status != tt.want {
 				t.Fatalf("Status = %q, want %q (err=%v)", got.Status, tt.want, got.Err)
 			}
@@ -265,7 +273,7 @@ func installFakeTmuxServer(t *testing.T, socket, body string) {
 func fakeTmuxListSessions(sessions ...string) string {
 	body := `[ -n "$FAKE_TMUX_ARGS" ] && printf '%s\n' "$@" > "$FAKE_TMUX_ARGS"`
 	for _, s := range sessions {
-		body += "\necho " + s
+		body += "\nprintf '%s\\n' '" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 	}
 	return body + "\nexit 0"
 }
