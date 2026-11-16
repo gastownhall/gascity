@@ -245,6 +245,9 @@ func TestNoLeakVectorReadsAtPackageInit(t *testing.T) {
 // evaluating nothing. That is a silent hole, not a loud one — the guards cannot
 // tell "clean tree" from "never looked". Whatever the root is named, the walk
 // was started deliberately, so the root is always in scope.
+//
+// scripts/add-testenv-import.go, the remedy this lint's failure message names,
+// carries a copy of these rules; change both together.
 func skipRepoLintDir(path, root, name string) bool {
 	if path == root {
 		return false

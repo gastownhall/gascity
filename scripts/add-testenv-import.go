@@ -43,17 +43,12 @@ func main() {
 	}
 	dirInfos := map[string]*dirInfo{}
 
-	// pkg/ is the public, OSS-consumable tree: its tests must NOT blank-import
-	// internal/testenv, or an external module importing the package (cross-module
-	// conformance replay) cannot compile them. Keep pkg/ packages testenv-free.
-	skipDirs := map[string]bool{"vendor": true, "node_modules": true, ".git": true, "pkg": true}
-
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if d.IsDir() {
-			if path != root && (skipDirs[d.Name()] || isNestedWorktreeRoot(path)) {
+			if skipRepoLintDir(path, root, d.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -235,6 +230,39 @@ func formatNode(fset *token.FileSet, file *ast.File) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// skipRepoLintDir reports whether the walk rooted at root must prune path. It
+// mirrors skipRepoLintDir in internal/testenv/lint_test.go, the lint whose
+// failure message tells the reader to run this generator: a directory the lint
+// does not require an import file in must never receive one here. Keep the two
+// in step (this file is a //go:build ignore main package, so it cannot import
+// the lint's copy); TestAddTestenvImportSelectsOnlyLintRequiredDirs pins them.
+func skipRepoLintDir(path, root, name string) bool {
+	if path == root {
+		return false
+	}
+	switch name {
+	case "vendor", "node_modules":
+		return true
+	case "pkg":
+		// pkg/ is the public, OSS-consumable tree: its tests must NOT
+		// blank-import internal/testenv, or an external module importing the
+		// package (cross-module conformance replay) cannot compile them.
+		return true
+	}
+	if strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_") {
+		return true
+	}
+	if name == "worktrees" || strings.HasPrefix(name, "worktree-") {
+		return true
+	}
+	// A nested Go module (tools/nogo) does not depend on this module, so its
+	// tests cannot import internal/testenv.
+	if _, err := os.Stat(filepath.Join(path, "go.mod")); err == nil {
+		return true
+	}
+	return isNestedWorktreeRoot(path)
 }
 
 // isNestedWorktreeRoot reports whether path is the root of a linked git
