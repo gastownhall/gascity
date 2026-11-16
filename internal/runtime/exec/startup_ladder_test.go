@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -327,40 +328,151 @@ func TestUnweldedPackMetaExitTwoIsUnsupported(t *testing.T) {
 	}
 }
 
-// Kills a separable launch that leaves the replaced launch's token readable
-// while the new agent starts, or a mixed identity after a failed write: a
-// claim in that window judges an older queued turn live (on a pack that
-// cannot fence it is typed into the new agent), and a fenced send against
-// new counters and the old token misses and dead-letters the live turn.
-// The launch withdraws the token before the agent starts, and a write that
-// fails leaves no token, so the queue reads the launch unknown and holds.
-func TestUnweldedLaunchWithdrawsTheReplacedToken(t *testing.T) {
+// identityBoxCaps is the handshake of a v2-ready pack that un-welds start
+// through the launch op.
+const identityBoxCaps = `{"version":0,"capabilities":["proc.provision","proc.launch","observe.v1","report-attachment"]}`
+
+// identityBoxOps is launchPackOps over one identity, as rules 4 and 5 of
+// observe.v1 require: `provision` creates the box ($dir/box) with the
+// identity its config's env carries, seeded into the metadata store
+// ($dir/meta.<key>) before the box is visible (a fresh_only provision into
+// a held name exits 73); `get-meta`, `set-meta` and `remove-meta` read and
+// write that store, and `observe` reports the box with the store's token.
+// `stop` destroys the box and its store. The launch op exits 1 while
+// $dir/fail-launch exists, and set-meta of a key exits 1 while
+// $dir/fail-set.<key> exists.
+func identityBoxOps() map[string]string {
 	ops := identityPackOps()
-	ops["launch"] = `cat > "$dir/launch.stdin"; : > "$dir/running"; if [ -f "$dir/meta.` + runtime.InstanceTokenEnv + `" ]; then cp "$dir/meta.` + runtime.InstanceTokenEnv + `" "$dir/token-at-launch"; else rm -f "$dir/token-at-launch"; fi`
+	ops["provision"] = `cat > "$dir/provision.stdin"; ` +
+		`if [ -f "$dir/box" ] && grep -q '"fresh_only":true' "$dir/provision.stdin"; then exit 73; fi; ` +
+		`for k in ` + strings.Join(launchIdentityKeys, " ") + `; do ` +
+		`v=$(sed -n "s/.*\"$k\":\"\([^\"]*\)\".*/\1/p" "$dir/provision.stdin"); ` +
+		`if [ -n "$v" ]; then printf %s "$v" > "$dir/meta.$k"; fi; done; : > "$dir/box"`
+	ops["launch"] = `cat > "$dir/launch.stdin"; if [ -f "$dir/fail-launch" ]; then echo "launch refused" >&2; exit 1; fi; : > "$dir/running"`
 	ops["set-meta"] = `if [ -f "$dir/fail-set.$3" ]; then echo "store down" >&2; exit 1; fi; ` + ops["set-meta"]
 	ops["remove-meta"] = `rm -f "$dir/meta.$3"`
-	script, dir := observePack(t, launchPackCaps, ops)
-	sp := NewSeamBacked(script)
+	ops["observe"] = `cat > /dev/null; if [ -f "$dir/box" ]; then tok=; ` +
+		`if [ -f "$dir/meta.` + runtime.InstanceTokenEnv + `" ]; then tok=$(cat "$dir/meta.` + runtime.InstanceTokenEnv + `"); fi; ` +
+		`printf '{"state":"running",` + testObject + `,"identity":{"` + runtime.InstanceTokenEnv + `":"%s"}}\n' "$tok"; ` +
+		`else echo '{"state":"absent"}'; fi`
+	ops["stop"] = `rm -f "$dir/box" "$dir/running" "$dir"/meta.*`
+	return ops
+}
+
+// observedToken is the instance token observe reports for name's box.
+func observedToken(t *testing.T, p *Provider, name string) string {
+	t.Helper()
+	o, err := p.observe(t.Context(), name, nil)
+	if err != nil {
+		t.Fatalf("observe: %v", err)
+	}
+	if !o.present() {
+		t.Fatalf("observe reads %q absent", name)
+	}
+	return o.identity[runtime.InstanceTokenEnv]
+}
+
+// freshIdentityConfig is identityConfig for a FreshOnly start.
+func freshIdentityConfig(token string, generation, epoch int) runtime.Config {
+	cfg := identityConfig(token, generation, epoch)
+	cfg.FreshOnly = true
+	return cfg
+}
+
+// Kills a launch that strips the box's instance token before it runs: a
+// fresh start whose launch op fails then leaves a box whose identity no
+// longer carries the token provision seeded, so the failed start's cleanup
+// cannot prove the box its own and leaks it, and the retry finds the name
+// held (ErrSessionExists). The launch touches no identity before it runs,
+// so the cleanup stops the box and the retry starts.
+func TestFailedFreshUnweldedLaunchStopsItsBox(t *testing.T) {
+	script, dir := observePack(t, identityBoxCaps, identityBoxOps())
+	p := NewProvider(script)
+	sp := seamBacked(p)
+	writeFile(t, filepath.Join(dir, "fail-launch"), "")
+	if err := sp.Start(t.Context(), "s", freshIdentityConfig("tok-first", 1, 1)); err == nil {
+		t.Fatal("Start succeeded with a failing launch op: the fixture does not model the failure")
+	}
+	if ran := opsRan(t, dir); !slices.Contains(ran, "stop") {
+		t.Fatalf("ops = %v: the failed fresh start left the box it provisioned", ran)
+	}
+	if err := os.Remove(filepath.Join(dir, "fail-launch")); err != nil {
+		t.Fatal(err)
+	}
+	if err := sp.Start(t.Context(), "s", freshIdentityConfig("tok-retry", 1, 1)); err != nil {
+		t.Fatalf("retry Start: %v", err)
+	}
+	if got := observedToken(t, p, "s"); got != "tok-retry" {
+		t.Fatalf("observe token after the retry = %q, want tok-retry", got)
+	}
+}
+
+// Kills a separable Relaunch that strips the running agent's token before
+// its launch runs: when the launch fails before replacing the agent, the
+// agent still runs but get-meta and observe no longer name it, so its
+// identity reads unknown. The agent keeps its token.
+func TestFailedUnweldedRelaunchKeepsTheRunningToken(t *testing.T) {
+	script, dir := observePack(t, identityBoxCaps, identityBoxOps())
+	p := NewProvider(script)
+	sp := seamBacked(p)
 	if err := sp.Start(t.Context(), "s", identityConfig("tok-first", 3, 2)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	relaunch := sp.(runtime.RelaunchProvider)
-	if err := relaunch.Relaunch(t.Context(), "s", identityConfig("tok-second", 4, 5)); err != nil {
-		t.Fatalf("Relaunch: %v", err)
+	writeFile(t, filepath.Join(dir, "fail-launch"), "")
+	if err := sp.Relaunch(t.Context(), "s", identityConfig("tok-second", 4, 5)); err == nil {
+		t.Fatal("Relaunch succeeded with a failing launch op: the fixture does not model the failure")
 	}
-	if seen := readLog(t, filepath.Join(dir, "token-at-launch")); seen != "" {
-		t.Fatalf("the launch op ran while get-meta still answered token %q: the replaced launch's token must be withdrawn first", seen)
+	if id, ok := runtime.ReadLaunchID(sp, "s"); !ok || id != runtime.LaunchID("tok-first") {
+		t.Fatalf("ReadLaunchID after the failed relaunch = %q, %v; want the running agent's", id, ok)
 	}
-	if id, ok := runtime.ReadLaunchID(sp, "s"); !ok || id != runtime.LaunchID("tok-second") {
-		t.Fatalf("ReadLaunchID after the relaunch = %q, %v; want the second launch", id, ok)
+	if got := observedToken(t, p, "s"); got != "tok-first" {
+		t.Fatalf("observe token after the failed relaunch = %q, want tok-first", got)
 	}
+}
 
-	writeFile(t, filepath.Join(dir, "fail-set."+runtime.ContinuationEpochEnv), "")
-	if err := relaunch.Relaunch(t.Context(), "s", identityConfig("tok-third", 5, 6)); err != nil {
-		t.Fatalf("Relaunch with a failing store: %v", err)
+// Kills a failed identity write that removes the token: on a fresh start
+// provision seeded the launch's own token, so removing it after a failed
+// write of any identity key deletes the new launch's correct identity, and
+// the queue holds its first turn as if the launch were unknown. A failed
+// write is logged and removes nothing.
+func TestFailedIdentityWriteKeepsTheSeededToken(t *testing.T) {
+	for _, failing := range launchIdentityKeys {
+		t.Run(failing, func(t *testing.T) {
+			script, dir := observePack(t, identityBoxCaps, identityBoxOps())
+			p := NewProvider(script)
+			sp := seamBacked(p)
+			writeFile(t, filepath.Join(dir, "fail-set."+failing), "")
+			if err := sp.Start(t.Context(), "s", freshIdentityConfig("tok-fresh", 1, 1)); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if !slices.Contains(opsRan(t, dir), "set-meta") {
+				t.Fatal("no set-meta ran: the fixture does not model the failed write")
+			}
+			if id, ok := runtime.ReadLaunchID(sp, "s"); !ok || id != runtime.LaunchID("tok-fresh") {
+				t.Fatalf("ReadLaunchID after a failed %s write = %q, %v; want the new launch", failing, id, ok)
+			}
+			if got := observedToken(t, p, "s"); got != "tok-fresh" {
+				t.Fatalf("observe token after a failed %s write = %q, want tok-fresh", failing, got)
+			}
+		})
 	}
-	if id, ok := runtime.ReadLaunchID(sp, "s"); ok {
-		t.Fatalf("ReadLaunchID after a failed identity write = %q; want unknown, never a mixed or replaced identity", id)
+}
+
+// Kills identity writes bound to the start's remaining budget: a start that
+// spent its ctx on the launch would drop the launch's identity, and the
+// queue would hold its first turn. Each write runs under the provider's own
+// op timeout, past the start's ctx.
+func TestLaunchIdentityOutlivesTheStartContext(t *testing.T) {
+	script, dir := observePack(t, launchPackCaps, identityPackOps())
+	p := NewProvider(script)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	cfg := identityConfig("tok-late", 2, 3)
+	p.publishLaunchIdentity(ctx, "s", cfg)
+	for _, key := range launchIdentityKeys {
+		if got := readLog(t, filepath.Join(dir, "meta."+key)); got != cfg.Env[key] {
+			t.Errorf("%s = %q after a publish under a spent ctx, want %q", key, got, cfg.Env[key])
+		}
 	}
 }
 

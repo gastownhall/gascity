@@ -657,7 +657,6 @@ func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Con
 		return nil
 	}
 	p.handbacks.set(name, runtime.StartupNudge{})
-	p.withdrawLaunchToken(ctx, name, cfg)
 	if p.launchDeclared() {
 		if err := p.runLaunchOp(ctx, name, cfg); err != nil {
 			return err

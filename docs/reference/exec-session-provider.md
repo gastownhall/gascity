@@ -217,7 +217,7 @@ first:
 
 | Rule | What the queue does |
 |---|---|
-| Identity | Before the launch, the orchestrator removes the box's `GC_INSTANCE_TOKEN` with `remove-meta`, so no read answers the launch being replaced. Right after the launch it writes the new launch's `GC_RUNTIME_EPOCH`, `GC_CONTINUATION_EPOCH` and then `GC_INSTANCE_TOKEN` with `set-meta`; if a write fails it removes the token again rather than leave a mixed identity. The queue reads them back with `get-meta` to tell which launch runs now. |
+| Identity | Right after the launch, the orchestrator writes the launch's `GC_RUNTIME_EPOCH`, `GC_CONTINUATION_EPOCH` and then `GC_INSTANCE_TOKEN` with `set-meta`. A key the start config does not carry keeps the box's value. A failed write is logged, stops the writes that follow it and removes nothing. The queue reads the keys back with `get-meta` to tell which launch runs now. |
 | Delivery | The turn goes only to the launch that produced it, alone, and before every other queued item of the session. The send is fenced to that launch when the pack declares `input-fence`. |
 | Replacement | When another launch replaces the session first, the old turn is dropped (`stale-launch`) and the new launch's own turn goes instead. |
 | Ordering | Reminders queued earlier, and messages sent to the session while its turn is still queued, wait behind the turn. |
@@ -254,9 +254,32 @@ loses it, as it would lose a turn typed inside the start.
 A pack that cannot fence input (`carrier.ops`, or no `input-fence`) has its
 turn checked against the live launch just before the send, not at the
 keystroke. A replacement launch that starts in that window can still receive
-the old launch's turn. If the `remove-meta` before a launch fails (it is
-reported, not fatal), `get-meta` answers the replaced launch until the new
-identity is written, and the same can happen in that window.
+the old launch's turn.
+
+Known limits of the first turn on the un-welded path:
+
+- On a warm relaunch, from the moment the new agent starts until the
+  orchestrator writes its identity, `get-meta` still answers the replaced
+  launch. On a pack that cannot fence, a first turn of the replaced launch
+  that is still queued can be typed into the new agent in that window.
+  A fresh start has no such window: `provision` seeds the new launch's
+  identity before the agent exists.
+- A failed identity write on a warm relaunch leaves the replaced launch's
+  token, possibly with the new launch's counters, until the next launch
+  writes them, so the queue can misjudge which launch its first turn
+  belongs to.
+- A send that may only reach a live session (the conversation lane's
+  message op, a mail notice, a sling nudge) is reported undelivered while
+  the first turn waits in the queue, but not while the queue is delivering
+  it, so it can reach the agent alongside the turn.
+- If the queue cannot be read, such a send is reported undelivered as if a
+  first turn were waiting.
+- In a city without the conversation lane, the warm-bind claim nudge and
+  the drain reminder are typed with the provider's `nudge` directly and do
+  not wait behind a queued first turn.
+- A script that un-welds start but keeps no metadata, against the
+  metadata requirement above, gets no binding: its first turn is queued as
+  a plain submit, and the rules in the table do not apply to it.
 
 **The connection primitive (slim RPP).** `exec` is the connection op
 (`RPP-CONN-001`). It is optional; conformance checks output and command exit

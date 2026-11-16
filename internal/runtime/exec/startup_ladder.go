@@ -65,36 +65,21 @@ func (p *Provider) runLaunchOp(ctx context.Context, name string, cfg runtime.Con
 // counters of its launch.
 var launchIdentityKeys = []string{runtime.RuntimeEpochEnv, runtime.ContinuationEpochEnv, runtime.InstanceTokenEnv}
 
-// withdrawLaunchToken removes, with remove-meta, the instance token name's
-// box holds before a separable launch that carries a token of its own
-// starts the agent: a box keeps its metadata across stop, so until
-// publishLaunchIdentity writes the new launch's token, get-meta would answer
-// the launch it replaces, and a claim would judge that launch's queued turn
-// live and send it into the new agent. Without a token the queue reads the
-// launch unknown and holds. A failed removal is reported, not returned: the
-// launch goes on, and the window is the documented one it would close.
-func (p *Provider) withdrawLaunchToken(ctx context.Context, name string, cfg runtime.Config) {
-	if cfg.Env[runtime.InstanceTokenEnv] == "" {
-		return
-	}
-	if _, err := p.runWithContext(ctx, p.timeout, nil, "remove-meta", name, runtime.InstanceTokenEnv); err != nil {
-		fmt.Fprintf(os.Stderr, "exec provider: session %q: withdrawing the replaced launch's %s: %v; until the launch publishes its own, a claim may read the replaced launch\n", name, runtime.InstanceTokenEnv, err)
-	}
-}
-
-// publishLaunchIdentity records, with set-meta under ctx (the start's), the
-// identity of the agent a separable launch of name just started: the
-// instance token and both epochs cfg.Env carries. The launch hands its first
-// turn back bound to that token (runtime.ReadLaunchID), and the queue judges
-// and fences the turn by the same get-meta reads (runtime.ReadInputFence),
-// so they must answer this launch from the moment Start returns, never a
-// launch it replaced, whatever the pack's own launch op stored. A key cfg.Env
-// does not carry is left as the box holds it (a warm relaunch without a
-// token keeps the box's). A failed write is reported, not returned: the
-// agent runs. It then removes the token, so the store never holds a mixed
-// identity (this launch's counters, another's token) and a queue that cannot
-// read the launch holds its first turn, never sends it elsewhere.
+// publishLaunchIdentity records, with set-meta, the identity of the agent a
+// separable launch of name just started: the instance token and both epochs
+// cfg.Env carries. The launch hands its first turn back bound to that token
+// (runtime.ReadLaunchID), and the queue judges and fences the turn by the
+// same get-meta reads (runtime.ReadInputFence), so they must answer this
+// launch from the moment Start returns, whatever the pack's own launch op
+// stored. A key cfg.Env does not carry is left as the box holds it (a warm
+// relaunch without a token keeps the box's). Each write runs under the
+// provider's op timeout, not what is left of the start's ctx, so a start
+// that spent its budget on the launch still publishes. A failed write is
+// reported, not returned, and removes nothing: the agent runs, and the box
+// keeps the token it held (on a fresh start, the one provision seeded for
+// this launch).
 func (p *Provider) publishLaunchIdentity(ctx context.Context, name string, cfg runtime.Config) {
+	ctx = context.WithoutCancel(ctx)
 	for _, key := range launchIdentityKeys {
 		value, ok := cfg.Env[key]
 		if !ok || value == "" {
@@ -102,9 +87,6 @@ func (p *Provider) publishLaunchIdentity(ctx context.Context, name string, cfg r
 		}
 		if _, err := p.runWithContext(ctx, p.timeout, []byte(value), "set-meta", name, key); err != nil {
 			fmt.Fprintf(os.Stderr, "exec provider: session %q: publishing the launch's %s: %v; its queued first turn waits until get-meta answers it\n", name, key, err)
-			if _, rmErr := p.runWithContext(context.WithoutCancel(ctx), p.timeout, nil, "remove-meta", name, runtime.InstanceTokenEnv); rmErr != nil {
-				fmt.Fprintf(os.Stderr, "exec provider: session %q: withdrawing %s after the failed publish: %v\n", name, runtime.InstanceTokenEnv, rmErr)
-			}
 			return
 		}
 	}
