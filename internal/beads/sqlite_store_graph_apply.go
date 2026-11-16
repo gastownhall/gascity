@@ -55,6 +55,11 @@ func (s *SQLiteStore) ApplyGraphPlanWithStorage(ctx context.Context, plan *Graph
 
 	result := &GraphApplyResult{IDs: make(map[string]string, len(plan.Nodes))}
 
+	// Pass 1 mints outside any transaction, so it may wait for the id block's
+	// directory lock, but only for one budget shared by all its mints.
+	waitCtx, cancelWait := newSequenceLockWait(ctx)
+	defer cancelWait()
+
 	// Pass 1: materialize each node into a Bead with a concrete ID (so symbolic
 	// keys in edges and MetadataRefs can resolve) but do not touch the DB yet.
 	staged := make([]Bead, len(plan.Nodes))
@@ -65,7 +70,7 @@ func (s *SQLiteStore) ApplyGraphPlanWithStorage(ctx context.Context, plan *Graph
 			defaultPriority := 2
 			priority = &defaultPriority
 		}
-		b, err := s.normalizeCreate(Bead{
+		b, err := s.normalizeCreate(waitCtx, Bead{
 			Title:       node.Title,
 			Description: node.Description,
 			Type:        node.Type,
@@ -79,7 +84,7 @@ func (s *SQLiteStore) ApplyGraphPlanWithStorage(ctx context.Context, plan *Graph
 			NoHistory:   noHistory,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("sqlite graph apply: %w", err)
+			return nil, fmt.Errorf("sqlite graph apply: %w", mapStoreTimeout(waitCtx, ctx, err))
 		}
 		result.IDs[key] = b.ID
 		staged[i] = b

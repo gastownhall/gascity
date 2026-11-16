@@ -281,7 +281,12 @@ func (s *SQLiteStore) sequenceWrappedErrorLocked() error {
 // of its range the allocator still attempts the reservation: it succeeds only
 // once an operator has raised the persisted floor past that end, and otherwise
 // reports the exhaustion, so a repair needs no restart.
-func (s *SQLiteStore) nextID(_ context.Context) (string, error) {
+//
+// ctx bounds only the wait for the store directory's lock. A caller outside a
+// transaction passes a bounded wait context and maps the end of that wait itself
+// (mapStoreTimeout); a caller inside a transaction passes sqliteOneAttemptContext,
+// which makes one lock attempt and fails with ErrStoreTimeout alone.
+func (s *SQLiteStore) nextID(ctx context.Context) (string, error) {
 	s.sequenceFloorMu.Lock()
 	defer s.sequenceFloorMu.Unlock()
 	if s.readOnly {
@@ -292,14 +297,10 @@ func (s *SQLiteStore) nextID(_ context.Context) (string, error) {
 	}
 	next, err := sequenceNext(s.seq)
 	if err != nil || !s.sequenceReserved || sequenceRankAbove(next, s.sequenceLimit) {
-		base, limit, err := reserveSQLiteSequenceBlock(s.sequenceFloorPath, s.seq, sqliteSequenceBlockSize)
-		if err != nil {
-			return "", fmt.Errorf("reserving sqlite bead ids: %w", err)
+		if err := s.reserveBlockLocked(ctx); err != nil {
+			return "", sequenceReserveError(ctx, err)
 		}
-		s.seq = base
-		s.sequenceLimit = limit
-		s.sequenceReserved = true
-		if next, err = sequenceNext(base); err != nil {
+		if next, err = sequenceNext(s.seq); err != nil {
 			return "", err
 		}
 	}
@@ -307,13 +308,116 @@ func (s *SQLiteStore) nextID(_ context.Context) (string, error) {
 	return s.prefix + "-" + strconv.FormatInt(next, 10), nil
 }
 
+// reserveBlockLocked reserves the next id block and moves the in-memory
+// allocator onto it. It is the one reservation step nextID and the pre-transaction
+// top-up share. The caller holds sequenceFloorMu.
+func (s *SQLiteStore) reserveBlockLocked(ctx context.Context) error {
+	base, limit, err := reserveSQLiteSequenceBlock(ctx, s.sequenceFloorPath, s.seq, sqliteSequenceBlockSize)
+	if err != nil {
+		return err
+	}
+	s.seq = base
+	s.sequenceLimit = limit
+	s.sequenceReserved = true
+	return nil
+}
+
+// sequenceReserveError is the error nextID reports for a failed reservation. A
+// one-attempt caller that met a held lock gets ErrStoreTimeout and nothing else:
+// no context error, because the caller's context was never what ended the wait,
+// and no busy text, because retryOnBusy would retry a message that holds either
+// busy substring. Every other error keeps its text.
+func sequenceReserveError(ctx context.Context, err error) error {
+	if isSQLiteOneAttempt(ctx) && errors.Is(err, context.Canceled) {
+		return fmt.Errorf("reserving sqlite bead ids: %w: the store directory's sequence-floor lock is held elsewhere", ErrStoreTimeout)
+	}
+	return fmt.Errorf("reserving sqlite bead ids: %w", err)
+}
+
+// sqliteOneAttemptKey marks the context sqliteOneAttemptContext returns.
+type sqliteOneAttemptKey struct{}
+
+// sqliteOneAttemptContext is the wait every mint inside a transaction passes: a
+// context that is already done, so the lock is tried once and never waited for.
+// A mint inside a transaction must not stall the single writer connection, and
+// SQLite's cross-process write lock with it, behind a foreign lock holder.
+var sqliteOneAttemptContext = func() context.Context {
+	ctx, cancel := context.WithCancel(context.WithValue(context.Background(), sqliteOneAttemptKey{}, true))
+	cancel()
+	return ctx
+}()
+
+// isSQLiteOneAttempt reports whether ctx is sqliteOneAttemptContext or derives
+// from it.
+func isSQLiteOneAttempt(ctx context.Context) bool {
+	return ctx.Value(sqliteOneAttemptKey{}) != nil
+}
+
+// newSequenceLockWait returns a context that ends sqliteSequenceLockWait from
+// now, derived from parent (nil means Background). Take it on entry to an
+// operation, before any mutex, so queueing never extends the budget.
+func newSequenceLockWait(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	return context.WithTimeout(parent, sqliteSequenceLockWait)
+}
+
+// topUpSequenceBlock reserves the next id block before a create opens its
+// transaction, when the block is nearly spent, so the wait for the directory
+// lock holds no transaction and the single writer connection stays free. A
+// create that pins its id mints nothing and takes no lock.
+//
+// It returns an error only when its own bounded wait ended (ErrStoreTimeout).
+// Every other condition makes it decline: the read-only, wrapped, exhausted and
+// disk-error cases leave the state untouched and the mint inside the
+// transaction meets the same condition and reports it with its usual text.
+func (s *SQLiteStore) topUpSequenceBlock(b Bead) error {
+	if b.ID != "" {
+		return nil
+	}
+	// The deadline is fixed on entry, before the mutex: a creator that queued
+	// behind others spends its own budget queueing, so the wait of the k-th
+	// creator in line never grows to k budgets. The timer is built only once a
+	// top-up is needed, so the common path allocates none.
+	deadline := time.Now().Add(sqliteSequenceLockWait)
+	s.sequenceFloorMu.Lock()
+	defer s.sequenceFloorMu.Unlock()
+	if !s.needsTopUpLocked() {
+		return nil
+	}
+	waitCtx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	err := s.reserveBlockLocked(waitCtx)
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
+		return nil
+	}
+	return fmt.Errorf("sqlite create: reserving id block: %w", mapStoreTimeout(waitCtx, context.Background(), err))
+}
+
+// needsTopUpLocked reports that a mint would soon need a new block: nothing is
+// reserved yet, or fewer than sqliteSequenceTopUpHeadroom ids are left. A store
+// that cannot mint (read-only, wrapped) needs none, and an arithmetic error
+// counts as headroom so the mint reports it. The caller holds sequenceFloorMu.
+func (s *SQLiteStore) needsTopUpLocked() bool {
+	if s.readOnly || s.sequenceWrappedErrorLocked() != nil {
+		return false
+	}
+	if !s.sequenceReserved {
+		return true
+	}
+	end, err := sequenceBlockEnd(s.seq, sqliteSequenceTopUpHeadroom)
+	return err == nil && sequenceRankAbove(end, s.sequenceLimit)
+}
+
 // reserveSQLiteSequenceBlock durably raises the floor at floorPath past
 // max(persisted floor, local) by one block and returns the reserved half-open
 // range (base, limit]. The read-max-write runs under the store directory's
 // flock, so concurrent reservations — in this process or another — receive
 // disjoint blocks, and the fsync completes before any id in the block exists.
-func reserveSQLiteSequenceBlock(floorPath string, local, block int64) (base, limit int64, returnErr error) {
-	returnErr = withSQLiteSequenceFloorLock(floorPath, func() error {
+// ctx bounds the wait for that lock (withSQLiteSequenceFloorLock).
+func reserveSQLiteSequenceBlock(ctx context.Context, floorPath string, local, block int64) (base, limit int64, returnErr error) {
+	returnErr = withSQLiteSequenceFloorLock(ctx, floorPath, func() error {
 		current, err := readSQLiteSequenceFloor(floorPath)
 		if err != nil {
 			return err
@@ -398,6 +502,8 @@ func InspectSQLiteSequence(dir, prefix string) (SQLiteSequenceState, error) {
 // reached the end of its range, or that refuses to mint because the store is
 // wrapped, resumes at its next mint once the floor covers it.
 func RaiseSQLiteSequenceFloor(dir, prefix string, floor int64) (before SQLiteSequenceState, returnErr error) {
+	waitCtx, cancel := newSequenceLockWait(context.Background())
+	defer cancel()
 	before, err := InspectSQLiteSequence(dir, prefix)
 	if err != nil {
 		return before, err
@@ -412,7 +518,7 @@ func RaiseSQLiteSequenceFloor(dir, prefix string, floor int64) (before SQLiteSeq
 	if _, err := os.Stat(dir); err != nil {
 		return before, fmt.Errorf("raising sqlite sequence floor: %w", err)
 	}
-	returnErr = withSQLiteSequenceFloorLock(before.FloorPath, func() error {
+	returnErr = withSQLiteSequenceFloorLock(waitCtx, before.FloorPath, func() error {
 		current, err := readSQLiteSequenceFloor(before.FloorPath)
 		if err != nil {
 			return err
@@ -425,5 +531,5 @@ func RaiseSQLiteSequenceFloor(dir, prefix string, floor int64) (before SQLiteSeq
 		}
 		return writeSQLiteSequenceFloor(before.FloorPath, floor)
 	})
-	return before, returnErr
+	return before, mapStoreTimeout(waitCtx, context.Background(), returnErr)
 }

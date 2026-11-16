@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -35,8 +36,8 @@ import (
 // the lock file outside the censused namespace. The cost is granularity: this
 // is the store directory's single lock, owned by the sequence floor. Anything
 // else needing to serialize on this directory must coordinate through here.
-func persistSQLiteSequenceFloorAtLeast(floorPath string, requested int64) (persisted int64, returnErr error) {
-	returnErr = withSQLiteSequenceFloorLock(floorPath, func() error {
+func persistSQLiteSequenceFloorAtLeast(ctx context.Context, floorPath string, requested int64) (persisted int64, returnErr error) {
+	returnErr = withSQLiteSequenceFloorLock(ctx, floorPath, func() error {
 		current, err := readSQLiteSequenceFloor(floorPath)
 		if err != nil {
 			return err
@@ -58,7 +59,12 @@ func persistSQLiteSequenceFloorAtLeast(floorPath string, requested int64) (persi
 // exclusive lock — the single lock that serializes every read-modify-write of
 // a sequence floor sidecar in that directory, across processes. Block
 // reservation, SetSequenceFloor and the operator repair all go through here.
-func withSQLiteSequenceFloorLock(floorPath string, fn func() error) (returnErr error) {
+//
+// ctx bounds only the wait for the lock (flockExclusive): a free lock is taken
+// even when ctx is done, and a context already done makes exactly one attempt.
+// When the wait ends the error wraps ctx's own error, never ErrStoreTimeout;
+// the callers that own the wait context map it (mapStoreTimeout).
+func withSQLiteSequenceFloorLock(ctx context.Context, floorPath string, fn func() error) (returnErr error) {
 	lock, lockLabel, err := filelock.OpenDirectoryLock(filepath.Dir(floorPath))
 	if err != nil {
 		return fmt.Errorf("opening sequence-floor lock directory: %w", err)
@@ -81,7 +87,7 @@ func withSQLiteSequenceFloorLock(floorPath string, fn func() error) (returnErr e
 			observeSQLiteSequenceFloorBoundary("sequence-floor-lock-close-after")
 		}
 	}()
-	heldLock, err = filelock.Acquire(lock, filelock.Options{Mode: filelock.Exclusive, Label: lockLabel})
+	heldLock, err = flockExclusive(ctx, lock, lockLabel)
 	if err != nil {
 		return fmt.Errorf("locking SQLite sequence floor: %w", err)
 	}

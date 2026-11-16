@@ -104,7 +104,7 @@ func (s *SQLiteStore) guardedCreateTx(ctx context.Context, tx *sql.Tx, idx int, 
 	if exists {
 		return guardedExistsError(idx, b.ID, nil)
 	}
-	stored, err := s.normalizeCreate(b)
+	stored, err := s.normalizeCreate(sqliteOneAttemptContext, b)
 	if err != nil {
 		return err
 	}

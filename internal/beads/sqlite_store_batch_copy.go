@@ -38,7 +38,7 @@ func (s *SQLiteStore) CreateWithForeignIDBatch(rows []Bead) error {
 		}
 		defer tx.Rollback() //nolint:errcheck
 		for _, b := range rows {
-			stored, err := s.normalizeCreate(b)
+			stored, err := s.normalizeCreate(sqliteOneAttemptContext, b)
 			if err != nil {
 				return err
 			}

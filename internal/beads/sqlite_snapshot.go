@@ -276,7 +276,10 @@ func RaiseSQLiteSequenceFloorPast(dir, prefix string, floors []int64, databases 
 			floor = sequenceMax(floor, hw)
 		}
 	}
-	return persistSQLiteSequenceFloorAtLeast(path, floor)
+	waitCtx, cancel := newSequenceLockWait(context.Background())
+	defer cancel()
+	persisted, err := persistSQLiteSequenceFloorAtLeast(waitCtx, path, floor)
+	return persisted, mapStoreTimeout(waitCtx, context.Background(), err)
 }
 
 func withImmutableSQLite(path string, fn func(*sql.DB) error) error {

@@ -693,13 +693,18 @@ func (s *SQLiteStore) create(b Bead, allowForeign bool) (Bead, error) {
 	var stored Bead
 	autoID := b.ID == ""
 	err := retryOnBusy(func() error {
+		// Reserve the next id block before the transaction opens, on every
+		// attempt: the busy ladder is long and other creators drain the block.
+		if err := s.topUpSequenceBlock(b); err != nil {
+			return err
+		}
 		ctx := context.Background()
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("sqlite create: begin tx: %w", err)
 		}
 		defer tx.Rollback() //nolint:errcheck
-		stored, err = s.normalizeCreate(b)
+		stored, err = s.normalizeCreate(sqliteOneAttemptContext, b)
 		if err != nil {
 			return err
 		}
@@ -751,10 +756,13 @@ func (s *SQLiteStore) checkPinnedIDNamespace(id string) error {
 	return checkPinnedIDNamespace("sqlite create", id, s.reservedPrefixes)
 }
 
-func (s *SQLiteStore) normalizeCreate(b Bead) (Bead, error) {
+// normalizeCreate fills b's defaults and mints its id when it has none. ctx
+// bounds the wait for the id block's directory lock: a mint inside a
+// transaction passes sqliteOneAttemptContext.
+func (s *SQLiteStore) normalizeCreate(ctx context.Context, b Bead) (Bead, error) {
 	b = cloneBead(b)
 	if b.ID == "" {
-		id, err := s.nextID(context.Background())
+		id, err := s.nextID(ctx)
 		if err != nil {
 			return Bead{}, err
 		}
@@ -822,6 +830,10 @@ func (s *SQLiteStore) SetSequenceFloor(n int64) error {
 	if n < 0 {
 		return fmt.Errorf("setting sqlite sequence floor: negative value %d", n)
 	}
+	// The wait budget starts here, before the mutex, so queueing behind a
+	// mint that is itself waiting does not extend it.
+	waitCtx, cancel := newSequenceLockWait(context.Background())
+	defer cancel()
 	s.sequenceFloorMu.Lock()
 	defer s.sequenceFloorMu.Unlock()
 	current, err := s.SequenceFloor()
@@ -832,9 +844,9 @@ func (s *SQLiteStore) SetSequenceFloor(n int64) error {
 	if s.sequenceFloorBeforePersist != nil {
 		s.sequenceFloorBeforePersist()
 	}
-	persisted, err := persistSQLiteSequenceFloorAtLeast(s.sequenceFloorPath, n)
+	persisted, err := persistSQLiteSequenceFloorAtLeast(waitCtx, s.sequenceFloorPath, n)
 	if err != nil {
-		return fmt.Errorf("setting sqlite sequence floor: %w", err)
+		return fmt.Errorf("setting sqlite sequence floor: %w", mapStoreTimeout(waitCtx, context.Background(), err))
 	}
 	s.seq = sequenceMax(s.seq, persisted)
 	return nil
@@ -1045,7 +1057,7 @@ func (s *SQLiteStore) mintUniqueIDTx(ctx context.Context, tx *sql.Tx, candidate 
 			}
 			reseeded = true
 		}
-		next, err := s.nextID(context.Background())
+		next, err := s.nextID(sqliteOneAttemptContext)
 		if err != nil {
 			return "", err
 		}
@@ -1967,7 +1979,7 @@ func (t *sqliteStoreTx) Create(b Bead) (Bead, error) {
 	if err := t.store.checkPinnedIDNamespace(b.ID); err != nil {
 		return Bead{}, err
 	}
-	stored, err := t.store.normalizeCreate(b)
+	stored, err := t.store.normalizeCreate(sqliteOneAttemptContext, b)
 	if err != nil {
 		return Bead{}, err
 	}
