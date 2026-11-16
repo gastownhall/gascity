@@ -24,10 +24,10 @@ stdout 'Closed bead: gc-1'
 # --- Send mail → should emit mail.sent ---
 # The city is born split, so mail is minted in the infrastructure store.
 
-exec gc mail send mayor 'hey there'
-stdout 'Sent message gcg-1 to mayor'
+exec gc mail send human 'hey there'
+stdout 'Sent message gcg-1 to human'
 
-# --- Read mail → should emit mail.read ---
+# --- Read mail as its recipient (the default identity) → should emit mail.read ---
 
 exec gc mail read gcg-1
 stdout 'Body:     hey there'
@@ -39,6 +39,22 @@ exec grep 'bead.closed' .gc/events.jsonl
 exec grep 'mail.sent' .gc/events.jsonl
 exec grep 'mail.read' .gc/events.jsonl
 exec grep 'gc-1' .gc/events.jsonl
+
+# --- A non-recipient read shows the message but neither consumes it nor emits mail.read ---
+
+# Each gc process reserves a block of ids from the infrastructure store's
+# sequence (sqliteSequenceBlockSize = 1024), so this second process mints gcg-1025.
+exec gc mail send mayor 'for the mayor'
+stdout 'Sent message gcg-1025 to mayor'
+exec gc mail read gcg-1025
+stdout 'Body:     for the mayor'
+stderr 'not to you'
+exec gc mail inbox mayor
+stdout 'for the mayor'
+# Count mail.read events by type: the born-split store also emits a bead.updated
+# event for the first read, which a bare 'mail.read' pattern would match too.
+exec grep -c '"type":"mail.read"' .gc/events.jsonl
+stdout '^1$'
 
 # --- gc events is a supervisor API reflection, not a local log reader ---
 

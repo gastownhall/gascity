@@ -81,7 +81,13 @@ func TestE2E_MailInbox(t *testing.T) {
 	}
 }
 
-// TestE2E_MailRead verifies that gc mail read displays and closes a message.
+// noMailIdentity blanks every variable gc mail derives its default identity
+// from, so a command run with it reads as the human (and not as whatever
+// session this test process was started from).
+var noMailIdentity = map[string]string{"GC_SESSION_ID": "", "GC_ALIAS": "", "GC_AGENT": ""}
+
+// TestE2E_MailRead verifies that gc mail read displays a message and marks it
+// read for its recipient, and that anyone else reading it consumes nothing.
 func TestE2E_MailRead(t *testing.T) {
 	city := e2eCity{
 		Agents: []e2eAgent{
@@ -90,21 +96,39 @@ func TestE2E_MailRead(t *testing.T) {
 	}
 	cityDir := setupE2ECity(t, nil, city)
 
-	// Send a message.
-	out, err := gc(cityDir, "mail", "send", "reader", "read me please")
+	// A non-recipient reads mail addressed to reader: the body shows, nothing
+	// is consumed.
+	out, err := gc(cityDir, "mail", "send", "reader", "not for you")
 	if err != nil {
 		t.Fatalf("gc mail send failed: %v\noutput: %s", err, out)
 	}
-
-	// Get the message ID from inbox.
 	out, err = gc(cityDir, "mail", "inbox", "reader")
 	if err != nil {
 		t.Fatalf("gc mail inbox failed: %v\noutput: %s", err, out)
 	}
-	msgID := extractFirstBeadID(t, out)
+	otherID := extractFirstBeadID(t, out)
+	out, err = gcWithEnv(cityDir, noMailIdentity, "mail", "read", otherID)
+	if err != nil {
+		t.Fatalf("gc mail read (non-recipient) failed: %v\noutput: %s", err, out)
+	}
+	if !strings.Contains(out, "not for you") {
+		t.Errorf("non-recipient mail read output missing body:\n%s", out)
+	}
+	if _, err := gc(cityDir, "mail", "check", "reader"); err != nil {
+		t.Errorf("mail check reader failed after a non-recipient read: the message must stay unread")
+	}
 
-	// Read the message.
-	out, err = gc(cityDir, "mail", "read", msgID)
+	// The recipient (here the human, the default identity) reads and consumes.
+	out, err = gc(cityDir, "mail", "send", "human", "read me please")
+	if err != nil {
+		t.Fatalf("gc mail send failed: %v\noutput: %s", err, out)
+	}
+	out, err = gcWithEnv(cityDir, noMailIdentity, "mail", "inbox")
+	if err != nil {
+		t.Fatalf("gc mail inbox failed: %v\noutput: %s", err, out)
+	}
+	msgID := extractFirstBeadID(t, out)
+	out, err = gcWithEnv(cityDir, noMailIdentity, "mail", "read", msgID)
 	if err != nil {
 		t.Fatalf("gc mail read failed: %v\noutput: %s", err, out)
 	}
@@ -112,10 +136,9 @@ func TestE2E_MailRead(t *testing.T) {
 		t.Errorf("mail read output missing body:\n%s", out)
 	}
 
-	// After reading, inbox should be empty.
-	_, err = gc(cityDir, "mail", "check", "reader")
-	if err == nil {
-		t.Error("mail check should fail after reading all messages")
+	// After reading, the recipient's inbox should be empty.
+	if out, err := gcWithEnv(cityDir, noMailIdentity, "mail", "check"); err == nil {
+		t.Errorf("mail check should fail after reading all messages; output: %s", out)
 	}
 }
 

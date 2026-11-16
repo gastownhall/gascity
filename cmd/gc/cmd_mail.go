@@ -2545,7 +2545,7 @@ func cmdMailReadWithJSON(args []string, jsonOut bool, stdout, stderr io.Writer) 
 		return code
 	}
 	rec := openCityRecorder(stderr)
-	return doMailReadWithJSON(mp, rec, lookupMailReader(), args, jsonOut, stdout, stderr)
+	return doMailReadWithJSON(mp, rec, lookupMailReader(mp), args, jsonOut, stdout, stderr)
 }
 
 // mailReader is who is running gc mail read: the routes of the caller's own
@@ -2558,7 +2558,7 @@ type mailReader struct {
 // lookupMailReader resolves the caller's own mailbox: the addresses it was
 // resolved from, plus every durable route of the session behind it, which is
 // the set an inbox read matches a message's recipient against.
-func lookupMailReader() mailReader {
+func lookupMailReader(_ mail.Provider) mailReader {
 	target, err := lookupDefaultMailTarget()
 	if err != nil {
 		return mailReader{err: err}

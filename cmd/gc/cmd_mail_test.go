@@ -2255,6 +2255,46 @@ func TestMailReadByNonRecipientJSONStillShowsUnreadMessage(t *testing.T) {
 	validateJSONResultSchema(t, []string{"mail", "read"}, stdout.Bytes())
 }
 
+// The inbox a session reads includes mail addressed to a closed predecessor
+// whose alias the session inherited. A session that sees such mail in its
+// inbox is its recipient, so gc mail read must consume it like any other.
+func TestMailReadMarksReadMailInheritedFromClosedPredecessor(t *testing.T) {
+	f := newHookBudgetFixture(t)
+	f.predecessorMail(t)
+
+	mp, code := openCityMailProvider(io.Discard, "gc mail read")
+	if mp == nil {
+		t.Fatalf("openCityMailProvider = %d", code)
+	}
+	target, err := lookupDefaultMailTarget()
+	if err != nil {
+		t.Fatalf("lookupDefaultMailTarget: %v", err)
+	}
+	unread, _, err := unreadMailForTarget(mp, target)
+	if err != nil {
+		t.Fatalf("unreadMailForTarget: %v", err)
+	}
+	if len(unread) != 1 || unread[0].Subject != "for my predecessor" {
+		t.Fatalf("session inbox = %+v, want the one message addressed to its closed predecessor", unread)
+	}
+	id := unread[0].ID
+
+	var stdout, stderr bytes.Buffer
+	if code := doMailRead(mp, events.Discard, lookupMailReader(mp), []string{id}, &stdout, &stderr); code != 0 {
+		t.Fatalf("doMailRead = %d; stderr: %s", code, stderr.String())
+	}
+	if stderr.Len() > 0 {
+		t.Errorf("stderr = %q, want none: the inbox shows this mail, so its reader is the recipient", stderr.String())
+	}
+	msg, err := mp.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !msg.Read {
+		t.Errorf("message %s still unread after the session that inherited it read it", id)
+	}
+}
+
 func TestMailReadMissingID(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := newTestBeadMail(store)

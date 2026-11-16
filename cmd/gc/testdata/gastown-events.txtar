@@ -22,7 +22,7 @@ exec grep 'gc-1' .gc/events.jsonl
 
 # --- 2. Mail operations emit events ---
 
-exec gc mail send mayor 'Deploy status?'
+exec gc mail send human 'Deploy status?'
 exec gc mail read bl-2
 
 exec grep 'mail.sent' .gc/events.jsonl
