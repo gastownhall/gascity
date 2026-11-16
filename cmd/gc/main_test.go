@@ -7490,6 +7490,85 @@ max = -1
 	}
 }
 
+// TestDoPrimeImplicitProviderAgentMatchesPromptlessPoolAgent pins that an
+// implicit provider agent ("claude") and an explicit prompt-less pool agent
+// get the same worker prompt, chosen by formula_v2.
+func TestDoPrimeImplicitProviderAgentMatchesPromptlessPoolAgent(t *testing.T) {
+	const closeForm = "--set-metadata gc.outcome=pass --status closed"
+	tests := []struct {
+		name        string
+		daemonTOML  string
+		wantHeading string
+		wantClose   bool
+	}{
+		{name: "formula_v2 default", wantHeading: "# Graph Worker", wantClose: true},
+		{name: "formula_v2 false", daemonTOML: "[daemon]\nformula_v2 = false\n", wantHeading: "# Pool Worker"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := materializeBuiltinPrompts(dir); err != nil {
+				t.Fatalf("materializeBuiltinPrompts: %v", err)
+			}
+			// The test runs inside agent sessions whose environment would
+			// otherwise leak into agent-name resolution.
+			for _, k := range []string{"GC_CITY", "GC_CITY_PATH", "GC_CITY_ROOT", "GC_DIR", "GC_RIG", "GC_RIG_ROOT", "GC_TEMPLATE", "GC_AGENT", "GC_SESSION_ID", "GC_SESSION_NAME", "GC_ALIAS"} {
+				t.Setenv(k, "")
+			}
+			tomlContent := `[workspace]
+name = "test-city"
+
+[providers.claude]
+base = "builtin:claude"
+
+` + tt.daemonTOML + `
+[[agent]]
+name = "worker"
+start_command = "echo"
+
+[agent.pool]
+min = 0
+max = -1
+`
+			if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(tomlContent+builtinImportsTOML("core")), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			writeBuiltinImportsLock(t, dir, "core")
+
+			orig, _ := os.Getwd()
+			t.Cleanup(func() { _ = os.Chdir(orig) })
+			if err := os.Chdir(dir); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("GC_CITY_PATH", dir)
+
+			prime := func(agent string) string {
+				t.Helper()
+				var stdout, stderr bytes.Buffer
+				if code := doPrime([]string{agent}, &stdout, &stderr); code != 0 {
+					t.Fatalf("doPrime(%q) = %d, want 0; stderr: %s", agent, code, stderr.String())
+				}
+				return stdout.String()
+			}
+			implicit, explicit := prime("claude"), prime("worker")
+
+			// (b) catches a regression that moves both agents together.
+			for agent, out := range map[string]string{"claude": implicit, "worker": explicit} {
+				if !strings.Contains(out, tt.wantHeading) {
+					t.Errorf("%s prompt missing heading %q", agent, tt.wantHeading)
+				}
+				if got := strings.Contains(out, closeForm); got != tt.wantClose {
+					t.Errorf("%s prompt contains %q = %v, want %v", agent, closeForm, got, tt.wantClose)
+				}
+			}
+			// (a) the two agents are selected the same way.
+			if implicit != explicit {
+				t.Errorf("implicit agent \"claude\" and prompt-less agent \"worker\" rendered different prompts (%d vs %d bytes)", len(implicit), len(explicit))
+			}
+		})
+	}
+}
+
 func TestDoPrimeFormulaV2GraphWorkerPromptClaimsRoutedWork(t *testing.T) {
 	dir := t.TempDir()
 	if err := materializeBuiltinPrompts(dir); err != nil {

@@ -7241,6 +7241,42 @@ func TestInjectImplicitAgents_ConfiguredOnly(t *testing.T) {
 	}
 }
 
+func TestInjectImplicitAgents_NoPromptTemplateWhenCoreComposed(t *testing.T) {
+	// Implicit agents carry no prompt_template, so gc prime selects their
+	// builtin worker prompt by formula_v2 like any agent without one. The
+	// fixture MUST compose core: without it the field was already empty and
+	// the assertion could not fail.
+	coreDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(coreDir, "pack.toml"), []byte("[pack]\nname = \"core\"\nschema = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &City{
+		PackDirs: []string{coreDir},
+		Providers: map[string]ProviderSpec{
+			"claude": {},
+			"codex":  {},
+		},
+		Rigs: []Rig{{Name: "frontend", Path: "/tmp/frontend"}},
+	}
+	if cfg.PackDirByName("core") == "" {
+		t.Fatal("fixture does not compose the core pack")
+	}
+	InjectImplicitAgents(cfg)
+
+	// 2 city-scoped + 2 rig-scoped provider agents.
+	if len(cfg.Agents) != 4 {
+		t.Fatalf("got %d agents, want 4", len(cfg.Agents))
+	}
+	for _, a := range cfg.Agents {
+		if !a.Implicit {
+			t.Errorf("agent %s/%s: Implicit = false, want true", a.Dir, a.Name)
+		}
+		if a.PromptTemplate != "" {
+			t.Errorf("agent %s/%s: PromptTemplate = %q, want empty", a.Dir, a.Name, a.PromptTemplate)
+		}
+	}
+}
+
 func TestInjectImplicitAgents_CustomProvider(t *testing.T) {
 	// Multiple builtins + multiple custom providers: builtins come first
 	// in canonical order, then customs in alphabetical order.
