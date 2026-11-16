@@ -901,3 +901,108 @@ func TestRetiringAWatchedTreeLeavesAnInFlightLeaseUsable(t *testing.T) {
 		t.Fatal("the job handle stayed open after the last lease on a retired tree ended")
 	}
 }
+
+// TestAConsoleGroupStopKeepsMembersOutsideTheGroup pins how a console-group
+// stop settles its tree. The group being empty does not make the job empty:
+// members that entered another group are still in it. Retiring the tree there
+// would close the job handle over them, killing them on a KillOnRelease job
+// and recording live processes as drained on any job, so a later stop would
+// report success over them.
+func TestAConsoleGroupStopKeepsMembersOutsideTheGroup(t *testing.T) {
+	cmd := spawnTreeCommand()
+	if _, err := StartCommand(cmd, SurviveRelease); err != nil {
+		t.Fatalf("StartCommand: %v", err)
+	}
+	go func() { _ = cmd.Wait() }()
+	descendants := waitForDescendants(t, cmd.Process.Pid)
+	t.Cleanup(func() {
+		for _, id := range descendants {
+			terminateIfSameProcess(id)
+		}
+	})
+
+	for _, tc := range []struct {
+		name    string
+		readErr error
+	}{
+		{name: "job still has members"},
+		{name: "job count unreadable", readErr: errors.New("injected: job count unreadable")},
+	} {
+		tree := acquireOwned(cmd)
+		if tree == nil {
+			t.Fatalf("%s: the tree is not owned", tc.name)
+		}
+		active, err := tree.activeProcesses()
+		if err != nil || active == 0 {
+			_ = tree.endUse()
+			t.Fatalf("%s: job reports %d active process(es), %v; the test needs live members", tc.name, active, err)
+		}
+		settleConsoleGroupStopped(cmd, tree, active, tc.readErr)
+		if !HoldsTree(cmd) {
+			t.Fatalf("%s: a console-group stop let go of a job that still had members", tc.name)
+		}
+		if wasDrained(cmd) {
+			t.Fatalf("%s: a console-group stop recorded a job with live members as drained", tc.name)
+		}
+		if alive := stillAlive(descendants); len(alive) == 0 {
+			t.Fatalf("%s: the job's members died with the console-group stop", tc.name)
+		}
+	}
+
+	if err := KillCommandGroup(cmd, 0, Options{}); err != nil {
+		t.Fatalf("KillCommandGroup after a console-group stop: %v", err)
+	}
+	waitTreeReaped(t, descendants, "KillCommandGroup after a console-group stop returned success")
+}
+
+// TestAConsoleGroupStopRetiresAnEmptyJob pins the other half: once the job's
+// own accounting shows nothing left, the stop retires the tree as drained.
+func TestAConsoleGroupStopRetiresAnEmptyJob(t *testing.T) {
+	cmd := exec.Command("cmd.exe", "/c", "exit 0")
+	if _, err := StartCommand(cmd, SurviveRelease); err != nil {
+		t.Fatalf("StartCommand: %v", err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	tree := acquireOwned(cmd)
+	if tree == nil {
+		t.Fatal("the tree is not owned")
+	}
+	active, err := tree.activeProcesses()
+	if err != nil {
+		_ = tree.endUse()
+		t.Fatalf("reading job count: %v", err)
+	}
+	settleConsoleGroupStopped(cmd, tree, active, nil)
+	if HoldsTree(cmd) {
+		t.Fatal("a console-group stop kept a job that was empty")
+	}
+	if !wasDrained(cmd) {
+		t.Fatal("an empty job was let go without being recorded as seen empty")
+	}
+}
+
+// TestTerminateManagedCommandBoundsTheReapWait pins that a managed stop whose
+// caller never reports the leader reaped returns ErrProcessNotConfirmedDead
+// within ManagedProcessReapGrace instead of waiting on done forever.
+func TestTerminateManagedCommandBoundsTheReapWait(t *testing.T) {
+	cmd := exec.Command("cmd.exe", "/c", "ping -n 61 127.0.0.1 >NUL")
+	if _, err := StartCommand(cmd, KillOnRelease); err != nil {
+		t.Fatalf("StartCommand: %v", err)
+	}
+	t.Cleanup(func() { _ = KillCommandGroup(cmd, 0, Options{}) })
+	go func() { _ = cmd.Wait() }()
+	done := make(chan struct{}) // never closed
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- TerminateManagedCommand(cmd, 0, done, 0, Options{}) }()
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, ErrProcessNotConfirmedDead) {
+			t.Fatalf("TerminateManagedCommand with a done that never closes = %v, want ErrProcessNotConfirmedDead", err)
+		}
+	case <-time.After(ManagedProcessReapGrace + 5*time.Second):
+		t.Fatal("TerminateManagedCommand waited on a done channel that never closes")
+	}
+}

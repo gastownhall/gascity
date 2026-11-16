@@ -893,8 +893,10 @@ func KillCommandGroup(cmd *exec.Cmd, _ int, opts Options) (err error) {
 // KillCommandConsoleGroup terminates the processes in cmd's owned Job Object
 // that remain in the console process group created for cmd's leader, and
 // confirms that group is empty. Job members that deliberately entered another
-// group are released with the Job handle instead of being terminated.
-func KillCommandConsoleGroup(cmd *exec.Cmd, _ int, opts Options) (err error) {
+// group are not terminated: they stay owned through the Job Object, so a later
+// stop can still reach them, and the tree is retired once its job is seen
+// empty. Closing the job handle does not release them.
+func KillCommandConsoleGroup(cmd *exec.Cmd, _ int, opts Options) error {
 	if cmd == nil || cmd.Process == nil {
 		return nil
 	}
@@ -902,11 +904,32 @@ func KillCommandConsoleGroup(cmd *exec.Cmd, _ int, opts Options) (err error) {
 	if tree == nil {
 		return stopUnowned(cmd)
 	}
-	defer func() { settleOwned(cmd, tree, err) }()
 	if err := tree.terminateConsoleGroup(); err != nil {
+		_ = keepOwned(cmd, tree)
 		return fmt.Errorf("processgroup: terminate process group %d of pid %d: %w", tree.consoleGroupID, cmd.Process.Pid, err)
 	}
-	return waitConsoleGroupExit(tree, confirmTimeout(0), opts)
+	if err := waitConsoleGroupExit(tree, confirmTimeout(0), opts); err != nil {
+		_ = keepOwned(cmd, tree)
+		return err
+	}
+	active, err := tree.activeProcesses()
+	settleConsoleGroupStopped(cmd, tree, active, err)
+	return nil
+}
+
+// settleConsoleGroupStopped ends the lease of a console-group stop that
+// confirmed the group empty. The group being empty is not the job being empty:
+// members that left the group are still in the job, and retiring it then would
+// close the handle over them — killing them on a KillOnRelease job, and
+// recording live processes as drained on any job. The tree is retired only when
+// the job's own accounting, read as active (or failing with readErr), shows
+// nothing left; otherwise it is kept for the watch to retire.
+func settleConsoleGroupStopped(cmd *exec.Cmd, tree *ownedTree, active uint32, readErr error) {
+	if readErr != nil || active > 0 {
+		_ = keepOwned(cmd, tree)
+		return
+	}
+	_ = retireDrained(cmd, tree)
 }
 
 func waitConsoleGroupExit(tree *ownedTree, timeout time.Duration, opts Options) error {
@@ -954,6 +977,8 @@ func InterruptCommand(cmd *exec.Cmd, knownPGID int, opts Options) error {
 // TerminateManagedCommand runs the provider-managed stop sequence for an owned
 // command: request a cooperative stop, wait up to grace for the process to
 // report its own exit on done, then force the owned tree down and confirm.
+// After a forced stop it waits up to [ManagedProcessReapGrace] for done to
+// close, and returns [ErrProcessNotConfirmedDead] if it does not.
 func TerminateManagedCommand(cmd *exec.Cmd, _ int, done <-chan struct{}, grace time.Duration, opts Options) (err error) {
 	if cmd == nil || cmd.Process == nil {
 		return nil
@@ -998,8 +1023,17 @@ func TerminateManagedCommand(cmd *exec.Cmd, _ int, done <-chan struct{}, grace t
 	if err := waitTreeExit(tree, confirmTimeout(grace), opts); err != nil {
 		return err
 	}
-	<-done
-	return nil
+	// The tree is empty, so done closes as soon as the caller reaps the
+	// leader. A caller that never does must not hold this stop, and its lease,
+	// forever: report it, and the tree stays owned until the watch retires it.
+	reap := time.NewTimer(ManagedProcessReapGrace)
+	defer reap.Stop()
+	select {
+	case <-done:
+		return nil
+	case <-reap.C:
+		return fmt.Errorf("%w: leader not reaped %v after the owned tree emptied", ErrProcessNotConfirmedDead, ManagedProcessReapGrace)
+	}
 }
 
 // confirmTimeout bounds the post-terminate confirmation wait. Termination is
