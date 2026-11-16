@@ -143,7 +143,7 @@ func (s *NativeDoltStore) DepRemoveBatch(pairs []DepPair) error {
 		return err
 	}
 	defer release()
-	err = retryOnNativeDoltSerializationConflict(func() error {
+	err = retryOnNativeDoltSerializationConflict("dep_remove_batch", "", func() error {
 		ctx, cancel := context.WithTimeout(context.Background(), nativeDepRemoveBatchDeadline(len(pairs)))
 		defer cancel()
 		return storage.RunInTransaction(ctx, fmt.Sprintf("gc: remove %d dependencies", len(pairs)), func(tx beadslib.Transaction) error {

@@ -104,7 +104,7 @@ func (s *NativeDoltStore) CloseWithMetadataIfMatch(id string, expectedRevision i
 	// and stay valid across attempts; if another writer actually touched this
 	// row in between, the update item's ExpectedVersion refuses the retry
 	// instead of silently reusing a stale reason.
-	err = retryOnNativeDoltSerializationConflict(func() error {
+	err = retryOnNativeDoltSerializationConflict("close_with_metadata_if_match", id, func() error {
 		applier, err := storage.BatchApplier()
 		if err != nil {
 			return nativeStoreError(id, err)
@@ -264,7 +264,7 @@ func (s *NativeDoltStore) UpdateIfMatch(id string, expectedRevision int64, opts 
 	// is the same on either door. validateConditionalUpdateOpts has already
 	// rejected ParentID/Labels, so the apply patch's missing parent_id
 	// (W-ApplyPatch.ParentID) never reaches this door.
-	err = retryOnNativeDoltSerializationConflict(func() error {
+	err = retryOnNativeDoltSerializationConflict("update_if_match", id, func() error {
 		if opts.Assignee != nil || opts.Status != nil {
 			applier, err := storage.BatchApplier()
 			if err != nil {
@@ -312,7 +312,7 @@ func (s *NativeDoltStore) UpdateIfMatch(id string, expectedRevision int64, opts 
 // The key is bookkeeping, not desired state: a caller comparing metadata for
 // convergence must ignore it, and nothing else reads it.
 func (s *NativeDoltStore) updateLabelsIfMatch(storage beadslib.Storage, id string, expectedRevision int64, opts UpdateOpts) error {
-	return retryOnNativeDoltSerializationConflict(func() error {
+	return retryOnNativeDoltSerializationConflict("update_labels_if_match", id, func() error {
 		ctx, cancel := nativeDoltOperationContext(context.TODO())
 		defer cancel()
 		return storage.RunInTransaction(ctx, fmt.Sprintf("gc: fenced label update bead %s", id), func(tx beadslib.Transaction) error {
@@ -385,7 +385,7 @@ func (s *NativeDoltStore) CloseIfMatch(id string, expectedRevision int64) error 
 	// serialization conflict is retried while a version mismatch still
 	// short-circuits through conditionalWriteError. The pre-read close reason is
 	// a deterministic function of the issue and stays valid across attempts.
-	err = retryOnNativeDoltSerializationConflict(func() error {
+	err = retryOnNativeDoltSerializationConflict("close_if_match", id, func() error {
 		lifecycle, err := storage.IssueLifecycle()
 		if err != nil {
 			return nativeStoreError(id, err)
@@ -435,7 +435,7 @@ func (s *NativeDoltStore) DeleteIfMatch(id string, expectedRevision int64) error
 	ctx, cancel := nativeDoltOperationContext(context.TODO())
 	defer cancel()
 
-	err = retryOnNativeDoltSerializationConflict(func() error {
+	err = retryOnNativeDoltSerializationConflict("delete_if_match", id, func() error {
 		deleter, err := storage.Deleter()
 		if err != nil {
 			return nativeStoreError(id, err)
@@ -515,7 +515,7 @@ func (s *NativeDoltStore) TransferIfCurrent(id, fromAssignee, toAssignee string)
 
 	expectedAssignee := fromAssignee
 	expectedStatus := issueops.StatusInProgress
-	err = retryOnNativeDoltSerializationConflict(func() error {
+	err = retryOnNativeDoltSerializationConflict("transfer_if_current", id, func() error {
 		ops, err := storage.IssueLifecycle()
 		if err != nil {
 			return nativeStoreError(id, err)

@@ -2565,15 +2565,52 @@ func (s *BdStore) runBDTransientReleaseOutput(args ...string) ([]byte, error) {
 func (s *BdStore) runBDTransientWriteOutputWhen(shouldRetry func(error) bool, args ...string) ([]byte, error) {
 	var err error
 	var out []byte
+	operation, id := bdWriteTarget(args)
 	args = s.bdTransientWriteArgs(args)
 	for attempt := 1; attempt <= bdTransientWriteAttempts; attempt++ {
 		out, err = s.runner(s.dir, "bd", args...)
 		if err == nil || !shouldRetry(err) || attempt == bdTransientWriteAttempts {
+			recordWriteBudget(operation, id, attempt, bdTransientWriteAttempts, err, err != nil && shouldRetry(err))
 			return out, err
 		}
 		time.Sleep(time.Duration(attempt) * 25 * time.Millisecond)
 	}
 	return out, err
+}
+
+// bdWriteTarget names the store verb and the bead a bd write command targets,
+// for write-conflict telemetry. The verb is args[0]; the bead is the first
+// positional argument after it, skipping flags and the values of the flags
+// that take one. It is empty for a verb whose first positional argument is not
+// a bead (an import file, a sub-command) and for a command with no
+// positional argument. A multi-bead close names its first bead.
+func bdWriteTarget(args []string) (operation, id string) {
+	if len(args) == 0 {
+		return "", ""
+	}
+	operation = args[0]
+	switch operation {
+	case "update", "close", "reopen", "delete", "reclaim", "dep":
+	default:
+		return operation, ""
+	}
+	rest := args[1:]
+	if operation == "dep" && len(rest) > 0 {
+		rest = rest[1:] // dep add|remove <issue> ...
+	}
+	for i := 0; i < len(rest); i++ {
+		switch a := rest[i]; {
+		case a == "--id" && i+1 < len(rest):
+			return operation, rest[i+1]
+		case a == "--reason" || a == "-r" || strings.HasPrefix(a, "--set-") ||
+			a == "--status" || a == "--assignee" || a == "--add-label" || a == "--remove-label":
+			i++ // flag value
+		case strings.HasPrefix(a, "-"):
+		default:
+			return operation, a
+		}
+	}
+	return operation, ""
 }
 
 // runBDTransientRead runs a read-only bd command, retrying on transient Dolt

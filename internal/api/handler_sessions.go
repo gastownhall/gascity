@@ -496,22 +496,12 @@ func deleteSessionBeadAfterClose(store beads.SessionStore, id string) error {
 			log.Printf("gc api: deleting bead after close %s: already gone", id)
 			return nil
 		}
-		if !isRetryableStoreConflict(err) {
+		if !beads.IsRetryableConflict(err) || attempt == maxAttempts-1 {
 			return err
 		}
 		time.Sleep(time.Duration(attempt+1) * 25 * time.Millisecond)
 	}
 	return err
-}
-
-func isRetryableStoreConflict(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	return strings.Contains(msg, "Error 1213") ||
-		strings.Contains(msg, "40001") ||
-		strings.Contains(msg, "serialization failure")
 }
 
 func (s *Server) handleSessionPermissionMode(w http.ResponseWriter, r *http.Request) {

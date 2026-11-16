@@ -108,7 +108,7 @@ func (s *NativeDoltStore) ApplyGuarded(ctx context.Context, b GuardedBatch) (Gua
 		provenance = nativeGuardedBatchProvenance
 	}
 	var result issueops.ApplyBatchResult
-	err = retryOnNativeDoltSerializationConflict(func() error {
+	err = retryOnNativeDoltSerializationConflict("apply_guarded", "", func() error {
 		var err error
 		result, err = applier.ApplyBatch(ctx, issueops.ApplyBatchRequest{
 			Actor:         s.actor,

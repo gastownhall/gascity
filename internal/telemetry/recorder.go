@@ -84,6 +84,9 @@ type recorderInstruments struct {
 
 	// Turn-fenced deliver-now (SESSION-RUNTIME-020)
 	turnInterruptTotal metric.Int64Counter
+
+	// Bead-store write conflicts that reached the end of the retry budget
+	storeWriteConflictTotal metric.Int64Counter
 }
 
 var (
@@ -208,6 +211,11 @@ func initInstruments() {
 		// Turn-fenced deliver-now
 		inst.turnInterruptTotal, _ = m.Int64Counter("gc.session.turn_interrupts.total",
 			metric.WithDescription("Total turn-fenced deliver-now requests by outcome, degradation and message disposition"),
+		)
+
+		// Bead-store write conflicts
+		inst.storeWriteConflictTotal, _ = m.Int64Counter("gc.beads.write_conflicts.total",
+			metric.WithDescription("Total bead-store writes that met a retryable conflict on their final attempt, by operation, conflict class and outcome"),
 		)
 	})
 }
@@ -595,6 +603,45 @@ func RecordCacheScanLarge(ctx context.Context, rig string, beadCount, threshold 
 		attribute.Int64("bead_count", int64(beadCount)),
 		attribute.Int64("threshold", int64(threshold)),
 		attribute.Int64("elapsed_ms", elapsed.Milliseconds()),
+	)
+}
+
+// Outcomes and classes RecordWriteConflict accepts as metric labels. They are
+// the whole label vocabulary: every value is a closed token.
+const (
+	// WriteConflictExhausted marks a write whose final attempt still failed
+	// with a retryable conflict.
+	WriteConflictExhausted = "exhausted"
+	// WriteConflictRecoveredFinal marks a write that succeeded only on its
+	// final attempt, so one more conflict would have exhausted it.
+	WriteConflictRecoveredFinal = "recovered-final"
+)
+
+// RecordWriteConflict records a bead-store write that used its whole retry
+// budget: gc.beads.write_conflicts.total always, plus one structured warning
+// when the write was exhausted. operation names the store verb and class the
+// conflict kind (serialization, cas or transient); outcome is
+// WriteConflictExhausted or WriteConflictRecoveredFinal. The metric labels are
+// only those closed tokens. The bead id and the attempt count ride the warning
+// alone, and no error text or bead content is recorded anywhere, so a store
+// error that quotes session text cannot reach a label or a log field.
+func RecordWriteConflict(ctx context.Context, operation, beadID, class, outcome string, attempts int) {
+	initInstruments()
+	inst.storeWriteConflictTotal.Add(ctx, 1,
+		metric.WithAttributes(
+			attribute.String("operation", operation),
+			attribute.String("class", class),
+			attribute.String("outcome", outcome),
+		),
+	)
+	if outcome != WriteConflictExhausted {
+		return
+	}
+	emit(ctx, "beads.write.conflict_exhausted", otellog.SeverityWarn,
+		attribute.String("operation", operation),
+		attribute.String("bead_id", beadID),
+		attribute.String("class", class),
+		attribute.Int64("attempts", int64(attempts)),
 	)
 }
 

@@ -1659,7 +1659,7 @@ func (s *NativeDoltStore) Update(id string, opts UpdateOpts) error {
 	defer release()
 
 	// The patch is pure, so only the write needs replaying.
-	return retryOnNativeDoltSerializationConflict(func() error {
+	return retryOnNativeDoltSerializationConflict("update", id, func() error {
 		ctx, cancel := nativeDoltOperationContext(context.TODO())
 		defer cancel()
 		return s.updateOnce(ctx, storage, id, patch, opts)
@@ -2277,7 +2277,7 @@ func (s *NativeDoltStore) Close(id string) error {
 	}
 	defer release()
 
-	return retryOnNativeDoltSerializationConflict(func() error {
+	return retryOnNativeDoltSerializationConflict("close", id, func() error {
 		ctx, cancel := nativeDoltOperationContext(context.TODO())
 		defer cancel()
 		return s.closeOnce(ctx, storage, id)
@@ -2339,7 +2339,7 @@ func (s *NativeDoltStore) Reopen(id string) error {
 	}
 	defer release()
 
-	return retryOnNativeDoltSerializationConflict(func() error {
+	return retryOnNativeDoltSerializationConflict("reopen", id, func() error {
 		ctx, cancel := nativeDoltOperationContext(context.TODO())
 		defer cancel()
 		return s.reopenOnce(ctx, storage, id)
@@ -2500,7 +2500,7 @@ func (s *NativeDoltStore) stampAndClose(id string, metadata map[string]string) e
 		return nativeStoreError(id, err)
 	}
 	var updated issueops.UpdateResult
-	if err := retryOnNativeDoltSerializationConflict(func() error {
+	if err := retryOnNativeDoltSerializationConflict("stamp_and_close", id, func() error {
 		attemptCtx, attemptCancel := nativeDoltOperationContext(context.TODO())
 		defer attemptCancel()
 		var attemptErr error
@@ -2533,7 +2533,7 @@ func (s *NativeDoltStore) stampAndClose(id string, metadata map[string]string) e
 	// The close replays alone. The stamp above it already committed, so replaying
 	// the pair would re-run a write that won its race to recover one that lost.
 	reason := nativeCloseReasonFromIssue(closing)
-	if err := retryOnNativeDoltSerializationConflict(func() error {
+	if err := retryOnNativeDoltSerializationConflict("stamp_and_close", id, func() error {
 		attemptCtx, attemptCancel := nativeDoltOperationContext(context.TODO())
 		defer attemptCancel()
 		_, err := ops.Close(attemptCtx, issueops.CloseRequest{
@@ -2651,7 +2651,7 @@ func (s *NativeDoltStore) SetMetadataBatch(id string, kvs map[string]string) err
 
 	// The facade merges the keys inside the write transaction, so a replay
 	// cannot clobber a competing writer's keys the way a stale read would.
-	return retryOnNativeDoltSerializationConflict(func() error {
+	return retryOnNativeDoltSerializationConflict("set_metadata_batch", id, func() error {
 		ctx, cancel := nativeDoltOperationContext(context.TODO())
 		defer cancel()
 		ops, err := storage.IssueLifecycle()
@@ -2700,8 +2700,19 @@ const (
 // deliberate: releasing between attempts would let the handle be swapped
 // mid-retry, so a retry could run against a different storage than the one whose
 // transaction it is repeating.
-func retryOnNativeDoltSerializationConflict(attempt func() error) error {
-	return retryNativeDoltWrite(attempt, isNativeDoltSerializationConflict)
+//
+// operation is a closed store-verb token and id the bead the write targets
+// (empty when it spans several). A write that reaches the last attempt is
+// reported through recordWriteBudget: exhausted when the last attempt still
+// conflicted, recovered-final when it succeeded only on that attempt.
+func retryOnNativeDoltSerializationConflict(operation, id string, attempt func() error) error {
+	attempts := 0
+	err := retryNativeDoltWrite(func() error {
+		attempts++
+		return attempt()
+	}, isNativeDoltSerializationConflict)
+	recordWriteBudget(operation, id, attempts, nativeWriteAttempts, err, isNativeDoltSerializationConflict(err))
+	return err
 }
 
 // retryNativeDoltWrite runs attempt up to nativeWriteAttempts times, sleeping a
