@@ -197,6 +197,9 @@ set -eu
 #   --only-db <name>   restrict to the named database (repeatable, a repeat is
 #                      ignored; augments GC_DOLT_COMPACT_ONLY_DBS).
 #   --dry-run          print intended actions without mutating Dolt.
+#   --force            run CALL DOLT_GC even on a database with live sessions
+#                      connected, or when the live-session probe fails (see
+#                      gc_live_session_gate). Deliberate operator use only.
 #   --skip-fetch       bypass CALL DOLT_FETCH for every database (sets
 #                      GC_DOLT_COMPACT_SKIP_FETCH=1) — opt-out for cities whose
 #                      remote is uncredentialed, where the fetch would crash the
@@ -229,8 +232,13 @@ select_only_db() {
 }
 
 gc_only=0
+force_gc=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --force)
+      force_gc=1
+      shift
+      ;;
     --gc-only)
       gc_only=1
       shift
@@ -260,7 +268,7 @@ while [ "$#" -gt 0 ]; do
       break
       ;;
     -*)
-      printf 'compact: unknown flag %s (supported: --gc-only, --only-db <name>, --dry-run, --skip-fetch)\n' "$1" >&2
+      printf 'compact: unknown flag %s (supported: --gc-only, --only-db <name>, --dry-run, --skip-fetch, --force)\n' "$1" >&2
       exit 2
       ;;
     *)
@@ -370,6 +378,9 @@ fi
 host="${GC_DOLT_HOST:-127.0.0.1}"
 threshold_commits="${GC_DOLT_COMPACT_THRESHOLD_COMMITS:-2000}"
 call_timeout="${GC_DOLT_COMPACT_CALL_TIMEOUT_SECS:-1800}"
+# Caps the live-session probe before CALL DOLT_GC; matches
+# cleanupLiveSessionProbeTimeout in cmd/gc/dolt_cleanup_drop.go.
+live_session_probe_timeout=2
 push_timeout="${GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS:-120}"
 live_probe_attempts="${GC_DOLT_COMPACT_LIVE_PROBE_ATTEMPTS:-3}"
 live_probe_delay="${GC_DOLT_COMPACT_LIVE_PROBE_DELAY_SECS:-2}"
@@ -2713,6 +2724,64 @@ live_gate_fail() {
   return 0
 }
 
+# live_session_count DB — prints how many sessions are connected to DB. The
+# probe selects no database (no --use-db), so its own connection is not counted
+# in information_schema.processlist. Reads the same information_schema.processlist
+# surface as ProbeLiveSessions in cmd/gc/dolt_cleanup_drop.go, filtered to one
+# database. Any error, timeout, or non-numeric answer returns non-zero.
+live_session_count() {
+  probe_db="$1"
+  valid_database_name "$probe_db" || return 1
+  export DOLT_CLI_PASSWORD="${GC_DOLT_PASSWORD:-}"
+  probe_out=$(run_bounded "$live_session_probe_timeout" \
+    dolt --host "$host" --port "$GC_DOLT_PORT" \
+    --user "$GC_DOLT_USER" --no-tls \
+    sql -r tabular -q "SELECT COUNT(*) FROM information_schema.processlist WHERE db = '$probe_db'") || return 1
+  probe_count=$(printf '%s\n' "$probe_out" | awk 'NR==4 {gsub(/[| ]/, ""); print; exit}')
+  case "$probe_count" in
+    ""|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$probe_count"
+}
+
+# gc_live_session_gate DB — run immediately before every CALL DOLT_GC. DOLT_GC
+# also collects dolt_ignore'd tables (mail, wisps) that no retention policy
+# protects, so GC only runs on a database no session is connected to. Returns
+# 0 to proceed, 1 when sessions are connected (a routine skip), 2 when the
+# probe failed (fail-closed: not confirmed quiescent is not quiescent).
+# --force logs and proceeds in both cases.
+#
+# This is a point-in-time check, not a lock: a session can connect between the
+# probe and the CALL DOLT_GC that follows, and nothing here fences it. The
+# conservative any-connection bar lowers the odds; retries give a busy database
+# another chance to be seen idle. Neither closes the window.
+gc_live_session_gate() {
+  gate_db="$1"
+  gate_rc=0
+  gate_err_tmp=$(mktemp)
+  gate_count=$(live_session_count "$gate_db" 2>"$gate_err_tmp") || gate_rc=$?
+  if [ "$gate_rc" -ne 0 ]; then
+    emit_error_file "$gate_db" "$gate_err_tmp"
+    rm -f "$gate_err_tmp"
+    if [ "$force_gc" = "1" ]; then
+      printf 'compact: db=%s live-session probe failed rc=%s — running DOLT_GC anyway (--force)\n' "$gate_db" "$gate_rc" >&2
+      return 0
+    fi
+    printf 'compact: db=%s live-session probe failed rc=%s — cannot confirm the database is quiescent, skipping DOLT_GC; re-run with --force to override\n' \
+      "$gate_db" "$gate_rc" >&2
+    return 2
+  fi
+  rm -f "$gate_err_tmp"
+  [ "$gate_count" -gt 0 ] || return 0
+  if [ "$force_gc" = "1" ]; then
+    printf 'compact: db=%s %s live session(s) connected — running DOLT_GC anyway (--force)\n' "$gate_db" "$gate_count" >&2
+    return 0
+  fi
+  printf 'compact: db=%s %s live session(s) connected — skipping DOLT_GC to protect dolt_ignore'"'"'d tables; re-run with --force to override\n' \
+    "$gate_db" "$gate_count" >&2
+  return 1
+}
+
 # Every GC here passes --archive-level=0: Dolt 2.3.3-2.5.1 default to
 # SimpleArchive, which duplicates its zstd dictionaries once an archive holds
 # more than 256, and each duplicate pins about 137 KB of C memory for the whole
@@ -2725,6 +2794,7 @@ run_full_gc() {
   start="$4"
   gc_step="$5"
 
+  gc_live_session_gate "$db" || return 1
   live_gate_arm "$db" "$gc_step" "" || return 1
   printf "compact: db=%s — running DOLT_GC('--full', '--archive-level=0')...\n" "$db"
   gc_rc=0
@@ -3168,10 +3238,18 @@ resolve_compact_base() {
 }
 
 # run_bare_gc runs a working-set CALL DOLT_GC('--archive-level=0'): it reclaims
-# journal and working-set garbage without touching history.
+# journal and working-set garbage without touching history. A database with live
+# sessions is skipped (return 0, routine); a failed probe returns 1.
 run_bare_gc() {
   db="$1"
   gc_step="$2"
+  gate_status=0
+  gc_live_session_gate "$db" || gate_status=$?
+  case "$gate_status" in
+    0) ;;
+    1) return 0 ;;
+    *) return 1 ;;
+  esac
   live_gate_arm "$db" "$gc_step" "" || return 1
   start=$(date +%s)
   gc_rc=0

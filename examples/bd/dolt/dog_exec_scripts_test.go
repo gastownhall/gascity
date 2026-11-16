@@ -270,6 +270,8 @@ func (f compactScriptFixture) runWithArgs(t *testing.T, mode string, args []stri
 		"GC_FAKE_DOLT_TAG_STATE_FILE",
 		"GC_FAKE_DOLT_LIVE_FAULT_DIR",
 		"GC_FAKE_PENDING_GC_MARKER",
+		"GC_FAKE_DOLT_LIVE_SESSIONS",
+		"GC_FAKE_DOLT_PROBE_FAIL",
 		"GC_PACK_STATE_DIR",
 		"GC_CITY_RUNTIME_DIR",
 		"GC_DOLT_COMPACT_MIN_FREE_BYTES",
@@ -715,6 +717,24 @@ case "$query" in
       live_head="$(sed -n '1p' "$state_file")"
     fi
     print_cell "$db:$live_head"
+    exit 0
+    ;;
+  *"information_schema.processlist"*)
+    # Live-session quiescence probe issued before every CALL DOLT_GC. The
+    # GC_FAKE_DOLT_LIVE_SESSIONS value is a space-separated db=count list (empty
+    # by default: the server is quiescent); GC_FAKE_DOLT_PROBE_FAIL makes the
+    # probe itself fail.
+    if [ -n "${GC_FAKE_DOLT_PROBE_FAIL:-}" ]; then
+      printf 'processlist unavailable\n' >&2
+      exit 59
+    fi
+    live_count=0
+    for entry in ${GC_FAKE_DOLT_LIVE_SESSIONS:-}; do
+      case "$query" in
+        *"db = '${entry%%=*}'"*) live_count="${entry#*=}" ;;
+      esac
+    done
+    print_cell "$live_count"
     exit 0
     ;;
   *"FROM dolt_log ORDER BY date DESC LIMIT 1"*)

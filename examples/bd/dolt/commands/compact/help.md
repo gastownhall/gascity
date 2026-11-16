@@ -123,6 +123,10 @@ author: every commit after the watermark is squashed, whichever city wrote it.
 - `--dry-run` — Print the intended actions without issuing any
   `DOLT_RESET` / `DOLT_COMMIT` / `DOLT_GC`.
 
+- `--force` — Run `CALL DOLT_GC` even on a database with connected sessions, or
+  when the live-session probe fails. For deliberate operator use only; every
+  forced run logs why it went ahead. See [Live-session gate](#live-session-gate).
+
 - `--skip-fetch` — Bypass `CALL DOLT_FETCH` for every database (sets
   `GC_DOLT_COMPACT_SKIP_FETCH=1`). Against an uncredentialed git+https remote
   the fetch crashes the managed Dolt sql-server and cascades to every remaining
@@ -181,6 +185,34 @@ outruns that fails with `rc=124` and no server error. A reclaim that needs
 longer belongs offline: follow the Recovery Procedure in
 `docs/troubleshooting/dolt-bloat-recovery.md` with
 `dolt gc --full --archive-level=0` as step 3.
+
+## Live-session gate
+
+`DOLT_GC` also collects `dolt_ignore`d tables (mail, wisps) that no retention
+policy protects, so a GC that runs while a session is writing can lose that
+data. Before every `CALL DOLT_GC`, the full GC after a flatten, `--gc-only`,
+pending-GC retries, and bare GC, compact asks the server how many sessions are
+connected to the database
+(`SELECT COUNT(*) FROM information_schema.processlist WHERE db = '<db>'`; the
+probe's own connection is not counted) and acts on the answer:
+
+- No sessions: the GC runs.
+- One or more sessions: the GC is skipped and the log says so. A bare GC skip
+  is routine and exits 0. A skipped full GC counts as a failed database (exit
+  non-zero), and after a flatten it leaves the pending-GC marker, so the next
+  run retries. The pending-GC marker it leaves keeps its usual reason
+  (`flatten succeeded but full GC failed`); the compactor log line naming the
+  live sessions says the GC was skipped, not failed.
+- The probe fails, times out, or returns a non-number: the GC is skipped,
+  because a database that cannot be confirmed quiescent is treated as busy.
+
+Any connected session blocks the GC, not only one with a write in flight.
+`--force` overrides both skips.
+
+The check is a point in time, not a lock: a session can connect between the
+probe and the GC that follows. Nothing closes that window. The 2-hour retry
+cadence only gives a busy database another chance to be seen idle; it does not
+shorten the gap between the probe and the GC.
 
 ## Live-database gate
 
