@@ -6,6 +6,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // TestProcessControlCoversEveryControlKind keeps the ProcessControl switch and
@@ -25,7 +26,7 @@ func TestProcessControlCoversEveryControlKind(t *testing.T) {
 			if err != nil {
 				t.Fatalf("create: %v", err)
 			}
-			_, err = ProcessControl(store, bead, ProcessOptions{})
+			_, err = ProcessControl(beadstest.Graph(store), bead, ProcessOptions{Work: beadstest.Work(store)})
 			if err != nil && strings.Contains(err.Error(), "unsupported control bead kind") {
 				t.Errorf("ProcessControl rejected declared control kind %q as unsupported: %v", kind, err)
 			}
@@ -40,7 +41,7 @@ func TestProcessControlCoversEveryControlKind(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := ProcessControl(store, bead, ProcessOptions{}); err == nil || !strings.Contains(err.Error(), "unsupported control bead kind") {
+	if _, err := ProcessControl(beadstest.Graph(store), bead, ProcessOptions{Work: beadstest.Work(store)}); err == nil || !strings.Contains(err.Error(), "unsupported control bead kind") {
 		t.Errorf("ProcessControl(unknown kind) error = %v, want unsupported-kind error", err)
 	}
 }

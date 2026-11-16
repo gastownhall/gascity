@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
@@ -275,7 +276,7 @@ func TestListLiveRootsInCityAcceptsBareCityRef(t *testing.T) {
 	}
 
 	for _, selected := range []string{"city:", "city:mc"} {
-		roots, err := ListLiveRootsInCity(store, "BL-42", selected, "city:mc", "mc")
+		roots, err := ListLiveRootsInCity(beadstest.GraphMolecule(store), "BL-42", selected, "city:mc", "mc")
 		if err != nil {
 			t.Fatalf("ListLiveRootsInCity(%q): %v", selected, err)
 		}
@@ -289,7 +290,7 @@ func TestListLiveRootsInCityAcceptsBareCityRef(t *testing.T) {
 	}
 
 	// The city-blind scanner keeps its exact comparison.
-	roots, err := ListLiveRoots(store, "BL-42", "city:", "city:mc")
+	roots, err := ListLiveRoots(beadstest.GraphMolecule(store), "BL-42", "city:", "city:mc")
 	if err != nil {
 		t.Fatalf("ListLiveRoots: %v", err)
 	}
@@ -327,7 +328,7 @@ func TestListLiveRootsFiltersBySourceStoreRef(t *testing.T) {
 		t.Fatalf("Create(beta): %v", err)
 	}
 
-	roots, err := ListLiveRoots(store, "BL-42", "rig:alpha", "rig:alpha")
+	roots, err := ListLiveRoots(beadstest.GraphMolecule(store), "BL-42", "rig:alpha", "rig:alpha")
 	if err != nil {
 		t.Fatalf("ListLiveRoots: %v", err)
 	}
@@ -360,7 +361,7 @@ func TestListLiveRootsIncludesGraphV2OnlyRoots(t *testing.T) {
 		t.Fatalf("Create(graph-only): %v", err)
 	}
 
-	roots, err := ListLiveRoots(store, "BL-42", "rig:alpha", "rig:alpha")
+	roots, err := ListLiveRoots(beadstest.GraphMolecule(store), "BL-42", "rig:alpha", "rig:alpha")
 	if err != nil {
 		t.Fatalf("ListLiveRoots: %v", err)
 	}
@@ -406,7 +407,7 @@ func TestListLiveRootsExcludesNonWorkflowBeadsUnderSameSource(t *testing.T) {
 		t.Fatalf("Create(note): %v", err)
 	}
 
-	roots, err := ListLiveRoots(store, "BL-42", "rig:alpha", "rig:alpha")
+	roots, err := ListLiveRoots(beadstest.GraphMolecule(store), "BL-42", "rig:alpha", "rig:alpha")
 	if err != nil {
 		t.Fatalf("ListLiveRoots: %v", err)
 	}
@@ -430,7 +431,7 @@ func TestListLiveRootsTreatsLegacyRootAsStoreScoped(t *testing.T) {
 		t.Fatalf("Create(legacy): %v", err)
 	}
 
-	alphaRoots, err := ListLiveRoots(store, "BL-42", "rig:alpha", "rig:alpha")
+	alphaRoots, err := ListLiveRoots(beadstest.GraphMolecule(store), "BL-42", "rig:alpha", "rig:alpha")
 	if err != nil {
 		t.Fatalf("ListLiveRoots(alpha): %v", err)
 	}
@@ -438,7 +439,7 @@ func TestListLiveRootsTreatsLegacyRootAsStoreScoped(t *testing.T) {
 		t.Fatalf("ListLiveRoots(alpha) = %#v, want 1 root", alphaRoots)
 	}
 
-	betaRoots, err := ListLiveRoots(store, "BL-42", "rig:alpha", "rig:beta")
+	betaRoots, err := ListLiveRoots(beadstest.GraphMolecule(store), "BL-42", "rig:alpha", "rig:beta")
 	if err != nil {
 		t.Fatalf("ListLiveRoots(beta): %v", err)
 	}
@@ -563,7 +564,7 @@ func TestCloseWorkflowSubtreeClosesDeepestChildrenFirst(t *testing.T) {
 		t.Fatalf("DepAdd(grandchild): %v", err)
 	}
 
-	closed, err := CloseWorkflowSubtree(store, root.ID)
+	closed, err := CloseWorkflowSubtree(beadstest.GraphMolecule(store), root.ID)
 	if err != nil {
 		t.Fatalf("CloseWorkflowSubtree: %v", err)
 	}
@@ -633,7 +634,7 @@ func TestCloseWorkflowSubtreeAsClosesDescendantsBeforeRootWithRootOnlyMetadata(t
 	}
 	store := &rootLastStrictStore{MemStore: base, rootID: root.ID}
 
-	closed, err := CloseWorkflowSubtreeAs(store, root.ID, "canceled",
+	closed, err := CloseWorkflowSubtreeAs(beadstest.GraphMolecule(store), root.ID, "canceled",
 		"run canceled via POST /runs/{id}/cancel",
 		map[string]string{"gc.cancel_requested": "true"})
 	if err != nil {
@@ -710,7 +711,7 @@ func TestCloseWorkflowSubtreeOrdersBlockersBeforeBlocked(t *testing.T) {
 		}
 	}
 
-	closed, err := CloseWorkflowSubtree(store, root.ID)
+	closed, err := CloseWorkflowSubtree(beadstest.GraphMolecule(store), root.ID)
 	if err != nil {
 		t.Fatalf("CloseWorkflowSubtree: %v", err)
 	}
@@ -756,7 +757,7 @@ func TestCloseWorkflowSubtreeStampsCloseReason(t *testing.T) {
 		t.Fatalf("Create(child): %v", err)
 	}
 
-	closed, err := CloseWorkflowSubtree(store, root.ID)
+	closed, err := CloseWorkflowSubtree(beadstest.GraphMolecule(store), root.ID)
 	if err != nil {
 		t.Fatalf("CloseWorkflowSubtree: %v", err)
 	}
@@ -814,7 +815,7 @@ func TestCloseSpecSidecarsForRootClosesOnlyOpenSpecs(t *testing.T) {
 		t.Fatalf("Create(work): %v", err)
 	}
 
-	closed, err := CloseSpecSidecarsForRoot(store, root.ID, "")
+	closed, err := CloseSpecSidecarsForRoot(beadstest.GraphMolecule(store), root.ID, "")
 	if err != nil {
 		t.Fatalf("CloseSpecSidecarsForRoot: %v", err)
 	}
@@ -869,7 +870,7 @@ func TestListWorkflowBeadsQueriesBothTiersForRootOwnedDescendants(t *testing.T) 
 		t.Fatalf("Create(spec): %v", err)
 	}
 
-	matched, err := ListWorkflowBeads(store, root.ID)
+	matched, err := ListWorkflowBeads(beadstest.GraphMolecule(store), root.ID)
 	if err != nil {
 		t.Fatalf("ListWorkflowBeads: %v", err)
 	}
@@ -936,7 +937,7 @@ func TestCloseWorkflowSubtreeHandlesParentCycles(t *testing.T) {
 		t.Fatalf("DepAdd(child): %v", err)
 	}
 
-	closed, err := CloseWorkflowSubtree(store, root.ID)
+	closed, err := CloseWorkflowSubtree(beadstest.GraphMolecule(store), root.ID)
 	if err != nil {
 		t.Fatalf("CloseWorkflowSubtree: %v", err)
 	}
@@ -986,7 +987,7 @@ func TestCloseWorkflowSubtree_StampsCloseReason(t *testing.T) {
 		t.Fatalf("DepAdd(child): %v", err)
 	}
 
-	closed, err := CloseWorkflowSubtree(store, root.ID)
+	closed, err := CloseWorkflowSubtree(beadstest.GraphMolecule(store), root.ID)
 	if err != nil {
 		t.Fatalf("CloseWorkflowSubtree: %v", err)
 	}
@@ -1044,21 +1045,21 @@ func TestSnapshotRestoreWorkflowBeadsRestoresMutableState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	snapshots, err := SnapshotOpenWorkflowBeads(store, root.ID)
+	snapshots, err := SnapshotOpenWorkflowBeads(beadstest.GraphMolecule(store), root.ID)
 	if err != nil {
 		t.Fatalf("SnapshotOpenWorkflowBeads: %v", err)
 	}
 	if len(snapshots) != 2 {
 		t.Fatalf("snapshots = %+v, want root and child", snapshots)
 	}
-	if _, err := CloseWorkflowSubtree(store, root.ID); err != nil {
+	if _, err := CloseWorkflowSubtree(beadstest.GraphMolecule(store), root.ID); err != nil {
 		t.Fatalf("CloseWorkflowSubtree: %v", err)
 	}
 	if err := store.SetMetadata(child.ID, "gc.outcome", "fail"); err != nil {
 		t.Fatalf("SetMetadata(outcome): %v", err)
 	}
 
-	if err := RestoreWorkflowBeads(store, snapshots); err != nil {
+	if err := RestoreWorkflowBeads(beadstest.GraphMolecule(store), snapshots); err != nil {
 		t.Fatalf("RestoreWorkflowBeads: %v", err)
 	}
 	rootAfter, err := store.Get(root.ID)
@@ -1242,7 +1243,7 @@ func TestCloseWorkflowSubtreeNeverClosesASessionRow(t *testing.T) {
 		}
 		want[b.ID] = false
 	}
-	if _, err := CloseWorkflowSubtree(store, root.ID); err != nil {
+	if _, err := CloseWorkflowSubtree(beadstest.GraphMolecule(store), root.ID); err != nil {
 		t.Fatal(err)
 	}
 	for id, wantClosed := range want {
@@ -1269,7 +1270,7 @@ func TestCloseSpecSidecarsNeverClosesASessionRow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := CloseSpecSidecarsForRoot(store, root.ID, ""); err != nil {
+	if _, err := CloseSpecSidecarsForRoot(beadstest.GraphMolecule(store), root.ID, ""); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := store.Get(sidecar.ID); b.Status != "closed" {
@@ -1282,7 +1283,7 @@ func TestCloseSpecSidecarsNeverClosesASessionRow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := CloseSpecSidecarsForRoot(store, root.ID, ""); err != nil {
+	if _, err := CloseSpecSidecarsForRoot(beadstest.GraphMolecule(store), root.ID, ""); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := store.Get(episode.ID); b.Status == "closed" {

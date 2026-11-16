@@ -1733,7 +1733,7 @@ func TestHandleSessionCloseDeleteRetriesTransientConflict(t *testing.T) {
 func TestDeleteSessionBeadAfterCloseReturnsLastTransientError(t *testing.T) {
 	store := &alwaysTransientDeleteConflictStore{Store: beads.NewMemStore()}
 
-	err := deleteSessionBeadAfterClose(store, "gc-test")
+	err := deleteSessionBeadAfterClose(beadstest.Sessions(store), "gc-test")
 
 	if err == nil {
 		t.Fatal("deleteSessionBeadAfterClose error = nil, want transient failure")
@@ -1749,7 +1749,7 @@ func TestDeleteSessionBeadAfterCloseReturnsLastTransientError(t *testing.T) {
 func TestDeleteSessionBeadAfterCloseDoesNotRetryNonTransientError(t *testing.T) {
 	store := &nonTransientDeleteErrorStore{err: errors.New("permission denied")}
 
-	err := deleteSessionBeadAfterClose(store, "gc-test")
+	err := deleteSessionBeadAfterClose(beadstest.Sessions(store), "gc-test")
 
 	if err == nil || !strings.Contains(err.Error(), "permission denied") {
 		t.Fatalf("deleteSessionBeadAfterClose error = %v, want permission denied", err)
@@ -1765,7 +1765,7 @@ func TestDeleteSessionBeadAfterCloseLogsAlreadyGone(t *testing.T) {
 	log.SetOutput(&logs)
 	defer log.SetOutput(oldOutput)
 
-	err := deleteSessionBeadAfterClose(deleteMissingStore{Store: beads.NewMemStore()}, "gc-test")
+	err := deleteSessionBeadAfterClose(beadstest.Sessions(deleteMissingStore{Store: beads.NewMemStore()}), "gc-test")
 	if err != nil {
 		t.Fatalf("deleteSessionBeadAfterClose: %v", err)
 	}
@@ -3296,14 +3296,14 @@ func TestMaterializeNamedSession_RebrandedSingletonKeepsTemplateWorkDirIdentity(
 	}}
 	srv := New(fs)
 
-	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "myrig/boot")
+	spec, ok, err := srv.findNamedSessionSpecForTarget("myrig/boot")
 	if err != nil {
 		t.Fatalf("findNamedSessionSpecForTarget: %v", err)
 	}
 	if !ok {
 		t.Fatal("expected named session spec")
 	}
-	id, err := srv.materializeNamedSession(fs.cityBeadStore, spec)
+	id, err := srv.materializeNamedSession(beadstest.Sessions(fs.cityBeadStore), spec)
 	if err != nil {
 		t.Fatalf("materializeNamedSession: %v", err)
 	}
@@ -3331,14 +3331,14 @@ func TestMaterializeNamedSessionStampsProviderFamilyMetadata(t *testing.T) {
 	}
 	srv := New(fs)
 
-	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "myrig/worker")
+	spec, ok, err := srv.findNamedSessionSpecForTarget("myrig/worker")
 	if err != nil {
 		t.Fatalf("findNamedSessionSpecForTarget: %v", err)
 	}
 	if !ok {
 		t.Fatal("expected named session spec")
 	}
-	id, err := srv.materializeNamedSession(fs.cityBeadStore, spec)
+	id, err := srv.materializeNamedSession(beadstest.Sessions(fs.cityBeadStore), spec)
 	if err != nil {
 		t.Fatalf("materializeNamedSession: %v", err)
 	}
@@ -3384,14 +3384,14 @@ func TestMaterializeNamedSessionSeedsCityRuntimeEnv(t *testing.T) {
 	}
 	srv := New(fs)
 
-	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
+	spec, ok, err := srv.findNamedSessionSpecForTarget("worker")
 	if err != nil {
 		t.Fatalf("findNamedSessionSpecForTarget: %v", err)
 	}
 	if !ok {
 		t.Fatal("expected named session spec")
 	}
-	id, err := srv.materializeNamedSession(fs.cityBeadStore, spec)
+	id, err := srv.materializeNamedSession(beadstest.Sessions(fs.cityBeadStore), spec)
 	if err != nil {
 		t.Fatalf("materializeNamedSession: %v", err)
 	}
@@ -3451,14 +3451,14 @@ func TestMaterializeNamedSessionRejectsACPTemplateWithoutACPRouting(t *testing.T
 	}
 	srv := New(fs)
 
-	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
+	spec, ok, err := srv.findNamedSessionSpecForTarget("worker")
 	if err != nil {
 		t.Fatalf("findNamedSessionSpecForTarget: %v", err)
 	}
 	if !ok {
 		t.Fatal("expected named session spec")
 	}
-	if _, err := srv.materializeNamedSession(fs.cityBeadStore, spec); err == nil {
+	if _, err := srv.materializeNamedSession(beadstest.Sessions(fs.cityBeadStore), spec); err == nil {
 		t.Fatal("materializeNamedSession() error = nil, want ACP routing error")
 	} else if !strings.Contains(err.Error(), "requires ACP transport") {
 		t.Fatalf("materializeNamedSession() error = %v, want ACP transport error", err)
@@ -3502,14 +3502,14 @@ args = ["{{.AgentName}}", "{{.WorkDir}}", "{{.TemplateName}}"]
 	}
 	srv := New(state)
 
-	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
+	spec, ok, err := srv.findNamedSessionSpecForTarget("worker")
 	if err != nil {
 		t.Fatalf("findNamedSessionSpecForTarget: %v", err)
 	}
 	if !ok {
 		t.Fatal("expected named session spec")
 	}
-	id, err := srv.materializeNamedSession(fs.cityBeadStore, spec)
+	id, err := srv.materializeNamedSession(beadstest.Sessions(fs.cityBeadStore), spec)
 	if err != nil {
 		t.Fatalf("materializeNamedSession: %v", err)
 	}
@@ -3620,7 +3620,7 @@ func TestHumaCreateProviderSessionUsesACPTransportCommand(t *testing.T) {
 	}
 	srv := New(state)
 
-	out, err := srv.humaCreateProviderSession(context.Background(), fs.SessionsBeadStore(), sessionCreateBody{
+	out, err := srv.humaCreateProviderSession(context.Background(), fs.Stores().Sessions(), sessionCreateBody{
 		Kind: "provider",
 		Name: "opencode",
 	}, "opencode")
@@ -3821,7 +3821,7 @@ func TestHumaCreateProviderSessionRejectsACPProviderWithoutACPRouting(t *testing
 	}
 	srv := New(fs)
 
-	if _, err := srv.humaCreateProviderSession(context.Background(), fs.SessionsBeadStore(), sessionCreateBody{
+	if _, err := srv.humaCreateProviderSession(context.Background(), fs.Stores().Sessions(), sessionCreateBody{
 		Kind: "provider",
 		Name: "opencode",
 	}, "opencode"); err == nil {
@@ -5367,7 +5367,7 @@ func TestResolveSessionIDMaterializingNamedWithContext_RollsBackCanceledCreate(t
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := srv.resolveSessionIDMaterializingNamedWithContext(ctx, fs.cityBeadStore, "worker")
+	_, err := srv.resolveSessionIDMaterializingNamedWithContext(ctx, beadstest.Sessions(fs.cityBeadStore), "worker")
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("resolveSessionIDMaterializingNamedWithContext: %v, want context canceled", err)
 	}
@@ -5389,14 +5389,14 @@ func TestHandleSessionGetIncludesConfiguredNamedSessionFlag(t *testing.T) {
 	h := newTestCityHandlerWith(t, fs, srv)
 	_ = h
 
-	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
+	spec, ok, err := srv.findNamedSessionSpecForTarget("worker")
 	if err != nil {
 		t.Fatalf("findNamedSessionSpecForTarget: %v", err)
 	}
 	if !ok {
 		t.Fatal("expected named session spec for worker")
 	}
-	id, err := srv.materializeNamedSession(fs.cityBeadStore, spec)
+	id, err := srv.materializeNamedSession(beadstest.Sessions(fs.cityBeadStore), spec)
 	if err != nil {
 		t.Fatalf("materializeNamedSession: %v", err)
 	}
@@ -5475,14 +5475,14 @@ func TestHandleSessionCloseRejectsAlwaysNamedSession(t *testing.T) {
 	h := newTestCityHandlerWith(t, fs, srv)
 	_ = h
 
-	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
+	spec, ok, err := srv.findNamedSessionSpecForTarget("worker")
 	if err != nil {
 		t.Fatalf("findNamedSessionSpecForTarget: %v", err)
 	}
 	if !ok {
 		t.Fatal("expected named session spec for worker")
 	}
-	id, err := srv.materializeNamedSession(fs.cityBeadStore, spec)
+	id, err := srv.materializeNamedSession(beadstest.Sessions(fs.cityBeadStore), spec)
 	if err != nil {
 		t.Fatalf("materializeNamedSession: %v", err)
 	}
@@ -5510,11 +5510,11 @@ func TestFindNamedSessionSpecForTarget_RequiresFullyQualifiedWhenAmbiguous(t *te
 	h := newTestCityHandlerWith(t, fs, srv)
 	_ = h
 
-	if _, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker"); err == nil || ok {
+	if _, ok, err := srv.findNamedSessionSpecForTarget("worker"); err == nil || ok {
 		t.Fatalf("findNamedSessionSpecForTarget(worker) = ok=%v err=%v, want ambiguous error", ok, err)
 	}
 
-	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "rig-a/worker")
+	spec, ok, err := srv.findNamedSessionSpecForTarget("rig-a/worker")
 	if err != nil {
 		t.Fatalf("findNamedSessionSpecForTarget(rig-a/worker): %v", err)
 	}
@@ -5544,7 +5544,7 @@ func TestResolveSessionIDMaterializingNamed_QualifiedAliasBasenameDoesNotStealNa
 		t.Fatalf("create ordinary session bead: %v", err)
 	}
 
-	id, err := srv.resolveSessionIDMaterializingNamed(fs.cityBeadStore, "worker")
+	id, err := srv.resolveSessionIDMaterializingNamed(beadstest.Sessions(fs.cityBeadStore), "worker")
 	if err != nil {
 		t.Fatalf("resolveSessionIDMaterializingNamed(worker): %v", err)
 	}
@@ -5569,7 +5569,7 @@ func TestResolveConfiguredNamedSessionIDWithContext_BoundedListCalls(t *testing.
 	fs.cityBeadStore = store
 	srv := New(fs)
 
-	spec, ok, err := srv.findNamedSessionSpecForTarget(store, "worker")
+	spec, ok, err := srv.findNamedSessionSpecForTarget("worker")
 	if err != nil {
 		t.Fatalf("findNamedSessionSpecForTarget(worker): %v", err)
 	}
@@ -5602,7 +5602,7 @@ func TestResolveConfiguredNamedSessionIDWithContext_BoundedListCalls(t *testing.
 		t.Fatalf("create canonical named session: %v", err)
 	}
 
-	id, matched, err := srv.resolveConfiguredNamedSessionIDWithContext(context.Background(), store, "worker", apiSessionResolveOptions{})
+	id, matched, err := srv.resolveConfiguredNamedSessionIDWithContext(context.Background(), beadstest.Sessions(store), "worker", apiSessionResolveOptions{})
 	if err != nil {
 		t.Fatalf("resolveConfiguredNamedSessionIDWithContext(worker): %v", err)
 	}
@@ -5624,7 +5624,7 @@ func TestResolveConfiguredNamedSessionIDWithContext_BoundedConflictListCalls(t *
 	fs.cityBeadStore = store
 	srv := New(fs)
 
-	spec, ok, err := srv.findNamedSessionSpecForTarget(store, "worker")
+	spec, ok, err := srv.findNamedSessionSpecForTarget("worker")
 	if err != nil {
 		t.Fatalf("findNamedSessionSpecForTarget(worker): %v", err)
 	}
@@ -5644,7 +5644,7 @@ func TestResolveConfiguredNamedSessionIDWithContext_BoundedConflictListCalls(t *
 		t.Fatalf("create wrong-template runtime bead: %v", err)
 	}
 
-	_, matched, err := srv.resolveConfiguredNamedSessionIDWithContext(context.Background(), store, "worker", apiSessionResolveOptions{})
+	_, matched, err := srv.resolveConfiguredNamedSessionIDWithContext(context.Background(), beadstest.Sessions(store), "worker", apiSessionResolveOptions{})
 	if err == nil {
 		t.Fatal("resolveConfiguredNamedSessionIDWithContext(worker) succeeded, want conflict")
 	}
@@ -5678,7 +5678,7 @@ func TestResolveSessionIDMaterializingNamed_AdoptsCanonicalRuntimeSessionNameBea
 	h := newTestCityHandlerWith(t, fs, srv)
 	_ = h
 
-	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
+	spec, ok, err := srv.findNamedSessionSpecForTarget("worker")
 	if err != nil {
 		t.Fatalf("findNamedSessionSpecForTarget(worker): %v", err)
 	}
@@ -5699,7 +5699,7 @@ func TestResolveSessionIDMaterializingNamed_AdoptsCanonicalRuntimeSessionNameBea
 		t.Fatalf("create canonical runtime bead: %v", err)
 	}
 
-	id, err := srv.resolveSessionIDMaterializingNamed(fs.cityBeadStore, "worker")
+	id, err := srv.resolveSessionIDMaterializingNamed(beadstest.Sessions(fs.cityBeadStore), "worker")
 	if err != nil {
 		t.Fatalf("resolveSessionIDMaterializingNamed(worker): %v", err)
 	}
@@ -5728,7 +5728,7 @@ func TestResolveSessionIDMaterializingNamed_DoesNotAdoptOrdinaryPoolSessionForSa
 		t.Fatalf("create ordinary pool worker: %v", err)
 	}
 
-	id, err := srv.resolveSessionIDMaterializingNamed(fs.cityBeadStore, "worker")
+	id, err := srv.resolveSessionIDMaterializingNamed(beadstest.Sessions(fs.cityBeadStore), "worker")
 	if err != nil {
 		t.Fatalf("resolveSessionIDMaterializingNamed(worker): %v", err)
 	}
@@ -5765,7 +5765,7 @@ func TestResolveSessionIDMaterializingNamed_RuntimeSessionNameWrongTemplateConfl
 	h := newTestCityHandlerWith(t, fs, srv)
 	_ = h
 
-	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
+	spec, ok, err := srv.findNamedSessionSpecForTarget("worker")
 	if err != nil {
 		t.Fatalf("findNamedSessionSpecForTarget(worker): %v", err)
 	}
@@ -5785,7 +5785,7 @@ func TestResolveSessionIDMaterializingNamed_RuntimeSessionNameWrongTemplateConfl
 		t.Fatalf("create wrong-template runtime bead: %v", err)
 	}
 
-	_, err = srv.resolveSessionIDMaterializingNamed(fs.cityBeadStore, "worker")
+	_, err = srv.resolveSessionIDMaterializingNamed(beadstest.Sessions(fs.cityBeadStore), "worker")
 	if err == nil || !strings.Contains(err.Error(), "conflicts with configured named session") {
 		t.Fatalf("resolveSessionIDMaterializingNamed(worker) error = %v, want configured named session conflict", err)
 	}
@@ -6426,7 +6426,7 @@ func TestHandleSessionTranscriptSyntheticCursorSurvivesTruncationAndInvalidatesO
 	if len(initial.Messages) != 3 {
 		t.Fatalf("initial Kimi messages = %d, want 3", len(initial.Messages))
 	}
-	handle, err := srv.workerHandleForSession(fs.cityBeadStore, info.ID)
+	handle, err := srv.workerHandleForSession(beadstest.Sessions(fs.cityBeadStore), info.ID)
 	if err != nil {
 		t.Fatalf("workerHandleForSession: %v", err)
 	}
@@ -7246,7 +7246,7 @@ func TestStreamSessionTranscriptHistoryDoesNotSkipTurnsAcrossCompactionBoundarie
 		`{"uuid":"b","parentUuid":"cb0","type":"assistant","message":"{\"role\":\"assistant\",\"content\":\"after first boundary\"}","timestamp":"2025-01-01T00:00:02Z"}`,
 	)
 
-	handle, err := srv.workerHandleForSession(fs.cityBeadStore, info.ID)
+	handle, err := srv.workerHandleForSession(beadstest.Sessions(fs.cityBeadStore), info.ID)
 	if err != nil {
 		t.Fatalf("workerHandleForSession: %v", err)
 	}
@@ -7325,7 +7325,7 @@ func TestStreamSessionTranscriptHistoryReloadsChangesWrittenAfterInitialHistory(
 		`{"uuid":"a","parentUuid":"","type":"user","message":"{\"role\":\"user\",\"content\":\"before initial history\"}","timestamp":"2025-01-01T00:00:00Z"}`,
 	)
 
-	handle, err := srv.workerHandleForSession(fs.cityBeadStore, info.ID)
+	handle, err := srv.workerHandleForSession(beadstest.Sessions(fs.cityBeadStore), info.ID)
 	if err != nil {
 		t.Fatalf("workerHandleForSession: %v", err)
 	}

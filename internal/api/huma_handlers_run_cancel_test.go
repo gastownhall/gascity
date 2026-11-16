@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -1055,7 +1056,7 @@ func TestRunCancelPartialFailureStopsClaimsAndRetryCompletes(t *testing.T) {
 		if step.Status == "closed" {
 			t.Fatalf("step %s closed; this test needs the failure to land before any close", id)
 		}
-		stop, err := molecule.WorkflowStopReason(mem, step)
+		stop, err := molecule.WorkflowStopReason(beadstest.GraphMolecule(mem), step)
 		if err != nil {
 			t.Fatal(err)
 		}

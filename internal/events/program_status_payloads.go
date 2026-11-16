@@ -17,7 +17,7 @@ type SessionProgramStatusShadowPayload struct {
 	// ancestor), config data and never a role.
 	Family string `json:"family,omitempty" doc:"The session's provider family (resolved built-in ancestor)."`
 	// Point is the decision point the comparison was taken at.
-	Point string `json:"point" enum:"wait_for_idle,typing_gate,submit_confirm,escape_resend,readiness,startup_ladder,interrupt_settle,pending,wait_idle_preread,execution_backstop,claim_nudge_hold,work_ladder,proved_idle,queued_delivery,drain_reminder,observation" doc:"The decision point."`
+	Point string `json:"point" enum:"wait_for_idle,typing_gate,submit_confirm,escape_resend,readiness,startup_ladder,interrupt_settle,pending,wait_idle_preread,execution_backstop,claim_nudge_hold,work_ladder,proved_idle,queued_delivery,drain_reminder,observation,starved_bypass" doc:"The decision point."`
 	// Scrape is today's reading, the one that decided.
 	Scrape string `json:"scrape" enum:"idle,busy,indeterminate,pending,confirmed,unconfirmed,ready,not_ready,settled,unsettled,hold,no_hold,resend,no_resend,none" doc:"Today's screen reading, which decided."`
 	// Program is what the record-side rule would decide.

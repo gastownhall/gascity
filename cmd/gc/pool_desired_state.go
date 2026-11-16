@@ -67,6 +67,17 @@ type SessionRequest struct {
 	// (computePoolTriggerBindingPatch), while that dir can host the resume
 	// (parkedWorkDirUsable).
 	ParkedContinuation bool
+	// NameOnly marks a request whose work bead only names a seat that a
+	// custom scale_check count places (scaleCheckDemand.NameOnly). When
+	// realization refuses that work's worktree evidence, the seat starts
+	// unnamed in the pool's own directory (unnamedPoolRequest) rather than
+	// leaving the pool a seat short of its count (nameOnlyFallback).
+	NameOnly bool
+	// NameRefused marks that unnamed request (unnamedPoolRequest). Its work
+	// dir is the pool's own directory (poolTriggerWorkDir), so a reused seat
+	// that is not alive moves there rather than start in the directory its
+	// last binding recorded (poolSeatBindingPatch).
+	NameRefused bool
 }
 
 func beadPriority(b beads.Bead) int {
@@ -642,51 +653,10 @@ func computePoolDesiredStatesParkedAt(
 			usage.accept(req, limits)
 		}
 		for j := 0; j < newCount-reusedCount; j++ {
-			workBeadID := ""
-			workBeadTitle := ""
-			workPack := ""
-			workWorkspace := ""
-			workStoreRef := ""
-			workParentSID := ""
-			var worktreeSpec *worktree.Spec
-			worktreeError := ""
+			req := SessionRequest{Template: template, Tier: "new"}
 			if len(residualWorkBeadIDs) > j {
-				workBeadID = residualWorkBeadIDs[j]
-				if demand.Titles != nil {
-					workBeadTitle = strings.TrimSpace(demand.Titles[workBeadID])
-				}
-				if demand.Packs != nil {
-					workPack = strings.TrimSpace(demand.Packs[workBeadID])
-				}
-				if demand.Workspaces != nil {
-					workWorkspace = strings.TrimSpace(demand.Workspaces[workBeadID])
-				}
-				if demand.StoreRefs != nil {
-					workStoreRef = strings.TrimSpace(demand.StoreRefs[workBeadID])
-				}
-				if demand.ParentSIDs != nil {
-					workParentSID = strings.TrimSpace(demand.ParentSIDs[workBeadID])
-				}
-				if demand.WorktreeSpecs != nil {
-					worktreeSpec = demand.WorktreeSpecs[workBeadID]
-				}
-				if demand.WorktreeErrors != nil {
-					worktreeError = strings.TrimSpace(demand.WorktreeErrors[workBeadID])
-				}
+				req = requestWithScaleDemandProvenance(req, demand, residualWorkBeadIDs[j])
 			}
-			req := SessionRequest{
-				Template:       template,
-				Tier:           "new",
-				WorkBeadID:     workBeadID,
-				WorkBeadTitle:  workBeadTitle,
-				WorkPack:       workPack,
-				WorkWorkspace:  workWorkspace,
-				WorkStoreRef:   workStoreRef,
-				BrainParentSID: workParentSID,
-				WorktreeSpec:   worktreeSpec,
-				WorktreeError:  worktreeError,
-			}
-			req.WorkBindingResident = demand.BindingResident[workBeadID]
 			allRequests = append(allRequests, req)
 			usage.accept(req, limits)
 		}
@@ -818,6 +788,20 @@ func requestWithScaleDemandProvenance(request SessionRequest, demand scaleCheckD
 	if demand.WorktreeErrors != nil {
 		request.WorktreeError = strings.TrimSpace(demand.WorktreeErrors[workBeadID])
 	}
+	request.NameOnly = demand.NameOnly
+	return request
+}
+
+// unnamedPoolRequest is request without the work it names, the fields
+// requestWithScaleDemandProvenance sets, marked NameRefused: the request a
+// warm custom scale_check pool's seat made before its work was named, which
+// starts the seat in the pool's own directory and moves a reused seat that is
+// not alive there.
+func unnamedPoolRequest(request SessionRequest) SessionRequest {
+	request.WorkBeadID, request.WorkBeadTitle, request.WorkPack, request.WorkWorkspace = "", "", "", ""
+	request.WorkStoreRef, request.WorkBindingResident, request.BrainParentSID = "", false, ""
+	request.WorktreeSpec, request.WorktreeError, request.NameOnly = nil, "", false
+	request.NameRefused = true
 	return request
 }
 

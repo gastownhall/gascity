@@ -30,8 +30,15 @@ import (
 // session.program_status_shadow, opening the recorder lazily on the first
 // comparison and keeping it for the process.
 //
-// Only a long-lived process (the supervisor, a foreground controller:
-// markProgramShadowLongLived) follows a timed comparison past its decision.
+// A long-lived process (the supervisor, a foreground controller:
+// markProgramShadowLongLived) records every session's comparisons. A
+// short-lived CLI process records only the sessions it decides for
+// (programShadowDecideFor: the target of a nudge, a submit, a lane op), so a
+// read-only command (gc session list) records nothing and a deciding one
+// records its own decision, never a sweep over the other sessions it reads:
+// its change memory starts empty, so every reading would look like a change.
+//
+// Only a long-lived process follows a timed comparison past its decision.
 // A short-lived CLI process records each decision-time verdict untimed, so
 // nothing it decides waits on a follow-up it may exit before; at exit it
 // waits, bounded by programShadowFlushTimeout, for the leaf's background
@@ -57,6 +64,13 @@ var programShadowRecorders sync.Map
 // comparisons past their decision.
 var programShadowLongLived atomic.Bool
 
+// programShadowScope is the sessions a short-lived process decides for, by
+// runtime session name or bead id (programShadowDecideFor).
+var programShadowScope struct {
+	mu       sync.Mutex
+	sessions map[string]struct{}
+}
+
 // programShadowWork counts the leaf's background shadow work in flight in
 // this process: comparisons still being judged, not yet offered.
 var programShadowWork atomic.Int64
@@ -68,6 +82,74 @@ func markProgramShadowLongLived() { programShadowLongLived.Store(true) }
 // programShadowFollowUps reports whether this process follows timed
 // comparisons past their decision (tmux Config.ComparisonFollowUps).
 func programShadowFollowUps() bool { return programShadowLongLived.Load() }
+
+// programShadowDecideFor declares that this process decides for the session
+// named by keys (its runtime session name, its bead id, or both), so a
+// short-lived process records that session's comparisons. Empty keys are
+// ignored. A long-lived process records every session and keeps no scope.
+func programShadowDecideFor(keys ...string) {
+	if programShadowLongLived.Load() {
+		return
+	}
+	programShadowScope.mu.Lock()
+	defer programShadowScope.mu.Unlock()
+	for _, k := range keys {
+		if k = strings.TrimSpace(k); k == "" {
+			continue
+		}
+		if programShadowScope.sessions == nil {
+			programShadowScope.sessions = make(map[string]struct{})
+		}
+		programShadowScope.sessions[k] = struct{}{}
+	}
+}
+
+// programShadowDecideForTarget is programShadowDecideFor for a nudge target.
+func programShadowDecideForTarget(target nudgeTarget) {
+	programShadowDecideFor(target.sessionName, target.sessionID)
+}
+
+// programShadowRecording reports whether this process records comparisons
+// at all (tmux Config.ComparisonEnabled): a long-lived process always, a
+// short-lived one once it decides for a session.
+func programShadowRecording() bool {
+	if programShadowLongLived.Load() {
+		return true
+	}
+	programShadowScope.mu.Lock()
+	defer programShadowScope.mu.Unlock()
+	return len(programShadowScope.sessions) > 0
+}
+
+// programShadowRecords reports whether this process records c: every
+// comparison in a long-lived process, and in a short-lived one only a
+// comparison of a session it decides for.
+func programShadowRecords(c runtime.ProgramStatusComparison) bool {
+	if programShadowLongLived.Load() {
+		return true
+	}
+	programShadowScope.mu.Lock()
+	defer programShadowScope.mu.Unlock()
+	for _, k := range []string{c.Session, c.SessionID} {
+		if k == "" {
+			continue
+		}
+		if _, ok := programShadowScope.sessions[k]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// programShadowScoped wraps sink so it takes only the comparisons this
+// process records (programShadowRecords).
+func programShadowScoped(sink runtime.ProgramStatusComparisonSink) runtime.ProgramStatusComparisonSink {
+	return func(c runtime.ProgramStatusComparison) {
+		if programShadowRecords(c) {
+			sink(c)
+		}
+	}
+}
 
 // programShadowBeginWork counts one piece of the leaf's background shadow
 // work and returns the call that ends it (tmux Config.ComparisonWork).
@@ -222,11 +304,11 @@ func flushProgramStatusShadow(timeout time.Duration) {
 }
 
 // shadowHold records a hold point's comparison (execution_backstop,
-// claim_nudge_hold, work_ladder, queued_delivery, drain_reminder) for sp's
-// session sessName: held is today's verdict, rule the record's, judged with
-// the runtime's last activity at now; the comparison carries both, so its
-// hold_live is the rule's own. It does nothing unless the leaf serving the
-// session is shadowing, and never feeds the decision.
+// claim_nudge_hold, work_ladder, drain_reminder) for sp's session sessName:
+// held is today's verdict, rule the record's, judged with the runtime's last
+// activity at now; the comparison carries both, so its hold_live is the
+// rule's own. It does nothing unless the leaf serving the session is
+// shadowing, and never feeds the decision.
 func shadowHold(sp runtime.Provider, sessName, sessionID, family string, point runtime.ProgramStatusPoint, held bool, now time.Time, rule func(runtime.ProgramStatus, time.Time, time.Time) runtime.ProgramVerdict) {
 	scrape := runtime.ProgramVerdictNoHold
 	if held {

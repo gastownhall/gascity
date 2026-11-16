@@ -222,7 +222,7 @@ esac
 	t.Setenv("INVOCATION_FILE", invocationFile)
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	report, err := managedDoltHealthCheck("127.0.0.1", "3311", "root", true)
+	report, err := managedDoltHealthCheck("127.0.0.1", "3311", "root")
 	if err != nil {
 		t.Fatalf("managedDoltHealthCheck() error = %v", err)
 	}
@@ -364,7 +364,7 @@ func TestManagedDoltHealthCheckWithPasswordUsesDirectHelpers(t *testing.T) {
 		}
 		return nil
 	}
-	managedDoltReadOnlyStateDirectFn = func(_, _, _ string) (string, error) {
+	managedDoltReadOnlyStateDirectFn = func(_, _, _, _ string) (string, error) {
 		calledReadOnly = true
 		return "false", nil
 	}
@@ -373,7 +373,7 @@ func TestManagedDoltHealthCheckWithPasswordUsesDirectHelpers(t *testing.T) {
 		return "7", nil
 	}
 
-	report, err := managedDoltHealthCheck("0.0.0.0", "3311", "root", true)
+	report, err := managedDoltHealthCheck("0.0.0.0", "3311", "root")
 	if err != nil {
 		t.Fatalf("managedDoltHealthCheck() error = %v", err)
 	}
@@ -403,7 +403,7 @@ func TestManagedDoltHealthCheckWithPasswordPropagatesReadOnlyProbeErrors(t *test
 	managedDoltQueryProbeDirectFn = func(_, _, _ string) error {
 		return nil
 	}
-	managedDoltReadOnlyStateDirectFn = func(_, _, _ string) (string, error) {
+	managedDoltReadOnlyStateDirectFn = func(_, _, _, _ string) (string, error) {
 		return "unknown", errors.New("read-only probe failed")
 	}
 	managedDoltConnectionCountDirectFn = func(_, _, _ string) (string, error) {
@@ -411,7 +411,7 @@ func TestManagedDoltHealthCheckWithPasswordPropagatesReadOnlyProbeErrors(t *test
 		return "", nil
 	}
 
-	_, err := managedDoltHealthCheck("127.0.0.1", "3311", "root", true)
+	_, err := managedDoltHealthCheck("127.0.0.1", "3311", "root")
 	if err == nil {
 		t.Fatal("managedDoltHealthCheck() error = nil, want read-only probe failure")
 	}
@@ -514,34 +514,6 @@ func TestRunManagedDoltSQLKeepsPasswordOutOfArgv(t *testing.T) {
 				t.Fatalf("DOLT_CLI_PASSWORD = %q, want %q", got, want)
 			}
 		})
-	}
-}
-
-// TestRunManagedDoltSQLEmptyPasswordMasksDefaultProfileAgainstRealServer pins,
-// against a real dolt, why an empty managed password still passes an explicit
-// empty --password: without one, dolt injects the password of a `default` CLI
-// profile, and the passwordless managed server then refuses the probe.
-func TestRunManagedDoltSQLEmptyPasswordMasksDefaultProfileAgainstRealServer(t *testing.T) {
-	_, port, _, cleanup := startRealDoltServer(t, "", "")
-	defer cleanup()
-	portText := fmt.Sprintf("%d", port)
-	// A dolt CLI cold start on a loaded host can outlast the runner's
-	// production bound, and this test pins argv, not latency.
-	prevTimeout := managedDoltSQLCommandTimeout
-	managedDoltSQLCommandTimeout = 30 * time.Second
-	t.Cleanup(func() { managedDoltSQLCommandTimeout = prevTimeout })
-
-	// startRealDoltServer points DOLT_ROOT_PATH at a per-test home, so the
-	// profile lands in this test's global dolt config only.
-	runExternal(t, "", "dolt", "profile", "add", "--password", "not-the-managed-password", "default")
-	controlEnv := withEnvValue(os.Environ(), "DOLT_CLI_PASSWORD", "")
-	stdout, stderr, err := runGCBeadsBdCommand(t, controlEnv, "dolt", "--host", "127.0.0.1", "--port", portText, "--user", "root", "--no-tls", "sql", "-q", "SELECT 1")
-	if err == nil || !strings.Contains(stdout+stderr, "Access denied") {
-		t.Fatalf("control: dolt without --password = %v, want the default profile's password refused, or this test proves nothing:\n%s%s", err, stdout, stderr)
-	}
-
-	if _, err := runManagedDoltSQL("127.0.0.1", portText, "root", "-r", "csv", "-q", "SELECT 1"); err != nil {
-		t.Fatalf("runManagedDoltSQL() with an empty managed password error = %v, want the default profile's password masked", err)
 	}
 }
 

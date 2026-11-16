@@ -433,6 +433,7 @@ func buildDemandTargetsPreRefactor(
 	var defaultNamedScaleTargets []defaultScaleCheckTarget
 	coldWakeTemplates := map[string]bool{}
 	namedOnDemandTemplates := map[string]bool{}
+	nameOnlyTemplates := map[string]bool{}
 	type activeStore struct {
 		store beads.Store
 		ref   string
@@ -533,11 +534,16 @@ func buildDemandTargetsPreRefactor(
 			}
 			continue
 		}
-		if store != nil && isCold && !storeScopedControlDispatcher {
+		claimsGeneratedQuery := cfg.Agents[i].WorkQuery == ""
+		if store != nil && !storeScopedControlDispatcher && (isCold || claimsGeneratedQuery) {
 			for _, source := range activeStores {
 				defaultScaleTargets = append(defaultScaleTargets, defaultScaleCheckTarget{template: template, store: source.store, storeKey: source.ref})
 			}
-			coldWakeTemplates[template] = true
+			if isCold {
+				coldWakeTemplates[template] = true
+			} else {
+				nameOnlyTemplates[template] = true
+			}
 		}
 		env, err := controllerQueryRuntimeEnv(cityPath, cfg, &cfg.Agents[i])
 		if err != nil {
@@ -552,6 +558,7 @@ func buildDemandTargetsPreRefactor(
 		defaultNamedScaleTargets: defaultNamedScaleTargets,
 		coldWakeTemplates:        coldWakeTemplates,
 		namedOnDemandTemplates:   namedOnDemandTemplates,
+		nameOnlyTemplates:        nameOnlyTemplates,
 	}
 }
 

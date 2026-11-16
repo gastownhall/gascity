@@ -21,8 +21,9 @@ import (
 // (coordclass.CheckFlip). On a split city the work stores hold only work beads
 // and the class binding only its infrastructure classes. A write that changes
 // a bead's class IN PLACE strands it in a store its class is never read from,
-// and one stranded row in the city work store makes every later routed gc
-// command refuse until the fleet is stopped and the row repaired. Every door
+// and one stranded row in the city work store is invisible to its class
+// readers, with the city serving degraded and saying so, until the row is
+// repaired. Every door
 // that lets a caller write a bead's type, labels or metadata states that write
 // as a coordclass.Mutation and asks CheckFlip. The doors, each with its own
 // table-driven test:

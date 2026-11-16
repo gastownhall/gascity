@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -168,7 +169,12 @@ func TestCheckTriggerCronAlreadyRunThisMinute(t *testing.T) {
 }
 
 func TestCheckTriggerCondition(t *testing.T) {
-	a := Order{Name: "check", Trigger: "condition", Check: "echo warning >&2; exit 0"}
+	check := "echo warning >&2; exit 0"
+	if goruntime.GOOS == "windows" {
+		// A check is PowerShell source on Windows (runtime.ShellCommandContext).
+		check = "[Console]::Error.WriteLine('warning'); exit 0"
+	}
+	a := Order{Name: "check", Trigger: "condition", Check: check}
 	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
 	result := CheckTrigger(a, now, neverRan, nil, nil)
 	if !result.Due {
@@ -184,10 +190,15 @@ func TestCheckTriggerConditionUsesOptions(t *testing.T) {
 	if realDir, err := filepath.EvalSymlinks(dir); err == nil {
 		dir = realDir
 	}
+	check := `test "$GC_CITY_PATH" = "$EXPECT_CITY" && test "$(pwd -P)" = "$(cd "$EXPECT_CITY" && pwd -P)"`
+	if goruntime.GOOS == "windows" {
+		// A check is PowerShell source on Windows (runtime.ShellCommandContext).
+		check = `if ($env:GC_CITY_PATH -eq $env:EXPECT_CITY -and (Get-Location).ProviderPath -eq (Resolve-Path -LiteralPath $env:EXPECT_CITY).ProviderPath) { exit 0 }; exit 1`
+	}
 	a := Order{
 		Name:    "check",
 		Trigger: "condition",
-		Check:   `test "$GC_CITY_PATH" = "$EXPECT_CITY" && test "$(pwd -P)" = "$(cd "$EXPECT_CITY" && pwd -P)"`,
+		Check:   check,
 	}
 	now := time.Date(2026, 2, 27, 12, 0, 0, 0, time.UTC)
 	result := CheckTriggerWithOptions(a, now, neverRan, nil, nil, TriggerOptions{
@@ -1208,5 +1219,40 @@ func TestCheckTriggerCronBadTZFailsClosed(t *testing.T) {
 	res := CheckTrigger(a, now, neverRan, nil, nil)
 	if res.Due || !strings.Contains(res.Reason, "bad tz") {
 		t.Errorf("due=%v reason=%q, want fail-closed with a bad-tz reason", res.Due, res.Reason)
+	}
+}
+
+// TestCheckEventStart pins where a standalone event check starts: an order
+// that has run reads past its run cursor; one that has never run reads past
+// the event head, so it opens none of the history below it and is due only on
+// an event recorded later (ga-1clac5).
+func TestCheckEventStart(t *testing.T) {
+	ep := events.NewFake()
+	for _, typ := range []string{"bead.closed", "bead.created", "bead.closed"} {
+		ep.Record(events.Event{Type: typ})
+	}
+	a := Order{Name: "convoy-check", Trigger: "event", On: "bead.closed"}
+
+	start, err := CheckEventStart(ep, 0)
+	if err != nil || start != 3 {
+		t.Fatalf("never run: CheckEventStart = %d, %v; want the head 3", start, err)
+	}
+	startFn := func(string) uint64 { return start }
+	if got := CheckTrigger(a, time.Time{}, neverRan, ep, startFn); got.Due {
+		t.Fatalf("never run, history only: result = %+v, want not due", got)
+	}
+	ep.Record(events.Event{Type: "bead.closed"})
+	if got := CheckTrigger(a, time.Time{}, neverRan, ep, startFn); !got.Due || got.Reason != "event: 1 bead.closed event(s)" {
+		t.Fatalf("never run, new event: result = %+v, want due on the one new event", got)
+	}
+
+	if start, err := CheckEventStart(ep, 2); err != nil || start != 2 {
+		t.Fatalf("has run: CheckEventStart = %d, %v; want its run cursor 2", start, err)
+	}
+	if start, err := CheckEventStart(nil, 0); err != nil || start != 0 {
+		t.Fatalf("no provider: CheckEventStart = %d, %v; want 0", start, err)
+	}
+	if _, err := CheckEventStart(events.NewFailFake(), 0); err == nil {
+		t.Fatal("unreadable head: CheckEventStart returned no error")
 	}
 }

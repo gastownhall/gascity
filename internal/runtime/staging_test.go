@@ -7,7 +7,53 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
+
+func TestStageProviderOverlayDirTrackedCollision(t *testing.T) {
+	for _, skipTracked := range []bool{false, true} {
+		name := "default"
+		if skipTracked {
+			name = "skip-tracked"
+		}
+		t.Run(name, func(t *testing.T) {
+			repo, _ := testutil.InitGitRepo(t)
+			const rel = "instructions.txt"
+			target := filepath.Join(repo, rel)
+			if err := os.WriteFile(target, []byte("repository instructions\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			testutil.RunGit(t, repo, "add", rel)
+			testutil.RunGit(t, repo, "commit", "-m", "track instructions")
+			src := t.TempDir()
+			if err := os.WriteFile(filepath.Join(src, rel), []byte("overlay instructions\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			var opts []StageOption
+			if skipTracked {
+				opts = append(opts, WithSkipTrackedOverlays())
+			}
+			var warnings bytes.Buffer
+			if err := StageProviderOverlayDir(src, repo, nil, &warnings, opts...); err != nil {
+				t.Fatalf("StageProviderOverlayDir: %v", err)
+			}
+			want := "overlay instructions\n"
+			if skipTracked || defaultSkipTrackedOverlays() {
+				want = "repository instructions\n"
+				if !strings.Contains(warnings.String(), "tracked by the destination repository") {
+					t.Fatalf("missing collision warning: %s", &warnings)
+				}
+			} else if warnings.Len() != 0 {
+				t.Fatalf("default staging warned about trackedness: %s", &warnings)
+			}
+			got, err := os.ReadFile(target)
+			if err != nil || string(got) != want {
+				t.Fatalf("staged instructions = %q, %v; want %q", got, err, want)
+			}
+		})
+	}
+}
 
 func TestStageDirPreservesBestEffortOverlayWarnings(t *testing.T) {
 	t.Parallel()
@@ -61,6 +107,91 @@ func TestStageWorkDirSkipsCopyWhenSourceAlreadyMatchesResolvedDestination(t *tes
 	if string(data) != "seed" {
 		t.Fatalf("staged source file = %q, want %q", string(data), "seed")
 	}
+}
+
+func TestStageWorkDirDirectoryCopyEntryUsesSourceRelativeMergeSemantics(t *testing.T) {
+	t.Parallel()
+
+	t.Run("destination prefix does not canonicalize a raw settings file", func(t *testing.T) {
+		srcDir := t.TempDir()
+		workDir := t.TempDir()
+		raw := []byte(`{"hooks":{}}`)
+		if err := os.WriteFile(filepath.Join(srcDir, "settings.json"), raw, 0o644); err != nil {
+			t.Fatalf("write source settings: %v", err)
+		}
+
+		if err := StageWorkDir(workDir, "", []CopyEntry{{Src: srcDir, RelDst: ".claude"}}); err != nil {
+			t.Fatalf("StageWorkDir: %v", err)
+		}
+		got, err := os.ReadFile(filepath.Join(workDir, ".claude", "settings.json"))
+		if err != nil {
+			t.Fatalf("read staged settings: %v", err)
+		}
+		if !bytes.Equal(got, raw) {
+			t.Fatalf("staged settings = %q, want raw source bytes %q", got, raw)
+		}
+	})
+
+	t.Run("destination prefix does not make a raw hooks file mergeable", func(t *testing.T) {
+		srcDir := t.TempDir()
+		workDir := t.TempDir()
+		raw := []byte(`{"source":true}`)
+		if err := os.WriteFile(filepath.Join(srcDir, "hooks.json"), raw, 0o644); err != nil {
+			t.Fatalf("write source hooks: %v", err)
+		}
+		target := filepath.Join(workDir, ".codex", "hooks.json")
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			t.Fatalf("mkdir target: %v", err)
+		}
+		if err := os.WriteFile(target, []byte(`{"keep":true}`), 0o644); err != nil {
+			t.Fatalf("write existing target: %v", err)
+		}
+
+		if err := StageWorkDir(workDir, "", []CopyEntry{{Src: srcDir, RelDst: ".codex"}}); err != nil {
+			t.Fatalf("StageWorkDir: %v", err)
+		}
+		got, err := os.ReadFile(target)
+		if err != nil {
+			t.Fatalf("read staged hooks: %v", err)
+		}
+		if !bytes.Equal(got, raw) {
+			t.Fatalf("staged hooks = %q, want raw overwrite %q", got, raw)
+		}
+	})
+
+	t.Run("relocating a mergeable source keeps merging by source path", func(t *testing.T) {
+		srcDir := t.TempDir()
+		workDir := t.TempDir()
+		src := filepath.Join(srcDir, ".codex", "hooks.json")
+		if err := os.MkdirAll(filepath.Dir(src), 0o755); err != nil {
+			t.Fatalf("mkdir source: %v", err)
+		}
+		if err := os.WriteFile(src, []byte(`{"source":true}`), 0o644); err != nil {
+			t.Fatalf("write source hooks: %v", err)
+		}
+		for _, relDst := range []string{"nested", "."} {
+			t.Run("to "+relDst, func(t *testing.T) {
+				target := filepath.Join(workDir, relDst, ".codex", "hooks.json")
+				if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+					t.Fatalf("mkdir target: %v", err)
+				}
+				if err := os.WriteFile(target, []byte(`{"keep":true}`), 0o644); err != nil {
+					t.Fatalf("write existing target: %v", err)
+				}
+
+				if err := StageWorkDir(workDir, "", []CopyEntry{{Src: srcDir, RelDst: relDst}}); err != nil {
+					t.Fatalf("StageWorkDir: %v", err)
+				}
+				got, err := os.ReadFile(target)
+				if err != nil {
+					t.Fatalf("read staged hooks: %v", err)
+				}
+				if !bytes.Contains(got, []byte(`"keep": true`)) || !bytes.Contains(got, []byte(`"source": true`)) {
+					t.Fatalf("staged hooks = %s, want merged existing and source fields", got)
+				}
+			})
+		}
+	})
 }
 
 func TestStageWorkDirFailsWhenOverlayCopyWarns(t *testing.T) {

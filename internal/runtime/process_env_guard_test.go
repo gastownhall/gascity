@@ -17,9 +17,6 @@ var bareEnvironAllowed = map[string]string{
 	// processSecretEnvValues reads the process env to scrub its secrets out of
 	// captured output; it starts nothing.
 	"redact.go": "secret scrub list",
-	// RunSetupCommand has no callers (#5637), and this package must stay
-	// stdlib-only, so it cannot reach execenv.
-	"setupcommand.go": "unwired setup runner in the stdlib-only contract package",
 	// mergeCurrentEnv fills this process's own identity into a process-table
 	// scan of itself; it starts nothing.
 	"proctable/scan_linux.go": "self identity merge for the process-table scan",

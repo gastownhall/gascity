@@ -98,3 +98,29 @@ func TestOrderPutsBlockersFirstOnEveryReadPath(t *testing.T) {
 		t.Fatalf("Order (unsupported batch) = %v with %d per-id reads, want %v with %d", got, unsupported.depLists, want, len(ids))
 	}
 }
+
+// TestOrderReadsTheBatchThroughAClassHandle: a store reached through a class
+// handle or a molecule target (typed-stores T5a) still answers with its
+// batched dep read, as the same store does when passed raw.
+func TestOrderReadsTheBatchThroughAClassHandle(t *testing.T) {
+	mem := beads.NewMemStore()
+	ids, a, b, c, d := chain(t, mem)
+	want := []string{d, a, b, c}
+	for name, wrap := range map[string]func(beads.Store) beads.Store{
+		"a graph handle":   func(s beads.Store) beads.Store { return beads.GraphStore{Store: s} },
+		"a graph molecule": func(s beads.Store) beads.Store { return beads.GraphMolecule(beads.GraphStore{Store: s}) },
+		"a work molecule":  func(s beads.Store) beads.Store { return beads.WorkMolecule(beads.WorkStore{Store: s}) },
+	} {
+		batched := &batchCountingStore{MemStore: mem}
+		got, err := closeorder.Order(wrap(batched), ids)
+		if err != nil {
+			t.Fatalf("%s: Order: %v", name, err)
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("%s: Order = %v, want %v", name, got, want)
+		}
+		if batched.batches != 1 || batched.depLists != 0 {
+			t.Errorf("%s: made %d batch and %d per-id reads, want 1 and 0: the handle hid the batched read", name, batched.batches, batched.depLists)
+		}
+	}
+}

@@ -226,9 +226,7 @@ func renderRigStatusFromAPI(cr api.CachedRead[api.StatusView], cityPath, cityNam
 		status := agentStatusLineWithPartial(a.Running, dops, a.SessionName, a.Suspended || rigSuspended, cr.Body.Partial)
 		fmt.Fprintf(stdout, "    %-12s%s\n", a.QualifiedName, status) //nolint:errcheck // best-effort stdout
 	}
-	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
-		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
-	}
+	writeCacheAgeFooter(stderr, cr.AgeSeconds, cr.Refresh)
 	return 0
 }
 

@@ -194,6 +194,69 @@ func TestTurnInterruptRestartNeedsTheTurnSeenRunning(t *testing.T) {
 	}
 }
 
+// A turn-scoped restart on failure is withheld, as a session-scoped one is,
+// when the family's idle wait after the keys ended on a pending interaction:
+// under program_status "on" the tmux leaf's settle reads the interrupted
+// program reporting a dialog raised since the interrupt, and a restart would
+// discard it. The settle (awaitTurnEnd) replaces the wait's error with one
+// naming it in its text only, so the stop reads the wait's error before it:
+// the runtime is left running, no key follows the interrupt's own (Codex's
+// soft Escape gets no Ctrl-C fallback), and the error wraps
+// session.ErrPendingInteraction beside runtime.ErrTurnNotEnded.
+func TestTurnInterruptRestartWithheldBehindADialog(t *testing.T) {
+	for _, tc := range []struct {
+		provider, turn string
+		backend        func(fake *runtime.Fake) runtime.ProfileBackend
+		start          time.Time
+		record         string
+		sent           []string
+	}{
+		{
+			provider: "claude", turn: claudeTurn1,
+			backend: func(fake *runtime.Fake) runtime.ProfileBackend {
+				return idleScript{FullFake: runtime.FullFake{Fake: fake}, state: &idleScriptState{answers: []idleAnswer{{idle: false}}}}
+			},
+			start:  time.Date(2026, 10, 13, 6, 0, 0, 0, time.UTC),
+			record: claudePrompt(claudeTurn1, "2026-10-13T05:59:50.123Z"),
+			sent:   []string{"Interrupt"},
+		},
+		{
+			provider: "codex", turn: codexTurn1,
+			backend: func(fake *runtime.Fake) runtime.ProfileBackend {
+				return inputHookBackend{idleScript: idleScript{FullFake: runtime.FullFake{Fake: fake}, state: &idleScriptState{}}}
+			},
+			start:  time.Date(2026, 10, 9, 0, 0, 0, 0, time.UTC),
+			record: codexStarted(codexTurn1, "2026-10-08T02:22:22.191Z", 1791426142),
+			sent:   []string{"SendKeys(Escape)"},
+		},
+	} {
+		t.Run(tc.provider, func(t *testing.T) {
+			fake := runtime.NewFake()
+			s := newTurnSession(t, profiled(runtime.ProfileTmux, tc.backend(fake)), tc.provider, "")
+			timing, clock := racingTurnTiming(tc.start)
+			s.handle.turns.timing = timing
+			ageTranscript(t, s.writeTranscript(t, tc.provider, tc.record), clock.now().Add(-time.Hour))
+			fake.WaitForIdleErrors[s.info.SessionName] = fmt.Errorf("session %q: the program reports a dialog after the interrupt, so it has not settled: %w", s.info.SessionName, runtime.ErrPendingInteraction)
+			fake.Calls = nil
+
+			res, err := s.handle.InterruptAs(context.Background(), handleActor(t, s.handle, sessionpkg.ActorController),
+				InterruptRequest{Turn: tc.turn, OnFailure: InterruptOnFailureRestart})
+			if res.Restarted || !errors.Is(err, sessionpkg.ErrPendingInteraction) || !errors.Is(err, runtime.ErrTurnNotEnded) {
+				t.Fatalf("InterruptAs(turn, restart, wait ended on a dialog) = %+v, %v; want ErrPendingInteraction and ErrTurnNotEnded, and no restart", res, err)
+			}
+			if errors.Is(err, sessionpkg.ErrInterruptOutcomeUnknown) {
+				t.Fatalf("InterruptAs(turn, restart, wait ended on a dialog) = %v; want the dialog, not an unknown outcome: the turn was seen still running", err)
+			}
+			if methods := callMethodsOf(fake, s.info.SessionName); slices.Contains(methods, "Stop") || slices.Contains(methods, "Start") {
+				t.Fatalf("calls = %v, want the runtime left running behind the dialog", methods)
+			}
+			if got := sentInputs(fake, s.info.SessionName); !slices.Equal(got, tc.sent) {
+				t.Fatalf("sent %v, want %v: no key follows the dialog", got, tc.sent)
+			}
+		})
+	}
+}
+
 // A turn-scoped restart that stopped the runtime and could not start it
 // again reaches the caller as that (session.ErrRestartNotStarted): never as
 // a row that would not load (runtime.ErrRuntimeUnavailable, nothing sent),

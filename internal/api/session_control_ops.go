@@ -452,8 +452,8 @@ func refusedToken(state string) string {
 // read from its row, and "" or the unrecordable reason when it has none: a
 // row that did not read is unreadable_target, with its read error; one that
 // read without a generation is no_generation.
-func sessionOpScope(store beads.Store, id string) (opjournal.Scope, string, error) {
-	info, err := session.NewStore(beads.SessionStore{Store: store}).Get(id)
+func sessionOpScope(store beads.SessionStore, id string) (opjournal.Scope, string, error) {
+	info, err := session.NewStore(store).Get(id)
 	if err != nil {
 		return opjournal.Scope{}, legacyop.ReasonUnreadableTarget, err
 	}
@@ -548,21 +548,21 @@ func humaStopError(err error) error {
 // executes interrupt, the stop is a lane op instead (stopSessionLane), and
 // ops.control does not govern it.
 func (s *Server) stopSession(ctx context.Context, target, key, named string) (syncAnswer, error) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return syncAnswer{}, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
-	id, err := s.resolveSessionIDWithConfig(store.Store, target)
+	id, err := s.resolveSessionIDWithConfig(store, target)
 	if err != nil {
 		return syncAnswer{}, humaResolveError(err)
 	}
 	if s.laneExecutes(opjournal.KindInterrupt) {
-		return s.stopSessionLane(ctx, store.Store, id, key, named)
+		return s.stopSessionLane(ctx, store, id, key, named)
 	}
 	// A key that already names a stop (its own op, or the row a stop of a
 	// turn's target key left under it) makes this request its retry.
 	prior, retry := s.priorSessionOp(opjournal.KindInterrupt, id, key)
-	plan, err := s.frontDoorStopPlan(ctx, store.Store, id, named, prior, retry)
+	plan, err := s.frontDoorStopPlan(ctx, store, id, named, prior, retry)
 	if err != nil {
 		return syncAnswer{}, err
 	}
@@ -573,12 +573,12 @@ func (s *Server) stopSession(ctx context.Context, target, key, named string) (sy
 		if err := s.checkBeforeEffect(opjournal.KindInterrupt, key); err != nil {
 			return syncAnswer{}, err
 		}
-		if req, plan, err = s.stopOpRequest(ctx, store.Store, req, plan, prior, retry); err != nil {
+		if req, plan, err = s.stopOpRequest(ctx, store, req, plan, prior, retry); err != nil {
 			return syncAnswer{}, err
 		}
 	}
 	fields, err := s.runSyncOp(req, humaStopError, func(adm *legacyop.Admission) (legacyop.Result, error) {
-		return s.runStop(store.Store, id, req, plan, adm)
+		return s.runStop(store, id, req, plan, adm)
 	})
 	if err != nil {
 		return syncAnswer{}, err
@@ -596,7 +596,7 @@ func (s *Server) stopSession(ctx context.Context, target, key, named string) (sy
 // when that is refused, leaving the op open, as a retryable error does, for
 // the next stop of its turn; one auto could not record runs as in off (I8),
 // unless it names its turn.
-func (s *Server) runStop(store beads.Store, id string, req syncOpRequest, plan stopPlan, adm *legacyop.Admission) (legacyop.Result, error) {
+func (s *Server) runStop(store beads.SessionStore, id string, req syncOpRequest, plan stopPlan, adm *legacyop.Admission) (legacyop.Result, error) {
 	if !adm.Recorded {
 		if !plan.named {
 			plan = stopPlan{}
@@ -660,7 +660,7 @@ func (s *Server) recordStopUnderKey(req syncOpRequest, answeredKey, target strin
 // the request's key already names a stop of that turn (prior, retry): the
 // retry replays or adopts that stop, so it takes keyedStopPlan, which
 // refuses nothing.
-func (s *Server) frontDoorStopPlan(ctx context.Context, store beads.Store, id, named string, prior opjournal.Op, retry bool) (stopPlan, error) {
+func (s *Server) frontDoorStopPlan(ctx context.Context, store beads.SessionStore, id, named string, prior opjournal.Op, retry bool) (stopPlan, error) {
 	switch {
 	case named == "":
 		return stopPlan{}, nil
@@ -673,7 +673,7 @@ func (s *Server) frontDoorStopPlan(ctx context.Context, store beads.Store, id, n
 // namedStopPlan checks a turn the request names at the front door (X11
 // D10): a valid turn token, on a session whose runtime records turn starts.
 // A refusal records no op.
-func (s *Server) namedStopPlan(ctx context.Context, store beads.Store, id, turn string) (stopPlan, error) {
+func (s *Server) namedStopPlan(ctx context.Context, store beads.SessionStore, id, turn string) (stopPlan, error) {
 	if _, err := opjournal.InterruptKey(1, turn); err != nil {
 		return stopPlan{}, apierr.ValidationFailed.Msg("invalid_turn: " + err.Error())
 	}
@@ -701,7 +701,7 @@ func (s *Server) namedStopPlan(ctx context.Context, store beads.Store, id, turn 
 // protocol turn source finds running, keyed by it when the request carries
 // no key. A target key's successor is the request's own key. A request that
 // cannot be recorded resolves nothing: it runs as in off.
-func (s *Server) stopOpRequest(ctx context.Context, store beads.Store, req syncOpRequest, plan stopPlan, prior opjournal.Op, retry bool) (syncOpRequest, stopPlan, error) {
+func (s *Server) stopOpRequest(ctx context.Context, store beads.SessionStore, req syncOpRequest, plan stopPlan, prior opjournal.Op, retry bool) (syncOpRequest, stopPlan, error) {
 	scope, why, whyErr := sessionOpScope(store, req.conv)
 	if why != "" {
 		req.unrecordable, req.unrecordableErr = why, whyErr
@@ -767,7 +767,7 @@ func stopTargetKey(gen int64, turn, fallback string) string {
 // request read the turn live, since a named turn is always target-keyed, so
 // the retry is not named either: a turn that ended meanwhile (the first
 // attempt's interrupt landed before it died) was nothing to stop.
-func (s *Server) priorStopPlan(ctx context.Context, store beads.Store, id, turn string) stopPlan {
+func (s *Server) priorStopPlan(ctx context.Context, store beads.SessionStore, id, turn string) stopPlan {
 	plan := stopPlan{turn: turn}
 	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
@@ -789,7 +789,7 @@ func (s *Server) priorStopPlan(ctx context.Context, store beads.Store, id, turn 
 // only an adopted op, which runs, nothing sent, so a closed stop the key
 // names replays whatever the session's turns read now (closed, or a runtime
 // that does not answer).
-func (s *Server) keyedStopPlan(ctx context.Context, store beads.Store, id, turn string) stopPlan {
+func (s *Server) keyedStopPlan(ctx context.Context, store beads.SessionStore, id, turn string) stopPlan {
 	plan := s.priorStopPlan(ctx, store, id, turn)
 	plan.named = true
 	return plan
@@ -803,7 +803,7 @@ func (s *Server) keyedStopPlan(ctx context.Context, store beads.Store, id, turn 
 // stop (DES-T3I §14 item 3). A session whose turn source cannot be told is
 // refused the same way. Every other turn source keeps the legacy
 // session-scoped stop, unread.
-func (s *Server) resolveStopTurn(ctx context.Context, store beads.Store, id string) stopPlan {
+func (s *Server) resolveStopTurn(ctx context.Context, store beads.SessionStore, id string) stopPlan {
 	unreadable := func(err error) stopPlan {
 		return stopPlan{unreadable: fmt.Errorf("reading the turn of session %s before stopping it, nothing sent: %w", id, err)}
 	}
@@ -837,7 +837,7 @@ func (s *Server) resolveStopTurn(ctx context.Context, store beads.Store, id stri
 // executeStop runs plan on session id and returns the op result and the
 // wire error. A turn-scoped stop that succeeds is unfenced unless the
 // runtime fences turns atomically; the session-scoped stop always is.
-func (s *Server) executeStop(store beads.Store, id string, plan stopPlan, minted bool) (legacyop.Result, error) {
+func (s *Server) executeStop(store beads.SessionStore, id string, plan stopPlan, minted bool) (legacyop.Result, error) {
 	switch {
 	case plan.noTurn:
 		return legacyop.Result{Outcome: opjournal.Outcome{Arm: opjournal.ArmSkipped, Reason: opjournal.ReasonNotNeeded}}, nil
@@ -861,7 +861,7 @@ func (s *Server) executeStop(store beads.Store, id string, plan stopPlan, minted
 			return syncOpResult(opjournal.KindInterrupt, err, minted), humaStopError(err)
 		}
 	}
-	if err := s.sessionManager(beads.SessionStore{Store: store}).StopTurn(id); err != nil {
+	if err := s.sessionManager(store).StopTurn(id); err != nil {
 		return syncOpResult(opjournal.KindInterrupt, err, minted), humaSessionManagerError(err)
 	}
 	res := syncOpResult(opjournal.KindInterrupt, nil, minted)
@@ -908,24 +908,24 @@ var respondOpPolicy = opjournal.Policy{Guarantee: opjournal.GuaranteeAtLeastOnce
 // (legacyop.ErrReservedKey): auto answers unrecorded and require refuses it,
 // so no op of OJ-4's takes the id of the lane op answering that raising.
 func (s *Server) respondSession(ctx context.Context, target, key string, resp runtime.InteractionResponse) (syncAnswer, error) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return syncAnswer{}, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
-	id, err := s.resolveSessionIDWithConfig(store.Store, target)
+	id, err := s.resolveSessionIDWithConfig(store, target)
 	if err != nil {
 		return syncAnswer{}, humaResolveError(err)
 	}
 	mgr := s.sessionManager(store)
 	if s.laneExecutes(opjournal.KindRespond) {
-		return s.respondSessionLane(ctx, mgr, store.Store, id, key, resp)
+		return s.respondSessionLane(ctx, mgr, store, id, key, resp)
 	}
 	if answer, answered, err := s.replayLaneRespond(ctx, store, id, key, resp); answered {
 		return answer, err
 	}
 	req := syncOpRequest{kind: opjournal.KindRespond, conv: id, key: key, policy: respondOpPolicy}
 	if recordingMode(s.ops.control.Mode) {
-		if req, err = s.respondOpRequest(mgr, store.Store, req, resp); err != nil {
+		if req, err = s.respondOpRequest(mgr, store, req, resp); err != nil {
 			return syncAnswer{}, err
 		}
 	}
@@ -964,7 +964,7 @@ func (s *Server) respondSession(ctx context.Context, target, key string, resp ru
 // recorded: auto runs it unrecorded, and require refuses it at the front
 // door with the answer the legacy respond gives (no_pending, or
 // unsupported), nothing sent.
-func (s *Server) respondOpRequest(mgr *session.Manager, store beads.Store, req syncOpRequest, resp runtime.InteractionResponse) (syncOpRequest, error) {
+func (s *Server) respondOpRequest(mgr *session.Manager, store beads.SessionStore, req syncOpRequest, resp runtime.InteractionResponse) (syncOpRequest, error) {
 	payload, err := encodeRespondOpPayload(resp)
 	if err != nil {
 		return req, err
@@ -1039,7 +1039,7 @@ func closeOpRequest(id, key string, del bool) (syncOpRequest, error) {
 // generation its row names, or, under a client key that already names a kill
 // of this session, to that kill's scope, so a same-key retry after the
 // session restarted answers from the first kill.
-func (s *Server) killOpRequest(store beads.Store, id, key string) syncOpRequest {
+func (s *Server) killOpRequest(store beads.SessionStore, id, key string) syncOpRequest {
 	req := syncOpRequest{kind: opjournal.KindKill, conv: id, key: key}
 	if !recordingMode(s.ops.lifecycle.Mode) {
 		return req
@@ -1068,7 +1068,7 @@ var errKillTargetMoved = errors.New("the kill's target moved")
 // is an error wrapping errKillTargetMoved naming both generations
 // (refused:target_moved); a row that does not read is a retryable error,
 // nothing killed. A kill that is not recorded passes.
-func killScopeMoved(store beads.Store, id string, adm *legacyop.Admission) error {
+func killScopeMoved(store beads.SessionStore, id string, adm *legacyop.Admission) error {
 	if !adm.Recorded || adm.Op.Scope.Kind != opjournal.ScopeSession {
 		return nil
 	}
@@ -1092,11 +1092,11 @@ func killScopeMoved(store beads.Store, id string, adm *legacyop.Admission) error
 // the same rule. A row that does not read is a retryable error, nothing
 // killed. It returns nil, taking none, for a kill that is not recorded at the
 // session's generation, an open row, or an actor with no city.
-func (s *Server) recordedKillLease(ctx context.Context, store beads.Store, id string, by session.Actor, adm *legacyop.Admission) (*session.RuntimeLease, error) {
+func (s *Server) recordedKillLease(ctx context.Context, store beads.SessionStore, id string, by session.Actor, adm *legacyop.Admission) (*session.RuntimeLease, error) {
 	if adm == nil || !adm.Recorded || adm.Op.Scope.Kind != opjournal.ScopeSession || by.City.IsZero() {
 		return nil, nil
 	}
-	info, err := session.NewStore(beads.SessionStore{Store: store}).Get(id)
+	info, err := session.NewStore(store).Get(id)
 	if err != nil {
 		return nil, fmt.Errorf("reading session %s before taking its runtime lease, so nothing was killed: %w", id, err)
 	}

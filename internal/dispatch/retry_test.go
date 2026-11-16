@@ -15,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 func TestProcessRetryEvalPassClosesLogical(t *testing.T) {
@@ -72,7 +73,7 @@ func TestProcessRetryEvalPassClosesLogical(t *testing.T) {
 	mustDepAdd(t, store, logical.ID, eval1.ID, "blocks")
 	mustDepAdd(t, store, eval1.ID, run1.ID, "blocks")
 
-	result, err := ProcessControl(store, eval1, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), eval1, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(retry-eval pass): %v", err)
 	}
@@ -188,7 +189,7 @@ func TestProcessRetryEvalPassClearsPendingBudgetOnClose(t *testing.T) {
 	pending := mustGetBead(t, store, eval1.ID)
 
 	// Recovered: the drift healed and the eval resolves with a passing outcome.
-	result, err := ProcessControl(store, pending, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), pending, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(retry-eval pass after pending): %v", err)
 	}
@@ -224,7 +225,7 @@ func TestProcessRetryEvalHardFailSettlesLogicalBeforeEval(t *testing.T) {
 		"gc.failure_reason": "boom",
 	})
 
-	result, err := ProcessControl(store, eval1, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), eval1, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(retry-eval hard): %v", err)
 	}
@@ -253,7 +254,7 @@ func TestProcessRetryEvalCanceledSettlesLogicalBeforeEval(t *testing.T) {
 		"gc.outcome": "canceled",
 	})
 
-	result, err := ProcessControl(store, eval1, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), eval1, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(retry-eval canceled): %v", err)
 	}
@@ -338,7 +339,7 @@ func TestProcessRetryEvalFinishesInterruptedSettle(t *testing.T) {
 				}
 			}
 
-			result, err := ProcessControl(store, mustGetBead(t, store, eval1.ID), ProcessOptions{})
+			result, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, eval1.ID), ProcessOptions{Work: beadstest.Work(store)})
 			if err != nil {
 				t.Fatalf("ProcessControl(interrupted settle): %v", err)
 			}
@@ -424,7 +425,7 @@ func TestProcessRetryEvalRetriesPassMissingRequiredOutputJSON(t *testing.T) {
 	mustDepAdd(t, store, logical.ID, eval1.ID, "blocks")
 	mustDepAdd(t, store, eval1.ID, run1.ID, "blocks")
 
-	result, err := ProcessControl(store, eval1, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), eval1, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(retry-eval missing output_json): %v", err)
 	}
@@ -676,7 +677,7 @@ func TestClassifyRetryAttemptWithPostconditionsRequiresArtifact(t *testing.T) {
 		},
 	}
 
-	got, err := classifyRetryAttemptWithPostconditions(store, subject, ProcessOptions{})
+	got, err := classifyRetryAttemptWithPostconditions(beadstest.Graph(store), subject, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("classifyRetryAttemptWithPostconditions: %v", err)
 	}
@@ -688,7 +689,7 @@ func TestClassifyRetryAttemptWithPostconditionsRequiresArtifact(t *testing.T) {
 	if err := os.WriteFile(path, []byte("review\n"), 0o644); err != nil {
 		t.Fatalf("write artifact: %v", err)
 	}
-	got, err = classifyRetryAttemptWithPostconditions(store, subject, ProcessOptions{})
+	got, err = classifyRetryAttemptWithPostconditions(beadstest.Graph(store), subject, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("classifyRetryAttemptWithPostconditions after artifact write: %v", err)
 	}
@@ -712,13 +713,13 @@ func TestClassifyRetryAttemptWithPostconditionsRejectsRelativeArtifactSymlinkOut
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 
-	got, err := classifyRetryAttemptWithPostconditions(beads.NewMemStore(), beads.Bead{
+	got, err := classifyRetryAttemptWithPostconditions(beadstest.Graph(beads.NewMemStore()), beads.Bead{
 		Metadata: map[string]string{
 			"gc.outcome":           "pass",
 			"gc.required_artifact": "codex-review.md",
 			"work_dir":             worktree,
 		},
-	}, ProcessOptions{})
+	}, ProcessOptions{Work: beadstest.Work(beads.NewMemStore())})
 	if err != nil {
 		t.Fatalf("classifyRetryAttemptWithPostconditions error = %v, want nil", err)
 	}
@@ -756,14 +757,14 @@ func TestClassifyRetryAttemptWithPostconditionsResolvesReviewArtifactTemplate(t 
 		t.Fatalf("write review artifact: %v", err)
 	}
 
-	got, err := classifyRetryAttemptWithPostconditions(store, beads.Bead{
+	got, err := classifyRetryAttemptWithPostconditions(beadstest.Graph(store), beads.Bead{
 		Metadata: map[string]string{
 			"gc.outcome":           "pass",
 			"gc.root_bead_id":      root.ID,
 			"gc.attempt":           "2",
 			"gc.required_artifact": "{worktree}/.gc/reviews/{root}/attempt-{attempt}/codex-review.md",
 		},
-	}, ProcessOptions{})
+	}, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("classifyRetryAttemptWithPostconditions: %v", err)
 	}
@@ -791,13 +792,13 @@ func TestClassifyRetryAttemptWithPostconditionsSurfacesRequiredArtifactStoreErro
 		err:    backendErr,
 	}
 
-	_, err := classifyRetryAttemptWithPostconditions(store, beads.Bead{
+	_, err := classifyRetryAttemptWithPostconditions(beadstest.Graph(store), beads.Bead{
 		Metadata: map[string]string{
 			"gc.outcome":           "pass",
 			"gc.root_bead_id":      root.ID,
 			"gc.required_artifact": "codex-review.md",
 		},
-	}, ProcessOptions{})
+	}, ProcessOptions{Work: beadstest.Work(store)})
 	if !errors.Is(err, backendErr) {
 		t.Fatalf("classifyRetryAttemptWithPostconditions error = %v, want backend error", err)
 	}
@@ -821,13 +822,13 @@ func TestClassifyRetryAttemptWithPostconditionsStoreErrorIsTransientControllerEr
 		err:    backendErr,
 	}
 
-	_, err := classifyRetryAttemptWithPostconditions(store, beads.Bead{
+	_, err := classifyRetryAttemptWithPostconditions(beadstest.Graph(store), beads.Bead{
 		Metadata: map[string]string{
 			"gc.outcome":           "pass",
 			"gc.root_bead_id":      root.ID,
 			"gc.required_artifact": "codex-review.md",
 		},
-	}, ProcessOptions{})
+	}, ProcessOptions{Work: beadstest.Work(store)})
 	if !errors.Is(err, backendErr) {
 		t.Fatalf("classifyRetryAttemptWithPostconditions error = %v, want backend error", err)
 	}
@@ -839,13 +840,13 @@ func TestClassifyRetryAttemptWithPostconditionsStoreErrorIsTransientControllerEr
 func TestClassifyRetryAttemptWithPostconditionsMissingRequiredArtifactContextStaysTransient(t *testing.T) {
 	t.Parallel()
 
-	got, err := classifyRetryAttemptWithPostconditions(beads.NewMemStore(), beads.Bead{
+	got, err := classifyRetryAttemptWithPostconditions(beadstest.Graph(beads.NewMemStore()), beads.Bead{
 		Metadata: map[string]string{
 			"gc.outcome":           "pass",
 			"gc.root_bead_id":      "missing-root",
 			"gc.required_artifact": "codex-review.md",
 		},
-	}, ProcessOptions{})
+	}, ProcessOptions{Work: beadstest.Work(beads.NewMemStore())})
 	if err != nil {
 		t.Fatalf("classifyRetryAttemptWithPostconditions error = %v, want nil", err)
 	}
@@ -878,13 +879,13 @@ func TestClassifyRetryAttemptWithPostconditionsResolvesWorktreeFromRootWhenSourc
 		t.Fatalf("writing artifact: %v", err)
 	}
 
-	got, err := classifyRetryAttemptWithPostconditions(store, beads.Bead{
+	got, err := classifyRetryAttemptWithPostconditions(beadstest.Graph(store), beads.Bead{
 		Metadata: map[string]string{
 			"gc.outcome":           "pass",
 			"gc.root_bead_id":      root.ID,
 			"gc.required_artifact": "codex-review.md",
 		},
-	}, ProcessOptions{})
+	}, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("classifyRetryAttemptWithPostconditions error = %v, want nil", err)
 	}
@@ -922,13 +923,14 @@ func TestClassifyRetryAttemptWithPostconditionsPrefersRootWorktreeOverResolvable
 	})
 
 	var statPath string
-	got, err := classifyRetryAttemptWithPostconditions(store, beads.Bead{
+	got, err := classifyRetryAttemptWithPostconditions(beadstest.Graph(store), beads.Bead{
 		Metadata: map[string]string{
 			"gc.outcome":           "pass",
 			"gc.root_bead_id":      root.ID,
 			"gc.required_artifact": "codex-review.md",
 		},
 	}, ProcessOptions{
+		Work: beadstest.Work(store),
 		RequiredArtifactStat: func(path string) (os.FileInfo, error) {
 			statPath = path
 			return fakeFileInfo{size: 10}, nil
@@ -976,13 +978,14 @@ func TestClassifyRetryAttemptWithPostconditionsRejectsArtifactOutsideWorktreeBef
 			t.Parallel()
 
 			var statCalls int
-			got, err := classifyRetryAttemptWithPostconditions(store, beads.Bead{
+			got, err := classifyRetryAttemptWithPostconditions(beadstest.Graph(store), beads.Bead{
 				Metadata: map[string]string{
 					"gc.outcome":           "pass",
 					"gc.root_bead_id":      root.ID,
 					"gc.required_artifact": tc.path,
 				},
 			}, ProcessOptions{
+				Work: beadstest.Work(store),
 				RequiredArtifactStat: func(string) (os.FileInfo, error) {
 					statCalls++
 					return fakeFileInfo{size: 10}, nil
@@ -1016,13 +1019,13 @@ func TestClassifyRetryAttemptWithPostconditionsRejectsAbsoluteArtifactSymlinkOut
 		t.Skipf("symlink unavailable: %v", err)
 	}
 
-	got, err := classifyRetryAttemptWithPostconditions(beads.NewMemStore(), beads.Bead{
+	got, err := classifyRetryAttemptWithPostconditions(beadstest.Graph(beads.NewMemStore()), beads.Bead{
 		Metadata: map[string]string{
 			"gc.outcome":           "pass",
 			"gc.required_artifact": linkPath,
 			"work_dir":             worktree,
 		},
-	}, ProcessOptions{})
+	}, ProcessOptions{Work: beadstest.Work(beads.NewMemStore())})
 	if err != nil {
 		t.Fatalf("classifyRetryAttemptWithPostconditions error = %v, want nil", err)
 	}
@@ -1038,13 +1041,14 @@ func TestClassifyRetryAttemptWithPostconditionsUsesRequiredArtifactStatOption(t 
 	worktree := t.TempDir()
 	path := filepath.Join(worktree, "review.md")
 	var statPath string
-	got, err := classifyRetryAttemptWithPostconditions(beads.NewMemStore(), beads.Bead{
+	got, err := classifyRetryAttemptWithPostconditions(beadstest.Graph(beads.NewMemStore()), beads.Bead{
 		Metadata: map[string]string{
 			"gc.outcome":           "pass",
 			"gc.required_artifact": path,
 			"work_dir":             worktree,
 		},
 	}, ProcessOptions{
+		Work: beadstest.Work(beads.NewMemStore()),
 		RequiredArtifactStat: func(path string) (os.FileInfo, error) {
 			statPath = path
 			return fakeFileInfo{size: 10}, nil
@@ -1082,13 +1086,13 @@ func TestClassifyRetryAttemptWithPostconditionsRequiredArtifactEdgeReasons(t *te
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			got, err := classifyRetryAttemptWithPostconditions(beads.NewMemStore(), beads.Bead{
+			got, err := classifyRetryAttemptWithPostconditions(beadstest.Graph(beads.NewMemStore()), beads.Bead{
 				Metadata: map[string]string{
 					"gc.outcome":           "pass",
 					"gc.required_artifact": tc.path,
 					"work_dir":             worktree,
 				},
-			}, ProcessOptions{})
+			}, ProcessOptions{Work: beadstest.Work(beads.NewMemStore())})
 			if err != nil {
 				t.Fatalf("classifyRetryAttemptWithPostconditions error = %v, want nil", err)
 			}
@@ -1283,7 +1287,7 @@ func TestProcessRetryEvalTransientAppendErrorStaysOpenForRetry(t *testing.T) {
 		Store: base,
 		err:   errors.New("creating retry run bead: invalid connection: i/o timeout"),
 	}
-	_, err := ProcessControl(store, mustGetBead(t, store, eval1.ID), ProcessOptions{})
+	_, err := ProcessControl(beadstest.Graph(store), mustGetBead(t, store, eval1.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if !errors.Is(err, ErrControlPending) {
 		t.Fatalf("ProcessControl(retry-eval append) error = %v, want %v", err, ErrControlPending)
 	}
@@ -1352,7 +1356,7 @@ func TestProcessRetryEvalPassPropagatesNonGCMetadataToLogical(t *testing.T) {
 	mustDepAdd(t, store, logical.ID, eval1.ID, "blocks")
 	mustDepAdd(t, store, eval1.ID, run1.ID, "blocks")
 
-	result, err := ProcessControl(store, eval1, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), eval1, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(retry-eval pass verdict propagation): %v", err)
 	}
@@ -1445,7 +1449,7 @@ func TestProcessRetryEvalPassUsesRetryRunInsteadOfBlockingControlDeps(t *testing
 	mustDepAdd(t, store, eval1.ID, unrelatedScopeCheck.ID, "blocks")
 	mustDepAdd(t, store, logical.ID, eval1.ID, "blocks")
 
-	result, err := ProcessControl(store, eval1, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), eval1, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(retry-eval live-style deps): %v", err)
 	}
@@ -1511,7 +1515,7 @@ func TestProcessRetryEvalResolvesLogicalByStepRefFallback(t *testing.T) {
 	mustDepAdd(t, store, logical.ID, eval1.ID, "blocks")
 	mustDepAdd(t, store, eval1.ID, run1.ID, "blocks")
 
-	result, err := ProcessControl(store, eval1, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), eval1, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(retry-eval fallback pass): %v", err)
 	}
@@ -1584,7 +1588,8 @@ func TestProcessRetryEvalTransientRetriesAndRecyclesPoolSession(t *testing.T) {
 	mustDepAdd(t, store, eval1.ID, run1.ID, "blocks")
 
 	var recycled []string
-	result, err := ProcessControl(store, eval1, ProcessOptions{
+	result, err := ProcessControl(beadstest.Graph(store), eval1, ProcessOptions{
+		Work: beadstest.Work(store),
 		RecycleSession: func(subject beads.Bead) error {
 			recycled = append(recycled, subject.Assignee)
 			return nil
@@ -1719,7 +1724,8 @@ func TestProcessRetryEvalTransientPreservesPinnedSessionAffinity(t *testing.T) {
 	mustDepAdd(t, store, eval1.ID, run1.ID, "blocks")
 
 	var recycled []string
-	result, err := ProcessControl(store, eval1, ProcessOptions{
+	result, err := ProcessControl(beadstest.Graph(store), eval1, ProcessOptions{
+		Work: beadstest.Work(store),
 		RecycleSession: func(subject beads.Bead) error {
 			recycled = append(recycled, subject.Assignee)
 			return nil
@@ -1819,7 +1825,7 @@ func TestProcessRetryEvalSoftFailOnExhaustedTransient(t *testing.T) {
 	mustDepAdd(t, store, logical.ID, eval3.ID, "blocks")
 	mustDepAdd(t, store, eval3.ID, run3.ID, "blocks")
 
-	result, err := ProcessControl(store, eval3, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), eval3, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(retry-eval soft-fail): %v", err)
 	}
@@ -1951,7 +1957,7 @@ func TestProcessRetryEvalSoftFailToleratesDelayedOutcomeVisibility(t *testing.T)
 
 	store := &outcomeHiddenRetrySubjectStore{MemStore: mem, subjectID: run3.ID, hideReads: 3}
 
-	result, err := ProcessControl(store, eval3, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), eval3, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(retry-eval soft-fail, delayed outcome visibility): %v", err)
 	}
@@ -1990,7 +1996,8 @@ func TestResolveRetrySubjectOutcomeStopsRetryWhenContextCanceled(t *testing.T) {
 	cancel()
 
 	var trace bytes.Buffer
-	_, err := resolveRetrySubjectOutcome(mem, subject, "eval3", ProcessOptions{
+	_, err := resolveRetrySubjectOutcome(beadstest.Graph(mem), subject, "eval3", ProcessOptions{
+		Work:    beadstest.Work(mem),
 		Context: ctx,
 		Tracef: func(format string, args ...any) {
 			fmt.Fprintf(&trace, format+"\n", args...) //nolint:errcheck // test buffer
@@ -2031,7 +2038,8 @@ func TestResolveRetrySubjectOutcomeDegradesOnReadError(t *testing.T) {
 	store := &failingGetStore{MemStore: mem, subjectID: subject.ID}
 
 	var trace bytes.Buffer
-	got, err := resolveRetrySubjectOutcome(store, subject, "eval3", ProcessOptions{
+	got, err := resolveRetrySubjectOutcome(beadstest.Graph(store), subject, "eval3", ProcessOptions{
+		Work: beadstest.Work(store),
 		Tracef: func(format string, args ...any) {
 			fmt.Fprintf(&trace, format+"\n", args...) //nolint:errcheck // test buffer
 		},
@@ -2108,7 +2116,7 @@ func TestProcessRetryEvalStaleAttemptFinalizesNoop(t *testing.T) {
 	mustDepAdd(t, store, logical.ID, eval1.ID, "blocks")
 	mustDepAdd(t, store, eval1.ID, run1.ID, "blocks")
 
-	result, err := ProcessControl(store, eval1, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), eval1, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(retry-eval stale noop): %v", err)
 	}
@@ -2175,7 +2183,7 @@ func TestProcessRetryEvalRetriesInvalidWorkerResultContract(t *testing.T) {
 	mustDepAdd(t, store, logical.ID, eval1.ID, "blocks")
 	mustDepAdd(t, store, eval1.ID, run1.ID, "blocks")
 
-	result, err := ProcessControl(store, eval1, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), eval1, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(retry-eval invalid contract): %v", err)
 	}
@@ -2248,7 +2256,7 @@ func TestProcessRetryEvalExhaustsInvalidWorkerResultContract(t *testing.T) {
 	mustDepAdd(t, store, logical.ID, eval2.ID, "blocks")
 	mustDepAdd(t, store, eval2.ID, run2.ID, "blocks")
 
-	result, err := ProcessControl(store, eval2, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), eval2, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(retry-eval exhausted invalid contract): %v", err)
 	}
@@ -2361,7 +2369,7 @@ func TestProcessRetryEvalRetriesDistinctInvalidWorkerResultContracts(t *testing.
 			mustDepAdd(t, store, logical.ID, eval1.ID, "blocks")
 			mustDepAdd(t, store, eval1.ID, run1.ID, "blocks")
 
-			result, err := ProcessControl(store, eval1, ProcessOptions{})
+			result, err := ProcessControl(beadstest.Graph(store), eval1, ProcessOptions{Work: beadstest.Work(store)})
 			if err != nil {
 				t.Fatalf("ProcessControl(retry-eval %s): %v", tc.name, err)
 			}
@@ -2453,7 +2461,7 @@ func TestProcessScopeCheckSkipsOpenRetryDescendantsOnAbort(t *testing.T) {
 	mustDepAdd(t, store, logical.ID, eval1.ID, "blocks")
 	mustDepAdd(t, store, eval1.ID, run1.ID, "blocks")
 
-	result, err := ProcessControl(store, control, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), control, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(scope-check with retry descendants): %v", err)
 	}
@@ -2557,7 +2565,7 @@ func TestProcessScopeCheckSkipsOpenRalphIterationDescendantsOnAbort(t *testing.T
 	mustDepAdd(t, store, logical.ID, iterationControl.ID, "blocks")
 	mustDepAdd(t, store, iterationControl.ID, iterationChild.ID, "blocks")
 
-	result, err := ProcessControl(store, control, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), control, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(scope-check with ralph descendants): %v", err)
 	}
@@ -2616,11 +2624,11 @@ func TestClassifyRetryAttemptWithPostconditionsResolvesSourceBeadAcrossStores(t 
 	})
 
 	var resolverRef string
-	opts := ProcessOptions{ResolveStoreRef: func(ref string) (beads.Store, error) {
+	opts := ProcessOptions{Work: beadstest.Work(graphStore), ResolveStoreRef: func(ref string) (beads.Store, error) {
 		resolverRef = ref
 		return workStore, nil
 	}}
-	got, err := classifyRetryAttemptWithPostconditions(graphStore, beads.Bead{
+	got, err := classifyRetryAttemptWithPostconditions(beadstest.Graph(graphStore), beads.Bead{
 		Metadata: map[string]string{
 			"gc.outcome":           "pass",
 			"gc.root_bead_id":      root.ID,
@@ -2656,13 +2664,13 @@ func TestClassifyRetryAttemptWithPostconditionsCrossStoreSourceWithoutResolverFa
 		},
 	})
 
-	_, err := classifyRetryAttemptWithPostconditions(graphStore, beads.Bead{
+	_, err := classifyRetryAttemptWithPostconditions(beadstest.Graph(graphStore), beads.Bead{
 		Metadata: map[string]string{
 			"gc.outcome":           "pass",
 			"gc.root_bead_id":      root.ID,
 			"gc.required_artifact": "codex-review.md",
 		},
-	}, ProcessOptions{}) // nil ResolveStoreRef
+	}, ProcessOptions{Work: beadstest.Work(graphStore)}) // nil ResolveStoreRef
 	if err == nil {
 		t.Fatal("want a loud error when a cross-store source ref has no resolver, got nil (silent transient)")
 	}
@@ -2671,12 +2679,12 @@ func TestClassifyRetryAttemptWithPostconditionsCrossStoreSourceWithoutResolverFa
 	}
 }
 
-// TestClassifyRetryAttemptWithPostconditionsResolvesInputConvoyViaMemberStores:
+// TestClassifyRetryAttemptWithPostconditionsResolvesInputConvoyViaMemberTail:
 // the gc.input_convoy_id hop carries no store ref on the root — a convoy is a
 // work bead, so on a split city it lives in the work store while the root and
 // the retry control run in the graph store. The read must federate through
-// opts.MemberStores (the work-store tail), exactly like the drain lane.
-func TestClassifyRetryAttemptWithPostconditionsResolvesInputConvoyViaMemberStores(t *testing.T) {
+// opts.MemberTail (the work-store tail), exactly like the drain lane.
+func TestClassifyRetryAttemptWithPostconditionsResolvesInputConvoyViaMemberTail(t *testing.T) {
 	t.Parallel()
 
 	workStore := &beads.MemStore{IDPrefix: "hq"}
@@ -2698,17 +2706,17 @@ func TestClassifyRetryAttemptWithPostconditionsResolvesInputConvoyViaMemberStore
 		},
 	})
 
-	got, err := classifyRetryAttemptWithPostconditions(graphStore, beads.Bead{
+	got, err := classifyRetryAttemptWithPostconditions(beadstest.Graph(graphStore), beads.Bead{
 		Metadata: map[string]string{
 			"gc.outcome":           "pass",
 			"gc.root_bead_id":      root.ID,
 			"gc.required_artifact": artifact,
 		},
-	}, ProcessOptions{MemberStores: []beads.Store{workStore}})
+	}, ProcessOptions{Work: beadstest.Work(workStore), MemberTail: true})
 	if err != nil {
 		t.Fatalf("classifyRetryAttemptWithPostconditions: %v", err)
 	}
 	if want := (retryEvalResult{Outcome: "pass"}); got != want {
-		t.Fatalf("classifyRetryAttemptWithPostconditions() = %+v, want %+v (input convoy not resolved via MemberStores?)", got, want)
+		t.Fatalf("classifyRetryAttemptWithPostconditions() = %+v, want %+v (input convoy not resolved via the member tail?)", got, want)
 	}
 }

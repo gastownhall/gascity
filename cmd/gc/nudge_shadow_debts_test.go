@@ -14,7 +14,6 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
-	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 )
@@ -776,47 +775,10 @@ func TestNudgeWaitReminderAckedWhileItsShadowWriteFails(t *testing.T) {
 	}
 }
 
-// The shim's import reuses an open shadow the way Enqueue does, so it drops a
-// retired debt on that shadow: paying it would close the shadow of an item
-// the queue serves. Its store calls run outside the queue lock (the harness's
-// lock probe).
-func TestNudgeImportMigratedDropsRetiredDebtsOnTheReusedShadow(t *testing.T) {
-	h := newNQCharHarness(t)
-	enqueueAndClaimForTest(t, h, "n-1")
-	h.failWrites = true
-	if err := ackQueuedNudgesWithOutcome(h.city, []string{"n-1"}, "injected", "", "provider-nudge-return"); err != nil {
-		t.Fatal(err)
-	}
-	h.failWrites = false
-	if got := loadNudgeStateForTest(t, h.city).Retired; len(got) != 1 {
-		t.Fatalf("retired after the failing ack = %v", nqCharItems(got))
-	}
-
-	moved := h.item("n-1", "alpha", 0, queuedNudgeOptions{})
-	q := &fileNudgeQueue{cityPath: h.city, store: h.shadow(), clk: clock.Real{}}
-	if _, err := q.importMigrated([]nudgequeue.Item{moved}); err != nil {
-		t.Fatalf("importMigrated: %v", err)
-	}
-	state := loadNudgeStateForTest(t, h.city)
-	if len(state.Pending) != 1 || state.Pending[0].ID != "n-1" {
-		t.Fatalf("pending after the import = %v", nqCharItems(state.Pending))
-	}
-	if len(state.Retired) != 0 {
-		t.Fatalf("retired after the import = %v, want the debt on the reused shadow dropped", nqCharItems(state.Retired))
-	}
-	if err := controllerPassForTest(h, time.Now().Add(time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	shadow, open, err := nudgeShadows(h.shadow()).Find("n-1")
-	if err != nil || !open {
-		t.Fatalf("shadow of the imported n-1 = %+v open=%v err=%v, want it open", shadow, open, err)
-	}
-}
-
 // An acked id queued again while the ack's payer holds its retired debt does
 // not reuse the shadow that payer is writing: dropping the debt would not stop
 // the write of the copy the payer took, which would close the shadow of an
-// item the queue serves. The enqueue or import is refused as busy and queues
+// item the queue serves. The enqueue is refused as busy and queues
 // nothing. Once the payer has written and confirmed, the old shadow keeps the
 // ack's outcome and a retry queues the item on a new shadow.
 func TestNudgeReuseOfAShadowAPayerHoldsIsRefused(t *testing.T) {
@@ -826,11 +788,6 @@ func TestNudgeReuseOfAShadowAPayerHoldsIsRefused(t *testing.T) {
 	}{
 		{"enqueue", func(h *nqCharHarness) error {
 			return enqueueQueuedNudgeWithStore(h.city, h.shadow(), h.item("n-1", "alpha", 0, queuedNudgeOptions{}))
-		}},
-		{"import", func(h *nqCharHarness) error {
-			q := &fileNudgeQueue{cityPath: h.city, store: h.shadow(), clk: clock.Real{}}
-			_, err := q.importMigrated([]nudgequeue.Item{h.item("n-1", "alpha", 0, queuedNudgeOptions{})})
-			return err
 		}},
 	} {
 		t.Run(c.verb, func(t *testing.T) {

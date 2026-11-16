@@ -170,7 +170,7 @@ func (w *controllerWiring) fallBackToLegacy() {
 // --foreground): the wiring, with the O6 fallback applied before the
 // controller socket publishes it.
 func newStandaloneControllerWiring(cityPath string, cfg *config.City, rec events.Recorder, stderr io.Writer) (*controllerWiring, error) {
-	w, err := newControllerWiring(cfg, reconcilerModeLookupEnv, stderr)
+	w, err := newControllerWiring(cfg, cityPath, reconcilerModeLookupEnv, stderr)
 	if err != nil {
 		return nil, err
 	}

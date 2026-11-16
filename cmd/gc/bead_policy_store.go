@@ -59,6 +59,10 @@ var (
 	_ beads.BatchDeleter           = (*beadPolicyGraphStore)(nil)
 	_ beads.DepMetadataReader      = (*beadPolicyStore)(nil)
 	_ beads.DepMetadataReader      = (*beadPolicyGraphStore)(nil)
+	_ beads.DepMetadataBatchReader = (*beadPolicyStore)(nil)
+	_ beads.DepMetadataBatchReader = (*beadPolicyGraphStore)(nil)
+	_ beads.DepBatchRemover        = (*beadPolicyStore)(nil)
+	_ beads.DepBatchRemover        = (*beadPolicyGraphStore)(nil)
 	_ beads.ParentProjectionWaiter = (*beadPolicyStore)(nil)
 	_ beads.ParentProjectionWaiter = (*beadPolicyGraphStore)(nil)
 )
@@ -160,9 +164,17 @@ func (s *beadPolicyStore) ReadyContext(ctx context.Context, query ...beads.Ready
 func (s *beadPolicyStore) DepMetadata(issueID, dependsOnID string) (string, bool, error) {
 	reader, ok := s.Store.(beads.DepMetadataReader)
 	if !ok {
-		return "", false, fmt.Errorf("reading dependency metadata %s -> %s: policy-wrapped store %T exposes no edge-payload read", issueID, dependsOnID, s.Store)
+		return "", false, fmt.Errorf("reading dependency metadata %s -> %s: policy-wrapped store %T: %w", issueID, dependsOnID, s.Store, beads.ErrDepMetadataUnsupported)
 	}
 	return reader.DepMetadata(issueID, dependsOnID)
+}
+
+// DepMetadataAbsentByProtocol forwards what the inner store declares about its
+// protocol, for the reason DepMetadata is forwarded: the embedded Store
+// interface strips the declaration, and the migration would read a generic
+// exec store under this wrapper as one it cannot ask.
+func (s *beadPolicyStore) DepMetadataAbsentByProtocol() (string, bool) {
+	return beads.DepMetadataAbsent(s.Store)
 }
 
 // Count implements beads.Counter with the same read-tier expansion as List.
@@ -263,6 +275,30 @@ func (s *beadPolicyStore) DepListBatch(ids []string) (map[string][]beads.Dep, er
 		return nil, beads.ErrDepListBatchUnsupported
 	}
 	return batch.DepListBatch(ids)
+}
+
+// DepMetadataBatch forwards the inner store's batched edge-payload read
+// (beads.DepMetadataBatchReader), for the reason DepListBatch is forwarded. An
+// inner store without it reports beads.ErrDepMetadataUnsupported, and the
+// caller reads edge by edge through DepMetadata.
+func (s *beadPolicyStore) DepMetadataBatch(ids []string) (map[beads.DepPair]string, error) {
+	reader, ok := beads.As[beads.DepMetadataBatchReader](s.Store)
+	if !ok {
+		return nil, beads.ErrDepMetadataUnsupported
+	}
+	return reader.DepMetadataBatch(ids)
+}
+
+// DepRemoveBatch forwards the inner store's batched edge removal
+// (beads.DepBatchRemover), for the reason DepMetadataBatch is forwarded. An
+// inner store without it reports beads.ErrDepRemoveBatchUnsupported, and the
+// caller removes edge by edge through DepRemove.
+func (s *beadPolicyStore) DepRemoveBatch(pairs []beads.DepPair) error {
+	remover, ok := beads.As[beads.DepBatchRemover](s.Store)
+	if !ok {
+		return beads.ErrDepRemoveBatchUnsupported
+	}
+	return remover.DepRemoveBatch(pairs)
 }
 
 // ReadyPreferCache forwards the cache-preferred ready read with the policy's

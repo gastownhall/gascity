@@ -88,7 +88,7 @@ func gatherDemand(env demandGatherEnv, reads demandReads) (v demandView, err err
 	c := &v.Collected
 	c.UnassignedRouted, _, c.UnassignedRoutedRefs, c.UnassignedRoutedPartial = collectOpenUnassignedRoutedWork(
 		env.CityPath, env.Cfg, env.CityStore, env.RigStores, env.SuspendedRigPaths, stderr, nil, reads)
-	c.ColdWakeTemplates, c.NamedOnDemandTemplates = targets.coldWakeTemplates, targets.namedOnDemandTemplates
+	c.ColdWakeTemplates, c.NamedOnDemandTemplates, c.NameOnlyTemplates = targets.coldWakeTemplates, targets.namedOnDemandTemplates, targets.nameOnlyTemplates
 	for _, pool := range targets.pendingPools {
 		v.CustomCheckTemplates = append(v.CustomCheckTemplates, env.Cfg.Agents[pool.agentIdx].QualifiedName())
 	}
@@ -96,6 +96,13 @@ func gatherDemand(env demandGatherEnv, reads demandReads) (v demandView, err err
 		var errs []error
 		c.DefaultProbed = true
 		c.DefaultCounts, c.DefaultDemand, c.DefaultPartials, errs = defaultScaleCheckCountsAndDemand(env.Cfg, targets.defaultScaleTargets, cache)
+		// Work this pass already reads as claimed is not new demand: v2's probe
+		// rows can be a recording older than the claim read
+		// (demand_claimed_work.go). The cut runs before the guards, so a row a
+		// guard admits is never a claimed one.
+		if _, recorded := reads.(*v2DemandReads); recorded {
+			c.DefaultCounts, c.DefaultDemand, v.ClaimedDemand = withoutClaimedDemand(c.DefaultCounts, c.DefaultDemand, demandClaimsOf(v.AssignedWork, v.AssignedStoreRefs))
+		}
 		// A bead whose claims keep failing the same way is not spawn demand
 		// (claim_loop_guard.go).
 		c.DefaultCounts, c.DefaultDemand = claimLoopGuardFor(env.CityPath).withhold(c.DefaultCounts, c.DefaultDemand)

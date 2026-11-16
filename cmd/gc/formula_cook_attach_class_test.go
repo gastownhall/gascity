@@ -28,6 +28,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -491,7 +492,7 @@ func TestAttachedSubDAGIsGraphClassWhateverTheFormulaVersion(t *testing.T) {
 		t.Fatalf("the fixture recipe is %v, not %v; it has to be the shape a standalone cook leaves in the work ledger", got, coordclass.ClassWork)
 	}
 
-	result, err := molecule.Attach(context.Background(), store, recipe, parent.ID, molecule.AttachOptions{})
+	result, err := molecule.Attach(context.Background(), beadstest.GraphMolecule(store), recipe, parent.ID, molecule.AttachOptions{})
 	if err != nil {
 		t.Fatalf("molecule.Attach: %v", err)
 	}

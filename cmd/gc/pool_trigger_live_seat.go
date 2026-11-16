@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -283,11 +284,17 @@ func (bp *agentBuildParams) retirePoolSeat(id string) {
 // when no fresh session can start (selectOrPlanPoolSessionBeadAvoiding), so
 // the seat's claim decides whether it runs that work there: it leaves it from
 // inside a managed worktree. The request's evidence is still verified first,
-// so unusable evidence skips the item as before.
+// so unusable evidence skips the item as before. A live seat whose name was
+// refused (SessionRequest.NameRefused) gets no work dir and is bound unnamed
+// where it runs; one that is not alive moves to the pool's own directory
+// (poolSeatBindingPatch).
 func poolTriggerBindWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, info session.Info, request SessionRequest) (string, error) {
 	workDir, err := verifiedPoolTriggerWorkDir(bp, cfgAgent, qualifiedName, request)
 	if err != nil || workDir == "" {
 		return workDir, err
+	}
+	if request.NameRefused && poolSeatAlive(bp, cfgAgent, info) {
+		return "", nil
 	}
 	at, placed := poolSeatPlacedElsewhere(bp, cfgAgent, info, request)
 	if !placed || !poolSeatAlive(bp, cfgAgent, info) {
@@ -297,4 +304,26 @@ func poolTriggerBindWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualif
 		fmt.Fprintf(bp.stderr, "buildDesiredState: pool %q session %s keeps work dir %s, where it runs, for trigger bead %s, whose work runs in %s; its claim decides whether it runs that work there\n", qualifiedName, info.ID, at.SeatDir, request.WorkBeadID, workDir) //nolint:errcheck // best-effort stderr
 	}
 	return at.SeatDir, nil
+}
+
+// sameTriggerWorkDirStale reports whether binding the pool seat info to
+// request must move its row off the work dir it records: the request is for
+// the trigger the row already records (computePoolTriggerBindingPatch keeps
+// the recorded dir for that), its work carries a verified managed worktree
+// (request.WorktreeSpec), and the recorded dir, resolved against cityPath, is
+// not workDir, that worktree. The work gained or changed its evidence after
+// the seat was bound, or a live seat re-pointed at it kept the dir it ran in.
+// The comparison is lexical, as the v2 decision is pure: legacy passes the
+// path its verify reported, v2 the spec's path (its plan-only work dir is
+// empty), which is the path the PreWake's verify reports.
+// A seat started in the recorded dir would leave its own trigger to a session
+// in the trigger's worktree and drain. Callers ask this only for a seat that
+// can start: a running seat keeps the dir its process runs in.
+func sameTriggerWorkDirStale(cityPath string, info session.Info, request SessionRequest, workDir string) bool {
+	workID := strings.TrimSpace(request.WorkBeadID)
+	if workID == "" || workDir == "" || request.WorktreeSpec == nil || workID != strings.TrimSpace(info.TriggerBeadID) {
+		return false
+	}
+	recorded := preparedStartSessionWorkDir(info)
+	return recorded != "" && filepath.Clean(resolveWorkDirAgainstCity(cityPath, recorded)) != filepath.Clean(workDir)
 }

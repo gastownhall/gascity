@@ -49,7 +49,7 @@ func TestDefaultV2FallsBackToLegacyOnABootRefusal(t *testing.T) {
 	city := fallbackCity(t)
 	cfg := v2DefaultCity(nil)
 	calls := stubV2BootProbe(t, errCensusRefusal)
-	w, err := newControllerWiringLoggingTo(cfg, envOf(nil), io.Discard, io.Discard)
+	w, err := newControllerWiringLoggingTo(cfg, "", envOf(nil), io.Discard, io.Discard)
 	if err != nil || w.mode != reconcilerV2 || w.reason != reconcilerDefaultV2 {
 		t.Fatalf("fixture wiring = (%+v, %v), want the v2 default", w, err)
 	}
@@ -83,7 +83,7 @@ func TestExplicitV2IsNeverProbedAndStillRefuses(t *testing.T) {
 	city := fallbackCity(t)
 	cfg := v2DefaultCity(func(c *config.City) { c.Daemon.SessionReconciler = config.SessionReconcilerV2 })
 	calls := stubV2BootProbe(t, errCensusRefusal)
-	w, err := newControllerWiringLoggingTo(cfg, envOf(nil), io.Discard, io.Discard)
+	w, err := newControllerWiringLoggingTo(cfg, "", envOf(nil), io.Discard, io.Discard)
 	if err != nil || w.mode != reconcilerV2 || w.reason != reconcilerExplicit {
 		t.Fatalf("fixture wiring = (%+v, %v), want an explicit v2", w, err)
 	}
@@ -102,7 +102,7 @@ func TestExplicitV2IsNeverProbedAndStillRefuses(t *testing.T) {
 func TestLegacyIsNeverProbed(t *testing.T) {
 	cfg := v2DefaultCity(func(c *config.City) { c.Daemon.SessionReconciler = config.SessionReconcilerLegacy })
 	calls := stubV2BootProbe(t, errCensusRefusal)
-	w, err := newControllerWiringLoggingTo(cfg, envOf(nil), io.Discard, io.Discard)
+	w, err := newControllerWiringLoggingTo(cfg, "", envOf(nil), io.Discard, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestDefaultV2ThatBootsClearsAStaleFallbackRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	stubV2BootProbe(t, nil)
-	w, err := newControllerWiringLoggingTo(cfg, envOf(nil), io.Discard, io.Discard)
+	w, err := newControllerWiringLoggingTo(cfg, "", envOf(nil), io.Discard, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -139,7 +139,7 @@ by conformance: some herdr verbs return an empty body on success, so `run()` tre
 whitespace-only output as a no-payload success.
 
 **Layout — one space per agent (2026-06-29):** `Start` places each agent in its **own tab** under a
-**per-rig (or per-town) workspace** — workspace = the rig (`<rig>--…`) or town (`<town>__…`), tab =
+**per-rig (or per-town) workspace** — workspace = the rig (`<rig>--…`), else the town (`<town>__…`, or a bare agent name, which takes the city name), tab =
 the agent (segment after the last `__`); see `workspaceTabFor`. herdr auto-spawns a stray shell pane
 on `workspace`/`tab create`, so `Start` closes it, leaving the tab holding only the agent. Find-or-
 create of the shared rig workspace is mutex-serialized so concurrent same-rig Starts don't race to

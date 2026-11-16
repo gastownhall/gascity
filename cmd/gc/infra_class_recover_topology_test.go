@@ -257,22 +257,40 @@ func TestStorageRecoverStrandedLeavesCrossBoundaryEdgesAlone(t *testing.T) {
 	}
 }
 
+// keepingDanglingRecoveryCity is convergedRecoveryCity over a work store that
+// keeps an edge to a bead it does not hold, as file and SQLite stores do.
+func keepingDanglingRecoveryCity(t *testing.T) (string, *config.City, beads.Store, infraBindingTarget) {
+	t.Helper()
+	source := beads.NewMemStore()
+	source.HonorExplicitIDs = true
+	prev := openInfraMigrationSource
+	openInfraMigrationSource = func(string) (beads.Store, error) { return source, nil }
+	t.Cleanup(func() { openInfraMigrationSource = prev })
+	return convergedRecoveryCityOn(t, source)
+}
+
 // postClearStrandInto builds the strand recover-stranded is for once the clear
-// has run: a work bead with an edge into carried, a bead the cutover carried;
-// then the clear, which removes carried from the work store and keeps the
-// work bead's edge into it; then a writer the migration could not fence,
-// restamping the work bead as order tracking. It returns the strand's id.
+// has run: the clear removes carried, a bead the cutover carried, from the
+// work store; then a writer the migration could not fence adds a work bead
+// with an edge into carried and restamps it as order tracking. It returns the
+// strand's id.
+//
+// Only a work store that holds an edge to a bead it no longer has takes that
+// edge (file and SQLite stores; bd refuses it), so the city runs over
+// keepingDanglingRecoveryCity's store.
 func postClearStrandInto(t *testing.T, cityPath string, source beads.Store, target infraBindingTarget, carried string) string {
 	t.Helper()
-	vote := mustCreateInfraBead(t, source, beads.Bead{Title: "order vote", Type: "task"})
-	if err := source.DepAdd(vote.ID, carried, "blocks"); err != nil {
-		t.Fatalf("seeding the edge %s -> %s: %v", vote.ID, carried, err)
-	}
 	if _, err := clearRetainedInfraCopies(cityPath, target, io.Discard); err != nil {
 		t.Fatalf("clearing the retained copies: %v", err)
 	}
 	if _, err := source.Get(carried); !errors.Is(err, beads.ErrNotFound) {
 		t.Fatalf("the clear left %s in the work store (err=%v); the binding must be its only holder", carried, err)
+	}
+	// The edge lands after the clear: the clear re-adds none (D9), so a
+	// work-store edge into a carried bead is one a writer added since.
+	vote := mustCreateInfraBead(t, source, beads.Bead{Title: "order vote", Type: "task"})
+	if err := source.DepAdd(vote.ID, carried, "blocks"); err != nil {
+		t.Fatalf("seeding the edge %s -> %s: %v", vote.ID, carried, err)
 	}
 	if deps, err := source.DepList(vote.ID, "down"); err != nil || len(deps) != 1 || deps[0].DependsOnID != carried {
 		t.Fatalf("the work store's edges of %s after the clear = %v (err=%v), want the one into %s", vote.ID, deps, err, carried)
@@ -303,7 +321,7 @@ func postClearStrandInto(t *testing.T, cityPath string, source beads.Store, targ
 //	is in the work store and missing from the binding after the restore. The
 //	manifest was NOT extended
 func TestStorageRecoverStrandedRestoresAnEdgeIntoABeadOnlyTheBindingHolds(t *testing.T) {
-	cityPath, cfg, source, target := convergedRecoveryCity(t)
+	cityPath, cfg, source, target := keepingDanglingRecoveryCity(t)
 	carried := carriedMessageID(t, source)
 	strand := postClearStrandInto(t, cityPath, source, target, carried)
 
@@ -328,7 +346,7 @@ func TestStorageRecoverStrandedRestoresAnEdgeIntoABeadOnlyTheBindingHolds(t *tes
 // cross-boundary, as the copy treats every edge into work: written into the
 // binding it would point at the bead the copy carried under the id instead.
 func TestStorageRecoverStrandedLeavesAnEdgeIntoAReusedWorkIDCrossBoundary(t *testing.T) {
-	cityPath, cfg, source, target := convergedRecoveryCity(t)
+	cityPath, cfg, source, target := keepingDanglingRecoveryCity(t)
 	carried := carriedMessageID(t, source)
 	strand := postClearStrandInto(t, cityPath, source, target, carried)
 	if _, err := source.Create(beads.Bead{ID: carried, Title: "a later work bead under the same id", Type: "task"}); err != nil {

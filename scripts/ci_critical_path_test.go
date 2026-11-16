@@ -680,7 +680,7 @@ func TestLintAndVetRunAsNogoInBazel(t *testing.T) {
 // rbe-west cannot run, allowing only the path-gated ones to skip.
 func TestCheckAndCIRequiredFanInTheGatingJobs(t *testing.T) {
 	wf := readCriticalPathWorkflow(t, "ci.yml")
-	gating := []string{"runner-policy", "changes", "credential-provider-windows", "pack-gate"}
+	gating := []string{"runner-policy", "changes", "credential-provider-windows", "pack-gate", "windows-lane", "windows-lane-test"}
 	for jobName, want := range map[string]struct {
 		name  string
 		needs []string
@@ -717,7 +717,8 @@ func TestCheckAndCIRequiredFanInTheGatingJobs(t *testing.T) {
 // TestCIWorkflowRunsNoBazelCoveredSuite: every build and test of this tree
 // runs under Bazel (bazel.yml's lanes, bazel-nightly.yml). ci.yml keeps
 // only the gating jobs rbe-west cannot run -- the Windows credential-provider
-// tests (no Windows workers) and the pack gate's live registry checks --
+// tests (no Windows workers), the Windows lane's cross-compiles and native
+// tests, and the pack gate's live registry checks --
 // plus routing and the two required fan-ins; advisory-probes.yml holds the
 // advisory live probes of upstream HEADs and their routing. A new job in
 // either needs a reason it cannot be a Bazel target.
@@ -727,6 +728,8 @@ func TestCIWorkflowRunsNoBazelCoveredSuite(t *testing.T) {
 			"runner-policy", "changes", // routing
 			"credential-provider-windows", // no Windows workers
 			"pack-gate",                   // live registry and pin provenance
+			"windows-lane",                // GOOS=windows/darwin cross-compiles; rbe-west builds Linux only
+			"windows-lane-test",           // no Windows workers
 			"check", "ci-required",        // required fan-ins
 		},
 		advisoryProbesWorkflowFile: {
@@ -755,9 +758,11 @@ func TestCIWorkflowRunsNoBazelCoveredSuite(t *testing.T) {
 			}
 		}
 	}
-	runner := readCriticalPathWorkflow(t, "ci.yml").Jobs["credential-provider-windows"].RunsOn
-	if runner != "${{ needs.runner-policy.outputs.runner_windows }}" {
-		t.Errorf("credential-provider-windows runs-on = %q, want runner_policy.py's Blacksmith Windows runner", runner)
+	ci := readCriticalPathWorkflow(t, "ci.yml")
+	for _, job := range []string{"credential-provider-windows", "windows-lane-test"} {
+		if runner := ci.Jobs[job].RunsOn; runner != "${{ needs.runner-policy.outputs.runner_windows }}" {
+			t.Errorf("%s runs-on = %q, want runner_policy.py's Blacksmith Windows runner", job, runner)
+		}
 	}
 }
 

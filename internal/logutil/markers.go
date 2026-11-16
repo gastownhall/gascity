@@ -8,7 +8,7 @@ const FatalMarker = "gc-fatal:"
 const (
 	ansiBoldRed            = "\x1b[1;31m"
 	ansiReset              = "\x1b[0m"
-	docsBaseURL            = "https://docs.gascityhall.com/"
+	docsBaseURL            = "https://docs.gascity.com/"
 	migrationGuideRepoPath = "docs/guides/shareable-packs.md"
 )
 

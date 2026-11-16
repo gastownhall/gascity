@@ -243,6 +243,7 @@ var mergeQueueEventExprs = map[string]string{
 	"bazel.yml jobs.rbe.steps[lanes].env.EVENT":                                            "merge_group",                // the PR lane set
 	"bazel.yml jobs.rrc-seed.if":                                                           "false",                      // seeds on push to main only
 	"bazel.yml jobs.rrc-verify.if":                                                         "false",                      // nightly and dispatch only
+	"bazel.yml jobs.split-strict-alert.if":                                                 "false",                      // nightly only
 	"bazel.yml jobs.rbe.steps[base].if":                                                    "false",                      // the queue ref is already the merge
 	"bazel.yml jobs.rbe.steps[splitpaths].if":                                              "false",                      // a merge group has no PR file list; the lane never runs there
 	"bazel.yml jobs.rbe.steps[splitpaths].env.PR_NUMBER":                                   "",                           // (step skipped)

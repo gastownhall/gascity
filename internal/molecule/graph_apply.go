@@ -104,7 +104,7 @@ func isGraphApplyErrorText(text string) bool {
 		strings.Contains(text, "adding edge ")
 }
 
-func instantiateFragmentViaGraphApply(ctx context.Context, store beads.Store, applier beads.GraphApplyStore, recipe *formula.FragmentRecipe, opts FragmentOptions) (*FragmentResult, error) {
+func instantiateFragmentViaGraphApply(ctx context.Context, store beads.MoleculeTarget, applier beads.GraphApplyStore, recipe *formula.FragmentRecipe, opts FragmentOptions) (*FragmentResult, error) {
 	graphApplyTracef("graph-apply fragment-enter root=%s applier=%T", opts.RootID, applier)
 	plan, err := buildFragmentApplyPlan(store, recipe, opts)
 	if err != nil {
@@ -426,7 +426,7 @@ func graphApplyPlanHasEdgeFromKeyToTarget(edges []beads.GraphApplyEdge, fromKey,
 	return false
 }
 
-func buildFragmentApplyPlan(store beads.Store, recipe *formula.FragmentRecipe, opts FragmentOptions) (*beads.GraphApplyPlan, error) {
+func buildFragmentApplyPlan(store beads.MoleculeTarget, recipe *formula.FragmentRecipe, opts FragmentOptions) (*beads.GraphApplyPlan, error) {
 	if recipe == nil {
 		return nil, fmt.Errorf("recipe is nil")
 	}

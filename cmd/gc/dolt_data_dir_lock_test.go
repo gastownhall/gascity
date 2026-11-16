@@ -4,11 +4,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 )
 
 // makeDoltDataDirWithLock creates a managed-dolt-shaped data dir with one
@@ -27,19 +27,24 @@ func makeDoltDataDirWithLock(t *testing.T) (string, string) {
 	return dataDir, lockPath
 }
 
-// holdFlock takes an exclusive flock on path and returns a release func.
-// flock conflicts are per open-file-description, so a second open in this
-// same process observes the lock as held — exactly how a separate dolt
-// process would.
+// holdFlock takes an exclusive kernel lock on path and returns a release func.
+// Lock conflicts are per open file description on Unix and per handle on
+// Windows, so a second open in this same process observes the lock as held —
+// exactly how a separate dolt process would.
 func holdFlock(t *testing.T, path string) func() {
 	t.Helper()
 	f, err := os.OpenFile(path, os.O_RDWR, 0o644)
 	if err != nil {
 		t.Fatalf("open lock file: %v", err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	lock, err := filelock.Acquire(f, filelock.Options{
+		Mode:        filelock.Exclusive,
+		NonBlocking: true,
+		Label:       path,
+	})
+	if err != nil {
 		_ = f.Close()
-		t.Fatalf("flock: %v", err)
+		t.Fatalf("lock %q: %v", path, err)
 	}
 	released := false
 	release := func() {
@@ -47,7 +52,7 @@ func holdFlock(t *testing.T, path string) func() {
 			return
 		}
 		released = true
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = lock.Release()
 		_ = f.Close()
 	}
 	t.Cleanup(release)

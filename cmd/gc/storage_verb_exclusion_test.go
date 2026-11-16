@@ -605,18 +605,24 @@ func storeSharerCitiesForTest(t *testing.T) string {
 
 // TestRemoteRuntimeIsReadFromTheCityNotTheShell: an operator shell's
 // GC_SESSION override does not hide a city's k8s sessions, and a pack runtime
-// is not presumed remote.
+// is remote unless its handshake declares locality=local (D4).
 func TestRemoteRuntimeIsReadFromTheCityNotTheShell(t *testing.T) {
 	t.Setenv("GC_SESSION", "fake")
-	if name, remote := cityRunsRemoteSessions(&config.City{Session: config.SessionConfig{Provider: "k8s"}}); !remote || name != "k8s" {
+	if name, remote := cityRunsRemoteSessions(&config.City{Session: config.SessionConfig{Provider: "k8s"}}, ""); !remote || name != "k8s" {
 		t.Fatalf("a k8s city under GC_SESSION=fake = (%q, %v), want remote", name, remote)
 	}
 	cfg := &config.City{Session: config.SessionConfig{Provider: "mybox"}, Runtimes: map[string]config.DiscoveredRuntime{"mybox": {Name: "mybox"}}}
-	if _, remote := cityRunsRemoteSessions(cfg); remote {
-		t.Fatal("a pack runtime was presumed remote")
+	if _, remote := cityRunsRemoteSessions(cfg, ""); !remote {
+		t.Fatal("a pack runtime that declares no locality was not remote")
+	}
+	local := writeRPPScript(t, `[ "$1" = protocol ] && { echo '{"version":0,"capabilities":[],"locality":"local"}'; exit 0; }; exit 2
+`)
+	cfg.Runtimes["mybox"] = config.DiscoveredRuntime{Name: "mybox", Command: local}
+	if _, remote := cityRunsRemoteSessions(cfg, ""); remote {
+		t.Fatal("a pack runtime declaring locality=local was remote")
 	}
 	t.Setenv("GC_SESSION", "ssh:box")
-	if _, remote := cityRunsRemoteSessions(&config.City{}); !remote {
+	if _, remote := cityRunsRemoteSessions(&config.City{}, ""); !remote {
 		t.Fatal("a remote GC_SESSION override was ignored")
 	}
 }
@@ -634,15 +640,15 @@ func TestExecRuntimeCountsAsRemote(t *testing.T) {
 	}
 	// The GC_SESSION override can only add remoteness.
 	t.Setenv("GC_SESSION", "exec:/opt/gc/anything")
-	if _, remote := cityRunsRemoteSessions(&config.City{}); !remote {
+	if _, remote := cityRunsRemoteSessions(&config.City{}, ""); !remote {
 		t.Error("an exec: GC_SESSION override was not remote")
 	}
 	t.Setenv("GC_SESSION", "")
 	// The one seam PAR-EXEC fills: a handshake declaring locality=local.
 	prev := execRuntimeDeclaresLocal
 	t.Cleanup(func() { execRuntimeDeclaresLocal = prev })
-	execRuntimeDeclaresLocal = func(string) bool { return true }
-	if _, remote := cityRunsRemoteSessions(request.Cfg); remote {
+	execRuntimeDeclaresLocal = func(string, string, string) bool { return true }
+	if _, remote := cityRunsRemoteSessions(request.Cfg, request.CityPath); remote {
 		t.Error("an exec: runtime declaring locality=local still counted as remote")
 	}
 	request.Force = storageForce{RemoteRuntime: true}

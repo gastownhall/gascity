@@ -478,6 +478,22 @@ func NudgeRefused(r Record, key ClaimKey, attempt int, now time.Time) (out Recor
 	return r, recountPaused(&r.Entries[i], true), true
 }
 
+// NudgeDeferred is r after the runtime deferred the nudge of attempt about
+// key that landed at now, typing nothing (a turn its keys would interrupt is
+// running, runtime.ErrSessionBusy): the attempt is re-counted as paused, as
+// a nudge that never reached the seat, and no refusal is counted, so it
+// raises no nudge_refused alert. ok is false when r no longer holds that
+// attempt.
+func NudgeDeferred(r Record, key ClaimKey, attempt int, now time.Time) (out Record, ok bool) {
+	i := slices.IndexFunc(r.Entries, func(e Entry) bool { return e.Key == key })
+	if i < 0 || !r.Entries[i].Last.Equal(now) || r.Entries[i].Attempts != attempt {
+		return r, false
+	}
+	r.Entries = slices.Clone(r.Entries)
+	recountPaused(&r.Entries[i], false)
+	return r, true
+}
+
 // NudgeDelivered is r after a direct nudge about key reached the seat at at
 // (the caller's clock at the delivery attempt's start: a refusal answering
 // the nudge may end before the delivery returns), in generation gen:

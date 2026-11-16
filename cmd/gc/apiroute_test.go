@@ -179,8 +179,7 @@ func TestAPIClientRouting(t *testing.T) {
 		// A supervisor that requires a signed grant on city routes refuses this
 		// client's gated calls with a 401 no caller falls back from, so general
 		// commands keep their local fallback without resolving the supervisor
-		// client — among them the per-turn gc mail check --inject hook, which
-		// would otherwise stop injecting mail.
+		// client — among them gc mail check, which would otherwise fail.
 		t.Setenv("GC_NO_API", "")
 		restore(supervisorHosted, func(string) *api.Client {
 			t.Errorf("supervisor client resolved for a supervisor that requires city grants")
@@ -192,7 +191,7 @@ func TestAPIClientRouting(t *testing.T) {
 			t.Fatalf("apiClient = %p, want nil (the supervisor requires grants this client never mints)", got)
 		}
 		if c, reason := mailCheckAPIClient(dir); c != nil || reason != "grant-required" {
-			t.Fatalf("mailCheckAPIClient = (%p, %q), want (nil, \"grant-required\") so gc mail check --inject injects locally", c, reason)
+			t.Fatalf("mailCheckAPIClient = (%p, %q), want (nil, \"grant-required\") so gc mail check reads locally", c, reason)
 		}
 	})
 
@@ -568,5 +567,75 @@ func TestSessionListAPIClientRouting(t *testing.T) {
 				t.Fatalf("sessionListAPIClient reason = %q, want %q", reason, tc.wantReason)
 			}
 		})
+	}
+}
+
+// TestStandaloneAPIClientNeverResolvesTheSupervisor pins standaloneAPIClient:
+// a standalone controller's [api] endpoint, and nil wherever apiClient would
+// hand back the supervisor-managed client, without resolving it.
+func TestStandaloneAPIClientNeverResolvesTheSupervisor(t *testing.T) {
+	origIdentity, origSup := apiRouteControllerIdentityHook, apiRouteSupervisorClientHook
+	t.Cleanup(func() { apiRouteControllerIdentityHook, apiRouteSupervisorClientHook = origIdentity, origSup })
+	sentinel := api.NewClient("http://supervisor.sentinel:1")
+	for _, tc := range []struct {
+		name     string
+		identity controllerIdentityReply
+		cityTOML string
+		want     string // "nil" or "standalone"
+	}{
+		{"supervisor-hosted", controllerIdentityReply{PID: 4242, HostingMode: controllerHostingSupervisor}, "name = \"t\"\n", "nil"},
+		{"supervisor-hosted with a stale api port", controllerIdentityReply{PID: 4242, HostingMode: controllerHostingSupervisor}, "name = \"t\"\n[api]\nport = 8080\n", "nil"},
+		{"no live controller", controllerIdentityReply{}, "name = \"t\"\n[api]\nport = 8080\n", "nil"},
+		{"controller predating identify, no api port", controllerIdentityReply{PID: 4242}, "name = \"t\"\n", "nil"},
+		{"standalone with an api port", controllerIdentityReply{PID: 4242, HostingMode: controllerHostingStandalone}, "name = \"t\"\n[api]\nport = 8080\n", "standalone"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_NO_API", "")
+			identity := tc.identity
+			apiRouteControllerIdentityHook = func(string) controllerIdentityReply { return identity }
+			apiRouteSupervisorClientHook = func(string) *api.Client {
+				t.Errorf("standaloneAPIClient resolved the supervisor-managed client")
+				return sentinel
+			}
+			got := standaloneAPIClient(writeCityTOMLForRoute(t, t.TempDir(), tc.cityTOML))
+			switch {
+			case tc.want == "nil" && got != nil:
+				t.Fatalf("standaloneAPIClient = %p, want nil", got)
+			case tc.want == "standalone" && (got == nil || got == sentinel):
+				t.Fatalf("standaloneAPIClient = %p, want the standalone controller's client", got)
+			}
+		})
+	}
+}
+
+// TestMailCheckInjectProbesOnlyAStandaloneController pins the client each
+// form of `gc mail check` routes through in a supervisor-hosted city. The
+// per-turn --inject hook reads the mailbox in process either way, so it does
+// not probe the supervisor first: that probe is a full inbox listing on every
+// agent prompt. A plain check still asks the supervisor.
+func TestMailCheckInjectProbesOnlyAStandaloneController(t *testing.T) {
+	origIdentity, origSup, origGrants := apiRouteControllerIdentityHook, apiRouteSupervisorClientHook, apiRouteSupervisorGrantsHook
+	t.Cleanup(func() {
+		apiRouteControllerIdentityHook, apiRouteSupervisorClientHook, apiRouteSupervisorGrantsHook = origIdentity, origSup, origGrants
+	})
+	t.Setenv("GC_NO_API", "")
+	sentinel := api.NewClient("http://supervisor.sentinel:1")
+	apiRouteControllerIdentityHook = func(string) controllerIdentityReply {
+		return controllerIdentityReply{PID: 4242, HostingMode: controllerHostingSupervisor}
+	}
+	apiRouteSupervisorGrantsHook = func() bool { return false }
+	dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
+
+	apiRouteSupervisorClientHook = func(string) *api.Client {
+		t.Errorf("gc mail check --inject resolved the supervisor-managed client")
+		return sentinel
+	}
+	if c, _ := mailCheckClient(dir, true); c != nil {
+		t.Fatalf("mailCheckClient(inject) = %p, want nil: the hook reads the mailbox in process", c)
+	}
+
+	apiRouteSupervisorClientHook = func(string) *api.Client { return sentinel }
+	if c, reason := mailCheckClient(dir, false); c != sentinel {
+		t.Fatalf("mailCheckClient(plain) = (%p, %q), want the supervisor-managed client", c, reason)
 	}
 }

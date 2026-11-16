@@ -1,22 +1,19 @@
 package herdr
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/gastownhall/gascity/internal/execenv"
-	"github.com/gastownhall/gascity/internal/execgrace"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
+	"github.com/gastownhall/gascity/internal/runtime/setupcmd"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -106,6 +103,9 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 	if p.IsRunning(name) {
 		return runtime.ErrSessionExists
 	}
+	if err := startCommandRefusal(cfg); err != nil {
+		return fmt.Errorf("herdr: start %q: %w", name, err)
+	}
 	// Step 0: stage the working directory, then run pre_start host-side,
 	// mirroring the other host-side providers (tmux stageStartFiles +
 	// doStartSession Step 0, subprocess/acp StageSessionWorkDir): stage
@@ -135,7 +135,7 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 	// workspace instead of racing to create duplicates. Under herdr ≥0.7.5 the
 	// tab's root shell pane — created here with the agent's cwd and env — IS
 	// the agent's pane.
-	wsLabel, tabLabel := placementFor(name, cfg.Env)
+	wsLabel, tabLabel := placementFor(name, p.c.session, cfg.Env)
 	p.mu.Lock()
 	tabID, paneID, err := p.c.ensurePlacement(ctx, wsLabel, tabLabel, workDir, cfg.Env)
 	p.mu.Unlock()
@@ -245,15 +245,7 @@ func (p *Provider) launchCommand(ctx context.Context, name string, spec launchSp
 			_ = p.c.tabClose(ctx, placed.TabID)
 		}
 	case spec.Raw != "":
-		// exec through the shell so the pane's root process becomes the
-		// command: when it exits the pane (and tab) close, preserving the
-		// tmux contract that a session ends with its command. The typed
-		// command executes only after the fresh pane's shell finishes
-		// initializing, so wait (bounded) for the launch to actually land —
-		// otherwise callers probing right after Start see a bare shell.
-		if err = p.c.paneRunCommand(ctx, paneID, "exec /bin/sh -c "+shellquote.Quote(spec.Raw)); err == nil {
-			p.waitPaneLaunched(ctx, paneID, spec.Raw)
-		}
+		err = p.launchRaw(ctx, paneID, spec.Raw)
 	default:
 		// Empty command: the pane's own shell is the session.
 	}
@@ -380,7 +372,7 @@ func (p *Provider) launchOrchestration(ctx context.Context, name string, cfg run
 	// branch) also re-delivers on the next reconcile tick; for every other
 	// path nudgeStalledPoolClaims remains the reconcile-tick backstop of
 	// last resort.
-	if err := p.c.deliverStartupTurn(ctx, launch.paneID, startupText, launch.mode); err != nil {
+	if err := p.c.deliverStartupTurn(ctx, launch.paneID, startupText, launch.mode, cfg.NotReadyMarkers, cfg.ReadyPromptPrefix); err != nil {
 		p.recordStartupDeliveryUnconfirmed(name, launch.paneID, idleOutcome, err)
 	}
 	return nil
@@ -541,19 +533,6 @@ func startupPrimeText(cfg runtime.Config) string {
 // concurrent boots during a town-wide restart.
 const startupNudgeIdleTimeout = 60 * time.Second
 
-const (
-	// preStartOutputLimit bounds the captured output tail attached to a failed
-	// pre_start error (mirrors tmux's setupCommandOutputLimit).
-	preStartOutputLimit = 4096
-	// preStartWaitDelay force-closes the capture pipes shortly after the command
-	// exits, so a pre_start that daemonizes a child holding inherited stdio
-	// cannot hang the start (mirrors tmux's setupCommandWaitDelay).
-	preStartWaitDelay = 2 * time.Second
-	// preStartCancelGrace is the rollback-trap budget when the activity-aware
-	// setup budget is enabled (mirrors tmux's setupCancelGrace).
-	preStartCancelGrace = 10 * time.Second
-)
-
 // runPreStart runs cfg.PreStart shell commands on the host before the agent is
 // created, mirroring the tmux provider (tmux/adapter.go runPreStart).
 //
@@ -579,119 +558,28 @@ func (p *Provider) runPreStart(ctx context.Context, cfg runtime.Config) error {
 	return nil
 }
 
-// runSetupCommand executes one setup command under the provider's setupTimeout,
-// mirroring tmux's tmuxStartOps.runSetupCommand: `sh -c <cmd>`, cwd from GC_DIR
-// (the workDir a pre_start may itself be creating — so it is intentionally read
-// from env rather than cfg.WorkDir), process env plus cfg.Env.
+// runSetupCommand executes one setup command under the provider's setup
+// budget through [setupcmd.Run], which owns the `sh -c` execution, the
+// TERM-then-KILL cancellation, the cause-bearing failure and the redacted output
+// tail. What stays here is the provider's policy: the defaulted setupTimeout,
+// the optional activity-aware ceiling, and the city root as the cwd fallback
+// when GC_DIR (the workDir a pre_start may itself be creating — so it is
+// intentionally read from env rather than cfg.WorkDir) does not exist yet, the
+// same fallback effectiveWorkDir applies to the agent itself.
 func (p *Provider) runSetupCommand(ctx context.Context, cmd string, env map[string]string) error {
-	// Read the base env before arming the deadline: execenv.Environ waits out
-	// an in-flight native store open, and that wait is not the command's.
-	baseEnv := execenv.Environ()
 	timeout := p.setupTimeout
 	if timeout <= 0 {
 		timeout = defaultSetupTimeout
 	}
-	// Deadline shape (mirrors tmux's runSetupCommand): with setupMaxTimeout
-	// unset the historical fixed wall-clock deadline applies; with it set the
-	// budget is activity-aware — timeout bounds output silence,
-	// setupMaxTimeout bounds total runtime.
-	idle, grace := time.Duration(0), preStartWaitDelay
-	if p.setupMaxTimeout > 0 {
-		idle, grace = timeout, preStartCancelGrace
+	var cityRoot string
+	if p.c != nil {
+		cityRoot = p.c.cityRoot
 	}
-	mon := execgrace.NewMonitor(ctx, idle, p.setupMaxTimeout)
-	defer mon.Stop()
-	runCtx := mon.Context()
-	if !mon.Enabled() {
-		var cancel context.CancelFunc
-		runCtx, cancel = context.WithTimeout(ctx, timeout)
-		defer cancel()
-	}
-	c := exec.CommandContext(runCtx, "sh", "-c", cmd)
-	// cwd from GC_DIR when it exists; otherwise fall back to the city root —
-	// the same not-yet-created-workDir fallback effectiveWorkDir applies to the
-	// agent itself. A pool session's worktree is often created concurrently with
-	// (or by) pre_start, so chdir'ing into it unconditionally fails fast with
-	// "chdir ... no such file" on resume-path starts that run before the
-	// worktree lands. The injected pre_start commands carry their target as an
-	// explicit --workdir flag and do not depend on cwd.
-	if workDir := strings.TrimSpace(env["GC_DIR"]); workDir != "" {
-		if _, err := os.Stat(workDir); err == nil {
-			c.Dir = workDir
-		} else if p.c.cityRoot != "" {
-			c.Dir = p.c.cityRoot
-		}
-	}
-	c.Env = baseEnv
-	for k, v := range env {
-		c.Env = append(c.Env, k+"="+v)
-	}
-	var out bytes.Buffer
-	w := mon.Writer(&out)
-	c.Stdout, c.Stderr = w, w
-	// Cooperative cancellation (execgrace.Apply): deadline expiry sends SIGTERM to
-	// the command's process group first so shell rollback traps run before
-	// the forced kill; the grace doubles as the pipe-closing WaitDelay
-	// (mirrors tmux's runSetupCommand).
-	execgrace.Apply(c, grace)
-	if err := c.Run(); err != nil {
-		// ErrWaitDelay means the command itself exited successfully and only the
-		// force-closed pipes ended the wait: a setup command that daemonizes a
-		// child holding inherited stdio succeeded (mirrors tmux).
-		if errors.Is(err, exec.ErrWaitDelay) {
-			return nil
-		}
-		// context.Cause surfaces which budget fired (execgrace.ErrIdle,
-		// execgrace.ErrCeiling, or the fixed deadline's DeadlineExceeded).
-		if ctxErr := context.Cause(runCtx); ctxErr != nil && runCtx.Err() != nil {
-			err = fmt.Errorf("%w: %w", ctxErr, err)
-		}
-		// The command's own output can echo a credential back at us — `set -x`
-		// traces every expansion, and a failing curl prints the header it sent.
-		// This error is durable (logs, event bus, bead notes) for the same reason
-		// the client's are.
-		//
-		// Both environments it was given, not just the session env: c.Env starts
-		// from os.Environ() above, so the controller's own credentials are in
-		// scope for that echo as much as the session's.
-		//
-		// [runtime.RedactSecretsTail] scrubs before it truncates, which is the
-		// order that matters: redacting a cut tail would leave a straddling
-		// credential decapitated and no longer matching itself. Unlike tmux's
-		// bounded writer this holds the whole output already, so nothing has to
-		// be retained to make that work.
-		tail, _ := runtime.RedactSecretsTail(out.String(), preStartOutputLimit, runtime.SetupCommandSecrets(env))
-		if tail = strings.TrimSpace(tail); tail != "" {
-			return fmt.Errorf("%w: %s", err, tail)
-		}
-		return err
-	}
-	return nil
-}
-
-// Stop closes the agent's pane and clears its metadata sidecar. Idempotent.
-// The pane resolves through the sidecar binding when the name is gone — the
-// earlier "sleep leak" was exactly this gap: name lost ⇒ pane never found ⇒
-// closePane never issued ⇒ panes piled up across witness sleep cycles.
-//
-// A session herdr answers it does not have (no agent, no live bound pane, or a
-// pane gone before its close) is stopped: nil. So is a session whose pane could
-// not be reached because the herdr server is confirmed dead
-// (serverConfirmedDead): its panes died with it, and dropping the sidecar
-// keeps a restarted server's recycled pane id from resolving to this session.
-// Otherwise a herdr that cannot answer (the pane lookup, an exited agent's
-// reap or the close fails) is an error, and the sidecar is kept so a retried
-// Stop still finds the pane (RUNTIME-CONTRACT-003: runtime.StopForCleanup
-// propagates it rather than certify the session gone).
-func (p *Provider) Stop(name string) error {
-	ctx := context.Background()
-	if err := p.closeSessionPane(ctx, name); err != nil && !p.c.serverConfirmedDead(ctx) {
-		return fmt.Errorf("herdr: stopping %q: %w", name, err)
-	}
-	if err := p.clearMeta(name); err != nil {
-		return fmt.Errorf("herdr: stopping %q: clearing its metadata: %w", name, err)
-	}
-	return nil
+	return setupcmd.Run(ctx, cmd, env, setupcmd.Options{
+		Timeout:     timeout,
+		MaxTimeout:  p.setupMaxTimeout,
+		FallbackDir: cityRoot,
+	})
 }
 
 // closeSessionPane resolves name's pane and closes it. No pane, or a pane herdr
@@ -704,7 +592,7 @@ func (p *Provider) closeSessionPane(ctx context.Context, name string) error {
 	if pid == "" {
 		return nil
 	}
-	if err := p.c.closePane(ctx, pid); err != nil && !paneGone(err) {
+	if err := p.closeBoundPane(ctx, name, pid); err != nil && !paneGone(err) {
 		return fmt.Errorf("closing pane %s: %w", pid, err)
 	}
 	return nil
@@ -741,13 +629,6 @@ func (p *Provider) IsRunning(name string) bool {
 
 // IsAttached reports false: herdr 0.7.1 exposes no clean attach-state query.
 func (p *Provider) IsAttached(_ string) bool { return false }
-
-// Attach runs `herdr agent attach`, blocking until the user detaches.
-func (p *Provider) Attach(name string) error {
-	cmd := exec.Command(p.c.bin, "--session", p.c.session, "agent", "attach", herdrAgentName(name))
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	return cmd.Run() // blocks until the user detaches
-}
 
 // ProcessAlive reports whether the agent's pane has a live foreground process,
 // optionally requiring one of processNames to be present.
@@ -789,7 +670,7 @@ func (p *Provider) processAliveByPane(ctx context.Context, name, paneID string, 
 	}
 	for _, pr := range fg {
 		for _, want := range processNames {
-			if pr.Name == want {
+			if proctable.ProcessNameKey(pr.Name) == proctable.ProcessNameKey(want) {
 				return true
 			}
 		}
@@ -815,7 +696,7 @@ func (p *Provider) startAgentAdopting(ctx context.Context, name, kind, paneID st
 			probe, perr := p.probePane(ctx, holderPane)
 			return perr == nil && probe.Exists && probe.Busy
 		},
-		closePane:  func(holderPane string) error { return p.c.closePane(ctx, holderPane) },
+		closePane:  func(holderPane string) error { return p.closeBoundPane(ctx, name, holderPane) },
 		retryStart: func() (agentInfo, error) { return p.launchAgentKind(ctx, hn, kind, paneID, args) },
 	})
 }
@@ -897,34 +778,13 @@ func (p *Provider) waitPaneShellReady(ctx context.Context, paneID string) {
 	}
 }
 
-// rawLaunchWait bounds how long Start's raw path waits for the typed
-// `exec /bin/sh -c …` to actually execute in the fresh pane. The typed launch
-// runs only after the pane's shell finishes initializing (rc files can take
-// seconds and spawn their own foreground children, so pane busyness alone
-// cannot confirm the launch). The bound only bites on a wedged shell, after
-// which Start proceeds best-effort (the reconciler tolerates a slow launch).
+// rawLaunchWait bounds how long Start's raw path waits for the typed launch to
+// actually execute in the fresh pane. The typed launch runs only after the
+// pane's shell finishes initializing (rc files can take seconds and spawn their
+// own foreground children, so pane busyness alone cannot confirm the launch).
+// The bound only bites on a wedged shell, after which Start proceeds
+// best-effort (the reconciler tolerates a slow launch).
 const rawLaunchWait = 15 * time.Second
-
-// waitPaneLaunched polls the pane until the launched `/bin/sh -c <raw>` shows
-// up in its foreground (exec preserves argv), the pane is gone (the command
-// already ran and exited), or the bound elapses. Best-effort by design.
-func (p *Provider) waitPaneLaunched(ctx context.Context, paneID, raw string) {
-	deadline := time.Now().Add(rawLaunchWait)
-	for time.Now().Before(deadline) {
-		shellPID, fg, err := p.c.processInfo(ctx, paneID)
-		switch {
-		case err != nil && (strings.Contains(err.Error(), "not_found") || strings.Contains(err.Error(), "not found")):
-			return // pane already gone: the command ran and exited
-		case err == nil && shellPID != 0 && (paneRunsCommand(fg, raw) || paneRootReplaced(shellPID, fg)):
-			return
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(200 * time.Millisecond):
-		}
-	}
-}
 
 // processTreeAlive is the descendant-walk fallback for ProcessAlive: it takes
 // a host-wide process snapshot and checks whether any process reachable from
@@ -935,11 +795,18 @@ func (p *Provider) waitPaneLaunched(ctx context.Context, paneID, raw string) {
 // since process env (unlike ppid) survives reparenting. Purely additive: it
 // never narrows the shell/foreground-rooted match, so a genuinely-dead agent
 // still reports false.
+//
+// A snapshot that could not inspect every process still answers: a match is a
+// match, and names and parentage do not need inspection. What it cannot do is
+// rule out a process whose environment went unread, which may carry sessionID;
+// while one of those could lead to a wanted name, the agent is not reported
+// dead.
 var snapshotProcesses = proctable.SnapshotProcesses
 
 func processTreeAlive(shellPID int, fg []proc, processNames []string, sessionID string) bool {
 	records, err := snapshotProcesses()
-	if err != nil || len(records) == 0 {
+	partial := errors.Is(err, proctable.ErrScanIncomplete)
+	if (err != nil && !partial) || len(records) == 0 {
 		return false
 	}
 	roots := make([]int, 0, len(fg)+1)
@@ -956,7 +823,19 @@ func processTreeAlive(shellPID int, fg []proc, processNames []string, sessionID 
 			}
 		}
 	}
-	return proctable.DescendantAlive(records, roots, processNames)
+	if proctable.DescendantAlive(records, roots, processNames) {
+		return true
+	}
+	if !partial || sessionID == "" {
+		return false
+	}
+	var unread []int
+	for _, r := range records {
+		if r.SessionIDUnknown {
+			unread = append(unread, r.PID)
+		}
+	}
+	return proctable.DescendantAlive(records, unread, processNames)
 }
 
 // ObserveLiveness reports session presence (Running) and agent-process
@@ -1073,7 +952,7 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	ctx := context.Background()
 	agents, err := p.c.listAgents(ctx)
 	if err != nil {
-		return nil, err
+		return nil, listRunningFailure(err)
 	}
 	seen := make(map[string]bool)   // gc names already listed
 	mapped := make(map[string]bool) // herdr-side names owned by bound gc sessions
@@ -1290,18 +1169,25 @@ func (p *Provider) paneID(ctx context.Context, name string) (string, error) {
 
 // workspaceTabFor maps a gascity runtime session name to its herdr placement: a
 // per-rig (or per-town) workspace label and a per-agent tab label. Runtime names
-// are "<rig>--<town>__<agent>" (rig-qualified; citylayout maps "/" → "--") or
-// "<town>__<agent>" (town-level). Workspace = the rig when present, else the
-// town; tab = the agent (the segment after the last "__"). Falls back to the
-// whole name when those separators are absent (defensive for non-gc names).
-func workspaceTabFor(name string) (workspace, tab string) {
+// are "<rig>--<town>__<agent>" (rig-qualified; citylayout maps "/" → "--"),
+// "<town>__<agent>" (town-level, when the session_template carries a city
+// prefix) or just "<agent>" (town-level under the default session_template,
+// {{.Agent}}, which relies on tmux's per-city socket instead of a prefix).
+// Workspace = the rig when present, else the town; tab = the agent (the segment
+// after the last "__"). A bare name carries no town, so it takes town: the herdr
+// session name, which is the city. Under herdr the session is already per-city,
+// so the workspace is the only grouping left, and without this every
+// town-level agent got a workspace named after itself (gascity#8933). Falls back
+// to the whole name when there is no separator and no town is known (defensive
+// for non-gc names).
+func workspaceTabFor(name, town string) (workspace, tab string) {
 	rest := name
 	if i := strings.Index(name, "--"); i >= 0 {
 		workspace, rest = name[:i], name[i+2:]
 	} else if j := strings.Index(name, "__"); j >= 0 {
 		workspace = name[:j]
 	} else {
-		workspace = name
+		workspace = town // "" falls back to the whole name below
 	}
 	if k := strings.LastIndex(rest, "__"); k >= 0 {
 		tab = rest[k+2:]
@@ -1330,14 +1216,15 @@ func workspaceTabFor(name string) (workspace, tab string) {
 // originating rig workspace (webapp/mobile), and GC_ALIAS swaps the wisp id for
 // the themed instance name, yielding e.g. workspace "webapp", tab
 // "polecat-furiosa". Persistent and town-level sessions are unaffected: they
-// either carry no GC_RIG (town agents) or already resolve to the same labels.
-func placementFor(name string, env map[string]string) (workspace, tab string) {
-	workspace, tab = workspaceTabFor(name)
+// either carry no GC_RIG (town agents, which workspaceTabFor places in the
+// town workspace named by town) or already resolve to the same labels.
+func placementFor(name, town string, env map[string]string) (workspace, tab string) {
+	workspace, tab = workspaceTabFor(name, town)
 	if len(env) == 0 {
 		return workspace, tab
 	}
 	// Group under the originating rig when known. Town-level agents (mayor,
-	// deacon, …) have no GC_RIG and keep their town workspace.
+	// deacon, …) have no GC_RIG and keep their town workspace (the city name).
 	if rig := strings.TrimSpace(env["GC_RIG"]); rig != "" {
 		workspace = rig
 	}

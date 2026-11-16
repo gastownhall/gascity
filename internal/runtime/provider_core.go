@@ -134,6 +134,30 @@ func ListRunningAttested(sp Provider) bool {
 	return ok && a.ListRunningComplete()
 }
 
+// SharedListing is an optional capability of a provider whose ListRunning
+// lists sessions beyond one city's: k8s lists every gc-agent pod in a
+// namespace that other cities may share. A name in such a listing does not
+// show that this city's session is running.
+type SharedListing interface {
+	ListRunningShared() bool
+}
+
+// ListRunningShared reports whether sp's listing, or any backend's of a
+// composite ([BackendsProvider], at any depth), is shared across cities.
+func ListRunningShared(sp Provider) bool {
+	if s, ok := sp.(SharedListing); ok && s.ListRunningShared() {
+		return true
+	}
+	if c, ok := sp.(BackendsProvider); ok {
+		for _, b := range c.Backends() {
+			if ListRunningShared(b.Provider) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // ListRunningWithAttestation lists sp under prefix and reports whether that
 // listing may be read as proof of absence. Attestation is read before the
 // listing and after it, and only both count: a provider's attestation can

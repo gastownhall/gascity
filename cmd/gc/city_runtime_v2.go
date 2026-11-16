@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
+	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
@@ -107,6 +108,10 @@ func (cr *CityRuntime) newPlannerHost() plannerHost {
 		},
 		capabilities: func() error {
 			return v2CapabilityVerdict(v2ClassStoreCapabilities(cr.v2SessionsStore(), cr.v2GraphStore(), false))
+		},
+		runtimeReadiness: func() error {
+			_, sp, _ := cr.serviceEnvSnapshot()
+			return v2RuntimeReadiness(sp)
 		},
 		beginTrace: cr.beginV2Trace,
 		inventoryFields: func() map[string]any {
@@ -296,6 +301,57 @@ func v2CapabilityRefusal(caps []v2StoreCapability) error {
 	return fmt.Errorf("v2 refuses to boot without conditional writes (C0.7): %s; v2 never writes blind: %s, or set session_reconciler = \"legacy\"", strings.Join(parts, "; "), fix)
 }
 
+// v2RuntimeReadiness is C0.8: the provider the city built, not the latch's
+// probe, decides whether v2 runs on it. Every leaf that reports v2 readiness
+// (an exec runtime) must have none of the v2 gaps in its own handshake;
+// one that lacks them refuses (the script answers the provider otherwise
+// than it answered the latch's probe: it changed, or reads its env), and
+// forgets every remembered admission handshake; one whose handshake could
+// not be read is no verdict (a *v2RuntimeUnreadError), so boot retries it.
+// A gap wins over an unread leaf.
+func v2RuntimeReadiness(sp runtime.Provider) error {
+	var refused []string
+	var unread error
+	for _, leaf := range inventoryLeaves(sp, "") {
+		r, ok := leaf.provider.(runtime.V2ReadinessReporter)
+		if !ok {
+			continue
+		}
+		label := leaf.label
+		if label == "" {
+			label = "the session runtime"
+		}
+		missing, err := r.V2Readiness()
+		switch {
+		case err != nil:
+			unread = &v2RuntimeUnreadError{Label: label, Err: err}
+		case len(missing) > 0:
+			refused = append(refused, fmt.Sprintf("%s's handshake does not declare %s", label, strings.Join(missing, " or ")))
+		}
+	}
+	if len(refused) > 0 {
+		// The admission probe answered otherwise: forget it, so the next
+		// latch asks the script again (and an unset session_reconciler then
+		// falls back to legacy instead of refusing every boot).
+		forgetExecReadiness()
+		return fmt.Errorf("v2 refuses to run on an exec runtime that is not v2-ready (C0.8): %s; the admission probe read a v2-ready handshake, so the script answers it otherwise now, or for the city's env: make it declare the observe.v1 profile, or set session_reconciler = \"legacy\"", strings.Join(refused, "; "))
+	}
+	return unread
+}
+
+// v2RuntimeUnreadError is C0.8 failing to read an exec runtime's handshake:
+// no verdict on the runtime, so boot retries rather than refusing.
+type v2RuntimeUnreadError struct {
+	Label string
+	Err   error
+}
+
+func (e *v2RuntimeUnreadError) Error() string {
+	return fmt.Sprintf("C0.8 could not read %s's handshake: %v", e.Label, e.Err)
+}
+
+func (e *v2RuntimeUnreadError) Unwrap() error { return e.Err }
+
 // v2CapabilityUnreadError is C0.7 failing to read a class store's list
 // revisions: no verdict on the store, so boot retries rather than refusing.
 type v2CapabilityUnreadError struct {
@@ -389,8 +445,12 @@ func (cr *CityRuntime) reloadV2(p *tickPass, source reloadSource) {
 // runtime a start is still creating; an error aborts the reload. The caller
 // resumes once the swap applied or aborted. Legacy waits the same bound for
 // its launched async starts. A ctx done during the wait (a controller stop)
-// aborts the swap too.
-func (cr *CityRuntime) beforeProviderSwap(ctx context.Context, cfg *config.City) (resume func(), err error) {
+// aborts the swap too. Under v2 the swap is refused first when the latch
+// refuses cfg's runtime, or when next, the provider the swap would run,
+// fails C0.8 (v2RuntimeReadiness): its own handshake, not the latch's probe,
+// decides, so v2 never swaps onto a runtime whose reads would come back
+// unsupported.
+func (cr *CityRuntime) beforeProviderSwap(ctx context.Context, cfg *config.City, next runtime.Provider) (resume func(), err error) {
 	startup := cfg.Session.StartupTimeoutDuration()
 	if startup <= 0 {
 		startup = 60 * time.Second // as admit's start deadline (CONTRACT v5.4 P3)
@@ -398,8 +458,11 @@ func (cr *CityRuntime) beforeProviderSwap(ctx context.Context, cfg *config.City)
 	if cr.v2 == nil {
 		return func() {}, cr.asyncStarts.waitLaunchedStarts(ctx, startup+startDeadlineSlack)
 	}
-	if r, refused := v2ProviderSwapRefusal(cfg, reconcilerModeLookupEnv); refused {
+	if r, refused := v2ProviderSwapRefusal(cfg, cr.cityPath, reconcilerModeLookupEnv); refused {
 		return func() {}, fmt.Errorf("v2 refuses the provider swap: %s", r)
+	}
+	if verdict := v2RuntimeReadiness(next); verdict != nil {
+		return func() {}, fmt.Errorf("v2 refuses the provider swap: %w", verdict)
 	}
 	cr.v2.planner.pauseStarts()
 	cr.v2.exec.closeStarts()
@@ -416,12 +479,12 @@ func (cr *CityRuntime) beforeProviderSwap(ctx context.Context, cfg *config.City)
 // v2ProviderSwapRefusal is the latch's refusal of the session provider cfg
 // runs under lookupEnv: at boot (v2LatchRefusals), and on a reload's provider
 // swap, so a v2 city never swaps onto a runtime it would not start on.
-func v2ProviderSwapRefusal(cfg *config.City, lookupEnv func(string) (string, bool)) (latchRefusal, bool) {
+func v2ProviderSwapRefusal(cfg *config.City, cityPath string, lookupEnv func(string) (string, bool)) (latchRefusal, bool) {
 	reg, err := runtimeRegistryForCity(cfg)
 	if err != nil { // a pack runtime collision; config load already rejects it
 		reg = runtimeRegistry
 	}
-	return v2SessionRuntimeRefusal(cfg, reg, v2SessionRuntimeName(cfg, lookupEnv))
+	return v2SessionRuntimeRefusal(cfg, cityPath, reg, v2SessionRuntimeRawName(cfg, lookupEnv), v2SessionRuntimeName(cfg, lookupEnv))
 }
 
 // checkReconcilerWiring refuses runtime params whose v2 runtime and wake
