@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -227,6 +228,13 @@ func (p *proxyProcessInstance) start(now time.Time) error {
 		"GC_SERVICE_VISIBILITY="+p.publication.Visibility,
 		"GC_PUBLISHED_SERVICES_DIR="+citylayout.PublishedServicesDir(p.rt.CityPath()),
 	)
+	// The service's own city name, appended after the supervisor's ambient
+	// environment so it wins (exec keeps the last duplicate): one supervisor
+	// can run several cities, and a service that bridges into its city must
+	// not see a neighbor's name.
+	if name := strings.TrimSpace(p.rt.CityName()); name != "" {
+		cmd.Env = append(cmd.Env, "GC_CITY_NAME="+name)
+	}
 	cmd.Env = append(cmd.Env, extraHelperEnv...)
 	cmd.Env = execenv.WithUsageMetricsDisabled(cmd.Env)
 	cmd.Stdout = logFile
