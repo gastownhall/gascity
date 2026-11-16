@@ -328,8 +328,9 @@ func newControllerStateWithRoutes(
 	beadsQuiescent := new(atomic.Bool)
 	// The binding's cache is built before the controller state it counts its
 	// background reads on, so it reaches the state through this pointer, set
-	// once the state exists; a read that starts before then is not counted,
-	// and the city is not quiescent that early.
+	// once the state exists. A read that starts before then (the async full
+	// prime) stays uncounted for its whole duration; the retire's
+	// stop-whenever-running convergence bounds that gap.
 	var owner atomic.Pointer[controllerState]
 	routes = routes.withControllerCache(ctx, ep, beads.JoinCachingStoreOptions(
 		reconcileGateFor(beadsQuiescent),

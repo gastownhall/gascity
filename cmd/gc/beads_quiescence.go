@@ -163,6 +163,9 @@ func (cr *CityRuntime) repairResumedScopes(suspended beadsScopeSuspension) {
 // sessions have drained. It runs after the session reconcile, which is what
 // stops a suspended rig's sessions. The city scope is left to
 // enterBeadsQuiescenceIfDue: it is retired only once nothing runs at all.
+// It checks session drain only: off-tick store work (offTickStoreWorkInFlight)
+// is not consulted for a rig suspended on its own, so a late read that restarts
+// the rig's pair is undone by convergence on a later tick.
 func (cr *CityRuntime) tickRetireSuspendedRigScopes(p *tickPass) bool {
 	suspended := suspendedBeadsScopes(cr.cityPath, cr.cfg)
 	cr.retiredScopes.forgetResumed(suspended)

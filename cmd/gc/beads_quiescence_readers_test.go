@@ -69,14 +69,15 @@ func assertQuiescentReaderRetired(t *testing.T, cr *CityRuntime, logPath string)
 }
 
 func TestBeadsQuiescenceRetiresOnlyAfterAnInFlightCacheReconcileFinishes(t *testing.T) {
-	for _, scope := range []string{"city", "rig"} {
+	// Both cases retire through city quiescence; rig-only retirement (tickRetireSuspendedRigScopes) does not yet consult store work.
+	for _, scope := range []string{"city-gate", "rig-gate"} {
 		t.Run(scope, func(t *testing.T) {
 			cr, _, _, logPath := quiescenceRuntime(t, "")
 			cr.cfg.Workspace.SuspendedOnStart = true
 			cs := &controllerState{beadsQuiescent: new(atomic.Bool)}
 			cr.cs = cs
 			option := cs.reconcileGate()
-			if scope == "rig" {
+			if scope == "rig-gate" {
 				option = cs.rigReconcileGate("r1")
 			}
 			gate := newQuiescenceReadGate(beads.NewMemStore())
