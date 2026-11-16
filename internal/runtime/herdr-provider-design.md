@@ -123,6 +123,23 @@ exhaustion; bead az-405 has the full evidence trail). The adapter was rewritten 
 - `gc rig suspend` holds pack agents but NOT city.toml `[[named_session]]`s pointing at
   the rig; those respawn (mode=always) until their mode changes or the rig's sessions
   are closed.
+- **Every herdr CLI call is bounded, and a timeout is never read as absence.** All
+  invocations go through one runner (`runWithin`) with a deadline (30s by default; a verb
+  that carries its own `--timeout` gets that timeout plus a 10s margin), and `cmd.WaitDelay`
+  so a grandchild holding stdout cannot hold the call past its kill. An exec that ended on
+  its deadline or its caller's cancel reports `context.DeadlineExceeded` / `context.Canceled`
+  and never the killed process's stderr or exit status, which would otherwise read as
+  "session gone". `Start`'s existence check surfaces such an error instead of treating the
+  session as absent, so a stalled herdr cannot make a live session look new (a second
+  pre_start, placement and agent launch); `ListRunning` has its own 25s walk deadline and,
+  on expiry, returns the names it verified plus an unwrapped `*runtime.PartialListError`;
+  server bring-up is single-flight (one launch, every waiter shares the result, a waiter's
+  own ctx only ends its own wait). The bool-only methods (`IsRunning`, `ProcessAlive`,
+  `ObserveLiveness`) still collapse a timeout to false, so a caller that acts destructively
+  on false must sit behind the fence in `cmd/gc/reconcile_session_fence.go` or use a
+  three-valued read; several session-bead and doctor paths do not yet (tracked separately). A test (`TestExecSitesAreAllowListed`) fails
+  on any new `exec.Command` in the package outside the runner, the detached server launch
+  and `agent attach`.
 - Verification history: unit suite runs against a fake-0.7.5 shell-script herdr
   (`panebinding_provider_test.go`); live tests cover occupant swap, raw sessions, a
   real claude kind-path boot, and the full provider conformance suite. Production

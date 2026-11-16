@@ -46,7 +46,7 @@ func TestServerAliveDialsThroughTheClientConnect(t *testing.T) {
 }
 
 // TestStartServerStopsAtARefusedEndpoint: a connect that reached something it
-// refused (errEndpointRefused) fails startServer with the refusal, and nothing
+// refused (errEndpointRefused) fails ensureServer with the refusal, and nothing
 // is launched. No server started now could take the endpoint from whatever
 // holds it, so launching one would only turn the reason into "did not become
 // ready" after the wait. The binary does not exist, so a launch would fail
@@ -55,14 +55,14 @@ func TestStartServerStopsAtARefusedEndpoint(t *testing.T) {
 	refusal := endpointRefusal{errors.New("herdr pipe P is owned by someone else")}
 	c := &client{session: "gc-test", sockPath: filepath.Join(t.TempDir(), "herdr.sock"), bin: filepath.Join(t.TempDir(), "no-herdr-here")}
 	c.dialUnix = func(context.Context, string) (net.Conn, error) { return nil, refusal }
-	err := c.startServer()
+	err := c.ensureServer(context.Background())
 	if !errors.Is(err, errEndpointRefused) || !strings.Contains(err.Error(), "owned by someone else") {
-		t.Fatalf("startServer = %v; want the refusal", err)
+		t.Fatalf("ensureServer = %v; want the refusal", err)
 	}
 }
 
 // TestStartServerStopsWhenItsEndpointIsRefusedWhileWaiting: a refusal that
-// appears while startServer waits for the server it launched ends the wait.
+// appears while ensureServer waits for the server it launched ends the wait.
 // The launch is this test binary, which exits at once on the server's
 // arguments.
 func TestStartServerStopsWhenItsEndpointIsRefusedWhileWaiting(t *testing.T) {
@@ -80,11 +80,11 @@ func TestStartServerStopsWhenItsEndpointIsRefusedWhileWaiting(t *testing.T) {
 		return nil, endpointRefusal{errors.New("herdr pipe P is owned by someone else")}
 	}
 	start := time.Now()
-	err = c.startServer()
+	err = c.ensureServer(context.Background())
 	if !errors.Is(err, errEndpointRefused) {
-		t.Fatalf("startServer = %v; want the refusal", err)
+		t.Fatalf("ensureServer = %v; want the refusal", err)
 	}
 	if waited := time.Since(start); waited > 5*time.Second {
-		t.Errorf("startServer took %v; the refusal should end the wait", waited)
+		t.Errorf("ensureServer took %v; the refusal should end the wait", waited)
 	}
 }

@@ -16,7 +16,7 @@ import (
 // is not that rule: on macOS it ignores XDG_CONFIG_HOME and returns
 // $HOME/Library/Application Support, a directory herdr never uses (#5770).
 // herdr reads each variable with std::env::var, so a variable that is set
-// counts even when it is empty or relative; startServer refuses the relative
+// counts even when it is empty or relative; ensureServer refuses the relative
 // socket path that results.
 func herdrConfigDir() string {
 	if dir, ok := os.LookupEnv("XDG_CONFIG_HOME"); ok {

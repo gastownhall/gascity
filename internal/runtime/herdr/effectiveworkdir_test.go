@@ -19,7 +19,7 @@ import (
 //
 // An EMPTY WorkDir keeps the legitimate fallback chain: a non-empty
 // GC_CITY_ROOT env, then the provider's cityRoot, then "" (city-less; defers
-// to the server cwd, itself pinned to the city root in startServer).
+// to the server cwd, itself pinned to the city root in ensureServer).
 func TestEffectiveWorkDir(t *testing.T) {
 	existing := t.TempDir()
 	missing := filepath.Join(existing, "not-created-yet")

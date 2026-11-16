@@ -136,7 +136,7 @@ func TestSocketPathCountsSetButEmptyVariablesAsSet(t *testing.T) {
 
 // A relative socket path resolves against the working directory of whichever
 // process uses it: the herdr server runs in the city root, while gc and the
-// herdr CLI calls run in gc's own. startServer must refuse one before it
+// herdr CLI calls run in gc's own. ensureServer must refuse one before it
 // dials, unlinks or launches anything, with an error that names the variables
 // to fix and both directories.
 func TestStartServerRefusesRelativeSocketPath(t *testing.T) {
@@ -169,20 +169,20 @@ func TestStartServerRefusesRelativeSocketPath(t *testing.T) {
 				t.Fatalf("test setup: socketPath() = %q; want a relative path", sock)
 			}
 
-			err := c.startServer()
+			err := c.ensureServer(context.Background())
 			if err == nil {
-				t.Fatal("startServer() = nil for a relative socket path; want a refusal")
+				t.Fatal("ensureServer() = nil for a relative socket path; want a refusal")
 			}
 			for _, want := range []string{sock, "XDG_CONFIG_HOME", cityRoot, gcDir} {
 				if !strings.Contains(err.Error(), want) {
-					t.Errorf("startServer() error %q does not name %q", err, want)
+					t.Errorf("ensureServer() error %q does not name %q", err, want)
 				}
 			}
 			if !standaloneHome.MatchString(err.Error()) {
-				t.Errorf("startServer() error %q does not name HOME", err)
+				t.Errorf("ensureServer() error %q does not name HOME", err)
 			}
 			if calls := fake.logLines(t); len(calls) != 0 {
-				t.Errorf("startServer() ran herdr %q; want no launch", calls)
+				t.Errorf("ensureServer() ran herdr %q; want no launch", calls)
 			}
 		})
 	}

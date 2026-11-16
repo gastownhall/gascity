@@ -41,9 +41,9 @@ func newBoundedClient(t *testing.T, script string) *client {
 // and the result is a deadline error, never the stderr text (which here would
 // read as "session gone"), with a declared argv secret scrubbed.
 func TestBoundedExecKilledAtBoundMapsToDeadline(t *testing.T) {
-	c := newBoundedClient(t, "#!/bin/sh\necho 'session not found: hunter2' >&2\nexec sleep "+hangSecs+"\n")
+	c := newBoundedClient(t, "#!/bin/sh\necho 'session not found: hunter2-secret-value' >&2\nexec sleep "+hangSecs+"\n")
 	start := time.Now()
-	_, err := c.runWithSecrets(context.Background(), []string{"hunter2"}, "agent", "prompt", "%1", "hunter2")
+	_, err := c.runWithSecrets(context.Background(), []string{"hunter2-secret-value"}, "agent", "prompt", "%1", "hunter2-secret-value")
 	elapsed := time.Since(start)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v; want it to wrap context.DeadlineExceeded", err)
@@ -51,7 +51,7 @@ func TestBoundedExecKilledAtBoundMapsToDeadline(t *testing.T) {
 	if runtime.IsSessionGone(err) {
 		t.Fatalf("a timeout reads as session gone: %v", err)
 	}
-	if strings.Contains(err.Error(), "hunter2") {
+	if strings.Contains(err.Error(), "hunter2-secret-value") {
 		t.Fatalf("declared secret leaked into %q", err)
 	}
 	if elapsed > testBound+testWaitDlay+boundSlack {

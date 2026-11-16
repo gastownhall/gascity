@@ -79,7 +79,7 @@ func New(herdrSession, metaDir, cityRoot string, setupTimeout, setupMaxTimeout t
 // ConfigureServer ensures the shared herdr session-server is running. A named
 // session's socket does not exist until its server starts, so this must run
 // before any agent op. Idempotent.
-func (p *Provider) ConfigureServer() error { return p.c.startServer() }
+func (p *Provider) ConfigureServer() error { return p.c.ensureServer(context.Background()) }
 
 // TeardownServer stops the shared herdr session-server after sessions drain.
 func (p *Provider) TeardownServer() error { return p.c.stopServer() }
@@ -91,7 +91,7 @@ func (p *Provider) TeardownServer() error { return p.c.stopServer() }
 // placed workspace/tab, accepts its startup dialogs, runs session_setup, and
 // delivers the startup nudge once the agent reaches idle.
 func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
-	if err := p.ConfigureServer(); err != nil {
+	if err := p.c.ensureServer(ctx); err != nil {
 		return fmt.Errorf("herdr: configure server: %w", err)
 	}
 	return p.start(ctx, name, cfg)
@@ -101,7 +101,15 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 // separated so tests can drive it against a fake herdr CLI without booting a
 // real session-server socket (mirroring tmux's Start/doStartSession split).
 func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) error {
-	if p.IsRunning(name) {
+	// The existence check runs on Start's ctx and tells a lookup that never
+	// answered from one that answered "absent": treating a timeout as absence
+	// would stage, pre_start and place a second copy of a live session. Any
+	// other lookup error is still read as not running, as IsRunning does.
+	_, running, err := resolveBinding(p.lookupOps(ctx, name))
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return fmt.Errorf("herdr: check existing session %q: %w", name, err)
+	}
+	if err == nil && running {
 		return runtime.ErrSessionExists
 	}
 	if err := startCommandRefusal(cfg); err != nil {
@@ -950,22 +958,36 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 // registered names. A registry entry with no registered name is a pane herdr
 // detected an agent in, not a session, and is never listed.
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
-	ctx := context.Background()
+	// One deadline covers the whole walk: each session costs up to three herdr
+	// calls, so without it a stalled herdr multiplies the per-call bound by the
+	// number of bound sessions.
+	ctx, cancel := context.WithTimeout(context.Background(), p.listBound())
+	defer cancel()
 	agents, err := p.c.listAgents(ctx)
 	if err != nil {
 		return nil, listRunningFailure(err)
 	}
 	seen := make(map[string]bool)   // gc names already listed
 	mapped := make(map[string]bool) // herdr-side names owned by bound gc sessions
-	var out []string
-	for _, name := range p.boundSessionNames() {
+	bound := p.boundSessionNames()
+	for _, name := range bound {
 		mapped[herdrAgentName(name)] = true
+	}
+	var out []string
+	var stalled error
+	for _, name := range bound {
 		if !strings.HasPrefix(name, prefix) || seen[name] {
 			continue
 		}
 		if _, running, err := resolveBinding(p.lookupOps(ctx, name)); err == nil && running {
 			seen[name] = true
 			out = append(out, name)
+		}
+		if cerr := ctx.Err(); cerr != nil {
+			// The walk ran out of time, so the sessions not yet verified are
+			// unknown, not absent: stop and say so.
+			stalled = cerr
+			break
 		}
 	}
 	for _, a := range agents {
@@ -977,7 +999,23 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 			out = append(out, a.Name)
 		}
 	}
+	if stalled != nil {
+		// Unwrapped: IsRuntimeServerAbsent is a direct type assertion. A stall
+		// is not an absent server, so ServerAbsent stays false.
+		return out, &runtime.PartialListError{Err: fmt.Errorf("herdr: list running: %w", stalled)}
+	}
 	return out, nil
+}
+
+// herdrListDeadline bounds one ListRunning walk.
+const herdrListDeadline = 25 * time.Second
+
+// listBound is the ListRunning deadline, honoring the test override.
+func (p *Provider) listBound() time.Duration {
+	if p.listDeadline > 0 {
+		return p.listDeadline
+	}
+	return herdrListDeadline
 }
 
 // SendKeys translates tmux-style key names and sends them to the agent's pane.
@@ -1295,7 +1333,7 @@ func lastSegment(s string) string {
 // stable project dir where trust is saved once, rather than herdr's server
 // cwd — which is $HOME whenever the daemon was launched from a login shell).
 // An empty cityRoot (city-less construction) returns "" and defers to the
-// server cwd (itself pinned to the city root in startServer).
+// server cwd (itself pinned to the city root in ensureServer).
 func effectiveWorkDir(cfg runtime.Config, cityRoot string) (string, error) {
 	if cfg.WorkDir != "" {
 		if _, err := os.Stat(cfg.WorkDir); err != nil {

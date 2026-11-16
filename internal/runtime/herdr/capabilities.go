@@ -97,7 +97,7 @@ func (p *Provider) waitForAgentStatus(ctx context.Context, name string, timeout 
 		args = append(args, "--until", s)
 	}
 	args = append(args, "--timeout", strconv.Itoa(ms))
-	res, err := p.c.run(ctx, args...)
+	res, err := p.c.runVerbTimeout(ctx, ms, args...)
 	switch {
 	case err == nil:
 		return res, idleWaitReached, nil

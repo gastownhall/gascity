@@ -36,7 +36,7 @@ func shortHome(t *testing.T) {
 
 // A stale socket inode — left by a herdr server that exited uncleanly — must not
 // be mistaken for a live server. This is the regression for the provider-swap
-// failure where startServer() no-op'd on a dead socket (an os.Stat file-presence
+// failure where ensureServer() no-op'd on a dead socket (an os.Stat file-presence
 // check), so the very next op (`herdr agent list`) hit ECONNREFUSED, the tmux→herdr
 // swap aborted, and pool polecats hung in start-pending / agent_not_found.
 func TestServerAliveRejectsStaleSocket(t *testing.T) {
