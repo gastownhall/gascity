@@ -3,12 +3,11 @@ package beads
 import (
 	"context"
 	"errors"
-	"strings"
 	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/telemetry"
-	beadslib "github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/issueops"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	otellog "go.opentelemetry.io/otel/log"
@@ -18,10 +17,9 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
-// countWriteConflictSamples leaves instrument naming to the implementation.
-// The public observation is one cumulative counter for the write outcome,
-// with bounded labels and no bead ID or error text in metric attributes.
-func countWriteConflictSamples(t *testing.T, reader *sdkmetric.ManualReader, wantOutcome string) int64 {
+// countWriteConflictSamples checks the metadata write's counter and its bounded
+// label set, which must not carry bead IDs or error text.
+func countWriteConflictSamples(t *testing.T, reader *sdkmetric.ManualReader, wantOperation, wantOutcome string) int64 {
 	t.Helper()
 	var data metricdata.ResourceMetrics
 	if err := reader.Collect(context.Background(), &data); err != nil {
@@ -30,8 +28,7 @@ func countWriteConflictSamples(t *testing.T, reader *sdkmetric.ManualReader, wan
 	var count int64
 	for _, scope := range data.ScopeMetrics {
 		for _, metric := range scope.Metrics {
-			if !strings.HasPrefix(metric.Name, "gc.beads.") ||
-				(!strings.Contains(metric.Name, "conflict") && !strings.Contains(metric.Name, "retry")) {
+			if metric.Name != "gc.beads.write_conflicts.total" {
 				continue
 			}
 			sum, ok := metric.Data.(metricdata.Sum[int64])
@@ -42,16 +39,12 @@ func countWriteConflictSamples(t *testing.T, reader *sdkmetric.ManualReader, wan
 				labels := map[string]string{}
 				for _, kv := range point.Attributes.ToSlice() {
 					labels[string(kv.Key)] = kv.Value.AsString()
-					if strings.Contains(kv.Value.AsString(), "ga-session") || strings.Contains(kv.Value.AsString(), "1213") {
-						t.Errorf("%s has unbounded attribute %s=%q", metric.Name, kv.Key, kv.Value.AsString())
-					}
 				}
-				if labels["outcome"] == wantOutcome {
-					if labels["operation"] == "" || labels["class"] == "" {
-						t.Errorf("%s labels = %v, want operation and class", metric.Name, labels)
-					}
-					count += point.Value
+				if len(labels) != 3 || labels["operation"] != wantOperation ||
+					labels["class"] != "serialization" || labels["outcome"] != wantOutcome {
+					t.Errorf("%s labels = %v, want only operation=%s class=serialization outcome=%s", metric.Name, labels, wantOperation, wantOutcome)
 				}
+				count += point.Value
 			}
 		}
 	}
@@ -113,26 +106,24 @@ func TestNativeDoltWriteConflictTelemetry(t *testing.T) {
 			reader := captureWriteConflictMetrics(t)
 			logged := captureWriteConflictLogs(t)
 			writes := 0
-			storage := &nativeDoltStorageSpy{
-				getIssue: func(context.Context, string) (*beadslib.Issue, error) {
-					return &beadslib.Issue{ID: "ga-session", RowVersion: int64(writes + 1)}, nil
-				},
-				updateIssueChecked: func(context.Context, string, map[string]interface{}, string, beadslib.UpdateIssueOptions) error {
+			conflict := errors.New("Error 1213 (40001): serialization conflict")
+			store := newRetryCountingStore(t, retryCountingLifecycle{
+				update: func(issueops.UpdateRequest) (issueops.UpdateResult, error) {
 					writes++
 					if recovered && writes == 3 {
-						return nil
+						return issueops.UpdateResult{Changed: true}, nil
 					}
-					return beadslib.ErrVersionMismatch
+					return issueops.UpdateResult{}, conflict
 				},
-			}
-			err := newNativeDoltStoreForTest(storage).SetMetadataBatch("ga-session", map[string]string{"state": "active"})
-			if writes != 3 || (recovered && err != nil) || (!recovered && !IsCASRetriesExhausted(err)) {
+			})
+			err := store.SetMetadataBatch("gc-1", map[string]string{"state": "active"})
+			if writes != 3 || (recovered && err != nil) || (!recovered && !errors.Is(err, conflict)) {
 				t.Fatalf("write result = (%d calls, %v), want third-attempt %s", writes, err, name)
 			}
-			if got := countWriteConflictSamples(t, reader, name); got != 1 {
+			if got := countWriteConflictSamples(t, reader, "set_metadata_batch", name); got != 1 {
 				t.Errorf("%s counter = %d, want 1", name, got)
 			}
-			assertExhaustedWarning(t, logged, "ga-session", name == "exhausted")
+			assertExhaustedWarning(t, logged, "gc-1", "set_metadata_batch", name == "exhausted")
 		})
 	}
 }
@@ -159,15 +150,15 @@ func TestBdStoreWriteConflictTelemetry(t *testing.T) {
 			if calls != 3 || (recovered && err != nil) || (!recovered && !errors.Is(err, conflict)) {
 				t.Fatalf("write result = (%d calls, %v), want third-attempt %s", calls, err, name)
 			}
-			if got := countWriteConflictSamples(t, reader, name); got != 1 {
+			if got := countWriteConflictSamples(t, reader, "update", name); got != 1 {
 				t.Errorf("%s counter = %d, want 1", name, got)
 			}
-			assertExhaustedWarning(t, logged, "ga-session", name == "exhausted")
+			assertExhaustedWarning(t, logged, "ga-session", "update", name == "exhausted")
 		})
 	}
 }
 
-func assertExhaustedWarning(t *testing.T, exporter *writeConflictLogExporter, id string, want bool) {
+func assertExhaustedWarning(t *testing.T, exporter *writeConflictLogExporter, id, operation string, want bool) {
 	t.Helper()
 	exporter.mu.Lock()
 	defer exporter.mu.Unlock()
@@ -178,13 +169,16 @@ func assertExhaustedWarning(t *testing.T, exporter *writeConflictLogExporter, id
 			attrs[string(kv.Key)] = kv.Value
 			return true
 		})
-		if record.Severity() == otellog.SeverityWarn &&
-			attrs["bead_id"].AsString() == id &&
-			attrs["operation"].AsString() != "" &&
-			attrs["class"].AsString() != "" &&
-			attrs["attempts"].AsInt64() == 3 {
-			matching = append(matching, record)
+		if record.Severity() != otellog.SeverityWarn {
+			continue
 		}
+		if attrs["bead_id"].AsString() != id ||
+			attrs["operation"].AsString() != operation ||
+			attrs["class"].AsString() != "serialization" ||
+			attrs["attempts"].AsInt64() != 3 {
+			t.Errorf("exhaustion warning attributes = %v, want bead_id=%s operation=%s class=serialization attempts=3", attrs, id, operation)
+		}
+		matching = append(matching, record)
 	}
 	if got := len(matching); (want && got != 1) || (!want && got != 0) {
 		wantCount := 0

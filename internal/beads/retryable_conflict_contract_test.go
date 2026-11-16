@@ -1,13 +1,13 @@
 package beads
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"testing"
 	"time"
 
 	beadslib "github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/issueops"
 )
 
 func TestIsRetryableConflictContract(t *testing.T) {
@@ -79,22 +79,19 @@ func TestRetryNativeDoltWriteBoundAndRecovery(t *testing.T) {
 	}
 }
 
-func TestNativeDoltStoreMixedConflictThenCASExhaustion(t *testing.T) {
+func TestNativeDoltStoreMetadataConflictThenVersionMismatchStops(t *testing.T) {
 	writes := 0
-	storage := &nativeDoltStorageSpy{
-		getIssue: func(context.Context, string) (*beadslib.Issue, error) {
-			return &beadslib.Issue{ID: "ga-session", RowVersion: int64(writes + 1)}, nil
-		},
-		updateIssueChecked: func(context.Context, string, map[string]interface{}, string, beadslib.UpdateIssueOptions) error {
+	store := newRetryCountingStore(t, retryCountingLifecycle{
+		update: func(issueops.UpdateRequest) (issueops.UpdateResult, error) {
 			writes++
 			if writes == 1 {
-				return errors.New("Error 1213 (40001): serialization conflict")
+				return issueops.UpdateResult{}, errors.New("Error 1213 (40001): serialization conflict")
 			}
-			return beadslib.ErrVersionMismatch
+			return issueops.UpdateResult{}, beadslib.ErrVersionMismatch
 		},
-	}
-	err := newNativeDoltStoreForTest(storage).SetMetadataBatch("ga-session", map[string]string{"state": "active"})
-	if writes != 3 || !errors.Is(err, beadslib.ErrVersionMismatch) || !IsCASRetriesExhausted(err) {
-		t.Fatalf("mixed exhaustion = (%d writes, %v), want 3 writes and wrapped CAS exhaustion", writes, err)
+	})
+	err := store.SetMetadataBatch("gc-1", map[string]string{"state": "active"})
+	if writes != 2 || !errors.Is(err, beadslib.ErrVersionMismatch) || IsCASRetriesExhausted(err) {
+		t.Fatalf("mixed conflict = (%d writes, %v), want one serialization retry then the version mismatch without CAS exhaustion", writes, err)
 	}
 }
