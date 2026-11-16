@@ -583,6 +583,10 @@ func deliverDrainReminder(sp runtime.Provider, store beads.Store, info sessions.
 		return drainReminderSkipped
 	}
 	err := nudgeDrainReminder(sp, name, info)
+	if runtime.NudgeDelivered(err) {
+		// A delivery whose turn start went unobserved is a delivery.
+		err = nil
+	}
 	if hold := drainReminderDeferralHold(err); hold != "" {
 		writeDrainReminderMarker(store, info, due.row, due.drainID, due.attempts, due.failed, due.settled, due.last, stdout)
 		noteDrainReminderHold(store, info, hold)

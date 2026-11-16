@@ -44,7 +44,10 @@ filegroup(
 
 go_library(
     name = "fsyncprobe",
-    srcs = ["fsyncprobe.go"],
+    srcs = [
+        "detach_unix.go",
+        "fsyncprobe.go",
+    ],
     importpath = "github.com/gastownhall/gascity/internal/fsyncprobe",
     visibility = ["//:__subpackages__"],
 )

@@ -279,7 +279,7 @@ func TestPublicImportSchemaOnlyExposesSourceAndVersion(t *testing.T) {
 			}
 
 			props := defProperties(t, raw, "Import")
-			for _, want := range []string{"source", "version"} {
+			for _, want := range []string{"source", "version", "agents_exclude"} {
 				if _, ok := props[want]; !ok {
 					t.Fatalf("Import schema missing public field %q in %v", want, props)
 				}
@@ -289,8 +289,8 @@ func TestPublicImportSchemaOnlyExposesSourceAndVersion(t *testing.T) {
 					t.Fatalf("Import schema exposes compatibility field %q in %v", hidden, props)
 				}
 			}
-			if len(props) != 2 {
-				t.Fatalf("Import schema properties = %v, want exactly source and version", props)
+			if len(props) != 3 {
+				t.Fatalf("Import schema properties = %v, want exactly source, version and agents_exclude", props)
 			}
 
 			defs := raw["$defs"].(map[string]interface{})

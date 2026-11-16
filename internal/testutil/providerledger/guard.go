@@ -72,16 +72,63 @@ type emptyPackageImporter struct {
 type standardOrEmptyImporter struct {
 	standard types.Importer
 	empty    *emptyPackageImporter
+	fset     *token.FileSet
+	sources  map[string]string
 }
 
 func (i *standardOrEmptyImporter) Import(importPath string) (*types.Package, error) {
-	// Runtime's module-local imports are currently body-only. Empty packages
-	// keep those ignored bodies hermetic; any selector used by a declaration
-	// remains unresolved and makes the guard fail closed below.
+	if dir, ok := i.sources[importPath]; ok {
+		return i.importDeclarations(importPath, dir)
+	}
+	// Other module-local imports are body-only. Undeclared source dependencies
+	// still fail closed if a selector is used outside an ignored function body.
 	if strings.HasPrefix(importPath, moduleImportPath+"/") {
 		return i.empty.Import(importPath)
 	}
 	return i.standard.Import(importPath)
+}
+
+func (i *standardOrEmptyImporter) importDeclarations(importPath, dir string) (*types.Package, error) {
+	if imported := i.empty.packages[importPath]; imported != nil {
+		return imported, nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read declaration dependency %q: %w", importPath, err)
+	}
+	var files []*ast.File
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		matches, err := build.Default.MatchFile(dir, name)
+		if err != nil {
+			return nil, fmt.Errorf("match declaration dependency file %q: %w", name, err)
+		}
+		if !matches {
+			continue
+		}
+		file, err := parser.ParseFile(i.fset, filepath.Join(dir, name), nil, parser.SkipObjectResolution)
+		if err != nil {
+			return nil, fmt.Errorf("parse declaration dependency file %q: %w", name, err)
+		}
+		files = append(files, file)
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("declaration dependency %q has no buildable Go source", importPath)
+	}
+	config := types.Config{
+		Importer:                 i,
+		DisableUnusedImportCheck: true,
+		IgnoreFuncBodies:         true,
+	}
+	imported, err := config.Check(importPath, i.fset, files, nil)
+	if err != nil {
+		return nil, fmt.Errorf("type-check declaration dependency %q: %w", importPath, err)
+	}
+	i.empty.packages[importPath] = imported
+	return imported, nil
 }
 
 // DiscoverRuntimeProviderDoubles discovers every exported concrete type in
@@ -140,6 +187,10 @@ func DiscoverRuntimeProviderDoubles(runtimeDir string) ([]ReusableDouble, error)
 		Importer: &standardOrEmptyImporter{
 			standard: stdImporter(fset),
 			empty:    &emptyPackageImporter{packages: make(map[string]*types.Package)},
+			fset:     fset,
+			sources: map[string]string{
+				moduleImportPath + "/internal/processgroup": filepath.Join(filepath.Dir(runtimeDir), "processgroup"),
+			},
 		},
 		DisableUnusedImportCheck: true,
 		IgnoreFuncBodies:         true,

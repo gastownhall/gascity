@@ -597,11 +597,11 @@ func applySnapshotRetention(to string, keep int, own string, owner snapshotOwner
 	return removed, errors.Join(errs...)
 }
 
-// pinStorageSnapshot pins a complete snapshot so retention keeps it. It has
-// no caller in this slice on purpose: S5-H's journal pins the split's
-// mandatory snapshot with it until the split is done, and retention honors
-// the pin from now, so an operator's hand-written pin works today. The pin is
-// a file, so an operator can see and remove it.
+// pinStorageSnapshot pins a complete snapshot so retention keeps it: the
+// reverse migration's mandatory snapshot (R0, storage_reverse.go), which
+// --abort-reverse unpins, and S5-H's split journal's. The pin is a file, so an
+// operator can see and remove it, and an operator's hand-written pin works
+// too.
 func pinStorageSnapshot(to, id, reason string) error {
 	dir := filepath.Join(to, id)
 	if _, err := readSnapshotManifest(dir); err != nil {

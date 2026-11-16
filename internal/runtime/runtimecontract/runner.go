@@ -129,6 +129,10 @@ type outcome struct {
 	unsupported bool  // exit 2 — op not implemented
 	err         error // any failure other than exit 2 (stderr included)
 	exitCode    int   // the op's process exit code (0 on success; set for non-2 exit errors)
+	// failedStdout is a failed op's raw stdout: an exit 80's outcome line
+	// under input-outcome, untrimmed so gc's stdout cap reads on what the
+	// pack printed (sessionexec.ReadExit80Outcome).
+	failedStdout string
 }
 
 func (o outcome) ok() bool { return o.err == nil && !o.unsupported }
@@ -186,7 +190,7 @@ func (r *runner) opEnv(ctx context.Context, timeout time.Duration, env []string,
 		case msg == "":
 			msg = err.Error()
 		}
-		res := outcome{err: fmt.Errorf("%s: %s", strings.Join(args, " "), msg)}
+		res := outcome{err: fmt.Errorf("%s: %s", strings.Join(args, " "), msg), failedStdout: stdout.String()}
 		if isExit {
 			res.exitCode = exitErr.ExitCode()
 		}
@@ -210,6 +214,14 @@ func (r *runner) startIn(ctx context.Context, env []string, name string) outcome
 	return r.opEnv(ctx, r.opts.StartTimeout, env, cfg, "start", name)
 }
 
+func (r *runner) startCommand(ctx context.Context, name, command string) outcome {
+	cfg, _ := json.Marshal(struct {
+		WorkDir string `json:"work_dir,omitempty"`
+		Command string `json:"command,omitempty"`
+	}{WorkDir: r.opts.WorkDir, Command: command})
+	return r.opTimeout(ctx, r.opts.StartTimeout, cfg, "start", name)
+}
+
 // provision sends a provision config for name and returns the raw outcome.
 // provision mirrors start's payload but is the box-without-agent half of the
 // un-weld: it creates a reachable box without launching the agent (exit 2 =
@@ -230,6 +242,10 @@ func (r *runner) stop(ctx context.Context, name string) outcome {
 // isRunning runs is-running and returns the trimmed stdout plus outcome.
 func (r *runner) isRunning(ctx context.Context, name string) outcome {
 	return r.op(ctx, "is-running", name)
+}
+
+func (r *runner) peek(ctx context.Context, name string, lines int) outcome {
+	return r.op(ctx, "peek", name, fmt.Sprint(lines))
 }
 
 // execOp runs a command in the box via the RPP exec op: the command rides

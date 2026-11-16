@@ -232,7 +232,7 @@ func TestBuildPod_EntrypointCreatesWorkDirAsDynamicUser(t *testing.T) {
 	if !strings.Contains(args, "mkdir -p \""+perBeadPodWorkDir+"\"") {
 		t.Errorf("entrypoint should mkdir the per-bead WorkingDir as root; got: %s", args)
 	}
-	if !strings.Contains(args, "cd "+perBeadPodWorkDir) {
+	if !strings.Contains(args, "cd "+shellquote.Quote(perBeadPodWorkDir)) {
 		t.Errorf("tmux session should start in the per-bead WorkingDir; got: %s", args)
 	}
 }
