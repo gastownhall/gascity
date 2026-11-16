@@ -35,6 +35,7 @@ go_library(
 go_test(
     name = "exec_test",
     srcs = [
+        "batchfile_windows_test.go",
         "capacity_test.go",
         "carrier_fence_integration_test.go",
         "carrier_ops_conformance_test.go",
