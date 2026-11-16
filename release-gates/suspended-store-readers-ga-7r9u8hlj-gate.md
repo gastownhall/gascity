@@ -102,3 +102,7 @@ Full retained evidence:
 - /home/jaword/projects/gc-management/.gc/artifacts/gascity/ga-7r9u8hlj/gate-pass-20261116T125912Z/evidence/nudgepoller-skip-mechanism-proof.json; SHA256 a17e795a5e78094764793494c4a2f0f4b82eec14bb03fe2b84a5af2fb36eb029
 - /home/jaword/projects/gc-management/.gc/artifacts/gascity/ga-7r9u8hlj/gate-pass-20261116T125912Z/evidence/ci-required/accounting.json; SHA256 0f977873728a017e43f5192a6d519c3d9a7585a60271d354e8189016f97910f4
 - Full evidence manifest: /home/jaword/projects/gc-management/.gc/artifacts/gascity/ga-7r9u8hlj/gate-pass-20261116T125912Z/SHA256SUMS; SHA256 6ed176ee7acbcf1b1435ca3e7c2881eb33babb17b982b5d4eb2105c67ef538d8
+
+Full command and inventory pointers:
+- /home/jaword/projects/gc-management/.gc/artifacts/gascity/ga-7r9u8hlj/gate-pass-20261116T125912Z/evidence/criterion3-run/evidence/execution.json; SHA256 a6b0c3ecf349203f44f666abd22dbe4c2ccac22cd054adc26c7721d036565283
+- /home/jaword/projects/gc-management/.gc/artifacts/gascity/ga-7r9u8hlj/gate-pass-20261116T125912Z/evidence/complete-skip-audit-plan.json; SHA256 11fa5a032edfb827a45a01abbc259869fbdde6a655a141ea71cdbbc9d81839cf
