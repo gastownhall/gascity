@@ -3051,6 +3051,11 @@ calls = 1
 tagged = true
 
 [[count]]
+path = "internal/workspacesvc/proxy_process_reap_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
 path = "internal/workspacesvc/proxy_process_test.go"
 resource = "fixed_sleep"
 calls = 6
