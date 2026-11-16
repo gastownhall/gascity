@@ -333,6 +333,13 @@ func (c *City) cleanupScaffoldOnly() {
 	}
 }
 
+// stopWarned reports whether gc stop output carries a failed provider stop
+// ("gc stop: bead store: <err>") or a timeout, either of which gc stop prints
+// and still exits 0.
+func stopWarned(out string) bool {
+	return strings.Contains(out, "gc stop: bead store:") || strings.Contains(out, "timed out after")
+}
+
 // teardown stops and unregisters the city, best effort, and records a clean
 // stop in tornDown so the cleanups registered after it skip theirs.
 func (c *City) teardown() {
@@ -340,6 +347,10 @@ func (c *City) teardown() {
 	out, err := RunGC(c.Env, c.Dir, "stop", c.Dir)
 	if err != nil {
 		c.t.Logf("cleanup: gc stop %s: %v\n%s", c.Dir, err, out)
+	} else if stopWarned(out) {
+		// gc stop reports a failed provider stop as a warning and exits 0, so
+		// the output is the only record of why the bead store was not retired.
+		c.t.Logf("cleanup: gc stop %s exited 0 with a warning:\n%s", c.Dir, out)
 	}
 	if out, err := RunGC(c.Env, c.Dir, "unregister", c.Dir); err != nil {
 		c.t.Logf("cleanup: gc unregister %s: %v\n%s", c.Dir, err, out)

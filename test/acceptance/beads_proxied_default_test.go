@@ -192,12 +192,15 @@ func proxiedEnvRecordingBD(t *testing.T, bdPath, doltPath string) (*helpers.Env,
 	return env.With("BD_BIN", recorder.Path), recorder
 }
 
-// doltProcessesUnder returns the command lines of every live bd proxy or dolt
-// sql-server whose argv names root. It reads the process table rather than a
-// pid file because the leak worth catching is a process whose record is gone.
+// doltProcessesUnder returns the process-table line of every live bd proxy or
+// dolt sql-server whose argv names root. It reads the process table rather
+// than a pid file because the leak worth catching is a process whose record is
+// gone. Each line starts with pid, ppid, elapsed seconds and state, so a leak
+// report says whether the two processes are parent and child and how old they
+// are.
 func doltProcessesUnder(t *testing.T, root string) []string {
 	t.Helper()
-	out, err := exec.Command("ps", "-eo", "args=").Output()
+	out, err := exec.Command("ps", "-eo", "pid=,ppid=,etimes=,stat=,args=").Output()
 	if err != nil {
 		t.Fatalf("read process table: %v", err)
 	}
@@ -221,7 +224,8 @@ func stopIfPairsRemain(t *testing.T, env *helpers.Env, cityRoot string, roots ..
 	t.Helper()
 	for _, root := range append([]string{cityRoot}, roots...) {
 		if len(doltProcessesUnder(t, root)) > 0 {
-			helpers.RunGC(env, cityRoot, "stop", cityRoot) //nolint:errcheck // best effort
+			out, err := helpers.RunGC(env, cityRoot, "stop", cityRoot)
+			t.Logf("cleanup: gc stop %s: err=%v\n%s", cityRoot, err, out)
 			return
 		}
 	}
@@ -763,14 +767,33 @@ func newProxiedDefaultCity(t *testing.T, rigNames ...string) *proxiedDefaultCity
 	}
 	t.Cleanup(func() {
 		stopIfPairsRemain(t, env, p.cityRoot, roots...)
-		helpers.RunGC(env, "", "supervisor", "stop", "--wait") //nolint:errcheck
+		out, err := helpers.RunGC(env, "", "supervisor", "stop", "--wait")
+		t.Logf("cleanup: gc supervisor stop --wait: err=%v\n%s", err, out)
 		for _, root := range roots {
 			if leaked := waitForNoDoltProcesses(t, root, 15*time.Second); len(leaked) > 0 {
-				t.Errorf("processes under %s outlived the test:\n%s", root, strings.Join(leaked, "\n"))
+				t.Errorf("processes under %s outlived the test (pid ppid etimes stat args):\n%s\n%s",
+					root, strings.Join(leaked, "\n"), proxyControlFiles(root))
 			}
 		}
 	})
 	return p
+}
+
+// proxyControlFiles renders the bd proxy's own records under root's
+// .beads/dolt, so a leak report shows whether they still name the processes
+// that outlived the test. A missing file prints as <absent>.
+func proxyControlFiles(root string) string {
+	dir := filepath.Join(root, ".beads", "dolt")
+	var b strings.Builder
+	for _, name := range []string{"proxy.pid", "proxy-child.pid", "proxy.stop-epoch", "proxy.spawn"} {
+		body, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			fmt.Fprintf(&b, "%s: <absent> (%v)\n", filepath.Join(dir, name), err)
+			continue
+		}
+		fmt.Fprintf(&b, "%s: %s\n", filepath.Join(dir, name), strings.TrimSpace(string(body)))
+	}
+	return b.String()
 }
 
 // createNamedGitRig is createGitRig under a chosen directory name.

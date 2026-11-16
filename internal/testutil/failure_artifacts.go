@@ -19,7 +19,15 @@ import (
 // stderr only to that file, so without it a CI failure carries no evidence at
 // all: t.Cleanup deletes the temp dir before any workflow step could collect
 // it. Set this to a path outside the temp root and the workflow can upload it.
+//
+// When it is empty or whitespace, diagnostics go to $TEST_UNDECLARED_OUTPUTS_DIR
+// instead. Bazel sets that for every test and keeps its contents as
+// test.outputs/outputs.zip, so a Bazel failure keeps its logs without any
+// workflow setting this variable.
 const FailureArtifactDirEnv = "GC_TEST_FAILURE_ARTIFACT_DIR"
+
+// undeclaredOutputsDirEnv is the directory Bazel keeps after a test run.
+const undeclaredOutputsDirEnv = "TEST_UNDECLARED_OUTPUTS_DIR"
 
 // failureArtifactNames are the diagnostic files worth keeping, relative to any
 // directory found while walking a failed test's temp root. Kept to an explicit
@@ -65,7 +73,8 @@ func SaveFailureDiagnostics(t FailureReporter, dir string) {
 // SaveDiagnostics copies the allowlisted diagnostics under dir into
 // $GC_TEST_FAILURE_ARTIFACT_DIR/<name>/<base of dir> unconditionally. It is
 // for state that outlives a single test, such as a TestMain's shared GC_HOME
-// after a failed run. A no-op when the variable is unset. Collection errors
+// after a failed run. A no-op when neither that variable nor
+// $TEST_UNDECLARED_OUTPUTS_DIR is set. Collection errors
 // are reported on stderr and never fail the caller.
 func SaveDiagnostics(name, dir string) {
 	if err := saveDiagnostics(name, dir); err != nil {
@@ -77,6 +86,9 @@ func SaveDiagnostics(name, dir string) {
 // error it met. A file that vanishes mid-walk is not an error.
 func saveDiagnostics(name, dir string) error {
 	dest := strings.TrimSpace(os.Getenv(FailureArtifactDirEnv))
+	if dest == "" {
+		dest = strings.TrimSpace(os.Getenv(undeclaredOutputsDirEnv))
+	}
 	if dest == "" {
 		return nil
 	}
