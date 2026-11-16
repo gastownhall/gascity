@@ -754,7 +754,7 @@ func (s *SQLiteStore) checkPinnedIDNamespace(id string) error {
 func (s *SQLiteStore) normalizeCreate(b Bead) (Bead, error) {
 	b = cloneBead(b)
 	if b.ID == "" {
-		id, err := s.nextID()
+		id, err := s.nextID(context.Background())
 		if err != nil {
 			return Bead{}, err
 		}
@@ -1045,7 +1045,7 @@ func (s *SQLiteStore) mintUniqueIDTx(ctx context.Context, tx *sql.Tx, candidate 
 			}
 			reseeded = true
 		}
-		next, err := s.nextID()
+		next, err := s.nextID(context.Background())
 		if err != nil {
 			return "", err
 		}

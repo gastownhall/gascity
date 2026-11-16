@@ -58,12 +58,21 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // sqliteSequenceBlockSize is how many ids one durable floor write reserves for
 // the reserving process. Larger blocks mean fewer fsyncs; the cost is at most
 // one block of never-used ids per process lifetime.
 const sqliteSequenceBlockSize int64 = 1024
+
+// sqliteSequenceLockWait bounds how long a store-owned wait for the directory
+// lock may last. Tests lower it.
+var sqliteSequenceLockWait = 8 * time.Second
+
+// sqliteSequenceTopUpHeadroom is the number of unissued ids at or below which an
+// auto-id create reserves the next block before it opens its transaction.
+const sqliteSequenceTopUpHeadroom int64 = 128
 
 // sqliteSequenceRepairCommand is the operator command that raises a store's
 // persisted floor. Allocation errors name it so the refusal is actionable.
@@ -272,7 +281,7 @@ func (s *SQLiteStore) sequenceWrappedErrorLocked() error {
 // of its range the allocator still attempts the reservation: it succeeds only
 // once an operator has raised the persisted floor past that end, and otherwise
 // reports the exhaustion, so a repair needs no restart.
-func (s *SQLiteStore) nextID() (string, error) {
+func (s *SQLiteStore) nextID(_ context.Context) (string, error) {
 	s.sequenceFloorMu.Lock()
 	defer s.sequenceFloorMu.Unlock()
 	if s.readOnly {

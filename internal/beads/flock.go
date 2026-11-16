@@ -1,8 +1,11 @@
 package beads
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/platform/filelock"
 )
@@ -66,3 +69,28 @@ type nopLocker struct{}
 
 func (nopLocker) Lock() error   { return nil }
 func (nopLocker) Unlock() error { return nil }
+
+// flockPollInterval is how long a bounded flock wait sleeps between attempts
+// while the lock is contended.
+const flockPollInterval = 10 * time.Millisecond
+
+// flockAcquire is the single call every bounded flock attempt goes through. It
+// is a variable so a test can count attempts and inject errnos.
+var flockAcquire = filelock.Acquire
+
+// flockExclusive takes an exclusive lock on f, waiting for contention only as
+// long as ctx allows.
+func flockExclusive(_ context.Context, _ *os.File, _ string) (*filelock.Lock, error) {
+	return nil, errors.New("flockExclusive: not implemented")
+}
+
+// tryFlockExclusive makes exactly one non-blocking attempt at an exclusive lock
+// on f and reports contention as filelock.ErrBusy.
+func tryFlockExclusive(_ *os.File, _ string) (*filelock.Lock, error) {
+	return nil, errors.New("tryFlockExclusive: not implemented")
+}
+
+// mapStoreTimeout turns the end of a store-owned wait into ErrStoreTimeout.
+func mapStoreTimeout(_, _ context.Context, err error) error {
+	return err
+}

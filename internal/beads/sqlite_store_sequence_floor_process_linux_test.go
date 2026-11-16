@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/bazeltest"
 )
@@ -309,9 +310,11 @@ func TestSQLiteSequenceMintHelperProcess(t *testing.T) {
 	store := opened.(*SQLiteStore)
 	defer store.CloseStore() //nolint:errcheck
 	out := bufio.NewWriter(os.Stdout)
+	mintCtx, cancelMint := context.WithTimeout(context.Background(), time.Minute)
+	defer cancelMint()
 	for i := 0; i < count; i++ {
 		// Mix committed creates with bare reservations so blocks turn over.
-		id, err := store.nextID()
+		id, err := store.nextID(mintCtx)
 		if i%64 == 0 {
 			var created Bead
 			created, err = store.Create(Bead{Title: "child"})
