@@ -195,6 +195,46 @@ func TestDoRigAdd_AddsRigWhenControllerUnavailable(t *testing.T) {
 	if !strings.Contains(string(data), "my-frontend") {
 		t.Errorf("city.toml should contain the rig:\n%s", data)
 	}
+	if strings.Contains(stderr.String(), "controller reload did not complete") {
+		t.Errorf("stderr should not warn about an incomplete reload when no controller answers:\n%s", stderr.String())
+	}
+}
+
+// TestDoRigAdd_WarnsWhenControllerReloadIncomplete pins that a controller
+// answering the reload without applying it still leaves the rig added, but
+// tells the user to run `gc reload` so the rig is served.
+func TestDoRigAdd_WarnsWhenControllerReloadIncomplete(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	rigPath := filepath.Join(t.TempDir(), "my-frontend")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_DOLT", "skip")
+	t.Setenv("GC_BEADS", "bd")
+
+	oldSend := sendReloadControlRequestHook
+	t.Cleanup(func() { sendReloadControlRequestHook = oldSend })
+	sendReloadControlRequestHook = func(string, reloadControlRequest) (reloadControlReply, error) {
+		return reloadControlReply{Outcome: "failed", Error: "boom"}, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "", "", false, false, &stdout, &stderr); code != 0 {
+		t.Fatalf("doRigAdd returned %d, stderr: %s", code, stderr.String())
+	}
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "my-frontend") {
+		t.Errorf("city.toml should contain the rig:\n%s", data)
+	}
+	for _, want := range []string{"controller reload did not complete", "gc reload"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr missing %q:\n%s", want, stderr.String())
+		}
+	}
 }
 
 func TestDoRigAdd_PreservesComments(t *testing.T) {

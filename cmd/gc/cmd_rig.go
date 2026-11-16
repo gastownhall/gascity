@@ -402,7 +402,11 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 				fmt.Fprintf(stderr, "gc rig add: warning: writing .beads/.env: %v\n", err) //nolint:errcheck // best-effort stderr
 			}
 
-			if err := rigReloadControllerConfig(cityPath); err == nil && pc.Deferred && cityUsesBdStoreContract(cityPath) {
+			reloadErr := rigReloadControllerConfig(cityPath)
+			if errors.Is(reloadErr, errRigReloadIncomplete) {
+				fmt.Fprintf(stderr, "gc rig add: warning: rig %q saved but controller reload did not complete: %v; run gc reload\n", name, reloadErr) //nolint:errcheck // best-effort stderr
+			}
+			if reloadErr == nil && pc.Deferred && cityUsesBdStoreContract(cityPath) {
 				if waitErr := rigWaitForStoreAccessible(cityPath, rigPath, rigDeferredStoreInitWait); waitErr != nil {
 					fmt.Fprintf(stderr, "gc rig add: warning: controller init still pending for rig %q: %v\n", name, waitErr) //nolint:errcheck // best-effort stderr
 				}
@@ -1159,6 +1163,10 @@ func cmdRigSuspend(args []string, stdout, stderr io.Writer) int {
 	return finishDirectRigSuspension(cityPath, "suspend", doRigSuspend(fsys.OSFS{}, cityPath, rigName, stdout, stderr), stderr)
 }
 
+// errRigReloadIncomplete reports that a running controller answered the
+// reload request without applying the new config.
+var errRigReloadIncomplete = errors.New("controller reload did not complete")
+
 // reloadControllerConfigAndWait asks the running controller to reload config
 // and returns once it has applied it. `gc rig add` needs this: a reload that is
 // only queued leaves the controller serving `gc ready` from the pre-rig config
@@ -1174,7 +1182,7 @@ func reloadControllerConfigAndWait(cityPath string) error {
 		return pokeSupervisor()
 	}
 	if reply.Outcome != reloadOutcomeApplied && reply.Outcome != reloadOutcomeNoChange {
-		return fmt.Errorf("controller reload did not complete: outcome=%q error=%q message=%q", reply.Outcome, reply.Error, reply.Message)
+		return fmt.Errorf("%w: outcome=%q error=%q message=%q", errRigReloadIncomplete, reply.Outcome, reply.Error, reply.Message)
 	}
 	return nil
 }
