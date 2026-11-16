@@ -28,7 +28,7 @@ import (
 const rigDeferredStoreInitWait = 30 * time.Second
 
 var (
-	rigReloadControllerConfig = reloadControllerConfig
+	rigReloadControllerConfig = reloadControllerConfigAndWait
 	rigWaitForStoreAccessible = waitForRigStoreAccessible
 	rigListSessionProvider    = newSessionProvider
 )
@@ -1157,6 +1157,26 @@ func cmdRigSuspend(args []string, stdout, stderr io.Writer) int {
 		// Connection error — fall through to direct mutation.
 	}
 	return finishDirectRigSuspension(cityPath, "suspend", doRigSuspend(fsys.OSFS{}, cityPath, rigName, stdout, stderr), stderr)
+}
+
+// reloadControllerConfigAndWait asks the running controller to reload config
+// and returns once it has applied it. `gc rig add` needs this: a reload that is
+// only queued leaves the controller serving `gc ready` from the pre-rig config
+// until its reconcile tick starts the reload, so work created in the new rig
+// right after the add is missing from a controller-served answer. With no
+// controller answering, it wakes the supervisor as reloadControllerConfig does.
+func reloadControllerConfigAndWait(cityPath string) error {
+	if onWorkerSite(cityPath) {
+		return errWorkerSiteNoController
+	}
+	reply, err := sendReloadControlRequestHook(cityPath, reloadControlRequest{Wait: true, Timeout: "5m"})
+	if err != nil {
+		return pokeSupervisor()
+	}
+	if reply.Outcome != reloadOutcomeApplied && reply.Outcome != reloadOutcomeNoChange {
+		return fmt.Errorf("controller reload did not complete: outcome=%q error=%q message=%q", reply.Outcome, reply.Error, reply.Message)
+	}
+	return nil
 }
 
 // Direct writes bypass the API's mutateAndPoke path. Reload the running
