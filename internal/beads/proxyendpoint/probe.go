@@ -689,8 +689,9 @@ func probeConnector(port int, database string, driverTimeout time.Duration) (dri
 	return mysql.NewConnector(cfg)
 }
 
-// readCursorsOver runs one probe session over connector and closes everything it
-// opened before it returns.
+// withSessionOver runs fn over ONE pinned, pinged session on connector and
+// closes everything it opened before it returns. It is the single place the
+// one-session invariants live: the cursor probe and WithSession both run here.
 //
 // The closes are the contract rather than housekeeping, so they are
 // deterministic and they are ordered: the pinned connection goes first — with no
@@ -718,15 +719,14 @@ func probeConnector(port int, database string, driverTimeout time.Duration) (dri
 // does not retry: Conn.PingContext and Conn.QueryContext go straight to the
 // driver connection they hold (pingDC, queryDC), and a bad-connection error
 // there is returned and the connection discarded.
-func readCursorsOver(ctx context.Context, connector driver.Connector) (CursorReport, error) {
-	var report CursorReport
+func withSessionOver(ctx context.Context, connector driver.Connector, fn func(context.Context, *sql.Conn) error) error {
 	// A caller who has already given up is owed no dial at all.
 	if err := ctx.Err(); err != nil {
-		return report, err
+		return err
 	}
 	session, err := connector.Connect(ctx)
 	if err != nil {
-		return report, err
+		return err
 	}
 	one := &oneSessionConnector{session: session, driver: connector.Driver()}
 	db := sql.OpenDB(one)
@@ -740,13 +740,25 @@ func readCursorsOver(ctx context.Context, connector driver.Connector) (CursorRep
 	defer one.closeUntaken()
 	conn, err := db.Conn(ctx)
 	if err != nil {
-		return report, err
+		return err
 	}
 	defer conn.Close() //nolint:errcheck // closes the socket: this handle retains no idle connection
 	if err := conn.PingContext(ctx); err != nil {
-		return report, err
+		return err
 	}
-	return ReadCursorReportOverConn(ctx, conn)
+	return fn(ctx, conn)
+}
+
+// readCursorsOver runs one cursor probe session over connector: withSessionOver
+// with the cursor reads as the session's work.
+func readCursorsOver(ctx context.Context, connector driver.Connector) (CursorReport, error) {
+	var report CursorReport
+	err := withSessionOver(ctx, connector, func(ctx context.Context, conn *sql.Conn) error {
+		var readErr error
+		report, readErr = ReadCursorReportOverConn(ctx, conn)
+		return readErr
+	})
+	return report, err
 }
 
 // ReadCursorReportOverConn reads the database's real migration counters —
