@@ -227,14 +227,23 @@ const (
 // single-bead predicate holds no deps, so it names what it does not know and
 // leaves the derivation to the consumer that can make it.
 //
-// Both callers pass a row already constrained to status=="open", so a raw
-// "blocked" status string never reaches here.
+// Both callers pass a row already constrained to status=="open" — the status
+// bd's read FOLDS every non-closed, non-in_progress status into — so bd's own
+// "blocked" status never arrives as b.Status. It survives only in
+// b.SourceStatus, which is what the status-blocked check reads. An empty
+// SourceStatus means the store reported no raw status (memstore, sqlite, exec,
+// or a row patched after a status change) and is not read as blocked.
 func classifyDemandRowClaimability(b beads.Bead, now time.Time) demandRowClaimability {
 	if beads.IsDeferred(b, now) {
 		return demandRowDeferred
 	}
 	if beadmeta.HasDispatchHold(b.Labels) {
 		return demandRowHeld
+	}
+	// Ahead of the is_blocked clause: the status is bead-local and fresh, so an
+	// explicit is_blocked=false (or an absent projection) cannot mask it.
+	if b.SourceStatus == "blocked" {
+		return demandRowStatusBlocked
 	}
 	if b.IsBlocked == nil || *b.IsBlocked {
 		return demandRowBlockednessUnproven

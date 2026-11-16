@@ -220,10 +220,12 @@ const (
 	// serve; this is the agreement invariant breaking.
 	DemandClaimDivergence = "divergence"
 	// DemandClaimBlocked: the trigger row is still open, unassigned and
-	// route-matching, and the only thing marking it non-claimable is a blocking
-	// dependency — re-derived from the row's LIVE deps, not read off bd's
-	// denormalized is_blocked projection, which can lag a just-closed blocker and
-	// is absent from the payloads these reads actually return. No worker could
+	// route-matching, and the only thing marking it non-claimable is bd's own
+	// blocked status or a blocking dependency. A dependency block is re-derived
+	// from the row's LIVE deps, not read off bd's denormalized is_blocked
+	// projection, which can lag a just-closed blocker and is absent from the
+	// payloads these reads actually return; the blocked status is read directly
+	// off the row and needs no dependency read. No worker could
 	// have claimed the row, so it is NOT counted as a clean divergence (that
 	// metric must stay the agreement signal) — but it is not folded into benign
 	// either: a routed row the controller keeps counting while nobody can take it
