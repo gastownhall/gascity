@@ -2720,6 +2720,11 @@ resource = "http_test_server"
 calls = 1
 
 [[count]]
+path = "internal/runtime/t3bridge/write_deadline_test.go"
+resource = "http_test_server"
+calls = 1
+
+[[count]]
 path = "internal/runtime/tmux/activity_poke_integration_test.go"
 resource = "fixed_sleep"
 calls = 4

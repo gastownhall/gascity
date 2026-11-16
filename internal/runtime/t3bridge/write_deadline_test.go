@@ -45,6 +45,18 @@ func (l smallRecvBufferListener) Accept() (net.Conn, error) {
 	return conn, nil
 }
 
+// newLoopbackServer starts handler on a loopback listener, shrinking the
+// receive buffer of each accepted connection when smallRecv is set. The caller
+// closes it. Every server in this file starts here.
+func newLoopbackServer(handler http.Handler, smallRecv bool) *httptest.Server {
+	srv := httptest.NewUnstartedServer(handler)
+	if smallRecv {
+		srv.Listener = smallRecvBufferListener{srv.Listener}
+	}
+	srv.Start()
+	return srv
+}
+
 // newStalledWSPeer starts a loopback server that completes the WebSocket
 // upgrade and then never reads, and returns its ws:// URL. Closing happens on
 // test cleanup.
@@ -52,16 +64,14 @@ func newStalledWSPeer(t *testing.T) string {
 	t.Helper()
 	release := make(chan struct{})
 	upgrader := websocket.Upgrader{ReadBufferSize: 1024, WriteBufferSize: 1024}
-	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := newLoopbackServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}
 		defer func() { _ = conn.Close() }()
 		<-release
-	}))
-	srv.Listener = smallRecvBufferListener{srv.Listener}
-	srv.Start()
+	}), true)
 	t.Cleanup(func() {
 		close(release)
 		srv.CloseClientConnections()
@@ -70,18 +80,13 @@ func newStalledWSPeer(t *testing.T) string {
 	return "ws" + strings.TrimPrefix(srv.URL, "http")
 }
 
-// closedLoopbackWSURL returns a ws:// URL on a loopback port that was reserved
+// closedLoopbackWSURL returns a ws:// URL on a loopback port that a server held
 // and then released, so a dial to it is refused at once.
 func closedLoopbackWSURL(t *testing.T) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := ln.Addr().String()
-	if err := ln.Close(); err != nil {
-		t.Fatal(err)
-	}
+	srv := newLoopbackServer(http.NotFoundHandler(), false)
+	addr := srv.Listener.Addr().String()
+	srv.Close()
 	return "ws://" + addr + "/ws"
 }
 
@@ -177,7 +182,7 @@ type tokenServer struct {
 func newTokenServer(t *testing.T, token string, gate <-chan struct{}) *tokenServer {
 	t.Helper()
 	ts := &tokenServer{entered: make(chan struct{}, 8)}
-	ts.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts.Server = newLoopbackServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ts.mu.Lock()
 		ts.hits++
 		ts.mu.Unlock()
@@ -194,7 +199,7 @@ func newTokenServer(t *testing.T, token string, gate <-chan struct{}) *tokenServ
 			"token":     token,
 			"expiresAt": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
 		})
-	}))
+	}), false)
 	t.Cleanup(ts.Close)
 	return ts
 }
@@ -285,7 +290,7 @@ func newStartPeer(t *testing.T, createDelay time.Duration) *startPeer {
 	t.Helper()
 	sp := &startPeer{createDelay: createDelay, payloads: make(map[string]json.RawMessage), released: make(chan struct{})}
 	upgrader := websocket.Upgrader{}
-	sp.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	sp.server = newLoopbackServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			sp.mu.Lock()
 			sp.paths = append(sp.paths, r.URL.Path)
@@ -324,7 +329,7 @@ func newStartPeer(t *testing.T, createDelay time.Duration) *startPeer {
 			"requestId": req.ID,
 			"exit":      map[string]interface{}{"_tag": "Success", "value": value},
 		})
-	}))
+	}), false)
 	t.Cleanup(func() {
 		close(sp.released)
 		sp.server.CloseClientConnections()
