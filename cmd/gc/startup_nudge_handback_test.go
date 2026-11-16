@@ -50,13 +50,13 @@ func TestStartupNudgeHandbackIsQueuedForTheSession(t *testing.T) {
 	sp := runtime.FullFake{Fake: fake}
 	now := time.Now()
 
-	if err := queueStartupNudgeHandback(dir, nil, sp, info, "worker-session", true, now); err != nil {
+	if err := queueStartupNudgeHandback(dir, nil, sp, info, "worker-session", "", true, now); err != nil {
 		t.Fatalf("no handback: %v", err)
 	}
 	wantQueuedHandbacks(t, dir, nil, info, now, 0)
 
 	fake.SetStartupNudgeHandback("worker-session", handbackNudge)
-	if err := queueStartupNudgeHandback(dir, nil, sp, info, "worker-session", false, now); err != nil {
+	if err := queueStartupNudgeHandback(dir, nil, sp, info, "worker-session", "", false, now); err != nil {
 		t.Fatalf("failed start: %v", err)
 	}
 	wantQueuedHandbacks(t, dir, nil, info, now, 0)
@@ -65,11 +65,11 @@ func TestStartupNudgeHandbackIsQueuedForTheSession(t *testing.T) {
 	}
 
 	fake.SetStartupNudgeHandback("worker-session", handbackNudge)
-	if err := queueStartupNudgeHandback(dir, nil, sp, info, "worker-session", true, now); err != nil {
+	if err := queueStartupNudgeHandback(dir, nil, sp, info, "worker-session", "", true, now); err != nil {
 		t.Fatalf("handback: %v", err)
 	}
 	wantQueuedHandbacks(t, dir, nil, info, now, 1)
-	if err := queueStartupNudgeHandback(dir, nil, sp, info, "worker-session", true, now); err != nil {
+	if err := queueStartupNudgeHandback(dir, nil, sp, info, "worker-session", "", true, now); err != nil {
 		t.Fatalf("second take: %v", err)
 	}
 	wantQueuedHandbacks(t, dir, nil, info, now, 1)

@@ -31,6 +31,7 @@ go_library(
         "info_apply_patch.go",
         "info_codec.go",
         "info_store.go",
+        "initial_message.go",
         "input_fence.go",
         "kill_fence.go",
         "lifecycle.go",

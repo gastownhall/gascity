@@ -249,11 +249,11 @@ func TestOpenNudgeQueueBuildsTheFileQueue(t *testing.T) {
 // normalized, and not to its session id: a target rebuilt through its alias
 // history would add the session id as a key.
 func TestFileClaimTargetAddressesExactlyItsQueueKeys(t *testing.T) {
-	target := fileClaimTarget(nudgeTarget{sessionID: "s-1", continuationEpoch: "2"}.claimTarget(""))
+	target := fileClaimTarget(nudgeTarget{sessionID: "s-1", continuationEpoch: "2"}.claimTarget("", nil))
 	if got := target.queueKeys(); len(got) != 1 || got[0] != "s-1" {
 		t.Fatalf("keys of a session-only target = %q, want [s-1]", got)
 	}
-	ct := nudgeTarget{alias: "alpha", sessionID: "s-1"}.claimTarget("")
+	ct := nudgeTarget{alias: "alpha", sessionID: "s-1"}.claimTarget("", nil)
 	ct.QueueKeys = []string{" alpha ", "", "alpha", "beta"}
 	target = fileClaimTarget(ct)
 	if got := strings.Join(target.queueKeys(), ","); got != "alpha,beta" {
@@ -279,7 +279,7 @@ func TestClaimTargetCensusIsTheCitysAndMemoized(t *testing.T) {
 		}
 		return map[string]struct{}{"s-1": {}}
 	}
-	ct := nudgeTarget{cityPath: "/elsewhere", sessionID: "s-1"}.claimTarget("/city")
+	ct := nudgeTarget{cityPath: "/elsewhere", sessionID: "s-1"}.claimTarget("/city", nil)
 	for range 2 {
 		if ids, ok := ct.LiveFenceSessions(); !ok || len(ids) != 1 {
 			t.Fatalf("census = %v, %v; want the live session", ids, ok)
@@ -288,7 +288,7 @@ func TestClaimTargetCensusIsTheCitysAndMemoized(t *testing.T) {
 	if strings.Join(cities, ",") != "/city" {
 		t.Fatalf("census asked of %q, want once of /city", cities)
 	}
-	if _, ok := (nudgeTarget{}).claimTarget("/city-down").LiveFenceSessions(); ok {
+	if _, ok := (nudgeTarget{}).claimTarget("/city-down", nil).LiveFenceSessions(); ok {
 		t.Fatal("an unavailable census reported available")
 	}
 }

@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/nudgequeue"
@@ -22,6 +23,10 @@ func WithDeferredSubmitQueue(q DeferredSubmitQueue) ManagerOption {
 		}
 	}
 }
+
+// errNoDeferredQueue refuses a deferred submit from a Manager with no city
+// path.
+var errNoDeferredQueue = errors.New("deferred submit is unavailable without a city path")
 
 // deferredQueue returns where the Manager queues deferred submits, or nil when
 // it has no city path and so defers none.

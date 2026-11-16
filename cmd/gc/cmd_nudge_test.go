@@ -2959,7 +2959,7 @@ func TestQueuedNudgeStarvedForTargetAtTheStarvationAge(t *testing.T) {
 		{name: "exactly the starvation age", now: createdAt.Add(queuedNudgeStarvedAfter), want: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			starved, err := queuedNudgeStarvedForTarget(target, tc.now)
+			starved, err := queuedNudgeStarvedForTarget(target, nil, tc.now)
 			if err != nil {
 				t.Fatalf("queuedNudgeStarvedForTarget: %v", err)
 			}
@@ -5562,7 +5562,7 @@ func TestClaimDueQueuedNudgesForTargetLeavesSiblingFencePending(t *testing.T) {
 		sessionID:         "gc-1",
 		continuationEpoch: "1",
 	}
-	claimed, err := claimDueQueuedNudgesForTarget(dir, target, time.Now())
+	claimed, err := claimDueQueuedNudgesForTarget(dir, target, nil, time.Now())
 	if err != nil {
 		t.Fatalf("claimDueQueuedNudgesForTarget: %v", err)
 	}
@@ -5601,7 +5601,7 @@ func TestClaimDueQueuedNudgesForTargetClaimsHistoricalAlias(t *testing.T) {
 		aliasHistory: []string{"mayor"},
 		sessionID:    "gc-1",
 	}
-	claimed, err := claimDueQueuedNudgesForTarget(dir, target, time.Now())
+	claimed, err := claimDueQueuedNudgesForTarget(dir, target, nil, time.Now())
 	if err != nil {
 		t.Fatalf("claimDueQueuedNudgesForTarget: %v", err)
 	}
@@ -5628,7 +5628,7 @@ func TestClaimDueQueuedNudgesForTargetClaimsSameSessionStaleEpoch(t *testing.T) 
 		sessionID:         "gc-1",
 		continuationEpoch: "2",
 	}
-	claimed, err := claimDueQueuedNudgesForTarget(dir, target, time.Now())
+	claimed, err := claimDueQueuedNudgesForTarget(dir, target, nil, time.Now())
 	if err != nil {
 		t.Fatalf("claimDueQueuedNudgesForTarget: %v", err)
 	}
@@ -5719,7 +5719,7 @@ func TestClaimDueQueuedNudgesForTargetClaimsReplacedSession(t *testing.T) {
 		sessionID:         "gc-new",
 		continuationEpoch: "2",
 	}
-	claimed, err := claimDueQueuedNudgesForTarget(dir, target, time.Now())
+	claimed, err := claimDueQueuedNudgesForTarget(dir, target, nil, time.Now())
 	if err != nil {
 		t.Fatalf("claimDueQueuedNudgesForTarget: %v", err)
 	}
@@ -5766,7 +5766,7 @@ func TestClaimDueQueuedNudgesForTargetLeavesLiveSiblingFencePending(t *testing.T
 		sessionID:         "gc-1",
 		continuationEpoch: "1",
 	}
-	claimed, err := claimDueQueuedNudgesForTarget(dir, target, time.Now())
+	claimed, err := claimDueQueuedNudgesForTarget(dir, target, nil, time.Now())
 	if err != nil {
 		t.Fatalf("claimDueQueuedNudgesForTarget: %v", err)
 	}

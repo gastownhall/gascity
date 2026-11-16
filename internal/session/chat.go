@@ -504,7 +504,6 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 		}
 		return false, fmt.Errorf("fresh start after stale key: %w", err)
 	}
-	m.queueStartupNudgeHandbackLocked(*b, sessName)
 	if inc != nil {
 		*inc = next
 	}
@@ -892,6 +891,10 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 		return err
 	}
 	defer release()
+	// The first turn a launch handed back is queued once, when the start
+	// knows which launch stands (below); a start that ends with none
+	// standing leaves it here, dropped.
+	defer m.dropStartupNudgeHandback(sessName)
 	if lease != nil {
 		var cancel context.CancelFunc
 		if ctx, cancel, err = lease.Watch(ctx, runtimeLeaseWatchEvery); err != nil {
@@ -1026,7 +1029,6 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 				return startFailure(resumeCommand, b.Metadata, err)
 			}
 		} else {
-			m.queueStartupNudgeHandbackLocked(b, sessName)
 			started = true
 		}
 		if started {
@@ -1045,7 +1047,8 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 			// This is self-healing via NDI — the next ensureRunning call
 			// sees the suspended-state bead, reads the runtime up, and
 			// persists "active" with the runtime's binding. The mint stands:
-			// the process launched carries it.
+			// the process launched carries it, and so does its first turn.
+			m.queueStartupNudgeHandbackLocked(ctx, b, sessName, incarnationToken(inc))
 			if unroute != nil {
 				unroute()
 			}
@@ -1058,6 +1061,11 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 			}
 			started = retried
 		}
+	}
+	// The launch that stands hands its first turn back once: a stale-key
+	// relaunch's replaced the dead resume's (each launch clears the last).
+	if started {
+		m.queueStartupNudgeHandbackLocked(ctx, b, sessName, incarnationToken(inc))
 	}
 	if b.Metadata["transport"] == "" && (started || transportVerified) {
 		m.persistTransport(id, b.Metadata["provider"], transport)
@@ -1212,6 +1220,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 	if !inc.recordedBy(b.Metadata) {
 		return fmt.Errorf("%w: session %s no longer records %s", ErrMintSuperseded, id, inc)
 	}
+	defer m.dropStartupNudgeHandback(sessName) // a start with no launch standing
 
 	cfg := hints
 	cfg.Command = resumeCommand
@@ -1271,23 +1280,38 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 			return startFailure(resumeCommand, b.Metadata, err)
 		}
 	} else {
-		m.queueStartupNudgeHandbackLocked(b, sessName)
 		started = true
 	}
 	if started && b.Metadata["session_key"] != "" {
 		if err := m.staleKeyDetectionWaiter(ctx, sessName); err != nil {
+			m.queueStartupNudgeHandbackLocked(ctx, b, sessName, inc.Fence().Token) // the launch stands
 			if unroute != nil {
 				unroute()
 			}
 			return err
 		}
 		if !m.sp.IsRunning(sessName) {
-			if _, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, nil, unroute, nil, nil); err != nil {
+			retried, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, nil, unroute, nil, nil)
+			if err != nil {
 				return err
 			}
+			started = retried
 		}
 	}
+	// As in ensureRunningOn, the launch that stands hands its first turn
+	// back once.
+	if started {
+		m.queueStartupNudgeHandbackLocked(ctx, b, sessName, inc.Fence().Token)
+	}
 	return nil
+}
+
+// incarnationToken is the instance token inc carries, or none for no inc.
+func incarnationToken(inc *Incarnation) string {
+	if inc == nil {
+		return ""
+	}
+	return inc.Fence().Token
 }
 
 // confirmLiveSessionState marks the row of a session found or brought live as
@@ -1429,10 +1453,14 @@ func (m *Manager) idleBoundaryOutOfReach(b beads.Bead, sessName string) bool {
 }
 
 func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, by Actor, id string, b beads.Bead, source, sessName, message, resumeCommand string, hints runtime.Config) (bool, error) {
+	ctx, started := withStartupNudgeRecorder(ctx)
 	if err := m.ensureDeliverable(ctx, by, id, b, sessName, resumeCommand, hints); errors.Is(err, ErrAgentDead) {
 		return false, nil // not delivered: the caller queues it for the healed agent
 	} else if err != nil {
 		return false, err
+	}
+	if started.queued {
+		return false, nil // not delivered: the caller queues it behind the first turn
 	}
 	if transportFromMetadata(b) == "acp" {
 		if err := m.nudgeSession(ctx, sessName, message, false); err != nil {
@@ -1552,10 +1580,13 @@ func (m *Manager) markStartupDialogsVerifiedLocked(id string, b *beads.Bead) {
 
 // sendLocked delivers message, starting or resuming the runtime as by
 // allows; a row it may not resume, or whose agent is dead in a pane still
-// up, gets the message queued (reports true). So does a live session the
-// runtime would not type into because it is running a turn the submit keys
-// would interrupt (runtime.ErrSessionBusy): the queue delivers it later.
+// up, gets the message queued (reports true), and so does a session whose
+// start, made by this send, queued its first turn: the queue delivers the
+// message after it. So does a live session the runtime would not type into
+// because it is running a turn the submit keys would interrupt
+// (runtime.ErrSessionBusy): the queue delivers it later.
 func (m *Manager) sendLocked(ctx context.Context, by Actor, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config, immediate bool, queueSource string) (bool, error) {
+	ctx, started := withStartupNudgeRecorder(ctx)
 	if err := m.ensureDeliverable(ctx, by, id, b, sessName, resumeCommand, hints); err != nil {
 		if !errors.Is(err, ErrResumeHeld) && !errors.Is(err, ErrAgentDead) {
 			return false, err
@@ -1565,6 +1596,13 @@ func (m *Manager) sendLocked(ctx context.Context, by Actor, id string, b beads.B
 	verifyDeferredDialogs := needsDeferredStartupDialogVerification(b)
 	if verifyDeferredDialogs {
 		m.dismissKnownDialogsLocked(ctx, sessName, codexDeferredDialogDelay)
+	}
+	if started.queued {
+		// The start this send made queued the session's first turn: the
+		// message waits behind it in the queue rather than reach the agent
+		// ahead of its startup prompt. Nothing was typed, so the dialogs
+		// stay unverified until a send types.
+		return true, m.enqueueDeferredSubmitLocked(b, sessName, message, queueSource)
 	}
 	if err := m.pendingInteractionLocked(sessName); err != nil {
 		return false, err

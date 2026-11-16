@@ -289,7 +289,7 @@ func TestTryDeliverQueuedNudgesByPollerKeepsTheBatchWhenNewNudgesArrive(t *testi
 func TestTryDeliverQueuedNudgesByPollerKeepsTheBatchAcrossLeaseExpiry(t *testing.T) {
 	h := newKeyedPollerHarness(t)
 	h.enqueue("nudge A")
-	claimed, err := claimDueQueuedNudgeBatchForTarget(h.dir, h.target, time.Now())
+	claimed, err := claimDueQueuedNudgeBatchForTarget(h.dir, h.target, nil, time.Now())
 	if err != nil || len(claimed) != 1 {
 		t.Fatalf("claim = %v, %v; want nudge A", claimed, err)
 	}
@@ -392,7 +392,7 @@ func TestTryDeliverQueuedNudgesByPollerKeepsTheBatchWhenAFencedPredecessorWakes(
 	census = map[string]struct{}{"S1": {}, "S2": {}} // S1 wakes again
 	predecessor := h.target
 	predecessor.sessionID = "S1"
-	claimed, err := claimDueQueuedNudgeBatchForTarget(h.dir, predecessor, time.Now())
+	claimed, err := claimDueQueuedNudgeBatchForTarget(h.dir, predecessor, nil, time.Now())
 	if err != nil || len(claimed) != 0 {
 		t.Fatalf("woken predecessor S1 claimed %+v (err %v), want nothing: the batch is S2's", claimed, err)
 	}
@@ -435,7 +435,7 @@ func TestClaimDueQueuedNudgeBatchMovesItsNudgesOntoTheClaimingFence(t *testing.T
 		census = map[string]struct{}{successor: {}}
 		target := h.target
 		target.sessionID = successor
-		claimed, err := claimDueQueuedNudgeBatchForTarget(h.dir, target, time.Now())
+		claimed, err := claimDueQueuedNudgeBatchForTarget(h.dir, target, nil, time.Now())
 		if err != nil || len(claimed) != 1 {
 			t.Fatalf("claim for %s = %+v, %v; want nudge A", successor, claimed, err)
 		}
@@ -469,7 +469,7 @@ func TestClaimDueQueuedNudgeBatchSkipsAPinnedBatchPartlyInFlight(t *testing.T) {
 	}
 	h.enqueue("nudge C")
 
-	claimed, err := claimDueQueuedNudgeBatchForTarget(h.dir, h.target, time.Now())
+	claimed, err := claimDueQueuedNudgeBatchForTarget(h.dir, h.target, nil, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -597,7 +597,7 @@ func TestRekeyQueuedNudgesAfterFailedBookkeepingReleasesWhenAClaimIsGone(t *test
 	h := newKeyedPollerHarness(t)
 	h.enqueue("nudge A")
 	h.enqueue("nudge B")
-	claimed, err := claimDueQueuedNudgeBatchForTarget(h.dir, h.target, time.Now())
+	claimed, err := claimDueQueuedNudgeBatchForTarget(h.dir, h.target, nil, time.Now())
 	if err != nil || len(claimed) != 2 || claimed[0].DeliveryBatch == "" {
 		t.Fatalf("claimed = %+v (err %v), want nudges A and B under one key", claimed, err)
 	}

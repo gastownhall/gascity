@@ -65,7 +65,7 @@ func enqueueAndClaimForTest(t *testing.T, h *nqCharHarness, ids ...string) {
 			t.Fatalf("enqueue %s: %v", id, err)
 		}
 	}
-	claimed, err := claimDueQueuedNudgesForTarget(h.city, h.target("", ""), time.Now())
+	claimed, err := claimDueQueuedNudgesForTarget(h.city, h.target("", ""), nil, time.Now())
 	if err != nil || len(claimed) != len(ids) {
 		t.Fatalf("claim = %v, %v; want %v", nqCharItems(claimed), err, ids)
 	}
@@ -97,7 +97,7 @@ func TestNudgeAckCommitsWhenItsShadowWriteFails(t *testing.T) {
 			t.Fatalf("debt of %s = %+v, want one failed attempt owing injected", item.ID, debt)
 		}
 	}
-	claimed, err := claimDueQueuedNudgesForTarget(h.city, h.target("", ""), time.Now().Add(time.Hour))
+	claimed, err := claimDueQueuedNudgesForTarget(h.city, h.target("", ""), nil, time.Now().Add(time.Hour))
 	if err != nil || len(claimed) != 0 {
 		t.Fatalf("a claim after the ack = %v, %v; want nothing", nqCharItems(claimed), err)
 	}
@@ -288,7 +288,7 @@ func TestPaidDeadLettersCostNoStoreCalls(t *testing.T) {
 	opens := h.opens
 	alpha := h.target("s-new", "2")
 	for i := 0; i < 10; i++ {
-		if _, err := claimDueQueuedNudgesForTarget(h.city, alpha, now); err != nil {
+		if _, err := claimDueQueuedNudgesForTarget(h.city, alpha, nil, now); err != nil {
 			t.Fatal(err)
 		}
 		if _, _, _, err := listQueuedNudgesForTarget(h.city, alpha, now); err != nil {
@@ -750,7 +750,7 @@ func TestNudgeWaitReminderAckedWhileItsShadowWriteFails(t *testing.T) {
 	if err := enqueueQueuedNudgeWithStore(h.city, h.shadow(), item); err != nil {
 		t.Fatal(err)
 	}
-	if claimed, err := claimDueQueuedNudgesForTarget(h.city, h.target("", ""), time.Now()); err != nil || len(claimed) != 1 {
+	if claimed, err := claimDueQueuedNudgesForTarget(h.city, h.target("", ""), nil, time.Now()); err != nil || len(claimed) != 1 {
 		t.Fatalf("claim = %v, %v", nqCharItems(claimed), err)
 	}
 	h.failWrites = true

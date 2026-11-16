@@ -53,9 +53,13 @@ var nqCharVerbs = struct {
 	dispatchSkips func(city string) map[string]int64
 	rekey         func(city string, items []queuedNudge, bookkeepErr error) ([]queuedNudge, error)
 }{
-	enqueue:       enqueueQueuedNudgeWithStore,
-	claimDue:      claimDueQueuedNudgesForTarget,
-	claimBatch:    claimDueQueuedNudgeBatchForTarget,
+	enqueue: enqueueQueuedNudgeWithStore,
+	claimDue: func(city string, target nudgeTarget, now time.Time) ([]queuedNudge, error) {
+		return claimDueQueuedNudgesForTarget(city, target, nil, now)
+	},
+	claimBatch: func(city string, target nudgeTarget, now time.Time) ([]queuedNudge, error) {
+		return claimDueQueuedNudgeBatchForTarget(city, target, nil, now)
+	},
 	release:       releaseQueuedNudgeClaimsUntil,
 	recordFailure: recordQueuedNudgeFailureDetailed,
 	ack:           ackQueuedNudgesWithOutcome,

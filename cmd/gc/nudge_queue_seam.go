@@ -1,12 +1,14 @@
 package main
 
 import (
+	"os"
 	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
@@ -75,18 +77,21 @@ func nudgeShadows(store beads.NudgesStore) storebinding.NudgeShadows {
 	return nudgeFrontDoor(store)
 }
 
-// claimTarget is the contract's view of t: its queue keys, its fence, and a
+// claimTarget is the contract's view of t: its queue keys, its fence, a
 // census of cityPath's sessions, taken at most once, that lets it adopt a
-// superseded session's nudges. A target that carries a census of its own
-// (fenceCensus, the dispatcher's skip-only snapshot census) answers with it
-// instead.
-func (t nudgeTarget) claimTarget(cityPath string) storebinding.ClaimTarget {
+// superseded session's nudges, and launch, the reader of the launch t's
+// session runs now that judges its startup turns (ClaimTarget.LiveLaunch;
+// nudgeLaunchReader). A nil launch holds those turns. A target that carries a
+// census of its own (fenceCensus, the dispatcher's skip-only snapshot census)
+// answers with it instead.
+func (t nudgeTarget) claimTarget(cityPath string, launch func() (string, bool)) storebinding.ClaimTarget {
 	if t.fenceCensus != nil {
 		return storebinding.ClaimTarget{
 			QueueKeys:         t.queueKeys(),
 			SessionID:         t.sessionID,
 			ContinuationEpoch: t.continuationEpoch,
 			LiveFenceSessions: t.fenceCensus,
+			LiveLaunch:        launch,
 		}
 	}
 	var once sync.Once
@@ -99,5 +104,26 @@ func (t nudgeTarget) claimTarget(cityPath string) storebinding.ClaimTarget {
 			once.Do(func() { ids = liveNudgeFenceSessionIDsForCity(cityPath) })
 			return ids, ids != nil
 		},
+		LiveLaunch: launch,
+	}
+}
+
+// nudgeLaunchReader reads the launch running as t's session through sp
+// (runtime.ReadLaunchID): on tmux the pane environment's instance token, on
+// other runtimes their identity read. It is nil, an unknown launch, when
+// there is no runtime or no session name to read.
+func nudgeLaunchReader(t nudgeTarget, sp runtime.Provider) func() (string, bool) {
+	if sp == nil || t.sessionName == "" {
+		return nil
+	}
+	return func() (string, bool) { return runtime.ReadLaunchID(sp, t.sessionName) }
+}
+
+// nudgeOwnLaunchReader answers the launch of the process it runs in, from its
+// own GC_INSTANCE_TOKEN: the hook drain of its own session reads no runtime.
+func nudgeOwnLaunchReader() func() (string, bool) {
+	return func() (string, bool) {
+		id := runtime.LaunchID(os.Getenv(runtime.InstanceTokenEnv))
+		return id, id != ""
 	}
 }

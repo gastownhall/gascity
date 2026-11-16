@@ -1245,8 +1245,8 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			}
 			return fmt.Errorf("starting session: %w", err)
 		}
-		m.queueStartupNudgeHandbackLocked(b, sessName)
 		if metaErr := m.confirmStartedRuntimeMetadata(inc, sessName, &b); metaErr != nil {
+			m.dropStartupNudgeHandback(sessName) // the create is undone, or another owns the runtime
 			if errors.Is(metaErr, ErrMintSuperseded) {
 				// The row records a newer incarnation: the runtime is its
 				// owner's to keep or reap, never stopped by name here.
@@ -1260,6 +1260,7 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			}
 			return metaErr
 		}
+		m.queueStartupNudgeHandbackLocked(ctx, b, sessName, inc.Fence().Token)
 
 		info = m.infoFromBead(b)
 		return nil

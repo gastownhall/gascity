@@ -209,7 +209,7 @@ func TestNudgeClaimWaitsForTheLockOnlyUntilTheHookDeadline(t *testing.T) {
 	h.lockHeldByTest = true
 	deadline := inHookForTest(t, 1200*time.Millisecond)
 
-	claimed, err := claimDueQueuedNudgesForTarget(h.city, h.target("", ""), time.Now())
+	claimed, err := claimDueQueuedNudgesForTarget(h.city, h.target("", ""), nil, time.Now())
 	if !errors.Is(err, nudgequeue.ErrQueueBusy) || len(claimed) != 0 {
 		t.Fatalf("claim under a held lock inside a hook = %v, %v; want nothing and ErrQueueBusy", nqCharItems(claimed), err)
 	}
@@ -265,7 +265,7 @@ func TestNudgeVerbsMaintainAfterALongLockWait(t *testing.T) {
 			return releaseQueuedNudgeClaims(city, []string{"n-1"})
 		}},
 		{"claim", func(city string) error {
-			_, err := claimDueQueuedNudgesForTarget(city, nudgeTarget{cityPath: city, alias: "beta"}, time.Now())
+			_, err := claimDueQueuedNudgesForTarget(city, nudgeTarget{cityPath: city, alias: "beta"}, nil, time.Now())
 			return err
 		}},
 	} {
@@ -304,11 +304,11 @@ func TestNudgeVerbsMaintainWhenTheirNowIsStale(t *testing.T) {
 		run  func(h *nqCharHarness, now time.Time) error
 	}{
 		{"claim", func(h *nqCharHarness, now time.Time) error {
-			_, err := claimDueQueuedNudgesForTarget(h.city, beta(h), now)
+			_, err := claimDueQueuedNudgesForTarget(h.city, beta(h), nil, now)
 			return err
 		}},
 		{"claim_batch", func(h *nqCharHarness, now time.Time) error {
-			_, err := claimDueQueuedNudgeBatchForTarget(h.city, beta(h), now)
+			_, err := claimDueQueuedNudgeBatchForTarget(h.city, beta(h), nil, now)
 			return err
 		}},
 		{"list", func(h *nqCharHarness, now time.Time) error {

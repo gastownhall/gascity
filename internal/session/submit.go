@@ -368,14 +368,21 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id str
 // hold was decided before the stop, so the restart does not re-read it: the
 // dead runtime would make a heartbeat or unreadable hold refuse, losing the
 // session and the message. Only an operator's resume consumes a user hold
-// (Actor.consumesHold). It reports whether the message was queued: the
-// replacement runtime's refusal to type into a prompt it came up showing
-// queues the message for after the prompt is answered, as the outgoing turn
-// is already gone, and so does its deferral of a turn already running that
-// the keys would interrupt (runtime.ErrSessionBusy), as sendLocked queues it.
+// (Actor.consumesHold). It reports whether the message was queued: a
+// replacement whose start queued its first turn has the message queued behind
+// that turn; the replacement runtime's refusal to type into a prompt it came
+// up showing queues the message for after the prompt is answered, as the
+// outgoing turn is already gone, and so does its deferral of a turn already
+// running that the keys would interrupt (runtime.ErrSessionBusy), as
+// sendLocked queues it.
 func (m *Manager) restartAndSendLocked(ctx context.Context, by Actor, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config) (bool, error) {
+	ctx, started := withStartupNudgeRecorder(ctx)
 	if err := m.ensureRunning(ctx, by, id, b, sessName, resumeCommand, hints, true); err != nil {
 		return false, err
+	}
+	if started.queued {
+		// The replacement queued its first turn: the message waits behind it.
+		return true, m.enqueueDeferredSubmitLocked(b, sessName, message, nudgequeue.SourceSubmit)
 	}
 	if err := m.waitUntilRunningLocked(ctx, id, sessName, 2*time.Second); err != nil {
 		return false, err
@@ -885,13 +892,15 @@ const deferredNudgeSource = "session"
 // boundary under source (nudgequeue.SourceSubmit for a user's submit,
 // deferredNudgeSource for a nudge).
 func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message, source string) error {
-	queue := m.deferredQueue()
-	if queue == nil {
-		return errors.New("deferred submit is unavailable without a city path")
-	}
-	now := time.Now().UTC()
-	item := nudgequeue.Item{
-		ID:                "nudge-" + NewInstanceToken()[:12],
+	_, err := m.enqueueDeferredItemsLocked(b, sessName, []nudgequeue.Item{newDeferredSubmitItem(b, message, source, time.Now().UTC())})
+	return err
+}
+
+// newDeferredSubmitItem is message as a deferred submit for b's session
+// under source, queued at now.
+func newDeferredSubmitItem(b beads.Bead, message, source string, now time.Time) nudgequeue.Item {
+	return nudgequeue.Item{
+		ID:                newDeferredSubmitID(),
 		Agent:             deferredSubmitAgentKey(b),
 		SessionID:         b.ID,
 		ContinuationEpoch: deferredSubmitEpoch(b),
@@ -901,10 +910,32 @@ func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message, s
 		DeliverAfter:      now,
 		ExpiresAt:         now.Add(defaultQueuedSubmitTTL),
 	}
-	if err := queue.EnqueueDeferred(item); err != nil {
-		return fmt.Errorf("queueing deferred submit: %w", err)
+}
+
+// newDeferredSubmitID mints a deferred submit's id.
+func newDeferredSubmitID() string {
+	return "nudge-" + NewInstanceToken()[:12]
+}
+
+// enqueueDeferredItemsLocked queues items for sessName in order, every one
+// even when an earlier one fails, and reports whether any was queued and
+// every failure. When one was queued and the session takes follow-ups, it
+// starts the session's submit poller.
+func (m *Manager) enqueueDeferredItemsLocked(b beads.Bead, sessName string, items []nudgequeue.Item) (bool, error) {
+	queue := m.deferredQueue()
+	if queue == nil {
+		return false, errNoDeferredQueue
 	}
-	if m.supportsFollowUpLocked(b) {
+	queued := false
+	var errs []error
+	for _, item := range items {
+		if err := queue.EnqueueDeferred(item); err != nil {
+			errs = append(errs, fmt.Errorf("queueing deferred submit: %w", err))
+			continue
+		}
+		queued = true
+	}
+	if queued && m.supportsFollowUpLocked(b) {
 		// The item is queued either way: the supervisor's dispatcher also
 		// delivers it. A poller that did not start only loses the fast path,
 		// so say so instead of dropping the error.
@@ -912,7 +943,7 @@ func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message, s
 			log.Printf("session: %q: queued a deferred submit but could not start its poller: %v", sessName, err)
 		}
 	}
-	return nil
+	return queued, errors.Join(errs...)
 }
 
 // deferredSubmitEpoch returns the continuation epoch a deferred submit is
