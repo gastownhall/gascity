@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // TestHTTPAdapterPublishSetsCSRFHeader pins that HTTPAdapter.Publish sets
@@ -28,7 +30,7 @@ func TestHTTPAdapterPublishSetsCSRFHeader(t *testing.T) {
 	// happens-before the test's assertions, satisfying the Go memory
 	// model. A bare shared variable would race.
 	gotHeader := make(chan string, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Errorf("expected POST, got %s", r.Method)
 		}
@@ -47,7 +49,7 @@ func TestHTTPAdapterPublishSetsCSRFHeader(t *testing.T) {
 			},
 			Delivered: true,
 		})
-	}))
+	})))
 	defer server.Close()
 
 	adapter := NewHTTPAdapter("test", server.URL, AdapterCapabilities{})
@@ -86,7 +88,7 @@ func TestHTTPAdapterEnsureChildConversationSetsCSRFHeader(t *testing.T) {
 	t.Parallel()
 
 	gotHeader := make(chan string, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Errorf("expected POST, got %s", r.Method)
 		}
@@ -102,7 +104,7 @@ func TestHTTPAdapterEnsureChildConversationSetsCSRFHeader(t *testing.T) {
 			Kind:                 ConversationThread,
 			ParentConversationID: "C123",
 		})
-	}))
+	})))
 	defer server.Close()
 
 	adapter := NewHTTPAdapter("test", server.URL, AdapterCapabilities{})

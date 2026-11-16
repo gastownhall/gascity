@@ -44,7 +44,8 @@ type gitStatus struct {
 // buildRigResponse creates a rigResponse with agent counts and last activity.
 // Each agent row is observed on the runtime session it runs under, as
 // sessions resolves it. pools answers unlimited-pool expansion for the whole
-// request (newRequestSessionListing).
+// request (newRequestSessionListing), and a session its attested listing
+// does not name is stopped without a probe (listedAbsent).
 func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.Provider, pools sessionLister, sessions *agentSessionResolver, cityName, cityPath string) rigResponse {
 	tmpl := cfg.Workspace.SessionTemplate
 	var agentCount, runningCount int
@@ -54,13 +55,17 @@ func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.P
 		if workdirutil.ConfiguredRigName(cityPath, a, cfg.Rigs) != rig.Name {
 			continue
 		}
-		processNames := config.AgentProcessNames(cfg, a, exec.LookPath)
+		processNames := lazyAgentProcessNames(cfg, a)
 		expanded := expandAgent(a, cityName, tmpl, pools, cfg.NamedSessions)
 		for _, ea := range expanded {
 			agentCount++
 			var obs worker.LiveObservation
 			sessions.resolve(a, ea.qualifiedName, func(sessionName string) bool {
-				obs = observeProviderSession(sp, sessionName, processNames)
+				if listedAbsent(pools, sessionName) {
+					obs = worker.LiveObservation{SessionName: sessionName}
+					return false
+				}
+				obs = observeProviderSession(sp, sessionName, processNames())
 				return obs.Running
 			})
 			if obs.Running {
@@ -95,30 +100,44 @@ func (s *Server) buildRigResponse(cfg *config.City, rig config.Rig, sp runtime.P
 // runtime entry, or if all its agents are runtime-suspended via session
 // metadata. The deprecated `[[rig]] suspended` field in city.toml is
 // intentionally NOT consulted — `gc doctor` surfaces it as a migration
-// target.
+// target. The first agent row that is not suspended decides the answer, so
+// a rig with a stopped agent costs no further probes.
 func (s *Server) rigSuspended(cfg *config.City, rig config.Rig, sp runtime.Provider, pools sessionLister, cityName, cityPath string) bool {
 	if rs, err := suspensionstate.Load(fsys.OSFS{}, cityPath); err == nil &&
 		suspensionstate.EffectiveRigSuspended(rs, rig.Name, rig.EffectiveSuspendedOnStart()) {
 		return true
 	}
 	tmpl := cfg.Workspace.SessionTemplate
-	var agentCount, suspendedCount int
+	agentCount := 0
 	for _, a := range cfg.Agents {
 		if workdirutil.ConfiguredRigName(cityPath, a, cfg.Rigs) != rig.Name {
 			continue
 		}
-		processNames := config.AgentProcessNames(cfg, a, exec.LookPath)
+		processNames := lazyAgentProcessNames(cfg, a)
 		expanded := expandAgent(a, cityName, tmpl, pools, cfg.NamedSessions)
 		for _, ea := range expanded {
 			agentCount++
 			sessionName := agent.SessionNameFor(cityName, ea.qualifiedName, tmpl)
-			obs := observeProviderSession(sp, sessionName, processNames)
-			if obs.Suspended {
-				suspendedCount++
+			if listedAbsent(pools, sessionName) || !observeProviderSession(sp, sessionName, processNames()).Suspended {
+				return false
 			}
 		}
 	}
-	return agentCount > 0 && suspendedCount == agentCount
+	return agentCount > 0
+}
+
+// lazyAgentProcessNames returns a's process names, resolved on the first call
+// only: resolving them resolves a's provider chain, which dominated the rig
+// list's cost once stopped rows stopped being probed.
+func lazyAgentProcessNames(cfg *config.City, a config.Agent) func() []string {
+	var names []string
+	resolved := false
+	return func() []string {
+		if !resolved {
+			names, resolved = config.AgentProcessNames(cfg, a, exec.LookPath), true
+		}
+		return names
+	}
 }
 
 // gitStatusTimeout bounds how long git operations can take per rig.

@@ -39,13 +39,16 @@ func TestSessionProgramStatusDerivation(t *testing.T) {
 	for name, tc := range map[string]struct {
 		mode      runtime.ProgramStatusMode
 		transport string
+		wantArm   runtime.ProgramStatusArm
 	}{
-		"off": {runtime.ProgramStatusOff, ""},
-		"acp": {runtime.ProgramStatusOn, config.SessionTransportACP},
+		// Off still carries the declaration: the leaf arms it only under its
+		// live switch, so a start resolved before a flip on follows it.
+		"off": {runtime.ProgramStatusOff, "", apiProgramStatusArm},
+		"acp": {runtime.ProgramStatusOn, config.SessionTransportACP, runtime.ProgramStatusArm{}},
 	} {
 		arm, env := sessionProgramStatus(tc.mode, resolved, tc.transport)
-		if arm != (runtime.ProgramStatusArm{}) {
-			t.Errorf("%s: arm = %+v, want disarmed", name, arm)
+		if arm != tc.wantArm {
+			t.Errorf("%s: arm = %+v, want %+v", name, arm, tc.wantArm)
 		}
 		if env[apiProgramStatusEnvKey] != "provider" {
 			t.Errorf("%s: env = %v, want the provider env untouched", name, env)
@@ -67,11 +70,12 @@ func TestEveryRuntimeConfigSiteAppliesProgramStatusArm(t *testing.T) {
 			mode      runtime.ProgramStatusMode
 			transport string
 			wantArm   runtime.ProgramStatusArm
+			wantEnv   bool
 		}{
-			{"on", runtime.ProgramStatusOn, "", apiProgramStatusArm},
-			{"shadow", runtime.ProgramStatusShadow, "", apiProgramStatusArm},
-			{"off", runtime.ProgramStatusOff, "", runtime.ProgramStatusArm{}},
-			{"acp", runtime.ProgramStatusOn, config.SessionTransportACP, runtime.ProgramStatusArm{}},
+			{"on", runtime.ProgramStatusOn, "", apiProgramStatusArm, true},
+			{"shadow", runtime.ProgramStatusShadow, "", apiProgramStatusArm, true},
+			{"off", runtime.ProgramStatusOff, "", apiProgramStatusArm, false},
+			{"acp", runtime.ProgramStatusOn, config.SessionTransportACP, runtime.ProgramStatusArm{}, false},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				cfg, err := resolvedSessionConfigForProvider(
@@ -85,7 +89,7 @@ func TestEveryRuntimeConfigSiteAppliesProgramStatusArm(t *testing.T) {
 				if got := cfg.Runtime.Hints.ProgramStatus; got != tc.wantArm {
 					t.Errorf("Hints.ProgramStatus = %+v, want %+v", got, tc.wantArm)
 				}
-				wantEnv := tc.wantArm.Capture
+				wantEnv := tc.wantEnv
 				if _, ok := cfg.Runtime.SessionEnv[apiProgramStatusEnvKey]; ok != wantEnv {
 					t.Errorf("SessionEnv has program-status env = %v, want %v", ok, wantEnv)
 				}
@@ -125,9 +129,10 @@ func TestEveryRuntimeConfigSiteAppliesProgramStatusArm(t *testing.T) {
 	for _, tc := range []struct {
 		mode    string
 		wantArm runtime.ProgramStatusArm
+		wantEnv bool
 	}{
-		{"on", apiProgramStatusArm},
-		{"off", runtime.ProgramStatusArm{}},
+		{"on", apiProgramStatusArm, true},
+		{"off", apiProgramStatusArm, false},
 	} {
 		t.Run("buildSessionResume "+tc.mode, func(t *testing.T) {
 			_, hints, err := newServer(t, tc.mode).buildSessionResume(info)
@@ -137,8 +142,8 @@ func TestEveryRuntimeConfigSiteAppliesProgramStatusArm(t *testing.T) {
 			if hints.ProgramStatus != tc.wantArm {
 				t.Errorf("ProgramStatus = %+v, want %+v", hints.ProgramStatus, tc.wantArm)
 			}
-			if _, ok := hints.Env[apiProgramStatusEnvKey]; ok != tc.wantArm.Capture {
-				t.Errorf("Env has program-status env = %v, want %v", ok, tc.wantArm.Capture)
+			if _, ok := hints.Env[apiProgramStatusEnvKey]; ok != tc.wantEnv {
+				t.Errorf("Env has program-status env = %v, want %v", ok, tc.wantEnv)
 			}
 		})
 		t.Run("resolveWorkerSessionRuntime "+tc.mode, func(t *testing.T) {
@@ -152,8 +157,8 @@ func TestEveryRuntimeConfigSiteAppliesProgramStatusArm(t *testing.T) {
 			if rt.Hints.ProgramStatus != tc.wantArm {
 				t.Errorf("ProgramStatus = %+v, want %+v", rt.Hints.ProgramStatus, tc.wantArm)
 			}
-			if _, ok := rt.SessionEnv[apiProgramStatusEnvKey]; ok != tc.wantArm.Capture {
-				t.Errorf("SessionEnv has program-status env = %v, want %v", ok, tc.wantArm.Capture)
+			if _, ok := rt.SessionEnv[apiProgramStatusEnvKey]; ok != tc.wantEnv {
+				t.Errorf("SessionEnv has program-status env = %v, want %v", ok, tc.wantEnv)
 			}
 		})
 	}

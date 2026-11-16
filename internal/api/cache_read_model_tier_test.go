@@ -23,7 +23,7 @@ func (s *readModelCountingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 }
 
 // TestSessionReadModelListingsWarmCacheZeroStoreList is the read-tier contract of
-// WI-6 W2: the typed read-model feed must serve a warm cachedListStore without a
+// WI-6 W2: the typed read-model feed must serve a warm beads.CachedLister without a
 // single store.List call. This is the #3939/#3941 dashboard-perf guarantee (no
 // per-request bd hit) that the raw sessionReadModelRows path held and the typed
 // twin must not regress. It holds for the default list and for every state

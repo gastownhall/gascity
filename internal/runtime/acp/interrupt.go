@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -251,7 +250,7 @@ func (sc *sessionConn) signalTurn(idleCh <-chan struct{}, sent *atomic.Bool) boo
 		sc.onTurnSignal()
 	}
 	// A failure means the group is already gone; the wait observes that.
-	if err := runtime.SignalProcessGroup(sc.cmd, syscall.SIGINT); err == nil && sent != nil {
+	if err := signalInterrupt(sc); err == nil && sent != nil {
 		sent.Store(true)
 	}
 	return true

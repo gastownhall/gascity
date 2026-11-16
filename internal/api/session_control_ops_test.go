@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
@@ -75,7 +76,7 @@ func wantStatus(t *testing.T, what string, rec *httptest.ResponseRecorder, code 
 // generationOf is session id's generation.
 func generationOf(t *testing.T, store beads.Store, id string) int64 {
 	t.Helper()
-	scope, why, err := sessionOpScope(store, id)
+	scope, why, err := sessionOpScope(beadstest.Sessions(store), id)
 	if why != "" {
 		t.Fatalf("session %s has no generation: %s %v", id, why, err)
 	}
@@ -1206,7 +1207,7 @@ func TestSessionControlOpsTranscriptStopKeepsTheLegacyStop(t *testing.T) {
 	if err := e.store.SetMetadata(info.ID, "provider", "claude"); err != nil {
 		t.Fatal(err)
 	}
-	handle, err := e.server(t).workerHandleForSession(e.store, info.ID)
+	handle, err := e.server(t).workerHandleForSession(beadstest.Sessions(e.store), info.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1951,7 +1952,7 @@ func (s *reopenAtKillStore) reopenAndStart() error {
 		return err
 	}
 	defer lease.Release()
-	scope, why, err := sessionOpScope(s.opsTestStore, s.id)
+	scope, why, err := sessionOpScope(beadstest.Sessions(s.opsTestStore), s.id)
 	if why != "" {
 		return fmt.Errorf("reading the generation: %s %w", why, err)
 	}

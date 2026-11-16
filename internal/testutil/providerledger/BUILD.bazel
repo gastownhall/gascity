@@ -31,6 +31,7 @@ go_test(
         "//cmd/gc:bazel_go_srcs",
         "//cmd/gc:providers.go",
         "//cmd/gc:runtime_registry.go",
+        "//internal/processgroup:bazel_go_srcs",
         "//internal/runtime:bazel_go_srcs",
         "//internal/runtime:bazel_go_test_srcs",
         "//internal/runtime/acp:bazel_go_test_srcs",

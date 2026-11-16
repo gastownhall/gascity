@@ -71,6 +71,7 @@ import (
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -246,7 +247,7 @@ func (s laneLiveSessions) GuardedBatcherHandle() (beads.GuardedBatcher, bool) {
 
 // laneHostEnv is the controller state the host runs over.
 type laneHostEnv interface {
-	SessionsBeadStore() beads.SessionStore
+	Stores() storeref.Stores
 	SessionProvider() runtime.Provider
 	Config() *config.City
 	CityPath() string
@@ -489,7 +490,7 @@ func (h *conversationLaneHost) start(ctx context.Context) {
 // decide sets the host's state from the current sessions store, logging a
 // refusal, and returns it.
 func (h *conversationLaneHost) decide() string {
-	sessions := h.env.SessionsBeadStore()
+	sessions := h.env.Stores().Sessions()
 	err := laneStoreCapability(sessions.Store)
 	h.mu.Lock()
 	var warnings []string
@@ -823,7 +824,7 @@ func (h *conversationLaneHost) pass(conv string) (out lanePassOutcome) {
 		h.noteError("store", err)
 		return lanePassOutcome{err: err}
 	}
-	sessions := h.env.SessionsBeadStore().Store
+	sessions := h.env.Stores().Sessions().Store
 	live := sessionFrontDoor(laneLiveSessions{Store: sessions})
 	view, row, absent, err := readConversationLaneView(live, conv, h.stopReading)
 	if err != nil {
@@ -903,7 +904,7 @@ func (h *conversationLaneHost) requestWake(live *session.Store, conv string) (se
 // store returns the cached op store and lane, opening them over the current
 // sessions store when none is cached or that store was replaced.
 func (h *conversationLaneHost) store() (*opjournal.Store, *opjournal.ConversationLane, error) {
-	over := h.env.SessionsBeadStore().Store
+	over := h.env.Stores().Sessions().Store
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.st != nil && sameBeadStore(h.stOver, over) {
@@ -1303,7 +1304,7 @@ func (h *conversationLaneHost) refreshRowOnce(id string) error {
 	if h.env.storesQuiescent() {
 		return errLaneRowQuiescent
 	}
-	cache := laneSessionsCache(h.env.SessionsBeadStore().Store)
+	cache := laneSessionsCache(h.env.Stores().Sessions().Store)
 	if cache == nil {
 		return errLaneRowUncached
 	}

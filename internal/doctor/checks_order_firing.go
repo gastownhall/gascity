@@ -81,6 +81,9 @@ func WithOrderFiringCurrentInapplicableFunc(fn OrderFiringCurrentInapplicableFun
 }
 
 // OrderFiringCurrentCheck reports scheduled orders whose last firing is stale.
+// An order's cadence is its interval, or the dispatch floor when that is
+// longer: the dispatcher starts a bounded number of orders per pass, so a short
+// interval in a large ring cannot be met (see OrderDispatchFloorCheck).
 type OrderFiringCurrentCheck struct {
 	cfg            *config.City
 	cityPath       string
@@ -223,7 +226,14 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 	// parallel. The pre-pass shares the cron-interval cache with the loop, so
 	// the expected intervals — and therefore which orders need a lookup — are
 	// identical to what the loop derives for itself.
-	lastRunFor := c.prefetchedLastRunFunc(c.pendingLastRunOrders(allOrders, firedEvents, suspendedRigs, cronIntervals, now))
+	// The dispatcher starts a bounded number of orders per pass, so an order
+	// can fire no more often than the dispatch floor however short its
+	// interval (order-dispatch-floor reports that configuration). Judging it
+	// against its bare interval instead would call a healthy order stale, or
+	// never fired, merely for waiting its turn in the ring.
+	floor, _, _ := orderDispatchFloor(c.cfg, len(orderDispatchRing(allOrders, suspendedRigs)))
+
+	lastRunFor := c.prefetchedLastRunFunc(c.pendingLastRunOrders(allOrders, firedEvents, suspendedRigs, cronIntervals, floor, now))
 
 	for _, order := range allOrders {
 		if order.Trigger != "cron" && order.Trigger != "cooldown" {
@@ -243,7 +253,8 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 			blockingErrors++
 			continue
 		}
-		lastFired, err := c.latestOrderFiredAtUsing(lastRunFor, firedEvents, order, expected, now)
+		cadence := max(expected, floor)
+		lastFired, err := c.latestOrderFiredAtUsing(lastRunFor, firedEvents, order, cadence, now)
 		if err != nil {
 			worst = worseStatus(worst, StatusError)
 			result.Details = append(result.Details, fmt.Sprintf("%s: cannot read order history: %v", orderDisplayName(order), err))
@@ -253,7 +264,11 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 			blockingErrors++
 			continue
 		}
-		status, severity, detail := classifyOrderFiring(order, now, expected, lastFired, startedAt)
+		status, severity, detail := classifyOrderFiring(order, now, cadence, lastFired, startedAt)
+		if cadence > expected {
+			detail += fmt.Sprintf(" (interval %s; the %s dispatch floor sets its cadence)",
+				formatDispatchFloorDuration(expected), formatDispatchFloorDuration(floor))
+		}
 		worst = worseStatus(worst, status)
 		result.Details = append(result.Details, detail)
 		if status != StatusOK {
@@ -631,7 +646,7 @@ func eventEvidenceSuffices(latest time.Time, expected time.Duration, now time.Ti
 // orders need an authoritative lookup. Orders whose expected interval cannot be
 // computed are skipped: the loop reports that as its own error without ever
 // reaching the lookup.
-func (c *OrderFiringCurrentCheck) pendingLastRunOrders(allOrders []orders.Order, firedEvents []events.Event, suspendedRigs map[string]bool, cronIntervals map[string]time.Duration, now time.Time) []orders.Order {
+func (c *OrderFiringCurrentCheck) pendingLastRunOrders(allOrders []orders.Order, firedEvents []events.Event, suspendedRigs map[string]bool, cronIntervals map[string]time.Duration, floor time.Duration, now time.Time) []orders.Order {
 	if c.lastRun == nil {
 		return nil
 	}
@@ -647,7 +662,7 @@ func (c *OrderFiringCurrentCheck) pendingLastRunOrders(allOrders []orders.Order,
 		if err != nil {
 			continue
 		}
-		if eventEvidenceSuffices(latestOrderFiredAt(firedEvents, order.ScopedName()), expected, now) {
+		if eventEvidenceSuffices(latestOrderFiredAt(firedEvents, order.ScopedName()), max(expected, floor), now) {
 			continue
 		}
 		pending = append(pending, order)

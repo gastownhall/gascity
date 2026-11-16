@@ -65,6 +65,7 @@ func stopNeeds(w *World, it intent) needs {
 	if isIdleReason(it.Reason) {
 		n.Content = w.idleView().fired[it.Key]
 		n.Activity = !n.Content
+		n.IdleShadow = true
 	}
 	return n
 }
@@ -204,11 +205,17 @@ func stopDecide(v txView) txStep {
 	if !fv.Proceed {
 		return txStep{Refuse: fv.Reason}
 	}
-	if plan.idle && !idleReproved(v) {
-		return txStep{Refuse: causeIdleUnproven}
+	if !plan.idle {
+		plan.verdict = fv
+		return txStep{Pass: plan}
+	}
+	// The idle stop's proof decides alone; the step carries it so the
+	// transaction records it beside the record's sleep proof (IdleSleep).
+	if !idleReproved(v) {
+		return txStep{Refuse: causeIdleUnproven, IdleSleep: idleSleepUnproved}
 	}
 	plan.verdict = fv
-	return txStep{Pass: plan}
+	return txStep{Pass: plan, IdleSleep: idleSleepProved}
 }
 
 // dormantGone reports an operator-dormant stop whose fresh read finds

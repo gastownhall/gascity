@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 func TestResolveTemplateMCPIntegration(t *testing.T) {
@@ -271,4 +272,156 @@ url = "https://mcp.example.test/private"
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
+}
+
+// TestResolveTemplateMCPExecPackRuntimeKeyedOnCapability is the permanent
+// regression test for gastownhall/gascity#9006 item (3a): an exec-backed
+// runtime (a pack's [runtimes.<name>] or an exec:<script> selection) with MCP
+// configured resolves wherever its runtime reports the host capability the
+// delivery stage needs, and hard-errors only where it does not. No runtime
+// name is involved in admission.
+func TestResolveTemplateMCPExecPackRuntimeKeyedOnCapability(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeMCPSource(t, filepath.Join(cityPath, "mcp", "notes.toml"), `
+name = "notes"
+command = "uvx"
+args = ["notes-mcp"]
+`)
+	const packRuntime = "pack-rt"
+	cityCfg := &config.City{
+		Workspace:  config.Workspace{Provider: "gemini"},
+		Providers:  map[string]config.ProviderSpec{"gemini": {Command: "echo", PromptMode: "none"}},
+		PackMCPDir: filepath.Join(cityPath, "mcp"),
+		Runtimes: map[string]config.DiscoveredRuntime{
+			packRuntime: {Name: packRuntime, Command: "/packs/rt/bin/gc-runtime"},
+		},
+	}
+	buildParams := func(sessionProvider string) *agentBuildParams {
+		return &agentBuildParams{
+			city:            cityCfg,
+			cityName:        "city",
+			cityPath:        cityPath,
+			workspace:       &cityCfg.Workspace,
+			providers:       cityCfg.Providers,
+			lookPath:        stubLookPath,
+			fs:              fsys.OSFS{},
+			beaconTime:      time.Unix(0, 0),
+			beadNames:       make(map[string]string),
+			stderr:          io.Discard,
+			sessionProvider: sessionProvider,
+		}
+	}
+	scopeRootAgent := func() *config.Agent {
+		return &config.Agent{Name: "worker", Scope: "city", Provider: "gemini"}
+	}
+	worktreeAgent := func() *config.Agent {
+		return &config.Agent{Name: "worker", Scope: "city", Provider: "gemini", WorkDir: ".gc/worktrees/worker-1"}
+	}
+	hasProjectMCPPreStart := func(tp TemplateParams) bool {
+		for _, entry := range tp.Hints.PreStart {
+			if strings.Contains(entry, "internal project-mcp") {
+				return true
+			}
+		}
+		return false
+	}
+
+	for _, selection := range []string{packRuntime, "exec:/opt/bin/gc-session"} {
+		selection := selection
+		t.Run(selection+" with host filesystem and host PreStart resolves", func(t *testing.T) {
+			stubExecRuntimeHostCapabilities(t, func(_, _, _ string) runtime.HostCapabilities {
+				return runtime.HostCapabilities{SharesHostFilesystem: true, RunsHostPreStart: true}
+			})
+			agent := scopeRootAgent()
+			tp, err := resolveTemplate(buildParams(selection), agent, agent.QualifiedName(), nil)
+			if err != nil {
+				t.Fatalf("stage-1 resolveTemplate: %v", err)
+			}
+			if tp.FPExtra["mcp:gemini"] == "" || hasProjectMCPPreStart(tp) {
+				t.Fatalf("stage-1 delivery: FPExtra=%+v PreStart=%v, want an MCP hash and no project-mcp PreStart", tp.FPExtra, tp.Hints.PreStart)
+			}
+			agent = worktreeAgent()
+			tp, err = resolveTemplate(buildParams(selection), agent, agent.QualifiedName(), nil)
+			if err != nil {
+				t.Fatalf("stage-2 resolveTemplate: %v", err)
+			}
+			if tp.FPExtra["mcp:gemini"] == "" || !hasProjectMCPPreStart(tp) {
+				t.Fatalf("stage-2 delivery: FPExtra=%+v PreStart=%v, want an MCP hash and a project-mcp PreStart", tp.FPExtra, tp.Hints.PreStart)
+			}
+		})
+
+		t.Run(selection+" with host filesystem only delivers at the scope root", func(t *testing.T) {
+			stubExecRuntimeHostCapabilities(t, func(_, _, _ string) runtime.HostCapabilities {
+				return runtime.HostCapabilities{SharesHostFilesystem: true}
+			})
+			agent := scopeRootAgent()
+			if _, err := resolveTemplate(buildParams(selection), agent, agent.QualifiedName(), nil); err != nil {
+				t.Fatalf("stage-1 resolveTemplate: %v", err)
+			}
+			agent = worktreeAgent()
+			_, err := resolveTemplate(buildParams(selection), agent, agent.QualifiedName(), nil)
+			if err == nil || !strings.Contains(err.Error(), "effective MCP cannot be delivered") {
+				t.Fatalf("stage-2 without host PreStart: err = %v, want the undeliverable-MCP error", err)
+			}
+		})
+
+		// A runtime that reports no host capability (here, a script whose
+		// handshake cannot be read) keeps the hard error — the honest
+		// answer, not a silent drop.
+		t.Run(selection+" without host capabilities hard errors", func(t *testing.T) {
+			agent := scopeRootAgent()
+			_, err := resolveTemplate(buildParams(selection), agent, agent.QualifiedName(), nil)
+			if err == nil || !strings.Contains(err.Error(), "effective MCP cannot be delivered") {
+				t.Fatalf("err = %v, want the undeliverable-MCP error", err)
+			}
+		})
+	}
+
+	// The real path (#9006 item 3b): no stand-in. A script whose own
+	// handshake declares locality=local with fs.host resolves at the scope
+	// root and in a worktree, for a pack runtime and an exec: selection
+	// alike; one declaring fs.host without locality=local, or locality=local
+	// alone (a container on the host), still errors.
+	scripts := t.TempDir()
+	writeHandshakeScript := func(name, handshake string) string {
+		path := filepath.Join(scripts, name)
+		body := "#!/bin/sh\nif [ \"$1\" = protocol ]; then echo '" + handshake + "'; exit 0; fi\nexit 2\n"
+		if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	for _, tc := range []struct {
+		name, handshake string
+		resolves        bool
+	}{
+		{"local with fs.host", `{"version":0,"capabilities":["fs.host"],"locality":"local"}`, true},
+		{"fs.host without locality", `{"version":0,"capabilities":["fs.host"]}`, false},
+		{"local without fs.host", `{"version":0,"capabilities":[],"locality":"local"}`, false},
+	} {
+		script := writeHandshakeScript(strings.ReplaceAll(tc.name, " ", "-"), tc.handshake)
+		cityCfg.Runtimes[packRuntime] = config.DiscoveredRuntime{Name: packRuntime, Command: script}
+		for _, selection := range []string{packRuntime, "exec:" + script} {
+			for _, agent := range []*config.Agent{scopeRootAgent(), worktreeAgent()} {
+				tp, err := resolveTemplate(buildParams(selection), agent, agent.QualifiedName(), nil)
+				where := "scope root"
+				if agent.WorkDir != "" {
+					where = "worktree"
+				}
+				switch {
+				case tc.resolves && err != nil:
+					t.Errorf("%s, %s at the %s: resolveTemplate = %v, want it to resolve", tc.name, selection, where, err)
+				case tc.resolves && tp.FPExtra["mcp:gemini"] == "":
+					t.Errorf("%s, %s at the %s: no MCP delivered (FPExtra=%+v)", tc.name, selection, where, tp.FPExtra)
+				case tc.resolves && where == "worktree" && !hasProjectMCPPreStart(tp):
+					t.Errorf("%s, %s in a worktree: no project-mcp PreStart (PreStart=%v)", tc.name, selection, tp.Hints.PreStart)
+				case !tc.resolves && (err == nil || !strings.Contains(err.Error(), "effective MCP cannot be delivered")):
+					t.Errorf("%s, %s at the %s: err = %v, want the undeliverable-MCP error", tc.name, selection, where, err)
+				}
+			}
+		}
+	}
 }

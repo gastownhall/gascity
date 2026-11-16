@@ -9,6 +9,123 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **New cities are born split.** `gc init` now writes a `[storage]` section
+  that keeps work in the work ledger and puts the five infrastructure classes
+  (graph, sessions, messaging, orders, nudges) in one SQLite store under
+  `.gc/store`, created on first start; nothing is migrated. Existing cities do
+  not change. For a new city:
+  - It runs conversation lanes and, unless a v2 gap is configured
+    (`depends_on`, `max_session_age`, `[chat_sessions] idle_timeout`, a
+    session provider other than tmux, acp or subprocess), the v2 session
+    reconciler.
+  - Its mail, session, workflow and order rows live in the infrastructure
+    store, with ids that start `gcg-`; queued nudges live there too, with ids
+    that start `gcnq-`. Work beads keep the city prefix.
+  - Raw `bd` shows only the work ledger. Use `gc session list`, `gc mail`,
+    `gc ready`, and `gc bd show` or `gc bd dep tree` on an infrastructure id
+    for the rest; `gc bd ready` refuses.
+  - `gc sling` routes work beads only. A v2 workflow that `gc formula cook`
+    creates lives in the infrastructure store, so `gc sling <target> <root>`
+    refuses it and names the launch to use instead: `gc sling <target>
+    <formula> --formula`, or `--on <formula>` against a work bead.
+  - Its bd must be one a split city's `gc bd` runs: bd 1.3.2, 1.3.3 or 1.3.4,
+    or the pinned Enterprise 1.3.0 build, reached directly rather than
+    through a shim or wrapper script. With OSS bd 1.3.0 or 1.3.1, or a bd gc
+    cannot match to a pinned command tree, `gc init` starts the city
+    single-store and says why.
+  - Its bead prefix may not be one its infrastructure store mints ids under
+    (`gcg`, `gcm`, `gcs`, `gco`, `gcn`, `gcnq`), and a name derives its
+    prefix from its initials (`gas-city-ops` derives `gco`). A plain
+    `gc init` starts a city whose name derives one single-store with a
+    notice; for a split city, pass a non-reserved `--prefix`. The HTTP city
+    create, which names a city after its directory and takes no prefix,
+    starts such a city single-store without a notice; for a split city,
+    create it in a directory with another name. A reserved `--prefix` is
+    refused, and so is `--storage=split` for such a name. A split source
+    given to `gc init --file`, or to `gc init --from` where the copy keeps
+    the split, is refused for such a name: pass another `--name`.
+    `gc rig add` refuses a rig whose prefix is reserved (the directory
+    `graphql-code-generator` derives `gcg`): pass `gc rig add --prefix`, or
+    the `prefix` field of an HTTP rig create.
+
+  How each path behaves:
+  - `gc init --storage=single` opts out; `--storage=split` asks for the split
+    explicitly. `gc init --json` reports `"storage": "split"` or `"single"`.
+  - A city with a remote session runtime (k8s, hybrid, `ssh:`, or an exec
+    runtime that does not declare `locality=local`) starts single-store with a
+    notice until worker-site transport exists; `--storage=split` is refused
+    there.
+  - `gc init --from` copies its source's `[storage]`, except where a plain
+    `gc init` would start the city single-store (the bd or remote-runtime cases
+    above): there the copy leaves the section out and prints the same notice.
+    It can leave out only the `[storage]` of the source's `city.toml`, so
+    there a source that declares part of it in an include fragment, as
+    `examples/storage` does, is refused instead, and nothing is copied.
+    A remote stage (`--remote-stage`, or a K8S pod) copies it as it is.
+    `gc init --file` copies its source's `[storage]` as it is. `--storage` and
+    `--prefix` are refused with either. To keep a copy single-store on
+    purpose, make it with `--no-start`, delete the whole `[storage]` section
+    from its `city.toml` and from any include fragment that declares part of
+    it (`[storage]` and every `[storage.*]` table), then run `gc start`.
+    Without `--no-start` the copy starts split, and once it has served its
+    infrastructure classes from `.gc/store`, taking the section out is a
+    rollback (`docs/runbooks/split-storage-classes.md`, "Rolling back").
+  - The `gastown`, `swarm` and `lifecycle` examples now carry the split;
+    `hyperscale` (k8s) stays single-store, and so does `t3bridge-gastown`:
+    the t3bridge runtime reads the beads behind a T3 thread's activity with
+    plain `bd`, which sees only a split city's work store, so keep a city on
+    that runtime single-store (`gc init --storage=single`). A city run in
+    place from one of the split example directories
+    (`gc start examples/gastown`) picks up the section with this release; if
+    it has run before, its next start refuses until it is migrated
+    (`gc storage migrate --from-work --fleet-stopped`) or the section is
+    removed.
+  - The HTTP city create shares `gc init`'s default, so API-created cities are
+    born split wherever a plain `gc init` would split them.
+
+  A pre-1.5 `gc` on an agent's `PATH` writes infrastructure rows into a
+  born-split city's work store; keep every `gc` a city's agents run current.
+  To split an existing city, see
+  `docs/runbooks/split-storage-classes.md`.
+- **A stranded split-store city serves degraded instead of refusing.** A
+  converged city whose work store holds infrastructure beads the binding
+  does not serve (for example ordinary work that a plain `bd create`
+  stamped with `gc.root_bead_id`) used to refuse every infrastructure class
+  in every `gc` process until it was repaired. It now serves degraded: the
+  stranded rows stay invisible to their class readers, every process prints
+  one `WARNING: serving degraded` line, `gc storage status` still exits 1
+  and prints `serving: degraded`, `gc doctor` reports an error, and the
+  controller publishes the new `storage.binding.stranded` event at boot and
+  from a read-only recheck every 10 minutes. A stranded id the binding holds
+  for a different bead, or retained copies of binding-owned beads (or an
+  unfinished clear) beside the strand, still refuse the city. Alerting that
+  relied on a refused boot must subscribe to `storage.binding.stranded`; the
+  `stranded` outcome no longer arrives as `storage.binding.unconverged`. A
+  boot gate's `storage.binding.*` event now carries `serving` (absent on
+  operator-command and recheck events, and on older events); recheck events
+  carry `recheck: true`.
+- **`gc storage recover-stranded` no longer carries work-shaped rows into the
+  binding by default.** A stranded row whose only class key is
+  `gc.root_bead_id` (no `gc.step_id`, no class-deciding type or label; typically
+  a task or bug) is listed apart with its in-place repair, `gc bd update <id>
+  --unset-metadata gc.root_bead_id`, and left in the work store; the command
+  exits 1 while any is left. Name one with `--move <id>` to copy it into the
+  binding as before. A row an older build's copy manifest lists by id alone
+  keeps its earlier handling whatever its metadata: a closed one is moved.
+- **`gc bd comment`, `comments`, `comments add` and the other by-id verbs
+  that fell through to bd now route through the binding check.** On a bead
+  the infrastructure binding holds they are refused with a routing message
+  (the binding stores no comments; record a note under a new metadata key
+  with `gc bd update <id> --set-metadata <new-key>=<text>`, never with
+  `--description`, which replaces the description) instead of bd's "no issue
+  found". For work-prefixed ids these verbs (`comment`, `comments`,
+  `comments add`, `note`, `assign`, `priority`, `promote`, `unclaim`,
+  `defer`, `undefer`, `dep remove` (source id only), `dep unrelate`,
+  `gate resolve`, `label add|remove|list|propagate`, `tag`, `state`,
+  `state list`, `history`, `children`) now read the binding first unless the
+  per-id census shows it holds no copy, and a failed binding read now fails
+  the command (exit 1) instead of running bd.
+
 - **Read commands print one JSON document whichever route serves them
   (#8453).** In 1.5.1 a supervisor-hosted city (the default shape, with no
   `[api]` port) read these commands locally, except `gc status`, which has
@@ -411,6 +528,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `gc doctor` reports as a warning per gate. `require`, which refuses a
     request it cannot record, stays opt-in.
 
+- **Beads (`bd`) v1.3.4 is the pinned and tested bd.** `deps.env`
+  (`BD_VERSION`, `BD_CURRENT_VERSION`, `BD_CURRENT_REF`), the go.mod library,
+  the CI workflows' `BD_VERSION` pins, the Bazel test bd (`bd_bin_v1_3_4`)
+  and the agent image move from bd v1.3.2 to
+  [v1.3.4](https://github.com/gastownhall/beads/releases/tag/v1.3.4), which
+  keeps the 1.3.0 schema (no new migration), so upgrading is a binary swap:
+  `brew upgrade beads`. The 1.3.0 floor is unchanged. bd v1.3.3 and later
+  change what some commands accept: `.beads/.env` keys outside the allowlist
+  (`BEADS_*`, `BD_*`, `GT_ROOT`, `DOLT_REMOTE_USER`, `DOLT_REMOTE_PASSWORD`)
+  are ignored with a warning on stderr; `mail.delegate` is read only from the
+  environment and user config; option-shaped remote URLs are refused;
+  `bd rules compact` previews unless given `--force`; and `bd delete` needs
+  full ids. v1.3.4 admits the `GT_ROOT` line `gc rig add` writes to a rig's
+  `.beads/.env`, so bd no longer prints `beads: ignoring GT_ROOT from
+  .beads/.env` there, as v1.3.3 did. gc embeds a bd 1.3.4 command inventory
+  beside the 1.3.2 one; bd 1.3.3 has the same command tree as 1.3.4, so a
+  split city admits 1.3.2, 1.3.3 and 1.3.4.
+
 - **Dolt 2.6.0 or newer is now required.** `gc init` and `gc start` readiness,
   `gc doctor`'s `dolt-version` check and the dolt pack's `check-dolt` doctor
   now refuse a final Dolt below 2.6.0 (the floor was 2.1.0) and still refuse
@@ -426,8 +561,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Dolt 2.6.0 is the pinned Dolt.** `deps.env`, the CI workflows'
   `DOLT_VERSION` pins (macOS regression, nightly, RC Gate, Ollama,
   fork-verify), the Bazel test Dolt (`dolt_bin_v2_6_0`), the agent base image
-  (`contrib/k8s/Dockerfile.base`, now built with Go 1.27.3, which Dolt 2.6.0
-  requires) and `contrib/k8s/dolt-statefulset.yaml` move from Dolt 2.2.0 to
+  (`contrib/k8s/Dockerfile.base`, now built with Go 1.27.4; Dolt 2.6.0 needs
+  Go 1.27.3 or newer) and `contrib/k8s/dolt-statefulset.yaml` move from Dolt 2.2.0 to
   2.6.0, the first Dolt release patched for the eMudhra CA distrust. Moving
   from 2.2.0 to 2.6.0 crosses several behaviour changes (release notes for
   [2.3.3](https://github.com/dolthub/dolt/releases/tag/v2.3.3),
@@ -450,7 +585,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Treat the upgrade as one-way: back up the data directory first; going back
   means restoring that backup, not reverting the image.
 
-- **gc is now built with Go 1.27.3.** On macOS and Windows, a set
+- **gc is now built with Go 1.27.4.** On macOS and Windows, a set
   `SSL_CERT_FILE` or `SSL_CERT_DIR` now replaces the system trust store
   (the keychain, the Windows certificate store) for gc's HTTPS connections,
   as it already did on Linux. If you export either variable for other tools
@@ -876,6 +1011,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Events: `session.created` and `session.closed`.** The city event
+  stream announces each session joining or leaving the open set, with
+  typed payloads (`SessionCreatedPayload`, `SessionClosedPayload`), so a
+  client can follow the session list without polling. See "Session List
+  Changes" in the API reference.
 - **API: optional fields so the CLI can print its local schema on the
   supervisor route (#8453).** All are optional, so existing clients are
   unaffected:
@@ -1101,13 +1241,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   running turn is not steered; it waits for that boundary and is reported
   queued (`queued: true`).
 
-- **Go toolchain 1.27.3.** The `go.mod` floor, the Bazel `go_sdk`, the nogo
-  analyzers' module and the `contrib/k8s` Go build images move to Go 1.27.3,
-  the toolchain Dolt 2.6.0 and beads `main` build with. Building from source
-  now needs Go 1.27.3 or newer. The rbe-west worker host moves with it: its
+- **Go toolchain 1.27.4.** The `go.mod` floor, the Bazel `go_sdk`, the nogo
+  analyzers' module and the `contrib/k8s` Go build images move to Go 1.27.4,
+  the first release that fixes the `net/http` advisory GO-2026-6859 (Go
+  1.27.3 left the Go module vulnerabilities check red on every pull
+  request). Dolt 2.6.0 and beads `main` build with Go 1.27.3 or newer.
+  Building from source now needs Go 1.27.4 or newer. The rbe-west worker host moves with it: its
   workers install `go.mod`'s Go and, from rbe-worker `80d70774`, Dolt 2.6.0.
   Contributors: a golangci-lint built with Go 1.26 refuses this module, which
-  breaks the pre-commit formatter. Rebuild it with Go 1.27.3:
+  breaks the pre-commit formatter. Rebuild it with Go 1.27.4:
   `rm "$(go env GOPATH)/bin/golangci-lint" && make install-tools`.
 
 - **`gc init` pins the gastown pack to registry release 0.1.13 and the
@@ -1204,6 +1346,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Adopting or restarting with a bd store bound to a loopback Dolt server
+  gc does not run works.** A store `bd init --server --external` bound to a
+  dolt sql-server on `127.0.0.1`/`localhost`/`::1` was classified as gc's own
+  managed server by its host spelling alone: `gc rig add --adopt` ran gc's
+  init op over it and failed (`managed Dolt server unreachable while
+  inspecting existing store`), and in a city on that server the
+  `gc.endpoint_origin` stamp made every later `gc start` fail. A loopback
+  binding is now gc's only when its port is one gc's managed-Dolt runtime
+  record for the city names (`.gc/runtime/packs/dolt/dolt-state.json` or
+  `dolt-provider-state.json`); a record gc cannot parse is an error naming
+  the file. One rule still answers first: in a city gc has run Dolt for, a
+  store whose database already has a directory in the city's data dir
+  (`.beads/dolt/<database>`, which `gc rig remove` leaves in place) is gc's
+  whatever its port, so give a store you adopt from your own server a
+  database name gc does not keep there. The boot port sync (and the
+  publication and `gc rig add` paths that share it) no longer stamps
+  endpoint keys into, writes, or removes the port file of a bd-owned store,
+  hosted or loopback; and `gc doctor`'s `dolt-drift` check no longer reports
+  such a store's own port file as drift. Like every store gc does not serve,
+  such a store does not get gc's bead types on start: after adopting one,
+  run `gc doctor --fix --check custom-types:<rig>` once. A store an earlier
+  gc already stamped needs a one-time repair: restore its pre-adopt
+  `.beads/config.yaml` (or drop the `gc.*` keys adopt appended), then adopt
+  again.
+
+- **`gc bd release-if-current` exits 1 for a bead its store does not hold.**
+  It printed `skipped` with exit 0 whenever nothing was released, including
+  when the store it ran against held no such bead, and the core orphan-sweep
+  order reads `skipped` as "someone else holds it". The bead is now read back
+  from that store before the verdict: a bead the store does not hold exits 1,
+  as does a failed read-back, and a bead it holds under another assignee or
+  status still prints `skipped` with exit 0.
+
+- **`gc lint` no longer flags bd's hidden flag aliases as unknown.** The bd
+  flag tables now list `bd create`'s `--label`, `--body`, `-m`/`--message`
+  and `--description-file`, `bd update`'s `--body`, `-m`/`--message`,
+  `--description-file` and `--acceptance-criteria`, and `bd close`'s
+  `--resolution`, `-m`/`--message` and `--comment`, which bd accepts without
+  listing them in its help. A prompt or script using one of them no longer
+  gets an unknown-flag finding.
+- **`gc bd` passes bd's hidden flag aliases through.** `gc bd close` with
+  `-m`/`--message`, `--resolution` or `--comment`, and `gc bd update` with
+  `--body`, `-m`/`--message`, `--description-file` or
+  `--acceptance-criteria`, used to stop with "cannot safely verify bead IDs
+  (unrecognized flag ...)"; they now run. `gc bd create` reads the token
+  after a valueless `--description-file` as that flag's value, as bd does,
+  so a `--metadata` there is no longer checked as a flag of its own.
+- **`gc agent-script`'s `bd_claim` and `bd_update` fail when the city config
+  cannot be loaded.** They used to run the write in the agent's default
+  store, so a city-scoped agent's claim of a rig bead could land in the
+  wrong store. The action now fails with the load error and runs no `bd`.
+
+- **The orphan sweep protects malformed claim rows and keeps sweeping.** A
+  claim whose bead id or assignee contains a tab, newline or carriage return
+  is protected and named, never asked about or released, since it could
+  forge a row of its own. A scope whose in-progress listing cannot be read is
+  dropped for the pass (its claims kept) while the other scopes are still
+  swept; one unreadable listing used to empty the whole pass.
+- **The orphan sweep releases a dead pool session's claim in a rig.** Its
+  release named no store, and `gc bd release-if-current` picked one from its
+  arguments, trying the assignee too: a pool session's bead id carries the
+  city's prefix and exists in the city store, so the release of a rig bead
+  went there and was skipped. `gc bd release-if-current` now routes by the
+  bead alone, and the sweep names the rig (`--rig`) for a rig claim.
+
 - **The supervisor built `/status`, `/agents` and `/rigs` slowly on cities
   with many unlimited pools (#8453).** Each unlimited pool listed the
   runtime's sessions on its own, so on tmux every pool forked
@@ -1292,6 +1499,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   says so and records the run as partial (`order.skipped`) instead of reading
   the failure as no gates. Gates created before this change carry no stamp and
   stay unannounced; close or re-pour them.
+
+- **Split cities seat a released graph step on the next controller pass.**
+  On a city whose `[storage.classes]` serves the graph class from a
+  binding, the v2 reconciler read the binding's ready work only from the
+  external-reads lane's recording, which refreshes about every 20 seconds at
+  the 15-second patrol, so a step released by a blocker in the binding waited
+  for that recording before it got a seat. A step whose every blocker lives in
+  the binding's own namespace needs no other store, and the controller now
+  judges it from the binding's cache in the pass; a step with a blocker
+  anywhere else is still served from the gated recording.
 
 - **The core orphan-sweep order judges claims on graph steps in a
   split-storage city.** On a city whose `[storage.classes]` serves the graph
@@ -1803,6 +2020,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   installed, init fails naming the lock file when it cannot create it.
   Without `flock`, init refuses to reset an interrupted bootstrap and says
   how to install it (#5926).
+
+- **The controller no longer wakes an on-demand named session for a
+  deferred molecule or wisp root it cannot claim.** An assigned, open,
+  ephemeral/no-history/workflow molecule root counts as ready wake demand
+  (`appendOpenAssignedMoleculeWorkUnique`) so an on-demand session gets
+  woken for its actual next turn — but the check never looked at
+  `defer_until` or an indefinite defer, even though the hook
+  (`isFutureDeferredHookCandidate`) already refuses the same row while its
+  `defer_until` is in the future. The session woke, found nothing
+  claimable, and drained; the next pass counted the same root again. Deferring a molecule or wisp
+  root now actually pauses the session it would otherwise wake, the same
+  way deferring a plain task already does.
 
 - **`passthroughEnv` now honors `GC_SUPERVISOR_ENV` when deciding which
   non-`GC_`-prefixed variables reach a spawned agent session, not only which

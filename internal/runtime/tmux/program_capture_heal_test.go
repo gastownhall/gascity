@@ -20,6 +20,8 @@ type healModelPane struct {
 	mark                string // agent, orphan or pane
 	dead, pipe          bool
 	tap, record, text   string
+	hold                string // the hold option's value as set
+	settle              string // the settle option's value as set
 }
 
 // healServer is a scripted tmux server for heal: it answers heal's pane
@@ -128,7 +130,7 @@ func (s *healServer) run(cmd []string) (string, error) {
 		var rows []string
 		for _, p := range s.panes {
 			if p.session == session {
-				rows = append(rows, row(boolField(p.dead), p.window, p.mark, p.id, boolField(p.pipe), p.tap, p.record, runtimeInventoryEnd))
+				rows = append(rows, row(boolField(p.dead), p.window, p.mark, p.id, boolField(p.pipe), p.tap, p.record, p.hold, p.settle, runtimeInventoryEnd))
 			}
 		}
 		if len(rows) == 0 {
@@ -139,6 +141,25 @@ func (s *healServer) run(cmd []string) (string, error) {
 		p := s.pane(target)
 		if err := s.fail(target); err != nil {
 			return "", err
+		}
+		if guard, ok := strings.CutPrefix(cmd[len(cmd)-2], "#{==:#{"+programTapOption+"},"); ok {
+			// Nonce-guarded hold and settle declarations (declarePane).
+			if p.tap != strings.TrimSuffix(guard, "}") {
+				return "", nil
+			}
+			for _, change := range strings.Split(cmd[len(cmd)-1], " ; ") {
+				value := p.id
+				if strings.Contains(change, "'-pu'") {
+					value = ""
+				}
+				switch {
+				case strings.Contains(change, "'"+programHoldOption+"'"):
+					p.hold = value
+				case strings.Contains(change, "'"+programSettleOption+"'"):
+					p.settle = value
+				}
+			}
+			return "", nil
 		}
 		if s.pipeOpensBeforeAct {
 			p.pipe = true
@@ -151,6 +172,13 @@ func (s *healServer) run(cmd []string) (string, error) {
 			return "", fmt.Errorf("if-shell arm list carries no nonce: %q", cmd[len(cmd)-1])
 		}
 		p.tap, p.record, p.text, p.pipe = m[1]+"."+p.id, "", "", true
+		p.hold, p.settle = "", ""
+		if strings.Contains(cmd[len(cmd)-1], "'"+programHoldOption+"' '#{pane_id}'") {
+			p.hold = p.id
+		}
+		if strings.Contains(cmd[len(cmd)-1], "'"+programSettleOption+"' '#{pane_id}'") {
+			p.settle = p.id
+		}
 		s.taps[p.tap] = true
 		return "", nil
 	case "display-message":
@@ -169,12 +197,21 @@ func (s *healServer) run(cmd []string) (string, error) {
 				p.record = ""
 			case programTextOption:
 				p.text = ""
+			case programHoldOption:
+				p.hold = ""
+			case programSettleOption:
+				p.settle = ""
 			}
 			return "", nil
 		}
 		opt, value := cmd[len(cmd)-2], cmd[len(cmd)-1]
-		if opt == programTapOption {
+		switch opt {
+		case programTapOption:
 			p.tap = strings.ReplaceAll(value, "#{pane_id}", p.id)
+		case programHoldOption:
+			p.hold = strings.ReplaceAll(value, "#{pane_id}", p.id)
+		case programSettleOption:
+			p.settle = strings.ReplaceAll(value, "#{pane_id}", p.id)
 		}
 		return "", nil
 	case "pipe-pane":

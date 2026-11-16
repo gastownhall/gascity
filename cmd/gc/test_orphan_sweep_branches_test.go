@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/platform/localsocket"
 )
 
 const testNonLivePID = 2147483647
@@ -50,8 +52,8 @@ func TestCmdGCTempRootPrefixKeepsControllerSocketLegacy(t *testing.T) {
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
 
 	sockPath := filepath.Join(root, "gc-testscript-1234567890", "script-controller", "ctrl-city", ".gc", "controller.sock")
-	if len(sockPath) > controllerSocketPathLimit {
-		t.Fatalf("controller test socket path length = %d, want <= %d: %s", len(sockPath), controllerSocketPathLimit, sockPath)
+	if len(sockPath) > localsocket.PathLimit {
+		t.Fatalf("controller test socket path length = %d, want <= %d: %s", len(sockPath), localsocket.PathLimit, sockPath)
 	}
 }
 

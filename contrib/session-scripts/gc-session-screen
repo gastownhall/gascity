@@ -56,6 +56,13 @@ umask 077
 op="${1:?missing operation}"
 name="${2:-}"
 
+# The handshake reads no state and answers the same for every city, so it is
+# answered before any state is set up.
+if [ "$op" = protocol ]; then
+  echo '{"version":0,"capabilities":["observe.v1","report-attachment","conformance-faults","city-scoped"],"locality":"local"}'
+  exit 0
+fi
+
 IDENTITY_KEYS="GC_SESSION_ID GC_RUNTIME_EPOCH GC_INSTANCE_TOKEN GT_PROCESS_NAMES"
 META_KEYS="$IDENTITY_KEYS GC_CITY_PATH GC_BIN"
 
@@ -296,8 +303,13 @@ kill_wait() {
 # binary is called (SCREEN, a path, a wrapped binary's name).
 is_stray() {
   local -a argv=()
+  local arg
   [ -r "$PROC/$1/cmdline" ] || return 1
-  { mapfile -d '' -t argv < "$PROC/$1/cmdline"; } 2>/dev/null || return 1
+  # read -d '', not mapfile -d (bash 4.4): macOS ships bash 3.2. arg is
+  # cleared before each read: a read error leaves it holding the last one.
+  { while arg=; IFS= read -r -d '' arg || [ -n "$arg" ]; do
+      argv[${#argv[@]}]=$arg
+    done < "$PROC/$1/cmdline"; } 2>/dev/null || return 1
   [ "${#argv[@]}" -eq 4 ] && [ "${argv[1]}" = -dmS ] &&
     [ "${argv[2]}" = "$2" ] && [ "${argv[3]}" = "$META/$2.wrapper.sh" ]
 }
@@ -470,10 +482,6 @@ target() {
 }
 
 case "$op" in
-  protocol)
-    echo '{"version":0,"capabilities":["observe.v1","report-attachment","conformance-faults","city-scoped"],"locality":"local"}'
-    ;;
-
   start)
     config=$(cat)
     valid_name "$name"
@@ -702,8 +710,9 @@ case "$op" in
     if [ -n "$ROWS" ] && [ -n "$(printf '%s\n' "$ROWS" | cut -f2 | sort | uniq -d)" ]; then
       die "inventory: a session name is held by more than one box"
     fi
-    declare -A agent_of=()
-    specs=""
+    # No associative arrays: macOS ships bash 3.2. A pid is an integer, so
+    # agent states are kept in an indexed array by pid.
+    specs=""; agent_of=()
     while IFS=$'\t' read -r pid sname status; do
       [ -n "$pid" ] || continue
       classify "$status"
@@ -712,7 +721,7 @@ case "$op" in
       [ -n "$PROCS" ] && specs+="$pid $PROCS $GCBIN"$'\n'
     done <<< "$ROWS"
     if [ -n "$specs" ] && states=$(printf '%s' "$specs" | agent_states); then
-      while read -r pid state; do agent_of[$pid]=$state; done <<< "$states"
+      while read -r pid state; do agent_of[pid]=$state; done <<< "$states"
     fi
     out='{"complete":true,"sessions":['; sep=""
     while IFS=$'\t' read -r pid sname status; do
@@ -735,24 +744,24 @@ case "$op" in
     # start recorded runs (its agent outlived the box): it is listed
     # unknown, never left out of a complete answer. Once that process is
     # gone, the name's start record is forgotten (forget_stale), so no later
-    # inventory reads it again.
-    declare -A listed=()
-    while IFS=$'\t' read -r pid sname _; do
-      [ -n "$pid" ] || continue
-      listed[$sname]=y
-    done <<< "$ROWS"
-    for rec in "$META"/*.window; do
-      [ -f "$rec" ] || continue
-      sname=${rec##*/}
-      sname=${sname%.window}
-      [ -z "${listed[$sname]:-}" ] || continue
+    # inventory reads it again. The names no box lists are found in one awk
+    # pass over the records' names and the listing, not a scan per record.
+    unlisted=$(
+      for rec in "$META"/*.window; do
+        [ -f "$rec" ] || continue
+        rec=${rec##*/}
+        printf '%s\n' "${rec%.window}"
+      done | awk -F'\t' 'FILENAME == ARGV[1] { listed[$2]; next } !($0 in listed)' <(printf '%s\n' "$ROWS") -
+    )
+    while IFS= read -r sname; do
+      [ -n "$sname" ] || continue
       if ! window_alive "$sname"; then
-        read_into "$rec"
+        read_into "$META/$sname.window"
         forget_stale "$sname" "$REPLY"
         continue
       fi
       out+="$sep{\"name\":$(json_str "$sname"),\"state\":\"unknown\"}"; sep=","
-    done
+    done <<< "$unlisted"
     printf '%s]}\n' "$out"
     ;;
 

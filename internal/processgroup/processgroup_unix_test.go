@@ -3,6 +3,8 @@
 package processgroup
 
 import (
+	"errors"
+	"os"
 	"os/exec"
 	"strings"
 	"syscall"
@@ -11,6 +13,48 @@ import (
 
 	"github.com/gastownhall/gascity/internal/processgroup/processgrouptest"
 )
+
+func TestTerminateManagedCommandBoundsReap(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		nilProcess  bool
+		exitOnKill  bool
+		wantTimeout bool
+	}{
+		{name: "stuck group", wantTimeout: true},
+		{name: "stuck without process", nilProcess: true, wantTimeout: true},
+		{name: "reaped after kill", exitOnKill: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			done := make(chan struct{})
+			cmd := &exec.Cmd{}
+			if !tc.nilProcess {
+				cmd.Process = &os.Process{Pid: 45678}
+			}
+			var signals []syscall.Signal
+			opts := Options{
+				CurrentGroupID: func() int { return 12345 },
+				Kill: func(_ int, sig syscall.Signal) error {
+					signals = append(signals, sig)
+					if sig == syscall.SIGKILL && tc.exitOnKill {
+						close(done)
+					}
+					return nil
+				},
+			}
+			err := terminateManagedCommandGraces(cmd, 45678, done, 0, time.Millisecond, opts)
+			if got := errors.Is(err, ErrProcessNotConfirmedDead); got != tc.wantTimeout {
+				t.Fatalf("terminate error = %v, want timeout %v", err, tc.wantTimeout)
+			}
+			if !tc.wantTimeout && err != nil {
+				t.Fatalf("terminate error = %v, want nil", err)
+			}
+			if !tc.nilProcess && (len(signals) != 2 || signals[0] != syscall.SIGTERM || signals[1] != syscall.SIGKILL) {
+				t.Fatalf("signals = %v, want [SIGTERM SIGKILL]", signals)
+			}
+		})
+	}
+}
 
 func TestTerminateEscalatesToSIGKILL(t *testing.T) {
 	killed := false

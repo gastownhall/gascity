@@ -173,6 +173,10 @@ func compileFormula(name string, searchPaths []string, vars map[string]string, v
 		return nil, fmt.Errorf("resolving expanded check paths in %q: %w", name, err)
 	}
 
+	if err := ResolveCheckMaxAttemptsVars(resolved.Steps, compileVars); err != nil {
+		return nil, fmt.Errorf("resolving check max_attempts in %q: %w", name, err)
+	}
+
 	// Stage 11: Expand inline Ralph steps
 	ralphSteps, err := ApplyRalph(resolved.Steps)
 	if err != nil {
@@ -264,6 +268,9 @@ func collectCompileTimeVarRefs(steps []*Step, refs map[string]bool) {
 			}
 		}
 		collectStepConditionVarRefs(step.Condition, refs)
+		if step.Ralph != nil && step.Ralph.MaxAttemptsVar != "" {
+			refs[step.Ralph.MaxAttemptsVar] = true
+		}
 		collectCompileTimeVarRefs(step.Children, refs)
 		if step.Loop != nil {
 			collectCompileTimeVarRefs(step.Loop.Body, refs)

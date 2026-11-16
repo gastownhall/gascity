@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // quarantinedWorkflowFixture builds, in store, a workflow root that the
@@ -118,7 +119,7 @@ func TestProcessWorkflowFinalizeKeepsQuarantinedRootFailed(t *testing.T) {
 			store := tc.store
 			root, finalizer := quarantinedWorkflowFixture(t, store, "closed", controlQuarantinedRootMetadata())
 
-			result, err := ProcessControl(store, finalizer, ProcessOptions{})
+			result, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{Work: beadstest.Work(store)})
 			if err != nil {
 				t.Fatalf("ProcessControl(workflow-finalize): %v", err)
 			}
@@ -155,7 +156,7 @@ func TestProcessWorkflowFinalizePassedRootStillReadsPass(t *testing.T) {
 	store := beads.NewMemStore()
 	root, finalizer := quarantinedWorkflowFixture(t, store, "open", nil)
 
-	result, err := ProcessControl(store, finalizer, ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), finalizer, ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
 	}
@@ -218,7 +219,7 @@ func TestCloseWorkflowRootNeverPassesOverQuarantine(t *testing.T) {
 				Status:   "closed",
 				Metadata: meta,
 			})
-			if err := closeWorkflowRoot(store, b.ID, "pass"); !errors.Is(err, errRootQuarantined) {
+			if err := closeWorkflowRoot(beadstest.Graph(store), b.ID, "pass"); !errors.Is(err, errRootQuarantined) {
 				t.Fatalf("closeWorkflowRoot err = %v, want errRootQuarantined", err)
 			}
 			after, err := store.Get(b.ID)
@@ -245,7 +246,7 @@ func TestCloseWorkflowRootRefusesPassWhenTheQuarantineReadFails(t *testing.T) {
 		Metadata: map[string]string{"gc.kind": "workflow"},
 	})
 	readErr := errors.New("injected root read failure")
-	err := closeWorkflowRoot(getErrorStore{Store: mem, failID: b.ID, err: readErr}, b.ID, "pass")
+	err := closeWorkflowRoot(beadstest.Graph(getErrorStore{Store: mem, failID: b.ID, err: readErr}), b.ID, "pass")
 	if !errors.Is(err, readErr) {
 		t.Fatalf("closeWorkflowRoot err = %v, want the read error", err)
 	}
@@ -274,7 +275,7 @@ func TestSetOutcomeAndCloseStillPassesAQuarantinedNonRoot(t *testing.T) {
 		Status:   "closed",
 		Metadata: meta,
 	})
-	if err := setOutcomeAndClose(store, b.ID, "pass"); err != nil {
+	if err := setOutcomeAndClose(beadstest.Graph(store), b.ID, "pass"); err != nil {
 		t.Fatalf("setOutcomeAndClose: %v", err)
 	}
 	after, err := store.Get(b.ID)
@@ -295,7 +296,7 @@ func TestProcessWorkflowFinalizeQuarantinedRootLeavesSourcesOpenWithItsDiagnosis
 	f := newSourceChainFinalizeFixture(t)
 	quarantineWorkflowRoot(t, f.rigStore, f.workflow.ID)
 
-	result, err := ProcessControl(f.rigStore, f.finalizer, ProcessOptions{ResolveStoreRef: f.resolver})
+	result, err := ProcessControl(beadstest.Graph(f.rigStore), f.finalizer, ProcessOptions{Work: beadstest.Work(f.rigStore), ResolveStoreRef: f.resolver})
 	if err != nil {
 		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
 	}
@@ -332,7 +333,8 @@ func TestProcessWorkflowFinalizeQuarantineRacingThePassFinalizesFailed(t *testin
 
 	f := newSourceChainFinalizeFixture(t)
 	var traces []string
-	result, err := ProcessControl(f.rigStore, f.finalizer, ProcessOptions{
+	result, err := ProcessControl(beadstest.Graph(f.rigStore), f.finalizer, ProcessOptions{
+		Work:            beadstest.Work(f.rigStore),
 		ResolveStoreRef: quarantineRootOnFirstResolve(t, f),
 		Tracef: func(format string, args ...any) {
 			traces = append(traces, fmt.Sprintf(format, args...))
@@ -395,10 +397,11 @@ func TestProcessWorkflowFinalizeQuarantineRaceRetriesAFailedSourceStamp(t *testi
 	f := newSourceChainFinalizeFixture(t)
 	lockErr := errors.New("injected source lock failure")
 	opts := ProcessOptions{
+		Work:               beadstest.Work(f.rigStore),
 		ResolveStoreRef:    quarantineRootOnFirstResolve(t, f),
 		SourceWorkflowLock: func(string, string, func() error) error { return lockErr },
 	}
-	_, err := ProcessControl(f.rigStore, f.finalizer, opts)
+	_, err := ProcessControl(beadstest.Graph(f.rigStore), f.finalizer, opts)
 	if !errors.Is(err, lockErr) || !strings.Contains(err.Error(), "marking failed source bead") {
 		t.Fatalf("ProcessControl err = %v, want the source stamp's lock failure", err)
 	}
@@ -411,7 +414,7 @@ func TestProcessWorkflowFinalizeQuarantineRaceRetriesAFailedSourceStamp(t *testi
 	}
 
 	opts.SourceWorkflowLock = func(_, _ string, fn func() error) error { return fn() }
-	result, err := ProcessControl(f.rigStore, finalizer, opts)
+	result, err := ProcessControl(beadstest.Graph(f.rigStore), finalizer, opts)
 	if err != nil {
 		t.Fatalf("ProcessControl(retry): %v", err)
 	}

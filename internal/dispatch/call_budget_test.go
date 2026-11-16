@@ -329,7 +329,7 @@ max_active_sessions = 1
 `), 0o644); err != nil {
 		t.Fatalf("write city.toml: %v", err)
 	}
-	opts := ProcessOptions{CityPath: cityPath}
+	opts := ProcessOptions{Work: beadstest.Work(counting), CityPath: cityPath}
 
 	var calls []controlCalls
 	failed := false
@@ -360,7 +360,7 @@ max_active_sessions = 1
 				}
 				if servingControls {
 					counting.reset()
-					result, err := ProcessControl(counting, current, opts)
+					result, err := ProcessControl(beadstest.Graph(counting), current, opts)
 					if errors.Is(err, ErrControlPending) {
 						continue
 					}
@@ -378,7 +378,7 @@ max_active_sessions = 1
 				}
 				if !failed && failFirstAttemptOf != "" && strings.HasSuffix(current.Metadata[beadmeta.StepRefMetadataKey], failFirstAttemptOf+".attempt.1") {
 					failed = true
-					if err := updateMetadataAndClose(inner, current.ID, map[string]string{
+					if err := updateMetadataAndClose(beadstest.Graph(inner), current.ID, map[string]string{
 						beadmeta.OutcomeMetadataKey:       beadmeta.OutcomeFail,
 						beadmeta.FailureClassMetadataKey:  beadmeta.FailureClassTransient,
 						beadmeta.FailureReasonMetadataKey: "flaky",

@@ -241,7 +241,7 @@ func (r coreDrainAckRun) drainAck(t *testing.T) {
 			if b.Metadata[beadmeta.RootBeadIDMetadataKey] != r.rootID || !beadmeta.IsControlKind(b.Metadata[beadmeta.KindMetadataKey]) {
 				continue
 			}
-			if _, err := dispatch.ProcessControl(r.store, b, dispatch.ProcessOptions{}); err != nil {
+			if _, err := dispatch.ProcessControl(beadstest.Graph(r.store), b, dispatch.ProcessOptions{}); err != nil {
 				if errors.Is(err, dispatch.ErrControlPending) {
 					continue
 				}

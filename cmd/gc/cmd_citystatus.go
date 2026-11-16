@@ -29,6 +29,7 @@ type StatusJSON struct {
 	CityName      string                 `json:"city_name"`
 	Workspace     WorkspaceJSON          `json:"workspace"`
 	CityPath      string                 `json:"city_path"`
+	APIURL        string                 `json:"api_url,omitempty"` // config-derived API base URL (cityStatusAPIURL); absent when none is usable
 	Controller    ControllerJSON         `json:"controller"`
 	Running       bool                   `json:"running"`
 	Suspended     bool                   `json:"suspended"`
@@ -312,6 +313,7 @@ func routeCityStatus(
 // controllerStatusForCity — same call the fallback path makes).
 func renderCityStatusFromAPI(cityPath string, cfg *config.City, cr api.CachedRead[api.StatusView], dops drainOps, jsonOutput bool, stdout, stderr io.Writer) int {
 	snapshot := snapshotFromStatusView(cityPath, cr.Body)
+	snapshot.APIURL = cityStatusAPIURL(cfg, snapshot.Controller, stderr)
 	fillStatusRigConfigFields(snapshot.Rigs, cfg)
 	if jsonOutput {
 		writeCityStatusJSONWithCache(snapshot, snapshot.Summary, cr.AgeSeconds, stdout)

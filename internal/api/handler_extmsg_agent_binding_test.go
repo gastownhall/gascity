@@ -172,7 +172,7 @@ func TestHandleExtMsgOutboundAgentBoundAuthorizesResolvedAgentSession(t *testing
 		t.Fatalf("Bind(agent): %v", err)
 	}
 
-	agentSessionID, err := srv.resolveSessionIDMaterializingNamed(fs.cityBeadStore, "myrig/worker")
+	agentSessionID, err := srv.resolveSessionIDMaterializingNamed(beadstest.Sessions(fs.cityBeadStore), "myrig/worker")
 	if err != nil {
 		t.Fatalf("materialize myrig/worker: %v", err)
 	}

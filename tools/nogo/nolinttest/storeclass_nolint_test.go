@@ -64,7 +64,7 @@ func TestNolintNeverSuppressesStoreclass(t *testing.T) {
 			if err := os.WriteFile(baseline, nil, 0o644); err != nil {
 				t.Fatal(err)
 			}
-			cmd := exec.Command(nogo, "-p", "github.com/gastownhall/gascity/cmd/nolintfixture", "-importcfg", cfg, "-go_version", "1.27.3", file)
+			cmd := exec.Command(nogo, "-p", "github.com/gastownhall/gascity/cmd/nolintfixture", "-importcfg", cfg, "-go_version", "1.27.4", file)
 			cmd.Env = append(os.Environ(), "GC_NOGO_MAIN_REPO_DATA="+baseline)
 			if name == "no baseline input" {
 				cmd.Env = append(os.Environ(), "GC_NOGO_MAIN_REPO_DATA=")

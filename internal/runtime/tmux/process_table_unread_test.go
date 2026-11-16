@@ -94,18 +94,18 @@ func TestProcessSnapshotFailureLogRateLimited(t *testing.T) {
 	failure := errors.New("fetching process snapshot: signal: killed")
 
 	for range 3 {
-		l.note(failure)
+		l.note("process snapshot failed", failure)
 	}
-	if len(logged) != 1 || !strings.Contains(logged[0], "signal: killed") || strings.Contains(logged[0], "more failures") {
-		t.Fatalf("logged %q, want one line naming the failure", logged)
+	if len(logged) != 1 || !strings.Contains(logged[0], "tmux: process snapshot failed: ") || !strings.Contains(logged[0], "signal: killed") || strings.Contains(logged[0], "more failures") {
+		t.Fatalf("logged %q, want one line naming the read and its failure", logged)
 	}
 	rewind()
-	l.note(failure)
+	l.note("process snapshot failed", failure)
 	if len(logged) != 2 || !strings.Contains(logged[1], "2 more failures since") {
 		t.Fatalf("logged %q, want a second line counting the 2 unlogged failures", logged)
 	}
 	rewind()
-	l.note(failure)
+	l.note("process snapshot failed", failure)
 	if len(logged) != 3 || strings.Contains(logged[2], "more failures") {
 		t.Fatalf("logged %q, want a third line with the count reset", logged)
 	}

@@ -1,10 +1,8 @@
 package runtime
 
 import (
-	"context"
 	"strings"
 	"testing"
-	"time"
 )
 
 // sentinel stands in for a credential. It is synthetic; no real value belongs in
@@ -186,76 +184,83 @@ func TestRedactSecretsTailRedactsBeforeTruncating(t *testing.T) {
 	}
 }
 
-// TestCommandOutputTailRetainsEnoughToRedact is the same property through the
-// bounded writer, where it is not free: the writer drops bytes as they stream,
-// long before anyone knows what the secrets are. Retaining exactly the reported
-// limit would put the head of a straddling credential beyond recovery.
-func TestCommandOutputTailRetainsEnoughToRedact(t *testing.T) {
-	const limit = 4096
-	// Place the cut inside the sentinel: the last limit bytes begin partway
-	// through it, so only retention beyond limit keeps it whole.
-	const lead = 10
-	filler := strings.Repeat("f", limit+20-len(sentinel))
-	tail := newCommandOutputTail(limit)
-	if _, err := tail.Write([]byte(strings.Repeat("s", lead) + sentinel + filler)); err != nil {
-		t.Fatalf("Write: %v", err)
+// TestTrimDecapitatedSecretCutsTheSurvivingTail pins what a bounded writer owes
+// once it has discarded output: what it kept can begin with the tail of a
+// credential whose head is gone, that tail matches nothing, and redaction alone
+// prints it as soon as shrinking the rest pulls the reported window back to it.
+func TestTrimDecapitatedSecretCutsTheSurvivingTail(t *testing.T) {
+	const after = "\ncurl: (22) 401"
+	text := sentinel[10:] + after
+
+	// The counterfactual, asserted rather than described.
+	if got := RedactSecrets(text, []string{sentinel}); !strings.Contains(got, "CREDENTIAL") {
+		t.Fatal("redaction already removes the fixture's fragment, so the trim is untested here")
 	}
 
-	got := tail.Detail("stderr", []string{sentinel})
-	if strings.Contains(got, "CREDENTIAL") {
-		t.Errorf("a credential straddling the truncation boundary leaked: %q", got)
+	if got := TrimDecapitatedSecret(text, []string{sentinel}); got != after {
+		t.Errorf("TrimDecapitatedSecret = %q, want %q", got, after)
 	}
-	if !strings.Contains(got, RedactedValue) {
-		t.Fatalf("the secret was not in the retained buffer at all: %q", got)
-	}
-	// The controls. The detail must still be bounded and still be marked as a
-	// partial tail, or this passes on a writer that simply kept everything.
-	if len(got) > limit+len("stderr: ... ") {
-		t.Errorf("Detail returned %d bytes, so the limit is not being applied", len(got))
-	}
-	if !strings.HasPrefix(got, "stderr: ... ") {
-		t.Errorf("Detail did not mark the output as truncated: %q", got[:min(40, len(got))])
+	// The controls: the cut is only ever a secret's suffix. Text that begins
+	// with none is left whole, and so is the suffix of a value below the
+	// substitution floor, which redaction leaves legible anyway; at the floor
+	// the same shape is cut, so the second case is about length.
+	for _, tc := range []struct {
+		text, secret, want string
+	}{
+		{text: "curl: (22) 401", secret: sentinel, want: "curl: (22) 401"},
+		{text: "efg: id", secret: "abcdefg", want: "efg: id"},
+		{text: "fgh: id", secret: "abcdefgh", want: ": id"},
+	} {
+		if got := TrimDecapitatedSecret(tc.text, []string{tc.secret}); got != tc.want {
+			t.Errorf("TrimDecapitatedSecret(%q, %q) = %q, want %q", tc.text, tc.secret, got, tc.want)
+		}
 	}
 }
 
-// TestCommandOutputTailRetainsAJWTLengthCredential pins the slack against the
-// population it actually has to cover, not against the tokens that inspired it.
-//
-// The retained window is the whole guarantee: a value whose head falls outside
-// it is gone before redaction runs, and its tail then survives into the reported
-// text matching nothing. So the slack is an upper bound on credential length,
-// and every unrecognized env value is a credential here by construction —
-// service-account JWTs and PEM keys included, which run kilobytes, not the sub-
-// 100 bytes an API key does. A fixture inside the old 1024 would have pinned
-// only the comfortable half of that range.
-func TestCommandOutputTailRetainsAJWTLengthCredential(t *testing.T) {
-	const limit = 256
-	// A service-account JWT's shape and order of magnitude (~1.5KB): the part
-	// that leaks when the head is dropped is the signature at the end.
-	const signature = ".SIGNATURE-NOT-A-REAL-CREDENTIAL"
-	jwt := "eyJhbGciOiJSUzI1NiJ9." + strings.Repeat("QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVph", 40) + signature
-	if len(jwt) <= 1024 {
-		t.Fatalf("fixture is %d bytes, which the previous slack already covered", len(jwt))
+// TestTrimDecapitatedSecretCutsTheLongestTail pins the choice between secrets:
+// which value lost its head is unknowable, so the longest suffix any of them
+// offers goes, whichever order the secrets arrive in (they come off a map
+// range).
+func TestTrimDecapitatedSecretCutsTheLongestTail(t *testing.T) {
+	const base = "inst-8f3a21c0"
+	const derived = base + "-worker-3"
+	// Both a two-byte suffix of base and an eleven-byte suffix of derived
+	// begin the text.
+	const text = "c0-worker-3 rejected"
+
+	for _, order := range [][]string{{base, derived}, {derived, base}} {
+		if got, want := TrimDecapitatedSecret(text, order), " rejected"; got != want {
+			t.Errorf("TrimDecapitatedSecret(%q order) = %q, want %q", order, got, want)
+		}
 	}
-	// Lead the secret with enough filler that its head lands outside a
-	// limit+1024 window but inside a limit+8192 one, and trail it with a marker
-	// that must survive.
-	tail := newCommandOutputTail(limit)
-	if _, err := tail.Write([]byte(strings.Repeat("f", 4000) + jwt + "curl: (22) 401")); err != nil {
-		t.Fatalf("Write: %v", err)
+}
+
+// TestTrimDecapitatedSecretKeepsWholeValuesWhole pins the cut's second half. A
+// value whose last bytes repeat its first offers a suffix that each of its
+// whole occurrences begins with, so kept bytes that happen to begin on a whole
+// occurrence look decapitated too. Cutting that suffix alone would take the
+// value's head itself, and redaction would then miss the rest. PEM blocks open
+// and close with dashes.
+func TestTrimDecapitatedSecretKeepsWholeValuesWhole(t *testing.T) {
+	const body = "Tk9ULUEtUkVBTC1LRVktTUFURVJJQUw="
+	const pem = "-----BEGIN TEST KEY-----\n" + body + "\n-----END TEST KEY-----"
+	const after = "\ncurl: (22) 401"
+	text := pem + after
+
+	// The counterfactual: the dashes alone are a matching suffix, and cutting
+	// just them leaves the body for redaction to miss.
+	if got := RedactSecrets(text[len("-----"):], []string{pem}); !strings.Contains(got, body) {
+		t.Fatal("the fixture does not repeat its first bytes at its end, so the extension is untested here")
 	}
 
-	got := tail.Detail("stderr", []string{jwt})
-	if strings.Contains(got, signature) {
-		t.Errorf("the tail of a JWT-length credential survived the reported window: %q", got)
+	got := RedactSecrets(TrimDecapitatedSecret(text, []string{pem}), []string{pem})
+	if strings.Contains(got, body) || strings.Contains(got, "BEGIN") {
+		t.Errorf("the trim decapitated a whole value, which then survived redaction: %q", got)
 	}
-	if !strings.Contains(got, RedactedValue) {
-		t.Fatalf("the secret was not retained whole, so nothing was redacted: %q", got)
-	}
-	// The control: over-redaction that shredded the diagnostic would pass the
-	// assertions above.
-	if !strings.Contains(got, "curl: (22) 401") {
-		t.Errorf("the surrounding diagnostic did not survive: %q", got)
+	// The control: the text after the value survives, so the assertion above
+	// is not passing on a trim that swallowed everything.
+	if got != after {
+		t.Errorf("TrimDecapitatedSecret then RedactSecrets = %q, want %q", got, after)
 	}
 }
 
@@ -283,38 +288,5 @@ func TestSetupCommandSecretsCoversBothEnvironments(t *testing.T) {
 	}
 	if !sawInherited {
 		t.Error("the inherited process credential is missing from the secret set")
-	}
-}
-
-// TestRunSetupCommandFailureOmitsCredentials is the end-to-end shape. This
-// runner is the extracted core both host-side providers are slated to delegate
-// to, so a leak here would reappear in both the moment they do — which is
-// exactly the kind of regression a fix applied only to the live copies invites.
-func TestRunSetupCommandFailureOmitsCredentials(t *testing.T) {
-	const inherited = "inherited-NOT-A-REAL-CREDENTIAL"
-	t.Setenv("ANTHROPIC_AUTH_TOKEN", inherited)
-
-	err := RunSetupCommand(context.Background(),
-		`echo "session=$GH_TOKEN" >&2; echo "inherited=$ANTHROPIC_AUTH_TOKEN"; exit 3`,
-		map[string]string{"GH_TOKEN": sentinel}, 10*time.Second)
-	if err == nil {
-		t.Fatal("a setup command exiting 3 must fail")
-	}
-	if strings.Contains(err.Error(), sentinel) {
-		t.Errorf("the session env credential reached the failure: %v", err)
-	}
-	if strings.Contains(err.Error(), inherited) {
-		t.Errorf("the inherited credential reached the failure: %v", err)
-	}
-	// The controls. Without these the assertions above pass on any error that
-	// simply never captured the output — including one where the command
-	// never ran.
-	if !strings.Contains(err.Error(), "exit status 3") {
-		t.Fatalf("the command did not run as expected: %v", err)
-	}
-	for _, want := range []string{"stderr: session=" + RedactedValue, "stdout: inherited=" + RedactedValue} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("failure detail missing %q, so nothing here was scrubbed: %v", want, err)
-		}
 	}
 }

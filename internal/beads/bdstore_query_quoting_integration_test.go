@@ -131,3 +131,87 @@ func TestBdStoreListWispsCreatedDescLimitAgainstRealBd(t *testing.T) {
 		})
 	}
 }
+
+// A pushed metadata.<key>="<value>" clause must keep every row the client
+// metadata filter keeps. This runs the real bd on PATH: a dotted key must
+// read as the top-level key (not a nested path), a JSON boolean must compare
+// by its text, and a value holding an escaped quote must round-trip. Each
+// filtered List must equal an unfiltered List narrowed by the filter in Go.
+func TestBdStoreListWispsMetadataPushdownAgainstRealBd(t *testing.T) {
+	const quoted = `say "hi" \now`
+	seed, dir := newConditionalIntegrationBdStore(t)
+	for _, b := range []beads.Bead{
+		{ID: "tst-md-1", Title: "routed", Metadata: map[string]string{"gc.routed_to": "rig/pool"}},
+		{ID: "tst-md-2", Title: "routed elsewhere", Metadata: map[string]string{"gc.routed_to": "rig/other"}},
+		{ID: "tst-md-3", Title: "quoted", Metadata: map[string]string{"alias": quoted}},
+		{ID: "tst-md-4", Title: "plain"},
+	} {
+		b.Type, b.Ephemeral = "task", true
+		if _, err := seed.Create(b); err != nil {
+			t.Fatalf("Create %s: %v", b.ID, err)
+		}
+	}
+	realBd := newConditionalIntegrationRunner(t, dir)
+	// BdStore writes metadata as strings; seed a JSON boolean through bd
+	// directly so the pushed clause meets a non-string scalar.
+	if out, err := realBd(dir, "bd", "create", "--json", "boolean read", "-t", "task", "--id", "tst-md-5",
+		"--ephemeral", "--metadata", `{"mail.read":true,"gc.routed_to":"rig/pool"}`); err != nil {
+		t.Fatalf("bd create boolean metadata row: %v\n%s", err, out)
+	}
+
+	var queryCmd string
+	store := beads.NewBdStore(dir, func(d, name string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "query" {
+			queryCmd = strings.Join(args, " ")
+		}
+		return realBd(d, name, args...)
+	})
+	all, err := store.List(beads.ListQuery{TierMode: beads.TierWisps, AllowScan: true})
+	if err != nil {
+		t.Fatalf("unfiltered List: %v", err)
+	}
+
+	cases := []struct {
+		name   string
+		filter map[string]string
+		clause string
+	}{
+		{"dotted key", map[string]string{"gc.routed_to": "rig/pool"}, `metadata.gc.routed_to="rig/pool"`},
+		{"boolean value", map[string]string{"mail.read": "true"}, `metadata.mail.read="true"`},
+		{"escaped quote", map[string]string{"alias": quoted}, `metadata.alias="say \"hi\" \\now"`},
+		{"two keys", map[string]string{"gc.routed_to": "rig/pool", "mail.read": "true"}, `metadata.gc.routed_to="rig/pool" AND metadata.mail.read="true"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			queryCmd = ""
+			got, err := store.List(beads.ListQuery{TierMode: beads.TierWisps, Metadata: tc.filter})
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			if !strings.Contains(queryCmd, tc.clause) {
+				t.Fatalf("bd query args = %q, want predicate %s", queryCmd, tc.clause)
+			}
+			var want []string
+			for _, b := range all {
+				keep := true
+				for k, v := range tc.filter {
+					if b.Metadata[k] != v {
+						keep = false
+					}
+				}
+				if keep {
+					want = append(want, b.ID)
+				}
+			}
+			gotIDs := fanoutIDs(got)
+			slices.Sort(gotIDs)
+			slices.Sort(want)
+			if len(want) == 0 {
+				t.Fatalf("client filter kept no rows for %v; the row proves nothing", tc.filter)
+			}
+			if !slices.Equal(gotIDs, want) {
+				t.Fatalf("pushed List ids = %v, unfiltered List narrowed in Go = %v", gotIDs, want)
+			}
+		})
+	}
+}

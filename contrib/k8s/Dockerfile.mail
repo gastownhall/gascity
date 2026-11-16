@@ -24,10 +24,15 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # installed binary package of its source, so naming it alone is the whole fix.
 # These three landed in trixie/main as a point release rather than in
 # trixie-security, so they resolve off the base image's own apt source.
+#
+# apt and libapt-pkg7.0 carry CVE-2026-109518, fixed in 3.0.4; they are the two
+# binary packages of one source, so both are named.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends --only-upgrade \
+    apt \
     bsdutils \
     gzip \
+    libapt-pkg7.0 \
     libblkid1 \
     libcap2 \
     liblastlog2-2 \
@@ -45,9 +50,47 @@ RUN apt-get update \
     openssl-provider-legacy \
     util-linux \
     && apt-get install -y --no-install-recommends \
-    git \
     libnghttp2-14 \
     && rm -rf /var/lib/apt/lists/*
+
+# git (mcp_agent_mail's archive store runs it through GitPython), built from the
+# signed upstream release. CVE-2026-105437, a heap overflow in xdiff's
+# three-way merge reachable from a committed .gitattributes, is fixed in 2.50.2,
+# 2.51.3, 2.52.1, 2.53.1, 2.54.1, 2.55.1 and 2.56.1 (which also fix
+# CVE-2026-111760, -113408, -114466, -114467 and -114469), and no Debian suite
+# ships a fixed git yet (security-tracker.debian.org, bug 1153670). GIT_SHA256 is the
+# kernel.org sha256sums.asc entry for the .tar.gz (the tarball is signed by
+# Junio C Hamano). NO_RUST is git's documented opt-out until Git 3.0;
+# sysconfdir=/etc keeps the system gitconfig at /etc/gitconfig. Build deps are
+# purged in this layer; the shared libraries git links stay, and the layer fails
+# if git-remote-https cannot load them or a distro git is installed.
+ARG GIT_VERSION=2.56.1
+ARG GIT_SHA256=fd0c0495427dc9ac445fdced8e36bb5eb6f233a14da5db3c6dfd8dcfa7f85761
+RUN savedAptMark="$(apt-mark showmanual)" \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates curl gcc libc6-dev make \
+        libcurl4-openssl-dev libexpat1-dev libpcre2-dev libssl-dev zlib1g-dev \
+    && curl -fsSL --retry 3 -o /tmp/git.tar.gz \
+        "https://mirrors.edge.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.gz" \
+    && echo "${GIT_SHA256}  /tmp/git.tar.gz" | sha256sum -c - \
+    && mkdir /tmp/git-src \
+    && tar -C /tmp/git-src --strip-components=1 -xzf /tmp/git.tar.gz \
+    && make -C /tmp/git-src -j"$(nproc)" prefix=/usr/local sysconfdir=/etc \
+        NO_GETTEXT=YesPlease NO_PERL=YesPlease NO_PYTHON=YesPlease NO_RUST=YesPlease \
+        NO_TCLTK=YesPlease USE_LIBPCRE2=YesPlease \
+        all install \
+    && rm -rf /tmp/git.tar.gz /tmp/git-src \
+    && apt-mark auto '.*' >/dev/null \
+    && apt-mark manual $savedAptMark >/dev/null \
+    && find /usr/local/libexec/git-core -type f -executable -exec ldd '{}' ';' 2>/dev/null \
+        | awk '/=>/ { so = $(NF-1); if (index(so, "/usr/local/") == 1) { next }; gsub("^/(usr/)?", "", so); printf "*%s\n", so }' \
+        | sort -u | xargs -r dpkg-query --search | cut -d: -f1 | sort -u | xargs -r apt-mark manual \
+    && apt-get purge -y --auto-remove \
+    && rm -rf /var/lib/apt/lists/* \
+    && ! dpkg -s git >/dev/null 2>&1 \
+    && ! ldd "$(git --exec-path)/git-remote-https" | grep -q 'not found' \
+    && git --version
 
 COPY .github/requirements/mcp-agent-mail.txt /tmp/requirements-mcp-agent-mail.txt
 RUN python -m pip install --no-cache-dir --require-hashes \

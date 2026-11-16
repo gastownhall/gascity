@@ -35,7 +35,7 @@ const (
 const (
 	alertNamedDuplicate = "named-duplicate"        // a named identity with more than one open row (B3)
 	alertAmbiguousBound = "ambiguous-create-bound" // P5's hard bound cleared an ambiguous create
-	alertBootRefused    = "boot-refused"           // C11, or C0.7 (C4b)
+	alertBootRefused    = "boot-refused"           // C11, C0.7 (C4b), or C0.8 (PAR-EXEC)
 	alertBootGateClosed = "boot-gate-closed"       // P2's gate closed for longer than 2 × patrol
 	alertPassPanic      = "pass-panic"             // P6
 	alertEffectDeadline = "effect-deadline"        // an effect settled at its deadline

@@ -411,16 +411,6 @@ func (c *client) dialSocket(ctx context.Context) (net.Conn, error) {
 	return c.dialUnix(dctx, c.socketPath())
 }
 
-// dialUnix is the production connect, installed on every client by newClient and
-// reached through the field of the same name so a test can observe the context the
-// dial runs under. That context is the one thing no listener-free test can otherwise
-// see: a real unix connect completes or fails at once unless the listener backlog is
-// saturated, so a missing bound looks exactly like a present one.
-func dialUnix(ctx context.Context, path string) (net.Conn, error) {
-	var d net.Dialer
-	return d.DialContext(ctx, "unix", path)
-}
-
 // sockSend writes one request line. params must be non-nil — the server
 // rejects requests without a params field.
 func sockSend(conn net.Conn, method string, params any) error {

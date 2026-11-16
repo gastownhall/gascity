@@ -8,6 +8,7 @@ import (
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/sse"
 	"github.com/gastownhall/gascity/internal/api/apierr"
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -17,12 +18,12 @@ import (
 // per-request streaming loop.
 
 func (s *Server) resolveSessionStream(ctx context.Context, input *SessionStreamInput) (*sessionStreamState, error) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 
-	id, err := s.resolveSessionIDAllowClosedWithConfig(store.Store, input.ID)
+	id, err := s.resolveSessionIDAllowClosedWithConfig(store, input.ID)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
@@ -32,7 +33,7 @@ func (s *Server) resolveSessionStream(ctx context.Context, input *SessionStreamI
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
-	handle, err := s.workerHandleForSession(store.Store, id)
+	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}

@@ -4,6 +4,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -880,5 +882,147 @@ func TestResolveTemplateNamedSessionMaterializeUsesTemplateName(t *testing.T) {
 	}
 	if strings.Contains(materializeCmd, "--agent rig/utz") {
 		t.Errorf("materialize-skills --agent flag must NOT carry named_session identity rig/utz; got: %q", materializeCmd)
+	}
+}
+
+// importedFrontmatterSkillFixture loads a real city catalog holding one
+// skill imported under binding "core" whose SKILL.md declares
+// `name: gc-work`, so its catalog name core.gc-work differs from the name a
+// frontmatter-keyed provider loads it by (#8501).
+func importedFrontmatterSkillFixture(t *testing.T) (string, materialize.CityCatalog) {
+	t.Helper()
+	t.Setenv("GC_HOME", t.TempDir())
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	packDir := t.TempDir()
+	skillsDir := filepath.Join(packDir, "skills")
+	skillDir := filepath.Join(skillsDir, "gc-work")
+	if err := os.MkdirAll(skillDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(skillDir, "SKILL.md"),
+		[]byte("---\nname: gc-work\ndescription: Working with beads\n---\nbody\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cat, err := materialize.LoadCityCatalog("", config.DiscoveredSkillCatalog{
+		SourceDir:   skillsDir,
+		PackDir:     packDir,
+		PackName:    "core",
+		BindingName: "core",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cat.Entries) != 1 || cat.Entries[0].Name != "core.gc-work" {
+		t.Fatalf("catalog entries = %+v, want one entry named core.gc-work", cat.Entries)
+	}
+	return cityPath, cat
+}
+
+// skillAppendixAgents covers both skill delivery shapes: a scope-root
+// agent materialized by the supervisor, and a stage-2 agent whose
+// worktree gets a materialize-skills PreStart entry.
+var skillAppendixAgents = []struct {
+	name         string
+	agent        config.Agent
+	wantPreStart bool
+}{
+	{"scope root", config.Agent{Name: "worker", Scope: "city", Provider: "claude"}, false},
+	{"stage-2 workdir", config.Agent{Name: "builder", Scope: "city", Provider: "claude", WorkDir: ".gc/worktrees/builder-1"}, true},
+}
+
+func resolveSkillAppendixTemplate(t *testing.T, cityPath string, cat *materialize.CityCatalog, agent config.Agent) TemplateParams {
+	t.Helper()
+	params := &agentBuildParams{
+		cityName:        "city",
+		cityPath:        cityPath,
+		workspace:       &config.Workspace{Provider: "claude"},
+		providers:       map[string]config.ProviderSpec{"claude": {Command: "echo", PromptMode: "none"}},
+		lookPath:        func(string) (string, error) { return "/bin/echo", nil },
+		fs:              fsys.OSFS{},
+		rigs:            []config.Rig{},
+		beaconTime:      time.Unix(0, 0),
+		beadNames:       make(map[string]string),
+		stderr:          io.Discard,
+		skillCatalog:    cat,
+		sessionProvider: "tmux",
+	}
+	tp, err := resolveTemplate(params, &agent, agent.QualifiedName(), nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	return tp
+}
+
+// TestResolveTemplateAppendixShowsImportedSkillFrontmatterName pins that
+// the skills appendix names an imported skill by both its catalog name
+// and the SKILL.md name a frontmatter-keyed provider loads it by.
+func TestResolveTemplateAppendixShowsImportedSkillFrontmatterName(t *testing.T) {
+	cityPath, cat := importedFrontmatterSkillFixture(t)
+	const want = "- `core.gc-work` (SKILL.md name: `gc-work`) — Working with beads *(core)*\n"
+	for _, c := range skillAppendixAgents {
+		t.Run(c.name, func(t *testing.T) {
+			tp := resolveSkillAppendixTemplate(t, cityPath, &cat, c.agent)
+			if !strings.Contains(tp.Prompt, want) {
+				t.Errorf("prompt missing %q:\n%s", want, tp.Prompt)
+			}
+		})
+	}
+}
+
+// TestResolveTemplateFrontmatterNameAnnotationKeepsFingerprints pins that
+// the SKILL.md name annotation changes only the rendered prompt: the
+// qualified skill fingerprint keys, PreStart commands and runtime core,
+// provision and launch hashes match a catalog without display names.
+func TestResolveTemplateFrontmatterNameAnnotationKeepsFingerprints(t *testing.T) {
+	cityPath, cat := importedFrontmatterSkillFixture(t)
+	cleared := cat
+	cleared.Entries = append([]materialize.SkillEntry(nil), cat.Entries...)
+	for i := range cleared.Entries {
+		cleared.Entries[i].FrontmatterName = ""
+	}
+	for _, c := range skillAppendixAgents {
+		t.Run(c.name, func(t *testing.T) {
+			annotated := resolveSkillAppendixTemplate(t, cityPath, &cat, c.agent)
+			plain := resolveSkillAppendixTemplate(t, cityPath, &cleared, c.agent)
+
+			if !strings.Contains(annotated.Prompt, "(SKILL.md name: `gc-work`)") {
+				t.Fatalf("prompt missing the SKILL.md name annotation:\n%s", annotated.Prompt)
+			}
+			if strings.Contains(plain.Prompt, "SKILL.md name") {
+				t.Fatalf("catalog without display names still annotated:\n%s", plain.Prompt)
+			}
+			if annotated.FPExtra["skills:core.gc-work"] == "" {
+				t.Errorf("FPExtra = %+v, want a skills:core.gc-work entry", annotated.FPExtra)
+			}
+			if _, ok := annotated.FPExtra["skills:gc-work"]; ok {
+				t.Errorf("FPExtra = %+v keys the skill by its SKILL.md name", annotated.FPExtra)
+			}
+			if !reflect.DeepEqual(annotated.FPExtra, plain.FPExtra) {
+				t.Errorf("FPExtra annotated = %+v, plain = %+v", annotated.FPExtra, plain.FPExtra)
+			}
+			hasPreStart := slices.ContainsFunc(annotated.Hints.PreStart, func(entry string) bool {
+				return strings.Contains(entry, "internal materialize-skills")
+			})
+			if hasPreStart != c.wantPreStart {
+				t.Errorf("materialize-skills PreStart = %v, want %v: %v", hasPreStart, c.wantPreStart, annotated.Hints.PreStart)
+			}
+			if !slices.Equal(annotated.Hints.PreStart, plain.Hints.PreStart) {
+				t.Errorf("PreStart annotated = %v, plain = %v", annotated.Hints.PreStart, plain.Hints.PreStart)
+			}
+			annotatedCfg, plainCfg := templateParamsToConfig(annotated), templateParamsToConfig(plain)
+			for _, h := range []struct {
+				name string
+				fn   func(runtime.Config) string
+			}{
+				{"core", runtime.CoreFingerprint},
+				{"provision", runtime.ProvisionFingerprint},
+				{"launch", runtime.LaunchFingerprint},
+			} {
+				if got, want := h.fn(annotatedCfg), h.fn(plainCfg); got != want {
+					t.Errorf("%s fingerprint annotated = %s, plain = %s", h.name, got, want)
+				}
+			}
+		})
 	}
 }

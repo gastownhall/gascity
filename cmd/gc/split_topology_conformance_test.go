@@ -2110,7 +2110,7 @@ func cliReadyIDs(t *testing.T, e splitEnv) []string {
 // sides are therefore compared in canonical order.
 //
 // The state is a controllerState — the production api.State — built from the
-// fixture, so BeadStores(), CityBeadStore() and GraphBeadStore() resolve through
+// fixture, so BeadStores(), CityBeadStore() and Stores() resolve through
 // exactly the dispatch the running controller uses.
 func apiReadyIDs(t *testing.T, e splitEnv) []string {
 	t.Helper()
@@ -2146,7 +2146,7 @@ func apiReadyBody(t *testing.T, e splitEnv) apiReadyListBody {
 // the REAL handler stack over the fixture's stores and decodes the list body.
 //
 // The state is a controllerState — the production api.State — so BeadStores(),
-// CityBeadStore() and GraphBeadStore() resolve through exactly the dispatch the
+// CityBeadStore() and Stores() resolve through exactly the dispatch the
 // running controller uses. suffix is the city-scoped path with its query string,
 // e.g. "/beads/ready" or "/beads?status=in_progress".
 func apiGetBeadListBody(t *testing.T, e splitEnv, suffix string) apiReadyListBody {
@@ -2925,9 +2925,14 @@ func conformanceUnresolvableCandidateStillDoesNotStrandWork(t *testing.T, e spli
 // beads.Store: resolve the bead in the store the claim is rooted in, take it,
 // and report the STORE's own error when it cannot — which is what makes the
 // relocated-id case a real not-found rather than a fixture assertion about one.
+//
+// The resolving read is the first leg of the class route's escalation, whose
+// miss the binding covers, so it reads through a federated leg: production's
+// leg is a bd subprocess, which declares nothing (OD-T7-6).
 func splitEnvStoreClaim(store beads.Store) hookClaimFunc {
+	leg := beadstest.FederatedLeg(store)
 	return func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
-		if _, err := store.Get(beadID); err != nil {
+		if _, err := leg.Get(beadID); err != nil {
 			return beads.Bead{}, false, fmt.Errorf("claiming bead %q: %w", beadID, err)
 		}
 		inProgress := "in_progress"

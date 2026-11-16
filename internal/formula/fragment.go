@@ -131,6 +131,10 @@ func CompileExpansionFragment(_ context.Context, name string, searchPaths []stri
 		return nil, fmt.Errorf("resolving expanded check paths in expansion %q: %w", name, err)
 	}
 
+	if err := ResolveCheckMaxAttemptsVars(resolved.Steps, expansionVars); err != nil {
+		return nil, fmt.Errorf("resolving check max_attempts in expansion %q: %w", name, err)
+	}
+
 	ralphSteps, err := ApplyRalph(resolved.Steps)
 	if err != nil {
 		return nil, fmt.Errorf("applying ralph transforms to expansion %q: %w", name, err)

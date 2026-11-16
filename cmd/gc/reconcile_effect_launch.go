@@ -352,6 +352,11 @@ func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, er
 	startCtx, stop := c.start.clock.WithDeadline(ctx, c.it.Deadline.Add(-startDeadlineSlack-startFailureSlack))
 	out := startOutcome{err: leaf.Start(startCtx, name, prepared.cfg), undo: in.undo, relaunched: in.relaunched, tp: in.tp, prepared: prepared}
 	stop()
+	// A startup nudge the session's program held back behind a dialog
+	// (program_status = "on", row A20) is queued, never typed or failed.
+	if err := queueStartupNudgeHandback(in.w.CityPath, launchCityConfig(in.w), leaf, launchHandbackRow(in), name, out.err == nil, c.start.clock.Now()); err != nil && c.start.stderr != nil {
+		fmt.Fprintf(c.start.stderr, "v2 start %s: %v\n", in.row.ID, err) //nolint:errcheck // best-effort stderr
+	}
 	// The commit lands on a runtime alive with the PreWake token whatever the
 	// Start returned (commitStep), so the binding is read whatever it returned.
 	prepared.runtimeBinding = startedRuntimeBinding(ctx, prepared.cfg.Env["GC_CITY_PATH"], leaf, name)
@@ -377,6 +382,24 @@ func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, er
 	out.health = startupHealthEpisodeKey(in.row, name)
 	out.accrued = startupHealthRecord{store: c.reads.city}.accrued(out.health)
 	return out, nil
+}
+
+// launchCityConfig is w's city config, nil when the pass carries none.
+func launchCityConfig(w *World) *config.City {
+	if w == nil || w.Env == nil {
+		return nil
+	}
+	return w.Env.Cfg
+}
+
+// launchHandbackRow is the row a launch's handed-back startup nudge is
+// queued for: the PreWake's bound row, which carries the continuation the
+// started runtime serves, else the pass's.
+func launchHandbackRow(in launchPass) session.Info {
+	if in.bound.ID != "" {
+		return in.bound
+	}
+	return in.row
 }
 
 // outlivesShutdown is ctx for a start's Call (callWatched, before its lease

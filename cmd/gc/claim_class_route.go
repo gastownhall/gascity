@@ -637,15 +637,10 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 			return route.claim(beadID, assignee)
 		}
 		// The work-scope claim is the first leg of the escalation: a
-		// not-found here is the signal to probe the binding, so the call is
-		// marked federated.
-		var claimed beads.Bead
-		var ok bool
-		err := beads.FederatedRead(func() error {
-			var claimErr error
-			claimed, ok, claimErr = base.Claim(ctx, dir, env, beadID, assignee)
-			return claimErr
-		})
+		// not-found here is the signal to probe the binding. It is a bd
+		// subprocess, not a store read, so it declares no leg (a test double
+		// that reads a store declares its own: beadstest.FederatedLeg).
+		claimed, ok, err := base.Claim(ctx, dir, env, beadID, assignee)
 		leg := hookStore{dir: dir, env: env}
 		if ok {
 			// The work store's CAS COMMITTED. Its error, if any, is the
@@ -673,7 +668,7 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 			return write()
 		}
 		// First leg of the escalation; a not-found sends the write to the binding.
-		err := beads.FederatedRead(func() error { return base.StampWorkMeta(ctx, dir, env, beadID, assignee, patch) })
+		err := base.StampWorkMeta(ctx, dir, env, beadID, assignee, patch)
 		routed, probeErr := route.routes(ctx, hookStore{dir: dir, env: env}, beadID, assignee, err)
 		switch {
 		case probeErr != nil:
@@ -690,12 +685,7 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 			return route.graph.Get(beadID)
 		}
 		// First leg of the escalation; a not-found sends the read to the binding.
-		var bead beads.Bead
-		err := beads.FederatedRead(func() error {
-			var readErr error
-			bead, readErr = base.ReadWorkMeta(ctx, dir, env, beadID, assignee)
-			return readErr
-		})
+		bead, err := base.ReadWorkMeta(ctx, dir, env, beadID, assignee)
 		routed, probeErr := route.routesRead(ctx, hookStore{dir: dir, env: env}, beadID, assignee, err)
 		switch {
 		case probeErr != nil:
@@ -727,12 +717,7 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 			return route.listContinuation(rootID, group)
 		}
 		// First leg; an EMPTY answer sends the query to the binding.
-		var siblings []beads.Bead
-		err := beads.FederatedRead(func() error {
-			var listErr error
-			siblings, listErr = base.ListContinuation(ctx, dir, env, rootID, group)
-			return listErr
-		})
+		siblings, err := base.ListContinuation(ctx, dir, env, rootID, group)
 		if err != nil || len(siblings) > 0 {
 			return siblings, err
 		}
@@ -753,7 +738,7 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 			return write()
 		}
 		// First leg of the escalation; a not-found sends the write to the binding.
-		err := beads.FederatedRead(func() error { return base.AssignContinuation(ctx, dir, env, beadID, assignee) })
+		err := base.AssignContinuation(ctx, dir, env, beadID, assignee)
 		routed, probeErr := route.routes(ctx, hookStore{dir: dir, env: env}, beadID, assignee, err)
 		switch {
 		case probeErr != nil:
@@ -829,32 +814,36 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 	// the convoy and its members from the work leg. Residence of the root is
 	// decided by the same read the claim-time seams use — the work leg first,
 	// the binding only on a proven absence — so a work-resident workflow
-	// keeps the exact unrouted call.
-	ops.InputDone = func(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string) (string, bool, error) {
+	// keeps the exact unrouted call. Input missing from both legs is purged
+	// only on prove's city-wide absence proof.
+	ops.InputVerdict = func(ctx context.Context, dir string, env []string, candidate beads.Bead, identityCandidates []string, prove workflowInputAbsenceProver) (workflowInputVerdict, error) {
 		rootID := workflowRootIDForInputCheck(candidate)
 		if rootID == "" {
-			return base.InputDone(ctx, dir, env, candidate, identityCandidates)
+			return base.InputVerdict(ctx, dir, env, candidate, identityCandidates, prove)
 		}
 		resident, err := route.resolvesToBinding(ctx, base, dir, env, rootID)
 		if err != nil {
-			return rootID, false, err
+			return workflowInputVerdict{RootID: rootID}, err
 		}
 		if !resident {
-			return base.InputDone(ctx, dir, env, candidate, identityCandidates)
+			return base.InputVerdict(ctx, dir, env, candidate, identityCandidates, prove)
 		}
 		work := base.WorkflowStore(ctx, dir, env, rootID, "")
-		return workflowInputDoneAcross(route.class, beads.WorkStore{Store: work}, candidate, identityCandidates)
+		return workflowInputDoneAcross(ctx, route.class, beads.WorkStore{Store: work}, candidate, identityCandidates, prove)
 	}
 
-	ops.SkipDoneWorkflow = func(ctx context.Context, dir string, env []string, rootID string) error {
-		resident, err := route.resolvesToBinding(ctx, base, dir, env, rootID)
+	ops.RetireWorkflow = func(ctx context.Context, dir string, env []string, verdict workflowInputVerdict) error {
+		resident, err := route.resolvesToBinding(ctx, base, dir, env, verdict.RootID)
 		if err != nil {
 			return err
 		}
-		if resident {
-			return skipDoneWorkflow(route.class, rootID)
+		if !resident {
+			return base.RetireWorkflow(ctx, dir, env, verdict)
 		}
-		return base.SkipDoneWorkflow(ctx, dir, env, rootID)
+		if verdict.State == workflowInputPurged {
+			return failPurgedWorkflow(ctx, route.class, verdict.RootID)
+		}
+		return skipDoneWorkflow(route.class, verdict.RootID)
 	}
 
 	// A stale-lease reclaim of a binding-resident bead belongs to the binding.

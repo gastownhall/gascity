@@ -417,7 +417,7 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 
 	// Respawn the agent in the warm "main" session.
 	if _, err := p.ops.execInPod(ctx, podName, "agent",
-		[]string{"sh", "-c", buildRespawnCommand(cfg)}, nil); err != nil {
+		buildRespawnCommand(cfg), nil); err != nil {
 		return fmt.Errorf("k8s relaunch %q: respawn-pane: %w", name, err)
 	}
 
@@ -710,6 +710,10 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 // shared namespace, so a same-named session of another city in that namespace
 // is listed too and can mask this city's session dying.
 func (p *Provider) ListRunningComplete() bool { return true }
+
+// ListRunningShared implements [runtime.SharedListing]: the listing is every
+// Running gc-agent pod in the namespace, which other cities may share.
+func (p *Provider) ListRunningShared() bool { return true }
 
 // GetLastActivity returns the time of the last I/O in the tmux session (zero
 // if unknown), read as the local tmux provider reads it: the newest

@@ -835,6 +835,9 @@ type AgentOverride struct {
 	// ScaleCheck overrides the shell command whose output reports new
 	// unassigned session demand for bead-backed reconciliation.
 	ScaleCheck *string `toml:"scale_check,omitempty"`
+	// ScaleCheckAuthoritative overrides whether this pool's ScaleCheck is the
+	// last word on new demand, its zeros included. See Agent.
+	ScaleCheckAuthoritative *bool `toml:"scale_check_authoritative,omitempty"`
 	// OptionDefaults adds or overrides provider option defaults for this agent.
 	// Keys are option keys, values are choice values. Merges additively
 	// (override keys win over existing agent keys).
@@ -869,6 +872,10 @@ type Import struct {
 	// Version is an optional semver constraint for git-backed imports (e.g.,
 	// "^1.2"). Empty for local paths. "sha:<hex>" pins a specific commit.
 	Version string `toml:"version,omitempty"`
+	// AgentsExclude removes named agent templates from this import edge.
+	// Selectors are matched against each agent's local name before the import
+	// binding is applied; other imported resources remain visible.
+	AgentsExclude []string `toml:"agents_exclude,omitempty"`
 	// Export is a compatibility-only loader knob retained for older
 	// configs. It is intentionally omitted from generated public schemas.
 	Export bool `toml:"export,omitempty" jsonschema:"-"`
@@ -914,12 +921,15 @@ func (imp *Import) ImportIsTransitive() bool {
 
 // HasDefaultOptionSemantics reports whether the import carries the
 // default option semantics: not exported, transitive resolution enabled,
-// and shadow handling empty or "warn". This is the option half of the
+// shadow handling empty or "warn", and no agent narrowing. This is the option half of the
 // reuse policy composition applies when deciding whether an existing
 // same-source binding can stand in for a converted legacy include
 // (existingDefaultImportBindingForSource); the doctor migration's
 // same-source dedup shares it so the two policies cannot drift.
 func (imp *Import) HasDefaultOptionSemantics() bool {
+	if len(imp.AgentsExclude) > 0 {
+		return false
+	}
 	if imp.Export {
 		return false
 	}
@@ -2528,6 +2538,20 @@ func (c OrdersConfig) MaxTimeoutDuration() time.Duration {
 	return durationOr(c.MaxTimeout, 0)
 }
 
+// DefaultMaxOrderDispatchesPerTick is the per-pass dispatch budget used when
+// orders.max_dispatches_per_tick is unset or not positive.
+const DefaultMaxOrderDispatchesPerTick = 4
+
+// EffectiveMaxDispatchesPerTick returns the per-pass dispatch budget the order
+// dispatcher runs with: MaxDispatchesPerTick when positive, else
+// DefaultMaxOrderDispatchesPerTick.
+func (c OrdersConfig) EffectiveMaxDispatchesPerTick() int {
+	if c.MaxDispatchesPerTick != nil && *c.MaxDispatchesPerTick > 0 {
+		return *c.MaxDispatchesPerTick
+	}
+	return DefaultMaxOrderDispatchesPerTick
+}
+
 // DefaultAPIPort is the default TCP port for the API server.
 const DefaultAPIPort = 9443
 
@@ -2708,7 +2732,7 @@ type DoctorConfig struct {
 	// the operator runs `gc doctor --fix`. Actual removal still
 	// requires --fix; this flag does not auto-prune. Safety is
 	// enforced by mechanical checks (no uncommitted changes, no
-	// unpushed commits, no stashes) — never by role identity.
+	// unpushed commits) — never by role identity.
 	NestedWorktreePrune bool `toml:"nested_worktree_prune,omitempty" jsonschema:"default=false"`
 
 	// Checks holds city-local inline doctor checks declared via
@@ -2943,6 +2967,13 @@ type DaemonConfig struct {
 	// within this window, the controller force-kills and restarts it.
 	// Duration string (e.g., "2m", "5m"). Defaults to "2m".
 	DriftDrainTimeout string `toml:"drift_drain_timeout,omitempty" jsonschema:"default=2m"`
+	// DriftDeferralEscalateAfter is how long a config-drift restart may stay
+	// deferred behind a seat's held work before the controller emits one
+	// escalated session.config_drift_deferred event for the episode. The
+	// escalation is a signal only: it never drains, restarts or kills the
+	// session. Positive Go duration string (e.g., "30m", "4h"). Defaults to
+	// "1h".
+	DriftDeferralEscalateAfter string `toml:"drift_deferral_escalate_after,omitempty" jsonschema:"default=1h"`
 	// ObservePaths lists extra directories to search for Claude JSONL session
 	// files (e.g., aimux session paths). The default search path
 	// (~/.claude/projects/) is always included.
@@ -3077,8 +3108,9 @@ type DaemonConfig struct {
 	// AutoPruneWorkerDir controls whether the reconciler removes a
 	// pool-managed session's worker_dir (agent worktree) after the session
 	// bead is closed. Removal is gated on: path lives under the city's
-	// .gc/worktrees/ tree, clean working tree, no unpushed commits.
-	// Nil (unset) defaults to true so pool worktrees do not
+	// .gc/worktrees/ tree, not a managed worktree (one gc worktree ensure
+	// provisioned, which only its owner removes), clean working tree, no
+	// unpushed commits. Nil (unset) defaults to true so pool worktrees do not
 	// accumulate without bound across pool recycles. Set to false to
 	// retain worktrees for post-session diagnostics.
 	AutoPruneWorkerDir *bool `toml:"auto_prune_worker_dir,omitempty" jsonschema:"default=true"`
@@ -3139,7 +3171,7 @@ func (d *DaemonConfig) AutoReapClosedBeadWorktreesMinAge() time.Duration {
 // pool-managed session's worker_dir after the session bead is closed. The
 // default is true: pool worktrees are transient by design and accumulate
 // without bound otherwise. Removal is still gated on per-worktree safety
-// probes (clean tree, no unpushed commits).
+// probes (not a managed worktree, clean tree, no unpushed commits).
 func (d *DaemonConfig) AutoPruneWorkerDirEnabled() bool {
 	if d.AutoPruneWorkerDir == nil {
 		return true
@@ -3379,6 +3411,20 @@ func (d *DaemonConfig) MaxWakesPerTickOrDefault() int {
 // Defaults to 2m if empty or unparseable.
 func (d *DaemonConfig) DriftDrainTimeoutDuration() time.Duration {
 	return durationOr(d.DriftDrainTimeout, 2*time.Minute)
+}
+
+// DefaultDriftDeferralEscalateAfter is the default age at which a deferred
+// config-drift episode over held work escalates.
+const DefaultDriftDeferralEscalateAfter = time.Hour
+
+// DriftDeferralEscalateAfterDuration returns the drift-deferral escalation
+// horizon. Defaults to DefaultDriftDeferralEscalateAfter if empty,
+// unparseable, or not positive.
+func (d *DaemonConfig) DriftDeferralEscalateAfterDuration() time.Duration {
+	if dur := durationOr(d.DriftDeferralEscalateAfter, DefaultDriftDeferralEscalateAfter); dur > 0 {
+		return dur
+	}
+	return DefaultDriftDeferralEscalateAfter
 }
 
 // DefaultStartReadyTimeout is the default wall-clock budget `gc start` and
@@ -3683,7 +3729,9 @@ type Agent struct {
 	Suspended bool `toml:"suspended,omitempty"`
 	// PreStart is a list of shell commands run before session creation.
 	// Commands run on the target filesystem: locally for tmux, inside the
-	// pod/container for exec providers. Template variables same as session_setup.
+	// pod/container for exec providers, and on gc's host for an exec runtime
+	// whose handshake declares fs.host with locality local. Template variables
+	// same as session_setup.
 	// On failure, the last 4 KiB of the command's stdout/stderr is included
 	// in the error and may appear in controller and reconciler logs; avoid
 	// set -x or echoing secrets in setup commands.
@@ -3768,6 +3816,28 @@ type Agent struct {
 	// session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName,
 	// DefaultBranch) before running the command.
 	ScaleCheck string `toml:"scale_check,omitempty"`
+	// ScaleCheckAuthoritative makes this pool's ScaleCheck the last word on
+	// new demand, its zeros included.
+	//
+	// By default a cold pool with a custom ScaleCheck is ALSO probed by gc's
+	// own Ready()/gc.routed_to count, merged with max(). That default exists
+	// for a real case: a rig-scoped check cannot see work routed to it that
+	// lives in the city store, so without the probe such a pool would never
+	// wake (TestBuildDesiredState_ScaleFromZero_CrossRig). But max() means a
+	// custom check can never answer "no demand" while cold — max(0,1) is 1 —
+	// so a pool whose check deliberately withholds demand is re-woken every
+	// tick, finds the work its own check already judged unactionable, and
+	// drains. Measured in production: 43 spawn/drain cycles in
+	// 40 minutes, one Claude cold start every ~30s, for as long as a review
+	// was outstanding.
+	//
+	// Set this only when the check reads the same store the routed work lives
+	// in — then the probe can discover nothing the check has not already
+	// weighed, and its disagreement is pure churn. A check that FAILS is
+	// still not a zero: it stays partial and falls through to the probe
+	// exactly as without this flag, so it adds no new way to strand routed
+	// work.
+	ScaleCheckAuthoritative bool `toml:"scale_check_authoritative,omitempty"`
 	// DrainTimeout is the maximum time to wait for a session to finish its
 	// current work before force-killing it during scale-down. Duration string
 	// (e.g., "5m", "30m", "1h"). Defaults to "5m".

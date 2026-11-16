@@ -121,7 +121,9 @@ func TestCmdOrderHistoryIncludesOverrideDisabledOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := store.Create(beads.Bead{Title: "drop run", Type: "task", Labels: []string{"order-run:drop"}})
+	// A run record carries order-tracking beside its order-run label, as
+	// orders.(*Store).CreateRun writes it.
+	run, err := store.Create(beads.Bead{Title: "drop run", Type: "task", Labels: []string{"order-run:drop", labelOrderTracking}})
 	if err != nil {
 		t.Fatal(err)
 	}

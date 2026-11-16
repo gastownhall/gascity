@@ -94,6 +94,7 @@ jobs:
           RBE_PRODUCT_ROOT: ${{ steps.grace.outputs.root }}
           RBE_WORKER_DIR: ${{ steps.rbe-worker.outputs.dir }}
           RBE_WORKER_REVISION: ${{ steps.rbe-worker.outputs.sha }}
+          RBE_DIST_MIRROR: ${{ vars.RBE_DIST_MIRROR || '' }}
         run: '"$RBE_WORKER_DIR/blacksmith-worker.sh"'
       # rbe-worker-pool.yml's worker step, with the previous host's product
       # files, the checked idle minutes, a max age that ends about the
@@ -122,4 +123,5 @@ jobs:
           RBE_HOT_URL: ${{ vars.RBE_HOT_URL || '' }}
           RBE_HOT_EVERY: ${{ vars.RBE_HOT_EVERY || '1' }}
           CAS_MAX_BYTES: ${{ vars.RBE_CAS_MAX_BYTES || '' }}
+          RBE_DIST_MIRROR: ${{ vars.RBE_DIST_MIRROR || '' }}
         run: '"$RBE_WORKER_DIR/blacksmith-worker.sh"'

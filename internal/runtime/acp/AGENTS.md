@@ -19,6 +19,12 @@
   entry makes `IsRunning` short-circuit on it and call the live replacement
   dead, and a non-gone error on that steady state is re-logged every tick by
   callers that branch only on `IsSessionGone`.
+- A `Stop` whose process outlives SIGKILL returns
+  `runtime.ErrProcessNotConfirmedDead`, in-process or relayed from the owner's
+  socket as `runtime.StopReplyNotConfirmedDead`. It is not `IsSessionGone`, so
+  `Stop` keeps the sidecars and socket for the retry (`cleanupMeta` and
+  `cleanupOwnMeta` run only on nil or gone). The cross-process stop timeout is
+  stop grace + `ManagedProcessReapGrace` + margin; never a literal.
 - Release the lifecycle lock after committing the real connection, before the
   initial nudge. A blocked stdin write needs Stop to acquire that lock and close
   the pipe. Bind initial delivery to the committed connection, not another

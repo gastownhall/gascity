@@ -197,11 +197,7 @@ func TestHookCitySessionTriggerReadsTheRowStamp(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	cityDir := writeFenceTestCity(t)
 	sessionID := newFenceSessionBead(t, cityDir, session.StateActive, "live-token")
-	store, err := openCityStoreAt(cityDir)
-	if err != nil {
-		t.Fatalf("openCityStoreAt: %v", err)
-	}
-	if err := store.SetMetadata(sessionID, beadmeta.TriggerBeadIDMetadataKey, "wb-1"); err != nil {
+	if err := openCitySessionStoreForTest(t, cityDir).SetMetadata(sessionID, beadmeta.TriggerBeadIDMetadataKey, "wb-1"); err != nil {
 		t.Fatalf("stamp session row: %v", err)
 	}
 	cfg, err := loadCityConfig(cityDir, io.Discard)

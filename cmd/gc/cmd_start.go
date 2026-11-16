@@ -822,10 +822,12 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	// Refuse an inadmissible session_reconciler before any init, so a refused
 	// start (including --dry-run) starts no bead store and opens no event log.
 	// runController latches again (newControllerWiring) for the mode it runs.
-	// The two cannot disagree: both read only cfg, which nothing below
-	// rewrites, and reconcilerModeLookupEnv's GC_SESSION and
-	// GC_BEADS_CONDITIONAL_WRITES, which no gc code sets.
-	mode, err := latchReconcilerMode(cfg, reconcilerModeLookupEnv)
+	// The two agree: both read only cfg, which nothing below rewrites,
+	// reconcilerModeLookupEnv's GC_SESSION and GC_BEADS_CONDITIONAL_WRITES,
+	// which no gc code sets, and an exec runtime's admission handshake,
+	// remembered per version of its script (execReadiness); a script
+	// rewritten between the two is caught at boot (C0.8).
+	mode, err := latchReconcilerMode(cfg, cityPath, reconcilerModeLookupEnv)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1869,57 +1871,6 @@ func checkAgentImages(sp runtime.Provider, agents []config.Agent, _ io.Writer) e
 		}
 	}
 	return nil
-}
-
-// countRunningPoolInstances counts how many pool instances are currently
-// running for a given pool agent. For bounded pools, checks static names
-// (1..max). For unlimited pools, discovers via prefix matching.
-//
-// Uses ListRunning with the city prefix for a single batch call instead
-// of N individual IsRunning calls. For exec providers (K8s), this reduces
-// N subprocess spawns to 1.
-func countRunningPoolInstances(agentName, agentDir string, sp0 scaleParams, a *config.Agent, cityName, sessionTemplate string, sp runtime.Provider) int { //nolint:unparam // agentName varies in production use
-	isUnlimited := sp0.Max < 0
-	if isUnlimited {
-		// Unlimited: count by prefix matching.
-		instances := discoverPoolInstances(agentName, agentDir, sp0, a, cityName, sessionTemplate, sp)
-		count := 0
-		for _, qn := range instances {
-			sn := sessionName(nil, cityName, qn, sessionTemplate)
-			if running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, sn); err == nil && running {
-				count++
-			}
-		}
-		return count
-	}
-
-	// Bounded: build the set of expected pool runtime session names.
-	expected := make(map[string]bool, sp0.Max)
-	for _, qualifiedInstance := range discoverPoolInstances(agentName, agentDir, sp0, a, cityName, sessionTemplate, sp) {
-		expected[sessionName(nil, cityName, qualifiedInstance, sessionTemplate)] = true
-	}
-
-	// Single ListRunning call, then intersect with expected set.
-	// Per-city socket isolation: all sessions belong to this city.
-	running, err := sp.ListRunning("")
-	if err != nil {
-		// Fallback: individual IsRunning calls (original behavior).
-		count := 0
-		for sn := range expected {
-			if running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, sn); err == nil && running {
-				count++
-			}
-		}
-		return count
-	}
-
-	count := 0
-	for _, name := range running {
-		if expected[name] {
-			count++
-		}
-	}
-	return count
 }
 
 // buildFingerprintExtra builds the fpExtra map for an agent's fingerprint

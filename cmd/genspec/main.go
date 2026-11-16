@@ -94,7 +94,7 @@ func main() {
 func eventsSpec() ([]byte, error) {
 	schema := map[string]any{
 		"$schema": "https://json-schema.org/draft/2020-12/schema",
-		"$id":     "https://docs.gascityhall.com/reference/schema/events.json",
+		"$id":     "https://docs.gascity.com/reference/schema/events.json",
 		"title":   "gc events JSONL line schema",
 		"description": "Validates one JSON object line emitted by `gc events`, `gc events --watch`, or `gc events --follow`. " +
 			"The referenced DTO schemas live in the supervisor OpenAPI document; the API remains the source of truth. " +

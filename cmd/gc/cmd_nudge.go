@@ -14,7 +14,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -30,9 +29,10 @@ import (
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
 	"github.com/gastownhall/gascity/internal/pidutil"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
+	"github.com/gastownhall/gascity/internal/processgroup"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
-	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storebinding"
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -46,22 +46,6 @@ const (
 	defaultQueuedNudgeRetryDelay    = 15 * time.Second
 	defaultQueuedNudgeMaxAttempts   = 5
 	defaultQueuedNudgeDeadRetention = 1 * time.Hour
-
-	// queuedNudgeStarvedAfter is how long a queued item waits on a session
-	// whose activity clock never quiets before the delivery carrying it
-	// stops waiting on that clock (ga-atd7r2): a session that stays
-	// continuously busy — a repainting idle TUI, or back-to-back turns —
-	// otherwise starves its queue, because the quiescence gate never
-	// clears for it. It sits above the #5317 busy-skip fixture (1 minute),
-	// so a fresh busy deferral still reads as a quiet-session courtesy
-	// skip, not a starvation.
-	queuedNudgeStarvedAfter = 2 * time.Minute
-
-	// queuedNudgeTurnLookTimeout bounds the protocol turn read a starved
-	// queue takes before it goes (starvedQueuedNudgeDelivery): t3bridge
-	// answers it over the network, and the dispatcher runs on the
-	// controller's loop.
-	queuedNudgeTurnLookTimeout = 5 * time.Second
 
 	// nudgeEnqueueMaintenanceBudget bounds the wall-clock time the foreground
 	// `gc sling --nudge` enqueue path spends on best-effort nudge-queue
@@ -1516,6 +1500,7 @@ func sessionNudgeOpPolicy(mode nudgeDeliveryMode) opjournal.Policy {
 // the live leg cannot or must not deliver it. It reports nothing on stdout;
 // its notes and warnings go to stderr, and a refusal is a cliMessageRefusal.
 func deliverSessionNudgeLegacy(target nudgeTarget, store beads.Store, sp runtime.Provider, message string, mode nudgeDeliveryMode, stderr io.Writer) (sessionNudgeResult, error) {
+	programShadowDecideForTarget(target)
 	if mode == nudgeDeliveryQueue {
 		return queueSessionNudgeWithWorker(target, store, sp, message, "")
 	}
@@ -1562,6 +1547,10 @@ func deliverSessionNudgeLegacy(target nudgeTarget, store beads.Store, sp runtime
 	// those would needlessly downgrade live delivery to queued. (gco-90ui)
 	if mode == nudgeDeliveryWaitIdle && target.sessionTransport() != "acp" && target.providerFamily() == "claude" {
 		if obs, obsErr := nudgeObserveTarget(target, sessStore, sp); obsErr == nil && obs.Running && nudgeObservationBusy(obs) {
+			// This busy pre-read stands in for the worker's (which records
+			// its own when it runs): under the shadow switch it is recorded
+			// beside the record (wait_idle_preread).
+			runtime.ShadowCompareIdle(sp, target.sessionName, target.sessionID, target.providerFamily(), runtime.ProgramPointWaitIdlePreread, runtime.ProgramVerdictBusy)
 			return queueSessionNudgeWithWorker(target, store, sp, message, worker.NudgeUndeliveredNoIdleBoundary)
 		}
 	}
@@ -1578,11 +1567,11 @@ func deliverSessionNudgeLegacy(target nudgeTarget, store beads.Store, sp runtime
 		Delivery: delivery,
 		Source:   "session",
 	})
-	if err != nil && errors.Is(err, tmux.ErrNudgeSubmitDeliveredUnobserved) {
-		// The submit Enter was delivered and the composer drained; only the
-		// busy-indicator OBSERVATION timed out. Delivery is proven, so this
-		// must report success like any other delivered nudge, not a CLI
-		// failure — fall through to the normal success path below.
+	if err != nil && runtime.NudgeDelivered(err) {
+		// The nudge reached the session; only the turn start went unobserved
+		// (any runtime's runtime.ErrNudgeDeliveredUnobserved). Delivery is
+		// proven, so this must report success like any other delivered nudge,
+		// not a CLI failure — fall through to the normal success path below.
 		result.Delivered = true
 		err = nil
 	}
@@ -1739,7 +1728,7 @@ func immediateNudgeBehindPendingInteractionError(target nudgeTarget, what string
 		if attach == "" {
 			attach = target.agentKey()
 		}
-		return fmt.Errorf("%s is waiting on a question (%s); typing now would answer it. Answer it in the terminal (gc session attach %s), or retry with --delivery=wait-idle or --delivery=queue to deliver after it is answered", target.agentKey(), what, attach)
+		return fmt.Errorf("%s is waiting on a question (%s); typing now would answer it. Answer it first (POST .../session/{id}/respond with action select naming one of its options, or in the terminal: gc session attach %s), or retry with --delivery=wait-idle or --delivery=queue to deliver after it is answered", target.agentKey(), what, attach)
 	}
 	return fmt.Errorf("%s is waiting on a permission prompt (%s); typing now would answer it. Approve or deny it first (POST .../session/{id}/respond), or retry with --delivery=wait-idle or --delivery=queue to deliver after it is answered", target.agentKey(), what)
 }
@@ -1910,6 +1899,7 @@ func requestWorkerSiteNudgeWake(target nudgeTarget, store beads.Store) (session.
 }
 
 func workerHandleForNudgeTarget(target nudgeTarget, store beads.Store, sp runtime.Provider) (worker.Handle, error) {
+	programShadowDecideForTarget(target)
 	if target.sessionName != "" {
 		if target.sessionID != "" || target.continuationEpoch != "" {
 			obs, err := workerObserveSessionTargetWithConfig(target.cityPath, store, sp, target.cfg, target.sessionName)
@@ -1962,6 +1952,7 @@ func workerHandleForNudgeTarget(target nudgeTarget, store beads.Store, sp runtim
 }
 
 func workerObserveNudgeTarget(target nudgeTarget, store beads.Store, sp runtime.Provider) (worker.LiveObservation, error) {
+	programShadowDecideForTarget(target)
 	if target.sessionName != "" {
 		obs, err := workerObserveSessionTargetWithConfig(target.cityPath, store, sp, target.cfg, target.sessionName)
 		if err != nil {
@@ -2081,8 +2072,8 @@ func writeQueuedSessionNudgeNote(target nudgeTarget, mode nudgeDeliveryMode, jso
 }
 
 // queuedNudgeQuestionNote is the downgrade note for a nudge queued behind a
-// question dialog, which is answered in the terminal rather than with respond.
-const queuedNudgeQuestionNote = " (the session is waiting on a question; the queued dispatcher delivers it after the question is answered in the terminal)"
+// question dialog, which is answered with respond's select or in the terminal.
+const queuedNudgeQuestionNote = " (the session is waiting on a question; the queued dispatcher delivers it after the question is answered)"
 
 // queuedNudgeDowngradeNote renders the reason the live leg was skipped, or "" for
 // a nudge that was queued by request. It names the provider for the unsupported
@@ -2288,11 +2279,12 @@ func deliverMailNotifyLegacy(target nudgeTarget, store beads.Store, sp runtime.P
 				Wake:     worker.NudgeWakeLiveOnly,
 			})
 			delivered := nudgeErr == nil && result.Delivered
-			// The submit Enter can be delivered and the composer drained with
-			// only the busy-indicator OBSERVATION timing out. Delivery is
-			// proven either way, so this must not fall through to the queue
-			// path below and duplicate the mail notification.
-			unobservedButDelivered := errors.Is(nudgeErr, tmux.ErrNudgeSubmitDeliveredUnobserved)
+			// The nudge can reach the session with only its turn start going
+			// unobserved (runtime.ErrNudgeDeliveredUnobserved, from any
+			// runtime). Delivery is proven either way, so this must not fall
+			// through to the queue path below and duplicate the mail
+			// notification.
+			unobservedButDelivered := nudgeErr != nil && runtime.NudgeDelivered(nudgeErr)
 			if delivered || unobservedButDelivered {
 				telemetry.RecordNudge(context.Background(), target.agentKey(), nil)
 				var sessFront *session.Store
@@ -2523,6 +2515,7 @@ func buildNudgeTarget(cityPath string, cfg *config.City, f nudgeTargetFields) nu
 		sessionName:       f.sessionName,
 	}
 	target.agent = parseNudgeAgentIdentity(identity)
+	resolvedByAgent := false
 	for _, candidate := range []string{f.agentName, f.template, f.commonName} {
 		if candidate == "" {
 			continue
@@ -2544,8 +2537,21 @@ func buildNudgeTarget(cityPath string, cfg *config.City, f nudgeTargetFields) nu
 				}
 			}
 			target.resolved = resolved
+			resolvedByAgent = true
 		}
 		break
+	}
+	if !resolvedByAgent {
+		// No agent resolves the provider, as none does for a provider
+		// session (API or dashboard kind=provider): its starts resolve it by
+		// name (resolveWorkerRuntimeProviderWithConfigAndMetadata), and its
+		// pane is armed with that provider's program-status declaration,
+		// which the starved bypass's holds read (programHoldDeclared,
+		// holdMidTurnWithoutRecord). Only the declaration is taken: the
+		// target's process names and family read as without it.
+		if byName := resolveProviderByName(cfg, f.provider, f.template); byName != nil {
+			target.resolved.ProgramStatus = byName.ProgramStatus
+		}
 	}
 	if target.identity == "" {
 		target.identity = target.agent.QualifiedName()
@@ -2736,12 +2742,12 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 			}
 			return false, bookkeepErr
 		}
-		if errors.Is(err, tmux.ErrNudgeSubmitDeliveredUnobserved) {
-			// The submit Enter was delivered and the composer drained; only the
-			// busy-indicator OBSERVATION timed out. Delivery is proven, so this
-			// must ack like a success, not run through failedQueuedNudge's
-			// attempt-counting/dead-letter path — that would re-inject the same
-			// reminder on the next pass.
+		if runtime.NudgeDelivered(err) {
+			// The nudge reached the session; only the turn start went
+			// unobserved (runtime.ErrNudgeDeliveredUnobserved, from any
+			// runtime). Delivery is proven, so this must ack like a success,
+			// not run through failedQueuedNudge's attempt-counting/dead-letter
+			// path — that would re-inject the same reminder on the next pass.
 			stampLastNudgeDeliveredAt(deliverySessFront, target.sessionID, time.Now())
 			ackErr := ackQueuedNudgesWithOutcome(target.cityPath, queuedNudgeIDs(items), "injected_unobserved", "", "provider-nudge-return")
 			return true, errors.Join(bookkeepErr, ackErr)
@@ -2773,11 +2779,29 @@ func stampLastNudgeDeliveredAt(sessFront *session.Store, sessionID string, t tim
 }
 
 // Under the program-status shadow switch the verdict is recorded beside the
-// record's hold (queued_delivery); the verdict returned is today's alone.
+// record's hold (queued_delivery) on a reading of the record taken fresh
+// with the decision; the verdict returned is today's alone.
 func pollerSessionIdleEnough(target nudgeTarget, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation) bool {
+	return pollerSessionIdleEnoughOn(target, sp, quiescence, obs, nil)
+}
+
+// pollerSessionIdleEnoughOn is pollerSessionIdleEnough judging the record
+// on reading, the fresh reading the decision shares with its other points
+// (the op lane's look); nil takes one for this decision alone.
+func pollerSessionIdleEnoughOn(target nudgeTarget, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation, reading *runtime.ShadowReading) bool {
+	programShadowDecideForTarget(target)
 	deliver := pollerSessionQuietEnough(target, sp, quiescence, obs)
-	shadowHold(sp, target.sessionName, target.sessionID, target.providerFamily(),
-		runtime.ProgramPointQueuedDelivery, !deliver, time.Now(), runtime.ProgramHoldVerdict)
+	if target.sessionName == "" || sp == nil {
+		return deliver
+	}
+	if reading == nil {
+		reading = runtime.NewShadowReading(sp, target.sessionName)
+	}
+	scrape := runtime.ProgramVerdictNoHold
+	if !deliver {
+		scrape = runtime.ProgramVerdictHold
+	}
+	reading.Compare(target.sessionID, target.providerFamily(), runtime.ProgramPointQueuedDelivery, scrape, time.Now(), runtime.ProgramHoldVerdict)
 	return deliver
 }
 
@@ -2822,7 +2846,7 @@ type queuedNudgeGate struct {
 // quiet opened sends any delivery on the default path. A gate a starvation
 // opened sends only a delivery that has starved itself, so a younger delivery
 // never goes on an older one's starvation, and looks at the leaf's turn again
-// first (starvedQueuedNudgeDelivery): its own look came before the claim and
+// first (starvedQueuedNudgeBypass): its own look came before the claim and
 // its bookkeeping, and a turn that started since holds the delivery, as one
 // running then held the pass. A look that fails holds it too, and err says
 // why.
@@ -2833,7 +2857,7 @@ func (g queuedNudgeGate) admit(target nudgeTarget, sp runtime.Provider, delivery
 	if !queuedNudgeDeliveryStarved(delivery, g.starvedAsOf) {
 		return "", false, nil
 	}
-	how, hold, err := starvedQueuedNudgeDelivery(sp, target.sessionName)
+	how, hold, err := starvedQueuedNudgeBypass(target, sp, time.Now())
 	if err != nil {
 		return "", false, fmt.Errorf("holding the claimed starved delivery for %s: %w", target.agentKey(), err)
 	}
@@ -2847,8 +2871,10 @@ func (g queuedNudgeGate) admit(target nudgeTarget, sp runtime.Provider, delivery
 // any quiescence window, so the gate never clears. Once the delivery the pass
 // would make has starved as of now (queuedNudgeStarvedForTarget), the gate
 // stops waiting on that clock and asks the leaf's turn instead
-// (starvedQueuedNudgeDelivery): a turn running holds the pass before it
-// claims, and admit asks again before it sends.
+// (starvedQueuedNudgeBypass): a turn running, on the screen or, for a
+// provider declaring hold_mid_turn under the switch on, in the program's
+// own record, holds the pass before it claims, and admit asks again before
+// it sends.
 func queuedNudgeGateFor(target nudgeTarget, sp runtime.Provider, quiescence time.Duration, obs worker.LiveObservation, now time.Time) (queuedNudgeGate, error) {
 	if pollerSessionIdleEnough(target, sp, quiescence, obs) {
 		return queuedNudgeGate{open: true}, nil
@@ -2857,7 +2883,7 @@ func queuedNudgeGateFor(target nudgeTarget, sp runtime.Provider, quiescence time
 	if err != nil || !starved {
 		return queuedNudgeGate{}, err
 	}
-	_, hold, err := starvedQueuedNudgeDelivery(sp, target.sessionName)
+	_, hold, err := starvedQueuedNudgeBypass(target, sp, now)
 	if err != nil {
 		return queuedNudgeGate{}, fmt.Errorf("holding the starved queue for %s: %w", target.agentKey(), err)
 	}
@@ -2905,44 +2931,6 @@ func queuedNudgeDeliveryStarved(delivery []queuedNudge, now time.Time) bool {
 		}
 	}
 	return false
-}
-
-// starvedQueuedNudgeDelivery is how a starved queue goes to sp's session
-// name, one its activity clock calls busy (queuedNudgeStarvedForTarget),
-// decided by one look at the turn of the backend serving it
-// (runtime.ResolveBackend). hold reports that a turn runs. A look that fails
-// is never an idle reading: it holds too, and err says why.
-//
-//   - A leaf that reads its turn on the screen (runtime.TurnRunningProvider)
-//     and sees none delivers immediately: the idle question the default path
-//     would wait out is already answered.
-//   - A leaf that reports its turn by protocol (runtime.TurnFenceProvider:
-//     ACP, t3bridge) and has none in progress takes the default path. Sent
-//     into a running turn, ACP's nudge would hold the dispatch for its whole
-//     busy wait (nudge_busy_timeout), and t3bridge's would start a second
-//     turn.
-//   - A leaf with neither reading takes the default path unread, as the open
-//     gate would send it: holding it would leave the starvation in place.
-func starvedQueuedNudgeDelivery(sp runtime.Provider, name string) (delivery worker.NudgeDelivery, hold bool, err error) {
-	if tr, ok := runtime.TurnRunningFor(sp, name); ok {
-		running, err := tr.TurnRunning(name)
-		if err != nil {
-			return "", true, fmt.Errorf("reading the turn of %q: %w", name, err)
-		}
-		return worker.NudgeDeliveryImmediate, running, nil
-	}
-	leaf, _, _ := runtime.ResolveBackend(sp, name)
-	tf, ok := leaf.(runtime.TurnFenceProvider)
-	if !ok {
-		return worker.NudgeDeliveryDefault, false, nil
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), queuedNudgeTurnLookTimeout)
-	defer cancel()
-	turn, err := tf.ObserveTurn(ctx, name)
-	if err != nil {
-		return "", true, fmt.Errorf("reading the turn of %q: %w", name, err)
-	}
-	return worker.NudgeDeliveryDefault, turn.Active(), nil
 }
 
 func pollerCanDeliverWithoutActivitySignal(target nudgeTarget, sp runtime.Provider) bool {
@@ -3306,15 +3294,33 @@ func splitStaleMailQueuedNudges(target nudgeTarget, mp mail.Provider, sessStore 
 	return keep, stale, nil
 }
 
+// nudgePollerIsGoTestExecutable is ensureNudgePoller's guard against
+// re-executing a Go test binary (see nudgepoller.IsGoTestExecutable). It is a
+// variable only so a test whose child is a test binary that exits before
+// running any test can let that spawn through.
+var nudgePollerIsGoTestExecutable = nudgepoller.IsGoTestExecutable
+
 func ensureNudgePoller(cityPath, agentName, sessionName string) error {
 	pidPath := nudgePollerPIDPath(cityPath, sessionName, agentName)
 	return withNudgePollerPIDLock(pidPath, func() error {
-		if running, _ := existingPollerPID(pidPath, cityPath, sessionName, agentName); running {
+		running, err := existingPollerPID(pidPath, cityPath, sessionName, agentName)
+		if err != nil {
+			// The recorded PID is live but could not be identified. Starting a
+			// replacement here would overwrite the pidfile and leave two
+			// pollers delivering the same nudges, and nothing downstream can
+			// undo that. Refuse instead: the caller retries, and a PID that has
+			// genuinely exited reads as not-running on the next pass.
+			return fmt.Errorf("checking for an existing nudge poller: %w", err)
+		}
+		if running {
 			return nil
 		}
 		exe, err := os.Executable()
 		if err != nil {
 			return err
+		}
+		if nudgePollerIsGoTestExecutable(exe) {
+			return fmt.Errorf("refusing to start nudge poller with Go test binary %q", exe)
 		}
 		cmd := newNudgePollerCommand(exe, processEnvSnapshotExcludingNativeDoltOpen(), cityPath, sessionName, agentName)
 		if err := cmd.Start(); err != nil {
@@ -3337,7 +3343,7 @@ func newNudgePollerCommand(exe string, environ []string, cityPath, sessionName, 
 	cmd.Env = nudgepoller.ChildEnv(environ)
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	processgroup.StartCommandInNewGroup(cmd)
 	disableProductMetricsForChild(cmd)
 	return cmd
 }
@@ -3929,7 +3935,15 @@ func acquireNudgePollerLease(cityPath, sessionName, agentName string) (func(), e
 		case err == nil && strings.TrimSpace(string(current)) == strings.TrimSpace(string(pid)):
 			return nil
 		case err == nil:
-			if running, _ := existingPollerPID(pidPath, cityPath, sessionName, agentName); running {
+			running, err := existingPollerPID(pidPath, cityPath, sessionName, agentName)
+			if err != nil {
+				// The recorded PID is live but could not be identified, so
+				// whether it is already this key's poller is unknown. Taking
+				// the lease here would overwrite the pidfile and run a second
+				// singleton alongside the first. Refuse instead.
+				return fmt.Errorf("checking for an existing nudge poller: %w", err)
+			}
+			if running {
 				return errNudgePollerRunning
 			}
 		case !errors.Is(err, os.ErrNotExist):
@@ -3943,6 +3957,13 @@ func acquireNudgePollerLease(cityPath, sessionName, agentName string) (func(), e
 	return release, nil
 }
 
+// existingPollerPID reports whether the recorded PID is still this session's
+// nudge poller.
+//
+// A non-nil error means the PID is LIVE but its identity could not be read, so
+// whether it is the poller is unknown. That is deliberately distinct from
+// (false, nil): the caller must not create a second singleton on the strength
+// of a check that did not run.
 func existingPollerPID(pidPath, cityPath, sessionName, agentName string) (bool, error) {
 	data, err := os.ReadFile(pidPath)
 	if errors.Is(err, os.ErrNotExist) {
@@ -3962,11 +3983,13 @@ func existingPollerPID(pidPath, cityPath, sessionName, agentName string) (bool, 
 	if cityPath == "" || sessionName == "" || agentName == "" {
 		return false, nil
 	}
-	if pidutil.AliveWithCmdline(pid, nudgepoller.CmdlineMatcher(cityPath, sessionName, agentName)) {
-		return true, nil
-	}
-	return false, nil
+	return nudgePollerIdentity(pid, nudgepoller.CmdlineMatcher(cityPath, sessionName, agentName))
 }
+
+// nudgePollerIdentity is existingPollerPID's identity probe. It is a variable
+// only so a test can stage a live PID whose identity cannot be read, which no
+// host reliably produces on demand.
+var nudgePollerIdentity = pidutil.AliveWithCmdline
 
 func writeNudgePollerPID(pidPath string, pid int) error {
 	data := []byte(fmt.Sprintf("%d\n", pid))
@@ -3986,9 +4009,10 @@ func withNudgePollerPIDLock(pidPath string, fn func() error) error {
 		return fmt.Errorf("opening nudge poller lock: %w", err)
 	}
 	defer lockFile.Close() //nolint:errcheck
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+	lock, err := filelock.Acquire(lockFile, filelock.Options{Mode: filelock.Exclusive, Label: lockPath})
+	if err != nil {
 		return fmt.Errorf("locking nudge poller: %w", err)
 	}
-	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) //nolint:errcheck
+	defer lock.Release() //nolint:errcheck
 	return fn()
 }

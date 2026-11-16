@@ -20,7 +20,7 @@ func (cs *controllerState) SessionListWakeReasons(listed []sessionpkg.Info, pers
 			infoIndex[id] = info
 		}
 	}
-	readyWaitSet, err := readyWaitSetForList(sessionpkg.NewStore(cs.SessionsBeadStore()))
+	readyWaitSet, err := readyWaitSetForList(sessionpkg.NewStore(cs.Stores().Sessions()))
 	if err != nil {
 		log.Printf("api: session list wake reasons for city %s: ready wait indicators degraded: %v", cs.cityName, err)
 	}

@@ -71,6 +71,15 @@ func New(defaultSP, acpSP runtime.Provider) *Provider {
 	}
 }
 
+// SetScanExecutables refreshes supported backends without changing routing.
+func (p *Provider) SetScanExecutables(names []string) {
+	for _, sp := range []runtime.Provider{p.defaultSP, p.acpSP} {
+		if scoped, ok := sp.(interface{ SetScanExecutables([]string) }); ok {
+			scoped.SetScanExecutables(names)
+		}
+	}
+}
+
 // RouteACP registers a session name to use the ACP backend.
 // Must be called before Start for that session.
 func (p *Provider) RouteACP(name string) {
