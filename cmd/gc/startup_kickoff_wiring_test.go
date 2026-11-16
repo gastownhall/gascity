@@ -18,16 +18,15 @@ import (
 const startupKickoffLaneStepName = "startup-kickoff"
 
 // startupKickoffWiringFixture is a running named session whose startup
-// kickoff has been pending for an hour, bound to the open step step-a, on a
-// store holding both beads.
-func startupKickoffWiringFixture(t *testing.T) (beads.Store, beads.Bead, beads.Bead, *runtime.Fake) {
+// kickoff began at startedAt, bound to an open step, on a store holding both
+// beads.
+func startupKickoffWiringFixture(t *testing.T, startedAt time.Time) (beads.Store, beads.Bead, beads.Bead, *runtime.Fake) {
 	t.Helper()
 	store := beads.NewMemStore()
 	step, err := store.Create(beads.Bead{Title: "step", Type: "task", Metadata: map[string]string{"gc.routed_to": "agent-a"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	startedAt := time.Now().Add(-time.Hour)
 	sess, err := store.Create(beads.Bead{Title: "agent-a", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
 		"session_name": "session-a", "template": "agent-a", "agent_name": "agent-a", "state": "awake",
 		"instance_token": "tok-1", "generation": "1",
@@ -43,7 +42,7 @@ func startupKickoffWiringFixture(t *testing.T) (beads.Store, beads.Bead, beads.B
 	if err := sp.Start(context.Background(), "session-a", runtime.Config{Command: "true"}); err != nil {
 		t.Fatal(err)
 	}
-	sp.SetActivity("session-a", time.Now().Add(-time.Hour))
+	sp.SetActivity("session-a", startedAt)
 	return store, step, sess, sp
 }
 
@@ -87,7 +86,7 @@ func TestBeadReconcileTickNudgesOutstandingStartupKickoff(t *testing.T) {
 		{name: "partial snapshot", partial: true, wantNudge: 0, wantState: startupKickoffStatePending},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			store, step, sess, sp := startupKickoffWiringFixture(t)
+			store, step, sess, sp := startupKickoffWiringFixture(t, time.Now().Add(-time.Hour))
 			cr := startupKickoffTickRuntime(store, sp, startupKickoffWiringCfg())
 			cr.cityPath = t.TempDir()
 			cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), startupKickoffTickResult(step, tc.partial), newSessionBeadSnapshot([]beads.Bead{sess}), nil, false)
@@ -117,7 +116,7 @@ func TestStartupKickoffLaneStep(t *testing.T) {
 			{name: "stale summary", edit: func(s *allocSummary) { s.At = s.At.Add(-time.Hour) }},
 		} {
 			t.Run(mode+"/"+tc.name, func(t *testing.T) {
-				store, step, _, sp := startupKickoffWiringFixture(t)
+				store, step, _, sp := startupKickoffWiringFixture(t, stepsTestNow.Add(-time.Hour))
 				cfg := startupKickoffWiringCfg()
 				cfg.Daemon.WorkLadder = mode
 				sum := &allocSummary{At: stepsTestNow, ReadyRouted: []beads.Bead{step}, ReadyRoutedRefs: []string{""}}

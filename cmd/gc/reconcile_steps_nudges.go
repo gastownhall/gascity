@@ -36,15 +36,16 @@ type executionStalledRequest struct {
 // errNoPlannerInbox: the lane has no planner to hand a request to.
 var errNoPlannerInbox = errors.New("no planner for the execution-stalled request")
 
-// addPoolSteps registers the work-ladder and orphan-release steps over the
-// planner's last allocation summary and its execution-stalled inbox. Call it
-// before start. Each runs every pass, as legacy runs its backstops every
-// tick; the ladder paces itself by its cell.
+// addPoolSteps registers the work-ladder, orphan-release and startup-kickoff
+// steps over the planner's last allocation summary and its execution-stalled
+// inbox. Call it before start. Each runs every pass, as legacy runs its
+// backstops every tick; the ladder paces itself by its cell.
 func (l *externalReadsLane) addPoolSteps(summary func() *allocSummary, stalled func(executionStalledRequest)) {
 	l.summary, l.stalled = summary, stalled
 	l.steps = append(l.steps,
 		&laneStep{name: "work-ladder", legs: sourceNone, run: l.workLadder},
-		&laneStep{name: "orphan-release", legs: sourceNone, run: l.orphanRelease})
+		&laneStep{name: "orphan-release", legs: sourceNone, run: l.orphanRelease},
+		&laneStep{name: "startup-kickoff", legs: sourceNone, run: l.startupKickoff})
 }
 
 // laneSummary is the planner's last allocation summary, or nil when there is
@@ -107,6 +108,25 @@ func (l *externalReadsLane) legacyBackstops(ctx context.Context, env externalRea
 		return
 	}
 	nudgeStalledPoolExecution(env.SP, env.Cfg, sessStore, raw, s.AssignedWork, s.AssignedStores, s.AssignedStoreRefs, s.Partial, now, l.events, l.requestExecutionStalled(env), l.stderr)
+}
+
+// startupKickoff is the startup-kickoff step: the named/direct sibling to the
+// pool backstops, over the same last allocation summary and one live read of
+// the raw session rows whose startup_kickoff markers it paces by. It runs in
+// every work_ladder mode, since the ladder paces pool seats only, and does
+// nothing on a partial or stale summary, which cannot tell an advanced bound
+// step from an unread one.
+func (l *externalReadsLane) startupKickoff(_ context.Context, env externalReadsEnv) {
+	s := l.laneSummary()
+	if s == nil || env.Cfg == nil || env.CityStore == nil || env.SP == nil {
+		return
+	}
+	raw, err := loadSessionBeads(env.CityStore)
+	if err != nil {
+		fmt.Fprintf(l.stderr, "external reads: loading sessions for the startup kickoff: %v\n", err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	nudgeOutstandingStartupKickoffs(env.SP, env.Cfg, env.CityStore, raw, slices.Concat(s.AssignedWork, s.ReadyRouted), s.Partial, l.now(), l.events, l.stderr)
 }
 
 // requestExecutionStalled is the execution backstop's requestDrain: it reads

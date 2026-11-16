@@ -3686,6 +3686,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 	if stalledPoolBeads, err := loadSessionBeads(sessStore.Store); err != nil {
 		fmt.Fprintf(cr.stderr, "%s: loading sessions for idle-claim nudge: %v\n", cr.logPrefix, err) //nolint:errcheck
 	} else {
+		partial := result.StoreQueryPartial || result.SessionQueryPartial
 		claimWork := make([]beads.Bead, 0, len(assignedWorkBeads)+len(result.ReadyUnassignedRoutedWorkBeads))
 		claimWork = append(claimWork, assignedWorkBeads...)
 		claimWork = append(claimWork, result.ReadyUnassignedRoutedWorkBeads...)
@@ -3722,7 +3723,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 			result.AssignedWorkBeads,
 			result.AssignedWorkStores,
 			result.AssignedWorkStoreRefs,
-			result.StoreQueryPartial || result.SessionQueryPartial,
+			partial,
 			time.Now(),
 			cr.rec,
 			cr.requestExecutionStalledDrain,
@@ -3731,10 +3732,8 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		// The named/direct sibling to the pool backstops above: a named
 		// session's startup kickoff against its bound step. It reads the
 		// same claim snapshot, and a partial one would read an advanced step
-		// as absent, so it does not run then.
-		if !result.StoreQueryPartial && !result.SessionQueryPartial {
-			nudgeOutstandingStartupKickoffs(cr.sp, cr.cfg, sessStore, stalledPoolBeads, claimWork, false, time.Now(), cr.rec, cr.stdout)
-		}
+		// as absent, so it does nothing then.
+		nudgeOutstandingStartupKickoffs(cr.sp, cr.cfg, sessStore, stalledPoolBeads, claimWork, partial, time.Now(), cr.rec, cr.stdout)
 	}
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.nudge_stalled_pool_claims", phaseStart, nil)
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"strconv"
 	"strings"
@@ -29,7 +30,7 @@ const startupKickoffNudgeLabel = "startup-kickoff-nudge"
 //
 // boundSteps is the tick's work snapshot, which must be complete: a bound step
 // that is absent from it, or no longer open, has advanced and confirms the
-// kickoff, so the caller skips this backstop on a partial snapshot. Once the
+// kickoff, so a partial snapshot (partial) makes the call do nothing. Once the
 // nudges are spent the session latches startup_kickoff_state=given_up and
 // emits events.SessionStartupKickoffGivenUp once; a given-up (or confirmed)
 // kickoff is never governed again, so there is no unbounded retry. Pool
@@ -45,8 +46,7 @@ func nudgeOutstandingStartupKickoffs(
 	rec events.Recorder,
 	stdout io.Writer,
 ) {
-	_ = partial // compile-only until the partial-snapshot guard lands
-	if sp == nil || cfg == nil || store == nil {
+	if partial || sp == nil || cfg == nil || store == nil {
 		return // hot reconcile path: never panic on a half-built dependency
 	}
 	runNudgeBackstop(sp, store, sessionBeads, boundSteps, now, stdout, startupKickoffNudgeLabel, namedDirectStartupBackstop{
@@ -171,11 +171,12 @@ func (p namedDirectStartupBackstop) exhausted(store beads.Store, s *beads.Bead, 
 		Attempts:    attempts,
 	})
 	if err != nil {
+		fmt.Fprintf(stdout, "startup kickoff: encoding the give-up event for session %s: %v\n", s.ID, err) //nolint:errcheck // best-effort stdout
 		return
 	}
 	p.rec.Record(events.Event{
 		Type:      events.SessionStartupKickoffGivenUp,
-		Actor:     eventActor(),
+		Actor:     "gc",
 		Subject:   stepID,
 		SessionID: s.ID,
 		Payload:   payload,
