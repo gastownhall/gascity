@@ -1179,7 +1179,14 @@ const liveContractStoreConflictBudget = 30 * time.Second
 // document.
 func liveContractDo(t *testing.T, baseURL string, v *apicontract.Spec, method, path string, body any, headers map[string]string, wanted func(int) bool) (*http.Request, *http.Response, []byte) {
 	t.Helper()
-	deadline := time.Now().Add(liveContractStoreConflictBudget)
+	return liveContractDoWith(t, baseURL, v, method, path, body, headers, wanted, time.Now, validateLiveContractResponse)
+}
+
+// liveContractDoWith supplies per-call clock and validation dependencies so the
+// retry guards can be checked without wall-time waits or shared mutable state.
+func liveContractDoWith(t *testing.T, baseURL string, v *apicontract.Spec, method, path string, body any, headers map[string]string, wanted func(int) bool, now func() time.Time, validate func(*testing.T, *apicontract.Spec, *http.Request, *http.Response, []byte)) (*http.Request, *http.Response, []byte) {
+	t.Helper()
+	deadline := now().Add(liveContractStoreConflictBudget)
 	for {
 		req, err := liveContractHTTPRequest(baseURL, method, path, body)
 		if err != nil {
@@ -1197,11 +1204,11 @@ func liveContractDo(t *testing.T, baseURL string, v *apicontract.Spec, method, p
 		if err != nil {
 			t.Fatalf("%s %s read response: %v", method, path, err)
 		}
-		if wanted(resp.StatusCode) || !liveContractStoreConflict(resp.StatusCode, raw) || time.Now().After(deadline) {
+		if wanted(resp.StatusCode) || !liveContractStoreConflict(resp.StatusCode, raw) || now().After(deadline) {
 			return req, resp, raw
 		}
 		if v != nil {
-			validateLiveContractResponse(t, v, req, resp, raw)
+			validate(t, v, req, resp, raw)
 		}
 		t.Logf("%s %s: re-issuing after declared store_conflict 503; body: %s", method, path, string(raw))
 	}

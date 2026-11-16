@@ -113,6 +113,7 @@ go_test(
             "//cmd/gc:gc_drift_new",
             "//cmd/gc:gc_drift_old",
             "//examples/bd",
+            "//internal/api:openapi.json",
             "//test/integration/filebdshim",
             # Pinned prebuilt release binaries (see MODULE.bazel): hermetic bd
             # and dolt for the dolt-backed integration shapes, same versions the
