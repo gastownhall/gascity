@@ -29,9 +29,8 @@ func (s *SQLiteStore) Claim(id, assignee string) (Bead, bool, error) {
 	}
 	var claimed Bead
 	var ok bool
-	err := retryOnBusy(func() error {
+	err := s.retryWrite(func(ctx context.Context) error {
 		ok = false
-		ctx := context.Background()
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("sqlite claim: begin tx: %w", err)

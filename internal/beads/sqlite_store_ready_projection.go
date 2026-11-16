@@ -48,11 +48,16 @@ func (s *SQLiteStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, error
 	}
 
 	blocked := make(map[string]bool, len(ids))
-	for start := 0; start < len(ids); start += sqliteReadyProjectionBatch {
-		end := min(start+sqliteReadyProjectionBatch, len(ids))
-		if err := s.readBlockedBatch(ids[start:end], blocked); err != nil {
-			return items, err
+	if _, err := sqliteRead(s, func(ctx context.Context) (struct{}, error) {
+		for start := 0; start < len(ids); start += sqliteReadyProjectionBatch {
+			end := min(start+sqliteReadyProjectionBatch, len(ids))
+			if err := s.readBlockedBatch(ctx, ids[start:end], blocked); err != nil {
+				return struct{}{}, err
+			}
 		}
+		return struct{}{}, nil
+	}); err != nil {
+		return items, err
 	}
 
 	enriched := make([]Bead, len(items))
@@ -72,14 +77,14 @@ func (s *SQLiteStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, error
 
 // readBlockedBatch records in into the blocking verdict of each id in chunk
 // that the store holds.
-func (s *SQLiteStore) readBlockedBatch(chunk []string, into map[string]bool) error {
+func (s *SQLiteStore) readBlockedBatch(ctx context.Context, chunk []string, into map[string]bool) error {
 	args := make([]any, len(chunk))
 	placeholders := make([]string, len(chunk))
 	for i, id := range chunk {
 		args[i] = id
 		placeholders[i] = "?"
 	}
-	rows, err := s.readDB.QueryContext(context.Background(),
+	rows, err := s.readDB.QueryContext(ctx,
 		`SELECT b.id, `+sqliteReadyBlockerExists("b.id")+` FROM beads b WHERE b.id IN (`+strings.Join(placeholders, ",")+`)`,
 		args...)
 	if err != nil {

@@ -42,6 +42,14 @@ const (
 	sqliteBusyRetryBaseDelay = 100 * time.Millisecond
 	sqliteBusyRetryMaxDelay  = 2 * time.Second
 
+	// sqliteDefaultOpTimeout bounds one store operation, end to end: every
+	// statement, busy retry and wait for a pooled connection it makes. It sits
+	// above the busy ladder (six retries of up to 5 s busy_timeout each plus
+	// 5.1 s of backoff, about 40 s) so ordinary write contention still ends as
+	// ErrSQLiteBusyExhausted, and below the point where a caller blocked on the
+	// store looks hung.
+	sqliteDefaultOpTimeout = 60 * time.Second
+
 	// sqliteMintProbesBeforeReseed is how many consecutive occupied ids
 	// mintUniqueIDTx steps over with point lookups before paying for one
 	// whole-table reseed scan. A floor that is stale because another process
@@ -57,6 +65,7 @@ type SQLiteStoreOptions struct {
 	reservedPrefixes        []string
 	retentionPeriod         time.Duration
 	retentionSweepInterval  time.Duration
+	opTimeout               time.Duration
 	disableRetentionSweeper bool
 	readOnly                bool
 	readOnlyNoMmap          bool
@@ -88,7 +97,7 @@ var (
 	}
 	observeSQLiteSequenceFloorBoundary = func(string) {}
 	observeSQLiteSequenceReseed        = func() {}
-	sqliteBusySleep                    = time.Sleep
+	sqliteBusySleep                    = sleepWithContext
 )
 
 // SQLiteStoreOption customizes OpenSQLiteStore.
@@ -99,6 +108,16 @@ func WithSQLiteStoreIDPrefix(prefix string) SQLiteStoreOption {
 	return func(o *SQLiteStoreOptions) {
 		if strings.TrimSpace(prefix) != "" {
 			o.prefix = normalizeIDPrefix(prefix)
+		}
+	}
+}
+
+// WithSQLiteStoreOpTimeout sets the deadline of one store operation. A
+// non-positive d keeps the default, sqliteDefaultOpTimeout.
+func WithSQLiteStoreOpTimeout(d time.Duration) SQLiteStoreOption {
+	return func(o *SQLiteStoreOptions) {
+		if d > 0 {
+			o.opTimeout = d
 		}
 	}
 }
@@ -188,11 +207,15 @@ func isSQLiteBusy(err error) bool {
 // The busy_timeout PRAGMA already retries at the C layer for 5 s per call, so
 // each application-level retry is an additional 5 s+ window for the lock.
 // fn must be one transaction: a busy error that outlasts the retries is
-// marked ErrSQLiteBusyExhausted, a write that committed nothing.
-func retryOnBusy(fn func() error) error {
+// marked ErrSQLiteBusyExhausted, a write that committed nothing. A ctx that
+// ends during a backoff stops the ladder at once and returns the last busy
+// error unmarked, since the ladder did not run out.
+func retryOnBusy(ctx context.Context, fn func() error) error {
 	err := fn()
 	for attempt := 0; attempt < sqliteBusyRetryAttempts && isSQLiteBusy(err); attempt++ {
-		sqliteBusySleep(sqliteBusyBackoff(attempt))
+		if sqliteBusySleep(ctx, sqliteBusyBackoff(attempt)) != nil {
+			return err
+		}
 		err = fn()
 	}
 	if isSQLiteBusy(err) {
@@ -224,6 +247,74 @@ func sqliteBusyBackoff(attempt int) time.Duration {
 	return half + time.Duration(rand.Int64N(int64(half)+1))
 }
 
+// opContext derives the context of one store operation from parent: the
+// store's operation deadline, or the parent's own if that is sooner. A nil
+// parent means the caller supplied none. The caller must call cancel.
+func (s *SQLiteStore) opContext(parent context.Context) (context.Context, context.CancelFunc) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	d := s.opTimeout
+	if d <= 0 {
+		d = sqliteDefaultOpTimeout
+	}
+	return context.WithTimeout(parent, d)
+}
+
+// mapStoreTimeout marks err as ErrStoreTimeout when the operation's own
+// deadline ended opCtx, keeping the context error and err in the chain. A
+// caller's cancel or deadline (parent done) and any error that is not a
+// context's pass through unchanged, and so does nil. opCtx is checked before
+// parent: opCtx ends when parent does, and the parent check is what tells the
+// caller's end from the store's.
+func mapStoreTimeout(opCtx, parent context.Context, err error) error {
+	if err == nil || opCtx.Err() == nil {
+		return err
+	}
+	if parent != nil && parent.Err() != nil {
+		return err
+	}
+	return fmt.Errorf("sqlite store operation: %w: %w: %w", ErrStoreTimeout, opCtx.Err(), err)
+}
+
+// retryWriteUnder runs fn as one write operation under the store's operation
+// deadline, retrying SQLITE_BUSY, and marks a deadline expiry. fn receives
+// the operation context and must end in the commit: a step after it must not
+// take that context or return ErrStoreTimeout, since the write already landed.
+func (s *SQLiteStore) retryWriteUnder(parent context.Context, fn func(ctx context.Context) error) error {
+	opCtx, cancel := s.opContext(parent)
+	defer cancel()
+	return mapStoreTimeout(opCtx, parent, retryOnBusy(opCtx, func() error { return fn(opCtx) }))
+}
+
+// retryWrite is retryWriteUnder for an operation whose caller supplied no
+// context.
+func (s *SQLiteStore) retryWrite(fn func(ctx context.Context) error) error {
+	var none context.Context
+	return s.retryWriteUnder(none, fn)
+}
+
+// sqliteReadUnder runs fn as one read operation under the store's operation
+// deadline and marks a deadline expiry. A failed read returns the zero T and
+// the mapped error, never a partial result.
+func sqliteReadUnder[T any](parent context.Context, s *SQLiteStore, fn func(ctx context.Context) (T, error)) (T, error) {
+	opCtx, cancel := s.opContext(parent)
+	defer cancel()
+	v, err := fn(opCtx)
+	if err != nil {
+		var zero T
+		return zero, mapStoreTimeout(opCtx, parent, err)
+	}
+	return v, nil
+}
+
+// sqliteRead is sqliteReadUnder for an operation whose caller supplied no
+// context.
+func sqliteRead[T any](s *SQLiteStore, fn func(ctx context.Context) (T, error)) (T, error) {
+	var none context.Context
+	return sqliteReadUnder(none, s, fn)
+}
+
 // SQLiteStore is a pure-Go SQLite-backed Store using modernc.org/sqlite.
 // No CGO required. Builds unconditionally with CGO_ENABLED=0.
 //
@@ -238,6 +329,7 @@ type SQLiteStore struct {
 	reservedPrefixes           []string // when non-empty, the namespaces a pinned id must carry
 	retentionPeriod            time.Duration
 	retentionSweepInterval     time.Duration
+	opTimeout                  time.Duration // zero means sqliteDefaultOpTimeout
 	disableRetentionSweeper    bool
 	retentionStop              context.CancelFunc
 	retentionDone              chan struct{}
@@ -348,6 +440,7 @@ func OpenSQLiteStore(dir string, opts ...SQLiteStoreOption) (Store, error) {
 		reservedPrefixes:        cfg.reservedPrefixes,
 		retentionPeriod:         cfg.retentionPeriod,
 		retentionSweepInterval:  cfg.retentionSweepInterval,
+		opTimeout:               cfg.opTimeout,
 		disableRetentionSweeper: cfg.disableRetentionSweeper,
 		readOnly:                cfg.readOnly,
 		sequenceFloorPath:       filepath.Join(dir, sqliteSequenceFloorFilenameFor(cfg.prefix)),
@@ -596,10 +689,13 @@ func (s *SQLiteStore) Ping() error {
 	if err := s.ensureOpen(); err != nil {
 		return err
 	}
-	if err := s.db.PingContext(context.Background()); err != nil {
-		return fmt.Errorf("pinging sqlite store: %w", err)
-	}
-	return nil
+	_, err := sqliteRead(s, func(ctx context.Context) (struct{}, error) {
+		if err := s.db.PingContext(ctx); err != nil {
+			return struct{}{}, fmt.Errorf("pinging sqlite store: %w", err)
+		}
+		return struct{}{}, nil
+	})
+	return err
 }
 
 // CloseStore stops the background retention sweeper and closes both the write
@@ -692,8 +788,7 @@ func (s *SQLiteStore) create(b Bead, allowForeign bool) (Bead, error) {
 	}
 	var stored Bead
 	autoID := b.ID == ""
-	err := retryOnBusy(func() error {
-		ctx := context.Background()
+	err := s.retryWrite(func(ctx context.Context) error {
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("sqlite create: begin tx: %w", err)
@@ -1137,23 +1232,25 @@ func (s *SQLiteStore) Get(id string) (Bead, error) {
 	if err := s.ensureOpen(); err != nil {
 		return Bead{}, err
 	}
-	row := s.readDB.QueryRowContext(
-		context.Background(),
-		`SELECT `+s.sqliteBeadProjection()+` FROM beads b WHERE b.id=?`,
-		id,
-	)
-	b, err := scanSQLiteBead(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
-	}
-	if err != nil {
-		return Bead{}, fmt.Errorf("getting bead %q: %w", id, err)
-	}
-	items := []Bead{b}
-	if err := hydrateSQLiteDeps(context.Background(), s.readDB, items); err != nil {
-		return Bead{}, fmt.Errorf("getting bead %q: %w", id, err)
-	}
-	return items[0], nil
+	return sqliteRead(s, func(ctx context.Context) (Bead, error) {
+		row := s.readDB.QueryRowContext(
+			ctx,
+			`SELECT `+s.sqliteBeadProjection()+` FROM beads b WHERE b.id=?`,
+			id,
+		)
+		b, err := scanSQLiteBead(row)
+		if errors.Is(err, sql.ErrNoRows) {
+			return Bead{}, fmt.Errorf("getting bead %q: %w", id, ErrNotFound)
+		}
+		if err != nil {
+			return Bead{}, fmt.Errorf("getting bead %q: %w", id, err)
+		}
+		items := []Bead{b}
+		if err := hydrateSQLiteDeps(ctx, s.readDB, items); err != nil {
+			return Bead{}, fmt.Errorf("getting bead %q: %w", id, err)
+		}
+		return items[0], nil
+	})
 }
 
 func (s *SQLiteStore) revisionSelectExpr(tableAlias string) string {
@@ -1296,8 +1393,7 @@ func (s *SQLiteStore) rewriteBead(id string, apply func(Bead) Bead) error {
 	if s.readOnly {
 		return fmt.Errorf("sqlite update %q: store is read-only", id)
 	}
-	return retryOnBusy(func() error {
-		ctx := context.Background()
+	return s.retryWrite(func(ctx context.Context) error {
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("sqlite update: begin tx: %w", err)
@@ -1357,8 +1453,7 @@ func (s *SQLiteStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error
 		return false, err
 	}
 	var released bool
-	err := retryOnBusy(func() error {
-		ctx := context.Background()
+	err := s.retryWrite(func(ctx context.Context) error {
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("sqlite release-if-current: begin tx: %w", err)
@@ -1476,33 +1571,35 @@ func (s *SQLiteStore) List(query ListQuery) ([]Bead, error) {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
 	sqlText, args := sqliteListSQL(query, s.sqliteBeadProjection())
-	rows, err := s.readDB.QueryContext(context.Background(), sqlText, args...)
-	if err != nil {
-		return nil, fmt.Errorf("listing sqlite beads: %w", err)
-	}
-	defer rows.Close() //nolint:errcheck
-	var result []Bead
-	for rows.Next() {
-		b, err := scanSQLiteBead(rows)
+	return sqliteRead(s, func(ctx context.Context) ([]Bead, error) {
+		rows, err := s.readDB.QueryContext(ctx, sqlText, args...)
 		if err != nil {
 			return nil, fmt.Errorf("listing sqlite beads: %w", err)
 		}
-		if !query.Matches(b) {
-			continue
+		defer rows.Close() //nolint:errcheck
+		var result []Bead
+		for rows.Next() {
+			b, err := scanSQLiteBead(rows)
+			if err != nil {
+				return nil, fmt.Errorf("listing sqlite beads: %w", err)
+			}
+			if !query.Matches(b) {
+				continue
+			}
+			result = append(result, b)
 		}
-		result = append(result, b)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("listing sqlite beads: %w", err)
-	}
-	sortBeadsForQuery(result, query.Sort)
-	if query.Limit > 0 && len(result) > query.Limit {
-		result = result[:query.Limit]
-	}
-	if err := hydrateSQLiteDeps(context.Background(), s.readDB, result); err != nil {
-		return nil, fmt.Errorf("listing sqlite beads: %w", err)
-	}
-	return result, nil
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("listing sqlite beads: %w", err)
+		}
+		sortBeadsForQuery(result, query.Sort)
+		if query.Limit > 0 && len(result) > query.Limit {
+			result = result[:query.Limit]
+		}
+		if err := hydrateSQLiteDeps(ctx, s.readDB, result); err != nil {
+			return nil, fmt.Errorf("listing sqlite beads: %w", err)
+		}
+		return result, nil
+	})
 }
 
 func sqliteListSQL(q ListQuery, projection string) (string, []any) {
@@ -1643,47 +1740,52 @@ func (s *SQLiteStore) ListOpen(status ...string) ([]Bead, error) {
 // Ready returns open, unblocked actionable beads from the requested tier in
 // the canonical (priority, created_at, id) ready order.
 func (s *SQLiteStore) Ready(query ...ReadyQuery) ([]Bead, error) {
-	return s.ReadyContext(context.Background(), query...)
+	var none context.Context
+	return s.ReadyContext(none, query...)
 }
 
 // ReadyContext implements ContextReadyReader for the SQLite store. The context
 // reaches the driver, which interrupts an in-flight statement on cancellation,
 // and the decode loop rechecks it per row, so a slow scan stops instead of
-// running to completion behind an abandoned caller. Cancellation always
-// surfaces as ctx.Err() — never as an empty result — so a deadline-sensitive
-// caller can tell "nothing is ready" from "we never finished looking".
+// running to completion behind an abandoned caller. A caller's cancellation
+// always surfaces as ctx.Err(), and the store's own operation deadline as
+// ErrStoreTimeout wrapping context.DeadlineExceeded — never as an empty result
+// — so a deadline-sensitive caller can tell "nothing is ready" from "we never
+// finished looking".
 func (s *SQLiteStore) ReadyContext(ctx context.Context, query ...ReadyQuery) ([]Bead, error) {
 	if err := s.ensureOpen(); err != nil {
 		return nil, err
 	}
-	if ctx == nil {
-		ctx = context.Background()
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	rows, err := s.readyRows(ctx, readyQueryFromArgs(query))
-	if err != nil {
-		return rows, err
-	}
-	if err := hydrateSQLiteDeps(ctx, s.readDB, rows); err != nil {
-		return nil, fmt.Errorf("listing sqlite ready beads: %w", err)
-	}
-	return rows, nil
+	q := readyQueryFromArgs(query)
+	return sqliteReadUnder(ctx, s, func(opCtx context.Context) ([]Bead, error) {
+		// The operation deadline needs no per-row check: the driver closes the
+		// rows when opCtx ends, and rows.Err reports why. Only a caller context
+		// that can be canceled is polled, so an uncancellable one costs nothing.
+		stop := func() error { return nil }
+		if ctx != nil && ctx.Done() != nil {
+			stop = ctx.Err
+		}
+		rows, err := s.readyRows(opCtx, stop, q)
+		if err != nil {
+			return nil, err
+		}
+		if err := hydrateSQLiteDeps(opCtx, s.readDB, rows); err != nil {
+			return nil, fmt.Errorf("listing sqlite ready beads: %w", err)
+		}
+		return rows, nil
+	})
 }
 
 // readyRows is the single ready read shared by Ready and ReadyContext, so both
-// answer identically for a live context.
-func (s *SQLiteStore) readyRows(ctx context.Context, q ReadyQuery) ([]Bead, error) {
-	// An uncancellable context can never fail a check; skip the per-row
-	// ctx.Err() calls entirely on the Ready fast path.
-	cancellable := ctx.Done() != nil
-	contextErr := func() error {
-		if !cancellable {
-			return nil
-		}
-		return ctx.Err()
-	}
+// answer identically for a live context. ctx is the operation context, which the
+// driver enforces; stop is the per-row check of the caller's own context.
+func (s *SQLiteStore) readyRows(ctx context.Context, stop func() error, q ReadyQuery) ([]Bead, error) {
+	contextErr := stop
 
 	sqlText, args := sqliteReadySQL(q, s.sqliteBeadProjection())
 	rows, err := s.readDB.QueryContext(ctx, sqlText, args...)
@@ -1911,6 +2013,11 @@ func (s *SQLiteStore) GetLocalString(id, key string) (string, error) {
 // runs at most once: an error from fn or from the commit is returned without
 // running fn again. Under contention fn can start well after Tx is called, so
 // state read before Tx may have changed by the time fn runs.
+//
+// The whole transaction (begin, retries, fn, commit) runs under one operation
+// deadline, and fn's store calls carry it: once it passes they fail, and Tx
+// returns an error matching ErrStoreTimeout, the context error and whatever fn
+// returned. fn that never calls the store is not interrupted.
 func (s *SQLiteStore) Tx(_ string, fn func(tx Tx) error) error {
 	if err := s.ensureOpen(); err != nil {
 		return err
@@ -1918,23 +2025,26 @@ func (s *SQLiteStore) Tx(_ string, fn func(tx Tx) error) error {
 	if fn == nil {
 		return errors.New("beads tx: nil callback")
 	}
-	ctx := context.Background()
+	var none context.Context
+	ctx, cancel := s.opContext(none)
+	defer cancel()
+	mapped := func(err error) error { return mapStoreTimeout(ctx, none, err) }
 	var tx *sql.Tx
-	if err := retryOnBusy(func() error {
+	if err := retryOnBusy(ctx, func() error {
 		var err error
 		if tx, err = s.db.BeginTx(ctx, nil); err != nil {
 			return fmt.Errorf("sqlite tx: begin: %w", err)
 		}
 		return nil
 	}); err != nil {
-		return err
+		return mapped(err)
 	}
 	defer tx.Rollback() //nolint:errcheck
 	if err := fn(&sqliteStoreTx{store: s, ctx: ctx, tx: tx}); err != nil {
-		return err
+		return mapped(err)
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("sqlite tx: commit: %w", err)
+		return mapped(fmt.Errorf("sqlite tx: commit: %w", err))
 	}
 	return nil
 }
@@ -2035,29 +2145,39 @@ func (t *sqliteStoreTx) Close(id string) error {
 
 // Delete permanently removes a bead and its indexed rows.
 func (s *SQLiteStore) Delete(id string) error {
+	var none context.Context
+	return s.deleteWithin(none, id)
+}
+
+// deleteWithin is Delete under the caller's context, which a cancel ends
+// without the store's timeout mark; the retention sweeper passes its own so
+// CloseStore interrupts a delete in flight. The local-strings cleanup after
+// the commit takes no context and never returns ErrStoreTimeout: the row is
+// already gone.
+func (s *SQLiteStore) deleteWithin(parent context.Context, id string) error {
 	if err := s.ensureOpen(); err != nil {
 		return err
 	}
-	if err := retryOnBusy(func() error {
-		tx, err := s.db.BeginTx(context.Background(), nil)
+	if err := s.retryWriteUnder(parent, func(ctx context.Context) error {
+		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("sqlite delete: begin tx: %w", err)
 		}
 		defer tx.Rollback() //nolint:errcheck
-		res, err := tx.Exec(`DELETE FROM beads WHERE id=?`, id)
+		res, err := tx.ExecContext(ctx, `DELETE FROM beads WHERE id=?`, id)
 		if err != nil {
 			return fmt.Errorf("deleting bead %q: %w", id, err)
 		}
 		if n, _ := res.RowsAffected(); n == 0 {
 			return fmt.Errorf("deleting bead %q: %w", id, ErrNotFound)
 		}
-		if err := s.clearClaimFenceTx(context.Background(), tx, id); err != nil {
+		if err := s.clearClaimFenceTx(ctx, tx, id); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`DELETE FROM deps WHERE issue_id=? OR depends_on_id=?`, id, id); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM deps WHERE issue_id=? OR depends_on_id=?`, id, id); err != nil {
 			return fmt.Errorf("deleting bead %q deps: %w", id, err)
 		}
-		if err := s.clearGraphEdgeMetadataForBeadsTx(context.Background(), tx, []string{id}); err != nil {
+		if err := s.clearGraphEdgeMetadataForBeadsTx(ctx, tx, []string{id}); err != nil {
 			return err
 		}
 		return tx.Commit()
@@ -2075,13 +2195,13 @@ func (s *SQLiteStore) DepAdd(issueID, dependsOnID, depType string) error {
 	if err := s.ensureOpen(); err != nil {
 		return err
 	}
-	return retryOnBusy(func() error {
-		tx, err := s.db.BeginTx(context.Background(), nil)
+	return s.retryWrite(func(ctx context.Context) error {
+		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("sqlite dep add: begin tx: %w", err)
 		}
 		defer tx.Rollback() //nolint:errcheck
-		if err := s.depAddTx(context.Background(), tx, issueID, dependsOnID, depType); err != nil {
+		if err := s.depAddTx(ctx, tx, issueID, dependsOnID, depType); err != nil {
 			return err
 		}
 		return tx.Commit()
@@ -2097,13 +2217,13 @@ func (s *SQLiteStore) DepAddWithMetadata(issueID, dependsOnID, depType, metadata
 	if err := s.ensureOpen(); err != nil {
 		return err
 	}
-	return retryOnBusy(func() error {
-		tx, err := s.db.BeginTx(context.Background(), nil)
+	return s.retryWrite(func(ctx context.Context) error {
+		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("sqlite dep add with metadata: begin tx: %w", err)
 		}
 		defer tx.Rollback() //nolint:errcheck
-		if err := s.depAddWithMetadataTx(context.Background(), tx, issueID, dependsOnID, depType, metadata); err != nil {
+		if err := s.depAddWithMetadataTx(ctx, tx, issueID, dependsOnID, depType, metadata); err != nil {
 			return err
 		}
 		return tx.Commit()
@@ -2165,8 +2285,7 @@ func (s *SQLiteStore) DepRemove(issueID, dependsOnID string) error {
 	if err := s.ensureOpen(); err != nil {
 		return err
 	}
-	return retryOnBusy(func() error {
-		ctx := context.Background()
+	return s.retryWrite(func(ctx context.Context) error {
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("sqlite dep remove: begin tx: %w", err)
@@ -2191,22 +2310,24 @@ func (s *SQLiteStore) DepList(id, direction string) ([]Dep, error) {
 	if direction == "up" {
 		col = "depends_on_id"
 	}
-	rows, err := s.readDB.QueryContext(context.Background(),
-		`SELECT issue_id, depends_on_id, dep_type FROM deps WHERE `+col+`=?`,
-		id)
-	if err != nil {
-		return nil, fmt.Errorf("listing dependencies for %q: %w", id, err)
-	}
-	defer rows.Close() //nolint:errcheck
-	var out []Dep
-	for rows.Next() {
-		var d Dep
-		if err := rows.Scan(&d.IssueID, &d.DependsOnID, &d.Type); err != nil {
-			return nil, err
+	return sqliteRead(s, func(ctx context.Context) ([]Dep, error) {
+		rows, err := s.readDB.QueryContext(ctx,
+			`SELECT issue_id, depends_on_id, dep_type FROM deps WHERE `+col+`=?`,
+			id)
+		if err != nil {
+			return nil, fmt.Errorf("listing dependencies for %q: %w", id, err)
 		}
-		out = append(out, d)
-	}
-	return out, rows.Err()
+		defer rows.Close() //nolint:errcheck
+		var out []Dep
+		for rows.Next() {
+			var d Dep
+			if err := rows.Scan(&d.IssueID, &d.DependsOnID, &d.Type); err != nil {
+				return nil, err
+			}
+			out = append(out, d)
+		}
+		return out, rows.Err()
+	})
 }
 
 func (s *SQLiteStore) startRetentionSweeper() {
@@ -2227,7 +2348,7 @@ func (s *SQLiteStore) startRetentionSweeper() {
 		for {
 			select {
 			case <-ticker.C:
-				_, _ = s.purgeTerminal(context.Background(), s.retentionPeriod)
+				_, _ = s.purgeTerminal(ctx, s.retentionPeriod)
 			case <-ctx.Done():
 				return
 			}
@@ -2235,6 +2356,10 @@ func (s *SQLiteStore) startRetentionSweeper() {
 	}()
 }
 
+// purgeTerminal deletes up to 1000 terminal beads older than olderThan, one
+// transaction each. It checks ctx between deletes and passes it into each, so
+// canceling it stops the purge after at most the delete in flight, which is
+// interrupted and rolled back.
 func (s *SQLiteStore) purgeTerminal(ctx context.Context, olderThan time.Duration) (int, error) {
 	if olderThan <= 0 {
 		return 0, nil
@@ -2264,7 +2389,10 @@ func (s *SQLiteStore) purgeTerminal(ctx context.Context, olderThan time.Duration
 		return 0, err
 	}
 	for _, id := range ids {
-		if err := s.Delete(id); err != nil && !errors.Is(err, ErrNotFound) {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		if err := s.deleteWithin(ctx, id); err != nil && !errors.Is(err, ErrNotFound) {
 			return 0, err
 		}
 	}

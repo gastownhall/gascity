@@ -28,7 +28,8 @@ func (s *SQLiteStore) GuardedBatcherHandle() (GuardedBatcher, bool) {
 // every transaction with BEGIN IMMEDIATE, so the write lock is held from the
 // first guard read to the commit, and an item that refuses rolls back every
 // item before it. A busy database re-runs the whole transaction from fresh
-// reads (retryOnBusy).
+// reads (retryOnBusy). The whole call runs under the store's operation
+// deadline as well as ctx; a caller cancel returns ctx.Err() unmarked.
 func (s *SQLiteStore) ApplyGuarded(ctx context.Context, b GuardedBatch) (GuardedResult, error) {
 	if err := s.ensureOpen(); err != nil {
 		return GuardedResult{}, err
@@ -54,9 +55,9 @@ func (s *SQLiteStore) ApplyGuarded(ctx context.Context, b GuardedBatch) (Guarded
 		}
 	}
 	var res GuardedResult
-	err := retryOnBusy(func() error {
+	err := s.retryWriteUnder(ctx, func(opCtx context.Context) error {
 		var err error
-		res, err = s.applyGuardedOnce(ctx, b)
+		res, err = s.applyGuardedOnce(opCtx, b)
 		return err
 	})
 	if err != nil {

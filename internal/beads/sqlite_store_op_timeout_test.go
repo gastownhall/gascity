@@ -2,6 +2,7 @@ package beads
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -48,9 +49,9 @@ func holdSQLiteWriterConn(t *testing.T, store *SQLiteStore) (release func()) {
 	return release
 }
 
-// holdSQLiteReaderConns takes every connection of the read pool and returns
-// the function that gives them back.
-func holdSQLiteReaderConns(t *testing.T, store *SQLiteStore) (release func()) {
+// holdSQLiteReaderConns takes every connection of the read pool and gives them
+// back when the test ends.
+func holdSQLiteReaderConns(t *testing.T, store *SQLiteStore) {
 	t.Helper()
 	var conns []interface{ Close() error }
 	for i := 0; i < sqliteReadPoolSize; i++ {
@@ -60,13 +61,17 @@ func holdSQLiteReaderConns(t *testing.T, store *SQLiteStore) (release func()) {
 		}
 		conns = append(conns, conn)
 	}
-	release = sync.OnceFunc(func() {
+	t.Cleanup(func() {
 		for _, c := range conns {
 			_ = c.Close()
 		}
 	})
-	t.Cleanup(release)
-	return release
+}
+
+// sameError reports whether got is want itself or an error with its exact
+// message that wraps it: an unchanged pass-through, not a re-marked one.
+func sameError(got, want error) bool {
+	return errors.Is(got, want) && got.Error() == want.Error()
 }
 
 // dumpSQLiteRows renders every row of the beads and deps tables, so a test can
@@ -124,11 +129,11 @@ func requireStoreTimeout(t *testing.T, what string, err error) {
 func slowDeleteTrigger(t *testing.T, store *SQLiteStore, id string) {
 	t.Helper()
 	for _, stmt := range []string{
-		`CREATE VIEW sqlite_test_slow AS
+		`CREATE VIEW gc_test_slow AS
 			WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 4000000000)
 			SELECT count(*) AS n FROM c`,
-		`CREATE TRIGGER sqlite_test_slow_delete AFTER DELETE ON beads WHEN old.id = '` + id + `'
-			BEGIN SELECT n FROM sqlite_test_slow; END`,
+		`CREATE TRIGGER gc_test_slow_delete AFTER DELETE ON beads WHEN old.id = '` + id + `'
+			BEGIN SELECT n FROM gc_test_slow; END`,
 	} {
 		if _, err := store.db.Exec(stmt); err != nil {
 			t.Fatalf("installing the slow-delete trigger: %v", err)
@@ -295,7 +300,7 @@ func TestSQLiteStoreCallerCancelPassesThroughUnmarked(t *testing.T) {
 	if _, err := store.ApplyGraphPlan(canceled, plan); !errors.Is(err, context.Canceled) || errors.Is(err, ErrStoreTimeout) {
 		t.Errorf("ApplyGraphPlan(canceled ctx) = %v, want context.Canceled and not ErrStoreTimeout", err)
 	}
-	if _, err := store.ReadyContext(canceled); err != context.Canceled {
+	if _, err := store.ReadyContext(canceled); !sameError(err, context.Canceled) {
 		t.Errorf("ReadyContext(canceled ctx) = %v, want context.Canceled unchanged", err)
 	}
 
@@ -373,7 +378,7 @@ func TestSQLiteOpContextHelpers(t *testing.T) {
 		if got := mapStoreTimeout(live, live, nil); got != nil {
 			t.Errorf("nil error mapped to %v", got)
 		}
-		if got := mapStoreTimeout(live, live, busy); got != busy {
+		if got := mapStoreTimeout(live, live, busy); !sameError(got, busy) {
 			t.Errorf("live op ctx mapped %v to %v, want it unchanged", busy, got)
 		}
 		opCtx, parent := expired()
@@ -386,11 +391,11 @@ func TestSQLiteOpContextHelpers(t *testing.T) {
 			t.Errorf("mapped error %v lost the original %v", got, busy)
 		}
 		opCtx, parent = canceledParent()
-		if got := mapStoreTimeout(opCtx, parent, busy); got != busy {
+		if got := mapStoreTimeout(opCtx, parent, busy); !sameError(got, busy) {
 			t.Errorf("caller cancel mapped %v to %v, want it unchanged (the op ctx is done too, but the parent ended it)", busy, got)
 		}
 		opCtx, parent = deadlinedParent()
-		if got := mapStoreTimeout(opCtx, parent, busy); got != busy || errors.Is(got, ErrStoreTimeout) {
+		if got := mapStoreTimeout(opCtx, parent, busy); !sameError(got, busy) || errors.Is(got, ErrStoreTimeout) {
 			t.Errorf("caller deadline mapped %v to %v, want it unchanged and never the sentinel", busy, got)
 		}
 	})
@@ -501,7 +506,7 @@ func TestSQLiteRetryOnBusyStopsWithItsContext(t *testing.T) {
 		if calls != 1 {
 			t.Errorf("fn ran %d times after the ctx ended, want 1", calls)
 		}
-		if err != busyErr {
+		if !sameError(err, busyErr) {
 			t.Errorf("early stop returned %v, want the last error %v unchanged", err, busyErr)
 		}
 		if errors.Is(err, ErrSQLiteBusyExhausted) {
@@ -594,16 +599,14 @@ func TestSQLiteStoreCloseStoreStopsAPurgeAfterOneDelete(t *testing.T) {
 		}
 	}
 	slow := ids[2]
+	// The schema check at open refuses a database that holds a trigger, so the
+	// trigger goes in after the open and the sweeper starts only once it is in.
 	slowDeleteTrigger(t, seed, slow)
-	if err := seed.CloseStore(); err != nil {
-		t.Fatalf("closing the seeding store: %v", err)
-	}
-
-	opened, err := OpenSQLiteStore(dir, WithSQLiteStoreRetention(time.Hour, 10*time.Millisecond))
-	if err != nil {
-		t.Fatalf("reopening with the sweeper: %v", err)
-	}
-	store := opened.(*SQLiteStore)
+	seed.retentionPeriod = time.Hour
+	seed.retentionSweepInterval = 10 * time.Millisecond
+	seed.disableRetentionSweeper = false
+	seed.startRetentionSweeper()
+	store := seed
 	gone := func(id string) bool {
 		_, err := store.Get(id)
 		return errors.Is(err, ErrNotFound)
@@ -611,7 +614,7 @@ func TestSQLiteStoreCloseStoreStopsAPurgeAfterOneDelete(t *testing.T) {
 	// The sweeper deletes the two ids before the slow one, then sits in the
 	// slow delete; spin (no fixed sleep) until it has got there.
 	deadline := time.Now().Add(30 * time.Second)
-	for !(gone(ids[0]) && gone(ids[1])) {
+	for !gone(ids[0]) || !gone(ids[1]) {
 		if time.Now().After(deadline) {
 			t.Fatal("the sweeper never reached the slow delete")
 		}
@@ -629,6 +632,18 @@ func TestSQLiteStoreCloseStoreStopsAPurgeAfterOneDelete(t *testing.T) {
 		t.Fatal("CloseStore did not return: it is waiting for the whole purge, not one delete")
 	}
 
+	raw, err := sql.Open("sqlite", filepath.Join(dir, "beads.sqlite"))
+	if err != nil {
+		t.Fatalf("opening the file to drop the slow-delete trigger: %v", err)
+	}
+	for _, stmt := range []string{`DROP TRIGGER gc_test_slow_delete`, `DROP VIEW gc_test_slow`} {
+		if _, err := raw.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("closing the raw handle: %v", err)
+	}
 	reopened, err := OpenSQLiteStore(dir)
 	if err != nil {
 		t.Fatalf("reopening to inspect: %v", err)

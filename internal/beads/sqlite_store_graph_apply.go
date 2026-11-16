@@ -103,7 +103,7 @@ func (s *SQLiteStore) ApplyGraphPlanWithStorage(ctx context.Context, plan *Graph
 	// origKeyToID) rather than mutating shared state across attempts.
 	origStaged := staged
 	origKeyToID := result.IDs
-	err = retryOnBusy(func() error {
+	err = s.retryWriteUnder(ctx, func(ctx context.Context) error {
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("sqlite graph apply: begin tx: %w", err)
@@ -244,8 +244,21 @@ func (s *SQLiteStore) DepMetadata(issueID, dependsOnID string) (string, bool, er
 	if err := s.ensureOpen(); err != nil {
 		return "", false, err
 	}
+	type carried struct {
+		metadata string
+		ok       bool
+	}
+	got, err := sqliteRead(s, func(ctx context.Context) (carried, error) {
+		metadata, ok, err := s.depMetadata(ctx, issueID, dependsOnID)
+		return carried{metadata, ok}, err
+	})
+	return got.metadata, got.ok, err
+}
+
+// depMetadata is DepMetadata's read under the caller's operation context.
+func (s *SQLiteStore) depMetadata(ctx context.Context, issueID, dependsOnID string) (string, bool, error) {
 	var depType string
-	err := s.readDB.QueryRowContext(context.Background(), `
+	err := s.readDB.QueryRowContext(ctx, `
 		SELECT dep_type FROM deps WHERE issue_id=? AND depends_on_id=?`, issueID, dependsOnID,
 	).Scan(&depType)
 	if err != nil {
@@ -255,7 +268,7 @@ func (s *SQLiteStore) DepMetadata(issueID, dependsOnID string) (string, bool, er
 		return "", false, fmt.Errorf("reading Graph dependency metadata type %s -> %s: %w", issueID, dependsOnID, err)
 	}
 	var metadata string
-	err = s.readDB.QueryRowContext(context.Background(), `SELECT value FROM kv WHERE key=?`, sqliteGraphEdgeMetadataKey(issueID, dependsOnID, depType)).Scan(&metadata)
+	err = s.readDB.QueryRowContext(ctx, `SELECT value FROM kv WHERE key=?`, sqliteGraphEdgeMetadataKey(issueID, dependsOnID, depType)).Scan(&metadata)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", false, nil

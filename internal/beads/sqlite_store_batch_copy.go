@@ -30,8 +30,7 @@ func (s *SQLiteStore) CreateWithForeignIDBatch(rows []Bead) error {
 	if len(rows) == 0 {
 		return nil
 	}
-	return retryOnBusy(func() error {
-		ctx := context.Background()
+	return s.retryWrite(func(ctx context.Context) error {
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("sqlite batch create: begin tx: %w", err)
@@ -73,8 +72,7 @@ func (s *SQLiteStore) DepAddBatch(edges []DepWithPayload) error {
 	if len(edges) == 0 {
 		return nil
 	}
-	return retryOnBusy(func() error {
-		ctx := context.Background()
+	return s.retryWrite(func(ctx context.Context) error {
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("sqlite batch dep add: begin tx: %w", err)
@@ -98,8 +96,7 @@ func (s *SQLiteStore) DepRemoveBatch(pairs []DepPair) error {
 	if len(pairs) == 0 {
 		return nil
 	}
-	return retryOnBusy(func() error {
-		ctx := context.Background()
+	return s.retryWrite(func(ctx context.Context) error {
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("sqlite batch dep remove: begin tx: %w", err)
@@ -125,11 +122,19 @@ func (s *SQLiteStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 	if err := s.ensureOpen(); err != nil {
 		return nil, err
 	}
+	return sqliteRead(s, func(ctx context.Context) (map[string][]Dep, error) {
+		return s.depListBatch(ctx, ids)
+	})
+}
+
+// depListBatch is DepListBatch's read under the caller's operation context, so
+// DepMetadataBatch can run its edge read and sidecar read under one deadline.
+func (s *SQLiteStore) depListBatch(ctx context.Context, ids []string) (map[string][]Dep, error) {
 	out := make(map[string][]Dep, len(ids))
 	for start := 0; start < len(ids); start += sqliteBatchQueryChunk {
 		chunk := ids[start:min(start+sqliteBatchQueryChunk, len(ids))]
 		args, in := sqliteInList(chunk)
-		held, err := s.readDB.QueryContext(context.Background(), `SELECT id FROM beads WHERE id IN (`+in+`)`, args...)
+		held, err := s.readDB.QueryContext(ctx, `SELECT id FROM beads WHERE id IN (`+in+`)`, args...)
 		if err != nil {
 			return nil, fmt.Errorf("listing the dep edges of %d anchor(s): %w", len(chunk), err)
 		}
@@ -145,7 +150,7 @@ func (s *SQLiteStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 			return nil, fmt.Errorf("listing the dep edges of %d anchor(s): %w", len(chunk), err)
 		}
 	}
-	edges, err := sqliteDepsFor(context.Background(), s.readDB, slices.Sorted(maps.Keys(out)))
+	edges, err := sqliteDepsFor(ctx, s.readDB, slices.Sorted(maps.Keys(out)))
 	if err != nil {
 		return nil, fmt.Errorf("listing the dep edges of %d anchor(s): %w", len(out), err)
 	}
@@ -159,7 +164,17 @@ func (s *SQLiteStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 // anchors: their edges, then their sidecars, under the type each edge has
 // now, exactly as DepMetadata reads one. It satisfies DepMetadataBatchReader.
 func (s *SQLiteStore) DepMetadataBatch(ids []string) (map[DepPair]string, error) {
-	edges, err := s.DepListBatch(ids)
+	if err := s.ensureOpen(); err != nil {
+		return nil, err
+	}
+	return sqliteRead(s, func(ctx context.Context) (map[DepPair]string, error) {
+		return s.depMetadataBatch(ctx, ids)
+	})
+}
+
+// depMetadataBatch is DepMetadataBatch under the caller's operation context.
+func (s *SQLiteStore) depMetadataBatch(ctx context.Context, ids []string) (map[DepPair]string, error) {
+	edges, err := s.depListBatch(ctx, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +195,7 @@ func (s *SQLiteStore) DepMetadataBatch(ids []string) (map[DepPair]string, error)
 	for start := 0; start < len(all); start += sqliteBatchQueryChunk {
 		chunk := all[start:min(start+sqliteBatchQueryChunk, len(all))]
 		args, in := sqliteInList(chunk)
-		rows, err := s.readDB.QueryContext(context.Background(), `SELECT key, value FROM kv WHERE key IN (`+in+`)`, args...)
+		rows, err := s.readDB.QueryContext(ctx, `SELECT key, value FROM kv WHERE key IN (`+in+`)`, args...)
 		if err != nil {
 			return nil, fmt.Errorf("reading Graph dependency metadata of %d edge(s): %w", len(chunk), err)
 		}

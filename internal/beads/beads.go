@@ -68,6 +68,19 @@ var ErrStoreClosed = errors.New("bead store closed")
 // BUSY. The error's message stays the driver's.
 var ErrSQLiteBusyExhausted = errors.New("sqlite busy retries exhausted")
 
+// ErrStoreTimeout marks a SQLiteStore operation that gave up because the
+// store's own operation deadline passed (WithSQLiteStoreOpTimeout; 60 s unless
+// set), as distinct from a caller's cancel or deadline, which surfaces
+// unmarked. An error that carries it also matches the context error that ended
+// the operation (context.DeadlineExceeded) and the error the operation was
+// holding when it stopped. Like ErrSQLiteBusyExhausted, a write that carries
+// it committed nothing: the commit is the last step under the deadline, a
+// commit that has begun is not interrupted and reports success, and every step
+// after it runs without the deadline. An error that wraps only
+// context.DeadlineExceeded, from a store that cannot say so, proves no such
+// thing. Check with errors.Is.
+var ErrStoreTimeout = errors.New("bead store operation timed out")
+
 // ErrStoreUnavailable marks a bead-store read whose answer is unknown because
 // the store could not be reached, as distinct from a store that answered with
 // no rows. Consumers must treat it as "unknown", never as "empty". Its producer

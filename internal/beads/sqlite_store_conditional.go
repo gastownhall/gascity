@@ -155,13 +155,13 @@ func (s *SQLiteStore) DeleteIfMatch(id string, expectedRevision int64) error {
 		return err
 	}
 	if err := s.conditionalWrite(id, expectedRevision, func(ctx context.Context, tx *sql.Tx, _ Bead) error {
-		if _, err := tx.Exec(`DELETE FROM beads WHERE id=?`, id); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM beads WHERE id=?`, id); err != nil {
 			return fmt.Errorf("deleting bead %q: %w", id, err)
 		}
-		if err := s.clearClaimFenceTx(context.Background(), tx, id); err != nil {
+		if err := s.clearClaimFenceTx(ctx, tx, id); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`DELETE FROM deps WHERE issue_id=? OR depends_on_id=?`, id, id); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM deps WHERE issue_id=? OR depends_on_id=?`, id, id); err != nil {
 			return fmt.Errorf("deleting bead %q deps: %w", id, err)
 		}
 		if err := s.clearGraphEdgeMetadataForBeadsTx(ctx, tx, []string{id}); err != nil {
@@ -189,9 +189,8 @@ func (s *SQLiteStore) CompareAndSetMetadataKey(id, key, expected, next string) (
 		return false, ErrConditionalWriteUnsupported
 	}
 	swapped := false
-	err := retryOnBusy(func() error {
+	err := s.retryWrite(func(ctx context.Context) error {
 		swapped = false
-		ctx := context.Background()
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("sqlite compare-and-set: begin tx: %w", err)
@@ -237,8 +236,7 @@ func (s *SQLiteStore) conditionalWrite(id string, expectedRevision int64, apply 
 	if !s.hasRevisionColumn {
 		return ErrConditionalWriteUnsupported
 	}
-	return retryOnBusy(func() error {
-		ctx := context.Background()
+	return s.retryWrite(func(ctx context.Context) error {
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("sqlite conditional write: begin tx: %w", err)
@@ -317,8 +315,7 @@ func (s *SQLiteStore) DeleteBatch(ids []string) error {
 }
 
 func (s *SQLiteStore) deleteBatchChunk(chunk []string) error {
-	return retryOnBusy(func() error {
-		ctx := context.Background()
+	return s.retryWrite(func(ctx context.Context) error {
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("sqlite delete batch: begin tx: %w", err)
