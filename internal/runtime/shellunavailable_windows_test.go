@@ -74,6 +74,7 @@ func TestShellCommandUnavailableRefusesPosixShellPrograms(t *testing.T) {
 		"function f\n{ bash -c harmless }",
 		"@{ a=bash }",
 		"@{a=sh}",
+		`& C:\x\script"$v".sh`,
 	}
 	for _, command := range refused {
 		if reason := ShellCommandUnavailable(command); !strings.Contains(reason, "POSIX shell") {
@@ -111,6 +112,20 @@ func TestShellCommandUnavailableRefusesPosixShellPrograms(t *testing.T) {
 	for _, command := range allowed {
 		if reason := ShellCommandUnavailable(command); reason != "" {
 			t.Errorf("ShellCommandUnavailable(%q) = %q, want \"\"", command, reason)
+		}
+	}
+}
+
+// TestShellCommandProgramsRefusesScopeForExpandableCommandWords pins that a
+// command word holding an expandable quoted part leaves the scope unresolved.
+func TestShellCommandProgramsRefusesScopeForExpandableCommandWords(t *testing.T) {
+	for _, command := range []string{
+		`& agent"$suffix"`,
+		`agent"$suffix" -x`,
+		`& agent"$(x)"`,
+	} {
+		if scope := ShellCommandPrograms(command); scope != nil {
+			t.Errorf("ShellCommandPrograms(%q) = %q, want nil", command, scope)
 		}
 	}
 }

@@ -237,13 +237,18 @@ func scanPowerShellCommand(command string) *psScan {
 			p.i++
 			call = true
 		default:
-			word := p.readBareWord()
+			word, dynamic := p.readBareWord()
 			if word == "" {
 				p.i++
 				atCmd = false
 				continue
 			}
 			if !atCmd && !wasCall || p.top() == 's' {
+				atCmd = false
+				continue
+			}
+			if dynamic {
+				p.dynamicProgram(word)
 				atCmd = false
 				continue
 			}
@@ -269,7 +274,7 @@ func (p *psScan) keyword(word string) (atCmd bool, ok bool) {
 	case "function", "filter", "workflow", "configuration":
 		p.unresolved = true // the script may shadow any program name
 		p.skipSpace()
-		p.readBareWord()
+		_, _ = p.readBareWord()
 		p.blockAt = len(p.frames)
 		return false, true
 	case "begin", "process", "end", "dynamicparam", "clean":
@@ -396,8 +401,10 @@ func (p *psScan) peekString() (value string, static bool, sub bool) {
 }
 
 // readBareWord reads an unquoted command word, resolving backtick escapes and
-// joining embedded static quoted parts as PowerShell does.
-func (p *psScan) readBareWord() string {
+// joining embedded static quoted parts as PowerShell does. It reports whether
+// the word holds an expandable quoted part, whose raw source text it keeps; a
+// part with a $( subexpression ends the word unconsumed.
+func (p *psScan) readBareWord() (word string, dynamic bool) {
 	var b strings.Builder
 	for p.i < len(p.s) && strings.IndexByte(" \t\v\f\r\n;|&(){}>", p.s[p.i]) < 0 && (p.s[p.i] != '=' || p.top() != 't') {
 		switch c := p.s[p.i]; {
@@ -405,9 +412,17 @@ func (p *psScan) readBareWord() string {
 			b.WriteString(backtickEscape(p.s[p.i+1]))
 			p.i += 2
 		case c == '\'' || c == '"':
+			start := p.i
 			value, static, sub := p.peekString()
-			if !static || sub {
-				return b.String()
+			if sub {
+				p.unresolved = true
+				return b.String(), true
+			}
+			if !static {
+				p.unresolved = true
+				dynamic = true
+				b.WriteString(p.s[start:p.i])
+				continue
 			}
 			b.WriteString(value)
 		default:
@@ -415,7 +430,7 @@ func (p *psScan) readBareWord() string {
 			p.i++
 		}
 	}
-	return b.String()
+	return b.String(), dynamic
 }
 
 // readVariable reads $name, ${name} or $scope:name, plus any path text that
