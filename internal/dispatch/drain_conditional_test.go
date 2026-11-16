@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
@@ -109,7 +110,7 @@ func TestReserveDrainMemberCASContention(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			results[i] = reserveDrainMember(store, controls[i], member, ProcessOptions{})
+			results[i] = reserveDrainMember(beadstest.Graph(store), controls[i], member, ProcessOptions{Work: beadstest.Work(store)})
 		}()
 	}
 	wg.Wait()
@@ -145,7 +146,7 @@ func TestReserveDrainMemberCASReentryIsIdempotent(t *testing.T) {
 	store := newStampedDrainStore(t, gate.Auto)
 	control, member := newDrainReservationFixtures(t, store)
 	for i := range 2 {
-		if err := reserveDrainMember(store, control, member, ProcessOptions{}); err != nil {
+		if err := reserveDrainMember(beadstest.Graph(store), control, member, ProcessOptions{Work: beadstest.Work(store)}); err != nil {
 			t.Fatalf("reserve #%d: %v (re-entry must be success, not skip)", i+1, err)
 		}
 	}
@@ -159,7 +160,7 @@ func TestReserveDrainMemberRequireIncapableFailsClosed(t *testing.T) {
 	store.DisableConditionalWrites = true
 	control, member := newDrainReservationFixtures(t, store)
 
-	err := reserveDrainMember(store, control, member, ProcessOptions{})
+	err := reserveDrainMember(beadstest.Graph(store), control, member, ProcessOptions{Work: beadstest.Work(store)})
 	if !beads.IsConditionalWritesRequired(err) {
 		t.Fatalf("err = %v, want the typed require refusal", err)
 	}
@@ -239,7 +240,7 @@ func TestReleaseDrainReservationCAS(t *testing.T) {
 	t.Run("owner clears its own reservation", func(t *testing.T) {
 		store := newStampedDrainStore(t, gate.Auto)
 		control, member := newDrainReservationFixtures(t, store)
-		if err := reserveDrainMember(store, control, member, ProcessOptions{}); err != nil {
+		if err := reserveDrainMember(beadstest.Graph(store), control, member, ProcessOptions{Work: beadstest.Work(store)}); err != nil {
 			t.Fatalf("reserve: %v", err)
 		}
 		if err := releaseDrainReservation(store, "drain-a", member.ID); err != nil {
@@ -290,7 +291,7 @@ func TestSyncControlEpochToAttemptCASNeverRegresses(t *testing.T) {
 				errs[i] = getErr
 				return
 			}
-			errs[i] = syncControlEpochToAttempt(store, ctl, attempt)
+			errs[i] = syncControlEpochToAttempt(beadstest.Graph(store), ctl, attempt)
 		}()
 	}
 	wg.Wait()
@@ -345,7 +346,7 @@ func TestFenceLossClassifiesTransientAndKeepsControlOpen(t *testing.T) {
 	if !IsTransientControllerError(fenceLoss) {
 		t.Fatal("fence-loss error not classified transient")
 	}
-	if retryable := markControllerSpawnError(store, control.ID, fenceLoss, ProcessOptions{}); !retryable {
+	if retryable := markControllerSpawnError(beadstest.Graph(store), control.ID, fenceLoss, ProcessOptions{Work: beadstest.Work(store)}); !retryable {
 		t.Fatal("markControllerSpawnError treated the fence loss as hard")
 	}
 	after, err := store.Get(control.ID)

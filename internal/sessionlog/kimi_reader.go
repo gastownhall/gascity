@@ -174,12 +174,17 @@ func findKimiSessionFilesIn(root, workHash string) []kimiContextCandidate {
 	return findKimiSessionFilesInVisited(root, workHash, make(map[string]bool))
 }
 
+// findKimiSessionFilesInVisited builds every returned path from the caller's own
+// spelling of root, including through symlinked account roots below it. The
+// resolved form is only the visited key: ExtractKimiTailMetaFromSearchPaths
+// checks containment lexically, so a resolved path is rejected as outside the
+// configured search roots.
 func findKimiSessionFilesInVisited(root, workHash string, visited map[string]bool) []kimiContextCandidate {
-	root = canonicalKimiSessionRoot(root)
-	if root == "" || visited[root] {
+	canonical := canonicalKimiSessionRoot(root)
+	if canonical == "" || visited[canonical] {
 		return nil
 	}
-	visited[root] = true
+	visited[canonical] = true
 
 	workRoot := filepath.Join(root, workHash)
 	files := kimiContextFiles(workRoot)
@@ -192,11 +197,11 @@ func findKimiSessionFilesInVisited(root, workHash string, visited map[string]boo
 		if entry.Type()&os.ModeSymlink == 0 {
 			continue
 		}
-		resolved, err := filepath.EvalSymlinks(filepath.Join(root, entry.Name()))
-		if err != nil {
+		child := filepath.Join(root, entry.Name())
+		if _, err := filepath.EvalSymlinks(child); err != nil {
 			continue
 		}
-		files = append(files, findKimiSessionFilesInVisited(resolved, workHash, visited)...)
+		files = append(files, findKimiSessionFilesInVisited(child, workHash, visited)...)
 	}
 	return files
 }
@@ -205,12 +210,14 @@ func findKimiSessionFileByIDIn(root, workHash, sessionID string) string {
 	return findKimiSessionFileByIDInVisited(root, workHash, sessionID, make(map[string]bool))
 }
 
+// findKimiSessionFileByIDInVisited keeps the caller's spelling of root in the
+// returned path for the same reason as findKimiSessionFilesInVisited.
 func findKimiSessionFileByIDInVisited(root, workHash, sessionID string, visited map[string]bool) string {
-	root = canonicalKimiSessionRoot(root)
-	if root == "" || visited[root] {
+	canonical := canonicalKimiSessionRoot(root)
+	if canonical == "" || visited[canonical] {
 		return ""
 	}
-	visited[root] = true
+	visited[canonical] = true
 
 	path := kimiTranscriptPath(filepath.Join(root, workHash), sessionID)
 	info, err := os.Stat(path)
@@ -226,11 +233,11 @@ func findKimiSessionFileByIDInVisited(root, workHash, sessionID string, visited 
 		if entry.Type()&os.ModeSymlink == 0 {
 			continue
 		}
-		resolved, err := filepath.EvalSymlinks(filepath.Join(root, entry.Name()))
-		if err != nil {
+		child := filepath.Join(root, entry.Name())
+		if _, err := filepath.EvalSymlinks(child); err != nil {
 			continue
 		}
-		if path := findKimiSessionFileByIDInVisited(resolved, workHash, sessionID, visited); path != "" {
+		if path := findKimiSessionFileByIDInVisited(child, workHash, sessionID, visited); path != "" {
 			return path
 		}
 	}

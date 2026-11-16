@@ -5431,12 +5431,12 @@ func TestRouteMailCount_SixRowMatrix(t *testing.T) {
 	}
 }
 
-func TestRouteMailCheck_StaleBannerOver30s(t *testing.T) {
+func TestRouteMailCheck_CacheAgeFooterOnStderr(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
 	cityPath := writeMailTestCity(t)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("X-GC-Cache-Age-S", "45")
+		setBehindCacheHeaders(w)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
 			"items": []map[string]any{
@@ -5452,9 +5452,7 @@ func TestRouteMailCheck_StaleBannerOver30s(t *testing.T) {
 	if code := routeMailCheck(cityPath, []string{"mayor"}, false, "", c, "", &stdout, &stderr); code != 0 {
 		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "cache age:") {
-		t.Errorf("stdout missing stale banner:\n%s", stdout.String())
-	}
+	assertCacheAgeFooterOnStderr(t, stdout.String(), stderr.String())
 }
 
 func TestRouteMailCheckInjectUsesLocalPathForArchiveSideEffects(t *testing.T) {
@@ -5530,7 +5528,7 @@ func TestRenderMailCheckFromAPIInjectCodexUsesUserPromptSubmit(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	if code := renderMailCheckFromAPI(cr, "mayor", true, hookOutputFormatCodex, &stdout); code != 0 {
+	if code := renderMailCheckFromAPI(cr, "mayor", true, hookOutputFormatCodex, &stdout, io.Discard); code != 0 {
 		t.Fatalf("renderMailCheckFromAPI = %d, want 0", code)
 	}
 	var out struct {
@@ -5546,12 +5544,12 @@ func TestRenderMailCheckFromAPIInjectCodexUsesUserPromptSubmit(t *testing.T) {
 	}
 }
 
-func TestRouteMailPeek_StaleBannerOver30s(t *testing.T) {
+func TestRouteMailPeek_CacheAgeFooterOnStderr(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
 	cityPath := writeMailTestCity(t)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("X-GC-Cache-Age-S", "45")
+		setBehindCacheHeaders(w)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
 			"id":         "msg-1",
@@ -5570,17 +5568,15 @@ func TestRouteMailPeek_StaleBannerOver30s(t *testing.T) {
 	if code := routeMailPeek(cityPath, []string{"msg-1"}, c, "", false, &stdout, &stderr); code != 0 {
 		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "cache age:") {
-		t.Errorf("stdout missing stale banner:\n%s", stdout.String())
-	}
+	assertCacheAgeFooterOnStderr(t, stdout.String(), stderr.String())
 }
 
-func TestRouteMailCount_StaleBannerOver30s(t *testing.T) {
+func TestRouteMailCount_CacheAgeFooterOnStderr(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
 	cityPath := writeMailTestCity(t)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("X-GC-Cache-Age-S", "45")
+		setBehindCacheHeaders(w)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{"total": 1, "unread": 0}) //nolint:errcheck
 	}))
@@ -5591,9 +5587,7 @@ func TestRouteMailCount_StaleBannerOver30s(t *testing.T) {
 	if code := routeMailCount(cityPath, []string{"mayor"}, c, "", false, &stdout, &stderr); code != 0 {
 		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "cache age:") {
-		t.Errorf("stdout missing stale banner:\n%s", stdout.String())
-	}
+	assertCacheAgeFooterOnStderr(t, stdout.String(), stderr.String())
 }
 
 // --- cmdMailSend positional body regression tests (#3331) ---

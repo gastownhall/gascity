@@ -27,7 +27,7 @@ type UpdateReporter interface {
 // afterwards: in one round trip through UpdateReporting when store offers it,
 // otherwise as Update followed by Get.
 func UpdateAndReadBack(store Store, id string, opts UpdateOpts) (UpdatedRow, error) {
-	if reporter, ok := store.(UpdateReporter); ok {
+	if reporter, ok := As[UpdateReporter](store); ok {
 		return reporter.UpdateReporting(id, opts)
 	}
 	if err := store.Update(id, opts); err != nil {

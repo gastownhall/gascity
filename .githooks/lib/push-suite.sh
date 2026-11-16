@@ -197,6 +197,24 @@ have_bazel() {
   command -v bazel >/dev/null 2>&1
 }
 
+# run_suite CMD...: runs the suite and exits with its status, except that 141
+# (SIGPIPE) fails the push with a named error. 141 says a writer hit a closed
+# pipe, not whether the tests passed: it follows a passing suite (a teardown
+# writer, a dropped stderr reader) as readily as a failing one. Exec'ing the
+# suite would hand that bare signal death to git as the hook's only verdict.
+run_suite() {
+  local status=0
+  "$@" || status=$?
+  if [ "$status" -eq 141 ]; then
+    {
+      echo "pre-push: $* exited 141 (SIGPIPE): it, or its teardown, wrote to a closed pipe."
+      echo "pre-push: that says nothing about whether the tests passed, so the push is refused (fail closed); push again."
+    } >&2
+    exit 1
+  fi
+  exit "$status"
+}
+
 # .bazelrc's pinned test PATH (the last unconditional one, as Bazel applies it).
 pinned_test_path() {
   [ -f .bazelrc ] && sed -n 's/^test[[:space:]]\{1,\}--test_env=PATH=\([^[:space:]]\{1,\}\).*/\1/p' .bazelrc | tail -n 1
@@ -272,7 +290,7 @@ esac
 case "$mode" in
 go)
   announce_go_suite
-  exec make test-fast-parallel
+  run_suite make test-fast-parallel
   ;;
 rbe) config=remote-exec ;;
 cache) config=fork-cache ;;
@@ -286,4 +304,4 @@ fi
 # .bazelrc roots every test's tmpdir at /tmp/bt and nothing else creates it.
 mkdir -p /tmp/bt
 echo "pre-push: bazel test //... --config=$config${executor:+ on $executor} (GC_PREPUSH_SUITE=go runs plain go test instead)" >&2
-exec bazel test //... "--config=$config" --keep_going
+run_suite bazel test //... "--config=$config" --keep_going

@@ -3106,10 +3106,11 @@ func TestVerifiedPoolTriggerWorkDirMarksEvidenceFailures(t *testing.T) {
 	}
 }
 
-// A failed binding write on a managed-worktree request leaves the session
-// bead stamped with the previous bead's work dir, so it is marked as an
-// evidence failure and skipped rather than reused. An unmanaged request
-// keeps the ordinary continue-without-trigger-env path.
+// A failed binding write on a managed-worktree request, or on a refused
+// name's (NameRefused), leaves the session bead stamped with the previous
+// bead's work dir, so it is marked as an evidence failure and skipped rather
+// than reused, and no name-only request falls back on it. An unmanaged
+// request keeps the ordinary continue-without-trigger-env path.
 func TestBindWriteFailureMarksManagedRequests(t *testing.T) {
 	cause := errors.New("store write failed")
 
@@ -3119,6 +3120,14 @@ func TestBindWriteFailureMarksManagedRequests(t *testing.T) {
 	}
 	if !errors.Is(managed, cause) {
 		t.Errorf("managed bind write failure lost its cause: %v", managed)
+	}
+	if _, ok := nameOnlyFallback(SessionRequest{WorkBeadID: "gc-a", WorktreeSpec: &worktree.Spec{BeadID: "gc-a"}, NameOnly: true}, managed); ok {
+		t.Errorf("name-only fallback on bind write failure %v, want none", managed)
+	}
+
+	refused := bindWriteFailure(unnamedPoolRequest(SessionRequest{WorkBeadID: "gc-a", NameOnly: true}), cause)
+	if !errors.Is(refused, errPoolTriggerBindWriteFailed) || !errors.Is(refused, cause) {
+		t.Errorf("refused name's bind write failure = %v, want the write-failure sentinel and its cause", refused)
 	}
 
 	unmanaged := bindWriteFailure(SessionRequest{}, cause)

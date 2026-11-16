@@ -14,6 +14,8 @@ go_library(
         "//internal/beads",
         "//internal/citylayout",
         "//internal/fsys",
+        "//internal/platform/filelock",
+        "//internal/platform/localsocket",
     ],
 )
 
@@ -31,6 +33,7 @@ go_test(
     deps = [
         "//internal/beads",
         "//internal/beads/beadstest",
+        "//internal/platform/filelock",
         "//internal/testenv",
     ],
 )

@@ -205,8 +205,9 @@ func (s *Store) Get(id string) (Op, error) {
 	return DecodeOp(b)
 }
 
-// QuarantinedRow is an open row ListOpenTolerant could not serve: one that
-// does not decode (an unknown kind, schema or value from a newer build, or
+// QuarantinedRow is a row a tolerant read could not serve, an open one
+// ListOpenTolerant read or a closed one RecentClosed read: one that does not
+// decode (an unknown kind, schema or value from a newer build, or
 // corruption) or that is keyed to another conversation. Err says why. A
 // reader reports it and never writes it.
 type QuarantinedRow struct {

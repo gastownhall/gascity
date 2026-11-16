@@ -1113,3 +1113,39 @@ func evalDeployedPolicyConstant(expr ast.Expr) (int64, error) {
 		return 0, fmt.Errorf("unsupported expression %s", types.ExprString(expr))
 	}
 }
+
+func TestIsNudgeQueueRecord(t *testing.T) {
+	store := openNudgeQueueStore(t, t.TempDir())
+	queue := newNudgeQueue(t, store)
+	now := time.Now().UTC()
+	if err := queue.Enqueue(testNudgeItem("n-rec", "", now)); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	record, err := store.Get(nudgeQueueBeadID("n-rec"))
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !IsNudgeQueueRecord(record) {
+		t.Errorf("IsNudgeQueueRecord(%+v) = false, want true", record)
+	}
+	shadowID, _, err := nudgequeue.NewStore(beads.NudgesStore{Store: store}).Save(testNudgeItem("n-shadow", "", now))
+	if err != nil {
+		t.Fatalf("legacy Save: %v", err)
+	}
+	shadow, err := store.Get(shadowID)
+	if err != nil {
+		t.Fatalf("Get shadow: %v", err)
+	}
+	if IsNudgeQueueRecord(shadow) {
+		t.Error("IsNudgeQueueRecord(gc:nudge shadow) = true, want false")
+	}
+	for _, b := range []beads.Bead{
+		{Type: "task", Labels: []string{nudgeQueueLabel}},
+		{Type: nudgeQueueBeadType, Labels: []string{"gc:nudge"}},
+		{Type: nudgeQueueBeadType},
+	} {
+		if IsNudgeQueueRecord(b) {
+			t.Errorf("IsNudgeQueueRecord(%+v) = true, want false", b)
+		}
+	}
+}

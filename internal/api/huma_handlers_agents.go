@@ -150,13 +150,14 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	envBatch, _ := sp.(runtime.EnvironmentBatchProvider)
 	runtimeSessions := s.newAgentSessionResolver(ctx, cfg, cityName)
 
+	pools := newRequestSessionListing(sp)
 	var agents []agentResponse
 	var partialErrors []string
 	for _, a := range cfg.Agents {
 		// Provenance is a property of the declared agent, shared by every
 		// pool-expanded instance, so compute it once per source agent.
 		pack, packDerived := agentPackProvenance(a, rawCfg, cfg)
-		expanded, expandErr := expandAgentChecked(a, cityName, sessTmpl, sp, cfg.NamedSessions)
+		expanded, expandErr := expandAgentChecked(a, cityName, sessTmpl, pools, cfg.NamedSessions)
 		// A runtime server that is not running at all (tmux before its first
 		// session) has no sessions; that is a complete answer, not a failure.
 		if runtime.IsRuntimeServerAbsent(expandErr) {

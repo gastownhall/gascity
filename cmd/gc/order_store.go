@@ -449,7 +449,11 @@ func validPublishedManagedDoltDataDirState(cityPath string, state doltRuntimeSta
 		return holderPID == state.PID
 	}
 	layout := managedDoltOrderRuntimeLayoutForDataDir(cityPath, dataDir)
-	owned, deleted := inspectManagedDoltOwnership(state.PID, layout)
+	owned, deleted, err := inspectManagedDoltOwnership(state.PID, layout)
+	if err != nil {
+		// Ownership undecided: decline to adopt. This gate only grants trust.
+		return false
+	}
 	return owned && !deleted
 }
 
@@ -514,7 +518,11 @@ func validDoltRuntimeStateForLayout(state doltRuntimeState, layout managedDoltRu
 	if holderPID > 0 && holderPID != state.PID {
 		return false
 	}
-	owned, deleted := inspectManagedDoltOwnership(state.PID, layout)
+	owned, deleted, err := inspectManagedDoltOwnership(state.PID, layout)
+	if err != nil {
+		// Ownership undecided: decline to adopt. This gate only grants trust.
+		return false
+	}
 	if deleted {
 		return false
 	}
@@ -724,6 +732,21 @@ func unwrapOrderTrackingSweepStore(store beads.Store) beads.Store {
 	return store
 }
 
+// appendOrdersClassHandle appends an orders class handle to a typed federation
+// of order stores, unless the federation already reads it: on a city that
+// relocates nothing the handle over a scope store is that scope store's leg.
+func appendOrdersClassHandle(stores []beads.OrdersStore, leg beads.OrdersStore) []beads.OrdersStore {
+	if leg == (beads.OrdersStore{}) {
+		return stores
+	}
+	for _, existing := range stores {
+		if existing == leg {
+			return stores
+		}
+	}
+	return append(stores, leg)
+}
+
 // appendOrdersClassStore appends the orders-class binding to a typed federation
 // of order stores, unless the federation already reads it.
 //
@@ -788,7 +811,6 @@ func cachedOrderHistoryStoresResolver(cityPath string, cfg *config.City, stderr 
 		stores[key] = store
 		return store, nil
 	}
-	ordersStore := relocatedOrdersClassStore(cityPath, cfg)
 	return func(a orders.Order) ([]beads.OrdersStore, error) {
 		target, err := resolveOrderStoreTarget(cityPath, cfg, a)
 		if err != nil {
@@ -798,16 +820,22 @@ func cachedOrderHistoryStoresResolver(cityPath string, cfg *config.City, stderr 
 		if err != nil {
 			return nil, err
 		}
+		// The orders leg is the class handle over the order's scope store, the
+		// one gc order run records its tracking bead through
+		// (orderTrackingFrontDoor): the binding on a split city, and the scope
+		// store itself on a city that relocates nothing, where the append
+		// below folds it into the primary leg.
+		ordersLeg := cliStores(cityPath, primary).Orders()
 		out := []beads.OrdersStore{{Store: primary}}
 		if legacyOrderCityFallbackNeeded(cityPath, target) {
 			legacy, err := openCached(legacyOrderCityTarget(cityPath, cfg))
 			if err != nil {
 				fmt.Fprintf(stderr, "gc order history: legacy city fallback unavailable for %s: %v\n", a.ScopedName(), err) //nolint:errcheck
-				return appendOrdersClassStore(out, ordersStore), nil
+				return appendOrdersClassHandle(out, ordersLeg), nil
 			}
 			out = append(out, beads.OrdersStore{Store: legacy})
 		}
-		return appendOrdersClassStore(out, ordersStore), nil
+		return appendOrdersClassHandle(out, ordersLeg), nil
 	}
 }
 

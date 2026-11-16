@@ -68,6 +68,10 @@ func (splitStrictGate) ClassView(store beads.Store) beads.Store {
 	return splittest.ProjectionOf(store).ClassViewOf(store)
 }
 
+func (splitStrictGate) ViewFront(store beads.Store) (beads.Store, func(beads.Store) beads.Store, bool) {
+	return splittest.ViewFront(store)
+}
+
 // splitStrictTestsM runs the package's tests under every TestMain check and
 // keeps m.Run's code. It hands the checks splittest.GateChecksBase's answer,
 // which under the gate is 0, so each check reports only its own failure.
@@ -151,7 +155,7 @@ func TestSplitStrictSeamIsInstalledOnlyUnderTheGate(t *testing.T) {
 		if splitStrictSeam != nil {
 			t.Fatal("the seam is installed although the gate is off")
 		}
-		if cs.CityBeadStore() != beads.Store(store) || cs.SessionsBeadStore().Store != beads.Store(store) {
+		if cs.CityBeadStore() != beads.Store(store) || cs.Stores().Sessions().Store != beads.Store(store) {
 			t.Fatal("accessors wrap the store although the gate is off")
 		}
 		return
@@ -160,7 +164,7 @@ func TestSplitStrictSeamIsInstalledOnlyUnderTheGate(t *testing.T) {
 	if cs.CityBeadStore() != p.WorkView() {
 		t.Fatal("CityBeadStore does not hand out the gate's work view")
 	}
-	if cs.SessionsBeadStore().Store != p.ClassView() || cs.GraphBeadStore().Store != p.ClassView() {
+	if cs.Stores().Sessions().Store != p.ClassView() || cs.Stores().Graph().Store != p.ClassView() {
 		t.Fatal("the class accessors do not hand out the gate's class view")
 	}
 }
@@ -183,7 +187,7 @@ func TestSplitStrictControllerSharesOneProjection(t *testing.T) {
 		t.Fatal("no city store")
 	}
 	work := cs.CityBeadStore()
-	sessions := cs.SessionsBeadStore().Store
+	sessions := cs.Stores().Sessions().Store
 	if splittest.ProjectionOf(work) != splittest.ProjectionOf(sessions) {
 		t.Fatal("the work and sessions accessors resolved to different projections")
 	}

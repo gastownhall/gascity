@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 func TestCookTutorialConditionUsesDefaultVars(t *testing.T) {
@@ -31,7 +32,7 @@ condition = "{{env}} == staging"
 	}
 
 	store := beads.NewMemStore()
-	result, err := Cook(context.Background(), store, "deploy-flow", []string{dir}, Options{})
+	result, err := Cook(context.Background(), beadstest.GraphMolecule(store), "deploy-flow", []string{dir}, Options{})
 	if err != nil {
 		t.Fatalf("Cook: %v", err)
 	}

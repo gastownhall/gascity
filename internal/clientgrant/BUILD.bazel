@@ -5,12 +5,17 @@ go_library(
     srcs = ["clientgrant.go"],
     importpath = "github.com/gastownhall/gascity/internal/clientgrant",
     visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/execenv",
+        "//internal/runtime",
+    ],
 )
 
 go_test(
     name = "clientgrant_test",
     srcs = [
         "clientgrant_test.go",
+        "exec_fixture_other_test.go",
         "testenv_import_test.go",
     ],
     embed = [":clientgrant"],

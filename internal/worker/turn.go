@@ -337,18 +337,32 @@ func TurnSessionGone(err error) bool {
 		errors.Is(err, sessionpkg.ErrNotSession) || errors.Is(err, sessionpkg.ErrSessionClosed)
 }
 
-// conversationTranscript resolves the transcript of info's current
+// conversationTranscript resolves the transcript of plan's current
 // conversation: only a file its provider session key finds, and that records
 // that conversation, never a work-directory or newest-file fallback, which
-// can return another conversation's file (KeyedTranscriptPath's rule). A
-// session without a key yet, or whose transcript is not written yet, is
+// can return another conversation's file (KeyedTranscriptPath's rule). The
+// key is looked up under the transcript search roots, then, where those find
+// none, among the files the session's own agent process holds open
+// (heldConversationTranscript, a runtime probe bounded by ctx), so a provider
+// home outside the search roots still has turns. A session without a key
+// yet, or whose transcript is not written yet, is
 // runtime.ErrRuntimeUnavailable: its source exists, its turns are unknown.
-func (h *SessionHandle) conversationTranscript(info sessionpkg.Info, provider string) (string, error) {
+func (h *SessionHandle) conversationTranscript(ctx context.Context, plan turnPlan) (string, error) {
+	info, provider := plan.info, plan.provider
 	key := strings.TrimSpace(info.SessionKey)
 	if key == "" {
 		return "", fmt.Errorf("turns of session %s: its conversation has no session key yet: %w", info.ID, runtime.ErrRuntimeUnavailable)
 	}
 	path := sessionpkg.ResolveKeyedTranscriptPaths([]sessionpkg.Info{info}, h.adapter.SearchPaths, provider)[info.ID]
+	if path == "" {
+		held, err := h.heldConversationTranscript(ctx, plan)
+		if err != nil {
+			// The runtime's failure is reported, not wrapped: a pane that
+			// cannot be read leaves the turns unknown, not the session gone.
+			return "", fmt.Errorf("turns of session %s: no single transcript of conversation %s found under the search roots, and its process's open files cannot be read (%s): %w", info.ID, key, err.Error(), runtime.ErrRuntimeUnavailable)
+		}
+		path = held
+	}
 	if path == "" {
 		return "", fmt.Errorf("turns of session %s: no single transcript of conversation %s found: %w", info.ID, key, runtime.ErrRuntimeUnavailable)
 	}
@@ -360,6 +374,35 @@ func (h *SessionHandle) conversationTranscript(info sessionpkg.Info, provider st
 		return "", fmt.Errorf("turns of session %s: transcript %s does not record conversation %s: %w", info.ID, path, key, runtime.ErrRuntimeUnavailable)
 	}
 	return path, nil
+}
+
+// heldFileReading is one read of the files a session's agent process holds
+// open (session.Manager.RuntimeHeldFiles).
+type heldFileReading struct {
+	files     []string
+	supported bool
+}
+
+// heldConversationTranscript resolves the transcript of plan's current
+// conversation among the files its agent process holds open, as the
+// session's runtime names them (Manager.RuntimeHeldFiles, only files the
+// current user owns), by its provider's keyed lookup
+// (sessionpkg.ResolveHeldTranscriptPath). The runtime's read is one of the
+// plan's runtime probes, made as plan.reads says and bounded by ctx
+// (observeTurnRead). It is "" with a nil error when the runtime cannot name
+// held files or none is the conversation's transcript.
+func (h *SessionHandle) heldConversationTranscript(ctx context.Context, plan turnPlan) (string, error) {
+	got, err := observeTurnRead(ctx, plan.reads, "held", h.turnObservationScope(), plan.info.SessionName, func(context.Context) (heldFileReading, error) {
+		files, supported, err := h.manager.RuntimeHeldFiles(plan.info)
+		return heldFileReading{files, supported}, err
+	})
+	if err != nil {
+		return "", err
+	}
+	if !got.supported {
+		return "", nil
+	}
+	return sessionpkg.ResolveHeldTranscriptPath(plan.info, got.files, plan.provider), nil
 }
 
 // TurnCapabilities reports what the worker can tell about its session's turns.
@@ -421,7 +464,7 @@ func (h *SessionHandle) currentTurnOf(ctx context.Context, plan turnPlan) (runti
 	case TurnSourceProtocol:
 		return h.protocolTurnHistory(ctx, plan)
 	case TurnSourceTranscript:
-		if plan.path, err = h.conversationTranscript(plan.info, plan.provider); err != nil {
+		if plan.path, err = h.conversationTranscript(ctx, plan); err != nil {
 			return runtime.TurnHistory{}, err
 		}
 		return h.transcriptTurnHistory(ctx, plan, func() (sessionlog.TurnScan, error) {
@@ -456,9 +499,9 @@ func turnCityScope(city sessionpkg.CityDir, err error, owner any) string {
 // turnObservationKey is the ObserveBounded key of a turn read of one session.
 // It is a namespace apart from liveness observation (postStartObservationKey
 // in cmd/gc), so a wedged turn read never blocks a liveness read, nor the
-// other way round. kind separates the history read and the idle snapshot,
-// which name the session by its runtime name, from a watcher's session
-// reload, which names it by its id. Turn reads go through ObserveShared:
+// other way round. kind separates the history read, the idle snapshot and
+// the held-file read, which name the session by its runtime name, from a
+// watcher's session reload, which names it by its id. Turn reads go through ObserveShared:
 // concurrent readers of one session share one read; a fresh read and a read
 // under the session mutation lock go through ObserveBounded under a fresh-
 // or locked- kind of their own (observeTurnRead).

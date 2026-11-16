@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -334,9 +333,10 @@ func (h *SessionHandle) State(ctx context.Context) (State, error) {
 			return State{}, err
 		}
 		// Under the program-status shadow switch, the phase this view
-		// settles on is recorded beside the record (observation); the
+		// settles on is recorded beside the record this view read
+		// (observation), the reading its phase decides with under on; the
 		// phase returned is this view's alone.
-		defer func() { h.manager.RecordObservationShadow(info, observationVerdict(state.Phase)) }()
+		defer func() { h.manager.RecordObservationShadow(info, state.Program, observationVerdict(state.Phase)) }()
 		if pending != nil {
 			state.Phase = PhaseBlocked
 			state.Pending = pending
@@ -826,19 +826,52 @@ func (h *SessionHandle) startCommand(id string) (string, error) {
 	if resumeCommand := strings.TrimSpace(h.session.Resume.ResumeCommand); resumeCommand != "" {
 		resumeInfo.ResumeCommand = resumeCommand
 	}
-	isClaude := strings.Contains(strings.ToLower(strings.TrimSpace(resumeInfo.Provider)), "claude")
-	probePaths := h.searchPaths
-	if len(probePaths) == 0 || !isClaude {
-		probePaths = DefaultSearchPaths()
-	}
-	if dir := strings.TrimSpace(h.session.Env["CLAUDE_CONFIG_DIR"]); isClaude && filepath.IsAbs(dir) {
-		probePaths = MergeSearchPaths(append(append([]string(nil), probePaths...), filepath.Join(dir, "projects")))
-	}
-	present, probeable := workertranscript.HasKeyedTranscript(probePaths, resumeInfo.Provider, resumeInfo.WorkDir, resumeInfo.SessionKey)
-	if probeable && !present && h.session.Resume.SessionIDFlag != "" {
+	if h.unlaunchedSessionKey(info, pr) {
 		return startCommandWithSessionID(resumeInfo, h.session)
 	}
 	return sessionpkg.BuildResumeCommand(resumeInfo), nil
+}
+
+// unlaunchedSessionKey reports whether the row's stored session key never
+// launched a conversation a resume could reattach to, so the start should open
+// a fresh conversation under the stored key with the provider's session-id
+// flag instead. The key must have a session-id flag to open one with, no
+// committed start may vouch for it, and the keyed transcript the resume would
+// reattach to must be probeable and absent under the roots this launch reads.
+// A committed start (started_config_hash) with no conversation reset pending
+// (continuation_reset_pending) vouches for the key, which then resumes
+// whatever the probe reads: a conversation under a root the probe cannot see,
+// such as a wrapper's own config dir, is not started over, and one whose
+// transcript is gone fails its resume into the session manager's
+// committed-conversation rule. A pending reset means the hash no longer speaks
+// for the key: a churn reset keeps the hash while it clears the key, which the
+// session sync then mints anew. The probe is the same probe and root rule the
+// reconciler's own start applies (workertranscript.KeyedProbeRoots): the
+// handle's search paths, plus the projects root of an absolute
+// CLAUDE_CONFIG_DIR the launch's env names. A relative or ~ value adds no
+// root; a provider whose transcript layout cannot be probed, a missing key or
+// work dir, and a transcript that is present all keep the resume.
+func (h *SessionHandle) unlaunchedSessionKey(info sessionpkg.Info, pr sessionpkg.PersistedResponse) bool {
+	if h.session.Resume.SessionIDFlag == "" || strings.TrimSpace(info.SessionKey) == "" {
+		return false
+	}
+	if strings.TrimSpace(pr.Metadata["started_config_hash"]) != "" &&
+		strings.TrimSpace(pr.Metadata["continuation_reset_pending"]) == "" {
+		return false
+	}
+	hints := h.runtimeHints()
+	workDir := strings.TrimSpace(hints.WorkDir)
+	if workDir == "" {
+		workDir = info.WorkDir
+	}
+	provider := h.historyProvider(info)
+	roots := h.adapter.SearchPaths
+	if dir, ok := workertranscript.ClaudeConfigProjectsRoot(hints.Env); ok {
+		roots = MergeSearchPaths(append(append([]string(nil), roots...), dir))
+	}
+	present, probeable := workertranscript.HasKeyedTranscript(
+		workertranscript.KeyedProbeRoots(roots, provider), provider, workDir, info.SessionKey)
+	return probeable && !present
 }
 
 func startCommandWithSessionID(info sessionpkg.Info, spec SessionSpec) (string, error) {

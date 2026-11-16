@@ -497,3 +497,40 @@ func TestCoreSQLOrdersDeclareRequiresBackendExceptHTTP(t *testing.T) {
 		}
 	}
 }
+
+// TestBindingSnapshotOrder pins the binding backup (S5 §5.3, S6): a
+// city-scoped cooldown exec every 6h of a live, read-only binding snapshot
+// into the pack's state directory, keeping 4. --if-bound is what makes it
+// inert on a city with no binding (the command exits 0 and writes nothing
+// there), and the state directory must be set rather than defaulting to a
+// path at the filesystem root.
+func TestBindingSnapshotOrder(t *testing.T) {
+	const file = "binding-snapshot.toml"
+	o := readOrder(t, file)
+	if err := orders.Validate(o); err != nil {
+		t.Fatalf("%s failed validation: %v", file, err)
+	}
+	if o.Trigger != "cooldown" || o.Interval != "6h" {
+		t.Errorf("trigger = %q interval = %q, want cooldown 6h", o.Trigger, o.Interval)
+	}
+	if !o.IsExec() || o.Pool != "" {
+		t.Errorf("want an exec order with no pool, got exec %q pool %q", o.Exec, o.Pool)
+	}
+	const want = `gc storage snapshot --binding --if-bound --to "${GC_PACK_STATE_DIR:?}/binding-archive" --keep 4`
+	if o.Exec != want {
+		t.Errorf("exec = %q, want %q", o.Exec, want)
+	}
+	if !o.IsCityScoped() {
+		t.Errorf("scope = %q, want city", o.Scope)
+	}
+	if !o.IsEnabled() {
+		t.Error("the order ships disabled")
+	}
+	interval, err := time.ParseDuration(o.Interval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if timeout := o.TimeoutOrDefault(); timeout >= interval {
+		t.Errorf("timeout %s is not shorter than interval %s", timeout, interval)
+	}
+}

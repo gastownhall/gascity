@@ -22,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -3605,6 +3606,17 @@ type capturingRecorder struct {
 
 func (c *capturingRecorder) Record(e events.Event) {
 	c.events = append(c.events, e)
+}
+
+// eventsOfType returns the captured events of one type, in emission order.
+func (c *capturingRecorder) eventsOfType(t string) []events.Event {
+	out := make([]events.Event, 0, len(c.events))
+	for _, e := range c.events {
+		if e.Type == t {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // strandedEvents returns the captured events.SessionStranded events,
@@ -10204,10 +10216,10 @@ func TestReconcileSessionBeads_ConfiguredNamedSessionRetriesAfterTransientStartF
 }
 
 // TestReconcileSessionBeads_ConfiguredNamedSessionStartFailureLoopQuarantines
-// pins the bound on those prompt retries: with no in-flight lease to wait
-// out, a start that keeps failing is retried each tick only until the
-// startup-health episode reaches defaultMaxWakeAttempts and quarantines the
-// name.
+// pins the bound on those retries: with no in-flight lease to wait out, a
+// start that keeps failing is retried once each per-failure backoff hold
+// (sr-xf2xj) has passed, only until the startup-health episode reaches
+// defaultMaxWakeAttempts and quarantines the name.
 func TestReconcileSessionBeads_ConfiguredNamedSessionStartFailureLoopQuarantines(t *testing.T) {
 	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
@@ -10242,7 +10254,13 @@ func TestReconcileSessionBeads_ConfiguredNamedSessionStartFailureLoopQuarantines
 		if woken := env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{current}, nil, nil); woken != 0 {
 			t.Fatalf("tick %d woken = %d, want 0 (every start fails)", tick, woken)
 		}
-		env.clk.Advance(time.Second)
+		// Wait out the per-failure backoff hold, never the quarantine: past
+		// the threshold the quarantine alone must keep holding starts back.
+		step := time.Second
+		if ep, err := sessionFrontDoor(env.store).LoadStartupHealthEpisode(sessionName); err == nil && ep.BackoffUntil.After(env.clk.Now().Add(step)) {
+			step = ep.BackoffUntil.Sub(env.clk.Now())
+		}
+		env.clk.Advance(step)
 		var err error
 		if current, err = env.store.Get(session.ID); err != nil {
 			t.Fatalf("Get(%s) after tick %d: %v", session.ID, tick, err)
@@ -10259,7 +10277,7 @@ func TestReconcileSessionBeads_ConfiguredNamedSessionStartFailureLoopQuarantines
 		}
 	}
 	if starts != defaultMaxWakeAttempts {
-		t.Fatalf("start attempts = %d over %d ticks, want %d (retried each tick until the startup-health quarantine)", starts, 2*defaultMaxWakeAttempts, defaultMaxWakeAttempts)
+		t.Fatalf("start attempts = %d over %d ticks, want %d (retried after each backoff hold until the startup-health quarantine)", starts, 2*defaultMaxWakeAttempts, defaultMaxWakeAttempts)
 	}
 	episode, err := sessionFrontDoor(env.store).LoadStartupHealthEpisode(sessionName)
 	if err != nil {
@@ -14778,7 +14796,7 @@ func TestReconcileSessionBeads_RecyclesDeadNamedPhantomHoldingAssignedWork(t *te
 
 	// The runtime name is now free: a fresh canonical bead for the same identity
 	// can claim it — the collision that previously wedged respawn is gone.
-	if err := sessionpkg.EnsureSessionNameAvailableWithConfigForOwner(env.store, env.cfg, runtimeName, "fresh-canonical-id", identity); err != nil {
+	if err := sessionpkg.EnsureSessionNameAvailableWithConfigForOwner(beadstest.Sessions(env.store), env.cfg, runtimeName, "fresh-canonical-id", identity); err != nil {
 		t.Fatalf("runtime name still reserved after recycle: %v", err)
 	}
 }
@@ -14890,7 +14908,7 @@ func TestReconcileSessionBeads_RecyclesDeadNamedPhantom_DefaultTemplateWorkKeeps
 	if gotWork.Assignee != identity {
 		t.Fatalf("work assignee = %q, want %q (the recycle must not release the configured identity's work)", gotWork.Assignee, identity)
 	}
-	if err := sessionpkg.EnsureSessionNameAvailableWithConfigForOwner(env.store, env.cfg, runtimeName, "fresh-canonical-id", identity); err != nil {
+	if err := sessionpkg.EnsureSessionNameAvailableWithConfigForOwner(beadstest.Sessions(env.store), env.cfg, runtimeName, "fresh-canonical-id", identity); err != nil {
 		t.Fatalf("runtime name still reserved after recycle: %v", err)
 	}
 }
@@ -14929,7 +14947,7 @@ func TestReconcileSessionBeads_RecyclesDeadNamedPhantom_RuntimeNameAssigneeSurvi
 	if gotWork.Assignee != runtimeName {
 		t.Fatalf("work assignee = %q, want %q (runtime-name claims belong to the configured identity too)", gotWork.Assignee, runtimeName)
 	}
-	if err := sessionpkg.EnsureSessionNameAvailableWithConfigForOwner(env.store, env.cfg, runtimeName, "fresh-canonical-id", identity); err != nil {
+	if err := sessionpkg.EnsureSessionNameAvailableWithConfigForOwner(beadstest.Sessions(env.store), env.cfg, runtimeName, "fresh-canonical-id", identity); err != nil {
 		t.Fatalf("runtime name still reserved after recycle: %v", err)
 	}
 }
@@ -14965,7 +14983,7 @@ func TestReconcileSessionBeads_RecyclesDeadNamedPhantom_AliasRecognizedPhantomKe
 	if gotWork.Assignee != identity {
 		t.Fatalf("work assignee = %q, want %q", gotWork.Assignee, identity)
 	}
-	if err := sessionpkg.EnsureSessionNameAvailableWithConfigForOwner(env.store, env.cfg, runtimeName, "fresh-canonical-id", identity); err != nil {
+	if err := sessionpkg.EnsureSessionNameAvailableWithConfigForOwner(beadstest.Sessions(env.store), env.cfg, runtimeName, "fresh-canonical-id", identity); err != nil {
 		t.Fatalf("runtime name still reserved after recycle: %v", err)
 	}
 }

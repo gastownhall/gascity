@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
+
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -551,7 +553,7 @@ func TestFreshTurnJoinsNoReadInFlight(t *testing.T) {
 func TestFreshTurnBoundsItsSessionLoad(t *testing.T) {
 	s := newTurnSession(t, profiled(runtime.ProfileACP, runtime.FullFake{Fake: runtime.NewFake()}), "claude", "")
 	store := newStallingTurnStore(t, s.store)
-	s.handle.manager = sessionpkg.NewManagerWithOptions(store, s.sp, sessionpkg.WithCityPath(t.TempDir()))
+	s.handle.manager = sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), s.sp, sessionpkg.WithCityPath(t.TempDir()))
 	store.stall(s.info.ID)
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()

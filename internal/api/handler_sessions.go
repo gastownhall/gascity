@@ -305,12 +305,12 @@ func writeResolveError(w http.ResponseWriter, err error) {
 }
 
 func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
-	mgr := s.sessionManager(store.Store)
+	mgr := s.sessionManager(store)
 	cfg := s.state.Config()
 
 	q := r.URL.Query()
@@ -395,26 +395,26 @@ func sessionTranscriptProviderFallback(cfg *config.City) string {
 }
 
 func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
 	cfg := s.state.Config()
 
-	id, err := s.resolveSessionIDAllowClosedWithConfig(store.Store, r.PathValue("id"))
+	id, err := s.resolveSessionIDAllowClosedWithConfig(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
 	}
-	info, pr, err := sessionGetEnriched(session.NewStore(store), s.sessionManager(store.Store), id)
+	info, pr, err := sessionGetEnriched(session.NewStore(store), s.sessionManager(store), id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
 	}
 	wantPeek := r.URL.Query().Get("peek") == "true"
 	resp := sessionResponseWithReason(info, pr, cfg, s.state.SessionProvider(), strings.TrimSpace(s.state.CityPath()) != "")
-	handle, err := s.workerHandleForSession(store.Store, id)
+	handle, err := s.workerHandleForSession(store, id)
 	if err == nil {
 		s.enrichSessionResponse(&resp, info, cfg, handle, wantPeek, true, true, 0)
 	}
@@ -422,18 +422,18 @@ func (s *Server) handleSessionGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSessionSuspend(w http.ResponseWriter, r *http.Request) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
 
-	id, err := s.resolveSessionIDMaterializingNamedWithContext(r.Context(), store.Store, r.PathValue("id"))
+	id, err := s.resolveSessionIDMaterializingNamedWithContext(r.Context(), store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
 	}
-	handle, err := s.workerHandleForSession(store.Store, id)
+	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -446,17 +446,17 @@ func (s *Server) handleSessionSuspend(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSessionClose(w http.ResponseWriter, r *http.Request) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
-	id, err := s.resolveSessionIDWithConfig(store.Store, r.PathValue("id"))
+	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
 	}
-	handle, err := s.workerHandleForSession(store.Store, id)
+	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -474,7 +474,7 @@ func (s *Server) handleSessionClose(w http.ResponseWriter, r *http.Request) {
 
 	// Optional: permanently delete the bead after closing.
 	if r.URL.Query().Get("delete") == "true" {
-		if err := deleteSessionBeadAfterClose(store.Store, id); err != nil {
+		if err := deleteSessionBeadAfterClose(store, id); err != nil {
 			log.Printf("gc api: deleting bead after close %s: %v", id, err)
 			writeError(w, http.StatusInternalServerError, "internal", "closed but delete failed: "+err.Error())
 			return
@@ -484,7 +484,7 @@ func (s *Server) handleSessionClose(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func deleteSessionBeadAfterClose(store beads.Store, id string) error {
+func deleteSessionBeadAfterClose(store beads.SessionStore, id string) error {
 	const maxAttempts = 5
 	var err error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
@@ -535,13 +535,13 @@ func (s *Server) handleSessionPermissionMode(w http.ResponseWriter, r *http.Requ
 
 // handleSessionWake clears hold and quarantine on a session.
 func (s *Server) handleSessionWake(w http.ResponseWriter, r *http.Request) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
 
-	id, err := s.resolveSessionIDMaterializingNamedWithContext(r.Context(), store.Store, r.PathValue("id"))
+	id, err := s.resolveSessionIDMaterializingNamedWithContext(r.Context(), store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
@@ -587,13 +587,13 @@ func (s *Server) handleSessionWake(w http.ResponseWriter, r *http.Request) {
 
 // handleSessionRename updates a session's title.
 func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
 
-	id, err := s.resolveSessionIDWithConfig(store.Store, r.PathValue("id"))
+	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
@@ -629,7 +629,7 @@ func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
 		sessFront.RepairTypeBestEffort(id)
 	}
 
-	handle, err := s.workerHandleForSession(store.Store, id)
+	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -640,7 +640,7 @@ func (s *Server) handleSessionRename(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Re-fetch to return the updated session, consistent with PATCH.
-	info, pr, err := sessionGetEnriched(session.NewStore(store), s.sessionManager(store.Store), id)
+	info, pr, err := sessionGetEnriched(session.NewStore(store), s.sessionManager(store), id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -717,7 +717,9 @@ func (s *Server) enrichSessionResponseWithKeyedPaths(resp *sessionResponse, info
 
 	s.applySessionModelContext(resp, info, cfg, allowWorkdirTranscriptDiscovery, keyedTranscriptPaths)
 	if resp.Running {
-		ps := programStatusUnder(configuredProgramStatusMode(cfg), s.state.SessionProvider(), info.SessionName)
+		published, sp := configuredProgramStatusMode(cfg), s.state.SessionProvider()
+		ps := programStatusUnder(published, sp, info.SessionName)
+		shadowObservation(published, sp, ps, info.SessionName, info.ID, session.ProviderFamilyFromInfo(info, ""), resp.Activity)
 		obs := observeProgram(ps, resp.Activity)
 		resp.ProgramStatus, resp.Activity, resp.ActivitySource = obs.status, obs.activity, obs.activitySource
 	}
@@ -734,11 +736,11 @@ func (s *Server) sessionPeekHandle(runtimeHandle any, info session.Info) worker.
 	case sessionResponseHandle:
 		return v
 	case runtime.Provider:
-		store := s.state.SessionsBeadStore()
-		if store.Store == nil {
+		store := s.state.Stores().Sessions()
+		if store == (beads.SessionStore{}) {
 			return nil
 		}
-		resolved, err := s.workerHandleForSession(store.Store, info.ID)
+		resolved, err := s.workerHandleForSession(store, info.ID)
 		if err != nil {
 			return nil
 		}
@@ -758,7 +760,7 @@ func (s *Server) applySessionModelContext(resp *sessionResponse, info session.In
 	if abs, err := filepath.Abs(workDir); err == nil {
 		workDir = abs
 	}
-	factory, err := s.workerFactory(s.state.SessionsBeadStore().Store)
+	factory, err := s.workerFactory(s.state.Stores().Sessions())
 	if err != nil {
 		return
 	}
@@ -813,13 +815,13 @@ func (s *Server) resolveSessionTranscriptFile(info session.Info, workDir, transc
 
 // handleSessionPatch handles PATCH /v0/session/{id}. Title and alias are mutable.
 func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		writeError(w, http.StatusServiceUnavailable, "unavailable", "no bead store configured")
 		return
 	}
 
-	id, err := s.resolveSessionIDWithConfig(store.Store, r.PathValue("id"))
+	id, err := s.resolveSessionIDWithConfig(store, r.PathValue("id"))
 	if err != nil {
 		writeResolveError(w, err)
 		return
@@ -883,7 +885,7 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 		sessFront.RepairTypeBestEffort(id)
 	}
 
-	catalog, err := s.workerSessionCatalog(store.Store)
+	catalog, err := s.workerSessionCatalog(store)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return
@@ -900,7 +902,7 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := session.WithCitySessionAliasLock(s.state.CityPath(), *aliasPtr, func() error {
-			if err := session.EnsureAliasAvailableWithConfig(store.Store, s.state.Config(), *aliasPtr, id); err != nil {
+			if err := session.EnsureAliasAvailableWithConfig(store, s.state.Config(), *aliasPtr, id); err != nil {
 				return err
 			}
 			return updateFn()
@@ -914,7 +916,7 @@ func (s *Server) handleSessionPatch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Re-fetch to get updated state.
-	info, pr, err := sessionGetEnriched(session.NewStore(store), s.sessionManager(store.Store), id)
+	info, pr, err := sessionGetEnriched(session.NewStore(store), s.sessionManager(store), id)
 	if err != nil {
 		writeSessionManagerError(w, err)
 		return

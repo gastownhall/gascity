@@ -27,80 +27,60 @@ import (
 // instance, and optional capabilities reached through beads.As keep working.
 
 // Stores returns the controller's class handles for its current city work
-// store and the routes it opened at boot. See storesEpochCache for when it is
-// re-minted.
+// store, rig stores, config and the routes it opened at boot. Every input is
+// read under one cs.mu read lock, the lock update swaps the city and rig
+// stores and the config under, so the handles come from one reload. See
+// storesEpochCache for when it is re-minted.
+//
+// The suspension set is read in the same section, but the city runtime
+// publishes it outside cs.mu (setSuspendedRigs, at the top of each tick), so
+// an epoch can pair a reload's stores with the previous tick's set: a rig
+// suspended or resumed is marked from the next tick's epoch on, a window of
+// at most one tick, in which a just-suspended rig may still be planned.
 func (cs *controllerState) Stores() storeref.Stores {
 	cs.mu.RLock()
-	cityPath, routes := cs.cityPath, cs.storageRoutes
+	cityPath, routes, cfg, work, rigs, suspended := cs.cityPath, cs.storageRoutes, cs.cfg, cs.cityBeadStore, cs.rigSetLocked(), cs.suspendedRigs.Load()
 	cs.mu.RUnlock()
-	return cs.storesOver(cityPath, routes)
+	return cs.stores.get(cityPath, routes, cfg, work, rigs, suspended)
 }
 
-// storesOver is Stores over the state's city work store with the routes and
-// city path a caller names. Its runtime names its own, which are the state's
-// in production (newControllerStateWithRoutes is handed them), so both share
-// the one epoch.
+// storesOver is Stores over the state's city work store and rig stores with
+// the routes and city path a caller names. Its runtime names its own, which
+// are the state's in production (newControllerStateWithRoutes is handed
+// them), so both share the one epoch.
 func (cs *controllerState) storesOver(cityPath string, routes *storageRoutes) storeref.Stores {
 	cs.mu.RLock()
-	work := cs.cityBeadStore
+	cfg, work, rigs, suspended := cs.cfg, cs.cityBeadStore, cs.rigSetLocked(), cs.suspendedRigs.Load()
 	cs.mu.RUnlock()
-	return cs.stores.get(cityPath, routes, work)
+	return cs.stores.get(cityPath, routes, cfg, work, rigs, suspended)
 }
 
-// graphBeadStore returns the store that owns graph (workflow/v2) beads. It
-// delegates to the exported GraphBeadStore() accessor so the api.State surface
-// and the controller's own callers share one resolver.
-func (cs *controllerState) graphBeadStore() beads.GraphStore {
-	return cs.GraphBeadStore()
-}
-
-// sessionsBeadStore returns the store that owns session and session-wait beads.
-// It delegates to the exported SessionsBeadStore() accessor so the api.State
-// surface and the controller's own callers share one resolver.
-func (cs *controllerState) sessionsBeadStore() beads.SessionStore {
-	return cs.SessionsBeadStore()
-}
-
-// mailBeadStore returns the store that owns mail (message) beads: the binding
-// when the routes relocate messaging, else the city work store.
-func (cs *controllerState) mailBeadStore() beads.MailStore {
-	return cs.Stores().Mail()
-}
-
-// nudgesBeadStore returns the store that owns nudge beads. It delegates to the
-// exported NudgesBeadStore() accessor so the api.State surface and the
-// controller's own callers share one resolver.
-func (cs *controllerState) nudgesBeadStore() beads.NudgesStore {
-	return cs.NudgesBeadStore()
-}
-
-// ordersBeadStore returns the store that owns order-tracking bookkeeping beads
-// for the city scope. The scope argument is not read: per-order scope
-// (rig/pool-routed orders) resolves PER ORDER through resolveOrderStoreTarget
-// (the federated dispatch/sweep paths in order_store.go / order_dispatch.go).
-func (cs *controllerState) ordersBeadStore(_ string) beads.OrdersStore {
-	return cs.OrdersBeadStore()
+// rigSetLocked is the state's rig stores as a rig set. cs.mu must be held.
+func (cs *controllerState) rigSetLocked() rigSet {
+	return rigSet{gen: cs.rigStoresGen, stores: cs.beadStores}
 }
 
 // cityWorkStore returns the city-level store for ordinary WORK-class beads that
 // are not scoped to a named rig: the store CityBeadStore() returns, as a
 // handle. CityBeadStore() stays beads.Store as the federation/by-id/default
-// root until the API state is retyped (T6).
+// root until T7's federated readers retire it.
 func (cs *controllerState) cityWorkStore() beads.WorkStore {
 	return cs.Stores().Work()
 }
 
 // cityStores returns the runtime's class handles over its routes: with a
-// controllerState, the state's epoch over the state's city work store; else an
-// epoch over its standalone city store.
+// controllerState, the state's epoch over the state's city and rig stores;
+// else an epoch over its standalone city and rig stores, read under the lock
+// setStandaloneStores swaps them under. A standalone runtime publishes no
+// suspension set, so its epoch marks no rig suspended.
 func (cr *CityRuntime) cityStores() storeref.Stores {
 	if cr.cs != nil {
 		return cr.cs.storesOver(cr.cityPath, cr.storageRoutes)
 	}
 	cr.serviceStateMu.RLock()
-	work := cr.standaloneCityStore
+	cfg, work, rigs := cr.cfg, cr.standaloneCityStore, rigSet{gen: cr.standaloneRigGen, stores: cr.standaloneRigStores}
 	cr.serviceStateMu.RUnlock()
-	return cr.standaloneStores.get(cr.cityPath, cr.storageRoutes, work)
+	return cr.standaloneStores.get(cr.cityPath, cr.storageRoutes, cfg, work, rigs, nil)
 }
 
 // graphBeadStore returns the runtime's graph (workflow/v2) bead store: the
@@ -312,6 +292,18 @@ func moleculeClassStore(recipe *formula.Recipe, workStore, graphStore beads.Stor
 	return workStore
 }
 
+// moleculeClassTarget is the molecule target recipe belongs in: graphStore as
+// a graph target for a graph-class recipe, workStore as a work target
+// otherwise. It is moleculeClassStore's choice, labeled with the class that
+// made it (molecule.RecipeClass). A caller that already holds the one store
+// the molecule lives in passes it for both. A nil choice is an absent target.
+func moleculeClassTarget(recipe *formula.Recipe, workStore, graphStore beads.Store) beads.MoleculeTarget {
+	if recipeCoordClass(recipe) == coordclass.ClassGraph {
+		return beads.GraphMolecule(beads.GraphStore{Store: graphStore})
+	}
+	return beads.WorkMolecule(beads.WorkStore{Store: workStore})
+}
+
 // cookOnClassRouted compiles a formula and instantiates it in the store the
 // compiled recipe's class demands; molecule.Cook picks its store before compiling.
 //
@@ -324,8 +316,8 @@ func cookOnClassRouted(ctx context.Context, workStore, graphStore beads.Store, f
 	if opts.ParentID == "" {
 		return nil, fmt.Errorf("cookOnClassRouted requires Options.ParentID")
 	}
-	result, _, err := molecule.CookChoosingStore(ctx, formulaName, searchPaths, opts, func(recipe *formula.Recipe) beads.Store {
-		return moleculeClassStore(recipe, workStore, graphStore)
+	result, _, err := molecule.CookChoosingStore(ctx, formulaName, searchPaths, opts, func(recipe *formula.Recipe) beads.MoleculeTarget {
+		return moleculeClassTarget(recipe, workStore, graphStore)
 	})
 	return result, err
 }

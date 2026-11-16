@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -587,7 +588,7 @@ func TestReconcileTraceResultsObservePostTickValues(t *testing.T) {
 	loserName := spec.SessionName + "-stale"
 	loserID := mk("3", loserName)
 
-	all, err := session.ListAllSessionBeads(store, beads.ListQuery{})
+	all, err := session.ListAllSessionBeads(beadstest.Sessions(store), beads.ListQuery{})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}

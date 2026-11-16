@@ -5,6 +5,8 @@ import (
 	"strconv"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
+
 	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
@@ -80,7 +82,7 @@ func TestProcessRalphCheckBlindReadDoesNotBurnAttempt(t *testing.T) {
 			}
 			check1 = mustGetBead(t, store, check1.ID)
 
-			_, err := ProcessControl(store, check1, ProcessOptions{CityPath: cityPath})
+			_, err := ProcessControl(beadstest.Graph(store), check1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 			if !errors.Is(err, ErrControlPending) {
 				t.Fatalf("ProcessControl on a blind gate read = %v, want ErrControlPending (re-run without burning an attempt)", err)
 			}
@@ -118,7 +120,7 @@ func TestProcessRalphCheckVerdictMarkerStillBurnsAttempt(t *testing.T) {
 			}
 			check1 = mustGetBead(t, store, check1.ID)
 
-			result, err := ProcessControl(store, check1, ProcessOptions{CityPath: cityPath})
+			result, err := ProcessControl(beadstest.Graph(store), check1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 			if err != nil {
 				t.Fatalf("ProcessControl: %v", err)
 			}
@@ -149,7 +151,7 @@ func TestProcessRalphCheckBlindReadBudgetExhaustionBurns(t *testing.T) {
 	}
 	check1 = mustGetBead(t, store, check1.ID)
 
-	result, err := ProcessControl(store, check1, ProcessOptions{CityPath: cityPath})
+	result, err := ProcessControl(beadstest.Graph(store), check1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("ProcessControl: %v", err)
 	}
@@ -173,7 +175,7 @@ func TestProcessRalphCheckOrdinaryFailureStillBurnsAttempt(t *testing.T) {
 	}
 	check1 = mustGetBead(t, store, check1.ID)
 
-	result, err := ProcessControl(store, check1, ProcessOptions{CityPath: cityPath})
+	result, err := ProcessControl(beadstest.Graph(store), check1, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 	if err != nil {
 		t.Fatalf("ProcessControl: %v", err)
 	}
@@ -201,7 +203,7 @@ func TestProcessRalphControlBlindReadDoesNotBurnIteration(t *testing.T) {
 			store, control := newUnlaunchableCheckRalphControl(t, checkPath)
 			beadsBefore := countAllBeads(t, store)
 
-			result, err := ProcessControl(store, control, ProcessOptions{CityPath: cityPath})
+			result, err := ProcessControl(beadstest.Graph(store), control, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 			if !errors.Is(err, ErrControlPending) {
 				t.Fatalf("ProcessControl on a blind read = (%+v, %v), want ErrControlPending (re-run without spending the iteration)", result, err)
 			}
@@ -229,7 +231,7 @@ func TestProcessRalphControlVerdictStillBurnsIteration(t *testing.T) {
 			checkPath := writeCheckScript(t, cityPath, "verdict-check.sh", tc.script)
 			store, control := newUnlaunchableCheckRalphControl(t, checkPath)
 
-			result, err := ProcessControl(store, control, ProcessOptions{CityPath: cityPath})
+			result, err := ProcessControl(beadstest.Graph(store), control, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath})
 			if err != nil {
 				t.Fatalf("ProcessControl: %v", err)
 			}

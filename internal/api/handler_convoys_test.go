@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 )
@@ -481,7 +482,7 @@ func TestConvoyCheckReportsChildIDsAndDanglingTracks(t *testing.T) {
 	}
 	empty, _ := store.Create(beads.Bead{Title: "empty", Type: "convoy"})
 
-	members, err := convoycore.Members(store, convoy.ID, true)
+	members, err := convoycore.MembersIn(convoycore.MemberClasses{Convoy: beadstest.Work(store)}, convoy.ID, true)
 	if err != nil {
 		t.Fatalf("Members: %v", err)
 	}

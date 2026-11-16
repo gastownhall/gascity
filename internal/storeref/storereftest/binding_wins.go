@@ -35,11 +35,12 @@ import (
 // lands where nothing reads. Exit 0, no diagnostic. That silence is why this
 // has to be asserted rather than reasoned about.
 type BindingWinsStores struct {
-	// Binding is the relocated class store: the authoritative copy.
-	Binding beads.Store
+	// Binding is the relocated class store: the authoritative copy, as the
+	// writable handle a by-id resolution answers (beadstest.Resident).
+	Binding beads.ResidentStore
 
 	// Work is the city work store holding the migration's retained copy.
-	Work beads.Store
+	Work beads.WorkStore
 
 	// DualID is resident in BOTH stores under the same id, with a DIFFERENT
 	// title in each so a read can be attributed to one of them.
@@ -137,7 +138,7 @@ func RunBindingWins(t *testing.T, stores BindingWinsStores, surface BindingWinsS
 func assertBindingWinsPremise(t *testing.T, stores BindingWinsStores, surface BindingWinsSurface) {
 	t.Helper()
 	switch {
-	case stores.Binding == nil || stores.Work == nil:
+	case beads.IsNilStore(stores.Binding) || beads.IsNilStore(stores.Work):
 		t.Fatalf("%s: the binding-wins fixture needs both stores", surface.Name)
 	case stores.DualID == "" || stores.WorkOnlyID == "":
 		t.Fatalf("%s: the binding-wins fixture needs both a dual-resident id and a work-only control", surface.Name)

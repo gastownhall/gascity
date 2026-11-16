@@ -450,7 +450,7 @@ func routeWaitList(cityPath string, c *api.Client, nilReason, stateFilter, sessi
 		if err == nil {
 			logRoute(stderr, cmdName, "api", "")
 			emitWaitListPartialNotice(stderr, cr.Body)
-			return renderWaitList(cityPath, cr.Body.Waits, cr.AgeSeconds, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
+			return renderWaitList(cityPath, cr.Body.Waits, cr.AgeSeconds, cr.Refresh, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
 		}
 		// Rung 2: an old server lacks /v0/waits (404 with no problem+json body);
 		// serve via the generic gc:wait beads endpoint instead.
@@ -459,7 +459,7 @@ func routeWaitList(cityPath string, c *api.Client, nilReason, stateFilter, sessi
 			if lerr == nil {
 				logRoute(stderr, cmdName, "api-legacy", "route-missing")
 				emitWaitListPartialNotice(stderr, lr.Body)
-				return renderWaitList(cityPath, lr.Body.Waits, lr.AgeSeconds, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
+				return renderWaitList(cityPath, lr.Body.Waits, lr.AgeSeconds, lr.Refresh, stateFilter, sessionFilter, jsonOutput, stdout, stderr)
 			}
 			err = lerr
 		}
@@ -493,8 +493,10 @@ func emitWaitListPartialNotice(stderr io.Writer, wl api.WaitList) {
 
 // renderWaitList applies the idempotent client-side stable ascending sort and
 // state/session filter over already-projected WaitInfo, so the typed rung, the
-// legacy rung, and the local fallback produce byte-identical output.
-func renderWaitList(cityPath string, waits []sessionpkg.WaitInfo, ageSeconds float64, stateFilter, sessionFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
+// legacy rung, and the local fallback produce byte-identical output. Human
+// output is followed by the cache-age footer on stderr when the server's cache
+// is behind (writeCacheAgeFooter).
+func renderWaitList(cityPath string, waits []sessionpkg.WaitInfo, ageSeconds float64, refresh api.CacheRefresh, stateFilter, sessionFilter string, jsonOutput bool, stdout, stderr io.Writer) int {
 	items := append([]sessionpkg.WaitInfo(nil), waits...)
 	sort.SliceStable(items, func(i, j int) bool { return items[i].CreatedAt.Before(items[j].CreatedAt) })
 	filtered := filterWaitListItems(items, stateFilter, sessionFilter)
@@ -502,9 +504,7 @@ func renderWaitList(cityPath string, waits []sessionpkg.WaitInfo, ageSeconds flo
 		return writeWaitListJSON(stdout, stderr, cityPath, filtered)
 	}
 	writeWaitListTable(filtered, stdout)
-	if ageSeconds > cacheAgeBannerThresholdSeconds {
-		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", ageSeconds) //nolint:errcheck
-	}
+	writeCacheAgeFooter(stderr, ageSeconds, refresh)
 	return 0
 }
 
@@ -607,7 +607,7 @@ func routeWaitInspect(cityPath string, c *api.Client, nilReason, waitID string, 
 		cr, err := c.GetWait(waitID)
 		if err == nil {
 			logRoute(stderr, cmdName, "api", "")
-			return renderWaitInspect(cityPath, cr.Body, cr.AgeSeconds, jsonOutput, stdout, stderr)
+			return renderWaitInspect(cityPath, cr.Body, cr.AgeSeconds, cr.Refresh, jsonOutput, stdout, stderr)
 		}
 		var naw *api.NotAWaitError
 		if errors.As(err, &naw) {
@@ -619,7 +619,7 @@ func routeWaitInspect(cityPath string, c *api.Client, nilReason, waitID string, 
 			lr, lerr := c.GetWaitViaBead(waitID)
 			if lerr == nil {
 				logRoute(stderr, cmdName, "api-legacy", "route-missing")
-				return renderWaitInspect(cityPath, lr.Body, lr.AgeSeconds, jsonOutput, stdout, stderr)
+				return renderWaitInspect(cityPath, lr.Body, lr.AgeSeconds, lr.Refresh, jsonOutput, stdout, stderr)
 			}
 			if errors.As(lerr, &naw) {
 				logRoute(stderr, cmdName, "api-legacy", "error")
@@ -640,14 +640,15 @@ func routeWaitInspect(cityPath string, c *api.Client, nilReason, waitID string, 
 	return doWaitInspectFallback(cityPath, waitID, jsonOutput, stdout, stderr)
 }
 
-func renderWaitInspect(cityPath string, wait sessionpkg.WaitInfo, ageSeconds float64, jsonOutput bool, stdout, stderr io.Writer) int {
+// renderWaitInspect prints one wait as JSON or a human detail block; the human
+// block is followed by the cache-age footer on stderr when the server's cache
+// is behind (writeCacheAgeFooter).
+func renderWaitInspect(cityPath string, wait sessionpkg.WaitInfo, ageSeconds float64, refresh api.CacheRefresh, jsonOutput bool, stdout, stderr io.Writer) int {
 	if jsonOutput {
 		return writeWaitInspectJSON(stdout, stderr, cityPath, wait)
 	}
 	writeWaitDetail(wait, stdout)
-	if ageSeconds > cacheAgeBannerThresholdSeconds {
-		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", ageSeconds) //nolint:errcheck
-	}
+	writeCacheAgeFooter(stderr, ageSeconds, refresh)
 	return 0
 }
 

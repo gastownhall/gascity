@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // This file is the load-bearing safety pin for the WI-6 store-domain-objects
@@ -83,7 +84,7 @@ func beadIDs(bs []beads.Bead) []string {
 func assertListAllEquivalent(t *testing.T, front *Store, raw beads.Store, opts ListAllOptions, query beads.ListQuery) {
 	t.Helper()
 	got, gotErr := front.ListAll(opts)
-	wantBeads, wantErr := ListAllSessionBeads(raw, query)
+	wantBeads, wantErr := ListAllSessionBeads(beadstest.Sessions(raw), query)
 
 	switch {
 	case (gotErr == nil) != (wantErr == nil):
@@ -189,7 +190,7 @@ func TestListAllForReconcileMatchesListAllSessionBeads(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			front, mem := newFront()
 			got, gotErr := front.ListAllForReconcile(tc.opts)
-			wantBeads, wantErr := ListAllSessionBeads(mem, tc.query)
+			wantBeads, wantErr := ListAllSessionBeads(beadstest.Sessions(mem), tc.query)
 			switch {
 			case (gotErr == nil) != (wantErr == nil):
 				t.Fatalf("opts=%+v: error presence mismatch got=%v want=%v", tc.opts, gotErr, wantErr)

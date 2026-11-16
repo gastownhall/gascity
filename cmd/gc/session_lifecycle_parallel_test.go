@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -7232,7 +7233,7 @@ func TestExecutePreparedStartWave_ParallelStabilitySignalsAreSessionScoped(t *te
 func TestExecutePreparedStartWave_ThreadsInnerStabilitySignalThroughWorkerBoundary(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
+	mgr := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithCityPath(t.TempDir()))
 	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{
 		BeadOnly: true,
 		Template: "worker",
@@ -9605,5 +9606,117 @@ func TestPrepareStartCandidateForCity_SurvivingNamedTriggerLaunchesWithOnlyTheDe
 	}
 	if v := after.Metadata[beadmeta.TriggerBeadIDMetadataKey]; v != work.ID {
 		t.Errorf("durable trigger stamp = %q, want kept as %q", v, work.ID)
+	}
+}
+
+// budgetExhaustingStartProvider is a runtime whose Start outlives the start
+// budget: it waits for the start context to end, optionally cancels the
+// controller context first, and then reports a successful launch.
+type budgetExhaustingStartProvider struct {
+	*runtime.Fake
+	// cancelParent, when set, is called before Start waits, standing in for
+	// the controller canceling the start.
+	cancelParent context.CancelFunc
+}
+
+func (p *budgetExhaustingStartProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if p.cancelParent != nil {
+		p.cancelParent()
+	}
+	<-ctx.Done()
+	return p.Fake.Start(context.Background(), name, cfg)
+}
+
+// recordingStabilityWaiter records the context each stability wait received.
+type recordingStabilityWaiter struct {
+	mu     sync.Mutex
+	calls  int
+	ctxErr error
+	// after runs once the wait is recorded, before it reports.
+	after func(name string)
+}
+
+func (w *recordingStabilityWaiter) wait(ctx context.Context, name string) bool {
+	w.mu.Lock()
+	w.calls++
+	w.ctxErr = ctx.Err()
+	w.mu.Unlock()
+	if w.after != nil {
+		w.after(name)
+	}
+	return ctx.Err() == nil
+}
+
+func (w *recordingStabilityWaiter) snapshot() (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.calls, w.ctxErr
+}
+
+func runBudgetExhaustingStart(ctx context.Context, t *testing.T, sp *budgetExhaustingStartProvider, waiter *recordingStabilityWaiter) startResult {
+	t.Helper()
+	city := t.TempDir()
+	item, release := leasedStart(t, city, storelessPostStartItem(t.TempDir()))
+	defer release()
+	done := make(chan startResult, 1)
+	go func() {
+		done <- runPreparedStartCandidate(ctx, item, city, sp, nil, nil, 10*time.Millisecond, waiter.wait, immediateSessionStaleKeyDetectionWaiter, nil)
+	}()
+	select {
+	case result := <-done:
+		return result
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("runPreparedStartCandidate did not return after the start budget ran out")
+		return startResult{}
+	}
+}
+
+// A keyed fresh start whose provider.Start used up the whole startup budget
+// still runs the stale-resume-key liveness check: the stability wait runs on
+// the controller context, not the spent start context, so a session that died
+// right after launch is recorded as a startup death.
+func TestRunPreparedStartCandidateStabilityWaitSurvivesExhaustedStartupBudget(t *testing.T) {
+	sp := &budgetExhaustingStartProvider{Fake: runtime.NewFake()}
+	waiter := &recordingStabilityWaiter{
+		// The session dies during the stability window.
+		after: func(name string) { _ = sp.Stop(name) },
+	}
+
+	result := runBudgetExhaustingStart(context.Background(), t, sp, waiter)
+
+	calls, ctxErr := waiter.snapshot()
+	if calls != 1 {
+		t.Fatalf("stability waiter calls = %d, want 1 (the post-start liveness branch did not run)", calls)
+	}
+	if ctxErr != nil {
+		t.Fatalf("stability waiter ctx.Err() = %v, want a live context after the start budget ran out", ctxErr)
+	}
+	if !result.diedDuringStartup {
+		t.Fatalf("diedDuringStartup = false (outcome %q, err %v), want the post-start liveness check to record the death", result.outcome, result.err)
+	}
+	if result.err == nil || result.outcome == TraceOutcomeSuccess {
+		t.Fatalf("result = {outcome:%q err:%v}, want a failed start, not a success", result.outcome, result.err)
+	}
+}
+
+// A controller cancel still ends the stability wait: the waiter sees a done
+// context and the start returns instead of hanging.
+func TestRunPreparedStartCandidateStabilityWaitHonoursControllerCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sp := &budgetExhaustingStartProvider{Fake: runtime.NewFake(), cancelParent: cancel}
+	waiter := &recordingStabilityWaiter{}
+
+	result := runBudgetExhaustingStart(ctx, t, sp, waiter)
+
+	calls, ctxErr := waiter.snapshot()
+	if calls != 1 {
+		t.Fatalf("stability waiter calls = %d, want 1", calls)
+	}
+	if !errors.Is(ctxErr, context.Canceled) {
+		t.Fatalf("stability waiter ctx.Err() = %v, want context.Canceled from the controller", ctxErr)
+	}
+	if result.outcome == TraceOutcomeSuccess {
+		t.Fatalf("result = {outcome:%q err:%v}, want a canceled start, not a success", result.outcome, result.err)
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -60,7 +61,7 @@ func startPendingSessionHandle(t *testing.T) pendingSessionHandle {
 
 	cityPath := t.TempDir()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(beads.NewMemStore(), sp, sessionpkg.WithCityPath(cityPath))
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(beads.NewMemStore()), sp, sessionpkg.WithCityPath(cityPath))
 	handle, err := worker.NewSessionHandle(worker.SessionHandleConfig{
 		Manager: manager,
 		Session: worker.SessionSpec{

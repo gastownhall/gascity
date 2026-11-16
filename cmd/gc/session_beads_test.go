@@ -2163,7 +2163,7 @@ func TestSyncSessionBeads_StaleManualPlanDoesNotRecreateClosedSession(t *testing
 		},
 	}
 	city := t.TempDir()
-	manager := session.NewManagerWithOptions(store, sp, session.WithCityPath(city))
+	manager := session.NewManagerWithOptions(beadstest.Sessions(store), sp, session.WithCityPath(city))
 	if _, err := manager.CloseDetailed(context.Background(), testOperatorIn(t, city), bead.ID); err != nil {
 		t.Fatalf("close manual session: %v", err)
 	}
@@ -5481,6 +5481,71 @@ func TestSyncSessionBeads_ProjectsSessionIDFlag(t *testing.T) {
 	}
 }
 
+// syncProviderProjection creates a worker session bead, overwrites its
+// provider projection with stored (a missing key stored empty), syncs it
+// under resolved and returns the bead's metadata; a second sync under the
+// same resolution must write nothing.
+func syncProviderProjection(t *testing.T, stored map[string]string, resolved *config.ResolvedProvider) map[string]string {
+	t.Helper()
+	cs := &countingStore{Store: beads.NewMemStore()}
+	clk := &clock.Fake{Time: time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	_ = sp.Start(context.TODO(), "worker", runtime.Config{Command: "run-worker"})
+	ds := map[string]TemplateParams{"worker": {TemplateName: "worker", Command: "run-worker"}}
+	var stderr bytes.Buffer
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	created := allSessionBeads(t, cs)
+	if len(created) != 1 {
+		t.Fatalf("expected 1 bead after the create tick, got %d", len(created))
+	}
+	overlay := make(map[string]string, len(providerProjectionKeys))
+	for _, k := range providerProjectionKeys {
+		overlay[k] = stored[k]
+	}
+	if err := cs.SetMetadataBatch(created[0].ID, overlay); err != nil {
+		t.Fatalf("SetMetadataBatch(stored projection): %v", err)
+	}
+
+	ds["worker"] = TemplateParams{TemplateName: "worker", Command: "run-worker", ResolvedProvider: resolved}
+	clk.Advance(time.Minute)
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	got := allSessionBeads(t, cs)[0].Metadata
+
+	writesBefore := cs.writes
+	clk.Advance(time.Minute)
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	if cs.writes != writesBefore {
+		t.Errorf("an unchanged sync wrote metadata (%d -> %d writes); the projection must be diff-gated (#1205)", writesBefore, cs.writes)
+	}
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+	return got
+}
+
+// TestSyncSessionBeads_ProviderProjectionClearsMissingFields guards #8539:
+// existing-session sync makes a successful provider resolution
+// authoritative for the six family and resume keys, so a key the resolved
+// provider leaves empty clears instead of keeping the previous provider's
+// value; a nil resolution keeps all seven stored keys.
+func TestSyncSessionBeads_ProviderProjectionClearsMissingFields(t *testing.T) {
+	for _, tc := range providerProjectionCases(t) {
+		t.Run(tc.name, func(t *testing.T) {
+			got := syncProviderProjection(t, tc.stored, tc.resolved)
+			for _, k := range providerProjectionKeys {
+				if got[k] != tc.want[k] {
+					t.Errorf("%s = %q after sync, want %q", k, got[k], tc.want[k])
+				}
+			}
+			if tc.family != "" {
+				if family := session.ProviderFamilyFromMetadata(got, ""); family != tc.family {
+					t.Errorf("provider family = %q after sync, want %q", family, tc.family)
+				}
+			}
+		})
+	}
+}
+
 func TestSyncSessionBeadsWithSnapshot_RefreshesMissingNamedSessionFromStore(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -7990,7 +8055,7 @@ func TestCleanupDeadRuntimeSessionCorpsesReleasesAliasOnBeadClose(t *testing.T) 
 	}
 
 	// The freed alias must now be available for a successor on the same slot.
-	if err := session.EnsureAliasAvailable(store, "gascity-packs/codex-1", ""); err != nil {
+	if err := session.EnsureAliasAvailable(beadstest.Sessions(store), "gascity-packs/codex-1", ""); err != nil {
 		t.Fatalf("EnsureAliasAvailable after cleanup = %v, want nil (alias still held by closed corpse)", err)
 	}
 }
@@ -10887,4 +10952,19 @@ func TestSyncSessionBeads_DoesNotMintSessionKeyOnLiveKeylessRow(t *testing.T) {
 			t.Errorf("a keyless row in state %q: session_key %q after sync, want minted %v; stderr=%s", tc.state, key, tc.mint, stderr.String())
 		}
 	}
+}
+
+// findClosedNamedSessionBead is session.FindClosedNamedSessionBead over a
+// single store serving the sessions class, ignoring the error.
+func findClosedNamedSessionBead(store beads.Store, identity string) (beads.Bead, bool) {
+	bead, ok, _ := session.FindClosedNamedSessionBead(beadstest.Sessions(store), identity)
+	return bead, ok
+}
+
+// findClosedNamedSessionBeadForSessionName is
+// session.FindClosedNamedSessionBeadForSessionName over a single store serving
+// the sessions class, ignoring the error.
+func findClosedNamedSessionBeadForSessionName(store beads.Store, identity, sessionName string) (beads.Bead, bool) {
+	bead, ok, _ := session.FindClosedNamedSessionBeadForSessionName(beadstest.Sessions(store), identity, sessionName)
+	return bead, ok
 }

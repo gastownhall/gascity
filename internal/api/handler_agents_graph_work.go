@@ -43,18 +43,19 @@ type graphAgentWork struct {
 // per-agent status and agent-list loops, so those loops never fan a query per
 // agent.
 //
-// On a default (single-store) city the graph class is not relocated, so
-// GraphBeadStore().Store equals CityBeadStore() (or is nil) and this returns
-// nil — every downstream lookup misses and the read path stays byte-identical
-// to the pre-seam single-store behavior. Only a city that has RELOCATED its
-// graph class to a dedicated store is scanned, matching the guard the other
+// On a default (single-store) city the graph class is not relocated, so the
+// graph handle wraps the work store (or is zero) and this returns nil — every
+// downstream lookup misses and the read path stays byte-identical to the
+// pre-seam single-store behavior. Only a city that has RELOCATED its graph
+// class to a dedicated store is scanned, matching the guard the other
 // relocated-graph legs use (see isGraphConvoyID in handler_convoys.go).
 func (s *Server) graphActiveWorkBySession() map[string]graphAgentWork {
-	graphStore := s.state.GraphBeadStore().Store
-	if graphStore == nil || graphStore == s.state.CityBeadStore() {
+	st := s.state.Stores()
+	graph := st.Graph()
+	if graph == (beads.GraphStore{}) || beads.SameStore(graph, st.Work()) {
 		return nil
 	}
-	inProgress, err := graphStore.List(beads.ListQuery{
+	inProgress, err := graph.List(beads.ListQuery{
 		Status: "in_progress",
 		Limit:  graphActiveWorkListLimit,
 		Sort:   beads.SortCreatedDesc,

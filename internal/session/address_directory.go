@@ -93,7 +93,7 @@ func (s *Store) ResolveMailboxAddress(selector string, closed bool) (Info, error
 // selector, deduplicated by bead ID.
 func (s *Store) mailboxMatches(selector string, closed bool) ([]beads.Bead, error) {
 	store := s.beadStore()
-	if store == nil {
+	if store == (beads.SessionStore{}) {
 		return nil, nil
 	}
 	var matches []beads.Bead
@@ -130,7 +130,7 @@ func (s *Store) mailboxMatches(selector string, closed bool) ([]beads.Bead, erro
 // mailboxMatchesByMetadata probes one indexed address key. The re-check on the
 // rows it returns is not redundant: a backing store may answer a metadata
 // filter loosely, and a loose answer here delivers someone else's mail.
-func mailboxMatchesByMetadata(store beads.Store, key, selector, status string) ([]beads.Bead, error) {
+func mailboxMatchesByMetadata(store beads.SessionStore, key, selector, status string) ([]beads.Bead, error) {
 	query := beads.ListQuery{
 		Metadata: map[string]string{key: selector},
 		TierMode: beads.TierBoth,

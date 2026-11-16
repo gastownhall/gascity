@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -50,7 +51,7 @@ func newInvocationTelemetryHandle(t *testing.T) (*SessionHandle, *beads.MemStore
 	workDir := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithCityPath(t.TempDir()))
 	handle, err := NewSessionHandle(SessionHandleConfig{
 		Manager:     manager,
 		SearchPaths: []string{searchBase},
@@ -501,7 +502,7 @@ func newFamilyTelemetryHandle(t *testing.T, profile Profile, provider, command s
 	workDir := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithCityPath(t.TempDir()))
 	handle, err := NewSessionHandle(SessionHandleConfig{
 		Manager:     manager,
 		SearchPaths: []string{searchBase},

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
@@ -25,7 +26,7 @@ func suspensionTestDeps(t *testing.T, cfg *config.City, runner *fakeRunner) Slin
 	t.Helper()
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
 	deps.CityPath = t.TempDir()
-	deps.Store = seededStore(suspensionTestBead)
+	deps = withStore(deps, seededStore(suspensionTestBead))
 	return deps
 }
 
@@ -404,7 +405,7 @@ title = "Do work"
 	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
 	store := beads.NewMemStore()
 	store.IDPrefix = "my"
-	deps.Store = store
+	deps = withStore(deps, store)
 	deps.CityPath = t.TempDir()
 	setCitySuspendedState(t, deps.CityPath, true)
 	setRigSuspendedState(t, deps.CityPath, true)
@@ -434,7 +435,7 @@ func createSuspensionTestConvoy(t *testing.T, store beads.Store) beads.Bead {
 	if err != nil {
 		t.Fatalf("create convoy: %v", err)
 	}
-	if err := convoycore.TrackItem(store, convoy.ID, createSuspensionTestTask(t, store).ID); err != nil {
+	if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beadstest.Work(store)}, convoy.ID, createSuspensionTestTask(t, store).ID); err != nil {
 		t.Fatalf("track task: %v", err)
 	}
 	return convoy

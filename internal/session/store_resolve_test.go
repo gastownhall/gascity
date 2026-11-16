@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // The identifier-resolution methods on Store are equivalence-tested against the
@@ -50,17 +51,17 @@ func TestStoreResolveMethodsMatchTheirPackageFunctions(t *testing.T) {
 	for _, identifier := range identifiers {
 		t.Run("exact-id/"+identifier, func(t *testing.T) {
 			gotID, gotErr := front.ResolveIDByExactID(identifier)
-			wantID, wantErr := ResolveSessionIDByExactID(store, identifier)
+			wantID, wantErr := ResolveSessionIDByExactID(beadstest.Sessions(store), identifier)
 			assertSameResolution(t, gotID, gotErr, wantID, wantErr)
 		})
 		t.Run("live/"+identifier, func(t *testing.T) {
 			gotID, gotErr := front.ResolveID(identifier)
-			wantID, wantErr := ResolveSessionID(store, identifier)
+			wantID, wantErr := ResolveSessionID(beadstest.Sessions(store), identifier)
 			assertSameResolution(t, gotID, gotErr, wantID, wantErr)
 		})
 		t.Run("allow-closed/"+identifier, func(t *testing.T) {
 			gotID, gotErr := front.ResolveIDAllowClosed(identifier)
-			wantID, wantErr := ResolveSessionIDAllowClosed(store, identifier)
+			wantID, wantErr := ResolveSessionIDAllowClosed(beadstest.Sessions(store), identifier)
 			assertSameResolution(t, gotID, gotErr, wantID, wantErr)
 		})
 	}
@@ -112,7 +113,7 @@ func TestStoreLookupConfiguredNamedProjectsIdsWithoutBeads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LookupConfiguredNamed: %v", err)
 	}
-	lookup, err := LookupConfiguredNamedSession(mem, spec)
+	lookup, err := LookupConfiguredNamedSession(beadstest.Sessions(mem), spec)
 	if err != nil {
 		t.Fatalf("LookupConfiguredNamedSession: %v", err)
 	}
@@ -148,7 +149,7 @@ func TestStoreLookupConfiguredNamedReportsAConflict(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LookupConfiguredNamed: %v", err)
 	}
-	lookup, err := LookupConfiguredNamedSession(mem, spec)
+	lookup, err := LookupConfiguredNamedSession(beadstest.Sessions(mem), spec)
 	if err != nil {
 		t.Fatalf("LookupConfiguredNamedSession: %v", err)
 	}

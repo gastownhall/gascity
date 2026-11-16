@@ -64,6 +64,23 @@ printf '%s\n' "$*" >> "$STATE/calls.log"
 # herdr ≥0.8.2 reads an agent on the untrusted trust dialog as blocked, unless
 # the scenario has it read that dialog as idle (dialog_reads_idle).
 blocked() { [ -e "$STATE/trust_dialog" ] && [ ! -e "$STATE/trusted" ] && [ ! -e "$STATE/dialog_reads_idle" ]; }
+# Real herdr reports a failed verb as the bare envelope on stderr with a
+# non-zero exit. prompt_error_stdout answers with the typed envelope on stdout
+# instead, and prompt_error_decorated quotes the envelope inside diagnostic
+# text ahead of a different error.
+prompt_error() {
+  if [ -e "$STATE/prompt_error_decorated" ]; then
+    printf 'invalid argument: %s\n' "$1" >&2
+    printf '%s\n' '{"error":{"code":"invalid_args","message":"invalid prompt argument"}}' >&2
+    exit 1
+  fi
+  if [ -e "$STATE/prompt_error_stdout" ]; then
+    printf '%s' "$1"
+    return
+  fi
+  printf '%s' "$1" >&2
+  exit 1
+}
 case "$1_$2" in
 agent_get)
   if [ ! -e "$STATE/registered" ]; then
@@ -152,16 +169,13 @@ agent_prompt)
     exit 1
   elif [ -e "$STATE/prompt_stalled" ]; then
     # No state change inside herdr's fixed 5000ms window: the submit CR never
-    # reached the TUI and the text sits unsubmitted in an idle input box. Real
-    # herdr reports a failed verb on stderr with a non-zero exit.
-    printf '%s' '{"error":{"code":"agent_prompt_stalled","message":"no state change observed after submission"}}' >&2
-    exit 1
+    # reached the TUI and the text sits unsubmitted in an idle input box.
+    prompt_error '{"error":{"code":"agent_prompt_stalled","message":"no state change observed after submission"}}'
   elif [ -e "$STATE/prompt_times_out" ]; then
     # The state-change gate passed (the CR landed) but no --until state was
     # observed before --timeout. herdr only reports this when --timeout
     # exceeds its 5000ms window; a shorter one masks the stall as a timeout.
-    printf '%s' '{"error":{"code":"timeout","message":"timed out waiting for agent status"}}' >&2
-    exit 1
+    prompt_error '{"error":{"code":"timeout","message":"timed out waiting for agent status"}}'
   elif [ -e "$STATE/prompt_blocked" ]; then
     # The first turn opened a confirmation dialog. herdr matches only the
     # requested --until states, so this settles iff the caller asked for

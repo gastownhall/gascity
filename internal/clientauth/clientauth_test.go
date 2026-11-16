@@ -153,7 +153,7 @@ func TestRunCredentialCommand_RealExec(t *testing.T) {
 	exp := time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
 	// The command echoes a token built from GC_EXEC_INFO to prove env delivery,
 	// and asserts GC_GRANT_INFO was stripped.
-	script := `test -z "$GC_GRANT_INFO" && printf '{"token":"t-%s","expiration_timestamp":"` + exp + `"}' "$(echo "$GC_EXEC_INFO" | grep -o mc)"`
+	script := realExecCommand(exp)
 	res, err := runCredentialCommand(context.Background(), script, ExecInfo{Version: Version, Spec: ExecSpec{ServerURL: "https://box:9443", City: "mc"}})
 	if err != nil {
 		t.Fatalf("exec: %v", err)
@@ -167,7 +167,7 @@ func TestRunCredentialCommand_RealExec(t *testing.T) {
 }
 
 func TestRunCredentialCommand_NonZeroExit(t *testing.T) {
-	_, err := runCredentialCommand(context.Background(), "echo oops >&2; exit 7", ExecInfo{Version: Version})
+	_, err := runCredentialCommand(context.Background(), failingCommand, ExecInfo{Version: Version})
 	if err == nil {
 		t.Fatal("non-zero exit must error")
 	}

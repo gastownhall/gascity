@@ -30,7 +30,7 @@ func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	}
 	roots := scanRecordsBySessionID(records, id)
 	if id == "" {
-		roots = orphanCandidates(roots, 0)
+		roots = orphanCandidates(roots)
 	}
 	return withStartIdentities(roots), nil
 }

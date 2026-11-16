@@ -2882,3 +2882,568 @@ title = "Review by {reviewer}"
 		t.Fatalf("title = %q, want the expansion default resolved against the provided var", step.Title)
 	}
 }
+
+func writeCheckMaxAttemptsVarFormula(t *testing.T, varsBlock string) string {
+	t.Helper()
+	dir := t.TempDir()
+	formulaContent := `
+formula = "check-var-demo"
+version = 1
+
+[requires]
+formula_compiler = ">=2.0.0"
+` + varsBlock + `
+[[steps]]
+id = "implement"
+title = "Implement"
+
+[steps.check]
+max_attempts = "{{attempts}}"
+
+[steps.check.check]
+mode = "exec"
+path = ".gascity/checks/widget.sh"
+`
+	if err := os.WriteFile(filepath.Join(dir, "check-var-demo.toml"), []byte(formulaContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func checkControlMaxAttempts(t *testing.T, recipe *Recipe) (string, int) {
+	t.Helper()
+	control := recipe.StepByID("check-var-demo.implement")
+	if control == nil {
+		t.Fatal("check control step missing")
+	}
+	spec := recipe.StepByID("check-var-demo.implement.spec")
+	if spec == nil {
+		t.Fatal("check spec step missing")
+	}
+	var frozen Step
+	if err := json.Unmarshal([]byte(spec.Description), &frozen); err != nil {
+		t.Fatalf("decode frozen spec: %v", err)
+	}
+	if frozen.Ralph == nil {
+		t.Fatal("frozen spec lost its check")
+	}
+	return control.Metadata[beadmeta.MaxAttemptsMetadataKey], frozen.Ralph.MaxAttempts
+}
+
+func TestCompileCheckMaxAttemptsFromVar(t *testing.T) {
+	enableV2ForTest(t)
+	dir := writeCheckMaxAttemptsVarFormula(t, `
+[vars.attempts]
+default = "3"
+`)
+
+	for _, tc := range []struct {
+		vars map[string]string
+		want string
+	}{
+		{vars: nil, want: "3"},
+		{vars: map[string]string{"attempts": "5"}, want: "5"},
+	} {
+		recipe, err := Compile(context.Background(), "check-var-demo", []string{dir}, tc.vars)
+		if err != nil {
+			t.Fatalf("Compile(%v): %v", tc.vars, err)
+		}
+		meta, frozen := checkControlMaxAttempts(t, recipe)
+		if meta != tc.want {
+			t.Errorf("Compile(%v): gc.max_attempts = %q, want %q", tc.vars, meta, tc.want)
+		}
+		if fmt.Sprint(frozen) != tc.want {
+			t.Errorf("Compile(%v): frozen spec max_attempts = %d, want %s", tc.vars, frozen, tc.want)
+		}
+	}
+}
+
+func TestCompileCheckMaxAttemptsVarRejectsBadValues(t *testing.T) {
+	enableV2ForTest(t)
+	dir := writeCheckMaxAttemptsVarFormula(t, `
+[vars.attempts]
+default = "3"
+`)
+
+	for _, value := range []string{"0", "-1", "two", "", "2.5"} {
+		_, err := Compile(context.Background(), "check-var-demo", []string{dir}, map[string]string{"attempts": value})
+		if err == nil {
+			t.Fatalf("Compile(attempts=%q) succeeded, want error", value)
+		}
+		requireErrorContains(t, err, "max_attempts")
+		requireErrorContains(t, err, "attempts")
+	}
+}
+
+func TestCompileCheckMaxAttemptsVarRequiresValue(t *testing.T) {
+	enableV2ForTest(t)
+	dir := writeCheckMaxAttemptsVarFormula(t, `
+[vars.attempts]
+required = true
+`)
+
+	if _, err := Compile(context.Background(), "check-var-demo", []string{dir}, nil); err == nil {
+		t.Fatal("Compile without a value for a required max_attempts var succeeded, want error")
+	}
+	recipe, err := Compile(context.Background(), "check-var-demo", []string{dir}, map[string]string{"attempts": "4"})
+	if err != nil {
+		t.Fatalf("Compile(attempts=4): %v", err)
+	}
+	if meta, _ := checkControlMaxAttempts(t, recipe); meta != "4" {
+		t.Fatalf("gc.max_attempts = %q, want 4", meta)
+	}
+}
+
+func TestCompileCheckMaxAttemptsVarUndeclaredFails(t *testing.T) {
+	enableV2ForTest(t)
+	dir := writeCheckMaxAttemptsVarFormula(t, "")
+
+	_, err := Compile(context.Background(), "check-var-demo", []string{dir}, nil)
+	if err == nil {
+		t.Fatal("Compile with an undeclared max_attempts var succeeded, want error")
+	}
+	requireErrorContains(t, err, "attempts")
+}
+
+func TestParseCheckMaxAttemptsRejectsNonPlaceholderStrings(t *testing.T) {
+	for _, raw := range []string{`"3"`, `"{{attempts}}x"`, `"{attempts}"`, `"{{ }}"`} {
+		var step Step
+		data := map[string]interface{}{}
+		if err := json.Unmarshal([]byte(`{"id":"s","title":"S","check":{"max_attempts":`+raw+`,"check":{"mode":"exec","path":"c.sh"}}}`), &data); err != nil {
+			t.Fatal(err)
+		}
+		err := step.UnmarshalTOML(data)
+		if err == nil {
+			t.Fatalf("max_attempts = %s parsed, want error", raw)
+		}
+		requireErrorContains(t, err, "max_attempts")
+	}
+}
+
+func TestCheckMaxAttemptsVarRoundTripsThroughJSON(t *testing.T) {
+	spec := RalphSpec{MaxAttemptsVar: "attempts", Check: &RalphCheckSpec{Mode: "exec", Path: "c.sh"}}
+	encoded, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"max_attempts":"{{attempts}}"`) {
+		t.Fatalf("encoded spec = %s, want the max_attempts placeholder", encoded)
+	}
+	var decoded RalphSpec
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.MaxAttemptsVar != "attempts" || decoded.MaxAttempts != 0 {
+		t.Fatalf("decoded = %+v, want MaxAttemptsVar=attempts", decoded)
+	}
+}
+
+func TestCompileCheckMaxAttemptsVarResolvesInExpansionScope(t *testing.T) {
+	enableV2ForTest(t)
+	const expansion = `
+formula = "check-var-expansion"
+type = "expansion"
+version = 1
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[vars.attempts]
+default = "2"
+
+[[template]]
+id = "{target}.verify"
+title = "Verify {target}"
+
+[template.check]
+max_attempts = "{{attempts}}"
+
+[template.check.check]
+mode = "exec"
+path = ".gascity/checks/widget.sh"
+`
+	const header = `
+formula = "check-var-parent"
+version = 1
+
+[requires]
+formula_compiler = ">=2.0.0"
+`
+	const target = `
+[[steps]]
+id = "release"
+title = "Release"
+`
+	for _, tc := range []struct {
+		name   string
+		parent string
+		want   string
+	}{
+		{name: "expansion default", parent: header + target + `
+[[compose.expand]]
+target = "release"
+with = "check-var-expansion"
+`, want: "2"},
+		{name: "compose rule var", parent: header + target + `
+[[compose.expand]]
+target = "release"
+with = "check-var-expansion"
+vars = { attempts = "4" }
+`, want: "4"},
+		{name: "compose map rule var", parent: header + target + `
+[[compose.map]]
+select = "release"
+with = "check-var-expansion"
+vars = { attempts = "6" }
+`, want: "6"},
+		{name: "inline expand_vars", parent: header + `
+[[steps]]
+id = "release"
+title = "Release"
+expand = "check-var-expansion"
+expand_vars = { attempts = "5" }
+`, want: "5"},
+		{name: "expansion default shadows a parent var of the same name", parent: header + `
+[vars.attempts]
+default = "9"
+` + target + `
+[[compose.expand]]
+target = "release"
+with = "check-var-expansion"
+`, want: "2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for name, body := range map[string]string{"check-var-expansion.toml": expansion, "check-var-parent.toml": tc.parent} {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			recipe, err := Compile(context.Background(), "check-var-parent", []string{dir}, nil)
+			if err != nil {
+				t.Fatalf("Compile: %v", err)
+			}
+			control := recipe.StepByID("check-var-parent.release.verify")
+			if control == nil {
+				t.Fatalf("expanded check control missing; steps = %+v", recipe.Steps)
+			}
+			if got := control.Metadata[beadmeta.MaxAttemptsMetadataKey]; got != tc.want {
+				t.Fatalf("gc.max_attempts = %q, want %q (the expansion's var scope)", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCompileCheckMaxAttemptsVarResolvesInInvokingExpansionScope(t *testing.T) {
+	enableV2ForTest(t)
+	const requires = `
+version = 1
+
+[requires]
+formula_compiler = ">=2.0.0"
+`
+	const rootVar = `
+[vars.attempts]
+default = "9"
+`
+	for _, tc := range []struct {
+		name            string
+		rootVars        string
+		rootExpandVars  string
+		innerExpandVars string
+		innerVars       string
+		want            string
+	}{
+		{name: "invoking expansion's default before the root's var", rootVars: rootVar, want: "2"},
+		{name: "invoking expansion's default without a root var", want: "2"},
+		{name: "root step's override of the invoking expansion's var", rootVars: rootVar, rootExpandVars: `expand_vars = { attempts = "7" }`, want: "7"},
+		{name: "invoking step's override of the inner expansion's var", rootVars: rootVar, innerExpandVars: `expand_vars = { attempts = "5" }`, want: "5"},
+		{name: "inner expansion's own default first", rootVars: rootVar, innerVars: `
+[vars.attempts]
+default = "3"
+`, want: "3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeNamedFormula(t, dir, "check-var-root", `
+formula = "check-var-root"
+`+requires+tc.rootVars+`
+[[steps]]
+id = "release"
+title = "Release"
+expand = "check-var-outer"
+`+tc.rootExpandVars+`
+`)
+			writeNamedFormula(t, dir, "check-var-outer", `
+formula = "check-var-outer"
+type = "expansion"
+`+requires+`
+[vars.attempts]
+default = "2"
+
+[[template]]
+id = "{target}.inner"
+title = "Inner {target}"
+expand = "check-var-inner"
+`+tc.innerExpandVars+`
+`)
+			writeNamedFormula(t, dir, "check-var-inner", `
+formula = "check-var-inner"
+type = "expansion"
+`+requires+tc.innerVars+`
+[[template]]
+id = "{target}.verify"
+title = "Verify {target}"
+
+[template.check]
+max_attempts = "{{attempts}}"
+
+[template.check.check]
+mode = "exec"
+path = ".gascity/checks/widget.sh"
+`)
+			recipe, err := Compile(context.Background(), "check-var-root", []string{dir}, nil)
+			if err != nil {
+				t.Fatalf("Compile: %v", err)
+			}
+			control := recipe.StepByID("check-var-root.release.inner.verify")
+			if control == nil {
+				t.Fatalf("nested check control missing; steps = %+v", recipe.Steps)
+			}
+			if got := control.Metadata[beadmeta.MaxAttemptsMetadataKey]; got != tc.want {
+				t.Fatalf("gc.max_attempts = %q, want %q (the invoking expansion's var scope)", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCompileCheckMaxAttemptsVarValidatesOnlyChecksAConditionKeeps(t *testing.T) {
+	enableV2ForTest(t)
+	// One var both gates the check and sizes it: "0" excludes the check, so its
+	// value must never be validated; "two" keeps it, so it must be.
+	const expansion = `
+formula = "check-var-optional"
+type = "expansion"
+version = 1
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[vars.attempts]
+default = %q
+
+[[template]]
+id = "{target}.build"
+title = "Build {target}"
+
+[[template]]
+id = "{target}.verify"
+title = "Verify {target}"
+condition = "{{attempts}}"
+
+[template.check]
+max_attempts = "{{attempts}}"
+
+[template.check.check]
+mode = "exec"
+path = ".gascity/checks/widget.sh"
+`
+	const parent = `
+formula = "check-var-parent"
+version = 1
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[[steps]]
+id = "release"
+title = "Release"
+`
+	compileRecipe := func(name string) func(string) ([]string, error) {
+		return func(dir string) ([]string, error) {
+			recipe, err := Compile(context.Background(), name, []string{dir}, nil)
+			if err != nil {
+				return nil, err
+			}
+			ids := make([]string, 0, len(recipe.Steps))
+			for _, step := range recipe.Steps {
+				ids = append(ids, step.ID)
+			}
+			return ids, nil
+		}
+	}
+	compileFragment := func(dir string) ([]string, error) {
+		fragment, err := CompileExpansionFragment(context.Background(), "check-var-optional", []string{dir}, &Step{ID: "demo.item", Title: "Item"}, nil)
+		if err != nil {
+			return nil, err
+		}
+		ids := make([]string, 0, len(fragment.Steps))
+		for _, step := range fragment.Steps {
+			ids = append(ids, step.ID)
+		}
+		return ids, nil
+	}
+	for _, tc := range []struct {
+		name    string
+		parent  string
+		compile func(dir string) ([]string, error)
+	}{
+		{name: "compose.expand", parent: parent + `
+[[compose.expand]]
+target = "release"
+with = "check-var-optional"
+`, compile: compileRecipe("check-var-parent")},
+		{name: "inline expand", parent: strings.Replace(parent, `title = "Release"`, `title = "Release"
+expand = "check-var-optional"`, 1), compile: compileRecipe("check-var-parent")},
+		{name: "standalone expansion", compile: compileRecipe("check-var-optional")},
+		{name: "runtime fragment", compile: compileFragment},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			write := func(attempts string) string {
+				dir := t.TempDir()
+				writeNamedFormula(t, dir, "check-var-optional", fmt.Sprintf(expansion, attempts))
+				if tc.parent != "" {
+					writeNamedFormula(t, dir, "check-var-parent", tc.parent)
+				}
+				return dir
+			}
+
+			ids, err := tc.compile(write("0"))
+			if err != nil {
+				t.Fatalf("compile with the check excluded: %v", err)
+			}
+			var built bool
+			for _, id := range ids {
+				if strings.Contains(id, ".verify") {
+					t.Fatalf("condition-excluded check %q compiled; steps = %v", id, ids)
+				}
+				built = built || strings.HasSuffix(id, ".build")
+			}
+			if !built {
+				t.Fatalf("steps = %v, want the unconditioned build step", ids)
+			}
+
+			_, err = tc.compile(write("two"))
+			requireErrorContains(t, err, `check max_attempts var "attempts" = "two", want an integer >= 1`)
+		})
+	}
+}
+
+func TestCompileCheckMaxAttemptsVarReportsForwardedVarWithoutValue(t *testing.T) {
+	enableV2ForTest(t)
+	const expansion = `
+formula = "check-var-expansion"
+type = "expansion"
+version = 1
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[vars.attempts]
+default = "2"
+
+[[template]]
+id = "{target}.verify"
+title = "Verify {target}"
+
+[template.check]
+max_attempts = "{{attempts}}"
+
+[template.check.check]
+mode = "exec"
+path = ".gascity/checks/widget.sh"
+`
+	const header = `
+formula = "check-var-parent"
+version = 1
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[vars.review_attempts]
+required = true
+
+[[steps]]
+id = "release"
+title = "Release"
+`
+	for _, tc := range []struct {
+		name   string
+		parent string
+	}{
+		{name: "compose rule var", parent: header + `
+[[compose.expand]]
+target = "release"
+with = "check-var-expansion"
+vars = { attempts = "{{review_attempts}}" }
+`},
+		{name: "inline expand_vars", parent: header + `expand = "check-var-expansion"
+expand_vars = { attempts = "{{review_attempts}}" }
+`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			writeNamedFormula(t, dir, "check-var-expansion", expansion)
+			writeNamedFormula(t, dir, "check-var-parent", tc.parent)
+
+			_, err := CompileWithoutRuntimeVarValidation(context.Background(), "check-var-parent", []string{dir}, nil)
+			requireErrorContains(t, err, `check max_attempts var "attempts" = "{{review_attempts}}" contains unresolved variable(s) review_attempts`)
+
+			recipe, err := Compile(context.Background(), "check-var-parent", []string{dir}, map[string]string{"review_attempts": "4"})
+			if err != nil {
+				t.Fatalf("Compile(review_attempts=4): %v", err)
+			}
+			control := recipe.StepByID("check-var-parent.release.verify")
+			if control == nil {
+				t.Fatalf("expanded check control missing; steps = %+v", recipe.Steps)
+			}
+			if got := control.Metadata[beadmeta.MaxAttemptsMetadataKey]; got != "4" {
+				t.Fatalf("gc.max_attempts = %q, want the forwarded value 4", got)
+			}
+		})
+	}
+}
+
+func TestCompileCheckMaxAttemptsVarResolvesChildCheck(t *testing.T) {
+	enableV2ForTest(t)
+	dir := t.TempDir()
+	writeNamedFormula(t, dir, "check-var-child", `
+formula = "check-var-child"
+version = 1
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[vars.attempts]
+default = "3"
+
+[[steps]]
+id = "phase"
+title = "Phase"
+
+[[steps.children]]
+id = "implement"
+title = "Implement"
+
+[steps.children.check]
+max_attempts = "{{attempts}}"
+
+[steps.children.check.check]
+mode = "exec"
+path = ".gascity/checks/widget.sh"
+`)
+
+	recipe, err := Compile(context.Background(), "check-var-child", []string{dir}, map[string]string{"attempts": "4"})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	var got []string
+	for _, step := range recipe.Steps {
+		if step.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindRalph {
+			got = append(got, step.Metadata[beadmeta.MaxAttemptsMetadataKey])
+		}
+	}
+	if len(got) != 1 || got[0] != "4" {
+		t.Fatalf("check controls' gc.max_attempts = %v, want [4]", got)
+	}
+}

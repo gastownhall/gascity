@@ -1,17 +1,20 @@
-//go:build !linux && !darwin
+//go:build !linux && !darwin && !windows
 
 package proctable
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // ScanBySessionID is unavailable on platforms without process environment
-// scanning support.
+// scanning support. The error is the whole answer: callers gating a start on
+// "no orphan is running" must refuse, because an unavailable scan cannot
+// distinguish a clean host from one with survivors.
 func ScanBySessionID(string) ([]runtime.LiveRuntime, error) {
-	return []runtime.LiveRuntime{}, nil
+	return nil, fmt.Errorf("proctable: process scanning is unavailable: %w", ErrUnsupported)
 }
 
 // ScanBySessionIDSince is unavailable on platforms without process

@@ -312,7 +312,7 @@ func TestPurgeStrandedMessagesRequiresTheFleetStoppedAttestation(t *testing.T) {
 }
 
 // TestPurgeStrandedMessagesRefusesWhileTheControllerIsLive: a live controller
-// is still writing the work store.
+// may still change the work store, so the purge refuses while it answers.
 func TestPurgeStrandedMessagesRefusesWhileTheControllerIsLive(t *testing.T) {
 	city := newMCShapedPurgeCity(t)
 	stubInfraControllerPing(t, 4242)
@@ -323,6 +323,7 @@ func TestPurgeStrandedMessagesRefusesWhileTheControllerIsLive(t *testing.T) {
 	if !strings.Contains(stderr.String(), "4242") {
 		t.Errorf("the refusal does not name the live controller: %s", stderr.String())
 	}
+	assertLiveControllerMessageClaimsNoWrites(t, stderr.String())
 	if got := countPurgeRowsOfType(purgeWorkRows(t, city), "message"); got != mcPurgeRows {
 		t.Errorf("rows were removed under a live controller: %d left", got)
 	}

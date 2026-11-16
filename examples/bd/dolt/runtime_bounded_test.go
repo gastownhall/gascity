@@ -1,3 +1,5 @@
+//go:build unix
+
 // Package dolt_test validates that runtime.sh's run_bounded helper
 // honors its own documented contract (SIGTERM, brief grace period,
 // then SIGKILL) on every fallback path — including the python3

@@ -11,6 +11,7 @@ type StartupHints struct {
 	Lifecycle              runtime.Lifecycle
 	ReadyPromptPrefix      string
 	ReadyDelayMs           int
+	NotReadyMarkers        []string
 	ProcessNames           []string
 	EmitsPermissionWarning bool
 	AcceptStartupDialogs   *bool
@@ -53,7 +54,8 @@ type StartupHints struct {
 	CopyFiles []runtime.CopyEntry
 	// ProgramStatus is the session's OSC 7501 capture declaration, derived
 	// once per session from the resolved provider's binding
-	// (config.ProgramStatusArmFor). The zero value declares nothing.
+	// (config.ProgramStatusLaunchFor), independent of the city switch: the
+	// leaf arms it only under its live switch. The zero value declares nothing.
 	ProgramStatus runtime.ProgramStatusArm
 }
 
@@ -70,6 +72,7 @@ func (h StartupHints) ToRuntimeConfig() runtime.Config {
 		Lifecycle:              h.Lifecycle,
 		ReadyPromptPrefix:      h.ReadyPromptPrefix,
 		ReadyDelayMs:           h.ReadyDelayMs,
+		NotReadyMarkers:        h.NotReadyMarkers,
 		ProcessNames:           h.ProcessNames,
 		EmitsPermissionWarning: h.EmitsPermissionWarning,
 		AcceptStartupDialogs:   h.AcceptStartupDialogs,

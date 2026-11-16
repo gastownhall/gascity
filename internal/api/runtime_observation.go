@@ -19,14 +19,15 @@ func observeProviderSession(sp runtime.Provider, sessionName string, processName
 	liveness := runtime.ObserveLiveness(sp, sessionName, processNames)
 	obs.Running = liveness.Running
 	obs.Alive = liveness.Alive
-	if suspended, err := sp.GetMeta(sessionName, "suspended"); err == nil && strings.TrimSpace(suspended) == "true" {
-		obs.Suspended = true
-	}
-	if sessionID, err := sp.GetMeta(sessionName, "GC_SESSION_ID"); err == nil {
-		obs.RuntimeSessionID = strings.TrimSpace(sessionID)
-	}
+	// Like GET /agents, only a running session's metadata is read: on tmux a
+	// stopped session has no environment, and each read forks
+	// `tmux show-environment`, while the rig list observes every configured
+	// agent row, most of them stopped.
 	if !obs.Running {
 		return obs
+	}
+	if suspended, err := sp.GetMeta(sessionName, "suspended"); err == nil && strings.TrimSpace(suspended) == "true" {
+		obs.Suspended = true
 	}
 	obs.Attached = sp.IsAttached(sessionName)
 	if lastActive, err := sp.GetLastActivity(sessionName); err == nil && !lastActive.IsZero() {

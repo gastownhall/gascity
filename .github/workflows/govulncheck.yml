@@ -149,8 +149,13 @@ jobs:
           # merely imported or merely required, so the policy this repo wants is the
           # tool's own exit code. Re-deriving it from parsed output would be a second
           # implementation of the same rule, free to drift from the first.
-          govulncheck -show verbose ./... > govulncheck-results/govulncheck.txt 2>&1
-          status=$?
+          #
+          # Actions runs every step under bash -e, which the set above does not undo,
+          # so the status is captured with || rather than read from $? afterwards: a
+          # bare call would end the step at exit 3, before the summary and the log
+          # below show what it found.
+          status=0
+          govulncheck -show verbose ./... > govulncheck-results/govulncheck.txt 2>&1 || status=$?
 
           {
             echo "## govulncheck"

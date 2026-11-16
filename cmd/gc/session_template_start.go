@@ -52,6 +52,7 @@ func materializeSessionForTemplateWithOptions(
 	stderr io.Writer,
 	opts ensureSessionForTemplateOptions,
 ) (string, error) {
+	sessions := beads.SessionStore{Store: store}
 	if stderr == nil {
 		stderr = io.Discard
 	}
@@ -194,10 +195,10 @@ func materializeSessionForTemplateWithOptions(
 			pokeErr := pokeController(cityPath)
 			var info session.Info
 			createErr := session.WithCitySessionIdentifierLocks(cityPath, []string{spec.Identity, spec.SessionName}, func() error {
-				if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, spec.Identity, "", spec.Identity); err != nil {
+				if err := session.EnsureAliasAvailableWithConfigForOwner(sessions, cfg, spec.Identity, "", spec.Identity); err != nil {
 					return err
 				}
-				if err := session.EnsureSessionNameAvailableWithConfigForOwner(store, cfg, spec.SessionName, "", spec.Identity); err != nil {
+				if err := session.EnsureSessionNameAvailableWithConfigForOwner(sessions, cfg, spec.SessionName, "", spec.Identity); err != nil {
 					return err
 				}
 				var createErr error
@@ -222,10 +223,10 @@ func materializeSessionForTemplateWithOptions(
 
 		var info session.Info
 		err = session.WithCitySessionIdentifierLocks(cityPath, []string{spec.Identity, spec.SessionName}, func() error {
-			if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, spec.Identity, "", spec.Identity); err != nil {
+			if err := session.EnsureAliasAvailableWithConfigForOwner(sessions, cfg, spec.Identity, "", spec.Identity); err != nil {
 				return err
 			}
-			if err := session.EnsureSessionNameAvailableWithConfigForOwner(store, cfg, spec.SessionName, "", spec.Identity); err != nil {
+			if err := session.EnsureSessionNameAvailableWithConfigForOwner(sessions, cfg, spec.SessionName, "", spec.Identity); err != nil {
 				return err
 			}
 			var createErr error
@@ -262,7 +263,7 @@ func ensureSessionIDForTemplateWithOptions(
 	if err != nil {
 		return "", err
 	}
-	sessionID, err := session.ResolveSessionID(store, sessionName)
+	sessionID, err := session.ResolveSessionID(beads.SessionStore{Store: store}, sessionName)
 	if err != nil {
 		return "", fmt.Errorf("resolving materialized session %q: %w", sessionName, err)
 	}
@@ -270,6 +271,7 @@ func ensureSessionIDForTemplateWithOptions(
 }
 
 func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store beads.Store, agentCfg *config.Agent, stderr io.Writer) (string, error) {
+	sessions := beads.SessionStore{Store: store}
 	if stderr == nil {
 		stderr = io.Discard
 	}
@@ -357,10 +359,10 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 		pokeErr := pokeController(cityPath)
 		var info session.Info
 		createErr := session.WithCitySessionIdentifierLocks(cityPath, reservationIDs, func() error {
-			if err := session.EnsureAliasAvailableWithConfig(store, cfg, sessionQualifiedName, ""); err != nil {
+			if err := session.EnsureAliasAvailableWithConfig(sessions, cfg, sessionQualifiedName, ""); err != nil {
 				return err
 			}
-			if err := session.EnsureSessionNameAvailableWithConfig(store, cfg, explicitName, ""); err != nil {
+			if err := session.EnsureSessionNameAvailableWithConfig(sessions, cfg, explicitName, ""); err != nil {
 				return err
 			}
 			var createErr error
@@ -376,10 +378,10 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 
 	var info session.Info
 	err = session.WithCitySessionIdentifierLocks(cityPath, reservationIDs, func() error {
-		if err := session.EnsureAliasAvailableWithConfig(store, cfg, sessionQualifiedName, ""); err != nil {
+		if err := session.EnsureAliasAvailableWithConfig(sessions, cfg, sessionQualifiedName, ""); err != nil {
 			return err
 		}
-		if err := session.EnsureSessionNameAvailableWithConfig(store, cfg, explicitName, ""); err != nil {
+		if err := session.EnsureSessionNameAvailableWithConfig(sessions, cfg, explicitName, ""); err != nil {
 			return err
 		}
 		var createErr error

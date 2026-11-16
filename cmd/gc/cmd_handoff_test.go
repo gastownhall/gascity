@@ -17,6 +17,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/mail"
@@ -885,7 +886,7 @@ func TestDoHandoff_RequireRefusalSendsNoMail(t *testing.T) {
 		t.Fatal(err)
 	}
 	rowStore.DisableConditionalWrites = true
-	mgr := session.NewManagerWithOptions(rowStore, runtime.NewFake(), session.WithCityPath(t.TempDir()))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(rowStore), runtime.NewFake(), session.WithCityPath(t.TempDir()))
 
 	store := beads.NewMemStore()
 	rec := events.NewFake()

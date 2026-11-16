@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -900,5 +901,56 @@ func TestHasExactKeyedLookup(t *testing.T) {
 		if got := HasExactKeyedLookup(provider); got != want {
 			t.Errorf("HasExactKeyedLookup(%q) = %v, want %v", provider, got, want)
 		}
+	}
+}
+
+func TestKeyedProbeRoots(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	defaults := sessionlog.DefaultSearchPaths()
+	given := []string{"/observed/claude"}
+	tests := []struct {
+		name        string
+		searchPaths []string
+		provider    string
+		want        []string
+	}{
+		{name: "empty list gives the defaults", provider: "claude", want: defaults},
+		{name: "claude keeps the given roots", searchPaths: given, provider: "claude", want: given},
+		{name: "claude family by name keeps the given roots", searchPaths: given, provider: " Claude-Eco ", want: given},
+		{name: "other provider gives the defaults", searchPaths: given, provider: "kimi", want: defaults},
+		{name: "pi gives the defaults", searchPaths: given, provider: "pi", want: defaults},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := KeyedProbeRoots(tt.searchPaths, tt.provider); !slices.Equal(got, tt.want) {
+				t.Fatalf("KeyedProbeRoots(%v, %q) = %v, want %v", tt.searchPaths, tt.provider, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClaudeConfigProjectsRoot(t *testing.T) {
+	abs := filepath.Join(t.TempDir(), "claude")
+	tests := []struct {
+		name     string
+		env      map[string]string
+		wantRoot string
+		wantOK   bool
+	}{
+		{name: "absolute", env: map[string]string{"CLAUDE_CONFIG_DIR": abs}, wantRoot: filepath.Join(abs, "projects"), wantOK: true},
+		{name: "whitespace padded absolute", env: map[string]string{"CLAUDE_CONFIG_DIR": "  " + abs + "\t"}, wantRoot: filepath.Join(abs, "projects"), wantOK: true},
+		{name: "unset", env: nil},
+		{name: "empty", env: map[string]string{"CLAUDE_CONFIG_DIR": "  "}},
+		{name: "relative", env: map[string]string{"CLAUDE_CONFIG_DIR": "rel/claude"}},
+		{name: "home relative", env: map[string]string{"CLAUDE_CONFIG_DIR": "~/.claude-alt"}},
+		{name: "bare tilde", env: map[string]string{"CLAUDE_CONFIG_DIR": "~"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root, ok := ClaudeConfigProjectsRoot(tt.env)
+			if root != tt.wantRoot || ok != tt.wantOK {
+				t.Fatalf("ClaudeConfigProjectsRoot(%v) = (%q, %v), want (%q, %v)", tt.env, root, ok, tt.wantRoot, tt.wantOK)
+			}
+		})
 	}
 }

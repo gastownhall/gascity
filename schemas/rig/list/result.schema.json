@@ -78,6 +78,22 @@
               "type": "string"
             }
           },
+          "federation": {
+            "type": "string",
+            "enum": [
+              "city",
+              "rig"
+            ],
+            "description": "Rig federation setting; present only when not the default \"city\"."
+          },
+          "namespace": {
+            "type": "string",
+            "enum": [
+              "shared",
+              "exclusive"
+            ],
+            "description": "Rig namespace declaration; present only when not the default \"shared\"."
+          },
           "beads": {
             "type": "string"
           }

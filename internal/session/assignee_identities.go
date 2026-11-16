@@ -82,7 +82,7 @@ var anyShapeRecordLookupKeys = append([]string{"session_name"}, recordLookupKeys
 // reliable even when the first partial-result error comes back with it. The
 // listings are Live reads, so a CachingStore returns a backing failure as the
 // hard error it is, not as a partial result over its cached open rows.
-func HasRecordAnsweringTo(store beads.Store, identity string) (bool, error) {
+func HasRecordAnsweringTo(store beads.SessionStore, identity string) (bool, error) {
 	id, err := recordAnsweringTo(store, strings.TrimSpace(identity), recordLookupKeys)
 	return id != "", err
 }
@@ -98,9 +98,9 @@ func HasRecordAnsweringTo(store beads.Store, identity string) (bool, error) {
 // the identity up under session_name, alias, configured named identity and
 // alias history. Error semantics match HasRecordAnsweringTo; a non-NotFound
 // Get error is a hard error.
-func RecordAnsweringTo(store beads.Store, identity string) (string, error) {
+func RecordAnsweringTo(store beads.SessionStore, identity string) (string, error) {
 	identity = strings.TrimSpace(identity)
-	if store == nil || identity == "" {
+	if store == (beads.SessionStore{}) || identity == "" {
 		return "", nil
 	}
 	if strings.Contains(identity, "/") {
@@ -130,8 +130,8 @@ func couldBeBeadID(identity string) bool {
 // recordAnsweringTo is the listing loop behind HasRecordAnsweringTo and
 // RecordAnsweringTo: one Live, closed-inclusive exact-metadata listing per key,
 // returning the first session record whose own identities include identity.
-func recordAnsweringTo(store beads.Store, identity string, keys []string) (string, error) {
-	if store == nil || identity == "" {
+func recordAnsweringTo(store beads.SessionStore, identity string, keys []string) (string, error) {
+	if store == (beads.SessionStore{}) || identity == "" {
 		return "", nil
 	}
 	var partial error

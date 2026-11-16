@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -131,6 +132,14 @@ func execProviderBase(provider string) string {
 
 func execProviderNeedsScopedDoltInit(provider string) bool {
 	return execProviderBase(provider) == "gc-beads-k8s"
+}
+
+// execProviderIsBdBacked reports an exec provider whose rows live in bd: the
+// managed gc-beads-bd and gc-beads-k8s, whose pods write the cluster's Dolt
+// through bd. bd stores the dependency payloads graph plans write, which the
+// exec protocol cannot read, so such a store is never payload-blind.
+func execProviderIsBdBacked(provider string) bool {
+	return contract.ProviderUsesBDContract(provider) || execProviderNeedsScopedDoltInit(provider)
 }
 
 func execProviderUsesCanonicalBdScopeFiles(provider string) bool {

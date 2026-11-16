@@ -259,7 +259,8 @@ func (x *createEffects) writeNamed(ctx context.Context, pass *createPass, p crea
 	plan, cfg, store := p.Named, pass.cfg, pass.store
 	now := x.host.now().UTC()
 	live := liveFenceStore{Store: store, live: beads.HandlesFor(store).Live}
-	rows, err := session.NamedSessionIdentityRows(live, plan.Identity)
+	liveSessions := beads.SessionStore{Store: live}
+	rows, err := session.NamedSessionIdentityRows(liveSessions, plan.Identity)
 	if err != nil {
 		return session.Info{}, err
 	}
@@ -271,10 +272,10 @@ func (x *createEffects) writeNamed(ctx context.Context, pass *createPass, p crea
 		}
 		return reopenNamed(ctx, store, live, cfg, p, closed, now, prog)
 	}
-	if err := session.EnsureAliasAvailableWithConfigForOwner(live, cfg, plan.Identity, "", plan.Identity); err != nil {
+	if err := session.EnsureAliasAvailableWithConfigForOwner(liveSessions, cfg, plan.Identity, "", plan.Identity); err != nil {
 		return session.Info{}, fmt.Errorf("alias %q for %s unavailable: %w", plan.Identity, plan.Identity, err)
 	}
-	if err := session.EnsureSessionNameAvailableWithConfigForOwner(live, cfg, plan.SessionName, "", plan.Identity); err != nil {
+	if err := session.EnsureSessionNameAvailableWithConfigForOwner(liveSessions, cfg, plan.SessionName, "", plan.Identity); err != nil {
 		return session.Info{}, fmt.Errorf("session_name %q for %s unavailable: %w", plan.SessionName, plan.Identity, err)
 	}
 	state := string(session.StateStartPending)

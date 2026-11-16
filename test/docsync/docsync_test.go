@@ -626,7 +626,7 @@ func TestLocalMarkdownLinks(t *testing.T) {
 	if len(unexpected) > 0 {
 		t.Errorf(`broken local markdown links (%d):
 
-docs/ is authored for the Mintlify site (https://docs.gascityhall.com), NOT for
+docs/ is authored for the Mintlify site (https://docs.gascity.com), NOT for
 direct GitHub viewing. Internal page links in docs/ are extensionless by
 convention — use /tutorials/01-beads, not /tutorials/01-beads.md. A .md/.mdx
 suffix breaks Mintlify navigation even though the file exists on disk, so please
@@ -687,7 +687,7 @@ func TestMintNavigationPagesExist(t *testing.T) {
 
 // docsPublishExemptions lists markdown files under docs/ that are allowed to
 // exist without a docs.json navigation entry. The docs/ tree publishes to
-// docs.gascityhall.com via Mintlify, so every other .md/.mdx must appear in
+// docs.gascity.com via Mintlify, so every other .md/.mdx must appear in
 // the navigation. Keep this list tiny: a file belongs here only if it is
 // docs-workspace meta (not a published page and not an engineering doc).
 // Engineering docs (plans, design notes, internal runbooks) do NOT belong in
@@ -726,7 +726,7 @@ func collectDocsMarkdownFiles(docsRoot string) ([]string, error) {
 
 // TestEveryDocsPageIsPublished enforces that docs/ holds only published docs:
 // every markdown file under docs/ must be referenced by docs.json navigation
-// (the source of truth for what ships to docs.gascityhall.com), except for the
+// (the source of truth for what ships to docs.gascity.com), except for the
 // small docsPublishExemptions allowlist. This is the reverse of
 // TestMintNavigationPagesExist (which checks nav entries point at real files);
 // together they keep docs/ and the published nav in exact correspondence and
@@ -772,7 +772,7 @@ func TestEveryDocsPageIsPublished(t *testing.T) {
 	if len(orphans) > 0 {
 		sort.Strings(orphans)
 		t.Errorf("docs/ markdown files not referenced in docs.json navigation.\n" +
-			"docs/ publishes to docs.gascityhall.com, so every page must be in the nav.\n" +
+			"docs/ publishes to docs.gascity.com, so every page must be in the nav.\n" +
 			"Fix each file by either adding it to docs/docs.json navigation (if it is a\n" +
 			"published page) or moving it under engdocs/ (if it is an engineering doc):")
 		for _, o := range orphans {

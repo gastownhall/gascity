@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
+
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -94,7 +96,7 @@ func TestHandleSessionResetClosedSessionConflicts(t *testing.T) {
 	h := newTestCityHandler(t, fs)
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "reset-closed-test")
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 	if err := mgr.Close(context.Background(), testOperatorIn(t, fs.cityPath), info.ID); err != nil {
 		t.Fatalf("Close: %v", err)
 	}

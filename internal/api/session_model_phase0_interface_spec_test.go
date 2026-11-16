@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -478,7 +479,7 @@ func TestPhase0APIResolver_BareConfigNameDoesNotMaterializeOrdinarySession(t *te
 	fs := newPhase0APIOrdinaryWorkerState(t)
 	srv := New(fs)
 
-	id, err := srv.resolveSessionIDMaterializingNamed(fs.cityBeadStore, "worker")
+	id, err := srv.resolveSessionIDMaterializingNamed(beadstest.Sessions(fs.cityBeadStore), "worker")
 	if err == nil {
 		t.Fatalf("resolveSessionIDMaterializingNamed(worker) = %q, want error", id)
 	}

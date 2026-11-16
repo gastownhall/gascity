@@ -71,14 +71,14 @@ func TestPhase0HandleSessionClose_AllowsConfiguredAlwaysNamedSession(t *testing.
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
 
-	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
+	spec, ok, err := srv.findNamedSessionSpecForTarget("worker")
 	if err != nil {
 		t.Fatalf("findNamedSessionSpecForTarget: %v", err)
 	}
 	if !ok {
 		t.Fatal("expected named session spec for worker")
 	}
-	id, err := srv.materializeNamedSession(fs.cityBeadStore, spec)
+	id, err := srv.materializeNamedSession(beadstest.Sessions(fs.cityBeadStore), spec)
 	if err != nil {
 		t.Fatalf("materializeNamedSession: %v", err)
 	}
@@ -312,7 +312,7 @@ func TestPhase0RetireContinuityIneligibleNamedSessionIdentifiersDoesNotRestampRe
 		t.Fatalf("Create(historical): %v", err)
 	}
 
-	retired, err := srv.retireContinuityIneligibleNamedSessionIdentifiers(store, apiNamedSessionSpec{Identity: "worker"})
+	retired, err := srv.retireContinuityIneligibleNamedSessionIdentifiers(beadstest.Sessions(store), apiNamedSessionSpec{Identity: "worker"})
 	if err != nil {
 		t.Fatalf("retireContinuityIneligibleNamedSessionIdentifiers: %v", err)
 	}
@@ -562,14 +562,14 @@ func phase0MaterializeCityScopedNamedWorker(t *testing.T, srv *Server, fs *fakeS
 	fs.cfg.Agents[0].Dir = ""
 	fs.cfg.NamedSessions[0].Dir = ""
 
-	spec, ok, err := srv.findNamedSessionSpecForTarget(fs.cityBeadStore, "worker")
+	spec, ok, err := srv.findNamedSessionSpecForTarget("worker")
 	if err != nil {
 		t.Fatalf("findNamedSessionSpecForTarget(worker): %v", err)
 	}
 	if !ok {
 		t.Fatal("expected city-scoped named session spec for worker")
 	}
-	id, err := srv.materializeNamedSession(fs.cityBeadStore, spec)
+	id, err := srv.materializeNamedSession(beadstest.Sessions(fs.cityBeadStore), spec)
 	if err != nil {
 		t.Fatalf("materializeNamedSession(worker): %v", err)
 	}
@@ -603,7 +603,7 @@ func TestRetireContinuityIneligibleNamedSessionClearsItsHolds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if _, err := srv.retireContinuityIneligibleNamedSessionIdentifiers(store, apiNamedSessionSpec{Identity: "worker"}); err != nil {
+	if _, err := srv.retireContinuityIneligibleNamedSessionIdentifiers(beadstest.Sessions(store), apiNamedSessionSpec{Identity: "worker"}); err != nil {
 		t.Fatalf("retireContinuityIneligibleNamedSessionIdentifiers: %v", err)
 	}
 	updated, err := store.Get(held.ID)

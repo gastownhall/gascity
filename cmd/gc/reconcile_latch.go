@@ -10,17 +10,23 @@ import (
 
 // latchRefusal is one configured feature v2 does not support yet, so the latch
 // refuses v2 rather than run without it. ParityPR is the slice that lifts it
-// (IMPLEMENTATION-PLAN §6), or "" for a runtime no slice covers yet.
+// (IMPLEMENTATION-PLAN §6), or "" for a runtime no slice covers yet. Fix,
+// when set, is what the operator changes instead: an exec runtime's
+// missing handshake capabilities (PAR-EXEC lifted the runtime itself).
 type latchRefusal struct {
 	Feature  string // what v2 would silently drop
 	Config   string // the composed-config setting that enables it
 	ParityPR string
+	Fix      string
 }
 
 // String renders the refusal as it appears in the latch error and in doctor.
 func (r latchRefusal) String() string {
 	s := fmt.Sprintf("%s (%s) is not available under v2", r.Config, r.Feature)
-	if r.ParityPR != "" {
+	switch {
+	case r.Fix != "":
+		s += ": " + r.Fix
+	case r.ParityPR != "":
 		s += " until " + r.ParityPR
 	}
 	return s
@@ -33,10 +39,12 @@ var v2SessionRuntimesAdmitted = map[string]bool{
 }
 
 // v2LatchRefusals lists every refusal the composed config hits, in a fixed
-// order. It reads only cfg, lookupEnv's GC_SESSION (the provider the city
-// runs, v2SessionRuntimeName) and the immutable builtin runtime registry,
-// never a store, so the latch and the doctor dry run agree.
-func v2LatchRefusals(cfg *config.City, lookupEnv func(string) (string, bool)) []latchRefusal {
+// order. It reads cfg, lookupEnv's GC_SESSION (the provider the city runs,
+// v2SessionRuntimeName) and the immutable builtin runtime registry, never a
+// store, and outside config only the exec admission probe (execReadiness),
+// one remembered handshake per version of the script file, so the latch,
+// the doctor dry run, gc start and the provider swap agree.
+func v2LatchRefusals(cfg *config.City, cityPath string, lookupEnv func(string) (string, bool)) []latchRefusal {
 	var out []latchRefusal
 	var dependsOn, maxAge []string
 	for i := range cfg.Agents {
@@ -56,13 +64,13 @@ func v2LatchRefusals(cfg *config.City, lookupEnv func(string) (string, bool)) []
 		{maxAge, "max_session_age", "max-age restarts", "PAR-AGE"},
 	} {
 		if len(c.agents) > 0 {
-			out = append(out, latchRefusal{c.feature, fmt.Sprintf("agent %s on %s", c.key, strings.Join(c.agents, ", ")), c.parityPR})
+			out = append(out, latchRefusal{Feature: c.feature, Config: fmt.Sprintf("agent %s on %s", c.key, strings.Join(c.agents, ", ")), ParityPR: c.parityPR})
 		}
 	}
 	if cfg.ChatSessions.IdleTimeoutDuration() > 0 {
-		out = append(out, latchRefusal{"chat auto-suspend", "[chat_sessions] idle_timeout", "PAR-CHAT"})
+		out = append(out, latchRefusal{Feature: "chat auto-suspend", Config: "[chat_sessions] idle_timeout", ParityPR: "PAR-CHAT"})
 	}
-	if r, ok := v2ProviderSwapRefusal(cfg, lookupEnv); ok {
+	if r, ok := v2ProviderSwapRefusal(cfg, cityPath, lookupEnv); ok {
 		out = append(out, r)
 	}
 	return out
@@ -100,24 +108,48 @@ func v2IgnoredSettings(cfg *config.City) []string {
 // when lookupEnv sets it, over the config's [session] provider, as
 // effectiveProviderName reads it (a nil lookupEnv has none).
 func v2SessionRuntimeName(cfg *config.City, lookupEnv func(string) (string, bool)) string {
+	return strings.TrimSpace(v2SessionRuntimeRawName(cfg, lookupEnv))
+}
+
+// v2SessionRuntimeRawName is v2SessionRuntimeName untrimmed, as
+// effectiveProviderName hands it to the runtime registry.
+func v2SessionRuntimeRawName(cfg *config.City, lookupEnv func(string) (string, bool)) string {
 	if lookupEnv != nil {
 		if v, ok := lookupEnv("GC_SESSION"); ok && v != "" {
-			return strings.TrimSpace(v)
+			return v
 		}
 	}
-	return strings.TrimSpace(cfg.Session.Provider)
+	return cfg.Session.Provider
 }
 
 // v2SessionRuntimeRefusal refuses a session provider name outside the
 // allowlist that reg resolves. A name reg does not resolve reaches the tmux
 // fallback and is admitted as tmux. exec:…/gc-session-t3 is the legacy
-// t3bridge spelling.
-func v2SessionRuntimeRefusal(cfg *config.City, reg *registry.Registry, name string) (latchRefusal, bool) {
+// t3bridge spelling. An exec runtime, `exec:<script>` or a pack's, is
+// admitted iff its handshake is v2-ready (execReadiness); otherwise it is
+// refused with the handshake's error or the capabilities it lacks as the
+// Fix. raw is the name untrimmed: the registry builds the provider from
+// it, so an exec runtime whose raw name differs (surrounding whitespace)
+// would run a script the probe never read, and is refused.
+func v2SessionRuntimeRefusal(cfg *config.City, cityPath string, reg *registry.Registry, raw, name string) (latchRefusal, bool) {
 	if v2SessionRuntimesAdmitted[name] || !reg.Resolves(name) {
 		return latchRefusal{}, false
 	}
+	if script, ok := execRuntimeScript(cfg, name); ok {
+		feature := "the exec session runtime " + script
+		if pack, isPack := cfg.Runtimes[name]; isPack {
+			feature = "the pack " + pack.PackName + " exec session runtime"
+		}
+		if raw != name {
+			return latchRefusal{Feature: feature, Config: fmt.Sprintf("[session] provider = %q", raw), Fix: "the name has surrounding whitespace, which the session provider keeps: remove it"}, true
+		}
+		h := execReadiness(script, cfg.EffectiveCityName(), cityPath)
+		if h.ready() {
+			return latchRefusal{}, false
+		}
+		return latchRefusal{Feature: feature, Config: fmt.Sprintf("[session] provider = %q", name), Fix: h.fix(script)}, true
+	}
 	feature, parityPR := "the "+name+" session runtime", ""
-	pack, packRuntime := cfg.Runtimes[name]
 	switch {
 	case name == "k8s" || name == "hybrid": // hybrid's remote leg is k8s
 		parityPR = "PAR-K8S"
@@ -127,14 +159,10 @@ func v2SessionRuntimeRefusal(cfg *config.City, reg *registry.Registry, name stri
 		parityPR = "PAR-T3"
 	case strings.HasPrefix(name, "exec:") && isLegacyT3BridgeExecScript(strings.TrimPrefix(name, "exec:")):
 		feature, parityPR = "the t3bridge session runtime", "PAR-T3"
-	case strings.HasPrefix(name, "exec:"):
-		feature, parityPR = "the exec session runtime", "PAR-EXEC"
 	case strings.HasPrefix(name, "ssh:"):
 		feature, parityPR = "the ssh session runtime", "PAR-SSH"
-	case packRuntime:
-		feature, parityPR = "the pack "+pack.PackName+" exec session runtime", "PAR-EXEC"
 	default:
 		feature = "unsupported session runtime"
 	}
-	return latchRefusal{feature, fmt.Sprintf("[session] provider = %q", name), parityPR}, true
+	return latchRefusal{Feature: feature, Config: fmt.Sprintf("[session] provider = %q", name), ParityPR: parityPR}, true
 }

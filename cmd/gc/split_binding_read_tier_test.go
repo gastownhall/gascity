@@ -45,7 +45,7 @@ func readTierControllerState(t *testing.T) (*controllerState, beads.Store) {
 	cs := newControllerStateWithRoutes(ctx, splitEnvRoutes(binding), cfg, runtime.NewFake(), nil, "tier-city", t.TempDir())
 	// Writes go through the controller's own handle (the CachingStore over the
 	// binding), as the controller's writes do, so the cache holds them.
-	return cs, cs.GraphBeadStore().Store
+	return cs, cs.Stores().Graph().Store
 }
 
 // seedEphemeralWispStep writes an in-progress EPHEMERAL graph step into the
@@ -97,7 +97,7 @@ func TestSplitBindingZeroTierReadsSeeTheWispTier(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	graph := cs.GraphBeadStore().Store
+	graph := cs.Stores().Graph().Store
 	if graph == cs.CityBeadStore() {
 		t.Fatal("fixture: the graph class is not relocated")
 	}
@@ -120,7 +120,7 @@ func TestSplitBindingZeroTierReadsSeeTheWispTier(t *testing.T) {
 			t.Errorf("binding Count(status=in_progress) = %d, %v; want 1 (the ephemeral step)", n, err)
 		}
 	}
-	sessions := cs.SessionsBeadStore().Store
+	sessions := cs.Stores().Sessions().Store
 	if rows, err := sessions.List(beads.ListQuery{Assignee: step.Assignee}); err != nil || !slices.Contains(ids(rows), step.ID) {
 		t.Errorf("sessions-class handle List(assignee) = %v, %v; want the ephemeral step through the shared binding", ids(rows), err)
 	}

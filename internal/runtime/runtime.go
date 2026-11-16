@@ -79,6 +79,20 @@ var ErrSessionDiedDuringStartup = errors.New("session died during startup")
 // commands use to report an infrastructure outcome (convergence.GateInfraExitCode).
 const ExitCodeTempFail = 75
 
+// ExitCodeNoScreen is sysexits.h EX_NOINPUT: an observe.v1 exec script's
+// `peek` of a name whose box has no screen to read (no box, or a dead box
+// whose screen is gone). It is an answer, not a failure: an empty screen.
+const ExitCodeNoScreen = 66
+
+// ExitCodeInputOutcome is the exit code of a typed non-success input
+// outcome: under [ProtocolCapabilityInputOutcome], a driving op (nudge,
+// send-keys, interrupt, clear-scrollback) that did not deliver its input
+// exits with it and prints exactly one outcome line naming why. It sits
+// above the sysexits block and below the shell's and the signals' codes, so
+// no killed or unrunnable op produces it; to a gc that does not read the
+// token it is an ordinary failure.
+const ExitCodeInputOutcome = 80
+
 // CapacitySourceExitStatus is the [CapacityError.Source] of a refusal observed
 // as the launched command's exit status.
 const CapacitySourceExitStatus = "exit_status"
@@ -114,6 +128,24 @@ func IsProviderCapacity(err error) bool { return errors.Is(err, ErrProviderCapac
 // dispatch with errors.Is.
 var ErrSessionNotFound = errors.New("session not found")
 
+// ErrAgentBlocked reports that the runtime refused to deliver input because
+// the agent is waiting on interactive input of its own: a question to the
+// user, a permission or trust dialog. Typing into the session then would
+// answer that prompt, so the refusal is correct, and it lasts until someone
+// answers. Callers holding the input should keep it and retry later instead of
+// treating the refusal as a delivery failure. Providers wrap their own
+// "blocked" condition with this sentinel so callers can dispatch with
+// errors.Is.
+var ErrAgentBlocked = errors.New("agent is blocked on interactive input")
+
+// ErrProcessNotConfirmedDead reports that a provider-managed process was sent
+// SIGKILL but had not left the run/ready set when the bounded reap wait ran
+// out (a process in uninterruptible sleep can outlive its own SIGKILL). The
+// process may still be alive, so the error is retryable and is never "gone":
+// [IsSessionGone] is false for it, and a teardown caller must keep the
+// session's bookkeeping instead of treating Stop as having succeeded.
+var ErrProcessNotConfirmedDead = errors.New("process not confirmed dead after SIGKILL")
+
 // ErrNudgeDeliveredUnobserved reports that a nudge reached the session and
 // was consumed, but the provider never observed the session start the turn.
 // Delivery is proven, so callers must treat the nudge as delivered and must
@@ -121,6 +153,13 @@ var ErrSessionNotFound = errors.New("session not found")
 // unobserved-delivery conditions with this sentinel so callers can dispatch
 // with errors.Is.
 var ErrNudgeDeliveredUnobserved = errors.New("nudge delivered but unobserved")
+
+// NudgeDelivered reports whether a nudge's err means the nudge reached the
+// session: nil, or [ErrNudgeDeliveredUnobserved] from any runtime. A caller
+// that retries undelivered nudges acks both and never redelivers them.
+func NudgeDelivered(err error) bool {
+	return err == nil || errors.Is(err, ErrNudgeDeliveredUnobserved)
+}
 
 // ErrNudgeDeliveryUnconfirmed reports that a nudge's submit was sent to the
 // session but the provider could not confirm it took: the message may have
@@ -285,6 +324,12 @@ func MetaValue(v string, err error) (string, error) {
 // A wrap over a join is judged by the join, not by the wrap's text. An error
 // tree with no join keeps the single-error rule below.
 func IsSessionGone(err error) bool {
+	// A process that may still be alive is never gone, whatever else the error
+	// says: a join with a "not found" leaf or a wrapped ErrSessionNotFound must
+	// not certify it dead.
+	if errors.Is(err, ErrProcessNotConfirmedDead) {
+		return false
+	}
 	switch wrapped := err.(type) { //nolint:errorlint // walks the error tree by hand: every leaf of a join must be gone, which errors.Is cannot express
 	case nil:
 		return false
@@ -719,6 +764,15 @@ type IdleSnapshotProvider interface {
 // message. It is not evidence of a running turn; callers fall back to the
 // signal they would use without a snapshot.
 var ErrIdleIndeterminate = errors.New("session idle state is indeterminate")
+
+// ErrIdlePendingChoice reports an [IdleSnapshotProvider] observation that saw
+// a menu waiting for a choice: its highlighted option is drawn where the
+// ready prompt would be, so text sent now would pick an option instead of
+// reaching the composer. It wraps [ErrIdleIndeterminate], which is what every
+// caller that does not ask for it by name reads; the wait-idle pre-read
+// ([IdleBoundaryNow]) reads it as pending, since a menu does not close by
+// itself within a short wait.
+var ErrIdlePendingChoice = fmt.Errorf("%w: a menu awaits a choice", ErrIdleIndeterminate)
 
 // ErrWaitUnobserved reports that an idle or interrupt-boundary wait
 // ([IdleWaitProvider], [InterruptBoundaryWaitProvider]) reached its timeout
@@ -1234,7 +1288,8 @@ type LiveRuntime struct {
 // artifacts.
 //
 // Providers that cannot inspect process tables do not implement this
-// interface. Callers must use a type assertion and continue safely when the
+// interface, or report false through [ConditionalProcessTableScanner].
+// Callers must use [AsProcessTableScanner] and continue safely when the
 // provider lacks the capability.
 type ProcessTableScanner interface {
 	// FindRuntimesBySessionID returns live agent root processes carrying
@@ -1453,6 +1508,13 @@ type Config struct {
 	// ReadyDelayMs is a fallback fixed delay when no prompt prefix is available.
 	ReadyDelayMs int
 
+	// NotReadyMarkers are text the agent prints when it discards a submitted
+	// prompt because it is not ready for input yet, even though its input
+	// prompt is showing (e.g. Copilot's "policy is still loading"). A marker
+	// that appears after a startup turn is submitted means the turn was
+	// dropped, so the runtime may submit it again.
+	NotReadyMarkers []string
+
 	// ProcessNames lists expected process names for liveness checks.
 	ProcessNames []string
 
@@ -1478,7 +1540,8 @@ type Config struct {
 	PreStart []string
 
 	// SessionSetup is a list of shell commands run after session creation,
-	// between verify-alive and nudge. Commands run in gc's process via sh -c.
+	// between verify-alive and nudge. Commands run in gc's process through the
+	// platform's command interpreter (see [ShellCommandContext]).
 	SessionSetup []string
 
 	// SessionSetupScript is a script path run after session_setup commands.
@@ -1531,7 +1594,9 @@ type Config struct {
 	// PromptSuffix is the shell-quoted prompt text appended to Command
 	// when starting the session. Excluded from CoreFingerprint because
 	// it contains beacon text with timestamps or other volatile data
-	// that should not trigger restarts.
+	// that should not trigger restarts. On Windows the ACP provider
+	// refuses it: no prompt text may reach a command line there (see
+	// [ShellQuote]), so an ACP agent's prompts ride Nudge instead.
 	PromptSuffix string
 
 	// PromptFlag is the CLI flag (e.g., "--prompt") prepended to

@@ -8,6 +8,7 @@ package conversationlane_test
 // repository, fails here first.
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	_ "github.com/go-sql-driver/mysql"
 )
@@ -170,4 +172,31 @@ func readDoltSwitches(port int) (doltSwitches, error) {
 		return doltSwitches{}, fmt.Errorf("reading the automatic-GC and stats switches: %w", err)
 	}
 	return s, nil
+}
+
+// TestBdDoltArmAdoptsTheLinkedSchema provisions the bd-dolt arm with a bd
+// whose schema trails the beads library gc links, and checks that the
+// workspace then opens the way the city's binding opens it (in-process,
+// with no migration consent) at the library's schema. The pinned bd and the
+// linked library need not agree: the enterprise release line links a beads
+// library newer than any bd release it can pin, and the library refuses to
+// migrate a database a dolt sql-server shares (gastownhall/beads#5920), so
+// a city on the arm would not start.
+func TestBdDoltArmAdoptsTheLinkedSchema(t *testing.T) {
+	c := newLaneCityWith(t, armBdDolt, activityNone, cityOptions{provisionerSchemaBehind: true})
+	root := c.workspaceRoot()
+	store, err := beads.OpenNativeDoltStoreAtWithoutAmbientEnv(context.Background(), root)
+	if err != nil {
+		t.Fatalf("opening the provisioned workspace at %s as the binding does: %v", root, err)
+	}
+	if err := store.CloseStore(); err != nil {
+		t.Fatalf("closing the workspace at %s: %v", root, err)
+	}
+	cursor, err := c.doltServer.schemaCursor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cursor < c.bdSchema {
+		t.Errorf("the workspace's schema cursor = %d, want at least %d, the version bd provisioned before the rewind: the linked library's", cursor, c.bdSchema)
+	}
 }

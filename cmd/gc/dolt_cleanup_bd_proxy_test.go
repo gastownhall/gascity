@@ -425,3 +425,56 @@ func TestBdOwnedProxyDoltConfigAcceptsEquivalentRootSpellings(t *testing.T) {
 		}
 	}
 }
+
+// TestClassifyDoltProcess_ProtectsBdOwnedProxyOnRuntimePort is the bd v1.3.3
+// (beads#7184) shape: when another process takes the Beads-chosen Dolt port
+// before dolt binds it, bd's proxy relaunches dolt on a free port from
+// <root>/proxy-child.runtime-config.yaml instead of config.yaml. That child is
+// still bd's, supervised by the same live proxy, so the reaper must protect it
+// exactly as it protects the config.yaml child, including under a test temp
+// root whose path is on the test-config-path allowlist.
+func TestClassifyDoltProcess_ProtectsBdOwnedProxyOnRuntimePort(t *testing.T) {
+	scope := filepath.Join(t.TempDir(), "city")
+	configPath := writeBdProxyRoot(t, scope, 4251)
+	runtimePath := filepath.Join(filepath.Dir(configPath), "proxy-child.runtime-config.yaml")
+	if err := os.WriteFile(runtimePath, []byte("listener:\n  host: 127.0.0.1\n  port: 40001\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stubLiveBdProxy(t, 4251, configPath)
+	if !isTestConfigPath(runtimePath, "/home/u", os.TempDir()) {
+		t.Fatalf("fixture %q is not on the test-config-path allowlist; the test would pass vacuously", runtimePath)
+	}
+
+	p := DoltProcInfo{PID: 9051, Argv: []string{"dolt", "sql-server", "--config", runtimePath}}
+	got := classifyDoltProcess(p, nil, "/home/u", os.TempDir(), nil)
+
+	if got.Action != "protect" {
+		t.Fatalf("Action = %q, want protect for bd's port-moved dolt child; reason = %q", got.Action, got.Reason)
+	}
+	if !strings.Contains(got.Reason, "bd-owned proxied dolt server") || !strings.Contains(got.Reason, "4251") {
+		t.Errorf("Reason = %q, want the bd-ownership reason naming the live proxy pid", got.Reason)
+	}
+	if got.ConfigPath != runtimePath {
+		t.Errorf("ConfigPath = %q, want %q", got.ConfigPath, runtimePath)
+	}
+}
+
+// TestBdOwnedProxyDoltConfigRuntimeConfigNeedsTheSameProof: the runtime config
+// name earns no trust by itself. Without a live bd proxy for that root it is
+// not bd's, so the pre-existing verdicts stand.
+func TestBdOwnedProxyDoltConfigRuntimeConfigNeedsTheSameProof(t *testing.T) {
+	scope := t.TempDir()
+	configPath := writeBdProxyRoot(t, scope, 4252)
+	runtimePath := filepath.Join(filepath.Dir(configPath), "proxy-child.runtime-config.yaml")
+	stubNoBdProxyProcesses(t)
+	if _, ok := bdOwnedProxyDoltConfig(runtimePath); ok {
+		t.Fatal("a runtime config with a dead proxy.pid beside it claimed bd ownership")
+	}
+	stubLiveBdProxy(t, 4252, configPath)
+	if _, ok := bdOwnedProxyDoltConfig(filepath.Join(scope, "unrelated", "proxy-child.runtime-config.yaml")); ok {
+		t.Fatal("a runtime config with no proxy.pid sibling claimed bd ownership")
+	}
+	if _, ok := bdOwnedProxyDoltConfig(runtimePath); !ok {
+		t.Fatal("bdOwnedProxyDoltConfig rejected bd's runtime config beside a live proxy")
+	}
+}

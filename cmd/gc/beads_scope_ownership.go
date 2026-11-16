@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 )
 
 // scopeOwnershipFile records the durable lifecycle owner for scopes that were
@@ -355,12 +356,21 @@ func scopeIsBdOwnedDirectExternal(cityPath, scopeRoot string) (bool, error) {
 // where this scope's beads actually are.
 //
 // The predicate above discriminates "bd's foreign upstream" from "gc's own
-// managed server" on the recorded host alone, compared against
-// managedCityHost(), which reads GC_DOLT_HOST from the live environment. A
-// gc-managed scope initialized under a non-loopback GC_DOLT_HOST records that
-// host verbatim, so a later boot with the variable unset or pointing elsewhere
-// compares unequal and reads gc's own server as foreign. This is the evidence
-// that settles it without consulting the environment at all.
+// managed server" by the recorded binding: a non-loopback host is compared
+// against managedCityHost(), which reads GC_DOLT_HOST from the live
+// environment, and a loopback one against the ports gc's runtime records for
+// the city. A gc-managed scope initialized under a non-loopback GC_DOLT_HOST
+// records that host verbatim, so a later boot with the variable unset or
+// pointing elsewhere compares unequal and reads gc's own server as foreign.
+// This is the evidence that settles it without consulting the environment at
+// all.
+//
+// It answers before the port rule for a loopback binding too. bd's binding
+// keeps the port it was initialized against, so once gc's own server has moved
+// to another port, the port rule alone would read gc's own legacy store as
+// bd's. The cost is the converse: a store an operator binds to their own
+// loopback server under the name of a database gc keeps in the city's data
+// dir (one a removed rig left behind) is gc's.
 //
 // It takes TWO facts, and the conjunction is the whole point:
 //
@@ -1386,12 +1396,13 @@ func withProviderScopeOwnershipLock(cityPath string, fn func() error) error {
 	if err != nil {
 		return fmt.Errorf("open scope ownership lock: %w", err)
 	}
-	if err := flockWithBoundedWait(lock, providerScopeOwnershipLockWait); err != nil {
+	heldLock, err := flockWithBoundedWait(lock, providerScopeOwnershipLockWait)
+	if err != nil {
 		_ = lock.Close()
 		return err
 	}
 	defer func() {
-		_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+		_ = heldLock.Release()
 		_ = lock.Close()
 	}()
 	return fn()
@@ -1401,18 +1412,22 @@ func withProviderScopeOwnershipLock(cityPath string, fn func() error) error {
 // blocking in the kernel so the wait has a deadline the caller chose. A blocking
 // LOCK_EX would be simpler, but it cannot be interrupted, and a wedged holder
 // would hang every later writer with no message.
-func flockWithBoundedWait(lock *os.File, wait time.Duration) error {
+func flockWithBoundedWait(lock *os.File, wait time.Duration) (*filelock.Lock, error) {
 	deadline := time.Now().Add(wait)
 	for {
-		err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		heldLock, err := filelock.Acquire(lock, filelock.Options{
+			Mode:        filelock.Exclusive,
+			NonBlocking: true,
+			Label:       lock.Name(),
+		})
 		if err == nil {
-			return nil
+			return heldLock, nil
 		}
-		if !errors.Is(err, syscall.EWOULDBLOCK) {
-			return fmt.Errorf("lock scope ownership journal: %w", err)
+		if !errors.Is(err, filelock.ErrBusy) {
+			return nil, fmt.Errorf("lock scope ownership journal: %w", err)
 		}
 		if !time.Now().Before(deadline) {
-			return fmt.Errorf("scope ownership journal is busy: another gc process still holds %s after %s", lock.Name(), wait)
+			return nil, fmt.Errorf("scope ownership journal is busy: another gc process still holds %s after %s", lock.Name(), wait)
 		}
 		time.Sleep(providerScopeOwnershipLockPoll)
 	}
@@ -1457,7 +1472,7 @@ func writeProviderScopeOwnershipJournal(cityPath string, journal providerScopeOw
 	if err := os.Rename(temporaryPath, path); err != nil {
 		return fmt.Errorf("replace scope ownership journal: %w", err)
 	}
-	directory, err := os.Open(dir)
+	directory, err := filelock.OpenDirectoryForSync(dir)
 	if err != nil {
 		return fmt.Errorf("open scope ownership directory for sync: %w", err)
 	}

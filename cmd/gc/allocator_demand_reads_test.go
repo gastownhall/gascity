@@ -15,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -29,8 +30,13 @@ type demandBacking struct {
 	armed      atomic.Bool
 	failLive   atomic.Bool
 	failWrites atomic.Bool
-	mu         sync.Mutex
-	ops        []string
+	// stall holds every read of the backing, armed or not, for that many
+	// nanoseconds and counts it in stalled: a loaded host's slow read, made
+	// deterministic. Zero is no stall.
+	stall   atomic.Int64
+	stalled atomic.Int64
+	mu      sync.Mutex
+	ops     []string
 }
 
 var errDemandBackingDown = errors.New("demand backing down")
@@ -48,6 +54,10 @@ func newDemandBacking(seed ...beads.Bead) *demandBacking {
 // log records a read in the compact form the goldens pin: the operation and
 // the query fields that select a read tier or a row set.
 func (b *demandBacking) log(format string, args ...any) {
+	if d := time.Duration(b.stall.Load()); d > 0 {
+		b.stalled.Add(1)
+		<-time.After(d)
+	}
 	if !b.armed.Load() {
 		return
 	}
@@ -653,7 +663,7 @@ func TestV2DemandReadsCachedWithoutCacheIsPartial(t *testing.T) {
 func TestClosedNamedIndexLegacyIsDirectCallV2ServesRecording(t *testing.T) {
 	backing := newDemandBacking(closedNamedSessionBead("gc-closed", "mayor"))
 	backing.armed.Store(true)
-	direct, directErr := session.BuildClosedNamedSessionBeadIndex(backing)
+	direct, directErr := session.BuildClosedNamedSessionBeadIndex(beadstest.Sessions(backing))
 	directLog := backing.readLog()
 	backing.ops = nil
 	legacy, legacyErr := legacyDemandReads{}.ClosedNamedIndex(backing)

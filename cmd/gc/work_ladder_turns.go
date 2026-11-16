@@ -42,14 +42,14 @@ type ladderTurnReader func(ctx context.Context, row beads.Bead) (runtime.TurnHis
 
 // ladderTurnReading reduces hist to what the ladder judges progress and rate
 // limits by, in conversation conv: whether the newest ended turn failed
-// (whatever the cause, with no turn open), and when the newest turn the
-// provider completed ended, anywhere in the recent turns; how many of the
-// newest ended turns in a row the provider refused with a rate limit (none
-// while a turn is open: it has no answer yet), when the newest of them
-// ended, and whether its source classed it a spent quota. A turn that ended
-// with no status (a family that records no turn end, an end inferred from
-// an idle boundary) is not a failure. Every rate-limit fact is the source's
-// own classification (runtime.TurnFailure); no text is read.
+// (whatever the cause) or completed, each with no turn open, and when the
+// newest turn the provider completed ended, anywhere in the recent turns;
+// how many of the newest ended turns in a row the provider refused with a
+// rate limit (none while a turn is open: it has no answer yet), when the
+// newest of them ended, and whether its source classed it a spent quota. A
+// turn that ended with no status (a family that records no turn end, an end
+// inferred from an idle boundary) is not a failure. Every rate-limit fact is
+// the source's own classification (runtime.TurnFailure); no text is read.
 func ladderTurnReading(hist runtime.TurnHistory, conv int64) workladder.TurnReading {
 	r := workladder.TurnReading{Read: true, Conv: conv}
 	for _, t := range hist.Recent {
@@ -60,6 +60,7 @@ func ladderTurnReading(hist runtime.TurnHistory, conv int64) workladder.TurnRead
 	}
 	open := hist.Current.Active()
 	r.LastFailed = !open && len(hist.Recent) > 0 && hist.Recent[0].Status == runtime.TurnStatusFailed
+	r.LastCompleted = !open && len(hist.Recent) > 0 && hist.Recent[0].Status == runtime.TurnStatusCompleted
 	if open {
 		return r
 	}

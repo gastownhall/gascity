@@ -1,9 +1,11 @@
 package scripts_test
 
 import (
+	"compress/gzip"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"path/filepath"
@@ -267,9 +269,8 @@ var multiLaneCommands = map[string]string{
 }
 
 // multiLaneEvidenceOnly are the lanes whose failure never fails the run:
-// integration until G3, and the split-strict projection gate until split is
-// the default for new cities.
-var multiLaneEvidenceOnly = map[string]bool{"integration": true, "split-strict": true}
+// integration until G3. The split-strict projection gate gates (ga-ylpbsy.94).
+var multiLaneEvidenceOnly = map[string]bool{"integration": true}
 
 // multiLaneFreshTargets are the targets the nightly fresh run adds to a lane
 // before --config=fresh: the timer-bound acceptance tests at their real
@@ -338,7 +339,9 @@ func TestBazelMultiLaneWorkflowTriggersAndPermissions(t *testing.T) {
 		"worker-host": {"contents": "read", "issues": "read"},
 		"rrc-seed":    {"contents": "read", "id-token": "write"}, // the rbe-rrc-writer certificate (bazel_rrc_test.go)
 		"rrc-verify":  {"contents": "read", "issues": "write"},   // the rrc-verify alert issue (bazel_rrc_test.go)
-		"gate":        nil,                                       // the top-level contents: read
+		// The nightly split-strict alert: this run's jobs, and its issue.
+		"split-strict-alert": {"actions": "read", "issues": "write"},
+		"gate":               nil, // the top-level contents: read
 	}
 	if len(wf.Jobs) != len(wantJobs) {
 		t.Errorf("%s has %d jobs, want %d (%v)", bazelMultiLaneWorkflow, len(wf.Jobs), len(wantJobs), wantJobs)
@@ -453,7 +456,7 @@ func wantMultiLanesPaths(event, mode, splitPaths string) []string {
 
 // TestBazelMultiLaneLaneList runs the rbe job's Lanes step for every event
 // and mode and checks the lane job's matrix it yields: the lanes that start,
-// each lane's exact command, evidence-only on integration and split-strict, and at most
+// each lane's exact command, evidence-only on integration only, and at most
 // multiLaneForkCertificates lanes (one rbe-fork certificate each) for a fork
 // PR.
 func TestBazelMultiLaneLaneList(t *testing.T) {
@@ -501,11 +504,10 @@ func TestBazelMultiLaneLaneList(t *testing.T) {
 						if cmd, _ := entry["cmd"].(string); cmd != wantCmd {
 							t.Errorf("event %s, mode %s, fresh %s: lane %s cmd %q, want %q", event, mode, fresh, name, cmd, wantCmd)
 						}
-						// Evidence-only (exit 0 on failure): integration until G3,
-						// split-strict until split is the default.
+						// Evidence-only (exit 0 on failure): integration until G3.
 						ev, set := entry["evidence-only"]
 						if multiLaneEvidenceOnly[name] != (set && ev == true) {
-							t.Errorf("event %s, mode %s, fresh %s: lane %s evidence-only %v; want true on integration and split-strict only", event, mode, fresh, name, ev)
+							t.Errorf("event %s, mode %s, fresh %s: lane %s evidence-only %v; want true on integration only", event, mode, fresh, name, ev)
 						}
 						for key := range entry {
 							if key != "lane" && key != "cmd" && key != "evidence-only" {
@@ -1397,6 +1399,118 @@ func TestCIAnalyticsStepsAreSafeAndBounded(t *testing.T) {
 	}
 }
 
+// TestBazelProfileArtifactStepsAreSafeAndBounded: the flame-graph profile
+// artifact (bes-observability-design.md §7, TESTING.md "Flame graphs"), in
+// both the lane job and the coverage job, is reporting only and public: the
+// prepare step and its upload are continue-on-error, skipped on a canceled
+// run and time-bounded; the upload is a 7-day bazel-profile-* artifact
+// (never bazel-bep-*, which bep-summary downloads) of the gzipped copy
+// alone, never the raw profile, BEP or exec log. The prepare script itself uploads a
+// clean profile, refuses a secret-shaped one and tolerates a missing one.
+func TestBazelProfileArtifactStepsAreSafeAndBounded(t *testing.T) {
+	wf := readMultiLaneWorkflow(t)
+	for jobName, wantName := range map[string]string{
+		"lane":     "bazel-profile-${{ matrix.lane }}-${{ github.run_attempt }}",
+		"coverage": "bazel-profile-coverage-${{ github.run_attempt }}",
+	} {
+		job := wf.Jobs[jobName]
+		testIdx := slices.IndexFunc(job.Steps, func(s multiLaneStep) bool { return s.ID == "test" })
+		prepIdx := slices.IndexFunc(job.Steps, func(s multiLaneStep) bool { return s.Name == "Prepare Bazel profile artifact" })
+		upIdx := slices.IndexFunc(job.Steps, func(s multiLaneStep) bool { return s.Name == "Upload Bazel profile" })
+		if testIdx < 0 || prepIdx < testIdx || upIdx != prepIdx+1 {
+			t.Fatalf("%s job: want the test step, then \"Prepare Bazel profile artifact\" directly followed by \"Upload Bazel profile\" (test %d, prepare %d, upload %d)", jobName, testIdx, prepIdx, upIdx)
+		}
+		prep, up := job.Steps[prepIdx], job.Steps[upIdx]
+		//nolint:misspell // GitHub Actions spells it cancelled()
+		if prep.ID != "profile-artifact" || prep.If != "!cancelled() && steps.test.outcome != 'skipped'" ||
+			prep.ContinueOnError != "true" || prep.TimeoutMinutes <= 0 || prep.TimeoutMinutes > 2 {
+			t.Errorf("%s job %q: id %q if %q continue-on-error %q timeout-minutes %d; want id profile-artifact, !cancelled() after a test step that ran, continue-on-error, 1-2 minutes",
+				jobName, prep.Name, prep.ID, prep.If, prep.ContinueOnError, prep.TimeoutMinutes)
+		}
+		if ciAnalyticsRunTemplateRE.MatchString(prep.Run) {
+			t.Errorf("%s job %q: run: contains a ${{ }} expression; use env: instead", jobName, prep.Name)
+		}
+		//nolint:misspell // GitHub Actions spells it cancelled()
+		if up.If != "!cancelled() && steps.profile-artifact.outcome == 'success'" || up.ContinueOnError != "true" ||
+			up.TimeoutMinutes <= 0 || up.TimeoutMinutes > 2 || !strings.HasPrefix(up.Uses, "actions/upload-artifact@") {
+			t.Errorf("%s job %q: if %q continue-on-error %q timeout-minutes %d uses %q; want a continue-on-error, 1-2 minute upload-artifact after a successful prepare",
+				jobName, up.Name, up.If, up.ContinueOnError, up.TimeoutMinutes, up.Uses)
+		}
+		want := map[string]string{
+			"name":              wantName,
+			"path":              "${{ runner.temp }}/profile-upload/",
+			"retention-days":    "7",
+			"if-no-files-found": "ignore",
+			"compression-level": "0",
+			"overwrite":         "true",
+		}
+		if !reflect.DeepEqual(up.With, want) {
+			t.Errorf("%s job %q: with %v, want %v", jobName, up.Name, up.With, want)
+		}
+		if strings.HasPrefix(up.With["name"], "bazel-bep-") || ciAnalyticsUploadPathForbidden.MatchString(up.With["path"]) {
+			t.Errorf("%s job %q: name %q / path %q collides with the BEP artifacts or names a raw file", jobName, up.Name, up.With["name"], up.With["path"])
+		}
+
+		dir := t.TempDir()
+		env := map[string]string{"RUNNER_TEMP": dir, "LANE": jobName}
+		gz := filepath.Join(dir, "profile-upload", "bazel-profile-"+jobName+".json.gz")
+		if out, err := runWorkflowStepScript(t, dir, prep.Run, env); err != nil {
+			t.Fatalf("%s job %q without a profile: %v\n%s", jobName, prep.Name, err, out)
+		}
+		if _, err := os.Stat(gz); !os.IsNotExist(err) {
+			t.Errorf("%s job %q: wrote %s without a profile", jobName, prep.Name, gz)
+		}
+		profile := filepath.Join(dir, "bazel-profile.json")
+		clean := `{"otherData":{"bazel_version":"9.3.1"},"traceEvents":[` + "\n" + `{"name":"//cmd/gc:gc_test","cat":"action processing","ph":"X","ts":1,"dur":2}]}` + "\n"
+		if err := os.WriteFile(profile, []byte(clean), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := runWorkflowStepScript(t, dir, prep.Run, env); err != nil {
+			t.Fatalf("%s job %q with a clean profile: %v\n%s", jobName, prep.Name, err, out)
+		}
+		if got, err := gunzipFile(gz); err != nil || got != clean {
+			t.Errorf("%s job %q: %s is not the gzipped profile (err %v)", jobName, prep.Name, gz, err)
+		}
+		for _, secret := range []string{
+			`"name":"fetching: https://user:pw@example.com/x"`,
+			`"args":{"x":"-----BEGIN PRIVATE KEY-----"}`,
+			`"args":{"x":"GITHUB_TOKEN=abc"}`,
+			`"name":"rbe-west.ops.gascity.com"`,
+			`"args":{"x":"https://example.com/x?token=abc"}`,
+			`"args":{"x":"ghs_0123456789abcdefghijABCDEFGHIJ"}`,
+		} {
+			if err := os.RemoveAll(filepath.Join(dir, "profile-upload")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(profile, []byte(clean+secret+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			out, err := runWorkflowStepScript(t, dir, prep.Run, env)
+			if err != nil || !strings.Contains(out, "::warning title=bazel profile not uploaded::") {
+				t.Errorf("%s job %q with %s: err %v, want a warning and exit 0:\n%s", jobName, prep.Name, secret, err, out)
+			}
+			if _, err := os.Stat(gz); !os.IsNotExist(err) {
+				t.Errorf("%s job %q: uploaded a profile carrying %s", jobName, prep.Name, secret)
+			}
+		}
+	}
+}
+
+// gunzipFile returns the decompressed contents of a gzip file.
+func gunzipFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close() //nolint:errcheck // read-only
+	zr, err := gzip.NewReader(f)
+	if err != nil {
+		return "", err
+	}
+	b, err := io.ReadAll(zr)
+	return string(b), err
+}
+
 // TestBazelWorkerHostFetchAlwaysRuns: the worker-host job fetches the PR's
 // pinned rbe-worker on every run, pin-moved or not (fix 3), so H5 always
 // has the fetched history to walk; only the H5 range check and the measure
@@ -1585,7 +1699,7 @@ func TestForkRepositoryCINeverReadsRBECache(t *testing.T) {
 		for _, id := range []string{"lane", "sync-check"} {
 			for _, s := range wf.Jobs[id].Steps {
 				_, syncFlags := s.Env["BAZEL_SYNC_FLAGS"]
-				probe := s.Name == bazelCacheZstdStep || s.Name == "Fork cache remote repo contents cache (read)"
+				probe := s.Name == bazelForkRRCReadStep
 				if s.Uses != setupBazelUses && !syncFlags && !probe {
 					continue
 				}
@@ -1873,5 +1987,41 @@ func TestSplitStrictLaneRunsOnTheRoutingCode(t *testing.T) {
 				t.Errorf("%s names %s, but a PR touching it does not run the split-strict lane", baseline, f)
 			}
 		}
+	}
+}
+
+// TestBazelSplitStrictLaneGates pins the split-strict lane as gating
+// (ga-ylpbsy.94.2): no job-level continue-on-error on the lane job (it would
+// keep a red leg out of the required gate's needs.lane.result), none on the
+// verdicts step, and the downward ratchet gating the nightly only. The
+// nightly alert must find the lane by the lane job's name.
+func TestBazelSplitStrictLaneGates(t *testing.T) {
+	wf := readMultiLaneWorkflow(t)
+	lane, ok := wf.Jobs["lane"]
+	if !ok {
+		t.Fatalf("%s: no lane job", bazelMultiLaneWorkflow)
+	}
+	if lane.ContinueOnError != "" {
+		t.Errorf("lane job continue-on-error %q; want none, so a red split-strict leg fails the required gate", lane.ContinueOnError)
+	}
+	if lane.Name != "bazel / ${{ matrix.lane }}" {
+		t.Errorf("lane job name %q; the split-strict alert matches the leg as \"bazel / split-strict\"", lane.Name)
+	}
+	steps := map[string]multiLaneStep{}
+	for _, s := range lane.Steps {
+		steps[s.Name] = s
+	}
+	if s, ok := steps["Split-strict verdicts"]; !ok || s.ContinueOnError != "" {
+		t.Errorf("Split-strict verdicts step present=%v continue-on-error %q; want present and none", ok, s.ContinueOnError)
+	}
+	if s, ok := steps["Split-strict downward ratchet"]; !ok || s.ContinueOnError != "${{ github.event_name != 'schedule' }}" {
+		t.Errorf("Split-strict downward ratchet present=%v continue-on-error %q; want it gating the nightly only", ok, s.ContinueOnError)
+	}
+	alert, ok := wf.Jobs["split-strict-alert"]
+	if !ok {
+		t.Fatalf("%s: no split-strict-alert job", bazelMultiLaneWorkflow)
+	}
+	if len(alert.Steps) != 1 || !strings.Contains(alert.Steps[0].Run, `endswith("bazel / split-strict")`) {
+		t.Errorf("split-strict-alert must find the lane leg by its job name (bazel / split-strict)")
 	}
 }

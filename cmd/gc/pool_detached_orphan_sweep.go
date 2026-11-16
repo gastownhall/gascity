@@ -317,7 +317,8 @@ func buildDetachedOrphanRouteIndex(store beads.Store) (detachedOrphanRouteIndex,
 	var all []beads.Bead
 	listErr := beads.RelicRead(func() error {
 		var err error
-		all, err = session.ListAllSessionBeads(store, beads.ListQuery{IncludeClosed: true})
+		// store is a work leg read under RelicRead, not the sessions class: the relabel keeps its reads (typed-store T7 RoleRelic).
+		all, err = session.ListAllSessionBeads(beads.SessionStore{Store: store}, beads.ListQuery{IncludeClosed: true})
 		return err
 	})
 	// Hard errors return nil rows; surface them to the caller.

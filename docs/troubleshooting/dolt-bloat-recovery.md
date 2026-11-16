@@ -38,10 +38,7 @@ files, and verifying the result.
   swapping; budget at least **2× the current `.dolt/` size** in free space
   on the same filesystem.
 - **Final Dolt 2.6.0 or newer.** This matches the floor enforced by Gas
-  City's managed Dolt tooling. Releases before 1.86.2 also have the upstream
-  GC/writer deadlock fixed in dolthub/dolt commit `ccf7bde206`, which can hang
-  `dolt_backup sync` under heavy write load. Check with
-  `dolt version`.
+  City's managed Dolt tooling. Check with `dolt version`.
 - **Always pass `--archive-level=0` to `dolt gc`.** Dolt 2.3.3 through 2.5.1
   default to a SimpleArchive that duplicates its zstd dictionaries once an
   archive holds more than 256 of them, and each duplicate pins about 137 KB of
@@ -139,10 +136,10 @@ every retry hits the same ceiling until the ceiling moves; when it said the
 timeout did not end the GC, the marker still retries, but moving
 `read_timeout_millis` is not the remedy. `--gc-only` writes no marker, so rerun
 it after raising the ceiling. Raise the value in `city.toml` past the longest GC
-you have seen; the GC's run time in the compactor's line is the floor. Releases
-through v1.4.2 ship `15000`, the value in the example above; v1.5.0 and later
-default to `120000`, so `120000` is the right first value for a city still on
-`15000`. A city already at `120000` needs a larger number.
+you have seen; the GC's run time in the compactor's line is the floor. The
+default is `120000`; a city created by an older release can still carry
+`15000`, the value in the example above, so `120000` is the right first value
+for such a city. A city already at `120000` needs a larger number.
 
 ```toml
 [dolt]
@@ -356,7 +353,7 @@ connects.
 
 | How a city reaches the database | What its compactor does |
 |---|---|
-| Its own bd-owned proxied store (the default for cities created by Gas City 1.5 and later) | Nothing: `gc dolt compact` prints `dolt lifecycle is owned by bd for proxied scopes; nothing to do` |
+| Its own bd-owned proxied store (the default for new cities) | Nothing: `gc dolt compact` prints `dolt lifecycle is owned by bd for proxied scopes; nothing to do` |
 | Its own Gas City–managed server, written only by this city | Flattens commits after the watermark, then runs a full GC |
 | Its own managed server or a loopback external endpoint, and other cities write to the same database (shared host, SSH tunnel, port forward) | Flattens **every** city's commits after the watermark into one commit |
 | An external endpoint on a non-loopback host (a remote or cloud-hosted Dolt server) | Nothing: no flatten, no GC, no watermark |
@@ -456,7 +453,7 @@ squash with a generational GC only, which reclaims little or no disk space.
    - **That city's bd-owned proxied store**: start nothing. bd starts the
      proxy and its Dolt server on the first `gc bd` command in step 4. Do not
      run `gc dolt start`, which only prints the proxied no-op line, or
-     `bd dolt start`, which bd 1.3.1 and later refuse in proxied mode.
+     `bd dolt start`, which bd refuses in proxied mode.
    - **A server no city manages** (a shared host or a cloud-hosted Dolt
      server): `gc stop` did not stop it. If it is down, start it with whatever
      runs it. Do not run `gc dolt start`; it does not start that server.
@@ -544,7 +541,8 @@ If GC finishes but the size barely moves, the chunks are nearly all live
 
 `gc dolt compact` writes exact reason strings into
 `.gc/runtime/packs/dolt/compact-quarantine/<database>` when it detects
-possible writer interference before full GC. Operator dashboards and runbooks
+possible writer interference before full GC, or when a database it rewrote
+stops being served. Operator dashboards and runbooks
 should treat these strings as the current vocabulary:
 
 | Reason | Meaning |
@@ -562,6 +560,7 @@ should treat these strings as the current vocabulary:
 | `post-flatten value hash probe returned empty value` | The database hash query returned an empty value after flatten. |
 | `post-flatten value hash changed with row-count increase` | The database hash changed after at least one stable-table row-count gain. *(auto-clearable — see below)* |
 | `post-flatten value hash changed without row-count increase` | The database hash changed without a row-count gain. *(auto-clearable — see below)* |
+| `live database unavailable after compaction` | After a flatten or GC, the database's data-dir entry was gone or the server no longer served it with a resolvable HEAD. *(never auto-cleared — see below)* |
 
 Four of these reasons are known writer-race false positives and are
 **auto-clearable**. On its next scheduled run, `gc dolt compact`'s flatten
@@ -586,6 +585,30 @@ compactor stores `seen_count`, `notify_count`, and last-notified fields under
 checks must not rewrite the quarantine marker. The sidecar is operational
 state, not integrity evidence. A changed reason or a replacement marker alerts
 immediately, while an unchanged marker follows the bounded reminder cadence.
+
+A `live database unavailable after compaction` marker means the rewrite may
+have left the server without the database. It records `live_gate_steps` (the
+rewrites that ran), `live_gate_failed_step`, `live_gate_failure`,
+`live_gate_probe_failure` (the server's answer to the served-HEAD probe),
+`live_gate_data_dir_entry` with its `_before` and `_after` states, and
+`live_gate_pre_compaction_head`. Compact writes no new pending-GC marker for
+that database (a pending-GC retry keeps the marker it retried) and ends the
+run with exit 1 without touching another database; its last line lists the
+selected databases it did not reach. To recover:
+
+1. If `<data_dir>/<database>/.dolt` is gone, restore the database from the
+   safety backup. If it is still on disk, restart the server
+   (`gc dolt restart`) instead: a restore from backup discards every write
+   since that backup.
+2. Verify the HEAD resolves, with
+   `gc dolt sql -q "USE <database>; SELECT HASHOF('HEAD')"`, and that bead
+   data is healthy, with `gc bd list --rig <rig> --limit 1`. Compare the HEAD
+   with `live_gate_pre_compaction_head` to tell whether the flatten landed.
+3. Remove the quarantine marker, and any pending-GC or pending-push marker
+   under `.gc/runtime/packs/dolt/` that predates the restore.
+4. Preview the next run with
+   `gc dolt compact --dry-run --only-db <database>` before letting scheduled
+   compaction touch it again.
 
 Safe marker-clear procedure:
 

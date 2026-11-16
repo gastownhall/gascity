@@ -19,13 +19,14 @@ type ChildrenBatchLister interface {
 }
 
 // ChildrenOfAny returns the union of Children(id, IncludeClosed, opts...)
-// over parentIDs, through the store's batched read when it has one and one
-// Children call per parent otherwise.
+// over parentIDs, through the store's batched read when it has one (seen
+// through class handles and molecule targets) and one Children call per
+// parent otherwise.
 func ChildrenOfAny(store Store, parentIDs []string, opts ...QueryOpt) ([]Bead, error) {
 	if len(parentIDs) == 0 {
 		return nil, nil
 	}
-	if batch, ok := store.(ChildrenBatchLister); ok {
+	if batch, ok := As[ChildrenBatchLister](store); ok {
 		return batch.ChildrenOfAny(parentIDs, opts...)
 	}
 	return ChildrenOfAnyPerParent(store, parentIDs, opts...)
