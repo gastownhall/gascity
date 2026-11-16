@@ -2700,9 +2700,14 @@ resource = "fixed_sleep"
 calls = 1
 
 [[count]]
+path = "internal/runtime/subprocess/subprocess_private_unix_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
 path = "internal/runtime/subprocess/subprocess_test.go"
 resource = "fixed_sleep"
-calls = 10
+calls = 6
 
 [[count]]
 path = "internal/runtime/subprocess/subprocess_test.go"
