@@ -93,6 +93,11 @@ type proxyProcessInstance struct {
 	nextRestart time.Time
 	closed      bool
 	status      Status
+	// failedStops holds generations whose stop failed where processgroup
+	// does not hold their tree, so no release registry can retry them. The
+	// next Close retries their stop. It is kept apart from cmd so the
+	// generation's reaper clearing cmd cannot drop them.
+	failedStops []*exec.Cmd
 }
 
 // proxyProcessStateRoot is the absolute state root of a proxy_process service.
@@ -222,6 +227,8 @@ func (p *proxyProcessInstance) Close() error {
 	cmd := p.cmd
 	doneCh := p.doneCh
 	p.cmd = nil
+	retry := slices.Clone(p.failedStops)
+	p.failedStops = nil
 	p.status.State = "stopped"
 	p.status.LocalState = "stopped"
 	p.status.Reason = "service_closed"
@@ -230,24 +237,41 @@ func (p *proxyProcessInstance) Close() error {
 
 	removeErr := cleanupProxyProcessSocketPath(p.socketPath)
 	var stopErr error
+	// A stop that failed on an earlier Close may have left survivors; retry
+	// it, and keep any that fail again for the next Close.
+	for _, c := range retry {
+		if err := stopProxyProcessTree(c); err != nil {
+			stopErr = errors.Join(stopErr, err)
+			p.mu.Lock()
+			p.failedStops = append(p.failedStops, c)
+			p.mu.Unlock()
+		}
+	}
 	if cmd != nil {
 		// An owned tree is released by the generation's reaper once its
 		// leader has exited, and that release decides whether the tree was
 		// reaped, so the service is not stopped until it has finished.
 		owned := processgroup.HoldsTree(cmd)
-		stopErr = stopProxyProcessTree(cmd)
+		cmdErr := stopProxyProcessTree(cmd)
 		switch {
-		case stopErr == nil && owned:
-			stopErr = awaitGenerationReaper(cmd, doneCh, proxyProcessReapWait)
-		case stopErr != nil && owned:
+		case cmdErr == nil && owned:
+			cmdErr = awaitGenerationReaper(cmd, doneCh, proxyProcessReapWait)
+		case cmdErr != nil && !owned:
+			// No release registry holds this tree, so the next Close
+			// retries the stop rather than reporting the service stopped.
+			p.mu.Lock()
+			p.failedStops = append(p.failedStops, cmd)
+			p.mu.Unlock()
+		case cmdErr != nil && owned:
 			// A tree the stop could not confirm empty is still owned, and its
 			// leader may still be running, in which case its reaper has not
 			// registered it. It is held pending here instead, so nothing
 			// starts under this state root until a release confirms it; the
 			// settle below makes the first attempt, and its result stands.
-			finishServiceRelease(p.reapKey, cmd, false, stopErr)
-			stopErr = nil
+			finishServiceRelease(p.reapKey, cmd, false, cmdErr)
+			cmdErr = nil
 		}
+		stopErr = errors.Join(stopErr, cmdErr)
 	}
 	// A generation whose reap was never confirmed may still be running, so
 	// the service is not stopped until a release confirms it.

@@ -579,3 +579,49 @@ func TestAFailedStopHoldsTheStateRootUntilAReleaseConfirmsIt(t *testing.T) {
 		t.Fatalf("settling once releases confirm: %v", err)
 	}
 }
+
+// TestAFailedUnixStopIsRetriedByTheNextClose covers a stop that fails where
+// processgroup does not hold the tree, so no release registry retries it: the
+// next Close must retry the stop rather than report the service stopped while
+// the group may still be running.
+func TestAFailedUnixStopIsRetriedByTheNextClose(t *testing.T) {
+	inst, _ := startReadyReapTestInstance(t, processgroup.ReleaseCommand)
+	cmd, _ := currentGeneration(inst)
+	owned := processgroup.HoldsTree(cmd)
+
+	var failing atomic.Bool
+	var calls atomic.Int32
+	failing.Store(true)
+	prev := stopProxyProcessTree
+	stopProxyProcessTree = func(c *exec.Cmd) error {
+		calls.Add(1)
+		if failing.Load() {
+			return errors.New("injected: stop not confirmed")
+		}
+		return stopProcessGroup(c)
+	}
+	t.Cleanup(func() { stopProxyProcessTree = prev })
+
+	if err := inst.Close(); err == nil {
+		t.Fatal("Close reported success over a tree it could not stop")
+	}
+	afterFirst := calls.Load()
+	// Where processgroup holds the tree, the failed stop is held in the reap
+	// registry instead, and the second Close settles it with a real release,
+	// which may confirm it; only an unheld tree must fail until its stop does.
+	if err := inst.Close(); err == nil && !owned {
+		t.Fatal("a second Close reported success while the failed stop is still unconfirmed")
+	}
+	afterSecond := calls.Load()
+	if !owned && afterSecond <= afterFirst {
+		t.Fatalf("the second Close did not retry the failed stop (calls %d -> %d)", afterFirst, afterSecond)
+	}
+
+	failing.Store(false)
+	if err := inst.Close(); err != nil {
+		t.Fatalf("Close once the stop succeeds = %v, want nil", err)
+	}
+	if !owned && calls.Load() <= afterSecond {
+		t.Fatalf("the third Close did not retry the stop (calls %d -> %d)", afterSecond, calls.Load())
+	}
+}
