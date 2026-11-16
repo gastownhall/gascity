@@ -1,7 +1,6 @@
 package beads
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -64,12 +63,11 @@ func (m *MemStore) ImportVerbatim(rows []Bead) error {
 
 // ImportVerbatim imports rows under the file lock and flushes once.
 func (fs *FileStore) ImportVerbatim(rows []Bead) error {
-	fs.fmu.Lock()
-	defer fs.fmu.Unlock()
-	if err := fs.locker.Lock(context.Background()); err != nil {
+	unlock, err := fs.lockForWrite()
+	if err != nil {
 		return err
 	}
-	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
+	defer unlock()
 	if err := fs.reloadFromDisk(); err != nil {
 		return err
 	}

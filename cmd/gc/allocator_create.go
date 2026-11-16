@@ -450,12 +450,15 @@ func (x *createEffects) settle(p createPlan, prog createProgress, info session.I
 // refusal, a not-found (bd's classification of a code-less not-found,
 // bdstore_conditional.go), a closed store (SQLite's ensureOpen and native
 // Dolt's acquireStorage refuse before any write; no other store returns
-// it), or a SQLite write whose busy retries ran out uncommitted. The
-// connection class, where the write may have committed, is none of these.
+// it), a SQLite write whose busy retries ran out uncommitted, or a store
+// operation that gave up on a lock or its own deadline before committing
+// (ErrStoreTimeout). The connection class, where the write may have
+// committed, is none of these; nor is a bare context deadline.
 func createWriteRefused(err error) bool {
 	return beads.IsPreconditionFailed(err) || beads.IsConditionalWriteUnsupported(err) ||
 		beads.IsGateRefusal(err) || errors.Is(err, beads.ErrNotFound) ||
-		errors.Is(err, beads.ErrStoreClosed) || errors.Is(err, beads.ErrSQLiteBusyExhausted)
+		errors.Is(err, beads.ErrStoreClosed) || errors.Is(err, beads.ErrSQLiteBusyExhausted) ||
+		errors.Is(err, beads.ErrStoreTimeout)
 }
 
 // logf reports to stderr. A panicking writer is ignored: it must not turn a

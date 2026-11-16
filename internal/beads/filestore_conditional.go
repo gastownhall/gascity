@@ -1,9 +1,6 @@
 package beads
 
-import (
-	"context"
-	"fmt"
-)
+import "fmt"
 
 // FileStore embeds *MemStore, which implements ConditionalWriter — but the
 // promoted methods would write straight to the in-memory MemStore, bypassing
@@ -28,15 +25,14 @@ func (fs *FileStore) UpdateIfMatch(id string, expectedRevision int64, opts Updat
 	if err := validateConditionalUpdateOpts(opts, fs.conditionalLabelsGuarded()); err != nil {
 		return fmt.Errorf("conditional update %s: %w", id, err)
 	}
-	fs.fmu.Lock()
-	defer fs.fmu.Unlock()
-	if fs.DisableConditionalWrites {
+	if fs.conditionalWritesDisabled() {
 		return ErrConditionalWriteUnsupported
 	}
-	if err := fs.locker.Lock(context.Background()); err != nil {
+	unlock, err := fs.lockForWrite()
+	if err != nil {
 		return err
 	}
-	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
+	defer unlock()
 	if err := fs.reloadFromDisk(); err != nil {
 		return err
 	}
@@ -54,15 +50,14 @@ func (fs *FileStore) UpdateIfMatch(id string, expectedRevision int64, opts Updat
 // CloseIfMatch closes the bead only when its persisted revision matches, then
 // flushes to disk.
 func (fs *FileStore) CloseIfMatch(id string, expectedRevision int64) error {
-	fs.fmu.Lock()
-	defer fs.fmu.Unlock()
-	if fs.DisableConditionalWrites {
+	if fs.conditionalWritesDisabled() {
 		return ErrConditionalWriteUnsupported
 	}
-	if err := fs.locker.Lock(context.Background()); err != nil {
+	unlock, err := fs.lockForWrite()
+	if err != nil {
 		return err
 	}
-	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
+	defer unlock()
 	if err := fs.reloadFromDisk(); err != nil {
 		return err
 	}
@@ -80,15 +75,14 @@ func (fs *FileStore) CloseIfMatch(id string, expectedRevision int64) error {
 // DeleteIfMatch removes the bead only when its persisted revision matches, then
 // flushes to disk.
 func (fs *FileStore) DeleteIfMatch(id string, expectedRevision int64) error {
-	fs.fmu.Lock()
-	defer fs.fmu.Unlock()
-	if fs.DisableConditionalWrites {
+	if fs.conditionalWritesDisabled() {
 		return ErrConditionalWriteUnsupported
 	}
-	if err := fs.locker.Lock(context.Background()); err != nil {
+	unlock, err := fs.lockForWrite()
+	if err != nil {
 		return err
 	}
-	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
+	defer unlock()
 	if err := fs.reloadFromDisk(); err != nil {
 		return err
 	}
@@ -111,15 +105,14 @@ func (fs *FileStore) DeleteIfMatch(id string, expectedRevision int64) error {
 // memory and file untouched (no save); a failed flush rolls the in-memory
 // mutation back, so both changes persist or neither does.
 func (fs *FileStore) CloseWithMetadataIfMatch(id string, expectedRevision int64, metadata map[string]string) (Bead, error) {
-	fs.fmu.Lock()
-	defer fs.fmu.Unlock()
-	if fs.DisableConditionalWrites {
+	if fs.conditionalWritesDisabled() {
 		return Bead{}, ErrConditionalWriteUnsupported
 	}
-	if err := fs.locker.Lock(context.Background()); err != nil {
+	unlock, err := fs.lockForWrite()
+	if err != nil {
 		return Bead{}, err
 	}
-	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
+	defer unlock()
 	if err := fs.reloadFromDisk(); err != nil {
 		return Bead{}, err
 	}
@@ -139,15 +132,14 @@ func (fs *FileStore) CloseWithMetadataIfMatch(id string, expectedRevision int64,
 // flushes to disk. A genuine value mismatch returns (false, nil) without a save;
 // a swap persists and returns (true, nil).
 func (fs *FileStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
-	fs.fmu.Lock()
-	defer fs.fmu.Unlock()
-	if fs.DisableConditionalWrites {
+	if fs.conditionalWritesDisabled() {
 		return false, ErrConditionalWriteUnsupported
 	}
-	if err := fs.locker.Lock(context.Background()); err != nil {
+	unlock, err := fs.lockForWrite()
+	if err != nil {
 		return false, err
 	}
-	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
+	defer unlock()
 	if err := fs.reloadFromDisk(); err != nil {
 		return false, err
 	}

@@ -2,6 +2,7 @@ package beads
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -74,11 +75,45 @@ func (nopLocker) Unlock() error              { return nil }
 // contended lock.
 const flockPollInterval = 10 * time.Millisecond
 
-// flockAcquire is the kernel lock call, a seam for tests.
+// flockAcquire is the kernel lock call, a seam for tests: it lets a unit test
+// script contention and other errors without a second process.
 var flockAcquire = filelock.Acquire
 
-// acquireFlock takes an exclusive flock on f. Stub: it blocks without end and
-// ignores ctx until the bounded wait lands.
-func acquireFlock(_ context.Context, f *os.File, label string) (*filelock.Lock, error) {
-	return flockAcquire(f, filelock.Options{Mode: filelock.Exclusive, Label: label})
+// acquireFlock takes an exclusive flock on f. It tries without blocking first,
+// so a free lock is acquired even when ctx is already done: ctx bounds only the
+// wait. Contention (filelock.ErrBusy) waits one flockPollInterval or until ctx
+// ends and tries again; any other error returns at once. A ctx that can never
+// end keeps the plain blocking acquisition. When ctx ends the wait returns
+// ctx.Err(); the caller adds ErrStoreTimeout.
+func acquireFlock(ctx context.Context, f *os.File, label string) (*filelock.Lock, error) {
+	opts := filelock.Options{Mode: filelock.Exclusive, Label: label}
+	if ctx.Done() == nil {
+		return flockAcquire(f, opts)
+	}
+	opts.NonBlocking = true
+	for {
+		lock, err := flockAcquire(f, opts)
+		if err == nil {
+			return lock, nil
+		}
+		if !errors.Is(err, filelock.ErrBusy) {
+			return nil, err
+		}
+		if err := waitFlockPoll(ctx); err != nil {
+			return nil, err
+		}
+	}
+}
+
+// waitFlockPoll waits one flockPollInterval, or returns ctx.Err() as soon as
+// ctx ends.
+func waitFlockPoll(ctx context.Context) error {
+	timer := time.NewTimer(flockPollInterval)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }

@@ -3,6 +3,7 @@ package beads
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -149,7 +150,18 @@ type FileStore struct {
 	locker    Locker // cross-process file lock; nopLocker when unset
 	freshness fileFreshness
 	lockWait  time.Duration // bound on a writer's lock wait; 0 keeps the default
+
+	// slot admits one in-process writer at a time into Locker.Lock, so the
+	// Locker is never entered twice at once and a handoff between in-process
+	// writers does not cost a flock poll. slotOnce creates it lazily so a
+	// zero-value FileStore works.
+	slotOnce sync.Once
+	slot     chan struct{}
 }
+
+// defaultFileStoreLockWait is how long a writer waits for the store lock when
+// WithFileStoreLockWait did not set a bound.
+const defaultFileStoreLockWait = 30 * time.Second
 
 var _ ConditionalAssignmentReleaser = (*FileStore)(nil)
 
@@ -202,16 +214,82 @@ func WithFileStoreIDPrefix(prefix string) FileStoreOption {
 	}
 }
 
-// WithFileStoreLockWait bounds how long a writer waits for the store lock.
-// Stub: the option is recorded and not yet enforced.
+// WithFileStoreLockWait bounds how long a writer waits for the store lock (the
+// in-process writer slot and the cross-process flock share one budget). A
+// writer that runs out of time returns ErrStoreTimeout before it reloads,
+// mutates or saves anything. d <= 0 keeps the default of 30 seconds; there is
+// no unbounded mode.
 func WithFileStoreLockWait(d time.Duration) FileStoreOption {
 	return func(s *FileStore) { s.lockWait = d }
 }
 
-// lockForWrite is the one place a writer takes the store lock. Stub: it takes
-// nothing and returns a no-op unlock until the bounded wait lands.
+// writerSlot returns the capacity-one channel that admits in-process writers.
+func (fs *FileStore) writerSlot() chan struct{} {
+	fs.slotOnce.Do(func() { fs.slot = make(chan struct{}, 1) })
+	return fs.slot
+}
+
+// acquireWriterSlot takes the slot, trying once before waiting so a free slot
+// succeeds even when ctx is already done. It gives up when ctx ends.
+func acquireWriterSlot(ctx context.Context, slot chan struct{}) error {
+	select {
+	case slot <- struct{}{}:
+		return nil
+	default:
+	}
+	select {
+	case slot <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// lockForWrite is the one place a writer takes the store lock: the writer
+// slot, then the cross-process lock, then fmu, all inside one bounded wait.
+// fmu is taken last and only after the wait, so readers (which take fmu alone)
+// never queue behind a writer that is still waiting. The returned unlock
+// releases fmu, the lock and the slot, in that order. On failure nothing is
+// held; a wait that ran out of time reports ErrStoreTimeout together with the
+// ctx error, and any other Lock error is returned as it is.
 func (fs *FileStore) lockForWrite() (unlock func(), err error) {
-	return func() {}, nil
+	wait := fs.lockWait
+	if wait <= 0 {
+		wait = defaultFileStoreLockWait
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
+	defer cancel()
+	slot := fs.writerSlot()
+	if err := acquireWriterSlot(ctx, slot); err != nil {
+		return nil, fs.lockWaitError(err)
+	}
+	if err := fs.locker.Lock(ctx); err != nil {
+		<-slot
+		return nil, fs.lockWaitError(err)
+	}
+	fs.fmu.Lock()
+	return func() {
+		fs.fmu.Unlock()
+		fs.locker.Unlock() //nolint:errcheck // best-effort unlock
+		<-slot
+	}, nil
+}
+
+// lockWaitError reports a lock wait that ended on its deadline as
+// ErrStoreTimeout wrapping the ctx error. Any other error passes through.
+func (fs *FileStore) lockWaitError(err error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("file store write lock %s: %w: %w", fs.path, ErrStoreTimeout, context.DeadlineExceeded)
+	}
+	return err
+}
+
+// conditionalWritesDisabled reads DisableConditionalWrites under a brief fmu
+// hold, so a conditional writer refuses before it waits for the lock.
+func (fs *FileStore) conditionalWritesDisabled() bool {
+	fs.fmu.Lock()
+	defer fs.fmu.Unlock()
+	return fs.DisableConditionalWrites
 }
 
 // OpenFileStore opens or creates a file-backed bead store at path. All file
@@ -356,12 +434,11 @@ func (fs *FileStore) refreshReadStateLocked() error {
 // If the disk flush fails, the in-memory mutation is rolled back to keep
 // the MemStore and file in sync.
 func (fs *FileStore) Create(b Bead) (Bead, error) {
-	fs.fmu.Lock()
-	defer fs.fmu.Unlock()
-	if err := fs.locker.Lock(context.Background()); err != nil {
+	unlock, err := fs.lockForWrite()
+	if err != nil {
 		return Bead{}, err
 	}
-	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
+	defer unlock()
 	if err := fs.reloadFromDisk(); err != nil {
 		return Bead{}, err
 	}
@@ -380,12 +457,11 @@ func (fs *FileStore) Create(b Bead) (Bead, error) {
 // Update delegates to MemStore.Update and flushes to disk.
 // If the disk flush fails, the in-memory mutation is rolled back.
 func (fs *FileStore) Update(id string, opts UpdateOpts) error {
-	fs.fmu.Lock()
-	defer fs.fmu.Unlock()
-	if err := fs.locker.Lock(context.Background()); err != nil {
+	unlock, err := fs.lockForWrite()
+	if err != nil {
 		return err
 	}
-	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
+	defer unlock()
 	if err := fs.reloadFromDisk(); err != nil {
 		return err
 	}
@@ -403,12 +479,11 @@ func (fs *FileStore) Update(id string, opts UpdateOpts) error {
 // ReleaseIfCurrent clears an in-progress assignment only when the bead still
 // has the expected assignee, while holding the file-store write lock.
 func (fs *FileStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
-	fs.fmu.Lock()
-	defer fs.fmu.Unlock()
-	if err := fs.locker.Lock(context.Background()); err != nil {
+	unlock, err := fs.lockForWrite()
+	if err != nil {
 		return false, err
 	}
-	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
+	defer unlock()
 	if err := fs.reloadFromDisk(); err != nil {
 		return false, err
 	}
@@ -427,12 +502,11 @@ func (fs *FileStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error)
 // Close delegates to MemStore.Close and flushes to disk.
 // If the disk flush fails, the in-memory mutation is rolled back.
 func (fs *FileStore) Close(id string) error {
-	fs.fmu.Lock()
-	defer fs.fmu.Unlock()
-	if err := fs.locker.Lock(context.Background()); err != nil {
+	unlock, err := fs.lockForWrite()
+	if err != nil {
 		return err
 	}
-	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
+	defer unlock()
 	if err := fs.reloadFromDisk(); err != nil {
 		return err
 	}
@@ -450,12 +524,11 @@ func (fs *FileStore) Close(id string) error {
 // Reopen delegates to MemStore.Reopen and flushes to disk.
 // If the disk flush fails, the in-memory mutation is rolled back.
 func (fs *FileStore) Reopen(id string) error {
-	fs.fmu.Lock()
-	defer fs.fmu.Unlock()
-	if err := fs.locker.Lock(context.Background()); err != nil {
+	unlock, err := fs.lockForWrite()
+	if err != nil {
 		return err
 	}
-	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
+	defer unlock()
 	if err := fs.reloadFromDisk(); err != nil {
 		return err
 	}
@@ -473,12 +546,11 @@ func (fs *FileStore) Reopen(id string) error {
 // Delete delegates to MemStore.Delete and flushes to disk.
 // If the disk flush fails, the in-memory mutation is rolled back.
 func (fs *FileStore) Delete(id string) error {
-	fs.fmu.Lock()
-	defer fs.fmu.Unlock()
-	if err := fs.locker.Lock(context.Background()); err != nil {
+	unlock, err := fs.lockForWrite()
+	if err != nil {
 		return err
 	}
-	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
+	defer unlock()
 	if err := fs.reloadFromDisk(); err != nil {
 		return err
 	}
@@ -495,12 +567,11 @@ func (fs *FileStore) Delete(id string) error {
 
 // CloseAll closes multiple beads and sets metadata, then flushes once.
 func (fs *FileStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
-	fs.fmu.Lock()
-	defer fs.fmu.Unlock()
-	if err := fs.locker.Lock(context.Background()); err != nil {
+	unlock, err := fs.lockForWrite()
+	if err != nil {
 		return 0, err
 	}
-	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
+	defer unlock()
 	if err := fs.reloadFromDisk(); err != nil {
 		return 0, err
 	}
@@ -521,12 +592,11 @@ func (fs *FileStore) CloseAll(ids []string, metadata map[string]string) (int, er
 // SetMetadata delegates to MemStore.SetMetadata and flushes to disk.
 // If the disk flush fails, the in-memory mutation is rolled back.
 func (fs *FileStore) SetMetadata(id, key, value string) error {
-	fs.fmu.Lock()
-	defer fs.fmu.Unlock()
-	if err := fs.locker.Lock(context.Background()); err != nil {
+	unlock, err := fs.lockForWrite()
+	if err != nil {
 		return err
 	}
-	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
+	defer unlock()
 	if err := fs.reloadFromDisk(); err != nil {
 		return err
 	}
@@ -544,12 +614,11 @@ func (fs *FileStore) SetMetadata(id, key, value string) error {
 // SetMetadataBatch delegates to MemStore.SetMetadataBatch and flushes to disk.
 // If the disk flush fails, the in-memory mutation is rolled back.
 func (fs *FileStore) SetMetadataBatch(id string, kvs map[string]string) error {
-	fs.fmu.Lock()
-	defer fs.fmu.Unlock()
-	if err := fs.locker.Lock(context.Background()); err != nil {
+	unlock, err := fs.lockForWrite()
+	if err != nil {
 		return err
 	}
-	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
+	defer unlock()
 	if err := fs.reloadFromDisk(); err != nil {
 		return err
 	}
@@ -675,12 +744,11 @@ func (fs *FileStore) Ping() error {
 // DepAdd delegates to MemStore.DepAdd and flushes to disk.
 // If the disk flush fails, the in-memory mutation is rolled back.
 func (fs *FileStore) DepAdd(issueID, dependsOnID, depType string) error {
-	fs.fmu.Lock()
-	defer fs.fmu.Unlock()
-	if err := fs.locker.Lock(context.Background()); err != nil {
+	unlock, err := fs.lockForWrite()
+	if err != nil {
 		return err
 	}
-	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
+	defer unlock()
 	if err := fs.reloadFromDisk(); err != nil {
 		return err
 	}
@@ -698,12 +766,11 @@ func (fs *FileStore) DepAdd(issueID, dependsOnID, depType string) error {
 // DepRemove delegates to MemStore.DepRemove and flushes to disk.
 // If the disk flush fails, the in-memory mutation is rolled back.
 func (fs *FileStore) DepRemove(issueID, dependsOnID string) error {
-	fs.fmu.Lock()
-	defer fs.fmu.Unlock()
-	if err := fs.locker.Lock(context.Background()); err != nil {
+	unlock, err := fs.lockForWrite()
+	if err != nil {
 		return err
 	}
-	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
+	defer unlock()
 	if err := fs.reloadFromDisk(); err != nil {
 		return err
 	}

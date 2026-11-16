@@ -1,7 +1,6 @@
 package beads
 
 import (
-	"context"
 	"fmt"
 	"math"
 	"strings"
@@ -34,18 +33,17 @@ func (fs *FileStore) CreateWithForeignIDBatch(rows []Bead) error {
 	if len(rows) == 0 {
 		return nil
 	}
-	fs.fmu.Lock()
-	defer fs.fmu.Unlock()
-	if err := fs.locker.Lock(context.Background()); err != nil {
+	unlock, err := fs.lockForWrite()
+	if err != nil {
 		return err
 	}
-	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
+	defer unlock()
 	if err := fs.reloadFromDisk(); err != nil {
 		return err
 	}
 	snap := fs.snapshotLocked()
 	fs.mu.Lock()
-	err := fs.insertVerbatimLocked(rows)
+	err = fs.insertVerbatimLocked(rows)
 	fs.mu.Unlock()
 	if err != nil {
 		return err

@@ -18,12 +18,11 @@ func (fs *FileStore) ApplyGuarded(ctx context.Context, b GuardedBatch) (GuardedR
 	if err := validateGuardedBatch(b); err != nil {
 		return GuardedResult{}, err
 	}
-	fs.fmu.Lock()
-	defer fs.fmu.Unlock()
-	if err := fs.locker.Lock(context.Background()); err != nil {
+	unlock, err := fs.lockForWrite()
+	if err != nil {
 		return GuardedResult{}, err
 	}
-	defer fs.locker.Unlock() //nolint:errcheck // best-effort unlock
+	defer unlock()
 	if err := fs.reloadFromDisk(); err != nil {
 		return GuardedResult{}, err
 	}

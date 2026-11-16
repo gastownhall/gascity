@@ -213,9 +213,13 @@ func TestFileStoreReadersDoNotQueueBehindAWaitingWriter(t *testing.T) {
 	s, _, a, _ := openLockWaitStore(t, beads.WithFileStoreLockWait(time.Minute))
 	locker := newBlockingLocker()
 	s.SetLocker(locker)
-	t.Cleanup(func() { close(locker.release) })
-
 	writerDone := make(chan error, 1)
+	// Release the writer and wait for it, so it is not still writing when the
+	// temp directory is removed.
+	t.Cleanup(func() {
+		close(locker.release)
+		<-writerDone
+	})
 	go func() { writerDone <- s.Update(a, beads.UpdateOpts{Title: ptr("renamed")}) }()
 	<-locker.entered
 
@@ -239,10 +243,8 @@ func TestFileStoreReadersDoNotQueueBehindAWaitingWriter(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Get/List blocked behind a writer that is still waiting for the lock")
 	}
-	select {
-	case err := <-writerDone:
-		t.Fatalf("writer returned %v while the lock was still held", err)
-	default:
+	if len(writerDone) != 0 {
+		t.Fatal("writer returned while the lock was still held")
 	}
 }
 
