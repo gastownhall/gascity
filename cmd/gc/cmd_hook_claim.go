@@ -186,6 +186,7 @@ type hookClaimOptions struct {
 	IdentityCandidates []string
 	RouteTargets       []string
 	Env                []string
+	StoreRef           string
 	DrainAck           bool
 	JSON               bool
 	// StrictDrainAck reports that the city runs the v2 session reconciler
@@ -315,6 +316,9 @@ type hookClaimOps struct {
 	// PublishRunMap writes best-effort session-to-run correlation without
 	// mutating the session bead after a successful work claim.
 	PublishRunMap hookPublishRunMapFunc
+	// ProvisionWorktree creates/verifies a gc-owned workspace for the claimed
+	// bead before the receipt is delivered. Nil keeps the historical claim path.
+	ProvisionWorktree hookProvisionWorktreeFunc
 	// EnqueueContinuationNudge enqueues a hook-claim-continuation nudge for the
 	// claiming session when a pool graph.v2 workflow root was freshly claimed and
 	// has at least one pre-assigned sibling step. This propels the root → step-1
@@ -417,6 +421,7 @@ type (
 	hookStampWorkMetaFunc         func(ctx context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error
 	hookStampSessionClaimFunc     func(sessionID, beadID string) error
 	hookPublishRunMapFunc         func(runID, beadID string, sessionKeys ...string) error
+	hookProvisionWorktreeFunc     func(beads.Bead, hookClaimOptions, hookClaimOps, string, io.Writer) (hookProvisionedWorktree, beads.Bead, error)
 	hookClaimReleaseFunc          func(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error)
 	// hookClaimReclaimFunc attempts a scoped stale-lease reclaim for exactly
 	// one bead ID (ctx, dir, env, beadID) and reports whether it reclaimed
@@ -452,7 +457,14 @@ type hookClaimJSONResult struct {
 	RootBeadID           string   `json:"root_bead_id,omitempty"`
 	ContinuationGroup    string   `json:"continuation_group,omitempty"`
 	ContinuationAssigned []string `json:"continuation_assigned,omitempty"`
+	WorkDir              string   `json:"work_dir,omitempty"`
+	WorkBranch           string   `json:"work_branch,omitempty"`
 	DrainAcknowledged    bool     `json:"drain_acknowledged,omitempty"`
+}
+
+type hookProvisionedWorktree struct {
+	WorkDir    string
+	WorkBranch string
 }
 
 // hookClaimResult is the outcome of attempting a claim against one store's
@@ -1608,6 +1620,20 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	}
 	result.RootBeadID = strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 	result.ContinuationGroup = strings.TrimSpace(bead.Metadata[beadmeta.ContinuationGroupMetadataKey])
+	if ops.ProvisionWorktree != nil {
+		provisioned, updated, err := ops.ProvisionWorktree(bead, opts, ops, dir, stderr)
+		if err != nil {
+			cause := fmt.Sprintf("provisioning worktree for %s: %v", bead.ID, err)
+			if minted {
+				return unwindUndeliveredHookClaim(hookClaimReleaseReasonUndelivered, cause, bead, opts, ops, dir, hookStartedKeyFor(ops, dir, bead.ID, verdict), stderr)
+			}
+			fmt.Fprintf(stderr, "gc hook --claim: %s\n", cause) //nolint:errcheck
+			return 1
+		}
+		bead = updated
+		result.WorkDir = provisioned.WorkDir
+		result.WorkBranch = provisioned.WorkBranch
+	}
 	durable, stamped := stampHookClaimIdentity(bead, opts, ops, dir, stderr)
 	// The started write (PHASE1-2 §6.4): before the result line, so a claim
 	// is never handed to a turn without the row saying so, and before the

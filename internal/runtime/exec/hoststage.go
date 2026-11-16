@@ -133,7 +133,8 @@ func (p *Provider) runSetupCommand(ctx context.Context, cmd string, env map[stri
 	})
 }
 
-// warnings is where non-fatal host-setup diagnostics go.
+// warnings is where non-fatal start diagnostics go: those of host-setup work,
+// and a failed carrier.ops ready-prompt publish (publishOpsReadyPrompt).
 func (p *Provider) warnings() io.Writer {
 	if p.setupWarnings != nil {
 		return p.setupWarnings

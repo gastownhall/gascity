@@ -151,30 +151,9 @@ func censusRig(cityPath, cityName string, cfg *config.City, target infraBindingT
 		row.State, row.Err = rigCensusUnreachable, fmt.Errorf("listing rig %s: %w", rig.Name, err)
 		return row
 	}
-	gen := coordclass.CurrentGeneration
-	if manifest != nil {
-		gen = manifest.Generation
-	}
-	for _, b := range snap.rows {
-		if manifest != nil && manifest.Match(b) == infraManifestReusedID {
-			row.Reused = append(row.Reused, b.ID)
-		}
-		if coordclass.ClassifyAt(b, gen) == coordclass.ClassWork {
-			continue
-		}
-		row.Infra++
-		if rigRowOpen(b) {
-			row.Open++
-		}
-		if manifest != nil && manifest.Carried(b) {
-			row.Retained = append(row.Retained, b.ID)
-		} else {
-			row.Stranded = append(row.Stranded, b.ID)
-		}
-	}
-	sort.Strings(row.Retained)
-	sort.Strings(row.Stranded)
-	sort.Strings(row.Reused)
+	classes := classifyRigRows(snap.rows, manifest)
+	row.Infra, row.Open = classes.Infra, classes.Open
+	row.Stranded, row.Retained, row.Reused = classes.Stranded, classes.Retained, classes.Reused
 	clean := fileExists(loc.CleanPath())
 	switch {
 	case fileExists(loc.InFlightPath()):
@@ -225,6 +204,53 @@ func censusRig(cityPath, cityName string, cfg *config.City, target infraBindingT
 		row.Plan = &plan
 	}
 	return row
+}
+
+// rigRowClasses is a rig store's rows classified against its import
+// manifest: what the census reports, and what a reverse checks before it
+// gives the rig every class back (reverseRun.rigStoreLeftovers).
+type rigRowClasses struct {
+	// Infra counts the infrastructure rows, under the manifest's generation,
+	// and Open the open ones among them.
+	Infra, Open int
+	// Stranded are the infrastructure rows the import never carried, and
+	// Retained those it carried, sorted.
+	Stranded, Retained []string
+	// Reused names rows, of any class, under an id the import moved for a
+	// different bead (same id, another created_at), sorted.
+	Reused []string
+}
+
+// classifyRigRows classifies rows, every row of a rig's store, against the
+// rig's import manifest, nil when it has none: then every infrastructure
+// row, under the current generation, is one no import carried.
+func classifyRigRows(rows []beads.Bead, manifest *infraCopyManifest) rigRowClasses {
+	var c rigRowClasses
+	gen := coordclass.CurrentGeneration
+	if manifest != nil {
+		gen = manifest.Generation
+	}
+	for _, b := range rows {
+		if manifest != nil && manifest.Match(b) == infraManifestReusedID {
+			c.Reused = append(c.Reused, b.ID)
+		}
+		if coordclass.ClassifyAt(b, gen) == coordclass.ClassWork {
+			continue
+		}
+		c.Infra++
+		if rigRowOpen(b) {
+			c.Open++
+		}
+		if manifest != nil && manifest.Carried(b) {
+			c.Retained = append(c.Retained, b.ID)
+		} else {
+			c.Stranded = append(c.Stranded, b.ID)
+		}
+	}
+	sort.Strings(c.Retained)
+	sort.Strings(c.Stranded)
+	sort.Strings(c.Reused)
+	return c
 }
 
 // rigCensusLine renders one row for an operator.

@@ -59,7 +59,7 @@ func unreadScope(t *testing.T) string {
 // List is charged to that budget. Measured before this was removed, with the
 // deadline shortened to 250ms and bd answering the probe argv slower than it:
 //
-//	statusListStoreWithTimeout(ctx, state, store, ListQuery{AllowScan:true})
+//	statusListStoreWithTimeout(ctx, state, testWorkLeg(t, store), ListQuery{AllowScan:true})
 //	  => rows=0 err="list timed out: context deadline exceeded"   (250ms)
 //	control, GC_BD_ALLOW_UNREAD_STORE_READ=1
 //	  => rows=0 err=<nil>                                         (72µs)
@@ -110,7 +110,7 @@ func TestStatusListUnderADeadlineIsUnchangedByTheUnreadStoreNotice(t *testing.T)
 			state.scopedStoreFn = func(context.Context, beads.Store) (beads.Store, error) { return store, nil }
 
 			start := time.Now()
-			rows, err := statusListStoreWithTimeout(caller, state, store, beads.ListQuery{AllowScan: true})
+			rows, err := statusListStoreWithTimeout(caller, state, testWorkLeg(t, store), beads.ListQuery{AllowScan: true})
 			elapsed := time.Since(start)
 
 			if err != nil {
@@ -156,7 +156,7 @@ func TestStatusRequestsOverOneScopePrintOneNotice(t *testing.T) {
 
 	const requests = 10
 	for i := 0; i < requests; i++ {
-		rows, err := statusListStoreWithTimeout(context.Background(), state, shared, beads.ListQuery{AllowScan: true})
+		rows, err := statusListStoreWithTimeout(context.Background(), state, testWorkLeg(t, shared), beads.ListQuery{AllowScan: true})
 		if err != nil || len(rows) != 0 {
 			t.Fatalf("request #%d = (%d rows, %v), want (0, nil)", i, len(rows), err)
 		}
