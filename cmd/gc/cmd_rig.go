@@ -402,15 +402,7 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 				fmt.Fprintf(stderr, "gc rig add: warning: writing .beads/.env: %v\n", err) //nolint:errcheck // best-effort stderr
 			}
 
-			reloadErr := rigReloadControllerConfig(cityPath)
-			if errors.Is(reloadErr, errRigReloadIncomplete) {
-				fmt.Fprintf(stderr, "gc rig add: warning: rig %q saved but controller reload did not complete: %v; run gc reload\n", name, reloadErr) //nolint:errcheck // best-effort stderr
-			}
-			if reloadErr == nil && pc.Deferred && cityUsesBdStoreContract(cityPath) {
-				if waitErr := rigWaitForStoreAccessible(cityPath, rigPath, rigDeferredStoreInitWait); waitErr != nil {
-					fmt.Fprintf(stderr, "gc rig add: warning: controller init still pending for rig %q: %v\n", name, waitErr) //nolint:errcheck // best-effort stderr
-				}
-			}
+			reloadControllerAfterRigAdd(cityPath, rigPath, name, pc.Deferred, stderr)
 			return nil
 		},
 		OnStep: func(s rig.ProvisionStep) {
@@ -451,6 +443,23 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 		recordNewRigClean(cityPath, reloaded, r, stderr)
 	}
 	return r, 0
+}
+
+// reloadControllerAfterRigAdd asks the controller to apply the config a rig add
+// just saved and, for a rig whose store init was deferred to the controller on
+// a bd-store city, waits for that store to become accessible. The rig is
+// already saved, so an incomplete reload or a store that is still pending only
+// warns.
+func reloadControllerAfterRigAdd(cityPath, rigPath, name string, deferred bool, stderr io.Writer) {
+	reloadErr := rigReloadControllerConfig(cityPath)
+	if errors.Is(reloadErr, errRigReloadIncomplete) {
+		fmt.Fprintf(stderr, "gc rig add: warning: rig %q saved but controller reload did not complete: %v; run gc reload\n", name, reloadErr) //nolint:errcheck // best-effort stderr
+	}
+	if reloadErr == nil && deferred && cityUsesBdStoreContract(cityPath) {
+		if waitErr := rigWaitForStoreAccessible(cityPath, rigPath, rigDeferredStoreInitWait); waitErr != nil {
+			fmt.Fprintf(stderr, "gc rig add: warning: controller init still pending for rig %q: %v\n", name, waitErr) //nolint:errcheck // best-effort stderr
+		}
+	}
 }
 
 // recordNewRigClean writes the S4 clean record for a rig `gc rig add` just
