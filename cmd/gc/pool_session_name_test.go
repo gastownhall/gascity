@@ -2957,3 +2957,71 @@ func TestClearCurrentBeadIDWhenUnassignedDropsStaleAnchor(t *testing.T) {
 		t.Fatalf("CurrentlyProcessingBeadID = %q after clear, want empty", reloaded.CurrentlyProcessingBeadID)
 	}
 }
+
+// TestReleaseOrphanedPoolAssignments_SameBeadIDInAnotherStoreIsNotShielded covers
+// gascity#6410 ask 3: the same bead ID can exist in two stores. A live session
+// that anchors bead "gc-1" in the city store must not shield the rig store's
+// "gc-1", which is a different bead assigned to a dead owner. The index is keyed
+// by store ref, so the rig bead should be released.
+func TestReleaseOrphanedPoolAssignments_SameBeadIDInAnotherStoreIsNotShielded(t *testing.T) {
+	cityPath := t.TempDir()
+	cityStore := beads.NewMemStore()
+	rigStore := beads.NewMemStore()
+
+	// Same ID in both stores: create in the city store first, then the rig store.
+	cityBead, err := cityStore.Create(beads.Bead{Title: "city bead"})
+	if err != nil {
+		t.Fatalf("Create city bead: %v", err)
+	}
+	rigBead, err := rigStore.Create(beads.Bead{
+		Title:    "rig bead",
+		Assignee: "dead-owner",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+	})
+	if err != nil {
+		t.Fatalf("Create rig bead: %v", err)
+	}
+	if cityBead.ID != rigBead.ID {
+		t.Fatalf("precondition: IDs differ (%s vs %s); the test needs a shared ID", cityBead.ID, rigBead.ID)
+	}
+	if err := rigStore.Update(rigBead.ID, beads.UpdateOpts{Status: stringPtr("in_progress")}); err != nil {
+		t.Fatalf("Set rig bead status: %v", err)
+	}
+	rigBead, err = rigStore.Get(rigBead.ID)
+	if err != nil {
+		t.Fatalf("Reload rig bead: %v", err)
+	}
+
+	// A live city pool session anchored on the city store's bead with the shared ID.
+	openSession := beads.Bead{
+		ID:     "th-city-worker",
+		Title:  "city worker session",
+		Status: "open",
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":           "th-city-worker",
+			"template":               "worker",
+			session.CurrentBeadIDKey: cityBead.ID,
+		},
+	}
+
+	cfg := &config.City{
+		Rigs:                  []config.Rig{{Name: "repo", Path: t.TempDir()}},
+		Agents:                []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}},
+		ResolvedWorkspaceName: "test-city",
+	}
+
+	released := releaseOrphanedPoolAssignmentsFromBeads(
+		cityStore,
+		cfg,
+		cityPath,
+		[]beads.Bead{openSession},
+		[]beads.Bead{rigBead},
+		[]beads.Store{rigStore},
+		[]string{"repo"},
+		map[string]beads.Store{"repo": rigStore},
+	)
+	if len(released) != 1 || released[0].ID != rigBead.ID {
+		t.Fatalf("released = %v, want the rig bead %s released; the city session's anchor must not shield it", released, rigBead.ID)
+	}
+}
