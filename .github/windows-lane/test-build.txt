@@ -40,6 +40,7 @@
 ./internal/poolplan
 ./internal/pricing
 ./internal/processenv
+./internal/processgroup
 ./internal/processgroup/processgrouptest
 ./internal/productmetrics
 ./internal/promptmeta
