@@ -345,6 +345,9 @@ func installOverlayManaged(fs fsys.FS, cityDir, workDir, provider string) error 
 		if provider == "antigravity" && rel == path.Join(".agents", "hooks.json") {
 			return writeJSONOverlayManaged(fs, dst, data)
 		}
+		if provider == "gemini" && rel == path.Join(".gemini", "settings.json") {
+			return writeJSONOverlayManaged(fs, dst, data)
+		}
 		if provider == "codex" && rel == path.Join(".codex", "hooks.json") {
 			return writeCodexHooksManaged(fs, cityDir, dst, data)
 		}

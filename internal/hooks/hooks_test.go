@@ -2137,6 +2137,50 @@ func TestGeminiSessionStartMarkerConvergesOnExistingSettings(t *testing.T) {
 	}
 }
 
+// TestInstallGeminiUpgradesExistingSessionStartMarkers pins that Install, not
+// only the merge function, converges an existing .gemini/settings.json that
+// predates the managed-hook markers to exactly one marker-carrying
+// SessionStart command, leaving the other events untouched.
+func TestInstallGeminiUpgradesExistingSessionStartMarkers(t *testing.T) {
+	fs := fsys.NewFake()
+	if err := Install(fs, "/city", "/work", []string{"gemini"}); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	const settingsPath = "/work/.gemini/settings.json"
+	embedded := fs.Files[settingsPath]
+	const markers = "GC_MANAGED_SESSION_HOOK=1 GC_HOOK_EVENT_NAME=SessionStart "
+	preFix := bytes.Replace(embedded, []byte(markers), nil, 1)
+	if bytes.Equal(preFix, embedded) {
+		t.Fatalf("installed gemini settings carry no %q prefix to strip:\n%s", markers, embedded)
+	}
+	fs.Files[settingsPath] = preFix
+
+	if err := Install(fs, "/city", "/work", []string{"gemini"}); err != nil {
+		t.Fatalf("second Install: %v", err)
+	}
+	upgraded := fs.Files[settingsPath]
+	start := overlayHookCommands(t, upgraded, "SessionStart")
+	if len(start) != 1 {
+		t.Fatalf("SessionStart commands after Install = %d, want exactly 1: %q", len(start), start)
+	}
+	for _, want := range []string{"GC_MANAGED_SESSION_HOOK=1", "GC_HOOK_EVENT_NAME=SessionStart"} {
+		if !strings.Contains(start[0], want) {
+			t.Errorf("upgraded SessionStart command missing %q: %q", want, start[0])
+		}
+	}
+	for _, event := range []string{"PreCompress", "BeforeAgent"} {
+		commands := overlayHookCommands(t, upgraded, event)
+		if got, want := len(commands), len(overlayHookCommands(t, preFix, event)); got != want {
+			t.Errorf("%s command count after Install = %d, want %d (unchanged)", event, got, want)
+		}
+		for _, command := range commands {
+			if strings.Contains(command, "GC_MANAGED_SESSION_HOOK") || strings.Contains(command, "GC_HOOK_EVENT_NAME") {
+				t.Errorf("gemini %s command must not carry managed-hook markers: %q", event, command)
+			}
+		}
+	}
+}
+
 // TestCopilotAndCursorSessionStartHooksOmitManagedMarkers pins that the two
 // providers whose SessionStart output is not delivered as model context stay
 // marker-free (ga-m4xy49). Copilot CLI ignores sessionStart output, so routing
