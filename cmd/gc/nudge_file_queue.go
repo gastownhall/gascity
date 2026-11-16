@@ -348,6 +348,7 @@ func (r *nudgeClaimRun) run(state *nudgeQueueState) error {
 	if r.launch != nil {
 		turn, hold := r.launch.judge(state, r.ledger, r.now)
 		if hold {
+			unpinSharedStartupTurn(state, turn, r.now)
 			r.claimed = claimQueuedNudges(state, r.now, func(item queuedNudge) bool { return item.ID == turn }, r.batchTarget)
 			return nil
 		}
@@ -358,6 +359,33 @@ func (r *nudgeClaimRun) run(state *nudgeQueueState) error {
 	}
 	r.claimed = claimQueuedNudges(state, r.now, match, r.batchTarget)
 	return nil
+}
+
+// unpinSharedStartupTurn unpins turn, the pending startup turn a claim takes
+// alone, when it is due and another live item shares its delivery batch: only
+// an older gc's claim pins a turn with other items, and such a turn could
+// never be claimed whole with them (wholePinnedBatch), nor alone under that
+// key, whose receipt a runtime that deduplicates by key could replay for the
+// rest. A turn pinned alone keeps its key.
+func unpinSharedStartupTurn(state *nudgeQueueState, turn string, now time.Time) {
+	at := -1
+	for i, item := range state.Pending {
+		if item.ID == turn && item.DeliveryBatch != "" && !item.DeliverAfter.After(now) {
+			at = i
+		}
+	}
+	if at < 0 {
+		return
+	}
+	batch := state.Pending[at].DeliveryBatch
+	for _, bucket := range [][]queuedNudge{state.Pending, state.InFlight} {
+		for _, item := range bucket {
+			if item.ID != turn && item.DeliveryBatch == batch {
+				state.Pending[at].DeliveryBatch = ""
+				return
+			}
+		}
+	}
 }
 
 // dryRun runs the claim on a lock-free snapshot and reports whether it would

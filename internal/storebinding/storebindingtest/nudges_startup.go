@@ -224,6 +224,39 @@ func runNudgeStartupTests(r Runner, suite NudgesSuite) {
 		}
 	})
 
+	r.Run("ATurnPinnedWithOtherItemsIsClaimedAloneUnderAKeyOfItsOwn", func(r Runner) {
+		// Only an older gc's claim pins a turn with other items: it claimed
+		// them together and crashed, or failed its repin.
+		const shared = "nudge-batch-shared"
+		for _, verb := range []string{"ClaimDue", "ClaimBatch"} {
+			queue := mustQueue(r, suite)
+			now := time.Now().UTC()
+			reminder := startupReminder("n-reminder", now.Add(-time.Minute))
+			reminder.DeliveryBatch = shared
+			turn := startupTurn("t-1", startupLaunchOne, now)
+			turn.DeliveryBatch = shared
+			enqueueItems(r, queue, reminder)
+			enqueueDeferred(r, queue, turn)
+			target := startupTarget(launchReader(startupLaunchOne))
+			claim := queue.ClaimDue
+			if verb == "ClaimBatch" {
+				claim = queue.ClaimBatch
+			}
+			claimed, err := claim(target, now)
+			if err != nil || fmt.Sprint(nudgeIDs(claimed)) != "[t-1]" {
+				r.Fatalf("%s = %v, %v; want the live launch's turn alone", verb, nudgeIDs(claimed), err)
+			}
+			if claimed[0].DeliveryBatch == shared || (verb == "ClaimBatch" && claimed[0].DeliveryBatch == "") {
+				r.Fatalf("%s claimed the turn under batch %q; want a key of its own, never the shared %q", verb, claimed[0].DeliveryBatch, shared)
+			}
+			ackAll(r, queue, "t-1")
+			claimed, err = claim(target, now)
+			if err != nil || fmt.Sprint(nudgeIDs(claimed)) != "[n-reminder]" {
+				r.Fatalf("%s after the turn's ack = %v, %v; want the reminder", verb, nudgeIDs(claimed), err)
+			}
+		}
+	})
+
 	r.Run("AReleasedTurnOfAReplacedLaunchIsDroppedNotRedelivered", func(r Runner) {
 		runReplacedLaunchCase(r, suite, func(r Runner, queue storebinding.NudgeQueue, now time.Time) time.Time {
 			if err := queue.ReleaseClaims([]string{"t-1"}, time.Time{}); err != nil {

@@ -141,6 +141,7 @@ func (q *MemoryNudgeQueue) ClaimDue(target storebinding.ClaimTarget, now time.Ti
 		if turn == nil {
 			return nil, nil
 		}
+		q.unpinSharedStartupTurnLocked(turn, now)
 		return []nudgequeue.Item{claimEntry(turn, now, turn.item.DeliveryBatch)}, nil
 	}
 	var claimed []nudgequeue.Item
@@ -219,6 +220,7 @@ func (q *MemoryNudgeQueue) ClaimBatch(target storebinding.ClaimTarget, now time.
 		if turn == nil {
 			return nil, nil
 		}
+		q.unpinSharedStartupTurnLocked(turn, now)
 		batch := turn.item.DeliveryBatch
 		if batch == "" {
 			minted, err := newMemoryBatchKey()
@@ -265,6 +267,24 @@ func (q *MemoryNudgeQueue) ClaimBatch(target storebinding.ClaimTarget, now time.
 		claimed = append(claimed, claimEntry(candidate, now, batch))
 	}
 	return claimed, nil
+}
+
+// unpinSharedStartupTurnLocked unpins turn, the startup turn a claim takes
+// alone, when another live entry shares its delivery batch: only an older
+// gc's claim pins a turn with other items, and a turn claimed alone under
+// that key would be part of that batch. A turn pinned alone keeps its key.
+func (q *MemoryNudgeQueue) unpinSharedStartupTurnLocked(turn *memoryQueueEntry, now time.Time) {
+	batch := turn.item.DeliveryBatch
+	if batch == "" {
+		return
+	}
+	for _, id := range q.order {
+		entry := q.entries[id]
+		if entry != nil && entry != turn && entry.live() && entry.item.DeliveryBatch == batch && !expired(entry.item, now) {
+			turn.item.DeliveryBatch = ""
+			return
+		}
+	}
 }
 
 // candidatesLocked returns the entries target may claim now, in delivery

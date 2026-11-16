@@ -296,6 +296,9 @@ func (q *beadsNudgeQueue) ClaimDue(target ClaimTarget, now time.Time) ([]nudgequ
 		return nil, err
 	}
 	if hold {
+		if turn, err = q.unpinSharedStartupTurn(turn, now); err != nil {
+			return nil, err
+		}
 		if turn == nil {
 			return nil, nudgeQueueQuarantined("ClaimDue", corrupt)
 		}

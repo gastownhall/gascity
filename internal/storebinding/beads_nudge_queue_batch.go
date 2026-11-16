@@ -69,6 +69,9 @@ func (q *beadsNudgeQueue) ClaimBatch(target ClaimTarget, now time.Time) ([]nudge
 		return nil, err
 	}
 	if hold {
+		if turn, err = q.unpinSharedStartupTurn(turn, now); err != nil {
+			return nil, err
+		}
 		claimed, err := q.claimStartupTurn(turn, now)
 		if err != nil {
 			return claimed, err
@@ -111,7 +114,8 @@ func (q *beadsNudgeQueue) ClaimBatch(target ClaimTarget, now time.Time) ([]nudge
 }
 
 // claimStartupTurn claims a startup turn as a batch of one: under the batch
-// it is pinned to, or a newly minted one. A nil turn claims nothing.
+// it is pinned to alone (unpinSharedStartupTurn), or a newly minted one. A
+// nil turn claims nothing.
 func (q *beadsNudgeQueue) claimStartupTurn(turn *nudgeQueueEntry, now time.Time) ([]nudgequeue.Item, error) {
 	if turn == nil {
 		return nil, nil
@@ -120,6 +124,55 @@ func (q *beadsNudgeQueue) claimStartupTurn(turn *nudgeQueueEntry, now time.Time)
 		return q.claimResumedBatch(key, []nudgeQueueEntry{*turn}, now)
 	}
 	return q.claimNewBatch([]nudgeQueueEntry{*turn}, now)
+}
+
+// unpinSharedStartupTurn returns turn, the startup turn a claim takes alone,
+// unpinned when other open records share its delivery batch, as re-read
+// after the unpin (nil when it moved since): only an older gc's claim pins a
+// turn with other items, and a turn claimed alone under that shared key
+// would be part of that batch, whose receipt a runtime that deduplicates by
+// key could replay for the rest, acking them unseen. A turn pinned alone
+// keeps its key. A nil turn is returned as is.
+func (q *beadsNudgeQueue) unpinSharedStartupTurn(turn *nudgeQueueEntry, now time.Time) (*nudgeQueueEntry, error) {
+	if turn == nil || turn.item.DeliveryBatch == "" {
+		return turn, nil
+	}
+	key := turn.item.DeliveryBatch
+	records, err := q.store.List(nudgeQueueBatchQuery(key))
+	if err != nil {
+		return nil, fmt.Errorf("listing nudge delivery batch %q: %w", key, err)
+	}
+	entries, corrupt := decodeNudgeQueueRecords(records, now)
+	shared := len(corrupt) > 0 // a member that does not decode cannot be vouched for
+	for _, entry := range entries {
+		if entry.item.ID != turn.item.ID && (entry.state == nudgeQueueStateLive || entry.state == nudgeQueueInFlight) && !nudgeQueueItemExpired(entry.item, now) {
+			shared = true
+		}
+	}
+	if !shared {
+		return turn, nil
+	}
+	err = q.mutate(turn.item.ID, now, func(current nudgeQueueEntry) (beads.UpdateOpts, bool, error) {
+		if current.state != nudgeQueueStateLive || current.item.DeliveryBatch != key {
+			return beads.UpdateOpts{}, false, nil
+		}
+		return beads.UpdateOpts{Metadata: map[string]string{nudgeMetaDeliveryBatch: ""}}, true, nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("unpinning startup turn %q from batch %q: %w", turn.item.ID, key, err)
+	}
+	record, err := q.store.Get(turn.bead.ID)
+	if errors.Is(err, beads.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading startup turn %q after unpinning it: %w", turn.item.ID, err)
+	}
+	unpinned, err := decodeNudgeQueueBead(record, now)
+	if err != nil || unpinned.state != nudgeQueueStateLive || unpinned.item.DeliveryBatch != "" {
+		return nil, err
+	}
+	return &unpinned, nil
 }
 
 // wholeBatch reads the open members of batch key and reports whether target
