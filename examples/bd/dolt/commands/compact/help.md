@@ -200,7 +200,9 @@ probe's own connection is not counted) and acts on the answer:
 - One or more sessions: the GC is skipped and the log says so. A bare GC skip
   is routine and exits 0. A skipped full GC counts as a failed database (exit
   non-zero), and after a flatten it leaves the pending-GC marker, so the next
-  run retries.
+  run retries. The pending-GC marker it leaves keeps its usual reason
+  (`flatten succeeded but full GC failed`); the compactor log line naming the
+  live sessions says the GC was skipped, not failed.
 - The probe fails, times out, or returns a non-number: the GC is skipped,
   because a database that cannot be confirmed quiescent is treated as busy.
 
@@ -208,8 +210,9 @@ Any connected session blocks the GC, not only one with a write in flight.
 `--force` overrides both skips.
 
 The check is a point in time, not a lock: a session can connect between the
-probe and the GC that follows. The gate and the 2-hour retry cadence narrow that
-window; they do not close it.
+probe and the GC that follows. Nothing closes that window. The 2-hour retry
+cadence only gives a busy database another chance to be seen idle; it does not
+shorten the gap between the probe and the GC.
 
 ## Live-database gate
 

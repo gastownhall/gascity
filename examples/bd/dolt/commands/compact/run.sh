@@ -378,7 +378,7 @@ fi
 host="${GC_DOLT_HOST:-127.0.0.1}"
 threshold_commits="${GC_DOLT_COMPACT_THRESHOLD_COMMITS:-2000}"
 call_timeout="${GC_DOLT_COMPACT_CALL_TIMEOUT_SECS:-1800}"
-# Caps the live-session probe before CALL DOLT_GC; mirrors
+# Caps the live-session probe before CALL DOLT_GC; matches
 # cleanupLiveSessionProbeTimeout in cmd/gc/dolt_cleanup_drop.go.
 live_session_probe_timeout=2
 push_timeout="${GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS:-120}"
@@ -2726,9 +2726,9 @@ live_gate_fail() {
 
 # live_session_count DB — prints how many sessions are connected to DB. The
 # probe selects no database (no --use-db), so its own connection is not counted
-# in information_schema.processlist. Same surface as ProbeLiveSessions in
-# cmd/gc/dolt_cleanup_drop.go. Any error, timeout, or non-numeric answer returns
-# non-zero.
+# in information_schema.processlist. Reads the same information_schema.processlist
+# surface as ProbeLiveSessions in cmd/gc/dolt_cleanup_drop.go, filtered to one
+# database. Any error, timeout, or non-numeric answer returns non-zero.
 live_session_count() {
   probe_db="$1"
   valid_database_name "$probe_db" || return 1
@@ -2753,8 +2753,8 @@ live_session_count() {
 #
 # This is a point-in-time check, not a lock: a session can connect between the
 # probe and the CALL DOLT_GC that follows, and nothing here fences it. The
-# conservative any-connection bar and the retry cadence shrink that window; they
-# do not close it.
+# conservative any-connection bar lowers the odds; retries give a busy database
+# another chance to be seen idle. Neither closes the window.
 gc_live_session_gate() {
   gate_db="$1"
   gate_rc=0
