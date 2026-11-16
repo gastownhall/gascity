@@ -2024,11 +2024,6 @@ resource = "fixed_sleep"
 calls = 1
 
 [[count]]
-path = "internal/beads/caching_store_internal_test.go"
-resource = "fixed_sleep"
-calls = 1
-
-[[count]]
 path = "internal/beads/caching_store_overlay_test.go"
 resource = "fixed_sleep"
 calls = 1

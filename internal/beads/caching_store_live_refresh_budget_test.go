@@ -45,7 +45,7 @@ func (s *liveRefreshHiddenStore) Get(id string) (Bead, error) {
 	s.gets = append(s.gets, id)
 	s.mu.Unlock()
 	if s.getDelay > 0 {
-		time.Sleep(s.getDelay) // synctest fake clock: the cost of one slow Get
+		<-time.After(s.getDelay) // synctest fake clock: the cost of one slow Get
 	}
 	return s.Store.Get(id)
 }
@@ -201,7 +201,7 @@ func TestCachingStoreLiveListRefreshTruncationLogsOncePerWindowWithoutProblemSta
 			t.Fatalf("truncation log lines after 3 truncating calls in one window = %d (%q), want exactly 1", len(lines), lines)
 		}
 
-		time.Sleep(cacheProblemLogWindow + time.Second) // synctest fake clock
+		<-time.After(cacheProblemLogWindow + time.Second) // synctest fake clock
 		if _, err := cache.List(liveOpenQuery()); err != nil {
 			t.Fatalf("List after window: %v", err)
 		}
