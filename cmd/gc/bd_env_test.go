@@ -6471,3 +6471,36 @@ func TestInvalidWorkspaceBdBinStillFailsClosed(t *testing.T) {
 		})
 	}
 }
+
+func TestMergeOrderExecEnvDropsInheritedServerDatabase(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "hq")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
+	for _, entry := range mergeOrderExecEnv(os.Environ(), nil) {
+		if strings.HasPrefix(entry, "BEADS_DOLT_SERVER_DATABASE=") || strings.HasPrefix(entry, "BEADS_DOLT_SERVER_MODE=") {
+			t.Errorf("order exec env inherits %q", entry)
+		}
+	}
+}
+
+func TestMergeRuntimeEnvDropsInheritedServerDatabase(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "hq")
+	for _, entry := range mergeRuntimeEnv(os.Environ(), map[string]string{"BEADS_DIR": "/rig/.beads", "BEADS_DOLT_SERVER_PORT": "4000"}) {
+		if strings.HasPrefix(entry, "BEADS_DOLT_SERVER_DATABASE=") {
+			t.Errorf("rig-scoped child env inherits %q", entry)
+		}
+	}
+}
+
+func TestMergeRuntimeEnvKeepsExplicitServerDatabaseOverride(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "hq")
+	env := mergeRuntimeEnv(os.Environ(), map[string]string{"BEADS_DOLT_SERVER_DATABASE": "rig_a"})
+	var got []string
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "BEADS_DOLT_SERVER_DATABASE=") {
+			got = append(got, entry)
+		}
+	}
+	if len(got) != 1 || got[0] != "BEADS_DOLT_SERVER_DATABASE=rig_a" {
+		t.Errorf("BEADS_DOLT_SERVER_DATABASE entries = %q, want only the explicit override rig_a", got)
+	}
+}
