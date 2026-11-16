@@ -745,3 +745,64 @@ func parseReadyArgsForTest(t *testing.T, args []string) func(beads.Bead) bool {
 	}
 	return matches
 }
+
+// A bd status=blocked row reads back as "open" with bd's raw status kept in
+// SourceStatus, and the seat's ready query excludes it whatever its
+// dependencies. The claimability predicate must therefore name it as its own
+// cause, ahead of the is_blocked projection (so an explicit false cannot mask
+// the status) and behind the deferral and hold causes (so such a row keeps the
+// classification and bucket it had).
+func TestClassifyDemandRowClaimabilityStatusBlocked(t *testing.T) {
+	now := time.Now()
+	future := now.Add(time.Hour)
+	blockedTrue, blockedFalse := true, false
+	for _, tt := range []struct {
+		name string
+		bead beads.Bead
+		want demandRowClaimability
+	}{
+		{"status blocked, no projection", beads.Bead{Status: "open", SourceStatus: "blocked"}, demandRowStatusBlocked},
+		{"status blocked, projection false", beads.Bead{Status: "open", SourceStatus: "blocked", IsBlocked: &blockedFalse}, demandRowStatusBlocked},
+		{"status blocked, projection true", beads.Bead{Status: "open", SourceStatus: "blocked", IsBlocked: &blockedTrue}, demandRowStatusBlocked},
+		{"status blocked and held", beads.Bead{Status: "open", SourceStatus: "blocked", Labels: []string{beadmeta.DispatchHoldLabels[0]}}, demandRowHeld},
+		{"status blocked and deferred", beads.Bead{Status: "open", SourceStatus: "blocked", DeferUntil: &future}, demandRowDeferred},
+
+		// Regression pins: a row without the recorded status classifies as before.
+		// An EMPTY SourceStatus means the store reported none (memstore, sqlite,
+		// exec, or after a status patch), which is not status-blocked.
+		{"no recorded status, no projection", beads.Bead{Status: "open"}, demandRowBlockednessUnproven},
+		{"no recorded status, projection true", beads.Bead{Status: "open", IsBlocked: &blockedTrue}, demandRowBlockednessUnproven},
+		{"no recorded status, projection false", beads.Bead{Status: "open", IsBlocked: &blockedFalse}, demandRowClaimable},
+		{"recorded status open, projection false", beads.Bead{Status: "open", SourceStatus: "open", IsBlocked: &blockedFalse}, demandRowClaimable},
+		{"recorded status open, no projection", beads.Bead{Status: "open", SourceStatus: "open"}, demandRowBlockednessUnproven},
+		{"held", beads.Bead{Status: "open", Labels: []string{beadmeta.DispatchHoldLabels[0]}}, demandRowHeld},
+		{"deferred", beads.Bead{Status: "open", DeferUntil: &future}, demandRowDeferred},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := classifyDemandRowClaimability(tt.bead, now); got != tt.want {
+				t.Errorf("classifyDemandRowClaimability = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// Wire-to-classification pin: a bd row with status "blocked", decoded by the
+// production BdStore read, must classify as status-blocked. BdStore folds the
+// status to "open"; if a later edit to its status normalization stopped keeping
+// the raw status, the cause would silently disconnect from the predicate. The
+// native-store decode is pinned where it lives, in internal/beads.
+func TestBdStatusBlockedRowClassifiesAsStatusBlocked(t *testing.T) {
+	runner := func(_, _ string, _ ...string) ([]byte, error) {
+		return []byte(`[{"id":"bd-x","title":"parked","status":"blocked","issue_type":"task","created_at":"2025-01-15T10:30:00Z"}]`), nil
+	}
+	got, err := beads.NewBdStore("/city", runner).Get("bd-x")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != "open" || got.IsBlocked != nil {
+		t.Fatalf("decoded row = status %q, IsBlocked %v; want the folded production shape (open, no projection)", got.Status, got.IsBlocked)
+	}
+	if cause := classifyDemandRowClaimability(got, time.Now()); cause != demandRowStatusBlocked {
+		t.Fatalf("classifyDemandRowClaimability(bd blocked row) = %q, want %q", cause, demandRowStatusBlocked)
+	}
+}

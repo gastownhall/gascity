@@ -179,6 +179,14 @@ const (
 	// held assigned work drained correctly; reporting it as a strand is what
 	// accompanied the hold-label wake/drain loop.
 	demandRowHeld demandRowClaimability = "held"
+	// demandRowStatusBlocked: bd itself parked the row with status "blocked". A bd
+	// read folds that status to "open" and keeps the raw value in
+	// Bead.SourceStatus, which is how the row is told apart. The status is a
+	// fresh bead-local column, and the seat's ready query excludes a blocked
+	// status whatever the row's dependencies say, so this is PROOF of
+	// non-claimability like a deferral or a hold, never settled against
+	// dependencies.
+	demandRowStatusBlocked demandRowClaimability = "status_blocked"
 	// demandRowBlockednessUnproven: the bead alone cannot settle whether the row is
 	// blocked, so each consumer re-derives it from live dependencies
 	// (beadHasUnmetPlainBlocksDep). Two readings land here, and neither is proof:

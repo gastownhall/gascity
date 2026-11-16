@@ -269,6 +269,90 @@ func TestDivergenceCaseIsReportedToTheWorkerStderr(t *testing.T) {
 	}
 }
 
+// A routed row bd itself parked with status=blocked reads back as "open" (bd's
+// raw status survives only in SourceStatus), so it used to fall through to the
+// unproven-settlement path and classify "divergence" when it has no unmet blocks
+// edge. The seat's ready query excludes that row whatever its dependencies, so
+// it was never claimable: the right bucket is blocked, reached without any
+// dependency read, and with no "demand/claim divergence" line on the worker's
+// stderr.
+func TestDivergenceStatusBlockedRowIsBlockedWithoutSettlement(t *testing.T) {
+	routed := map[string]string{beadmeta.RoutedToMetadataKey: "rig/worker"}
+	blockedTrue, blockedFalse := true, false
+	for _, tt := range []struct {
+		name      string
+		isBlocked *bool
+	}{
+		{name: "no projection", isBlocked: nil},
+		{name: "projection false", isBlocked: &blockedFalse},
+		{name: "projection true", isBlocked: &blockedTrue},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := events.NewFake()
+			prev := demandDivergenceRecorder
+			demandDivergenceRecorder = func(io.Writer) events.Recorder { return rec }
+			t.Cleanup(func() { demandDivergenceRecorder = prev })
+
+			bead := beads.Bead{
+				ID: "wb-1", Status: "open", SourceStatus: "blocked", Type: "task",
+				Metadata: routed, IsBlocked: tt.isBlocked,
+			}
+			ops := demandDivergenceOpsForBlockedBead(bead, nil, false, nil)
+			ops.ConfirmBlocked = func(context.Context, string, []string, string, string) (bool, error) {
+				t.Error("ConfirmBlocked called: a status-blocked row is proof, not a question for the dependency settlement")
+				return false, nil
+			}
+
+			var stderr bytes.Buffer
+			recordDemandClaimDivergence(hookClaimReasonNoWork, "/rig", divergenceOptions(demandSpawnEnv()...), ops, &stderr)
+
+			if len(rec.Events) != 1 || rec.Events[0].Message != events.DemandClaimBlocked {
+				t.Fatalf("events = %+v, want one blocked-classified event", rec.Events)
+			}
+			if stderr.Len() != 0 {
+				t.Fatalf("stderr = %q, want silence: the row was never claimable", stderr.String())
+			}
+		})
+	}
+
+	// Controls: a row that is also held or deferred keeps its benign bucket, and
+	// the same row without the recorded status still settles to divergence.
+	future := time.Now().Add(time.Hour)
+	for _, tt := range []struct {
+		name string
+		bead beads.Bead
+		want string
+	}{
+		{
+			name: "held and status-blocked",
+			bead: beads.Bead{ID: "wb-1", Status: "open", SourceStatus: "blocked", Type: "task", Metadata: routed, Labels: []string{beadmeta.DispatchHoldLabels[0]}},
+			want: events.DemandClaimBenign,
+		},
+		{
+			name: "deferred and status-blocked",
+			bead: beads.Bead{ID: "wb-1", Status: "open", SourceStatus: "blocked", Type: "task", Metadata: routed, DeferUntil: &future},
+			want: events.DemandClaimBenign,
+		},
+		{
+			name: "recorded status open",
+			bead: beads.Bead{ID: "wb-1", Status: "open", SourceStatus: "open", Type: "task", Metadata: routed},
+			want: events.DemandClaimDivergence,
+		},
+		{
+			name: "no recorded status",
+			bead: beads.Bead{ID: "wb-1", Status: "open", Type: "task", Metadata: routed},
+			want: events.DemandClaimDivergence,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, class := classifyDemandTrigger(tt.bead.ID, "/rig", divergenceOptions(), demandDivergenceOpsForBlockedBead(tt.bead, nil, false, nil))
+			if class != tt.want {
+				t.Errorf("classification = %q, want %q", class, tt.want)
+			}
+		})
+	}
+}
+
 // Control: a seat the controller did NOT spawn from demand evidence produces no
 // event at all. A named session or a manual hook draining empty says nothing
 // about the agreement invariant, and counting it would poison the metric.

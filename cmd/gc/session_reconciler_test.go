@@ -2386,6 +2386,57 @@ func TestReconcileSessionBeads_DrainAckDeferredAssignedWorkSuppressesEvent(t *te
 	}
 }
 
+// TestReconcileSessionBeads_DrainAckStatusBlockedAssignedWorkSuppressesEvent pins
+// the status-blocked half of the provably-non-claimable suppression: an OPEN
+// bead assigned to the seat whose bd status is "blocked" (read back as "open",
+// the raw status kept in SourceStatus) is excluded from the seat's ready query
+// whatever its dependencies, so the seat drained correctly and the event must
+// NOT fire. It carries no blocks edge, which is what made it settle as claimable
+// before.
+func TestReconcileSessionBeads_DrainAckStatusBlockedAssignedWorkSuppressesEvent(t *testing.T) {
+	count := drainAckAssignedWorkEventCount(t, func(t *testing.T, store beads.Store, sessionID string) {
+		work, err := store.Create(beads.Bead{Title: "parked phase", Type: "task", Status: "open", SourceStatus: "blocked", Assignee: sessionID})
+		if err != nil {
+			t.Fatalf("Create(work): %v", err)
+		}
+		// Guard the premise on a real read: the store must hand the recorded
+		// status back, or this test would quietly cover the unmarked shape.
+		readBack, err := store.Get(work.ID)
+		if err != nil {
+			t.Fatalf("Get(work): %v", err)
+		}
+		if readBack.SourceStatus != "blocked" {
+			t.Fatalf("work.SourceStatus = %q, want %q — this test is only meaningful when the store reports bd's blocked status", readBack.SourceStatus, "blocked")
+		}
+	})
+	if count != 0 {
+		t.Fatalf("%s events = %d, want 0 — an open row bd parked as blocked is not claimable whatever its dependencies, so the seat drained correctly",
+			events.SessionDrainAckedWithAssignedWork, count)
+	}
+}
+
+// TestOpenAssignedRowStatusBlockedMakesNoDependencyRead pins that the
+// status-blocked cause is proof and not a question: a dependency read that would
+// fail is never made, so the row suppresses without an error (the fail-closed
+// polarity of the unproven cause is unchanged, see
+// TestReconcileSessionBeads_DrainAckDepConfirmReadErrorNoFireAndLogsError), and
+// the same row without the recorded status still reads the dependencies.
+func TestOpenAssignedRowStatusBlockedMakesNoDependencyRead(t *testing.T) {
+	store := depListErrStore{Store: beads.NewMemStore(), err: errors.New("dependency read failed")}
+	now := time.Now()
+
+	parked := beads.Bead{ID: "wb-1", Status: "open", SourceStatus: "blocked", Type: "task"}
+	suppress, err := openAssignedRowProvablyNonClaimable(store, parked, now)
+	if err != nil || !suppress {
+		t.Fatalf("status-blocked row: suppress, err = %v, %v; want true, nil (no dependency read)", suppress, err)
+	}
+
+	unmarked := beads.Bead{ID: "wb-2", Status: "open", Type: "task"}
+	if _, err := openAssignedRowProvablyNonClaimable(store, unmarked, now); err == nil {
+		t.Fatal("unmarked row: err = nil, want the dependency read error (an unproven row still settles against dependencies)")
+	}
+}
+
 // TestReconcileSessionBeads_DrainAckOpenStepAssignedWorkEmitsEvent is the MAJOR
 // regression guard. An execution STEP bead can be assigned straight to a seat at
 // dispatch (control.go stamps step.Assignee) and sit OPEN before the agent claims
