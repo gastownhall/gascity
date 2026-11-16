@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -165,7 +166,7 @@ func (w fencedWriter) rollbackPendingCreate(expected session.Info, closePatch, p
 	if err != nil {
 		return false, false, err
 	}
-	return front.RollbackPendingCreateAtomically(expected, closePatch, postClosePatch)
+	return front.RollbackPendingCreateAtomically(context.Background(), expected, closePatch, postClosePatch)
 }
 
 // foldInfo is info.ApplyPatch(patch), a pure fold that writes nothing. The
@@ -251,13 +252,19 @@ func (s blindWriteRefusingStore) DepList(id, direction string) ([]beads.Dep, err
 func (blindWriteRefusingStore) Create(beads.Bead) (beads.Bead, error) {
 	return beads.Bead{}, errBlindWriteRefused
 }
+
 func (blindWriteRefusingStore) Update(string, beads.UpdateOpts) error { return errBlindWriteRefused }
-func (blindWriteRefusingStore) Close(string) error                    { return errBlindWriteRefused }
-func (blindWriteRefusingStore) Reopen(string) error                   { return errBlindWriteRefused }
+
+func (blindWriteRefusingStore) Close(string) error { return errBlindWriteRefused }
+
+func (blindWriteRefusingStore) Reopen(string) error { return errBlindWriteRefused }
+
 func (blindWriteRefusingStore) CloseAll([]string, map[string]string) (int, error) {
 	return 0, errBlindWriteRefused
 }
+
 func (blindWriteRefusingStore) SetMetadata(string, string, string) error { return errBlindWriteRefused }
+
 func (blindWriteRefusingStore) SetMetadataBatch(string, map[string]string) error {
 	return errBlindWriteRefused
 }
@@ -265,7 +272,11 @@ func (blindWriteRefusingStore) SetMetadataBatch(string, map[string]string) error
 func (blindWriteRefusingStore) SetLocalString(string, string, string) error {
 	return errBlindWriteRefused
 }
+
 func (blindWriteRefusingStore) Tx(string, func(beads.Tx) error) error { return errBlindWriteRefused }
-func (blindWriteRefusingStore) Delete(string) error                   { return errBlindWriteRefused }
-func (blindWriteRefusingStore) DepAdd(string, string, string) error   { return errBlindWriteRefused }
-func (blindWriteRefusingStore) DepRemove(string, string) error        { return errBlindWriteRefused }
+
+func (blindWriteRefusingStore) Delete(string) error { return errBlindWriteRefused }
+
+func (blindWriteRefusingStore) DepAdd(string, string, string) error { return errBlindWriteRefused }
+
+func (blindWriteRefusingStore) DepRemove(string, string) error { return errBlindWriteRefused }

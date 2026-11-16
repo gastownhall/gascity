@@ -238,6 +238,165 @@ func TestDetachedHandoffOrphanCandidateRefusesEveryKindedBead(t *testing.T) {
 	}
 }
 
+// A pack that parks finished work on a canonical dispatch hold clears the
+// assignee and gc.routed_to on purpose: the next actor is not the pool that
+// worked it. That leaves exactly the detached-orphan signature (open,
+// unassigned, unrouted, branch, session back-reference), so without a hold gate
+// the sweep re-stamps the old pool route behind the parker's back. Restoring a
+// route is a decision about what to DO with the bead, and DispatchHoldLabels
+// answers no to every such decision. Fails without the hold gate (restored=1).
+func TestSweepDetachedHandoffOrphans_SkipsHeldBead(t *testing.T) {
+	for _, hold := range append(append([]string(nil), beadmeta.DispatchHoldLabels...), "Hold:External") {
+		t.Run(hold, func(t *testing.T) {
+			store := beads.NewMemStore()
+			sessionBead, err := store.Create(beads.Bead{
+				Title:  "worker session",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name": "pack__worker-th-held",
+					"template":     "repo/pack.worker",
+				},
+			})
+			if err != nil {
+				t.Fatalf("create session bead: %v", err)
+			}
+			work, err := store.Create(beads.Bead{
+				Title:  "parked work",
+				Status: "open",
+				Labels: []string{hold},
+				Metadata: map[string]string{
+					beadmeta.WorkBranchMetadataKey:  "polecat/ga-held",
+					beadmeta.SessionIDMetadataKey:   sessionBead.ID,
+					beadmeta.SessionNameMetadataKey: sessionBead.Metadata["session_name"],
+				},
+			})
+			if err != nil {
+				t.Fatalf("create work bead: %v", err)
+			}
+
+			n, err := sweepDetachedHandoffOrphans(store)
+			if err != nil {
+				t.Fatalf("sweep: %v", err)
+			}
+			if n != 0 {
+				t.Fatalf("restored=%d, want 0 (a bead parked on %q must not be re-routed)", n, hold)
+			}
+			if got := mustRoutedTo(t, store, work.ID); got != "" {
+				t.Errorf("gc.routed_to=%q, want empty (the parker cleared it on purpose)", got)
+			}
+
+			// Lifting the hold makes it an ordinary detached orphan again: the
+			// gate defers recovery, it does not strand the bead.
+			if err := store.Update(work.ID, beads.UpdateOpts{RemoveLabels: []string{hold}}); err != nil {
+				t.Fatalf("lift hold: %v", err)
+			}
+			n, err = sweepDetachedHandoffOrphans(store)
+			if err != nil {
+				t.Fatalf("sweep after lifting hold: %v", err)
+			}
+			if n != 1 {
+				t.Fatalf("restored=%d after lifting the hold, want 1", n)
+			}
+			if got := mustRoutedTo(t, store, work.ID); got != "repo/pack.worker" {
+				t.Errorf("gc.routed_to=%q after lifting the hold, want repo/pack.worker", got)
+			}
+		})
+	}
+}
+
+// The hold gate reads the SDK's canonical hold set and nothing else. A pack's
+// own parking label is pack vocabulary the SDK cannot know, so a bead parked
+// only by such a label is still a candidate; a pack parks with a canonical hold
+// or a bd status (blocked/deferred, excluded by the Live candidate List).
+func TestDetachedHandoffOrphanCandidateHonorsOnlyCanonicalHolds(t *testing.T) {
+	base := func(labels ...string) beads.Bead {
+		return beads.Bead{ID: "H-1", Status: "open", Labels: labels, Metadata: map[string]string{
+			beadmeta.WorkBranchMetadataKey: "polecat/ga-h",
+			beadmeta.SessionIDMetadataKey:  "S-1",
+		}}
+	}
+	if !isDetachedHandoffOrphanCandidate(base()) {
+		t.Fatal("the unlabeled base bead is not a candidate; every assertion below would pass vacuously")
+	}
+	for _, hold := range beadmeta.DispatchHoldLabels {
+		if isDetachedHandoffOrphanCandidate(base("upstream-pr", hold)) {
+			t.Errorf("a bead carrying %q is a detached-orphan candidate; route restore would re-route parked work", hold)
+		}
+	}
+	if !isDetachedHandoffOrphanCandidate(base("deferred:w3-scope", "hold:someone-else")) {
+		t.Error("a bead with only non-canonical labels is not a candidate; the SDK must not grow pack label vocabulary")
+	}
+}
+
+// A graph.v2 workflow that wraps a work bead takes over its routing: the sling
+// restamp moves the route to gc.execution_routed_to and clears gc.routed_to and
+// gc.run_target, so the workflow's executable step is the bead's only demand
+// unit. A bead a worker claimed before the wrap still carries that claim's
+// branch and session back-reference, which is the detached-orphan signature, so
+// without a gate the sweep re-stamps the old pool route and the pool counts one
+// job twice. Fails without the gate (restored=2).
+//
+// A workflow member is the control: a step a retry or ralph control spawned
+// carries gc.execution_routed_to beside its own gc.routed_to and, like every
+// workflow member, gc.root_bead_id. One that lost its route is still restored.
+func TestSweepDetachedHandoffOrphans_SkipsGraphWorkflowSource(t *testing.T) {
+	store := beads.NewMemStore()
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "polecat session",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "gastown__polecat-th-src",
+			"template":     "gascity/gastown.polecat",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	source, err := store.Create(beads.Bead{
+		Title:  "work a graph workflow wrapped",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.WorkBranchMetadataKey:        "polecat/ga-src",
+			beadmeta.SessionIDMetadataKey:         sessionBead.ID,
+			beadmeta.SessionNameMetadataKey:       sessionBead.Metadata["session_name"],
+			beadmeta.ExecutionRoutedToMetadataKey: "gascity/gastown.polecat",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create source bead: %v", err)
+	}
+	member, err := store.Create(beads.Bead{
+		Title:  "attempt step that lost its route",
+		Status: "open",
+		Metadata: map[string]string{
+			beadmeta.WorkBranchMetadataKey:        "polecat/ga-step",
+			beadmeta.SessionIDMetadataKey:         sessionBead.ID,
+			beadmeta.SessionNameMetadataKey:       sessionBead.Metadata["session_name"],
+			beadmeta.ExecutionRoutedToMetadataKey: "gascity/gastown.polecat",
+			beadmeta.RootBeadIDMetadataKey:        "WF-1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create member bead: %v", err)
+	}
+
+	n, err := sweepDetachedHandoffOrphans(store)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("restored=%d, want 1 (the workflow member only)", n)
+	}
+	if got := mustRoutedTo(t, store, source.ID); got != "" {
+		t.Errorf("wrapped source gc.routed_to=%q, want empty (its workflow's step is its only demand unit)", got)
+	}
+	if got := mustRoutedTo(t, store, member.ID); got != "gascity/gastown.polecat" {
+		t.Errorf("workflow member gc.routed_to=%q, want gascity/gastown.polecat (a member's empty route is still a lost one)", got)
+	}
+}
+
 // A bead with no branch set is not a completed-work bead and must be skipped.
 func TestSweepDetachedHandoffOrphans_SkipsNoBranch(t *testing.T) {
 	store := beads.NewMemStore()

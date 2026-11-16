@@ -2,6 +2,9 @@ package herdr
 
 import "testing"
 
+// testTown stands in for the city name the Provider holds as its herdr session.
+const testTown = "my-city"
+
 // TestPlacementFor covers how a runtime session name + reconciler env map to a
 // herdr workspace and tab. The wisp cases are the reason this exists: their
 // town-qualified, wisp-id runtime name must be lifted into the originating rig
@@ -10,6 +13,7 @@ func TestPlacementFor(t *testing.T) {
 	tests := []struct {
 		name     string
 		sessName string
+		town     string // the herdr session name (the city); "" means testTown
 		env      map[string]string
 		wantWS   string
 		wantTab  string
@@ -108,13 +112,97 @@ func TestPlacementFor(t *testing.T) {
 			wantWS:   "webapp",
 			wantTab:  "refinery",
 		},
+		{
+			// gascity#8933: the default session_template is {{.Agent}}, so a
+			// town-level agent's runtime name carries neither "--" nor "__" and no
+			// GC_RIG. It must land in the one shared town workspace (the city name),
+			// not in a workspace named after itself.
+			name:     "default-template town agent shares the town workspace",
+			sessName: "mayor",
+			env:      map[string]string{"GC_ALIAS": "mayor"},
+			wantWS:   testTown,
+			wantTab:  "mayor",
+		},
+		{
+			name:     "second default-template town agent lands in the same workspace",
+			sessName: "generalist-builder",
+			env:      map[string]string{"GC_ALIAS": "generalist-builder"},
+			wantWS:   testTown,
+			wantTab:  "generalist-builder",
+		},
+		{
+			name:     "default-template town agent with no env shares the town workspace",
+			sessName: "mayor",
+			env:      nil,
+			wantWS:   testTown,
+			wantTab:  "mayor",
+		},
+		{
+			// Control: a bare name WITH a GC_RIG is a rig agent and keeps grouping
+			// under its rig, exactly as before the town fallback existed.
+			name:     "default-template rig agent still groups under its rig",
+			sessName: "claude-1",
+			env:      map[string]string{"GC_RIG": "my-rig", "GC_ALIAS": "my-rig/claude-1"},
+			wantWS:   "my-rig",
+			wantTab:  "claude-1",
+		},
+		{
+			name:     "default-template rig wisp still groups under its rig with a themed tab",
+			sessName: "claude-gm-wisp-sf4qr",
+			env:      map[string]string{"GC_RIG": "my-rig", "GC_ALIAS": "my-rig/furiosa"},
+			wantWS:   "my-rig",
+			wantTab:  "claude-furiosa",
+		},
+		{
+			name:     "town-qualified name keeps its structural town workspace",
+			sessName: "gastown__mayor",
+			town:     "other-city",
+			env:      map[string]string{"GC_ALIAS": "gastown.mayor"},
+			wantWS:   "gastown",
+			wantTab:  "mayor",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotWS, gotTab := placementFor(tt.sessName, tt.env)
+			town := tt.town
+			if town == "" {
+				town = testTown
+			}
+			gotWS, gotTab := placementFor(tt.sessName, town, tt.env)
 			if gotWS != tt.wantWS || gotTab != tt.wantTab {
-				t.Errorf("placementFor(%q, %v) = (%q, %q), want (%q, %q)",
-					tt.sessName, tt.env, gotWS, gotTab, tt.wantWS, tt.wantTab)
+				t.Errorf("placementFor(%q, %q, %v) = (%q, %q), want (%q, %q)",
+					tt.sessName, town, tt.env, gotWS, gotTab, tt.wantWS, tt.wantTab)
+			}
+		})
+	}
+}
+
+// TestWorkspaceTabFor pins the structural half of placement. A runtime name
+// with neither "--" nor "__" is a town-level agent under the default
+// session_template ({{.Agent}}); it belongs in the town workspace (the herdr
+// session name), not in a workspace named after the agent (gascity#8933). Names
+// that do carry a separator keep the placement they always had.
+func TestWorkspaceTabFor(t *testing.T) {
+	tests := []struct {
+		name     string
+		sessName string
+		town     string
+		wantWS   string
+		wantTab  string
+	}{
+		{name: "bare town agent goes to the town workspace", sessName: "mayor", town: testTown, wantWS: testTown, wantTab: "mayor"},
+		{name: "another bare town agent goes to the same workspace", sessName: "sie-broker", town: testTown, wantWS: testTown, wantTab: "sie-broker"},
+		{name: "town-qualified name keeps its town segment", sessName: "gastown__mayor", town: testTown, wantWS: "gastown", wantTab: "mayor"},
+		{name: "rig-qualified name keeps its rig", sessName: "webapp--gastown__witness", town: testTown, wantWS: "webapp", wantTab: "witness"},
+		{name: "rig-qualified name without a town segment keeps its rig", sessName: "webapp--witness", town: testTown, wantWS: "webapp", wantTab: "witness"},
+		{name: "no town known falls back to the name, as before", sessName: "mayor", town: "", wantWS: "mayor", wantTab: "mayor"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotWS, gotTab := workspaceTabFor(tt.sessName, tt.town)
+			if gotWS != tt.wantWS || gotTab != tt.wantTab {
+				t.Errorf("workspaceTabFor(%q, %q) = (%q, %q), want (%q, %q)",
+					tt.sessName, tt.town, gotWS, gotTab, tt.wantWS, tt.wantTab)
 			}
 		})
 	}

@@ -144,7 +144,10 @@ func resolveIdleSetting(w *World, info session.Info) (idleSetting, bool) {
 	if res.Err != nil || res.TP.TemplateName == "" || w.Env == nil || w.Env.Cfg == nil {
 		return idleSetting{}, false
 	}
-	cfg, name := w.Env.Cfg, strings.TrimSpace(info.SessionName)
+	// A named session renamed in place keeps the bare form's runtime name, but
+	// its settings are its named session's (lifecycleSessionNameInfo).
+	cfg := w.Env.Cfg
+	name := lifecycleSessionNameInfo(info, cfg, cfg.EffectiveCityName(), strings.TrimSpace(info.SessionName))
 	s := idleSetting{Template: res.TP.TemplateName, Timeout: idleTimeoutFor(cfg, res.TP.TemplateName, name)}
 	if s.Timeout > 0 {
 		s.Limit = assignedWorkDeferLimitFor(cfg, res.TP.TemplateName, name)

@@ -23,7 +23,7 @@ func (s *captureListStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 // tracking corpus, ~0.3s per event order per tick).
 func TestBdCursorBoundsItsTrackingRead(t *testing.T) {
 	mem := beads.NewMemStore()
-	if _, err := mem.Create(beads.Bead{Title: "run", Labels: []string{"order:digest", "seq:42"}}); err != nil {
+	if _, err := mem.Create(beads.Bead{Title: "run", Labels: []string{"order-run:digest", "order:digest", "seq:42", "order-tracking"}}); err != nil {
 		t.Fatal(err)
 	}
 	store := &captureListStore{Store: mem}
@@ -51,5 +51,39 @@ func TestBdCursorBoundsItsTrackingRead(t *testing.T) {
 	// prefix; the Limit is only a client-side result cap.
 	if store.got.AllowBackingCreatedLimit {
 		t.Fatal("bdCursor must NOT set AllowBackingCreatedLimit: its max(seq) reduction needs the canonical id-DESC prefix, which a bounded id-ASC backing read would truncate")
+	}
+}
+
+// TestBdCursorIgnoresAForgedSeq (the #7766 review): a plain bead carrying an
+// event order's order:<name> and seq:<n> labels, which the generic API still
+// creates, moves no dispatcher cursor; the run record's seq is the cursor.
+func TestBdCursorIgnoresAForgedSeq(t *testing.T) {
+	mem := beads.NewMemStore()
+	if _, err := mem.Create(beads.Bead{Title: "run", Labels: []string{"order-run:digest", "order:digest", "seq:5", "order-tracking"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mem.Create(beads.Bead{Title: "forged", Type: "task", Labels: []string{"order-run:digest", "order:digest", "seq:999999"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := bdCursor(mem, "digest"); err != nil || got != 5 {
+		t.Fatalf("bdCursor = %d (%v), want the run record's 5", got, err)
+	}
+}
+
+// TestBdCursorSurvivesAnOrderLabelFlood (trial, the #7766 review): more plain
+// beads carrying order:<name> than the window holds, all newer than the run,
+// neither reset nor move the dispatcher's cursor.
+func TestBdCursorSurvivesAnOrderLabelFlood(t *testing.T) {
+	mem := beads.NewMemStore()
+	if _, err := mem.Create(beads.Bead{Title: "run", Labels: []string{"order-run:digest", "order:digest", "seq:5", "order-tracking"}}); err != nil {
+		t.Fatal(err)
+	}
+	for range bdCursorRecentRunsLimit + 1 {
+		if _, err := mem.Create(beads.Bead{Title: "flood", Type: "task", Labels: []string{"order:digest", "seq:999999"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, err := bdCursor(mem, "digest"); err != nil || got != 5 {
+		t.Fatalf("bdCursor = %d (%v), want the run record's 5", got, err)
 	}
 }

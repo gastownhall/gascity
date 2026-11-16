@@ -2,10 +2,12 @@ package acp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"syscall"
 	"testing"
@@ -22,12 +24,12 @@ import (
 // $GC_ASK_PERMISSION set, a held prompt first sends session/request_permission
 // with id 7. $GC_ON_CANCEL is reply (answer held prompts canceled after
 // $GC_CANCEL_DELAY seconds) or ignore. $GC_SIGINT is ignore, cancel (answer
-// held prompts canceled) or exit (status 130).
+// held prompts canceled) or exit (status 130). A thread of its own takes each
+// SIGINT with sigwait; the fake installs no Python signal handler.
 func fakeACPInterruptCommand() string {
 	return `exec python3 -u -c '
 import sys, json, os, signal, threading
-# Reentrant: Python runs on_sig on the main thread, which may hold lock.
-lock = threading.RLock()
+lock = threading.Lock()
 held = []
 log_path = os.environ["GC_WIRE_LOG"]
 on_cancel = os.environ.get("GC_ON_CANCEL", "reply")
@@ -51,14 +53,26 @@ def cancel_held():
     for pid in ids:
         send({"jsonrpc": "2.0", "id": pid, "result": {"stopReason": STOP_CANCELED}})
 
-def on_sig(signum, frame):
+def on_sig():
     log(json.dumps({"signal": "SIGINT"}))
     if on_sigint == "exit":
         os._exit(130)
     if on_sigint == "cancel":
         cancel_held()
 
-signal.signal(signal.SIGINT, on_sig)
+# Python runs a signal handler only between bytecodes. For a SIGINT that lands
+# after the loop below finishes a line but before it blocks reading stdin, the
+# handler would run only once the next line arrives, so a held turn would not
+# end. SIGINT is blocked instead, before any thread starts so every thread
+# inherits the mask, and sigint_loop takes it with sigwait.
+signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+
+def sigint_loop():
+    while True:
+        signal.sigwait({signal.SIGINT})
+        on_sig()
+
+threading.Thread(target=sigint_loop, daemon=True).start()
 for line in sys.stdin:
     line = line.strip()
     if not line:
@@ -406,7 +420,7 @@ func TestInterruptCancelNeverFollowsTheNextPrompt(t *testing.T) {
 					t.Fatal("next turn never completed")
 				}
 			}
-			sc.cancelTurn(f.name, sessionID, idleCh, nil)
+			sc.cancelTurn(f.name, sessionID, idleCh, nil, nil)
 			if tc.next == "hold" {
 				endTurnBySIGINT(t, sc)
 			}
@@ -639,5 +653,45 @@ func TestNewSessionCancelNotification(t *testing.T) {
 	const want = `{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"sess-9"}}`
 	if string(data) != want {
 		t.Fatalf("session/cancel = %s, want %s", data, want)
+	}
+}
+
+// TestInterruptStaysBoundedWhileAStdinWriteIsStuck pins Interrupt's bound when
+// the agent has stopped reading its stdin mid-write: a prompt write holds the
+// pipe, and Interrupt still returns ErrInterruptNotSettled after its
+// session/cancel and SIGINT waits instead of waiting for that write.
+func TestInterruptStaysBoundedWhileAStdinWriteIsStuck(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = r.Close(); _ = w.Close() })
+	sc := newSessionConn(exec.Command("true"), w, nil, 10, nil)
+	sc.mu.Lock()
+	sc.sessionID = "s1"
+	sc.markBusyLocked(1)
+	sc.mu.Unlock()
+	writing := make(chan struct{})
+	go func() {
+		close(writing)
+		_ = sc.writeMessage(bytes.Repeat([]byte("x"), 1<<20))
+	}()
+	<-writing
+	waitUntil(t, "the write to hold stdin", func() bool {
+		if sc.stdinMu.TryLock() {
+			sc.stdinMu.Unlock()
+			return false
+		}
+		return true
+	})
+	done := make(chan error, 1)
+	go func() { done <- sc.interrupt("stuck", 50*time.Millisecond) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, runtime.ErrInterruptNotSettled) {
+			t.Fatalf("interrupt = %v, want ErrInterruptNotSettled", err)
+		}
+	case <-time.After(protocolUnitWait):
+		t.Fatal("interrupt blocked behind a stuck stdin write")
 	}
 }

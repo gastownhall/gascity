@@ -299,7 +299,7 @@ func isInterruptMessage(message json.RawMessage) bool {
 	if msg.Content[0] == '"' {
 		var s string
 		if json.Unmarshal(msg.Content, &s) == nil {
-			return bytes.Contains([]byte(s), []byte("[Request interrupted by user]"))
+			return containsInterruptMarker(s)
 		}
 	}
 	// Array content: [{"type":"text","text":"..."}]
@@ -308,12 +308,19 @@ func isInterruptMessage(message json.RawMessage) bool {
 	}
 	if json.Unmarshal(msg.Content, &blocks) == nil {
 		for _, b := range blocks {
-			if bytes.Contains([]byte(b.Text), []byte("[Request interrupted by user]")) {
+			if containsInterruptMarker(b.Text) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// Both native markers terminate a turn. Preserve legacy matching and require
+// the new tool-use marker to stand alone, not appear in ordinary user prose.
+func containsInterruptMarker(text string) bool {
+	return bytes.Contains([]byte(text), []byte("[Request interrupted by user]")) ||
+		bytes.Equal(bytes.TrimSpace([]byte(text)), []byte("[Request interrupted by user for tool use]"))
 }
 
 // unwrapJSONString handles JSONL files where the message field is stored

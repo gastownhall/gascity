@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/runproj"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 var errWorkflowNotFound = errors.New("workflow not found")
@@ -45,11 +46,24 @@ func logWorkflowSQLFallback(workflowID string, err error) {
 // both doors, and workflowStoreByRef below is what parses it back.
 const workflowGraphStoreRefPrefix = sourceworkflow.GraphStoreRefPrefix
 
+// workflowStoreInfo is one leg of the workflow-root federation, as the API
+// names and reads it (workflowLegs), or one store an order read reads
+// (orderStoreInfosForState, appendOrdersClassStoreInfo).
 type workflowStoreInfo struct {
 	ref       string
 	scopeKind string
 	scopeRef  string
-	store     beads.Store
+	// leg reads a workflow leg: Reader in the plan leg's gate role, Strict
+	// for a read that carried no marker. Zero on an order read's entry.
+	leg storeref.TypedLeg
+	// store is what an order read reads: the store itself on an order entry,
+	// the leg's strict writable handle on a workflow leg an order read takes
+	// (workflowWritableStores, workflowStoreByRef). It is nil on the entries
+	// workflowStores and workflowStoresIncludingRetiredRigs hand out, which
+	// no order read takes; every order read skips an entry with no store.
+	// T7f gives the order reads legs; until then this is the raw field they
+	// read.
+	store beads.Store
 }
 
 type workflowRootMatch struct {
@@ -103,14 +117,15 @@ func (s *Server) buildWorkflowSnapshot(workflowID, fallbackScopeKind, fallbackSc
 	var firstGetErr error
 
 	for _, info := range stores {
-		if info.store == nil {
-			continue
-		}
 		if !seenStoreRefs[info.ref] {
 			storesScanned = append(storesScanned, info.ref)
 			seenStoreRefs[info.ref] = true
 		}
-		root, err := info.store.Get(workflowID)
+		// One leg of the workflowStores federation (graph, city, rigs), read
+		// in its plan role: a scope leg of a split city is a relic leg (S4
+		// debt), the binding a federated one. A miss here is covered by the
+		// leg that owns the root.
+		root, err := info.leg.Reader.Get(workflowID)
 		if err != nil {
 			if firstGetErr == nil && !errors.Is(err, beads.ErrNotFound) {
 				firstGetErr = err
@@ -135,10 +150,8 @@ func (s *Server) buildWorkflowSnapshot(workflowID, fallbackScopeKind, fallbackSc
 	listPartial := false
 	if len(matches) == 0 {
 		for _, info := range stores {
-			if info.store == nil {
-				continue
-			}
-			roots, err := info.store.List(beads.ListQuery{
+			// One leg of the workflowStores federation; see the Get above.
+			roots, err := info.leg.Reader.List(beads.ListQuery{
 				Metadata: map[string]string{
 					beadmeta.KindMetadataKey:       beadmeta.KindWorkflow,
 					beadmeta.WorkflowIDMetadataKey: workflowID,
@@ -177,7 +190,7 @@ func (s *Server) buildWorkflowSnapshot(workflowID, fallbackScopeKind, fallbackSc
 // walk would drop it and hand the dashboard a shorter, plausible step list.
 //
 // The fallback is spelled out here instead of calling beads.DirectMembers
-// because it reads through info.store's own handle. beads.DirectMembers reads
+// because it reads through the leg's own reader. beads.DirectMembers reads
 // through the LIVE handle, which on a caching store bypasses the cache — a
 // correctness win for the dispatcher writing the molecule, an unwanted cost on
 // this dashboard read path. The RULE is shared; the read handle is not.
@@ -204,7 +217,9 @@ func (s *Server) snapshotFromStore(info workflowStoreInfo, root beads.Bead, fall
 
 	if !usedSQL {
 		// Fall back to bd subprocess path.
-		all, err := info.store.List(beads.ListQuery{
+		// Strict: these reads carried no marker. The root was found on this
+		// leg, and its tree lives beside it.
+		all, err := info.leg.Strict.List(beads.ListQuery{
 			Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID},
 			IncludeClosed: true,
 		})
@@ -224,7 +239,7 @@ func (s *Server) snapshotFromStore(info workflowStoreInfo, root beads.Bead, fall
 			seen[bead.ID] = struct{}{}
 			workflowBeads = append(workflowBeads, bead)
 		}
-		if freshRoot, err := info.store.Get(root.ID); err == nil {
+		if freshRoot, err := info.leg.Strict.Get(root.ID); err == nil {
 			addBead(freshRoot)
 		}
 		for _, bead := range all {
@@ -246,14 +261,14 @@ func (s *Server) snapshotFromStore(info workflowStoreInfo, root beads.Bead, fall
 		root = updated
 	}
 
-	var store beads.Store
+	var store workflowDepLister
 	if usedSQL {
 		store = &prefetchedDepStore{deps: depMap}
 	} else {
 		if prefetchedDeps, ok := prefetchedDepsForWorkflowBeads(workflowBeads); ok {
 			store = &prefetchedDepStore{deps: prefetchedDeps}
 		} else {
-			store = info.store
+			store = info.leg.Strict
 		}
 	}
 
@@ -452,7 +467,13 @@ func workflowRootScope(root beads.Bead) (string, string) {
 
 // collectWorkflowDeps returns the physical bead-to-bead dependencies.
 // Logical edge computation is handled by the real-world app server's presentation layer.
-func collectWorkflowDeps(store beads.Store, beadIndex map[string]beads.Bead) ([]workflowDepResponse, bool) {
+// workflowDepLister is the one read collectWorkflowDeps makes: a leg's
+// DepList, or the prefetched deps the SQL path or the listed rows carried.
+type workflowDepLister interface {
+	DepList(id, direction string) ([]beads.Dep, error)
+}
+
+func collectWorkflowDeps(store workflowDepLister, beadIndex map[string]beads.Bead) ([]workflowDepResponse, bool) {
 	workflowDeps := make([]workflowDepResponse, 0)
 	seen := map[string]bool{}
 	partial := false
@@ -611,55 +632,101 @@ func workflowBeadResponseFromBead(bead beads.Bead) workflowBeadResponse {
 	}
 }
 
+// workflowStores is the workflow legs (workflowLegs) the workflow readers
+// read. Its entries carry no store (workflowStoreInfo.store); an order read
+// takes workflowWritableStores.
 func workflowStores(state State) []workflowStoreInfo {
-	beadStores := state.BeadStores()
-	stores := make([]workflowStoreInfo, 0, len(beadStores)+2)
-	cityName := workflowCityScopeRef(state.CityName())
-	cityStore := state.CityBeadStore()
+	infos, _ := workflowLegs(state.Stores(), state.CityName(), workflowLegQuery{})
+	return infos
+}
 
-	// Graph-first: when [beads.classes.graph] relocates graph beads to a dedicated
-	// store, workflow roots/steps/wisps live there, NOT on the work store, so the
-	// snapshot scan must consult it. Lead with it (graph-first) so a graph-resident
-	// root is found on the first probe. Skip it on a default (non-relocated) city —
-	// where GraphBeadStore() == CityBeadStore() — so the scan stays byte-identical
-	// there. It carries the city scope as its fallback (graph roots stamp their own
-	// scope metadata, which workflowSnapshotScope prefers) but a distinct ref so the
-	// store-scan dedup never conflates it with the city store.
-	if graphStore := state.GraphBeadStore().Store; graphStore != nil && graphStore != cityStore {
-		stores = append(stores, workflowStoreInfo{
-			ref:       workflowGraphStoreRefPrefix + ":" + cityName,
-			scopeKind: beadmeta.ScopeKindCity,
-			scopeRef:  cityName,
-			store:     graphStore,
-		})
+// workflowStoresIncludingRetiredRigs is workflowStores with every rig leg,
+// relic-free or not, for a reader that may be looking for rig WORK (an event
+// subject), which a relic-free rig still holds.
+func workflowStoresIncludingRetiredRigs(state State) []workflowStoreInfo {
+	infos, _ := workflowLegs(state.Stores(), state.CityName(), workflowLegQuery{includeRetiredRigs: true})
+	return infos
+}
+
+// workflowWritableStores is workflowStores for the order reads that still
+// take a store (huma_handlers_orders.go, orders_feed.go; T7f converts them):
+// each entry's store is the strict writable handle on its leg, so those reads
+// see what they saw over the raw store.
+func workflowWritableStores(state State) []workflowStoreInfo {
+	infos, resident := workflowLegs(state.Stores(), state.CityName(), workflowLegQuery{})
+	for i := range infos {
+		infos[i].store = resident(infos[i])
 	}
+	return infos
+}
 
-	if cityStore != nil {
-		stores = append(stores, workflowStoreInfo{
-			ref:       "city:" + cityName,
-			scopeKind: beadmeta.ScopeKindCity,
-			scopeRef:  cityName,
-			store:     cityStore,
+// workflowLegQuery is which Workflow legs a reader asks workflowLegs for.
+type workflowLegQuery struct {
+	// includeRetiredRigs keeps a relic-free rig (storeref.Workflow's
+	// IncludeRetiredRigs).
+	includeRetiredRigs bool
+	// keepRigNamedLikeCity keeps a rig leg whose name is the city's scope ref.
+	// The workflow scan never read one (a rig named like the city replaced
+	// the city in the BeadStores() map it ranged, and it skipped that name);
+	// a ref names it, so ref resolution and isGraphConvoyID keep it.
+	keepRigNamedLikeCity bool
+}
+
+// workflowLegs is the workflow-root federation, storeref's Workflow plan over
+// one epoch, st (Stores().Plan), for the city named cityName, as the API
+// names its legs. A request that reads the epoch again (a rig lookup beside
+// the legs) takes one st and passes it to both, so the two never see two rig
+// sets. The legs: the
+// relocated graph binding graph:<city>, the city work store city:<city>, then
+// each rig rig:<name> ascending. On a relocated city the city and rig legs
+// are relic legs, and a rig proven relic-free is dropped unless q keeps it;
+// the city leg is never retired (OD-T7-11). Every workflow reader here reads
+// a suspended rig, as it did over BeadStores(), so the plan reads them too.
+//
+// Each entry's leg reads through the plan leg's gate role (Reader) or
+// strictly (Strict), for a read that carried no marker. resident is the
+// writable handle on an entry's leg, minted only for the legs a caller writes
+// to: storeref.WalkOwner stopped on the plan leg over the entry's store (by
+// identity; a plan reads each store once), so its reads are strict
+// (OD-T7-3), as the raw store's were. An entry with no leg (an order entry,
+// a zero entry) matches no plan leg and gets the zero handle.
+//
+// A plan the epoch cannot make (no store at all) is no legs, as the hand
+// list was empty.
+func workflowLegs(st storeref.Stores, cityName string, q workflowLegQuery) ([]workflowStoreInfo, func(workflowStoreInfo) beads.ResidentStore) {
+	plan, err := st.Plan(storeref.Workflow{
+		IncludeRetiredRigs: q.includeRetiredRigs,
+		SuspendedRigs:      storeref.WorkflowReadsSuspendedRigs,
+	})
+	resident := func(info workflowStoreInfo) beads.ResidentStore {
+		owner, _, _ := storeref.WalkOwner(plan, func(leg storeref.TypedLeg) (bool, error) {
+			return beads.SameStore(leg.Reader, info.leg.Reader), nil
 		})
+		return owner
 	}
-
-	for _, rigName := range sortedRigNames(beadStores) {
-		if rigName == cityName {
-			continue
+	if err != nil {
+		return nil, resident
+	}
+	cityName = workflowCityScopeRef(cityName)
+	infos := make([]workflowStoreInfo, 0, len(plan.Legs))
+	storeref.EachTypedLeg(plan, func(leg storeref.TypedLeg) {
+		info := workflowStoreInfo{scopeKind: beadmeta.ScopeKindCity, scopeRef: cityName, leg: leg}
+		switch rig, _ := storeref.ScopeRigContext(string(leg.Ref)); {
+		case leg.Role == storeref.RoleAuthority:
+			info.ref = workflowGraphStoreRefPrefix + ":" + cityName
+		case leg.Ref == storeref.WorkRef:
+			info.ref = "city:" + cityName
+		case rig != "":
+			if rig == cityName && !q.keepRigNamedLikeCity {
+				return
+			}
+			info.ref, info.scopeKind, info.scopeRef = "rig:"+rig, beadmeta.ScopeKindRig, rig
+		default:
+			return
 		}
-		store := state.BeadStore(rigName)
-		if store == nil {
-			continue
-		}
-		stores = append(stores, workflowStoreInfo{
-			ref:       "rig:" + rigName,
-			scopeKind: beadmeta.ScopeKindRig,
-			scopeRef:  rigName,
-			store:     store,
-		})
-	}
-
-	return stores
+		infos = append(infos, info)
+	})
+	return infos, resident
 }
 
 func workflowStoreByRef(state State, ref string) (workflowStoreInfo, bool) {
@@ -677,41 +744,29 @@ func workflowStoreByRef(state State, ref string) (workflowStoreInfo, bool) {
 		return workflowStoreInfo{}, false
 	}
 
-	switch strings.TrimSpace(kind) {
-	case beadmeta.ScopeKindCity:
-		cityStore := state.CityBeadStore()
-		cityName := workflowCityScopeRef(state.CityName())
-		if cityStore == nil || scopeRef != cityName {
+	switch kind = strings.TrimSpace(kind); kind {
+	case beadmeta.ScopeKindCity, workflowGraphStoreRefPrefix, beadmeta.ScopeKindRig:
+		// The graph ref round-trips the binding workflowStores names when
+		// graph is relocated; on a default city it names nothing, and callers
+		// fall back to the store scan. A rig resolves retired, suspended or
+		// named like the city, as BeadStore(name) did.
+		// One epoch for the request: the legs and the shared-store fallback
+		// read the same rig set.
+		st := state.Stores()
+		infos, resident := workflowLegs(st, state.CityName(), workflowLegQuery{includeRetiredRigs: true, keepRigNamedLikeCity: true})
+		info, ok := workflowLegNamed(st, infos, kind+":"+scopeRef)
+		if !ok {
 			return workflowStoreInfo{}, false
 		}
-		return workflowStoreInfo{
-			ref:       "city:" + cityName,
-			scopeKind: beadmeta.ScopeKindCity,
-			scopeRef:  cityName,
-			store:     cityStore,
-		}, true
-	case workflowGraphStoreRefPrefix:
-		// Round-trip the graph-store ref minted by workflowStores when graph is
-		// relocated. On a default city (graph == city) there is no graph entry, so
-		// this resolves nothing and callers fall back to the store scan.
-		graphStore := state.GraphBeadStore().Store
-		cityName := workflowCityScopeRef(state.CityName())
-		if graphStore == nil || graphStore == state.CityBeadStore() || scopeRef != cityName {
-			return workflowStoreInfo{}, false
-		}
-		return workflowStoreInfo{
-			ref:       workflowGraphStoreRefPrefix + ":" + cityName,
-			scopeKind: beadmeta.ScopeKindCity,
-			scopeRef:  cityName,
-			store:     graphStore,
-		}, true
+		info.store = resident(info)
+		return info, true
 	case ordersClassStoreRefPrefix:
 		// Round-trip the orders-class ref minted by appendOrdersClassStoreInfo: the
 		// order history list hands it to a client as the store_ref for every
 		// binding-resident tracking bead, and the detail endpoint takes it back. On
 		// a default city (orders == city) there is no orders entry to name, so this
 		// resolves nothing and callers fall back to the store scan.
-		ordersStore := state.OrdersBeadStore().Store
+		ordersStore := state.Stores().Orders().Store
 		cityName := workflowCityScopeRef(state.CityName())
 		if ordersStore == nil || ordersStore == state.CityBeadStore() || scopeRef != cityName {
 			return workflowStoreInfo{}, false
@@ -722,17 +777,40 @@ func workflowStoreByRef(state State, ref string) (workflowStoreInfo, bool) {
 			scopeRef:  cityName,
 			store:     ordersStore,
 		}, true
-	case beadmeta.ScopeKindRig:
-		store := state.BeadStore(scopeRef)
-		if store == nil {
-			return workflowStoreInfo{}, false
+	}
+	return workflowStoreInfo{}, false
+}
+
+// workflowLegNamed is the entry of infos ref names. A rig whose store another
+// leg already reads (rigs sharing one store, a rig over the city store) has no
+// leg of its own, since a plan reads a store once; it names that leg, under
+// its own ref and scope, as BeadStore(name) named the shared store.
+//
+// One corner of that fallback reads more than before: in workflowEventRoot's
+// hint lookup, whose legs drop relic-free rigs, a relic-free rig sharing a
+// store with a rig that is not relic-free resolves to the other rig's leg, so
+// the hint is probed there, where the hand path skipped the retired rig. The
+// probe reads a store the scan beside it reads anyway, and the S4 bit is per
+// rig while the rows are per store, so no city that splits serves the shape.
+func workflowLegNamed(st storeref.Stores, infos []workflowStoreInfo, ref string) (workflowStoreInfo, bool) {
+	for _, info := range infos {
+		if info.ref == ref {
+			return info, true
 		}
-		return workflowStoreInfo{
-			ref:       "rig:" + scopeRef,
-			scopeKind: beadmeta.ScopeKindRig,
-			scopeRef:  scopeRef,
-			store:     store,
-		}, true
+	}
+	rig, ok := strings.CutPrefix(ref, "rig:")
+	if !ok {
+		return workflowStoreInfo{}, false
+	}
+	work, ok := st.Rig(rig)
+	if !ok {
+		return workflowStoreInfo{}, false
+	}
+	for _, info := range infos {
+		if beads.SameStore(info.leg.Reader, work) {
+			info.ref, info.scopeKind, info.scopeRef = ref, beadmeta.ScopeKindRig, rig
+			return info, true
+		}
 	}
 	return workflowStoreInfo{}, false
 }

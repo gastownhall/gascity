@@ -7,6 +7,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
@@ -49,7 +50,7 @@ func newStalledConvergenceHarness(t *testing.T) *stalledConvergenceHarness {
 		}},
 	}
 
-	manager := sessionpkg.NewManagerWithOptions(env.store, env.sp, sessionpkg.WithClock(env.clk), sessionpkg.WithCityPath(env.city))
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(env.store), env.sp, sessionpkg.WithClock(env.clk), sessionpkg.WithCityPath(env.city))
 	info, err := manager.CreateSession(t.Context(), sessionpkg.CreateOptions{
 		BeadOnly: true, Template: template, Title: "pool worker", Command: "true", Provider: "fake",
 	})

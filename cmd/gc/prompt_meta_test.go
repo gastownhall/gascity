@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"io"
+	"io/fs"
 	"strings"
 	"testing"
 
@@ -144,5 +146,54 @@ func TestRenderPromptWithMeta_FrontMatterParseDelegatedToPromptmetaPackage(t *te
 	fm, _ := promptmeta.Parse(in)
 	if fm.Version != "v9" {
 		t.Fatalf("smoke check on promptmeta failed: %q", fm.Version)
+	}
+}
+
+// TestRenderPromptWithMeta_ErrReportsFallbacks pins which outcomes set Err:
+// only a declared template that could not be used as written. A clean or
+// legitimately empty render, a plain .md, an empty path, and a missing inject
+// fragment (a warning that leaves the main render intact) leave it nil.
+func TestRenderPromptWithMeta_ErrReportsFallbacks(t *testing.T) {
+	tests := []struct {
+		name      string
+		path      string
+		body      string
+		inject    []string
+		wantErr   bool
+		wantText  string
+		wantWarn  string
+		wantErrIs error
+	}{
+		{name: "missing file", path: "prompts/missing.template.md", wantErr: true, wantErrIs: fs.ErrNotExist},
+		{name: "parse error", path: "prompts/p.template.md", body: "---\nversion: v1\n---\nHello {{base_branch}}\n", wantErr: true, wantText: "Hello {{base_branch}}\n"},
+		{name: "execute error", path: "prompts/p.template.md", body: `Hello {{template "no-such-fragment" .}}`, wantErr: true, wantText: `Hello {{template "no-such-fragment" .}}`},
+		{name: "valid template", path: "prompts/p.template.md", body: "Hello {{.AgentName}}", wantText: "Hello worker"},
+		{name: "valid template renders empty", path: "prompts/p.template.md", body: "{{if .RigName}}rig{{end}}", wantText: ""},
+		{name: "plain markdown is not executed", path: "prompts/p.md", body: "Hello {{base_branch}}", wantText: "Hello {{base_branch}}"},
+		{name: "empty path", path: ""},
+		{name: "missing inject fragment", path: "prompts/p.template.md", body: "Hello", inject: []string{"no-such-fragment"}, wantText: "Hello", wantWarn: `inject_fragment "no-such-fragment"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := fsys.NewFake()
+			if tt.body != "" {
+				f.Files["/city/"+tt.path] = []byte(tt.body)
+			}
+			var stderr strings.Builder
+			res := renderPromptWithMeta(f, "/city", "", tt.path,
+				PromptContext{AgentName: "worker"}, "", &stderr, nil, tt.inject, nil)
+			if (res.Err != nil) != tt.wantErr {
+				t.Fatalf("Err = %v, want error: %v", res.Err, tt.wantErr)
+			}
+			if tt.wantErrIs != nil && !errors.Is(res.Err, tt.wantErrIs) {
+				t.Errorf("Err = %v, want errors.Is %v", res.Err, tt.wantErrIs)
+			}
+			if res.Text != tt.wantText {
+				t.Errorf("Text = %q, want %q", res.Text, tt.wantText)
+			}
+			if tt.wantWarn != "" && !strings.Contains(stderr.String(), tt.wantWarn) {
+				t.Errorf("stderr = %q, want it to contain %q", stderr.String(), tt.wantWarn)
+			}
+		})
 	}
 }

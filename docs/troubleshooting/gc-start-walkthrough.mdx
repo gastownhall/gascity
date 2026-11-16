@@ -8,8 +8,7 @@ it is a URL that links here. Find your symptom in the lookup below, then
 expand its section for the cause and resolution.
 
 <Note>
-This page covers the seven failure modes encountered in the 2026-04-26
-selfhost UX bug haul (umbrella PRD `ga-r8hs`). For installation issues
+This page covers seven common `gc start` failures. For installation issues
 (`gc` not on PATH, missing prerequisites, version mismatches), see
 [Troubleshooting](/getting-started/troubleshooting). For Dolt store
 recovery, see [Dolt bloat recovery](/troubleshooting/dolt-bloat-recovery).
@@ -59,22 +58,19 @@ Or `gc start` hangs and the supervisor cycles through
 
 **Cause**
 
-`bd >= 1.0.3` triggers a config schema auto-migration on every
-`bd config set` call. Older versions of the `gc-beads-bd` shim issued
-two `bd config set` invocations during `op_init`, taking 18s and ~50s
-respectively — each `SIGKILL`'d by the 30s `op_init` provider timeout.
-The supervisor never reached ready state.
-
-Fixed in `ga-5mym.1` by replacing the slow path with a direct
-`.beads/config.yaml` write (idempotent, < 5s wall clock).
+`bd` runs a config schema auto-migration on every `bd config set` call.
+An older `gc` issued two `bd config set` invocations while initializing
+the bead store, and each could outlast the 30s `op_init` provider timeout
+and be killed, so the supervisor never reached ready state. Current `gc`
+writes `.beads/config.yaml` directly instead.
 
 **Resolution**
 
-Upgrade `gc` to 1.1.0 or later. Verify:
+Upgrade `gc` and `bd` to the latest release. Verify:
 
 ```bash
 gc version
-bd version   # should report 1.0.3 or later
+bd version   # 1.3.0 or newer
 gc start
 ```
 
@@ -102,13 +98,11 @@ keeps executing the previous binary's image and the cached pack
 snapshots it parsed at startup. New requests to the supervisor still
 go through the old code path.
 
-The fix shipped in `ga-a3ry.1` (binary drift detection in `gc start`)
-detects this automatically and restarts the supervisor.
+`gc start` detects this binary drift and restarts the supervisor.
 
 **Resolution**
 
-The `gc start` command in 1.1.0 detects the drift and offers to
-restart the supervisor. Confirm:
+`gc start` detects the drift and restarts the supervisor. Confirm:
 
 ```bash
 gc start                  # detects + restarts automatically
@@ -150,11 +144,6 @@ name that another included pack declares in
 agent name; cross-pack agent name collisions are hard errors, so the
 validator refuses the ambiguity.
 
-The `pack v1 → v2 mismatch` line is emitted by `ga-9ogb` (collision
-detection); the source paths are filled in by `ga-tpfc.1` (source-path
-ergonomics). Before 1.1.0, the second source rendered as an empty
-string.
-
 **Resolution**
 
 Choose one of the following.
@@ -195,7 +184,7 @@ Or any `unknown field <path>` error during pack parse.
 **Cause**
 
 Your `pack.toml` declares a field that the current `gc` binary's
-schema does not recognise. The most common case in 1.1.0 is
+schema does not recognise. The most common case is
 `[agent.pool]`, removed in favour of flat `min_active_sessions` and
 `max_active_sessions` on the agent itself.
 
@@ -204,7 +193,7 @@ schema does not recognise. The most common case in 1.1.0 is
 Translate the deprecated block:
 
 ```toml
-# Before (pack v1, pre-1.1.0):
+# Before (pack v1):
 [[agent]]
 name = "worker"
 [agent.pool]

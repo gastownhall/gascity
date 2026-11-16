@@ -224,3 +224,76 @@ func TestEnsureSessionForTemplate_RebrandedSingletonKeepsTemplateWorkDirIdentity
 		t.Fatalf("work_dir = %q, want %q", got, wantWorkDir)
 	}
 }
+
+// TestEnsureSessionForTemplateRegisteredCityDefersStart materializes a named
+// session and a plain agent template in a city registered with a supervisor
+// that is not running: both rows are left start-pending for the reconciler.
+func TestEnsureSessionForTemplateRegisteredCityDefersStart(t *testing.T) {
+	for _, template := range []string{"mayor", "helper"} {
+		t.Run(template, func(t *testing.T) {
+			t.Setenv("GC_SESSION", "fake")
+			t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
+			t.Setenv("XDG_RUNTIME_DIR", shortSocketTempDir(t, "gc-run-"))
+			cityPath := shortSocketTempDir(t, "gc-materialize-city-")
+			registerCityWithSupervisorForTest(t, cityPath)
+
+			store := beads.NewMemStore()
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents: []config.Agent{
+					{Name: "mayor", StartCommand: "true"},
+					{Name: "helper", StartCommand: "true"},
+				},
+				NamedSessions: []config.NamedSession{{Template: "mayor"}},
+			}
+
+			var stderr strings.Builder
+			if _, err := ensureSessionForTemplate(cityPath, cfg, store, template, &stderr); err != nil {
+				t.Fatalf("ensureSessionForTemplate(%s): %v", template, err)
+			}
+			all, err := store.ListByLabel(session.LabelSession, 0)
+			if err != nil {
+				t.Fatalf("ListByLabel: %v", err)
+			}
+			if len(all) != 1 {
+				t.Fatalf("session beads = %d, want 1", len(all))
+			}
+			assertDeferredSessionBead(t, all[0])
+			if !strings.Contains(stderr.String(), "gc supervisor start") {
+				t.Fatalf("stderr = %q, want the deferred-start warning", stderr.String())
+			}
+		})
+	}
+}
+
+// TestEnsureSessionForTemplateCorruptRegistryFails: a cities.toml that cannot
+// be parsed fails the materialize instead of starting the session here.
+func TestEnsureSessionForTemplateCorruptRegistryFails(t *testing.T) {
+	t.Setenv("GC_SESSION", "fake")
+	t.Setenv("GC_HOME", shortSocketTempDir(t, "gc-home-"))
+	t.Setenv("XDG_RUNTIME_DIR", shortSocketTempDir(t, "gc-run-"))
+	cityPath := shortSocketTempDir(t, "gc-materialize-city-")
+	registryPath := writeCorruptSupervisorRegistryForTest(t)
+
+	store := beads.NewMemStore()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents:    []config.Agent{{Name: "mayor", StartCommand: "true"}},
+	}
+	_, err := ensureSessionForTemplate(cityPath, cfg, store, "mayor", io.Discard)
+	if err == nil {
+		t.Fatal("ensureSessionForTemplate(corrupt registry) = nil error, want the registry parse error")
+	}
+	for _, want := range []string{registryPath, "parsing registry"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %q, want it to contain %q", err, want)
+		}
+	}
+	all, listErr := store.ListByLabel(session.LabelSession, 0)
+	if listErr != nil {
+		t.Fatalf("ListByLabel: %v", listErr)
+	}
+	if len(all) != 0 {
+		t.Fatalf("session beads = %d, want 0", len(all))
+	}
+}

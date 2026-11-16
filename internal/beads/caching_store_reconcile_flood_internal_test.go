@@ -25,14 +25,20 @@ type cacheFloodEvent struct {
 
 func newFloodLoopHarness(t *testing.T, backing Store) *floodLoopHarness {
 	t.Helper()
+	h := newUnprimedFloodLoopHarness(backing)
+	if err := h.cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	return h
+}
+
+// newUnprimedFloodLoopHarness leaves priming to the test, for the boot paths.
+func newUnprimedFloodLoopHarness(backing Store) *floodLoopHarness {
 	h := &floodLoopHarness{}
 	h.cache = NewCachingStoreForTest(backing, func(eventType, beadID string, payload json.RawMessage) {
 		h.emitted = append(h.emitted, eventType+":"+beadID)
 		h.pending = append(h.pending, cacheFloodEvent{eventType: eventType, payload: payload})
 	})
-	if err := h.cache.Prime(context.Background()); err != nil {
-		t.Fatalf("Prime: %v", err)
-	}
 	return h
 }
 
@@ -40,12 +46,27 @@ func newFloodLoopHarness(t *testing.T, backing Store) *floodLoopHarness {
 // the cache, the way the controller's watcher does.
 func (h *floodLoopHarness) pass() {
 	h.cache.runReconciliation()
+	h.deliver()
+}
+
+// deliver feeds everything the cache emitted since the last delivery, write
+// echoes included, back through the snapshot entry point. The controller routes
+// cache-actored events (cache-reconcile, cache-local) there.
+func (h *floodLoopHarness) deliver() {
+	h.deliverVia(h.cache.ApplyEventSnapshot)
+}
+
+// deliverPatches feeds them back as a rig cache receives them: as patches
+// (ApplyEvent), which do not vouch for the edges they omit.
+func (h *floodLoopHarness) deliverPatches() {
+	h.deliverVia(h.cache.ApplyEvent)
+}
+
+func (h *floodLoopHarness) deliverVia(apply func(eventType string, payload json.RawMessage)) {
 	pending := h.pending
 	h.pending = nil
 	for _, evt := range pending {
-		// The controller routes cache-reconcile-actored events through the
-		// snapshot entry point; every emission here is one of those.
-		h.cache.ApplyEventSnapshot(evt.eventType, evt.payload)
+		apply(evt.eventType, evt.payload)
 	}
 }
 

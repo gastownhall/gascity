@@ -12,6 +12,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/molecule"
 )
 
@@ -220,21 +221,14 @@ max_active_sessions = 1
 	return compiledRalphCity{name: name, formulaDir: formulaDir, cityPath: cityPath}
 }
 
-// buildCompiledRalphFixture cooks the city's formula in the requested shape and
-// wires a worker that closes ready work beads by policy.
-func buildCompiledRalphFixture(t *testing.T, wrap func(beads.Store) beads.Store, city compiledRalphCity, shape ralphFixtureShape, policy ralphWorkerPolicy) compiledRalphFixture {
-	t.Helper()
-	ledger := newBdClosePolicyStore()
-	cooked, err := molecule.Cook(context.Background(), ledger, city.name, []string{city.formulaDir}, molecule.Options{})
-	if err != nil {
-		t.Fatalf("Cook: %v", err)
-	}
-	rootID := cooked.RootID
-	if shape == shapeLinked {
-		linkCompileTimeRetryAttempts(t, ledger, rootID)
-	}
-	work := func(t *testing.T) bool {
-		open, err := ledger.ListOpen()
+// compiledRalphWorker plays the agents for a cooked ralph fixture: each call
+// closes one ready work bead with the metadata policy returns, keyed by the
+// bead's step and loop iteration. A nil policy result leaves the bead alone —
+// the worker passes it by — so a test can hold a runtime-spawned iteration the
+// way a pool holds a claim.
+func compiledRalphWorker(store beads.Store, rootID string, policy ralphWorkerPolicy) func(t *testing.T) bool {
+	return func(t *testing.T) bool {
+		open, err := store.ListOpen()
 		if err != nil {
 			t.Fatalf("listing open beads: %v", err)
 		}
@@ -244,7 +238,7 @@ func buildCompiledRalphFixture(t *testing.T, wrap func(beads.Store) beads.Store,
 			if b.ID == rootID || kind == beadmeta.KindSpec || kind == beadmeta.KindScope || beadmeta.IsControlKind(kind) {
 				continue
 			}
-			if !allBlockersClosed(t, ledger, b.ID) {
+			if !allBlockersClosed(t, store, b.ID) {
 				continue
 			}
 			iteration, err := strconv.Atoi(b.Metadata[beadmeta.IterationMetadataKey])
@@ -255,19 +249,38 @@ func buildCompiledRalphFixture(t *testing.T, wrap func(beads.Store) beads.Store,
 			// step ("apply-fixes.attempt.1"), so match the step the way the pack
 			// gates do: the id up to the first dot.
 			step, _, _ := strings.Cut(b.Metadata[beadmeta.StepIDMetadataKey], ".")
-			if err := updateMetadataAndClose(ledger, b.ID, policy(step, iteration)); err != nil {
+			closeMetadata := policy(step, iteration)
+			if closeMetadata == nil {
+				continue
+			}
+			if err := updateMetadataAndClose(beadstest.Graph(store), b.ID, closeMetadata); err != nil {
 				t.Fatalf("worker close %s: %v", b.ID, err)
 			}
 			return true
 		}
 		return false
 	}
+}
+
+// buildCompiledRalphFixture cooks the city's formula in the requested shape and
+// wires a worker that closes ready work beads by policy.
+func buildCompiledRalphFixture(t *testing.T, wrap func(beads.Store) beads.Store, city compiledRalphCity, shape ralphFixtureShape, policy ralphWorkerPolicy) compiledRalphFixture {
+	t.Helper()
+	ledger := newBdClosePolicyStore()
+	cooked, err := molecule.Cook(context.Background(), beadstest.GraphMolecule(ledger), city.name, []string{city.formulaDir}, molecule.Options{})
+	if err != nil {
+		t.Fatalf("Cook: %v", err)
+	}
+	rootID := cooked.RootID
+	if shape == shapeLinked {
+		linkCompileTimeRetryAttempts(t, ledger, rootID)
+	}
 	return compiledRalphFixture{
 		crashFixture: crashFixture{
 			ledger:   []*beads.MemStore{ledger.MemStore},
 			dispatch: wrap(ledger),
 			opts:     ProcessOptions{CityPath: city.cityPath},
-			work:     work,
+			work:     compiledRalphWorker(ledger, rootID, policy),
 		},
 		store:  ledger,
 		rootID: rootID,

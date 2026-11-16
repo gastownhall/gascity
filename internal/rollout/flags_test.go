@@ -67,3 +67,44 @@ func TestZeroFlagsIsLegacy(t *testing.T) {
 		t.Errorf("zero OriginOf = %q, want empty (unwired)", z.OriginOf(keyBeadsConditionalWrites))
 	}
 }
+
+// TestBuiltinAuto pins that only a mode gate resolved to auto by its builtin
+// default reads as BuiltinAuto: an explicit auto from config or env does not,
+// nor an off default, a bool gate, an unknown key or a never-resolved Flags.
+func TestBuiltinAuto(t *testing.T) {
+	t.Parallel()
+	env := func(vars map[string]string) func(string) (string, bool) {
+		return func(k string) (string, bool) { v, ok := vars[k]; return v, ok }
+	}
+	resolve := func(cfg *config.City, vars map[string]string) Flags {
+		f, err := Resolve(cfg, ResolveOptions{LookupEnv: env(vars)})
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		return f
+	}
+	explicit := &config.City{}
+	explicit.Ops.ContentMode = "auto"
+	cases := []struct {
+		name  string
+		flags Flags
+		key   string
+		want  bool
+	}{
+		{"default ops gate", ForTest(), KeyOpsContent, true},
+		{"default conditional writes", ForTest(), KeyBeadsConditionalWrites, true},
+		{"resolved default", resolve(&config.City{}, nil), KeyOpsLifecycle, true},
+		{"explicit config auto", resolve(explicit, nil), KeyOpsContent, false},
+		{"explicit env auto", resolve(&config.City{}, map[string]string{envOpsControl: "auto"}), KeyOpsControl, false},
+		{"ForTest override auto", ForTest(WithOpsContent(Auto)), KeyOpsContent, false},
+		{"default off", ForTest(), KeyBeadsGuardedRelease, false},
+		{"bool gate", ForTest(), keyDaemonFormulaV2, false},
+		{"unknown key", ForTest(), "no.such.gate", false},
+		{"zero Flags", Flags{}, KeyOpsContent, false},
+	}
+	for _, c := range cases {
+		if got := c.flags.BuiltinAuto(c.key); got != c.want {
+			t.Errorf("%s: BuiltinAuto(%s) = %t, want %t", c.name, c.key, got, c.want)
+		}
+	}
+}

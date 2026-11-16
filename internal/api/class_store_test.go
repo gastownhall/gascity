@@ -30,7 +30,7 @@ func writeRoutesJSONL(t *testing.T, scopeDir string, lines ...string) {
 }
 
 // TestBeadStoresForIDDefaultBackendIsCityLed pins the single-store invariant:
-// when the graph class is NOT relocated (GraphBeadStore() == CityBeadStore()),
+// when the graph class is NOT relocated (Stores().Graph() == CityBeadStore()),
 // the class-prefix arm never fires, so the unrouted by-id candidate set leads
 // with the city store ahead of the per-rig work stores — byte-identical to the
 // pre-seam ordering.
@@ -75,7 +75,7 @@ func TestBeadStoresForIDClassAwareGraphArm(t *testing.T) {
 	s := New(st)
 
 	got := s.beadStoresForID(prefix + "-1")
-	if len(got) != 2 || got[0] != s.state.GraphBeadStore().Store || got[1] != s.state.CityBeadStore() {
+	if len(got) != 2 || got[0] != s.state.Stores().Graph().Store || got[1] != s.state.CityBeadStore() {
 		t.Fatalf("beadStoresForID(%s-1) = %v (len %d), want [graph, work]", prefix, got, len(got))
 	}
 }
@@ -268,7 +268,7 @@ func TestClassArmStillDoesNotCoverMigratedLegacyIDs(t *testing.T) {
 	if storeref.IDInNamespace("mc-123", prefix) {
 		t.Fatalf("the fixture id mc-123 is inside the %q namespace; it proves nothing about the decline", prefix)
 	}
-	topo := New(st).residencyTopology()
+	topo := st.Stores().Topology()
 	if len(topo.Bindings) != 1 {
 		t.Fatalf("topology has %d bindings, want 1 (the relocated graph store %p)", len(topo.Bindings), graph)
 	}
@@ -320,7 +320,7 @@ func TestBeadGetResolvesAShadowingRigID(t *testing.T) {
 }
 
 // TestBeadStoresForIDShadowingRigPrefixStillWinsOnDefaultCity pins the other
-// side of that rule: with no relocation (GraphBeadStore() == CityBeadStore())
+// side of that rule: with no relocation (Stores().Graph() == CityBeadStore())
 // the class arm never fires, so a rig configured with the reserved prefix keeps
 // owning those ids exactly as it does today.
 func TestBeadStoresForIDShadowingRigPrefixStillWinsOnDefaultCity(t *testing.T) {

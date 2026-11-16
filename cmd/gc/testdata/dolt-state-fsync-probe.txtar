@@ -1,0 +1,23 @@
+# gc dolt-state fsync-probe through the real chain: the hidden command, the
+# re-exec of this binary as the detached fsync-probe-worker, the result pipe on
+# fd 3, and the tab-separated output the stall guard script parses.
+
+env GC_SESSION=fake
+env GC_BEADS=file
+env GC_DOLT=skip
+
+mkdir $WORK/data
+exec gc dolt-state fsync-probe --dir $WORK/data --timeout-ms 10000
+stdout 'status\tfinished'
+stdout 'fsync_ms\t[0-9]+'
+! stdout 'error'
+
+! exec gc dolt-state fsync-probe --dir $WORK/missing --timeout-ms 10000
+stdout 'status\terror'
+stdout 'error\t.+'
+stderr 'fsync-probe'
+
+! exec gc dolt-state fsync-probe --dir $WORK/data --timeout-ms 0
+stdout 'status\terror'
+! exec gc dolt-state fsync-probe --dir $WORK/data --timeout-ms -5
+stdout 'status\terror'

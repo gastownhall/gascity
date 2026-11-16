@@ -231,6 +231,14 @@ func newConditionalIntegrationBdStore(t *testing.T) (*beads.BdStore, string) {
 // route this row into their host-wide shared Dolt server.
 func newConditionalIntegrationRunner(t *testing.T, scopeDir string) beads.CommandRunner {
 	t.Helper()
+	return newConditionalIntegrationRunnerAs(t, scopeDir, "")
+}
+
+// newConditionalIntegrationRunnerAs is newConditionalIntegrationRunner with
+// bd's actor pinned to actor through BEADS_ACTOR, the variable gc's claim path
+// names its claimant with. An empty actor leaves bd's own default.
+func newConditionalIntegrationRunnerAs(t *testing.T, scopeDir, actor string) beads.CommandRunner {
+	t.Helper()
 	home := filepath.Join(filepath.Dir(scopeDir), "tool-home")
 	if err := os.MkdirAll(home, 0o755); err != nil {
 		t.Fatalf("create bd tool home: %v", err)
@@ -242,6 +250,9 @@ func newConditionalIntegrationRunner(t *testing.T, scopeDir string) beads.Comman
 	}
 	env["BEADS_DIR"] = filepath.Join(scopeDir, ".beads")
 	env["BEADS_DOLT_AUTO_START"] = "0"
+	if actor != "" {
+		env["BEADS_ACTOR"] = actor
+	}
 	// toolhome.Environ drops every BEADS_* name, so BdSubprocessEnv re-applies the
 	// test-mode default that keeps bd's detached metrics flusher from racing the
 	// TempDir removal (ga-aik16g).

@@ -1,10 +1,14 @@
 package beads
 
-import "sort"
+import (
+	"sort"
+	"time"
+)
 
 // This file holds the CachingStore's bead.closed announcement bookkeeping: the
-// queue of closes a non-announcing absorb installed (gastownhall/gascity#6860)
-// and the drain that announces each queued close once. That is once per cache,
+// queue of closes a non-announcing absorb installed (gastownhall/gascity#6860),
+// the drain that announces each queued close once, and the record of the
+// closes the cache announced (announcedCloses). That is once per cache,
 // not once per close: a close another process made and announced itself
 // reaches this cache either as its bead.closed, absorbed as already announced,
 // or through a read, and when the read lands first this cache announces the
@@ -15,22 +19,31 @@ import "sort"
 
 // trackCloseTransitionLocked keeps unannouncedCloses in step with the row just
 // installed for id. A row that is not closed cancels any queued close (a
-// reopen before the drain must not announce a stale close) and starts a new
-// close generation for the closing writes in flight (noteNotClosedLocked). A
+// reopen before the drain must not announce a stale close), drops the record
+// of the close the cache announced (announcedCloses), and starts a new close
+// generation for the closing writes in flight (noteNotClosedLocked). A
 // not-closed to closed transition is queued unless the caller announces it
 // itself, and so is a closed row installed with no cached row before it while
 // a closing write of ours is in flight (closeIntents) and its generation's
 // close is unannounced. A queued close carries the close generation of the
-// writes in flight when it was queued, 0 for none (queuedClose). Caller must
-// hold c.mu in write mode.
-func (c *CachingStore) trackCloseTransitionLocked(id string, previous Bead, hadPrevious bool, installed Bead, announced bool) {
+// writes in flight when it was queued, 0 for none (queuedClose). Any other
+// closed row installed with no cached row before it, and not announced, is
+// marked silently installed (silentCloses), so a refresh with evidence of a
+// recent close still announces it, unless claimed: a closing write of ours
+// installs it and has claimed its close or found it announced elsewhere. A
+// closed row laid over a closed one keeps the mark it had. Caller must hold
+// c.mu in write mode.
+func (c *CachingStore) trackCloseTransitionLocked(id string, previous Bead, hadPrevious bool, installed Bead, announced, claimed bool) {
 	if installed.Status != "closed" {
 		c.noteNotClosedLocked(id)
 		c.dropQueuedCloseLocked(id)
+		delete(c.announcedCloses, id)
+		delete(c.silentCloses, id)
 		return
 	}
 	if announced {
 		c.dropQueuedCloseLocked(id)
+		delete(c.silentCloses, id)
 		return
 	}
 	switch intent := c.closeIntents[id]; {
@@ -39,9 +52,20 @@ func (c *CachingStore) trackCloseTransitionLocked(id string, previous Bead, hadP
 	case !hadPrevious && intent != nil && intent.announced < intent.generation:
 		// A close a write of ours is making, observed before that write
 		// claims it: queue it so the claim (or the drain) announces it.
+	case !hadPrevious && claimed:
+		delete(c.silentCloses, id)
+		return
+	case !hadPrevious:
+		// A close nobody announced, installed over no cached row.
+		if c.silentCloses == nil {
+			c.silentCloses = make(map[string]struct{})
+		}
+		c.silentCloses[id] = struct{}{}
+		return
 	default:
 		return
 	}
+	delete(c.silentCloses, id)
 	if c.unannouncedCloses == nil {
 		c.unannouncedCloses = make(map[string]queuedClose)
 	}
@@ -61,6 +85,140 @@ func (c *CachingStore) trackCloseTransitionLocked(id string, previous Bead, hadP
 type queuedClose struct {
 	bead       Bead
 	generation uint64
+}
+
+// announcedClose is a close the cache announced: when, and which version of
+// the row it announced, by Revision where the backing stamps one and by
+// UpdatedAt where it does not.
+type announcedClose struct {
+	at        time.Time
+	updatedAt time.Time
+	revision  int64
+}
+
+// announcedClosesPruneAt is the smallest record size from which recording a
+// close prunes the expired ones first. Below it, the reconcile merge's prune
+// keeps the record small, and a close costs no scan of it.
+const announcedClosesPruneAt = 4096
+
+// recordAnnouncedClose records that the cache is announcing b's close now.
+// emitChange calls it for every bead.closed, before the announcement reaches
+// onChange. Once the record holds announcedClosesPruneAt entries, and
+// announcedClosesPruneNext, it prunes the expired ones first, so a cache whose
+// reconcile loop does not run keeps a bounded record, and a burst of closes
+// inside one recentWriteVerifyWindow, whose prunes free nothing, scans the
+// record a logarithmic number of times rather than at every close. A record
+// of at least announcedClosesPruneAt entries is also pruned once the last
+// prune is a window old, so the size a burst raised announcedClosesPruneNext
+// to does not hold its expired entries until the record grows back to it.
+// Callers must not hold c.mu.
+func (c *CachingStore) recordAnnouncedClose(b Bead) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := c.clockNow()
+	if n := len(c.announcedCloses); n >= max(announcedClosesPruneAt, c.announcedClosesPruneNext) ||
+		(n >= announcedClosesPruneAt && now.Sub(c.announcedClosesPrunedAt) > recentWriteVerifyWindow) {
+		c.pruneAnnouncedClosesLocked(now)
+	}
+	c.recordAnnouncedCloseLocked(b.ID, b, now)
+}
+
+// recordAnnouncedCloseLocked records that the cache announced id's close at
+// now, closed being the row the announcement carries. Caller must hold c.mu
+// in write mode.
+func (c *CachingStore) recordAnnouncedCloseLocked(id string, closed Bead, now time.Time) {
+	if c.announcedCloses == nil {
+		c.announcedCloses = make(map[string]announcedClose)
+	}
+	c.announcedCloses[id] = announcedClose{at: now, updatedAt: closed.UpdatedAt, revision: closed.Revision}
+}
+
+// announcesCloseLocked reports whether RefreshRowReport announces fresh, the
+// row it read for id, as a close rowRefreshChange does not: the close of a
+// row the cache does not hold, or holds closed only because an install that
+// announced nothing put it there (heldSilentlyLocked), with
+// opts.AnnounceUnheldClose or opts.SeenOpen, or, with opts.SeenOpen, of a row
+// the cache holds closed at another version. Neither is announced while a
+// closing write of this cache is in flight for the row (that write announces
+// it), or when the cache announced this close recently
+// (announcedCloseCoversLocked). Caller must hold c.mu.
+func (c *CachingStore) announcesCloseLocked(id string, opts RowRefreshOptions, cached Bead, held bool, fresh Bead) bool {
+	switch {
+	case fresh.Status != "closed" || c.closeIntents[id] != nil:
+		return false
+	case !held || c.heldSilentlyLocked(id, cached):
+		if !opts.AnnounceUnheldClose && !opts.SeenOpen {
+			return false
+		}
+	case !opts.SeenOpen || cached.Status != "closed" || sameRowVersion(cached, fresh):
+		return false
+	}
+	return !c.announcedCloseCoversLocked(id, fresh, c.clockNow(), opts.SeenOpen)
+}
+
+// heldSilentlyLocked reports whether cached, id's cached row, is a closed row
+// installed over no cached row with its close announced by nobody
+// (silentCloses): for announcing its close, the cache holds it no more than
+// it holds an uncached row. Caller must hold c.mu.
+func (c *CachingStore) heldSilentlyLocked(id string, cached Bead) bool {
+	if cached.Status != "closed" {
+		return false
+	}
+	_, silent := c.silentCloses[id]
+	return silent
+}
+
+// pruneSilentClosesLocked drops the silentCloses marks of rows the cache does
+// not hold closed. An install or eviction of a row keeps its own mark in
+// step; this sweeps the marks of rows dropped wholesale. Caller must hold c.mu
+// in write mode.
+func (c *CachingStore) pruneSilentClosesLocked() {
+	for id := range c.silentCloses {
+		if b, held := c.beads[id]; !held || b.Status != "closed" {
+			delete(c.silentCloses, id)
+		}
+	}
+}
+
+// sameRowVersion reports whether a and b carry the same nonzero Revision, so
+// are the same version of one row. Rows without one are never known to be.
+func sameRowVersion(a, b Bead) bool {
+	return a.Revision != 0 && a.Revision == b.Revision
+}
+
+// announcedCloseCoversLocked reports whether fresh, a closed row read for id,
+// is a close the cache announced within recentWriteVerifyWindow of now. When
+// both the announced row and fresh carry a Revision, it is that close if the
+// revisions match: every write since, an edit or a reopen and close, mints a
+// new one. Otherwise it is that close if UpdatedAt matches, unless seenOpen
+// (RowRefreshOptions.SeenOpen): a backing that stamps whole seconds can tie
+// a reopen and close inside the second of the announced close. A close that
+// is not covered is announced again, as bead.closed delivery allows; so is a
+// close announced with a row read before it committed (a lagged read after a
+// closing write). Caller must hold c.mu.
+func (c *CachingStore) announcedCloseCoversLocked(id string, fresh Bead, now time.Time, seenOpen bool) bool {
+	ac, ok := c.announcedCloses[id]
+	switch {
+	case !ok || now.Sub(ac.at) > recentWriteVerifyWindow:
+		return false
+	case ac.revision != 0 && fresh.Revision != 0:
+		return fresh.Revision == ac.revision
+	}
+	return !seenOpen && fresh.UpdatedAt.Equal(ac.updatedAt)
+}
+
+// pruneAnnouncedClosesLocked drops the announcedCloses entries older than
+// recentWriteVerifyWindow, sets announcedClosesPruneNext to twice the entries
+// it kept, and dates the prune (announcedClosesPrunedAt). Caller must hold
+// c.mu in write mode.
+func (c *CachingStore) pruneAnnouncedClosesLocked(now time.Time) {
+	for id, ac := range c.announcedCloses {
+		if now.Sub(ac.at) > recentWriteVerifyWindow {
+			delete(c.announcedCloses, id)
+		}
+	}
+	c.announcedClosesPruneNext = 2 * len(c.announcedCloses)
+	c.announcedClosesPrunedAt = now
 }
 
 // dropQueuedCloseLocked removes id's queued close and reports whether one was
@@ -102,8 +260,8 @@ func (c *CachingStore) takeUnannouncedClosesLocked() []Bead {
 // announceUnannouncedCloses emits bead.closed for every close queued by
 // trackCloseTransitionLocked. Draining under c.mu makes each queued close go
 // out exactly once however many goroutines race here. The close was inferred
-// from a read, so it carries ChangeScan's inferred source. Callers must not
-// hold c.mu.
+// from a read, so it carries ChangeRefresh, the inferred-from-a-read source;
+// ChangeScan is only the reconcile scan's diff. Callers must not hold c.mu.
 func (c *CachingStore) announceUnannouncedCloses() {
 	if !c.hasUnannouncedCloses.Load() {
 		return
@@ -121,9 +279,15 @@ func (c *CachingStore) announceUnannouncedCloses() {
 // It owns it when it cancels a close a read queued but has not drained yet, or
 // when the cached row it replaces is not closed. A cached row that is already
 // closed and not queued was announced by whoever installed it, so the write
-// does not announce again. With no cached row, uncachedOwns decides: a write
-// that itself closed the bead owns its close; one that merely refreshed an
-// uncached row does not.
+// does not announce again. With no cached row, or one held only silently
+// (heldSilentlyLocked), uncachedOwns decides: a write that itself closed the
+// bead owns its close; one that merely refreshed an uncached row does not.
+// Even a write that closed the bead declines when closed, the row it is
+// about to announce, is a close this cache announced recently
+// (announcedCloseCoversLocked): its backing close was a no-op on a row
+// closed already, whose close a re-scan or refresh announced before the row
+// left the cache. A nil closed (a write that has not read its row back yet)
+// skips that check.
 //
 // fenced is racedWriteLocked's verdict: the write installs nothing. A held row
 // that is not closed would then stay cached under the dirty mark, and the read
@@ -132,13 +296,16 @@ func (c *CachingStore) announceUnannouncedCloses() {
 // claim drops that row, as evictForConditionalClose does: the dirty mark keeps
 // readers on the backing, and a read that finds no held row announces nothing.
 // Caller must hold c.mu in write mode.
-func (c *CachingStore) claimCloseLocked(id string, uncachedOwns, fenced bool) bool {
+func (c *CachingStore) claimCloseLocked(id string, closed *Bead, uncachedOwns, fenced bool) bool {
 	if c.dropQueuedCloseLocked(id) {
 		return true
 	}
 	previous, held := c.beads[id]
-	if !held {
-		return uncachedOwns
+	if !held || c.heldSilentlyLocked(id, previous) {
+		if !uncachedOwns {
+			return false
+		}
+		return closed == nil || !c.announcedCloseCoversLocked(id, *closed, c.clockNow(), false)
 	}
 	if previous.Status == "closed" {
 		return false
@@ -165,7 +332,7 @@ func (c *CachingStore) updateEventTypeLocked(id string, installed Bead, opts Upd
 	if installed.Status != "closed" || announcedElsewhere {
 		return "bead.updated"
 	}
-	if c.claimCloseLocked(id, updateCloses(opts), fenced) {
+	if c.claimCloseLocked(id, &installed, updateCloses(opts), fenced) {
 		c.noteCloseClaimedLocked(id, generation)
 		return "bead.closed"
 	}
@@ -287,13 +454,13 @@ func (c *CachingStore) noteNotClosedLocked(id string) {
 // (claimCloseLocked) under the same lock, so no read can queue the close
 // between the two. A close something else announced while the write was in
 // flight is not claimed (endCloseIntentLocked); a claimed close is noted for
-// the write's generation (noteCloseClaimedLocked). fenced is
+// the write's generation (noteCloseClaimedLocked). closed and fenced are
 // claimCloseLocked's. Caller must hold c.mu in write mode.
-func (c *CachingStore) claimCloseIntentLocked(id string, generation uint64, uncachedOwns, fenced bool) bool {
+func (c *CachingStore) claimCloseIntentLocked(id string, generation uint64, closed *Bead, uncachedOwns, fenced bool) bool {
 	if c.endCloseIntentLocked(id, generation) {
 		return false
 	}
-	own := c.claimCloseLocked(id, uncachedOwns, fenced)
+	own := c.claimCloseLocked(id, closed, uncachedOwns, fenced)
 	if own {
 		c.noteCloseClaimedLocked(id, generation)
 	}

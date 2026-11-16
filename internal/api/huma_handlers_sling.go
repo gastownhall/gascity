@@ -143,6 +143,11 @@ func (s *Server) humaHandleSling(ctx context.Context, input *SlingInput) (*Sling
 		if status >= http.StatusInternalServerError {
 			return nil, apierr.Internal.Msg(message)
 		}
+		if code == "molecule_attached" {
+			// The bead already carries a live molecule another formula poured;
+			// attaching would double up on work in progress.
+			return nil, apierr.ConflictWrongState.Msg(message)
+		}
 		if code == "missing_bead" {
 			return nil, apierr.SlingMissingBead.Msg(message)
 		}

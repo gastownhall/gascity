@@ -5,7 +5,8 @@
 # Operator command for explicit lifecycle recovery; the dolt-health order is
 # diagnostic-only and does not restart the server automatically.
 #
-# Environment: GC_CITY_PATH
+# Environment: GC_CITY_PATH, GC_DOLT_JOURNAL_RESTORE_TIMEOUT_SECONDS
+#              (default here: 0, no limit)
 set -e
 
 : "${GC_CITY_PATH:?GC_CITY_PATH must be set}"
@@ -18,4 +19,9 @@ if [ ! -x "$GC_BEADS_BD_SCRIPT" ]; then
 fi
 
 # start exits 0 if started or already running, 2 if remote (no-op).
-GC_CITY_PATH="$GC_CITY_PATH" "$GC_BEADS_BD_SCRIPT" start
+# Journal-corruption recovery stops an automatic restore after 45s by
+# default, to fit the 120s gc gives its own start operation. This command
+# has no time limit, so it lets the restore run to completion.
+GC_CITY_PATH="$GC_CITY_PATH" \
+  GC_DOLT_JOURNAL_RESTORE_TIMEOUT_SECONDS="${GC_DOLT_JOURNAL_RESTORE_TIMEOUT_SECONDS:-0}" \
+  "$GC_BEADS_BD_SCRIPT" start

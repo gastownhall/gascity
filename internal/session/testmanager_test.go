@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -12,5 +13,5 @@ import (
 // no-city refusal builds a Manager without one.
 func newTestManager(t testing.TB, store beads.Store, sp runtime.Provider, opts ...ManagerOption) *Manager {
 	t.Helper()
-	return NewManagerWithOptions(store, sp, append([]ManagerOption{WithCityPath(t.TempDir())}, opts...)...)
+	return NewManagerWithOptions(beadstest.Sessions(store), sp, append([]ManagerOption{WithCityPath(t.TempDir())}, opts...)...)
 }

@@ -121,12 +121,14 @@ gc hook --claim --drain-ack --json
 
 ## Escalation
 
-When blocked, escalate — do not wait silently. `human` is the reserved
-recipient alias that resolves in every city; if your city staffs a
-coordinator role (e.g. the gastown pack's mayor), mail that instead:
+When blocked, escalate — do not wait silently. Run this command as written;
+the shell resolves the recipient to `$GC_ESCALATION_RECIPIENT` when the city
+sets it, otherwise to `human`, the reserved operator mailbox that resolves in
+every city. `--notify` wakes the recipient when it is an agent session;
+`human` has no session, so for it the flag does nothing.
 
 ```bash
-gc mail send human -s "BLOCKED: Brief description" -m "Details of the issue"
+gc mail send "${GC_ESCALATION_RECIPIENT:-human}" --notify -s "BLOCKED: Brief description" -m "Details of the issue"
 ```
 
 ## Context Exhaustion

@@ -860,3 +860,32 @@ func TestProviderLastActivityFromSnapshotStillDiscountsPoke(t *testing.T) {
 		t.Fatalf("GetLastActivity = %v, want the pre-poke activity %v: the snapshot path must apply the same poke discount as the per-session read", got, prior)
 	}
 }
+
+// FreshActivity reads the session's own windows, never the fleet snapshot: a
+// pane that drew after the snapshot was taken reads at its new activity,
+// which GetLastActivity, answering from the snapshot within its TTL, does not
+// see.
+func TestProviderFreshActivityReadsPastTheSnapshot(t *testing.T) {
+	fe := &fakeExecutor{
+		outs: []string{
+			"agent-1\t0\tclaude\t101\t0\t1000", // list-panes: the snapshot's activity
+			"1060",                             // list-windows for agent-1: drawn since
+		},
+	}
+	p := NewProviderWithConfig(Config{SocketName: "x"})
+	p.tm.exec = fe
+
+	if got, err := p.GetLastActivity("agent-1"); err != nil || !got.Equal(time.Unix(1000, 0)) {
+		t.Fatalf("GetLastActivity = %v, %v; want the snapshot's %v", got, err, time.Unix(1000, 0))
+	}
+	got, err := p.FreshActivity("agent-1")
+	if err != nil {
+		t.Fatalf("FreshActivity error = %v", err)
+	}
+	if !got.Equal(time.Unix(1060, 0)) {
+		t.Fatalf("FreshActivity = %v, want %v from the session's own windows", got, time.Unix(1060, 0))
+	}
+	if len(fe.calls) != 2 || !slices.Contains(fe.calls[1], "list-windows") || !slices.Contains(fe.calls[1], "agent-1") {
+		t.Fatalf("tmux calls = %v, want the list-panes snapshot, then list-windows for agent-1", fe.calls)
+	}
+}

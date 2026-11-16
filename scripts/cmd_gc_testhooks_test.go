@@ -10,7 +10,8 @@ import (
 )
 
 // testHooksStamp is the link-time variable that turns gc's test-only hooks
-// on (internal/clock.testHooks; today GC_TEST_BACKSTOP_SPEEDUP).
+// on (internal/clock.testHooks; today GC_TEST_BACKSTOP_SPEEDUP,
+// GC_LANE_FAILPOINT and GC_OPS_FAILPOINT).
 const testHooksStamp = "internal/clock.testHooks"
 
 // TestOnlyTheTestonlyGCLinkCarriesTheTestHooksStamp keeps gc's test hooks out
@@ -18,13 +19,17 @@ const testHooksStamp = "internal/clock.testHooks"
 // with -X .../internal/clock.testHooks=enabled, so this pins that:
 //
 //   - exactly one Bazel target stamps it, //cmd/gc:gc_testhooks, and that
-//     target is testonly, manual and visible to //test/acceptance only;
+//     target is testonly, manual and visible to //test/acceptance and
+//     //test/conversationlane only;
 //   - //cmd/gc:gc_lib, gc's main package, stays private, so no other
 //     package can link a gc of its own;
 //   - the release config (.goreleaser.yml) and the Makefile's LDFLAGS never
 //     mention it;
 //   - every acceptance target that sets GC_TEST_BACKSTOP_SPEEDUP runs that
 //     binary (GC_ACCEPTANCE_GC_BIN), since a gc without the stamp ignores it.
+//   - the conversation-lane evidence runs that binary as the gc it kills
+//     at its lane failpoints (GC_LANE_GC_BIN), since a gc without the stamp
+//     ignores GC_LANE_FAILPOINT.
 //
 // Under go test the walk for stamping BUILD and .bzl files covers the whole
 // checkout; under bazel test it sees only the files in this test's runfiles
@@ -73,7 +78,7 @@ func TestOnlyTheTestonlyGCLinkCarriesTheTestHooksStamp(t *testing.T) {
 	for _, want := range []string{
 		"    testonly = True,\n",
 		`    tags = ["manual"],` + "\n",
-		`    visibility = ["//test/acceptance:__pkg__"],` + "\n",
+		"    visibility = [\n        \"//test/acceptance:__pkg__\",\n        \"//test/conversationlane:__pkg__\",\n    ],\n",
 		`    x_defs = {"github.com/gastownhall/gascity/` + testHooksStamp + `": "enabled"},` + "\n",
 	} {
 		if !strings.Contains(rule[1], want) {
@@ -108,6 +113,11 @@ func TestOnlyTheTestonlyGCLinkCarriesTheTestHooksStamp(t *testing.T) {
 	if n := strings.Count(starlarkCode(acc), "GC_TEST_BACKSTOP_SPEEDUP"); n != strings.Count(hooksEnv[1], "GC_TEST_BACKSTOP_SPEEDUP") {
 		t.Errorf("test/acceptance/BUILD.bazel sets GC_TEST_BACKSTOP_SPEEDUP outside TESTHOOKS_GC_ENV (%d mentions); "+
 			"a target that sets it must run the test-hooks gc", n)
+	}
+
+	lanes := readRepoFile(t, root, "test/conversationlane/BUILD.bazel")
+	if !strings.Contains(lanes, `"GC_LANE_GC_BIN": "$(rootpath //cmd/gc:gc_testhooks)",`) {
+		t.Errorf("test/conversationlane/BUILD.bazel does not run //cmd/gc:gc_testhooks as GC_LANE_GC_BIN; a gc without the stamp ignores GC_LANE_FAILPOINT")
 	}
 }
 

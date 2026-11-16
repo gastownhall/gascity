@@ -209,6 +209,7 @@ var rowArms = []rowArm{
 	{"A6", armSquatterHeal},
 	{"A6", armSoftSuspendHeal},
 	{"A6", armAwakeHeal},
+	{"A6", armSatisfiedWake},
 	{"A6", armStabilityClear},
 	{"A6", armDetachedAt},
 	{"A6", armStrandedClear},

@@ -30,6 +30,8 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
+	"github.com/gastownhall/gascity/internal/platform/localsocket"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -74,7 +76,6 @@ func (e controllerCommandError) Is(target error) bool {
 }
 
 const (
-	controllerSocketPathLimit        = 100
 	controllerIdentityCommand        = "identify"
 	sessionCircuitResetCommandPrefix = "session-circuit-reset:"
 )
@@ -94,6 +95,9 @@ func (m controllerHostingMode) known() bool {
 type controllerIdentityReply struct {
 	PID         int                   `json:"pid"`
 	HostingMode controllerHostingMode `json:"hosting_mode"`
+	// SessionReconciler is the session reconciler the controller latched at
+	// boot ("legacy" or "v2"); empty from a controller that predates it.
+	SessionReconciler string `json:"session_reconciler,omitempty"`
 }
 
 type sessionCircuitResetRequest struct {
@@ -106,18 +110,18 @@ type sessionCircuitResetReply struct {
 	Error   string `json:"error,omitempty"`
 }
 
-// controllerSocketPath returns the Unix socket path for controller commands.
+// controllerSocketPath returns the local endpoint path for controller commands.
 // It uses the canonical .gc/controller.sock location for short city paths,
-// but falls back to a deterministic short temp-path when that pathname is too
-// close to the platform Unix-socket length limit.
+// but falls back to a deterministic short path when that pathname is too
+// close to the platform's endpoint length limit.
 func controllerSocketPath(cityPath string) string {
 	canonicalCityPath := normalizePathForCompare(cityPath)
 	canonicalLegacy := filepath.Join(canonicalCityPath, ".gc", "controller.sock")
-	if len(canonicalLegacy) <= controllerSocketPathLimit {
+	if len(canonicalLegacy) <= localsocket.PathLimit {
 		return canonicalLegacy
 	}
 	sum := sha256.Sum256([]byte(canonicalCityPath))
-	return filepath.Join("/tmp", "gascity-controller", fmt.Sprintf("%x.sock", sum[:16]))
+	return filepath.Join(localsocket.FallbackDir("gascity-controller"), fmt.Sprintf("%x.sock", sum[:16]))
 }
 
 // acquireControllerLock takes an exclusive flock on .gc/controller.lock.
@@ -129,7 +133,7 @@ func acquireControllerLock(cityPath string) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening controller lock: %w", err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if _, err := filelock.Acquire(f, filelock.Options{Mode: filelock.Exclusive, NonBlocking: true, Label: path}); err != nil {
 		f.Close() //nolint:errcheck // closing after flock failure
 		return nil, errControllerAlreadyRunning
 	}
@@ -154,12 +158,11 @@ func startControllerSocket(
 		return nil, fmt.Errorf("starting controller socket: invalid hosting mode %q", hostingMode)
 	}
 	sockPath := controllerSocketPath(cityPath)
-	if err := os.MkdirAll(filepath.Dir(sockPath), 0o700); err != nil {
-		return nil, fmt.Errorf("creating controller socket dir: %w", err)
-	}
-	// Remove stale socket from a previous crash.
-	os.Remove(sockPath) //nolint:errcheck // stale socket cleanup
-	lis, err := net.Listen("unix", sockPath)
+	// The controller socket lives inside the city's own .gc directory, which
+	// the city owns and this call does not re-own: MkdirAll's mode applies
+	// only when .gc has to be created. Reachability of the socket therefore
+	// follows the city directory on every platform.
+	lis, err := localsocket.Listen(sockPath, localsocket.Options{DirMode: 0o700, SocketMode: 0o600})
 	if err != nil {
 		return nil, fmt.Errorf("listening on controller socket: %w", err)
 	}
@@ -178,9 +181,16 @@ func startControllerSocket(
 // handleControllerConn reads from a connection and dispatches commands.
 // Supported commands: "stop" (shutdown), "stop-force" (shutdown without
 // interrupt grace), "ping" (legacy liveness check, returns numeric PID),
-// "identify" (typed process identity), "converge:{json}" (convergence
-// commands routed to event loop), and "v2-pass" (the v2 planner's last pass,
-// for doctor).
+// "identify" (typed process identity and the latched session reconciler),
+// "converge:{json}" (convergence commands routed to event loop),
+// "reconciler-mode" (the session reconciler this controller latched, for
+// lane passes outside it), "v2-pass" (the v2 planner's last pass, for
+// doctor), "ledger-feed" (the journal feeds' status, for doctor),
+// "lane:<conversation>[:<row id>[,<row id>...]]" (a conversation-lane
+// doorbell naming the journal rows to refresh, replying ok, "ok, rows
+// waiting for a retry: <n>", no-host or refused <reason>; laneReplyPoked
+// reads the reply), and "lane-status" (the conversation-lane
+// host's status, for doctor).
 func handleControllerConn(
 	conn net.Conn,
 	cityPath string,
@@ -212,7 +222,7 @@ func handleControllerConn(
 		case line == "ping":
 			fmt.Fprintf(conn, "%d\n", os.Getpid()) //nolint:errcheck // best-effort
 		case line == controllerIdentityCommand:
-			writeJSONLine(conn, controllerIdentityReply{PID: os.Getpid(), HostingMode: hostingMode})
+			writeJSONLine(conn, controllerIdentityReply{PID: os.Getpid(), HostingMode: hostingMode, SessionReconciler: wake.latchedModeName()})
 		case line == "poke" || strings.HasPrefix(line, pokeKeyedCommandPrefix):
 			// "poke" or "poke:<json key>" (see reconcile_enqueue.go): a
 			// non-blocking enqueue for event-driven wake, e.g. after sling
@@ -245,8 +255,18 @@ func handleControllerConn(
 			}
 		case line == "trace-status":
 			handleTraceStatusSocketCmd(conn, cityPath)
+		case line == reconcilerModeCommand:
+			if reply, ok := reconcilerModeReplyFor(wake); ok {
+				writeJSONLine(conn, reply)
+			}
 		case line == v2PassCommand:
 			writeJSONLine(conn, wake.v2PassStatus(time.Now()))
+		case line == ledgerFeedStatusCommand:
+			writeJSONLine(conn, ledgerFeedStatusFor(cityPath, time.Now()))
+		case strings.HasPrefix(line, laneSocketPrefix):
+			conn.Write([]byte(laneSocketReply(cityPath, line[len(laneSocketPrefix):]) + "\n")) //nolint:errcheck // best-effort reply
+		case line == laneStatusCommand:
+			writeJSONLine(conn, conversationLaneStatusFor(cityPath, time.Now()))
 		}
 	}
 }
@@ -276,20 +296,18 @@ func handleSessionCircuitResetSocketCmd(conn net.Conn, cityPath, payload string)
 		})
 		return
 	}
-	store, err := openCityStoreAt(cityPath)
+	// This runs inside the controller, so the session bead is read and written
+	// through the session store of the runtime this process serves, never the
+	// one-shot funnel (see registeredSessionFrontDoor).
+	sessFront, err := registeredSessionFrontDoor(cityPath)
 	if err != nil {
 		writeJSONLine(conn, sessionCircuitResetReply{
 			Outcome: "failed",
-			Error:   fmt.Sprintf("opening city store: %v", err),
+			Error:   err.Error(),
 		})
 		return
 	}
-	// Route the session circuit-breaker reset through the session
-	// coordination-class store so a [beads.classes.sessions] relocation reaches
-	// this socket-command path. No-refresh loader: this runs inside the running
-	// controller (packs already materialized); nil cfg → cliSessionStore identity.
-	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
-	if err := resetSessionCircuitBreakerState(cliSessionStore(store, cfg, cityPath), sessionID, identity, defaultSessionCircuitBreaker()); err != nil {
+	if err := resetSessionCircuitBreakerFront(sessFront, sessionID, identity, defaultSessionCircuitBreaker()); err != nil {
 		writeJSONLine(conn, sessionCircuitResetReply{
 			Outcome: "failed",
 			Error:   err.Error(),
@@ -300,6 +318,12 @@ func handleSessionCircuitResetSocketCmd(conn net.Conn, cityPath, payload string)
 }
 
 func resetSessionCircuitBreakerState(store beads.Store, sessionID string, identity string, cb *sessionCircuitBreaker) error {
+	return resetSessionCircuitBreakerFront(sessionFrontDoor(store), sessionID, identity, cb)
+}
+
+// resetSessionCircuitBreakerFront is resetSessionCircuitBreakerState over a
+// session front door the caller already resolved.
+func resetSessionCircuitBreakerFront(sessFront *sessionpkg.Store, sessionID string, identity string, cb *sessionCircuitBreaker) error {
 	identity = strings.TrimSpace(identity)
 	if identity == "" {
 		return nil
@@ -307,7 +331,7 @@ func resetSessionCircuitBreakerState(store beads.Store, sessionID string, identi
 	if cb == nil {
 		cb = defaultSessionCircuitBreaker()
 	}
-	if err := loadPersistedSessionCircuitResetGeneration(sessionFrontDoor(store), sessionID, identity, cb); err != nil {
+	if err := loadPersistedSessionCircuitResetGeneration(sessFront, sessionID, identity, cb); err != nil {
 		return err
 	}
 	initialSnapshot := cb.snapshotIdentity(identity)
@@ -315,7 +339,7 @@ func resetSessionCircuitBreakerState(store beads.Store, sessionID string, identi
 		cb.Reset(identity)
 		return nil
 	}
-	if err := resetAndClearSessionCircuitBreakerState(store, sessionID, identity, cb, initialSnapshot); err != nil {
+	if err := resetAndClearSessionCircuitBreakerState(sessFront, sessionID, identity, cb, initialSnapshot); err != nil {
 		return err
 	}
 	// The second cycle invalidates an OPEN persist that may race through
@@ -323,12 +347,12 @@ func resetSessionCircuitBreakerState(store beads.Store, sessionID string, identi
 	// snapshot so the controller never leaves memory CLOSED while storage still
 	// says OPEN. TestResetSessionCircuitBreakerStateClearsRacingOpenPersist
 	// guards this from being collapsed into a single reset.
-	return resetAndClearSessionCircuitBreakerState(store, sessionID, identity, cb, initialSnapshot)
+	return resetAndClearSessionCircuitBreakerState(sessFront, sessionID, identity, cb, initialSnapshot)
 }
 
-func resetAndClearSessionCircuitBreakerState(store beads.Store, sessionID string, identity string, cb *sessionCircuitBreaker, restoreSnapshot sessionCircuitBreakerIdentitySnapshot) error {
+func resetAndClearSessionCircuitBreakerState(sessFront *sessionpkg.Store, sessionID string, identity string, cb *sessionCircuitBreaker, restoreSnapshot sessionCircuitBreakerIdentitySnapshot) error {
 	resetGeneration := cb.Reset(identity)
-	if err := clearPersistedSessionCircuitBreakerMetadata(sessionFrontDoor(store), sessionID, resetGeneration); err != nil {
+	if err := clearPersistedSessionCircuitBreakerMetadata(sessFront, sessionID, resetGeneration); err != nil {
 		cb.restoreIdentity(identity, restoreSnapshot)
 		// Restore the pre-reset snapshot rather than the just-reset one so a
 		// durable clear failure cannot strand the breaker CLOSED in memory.
@@ -536,7 +560,7 @@ func sendControllerCommandWithReadTimeout(cityPath, command string, readTimeout 
 
 func sendControllerCommandWithTimeouts(cityPath, command string, dialTimeout, writeTimeout, readTimeout time.Duration) ([]byte, error) {
 	sockPath := controllerSocketPath(cityPath)
-	conn, err := net.DialTimeout("unix", sockPath, dialTimeout)
+	conn, err := localsocket.Dial(sockPath, dialTimeout)
 	if err != nil {
 		return nil, controllerCommandError{
 			op:          "connecting to controller",
@@ -997,9 +1021,19 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 	if err := validatePackRuntimeRegistrations(newCfg); err != nil {
 		return failWithWarnings(fmt.Errorf("validating pack runtimes: %w", err))
 	}
+	// Refuse, not warn: a running city must not adopt a rig layout that
+	// start and the supervisor would refuse on the next restart.
+	if err := config.ValidateRigFederationLayout(cityRoot, newCfg); err != nil {
+		return failWithWarnings(fmt.Errorf("validating rigs: %w", err))
+	}
 	newName := loadedCityName(newCfg, filepath.Dir(tomlPath))
 	if newName != lockedWorkspaceName {
 		return failWithWarnings(fmt.Errorf("workspace.name changed from %q to %q (restart controller to apply)", lockedWorkspaceName, newName))
+	}
+	// Every reload, changed or not, repeats that a guarded rig is not
+	// protected by this build.
+	for _, w := range config.RigFederationWarnings(newCfg.Rigs) {
+		reloadWarnings = append(reloadWarnings, "config reload: "+w)
 	}
 	rev := config.Revision(fsys.OSFS{}, prov, newCfg, cityRoot)
 	return &reloadResult{Cfg: newCfg, Prov: prov, Revision: rev, Warnings: reloadWarnings}, nil
@@ -1373,6 +1407,7 @@ func controllerLoop(
 		loopCfg = &cfgCopy
 	}
 	cr := &CityRuntime{
+		bootCityStore:       bootCityStoreFor(cityPath),
 		cityPath:            cityPath,
 		cityName:            cityName,
 		tomlPath:            tomlPath,
@@ -1461,6 +1496,7 @@ func runController(
 	eventProv events.Provider,
 	stdout, stderr io.Writer,
 ) int {
+	markProgramShadowLongLived()
 	if heldLock == nil {
 		lock, err := acquireControllerLock(cityPath)
 		if err != nil {
@@ -1483,7 +1519,7 @@ func runController(
 
 	// doStartStandalone already refused an inadmissible mode before any init;
 	// this latch is the one whose mode the runtime runs.
-	wiring, wiringErr := newControllerWiring(cfg, reconcilerModeLookupEnv, stderr)
+	wiring, wiringErr := newStandaloneControllerWiring(cityPath, cfg, rec, stderr)
 	if wiringErr != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", wiringErr) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1518,10 +1554,6 @@ func runController(
 	defer convergence.RemoveToken(cityPath) //nolint:errcheck // best-effort cleanup
 
 	cityName := loadedCityName(cfg, cityPath)
-	rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
-	telemetry.RecordControllerLifecycle(context.Background(), "started")
-	fmt.Fprintln(stdout, "Controller started.") //nolint:errcheck // best-effort stdout
-
 	cr, err := newCityRuntime(wiring.runtimeParams(CityRuntimeParams{
 		CityPath:                cityPath,
 		CityName:                cityName,
@@ -1546,6 +1578,13 @@ func runController(
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	// Recorded only once the runtime exists, as the supervisor does: building it
+	// built the order dispatcher, which read the event head its never-run event
+	// orders start from, so an order on controller.started sees this one.
+	rec.Record(events.Event{Type: events.ControllerStarted, Actor: "gc"})
+	telemetry.RecordControllerLifecycle(context.Background(), "started")
+	fmt.Fprintln(stdout, "Controller started.") //nolint:errcheck // best-effort stdout
+	warnBdInventoryAtControllerStart(cityPath, cfg, rec)
 
 	// Install controller-managed bead stores even when the HTTP API is
 	// disabled. Standalone runtime still needs cached city/rig stores for
@@ -1576,16 +1615,16 @@ func runController(
 	// Best-effort — a sweep failure must never block startup, and the lazy
 	// reclaim path still releases such claims when the configured identity
 	// reclaims its name.
-	if cs.cityBeadStore != nil {
-		if released, err := sessionpkg.ReleaseStaleConfiguredNameClaims(cs.cityBeadStore, cfg, cityName); err != nil {
-			fmt.Fprintf(stderr, "controller: stale name-claim sweep: %v\n", err) //nolint:errcheck // best-effort stderr
-		} else if released > 0 {
-			fmt.Fprintf(stderr, "controller: released %d stale configured name claim(s) at startup\n", released) //nolint:errcheck // best-effort stderr
-		}
+	if released, err := releaseStaleNameClaimsAtStartup(cs, cfg, cityName); err != nil {
+		fmt.Fprintf(stderr, "controller: stale name-claim sweep: %v\n", err) //nolint:errcheck // best-effort stderr
+	} else if released > 0 {
+		fmt.Fprintf(stderr, "controller: released %d stale configured name claim(s) at startup\n", released) //nolint:errcheck // best-effort stderr
 	}
 
 	cs.startBeadEventWatcher(ctx)
 	cs.startAutocloseSweep(ctx)
+	cs.startOpSweep(ctx)
+	cs.startConversationLaneHost(ctx, wiring.mode)
 	cs.startEmergencyEventRelay(ctx)
 	cs.startMaintenanceLoop(ctx)
 
@@ -1706,4 +1745,24 @@ func (r *singleCityStateResolver) CityState(name string) api.State {
 		return r.state
 	}
 	return nil
+}
+
+// releaseStaleNameClaimsAtStartup is the one-time startup sweep that releases
+// the runtime name claims closed configured named-session beads still hold
+// (ga-n2d Gap C), run by both the standalone controller and the supervisor.
+//
+// It sweeps the SESSIONS store. Session beads are session class, so on a split
+// city they live only in the class binding; the sweep used to read the work
+// store and was a silent no-op there, leaving only the lazy reclaim (write-audit
+// B8). On a single-store city the sessions store is the work store, so nothing
+// changes.
+func releaseStaleNameClaimsAtStartup(cs *controllerState, cfg *config.City, cityName string) (int, error) {
+	if cs == nil {
+		return 0, nil
+	}
+	sessions := cs.Stores().Sessions()
+	if sessions == (beads.SessionStore{}) {
+		return 0, nil
+	}
+	return sessionpkg.ReleaseStaleConfiguredNameClaims(sessions, cfg, cityName)
 }

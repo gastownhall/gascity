@@ -98,7 +98,7 @@ func TestRowWriteRefusesWithoutConditionalWriter(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			m := beads.NewMemStore()
 			if c.mode != gate.ModeUnset {
-				if err := beads.StampOpenedStore(m, "MemStore", c.mode, nil, nil); err != nil {
+				if err := beads.StampOpenedStore(m, "MemStore", c.mode, false, nil, nil); err != nil {
 					t.Fatal(err)
 				}
 				m.DisableConditionalWrites = true

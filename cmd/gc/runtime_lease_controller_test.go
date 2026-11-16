@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -244,7 +245,7 @@ func TestChatAutoSuspendNeverWaits(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	now := time.Date(2026, 3, 11, 12, 0, 0, 0, time.UTC)
-	info, err := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir())).CreateSession(context.Background(), sessionpkg.CreateOptions{
+	info, err := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithCityPath(t.TempDir())).CreateSession(context.Background(), sessionpkg.CreateOptions{
 		Template: "default", Title: "S1", Command: "echo s1", WorkDir: t.TempDir(), Provider: "test",
 		ExtraMeta: map[string]string{"session_origin": "manual"},
 	})
@@ -303,11 +304,11 @@ func TestTickPoolRuntimeReleaseTakesTheFlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if releaseBeadScopedPoolRuntimeLeased(city, info, sp, io.Discard) || !sp.IsRunning("worker-gc-7") {
+	if releaseRowOwnedRuntimeLeased(city, nil, info, sp, io.Discard, nil) || !sp.IsRunning("worker-gc-7") {
 		t.Fatal("the tick released a pool runtime under another holder's flock")
 	}
 	held.Release()
-	if !releaseBeadScopedPoolRuntimeLeased(city, info, sp, io.Discard) || sp.IsRunning("worker-gc-7") {
+	if !releaseRowOwnedRuntimeLeased(city, nil, info, sp, io.Discard, nil) || sp.IsRunning("worker-gc-7") {
 		t.Fatal("the tick did not release a free pool runtime")
 	}
 }

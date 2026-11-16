@@ -15,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -408,7 +409,7 @@ func TestOperatorResumeClearsAStaleAck(t *testing.T) {
 			}
 		}
 		city := t.TempDir()
-		if err := session.NewManagerWithOptions(store, sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), b.ID, "claude", runtime.Config{}); err != nil {
+		if err := session.NewManagerWithOptions(beadstest.Sessions(store), sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), b.ID, "claude", runtime.Config{}); err != nil {
 			t.Fatalf("running %t: attach: %v", running, err)
 		}
 		got, err := store.Get(b.ID)
@@ -449,7 +450,7 @@ func (h *attachRaceSP) Start(ctx context.Context, name string, cfg runtime.Confi
 	return err
 }
 
-// attachRaceStore runs beforeClear once, before the first metadata batch
+// attachRaceStore runs beforeClear once, before the first metadata write
 // that clears the stop request's controller half (the operator's confirm).
 type attachRaceStore struct {
 	*beads.MemStore
@@ -457,12 +458,23 @@ type attachRaceStore struct {
 }
 
 func (s *attachRaceStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	s.race(kvs)
+	return s.MemStore.SetMetadataBatch(id, kvs)
+}
+
+// UpdateIfMatch is the start's confirm fenced on its incarnation
+// (session.Store.ConfirmIncarnation).
+func (s *attachRaceStore) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts) error {
+	s.race(opts.Metadata)
+	return s.MemStore.UpdateIfMatch(id, rev, opts)
+}
+
+func (s *attachRaceStore) race(kvs map[string]string) {
 	if _, ok := kvs[session.DrainIntentReasonKey]; ok && s.beforeClear != nil {
 		f := s.beforeClear
 		s.beforeClear = nil
 		f()
 	}
-	return s.MemStore.SetMetadataBatch(id, kvs)
 }
 
 // TestSignalNeverStrandsAnOperatorStart (#7638, mc-ted51; review probes
@@ -500,7 +512,7 @@ func TestSignalNeverStrandsAnOperatorStart(t *testing.T) {
 				mstore = &attachRaceStore{MemStore: store.(*beads.MemStore), beforeClear: signal}
 			}
 			city := p.World.CityPath
-			err := session.NewManagerWithOptions(mstore, sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), it.Key.ID, "claude", runtime.Config{})
+			err := session.NewManagerWithOptions(beadstest.Sessions(mstore), sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), it.Key.ID, "claude", runtime.Config{})
 			got, gerr := store.Get(it.Key.ID)
 			if gerr != nil {
 				t.Fatal(gerr)
@@ -540,7 +552,7 @@ func TestOperatorStartClearsARequestBegunBeforeItsLease(t *testing.T) {
 	}
 	sp := &attachRaceSP{Fake: runtime.NewFake(), onIsRunning: begin}
 	city := t.TempDir()
-	if err := session.NewManagerWithOptions(store, sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), b.ID, "claude", runtime.Config{}); err != nil {
+	if err := session.NewManagerWithOptions(beadstest.Sessions(store), sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), b.ID, "claude", runtime.Config{}); err != nil {
 		t.Fatalf("attach: %v", err)
 	}
 	got, err := store.Get(b.ID)
@@ -1219,5 +1231,37 @@ func TestSeatAwakeReadyAcrossLegsAndIdentities(t *testing.T) {
 				t.Fatalf("tick read = %v (%v), want %v, as the seat read", tick, err, c.want)
 			}
 		})
+	}
+}
+
+// TestAckPredatesRuntimeForeignExemption (v5.10k-2; mc-j43o4, the #7797 r3
+// review's R5 and R6). Kills the Foreign exemption widened: another row's
+// runtime under the name is no replacement of this row's, so a newer
+// creation time voids no ack, but only when both presence reads saw one
+// object (Same; R5: an identity read across a replaced object proves
+// nothing of the runtime now there), and only for a Foreign identity (R6:
+// the row's own runtime of another incarnation, StaleSelf or NewerSelf, is a
+// replacement, so an ack older than it is void).
+func TestAckPredatesRuntimeForeignExemption(t *testing.T) {
+	ackAt := gatherNow.Add(-time.Minute).Truncate(time.Second)
+	after := strconv.FormatInt(ackAt.Add(time.Second).Unix(), 10)
+	row := session.Info{ID: "gc-1", Generation: "3", InstanceToken: "tok-3"}
+	for _, c := range []struct {
+		name  string
+		ident runtimeIdentity
+		same  bool
+		void  bool
+	}{
+		{"another row's runtime, one object", runtimeIdentity{Known: true, SessionID: "gc-9", Epoch: "1", Token: "tok-9"}, true, false},
+		{"another row's runtime, replaced mid-read (R5)", runtimeIdentity{Known: true, SessionID: "gc-9", Epoch: "1", Token: "tok-9"}, false, true},
+		{"its own older incarnation (R6)", runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "2", Token: "tok-2"}, true, true},
+		{"its own newer incarnation (R6)", runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "4", Token: "tok-4"}, true, true},
+		{"its own current runtime", runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "3", Token: "tok-3"}, true, true},
+	} {
+		live := runtime.Liveness{Running: true, Alive: true, ObjectID: "$1", ObjectCreated: after}
+		r := &rowFacts{row: censusRow{Info: row}, fresh: &txRuntime{Class: rtAlive, Live: live, Again: live, Identity: c.ident, Same: c.same}}
+		if got := r.ackPredatesRuntime(ackAt); got != c.void {
+			t.Errorf("%s: ack predates the runtime %t, want %t", c.name, got, c.void)
+		}
 	}
 }

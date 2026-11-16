@@ -33,12 +33,12 @@ func processIdentityWithReader(pid int, readFile func(string) ([]byte, error)) (
 		}
 		return "", fmt.Errorf("reading process identity for PID %d: %w", pid, err)
 	}
-	_, _, startTime, ok, err := parseProcStatIdentity(string(data))
+	stat, err := parseProcStat(string(data))
 	if err != nil {
 		return "", fmt.Errorf("parsing process identity for PID %d: %w", pid, err)
 	}
-	if !ok || startTime == "" {
+	if stat.startTime == "" {
 		return "", fmt.Errorf("process identity for PID %d is empty", pid)
 	}
-	return startTime, nil
+	return stat.startTime, nil
 }

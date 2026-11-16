@@ -146,10 +146,14 @@ func TestCoreMaintenanceExecAssets(t *testing.T) {
 		// Retired with the move to bd verbs: the maintenance orders no
 		// longer resolve a Dolt port of their own.
 		"assets/scripts/dolt-target.sh",
+		// Retired because bd list hides the wisps plane, so the order never
+		// selected a wisp; reaper and the controller wisp GC own that work.
+		"orders/wisp-compact.toml",
+		"assets/scripts/wisp-compact.sh",
 	}
 	for _, path := range retired {
 		if _, err := fs.Stat(PackFS, path); err == nil {
-			t.Fatalf("core pack must not carry retired Dog maintenance asset %s", path)
+			t.Fatalf("core pack must not carry retired maintenance asset %s", path)
 		}
 	}
 }
@@ -196,6 +200,9 @@ func TestJSONLExportMaintainsArchiveObjectDatabase(t *testing.T) {
 		`count-objects -v`,
 		`pack.windowMemory=`,
 		`pack.threads=1`,
+		`--geometric=2`,
+		`maintenance.auto=false`,
+		`gc.auto=0`,
 		`nice -n 19`,
 		`ionice -t -c 3`,
 	} {
@@ -204,8 +211,12 @@ func TestJSONLExportMaintainsArchiveObjectDatabase(t *testing.T) {
 		}
 	}
 	calls := regexp.MustCompile(`\bmaintain_archive_repository\b(?:[^(]|$)`)
-	if got := len(calls.FindAllString(body, -1)); got < 3 {
-		t.Fatalf("jsonl-export.sh invokes archive maintenance %d times, want at least three (before the export, after a HALT commit, after the push)", got)
+	if got := len(calls.FindAllString(body, -1)); got != 1 {
+		t.Fatalf("jsonl-export.sh invokes archive maintenance %d times, want one (a helper that every exit after the export calls)", got)
+	}
+	exits := regexp.MustCompile(`\bmaintain_archive_or_exit\b(?:[^(]|$)`)
+	if got := len(exits.FindAllString(body, -1)); got != 5 {
+		t.Fatalf("jsonl-export.sh runs archive maintenance at %d exits, want five (normal, HALT, pending push, failed DB, no changes)", got)
 	}
 }
 
@@ -292,4 +303,43 @@ func TestClaimProtocolFragmentIsEmbedded(t *testing.T) {
 			t.Errorf("embedded claim-protocol fragment missing %q", want)
 		}
 	}
+}
+
+// coreWorkerPrompts are the core pack prompts that tell a blocked worker how
+// to escalate.
+var coreWorkerPrompts = []string{
+	"assets/prompts/graph-worker.md",
+	"assets/prompts/pool-worker.template.md",
+}
+
+// promptSection returns the body of the "## <heading>" section of a Markdown
+// prompt, up to the next level-two heading.
+func promptSection(t *testing.T, body, heading string) string {
+	t.Helper()
+	marker := "\n## " + heading + "\n"
+	start := strings.Index(body, marker)
+	if start < 0 {
+		t.Fatalf("prompt has no %q section", "## "+heading)
+	}
+	section := body[start+len(marker):]
+	if end := strings.Index(section, "\n## "); end >= 0 {
+		section = section[:end+1]
+	}
+	return section
+}
+
+// singleBashBlock returns the contents of the only fenced bash block in a
+// prompt section.
+func singleBashBlock(t *testing.T, section string) string {
+	t.Helper()
+	const open, closing = "```bash\n", "\n```"
+	if n := strings.Count(section, open); n != 1 {
+		t.Fatalf("section has %d fenced bash blocks, want exactly 1:\n%s", n, section)
+	}
+	start := strings.Index(section, open) + len(open)
+	end := strings.Index(section[start:], closing)
+	if end < 0 {
+		t.Fatalf("section's bash block is not closed:\n%s", section)
+	}
+	return section[start:start+end] + "\n"
 }

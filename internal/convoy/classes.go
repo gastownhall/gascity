@@ -3,12 +3,10 @@ package convoy
 import (
 	"errors"
 	"fmt"
-	"reflect"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/coordclass"
-	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // MemberClasses names the class handles a single convoy operation spans.
@@ -39,19 +37,20 @@ type MemberClasses struct {
 	// its membership edges. It is required: every convoy operation reads or
 	// writes the convoy's own edges through it, and it is also the first
 	// candidate probed for members (a same-class convoy owns its members).
-	Convoy beads.Store
+	Convoy beads.WorkStore
 
 	// Work names the Work-class scopes whose beads can be members. Work is a
 	// topology, not one store — the HQ workspace plus each rig workspace — so
 	// it is a slice; a caller that spans only the HQ scope names one handle.
 	// Nil or empty means this operation does not span the Work class.
-	Work []beads.Store
+	Work []beads.WorkStore
 
 	// Graph names the Graph-class handle when graph-class beads (formula steps,
 	// control beads, wisp roots) can be members. It is never the class that owns
 	// the convoy itself — synthetic convoys are work beads like every other
-	// convoy. Nil means this operation does not span the Graph class.
-	Graph beads.Store
+	// convoy. The zero handle means this operation does not span the Graph
+	// class.
+	Graph beads.GraphStore
 }
 
 // ErrDuplicateResidence reports that one bead id was found in more than one
@@ -94,17 +93,73 @@ var ErrNoConvoyClass = errors.New("no handle named for the convoy's own class")
 
 // requireConvoyHandle reports whether the operation can proceed at all.
 func (m MemberClasses) requireConvoyHandle() error {
-	if isNilStore(m.Convoy) {
+	if beads.IsNilStore(m.Convoy) {
 		return ErrNoConvoyClass
 	}
 	return nil
 }
 
 // classHandle is one named candidate: a class name for provenance and the
-// handle the caller supplied for it.
+// handle the caller supplied for it, a work-class one (the convoy's own class
+// and each Work scope) or the graph-class one.
 type classHandle struct {
 	class string
-	store beads.Store
+	work  beads.WorkStore
+	graph beads.GraphStore
+}
+
+func workHandle(class string, s beads.WorkStore) classHandle {
+	return classHandle{class: class, work: s}
+}
+
+func graphHandle(class string, s beads.GraphStore) classHandle {
+	return classHandle{class: class, graph: s}
+}
+
+// isGraph reports whether c names the graph class.
+func (c classHandle) isGraph() bool { return c.graph != (beads.GraphStore{}) }
+
+// isNil reports whether c names no store.
+func (c classHandle) isNil() bool {
+	if c.isGraph() {
+		return beads.IsNilStore(c.graph)
+	}
+	return beads.IsNilStore(c.work)
+}
+
+// get reads id from c's store.
+func (c classHandle) get(id string) (beads.Bead, error) {
+	if c.isGraph() {
+		return c.graph.Get(id)
+	}
+	return c.work.Get(id)
+}
+
+// idPrefix is the id prefix c's store mints, if it reports one.
+func (c classHandle) idPrefix() (string, bool) {
+	var p interface{ IDPrefix() string }
+	var ok bool
+	if c.isGraph() {
+		p, ok = beads.As[interface{ IDPrefix() string }](c.graph)
+	} else {
+		p, ok = beads.As[interface{ IDPrefix() string }](c.work)
+	}
+	if !ok {
+		return "", false
+	}
+	return p.IDPrefix(), true
+}
+
+// sameAs reports whether c and o name the same physical store.
+func (c classHandle) sameAs(o classHandle) bool {
+	var a, b beads.Store = c.work, o.work
+	if c.isGraph() {
+		a = c.graph
+	}
+	if o.isGraph() {
+		b = o.graph
+	}
+	return beads.SameStore(a, b)
 }
 
 // candidates returns the named class handles in deterministic probe order: the
@@ -114,27 +169,38 @@ type classHandle struct {
 // and can never look like duplicate residence.
 func (m MemberClasses) candidates() []classHandle {
 	out := make([]classHandle, 0, 2+len(m.Work))
-	add := func(class string, store beads.Store) {
-		if isNilStore(store) {
+	add := func(c classHandle) {
+		if c.isNil() {
 			return
 		}
 		for _, existing := range out {
-			if sameHandle(existing.store, store) {
+			if existing.sameAs(c) {
 				return
 			}
 		}
-		out = append(out, classHandle{class: class, store: store})
+		out = append(out, c)
 	}
-	add("convoy", m.Convoy)
+	add(workHandle("convoy", m.Convoy))
 	for i, w := range m.Work {
 		class := coordclass.ClassWork.String()
 		if len(m.Work) > 1 {
 			class = fmt.Sprintf("%s[%d]", class, i)
 		}
-		add(class, w)
+		add(workHandle(class, w))
 	}
-	add(coordclass.ClassGraph.String(), m.Graph)
+	add(graphHandle(coordclass.ClassGraph.String(), m.Graph))
 	return out
+}
+
+// prefixOwner is the first of cands whose store mints id's prefix
+// (storeref.PrefixOwner's rule, asked through the handles).
+func prefixOwner(id string, cands []classHandle) (classHandle, bool) {
+	for _, c := range cands {
+		if pfx, ok := c.idPrefix(); ok && pfx != "" && strings.HasPrefix(id, pfx+"-") {
+			return c, true
+		}
+	}
+	return classHandle{}, false
 }
 
 // resolveMember returns the bead and the class handle that owns it, applying
@@ -152,27 +218,17 @@ func (m MemberClasses) resolveMember(id string) (beads.Bead, classHandle, error)
 
 	// Recorded ownership first: a store that mints id's prefix owns it, so no
 	// probe of the other classes is needed and no second residence is possible.
-	stores := make([]beads.Store, 0, len(cands))
-	for _, c := range cands {
-		stores = append(stores, c.store)
-	}
-	if owner := storeref.PrefixOwner(id, stores); owner != nil {
-		for _, c := range cands {
-			if !sameHandle(c.store, owner) {
-				continue
-			}
-			got, err := owner.Get(id)
-			if err == nil {
-				return got, c, nil
-			}
-			if !errors.Is(err, beads.ErrNotFound) {
-				return beads.Bead{}, classHandle{}, classReadError(c, id, err)
-			}
-			// A prefix owner that reports the bead absent means a partial
-			// migration or a foreign id shape; fall through to the full
-			// named-class probe rather than reducing correctness.
-			break
+	if c, ok := prefixOwner(id, cands); ok {
+		got, err := c.get(id)
+		if err == nil {
+			return got, c, nil
 		}
+		if !errors.Is(err, beads.ErrNotFound) {
+			return beads.Bead{}, classHandle{}, classReadError(c, id, err)
+		}
+		// A prefix owner that reports the bead absent means a partial
+		// migration or a foreign id shape; fall through to the full
+		// named-class probe rather than reducing correctness.
 	}
 
 	var (
@@ -182,7 +238,7 @@ func (m MemberClasses) resolveMember(id string) (beads.Bead, classHandle, error)
 		duplicates []string
 	)
 	for _, c := range cands {
-		got, err := c.store.Get(id)
+		got, err := c.get(id)
 		if err != nil {
 			if errors.Is(err, beads.ErrNotFound) {
 				continue
@@ -220,36 +276,4 @@ func classNames(cands []classHandle) []string {
 		names = append(names, c.class)
 	}
 	return names
-}
-
-// isNilStore reports whether a handle is unnamed. A typed nil pointer in a
-// beads.Store interface is a NON-nil interface value that panics on first use,
-// so the nil check has to look through the interface.
-func isNilStore(s beads.Store) bool {
-	if s == nil {
-		return true
-	}
-	v := reflect.ValueOf(s)
-	switch v.Kind() {
-	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Func, reflect.Chan, reflect.Interface:
-		return v.IsNil()
-	default:
-		return false
-	}
-}
-
-// sameHandle reports whether two named handles are the same physical store.
-// Interface comparison panics when both hold the same non-comparable dynamic
-// type, so comparability is checked first; two handles that cannot be compared
-// are treated as distinct, which is the conservative answer (they are probed
-// separately and a genuine double-residence is reported rather than hidden).
-func sameHandle(a, b beads.Store) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	av, bv := reflect.ValueOf(a), reflect.ValueOf(b)
-	if av.Type() != bv.Type() || !av.Comparable() || !bv.Comparable() {
-		return false
-	}
-	return a == b
 }

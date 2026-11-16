@@ -69,8 +69,11 @@ type deadPeek struct {
 // agent's to classify: it reads empty, and the recycle removes it by exact
 // object as before (the #7762 review). A zombie's never does: its live pane
 // may be an operator's, which KillZombieObject would kill, so the peek
-// refuses. The screen counts only when a fresh read after the capture, taken
-// at the wall clock (so no snapshot from before the capture answers it),
+// refuses. An exec script's "no screen" (its `peek` exit 66) reads as an
+// empty screen, so it recycles alike; any other peek failure refuses
+// (causePeekError), so the recycle holds rather than relaunch over a screen
+// it could not read. The screen counts only when a fresh read after the
+// capture, taken at the wall clock (so no snapshot from before the capture answers it),
 // still finds the session object the classification read, its id and its
 // created time (tmux reuses ids after a server restart); otherwise the peek
 // refuses (errPeekObjectMoved).

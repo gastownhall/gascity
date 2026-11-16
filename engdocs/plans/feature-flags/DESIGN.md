@@ -1529,6 +1529,8 @@ func (s *BdStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool
 
 Exhaustion is **not** `PreconditionFailedError` and not `(false, nil)`: the value never mismatched, so telling the caller "you lost" would strand reservations (the C6 self-win contract depends on the distinction). Consumers treat exhaustion as a transient — back off and re-enter through the level-triggered pass.
 
+> **2026-10-17:** the `ReleaseIfCurrent` SQL template and its `releaseIfCurrentViaEmbeddedDoltSQL` fallback cited below were deleted when gc's minimum bd moved to 1.3.0; `ReleaseIfCurrent` now runs bd's `--if-assignee`/`--if-status` verb, so this sidestep has no SQL template left to reuse.
+
 **Sidestep under evaluation (stage-2 spike, decided before C4/C6 land):** implement BdStore value-CAS as a single conditional SQL `UPDATE` — the `ReleaseIfCurrent` template at bdstore.go:1097, including its `releaseIfCurrentViaEmbeddedDoltSQL` fallback — with a JSON-path predicate on the metadata column. This eliminates cross-key interference entirely (the predicate tests the *value*, not the revision) at zero subprocess-retry cost. Disqualifier the spike must clear: the raw SQL path bypasses bd's write layer, so the same `UPDATE` must also bump the revision column itself (`revision = revision + 1`) or it breaks the revision contract for every other conditional writer; if bd's schema or the embedded fallback can't guarantee that atomically, the emulation loop remains the shipping implementation and the SQL path is dropped, not half-adopted.
 
 ### 8.5 CachingStore: forward, and evict — never patch

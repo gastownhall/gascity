@@ -28,6 +28,7 @@ func TestDecideRowStartGates(t *testing.T) {
 		desired  desire
 		meta     []string
 		episode  time.Time // the startup-health episode's quarantine end
+		backoff  time.Time // the startup-health episode's retry backoff end
 		health   map[string]bool
 		want     string
 		wantKind string
@@ -40,6 +41,9 @@ func TestDecideRowStartGates(t *testing.T) {
 		{name: "an expired quarantine heals in the start's CAS", liveness: livenessGone, desired: desireWake, meta: []string{"quarantined_until", woke}, want: decideStart, wantKind: intentStart},
 		{name: "SESS-607 the startup-health episode (#46)", liveness: livenessGone, desired: desireWake, episode: soon, want: decideStartEpisode, next: soon},
 		{name: "an expired episode starts", liveness: livenessGone, desired: desireWake, episode: gatherNow.Add(-time.Second), want: decideStart, wantKind: intentStart},
+		{name: "a pending backoff-only episode holds the start", liveness: livenessGone, desired: desireWake, backoff: soon, want: decideStartEpisode, next: soon},
+		{name: "an expired backoff-only episode starts", liveness: livenessGone, desired: desireWake, backoff: gatherNow.Add(-time.Second), want: decideStart, wantKind: intentStart},
+		{name: "a backoff later than the episode quarantine holds to the backoff", liveness: livenessGone, desired: desireWake, episode: soon, backoff: soon.Add(time.Hour), want: decideStartEpisode, next: soon.Add(time.Hour)},
 		{name: "SESS-610 a red provider", liveness: livenessGone, desired: desireWake, health: map[string]bool{"claude": false}, want: decideStartProviderRed},
 		{name: "GUAR-034 unknown health fails open", liveness: livenessGone, desired: desireWake, health: map[string]bool{}, want: decideStart, wantKind: intentStart},
 		{name: "a green provider starts", liveness: livenessGone, desired: desireWake, health: map[string]bool{"claude": true}, want: decideStart, wantKind: intentStart},
@@ -55,8 +59,8 @@ func TestDecideRowStartGates(t *testing.T) {
 			e := c.a.Snapshot.Entries[c.k]
 			e.Endpoint = "provider:claude"
 			info := c.w.Census.Rows[c.k].Info
-			if !tc.episode.IsZero() {
-				c.w.Episodes = map[string]session.StartupHealthEpisode{startupHealthEpisodeKey(info, "s-heal"): {QuarantinedUntil: tc.episode}}
+			if !tc.episode.IsZero() || !tc.backoff.IsZero() {
+				c.w.Episodes = map[string]session.StartupHealthEpisode{startupHealthEpisodeKey(info, "s-heal"): {QuarantinedUntil: tc.episode, BackoffUntil: tc.backoff}}
 			}
 			if tc.health != nil {
 				c.w.ProviderHealth = &providerHealthSnapshot{present: true, entries: tc.health}

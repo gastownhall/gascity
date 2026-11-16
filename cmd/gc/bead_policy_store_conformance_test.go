@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -34,6 +35,63 @@ func (s *recordingPolicyReadStore) ReadyContext(ctx context.Context, query ...be
 		return nil, err
 	}
 	return s.Ready(query...)
+}
+
+// recordingCachingStore records the queries the policy wrapper forwards to a
+// CachingStore, keeping the cache's own List behavior.
+type recordingCachingStore struct {
+	*beads.CachingStore
+	listQueries []beads.ListQuery
+}
+
+func (s *recordingCachingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.listQueries = append(s.listQueries, query)
+	return s.CachingStore.List(query)
+}
+
+// TestBeadPolicyStoreListByLabelIsNewestFirst: like every unwrapped
+// ListByLabel, the policy wrapper's returns newest-first, so a limit keeps the
+// newest beads rather than an arbitrary slice of the cache's map.
+func TestBeadPolicyStoreListByLabelIsNewestFirst(t *testing.T) {
+	backing := beads.NewMemStore()
+	var created []string
+	for i := range 3 {
+		b, err := backing.Create(beads.Bead{Title: fmt.Sprintf("bead-%d", i), Labels: []string{"scope"}})
+		if err != nil {
+			t.Fatalf("seed bead-%d: %v", i, err)
+		}
+		created = append(created, b.ID)
+	}
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime(): %v", err)
+	}
+	recorder := &recordingCachingStore{CachingStore: cache}
+	store := wrapStoreWithBeadPolicies(recorder, &config.City{})
+	newestFirst := []string{created[2], created[1], created[0]}
+
+	all, err := store.ListByLabel("scope", 0)
+	if err != nil {
+		t.Fatalf("ListByLabel(scope, 0): %v", err)
+	}
+	if got := beadIDs(all); !slices.Equal(got, newestFirst) {
+		t.Errorf("ListByLabel(scope, 0) IDs = %v, want newest-first %v", got, newestFirst)
+	}
+	newest, err := store.ListByLabel("scope", 1)
+	if err != nil {
+		t.Fatalf("ListByLabel(scope, 1): %v", err)
+	}
+	if got := beadIDs(newest); !slices.Equal(got, newestFirst[:1]) {
+		t.Errorf("ListByLabel(scope, 1) IDs = %v, want only the newest %v", got, newestFirst[:1])
+	}
+	if len(recorder.listQueries) == 0 {
+		t.Fatal("wrapper forwarded no List query")
+	}
+	for i, q := range recorder.listQueries {
+		if q.Sort != beads.SortCreatedDesc {
+			t.Errorf("forwarded query[%d].Sort = %q, want SortCreatedDesc", i, q.Sort)
+		}
+	}
 }
 
 func TestBeadPolicyStoreReadHelperTierConformance(t *testing.T) {
@@ -105,8 +163,8 @@ func TestBeadPolicyStoreReadHelperTierConformance(t *testing.T) {
 				return err
 			},
 			want: func(q beads.ListQuery) error {
-				if q.Label != "scope" || q.Limit != 7 || q.TierMode != beads.TierBoth {
-					return fmt.Errorf("query = %#v, want label scope, limit 7, and TierBoth", q)
+				if q.Label != "scope" || q.Limit != 7 || q.Sort != beads.SortCreatedDesc || q.TierMode != beads.TierBoth {
+					return fmt.Errorf("query = %#v, want label scope, limit 7, created desc, and TierBoth", q)
 				}
 				return nil
 			},

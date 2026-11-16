@@ -234,6 +234,7 @@ func TestManagedDoltRecoverFields(t *testing.T) {
 		"had_pid\ttrue",
 		"forced\tfalse",
 		"ready\ttrue",
+		"ready_inconclusive\tfalse",
 		"pid\t9876",
 		"port\t3311",
 		"healthy\ttrue",
@@ -659,7 +660,7 @@ func TestRecoverManagedDolt_SkipsRestartWhenProbeHealthy(t *testing.T) {
 	})
 
 	managedDoltQueryProbeDirectFn = func(_, _, _ string) error { return nil }
-	managedDoltReadOnlyStateDirectFn = func(_, _, _ string) (string, error) { return "false", nil }
+	managedDoltReadOnlyStateDirectFn = func(_, _, _, _ string) (string, error) { return "false", nil }
 	managedDoltConnectionCountDirectFn = func(_, _, _ string) (string, error) { return "5", nil }
 
 	report, err := recoverManagedDoltProcess(cityPath, "127.0.0.1", "3306", "root", "warning", 10*time.Second)
@@ -704,7 +705,7 @@ func TestRecoverManagedDolt_ProceedsWhenReadOnly(t *testing.T) {
 	})
 
 	managedDoltQueryProbeDirectFn = func(_, _, _ string) error { return nil }
-	managedDoltReadOnlyStateDirectFn = func(_, _, _ string) (string, error) { return "true", nil }
+	managedDoltReadOnlyStateDirectFn = func(_, _, _, _ string) (string, error) { return "true", nil }
 	managedDoltConnectionCountDirectFn = func(_, _, _ string) (string, error) { return "5", nil }
 	managedDoltPreflightCleanupFn = func(_ string) error {
 		return fmt.Errorf("stop: expected — no real dolt process")
@@ -764,7 +765,7 @@ func TestRecoverManagedDolt_ProceedsWhenReadOnlyUnknown(t *testing.T) {
 	})
 
 	managedDoltQueryProbeDirectFn = func(_, _, _ string) error { return nil }
-	managedDoltReadOnlyStateDirectFn = func(_, _, _ string) (string, error) {
+	managedDoltReadOnlyStateDirectFn = func(_, _, _, _ string) (string, error) {
 		return "unknown", errManagedDoltNoUserDatabase
 	}
 	managedDoltConnectionCountDirectFn = func(_, _, _ string) (string, error) { return "5", nil }
@@ -797,7 +798,7 @@ func TestRecoverManagedDolt_ProceedsWhenHealthCheckErrors(t *testing.T) {
 	})
 
 	managedDoltQueryProbeDirectFn = func(_, _, _ string) error { return nil }
-	managedDoltReadOnlyStateDirectFn = func(_, _, _ string) (string, error) {
+	managedDoltReadOnlyStateDirectFn = func(_, _, _, _ string) (string, error) {
 		return "", fmt.Errorf("broken pipe")
 	}
 	managedDoltPreflightCleanupFn = func(_ string) error {

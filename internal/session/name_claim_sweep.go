@@ -28,8 +28,8 @@ import (
 // named-session runtime name AND the bead is recognized as that configured named
 // session — by the boolean flag, the recorded identity, or a legacy
 // alias/agent_name/template signal that resolves to the configured identity.
-func ReleaseStaleConfiguredNameClaims(store beads.Store, cfg *config.City, cityName string) (int, error) {
-	if store == nil || cfg == nil {
+func ReleaseStaleConfiguredNameClaims(store beads.SessionStore, cfg *config.City, cityName string) (int, error) {
+	if store == (beads.SessionStore{}) || cfg == nil {
 		return 0, nil
 	}
 	cityName = strings.TrimSpace(cityName)

@@ -1,3 +1,11 @@
+//go:build unix
+
+// The server under test proves it is deaf to SIGTERM before the handshake
+// completes, and the assertions probe liveness with signal 0 and ESRCH.
+// Signals are the mechanism being tested, not an implementation detail of the
+// harness, so there is nothing to port: Windows stops a tree through its Job
+// Object instead, which internal/processgroup covers directly.
+
 package acp
 
 import (
@@ -105,14 +113,12 @@ func TestConfigStopGraceDefaultsToManagedProcessStopGrace(t *testing.T) {
 	}
 }
 
-func TestConfigStopSocketTimeoutOutlastsStopGrace(t *testing.T) {
+func TestConfigStopSocketTimeoutOutlastsStopGraceAndReapGrace(t *testing.T) {
 	for _, c := range []Config{{}, {StopGrace: testStopGrace}, {StopGrace: 30 * time.Second}} {
-		if got := c.stopSocketTimeout(); got <= c.stopGrace() {
-			t.Errorf("Config{StopGrace: %v}.stopSocketTimeout() = %v, want longer than the %v grace", c.StopGrace, got, c.stopGrace())
+		floor := c.stopGrace() + runtime.ManagedProcessReapGrace
+		if got := c.stopSocketTimeout(); got <= floor {
+			t.Errorf("Config{StopGrace: %v}.stopSocketTimeout() = %v, want longer than stop grace + reap grace = %v", c.StopGrace, got, floor)
 		}
-	}
-	if got := (&Config{}).stopSocketTimeout(); got != 7*time.Second {
-		t.Errorf("default stopSocketTimeout() = %v, want the historical 7s", got)
 	}
 }
 

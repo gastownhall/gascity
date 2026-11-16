@@ -1,0 +1,48 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+# Runs the built nogo binary over fixture files written at test time, against
+# internal/beads' real export data: no nolint spelling or placement may
+# suppress storeclass (third_party/patches/rules_go_nogo_golangci_nolint.patch).
+go_test(
+    name = "nolinttest_test",
+    srcs = ["storeclass_nolint_test.go"],
+    args = [
+        "-nogo=$(rootpath //tools/nogo)",
+        "-beads_export=$(rootpath //internal/beads)",
+    ],
+    data = [
+        "//internal/beads",
+        "//tools/nogo",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

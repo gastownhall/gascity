@@ -6,7 +6,8 @@ type unavailableStore struct {
 	err error
 }
 
-func (s unavailableStore) Create(beads.Bead) (beads.Bead, error)             { return beads.Bead{}, s.err }
+func (s unavailableStore) Create(beads.Bead) (beads.Bead, error) { return beads.Bead{}, s.err }
+
 func (s unavailableStore) Get(string) (beads.Bead, error)                    { return beads.Bead{}, s.err }
 func (s unavailableStore) Update(string, beads.UpdateOpts) error             { return s.err }
 func (s unavailableStore) Close(string) error                                { return s.err }

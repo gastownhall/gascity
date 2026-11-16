@@ -131,8 +131,9 @@ func (s *sim) checkStarts() {
 // Current, or the own-runtime exception's StaleSelf with epoch =
 // generation), any corpse (the corpse exception) or the row's own zombie
 // (the start recycle's and the close's), or a pending create's bead-scoped
-// name (C8.2(a)), and never an attached one. The own-runtime exception to
-// I5 is D1b's to model with the effects it covers.
+// name (C8.2(a)) but for a live incarnation of the row's own session while
+// that session's work is in progress (#2081), and never an attached one. The
+// own-runtime exception to I5 is D1b's to model with the effects it covers.
 func (s *sim) checkDestructive() {
 	kills := s.sp.kills[min(s.killsChecked, len(s.sp.kills)):] // each judged once, on the rows before its step
 	s.killsChecked = len(s.sp.kills)
@@ -154,6 +155,11 @@ func (s *sim) checkDestructive() {
 		case k.Method == "KillZombieObject" && k.Hit.zombie && k.Hit.id != "" && k.Hit.id == s.rowNamedEver(k.Name).ID:
 			// The row's own zombie: the start recycle's and the close's, the
 			// row closed meanwhile included (its zombie stays its own).
+		case workingIncarnation(s.prev, row, k.Hit):
+			// #2081: the rollback holds over a live incarnation of the row's
+			// own session while that session's work is in progress, whatever
+			// name it runs under.
+			s.failf("I4 I-fence", "v2 %s on %s hit %s/%s/%s, a live incarnation of row %s's session whose work is in progress", k.Method, k.Name, k.Hit.id, k.Hit.epoch, k.Hit.token, row.ID)
 		case k.Method == "Stop" && row.Metadata["pending_create_claim"] == "true" && ownsName(sessionInfoFromBead(row), k.Name) && (!closed || own || k.Effect == intentRollback):
 			// C8.2(a): a pending create's rollback stops its bead-scoped name
 			// whoever runs under it (C3, S1's Foreign row), as legacy does;
@@ -258,7 +264,7 @@ func (s *sim) checkWrite(w simWrite) {
 			}
 		}
 	}
-	if k := dormantChange(w.Before, a, w.At, s.stable[w.After.ID]); k != "" && (!closes || !closeEndsSuspend(w.Before, k, w.At)) && (!closes || !pendingCreateRollback(w)) && !pendingCreateScreenPark(w, s.stable[w.After.ID]) && !pendingCreateAdopt(w, k) && !s.quarantinedCommit(id, w, k) {
+	if k := dormantChange(w.Before, a, w.At, s.stable[w.After.ID]); k != "" && (!closes || !closeEndsSuspend(w.Before, k, w.At)) && (!closes || !pendingCreateRollback(w)) && !pendingCreateScreenPark(w, s.stable[w.After.ID]) && !pendingCreateAdopt(w, k) && !s.quarantinedCommit(id, w, k) && !namedReopen(w) {
 		s.failf("I15 I-STOP-3/4", "v2 rewrote %s %q -> %q on %s, which an operator holds dormant at %s", k, b[k], a[k], id, w.At.Format(time.RFC3339))
 	}
 	terminal := (w.After.Status == "closed" && w.Before.Status != "closed") ||
@@ -398,12 +404,21 @@ func premiseMovedKeys(err error) []string {
 	return strings.Split(list, ", ")
 }
 
+// unknownState reports b in a state A5 holds (the census's UnknownState:
+// one main does not know, but drain-ack stop-pending), on which no arm may
+// drain it (CONTRACT v5.10i; seed 437 of the floored-pending corpus).
+func (s *sim) unknownState(b beads.Bead) bool {
+	info := sessionInfoFromBead(b)
+	return !isKnownStateInfo(info) && !isDrainAckStopPendingInfo(info)
+}
+
 // checkQuarantinedCommits is I15's bound on §12.2 #57: a row whose commit
 // kept a late quarantine is, within quarantineDrainBound of v2's own time,
 // closed, stopped, asked to stop (A20's begin; A4 stops it), out of its
 // quarantine, or kept by its assigned work, as legacy's assigned-work lens
 // keeps it (DRAIN-046). The bound pauses while the row's liveness reads
-// unknown (A9 holds every arm, GUAR-053) and restarts at an outside write
+// unknown (A9 holds every arm, GUAR-053) or its state is one A5 holds
+// (v5.10i), and restarts at an outside write
 // that moves its incarnation or drain basis, or that refuses the row's own
 // pending effect on its premise (checkPremiseRefusal), whose refusal and
 // backoff are not v2's delay (CONTRACT v5.9x).
@@ -420,7 +435,7 @@ func (s *sim) checkQuarantinedCommits() {
 		switch {
 		case s.basisMovedOutside(leg, b.ID, c.moves), slices.Contains(s.premiseRefusals[min(c.refusals, len(s.premiseRefusals)):], leg+"/"+b.ID):
 			c.start, c.moves, c.refusals = now, len(s.basisMoves), len(s.premiseRefusals)
-		case obs == nil || obs[rowKey{Leg: rowLeg, ID: b.ID}].Liveness == livenessUnknown:
+		case obs == nil || obs[rowKey{Leg: rowLeg, ID: b.ID}].Liveness == livenessUnknown, s.unknownState(b):
 			c.start = c.start.Add(now.Sub(c.checked))
 		}
 		c.checked = now
@@ -470,6 +485,16 @@ var suspendKey = map[string]bool{"state": true, "suspended_at": true}
 // closeEndsSuspend reports whether a close may change k on b at t: k is a
 // suspend's key and no deliberate hold is in force or unreadable (§12.2 #27).
 // A held suspended row is never closed.
+// namedReopen reports w a configured named session's reopen of its closed
+// row (v5 C2, AM-N2): a fresh spawn on the row, which retires the closed
+// row's holds (its suspend, hold, quarantine and their reasons) as legacy's
+// reopenNamedSessionBatch does (the disposition's Retire cell and
+// ClearWakeBlockersPatch), so no dormant key it moves is an operator's
+// (ruling on the creates generator's seeds 250, 783 and 1001, mc-i7efm).
+func namedReopen(w simWrite) bool {
+	return w.Before.Status == "closed" && w.After.Status != "closed" && w.Before.Metadata["configured_named_session"] == "true"
+}
+
 func closeEndsSuspend(b beads.Bead, k string, t time.Time) bool {
 	return suspendKey[k] && !session.DecodeDisposition(b.Metadata).HoldsDeliberately(t)
 }
@@ -663,6 +688,9 @@ func (s *sim) checkFinalized(e *simEffect) func(settlement) {
 		b, err := l.backing.Get(e.it.Key.ID)
 		if res.Cause == causePremise && (s.basisMovedOutside(l.name, e.it.Key.ID, window) || s.stopBasisMovedSinceRead(l.name, e.it.Key)) {
 			return
+		}
+		if res.Cause == causeDeadline {
+			return // abandoned at its deadline, the stop confirmed nothing; I17's bound holds the row (ruling on seed 222 of the floored-pending corpus, mc-i7efm)
 		}
 		if res.Cause == fenceLivenessUnknown && s.probeErring(b) {
 			return // an erroring probe proves no absence (O3), as I17 rules it not stoppable (v5.9n; seed 606 of the floored-pending corpus)

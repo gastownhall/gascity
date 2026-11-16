@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -14,7 +15,7 @@ import (
 // same terms as the invariant under test: one live root per tracked bead.
 func liveTrackingRoots(t *testing.T, store beads.Store, itemID string) []beads.Bead {
 	t.Helper()
-	convoys, err := convoycore.TrackingConvoysForItem(store, itemID)
+	convoys, err := convoycore.TrackingConvoysForItem(beadstest.Work(store), itemID)
 	if err != nil {
 		t.Fatalf("TrackingConvoysForItem(%s): %v", itemID, err)
 	}
@@ -51,7 +52,7 @@ func trackNewConvoyTitled(t *testing.T, store beads.Store, itemID, title string,
 	if err != nil {
 		t.Fatalf("creating convoy %q tracking %s: %v", title, itemID, err)
 	}
-	if err := convoycore.TrackItem(store, c.ID, itemID); err != nil {
+	if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beadstest.Work(store)}, c.ID, itemID); err != nil {
 		t.Fatalf("tracking %s from convoy %s: %v", itemID, c.ID, err)
 	}
 	return c

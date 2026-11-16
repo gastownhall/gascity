@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/acp"
@@ -49,7 +50,7 @@ func TestACPCaptureComposesWithTranscriptDiscovery(t *testing.T) {
 		OutputBufferLines: 100,
 		TranscriptRoot:    citylayout.ACPTranscriptsDir(city),
 	})
-	mgr := NewManagerWithOptions(beads.NewMemStore(), sp, WithCityPath(city))
+	mgr := NewManagerWithOptions(beadstest.Sessions(beads.NewMemStore()), sp, WithCityPath(city))
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{
 		Template:  "helper",
 		Command:   composeFakeACPAgent,

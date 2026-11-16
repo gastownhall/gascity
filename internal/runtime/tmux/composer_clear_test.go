@@ -364,8 +364,7 @@ func (f *fakeClaudePane) execute(args []string) (string, error) {
 		}
 		return strings.TrimSpace(strings.Join(f.renderStyled(slices.Contains(args, "-e")), "\n")), nil
 	case "send-keys":
-		f.sendKeys(args[1:])
-		return "", nil
+		return "", f.sendKeys(args[1:])
 	default:
 		return "", nil
 	}
@@ -375,7 +374,7 @@ func (f *fakeClaudePane) executeCtx(_ context.Context, args []string) (string, e
 	return f.execute(args)
 }
 
-func (f *fakeClaudePane) sendKeys(args []string) {
+func (f *fakeClaudePane) sendKeys(args []string) error {
 	literal := false
 	var keys []string
 	for i := 0; i < len(args); i++ {
@@ -383,14 +382,20 @@ func (f *fakeClaudePane) sendKeys(args []string) {
 		case "-t":
 			i++
 		case "-l":
-			literal = true
+			// Everything after -l is text, read as tmux reads it.
+			text, err := runtime.TmuxLiteralText(args[i+1:])
+			if err != nil {
+				return err
+			}
+			literal, keys = true, []string{text}
+			i = len(args)
 		default:
 			keys = append(keys, args[i])
 		}
 	}
 	if f.promptShown {
 		f.promptKeys = append(f.promptKeys, keys...)
-		return
+		return nil
 	}
 	if literal {
 		if f.prompt != "" && f.promptAfterPaste {
@@ -404,7 +409,7 @@ func (f *fakeClaudePane) sendKeys(args []string) {
 		c := f.cur()
 		f.draft = f.draft[:c] + text + f.draft[c:]
 		f.setCursor(c + len(text))
-		return
+		return nil
 	}
 	for _, key := range keys {
 		f.keys = append(f.keys, key)
@@ -428,6 +433,14 @@ func (f *fakeClaudePane) sendKeys(args []string) {
 			}
 		}
 	}
+	return nil
+}
+
+// state returns the messages Enter submitted and the current draft.
+func (f *fakeClaudePane) state() (submitted []string, draft string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.submitted), f.draft
 }
 
 func (f *fakeClaudePane) keyCount(key string) int {
@@ -533,10 +546,10 @@ func TestNudgeSessionLeavesAttachedClaudeDraftAlone(t *testing.T) {
 // draft: the human now at the pane may be typing (#5192).
 func TestNudgeSessionStopsClearingWhenClientAttachesMidClear(t *testing.T) {
 	pane := newFakeClaudePane(claudeRestoredDraft)
-	// Capture 4 is the redraw read after the first Ctrl-U Ctrl-K: the nudge
+	// Capture 5 is the redraw read after the first Ctrl-U Ctrl-K: the nudge
 	// looks for a permission prompt (1) and a dialog (2), then the clear reads
-	// the input box (3) and presses.
-	pane.attachOnCapture = 4
+	// the input box (3), looks for a prompt again (4) and presses.
+	pane.attachOnCapture = 5
 	tm := newFakeClaudeTmux(pane)
 
 	err := tm.NudgeSession(pane.sessionName, "nudge")

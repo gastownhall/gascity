@@ -147,10 +147,22 @@ func TestResolvedProviderCached_DeepCopyIsolatesMutations(t *testing.T) {
 				Args:          []string{"run", "codex"},
 				ResumeCommand: "aimux run codex -- resume {{.SessionKey}}",
 			},
+			"opencode-local": {
+				Base: basePtr("builtin:opencode"),
+				Args: []string{"-m", "acme/model-x"},
+			},
 		},
 	}
 	if err := BuildResolvedProviderCache(cfg); err != nil {
 		t.Fatalf("build: %v", err)
+	}
+	wrapper, _ := ResolvedProviderCached(cfg, "opencode-local")
+	if len(wrapper.ACPOmittedArgs) == 0 {
+		t.Fatalf("opencode-local ACPOmittedArgs is empty; the cache must record the args its ACP launch omits")
+	}
+	wrapper.ACPOmittedArgs[0] = "MUTATED"
+	if again, _ := ResolvedProviderCached(cfg, "opencode-local"); again.ACPOmittedArgs[0] == "MUTATED" {
+		t.Errorf("mutation of ACPOmittedArgs leaked back into cache: %v", again.ACPOmittedArgs)
 	}
 	first, _ := ResolvedProviderCached(cfg, "codex-max")
 	// Mutate the returned copy.

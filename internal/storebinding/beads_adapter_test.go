@@ -280,6 +280,7 @@ func TestBeadsOrdersAdapterBindGraphUsesSelectedSplitGraph(t *testing.T) {
 func TestBeadsOrdersAdapterConsumesPartialGraphRows(t *testing.T) {
 	partial := partialGraph{items: []beads.Bead{{
 		ID:        "partial",
+		Type:      "molecule", // a run's root: only a run record counts (the #7766 review)
 		CreatedAt: time.Now(),
 		Labels:    []string{"order-run:partial", "seq:7"},
 	}}, err: errors.New("partial graph read")}
@@ -436,5 +437,23 @@ func TestBeadsGraphAdapterClaimForwardsToAClaimCapableStore(t *testing.T) {
 	}
 	if leaf.claimCalls != 1 {
 		t.Fatalf("backing Claim calls = %d, want 1", leaf.claimCalls)
+	}
+}
+
+// TestBeadsOrdersAdapterIgnoresAForgedGraphRunLabel (the #7766 review): a
+// plain bead on the graph leg carrying an order's run label, newer than the
+// order's real root, moves neither its LastRun nor its Cursor.
+func TestBeadsOrdersAdapterIgnoresAForgedGraphRunLabel(t *testing.T) {
+	t0 := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	graph := beads.NewMemStoreFrom(2, []beads.Bead{
+		{ID: "root", Type: "molecule", Status: "closed", CreatedAt: t0, Labels: []string{"order-run:digest", "seq:3"}},
+		{ID: "forged", Type: "task", Status: "open", CreatedAt: t0.Add(time.Hour), Labels: []string{"order-run:digest", "seq:999"}},
+	}, nil)
+	adapter := newBeadsOrdersAdapter(beads.OrdersStore{Store: beads.NewMemStore()}, &beadsGraphAdapter{store: graph})
+	if got := adapter.Cursor("digest"); got != 3 {
+		t.Fatalf("Cursor() = %d, want the root's 3", got)
+	}
+	if got, err := adapter.LastRun("digest"); err != nil || !got.Equal(t0) {
+		t.Fatalf("LastRun() = %v, %v; want the root's %v", got, err, t0)
 	}
 }

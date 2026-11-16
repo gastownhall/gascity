@@ -49,6 +49,13 @@ var contractAsyncCases = []contractAsyncCase{
 		},
 	},
 	{
+		operationID: "submit-session",
+		terminal:    "replay: a same-key retry answers the first request's request_id and event_cursor, and request.result.session.submit for that request_id follows the cursor; the runtime received the text once",
+		run: func(t *testing.T, h *contractHarness) {
+			h.submitReplayAndExpectOneDelivery(t, h.createAgentSession(t, "async submit replay"))
+		},
+	},
+	{
 		operationID: "send-session-message",
 		terminal:    "request.result.session.message for the request_id; the runtime received the message text",
 		run: func(t *testing.T, h *contractHarness) {
@@ -160,6 +167,41 @@ func contractAsyncFamily(t *testing.T, h *contractHarness) {
 	}
 }
 
+// submitReplayAndExpectOneDelivery drives submit-session twice under one
+// Idempotency-Key. The retry is answered as the first request by the
+// Idempotency-Key LRU, so a waiter on either answer sees the one terminal
+// event, and nothing is delivered twice. It exercises the LRU only: the
+// harness's file bead store has no id prefix, so an ops.content gate would
+// run unrecorded here (no_namespace); the op-row replay across a restart is
+// covered over a real Server in internal/api
+// (TestClientSubmitSessionWithKeyReplaysAcrossARestart).
+func (h *contractHarness) submitReplayAndExpectOneDelivery(t *testing.T, sess genclient.SessionResponse) {
+	t.Helper()
+	const text = "contract submit replay"
+	params := &genclient.SubmitSessionParams{XGCRequest: contractCSRF, IdempotencyKey: ptr("contract-replay-key")}
+	var accepted []contractAccepted
+	for range 2 {
+		resp, err := h.client.SubmitSessionWithResponse(h.ctx, contractCityName, sess.Id, params,
+			genclient.SubmitSessionJSONRequestBody{Message: text})
+		expectStatus(t, "submit session (keyed)", resp, err, http.StatusAccepted)
+		acc := mustJSON(t, "submit session (keyed)", resp.JSON202, resp)
+		accepted = append(accepted, contractAccepted{RequestID: acc.RequestId, EventCursor: acc.EventCursor})
+	}
+	if accepted[1] != accepted[0] {
+		t.Fatalf("replay answered %+v, want the first answer %+v", accepted[1], accepted[0])
+	}
+	h.awaitSuccess(t, accepted[1], events.RequestResultSessionSubmit)
+	n := 0
+	for _, call := range h.sp.SnapshotCalls() {
+		if call.Name == sess.SessionName && strings.Contains(call.Message, text) {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("runtime received %q %d times, want once", text, n)
+	}
+}
+
 func (h *contractHarness) raisePending(t *testing.T, sess genclient.SessionResponse) {
 	t.Helper()
 	h.sp.SetPendingInteraction(sess.SessionName, &runtimePendingApproval)
@@ -205,7 +247,7 @@ func contractAsyncRigCreate(t *testing.T, h *contractHarness) {
 		genclient.CreateRigJSONRequestBody{Name: "gamma", GitUrl: ptr(contractCloneURL), Prefix: ptr("gm"), DefaultBranch: ptr("main"), RequestId: ptr(requestID)})
 	expectStatus(t, "create rig (git_url)", resp, err, http.StatusAccepted)
 	body := mustJSON(t, "create rig (git_url)", resp.JSON202, resp)
-	if body.Status != genclient.Accepted || body.RequestId == nil || *body.RequestId != requestID || body.EventCursor == nil {
+	if body.Status != genclient.RigCreateResponseBodyStatusAccepted || body.RequestId == nil || *body.RequestId != requestID || body.EventCursor == nil {
 		t.Fatalf("202 rig create body = %s", contractBody(resp))
 	}
 	acc := contractAccepted{RequestID: *body.RequestId, EventCursor: *body.EventCursor}

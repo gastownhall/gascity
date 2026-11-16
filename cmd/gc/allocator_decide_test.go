@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // allocNow is the decide tests' one clock.
@@ -1051,7 +1052,7 @@ func TestAllocator_EntryTemplateResolvesLegacyRows(t *testing.T) {
 	in := f.inputs()
 	p := newDecidePass(in)
 	p.prepare()
-	p.markTemplate("worker", true, "pool-scale-check-partial")
+	p.markTemplate("worker", true, causeScaleCheckPartial)
 	d := p.finish()
 	if e := entryOf(t, d, "gc-2"); e.Template != "worker" || e.Desired != desireKeep {
 		t.Fatalf("legacy-template row = template %q %s/%s, want worker, retained", e.Template, e.Desired, e.Reason)
@@ -1177,6 +1178,37 @@ func TestAllocator_HonoredExplicitWakeIsNeverDrained(t *testing.T) {
 	}
 }
 
+// Kills a resume: true that consumes an operator's suspend on a pool row
+// without recording its wake (session.Store.ResumeHeld, SESSION-START-022):
+// the suspend alone kept the row, so a pass that read it before the lane
+// host's own wake request landed drained it as orphaned and A21 closed it,
+// failing the message it was resumed for. The resumed row's explicit wake is
+// honored, and A21 proposes no close.
+func TestAllocator_ResumedPoolRowWakesAndIsNotClosed(t *testing.T) {
+	store := censusStore(poolRow("gc-1", "worker", 1, "asleep", "slept_at", ago(2*time.Hour)))
+	sessions := session.NewStore(beads.SessionStore{Store: store})
+	if _, err := sessions.OperatorSuspend("gc-1", allocNow.Add(-time.Hour)); err != nil {
+		t.Fatalf("OperatorSuspend: %v", err)
+	}
+	if err := sessions.ResumeHeld("gc-1", allocNow.Add(-time.Second), allocNow.Add(-time.Second)); err != nil {
+		t.Fatalf("ResumeHeld: %v", err)
+	}
+	resumed, err := store.Get("gc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := newAllocFixture(t, &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3)}}).sessions(resumed).inputs()
+	d := mustDecide(t, in)
+	e := entryOf(t, d, "gc-1")
+	if e.Desired != desireWake || !e.WakeHonored || e.DrainReason != "" {
+		t.Fatalf("resumed pool row = %s/%s honored %t drain %q, want its wake honored", e.Desired, e.Reason, e.WakeHonored, e.DrainReason)
+	}
+	w := &World{Now: allocNow, Census: in.Census, Mislabelled: map[rowKey]bool{}}
+	if it, _ := decideRow(w, &d, e.Key); it.Kind == intentClose {
+		t.Fatalf("A21 = %s on the resumed row, want no close", it.Reason)
+	}
+}
+
 // Kills: an honored wake that overruns max_active_sessions (v5.10n): with
 // the template at its max (rows woken or alive), the honored row is Keep,
 // never Wake and never Drain, and wakes once a slot frees.
@@ -1236,6 +1268,18 @@ func TestAllocator_HonoredExplicitWakeCountsEverySessionTowardMax(t *testing.T) 
 			t.Errorf("gc-3 = %s/%s honored %t, want keep beside gc-1 and a create in flight", e.Desired, e.Reason, e.WakeHonored)
 		}
 	})
+	t.Run("a named create the census already shows counts once", func(t *testing.T) {
+		// A named reopen keeps its row's own token: the in-flight create and
+		// its open row are one session, not two (#7807 review, mc-mhloj).
+		f := newAllocFixture(t, cfg).sessions(
+			poolRow("gc-1", "worker", 1, "active", "configured_named_session", "true", "configured_named_identity", "chat", "instance_token", "tok-row"),
+			poolRow("gc-3", "worker", 3, "asleep", honoredWakeMeta()...),
+		).alive("s-gc-1", InventoryAttrs{AttachedKnown: true})
+		f.in.InFlight = inflightView{Entries: []inflightEntry{{Kind: inflightCreate, Token: "tok-reopen", Template: "worker", Identity: createIdentity{QualifiedInstance: "chat", Named: true}.key()}}}
+		if e := entryOf(t, f.decide(), "gc-3"); e.Desired != desireWake {
+			t.Errorf("gc-3 = %s/%s, want wake: the named create is gc-1's own row, one of max_active_sessions 2", e.Desired, e.Reason)
+		}
+	})
 	t.Run("rows of unknown liveness", func(t *testing.T) {
 		d := newAllocFixture(t, cfg).sessions(
 			poolRow("gc-1", "worker", 1, "active"), poolRow("gc-2", "worker", 2, "active"),
@@ -1249,18 +1293,24 @@ func TestAllocator_HonoredExplicitWakeCountsEverySessionTowardMax(t *testing.T) 
 }
 
 // Kills a last slot given to a second honored row, or by map order (#7807
-// review): two honored rows compete for one slot; the lower key wakes and
-// the other keeps, every run.
+// review): honored rows compete for one slot; the lowest key wakes and every
+// other keeps. Twelve competitors make an unsorted map walk pick the lowest
+// with probability 1/12 a run, so 20 runs cannot pass by chance
+// ((1/12)^20), as two competitors could ((1/2)^20 was the k6 survivor).
 func TestAllocator_HonoredExplicitWakeLastSlotIsDeterministic(t *testing.T) {
+	const competitors = 12
 	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 2)}}
 	for i := range 20 {
-		d := newAllocFixture(t, cfg).sessions(
-			poolRow("gc-1", "worker", 1, "active"),
-			poolRow("gc-3", "worker", 3, "asleep", honoredWakeMeta()...),
-			poolRow("gc-4", "worker", 4, "asleep", honoredWakeMeta()...),
-		).alive("s-gc-1", InventoryAttrs{AttachedKnown: true}).decideSelecting("gc-1")
-		if a, b := entryOf(t, d, "gc-3").Desired, entryOf(t, d, "gc-4").Desired; a != desireWake || b != desireKeep {
-			t.Fatalf("run %d: gc-3 %s, gc-4 %s; want gc-3 wake, gc-4 keep", i, a, b)
+		rows := []beads.Bead{poolRow("gc-01", "worker", 1, "active")}
+		for c := range competitors {
+			rows = append(rows, poolRow(fmt.Sprintf("gc-%02d", 10+c), "worker", 10+c, "asleep", honoredWakeMeta()...))
+		}
+		d := newAllocFixture(t, cfg).sessions(rows...).alive("s-gc-01", InventoryAttrs{AttachedKnown: true}).decideSelecting("gc-01")
+		for c := range competitors {
+			id := fmt.Sprintf("gc-%02d", 10+c)
+			if want := map[bool]desire{true: desireWake, false: desireKeep}[c == 0]; entryOf(t, d, id).Desired != want {
+				t.Fatalf("run %d: %s %s, want %s (the lowest key, gc-10, takes the last slot)", i, id, entryOf(t, d, id).Desired, want)
+			}
 		}
 	}
 }

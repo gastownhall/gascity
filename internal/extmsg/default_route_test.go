@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 func defaultRouteTestMessage(ref ConversationRef) ExternalInboundMessage {
@@ -19,7 +20,7 @@ func defaultRouteTestMessage(ref ConversationRef) ExternalInboundMessage {
 func TestHandleInboundNormalizedDefaultRouteBindsConfiguredAgent(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := testConversationRef()
 
 	deps := InboundDeps{
@@ -70,7 +71,7 @@ func TestHandleInboundNormalizedDefaultRouteBindsConfiguredAgent(t *testing.T) {
 func TestHandleInboundNormalizedDefaultRouteAbsentPreservesUnbound(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := testConversationRef()
 
 	// No resolver wired (config absent) — unrouted, no binding created.
@@ -138,7 +139,7 @@ func TestHandleInboundNormalizedDefaultRouteSkipsGroupedConversation(t *testing.
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			store := beads.NewMemStore()
-			fabric := NewServices(store)
+			fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 			ref := testConversationRef()
 
 			group, err := fabric.Groups.EnsureGroup(context.Background(), testControllerCaller(), EnsureGroupInput{
@@ -193,7 +194,7 @@ func TestHandleInboundNormalizedDefaultRouteSkipsGroupedConversation(t *testing.
 func TestGroupServiceResolveInboundDistinguishesNoGroupFromNoMatch(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	svc := NewGroupService(store)
+	svc := NewGroupService(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := testConversationRef()
 
 	// No group for the conversation: the distinct "no group" outcome that makes
@@ -237,7 +238,7 @@ func TestGroupServiceResolveInboundDistinguishesNoGroupFromNoMatch(t *testing.T)
 func TestHandleInboundNormalizedDefaultRouteConflictAdoptsExistingBinding(t *testing.T) {
 	freezeTestClock(t)
 	store := beads.NewMemStore()
-	fabric := NewServices(store)
+	fabric := NewServices(beadstest.Mail(store), beadstest.Sessions(store))
 	ref := testConversationRef()
 
 	// The resolver simulates a concurrent racer: by the time the default

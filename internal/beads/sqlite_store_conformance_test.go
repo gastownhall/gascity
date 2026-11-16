@@ -208,3 +208,12 @@ func TestSQLiteStoreDeleteBatch(t *testing.T) {
 		t.Fatal("chunked batch left rows behind")
 	}
 }
+
+// TestSQLiteStoreGuardedBatchConformance runs the guarded-batch contract
+// against the SQLite store. The legacy and read-only layouts, which are not
+// discovered as batchers, are pinned in guarded_batch_test.go.
+func TestSQLiteStoreGuardedBatchConformance(t *testing.T) {
+	beadstest.RunGuardedBatchConformance(t, "SQLiteStore", func(t *testing.T) beads.Store {
+		return newSQLiteForConformance(t)
+	})
+}

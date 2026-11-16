@@ -48,6 +48,9 @@ func currentSessionRuntimeTarget() (sessionRuntimeTarget, error) {
 	if !ok {
 		return sessionRuntimeTarget{}, fmt.Errorf("not in session context (city context not set)")
 	}
+	if err := gateControlPlaneAt(cityPath); err != nil {
+		return sessionRuntimeTarget{}, err
+	}
 	return sessionRuntimeTarget{
 		cityPath:    cityPath,
 		display:     display,
@@ -66,8 +69,10 @@ func resolveSessionRuntimeTarget(identifier string, warningWriter ...io.Writer) 
 // resolveSessionRuntimeTargetInCity resolves identifier in the city at
 // cityPath with cfg. Unlike resolveSessionRuntimeTarget, a store that will not
 // open is returned as that failure, never as session.ErrSessionNotFound, so a
-// not-found error here means a store that opened has no such session.
-func resolveSessionRuntimeTargetInCity(cityPath string, cfg *config.City, identifier string) (sessionRuntimeTarget, error) {
+// not-found error here means a store that opened has no such session. stderr
+// receives the report of a configured named session the resolution
+// materialized for the reconciler to start; nil discards it.
+func resolveSessionRuntimeTargetInCity(cityPath string, cfg *config.City, identifier string, stderr io.Writer) (sessionRuntimeTarget, error) {
 	store, opened, err := openNudgeBeadStoreOwned(cityPath)
 	if err != nil {
 		return sessionRuntimeTarget{}, err
@@ -76,7 +81,7 @@ func resolveSessionRuntimeTargetInCity(cityPath string, cfg *config.City, identi
 	if store.Store == nil {
 		return sessionRuntimeTarget{}, fmt.Errorf("opening the city store at %q: no store", cityPath)
 	}
-	target, err := resolveNudgeTargetInStore(cityPath, cfg, store, identifier, false)
+	target, err := resolveNudgeTargetInStore(cityPath, cfg, store, identifier, false, stderr)
 	if err != nil {
 		return sessionRuntimeTarget{}, err
 	}

@@ -18,7 +18,7 @@
 # The sibling pack.toml owns the Gastown import. This city owns the default
 # rig binding used by `gc rig add`.
 #
-# To use: gc start examples/gastown/
+# To use: gc init --from examples/gastown ~/gastown-city
 # Requires rigs to be registered: gc rig add <path>
 
 [workspace]
@@ -31,7 +31,25 @@ base = "builtin:claude"
 
 [defaults.rig.imports.gastown]
 source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:33d3a430a67d1782ad364556cb566bdb01d0afe3"
+version = "sha:66897e7132c9d1160509ee47dd1b935bbd3b9664"
+
+# Storage classes (docs/runbooks/split-storage-classes.md): work stays in the
+# work ledger, and the five infrastructure classes live in one local SQLite
+# store under .gc/store, created on first start. This is the split gc init
+# writes for a new city. `gc init --from` copies it, except where gc init
+# would start a new city single-store (a bd a split city's gc bd refuses):
+# there the copy leaves it out and says why.
+[storage.classes]
+work = "work"
+graph = "infra"
+sessions = "infra"
+messaging = "infra"
+orders = "infra"
+nudges = "infra"
+
+[storage.bindings.infra]
+provider = "sqlite-beads"
+path = ".gc/store"
 
 [daemon]
 patrol_interval = "30s"

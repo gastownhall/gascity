@@ -1,0 +1,66 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "connect",
+    srcs = [
+        "bearer.go",
+        "bundle.go",
+        "descriptor.go",
+        "doc.go",
+        "refusal.go",
+        "tokenfile.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/connect",
+    visibility = ["//:__subpackages__"],
+    deps = ["@com_github_burntsushi_toml//:toml"],
+)
+
+go_test(
+    name = "connect_test",
+    srcs = [
+        "bearer_test.go",
+        "bundle_test.go",
+        "descriptor_test.go",
+        "refusal_test.go",
+        "storage_classes_test.go",
+        "testenv_import_test.go",
+        "tokenfile_test.go",
+    ],
+    data = glob(["testdata/**"]),
+    embed = [":connect"],
+    deps = [
+        "//internal/config",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

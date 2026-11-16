@@ -439,3 +439,34 @@ func TestGatherCarriesTheSuspensionState(t *testing.T) {
 		t.Fatalf("World.Suspension = %+v, want the reader's %+v", w.Suspension, st)
 	}
 }
+
+// TestGatherReusesTheDemandProbeStores (Gate S fix 2). Kills gather's
+// lane-fed check reading anything but what k1Env would build: the demand
+// gather's probe stores (demandView.ProbeStores) are the default scale-check
+// probe stores the demand targets name, so the lane env built from them
+// equals k1Env's, which builds the targets again, on the city's pool and on
+// a rig's lane-fed store.
+func TestGatherReusesTheDemandProbeStores(t *testing.T) {
+	for name, arrange := range map[string]func(*testing.T, *gatherFixture){"city": nil, "lane-fed rig": laneFedRig} {
+		t.Run(name, func(t *testing.T) {
+			f := newGatherFixture(t, poolRow("gc-1", "worker", 1, "active"))
+			if arrange != nil {
+				arrange(t, f)
+			}
+			w, err := gather(f.env, f.p, gatherNow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			env := f.env.Env()
+			dg := censusDemandEnv(w.Census, f.env.Sessions(), f.env.RigStores())
+			dg.CityName, dg.CityPath, dg.Cfg, dg.SuspendedRigPaths = f.env.CityName, f.env.CityPath, env.Cfg, w.SuspendedRigPaths
+			want := k1Env(f.env, env, w.SuspendedRigPaths, dg)
+			if len(want.ProbeStores) == 0 {
+				t.Fatal("premise: the demand targets name no probe store")
+			}
+			if got := k1EnvWith(f.env, env, w.SuspendedRigPaths, dg, w.Demand.ProbeStores); !reflect.DeepEqual(got.ProbeStores, want.ProbeStores) {
+				t.Errorf("probe stores %v, want k1Env's %v", got.ProbeStores, want.ProbeStores)
+			}
+		})
+	}
+}

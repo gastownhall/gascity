@@ -36,6 +36,28 @@ func warmBindPoolSession() *beads.Bead {
 func alwaysUnclaimed(beads.Bead) bool { return true }
 func neverUnclaimed(beads.Bead) bool  { return false }
 
+// TestWarmBindClaimText: a warm reuse reminds a slot with its template's
+// claim nudge, else the pool default the claim backstop sends later; a slot
+// whose template is unknown, or suppresses its startup prompt, gets none.
+func TestWarmBindClaimText(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{
+		{Name: "worker", Nudge: "  " + warmClaimText + "\n"},
+		{Name: "quiet"},
+		{Name: config.ControlDispatcherAgentName, StartCommand: "gc convoy control --serve"},
+	}}
+	for template, want := range map[string]string{
+		"worker":                          warmClaimText,
+		"quiet":                           defaultPoolClaimNudge,
+		"ghost":                           "",
+		config.ControlDispatcherAgentName: "",
+	} {
+		s := beads.Bead{ID: "s-1", Metadata: map[string]string{"template": template}}
+		if got := warmBindClaimText(cfg, s); got != want {
+			t.Errorf("template %q: text = %q, want %q", template, got, want)
+		}
+	}
+}
+
 // countNudges returns how many Nudge calls the fake recorded and the message of
 // the last one.
 func countNudges(sp *runtime.Fake) (int, string) {
@@ -63,7 +85,7 @@ func TestDeliverWarmBindClaimNudge_FiresOncePerBinding(t *testing.T) {
 	store := beads.NewMemStoreFrom(0, []beads.Bead{*session}, nil)
 
 	// Pass 1: fires once, stamps the marker.
-	deliverWarmBindClaimNudge(context.Background(), sp, store, session, warmClaimText, alwaysUnclaimed)
+	deliverWarmBindClaimNudge(context.Background(), sp, store, nil, session, warmClaimText, alwaysUnclaimed)
 	if n, last := countNudges(sp); n != 1 || last != warmClaimText {
 		t.Fatalf("pass 1: got %d nudges (last=%q), want 1 with claim text", n, last)
 	}
@@ -76,14 +98,14 @@ func TestDeliverWarmBindClaimNudge_FiresOncePerBinding(t *testing.T) {
 	}
 
 	// Pass 2: same binding — marker matches, no re-nudge.
-	deliverWarmBindClaimNudge(context.Background(), sp, store, session, warmClaimText, alwaysUnclaimed)
+	deliverWarmBindClaimNudge(context.Background(), sp, store, nil, session, warmClaimText, alwaysUnclaimed)
 	if n, _ := countNudges(sp); n != 1 {
 		t.Fatalf("pass 2: got %d nudges, want still 1 (marker guard)", n)
 	}
 
 	// Rebind to a different trigger — fires exactly once more.
 	session.Metadata[beadmeta.TriggerBeadIDMetadataKey] = "w-2"
-	deliverWarmBindClaimNudge(context.Background(), sp, store, session, warmClaimText, alwaysUnclaimed)
+	deliverWarmBindClaimNudge(context.Background(), sp, store, nil, session, warmClaimText, alwaysUnclaimed)
 	if n, last := countNudges(sp); n != 2 || last != warmClaimText {
 		t.Fatalf("rebind: got %d nudges (last=%q), want 2 with claim text", n, last)
 	}
@@ -98,7 +120,7 @@ func TestDeliverWarmBindClaimNudge_WaitsForIdleBeforeDelivering(t *testing.T) {
 	session := warmBindPoolSession()
 	store := beads.NewMemStoreFrom(0, []beads.Bead{*session}, nil)
 
-	deliverWarmBindClaimNudge(context.Background(), sp, store, session, warmClaimText, alwaysUnclaimed)
+	deliverWarmBindClaimNudge(context.Background(), sp, store, nil, session, warmClaimText, alwaysUnclaimed)
 
 	sawWait, sawNudge := false, false
 	for _, c := range sp.Calls {
@@ -126,7 +148,7 @@ func TestDeliverWarmBindClaimNudge_SkipsClaimedTrigger(t *testing.T) {
 	session := warmBindPoolSession()
 	store := beads.NewMemStoreFrom(0, []beads.Bead{*session}, nil)
 
-	deliverWarmBindClaimNudge(context.Background(), sp, store, session, warmClaimText, neverUnclaimed)
+	deliverWarmBindClaimNudge(context.Background(), sp, store, nil, session, warmClaimText, neverUnclaimed)
 	if n, _ := countNudges(sp); n != 0 {
 		t.Fatalf("claimed trigger: got %d nudges, want 0", n)
 	}
@@ -142,7 +164,7 @@ func TestDeliverWarmBindClaimNudge_SkipsNonPool(t *testing.T) {
 	delete(session.Metadata, "pool_managed")
 	store := beads.NewMemStoreFrom(0, []beads.Bead{*session}, nil)
 
-	deliverWarmBindClaimNudge(context.Background(), sp, store, session, warmClaimText, alwaysUnclaimed)
+	deliverWarmBindClaimNudge(context.Background(), sp, store, nil, session, warmClaimText, alwaysUnclaimed)
 	if n, _ := countNudges(sp); n != 0 {
 		t.Fatalf("non-pool: got %d nudges, want 0", n)
 	}
@@ -168,7 +190,7 @@ func TestDeliverWarmBindClaimNudge_NoopGuards(t *testing.T) {
 	for name, build := range cases {
 		t.Run(name, func(t *testing.T) {
 			sp, session, probe, text := build()
-			deliverWarmBindClaimNudge(context.Background(), sp, store, session, text, probe)
+			deliverWarmBindClaimNudge(context.Background(), sp, store, nil, session, text, probe)
 			if n, _ := countNudges(sp); n != 0 {
 				t.Fatalf("%s: got %d nudges, want 0", name, n)
 			}
@@ -183,7 +205,7 @@ func TestDeliverWarmBindClaimNudge_NoMarkerOnDeliveryFailure(t *testing.T) {
 	session := warmBindPoolSession()
 	store := beads.NewMemStoreFrom(0, []beads.Bead{*session}, nil)
 
-	deliverWarmBindClaimNudge(context.Background(), sp, store, session, warmClaimText, alwaysUnclaimed)
+	deliverWarmBindClaimNudge(context.Background(), sp, store, nil, session, warmClaimText, alwaysUnclaimed)
 
 	if n, _ := countNudges(sp); n != 1 {
 		t.Fatalf("delivery failure: want exactly one Nudge attempt, got %d", n)
@@ -653,5 +675,38 @@ func TestBeadReconcileTickWarmBindNudgesTemplateAssignedDemand(t *testing.T) {
 				t.Errorf("%s = %q, want marked=%v", warmBindNudgedForTriggerKey, got.Metadata[warmBindNudgedForTriggerKey], wantNudges == 1)
 			}
 		})
+	}
+}
+
+// A warm reuse of a canonical-singleton pool seat the configured named
+// session took over still gets its claim reminder (collapsedSingletonRow).
+func TestDeliverWarmBindClaimNudge_FiresForCollapsedSingletonPoolSeat(t *testing.T) {
+	cfg := collapsedSingletonCfg()
+	store := beads.NewMemStore()
+	row := collapsedSingletonRow(t, cfg, store)
+	if err := store.SetMetadata(row.ID, beadmeta.TriggerBeadIDMetadataKey, "w-1"); err != nil {
+		t.Fatal(err)
+	}
+	row, _ = store.Get(row.ID)
+	sp := runtime.NewFake()
+	deliverWarmBindClaimNudge(context.Background(), sp, store, cfg, &row, warmClaimText, alwaysUnclaimed)
+	if n, _ := countNudges(sp); n != 1 {
+		t.Fatalf("collapsed singleton seat: got %d nudges, want 1", n)
+	}
+}
+
+// A plain named session wearing its reserved name gets no warm-bind nudge.
+func TestDeliverWarmBindClaimNudge_SkipsPlainNamedSession(t *testing.T) {
+	cfg := collapsedSingletonCfg()
+	session := warmBindPoolSession()
+	delete(session.Metadata, "pool_managed")
+	session.Metadata["session_name"] = config.NamedSessionRuntimeName(cfg.EffectiveCityName(), cfg.Workspace, "poller")
+	session.Metadata["session_origin"] = "named"
+	session.Metadata["template"] = "poller"
+	store := beads.NewMemStoreFrom(0, []beads.Bead{*session}, nil)
+	sp := runtime.NewFake()
+	deliverWarmBindClaimNudge(context.Background(), sp, store, cfg, session, warmClaimText, alwaysUnclaimed)
+	if n, _ := countNudges(sp); n != 0 {
+		t.Fatalf("plain named session: got %d nudges, want 0", n)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -262,6 +263,24 @@ func ScopedFromRunLabel(label string) (string, bool) {
 // IsTrackingBead reports whether b is an order tracking record.
 func IsTrackingBead(b beads.Bead) bool { return beadLabelsContain(b.Labels, labelOrderTracking) }
 
+// IsRunRecord reports a bead whose order-run:<scoped> label is evidence of an
+// order's run: its tracking bead (IsTrackingBead), or the root the run poured,
+// in any of a formula's three root shapes: a graph workflow root (gc.kind=
+// workflow or gc.formula_contract=graph.v2, sourceworkflow.IsWorkflowRoot's
+// marks; a test pins the two), a v1 molecule container or wisp root
+// (beads.IsMoleculeType: type molecule or wisp) or a root-only wisp
+// (gc.kind=wisp). Another bead carrying the label (a plain
+// task's) is none: it moves no order's cooldown, cursor or single-flight
+// (architecture B v2, mc-v8g4p). orders cannot import sourceworkflow, which
+// reaches back through coordclass.
+func IsRunRecord(b beads.Bead) bool {
+	kind := strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey])
+	return IsTrackingBead(b) ||
+		strings.EqualFold(kind, beadmeta.KindWorkflow) || strings.EqualFold(kind, beadmeta.KindWisp) ||
+		strings.EqualFold(strings.TrimSpace(b.Metadata[beadmeta.FormulaContractMetadataKey]), beadmeta.FormulaContractGraphV2) ||
+		beads.IsMoleculeType(strings.ToLower(strings.TrimSpace(b.Type)))
+}
+
 // MaxEventCursor returns the largest event cursor encoded by the supplied
 // order-run bead labels.
 func MaxEventCursor(items []beads.Bead) EventCursor {
@@ -399,7 +418,7 @@ func (s *Store) CreateRunClosed(scoped string, outcome RunOutcome, cursor *Event
 // cosmetic, unlike the Cursor read (store_reads.go), whose max-seq reduction is
 // over a different column and therefore must NOT opt in.
 func (s *Store) RecentRuns(scoped string, limit int) ([]OrderRun, error) {
-	if s.store.Store == nil {
+	if s.store == (beads.OrdersStore{}) {
 		return nil, nil
 	}
 	beadsList, err := s.store.List(beads.ListQuery{
@@ -431,24 +450,37 @@ func (s *Store) RecentRuns(scoped string, limit int) ([]OrderRun, error) {
 // LatestOpenRun's deliberate open-only narrowing, the feed lists completed
 // runs alongside in-flight ones. A non-positive limit means unlimited.
 func (s *Store) ListTracking(limit int) ([]OrderRun, error) {
-	if s.store.Store == nil {
+	if s.store == (beads.OrdersStore{}) {
 		return nil, nil
 	}
-	list, err := s.store.List(beads.ListQuery{
+	list, err := s.store.List(trackingListQuery(limit))
+	return trackingRuns(list), err
+}
+
+// trackingListQuery is ListTracking's read: every tracking bead, both tiers,
+// closed included, newest first, limit pushed to the backing. ListTrackingOn
+// reads the same query over a leg.
+func trackingListQuery(limit int) beads.ListQuery {
+	return beads.ListQuery{
 		Label:                    labelOrderTracking,
 		Limit:                    limit,
 		IncludeClosed:            true,
 		Sort:                     beads.SortCreatedDesc,
 		TierMode:                 beads.TierBoth,
 		AllowBackingCreatedLimit: true,
-	})
+	}
+}
+
+// trackingRuns decodes a tracking list, skipping a bead with no order-run
+// label.
+func trackingRuns(list []beads.Bead) []OrderRun {
 	runs := make([]OrderRun, 0, len(list))
 	for _, b := range list {
 		if run, ok := RunFromTrackingBead(b); ok {
 			runs = append(runs, run)
 		}
 	}
-	return runs, err
+	return runs
 }
 
 // LatestOpenRun returns the newest OPEN order-run bead for scoped, if any. The
@@ -459,15 +491,28 @@ func (s *Store) ListTracking(limit int) ([]OrderRun, error) {
 // row, a found flag, and any list error are returned together; found can be true
 // alongside a partial-tier error, mirroring the feed's prior handling.
 func (s *Store) LatestOpenRun(scoped string) (OrderRun, bool, error) {
-	if s.store.Store == nil {
+	if s.store == (beads.OrdersStore{}) {
 		return OrderRun{}, false, nil
 	}
-	list, err := s.store.List(beads.ListQuery{
+	list, err := s.store.List(latestOpenRunQuery(scoped))
+	return latestOpenRun(scoped, list, err)
+}
+
+// latestOpenRunQuery is LatestOpenRun's read: the newest open bead carrying
+// scoped's run label, both tiers. LatestOpenRunOn reads the same query over a
+// leg.
+func latestOpenRunQuery(scoped string) beads.ListQuery {
+	return beads.ListQuery{
 		Label:    labelOrderRunPrefix + scoped,
 		Limit:    1,
 		Sort:     beads.SortCreatedDesc,
 		TierMode: beads.TierBoth,
-	})
+	}
+}
+
+// latestOpenRun decodes LatestOpenRun's list: the newest row and found, with
+// the list error passed through, rows or not.
+func latestOpenRun(scoped string, list []beads.Bead, err error) (OrderRun, bool, error) {
 	if len(list) == 0 {
 		return OrderRun{}, false, err
 	}

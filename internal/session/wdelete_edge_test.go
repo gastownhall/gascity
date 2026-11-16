@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // inlineSetFingerprint is a verbatim copy of the pre-migration
@@ -114,7 +115,7 @@ func TestListAllForReconcileWithFingerprintMatchesSet(t *testing.T) {
 
 	// The fingerprint must be SetFingerprint over the raw union rows (the set
 	// the snapshot projects), computed here independently through the raw union.
-	rawUnion, err := ListAllSessionBeads(mem, beads.ListQuery{})
+	rawUnion, err := ListAllSessionBeads(beadstest.Sessions(mem), beads.ListQuery{})
 	if err != nil {
 		t.Fatalf("ListAllSessionBeads: %v", err)
 	}

@@ -22,11 +22,12 @@ const heldNameToken = "token-of-this-bead"
 // session name already held, answering by tmux verb and recording every call.
 //
 // Answering by verb keeps a change in how many probes Start makes from shifting
-// an answer onto the wrong command. No answer carries a pane PID:
-// KillSessionWithProcesses builds its kill plan from the host process table, so
-// a numeric PID would let a test signal whatever real process owns it. The
-// pane-state read behind that plan fails instead, which still lets the
-// kill-session itself through.
+// an answer onto the wrong command. No answer the kill plan reads carries a
+// pane PID: KillSessionWithProcesses builds its kill plan from the host process
+// table, so a numeric PID would let a test signal whatever real process owns
+// it. The pane-state read behind that plan fails instead, which still lets the
+// kill-session itself through. Only GetPanePID's own read answers panePID, for
+// a held agent the process table judges.
 type heldNameTmux struct {
 	calls [][]string
 
@@ -39,6 +40,10 @@ type heldNameTmux struct {
 	hasSessionErrs []error
 	// paneCommand is the held session's pane_current_command.
 	paneCommand string
+	// panePID answers the pane-PID read alone (GetPanePID); empty fails it.
+	// The kill plan's pane-state read asks for #{pane_pid} with #{pane_dead}
+	// and fails whatever panePID holds.
+	panePID string
 	// liveToken is the GC_INSTANCE_TOKEN the session reports to show-environment.
 	liveToken string
 	// listRows answers list-panes -a.
@@ -69,6 +74,8 @@ func (h *heldNameTmux) execute(args []string) (string, error) {
 		format := args[len(args)-1]
 		if rest, ok := strings.CutPrefix(format, agentPaneMarkerFormat+"\t"); ok {
 			switch {
+			case rest == "#{pane_pid}" && h.panePID != "":
+				return "pane\t" + h.panePID, nil
 			case strings.Contains(rest, "#{pane_pid}"):
 				return "", errors.New("pane pid unavailable")
 			case strings.Contains(rest, "#{pane_current_command}"):

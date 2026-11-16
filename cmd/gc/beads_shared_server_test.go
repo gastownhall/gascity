@@ -117,9 +117,10 @@ func TestFoundProxiedScopeGetsNoSharedServerOptOutAnywhere(t *testing.T) {
 	}
 }
 
-// The opt-out is a statement about proxied scopes gc owns. A rig that is not
-// proxied must not inherit it from its proxied city's projection: its bd
-// resolution (and the operator's shared-server choice for it) is unchanged.
+// The opt-out is a statement about scopes gc owns. A rig gc does not own (here,
+// one on an external host) must not inherit it from its proxied city's
+// projection: its bd resolution (and the operator's shared-server choice for
+// it) is unchanged.
 func TestNonProxiedRigDoesNotInheritTheCitySharedServerPin(t *testing.T) {
 	cityPath, _ := proxiedEnvTestCity(t)
 	rig := filepath.Join(cityPath, "rigs", "direct")
@@ -150,8 +151,8 @@ func writeScopeConfigYAML(t *testing.T, scopeRoot, body string) {
 }
 
 // The config.yaml pin covers the bd processes gc does not spawn — an agent
-// running `bd` in its shell — so it has to land in every proxied scope gc owns,
-// and nowhere else.
+// running `bd` in its shell — so it has to land in every scope gc owns, proxied
+// or managed server-mode, and nowhere else.
 func TestEnsureGCOwnedProxiedScopeSharedServerOff(t *testing.T) {
 	t.Run("journaled scope is pinned", func(t *testing.T) {
 		cityPath, _ := proxiedEnvTestCity(t)
@@ -212,15 +213,15 @@ func TestEnsureGCOwnedProxiedScopeSharedServerOff(t *testing.T) {
 		}
 	})
 
-	t.Run("a non-proxied scope is left alone", func(t *testing.T) {
+	t.Run("a managed server-mode scope is pinned", func(t *testing.T) {
 		cityPath := t.TempDir()
 		writeScopeBeadsMetadata(t, cityPath, `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`)
 		writeScopeConfigYAML(t, cityPath, "gc.endpoint_origin: managed_city\n")
 		if err := ensureGCOwnedProxiedScopeSharedServerOff(cityPath, cityPath); err != nil {
 			t.Fatal(err)
 		}
-		if pin := readScopeSharedServerPin(t, cityPath); pin != contract.SharedServerUnset {
-			t.Fatalf("pin = %v, want a direct scope untouched", pin)
+		if pin := readScopeSharedServerPin(t, cityPath); pin != contract.SharedServerPinnedOff {
+			t.Fatalf("pin = %v, want pinned off", pin)
 		}
 	})
 }

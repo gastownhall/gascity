@@ -73,13 +73,22 @@ func gatherDemand(env demandGatherEnv, reads demandReads) (v demandView, err err
 	targets := buildDemandTargets(env.CityName, env.CityPath, env.Cfg, env.CityStore, env.RigStores, env.SuspendedRigPaths,
 		env.OpenSessions, noProbeEnv, stderr)
 	cache := newReadyDemandCacheWithReads(reads)
+	gateLegs := crossStoreGateLegs(env.CityPath, env.Cfg, env.CityStore, env.RigStores, env.SuspendedRigPaths)
+	if v2, ok := reads.(*v2DemandReads); ok {
+		// The v2 pass does no remote I/O (CONTRACT v5 R4), and judging a
+		// row's cross-store blockers reads other stores: the external-reads
+		// lane gates a split city's snapshots, and the pass serves them.
+		v2.gateLegs = gateLegs
+	} else {
+		cache = cache.withGateLegs(gateLegs)
+	}
 
 	v.AssignedWork, v.AssignedStores, v.AssignedStoreRefs, v.ReadyAssigned, v.StorePartial = collectAssignedWorkBeadsWithStores(
 		env.CityPath, env.Cfg, env.CityStore, env.RigStores, env.SuspendedRigPaths, env.Sessions, cache)
 	c := &v.Collected
 	c.UnassignedRouted, _, c.UnassignedRoutedRefs, c.UnassignedRoutedPartial = collectOpenUnassignedRoutedWork(
 		env.CityPath, env.Cfg, env.CityStore, env.RigStores, env.SuspendedRigPaths, stderr, nil, reads)
-	c.ColdWakeTemplates, c.NamedOnDemandTemplates = targets.coldWakeTemplates, targets.namedOnDemandTemplates
+	c.ColdWakeTemplates, c.NamedOnDemandTemplates, c.NameOnlyTemplates = targets.coldWakeTemplates, targets.namedOnDemandTemplates, targets.nameOnlyTemplates
 	for _, pool := range targets.pendingPools {
 		v.CustomCheckTemplates = append(v.CustomCheckTemplates, env.Cfg.Agents[pool.agentIdx].QualifiedName())
 	}
@@ -87,6 +96,19 @@ func gatherDemand(env demandGatherEnv, reads demandReads) (v demandView, err err
 		var errs []error
 		c.DefaultProbed = true
 		c.DefaultCounts, c.DefaultDemand, c.DefaultPartials, errs = defaultScaleCheckCountsAndDemand(env.Cfg, targets.defaultScaleTargets, cache)
+		// Work this pass already reads as claimed is not new demand: v2's probe
+		// rows can be a recording older than the claim read
+		// (demand_claimed_work.go). The cut runs before the guards, so a row a
+		// guard admits is never a claimed one.
+		if _, recorded := reads.(*v2DemandReads); recorded {
+			c.DefaultCounts, c.DefaultDemand, v.ClaimedDemand = withoutClaimedDemand(c.DefaultCounts, c.DefaultDemand, demandClaimsOf(v.AssignedWork, v.AssignedStoreRefs))
+		}
+		// A bead whose claims keep failing the same way is not spawn demand
+		// (claim_loop_guard.go).
+		c.DefaultCounts, c.DefaultDemand = claimLoopGuardFor(env.CityPath).withhold(c.DefaultCounts, c.DefaultDemand)
+		// Nor is the work of a template whose seats stopped claiming
+		// (claim_stall_guard.go).
+		c.DefaultCounts, c.DefaultDemand = claimStallGuardFor(env.CityPath).withhold(c.DefaultCounts, c.DefaultDemand)
 		for _, probeErr := range errs {
 			fmt.Fprintf(stderr, "gatherDemand: %v (counts above may be a partial of one demand source)\n", probeErr) //nolint:errcheck
 		}
@@ -98,6 +120,7 @@ func gatherDemand(env demandGatherEnv, reads demandReads) (v demandView, err err
 			fmt.Fprintf(stderr, "gatherDemand: %v (using named demand=false)\n", probeErr) //nolint:errcheck
 		}
 	}
+	v.ProbeStores = demandProbeStores(targets)
 	v.RelocatedClaimRefs = assignedWorkRelocatedClaimRefs(env.CityPath, env.Cfg, env.CityStore)
 	v.WakeClaimRefs = assignedWorkClaimRefs(env.CityPath, env.Cfg, env.CityStore)
 	return v, nil

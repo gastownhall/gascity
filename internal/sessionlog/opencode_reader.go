@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 // ReadOpenCodeFile reads an OpenCode session export JSON file and converts it
@@ -116,7 +118,10 @@ func findOpenCodeSessionFileIn(root, workDir string) string {
 		if !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
 			return nil
 		}
-		if cleanOpenCodeWorkDir(openCodeExportDirectory(path)) != workDir {
+		// Compared via pathutil.SamePath, not raw string inequality: on macOS
+		// a real work dir resolves through the /var alias while the adapter's
+		// shelled-out cwd lands on the physical /private/var path.
+		if !pathutil.SamePath(openCodeExportDirectory(path), workDir) {
 			return nil
 		}
 		info, err := entry.Info()

@@ -1,0 +1,14 @@
+other tool before it. Step 2: when it returns, print the raw answers you
+received as a fenced JSON block, then stop.
+────────────────────────────────────────────────────────────────────────────
+──────────────────────────────────────────────────────────────────────────
+←  ☐ Q1  ☐ Q2  ☐ Q3  ☐ Q4  ✔ Submit  →
+Which approach would you prefer for this feature?
+❯ 1. Alpha approach (Recommended)
+2. Beta variant
+3. Gamma variant
+4. Type something.
+────────────────────────────────────────────────────────────────────────────
+──────────────────────────────────────────────────────────────────────────
+5. Chat about this
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel

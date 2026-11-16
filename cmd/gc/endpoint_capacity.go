@@ -377,7 +377,9 @@ func (g *endpointCapacityGuard) noteSeen(k endpointKey) {
 // endpointHoldForRows returns a hold check for rows seen without template
 // params (the stale-session reaper runs before desired state is built). The
 // endpoint comes from config: the agent's selected upstream, else the provider
-// recorded on the row, which is already the resolved leaf.
+// recorded on the row, which is already the resolved leaf. The reaper combines
+// this hold with the start-deferral memo's through pendingCreateHold; a reader
+// that sees only the bead (gc session wake) sees neither.
 func endpointHoldForRows(cfg *config.City, g *endpointCapacityGuard) func(sessionpkg.Info) bool {
 	return func(info sessionpkg.Info) bool {
 		var tp TemplateParams

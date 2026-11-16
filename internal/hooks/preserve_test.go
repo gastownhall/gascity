@@ -6,6 +6,7 @@ import (
 	iofs "io/fs"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -20,15 +21,43 @@ func installedOpenCodePlugin(t *testing.T) []byte {
 	if err := Install(fs, "/city", "/work", []string{"opencode"}); err != nil {
 		t.Fatalf("Install: %v", err)
 	}
-	return fs.Files["/work/.opencode/plugins/gascity.js"]
+	key := filepath.Join("/work", ".opencode", "plugins", "gascity.js")
+	data, ok := fs.Files[key]
+	if !ok {
+		t.Fatalf("installed OpenCode plugin missing at %q", key)
+	}
+	return data
 }
 
 // A current managed hook file must be preserved so overlay staging cannot
-// revert it on the next reconcile tick (#5554).
+// revert it on the next reconcile tick (#5554). Every versioned plugin is
+// checked as installed: one that its own predicate reads as stale would be
+// rewritten by every install and reverted by every tick. A file the predicate
+// does not recognize as managed is preserved too, so the same file with its
+// version zeroed must be replaced.
 func TestPreserveManagedFileKeepsCurrentPlugin(t *testing.T) {
-	rel := filepath.Join(".opencode", "plugins", "gascity.js")
-	if !PreserveManagedFile(rel, installedOpenCodePlugin(t)) {
-		t.Fatal("freshly installed OpenCode plugin was not preserved")
+	version := regexp.MustCompile(`(GC_[A-Z]+_HOOK_VERSION\s*=\s*)[0-9]+`)
+	for rel, provider := range managedOverlayHookPaths {
+		t.Run(provider, func(t *testing.T) {
+			fs := fsys.NewFake()
+			if err := Install(fs, "/city", "/work", []string{provider}); err != nil {
+				t.Fatalf("Install: %v", err)
+			}
+			installed, ok := fs.Files[filepath.Join("/work", rel)]
+			if !ok {
+				t.Fatalf("Install wrote no %s", rel)
+			}
+			if !PreserveManagedFile(rel, installed) {
+				t.Errorf("freshly installed %s plugin was not preserved", provider)
+			}
+			stale := version.ReplaceAll(installed, []byte("${1}0"))
+			if bytes.Equal(stale, installed) {
+				t.Fatalf("%s has no hook version to zero", rel)
+			}
+			if PreserveManagedFile(rel, stale) {
+				t.Errorf("%s plugin with its version zeroed was preserved; the bundled file is not recognized as managed", provider)
+			}
+		})
 	}
 }
 
@@ -117,14 +146,14 @@ func TestManagedOverlayHookPathsCoverEveryVersionedFile(t *testing.T) {
 				return nil
 			}
 			if overlay.IsMergeablePath(filepath.FromSlash(rel)) {
-				if got, ok := managedOverlayHookPaths[filepath.FromSlash(rel)]; ok {
+				if got, ok := managedOverlayHookPaths[filepath.ToSlash(filepath.Clean(filepath.FromSlash(rel)))]; ok {
 					t.Errorf("mergeable path %q is listed in managedOverlayHookPaths (provider %q); "+
 						"staging skips it before the predicate runs", rel, got)
 				}
 				return nil
 			}
 			checked++
-			got, ok := managedOverlayHookPaths[filepath.FromSlash(rel)]
+			got, ok := managedOverlayHookPaths[filepath.ToSlash(filepath.Clean(filepath.FromSlash(rel)))]
 			if !ok {
 				t.Errorf("provider %q file %q has a version marker but no managedOverlayHookPaths "+
 					"entry, so overlay staging will silently revert it", provider, rel)

@@ -38,6 +38,9 @@ func TestRebaseResolveLib(t *testing.T) {
 		"PATH=" + os.Getenv("PATH"),
 		"HOME=" + t.TempDir(),
 		"TMPDIR=" + t.TempDir(),
+		// internal/testenv's hermetic git template, so the temp repos the script
+		// makes have git auto-maintenance off (ga-zoe1wr).
+		"GIT_TEMPLATE_DIR=" + os.Getenv("GIT_TEMPLATE_DIR"),
 	}
 
 	out, err := cmd.CombinedOutput()

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -41,7 +42,7 @@ func TestResolveSessionTargetID_MatchesPoolSessionPathAlias(t *testing.T) {
 
 	pool := createPoolSessionBead(t, fs.cityBeadStore, "gascity-maintenance-pl", "s-gc-pool-001", "active")
 
-	id, err := srv.resolveSessionIDWithConfig(fs.cityBeadStore, "gascity-maintenance-pl")
+	id, err := srv.resolveSessionIDWithConfig(beadstest.Sessions(fs.cityBeadStore), "gascity-maintenance-pl")
 	if err != nil {
 		t.Fatalf("resolveSessionIDWithConfig(path-alias): %v", err)
 	}
@@ -57,7 +58,7 @@ func TestResolveSessionTargetID_PoolPathAliasAwakeStateMatches(t *testing.T) {
 
 	pool := createPoolSessionBead(t, fs.cityBeadStore, "awake-pl", "s-gc-pool-awake", string(session.StateAwake))
 
-	id, err := srv.resolveSessionIDWithConfig(fs.cityBeadStore, "awake-pl")
+	id, err := srv.resolveSessionIDWithConfig(beadstest.Sessions(fs.cityBeadStore), "awake-pl")
 	if err != nil {
 		t.Fatalf("resolveSessionIDWithConfig(awake path-alias): %v", err)
 	}
@@ -106,7 +107,7 @@ func TestResolveLiveSessionByPathAlias_TiebreakerPrefersMostRecent(t *testing.T)
 	}
 
 	store := &pathAliasFakeStore{items: []beads.Bead{older, newer}}
-	id, ok, err := resolveLiveSessionByPathAlias(store, "shared-pl")
+	id, ok, err := resolveLiveSessionByPathAlias(beadstest.Sessions(store), "shared-pl")
 	if err != nil {
 		t.Fatalf("resolveLiveSessionByPathAlias: %v", err)
 	}
@@ -117,7 +118,7 @@ func TestResolveLiveSessionByPathAlias_TiebreakerPrefersMostRecent(t *testing.T)
 	// Reverse the input order to confirm CreatedAt drives the tiebreaker,
 	// not the iteration order.
 	store = &pathAliasFakeStore{items: []beads.Bead{newer, older}}
-	id, ok, err = resolveLiveSessionByPathAlias(store, "shared-pl")
+	id, ok, err = resolveLiveSessionByPathAlias(beadstest.Sessions(store), "shared-pl")
 	if err != nil {
 		t.Fatalf("resolveLiveSessionByPathAlias (reversed): %v", err)
 	}
@@ -137,7 +138,7 @@ func TestResolveSessionTargetID_PathAliasDrainingSessionNotFound(t *testing.T) {
 
 	createPoolSessionBead(t, fs.cityBeadStore, "draining-pl", "s-gc-pool-draining", string(session.StateDraining))
 
-	_, err := srv.resolveSessionIDWithConfig(fs.cityBeadStore, "draining-pl")
+	_, err := srv.resolveSessionIDWithConfig(beadstest.Sessions(fs.cityBeadStore), "draining-pl")
 	if !errors.Is(err, session.ErrSessionNotFound) {
 		t.Fatalf("resolveSessionIDWithConfig(draining path-alias) = %v, want ErrSessionNotFound", err)
 	}
@@ -169,7 +170,7 @@ func TestResolveSessionTargetID_PathAliasEmptyStateTreatedAsActive(t *testing.T)
 		t.Fatalf("create legacy pool bead: %v", err)
 	}
 
-	id, err := srv.resolveSessionIDWithConfig(fs.cityBeadStore, "legacy-pl")
+	id, err := srv.resolveSessionIDWithConfig(beadstest.Sessions(fs.cityBeadStore), "legacy-pl")
 	if err != nil {
 		t.Fatalf("resolveSessionIDWithConfig(legacy path-alias): %v", err)
 	}
@@ -190,7 +191,7 @@ func TestResolveSessionTargetID_PathAliasCreatingSessionNotFound(t *testing.T) {
 
 	createPoolSessionBead(t, fs.cityBeadStore, "creating-pl", "s-gc-pool-creating", string(session.StateCreating))
 
-	_, err := srv.resolveSessionIDWithConfig(fs.cityBeadStore, "creating-pl")
+	_, err := srv.resolveSessionIDWithConfig(beadstest.Sessions(fs.cityBeadStore), "creating-pl")
 	if !errors.Is(err, session.ErrSessionNotFound) {
 		t.Fatalf("resolveSessionIDWithConfig(creating path-alias) = %v, want ErrSessionNotFound", err)
 	}
@@ -207,7 +208,7 @@ func TestResolveSessionTargetID_PathAliasClosedSessionNotFound(t *testing.T) {
 		t.Fatalf("close pool bead: %v", err)
 	}
 
-	_, err := srv.resolveSessionIDWithConfig(fs.cityBeadStore, "closed-pl")
+	_, err := srv.resolveSessionIDWithConfig(beadstest.Sessions(fs.cityBeadStore), "closed-pl")
 	if !errors.Is(err, session.ErrSessionNotFound) {
 		t.Fatalf("resolveSessionIDWithConfig(closed path-alias) = %v, want ErrSessionNotFound", err)
 	}
@@ -220,7 +221,7 @@ func TestResolveSessionTargetID_PathAliasAsleepSessionNotFound(t *testing.T) {
 
 	createPoolSessionBead(t, fs.cityBeadStore, "asleep-pl", "s-gc-pool-asleep", string(session.StateAsleep))
 
-	_, err := srv.resolveSessionIDWithConfig(fs.cityBeadStore, "asleep-pl")
+	_, err := srv.resolveSessionIDWithConfig(beadstest.Sessions(fs.cityBeadStore), "asleep-pl")
 	if !errors.Is(err, session.ErrSessionNotFound) {
 		t.Fatalf("resolveSessionIDWithConfig(asleep path-alias) = %v, want ErrSessionNotFound", err)
 	}
@@ -239,7 +240,7 @@ func TestResolveSessionTargetID_ExactIDWinsOverPathAlias(t *testing.T) {
 	// Second pool session whose Title masquerades as the first session's ID.
 	createPoolSessionBead(t, fs.cityBeadStore, target.ID, "s-gc-decoy", "active")
 
-	id, err := srv.resolveSessionIDWithConfig(fs.cityBeadStore, target.ID)
+	id, err := srv.resolveSessionIDWithConfig(beadstest.Sessions(fs.cityBeadStore), target.ID)
 	if err != nil {
 		t.Fatalf("resolveSessionIDWithConfig(%q): %v", target.ID, err)
 	}
@@ -277,7 +278,7 @@ func TestResolveSessionTargetID_ConfiguredNamedSessionWinsOverPathAlias(t *testi
 	// Pool session whose Title shadows the named-session identity.
 	createPoolSessionBead(t, fs.cityBeadStore, "myrig/worker", "s-gc-pool-shadow", "active")
 
-	id, err := srv.resolveSessionIDWithConfig(fs.cityBeadStore, "myrig/worker")
+	id, err := srv.resolveSessionIDWithConfig(beadstest.Sessions(fs.cityBeadStore), "myrig/worker")
 	if err != nil {
 		t.Fatalf("resolveSessionIDWithConfig(myrig/worker): %v", err)
 	}
@@ -296,7 +297,7 @@ func TestResolveSessionTargetID_PathAliasUnknownNotFound(t *testing.T) {
 
 	createPoolSessionBead(t, fs.cityBeadStore, "real-pl", "s-gc-pool-real", "active")
 
-	_, err := srv.resolveSessionIDWithConfig(fs.cityBeadStore, "ghost-pl")
+	_, err := srv.resolveSessionIDWithConfig(beadstest.Sessions(fs.cityBeadStore), "ghost-pl")
 	if !errors.Is(err, session.ErrSessionNotFound) {
 		t.Fatalf("resolveSessionIDWithConfig(ghost-pl) = %v, want ErrSessionNotFound", err)
 	}
@@ -323,7 +324,7 @@ func TestResolveLiveSessionByPathAlias_SkipsConfiguredNamedSessions(t *testing.T
 		t.Fatalf("create named-session bead: %v", err)
 	}
 
-	id, ok, err := resolveLiveSessionByPathAlias(store, "named-pl")
+	id, ok, err := resolveLiveSessionByPathAlias(beadstest.Sessions(store), "named-pl")
 	if err != nil {
 		t.Fatalf("resolveLiveSessionByPathAlias: %v", err)
 	}
@@ -334,13 +335,13 @@ func TestResolveLiveSessionByPathAlias_SkipsConfiguredNamedSessions(t *testing.T
 
 func TestResolveLiveSessionByPathAlias_EmptyIdentifier(t *testing.T) {
 	store := beads.NewMemStore()
-	if _, _, err := resolveLiveSessionByPathAlias(store, "  "); err != nil {
+	if _, _, err := resolveLiveSessionByPathAlias(beadstest.Sessions(store), "  "); err != nil {
 		t.Fatalf("resolveLiveSessionByPathAlias(whitespace): %v", err)
 	}
 }
 
 func TestResolveLiveSessionByPathAlias_NilStore(t *testing.T) {
-	id, ok, err := resolveLiveSessionByPathAlias(nil, "anything")
+	id, ok, err := resolveLiveSessionByPathAlias(beads.SessionStore{}, "anything")
 	if err != nil || ok || id != "" {
 		t.Fatalf("resolveLiveSessionByPathAlias(nil) = (%q, %v, %v), want (\"\", false, nil)", id, ok, err)
 	}
@@ -355,7 +356,7 @@ func TestResolveSessionTargetID_PathAliasResolvesViaContextHelper(t *testing.T) 
 
 	pool := createPoolSessionBead(t, fs.cityBeadStore, "extmsg-pl", "s-gc-extmsg", "active")
 
-	id, err := srv.resolveSessionTargetIDWithContext(context.Background(), fs.cityBeadStore, "extmsg-pl", apiSessionResolveOptions{})
+	id, err := srv.resolveSessionTargetIDWithContext(context.Background(), beadstest.Sessions(fs.cityBeadStore), "extmsg-pl", apiSessionResolveOptions{})
 	if err != nil {
 		t.Fatalf("resolveSessionTargetIDWithContext(extmsg-pl): %v", err)
 	}
@@ -383,7 +384,7 @@ func TestResolveSessionTargetID_SessionNameWinsOverPathAliasTitle(t *testing.T) 
 	// otherwise catch this).
 	createPoolSessionBead(t, fs.cityBeadStore, "shared-id", "different-name", "active")
 
-	id, err := srv.resolveSessionIDWithConfig(fs.cityBeadStore, "shared-id")
+	id, err := srv.resolveSessionIDWithConfig(beadstest.Sessions(fs.cityBeadStore), "shared-id")
 	if err != nil {
 		t.Fatalf("resolveSessionIDWithConfig(shared-id): %v", err)
 	}

@@ -148,8 +148,9 @@ func liveBeadRead(store beads.Store, id string) (beads.Bead, error) {
 // (a v2 effect's read-only store) never hands its writable inner store on.
 type liveRead struct{ store beads.Store }
 
-// Get reads id through the peeled store's live handle, past any cache.
-func (r liveRead) Get(id string) (beads.Bead, error) { return beads.HandlesFor(r.store).Live.Get(id) }
+// Get reads id through the peeled store's live reader (beads.LiveFor), past
+// any cache and any class layer above it.
+func (r liveRead) Get(id string) (beads.Bead, error) { return beads.LiveFor(r.store).Get(id) }
 
 // Ready is beads.ReadyLive on the peeled store: its Backing() fast path
 // where it has one.
@@ -157,24 +158,24 @@ func (r liveRead) Ready(q ...beads.ReadyQuery) ([]beads.Bead, error) {
 	return beads.ReadyLive(r.store, q...)
 }
 
-// liveReads is store's live read handle under the wrappers that do not
-// promote its live capabilities (Handles, Backing): the typed class wrappers
-// (beads.SessionStore, beads.WorkStore) and v2's read-only wrappers
-// (readOnlyStore, blindWriteRefusingStore: a v2 effect's stores).
+// liveReads is store's live read handle under v2's read-only wrappers
+// (readOnlyStore, blindWriteRefusingStore: a v2 effect's stores), which do
+// not promote their store's live capabilities (Handles, Backing). Each is
+// found below any class layer (beads.As), so a class handle over one is
+// peeled as the wrapper is, and a class handle over the store itself is read
+// through LiveFor, which sees through every class layer: no handle type is
+// named, so no handle a peel by hand forgot reads the cache.
 func liveReads(store beads.Store) liveRead {
 	for {
-		switch v := store.(type) {
-		case beads.SessionStore:
+		if v, ok := beads.As[readOnlyStore](store); ok {
 			store = v.Store
-		case beads.WorkStore:
-			store = v.Store
-		case readOnlyStore:
-			store = v.Store
-		case blindWriteRefusingStore:
-			store = v.inner
-		default:
-			return liveRead{store: store}
+			continue
 		}
+		if v, ok := beads.As[blindWriteRefusingStore](store); ok {
+			store = v.inner
+			continue
+		}
+		return liveRead{store: store}
 	}
 }
 

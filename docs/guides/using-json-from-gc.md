@@ -285,10 +285,61 @@ the result schema belongs to the pack command leaf represented by
 meaningful command-specific failure fields beyond the shared default failure
 shape.
 
+## Same Output On Every Route
+
+A read command such as `gc session list` can answer from two places: the city's
+running supervisor API, or a direct read of the city's own files and bead
+stores. A supervisor-hosted city reads through the API by default. Either way,
+the command prints a JSON document of the same shape, the one its result
+schema declares:
+
+| What you see | Rule |
+|---|---|
+| Shape | The same keys and types on both routes. For the same city state the values match too, apart from the known differences listed below. |
+| Data only the server has | Optional keys the schema declares, such as `_cache_age_s` (seconds since the server's bead cache last took in fresh data from its store; 0 for a read whose answer does not come from that cache, such as `gc rig list`) and `running` on session rows. The direct read leaves them out; it never guesses them. `gc mail peek` also prints `message.rig`, the city name, only on the API route. |
+| Data only the direct read has | `gc session list` prints `command`, `session_key` and the `resume_*` fields only on the direct read; the API never sends them. Set `GC_NO_API=1` if a script needs them. For a local city, `--state closed` and `--state all` always use the direct read, so they carry these fields and no `running` or `_cache_age_s`. |
+| Keys you don't recognize | Ignore them. New optional keys can appear without a `schema_version` bump. |
+
+A few values can still differ between the routes for the same city state:
+
+- `gc session list`: for a session that recorded no provider, the API route
+  prints the city's `[workspace]` provider, while the direct read leaves
+  `provider` out.
+- `gc session peek`: the two routes resolve a session name through different
+  alias rules, so a name can resolve on one route and not on the other.
+- `gc rig status`: rows for unlimited pools (agents without
+  `max_active_sessions`) can list different instances.
+- `gc status`: a rig's `path` can be relative on one route and absolute on
+  the other.
+- `gc beads list` and `gc convoy list` on a city that splits its bead storage
+  can read a different set of stores on each route.
+- `gc mail count` and `gc mail check` can count a named session's mail across
+  its earlier incarnations differently.
+
+You can still pick the route. `GC_NO_API=1` forces the direct read of a local
+city, and `--city-url`, `--city-name`, `GC_CITY_URL` and contexts read a remote
+city through its API. Picking a route doesn't change the shape. The one
+exception is `gc beads list` and `gc beads show --format=json`: for a remote
+city they wrap the result in `{"beads"|"bead", "_cache_age_s"}`, and for a
+local city they print the bare array or object.
+
+```sh
+gc session list --json | jq '.sessions[] | {id, state, closed}'
+GC_NO_API=1 gc session list --json | jq '.sessions[] | {id, state, closed}'  # same rows
+```
+
 ## Compatibility Notes
 
-JSON output is an automation contract. A PR that changes an existing JSON output
-shape should call that out explicitly, including:
+JSON output is an automation contract:
+
+- `schema_version` changes only for a breaking change inside a command's
+  schema: a removed, renamed or retyped key, or a changed meaning. Adding an
+  optional key is not breaking.
+- Every change to what a command prints, including a change on one route only,
+  gets an Upgrading Note in the changelog.
+
+A PR that changes an existing JSON output shape should call that out
+explicitly, including:
 
 - the command and invocation.
 - the old shape.

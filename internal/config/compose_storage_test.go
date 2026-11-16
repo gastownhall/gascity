@@ -1,8 +1,11 @@
 package config
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -458,5 +461,189 @@ cache = "work"
 	_, _, err := LoadWithIncludes(fs, "/city/city.toml")
 	if err == nil || !strings.Contains(err.Error(), `unknown storage class "cache"`) {
 		t.Fatalf("LoadWithIncludes error = %v, want unknown fragment class", err)
+	}
+}
+
+// TestLoadWithIncludesRecordsTheFragmentsThatDeclareStorage pins
+// Provenance.StorageFragments: every include fragment that declares any part
+// of [storage], in load order, and neither the root nor a fragment that
+// declares no part of it. gc init --from, which can leave a source's [storage]
+// out of its city.toml only, refuses a copy these fragments would keep it in.
+// ComposeFragments, which stops before packs, composes the same [storage] from
+// the same fragments.
+func TestLoadWithIncludesRecordsTheFragmentsThatDeclareStorage(t *testing.T) {
+	const daemonFragment = "[daemon]\npatrol_interval = \"1m\"\n"
+	for _, tc := range []struct {
+		name  string
+		root  string
+		files map[string]string
+		want  []string
+	}{
+		{
+			name:  "class map in city.toml, binding in a fragment",
+			root:  strings.Replace(fragmentSplitStorageRoot, `include = ["storage.toml"]`, `include = ["daemon.toml", "storage.toml"]`, 1),
+			files: map[string]string{"/city/daemon.toml": daemonFragment, "/city/storage.toml": fragmentSplitStorageFragment},
+			want:  []string{"/city/storage.toml"},
+		},
+		{
+			name: "the whole [storage] in a fragment",
+			root: "include = [\"storage.toml\"]\n\n[workspace]\nname = \"split-city\"\n",
+			files: map[string]string{"/city/storage.toml": `
+[storage.classes]
+work = "work"
+graph = "infra"
+sessions = "infra"
+messaging = "infra"
+orders = "infra"
+nudges = "infra"
+` + fragmentSplitStorageFragment},
+			want: []string{"/city/storage.toml"},
+		},
+		{
+			name: "class map and binding in two fragments",
+			root: "include = [\"classes.toml\", \"daemon.toml\", \"bindings.toml\"]\n\n[workspace]\nname = \"split-city\"\n",
+			files: map[string]string{
+				"/city/classes.toml": `
+[storage.classes]
+work = "work"
+graph = "infra"
+sessions = "infra"
+messaging = "infra"
+orders = "infra"
+nudges = "infra"
+`,
+				"/city/daemon.toml":   daemonFragment,
+				"/city/bindings.toml": fragmentSplitStorageFragment,
+			},
+			want: []string{"/city/classes.toml", "/city/bindings.toml"},
+		},
+		{
+			name:  "no [storage] anywhere",
+			root:  "include = [\"daemon.toml\"]\n\n[workspace]\nname = \"single-city\"\n",
+			files: map[string]string{"/city/daemon.toml": daemonFragment},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := fsys.NewFake()
+			fs.Files["/city/city.toml"] = []byte(tc.root)
+			for path, body := range tc.files {
+				fs.Files[path] = []byte(body)
+			}
+			cfg, prov, err := LoadWithIncludes(fs, "/city/city.toml")
+			if err != nil {
+				t.Fatalf("LoadWithIncludes: %v", err)
+			}
+			if !slices.Equal(prov.StorageFragments, tc.want) {
+				t.Fatalf("Provenance.StorageFragments = %q, want %q", prov.StorageFragments, tc.want)
+			}
+			own, ownProv, err := ComposeFragments(fs, "/city/city.toml")
+			if err != nil {
+				t.Fatalf("ComposeFragments: %v", err)
+			}
+			if !slices.Equal(ownProv.StorageFragments, tc.want) || !reflect.DeepEqual(own.Storage, cfg.Storage) {
+				t.Fatalf("ComposeFragments = [storage] %+v from %q; LoadWithIncludes = %+v from %q", own.Storage, ownProv.StorageFragments, cfg.Storage, tc.want)
+			}
+		})
+	}
+}
+
+// wholeSplitStorage is a whole split [storage]: the class map and the binding
+// it names.
+const wholeSplitStorage = `
+[storage.classes]
+work = "work"
+graph = "infra"
+sessions = "infra"
+messaging = "infra"
+orders = "infra"
+nudges = "infra"
+` + fragmentSplitStorageFragment
+
+// writeCityWithUninstalledImport writes files (name to content) into a new
+// city directory whose pack.toml imports a remote pack this host has not
+// installed, as a gc init --from source can, and returns its city.toml path.
+// LoadWithIncludes cannot load that city until gc import install runs.
+func writeCityWithUninstalledImport(t *testing.T, files map[string]string) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	dir := t.TempDir()
+	files = maps.Clone(files)
+	files["pack.toml"] = "[pack]\nname = \"template\"\nschema = 1\n\n[imports.remote]\nsource = \"https://github.com/example/remote-pack.git\"\nversion = \"^1.2\"\n"
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tomlPath := filepath.Join(dir, "city.toml")
+	if _, _, err := LoadWithIncludes(fsys.OSFS{}, tomlPath); err == nil || !strings.Contains(err.Error(), "missing packs.lock") {
+		t.Fatalf("LoadWithIncludes = %v, want the uninstalled remote import refused", err)
+	}
+	return tomlPath
+}
+
+// ComposeFragments composes a city's own declarations, its city.toml and
+// include fragments, and expands no pack: a city whose remote import is not
+// installed here, which LoadWithIncludes cannot load, still composes the split
+// [storage] its fragments declare, and names them.
+func TestComposeFragmentsComposesTheStorageOfACityWhosePackIsNotInstalled(t *testing.T) {
+	tomlPath := writeCityWithUninstalledImport(t, map[string]string{
+		"city.toml":    "include = [\"daemon.toml\", \"storage.toml\"]\n\n[workspace]\nname = \"template\"\n",
+		"daemon.toml":  "[daemon]\npatrol_interval = \"1m\"\n",
+		"storage.toml": wholeSplitStorage,
+	})
+	cfg, prov, err := ComposeFragments(fsys.OSFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("ComposeFragments: %v", err)
+	}
+	if !RelocatesAnyClass(cfg) || cfg.Storage.Bindings["infra"].Path != ".gc/store" {
+		t.Fatalf("ComposeFragments [storage] = %+v; want the fragment's split", cfg.Storage)
+	}
+	if want := []string{filepath.Join(filepath.Dir(tomlPath), "storage.toml")}; !slices.Equal(prov.StorageFragments, want) {
+		t.Fatalf("Provenance.StorageFragments = %q, want %q", prov.StorageFragments, want)
+	}
+	if cfg.Workspace.Name != "template" || cfg.Daemon.PatrolInterval != "1m" {
+		t.Fatalf("ComposeFragments lost the city's own declarations: workspace %q, daemon patrol %q", cfg.Workspace.Name, cfg.Daemon.PatrolInterval)
+	}
+}
+
+// Whatever stops a city's include fragments from composing stops
+// ComposeFragments with the error LoadWithIncludes reports for it.
+func TestComposeFragmentsFailsAsLoadWithIncludesWhereTheFragmentsDoNotCompose(t *testing.T) {
+	for name, files := range map[string]map[string]string{
+		"a missing fragment": {
+			"/city/city.toml": `include = ["storage.toml"]`,
+		},
+		"a fragment that does not parse": {
+			"/city/city.toml":    `include = ["storage.toml"]`,
+			"/city/storage.toml": "[storage.classes\n",
+		},
+		"a fragment that includes another": {
+			"/city/city.toml":    `include = ["storage.toml"]`,
+			"/city/storage.toml": "include = [\"more.toml\"]\n",
+		},
+		"a binding declared twice": {
+			"/city/city.toml":    fragmentSplitStorageRoot + fragmentSplitStorageFragment,
+			"/city/storage.toml": fragmentSplitStorageFragment,
+		},
+		"a [storage] that composes incomplete": {
+			"/city/city.toml":    "include = [\"storage.toml\"]\n\n[workspace]\nname = \"split-city\"\n",
+			"/city/storage.toml": fragmentSplitStorageFragment,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fs := fsys.NewFake()
+			for path, body := range files {
+				fs.Files[path] = []byte(body)
+			}
+			_, _, loadErr := LoadWithIncludes(fs, "/city/city.toml")
+			if loadErr == nil {
+				t.Fatal("LoadWithIncludes loaded the city; the case does not stop its fragments")
+			}
+			if _, _, err := ComposeFragments(fs, "/city/city.toml"); err == nil || err.Error() != loadErr.Error() {
+				t.Fatalf("ComposeFragments error = %v, want LoadWithIncludes' %v", err, loadErr)
+			}
+		})
 	}
 }

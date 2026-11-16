@@ -14,8 +14,8 @@ Formula, Rig, Pack, and Event.
 
 This page continues from a `my-city` with `my-project` rigged, the `pancakes`
 formula cooked, and `mayor` / `reviewer` / `worker` agents (see
-[Tutorial 05](/tutorials/05-formulas)). Everything below runs against the bead
-store with the `bd` tool.
+[Tutorial 05](/tutorials/05-formulas)). Most of what follows uses the `bd` tool
+on the city's work ledger.
 
 Confirm the local pack, rig registration, and reviewer binding carried forward
 from the earlier tutorials:
@@ -27,6 +27,8 @@ $ cat pack.toml
 name = "my-city"
 schema = 2
 
+# ... yours also has an [imports] table for the packs gc init pulled in
+
 [[named_session]]
 template = "mayor"
 mode = "always"
@@ -36,15 +38,20 @@ $ cat city.toml
 [workspace]
 provider = "claude"
 
-... # content elided
+# ... yours also has [providers], [defaults.rig.imports] and [storage] tables
 
 [[rigs]]
-name = "my-project"
+name = "hello-world"   # from the Quickstart
+# ...
+
+[[rigs]]
+name = "my-project"    # from Tutorial 01
+# ...
 
 ~/my-city
 $ cat agents/reviewer/agent.toml
 dir = "my-project"
-provider = "codex"
+provider = "codex"     # or whichever provider you chose in Tutorial 02
 ```
 
 ## What is a bead
@@ -55,37 +62,41 @@ A bead is a unit of work with an ID, a title, a status, and a type. We use the
 ```shell
 ~/my-city
 $ bd list
-○ mc-0ez P2 Mix wet ingredients
-○ mc-265 P2 Combine wet and dry
-○ mc-79s P2 pancakes
-○ mc-9vb P2 Finalize workflow
 ○ mc-a4l P2 Refactor auth module
-○ mc-b8g P2 Mix dry ingredients
 ○ mc-d4g P2 Sprint 42
-○ mc-io4 P2 mayor
-○ mc-k3q P2 Serve
-○ mc-nia P2 Cook the pancakes
 ○ mc-xp7 P2 Update API docs
 
 --------------------------------------------------------------------------------
-Total: 11 issues (11 open, 0 in progress)
+Total: 3 issues (3 open, 0 in progress)
 
 Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred
 ```
 
-The seven `pancakes` beads come from cooking the formula in
-[Tutorial 05](/tutorials/05-formulas): a root bead (`mc-79s`), one bead per
-step, and the `Finalize workflow` control step the v2 compiler appends. Each is
-an independent top-level bead with its own ID; ordering lives in dependency
-edges (below). The leading glyph is status, followed by ID, priority (`P2`),
-and title. Pass `--flat` for a single-level list, `--all` to include closed
-beads. Your inventory will differ — `Refactor auth module`, `Sprint 42`, and
-`Update API docs` are created later on this page. The shape is what matters.
+The leading glyph is status, followed by ID, priority (`P2`), and title. Pass
+`--flat` for a single-level list, `--all` to include closed beads. Your
+inventory will differ — these three are created later on this page, and yours
+also holds any work from earlier tutorials. The shape is what matters.
+
+The `pancakes` workflow you cooked in [Tutorial 05](/tutorials/05-formulas) is
+not in this list, and neither is the mayor's session. A city keeps its beads in
+two stores:
+
+| Store | Holds | Read it with |
+| --- | --- | --- |
+| **Work ledger** | The work people and agents reason about: tasks, features, bugs, convoys | `bd`, `gc bd`, and every `gc` command |
+| **Infrastructure store** (`.gc/store`) | What the city runs on: sessions, mail, workflow steps, order runs, queued nudges | `gc` commands (`gc session list`, `gc mail`, `gc ready`, and `gc bd show` or `gc bd dep tree` on one of its IDs) |
+
+`gc init` writes this split into `city.toml` as the `[storage]` section. The
+infrastructure store is a local SQLite database that keeps the city's own
+bookkeeping from competing with your work for the ledger, and its beads carry
+IDs that start `gcg-` (queued nudges: `gcnq-`). Raw `bd` reads only the work
+ledger.
 
 Every bead has:
 
 - **ID** — prefixed with two letters from the city or rig name (`mc-194` for
-  "my-city", `ma-12` for a rig "my-app")
+  "my-city", `ma-12` for a rig "my-app"); beads in the infrastructure store
+  start `gcg-` (`gcnq-` for queued nudges)
 - **Title** — human-readable name
 - **Status** — `open`, `in_progress`, `blocked`, `deferred`, or `closed`
 - **Type** — what kind of bead it is
@@ -101,9 +112,8 @@ The type determines what a bead represents:
 | **session**  | A running agent session                             | `gc session new`                            |
 | **convoy**   | Container grouping related beads                    | `gc convoy create`, auto-created by sling   |
 
-There's no separate storage for tasks vs. messages vs. sessions — one store,
-one query interface, one dependency model for everything. That's what makes the
-system composable.
+Every type is the same bead underneath, whichever store holds it — one shape,
+one dependency model for everything. That's what makes the system composable.
 
 A formula has no type of its own. Cooking or slinging one produces plain `task`
 beads: the root carries `gc.kind=workflow` metadata, and an ephemeral
@@ -141,6 +151,14 @@ $ bd create "Update API docs"
   Status: open
 ```
 
+<Note>
+Bead IDs are generated, so yours will differ. Note the three IDs your
+`bd create` commands printed. For the rest of this page, use your ID wherever
+the examples show `mc-ykp` (Fix the login bug), `mc-a4l` (Refactor auth
+module), or `mc-xp7` (Update API docs). Do the same for the convoy IDs that
+`gc convoy create` prints later.
+</Note>
+
 The trailing lines (`Priority:`, `Status:`) vary by `bd` version — some builds
 print one, some both. The bead is created identically either way. The
 dependency and convoy examples below use all three of these beads.
@@ -167,25 +185,38 @@ $ bd close mc-ykp
 
 $ bd list --status open --flat
 ○ mc-a4l [P2] [feature] - Refactor auth module
-○ mc-xp7 [P2] [task]    - Update API docs
+○ mc-xp7 [P2] [task] - Update API docs
 ```
 
 Note that the flag is `--status` (`--state` is a different command for state
 dimensions). As with the opening listing, the output here is trimmed to the
-beads this page created — yours will still include the open pancakes beads
-and the mayor's session bead.
+beads this page created. Yours also includes any open work beads from earlier
+tutorials.
 
 ## Beads as execution state
 
-The bead store is the execution state of the whole system — every running
+The bead stores are the execution state of the whole system — every running
 session, message in flight, and formula step is a bead with a status. To know
-what the city is doing right now, query the store:
+what the city is doing right now, query them. Session beads live in the
+infrastructure store, so list them with `gc`:
 
 ```shell
 ~/my-city
-$ bd list --status in_progress --flat
-◐ mc-io4 [P2] [session] - mayor
+$ gc session list
+ID     TEMPLATE  STATE   REASON          TARGET  TITLE  WORKDIR             AGE  LAST ACTIVE  LAST NUDGE
+gcg-2  mayor     active  session,config  mayor   mayor  /Users/you/my-city  10h  5s ago       -
+...
 ```
+
+You'll see one per session in your city (the mayor, the control dispatcher,
+any pool workers), each with its own `gcg-` ID.
+
+A session bead's status stays `open` while the session exists; whether it is
+running, asleep, or suspended lives in the bead's metadata, which
+`gc session list` reads to show each session's state. Task beads are the ones
+that move to `in_progress` when an agent claims them, so
+`bd list --status in_progress --flat` shows the work that agents are doing
+right now.
 
 Because work lives in the store rather than in memory, agent sessions are
 disposable. If an agent dies its beads stay open; when it restarts, its hooks
@@ -208,7 +239,7 @@ $ bd label add mc-a4l frontend
 ✓ Added label 'frontend' to mc-a4l
 
 $ bd list --label priority:high --flat
-○ mc-a4l [P2] [feature] - Refactor auth module
+○ mc-a4l [P2] [feature] [frontend priority:high] - Refactor auth module
 ```
 
 `bd label add` takes a single label per call — apply multiples one at a time.
@@ -332,7 +363,8 @@ Landed convoy mc-0ud "Auth rewrite"
 ### Adding beads and checking convoys
 
 Work grows after a convoy is created — a bug surfaces mid-sprint. Add beads to
-an existing convoy:
+an existing convoy (`mc-xp7` is already a member, so this repeat is a harmless
+no-op; pass any other bead ID to grow the convoy):
 
 ```shell
 ~/my-city
@@ -341,14 +373,19 @@ Added mc-xp7 to convoy mc-d4g
 ```
 
 If a convoy should have auto-closed but didn't (a hook misfired), reconcile
-manually:
+manually. `gc convoy check` closes every convoy whose members are all closed,
+skipping owned convoys:
 
 ```shell
 ~/my-city
 $ gc convoy check
-Auto-closed convoy mc-d4g "Sprint 42"
-1 convoy(s) auto-closed
+0 convoy(s) auto-closed
 ```
+
+Nothing closes here: `Sprint 42` still has two open members (`mc-a4l` and
+`mc-xp7`). Once the last of them closes, the convoy closes on its own, and a
+`gc convoy check` that finds one the hook missed prints
+`Auto-closed convoy <id> "<title>"` for it before the count.
 
 ### Stranded work
 
@@ -362,6 +399,9 @@ CONVOY  ISSUE   TITLE
 mc-d4g  mc-a4l  Refactor auth module
 mc-d4g  mc-xp7  Update API docs
 ```
+
+Rows for convoys that earlier tutorials created by slinging work can appear
+here too.
 
 ### Convoy metadata
 
@@ -403,11 +443,13 @@ flow:
 
 For work routed to a pool — a group of agents sharing a work queue, which
 [Tutorial 07](/tutorials/07-orders) covers — the query checks metadata instead
-of assignee:
+of assignee. `gc ready` reads both stores, so it also finds the workflow steps
+routed to the pool; it prints a JSON array of the ready beads:
 
 ```shell
 ~/my-city
-$ bd ready --metadata-field gc.routed_to=my-project/worker --unassigned --limit=1
+$ gc ready --metadata-field gc.routed_to=my-project/worker --unassigned --limit=1
+[]
 ```
 
 `mc-xp7` is blocked by `mc-a4l`, so this query won't return it — blocked work
@@ -436,27 +478,33 @@ Configure the backend in `city.toml`:
 provider = "file"    # or "bd" (default)
 ```
 
-For most users, the default works fine and you don't need to think about it.
+That backend holds the work ledger. The infrastructure store is the
+`[storage]` section's SQLite binding under `.gc/store`, whatever the backend.
+For most users, the defaults work fine and you don't need to think about
+either. [Storage classes](/runbooks/split-storage-classes) covers the split in
+depth, including how to move a city created before it was the default.
 
 ---
 
 You rarely touch beads directly — `gc session`, `gc mail`, `gc sling`, and `gc
 formula` handle creation and management. You reach for `bd` when you want to
-query outstanding work across the city, create ad-hoc tasks, inspect a
-formula's dependency graph, or debug why an agent isn't picking up work.
-(Listings trimmed to this page's beads; open pancakes beads will show up in
-yours too.)
+query outstanding work in the ledger, create ad-hoc tasks, or debug why an
+agent isn't picking up work.
+(The listing is trimmed to this page's beads; open task beads from earlier
+tutorials show up in yours too.)
 
 ```shell
 ~/my-city
 $ bd list --status open --type task --flat
-○ mc-xp7 [P2] [task] - Update API docs
-○ mc-b8g [P2] [task] - Mix dry ingredients (blocks: mc-265)
+● mc-xp7 [P2] [task] - Update API docs (blocked by: mc-a4l)
 
 $ bd show mc-a4l
 ○ mc-a4l · Refactor auth module   [P2 · OPEN]
-Owner: dbox · Type: feature
+Created by: Your Name · Type: feature
 Created: 2026-04-08 · Updated: 2026-04-08
+
+DESCRIPTION
+  (none)
 
 LABELS: frontend, priority:high
 
@@ -466,17 +514,23 @@ METADATA
 
 BLOCKS
   ← ○ mc-xp7: Update API docs P2
+
+TRACKED BY
   ← ○ mc-d4g: Sprint 42 P2
 
 $ bd close mc-a4l
 ✓ Closed mc-a4l — Refactor auth module: Closed
 ```
 
-The `Sprint 42` entry under `BLOCKS` is the convoy's incoming `tracks` edge —
-grouping, not a blocker.
+`mc-xp7` still matches `--status open`, but the `●` glyph and the
+`(blocked by: …)` note show that its `blocks` dependency on `mc-a4l` holds it
+back. `bd show` lists that edge under `BLOCKS` and the `Sprint 42` convoy's
+`tracks` edge separately under `TRACKED BY`: grouping, not a blocker.
 
 Beads are the ground truth of the city's running state. Sessions, mail, and
-convoys are beads; a formula materializes its work as beads when run.
+convoys are beads; a formula materializes its work as beads when run. Work
+lives in the ledger, and what the city runs on lives in the infrastructure
+store.
 
 ## What's next
 

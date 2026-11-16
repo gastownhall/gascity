@@ -42,6 +42,10 @@ var allowedNonMetadata = map[string]string{
 	"gc.healthz.v1":            "workspace healthz workflow contract (internal/workspacesvc)",
 	"gc.worker.conformance.v1": "worker conformance report schema version (internal/worker/workertest)",
 
+	// HMAC domain-separation tags (MAC input prefixes, never stored anywhere).
+	"gc.connect.bearer.v1":   "connect bearer HMAC domain tag (internal/connect/bearer.go)",
+	"gc.connect.sentinel.v1": "connect token-file sentinel HMAC domain tag (internal/connect/bearer.go)",
+
 	// Cobra command-tree annotations (not bead metadata).
 	"gc.docgen.skip":                "cobra annotation: skip CLI doc generation",
 	"gc.json.schema_dir":            "cobra annotation: JSON schema output dir",
@@ -60,6 +64,10 @@ var allowedNonMetadata = map[string]string{
 	"gc.bash": "shell completion filename (cmd/gc/cmd_shell.go)",
 	"gc.fish": "shell completion filename (cmd/gc/cmd_shell.go)",
 
+	// Windows executable name, not a metadata key: in PowerShell a bare gc is
+	// the Get-Content alias, so agent-facing command text names gc.exe.
+	"gc.exe": "Windows gc executable name (internal/runtime/gccommand_windows.go, internal/overlay/platform_windows.go)",
+
 	// City config YAML keys (config-file rewrite, not bead metadata).
 	"gc.endpoint_origin": "city config YAML key (internal/beads/contract/files.go)",
 	"gc.endpoint_status": "city config YAML key (internal/beads/contract/files.go)",
@@ -77,6 +85,7 @@ var excludedDirs = []string{
 	"internal/telemetry",        // gc.* metric/counter names
 	"internal/runtime/t3bridge", // t3bridge UI thread-metadata namespace
 	"internal/opjournal",        // op journal gc.op.* / gc.fact.* namespace; its codec is the only reader and writer
+	"internal/eventfact",        // event-fact gc.ev.* and projector-checkpoint gc.evproj.* namespaces; its codec is the only reader and writer
 	"internal/api/genclient",    // generated client code
 }
 

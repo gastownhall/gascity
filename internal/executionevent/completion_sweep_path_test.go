@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
@@ -137,5 +138,77 @@ func TestCompletionBackstopGrowthCapFiresOnTheSweepPath(t *testing.T) {
 	}
 	if trimmed > completedFactIndexGrowthCap {
 		t.Fatalf("after the rebuild the set holds %d fact(s), still over the cap; the rotated-out keys were not dropped", trimmed)
+	}
+}
+
+// TestCompletionBackstopKeepsTheSweepAcrossAnEqualStoreFan pins the other half
+// of the store-fan guard: a fan the caller re-resolves to the SAME physical
+// stores in the same order, in a fresh slice of fresh handles (with a zero
+// handle at the same position), keeps the sweep, so a chunked sweep resumes instead of restarting
+// at the first root of the first store every chunk.
+func TestCompletionBackstopKeepsTheSweepAcrossAnEqualStoreFan(t *testing.T) {
+	backing, _, _ := completionCorpus(t, 3)
+	store := &sweepCountingGraphStore{Store: backing}
+	journal := events.NewFake()
+	backstop := &CompletionBackstop{ChunkSize: 1}
+	fans := [][]beads.GraphStore{
+		{{Store: store}, {}},
+		{{Store: store}, {}},
+	}
+	visited := 0
+	for i := 0; ; i++ {
+		r := backstop.Pass(journal, fans[i%len(fans)], "execution-reconcile")
+		visited += r.RootsVisited
+		if r.SweepComplete {
+			break
+		}
+		if i > 20 {
+			t.Fatal("the sweep never completed; the cursor is not advancing")
+		}
+	}
+	if store.rootLists != 1 {
+		t.Fatalf("the store's roots were listed %d times in one sweep, want 1: an equal fan restarted the sweep", store.rootLists)
+	}
+	if visited != 3 {
+		t.Fatalf("visited %d roots in one sweep, want 3", visited)
+	}
+}
+
+// TestCompletionBackstopRestartsWhenAFanPositionEmpties pins that a store
+// replaced by the zero handle at the cursor's position, or the reverse, is a
+// changed fan.
+func TestCompletionBackstopRestartsWhenAFanPositionEmpties(t *testing.T) {
+	backing, _, _ := completionCorpus(t, 2)
+	store := &sweepCountingGraphStore{Store: backing}
+	journal := events.NewFake()
+	backstop := &CompletionBackstop{ChunkSize: 1}
+	backstop.Pass(journal, []beads.GraphStore{{Store: store}}, "execution-reconcile")
+	backstop.Pass(journal, []beads.GraphStore{{}}, "execution-reconcile")
+	r := backstop.Pass(journal, []beads.GraphStore{{Store: store}}, "execution-reconcile")
+	if store.rootLists != 2 {
+		t.Fatalf("the store's roots were listed %d times, want 2: emptying its position did not restart the sweep", store.rootLists)
+	}
+	if r.RootsVisited != 1 {
+		t.Fatalf("the restarted sweep visited %d roots, want 1", r.RootsVisited)
+	}
+}
+
+// TestCompletionBackstopLatchesACopyOfTheFan: a caller that reuses its fan
+// slice and replaces a store in place mid-sweep still restarts the sweep. A
+// latch that aliased the caller's slice would compare the new fan with itself
+// and keep the old store's held roots against the new store.
+func TestCompletionBackstopLatchesACopyOfTheFan(t *testing.T) {
+	backingA, _, _ := completionCorpus(t, 2)
+	backingB, _, _ := completionCorpus(t, 2)
+	storeA := &sweepCountingGraphStore{Store: backingA}
+	storeB := &sweepCountingGraphStore{Store: backingB}
+	journal := events.NewFake()
+	backstop := &CompletionBackstop{ChunkSize: 1}
+	fan := []beads.GraphStore{{Store: storeA}}
+	backstop.Pass(journal, fan, "execution-reconcile")
+	fan[0] = beadstest.Graph(storeB)
+	backstop.Pass(journal, fan, "execution-reconcile")
+	if storeB.rootLists != 1 {
+		t.Fatalf("store B's roots were listed %d times after it replaced store A in place, want 1: the sweep kept A's held roots", storeB.rootLists)
 	}
 }

@@ -7,6 +7,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -22,14 +23,14 @@ func TestExistingGraphV2RootTakesOnlyARoot(t *testing.T) {
 	if _, err := store.Create(beads.Bead{Title: "forged", Type: "task", Metadata: map[string]string{beadmeta.Graphv2RootKeyMetadataKey: "k"}}); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := existingGraphV2Root(store, recipe); err != nil || got != nil {
+	if got, err := existingGraphV2Root(beadstest.Graph(store), recipe); err != nil || got != nil {
 		t.Fatalf("existingGraphV2Root = %+v (%v), want none", got, err)
 	}
 	root, err := store.Create(beads.Bead{Title: "root", Type: "task", Metadata: map[string]string{beadmeta.Graphv2RootKeyMetadataKey: "k", beadmeta.KindMetadataKey: beadmeta.KindWorkflow, beadmeta.FormulaContractMetadataKey: beadmeta.FormulaContractGraphV2}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, err := existingGraphV2Root(store, recipe); err != nil || got == nil || got.RootID != root.ID {
+	if got, err := existingGraphV2Root(beadstest.Graph(store), recipe); err != nil || got == nil || got.RootID != root.ID {
 		t.Fatalf("existingGraphV2Root = %+v (%v), want %s", got, err, root.ID)
 	}
 }
@@ -55,17 +56,24 @@ func TestDoSlingBatchRefusesAControllerOwnedChild(t *testing.T) {
 			t.Fatal(err)
 		}
 		owned := map[string]beads.Bead{}
-		for _, typ := range []string{"startup-health-episode", "Convergence", "task"} {
+		for _, typ := range []string{"startup-health-episode", "Convergence", "task", "message", "order-run"} {
 			b, err := store.Create(beads.Bead{Title: typ, Type: "task", Status: "open"})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if typ == "task" {
+			switch typ {
+			case "task":
 				if err := store.Update(b.ID, beads.UpdateOpts{Labels: []string{"gc:session"}}); err != nil {
 					t.Fatal(err)
 				}
-			} else if err := store.Update(b.ID, beads.UpdateOpts{Type: &typ}); err != nil {
-				t.Fatal(err)
+			case "order-run": // a coordination row by its run label (the #7766 review)
+				if err := store.Update(b.ID, beads.UpdateOpts{Labels: []string{"order-run:digest"}}); err != nil {
+					t.Fatal(err)
+				}
+			default:
+				if err := store.Update(b.ID, beads.UpdateOpts{Type: &typ}); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if err := store.DepAdd(convoy.ID, b.ID, "tracks"); err != nil {
 				t.Fatal(err)
@@ -82,7 +90,7 @@ func TestDoSlingBatchRefusesAControllerOwnedChild(t *testing.T) {
 		}
 		for _, c := range result.Children {
 			if before, ok := owned[c.BeadID]; ok {
-				if !c.Failed || !strings.Contains(c.FailReason, "controller-owned") {
+				if !c.Failed || !strings.Contains(c.FailReason, "is owned") {
 					t.Fatalf("force %t: owned child %+v, want refused", force, c)
 				}
 				if got, _ := store.Get(c.BeadID); got.Assignee != before.Assignee || got.Status != before.Status || !maps.Equal(got.Metadata, before.Metadata) {

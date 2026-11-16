@@ -613,6 +613,7 @@ The resource critical path exclusively owns these files while active:
 - `internal/testpolicy/resourcecensus/hermetic.go`
 - `internal/testpolicy/resourcecensus/hermetic_test.go`
 - `test/test-resources.toml`
+- `test/test-resource-counts.toml`
 - `TESTING.md`
 
 Treat `TESTING.md` as a single-writer integration file. Other lanes may prepare
@@ -823,6 +824,8 @@ To restart the program:
   — source-resource census and code-owned policy.
 - [`test/test-resources.toml`](../../test/test-resources.toml) — checked
   resource ledger.
+- [`test/test-resource-counts.toml`](../../test/test-resource-counts.toml) —
+  generated per-file census counts.
 - [`internal/testutil/providerledger/`](../../internal/testutil/providerledger/)
   — provider-constructor/conformance ownership.
 - [`internal/testpolicy/timingplan/`](../../internal/testpolicy/timingplan/) —

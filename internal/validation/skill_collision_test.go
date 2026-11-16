@@ -34,6 +34,58 @@ func makeAgentSkillsDir(t *testing.T, root, agentName string) string {
 	return dir
 }
 
+func TestValidateSkillCollisionsProviderFamily(t *testing.T) {
+	claudeBase := "builtin:claude"
+	wrapperBase := "provider:myclaude"
+	customBase := ""
+	providers := map[string]config.ProviderSpec{
+		"myclaude": {Base: &claudeBase},
+		"wrapper":  {Base: &wrapperBase},
+		"custom":   {Base: &customBase, Command: "custom"},
+	}
+	for _, tc := range []struct {
+		name              string
+		agentProvider     string
+		otherProvider     string
+		workspaceProvider string
+		wantCollision     bool
+	}{
+		{name: "wrapped claude", agentProvider: "myclaude", otherProvider: "myclaude", wantCollision: true},
+		{name: "wrapper and builtin share sink", agentProvider: "myclaude", otherProvider: "claude", wantCollision: true},
+		{name: "two hop workspace wrapper", workspaceProvider: "wrapper", wantCollision: true},
+		{name: "custom without family", agentProvider: "custom", otherProvider: "custom"},
+		{name: "unknown provider", agentProvider: "unknown", otherProvider: "unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			aSkills := makeAgentSkillsDir(t, root, "a")
+			bSkills := makeAgentSkillsDir(t, root, "b")
+			writeAgentSkill(t, aSkills, "notes")
+			writeAgentSkill(t, bSkills, "notes")
+			cfg := &config.City{
+				Providers: providers,
+				Workspace: config.Workspace{Provider: tc.workspaceProvider},
+				Agents: []config.Agent{
+					{Name: "a", Provider: tc.agentProvider, Scope: "city", SkillsDir: aSkills},
+					{Name: "b", Provider: tc.otherProvider, Scope: "city", SkillsDir: bSkills},
+				},
+			}
+			var want []SkillCollision
+			if tc.wantCollision {
+				want = []SkillCollision{{
+					ScopeRoot:  "<city>",
+					Vendor:     "claude",
+					SkillName:  "notes",
+					AgentNames: []string{"a", "b"},
+				}}
+			}
+			if got := ValidateSkillCollisions(cfg); !reflect.DeepEqual(got, want) {
+				t.Fatalf("got %+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
 func TestValidateSkillCollisions(t *testing.T) {
 	t.Run("no agents returns nil", func(t *testing.T) {
 		if got := ValidateSkillCollisions(&config.City{}); got != nil {

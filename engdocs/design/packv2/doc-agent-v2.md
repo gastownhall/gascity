@@ -268,9 +268,13 @@ When a target has effective MCP, Gas City adopts the provider-native MCP
 surface as GC-managed runtime state. On first adoption the existing
 provider-native content is snapshotted to
 `.gc/mcp-adopted/<provider>/<timestamp>.<ext>` and a one-line warning
-is emitted to stderr, so hand-authored `.mcp.json`/`settings.json`/
-`config.toml` entries can be recovered. Symlinked targets are rejected
-unconditionally — managed targets must be regular files.
+is emitted to stderr. A file that holds MCP servers the catalog does not
+define or defines differently (or, for Claude's `.mcp.json`, other
+top-level keys), a file gc cannot parse, and a symlinked one are not adopted
+at all: gc leaves the file as it is and warns, so a repository's own MCP
+config keeps working; define the servers still needed in an `mcp/` catalog
+and remove the file's entries to let gc adopt it. A managed target must be
+a regular file: a symlink there is an error.
 
 Cleanup on each stage-1 reconcile walks `.gc/mcp-managed/` under the
 city root and every **still-attached** rig and removes managed

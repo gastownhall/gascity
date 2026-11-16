@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
 // ErrIncarnationBoundUnsupported reports that this platform has no process
@@ -17,10 +17,12 @@ import (
 // must treat the scan as incomplete, never as a certified absence.
 var ErrIncarnationBoundUnsupported = errors.New("proctable: incarnation start-time bound unsupported on this platform")
 
-// ScanAll returns all live agent root processes with a non-empty
-// GC_SESSION_ID.
-func ScanAll() ([]runtime.LiveRuntime, error) {
-	return ScanBySessionID("")
+// OrphanCandidate reports whether a process whose parent is ppid was
+// reparented away from its spawner, to init or the user subreaper: the only
+// roots the orphan sweep may reap ([pidutil.IsReparentedOrphan]), and so the
+// only processes the empty-id scan reads.
+func OrphanCandidate(ppid, subreaperPID int) bool {
+	return pidutil.IsReparentedOrphan(ppid, subreaperPID)
 }
 
 // EntryError is a scan's failure to inspect one process entry. Its message is
@@ -108,6 +110,30 @@ func SummarizeScanError(err error) string {
 	parts = append(parts, fmt.Sprintf("%d unreadable process entries in %d classes: %s",
 		count, len(order), strings.Join(described, "; ")))
 	return strings.Join(parts, "; ")
+}
+
+// ScanErrorShape is the kinds of failure in a scan error: its whole-scan
+// failures and its entry failure classes (as SummarizeScanError groups them),
+// with digit runs normalized and sorted. Two scans whose failures differ only
+// in counts and PIDs have the same shape, so a logger can report a scan
+// error once until its kind changes.
+func ScanErrorShape(err error) string {
+	var entries []*EntryError
+	var other []string
+	collectScanErrors(err, &entries, &other)
+	kinds := make(map[string]bool, len(other)+len(entries))
+	for _, msg := range other {
+		kinds[digitRun.ReplaceAllString(msg, "N")] = true
+	}
+	for _, entry := range entries {
+		kinds["entry: "+digitRun.ReplaceAllString(oneLine(entry.Error()), "N")] = true
+	}
+	shape := make([]string, 0, len(kinds))
+	for kind := range kinds {
+		shape = append(shape, kind)
+	}
+	sort.Strings(shape)
+	return strings.Join(shape, "\n")
 }
 
 // HasWholeScanFailure reports whether err holds any failure that is not one

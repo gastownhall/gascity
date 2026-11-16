@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -285,7 +287,7 @@ func TestOrderDispatchGateReadsTheBindingAloneOnASplitCity(t *testing.T) {
 		t.Fatalf("ordersStoreFor = %T(%p), want the binding %p; the tracking bead's own store is not in the gate's reach", got, got, binding)
 	}
 
-	storesForGate, storeKeysForGate := m.gateStoresFor(cityPath, workStore, "city\x00"+cityPath, nil)
+	storesForGate, storeKeysForGate := m.gateStoresFor(cityPath, workStore, "city\x00"+cityPath, nil, nil)
 	if !storeListContains(storesForGate, beads.Store(binding)) {
 		t.Fatalf("gate store list = %+v, missing the binding the tracking bead lives in; the marker the dispatch just wrote is invisible and the order re-fires every tick", storesForGate)
 	}
@@ -318,7 +320,7 @@ func TestOrderDispatchGateStaysOnTheOneStoreOnSingleStoreCity(t *testing.T) {
 		dispatchCtx:    dispatchCtx,
 		dispatchCancel: cancel,
 	}
-	storesForGate, storeKeysForGate := m.gateStoresFor(cityPath, store, "city\x00"+cityPath, nil)
+	storesForGate, storeKeysForGate := m.gateStoresFor(cityPath, store, "city\x00"+cityPath, nil, nil)
 	if len(storesForGate) != 1 || storesForGate[0] != beads.Store(store) {
 		t.Fatalf("gate store list = %+v, want exactly the one store the city has", storesForGate)
 	}
@@ -580,6 +582,70 @@ func TestOneShotOrderFederationsStayOnTheOneStoreOnSingleStoreCity(t *testing.T)
 	}
 	if got := appendOrdersSweepStore([]beads.Store{scope}, scope); len(got) != 1 {
 		t.Fatalf("sweep federation = %+v, want the store it already reads added no second time", got)
+	}
+}
+
+// TestOrderHistoryFoldsTheScopeStoresOwnOrdersHandle pins the federation
+// gc order history reads on a city that relocates nothing. Its orders leg is
+// the orders class handle over the order's scope store, the handle gc order run
+// records through, and there that handle is the scope store itself, so the
+// resolver hands back the one scope store, read once. Under the split-strict
+// gate the handle is the class view, which holds the rows the work view hides,
+// so it is the second leg there.
+func TestOrderHistoryFoldsTheScopeStoresOwnOrdersHandle(t *testing.T) {
+	cityPath := t.TempDir()
+	t.Setenv("GC_BEADS", "file")
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	resetCLIStorageRoutes(t)
+	a := orders.Order{Name: "digest", Exec: "true", Trigger: "cooldown", Interval: "15m"}
+
+	stores, err := cachedOrderHistoryStoresResolver(cityPath, cfg, io.Discard)(a)
+	if err != nil {
+		t.Fatalf("resolving stores: %v", err)
+	}
+	want := []beads.OrdersStore{stores[0]}
+	if splitStrictSeam != nil {
+		want = append(want, cliStores(cityPath, stores[0].Store).Orders())
+	}
+	if len(stores) != len(want) {
+		t.Fatalf("history legs = %d (%+v), want %d: the orders handle over the scope store is that store", len(stores), stores, len(want))
+	}
+	for i := range want {
+		if stores[i] != want[i] {
+			t.Fatalf("history leg %d = %+v, want %+v", i, stores[i], want[i])
+		}
+	}
+}
+
+// TestOrderHistoryReadsTheRunsGcOrderRunRecords pins gc order history to the
+// store gc order run writes. The run is recorded through the orders class
+// handle over the order's scope store (orderTrackingFrontDoor); history must
+// list it whatever that handle is: the scope store on a city that relocates
+// nothing, the binding on a split one, the class view under the split-strict
+// gate.
+func TestOrderHistoryReadsTheRunsGcOrderRunRecords(t *testing.T) {
+	cityPath := t.TempDir()
+	t.Setenv("GC_BEADS", "file")
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	resetCLIStorageRoutes(t)
+	a := orders.Order{Name: "digest", Exec: "true", Trigger: "cooldown", Interval: "15m"}
+
+	resolve := cachedOrderHistoryStoresResolver(cityPath, cfg, io.Discard)
+	stores, err := resolve(a)
+	if err != nil {
+		t.Fatalf("resolving stores: %v", err)
+	}
+	run, err := orderTrackingFrontDoor(cityPath, cfg, stores[0]).CreateRun(a.ScopedName(), orders.RunOpts{})
+	if err != nil {
+		t.Fatalf("recording the run: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doOrderHistoryWithStoresResolverJSON("digest", "", []orders.Order{a}, resolve, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("doOrderHistory = %d; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), run.ID) {
+		t.Fatalf("gc order history = %s, want the run %s gc order run recorded", stdout.String(), run.ID)
 	}
 }
 

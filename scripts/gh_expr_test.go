@@ -303,6 +303,14 @@ func evalGHExpr(expr string, ctx map[string]string) (any, error) {
 	for k, v := range ctx {
 		typed[k] = v
 	}
+	return evalGHExprTyped(expr, typed)
+}
+
+// evalGHExprTyped is evalGHExpr over a typed context: the values a real
+// event payload carries (bool, float64, string, nil), so a JSON boolean such
+// as github.event.pull_request.head.repo.fork compares with true as it does
+// on GitHub (a string "true" never equals true).
+func evalGHExprTyped(expr string, typed map[string]any) (any, error) {
 	expr = strings.TrimSpace(expr)
 	expr = strings.TrimPrefix(expr, "${{")
 	expr = strings.TrimSuffix(expr, "}}")
@@ -345,6 +353,19 @@ func interpolateGH(t *testing.T, s string, ctx map[string]string) string {
 		v, err := evalGHExpr(m, ctx)
 		if err != nil {
 			t.Fatalf("evalGHExpr(%q): %v", m, err)
+		}
+		return ghString(v)
+	})
+}
+
+// interpolateGHTyped is interpolateGH over a typed context
+// (evalGHExprTyped).
+func interpolateGHTyped(t *testing.T, s string, ctx map[string]any) string {
+	t.Helper()
+	return ghInterpolation.ReplaceAllStringFunc(s, func(m string) string {
+		v, err := evalGHExprTyped(m, ctx)
+		if err != nil {
+			t.Fatalf("evalGHExprTyped(%q): %v", m, err)
 		}
 		return ghString(v)
 	})

@@ -69,12 +69,27 @@ func TestPinnedValues(t *testing.T) {
 		// `gc hook current` reads it back, so a value drift here would silently
 		// break the only route a pool step has to its own bead id.
 		CurrentClaimBeadIDMetadataKey: "current_claim_bead_id",
+		// The verified launcher of a piece of work: the supervisor stamps it
+		// and out-of-process credential resolvers read it by this exact name.
+		InitiatorMetadataKey: "gc.initiator",
 	}
 	for got, want := range pinned {
 		if got != want {
 			t.Errorf("pinned value drift: got %q, want %q", got, want)
 		}
 	}
+}
+
+// TestInitiatorKeyIsKnown pins the server-owned initiator key into the
+// declared vocabulary so the generic bead API's reservation and the drift guard
+// both see it.
+func TestInitiatorKeyIsKnown(t *testing.T) {
+	for _, k := range KnownMetadataKeys {
+		if k == InitiatorMetadataKey {
+			return
+		}
+	}
+	t.Fatalf("KnownMetadataKeys does not declare %q", InitiatorMetadataKey)
 }
 
 // TestValidLabel: a label is valid only when bd's CSV parse (pflag's string

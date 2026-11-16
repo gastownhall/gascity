@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"syscall"
@@ -464,8 +465,10 @@ func TestRunDoltCleanup_ForceDoesNotProtectLegacyFallbackPort(t *testing.T) {
 		ReapGracePeriod: 1,
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("exit=%d, stderr=%s", code, stderr.String())
+	// The fallback refuses drop and purge, so the forced run exits nonzero;
+	// the reap still runs and still gives the fallback port no protection.
+	if code != 1 {
+		t.Fatalf("exit=%d, want 1 from the legacy-fallback force blocker; stderr=%s", code, stderr.String())
 	}
 	var r CleanupReport
 	if err := json.Unmarshal(stdout.Bytes(), &r); err != nil {
@@ -473,6 +476,13 @@ func TestRunDoltCleanup_ForceDoesNotProtectLegacyFallbackPort(t *testing.T) {
 	}
 	if r.Port.Resolved != LegacyDefaultDoltPort || !r.Port.Fallback {
 		t.Fatalf("Port = %+v, want legacy fallback", r.Port)
+	}
+	if len(r.ForceBlockers) != 1 || r.ForceBlockers[0].Kind != cleanupErrorKindLegacyFallbackPort {
+		t.Fatalf("ForceBlockers = %+v, want the %s blocker", r.ForceBlockers, cleanupErrorKindLegacyFallbackPort)
+	}
+	// This run has no CityPath, so the refusal has no city to name.
+	if strings.Contains(r.ForceBlockers[0].Error, " for :") {
+		t.Fatalf("force blocker = %q, want no empty city path printed", r.ForceBlockers[0].Error)
 	}
 	if !equalIntSlice(r.Reaped.ProtectedPIDs, nil) {
 		t.Fatalf("ProtectedPIDs = %v, want none for legacy fallback test process", r.Reaped.ProtectedPIDs)
@@ -511,6 +521,7 @@ func TestRunDoltCleanup_ForceReapsBareDeletedCwd(t *testing.T) {
 			return nil
 		},
 		ReapGracePeriod: 1,
+		LiveResolve:     fakeLiveResolve(),
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
 	if code != 0 {
@@ -556,6 +567,7 @@ func TestRunDoltCleanup_SQLClientOpenFailureIsTypedAndFatal(t *testing.T) {
 		DoltClientOpenErr: fmt.Errorf("open dolt connection: refused"),
 		DiscoverProcesses: func() ([]DoltProcInfo, error) { return nil, nil },
 		ReapGracePeriod:   1,
+		CityPort:          28231,
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
 	if code == 0 {
@@ -589,6 +601,122 @@ func TestRunDoltCleanup_SQLClientOpenFailureIsTypedAndFatal(t *testing.T) {
 	}
 	if r.Summary.BytesFreedDisk != 0 {
 		t.Fatalf("Summary.BytesFreedDisk = %d, want 0 because forced purge did not run", r.Summary.BytesFreedDisk)
+	}
+}
+
+// TestAttachCleanupDoltClient pins the command's decision to open a SQL
+// client. That decision sits above runDoltCleanup, so no test that hands
+// runDoltCleanup a ready-made client can see it. A legacy-fallback port and a
+// fatal resolution must open nothing; any other port opens exactly one client
+// at the configured host, loopback when none is configured.
+func TestAttachCleanupDoltClient(t *testing.T) {
+	const city = "/city"
+	errOpen := errors.New("open dolt connection: refused")
+	type openCall struct{ cityPath, host, port string }
+
+	for _, tt := range []struct {
+		name       string
+		resolution PortResolution
+		// fallback and fatal describe the fixture; the row fails as a fixture
+		// error when the resolver stops producing that shape.
+		fallback bool
+		fatal    bool
+		host     string
+		openErr  error
+		wantOpen *openCall
+	}{
+		{
+			name:       "legacy fallback port opens nothing",
+			resolution: ResolveDoltPort(PortResolverInput{CityPath: city, LiveResolve: fakeLiveResolveMiss()}),
+			fallback:   true,
+		},
+		{
+			name:       "invalid --port beside a valid city port opens nothing",
+			resolution: ResolveDoltPort(PortResolverInput{Flag: "not-a-number", CityPort: 4242, CityPath: city, LiveResolve: fakeLiveResolveMiss()}),
+			fatal:      true,
+		},
+		{
+			name:       "live resolution error opens nothing",
+			resolution: ResolveDoltPort(PortResolverInput{CityPath: city, LiveResolve: fakeLiveResolveError("ambiguous live dolt listeners")}),
+			fatal:      true,
+		},
+		{
+			name:       "live port with no configured host opens on loopback",
+			resolution: ResolveDoltPort(PortResolverInput{CityPath: city, LiveResolve: fakeLiveResolve()}),
+			wantOpen:   &openCall{cityPath: city, host: "127.0.0.1", port: "28231"},
+		},
+		{
+			name:       "configured host is passed through",
+			resolution: ResolveDoltPort(PortResolverInput{CityPort: 4242, CityPath: city, LiveResolve: fakeLiveResolveMiss()}),
+			host:       "dolt.internal",
+			wantOpen:   &openCall{cityPath: city, host: "dolt.internal", port: "4242"},
+		},
+		{
+			name:       "open error is recorded and no client attached",
+			resolution: ResolveDoltPort(PortResolverInput{CityPath: city, LiveResolve: fakeLiveResolve()}),
+			openErr:    errOpen,
+			wantOpen:   &openCall{cityPath: city, host: "127.0.0.1", port: "28231"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.resolution.Fallback != tt.fallback || (fatalPortResolutionError(tt.resolution) != nil) != tt.fatal {
+				t.Fatalf("fixture: resolution = %+v, want fallback=%v fatal=%v", tt.resolution, tt.fallback, tt.fatal)
+			}
+			if tt.fallback && tt.resolution.Port != LegacyDefaultDoltPort {
+				t.Fatalf("fixture: fallback port = %d, want the legacy default %d", tt.resolution.Port, LegacyDefaultDoltPort)
+			}
+
+			client := &fakeCleanupDoltClient{}
+			var calls []openCall
+			open := func(cityPath, host, port string) (CleanupDoltClient, error) {
+				calls = append(calls, openCall{cityPath: cityPath, host: host, port: port})
+				if tt.openErr != nil {
+					return nil, tt.openErr
+				}
+				return client, nil
+			}
+
+			opts := cleanupOptions{CityPath: city, Host: tt.host, PortResolution: tt.resolution}
+			closeClient := attachCleanupDoltClient(&opts, open)
+			if closeClient == nil {
+				t.Fatal("attachCleanupDoltClient returned a nil close func; the command defers it unconditionally")
+			}
+
+			wantAttached := tt.wantOpen != nil && tt.openErr == nil
+			if tt.wantOpen == nil {
+				if len(calls) != 0 {
+					t.Errorf("opener calls = %+v, want none", calls)
+				}
+			} else if len(calls) != 1 || calls[0] != *tt.wantOpen {
+				t.Errorf("opener calls = %+v, want exactly %+v", calls, *tt.wantOpen)
+			}
+			if wantAttached {
+				if opts.DoltClient != CleanupDoltClient(client) {
+					t.Errorf("DoltClient = %v, want the opened client attached", opts.DoltClient)
+				}
+			} else if opts.DoltClient != nil {
+				t.Error("DoltClient attached, want none")
+			}
+			if tt.openErr == nil {
+				if opts.DoltClientOpenErr != nil {
+					t.Errorf("DoltClientOpenErr = %v, want nil", opts.DoltClientOpenErr)
+				}
+			} else if !errors.Is(opts.DoltClientOpenErr, tt.openErr) {
+				t.Errorf("DoltClientOpenErr = %v, want %v", opts.DoltClientOpenErr, tt.openErr)
+			}
+
+			if client.closeCalls != 0 {
+				t.Errorf("client closed %d times before the returned close func ran; it must stay open for the run", client.closeCalls)
+			}
+			closeClient()
+			wantCloses := 0
+			if wantAttached {
+				wantCloses = 1
+			}
+			if client.closeCalls != wantCloses {
+				t.Errorf("Close calls after the returned close func = %d, want %d", client.closeCalls, wantCloses)
+			}
+		})
 	}
 }
 
@@ -829,6 +957,9 @@ func TestRunDoltCleanup_ForceKillsOrphans(t *testing.T) {
 			return syscall.ESRCH // pretend the process is already gone after TERM
 		},
 		ReapGracePeriod: 1, // tiny so the test doesn't sleep meaningfully
+		// Not 28231: the bare server above must stay protected for having no
+		// --config, not for sitting on the resolved port.
+		CityPort: 4242,
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
 	if code != 0 {
@@ -862,6 +993,7 @@ func TestRunDoltCleanup_ForceReportsReapedRSSBytes(t *testing.T) {
 		DiscoverProcesses: func() ([]DoltProcInfo, error) { return procs, nil },
 		KillProcess:       func(_ int, _ syscall.Signal) error { return syscall.ESRCH },
 		ReapGracePeriod:   1,
+		LiveResolve:       fakeLiveResolve(),
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
 	if code != 0 {
@@ -898,6 +1030,7 @@ func TestRunDoltCleanup_ForceCountsSuccessfulKill(t *testing.T) {
 			return nil
 		},
 		ReapGracePeriod: 1,
+		LiveResolve:     fakeLiveResolve(),
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
 	if code != 0 {
@@ -950,6 +1083,7 @@ func TestRunDoltCleanup_ForceCountsPostSIGTERMGoneAsReaped(t *testing.T) {
 			return nil
 		},
 		ReapGracePeriod: 1,
+		LiveResolve:     fakeLiveResolve(),
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
 	if code != 0 {
@@ -1066,6 +1200,7 @@ func TestRunDoltCleanup_ForceSkipsSignalWhenPIDStartTimeChanges(t *testing.T) {
 			return nil
 		},
 		ReapGracePeriod: 1,
+		LiveResolve:     fakeLiveResolve(),
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
 	if code != 0 {
@@ -1115,6 +1250,7 @@ func TestRunDoltCleanup_ForceDoesNotCountMissingPIDAfterRevalidation(t *testing.
 			return nil
 		},
 		ReapGracePeriod: 1,
+		LiveResolve:     fakeLiveResolve(),
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
 	if code != 0 {
@@ -1164,6 +1300,7 @@ func TestRunDoltCleanup_ForceSkipsSIGKILLWhenRevalidationDiscoverErrors(t *testi
 			return nil
 		},
 		ReapGracePeriod: 1,
+		LiveResolve:     fakeLiveResolve(),
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
 	if code != 0 {
@@ -1263,6 +1400,7 @@ func TestRunDoltCleanup_ForceRecordsKillError(t *testing.T) {
 			return syscall.EPERM
 		},
 		ReapGracePeriod: 1,
+		LiveResolve:     fakeLiveResolve(),
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
 	if code != 0 {
@@ -1360,6 +1498,7 @@ func TestRunDoltCleanup_SkipsNonDoltBackedRig(t *testing.T) {
 		FS:                fs,
 		JSON:              true,
 		DiscoverProcesses: func() ([]DoltProcInfo, error) { return nil, nil },
+		LiveResolve:       fakeLiveResolve(),
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
 	if code != 0 {
@@ -1488,6 +1627,7 @@ func TestRunDoltCleanup_ForceDisablesDropAndPurgeWhenRigMetadataMissing(t *testi
 		DoltClient:        client,
 		DiscoverProcesses: func() ([]DoltProcInfo, error) { return nil, nil },
 		ReapGracePeriod:   1,
+		CityPort:          28231,
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
 	if code != 0 {
@@ -1527,6 +1667,7 @@ func TestRunDoltCleanup_ForceDisablesDropAndPurgeWhenRigMetadataLacksDoltDatabas
 		DoltClient:        client,
 		DiscoverProcesses: func() ([]DoltProcInfo, error) { return nil, nil },
 		ReapGracePeriod:   1,
+		CityPort:          28231,
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
 	if code != 0 {
@@ -1564,6 +1705,7 @@ func TestRunDoltCleanup_ForceRefusesDropWhenApplyPlanExceedsMaxOrphanDBs(t *test
 		DoltClient:        client,
 		DiscoverProcesses: func() ([]DoltProcInfo, error) { return nil, nil },
 		ReapGracePeriod:   1,
+		LiveResolve:       fakeLiveResolve(),
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
 	if code != 0 {
@@ -1624,6 +1766,7 @@ func TestRunDoltCleanup_MaxOrphanRefusalAbortsForcedPurgeAndReap(t *testing.T) {
 			return nil
 		},
 		ReapGracePeriod: 1,
+		CityPort:        28231,
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
 	if code != 0 {
@@ -1781,6 +1924,7 @@ func TestRunDoltCleanup_ForceRemovesDataDirAfterConfirmedKill(t *testing.T) {
 			return nil
 		},
 		ReapGracePeriod: 1,
+		LiveResolve:     fakeLiveResolve(),
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
 	if code != 0 {
@@ -1875,6 +2019,10 @@ func TestRunDoltCleanup_ForceSkipsDataDirRemovalWhenTargetBecomesProtected(t *te
 			return nil
 		},
 		ReapGracePeriod: 1,
+		// Not 28231, and no live resolution: the target must become protected
+		// through the recorded port file, the fence left when the managed dolt
+		// is down.
+		CityPort: 4242,
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
 	if code != 0 {
@@ -1915,6 +2063,7 @@ func TestRunDoltCleanup_ForceDataDirRemovalErrorIsRecorded(t *testing.T) {
 			return fmt.Errorf("permission denied")
 		},
 		ReapGracePeriod: 1,
+		LiveResolve:     fakeLiveResolve(),
 	}
 	code := runDoltCleanup(opts, &stdout, &stderr)
 	if code != 0 {

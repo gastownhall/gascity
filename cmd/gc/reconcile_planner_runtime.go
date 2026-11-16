@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 )
 
 // The planner as the controller runs it behind session_reconciler=v2, beside
@@ -23,13 +24,15 @@ import (
 
 // Boot states, for the pass record and the startup watchdog.
 const (
-	plannerBootCensus  = "census" // C11's boot census has not passed
-	plannerBootGate    = "gate"   // no pass has completed with the boot gate open
-	plannerBootReady   = "ready"
-	plannerBootNoStore = "no-store" // no bead store: boot never runs (MAINT-003)
+	plannerBootCapabilities = "capabilities" // C0.7's read of the class stores has not passed
+	plannerBootRuntime      = "runtime"      // C0.8's read of the exec runtimes' handshakes has not passed
+	plannerBootCensus       = "census"       // C11's boot census has not passed
+	plannerBootGate         = "gate"         // no pass has completed with the boot gate open
+	plannerBootReady        = "ready"
+	plannerBootNoStore      = "no-store" // no bead store: boot never runs (MAINT-003)
 )
 
-// The boot census retry backoff (laneBackoff).
+// The boot read retry backoff (laneBackoff).
 const (
 	v2LaneBaseBackoff = time.Second
 	v2LaneMaxBackoff  = 30 * time.Second
@@ -40,13 +43,19 @@ var errV2Stopped = errors.New("v2 reconciler: stopped before ready")
 
 // plannerHost is the only way the planner reaches the city (F2). bindHost
 // fills gather's Env and Recording; only publishEnv calls snapshotEnv; a nil
-// bootCensus skips C11's check, and a nil capabilities C0.7's.
+// bootCensus skips C11's check, a nil capabilities C0.7's, and a nil
+// runtimeReadiness C0.8's.
 type plannerHost struct {
 	gather           gatherEnv
 	snapshotEnv      func() (*config.City, runtime.Provider, string)
 	setInventoryHook func(fn func(prev, next *ObservationSnapshot))
 	bootCensus       func() (v2SessionMigration, error)
 	capabilities     func() error
+	// runtimeReadiness is C0.8 (v2RuntimeReadiness): nil when every exec
+	// leaf of the provider the city built is v2-ready, a
+	// *v2RuntimeUnreadError when a handshake could not be read, else the
+	// refusal.
+	runtimeReadiness func() error
 	beginTrace       func(trigger string) *sessionReconcilerTraceCycle // off the controller goroutine
 	inventoryFields  func() map[string]any                             // the pass record's view of the inventory lane
 	safeTick         func(fn func(), trigger string) (panicked bool)
@@ -68,6 +77,8 @@ type plannerRuntime struct {
 	env     atomic.Pointer[reconcileEnv]
 	// softReload amends a reload's reply (acceptSoftReload, v5 M2).
 	softReload func(ctx context.Context, intent reloadIntent, r *reloadControlReply)
+	capable    atomic.Bool   // C0.7's read of the class stores passed
+	runtimeOK  atomic.Bool   // C0.8's read of the exec runtimes' handshakes passed
 	census     atomic.Bool   // C11's boot census passed
 	ready      chan struct{} // closed by the first completed pass with the gate open
 	readyOnce  sync.Once
@@ -114,6 +125,7 @@ func (rt *plannerRuntime) bindHost(h plannerHost) {
 		}
 		return nil
 	}
+	h.gather.WakeReads = rt.wakeReads
 	h.gather.ReadyWaits = func() map[string]bool {
 		if l := rt.lane.Load(); l != nil {
 			return l.readyWaitSet()
@@ -153,18 +165,29 @@ func (rt *plannerRuntime) publishEnv() *reconcileEnv {
 	return e
 }
 
-// boot refuses stores that cannot fence (C0.7), publishes env Gen 1, refuses
-// enterprise-era session rows on a live census (C11; a failed census is
-// retried with backoff, as an error is not an empty city), starts the
-// planner, and returns once a pass has completed with the boot gate open
-// (CONTRACT v5 P2), or with ctx's error. It is idempotent, so a startup
-// retry after a panic resumes it (MAINT-005).
+// boot refuses stores that cannot fence (C0.7; a store C0.7 could not read
+// is retried with backoff, as a failed read is no verdict on the store),
+// refuses an exec runtime the provider built whose handshake is not v2-ready
+// (C0.8; a handshake that could not be read is retried alike), publishes env
+// Gen 1, refuses enterprise-era session rows on a live census
+// (C11; a failed census is retried with backoff, as an error is not an empty
+// city), starts the planner, and returns once a pass has completed with the
+// boot gate open (CONTRACT v5 P2), or with ctx's error. It is idempotent, so a
+// startup retry after a panic resumes it (MAINT-005).
 func (rt *plannerRuntime) boot(ctx context.Context) error {
-	if rt.host.capabilities != nil {
-		if refusal := rt.host.capabilities(); refusal != nil {
-			rt.planner.alert(alertBootRefused, "", refusal.Error())
-			return refusal
-		}
+	if err := rt.bootCheck(ctx, &rt.capable, "C0.7 store read", rt.host.capabilities, func(err error) bool {
+		var unread *v2CapabilityUnreadError
+		return errors.As(err, &unread)
+	}, 0); err != nil {
+		return err
+	}
+	// A failed handshake stays cached by the provider for
+	// sessionexec.HandshakeRetryAfter, so C0.8 retries no sooner.
+	if err := rt.bootCheck(ctx, &rt.runtimeOK, "C0.8 runtime handshake", rt.host.runtimeReadiness, func(err error) bool {
+		var unread *v2RuntimeUnreadError
+		return errors.As(err, &unread)
+	}, sessionexec.HandshakeRetryAfter); err != nil {
+		return err
 	}
 	if rt.env.Load() == nil {
 		rt.publishEnv()
@@ -184,14 +207,8 @@ func (rt *plannerRuntime) boot(ctx context.Context) error {
 			break
 		}
 		failures++
-		d := laneBackoff(failures, rand.Float64)
-		fmt.Fprintf(rt.host.stderr, "v2 planner: boot census failed (retry in %s): %v\n", d.Round(time.Millisecond), err) //nolint:errcheck // best-effort stderr
-		t := time.NewTimer(d)
-		select {
-		case <-t.C:
-		case <-ctx.Done():
-			t.Stop()
-			return ctx.Err()
+		if err := rt.bootBackoff(ctx, failures, "boot census", err); err != nil {
+			return err
 		}
 	}
 	if !rt.start(ctx) {
@@ -224,6 +241,7 @@ func (rt *plannerRuntime) start(parent context.Context) bool {
 	lane.stranded = h.stranded
 	lane.addWaitsStep()
 	lane.addPoolSteps(rt.planner.out.summary.Load, rt.planner.postExecutionStalled)
+	lane.turnReaderFor = workerLadderTurns
 	rt.lane.Store(lane)
 	if h.setInventoryHook != nil {
 		h.setInventoryHook(func(prev, next *ObservationSnapshot) {
@@ -235,6 +253,15 @@ func (rt *plannerRuntime) start(parent context.Context) bool {
 	rt.laneDone = lane.start(ctx)
 	go rt.planner.run(ctx)
 	return true
+}
+
+// wakeReads asks the lane for a pass, so a poke or a reload reaches the
+// legs and custom scale_checks it reads without waiting out the patrol. It
+// never blocks, and does nothing before start.
+func (rt *plannerRuntime) wakeReads() {
+	if l := rt.lane.Load(); l != nil {
+		l.wake()
+	}
 }
 
 // waitDependencyClosed runs the lane's waits step alone when a pending deps
@@ -308,6 +335,10 @@ func (rt *plannerRuntime) bootState() string {
 	switch {
 	case rt.noStore.Load():
 		return plannerBootNoStore
+	case !rt.capable.Load():
+		return plannerBootCapabilities
+	case !rt.runtimeOK.Load():
+		return plannerBootRuntime
 	case !rt.census.Load():
 		return plannerBootCensus
 	}
@@ -339,4 +370,50 @@ func laneBackoff(failures int, rand func() float64) time.Duration {
 	}
 	d = min(d, v2LaneMaxBackoff)
 	return time.Duration(float64(d) * (1 + v2Jitter*(2*rand()-1)))
+}
+
+// bootCheck runs one boot check until it passes (setting passed) or
+// refuses: read's nil passes, an error unread reports is no verdict and is
+// retried with the boot backoff (at least floor), and any other error is
+// the refusal, alerted as boot-refused. A nil read passes.
+func (rt *plannerRuntime) bootCheck(ctx context.Context, passed *atomic.Bool, what string, read func() error, unread func(error) bool, floor time.Duration) error {
+	for failures := 0; !passed.Load(); {
+		var verdict error
+		if read != nil {
+			verdict = read()
+		}
+		if verdict == nil {
+			passed.Store(true)
+			return nil
+		}
+		if !unread(verdict) {
+			rt.planner.alert(alertBootRefused, "", verdict.Error())
+			return verdict
+		}
+		failures++
+		if err := rt.bootBackoffAtLeast(ctx, failures, what, verdict, floor); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// bootBackoff reports a failed boot read and waits out its backoff, or
+// returns ctx's error.
+func (rt *plannerRuntime) bootBackoff(ctx context.Context, failures int, what string, err error) error {
+	return rt.bootBackoffAtLeast(ctx, failures, what, err, 0)
+}
+
+// bootBackoffAtLeast is bootBackoff waiting no less than floor.
+func (rt *plannerRuntime) bootBackoffAtLeast(ctx context.Context, failures int, what string, err error, floor time.Duration) error {
+	d := max(laneBackoff(failures, rand.Float64), floor)
+	fmt.Fprintf(rt.host.stderr, "v2 planner: %s failed (retry in %s): %v\n", what, d.Round(time.Millisecond), err) //nolint:errcheck // best-effort stderr
+	t := time.NewTimer(d)
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		t.Stop()
+		return ctx.Err()
+	}
 }

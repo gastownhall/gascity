@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/sling"
+	"github.com/gastownhall/gascity/internal/workdir"
 )
 
 // reapDecision records one worktree the reaper acted on or declined to act on,
@@ -43,7 +44,8 @@ type reapReport struct {
 }
 
 // reapClosedBeadWorktrees discovers per-bead git worktrees under
-// cityPath/.gc/worktrees/<rig>/ and removes any whose associated bead is closed
+// <worktrees root>/<rig>/, the configured worktrees root
+// (workdir.WorktreesRoot), and removes any whose associated bead is closed
 // and that pass every safety gate. It returns a reapReport describing what was
 // reaped and what was protected.
 //
@@ -71,7 +73,7 @@ type reapReport struct {
 //     sit at or beneath the worktree. If the liveness scan is indeterminate
 //     (no /proc), NOTHING is reaped this pass — the reaper cannot prove any
 //     tree is idle (root cause B: closed-bead != end-of-use).
-//  6. Git state: no uncommitted changes, no stashes, and no commits that
+//  6. Git state: no uncommitted changes and no commits that
 //     removing the worktree would orphan — commits reachable from no branch,
 //     tag, or remote-tracking ref (git.HasUnreachableCommitsResult). The test
 //     is deliberately reachability, not push state: `git worktree remove`
@@ -140,7 +142,7 @@ func reapClosedBeadWorktrees(
 		fmt.Fprintf(stderr, "reapClosedBeadWorktrees: liveness scanned via %s (/proc unavailable)\n", live.source) //nolint:errcheck
 	}
 
-	wtRoot := filepath.Join(cityPath, ".gc", "worktrees")
+	wtRoot := workdir.WorktreesRoot(cityPath)
 
 	for rigName, store := range rigStores {
 		if store == nil {
@@ -307,14 +309,11 @@ func reapClosedBeadWorktrees(
 				wg := git.New(worktreePath)
 				hasUncommitted := wg.HasUncommittedWork()
 				hasUnreachable, unreachableErr := wg.HasUnreachableCommitsResult()
-				hasStashes, stashErr := wg.HasStashesResult()
 				switch {
 				case unreachableErr != nil:
 					reason = fmt.Sprintf("git probe failed (failing closed): %v", unreachableErr)
-				case stashErr != nil:
-					reason = fmt.Sprintf("git probe failed (failing closed): %v", stashErr)
-				case hasUncommitted || hasUnreachable || hasStashes:
-					reason = fmt.Sprintf("unsafe git state: uncommitted=%v unreachable=%v stashes=%v", hasUncommitted, hasUnreachable, hasStashes)
+				case hasUncommitted || hasUnreachable:
+					reason = fmt.Sprintf("unsafe git state: uncommitted=%v unreachable=%v", hasUncommitted, hasUnreachable)
 				}
 			}
 

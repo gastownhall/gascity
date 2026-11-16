@@ -70,8 +70,8 @@ func manifestFromRecord(rec *beads.Bead) RigProvisionManifest {
 // It is a no-op when the record is synthetic (beadID == "") or the manifest
 // claims nothing. SetMetadataBatch merges, so successive calls accrete the
 // created_dir first (before the clone) and the dolt_db later (after init).
-func persistManifest(store beads.Store, beadID string, m RigProvisionManifest) error {
-	if beadID == "" || store == nil {
+func persistManifest(store beads.WorkStore, beadID string, m RigProvisionManifest) error {
+	if beadID == "" || store == (beads.WorkStore{}) {
 		return nil
 	}
 	updates := map[string]string{}
@@ -115,7 +115,7 @@ type RigSweepDeps interface {
 // (G13 §3.5), so every such record is an orphan whose goroutine did not survive
 // the restart. The lookup is metadata-only (kind+city) with IncludeClosed — the
 // records are closed at birth — then filtered on state in Go.
-func listOrphanInFlightIdemRecords(store beads.Store, city string) ([]beads.Bead, error) {
+func listOrphanInFlightIdemRecords(store beads.WorkStore, city string) ([]beads.Bead, error) {
 	matches, err := store.List(beads.ListQuery{
 		Metadata: map[string]string{
 			metaIdemKind: idemKindRigCreate,
@@ -151,8 +151,8 @@ func listOrphanInFlightIdemRecords(store beads.Store, city string) ([]beads.Bead
 // It is best-effort and idempotent (a re-crash mid-sweep re-runs cleanly): per
 // record failures are joined into the returned error for the caller to log, and
 // the sweep continues to the next record.
-func SweepOrphanRigProvisions(ctx context.Context, store beads.Store, city string, deps RigSweepDeps) error {
-	if store == nil || deps == nil {
+func SweepOrphanRigProvisions(ctx context.Context, store beads.WorkStore, city string, deps RigSweepDeps) error {
+	if store == (beads.WorkStore{}) || deps == nil {
 		return nil
 	}
 	orphans, err := listOrphanInFlightIdemRecords(store, city)

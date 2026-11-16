@@ -7,11 +7,11 @@ import (
 	"testing"
 )
 
-// ProcessEnvValue recovers a darwin process's environment by splitting the ps
-// command column on whitespace and folding every key=value token into a map.
-// These cases pin that parse, which is the half of ProcessEnvValue a test can
-// drive: the ps exec has no injection seam, and liveScanGuard refuses the live
-// process table under go test (gastownhall/gascity#2839).
+// The darwin scan (ScanBySessionID) recovers each process's environment by
+// splitting its ps command column on whitespace and folding every key=value
+// token into a map. These cases pin that parse: the ps exec has no injection
+// seam, and liveScanGuard refuses the live process table under go test
+// (gastownhall/gascity#2839).
 func TestParseInlineEnvFromPSCommandColumn(t *testing.T) {
 	const key = "GC_ACP_CONTROL_SOCKET"
 	tests := []struct {
@@ -25,11 +25,11 @@ func TestParseInlineEnvFromPSCommandColumn(t *testing.T) {
 			want:    "/tmp/gc/acp/a1b2.sock",
 		},
 		{
-			// Known darwin limitation, documented on ProcessEnvValue: ps
+			// Known limitation of the scan's records, documented on
+			// ProcessEnvValue, which reads such a value whole instead: ps
 			// flattens command, arguments and environment into one
 			// whitespace-separated line, so a socket path under a directory
-			// with a space truncates and matches nothing. The caller then sees
-			// the same thing it sees for an absent key.
+			// with a space truncates.
 			name: "value containing a space truncates",
 			command: "node agent.js GC_SESSION_ID=sid " +
 				key + "=/Users/dev/Application Support/gc/a1b2.sock",

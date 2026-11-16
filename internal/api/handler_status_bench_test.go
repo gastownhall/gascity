@@ -31,6 +31,11 @@ func (s *benchCounterStore) ReadyContext(ctx context.Context, query ...beads.Rea
 func benchmarkStatusState(b *testing.B, nStores, nBeads int, useCounter bool) *fakeState {
 	b.Helper()
 	state := newFakeState(b)
+	// buildStatusBody's StoreHealth counts the city store's rows; without a
+	// city store every build is Partial and the benchmark stops at once.
+	if state.cityBeadStore == nil {
+		state.cityBeadStore = beads.NewMemStore()
+	}
 	for i := 0; i < nStores; i++ {
 		mem := beads.NewMemStore()
 		counts := map[string]int{}

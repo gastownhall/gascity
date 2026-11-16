@@ -170,23 +170,32 @@ func cmdRigRestart(args []string, stdout, stderr io.Writer) int {
 }
 
 // doRigRestart kills sessions for all agents in a rig. The reconciler will
-// restart them. Returns 0 even if no agents were running.
+// restart them. Returns 0 even if no agents were running. sessStore is the
+// session coordination-class store (cliSessionStore).
 func doRigRestart(
 	sp runtime.Provider,
 	rec events.Recorder,
-	store beads.Store,
+	sessStore beads.Store,
 	cfg *config.City,
 	agents []config.Agent,
 	rigName, cityName, sessionTemplate string,
 	stdout, stderr io.Writer,
 ) int {
 	var targets []stopTarget
+	// floor is the pool seats of agents with a min_active_sessions floor. They
+	// are marked city-stop before the stop, as gc stop marks every session:
+	// the sweep then kills a marked seat and sleeps it asleep with reason
+	// city-stop (stopTargetThroughWorkerBoundary), which the floor revival
+	// (cityStopPoolBeads) wakes with no work assigned. An unmarked seat takes
+	// the shutdown stop, which soft-suspends it; it heals asleep with no
+	// reason, which nothing revives, and the pool sits at zero seats.
+	floor := map[string]bool{}
 	for _, a := range agents {
 		sp0 := scaleParamsFor(&a)
 		if !a.SupportsInstanceExpansion() {
 			// Non-expanding template.
-			sn := lookupSessionNameOrLegacy(store, cityName, a.QualifiedName(), sessionTemplate)
-			running, err := workerSessionTargetRunningWithConfig("", store, sp, cfg, sn)
+			sn := lookupSessionNameOrLegacy(sessStore, cityName, a.QualifiedName(), sessionTemplate)
+			running, err := workerSessionTargetRunningWithConfig("", sessStore, sp, cfg, sn)
 			if err != nil {
 				fmt.Fprintf(stderr, "gc rig restart: observing %s: %v\n", sn, err) //nolint:errcheck
 				return 1
@@ -203,12 +212,15 @@ func doRigRestart(
 			}
 		} else {
 			// Pool agent: resolve live instances from beads first, then legacy discovery.
-			refs, err := selectRunningPoolSessionRefs(store, sp, cfg, resolvePoolSessionRefs(store, cfg, a.Name, a.Dir, sp0, &a, cityName, sessionTemplate, sp, stderr))
+			refs, err := selectRunningPoolSessionRefs(sessStore, sp, cfg, resolvePoolSessionRefs(sessStore, cfg, a.Name, a.Dir, sp0, &a, cityName, sessionTemplate, sp, stderr))
 			if err != nil {
 				fmt.Fprintf(stderr, "gc rig restart: observing %s: %v\n", a.QualifiedName(), err) //nolint:errcheck
 				return 1
 			}
 			for _, ref := range refs {
+				if a.EffectiveMinActiveSessions() > 0 {
+					floor[ref.sessionName] = true
+				}
 				targets = append(targets, stopTarget{
 					name:      ref.sessionName,
 					template:  a.QualifiedName(),
@@ -224,7 +236,8 @@ func doRigRestart(
 	if dependencyCfg == nil {
 		dependencyCfg = &config.City{Agents: agents}
 	}
-	killed := stopTargetsBounded(targets, dependencyCfg, store, sp, rec, eventActor(), io.Discard, stderr)
+	markSessionsCityStop(sessionFrontDoor(sessStore), floor, "gc rig restart", stderr)
+	killed := stopTargetsBounded(targets, dependencyCfg, sessStore, sp, rec, eventActor(), io.Discard, stderr)
 
 	fmt.Fprintf(stdout, "Restarted %d agent(s) in rig '%s' (killed sessions; reconciler will restart)\n", killed, rigName) //nolint:errcheck // best-effort stdout
 	return 0

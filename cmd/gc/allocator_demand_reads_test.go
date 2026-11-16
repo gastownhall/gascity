@@ -15,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -29,8 +30,13 @@ type demandBacking struct {
 	armed      atomic.Bool
 	failLive   atomic.Bool
 	failWrites atomic.Bool
-	mu         sync.Mutex
-	ops        []string
+	// stall holds every read of the backing, armed or not, for that many
+	// nanoseconds and counts it in stalled: a loaded host's slow read, made
+	// deterministic. Zero is no stall.
+	stall   atomic.Int64
+	stalled atomic.Int64
+	mu      sync.Mutex
+	ops     []string
 }
 
 var errDemandBackingDown = errors.New("demand backing down")
@@ -48,6 +54,10 @@ func newDemandBacking(seed ...beads.Bead) *demandBacking {
 // log records a read in the compact form the goldens pin: the operation and
 // the query fields that select a read tier or a row set.
 func (b *demandBacking) log(format string, args ...any) {
+	if d := time.Duration(b.stall.Load()); d > 0 {
+		b.stalled.Add(1)
+		<-time.After(d)
+	}
 	if !b.armed.Load() {
 		return
 	}
@@ -124,7 +134,13 @@ func (b *demandBacking) SetMetadataBatch(id string, kvs map[string]string) error
 // exact or not, and returns both.
 func newDemandCache(t *testing.T, exact bool, seed ...beads.Bead) (*beads.CachingStore, *demandBacking) {
 	t.Helper()
-	backing := newDemandBacking(seed...)
+	return newDemandCacheDeps(t, exact, nil, seed...)
+}
+
+// newDemandCacheDeps is newDemandCache over a backing seeded with deps too.
+func newDemandCacheDeps(t *testing.T, exact bool, deps []beads.Dep, seed ...beads.Bead) (*beads.CachingStore, *demandBacking) {
+	t.Helper()
+	backing := &demandBacking{Store: beads.NewMemStoreFrom(0, seed, deps)}
 	var store beads.Store = backing
 	if exact {
 		store = exactDemandBacking{backing}
@@ -339,7 +355,7 @@ func TestLegacyDemandReadsByteIdenticalToDirectCalls(t *testing.T) {
 // the cached-tier Lists (served by a clean cache, read through a plain store,
 // falling back live past a dirty row), and one unfiltered Ready per cache.
 var legacyCollectorBackingReads = func() map[string][]string {
-	const ready = "Ready [{Assignee: Limit:0 TierMode:2}]"
+	const ready = "Ready [{Assignee: Limit:0 TierMode:2 Unassigned:false MetadataEquals:map[]}]"
 	plain := []string{"List status=in_progress live=false", "List status=open live=true", "List status=open live=false", ready, "List status=open live=true", ready}
 	cached := []string{"List status=open live=true", ready, "List status=open live=true", ready}
 	return map[string][]string{
@@ -415,7 +431,7 @@ func TestV2DemandCachedLegDirtyRowServes(t *testing.T) {
 	if rows, err := newV2DemandReads(now, nil).ReadyAll(cache); err != nil || !slices.Contains(ids(rows), "gc-r1") {
 		t.Errorf("dirty row: ReadyAll = %v, %v; want gc-r1", ids(rows), err)
 	}
-	if ops, want := backing.readLog(), []string{"Ready [{Assignee: Limit:0 TierMode:2}]"}; !slices.Equal(ops, want) {
+	if ops, want := backing.readLog(), []string{"Ready [{Assignee: Limit:0 TierMode:2 Unassigned:false MetadataEquals:map[]}]"}; !slices.Equal(ops, want) {
 		t.Errorf("dirty row: ReadyAll backing reads %q, want %q", ops, want)
 	}
 }
@@ -647,7 +663,7 @@ func TestV2DemandReadsCachedWithoutCacheIsPartial(t *testing.T) {
 func TestClosedNamedIndexLegacyIsDirectCallV2ServesRecording(t *testing.T) {
 	backing := newDemandBacking(closedNamedSessionBead("gc-closed", "mayor"))
 	backing.armed.Store(true)
-	direct, directErr := session.BuildClosedNamedSessionBeadIndex(backing)
+	direct, directErr := session.BuildClosedNamedSessionBeadIndex(beadstest.Sessions(backing))
 	directLog := backing.readLog()
 	backing.ops = nil
 	legacy, legacyErr := legacyDemandReads{}.ClosedNamedIndex(backing)

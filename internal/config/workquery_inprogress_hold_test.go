@@ -24,10 +24,10 @@ import (
 // spelling.
 //
 // Scope note (ga-5736js): this tier is being made hold-aware for the
-// WORK-SERVING decision only. The assignee-scoped probes that answer "does a
-// session still need to exist" (ephemeralAssignedReadyProbeScript,
-// filterReadyByAssignee) stay hold-transparent by design — pinned by
-// TestEphemeralAssignedReadyProbeScriptDoesNotExcludeDispatchHoldLabels.
+// WORK-SERVING decision only. The assignee-scoped tier that answers "does a
+// session still need to exist" (filterReadyByAssignee) stays hold-transparent
+// by design. The assigned-ready tier serves work, so it drops held rows too
+// (#8010, workquery_assigned_ready_hold_test.go).
 
 // heldInProgressListRow is the crash-recovery row for a bead parked on label.
 func heldInProgressListRow(label string) string {

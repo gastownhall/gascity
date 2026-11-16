@@ -6,6 +6,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // writeHostedProbeCity writes a composed city (city.toml including
@@ -61,6 +64,55 @@ func TestHostedCredentialProbeReusesTheComposedLoad(t *testing.T) {
 	}
 	if got := hostedCredentialProbeLoads.Load() - loadsBefore; got != 2 {
 		t.Fatalf("config loads after the include changed = %d, want 2", got)
+	}
+}
+
+// TestHostedCredentialProbeReadsThroughTheInvocationMemo pins that the probe
+// composes through loadComposedCityConfig, so inside a `gc bd` scope it is
+// answered from the composition the rest of the command already holds instead
+// of composing the city again.
+//
+// The scope's composition is seeded, then storage.toml is rewritten to drop the
+// hosted binding: a probe that read through the memo still reports the seeded
+// answer, while one that called config.LoadWithIncludesOptions itself reads the
+// rewrite. That stale read is the only way to tell the two apart: a direct
+// composition moves cmd/gc's load counters exactly as a memo answer does, so
+// TestGcBdPassthroughLoadsCityConfigOnce cannot see one.
+func TestHostedCredentialProbeReadsThroughTheInvocationMemo(t *testing.T) {
+	resetHostedCredentialProbeCache()
+	t.Cleanup(resetHostedCredentialProbeCache)
+	cityPath := t.TempDir()
+	stamp := time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)
+	writeHostedProbeCity(t, cityPath, true, stamp)
+	tomlPath := filepath.Join(cityPath, "city.toml")
+
+	end := beginInvocationConfigMemo()
+	t.Cleanup(end)
+	if _, _, err := loadComposedCityConfig(fsys.OSFS{}, tomlPath, invocationMemoLoadOptions); err != nil {
+		t.Fatal(err)
+	}
+	writeHostedProbeCity(t, cityPath, false, stamp.Add(time.Second))
+
+	// Control: a fresh composition reads the rewrite, so the probe's answer
+	// below tells a memo read from a fresh one.
+	fresh, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, tomlPath, hostedCredentialProbeLoad)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configSelectsHostedBeadsCredentialProvider(fresh) {
+		t.Fatal("rewriting storage.toml did not drop the hosted binding; the test cannot tell a memo read from a fresh one")
+	}
+
+	composedBefore := composedCityConfigLoads.Load()
+	selected, err := citySelectsHostedBeadsCredentialProvider(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !selected {
+		t.Fatal("probe inside the scope composed the city again instead of reading the scope's composition")
+	}
+	if got := composedCityConfigLoads.Load() - composedBefore; got != 0 {
+		t.Fatalf("probe inside the scope composed the city config %d times, want 0 (a memo answer)", got)
 	}
 }
 
