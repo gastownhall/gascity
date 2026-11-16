@@ -2555,13 +2555,29 @@ type mailReader struct {
 	err    error
 }
 
-// lookupMailReader resolves the caller's own mailbox: the addresses it was
-// resolved from, plus every durable route of the session behind it, which is
-// the set an inbox read matches a message's recipient against.
-func lookupMailReader(_ mail.Provider) mailReader {
+// lookupMailReader resolves the caller's own mailbox from the default mail
+// identity. See mailReaderFor for which routes count.
+func lookupMailReader(mp mail.Provider) mailReader {
 	target, err := lookupDefaultMailTarget()
 	if err != nil {
 		return mailReader{err: err}
+	}
+	return mailReaderFor(mp, target)
+}
+
+// mailReaderFor is the mailbox of target. When mp can read a session's inbox
+// (sessionInboxForTarget), the routes are that inbox's own, so "addressed to
+// the reader" means exactly "in the reader's inbox", including mail for a
+// closed predecessor whose alias the session inherited. Otherwise they are the
+// addresses the target was resolved from plus every durable route of its
+// session, if it has one.
+func mailReaderFor(mp mail.Provider, target resolvedMailTarget) mailReader {
+	inbox, ok, err := sessionInboxForTarget(mp, target)
+	if ok {
+		if err != nil {
+			return mailReader{err: fmt.Errorf("reading the session inbox: %w", err)}
+		}
+		return mailReader{routes: inbox.Routes()}
 	}
 	routes := slices.Clone(target.recipients)
 	if target.session != nil {

@@ -36,7 +36,7 @@ gc mail send worker -s "disk warning" -m "..." --dedup "disk-warn:hq"
 gc mail inbox                          # List unread messages
 gc mail count                          # Count unread messages
 gc mail peek <id>                      # Preview a message without marking read
-gc mail read <id>                      # Read a message (marks as read)
+gc mail read <id>                      # Read a message (marks it read only for its recipient)
 gc mail thread <id>                    # Show full conversation thread
 ```
 
