@@ -4530,7 +4530,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if assignedWorkDeferTr != nil {
 				if dec.Action == sessionpkg.TimerActionDefer && dec.TraceReason == string(TraceReasonAssignedWork) {
 					anchorBeadID := strings.TrimSpace(infoByID[id].CurrentlyProcessingBeadID)
-					if assignedWorkDeferTr.recordDefer(lifecycleName, tp.TemplateName, anchorBeadID) {
+					if assignedWorkDeferTr.recordDefer(lifecycleName, tp.TemplateName, anchorBeadID, clk.Now()) {
 						dec = sessionpkg.DecideAssignedWorkExhausted()
 					}
 				} else {

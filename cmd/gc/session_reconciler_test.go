@@ -12396,16 +12396,17 @@ func TestReconcileSessionBeads_MaxAgeBusyDeferFallsThroughToIdleTimeout(t *testi
 	}
 }
 
-// idleTimeoutBackstopTrace builds a sessionReconcilerTraceCycle wired so
+// idleTimeoutBackstopTrace builds a sessionReconcilerTraceCycle for the
+// "witness" template wired so
 // RecordDecision actually appends to records instead of stashing pending
 // (RecordDecision only appends when detailSource finds template as a key in
 // tracer.detail, and ensureAutoArm needs an armStore this literal has none
 // of) — mirrors the literal already proven in
 // TestReconcileSessionBeads_MaxAgeBusyDeferFallsThroughToIdleTimeout.
-func idleTimeoutBackstopTrace(templateName string) *sessionReconcilerTraceCycle {
+func idleTimeoutBackstopTrace() *sessionReconcilerTraceCycle {
 	return &sessionReconcilerTraceCycle{
 		tracer: &SessionReconcilerTracer{
-			detail: map[string]TraceSource{templateName: TraceSourceManual},
+			detail: map[string]TraceSource{"witness": TraceSourceManual},
 		},
 		dropReasons:       map[string]int{},
 		pendingDetail:     map[string][]SessionReconcilerTraceRecord{},
@@ -12486,7 +12487,7 @@ func TestReconcileSessionBeads_AssignedWorkDeferBackstopForcesStopAfterLimit(t *
 
 	runTick := func() (*sessionReconcilerTraceCycle, *events.Fake) {
 		rec := events.NewFake()
-		trace := idleTimeoutBackstopTrace("witness")
+		trace := idleTimeoutBackstopTrace()
 		reconcileSessionBeadsTraced(
 			context.Background(), env.city, []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
 			env.store, nil, nil, nil, nil, env.dt, poolDesired, false, nil, "",
@@ -12520,6 +12521,122 @@ func TestReconcileSessionBeads_AssignedWorkDeferBackstopForcesStopAfterLimit(t *
 		}
 		if b.Metadata["sleep_reason"] != string(sessionpkg.SleepReasonAssignedWorkExhausted) {
 			t.Errorf("sleep_reason = %q, want %q", b.Metadata["sleep_reason"], sessionpkg.SleepReasonAssignedWorkExhausted)
+		}
+	}
+}
+
+// assignedWorkDeferWindowHarness builds the idle "witness" session holding an
+// in-flight assigned bead on a fixed anchor, and returns a runTick that
+// advances the fake reconciler clock by gap before every tick after the
+// first, then reconciles once with the given tracker. Each tick reports
+// whether the session was force-stopped under the assigned-work-exhausted
+// trace reason, and fails the test if the stop does not carry the unchanged
+// StopDeferExhausted outcome and sleep reason.
+func assignedWorkDeferWindowHarness(t *testing.T, tr assignedWorkDeferTracker, gap time.Duration) (runTick func() (stopped bool)) {
+	t.Helper()
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "witness"}}}
+	env.addDesired("witness", "witness", true)
+	session := env.createSessionBead("witness", "witness")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"currently_processing_bead_id": "ga-anchor1",
+	})
+	if err := env.sp.SetMeta("witness", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	if _, err := env.store.Create(beads.Bead{
+		Title:    "in-flight work",
+		Type:     "task",
+		Status:   "in_progress",
+		Assignee: session.ID,
+	}); err != nil {
+		t.Fatalf("Create(in-flight work): %v", err)
+	}
+	it := newFakeIdleTracker()
+	it.idle["witness"] = true
+	poolDesired := make(map[string]int)
+	for _, tp := range env.desiredState {
+		if tp.TemplateName != "" {
+			poolDesired[tp.TemplateName]++
+		}
+	}
+	cfgNames := configuredSessionNames(env.cfg, "", env.store)
+
+	ticks := 0
+	return func() bool {
+		if ticks > 0 {
+			env.clk.Advance(gap)
+		}
+		ticks++
+		rec := events.NewFake()
+		trace := idleTimeoutBackstopTrace()
+		reconcileSessionBeadsTraced(
+			context.Background(), env.city, []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
+			env.store, nil, nil, nil, nil, env.dt, poolDesired, false, nil, "",
+			it, env.clk, rec, 0, 0, &env.stdout, &env.stderr, trace,
+			withAssignedWorkDeferTracker(tr),
+			withAsyncDrainAckStopTracker(env.stops),
+		)
+		if !idleTimeoutBackstopKilled(rec) {
+			if !idleTimeoutBackstopTraceHasDecision(trace, TraceReasonAssignedWork, TraceOutcomeDeferredBusy) {
+				t.Fatalf("tick %d: neither a stop nor an AssignedWork/DeferredBusy decision was recorded", ticks)
+			}
+			return false
+		}
+		if !idleTimeoutBackstopTraceHasDecision(trace, TraceReasonAssignedWorkExhausted, TraceOutcomeStopDeferExhausted) {
+			t.Fatalf("tick %d: stopped without an AssignedWorkExhausted/StopDeferExhausted decision", ticks)
+		}
+		b, err := env.store.Get(session.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b.Metadata["sleep_reason"] != string(sessionpkg.SleepReasonAssignedWorkExhausted) {
+			t.Errorf("tick %d: sleep_reason = %q, want %q", ticks, b.Metadata["sleep_reason"], sessionpkg.SleepReasonAssignedWorkExhausted)
+		}
+		return true
+	}
+}
+
+// TestReconcileSessionBeads_AssignedWorkDeferWindowStopsOnSlowTicks proves
+// the wall-clock ceiling on the built-in default limit: with reconcile ticks
+// 200 s apart, tick 1 defers and tick 2 (200 s after the first deferring
+// tick, past the 120 s ceiling) force-stops, instead of waiting for the
+// count of 3 to be exceeded on tick 4 (about 10 minutes in).
+func TestReconcileSessionBeads_AssignedWorkDeferWindowStopsOnSlowTicks(t *testing.T) {
+	runTick := assignedWorkDeferWindowHarness(t, newAssignedWorkDeferTracker(), 200*time.Second)
+	if runTick() {
+		t.Fatal("tick 1: session stopped, want deferred (one extra tick of defer is kept on purpose)")
+	}
+	if !runTick() {
+		t.Fatal("tick 2: session not stopped, want forced stop 200 s after the first deferring tick")
+	}
+}
+
+// TestReconcileSessionBeads_AssignedWorkDeferExplicitLimitIgnoresWindow
+// proves an explicit limit keeps pure tick-count semantics: with limit 2 and
+// ticks 200 s apart, ticks 1 and 2 still defer and tick 3 (count 3 > 2)
+// stops, even though the 120 s ceiling passed before tick 2.
+func TestReconcileSessionBeads_AssignedWorkDeferExplicitLimitIgnoresWindow(t *testing.T) {
+	tr := newAssignedWorkDeferTracker()
+	tr.setLimit("witness", 2)
+	runTick := assignedWorkDeferWindowHarness(t, tr, 200*time.Second)
+	for i, wantStop := range []bool{false, false, true} {
+		if got := runTick(); got != wantStop {
+			t.Fatalf("tick %d: stopped = %v, want %v", i+1, got, wantStop)
+		}
+	}
+}
+
+// TestReconcileSessionBeads_AssignedWorkDeferFastTicksStillBoundedByCount
+// proves the count remains the bound at the nominal 30 s patrol tick: the
+// 120 s ceiling has not been reached by the 3rd tick (60 s in), so ticks 1-3
+// defer and tick 4 stops on count 4 > 3.
+func TestReconcileSessionBeads_AssignedWorkDeferFastTicksStillBoundedByCount(t *testing.T) {
+	runTick := assignedWorkDeferWindowHarness(t, newAssignedWorkDeferTracker(), 30*time.Second)
+	for i, wantStop := range []bool{false, false, false, true} {
+		if got := runTick(); got != wantStop {
+			t.Fatalf("tick %d: stopped = %v, want %v", i+1, got, wantStop)
 		}
 	}
 }
@@ -12568,7 +12685,7 @@ func TestReconcileSessionBeads_AssignedWorkDeferBackstopResetsOnAnchorChange(t *
 			"currently_processing_bead_id": anchorBeadID,
 		})
 		rec := events.NewFake()
-		trace := idleTimeoutBackstopTrace("witness")
+		trace := idleTimeoutBackstopTrace()
 		reconcileSessionBeadsTraced(
 			context.Background(), env.city, []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
 			env.store, nil, nil, nil, nil, env.dt, poolDesired, false, nil, "",
@@ -12635,7 +12752,7 @@ func TestReconcileSessionBeads_AssignedWorkDeferBackstopResetsOnOtherOutcome(t *
 
 	runTick := func() *events.Fake {
 		rec := events.NewFake()
-		trace := idleTimeoutBackstopTrace("witness")
+		trace := idleTimeoutBackstopTrace()
 		reconcileSessionBeadsTraced(
 			context.Background(), env.city, []beads.Bead{session}, env.desiredState, cfgNames, env.cfg, env.sp,
 			env.store, nil, nil, nil, nil, env.dt, poolDesired, false, nil, "",

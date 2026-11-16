@@ -1,6 +1,9 @@
 package main
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 // defaultAssignedWorkDeferLimit is the consecutive same-anchor assigned-work
 // defer limit applied when neither a session nor its template has an
@@ -9,6 +12,9 @@ import "sync"
 // only that some finite default exists so the backstop (ga-nllza6) is live
 // out of the box instead of requiring every agent to opt in.
 const defaultAssignedWorkDeferLimit = 3
+
+// defaultAssignedWorkDeferWindow is declared for the RED tests; recordDefer does not consult it yet.
+const defaultAssignedWorkDeferWindow = 120 * time.Second
 
 // assignedWorkDeferTracker records, per session name, the number of
 // consecutive idle-timeout ticks the reconciler has deferred specifically
@@ -39,7 +45,7 @@ type assignedWorkDeferTracker interface {
 	// session's previously recorded anchor — including first sight — the
 	// count resets to zero before this defer is counted, so a fresh anchor
 	// bead always starts at one.
-	recordDefer(sessionName, template, anchorBeadID string) (exhausted bool)
+	recordDefer(sessionName, template, anchorBeadID string, now time.Time) (exhausted bool)
 
 	// reset clears sessionName's consecutive-defer count and remembered
 	// anchor. Callers reset whenever the session is not idle-kill-eligible
@@ -139,7 +145,7 @@ func (m *memoryAssignedWorkDeferTracker) limitFor(sessionName, template string) 
 	return defaultAssignedWorkDeferLimit
 }
 
-func (m *memoryAssignedWorkDeferTracker) recordDefer(sessionName, template, anchorBeadID string) bool {
+func (m *memoryAssignedWorkDeferTracker) recordDefer(sessionName, template, anchorBeadID string, _ time.Time) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	st := m.state[sessionName]
