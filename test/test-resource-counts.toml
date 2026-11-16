@@ -2351,6 +2351,18 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
+path = "internal/processgroup/processgroup_windows_test.go"
+resource = "fixed_sleep"
+calls = 12
+tagged = true
+
+[[count]]
+path = "internal/processgroup/processgroup_windows_test.go"
+resource = "subprocess"
+calls = 13
+tagged = true
+
+[[count]]
 path = "internal/productmetrics/control_unix_test.go"
 resource = "fixed_sleep"
 calls = 1
