@@ -21,9 +21,18 @@ import (
 // A drain on a split city cannot write an edge from its graph-resident item
 // workflow to a work-resident blocker, so it holds the item behind a GATE in the
 // graph binding that mirrors the blocker. This lane closes a gate once its
-// blocker is closed in every work store that holds it (and closes the gates of
-// a drain control that is closed or gone), which makes the item ready through
-// an ordinary same-store edge every readiness reader already honors.
+// blocker is closed in every store that holds it (and closes the gates of a
+// drain control that is closed or gone), which makes the item ready through an
+// ordinary same-store edge every readiness reader already honors.
+//
+// # A blocker that moved into the binding
+//
+// A gate names a blocker that lived in another store when the gate was
+// minted, and a migration can move that blocker into the binding afterwards:
+// `gc storage migrate --from-rigs` moves a rig's graph rows there, and the city
+// copy (or another rig's import) may have gated a moved row on one of them.
+// Nothing re-points such a gate, so the binding is read as a store too, and
+// the gate closes once its blocker closes there.
 //
 // # Off the tick
 //
@@ -37,9 +46,9 @@ import (
 // A city that relocates nothing never mints a gate, and the loop does not even
 // start reading: it checks the routes and returns. On a split city a pass reads
 // the open gates from the binding (one local query) and, only when there are
-// some, every distinct blocker in ONE batched read per work store. A store that
-// is suspended or quiescent is not read, and neither is any store while the
-// city is quiescent.
+// some, every distinct blocker in ONE batched read per store, the binding's a
+// local one. A store that is suspended or quiescent is not read, and neither
+// is any store while the city is quiescent.
 //
 // # A store the pass could not read
 //
@@ -84,7 +93,7 @@ func (cr *CityRuntime) releaseCrossStoreGates() dispatch.CrossStoreGateReport {
 		// A quiescent city's stores are not touched; the gates wait for it.
 		return dispatch.CrossStoreGateReport{}
 	}
-	report, err := dispatch.ReleaseCrossStoreGates(beads.GraphStore{Store: graph}, crossStoreBlockerResolver(graph, city, cfg, cr.rigBeadStores(), buildSuspendedRigPathsForCity(cfg, cr.cityPath))) // residency:allow — the work legs a gate's blocker may live in; see crossStoreBlockerResolver
+	report, err := dispatch.ReleaseCrossStoreGates(beads.GraphStore{Store: graph}, crossStoreBlockerResolver(graph, city, cfg, cr.rigBeadStores(), buildSuspendedRigPathsForCity(cfg, cr.cityPath))) // residency:allow — the legs a gate's blocker may live in; see crossStoreBlockerResolver
 	if len(report.Released) > 0 {
 		fmt.Fprintf(cr.stdout, "Cross-store gates: released %d (%s); their drain items may run\n", len(report.Released), strings.Join(report.Released, " ")) //nolint:errcheck // best-effort stdout
 	}
@@ -176,18 +185,18 @@ func (cr *CityRuntime) recordUnresolvedCrossStoreGates(report dispatch.CrossStor
 	}
 }
 
-// crossStoreBlockerLeg is one work store a gate's blocker may live in, by the
-// label an operator knows it by ("city", "rig <name>").
+// crossStoreBlockerLeg is one store a gate's blocker may live in, by the
+// label an operator knows it by ("city", "rig <name>", "graph binding").
 type crossStoreBlockerLeg struct {
 	label string
 	store beads.Store
 }
 
-// crossStoreBlockerResolver reads every gate blocker from every work store a
-// blocker may live in — the city store, then each serving rig store — in ONE
-// batched read per store, and returns every copy it finds. The binding the
-// gates live in is skipped: a blocker it held would have been an ordinary edge,
-// never a gate. A blocker in a SUSPENDED rig's namespace is undecided (the
+// crossStoreBlockerResolver reads every gate blocker from every store a
+// blocker may live in — the city store, each serving rig store, then the
+// binding the gates live in, which holds a blocker a migration moved there
+// after its gate was minted — in ONE batched read per store, and returns every
+// copy it finds. A blocker in a SUSPENDED rig's namespace is undecided (the
 // rig's store is not read). A store whose read fails is reported, not
 // returned (crossStoreBlockerResolverOver).
 func crossStoreBlockerResolver(binding, city beads.Store, cfg *config.City, rigs map[string]beads.Store, suspended map[string]bool) dispatch.CrossStoreBlockerResolver {
@@ -205,8 +214,8 @@ func crossStoreBlockerResolver(binding, city beads.Store, cfg *config.City, rigs
 			}
 		}
 	}
-	// Every work store is a leg, not just the first owner: a gate releases only
-	// once its blocker is closed in EVERY work store that holds it.
+	// Every store is a leg, not just the first owner: a gate releases only once
+	// its blocker is closed in EVERY store that holds it.
 	legs := []crossStoreBlockerLeg{{label: "city", store: city}}
 	names := make([]string, 0, len(serving))
 	for name := range serving {
@@ -228,16 +237,19 @@ func crossStoreBlockerResolver(binding, city beads.Store, cfg *config.City, rigs
 			legs = append(legs, crossStoreBlockerLeg{label: "rig " + name, store: leg})
 		}
 	}
-	return crossStoreBlockerResolverOver(binding, legs, suspendedPrefixes)
+	if binding != nil && binding != city {
+		legs = append(legs, crossStoreBlockerLeg{label: "graph binding", store: binding})
+	}
+	return crossStoreBlockerResolverOver(legs, suspendedPrefixes)
 }
 
 // crossStoreBlockerResolverOver reads every blocker from legs in ONE batched
-// read per leg, skipping the gates' own binding, and returns every copy it
-// finds. An id in one of the unread namespaces (a store that is not read) is
-// undecided. A leg whose read fails might hold an open copy of any blocker, so
-// it makes every blocker undecided and is named in Unreadable with its error:
-// the pass holds those gates as they are, and its caller says why.
-func crossStoreBlockerResolverOver(binding beads.Store, legs []crossStoreBlockerLeg, unreadNamespaces []string) dispatch.CrossStoreBlockerResolver {
+// read per leg, and returns every copy it finds. An id in one of the unread
+// namespaces (a store that is not read) is undecided. A leg whose read fails
+// might hold an open copy of any blocker, so it makes every blocker undecided
+// and is named in Unreadable with its error: the pass holds those gates as
+// they are, and its caller says why.
+func crossStoreBlockerResolverOver(legs []crossStoreBlockerLeg, unreadNamespaces []string) dispatch.CrossStoreBlockerResolver {
 	return func(ids []string) (dispatch.CrossStoreBlockerResolution, error) {
 		resolved := dispatch.CrossStoreBlockerResolution{
 			Copies:    make(map[string][]beads.Bead, len(ids)),
@@ -253,7 +265,7 @@ func crossStoreBlockerResolverOver(binding beads.Store, legs []crossStoreBlocker
 			}
 		}
 		for _, leg := range legs {
-			if leg.store == nil || leg.store == binding {
+			if leg.store == nil {
 				continue
 			}
 			found, err := beads.GetMany(leg.store, ids)

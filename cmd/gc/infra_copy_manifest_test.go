@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
@@ -1042,10 +1044,6 @@ func TestAnnotatedManifestStaysReadableByTheLegacyParser(t *testing.T) {
 func unboundedCollectedCity(t *testing.T, closeWorkRow bool) (cityPath string, cfg *config.City, source beads.Store, target infraBindingTarget, id string) {
 	t.Helper()
 	cityPath, cfg, source, target = convergedRecoveryCity(t)
-	writeLegacyManifest(t, target)
-	if err := os.WriteFile(target.MarkerPath(), []byte("infrastructure classes migrated\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	rows, err := readInfraSnapshot(source)
 	if err != nil {
 		t.Fatal(err)
@@ -1058,8 +1056,22 @@ func unboundedCollectedCity(t *testing.T, closeWorkRow bool) (cityPath string, c
 	if id == "" {
 		t.Fatal("the fixture carried no session")
 	}
+	collectUnboundedEntry(t, cityPath, source, target, id, closeWorkRow)
+	return cityPath, cfg, source, target, id
+}
+
+// collectUnboundedEntry turns id, a bead the cutover carried, into that shape:
+// the manifest is rewritten in the legacy format under a marker that records
+// no time, the binding closes and collects its row, and the work store keeps
+// the frozen cutover-time row, closed too when closeWorkRow.
+func collectUnboundedEntry(t *testing.T, cityPath string, source beads.Store, target infraBindingTarget, id string, closeWorkRow bool) {
+	t.Helper()
+	writeLegacyManifest(t, target)
+	if err := os.WriteFile(target.MarkerPath(), []byte("infrastructure classes migrated\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if frozen, _ := source.Get(id); frozen.Status == "closed" {
-		t.Fatal("the fixture's frozen session is already closed")
+		t.Fatalf("the fixture's frozen row %s is already closed", id)
 	}
 	if closeWorkRow {
 		if err := source.Close(id); err != nil {
@@ -1078,7 +1090,6 @@ func unboundedCollectedCity(t *testing.T, closeWorkRow bool) (cityPath string, c
 	if _, err := clearRetainedInfraCopies(cityPath, target, &announce); !errors.As(err, &unbounded) {
 		t.Fatalf("precondition: clear = %v, want the unbounded refusal", err)
 	}
-	return cityPath, cfg, source, target, id
 }
 
 func runStrandedRecoveryWith(t *testing.T, cityPath string, cfg *config.City, opts strandedRecoveryOptions) (int, string, string) {
@@ -1111,6 +1122,48 @@ func TestRecoverMovesAClosedUnboundedEntryTheBindingCollected(t *testing.T) {
 	}
 	if got.Status != "closed" {
 		t.Errorf("moved %s arrived %q, want closed", id, got.Status)
+	}
+	assertClearProceeds(t, cityPath, target)
+}
+
+// The same exit for a carried row only its metadata makes infrastructure. A
+// formula step instantiated before #4928 carries gc.root_bead_id and
+// gc.step_ref but no gc.step_id, and steps from that era are what a legacy
+// manifest lists. recover-stranded's work-shaped default is for rows the
+// manifest does not list (the gate's Declassifiable set), so a closed row it
+// lists by id alone is still moved and recorded, and the clear proceeds.
+//
+// Red before: the run left the row in the work store as work-shaped and
+// exited 1, "still stranded by default", while the gate reported no strand
+// and the clear kept refusing on the row only this run moves.
+func TestRecoverMovesAClosedWorkShapedUnboundedEntryTheBindingCollected(t *testing.T) {
+	source := stubStrandedRecoverySource(t)
+	step := mustCreateInfraBead(t, source, beads.Bead{Title: "a step from before gc.step_id", Type: "task", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey: "gc-1",
+		beadmeta.StepRefMetadataKey:    "mol.step",
+	}})
+	if keys, ok := coordclass.ClassMetadataOnly(step); !ok || !slices.Equal(keys, []string{beadmeta.RootBeadIDMetadataKey}) {
+		t.Fatalf("the fixture %s is not work-shaped (keys %v, ok %v); the scenario under test was never created", step.ID, keys, ok)
+	}
+	cityPath, cfg, _, target := convergedRecoveryCityOn(t, source)
+	collectUnboundedEntry(t, cityPath, source, target, step.ID, true)
+	if got := strandedIDs(t, cityPath, target); len(got) != 0 {
+		t.Fatalf("precondition: the gate calls %v stranded, want none: an unbounded entry is retained", got)
+	}
+
+	code, stdout, stderr := runStrandedRecoveryWith(t, cityPath, cfg, strandedRecoveryOptions{})
+	if code != 0 {
+		t.Fatalf("recover exited %d: %s %s", code, stdout, stderr)
+	}
+	if strings.Contains(stdout, "work-shaped") {
+		t.Errorf("recover held back %s, a row the manifest lists, as work-shaped: %s", step.ID, stdout)
+	}
+	got, err := openMigratedDestination(t, target).Get(step.ID)
+	if err != nil {
+		t.Fatalf("recover did not move the closed unbounded entry %s: %v", step.ID, err)
+	}
+	if got.Status != "closed" {
+		t.Errorf("moved %s arrived %q, want closed", step.ID, got.Status)
 	}
 	assertClearProceeds(t, cityPath, target)
 }
@@ -2216,9 +2269,24 @@ func TestABareIDDoesNotCarryARowWithNoCreatedAtOnItsOwn(t *testing.T) {
 //
 // Red before: recover-stranded moved the frozen open copy back into the
 // binding with no question, and the dry run counted it an ordinary strand.
+//
+// A work-shaped row (the substrate incident's shape) carried the same way gets
+// the same answers. The work-shaped default is for rows the manifest does not
+// list, and this one it lists by a bare id: open, it is asked the same per-id
+// question; closed, it moves.
 func TestRecoverAsksBeforeMovingAPresumedReusedRowTheBindingCollected(t *testing.T) {
-	for _, closed := range []bool{false, true} {
-		t.Run(map[bool]string{false: "open", true: "closed"}[closed], func(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		workShaped bool
+		closed     bool
+	}{
+		{"open", false, false},
+		{"closed", false, true},
+		{"work-shaped/open", true, false},
+		{"work-shaped/closed", true, true},
+	} {
+		closed := tc.closed
+		t.Run(tc.name, func(t *testing.T) {
 			prevSlack := infraManifestClockSlack
 			infraManifestClockSlack = 0
 			t.Cleanup(func() { infraManifestClockSlack = prevSlack })
@@ -2226,7 +2294,14 @@ func TestRecoverAsksBeforeMovingAPresumedReusedRowTheBindingCollected(t *testing
 			cityPath, cfg, source, target := convergedRecoveryCity(t)
 			writeLegacyManifest(t, target)
 			waitPastMarkerBound(t, target)
-			late := mustCreateInfraBead(t, source, beads.Bead{Title: "a mail an older recover-stranded carried", Type: "message"})
+			row := beads.Bead{Title: "a mail an older recover-stranded carried", Type: "message"}
+			if tc.workShaped {
+				row = beads.Bead{Title: "work an older recover-stranded carried", Type: "task", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gc-622605"}}
+			}
+			late := mustCreateInfraBead(t, source, row)
+			if _, ok := coordclass.ClassMetadataOnly(late); ok != tc.workShaped {
+				t.Fatalf("precondition: ClassMetadataOnly(%s) = %v, want %v", late.ID, ok, tc.workShaped)
+			}
 			dest, err := openInfraDestination(target)
 			if err != nil {
 				t.Fatal(err)
@@ -2552,5 +2627,83 @@ func TestStorageStatusNamesTheChoiceForAPresumedReusedStrand(t *testing.T) {
 	}
 	if strings.Contains(out, "could not fence") {
 		t.Errorf("status blames an unfenced writer for a presumed-reused row:\n%s", out)
+	}
+}
+
+// A row that metadata alone made infrastructure class is told its in-place
+// repair first, per id, and is not lumped with the copy-it-in rows.
+func TestInfraStrandedAdviceNamesTheDeclassifyRepair(t *testing.T) {
+	declass := map[string][]string{"su-1": {"gc.root_bead_id"}}
+	advice := infraStrandedAdviceFor([]string{"gc-3", "su-1"}, nil, nil, declass)
+	if !strings.Contains(advice, "`gc bd update su-1 --unset-metadata gc.root_bead_id`") {
+		t.Errorf("advice does not spell the in-place repair for su-1: %s", advice)
+	}
+	if !strings.Contains(advice, "1 of them (gc-3) are absent") {
+		t.Errorf("the copy-it-in sentence does not name only gc-3: %s", advice)
+	}
+	if !strings.Contains(advice, "--"+strandedMoveFlag) {
+		t.Errorf("advice does not name the opt-in copy for a real workflow step: %s", advice)
+	}
+	only := infraStrandedAdviceFor([]string{"su-1"}, nil, nil, declass)
+	if strings.Contains(only, "could not fence them") || !strings.HasPrefix(only, "su-1 is infrastructure class only because of metadata (gc.root_bead_id)") {
+		t.Errorf("declassify only = %q", only)
+	}
+	// A held-different id keeps its own remedy even when its metadata alone
+	// decides its class.
+	held := infraStrandedAdviceFor([]string{"su-1"}, []string{"su-1"}, nil, declass)
+	if strings.Contains(held, "--unset-metadata") {
+		t.Errorf("a held-different id was told to unset metadata: %s", held)
+	}
+}
+
+// gc storage status on a city stranded by an agent's plain `bd create`
+// carrying gc.root_bead_id (substrate 2026-11-09): exit 1, the serving verdict
+// says degraded, and the advice spells the in-place repair for that row and
+// not for a gc:session row stranded beside it.
+func TestStorageStatusNamesTheDeclassifyRepairAndDegradedServing(t *testing.T) {
+	cityPath, cfg, source, _ := convergedInfraCity(t)
+	work := mustCreateInfraBead(t, source, beads.Bead{Title: "patrol finding", Type: "task", Metadata: map[string]string{"gc.root_bead_id": "gcg-622605"}})
+	session := mustCreateInfraBead(t, source, beads.Bead{Title: "stray session", Type: "session", Labels: []string{"gc:session"}})
+	var stdout, stderr bytes.Buffer
+	if code := doStorageStatus(storageOperatorRequest{CityPath: cityPath, Cfg: cfg}, &stdout, &stderr); code != 1 {
+		t.Fatalf("status exited %d with two stranded rows, want 1: %s", code, stdout.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"serving:     degraded — 2 stranded row(s)", "gc bd update " + work.ID + " --unset-metadata gc.root_bead_id"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("status does not say %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "gc bd update "+session.ID) {
+		t.Errorf("status tells the gc:session row to drop its metadata:\n%s", out)
+	}
+	// Status and the gate agree: the city status calls degraded is the one
+	// the gate serves.
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, io.Discard)
+	if err != nil {
+		t.Fatalf("status says degraded and the gate refuses: %v", err)
+	}
+	if !routes.bootVerdict.servesDegraded() {
+		t.Errorf("status says degraded and the gate served verdict %s", routes.bootVerdict.Outcome)
+	}
+	_ = routes.close()
+
+	// The repair in place, as gc bd judges it: unsetting the key returns the
+	// row to work, which the work store holds, and status is clean again.
+	before, err := source.Get(work.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := coordclass.Mutation{UnsetMetadata: []string{"gc.root_bead_id"}}.Apply(before)
+	if flip := coordclass.CheckFlip(before, after, []coordclass.Class{coordclass.ClassWork}); flip != nil {
+		t.Fatalf("the declassify write is refused by the flip guard: %v", flip)
+	}
+	if err := source.Update(work.ID, beads.UpdateOpts{UnsetMetadata: []string{"gc.root_bead_id"}}); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	doStorageStatus(storageOperatorRequest{CityPath: cityPath, Cfg: cfg}, &stdout, &stderr)
+	if strings.Contains(stdout.String(), work.ID) {
+		t.Errorf("status still counts %s after the key was removed:\n%s", work.ID, stdout.String())
 	}
 }

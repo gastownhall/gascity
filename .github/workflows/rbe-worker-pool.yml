@@ -120,6 +120,9 @@ jobs:
           WORKER_MODE: measure
           RBE_WORKER_DIR: ${{ steps.rbe-worker.outputs.dir }}
           RBE_WORKER_REVISION: ${{ steps.rbe-worker.outputs.sha }}
+          # Go and dolt come from the mirror first (the worker step's
+          # RBE_DIST_MIRROR comment).
+          RBE_DIST_MIRROR: ${{ vars.RBE_DIST_MIRROR || '' }}
         run: '"$RBE_WORKER_DIR/blacksmith-worker.sh"'
       - name: Upload the worker-env drift
         if: steps.worker-env.outcome == 'failure'
@@ -194,6 +197,14 @@ jobs:
           # also cancel the running pool runs, which keep their cap until they
           # retire.
           CAS_MAX_BYTES: ${{ vars.RBE_CAS_MAX_BYTES || '' }}
+          # Pinned setup downloads (NativeLink, Go, dolt; infra README "Pinned
+          # setup downloads on R2"): rbe-worker's rbe-fetch retries each and,
+          # with this set (https://rbe-warm.ops.gascity.com/dist), tries the
+          # warm bucket's copy first. The copy is transport only: every file
+          # is checked against the pin's sha256, and a miss or mismatch reads
+          # upstream (GitHub, go.dev). Unset: upstream alone, still retried.
+          # Rollback: unset it; the next dispatch downloads from upstream.
+          RBE_DIST_MIRROR: ${{ vars.RBE_DIST_MIRROR || '' }}
         run: '"$RBE_WORKER_DIR/blacksmith-worker.sh"'
 
   # Beside the worker, which serves for hours: wait for its drift upload to

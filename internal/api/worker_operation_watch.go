@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
@@ -24,7 +25,7 @@ func (s *Server) resolveAgentSessionSubjects(name string, cfg *config.City) (str
 	}
 
 	sessionID := ""
-	if store := s.state.SessionsBeadStore().Store; store != nil {
+	if store := s.state.Stores().Sessions(); store != (beads.SessionStore{}) {
 		if id, err := s.resolveSessionIDWithConfig(store, sessionName); err == nil {
 			sessionID = strings.TrimSpace(id)
 		}

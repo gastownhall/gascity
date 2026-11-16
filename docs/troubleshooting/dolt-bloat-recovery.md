@@ -103,8 +103,9 @@ the underlying reason (see **Compact Quarantine Reasons** below) before
 reclaiming. Like the offline `dolt gc --archive-level=0` procedure above,
 it writes classic table files. Unlike that procedure,
 `--gc-only` runs against the live managed server and does not require stopping
-the city — though quiescing writers still makes the GC faster and more
-thorough.
+the city, but it skips any database with a connected session (see the live-session
+gate in `gc dolt compact --help`), so quiesce writers first; `--force` overrides
+the skip.
 
 ### A full GC canceled at the read timeout
 
@@ -253,12 +254,22 @@ Markers left by runs from before this guard existed:
   reports the database as diverged until you reconcile it. Either re-clone
   from the remote, or push the flattened history during an announced window
   (see below).
-- **`compact-pending-push/<database>`**: the marker is held untouched, and
-  nothing is force-pushed. Compact reports it on stderr, emits a
+- **`compact-pending-push/<database>`**: when the marker's remote is still
+  configured, the marker is held untouched, and
+  nothing is force-pushed. (A marker whose remote was removed is reported as
+  unsatisfiable instead; see below.) Compact reports it on stderr, emits a
   `dolt.compact.quarantine` event of type `compact-pending-push-held`, and
   mails the compactor alert recipient (`GC_DOLT_COMPACT_ALERT_TO`, default
   `mayor`). Reminders follow the same cadence as quarantine alerts. Reconcile
   it the same way as a pending-GC marker.
+
+A `compact-pending-push` marker whose remote has since been removed can never
+be retried, whether or not the database still has other remotes. Compact stops
+treating it as a stale-marker or held alert and reports it once, as a `dolt.compact.quarantine` event of type
+`compact-pending-push-unsatisfiable` plus one mail. The event repeats every
+run; the mail does not. The marker is left untouched and the database stays
+blocked. Restore the remote, or clear the marker after you reconcile the
+database by hand.
 
 > **Warning:** re-cloning from the remote discards every commit made to the
 > local database since the flatten. Those writes exist only locally. Before
@@ -541,7 +552,8 @@ If GC finishes but the size barely moves, the chunks are nearly all live
 
 `gc dolt compact` writes exact reason strings into
 `.gc/runtime/packs/dolt/compact-quarantine/<database>` when it detects
-possible writer interference before full GC. Operator dashboards and runbooks
+possible writer interference before full GC, or when a database it rewrote
+stops being served. Operator dashboards and runbooks
 should treat these strings as the current vocabulary:
 
 | Reason | Meaning |
@@ -559,6 +571,7 @@ should treat these strings as the current vocabulary:
 | `post-flatten value hash probe returned empty value` | The database hash query returned an empty value after flatten. |
 | `post-flatten value hash changed with row-count increase` | The database hash changed after at least one stable-table row-count gain. *(auto-clearable — see below)* |
 | `post-flatten value hash changed without row-count increase` | The database hash changed without a row-count gain. *(auto-clearable — see below)* |
+| `live database unavailable after compaction` | After a flatten or GC, the database's data-dir entry was gone or the server no longer served it with a resolvable HEAD. *(never auto-cleared — see below)* |
 
 Four of these reasons are known writer-race false positives and are
 **auto-clearable**. On its next scheduled run, `gc dolt compact`'s flatten
@@ -584,6 +597,30 @@ checks must not rewrite the quarantine marker. The sidecar is operational
 state, not integrity evidence. A changed reason or a replacement marker alerts
 immediately, while an unchanged marker follows the bounded reminder cadence.
 
+A `live database unavailable after compaction` marker means the rewrite may
+have left the server without the database. It records `live_gate_steps` (the
+rewrites that ran), `live_gate_failed_step`, `live_gate_failure`,
+`live_gate_probe_failure` (the server's answer to the served-HEAD probe),
+`live_gate_data_dir_entry` with its `_before` and `_after` states, and
+`live_gate_pre_compaction_head`. Compact writes no new pending-GC marker for
+that database (a pending-GC retry keeps the marker it retried) and ends the
+run with exit 1 without touching another database; its last line lists the
+selected databases it did not reach. To recover:
+
+1. If `<data_dir>/<database>/.dolt` is gone, restore the database from the
+   safety backup. If it is still on disk, restart the server
+   (`gc dolt restart`) instead: a restore from backup discards every write
+   since that backup.
+2. Verify the HEAD resolves, with
+   `gc dolt sql -q "USE <database>; SELECT HASHOF('HEAD')"`, and that bead
+   data is healthy, with `gc bd list --rig <rig> --limit 1`. Compare the HEAD
+   with `live_gate_pre_compaction_head` to tell whether the flatten landed.
+3. Remove the quarantine marker, and any pending-GC or pending-push marker
+   under `.gc/runtime/packs/dolt/` that predates the restore.
+4. Preview the next run with
+   `gc dolt compact --dry-run --only-db <database>` before letting scheduled
+   compaction touch it again.
+
 Safe marker-clear procedure:
 
 1. Require a clean application worktree: `git status --short` should show no
@@ -608,6 +645,10 @@ path also refuses, except for the four auto-clearable reasons above, which it
 may clear on its own after proving content preservation. The refusal output
 repeats the marker path, reason, key evidence fields, and the clear/retry
 command so operators have the next action without opening this runbook first.
+
+Separately, `gc dolt compact` skips `CALL DOLT_GC` on a database that has live
+sessions connected, or whose session probe fails. The log names the database and
+the next run retries; `--force` runs the GC anyway.
 
 ## When to Escalate
 

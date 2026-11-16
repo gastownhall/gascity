@@ -84,8 +84,9 @@ func holdNudgeOutcome(r worker.NudgeResult, err error) string {
 // nudge exactly as the switch off does, whatever its record says (a record
 // may say working with no turn running), under shadow and on alike; and,
 // under on, its runtime's fresh hold read reports a live working record as
-// a typing hold, the one the starved-queue bypass is vetoed on, and a
-// blocked or boundary record as none.
+// a typing hold, the one the starved-queue bypass and the conversation
+// lane's quiescence boundary are vetoed on, and a blocked or boundary record
+// as none.
 func checkProgramStatusHoldMidTurn(t *testing.T, profile Profile) Result {
 	t.Helper()
 	return runHoldMidTurnCheck(t, profile, true)

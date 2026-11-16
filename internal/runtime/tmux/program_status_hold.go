@@ -53,29 +53,44 @@ func parseProgramHoldRow(line string) (programHoldRow, bool) {
 	return programHoldRow{pane: pane, activity: fields[1+programPaneFields]}, true
 }
 
-// holdRead takes one fresh hold reading of session's agent pane: one
-// list-panes of the session folded to its agent pane, bounded by
-// shadowReadTimeout. ok is false, and nothing is read, unless
-// the switch is on; it is false as well when the read failed, the agent
-// pane cannot be named, or the pane does not declare the hold. The record is
-// judged under the switch with the tap liveness of the state cache's last
-// process table, and the activity has gc's own keystroke echo discounted.
+// holdRead takes one fresh hold reading of session's agent pane
+// (decisionRead). ok is false, and nothing is read, unless the switch is on;
+// it is false as well when the read failed, the agent pane cannot be named,
+// or the pane does not declare the hold.
 func (t *Tmux) holdRead(session string) (runtime.ProgramHoldReading, bool) {
+	r, pane, ok := t.decisionRead(session)
+	if !ok || !pane.holdDeclared() {
+		return runtime.ProgramHoldReading{}, false
+	}
+	return r, true
+}
+
+// decisionRead takes one fresh reading of session's agent pane for a
+// decision under the switch on: one list-panes of the session folded to its
+// agent pane, bounded by shadowReadTimeout, carrying the pane's record, its
+// hold declaration and its window's activity, past the state cache's
+// snapshot, with the agent pane's capture fields (its hold and settle
+// declarations among them). ok is false, and nothing is read, unless the
+// switch is on; it is false as well when the read failed or the agent pane
+// cannot be named. The record is judged under the switch with the tap
+// liveness of the state cache's last process table, and the activity has
+// gc's own keystroke echo discounted.
+func (t *Tmux) decisionRead(session string) (r runtime.ProgramHoldReading, pane programPane, ok bool) {
 	mode := t.programStatusMode()
 	if mode != runtime.ProgramStatusOn || !validSessionNameRe.MatchString(session) {
-		return runtime.ProgramHoldReading{}, false
+		return runtime.ProgramHoldReading{}, programPane{}, false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), shadowReadTimeout)
 	defer cancel()
 	out, err := t.runCtx(ctx, "list-panes", "-s", "-t", paneTarget(session), "-F", programHoldFormat)
 	if err != nil {
-		return runtime.ProgramHoldReading{}, false
+		return runtime.ProgramHoldReading{}, programPane{}, false
 	}
 	var rows []programHoldRow
 	for _, line := range strings.Split(out, "\n") {
 		row, ok := parseProgramHoldRow(line)
 		if !ok {
-			return runtime.ProgramHoldReading{}, false
+			return runtime.ProgramHoldReading{}, programPane{}, false
 		}
 		rows = append(rows, row)
 	}
@@ -84,8 +99,8 @@ func (t *Tmux) holdRead(session string) (runtime.ProgramHoldReading, bool) {
 		panes[i] = row.pane
 	}
 	pane, named := foldProgramPane(panes)
-	if !named || !pane.holdDeclared() {
-		return runtime.ProgramHoldReading{}, false
+	if !named {
+		return runtime.ProgramHoldReading{}, programPane{}, false
 	}
 	var activity string
 	for _, r := range rows {
@@ -97,11 +112,33 @@ func (t *Tmux) holdRead(session string) (runtime.ProgramHoldReading, bool) {
 	if t.shadow.taps != nil {
 		taps = t.shadow.taps()
 	}
-	reading := runtime.ProgramHoldReading{Status: judgeProgramPane(mode, t.captureGatePassed(), pane, true, taps)}
+	r = runtime.ProgramHoldReading{Status: judgeProgramPane(mode, t.captureGatePassed(), pane, true, taps)}
 	if secs, err := strconv.ParseInt(activity, 10, 64); err == nil && secs > 0 {
-		reading.Activity = t.discountedActivity(session, time.Unix(secs, 0))
+		r.Activity = t.discountedActivity(session, time.Unix(secs, 0))
 	}
-	return reading, true
+	return r, pane, true
+}
+
+// programDecision is a deciding reading of a session's record
+// (programDecide) and the clock its rule judges it at.
+type programDecision struct {
+	reading runtime.ProgramHoldReading
+	at      time.Time
+}
+
+// programDecide takes a decision's reading under the switch on
+// (decisionRead), and returns it only when it decides
+// ([runtime.ProgramStatus.Decides]: valid, taken under on), stamped with the
+// clock read after it: no state the reading shows can have been entered
+// later, while a clock taken before the read would make a state entered
+// during it look skewed and hold nothing. Under off or shadow nothing is
+// read and ok is false.
+func (t *Tmux) programDecide(session string) (programDecision, bool) {
+	r, _, ok := t.decisionRead(session)
+	if !ok || !r.Status.Decides() {
+		return programDecision{}, false
+	}
+	return programDecision{reading: r, at: time.Now()}, true
 }
 
 // ProgramStatusHoldRead implements [runtime.ProgramStatusHoldProvider]: one
@@ -113,18 +150,16 @@ func (p *Provider) ProgramStatusHoldRead(name string) (runtime.ProgramHoldReadin
 
 var _ runtime.ProgramStatusHoldProvider = (*Provider)(nil)
 
-// declareHold sets pane's hold declaration to hold, guarded by the nonce
-// heal read on it: tmux runs the change only while the pane still carries
-// that nonce, so a pane re-armed or disarmed in between keeps the
-// declaration its own arm gave it.
-func (t *Tmux) declareHold(pane healPane, hold bool) error {
-	change := []string{"set-option", "-pu", "-t", pane.target, programHoldOption}
-	if hold {
-		change = []string{"set-option", "-p", "-F", "-t", pane.target, programHoldOption, "#{pane_id}"}
-	}
+// declarePane converges pane's hold and settle declarations to want's,
+// guarded by the nonce heal read on it: tmux runs the change only while the
+// pane still carries that nonce, so a pane re-armed or disarmed in between
+// keeps the declarations its own arm gave it.
+func (t *Tmux) declarePane(pane healPane, want runtime.ProgramStatusArm) error {
+	changes := appendDeclaration(nil, pane.target, programHoldOption, want.HoldMidTurn, true)
+	changes = appendDeclaration(changes, pane.target, programSettleOption, want.DecideSettle, true)
 	guard := "#{==:#{" + programTapOption + "}," + pane.tap + "}"
-	if _, err := t.run("if-shell", "-F", "-t", pane.target, guard, tmuxCommandLines([][]string{change})); err != nil {
-		return fmt.Errorf("declaring the hold of %s: %w", pane.target, err)
+	if _, err := t.run("if-shell", "-F", "-t", pane.target, guard, tmuxCommandLines(changes)); err != nil {
+		return fmt.Errorf("declaring the hold and settle of %s: %w", pane.target, err)
 	}
 	return nil
 }

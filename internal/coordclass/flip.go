@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -106,7 +107,7 @@ func (f *Flip) Error() string {
 	}
 	return fmt.Sprintf("this write would turn a %s-class bead into a %s-class bead in a store that holds only %s beads; "+
 		"this city keeps %s beads in a different store, so the bead would be stranded where no %s reader looks "+
-		"— and one stranded bead makes every later gc command refuse until it is repaired",
+		"— where it stays invisible to its class readers, and the city reports itself degraded, until it is repaired",
 		f.Before, f.After, strings.Join(held, "/"), f.After, f.After)
 }
 
@@ -160,4 +161,63 @@ func MintCommand(c Class) string {
 	default:
 		return ""
 	}
+}
+
+// ClassMetadataOnly reports whether b is a WORK-SHAPED bead that a stray
+// gc.root_bead_id alone takes out of the work class, and if so the keys an
+// in-place repair unsets (always exactly gc.root_bead_id).
+//
+// It exists for the stranded-row repair. An agent that copies its workflow
+// root onto ordinary work as provenance (`gc.root_bead_id` on a task, the
+// substrate 2026-11-09 incident) makes that work graph class, and a split
+// city then counts it as stranded. Such a row is repaired in place, on the
+// running city, by unsetting the key: CheckFlip allows a write that returns a
+// bead to a class its store holds. Copying it into the binding instead would
+// hand ordinary work to a workflow's ownership.
+//
+// It is deliberately narrow, because a false yes tells an operator to strip
+// a REAL graph bead of its workflow membership. ok is false for:
+//
+//   - a work bead (nothing to remove);
+//   - any bead whose type or labels decide its class (a gc:session bead, a
+//     convergence root, a message, a wisp label);
+//   - any bead carrying a classifier key other than gc.root_bead_id:
+//     gc.kind (a workflow root, a wisp) and gc.formula_contract are
+//     definitive graph markers no agent copies by accident;
+//   - a bead carrying gc.step_id: that is what a formula step looks like, so
+//     it is most likely a real step written by an unfenced writer.
+func ClassMetadataOnly(b beads.Bead) (keys []string, ok bool) {
+	if Classify(b) == ClassWork {
+		return nil, false
+	}
+	for _, l := range b.Labels {
+		if isClassifierLabel(l) {
+			return nil, false
+		}
+	}
+	for _, k := range ClassifierMetadataKeys() {
+		if k != beadmeta.RootBeadIDMetadataKey && strings.TrimSpace(b.Metadata[k]) != "" {
+			return nil, false
+		}
+	}
+	if strings.TrimSpace(b.Metadata[beadmeta.RootBeadIDMetadataKey]) == "" ||
+		strings.TrimSpace(b.Metadata[beadmeta.StepIDMetadataKey]) != "" {
+		return nil, false
+	}
+	keys = []string{beadmeta.RootBeadIDMetadataKey}
+	if Classify(Mutation{UnsetMetadata: keys}.Apply(b)) != ClassWork {
+		return nil, false
+	}
+	return keys, true
+}
+
+// DeclassifyCommand is the one spelling of the in-place repair for a bead
+// ClassMetadataOnly answered for: the gc bd update that unsets those keys.
+func DeclassifyCommand(id string, keys []string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "gc bd update %s", id)
+	for _, k := range keys {
+		fmt.Fprintf(&b, " --unset-metadata %s", k)
+	}
+	return b.String()
 }

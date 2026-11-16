@@ -22,8 +22,8 @@ import (
 
 func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInput) (*ListOutput[sessionResponse], error) {
 	index := s.latestIndex()
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 	// Validate the cursor before the read-model listing and per-session
@@ -89,7 +89,7 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	if input.WakeReasons {
 		s.setSessionListWakeReasons(page, pageSessions, listings)
 	}
-	freshness := cacheAgeSeconds(store.Store)
+	freshness := cacheAgeSeconds(store)
 	return &ListOutput[sessionResponse]{
 		Index:        index,
 		CacheAgeS:    freshness.ageS,
@@ -140,9 +140,9 @@ func (s *Server) setSessionListWakeReasons(page []sessionResponse, pageSessions 
 // seat on every render) must never pay for a miss. With peek_strict the live-
 // session ladder runs instead, as for gc session peek's local path: a closed
 // session is found only by its exact bead id.
-func (s *Server) resolveSessionGetID(store beads.Store, input *SessionGetInput) (string, error) {
+func (s *Server) resolveSessionGetID(store beads.SessionStore, input *SessionGetInput) (string, error) {
 	if input.ExactID {
-		return session.ResolveSessionIDByExactID(beads.SessionStore{Store: store}, input.ID)
+		return session.ResolveSessionIDByExactID(store, input.ID)
 	}
 	if input.PeekStrict {
 		return s.resolveSessionIDWithConfig(store, input.ID)
@@ -154,16 +154,15 @@ func (s *Server) resolveSessionGetID(store beads.Store, input *SessionGetInput) 
 
 func (s *Server) humaHandleSessionGet(ctx context.Context, input *SessionGetInput) (*IndexOutput[sessionResponse], error) {
 	index := s.latestIndex()
-	store := s.state.SessionsBeadStore()
-	raw := store.Store
-	if raw == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 	mgr := s.sessionManager(store)
 	cfg := s.state.Config()
 	sp := s.state.SessionProvider()
 
-	id, err := s.resolveSessionGetID(raw, input)
+	id, err := s.resolveSessionGetID(store, input)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
@@ -173,7 +172,7 @@ func (s *Server) humaHandleSessionGet(ctx context.Context, input *SessionGetInpu
 	}
 	var strictOutput string
 	if input.PeekStrict {
-		handle, handleErr := s.workerHandleForSession(raw, id)
+		handle, handleErr := s.workerHandleForSession(store, id)
 		if handleErr != nil {
 			return nil, humaSessionManagerError(fmt.Errorf("peeking session %s: %w", id, handleErr))
 		}
@@ -191,7 +190,7 @@ func (s *Server) humaHandleSessionGet(ctx context.Context, input *SessionGetInpu
 	if len(s.conversationLaneKinds()) > 0 {
 		resp.Turn = s.observedSessionTurn(id, info.Generation)
 	}
-	freshness := cacheAgeSeconds(raw)
+	freshness := cacheAgeSeconds(store)
 	return &IndexOutput[sessionResponse]{
 		Index:        index,
 		CacheAgeS:    freshness.ageS,
@@ -206,12 +205,12 @@ func (s *Server) humaHandleSessionGet(ctx context.Context, input *SessionGetInpu
 
 func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *SessionTranscriptInput) (*IndexOutput[sessionTranscriptGetResponse], error) {
 	index := s.latestIndex()
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 
-	id, err := s.resolveSessionIDAllowClosedWithConfig(store.Store, input.ID)
+	id, err := s.resolveSessionIDAllowClosedWithConfig(store, input.ID)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
@@ -246,7 +245,7 @@ func (s *Server) humaHandleSessionTranscript(ctx context.Context, input *Session
 		// entries, so default to 0 (sessionlog's "no pagination"
 		// sentinel) rather than 1 compaction.
 		tail, _ := input.Compactions()
-		handle, handleErr := s.workerHandleForSession(store.Store, id)
+		handle, handleErr := s.workerHandleForSession(store, id)
 		if handleErr != nil {
 			return nil, humaSessionManagerError(handleErr)
 		}
@@ -430,12 +429,12 @@ func (s *Server) structuredTranscriptFallback(index uint64, info session.Info, i
 
 func (s *Server) humaHandleSessionPending(_ context.Context, input *SessionIDInput) (*IndexOutput[sessionPendingResponse], error) {
 	index := s.latestIndex()
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 
-	id, err := s.resolveSessionIDWithConfig(store.Store, input.ID)
+	id, err := s.resolveSessionIDWithConfig(store, input.ID)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
@@ -502,8 +501,8 @@ type cityPendingSnapshot struct {
 // decision. Pending() itself degrades gracefully (runtime-gone -> no pending),
 // so over-including a dormant empty-state bead is harmless.
 func (s *Server) probeCityPending() (cityPendingSnapshot, error) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return cityPendingSnapshot{}, errNoSessionsStore
 	}
 	mgr := s.sessionManager(store)
@@ -560,8 +559,8 @@ var errNoSessionsStore = errors.New("no bead store configured")
 // rest.
 func (s *Server) humaHandleCityPending(_ context.Context, _ *CityPendingInput) (*ListOutput[cityPendingEntry], error) {
 	index := s.latestIndex()
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 	snap, err := s.probeCityPending()
@@ -586,7 +585,7 @@ func (s *Server) humaHandleCityPending(_ context.Context, _ *CityPendingInput) (
 		})
 	}
 
-	freshness := cacheAgeSeconds(store.Store)
+	freshness := cacheAgeSeconds(store)
 	return &ListOutput[cityPendingEntry]{
 		Index:        index,
 		CacheAgeS:    freshness.ageS,
@@ -606,12 +605,12 @@ func (s *Server) humaHandleCityPending(_ context.Context, _ *CityPendingInput) (
 
 func (s *Server) humaHandleSessionAgentList(_ context.Context, input *SessionIDInput) (*IndexOutput[sessionAgentListResponse], error) {
 	index := s.latestIndex()
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 
-	id, err := s.resolveSessionIDAllowClosedWithConfig(store.Store, input.ID)
+	id, err := s.resolveSessionIDAllowClosedWithConfig(store, input.ID)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
@@ -648,12 +647,12 @@ func (s *Server) humaHandleSessionAgentList(_ context.Context, input *SessionIDI
 
 func (s *Server) humaHandleSessionAgentGet(_ context.Context, input *SessionAgentGetInput) (*IndexOutput[sessionAgentGetResponse], error) {
 	index := s.latestIndex()
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 
-	id, err := s.resolveSessionIDAllowClosedWithConfig(store.Store, input.ID)
+	id, err := s.resolveSessionIDAllowClosedWithConfig(store, input.ID)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}

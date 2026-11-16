@@ -21,6 +21,35 @@ func SetLivenessClockForTest(c clock.Clock) (restore func()) {
 	return func() { livenessClock = prev }
 }
 
+// apiClassStore is a class handle of any class a handler reads: the cache
+// gate and the cache-age headers take the handle of the store the read is
+// served from, so the class is the caller's to name, never a raw store's.
+type apiClassStore interface {
+	beads.WorkStore | beads.GraphStore | beads.SessionStore | beads.MailStore | beads.OrdersStore | beads.NudgesStore
+}
+
+// classAs is beads.As over a class handle of any class: the capability T of
+// the store under the handle. A type parameter is not a beads.Store to the
+// compiler, so each class is passed to As as its own handle type.
+func classAs[T any, H apiClassStore](store H) (T, bool) {
+	switch h := any(store).(type) {
+	case beads.WorkStore:
+		return beads.As[T](h)
+	case beads.GraphStore:
+		return beads.As[T](h)
+	case beads.SessionStore:
+		return beads.As[T](h)
+	case beads.MailStore:
+		return beads.As[T](h)
+	case beads.OrdersStore:
+		return beads.As[T](h)
+	case beads.NudgesStore:
+		return beads.As[T](h)
+	}
+	var zero T
+	return zero, false
+}
+
 // cacheLiveOr503 returns a 503 typed error when the given store reports that
 // its bead cache is not live (priming, reconciling or degraded). Stores that
 // do not report liveness pass through. The report is reached through beads.As,
@@ -38,8 +67,8 @@ func SetLivenessClockForTest(c clock.Clock) (restore func()) {
 // The error's detail string is prefixed with "cache_not_live:" so
 // internal/api.Client can classify the 503 into *cacheNotLiveError, which
 // api.ShouldFallback reports as fallbackable.
-func cacheLiveOr503(store beads.Store) error {
-	lr, ok := beads.As[beads.CacheLivenessReporter](store)
+func cacheLiveOr503[H apiClassStore](store H) error {
+	lr, ok := classAs[beads.CacheLivenessReporter](store)
 	if !ok {
 		return nil
 	}
@@ -94,21 +123,16 @@ type cacheFreshness struct {
 
 // cacheAgeSeconds reports the store's bead-cache freshness (Stats, which a
 // CachingStore and the controller's bead-policy layer over one report, reached
-// through beads.As so a class handle reports its store's): the seconds since
+// through beads.As so the handle reports its store's): the seconds since
 // the cache last took in fresh data from its backing store (a full re-scan, or
 // a write, event or row re-read it applied), the re-scan interval its loop is
 // using, and whether those re-scans are scheduled, paused or failing. The age
 // is the cache's, not each row's, so it grows between re-scans and while the
-// city is suspended (re-scans pause). It is the zero value when the store is
-// nil, reports no cache stats, or has never been primed. It reads values only:
+// city is suspended (re-scans pause). It is the zero value when the handle is
+// zero, its store reports no cache stats, or it has never been primed. It reads values only:
 // whether the age is too old is the client's call.
-//
-// The storeclass baseline keys this function's raw-store debt (its beads.Store
-// parameter and Stats assertion) by its name: under another name that debt is
-// a new baseline row, a raise only the typed-store coordinator approves. Keep
-// the name until a typed handle retires the debt.
-func cacheAgeSeconds(store beads.Store) cacheFreshness {
-	sr, ok := beads.As[beads.CacheStatsReporter](store)
+func cacheAgeSeconds[H apiClassStore](store H) cacheFreshness {
+	sr, ok := classAs[beads.CacheStatsReporter](store)
 	if !ok {
 		return cacheFreshness{}
 	}

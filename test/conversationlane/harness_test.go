@@ -110,6 +110,12 @@ type cityOptions struct {
 	// opTypeMissing provisions a Dolt arm's workspace without the op bead
 	// type, so the op journal cannot propose.
 	opTypeMissing bool
+	// provisionerSchemaBehind provisions the bd-dolt arm as a bd one schema
+	// migration behind the linked beads library would: the workspace's
+	// schema cursor is rewound one version after bd provisions it, the shape
+	// the enterprise release line meets with every provisioning (its public
+	// bd writes v66, its linked library is at v69).
+	provisionerSchemaBehind bool
 	// realCadences runs controllers without GC_TEST_BACKSTOP_SPEEDUP.
 	realCadences bool
 	// pool runs the city's sessions on real tmux, under a socket root of
@@ -146,6 +152,9 @@ type laneCity struct {
 	// doltServer is the bd-dolt arm's dolt sql-server, stopped after the
 	// city's controllers.
 	doltServer *doltServer
+	// bdSchema is the schema cursor the bd-dolt arm's bd provisioned its
+	// workspace at.
+	bdSchema int
 	// tmuxRoot is a real-tmux city's TMUX_TMPDIR: its tmux servers'
 	// sockets live there and nowhere else, so the cleanup kills only those.
 	tmuxRoot string

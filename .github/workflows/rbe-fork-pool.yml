@@ -129,6 +129,9 @@ jobs:
           WORKER_MODE: measure
           RBE_WORKER_DIR: ${{ steps.rbe-worker.outputs.dir }}
           RBE_WORKER_REVISION: ${{ steps.rbe-worker.outputs.sha }}
+          # Go and dolt come from the mirror first (the worker step's
+          # RBE_DIST_MIRROR comment).
+          RBE_DIST_MIRROR: ${{ vars.RBE_FORK_DIST_MIRROR || '' }}
         run: '"$RBE_WORKER_DIR/blacksmith-worker.sh"'
       - name: Upload the worker-env drift
         if: steps.worker-env.outcome == 'failure'
@@ -186,6 +189,14 @@ jobs:
           # RBE_FORK_CAS_MAX_BYTES, and new VMs take 150 GB. For an emergency,
           # also cancel the running fork pool runs.
           CAS_MAX_BYTES: ${{ vars.RBE_FORK_CAS_MAX_BYTES || '' }}
+          # Pinned setup downloads (NativeLink, Go, dolt; infra README "Pinned
+          # setup downloads on R2"): rbe-worker's rbe-fetch retries each and,
+          # with this set (https://rbe-warm.ops.gascity.com/dist), tries the
+          # warm bucket's copy first. The copy is transport only: every file
+          # is checked against the pin's sha256, and a miss or mismatch reads
+          # upstream (GitHub, go.dev). Unset: upstream alone, still retried.
+          # Rollback: unset RBE_FORK_DIST_MIRROR; the next dispatch downloads from upstream.
+          RBE_DIST_MIRROR: ${{ vars.RBE_FORK_DIST_MIRROR || '' }}
         run: '"$RBE_WORKER_DIR/blacksmith-worker.sh"'
 
   # The hot tier's B3 pre-check (infra nativelink-cas/west README "Hot blobs
@@ -232,7 +243,7 @@ jobs:
           (cd .github/rbe-hot && sha256sum --strict -c rbe-hot-precheck.sha256)
           command -v zstd >/dev/null || { sudo apt-get update -qq; sudo apt-get install -y -qq zstd >/dev/null; }
           pki=$(mktemp -d)
-          trap 'shred -u "$pki"/*.pem 2>/dev/null; rm -rf "$pki"' EXIT
+          trap 'shred -u "$pki"/*.pem 2>/dev/null || true; rm -rf "$pki"' EXIT
           (umask 077 && printf '%s' "$CERT_B64" | base64 -d >"$pki/cert.pem" && printf '%s' "$KEY_B64" | base64 -d >"$pki/key.pem")
           out=$(env -u CERT_B64 -u KEY_B64 DIGEST="$DIGEST" CERT="$pki/cert.pem" KEY="$pki/key.pem" \
             bash .github/rbe-hot/rbe-hot-precheck.sh 2>&1) || true

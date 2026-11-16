@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/execenv"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // TriggerResult holds the outcome of a trigger check.
@@ -356,7 +357,13 @@ func checkCondition(a Order, opts TriggerOptions) TriggerResult {
 	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", "-c", a.Check)
+	if reason := runtime.ShellCommandUnavailable(a.Check); reason != "" {
+		return TriggerResult{Due: false, Reason: "check command refused: " + reason}
+	}
+	cmd, err := runtime.ShellCommandContext(ctx, a.Check)
+	if err != nil {
+		return TriggerResult{Due: false, Reason: fmt.Sprintf("check command failed: %v", err)}
+	}
 	cleanupCommand := prepareConditionCommand(cmd, conditionCheckSignalGrace)
 	cmd.WaitDelay = conditionCheckPostCancelWaitDelay
 	cmd.Stdout = io.Discard
@@ -371,7 +378,12 @@ func checkCondition(a Order, opts TriggerOptions) TriggerResult {
 	if opts.ConditionDir != "" {
 		cmd.Dir = opts.ConditionDir
 	}
-	if err := cmd.Run(); err != nil {
+	err = startConditionCommand(cmd)
+	if err == nil {
+		defer releaseConditionCommand(cmd)
+		err = cmd.Wait()
+	}
+	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
 			reason := fmt.Sprintf("check command %s after %s", ConditionCheckTimedOutMarker, timeout)
 			if cleanupErr := cleanupCommand(); cleanupErr != nil {
@@ -501,6 +513,31 @@ func checkEvent(a Order, ep events.Provider, cursorFn CursorFunc) TriggerResult 
 		return TriggerResult{Due: false, Reason: "event: no matching events"}
 	}
 	return TriggerResult{Due: true, Reason: fmt.Sprintf("event: %d %s event(s)", count, a.On)}
+}
+
+// CheckEventStart returns the seq a standalone event check (gc order check,
+// the orders/check API) reads past for an order whose run cursor is
+// runCursor: the cursor itself once the order has run, or the event head for
+// an order that has never run.
+//
+// An event order fires on the matching events recorded after the controller
+// began watching it; history recorded before then is never replayed (the
+// controller seeds a never-run order at the head, see cmd/gc
+// eventCheckStart). A standalone check holds no record of when watching
+// began, so it reads nothing below the head and reports a never-run order not
+// due: a matching event recorded since the controller began watching fires
+// it on the controller's next pass. Without this, every check of a never-run
+// order re-read the whole event history, every archive included, and
+// reported due on history the controller would never fire on.
+func CheckEventStart(ep events.Provider, runCursor uint64) (uint64, error) {
+	if runCursor > 0 || ep == nil {
+		return runCursor, nil
+	}
+	head, err := ep.LatestSeq()
+	if err != nil {
+		return 0, fmt.Errorf("reading event head: %w", err)
+	}
+	return head, nil
 }
 
 // listEventsWithInFlight reads the events filter matches, including those

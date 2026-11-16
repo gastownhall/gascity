@@ -12,14 +12,16 @@ import (
 // class-neutral. The XFor helpers answer through a handle as they did
 // (TestXForThroughAHandleToday pins that), except the two class-neutral reads
 // As itself calls, DepListBatchFor and ReadyBlockedByAbsentFor, which walk
-// the class layers since T6a.
+// the class layers since T6a, and HandlesFor, which the handles forward since
+// T7a (class_store_handles.go).
 //
 // Outside internal/beads the storeclass lint (tools/nogo/analyzers/storeclass)
 // reports a type assertion on a store and an unwrap of a handle; As and the
 // XFor helpers are what replace them.
 
 // classLayer is a layer the class machinery puts above the store the router
-// chose: a typed class handle, and from T8 the class guard. As and SameStore
+// chose: a typed class handle, a ResidentStore, a federation leg layer and
+// its FederatedReader (leg.go), and from T8 the class guard. As and SameStore
 // walk class layers and nothing else; they never peel a CachingStore, an
 // emitter or a policy store.
 type classLayer interface {
@@ -95,6 +97,11 @@ const classLayerMaxDepth = 8
 // a handle over one), or a walk deeper than classLayerMaxDepth answers
 // false, before any layer is asked, so As[Store] never hands out an absent
 // handle.
+//
+// A CachedLister or Counter found below a federated or relic leg layer comes
+// back in an adapter whose reads carry the innermost such leg's role
+// (leg_reads.go), so the gate charges a cache-first list or a count through a
+// leg as it does the leg's own reads.
 func As[T any](s Store) (T, bool) {
 	var zero T
 	if physicalStore(s) == nil {
@@ -107,13 +114,21 @@ func As[T any](s Store) (T, bool) {
 		}
 		return zero, false
 	}
+	role := NoLegRole
 	for range classLayerMaxDepth {
 		layer, isLayer := s.(classLayer)
 		if !isLayer {
-			return resolveCapability[T](s)
+			v, ok := resolveCapability[T](s)
+			if ok {
+				v = legCapability(role, v)
+			}
+			return v, ok
 		}
 		if v, ok := s.(T); ok {
 			return v, true
+		}
+		if leg, ok := s.(legLayer); ok && leg.legRole() != NoLegRole {
+			role = leg.legRole()
 		}
 		s = layer.unwrapClassLayer()
 	}
@@ -188,17 +203,18 @@ func passesClassGate[T any]() bool {
 }
 
 // SameStore reports whether a and b are one physical store: the store below
-// their class layers, so two class handles over one store are the same, and
-// a handle is the same as the store it wraps. A nil or zero handle is the
+// their class layers, so two class handles over one store are the same, a
+// handle is the same as the store it wraps, and a FederatedReader is the same
+// as the store it reads. A nil or zero handle is the
 // same as nothing, and a store whose dynamic type is not comparable (== on
 // it would panic) is the same as nothing either.
-func SameStore(a, b Store) (same bool) {
-	a, b = physicalStore(a), physicalStore(b)
-	if a == nil || b == nil {
+func SameStore(a, b StoreReader) (same bool) {
+	pa, pb := physicalStore(a), physicalStore(b)
+	if pa == nil || pb == nil {
 		return false
 	}
-	ta := reflect.TypeOf(a)
-	if ta != reflect.TypeOf(b) || !ta.Comparable() {
+	ta := reflect.TypeOf(pa)
+	if ta != reflect.TypeOf(pb) || !ta.Comparable() {
 		return false
 	}
 	defer func() {
@@ -206,7 +222,7 @@ func SameStore(a, b Store) (same bool) {
 			same = false // a comparable type holding a non-comparable interface value
 		}
 	}()
-	return a == b
+	return pa == pb
 }
 
 // LiveFor is HandlesFor(raw).Live for the store raw below s's class layers: a
@@ -214,18 +230,21 @@ func SameStore(a, b Store) (same bool) {
 // live reader, which a class handle would otherwise hide behind the logical
 // wrapper, and any other store is read through the logical wrapper over raw
 // itself, so the wrapper's optional reads (GetExactBatch) find raw's
-// capabilities rather than the handle's. s must be a store: a zero handle
+// capabilities rather than the handle's. When s reads through a federated or
+// relic leg (a FederatedReader, or a ResidentStore over one), the live reader
+// is raw's in an adapter whose reads, GetExactBatch included, carry the
+// innermost such leg's role (leg_reads.go). s must be a store: a zero handle
 // answers a reader whose reads panic, as HandlesFor(nil) does.
-func LiveFor(s Store) LiveReader {
-	return HandlesFor(physicalStore(s)).Live
+func LiveFor(s StoreReader) LiveReader {
+	return roleReads(legRoleOf(s), HandlesFor(physicalStore(s)).Live)
 }
 
 // PhysicalStoreKey is a string identity for the store below s's class layers,
 // for a map keyed by store: "%T:%x" of its address for a reference kind,
 // "%T:%v" of its value for any other, and "<nil>" for no store. Like SameStore
-// it sees through every class handle, so two handles over one store, of any
-// classes, share the store's own key.
-func PhysicalStoreKey(s Store) string {
+// it sees through every class handle and leg reader, so two handles over one
+// store, of any classes, share the store's own key.
+func PhysicalStoreKey(s StoreReader) string {
 	p := physicalStore(s)
 	if p == nil {
 		return "<nil>"
@@ -239,11 +258,11 @@ func PhysicalStoreKey(s Store) string {
 	}
 }
 
-// IsNilStore reports whether s is no store: nil, a zero handle (or a handle
-// over one), or a nil pointer below its class layers. A typed nil passes a
+// IsNilStore reports whether s is no store: nil, a zero handle or leg reader
+// (or a handle over one), or a nil pointer below its class layers. A typed nil passes a
 // nil check on the interface and then panics on its first method call, so a
 // constructor that refuses an absent store asks this rather than == nil.
-func IsNilStore(s Store) bool {
+func IsNilStore(s StoreReader) bool {
 	p := physicalStore(s)
 	if p == nil {
 		return true
@@ -252,12 +271,15 @@ func IsNilStore(s Store) bool {
 	return v.Kind() == reflect.Pointer && v.IsNil()
 }
 
-// physicalStore is s below its class layers, or nil.
-func physicalStore(s Store) Store {
+// physicalStore is s below its class layers (leg readers and leg layers
+// included), or nil: no store, or a reader that is neither a store nor a
+// class layer.
+func physicalStore(s StoreReader) Store {
 	for range classLayerMaxDepth {
 		layer, ok := s.(classLayer)
 		if !ok {
-			return s
+			store, _ := s.(Store)
+			return store
 		}
 		s = layer.unwrapClassLayer()
 	}

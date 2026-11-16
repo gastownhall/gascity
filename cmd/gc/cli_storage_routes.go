@@ -66,6 +66,7 @@ package main
 // fails if either one ever starts routing through a class instead.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -212,6 +213,15 @@ func printCLIStorageRefusal(refusal error) {
 	fmt.Fprintln(cliStorageStderr, msg) //nolint:errcheck // best-effort stderr
 }
 
+// printCLIStorageDiagnostics writes the gate diagnostics a refusing
+// resolution buffered to cliStorageStderr, as the gate used to write them
+// directly.
+func printCLIStorageDiagnostics(diagnostics *bytes.Buffer) {
+	if diagnostics.Len() > 0 {
+		cliStorageStderr.Write(diagnostics.Bytes()) //nolint:errcheck // best-effort stderr
+	}
+}
+
 // forgetCLIStorageRoutesEntry drops a memo slot whose unsettled answer has
 // expired — a refusal because city.toml did not load, or because the gate
 // could not read what it needed. The next
@@ -352,12 +362,18 @@ func cityTOMLPresent(tomlPath string) bool {
 // (isTransientStorageGateFault): it is not memoized, so the next resolution
 // tries again.
 func resolveCLIStorageRoutesFor(cityPath string, cfg *config.City) (routes *storageRoutes, unsettled bool) {
+	// The gate's diagnostics are buffered and printed only with a refusal.
+	// A city served degraded would otherwise repeat the whole containment
+	// paragraph in every gc process; it gets exactly one warning line.
+	var diagnostics bytes.Buffer
 	if cfg == nil {
-		routes, err := storageBootGate(cityPath, nil, cliStorageLogPrefix, nil, cliStorageStderr)
+		routes, err := storageBootGate(cityPath, nil, cliStorageLogPrefix, nil, &diagnostics)
 		if err != nil {
+			printCLIStorageDiagnostics(&diagnostics)
 			printCLIStorageRefusal(err)
 			return refusingStorageRoutes("", err), isTransientStorageGateFault(err)
 		}
+		warnDegradedServing(routes, cliStorageStderr, cliStorageLogPrefix)
 		return routes, false
 	}
 	// The worker-site verdict comes first, so a binding the descriptor does not
@@ -368,8 +384,9 @@ func resolveCLIStorageRoutesFor(cityPath string, cfg *config.City) (routes *stor
 		_, binding := storageSplitShapeOf(cfg.EffectiveStorage())
 		return refusingStorageRoutes(binding, refusal), false
 	}
-	routes, err := storageBootGate(cityPath, cfg, cliStorageLogPrefix, nil, cliStorageStderr)
+	routes, err := storageBootGate(cityPath, cfg, cliStorageLogPrefix, nil, &diagnostics)
 	if err == nil {
+		warnDegradedServing(routes, cliStorageStderr, cliStorageLogPrefix)
 		// The one and only place a class store is given an emit target. A
 		// one-shot command has no live event bus, so without this its writes to
 		// a relocated class land in a store nothing observes; the controller
@@ -379,6 +396,7 @@ func resolveCLIStorageRoutesFor(cityPath string, cfg *config.City) (routes *stor
 	}
 	// Once, here, rather than at each call site: a command that discards the
 	// store error still has to leave the operator holding the remedy.
+	printCLIStorageDiagnostics(&diagnostics)
 	printCLIStorageRefusal(err)
 	_, binding := storageSplitShapeOf(cfg.EffectiveStorage())
 	return refusingStorageRoutes(binding, err), isTransientStorageGateFault(err)
@@ -476,6 +494,9 @@ func closeCLIStorageRoutes() error {
 	cliStorageRefusalsMu.Lock()
 	cliStorageRefusalsPrinted = nil
 	cliStorageRefusalsMu.Unlock()
+	storageWarningsMu.Lock()
+	storageWarningsPrinted = nil
+	storageWarningsMu.Unlock()
 
 	var errs []error
 	for _, entry := range entries {

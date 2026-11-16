@@ -241,3 +241,97 @@ func TestRalphRetryClonesOfStampedIterationAreBornUnbound(t *testing.T) {
 		}
 	})
 }
+
+// withMigrationStamp stamps meta as a row a rig import carried into the
+// binding (beadmeta.InfraMigratedFromMetadataKey), as it leaves the rows of a
+// workflow in flight.
+func withMigrationStamp(meta map[string]string) map[string]string {
+	meta[beadmeta.InfraMigratedFromMetadataKey] = "rig:gp"
+	return meta
+}
+
+// assertNoMigrationStamp fails when a clone still carries the migration stamp
+// of the row it was cloned from.
+func assertNoMigrationStamp(t *testing.T, label string, meta map[string]string) {
+	t.Helper()
+	if value, ok := meta[beadmeta.InfraMigratedFromMetadataKey]; ok {
+		t.Errorf("%s: carries %s=%q from the row it was cloned from; want it born unstamped, since the migration did not write it", label, beadmeta.InfraMigratedFromMetadataKey, value)
+	}
+}
+
+// Every clone path strips the storage-class migration's stamp. A retry or a
+// Ralph iteration of a workflow the migration carried into the binding mints
+// new rows there, under the binding's own ids, which the migration did not
+// write and no store it copied from holds. A stamped clone reads as a carried
+// row to everything that reads the stamp: a binding restore looks for it in
+// the rig's own store and refuses, and the rig import takes it for an
+// interrupted attempt's copy.
+func TestRetryClonesOfMigratedRowsAreBornUnstamped(t *testing.T) {
+	t.Parallel()
+
+	meta := withMigrationStamp(map[string]string{beadmeta.StepIDMetadataKey: "build"})
+	clearRetryEphemera(meta)
+	assertNoMigrationStamp(t, "clearRetryEphemera", meta)
+
+	prev := beads.Bead{ID: "gp-a", Title: "build", Type: "task", Metadata: withMigrationStamp(map[string]string{
+		beadmeta.StepIDMetadataKey: "build",
+	})}
+	assertNoMigrationStamp(t, "retryAttemptBead", retryAttemptBead(prev, "gp-logical", "build.run.2", 2, (*config.City)(nil)).Metadata)
+	assertNoMigrationStamp(t, "retryEvalBead", retryEvalBead(prev, "gp-logical", "build.eval.2", 2).Metadata)
+
+	t.Run("appendRalphRetryLegacy", func(t *testing.T) {
+		t.Parallel()
+		store := beads.NewMemStore()
+		workflow := mustCreateWorkflowBead(t, store, beads.Bead{
+			Title:    "workflow",
+			Type:     "task",
+			Metadata: withMigrationStamp(map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}),
+		})
+		logical := mustCreateWorkflowBead(t, store, beads.Bead{
+			Title: "review-loop",
+			Type:  "task",
+			Metadata: withMigrationStamp(map[string]string{
+				beadmeta.KindMetadataKey:       beadmeta.KindRalph,
+				beadmeta.StepIDMetadataKey:     "review-loop",
+				beadmeta.RootBeadIDMetadataKey: workflow.ID,
+			}),
+		})
+		newBead := func(desc ralphIterationOneBead) beads.Bead {
+			meta := withMigrationStamp(desc.metadata(workflow.ID))
+			if desc.kind == beadmeta.KindScope || desc.kind == beadmeta.KindCheck {
+				meta[beadmeta.LogicalBeadIDMetadataKey] = logical.ID
+			}
+			return mustCreateWorkflowBead(t, store, beads.Bead{Title: desc.title, Type: "task", Metadata: meta})
+		}
+		subject := newBead(ralphIterOneSubject)
+		member := newBead(ralphIterOnePlainMember)
+		check := newBead(ralphIterOneCheck)
+		mapping, err := appendRalphRetryLegacy(beadstest.Graph(store), logical.ID, subject, check,
+			map[string]beads.Bead{subject.ID: subject, member.ID: member},
+			1, 2, "review-loop.iteration.1", "review-loop.iteration.2", nil)
+		if err != nil {
+			t.Fatalf("appendRalphRetryLegacy: %v", err)
+		}
+		for label, oldID := range map[string]string{"subject": subject.ID, "member": member.ID, "check": check.ID} {
+			newID := mapping[oldID]
+			if newID == "" {
+				t.Fatalf("no clone mapped for the %s", label)
+			}
+			assertNoMigrationStamp(t, label, mustGetBead(t, store, newID).Metadata)
+		}
+	})
+
+	t.Run("buildRalphRetryGraphNode", func(t *testing.T) {
+		t.Parallel()
+		for label, desc := range map[string]ralphIterationOneBead{
+			"subject": ralphIterOneSubject,
+			"member":  ralphIterOnePlainMember,
+			"check":   ralphIterOneCheck,
+		} {
+			old := beads.Bead{ID: desc.stepRef, Ref: desc.stepRef, Metadata: withMigrationStamp(desc.metadata("workflow"))}
+			node := buildRalphRetryGraphNode(old, "logical", "review-loop.iteration.1", "review-loop.iteration.2", 1, 2,
+				map[string]bool{old.ID: true}, nil)
+			assertNoMigrationStamp(t, label, node.Metadata)
+		}
+	})
+}

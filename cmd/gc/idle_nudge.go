@@ -147,10 +147,10 @@ func nudgeStalledPoolClaims(
 	if sp == nil || cfg == nil || store == nil {
 		return // hot reconcile path: never panic on a half-built dependency
 	}
-	// beads.SessionStore embeds the Store interface, so a wrapper holding a nil
-	// store is still a non-nil beads.Store. Unwrap it so the half-built
-	// dependency guard also covers the SessionStore the reconciler passes.
-	if sess, ok := store.(beads.SessionStore); ok && sess.Store == nil {
+	// A typed handle over no store is still a non-nil beads.Store, so the
+	// half-built dependency guard asks IsNilStore, which sees through every
+	// class layer, to cover the SessionStore the reconciler passes.
+	if beads.IsNilStore(store) {
 		return
 	}
 	// The shared engine keys work by bead ID alone, which cannot tell two
@@ -209,7 +209,7 @@ func nudgeStalledPoolContinuations(
 	if sp == nil || cfg == nil || store == nil || snapshotPartial {
 		return
 	}
-	if sess, ok := store.(beads.SessionStore); ok && sess.Store == nil {
+	if beads.IsNilStore(store) {
 		return
 	}
 	runNudgeBackstop(

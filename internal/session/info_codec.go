@@ -192,6 +192,7 @@ var infoKeyCodec = []infoKeySpec{
 	{"config_drift_deferred_key", func(i *Info, v string) { i.ConfigDriftDeferredKey = v }},
 	{"attached_config_drift_deferred_at", func(i *Info, v string) { i.AttachedConfigDriftDeferredAt = v }},
 	{"attached_config_drift_deferred_key", func(i *Info, v string) { i.AttachedConfigDriftDeferredKey = v }},
+	{"config_drift_escalated_at", func(i *Info, v string) { i.ConfigDriftEscalatedAt = v }},
 	{"stranded_event_emitted_at", func(i *Info, v string) { i.StrandedEventEmittedAt = v }},
 	{"unknown_state_first_seen", func(i *Info, v string) { i.UnknownStateFirstSeen = v }},
 	{"unknown_state_value", func(i *Info, v string) { i.UnknownStateValue = v }},

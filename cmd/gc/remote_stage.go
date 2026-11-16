@@ -172,6 +172,17 @@ func initRemoteStageRefusal(from string, noStart bool) error {
 	return nil
 }
 
+// initFromStagesARemoteCity reports whether this gc init --from stages a
+// controller's city: --remote-stage asks for it, or the process runs in a
+// pod's remote-stage environment (initCityInPod passes no --remote-stage).
+func initFromStagesARemoteCity() bool {
+	if strings.TrimSpace(initRemoteStageFlag) != "" {
+		return true
+	}
+	_, ok := remoteStageFromEnv()
+	return ok
+}
+
 // recordInitRemoteStage writes the remote-stage record for a city gc init
 // --from just copied, when --remote-stage asked for one. The controller's
 // city name comes from the source's config (the copy's own name is the

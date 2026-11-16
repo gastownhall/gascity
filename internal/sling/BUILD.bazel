@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "sling",
     srcs = [
+        "beadid_other.go",
         "cycle.go",
         "sling.go",
         "sling_attachment.go",
@@ -28,7 +29,6 @@ go_library(
         "//internal/pathutil",
         "//internal/runtime",
         "//internal/session",
-        "//internal/shellquote",
         "//internal/sourceworkflow",
         "//internal/suspensionstate",
         "//internal/telemetry",
@@ -58,6 +58,7 @@ go_test(
         "sling_owned_test.go",
         "sling_reassign_reopen_test.go",
         "sling_rootonly_hint_test.go",
+        "sling_sessions_test.go",
         "sling_split_attachment_test.go",
         "sling_suspension_test.go",
         "sling_sweep_test.go",

@@ -332,7 +332,18 @@ const (
 	// CI / required, whose needs are unchanged. Reviewed delta: two jobs, two
 	// filters and two outputs removed; no new job, trigger, step command or
 	// permission.
-	expectedCIExecutionHash     = "8d71c559b60d2715b518faf498209843132276ed3e448929e1841f082136e6cf"
+	//
+	// Bumped again (#8977, Windows lane): two new jobs. windows-lane
+	// (runner_16vcpu, needs runner-policy, timeout 30m): GOOS=windows build
+	// of .github/windows-lane/build.txt, GOOS=windows test compile
+	// (-vet=off -run '^$' -exec /bin/true) of test-build.txt, the same for
+	// tools/nogo ./analyzers/..., and GOOS=darwin build plus test compile of
+	// ./.... windows-lane-test (runner_windows, needs runner-policy,
+	// timeout 30m): go test -count=1 over test.txt. Neither is path-gated;
+	// both join the needs of Check and CI / required, whose allow_skipped is
+	// unchanged. Reviewed delta: two jobs and four needs entries; no new
+	// trigger or permission.
+	expectedCIExecutionHash     = "2c0db5f4a5ba7390f63fccfcee565f6936801bee8f51f2f2ebae8c75688ed5f4"
 	expectedNightlyTriggersHash = "0a4400a09ac567e90adf8be1232eef1f14e36efd8dba3e143aa6e36f5b7a36f5"
 	// Nightly: reviewed delta Beads v1.3.0-rc.2 -> v1.3.0, then (round3 review,
 	// completeness) one new job, beads-proxied-perf: ubuntu-latest,
@@ -371,8 +382,12 @@ const (
 	// (the first patched Dolt release for the eMudhra CA distrust):
 	// the workflow DOLT_VERSION env value only. Then Beads v1.3.2 -> v1.3.3:
 	// the workflow BD_VERSION env value only. Then Beads v1.3.3 -> v1.3.4:
-	// the workflow BD_VERSION env value only.
-	expectedNightlyExecutionHash = "e2fb893fdaf435dc264f782c6569c5fb7b7ff7546c10dca92abf273f944bdb64"
+	// the workflow BD_VERSION env value only. Then (ga-hd99jq D5) one new
+	// job, nightly-summary: ubuntu-latest, timeout-minutes 5, `if: always()`,
+	// needs every other Nightly job, one python3 step fed by a dedicated
+	// needs.<job>.result env var per dependency that fails closed on anything
+	// but "success"; no new trigger, permission or secret.
+	expectedNightlyExecutionHash = "adfd68dfb5d2c4285bb6cf2ecf5a81ea1446fa54e2bf2a39aa5dd4e4581153cf"
 	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
 	// `cache: false` and one step right after it,
 	// `uses: ./.github/actions/go-mod-download`. Then the claude-version

@@ -242,7 +242,7 @@ func with(fields []Field, asClear bool, site Site, keys ...string) []Field {
 // identity (M1), A8's baseline (M2), and the create (C1) and named reopen
 // effects, which stamp a row's whole starting state.
 var fields = withObserved(with(with(with(with(with(with(with(registry, false, v2("cmd/gc/reconcile_arms_drift.go", "rowFacts.driftRepair"),
-	"config_drift_deferred_at", "config_drift_deferred_key", "attached_config_drift_deferred_at", "attached_config_drift_deferred_key", "session_key"), false, v2("cmd/gc/reconcile_arms_metadata.go", "identityPatch"),
+	"config_drift_deferred_at", "config_drift_deferred_key", "attached_config_drift_deferred_at", "attached_config_drift_deferred_key", "config_drift_escalated_at", "session_key"), false, v2("cmd/gc/reconcile_arms_metadata.go", "identityPatch"),
 	"template", "session_origin", "pool_managed", "pool_slot", "agent_name", "dependency_only", NamedSessionMetadataKey,
 	NamedSessionIdentityMetadata, NamedSessionModeMetadata, "alias", "alias_history", "pool_alias_conflict", "pool_alias_conflict_count",
 	"pool_alias_conflict_at", "synced_at", "work_dir", "wake_mode", "session_key", "continuation_epoch", "command", "provider", "provider_kind",
@@ -410,7 +410,24 @@ var registry = slices.Concat([]Field{
 			legacy("cmd/gc/drain_reminder.go", "drainReminderContentHeld")),
 		Clears: sites(op("internal/session/content_hold.go", "Store.ClearContentHold")),
 	},
-	{Key: ResetCommittedAtKey, Class: ClassMarker, Writers: sites(legacy(srcTransition, "RestartRequestPatch"), opUnmint), Clears: sites(opMint)},
+	// reset_committed_at stamps a restart handoff (a fresh conversation the
+	// controller committed to start); passive continuation-reset re-arms clear
+	// it so a stale handoff stamp never survives them (gascity#4067).
+	{Key: ResetCommittedAtKey, Class: ClassMarker, Writers: sites(
+		legacy(srcTransition, "RestartRequestPatch"),
+		legacy(srcTransition, "ConfigDriftResetPatch"),
+		v2(srcTransition, "ConfigDriftRestartPatch"),
+		op(srcManager, "Manager.RequestFreshRestart"),
+		opUnmint,
+	), Clears: sites(
+		opMint,
+		legacy(srcTransition, "ContinuationResetWakePatch"),
+		legacy(srcTransition, "AcknowledgeDrainPatch"),
+		legacy(srcTransition, "CompleteDrainPatch"),
+		v2(srcTransition, "ConfigDriftAsleepResetPatch"),
+		op("internal/session/lifecycle_exits.go", "ConversationResetPatch"),
+		legacy("cmd/gc/session_reconcile.go", "healStatePatchWithRollbackInfo"),
+	)},
 	{Key: "drain_finalize", Class: ClassMarker, Writers: sites(legacy("cmd/gc/session_pool_drain_deadline.go", "retirePoolSlotAtDrainDeadline"))},
 	{Key: "startup_dialog_verified", Class: ClassMarker, Writers: sites(op("internal/session/chat.go", "Manager.markStartupDialogsVerifiedLocked"))},
 	{Key: "unknown_state_first_seen", Class: ClassMarker, Writers: sites(legacy(srcReconciler, "emitSessionUnknownStateDiagnostic")), Clears: sites(v2("cmd/gc/reconcile_session_decide.go", "timerHealPatch"))},
@@ -534,7 +551,10 @@ var registry = slices.Concat([]Field{
 	same(ClassAdvisory, false, sites(legacy(srcTransition, "ClosePatch"), op(srcManager, "Manager.CloseDetailed"), legacy(srcBeads, "reopenNamedSessionBatch"),
 		legacy("cmd/gc/usage_compute.go", "CityRuntime.settleClosedInterval")),
 		MetadataKeyUsageClosedAwakeStartedAt, MetadataKeyUsageClosedSessionKey),
-	same(ClassAdvisory, false, sites(legacy(srcReconciler, "recordNamedSessionConfigDriftDeferredAt")), "config_drift_deferred_at", "config_drift_deferred_key"),
+	same(ClassAdvisory, false, sites(legacy(srcReconciler, "recordNamedSessionConfigDriftDeferredAt"), legacy(srcReconciler, "recordConfigDriftHeldWorkEpisode"),
+		legacy("cmd/gc/config_drift_episode.go", "driftEpisodePatch"), v2("cmd/gc/reconcile_arms_drift.go", "rowFacts.driftHeldWork")), "config_drift_deferred_at", "config_drift_deferred_key"),
+	same(ClassAdvisory, false, sites(legacy(srcReconciler, "recordConfigDriftHeldWorkEpisode"), legacy("cmd/gc/config_drift_episode.go", "driftEpisodePatch"),
+		v2("cmd/gc/reconcile_arms_drift.go", "rowFacts.driftHeldWork")), "config_drift_escalated_at"),
 	same(ClassAdvisory, false, sites(legacy(srcReconciler, "recordSessionAttachedConfigDriftDeferral")), "attached_config_drift_deferred_at",
 		"attached_config_drift_deferred_key"),
 	same(ClassAdvisory, false, sleepPolicy, "requested_sleep_after_idle", "effective_sleep_after_idle", "sleep_policy_source",

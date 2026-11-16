@@ -420,7 +420,7 @@ func TestVerifyInfraCopyRefusesADroppedDurableField(t *testing.T) {
 			if _, err := creator.CreateWithForeignID(tc.drop(infraMigrationRow(row))); err != nil {
 				t.Fatalf("writing the lossy row: %v", err)
 			}
-			if _, err := verifyInfraCopy(reopen, source, nil); err == nil {
+			if _, _, err := verifyInfraCopy(reopen, source, infraCopyPlan{}); err == nil {
 				t.Fatalf("the equality stage blessed a copy that dropped %s; that copy would get a convergence marker", tc.field)
 			}
 		})
@@ -435,7 +435,7 @@ func TestVerifyInfraCopyRefusesADroppedDurableField(t *testing.T) {
 		if _, err := creator.CreateWithForeignID(infraMigrationRow(row)); err != nil {
 			t.Fatalf("writing the faithful row: %v", err)
 		}
-		proven, err := verifyInfraCopy(reopen, source, nil)
+		proven, _, err := verifyInfraCopy(reopen, source, infraCopyPlan{})
 		if err != nil {
 			t.Fatalf("the equality stage refused a faithful copy through the deployed destination: %v", err)
 		}
@@ -540,7 +540,7 @@ func TestVerifyInfraCopyStripsTheReadinessProjection(t *testing.T) {
 		if _, err := creator.CreateWithForeignID(carried); err != nil {
 			t.Fatalf("writing the row that kept is_blocked: %v", err)
 		}
-		if _, err := verifyInfraCopy(reopen, source, nil); err == nil {
+		if _, _, err := verifyInfraCopy(reopen, source, infraCopyPlan{}); err == nil {
 			t.Fatal("the equality stage blessed a copy carrying is_blocked; the binding would serve that projection forever")
 		}
 	})
@@ -554,7 +554,7 @@ func TestVerifyInfraCopyStripsTheReadinessProjection(t *testing.T) {
 		if _, err := creator.CreateWithForeignID(infraMigrationRow(row)); err != nil {
 			t.Fatalf("writing the stripped row: %v", err)
 		}
-		if _, err := verifyInfraCopy(reopen, source, nil); err != nil {
+		if _, _, err := verifyInfraCopy(reopen, source, infraCopyPlan{}); err != nil {
 			t.Fatalf("the equality stage refused the stripped copy: %v", err)
 		}
 		// Read it back through a fresh handle: the strip has to survive the
@@ -600,14 +600,14 @@ func TestVerifyInfraCopyRefusesAnInventedDependencyEdge(t *testing.T) {
 	if err := importInfraRows(t, destination, source, rows); err != nil {
 		t.Fatalf("importing: %v", err)
 	}
-	if _, err := verifyInfraCopy(reopen, source, nil); err != nil {
+	if _, _, err := verifyInfraCopy(reopen, source, infraCopyPlan{}); err != nil {
 		t.Fatalf("the equality stage refused a faithful copy: %v", err)
 	}
 
 	if err := destination.DepAdd(a.ID, c.ID, "blocks"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := verifyInfraCopy(reopen, source, nil); err == nil {
+	if _, _, err := verifyInfraCopy(reopen, source, infraCopyPlan{}); err == nil {
 		t.Fatal("the equality stage blessed a destination holding a dep edge the work store does not have")
 	}
 }
@@ -681,14 +681,17 @@ func TestVerifyInfraCopyRefusesAStrippedEdgePayload(t *testing.T) {
 	if err := importInfraRows(t, destination, source, rows); err != nil {
 		t.Fatalf("importing: %v", err)
 	}
-	if _, err := verifyInfraCopy(reopen, source, nil); err != nil {
+	// The source's edge onto work is a gate in the binding (D9): verified
+	// against the plan that minted it.
+	plan := plannedInfraCopy(t, source)
+	if _, _, err := verifyInfraCopy(reopen, source, plan); err != nil {
 		t.Fatalf("the equality stage refused a faithful copy: %v", err)
 	}
 
 	if err := destination.DepAdd(from.ID, to.ID, "blocks"); err != nil {
 		t.Fatalf("stripping the payload: %v", err)
 	}
-	if _, err := verifyInfraCopy(reopen, source, nil); err == nil {
+	if _, _, err := verifyInfraCopy(reopen, source, plan); err == nil {
 		t.Fatal("the equality stage blessed a destination that holds every edge and none of their payloads; a copy that lost every formula gate would get a convergence marker")
 	}
 }
@@ -787,7 +790,7 @@ func TestVerifyInfraCopyReReadsTheSourceAtVerificationTime(t *testing.T) {
 	}
 
 	before := source.lists
-	if _, err := verifyInfraCopy(reopen, source, nil); err != nil {
+	if _, _, err := verifyInfraCopy(reopen, source, infraCopyPlan{}); err != nil {
 		t.Fatalf("the equality stage refused a faithful copy: %v", err)
 	}
 	if source.lists == before {
@@ -798,7 +801,7 @@ func TestVerifyInfraCopyReReadsTheSourceAtVerificationTime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := verifyInfraCopy(reopen, source, nil); err == nil {
+	if _, _, err := verifyInfraCopy(reopen, source, infraCopyPlan{}); err == nil {
 		t.Fatalf("the equality stage blessed a copy that stranded %s (%s)", late.ID, late.Title)
 	}
 	if _, err := destination.Get(early.ID); err != nil {
@@ -1116,6 +1119,13 @@ func importInfraRows(t *testing.T, destination, source beads.Store, rows []beads
 		plan.down, err = readInfraDownEdges(nil, source, sortedMapKeys(plan.infraIDs))
 	}
 	if err != nil {
+		return err
+	}
+	_, all, err := readInfraSnapshotRows(source, coordclass.CurrentGeneration)
+	if err != nil {
+		return err
+	}
+	if err := planInfraCityBoundary(t.TempDir(), nil, &plan, all, false); err != nil {
 		return err
 	}
 	_, err = importInfraSnapshot(destination, plan, infraPrepared{}, infraEngineClock{})

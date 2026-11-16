@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -4696,6 +4697,69 @@ dir = "frontend"
 				t.Fatalf("doOrderRunWithJSON = %d, want 0; stderr: %s", code, stderr.String())
 			}
 			requireBeadTitled(t, store, tc.want)
+		})
+	}
+}
+
+// TestOrderCheckNeverRunEventOrderReadsOnlyPastTheHead: gc order check of an
+// event order that has never run reads the log from its head, not from seq 0,
+// so it opens none of the history (every archive included) and does not report
+// the order due on history the controller never replays (ga-1clac5). Both
+// output shapes.
+func TestOrderCheckNeverRunEventOrderReadsOnlyPastTheHead(t *testing.T) {
+	for _, jsonOutput := range []bool{false, true} {
+		t.Run(fmt.Sprintf("json=%v", jsonOutput), func(t *testing.T) {
+			spy := &eventCheckSpy{Fake: events.NewFake(), typ: events.BeadClosed}
+			spy.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+			spy.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+			aa := []orders.Order{{Name: "watch", Trigger: "event", On: events.BeadClosed, Formula: "mol-watch"}}
+			store := beads.NewMemStore()
+			resolver := func(a orders.Order) ([]beads.OrdersStore, error) {
+				if a.Name != "watch" {
+					return nil, fmt.Errorf("unexpected order %q", a.Name)
+				}
+				return []beads.OrdersStore{{Store: store}}, nil
+			}
+			check := func() (int, string) {
+				var stdout, stderr bytes.Buffer
+				code := doOrderCheckWithStoresResolverScopedJSON("", nil, aa, time.Now(), spy, resolver, jsonOutput, &stdout, &stderr)
+				if stderr.Len() > 0 {
+					t.Fatalf("stderr: %s", stderr.String())
+				}
+				return code, stdout.String()
+			}
+
+			if code, out := check(); code != 1 || strings.Contains(out, "bead.closed event(s)") {
+				t.Fatalf("history only: code %d, want 1 (not due); stdout:\n%s", code, out)
+			}
+			if got := spy.readsAfter(); !slices.Equal(got, []uint64{2}) {
+				t.Fatalf("history only: reads after %v, want one read after the head [2]", got)
+			}
+
+			// A standalone check holds no record of when the controller began
+			// watching, so a never-run order stays not due; the controller
+			// fires it on its next pass.
+			spy.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+			if code, out := check(); code != 1 {
+				t.Fatalf("never run, new event: code %d, want 1 (not due); stdout:\n%s", code, out)
+			}
+			if got := spy.readsAfter(); !slices.Equal(got, []uint64{2, 3}) {
+				t.Fatalf("never run: reads after %v, want each read after the head [2 3]", got)
+			}
+
+			// Once it has run, the check reads past its run cursor.
+			if _, err := store.Create(beads.Bead{
+				Title:  "order:watch",
+				Labels: []string{"order-run:watch", "order-tracking", "order:watch", "seq:2"},
+			}); err != nil {
+				t.Fatalf("create run: %v", err)
+			}
+			if code, out := check(); code != 0 || !strings.Contains(out, "1 bead.closed event(s)") {
+				t.Fatalf("has run: code %d, want 0 (due on the one event past its cursor); stdout:\n%s", code, out)
+			}
+			if got := spy.readsAfter(); !slices.Equal(got, []uint64{2, 3, 2}) {
+				t.Fatalf("has run: reads after %v, want the last read after its run cursor 2", got)
+			}
 		})
 	}
 }

@@ -74,6 +74,46 @@ func TestProgramStatusArmDerivation(t *testing.T) {
 	}
 }
 
+// A start carries the provider's declaration whatever the switch, so a
+// resolution cached under off still arms once the leaf's live switch goes
+// shadow or on; the forced env alone follows the switch at resolution.
+func TestProgramStatusLaunchCarriesDeclarationUnderEverySwitch(t *testing.T) {
+	declared := declaredBinding()
+	want := runtime.ProgramStatusArm{Capture: true, App: "codex", Relay: true, HoldMidTurn: true}
+	for _, mode := range []runtime.ProgramStatusMode{"", runtime.ProgramStatusOff, "bogus", runtime.ProgramStatusShadow, runtime.ProgramStatusOn} {
+		arm, env := declared.Launch(mode, false)
+		if arm != want {
+			t.Errorf("mode %q: arm = %+v, want the declaration %+v", mode, arm, want)
+		}
+		_, wantEnv := declared.Arm(mode, false)
+		if !maps.Equal(env, wantEnv) || (wantEnv == nil) != (env == nil) {
+			t.Errorf("mode %q: env = %v, want the switch-gated %v", mode, env, wantEnv)
+		}
+	}
+	for name, b := range map[string]ProgramStatusBinding{
+		"undeclared":            {App: "codex", Env: map[string]string{"X": "1"}},
+		"explicitly undeclared": {Protocol: ProgramStatusProtocolNone, App: "codex"},
+	} {
+		if arm, env := b.Launch(runtime.ProgramStatusOn, false); arm != (runtime.ProgramStatusArm{}) || env != nil {
+			t.Errorf("%s: arm = %+v env = %v, want neither", name, arm, env)
+		}
+	}
+	if arm, env := declared.Launch(runtime.ProgramStatusOn, true); arm != (runtime.ProgramStatusArm{}) || env != nil {
+		t.Errorf("acp: arm = %+v env = %v, want neither", arm, env)
+	}
+
+	resolved := &ResolvedProvider{Name: "codex", ProgramStatus: declared}
+	if arm, env := ProgramStatusLaunchFor(&City{}, resolved, ""); arm != want || env != nil {
+		t.Errorf("ProgramStatusLaunchFor under off: arm = %+v env = %v, want the declaration and no env", arm, env)
+	}
+	if arm, env := ProgramStatusLaunchFor(nil, resolved, ""); arm.Capture || env != nil {
+		t.Errorf("nil city: arm = %+v env = %v, want neither", arm, env)
+	}
+	if arm, env := ProgramStatusLaunchFor(&City{}, nil, ""); arm.Capture || env != nil {
+		t.Errorf("nil provider: arm = %+v env = %v, want neither", arm, env)
+	}
+}
+
 func TestProgramStatusArmEnvIsACopy(t *testing.T) {
 	b := declaredBinding()
 	_, env := b.Arm(runtime.ProgramStatusOn, false)

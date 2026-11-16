@@ -84,8 +84,8 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 // acceptSessionCreate validates the create request, starts the asynchronous
 // create, and returns the 202 response.
 func (s *Server) acceptSessionCreate(ctx context.Context, input *SessionCreateInput) (*SessionCreateOutput, error) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 
@@ -211,7 +211,7 @@ func (s *Server) acceptSessionCreate(ctx context.Context, input *SessionCreateIn
 			s.emitSessionCreateFailed(reqID, "create_failed", cfgErr.Error())
 			return
 		}
-		handle, handleErr := s.newResolvedWorkerSessionHandle(store.Store, resolvedCfg)
+		handle, handleErr := s.newResolvedWorkerSessionHandle(store, resolvedCfg)
 		if handleErr != nil {
 			s.emitSessionCreateFailed(reqID, "create_failed", handleErr.Error())
 			return
@@ -383,7 +383,7 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 			s.emitSessionCreateFailed(reqID, "create_failed", cfgErr.Error())
 			return
 		}
-		handle, handleErr := s.newResolvedWorkerSessionHandle(store.Store, resolvedCfg)
+		handle, handleErr := s.newResolvedWorkerSessionHandle(store, resolvedCfg)
 		if handleErr != nil {
 			s.emitSessionCreateFailed(reqID, "create_failed", handleErr.Error())
 			return
@@ -402,7 +402,7 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Sessio
 			return
 		}
 		if msg := strings.TrimSpace(body.Message); msg != "" {
-			if sendErr := s.deliverInitialMessage(context.Background(), store.Store, info.ID, msg); sendErr != nil {
+			if sendErr := s.deliverInitialMessage(context.Background(), store, info.ID, msg); sendErr != nil {
 				if rollbackErr := s.rollbackCreatedSession(store, info.ID); rollbackErr != nil {
 					s.emitSessionCreateFailedFor(reqID, info.ID, "message_delivery_failed",
 						fmt.Sprintf("initial message delivery failed: %v (rollback failed: %v)", sendErr, rollbackErr))
@@ -565,12 +565,12 @@ func (sessionTranscriptGetResponse) Schema(r huma.Registry) *huma.Schema {
 
 func (s *Server) humaHandleSessionPatch(_ context.Context, input *SessionPatchInput) (*IndexOutput[sessionResponse], error) {
 	index := s.latestIndex()
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 
-	id, err := s.resolveSessionIDWithConfig(store.Store, input.ID)
+	id, err := s.resolveSessionIDWithConfig(store, input.ID)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
@@ -658,12 +658,12 @@ func (s *Server) humaHandleSessionPermissionMode(_ context.Context, input *Sessi
 
 func (s *Server) updateSessionPermissionMode(idRef string, body SessionPermissionModeBody) (*IndexOutput[sessionResponse], error) {
 	index := s.latestIndex()
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 
-	id, err := s.resolveSessionIDAllowClosedWithConfig(store.Store, idRef)
+	id, err := s.resolveSessionIDAllowClosedWithConfig(store, idRef)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
@@ -852,7 +852,7 @@ func (s *Server) sendSubmit(ctx context.Context, d messageDelivery, send *messag
 type messageDelivery struct {
 	adm   *legacyop.Admission
 	reqID string
-	store beads.Store
+	store beads.SessionStore
 	// target is the session as addressed; deliverTo, when set, is the
 	// session the delivery goes to without re-resolving target.
 	target    string
@@ -868,11 +868,11 @@ type messageDelivery struct {
 // deliver on its own goroutine and returns the 202 body. A replay is answered
 // with its body and starts nothing: its request_id is the one first accepted.
 func (s *Server) acceptMessageOp(ctx context.Context, req *messageOpRequest, deliver func(messageDelivery)) (asyncAcceptedBody, error) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return asyncAcceptedBody{}, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
-	conv, err := s.messageTargetConversation(ctx, store.Store, req)
+	conv, err := s.messageTargetConversation(ctx, store, req)
 	if err != nil {
 		return asyncAcceptedBody{}, err
 	}
@@ -890,9 +890,9 @@ func (s *Server) acceptMessageOp(ctx context.Context, req *messageOpRequest, del
 		return asyncAcceptedBody{}, apierr.Internal.Msg(err.Error())
 	}
 	if req.lane {
-		return s.acceptMessageLane(ctx, store.Store, req, ep, eventCursor)
+		return s.acceptMessageLane(ctx, store, req, ep, eventCursor)
 	}
-	adm, replay, err := s.admitMessageOp(ctx, store.Store, req, eventCursor)
+	adm, replay, err := s.admitMessageOp(ctx, store, req, eventCursor)
 	if err != nil {
 		return asyncAcceptedBody{}, err
 	}
@@ -916,7 +916,7 @@ func (s *Server) acceptMessageOp(ctx context.Context, req *messageOpRequest, del
 	adm.Accept(inflightAnswer{operation: req.operation, body: body})
 	s.ops.runAfterAdmit()
 
-	d := messageDelivery{adm: adm, reqID: reqID, store: store.Store, target: req.target}
+	d := messageDelivery{adm: adm, reqID: reqID, store: store, target: req.target}
 	// Require delivers to the op's conversation: the op is the request.
 	// Otherwise the delivery re-resolves the target, as it always has.
 	if adm.Recorded && s.ops.content.Mode == gate.Require {
@@ -940,7 +940,7 @@ func (s *Server) acceptMessageOp(ctx context.Context, req *messageOpRequest, del
 // A request the lane accepts (req.lane) is checked for a pending
 // interaction only once no op under its key answers it
 // (acceptMessageLane).
-func (s *Server) messageTargetConversation(ctx context.Context, store beads.Store, req *messageOpRequest) (string, error) {
+func (s *Server) messageTargetConversation(ctx context.Context, store beads.SessionStore, req *messageOpRequest) (string, error) {
 	target := req.target
 	conv, err := s.sessionTargetDeliverable(ctx, store, target)
 	if errors.Is(err, session.ErrSessionNotFound) {
@@ -1194,18 +1194,18 @@ func (s *Server) humaHandleSessionKill(_ context.Context, input *SessionKillInpu
 // killSession kills target's runtime, recorded as a kill op under
 // ops.lifecycle, and returns the answer.
 func (s *Server) killSession(target, key string, force bool) (syncAnswer, error) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return syncAnswer{}, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 
-	id, err := s.resolveSessionIDWithConfig(store.Store, target)
+	id, err := s.resolveSessionIDWithConfig(store, target)
 	if err != nil {
 		return syncAnswer{}, humaResolveError(err)
 	}
 
-	fields, err := s.runSyncOp(s.killOpRequest(store.Store, id, key), humaSessionManagerError, func(adm *legacyop.Admission) (legacyop.Result, error) {
-		killed, err := s.operatorKill(context.Background(), store.Store, id, force, adm)
+	fields, err := s.runSyncOp(s.killOpRequest(store, id, key), humaSessionManagerError, func(adm *legacyop.Admission) (legacyop.Result, error) {
+		killed, err := s.operatorKill(context.Background(), store, id, force, adm)
 		res := killOpResult(err, adm.Minted)
 		if killed.AlreadyInactive {
 			// A named session's runtime was already gone: nothing was killed.
@@ -1250,12 +1250,12 @@ var resetSessionPolicy = opjournal.Policy{Restart: opjournal.RestartPolicy{Mode:
 // resetSession records a fresh restart of target, as a restart op under
 // ops.lifecycle, and returns the answer.
 func (s *Server) resetSession(ctx context.Context, target, key string) (syncAnswer, error) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return syncAnswer{}, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 
-	id, err := s.resolveSessionIDWithConfig(store.Store, target)
+	id, err := s.resolveSessionIDWithConfig(store, target)
 	if err != nil {
 		return syncAnswer{}, humaResolveError(err)
 	}
@@ -1272,7 +1272,7 @@ func (s *Server) resetSession(ctx context.Context, target, key string) (syncAnsw
 		}
 	}
 
-	handle, err := s.workerHandleForSession(store.Store, id)
+	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		return syncAnswer{}, humaSessionManagerError(err)
 	}
@@ -1345,8 +1345,8 @@ func (s *Server) humaHandleSessionSuspend(ctx context.Context, input *SessionCon
 // returns the answer. A configured named session with no row yet is
 // materialized first, after require's refusals that need no conversation.
 func (s *Server) suspendSession(ctx context.Context, target, key string) (syncAnswer, error) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return syncAnswer{}, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 	mgr := s.sessionManager(store)
@@ -1354,7 +1354,7 @@ func (s *Server) suspendSession(ctx context.Context, target, key string) (syncAn
 		return syncAnswer{}, err
 	}
 
-	id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store.Store, target)
+	id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store, target)
 	if err != nil {
 		return syncAnswer{}, humaResolveError(err)
 	}
@@ -1405,12 +1405,12 @@ func (s *Server) humaHandleSessionClose(ctx context.Context, input *SessionClose
 // whose via differs from del, which only an op recorded before close ops
 // carried del can reach, is idempotency_mismatch as well.
 func (s *Server) closeSession(ctx context.Context, target, key string, del bool) (syncAnswer, error) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return syncAnswer{}, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 
-	id, err := s.resolveSessionIDWithConfig(store.Store, target)
+	id, err := s.resolveSessionIDWithConfig(store, target)
 	if err != nil {
 		return syncAnswer{}, humaResolveError(err)
 	}
@@ -1421,7 +1421,7 @@ func (s *Server) closeSession(ctx context.Context, target, key string, del bool)
 		strings.Contains(strings.TrimSpace(b.Metadata[apiNamedSessionIdentityKey]), "/") {
 		return syncAnswer{}, apierr.SessionConflict.Msg("configured always-on named sessions cannot be closed while config-managed")
 	}
-	handle, err := s.workerHandleForSession(store.Store, id)
+	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		return syncAnswer{}, humaSessionManagerError(err)
 	}
@@ -1442,7 +1442,7 @@ func (s *Server) closeSession(ctx context.Context, target, key string, del bool)
 		// Optional: permanently delete the bead after closing.
 		res := syncOpResult(opjournal.KindClose, nil, adm.Minted)
 		if del {
-			if err := deleteSessionBeadAfterClose(store.Store, id); err != nil {
+			if err := deleteSessionBeadAfterClose(store, id); err != nil {
 				log.Printf("gc api: deleting bead after close %s: %v", id, err)
 				return syncOpResult(opjournal.KindClose, err, adm.Minted), apierr.Internal.Msg("closed but delete failed: " + err.Error())
 			}
@@ -1488,15 +1488,15 @@ func (s *Server) humaHandleSessionWake(ctx context.Context, input *SessionContro
 // the answer. A configured named session with no row yet is materialized
 // first, after require's refusals that need no conversation.
 func (s *Server) wakeSessionOp(ctx context.Context, target, key string) (syncAnswer, error) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return syncAnswer{}, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 	if err := s.checkBeforeEffect(opjournal.KindWake, key); err != nil {
 		return syncAnswer{}, err
 	}
 
-	id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store.Store, target)
+	id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store, target)
 	if err != nil {
 		return syncAnswer{}, humaResolveError(err)
 	}
@@ -1640,16 +1640,16 @@ func (s *Server) humaHandleSessionUnpin(ctx context.Context, input *SessionIDInp
 
 func (s *Server) setSessionPin(ctx context.Context, idRef string, pinned bool) (*IndexOutput[sessionResponse], error) {
 	index := s.latestIndex()
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 	// A pin materializes a configured named session not yet created, as gc
 	// session pin does; that row is the pin's to keep.
-	id, err := s.resolveSessionIDWithConfig(store.Store, idRef)
+	id, err := s.resolveSessionIDWithConfig(store, idRef)
 	materialized := false
 	if err != nil && pinned {
-		id, err = s.resolveSessionIDMaterializingNamedWithContext(ctx, store.Store, idRef)
+		id, err = s.resolveSessionIDMaterializingNamedWithContext(ctx, store, idRef)
 		materialized = err == nil
 	}
 	if err != nil {
@@ -1694,12 +1694,12 @@ func (s *Server) setSessionPin(ctx context.Context, idRef string, pinned bool) (
 
 func (s *Server) humaHandleSessionRename(_ context.Context, input *SessionRenameInput) (*IndexOutput[sessionResponse], error) {
 	index := s.latestIndex()
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 
-	id, err := s.resolveSessionIDWithConfig(store.Store, input.ID)
+	id, err := s.resolveSessionIDWithConfig(store, input.ID)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}

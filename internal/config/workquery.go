@@ -367,10 +367,6 @@ func bdQueryEphemeralStatusShell(status string) string {
 	return `bd query --json ` + shellquote.Quote("ephemeral=true AND status="+status) + ` --limit=0`
 }
 
-func bdQueryEphemeralInProgressQuietShell() string {
-	return bdQueryEphemeralStatusShell("in_progress") + ` 2>/dev/null`
-}
-
 // ephemeralStatusSnapshotShell emits a memoized read of one ephemeral status
 // tier into shellVar, for the probes that filter it per identity.
 //
@@ -1297,7 +1293,9 @@ func (a *Agent) effectiveQuery(kind queryKind, topo QueryTopology) string {
 	if o := spec.override(a); o != "" {
 		return o
 	}
-	return spec.build(a, topo)
+	command := spec.build(a, topo)
+	noteGeneratedQuery(kind, command)
+	return command
 }
 
 // EffectiveWorkQuery returns the work query command for this agent.
@@ -1573,7 +1571,7 @@ func (a *Agent) EffectiveScaleCheck() string {
 }
 
 // RecoveryHookMarker prefixes every diagnostic the DEFAULT on_death/on_boot
-// recovery hooks print to stdout when a bd release fails. It is the contract
+// recovery hooks print to stdout when a bd read or release fails. It is the contract
 // between the generated templates (which emit it) and the controller callers
 // (which surface only marked output): a user-supplied on_death/on_boot override
 // is passed through verbatim and carries no marker, so its stdout is not
@@ -1594,24 +1592,48 @@ func (a *Agent) EffectiveOnDeathFor(topo QueryTopology) string {
 	return a.effectiveQuery(queryOnDeath, topo)
 }
 
+// recoveryReadShell wraps one bd read of a DEFAULT recovery hook; name is the
+// read's bd subcommand and selector, reported as "bd <name>". A read that
+// exits non-zero prints one RecoveryHookMarker line on fd 3 and contributes
+// nothing to the sweep, not even rows it printed before it failed; a read that
+// succeeds feeds its output to filter and keeps its stderr dropped.
+//
+// The marker goes to fd 3, which the hook points at its real stdout BEFORE the
+// pipeline (`exec 3>&1`), so it bypasses the pipe from the reads to the release
+// loop. On that pipe it would be read as a bead id and handed to `bd update`.
+// The hook itself still exits 0: the controller drops the stdout of a hook that
+// exits non-zero, and the marker is the point.
+func recoveryReadShell(hook, name, read, filter string) string {
+	return `if r=$(` + read + ` 2>/dev/null); then printf '%s\n' "$r" | ` + filter + ` 2>/dev/null; ` +
+		`else printf '` + RecoveryHookMarker + ` ` + hook + ` read failed: bd ` + name + ` (exit %s)\n' "$?" >&3; fi; `
+}
+
+// OnDeathIsGenerated reports whether EffectiveOnDeath returns the generated
+// recovery hook, as it does when the agent sets no on_death.
+func (a *Agent) OnDeathIsGenerated() bool {
+	return queryTable[queryOnDeath].override(a) == ""
+}
+
 func buildOnDeath(a *Agent, topo QueryTopology) string {
 	route := a.QualifiedName()
 	if a.PoolName != "" {
 		route = a.PoolName
 	}
 	_ = topo
-	ephemeralRead := bdQueryEphemeralInProgressQuietShell() + ` | ` +
-		`jq -r --arg assignee ` + shellquote.Quote(a.QualifiedName()) + ` '.[] | select((.assignee // "") == $assignee) | [.id, ` + jqMeta(beadmeta.RunTargetMetadataKey) + `, ` + jqMeta(beadmeta.RoutedToMetadataKey) + `] | @tsv' 2>/dev/null; `
+	listRead := recoveryReadShell("on_death", "list",
+		`bd list --assignee=`+a.QualifiedName()+` --status=in_progress --json`,
+		`jq -r '.[] | [.id, `+jqMeta(beadmeta.RunTargetMetadataKey)+`, `+jqMeta(beadmeta.RoutedToMetadataKey)+`] | @tsv'`)
+	ephemeralRead := recoveryReadShell("on_death", "query",
+		bdQueryEphemeralStatusShell("in_progress"),
+		`jq -r --arg assignee `+shellquote.Quote(a.QualifiedName())+` '.[] | select((.assignee // "") == $assignee) | [.id, `+jqMeta(beadmeta.RunTargetMetadataKey)+`, `+jqMeta(beadmeta.RoutedToMetadataKey)+`] | @tsv'`)
 	// Reset both assignee and status: clearing assignee alone leaves the bead
 	// invisible to every work_query tier (Tier 1 needs assignee match, Tiers
 	// 2/3 only match "ready" status). The next worker re-claims via Tier 3.
 	// If routed metadata is missing entirely, backfill the canonical
 	// gc.run_target route so reopened direct-assigned work does not stay
 	// invisible.
-	return `{ ` +
-		`bd list --assignee=` + a.QualifiedName() +
-		` --status=in_progress --json 2>/dev/null | ` +
-		`jq -r '.[] | [.id, ` + jqMeta(beadmeta.RunTargetMetadataKey) + `, ` + jqMeta(beadmeta.RoutedToMetadataKey) + `] | @tsv' 2>/dev/null; ` +
+	return `exec 3>&1; { ` +
+		listRead +
 		ephemeralRead +
 		`} | ` +
 		`while IFS="$(printf '\t')" read -r id run_target routed_to; do ` +
@@ -1637,20 +1659,31 @@ func (a *Agent) EffectiveOnBootFor(topo QueryTopology) string {
 	return a.effectiveQuery(queryOnBoot, topo)
 }
 
+// OnBootIsGenerated reports whether EffectiveOnBoot returns the generated
+// recovery hook, as it does when the agent sets no on_boot.
+func (a *Agent) OnBootIsGenerated() bool {
+	return queryTable[queryOnBoot].override(a) == ""
+}
+
 func buildOnBoot(a *Agent, topo QueryTopology) string {
 	template := a.QualifiedName()
 	if a.PoolName != "" {
 		template = a.PoolName
 	}
 	_ = topo
-	ephemeralRead := bdQueryEphemeralInProgressQuietShell() + ` | ` +
-		`jq -r --arg template "$template" '.[] | select((.assignee // "") == "") | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == $template) or ((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.RunTargetMetadataKey) + ` == $template) and (` + jqMeta(beadmeta.KindMetadataKey) + ` == "` + beadmeta.KindWorkflow + `"))) | .id' 2>/dev/null; `
-	return `template=` + shellquote.Quote(template) + `; ` +
+	routedRead := recoveryReadShell("on_boot", "list "+beadmeta.RoutedToMetadataKey,
+		`bd list --metadata-field "`+beadmeta.RoutedToMetadataKey+`=$template" --status=in_progress --no-assignee --json`,
+		`jq -r '.[].id'`)
+	runTargetRead := recoveryReadShell("on_boot", "list "+beadmeta.RunTargetMetadataKey,
+		`bd list --metadata-field "`+beadmeta.RunTargetMetadataKey+`=$template" --metadata-field "`+beadmeta.KindMetadataKey+`=`+beadmeta.KindWorkflow+`" --status=in_progress --no-assignee --json`,
+		`jq -r '.[] | select(`+jqMeta(beadmeta.RoutedToMetadataKey)+` == "") | .id'`)
+	ephemeralRead := recoveryReadShell("on_boot", "query",
+		bdQueryEphemeralStatusShell("in_progress"),
+		`jq -r --arg template "$template" '.[] | select((.assignee // "") == "") | select((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == $template) or ((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == "") and (`+jqMeta(beadmeta.RunTargetMetadataKey)+` == $template) and (`+jqMeta(beadmeta.KindMetadataKey)+` == "`+beadmeta.KindWorkflow+`"))) | .id'`)
+	return `template=` + shellquote.Quote(template) + `; exec 3>&1; ` +
 		`{ ` +
-		`bd list --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$template" --status=in_progress --no-assignee --json 2>/dev/null | ` +
-		`jq -r '.[].id' 2>/dev/null; ` +
-		`bd list --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$template" --metadata-field "` + beadmeta.KindMetadataKey + `=` + beadmeta.KindWorkflow + `" --status=in_progress --no-assignee --json 2>/dev/null | ` +
-		`jq -r '.[] | select(` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") | .id' 2>/dev/null; ` +
+		routedRead +
+		runTargetRead +
 		ephemeralRead +
 		`} | awk 'NF && !seen[$0]++' | ` +
 		`xargs -rI{} sh -c 'if ! err=$(bd update "$1" --status open 2>&1 >/dev/null); then printf "gc-recovery: on_boot reopen failed for %s: %s\n" "$1" "$err"; fi' _ {}`

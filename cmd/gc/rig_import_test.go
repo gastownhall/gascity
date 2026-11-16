@@ -64,14 +64,20 @@ func (f *fakeRigHashConfig) ConfigSet(key, value string) error {
 
 func newRigImportFixture(t *testing.T, rigs ...config.Rig) *rigImportFixture {
 	t.Helper()
+	stubInfraMigrationSource(t)
+	return newRigImportFixtureCopying(t, nil, rigs...)
+}
+
+// newRigImportFixtureCopying is newRigImportFixture over whatever work store
+// openInfraMigrationSource serves. The rigs are registered, and seed (when
+// given) fills them, before the city copy runs, so the copy's boundary plan
+// reads the rigs as `gc storage migrate --from-work` (Step 4) does before any
+// rig is imported (Step 4b).
+func newRigImportFixtureCopying(t *testing.T, seed func(*rigImportFixture), rigs ...config.Rig) *rigImportFixture {
+	t.Helper()
 	cfg := infraSplitConfig(filepath.Join(t.TempDir(), "store"))
 	request := storageTestRequest(t, cfg)
-	stubInfraMigrationSource(t)
 	stubInfraControllerPing(t, 0)
-	var log bytes.Buffer
-	if got := migrateInfraClasses(t, request.CityPath, cfg, &log); got.Outcome != infraMigrationConverged {
-		t.Fatalf("the fixture city did not converge: %s: %s", got.Outcome, log.String())
-	}
 	f := &rigImportFixture{
 		t:        t,
 		request:  request,
@@ -114,6 +120,20 @@ func newRigImportFixture(t *testing.T, rigs ...config.Rig) *rigImportFixture {
 		return conf, nil
 	}
 	t.Cleanup(func() { rigImportHashConfigOpener = prevHash })
+	if seed != nil {
+		seed(f)
+	}
+	// The copy probes the city's rigs from the config it loads; this city has
+	// none on disk, so the probe reads the fixture's.
+	prevProbe := infraCityBoundaryProbe
+	infraCityBoundaryProbe = func(cityPath string, _ *config.City, ids []string, fromBackup bool) (map[string][]beads.Bead, []string) {
+		return probeElsewhere(rigImportEnv{CityPath: cityPath, Cfg: f.cfg}, "", resolveStoreScopeRoot(cityPath, cityPath), fromBackup, ids)
+	}
+	t.Cleanup(func() { infraCityBoundaryProbe = prevProbe })
+	var log bytes.Buffer
+	if got := migrateInfraClasses(t, request.CityPath, cfg, &log); got.Outcome != infraMigrationConverged {
+		t.Fatalf("the fixture city did not converge: %s: %s", got.Outcome, log.String())
+	}
 	return f
 }
 
@@ -560,6 +580,115 @@ func TestRigImportReleasesAndRetiresItsGatesThroughTheS3bLane(t *testing.T) {
 	}
 	if gateOpen() {
 		t.Fatal("the gate still holds its owner after the rig blocker closed")
+	}
+}
+
+// TestAGateOnARigGraphRowReleasesOnceTheRigImportMovesIt: a gate is minted
+// while its blocker, a graph row, still lives in a rig: by the city copy
+// (Step 4), or by another rig's import. The rig's own import (Step 4b) then
+// moves the row into the binding and clears the rig, and nothing re-points
+// the gate. The gate lane reads the binding as well: the gate holds its owner
+// while the row is open there, and releases it once the row closes.
+//
+// Red while the lane skipped the binding: no store it read held the row, so
+// the gate was marked unresolved and held its owner forever.
+func TestAGateOnARigGraphRowReleasesOnceTheRigImportMovesIt(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		owner, row    string
+		build         func(t *testing.T) (f *rigImportFixture, city beads.Store)
+		importsBefore []string
+	}{
+		{
+			name:  "minted by the city copy",
+			owner: "mc-d1", row: "ga-x1",
+			build: func(t *testing.T) (*rigImportFixture, beads.Store) {
+				source := d9SQLiteSource(t, []beads.Bead{graphRow("mc-d1", "mc-d1", "open", nil)}, []beads.Dep{{IssueID: "mc-d1", DependsOnID: "ga-x1", Type: "blocks"}})
+				prev := openInfraMigrationSource
+				openInfraMigrationSource = func(string) (beads.Store, error) { return source, nil }
+				t.Cleanup(func() { openInfraMigrationSource = prev })
+				f := newRigImportFixtureCopying(t, func(f *rigImportFixture) {
+					f.seed("ga", []beads.Bead{graphRow("ga-x1", "ga-x1", "open", nil)}, nil)
+				}, config.Rig{Name: "ga", Prefix: "ga"})
+				return f, source
+			},
+		},
+		{
+			name:  "minted by another rig's import",
+			owner: "gb-d1", row: "ga-x1",
+			build: func(t *testing.T) (*rigImportFixture, beads.Store) {
+				f := newRigImportFixture(t, config.Rig{Name: "ga", Prefix: "ga"}, config.Rig{Name: "gb", Prefix: "gb"})
+				f.seed("ga", []beads.Bead{graphRow("ga-x1", "ga-x1", "open", nil)}, nil)
+				f.seed("gb", []beads.Bead{graphRow("gb-d1", "gb-d1", "open", nil)}, []beads.Dep{{IssueID: "gb-d1", DependsOnID: "ga-x1", Type: "blocks"}})
+				city, err := openInfraMigrationSource(f.request.CityPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return f, city
+			},
+			importsBefore: []string{"gb"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, city := tc.build(t)
+			for _, rig := range append(tc.importsBefore, "ga") {
+				if code, stdout, stderr := f.importRigs(rig); code != 0 {
+					t.Fatalf("importing rig %s = %d: %s %s", rig, code, stdout, stderr)
+				}
+			}
+			if rest := rigTestList(t, f.rig("ga")); len(rest) != 0 {
+				t.Fatalf("rig ga holds %v after its import, want nothing", rigTestIDs(rest))
+			}
+			binding, err := openInfraDestination(f.target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = closeBeadStoreHandle(binding) })
+			gates, err := binding.List(beads.ListQuery{Label: dispatch.CrossStoreGateLabel, IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+			if err != nil || len(gates) != 1 || gates[0].Metadata[beadmeta.CrossStoreGateOwnerMetadataKey] != tc.owner || gates[0].Metadata[beadmeta.CrossStoreBlockerMetadataKey] != tc.row {
+				t.Fatalf("gates = %+v (%v), want one holding %s on %s", gates, err, tc.owner, tc.row)
+			}
+			gate := gates[0]
+			rigs := map[string]beads.Store{}
+			for _, rig := range f.cfg.Rigs {
+				rigs[rig.Name] = f.rig(rig.Name)
+			}
+			resolve := crossStoreBlockerResolver(binding, city, f.cfg, rigs, nil)
+			pass := func() dispatch.CrossStoreGateReport {
+				t.Helper()
+				report, err := dispatch.ReleaseCrossStoreGates(beadstest.Graph(binding), resolve)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return report
+			}
+			ready := func() bool {
+				t.Helper()
+				rows, err := binding.Ready(beads.ReadyQuery{TierMode: beads.TierBoth})
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, b := range rows {
+					if b.ID == tc.owner {
+						return true
+					}
+				}
+				return false
+			}
+
+			if report := pass(); len(report.Released)+len(report.Unresolved) != 0 || ready() {
+				t.Fatalf("while %s is open in the binding: report %+v, %s ready %v; want the gate holding it", tc.row, report, tc.owner, ready())
+			}
+			if state := mustBeadMeta(t, binding, gate.ID, beadmeta.CrossStoreGateStateMetadataKey); state != "" {
+				t.Fatalf("gate %s was marked %q while the binding holds its blocker", gate.ID, state)
+			}
+			if err := binding.Close(tc.row); err != nil {
+				t.Fatal(err)
+			}
+			if report := pass(); len(report.Released) != 1 || report.Released[0] != gate.ID || !ready() {
+				t.Fatalf("after %s closed in the binding: report %+v, %s ready %v; want gate %s released", tc.row, report, tc.owner, ready(), gate.ID)
+			}
+		})
 	}
 }
 

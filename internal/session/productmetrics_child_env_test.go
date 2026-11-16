@@ -14,15 +14,7 @@ import (
 func TestProductMetricsDirectChildEnvSessionSubmitPoller(t *testing.T) {
 	dir := t.TempDir()
 	snapshot := filepath.Join(dir, "child.env")
-	spy := filepath.Join(dir, "gc-child-spy")
-	script := "#!/bin/sh\n" +
-		"snapshot=\"$GC_TEST_PRODUCT_METRICS_CHILD_ENV_SPY\"\n" +
-		"tmp=\"${snapshot}.tmp.$$\"\n" +
-		"printf '%s\\n' \"$GC_DISABLE_USAGE_METRICS\" \"$BD_DISABLE_METRICS\" \"$OTEL_SERVICE_NAME\" > \"$tmp\"\n" +
-		"mv -f \"$tmp\" \"$snapshot\"\n"
-	if err := os.WriteFile(spy, []byte(script), 0o700); err != nil {
-		t.Fatalf("write child spy: %v", err)
-	}
+	spy := writeChildEnvSpy(t, dir)
 	t.Setenv("GC_TEST_PRODUCT_METRICS_CHILD_ENV_SPY", snapshot)
 	t.Setenv(execenv.UsageMetricsDisableEnv, "0")
 	t.Setenv("BD_DISABLE_METRICS", "keep-beads-setting")
@@ -52,7 +44,10 @@ func TestProductMetricsDirectChildEnvSessionSubmitPoller(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	got := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	// Windows line endings come from the .cmd spy's echo; normalizing keeps
+	// the recorded values comparable without relaxing what is compared.
+	text := strings.ReplaceAll(string(data), "\r\n", "\n")
+	got := strings.Split(strings.TrimSuffix(text, "\n"), "\n")
 	want := []string{execenv.UsageMetricsDisableValue, "keep-beads-setting", "keep-otel-setting"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("session submit poller environment = %#v, want %#v", got, want)

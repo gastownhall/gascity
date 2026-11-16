@@ -25,19 +25,16 @@ func droppedEdgeRecords(t *testing.T, b beads.Bead) []rigCrossEdgeRecord {
 	return records
 }
 
-// TestTheClearRecordsEachDroppedCrossEdgeOnItsWorkBead is ga-4tnypl: a bd or
-// native-Dolt work store refuses an edge onto a bead it no longer holds, so the
+// TestTheClearRecordsEachDroppedCrossEdgeOnItsWorkBead is ga-4tnypl: the
 // clear drops every edge from a work bead into a moved bead (discovered-from,
-// related, tracks...). The loss used to be recorded only in the city-side
-// cleared note; the work bead kept no trace of its provenance. Each dropped
-// edge is now recorded on the work bead itself, in the rig importer's
-// gc.migrated_cross_edges shape, beside any record the bead already carries.
+// related, tracks...), and re-adds none (D9). The loss used to be recorded
+// only in the city-side cleared note; the work bead kept no trace of its
+// provenance. Each dropped edge is recorded on the work bead itself, in the
+// rig importer's gc.migrated_cross_edges shape, beside any record the bead
+// already carries.
 func TestTheClearRecordsEachDroppedCrossEdgeOnItsWorkBead(t *testing.T) {
 	stubInfraControllerPing(t, 0)
-	source := danglingRefusingStore{beads.NewMemStore()}
-	prev := openInfraMigrationSource
-	openInfraMigrationSource = func(string) (beads.Store, error) { return source, nil }
-	t.Cleanup(func() { openInfraMigrationSource = prev })
+	source := stubInfraMigrationSource(t)
 
 	foundIn := mustCreateInfraBead(t, source, beads.Bead{Title: "wisp the bug was found in", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
 	if err := source.Close(foundIn.ID); err != nil {
@@ -62,8 +59,8 @@ func TestTheClearRecordsEachDroppedCrossEdgeOnItsWorkBead(t *testing.T) {
 	if report.Outcome != infraMigrationConverged {
 		t.Fatalf("migrate = %s: %s", report.Outcome, log.String())
 	}
-	if len(report.LostCrossEdges) != 2 {
-		t.Fatalf("lost cross edges = %v, want the two the store refused", report.LostCrossEdges)
+	if len(report.Clear.Dropped) != 2 || len(report.LostCrossEdges) != 0 {
+		t.Fatalf("dropped %v, lost %v; want the two edges dropped and recorded, none lost", report.Clear.Dropped, report.LostCrossEdges)
 	}
 
 	got, err := source.Get(bug.ID)
@@ -96,10 +93,10 @@ func TestTheClearRecordsEachDroppedCrossEdgeOnItsWorkBead(t *testing.T) {
 	}
 }
 
-// TestTheClearRecordsNothingOnAStoreThatKeepsTheEdges: a work store that can
-// hold an edge onto a bead it no longer has keeps every edge, so no work bead
-// gains a record of a loss that did not happen.
-func TestTheClearRecordsNothingOnAStoreThatKeepsTheEdges(t *testing.T) {
+// TestAResumedClearRecordsEachDroppedEdgeOnce: a clear killed after it
+// removed its rows and before it recorded the dropped edges records them on
+// the resumed run, once; a third run adds nothing.
+func TestAResumedClearRecordsEachDroppedEdgeOnce(t *testing.T) {
 	stubInfraControllerPing(t, 0)
 	source := stubInfraMigrationSource(t)
 	moved := mustCreateInfraBead(t, source, beads.Bead{Title: "wisp", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
@@ -108,24 +105,41 @@ func TestTheClearRecordsNothingOnAStoreThatKeepsTheEdges(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := storageTestRequest(t, infraSplitConfig(filepath.Join(t.TempDir(), "store")))
+	prev := infraEngineCrashPoint
+	t.Cleanup(func() { infraEngineCrashPoint = prev })
+	infraEngineCrashPoint = func(p string) error {
+		if strings.HasPrefix(p, "clearing ") {
+			return errKilled
+		}
+		return nil
+	}
 	var log bytes.Buffer
-	if report := migrateInfraClasses(t, request.CityPath, request.Cfg, &log); report.Outcome != infraMigrationConverged {
-		t.Fatalf("migrate = %s: %s", report.Outcome, log.String())
+	if report := migrateInfraClasses(t, request.CityPath, request.Cfg, &log); report.Outcome == infraMigrationConverged {
+		t.Fatalf("the kill did not stop the clear: %s", log.String())
 	}
-	got, err := source.Get(bug.ID)
-	if err != nil {
-		t.Fatal(err)
+	infraEngineCrashPoint = prev
+	if got, _ := source.Get(bug.ID); got.Metadata[beadmeta.MigratedCrossEdgesMetadataKey] != "" {
+		t.Fatalf("precondition: the killed run recorded %q", got.Metadata[beadmeta.MigratedCrossEdgesMetadataKey])
 	}
-	if raw, ok := got.Metadata[beadmeta.MigratedCrossEdgesMetadataKey]; ok {
-		t.Fatalf("%s gained %s=%s though its edge was kept", bug.ID, beadmeta.MigratedCrossEdgesMetadataKey, raw)
+	for run := 0; run < 2; run++ {
+		log.Reset()
+		if report := migrateInfraClasses(t, request.CityPath, request.Cfg, &log); report.Outcome != infraMigrationConverged {
+			t.Fatalf("run %d = %s: %s", run, report.Outcome, log.String())
+		}
+		got, err := source.Get(bug.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if records := droppedEdgeRecords(t, got); len(records) != 1 || records[0].Other != moved.ID || records[0].Action != rigEdgeDropped {
+			t.Fatalf("run %d: %s records %+v, want the one dropped edge once", run, bug.ID, records)
+		}
 	}
 }
 
 // TestPreflightListsTheCrossEdgesTheClearMayDrop is ga-4tnypl's preflight leg:
 // the operator sees, before the window, every edge from a work bead into a bead
-// the copy moves that a bd or native-Dolt work store will drop. A blocking edge
-// onto a closed bead is released, not dropped, so it is not listed. It does
-// not block: the clear records each loss.
+// the copy moves, which the clear drops (it re-adds none, D9), a satisfied
+// blocking edge included. It does not block: the clear records each.
 func TestPreflightListsTheCrossEdgesTheClearMayDrop(t *testing.T) {
 	request, _, _ := preflightReadyCity(t, 0)
 	source, err := openInfraMigrationSource(request.CityPath)
@@ -152,11 +166,8 @@ func TestPreflightListsTheCrossEdgesTheClearMayDrop(t *testing.T) {
 		t.Fatalf("preflight blocked on edges the clear records: exit %d stdout=%q", code, stdout.String())
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "1 edge(s) from work beads") || !strings.Contains(out, bug.ID+" -[discovered-from]-> "+moved.ID) {
-		t.Fatalf("preflight does not list the edge at risk: %s", out)
-	}
-	if strings.Contains(out, bug.ID+" -[blocks]-> "+done.ID) {
-		t.Fatalf("preflight lists a satisfied blocking edge the clear releases: %s", out)
+	if !strings.Contains(out, "2 edge(s) from work beads") || !strings.Contains(out, bug.ID+" -[discovered-from]-> "+moved.ID) || !strings.Contains(out, bug.ID+" -[blocks]-> "+done.ID) {
+		t.Fatalf("preflight does not list both edges the clear drops: %s", out)
 	}
 }
 

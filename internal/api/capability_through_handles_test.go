@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // capabilityStore has every optional capability the API reaches for on a
@@ -55,6 +56,12 @@ func (s asHandedState) BeadStore(rig string) beads.Store { return s.stores[rig] 
 
 func (s asHandedState) BeadStores() map[string]beads.Store { return s.stores }
 
+// Stores mints the handles over the stores as the test put them in, with no
+// projection, as BeadStore and BeadStores hand them out.
+func (s asHandedState) Stores() storeref.Stores {
+	return mintFakeStores(s.cityBeadStore, s.stores, s.relocatedClasses(), storeref.StoresOptions{}, s.cfg, s.ClassBindingHasLegacyResidents, s.rigBits)
+}
+
 // apiHandleWraps are the shapes T6 hands the API's store helpers: the raw
 // store (the control) and a class handle over it of each class a handler
 // serves through Stores().
@@ -81,24 +88,24 @@ func TestAPICapabilitiesReachTheStoreThroughAHandle(t *testing.T) {
 			store := &capabilityStore{MemStore: beads.NewMemStore()}
 
 			// handler_status.go statusStoredWorkCounts: Counter.
-			if _, err := statusStoredWorkCounts(ctx, state, wrap(store)); err != nil || store.counts.Load() == 0 {
+			if _, err := statusStoredWorkCounts(ctx, state, testWorkLeg(t, wrap(store))); err != nil || store.counts.Load() == 0 {
 				t.Errorf("statusStoredWorkCounts made %d counts (%v), want the Counter path", store.counts.Load(), err)
 			}
 			// store_health.go countBeadStoreRows: Counter.
 			store.counts.Store(0)
-			if n, err := countBeadStoreRows(ctx, state, wrap(store)); err != nil || n != 7 || store.counts.Load() != 1 {
+			if n, err := countBeadStoreRows(ctx, state, testWorkLeg(t, wrap(store))); err != nil || n != 7 || store.counts.Load() != 1 {
 				t.Errorf("countBeadStoreRows = %d after %d counts (%v), want the Counter's 7", n, store.counts.Load(), err)
 			}
 			// huma_handlers_beads.go beadListLegCount: Counter.
-			if n, ok := beadListLegCount(ctx, wrap(store), "", &BeadListInput{}); !ok || n != 7 {
+			if n, ok := beadListLegCount(ctx, testWorkLeg(t, wrap(store)), "", &BeadListInput{}); !ok || n != 7 {
 				t.Errorf("beadListLegCount = %d, %v; want the Counter's 7", n, ok)
 			}
 			// handler_status.go statusReadyStoreWithTimeout: ContextReadyReader.
-			if _, err := statusReadyStoreWithTimeout(ctx, state, wrap(store)); err != nil || store.readyCtx.Load() != 1 {
+			if _, err := statusReadyStoreWithTimeout(ctx, state, testWorkLeg(t, wrap(store))); err != nil || store.readyCtx.Load() != 1 {
 				t.Errorf("statusReadyStoreWithTimeout made %d context-aware ready reads (%v), want 1", store.readyCtx.Load(), err)
 			}
 			// store_health.go measuredStoreRows: RowWitness.
-			if _, err := measuredStoreRows(wrap(store), 0, countBranchCounter); !errors.Is(err, errRowCountContradicted) {
+			if _, err := measuredStoreRows(testWorkLeg(t, wrap(store)).Strict, 0, countBranchCounter); !errors.Is(err, errRowCountContradicted) {
 				t.Errorf("measuredStoreRows over a witness that saw rows = %v, want errRowCountContradicted", err)
 			}
 			// huma_handlers_orders.go orderHistoryBeadsAcrossStoreInfosCachedFirst: CachedLister.
@@ -131,24 +138,58 @@ func TestAPICapabilitiesReachTheStoreThroughAHandle(t *testing.T) {
 	}
 }
 
+// cacheHandleProbes are cacheLiveOr503 and cacheAgeSeconds over a handle of
+// each class a handler can name: one instantiation per class, so every arm of
+// classAs is exercised.
+var cacheHandleProbes = map[string]struct {
+	live func(beads.Store) error
+	age  func(beads.Store) cacheFreshness
+}{
+	"a work handle": {
+		func(s beads.Store) error { return cacheLiveOr503(beadstest.Work(s)) },
+		func(s beads.Store) cacheFreshness { return cacheAgeSeconds(beadstest.Work(s)) },
+	},
+	"a graph handle": {
+		func(s beads.Store) error { return cacheLiveOr503(beadstest.Graph(s)) },
+		func(s beads.Store) cacheFreshness { return cacheAgeSeconds(beadstest.Graph(s)) },
+	},
+	"a sessions handle": {
+		func(s beads.Store) error { return cacheLiveOr503(beadstest.Sessions(s)) },
+		func(s beads.Store) cacheFreshness { return cacheAgeSeconds(beadstest.Sessions(s)) },
+	},
+	"a mail handle": {
+		func(s beads.Store) error { return cacheLiveOr503(beadstest.Mail(s)) },
+		func(s beads.Store) cacheFreshness { return cacheAgeSeconds(beadstest.Mail(s)) },
+	},
+	"an orders handle": {
+		func(s beads.Store) error { return cacheLiveOr503(beadstest.Orders(s)) },
+		func(s beads.Store) cacheFreshness { return cacheAgeSeconds(beadstest.Orders(s)) },
+	},
+	"a nudges handle": {
+		func(s beads.Store) error { return cacheLiveOr503(beadstest.Nudges(s)) },
+		func(s beads.Store) cacheFreshness { return cacheAgeSeconds(beadstest.Nudges(s)) },
+	},
+}
+
 // TestCacheGateAndAgeReachACacheThroughAHandle pins cache_liveness.go's two
-// lookups through a class handle over a real CachingStore: the 503 fires for a
-// cache that is not live, and the age header reports the cache's freshness.
+// lookups through a class handle of every class over a real CachingStore: the
+// 503 fires for a cache that is not live, and the age header reports the
+// cache's freshness.
 func TestCacheGateAndAgeReachACacheThroughAHandle(t *testing.T) {
-	for name, wrap := range apiHandleWraps {
+	for name, probe := range cacheHandleProbes {
 		cold := beads.NewCachingStoreForTest(beads.NewMemStore(), nil)
-		if err := cacheLiveOr503(wrap(cold)); err == nil {
+		if err := probe.live(cold); err == nil {
 			t.Errorf("%s over an unprimed cache: cacheLiveOr503 = nil, want the 503", name)
 		}
 		primed := beads.NewCachingStoreForTest(beads.NewMemStore(), nil)
 		if err := primed.Prime(t.Context()); err != nil {
 			t.Fatal(err)
 		}
-		if err := cacheLiveOr503(wrap(primed)); err != nil {
+		if err := probe.live(primed); err != nil {
 			t.Errorf("%s over a live cache: cacheLiveOr503 = %v, want nil", name, err)
 		}
 		restore := SetLivenessClockForTest(&clock.Fake{Time: primed.Stats().LastFreshAt.Add(9 * time.Second)})
-		if got := cacheAgeSeconds(wrap(primed)); got.ageS != 9 || got.refresh.State == "" {
+		if got := probe.age(primed); got.ageS != 9 || got.refresh.State == "" {
 			t.Errorf("%s over a primed cache: cacheAgeSeconds = %+v, want age 9 and a refresh state", name, got)
 		}
 		restore()

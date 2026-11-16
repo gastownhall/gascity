@@ -54,11 +54,17 @@ forwards.
 ## Claiming and updating
 
 ```
-gc bd update <id> --claim                 # Claim a bead (sets assignee + in_progress) — races in a multi-agent city; prefer `gc hook --claim` there
+gc bd update <id> --claim                 # Claim one bead (sets assignee + in_progress); fails if another agent holds it
 gc bd update <id> --status in_progress    # Update status
 gc bd update <id> --add-label <key>=<value>  # Add/update labels
 gc bd update <id> --append-notes "progress..."  # Append a note (does not replace existing notes)
 ```
+
+`gc bd update <id> --claim` is safe to repeat for a bead you already hold, but
+it never takes a bead over: it fails when another agent holds the bead. Treat a
+failed claim as "held by someone else" and do not work that bead. To pick up
+routed work in a multi-agent city, prefer `gc hook --claim`, which finds and
+claims one item in a single step.
 
 ## Closing work
 

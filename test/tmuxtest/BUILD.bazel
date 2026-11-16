@@ -5,10 +5,15 @@ go_library(
     srcs = [
         "guard.go",
         "orphan_sweep.go",
+        "signal_unix.go",
+        "signal_windows.go",
     ],
     importpath = "github.com/gastownhall/gascity/test/tmuxtest",
     visibility = ["//visibility:public"],
-    deps = ["//internal/pidutil"],
+    deps = [
+        "//internal/pidutil",
+        "//internal/platform/filelock",
+    ],
 )
 
 go_test(

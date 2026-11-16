@@ -139,6 +139,7 @@ cmd_gc_integration_tests=(
   TestGcBdCreateGraphJudgeFactsRealBd
   TestGcBdMolWispRootOnlyMintsOneWorkBead
   TestGcBdSplitJudgesMetadataAsTheStoresReadItBack
+  TestInfraScopedManagedDoltPIDIdentityUnderRealSystemd
   TestInitJudgeSplitBDMatchesGcBdVerdictOnRealBinaries
   TestInitializingARealEmbeddedRigLetsItCreateGcTypedBeads
   TestManagedBdRigProviderStoreRecoversAfterHardKillPortRebind
@@ -163,6 +164,9 @@ cmd_gc_integration_tests=(
   TestStorageMigrateDoesNotCountItsOwnPooledSessions
   TestStorageMigrateMovesAStoppedManagedDoltCityInsideTheMaintenanceWindow
   TestStorageMigrateRefusesAForeignSessionOnTheManagedDoltItStarted
+  TestStorageSnapshotHostedBdWorkStore
+  TestTheCityFloorHoldsOnARealBdStore
+  TestTheDefaultFloorOpenerReachesARealBdCity
 )
 
 join_regex() {

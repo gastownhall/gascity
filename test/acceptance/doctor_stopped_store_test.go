@@ -32,7 +32,7 @@ func TestDoctorLeavesAStoppedProxiedCityStopped(t *testing.T) {
 	}
 	run := helpers.StartTopology(t, testEnv, topo, bdPath, doltPath)
 	rigDir := run.RigWorkspace(t, "stoppedrig")
-	if out, err := run.GC("rig", "add", rigDir); err != nil {
+	if out, err := run.RigAdd(t, rigDir); err != nil {
 		t.Fatalf("gc rig add: %v\n%s", err, out)
 	}
 	if out, err := run.Stop(); err != nil {

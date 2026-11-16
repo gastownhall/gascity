@@ -202,7 +202,11 @@ func openMigrationSource(lock *os.File, cityPath string, cfg *config.City, logPr
 		}
 		for _, root := range rigRoots {
 			owned, err := scopeProviderOwned(cityPath, root)
-			if err == nil && owned {
+			if err != nil {
+				stopErr := w.stopProvider()
+				return nil, errors.Join(fmt.Errorf("the maintenance window cannot tell whether bd owns a proxied server for rig scope %s (%w), so it can neither start that server nor rule it out, and this run reads that rig; the whole run is refused, nothing was written. Repair the rig's .beads metadata, or unbind the rig, then run this again", root, err), stopErr)
+			}
+			if owned {
 				err = migrationWindowStartScope(cityPath, root)
 			}
 			if err != nil {

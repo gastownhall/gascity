@@ -36,7 +36,7 @@ func (s *Server) newAgentSessionResolver(ctx context.Context, cfg *config.City, 
 		cityName: cityName,
 		sessTmpl: cfg.Workspace.SessionTemplate,
 		readSnapshot: func() statusSessionSnapshot {
-			snapshot, _, _ := s.citySessionSnapshot(ctx, cfg)
+			snapshot, _, _ := s.citySessionSnapshot(ctx, cfg, s.state.Stores())
 			return snapshot
 		},
 	}

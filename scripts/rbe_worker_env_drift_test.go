@@ -569,11 +569,18 @@ func TestRBEPoolWorkflowsReportDriftWhileServing(t *testing.T) {
 			if fetch == nil {
 				t.Fatalf("worker job: no fetch-the-pinned-rbe-worker step")
 			}
+			// The setup downloads' mirror (rbe-worker rbe-fetch): the tier's
+			// own repository variable, as the worker step reads it.
+			mirror := "${{ vars.RBE_DIST_MIRROR || '' }}"
+			if path == rbeForkPoolWorkflow {
+				mirror = "${{ vars.RBE_FORK_DIST_MIRROR || '' }}"
+			}
 			measureAt, measure := findStep(worker, isMeasureStep)
-			if measure == nil || measure.ID != "worker-env" || measure.ContinueOnError != "true" || len(measure.Env) != 3 ||
+			if measure == nil || measure.ID != "worker-env" || measure.ContinueOnError != "true" || len(measure.Env) != 4 ||
 				measure.Env["RBE_WORKER_DIR"] != "${{ steps.rbe-worker.outputs.dir }}" ||
-				measure.Env["RBE_WORKER_REVISION"] != "${{ steps.rbe-worker.outputs.sha }}" {
-				t.Fatalf("worker job: no continue-on-error measure step (id worker-env, WORKER_MODE=measure, RBE_WORKER_DIR and RBE_WORKER_REVISION): %+v", measure)
+				measure.Env["RBE_WORKER_REVISION"] != "${{ steps.rbe-worker.outputs.sha }}" ||
+				measure.Env["RBE_DIST_MIRROR"] != mirror {
+				t.Fatalf("worker job: no continue-on-error measure step (id worker-env, WORKER_MODE=measure, RBE_WORKER_DIR, RBE_WORKER_REVISION and RBE_DIST_MIRROR=%s): %+v", mirror, measure)
 			}
 			if fetchAt > measureAt {
 				t.Errorf("worker job: the fetch step (%d) must come before the measure step (%d)", fetchAt, measureAt)
@@ -658,9 +665,10 @@ func TestRBEWorkerEnvCanaryWorkflow(t *testing.T) {
 		t.Fatalf("measure job: no fetch-the-pinned-rbe-worker step")
 	}
 	i, s := findStep(measure, isMeasureStep)
-	if s == nil || len(s.Env) != 3 || s.Env["WORKER_MODE"] != "measure" || s.Env["RBE_WORKER_DIR"] != "${{ steps.rbe-worker.outputs.dir }}" ||
-		s.Env["RBE_WORKER_REVISION"] != "${{ steps.rbe-worker.outputs.sha }}" {
-		t.Fatalf("measure job: no blacksmith-worker.sh step with WORKER_MODE=measure, RBE_WORKER_DIR and RBE_WORKER_REVISION: %+v", s)
+	// The setup downloads' mirror, as the OSS pool provisions (rbe-fetch).
+	if s == nil || len(s.Env) != 4 || s.Env["WORKER_MODE"] != "measure" || s.Env["RBE_WORKER_DIR"] != "${{ steps.rbe-worker.outputs.dir }}" ||
+		s.Env["RBE_WORKER_REVISION"] != "${{ steps.rbe-worker.outputs.sha }}" || s.Env["RBE_DIST_MIRROR"] != "${{ vars.RBE_DIST_MIRROR || '' }}" {
+		t.Fatalf("measure job: no blacksmith-worker.sh step with WORKER_MODE=measure, RBE_WORKER_DIR, RBE_WORKER_REVISION and RBE_DIST_MIRROR: %+v", s)
 	}
 	if fetchAt > i {
 		t.Errorf("measure job: the fetch step (%d) must come before the measure step (%d)", fetchAt, i)

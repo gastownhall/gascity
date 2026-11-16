@@ -475,24 +475,24 @@ func shadowFake(t *testing.T, sink bool) (*runtime.Fake, *[]runtime.ProgramStatu
 	return f, got
 }
 
-// Kills an idle comparison made outside the leaf (observation, the op
-// lane's pre-read) that records without a shadowing leaf, judges anything
+// Kills an idle comparison made outside the leaf (the op lane's and the
+// CLI's pre-reads) that records without a shadowing leaf, judges anything
 // but the record's idle verdict, or loses the decision's identity.
 func TestShadowCompareIdle(t *testing.T) {
 	f, got := shadowFake(t, true)
-	runtime.ShadowCompareIdle(auto.New(runtime.FullFake{Fake: f}, runtime.NewFake()), "s", "gc-1", "claude", runtime.ProgramPointObservation, runtime.ProgramVerdictIdle)
+	runtime.ShadowCompareIdle(auto.New(runtime.FullFake{Fake: f}, runtime.NewFake()), "s", "gc-1", "claude", runtime.ProgramPointWaitIdlePreread, runtime.ProgramVerdictIdle)
 	if len(*got) != 1 {
 		t.Fatalf("recorded %+v, want one comparison", *got)
 	}
 	c := (*got)[0]
-	if c.Point != runtime.ProgramPointObservation || c.Scrape != runtime.ProgramVerdictIdle || c.Program != runtime.ProgramVerdictBusy ||
+	if c.Point != runtime.ProgramPointWaitIdlePreread || c.Scrape != runtime.ProgramVerdictIdle || c.Program != runtime.ProgramVerdictBusy ||
 		c.SessionID != "gc-1" || c.Family != "claude" || c.Session != "s" || c.JudgedAt.IsZero() {
-		t.Fatalf("recorded %+v, want observation idle/busy for gc-1 (claude), judged when read", c)
+		t.Fatalf("recorded %+v, want wait_idle_preread idle/busy for gc-1 (claude), judged when read", c)
 	}
 	off, offGot := shadowFake(t, false)
-	runtime.ShadowCompareIdle(runtime.FullFake{Fake: off}, "s", "gc-1", "claude", runtime.ProgramPointObservation, runtime.ProgramVerdictIdle)
-	if len(*offGot) != 0 || methodCalls(off, "ProgramStatus") != 0 {
-		t.Fatalf("a leaf that is not shadowing recorded %+v after %d reads", *offGot, methodCalls(off, "ProgramStatus"))
+	runtime.ShadowCompareIdle(runtime.FullFake{Fake: off}, "s", "gc-1", "claude", runtime.ProgramPointWaitIdlePreread, runtime.ProgramVerdictIdle)
+	if reads := methodCalls(off, "ProgramStatus") + methodCalls(off, "ProgramStatusShadowRead"); len(*offGot) != 0 || reads != 0 {
+		t.Fatalf("a leaf that is not shadowing recorded %+v after %d reads", *offGot, reads)
 	}
 }
 

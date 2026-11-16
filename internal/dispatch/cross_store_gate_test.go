@@ -1211,8 +1211,23 @@ func TestEveryControllerSubtreeCloseReadsAsAControllerClose(t *testing.T) {
 		}},
 		{"workflow finalizer, pass", finalize(false)},
 		{"workflow finalizer, canceled run", finalize(true)},
-		{"gc hook --claim skip of a done workflow (closes by gc.root_bead_id)", closeByRootWith(sourceworkflow.HookSkipDoneWorkflowCloseReason)},
-		{"order-tracking sweep of a stale order wisp subtree", closeByRootWith(sourceworkflow.StaleOrderWispCloseReason)},
+		{"gc hook --claim skip of a done workflow (closes by gc.root_bead_id)", closeByRootWith(map[string]string{
+			beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
+			"close_reason":              sourceworkflow.HookSkipDoneWorkflowCloseReason,
+		})},
+		{"gc hook --claim retirement of a workflow whose input was purged (closes by gc.root_bead_id)", closeByRootWith(map[string]string{
+			// cmd/gc's failPurgedWorkflow stamps this exact set (its
+			// failure_reason constant is unexported there); the close_reason
+			// is what the gate reads.
+			beadmeta.OutcomeMetadataKey:       beadmeta.OutcomeFail,
+			beadmeta.FailureClassMetadataKey:  beadmeta.FailureClassHard,
+			beadmeta.FailureReasonMetadataKey: "input_purged",
+			"close_reason":                    sourceworkflow.HookInputPurgedWorkflowCloseReason,
+		})},
+		{"order-tracking sweep of a stale order wisp subtree", closeByRootWith(map[string]string{
+			beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
+			"close_reason":              sourceworkflow.StaleOrderWispCloseReason,
+		})},
 		{"POST /runs/{id}/cancel", func(t *testing.T, store beads.Store, rootID string) {
 			if _, err := sourceworkflow.CloseWorkflowSubtreeAsExcept(beadstest.GraphMolecule(store), rootID, beadmeta.OutcomeCanceled,
 				sourceworkflow.RunCanceledCloseReason, map[string]string{beadmeta.CancelRequestedMetadataKey: "true"}, nil); err != nil {
@@ -1660,9 +1675,10 @@ func TestAnOpenGateThatClosesUnderItsClearingWriteIsSettledAsClosed(t *testing.T
 }
 
 // closeByRootWith closes every open bead carrying rootID as its root, and the
-// root, with reason — the shape of the cmd/gc closes that select by
-// gc.root_bead_id (gc hook --claim's skip, the stale order wisp sweep).
-func closeByRootWith(reason string) func(t *testing.T, store beads.Store, rootID string) {
+// root, stamping metadata — the shape of the cmd/gc closes that select by
+// gc.root_bead_id (gc hook --claim's skip and purge retirement, the stale
+// order wisp sweep).
+func closeByRootWith(metadata map[string]string) func(t *testing.T, store beads.Store, rootID string) {
 	return func(t *testing.T, store beads.Store, rootID string) {
 		t.Helper()
 		members, err := store.List(beads.ListQuery{Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: rootID}, TierMode: beads.TierBoth})
@@ -1675,10 +1691,7 @@ func closeByRootWith(reason string) func(t *testing.T, store beads.Store, rootID
 				ids = append(ids, m.ID)
 			}
 		}
-		if _, err := store.CloseAll(append(ids, rootID), map[string]string{
-			beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
-			"close_reason":              reason,
-		}); err != nil {
+		if _, err := store.CloseAll(append(ids, rootID), metadata); err != nil {
 			t.Fatal(err)
 		}
 	}

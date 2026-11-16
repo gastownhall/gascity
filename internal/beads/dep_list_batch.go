@@ -55,7 +55,7 @@ var ErrDepListBatchUnsupported = errors.New("batched dep-edge read unsupported b
 // walks the class layers itself rather than through As, because As answers
 // this capability by calling here; skipping a class guard is safe because the
 // batch is a class-neutral read (passesClassGate).
-func DepListBatchFor(store Store) (DependencyBatchLister, bool) {
+func DepListBatchFor(store StoreReader) (DependencyBatchLister, bool) {
 	batch, ok := physicalStore(store).(DependencyBatchLister)
 	return batch, ok
 }

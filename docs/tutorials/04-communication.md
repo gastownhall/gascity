@@ -44,7 +44,7 @@ Send mail to the mayor:
 ```shell
 ~/my-city
 $ gc mail send mayor -s "Review needed" -m "Please have the my-project reviewer review hello.py"
-Sent message mc-msg-8t8 to mayor
+Sent message gcg-9 to mayor
 ```
 
 Your message ID will differ. `gc mail send` takes the recipient as a positional
@@ -68,8 +68,8 @@ See the inbox:
 ```shell
 ~/my-city
 $ gc mail inbox mayor
-ID          FROM   SUBJECT        BODY
-mc-msg-8t8  human  Review needed  Please have the my-project reviewer review hello.py
+ID     FROM   SUBJECT        BODY
+gcg-9  human  Review needed  Please have the my-project reviewer review hello.py
 ```
 
 `gc mail inbox` lists only unread messages, so there's no STATE column —

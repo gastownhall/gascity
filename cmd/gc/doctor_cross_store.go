@@ -178,7 +178,7 @@ func (c *crossStoreGatesCheck) heldByUnreadableStores(graph beads.Store, gates [
 	for _, sc := range scopes {
 		legs = append(legs, crossStoreBlockerLeg{label: sc.label, store: sc.store})
 	}
-	read := crossStoreBlockerResolverOver(graph, legs, unread)
+	read := crossStoreBlockerResolverOver(legs, unread)
 	resolve := func(ids []string) (dispatch.CrossStoreBlockerResolution, error) {
 		resolved, err := read(ids)
 		if err != nil || len(skipped) == 0 {

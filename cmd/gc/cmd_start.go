@@ -1873,57 +1873,6 @@ func checkAgentImages(sp runtime.Provider, agents []config.Agent, _ io.Writer) e
 	return nil
 }
 
-// countRunningPoolInstances counts how many pool instances are currently
-// running for a given pool agent. For bounded pools, checks static names
-// (1..max). For unlimited pools, discovers via prefix matching.
-//
-// Uses ListRunning with the city prefix for a single batch call instead
-// of N individual IsRunning calls. For exec providers (K8s), this reduces
-// N subprocess spawns to 1.
-func countRunningPoolInstances(agentName, agentDir string, sp0 scaleParams, a *config.Agent, cityName, sessionTemplate string, sp runtime.Provider) int { //nolint:unparam // agentName varies in production use
-	isUnlimited := sp0.Max < 0
-	if isUnlimited {
-		// Unlimited: count by prefix matching.
-		instances := discoverPoolInstances(agentName, agentDir, sp0, a, cityName, sessionTemplate, sp)
-		count := 0
-		for _, qn := range instances {
-			sn := sessionName(nil, cityName, qn, sessionTemplate)
-			if running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, sn); err == nil && running {
-				count++
-			}
-		}
-		return count
-	}
-
-	// Bounded: build the set of expected pool runtime session names.
-	expected := make(map[string]bool, sp0.Max)
-	for _, qualifiedInstance := range discoverPoolInstances(agentName, agentDir, sp0, a, cityName, sessionTemplate, sp) {
-		expected[sessionName(nil, cityName, qualifiedInstance, sessionTemplate)] = true
-	}
-
-	// Single ListRunning call, then intersect with expected set.
-	// Per-city socket isolation: all sessions belong to this city.
-	running, err := sp.ListRunning("")
-	if err != nil {
-		// Fallback: individual IsRunning calls (original behavior).
-		count := 0
-		for sn := range expected {
-			if running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, sn); err == nil && running {
-				count++
-			}
-		}
-		return count
-	}
-
-	count := 0
-	for _, name := range running {
-		if expected[name] {
-			count++
-		}
-	}
-	return count
-}
-
 // buildFingerprintExtra builds the fpExtra map for an agent's fingerprint
 // from its config. Returns nil if no extra fields are present. Each key's
 // runtime.FingerprintExtraChangePolicy decides whether a change drains:

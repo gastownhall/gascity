@@ -1,4 +1,4 @@
-//go:build integration
+//go:build integration && unix
 
 package dolt_test
 
