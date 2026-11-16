@@ -46,22 +46,45 @@ func StartupHandbackItems(turn nudgequeue.Item, launchID, initialMessage, messag
 	return []nudgequeue.Item{turn, message}
 }
 
-// queueStartupNudgeHandbackLocked takes the startup nudge the runtime handed
-// back after a start of sessName that succeeded
+// startupTurn is the first turn a Start that succeeded handed back
 // (runtime.TakeStartupNudgeHandback): under program_status = "on", one its
 // program held back behind a dialog through the whole startup ladder, never
-// typed (design §10.2 row A20). It is queued as a user's submit for b's
-// session, bound to the launch that stands (StartupTurnLaunchID, startToken
-// the token the start minted), with the row's initial message split off
-// (StartupHandbackItems); the queue delivers it to that launch alone, before
-// the session's other items. A start takes its handback once, when it knows
-// which launch stands (after the stale-key check). A start that handed
-// nothing back queues nothing; a queueing failure is logged, since the start
-// itself succeeded. A queued nudge is recorded on ctx's startupNudgeRecorder,
-// if it carries one.
-func (m *Manager) queueStartupNudgeHandbackLocked(ctx context.Context, b beads.Bead, sessName, startToken string) {
+// typed (design §10.2 row A20). It is taken right after that Start, while
+// the slot is still that launch's, and bound then to the launch it came from
+// (StartupTurnLaunchID). ok is false when the Start handed nothing back.
+type startupTurn struct {
+	text, launchID string
+	ok             bool
+}
+
+// takeStartupTurn takes the first turn the Start of sessName that just
+// succeeded, under startToken, handed back, bound to its launch.
+func (m *Manager) takeStartupTurn(sessName, startToken string) startupTurn {
 	text, ok := runtime.TakeStartupNudgeHandback(m.sp, sessName)
 	if !ok {
+		return startupTurn{}
+	}
+	return startupTurn{text: text, launchID: StartupTurnLaunchID(m.sp, sessName, startToken), ok: true}
+}
+
+// settleStartupTurnLocked ends a start of sessName: turn, the first turn the
+// last Start that succeeded handed back, is queued (queueStartupTurnLocked)
+// whatever the start returns, since its launch may stand, and a claim drops
+// it as stale only once another launch runs; whatever a Start that failed
+// left in the runtime's slot is dropped, since no launch of its stands.
+func (m *Manager) settleStartupTurnLocked(ctx context.Context, b beads.Bead, sessName string, turn startupTurn) {
+	runtime.TakeStartupNudgeHandback(m.sp, sessName)
+	m.queueStartupTurnLocked(ctx, b, sessName, turn)
+}
+
+// queueStartupTurnLocked queues turn as a user's submit for b's session,
+// bound to its launch, with the row's initial message split off
+// (StartupHandbackItems); the queue delivers it to that launch alone, before
+// the session's other items. A turn not ok queues nothing; a queueing
+// failure is logged, since the start itself succeeded. A queued turn is
+// recorded on ctx's startupNudgeRecorder, if it carries one.
+func (m *Manager) queueStartupTurnLocked(ctx context.Context, b beads.Bead, sessName string, turn startupTurn) {
+	if !turn.ok {
 		return
 	}
 	now := time.Now().UTC()
@@ -69,8 +92,8 @@ func (m *Manager) queueStartupNudgeHandbackLocked(ctx context.Context, b beads.B
 	if err != nil {
 		log.Printf("session: %q: reading its initial message to split from the startup nudge: %v", sessName, err)
 	}
-	items := StartupHandbackItems(newDeferredSubmitItem(b, text, nudgequeue.SourceSubmit, now),
-		StartupTurnLaunchID(m.sp, sessName, startToken), overrides[InitialMessageOverrideKey], newDeferredSubmitID())
+	items := StartupHandbackItems(newDeferredSubmitItem(b, turn.text, nudgequeue.SourceSubmit, now),
+		turn.launchID, overrides[InitialMessageOverrideKey], newDeferredSubmitID())
 	queued, err := m.enqueueDeferredItemsLocked(b, sessName, items)
 	if err != nil {
 		log.Printf("session: %q: started, but queueing the startup nudge its program's dialog held back failed: %v", sessName, err)
@@ -78,13 +101,6 @@ func (m *Manager) queueStartupNudgeHandbackLocked(ctx context.Context, b beads.B
 	if rec, ok := ctx.Value(startupNudgeRecorderKey{}).(*startupNudgeRecorder); ok && queued {
 		rec.queued = true
 	}
-}
-
-// dropStartupNudgeHandback takes and drops the startup nudge a start of
-// sessName that ended with no launch standing may have left: no session
-// takes it.
-func (m *Manager) dropStartupNudgeHandback(sessName string) {
-	runtime.TakeStartupNudgeHandback(m.sp, sessName)
 }
 
 // startupNudgeRecorder records that a start made on behalf of a delivery

@@ -355,6 +355,9 @@ func (m *Manager) retainFailedResume(id, sessName string, env map[string]string,
 // the failed start's identity with no read: the legacy runtime-only start,
 // whose caller commits against the incarnation its PreWake minted, so a mint
 // under it would make its own commit stale (deleted with legacy at P6).
+// turn holds the first turn the start's last successful Start handed back:
+// a relaunch that starts replaces it with its own (takeStartupTurn), and
+// one that does not leaves it, since that launch may still stand.
 func (m *Manager) retryFreshStartAfterStaleKey(
 	ctx context.Context,
 	id string,
@@ -366,6 +369,7 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	unroute func(),
 	lease *RuntimeLease,
 	inc *Incarnation,
+	turn *startupTurn,
 ) (bool, error) {
 	if retainsCommittedConversation(infoFromPersistedBead(*b)) {
 		return false, m.retainFailedResume(id, sessName, cfg.Env, startErr, unroute)
@@ -507,6 +511,9 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	if inc != nil {
 		*inc = next
 	}
+	// The relaunch replaced the launch turn came from: its own first turn,
+	// if it handed one back, is the one that stands.
+	*turn = m.takeStartupTurn(sessName, cfg.Env[runtime.InstanceTokenEnv])
 	return true, nil
 }
 
@@ -891,10 +898,11 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 		return err
 	}
 	defer release()
-	// The first turn a launch handed back is queued once, when the start
-	// knows which launch stands (below); a start that ends with none
-	// standing leaves it here, dropped.
-	defer m.dropStartupNudgeHandback(sessName)
+	// The first turn the last Start that succeeded handed back, taken right
+	// after that Start and queued once the start ends, whatever it returns:
+	// its launch may stand (settleStartupTurnLocked).
+	var turn startupTurn
+	defer func() { m.settleStartupTurnLocked(ctx, b, sessName, turn) }()
 	if lease != nil {
 		var cancel context.CancelFunc
 		if ctx, cancel, err = lease.Watch(ctx, runtimeLeaseWatchEvery); err != nil {
@@ -995,7 +1003,7 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 			// it falls through to the plain failure below instead of the
 			// stale-key recovery.
 			case errors.Is(err, runtime.ErrSessionDiedDuringStartup) && !runtime.IsProviderCapacity(err):
-				retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, err, unroute, lease, inc)
+				retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, err, unroute, lease, inc, &turn)
 				if retryErr != nil {
 					return retryErr
 				}
@@ -1030,6 +1038,7 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 			}
 		} else {
 			started = true
+			turn = m.takeStartupTurn(sessName, minted.Fence().Token)
 		}
 		if started {
 			provisional = false // a process runs under inc
@@ -1048,24 +1057,18 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 			// sees the suspended-state bead, reads the runtime up, and
 			// persists "active" with the runtime's binding. The mint stands:
 			// the process launched carries it, and so does its first turn.
-			m.queueStartupNudgeHandbackLocked(ctx, b, sessName, incarnationToken(inc))
 			if unroute != nil {
 				unroute()
 			}
 			return err
 		}
 		if !m.sp.IsRunning(sessName) {
-			retried, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, nil, unroute, lease, inc)
+			retried, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, nil, unroute, lease, inc, &turn)
 			if err != nil {
 				return err
 			}
 			started = retried
 		}
-	}
-	// The launch that stands hands its first turn back once: a stale-key
-	// relaunch's replaced the dead resume's (each launch clears the last).
-	if started {
-		m.queueStartupNudgeHandbackLocked(ctx, b, sessName, incarnationToken(inc))
 	}
 	if b.Metadata["transport"] == "" && (started || transportVerified) {
 		m.persistTransport(id, b.Metadata["provider"], transport)
@@ -1220,7 +1223,8 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 	if !inc.recordedBy(b.Metadata) {
 		return fmt.Errorf("%w: session %s no longer records %s", ErrMintSuperseded, id, inc)
 	}
-	defer m.dropStartupNudgeHandback(sessName) // a start with no launch standing
+	var turn startupTurn // as in ensureRunningOn
+	defer func() { m.settleStartupTurnLocked(ctx, b, sessName, turn) }()
 
 	cfg := hints
 	cfg.Command = resumeCommand
@@ -1258,7 +1262,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 		// A capacity refusal says nothing about the resume key; it takes the
 		// plain failure path, not the stale-key recovery (see ensureRunning).
 		case errors.Is(err, runtime.ErrSessionDiedDuringStartup) && !runtime.IsProviderCapacity(err):
-			retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, err, unroute, nil, nil)
+			retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, err, unroute, nil, nil, &turn)
 			if retryErr != nil {
 				return retryErr
 			}
@@ -1281,37 +1285,22 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 		}
 	} else {
 		started = true
+		turn = m.takeStartupTurn(sessName, inc.Fence().Token)
 	}
 	if started && b.Metadata["session_key"] != "" {
 		if err := m.staleKeyDetectionWaiter(ctx, sessName); err != nil {
-			m.queueStartupNudgeHandbackLocked(ctx, b, sessName, inc.Fence().Token) // the launch stands
 			if unroute != nil {
 				unroute()
 			}
 			return err
 		}
 		if !m.sp.IsRunning(sessName) {
-			retried, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, nil, unroute, nil, nil)
-			if err != nil {
+			if _, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, nil, unroute, nil, nil, &turn); err != nil {
 				return err
 			}
-			started = retried
 		}
 	}
-	// As in ensureRunningOn, the launch that stands hands its first turn
-	// back once.
-	if started {
-		m.queueStartupNudgeHandbackLocked(ctx, b, sessName, inc.Fence().Token)
-	}
 	return nil
-}
-
-// incarnationToken is the instance token inc carries, or none for no inc.
-func incarnationToken(inc *Incarnation) string {
-	if inc == nil {
-		return ""
-	}
-	return inc.Fence().Token
 }
 
 // confirmLiveSessionState marks the row of a session found or brought live as

@@ -516,3 +516,108 @@ func TestRestartSendAndWaitIdleNudgeWaitBehindTheStartupTurn(t *testing.T) {
 		})
 	}
 }
+
+// blindAfterStartProvider is a handback leaf whose reads lose sight of a
+// runtime its Start brought up, as the tmux state cache does once it passes
+// its TTL: after the first Start, IsRunning reports nothing running and a
+// fresh liveness read cannot answer. The runtime stays up.
+type blindAfterStartProvider struct {
+	*handbackStartProvider
+	blind bool
+}
+
+func (p *blindAfterStartProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := p.handbackStartProvider.Start(ctx, name, cfg); err != nil {
+		return err
+	}
+	p.blind = true
+	return nil
+}
+
+func (p *blindAfterStartProvider) IsRunning(name string) bool {
+	return !p.blind && p.Fake.IsRunning(name)
+}
+
+func (p *blindAfterStartProvider) ObserveLivenessSince(name string, processNames []string, _ time.Time) (runtime.Liveness, error) {
+	if p.blind {
+		return runtime.Liveness{}, runtime.ErrRuntimeUnavailable
+	}
+	return runtime.ObserveLivenessWithError(p.Fake, name, processNames)
+}
+
+// Kills a start that drops the first turn of a launch that may still stand
+// when it returns an error after its Start succeeded: the turn is queued,
+// bound to that launch, and a claim drops it only once another launch runs.
+func TestAStartThatFailsAfterItsLaunchQueuesTheTurn(t *testing.T) {
+	t.Run("stale-key recovery that cannot read the runtime", func(t *testing.T) {
+		stubSubmitPoller(t)
+		sp := &blindAfterStartProvider{handbackStartProvider: &handbackStartProvider{Fake: runtime.NewFake()}}
+		mgr := newTestManager(t, beads.NewMemStore(), sp, WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter))
+		hints := runtime.Config{WorkDir: t.TempDir()}
+		info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "worker", Command: "claude", WorkDir: hints.WorkDir, Provider: "claude", Resume: ProviderResume{ResumeFlag: "--resume", SessionIDFlag: "--session-id"}, Hints: hints, ExtraMeta: map[string]string{"session_origin": "manual"}})
+		if err != nil {
+			t.Fatalf("CreateSession: %v", err)
+		}
+		if err := mgr.Suspend(context.Background(), testActor(mgr, ActorOperator), info.ID, false); err != nil {
+			t.Fatalf("Suspend: %v", err)
+		}
+		for _, it := range queuedHandbacks(t, mgr, info.ID) {
+			t.Fatalf("queued %+v before the resume", it)
+		}
+		sp.blind, sp.nudge = false, handbackStartNudge
+		err = mgr.Start(context.Background(), testActor(mgr, ActorOperator), info.ID, "claude --resume "+info.SessionKey, hints)
+		if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			t.Fatalf("Start = %v; want the recovery's unanswerable read", err)
+		}
+		if !sp.Fake.IsRunning(info.SessionName) {
+			t.Fatal("the resume's runtime is gone; want it still up")
+		}
+		wantOneStartupTurn(t, mgr, info.ID, liveToken(t, sp.Fake, info.SessionName))
+	})
+	t.Run("runtime-only stale-key relaunch refused by the launch that stands", func(t *testing.T) {
+		stubSubmitPoller(t)
+		store := openLeaseStore(t, t.TempDir())
+		b := mintRow(t, store, "session_key", "key-1", "resume_flag", "--resume")
+		sp := &blindAfterStartProvider{handbackStartProvider: &handbackStartProvider{Fake: runtime.NewFake(), nudge: handbackStartNudge}}
+		mgr := newTestManager(t, store, sp, WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter))
+		err := startRuntimeOnly(t, mgr, b.ID, "claude --resume key-1", runtime.Config{})
+		if !errors.Is(err, runtime.ErrSessionExists) {
+			t.Fatalf("StartRuntimeOnly = %v; want the relaunch refused by the runtime up", err)
+		}
+		wantOneStartupTurn(t, mgr, b.ID, liveToken(t, sp.Fake, "s-mint"))
+	})
+}
+
+// remintingHandbackProvider is a handback leaf under which another start
+// re-mints the created row right after the Start: the create's confirm finds
+// the row no longer records its incarnation.
+type remintingHandbackProvider struct {
+	*handbackStartProvider
+	store beads.Store
+}
+
+func (p *remintingHandbackProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := p.handbackStartProvider.Start(ctx, name, cfg); err != nil {
+		return err
+	}
+	return p.store.SetMetadataBatch(cfg.Env["GC_SESSION_ID"], map[string]string{"instance_token": "tok-newer"})
+}
+
+// Kills a create that drops the first turn of a runtime it leaves running
+// for the row's newer owner: a confirm refused as superseded queues the
+// turn, bound to the launch that stands.
+func TestACreateWhoseRowWasReMintedQueuesTheTurn(t *testing.T) {
+	stubSubmitPoller(t)
+	store := openLeaseStore(t, t.TempDir())
+	sp := &remintingHandbackProvider{handbackStartProvider: &handbackStartProvider{Fake: runtime.NewFake(), nudge: handbackStartNudge}, store: store}
+	mgr := newTestManager(t, store, sp)
+	_, err := mgr.CreateSession(context.Background(), CreateOptions{ExplicitName: "named-worker", Template: "helper", Command: "claude", WorkDir: "/tmp", Provider: "claude"})
+	if !errors.Is(err, ErrMintSuperseded) {
+		t.Fatalf("CreateSession over a re-minted row = %v, want ErrMintSuperseded", err)
+	}
+	all, err := store.List(beads.ListQuery{Type: BeadType})
+	if err != nil || len(all) != 1 {
+		t.Fatalf("rows %v (%v), want the created row", all, err)
+	}
+	wantOneStartupTurn(t, mgr, all[0].ID, liveToken(t, sp.Fake, "named-worker"))
+}

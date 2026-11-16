@@ -1245,11 +1245,14 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			}
 			return fmt.Errorf("starting session: %w", err)
 		}
+		turn := m.takeStartupTurn(sessName, inc.Fence().Token)
 		if metaErr := m.confirmStartedRuntimeMetadata(inc, sessName, &b); metaErr != nil {
-			m.dropStartupNudgeHandback(sessName) // the create is undone, or another owns the runtime
 			if errors.Is(metaErr, ErrMintSuperseded) {
 				// The row records a newer incarnation: the runtime is its
-				// owner's to keep or reap, never stopped by name here.
+				// owner's to keep or reap, never stopped by name here. Its
+				// launch stands, so its first turn is queued: a claim drops
+				// it once another launch runs.
+				m.queueStartupTurnLocked(ctx, b, sessName, turn)
 				return metaErr
 			}
 			if stopErr := m.sp.Stop(sessName); stopErr != nil {
@@ -1260,7 +1263,7 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			}
 			return metaErr
 		}
-		m.queueStartupNudgeHandbackLocked(ctx, b, sessName, inc.Fence().Token)
+		m.queueStartupTurnLocked(ctx, b, sessName, turn)
 
 		info = m.infoFromBead(b)
 		return nil
