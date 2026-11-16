@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -24,7 +25,11 @@ func wispQueryArg(t *testing.T, calls [][]string) string {
 }
 
 func recordingEmptyRunner(calls *[][]string) beads.CommandRunner {
+	// TierBoth runs bd query and bd list concurrently.
+	var mu sync.Mutex
 	return func(_, _ string, args ...string) ([]byte, error) {
+		mu.Lock()
+		defer mu.Unlock()
 		*calls = append(*calls, append([]string(nil), args...))
 		return []byte(`[]`), nil
 	}
