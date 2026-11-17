@@ -133,6 +133,7 @@ var (
 	controllerStatusStandaloneFallbackTimeout = 250 * time.Millisecond
 	statusObservationTimeout                  = 750 * time.Millisecond
 	statusSessionSnapshotTimeout              = 3 * time.Second
+	statusOrderHealthTimeout                  = 3 * time.Second
 )
 
 // newStatusCmd creates the "gc status [path]" command.

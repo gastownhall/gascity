@@ -80,6 +80,23 @@ func findCityStatusOrder(t *testing.T, orders []cityStatusOrder, name string) ci
 	return cityStatusOrder{}
 }
 
+// collectCityStatusTextSnapshot collects a snapshot the way the text route
+// does: it starts the Orders leg, collects, and joins the leg into
+// snapshot.Orders.
+func collectCityStatusTextSnapshot(sp runtime.Provider, cfg *config.City, cityPath string, store beads.Store, statusSnapshot *sessionBeadSnapshot, stderr io.Writer) cityStatusSnapshot {
+	join := startCityStatusOrders(cfg, cityPath, stderr)
+	snapshot := collectCityStatusSnapshotFromStoreSnapshot(sp, cfg, cityPath, store, statusSnapshot, stderr)
+	snapshot.Orders = join()
+	return snapshot
+}
+
+// collectCityStatusSnapshotWithOrders collects a snapshot the way the text
+// route does: the Orders leg runs and is joined. The shared collector alone
+// does not run it (gc status --json must not pay for it).
+func collectCityStatusSnapshotWithOrders(sp runtime.Provider, cfg *config.City, cityPath string, store beads.Store, stderr io.Writer) cityStatusSnapshot {
+	return collectCityStatusTextSnapshot(sp, cfg, cityPath, store, loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr), stderr)
+}
+
 // TestCityStatusOrdersEmptyOnHealthyCity pins the zero-config happy path:
 // gc status must stay byte-for-byte unchanged (no "Orders:" section, empty
 // Orders slice) when nothing is overdue, failing, or gate-suppressed. Every
@@ -96,7 +113,7 @@ func TestCityStatusOrdersEmptyOnHealthyCity(t *testing.T) {
 	sp := runtime.NewFake()
 	store := beads.NewMemStore()
 	var stderr bytes.Buffer
-	snapshot := collectCityStatusSnapshot(sp, cfg, cityPath, store, &stderr)
+	snapshot := collectCityStatusSnapshotWithOrders(sp, cfg, cityPath, store, &stderr)
 
 	if len(snapshot.Orders) != 0 {
 		t.Fatalf("Orders = %+v, want empty on a healthy city", snapshot.Orders)
@@ -133,7 +150,7 @@ func TestCityStatusOrdersSurfacesStaleFiring(t *testing.T) {
 	sp := runtime.NewFake()
 	store := beads.NewMemStore()
 	var stderr bytes.Buffer
-	snapshot := collectCityStatusSnapshot(sp, cfg, cityPath, store, &stderr)
+	snapshot := collectCityStatusSnapshotWithOrders(sp, cfg, cityPath, store, &stderr)
 
 	order := findCityStatusOrder(t, snapshot.Orders, wantResult.Name)
 	if order.Status != wantResult.Status {
@@ -147,14 +164,18 @@ func TestCityStatusOrdersSurfacesStaleFiring(t *testing.T) {
 	}
 
 	// The check's Message names no order ("scheduled orders are stale"), so
-	// the row is only actionable if it carries the check's own per-order
-	// Details through. Without them an operator has to run gc doctor to learn
+	// the row is only actionable if it carries the check's typed per-order
+	// findings through. Without them an operator has to run gc doctor to learn
 	// which order is stale, which is the thing this bead exists to avoid.
-	if len(order.Details) == 0 {
-		t.Fatalf("Orders[%s].Details is empty, want doctor's per-order breakdown %v", wantResult.Name, wantResult.Details)
+	wantFindings, ok := doctor.OrderFindings(wantResult)
+	if !ok || len(wantFindings) == 0 {
+		t.Fatalf("fixture sanity: doctor result carries findings %v ok=%v, want the stale order", wantFindings, ok)
 	}
-	if !slices.Equal(order.Details, wantResult.Details) {
-		t.Fatalf("Orders[%s].Details = %v, want %v (carried through verbatim from gc doctor)", wantResult.Name, order.Details, wantResult.Details)
+	if len(order.Findings) == 0 {
+		t.Fatalf("Orders[%s].Findings is empty, want doctor's findings %v", wantResult.Name, wantFindings)
+	}
+	if !slices.Equal(order.Findings, wantFindings) {
+		t.Fatalf("Orders[%s].Findings = %v, want %v (carried through verbatim from gc doctor)", wantResult.Name, order.Findings, wantFindings)
 	}
 
 	var stdout bytes.Buffer
@@ -197,7 +218,7 @@ func TestCityStatusOrdersSurfacesRepeatedFailures(t *testing.T) {
 	sp := runtime.NewFake()
 	store := beads.NewMemStore()
 	var stderr bytes.Buffer
-	snapshot := collectCityStatusSnapshot(sp, cfg, cityPath, store, &stderr)
+	snapshot := collectCityStatusSnapshotWithOrders(sp, cfg, cityPath, store, &stderr)
 
 	order := findCityStatusOrder(t, snapshot.Orders, wantResult.Name)
 	if order.Message != wantResult.Message {
@@ -244,7 +265,7 @@ func TestCityStatusOrdersSurfacesGateSuppression(t *testing.T) {
 	sp := runtime.NewFake()
 	store := beads.NewMemStore()
 	var stderr bytes.Buffer
-	snapshot := collectCityStatusSnapshot(sp, cfg, cityPath, store, &stderr)
+	snapshot := collectCityStatusSnapshotWithOrders(sp, cfg, cityPath, store, &stderr)
 
 	order := findCityStatusOrder(t, snapshot.Orders, "watched-order")
 	if order.Consecutive != 12 {
@@ -353,7 +374,7 @@ name = "test-city"
 
 	sp := runtime.NewFake()
 	var stderr bytes.Buffer
-	snapshot := collectCityStatusSnapshot(sp, cfg, cityPath, store, &stderr)
+	snapshot := collectCityStatusSnapshotWithOrders(sp, cfg, cityPath, store, &stderr)
 
 	// collectCityStatusOrders drops StatusOK results entirely (see the
 	// "continue" above), so the healthy-per-doctor check must produce no
@@ -409,7 +430,7 @@ func TestCityStatusOrdersIgnoresStaleGateSuppression(t *testing.T) {
 	sp := runtime.NewFake()
 	store := beads.NewMemStore()
 	var stderr bytes.Buffer
-	snapshot := collectCityStatusSnapshot(sp, cfg, cityPath, store, &stderr)
+	snapshot := collectCityStatusSnapshotWithOrders(sp, cfg, cityPath, store, &stderr)
 
 	for _, o := range snapshot.Orders {
 		if o.Name == "long-recovered-order" {
@@ -461,7 +482,7 @@ func TestCityStatusOrdersDedupesRepeatedGateSuppression(t *testing.T) {
 	sp := runtime.NewFake()
 	store := beads.NewMemStore()
 	var stderr bytes.Buffer
-	snapshot := collectCityStatusSnapshot(sp, cfg, cityPath, store, &stderr)
+	snapshot := collectCityStatusSnapshotWithOrders(sp, cfg, cityPath, store, &stderr)
 
 	var rows int
 	for _, o := range snapshot.Orders {
@@ -488,24 +509,5 @@ func TestCityStatusOrdersDedupesRepeatedGateSuppression(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "260") {
 		t.Fatalf("stdout = %q, want the newest consecutive-suppression count", stdout.String())
-	}
-}
-
-// appendToFile appends content to an existing file, used where
-// writeCityStatusOrderTOML's fixed [order] shape doesn't cover a field
-// (here, cron's "schedule" vs. cooldown's "interval").
-func appendToFile(t *testing.T, path, content string) {
-	t.Helper()
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
-	if err != nil {
-		t.Fatalf("open %s for append: %v", path, err)
-	}
-	defer func() {
-		if err := f.Close(); err != nil {
-			t.Fatalf("close %s: %v", path, err)
-		}
-	}()
-	if _, err := f.WriteString(content); err != nil {
-		t.Fatalf("append to %s: %v", path, err)
 	}
 }

@@ -116,6 +116,7 @@ type cityStatusOrder struct {
 	// it at cityStatusOrderDetailLimit. Empty for suppression rows, whose
 	// Name is already the order name.
 	Details         []string
+	Findings        []doctor.OrderFinding
 	Consecutive     int
 	FirstSuppressed string
 }
@@ -188,6 +189,17 @@ func buildCityStoreHealth(cityPath string, store beads.Store, stderr io.Writer) 
 
 func collectCityStatusSnapshot(sp runtime.Provider, cfg *config.City, cityPath string, store beads.Store, stderr io.Writer) cityStatusSnapshot {
 	return collectCityStatusSnapshotFromStoreSnapshot(sp, cfg, cityPath, store, loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr), stderr)
+}
+
+// newStatusOrderChecks builds the checks the text route's Orders leg runs.
+// RED stub: the real constructor lands with the implementation.
+var newStatusOrderChecks = func(*config.City, string, io.Writer) []doctor.Check { return nil }
+
+// startCityStatusOrders starts the text route's Orders leg and returns the
+// join that yields its rows.
+// RED stub: the real leg lands with the implementation.
+func startCityStatusOrders(*config.City, string, io.Writer) func() []cityStatusOrder {
+	return func() []cityStatusOrder { return nil }
 }
 
 func collectCityStatusSnapshotFromStoreSnapshot(
