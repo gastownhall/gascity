@@ -11,16 +11,18 @@ import (
 
 // countFingerprintCases answers the reaper's stale-wisp and mail-wisp counts
 // from the environment, per scope: the api rig's database is apidb, every
-// other scope is the city's. The api arm comes first because the stale-wisp
-// query of every scope has the same shape.
+// other scope is the city's. Only the plain COUNT query is answered, so the
+// recursive subtree query keeps its empty default and adds no anomaly. The
+// api arm comes first because the stale-wisp query of every scope has the same
+// shape.
 const countFingerprintCases = `
-  *"apidb"*"wisps"*"issue_type NOT IN ('message')"*"created_at <"*)
+  *"SELECT COUNT(*) FROM "*"apidb"*"wisps"*"issue_type NOT IN ('message')"*"created_at <"*)
     printf 'COUNT(*)\n%s\n' "${API_STALE_WISPS:-0}"
     ;;
-  *"wisps"*"issue_type NOT IN ('message')"*"created_at <"*)
+  *"SELECT COUNT(*) FROM "*"wisps"*"issue_type NOT IN ('message')"*"created_at <"*)
     printf 'COUNT(*)\n%s\n' "${CITY_STALE_WISPS:-0}"
     ;;
-  *"wisps"*"issue_type = 'message'"*)
+  *"SELECT COUNT(*) FROM "*"wisps"*"issue_type = 'message'"*)
     printf 'COUNT(*)\n%s\n' "${CITY_MAIL_WISPS:-0}"
     ;;`
 
