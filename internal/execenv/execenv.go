@@ -1,5 +1,20 @@
 // Package execenv centralizes environment filtering, log redaction and the
 // Windows batch-file argument check for subprocess boundaries.
+//
+// # Process environment views
+//
+// The process environment has two views. While no projection window is open it
+// is os.Environ(). While one is open, the open has rewritten the environment
+// os.Environ() reports (it withholds some variables and projects others for the
+// linked beads library to read), so the view every other reader gets is the
+// snapshot taken as the window opened. Readers never wait: the window is
+// entered with a context and is the only thing that can block, and only another
+// window entry.
+//
+// The sequence counter orders the two views. It is odd while a window is open
+// and even otherwise. A reader that finds it even reads os.Environ() and keeps
+// the result only if the counter did not move meanwhile; otherwise it retries
+// and finds the window's snapshot. EnterProjectionWindow opens a window.
 package execenv
 
 import (
