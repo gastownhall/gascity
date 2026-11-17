@@ -192,6 +192,13 @@ returns `[]` so a session exits cleanly, while the count form propagates
 the failure to `evaluatePool`, which records telemetry and falls back to
 the pool minimum.
 
+This parity is enforced for the generated queries only
+(`TestPoolDemandPredicateSharedWithWorkQuery`,
+`TestPoolDemandAndWorkQueryAgreeOnRoutedSemantics`). A raw `work_query`
+bypasses it by construction: the controller never runs a custom query, so
+keeping route and query aligned is the pack's job (the actual pack's
+`check-routing-invariant` doctor check is one example).
+
 Diverging the two — for example, by adding a state filter to the
 work-query without updating the count form — re-introduces the
 protocol-mismatch class. Pre-PR #1516 symptom: the reconciler counted
@@ -279,7 +286,10 @@ regressions.
     lives outside the shared primary pool-demand predicate. Enforced by
     `TestPoolDemandPredicateSharedWithWorkQuery` and
     `TestPoolDemandAndWorkQueryAgreeOnRoutedSemantics` in
-    `internal/config/config_test.go`. Historical context: PR #1516
+    `internal/config/config_test.go` for the generated queries only; a raw
+    `work_query` bypasses the pinned parity by construction, and keeping route
+    and query aligned is the pack's job (the actual pack's
+    `check-routing-invariant` doctor check). Historical context: PR #1516
     removed the old molecule-counting tier from the count form; a later
     gc-udx change added `--exclude-type=epic` to the worker path; this
     refactor adds that filter to the default count form and makes the

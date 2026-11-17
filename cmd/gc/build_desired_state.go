@@ -1386,9 +1386,11 @@ func buildDemandTargets(
 			// but explicit scale_check/min demand for the backing template still
 			// creates ephemeral capacity through the pool pipeline. The default
 			// routed-work probes treat gc.routed_to=<template> as generic pool
-			// demand. Named sessions wake only from direct Assignee=<identity>
-			// work below; defaultNamedScaleTargets only preserves partial-query
-			// retention for configured named-session beads.
+			// demand. A named session also wakes from direct Assignee=<identity>
+			// work below, and an on_demand named singleton is additionally woken
+			// by the default routed probe (gc.routed_to) added below; always mode
+			// skips pool demand. defaultNamedScaleTargets only preserves
+			// partial-query retention for configured named-session beads.
 			poolDir := agentCommandDir(cityPath, &cfg.Agents[i], cfg.Rigs)
 			if store != nil && !hasCustomScaleCheck {
 				ownTarget := ownScaleCheckTarget(cityPath, cfg, &cfg.Agents[i], store, rigStores, controlBinding, storeScopedControlDispatcher)
