@@ -136,18 +136,22 @@ var cacheOmittedCapabilities = map[string]func(beads.Store) bool{
 	"CreateWithForeignIDBatch": nil,
 	// The reverse migration's created form (S5-G), engine-only: the reverse
 	// opens the store it copies into itself.
-	"CreatedForm":          nil,
-	"AcceptsDanglingDep":   nil,
-	"DepAddBatch":          nil,
-	"DepMetadataBatch":     nil,
-	"DepRemoveBatch":       nil,
-	"DepAddWithMetadata":   nil,
-	"HasResidentOutside":   nil,
-	"SequenceFloor":        nil,
-	"SetSequenceFloor":     nil,
-	"AdvanceSequenceFloor": nil,
-	"StoreHealthPath":      nil,
-	"ReadOnly":             nil,
+	"CreatedForm":        nil,
+	"AcceptsDanglingDep": nil,
+	"DepAddBatch":        nil,
+	"DepMetadataBatch":   nil,
+	"DepRemoveBatch":     nil,
+	"DepAddWithMetadata": nil,
+	"HasResidentOutside": nil,
+	// The census's discovery handle, engine-only with the census itself: the
+	// boot census reads the bare engines before the cache exists
+	// (censusBindingRelics), and the verdict is looked up under the cache.
+	"NamespaceCensusHandle": nil,
+	"SequenceFloor":         nil,
+	"SetSequenceFloor":      nil,
+	"AdvanceSequenceFloor":  nil,
+	"StoreHealthPath":       nil,
+	"ReadOnly":              nil,
 	// (DepListBatch is carried, not omitted: a cached bd store paid one
 	// `bd dep list` per member of every close order behind a failed
 	// assertion. The cache answers the anchors it holds from memory as
