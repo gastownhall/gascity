@@ -3872,6 +3872,12 @@ type Agent struct {
 	//   3. ready unassigned work with gc.routed_to=<qualified-name>
 	// When the controller probes for demand without session context, only the
 	// routed_to tier applies. Override to integrate with external task systems.
+	// Overriding work_query hands demand/serve agreement for this agent to the
+	// pack. The controller never runs a custom query. For an on_demand named
+	// session it still counts open, unassigned, unheld routed rows
+	// (gc.routed_to) as demand and wakes the seat for them whether or not the
+	// query returns them, so a seat whose query can omit a routed row wakes
+	// without work and idles out.
 	// A custom query that looks up assigned work should read $GC_ALIAS: under
 	// gc hook --claim, a single-slot pool session the supervisor collapsed onto
 	// the agent's canonical [[named_session]] identity runs the query with
