@@ -728,7 +728,8 @@ func (s *emittingClassStore) HasResidentOutside(prefixes []string) (bool, error)
 // wrapper, exactly as AtomicConditionalCloserHandle does above and for the same
 // reason: the reflective capability guard forces HasResidentOutside to EXIST
 // for every engine, so a bare type assertion would advertise a census over a
-// backing — a mem store, the native Dolt engine — that has none. The census
+// backing — a mem store, a native Dolt engine whose handle exports no pool —
+// that has none. The census
 // contract makes that a hard gate rather than a rollout seam, because a store
 // that answers the question inexactly strands every bead it failed to see.
 //

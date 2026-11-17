@@ -617,8 +617,8 @@ var bindingEngineTypes = []reflect.Type{
 //
 // Dropping the method costs a scan that returns the same verdict. Carrying it
 // as a plain forward makes a bare assertion succeed over a backing that has no
-// census — the mem store here, the native Dolt engine in production — and the
-// caller then retires the binding's by-id probe on an answer nobody computed,
+// census — the mem store here, a native Dolt engine with no pool to ask in
+// production — and the caller then retires the binding's by-id probe on an answer nobody computed,
 // stranding every bead the class migration carried across under its original
 // id. Both halves are pinned: discovery must refuse a backing that cannot
 // answer, and it must find one that can and agree with the scan.
@@ -1750,7 +1750,6 @@ func TestEmittingClassStoreOverClaimsArePinnedPerEngine(t *testing.T) {
 			// DepMetadataAbsentByProtocol forwards the engine's declaration, and
 			// neither engine declares one: ("", false), as its absence answers.
 			"DepMetadataAbsentByProtocol",
-			"HasResidentOutside", "NamespaceCensusHandle",
 			// ReadyBlockedByAbsent over native Dolt reports no rows, and
 			// StrandsAbsentTargets answers false, so ReadyBlockedByAbsentFor
 			// finds no listing, as over the bare engine: bd never strands a
