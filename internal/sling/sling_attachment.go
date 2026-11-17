@@ -947,6 +947,9 @@ func checkReadBeadState(q BeadQuerier, b beads.Bead, beadID string, a config.Age
 				Warnings:  []string{fmt.Sprintf("warning: bead %s was assigned to %q but routed to %q; re-routing", beadID, target, routedTo)},
 			}
 		}
+		// Any other bead is refused when a third party holds its route; an
+		// assignee that is already the target is not taking the bead from anyone,
+		// so it is re-routed above instead.
 		return BeadCheckResult{Warnings: routedStateWarnings(b, beadID), Conflict: routedConflict(b, beadID, deps.CallerIdentity)}
 	}
 
