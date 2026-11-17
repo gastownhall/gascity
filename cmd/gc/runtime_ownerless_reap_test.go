@@ -650,6 +650,37 @@ func TestOwnerlessDoctorCheckSkipsASuspendedRig(t *testing.T) {
 	}
 }
 
+// TestOwnerlessDoctorCheckSkipsANotRunningRig: a rig whose stopped store
+// the gate will not start does not abort the scan either. A runtime whose
+// owner no read store holds is unprovable, naming the rig not checked, never
+// reapable; and the stopped rig's store is never opened.
+func TestOwnerlessDoctorCheckSkipsANotRunningRig(t *testing.T) {
+	c, cfg, open, opened := ownerlessSuspendedRigCase(t, false)
+	dormantPath := cfg.Rigs[1].Path
+	oldNotRunning, oldIdle := doctorProxiedStoreNotRunning, doctorProxiedStoreRetiresWhenIdle
+	t.Cleanup(func() { doctorProxiedStoreNotRunning, doctorProxiedStoreRetiresWhenIdle = oldNotRunning, oldIdle })
+	doctorProxiedStoreNotRunning = func(p string) bool { return p == dormantPath }
+	// A never-idle store with no proxy stays stopped even under a running city.
+	doctorProxiedStoreRetiresWhenIdle = func(string) bool { return false }
+	res := newOwnerlessRuntimesCheck(cfg, c.city, open, c.sp, nil).Run(nil)
+	got := strings.Join(res.Details, "\n")
+	if res.Status != doctor.StatusWarning || strings.Contains(res.Message, "skipping the ownerless-runtime scan") {
+		t.Fatalf("result %+v, want the scan run, not skipped", res)
+	}
+	if !strings.Contains(res.Message, "(rig dormant not checked: store not running)") {
+		t.Errorf("message %q, want it to name the rig not checked", res.Message)
+	}
+	if len(res.Details) != 1 || !strings.Contains(got, "named-1: session bead gc-gone") || !strings.Contains(got, "unprovable (rig dormant not checked: store not running)") {
+		t.Errorf("findings %q, want named-1 unprovable with rig dormant not checked", got)
+	}
+	if strings.Contains(got, "reaps it") {
+		t.Errorf("findings %q call an unprovable runtime reapable", got)
+	}
+	if *opened != 0 {
+		t.Errorf("opened the stopped rig's store %d time(s), want it left cold", *opened)
+	}
+}
+
 // TestOwnerlessDoctorCheckWithNoSkippedRig: with every rig read, a runtime
 // whose owner no store holds is ownerless as before.
 func TestOwnerlessDoctorCheckWithNoSkippedRig(t *testing.T) {
