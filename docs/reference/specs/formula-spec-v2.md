@@ -724,7 +724,7 @@ iteration while budget remains, and exhaustion closes the step as failed.
 
 | Key | Purpose |
 |---|---|
-| `max_attempts` | Total run/check attempts including the first (≥ 1) |
+| `max_attempts` | Total run/check attempts including the first (≥ 1); an integer, or a `"{{name}}"` var placeholder resolved at compile time |
 | `check.mode` | Checker implementation; only `"exec"` is supported |
 | `check.path` | Repo-relative or absolute script path to execute |
 | `check.timeout` | Script execution bound (e.g. `"2m"`); takes precedence over the step's `timeout` |
@@ -747,6 +747,17 @@ mode = "exec"
 path = "scripts/verify.sh"
 timeout = "2m"
 ```
+
+`max_attempts` may instead name a formula var, written as a single
+`"{{name}}"` placeholder (`max_attempts = "{{attempts}}"`). The compiler
+substitutes the var's value (the caller's `--var`, else the declared default)
+before materialization, so the control bead and spec sidecar carry a literal
+count. In an expansion template the var resolves against the expansion's vars
+(its defaults and the rule's or step's overrides) before the invoking
+formula's; when one expansion invokes another, the outer expansion's vars come
+before the root formula's. The value must be an integer ≥ 1; a missing,
+non-integer, or smaller value fails compilation, unless the step's `condition`
+(section 1.5) excludes the check. Any other string is a parse error.
 
 Materialization: the compiler emits a spec sidecar (`<step>.spec`, kind
 `spec`, carrying the serialized step definition), the first iteration
@@ -829,9 +840,13 @@ runs it, so there is no exit status to read. The step stays open rather than
 failing: the fix is out of band (ship the script, `chmod +x` it), and closing
 the step would release the steps that need it. The orchestrator re-checks the
 step every sweep; once the script can run, the step resumes and spends attempts
-normally. If the script is still unlaunchable when the stall budget elapses (15
-minutes by default), the orchestrator emits a single `control.stalled` event
-with `error_class = "pending"` and keeps waiting. It records no `order.failed`.
+normally. On the first sweep that cannot launch the script, the orchestrator
+emits a `control.check_unlaunchable` event naming the step's bead, its
+`check.path`, and the reason. It emits the event again only when the reason
+changes, such as a missing script that ships without its execute bit. If the
+script is still unlaunchable when the stall budget elapses (15 minutes by
+default), the orchestrator emits a single `control.stalled` event with
+`error_class = "pending"` and keeps waiting. It records no `order.failed`.
 A script that is missing because the step's working directory was removed, and
 that exists nowhere else, is held open the same way. Restoring the directory
 heals it; shipping a copy under the city or store root does not. The script

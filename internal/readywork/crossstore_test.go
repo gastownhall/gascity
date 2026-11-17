@@ -10,6 +10,7 @@ package readywork
 
 import (
 	"context"
+	"math/rand"
 	"slices"
 	"sort"
 	"strings"
@@ -1069,5 +1070,130 @@ func TestInProgressJudgesTheServingLegsCopyAgainstEveryOtherCopy(t *testing.T) {
 	}
 	if got := cut[0].BlockedBy; len(got) != 1 || got[0].Status != "closed" {
 		t.Fatalf("blocked_by = %+v, want %s closed in every copy", got, relic.ID)
+	}
+}
+
+// strandsNothing hides a store's absent-blocker listing, as a wrapper over
+// bd/Dolt does.
+type strandsNothing struct{ beads.Store }
+
+// TestOwnVerdictStandsExactlyWhereTheGateKeepsTheBindingsVerdict pins
+// OwnVerdictStands to the gate it stands in for (ga-ylpbsy.67): a class
+// binding's row keeps the binding's own ready verdict exactly when every
+// blocking edge names a target in the binding's reserved namespace that the
+// verdict judged. Kills: a foreign, external:, capability or unjudged target
+// read as the binding's own, which would serve a row the gate holds, and an
+// in-namespace, self or non-blocking edge read as foreign, which would leave a
+// row the binding settles waiting on the federation.
+func TestOwnVerdictStandsExactlyWhereTheGateKeepsTheBindingsVerdict(t *testing.T) {
+	binding := sqliteBinding(t)
+	legs := splitLegs(beads.NewMemStore(), binding)
+	graph := legs[1]
+	held := func(ids ...string) func(string) bool {
+		return func(id string) bool { return slices.Contains(ids, id) }
+	}
+	dep := func(to, depType string) beads.Dep {
+		return beads.Dep{IssueID: "gcg-1", DependsOnID: to, Type: depType}
+	}
+	for _, tc := range []struct {
+		name string
+		leg  Leg
+		deps []beads.Dep
+		held func(string) bool
+		want bool
+	}{
+		{"no edges", graph, nil, held(), true},
+		{"in-namespace target the verdict judged", graph, []beads.Dep{dep("gcg-2", "blocks")}, held("gcg-2"), true},
+		{"in-namespace waits-for and conditional-blocks", graph, []beads.Dep{dep("gcg-2", "waits-for"), dep("gcg-3", "conditional-blocks")}, held("gcg-2", "gcg-3"), true},
+		{"the store's own verdict, which judged every target", graph, []beads.Dep{dep("gcg-2", "blocks")}, nil, true},
+		{"self edge", graph, []beads.Dep{dep("gcg-1", "blocks")}, held(), true},
+		{"non-blocking edges to foreign targets", graph, []beads.Dep{dep("gc-1", "parent-child"), dep("gc-2", "relates-to")}, held(), true},
+		{"in-namespace target the verdict did not judge", graph, []beads.Dep{dep("gcg-2", "blocks")}, held(), false},
+		{"foreign target", graph, []beads.Dep{dep("gc-1", "blocks")}, held("gc-1"), false},
+		{"external: ref to an in-namespace bead", graph, []beads.Dep{dep("external:gcg-2", "blocks")}, held("gcg-2"), false},
+		{"capability ref", graph, []beads.Dep{dep("external:rig:capability", "blocks")}, held(), false},
+		{"one foreign target among in-namespace ones", graph, []beads.Dep{dep("gcg-2", "blocks"), dep("gc-1", "waits-for")}, held("gcg-2", "gc-1"), false},
+		{"a work leg", legs[0], nil, held(), false},
+		{"a binding whose store strands nothing", Leg{Label: "graph", Store: strandsNothing{binding}, ClassBinding: true, ReservedPrefixes: []string{"gcg"}}, nil, held(), false},
+	} {
+		if got := OwnVerdictStands(tc.leg, "gcg-1", tc.deps, tc.held); got != tc.want {
+			t.Errorf("%s: OwnVerdictStands = %t, want %t", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestLegGateKeepsEveryRowWhoseOwnVerdictStands ties OwnVerdictStands to the
+// gate's own judgment (ga-ylpbsy.67): over random graphs whose edges mix
+// in-namespace, foreign, external:, capability and absent targets, every row
+// the binding's own Ready serves whose own verdict stands is a row LegGate
+// keeps. Kills: the gate and the exported rule drifting apart, so a reader
+// trusting the rule serves a row the gate re-judges and holds.
+func TestLegGateKeepsEveryRowWhoseOwnVerdictStands(t *testing.T) {
+	for seed := int64(1); seed <= 25; seed++ {
+		rng := rand.New(rand.NewSource(seed))
+		binding := sqliteBinding(t)
+		work := beads.NewMemStore()
+		legs := splitLegs(work, binding)
+		var graph, workIDs []string
+		for i := 0; i < 4; i++ {
+			b, err := work.Create(beads.Bead{Title: "work", Type: "task"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			workIDs = append(workIDs, b.ID)
+		}
+		for i := 0; i < 10; i++ {
+			b, err := binding.Create(beads.Bead{Title: "graph", Type: "task"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			graph = append(graph, b.ID)
+		}
+		for _, id := range graph {
+			for n := rng.Intn(4); n > 0; n-- {
+				to := []string{
+					graph[rng.Intn(len(graph))], graph[rng.Intn(len(graph))], workIDs[rng.Intn(len(workIDs))],
+					"external:" + workIDs[rng.Intn(len(workIDs))], "external:rig:capability", "gcg-absent",
+				}[rng.Intn(6)]
+				if to == id {
+					continue
+				}
+				if err := binding.DepAdd(id, to, []string{"blocks", "waits-for", "parent-child"}[rng.Intn(3)]); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		for _, id := range graph {
+			if rng.Intn(3) == 0 {
+				closeBead(t, binding, id)
+			}
+		}
+		for _, id := range workIDs {
+			if rng.Intn(2) == 0 {
+				closeBead(t, work, id)
+			}
+		}
+		q := beads.ReadyQuery{TierMode: beads.TierBoth}
+		own, err := binding.Ready(q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		gated, err := NewLegGate(legs, q).Gate(context.Background(), 1, own)
+		if err != nil {
+			t.Fatal(err)
+		}
+		kept := make(map[string]bool, len(gated))
+		for _, b := range gated {
+			kept[b.ID] = true
+		}
+		for _, b := range own {
+			deps, err := binding.DepList(b.ID, "down")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if OwnVerdictStands(legs[1], b.ID, deps, nil) && !kept[b.ID] {
+				t.Errorf("seed %d: %s's own verdict stands (edges %v), but the gate holds it", seed, b.ID, deps)
+			}
+		}
 	}
 }

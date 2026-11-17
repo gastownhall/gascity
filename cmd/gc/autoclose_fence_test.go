@@ -233,7 +233,7 @@ func TestConvoyAutocloseReadsTheConvoyLiveBeforeClosing(t *testing.T) {
 	}
 	rec := events.NewFake()
 	var stdout bytes.Buffer
-	doConvoyAutocloseWith(cached, convoyAutocloseHomes{}, rec, member.ID, &stdout, &stdout)
+	doConvoyAutocloseWith(cached, testStores(cached, nil), convoyAutocloseHomes{}, rec, member.ID, &stdout, &stdout)
 
 	if got := statusOf(t, backing, convoy.ID); got != "open" {
 		t.Fatalf("convoy %s; the live row is owned", got)
@@ -270,7 +270,7 @@ func TestMoleculeAutocloseLeavesARootClosedBehindTheCache(t *testing.T) {
 	}
 	rec := events.NewFake()
 	var stdout bytes.Buffer
-	doMoleculeAutocloseWith(cached, "", rec, step.ID, &stdout, beads.GraphStore{Store: cached})
+	doMoleculeAutocloseWith(cached, "", rec, step.ID, &stdout, testStores(cached, cached))
 
 	for _, evt := range rec.Events {
 		if evt.Subject == root.ID {
@@ -308,7 +308,7 @@ func TestWispAutocloseRechecksTheParentBeforeClosing(t *testing.T) {
 	store := &reopeningStore{MemStore: mem, id: parent.ID}
 
 	var stdout bytes.Buffer
-	doWispAutocloseWith(store, parent.ID, &stdout, beads.GraphStore{Store: store})
+	doWispAutocloseWith(store, parent.ID, &stdout, testStores(store, store))
 
 	if got := statusOf(t, mem, wisp.ID); got != "open" {
 		t.Fatalf("wisp %s under a parent reopened before the close", got)
@@ -328,7 +328,7 @@ func TestWispAutocloseRechecksAReapedRootBeforeClosing(t *testing.T) {
 	store := &reopeningStore{MemStore: mem, id: wisp.ID}
 
 	var stdout bytes.Buffer
-	doWispAutocloseWith(store, parent.ID, &stdout, beads.GraphStore{Store: store})
+	doWispAutocloseWith(store, parent.ID, &stdout, testStores(store, store))
 
 	if got := statusOf(t, mem, wisp.ID); got != "open" {
 		t.Fatalf("wisp %s after it was reopened before the close", got)
@@ -354,7 +354,7 @@ func TestConvoyAutocloseRechecksTheConvoyIsStillOpen(t *testing.T) {
 	}
 	rec := events.NewFake()
 	var stdout bytes.Buffer
-	doConvoyAutocloseWith(cached, convoyAutocloseHomes{}, rec, member.ID, &stdout, &stdout)
+	doConvoyAutocloseWith(cached, testStores(cached, nil), convoyAutocloseHomes{}, rec, member.ID, &stdout, &stdout)
 	for _, evt := range rec.Events {
 		if evt.Type == events.ConvoyClosed {
 			t.Fatalf("recorded %s for a convoy another writer already closed", evt.Type)
@@ -394,7 +394,7 @@ func TestWispAutocloseRecheckFailsClosedOnAReadError(t *testing.T) {
 	store := &flakyLiveStore{MemStore: mem, id: parent.ID}
 
 	var stdout bytes.Buffer
-	run := doWispAutocloseWith(store, parent.ID, &stdout, beads.GraphStore{Store: store})
+	run := doWispAutocloseWith(store, parent.ID, &stdout, testStores(store, store))
 
 	if got := statusOf(t, mem, wisp.ID); got != "open" {
 		t.Fatalf("wisp %s after the parent re-check failed", got)
@@ -444,7 +444,7 @@ func TestWispAutocloseRecheckReadsTheParentLive(t *testing.T) {
 	}
 
 	var stdout bytes.Buffer
-	doWispAutocloseWith(store, parent.ID, &stdout, beads.GraphStore{Store: store})
+	doWispAutocloseWith(store, parent.ID, &stdout, testStores(store, store))
 
 	if got := statusOf(t, mem, wisp.ID); got != "open" {
 		t.Fatalf("wisp %s; the live parent was reopened before the close", got)

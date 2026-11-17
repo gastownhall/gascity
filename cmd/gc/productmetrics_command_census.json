@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 215,
+  "next_id": 217,
   "permanent_ids": [
     {
       "name": "help",
@@ -4205,6 +4205,36 @@
       "classification": "storage-repair-sequence",
       "owner": "immediate",
       "id": 209
+    },
+    {
+      "path": "gc storage snapshot",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable-group",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "storage-snapshot",
+      "owner": "immediate",
+      "id": 215
+    },
+    {
+      "path": "gc storage snapshot restore",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "storage-snapshot-restore",
+      "owner": "immediate",
+      "id": 216
     },
     {
       "path": "gc storage status",
