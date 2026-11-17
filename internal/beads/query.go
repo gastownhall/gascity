@@ -223,7 +223,10 @@ type ReadyQuery struct {
 	Unassigned bool
 	// MetadataEquals keeps beads whose metadata carries every key with exactly
 	// that value, as `bd ready --metadata-field key=value` matches. Keys and
-	// values are passed as given; a caller that cannot vouch for a pair's
+	// values are passed as given, except that an empty-valued pair is never
+	// sent server-side (an absent key reads as "", see pushableMetadataPairs),
+	// so a caller that needs the exact answer for one re-applies it to what
+	// comes back. A caller that cannot vouch for a pair's
 	// equality semantics on every backend (a value that is a JSON literal, a
 	// key outside bd's key grammar) must not push it.
 	MetadataEquals map[string]string
@@ -234,6 +237,26 @@ type ReadyQuery struct {
 func (q ReadyQuery) IsZero() bool {
 	return q.Assignee == "" && q.Limit == 0 && q.TierMode == TierIssues &&
 		!q.Unassigned && len(q.MetadataEquals) == 0
+}
+
+// pushableMetadataPairs returns the pairs of a metadata equality filter that a
+// backend may send server-side, or nil when none remain. An empty-valued pair is
+// never pushed: ListQuery.Matches reads an absent key as "", so {k: ""} keeps
+// rows that lack k, while a server-side comparison of the stored value is NULL
+// for an absent key and drops them. The pushdown must be a superset, so such a
+// pair is left to the client-side cut, which filters exactly.
+func pushableMetadataPairs(metadata map[string]string) map[string]string {
+	var pushed map[string]string
+	for k, v := range metadata {
+		if v == "" {
+			continue
+		}
+		if pushed == nil {
+			pushed = make(map[string]string, len(metadata))
+		}
+		pushed[k] = v
+	}
+	return pushed
 }
 
 func readyQueryFromArgs(queries []ReadyQuery) ReadyQuery {

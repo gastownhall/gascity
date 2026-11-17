@@ -3152,14 +3152,14 @@ func (s *BdStore) fetchViaBDList(query ListQuery) ([]Bead, *PartialResultError, 
 	if serverQuery.ParentID != "" {
 		args = append(args, "--parent", serverQuery.ParentID)
 	}
-	if len(serverQuery.Metadata) > 0 {
-		keys := make([]string, 0, len(serverQuery.Metadata))
-		for k := range serverQuery.Metadata {
+	if pushed := pushableMetadataPairs(serverQuery.Metadata); len(pushed) > 0 {
+		keys := make([]string, 0, len(pushed))
+		for k := range pushed {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			args = append(args, "--metadata-field", k+"="+serverQuery.Metadata[k])
+			args = append(args, "--metadata-field", k+"="+pushed[k])
 		}
 	}
 	if query.SkipLabels && serverQuery.Label == "" && s.listSkipLabelsEnabled {

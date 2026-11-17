@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"maps"
 	"sort"
 	"strconv"
 	"strings"
@@ -777,8 +776,8 @@ func nativeListRequestFromListQuery(query ListQuery, pushableTypes map[string]bo
 	if query.Label != "" {
 		req.Labels = []string{query.Label}
 	}
-	if len(query.Metadata) > 0 {
-		req.MetadataFields = query.Metadata
+	if pushed := pushableMetadataPairs(query.Metadata); len(pushed) > 0 {
+		req.MetadataFields = pushed
 	}
 	if !query.CreatedBefore.IsZero() {
 		req.CreatedBefore = zeroTimePtr(query.CreatedBefore)
@@ -889,8 +888,8 @@ func nativeReadyRequestFromReadyQuery(q ReadyQuery) issueops.ReadyRequest {
 	if q.Unassigned {
 		req.Unassigned = true
 	}
-	if len(q.MetadataEquals) > 0 {
-		req.MetadataFields = maps.Clone(q.MetadataEquals)
+	if pushed := pushableMetadataPairs(q.MetadataEquals); len(pushed) > 0 {
+		req.MetadataFields = pushed
 	}
 	return req
 }
