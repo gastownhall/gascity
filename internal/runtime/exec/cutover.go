@@ -12,7 +12,8 @@ import (
 // interfaces production callers type-assert — DialogProvider (dialog dismissal),
 // SleepCapability, IdleWaitProvider (the idle boundary) and its probe budget,
 // FencedInputProvider (the carrier guard),
-// the error-bearing attachment probe, and the image-checker (CheckImage) — through to the
+// ProgramStatusProvider and its mode setter, the error-bearing attachment
+// probe, and the image-checker (CheckImage) — through to the
 // underlying *Provider. The early cut-over for the exec provider.
 //
 // The observe.v1 interfaces (the error-bearing liveness read, fresh reads,
@@ -58,6 +59,7 @@ var (
 	_ runtime.InventoryLister           = (*seamBackedProvider)(nil)
 
 	_ runtime.ServerLifecycleProvider = (*seamBackedProvider)(nil)
+	_ runtime.ProgramStatusProvider   = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked wraps an exec provider for the given script so it is served
@@ -130,7 +132,7 @@ func (s *seamBackedProvider) RuntimeInventory(ctx context.Context) (map[string]r
 }
 
 // ListInventory passes through to the underlying provider's `inventory`; the
-// seams' ListRunning is the same read.
+// seams' ListRunning skips the additional program-status poll.
 func (s *seamBackedProvider) ListInventory(prefix string) ([]string, map[string]runtime.InventoryEntry, error) {
 	return s.raw.ListInventory(prefix)
 }
@@ -150,6 +152,16 @@ func (s *seamBackedProvider) ListRunningComplete() bool {
 // V2Readiness passes through to the underlying provider's handshake.
 func (s *seamBackedProvider) V2Readiness() ([]string, error) {
 	return s.raw.V2Readiness()
+}
+
+// ProgramStatus passes through the pack-owned program reading.
+func (s *seamBackedProvider) ProgramStatus(name string) (runtime.ProgramStatus, error) {
+	return s.raw.ProgramStatus(name)
+}
+
+// SetProgramStatusMode publishes the switch to the underlying exec leaf.
+func (s *seamBackedProvider) SetProgramStatusMode(mode runtime.ProgramStatusMode) {
+	s.raw.SetProgramStatusMode(mode)
 }
 
 // ConfigureServer passes through to the underlying provider's no-op

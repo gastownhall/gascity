@@ -3165,7 +3165,7 @@
             "shadow",
             "on"
           ],
-          "description": "ProgramStatus is the city switch for OSC 7501 program status. \"off\"\n(the default) changes nothing. \"shadow\" arms capture on declared\nproviders ([providers.\u003cp\u003e.program_status]) and compares readings\nwithout changing any decision. \"on\" lets valid readings decide.",
+          "description": "ProgramStatus is the city switch for OSC 7501 program status. \"off\"\n(the default) changes nothing. \"shadow\" arms capture on declared\nproviders ([providers.\u003cp\u003e.program_status]) and compares readings\nwithout changing any decision. \"on\" lets valid readings decide.\nAn exec pack declaring program-status is read regardless of the provider\nbinding's capture declaration and app filter, which are not consulted.",
           "default": "off"
         }
       },

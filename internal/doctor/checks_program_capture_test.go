@@ -13,6 +13,11 @@ import (
 // runProgramCapture runs the check over st.
 func runProgramCapture(t *testing.T, st ProgramCaptureState) *CheckResult {
 	t.Helper()
+	// These fixtures model capture-owning leaves. Runtime-only readers use
+	// NewProgramCaptureCheck directly, without this helper.
+	for i := range st.Sessions {
+		st.Sessions[i].Captures = true
+	}
 	return NewProgramCaptureCheck(func() (ProgramCaptureState, error) { return st, nil }).Run(&CheckContext{})
 }
 

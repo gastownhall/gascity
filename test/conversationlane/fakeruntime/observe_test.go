@@ -45,6 +45,8 @@ func TestObserveProfileIsConformant(t *testing.T) {
 		runtimecontract.ReqObserveFaultsReadUnknown: true, runtimecontract.ReqObserveCityScoped: true,
 		runtimecontract.ReqObserveInventoryHasActivity:  true,
 		runtimecontract.ReqDiscoveryFailureIsNotAbsence: true,
+		// The profile does not declare program-status.
+		runtimecontract.ReqPStatusAnswers: true, runtimecontract.ReqPStatusFollowsReport: true, runtimecontract.ReqPStatusMissingSession: true,
 		// No server of its own: server-lifecycle is not declared.
 		runtimecontract.ReqServerStopIdempotent: true, runtimecontract.ReqServerStartAfterStop: true,
 		runtimecontract.ReqServerStopEndsSession: true, runtimecontract.ReqServerStopSparesOtherCities: true,

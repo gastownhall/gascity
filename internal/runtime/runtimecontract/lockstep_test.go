@@ -225,6 +225,12 @@ func TestEveryCatalogCodeBacksAContractCase(t *testing.T) {
 			// over the same golden reference.
 			continue
 		}
+		if req.Group == GroupPStatus {
+			// program-status backs ProgramStatusProvider, contract-tested by
+			// runtimetest.RunProgramStatusContract (RUNTIME-CONTRACT-017) in
+			// exec/program_status_contract_test.go.
+			continue
+		}
 		if req.Group == GroupFSHost {
 			// fs.host is a handshake token whose promise (a shared filesystem
 			// view and user) no runtime.Provider method states; gc's side of

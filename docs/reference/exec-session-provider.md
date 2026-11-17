@@ -81,7 +81,7 @@ No shell invocation — the script is exec'd directly.
 | 0 | Success |
 | 1 | Failure (stderr contains error message) |
 | 2 | Unknown operation (treated as success — forward compatible). From `start`, and from an operation the script declares, it is not success; see below. |
-| 66 | `peek` only, from a v2-ready script (one that declares `observe.v1` and `report-attachment`): no screen. Nothing holds a screen for the name (no box, or a dead box whose screen is gone). See [`peek` under observe.v1](#peek-name-lines-under-observev1). On any other operation, or from a script that is not v2-ready, 66 is an ordinary failure. |
+| 66 | `program-status`: the pack holds no session under the name, whether or not the script is v2-ready. A held box whose program exited instead answers exit 0 with `"exited": true`. `peek` from a v2-ready script, one that declares `observe.v1` and `report-attachment`: no screen. Nothing holds a screen for the name, either no box or a dead box whose screen is gone. See [`peek` under observe.v1](#peek-name-lines-under-observev1). From a script that is not v2-ready, 66 from `peek` is an ordinary failure. On every other operation, whether or not the script is v2-ready, 66 is an ordinary failure. |
 | 75 | `start` only: temporary failure (`EX_TEMPFAIL`). The endpoint the agent launches against is at capacity or unavailable, so the start is retryable and not specific to this session. Gas City still tears the box down. On any other operation 75 is an ordinary failure. |
 | 80 | `nudge`, `send-keys`, `interrupt` and `clear-scrollback` only, from a script that declares `input-outcome`: the input was not delivered, and stdout carries exactly one outcome line naming why. See [Typed input outcomes](#typed-input-outcomes-input-outcome). To a Gas City that does not read the token, and on any other operation, 80 is an ordinary failure. |
 
@@ -94,7 +94,7 @@ operations do not read exit 2 as success: under `proc.exec`, `exec` returns it
 as the command's own exit code, and under `proc.provision`,
 `report-attachment` and `server-lifecycle`, `provision`, `is-attached` and
 `server-stop` report it as a failure, and under `input-outcome` so do the four
-driving operations.
+driving operations. A declared `program-status` also treats exit 2 as failure.
 `start` cannot be unknown either, so its exit 2 (for example a helper's
 `grep` or `jq` exit status escaping a `set -e` script) is a failed start.
 Under `carrier.ops`, the five driving operations (`nudge`, `peek`,
@@ -163,6 +163,7 @@ above: a canceled `exec` or `watch-startup` call is killed outright, with
 | `observe` | `script observe <name>` | process names (1/line) | one JSON object (see [observe.v1](#observev1-reconciler-v2)) |
 | `inventory` | `script inventory` | — | one JSON object (see [observe.v1](#observev1-reconciler-v2)) |
 | `kill-object` | `script kill-object <name>` | JSON request | `killed`, `gone`, `renamed`, `live` or `changed` |
+| `program-status` | `script program-status <name>` | none | one JSON object, see [Program status](#program-status-program-status) |
 | `server-stop` | `script server-stop` | — | — (see [Server teardown](#server-teardown-server-lifecycle)) |
 
 **Box without agent (the un-weld).** `provision` is `start` MINUS the agent
@@ -232,6 +233,7 @@ Capabilities:
 | `proc.stream` | Reserved (connection-plane family, parallel to `env.*`): declares the persistent bidirectional `stream` connection op (ACP over a stream, tmux pipe-pane). Sets `CanStream`. The `stream` op and its capability-gated conformance entry land with the connection rewrite. |
 | `tty.attach` | Reserved: declares an interactive PTY `attach` connection op. Sets `CanAttachTTY`. |
 | `observe.v1` | The script keeps the observe.v1 profile reconciler v2 reads: the `observe`, `inventory` and `kill-object` ops, `fresh_only` starts and strict exits (see [observe.v1](#observev1-reconciler-v2)). With `report-attachment`, the script is v2-ready. |
+| `program-status` | The script answers the session's own agent-program root record through `program-status <name>`. It forwards the terminal's state word unchanged and never supplies a root it cannot attribute to that program. Gives no idle boundary by itself. |
 | `server-lifecycle` | The script owns a server its boxes run under and implements `server-stop`, which gc runs after it stops the city's sessions, at `gc stop` and at the orchestrator's shutdown (see [Server teardown](#server-teardown-server-lifecycle) for when). Without it, gc sends no `server-stop`. |
 | `fs.host` | With `"locality": "local"` only: the script's boxes run on gc's host as gc's user, with gc's view of the filesystem, so `work_dir`, `HOME` and transcript paths name the same files inside the box. gc then stages the work dir, runs `pre_start` before `start` and `session_setup` after it on the host itself, leaves that work out of the start config, reads the agent's transcripts for turns, on a v2-ready script reaps a session's leftover processes from its process table, and admits skills and MCP for the runtime (see [Host filesystem (`fs.host`)](#host-filesystem-fshost)). Without `"locality": "local"` it is ignored. |
 | `input-outcome` | The four driving operations (`nudge`, `send-keys`, `interrupt`, `clear-scrollback`) answer with a typed outcome: exit 0 when the input was delivered, exit 80 with one outcome line otherwise (see [Typed input outcomes](#typed-input-outcomes-input-outcome)). Their exit 2 is then a failure. It changes what gc reads from the dedicated operations, so it has no effect on input the default tmux carrier delivers over `exec`. |
@@ -288,6 +290,36 @@ needs three round trips, each under 1.6 s. Every check needs the read while
 limits, not targets: a capture that ends exactly at the 5 s mark does not
 count. A slower check fails closed: the session stays awake, and the check
 runs again on the next orchestrator tick.
+
+With `program-status` declared and the switch on, each idle observation first
+reads status fresh, outside the inventory pass and cache, under a 1-second
+sub-bound. Only a deciding reading uses the shared idle-verdict rules. An
+input boundary counts idle; a live working or blocked root counts busy.
+The hold uses `Since` alone, with no extra activity op. An indeterminate
+reading falls back to the screen for that observation. A failed or timed-out
+status read falls back to the screen for the rest of the wait. Shadow and
+off send no status op during the wait.
+
+Two consecutive idles must come from the same reader. Changing readers
+restarts the count; repeated flapping can time out even with an idle screen.
+The ready-prompt read still runs first within the same hard deadline.
+`program-status` alone changes neither the idle-boundary gate nor
+`sleep_capability`.
+
+For the 5-second budget, R is the prompt read, S a status read, P a screen
+read and each pause is 0.2 seconds. Figures are break-even ceilings for
+uniform successful round trips x; each status read also has its own 1-second
+sub-bound. An observation ending at the deadline never counts.
+
+| Sequence | Cost | x with R | x without R |
+| --- | --- | --- | --- |
+| Pane only | R + 2P + 0.2 | <1.6s | <2.4s |
+| Status idle twice | R + 2S + 0.2 | <1.6s | <2.4s |
+| Status idle, fast failure, two pane idles | R + 2S + 2P + 0.4 | <0.92s | <1.15s |
+| Status idle, 1s failure, two pane idles | R + S + 1 + 2P + 0.4 | <0.9s | <1.2s |
+| Status idle, then two indeterminate reads with pane idle | R + 3S + 2P + 0.4 | <0.767s | <0.92s |
+| Two indeterminate reads with pane idle | R + 2S + 2P + 0.2 | <0.96s | <1.2s |
+| First status hangs 1s, then pane only | R + 1 + 2P + 0.2 | <1.27s | <1.9s |
 
 For `carrier.ops`, after `start` the orchestrator publishes the effective
 prompt using `set-meta <name> GC_READY_PROMPT_PREFIX` with the prefix on
@@ -399,6 +431,118 @@ delivered. An `exec` op that is [canceled](#cancellation) or cannot be run at
 all is an outage too, without asking `is-running`, and it does not say
 whether part of the input went in before it stopped. A pane started before gc
 published fences takes no fenced input until its agent is relaunched.
+
+### Program status (`program-status`)
+
+A terminal that already tracks OSC 7501 can supply the reading without a gc
+capture tap. Declare `program-status` and implement `program-status <name>`.
+The smallest answer is `{"state":"working"}`. Report only the root of the
+session's own agent program. Forward the terminal's state word unchanged,
+including words gc does not recognize. gc applies no app filter.
+
+The op takes no stdin. Stdout is one JSON object followed only by JSON
+whitespace, at most 64 KiB. Unknown keys are ignored. Missing `state`, `null`,
+a second JSON value, trailing bytes or an invalid field type fails the read.
+No answer field carries program title or message text; gc's errors do not
+repeat the answer bytes.
+
+| Field | Type and accepted values | Missing or null | Invalid or unknown value |
+| --- | --- | --- | --- |
+| `state` | Required string, `idle`, `working`, `done`, `blocked`, `error` or `""` | Fails the read | Non-string fails. An unknown word reads silent and changes no derived record. Ignored when `exited` is true. |
+| `kind` | String, `permission`, `question` or `auth`, only with blocked | Unspecified | Wrong type fails; unknown word is unspecified. |
+| `app` | String, 1-32 ASCII letters, digits or `_.+-` | Empty | Wrong type fails; invalid string becomes empty. |
+| `progress` | Number, integer 0-100, only with working or blocked | -1 | Wrong type fails; fractional or out-of-range number becomes -1. |
+| `children` | Number, integer from 0 through 2147483647, excluding the root | 0 | Wrong type, fraction or out-of-range value fails. |
+| `working_children` | Number, integer from 0 through `children` | 0 | Wrong type, fraction or out-of-range value fails. |
+| `exited` | Boolean, the held session's reporting program exited | false | Wrong type fails. |
+| `incarnation` | Opaque string, 1-128 bytes, each ASCII 0x21-0x7E; stable for one run and never reused | No incarnation | Wrong type fails; an empty string means no incarnation; a non-empty invalid string fails. |
+
+| Result | gc reading |
+| --- | --- |
+| Exit 0, known non-empty root | valid, with state and attributes |
+| Exit 0, empty root never reported this incarnation | silent, no state |
+| Exit 0, empty root after an observed report | cleared, no state |
+| Exit 0, unknown root word | silent, no state, never cleared |
+| Exit 0, `exited: true` | exited, no state, keeping an error gc observed this incarnation |
+| Exit 66 | `ErrSessionNotFound`, the pack holds no session |
+| Any other non-zero exit, including 2; timeout; malformed or oversized output | `ErrRuntimeUnavailable` |
+| Switch off or unknown | Unread stamped off, no handshake or op |
+| Token undeclared or handshake failed | Unread stamped with the current mode, no status op |
+
+A held box with a dead program is **not** a missing session. Return exit 0
+with `"exited": true`; unlike `peek`, do not return 66 merely because the
+program died. `not_armed` and `reader_lost` are never produced here. gc arms
+no tap and reports no reader verification, probe or capture declaration.
+
+The [city switch](/reference/config#sessionconfig) controls reads. Under
+shadow the reading is visible but records no shadow comparisons. Under on,
+worker phase and API projections can reflect it, and exec's idle wait can
+use it. The [provider binding](/reference/config#programstatusbinding), its
+capture flag and its app filter are not consulted. Binding environment
+variables still reach the agent.
+
+Ordinary readers share one bounded read per session per 45-second cache
+age. The cache holds the outcome of every read that ran the op, failures
+included. After the capability check, a cold status read takes at most
+2 seconds; N cold rows read sequentially can cost N times 2 seconds.
+The first handshake has its own 30-second op budget; a failed handshake
+returns Unread and is retried after 30 seconds. A newer failure replaces an
+older success, including an idle read that started its op and expired at
+its 1-second sub-bound. A read that cannot get one of the eight slots within
+its bound fails for that caller and is not cached. Under slot saturation,
+an uncached reader can therefore wait up to the read bound and get an error.
+Each read takes a ticket when it gets a slot, before its op runs. Tickets
+order admission to execution, not when the subprocess starts or when the
+pack samples its state. A read is overtaken only when a read with a higher
+ticket has already applied; it then returns that cached outcome. A reset
+made by a read's own apply does not discard a higher-ticket read still in
+flight. That read applies its own answer. If the answer predates the reset
+and names a different incarnation, it resets history again and changes the
+nonce, to empty without an incarnation, and its counters, `Reported` and
+`LastError` start again from zero, so a baseline taken earlier gets no
+credit until it is taken again. A same-incarnation `exited` answer arriving
+after a live one keeps the nonce, credits no baseline and supplies no idle
+evidence; the next live answer resets again. The idle wait can still fall
+back to the screen.
+A read finishing after the switch goes off returns Unread with no error;
+every other mode change invalidates in-flight results. Every mode change
+drops the cache, and an off interval also resets derived history. Starts,
+stops and relaunches drop state before and after their op. Complete listings
+that omit a name drop its state; partial or failed listings do not.
+
+The inventory pass polls running, readable sessions only when the pack also
+declares `observe.v1` and `report-attachment`. It uses eight workers, at most
+2 seconds per op and 3 seconds total. Unreached sessions get priority on the
+next pass. An attempt cut short by the total poll bound keeps its priority,
+so the same final wave cannot repeatedly miss its reading. A failed status
+read leaves that entry Unread without failing or
+changing the listing's attestation. `ListRunning` and the process scan do
+not poll status. The listing's 30-second inventory op plus 3-second poll is
+33 seconds **per leaf**, below the shared 35-second lane bound for one leaf
+with a cached handshake. Composite leaves list sequentially; each declaring
+exec leaf adds up to 3 seconds, so polling can turn a composite listing into
+a lane timeout. An uncached handshake can already consume up to 30 seconds.
+
+Limits:
+
+- Polling supplies no events. Counters are lower bounds; a whole turn between
+  reads is missed. `Since` and `QuietSince` are when gc first observed the
+  transition, on gc's clock. Unchanged readings do not refresh them.
+- An incarnation identifies a program run, not a box or a process ID that
+  can be reused. With one, the nonce includes the provider instance and a
+  local generation; after replacement or reset an old baseline gets no
+  credit. Without one, the nonce is empty and no baseline gets credit.
+- Exit is recognized only by a successful `exited` answer; absence only by
+  exit 66. A root-only pack can keep returning a dead program's last state.
+  Cache expiry and fresh reads alone cannot detect that exit.
+- gc implements no capture healing, hold, startup ladder or interrupt-settle
+  extension for this reading. Only exec's idle wait gains an acting consumer.
+
+`gc runtime check` runs `program-status` once against the session it starts
+when the token is declared. Exit 2, any other failure, or an answer gc cannot
+parse fails the check. An undeclared script is sent no `program-status` op.
+`gc runtime conformance` checks the token as the `pstatus` group,
+`RPP-PSTATUS-001` to `RPP-PSTATUS-003`.
 
 ### Server teardown (`server-lifecycle`)
 
@@ -1271,7 +1415,14 @@ skipped when its op answers exit 2 and failed when it answers wrongly:
 | `discovery` | `RPP-DISCOVERY-001` to `005` | `list-running` lists running sessions under the prefix and omits stopped ones. With `conformance-faults`, a listing the backend cannot read must fail (non-zero, not 2), never answer an empty list. |
 | `process` | `RPP-PROCESS-001` to `002` | `process-alive` with no names answers `true`; after `stop` it never answers `true` or empty. |
 | `concurrency` | `RPP-CONCURRENCY-001` to `005` | Under `observe.v1`: `start`, `stop`, `is-running`, `process-alive` and `list-running` on distinct names all work at once. |
+| `pstatus` | `RPP-PSTATUS-001` to `003` | With `program-status`: a running session answers a parseable object; separate commands requesting working and idle read those states by each session's own name, and the first still reads working after the second starts; a name no box holds answers exit 66. Declared exit 2 fails. |
 | `observe` | `RPP-OBSERVE-017` to `018` | With `report-attachment`: `is-attached` answers `false`, exit 0, for a running box with no client and for a name no box holds. |
+
+The status wire probe proves the op and the pack's plumbing. A pack echoing
+its start config passes it; it does not prove a terminal processes emitted
+OSC bytes. The exec provider's emitter-backed contract test supplies that
+separate proof, reading after every emitted step. Production polling can
+miss short-lived reports.
 
 ### Switching an existing exec city to v2
 

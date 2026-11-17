@@ -1678,6 +1678,8 @@ go_test(
         "event_export_test.go",
         "exec_carrier_ops_test.go",
         "exec_process_sweep_test.go",
+        "exec_program_status_doctor_test.go",
+        "exec_program_status_test.go",
         "exec_runtime_readiness_test.go",
         "execution_backstop_test.go",
         "execution_backstop_work_started_test.go",

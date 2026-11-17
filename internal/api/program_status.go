@@ -219,8 +219,9 @@ func sameTimePtr(a, b *time.Time) bool {
 // reload's publication; the cap makes a reload to off hide every reading at
 // once. No liveness probe precedes the read: a stopped or missing session
 // reads Unread or exited, which no response shows, and a backend without the
-// capability is answered Unread without being asked. tmux, the one backend
-// that takes readings, serves them from its state cache.
+// capability is answered Unread without being asked. tmux serves readings
+// from its state cache, and exec from a bounded cache, where a cold read can
+// run one pack op.
 func programStatusUnder(published runtime.ProgramStatusMode, sp runtime.Provider, sessionName string) runtime.ProgramStatus {
 	sessionName = strings.TrimSpace(sessionName)
 	if (published != runtime.ProgramStatusShadow && published != runtime.ProgramStatusOn) || sp == nil || sessionName == "" {

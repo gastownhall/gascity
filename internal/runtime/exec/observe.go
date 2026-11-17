@@ -334,12 +334,16 @@ func (p *Provider) createFresh(ctx context.Context, name string, cfg runtime.Con
 		return err
 	}
 	if p.supportsSeparableLaunch() {
-		if _, err := p.runWithContext(ctx, p.startTimeout, data, "provision", name); err != nil {
+		_, err = p.runWithContext(ctx, p.startTimeout, data, "provision", name)
+		p.forgetProgramStatus(name)
+		if err != nil {
 			return err
 		}
 		err = p.launchAgent(ctx, name, cfg)
 	} else {
-		if _, err := p.runWithContext(ctx, p.startTimeout, data, "start", name); err != nil {
+		_, err = p.runWithContext(ctx, p.startTimeout, data, "start", name)
+		p.forgetProgramStatus(name)
+		if err != nil {
 			return err
 		}
 		_, err = p.finishStart(ctx, name, cfg)

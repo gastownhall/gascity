@@ -15,6 +15,7 @@ import (
 // the runtime's judged reading of its agent pane.
 type ProgramCaptureSession struct {
 	Name     string
+	Captures bool                  // the routed leaf implements runtime.ProgramCaptureHealer
 	Declared bool                  // the session's provider declares capture under the city switch
 	Reading  runtime.ProgramStatus // the runtime's reading; zero when ReadErr is set
 	ReadErr  error                 // the reading failed
@@ -93,8 +94,20 @@ func (c *ProgramCaptureCheck) Run(_ *CheckContext) *CheckResult {
 
 	sessions := append([]ProgramCaptureSession(nil), st.Sessions...)
 	sort.Slice(sessions, func(i, j int) bool { return sessions[i].Name < sessions[j].Name })
-	capturing, unchecked := 0, 0
+	capturing, unchecked, runtimeReadings := 0, 0, 0
 	for _, s := range sessions {
+		if !s.Captures {
+			runtimeReadings++
+			if s.ReadErr != nil {
+				notes = append(notes, fmt.Sprintf("session %s: reading program status from its runtime: %v", s.Name, s.ReadErr))
+			} else {
+				switch s.Reading.Validity {
+				case runtime.ProgramStatusValid, runtime.ProgramStatusSilent, runtime.ProgramStatusCleared:
+					notes = append(notes, fmt.Sprintf("session %s: program status %s, read from its runtime (gc arms no capture there)", s.Name, s.Reading.Validity))
+				}
+			}
+			continue
+		}
 		if s.ReadErr != nil {
 			problems = append(problems, fmt.Sprintf("session %s: reading program status: %v", s.Name, s.ReadErr))
 			continue
@@ -135,6 +148,9 @@ func (c *ProgramCaptureCheck) Run(_ *CheckContext) *CheckResult {
 		r.Message = fmt.Sprintf("%d declared session(s) reporting program status", capturing)
 		if unchecked > 0 {
 			r.Message += fmt.Sprintf("; %d with tap liveness unchecked", unchecked)
+		}
+		if runtimeReadings > 0 {
+			r.Message += fmt.Sprintf("; %d session(s) reading program status from their runtime", runtimeReadings)
 		}
 		return r
 	}

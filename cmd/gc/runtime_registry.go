@@ -110,7 +110,7 @@ func buildRuntimeRegistry() *registry.Registry {
 		if isLegacyT3BridgeExecScript(script) {
 			return sessiont3bridge.NewSeamBacked(), nil
 		}
-		return sessionexec.NewSeamBackedForCity(script, cityName, cityPath, execSetupTimeouts(sc)), nil
+		return sessionexec.NewSeamBackedForCity(script, cityName, cityPath, execSetupTimeouts(sc), sessionexec.WithProgramStatusMode(sc.ProgramStatusMode())), nil
 	}, registry.WithHostCapabilities(func(name, cityName, cityPath string) runtime.HostCapabilities {
 		script := strings.TrimPrefix(name, "exec:")
 		if isLegacyT3BridgeExecScript(script) {
@@ -199,7 +199,7 @@ func runtimeRegistryForCity(cfg *config.City) (*registry.Registry, error) {
 	for _, name := range names {
 		rt := cfg.Runtimes[name]
 		if err := r.Register(name, func(_ string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
-			return sessionexec.NewSeamBackedForCity(rt.Command, cityName, cityPath, execSetupTimeouts(sc)), nil
+			return sessionexec.NewSeamBackedForCity(rt.Command, cityName, cityPath, execSetupTimeouts(sc), sessionexec.WithProgramStatusMode(sc.ProgramStatusMode())), nil
 		}, registry.WithHostCapabilities(func(_, cityName, cityPath string) runtime.HostCapabilities {
 			return execRuntimeHostCapabilities(rt.Command, cityName, cityPath)
 		})); err != nil {

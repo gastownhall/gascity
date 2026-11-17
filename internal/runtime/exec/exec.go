@@ -78,6 +78,8 @@ type Provider struct {
 	// its host work (provisionBox), so the launch that follows runs their
 	// session_setup on the host (execTransport.Launch).
 	hostSetupDue sync.Map
+
+	programs programStatusState
 }
 
 type startupWatchEvent struct {
@@ -97,6 +99,7 @@ func NewProvider(script string, opts ...Option) *Provider {
 		timeout:      30 * time.Second,
 		startTimeout: 120 * time.Second,
 		setupTimeout: defaultSetupTimeout,
+		programs:     newProgramStatusState(),
 	}
 	for _, opt := range opts {
 		opt(p)
@@ -325,7 +328,7 @@ func (e *opExitError) Unwrap() error { return e.err }
 // for a pack that declared proc.provision), is-attached (it runs only for a
 // pack that declared report-attachment; [Provider.IsAttachedWithError]
 // reports its failure as "could not tell"), the observe.v1 ops, and
-// server-stop (it runs only for a pack that declared server-lifecycle). strict
+// server-stop and program-status (each runs only when declared). strict
 // is an exit 2 the pack's declarations oblige it not to give
 // (Provider.exitTwoIsStrict), which fails as strictExitTwo maps it. A
 // start-op name collision maps to [runtime.ErrSessionExists]; a start-op
@@ -350,7 +353,7 @@ func classifyExecExit(op string, code int, msg string, strict bool, base error) 
 // exit 2 from it is a failure rather than the forward-compatible no-op.
 func exitTwoIsFailure(op string) bool {
 	switch op {
-	case "start", "provision", "is-attached", "observe", "inventory", "kill-object", serverStopOp:
+	case "start", "provision", "is-attached", "observe", "inventory", "kill-object", serverStopOp, "program-status":
 		return true
 	default:
 		return false
@@ -481,7 +484,9 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if !occupancyKnown || occupiedBefore {
 		saved = p.clearInputFence(ctx, name)
 	}
-	if _, err = p.runWithContext(ctx, p.startTimeout, data, "start", name); err != nil {
+	_, err = p.runWithContext(ctx, p.startTimeout, data, "start", name)
+	p.forgetProgramStatus(name)
+	if err != nil {
 		if startFailureKeepsBox(err, foreignBox) {
 			// The live session keeps its box, so it keeps its fence too.
 			p.restoreInputFence(context.WithoutCancel(ctx), name, saved)
@@ -592,7 +597,9 @@ func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Co
 	if err != nil {
 		return err
 	}
-	if _, err := p.runWithContext(ctx, p.startTimeout, data, "provision", name); err != nil {
+	_, err = p.runWithContext(ctx, p.startTimeout, data, "provision", name)
+	p.forgetProgramStatus(name)
+	if err != nil {
 		return err
 	}
 	if hostWork {
@@ -634,7 +641,9 @@ func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Con
 	// launches the agent, so no input fenced for another incarnation is
 	// let through between them.
 	argv = append(argv, p.launchFenceArgs(name, cfg)...)
-	if _, code, err := p.Exec(ctx, name, argv); err != nil {
+	_, code, err := p.Exec(ctx, name, argv)
+	p.forgetProgramStatus(name)
+	if err != nil {
 		return fmt.Errorf("exec provider: launching agent in %q: %w", name, err)
 	} else if code != 0 {
 		return fmt.Errorf("exec provider: launching agent in %q: tmux exited %d", name, code)
@@ -939,7 +948,9 @@ func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout
 // Stop destroys the named session: script stop <name>
 func (p *Provider) Stop(name string) error {
 	p.forgetReadyPrompt(name)
+	p.forgetProgramStatus(name)
 	_, err := p.run(nil, "stop", name)
+	p.forgetProgramStatus(name)
 	return err
 }
 
@@ -1211,7 +1222,7 @@ func (p *Provider) Peek(name string, lines int) (string, error) {
 // A v2-ready pack lists through `inventory` instead (listInventory).
 func (p *Provider) ListRunning(prefix string) ([]string, error) {
 	if p.v2Ready() {
-		names, _, err := p.ListInventory(prefix)
+		names, _, err := p.listInventory(prefix, false)
 		return names, err
 	}
 	out, err := p.run(nil, "list-running", prefix)
