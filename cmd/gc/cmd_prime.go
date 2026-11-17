@@ -1137,6 +1137,25 @@ func primeBuiltinPromptFile(cfg *config.City, a *config.Agent) string {
 	return ""
 }
 
+// startupPromptTemplate returns the template file a session of a starts with,
+// or "" when it starts with the beacon alone. An explicit prompt_template wins
+// (a [[patches.agent]] one on an implicit agent included); otherwise an
+// implicit agent gets primeBuiltinPromptFile's pick, and any other agent gets
+// nothing. Every consumer that renders or sizes a session's startup prompt
+// takes the template through this helper, because reading
+// Agent.PromptTemplate directly misses an implicit agent's builtin prompt.
+func startupPromptTemplate(cfg *config.City, a *config.Agent) string {
+	switch {
+	case a == nil:
+		return ""
+	case a.PromptTemplate != "":
+		return a.PromptTemplate
+	case a.Implicit && cfg != nil:
+		return primeBuiltinPromptFile(cfg, a)
+	}
+	return ""
+}
+
 // renderPrimeAgentPrompt renders an agent's prompt_template with the
 // fragments and rig-scoped pack dirs gc prime uses.
 func renderPrimeAgentPrompt(cityPath, cityName string, cfg *config.City, a *config.Agent, ctx PromptContext, stderr io.Writer) PromptRenderResult {

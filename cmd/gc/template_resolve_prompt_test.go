@@ -841,6 +841,88 @@ func TestResolveTemplateBeaconOnlyKeepsPrimeInstruction(t *testing.T) {
 	}
 }
 
+// TestResolveTemplateImplicitAgentStartsWithSelectedWorkerPrompt pins the launch
+// half of startupPromptTemplate: an implicit provider agent carries no
+// prompt_template, yet its session starts with the core pack's builtin worker
+// prompt below the beacon, graph-worker by default and pool-worker with
+// formula_v2 = false, for a hook provider and a hook-less one alike. An
+// explicit prompt-less agent keeps the bare beacon, and a launch with no city
+// bound renders nothing.
+func TestResolveTemplateImplicitAgentStartsWithSelectedWorkerPrompt(t *testing.T) {
+	const cityTOML = implicitProviderCityTOML + `
+[providers.opencode]
+base = "builtin:opencode"
+`
+	for _, tt := range []struct {
+		name        string
+		formulaV2   bool
+		wantHeading string
+	}{
+		{name: "formula_v2 default", formulaV2: true, wantHeading: "# Graph Worker"},
+		{name: "formula_v2 false", formulaV2: false, wantHeading: "# Pool Worker"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cityDir := writePrimeCity(t, cityTOML, map[string]string{})
+			writeBuiltinImportsFixture(t, cityDir, "core")
+			cfg, err := loadCityConfig(cityDir, io.Discard)
+			if err != nil {
+				t.Fatalf("loadCityConfig: %v", err)
+			}
+			cfg.Daemon.FormulaV2 = &tt.formulaV2
+			cfg.Agents = append(cfg.Agents, config.Agent{Name: "plain", Provider: "claude"})
+			bp := newAgentBuildParams("gastown", cityDir, cfg, runtime.NewFake(), testBeaconTime, nil, io.Discard)
+
+			for _, template := range []string{"claude", "opencode"} {
+				agent := findAgentByTemplate(cfg, template)
+				if agent == nil || !agent.Implicit || agent.PromptTemplate != "" {
+					t.Fatalf("implicit %s agent = %+v, want an implicit agent that carries no prompt_template", template, agent)
+				}
+				tp, err := resolveTemplate(bp, agent, agent.QualifiedName(), nil)
+				if err != nil {
+					t.Fatalf("resolveTemplate(%s): %v", template, err)
+				}
+				if !strings.Contains(tp.Prompt, "gastown") || !strings.Contains(tp.Prompt, tt.wantHeading) {
+					t.Errorf("%s: prompt lacks the beacon or %q: %q", template, tt.wantHeading, tp.Prompt)
+				}
+				if strings.Contains(tp.Prompt, "Run `gc prime`") {
+					t.Errorf("%s: a prompt inlined below the beacon must omit the gc prime instruction: %q", template, tp.Prompt)
+				}
+			}
+
+			plain := findAgentByTemplate(cfg, "plain")
+			tp, err := resolveTemplate(bp, plain, plain.QualifiedName(), nil)
+			if err != nil {
+				t.Fatalf("resolveTemplate(plain): %v", err)
+			}
+			if strings.Contains(tp.Prompt, "# Graph Worker") || strings.Contains(tp.Prompt, "# Pool Worker") {
+				t.Errorf("an explicit prompt-less agent must keep the bare beacon, got %q", tp.Prompt)
+			}
+		})
+	}
+
+	t.Run("no city bound", func(t *testing.T) {
+		params := &agentBuildParams{
+			fs:         fsys.NewFake(),
+			cityName:   "bright-lights",
+			cityPath:   t.TempDir(),
+			workspace:  &config.Workspace{Name: "bright-lights", Provider: "opencode"},
+			providers:  config.BuiltinProviders(),
+			lookPath:   func(string) (string, error) { return "/usr/bin/opencode", nil },
+			beaconTime: testBeaconTime,
+			beadNames:  make(map[string]string),
+			stderr:     io.Discard,
+		}
+		agent := &config.Agent{Name: "opencode", Provider: "opencode", Implicit: true}
+		tp, err := resolveTemplate(params, agent, agent.QualifiedName(), nil)
+		if err != nil {
+			t.Fatalf("resolveTemplate: %v", err)
+		}
+		if !strings.Contains(tp.Prompt, "Run `gc prime`") || strings.Contains(tp.Prompt, "# Graph Worker") || strings.Contains(tp.Prompt, "# Pool Worker") {
+			t.Errorf("an implicit agent with no city bound must get the bare beacon: %q", tp.Prompt)
+		}
+	})
+}
+
 func TestResolveTemplateKeepsConcreteProviderForOverlays(t *testing.T) {
 	cityPath := t.TempDir()
 	fs := fsys.NewFake()

@@ -4266,7 +4266,9 @@ type agentKey struct{ dir, name string }
 
 // InjectImplicitAgents adds implicit agent entries for configured providers
 // that lack an explicit [[agent]] entry, enabling auto-materialization of
-// sling targets without requiring manual agent declarations.
+// sling targets without requiring manual agent declarations. Implicit agents
+// carry no prompt_template: gc prime selects their builtin worker prompt as it
+// does for any agent without one.
 func InjectImplicitAgents(cfg *City) {
 	// Build set of existing agent keys (dir, name).
 	existing := make(map[agentKey]bool, len(cfg.Agents))
@@ -4283,15 +4285,6 @@ func InjectImplicitAgents(cfg *City) {
 	// then any custom providers in sorted order.
 	providers := configuredProviderOrder(configured)
 
-	// Implicit agents default to the core pack's pool-worker prompt when
-	// the core pack is composed (it resolves from the user-global cache,
-	// so the path is absolute). Without core the template stays empty and
-	// prompt rendering falls back to the embedded baseline.
-	promptTemplate := ""
-	if coreDir := cfg.PackDirByName("core"); coreDir != "" {
-		promptTemplate = filepath.Join(coreDir, "assets", "prompts", "pool-worker.template.md")
-	}
-
 	slingFormula := cfg.AgentDefaults.DefaultSlingFormula
 	if slingFormula == "" {
 		slingFormula = "mol-do-work"
@@ -4305,7 +4298,6 @@ func InjectImplicitAgents(cfg *City) {
 		cfg.Agents = append(cfg.Agents, Agent{
 			Name:                name,
 			Provider:            name,
-			PromptTemplate:      promptTemplate,
 			DefaultSlingFormula: &slingFormula,
 			Implicit:            true,
 		})
@@ -4321,7 +4313,6 @@ func InjectImplicitAgents(cfg *City) {
 				Name:                name,
 				Dir:                 rig.Name,
 				Provider:            name,
-				PromptTemplate:      promptTemplate,
 				DefaultSlingFormula: &slingFormula,
 				Implicit:            true,
 			})

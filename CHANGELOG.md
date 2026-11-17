@@ -1200,6 +1200,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Implicit provider agents' workers start with the core pack's builtin
+  worker prompt chosen by `formula_v2`: graph-worker by default, pool-worker
+  with `formula_v2 = false`.** The choice now holds at launch, on resume and
+  from `gc prime`; implicit agents used to be stamped with the pool-worker
+  prompt, whose bare `gc bd close <id>` fails retry-managed and abort-scope
+  steps and cost one cold session per step. Under the default a worker runs
+  one session across a workflow's steps. Under the default `formula_v2`,
+  `[workspace] global_fragments` and `[agent_defaults] append_fragments` no
+  longer reach implicit agents (graph-worker.md is plain markdown; explicit
+  prompt-less agents already do not receive them). `formula_v2 = false`
+  cities keep the pool-worker prompt, fragments included, at launch and
+  resume. A city that needs fragments on a provider worker declares an
+  explicit `[[agent]]` with a `prompt_template`.
+
 - **API: `GET /v0/city/{cityName}/orders/history` and
   `GET /v0/city/{cityName}/order/history/{bead_id}` report `created_at` with
   sub-second precision (RFC 3339 with nanoseconds) (#8453).** They used to

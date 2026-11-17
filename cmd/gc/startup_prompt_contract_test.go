@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -409,6 +410,60 @@ func TestStartupPromptContractClientProviderChatGetsNoPersona(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestStartupPromptContractImplicitWorkerResumeGetsSelectedWorkerPrompt is the
+// resume half of startupPromptTemplate: a resumed session of an implicit
+// provider agent, which carries no prompt_template, gets the core pack's builtin
+// worker prompt chosen by formula_v2, and a client's provider chat still gets
+// nothing.
+func TestStartupPromptContractImplicitWorkerResumeGetsSelectedWorkerPrompt(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		formulaV2   bool
+		wantHeading string
+	}{
+		{name: "formula_v2 default", formulaV2: true, wantHeading: "# Graph Worker"},
+		{name: "formula_v2 false", formulaV2: false, wantHeading: "# Pool Worker"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, bp := coreComposedProviderCity(t)
+			cfg.Daemon.FormulaV2 = &tt.formulaV2
+			agent := findAgentByTemplate(cfg, "claude")
+			if agent == nil || !agent.Implicit || agent.PromptTemplate != "" {
+				t.Fatalf("implicit claude agent = %+v, want an implicit agent that carries no prompt_template", agent)
+			}
+			resolved, err := config.ResolveProvider(agent, &cfg.Workspace, cfg.Providers, func(name string) (string, error) { return name, nil })
+			if err != nil {
+				t.Fatalf("ResolveProvider: %v", err)
+			}
+			resume := func(info session.Info) runtime.Config {
+				t.Helper()
+				info.Template = "claude"
+				info.WorkDir = bp.cityPath
+				info.SessionKey = "warm"
+				info.StartedConfigHash = "cfg"
+				hints, err := startupPromptCity{path: bp.cityPath, cfg: cfg, stderr: io.Discard}.
+					applyTo(info, resolved, "", runtime.Config{WorkDir: bp.cityPath, Env: map[string]string{}})
+				if err != nil {
+					t.Fatalf("applyTo: %v", err)
+				}
+				return hints
+			}
+
+			worker := resume(session.Info{ID: "gc-worker", SessionOrigin: "ephemeral", PoolManaged: true, PoolSlot: "1"})
+			if !strings.Contains(worker.Nudge, tt.wantHeading) || worker.Env[startupPromptDeliveredEnv] != "1" {
+				t.Errorf("resumed worker: want %q in the nudge and the delivered marker, got marker=%q nudge=%q",
+					tt.wantHeading, worker.Env[startupPromptDeliveredEnv], abbreviate(worker.Nudge))
+			}
+
+			chat := resume(session.Info{ID: "gc-chat", SessionOrigin: "manual", Alias: "my-chat"})
+			if chat.Nudge != "" || chat.Env[startupPromptDeliveredEnv] != "" {
+				t.Errorf("a client's provider chat must get no startup prompt on resume, got marker=%q nudge=%q",
+					chat.Env[startupPromptDeliveredEnv], abbreviate(chat.Nudge))
+			}
+		})
 	}
 }
 

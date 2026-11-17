@@ -60,3 +60,9 @@ round-trips. When adding a field to `SiteBinding` or `RigSiteBinding`, register
 its TOML key in `siteBindingKeyOwners` / `rigSiteBindingKeyOwners` and patch it
 only in that owning writer. `TestSiteBindingFieldsHaveWriterOwner` fails on an
 unregistered field.
+
+## Implicit agents carry no prompt_template
+
+`InjectImplicitAgents` leaves `PromptTemplate` empty. The startup prompt of an
+implicit agent's session is chosen in `cmd/gc` by `startupPromptTemplate`
+through `primeBuiltinPromptFile`; do not stamp a core-pack asset path in config.
