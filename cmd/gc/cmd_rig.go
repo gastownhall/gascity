@@ -1180,15 +1180,23 @@ var errRigReloadIncomplete = errors.New("controller reload did not complete")
 // and returns once it has applied it. `gc rig add` needs this: a reload that is
 // only queued leaves the controller serving `gc ready` from the pre-rig config
 // until its reconcile tick starts the reload, so work created in the new rig
-// right after the add is missing from a controller-served answer. With no
-// controller answering, it wakes the supervisor as reloadControllerConfig does.
+// right after the add is missing from a controller-served answer. Only an
+// absent controller (no socket, a refused connection, or an unavailable
+// controller) wakes the supervisor as reloadControllerConfig does; any other
+// failed exchange with a running controller reports errRigReloadIncomplete.
 func reloadControllerConfigAndWait(cityPath string) error {
 	if onWorkerSite(cityPath) {
 		return errWorkerSiteNoController
 	}
 	reply, err := sendReloadControlRequestHook(cityPath, reloadControlRequest{Wait: true, Timeout: "5m"})
 	if err != nil {
-		return pokeSupervisor()
+		// No controller listening: wake the supervisor; a later start reads the saved rig.
+		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, errControllerUnavailable) {
+			return pokeSupervisor()
+		}
+		// A controller answered the connection but the exchange failed (timeout,
+		// unresponsive, unparsable reply): the rig is saved but may not be served yet.
+		return fmt.Errorf("%w: %w", errRigReloadIncomplete, err)
 	}
 	if reply.Outcome != reloadOutcomeApplied && reply.Outcome != reloadOutcomeNoChange {
 		return fmt.Errorf("%w: outcome=%q error=%q message=%q", errRigReloadIncomplete, reply.Outcome, reply.Error, reply.Message)
