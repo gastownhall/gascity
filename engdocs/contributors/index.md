@@ -25,6 +25,10 @@ description: The shortest path for new contributors to get productive in Gas Cit
 - [Hold and Blocked Label Conventions](hold-label-conventions.md) when a bead
   needs to pause on a specific actor or condition — only `hold:mayor` and
   `hold:external` are canonical
+- [Early-Exit Readers Under pipefail](shell-pipefail-early-exit.md) when a
+  shell pipeline ends in `grep -q`, `head`, `sed ...q` or `awk ...exit` under
+  `set -o pipefail` — the producer can die of SIGPIPE and flip a match into a
+  miss; the guard test and the one-token rewrites are here
 - [Release Gate Criteria Conventions](release-gate-criteria-conventions.md)
   when signing off the "Tests pass" criterion on a `release-gates/*.md`
   deploy gate — it must cite the CI jobs `ci-required` actually gates on

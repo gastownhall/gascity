@@ -243,6 +243,7 @@ becoming more useful as models improve — it becomes LESS useful instead.
   work is unrecoverable. To read a file at a ref use `git show <ref>:<path>`.
   To check something out, use your own worktree or a disposable
   `git worktree add`.
+- **Pipefail:** see `scripts/AGENTS.md`.
 - **Non-interactive shell:** `cp`, `mv`, and `rm` may be aliased to `-i` and
   hang an agent; use `cp -f`, `mv -f`, `rm -f`, `rm -rf`, `cp -rf`. Use
   `-o BatchMode=yes` for `ssh`/`scp`, `-y` for `apt-get`, and
