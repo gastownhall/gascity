@@ -214,7 +214,7 @@ func TestGCStatusOrdersTimeoutBecomesUnmeasuredRow(t *testing.T) {
 		}
 	})
 	cityPath, cfg := cityStatusOrderTestCity(t)
-	cfg.Agents = []config.Agent{{Name: "worker"}}
+	cfg.Agents = []config.Agent{{Name: "worker", MaxActiveSessions: intPtr(1)}}
 	sp := runtime.NewFake()
 	var stderr bytes.Buffer
 

@@ -214,6 +214,7 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 		now = time.Now()
 	}
 	cronIntervals := map[string]time.Duration{}
+	findings := newOrderFindingSet()
 	worst := StatusOK
 	monitored := 0
 	var firstNonOK string
@@ -246,7 +247,7 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 		expected, err := expectedIntervalForOrder(order, cronIntervals)
 		if err != nil {
 			worst = worseStatus(worst, StatusError)
-			result.Details = append(result.Details, fmt.Sprintf("%s: cannot compute expected interval: %v", orderDisplayName(order), err))
+			findings.record(result, order, StatusError, SeverityBlocking, fmt.Sprintf("%s: cannot compute expected interval: %v", orderDisplayName(order), err))
 			if firstNonOK == "" {
 				firstNonOK = orderHistoryHintTarget(order)
 			}
@@ -257,7 +258,7 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 		lastFired, err := c.latestOrderFiredAtUsing(lastRunFor, firedEvents, order, cadence, now)
 		if err != nil {
 			worst = worseStatus(worst, StatusError)
-			result.Details = append(result.Details, fmt.Sprintf("%s: cannot read order history: %v", orderDisplayName(order), err))
+			findings.record(result, order, StatusError, SeverityBlocking, fmt.Sprintf("%s: cannot read order history: %v", orderDisplayName(order), err))
 			if firstNonOK == "" {
 				firstNonOK = orderHistoryHintTarget(order)
 			}
@@ -270,7 +271,7 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 				formatDispatchFloorDuration(expected), formatDispatchFloorDuration(floor))
 		}
 		worst = worseStatus(worst, status)
-		result.Details = append(result.Details, detail)
+		findings.record(result, order, status, severity, detail)
 		if status != StatusOK {
 			if firstNonOK == "" {
 				firstNonOK = orderHistoryHintTarget(order)
@@ -285,6 +286,7 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
+	result.Payload = findings.payload()
 	if monitored == 0 {
 		result.Status = StatusOK
 		result.Message = "no cron or cooldown orders"

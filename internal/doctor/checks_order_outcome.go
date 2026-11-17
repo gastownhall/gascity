@@ -207,6 +207,7 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 		return result
 	}
 
+	findings := newOrderFindingSet()
 	worst := StatusOK
 	monitored := 0
 	failing := 0
@@ -229,7 +230,7 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 		streak, lastMessage, sawOutcome, skipped := consecutiveOrderFailures(log.bySubject[order.ScopedName()], order.ScopedName(), log.starts, c.grace)
 		status, detail := classifyOrderOutcome(order, streak, c.threshold, lastMessage, sawOutcome, skipped)
 		worst = worseStatus(worst, status)
-		result.Details = append(result.Details, detail)
+		findings.record(result, order, status, SeverityAdvisory, detail)
 		if status != StatusOK {
 			failing++
 			if firstFailingHint == "" {
@@ -243,6 +244,7 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
+	result.Payload = findings.payload()
 	if monitored == 0 {
 		result.Status = StatusOK
 		result.Message = "no cron or cooldown orders"

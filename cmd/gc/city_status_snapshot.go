@@ -1,12 +1,14 @@
 package main
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -96,26 +98,24 @@ type cityStatusNamedSession struct {
 }
 
 // cityStatusOrder is one unhealthy order signal surfaced in gc status
-// without requiring gc doctor. Two distinct sources populate it: a firing- or
-// outcome-unhealthy order copies Name/Status/Severity/Message/Details
-// straight from that doctor check's own CheckResult
-// (Consecutive/FirstSuppressed left zero), while a gate-suppressed order sets
-// Name/Consecutive/FirstSuppressed from its events.OrderSuppressedPayload and
-// synthesizes Message, since no doctor check reads that event type.
+// without requiring gc doctor. Three sources populate it: a firing- or
+// outcome-unhealthy check copies Name/Status/Severity/Message from its
+// CheckResult and carries the non-OK per-order Findings from the check's typed
+// payload; a check that gave no verdict within statusOrderHealthTimeout
+// becomes a warning/advisory "unmeasured" row; and a gate-suppressed order
+// sets Name/Consecutive/FirstSuppressed from its events.OrderSuppressedPayload
+// and synthesizes Message, since no doctor check reads that event type. Every
+// row is non-OK: a healthy check produces no row.
 type cityStatusOrder struct {
 	Name     string
 	Status   doctor.CheckStatus
 	Severity doctor.CheckSeverity
 	Message  string
-	// Details is the check's own per-order breakdown, carried through
-	// verbatim. Both order checks summarize into a Message that names no
-	// order ("scheduled orders are stale"), so without this the row tells an
-	// operator nothing actionable and they have to run gc doctor anyway. It
-	// is the same list gc doctor --verbose prints, so it includes a line per
-	// monitored order rather than only the offending ones; the renderer caps
-	// it at cityStatusOrderDetailLimit. Empty for suppression rows, whose
-	// Name is already the order name.
-	Details         []string
+	// Findings are the check's non-OK per-order results. Both order checks
+	// summarize into a Message that names no order ("scheduled orders are
+	// stale"), so without them the row tells an operator nothing actionable.
+	// The renderer orders them worst-first and caps them at
+	// cityStatusOrderDetailLimit. Empty for unmeasured and suppression rows.
 	Findings        []doctor.OrderFinding
 	Consecutive     int
 	FirstSuppressed string
@@ -189,17 +189,6 @@ func buildCityStoreHealth(cityPath string, store beads.Store, stderr io.Writer) 
 
 func collectCityStatusSnapshot(sp runtime.Provider, cfg *config.City, cityPath string, store beads.Store, stderr io.Writer) cityStatusSnapshot {
 	return collectCityStatusSnapshotFromStoreSnapshot(sp, cfg, cityPath, store, loadStatusSessionSnapshot(cityPath, cfg, cliSessionStore(store, cfg, cityPath), stderr), stderr)
-}
-
-// newStatusOrderChecks builds the checks the text route's Orders leg runs.
-// RED stub: the real constructor lands with the implementation.
-var newStatusOrderChecks = func(*config.City, string, io.Writer) []doctor.Check { return nil }
-
-// startCityStatusOrders starts the text route's Orders leg and returns the
-// join that yields its rows.
-// RED stub: the real leg lands with the implementation.
-func startCityStatusOrders(*config.City, string, io.Writer) func() []cityStatusOrder {
-	return func() []cityStatusOrder { return nil }
 }
 
 func collectCityStatusSnapshotFromStoreSnapshot(
@@ -370,8 +359,6 @@ func collectCityStatusSnapshotFromStoreSnapshot(
 		})
 	}
 
-	snapshot.Orders = collectCityStatusOrders(cfg, cityPath, stderr)
-
 	return snapshot
 }
 
@@ -410,12 +397,8 @@ const (
 	cityStatusOrderDetailLimit = 20
 )
 
-// collectCityStatusOrders gathers the unhealthy-order signals gc status
-// surfaces without requiring gc doctor: the firing- and outcome-health
-// checks doctor already runs, copied straight from their own CheckResult so
-// the two commands can never disagree, plus the current open-work gate
-// suppression state (events.OrderSuppressed), which neither doctor check
-// reads.
+// newStatusOrderChecks builds the checks the text route's Orders leg runs:
+// the firing- and outcome-health checks doctor already runs.
 //
 // The firing-current check is wired with the same
 // doctor.WithOrderFiringCurrentLastRunFunc(doctorOrderFiringCurrentLastRunFunc(...))
@@ -424,26 +407,80 @@ const (
 // order whose last firing falls outside the check's bounded events.jsonl
 // tail read has no fallback and gc status silently disagrees with gc
 // doctor, which does have the authoritative order-run-history lookup.
-func collectCityStatusOrders(cfg *config.City, cityPath string, stderr io.Writer) []cityStatusOrder {
-	var result []cityStatusOrder
-
-	checkCtx := &doctor.CheckContext{CityPath: cityPath}
-	for _, r := range []*doctor.CheckResult{
-		doctor.NewOrderFiringCurrentCheck(cfg, cityPath, doctor.WithOrderFiringCurrentLastRunFunc(doctorOrderFiringCurrentLastRunFunc(cityPath, cfg, stderr))).Run(checkCtx),
-		doctor.NewOrderOutcomeHealthyCheck(cfg, cityPath).Run(checkCtx),
-	} {
-		if r.Status == doctor.StatusOK {
-			continue
-		}
-		result = append(result, cityStatusOrder{
-			Name:     r.Name,
-			Status:   r.Status,
-			Severity: r.Severity,
-			Message:  r.Message,
-			Details:  r.Details,
-		})
+// Indirected through a var so tests swap the check set.
+var newStatusOrderChecks = func(cfg *config.City, cityPath string, stderr io.Writer) []doctor.Check {
+	return []doctor.Check{
+		doctor.NewOrderFiringCurrentCheck(cfg, cityPath, doctor.WithOrderFiringCurrentLastRunFunc(doctorOrderFiringCurrentLastRunFunc(cityPath, cfg, stderr))),
+		doctor.NewOrderOutcomeHealthyCheck(cfg, cityPath),
 	}
+}
 
+// startCityStatusOrders starts the text route's Orders leg and returns the
+// join that yields its rows. Each order check runs through its own
+// doctor.Doctor, concurrently, with CheckTimeout set to
+// statusOrderHealthTimeout, so the leg costs at most one budget however many
+// checks it runs, and a check that outlives it is abandoned by the runner and
+// reported TimedOut. Doctor.Wait is never called: it would block on the
+// abandoned check, and the process exits right after rendering. The join
+// returns once every check has a result, then reads the suppression events.
+//
+// Starting the leg before the rest of the snapshot is collected overlaps its
+// budget with that work. gc status --json never starts it.
+func startCityStatusOrders(cfg *config.City, cityPath string, stderr io.Writer) func() []cityStatusOrder {
+	if cfg == nil {
+		return func() []cityStatusOrder { return nil }
+	}
+	timeout := statusOrderHealthTimeout
+	checks := newStatusOrderChecks(cfg, cityPath, lockedStderr(stderr))
+	results := make([]*doctor.CheckResult, len(checks))
+	var wg sync.WaitGroup
+	for i, check := range checks {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			d := &doctor.Doctor{CheckTimeout: timeout}
+			d.Register(check)
+			results[i] = d.RunCollect(&doctor.CheckContext{CityPath: cityPath}, false).Results[0]
+		}()
+	}
+	return func() []cityStatusOrder {
+		wg.Wait()
+		return append(cityStatusOrdersFromResults(results, timeout), cityStatusSuppressedOrders(cityPath)...)
+	}
+}
+
+// cityStatusOrdersFromResults turns the order checks' results into Orders
+// rows: healthy checks produce none, a TimedOut check becomes an "unmeasured"
+// row (not snapshot.Partial, which means agent rows are unknown), and any
+// other non-OK check carries its message and typed findings.
+func cityStatusOrdersFromResults(results []*doctor.CheckResult, timeout time.Duration) []cityStatusOrder {
+	var rows []cityStatusOrder
+	for _, r := range results {
+		switch {
+		case r.TimedOut:
+			rows = append(rows, cityStatusOrder{
+				Name:     r.Name,
+				Status:   doctor.StatusWarning,
+				Severity: doctor.SeverityAdvisory,
+				Message:  fmt.Sprintf("unmeasured: no verdict within %s; run gc doctor --check %s", timeout, r.Name),
+			})
+		case r.Status != doctor.StatusOK:
+			findings, _ := doctor.OrderFindings(r)
+			rows = append(rows, cityStatusOrder{
+				Name:     r.Name,
+				Status:   r.Status,
+				Severity: r.Severity,
+				Message:  r.Message,
+				Findings: findings,
+			})
+		}
+	}
+	return rows
+}
+
+// cityStatusSuppressedOrders reads the current open-work gate suppression
+// state (events.OrderSuppressed), which neither doctor check reads.
+func cityStatusSuppressedOrders(cityPath string) []cityStatusOrder {
 	// Tail-read events.jsonl for recent OrderSuppressed events and keep only
 	// the most recent one per order name: the gate re-emits this event on
 	// every suppressed dispatch tick, so a live-stuck order can appear many
@@ -471,6 +508,8 @@ func collectCityStatusOrders(cfg *config.City, cityPath string, stderr io.Writer
 		}
 		row := cityStatusOrder{
 			Name:            payload.OrderName,
+			Status:          doctor.StatusWarning,
+			Severity:        doctor.SeverityAdvisory,
 			Consecutive:     payload.Consecutive,
 			FirstSuppressed: payload.FirstSuppressed,
 			Message:         e.Message,
@@ -483,7 +522,7 @@ func collectCityStatusOrders(cfg *config.City, cityPath string, stderr io.Writer
 		}
 	}
 
-	return append(result, suppressedRows...)
+	return suppressedRows
 }
 
 func namedSessionStatusForCity(
@@ -783,13 +822,7 @@ func renderCityStatusText(snapshot cityStatusSnapshot, dops drainOps, stdout io.
 		fmt.Fprintln(stdout, "Orders:")
 		for _, order := range snapshot.Orders {
 			fmt.Fprintf(stdout, "  %-24s%s\n", order.Name, order.Message) //nolint:errcheck // best-effort stdout
-			for i, detail := range order.Details {
-				if i == cityStatusOrderDetailLimit {
-					fmt.Fprintf(stdout, "    ... and %d more (gc doctor --verbose)\n", len(order.Details)-cityStatusOrderDetailLimit) //nolint:errcheck // best-effort stdout
-					break
-				}
-				fmt.Fprintf(stdout, "    %s\n", detail) //nolint:errcheck // best-effort stdout
-			}
+			renderCityStatusOrderFindings(stdout, order.Findings)
 		}
 	}
 
@@ -807,6 +840,42 @@ func renderCityStatusText(snapshot cityStatusSnapshot, dops drainOps, stdout io.
 
 	renderStoreHealthBlock(stdout, snapshot.Summary.StoreHealth)
 	renderConditionalWritesBlock(stdout, snapshot.ConditionalWrites)
+}
+
+// renderCityStatusOrderFindings prints one order row's findings worst-first
+// (error before warning, blocking before advisory, then order name), so the
+// cap never hides the most severe, then an overflow line counting the
+// findings it cut.
+func renderCityStatusOrderFindings(stdout io.Writer, findings []doctor.OrderFinding) {
+	sorted := slices.Clone(findings)
+	slices.SortStableFunc(sorted, func(a, b doctor.OrderFinding) int {
+		return cmp.Or(
+			cmp.Compare(orderFindingStatusRank(a.Status), orderFindingStatusRank(b.Status)),
+			cmp.Compare(orderFindingSeverityRank(a.Severity), orderFindingSeverityRank(b.Severity)),
+			cmp.Compare(a.Order, b.Order),
+		)
+	})
+	for i, f := range sorted {
+		if i == cityStatusOrderDetailLimit {
+			fmt.Fprintf(stdout, "    ... and %d more (gc doctor --verbose)\n", len(sorted)-cityStatusOrderDetailLimit) //nolint:errcheck // best-effort stdout
+			return
+		}
+		fmt.Fprintf(stdout, "    %s\n", f.Detail) //nolint:errcheck // best-effort stdout
+	}
+}
+
+func orderFindingStatusRank(status string) int {
+	if status == "error" {
+		return 0
+	}
+	return 1
+}
+
+func orderFindingSeverityRank(severity string) int {
+	if severity == "blocking" {
+		return 0
+	}
+	return 1
 }
 
 // renderConditionalWritesBlock prints the daemon's latched conditional-writes

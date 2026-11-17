@@ -133,7 +133,10 @@ var (
 	controllerStatusStandaloneFallbackTimeout = 250 * time.Millisecond
 	statusObservationTimeout                  = 750 * time.Millisecond
 	statusSessionSnapshotTimeout              = 3 * time.Second
-	statusOrderHealthTimeout                  = 3 * time.Second
+	// statusOrderHealthTimeout bounds each order-health check in the text
+	// route's Orders leg; a check with no verdict by then is reported
+	// "unmeasured" instead of stalling gc status.
+	statusOrderHealthTimeout = 3 * time.Second
 )
 
 // newStatusCmd creates the "gc status [path]" command.
@@ -632,7 +635,11 @@ func doCityStatusWithStoreAndSnapshot(
 	statusSnapshot *sessionBeadSnapshot,
 	stdout, stderr io.Writer,
 ) int {
+	// The Orders leg is text-only and starts first, so its budget overlaps the
+	// rest of the collection; gc status --json never runs it.
+	joinOrders := startCityStatusOrders(cfg, cityPath, stderr)
 	snapshot := collectCityStatusSnapshotFromStoreSnapshot(sp, cfg, cityPath, store, statusSnapshot, stderr)
+	snapshot.Orders = joinOrders()
 	renderCityStatusText(snapshot, dops, stdout)
 
 	// Track session-snapshot degradation so we can render the textual report
