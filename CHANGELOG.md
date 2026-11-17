@@ -1346,6 +1346,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gc sling --on <formula> --force` now replaces the live workflow instead
+  of launching a second one beside it.** On the convoy-first graph.v2 path a
+  forced re-sling of a bead that already had a live root for the same formula
+  left two live roots, although `--force` is documented as allowing workflow
+  replacement. It now closes every live root for that formula and bead (marked
+  `graphv2_force_replaced`) once the new root has started, retires each closed
+  root's synthetic input convoy, and prints `Superseded N live workflow(s)`.
+  If any step fails, every prior root is restored and the new root and convoy
+  are closed, so a failed `--force` never leaves zero live workflows. Roots of
+  other formulas and roots of a multi-item convoy are untouched, and without
+  `--force` the duplicate-workflow refusal is unchanged. `gc sling --dry-run
+  --force` now names the roots it would replace instead of claiming nothing
+  blocks the launch.
+
 - **Adopting or restarting with a bd store bound to a loopback Dolt server
   gc does not run works.** A store `bd init --server --external` bound to a
   dolt sql-server on `127.0.0.1`/`localhost`/`::1` was classified as gc's own

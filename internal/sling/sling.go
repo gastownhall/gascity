@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"maps"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
@@ -247,6 +249,7 @@ type SlingResult struct {
 	SuspendedRig   string   // non-empty: name of the target's rig, which is suspended
 	PoolEmpty      bool     // pool max=0
 	AutoBurned     []string // IDs of auto-burned stale molecules
+	Superseded     []string // IDs of live graph.v2 roots a --force launch closed in favor of the new root
 	MetadataErrors []string // non-fatal metadata write failures
 	BeadWarnings   []string // pre-flight bead state warnings
 	Deprecations   []string // deprecated formula constructs (graph.v2 issue alias)
@@ -1644,6 +1647,75 @@ func rollbackGraphV2ReplacementLaunch(store beads.GraphStore, replacementRootID 
 	}
 	if err := sourceworkflow.RestoreWorkflowBeads(storeMolecule, snapshot.snapshots); err != nil {
 		rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore replaced formulas v2 root %s: %w", snapshot.rootID, err))
+	}
+	return rollbackErr
+}
+
+// supersedeConvoyTrackedRoots closes every root in priors -- the live
+// convoy-tracked roots a --force launch displaces -- marking each
+// graphv2_force_replaced through closeReplacedGraphV2Root. It returns the IDs it
+// closed and every snapshot it took, in the order taken. On a failure the roots
+// already closed are NOT restored here: the caller owns the replacement root and
+// rolls the whole launch back through rollbackGraphV2Supersede, so a failure
+// part-way never leaves some priors closed and the replacement live.
+func supersedeConvoyTrackedRoots(store beads.GraphStore, priors []beads.Bead) (superseded []string, snapshots []sourceworkflow.WorkflowBeadSnapshot, err error) {
+	for _, prior := range priors {
+		taken, err := closeReplacedGraphV2Root(store, prior.ID)
+		if err != nil {
+			return superseded, snapshots, err
+		}
+		if len(taken) == 0 {
+			// Already closed by the time we got here (the keyed replacement
+			// path in the launch itself): nothing was superseded by us.
+			continue
+		}
+		superseded = append(superseded, prior.ID)
+		snapshots = append(snapshots, taken...)
+	}
+	return superseded, snapshots, nil
+}
+
+// retireSupersededInputConvoys closes the synthetic input convoy of each root
+// supersede closed, so a forced re-sling does not leave an open, claim-attracting
+// convoy per replaced launch. It runs after the replacement is live and outside
+// the rollback set: a convoy that will not close is a warning for the caller to
+// show, never a reason to fail or undo a launch that already replaced its roots.
+func retireSupersededInputConvoys(deps SlingDeps, beadID string, priors []beads.Bead, superseded []string) []string {
+	var warnings []string
+	for _, prior := range priors {
+		if !slices.Contains(superseded, prior.ID) {
+			continue
+		}
+		convoyID := strings.TrimSpace(prior.Metadata[beadmeta.InputConvoyIDMetadataKey])
+		if convoyID == "" {
+			continue
+		}
+		graphv2.CloseSyntheticInputConvoy(deps.Store, convoyID, beadID)
+		if convoy, err := deps.Store.Get(convoyID); err != nil {
+			warnings = append(warnings, fmt.Sprintf("superseded workflow %s: could not confirm its input convoy %s closed: %v", prior.ID, convoyID, err))
+		} else if !convoycore.IsTerminalStatus(convoy.Status) {
+			warnings = append(warnings, fmt.Sprintf("superseded workflow %s: input convoy %s is still %s; close it by hand", prior.ID, convoyID, convoy.Status))
+		}
+	}
+	return warnings
+}
+
+// rollbackGraphV2Supersede undoes a --force launch whose supersede step failed:
+// it closes the replacement root and restores every prior root snapshots holds,
+// so the city ends with its previous live roots and never with zero.
+func rollbackGraphV2Supersede(store beads.GraphStore, replacementRootID string, snapshots []sourceworkflow.WorkflowBeadSnapshot) error {
+	if store == (beads.GraphStore{}) {
+		return nil
+	}
+	storeMolecule := beads.GraphMolecule(store)
+	var rollbackErr error
+	if replacementRootID = strings.TrimSpace(replacementRootID); replacementRootID != "" {
+		if _, err := sourceworkflow.CloseWorkflowSubtree(storeMolecule, replacementRootID); err != nil {
+			rollbackErr = errors.Join(rollbackErr, fmt.Errorf("close replacement formulas v2 root %s: %w", replacementRootID, err))
+		}
+	}
+	if err := sourceworkflow.RestoreWorkflowBeads(storeMolecule, snapshots); err != nil {
+		rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore superseded formulas v2 roots: %w", err))
 	}
 	return rollbackErr
 }

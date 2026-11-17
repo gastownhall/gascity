@@ -3805,19 +3805,16 @@ func TestSlingAttachGraphFormulaConvoyFirstNoExistingRootProceeds(t *testing.T) 
 	}
 }
 
-// TestSlingAttachGraphFormulaForceRelaunchesDespiteLiveConvoyTrackedRoot
-// pins the --force escape hatch on the convoy-first path. The CLI advertises
-// --force as the override for exactly this ConflictError, so the guard added
-// for #5420 must not become the one conflict class --force cannot clear.
-//
-// Note what --force does here today: it launches a SECOND live root beside
-// the first rather than superseding it. That is unchanged pre-existing
-// behavior on this path -- snapshotGraphV2ReplacementRoot keys the
-// replacement on RootKey(inputConvoyID, ...), and a bare-bead `--on` mints a
-// fresh synthetic input convoy per launch, so the prior root is never the
-// replacement candidate. Making --force supersede instead is filed as
-// follow-up, not attempted here.
-func TestSlingAttachGraphFormulaForceRelaunchesDespiteLiveConvoyTrackedRoot(t *testing.T) {
+// TestSlingAttachGraphFormulaForceSupersedesLiveConvoyTrackedRoot pins what
+// --force means on the convoy-first path: the CLI advertises it as the
+// override for the #5420 ConflictError and describes it as workflow
+// REPLACEMENT, so a forced re-sling closes the live root it displaces (marked
+// graphv2_force_replaced) and retires that launch's synthetic input convoy,
+// leaving exactly one live root. snapshotGraphV2ReplacementRoot keys on
+// RootKey(inputConvoyID, ...) and a bare-bead `--on` mints a fresh synthetic
+// input convoy per launch, so the prior root has to be found through the
+// convoy-tracking lookup instead.
+func TestSlingAttachGraphFormulaForceSupersedesLiveConvoyTrackedRoot(t *testing.T) {
 	deps := graphV2ConvoyFirstSlingTestConfig(t)
 	source, err := deps.Store.Create(beads.Bead{ID: "BL-42", Title: "work", Type: "task", Status: "open"})
 	if err != nil {
@@ -3836,16 +3833,46 @@ func TestSlingAttachGraphFormulaForceRelaunchesDespiteLiveConvoyTrackedRoot(t *t
 	if first.WorkflowID == "" {
 		t.Fatal("first launch: WorkflowID empty, want a live workflow root")
 	}
+	firstRoot, err := deps.Store.Get(first.WorkflowID)
+	if err != nil {
+		t.Fatalf("Get(first root): %v", err)
+	}
+	firstConvoyID := firstRoot.Metadata[beadmeta.InputConvoyIDMetadataKey]
+	if firstConvoyID == "" {
+		t.Fatal("first root carries no gc.input_convoy_id; the fixture is not convoy-first")
+	}
 
 	second, err := s.AttachFormula(context.Background(), "graph-work", source.ID, a, FormulaOpts{Force: true})
 	if err != nil {
 		t.Fatalf("forced AttachFormula: %v, want nil -- --force must override the convoy-tracked duplicate guard", err)
 	}
-	if second.WorkflowID == "" {
-		t.Fatal("forced launch: WorkflowID empty, want a live workflow root")
+	if second.WorkflowID == "" || second.WorkflowID == first.WorkflowID {
+		t.Fatalf("forced WorkflowID = %q, want a fresh root distinct from %q", second.WorkflowID, first.WorkflowID)
 	}
-	if second.WorkflowID == first.WorkflowID {
-		t.Fatalf("forced WorkflowID = %q, want a root distinct from the first launch's", second.WorkflowID)
+	if want := []string{first.WorkflowID}; !slices.Equal(second.Superseded, want) {
+		t.Fatalf("result.Superseded = %v, want %v", second.Superseded, want)
+	}
+
+	live := liveGraphV2Roots(t, deps.Store)
+	if len(live) != 1 || live[0].ID != second.WorkflowID {
+		t.Fatalf("live graph roots = %+v, want exactly the forced launch's root %s", live, second.WorkflowID)
+	}
+	oldRoot, err := deps.Store.Get(first.WorkflowID)
+	if err != nil {
+		t.Fatalf("Get(old root): %v", err)
+	}
+	if oldRoot.Status != "closed" {
+		t.Fatalf("old root status = %q, want closed", oldRoot.Status)
+	}
+	if got := oldRoot.Metadata[beadmeta.FailureReasonMetadataKey]; got != "graphv2_force_replaced" {
+		t.Fatalf("old root gc.failure_reason = %q, want graphv2_force_replaced", got)
+	}
+	oldConvoy, err := deps.Store.Get(firstConvoyID)
+	if err != nil {
+		t.Fatalf("Get(old input convoy): %v", err)
+	}
+	if oldConvoy.Status != "closed" {
+		t.Fatalf("superseded root's synthetic input convoy status = %q, want closed", oldConvoy.Status)
 	}
 }
 

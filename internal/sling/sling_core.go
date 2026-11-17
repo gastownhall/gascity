@@ -714,6 +714,20 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 			if err != nil {
 				return result, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
 			}
+			// --force supersedes every live convoy-tracked root for this
+			// (formula, bead). The keyed snapshot above cannot find them: a
+			// bare-bead `--on` mints a fresh synthetic input convoy per
+			// launch, so no prior root shares this launch's root key. They are
+			// listed BEFORE the launch so the new root is never in its own
+			// supersede set, and closed only AFTER the launch started, so a
+			// failed launch leaves every prior untouched.
+			var priorRoots []beads.Bead
+			if opts.Force {
+				priorRoots, err = liveConvoyTrackedWorkflowRoots(deps.Store, deps.GraphStore, beadID, formulaName)
+				if err != nil {
+					return result, fmt.Errorf("instantiating %s %q on %s: %w", errLabel, formulaName, beadID, err)
+				}
+			}
 			mResult, err := InstantiateSlingFormula(context.Background(), formulaName, searchPaths, molecule.Options{
 				Title:            opts.Title,
 				Vars:             formulaVars,
@@ -730,11 +744,28 @@ func attachFormulaToBead(opts SlingOpts, deps SlingDeps, querier BeadQuerier, be
 				// root was created in: a rollback that closed the replacement
 				// through a store that does not hold it would leave the failed
 				// launch live and restore nothing.
-				if rollbackErr := rollbackGraphV2ReplacementLaunch(deps.GraphStore, mResult.RootID, replacedSnapshot); rollbackErr != nil {
+				rollbackErr := rollbackGraphV2ReplacementLaunch(deps.GraphStore, mResult.RootID, replacedSnapshot)
+				if opts.Force && replacedSnapshot.rootID == "" {
+					// No keyed root was displaced, so the call above did
+					// nothing: close the replacement ourselves, or a forced
+					// launch that fails to start leaves a half-started live
+					// root beside the priors it never got to replace.
+					rollbackErr = rollbackGraphV2Supersede(deps.GraphStore, mResult.RootID, nil)
+				}
+				if rollbackErr != nil {
 					return wfResult, errors.Join(wfErr, rollbackErr)
 				}
 				return wfResult, wfErr
 			}
+			superseded, supersedeSnapshots, supErr := supersedeConvoyTrackedRoots(deps.GraphStore, priorRoots)
+			if supErr != nil {
+				if rollbackErr := rollbackGraphV2Supersede(deps.GraphStore, mResult.RootID, supersedeSnapshots); rollbackErr != nil {
+					return wfResult, errors.Join(supErr, rollbackErr)
+				}
+				return wfResult, fmt.Errorf("superseding live workflows on %s: %w", beadID, supErr)
+			}
+			wfResult.Superseded = superseded
+			wfResult.BeadWarnings = append(wfResult.BeadWarnings, retireSupersededInputConvoys(deps, beadID, priorRoots, superseded)...)
 			// The convoy-first branch deliberately passes an empty
 			// sourceBeadID (the source is tracked through the input convoy,
 			// not gc.source_bead_id), so doStartGraphWorkflow's own restamp
@@ -2024,7 +2055,9 @@ func checkLegacySourceWorkflowConflict(deps SlingDeps, beadID, formulaName strin
 	//
 	// --force skips this lookup: the CLI advertises --force as the override
 	// for exactly this conflict, and the sibling check in
-	// withSourceWorkflowLaunchLock gates on `if !force` the same way.
+	// withSourceWorkflowLaunchLock gates on `if !force` the same way. The
+	// roots it would have refused are not ignored: attachFormulaToBead lists
+	// them itself and supersedes them once the replacement has started.
 	var convoyRoots []beads.Bead
 	if !force {
 		convoyRoots, err = liveConvoyTrackedWorkflowRoots(deps.Store, deps.GraphStore, beadID, formulaName)

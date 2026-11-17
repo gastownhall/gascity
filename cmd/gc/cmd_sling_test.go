@@ -6730,13 +6730,11 @@ func TestDryRunOnFormulaBlockedByLiveConvoyTrackedWorkflow(t *testing.T) {
 	}
 }
 
-// TestDryRunOnFormulaForceSkipsConvoyTrackedWorkflowPreCheck pins the
-// --force preview against the same shape: --force overrides the
-// convoy-tracked duplicate guard at launch time, so the preview must not
-// predict a failure the real run will not produce. The workflow half of the
-// pre-check is skipped, so the pass line reverts to its pre-#5420 wording
-// rather than claiming an absence that was never checked.
-func TestDryRunOnFormulaForceSkipsConvoyTrackedWorkflowPreCheck(t *testing.T) {
+// TestDryRunOnFormulaForceNamesTheRootsItWouldSupersede: a forced launch
+// closes every live convoy-tracked root for (formula, bead), so the preview
+// names them and exits 0 instead of either predicting a refusal --force will
+// not produce or silently saying nothing about the roots it will close.
+func TestDryRunOnFormulaForceNamesTheRootsItWouldSupersede(t *testing.T) {
 	formulaDir := t.TempDir()
 	writeGraphV2FormulaForDryRunTest(t, formulaDir)
 
@@ -6752,8 +6750,11 @@ func TestDryRunOnFormulaForceSkipsConvoyTrackedWorkflowPreCheck(t *testing.T) {
 	q.childrenOf["BL-42"] = []beads.Bead{}
 
 	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
-	deps = slingDepsWithStore(deps, seededStore("BL-42"))
-	seedConvoyTrackedWorkflow(t, deps.Store, "BL-42", "graph-work")
+	deps = slingDepsWithStore(deps, seededStore("BL-42", "BL-99"))
+	rootA := seedConvoyTrackedWorkflow(t, deps.Store, "BL-42", "graph-work")
+	rootB := seedConvoyTrackedWorkflow(t, deps.Store, "BL-42", "graph-work")
+	other := seedConvoyTrackedWorkflow(t, deps.Store, "BL-42", "some-other-formula")
+	foreign := seedConvoyTrackedWorkflow(t, deps.Store, "BL-99", "graph-work")
 
 	opts := testOpts(a, "BL-42")
 	opts.OnFormula = "graph-work"
@@ -6765,13 +6766,72 @@ func TestDryRunOnFormulaForceSkipsConvoyTrackedWorkflowPreCheck(t *testing.T) {
 		t.Fatalf("dry-run --force returned %d, want 0; stderr: %s", code, stderr.String())
 	}
 	if strings.Contains(stderr.String(), "already has attached workflow") {
-		t.Errorf("stderr predicts a blocking workflow --force would override: %s", stderr.String())
+		t.Errorf("stderr predicts a refusal --force would override: %s", stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "Pre-check: BL-42 has no existing molecule/wisp children ✓") {
-		t.Errorf("stdout missing the pre-#5420 pre-check line: %s", stdout.String())
+	out := stdout.String()
+	if !strings.Contains(out, "Would supersede") {
+		t.Fatalf("stdout does not say the forced launch would supersede anything:\n%s", out)
 	}
-	if strings.Contains(stdout.String(), "live formulas-v2 workflow") {
-		t.Errorf("stdout claims a workflow pre-check --force skipped: %s", stdout.String())
+	for _, id := range []string{rootA.ID, rootB.ID} {
+		if !strings.Contains(out, id) {
+			t.Errorf("stdout does not name the root %s a forced launch would close:\n%s", id, out)
+		}
+	}
+	for _, untouched := range []string{other.ID, foreign.ID} {
+		if strings.Contains(out, untouched) {
+			t.Errorf("stdout names %s, a root --force would not touch (other formula or other bead):\n%s", untouched, out)
+		}
+	}
+	if strings.Contains(out, "has no existing molecule/wisp children or live formulas-v2 workflow") {
+		t.Errorf("stdout claims there is no live workflow while naming roots it would close:\n%s", out)
+	}
+}
+
+// TestDryRunOnFormulaForceWithNoLiveRootKeepsThePassLine: with nothing to
+// supersede, a forced preview reads exactly like the unforced one.
+func TestDryRunOnFormulaForceWithNoLiveRootKeepsThePassLine(t *testing.T) {
+	formulaDir := t.TempDir()
+	writeGraphV2FormulaForDryRunTest(t, formulaDir)
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Daemon:        config.DaemonConfig{FormulaV2: boolPtr(true)},
+		FormulaLayers: config.FormulaLayers{City: []string{formulaDir}},
+	}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	q := newFakeChildQuerier()
+	q.beadsByID["BL-42"] = beads.Bead{ID: "BL-42", Type: "task", Status: "open"}
+	q.childrenOf["BL-42"] = []beads.Bead{}
+	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps = slingDepsWithStore(deps, seededStore("BL-42"))
+
+	opts := testOpts(a, "BL-42")
+	opts.OnFormula = "graph-work"
+	opts.DryRun = true
+	opts.Force = true
+	if code := doSling(opts, deps, q, stdout, stderr); code != 0 {
+		t.Fatalf("dry-run --force returned %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Would supersede") {
+		t.Errorf("stdout predicts a supersede with no live root:\n%s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Pre-check: BL-42 has no existing molecule/wisp children or live formulas-v2 workflow for graph-work ✓") {
+		t.Errorf("stdout lost the pass line:\n%s", stdout.String())
+	}
+}
+
+// TestPrintSlingWarningsReportsSupersededRoots is I8's CLI half: a forced
+// launch that closed live roots says so in one line naming every one.
+func TestPrintSlingWarningsReportsSupersededRoots(t *testing.T) {
+	var stderr bytes.Buffer
+	printSlingWarnings(sling.SlingResult{Superseded: []string{"gc-3", "gc-5"}}, &stderr)
+	lines := strings.Split(strings.TrimSpace(stderr.String()), "\n")
+	if len(lines) != 1 || !strings.Contains(lines[0], "Superseded") || !strings.Contains(lines[0], "gc-3") || !strings.Contains(lines[0], "gc-5") {
+		t.Fatalf("stderr = %q, want one Superseded line naming gc-3 and gc-5", stderr.String())
+	}
+	stderr.Reset()
+	printSlingWarnings(sling.SlingResult{}, &stderr)
+	if strings.Contains(stderr.String(), "Superseded") {
+		t.Errorf("stderr mentions a supersede with none recorded: %q", stderr.String())
 	}
 }
 
