@@ -216,8 +216,14 @@ type QuarantinedRow struct {
 }
 
 // ListOpen returns the conversation's open ops in CompareOrder order. It
-// issues exactly one read, keyed by gc.op.open, which only open rows carry,
-// and fails loudly on any row it cannot serve.
+// issues exactly one read of op rows (LabelOp), keyed by gc.op.open, which
+// only open rows carry, and fails loudly on any row it cannot serve.
+//
+// The label is what bounds the read. A metadata key has no index, so a list
+// keyed by gc.op.open alone compares it on every row the store holds, closed
+// history of every other kind included; the label narrows that to op rows
+// first, as the journal's other keyed reads do. A row that carries
+// gc.op.open without the op label is not an op (DecodeOp) and is not read.
 func (s *Store) ListOpen(conversation string) ([]Op, error) {
 	ops, quarantined, err := s.ListOpenTolerant(conversation)
 	if err != nil {
@@ -237,6 +243,7 @@ func (s *Store) ListOpenTolerant(conversation string) ([]Op, []QuarantinedRow, e
 		return nil, nil, err
 	}
 	rows, err := s.store.List(beads.ListQuery{
+		Label:    LabelOp,
 		Metadata: map[string]string{keyOpen: conversation},
 		Sort:     beads.SortCreatedAsc,
 		TierMode: beads.TierBoth,
