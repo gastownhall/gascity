@@ -386,8 +386,12 @@ const (
 	// job, nightly-summary: ubuntu-latest, timeout-minutes 5, `if: always()`,
 	// needs every other Nightly job, one python3 step fed by a dedicated
 	// needs.<job>.result env var per dependency that fails closed on anything
-	// but "success"; no new trigger, permission or secret.
-	expectedNightlyExecutionHash = "adfd68dfb5d2c4285bb6cf2ecf5a81ea1446fa54e2bf2a39aa5dd4e4581153cf"
+	// but "success"; no new trigger, permission or secret. Then (ga-1gn23y) the
+	// "Verify bd supports proxied-server" step captures `bd init --help` into a
+	// variable and greps a here-string, so grep -q no longer ends a pipe under
+	// pipefail (SIGPIPE flipped a match into a miss); the step's script only, no
+	// new step, job, trigger, permission or secret.
+	expectedNightlyExecutionHash = "0baab049f557866ed40473dec141759104f5e29d378f18467ebf3ec211b1947c"
 	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
 	// `cache: false` and one step right after it,
 	// `uses: ./.github/actions/go-mod-download`. Then the claude-version
