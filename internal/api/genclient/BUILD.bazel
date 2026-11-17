@@ -33,6 +33,13 @@ go_test(
     ],
 )
 
+# The generated client source is read by //internal/api:api_test's client
+# pagination guard (client_pagination_drain_guard_test.go).
+exports_files(
+    ["client_gen.go"],
+    visibility = ["//internal/api:__pkg__"],
+)
+
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
 
 filegroup(

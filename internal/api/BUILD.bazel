@@ -307,6 +307,7 @@ go_test(
         "capability_through_handles_test.go",
         "class_store_test.go",
         "client_extmsg_test.go",
+        "client_pagination_drain_guard_test.go",
         "client_remote_test.go",
         "client_session_peek_test.go",
         "client_sling_test.go",
@@ -605,6 +606,7 @@ go_test(
     ) + [
         "//:go.mod",
         "//docs:reference_schema",
+        "//internal/api/genclient:client_gen.go",
         "//internal/worker:operation_events.go",
     ],
     embed = [":api"],
