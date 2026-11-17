@@ -726,6 +726,12 @@ func lookupConfiguredNamedSession(store beads.SessionStore, spec NamedSessionSpe
 		return ConfiguredNamedSessionLookup{}, nil
 	}
 
+	// Store list order is not a contract (MemStore lists oldest first, bd newest
+	// first, a primed CachingStore in map order), so the conflict a caller is
+	// shown is the oldest claimant, not whichever the store listed first.
+	// session_name conflicts still come before alias conflicts.
+	beads.SortBeads(runtimeSessionNameMatches, beads.SortCreatedAsc)
+	beads.SortBeads(aliasMatches, beads.SortCreatedAsc)
 	conflictCandidates := append([]beads.Bead{}, runtimeSessionNameMatches...)
 	conflictCandidates = appendUniqueNamedSessionCandidates(conflictCandidates, make(map[string]bool, len(conflictCandidates)+len(aliasMatches)), aliasMatches)
 	for _, candidate := range conflictCandidates {
@@ -951,30 +957,71 @@ func FindNamedSessionConflictInfo(candidates []Info, spec NamedSessionSpec) (Inf
 	return Info{}, false
 }
 
+// electCanonicalNamedSessionInfo is electCanonicalNamedSessionBead over Info
+// rows.
+func electCanonicalNamedSessionInfo(candidates []Info, spec NamedSessionSpec, match func(Info) bool) (Info, bool) {
+	var best Info
+	found := false
+	for _, i := range candidates {
+		if !IsSessionBeadOrRepairableInfo(i) || i.Closed || !NamedSessionInfoContinuityEligible(i) || !match(i) {
+			continue
+		}
+		if !found || NamedSessionWinsCanonicalRepairInfo(i, best, spec.SessionName) {
+			best, found = i, true
+		}
+	}
+	return best, found
+}
+
+// NamedSessionWinsCanonicalRepairInfo is the canonical-repair rule (SESS-012):
+// it reports whether candidate outranks incumbent as the row that owns a
+// configured named session whose runtime session name is canonicalSessionName.
+// The higher integer generation wins (a parseable generation beats an
+// unparseable one), then a session_name equal to canonicalSessionName, then the
+// newer CreatedAt, then the larger ID. The controller's duplicate repair keeps
+// the winner and retires the rest; the interactive lookup elects the same row so
+// that its verdict does not depend on the order a store lists the candidates in.
+func NamedSessionWinsCanonicalRepairInfo(candidate, incumbent Info, canonicalSessionName string) bool {
+	cg, cErr := strconv.Atoi(strings.TrimSpace(candidate.Generation))
+	ig, iErr := strconv.Atoi(strings.TrimSpace(incumbent.Generation))
+	if cErr == nil && iErr == nil && cg != ig {
+		return cg > ig
+	}
+	if cErr == nil && iErr != nil {
+		return true
+	}
+	if cErr != nil && iErr == nil {
+		return false
+	}
+	cCanonical := strings.TrimSpace(candidate.SessionNameMetadata) == canonicalSessionName
+	iCanonical := strings.TrimSpace(incumbent.SessionNameMetadata) == canonicalSessionName
+	if cCanonical != iCanonical {
+		return cCanonical
+	}
+	if !candidate.CreatedAt.Equal(incumbent.CreatedAt) {
+		return candidate.CreatedAt.After(incumbent.CreatedAt)
+	}
+	return candidate.ID > incumbent.ID
+}
+
 // FindCanonicalNamedSessionInfo is the session.Info mirror of
 // FindCanonicalNamedSessionBead: it finds the active Info that owns a configured
 // named session.
 func FindCanonicalNamedSessionInfo(candidates []Info, spec NamedSessionSpec) (Info, bool) {
 	identity := NormalizeNamedSessionTarget(spec.Identity)
-	for _, i := range candidates {
-		if !IsSessionBeadOrRepairableInfo(i) || i.Closed || !NamedSessionInfoContinuityEligible(i) {
-			continue
-		}
-		if IsNamedSessionInfo(i) && NamedSessionIdentityInfo(i) == identity {
-			return i, true
-		}
+	if i, ok := electCanonicalNamedSessionInfo(candidates, spec, func(i Info) bool {
+		return IsNamedSessionInfo(i) && NamedSessionIdentityInfo(i) == identity
+	}); ok {
+		return i, true
 	}
-	for _, i := range candidates {
-		if !IsSessionBeadOrRepairableInfo(i) || i.Closed || !NamedSessionInfoContinuityEligible(i) {
-			continue
-		}
+	if i, ok := electCanonicalNamedSessionInfo(candidates, spec, func(i Info) bool {
 		if !NamedSessionInfoMatchesSpec(i, spec) {
-			continue
+			return false
 		}
 		sn := strings.TrimSpace(i.SessionNameMetadata)
-		if sn == spec.SessionName || sn == identity {
-			return i, true
-		}
+		return sn == spec.SessionName || sn == identity
+	}); ok {
+		return i, true
 	}
 	// Mirrors the alias-based pass in FindCanonicalNamedSessionBead: gated by
 	// NamedSessionInfoMatchesSpec (the backing-template check) and unique
@@ -1335,27 +1382,38 @@ func (idx ClosedNamedSessionBeadIndex) Find(identity string) (beads.Bead, bool) 
 // version for the same reason.
 func findCanonicalNamedSessionBeadStrict(candidates []beads.Bead, spec NamedSessionSpec) (beads.Bead, bool) {
 	identity := NormalizeNamedSessionTarget(spec.Identity)
-	for _, b := range candidates {
-		if !IsSessionBeadOrRepairable(b) || b.Status == "closed" || !NamedSessionContinuityEligible(b) {
-			continue
-		}
-		if IsNamedSessionBead(b) && NamedSessionIdentity(b) == identity {
-			return b, true
-		}
+	if b, ok := electCanonicalNamedSessionBead(candidates, spec, func(b beads.Bead) bool {
+		return IsNamedSessionBead(b) && NamedSessionIdentity(b) == identity
+	}); ok {
+		return b, true
 	}
-	for _, b := range candidates {
-		if !IsSessionBeadOrRepairable(b) || b.Status == "closed" || !NamedSessionContinuityEligible(b) {
-			continue
-		}
+	return electCanonicalNamedSessionBead(candidates, spec, func(b beads.Bead) bool {
 		if !NamedSessionBeadMatchesSpec(b, spec) {
-			continue
+			return false
 		}
 		sn := strings.TrimSpace(b.Metadata["session_name"])
-		if sn == spec.SessionName || sn == identity {
-			return b, true
+		return sn == spec.SessionName || sn == identity
+	})
+}
+
+// electCanonicalNamedSessionBead returns the live, continuity-eligible
+// candidate satisfying match that wins NamedSessionWinsCanonicalRepairInfo
+// against every other such candidate. Scanning all of them, not stopping at the
+// first, keeps the verdict independent of the order the store listed them in.
+func electCanonicalNamedSessionBead(candidates []beads.Bead, spec NamedSessionSpec, match func(beads.Bead) bool) (beads.Bead, bool) {
+	var best beads.Bead
+	var bestInfo Info
+	found := false
+	for _, b := range candidates {
+		if !IsSessionBeadOrRepairable(b) || b.Status == "closed" || !NamedSessionContinuityEligible(b) || !match(b) {
+			continue
+		}
+		info := infoFromPersistedBead(b)
+		if !found || NamedSessionWinsCanonicalRepairInfo(info, bestInfo, spec.SessionName) {
+			best, bestInfo, found = b, info, true
 		}
 	}
-	return beads.Bead{}, false
+	return best, found
 }
 
 // FindCanonicalNamedSessionBead finds the active bead that owns a configured named session.

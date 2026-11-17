@@ -67,7 +67,7 @@ func TestFreshRestartSessionKeyInfoMatchesRaw(t *testing.T) {
 }
 
 // TestNamedSessionWinsCanonicalRepairInfoMatchesRaw is the equivalence oracle for
-// namedSessionWinsCanonicalRepairInfo: for every candidate/incumbent pair it must
+// session.NamedSessionWinsCanonicalRepairInfo: for every candidate/incumbent pair it must
 // agree with namedSessionBeadWinsCanonicalRepair. The fixtures cover the
 // generation compare (both directions), one-parses-one-doesn't (both directions),
 // the canonical-session-name tiebreak, the CreatedAt tiebreak, and the ID
@@ -104,7 +104,7 @@ func TestNamedSessionWinsCanonicalRepairInfoMatchesRaw(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := namedSessionBeadWinsCanonicalRepair(tc.cand, tc.incb, canon)
-			info := namedSessionWinsCanonicalRepairInfo(
+			info := session.NamedSessionWinsCanonicalRepairInfo(
 				sessiontest.SeedBead(t, tc.cand), sessiontest.SeedBead(t, tc.incb), canon)
 			if raw != info {
 				t.Fatalf("winner rule diverged: raw=%v info=%v", raw, info)

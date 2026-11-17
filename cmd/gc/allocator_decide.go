@@ -181,6 +181,10 @@ type decidePass struct {
 	// occupancy is every canonical census row, on every leg and in every
 	// class: what holds a slot or a name (C7.1).
 	occupancy []session.Info
+	// sessionsOccupancy is the part of occupancy on the sessions leg: the rows
+	// the pass can manage. A named session's canonical row is elected from it
+	// before any other leg's rows (canonicalNamedRow).
+	sessionsOccupancy []session.Info
 
 	merged      mergedDemand
 	named       namedSessionDemand
@@ -332,6 +336,9 @@ func (p *decidePass) classifyRows() {
 			continue
 		}
 		p.occupancy = append(p.occupancy, row.Info)
+		if k.Leg == c.sessionsLeg() {
+			p.sessionsOccupancy = append(p.sessionsOccupancy, row.Info)
+		}
 		info := row.Info
 		notRunning := observed && (o.Liveness == livenessGone || o.Liveness == livenessOccupied)
 		// A guarded endpoint the pass has no view of holds (fail closed).
@@ -381,7 +388,7 @@ func (p *decidePass) identityDuplicates() {
 			continue
 		}
 		rows[identity] = append(rows[identity], k)
-		if c, seen := canonical[identity]; managed && (!seen || namedSessionWinsCanonicalRepairInfo(info, p.in.Census.Rows[c].Info, spec.SessionName)) {
+		if c, seen := canonical[identity]; managed && (!seen || session.NamedSessionWinsCanonicalRepairInfo(info, p.in.Census.Rows[c].Info, spec.SessionName)) {
 			canonical[identity] = k
 		}
 	}

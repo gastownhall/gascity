@@ -126,7 +126,7 @@ func (p *decidePass) demand() {
 	}
 	refs := p.in.Demand.RelocatedClaimRefs
 	canonical := func(spec namedSessionSpec) (session.Info, bool) {
-		return session.FindCanonicalNamedSessionInfo(p.namedCandidates(), spec)
+		return p.canonicalNamedRow(spec)
 	}
 	p.named = computeNamedSessionDemandOn(p.in.CityName, p.in.CityPath, p.cfg, func() []string { return refs }, canonical,
 		p.in.SuspendedRigPaths, p.in.Demand.NamedDefault, p.in.Demand.AssignedWork, p.in.Demand.AssignedStoreRefs,
@@ -686,7 +686,7 @@ func (p *decidePass) planIdentifiers(cfgAgent *config.Agent, template string, pl
 // so a named row on any leg counts as canonical; legacy checks only the
 // sessions store.
 func (p *decidePass) planNamed() {
-	candidates := p.namedCandidates()
+	candidates := p.namedCandidates(p.occupancy)
 	for _, identity := range slices.Sorted(maps.Keys(p.named.specs)) {
 		spec := p.named.specs[identity]
 		template := namedSessionBackingTemplate(spec)
@@ -694,7 +694,7 @@ func (p *decidePass) planNamed() {
 			p.refuse(template, identity, rowKey{}, gateTransport)
 			continue
 		}
-		if canonical, ok := session.FindCanonicalNamedSessionInfo(candidates, spec); ok {
+		if canonical, ok := p.canonicalNamedRow(spec); ok {
 			p.selectNamedRow(canonical, spec, identity)
 			continue
 		}
@@ -733,17 +733,30 @@ func (p *decidePass) planNamed() {
 // looked up in: the occupancy without its identity duplicates, which never
 // stand for their identity, so the lookup takes the first claimant in census
 // order.
-func (p *decidePass) namedCandidates() []session.Info {
+func (p *decidePass) namedCandidates(rows []session.Info) []session.Info {
 	if !slices.Contains(slices.Collect(maps.Values(p.none)), reasonIdentityDuplicate) {
-		return p.occupancy
+		return rows
 	}
-	candidates := make([]session.Info, 0, len(p.occupancy))
-	for _, info := range p.occupancy {
+	candidates := make([]session.Info, 0, len(rows))
+	for _, info := range rows {
 		if k, ok := p.byID[info.ID]; !ok || p.none[k] != reasonIdentityDuplicate {
 			candidates = append(candidates, info)
 		}
 	}
 	return candidates
+}
+
+// canonicalNamedRow is the row that owns spec's named session. The census is
+// multi-leg, so a row on any leg can own it, but a row on the sessions leg is
+// elected first: identityDuplicates elects among the managed rows only, and a
+// census-only row on another leg, whatever its generation, never displaces the
+// row the pass manages. Only when the sessions leg holds no claimant is the
+// canonical row elected from every leg's rows.
+func (p *decidePass) canonicalNamedRow(spec namedSessionSpec) (session.Info, bool) {
+	if info, ok := session.FindCanonicalNamedSessionInfo(p.namedCandidates(p.sessionsOccupancy), spec); ok {
+		return info, true
+	}
+	return session.FindCanonicalNamedSessionInfo(p.namedCandidates(p.occupancy), spec)
 }
 
 // namedGate returns why a named plan is refused, or "". It sets the plan's

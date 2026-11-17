@@ -868,7 +868,7 @@ func retireDuplicateConfiguredNamedSessionRows(
 		spec, _ := findNamedSessionSpec(cfg, cityName, identity)
 		winner := indexes[0]
 		for _, idx := range indexes[1:] {
-			if namedSessionWinsCanonicalRepairInfo(rows[idx].Info, rows[winner].Info, spec.SessionName) {
+			if session.NamedSessionWinsCanonicalRepairInfo(rows[idx].Info, rows[winner].Info, spec.SessionName) {
 				winner = idx
 			}
 		}
@@ -899,6 +899,10 @@ func retireDuplicateConfiguredNamedSessionRows(
 	return rows
 }
 
+// namedSessionBeadWinsCanonicalRepair is the raw-bead form of the canonical-repair
+// rule (SESS-012), session.NamedSessionWinsCanonicalRepairInfo, which the Info
+// paths and the interactive named-session lookup share. The twin oracle
+// TestNamedSessionWinsCanonicalRepairInfoMatchesRaw pins the two together.
 func namedSessionBeadWinsCanonicalRepair(candidate, incumbent beads.Bead, canonicalSessionName string) bool {
 	cg, cOK := strconv.Atoi(strings.TrimSpace(candidate.Metadata["generation"]))
 	ig, iOK := strconv.Atoi(strings.TrimSpace(incumbent.Metadata["generation"]))
@@ -913,34 +917,6 @@ func namedSessionBeadWinsCanonicalRepair(candidate, incumbent beads.Bead, canoni
 	}
 	cCanonical := strings.TrimSpace(candidate.Metadata["session_name"]) == canonicalSessionName
 	iCanonical := strings.TrimSpace(incumbent.Metadata["session_name"]) == canonicalSessionName
-	if cCanonical != iCanonical {
-		return cCanonical
-	}
-	if !candidate.CreatedAt.Equal(incumbent.CreatedAt) {
-		return candidate.CreatedAt.After(incumbent.CreatedAt)
-	}
-	return candidate.ID > incumbent.ID
-}
-
-// namedSessionWinsCanonicalRepairInfo is the session.Info form of
-// namedSessionBeadWinsCanonicalRepair: generation int-compare (Info.Generation,
-// the verbatim raw mirror), canonical-session-name tiebreak (SessionNameMetadata),
-// CreatedAt, then ID — byte-identical to the raw form. Pinned by the classifier
-// equivalence oracle.
-func namedSessionWinsCanonicalRepairInfo(candidate, incumbent session.Info, canonicalSessionName string) bool {
-	cg, cErr := strconv.Atoi(strings.TrimSpace(candidate.Generation))
-	ig, iErr := strconv.Atoi(strings.TrimSpace(incumbent.Generation))
-	if cErr == nil && iErr == nil && cg != ig {
-		return cg > ig
-	}
-	if cErr == nil && iErr != nil {
-		return true
-	}
-	if cErr != nil && iErr == nil {
-		return false
-	}
-	cCanonical := strings.TrimSpace(candidate.SessionNameMetadata) == canonicalSessionName
-	iCanonical := strings.TrimSpace(incumbent.SessionNameMetadata) == canonicalSessionName
 	if cCanonical != iCanonical {
 		return cCanonical
 	}

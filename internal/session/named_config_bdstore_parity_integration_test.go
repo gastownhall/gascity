@@ -315,8 +315,9 @@ func sortedCopy(in []string) []string {
 // the lookup's verdict, bare and policy-wrapped. Seeds are written with
 // history and, in a second pair of stores, with no-history storage, the tier
 // session beads get in production. The per-query ORDER each backend returned
-// is logged: the lookup takes the first qualifying candidate, so order decides
-// the verdict whenever more than one candidate qualifies.
+// is logged: it differs between the stores, and the lookup's verdict must not
+// follow it. Where more than one candidate qualifies, the verdict is the
+// canonical-repair winner (SESS-012) or, among conflicts, the oldest claimant.
 func TestNamedSessionDecoyShapesMemStoreBdStoreParity(t *testing.T) {
 	scenarios := parityScenarios()
 	for _, storage := range []string{"history", "no-history"} {
