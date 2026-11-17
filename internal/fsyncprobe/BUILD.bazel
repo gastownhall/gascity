@@ -46,6 +46,7 @@ go_library(
     name = "fsyncprobe",
     srcs = [
         "detach_unix.go",
+        "detach_windows.go",
         "fsyncprobe.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/fsyncprobe",

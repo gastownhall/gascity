@@ -1,3 +1,8 @@
+//go:build !windows
+
+// Windows Stop keeps its best-effort contract (provider_stop_windows.go), and
+// these cases drive the shell fake herdr with a FIFO.
+
 package herdr
 
 import (

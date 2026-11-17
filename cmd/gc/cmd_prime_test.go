@@ -1514,3 +1514,171 @@ func TestBuildPrimeContextConfigDir(t *testing.T) {
 		t.Fatalf("ConfigDir = %q, want SourceDir override %q", ctx.ConfigDir, packDir)
 	}
 }
+
+// withPrimeHookStdinPayload feeds one hook payload line to `gc prime --hook`
+// the way a provider that pipes JSON on stdin does.
+func withPrimeHookStdinPayload(t *testing.T, line string) {
+	t.Helper()
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.WriteString(line + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	oldPrimeStdin := primeStdin
+	primeStdin = func() *os.File { return reader }
+	t.Cleanup(func() {
+		primeStdin = oldPrimeStdin
+		_ = reader.Close()
+	})
+}
+
+const deliveredPromptHookContent = "launch-only startup prompt\n"
+
+// setupDeliveredPromptHookCity builds the city the startup-prompt-delivery
+// tests share: a live worker session whose launch already delivered the prompt
+// (GC_STARTUP_PROMPT_DELIVERED=1). The managed-hook markers are left to the
+// caller, since they are what each test varies.
+func setupDeliveredPromptHookCity(t *testing.T) {
+	t.Helper()
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+
+	cityDir := t.TempDir()
+	promptDir := filepath.Join(cityDir, "prompts")
+	if err := os.MkdirAll(promptDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(promptDir): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(promptDir, "worker.md"), []byte(deliveredPromptHookContent), 0o644); err != nil {
+		t.Fatalf("WriteFile(prompt): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`
+[workspace]
+name = "gastown"
+
+[[agent]]
+name = "worker"
+prompt_template = "prompts/worker.md"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_AGENT", "worker")
+	t.Setenv("GC_ALIAS", "worker")
+	t.Setenv("GC_TEMPLATE", "worker")
+	t.Setenv("GC_SESSION_NAME", "gastown--worker")
+	t.Setenv("GC_SESSION_ID", createPrimeHookSession(t, cityDir, "gastown--worker", "worker"))
+	t.Setenv("GC_HOOK_SOURCE", "startup")
+	t.Setenv(startupPromptDeliveredEnv, "1")
+}
+
+// TestDoPrimeWithHook_GeminiStdinSessionStartHonorsManagedMarker pins that
+// Gemini's own stdin payload ("hook_event_name":"SessionStart") keeps the
+// managed marker effective: the already-delivered prompt is dropped only when
+// the overlay sets GC_MANAGED_SESSION_HOOK, and repeated otherwise.
+func TestDoPrimeWithHook_GeminiStdinSessionStartHonorsManagedMarker(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		marker     string
+		wantPrompt bool
+	}{
+		{name: "overlay sets the marker", marker: "1", wantPrompt: false},
+		{name: "overlay without the marker", marker: "", wantPrompt: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupDeliveredPromptHookCity(t)
+			t.Setenv(managedSessionHookEnv, tc.marker)
+			if tc.marker != "" {
+				t.Setenv("GC_HOOK_EVENT_NAME", "SessionStart")
+			}
+			withPrimeHookStdinPayload(t, `{"session_id":"g-1","hook_event_name":"SessionStart","source":"startup"}`)
+
+			var stdout, stderr bytes.Buffer
+			if code := doPrimeWithHookFormat(nil, &stdout, &stderr, true, hookOutputFormatGemini, false); code != 0 {
+				t.Fatalf("doPrimeWithHookFormat() = %d, want 0; stderr=%q", code, stderr.String())
+			}
+			var got struct {
+				HookSpecificOutput struct {
+					AdditionalContext string `json:"additionalContext"`
+				} `json:"hookSpecificOutput"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+				t.Fatalf("hook output is not JSON: %v; stdout=%q", err, stdout.String())
+			}
+			context := got.HookSpecificOutput.AdditionalContext
+			if gotPrompt := strings.Contains(context, strings.TrimSpace(deliveredPromptHookContent)); gotPrompt != tc.wantPrompt {
+				t.Fatalf("additionalContext = %q, prompt present = %v, want %v", context, gotPrompt, tc.wantPrompt)
+			}
+			if !strings.Contains(context, "[gastown] worker") {
+				t.Fatalf("additionalContext = %q, want hook beacon", context)
+			}
+		})
+	}
+}
+
+// TestDoPrimeWithHook_ProviderStdinEventOverridesEnvMarker pins the precedence
+// that decides which providers may carry the managed markers: a non-empty
+// stdin hook_event_name overrides GC_HOOK_EVENT_NAME, and neither Kiro's
+// "agentSpawn" nor Cursor's "sessionStart" equals "SessionStart". That is why
+// the Kiro overlay redirects stdin from /dev/null and Cursor carries no
+// markers at all.
+func TestDoPrimeWithHook_ProviderStdinEventOverridesEnvMarker(t *testing.T) {
+	for _, tc := range []struct{ name, payload string }{
+		{name: "kiro agentSpawn", payload: `{"hook_event_name":"agentSpawn","cwd":"/w","session_id":"k-1"}`},
+		{name: "cursor sessionStart", payload: `{"hook_event_name":"sessionStart","conversation_id":"c-1","session_id":"c-1"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupDeliveredPromptHookCity(t)
+			t.Setenv(managedSessionHookEnv, "1")
+			t.Setenv("GC_HOOK_EVENT_NAME", "SessionStart")
+			withPrimeHookStdinPayload(t, tc.payload)
+
+			var stdout, stderr bytes.Buffer
+			if code := doPrimeWithMode(nil, &stdout, &stderr, true, false); code != 0 {
+				t.Fatalf("doPrimeWithMode() = %d, want 0; stderr=%q", code, stderr.String())
+			}
+			if !strings.Contains(stdout.String(), deliveredPromptHookContent) {
+				t.Fatalf("stdout = %q, want the prompt: the stdin event overrides the env marker", stdout.String())
+			}
+		})
+	}
+}
+
+// TestDoPrimeWithHook_DevNullStdinLetsEnvMarkersRoute pins the other half: with
+// stdin on /dev/null (a char device readPrimeHookStdin skips, as the Kiro
+// overlay's `< /dev/null` arranges) the env markers route, and the delivered
+// prompt is dropped.
+func TestDoPrimeWithHook_DevNullStdinLetsEnvMarkersRoute(t *testing.T) {
+	setupDeliveredPromptHookCity(t)
+	t.Setenv(managedSessionHookEnv, "1")
+	t.Setenv("GC_HOOK_EVENT_NAME", "SessionStart")
+
+	devNull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldPrimeStdin := primeStdin
+	primeStdin = func() *os.File { return devNull }
+	t.Cleanup(func() {
+		primeStdin = oldPrimeStdin
+		_ = devNull.Close()
+	})
+
+	var stdout, stderr bytes.Buffer
+	if code := doPrimeWithMode(nil, &stdout, &stderr, true, false); code != 0 {
+		t.Fatalf("doPrimeWithMode() = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	out := stdout.String()
+	if strings.Contains(out, deliveredPromptHookContent) {
+		t.Fatalf("stdout = %q, want no repeated startup prompt", out)
+	}
+	if !strings.Contains(out, "[gastown] worker") {
+		t.Fatalf("stdout = %q, want hook beacon", out)
+	}
+}

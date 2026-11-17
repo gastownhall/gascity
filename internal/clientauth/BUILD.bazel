@@ -14,8 +14,10 @@ go_library(
 go_test(
     name = "clientauth_test",
     srcs = [
+        "caseenv_windows_test.go",
         "clientauth_test.go",
         "exec_fixture_other_test.go",
+        "exec_fixture_windows_test.go",
         "testenv_import_test.go",
     ],
     embed = [":clientauth"],
