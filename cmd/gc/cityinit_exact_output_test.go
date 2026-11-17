@@ -10,6 +10,7 @@ import (
 )
 
 func TestCityInitExactOutput_DefaultScaffold(t *testing.T) {
+	admitInitSplitBD(t)
 	var stdout, stderr bytes.Buffer
 
 	code := doInit(fsys.NewFake(), "/bright-lights", defaultWizardConfig(), "", &stdout, &stderr, false)
@@ -37,6 +38,7 @@ func TestCityInitExactOutput_CommandProviderSkipReadiness(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	disableBootstrapForTests(t)
+	stubInitRemoteImports(t)
 
 	oldRegister := registerCityWithSupervisorTestHook
 	registerCityWithSupervisorTestHook = func(_ string, _ string, _ io.Writer, _ io.Writer) (bool, int) {

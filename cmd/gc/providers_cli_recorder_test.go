@@ -126,3 +126,50 @@ func TestCliFactoryEventsRecorderMemoizesPerCityPath(t *testing.T) {
 		t.Fatal("a different city path reused the same recorder, want one recorder per city")
 	}
 }
+
+// TestCliFactoryEventsRecorderSurvivesOwnerRotation covers the memo's
+// lifetime: it holds one recorder per city for the whole process (the
+// supervisor, gc nudge poll), so after the city's owner rotates the log, the
+// memoized recorder must keep landing events in the live log rather than in
+// the renamed file gzip then deletes (mc-zndi7.59).
+func TestCliFactoryEventsRecorderSurvivesOwnerRotation(t *testing.T) {
+	resetCLIFactoryRecorders(t)
+	t.Setenv("GC_EVENTS", "")
+
+	cityPath := t.TempDir()
+	memo := cliFactoryEventsRecorder(cityPath, nil)
+	if memo == events.Discard {
+		t.Fatal("cliFactoryEventsRecorder = events.Discard, want a live recorder")
+	}
+	owner, err := events.NewFileRecorder(filepath.Join(cityPath, ".gc", "events.jsonl"), io.Discard,
+		events.WithMaxSize(1), events.WithRotationCheckRecords(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer owner.Close() //nolint:errcheck // test cleanup
+
+	owner.Record(events.Event{Type: events.BeadCreated, Actor: "owner", Subject: "o1"})
+	memo.Record(events.Event{Type: events.BeadCreated, Actor: "memo", Subject: "m1"})
+	owner.Record(events.Event{Type: events.BeadCreated, Actor: "owner", Subject: "o2"}) // rotates
+	owner.WaitForRotations()
+	for _, subject := range []string{"m2", "m3", "m4"} {
+		memo.Record(events.Event{Type: events.BeadCreated, Actor: "memo", Subject: subject})
+	}
+	if err := owner.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	all, err := events.ReadAll(filepath.Join(cityPath, ".gc", "events.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, e := range all {
+		seen[e.Subject] = true
+	}
+	for _, subject := range []string{"o1", "m1", "o2", "m2", "m3", "m4"} {
+		if !seen[subject] {
+			t.Errorf("event %q missing from the log after the owner's rotation", subject)
+		}
+	}
+}

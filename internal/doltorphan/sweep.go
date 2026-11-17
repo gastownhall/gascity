@@ -1,12 +1,12 @@
 // Package doltorphan implements a symptom-based fallback sweep for
 // orphaned dolt store directories: a directory is a removal candidate when
-// it is old, contains a .dolt marker, and is not held open by any live
-// process. It composes with, but does not replace, process-level
-// classification (e.g. cmd/gc's classifyDoltProcess) — this package never
-// inspects or kills processes, it only judges directories that are already
-// symptomatic of abandonment, which is what lets it catch leaks regardless
-// of what created them (a killed test binary, an untracked ad-hoc dolt
-// invocation, etc.). Ported from the production-proven heuristic in
+// it is old, contains a Dolt store (a .dolt/noms directory), and is not held
+// open by any live process. It composes with, but does not replace,
+// process-level classification (e.g. cmd/gc's classifyDoltProcess) — this
+// package never inspects or kills processes, it only judges directories that
+// are already symptomatic of abandonment, which is what lets it catch leaks
+// regardless of what created them (a killed test binary, an untracked ad-hoc
+// dolt invocation, etc.). Ported from the production-proven heuristic in
 // gc-test-dolt-reaper.sh sections 4-5.
 package doltorphan
 
@@ -28,14 +28,31 @@ import (
 // ga-ntbpyb.2.
 const DefaultMinAge = 60 * time.Minute
 
-// maxMarkerDepth bounds how deep the .dolt marker search descends below a
-// candidate directory, mirroring `find "$d" -maxdepth 3 -type d -name
-// '.dolt'` from gc-test-dolt-reaper.sh section 4.
+// maxMarkerDepth bounds how deep the Dolt store search descends below a
+// candidate directory: a store root may sit at most two levels below the
+// top-level child (top/a/b), so its .dolt is the third level down and its
+// .dolt/noms the fourth.
 const maxMarkerDepth = 3
 
-// lsofScanTimeout bounds the real `lsof -w` invocation, mirroring the
+// sentinelFileName, when present directly inside a top-level candidate
+// directory, exempts that directory from sweeping entirely regardless of
+// age or any nested .dolt marker. This is a per-directory opt-out an owner
+// creates deliberately (architect ruling ga-txnhdk, Option 4) — not a
+// name/prefix filter on the candidate itself, which was rejected because it
+// would reintroduce the fragility ga-ntbpyb.2 AC2's name-independent
+// detection removed.
+const sentinelFileName = ".no-orphan-sweep"
+
+// noReapMarkerName is the keep marker packs/actual's vartmp-scratch-reaper
+// already honors, and the one agents on a shared host put on a directory
+// they keep on purpose (ga-v83niq). It exempts a top-level candidate exactly
+// as sentinelFileName does; a sweep that ignored it would delete those kept
+// Dolt stores.
+const noReapMarkerName = ".gc-no-reap"
+
+// defaultLsofScanTimeout bounds the real `lsof -w` invocation, mirroring the
 // shell script's `timeout 30 lsof -w`.
-const lsofScanTimeout = 30 * time.Second
+const defaultLsofScanTimeout = 30 * time.Second
 
 // SweepConfig configures a single Sweep pass. Root is required; every
 // other field defaults to production behavior when left zero-valued.
@@ -51,12 +68,14 @@ type SweepConfig struct {
 	RunLsof func(ctx context.Context) ([]byte, error)
 	// RemoveAll removes a candidate directory. Defaults to os.RemoveAll.
 	// Injectable for tests.
-	RemoveAll func(path string) error
+	RemoveAll       func(path string) error
+	lsofCommand     string
+	lsofScanTimeout time.Duration
 }
 
 // SweepResult reports what a Sweep pass did.
 type SweepResult struct {
-	// Removed lists the candidate directories that were removed.
+	// Removed lists the store directories that were removed.
 	Removed []string
 	// Skipped counts candidates that matched age+marker but were held
 	// open per lsof, or were held per fail-closed lsof-error handling.
@@ -67,15 +86,37 @@ type SweepResult struct {
 	Errors []error
 }
 
-// Sweep removes direct children of cfg.Root that look like abandoned dolt
-// store directories: mtime older than MinAge, a .dolt marker directory
-// within maxMarkerDepth levels, and not currently held open by any live
-// process per lsof. Candidate selection intentionally does not filter on
-// directory name — the three signals above are what establish
-// abandonment, not any particular naming convention, so this catches
-// leaks "regardless of creation source" (ga-ntbpyb.2 acceptance criterion
-// 2) including directories named by Go's t.TempDir() rather than the
-// bare-mktemp "tmp.*" pattern the heuristic was first observed against.
+// candidate pairs a top-level swept directory with the Dolt store directory
+// nested within it that actually owns the .dolt marker. lsof-held checks
+// stay keyed on topLevel — matching lsofHeldChildren's one-segment-past-root
+// regex, which cannot see any deeper — while removal targets storeDir, so a
+// container's unrelated siblings survive sweeping its abandoned store.
+type candidate struct {
+	topLevel string
+	storeDir string
+}
+
+// Sweep considers direct children of cfg.Root that look like abandoned dolt
+// containers: mtime older than MinAge, a Dolt store within maxMarkerDepth
+// levels, and not currently held open by any live process per lsof (checked
+// against the top-level child, since that's as deep as lsofHeldChildren can
+// see). Candidate selection intentionally does not filter on directory name —
+// the signals above are what establish abandonment, not any particular naming
+// convention, so this catches leaks "regardless of creation source"
+// (ga-ntbpyb.2 acceptance criterion 2) including directories named by Go's
+// t.TempDir() rather than the bare-mktemp "tmp.*" pattern the heuristic was
+// first observed against.
+//
+// A top-level child containing sentinelFileName or noReapMarkerName (any file
+// type, like the reaper's own -e test) is exempted entirely, regardless of
+// age or marker.
+//
+// Removal targets only the Dolt store directory, which may be nested below
+// the top-level child. The top-level child itself is removed only when it is
+// itself a Dolt store — so that unrelated payload a container legitimately
+// holds alongside an abandoned Dolt copy nested within it survives the sweep.
+// A .dolt without a noms directory (a sql-server's bookkeeping, Dolt's global
+// config) is not a store, so a directory holding only that is never removed.
 //
 // If the lsof scan itself fails, Sweep fails closed: nothing is removed
 // this pass (an unverifiable "is this held open" check is treated the
@@ -103,12 +144,15 @@ func Sweep(cfg SweepConfig) SweepResult {
 	}
 
 	now := clk.Now()
-	var candidates []string
+	var candidates []candidate
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
 		dir := filepath.Join(cfg.Root, e.Name())
+		if hasSentinel(dir) {
+			continue
+		}
 		info, err := e.Info()
 		if err != nil {
 			continue
@@ -116,69 +160,116 @@ func Sweep(cfg SweepConfig) SweepResult {
 		if now.Sub(info.ModTime()) < minAge {
 			continue
 		}
-		if !hasDoltMarker(dir, maxMarkerDepth) {
+		storeDir, ok := findDoltStoreDir(dir, maxMarkerDepth)
+		if !ok {
 			continue
 		}
-		candidates = append(candidates, dir)
+		candidates = append(candidates, candidate{topLevel: dir, storeDir: storeDir})
 	}
 	if len(candidates) == 0 {
 		return result
 	}
 
-	held, err := lsofHeldChildren(cfg.Root, cfg.RunLsof)
+	held, err := lsofHeldChildren(cfg.Root, cfg.RunLsof, cfg.lsofCommand, cfg.lsofScanTimeout)
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Errorf("lsof -w: %w", err))
 		result.Skipped = len(candidates)
 		return result
 	}
 
-	for _, dir := range candidates {
-		if held[dir] {
+	for _, c := range candidates {
+		if held[c.topLevel] {
 			result.Skipped++
 			continue
 		}
-		if err := removeAll(dir); err != nil {
-			result.Errors = append(result.Errors, fmt.Errorf("remove %s: %w", dir, err))
+		if err := removeAll(c.storeDir); err != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("remove %s: %w", c.storeDir, err))
 			continue
 		}
-		result.Removed = append(result.Removed, dir)
+		result.Removed = append(result.Removed, c.storeDir)
 	}
 	return result
 }
 
-// hasDoltMarker reports whether a directory literally named ".dolt" exists
-// within depth levels of dir (dir's direct children are depth 1).
-func hasDoltMarker(dir string, depth int) bool {
-	if depth <= 0 {
-		return false
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return false
-	}
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		if e.Name() == ".dolt" {
-			return true
-		}
-		if hasDoltMarker(filepath.Join(dir, e.Name()), depth-1) {
+// hasSentinel reports whether dir directly contains sentinelFileName or
+// noReapMarkerName.
+func hasSentinel(dir string) bool {
+	for _, name := range []string{sentinelFileName, noReapMarkerName} {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
 			return true
 		}
 	}
 	return false
 }
 
+// findDoltStoreDir searches within depth levels of dir (dir's direct children
+// are depth 1) for a Dolt store and, if found, returns its root: the directory
+// whose .dolt/noms is a directory. That is the test Dolt itself applies to
+// decide a directory holds a database. A .dolt without noms (the bookkeeping a
+// dolt sql-server --data-dir leaves, Dolt's global config, an empty or
+// incomplete .dolt) is not a store marker, so its directory is never a removal
+// target on that account. A probe error also counts as "not a store", because
+// the sweep errs toward keeping what it cannot verify. .dolt is a probe
+// target and is never descended into.
+//
+// The returned root is the removal target: deleting only it, rather than the
+// top-level candidate dir, keeps a container's unrelated siblings intact when
+// it holds other payload alongside an abandoned Dolt copy nested deeper within
+// it. A store that is removed goes whole, including any files beside its .dolt.
+//
+// A subtree can hold stores at different depths, so a store in a nested
+// subdirectory is always preferred over dir itself: every subdirectory is
+// explored before falling back to dir, so an ancestor never becomes the target
+// while a descendant store exists. When stores sit in separate sibling
+// subtrees, the first one found in lexical order is returned and the rest go
+// on later passes, one per pass: removing a store refreshes its container's
+// mtime, so the next sibling goes only after another MinAge.
+func findDoltStoreDir(dir string, depth int) (string, bool) {
+	if depth <= 0 {
+		return "", false
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", false
+	}
+	selfIsStore := false
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if e.Name() == ".dolt" {
+			if info, err := os.Lstat(filepath.Join(dir, ".dolt", "noms")); err == nil && info.IsDir() {
+				selfIsStore = true
+			}
+			continue
+		}
+		if store, ok := findDoltStoreDir(filepath.Join(dir, e.Name()), depth-1); ok {
+			return store, true
+		}
+	}
+	if selfIsStore {
+		return dir, true
+	}
+	return "", false
+}
+
 // lsofHeldChildren runs runLsof (defaulting to a real `lsof -w`) and
 // returns the set of root's direct children that appear as a path prefix
 // of some open file, i.e. directories currently held open by a live
 // process anywhere on the system.
-func lsofHeldChildren(root string, runLsof func(ctx context.Context) ([]byte, error)) (map[string]bool, error) {
+func lsofHeldChildren(root string, runLsof func(ctx context.Context) ([]byte, error), command string, scanTimeout time.Duration) (map[string]bool, error) {
 	if runLsof == nil {
-		runLsof = runLsofW
+		if command == "" {
+			command = "lsof"
+		}
+		runLsof = func(ctx context.Context) ([]byte, error) {
+			return runLsofW(ctx, command)
+		}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), lsofScanTimeout)
+	if scanTimeout <= 0 {
+		scanTimeout = defaultLsofScanTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), scanTimeout)
 	defer cancel()
 	out, err := runLsof(ctx)
 	if err != nil {
@@ -192,18 +283,26 @@ func lsofHeldChildren(root string, runLsof func(ctx context.Context) ([]byte, er
 	return held, nil
 }
 
-// runLsofW runs `lsof -w` and returns its stdout. lsof commonly exits
-// non-zero when it cannot read some other process's /proc entries
-// (permission denied) even though the rest of its output is valid; that
-// case is treated as success (mirroring the shell heuristic's `2>/dev/null`,
-// which discards the warning but still uses stdout). Only a failure to run
-// lsof at all (missing binary, context deadline) is treated as fatal.
-func runLsofW(ctx context.Context) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "lsof", "-w")
+var errLsofNoOutput = errors.New("lsof produced no output")
+
+// runLsofW runs `lsof -w` and returns its stdout. Exit status 1 with output
+// is accepted because lsof exits 1 when it cannot read some other process's
+// /proc entries while the rest of its output stays valid (mirroring the
+// shell heuristic's `2>/dev/null`). Launch failures, any other exit status,
+// signal termination, context expiry and empty output are fatal, because a
+// truncated scan under-reports held directories.
+func runLsofW(ctx context.Context, command string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, command, "-w")
 	out, err := cmd.Output()
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	var exitErr *exec.ExitError
-	if err != nil && !errors.As(err, &exitErr) {
+	if err != nil && (!errors.As(err, &exitErr) || exitErr.ExitCode() != 1) {
 		return nil, err
+	}
+	if len(out) == 0 {
+		return nil, errors.Join(errLsofNoOutput, err)
 	}
 	return out, nil
 }

@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -343,6 +346,151 @@ func TestManagedDoltScopeWatchdogServerSurvivesScopePresent(t *testing.T) {
 	}
 }
 
+// TestManagedDoltScopeWatchdogDoesNotInheritSessionIdentity spawns the real
+// watchdog the way `gc dolt restart` does from inside an agent shell, with
+// every session-scoped key stamped on the parent environment, and reads the
+// live environment of both the watchdog and its dolt child. Neither may carry
+// a stamp: the watchdog reparents to init, so a GC_SESSION_ID on it is what
+// the session reconciler's orphan sweep keys on when it reaps the watchdog,
+// and with it the server, once that session's bead closes. PATH is the
+// control that the scrub is targeted rather than a blanket strip.
+func TestManagedDoltScopeWatchdogDoesNotInheritSessionIdentity(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("reads /proc/<pid>/environ")
+	}
+	dir := t.TempDir()
+	fakeDoltDir := writeFakeDoltSQLServer(t)
+	configPath := filepath.Join(dir, "dolt-config.yaml")
+	logPath := filepath.Join(dir, "dolt.log")
+	if err := os.WriteFile(configPath, []byte("log_level: debug\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatalf("open log file: %v", err)
+	}
+	defer logFile.Close() //nolint:errcheck
+
+	parentEnv := removeEnvKey(os.Environ(), "PATH")
+	parentEnv = append(parentEnv, "PATH="+fakeDoltDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	for _, key := range managedDoltSessionScopedEnvKeys {
+		parentEnv = append(parentEnv, key+"=stamped")
+	}
+
+	started, err := startManagedDoltSQLServerWithScopeWatchdogEnv("", configPath, logPath, logFile, parentEnv)
+	if err != nil {
+		t.Fatalf("start managed dolt with scope watchdog: %v", err)
+	}
+	t.Cleanup(func() {
+		cleanupManagedDoltTestPID(t, started.PID)
+		cleanupManagedDoltTestPID(t, started.WatchdogPID)
+	})
+
+	for _, proc := range []struct {
+		name string
+		pid  int
+	}{
+		{name: "scope watchdog", pid: started.WatchdogPID},
+		{name: "dolt sql-server", pid: started.PID},
+	} {
+		env := waitForProcEnviron(t, proc.pid)
+		for _, key := range managedDoltSessionScopedEnvKeys {
+			if value, ok := env[key]; ok {
+				t.Errorf("%s pid %d inherited %s=%q from the spawning session", proc.name, proc.pid, key, value)
+			}
+		}
+		if !strings.HasPrefix(env["PATH"], fakeDoltDir) {
+			t.Errorf("%s pid %d PATH = %q, want the parent's PATH carried through", proc.name, proc.pid, env["PATH"])
+		}
+	}
+}
+
+// waitForProcEnviron reads /proc/<pid>/environ from one settled image and
+// fails the test when none settles within 5s. readSettledProcEnviron says
+// which reads are refused.
+func waitForProcEnviron(t *testing.T, pid int) map[string]string {
+	t.Helper()
+	env, err := readSettledProcEnviron(pid, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return env
+}
+
+// readSettledProcEnviron reads /proc/<pid>/environ until one read comes from
+// a settled image. The fake dolt execs twice (sh, then sleep), and a read can
+// be unusable four ways while that happens:
+//
+//   - Inside execve the kernel reports an empty environ.
+//   - From Linux 7.2 the open fails with EACCES while an execve is in flight.
+//     exec_mmap installs a fresh task_exec_state whose dumpable mode is
+//     TASK_DUMPABLE_OFF, begin_new_exec sets TASK_DUMPABLE_OWNER only later,
+//     and procfs derives the file's owner from that mode without taking
+//     exec_update_lock, so for the window the file is owned by root.
+//   - A read spanning an exec is torn. os.ReadFile needs several read(2)s for
+//     an environment past 512 bytes; the first chunk comes from the old image
+//     and the next hits EOF on its torn-down address space.
+//   - bash imports its environment at startup by overwriting each entry's '='
+//     with a NUL in place and restoring it afterwards, so a read in that
+//     window splits one NAME=VALUE entry into NAME and VALUE.
+//
+// A read is accepted only when /proc/<pid>/exe is the same before and after
+// it and parseSettledEnviron accepts the data. EACCES is retried like the
+// other windows; one that outlasts the timeout is returned, so a process that
+// stays unreadable still fails the caller.
+func readSettledProcEnviron(pid int, timeout time.Duration) (map[string]string, error) {
+	procDir := filepath.Join("/proc", strconv.Itoa(pid))
+	deadline := time.After(timeout)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		exeBefore, err := os.Readlink(filepath.Join(procDir, "exe"))
+		if err != nil {
+			return nil, fmt.Errorf("read exe for pid %d: %w", pid, err)
+		}
+		var unsettled string
+		data, err := os.ReadFile(filepath.Join(procDir, "environ"))
+		switch {
+		case errors.Is(err, fs.ErrPermission):
+			unsettled = err.Error()
+		case err != nil:
+			return nil, fmt.Errorf("read environ for pid %d: %w", pid, err)
+		default:
+			exeAfter, err := os.Readlink(filepath.Join(procDir, "exe"))
+			if err != nil {
+				return nil, fmt.Errorf("read exe for pid %d: %w", pid, err)
+			}
+			if env, ok := parseSettledEnviron(data); ok && exeBefore == exeAfter {
+				return env, nil
+			}
+			unsettled = fmt.Sprintf("%d bytes, exe %q before and %q after", len(data), exeBefore, exeAfter)
+		}
+		select {
+		case <-deadline:
+			return nil, fmt.Errorf("pid %d environ never settled within %s (last read: %s)", pid, timeout, unsettled)
+		case <-tick.C:
+		}
+	}
+}
+
+// parseSettledEnviron parses raw /proc/<pid>/environ data. It refuses the
+// shapes a read of an image mid-exec or mid-import takes: empty, not ending
+// on an entry terminator, or holding an entry with no '=' or an empty name.
+func parseSettledEnviron(data []byte) (map[string]string, bool) {
+	if len(data) == 0 || data[len(data)-1] != 0 {
+		return nil, false
+	}
+	env := make(map[string]string)
+	for _, entry := range strings.Split(string(data[:len(data)-1]), "\x00") {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok || key == "" {
+			return nil, false
+		}
+		env[key] = value
+	}
+	return env, true
+}
+
 // TestRunManagedDoltScopeWatchdogUsage pins the argv contract.
 func TestRunManagedDoltScopeWatchdogUsage(t *testing.T) {
 	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
@@ -358,6 +506,26 @@ func TestRunManagedDoltScopeWatchdogUsage(t *testing.T) {
 	}
 	if code := runManagedDoltScopeWatchdog([]string{" ", "log", "city"}, devnull, devnull); code != 2 {
 		t.Errorf("blank config exit = %d, want 2", code)
+	}
+}
+
+func TestFinishManagedDoltScopeWatchdogTerminationReturnsOnError(t *testing.T) {
+	done := make(chan error)
+	var log bytes.Buffer
+	result := make(chan int, 1)
+	go func() {
+		result <- finishManagedDoltScopeWatchdogTermination(done, errors.New("lock ownership unavailable"), &log, 4242)
+	}()
+	select {
+	case code := <-result:
+		if code != 1 {
+			t.Fatalf("exit = %d, want 1", code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("termination error blocked waiting for a child that may never exit")
+	}
+	if got := log.String(); !strings.Contains(got, "lock ownership unavailable") || !strings.Contains(got, "4242") {
+		t.Fatalf("log = %q, want pid and termination error", got)
 	}
 }
 

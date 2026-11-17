@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,12 +12,24 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
 const (
 	processArgsPSTimeout = 10 * time.Second
 	lsofCommandTimeout   = 2 * time.Second
 )
+
+// errManagedDoltIdentityUnavailable reports that a managed Dolt process's
+// ownership could not be established.
+//
+// It is distinct from "this process is not ours". Ownership gates destructive
+// work — killing a PID, clearing the recorded runtime state, declaring a data
+// directory released — and for each of those, "not ours" and "cannot tell" have
+// opposite safe outcomes. Collapsing the second into the first is what lets a
+// stop report success while the server keeps running.
+var errManagedDoltIdentityUnavailable = errors.New("managed dolt process identity unavailable")
 
 type managedDoltProcessInspection struct {
 	ManagedPID              int
@@ -26,25 +39,38 @@ type managedDoltProcessInspection struct {
 	PortHolderPID           int
 	PortHolderOwned         bool
 	PortHolderDeletedInodes bool
+
+	// OwnershipErr is non-nil when a live PID was found but its ownership
+	// could not be decided. The Owned booleans are then meaningless and must
+	// not be read as "not owned".
+	OwnershipErr error
 }
 
 func inspectManagedDoltProcess(cityPath, port string) (managedDoltProcessInspection, error) {
+	if err := managedDoltNativeIdentitySupported(); err != nil {
+		return managedDoltProcessInspection{}, err
+	}
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
 		return managedDoltProcessInspection{}, err
 	}
-	return inspectManagedDoltProcessWithLayout(layout, port, true), nil
+	info := inspectManagedDoltProcessWithLayout(layout, port, true)
+	return info, info.OwnershipErr
 }
 
 func inspectManagedDoltProcessWithLayout(layout managedDoltRuntimeLayout, port string, removeStalePIDFile bool) managedDoltProcessInspection {
 	info := managedDoltProcessInspection{}
 	info.ManagedPID, info.ManagedSource = findManagedDoltPIDWithOptions(layout, port, removeStalePIDFile)
 	if info.ManagedPID > 0 {
-		info.ManagedOwned, info.ManagedDeletedInodes = inspectManagedDoltOwnership(info.ManagedPID, layout)
+		var err error
+		info.ManagedOwned, info.ManagedDeletedInodes, err = inspectManagedDoltOwnership(info.ManagedPID, layout)
+		info.OwnershipErr = errors.Join(info.OwnershipErr, err)
 	}
-	info.PortHolderPID = findPortHolderPID(port)
+	info.PortHolderPID = findPortHolderPID(port, info.ManagedPID)
 	if info.PortHolderPID > 0 {
-		info.PortHolderOwned, info.PortHolderDeletedInodes = inspectManagedDoltOwnership(info.PortHolderPID, layout)
+		var err error
+		info.PortHolderOwned, info.PortHolderDeletedInodes, err = inspectManagedDoltOwnership(info.PortHolderPID, layout)
+		info.OwnershipErr = errors.Join(info.OwnershipErr, err)
 	}
 	return info
 }
@@ -84,12 +110,21 @@ func managedPIDFromPIDFileWithOptions(pidFile string, removeStale bool) int {
 	return pid
 }
 
-func findPortHolderPID(port string) int {
+// findPortHolderPID returns the PID listening on port. candidates are PIDs the
+// caller expects to own it (e.g. the PID recorded in runtime state); on Linux
+// they are checked first so the common "is it still ours" answer costs one
+// /proc/<pid>/fd read instead of a walk of every process. Hosts without
+// /proc/net (darwin) fall back to lsof.
+func findPortHolderPID(port string, candidates ...int) int {
 	port = strings.TrimSpace(port)
 	if port == "" {
 		return 0
 	}
-	if pid, checked := findPortHolderPIDFromProc(port); checked {
+	portNum, err := strconv.ParseUint(port, 10, 16)
+	if err != nil {
+		return 0
+	}
+	if pid, checked := pidutil.ListenerPID(int(portNum), candidates...); checked {
 		return pid
 	}
 	return findPortHolderPIDFromLsof(port)
@@ -386,82 +421,6 @@ func processHasDeletedDataInodesWithin(pid int, dataDir string, timeout time.Dur
 	return false
 }
 
-func findPortHolderPIDFromProc(port string) (int, bool) {
-	portNum, err := strconv.ParseUint(port, 10, 16)
-	if err != nil {
-		return 0, true
-	}
-	inodes, checked := listeningSocketInodesFromProc(uint16(portNum))
-	if !checked {
-		return 0, false
-	}
-	if len(inodes) == 0 {
-		return 0, true
-	}
-	return processWithSocketInodes(inodes), true
-}
-
-func listeningSocketInodesFromProc(port uint16) (map[string]struct{}, bool) {
-	inodes := map[string]struct{}{}
-	checked := false
-	for _, path := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		checked = true
-		scanner := bufio.NewScanner(strings.NewReader(string(data)))
-		for scanner.Scan() {
-			fields := strings.Fields(scanner.Text())
-			if len(fields) < 10 || fields[3] != "0A" {
-				continue
-			}
-			_, portHex, ok := strings.Cut(fields[1], ":")
-			if !ok {
-				continue
-			}
-			gotPort, err := strconv.ParseUint(portHex, 16, 16)
-			if err != nil || uint16(gotPort) != port {
-				continue
-			}
-			inodes[fields[9]] = struct{}{}
-		}
-	}
-	return inodes, checked
-}
-
-func processWithSocketInodes(inodes map[string]struct{}) int {
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return 0
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		pid, err := strconv.Atoi(entry.Name())
-		if err != nil || !pidAlive(pid) {
-			continue
-		}
-		fdDir := filepath.Join("/proc", entry.Name(), "fd")
-		fds, err := os.ReadDir(fdDir)
-		if err != nil {
-			continue
-		}
-		for _, fd := range fds {
-			target, err := os.Readlink(filepath.Join(fdDir, fd.Name()))
-			if err != nil || !strings.HasPrefix(target, "socket:[") || !strings.HasSuffix(target, "]") {
-				continue
-			}
-			inode := strings.TrimSuffix(strings.TrimPrefix(target, "socket:["), "]")
-			if _, ok := inodes[inode]; ok {
-				return pid
-			}
-		}
-	}
-	return 0
-}
-
 func managedPIDFromPSByConfig(configFile string) int {
 	for _, line := range doltPSLines() {
 		if !strings.Contains(line, "dolt sql-server") {
@@ -521,47 +480,65 @@ func psLinePID(line string) int {
 	return pid
 }
 
-func inspectManagedDoltOwnership(pid int, layout managedDoltRuntimeLayout) (bool, bool) {
+func inspectManagedDoltOwnership(pid int, layout managedDoltRuntimeLayout) (bool, bool, error) {
 	if pid <= 0 {
-		return false, false
+		return false, false, nil
 	}
 
 	stateDir := strings.TrimSpace(loadDoltRuntimeStateDataDir(layout.StateFile))
 	if stateDir != "" && !samePath(stateDir, layout.DataDir) {
-		return false, processHasDeletedDataInodes(pid, layout.DataDir)
+		return false, processHasDeletedDataInodes(pid, layout.DataDir), nil
 	}
 
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for {
-		owned := managedDoltProcessOwnedWithStateDir(pid, layout, stateDir)
+		owned, err := managedDoltProcessOwnedWithStateDir(pid, layout, stateDir)
 		deleted := processHasDeletedDataInodes(pid, layout.DataDir)
+		if err != nil {
+			return false, deleted, err
+		}
 		if owned || deleted || !pidAlive(pid) || time.Now().After(deadline) {
-			return owned, deleted
+			return owned, deleted, nil
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
 }
 
-func managedDoltProcessOwnedWithStateDir(pid int, layout managedDoltRuntimeLayout, stateDir string) bool {
+// managedDoltProcessOwnedWithStateDir reports whether pid is this city's
+// managed Dolt server.
+//
+// A non-nil error means the process's arguments could not be read, so ownership
+// is undecided. It is returned rather than folded into a false so a caller
+// about to kill the process, or about to erase the record of it, can tell the
+// two apart.
+func managedDoltProcessOwnedWithStateDir(pid int, layout managedDoltRuntimeLayout, stateDir string) (bool, error) {
 	if pid <= 0 {
-		return false
+		return false, nil
 	}
 	if stateDir != "" && !samePath(stateDir, layout.DataDir) {
-		return false
+		return false, nil
 	}
 
-	procArgs, _ := processArgs(pid)
+	procArgs, err := processArgs(pid)
+	if err != nil {
+		// A process that exited between the liveness check and this read is
+		// simply gone, and reporting it as not-owned is correct.
+		if !pidAlive(pid) {
+			return false, nil
+		}
+		return false, fmt.Errorf("%w: reading arguments of live pid %d: %w", errManagedDoltIdentityUnavailable, pid, err)
+	}
 	switch {
 	case containsProcessConfig(procArgs, layout.ConfigFile):
-		return true
+		return true, nil
 	case hasOtherProcessConfig(procArgs):
-		return false
+		return false, nil
 	case processDataDirMatches(procArgs, layout.DataDir):
-		return true
+		return true, nil
 	case processCWDMatches(pid, layout.DataDir):
-		return true
+		return true, nil
 	default:
-		return false
+		return false, nil
 	}
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -67,12 +68,8 @@ func (rt *serviceRuntime) BeadStore(rig string) beads.Store {
 	return nil
 }
 
+// Poke implements workspacesvc.Runtime. Key-less: a workspace service has
+// no session or template in hand, so it enqueues the allocator.
 func (rt *serviceRuntime) Poke() {
-	if rt.cr.pokeCh == nil {
-		return
-	}
-	select {
-	case rt.cr.pokeCh <- struct{}{}:
-	default:
-	}
+	rt.cr.wakeOf().Enqueue(wakeReasonService, reconcilekey.Allocator())
 }

@@ -456,3 +456,180 @@ func TestStateString(t *testing.T) {
 		}
 	}
 }
+
+// capacitySettings mirrors the endpoint-capacity consumer: trip on the first
+// failure, sticky exponent, and successes ignored while open.
+func capacitySettings() Settings {
+	return Settings{
+		Enabled:                true,
+		ConsecutiveFailures:    1,
+		OpenBase:               5 * time.Second,
+		OpenMax:                60 * time.Second,
+		HalfOpenInterval:       10 * time.Minute,
+		TripDecay:              2 * time.Minute,
+		IgnoreSuccessWhileOpen: true,
+	}
+}
+
+func TestBreaker_ReleaseProbeAdmitsNextProbeImmediately(t *testing.T) {
+	clock := newTestClock()
+	b := newTestBreaker(t, capacitySettings(), clock, nil)
+	b.RecordFailure()
+	clock.Advance(5 * time.Second)
+	if !b.Allow() {
+		t.Fatal("Allow() = false past the open deadline, want the probe")
+	}
+	if b.Allow() {
+		t.Fatal("Allow() = true for a second caller while the probe is in flight, want false")
+	}
+	b.ReleaseProbe()
+	if got := b.State(); got != StateHalfOpen {
+		t.Fatalf("State() after ReleaseProbe = %v, want %v", got, StateHalfOpen)
+	}
+	if !b.ProbeDue() {
+		t.Fatal("ProbeDue() = false after ReleaseProbe, want true")
+	}
+	if !b.Allow() {
+		t.Fatal("Allow() = false after ReleaseProbe, want a new probe without waiting HalfOpenInterval")
+	}
+}
+
+func TestBreaker_ReleaseProbeIsNoOpUnlessHalfOpen(t *testing.T) {
+	clock := newTestClock()
+	b := newTestBreaker(t, capacitySettings(), clock, nil)
+	b.RecordFailure()
+	b.ReleaseProbe()
+	if b.Allow() {
+		t.Fatal("Allow() = true before the open deadline after ReleaseProbe, want false")
+	}
+}
+
+func TestBreaker_TripDecayKeepsExponentAcrossQuickRecovery(t *testing.T) {
+	clock := newTestClock()
+	b := newTestBreaker(t, capacitySettings(), clock, nil)
+
+	b.RecordFailure()
+	clock.Advance(5 * time.Second)
+	if !b.Allow() {
+		t.Fatal("Allow() = false past the first deadline, want the probe")
+	}
+	b.RecordSuccess()
+	if got := b.State(); got != StateClosed {
+		t.Fatalf("State() after probe success = %v, want %v", got, StateClosed)
+	}
+	clock.Advance(time.Minute) // inside TripDecay
+	b.RecordFailure()
+	if st := b.Status(); st.Trips != 2 || st.BackoffCap != 10*time.Second {
+		t.Fatalf("re-trip within TripDecay: Trips=%d BackoffCap=%v, want 2 and 10s", st.Trips, st.BackoffCap)
+	}
+
+	clock.Advance(10 * time.Second)
+	if !b.Allow() {
+		t.Fatal("Allow() = false past the second deadline, want the probe")
+	}
+	b.RecordSuccess()
+	clock.Advance(2 * time.Minute) // closed for the full TripDecay
+	b.RecordFailure()
+	if st := b.Status(); st.Trips != 1 || st.BackoffCap != 5*time.Second {
+		t.Fatalf("re-trip after TripDecay: Trips=%d BackoffCap=%v, want 1 and 5s", st.Trips, st.BackoffCap)
+	}
+}
+
+func TestBreaker_ZeroValueSettingsPreserveLegacySemantics(t *testing.T) {
+	clock := newTestClock()
+	b := newTestBreaker(t, Settings{Enabled: true, ConsecutiveFailures: 1, OpenBase: time.Second, OpenMax: time.Minute}, clock, nil)
+
+	// Success while open closes and resets the exponent.
+	b.RecordFailure()
+	b.RecordSuccess()
+	if got := b.State(); got != StateClosed {
+		t.Fatalf("State() after success while open = %v, want %v", got, StateClosed)
+	}
+	if st := b.Status(); st.Trips != 0 {
+		t.Fatalf("Trips after success = %d, want 0 (success resets without TripDecay)", st.Trips)
+	}
+
+	// An immediate re-trip starts again from OpenBase.
+	b.RecordFailure()
+	if st := b.Status(); st.Trips != 1 || st.BackoffCap != time.Second {
+		t.Fatalf("re-trip: Trips=%d BackoffCap=%v, want 1 and 1s", st.Trips, st.BackoffCap)
+	}
+	if got := b.snapshot().deadline; !got.Equal(clock.Now().Add(time.Second)) {
+		t.Fatalf("deadline = %v, want now+1s", got)
+	}
+}
+
+func TestBreaker_IgnoreSuccessWhileOpenKeepsOpen(t *testing.T) {
+	clock := newTestClock()
+	b := newTestBreaker(t, capacitySettings(), clock, nil)
+	b.RecordFailure()
+	b.RecordSuccess()
+	if got := b.State(); got != StateOpen {
+		t.Fatalf("State() after straggler success while open = %v, want %v", got, StateOpen)
+	}
+	clock.Advance(5 * time.Second)
+	if !b.Allow() {
+		t.Fatal("Allow() = false past the deadline, want the probe")
+	}
+	b.RecordSuccess()
+	if got := b.State(); got != StateClosed {
+		t.Fatalf("State() after half-open success = %v, want %v", got, StateClosed)
+	}
+}
+
+func TestBreaker_AllowProbeReportsProbeAdmission(t *testing.T) {
+	clock := newTestClock()
+	b := newTestBreaker(t, capacitySettings(), clock, nil)
+	if allowed, probe := b.AllowProbe(); !allowed || probe {
+		t.Fatalf("closed AllowProbe() = (%v, %v), want (true, false)", allowed, probe)
+	}
+	b.RecordFailure()
+	if allowed, probe := b.AllowProbe(); allowed || probe {
+		t.Fatalf("open before deadline AllowProbe() = (%v, %v), want (false, false)", allowed, probe)
+	}
+	clock.Advance(5 * time.Second)
+
+	const callers = 16
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	admitted, probes := 0, 0
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			allowed, probe := b.AllowProbe()
+			mu.Lock()
+			defer mu.Unlock()
+			if allowed {
+				admitted++
+			}
+			if probe {
+				probes++
+			}
+		}()
+	}
+	wg.Wait()
+	if admitted != 1 || probes != 1 {
+		t.Fatalf("concurrent AllowProbe past the deadline admitted %d (probes %d), want exactly 1", admitted, probes)
+	}
+}
+
+func TestBreaker_SettingsNowDrivesDeadlineAndProbeDue(t *testing.T) {
+	clock := newTestClock()
+	settings := capacitySettings()
+	settings.Now = clock.Now
+	b := newBreaker("scope-a", OpClassSessionStart, settings.withDefaults(), nil)
+	b.jitter = maxJitter
+
+	b.RecordFailure()
+	if b.ProbeDue() || b.Allow() {
+		t.Fatal("probe due immediately after the trip under the injected clock")
+	}
+	if got, want := b.Status().Deadline, clock.Now().Add(5*time.Second); !got.Equal(want) {
+		t.Fatalf("Deadline = %v, want %v (from Settings.Now)", got, want)
+	}
+	clock.Advance(5 * time.Second)
+	if !b.ProbeDue() || !b.Allow() {
+		t.Fatal("probe not due after advancing the injected clock past the deadline")
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/pidutil"
 )
@@ -54,6 +56,9 @@ type managedDoltStartedProcess struct {
 	// these before signaling WatchdogPID. Zero/empty when there is no watchdog.
 	WatchdogStartTimeTicks uint64
 	WatchdogStartIdentity  string
+	// InfraScope names the transient systemd user scope unit the spawn runs
+	// in (see infraArgv); empty when it was spawned unscoped.
+	InfraScope string
 }
 
 // defaultManagedDoltBindHost is the listener host a managed dolt sql-server
@@ -105,6 +110,12 @@ var (
 	managedDoltStartSQLServerFn = startManagedDoltSQLServer
 	managedDoltWaitForReadyFn   = waitForManagedDoltReady
 	managedDoltLogSuffixFn      = managedDoltLogSuffix
+
+	// The platform gate is indirected for the same reason, with one
+	// difference worth stating: a test that stubs it is not bypassing a
+	// safety check, because the hazard the gate guards is an unmanageable
+	// live server, and a test that also stubs the spawn never creates one.
+	managedDoltNativeIdentitySupportedFn = managedDoltNativeIdentitySupported
 )
 
 // init is the re-entry point for the dolt-managed-test watchdog. The watchdog
@@ -148,6 +159,16 @@ func startManagedDoltProcess(cityPath, host, port, user, logLevel string, timeou
 
 //nolint:unparam // archiveLevel is an explicit override hook; current callers use config/env fallback.
 func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel string, archiveLevel int, timeout time.Duration, publish bool) (managedDoltStartReport, error) {
+	// Refuse to start what this platform cannot afterwards stop or identify.
+	// The stop and inspect paths are both fenced by the same gate, so where it
+	// fails a successful start leaves a database server holding the data
+	// directory's exclusive lock, a PID file, and a runtime-state record
+	// claiming it is running — none of which any supported operation can act
+	// on again. Refusing here is recoverable; an unmanageable server writing
+	// into a live data directory is not.
+	if err := managedDoltNativeIdentitySupportedFn(); err != nil {
+		return managedDoltStartReport{}, err
+	}
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
 		return managedDoltStartReport{}, err
@@ -237,11 +258,12 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 			return report, fmt.Errorf("write pid file: %w", err)
 		}
 		if err := writeDoltRuntimeStateFile(layout.StateFile, doltRuntimeState{
-			Running:   true,
-			PID:       started.PID,
-			Port:      currentPort,
-			DataDir:   layout.DataDir,
-			StartedAt: time.Now().UTC().Format(time.RFC3339),
+			Running:    true,
+			PID:        started.PID,
+			Port:       currentPort,
+			DataDir:    layout.DataDir,
+			StartedAt:  time.Now().UTC().Format(time.RFC3339),
+			InfraScope: started.InfraScope,
 		}); err != nil {
 			terminateManagedDoltStartedProcess(started)
 			_ = os.Remove(layout.PIDFile)
@@ -283,7 +305,7 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 		})
 
 		startupOutput, readErr := managedDoltLogSuffixFn(layout.LogFile, logOffset)
-		if readErr == nil && strings.Contains(strings.ToLower(startupOutput), "address already in use") {
+		if readErr == nil && doltStartupPortInUse(startupOutput) {
 			report.AddressInUse = true
 			// Wait briefly on the originally requested port to outlast a
 			// TIME_WAIT socket before bumping ports. See
@@ -309,6 +331,23 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 	return report, fmt.Errorf("dolt server could not find a free port after repeated address-in-use failures (last port %d)", report.Port)
 }
 
+// doltPortInUsePattern matches what dolt 2.3.3 prints when another listener
+// holds its port, "Port 17777 already in use." The word boundary keeps a name
+// that merely ends in "port" from counting.
+var doltPortInUsePattern = regexp.MustCompile(`(?i)\bport \d+ already in use`)
+
+// doltStartupPortInUse reports whether dolt's startup output says it could
+// not take its configured port. dolt says so two ways: the kernel's bind error
+// ("listen tcp 0.0.0.0:3307: bind: address already in use"), which appears
+// only when the bind itself fails, and, in 2.3.3, "Port 3307 already in use."
+// whenever another listener holds the port. Other "already in use" complaints,
+// such as a database held by another process, are not port conflicts and do
+// not match.
+func doltStartupPortInUse(output string) bool {
+	return strings.Contains(strings.ToLower(output), "address already in use") ||
+		doltPortInUsePattern.MatchString(output)
+}
+
 // managedDoltLockReleaseTimeoutFn resolves the configured wait window for
 // dolt's on-disk exclusive store lock in the start guard. Package-level var
 // so tests can shim the window without writing a city.toml. Production
@@ -323,7 +362,8 @@ var managedDoltStartAddressInUseRetryWindowFn = resolveManagedDoltStartAddressIn
 
 // resolveManagedDoltStartAddressInUseRetryWindow returns how long the managed-dolt
 // start path should wait on the originally requested port before falling back
-// to a higher port when bind fails with "address already in use". Reads
+// to a higher port when dolt reports the port in use (doltStartupPortInUse:
+// "address already in use" or "Port N already in use."). Reads
 // `[daemon].dolt_start_address_in_use_retry_window` from city.toml when available;
 // falls back to config.DefaultDoltStartAddressInUseRetryWindow when the config
 // cannot be loaded.
@@ -426,7 +466,7 @@ func startManagedDoltSQLServer(cityPath, configFile, logFilePath string, logFile
 	if managedDoltScopeWatchdogEnabled() {
 		return startManagedDoltSQLServerWithScopeWatchdog(cityPath, configFile, logFilePath, logFile)
 	}
-	cmd := exec.Command("dolt", "sql-server", "--config", configFile)
+	cmd, infraScopeUnit := infraCommand(managedDoltInfraDescription(cityPath), "dolt", "sql-server", "--config", configFile)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
@@ -450,6 +490,7 @@ func startManagedDoltSQLServer(cityPath, configFile, logFilePath string, logFile
 		PID:            pid,
 		StartTimeTicks: startTimeTicks,
 		StartIdentity:  startIdentity,
+		InfraScope:     infraScopeUnit,
 	}
 	// Reap the child when it exits so it does not linger as a zombie under a
 	// non-reaping PID-1 controller. This server is managed out-of-band by PID
@@ -1257,10 +1298,32 @@ func managedDoltTestParentDone(rawFD string) (<-chan struct{}, func(), error) {
 	return done, func() { _ = parentPipe.Close() }, nil
 }
 
+// managedDoltSessionScopedEnvKeys are the per-session identity variables
+// (execenv.SessionScopedEnvKeys) a managed server started from inside an
+// agent session would otherwise inherit. Its scope watchdog reparents to
+// init, so the session reconciler's orphan sweep (sweepProcessTableOrphans)
+// would reap the watchdog as that session's process-table root once the
+// session bead closes, taking the server down with it. A managed server is
+// city infrastructure, not part of any session. The list is shared with the
+// exec runtime's ops, so the two scrubs cannot drift.
+var managedDoltSessionScopedEnvKeys = execenv.SessionScopedEnvKeys
+
+// withoutSessionIdentityEnv returns env without any
+// managedDoltSessionScopedEnvKeys entry (execenv.WithoutSessionIdentity).
+// Every long-lived, detached city-infrastructure process gc spawns (managed
+// Dolt, its scope watchdog, a drift-respawned supervisor) goes through it,
+// because a reparented process carrying an agent's GC_SESSION_ID is that
+// session's orphan-sweep target. Exec orders go through it too
+// (mergeOrderExecEnv): an order acts for the city, not for the seat that
+// started the controller.
+func withoutSessionIdentityEnv(env []string) []string {
+	return execenv.WithoutSessionIdentity(env)
+}
+
 // doltServerEnv returns the environment applied to every managed dolt
-// sql-server we launch.
+// sql-server we launch, and to the scope watchdog that supervises it.
 func doltServerEnv(cityPath string, parent []string) []string {
-	env := removeEnvKey(parent, "DOLT_DISABLE_EVENT_FLUSH")
+	env := withoutSessionIdentityEnv(removeEnvKey(parent, "DOLT_DISABLE_EVENT_FLUSH"))
 	if managedDoltDisableEventFlush(cityPath) {
 		// Disable Dolt usage telemetry for managed servers by default. The
 		// `dolt send-metrics` event-flush reporter spawns transient

@@ -15,9 +15,10 @@ import (
 // acp resembles t3bridge: it speaks a JSON-RPC agent protocol over its own
 // connection (spawned agent + control socket), with no in-box exec op and no
 // tmux. So Place.Exec returns runtime.ErrExecUnsupported and the Transport is
-// bespoke ("acp"): Nudge delivers an ACP prompt, Interrupt cancels, Peek reads
-// the buffered output; SendKeys/ClearScrollback are no-ops (no terminal). Attach
-// is unsupported. Meta is file-backed (sidecar files, like subprocess).
+// bespoke ("acp"): Nudge delivers an ACP prompt, Interrupt cancels the turn
+// with session/cancel and waits for it to settle, Peek reads the buffered
+// output; SendKeys/ClearScrollback are no-ops (no terminal). Attach is
+// unsupported. Meta is file-backed (sidecar files, like subprocess).
 //
 // InteractionProvider (Pending/Respond) and TransportCapabilityProvider
 // (SupportsTransport) are optional extensions OUTSIDE the core seams; cutover.go

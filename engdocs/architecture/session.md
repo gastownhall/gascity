@@ -117,6 +117,78 @@ Optional provider extensions also live in `runtime/runtime.go`:
 - `IdleWaitProvider`
 - `ImmediateNudgeProvider`
 
+### Parked Pool Seats
+
+A graph claim pre-assigns the open siblings of its step's
+`gc.continuation_group` to the claiming session (`preassignHookContinuationGroup`,
+`cmd/gc/cmd_hook_claim.go`), so the same session runs the later steps with the
+conversation it built. When the seat finishes its step while such a pin is
+still blocked, it drains, and `gc runtime drain-ack` keeps the pin (it releases
+only unexecuted `in_progress` claims). The finalize then leaves the seat
+asleep with `sleep_reason=idle`.
+
+That seat is **parked**, not stranded (`cmd/gc/seat_parked.go`). A pool seat
+is parked when it is asleep on its own stop (`sleep_reason=idle`) with no hold,
+its template is not `wake_mode=fresh`, it slept less than `parkedWorkMaxHold`
+(24 hours) ago, and every bead assigned to it is open, unstarted (no claim,
+wake or `work_started` record names it), not deferred and not ready. The
+verdict is recomputed each pass from those persisted fields; there is no
+parked state to store or clear.
+
+- The pool-slot close (v2 A21; legacy's pool-free branch) holds a parked seat
+  with no `session.stranded`, no marker and no repair. A seat the pass only
+  found eligible is re-read live by the close, which holds it if its live work
+  is still only blocked pins. A live read that fails neither parks nor strands
+  the seat: v2's close refuses and retries, legacy holds it for the tick.
+- The hold comes before the repair: a seat a pass sent down the stranded path
+  (its pool was full, or a read failed) parks again, unrepaired, once it is
+  parked-shaped and eligible.
+- The pool planner keeps a parked seat selected, so it sleeps instead of
+  draining as an orphan, but its pin takes no cap headroom and is not pool
+  demand until it is ready (`SessionRequest.Parked`).
+- When the pin turns ready, the assigned-work wake restarts the same seat. With
+  the default `wake_mode=resume` it resumes its provider conversation (the
+  `session_key` stays while its transcript exists), and `gc hook --claim`
+  claims the pin by session ID.
+- The resume runs in the work dir the seat ran in, where its transcript is
+  filed. A pin's binding would otherwise derive the dir afresh: the agent's
+  `work_dir` for the seat's instance, plus the pin's `gc.pack` and
+  `gc.pack_workspace`. That dir differs from the recorded one when the seat
+  was created on a managed per-bead worktree, when its last step and its pin
+  carry different pack metadata, or when `work_dir` changed while it was
+  parked. The planner marks a parked seat's resume
+  (`SessionRequest.ParkedContinuation`), while the pin is blocked and once it
+  is ready, and `computePoolTriggerBindingPatch` keeps the recorded dir for it,
+  as it does for a live continuation. Where the binding applies (legacy's bind
+  write, v2's PreWake), the recorded dir must still be a directory in the rig
+  of the derived dir, or, when no rig owns that path, the seat's own rig. A
+  dir that is gone or in another rig is re-derived, and the seat starts fresh
+  there.
+- A slot-bounded pool (`max_active_sessions`, or a namepool) parks only while
+  it keeps a free slot: once its open rows (a workless asleep seat the close
+  ends this pass aside) reach the bound, its oldest parked seats fall back to
+  the stranded path until one slot is free.
+- A parked seat's pin turns into a counted resume when it is ready, and
+  competes by bead priority with the other existing seats' requests, ahead of
+  new demand; a tie keeps the pass's order. At a full rig or city cap the
+  request that loses selects no seat, but the session overlay still keeps
+  every open row of a template the pass selects, so the outcome turns on the
+  loser's template:
+  - While its template keeps a selected row, the loser stays selected: a
+    parked seat wakes for its ready pin, or a live seat keeps running, past
+    the cap.
+  - Otherwise nothing selects it. A parked seat that loses is closed as an
+    orphan by both reconcilers, its pin returned to the pool (SESS-082), as
+    for any asleep seat that loses the cap: a fresh seat runs the pin without
+    the conversation. It does not wait for a slot, so nothing deadlocks on the
+    cap. A live seat the pin displaces finishes its claimed work as an
+    undesired row (SESS-074) before it drains, so the cap is briefly exceeded
+    by that one seat.
+- Everything else strands as before: a seat holding started work, a seat whose
+  runtime died (`runtime-missing`), a seat its idle timeout stopped
+  (`idle-timeout`; only the voluntary `idle` stop parks), a fresh-wake seat, a
+  seat past its bound. The stranded repair then returns the pin to the pool.
+
 ### Providers
 
 - **tmux**: Primary interactive runtime in
@@ -205,22 +277,33 @@ Stored config hashes carry a `vN:` prefix. The version literal comes from
 `runtime.FingerprintVersion` in
 [`internal/runtime/fingerprint.go`](https://github.com/gastownhall/gascity/blob/main/internal/runtime/fingerprint.go).
 `ConfigFingerprint`, `CoreFingerprint`, and `LiveFingerprint` all emit
-`<FingerprintVersion>:<sha256-hex>`. The current version is `v5`.
+`<FingerprintVersion>:<sha256-hex>`. The current version is `v7`.
 
-The reconciler treats two stored-hash cases as silent rebaseline rather than
-drift:
+The reconciler treats three stored-hash cases as silent rebaseline rather
+than drift:
 
 1. The stored hash has no version prefix, which means it was written by a
    pre-versioning binary.
-2. The stored hash has a prefix that differs from the current
-   `runtime.FingerprintVersion`.
+2. The stored hash has a prefix other than `v6` that differs from the
+   current `runtime.FingerprintVersion`.
+3. The stored hash is `v6` and equals the hash the `v6` binary computes from
+   the current config (`runtime.IsCoreHashArtifact`, and
+   `runtime.IsLiveHashArtifact` for a live hash). `v7` stopped hashing the
+   non-Restart `FingerprintExtra` keys, and `v6` is the one older version
+   still checked against config: a `v6` hash of other config is drift, so a
+   session whose config changed while `v6` ran still drains or restarts
+   once. Once no stored hash is `v6`, the check can go and `v6` joins case 2.
 
-Silent rebaseline atomically overwrites `started_config_hash`,
-`started_live_hash`, `live_hash`, and `core_hash_breakdown` with values from
-the current binary. The session keeps running, no `SessionDraining` event is
-recorded, and the supervisor log shows one info line for the affected session.
-The `core_hash_breakdown` JSON shape is part of the same upgrade contract: a
-shape change must be paired with a fingerprint version bump.
+Silent rebaseline atomically overwrites the six fingerprint keys,
+`started_config_hash`, `started_provision_hash`, `started_launch_hash`,
+`started_live_hash`, `live_hash`, and `core_hash_breakdown`, with values from
+the current binary. A `v6` core hash moves the core baseline alone and leaves
+`started_live_hash` and `live_hash` to the live check, so a `session_live`
+change made since the start is still applied. The session keeps running, no
+`SessionDraining` event is recorded, and the supervisor log shows one info
+line for the affected session. The `core_hash_breakdown` JSON shape is part
+of the same upgrade contract: a shape change must be paired with a
+fingerprint version bump.
 
 Implementation references:
 [`internal/runtime/fingerprint.go`](https://github.com/gastownhall/gascity/blob/main/internal/runtime/fingerprint.go)
@@ -272,6 +355,8 @@ For PRs that touch `internal/runtime/fingerprint.go`:
 |---|---|---|
 | `v1` | 2026-04-27 | Initial introduction of the `vN:` prefix. Pre-existing unversioned hashes are silently rebaselined to `v1` on the first reconciler tick after upgrade. |
 | `v5` | 2026-07-01 | Operational/host-tooling scripts (`city-*.sh`, `update-*.sh`) excluded from the `.gc/scripts` probed CopyFiles content hash, so editing one no longer flips every agent's fingerprint into a fleet-wide drift. Existing hashes rebaseline silently on upgrade. (#3840) |
+| `v6` | 2026-09-12 | Operator-authored config env gets its own Launch-tier identity field (`Config.OperatorEnv`), separate from `Env` and `FingerprintExtra`. Existing hashes rebaseline silently on upgrade. (#6321) |
+| `v7` | 2026-10-18 | `FingerprintExtra` hashes only its Restart-policy keys (`runtime.FingerprintExtraChangePolicy`), so a pool sizing, skill or `wake_mode` edit no longer drains the sessions it reaches. A `v6` hash rebaselines silently only for config unchanged since; a session whose config changed while `v6` ran drains once. (#8079) |
 
 ## Known Limitations
 

@@ -38,7 +38,7 @@ func TestProxiedBackupCoverageAdvisorySkipsAnExternalUpstream(t *testing.T) {
 	city := t.TempDir()
 	writeProxiedExternalScope(t, city)
 
-	if check := NewProxiedBackupCoverageCheckForConfig(city, nil, errors.New("no city.toml")); check != nil {
+	if check := NewProxiedBackupCoverageCheckForConfig(city, nil, errors.New("no city.toml"), nil); check != nil {
 		t.Fatalf("a proxied-external city got the local-store advisory: %q", check.Run(&CheckContext{}).Message)
 	}
 }
@@ -60,10 +60,12 @@ func TestProxiedBackupCoverageAdvisoryNamesOnlyLocallyStoredScopes(t *testing.T)
 		t.Fatal(err)
 	}
 
-	check := NewProxiedBackupCoverageCheckForConfig(city, nil, errors.New("no city.toml"))
+	check := NewProxiedBackupCoverageCheckForConfig(city, nil, errors.New("no city.toml"), nil)
 	if check == nil {
 		t.Fatal("no advisory registered for a city with a locally stored proxied rig")
 	}
+	check.status = bdRefusesProxiedBackup
+	check.proxyLive = proxiesRunning
 	message := check.Run(&CheckContext{}).Message
 	if !strings.Contains(message, filepath.Join("rigs", "local")) {
 		t.Errorf("advisory does not name the locally stored scope: %q", message)
@@ -95,7 +97,7 @@ func TestDoltBackupCheckReportsSelfManagedBackupsOnAProxiedExternalRig(t *testin
 	if !strings.Contains(result.Message, externalUpstreamBackupNote) {
 		t.Errorf("message does not defer backups to the endpoint: %q", result.Message)
 	}
-	if strings.Contains(result.Message, "no gc or bd backup exists") {
+	if strings.Contains(result.Message, "only bd can back it up") {
 		t.Errorf("message claims no copy exists of data held on an external server: %q", result.Message)
 	}
 }
@@ -119,7 +121,7 @@ func TestProxiedLocalScopeKeepsTheOnlyCopyWording(t *testing.T) {
 	}
 
 	result := NewDoltBackupCheck(city, config.Rig{Name: "r1", Path: rig}, "").Run(&CheckContext{})
-	if !strings.Contains(result.Message, "no gc or bd backup exists") {
+	if !strings.Contains(result.Message, "only bd can back it up") {
 		t.Fatalf("a proxied-local rig lost the gap it really has: %q", result.Message)
 	}
 }

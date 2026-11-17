@@ -61,6 +61,35 @@
 // store traced back to test clients reaching the local server on port 3307
 // (ga-4c2ss6). For the rare legitimate case, set ProdDoltPortOptOutVar
 // (GC_ALLOW_PROD_DOLT_PORT_IN_TESTS) to "1".
+//
+// Hermetic git template: in go-test mode init() also points GIT_TEMPLATE_DIR
+// at a template directory holding a config with maintenance.auto=false, an
+// empty hooks/ and an empty info/exclude, replacing any ambient
+// GIT_TEMPLATE_DIR (which beats init.templateDir) that is not already that
+// template. Every repo this binary or a child it spawns makes with git init or
+// git clone then starts with git's detached auto-maintenance off. Git 2.55
+// starts that daemon after commit, merge, am, fetch and pull, and it races
+// t.TempDir's RemoveAll ("directory not empty", ga-zoe1wr). The template lives
+// in $TEST_TMPDIR when Bazel sets it, else os.TempDir(), named for the owner's
+// uid and a digest of its contents. Git copies a template's hooks/ into every
+// repo it makes, so an existing template is verified against what init()
+// writes (entry by entry, content byte for byte, and on unix owner and mode)
+// before it is used, and one that differs makes init() panic naming the
+// directory to remove. A test binary that another one re-execs inherits
+// GIT_TEMPLATE_DIR and keeps it when it is an absolute path that passes the
+// same verification, so a child started with a TMPDIR of its own creates
+// nothing there. Testscript subcommand mode is left alone, as above. Code that
+// builds a child env from scratch must carry GIT_TEMPLATE_DIR into it, or the
+// repos that child makes lose the guard, and a child that is a test binary
+// installs a template of its own in its temp dir.
+//
+// Dolt event flush: in a go-test binary init() also sets
+// DOLT_DISABLE_EVENT_FLUSH. dolt forks a detached `dolt send-metrics` after each
+// command unless that variable is present, and metrics.disabled in the dolt
+// global config does not stop the fork, so every dolt a test runs, directly or
+// through gc or bd, would otherwise leave a metrics process behind. The variable
+// is a presence switch; dolt does not read its value. Testscript subcommand mode
+// skips it with the scrub, because testscript owns that child env exactly.
 package testenv
 
 import (
@@ -78,6 +107,12 @@ import (
 // testscript subcommand re-invocation renames the binary (e.g. to `gc`) so
 // its os.Args[0] will not have the `.test` suffix.
 func isGoTestBinary() bool {
+	// Bazel test binaries drop the .test suffix but export TEST_SRCDIR and
+	// name the binary <target>_test; testscript re-invocations rename it
+	// (e.g. "gc"), so require both markers to keep the child env intact.
+	if os.Getenv("TEST_SRCDIR") != "" && strings.HasSuffix(filepath.Base(os.Args[0]), "_test") {
+		return true
+	}
 	name := filepath.Base(os.Args[0])
 	name = strings.TrimSuffix(name, ".exe")
 	return strings.HasSuffix(name, ".test")
@@ -88,6 +123,10 @@ func isGoTestBinary() bool {
 // the list are scrubbed as usual; the passthrough var itself is unset so the
 // list does not flow onward to further subprocesses.
 const PassthroughVar = "GC_TESTENV_PASSTHROUGH"
+
+// doltDisableEventFlushVar is the variable dolt checks, by presence only, before
+// it forks the detached `dolt send-metrics` it otherwise runs after each command.
+const doltDisableEventFlushVar = "DOLT_DISABLE_EVENT_FLUSH"
 
 // LeakVectorVars is the list of env vars that point at live-city paths,
 // session identities, bead stores, or Dolt runtimes. If any of these survive
@@ -127,6 +166,7 @@ var LeakVectorVars = []string{
 	"GC_AGENT",
 	"GC_ALIAS",
 	"GC_BEADS",
+	"GC_BEADS_ALLOW_SCHEMA_BEHIND_MIGRATE",
 	"GC_BEADS_CONDITIONAL_WRITES",
 	"GC_BEADS_GUARDED_RELEASE",
 	"GC_BEADS_SCOPE_ROOT",
@@ -144,6 +184,20 @@ var LeakVectorVars = []string{
 	"GC_DOLT_PORT",
 	"GC_DOLT_USER",
 	"GC_HOME",
+	// GC_LANE_FAILPOINT makes a test-hooks gc kill itself at a lane stage
+	// (cmd/gc/conversation_lane_failpoint.go). A leaked shell value would make
+	// a gc child a test starts, or a unit test that enables the stamp, kill
+	// itself, so the scrub owns it; tests that want it set it on the child.
+	"GC_LANE_FAILPOINT",
+	"GC_OPS_CONTENT",
+	"GC_OPS_CONTROL",
+	// GC_OPS_FAILPOINT makes a test-hooks gc kill itself, park a request or
+	// fail an op's closes at an op recording crash point
+	// (cmd/gc/ops_failpoint.go). A leaked shell value would make a gc child a
+	// test starts do so, so the scrub owns it; tests that want it set it on
+	// the child.
+	"GC_OPS_FAILPOINT",
+	"GC_OPS_LIFECYCLE",
 	"GC_SESSION_ID",
 	"GC_SESSION_NAME",
 	"GC_TMUX_SESSION",
@@ -326,6 +380,7 @@ func init() {
 		refuseProdDoltPort(func(string) bool { return true })
 		return
 	}
+	prependBazelTools()
 	keep := map[string]bool{}
 	if list := os.Getenv(PassthroughVar); list != "" {
 		for _, name := range strings.Split(list, ",") {
@@ -341,4 +396,8 @@ func init() {
 			_ = os.Unsetenv(name)
 		}
 	}
+	seedGitTemplate()
+	// Not a leak vector, so the scrub above leaves it alone and a passthrough
+	// list cannot name it; set unconditionally because only its presence counts.
+	_ = os.Setenv(doltDisableEventFlushVar, "1")
 }

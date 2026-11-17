@@ -108,6 +108,25 @@ extra work:
   grouped into a single transaction.
 - `Ping` runs `list` to confirm the script is reachable.
 
+### Optional operations
+
+A script lists the optional operations it implements from `capabilities`; a
+script that exits 2 there offers none.
+
+| Operation | Invocation | Stdin | Stdout |
+|-----------|-----------|-------|--------|
+| `capabilities` | `script capabilities` | — | the optional operations it offers, one per line or as a JSON array of strings |
+| `import` | `script import` | bead JSON, `id` included | the bead as stored, or nothing |
+
+`import` creates a bead under the id it already carries. Its stdin holds `id`,
+`title`, `status`, `type`, `priority`, `created_at`, `updated_at`, `assignee`,
+`from`, `parent_id`, `ref`, `description`, `labels`, `metadata`, `ephemeral`,
+`no_history`, `defer_until`, and `close_reason`, and the script must store the
+`id`, `status`, and timestamps exactly as given. When it prints nothing, the
+provider reads the bead back with `get`. The reverse storage migration
+(`gc storage migrate --to-work` or `--to-rigs`) copies beads back through
+`import` and refuses an exec store whose `capabilities` do not list it.
+
 ### `ready` and ephemeral tiers
 
 `ready` returns open, unblocked beads. The orchestrator's demand scans pass
@@ -144,6 +163,11 @@ The script assigns `id`, `status`, `created_at`, and `updated_at` on `create`.
 On `create` the provider defaults a missing `type` to `task` before calling the
 script; on every read it normalizes a missing or empty `status` to `open`.
 `metadata` values may be any JSON type but are coerced to strings.
+A closed bead may carry `close_reason`, a string saying why it was closed (bd's
+`close_reason` field); the provider reports it as the bead's close reason and
+ignores it on a bead that is not closed. The `close` operation carries no
+reason; Gas City stamps `metadata.close_reason` before closing, so a script
+that records reasons can take it from there.
 Preserve `ephemeral`, `no_history`, and `defer_until` on every read path so the
 provider can keep run beads out of normal work queries. `no_history=true` marks
 durable work that carries no version-control history: unlike `ephemeral` beads

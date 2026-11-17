@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 // TestMigrateJournalFileMatchesPinnedBeads reads the name out of the pinned
@@ -173,6 +175,12 @@ func TestGoModuleCacheResolutionOrder(t *testing.T) {
 // repositoryRoot walks up from the package directory to the module root.
 func repositoryRoot(t *testing.T) string {
 	t.Helper()
+	if root := bazeltest.OverrideRoot(); root != "" {
+		if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
+			t.Fatalf("GC_TEST_REPO_ROOT=%s has no go.mod: %v", root, err)
+		}
+		return root
+	}
 	dir, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("resolve working directory: %v", err)

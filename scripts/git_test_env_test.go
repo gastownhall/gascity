@@ -3,6 +3,7 @@ package scripts_test
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -37,6 +38,11 @@ print-test-env-git:
 		"USER=" + os.Getenv("USER"),
 		"SHELL=/bin/sh",
 		"GIT_DIR=/poison/.git",
+		// Makefile-internal `go env` probes must not download a toolchain
+		// into the isolated HOME: the module cache's read-only files would
+		// defeat t.TempDir cleanup.
+		"GOTOOLCHAIN=local",
+		"GOMODCACHE=" + filepath.Join(os.TempDir(), "gc-makefile-git-gomodcache"),
 	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -104,6 +110,56 @@ func TestShardTestEnvsIgnoreUserGitConfiguration(t *testing.T) {
 				if got := strings.Count(content, "\nexport gc_test_gitconfig\n"); got != 1 {
 					t.Errorf("%s must export gc_test_gitconfig for the xargs fan-out workers (found %d)", path, got)
 				}
+			}
+		})
+	}
+}
+
+// shellAssignment finds a SHELL assignment in an env -i allowlist. The leading
+// guard keeps names such as GIT_SHELL from matching, and the value stops at
+// whitespace or the line-continuation backslash.
+var shellAssignment = regexp.MustCompile(`(?:^|[^A-Za-z0-9_])SHELL=([^\s\\]*)`)
+
+// forwardedShell finds every spelling that copies the caller's SHELL into a
+// nested environment: a make $$SHELL, a shell $SHELL, or ${SHELL:-...}. A make
+// $(SHELL) is not one.
+var forwardedShell = regexp.MustCompile(`\$\$?\{?SHELL\b`)
+
+// TestRunnerTestEnvsPinPaneShell guards ga-yghhjf. A test that starts a tmux or
+// herdr pane runs the environment's SHELL in it. Forward the invoking user's
+// zsh into a fresh HOME and the pane opens zsh's new-user wizard, which
+// swallows the text the test types. Every allowlist that builds a test
+// environment therefore pins SHELL=/bin/sh once and never forwards the caller's
+// value. The four are mirrored copies of one allowlist and change together
+// (scripts/AGENTS.md).
+func TestRunnerTestEnvsPinPaneShell(t *testing.T) {
+	repoRoot := repoRoot(t)
+	for _, path := range []string{
+		"Makefile",
+		"scripts/test-local-parallel",
+		"scripts/test-go-test-shard",
+		"scripts/test-integration-shard",
+	} {
+		t.Run(path, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join(repoRoot, path))
+			if err != nil {
+				t.Fatalf("read %s: %v", path, err)
+			}
+			var pins []string
+			for _, line := range strings.Split(string(data), "\n") {
+				// A comment may explain the pin; only live text counts.
+				if strings.HasPrefix(strings.TrimSpace(line), "#") {
+					continue
+				}
+				if forwardedShell.MatchString(line) {
+					t.Errorf("%s forwards the caller's SHELL: %s", path, strings.TrimSpace(line))
+				}
+				for _, m := range shellAssignment.FindAllStringSubmatch(line, -1) {
+					pins = append(pins, m[1])
+				}
+			}
+			if len(pins) != 1 || pins[0] != "/bin/sh" {
+				t.Errorf("%s assigns SHELL %q, want exactly one assignment, to /bin/sh", path, pins)
 			}
 		})
 	}
@@ -192,5 +248,47 @@ func TestFanOutWorkerReceivesExportedGitConfigGlobal(t *testing.T) {
 	}
 	if !strings.Contains(string(probeOut), "GIT_CONFIG_GLOBAL_OK=") {
 		t.Fatalf("probe job did not confirm GIT_CONFIG_GLOBAL; probe log:\n%s\nharness output:\n%s", probeOut, out)
+	}
+}
+
+// TestSeededGitConfigDisablesBackgroundMaintenance pins the seeded global
+// gitconfig's auto-maintenance switch. git 2.47 and later follow a fetch,
+// commit or merge with `git maintenance run --auto --detach`: a background
+// process that takes objects/maintenance.lock after the command exits, so a
+// test's t.TempDir cleanup can race it ("unlinkat .../.git: directory not
+// empty"). The seed reaches only the git processes that read the test env's
+// GIT_CONFIG_GLOBAL. A script that replaces it, as the rbe-worker fetch.sh
+// does, passes the switch on its own git calls
+// (TestRBEWorkerFetchScriptInvariants). The seed is a literal heredoc, read
+// here rather than run. Its name carries a version, because a host keeps an
+// older seed (created once, never rewritten) until the name changes, so both
+// of the script's path assignments, the temp dir's and the sandbox
+// fallback's, must carry it.
+func TestSeededGitConfigDisablesBackgroundMaintenance(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(repoRoot(t), "scripts", "test-gitconfig-path"))
+	if err != nil {
+		t.Fatalf("read test-gitconfig-path: %v", err)
+	}
+	script := string(data)
+	_, seed, ok := strings.Cut(script, "cat > \"$tmp\" <<'EOF'\n")
+	if ok {
+		seed, _, ok = strings.Cut(seed, "\nEOF\n")
+	}
+	if !ok {
+		t.Fatal("test-gitconfig-path has no seed heredoc")
+	}
+	for _, want := range []string{"[maintenance]\n\tauto = false", "[gc]\n\tauto = 0"} {
+		if !strings.Contains(seed, want) {
+			t.Errorf("seeded gitconfig lacks %q:\n%s", want, seed)
+		}
+	}
+	names := regexp.MustCompile(`(?m)^\s*path="\$temp_root/(gc-test-gitconfig-[^"]*)"$`).FindAllStringSubmatch(script, -1)
+	if len(names) != 2 {
+		t.Fatalf("test-gitconfig-path assigns the seed path %d times, want 2 (the temp dir and the sandbox fallback)", len(names))
+	}
+	for _, name := range names {
+		if !strings.HasPrefix(name[1], "gc-test-gitconfig-v2-") {
+			t.Errorf("test-gitconfig-path's seed name %s does not carry the version v2: a host with the older seed would keep it", name[1])
+		}
 	}
 }

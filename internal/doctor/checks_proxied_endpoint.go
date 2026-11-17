@@ -3,6 +3,7 @@ package doctor
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -29,6 +30,22 @@ type BeadsStorePayload struct {
 	// native one.
 	PreflightGate   string `json:"preflight_gate,omitempty"`
 	PreflightReason string `json:"preflight_reason,omitempty"`
+	// Proxied is the STORE OPEN's own account of the proxied-native lane: the
+	// generation it pinned, the evidence it pinned it on, the idle policy and the
+	// cursors it gated against, the verdict if it refused, and whether the handle
+	// has since dropped to the bd leaf.
+	//
+	// It sits BESIDE Endpoint rather than replacing it, and the two are gathered
+	// independently: this one is what gc decided AT OPEN, Endpoint is what the
+	// endpoint looks like NOW. An operator debugging a proxied city needs both,
+	// because "the proxy changed under us" and "gc read it wrong" produce the same
+	// single-account picture and different two-account ones.
+	//
+	// It is the beads type rather than a projection of it, so the two can never
+	// drift into two vocabularies for one fact. Nil on every lane but this one,
+	// and `omitempty`, so a flag-off proxied scope serializes byte-identically to
+	// what it serializes today.
+	Proxied *beads.ProxiedDiagnostic `json:"proxied,omitempty"`
 	// Endpoint is present only for a bd-owned proxied scope: it is what gc
 	// could establish about bd's proxy without starting, stopping or writing
 	// anything.
@@ -77,12 +94,19 @@ type ProxiedEndpointPayload struct {
 	Detail string `json:"detail,omitempty"`
 }
 
+// ProxiedEndpointIdleDetail is the endpoint detail for a finite-idle scope
+// whose proxy is not running: it retired on its idle timeout, and the next bd
+// command restarts it.
+const ProxiedEndpointIdleDetail = "idle: the proxy retired after its idle timeout; the next bd command restarts it"
+
 // beadsStoreDiagnostic is the subset of a store-open diagnostic the payload
 // projects. It keeps this file from depending on the whole beads open result.
 type beadsStoreDiagnostic struct {
 	Store           string
 	PreflightGate   string
 	PreflightReason string
+	// Proxied is the proxied-native lane's account, nil on every other lane.
+	Proxied *beads.ProxiedDiagnostic
 }
 
 // proxiedEndpointProcessTable and probeProxiedEndpoint are the two pieces of
@@ -105,11 +129,104 @@ func newBeadsStorePayload(scopeRoot string, target contract.DoltConnectionTarget
 		Store:           diag.Store,
 		PreflightGate:   diag.PreflightGate,
 		PreflightReason: diag.PreflightReason,
+		Proxied:         diag.Proxied,
 	}
 	if targetIsProviderOwnedProxied(target) || scopeBindingIsProviderOwnedProxied(scopeRoot) {
 		payload.Endpoint = inspectProxiedEndpoint(scopeRoot, target.Database)
 	}
 	return payload
+}
+
+// proxiedNativeStoreMessage is the operator's line for a scope gc is serving
+// natively over bd's proxy.
+//
+// It names the GENERATION rather than the port, because a port is not an
+// identity: bd allocates a fresh one on most respawns, and a sidecar that pins
+// --proxied-server-port hands the same one to a different process over a
+// different Dolt child. The generation is what tells an operator whether the
+// handle they are looking at is the one they were looking at a minute ago.
+//
+// It also says where writes go, unprompted. "native" on a line about a bead
+// store reads as "gc talks to Dolt", and the whole safety argument of this lane
+// is that it does not — every mutation is still bd's.
+func proxiedNativeStoreMessage(proxied *beads.ProxiedDiagnostic) string {
+	generation := "unknown"
+	if proxied != nil && proxied.Endpoint.Generation != "" {
+		generation = proxied.Endpoint.Generation
+	}
+	return fmt.Sprintf("native reads over bd proxy (gen %s, writes via bd CLI)", generation)
+}
+
+// rigProxiedStoreMessage is the rig lane's line for a bd-owned proxied scope.
+//
+// Rigs have no retained store-open diagnostic — NewRigBeadsCheck takes a factory
+// returning a bare beads.Store, and unlike the city's (api_state.go's
+// CityBeadsDiagnostic) a rig's is discarded after the open. So the lane is read
+// off the store gc is actually holding, which is the one piece of evidence this
+// check has — through the unwrap seam, so a policy- or cache-wrapped rig store
+// still answers instead of reading as the bd front door by default.
+func rigProxiedStoreMessage(store beads.Store) string {
+	if proxied, ok := beads.ProxiedStoreFrom(store); ok {
+		report := proxied.Report()
+		if !report.Demoted {
+			return proxiedNativeStoreMessage(&beads.ProxiedDiagnostic{
+				Endpoint: report.Endpoint,
+				Evidence: report.Evidence,
+			})
+		}
+		if verdict := proxied.Verdict(); verdict != nil {
+			return proxiedFallbackStoreMessage(&beads.ProxiedDiagnostic{Verdict: verdict.Verdict})
+		}
+	}
+	return proxiedProviderStoreMessage
+}
+
+// proxiedDemotedStoreMessage is the line for a handle that WAS serving natively
+// and has since stood down.
+//
+// It is a distinct message from the healthy fallback because the two are
+// different facts: a fallback never opened the lane, and a demotion opened it and
+// lost it. An operator debugging "why is this city forking again" needs to know
+// which, and the verdict names the cause. The status stays OK — the bd front door
+// is a supported store for a proxied scope, and the lane is a performance
+// property, not an availability one.
+func proxiedDemotedStoreMessage(proxied *beads.ProxiedDiagnostic) string {
+	verdict := beads.ProxiedVerdictNone
+	generation := "unknown"
+	if proxied != nil {
+		verdict = proxied.Verdict
+		if proxied.Endpoint.Generation != "" {
+			generation = proxied.Endpoint.Generation
+		}
+	}
+	if verdict == beads.ProxiedVerdictNone {
+		return fmt.Sprintf("native reads over bd proxy stood down (gen %s); reads and writes via bd CLI", generation)
+	}
+	return fmt.Sprintf("native reads over bd proxy stood down (gen %s, verdict=%s); reads and writes via bd CLI",
+		generation, verdict)
+}
+
+// proxiedFallbackStoreMessage is the healthy-fallback line: the message a
+// proxied scope has today, plus the verdict when the proxied-native lane
+// produced one.
+//
+// The base message is UNCHANGED on purpose. A fallback to the bd front door is
+// the designed outcome for a proxied scope, not a degradation, and doctor's
+// matcher plus the topology matrix both key on it. The verdict is appended
+// rather than substituted so an operator learns WHY the lane declined without
+// anything that reads the message losing its anchor.
+func proxiedFallbackStoreMessage(proxied *beads.ProxiedDiagnostic) string {
+	if proxied == nil || proxied.Verdict == beads.ProxiedVerdictNone {
+		return proxiedProviderStoreMessage
+	}
+	message := fmt.Sprintf("%s; verdict=%s", proxiedProviderStoreMessage, proxied.Verdict)
+	if proxied.Verdict == beads.ProxiedVerdictSchemaSkew && proxied.Cursors != (proxyendpoint.Cursors{}) {
+		// The one verdict whose qualifier an operator cannot infer: which lane
+		// drifted and in which direction is the difference between "the database
+		// would be migrated on open" and "this binary would issue old-shape SQL".
+		message += fmt.Sprintf(" (database %s, this binary expects %s)", proxied.Cursors, expectedCursors())
+	}
+	return message
 }
 
 // inspectProxiedEndpoint reads and classifies a proxied scope's endpoint, and
@@ -166,6 +283,10 @@ func inspectProxiedEndpoint(scopeRoot, database string) *ProxiedEndpointPayload 
 		payload.Generation = proxyendpoint.NewPoolKey(ep.Record, database).Generation()
 	}
 	switch {
+	case ep.Verdict == proxyendpoint.VerdictNoRecord && sidecarErr == nil && idle.Kind == proxyendpoint.IdleFinite:
+		// A finite scope with no record is idle, not a gap: bd removed the
+		// record when the proxy retired on its idle timeout.
+		payload.Detail = ProxiedEndpointIdleDetail
 	case ep.Err != nil:
 		payload.Detail = ep.Err.Error()
 	case sidecarErr != nil:
@@ -200,26 +321,20 @@ func scopeBeadsDir(scopeRoot string) string {
 	return filepath.Join(pathutil.NormalizePathForCompare(scopeRoot), ".beads")
 }
 
-// ProxiedIdleTimeoutCheck reports a gc-owned proxied scope whose sidecar does
-// not state, in writing, that its proxy has no idle timeout.
+// ProxiedIdleTimeoutCheck compares, for each gc-owned proxied scope, the idle
+// timeout gc is configured to give it ([beads] proxied_idle_timeout, the rig's
+// beads_proxied_idle_timeout, or GC_BEADS_PROXIED_IDLE_TIMEOUT) with what bd
+// persisted in the scope's sidecar, and with what the running proxy was
+// started with.
 //
-// bd tags the sidecar's idle_timeout `omitempty`, so an absent key is what a
-// scope initialized without the flag looks like — and bd's provider substitutes
-// a 30s window for it. On such a scope bd retires the proxy AND its Dolt child
-// after every quiet period, and the next gc command pays a cold start: about a
-// second of proxy adoption plus the Dolt child's own startup, per scope, on a
-// city that may have a dozen.
-//
-// gc's own provider script passes `--proxied-server-idle-timeout 0` at init,
-// which bd maps to IdleTimeoutNever before persisting, so a scope gc created
-// carries `-1`. An absent or non-negative value on a gc-owned scope therefore
-// means something rewrote the sidecar, or the scope was initialized by
-// something other than gc's front door — which is an ordinary thing for an
-// operator to have done and NOT a broken city. That is why it warns rather than
-// fails: the scope works, it is just slower than gc's topology intends, and gc
-// must not repair it by writing to a file bd owns.
+// Drift is advisory, never a failure: the scope works either way. bd offers no
+// verb that changes an initialized scope's idle timeout, and gc must not edit
+// the sidecar, which is bd's file — so the configured value applies to scopes
+// gc creates (gc init, gc rig add, gc beads city migrate-proxied), and an older
+// scope keeps the value it was created with until bd can change it.
 type ProxiedIdleTimeoutCheck struct {
 	cityPath   string
+	cfg        *config.City
 	scopeRoots []string
 }
 
@@ -241,27 +356,26 @@ func NewProxiedIdleTimeoutCheckForConfig(cityPath string, cfg *config.City, cfgE
 	if len(roots) == 0 {
 		return nil
 	}
-	return &ProxiedIdleTimeoutCheck{cityPath: cityPath, scopeRoots: roots}
+	if cfgErr != nil {
+		cfg = nil
+	}
+	return &ProxiedIdleTimeoutCheck{cityPath: cityPath, cfg: cfg, scopeRoots: roots}
 }
 
 // Name returns the check identifier.
 func (c *ProxiedIdleTimeoutCheck) Name() string { return "proxied-idle-timeout" }
 
-// Run reads each settled gc-owned proxied scope's sidecar and reports the ones
-// that do not pin their proxy resident.
+// Run compares each settled gc-owned proxied scope's configured, persisted and
+// running idle timeouts.
 //
-// A scope the journal records as still initializing is not an offender, and this
-// is the one check that could have said otherwise. bd writes metadata.json and
-// the sidecar in one batch, so the state that persists after a crashed `bd init`
-// is a scope with NO sidecar — which reads here as "absent idle_timeout", the
-// operator-misconfiguration message, with a hint to re-initialize a scope that is
-// mid-initialization. Every other proxied check names that state as pending
-// initialisation (see BeadsStoreCheck.Run's pendingScopeInitResult), and the lens
-// has to agree across checks or the operator is told to fix the wrong thing.
+// A scope the journal records as still initializing is not compared: bd writes
+// metadata.json and the sidecar in one batch, so a crashed `bd init` leaves a
+// scope with no sidecar, and every other proxied check names that state as
+// pending initialisation (see BeadsStoreCheck.Run's pendingScopeInitResult).
 func (c *ProxiedIdleTimeoutCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name(), Severity: SeverityAdvisory}
 
-	var offenders, unreadable, pending []string
+	var drift, restart, notes, unreadable, pending []string
 	settled := 0
 	for _, scopeRoot := range c.scopeRoots {
 		label := proxiedScopeLabel(c.cityPath, scopeRoot)
@@ -270,18 +384,35 @@ func (c *ProxiedIdleTimeoutCheck) Run(_ *CheckContext) *CheckResult {
 			continue
 		}
 		settled++
-		sidecar, err := proxyendpoint.ReadSidecar(scopeBeadsDir(scopeRoot))
-		switch {
-		case err != nil:
+		rig := c.rigForScope(scopeRoot)
+		shares := rig != nil && proxyendpoint.SharesCityRoot(c.cityPath, scopeRoot)
+		want, ignored, err := config.ProxiedIdleTimeoutForScope(c.cfg, rig, shares)
+		if err != nil {
 			unreadable = append(unreadable, fmt.Sprintf("%s: %v", label, err))
-		case sidecar.ExplicitIdleNever():
 			continue
-		default:
-			offenders = append(offenders, fmt.Sprintf("%s (%s)", label, sidecar.IdlePolicy()))
+		}
+		if ignored {
+			notes = append(notes, fmt.Sprintf("%s: beads_proxied_idle_timeout is ignored because the rig shares the city's proxy root; it uses the city's value", label))
+		}
+		sidecar, err := proxyendpoint.ReadSidecar(scopeBeadsDir(scopeRoot))
+		if err != nil {
+			unreadable = append(unreadable, fmt.Sprintf("%s: %v", label, err))
+			continue
+		}
+		if !sidecar.IdleMatches(want.Duration) {
+			drift = append(drift, fmt.Sprintf("%s: configured %s (%s), scope has %s", label, want, want.Source, sidecar.IdlePolicy()))
+			continue
+		}
+		if argv, live := liveProxyIdlePolicy(scopeRoot); live && !sameIdlePolicy(argv, sidecar.IdlePolicy()) {
+			restart = append(restart, fmt.Sprintf("%s: running proxy has %s, scope has %s", label, argv, sidecar.IdlePolicy()))
 		}
 	}
+	envNote := ""
+	if env := strings.TrimSpace(os.Getenv(config.ProxiedIdleTimeoutEnv)); env != "" {
+		envNote = fmt.Sprintf("%s=%s overrides the configured idle timeout for every scope gc initializes from this environment", config.ProxiedIdleTimeoutEnv, env)
+	}
 
-	if len(offenders) == 0 && len(unreadable) == 0 {
+	if len(drift) == 0 && len(restart) == 0 && len(notes) == 0 && len(unreadable) == 0 {
 		if settled == 0 {
 			// Nothing to have an opinion about yet: every scope this check
 			// covers is still being initialized.
@@ -292,27 +423,83 @@ func (c *ProxiedIdleTimeoutCheck) Run(_ *CheckContext) *CheckResult {
 			return r
 		}
 		r.Status = StatusOK
-		r.Message = fmt.Sprintf("%d gc-owned proxied scope(s) pin their proxy resident (idle_timeout < 0)", settled)
+		r.Message = fmt.Sprintf("%d gc-owned proxied scope(s) carry the configured idle timeout", settled)
 		if len(pending) > 0 {
 			r.Message += fmt.Sprintf("; %d still initializing", len(pending))
-			r.Details = pending
 		}
+		if envNote != "" {
+			// Informational: the scopes match what this environment resolves.
+			r.Message += "; " + config.ProxiedIdleTimeoutEnv + " is set"
+			r.Details = append(r.Details, envNote)
+		}
+		r.Details = append(r.Details, pending...)
 		return r
+	}
+	if envNote != "" {
+		notes = append(notes, envNote)
 	}
 
 	r.Status = StatusWarning
 	switch {
-	case len(offenders) > 0:
-		r.Message = fmt.Sprintf(
-			"%d gc-owned proxied scope(s) do not pin their proxy resident: %s — bd retires the proxy and its Dolt child after each quiet period, so every later command pays a cold start",
-			len(offenders), strings.Join(offenders, ", "))
-		r.FixHint = "re-initialize the scope through gc (`gc rig add` / `gc init`), which passes --proxied-server-idle-timeout 0 and makes bd persist idle_timeout -1; gc will not edit the sidecar, which is bd's file"
+	case len(drift) > 0:
+		r.Message = fmt.Sprintf("%d gc-owned proxied scope(s) do not carry the configured idle timeout", len(drift))
+		r.FixHint = "bd cannot yet change an initialized scope's idle timeout, and gc will not edit the sidecar, which is bd's file: the configured value applies to scopes gc creates (gc init, gc rig add, gc beads city migrate-proxied) and takes effect on existing scopes once bd supports `bd dolt set idle-timeout`. To keep these scopes as they are and silence this, set the value they carry, e.g. `[beads] proxied_idle_timeout = \"0\"` for scopes that never idle"
+	case len(unreadable) > 0:
+		r.Message = fmt.Sprintf("could not compare the idle timeout of %d gc-owned proxied scope(s)", len(unreadable))
+		r.FixHint = "inspect <scope>/.beads/proxied_server_client_info.json and the city's idle-timeout config"
+	case len(restart) > 0:
+		r.Message = fmt.Sprintf("%d running proxy(ies) still use an older idle timeout", len(restart))
+		r.FixHint = "the scope's value takes effect at the proxy's next start: after its idle exit, or after `gc stop` and `gc start`"
 	default:
-		r.Message = fmt.Sprintf("could not read the proxied sidecar of %d gc-owned scope(s)", len(unreadable))
-		r.FixHint = "inspect <scope>/.beads/proxied_server_client_info.json; bd rewrites it on the next `bd init` for that scope"
+		r.Message = "the proxied idle timeout carries a note"
+		r.FixHint = "no action needed unless the note is unexpected"
 	}
-	r.Details = append(append(offenders, unreadable...), pending...) //nolint:gocritic // one detail list, offenders first
+	r.Details = append(append(append(append(drift, unreadable...), restart...), notes...), pending...) //nolint:gocritic // one detail list, drift first
 	return r
+}
+
+// rigForScope returns the configured rig whose path is scopeRoot, or nil for
+// the city and for a scope no rig names.
+func (c *ProxiedIdleTimeoutCheck) rigForScope(scopeRoot string) *config.Rig {
+	if c.cfg == nil || pathutil.SamePath(c.cityPath, scopeRoot) {
+		return nil
+	}
+	for i := range c.cfg.Rigs {
+		path := c.cfg.Rigs[i].Path
+		if path == "" {
+			continue
+		}
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(c.cityPath, path)
+		}
+		if pathutil.SamePath(path, scopeRoot) {
+			return &c.cfg.Rigs[i]
+		}
+	}
+	return nil
+}
+
+// liveProxyIdlePolicy reports the idle policy a scope's running proxy was
+// started with, read from its argv. live is false when no proxy runs or its
+// argv did not answer.
+func liveProxyIdlePolicy(scopeRoot string) (proxyendpoint.IdlePolicy, bool) {
+	root, err := proxyendpoint.ProviderRoot(scopeRoot)
+	if err != nil {
+		return proxyendpoint.IdlePolicy{}, false
+	}
+	ep := proxyendpoint.Inspect(root, proxiedEndpointProcessTable())
+	if !ep.Verdict.Live() || !ep.Liveness.IdlePolicy.Known() {
+		return proxyendpoint.IdlePolicy{}, false
+	}
+	return ep.Liveness.IdlePolicy, true
+}
+
+// sameIdlePolicy compares two policies by behavior, ignoring their sources.
+func sameIdlePolicy(a, b proxyendpoint.IdlePolicy) bool {
+	if a.Kind != b.Kind {
+		return false
+	}
+	return a.Kind != proxyendpoint.IdleFinite || a.Timeout == b.Timeout
 }
 
 // CanFix returns false: the sidecar is bd's file, and the repair is a bd init

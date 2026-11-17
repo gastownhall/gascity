@@ -9,14 +9,15 @@
 #   PATH     — must include gc binary
 
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/lib/bead-id.sh"
 cd "$GC_CITY"
 ASSIGNEE="${GC_SESSION_NAME:-$GC_AGENT}"
 
 while true; do
     ready=$(bd ready --assignee="$ASSIGNEE" 2>/dev/null || true)
 
-    if echo "$ready" | grep -q "^gc-"; then
-        id=$(echo "$ready" | grep "^gc-" | head -1 | awk '{print $1}')
+    if echo "$ready" | bead_id_rows | grep -q .; then
+        id=$(echo "$ready" | bead_id_rows | head -1 | awk '{print $1}')
         bd close "$id"
         exit 0
     fi

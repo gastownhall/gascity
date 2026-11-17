@@ -109,8 +109,10 @@ func TestNativeDoltStoreCloseReplayShortCircuitsWhenAnotherActorClosedTheBead(t 
 	if got := atomic.LoadInt32(&spy.mutates); got != 1 {
 		t.Fatalf("CloseIssue attempts = %d, want 1 (the replay must not re-close)", got)
 	}
-	if got := atomic.LoadInt32(&spy.gets); got != 2 {
-		t.Fatalf("GetIssue reads = %d, want 2 (the replay must re-read, not reuse the first snapshot)", got)
+	// Three reads, not two: closeOnce reads once per attempt and the facade's
+	// own Close reads again on the attempt that reaches it.
+	if got := atomic.LoadInt32(&spy.gets); got != 3 {
+		t.Fatalf("GetIssue reads = %d, want 3 (the replay must re-read, not reuse the first snapshot)", got)
 	}
 }
 
@@ -157,6 +159,10 @@ func TestNativeDoltStoreCloseDoesNotRetryNonConflictErrors(t *testing.T) {
 // This test drives CloseAll rather than Close so the asymmetry itself is
 // guarded. Reverting the Close wrap alone leaves every direct-Close test in
 // this file failing, but nothing would record that the pairing is the point.
+//
+// CloseAll now dials both writes as one batch item pair, so the pairing is a
+// transaction rather than two retried units — but the chunk still has to retry,
+// which is what this asserts today.
 func TestNativeDoltStoreCloseAllRecoversWhenTheCloseConflictsAfterMetadataLanded(t *testing.T) {
 	var (
 		closed   int32
@@ -207,10 +213,10 @@ func TestNativeDoltStoreCloseAllRecoversWhenTheCloseConflictsAfterMetadataLanded
 	if got := atomic.LoadInt32(&closes); got != 2 {
 		t.Fatalf("CloseIssue attempts = %d, want 2 (one conflict, one retry)", got)
 	}
-	// The metadata write must not be replayed by the Close retry: the two are
-	// separately retried units, and only the inner one lost its race.
-	if got := atomic.LoadInt32(&metadata); got != 1 {
-		t.Fatalf("metadata writes = %d, want 1 (the Close retry must not re-run SetMetadataBatch)", got)
+	// The stamp never outruns its close. On the batch route the two replay
+	// together, so the counts move in lockstep; the bug was one landing alone.
+	if got := atomic.LoadInt32(&metadata); got > atomic.LoadInt32(&closes) {
+		t.Fatalf("metadata writes = %d, close attempts = %d: a stamp landed without the close it pairs", got, closes)
 	}
 }
 

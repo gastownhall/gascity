@@ -9,6 +9,7 @@ import (
 )
 
 func TestQualityGateFallbackInFormulas(t *testing.T) {
+	chdirToRealPackageDir(t)
 	searchPaths := []string{"../../internal/bootstrap/packs/core/formulas/"}
 
 	recipe, err := formula.Compile(context.Background(), "mol-polecat-base", searchPaths, nil)

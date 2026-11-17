@@ -38,6 +38,7 @@ go_test(
         "controller_script_test.go",
         "exec_provider_test.go",
         "name_test.go",
+        "pod_prompt_test.go",
         "pod_test.go",
         "provider_stale_probe_test.go",
         "provider_test.go",
@@ -47,9 +48,18 @@ go_test(
         "testenv_helpers_test.go",
         "testenv_import_test.go",
     ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:go.mod",
+        "//contrib:all_files",
+    ],
     embed = [":k8s"],
     deps = [
+        "//internal/bazeltest",
         "//internal/runtime",
+        "//internal/runtime/runtimetest",
         "//internal/shellquote",
         "//internal/testenv",
         "@io_k8s_api//core/v1:core",
@@ -58,4 +68,35 @@ go_test(
         "@io_k8s_apimachinery//pkg/runtime/schema",
         "@io_k8s_client_go//util/exec",
     ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
 )

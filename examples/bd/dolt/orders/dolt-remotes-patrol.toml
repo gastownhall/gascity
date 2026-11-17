@@ -3,3 +3,6 @@ description = "Push dolt databases to configured remotes"
 trigger = "cooldown"
 interval = "15m"
 exec = "gc dolt sync"
+# Dolt-server work: never dispatched for a scope on another backend (http,
+# postgres, doltlite); gc reports it there as inapplicable, not failed.
+requires_backend = ["dolt"]

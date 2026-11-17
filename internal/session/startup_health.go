@@ -22,6 +22,7 @@ const (
 	StartupHealthKindMetadataKey             = "startup_health_kind"
 	StartupHealthAlertMetadataKey            = "startup_health_alert_disposition"
 	StartupHealthQuarantinedUntilMetadataKey = "startup_health_quarantined_until"
+	StartupHealthBackoffUntilMetadataKey     = "startup_health_backoff_until"
 )
 
 // startupHealthLastDetailMaxRunes bounds StartupHealthEpisode.LastDetail.
@@ -62,6 +63,26 @@ type StartupHealthEpisode struct {
 	Kind             FailureKind
 	AlertDisposition AlertDisposition
 	QuarantinedUntil time.Time
+	// BackoffUntil holds the next start back for a growing, capped interval
+	// after each consecutive failure, independent of QuarantinedUntil. The two
+	// are separate because they mean different things to an operator: a
+	// backoff is the normal, self-healing retry cadence for a start path that
+	// may still clear on its own, whereas a quarantine means the
+	// consecutive-failure threshold was crossed and `gc doctor` reports it as
+	// an error. Folding the backoff into QuarantinedUntil would turn every
+	// transient double-flake into a doctor failure. The gate consults
+	// StartHoldUntil, which is the later of the two.
+	BackoffUntil time.Time
+}
+
+// StartHoldUntil is the single instant before which a start attempt for this
+// episode must not be made: the later of the threshold quarantine and the
+// per-failure backoff. Either may be zero; both zero means no hold.
+func (ep StartupHealthEpisode) StartHoldUntil() time.Time {
+	if ep.BackoffUntil.After(ep.QuarantinedUntil) {
+		return ep.BackoffUntil
+	}
+	return ep.QuarantinedUntil
 }
 
 // StartupHealthEpisodeFromMetadata projects a StartupHealthEpisode from a
@@ -88,6 +109,9 @@ func StartupHealthEpisodeFromMetadata(meta map[string]string) StartupHealthEpiso
 	if t, err := time.Parse(time.RFC3339, meta[StartupHealthQuarantinedUntilMetadataKey]); err == nil {
 		ep.QuarantinedUntil = t
 	}
+	if t, err := time.Parse(time.RFC3339, meta[StartupHealthBackoffUntilMetadataKey]); err == nil {
+		ep.BackoffUntil = t
+	}
 	return ep
 }
 
@@ -108,6 +132,7 @@ func startupHealthEpisodeToMetadata(ep StartupHealthEpisode) map[string]string {
 		StartupHealthKindMetadataKey:             string(ep.Kind),
 		StartupHealthAlertMetadataKey:            string(ep.AlertDisposition),
 		StartupHealthQuarantinedUntilMetadataKey: formatStartupHealthTime(ep.QuarantinedUntil),
+		StartupHealthBackoffUntilMetadataKey:     formatStartupHealthTime(ep.BackoffUntil),
 	}
 }
 
@@ -125,7 +150,10 @@ func formatStartupHealthTime(t time.Time) string {
 // QuarantinedUntil is set once ConsecutiveCount reaches threshold; and
 // AlertDisposition escalates to pending on entering quarantine but never
 // regresses away from AlertDispositionSent (an already-sent escalation stays
-// sent through further accrual).
+// sent through further accrual). BackoffUntil is deliberately NOT accrued
+// here: the retry cadence is a caller policy (its base and cap live beside
+// the caller's threshold and quarantine-duration constants), so the caller
+// stamps it on the returned episode before saving.
 func RecordStartupFailure(prior StartupHealthEpisode, kind FailureKind, detail string, now time.Time, threshold int, quarantineDuration time.Duration) StartupHealthEpisode {
 	firstFailureAt := prior.FirstFailureAt
 	if firstFailureAt.IsZero() {
@@ -160,11 +188,23 @@ func ClearStartupHealthEpisode(sessionName string) StartupHealthEpisode {
 	return StartupHealthEpisode{SessionName: sessionName}
 }
 
+// startupHealthEpisodeBeads lists sessionName's startup-health episode bead,
+// if any. Only a bead of StartupHealthEpisodeType is one: another bead
+// carrying the episode's keys (a task's) holds no session down (mc-lp7zb).
+func (s *Store) startupHealthEpisodeBeads(sessionName string) ([]beads.Bead, error) {
+	return s.store.List(beads.ListQuery{
+		Type:     StartupHealthEpisodeType,
+		Metadata: map[string]string{StartupHealthSessionNameMetadataKey: sessionName},
+		Limit:    1,
+		Sort:     beads.SortCreatedDesc,
+	})
+}
+
 // LoadStartupHealthEpisode loads the startup-health episode for sessionName,
 // returning the zero value if none is recorded. Read-only: it issues a single
-// metadata query and no mutating store call.
+// typed metadata query and no mutating store call.
 func (s *Store) LoadStartupHealthEpisode(sessionName string) (StartupHealthEpisode, error) {
-	matches, err := s.store.ListByMetadata(map[string]string{StartupHealthSessionNameMetadataKey: sessionName}, 1)
+	matches, err := s.startupHealthEpisodeBeads(sessionName)
 	if err != nil {
 		return StartupHealthEpisode{}, fmt.Errorf("loading startup-health episode for %q: %w", sessionName, err)
 	}
@@ -182,7 +222,7 @@ func (s *Store) LoadStartupHealthEpisode(sessionName string) (StartupHealthEpiso
 // readyExcludeTypes.
 func (s *Store) SaveStartupHealthEpisode(ep StartupHealthEpisode) error {
 	meta := startupHealthEpisodeToMetadata(ep)
-	matches, err := s.store.ListByMetadata(map[string]string{StartupHealthSessionNameMetadataKey: ep.SessionName}, 1)
+	matches, err := s.startupHealthEpisodeBeads(ep.SessionName)
 	if err != nil {
 		return fmt.Errorf("looking up startup-health episode for %q: %w", ep.SessionName, err)
 	}

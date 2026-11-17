@@ -94,6 +94,7 @@ func resolveProviderChain(leafName string, leaf ProviderSpec, customProviders ma
 	resolvedPtr.BuiltinAncestor = ancestor
 	resolvedPtr.Chain = ctx.chain
 	resolvedPtr.Provenance = buildProviderProvenance(ctx, customProviders)
+	resolvedPtr.ACPOmittedArgs = acpOmittedArgs(ctx.chainSpecs)
 	// Kind is the legacy field; mirror BuiltinAncestor for backward compat.
 	if ancestor != "" {
 		resolvedPtr.Kind = ancestor
@@ -392,6 +393,7 @@ func recordScalarProvenance(spec ProviderSpec, layer string, into map[string]str
 	set("prompt_flag", spec.PromptFlag)
 	setInt("ready_delay_ms", spec.ReadyDelayMs)
 	set("ready_prompt_prefix", spec.ReadyPromptPrefix)
+	setSlice("not_ready_markers", spec.NotReadyMarkers)
 	setSlice("process_names", spec.ProcessNames)
 	set("path_check", spec.PathCheck)
 	setBool("supports_acp", spec.SupportsACP)

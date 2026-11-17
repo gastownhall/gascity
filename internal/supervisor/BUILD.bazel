@@ -9,16 +9,20 @@ go_library(
         "publications.go",
         "registry.go",
         "restartcause.go",
+        "servicename.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/supervisor",
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/beads",
         "//internal/citylayout",
+        "//internal/config",
         "//internal/events",
         "//internal/fsys",
+        "//internal/loopbackport",
         "//internal/mail",
         "//internal/pathutil",
+        "//internal/platform/filelock",
         "@com_github_burntsushi_toml//:toml",
     ],
 )
@@ -38,13 +42,58 @@ go_test(
         "publications_test.go",
         "registry_test.go",
         "restartcause_test.go",
+        "servicename_test.go",
         "testenv_import_test.go",
     ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
     embed = [":supervisor"],
     deps = [
+        "//internal/config",
         "//internal/events",
+        "//internal/loopbackport",
         "//internal/mail",
         "//internal/testenv",
         "//internal/testutil",
     ],
+)
+
+# Part of the OSS event-export surface //scripts:check_eventexport_isolation_test
+# scans.
+exports_files(
+    ["config.go"],
+    visibility = ["//scripts:__pkg__"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
 )

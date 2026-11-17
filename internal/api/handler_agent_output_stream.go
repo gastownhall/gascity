@@ -131,7 +131,7 @@ func (s *Server) streamSessionLog(
 		}
 
 		// Use tail=1 (last compaction segment) to limit parsing scope.
-		factory, err := s.workerFactory(s.state.SessionsBeadStore().Store)
+		factory, err := s.workerFactory(s.state.Stores().Sessions())
 		if err != nil {
 			return false
 		}
@@ -149,6 +149,10 @@ func (s *Server) streamSessionLog(
 		turns := make([]outputTurn, 0, len(sess.Messages))
 		uuids := make([]string, 0, len(sess.Messages))
 		for _, e := range sess.Messages {
+			if e.Partial {
+				// Still growing; send it once it settles (see settledHistorySnapshot).
+				continue
+			}
 			turn := entryToTurn(e)
 			if turn.Text == "" {
 				continue
@@ -324,7 +328,7 @@ func (s *Server) streamSessionLogHuma(
 			return false
 		}
 
-		factory, err := s.workerFactory(s.state.SessionsBeadStore().Store)
+		factory, err := s.workerFactory(s.state.Stores().Sessions())
 		if err != nil {
 			return false
 		}
@@ -342,6 +346,10 @@ func (s *Server) streamSessionLogHuma(
 		turns := make([]outputTurn, 0, len(sess.Messages))
 		uuids := make([]string, 0, len(sess.Messages))
 		for _, entry := range sess.Messages {
+			if entry.Partial {
+				// Still growing; send it once it settles (see settledHistorySnapshot).
+				continue
+			}
 			turn := entryToTurn(entry)
 			if turn.Text == "" {
 				continue

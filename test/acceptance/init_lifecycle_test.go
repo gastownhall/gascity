@@ -16,6 +16,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/testutil"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
@@ -71,6 +72,12 @@ func TestMain(m *testing.M) {
 
 	// Best-effort supervisor stop.
 	helpers.RunGC(testEnv, "", "supervisor", "stop", "--wait") //nolint:errcheck
+	// The supervisor (and the controllers it runs) logs to the shared
+	// GC_HOME, which no single test's temp dir contains; keep it on a failed
+	// run alongside the per-test Dolt logs.
+	if code != 0 {
+		testutil.SaveDiagnostics("TestMain", gcHome)
+	}
 	os.Exit(code)
 }
 

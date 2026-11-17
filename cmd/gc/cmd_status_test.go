@@ -16,7 +16,9 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -136,6 +138,32 @@ func TestDoRigStatusJSON(t *testing.T) {
 	}
 	if agent := byName["frontend/worker-1"]; agent.QualifiedName != "frontend/worker-1" || !agent.Running || !agent.Draining || agent.Status != "draining" {
 		t.Fatalf("numbered agent = %+v, want running draining frontend/worker-1", agent)
+	}
+}
+
+func TestDoRigStatusJSONUsesRuntimeRigSuspension(t *testing.T) {
+	cityPath := t.TempDir()
+	suspended := true
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cityPath, "frontend", &suspended); err != nil {
+		t.Fatalf("SetRigSuspended: %v", err)
+	}
+	rig := config.Rig{Name: "frontend", Path: "/tmp/frontend"}
+
+	var stdout, stderr bytes.Buffer
+	code := doRigStatusWithStoreAndSnapshot(
+		runtime.NewFake(), newFakeDrainOps(), rig, nil,
+		cityPath, "city", "", &config.City{Rigs: []config.Rig{rig}}, nil,
+		newSessionBeadSnapshot(nil), true, &stdout, &stderr,
+	)
+	if code != 0 {
+		t.Fatalf("doRigStatusWithStoreAndSnapshot --json = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	var result RigStatusJSON
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+		t.Fatalf("invalid JSON: %v\nraw: %s", err, stdout.String())
+	}
+	if !result.Rig.Suspended {
+		t.Fatal("rig suspended = false, want runtime suspension")
 	}
 }
 
@@ -438,13 +466,14 @@ func TestRouteRigStatus_SixRowMatrix(t *testing.T) {
 	}
 }
 
-// TestRouteRigStatus_APIStaleBanner verifies the human-output staleness
-// banner appears when the supervisor reports a cache age > 30 s.
-func TestRouteRigStatus_APIStaleBanner(t *testing.T) {
+// TestRouteRigStatus_CacheAgeFooterOnStderr verifies the API route prints
+// the cache-age footer on stderr, not stdout, when the supervisor reports a
+// cache age more than twice its re-scan interval.
+func TestRouteRigStatus_CacheAgeFooterOnStderr(t *testing.T) {
 	cityPath := writeRigStatusTestCity(t)
 	staleHandler := func(_ *testing.T) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("X-GC-Cache-Age-S", "99")
+			setBehindCacheHeaders(w)
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"name": "test-city", "path": "/tmp",
@@ -469,7 +498,5 @@ func TestRouteRigStatus_APIStaleBanner(t *testing.T) {
 	if code := routeRigStatus(cityPath, "test-city", rig, nil, "", nil, nil, nil, sp, dops, c, "", false, &stdout, &stderr); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "cache age:") {
-		t.Errorf("human output should include stale banner, got:\n%s", stdout.String())
-	}
+	assertCacheAgeFooterOnStderr(t, stdout.String(), stderr.String())
 }

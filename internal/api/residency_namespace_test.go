@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // The two halves of the residence-probe retirement condition, as this plane
@@ -48,10 +49,10 @@ func TestAPIBindingReportsBothHalvesOfTheRetirementCondition(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			bindings, _ := apiResidencyBindings(
+			bindings, _ := storeref.BuildBindings(
 				[]beads.Store{tt.store},
 				map[beads.Store][]coordclass.Class{tt.store: {coordclass.ClassGraph}},
-				nil,
+				storeref.BindingOptions{},
 			)
 			if len(bindings) != 1 {
 				t.Fatalf("got %d bindings, want 1", len(bindings))
@@ -93,21 +94,20 @@ func TestAPIBindingDeclaresEveryHeldNamespace(t *testing.T) {
 			want:     config.ReservedClassPrefixesFor(config.BeadClassNudges),
 		},
 		{
-			// Observing every observable class is the whole-split shape:
-			// completeObservedClasses rounds it up to all five infrastructure
-			// classes, so the binding must declare the full reserved union.
+			// The whole split relocates all five infrastructure classes, so
+			// the binding must declare the full reserved union.
 			name:     "whole split",
-			observed: observableInfraClasses(),
+			observed: []coordclass.Class{coordclass.ClassGraph, coordclass.ClassMessaging, coordclass.ClassSessions, coordclass.ClassOrders, coordclass.ClassNudges},
 			want:     config.AllReservedClassPrefixes(),
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store := beads.NewMemStore()
-			bindings, refused := apiResidencyBindings(
+			bindings, refused := storeref.BuildBindings(
 				[]beads.Store{store},
 				map[beads.Store][]coordclass.Class{store: tt.observed},
-				nil,
+				storeref.BindingOptions{},
 			)
 			if refused != nil {
 				t.Fatalf("unexpected refusal: %v", refused)

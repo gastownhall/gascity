@@ -718,6 +718,31 @@ esac
 	}
 }
 
+// TestUpdate_unsetMetadataIsRefusedBeforeTheScriptRuns pins the exec
+// protocol's refusal of a metadata unset. Its update document has no removal
+// field, so a script would see only the sets and report success with the key
+// still set; the whole update is refused before the script is asked.
+func TestUpdate_unsetMetadataIsRefusedBeforeTheScriptRuns(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "update-ran")
+	script := writeScript(t, dir, `
+case "$1" in
+  update) touch "`+marker+`" ;;
+esac
+exit 0
+`)
+	err := NewStore(script).Update("EX-1", beads.UpdateOpts{
+		Metadata:      map[string]string{"kept": "v"},
+		UnsetMetadata: []string{"gone"},
+	})
+	if !errors.Is(err, beads.ErrUnsetMetadataUnsupported) {
+		t.Fatalf("Update with UnsetMetadata = %v, want ErrUnsetMetadataUnsupported", err)
+	}
+	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Errorf("the provider script ran its update (stat: %v); the refusal must come before any write", statErr)
+	}
+}
+
 func TestUpdate_assigneeRoundTripsThroughConformanceScript(t *testing.T) {
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq not available")
@@ -1495,5 +1520,29 @@ esac
 	// script-side limit would cut rows before the Go-side seek filter runs.
 	if strings.Contains(argsText, "--limit=7") {
 		t.Fatalf("list args should not limit before seek filtering: %s", argsText)
+	}
+}
+
+// A script that reports why a bead was closed (bd's close_reason field) has
+// that reason read onto the bead (gastownhall/gascity#2663).
+func TestGetReadsCloseReason(t *testing.T) {
+	dir := t.TempDir()
+	script := writeScript(t, dir, `
+op="$1"; shift
+case "$op" in
+  get)
+    echo '{"id":"'"$1"'","title":"done","status":"closed","type":"task","created_at":"2026-02-27T10:00:00Z","close_reason":"fixed in commit abc123; tests pass"}'
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	s := NewStore(script)
+
+	b, err := s.Get("EX-9")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if b.CloseReason != "fixed in commit abc123; tests pass" {
+		t.Errorf("CloseReason = %q, want %q", b.CloseReason, "fixed in commit abc123; tests pass")
 	}
 }

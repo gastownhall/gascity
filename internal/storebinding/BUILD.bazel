@@ -5,10 +5,12 @@ go_library(
     srcs = [
         "beads_adapter.go",
         "beads_nudge_queue.go",
+        "beads_nudge_queue_batch.go",
         "builder_publication.go",
         "builder_storeset.go",
         "cache_graph.go",
         "endpoint.go",
+        "engine_fence.go",
         "engine_opener.go",
         "events.go",
         "health_bindings.go",
@@ -37,6 +39,7 @@ go_library(
     deps = [
         "//internal/beadmeta",
         "//internal/beads",
+        "//internal/config",
         "//internal/coordclass",
         "//internal/events",
         "//internal/extmsg",
@@ -45,6 +48,8 @@ go_library(
         "//internal/nudgequeue",
         "//internal/orders",
         "//internal/pathutil",
+        "//internal/platform/filelock",
+        "//internal/runtime",
         "//internal/session",
     ],
 )
@@ -54,6 +59,10 @@ go_test(
     srcs = [
         "beads_adapter_graph_capability_test.go",
         "beads_adapter_test.go",
+        "beads_nudge_queue_batch_test.go",
+        "beads_nudge_queue_keyed_test.go",
+        "beads_nudge_queue_maintain_test.go",
+        "beads_nudge_queue_native_integration_test.go",
         "beads_nudge_queue_test.go",
         "beads_over_sqlite_conformance_test.go",
         "builder_publication_census_test.go",
@@ -61,6 +70,7 @@ go_test(
         "builder_storeset_test.go",
         "cache_graph_test.go",
         "census_sources_nested_worktree_test.go",
+        "engine_fence_test.go",
         "health_bindings_test.go",
         "lifecycle_bindings_test.go",
         "lifecycle_events_test.go",
@@ -73,6 +83,7 @@ go_test(
         "migration_guard_unix_test.go",
         "migration_intent_test.go",
         "migration_manifest_store_test.go",
+        "migration_manifest_store_windows_test.go",
         "migration_manifest_test.go",
         "migration_saga_test.go",
         "plan_fixtures_test.go",
@@ -91,9 +102,19 @@ go_test(
         "storebinding_test.go",
         "testenv_import_test.go",
     ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ) + [
+        "//:go.mod",
+        "//:repo_go_srcs",
+    ],
     embed = [":storebinding"],
     deps = [
+        "//internal/bazeltest",
         "//internal/beads",
+        "//internal/beads/beadstest",
+        "//internal/config",
         "//internal/coordclass",
         "//internal/extmsg",
         "//internal/mail",
@@ -130,4 +151,35 @@ go_test(
         ],
         "//conditions:default": [],
     }),
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
 )

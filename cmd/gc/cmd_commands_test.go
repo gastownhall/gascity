@@ -9,11 +9,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/test/tmuxtest"
 	"github.com/spf13/cobra"
 )
@@ -186,6 +188,110 @@ func TestRunDiscoveredCommand_FailsClosedWhenInvokingExecutableCannotBeResolved(
 	}
 }
 
+// supervisorURLScriptEntry writes a pack command that prints the supervisor
+// URL it was handed and returns its discovered entry.
+func supervisorURLScriptEntry(t *testing.T, dir string) config.DiscoveredCommand {
+	t.Helper()
+	scriptPath := filepath.Join(dir, "print-supervisor-url.sh")
+	script := "#!/bin/sh\necho \"supervisor=${GC_SUPERVISOR_URL-<unset>}\"\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return config.DiscoveredCommand{
+		BindingName: "test",
+		PackName:    "mypack",
+		Command:     []string{"url"},
+		RunScript:   scriptPath,
+		SourceDir:   dir,
+	}
+}
+
+// TestRunDiscoveredCommand_SupervisorURL pins GC_SUPERVISOR_URL: a pack
+// command running in a supervisor-registered city gets the loopback base URL
+// the CLI itself would use for the supervisor API, and nothing otherwise. An
+// ambient value never leaks through.
+func TestRunDiscoveredCommand_SupervisorURL(t *testing.T) {
+	cases := []struct {
+		name          string
+		register      bool
+		supervisorCfg string // "" leaves supervisor.toml absent
+		want          string
+		wantStderr    string
+	}{
+		{
+			name:          "registered city on default bind",
+			register:      true,
+			supervisorCfg: "[supervisor]\nport = 18561\n",
+			want:          "supervisor=http://127.0.0.1:18561",
+		},
+		{
+			name:          "wildcard bind maps to loopback like the CLI",
+			register:      true,
+			supervisorCfg: "[supervisor]\nbind = \"0.0.0.0\"\nport = 18562\n",
+			want:          "supervisor=http://127.0.0.1:18562",
+		},
+		{
+			name:          "IPv6 loopback bind",
+			register:      true,
+			supervisorCfg: "[supervisor]\nbind = \"::1\"\nport = 18563\n",
+			want:          "supervisor=http://[::1]:18563",
+		},
+		{
+			name:          "non-loopback bind is not exported",
+			register:      true,
+			supervisorCfg: "[supervisor]\nbind = \"192.0.2.10\"\nport = 18564\n",
+			want:          "supervisor=<unset>",
+		},
+		{
+			name:          "city not registered with a supervisor",
+			register:      false,
+			supervisorCfg: "[supervisor]\nport = 18565\n",
+			want:          "supervisor=<unset>",
+		},
+		{
+			name:          "unreadable supervisor config warns and is not exported",
+			register:      true,
+			supervisorCfg: "[supervisor\n",
+			want:          "supervisor=<unset>",
+			wantStderr:    "not setting GC_SUPERVISOR_URL",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gcHome := t.TempDir()
+			t.Setenv("GC_HOME", gcHome)
+			t.Setenv("GC_SUPERVISOR_URL", "http://stale.example:1")
+			if tc.supervisorCfg != "" {
+				if err := os.WriteFile(filepath.Join(gcHome, "supervisor.toml"), []byte(tc.supervisorCfg), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cityDir := t.TempDir()
+			if tc.register {
+				if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityDir, "testcity"); err != nil {
+					t.Fatalf("register city: %v", err)
+				}
+			}
+			entry := supervisorURLScriptEntry(t, t.TempDir())
+
+			var stdout, stderr bytes.Buffer
+			code := runDiscoveredCommand(entry, cityDir, "testcity", nil, strings.NewReader(""), &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("exit code = %d, want 0; stderr: %s", code, stderr.String())
+			}
+			if got := strings.TrimSpace(stdout.String()); got != tc.want {
+				t.Errorf("stdout = %q, want %q", got, tc.want)
+			}
+			if tc.wantStderr == "" && stderr.Len() != 0 {
+				t.Errorf("stderr = %q, want empty", stderr.String())
+			}
+			if tc.wantStderr != "" && !strings.Contains(stderr.String(), tc.wantStderr) {
+				t.Errorf("stderr = %q, want it to contain %q", stderr.String(), tc.wantStderr)
+			}
+		})
+	}
+}
+
 const packCommandProcessHelperArg = "pack-command-process-helper"
 
 type packCommandProcessInvocation struct {
@@ -239,7 +345,7 @@ func TestPackCommandExitHelper(t *testing.T) {
 		}()
 		return runPackCommandScenario(t, invocation.scenario, invocation.args, os.Stdout, os.Stderr)
 	}()
-	os.Exit(code)
+	exitTestProcess(code)
 }
 
 func parsePackCommandProcessInvocation(args []string) (packCommandProcessInvocation, bool) {
@@ -277,6 +383,7 @@ type packCommandProcessResult struct {
 	exitCode int
 	stdout   string
 	stderr   string
+	pid      int
 }
 
 func runPackCommandProcess(t *testing.T, cityPath, scenario string, args ...string) packCommandProcessResult {
@@ -312,7 +419,7 @@ func runPackCommandProcessWithEnv(t *testing.T, cityPath, scenario string, extra
 	if got, err := os.ReadFile(afterRun); err != nil || string(got) != "reached\n" {
 		t.Fatalf("post-run marker = %q, err=%v; run did not return through deferred lifecycle", got, err)
 	}
-	return packCommandProcessResult{exitCode: exitCode, stdout: stdout.String(), stderr: stripLeakGuardNoise(stderr.String())}
+	return packCommandProcessResult{exitCode: exitCode, stdout: stdout.String(), stderr: stripLeakGuardNoise(stderr.String()), pid: cmd.ProcessState.Pid()}
 }
 
 // stripLeakGuardNoise removes BOTH test leak guards' own diagnostic lines from
@@ -2788,6 +2895,34 @@ func TestPackCommandExitReturnsThroughRun(t *testing.T) {
 			}
 			if got := result.stderr; got != "" {
 				t.Fatalf("helper stderr = %q, want empty", got)
+			}
+		})
+	}
+}
+
+// TestPackCommandHelperLeavesNoTempRoot is ga-gcast6 / ga-5qipy6: the helper
+// re-exec ends its process from inside m.Run, which skips TestMain's teardown.
+// Each helper left its temp root behind in this process's root, and once it
+// was two minutes old the next helper's TestMain swept it, announcing the
+// removal on that helper's stderr: a stderr assertion then failed on a repeat
+// run (-count>1) or late in a shard. A helper removes what TestMain made for
+// it before it exits.
+func TestPackCommandHelperLeavesNoTempRoot(t *testing.T) {
+	cityPath := setupPackExitCity(t)
+	for _, scenario := range []string{"eager", "lazy"} {
+		t.Run(scenario, func(t *testing.T) {
+			result := runPackCommandProcess(t, cityPath, scenario, "backstage", "hello")
+			if result.exitCode != 42 {
+				t.Fatalf("helper exit code = %d, want 42; stderr=%q", result.exitCode, result.stderr)
+			}
+			for _, prefix := range []string{testCmdGCTempRootPrefix, testCmdGCShardTempRootPrefix} {
+				left, err := filepath.Glob(filepath.Join(os.TempDir(), prefix+strconv.Itoa(result.pid)+"-*"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(left) > 0 {
+					t.Fatalf("helper pid %d left its test temp root behind: %v", result.pid, left)
+				}
 			}
 		})
 	}

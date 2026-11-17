@@ -73,6 +73,7 @@ func TestIsReadyExcludedType(t *testing.T) {
 		{"role", true},
 		{"rig", true},
 		{"startup-health-episode", true}, // bookkeeping record; never actionable Ready work (ga-o04bfr.1.1)
+		{"op", true},                     // conversation operation journal rows (internal/opjournal)
 		{"task", false},
 		{"wisp", false},
 		{"", false},
@@ -81,6 +82,41 @@ func TestIsReadyExcludedType(t *testing.T) {
 	for _, tt := range tests {
 		if got := IsReadyExcludedType(tt.typ); got != tt.want {
 			t.Errorf("IsReadyExcludedType(%q) = %v, want %v", tt.typ, got, tt.want)
+		}
+	}
+}
+
+// A bookkeeping label excludes a bead from Ready whatever its type.
+func TestHasReadyExcludedLabel(t *testing.T) {
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name   string
+		labels []string
+		want   bool
+	}{
+		{"session continuity", []string{"gc:session"}, true},
+		{"order tracking", []string{"gc:order-tracking"}, true},
+		{"legacy order tracking", []string{"order-tracking"}, true},
+		{"op journal op row", []string{"gc:op", "gc:op-conv:gc-7"}, true},       // internal/opjournal
+		{"op journal fact row", []string{"gc:fact", "gc:fact-conv:gc-7"}, true}, // internal/opjournal
+		{"op journal runtime row", []string{"gc:rt", "gc:rt-conv:gc-7"}, true},  // internal/opjournal
+		{"op conversation label alone", []string{"gc:op-conv:gc-7"}, false},
+		{"fact conversation label alone", []string{"gc:fact-conv:gc-7"}, false},
+		{"runtime conversation label alone", []string{"gc:rt-conv:gc-7"}, false},
+		{"unrelated label", []string{"priority:high"}, false},
+		{"no labels", nil, false},
+		{"case-sensitive", []string{"GC:OP"}, false},
+	}
+	for _, tt := range tests {
+		b := Bead{Status: "open", Type: "task", Labels: tt.labels}
+		if got := HasReadyExcludedLabel(b); got != tt.want {
+			t.Errorf("%s: HasReadyExcludedLabel(%v) = %v, want %v", tt.name, tt.labels, got, tt.want)
+		}
+		if got := IsReadyExcludedBead(b); got != tt.want {
+			t.Errorf("%s: IsReadyExcludedBead(task %v) = %v, want %v", tt.name, tt.labels, got, tt.want)
+		}
+		if got := IsReadyCandidate(b, now); got == tt.want {
+			t.Errorf("%s: IsReadyCandidate(open task %v) = %v, want %v", tt.name, tt.labels, got, !tt.want)
 		}
 	}
 }
@@ -157,6 +193,36 @@ func TestIsReadyCandidate(t *testing.T) {
 // satisfies unless it was explicitly closed as gc.work_outcome=blocked. A
 // closed dependency carrying no work_outcome at all (the legacy/pre-ADR-0009
 // case) must still satisfy — that's the backward-compat guarantee.
+func TestReadinessWorkOutcomeDefersToAPassedStep(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata map[string]string
+		want     string
+	}{
+		{"no metadata", nil, ""},
+		{"work outcome alone", map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+		{"passed step ignores blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, ""},
+		{"failed step keeps blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomeFail, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+		{"skipped step keeps blocked work outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+		{"passed step with shipped outcome", map[string]string{beadmeta.StepRefMetadataKey: "review", beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped}, ""},
+		// A plain work bead (no gc.step_ref) is not a control-plane step: the
+		// core mol-do-work formula stamps gc.outcome=pass on the work bead
+		// itself, including blocked/abandoned closes, so gc.outcome must not
+		// mask its blocked work outcome.
+		{"work bead with pass keeps blocked work outcome", map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass, beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked}, beadmeta.WorkOutcomeBlocked},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ReadinessWorkOutcome(tt.metadata); got != tt.want {
+				t.Fatalf("ReadinessWorkOutcome(%v) = %q, want %q", tt.metadata, got, tt.want)
+			}
+			if tt.want == "" && !DependencySatisfied("closed", ReadinessWorkOutcome(tt.metadata)) {
+				t.Fatalf("a closed dependency whose step passed must satisfy its dependents (%v)", tt.metadata)
+			}
+		})
+	}
+}
+
 func TestDependencySatisfied(t *testing.T) {
 	tests := []struct {
 		name           string

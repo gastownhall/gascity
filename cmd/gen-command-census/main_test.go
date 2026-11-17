@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/commandcensus"
 )
 
@@ -35,7 +36,10 @@ func TestCommittedCommandCensusArtifactsAreFresh(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller could not locate repository")
 	}
-	root := filepath.Clean(filepath.Join(filepath.Dir(source), "../.."))
+	root := bazeltest.OverrideRoot()
+	if root == "" {
+		root = filepath.Clean(filepath.Join(filepath.Dir(source), "../.."))
+	}
 	if err := runGenerator(generatorOptions{Root: root, Check: true}); err != nil {
 		t.Fatal(err)
 	}

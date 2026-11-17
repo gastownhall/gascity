@@ -1,0 +1,34 @@
+name: rbe-worker
+description: >
+  Fetch the gastownhall/rbe-worker commit in ./pin, anonymously, after
+  verifying it is in the history of rbe-worker's main. Runs no fetched code
+  and reads no secret.
+inputs:
+  canary-sha:
+    description: >
+      Empty (the default): ./pin. A pool workflow's rbe_worker_sha canary
+      input: that commit instead, if it is on rbe-worker main's first-parent
+      line and descends from the pin (fetch.sh).
+    required: false
+    default: ""
+outputs:
+  dir:
+    description: "worker/ of the fetched tree"
+    value: ${{ steps.fetch.outputs.dir }}
+  sha:
+    description: "the rbe-worker commit"
+    value: ${{ steps.fetch.outputs.sha }}
+  pin:
+    description: "the pin file's commit"
+    value: ${{ steps.fetch.outputs.pin }}
+  canary:
+    description: "true: sha is a canary commit, not the pin"
+    value: ${{ steps.fetch.outputs.canary }}
+runs:
+  using: composite
+  steps:
+    - id: fetch
+      shell: bash
+      env:
+        RBE_WORKER_CANARY_SHA: ${{ inputs.canary-sha }}
+      run: bash "$GITHUB_ACTION_PATH/fetch.sh" pin

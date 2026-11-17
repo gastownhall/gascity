@@ -28,6 +28,7 @@ import (
 func TestCmdNudgePollSkipsDeliveryAttemptWithEmptyQueue(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
+	markNudgePollCityRunningForTest(t)
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
 
@@ -98,6 +99,7 @@ func TestCmdNudgePollSkipsDeliveryAttemptWithEmptyQueue(t *testing.T) {
 func TestCmdNudgePollExitsWhenSessionDiesWithEmptyQueue(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
+	markNudgePollCityRunningForTest(t)
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
 
@@ -162,6 +164,7 @@ func TestCmdNudgePollExitsWhenSessionDiesWithEmptyQueue(t *testing.T) {
 func TestCmdNudgePollDeliversDueWorkPromptly(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
+	markNudgePollCityRunningForTest(t)
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
 

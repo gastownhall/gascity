@@ -67,21 +67,43 @@ func contextInjectLine(hookInput []byte) string {
 // configuration to a hook payload. Environment variables remain the final
 // compatibility override for enablement, thresholds, and window size.
 func contextInjectLineForAdvisory(hookInput []byte, global, agent *config.ContextAdvisory) string {
+	return contextInjectLineForSample(readContextUsageSample(hookInput), global, agent)
+}
+
+// contextUsageSample is the context footprint read from one provider hook
+// payload, so a hook that renders the advisory after other work reads the
+// transcript once.
+type contextUsageSample struct {
+	tokens int
+	models []string
+	// ok is false when injection is disabled, the payload names no
+	// transcript, or the transcript has no usage entry yet. No advisory policy
+	// renders a line for such a sample.
+	ok bool
+}
+
+func readContextUsageSample(hookInput []byte) contextUsageSample {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("GC_INJECT_CONTEXT"))) {
 	case "0", "false", "off":
-		return ""
+		return contextUsageSample{}
 	}
 	var in hookStdinInput
 	if err := json.Unmarshal(hookInput, &in); err != nil || strings.TrimSpace(in.TranscriptPath) == "" {
-		return ""
+		return contextUsageSample{}
 	}
 	tokens, models, ok := lastTranscriptUsage(in.TranscriptPath)
-	if !ok {
+	return contextUsageSample{tokens: tokens, models: models, ok: ok}
+}
+
+// contextInjectLineForSample is contextInjectLineForAdvisory over a sample
+// already read from the hook payload.
+func contextInjectLineForSample(sample contextUsageSample, global, agent *config.ContextAdvisory) string {
+	if !sample.ok {
 		return ""
 	}
 	builtin := config.DefaultContextAdvisory()
 	policy := config.ResolveContextAdvisory(&builtin, global, agent)
-	return contextUsageMessageForPolicy(tokens, contextWindowTokensWithOverride(models, policy.WindowTokens), policy)
+	return contextUsageMessageForPolicy(sample.tokens, contextWindowTokensWithOverride(sample.models, policy.WindowTokens), policy)
 }
 
 // lastTranscriptUsage reads the tail of a provider transcript (JSONL) and

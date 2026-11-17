@@ -10,11 +10,14 @@ import (
 	"go/token"
 	"go/types"
 	"os"
-	pathpkg "path"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
+
+	pathpkg "path"
 )
 
 // RuntimeRegistration is one builtin runtime selection key and the exact
@@ -69,16 +72,63 @@ type emptyPackageImporter struct {
 type standardOrEmptyImporter struct {
 	standard types.Importer
 	empty    *emptyPackageImporter
+	fset     *token.FileSet
+	sources  map[string]string
 }
 
 func (i *standardOrEmptyImporter) Import(importPath string) (*types.Package, error) {
-	// Runtime's module-local imports are currently body-only. Empty packages
-	// keep those ignored bodies hermetic; any selector used by a declaration
-	// remains unresolved and makes the guard fail closed below.
+	if dir, ok := i.sources[importPath]; ok {
+		return i.importDeclarations(importPath, dir)
+	}
+	// Other module-local imports are body-only. Undeclared source dependencies
+	// still fail closed if a selector is used outside an ignored function body.
 	if strings.HasPrefix(importPath, moduleImportPath+"/") {
 		return i.empty.Import(importPath)
 	}
 	return i.standard.Import(importPath)
+}
+
+func (i *standardOrEmptyImporter) importDeclarations(importPath, dir string) (*types.Package, error) {
+	if imported := i.empty.packages[importPath]; imported != nil {
+		return imported, nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("read declaration dependency %q: %w", importPath, err)
+	}
+	var files []*ast.File
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		matches, err := build.Default.MatchFile(dir, name)
+		if err != nil {
+			return nil, fmt.Errorf("match declaration dependency file %q: %w", name, err)
+		}
+		if !matches {
+			continue
+		}
+		file, err := parser.ParseFile(i.fset, filepath.Join(dir, name), nil, parser.SkipObjectResolution)
+		if err != nil {
+			return nil, fmt.Errorf("parse declaration dependency file %q: %w", name, err)
+		}
+		files = append(files, file)
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("declaration dependency %q has no buildable Go source", importPath)
+	}
+	config := types.Config{
+		Importer:                 i,
+		DisableUnusedImportCheck: true,
+		IgnoreFuncBodies:         true,
+	}
+	imported, err := config.Check(importPath, i.fset, files, nil)
+	if err != nil {
+		return nil, fmt.Errorf("type-check declaration dependency %q: %w", importPath, err)
+	}
+	i.empty.packages[importPath] = imported
+	return imported, nil
 }
 
 // DiscoverRuntimeProviderDoubles discovers every exported concrete type in
@@ -135,8 +185,12 @@ func DiscoverRuntimeProviderDoubles(runtimeDir string) ([]ReusableDouble, error)
 	var typeProblems []string
 	config := types.Config{
 		Importer: &standardOrEmptyImporter{
-			standard: importer.Default(),
+			standard: stdImporter(fset),
 			empty:    &emptyPackageImporter{packages: make(map[string]*types.Package)},
+			fset:     fset,
+			sources: map[string]string{
+				moduleImportPath + "/internal/processgroup": filepath.Join(filepath.Dir(runtimeDir), "processgroup"),
+			},
 		},
 		DisableUnusedImportCheck: true,
 		IgnoreFuncBodies:         true,
@@ -385,8 +439,10 @@ func DiscoverRuntimeCatalog(source []byte) ([]RuntimeRegistration, error) {
 
 		switch selector.Sel.Name {
 		case "SetFallback":
-			if len(call.Args) != 1 {
-				discoverErr = fmt.Errorf("SetFallback call at %s must have exactly one factory", fset.Position(call.Pos()))
+			// The factory comes first; like Register's, any further
+			// arguments are registration options, not factories.
+			if len(call.Args) < 1 {
+				discoverErr = fmt.Errorf("SetFallback call at %s must have a factory", fset.Position(call.Pos()))
 				return false
 			}
 			factory, binding, use, err := resolveFactoryLiteral(call.Args[0], factories, bindings)
@@ -1099,4 +1155,24 @@ func resolveCallSymbol(call *ast.CallExpr, imports map[string]string, localImpor
 	default:
 		return SymbolRef{}, fmt.Errorf("constructor must be a direct function call, got %T", call.Fun)
 	}
+}
+
+// stdImporter resolves the standard-library importer for the type-check.
+// Under bazel the SDK arrives as runfiles (declare @go_sdk//:srcs in the
+// calling test's data); the source importer reads GOROOT/src, which is
+// exactly what that runfiles tree provides. Outside bazel the ambient
+// importer is kept.
+func stdImporter(fset *token.FileSet) types.Importer {
+	if gr := bazeltest.GOROOTFromRunfiles(); gr != "" {
+		// go/build.Default captures GOROOT at package init; mutate it (and
+		// the env) before the source importer snapshots the context. GOPATH
+		// mode resolves the standard library from GOROOT/src with no
+		// subprocess, which the srcs-only SDK runfiles fully support.
+		build.Default.GOROOT = gr
+		build.Default.GOPATH = ""
+		_ = os.Setenv("GOROOT", gr)
+		_ = os.Setenv("GO111MODULE", "off")
+		return importer.ForCompiler(fset, "source", nil)
+	}
+	return importer.Default()
 }

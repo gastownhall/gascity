@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
 )
@@ -101,6 +102,12 @@ func prepareACPConformanceFixture(ownerT *testing.T, fixture *acpConformanceFixt
 			return
 		}
 
+		// Bazel hands the test the //internal/runtime/acp/testdata/fakeacp
+		// it built; under go test, build it.
+		if bin := bazeltest.DataPath(ownerT, "GC_TEST_FAKEACP_BIN"); bin != "" {
+			fixture.command = bin
+			return
+		}
 		modRoot, err := moduleRoot()
 		if err != nil {
 			fixture.err = err

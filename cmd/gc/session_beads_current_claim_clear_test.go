@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"strings"
 	"testing"
 	"time"
 
@@ -62,7 +63,7 @@ func TestReleaseWorkFromClosedSessionBeadClearsTheCurrentClaim(t *testing.T) {
 	sessionBead, workBead := seedClaimingSession(t, store)
 
 	var stderr bytes.Buffer
-	releaseWorkFromClosedSessionBead(store, sessionBead, &stderr)
+	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", servingCity("rig/worker"), store, nil), sessionBead, nil, &stderr)
 
 	if got := currentClaimStamp(t, store, sessionBead.ID); got != "" {
 		t.Fatalf("current claim = %q, want cleared once the work was released", got)
@@ -84,7 +85,7 @@ func TestUnclaimWorkAssignedToRetiredSessionBeadClearsTheCurrentClaim(t *testing
 	sessionBead, workBead := seedClaimingSession(t, store)
 
 	var stderr bytes.Buffer
-	unclaimWorkAssignedToRetiredSessionBead("", nil, store, nil, sessionBead, "rig/worker", &stderr)
+	unclaimWorkAssignedToRetiredSessionBead(testWorkLegs("", servingCity("rig/worker"), store, nil), store, sessionBead, "rig/worker", &stderr)
 
 	if got := currentClaimStamp(t, store, sessionBead.ID); got != "" {
 		t.Fatalf("current claim = %q, want cleared on retirement", got)
@@ -111,7 +112,7 @@ func TestUnclaimWorkAssignedToRetiredSessionInfoClearsTheCurrentClaim(t *testing
 	}
 
 	var stderr bytes.Buffer
-	unclaimWorkAssignedToRetiredSessionInfo("", nil, store, nil, info, "rig/worker", &stderr)
+	unclaimWorkAssignedToRetiredSessionInfo(testSeatWork("", nil, store, nil), store, info, &stderr)
 
 	if got := currentClaimStamp(t, store, sessionBead.ID); got != "" {
 		t.Fatalf("current claim = %q, want cleared on retirement", got)
@@ -127,7 +128,7 @@ func TestReassignWorkAssignedToRetiredSessionBeadClearsTheCurrentClaim(t *testin
 	sessionBead, workBead := seedClaimingSession(t, store)
 
 	var stderr bytes.Buffer
-	reassignWorkAssignedToRetiredSessionBead("", nil, store, nil, sessionBead, "mc-successor", &stderr)
+	reassignWorkAssignedToRetiredSessionBead(testWorkLegs("", nil, store, nil), store, sessionBead, "mc-successor", &stderr)
 
 	if got := currentClaimStamp(t, store, sessionBead.ID); got != "" {
 		t.Fatalf("current claim = %q, want cleared on reassignment", got)
@@ -149,10 +150,60 @@ func TestCloseBeadClearsTheCurrentClaim(t *testing.T) {
 	sessionBead, _ := seedClaimingSession(t, store)
 
 	var stderr bytes.Buffer
-	if !closeBead(store, sessionBead.ID, "orphaned", time.Now(), &stderr) {
+	if !closeBead(store, testSeatWork("", servingCity("rig/worker"), store, nil), decidedSessionInfo(store, sessionBead.ID), "orphaned", time.Now(), &stderr) {
 		t.Fatalf("closeBead reported no close; stderr=%s", stderr.String())
 	}
 	if got := currentClaimStamp(t, store, sessionBead.ID); got != "" {
 		t.Fatalf("current claim = %q, want cleared by the session-close cascade", got)
+	}
+}
+
+// TestUnclaimWorkAssignedToRetiredSessionClearsClaimInTheSessionStore pins the
+// `gc session close` split-store case: the sweep leads with the WORK store, but
+// the session bead lives in the sessions-class store. Clearing the claim
+// back-channel through the work store looked the session bead up where it does
+// not live — the close logged "clearing current claim on retired session ...:
+// getting bead ...: bead not found" and left current_claim_bead_id stamped on
+// the closed session.
+func TestUnclaimWorkAssignedToRetiredSessionClearsClaimInTheSessionStore(t *testing.T) {
+	sessions := beads.NewMemStore()
+	work := beads.NewMemStore()
+	sessionBead, err := sessions.Create(beads.Bead{
+		Title:    "olivia",
+		Type:     sessionBeadType,
+		Labels:   []string{sessionBeadLabel},
+		Metadata: map[string]string{"session_name": "olivia", "state": "asleep"},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	workBead, err := work.Create(beads.Bead{
+		Title:    "step",
+		Type:     "task",
+		Status:   "in_progress",
+		Metadata: map[string]string{"gc.routed_to": "worker"}, Assignee: sessionBead.ID,
+	})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	if err := sessions.SetMetadata(sessionBead.ID, beadmeta.CurrentClaimBeadIDMetadataKey, workBead.ID); err != nil {
+		t.Fatalf("seed claim stamp: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	unclaimWorkAssignedToRetiredSessionBeadVia(testWorkLegs("", servingCity("worker"), work, nil), sessions, sessionBead, "", &stderr)
+
+	if got := currentClaimStamp(t, sessions, sessionBead.ID); got != "" {
+		t.Fatalf("current claim = %q, want cleared in the session store", got)
+	}
+	if strings.Contains(stderr.String(), "clearing current claim") {
+		t.Fatalf("stderr = %q, want no claim-clear failure: the clear must target the session store", stderr.String())
+	}
+	released, err := work.Get(workBead.ID)
+	if err != nil {
+		t.Fatalf("get work bead: %v", err)
+	}
+	if released.Assignee != "" {
+		t.Fatalf("work bead Assignee = %q, want released from the work store", released.Assignee)
 	}
 }

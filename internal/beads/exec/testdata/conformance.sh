@@ -245,7 +245,7 @@ ready)
 	# shellcheck disable=SC2086
 	jq -s --argjson deps "$deps" "
 	  [.[] | $JQ_NORMALIZE_BEAD] as \$beads
-	  | (\$beads | map({key: .id, value: {status: .status, work_outcome: (.metadata[\"gc.work_outcome\"] // \"\")}}) | from_entries) as \$byid
+	  | (\$beads | map({key: .id, value: {status: .status, work_outcome: (if .metadata[\"gc.outcome\"] == \"pass\" and (.metadata[\"gc.step_ref\"] // \"\") != \"\" then \"\" else (.metadata[\"gc.work_outcome\"] // \"\") end)}}) | from_entries) as \$byid
 	  | [\$beads[] | select(.status == \"open\") | . as \$b | select(
 	      [\$deps[] | select(.issue_id == \$b.id and (.type == \"blocks\" or .type == \"waits-for\" or .type == \"conditional-blocks\"))]
 	      | all(\$byid[.depends_on_id].status == \"closed\" and \$byid[.depends_on_id].work_outcome != \"blocked\")

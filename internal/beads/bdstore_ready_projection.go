@@ -39,7 +39,7 @@ const bdReadyProjectionMinVersion = "1.0.5"
 //
 // It is reported exactly once per SCOPE: the verdict is latched in a registry
 // keyed by scope path, not on the store object, because cmd/gc rebuilds a store
-// per request and the control dispatcher rebuilds one every few seconds. Each
+// per request and the control dispatcher rebuilds one on every readiness scan. Each
 // cache over the scope still learns the verdict — it must, to decline its ready
 // reads — but the operator notice and the failing subprocess are spent once.
 var ErrReadyProjectionUnsupported = errors.New("ready projection unsupported by this bead store")
@@ -56,8 +56,8 @@ type readyProjectionDegrade struct {
 // Per-scope rather than per-store object is the same correction unreadStoreGuard
 // already carries (scopeGuards, unread_store_notice.go). A verdict memoized on
 // the store object is memoized on nothing: cmd/gc's scoped stores are built per
-// request, and cmd/gc's control-ready path rebuilds a store per
-// controlReadyCacheTTL (3s) per scope for the life of the dispatcher. Bounding
+// request, and cmd/gc's control-ready path rebuilds a store per readiness
+// scan per scope for the life of the dispatcher. Bounding
 // there turns "once per store" into "once per rebuild" — an unbounded operator
 // notice, and a latch that never actually saves the failing 6-16s `bd sql` it
 // exists to save.
@@ -170,6 +170,9 @@ func (s *BdStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, error) {
 		}
 		enriched[i].IsBlocked = cloneBoolPtr(&blocked)
 	}
+	if err := vetoReadyProjectionWorkOutcomes(enriched, s.filterReadyByWorkOutcome); err != nil {
+		return items, err
+	}
 	return enriched, nil
 }
 
@@ -277,7 +280,7 @@ func (s *BdStore) bdReadyProjectionEnabled() (readyProjectionDoor, bool, error) 
 //
 // The choice is latched in the scope guard, not just on this store object,
 // because cmd/gc builds a store per request and the control-ready scan rebuilds
-// one per scope every controlReadyCacheTTL: a store-local flag would let the
+// one per scope on every scan: a store-local flag would let the
 // next store re-derive the SQL door from metadata and re-spend the failing
 // 6-16s `bd sql` a few times a minute, forever. It is a DISTINCT verdict from
 // the degrade the guard also carries — "SQL door proven refused, use `bd
@@ -296,7 +299,7 @@ func (s *BdStore) switchToBlockedDoor() {
 // readyProjectionBlockedDoorLatched reports whether some store over this scope
 // already proved `bd sql` refused at runtime and switched to the blocked door.
 // A fresh store consults it before deriving the door from metadata, so the
-// proven refusal survives the per-request / per-controlReadyCacheTTL store
+// proven refusal survives the per-request / per-scan store
 // rebuilds instead of re-spending the failing `bd sql` on each one.
 func (s *BdStore) readyProjectionBlockedDoorLatched() bool {
 	g := s.readyProjectionGuard()
@@ -329,8 +332,15 @@ func (s *BdStore) readyProjectionBlockedDoorLatched() bool {
 // a Dolt SQL server is REACHABLE, only that gc implements the backend; a bd
 // that then refuses anyway is caught by the runtime latch in
 // fetchReadyProjection.
+//
+// A backend the linked library registered as an extension is recognized by the
+// metadata loader yet still one gc does not implement, so it is refused here
+// by name.
 func (s *BdStore) readyProjectionBackendRefusal() error {
-	_, _, err := contract.LoadMetadataState(fsys.OSFS{}, filepath.Join(s.dir, ".beads", "metadata.json"))
+	state, _, err := contract.LoadMetadataState(fsys.OSFS{}, filepath.Join(s.dir, ".beads", "metadata.json"))
+	if err == nil && contract.IsLibraryExtensionBackend(state.Backend) {
+		return fmt.Errorf("backend %q is served by the linked beads library, which gc does not implement a SQL projection for", state.Backend)
+	}
 	if err == nil || !errors.Is(err, contract.ErrUnknownBackend) {
 		return nil
 	}
@@ -434,13 +444,14 @@ func (s *BdStore) fetchReadyProjection(door readyProjectionDoor, ids []string) (
 	result := make(map[string]bool, len(wanted))
 
 	// bd exposes this as an active-row projection: the SQL filters out closed
-	// rows so cache prime/reconcile cost stays O(active work) instead of
-	// scanning unbounded closed issue/wisp history every cycle. The ids
-	// argument is a cache-side allow-list so callers can keep their requested
-	// surface bounded. A row that races closed between the list snapshot and
-	// this fetch drops out of the projection; the reconciler preserves its last
-	// cached is_blocked (preserveCachedReadyProjectionLocked) so the absence
-	// does not flap a spurious bead.updated.
+	// rows, so this read stays O(active work) instead of scanning unbounded
+	// closed issue/wisp history every cycle. The work-outcome veto is the one
+	// closed-inclusive read a cycle can add (vetoReadyProjectionWorkOutcomes).
+	// The ids argument is a cache-side allow-list so callers can keep their
+	// requested surface bounded. A row that races closed between the list
+	// snapshot and this fetch drops out of the projection; the reconciler
+	// preserves its last cached is_blocked (preserveCachedReadyProjectionLocked)
+	// so the absence does not flap a spurious bead.updated.
 	out, err := s.runner(s.dir, "bd", "sql", readyProjectionSQL(), "--json")
 	if err != nil {
 		if isBdSQLUnsupportedInEmbeddedMode(err) {
@@ -452,8 +463,8 @@ func (s *BdStore) fetchReadyProjection(door readyProjectionDoor, ids []string) (
 			// — and every later rebuild consults it before the metadata-derived
 			// door. Without that scope latch the switch lived only on this store
 			// object, and cmd/gc rebuilds the store per request while the
-			// control-ready scan rebuilds one per scope every
-			// controlReadyCacheTTL: the next store re-picked the SQL door and
+			// control-ready scan rebuilds one per scope on every
+			// scan: the next store re-picked the SQL door and
 			// re-spent this failing 6-16s subprocess on every prime and every
 			// reconcile, indefinitely.
 			s.switchToBlockedDoor()
@@ -527,11 +538,32 @@ func (s *BdStore) projectViaBlockedDoor(wanted map[string]struct{}, withheld err
 // refusal it fails to recognize costs a retry per cycle rather than a wrong
 // answer, and a blip it misreads as a refusal costs the projection, never the
 // readiness verdict, because the degrade sends readiness to a live `bd ready`.
+//
+// Three refusal shapes are recognized:
+//
+//   - the verb itself is missing or unsupported by the client or its storage
+//     ("unknown command", "not supported", ...), which must name the verb;
+//   - a client that classifies the command against the server's advertised
+//     capabilities and refuses before dialing:
+//     `bd blocked requires server capability "X"; bd serve at ... does not
+//     advertise it`;
+//   - a client whose transport refuses the operation at the handshake:
+//     `bd serve at ... does not advertise capability "X", which ... requires`.
+//
+// The last two are what a newer bd says to an older `bd serve` that lacks the
+// operation. That is as permanent for the life of the process as the verb
+// being absent (a server upgrade needs the gc restart the latch already
+// prescribes), so it latches too; without it a newer bd in front of an older
+// server re-spends a failing subprocess every reconcile.
 func isBdBlockedUnsupported(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "requires server capability") ||
+		strings.Contains(msg, "does not advertise capability") {
+		return true
+	}
 	if !strings.Contains(msg, "blocked") {
 		return false
 	}

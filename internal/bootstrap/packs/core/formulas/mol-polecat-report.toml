@@ -163,16 +163,25 @@ REPORT="$(cat <<'ENDREPORT'
 <unresolved items, caveats>
 ENDREPORT
 )"
-gc bd update "$WORK_BEAD_ID" --notes "$REPORT"
+gc bd update "$WORK_BEAD_ID" --append-notes "$REPORT"
 ```
 
-**2. Close the bead:**
+**2. Close the bead** with a one-line summary of the findings as the reason:
 ```bash
-gc bd close "$WORK_BEAD_ID"
+gc bd close "$WORK_BEAD_ID" --reason "Report: <one-line root cause or 'unknown — further investigation required'>"
 ```
 
-**3. Signal reconciler and exit.**
+**3. Close this step, signal reconciler, and exit.**
+
+`gc runtime drain-ack` gives back every claim this session still holds, so
+close this step first: acking with it still open hands it back to the pool
+and a fresh session runs it again. `gc hook current` names the step you
+claimed; refuse to ack if it is not this one.
 ```bash
+STEP_BEAD_ID=$(gc hook current --id-only) || exit 1
+STEP_BEAD=$(gc bd show "$STEP_BEAD_ID" --json) || exit 1
+printf '%s' "$STEP_BEAD" | jq -e '(if type == "array" then .[0] else . end) | .status == "in_progress" and ((.metadata["gc.step_ref"] // "") | endswith(".write-report"))' >/dev/null || { echo "write-report: current claim $STEP_BEAD_ID is not this in-progress step; not acknowledging drain" >&2; exit 1; }
+gc bd update "$STEP_BEAD_ID" --set-metadata gc.outcome=pass --status=closed || exit 1
 gc runtime drain-ack
 exit
 ```
@@ -181,4 +190,5 @@ exit
 reconciler only restarts you if the pool check command finds more work.
 You are GONE. Done means gone. There is no idle state.
 
-**Exit criteria:** Report written to bead notes, bead closed, session exited."""
+**Exit criteria:** Report written to bead notes, bead closed, this step
+closed, session exited."""

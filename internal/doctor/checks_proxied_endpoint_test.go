@@ -130,10 +130,7 @@ func TestBeadsStorePayloadOnAHealthyProxiedScope(t *testing.T) {
 	fixture := writeProxiedScope(t, scope, `{"root_path":"dolt","idle_timeout":-1}`, 6001, 45123)
 	stubProxyProcess(t, fixture, "-1ns")
 	probes := 0
-	stubProbe(t, proxyendpoint.ProbeResult{
-		Outcome: proxyendpoint.ProbeServed,
-		Cursors: proxyendpoint.Cursors{Main: beads.SchemaCursorMain, Ignored: beads.SchemaCursorIgnored},
-	}, &probes)
+	stubProbe(t, proxyendpoint.ServedProbeForTest(proxyendpoint.Cursors{Main: beads.SchemaCursorMain, Ignored: beads.SchemaCursorIgnored}, proxyendpoint.CursorReality{}), &probes)
 
 	payload := newBeadsStorePayload(scope, proxiedTarget(), beadsStoreDiagnostic{
 		Store:         beads.BeadsStoreNameBdStore,
@@ -252,7 +249,7 @@ func TestBeadsStorePayloadNeverProbesAnUnprovenEndpoint(t *testing.T) {
 			fixture := writeProxiedScope(t, scope, `{"root_path":"dolt","idle_timeout":-1}`, tc.pid, 45200)
 			tc.table(t, fixture)
 			probes := 0
-			stubProbe(t, proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed}, &probes)
+			stubProbe(t, proxyendpoint.ServedProbeForTest(proxyendpoint.Cursors{}, proxyendpoint.CursorReality{}), &probes)
 
 			payload := newBeadsStorePayload(scope, proxiedTarget(), beadsStoreDiagnostic{Store: beads.BeadsStoreNameBdStore})
 			ep := payload.Endpoint
@@ -276,6 +273,30 @@ func TestBeadsStorePayloadNeverProbesAnUnprovenEndpoint(t *testing.T) {
 			// operator wants to see next to "dead".
 			if ep.IdlePolicy != "never" || ep.IdlePolicySource != "sidecar" {
 				t.Errorf("idle policy = %s(%s), want never(sidecar)", ep.IdlePolicy, ep.IdlePolicySource)
+			}
+		})
+	}
+}
+
+// A finite-idle scope with no proxy record is idle, not a gap.
+func TestBeadsStorePayloadReportsAFiniteScopeWithNoRecordAsIdle(t *testing.T) {
+	for _, tc := range []struct {
+		name, sidecar string
+		idle          bool
+	}{
+		{name: "finite", sidecar: `{"root_path":"dolt","idle_timeout":1800000000000}`, idle: true},
+		{name: "never", sidecar: `{"root_path":"dolt","idle_timeout":-1}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			scope := t.TempDir()
+			writeProxiedScope(t, scope, tc.sidecar, 0, 0)
+			stubProxyProcessTable(t, proxyendpoint.ProcessTable{})
+			ep := newBeadsStorePayload(scope, proxiedTarget(), beadsStoreDiagnostic{Store: beads.BeadsStoreNameBdStore}).Endpoint
+			if ep == nil || ep.Verdict != "no_record" {
+				t.Fatalf("endpoint = %+v, want no_record", ep)
+			}
+			if got := ep.Detail == ProxiedEndpointIdleDetail; got != tc.idle {
+				t.Fatalf("detail = %q, idle = %v, want %v", ep.Detail, got, tc.idle)
 			}
 		})
 	}
@@ -369,7 +390,7 @@ func TestBeadsStorePayloadIdleSourcesCrossed(t *testing.T) {
 			scope := t.TempDir()
 			fixture := writeProxiedScope(t, scope, tc.sidecar, 6006, 45400)
 			stubProxyProcess(t, fixture, tc.idleFlag)
-			stubProbe(t, proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed}, nil)
+			stubProbe(t, proxyendpoint.ServedProbeForTest(proxyendpoint.Cursors{}, proxyendpoint.CursorReality{}), nil)
 
 			ep := newBeadsStorePayload(scope, proxiedTarget(), beadsStoreDiagnostic{Store: beads.BeadsStoreNameBdStore}).Endpoint
 			if ep.IdlePolicy != tc.wantPolicy || ep.IdlePolicySource != tc.wantSource {
@@ -400,7 +421,7 @@ func TestBeadsStorePayloadSkipsNonProxiedScopes(t *testing.T) {
 		Alive: func(int) bool { consulted = true; return false },
 	})
 	probes := 0
-	stubProbe(t, proxyendpoint.ProbeResult{Outcome: proxyendpoint.ProbeServed}, &probes)
+	stubProbe(t, proxyendpoint.ServedProbeForTest(proxyendpoint.Cursors{}, proxyendpoint.CursorReality{}), &probes)
 
 	payload := newBeadsStorePayload(scope, contract.DoltConnectionTarget{DoltMode: "server", Database: "beads"}, beadsStoreDiagnostic{
 		Store: "NativeDoltStore",
@@ -423,10 +444,7 @@ func TestBeadsStorePayloadMarshalsTheShapeAutomationReads(t *testing.T) {
 	scope := t.TempDir()
 	fixture := writeProxiedScope(t, scope, `{"root_path":"dolt","idle_timeout":-1}`, 6007, 45500)
 	stubProxyProcess(t, fixture, "-1ns")
-	stubProbe(t, proxyendpoint.ProbeResult{
-		Outcome: proxyendpoint.ProbeServed,
-		Cursors: proxyendpoint.Cursors{Main: 66, Ignored: 26},
-	}, nil)
+	stubProbe(t, proxyendpoint.ServedProbeForTest(proxyendpoint.Cursors{Main: 66, Ignored: 26}, proxyendpoint.CursorReality{}), nil)
 
 	payload := newBeadsStorePayload(scope, proxiedTarget(), beadsStoreDiagnostic{
 		Store:         beads.BeadsStoreNameBdStore,
@@ -520,74 +538,161 @@ func writeScopeOwnershipRows(t *testing.T, cityPath string, rows ...scopeOwnersh
 func TestProxiedIdleTimeoutCheck(t *testing.T) {
 	cases := []struct {
 		name       string
+		beads      string
+		env        string
 		sidecar    string
 		wantStatus CheckStatus
 		wantIn     string
 	}{
 		{
-			// What gc's own `bd init` produces: the script passes
-			// --proxied-server-idle-timeout 0, which bd maps to
-			// IdleTimeoutNever before persisting.
-			name:       "gc's own scope pins the proxy resident",
+			// What gc's own `bd init` produces at a "0" config: bd maps
+			// --proxied-server-idle-timeout 0 to IdleTimeoutNever.
+			name:       "never configured, never persisted",
+			beads:      "0",
 			sidecar:    `{"root_path":"dolt","idle_timeout":-1}`,
 			wantStatus: StatusOK,
-			wantIn:     "pin their proxy resident",
+			wantIn:     "carry the configured idle timeout",
+		},
+		{
+			name:       "finite configured, finite persisted",
+			beads:      "30m",
+			sidecar:    `{"root_path":"dolt","idle_timeout":1800000000000}`,
+			wantStatus: StatusOK,
+			wantIn:     "carry the configured idle timeout",
+		},
+		{
+			// An existing scope made before the value changed: bd cannot
+			// change it, so doctor names the drift and the remedy.
+			name:       "configured finite, scope pinned never",
+			beads:      "30m",
+			sidecar:    `{"root_path":"dolt","idle_timeout":-1}`,
+			wantStatus: StatusWarning,
+			wantIn:     "configured 30m0s (city), scope has never(sidecar)",
 		},
 		{
 			// bd elides a zero, so this is what a scope initialized without
 			// the flag looks like — and bd's provider substitutes 30s for it.
 			name:       "an absent key is bd's 30s default",
+			beads:      "0",
 			sidecar:    `{"root_path":"dolt"}`,
 			wantStatus: StatusWarning,
 			wantIn:     "finite(30s, bd-default)",
 		},
 		{
-			name:       "an explicit window is still a window",
-			sidecar:    `{"root_path":"dolt","idle_timeout":300000000000}`,
-			wantStatus: StatusWarning,
-			wantIn:     "finite(5m0s, sidecar)",
-		},
-		{
 			name:       "no sidecar at all",
+			beads:      "0",
 			sidecar:    "",
 			wantStatus: StatusWarning,
 			wantIn:     "bd-default",
 		},
 		{
 			name:       "an unreadable sidecar is reported, not assumed",
+			beads:      "0",
 			sidecar:    `{"root_path":`,
 			wantStatus: StatusWarning,
-			wantIn:     "could not read",
+			wantIn:     "could not compare",
+		},
+		{
+			// The scope matches what this environment resolves, so the
+			// override is named without turning the line into a warning.
+			name:       "the env override is named",
+			beads:      "30m",
+			env:        "20s",
+			sidecar:    `{"root_path":"dolt","idle_timeout":20000000000}`,
+			wantStatus: StatusOK,
+			wantIn:     config.ProxiedIdleTimeoutEnv + "=20s",
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(config.ProxiedIdleTimeoutEnv, tc.env)
 			city := t.TempDir()
 			writeProxiedScope(t, city, tc.sidecar, 0, 0)
 			writeScopeOwnership(t, city, map[string]string{"city": city})
 
-			check := NewProxiedIdleTimeoutCheckForConfig(city, &config.City{}, nil)
+			check := NewProxiedIdleTimeoutCheckForConfig(city, &config.City{Beads: config.BeadsConfig{ProxiedIdleTimeout: tc.beads}}, nil)
 			if check == nil {
 				t.Fatal("the check was not registered for a city with a gc-owned proxied scope")
 			}
 			got := check.Run(&CheckContext{CityPath: city})
 			if got.Status != tc.wantStatus {
-				t.Fatalf("status = %v, want %v: %s", got.Status, tc.wantStatus, got.Message)
+				t.Fatalf("status = %v, want %v: %s %v", got.Status, tc.wantStatus, got.Message, got.Details)
 			}
 			if !strings.Contains(got.Message, tc.wantIn) && !containsAny(got.Details, tc.wantIn) {
 				t.Fatalf("message %q / details %v do not mention %q", got.Message, got.Details, tc.wantIn)
 			}
 			if got.Severity != SeverityAdvisory {
-				t.Errorf("severity = %v, want advisory — the scope works, it is only slower than gc's topology intends", got.Severity)
+				t.Errorf("severity = %v, want advisory — the scope works either way", got.Severity)
 			}
 			if got.Status != StatusOK && got.FixHint == "" {
 				t.Error("a warning with no fix hint")
+			}
+			if strings.Contains(got.Message, "do not carry") && !strings.Contains(got.FixHint, `proxied_idle_timeout = "0"`) {
+				t.Errorf("drift hint %q does not say how to keep the scopes and silence it", got.FixHint)
 			}
 			if check.CanFix() {
 				t.Error("the check offers to fix a file bd owns")
 			}
 		})
+	}
+}
+
+// The running proxy's argv is the third value: a scope whose sidecar matches
+// the config but whose live proxy was started with something else gets the
+// value at its next start, and doctor says so.
+func TestProxiedIdleTimeoutCheckComparesTheRunningProxy(t *testing.T) {
+	t.Setenv(config.ProxiedIdleTimeoutEnv, "")
+	for _, tc := range []struct {
+		name, argv string
+		wantStatus CheckStatus
+	}{
+		{name: "matching argv", argv: "30m0s", wantStatus: StatusOK},
+		{name: "older argv", argv: "-1ns", wantStatus: StatusWarning},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			city := t.TempDir()
+			fixture := writeProxiedScope(t, city, `{"idle_timeout":1800000000000}`, 4242, 40000)
+			writeScopeOwnership(t, city, map[string]string{"city": city})
+			stubProxyProcess(t, fixture, tc.argv)
+			got := NewProxiedIdleTimeoutCheckForConfig(city, &config.City{Beads: config.BeadsConfig{ProxiedIdleTimeout: "30m"}}, nil).Run(&CheckContext{CityPath: city})
+			if got.Status != tc.wantStatus {
+				t.Fatalf("status = %v, want %v: %s %v", got.Status, tc.wantStatus, got.Message, got.Details)
+			}
+			if tc.wantStatus == StatusWarning && !containsAny(got.Details, "running proxy has never") {
+				t.Fatalf("details %v do not name the running proxy's value", got.Details)
+			}
+		})
+	}
+}
+
+// A rig on the city's proxy root is compared against the city's value, and its
+// own override is named as ignored.
+func TestProxiedIdleTimeoutCheckSharedRootRigUsesCityValue(t *testing.T) {
+	t.Setenv(config.ProxiedIdleTimeoutEnv, "")
+	city := t.TempDir()
+	rig := filepath.Join(city, "rigs", "alpha")
+	writeProxiedScope(t, city, `{"idle_timeout":1800000000000}`, 0, 0)
+	writeProxiedScope(t, rig, `{"idle_timeout":1800000000000}`, 0, 0)
+	if err := os.WriteFile(filepath.Join(rig, ".beads", "metadata.json"),
+		[]byte(`{"backend":"dolt","database":"dolt","dolt_mode":"proxied-server","dolt_database":"alpha","dolt_data_dir":"../../../.beads/dolt"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeScopeOwnershipRows(t, city,
+		scopeOwnershipRow{key: "city", path: city, state: "ready"},
+		scopeOwnershipRow{key: "rigs/alpha", path: rig, state: "ready"},
+	)
+	never := "0"
+	cfg := &config.City{
+		Beads: config.BeadsConfig{ProxiedIdleTimeout: "30m"},
+		Rigs:  []config.Rig{{Name: "alpha", Path: rig, BeadsProxiedIdleTimeout: &never}},
+	}
+	got := NewProxiedIdleTimeoutCheckForConfig(city, cfg, nil).Run(&CheckContext{CityPath: city})
+	if containsAny(got.Details, "configured never") {
+		t.Fatalf("the shared-root rig was compared against its own override: %v", got.Details)
+	}
+	if !containsAny(got.Details, "shares the city's proxy root") {
+		t.Fatalf("details %v do not name the ignored override", got.Details)
 	}
 }
 
@@ -614,7 +719,7 @@ func TestProxiedIdleTimeoutCheckUsesThePendingInitLens(t *testing.T) {
 		if got.Message != pendingScopeInitMessage {
 			t.Fatalf("message = %q, want the pending-initialisation message %q", got.Message, pendingScopeInitMessage)
 		}
-		if strings.Contains(got.Message, "do not pin") || containsAny(got.Details, "bd-default") {
+		if strings.Contains(got.Message, "do not carry") || containsAny(got.Details, "bd-default") {
 			t.Fatalf("a scope mid-initialisation was reported as a sidecar misconfiguration: %q %v", got.Message, got.Details)
 		}
 		if got.Severity != SeverityAdvisory {
@@ -645,11 +750,11 @@ func TestProxiedIdleTimeoutCheckUsesThePendingInitLens(t *testing.T) {
 			t.Fatalf("the check covers %d scope(s) (%v), want the city and the rig: a pending scope that is not covered cannot be reported beside anything", len(check.scopeRoots), check.scopeRoots)
 		}
 		got := check.Run(&CheckContext{CityPath: city})
-		if got.Status != StatusWarning || !strings.Contains(got.Message, "do not pin their proxy resident") {
+		if got.Status != StatusWarning || !strings.Contains(got.Message, "do not carry the configured idle timeout") {
 			t.Fatalf("status/message = %v / %q, want the settled scope reported", got.Status, got.Message)
 		}
 		// The offender is counted alone: a scope mid-initialisation is not one.
-		if !strings.Contains(got.Message, "1 gc-owned proxied scope(s) do not pin") {
+		if !strings.Contains(got.Message, "1 gc-owned proxied scope(s) do not carry") {
 			t.Errorf("message %q counts the pending scope as an offender", got.Message)
 		}
 		// And the pending scope is still SAID, in a detail a reader can tell
@@ -701,4 +806,298 @@ func containsAny(details []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+// proxiedNativeGeneration is the fixture's pinned proxy generation: the
+// {pid, birth-digest} pair proxyendpoint.PoolKey derives, not a port.
+const proxiedNativeGeneration = "6001:ab12cd34"
+
+// proxiedNativeOpenReport is the store-open account the factory's proxied arm
+// produces for a healthy native-over-proxy open.
+func proxiedNativeOpenReport(demoted bool) *beads.ProxiedDiagnostic {
+	return &beads.ProxiedDiagnostic{
+		Endpoint:   beads.ProxiedEndpointStamp{Port: 45123, PID: 6001, Generation: proxiedNativeGeneration},
+		Evidence:   "argv+birth",
+		IdlePolicy: "never",
+		Cursors:    proxyendpoint.Cursors{Main: beads.SchemaCursorMain, Ignored: beads.SchemaCursorIgnored},
+		Demoted:    demoted,
+	}
+}
+
+// TestBeadsStoreCheckPayloadReportsProxiedNativeVerdict is P2-10's acceptance
+// shape: the `beads-store` result carries the STORE OPEN's own account of the
+// proxied-native lane beside doctor's independent endpoint account, and the
+// message tells an operator which lane they are on without them having to read
+// JSON.
+//
+// The two accounts are gathered from different evidence on purpose. The payload's
+// `proxied` block is what gc decided at open; `endpoint` is what the record and a
+// fresh probe say now. Averaging them into one field would hide exactly the state
+// an operator needs to see — the proxy changed under a held handle.
+func TestBeadsStoreCheckPayloadReportsProxiedNativeVerdict(t *testing.T) {
+	newCheck := func(t *testing.T, diag beads.BeadsDiagnostic) *CheckResult {
+		t.Helper()
+		scope := setupCity(t, "[workspace]\nname = \"test\"\n\n[beads]\nprovider = \"file\"\n")
+		fixture := writeProxiedScope(t, scope, `{"root_path":"dolt","idle_timeout":-1}`, 6001, 45123)
+		stubProxyProcess(t, fixture, "-1ns")
+		stubProbe(t, proxyendpoint.ServedProbeForTest(proxyendpoint.Cursors{Main: beads.SchemaCursorMain, Ignored: beads.SchemaCursorIgnored}, proxyendpoint.CursorReality{}), nil)
+		spy := &spyPingStore{pingFunc: func() error { return nil }}
+		return NewBeadsStoreCheck(scope, func(_ string) (beads.StoreOpenResult, error) {
+			return beads.StoreOpenResult{Store: spy, Diagnostic: diag}, nil
+		}).Run(&CheckContext{})
+	}
+
+	t.Run("the served native lane", func(t *testing.T) {
+		r := newCheck(t, beads.BeadsDiagnostic{
+			Store:               beads.BeadsStoreNameNativeDoltStore,
+			NativeStoreEligible: true,
+			Proxied:             proxiedNativeOpenReport(false),
+		})
+		if r.Status != StatusOK {
+			t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
+		}
+		if r.Message != "native reads over bd proxy (gen 6001:ab12cd34, writes via bd CLI)" {
+			t.Errorf("message = %q, want the native-over-proxy line naming the generation and where writes go", r.Message)
+		}
+		payload, ok := r.Payload.(*BeadsStorePayload)
+		if !ok {
+			t.Fatalf("payload = %T, want *BeadsStorePayload", r.Payload)
+		}
+		if payload.Store != beads.BeadsStoreNameNativeDoltStore {
+			t.Errorf("store = %q, want NativeDoltStore — the flag-on lane reports the store that serves the reads", payload.Store)
+		}
+		if payload.Proxied == nil {
+			t.Fatal("the payload carries no proxied account, so nothing can assert on the lane but prose")
+		}
+		if payload.Proxied.Endpoint.Generation != "6001:ab12cd34" || payload.Proxied.Endpoint.Port != 45123 {
+			t.Errorf("proxied endpoint = %+v, want the pinned generation and port", payload.Proxied.Endpoint)
+		}
+		if payload.Proxied.Evidence != "argv+birth" || payload.Proxied.IdlePolicy != "never" {
+			t.Errorf("proxied evidence/idle = %s/%s, want argv+birth/never", payload.Proxied.Evidence, payload.Proxied.IdlePolicy)
+		}
+		if payload.Proxied.Cursors != expectedCursors() {
+			t.Errorf("proxied cursors = %v, want the gated pair %v", payload.Proxied.Cursors, expectedCursors())
+		}
+		if payload.Proxied.Verdict != beads.ProxiedVerdictNone {
+			t.Errorf("verdict = %q, want empty on a served lane", payload.Proxied.Verdict)
+		}
+		if payload.Endpoint == nil {
+			t.Fatal("the independent endpoint account is missing; a disagreement between the two would be invisible")
+		}
+		if payload.Endpoint.Verdict != "live" || payload.Endpoint.Probe != "served" {
+			t.Errorf("endpoint account = %s/%s, want live/served", payload.Endpoint.Verdict, payload.Endpoint.Probe)
+		}
+	})
+
+	t.Run("a demoted handle says so in the payload", func(t *testing.T) {
+		r := newCheck(t, beads.BeadsDiagnostic{
+			Store:               beads.BeadsStoreNameNativeDoltStore,
+			NativeStoreEligible: true,
+			Proxied:             proxiedNativeOpenReport(true),
+		})
+		payload := r.Payload.(*BeadsStorePayload)
+		if !payload.Proxied.Demoted {
+			t.Error("the demotion did not reach the payload")
+		}
+	})
+
+	t.Run("a healthy fallback keeps the gate and appends the verdict", func(t *testing.T) {
+		skewed := proxiedNativeOpenReport(false)
+		skewed.Verdict = beads.ProxiedVerdictIdlePolicyFinite
+		skewed.IdlePolicy = "finite(30s)"
+		r := newCheck(t, beads.BeadsDiagnostic{
+			Store:               beads.BeadsStoreNameBdStore,
+			NativeStoreEligible: false,
+			PreflightGate:       beads.BeadsGateProxiedProvider,
+			PreflightReason:     "proxied-server mode is owned by the bd provider",
+			Proxied:             skewed,
+		})
+		if r.Status != StatusOK {
+			t.Fatalf("status = %d, want OK — a proxied fallback is the designed outcome, not a degradation", r.Status)
+		}
+		if !strings.HasPrefix(r.Message, proxiedProviderStoreMessage) {
+			t.Errorf("message = %q, want it to keep the existing base message doctor's matcher and the matrix key on", r.Message)
+		}
+		if !strings.Contains(r.Message, "verdict=idle_policy_finite") {
+			t.Errorf("message = %q, want the verdict appended", r.Message)
+		}
+		payload := r.Payload.(*BeadsStorePayload)
+		if payload.PreflightGate != beads.BeadsGateProxiedProvider {
+			t.Errorf("preflight_gate = %q, want it UNCHANGED at proxied_provider", payload.PreflightGate)
+		}
+		if payload.Proxied.Verdict != beads.ProxiedVerdictIdlePolicyFinite {
+			t.Errorf("payload verdict = %q, want idle_policy_finite", payload.Proxied.Verdict)
+		}
+	})
+
+	t.Run("a schema-skew fallback names the cursor pair", func(t *testing.T) {
+		skewed := proxiedNativeOpenReport(false)
+		skewed.Verdict = beads.ProxiedVerdictSchemaSkew
+		skewed.Cursors = proxyendpoint.Cursors{Main: beads.SchemaCursorMain + 1, Ignored: beads.SchemaCursorIgnored}
+		r := newCheck(t, beads.BeadsDiagnostic{
+			Store:         beads.BeadsStoreNameBdStore,
+			PreflightGate: beads.BeadsGateProxiedProvider,
+			Proxied:       skewed,
+		})
+		if !strings.Contains(r.Message, "verdict=schema_skew") {
+			t.Fatalf("message = %q, want the skew verdict", r.Message)
+		}
+		if !strings.Contains(r.Message, "this binary expects") {
+			t.Errorf("message = %q, want the observed and expected cursor pairs — the direction is the whole difference between two hazards", r.Message)
+		}
+	})
+}
+
+// TestBeadsStoreCheckFlagOffPayloadUnchanged is the golden that keeps "flag off
+// is byte-identical" honest for this surface.
+//
+// It compares MARSHALED BYTES rather than fields, because that is the only
+// comparison a new struct field can fail: a field-by-field check passes a payload
+// that grew `"proxied":null` and every consumer's snapshot would still break.
+func TestBeadsStoreCheckFlagOffPayloadUnchanged(t *testing.T) {
+	scope := setupCity(t, "[workspace]\nname = \"test\"\n\n[beads]\nprovider = \"file\"\n")
+	fixture := writeProxiedScope(t, scope, `{"root_path":"dolt","idle_timeout":-1}`, 6001, 45123)
+	stubProxyProcess(t, fixture, "-1ns")
+	stubProbe(t, proxyendpoint.ServedProbeForTest(proxyendpoint.Cursors{Main: beads.SchemaCursorMain, Ignored: beads.SchemaCursorIgnored}, proxyendpoint.CursorReality{}), nil)
+
+	// The flag-off diagnostic for a proxied scope: exactly what the factory
+	// produces today, with no Proxied field at all.
+	payload := newBeadsStorePayload(scope, proxiedTarget(), beadsStoreDiagnostic{
+		Store:           beads.BeadsStoreNameBdStore,
+		PreflightGate:   beads.BeadsGateProxiedProvider,
+		PreflightReason: "proxied-server mode is owned by the bd provider",
+	})
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"proxied":`) {
+		t.Fatalf("the flag-off payload emits the proxied key: %s", raw)
+	}
+
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"store", "preflight_gate", "preflight_reason", "endpoint"} {
+		if _, ok := decoded[key]; !ok {
+			t.Errorf("the flag-off payload lost %q", key)
+		}
+	}
+	if len(decoded) != 4 {
+		t.Errorf("the flag-off payload has %d keys (%v), want exactly the four it has today", len(decoded), decoded)
+	}
+}
+
+// TestRigProxiedStoreMessageReadsTheStoreItHolds covers the rig gap.
+//
+// Rigs retain no store-open diagnostic — NewRigBeadsCheck takes a factory
+// returning a bare beads.Store, and unlike the city's a rig's diagnostic is
+// discarded after the open. So the lane is read off the store itself, and a store
+// that arrives already wrapped reads as the bd front door, which is the honest
+// answer rather than a guess.
+func TestRigProxiedStoreMessageReadsTheStoreItHolds(t *testing.T) {
+	if got := rigProxiedStoreMessage(&spyPingStore{}); got != proxiedProviderStoreMessage {
+		t.Errorf("message for a bd-shaped store = %q, want the unchanged bd-owned line", got)
+	}
+}
+
+// liveProxiedStore stands in for a held *beads.ProxiedStore. The concrete type
+// cannot be built outside internal/beads (its constructor demands an admitted
+// beads.Pin), which is exactly why the unwrap seam is an interface: a check that
+// asserted the concrete type could not test its own branch without a live proxy.
+type liveProxiedStore struct {
+	beads.MemStore
+	demoted bool
+	verdict *beads.ProxiedVerdictError
+	report  beads.ProxiedOpenReport
+}
+
+func (s *liveProxiedStore) Demoted() bool                       { return s.demoted }
+func (s *liveProxiedStore) Verdict() *beads.ProxiedVerdictError { return s.verdict }
+func (s *liveProxiedStore) Report() beads.ProxiedOpenReport     { return s.report }
+func (s *liveProxiedStore) BdLeaf() beads.Store                 { return beads.NewMemStore() }
+func (s *liveProxiedStore) Ping() error                         { return nil }
+
+// TestBeadsStoreCheckReportsAPostOpenDemotion closes P2-10's recorded gap.
+//
+// The store-open diagnostic is the account AT OPEN. A controller store that was
+// admitted natively at boot and stood down two hours later — a migration under
+// it, a proxy that went away for good — would report itself native for the rest
+// of the process, and an operator asking `gc doctor` why their city is forking
+// again would be told it is not. The unwrap seam (P2-13) is what lets the check
+// ask the handle instead of the open.
+func TestBeadsStoreCheckReportsAPostOpenDemotion(t *testing.T) {
+	scope := setupCity(t, "[workspace]\nname = \"test\"\n\n[beads]\nprovider = \"file\"\n")
+	fixture := writeProxiedScope(t, scope, `{"root_path":"dolt","idle_timeout":-1}`, 6001, 45123)
+	stubProxyProcess(t, fixture, "-1ns")
+	stubProbe(t, proxyendpoint.ServedProbeForTest(proxyendpoint.Cursors{Main: beads.SchemaCursorMain, Ignored: beads.SchemaCursorIgnored}, proxyendpoint.CursorReality{}), nil)
+
+	// The handle stood down after the open: the open's account says native and
+	// not demoted, the live handle says otherwise.
+	held := &liveProxiedStore{
+		demoted: true,
+		verdict: beads.NewSchemaSkewVerdictError(beads.ProxiedSkewLaneMain, beads.ProxiedSkewDirAhead,
+			"the database was migrated under a held handle"),
+		report: beads.ProxiedOpenReport{
+			Endpoint:   beads.ProxiedEndpointStamp{Port: 45123, PID: 6001, Generation: proxiedNativeGeneration},
+			Evidence:   "argv+birth",
+			IdlePolicy: "never",
+			Cursors:    proxyendpoint.Cursors{Main: beads.SchemaCursorMain + 1, Ignored: beads.SchemaCursorIgnored},
+			Demoted:    true,
+		},
+	}
+	r := NewBeadsStoreCheck(scope, func(_ string) (beads.StoreOpenResult, error) {
+		return beads.StoreOpenResult{
+			Store: held,
+			Diagnostic: beads.BeadsDiagnostic{
+				Store:               beads.BeadsStoreNameNativeDoltStore,
+				NativeStoreEligible: true,
+				Proxied:             proxiedNativeOpenReport(false),
+			},
+		}, nil
+	}).Run(&CheckContext{})
+
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want OK: the bd front door is a supported store for a proxied scope; msg = %s", r.Status, r.Message)
+	}
+	payload, ok := r.Payload.(*BeadsStorePayload)
+	if !ok {
+		t.Fatalf("payload = %T, want *BeadsStorePayload", r.Payload)
+	}
+	if payload.Proxied == nil {
+		t.Fatal("the payload carries no proxied account at all")
+	}
+	if !payload.Proxied.Demoted {
+		t.Error("the payload reports the handle as still serving natively; the demotion happened after the open")
+	}
+	if payload.Proxied.Verdict != beads.ProxiedVerdictSchemaSkew {
+		t.Errorf("payload verdict = %q, want schema_skew — the reason the handle stood down", payload.Proxied.Verdict)
+	}
+	if payload.Proxied.Cursors.Main != beads.SchemaCursorMain+1 {
+		t.Errorf("payload cursors = %v, want the LIVE handle's pair (the drifted one)", payload.Proxied.Cursors)
+	}
+	if !strings.Contains(r.Message, "stood down") || !strings.Contains(r.Message, "verdict=schema_skew") {
+		t.Errorf("message = %q, want it to say the lane stood down and why", r.Message)
+	}
+	if strings.Contains(r.Message, "native reads over bd proxy (") {
+		t.Errorf("message = %q still claims native reads for a handle that forks every read", r.Message)
+	}
+}
+
+// TestRigProxiedStoreMessageSeesThroughWrappers is the same seam on the rig lane.
+// Rigs retain no store-open diagnostic at all, so the store gc is holding is the
+// only evidence the check has — and until the seam existed, a rig store that had
+// been policy- or cache-wrapped read as the plain bd front door.
+func TestRigProxiedStoreMessageSeesThroughWrappers(t *testing.T) {
+	native := &liveProxiedStore{report: beads.ProxiedOpenReport{
+		Endpoint: beads.ProxiedEndpointStamp{Generation: proxiedNativeGeneration},
+		Evidence: "argv+birth",
+	}}
+	if got := rigProxiedStoreMessage(beads.NewCachingStoreForTest(native, nil)); !strings.Contains(got, "native reads over bd proxy") {
+		t.Fatalf("rigProxiedStoreMessage(cache(native)) = %q, want the native-over-proxy line", got)
+	}
+	if got := rigProxiedStoreMessage(beads.NewMemStore()); got != proxiedProviderStoreMessage {
+		t.Fatalf("rigProxiedStoreMessage(MemStore) = %q, want the unchanged base message", got)
+	}
 }

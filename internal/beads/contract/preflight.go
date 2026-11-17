@@ -50,8 +50,18 @@ const (
 	PreflightCheckDoltModeSafe PreflightCheckID = "dolt_mode_safe"
 	// PreflightCheckIdentityMatch validates metadata and database project identity.
 	PreflightCheckIdentityMatch PreflightCheckID = "identity_match"
-	// PreflightCheckVersionCompat validates the bd CLI and linked beads library version.
+	// PreflightCheckVersionCompat validates the database schema cursors a city's
+	// bd/dolt actually carries, read directly over SQL, against the schema
+	// ceiling the linked beads library can open. This is the eligibility gate:
+	// FAIL blocks, PASS/WARN do not.
 	PreflightCheckVersionCompat PreflightCheckID = "version_compat"
+	// PreflightCheckBDVersionHint validates the bd CLI's own semver string
+	// against the linked beads library's semver string. This is informational
+	// only — it never fails and its WARN never degrades the verdict, because
+	// a bd distribution can legitimately carry a semver far from the linked
+	// library's release train while still speaking a schema the linked
+	// library opens without incident (see checkSchemaCompat).
+	PreflightCheckBDVersionHint PreflightCheckID = "bd_version_hint"
 	// PreflightCheckContractShape validates backend-specific metadata field shape.
 	PreflightCheckContractShape PreflightCheckID = "contract_shape"
 )

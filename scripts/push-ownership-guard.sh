@@ -198,8 +198,10 @@ _pog_ownership_violation() {
 
 # _pog_resolve_bead_id: prints the bead id this push should be checked
 # against; prints nothing if none can be resolved. Resolution order:
-#   1. The current branch name, matched against ga-[0-9a-z]{6}(\.[0-9]+)* —
-#      the bead's own id format, extended with zero or more repeated
+#   1. The current branch name, matched against ga-[0-9a-z]{6,}(\.[0-9]+)* —
+#      the bead's own id format (six characters for legacy ids, seven for
+#      current ones; {6,} takes the whole run, `-` and `/` end it),
+#      extended with zero or more repeated
 #      sub-bead suffixes because this repo's real branch convention is
 #      builder/<bead-id>-<slug> and sub-beads are routine at any nesting
 #      depth: a single-level sub-bead (e.g. ga-fip9ps.1) as well as a
@@ -208,7 +210,8 @@ _pog_ownership_violation() {
 #      grandchild id after its first dotted segment, misresolving to the
 #      wrong (and possibly closed) parent/child bead instead of the actual
 #      grandchild bead the branch is for. The literal 6-char-only pattern
-#      would misresolve to the root bead on any sub-bead's own branch.
+#      would misresolve to the root bead on any sub-bead's own branch, and
+#      truncate a seven-character id to a nonexistent six-character one.
 #   2. Falls back to this session's in-progress assignment
 #      (bd list --assignee="$GC_AGENT" --status=in_progress --json) when
 #      the branch name doesn't match. Only resolves when that query returns
@@ -277,7 +280,7 @@ _pog_resolve_bead_id() {
 
     local branch_id=""
     if [[ -n "$branch" ]]; then
-        branch_id="$(grep -oE 'ga-[0-9a-z]{6}(\.[0-9]+)*' <<<"$branch" | head -1 || true)"
+        branch_id="$(grep -oE 'ga-[0-9a-z]{6,}(\.[0-9]+)*' <<<"$branch" | head -1 || true)"
     fi
 
     # assignee_read_failed distinguishes "the read failed" (ambiguity) from

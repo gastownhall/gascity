@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -184,7 +185,7 @@ func TestFindClosedNamedSessionBeadForSessionName_PrefersMatchingCanonicalCandid
 		t.Fatalf("Close(canonical): %v", err)
 	}
 
-	found, ok, err := FindClosedNamedSessionBeadForSessionName(store, "mayor", "test-city--mayor")
+	found, ok, err := FindClosedNamedSessionBeadForSessionName(beadstest.Sessions(store), "mayor", "test-city--mayor")
 	if err != nil {
 		t.Fatalf("FindClosedNamedSessionBeadForSessionName: %v", err)
 	}
@@ -216,7 +217,7 @@ func TestFindClosedNamedSessionBeadForSessionName_SkipsTerminalRetiredCandidate(
 		t.Fatalf("Close(orphaned): %v", err)
 	}
 
-	found, ok, err := FindClosedNamedSessionBeadForSessionName(store, "mayor", "test-city--mayor")
+	found, ok, err := FindClosedNamedSessionBeadForSessionName(beadstest.Sessions(store), "mayor", "test-city--mayor")
 	if err != nil {
 		t.Fatalf("FindClosedNamedSessionBeadForSessionName: %v", err)
 	}
@@ -245,7 +246,7 @@ func TestFindClosedNamedSessionBeadForSessionName_SkipsFailedCreateCandidate(t *
 		t.Fatalf("Close(failed-create): %v", err)
 	}
 
-	found, ok, err := FindClosedNamedSessionBeadForSessionName(store, "mayor", "test-city--mayor")
+	found, ok, err := FindClosedNamedSessionBeadForSessionName(beadstest.Sessions(store), "mayor", "test-city--mayor")
 	if err != nil {
 		t.Fatalf("FindClosedNamedSessionBeadForSessionName: %v", err)
 	}
@@ -287,7 +288,7 @@ func TestFindClosedNamedSessionBead_PrefersNewestClosedCanonical(t *testing.T) {
 		t.Fatalf("Close(newer): %v", err)
 	}
 
-	found, ok, err := FindClosedNamedSessionBead(store, "mayor")
+	found, ok, err := FindClosedNamedSessionBead(beadstest.Sessions(store), "mayor")
 	if err != nil {
 		t.Fatalf("FindClosedNamedSessionBead: %v", err)
 	}
@@ -429,7 +430,7 @@ func TestFindClosedNamedSessionBead_AcceptsLegacySessionType(t *testing.T) {
 		t.Fatalf("Close(legacy): %v", err)
 	}
 
-	found, ok, err := FindClosedNamedSessionBead(store, "mayor")
+	found, ok, err := FindClosedNamedSessionBead(beadstest.Sessions(store), "mayor")
 	if err != nil {
 		t.Fatalf("FindClosedNamedSessionBead: %v", err)
 	}
@@ -472,7 +473,7 @@ func TestLookupConfiguredNamedSession_BoundedConflictQueries(t *testing.T) {
 		t.Fatalf("Create(conflict): %v", err)
 	}
 
-	lookup, err := LookupConfiguredNamedSession(store, spec)
+	lookup, err := LookupConfiguredNamedSession(beadstest.Sessions(store), spec)
 	if err != nil {
 		t.Fatalf("LookupConfiguredNamedSession: %v", err)
 	}
@@ -510,7 +511,7 @@ func TestLookupConfiguredNamedSession_AcceptsTypeOnlyCanonicalBead(t *testing.T)
 		t.Fatalf("Create(canonical): %v", err)
 	}
 
-	lookup, err := LookupConfiguredNamedSession(store, spec)
+	lookup, err := LookupConfiguredNamedSession(beadstest.Sessions(store), spec)
 	if err != nil {
 		t.Fatalf("LookupConfiguredNamedSession: %v", err)
 	}
@@ -557,7 +558,7 @@ func TestLookupConfiguredNamedSession_AliasOnlyBeadWithoutOtherSignalsConflicts(
 		t.Fatalf("Create(aliasOnly): %v", err)
 	}
 
-	lookup, err := LookupConfiguredNamedSession(store, spec)
+	lookup, err := LookupConfiguredNamedSession(beadstest.Sessions(store), spec)
 	if err != nil {
 		t.Fatalf("LookupConfiguredNamedSession: %v", err)
 	}
@@ -594,7 +595,7 @@ func TestLookupConfiguredNamedSession_UnrelatedAliasOnlyBeadNotTrustedAsSelf(t *
 		t.Fatalf("Create(decoy): %v", err)
 	}
 
-	lookup, err := LookupConfiguredNamedSession(store, spec)
+	lookup, err := LookupConfiguredNamedSession(beadstest.Sessions(store), spec)
 	if err != nil {
 		t.Fatalf("LookupConfiguredNamedSession: %v", err)
 	}
@@ -639,7 +640,7 @@ func TestLookupConfiguredNamedSession_DifferentIdentitySimilarAliasStillConflict
 		t.Fatalf("Create(conflict): %v", err)
 	}
 
-	lookup, err := LookupConfiguredNamedSession(store, spec)
+	lookup, err := LookupConfiguredNamedSession(beadstest.Sessions(store), spec)
 	if err != nil {
 		t.Fatalf("LookupConfiguredNamedSession: %v", err)
 	}
@@ -678,7 +679,7 @@ func TestLookupConfiguredNamedSession_AliasMatchWithMismatchedSessionNameStillCo
 		t.Fatalf("Create(squatter): %v", err)
 	}
 
-	lookup, err := LookupConfiguredNamedSession(store, spec)
+	lookup, err := LookupConfiguredNamedSession(beadstest.Sessions(store), spec)
 	if err != nil {
 		t.Fatalf("LookupConfiguredNamedSession: %v", err)
 	}
@@ -733,7 +734,7 @@ func TestLookupConfiguredNamedSession_SessionNameConflictReportedOverBareAliasMa
 		t.Fatalf("Create(session_name conflict): %v", err)
 	}
 
-	lookup, err := LookupConfiguredNamedSession(store, spec)
+	lookup, err := LookupConfiguredNamedSession(beadstest.Sessions(store), spec)
 	if err != nil {
 		t.Fatalf("LookupConfiguredNamedSession: %v", err)
 	}
@@ -751,7 +752,7 @@ func TestLookupConfiguredNamedSession_SessionNameConflictReportedOverBareAliasMa
 func TestLookupConfiguredNamedSession_EmptySpecNoListCall(t *testing.T) {
 	store := &listCountingStore{MemStore: beads.NewMemStore()}
 
-	lookup, err := LookupConfiguredNamedSession(store, NamedSessionSpec{})
+	lookup, err := LookupConfiguredNamedSession(beadstest.Sessions(store), NamedSessionSpec{})
 	if err != nil {
 		t.Fatalf("LookupConfiguredNamedSession(empty): %v", err)
 	}
@@ -839,7 +840,7 @@ func TestNamedSessionResolutionCandidates_SingleListByLabel(t *testing.T) {
 		Identity:    "mayor",
 		SessionName: "test-city--mayor",
 	}
-	got, err := NamedSessionResolutionCandidates(store, spec)
+	got, err := NamedSessionResolutionCandidates(beadstest.Sessions(store), spec)
 	if err != nil {
 		t.Fatalf("NamedSessionResolutionCandidates: %v", err)
 	}
@@ -876,7 +877,7 @@ func TestNamedSessionResolutionCandidates_SingleListByLabel(t *testing.T) {
 
 func TestNamedSessionResolutionCandidates_EmptySpecNoListCall(t *testing.T) {
 	store := &listCountingStore{MemStore: beads.NewMemStore()}
-	got, err := NamedSessionResolutionCandidates(store, NamedSessionSpec{})
+	got, err := NamedSessionResolutionCandidates(beadstest.Sessions(store), NamedSessionSpec{})
 	if err != nil {
 		t.Fatalf("NamedSessionResolutionCandidates(empty): %v", err)
 	}
@@ -889,7 +890,7 @@ func TestNamedSessionResolutionCandidates_EmptySpecNoListCall(t *testing.T) {
 }
 
 func TestNamedSessionResolutionCandidates_NilStore(t *testing.T) {
-	got, err := NamedSessionResolutionCandidates(nil, NamedSessionSpec{Identity: "mayor"})
+	got, err := NamedSessionResolutionCandidates(beads.SessionStore{}, NamedSessionSpec{Identity: "mayor"})
 	if err != nil {
 		t.Fatalf("NamedSessionResolutionCandidates(nil): %v", err)
 	}
@@ -1240,7 +1241,7 @@ func TestClosedNamedSessionBeadIndexMatchesPerIdentityLookup(t *testing.T) {
 	create("closed", meta(idTwoFallback, nil), BeadType, []string{LabelSession})
 	beadTwoFallbackWinner := create("closed", meta(idTwoFallback, nil), BeadType, []string{LabelSession})
 
-	idx, err := BuildClosedNamedSessionBeadIndex(store)
+	idx, err := BuildClosedNamedSessionBeadIndex(beadstest.Sessions(store))
 	if err != nil {
 		t.Fatalf("BuildClosedNamedSessionBeadIndex: %v", err)
 	}
@@ -1268,7 +1269,7 @@ func TestClosedNamedSessionBeadIndexMatchesPerIdentityLookup(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			refBead, refOK, err := FindClosedNamedSessionBeadForSessionName(store, tt.identity, "")
+			refBead, refOK, err := FindClosedNamedSessionBeadForSessionName(beadstest.Sessions(store), tt.identity, "")
 			if err != nil {
 				t.Fatalf("FindClosedNamedSessionBeadForSessionName(%q): %v", tt.identity, err)
 			}
@@ -1326,17 +1327,151 @@ func TestClosedNamedSessionBeadIndexMissesBeadWithNeitherTypeNorLabel(t *testing
 		t.Fatalf("Close(%s): %v", b.ID, err)
 	}
 
-	if _, ok, err := FindClosedNamedSessionBeadForSessionName(store, identity, ""); err != nil {
+	if _, ok, err := FindClosedNamedSessionBeadForSessionName(beadstest.Sessions(store), identity, ""); err != nil {
 		t.Fatalf("FindClosedNamedSessionBeadForSessionName(%q): %v", identity, err)
 	} else if !ok {
 		t.Fatalf("reference lookup ok = false, want true (identity=%q) — this fixture must be reachable by the per-identity query for the gap it pins to be meaningful", identity)
 	}
 
-	idx, err := BuildClosedNamedSessionBeadIndex(store)
+	idx, err := BuildClosedNamedSessionBeadIndex(beadstest.Sessions(store))
 	if err != nil {
 		t.Fatalf("BuildClosedNamedSessionBeadIndex: %v", err)
 	}
 	if _, ok := idx.Find(identity); ok {
 		t.Fatalf("index lookup ok = true, want false (identity=%q) — a bead with neither Type nor Label should stay outside both batched legs", identity)
+	}
+}
+
+// TestIsDemandOnlySingletonTemplate pins the template shape whose only session
+// the controller starts purely from pool demand (#6858): max_active_sessions = 1,
+// no namepool, and no configured [[named_session]] backing it. It is the same
+// shape `gc config show --validate` warns about.
+func TestIsDemandOnlySingletonTemplate(t *testing.T) {
+	one, two, zero := 1, 2, 0
+	tests := []struct {
+		name  string
+		agent config.Agent
+		named []config.NamedSession
+		want  bool
+	}{
+		{
+			name:  "rig pool singleton without named session",
+			agent: config.Agent{Name: "worker", Dir: "demo", MinActiveSessions: &zero, MaxActiveSessions: &one},
+			want:  true,
+		},
+		{
+			name:  "plain singleton without named session",
+			agent: config.Agent{Name: "worker", MaxActiveSessions: &one},
+			want:  true,
+		},
+		{
+			name:  "singleton backed by a named session",
+			agent: config.Agent{Name: "worker", Dir: "demo", MinActiveSessions: &zero, MaxActiveSessions: &one},
+			named: []config.NamedSession{{Template: "worker", Dir: "demo", Mode: "always"}},
+			want:  false,
+		},
+		{
+			// min_active_sessions = 1 keeps the pool's one session running
+			// without demand, so creates, pins and wakes are honored (#6858
+			// follow-up).
+			name:  "singleton with a minimum of one session",
+			agent: config.Agent{Name: "worker", Dir: "demo", MinActiveSessions: &one, MaxActiveSessions: &one},
+			want:  false,
+		},
+		{
+			name:  "unbounded template",
+			agent: config.Agent{Name: "worker"},
+			want:  false,
+		},
+		{
+			name:  "multi-session pool",
+			agent: config.Agent{Name: "worker", MaxActiveSessions: &two},
+			want:  false,
+		},
+		{
+			name:  "namepool singleton",
+			agent: config.Agent{Name: "worker", MaxActiveSessions: &one, Namepool: "names.txt"},
+			want:  false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.City{
+				Workspace:     config.Workspace{Name: "test-city"},
+				Agents:        []config.Agent{tt.agent},
+				NamedSessions: tt.named,
+			}
+			if got := IsDemandOnlySingletonTemplate(cfg, &cfg.Agents[0]); got != tt.want {
+				t.Fatalf("IsDemandOnlySingletonTemplate(%s) = %v, want %v", cfg.Agents[0].QualifiedName(), got, tt.want)
+			}
+		})
+	}
+	if IsDemandOnlySingletonTemplate(nil, &config.Agent{Name: "worker", MaxActiveSessions: &one}) {
+		t.Fatal("IsDemandOnlySingletonTemplate(nil cfg) = true, want false")
+	}
+	if IsDemandOnlySingletonTemplate(&config.City{}, nil) {
+		t.Fatal("IsDemandOnlySingletonTemplate(nil agent) = true, want false")
+	}
+}
+
+// TestIsDemandOnlySingletonSession pins which sessions of a demand-only
+// singleton template are the controller-owned pool capacity that neither a
+// wake nor a pin can start (#6858): named and manual sessions of the same
+// template start on their own terms.
+func TestIsDemandOnlySingletonSession(t *testing.T) {
+	one, two := 1, 2
+	singleton := config.Agent{Name: "worker", Dir: "demo", MaxActiveSessions: &one}
+	tests := []struct {
+		name  string
+		agent config.Agent
+		info  Info
+		want  bool
+	}{
+		{"pool-managed session", singleton, Info{Template: "demo/worker", PoolManaged: true}, true},
+		{"ephemeral origin", singleton, Info{Template: "demo/worker", SessionOrigin: "ephemeral"}, true},
+		{"pool slot marker", singleton, Info{Template: "demo/worker", PoolSlot: "1"}, true},
+		{"dependency-only session", singleton, Info{Template: "demo/worker", DependencyOnly: true}, true},
+		{"legacy slot-suffixed agent name", singleton, Info{Template: "demo/worker", AgentName: "demo/worker-2"}, true},
+		{"manual origin", singleton, Info{Template: "demo/worker", SessionOrigin: "manual", PoolManaged: true}, false},
+		{"manual metadata", singleton, Info{Template: "demo/worker", ManualSessionMetadata: "true", PoolManaged: true}, false},
+		{"configured named session", singleton, Info{Template: "demo/worker", ConfiguredNamedSession: true, PoolManaged: true}, false},
+		{"no origin markers", singleton, Info{Template: "demo/worker"}, false},
+		{"multi-session template", config.Agent{Name: "worker", Dir: "demo", MaxActiveSessions: &two}, Info{Template: "demo/worker", PoolManaged: true}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}, Agents: []config.Agent{tt.agent}}
+			if got := IsDemandOnlySingletonSession(cfg, &cfg.Agents[0], tt.info); got != tt.want {
+				t.Fatalf("IsDemandOnlySingletonSession(%+v) = %v, want %v", tt.info, got, tt.want)
+			}
+		})
+	}
+	if IsDemandOnlySingletonSession(&config.City{}, nil, Info{PoolManaged: true}) {
+		t.Fatal("IsDemandOnlySingletonSession(nil agent) = true, want false")
+	}
+}
+
+// TestDemandOnlySingletonWakeRefused: a wake of the pool capacity cannot start
+// it, but a wake of one already running only clears its blockers.
+func TestDemandOnlySingletonWakeRefused(t *testing.T) {
+	one := 1
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}, Agents: []config.Agent{{Name: "worker", MaxActiveSessions: &one}}}
+	agent := &cfg.Agents[0]
+	for _, tt := range []struct {
+		state string
+		want  bool
+	}{
+		{"asleep", true},
+		{"", true},
+		{"drained", true},
+		{"active", false},
+		{"awake", false},
+		{"creating", false},
+		{"start-pending", true},
+	} {
+		info := Info{Template: "worker", PoolManaged: true, MetadataState: tt.state}
+		if got := DemandOnlySingletonWakeRefused(cfg, agent, info); got != tt.want {
+			t.Errorf("DemandOnlySingletonWakeRefused(state=%q) = %v, want %v", tt.state, got, tt.want)
+		}
 	}
 }

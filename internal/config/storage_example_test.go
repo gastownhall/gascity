@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -18,7 +19,10 @@ func TestShippedStorageExampleCityLoads(t *testing.T) {
 	if !ok {
 		t.Fatal("runtime.Caller failed")
 	}
-	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
+	repoRoot := bazeltest.OverrideRoot()
+	if repoRoot == "" {
+		repoRoot = filepath.Clean(filepath.Join(filepath.Dir(thisFile), "..", ".."))
+	}
 	cityPath := filepath.Join(repoRoot, "examples", "storage", "city.toml")
 
 	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, cityPath)

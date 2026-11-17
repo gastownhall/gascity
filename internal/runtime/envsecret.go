@@ -1,5 +1,7 @@
 package runtime
 
+import "sort"
+
 // Session environment reaches several providers as process arguments — the
 // local tmux adapter and the ssh provider both build
 // `new-session ... -e KEY=VALUE`. On Linux /proc/<pid>/cmdline is world-readable
@@ -130,6 +132,35 @@ func SplitEnvForMetaSeed(env map[string]string) (seed, withheld map[string]strin
 		seed[k] = v
 	}
 	return seed, withheld
+}
+
+// metaSeedIdentityRank orders the identity keys in a sidecar seed: token, then
+// epoch, then session ID. A reader takes the ID first and the token last, so a
+// reader that sees the ID also sees the rest, and a read that straddles the
+// seed finds a token without an ID (Current or Unknown), never an ID without
+// its token (Foreign or Unknown).
+var metaSeedIdentityRank = map[string]int{"GC_INSTANCE_TOKEN": 1, "GC_RUNTIME_EPOCH": 2, "GC_SESSION_ID": 3}
+
+// MetaSeedKeys returns seed's keys in the order a provider writes them: the
+// identity keys first (see [metaSeedIdentityRank]), then the rest sorted.
+func MetaSeedKeys(seed map[string]string) []string {
+	keys := make([]string, 0, len(seed))
+	for k := range seed {
+		keys = append(keys, k)
+	}
+	rank := func(k string) int {
+		if r, ok := metaSeedIdentityRank[k]; ok {
+			return r
+		}
+		return len(metaSeedIdentityRank) + 1
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if ri, rj := rank(keys[i]), rank(keys[j]); ri != rj {
+			return ri < rj
+		}
+		return keys[i] < keys[j]
+	})
+	return keys
 }
 
 // ArgvSecretEnvValue reports whether this key/value pair must be kept out of

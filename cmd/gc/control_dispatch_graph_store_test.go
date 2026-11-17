@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
@@ -182,19 +183,6 @@ func TestControlDispatchSingleStoreUsesTheOneStore(t *testing.T) {
 	}
 }
 
-// resetControlReadyCache clears the per-dir readiness snapshot registry so a
-// test observes a fresh scan rather than one memoized inside controlReadyCacheTTL.
-func resetControlReadyCache(t *testing.T) {
-	t.Helper()
-	flush := func() {
-		controlReadyCacheRegistry.mu.Lock()
-		defer controlReadyCacheRegistry.mu.Unlock()
-		controlReadyCacheRegistry.byDir = make(map[string]*controlReadyCacheEntry)
-	}
-	flush()
-	t.Cleanup(flush)
-}
-
 // newRoutedControlBead writes a control bead routed to the control dispatcher,
 // so the readiness scan's route filter admits it.
 func newRoutedControlBead(t *testing.T, store beads.Store, rootID, route string) beads.Bead {
@@ -212,8 +200,7 @@ func newRoutedControlBead(t *testing.T, store beads.Store, rootID, route string)
 // comes from, for a control dispatcher whose scope directory is dir.
 func controlReadyScan(t *testing.T, dir string, agentCfg config.Agent, beadsCfg config.BeadsConfig) []string {
 	t.Helper()
-	resetControlReadyCache(t)
-	queue, handled, err := tryControlReadyFromCacheOrFallback(
+	queue, handled, err := tryControlReadyScan(
 		workflowServeControlReadyQueryForBeads(agentCfg, beadsCfg), dir, nil)
 	if err != nil {
 		t.Fatalf("control-ready scan: %v", err)
@@ -232,20 +219,18 @@ func controlReadyScan(t *testing.T, dir string, agentCfg config.Agent, beadsCfg 
 // side of the control dispatcher against the same ledger the consumer mutates.
 //
 // The dispatch hop is only half a fix. The serve loop's queue comes from
-// nextWorkflowServeBeads -> tryControlReadyFromCacheOrFallback, and if that scan
+// nextWorkflowServeBeads -> tryControlReadyScan, and if that scan
 // keeps reading the work store while the dispatch closes the binding's copy, the
 // retained work copy stays open and ready forever: it is re-offered on every
-// tick, ProcessControl no-ops on the already-closed binding copy, and
-// drainWorkflowServeWork counts a no-op as progress and immediately re-queries.
-// The loop never returns. Symmetrically, the beads a dispatch CREATES land in
-// the binding, which a work-store scan never reads, so the workflow cannot
-// advance past its first hop.
+// sweep, ProcessControl no-ops on the already-closed binding copy, and
+// drainWorkflowServeWork pays a full dispatch each time to skip it.
+// Symmetrically, the beads a dispatch CREATES land in the binding, which a
+// work-store scan never reads, so the workflow cannot advance past its first
+// hop.
 //
-// Both arms of the scan are covered, because they reach the store by different
-// routes: the cached arm wraps a CachingStore around the resolved class store,
-// and the fallback arm (taken under bd-1.0.5 compatibility, which needs a tier
-// CachedReady cannot serve) would otherwise shell `bd ready` in a directory that
-// no longer holds the class.
+// Both bd compatibility modes are covered: the scan must read the resolved
+// class store in-process under either, rather than shell `bd ready` in a
+// directory that no longer holds the class.
 func TestControlReadyScanEnumeratesTheGraphBindingOnSplitCity(t *testing.T) {
 	agentCfg := config.Agent{Name: config.ControlDispatcherAgentName}
 	route := agentCfg.QualifiedName()
@@ -254,8 +239,8 @@ func TestControlReadyScanEnumeratesTheGraphBindingOnSplitCity(t *testing.T) {
 		name  string
 		beads config.BeadsConfig
 	}{
-		{name: "cached arm", beads: config.BeadsConfig{}},
-		{name: "fallback arm", beads: config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105}},
+		{name: "bd-1.0.4 compatibility", beads: config.BeadsConfig{}},
+		{name: "bd-1.0.5 compatibility", beads: config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cityPath := t.TempDir()
@@ -281,14 +266,16 @@ func TestControlReadyScanEnumeratesTheGraphBindingOnSplitCity(t *testing.T) {
 }
 
 // TestControlReadyScanStopsOfferingAControlBeadTheDispatchClosed is the
-// termination property the drain loop depends on, asserted directly.
+// property that keeps the drain loop from re-dispatching a control bead it
+// already finished, asserted directly.
 //
-// drainWorkflowServeWork loops until its queue comes back empty, and it has no
-// iteration bound and no sleep between passes. What makes it terminate is that
-// the copy it enumerates is the copy the dispatch closes. On a converged split
-// city the migration retains the source verbatim, so the same control-bead id is
-// open in the work store and live in the binding; a scan pointed at the work
-// store therefore keeps returning an id the dispatch has already finished.
+// drainWorkflowServeWork dispatches every control bead its queue offers, on
+// every sweep. What keeps a finished one out of the queue is that the copy it
+// enumerates is the copy the dispatch closes. On a converged split city the
+// migration retains the source verbatim, so the same control-bead id is open in
+// the work store and live in the binding; a scan pointed at the work store
+// therefore keeps returning an id the dispatch has already finished, and every
+// sweep pays a full dispatch to skip it.
 //
 // The assertion is the fixed point: after the dispatch, a fresh scan is empty
 // even though the retained work copy is still open.
@@ -345,32 +332,30 @@ func TestControlReadyScanStopsOfferingAControlBeadTheDispatchClosed(t *testing.T
 	}
 
 	if got := controlReadyScan(t, cityPath, agentCfg, config.BeadsConfig{}); len(got) != 0 {
-		t.Fatalf("control-ready queue after dispatch = %v, want empty; the serve loop re-offers a bead the dispatch already finished and never returns", got)
+		t.Fatalf("control-ready queue after dispatch = %v, want empty; the serve loop re-dispatches a bead the dispatch already finished on every sweep", got)
 	}
 }
 
-// TestControlDispatchRigScopeStaysOnItsOwnStore guards the scope half of the
-// class hop.
+// TestControlDispatchRigScopeTakesTheBindingAndDispatchesRelicsInPlace guards
+// the scope half of the class hop under the S4 placement rule.
 //
-// There is no per-scope graph binding: resolveClassStore holds one city-level
-// store per class, and `gc storage migrate` copies only the CITY work store, so
-// a rig's control beads were never carried into the binding. Redirecting a rig
-// scope there would look up every rig-scoped control bead in a database that has
-// never held it — "bead not found", which IsTransientControllerError does not
-// match, so drainWorkflowServeWork returns it as fatal and the dispatcher
-// session exits and crash-loops.
-func TestControlDispatchRigScopeStaysOnItsOwnStore(t *testing.T) {
+// A split city creates every graph root in the binding at every scope, so a
+// rig dispatcher's primary graph ledger is the binding. A rig-resident control
+// bead — a tree the rig minted before S4 — is still found, through the relic
+// leg, and dispatched where it lives: "bead not found" there would be fatal to
+// the drain loop (IsTransientControllerError does not match it).
+func TestControlDispatchRigScopeTakesTheBindingAndDispatchesRelicsInPlace(t *testing.T) {
 	cityPath := t.TempDir()
 	rigPath := filepath.Join(cityPath, "rigs", "fixture")
 	rigStore := beads.NewMemStore()
-	graphStore := beads.NewMemStore()
+	graphStore := beads.NewMemStoreFrom(100, nil, nil)
 	seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(graphStore))
 
-	if got := controlGraphStore(cityPath, rigPath, nil, rigStore); got != beads.Store(rigStore) {
-		t.Fatalf("controlGraphStore for a rig scope returned %T(%p), want the rig's own store %p; the city binding never held this rig's beads", got, got, rigStore)
+	if got := controlGraphStore(cityPath, rigPath, nil, rigStore); !sameStorePtr(got, graphStore) {
+		t.Fatalf("controlGraphStore for a split rig scope returned %T(%p), want the city binding; new rig trees are born there", got, got)
 	}
-	if controlGraphRelocated(cityPath, rigPath) {
-		t.Fatal("controlGraphRelocated for a rig scope = true; the readiness scan would go in-process against a binding with none of this rig's beads")
+	if !controlGraphRelocated(cityPath, rigPath) {
+		t.Fatal("controlGraphRelocated for a split rig scope = false; the readiness scan would read only the rig store and miss every tree born since S4")
 	}
 
 	// End to end: a rig-scoped control bead dispatches against the rig store,
@@ -507,9 +492,11 @@ title = "Work {{convoy_id}}"
 // command exits 0 with no operator signal — strictly worse than the loud
 // orphaned_workflow the unrouted read produced before.
 //
-// The assertion is therefore on the manifest, not on the drain completing: the
-// convoy must expand to one row per member, and the pass-with-nothing-expanded
-// state must not be reachable over a convoy that has members.
+// The assertion is therefore on the expansion, not on the drain completing:
+// the first pass must leave the drain open and expanded with one manifest row
+// per member, so the pass-with-nothing-expanded state is not reachable over a
+// convoy that has members. A resume pass must then find the unit convoys the
+// first pass minted.
 func TestControlDispatchDrainNamesTheWorkLegForConvoyMembership(t *testing.T) {
 	cityPath := t.TempDir()
 	scopeStore := beads.NewMemStore()
@@ -530,7 +517,7 @@ func TestControlDispatchDrainNamesTheWorkLegForConvoyMembership(t *testing.T) {
 		if err != nil {
 			t.Fatalf("create member: %v", err)
 		}
-		if err := convoycore.TrackItem(scopeStore, convoy.ID, member.ID); err != nil {
+		if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beadstest.Work(scopeStore)}, convoy.ID, member.ID); err != nil {
 			t.Fatalf("track member: %v", err)
 		}
 		memberIDs = append(memberIDs, member.ID)
@@ -563,37 +550,85 @@ func TestControlDispatchDrainNamesTheWorkLegForConvoyMembership(t *testing.T) {
 		t.Fatalf("create drain control: %v", err)
 	}
 
-	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		// The drain item roots route to the control dispatcher.
+		Agents: []config.Agent{{Name: config.ControlDispatcherAgentName, StartCommand: "gc convoy control --serve"}},
+	}
 	cfg.FormulaLayers.City = []string{splitClassDrainFormulaDir(t)}
 	var stdout, stderr bytes.Buffer
-	// The dispatch may fail loudly downstream of the expansion; what it may not
-	// do is silently report the convoy as drained.
-	_ = runControlDispatcherWithStoreAndConfig(cityPath, cityPath, scopeStore, drain.ID, cfg, &stdout, &stderr)
+	if err := runControlDispatcherWithStoreAndConfig(cityPath, cityPath, scopeStore, drain.ID, cfg, &stdout, &stderr); err != nil {
+		t.Fatalf("control dispatch: %v; stderr=%q", err, stderr.String())
+	}
 
 	got := beadByID(t, graphStore, drain.ID)
 	raw := got.Metadata[beadmeta.DrainManifestMetadataKey]
 	if strings.TrimSpace(raw) == "" {
 		t.Fatalf("drain recorded no manifest at all; status=%q outcome=%q stderr=%q", got.Status, got.Metadata[beadmeta.OutcomeMetadataKey], stderr.String())
 	}
+	// A quarantine reports on stderr and returns nil, so the drain's own state
+	// is what says the expansion went through.
+	if got.Status != "open" || got.Metadata[beadmeta.DrainStateMetadataKey] != beadmeta.DrainStateExpanded {
+		t.Fatalf("after the first pass: status=%q gc.drain_state=%q, want open and %q; stderr=%q", got.Status, got.Metadata[beadmeta.DrainStateMetadataKey], beadmeta.DrainStateExpanded, stderr.String())
+	}
+	manifest := parseDrainManifestRows(t, raw)
+	if len(manifest) != len(memberIDs) {
+		t.Fatalf("manifest rows = %d, want %d — one per convoy member; the dispatch did not name the work leg that owns this convoy's tracks edges", len(manifest), len(memberIDs))
+	}
+	for i, id := range memberIDs {
+		if manifest[i].MemberID != id {
+			t.Fatalf("manifest row %d member = %q, want %q", i, manifest[i].MemberID, id)
+		}
+		if manifest[i].UnitConvoyID == "" {
+			t.Fatalf("manifest row %d has no unit convoy; manifest=%s stderr=%q", i, raw, stderr.String())
+		}
+	}
+
+	// A resume pass reads the unit convoys the first pass minted. They are
+	// work beads minted through the work leg, so a resume that reads them
+	// anywhere else reports them missing and the drain is quarantined, or
+	// mints a second set.
+	if err := graphStore.SetMetadata(drain.ID, beadmeta.DrainStateMetadataKey, beadmeta.DrainStateExpanding); err != nil {
+		t.Fatalf("rewind gc.drain_state: %v", err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if err := runControlDispatcherWithStoreAndConfig(cityPath, cityPath, scopeStore, drain.ID, cfg, &stdout, &stderr); err != nil {
+		t.Fatalf("resume dispatch: %v; stderr=%q", err, stderr.String())
+	}
+	// As after the first pass, the drain's own state says the resume went
+	// through.
+	after := beadByID(t, graphStore, drain.ID)
+	if after.Status != "open" || after.Metadata[beadmeta.DrainStateMetadataKey] != beadmeta.DrainStateExpanded {
+		t.Fatalf("after the resume pass: status=%q gc.drain_state=%q, want open and %q; stderr=%q", after.Status, after.Metadata[beadmeta.DrainStateMetadataKey], beadmeta.DrainStateExpanded, stderr.String())
+	}
+	resumed := parseDrainManifestRows(t, after.Metadata[beadmeta.DrainManifestMetadataKey])
+	if len(resumed) != len(manifest) {
+		t.Fatalf("resumed manifest rows = %d, want %d", len(resumed), len(manifest))
+	}
+	for i := range manifest {
+		if resumed[i].UnitConvoyID != manifest[i].UnitConvoyID {
+			t.Fatalf("resumed row %d unit convoy = %q, want the first pass's %q", i, resumed[i].UnitConvoyID, manifest[i].UnitConvoyID)
+		}
+	}
+}
+
+// drainManifestRow is the slice of a gc.drain_manifest row the split-city
+// drain tests read.
+type drainManifestRow struct {
+	MemberID     string `json:"member_id"`
+	UnitConvoyID string `json:"unit_convoy_id"`
+}
+
+func parseDrainManifestRows(t *testing.T, raw string) []drainManifestRow {
+	t.Helper()
 	var manifest struct {
-		Rows []struct {
-			MemberID string `json:"member_id"`
-		} `json:"rows"`
+		Rows []drainManifestRow `json:"rows"`
 	}
 	if err := json.Unmarshal([]byte(raw), &manifest); err != nil {
 		t.Fatalf("parse drain manifest %q: %v", raw, err)
 	}
-	if got.Metadata[beadmeta.OutcomeMetadataKey] == beadmeta.OutcomePass && len(manifest.Rows) == 0 {
-		t.Fatalf("drain closed gc.outcome=pass with an empty manifest over a convoy of %d members; every member is left open and the run reports green. stdout=%q", len(memberIDs), stdout.String())
-	}
-	if len(manifest.Rows) != len(memberIDs) {
-		t.Fatalf("manifest rows = %d, want %d — one per convoy member; the dispatch did not name the work leg that owns this convoy's tracks edges", len(manifest.Rows), len(memberIDs))
-	}
-	for i, id := range memberIDs {
-		if manifest.Rows[i].MemberID != id {
-			t.Fatalf("manifest row %d member = %q, want %q", i, manifest.Rows[i].MemberID, id)
-		}
-	}
+	return manifest.Rows
 }
 
 // TestSourceWorkflowStoresScanTheLedgerThatHoldsWorkflowRoots pins the
@@ -642,7 +677,7 @@ func TestSourceWorkflowStoresScanTheLedgerThatHoldsWorkflowRoots(t *testing.T) {
 
 	var found []string
 	for _, info := range stores {
-		roots, err := sourceworkflow.ListLiveRoots(info.Store, sourceBeadID, storeRef, storeRef)
+		roots, err := sourceworkflow.ListLiveRoots(beadstest.GraphMolecule(info.Store), sourceBeadID, storeRef, storeRef)
 		if err != nil {
 			t.Fatalf("ListLiveRoots(%s): %v", info.StoreRef, err)
 		}

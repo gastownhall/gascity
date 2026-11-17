@@ -1,11 +1,19 @@
+//go:build unix
+
+// These drive scripts/test-go-test-shard, a POSIX shell harness, and assert
+// that it reaps a test tree via process groups and signals. Both the harness
+// and the mechanism it is being held to are Unix-only.
+
 package scripts_test
 
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -21,6 +29,12 @@ import (
 // (gas-px0). The bound is far longer than any assertion here waits, so it can
 // never mask a real reap failure, and short enough to self-clear.
 const fixtureLifetimeSeconds = 300
+
+// pidFileWait is how long waitForPIDFile waits for a scripted run body to
+// record its pid. It is a constant, not a parameter, because every caller
+// wants the same generous bound (nogo's unparam rejects a parameter that never
+// varies).
+const pidFileWait = 30 * time.Second
 
 // reapFixture builds a repo-shaped environment for driving
 // scripts/test-go-test-shard with a fake `go` whose run phase is scripted by
@@ -100,8 +114,24 @@ esac
 }
 
 // start launches the shard runner in its own process group so a test can
-// signal the runner alone, exactly as a dying parent chain would.
+// signal the runner alone, exactly as a dying parent chain would. The runner's
+// output goes to a log file, read back through output.
 func (f *reapFixture) start(t *testing.T, extraEnv ...string) *exec.Cmd {
+	t.Helper()
+	f.logPath = filepath.Join(f.tmpDir, "runner.log")
+	logFile, err := os.Create(f.logPath)
+	if err != nil {
+		t.Fatalf("create runner log: %v", err)
+	}
+	t.Cleanup(func() { _ = logFile.Close() })
+	return f.startWithOutput(t, logFile, extraEnv...)
+}
+
+// startWithOutput is start with the runner's stdout and stderr both sent to
+// out, for a test that must observe who still holds that descriptor. out is an
+// *os.File so the runner inherits it directly: os/exec copies through a pipe of
+// its own only for other writers.
+func (f *reapFixture) startWithOutput(t *testing.T, out *os.File, extraEnv ...string) *exec.Cmd {
 	t.Helper()
 	cmd := exec.Command(filepath.Join(f.repoRoot, "scripts", "test-go-test-shard"), "./example", "1", "2")
 	cmd.Dir = f.repoRoot
@@ -115,15 +145,8 @@ func (f *reapFixture) start(t *testing.T, extraEnv ...string) *exec.Cmd {
 		"SYS_USR_CGO_FALLBACK=0",
 	}, extraEnv...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-
-	f.logPath = filepath.Join(f.tmpDir, "runner.log")
-	logFile, err := os.Create(f.logPath)
-	if err != nil {
-		t.Fatalf("create runner log: %v", err)
-	}
-	t.Cleanup(func() { _ = logFile.Close() })
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
+	cmd.Stdout = out
+	cmd.Stderr = out
 
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start test-go-test-shard: %v", err)
@@ -134,6 +157,13 @@ func (f *reapFixture) start(t *testing.T, extraEnv ...string) *exec.Cmd {
 		_ = cmd.Wait()
 	})
 	return cmd
+}
+
+// harnessBash returns a bash running script, for tests that drive a script
+// directly rather than through a runner: scripts/lib/harness-reap.sh's
+// functions, and tools/bazel/rules/go_test_run.sh (go_test_run_script_test.go).
+func harnessBash(script string) *exec.Cmd {
+	return exec.Command("bash", "-c", script)
 }
 
 // waitWithin reaps cmd, failing if it has not exited before within elapses so
@@ -153,9 +183,9 @@ func waitWithin(t *testing.T, cmd *exec.Cmd, within time.Duration) error {
 
 // waitForPIDFile blocks until the scripted run body has recorded the PID of
 // the descendant it spawned, so the test signals only after the tree exists.
-func waitForPIDFile(t *testing.T, path string, within time.Duration) int {
+func waitForPIDFile(t *testing.T, path string) int {
 	t.Helper()
-	deadline := time.Now().Add(within)
+	deadline := time.Now().Add(pidFileWait)
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(path)
 		if err == nil {
@@ -166,7 +196,7 @@ func waitForPIDFile(t *testing.T, path string, within time.Duration) int {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("descendant never recorded its pid at %s within %s", path, within)
+	t.Fatalf("descendant never recorded its pid at %s within %s", path, pidFileWait)
 	return 0
 }
 
@@ -208,7 +238,7 @@ exec sleep %d
 `, pidFile, fixtureLifetimeSeconds))
 
 	cmd := fixture.start(t)
-	descendant := waitForPIDFile(t, pidFile, 30*time.Second)
+	descendant := waitForPIDFile(t, pidFile)
 
 	// Kill only the runner, the way a dead driver, a closed session, or a
 	// killed parent chain does. Its descendants must not survive it.
@@ -246,7 +276,7 @@ func TestGoTestShardWatchdogKillsARunThatDefeatsGoTimeout(t *testing.T) {
 		"GO_TEST_TIMEOUT=2s",
 		"GO_TEST_WATCHDOG_GRACE=2s",
 	)
-	wedged := waitForPIDFile(t, pidFile, 30*time.Second)
+	wedged := waitForPIDFile(t, pidFile)
 
 	err := waitWithin(t, cmd, 90*time.Second)
 	elapsed := time.Since(start)
@@ -265,6 +295,187 @@ func TestGoTestShardWatchdogKillsARunThatDefeatsGoTimeout(t *testing.T) {
 	}
 	if !processGone(wedged, 20*time.Second) {
 		t.Fatalf("wedged run pid %d survived the watchdog: it must escalate past ignored signals", wedged)
+	}
+}
+
+// processGroupOf resolves the process group ID pid currently belongs to. The
+// QUIT regression below needs the *job's* group specifically — see the
+// comment on TestGoTestShardTrapsQuitInsteadOfCoreDumping for why the
+// runner's own pid is a different, and insufficient, target. This calls
+// getpgid(2) directly instead of shelling out to ps: getpgid is POSIX and
+// available on both Linux and the macOS this suite also targets, and it
+// costs this test suite no new subprocess call site against the resource
+// census ledger (test/test-resources.toml).
+func processGroupOf(t *testing.T, pid int) int {
+	t.Helper()
+	pgid, err := syscall.Getpgid(pid)
+	if err != nil {
+		t.Fatalf("getpgid(%d): %v", pid, err)
+	}
+	return pgid
+}
+
+// sigQuitCaught reports whether the process pid has a handler installed for
+// SIGQUIT, read from the SigCgt mask in /proc/<pid>/status (SIGQUIT is signal
+// 3, so bit 0x4). known is false where /proc does not exist (macOS), in which
+// case the caller falls back to the behavioral assertions alone.
+//
+// This is the direct, discriminating check on the job leader: a signaled
+// process that merely happens to exit is not evidence it had a disposition,
+// but a missing SigCgt bit is evidence it would core dump. SigIgn is checked
+// too: a SIGQUIT inherited as ignored from the launching environment makes any
+// signal-based repro pass for the wrong reason, because nothing ever dies.
+func sigQuitCaught(t *testing.T, pid int) (caught, ignored, known bool) {
+	t.Helper()
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		return false, false, false
+	}
+	const quitBit = 0x4
+	mask := func(field string) uint64 {
+		for _, line := range strings.Split(string(data), "\n") {
+			rest, ok := strings.CutPrefix(line, field+":")
+			if !ok {
+				continue
+			}
+			v, convErr := strconv.ParseUint(strings.TrimSpace(rest), 16, 64)
+			if convErr != nil {
+				t.Fatalf("parse %s from /proc/%d/status: %v", field, pid, convErr)
+			}
+			return v
+		}
+		t.Fatalf("/proc/%d/status has no %s line:\n%s", pid, field, data)
+		return 0
+	}
+	return mask("SigCgt")&quitBit != 0, mask("SigIgn")&quitBit != 0, true
+}
+
+// TestGoTestShardTrapsQuitInsteadOfCoreDumping is the ga-5kse5n regression:
+// gc_harness_watchdog (harness-reap.sh:96) signals the *job's* process group
+// with SIGQUIT when a shard blows its deadline — gc_harness_signal_group
+// sends to "-$pgid", never to the top-level runner's own pid. But
+// gc_harness_run_supervised backgrounds that job with a bare `"$@" &`, and
+// bash resets an inherited (but not locally reinstalled) trap to SIG_DFL for
+// an async subshell. So the job itself — not the runner — takes QUIT's
+// default disposition: terminate plus core dump. Production sampled 498 bash
+// coredumps this way (127/day), all comm=bash running this script's job
+// group. QUIT itself must still reach the run uncaught: it drives the Go
+// runtime's own goroutine dump, the only artifact that answers "which test
+// wedged." Only bash's own disposition on the way past may change.
+//
+// There are two production changes and each has its own case, so reverting
+// either one turns exactly the matching case red:
+//
+//   - job-group: the job leader's `trap 'exit 131' QUIT` (harness-reap.sh).
+//     The watchdog's group-wide QUIT lands on the job leader, which must
+//     have a QUIT handler (SigCgt bit 0x4, read from /proc before signaling)
+//     and must not be reported by bash as dying from an uncaught signal.
+//   - runner: the runner's own `trap gc_shard_on_quit QUIT` (test-go-test-
+//     shard). QUIT sent to the runner alone must run the handler, which
+//     reaps the supervised job group and exits 131. Without the trap the
+//     runner never reaches that handler: it dies from the signal
+//     (ExitCode -1) or hangs mid core dump, and the job is orphaned.
+//
+// The runner's exit status alone can't tell buggy from fixed apart in the
+// job-group case: bash collapses "$?" to the same 128+SIGQUIT=131 whether the
+// job died from the uncaught signal or from a trap that itself calls
+// `exit 131`. What does distinguish the two there is bash's own job-control
+// death report — printed against the job's pid, specifically, only for a job
+// that job control learns died from an uncaught signal, never for a clean
+// exit — which is why the case asserts on that message as well as on SigCgt.
+func TestGoTestShardTrapsQuitInsteadOfCoreDumping(t *testing.T) {
+	// Force RLIMIT_CORE=0 for the fixture processes this test spawns so a
+	// pre-fix run cannot leave a real core file or a coredumpctl entry
+	// behind — the very artifact this bug exists to drive to zero. Bash's
+	// job-control death report (asserted below) reflects signal disposition
+	// independently of whether a core was actually written, so this does not
+	// weaken the assertion.
+	var oldRlimit syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_CORE, &oldRlimit); err != nil {
+		t.Fatalf("get RLIMIT_CORE: %v", err)
+	}
+	if err := syscall.Setrlimit(syscall.RLIMIT_CORE, &syscall.Rlimit{Cur: 0, Max: oldRlimit.Max}); err != nil {
+		t.Fatalf("set RLIMIT_CORE: %v", err)
+	}
+	t.Cleanup(func() { _ = syscall.Setrlimit(syscall.RLIMIT_CORE, &oldRlimit) })
+
+	cases := []struct {
+		name string
+		// signal delivers SIGQUIT the way that case's production path does.
+		signal func(runnerPid, jobPgid int) error
+		// wantExit, when nonzero, is the exact exit status the runner must
+		// report (131 = 128+SIGQUIT from its own trap). Zero means only
+		// "failed, did not exit 0".
+		wantExit int
+	}{
+		{
+			name: "job-group",
+			// Exactly as gc_harness_watchdog does: group-wide, never the
+			// runner's own pid alone.
+			signal: func(_, jobPgid int) error { return syscall.Kill(-jobPgid, syscall.SIGQUIT) },
+		},
+		{
+			name:     "runner",
+			signal:   func(runnerPid, _ int) error { return syscall.Kill(runnerPid, syscall.SIGQUIT) },
+			wantExit: 131,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pidFile := filepath.Join(t.TempDir(), "descendant.pid")
+
+			// A plain sleeping descendant is enough to resolve the job's
+			// process group (it inherits jobPgid; nothing in this chain calls
+			// setpgid) and to show whether the supervised job is reaped or
+			// orphaned afterward.
+			fixture := newReapFixture(t, fmt.Sprintf(`
+    echo $$ > %q
+    sleep %d
+`, pidFile, fixtureLifetimeSeconds))
+
+			cmd := fixture.start(t)
+			descendant := waitForPIDFile(t, pidFile)
+			jobPgid := processGroupOf(t, descendant)
+
+			// The job leader is the process whose pid is the group id. Check
+			// its disposition BEFORE signaling, so a missing handler fails
+			// here with a precise message rather than as a downstream symptom.
+			caught, ignored, known := sigQuitCaught(t, jobPgid)
+			switch {
+			case !known:
+				t.Logf("no /proc: SIGQUIT disposition not inspected on this platform")
+			case ignored:
+				t.Fatalf("job leader %d inherited SIGQUIT as ignored (SigIgn): a signal-based repro would pass for the wrong reason; fix the launching environment", jobPgid)
+			case !caught && tc.name == "job-group":
+				t.Fatalf("job leader %d has no SIGQUIT handler (SigCgt bit 0x4 clear): the watchdog's group QUIT will core-dump it — this is the ga-5kse5n bash core dump", jobPgid)
+			}
+
+			if err := tc.signal(cmd.Process.Pid, jobPgid); err != nil {
+				t.Fatalf("signal SIGQUIT (%s): %v", tc.name, err)
+			}
+
+			err := waitWithin(t, cmd, 20*time.Second)
+			if err == nil {
+				t.Fatalf("runner exited 0 after SIGQUIT; expected a QUIT-driven termination.\n%s", fixture.output())
+			}
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Fatalf("wait runner: %v\n%s", err, fixture.output())
+			}
+			if tc.wantExit != 0 && exitErr.ExitCode() != tc.wantExit {
+				t.Fatalf("runner exit status = %d, want %d (a QUIT trap that reaps the job then `exit %d`; -1 means the runner died from the uncaught signal).\n%s", exitErr.ExitCode(), tc.wantExit, tc.wantExit, fixture.output())
+			}
+
+			wantDeath := fmt.Sprintf("%d Quit", jobPgid)
+			if out := fixture.output(); strings.Contains(out, wantDeath) {
+				t.Fatalf("job group %d died from an uncaught QUIT instead of trapping it and exiting cleanly — this is the ga-5kse5n bash core dump.\n%s", jobPgid, out)
+			}
+
+			if !processGone(descendant, 20*time.Second) {
+				t.Fatalf("descendant pid %d survived the runner's QUIT: the QUIT trap must reap the supervised job before exiting, like the other signal traps do", descendant)
+			}
+		})
 	}
 }
 
@@ -315,7 +526,7 @@ gc_harness_kill_pid() { printf 'KILLED %%s\n' "$1" >> %q ; }
 gc_harness_sweep_stale_orphans %s
 `, filepath.Join(repoRoot(t), "scripts", "lib", "harness-reap.sh"), killLog, minAge)
 
-	cmd := exec.Command("bash", "-c", script)
+	cmd := harnessBash(script)
 	cmd.Env = append(os.Environ(), "PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -457,5 +668,239 @@ func TestGoTestShardLeavesNothingHoldingTheCallersPipe(t *testing.T) {
 	case <-time.After(60 * time.Second):
 		_ = cmd.Process.Kill()
 		t.Fatal("reading the shard runner's output blocked after the run finished: a descendant outlived the run holding the caller's pipe")
+	}
+}
+
+// TestGoTestShardTerminationLeavesNothingHoldingTheCallersPipe is the
+// signal-path twin of TestGoTestShardLeavesNothingHoldingTheCallersPipe
+// (ga-880tzy). The watchdog lives in a process group of its own, so a runner
+// whose signal trap tears down only the run's group leaves the watchdog and
+// its sleep(1) behind as orphans: they hold the caller's stdout and the run's
+// cwd until the deadline, and on waking signal the run's process-group id,
+// which by then the kernel may have handed to an unrelated group. Reading the
+// runner's stdout to EOF proves every process that inherited it is gone,
+// watchdog included, without having to name any of them.
+func TestGoTestShardTerminationLeavesNothingHoldingTheCallersPipe(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "run.pid")
+	fixture := newReapFixture(t, fmt.Sprintf(`
+    echo $$ > %q
+    sleep %d
+`, pidFile, fixtureLifetimeSeconds))
+
+	stdout, stdoutWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create runner stdout pipe: %v", err)
+	}
+	t.Cleanup(func() { _ = stdout.Close() })
+
+	// The 60s budget outlasts this test's patience by a wide margin, so a
+	// leaked watchdog is still holding the pipe when the test gives up. It is
+	// also short enough that a leaked watchdog wakes long before the kernel
+	// could plausibly recycle the run's dead process-group id; it then finds
+	// no such group and exits without signaling anything.
+	cmd := fixture.startWithOutput(t, stdoutWriter,
+		"GO_TEST_TIMEOUT=30s",
+		"GO_TEST_WATCHDOG_GRACE=30s",
+	)
+	// From here on the runner's tree holds the only write ends.
+	_ = stdoutWriter.Close()
+	waitForPIDFile(t, pidFile)
+
+	if err := syscall.Kill(cmd.Process.Pid, syscall.SIGTERM); err != nil {
+		t.Fatalf("signal runner: %v", err)
+	}
+
+	drained := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(io.Discard, stdout)
+		drained <- err
+	}()
+	select {
+	case err := <-drained:
+		if err != nil {
+			t.Fatalf("read runner stdout: %v", err)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("a process of the terminated runner's tree still holds its stdout 20s later: the runner must take its watchdog down with its run")
+	}
+}
+
+// TestHarnessSignalDuringLaunchStillTearsDownTheJustForkedJob pins the
+// ga-96smfk.61 race. Bash runs a signal trap between any two commands, so a
+// signal can land after a supervised run or its watchdog has been forked but
+// before the runner has recorded its PID. A teardown that consults only the
+// recorded PIDs then finds nothing to end: the just-forked job outlives the
+// runner holding the caller's stdout. Under remote-exec load that window was
+// wide enough to strand the watchdog, failing
+// TestGoTestShardTerminationLeavesNothingHoldingTheCallersPipe. Here a DEBUG
+// trap raises the signal at the first command boundary after the run's or the
+// watchdog's fork inside gc_harness_run_supervised itself, so the race is
+// exercised every run instead of once in a few hundred, through the launch
+// the runners use rather than a copy of it.
+func TestHarnessSignalDuringLaunchStillTearsDownTheJustForkedJob(t *testing.T) {
+	for _, tc := range []struct {
+		kind string
+		// fork counts gc_harness_run_supervised's background forks up to the
+		// one the signal follows: the run is the first, its watchdog the
+		// second.
+		fork int
+	}{
+		{kind: "run", fork: 1},
+		{kind: "watchdog", fork: 2},
+	} {
+		t.Run(tc.kind, func(t *testing.T) {
+			script := fmt.Sprintf(`
+set -euo pipefail
+source %q
+on_term() {
+  printf 'launch window at signal: [%%s]\n' "$gc_harness_launching"
+  gc_harness_terminate_supervised 5
+  trap - TERM
+  kill -TERM $$
+}
+trap on_term TERM
+# Under functrace the DEBUG trap runs before every command, inside functions
+# too. It raises the signal before the first command after the script's Nth
+# background fork: $! has moved, but nothing has published it yet. A forked
+# child starts with $! as it stood before its own fork, so it never sees a
+# fork of its own and never raises.
+forks=0
+seen_pid=""
+raise_after_fork() {
+  (( forks < %[2]d )) || return 0
+  local pid=""
+  (( ${#!} == 0 )) || pid="$!"
+  [[ "$pid" != "$seen_pid" ]] || return 0
+  seen_pid="$pid"
+  forks=$(( forks + 1 ))
+  if (( forks == %[2]d )); then
+    kill -TERM $$
+  fi
+}
+set -o functrace
+trap raise_after_fork DEBUG
+gc_harness_run_supervised launch-window %[3]d 1 -- sleep %[3]d
+`, filepath.Join(repoRoot(t), "scripts", "lib", "harness-reap.sh"), tc.fork, fixtureLifetimeSeconds)
+
+			stdout, stdoutWriter, err := os.Pipe()
+			if err != nil {
+				t.Fatalf("create stdout pipe: %v", err)
+			}
+			t.Cleanup(func() { _ = stdout.Close() })
+
+			cmd := harnessBash(script)
+			cmd.Stdout = stdoutWriter
+			cmd.Stderr = stdoutWriter
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			if err := cmd.Start(); err != nil {
+				t.Fatalf("start launch-window script: %v", err)
+			}
+			_ = stdoutWriter.Close()
+
+			// EOF on stdout proves every process that inherited it is gone,
+			// the just-forked job included. Left behind, that job is a sleep
+			// outlasting this test, so the read below never returns on its own.
+			type drain struct {
+				output []byte
+				err    error
+			}
+			drained := make(chan drain, 1)
+			go func() {
+				output, err := io.ReadAll(stdout)
+				drained <- drain{output: output, err: err}
+			}()
+			var output []byte
+			select {
+			case got := <-drained:
+				if got.err != nil {
+					t.Fatalf("read script stdout: %v", got.err)
+				}
+				output = got.output
+			case <-time.After(60 * time.Second):
+				t.Fatalf("a %s job forked just before the signal still holds the runner's stdout: teardown must adopt a job whose PID was not yet published", tc.kind)
+			}
+
+			// A signal that missed the window would prove nothing about it.
+			if want := fmt.Sprintf("launch window at signal: [%s]", tc.kind); !strings.Contains(string(output), want) {
+				t.Fatalf("script output lacks %q: the signal did not land between the %s fork and the publish of its PID\n%s", want, tc.kind, output)
+			}
+			// Re-raising SIGTERM is the trap's last act, so dying of it proves
+			// the teardown ran to its end rather than the script failing early.
+			err = waitWithin(t, cmd, 10*time.Second)
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) {
+				t.Fatalf("launch-window script exit = %v, want death by its trap's re-raised SIGTERM\n%s", err, output)
+			}
+			if status, ok := exitErr.Sys().(syscall.WaitStatus); !ok || !status.Signaled() || status.Signal() != syscall.SIGTERM {
+				t.Fatalf("launch-window script exit = %v, want death by its trap's re-raised SIGTERM\n%s", err, output)
+			}
+		})
+	}
+}
+
+// TestHarnessLaunchesUnderNounsetBeforeAnyBackgroundJob pins launch
+// bookkeeping to bash 3.2, the oldest bash the runners support. Both runners
+// that source harness-reap.sh run under `set -u`, and $! is unset until a
+// script forks its first background job. Bash 3.2 aborts on any expansion of
+// an unset $!, even a defaulted one such as ${!:-}, where later bashes
+// substitute the default, so a read that passes on a modern bash can kill a
+// macOS runner at its first launch. The script runs on bash 3.2 when the host
+// has one (see findBash32); a host without one still runs the static scan,
+// which rejects the defaulted forms that only bash 3.2 refuses.
+func TestHarnessLaunchesUnderNounsetBeforeAnyBackgroundJob(t *testing.T) {
+	root := repoRoot(t)
+	lib := filepath.Join(root, "scripts", "lib", "harness-reap.sh")
+	assertNoDefaultedLastJobPID(t,
+		lib,
+		filepath.Join(root, "scripts", "test-go-test-shard"),
+		filepath.Join(root, "scripts", "test-local-parallel"),
+	)
+
+	bashPath := findBash32(t)
+	if bashPath == "" {
+		bashPath = "bash"
+	}
+	script := fmt.Sprintf(`
+set -euo pipefail
+source %q
+gc_harness_launch_begin run
+gc_harness_launch_publish
+gc_harness_launch_begin watchdog
+gc_harness_terminate_supervised 1
+printf 'published run=[%%s] watchdog=[%%s] window=[%%s]\n' \
+  "$gc_harness_supervised_pgid" "$gc_harness_watchdog_pgid" "$gc_harness_launching"
+gc_harness_run_supervised nounset 30 1 -- true
+echo launched
+`, lib)
+	out, err := shardTestCommand(bashPath, "-c", script).CombinedOutput()
+	if err != nil {
+		t.Fatalf("launch before any background job under %s: %v\n%s", bashPath, err, out)
+	}
+	if want := "published run=[] watchdog=[] window=[]\nlaunched\n"; string(out) != want {
+		t.Fatalf("launch before any background job under %s printed:\n%s\nwant:\n%s", bashPath, out, want)
+	}
+}
+
+// assertNoDefaultedLastJobPID fails for any non-comment line of the scripts at
+// paths that expands $! through an operator: ${!:-}, ${!-}, ${!+x} and the
+// rest. While $! is unset bash 3.2 aborts on every one of them under `set -u`,
+// and later bashes accept them all, so no test on a modern bash notices.
+// ${!name} indirection and ${!array[@]} keys are not $! and do not match.
+func assertNoDefaultedLastJobPID(t *testing.T, paths ...string) {
+	t.Helper()
+	defaulted := regexp.MustCompile(`\$\{!:?[-+=?]`)
+	for _, path := range paths {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		for index, line := range strings.Split(string(content), "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "#") {
+				continue
+			}
+			if defaulted.MatchString(line) {
+				t.Errorf("%s:%d expands $! through an operator, which aborts bash 3.2 under set -u until a background job exists; read it behind (( ${#!} == 0 )) instead:\n%s", path, index+1, line)
+			}
+		}
 	}
 }

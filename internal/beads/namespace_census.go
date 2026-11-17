@@ -179,3 +179,55 @@ func (s *SQLiteStore) HasResidentOutside(prefixes []string) (bool, error) {
 		return true, nil
 	}
 }
+
+// ResidentIDs returns every id store holds, BOTH tiers and CLOSED rows
+// included, without hydrating a single row — exactly the id set
+// List(ListQuery{TierMode: TierBoth, IncludeClosed: true, AllowScan: true})
+// would return. ok=false means store cannot answer it that way and the caller
+// lists instead.
+//
+// It exists for the storage boot gate's containment check, which asks "which of
+// these source ids does the binding hold" of a binding that, on the measured
+// city, is a 2 GB database of ~134k rows: listing it hydrated and JSON-decoded
+// every row (~15 s per CLI command) to keep one string per row.
+//
+// It is a function over the bare engine rather than a Store method on purpose.
+// The one caller opens the binding itself (a read-only *SQLiteStore), and an
+// exported method would oblige every wrapper the reflective capability guards
+// hold to the engine's method set (the controller binding cache, the emitting
+// class store) to forward a read only that caller makes. A wrapped store
+// answers ok=false and is listed, which is always correct, merely slower.
+func ResidentIDs(store Store) (ids []string, ok bool, err error) {
+	engine, isEngine := store.(*SQLiteStore)
+	if !isEngine || engine == nil {
+		return nil, false, nil
+	}
+	ids, err = engine.residentIDs()
+	return ids, true, err
+}
+
+// residentIDs reads every id in the sqlite bead store. Both tiers live in the
+// one beads table (tier is a column) and nothing is filtered by status, so this
+// is the TierBoth, closed-inclusive id set.
+func (s *SQLiteStore) residentIDs() ([]string, error) {
+	if err := s.ensureOpen(); err != nil {
+		return nil, err
+	}
+	rows, err := s.readDB.QueryContext(context.Background(), "SELECT id FROM beads")
+	if err != nil {
+		return nil, fmt.Errorf("listing the ids of the sqlite bead store at %s: %w", s.path, err)
+	}
+	defer rows.Close() //nolint:errcheck
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("listing the ids of the sqlite bead store at %s: %w", s.path, err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("listing the ids of the sqlite bead store at %s: %w", s.path, err)
+	}
+	return ids, nil
+}

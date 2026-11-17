@@ -9,6 +9,9 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -309,7 +312,7 @@ func TestQuarantinedStartupHealthMirrorClearsOnSuccessfulRecovery(t *testing.T) 
 	}
 }
 
-// failFirstStartupHealthLoadStore forces exactly the first ListByMetadata
+// failFirstStartupHealthLoadStore forces exactly the first episode List
 // lookup filtered on the given session name's startup-health episode key to
 // fail, then delegates every later matching call — including the sibling
 // LoadStartupHealthEpisode calls in session_lifecycle_parallel.go's
@@ -326,15 +329,15 @@ type failFirstStartupHealthLoadStore struct {
 	failed      bool
 }
 
-func (s *failFirstStartupHealthLoadStore) ListByMetadata(filters map[string]string, limit int, opts ...beads.QueryOpt) ([]beads.Bead, error) {
-	if filters[sessionpkg.StartupHealthSessionNameMetadataKey] == s.sessionName {
+func (s *failFirstStartupHealthLoadStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Type == sessionpkg.StartupHealthEpisodeType && q.Metadata[sessionpkg.StartupHealthSessionNameMetadataKey] == s.sessionName {
 		s.calls++
 		if !s.failed {
 			s.failed = true
 			return nil, s.err
 		}
 	}
-	return s.Store.ListByMetadata(filters, limit, opts...)
+	return s.Store.List(q)
 }
 
 func TestQuarantineGateLogsOnStartupHealthLoadError(t *testing.T) {
@@ -380,7 +383,7 @@ func TestQuarantineGateLogsOnStartupHealthLoadError(t *testing.T) {
 	h.reconcileTickWithoutPostInvariants(false)
 
 	if failing.calls < 1 {
-		t.Fatal("ListByMetadata for the startup-health episode was never called; test does not exercise the quarantine gate")
+		t.Fatal("the startup-health episode List was never called; test does not exercise the quarantine gate")
 	}
 	// LoadStartupHealthEpisode wraps the store error before returning it
 	// (internal/session/startup_health.go), so check the reconciler's own
@@ -396,5 +399,41 @@ func TestQuarantineGateLogsOnStartupHealthLoadError(t *testing.T) {
 	}
 	if got := h.countRuntimeCalls("Start"); got <= startsBefore {
 		t.Fatalf("Start not attempted after a startup-health load error (calls before=%d after=%d); fail-open must still let the retry through", startsBefore, got)
+	}
+}
+
+// TestForgedStartupHealthEpisodeHoldsNothingDown (mc-lp7zb): only a
+// startup-health-episode bead is a session's episode, so a task carrying the
+// episode's keys, a live quarantine included, holds nothing down, and the
+// three readers agree: the reconciler starts the session, /wake does not
+// refuse it, and gc doctor reports no episode.
+func TestForgedStartupHealthEpisodeHoldsNothingDown(t *testing.T) {
+	forge := func(t *testing.T, store beads.Store, name string) {
+		t.Helper()
+		if _, err := store.Create(beads.Bead{Title: "forged", Type: "task", Metadata: map[string]string{
+			sessionpkg.StartupHealthSessionNameMetadataKey:      name,
+			sessionpkg.StartupHealthConsecutiveMetadataKey:      strconv.Itoa(defaultMaxWakeAttempts),
+			sessionpkg.StartupHealthQuarantinedUntilMetadataKey: "9999-01-01T00:00:00Z",
+		}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	h := newSessionChaosHarness(t, 20261013001)
+	h.createSessionIntent()
+	forge(t, h.env.store, h.sessionName)
+	if tick := runDesiredPendingCreateTicks(t, h); tick == -1 || h.countRuntimeCalls("Start") == 0 {
+		t.Fatalf("Start calls %d (tick %d): a task's keys must not block the session's start", h.countRuntimeCalls("Start"), tick)
+	}
+
+	store := beads.NewMemStore()
+	forge(t, store, "worker")
+	cs := &controllerState{cityPath: t.TempDir(), cfg: &config.City{Agents: []config.Agent{{Name: "worker"}}}, cityBeadStore: store, sp: runtime.NewFake()}
+	if got, _ := cs.WakeStartRefusal(sessionpkg.Info{Template: "worker", SessionNameMetadata: "worker"}); got != "" {
+		t.Fatalf("WakeStartRefusal = %q, want none", got)
+	}
+	result := newStartupHealthEpisodesCheck(&config.City{}, t.TempDir(), func(string) (beads.Store, error) { return store, nil }).Run(&doctor.CheckContext{})
+	if result.Status != doctor.StatusOK || len(result.Details) != 0 {
+		t.Fatalf("doctor %v %v, want ok and no episode", result.Status, result.Details)
 	}
 }

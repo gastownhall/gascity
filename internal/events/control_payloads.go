@@ -15,7 +15,12 @@ type ControlStalledPayload struct {
 	Kind       string `json:"kind,omitempty"`
 	RootBeadID string `json:"root_bead_id,omitempty"`
 	StorePath  string `json:"store_path,omitempty"`
-	// ErrorClass names the tier that ran out of budget ("semantic").
+	// ErrorClass names what ran out of budget: "semantic" for a Tier-B refusal
+	// the dispatcher quarantined (bead closed, order failed), or "pending" for
+	// a drift wait whose loudness horizon expired (bead still open, still
+	// retrying, no order.failed). It is the discriminator between a dead
+	// workflow and a healable one; consumers that treat control.stalled as
+	// uniformly terminal must switch on it.
 	ErrorClass string `json:"error_class"`
 	FirstSeen  string `json:"first_seen"`
 	Attempts   int    `json:"attempts"`
@@ -32,6 +37,32 @@ func (ControlStalledPayload) IsEventPayload() {}
 // ControlStalledPayloadJSON builds the JSON wire form for attachment to an
 // Event.Payload field.
 func ControlStalledPayloadJSON(p ControlStalledPayload) json.RawMessage {
+	b, _ := json.Marshal(p) //nolint:errcheck // a struct of scalars cannot fail to marshal
+	return b
+}
+
+// ControlCheckUnlaunchablePayload is the typed payload for
+// control.check_unlaunchable events. It names the step an operator has to
+// repair without reading a trace log: which control bead is held, in which
+// workflow and store, the check path it could not launch, and why.
+type ControlCheckUnlaunchablePayload struct {
+	BeadID     string `json:"bead_id"`
+	Kind       string `json:"kind,omitempty"`
+	RootBeadID string `json:"root_bead_id,omitempty"`
+	StorePath  string `json:"store_path,omitempty"`
+	// CheckPath is gc.check_path exactly as stamped on the control bead, before
+	// resolution. Where the dispatcher looked for it is in Error.
+	CheckPath string `json:"check_path"`
+	// Error is the resolution refusal, truncated at the record site.
+	Error string `json:"error"`
+}
+
+// IsEventPayload marks ControlCheckUnlaunchablePayload as an events.Payload variant.
+func (ControlCheckUnlaunchablePayload) IsEventPayload() {}
+
+// ControlCheckUnlaunchablePayloadJSON builds the JSON wire form for attachment
+// to an Event.Payload field.
+func ControlCheckUnlaunchablePayloadJSON(p ControlCheckUnlaunchablePayload) json.RawMessage {
 	b, _ := json.Marshal(p) //nolint:errcheck // a struct of scalars cannot fail to marshal
 	return b
 }
@@ -109,6 +140,7 @@ func ControlDispatcherScopeGapPayloadJSON(p ControlDispatcherScopeGapPayload) js
 
 func init() {
 	RegisterPayload(ControlStalled, ControlStalledPayload{})
+	RegisterPayload(ControlCheckUnlaunchable, ControlCheckUnlaunchablePayload{})
 	RegisterPayload(ControlDispatcherScopeGap, ControlDispatcherScopeGapPayload{})
 	RegisterPayload(ControlRootSettleFailed, ControlRootSettleFailedPayload{})
 }

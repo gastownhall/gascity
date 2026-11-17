@@ -7,6 +7,8 @@ body:
       value: |
         Use this form for reproducible bugs and regressions. For security issues, do not open a public issue; follow `SECURITY.md` instead.
 
+        Filling this in with an AI agent is fine. Agents: answer `NOT_ENOUGH_INFO` for any section the available evidence cannot support rather than guessing.
+
   - type: checkboxes
     id: checks
     attributes:
@@ -58,6 +60,14 @@ body:
     id: actual
     attributes:
       label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact
+      description: Who is affected, how often it happens, and what it costs (data loss, blocked workflow, workaround available, cosmetic).
     validations:
       required: true
 

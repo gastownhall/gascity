@@ -11,8 +11,8 @@
   "navbar": {
     "links": [
       {
-        "label": "Gas City Hall",
-        "href": "https://gascityhall.com"
+        "label": "Gas City",
+        "href": "https://gascity.com"
       },
       {
         "label": "Discord",
@@ -154,7 +154,8 @@
           "getting-started/how-gas-city-works",
           "getting-started/coming-from-gastown",
           "getting-started/faq",
-          "getting-started/troubleshooting"
+          "getting-started/troubleshooting",
+          "getting-started/upgrading"
         ]
       },
       {
@@ -191,6 +192,7 @@
               "guides/registry-showcase",
               "guides/gastown-config-recipes",
               "guides/using-json-from-gc",
+              "guides/sharing-a-rig-store",
               "guides/connected-clients",
               "guides/multi-agent-engineering-environment"
             ]
@@ -214,7 +216,9 @@
             "pages": [
               "runbooks/managed-city-endpoints",
               "runbooks/remote-hardened-city",
-              "runbooks/split-storage-classes"
+              "runbooks/split-storage-classes",
+              "runbooks/dolt-compact",
+              "runbooks/events-mirror"
             ]
           }
         ]

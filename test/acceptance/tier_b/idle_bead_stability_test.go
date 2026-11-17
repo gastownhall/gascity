@@ -17,6 +17,7 @@ import (
 	gascitypacks "github.com/gastownhall/gascity-packs"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
@@ -25,7 +26,9 @@ func TestGastownIdleOpenBeadCountsStayBounded(t *testing.T) {
 	probe := idleBeadStabilityProbeConfig(t)
 	env := newIsolatedTierBEnv(t, "fake")
 	c := helpers.NewCity(t, env)
-	c.InitFrom(filepath.Join(helpers.ExamplesDir(), "gastown"))
+	// Single-store: the probe counts order runs and wisps in the work file
+	// store, where the born-split example keeps neither.
+	c.InitFrom(singleStoreExampleCopy(t, "gastown"))
 
 	// gc init --from starts a controller for the copied city. Restart under the
 	// isolated supervisor after installing the fast idle orders below.
@@ -44,7 +47,7 @@ func TestGastownIdleOpenBeadCountsStayBounded(t *testing.T) {
 	var activity beadCountSnapshot
 	if ok := c.WaitForCondition(func() bool {
 		activity = readOpenBeadSnapshot(t, c.Dir)
-		return activity.OpenWisps > 0
+		return openOrderWispCount(t, c.Dir, "idle-wisp") > 0
 	}, 30*time.Second); !ok {
 		t.Fatalf("idle probe order did not create a wisp within 30s; last snapshot: %s", activity)
 	}
@@ -69,7 +72,9 @@ func TestPlainIdleOpenBeadCountsStayBounded(t *testing.T) {
 	probe := idleBeadStabilityProbeConfig(t)
 	env := newIsolatedTierBEnv(t, "fake")
 	c := helpers.NewCity(t, env)
-	c.Init("claude")
+	// Single-store: the probe counts order runs and wisps in the work file
+	// store, where a born-split city keeps neither.
+	c.InitSingleStore("claude")
 	setCityPatrolInterval(t, c.Dir, "1s")
 	writePlainIdleProbeOrders(t, c.Dir)
 
@@ -284,6 +289,9 @@ func writeGastownIdleProbeOrders(t *testing.T, cityDir string) {
 		t.Fatalf("copied digest order missing expected interval")
 	}
 	formulaOrderBody = strings.Replace(formulaOrderBody, `interval = "24h"`, `interval = "1s"`, 1)
+	// The gastown and bd packs both define a "dog" pool; a city-level order
+	// must name the pool it means, or dispatch fails as ambiguous.
+	formulaOrderBody = strings.Replace(formulaOrderBody, `pool = "dog"`, `pool = "gastown.dog"`, 1)
 	orders := map[string]string{
 		"idle-wisp.toml": formulaOrderBody,
 		"idle-exec.toml": `[order]
@@ -425,4 +433,89 @@ func formatBeadCountSnapshots(samples []beadCountSnapshot) string {
 func (s beadCountSnapshot) String() string {
 	return fmt.Sprintf("open_issues=%d open_wisps=%d issue_ids=%v wisp_ids=%v",
 		s.OpenIssues, s.OpenWisps, s.IssueIDs, s.WispIDs)
+}
+
+// openOrderWispCount counts open formula wisps an order created, in either
+// storage tier: under the default bd-1.0.4 compatibility the wisp policy is
+// history-backed, so the root lands in the issues tier.
+func openOrderWispCount(t *testing.T, cityDir, orderName string) int {
+	t.Helper()
+	store, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(cityDir, ".gc", "beads.json"))
+	if err != nil {
+		t.Fatalf("open file bead store: %v", err)
+	}
+	rows, err := store.List(beads.ListQuery{Status: "open", Label: "order-run:" + orderName, AllowScan: true, TierMode: beads.TierBoth})
+	if err != nil {
+		t.Fatalf("list open order wisps for %q: %v", orderName, err)
+	}
+	n := 0
+	for _, row := range rows {
+		if row.Metadata["gc.kind"] == "wisp" {
+			n++
+		}
+	}
+	return n
+}
+
+// singleStoreExampleCopy copies the named example city into a temp dir with
+// its [storage] section removed, so gc init --from creates it single-store.
+// It reads through symlinks, as bazel's runfiles tree is one.
+func singleStoreExampleCopy(t *testing.T, name string) string {
+	t.Helper()
+	src := filepath.Join(helpers.ExamplesDir(), name)
+	dst := filepath.Join(helpers.TempDir(t), name)
+	if err := copyTreeFollowingLinks(src, dst); err != nil {
+		t.Fatalf("copying example %s: %v", name, err)
+	}
+	tomlPath := filepath.Join(dst, "city.toml")
+	data, err := os.ReadFile(tomlPath)
+	if err != nil {
+		t.Fatalf("reading %s: %v", tomlPath, err)
+	}
+	cfg, err := config.Parse(data)
+	if err != nil {
+		t.Fatalf("parsing %s: %v", tomlPath, err)
+	}
+	cfg.Storage = nil
+	out, err := cfg.Marshal()
+	if err != nil {
+		t.Fatalf("marshaling %s: %v", tomlPath, err)
+	}
+	if err := os.WriteFile(tomlPath, out, 0o644); err != nil {
+		t.Fatalf("writing %s: %v", tomlPath, err)
+	}
+	return dst
+}
+
+// copyTreeFollowingLinks copies the directory tree at src to dst, copying
+// what each symlink points at.
+func copyTreeFollowingLinks(src, dst string) error {
+	if err := os.MkdirAll(dst, 0o755); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		from, to := filepath.Join(src, entry.Name()), filepath.Join(dst, entry.Name())
+		info, err := os.Stat(from)
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			if err := copyTreeFollowingLinks(from, to); err != nil {
+				return err
+			}
+			continue
+		}
+		data, err := os.ReadFile(from)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(to, data, info.Mode().Perm()|0o600); err != nil {
+			return err
+		}
+	}
+	return nil
 }

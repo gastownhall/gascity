@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // primeCaptureTestStore stands up a file-backed city store the same way
@@ -264,5 +267,75 @@ func TestPersistPrimeHookProviderSessionKey_QuietWithoutDebug(t *testing.T) {
 	}
 	if out := stderr.String(); out != "" {
 		t.Errorf("hook wrote to stderr without GC_DEBUG, which reaches the agent terminal: %q", out)
+	}
+}
+
+// A caller that already resolved its city hands that path to the provider-key
+// write, which must use it without resolving the ambient city again — here
+// ambient resolution is made impossible, so only the supplied path can work.
+func TestPersistPrimeHookProviderSessionKeyAtCityUsesSuppliedPath(t *testing.T) {
+	isolateProviderSessionEnv(t)
+	cityDir, store := primeCaptureTestStore(t)
+	sessionID := createCaptureSessionBead(t, store, "claude")
+	t.Setenv("GC_SESSION_ID", sessionID)
+	for _, key := range []string{"GC_CITY", "GC_CITY_PATH", "GC_CITY_ROOT", "GC_DIR", "GC_RIG", "GC_RIG_ROOT"} {
+		t.Setenv(key, "")
+	}
+	if resolved, err := resolveCity(); err == nil {
+		t.Fatalf("test requires ambient city resolution to fail, resolved %q", resolved)
+	}
+
+	var stderr bytes.Buffer
+	persistPrimeHookProviderSessionKeyAtCity("11111111-2222-3333-4444-555555555555", cityDir, &stderr)
+	if stderr.Len() != 0 {
+		t.Fatalf("persist stderr = %q, want empty", stderr.String())
+	}
+
+	updated, err := store.Get(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(updated.Metadata["session_key"]); got != "11111111-2222-3333-4444-555555555555" {
+		t.Fatalf("session_key = %q, want the hook id persisted through the supplied city path", got)
+	}
+
+	// The ambient wrapper still resolves the city itself, so with nothing to
+	// resolve it reports that rather than writing anywhere.
+	stderr.Reset()
+	persistPrimeHookProviderSessionKey("11111111-2222-3333-4444-555555555555", &stderr)
+	if !strings.Contains(stderr.String(), "resolving city") {
+		t.Fatalf("ambient persist stderr = %q, want a city-resolution diagnostic", stderr.String())
+	}
+}
+
+// TestPrimeHookCapturesClaudeIDAfterSyncOnLiveKeylessRow kills a sync pass
+// that mints a key between a stale-key relaunch's clear and the relaunched
+// claude's SessionStart hook (gastownhall/gascity#5439): the set-once capture
+// would drop the provider's real id for a key naming no transcript. The
+// hook's id must land.
+func TestPrimeHookCapturesClaudeIDAfterSyncOnLiveKeylessRow(t *testing.T) {
+	cityDir, store := primeCaptureTestStore(t)
+	ds := map[string]TemplateParams{"alpha": builtinClaudeTemplate(t, "alpha", t.TempDir())}
+	clk := &clock.Fake{Time: time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)}
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, runtime.NewFake(), allConfiguredDS(ds), nil, clk, &stderr, false)
+	rows := allSessionBeads(t, store)
+	if len(rows) != 1 || rows[0].Metadata["session_key"] == "" {
+		t.Fatalf("first sync: rows %v, want one keyed row; stderr=%s", rows, stderr.String())
+	}
+	id := rows[0].ID
+	// The stale-key relaunch clears the key; its process is then live.
+	if err := store.SetMetadataBatch(id, map[string]string{"session_key": "", "state": "active"}); err != nil {
+		t.Fatal(err)
+	}
+	clk.Time = clk.Time.Add(time.Minute)
+	syncSessionBeads("", store, ds, runtime.NewFake(), allConfiguredDS(ds), nil, clk, &stderr, false)
+
+	t.Setenv("GC_SESSION_ID", id)
+	isolateProviderSessionEnv(t)
+	const claudeSessionID = "5b1c7e2a-9d34-4f6b-8a0e-2c71d9f4e3b8"
+	persistPrimeHookProviderSessionKey(claudeSessionID, &stderr)
+	if got := reloadSessionKey(t, cityDir, id); got != claudeSessionID {
+		t.Fatalf("session_key = %q, want the hook's id %q; stderr=%s", got, claudeSessionID, stderr.String())
 	}
 }

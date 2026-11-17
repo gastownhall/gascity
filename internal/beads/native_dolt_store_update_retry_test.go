@@ -77,3 +77,31 @@ func TestNativeDoltStoreUpdateDoesNotRetryNonConflictErrors(t *testing.T) {
 		t.Fatalf("transaction attempts = %d, want 1 (non-conflict errors must not retry)", got)
 	}
 }
+
+func TestNativeDoltStoreSetMetadataBatchRetriesSerializationConflict(t *testing.T) {
+	var attempts int32
+	store := newNativeDoltStoreForTest(conflictThenOKStorage(1, &attempts))
+
+	if err := store.SetMetadataBatch("gc-1", map[string]string{"gc.step_ref": "build"}); err != nil {
+		t.Fatalf("SetMetadataBatch after one serialization conflict: got %v, want nil", err)
+	}
+	if got := atomic.LoadInt32(&attempts); got != 2 {
+		t.Fatalf("transaction attempts = %d, want 2 (one conflict, one retry)", got)
+	}
+}
+
+func TestNativeDoltStoreSetMetadataBatchStopsAtAttemptLimit(t *testing.T) {
+	var attempts int32
+	store := newNativeDoltStoreForTest(conflictThenOKStorage(int32(nativeWriteAttempts), &attempts))
+
+	err := store.SetMetadataBatch("gc-1", map[string]string{"gc.step_ref": "build"})
+	if err == nil {
+		t.Fatal("SetMetadataBatch with unrelenting conflicts: got nil, want the serialization error")
+	}
+	if !isNativeDoltSerializationConflict(err) {
+		t.Fatalf("returned error lost its serialization-conflict identity: %v", err)
+	}
+	if got := atomic.LoadInt32(&attempts); got != int32(nativeWriteAttempts) {
+		t.Fatalf("transaction attempts = %d, want %d", got, nativeWriteAttempts)
+	}
+}

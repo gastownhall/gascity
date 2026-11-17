@@ -1,6 +1,7 @@
 package orders
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -31,7 +32,7 @@ func TestLastRunReturnsLatestRun(t *testing.T) {
 	first, err := store.Create(beads.Bead{
 		Title:  "order:digest",
 		Status: "closed",
-		Labels: []string{"order-run:digest"},
+		Labels: []string{"order-run:digest", "order-tracking"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -42,7 +43,7 @@ func TestLastRunReturnsLatestRun(t *testing.T) {
 	second, err := store.Create(beads.Bead{
 		Title:  "order:digest",
 		Status: "closed",
-		Labels: []string{"order-run:digest", "wisp-failed"},
+		Labels: []string{"order-run:digest", "order-tracking", "wisp-failed"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -80,7 +81,7 @@ func TestLastRunUsesRowsFromPartialTierError(t *testing.T) {
 			ID:        "run-1",
 			Title:     "digest",
 			CreatedAt: want,
-			Labels:    []string{"order-run:digest"},
+			Labels:    []string{"order-run:digest", "order-tracking"},
 		}},
 		err: errors.New("wisps tier unavailable"),
 	}
@@ -230,7 +231,7 @@ func TestCursorUsesRowsAndLogsPartialTierError(t *testing.T) {
 		MemStore: beads.NewMemStore(),
 		rows: []beads.Bead{{
 			ID:     "run-1",
-			Labels: []string{"order-run:digest", "seq:42"},
+			Labels: []string{"order-run:digest", "order-tracking", "seq:42"},
 		}},
 		err: errors.New("wisps tier unavailable"),
 	}
@@ -248,12 +249,12 @@ func TestCursorUsesRowsAndLogsPartialTierError(t *testing.T) {
 // recent run across scopes.
 func TestLastRunAcrossReturnsMaxScope(t *testing.T) {
 	early := beads.NewMemStore()
-	if _, err := early.Create(beads.Bead{Title: "order:digest", Status: "closed", Labels: []string{"order-run:digest"}}); err != nil {
+	if _, err := early.Create(beads.Bead{Title: "order:digest", Status: "closed", Labels: []string{"order-run:digest", "order-tracking"}}); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(time.Millisecond)
 	late := beads.NewMemStore()
-	lateRun, err := late.Create(beads.Bead{Title: "order:digest", Status: "closed", Labels: []string{"order-run:digest"}})
+	lateRun, err := late.Create(beads.Bead{Title: "order:digest", Status: "closed", Labels: []string{"order-run:digest", "order-tracking"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,5 +264,40 @@ func TestLastRunAcrossReturnsMaxScope(t *testing.T) {
 	}
 	if !got.Equal(lateRun.CreatedAt) {
 		t.Fatalf("LastRunAcross() = %s, want %s (max across scopes)", got, lateRun.CreatedAt)
+	}
+}
+
+// closedHistoryFailsStore serves every active-row read and fails, hard, every
+// read that includes closed history: the shape of a backing whose closed rows
+// are unreachable while the controller's cache still holds the open ones.
+type closedHistoryFailsStore struct{ *beads.MemStore }
+
+func (s closedHistoryFailsStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.IncludeClosed {
+		return nil, errors.New("closed history unavailable")
+	}
+	return s.MemStore.List(q)
+}
+
+// Over a CachingStore, a hard backing error on the order-run history read must
+// stay an error. Kills: a cached read that turns it into a partial result of
+// the open rows the cache holds, which LastRun and Cursor would trust as
+// surviving rows — a cooldown clock from an open run, a cursor that replays
+// consumed events.
+func TestLastRunAndCursorKeepAHardBackingErrorThroughACache(t *testing.T) {
+	backing := beads.NewMemStore()
+	if _, err := backing.Create(beads.Bead{Title: "order:digest", Labels: []string{"order-run:digest", "order-tracking", "seq:3"}}); err != nil {
+		t.Fatal(err)
+	}
+	cache := beads.NewCachingStore(closedHistoryFailsStore{backing}, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	store := ordersStoreOver(cache)
+	if got, err := store.LastRun("digest"); err == nil {
+		t.Fatalf("LastRun() = %s, nil; a hard backing error was answered from the cache's open rows", got)
+	}
+	if got := store.Cursor("digest"); got != 0 {
+		t.Fatalf("Cursor() = %d, want 0 (unread); a hard backing error was answered from the cache's open rows", got)
 	}
 }

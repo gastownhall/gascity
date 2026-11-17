@@ -96,7 +96,12 @@ export function SessionPeekContent({ loading, error, result, caption }: SessionP
         <p className="text-label uppercase tracking-wider text-warn">▲ {PROMPT_INJECTION_NOTICE}</p>
         <ol className="space-y-5">
           {result.turns.map((turn, idx) => (
-            <TurnBlock key={idx} turn={turn} index={idx} now={now} />
+            <TurnBlock
+              key={turn.id ? `id:${turn.id}` : `idx:${idx}`}
+              turn={turn}
+              index={idx}
+              now={now}
+            />
           ))}
         </ol>
         {result.truncated && (

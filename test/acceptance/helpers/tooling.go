@@ -8,12 +8,19 @@ import (
 )
 
 const (
-	// EnvRequireTooling makes a missing bd or dolt fatal instead of a skip.
+	// EnvRequireTooling makes a missing bd or dolt fatal instead of a skip, and
+	// so does a row precondition the bd under test cannot produce (see
+	// MissingPrecondition): a job that sets it is one whose rows must run.
 	EnvRequireTooling = "GC_REQUIRE_ACCEPTANCE_TOOLING"
 	// EnvRequireLegacyGC makes a missing pre-journal gc fatal instead of a skip.
 	EnvRequireLegacyGC = "GC_REQUIRE_ACCEPTANCE_LEGACY_GC"
 	// EnvTopologyMatrix opts a run in to the full bd/dolt topology matrix.
 	EnvTopologyMatrix = "GC_ACCEPTANCE_TOPOLOGY_MATRIX"
+	// EnvProxiedNative is PR2's rollout flag: native reads over bd's proxy,
+	// every mutation still through the bd CLI. It lives here rather than in the
+	// test package because the shared harness has to be able to REMOVE it — a
+	// flag-off lane that an ambient export can turn on is not a lane.
+	EnvProxiedNative = "GC_BEADS_PROXIED_NATIVE"
 )
 
 // RequireTopologyMatrix skips unless the run opted in to the topology matrix.
@@ -22,16 +29,16 @@ const (
 // runs them back to back: on the Mac Tier A runner it reached 14 minutes and
 // blew `make test-acceptance`'s 20-minute budget with M2-direct-local alone
 // taking 11 of them. Tier A is a smoke tier, so the matrix is not its job.
-// The Beads / topology acceptance workflow sets this and is where the shapes
-// actually run, under GC_REQUIRE_ACCEPTANCE_TOOLING so it cannot pass by
-// skipping them.
+// Bazel's acceptance lane sets this (test/acceptance/BUILD.bazel) and is
+// where the shapes actually run, under GC_REQUIRE_ACCEPTANCE_TOOLING so it
+// cannot pass by skipping them.
 func RequireTopologyMatrix(t *testing.T) {
 	t.Helper()
 	if requireSwitchOn(EnvTopologyMatrix) {
 		return
 	}
 	t.Skipf("the topology matrix stands up real Dolt servers per shape and does not fit the Tier A smoke budget; "+
-		"set %s=1 (the Beads / topology acceptance job does) to run it", EnvTopologyMatrix)
+		"set %s=1 (Bazel's acceptance lane does) to run it", EnvTopologyMatrix)
 }
 
 // requireSwitchOn reports whether a GC_REQUIRE_* switch is on. Unset, empty and
@@ -65,10 +72,41 @@ func MissingLegacyGC(t *testing.T, format string, args ...any) {
 	skipOrFail(t, EnvRequireLegacyGC, fmt.Sprintf(format, args...))
 }
 
-func skipOrFail(t *testing.T, env, reason string) {
+// MissingPrecondition reports a row whose precondition this host, or the bd
+// under test, did not produce — a database with no row for the row to remove,
+// a record bd cleaned up that the row needs to find. It is MissingTooling's
+// contract on the same switch: a skip for a developer's local run, and a
+// failure under EnvRequireTooling.
+//
+// The switch is the right one because the jobs that set it are the ones whose
+// rows are the evidence (Bazel's acceptance lane, which sets it, is
+// required). An in-row t.Skip there let the job report success without
+// running the row, visible only in a step summary nobody gates on; a bd that
+// changed the behavior the row depends on must turn that lane red, so somebody
+// decides what the row should now measure.
+func MissingPrecondition(t *testing.T, format string, args ...any) {
+	t.Helper()
+	missingPrecondition(t, format, args...)
+}
+
+func missingPrecondition(t skipOrFailer, format string, args ...any) {
+	t.Helper()
+	skipOrFail(t, EnvRequireTooling, fmt.Sprintf(format, args...))
+}
+
+// skipOrFailer is the part of *testing.T skipOrFail uses, so the choice it
+// makes has a test that does not have to fail one.
+type skipOrFailer interface {
+	Helper()
+	Skip(args ...any)
+	Fatalf(format string, args ...any)
+}
+
+func skipOrFail(t skipOrFailer, env, reason string) {
 	t.Helper()
 	if requireSwitchOn(env) {
 		t.Fatalf("%s is set, so this test must run, but %s", env, reason)
+		return
 	}
 	t.Skip(reason)
 }

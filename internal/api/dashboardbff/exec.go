@@ -7,8 +7,11 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/searchpath"
 )
 
 // Output caps and concurrency, mirroring the BFF's exec-core.ts contract.
@@ -51,11 +54,12 @@ type execResult struct {
 // execRunner bounds subprocess concurrency with a semaphore (MAX_CONCURRENT in
 // the BFF) and runs every command shell-free under a clean environment.
 type execRunner struct {
-	sem chan struct{}
+	sem           chan struct{}
+	bdPingTimeout time.Duration
 }
 
 func newExecRunner() *execRunner {
-	return &execRunner{sem: make(chan struct{}, maxConcurrent)}
+	return &execRunner{sem: make(chan struct{}, maxConcurrent), bdPingTimeout: bdPingTimeout}
 }
 
 // run executes cmd with positional args (never a shell string), under a clean
@@ -90,6 +94,13 @@ func (r *execRunner) run(ctx context.Context, cmd string, args []string, timeout
 
 	if cctx.Err() == context.DeadlineExceeded && !stdout.truncated {
 		return nil, &execError{msg: "exec timed out", kind: execErrTimeout}
+	}
+	// runErr != nil keeps this off a child that completed successfully before
+	// the cancel landed: its stdout is whole, and callers like
+	// localToolVersions memoize probe results (error rows included) for
+	// localToolsTTL.
+	if runErr != nil && cctx.Err() == context.Canceled && !stdout.truncated {
+		return nil, &execError{msg: "exec canceled", kind: execErrSpawn}
 	}
 
 	exitCode := 0
@@ -150,7 +161,11 @@ func (b *cappedBuffer) markTruncated() {
 func (b *cappedBuffer) String() string { return b.buf.String() }
 
 // cleanEnv builds the minimal environment passed to every subprocess. No host
-// environment is inherited; PATH/HOME/LANG are assigned intentionally.
+// environment is inherited; PATH/HOME/LANG are assigned intentionally. PATH is
+// ADMIN_PATH when set, otherwise the deterministic searchpath order of
+// cleanEnvPath, recomputed per spawn so a user-managed dir created after
+// startup is found. That order is built from the raw HOME: the child's /tmp
+// HOME fallback never contributes search dirs.
 //
 // GITHUB_TOKEN is deliberately NOT forwarded: none of the dashboard's
 // credential-free probes (git log/diff, Beads connectivity, version probes)
@@ -161,12 +176,9 @@ func (b *cappedBuffer) String() string { return b.buf.String() }
 // repo cannot drive an out-of-band helper that inherits this environment.
 func cleanEnv() []string {
 	home := os.Getenv("HOME")
+	path := cleanEnvPath(os.Getenv("ADMIN_PATH"), home, runtime.GOOS)
 	if home == "" {
 		home = "/tmp"
-	}
-	path := os.Getenv("ADMIN_PATH")
-	if path == "" {
-		path = home + "/.local/bin:/usr/local/bin:/usr/bin:/bin"
 	}
 	return []string{
 		"PATH=" + path,
@@ -176,6 +188,20 @@ func cleanEnv() []string {
 		"GIT_TERMINAL_PROMPT=0",
 		"GIT_ALLOW_PROTOCOL=none",
 	}
+}
+
+// cleanEnvBasePath is the fixed system base of the subprocess search path.
+const cleanEnvBasePath = "/usr/local/bin:/usr/bin:/bin"
+
+// cleanEnvPath returns the subprocess PATH: adminPath verbatim when set
+// (operator override), otherwise a deterministic, user-aware search order
+// built from cleanEnvBasePath. An empty home adds no home-derived entries.
+// The ambient process PATH is never consulted.
+func cleanEnvPath(adminPath, home, goos string) string {
+	if adminPath != "" {
+		return adminPath
+	}
+	return searchpath.ExpandPath(home, goos, cleanEnvBasePath)
 }
 
 // Terminal-output sanitizer, ported from exec.ts. Strips OSC sequences, CSI
@@ -280,5 +306,9 @@ func (r *execRunner) execBdPing(ctx context.Context, beadsPath string) (*execRes
 	if !isValidHostPath(beadsPath) || !strings.HasSuffix(beadsPath, "/.beads") {
 		return nil, validationErr("invalid beads store path")
 	}
-	return r.run(ctx, "bd", []string{"ping", "--db", beadsPath, "--json"}, bdPingTimeout, maxBytes)
+	timeout := r.bdPingTimeout
+	if timeout <= 0 {
+		timeout = bdPingTimeout
+	}
+	return r.run(ctx, "bd", []string{"ping", "--db", beadsPath, "--json"}, timeout, maxBytes)
 }

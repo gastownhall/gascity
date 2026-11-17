@@ -21,6 +21,9 @@ base = "builtin:claude"
 [imports.hyperscale]
 source = "packs/hyperscale"
 
+# No [storage]: this city stays single-store. Its sessions run in pods, and a
+# split city's pods refuse mail, nudges, sessions, orders and workflows until
+# worker-site transport exists, so gc init starts a k8s city single-store too.
 [session]
 provider = "k8s"
 
@@ -49,8 +52,8 @@ tick_debounce = "500ms"
 # The builtin-pack-imports doctor check repairs missing entries.
 [imports.core]
 source = "https://github.com/gastownhall/gascity.git//internal/bootstrap/packs/core"
-version = "sha:f895c0ff47d6ee9334ed282a416387eb5b084d24"
+version = "sha:e38ce9cc55d15fa351199c042f0d07aba1a347af"
 
 [imports.bd]
 source = "https://github.com/gastownhall/gascity.git//examples/bd"
-version = "sha:f895c0ff47d6ee9334ed282a416387eb5b084d24"
+version = "sha:e38ce9cc55d15fa351199c042f0d07aba1a347af"

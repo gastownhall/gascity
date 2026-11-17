@@ -5,10 +5,15 @@ go_library(
     srcs = [
         "manager.go",
         "orphan_reap.go",
+        "orphan_reap_unix.go",
+        "orphan_reap_windows.go",
         "proxy_process.go",
         "proxy_process_linux.go",
         "proxy_process_other.go",
+        "proxy_process_windows.go",
         "publication.go",
+        "reap_key_other.go",
+        "reap_key_windows.go",
         "registry.go",
         "types.go",
         "validate.go",
@@ -19,8 +24,12 @@ go_library(
     deps = [
         "//internal/beads",
         "//internal/citylayout",
+        "//internal/config",
         "//internal/execenv",
+        "//internal/fsys",
+        "//internal/pathutil",
         "//internal/pidutil",
+        "//internal/processgroup",
         "//internal/runtime",
         "//internal/supervisor",
     ],
@@ -31,6 +40,9 @@ go_test(
     srcs = [
         "manager_test.go",
         "orphan_reap_test.go",
+        "proxy_process_pdeathsig_linux_test.go",
+        "proxy_process_ready_test.go",
+        "proxy_process_reap_test.go",
         "proxy_process_test.go",
         "publication_test.go",
         "testenv_import_test.go",
@@ -40,10 +52,43 @@ go_test(
     deps = [
         "//internal/beads",
         "//internal/citylayout",
+        "//internal/config",
         "//internal/execenv",
         "//internal/pidutil",
+        "//internal/processgroup",
         "//internal/runtime",
         "//internal/supervisor",
         "//internal/testenv",
     ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
 )

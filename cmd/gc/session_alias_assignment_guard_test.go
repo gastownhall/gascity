@@ -21,6 +21,8 @@ import (
 // including the session currently bound to that slot. If a future change makes
 // the guards enumerate slot aliases, a rebind would let a fresh session shield
 // (or inherit) a dead session's claim — the ambiguity this design rejects.
+// Stable aliases (namepool members, canonical singletons) are the opposite case
+// and ARE assignment identities; see pool_alias_assignment_test.go.
 
 // legacyAliasedPoolSessionBead is a pre-fix pool session bead: it still carries
 // the slot in metadata["alias"], the shape in-flight beads have at deploy time.
@@ -81,7 +83,7 @@ func TestDrainGuardsKeepPoolSessionClaimingUnderItsSessionName(t *testing.T) {
 	info := sessiontest.SeedBead(t, legacyAliasedPoolSessionBead("gcg-session-x", sessionName, "", ""))
 	mustCreateInProgressWork(t, store, sessionName)
 
-	has, err := sessionHasOpenAssignedWorkForConfigInfo("", aliasGuardConfig(), store, nil, info)
+	has, err := sessionHasOpenAssignedWorkForConfigInfo(testSeatWork("", aliasGuardConfig(), store, nil), info)
 	if err != nil {
 		t.Fatalf("sessionHasOpenAssignedWorkForConfigInfo: %v", err)
 	}
@@ -89,7 +91,7 @@ func TestDrainGuardsKeepPoolSessionClaimingUnderItsSessionName(t *testing.T) {
 		t.Fatal("orphan-drain guard missed a session-name-form pool claim; the whole fix rests on this form being visible")
 	}
 
-	closeGate, err := sessionHasOpenAssignedWorkForReachableStoreForCloseGate("", aliasGuardConfig(), store, nil, info)
+	closeGate, err := sessionHasOpenAssignedWorkForReachableStoreForCloseGate(testSeatWork("", aliasGuardConfig(), store, nil), info)
 	if err != nil {
 		t.Fatalf("sessionHasOpenAssignedWorkForReachableStoreForCloseGate: %v", err)
 	}
@@ -111,7 +113,7 @@ func TestAssignmentGuardsIgnoreTransientPoolSlotAliases(t *testing.T) {
 		mustCreateInProgressWork(t, store, assignee)
 	}
 
-	has, err := sessionHasOpenAssignedWorkForConfigInfo("", aliasGuardConfig(), store, nil, info)
+	has, err := sessionHasOpenAssignedWorkForConfigInfo(testSeatWork("", aliasGuardConfig(), store, nil), info)
 	if err != nil {
 		t.Fatalf("sessionHasOpenAssignedWorkForConfigInfo: %v", err)
 	}
@@ -120,7 +122,7 @@ func TestAssignmentGuardsIgnoreTransientPoolSlotAliases(t *testing.T) {
 			"ownership must never keep a session alive")
 	}
 
-	closeGate, err := sessionHasOpenAssignedWorkForReachableStoreForCloseGate("", aliasGuardConfig(), store, nil, info)
+	closeGate, err := sessionHasOpenAssignedWorkForReachableStoreForCloseGate(testSeatWork("", aliasGuardConfig(), store, nil), info)
 	if err != nil {
 		t.Fatalf("sessionHasOpenAssignedWorkForReachableStoreForCloseGate: %v", err)
 	}
@@ -128,7 +130,7 @@ func TestAssignmentGuardsIgnoreTransientPoolSlotAliases(t *testing.T) {
 		t.Fatal("the drain-ack close gate honored a transient pool slot alias")
 	}
 
-	if sessionBeadHasAssignedWorkInfo([]beads.Bead{{ID: "wb", Status: "in_progress", Assignee: "gascity/gc.run-operator-1"}}, info) {
+	if sessionBeadHasAssignedWorkInfo([]beads.Bead{{ID: "wb", Status: "in_progress", Assignee: "gascity/gc.run-operator-1"}}, info, aliasGuardConfig()) {
 		t.Fatal("the pool reuse predicate honored a transient pool slot alias")
 	}
 }
