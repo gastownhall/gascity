@@ -8,7 +8,7 @@ import (
 )
 
 // HasOpenLaneOps reports whether conversation holds an open op that a lane
-// executes, with one keyed read of at most one row (gc.op.open =
+// executes, with one keyed read of at most one op row (LabelOp, gc.op.open =
 // conversation and gc.op.executor = lane). Like HasSubmittedOps it needs no
 // conditional-write capability or namespace, so a caller that usually has
 // nothing to do, such as the in-band hook pass on every prompt (DES-O1 §8),
@@ -22,6 +22,7 @@ func HasOpenLaneOps(store beads.SessionStore, conversation string) (bool, error)
 		return false, err
 	}
 	rows, err := store.List(beads.ListQuery{
+		Label:    LabelOp,
 		Metadata: map[string]string{keyOpen: conversation, keyExecutor: string(ExecutorLane)},
 		Limit:    1,
 		TierMode: beads.TierBoth,

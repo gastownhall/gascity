@@ -33,7 +33,7 @@ func newHarness(t *testing.T) *harness {
 
 // newHarnessOver records every operation on backing (a store wrapping mem, or
 // mem itself) and checks, at cleanup, that the op store only ever listed by
-// a key: gc.op.open, or gc.op.status on op rows.
+// a key: gc.op.open or gc.op.status, on op rows.
 func newHarnessOver(t *testing.T, mem *beads.MemStore, backing beads.Store) *harness {
 	t.Helper()
 	rec := beadstest.NewOpRecordingStore(backing)
@@ -53,10 +53,10 @@ func assertOnlyKeyedLists(t *testing.T, rec *beadstest.OpRecordingStore) {
 			continue
 		}
 		q := op.Query
-		openKeyed := q.Label == "" && len(q.Metadata) == 1 && q.Metadata[keyOpen] != ""
+		openKeyed := q.Label == LabelOp && len(q.Metadata) == 1 && q.Metadata[keyOpen] != ""
 		legacyKeyed := q.Label == LabelOp && len(q.Metadata) == 1 && q.Metadata[keyStatus] == string(StatusSubmitted)
 		laneScanKeyed := q.Label == LabelOp && len(q.Metadata) == 2 && q.Metadata[keyExecutor] == string(ExecutorLane) && q.Metadata[keyStatus] != ""
-		openLaneKeyed := q.Label == "" && len(q.Metadata) == 2 && q.Metadata[keyOpen] != "" && q.Metadata[keyExecutor] == string(ExecutorLane)
+		openLaneKeyed := q.Label == LabelOp && len(q.Metadata) == 2 && q.Metadata[keyOpen] != "" && q.Metadata[keyExecutor] == string(ExecutorLane)
 		interruptsKeyed := strings.HasPrefix(q.Label, labelOpConvPrefix) && len(q.Metadata) == 1 && q.Metadata[keyKind] == string(KindInterrupt) && q.Limit > 0
 		causationKeyed := q.Label == LabelOp && len(q.Metadata) == 2 && q.Metadata[keyCausation] != "" && q.Metadata[keyExecutor] == string(ExecutorLane)
 		recentClosedKeyed := strings.HasPrefix(q.Label, labelOpConvPrefix) && len(q.Metadata) == 3 && q.Metadata[keyStatus] == string(StatusClosed) &&
@@ -594,8 +594,8 @@ func TestListOpen(t *testing.T) {
 		t.Fatalf("ListOpen = %v, want %v", ids(got), want)
 	}
 	if ops := h.rec.Ops(); len(ops) != 1 || ops[0].Kind != beadstest.OpList ||
-		ops[0].Query.Label != "" || fmt.Sprint(ops[0].Query.Metadata) != fmt.Sprint(map[string]string{keyOpen: "gc-1"}) {
-		t.Fatalf("ListOpen issued %+v, want exactly one List keyed by %s", ops, keyOpen)
+		ops[0].Query.Label != LabelOp || fmt.Sprint(ops[0].Query.Metadata) != fmt.Sprint(map[string]string{keyOpen: "gc-1"}) {
+		t.Fatalf("ListOpen issued %+v, want exactly one List of op rows (label %s) keyed by %s: a metadata key alone has no index, so the read would cost the store's whole history", ops, LabelOp, keyOpen)
 	}
 	h.rec.Reset()
 	if ops, quarantined, err := h.store.ListOpenTolerant("gc-1"); err != nil || len(quarantined) != 0 || fmt.Sprint(ids(ops)) != fmt.Sprint(ids(got)) {

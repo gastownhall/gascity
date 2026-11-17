@@ -43,8 +43,8 @@ func TestHasOpenLaneOps(t *testing.T) {
 		t.Fatal("an open lane op was not seen")
 	}
 	ops := h.rec.Ops()
-	if len(ops) != 1 || ops[0].Kind != beadstest.OpList || ops[0].Query.Limit != 1 {
-		t.Fatalf("probe ops = %+v, want one keyed list of limit 1", ops)
+	if len(ops) != 1 || ops[0].Kind != beadstest.OpList || ops[0].Query.Limit != 1 || ops[0].Query.Label != LabelOp {
+		t.Fatalf("probe ops = %+v, want one list of op rows (label %s) of limit 1: the probe runs on every prompt, and a metadata key alone has no index", ops, LabelOp)
 	}
 }
 
@@ -59,5 +59,45 @@ func TestHasOpenLaneOpsErrors(t *testing.T) {
 	}
 	if _, err := HasOpenLaneOps(beads.SessionStore{Store: beads.NewMemStore()}, ""); err == nil {
 		t.Fatal("an empty conversation reported no error")
+	}
+}
+
+// TestOpenOpReadsCostTheSameWhateverHistoryTheStoreHolds is the scale rule for
+// the reads a message pays: the hook's probe on every prompt and the lane's
+// read on every pass examine the op rows, not the ledger. Ten times the closed
+// order-run history costs them nothing more.
+func TestOpenOpReadsCostTheSameWhateverHistoryTheStoreHolds(t *testing.T) {
+	cost := func(history int) int {
+		t.Helper()
+		h := newHarness(t)
+		if err := beadstest.ClosedHistory(h.mem, history); err != nil {
+			t.Fatal(err)
+		}
+		h.propose(t, msgReq("open", "x"))
+		h.rec.Reset()
+		if due, err := HasOpenLaneOps(beads.SessionStore{Store: h.rec}, "gc-1"); err != nil || !due {
+			t.Fatalf("HasOpenLaneOps = %v, %v; want the open op seen", due, err)
+		}
+		if ops, _, err := h.store.ListOpenTolerant("gc-1"); err != nil || len(ops) != 1 {
+			t.Fatalf("ListOpenTolerant = %d ops, %v; want the one open op", len(ops), err)
+		}
+		rows, err := beadstest.LedgerRows(h.mem)
+		if err != nil {
+			t.Fatal(err)
+		}
+		examined := 0
+		for _, op := range h.rec.Ops() {
+			if op.Kind == beadstest.OpList {
+				examined += beadstest.IndexedRows(rows, op.Query)
+			}
+		}
+		return examined
+	}
+	small, large := cost(30), cost(300)
+	if small != large {
+		t.Fatalf("the open-op reads examine %d rows over 30 closed order runs and %d over 300; a message's reads must not grow with the store's history", small, large)
+	}
+	if small == 0 {
+		t.Fatal("the open-op reads examined no row; the model priced nothing")
 	}
 }
