@@ -200,9 +200,17 @@ func withProjectedOpenEnvLocked(openEnvKeys []string, env map[string]string, cre
 	}, nil
 }
 
+// restoreNativeDoltOpenEnv puts back what the projection recorded in previous.
+// A nil entry means the key was unset before the projection; an absent entry
+// means a failed projection never reached the key, so its ambient value is left
+// alone.
 func restoreNativeDoltOpenEnv(previous map[string]*string, keys []string) {
 	for _, key := range keys {
-		if value := previous[key]; value != nil {
+		value, reached := previous[key]
+		if !reached {
+			continue
+		}
+		if value != nil {
 			_ = os.Setenv(key, *value)
 			continue
 		}
