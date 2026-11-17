@@ -21,6 +21,7 @@ import (
 )
 
 func TestFreshGasCityScaffoldRecordsNativeInfrastructureBeforeRegistration(t *testing.T) {
+	t.Setenv(initInfrastructureEnv, initInfrastructureNative)
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "")
 	admitInitSplitBD(t)
@@ -81,6 +82,60 @@ func TestNativeInfrastructureFollowsInitStorageDecision(t *testing.T) {
 			}
 			if got := written.Storage != nil; got != tc.wantSplit {
 				t.Fatalf("city.toml [storage] present = %t, want %t", got, tc.wantSplit)
+			}
+		})
+	}
+}
+
+// TestDefaultInitServesInfrastructureFromSQLite is the storage rule for a
+// fresh factory city: with no --storage it is born split, its infrastructure
+// classes on the local SQLite binding, as on main. The native infrastructure
+// workspace (a Dolt store opened through the beads library) is taken only when
+// the operator asks for it by name. Left as the default it put every
+// infrastructure read on Dolt, where their cost grows with the closed history.
+func TestDefaultInitServesInfrastructureFromSQLite(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		optIn      string
+		wantNative bool
+	}{
+		{name: "default"},
+		{name: "another value is not the opt-in", optIn: "1"},
+		{name: "native asked for by name", optIn: "native", wantNative: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_BEADS", "bd")
+			t.Setenv("GC_DOLT", "")
+			t.Setenv(initInfrastructureEnv, tc.optIn)
+			initStorageFakeBD(t)
+			stubInitBDVersion(t, "bd version 1.3.4 (7ef2fd05e: HEAD@7ef2fd05eb0c)")
+			stubInitSplitBDJudge(t, "bd-1.3.4", nil)
+			fs := fsys.NewFake()
+			city := "/new-gascity"
+			var stdout, stderr bytes.Buffer
+			if code := doInit(fs, city, wizardConfig{configName: "gascity", provider: "codex"}, "", &stdout, &stderr, false); code != 0 {
+				t.Fatalf("scaffold = %d: %s", code, stderr.String())
+			}
+			_, planErr := fs.ReadFile(filepath.Join(city, ".gc", "init-infrastructure.json"))
+			if native := planErr == nil; native != tc.wantNative {
+				t.Fatalf("native infrastructure intent recorded = %t, want %t", native, tc.wantNative)
+			}
+			written, err := config.Parse(fs.Files[filepath.Join(city, "city.toml")])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantNative {
+				if written.Storage != nil {
+					t.Fatalf("city.toml carries [storage] %+v; the native initializer writes its own once the workspace is ready", written.Storage)
+				}
+				return
+			}
+			if written.Storage == nil {
+				t.Fatal("city.toml has no [storage]: a default factory city must be born split")
+			}
+			binding, ok := written.Storage.Bindings[written.Storage.Classes.Sessions]
+			if !ok || binding.Provider != config.StorageProviderSQLiteBeads {
+				t.Fatalf("infrastructure binding = %+v (found %t), want provider %q", binding, ok, config.StorageProviderSQLiteBeads)
 			}
 		})
 	}
@@ -301,6 +356,7 @@ func TestNativeInfrastructureExplicitStorageOpsAndExistingDataStayUntouched(t *t
 }
 
 func TestNativeInfrastructureHTTPScaffoldDefersAndResumesBeforeBootstrap(t *testing.T) {
+	t.Setenv(initInfrastructureEnv, initInfrastructureNative)
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "")
 	admitInitSplitBD(t)

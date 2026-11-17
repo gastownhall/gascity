@@ -379,10 +379,12 @@ a repair tool for unknown native data.
 ## `gc init` Created a Single-Store City
 
 A new city is born split unless something keeps it single-store, and `gc init`
-prints the reason on stderr. The HTTP city create follows the same rules. Where
-none of the reasons below applies, a fresh `gc init` of the default template
-with no `--storage`, on a bd work store, leaves `[storage]` to its native
-infrastructure workspace, which adds the section once that workspace is ready.
+prints the reason on stderr. The HTTP city create follows the same rules. A
+born-split city serves its infrastructure classes from the local SQLite
+binding. Where none of the reasons below applies, `GC_INIT_INFRASTRUCTURE=native`
+makes a fresh `gc init` of the default template with no `--storage`, on a bd
+work store, leave `[storage]` to a native infrastructure workspace instead,
+which adds the section once that workspace is ready.
 
 | Notice names | Why | To get the split |
 |---|---|---|

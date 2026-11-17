@@ -81,6 +81,20 @@ func freshInitInfrastructureCandidate(fs fsys.FS, city string, adopting bool) bo
 	return true
 }
 
+// initInfrastructureEnv names the environment variable that asks gc init for
+// the native infrastructure workspace. A fresh factory city is born split onto
+// the SQLite binding unless it is set to initInfrastructureNative.
+const (
+	initInfrastructureEnv    = "GC_INIT_INFRASTRUCTURE"
+	initInfrastructureNative = "native"
+)
+
+// nativeInitInfrastructureRequested reports whether the operator asked gc init
+// for the native infrastructure workspace by name.
+func nativeInitInfrastructureRequested() bool {
+	return strings.TrimSpace(os.Getenv(initInfrastructureEnv)) == initInfrastructureNative
+}
+
 // freshInitInfrastructureEnabled reports whether this process records native
 // infrastructure for a fresh bundled factory scaffold at all: Dolt is not
 // skipped and the bead provider is bd.
