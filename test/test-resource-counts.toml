@@ -1346,7 +1346,7 @@ tagged = true
 [[count]]
 path = "cmd/gc/storage_snapshot_hosted_bd_integration_test.go"
 resource = "subprocess"
-calls = 4
+calls = 5
 tagged = true
 
 [[count]]
