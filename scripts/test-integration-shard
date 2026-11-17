@@ -257,7 +257,7 @@ validate_selected_tests() {
   available="$(list_integration_tests)"
   missing=0
   for requested_name in "${requested[@]}"; do
-    if ! printf '%s\n' "$available" | grep -Fxq -- "$requested_name"; then
+    if ! grep -Fxq -- "$requested_name" <<<"$available"; then
       echo "missing integration test for shard ${shard}: ${requested_name}" >&2
       missing=1
     fi
@@ -391,7 +391,7 @@ run_rest_full_shard_modulo() {
   done <<< "$listed"
 
   for test_name in "${all_tests[@]}"; do
-    if ! printf '%s' "$excluded" | grep -Fxq -- "$test_name"; then
+    if ! grep -Fxq -- "$test_name" <<<"$excluded"; then
       rest_tests+=("$test_name")
     fi
   done

@@ -23,7 +23,7 @@ old=$2
 new=$3
 repo=gastownhall/rbe-worker
 
-is_sha() { printf '%s' "$1" | grep -qE '^[0-9a-f]{40}$'; }
+is_sha() { grep -qE '^[0-9a-f]{40}$' <<<"$1"; }
 
 is_sha "$new" || { echo "::error title=rbe-worker bump::NEW '$new' is not a 40-hex sha"; exit 2; }
 case "$old" in

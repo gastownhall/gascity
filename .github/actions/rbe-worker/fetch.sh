@@ -76,7 +76,7 @@ if [ -n "$canary" ]; then
 		echo "::error title=rbe-worker::a canary commit is for the pool worker's fetch (pin) alone"
 		exit 2
 	fi
-	if ! printf '%s' "$canary" | grep -qE '^[0-9a-f]{40}$' || [ "$(printf '%s' "$canary" | wc -l | tr -d ' ')" != 0 ]; then
+	if ! grep -qE '^[0-9a-f]{40}$' <<<"$canary" || [ "$(printf '%s' "$canary" | wc -l | tr -d ' ')" != 0 ]; then
 		echo "::error title=rbe-worker::the canary commit must be one 40-hex sha"
 		exit 2
 	fi
@@ -146,7 +146,7 @@ fi
 # the worker's own setup (sudo install) follows symlinks anywhere under
 # worker/, so any entry there with mode 120000 is refused too, wherever it
 # is (e.g. worker/rbe-action-launch -> /outside).
-symlink=$(git -C "$dir" ls-tree -r "$sha" -- worker | awk '$1 == "120000" { print $4; exit }')
+symlink=$(git -C "$dir" ls-tree -r "$sha" -- worker | awk '$1 == "120000" && !seen { print $4; seen = 1 }')
 if [ -n "$symlink" ]; then
 	echo "::error title=rbe-worker::$sha's $symlink is a symlink; refused"
 	exit 1

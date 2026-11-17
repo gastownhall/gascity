@@ -55,7 +55,7 @@ find_stable_identity() {
 	local candidate
 
 	for pattern in 'Apple Development:' 'Developer ID Application:' 'GasCity Dev'; do
-		candidate=$(printf '%s\n' "$candidates" | awk -F '"' -v pattern="$pattern" 'index($0, pattern) {print $2; exit}')
+		candidate=$(awk -F '"' -v pattern="$pattern" 'index($0, pattern) {print $2; exit}' <<<"$candidates")
 		if [ -n "$candidate" ]; then
 			printf '%s\n' "$candidate"
 			return 0

@@ -69,7 +69,7 @@ jobs:
             key="fresh-$fp-$(date -u +%G-W%V)"
             # Only main's entries: a PR's cache (refs/pull/N/merge) is the PR
             # author's to write, and must never suppress a fresh run.
-            if gh cache list -R "$GITHUB_REPOSITORY" --ref refs/heads/main --key "$key" --json key -q '.[].key' | grep -qx "$key"; then
+            if gh cache list -R "$GITHUB_REPOSITORY" --ref refs/heads/main --key "$key" --json key -q '.[].key' | grep -x "$key" >/dev/null; then
               decision=false reason="a green fresh run already covered this host this week"
             else
               reason="a new host fingerprint or a new week"

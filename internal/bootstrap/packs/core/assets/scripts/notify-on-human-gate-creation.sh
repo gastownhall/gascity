@@ -107,7 +107,7 @@ set_rig_args() {
     [ -n "$_prefix" ] && [ "$_prefix" != "$1" ] || return 0
     _rig="$(printf '%s' "$RIGS_JSON" \
         | jq -r --arg p "$_prefix" '(.rigs // [])[] | select(.prefix == $p and (.hq != true)) | .name' 2>/dev/null \
-        | head -1)"
+        | sed -n '1p')"
     if [ -n "$_rig" ]; then
         RIG_ARG1="--rig"
         RIG_ARG2="$_rig"

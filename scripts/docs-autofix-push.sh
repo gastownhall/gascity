@@ -135,7 +135,7 @@ post_or_update_comment() {
     local ids existing
     ids="$(gh api --paginate "repos/$BASE_REPO/issues/$PR_NUMBER/comments" \
         --jq ".[] | select(.body | startswith(\"$COMMENT_MARKER\")) | .id")"
-    existing="$(printf '%s\n' "$ids" | head -1)"
+    existing="$(head -1 <<<"$ids")"
     if [ -n "$existing" ]; then
         gh api --method PATCH "repos/$BASE_REPO/issues/comments/$existing" \
             -F body=@"$body_file" >/dev/null

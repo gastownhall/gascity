@@ -143,7 +143,7 @@ echo ""
 echo "--- Download gc binary ---"
 if [[ "$VERSION" == "latest" ]]; then
     TAG=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" \
-        | grep '"tag_name"' | head -1 | cut -d'"' -f4)
+        | grep '"tag_name"' | sed -n '1p' | cut -d'"' -f4)
     if [[ -z "$TAG" ]]; then
         echo "ERROR: could not resolve latest release tag" >&2
         exit 1
@@ -210,7 +210,7 @@ echo ""
 echo "--- Test: gc doctor ---"
 if gc_run doctor --help >/dev/null 2>&1; then
     # doctor will report missing deps on a clean machine — that's expected.
-    gc_run doctor 2>&1 | head -30 || true
+    gc_run doctor 2>&1 | sed -n '1,30p' || true
     result pass "doctor (runs; dependency warnings expected)"
 else
     result skip "doctor (not available)"

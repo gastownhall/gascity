@@ -304,7 +304,7 @@ do_start() {
 
     # --- Start idempotency ---
     # If container is running and tmux session is alive, leave it alone.
-    if docker inspect -f '{{.State.Running}}' "$cname" 2>/dev/null | grep -q true; then
+    if docker inspect -f '{{.State.Running}}' "$cname" 2>/dev/null | grep true >/dev/null; then
         if dtmux "$cname" has-session -t "=$TMUX_SESSION" 2>/dev/null; then
             return 0  # healthy — idempotent no-op
         fi
@@ -821,7 +821,7 @@ case "$op" in
         # Try host-side copy first (works with bind-mounted workdirs).
         # Fall back to docker cp if needed.
         work_dir=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$cname" 2>/dev/null \
-            | grep '^GC_DIR=' | head -1 | cut -d= -f2-)
+            | grep '^GC_DIR=' | sed -n '1p' | cut -d= -f2-)
         if [ -n "$work_dir" ] && [ -d "$work_dir" ]; then
             dst="$work_dir"
             [ -n "$rel_dst" ] && dst="$work_dir/$rel_dst"

@@ -139,7 +139,8 @@ jobs:
         run: |
           set -euo pipefail
           bd version
-          if ! bd init --help | grep -q -- --proxied-server; then
+          help=$(bd init --help)
+          if ! grep -q -- --proxied-server <<<"$help"; then
             echo "::error::bd at $(command -v bd) has no --proxied-server support" >&2
             exit 1
           fi
