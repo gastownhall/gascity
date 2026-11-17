@@ -669,7 +669,7 @@ func metadataWithFrom(metadata map[string]string, from string) map[string]string
 	if metadata["from"] != "" {
 		return metadata
 	}
-	merged := make(map[string]string, len(metadata)+1)
+	merged := make(map[string]string, len(metadata))
 	for k, v := range metadata {
 		merged[k] = v
 	}
