@@ -37,7 +37,7 @@ const (
 	managedPiHookVersion       = 10
 	managedOpenCodeHookVersion = 8
 	managedMimoCodeHookVersion = 4
-	managedOmpHookVersion      = 2
+	managedOmpHookVersion      = 3
 )
 
 // hookSource is a managed hook file in the normalized form its upgrade markers
@@ -345,6 +345,9 @@ func installOverlayManaged(fs fsys.FS, cityDir, workDir, provider string) error 
 		if provider == "antigravity" && rel == path.Join(".agents", "hooks.json") {
 			return writeJSONOverlayManaged(fs, dst, data)
 		}
+		if provider == "gemini" && rel == path.Join(".gemini", "settings.json") {
+			return writeJSONOverlayManaged(fs, dst, data)
+		}
 		if provider == "codex" && rel == path.Join(".codex", "hooks.json") {
 			return writeCodexHooksManaged(fs, cityDir, dst, data)
 		}
@@ -615,6 +618,9 @@ func ompHookNeedsUpgrade(existing []byte) bool {
 		!hookContains(src, "gascityOmpExtension") ||
 		!hookContains(src, "GC_PROVIDER_SESSION_ID") ||
 		!hookContains(src, "GC_PROVIDER_SESSION_ID_REQUIRED") ||
+		!hookContains(src, "GC_MANAGED_SESSION_HOOK") ||
+		!hookContains(src, "GC_HOOK_EVENT_NAME") ||
+		!hookContains(src, "pendingPrimeContext") ||
 		!hookContains(src, `pi.on("session_start"`) ||
 		!hookContains(src, `pi.on("session_compact"`) ||
 		!hookContains(src, `pi.on("before_agent_start"`) ||
