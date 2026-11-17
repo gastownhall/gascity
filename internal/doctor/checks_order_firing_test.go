@@ -9,6 +9,9 @@ import (
 	"testing"
 	"time"
 
+	// Embedded zoneinfo: the order-timezone test must not depend on host tzdata.
+	_ "time/tzdata"
+
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -796,5 +799,81 @@ func TestOrderFiringCurrent_InapplicableOrderIsReportedNotStale(t *testing.T) {
 	}
 	if got := strings.Join(result.Details, "\n"); !strings.Contains(got, "dolt-health: inapplicable (backend http)") {
 		t.Fatalf("details = %v, want the order reported inapplicable", result.Details)
+	}
+}
+
+// donnaBenchSchedule is donna-bench's deliberate three tries a day (gm-d9n7j).
+// Its minimum gap is 1h but it only owes one firing per day, so age alone says
+// nothing about whether a scheduled firing was missed.
+const donnaBenchSchedule = "30 1,2,4 * * *"
+
+func TestOrderFiringCurrent_CronJudgedBySchedule(t *testing.T) {
+	pt := func(day, hour, minute int) time.Time {
+		return time.Date(2026, 11, day, hour, minute, 0, 0, time.UTC)
+	}
+	tests := []struct {
+		name      string
+		schedule  string
+		lastFired time.Time
+		now       time.Time
+		want      CheckStatus
+		wantText  string
+	}{
+		// The reported bug: healthy 3-try daily cron read CRITICAL stale ~18h a day.
+		{"three tries: hours after the day's run", donnaBenchSchedule, pt(16, 4, 30), pt(16, 11, 0), StatusOK, "not yet due"},
+		{"three tries: just before the first try", donnaBenchSchedule, pt(16, 4, 30), pt(17, 1, 20), StatusOK, "not yet due"},
+		{"three tries: first try is a few minutes old", donnaBenchSchedule, pt(16, 4, 30), pt(17, 1, 40), StatusOK, "scheduled run"},
+		// A real stall still goes red, on the same thresholds a regular cron gets.
+		{"three tries: first try missed, overdue", donnaBenchSchedule, pt(16, 4, 30), pt(17, 3, 0), StatusWarning, "(overdue)"},
+		{"three tries: first try missed, stale", donnaBenchSchedule, pt(16, 4, 30), pt(17, 4, 0), StatusError, "(CRITICAL: stale)"},
+		// Same class of bug for any irregular schedule: a weekday-only cron
+		// owes nothing over the weekend.
+		{"weekdays: Friday run, Sunday noon", "0 9 * * 1-5", pt(13, 9, 0), pt(15, 12, 0), StatusOK, "not yet due"},
+		{"weekdays: Monday run missed by 14h", "0 9 * * 1-5", pt(13, 9, 0), pt(16, 23, 0), StatusWarning, "(overdue)"},
+		// A classic every-N-minutes cron keeps its current classification,
+		// including when the last firing is not slot-aligned.
+		{"every 15m: current", "*/15 * * * *", pt(17, 12, 0).Add(5 * time.Minute), pt(17, 12, 10), StatusOK, "expected every 15m"},
+		{"every 15m: overdue", "*/15 * * * *", pt(17, 12, 0).Add(-40 * time.Minute), pt(17, 12, 0), StatusWarning, "(overdue)"},
+		{"every 15m: stale", "*/15 * * * *", pt(17, 12, 0).Add(-50 * time.Minute), pt(17, 12, 0), StatusError, "(CRITICAL: stale)"},
+		{"every 4h, unaligned last firing: still overdue", "0 */4 * * *", pt(17, 1, 0), pt(17, 12, 0), StatusWarning, "(overdue)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityPath, cfg := orderFiringTestCity(t)
+			writeOrderFiringTestOrder(t, cityPath, "donna-bench", "cron", tt.schedule)
+			writeOrderFiringTestEvents(t, cityPath,
+				events.Event{Type: events.ControllerStarted, Ts: tt.now.Add(-72 * time.Hour)},
+				events.Event{Type: events.OrderFired, Subject: "donna-bench", Ts: tt.lastFired},
+			)
+			result := runOrderFiringCurrentTest(t, cfg, cityPath, tt.now)
+			if result.Status != tt.want {
+				t.Fatalf("status = %v, want %v; msg = %s; details = %v", result.Status, tt.want, result.Message, result.Details)
+			}
+			if got := strings.Join(result.Details, "\n"); !strings.Contains(got, tt.wantText) {
+				t.Fatalf("details = %q, want it to contain %q", got, tt.wantText)
+			}
+		})
+	}
+}
+
+// The scheduled slot is read in the order's own zone, as the dispatcher reads
+// it. At 01:40 Pacific the 01:30 Pacific try is 10 minutes old; read in UTC the
+// same instant would put the last owed slot 8 hours back.
+func TestOrderFiringCurrent_CronSlotsReadInOrderTimeZone(t *testing.T) {
+	now := time.Date(2026, 11, 17, 9, 40, 0, 0, time.UTC) // 01:40 PST
+	cityPath, cfg := orderFiringTestCity(t)
+	writeOrderFiringRawOrder(t, cityPath, "donna-bench", `[order]
+exec = "true"
+trigger = "cron"
+schedule = "`+donnaBenchSchedule+`"
+tz = "America/Los_Angeles"
+`)
+	writeOrderFiringTestEvents(t, cityPath,
+		events.Event{Type: events.ControllerStarted, Ts: now.Add(-72 * time.Hour)},
+		events.Event{Type: events.OrderFired, Subject: "donna-bench", Ts: time.Date(2026, 11, 16, 12, 30, 0, 0, time.UTC)}, // 04:30 PST
+	)
+	result := runOrderFiringCurrentTest(t, cfg, cityPath, now)
+	if result.Status != StatusOK {
+		t.Fatalf("status = %v, want OK; msg = %s; details = %v", result.Status, result.Message, result.Details)
 	}
 }
