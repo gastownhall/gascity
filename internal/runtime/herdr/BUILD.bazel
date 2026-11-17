@@ -115,6 +115,7 @@ go_test(
         "redaction_test.go",
         "registry_stop_cleanup_windows_test.go",
         "seedmeta_test.go",
+        "server_env_test.go",
         "serveralive_test.go",
         "setupcommand_fixture_other_test.go",
         "setupcommand_fixture_windows_test.go",

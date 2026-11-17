@@ -352,3 +352,8 @@ func tokenPipeOwners(token windows.Token) ([]*windows.SID, error) {
 // pointer file it leaves at the path after an unclean exit does not stop a new
 // server from starting: the new server overwrites it.
 func (c *client) removeStaleSocket() {}
+
+// clearDeadSocket has nothing to check on Windows: a named pipe disappears
+// with its server, so there is no stale endpoint to unlink and no live
+// server's endpoint a launch could orphan.
+func (c *client) clearDeadSocket(context.Context) error { return nil }
