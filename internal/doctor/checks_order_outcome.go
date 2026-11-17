@@ -140,16 +140,48 @@ type OrderOutcomeHealthyCheck struct {
 	cityPath  string
 	threshold int
 	grace     time.Duration
+	// scanBound, when positive, switches the check to bounded mode: it decodes
+	// at most this many bytes of the active event log and reports orders it
+	// cannot decide as unresolved. Zero is exact mode, the full read.
+	scanBound int64
+}
+
+// OrderOutcomeOption configures the repeated-order-failure check.
+type OrderOutcomeOption func(*OrderOutcomeHealthyCheck)
+
+// WithOrderOutcomeScanBound makes the check read at most maxScanBytes of the
+// newest part of the active event log, so a caller with a latency budget gets a
+// verdict whatever the log's size. A bounded result may under-claim and never
+// over-claims: each order is judged exactly, flagged as failing with "at least
+// N" failures, or listed as unresolved (OrderOutcomePayload). Without this
+// option, or with maxScanBytes <= 0, the check is exact and reads every event,
+// archives included.
+func WithOrderOutcomeScanBound(maxScanBytes int64) OrderOutcomeOption {
+	return func(c *OrderOutcomeHealthyCheck) { c.scanBound = max(maxScanBytes, 0) }
+}
+
+// OrderOutcomePayload is the structured evidence of a bounded
+// order-outcome-healthy run, projected into `gc doctor --json`. It is set only
+// when the bound left orders undecided, so an exact result and a fully resolved
+// bounded result carry no payload.
+type OrderOutcomePayload struct {
+	// Unresolved names the monitored orders the scan bound could not decide.
+	// They are neither failing nor known healthy.
+	Unresolved []string `json:"unresolved,omitempty"`
 }
 
 // NewOrderOutcomeHealthyCheck creates the repeated-order-failure check.
-func NewOrderOutcomeHealthyCheck(cfg *config.City, cityPath string) *OrderOutcomeHealthyCheck {
-	return &OrderOutcomeHealthyCheck{
+func NewOrderOutcomeHealthyCheck(cfg *config.City, cityPath string, opts ...OrderOutcomeOption) *OrderOutcomeHealthyCheck {
+	c := &OrderOutcomeHealthyCheck{
 		cfg:       cfg,
 		cityPath:  cityPath,
 		threshold: orderOutcomeFailureThreshold,
 		grace:     orderOutcomeStartGrace,
 	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 // Name returns the check identifier shown by gc doctor.
@@ -200,7 +232,7 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	eventPath := filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl")
-	log, err := readOrderOutcomeLog(ctx, eventPath)
+	log, err := c.readLog(ctx, eventPath)
 	if err != nil {
 		result.Status = StatusError
 		result.Message = fmt.Sprintf("read order outcome events: %v", err)
@@ -210,6 +242,7 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 	worst := StatusOK
 	monitored := 0
 	failing := 0
+	var unresolved []string
 	var firstFailingHint string
 	suspendedRigs := orderFiringCurrentSuspendedRigs(c.cfg, cityPath)
 
@@ -226,11 +259,14 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 		monitored++
 
-		streak, lastMessage, sawOutcome, skipped := consecutiveOrderFailures(log.bySubject[order.ScopedName()], order.ScopedName(), log.starts, c.grace)
-		status, detail := classifyOrderOutcome(order, streak, c.threshold, lastMessage, sawOutcome, skipped)
-		worst = worseStatus(worst, status)
-		result.Details = append(result.Details, detail)
-		if status != StatusOK {
+		verdict := judgeOrderOutcome(order, log, c.threshold, c.grace)
+		result.Details = append(result.Details, verdict.Detail)
+		if verdict.Unresolved {
+			unresolved = append(unresolved, orderDisplayName(order))
+			continue
+		}
+		worst = worseStatus(worst, verdict.Status)
+		if verdict.Status != StatusOK {
 			failing++
 			if firstFailingHint == "" {
 				// gc order history takes a bare name positionally and filters
@@ -250,13 +286,100 @@ func (c *OrderOutcomeHealthyCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	result.Status = worst
-	if worst == StatusOK {
-		result.Message = "all scheduled orders succeeding"
-	} else {
-		result.Message = fmt.Sprintf("%d order(s) failing repeatedly", failing)
+	result.Message = orderOutcomeSummary(worst, failing, len(unresolved))
+	if worst != StatusOK {
 		result.FixHint = fmt.Sprintf(orderOutcomeInspectHintFmt, firstFailingHint)
 	}
+	if len(unresolved) > 0 {
+		slices.Sort(unresolved)
+		result.Payload = OrderOutcomePayload{Unresolved: unresolved}
+	}
 	return result
+}
+
+// orderOutcomeSummary is the aggregate message. With nothing unresolved it is
+// the exact-mode text; an unresolved order is added to it, never folded into
+// "succeeding" or "failing".
+func orderOutcomeSummary(worst CheckStatus, failing, unresolved int) string {
+	msg := "all scheduled orders succeeding"
+	switch {
+	case worst != StatusOK:
+		msg = fmt.Sprintf("%d order(s) failing repeatedly", failing)
+	case unresolved > 0:
+		msg = "no repeated failures in the scanned window"
+	}
+	if unresolved > 0 {
+		msg = fmt.Sprintf("%s; %d order(s) unresolved within the scan bound", msg, unresolved)
+	}
+	return msg
+}
+
+// readLog reads the event log the way the check was configured: the whole
+// history in exact mode, a byte-bounded window of the active log otherwise.
+func (c *OrderOutcomeHealthyCheck) readLog(ctx *CheckContext, eventPath string) (orderOutcomeLog, error) {
+	if c.scanBound > 0 {
+		return readOrderOutcomeLogBounded(ctx, eventPath, c.scanBound)
+	}
+	return readOrderOutcomeLog(ctx, eventPath)
+}
+
+// orderOutcomeVerdict is one order's result. Unresolved means the scan could not
+// decide the order; Status is meaningless then and must not be read as OK.
+type orderOutcomeVerdict struct {
+	Status     CheckStatus
+	Detail     string
+	Unresolved bool
+}
+
+// judgeOrderOutcome decides one order from what log holds.
+//
+// Over a complete log it is the exact algorithm. Over a window it may only
+// under-claim, so the newest-first walk returns the exact verdict when a success
+// inside the window ends the streak, and otherwise stops at the first failure
+// it cannot place. A failure is placed when no controller start it depends on
+// can lie outside the window (see orderOutcomeLog.decidable). When the window
+// ends with no success, older history may still extend the streak: at least
+// threshold counted failures is a warning that exact mode confirms, and fewer
+// is unresolved.
+func judgeOrderOutcome(order orders.Order, log orderOutcomeLog, threshold int, grace time.Duration) orderOutcomeVerdict {
+	name := order.ScopedName()
+	outcomes := log.bySubject[name]
+	if log.complete {
+		streak, lastMessage, sawOutcome, skipped := consecutiveOrderFailures(outcomes, name, log.starts, grace)
+		status, detail := classifyOrderOutcome(order, streak, threshold, lastMessage, sawOutcome, skipped)
+		return orderOutcomeVerdict{Status: status, Detail: detail}
+	}
+
+	display := orderDisplayName(order)
+	unresolved := orderOutcomeVerdict{Detail: fmt.Sprintf("%s: unresolved, older history not scanned", display), Unresolved: true}
+	streak, skipped := 0, 0
+	var lastMessage string
+	for i := len(outcomes) - 1; i >= 0; i-- {
+		event := outcomes[i]
+		if event.Type != events.OrderFailed {
+			status, detail := classifyOrderOutcome(order, streak, threshold, lastMessage, true, skipped)
+			return orderOutcomeVerdict{Status: status, Detail: detail}
+		}
+		if !log.decidable(event.Ts, grace) {
+			return unresolved
+		}
+		if nearControllerStart(event.Ts, log.starts, grace) {
+			skipped++
+			continue
+		}
+		if streak == 0 {
+			lastMessage = event.Message
+		}
+		streak++
+	}
+	if streak < threshold {
+		return unresolved
+	}
+	_, detail := classifyOrderOutcome(order, streak, threshold, lastMessage, true, skipped)
+	return orderOutcomeVerdict{
+		Status: StatusWarning,
+		Detail: strings.Replace(detail, display+": ", display+": at least ", 1) + "; older history not scanned",
+	}
 }
 
 // orderOutcomeLog is everything order-outcome-healthy needs from the event log,
@@ -267,6 +390,22 @@ type orderOutcomeLog struct {
 	bySubject map[string][]events.Event
 	// starts holds every controller.started timestamp — see nearControllerStart.
 	starts []time.Time
+	// complete is true when the log is the whole history. When false it is the
+	// newest window of it, and horizon is the timestamp of the oldest event that
+	// window covers (zero if it covered none).
+	complete bool
+	horizon  time.Time
+}
+
+// decidable reports whether a failure at ts can be placed against controller
+// starts using only this log. In a window, every start outside it is at or
+// before the horizon, so it can be within grace of ts only if the horizon is
+// itself within grace of ts. This relies on timestamps being monotone with Seq.
+func (l orderOutcomeLog) decidable(ts time.Time, grace time.Duration) bool {
+	if l.complete || grace <= 0 {
+		return true
+	}
+	return !l.horizon.IsZero() && l.horizon.Before(ts.Add(-grace))
 }
 
 // readOrderOutcomeLog reads order.completed, order.failed and controller.started
@@ -280,12 +419,38 @@ func readOrderOutcomeLog(ctx *CheckContext, eventPath string) (orderOutcomeLog, 
 	goCtx, cancel := checkGoContext(ctx)
 	defer cancel()
 
-	evts, err := events.ReadFilteredContext(goCtx, eventPath, events.Filter{
-		Types: []string{events.OrderCompleted, events.OrderFailed, events.ControllerStarted},
-	})
+	evts, err := events.ReadFilteredContext(goCtx, eventPath, events.Filter{Types: orderOutcomeEventTypes})
 	if err != nil {
 		return orderOutcomeLog{}, err
 	}
+	log := groupOrderOutcomes(evts)
+	log.complete = true
+	return log, nil
+}
+
+// readOrderOutcomeLogBounded reads the same events from at most maxScanBytes of
+// the newest part of the active log. Archives are never opened, so the result is
+// complete only when that window reaches the start of the active log and no
+// archive exists.
+func readOrderOutcomeLogBounded(ctx *CheckContext, eventPath string, maxScanBytes int64) (orderOutcomeLog, error) {
+	goCtx, cancel := checkGoContext(ctx)
+	defer cancel()
+
+	window, err := events.ReadTailWindow(goCtx, eventPath, events.Filter{Types: orderOutcomeEventTypes, MaxScanBytes: maxScanBytes})
+	if err != nil {
+		return orderOutcomeLog{}, err
+	}
+	log := groupOrderOutcomes(window.Events)
+	log.complete = window.Complete
+	log.horizon = window.Oldest
+	return log, nil
+}
+
+var orderOutcomeEventTypes = []string{events.OrderCompleted, events.OrderFailed, events.ControllerStarted}
+
+// groupOrderOutcomes splits events into per-order outcomes and controller
+// starts, in Seq order.
+func groupOrderOutcomes(evts []events.Event) orderOutcomeLog {
 	// Seq, not Ts: the log is append-only and seq-ordered, and two events in the
 	// same second would otherwise sort arbitrarily. The reader already yields Seq
 	// order (archives oldest-first, then the active log), so this is a guard, not
@@ -302,7 +467,7 @@ func readOrderOutcomeLog(ctx *CheckContext, eventPath string) (orderOutcomeLog, 
 		}
 		log.bySubject[event.Subject] = append(log.bySubject[event.Subject], event)
 	}
-	return log, nil
+	return log
 }
 
 func compareEventSeq(a, b events.Event) int { return cmp.Compare(a.Seq, b.Seq) }

@@ -26,6 +26,7 @@ go_library(
         "reader_each.go",
         "reader_history_tail.go",
         "reader_since.go",
+        "reader_tail_window.go",
         "recorder.go",
         "rename_linux.go",
         "rename_other.go",

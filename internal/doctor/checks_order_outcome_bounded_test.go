@@ -128,13 +128,13 @@ func legacyOutcomeVerdicts(t testing.TB, eventPath string, ords []orders.Order, 
 	return out
 }
 
-func boundedVerdict(t testing.TB, eventPath string, bound int64, o orders.Order, threshold int) orderOutcomeVerdict {
+func boundedVerdict(t testing.TB, eventPath string, bound int64, o orders.Order) orderOutcomeVerdict {
 	t.Helper()
 	log, err := readOrderOutcomeLogBounded(nil, eventPath, bound)
 	if err != nil {
 		t.Fatalf("bounded read (bound=%d): %v", bound, err)
 	}
-	return judgeOrderOutcome(o, log, threshold, orderOutcomeStartGrace)
+	return judgeOrderOutcome(o, log, orderOutcomeFailureThreshold, orderOutcomeStartGrace)
 }
 
 func testOrder(name string) orders.Order { return orders.Order{Name: name, Trigger: "cooldown"} }
@@ -157,7 +157,7 @@ func TestBoundedFailuresNearAnUnscannedControllerStartAreUnresolved(t *testing.T
 	if exact.status != StatusOK {
 		t.Fatalf("fixture drifted: exact status = %v (%s), want OK (all failures inside the grace window)", exact.status, exact.detail)
 	}
-	got := boundedVerdict(t, path, size+1, testOrder("a"), 3)
+	got := boundedVerdict(t, path, size+1, testOrder("a"))
 
 	if !got.Unresolved {
 		t.Fatalf("verdict = %+v, want unresolved: the start that decides these failures is outside the scan", got)
@@ -180,7 +180,7 @@ func TestBoundedCountsFailuresPastTheGraceHorizonAsALowerBound(t *testing.T) {
 	}
 	path, size := writeBoundedTestLog(t, t.TempDir(), b.evts, 1)
 
-	got := boundedVerdict(t, path, size+1, testOrder("a"), 3)
+	got := boundedVerdict(t, path, size+1, testOrder("a"))
 
 	if got.Unresolved || got.Status != StatusWarning {
 		t.Fatalf("verdict = %+v, want a warning: 3 failures are provably past every start", got)
@@ -208,7 +208,7 @@ func TestBoundedRareOrderBeyondTheWindowIsUnresolvedNotOK(t *testing.T) {
 	if exact.status != StatusWarning {
 		t.Fatalf("fixture drifted: exact = %v (%s), want a warning", exact.status, exact.detail)
 	}
-	got := boundedVerdict(t, path, boundCoveringNewest(t, path, 100), testOrder("rare"), 3)
+	got := boundedVerdict(t, path, boundCoveringNewest(t, path, 100), testOrder("rare"))
 
 	if !got.Unresolved {
 		t.Fatalf("verdict = %+v, want unresolved: its history is outside the window", got)
@@ -229,7 +229,7 @@ func TestBoundedSuccessInsideTheWindowResolvesLikeExact(t *testing.T) {
 	path, _ := writeBoundedTestLog(t, t.TempDir(), b.evts, 0)
 
 	exact := legacyOutcomeVerdicts(t, path, []orders.Order{testOrder("a")}, 3)["a"]
-	got := boundedVerdict(t, path, boundCoveringNewest(t, path, 101), testOrder("a"), 3)
+	got := boundedVerdict(t, path, boundCoveringNewest(t, path, 101), testOrder("a"))
 
 	if got.Unresolved || got.Status != exact.status || got.Detail != exact.detail {
 		t.Fatalf("verdict = %+v, want the exact verdict %+v", got, exact)
@@ -251,7 +251,7 @@ func TestBoundedFullCoverageEqualsExact(t *testing.T) {
 	ords := []orders.Order{testOrder("a"), testOrder("b"), testOrder("never-ran")}
 	exact := legacyOutcomeVerdicts(t, path, ords, 3)
 	for _, o := range ords {
-		got := boundedVerdict(t, path, size*2, o, 3)
+		got := boundedVerdict(t, path, size*2, o)
 		want := exact[o.ScopedName()]
 		if got.Unresolved || got.Status != want.status || got.Detail != want.detail {
 			t.Errorf("%s: verdict = %+v, want exact %+v", o.Name, got, want)
@@ -268,7 +268,7 @@ func TestBoundedOrderWithNoEventsIsUnresolvedWhileAnArchiveExists(t *testing.T) 
 	b.add(events.OrderCompleted, "b", boundedTestStart.Add(time.Hour), "")
 	path, size := writeBoundedTestLog(t, t.TempDir(), b.evts, 1)
 
-	got := boundedVerdict(t, path, size*2, testOrder("never-ran"), 3)
+	got := boundedVerdict(t, path, size*2, testOrder("never-ran"))
 
 	if !got.Unresolved {
 		t.Fatalf("verdict = %+v, want unresolved: an archive may hold its runs", got)
