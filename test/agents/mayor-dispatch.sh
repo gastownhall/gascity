@@ -16,7 +16,7 @@ while true; do
     # Check inbox for dispatch requests
     inbox=$(gc mail inbox "$GC_AGENT" 2>/dev/null || true)
 
-    if echo "$inbox" | bead_id_rows | grep -q .; then
+    if echo "$inbox" | bead_id_rows | grep . >/dev/null; then
         # Process each message
         echo "$inbox" | bead_id_rows | while read -r line; do
             msg_id=$(echo "$line" | awk '{print $1}')

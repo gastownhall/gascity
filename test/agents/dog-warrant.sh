@@ -16,8 +16,8 @@ ASSIGNEE="${GC_SESSION_NAME:-$GC_AGENT}"
 
 while true; do
     hooked=$(bd ready --assignee="$ASSIGNEE" 2>/dev/null || true)
-    if echo "$hooked" | bead_id_rows | grep -q .; then
-        warrant_id=$(echo "$hooked" | bead_id_rows | head -1 | awk '{print $1}')
+    if echo "$hooked" | bead_id_rows | grep . >/dev/null; then
+        warrant_id=$(echo "$hooked" | bead_id_rows | sed -n '1p' | awk '{print $1}')
 
         details=$(bd show "$warrant_id" 2>/dev/null || true)
         _="${details}"
