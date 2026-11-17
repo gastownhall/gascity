@@ -842,8 +842,10 @@ func TestResolveSessionID_BoundedListCalls(t *testing.T) {
 	if len(store.listCalls) == 0 {
 		t.Fatalf("expected at least one List call")
 	}
-	if len(store.listCalls) != 2 {
-		t.Fatalf("List calls = %d, want 2", len(store.listCalls))
+	// session_name, then alias, each read among session beads by type and
+	// by label (TestResolveSessionID_NameLookupsReadSessionBeadsOnly).
+	if len(store.listCalls) != 4 {
+		t.Fatalf("List calls = %d, want 4", len(store.listCalls))
 	}
 	for i, q := range store.listCalls {
 		if len(q.Metadata) == 0 {
@@ -1056,5 +1058,115 @@ func TestRepairEmptyType_StoreFailureIsLoggedAndPatchesInMemory(t *testing.T) {
 	logged := buf.String()
 	if !strings.Contains(logged, b.ID) || !strings.Contains(logged, "update rejected") {
 		t.Errorf("expected repair failure log mentioning %q and the error, got %q", b.ID, logged)
+	}
+}
+
+// TestResolveSessionID_NameLookupsReadSessionBeadsOnly pins how a name is
+// looked up: among session beads, by their type or by the session label, and
+// never by the metadata key alone. A metadata key has no index, so a lookup
+// keyed by it alone compares it on every bead the store holds, closed history
+// of every other kind included. A sidecar resolves its session's name every
+// few seconds; on a store holding a week of closed order runs each such
+// lookup took one to two seconds of the store's time.
+//
+// The two reads together select exactly what one metadata read did: a session
+// bead is one with the session type, or with no type and the session label.
+func TestResolveSessionID_NameLookupsReadSessionBeadsOnly(t *testing.T) {
+	mem := beads.NewMemStore()
+	create := func(b beads.Bead) beads.Bead {
+		t.Helper()
+		created, err := mem.Create(b)
+		if err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		return created
+	}
+	both := create(beads.Bead{Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{"session_name": "s-both"}})
+	typed := create(beads.Bead{Type: session.BeadType, Metadata: map[string]string{"session_name": "s-typed", "alias": "typed-alias"}})
+	untyped := create(beads.Bead{Labels: []string{session.LabelSession}, Metadata: map[string]string{"session_name": "s-untyped"}})
+	empty := ""
+	if err := mem.Update(untyped.ID, beads.UpdateOpts{Type: &empty}); err != nil {
+		t.Fatalf("clearing the type: %v", err)
+	}
+	create(beads.Bead{Type: "task", Metadata: map[string]string{"session_name": "s-stranger"}})
+	create(beads.Bead{Type: "task", Labels: []string{session.LabelSession}, Metadata: map[string]string{"session_name": "s-labeled-task"}})
+	twinA := create(beads.Bead{Type: session.BeadType, Metadata: map[string]string{"session_name": "s-twin"}})
+	twinB := create(beads.Bead{Labels: []string{session.LabelSession}, Metadata: map[string]string{"session_name": "s-twin"}})
+	if err := mem.Update(twinB.ID, beads.UpdateOpts{Type: &empty}); err != nil {
+		t.Fatalf("clearing the type: %v", err)
+	}
+
+	store := &listCountingStore{Store: mem}
+	for identifier, want := range map[string]string{
+		"s-both":      both.ID,
+		"s-typed":     typed.ID,
+		"typed-alias": typed.ID,
+		"s-untyped":   untyped.ID,
+	} {
+		got, err := session.ResolveSessionID(beadstest.Sessions(store), identifier)
+		if err != nil || got != want {
+			t.Errorf("ResolveSessionID(%q) = %q, %v; want %q", identifier, got, err, want)
+		}
+	}
+	for _, identifier := range []string{"s-stranger", "s-labeled-task", "s-nobody"} {
+		if got, err := session.ResolveSessionID(beadstest.Sessions(store), identifier); !errors.Is(err, session.ErrSessionNotFound) {
+			t.Errorf("ResolveSessionID(%q) = %q, %v; want ErrSessionNotFound: the bead is not a session bead", identifier, got, err)
+		}
+	}
+	if _, err := session.ResolveSessionID(beadstest.Sessions(store), "s-twin"); !errors.Is(err, session.ErrAmbiguous) ||
+		!strings.Contains(err.Error(), twinA.ID) || !strings.Contains(err.Error(), twinB.ID) {
+		t.Errorf("ResolveSessionID(s-twin) = %v, want ErrAmbiguous naming %s and %s", err, twinA.ID, twinB.ID)
+	}
+	if len(store.listCalls) == 0 {
+		t.Fatal("no listing was recorded")
+	}
+	for _, q := range store.listCalls {
+		if q.Type != session.BeadType && q.Label != session.LabelSession {
+			t.Errorf("name lookup %+v is keyed by metadata alone; it must read session beads only (type %q or label %q)", q, session.BeadType, session.LabelSession)
+		}
+		if len(q.Metadata) != 1 {
+			t.Errorf("name lookup %+v is not keyed by one identifier", q)
+		}
+	}
+}
+
+// TestResolveSessionID_NameLookupCostsTheSameWhateverHistoryTheStoreHolds is
+// the scale rule for the lookup every sidecar repeats: resolving a session by
+// name examines the session beads, not the ledger. Ten times the closed
+// order-run history costs it nothing more.
+func TestResolveSessionID_NameLookupCostsTheSameWhateverHistoryTheStoreHolds(t *testing.T) {
+	cost := func(history int) int {
+		t.Helper()
+		mem := beads.NewMemStore()
+		if err := beadstest.ClosedHistory(mem, history); err != nil {
+			t.Fatal(err)
+		}
+		want, err := mem.Create(beads.Bead{
+			Type: session.BeadType, Labels: []string{session.LabelSession},
+			Metadata: map[string]string{"session_name": "s-gc-1"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		store := &listCountingStore{Store: mem}
+		if got, err := session.ResolveSessionID(beadstest.Sessions(store), "s-gc-1"); err != nil || got != want.ID {
+			t.Fatalf("ResolveSessionID = %q, %v; want %q", got, err, want.ID)
+		}
+		rows, err := beadstest.LedgerRows(mem)
+		if err != nil {
+			t.Fatal(err)
+		}
+		examined := 0
+		for _, q := range store.listCalls {
+			examined += beadstest.IndexedRows(rows, q)
+		}
+		return examined
+	}
+	small, large := cost(30), cost(300)
+	if small != large {
+		t.Fatalf("the name lookup examines %d rows over 30 closed order runs and %d over 300; it must not grow with the store's history", small, large)
+	}
+	if small == 0 {
+		t.Fatal("the name lookup examined no row; the model priced nothing")
 	}
 }
