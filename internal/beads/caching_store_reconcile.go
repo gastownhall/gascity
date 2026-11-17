@@ -98,6 +98,9 @@ func (c *CachingStore) reconcileLoop(ctx context.Context, stagger time.Duration)
 // reconcileIfDue runs one reconcile when one is due, none is in flight, and
 // the reconcile gate (WithReconcileGate), if any, allows it.
 func (c *CachingStore) reconcileIfDue(now time.Time) {
+	// Counted before the gate is asked: the owner either sees this cycle in
+	// flight or the cycle sees the gate closed (WithStoreWork).
+	defer c.beginStoreWork()()
 	if c.reconcileGate != nil && !c.reconcileGate() {
 		return
 	}

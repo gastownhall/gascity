@@ -3608,6 +3608,17 @@ func (c *capturingRecorder) Record(e events.Event) {
 	c.events = append(c.events, e)
 }
 
+// eventsOfType returns the captured events of one type, in emission order.
+func (c *capturingRecorder) eventsOfType(t string) []events.Event {
+	out := make([]events.Event, 0, len(c.events))
+	for _, e := range c.events {
+		if e.Type == t {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // strandedEvents returns the captured events.SessionStranded events,
 // in emission order. Specialized to the only event type any test in
 // this package currently filters for; add a sibling method (or migrate
@@ -8040,6 +8051,103 @@ func TestReconcileSessionBeads_SuspendedNamedSessionInsideDesiredStateDrainsAsSu
 	}
 }
 
+// TestReconcileSessionBeads_ResumeCancelsInFlightSuspendDrainAndRestartsNamedSession
+// pins the post-resume contract for a named-always session. City suspend
+// leaves a configured named-always session in the desired set (the discover
+// backfill) and the wake arm starts a suspend drain while the runtime is
+// still alive. The runtime can then stop before the next tick, and a resume
+// puts the session back in demand. The replacement start runs before
+// advanceSessionDrains, so an in-flight suspend drain that is not canceled
+// sees the new process as still running and arms GC_DRAIN_ACK on it. The
+// following tick stops that process before it can write its report. Resume
+// must cancel the suspend drain and leave the replacement running.
+func TestReconcileSessionBeads_ResumeCancelsInFlightSuspendDrainAndRestartsNamedSession(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "test-cmd"}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:                 "test-cmd",
+		SessionName:             sessionName,
+		TemplateName:            "worker",
+		ConfiguredNamedIdentity: "worker",
+		ConfiguredNamedMode:     "always",
+	}
+	session := env.createSessionBead(sessionName, "worker")
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "always",
+	})
+	env.markSessionActive(&session)
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "test-cmd"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	reload := func() beads.Bead {
+		t.Helper()
+		b, err := env.store.Get(session.ID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", session.ID, err)
+		}
+		return b
+	}
+
+	// City suspend, runtime still alive: the wake arm records a suspend drain
+	// and does not stop the process on this tick.
+	env.cfg.Workspace.SuspendedOnStart = true
+	env.reconcile([]beads.Bead{reload()})
+	ds := env.dt.get(session.ID)
+	if ds == nil || ds.reason != "suspended" {
+		t.Fatalf("suspend drain = %+v, want reason %q\nstdout:\n%s\nstderr:\n%s", ds, "suspended", env.stdout.String(), env.stderr.String())
+	}
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatal("suspend drain must leave the runtime up until ack or timeout")
+	}
+
+	// The runtime stops in the gap before the next reconciler tick.
+	if err := env.sp.Stop(sessionName); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+
+	// Resume. The desired entry stays; only the suspension flag lifts.
+	env.cfg.Workspace.SuspendedOnStart = false
+	env.stdout.Reset()
+	env.stderr.Reset()
+	env.reconcile([]beads.Bead{reload()})
+
+	if !env.sp.IsRunning(sessionName) {
+		b := reload()
+		t.Fatalf("resumed named session %q must be running; status=%q state=%q sleep_reason=%q state_reason=%q\nstdout:\n%s\nstderr:\n%s",
+			sessionName, b.Status, b.Metadata["state"], b.Metadata["sleep_reason"], b.Metadata["state_reason"], env.stdout.String(), env.stderr.String())
+	}
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("in-flight suspend drain must be canceled once the city resumes and the session is desired: %+v", *ds)
+	}
+	if ack, err := env.sp.GetMeta(sessionName, "GC_DRAIN_ACK"); err != nil {
+		t.Fatalf("GetMeta GC_DRAIN_ACK: %v", err)
+	} else if ack == "1" {
+		t.Fatal("GC_DRAIN_ACK must not stay armed on the replacement process")
+	}
+
+	// The next tick observes provider drain-ack metadata. A leftover ack
+	// stops the process that just started.
+	poolDesired := make(map[string]int)
+	for _, tp := range env.desiredState {
+		if tp.TemplateName != "" {
+			poolDesired[tp.TemplateName]++
+		}
+	}
+	env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{reload()}, poolDesired, &providerDrainOps{sp: env.sp})
+	if !env.sp.IsRunning(sessionName) {
+		b := reload()
+		t.Fatalf("following tick stopped the resumed session; status=%q state=%q sleep_reason=%q\nstdout:\n%s\nstderr:\n%s",
+			b.Status, b.Metadata["state"], b.Metadata["sleep_reason"], env.stdout.String(), env.stderr.String())
+	}
+}
+
 func TestReconcileSessionBeads_SuspendedNotRunningClosed(t *testing.T) {
 	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
@@ -10205,10 +10313,10 @@ func TestReconcileSessionBeads_ConfiguredNamedSessionRetriesAfterTransientStartF
 }
 
 // TestReconcileSessionBeads_ConfiguredNamedSessionStartFailureLoopQuarantines
-// pins the bound on those prompt retries: with no in-flight lease to wait
-// out, a start that keeps failing is retried each tick only until the
-// startup-health episode reaches defaultMaxWakeAttempts and quarantines the
-// name.
+// pins the bound on those retries: with no in-flight lease to wait out, a
+// start that keeps failing is retried once each per-failure backoff hold
+// (sr-xf2xj) has passed, only until the startup-health episode reaches
+// defaultMaxWakeAttempts and quarantines the name.
 func TestReconcileSessionBeads_ConfiguredNamedSessionStartFailureLoopQuarantines(t *testing.T) {
 	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{
@@ -10243,7 +10351,13 @@ func TestReconcileSessionBeads_ConfiguredNamedSessionStartFailureLoopQuarantines
 		if woken := env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{current}, nil, nil); woken != 0 {
 			t.Fatalf("tick %d woken = %d, want 0 (every start fails)", tick, woken)
 		}
-		env.clk.Advance(time.Second)
+		// Wait out the per-failure backoff hold, never the quarantine: past
+		// the threshold the quarantine alone must keep holding starts back.
+		step := time.Second
+		if ep, err := sessionFrontDoor(env.store).LoadStartupHealthEpisode(sessionName); err == nil && ep.BackoffUntil.After(env.clk.Now().Add(step)) {
+			step = ep.BackoffUntil.Sub(env.clk.Now())
+		}
+		env.clk.Advance(step)
 		var err error
 		if current, err = env.store.Get(session.ID); err != nil {
 			t.Fatalf("Get(%s) after tick %d: %v", session.ID, tick, err)
@@ -10260,7 +10374,7 @@ func TestReconcileSessionBeads_ConfiguredNamedSessionStartFailureLoopQuarantines
 		}
 	}
 	if starts != defaultMaxWakeAttempts {
-		t.Fatalf("start attempts = %d over %d ticks, want %d (retried each tick until the startup-health quarantine)", starts, 2*defaultMaxWakeAttempts, defaultMaxWakeAttempts)
+		t.Fatalf("start attempts = %d over %d ticks, want %d (retried after each backoff hold until the startup-health quarantine)", starts, 2*defaultMaxWakeAttempts, defaultMaxWakeAttempts)
 	}
 	episode, err := sessionFrontDoor(env.store).LoadStartupHealthEpisode(sessionName)
 	if err != nil {

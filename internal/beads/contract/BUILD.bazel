@@ -14,6 +14,7 @@ go_library(
         "mode.go",
         "preflight.go",
         "preflight_checker.go",
+        "provider_owned_server_windows.go",
         "remote_backends.go",
         "shared_server.go",
     ],
@@ -71,6 +72,7 @@ go_test(
     deps = [
         "//internal/bazeltest",
         "//internal/fsys",
+        "//internal/platform/livefile",
         "//internal/testenv",
         "@com_github_steveyegge_beads//backend",
         "@in_gopkg_yaml_v3//:yaml_v3",

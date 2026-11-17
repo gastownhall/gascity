@@ -55,6 +55,10 @@ const (
 	causeScaleCheckStaleClaim = "scale-check-stale-vs-claim"
 )
 
+// allocTraceClaimedDemand prefixes the trace reason for the default-probe
+// rows a pass dropped as claims (decidePass.traceClaimedDemand).
+const allocTraceClaimedDemand = "claimed-demand:"
+
 // standInPrefix marks the ID of an in-flight create's stand-in row.
 const standInPrefix = "pending-create:"
 
@@ -102,6 +106,10 @@ func (p *decidePass) demand() {
 	collected.DefaultCounts, collected.DefaultDemand = withoutSuppressedRoutes(collected, projected)
 	collected.UnassignedRouted = projected
 	p.merged = mergeCollectedDemand(p.cfg, collected)
+	for _, refused := range p.merged.NameRefusals {
+		p.refuseWork(refused.Template, "", rowKey{}, SessionRequest{WorkBeadID: refused.WorkBeadID}, refused.err())
+	}
+	p.traceClaimedDemand()
 	for template := range p.merged.PoolScaleCheckPartial {
 		for _, cause := range p.scaleCheckCauses(template) {
 			p.markTemplate(template, true, cause)
@@ -123,6 +131,22 @@ func (p *decidePass) demand() {
 	p.named = computeNamedSessionDemandOn(p.in.CityName, p.in.CityPath, p.cfg, func() []string { return refs }, canonical,
 		p.in.SuspendedRigPaths, p.in.Demand.NamedDefault, p.in.Demand.AssignedWork, p.in.Demand.AssignedStoreRefs,
 		p.in.Demand.ReadyAssigned, p.merged.ScaleCheckCounts, io.Discard)
+}
+
+// traceClaimedDemand names each template's default-probe rows gather dropped
+// as claims (demandView.ClaimedDemand) in the decide's trace (C2.2). That
+// trace leaves the process only through the worktree-refusal alert, which
+// skips these records: operators see the cut as the planner's
+// claimed_demand_cut series (observeClaimedDemand). The rows go in the
+// reason, never in WorkBeadID: a record naming a work item is a worktree
+// refusal.
+func (p *decidePass) traceClaimedDemand() {
+	for _, template := range slices.Sorted(maps.Keys(p.in.Demand.ClaimedDemand)) {
+		p.trace = append(p.trace, allocTraceRecord{
+			Template: template,
+			Reason:   allocTraceClaimedDemand + strings.Join(p.in.Demand.ClaimedDemand[template].WorkBeadIDs, ","),
+		})
+	}
 }
 
 // scaleCheckCauses are the causes of template's scale-check partial: an
@@ -470,6 +494,7 @@ func (p *decidePass) realizePools() {
 // realization params. A refusal stalls the request, as legacy's does
 // (build_desired_state.go:5180).
 func (p *decidePass) realizeRequest(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, prefer *session.Info, request SessionRequest, used map[string]bool, usedSlots map[int]bool) {
+	request = p.placeableName(bp, cfgAgent, qualifiedName, request)
 	info, slot, plan, err := selectOrPlanPoolSessionBead(bp, cfgAgent, qualifiedName, prefer, request, p.in.Now, used, usedSlots)
 	switch {
 	case errors.Is(err, errPoolTriggerWorktreeEvidence):
@@ -482,6 +507,28 @@ func (p *decidePass) realizeRequest(bp *agentBuildParams, cfgAgent *config.Agent
 		used[info.ID] = true
 		p.selectPoolRow(cfgAgent, info, slot, request)
 	}
+}
+
+// placeableName returns request, or, when it only names its seat
+// (SessionRequest.NameOnly) and the pass refuses its work's worktree
+// evidence, the request unnamed (unnamedPoolRequest): the evidence the plan
+// checks (verifiedPoolTriggerWorkDir), or a failed verification's live
+// backoff. The refusal is traced as for a named request (refuseWork, or
+// refuse while the backoff is live); the seat still starts, in the pool's own
+// directory, as legacy's realization starts it (nameOnlyFallback).
+func (p *decidePass) placeableName(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedName string, request SessionRequest) SessionRequest {
+	if !request.NameOnly {
+		return request
+	}
+	if _, err := verifiedPoolTriggerWorkDir(bp, cfgAgent, qualifiedName, request); err != nil {
+		p.refuseWork(qualifiedName, "", rowKey{}, request, err)
+		return unnamedPoolRequest(request)
+	}
+	if p.worktreeRefused(request) {
+		p.refuse(qualifiedName, "", rowKey{}, gateWorktreeRefused)
+		return unnamedPoolRequest(request)
+	}
+	return request
 }
 
 // selectPoolRow selects a reused pool row (phase C without its effects): its
@@ -519,7 +566,10 @@ func (p *decidePass) selectPoolRow(cfgAgent *config.Agent, info session.Info, sl
 	// evidence (#34) is unusable while its verdict stands. A live row, or one
 	// whose liveness is unknown, keeps its selection and gets no binding. A
 	// parked seat's resume keeps its recorded work dir (KeptWorkDir), which
-	// the PreWake verifies as it verifies a worktree.
+	// the PreWake verifies as it verifies a worktree. A refused name's
+	// unnamed request (SessionRequest.NameRefused) moves the start candidate
+	// to the pool's own directory, as legacy moves a seat that is not alive
+	// (poolSeatBindingPatch).
 	if p.snap.Entries[k].Liveness.startCandidate() {
 		workDir, err := verifiedPoolTriggerWorkDir(p.bp, cfgAgent, ref.QualifiedInstance, request)
 		switch {
@@ -530,8 +580,18 @@ func (p *decidePass) selectPoolRow(cfgAgent *config.Agent, info session.Info, sl
 			p.refuse(cfgAgent.QualifiedName(), ref.QualifiedInstance, k, gateWorktreeRefused)
 			return
 		}
-		patch := computePoolTriggerBindingPatch(info, request, workDir)
-		if kept := parkedWorkDirKept(info, request, workDir); len(patch) > 0 || kept != "" {
+		patch := poolSeatBindingPatch(info, request, workDir)
+		kept := parkedWorkDirKept(info, request, workDir)
+		// The plan-only work dir is "" for work with worktree evidence, so a
+		// same-trigger row recording another dir compares against the spec's
+		// path, which the PreWake's verify reports. Stale, it is bound even
+		// with an empty patch: the PreWake verifies the worktree and stamps
+		// its path as the row's work dir.
+		stale := request.WorktreeSpec != nil && sameTriggerWorkDirStale(p.in.CityPath, info, request, strings.TrimSpace(request.WorktreeSpec.Path))
+		if stale {
+			kept = ""
+		}
+		if len(patch) > 0 || kept != "" || stale {
 			sel.binding = bindingOf(request, workDir)
 			sel.binding.Patch, sel.binding.KeptWorkDir = patch, kept
 		}

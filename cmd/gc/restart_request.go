@@ -200,14 +200,50 @@ func sessionFencedReset(cityPath string, sessStore beads.Store, sp runtime.Provi
 // checked write (the v2 owner's sign-off of 2026-10-27, Q1). The session
 // layer asks it only when a write is due on a store with no conditional
 // writer, so the controller is asked its latched mode (cityRunsV2) only then.
-// A worker site takes the checked write: no released bd fences, and its
-// remote controller is not reachable from the box to ask. Q1 still holds
-// there only because no v2 city has worker sites: v2 refuses the session
-// runtimes that place sessions on one (exec and pack runtimes, PAR-EXEC; ssh,
-// PAR-SSH; k8s and hybrid, PAR-K8S), explicit or by default. Lifting any of
-// them must revisit this exemption.
+//
+// A worker site's remote controller is not reachable from the box to ask, so
+// the box decides from its own config, failing closed (workerSiteRunsV2):
+// only a config that shows legacy takes the checked write (no released bd
+// fences); an exec or pack runtime not pinned to legacy, a config that
+// resolves v2, or one that cannot be loaded refuses it.
+// v2 admits remote exec and pack runtimes (PAR-EXEC; the owner's decision of
+// 2026-11-04), so a v2 city's sessions can run off the controller's host, but
+// no box is a worker site until a worker-site descriptor makes it one (CN-2:
+// `gc connect`, or a .gc/control-plane.toml). CN-2 owns the precondition: a
+// box of a v2 city becomes a worker site only once restart writes there are
+// CAS-only (a conditional writer on its store), or its descriptor carries the
+// controller's latched mode, which this then reads instead of the box's
+// config. TestCN2WorkerSiteOfAV2CityNeverTakesTheCheckedWrite pins it.
 func restartRecordsOnlyByCAS(cityPath string, cfg *config.City) func() bool {
 	return func() bool {
-		return !onWorkerSite(cityPath) && cityRunsV2(cityPath, cfg)
+		if onWorkerSite(cityPath) {
+			return workerSiteRunsV2(cityPath, cfg)
+		}
+		return cityRunsV2(cityPath, cfg)
 	}
+}
+
+// workerSiteRunsV2 reports whether a worker site's city may run v2, failing
+// closed: it reads v2 unless the box's own config shows legacy. A config
+// that cannot be loaded shows nothing, so it reads as v2. An exec or pack
+// session runtime reads as v2 unless session_reconciler pins legacy,
+// without probing: a remote box's config names the controller host's
+// script, which the box cannot run, so its probe would fail and read the
+// latch as refused or fallen back, legacy, while the controller runs v2.
+// Any other runtime resolves as the controller would latch it
+// (drainAckStrictConfig). The checked write is then refused rather than
+// taken blind.
+func workerSiteRunsV2(cityPath string, cfg *config.City) bool {
+	if cfg == nil {
+		loaded, err := loadCityConfig(cityPath, io.Discard)
+		if err != nil {
+			return true
+		}
+		cfg = loaded
+	}
+	if _, isExec := execRuntimeScript(cfg, v2SessionRuntimeName(cfg, reconcilerModeLookupEnv)); isExec {
+		mode, _, ok := cfg.Daemon.SessionReconcilerMode()
+		return !ok || mode != config.SessionReconcilerLegacy
+	}
+	return drainAckStrictConfig(cfg, cityPath)
 }

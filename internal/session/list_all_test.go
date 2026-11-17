@@ -1,6 +1,8 @@
 package session
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -380,5 +382,95 @@ func TestListAll_CachePartialDoesNotReadThroughToBackingStore(t *testing.T) {
 	}
 	if gotIDs[direct.ID] {
 		t.Errorf("bead %s written directly to backing after PrimeActive leaked into the census — ListAll should be cache-served under a partial prime, not read through to backing", direct.ID)
+	}
+}
+
+// bdRefusesSessionType is the error a bd store whose type registry does not
+// define the session type returns for a listing filtered by it, as BdStore
+// wraps it: an adopted store gc does not serve keeps bd's own types until the
+// operator registers gc's (gc doctor --fix --check custom-types:<rig>).
+const bdRefusesSessionType = `bd list both tiers: bd list: bd list: exit status 1: Error: invalid issue type "session" (valid: bug, feature, task, epic, chore, decision)`
+
+// typeRefusingStore answers a listing filtered by refusedType with err and
+// every other listing from Store.
+type typeRefusingStore struct {
+	beads.Store
+	refusedType string
+	err         error
+	rows        []beads.Bead // returned alongside err (a partial result)
+}
+
+func (s typeRefusingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Type == s.refusedType {
+		return s.rows, s.err
+	}
+	return s.Store.List(q)
+}
+
+// TestListAllSessionBeads_AStoreThatDoesNotDefineTheTypeHoldsNoneOfIt: a store
+// whose type registry has no session type cannot hold a row of it, so its
+// refusal of the type-filtered leg is an empty leg, not a failed read. The
+// label leg still answers. Before this, a city that adopted a bd store gc does
+// not serve never became ready under the v2 reconciler (every new city's
+// default): its boot census read the rig's sessions leg, the store refused the
+// type, and the census retried forever.
+func TestListAllSessionBeads_AStoreThatDoesNotDefineTheTypeHoldsNoneOfIt(t *testing.T) {
+	inner := beads.NewMemStore()
+	labeled, err := inner.Create(beads.Bead{
+		Title:    "labeled",
+		Type:     BeadType,
+		Labels:   []string{LabelSession},
+		Metadata: map[string]string{"session_name": "labeled"},
+	})
+	if err != nil {
+		t.Fatalf("create labeled session bead: %v", err)
+	}
+	if _, err := inner.Create(beads.Bead{Title: "work", Type: "task"}); err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	store := typeRefusingStore{Store: inner, refusedType: BeadType, err: errors.New(bdRefusesSessionType)}
+
+	got, err := ListAllSessionBeads(beadstest.Sessions(store), beads.ListQuery{})
+	if err != nil {
+		t.Fatalf("ListAllSessionBeads over a store that does not define the session type = %v, want the label leg's answer and no error", err)
+	}
+	if len(got) != 1 || got[0].ID != labeled.ID {
+		t.Fatalf("got %d bead(s) %+v, want the one labeled session bead %s", len(got), got, labeled.ID)
+	}
+}
+
+// TestListAllSessionBeads_ARefusedTypeKeepsAnotherTiersRows: the refusal can
+// arrive as a partial result, when the ephemeral tier answered and the durable
+// tier refused the type. The rows the other tier returned are kept.
+func TestListAllSessionBeads_ARefusedTypeKeepsAnotherTiersRows(t *testing.T) {
+	inner := beads.NewMemStore()
+	wisp := beads.Bead{ID: "ad-wisp-1", Title: "ephemeral session", Type: BeadType, Status: "open", Metadata: map[string]string{"session_name": "ephemeral"}}
+	store := typeRefusingStore{
+		Store:       inner,
+		refusedType: BeadType,
+		rows:        []beads.Bead{wisp},
+		err:         &beads.PartialResultError{Op: "bd list both tiers", Err: fmt.Errorf("bd list: %w", errors.New(bdRefusesSessionType))},
+	}
+
+	got, err := ListAllSessionBeads(beadstest.Sessions(store), beads.ListQuery{})
+	if err != nil {
+		t.Fatalf("ListAllSessionBeads = %v, want the other tier's rows and no error", err)
+	}
+	if len(got) != 1 || got[0].ID != wisp.ID {
+		t.Fatalf("got %+v, want the ephemeral tier's session row %s", got, wisp.ID)
+	}
+}
+
+// TestListAllSessionBeads_AFailedTypeLegStillFails: only a refusal of the type
+// is read as an empty leg. A store that could not answer has told the census
+// nothing, and the read fails as before.
+func TestListAllSessionBeads_AFailedTypeLegStillFails(t *testing.T) {
+	store := typeRefusingStore{
+		Store:       beads.NewMemStore(),
+		refusedType: BeadType,
+		err:         errors.New("bd list both tiers: bd list: dial tcp 127.0.0.1:3307: connect: connection refused"),
+	}
+	if _, err := ListAllSessionBeads(beadstest.Sessions(store), beads.ListQuery{}); err == nil {
+		t.Fatal("ListAllSessionBeads over an unreachable store returned no error; a failed read must not read as an empty one")
 	}
 }

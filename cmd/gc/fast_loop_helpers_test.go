@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/bazeltest"
 )
@@ -85,63 +84,46 @@ func itoa(n int) string {
 	return []string{"0", "1", "2"}[n]
 }
 
+// listenOnRandomPort returns a live listener on a 127.0.0.1 port. It also holds
+// the port's [::1] twin until t.Cleanup, so a listener a concurrent test action
+// owns on [::1] cannot be mistaken for this one (see holdLoopbackPort).
 func listenOnRandomPort(t *testing.T) net.Listener {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
+	const tries = 64
+	for i := 0; i < tries; i++ {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		if holdLoopbackTwin(t, ln.Addr().(*net.TCPAddr).Port) {
+			return ln
+		}
+		_ = ln.Close()
 	}
-	return ln
+	t.Fatalf("no port free on both loopback families in %d tries", tries)
+	return nil
 }
 
+// reserveRandomTCPPort returns a loopback port number that stays held until
+// t.Cleanup, so no other process is handed it between this pick and the
+// caller's own bind. A fixture that picks a port number holds it.
 func reserveRandomTCPPort(t *testing.T) int {
 	t.Helper()
-	ln := listenOnRandomPort(t)
-	port := ln.Addr().(*net.TCPAddr).Port
-	_ = ln.Close()
-	return port
+	return holdLoopbackPort(t, 0)
 }
 
 func startTCPListenerProcess(t *testing.T, port int) *exec.Cmd {
 	t.Helper()
 	skipSlowCmdGCTest(t, "spawns a TCP listener process to emulate managed dolt; run make test-cmd-gc-process for full coverage")
-	cmd := exec.Command("python3", "-c", `
-import signal
-import socket
-import sys
-import time
-port = int(sys.argv[1])
-sock = socket.socket()
-sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-sock.bind(("127.0.0.1", port))
-sock.listen(5)
-def _stop(*_args):
-    raise SystemExit(0)
-signal.signal(signal.SIGTERM, _stop)
-signal.signal(signal.SIGINT, _stop)
-while True:
-    time.sleep(1)
-`, strconv.Itoa(port))
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("start listener process: %v", err)
+	cmd, err := launchTCPListenerProcess(t.TempDir(), port)
+	if err != nil {
+		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
-		}
+		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 	})
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 200*time.Millisecond)
-		if err == nil {
-			_ = conn.Close()
-			return cmd
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatalf("listener process on %d did not become ready", port)
-	return nil
+	return cmd
 }
 
 func writeDoltState(cityPath string, state doltRuntimeState) error {

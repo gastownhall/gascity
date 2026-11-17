@@ -206,7 +206,10 @@ func TestByIDFunnelSkipChangesNoAnswer(t *testing.T) {
 		manifest funnelSkipManifest
 	}{
 		{name: "served", stranded: false, manifest: skipManifestRead},
-		{name: "refused", stranded: true, manifest: skipManifestRead},
+		// A stranded city whose manifest reads serves degraded
+		// (infraMigrationReport.servesDegraded): served answers, with the
+		// gate's diagnostics and warning as its boot output.
+		{name: "stranded, served degraded", stranded: true, manifest: skipManifestRead},
 		{name: "served without a manifest", stranded: false, manifest: skipManifestMissing},
 		{name: "refused without a manifest", stranded: true, manifest: skipManifestMissing},
 		{name: "served with an unreadable manifest", stranded: false, manifest: skipManifestUnreadable},
@@ -218,7 +221,7 @@ func TestByIDFunnelSkipChangesNoAnswer(t *testing.T) {
 			shapeFunnelSkipManifest(t, bindingTargetOf(t, cityPath), tc.manifest, collected)
 			maySkip := tc.manifest == skipManifestRead
 			bootStderr := captureCLIStorageStderr(t)
-			funnelBoot, refused := funnelBootStderr(t, cityPath, bootStderr)
+			funnelBoot, noisy := funnelBootStderr(t, cityPath, bootStderr)
 			droppedBoot := false
 			for _, row := range []struct {
 				argv    []string
@@ -237,10 +240,10 @@ func TestByIDFunnelSkipChangesNoAnswer(t *testing.T) {
 				if skipped != row.maySkip {
 					t.Errorf("%v: skipped the funnel = %v, want %v", row.argv, skipped, row.maySkip)
 				}
-				droppedBoot = droppedBoot || (skipped && refused)
+				droppedBoot = droppedBoot || (skipped && noisy)
 			}
-			if refused && maySkip && !droppedBoot {
-				t.Error("no skipped read on the refused city dropped the funnel's boot output, so the stderr rows compared nothing")
+			if noisy && maySkip && !droppedBoot {
+				t.Error("no skipped read on the refused or degraded city dropped the funnel's boot output, so the stderr rows compared nothing")
 			}
 		})
 	}
@@ -282,19 +285,22 @@ func shapeFunnelSkipManifest(t *testing.T, target infraBindingTarget, shape funn
 }
 
 // funnelBootStderr resolves the funnel in a fresh process and returns what its
-// boot gate printed to bootStderr, and whether it refused the city. It must
-// print exactly when it refuses.
-func funnelBootStderr(t *testing.T, cityPath string, bootStderr *bytes.Buffer) (out string, refused bool) {
+// boot gate printed to bootStderr, and whether it printed anything. It must
+// print exactly when it refuses the city or serves it degraded.
+func funnelBootStderr(t *testing.T, cityPath string, bootStderr *bytes.Buffer) (out string, noisy bool) {
 	t.Helper()
 	freshByIDProcess(t)
 	bootStderr.Reset()
-	sessions, _ := cliStorageRoutes(cityPath).storeFor(coordclass.ClassSessions)
-	_, refused = sessions.(refusedClassStore)
+	routes := cliStorageRoutes(cityPath)
+	sessions, _ := routes.storeFor(coordclass.ClassSessions)
+	_, refused := sessions.(refusedClassStore)
+	degraded := !refused && routes.bootVerdict.servesDegraded()
+	noisy = refused || degraded
 	out = bootStderr.String()
-	if (out != "") != refused {
-		t.Fatalf("the funnel's own boot stderr is %q (refused=%v); want boot output exactly when it refuses", out, refused)
+	if (out != "") != noisy {
+		t.Fatalf("the funnel's own boot stderr is %q (refused=%v, degraded=%v); want boot output exactly when it refuses or serves degraded", out, refused, degraded)
 	}
-	return out, refused
+	return out, noisy
 }
 
 // compareFunnelSkipRow asks the door for argv twice from a fresh process: once

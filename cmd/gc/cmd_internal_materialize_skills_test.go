@@ -2,9 +2,11 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -906,5 +908,46 @@ func TestInternalMaterializeSkillsNonBestEffortFailsOnLoadCityConfigError(t *tes
 	var so, se bytes.Buffer
 	if code := run([]string{"internal", "materialize-skills", "--agent", "some-agent", "--workdir", t.TempDir()}, &so, &se); code == 0 {
 		t.Fatalf("missing city.toml without --best-effort: got exit 0, want non-zero; stderr=%q", se.String())
+	}
+}
+
+// TestSharedCatalogSnapshotFrontmatterNameCompatibility pins that the
+// shared-catalog snapshot carries FrontmatterName and that a snapshot
+// written before the field existed still decodes to the same skill
+// identity, with an empty FrontmatterName.
+func TestSharedCatalogSnapshotFrontmatterNameCompatibility(t *testing.T) {
+	t.Parallel()
+	current := materialize.CityCatalog{
+		Entries: []materialize.SkillEntry{{
+			Name:            "core.gc-work",
+			Source:          "/packs/core/skills/gc-work",
+			Origin:          "core",
+			Description:     "Working with beads",
+			FrontmatterName: "gc-work",
+		}},
+		OwnedRoots: []string{"/packs/core/skills"},
+	}
+	encoded, err := encodeSharedCatalogSnapshot(current)
+	if err != nil {
+		t.Fatalf("encodeSharedCatalogSnapshot: %v", err)
+	}
+	roundTrip, err := decodeSharedCatalogSnapshot(encoded)
+	if err != nil {
+		t.Fatalf("decodeSharedCatalogSnapshot: %v", err)
+	}
+	if !reflect.DeepEqual(roundTrip, current) {
+		t.Fatalf("round trip = %+v, want %+v", roundTrip, current)
+	}
+
+	old := `{"Entries":[{"Name":"core.gc-work","Source":"/packs/core/skills/gc-work","Origin":"core","Description":"Working with beads"}],"OwnedRoots":["/packs/core/skills"],"Shadowed":null}`
+	decoded, err := decodeSharedCatalogSnapshot(base64.StdEncoding.EncodeToString([]byte(old)))
+	if err != nil {
+		t.Fatalf("decoding pre-FrontmatterName snapshot: %v", err)
+	}
+	want := current
+	want.Entries = []materialize.SkillEntry{current.Entries[0]}
+	want.Entries[0].FrontmatterName = ""
+	if !reflect.DeepEqual(decoded, want) {
+		t.Fatalf("pre-FrontmatterName snapshot decoded = %+v, want %+v", decoded, want)
 	}
 }
