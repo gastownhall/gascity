@@ -13,10 +13,11 @@ vulnerabilities:
   # golang.org/x/text, github.com/apache/thrift and github.com/klauspost/compress
   # forward in the gh and Dolt builds the same way it already forced google.golang.org/grpc, and each
   # build asserts the versions it embedded. contrib/k8s/Dockerfile.agent
-  # rebuilds bd from a source ref whose go.mod pins x/net 0.58.0, which
-  # CVE-2026-78669 affects, so it forces grpc, thrift and x/net forward itself
-  # (GRPC_VERSION, THRIFT_VERSION and XNET_VERSION in that file) and asserts
-  # all three embedded versions; x/net's own requirements carry bd's x/crypto
+  # rebuilds bd from a source ref whose go.mod pins klauspost/compress 1.18.7,
+  # which GO-2026-6865 affects, and forces grpc, thrift, x/net, go-jose/v4 and
+  # klauspost/compress forward itself (GRPC_VERSION, THRIFT_VERSION,
+  # XNET_VERSION, JOSE_VERSION and COMPRESS_VERSION in that file) and asserts
+  # all five embedded versions; x/net's own requirements carry bd's x/crypto
   # and x/text forward too, unasserted. The rule the previous horizon
   # established still holds and now covers every rebuilt path without
   # exception: no rebuilt bd/dolt/gh path is waived for anything, so if a
@@ -32,7 +33,7 @@ vulnerabilities:
   # cosign-verified binary, and with Trivy 0.70.0 scans of the built
   # gc-controller image). Go 1.26.10 clears every Go-stdlib finding v1.36.5 had:
   # CVE-2026-78667 and CVE-2026-97031 (fixed in Go 1.26.9) and CVE-2026-111943
-  # (code-scanning alert #490, fixed in Go 1.26.10). The two findings left need
+  # (code-scanning alert #490, fixed in Go 1.26.10). The three findings left need
   # module versions no stable kubectl release ships yet: the newest releases,
   # v1.36.6 and v1.37.2, are both on Go 1.26.10, but on x/net v0.56.0/v0.57.0
   # and x/text v0.39.0/v0.40.0, so v1.37.2 clears nothing more and the pin stays
@@ -48,7 +49,15 @@ vulnerabilities:
   # alert #481) is fixed in x/text 0.41.0, and the repo owner decided on
   # 2026-10-25 to waive it rather than keep the gc-controller image scan red
   # until a fixed kubectl ships; its vulnerable package is not compiled into
-  # kubectl at all, as its statement explains.
+  # kubectl at all, as its statement explains. CVE-2026-78661 (added 2026-11-06)
+  # is a denial-of-service finding in x/net's HTML parser (quadratic text-node
+  # coalescing), fixed in x/net 0.62.0. kubectl links only x/net's HTML
+  # tokenizer, for apimachinery's rewriteHTML, so the parser is not compiled
+  # into kubectl either, as its statement explains. The repo owner decided on
+  # 2026-11-06 to waive it like the two above rather than keep the gc-controller
+  # image scan red until a fixed kubectl ships. Re-check it at each pin bump:
+  # `strings -a kubectl | grep -E '^golang\.org/x/net/html\.(Parse|\(\*parser\))'`
+  # must print nothing.
   #
   # The horizon is one month rather than three. The previous three-month
   # horizon was set when nothing in the kubectl set was fixable from this repo.
@@ -66,6 +75,11 @@ vulnerabilities:
       - "usr/local/bin/kubectl"
     expired_at: 2026-12-07
     statement: Reached through golang.org/x/text (kubectl v1.36.6 ships v0.39.0; fixed in 0.41.0). GO-2026-6629 is a panic on crafted input in the golang.org/x/text/secure/precis Nickname profile, and that package is not compiled into kubectl. Kubernetes v1.36.6 does not vendor it, and the binary's function table (pclntab) has no precis function and no precis symbol name, so Trivy matches only the module version recorded in the build info. kubectl is an upstream-signed prebuilt this repo installs rather than rebuilds, so the fix has to come from a Kubernetes release; as of 2026-11-01 the newest releases (v1.36.6 on x/text v0.39.0, v1.37.2 on v0.40.0) are both below 0.41.0, so none clears it yet; drop this entry once one ships that does.
+  - id: CVE-2026-78661
+    paths:
+      - "usr/local/bin/kubectl"
+    expired_at: 2026-12-07
+    statement: Reached through golang.org/x/net (kubectl v1.36.6 ships v0.56.0; fixed in 0.62.0). GO-2026-6860 is quadratic text-node coalescing in the golang.org/x/net/html parser (Parse/ParseFragment -> parser.addText/fosterParent), and the parser is not compiled into kubectl. kubectl links only the x/net/html tokenizer (for k8s.io/apimachinery's rewriteHTML), and the binary's function table (pclntab) has no html.Parse* or parser function, so Trivy matches only the module version recorded in the build info. kubectl is an upstream-signed prebuilt this repo installs rather than rebuilds, so the fix has to come from a Kubernetes release; as of 2026-11-06 the newest releases (v1.36.6 on x/net v0.56.0, v1.37.2 on v0.57.0) are both below 0.62.0, so none clears it yet; drop this entry once one ships that does.
   # gc-mcp-mail Python packages, added 2026-10-26. The repo owner decided to hold
   # filelock below 4 and GitPython on 3.1.x after the review of #8307
   # (https://github.com/gastownhall/gascity/pull/8307#pullrequestreview-5645840708)

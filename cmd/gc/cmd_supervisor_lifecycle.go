@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -31,6 +32,7 @@ import (
 	"github.com/gastownhall/gascity/internal/processgroup"
 	"github.com/gastownhall/gascity/internal/searchpath"
 	"github.com/gastownhall/gascity/internal/supervisor"
+	"github.com/gastownhall/gascity/internal/tailfile"
 	"github.com/spf13/cobra"
 )
 
@@ -1559,16 +1561,10 @@ func doSupervisorLogs(numLines int, follow bool, stdout, stderr io.Writer) int {
 		fmt.Fprint(stderr, supervisorLogsTeeDisabledWarning(goruntime.GOOS, logPath, numLines, follow)) //nolint:errcheck // best-effort stderr
 	}
 
-	args := []string{"-n", fmt.Sprintf("%d", numLines)}
-	if follow {
-		args = append(args, "-f")
-	}
-	args = append(args, logPath)
-
-	cmd := exec.Command("tail", args...)
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	if err := cmd.Run(); err != nil {
+	err := tailfile.Tail(context.Background(), logPath, numLines, follow, stdout, func() {
+		fmt.Fprintf(stderr, "gc supervisor logs: %s: file truncated\n", logPath) //nolint:errcheck // best-effort stderr
+	})
+	if err != nil {
 		fmt.Fprintf(stderr, "gc supervisor logs: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

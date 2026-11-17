@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
@@ -658,6 +659,9 @@ type asyncStartTracker struct {
 	// a provider swap's wait (waitLaunchedStarts).
 	launched         int
 	drainAckStopKeys sync.Map
+	// admitted counts the starts handed out by start and not yet finished, for
+	// busy. It is read without mu, from the controller's tick.
+	admitted atomic.Int64
 }
 
 func (t *asyncStartTracker) start() (func(), bool) {
@@ -670,7 +674,20 @@ func (t *asyncStartTracker) start() (func(), bool) {
 		return nil, false
 	}
 	t.wg.Add(1)
-	return t.wg.Done, true
+	t.admitted.Add(1)
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			t.admitted.Add(-1)
+			t.wg.Done()
+		})
+	}, true
+}
+
+// busy reports whether any start handed out by start (an async session start
+// or drain-ack stop) has not finished. It is a non-blocking read, unlike wait.
+func (t *asyncStartTracker) busy() bool {
+	return t != nil && t.admitted.Load() > 0
 }
 
 func (t *asyncStartTracker) startDrainAckStop(key string) (func(), bool) {
@@ -2019,6 +2036,11 @@ func runPreparedStartCandidate(
 	startCallBegin := time.Now()
 	startedFresh, err := startPreparedStartCandidate(startCtx, item, cityPath, store, sp, cfg, &phases, sessionStaleKeyDetectionWaiter, warmClaim)
 	startCtxErr := startCtx.Err()
+	// A startup nudge the session's program held back behind a dialog
+	// (program_status = "on", row A20) is queued, never typed or failed.
+	if qerr := queueStartupNudgeHandback(cityPath, cfg, sp, item.candidate.info, item.candidate.name(), err == nil, time.Now()); qerr != nil {
+		log.Printf("gc start: %v", qerr)
+	}
 	// diedDuringStartup starts true when the provider/resume layer already
 	// reported the death directly (runtime.ErrSessionDiedDuringStartup,
 	// e.g. from the tmux adapter or from retryFreshStartAfterStaleKey's
@@ -2070,7 +2092,7 @@ func runPreparedStartCandidate(
 	var diedPane string
 	if startedFresh && err == nil && strings.TrimSpace(item.candidate.info.ID) != "" && item.candidate.info.SessionKey != "" {
 		postStartBegin := time.Now()
-		if stabilityWaiter(startCtx, item.candidate.name()) {
+		if stabilityWaiter(ctx, item.candidate.name()) {
 			running := false
 			alive := false
 			if store == nil || strings.TrimSpace(item.candidate.info.ID) == "" {
@@ -2737,7 +2759,7 @@ func startPreparedStartCandidate(
 				// already has.
 				if store != nil {
 					if raw, err := store.Get(item.candidate.info.ID); err == nil {
-						deliverWarmBindClaimNudge(ctx, sp, store, &raw, warmBindClaimText(cfg, raw), warmClaim)
+						deliverWarmBindClaimNudge(ctx, sp, store, cfg, &raw, warmBindClaimText(cfg, raw), warmClaim)
 					}
 				}
 				return false, nil
@@ -2857,17 +2879,11 @@ var staleResumeKeyProbe = func(searchPaths []string, provider, workDir, sessionK
 	return workertranscript.HasKeyedTranscript(keyedProbeRoots(searchPaths, provider), provider, workDir, sessionKey)
 }
 
-// keyedProbeRoots is the roots a keyed probe of provider searches. A
-// claude-family probe searches the roots exactly as given, adding no default
-// of its own, so an empty list means the defaults rather than nothing. Every
-// other family probes the defaults alone, on top of which its reader adds
-// its own default roots: [daemon] observe_paths are Claude roots, and pi
-// walks every root it is given recursively.
+// keyedProbeRoots is the roots a keyed probe of provider searches
+// (workertranscript.KeyedProbeRoots): searchPaths for a claude-family probe,
+// the defaults otherwise.
 func keyedProbeRoots(searchPaths []string, provider string) []string {
-	if len(searchPaths) == 0 || !strings.Contains(strings.ToLower(strings.TrimSpace(provider)), "claude") {
-		return worker.DefaultSearchPaths()
-	}
-	return searchPaths
+	return workertranscript.KeyedProbeRoots(searchPaths, provider)
 }
 
 // launchTranscriptRoots is the roots a keyed probe searches for a launch of
@@ -2888,12 +2904,12 @@ func keyedProbeRoots(searchPaths []string, provider string) []string {
 // operator value beside such a wrapper pins the probe to a root the launch
 // does not read, and every start reads its conversation gone.
 func launchTranscriptRoots(cfg *config.City, tp TemplateParams) []string {
-	if dir := strings.TrimSpace(tp.OperatorEnv["CLAUDE_CONFIG_DIR"]); filepath.IsAbs(dir) {
-		return []string{filepath.Join(dir, "projects")}
+	if root, ok := workertranscript.ClaudeConfigProjectsRoot(tp.OperatorEnv); ok {
+		return []string{root}
 	}
 	roots := sessionTranscriptSearchPaths(cfg)
-	if dir := strings.TrimSpace(tp.Env["CLAUDE_CONFIG_DIR"]); filepath.IsAbs(dir) {
-		roots = worker.MergeSearchPaths(append(roots, filepath.Join(dir, "projects")))
+	if root, ok := workertranscript.ClaudeConfigProjectsRoot(tp.Env); ok {
+		roots = worker.MergeSearchPaths(append(roots, root))
 	}
 	return roots
 }
@@ -3167,7 +3183,7 @@ func commitStartResultTraced(
 		// crash-loop accounting: a provider Start that failed still delays the
 		// next one. A collision with an existing session is not a start failure.
 		if result.unattributedErr != nil && result.providerStartCalled && !errors.Is(result.unattributedErr, runtime.ErrSessionExists) {
-			recordStartupHealthFailure(info, name, result.unattributedErr, sessFront, clk, stderr)
+			recordStartupHealthFailure(info, name, tp.TemplateName, result.unattributedErr, sessFront, clk, rec, stderr)
 		}
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.unattributedErr, result.phases)
 		return startCommitFailed
@@ -3584,7 +3600,7 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 				"error": formatLifecycleError(result.err),
 			})
 		}
-		recordStartupHealthFailure(info, name, result.err, sessFront, clk, stderr)
+		recordStartupHealthFailure(info, name, tp.TemplateName, result.err, sessFront, clk, rec, stderr)
 		if !result.prepared.candidate.configured || result.diedDuringStartup {
 			// A configured named session (declared via [[named_session]]) must
 			// survive a single transient start failure mid pending-create (e.g.
@@ -3656,8 +3672,9 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 
 // recordStartupHealthFailure accrues one failed start on the session's
 // startup-health episode, which quarantines the name once it reaches
-// defaultMaxWakeAttempts.
-func recordStartupHealthFailure(info sessionpkg.Info, name string, err error, sessFront *sessionpkg.Store, clk clock.Clock, stderr io.Writer) {
+// defaultMaxWakeAttempts, stamps the per-failure retry backoff, and emits the
+// once-per-episode startup-health alert on crossing the threshold.
+func recordStartupHealthFailure(info sessionpkg.Info, name, template string, err error, sessFront *sessionpkg.Store, clk clock.Clock, rec events.Recorder, stderr io.Writer) {
 	episodeKey := startupHealthEpisodeKey(info, name)
 	prior, loadErr := sessFront.LoadStartupHealthEpisode(episodeKey)
 	if loadErr != nil {
@@ -3670,6 +3687,20 @@ func recordStartupHealthFailure(info sessionpkg.Info, name string, err error, se
 		kind = sessionpkg.FailureKindTimeout
 	}
 	episode := sessionpkg.RecordStartupFailure(prior, kind, err.Error(), clk.Now(), defaultMaxWakeAttempts, defaultQuarantineDuration)
+	// Stamp the retry backoff (caller-owned policy, see
+	// RecordStartupFailure's contract). Below the quarantine threshold
+	// this is the ONLY thing bounding the retry cadence, and it is
+	// what turns an indefinite ~65s respawn loop into a capped one.
+	episode.BackoffUntil = startupBackoffUntil(episode.ConsecutiveCount, clk.Now())
+	// Escalate exactly once per episode. RecordStartupFailure raises
+	// the disposition to pending on crossing the threshold and never
+	// regresses it from sent, so this fires on the threshold failure
+	// only. The event is recorded BEFORE the disposition is persisted:
+	// if the save below fails, the next failure re-alerts rather than
+	// losing the escalation entirely. At-least-once is the right
+	// failure mode for an alert whose whole purpose is that 42 silent
+	// hours never happen again.
+	episode = emitStartupHealthAlert(rec, stderr, episode, template)
 	if saveErr := sessFront.SaveStartupHealthEpisode(episode); saveErr != nil {
 		fmt.Fprintf(stderr, "session reconciler: saving startup-health episode for %s: %v\n", name, saveErr) //nolint:errcheck
 	}
@@ -4249,7 +4280,7 @@ func clearLegacyPoolStartupHealthEpisode(info sessionpkg.Info, name string, sess
 	if err != nil || (prior.ConsecutiveCount == 0 && prior.QuarantinedUntil.IsZero()) {
 		return
 	}
-	holders, err := sessionpkg.ExactMetadataSessionCandidatesInfo(sessFront.Store().Store, true,
+	holders, err := sessionpkg.ExactMetadataSessionCandidatesInfo(sessFront.Store(), true,
 		map[string]string{"session_name": legacy})
 	if err != nil {
 		return

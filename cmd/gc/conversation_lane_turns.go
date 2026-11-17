@@ -1145,10 +1145,10 @@ func (h *conversationLaneHost) newTurnObserver(conv string) *laneTurnObserver {
 			if h.turnHandle != nil {
 				return h.turnHandle(conv)
 			}
-			return workerHandleForSessionWithConfig(h.env.CityPath(), h.env.SessionsBeadStore().Store, h.env.SessionProvider(), h.env.Config(), conv)
+			return workerHandleForSessionWithConfig(h.env.CityPath(), h.env.Stores().Sessions().Store, h.env.SessionProvider(), h.env.Config(), conv)
 		},
 		generation: func() (laneTurnGeneration, error) {
-			live := sessionFrontDoor(laneLiveSessions{Store: h.env.SessionsBeadStore().Store})
+			live := sessionFrontDoor(laneLiveSessions{Store: h.env.Stores().Sessions().Store})
 			info, err := live.Get(conv)
 			switch {
 			case laneSessionGone(err), errors.Is(err, beads.ErrNotFound):
@@ -1163,7 +1163,7 @@ func (h *conversationLaneHost) newTurnObserver(conv string) *laneTurnObserver {
 			if err != nil {
 				return laneTurnRows{}, err
 			}
-			rows := laneLiveSessions{Store: h.env.SessionsBeadStore().Store}
+			rows := laneLiveSessions{Store: h.env.Stores().Sessions().Store}
 			batcher, ok := beads.GuardedBatcherFor(rows)
 			if !ok || batcher == nil {
 				return laneTurnRows{}, beads.ErrGuardedBatchUnsupported
@@ -1171,7 +1171,7 @@ func (h *conversationLaneHost) newTurnObserver(conv string) *laneTurnObserver {
 			return laneTurnRows{store: rows, batcher: batcher, prefix: st.Prefix()}, nil
 		},
 		running: func(context.Context) (bool, error) {
-			obs, err := workerObserveSessionTargetWithConfig(h.env.CityPath(), h.env.SessionsBeadStore().Store, h.env.SessionProvider(), h.env.Config(), conv)
+			obs, err := workerObserveSessionTargetWithConfig(h.env.CityPath(), h.env.Stores().Sessions().Store, h.env.SessionProvider(), h.env.Config(), conv)
 			switch {
 			case laneSessionGone(err):
 				return false, nil

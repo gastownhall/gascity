@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -40,10 +41,12 @@ type laneHostEnvFake struct {
 	enqueued []reconcilekey.Key
 }
 
-func (e *laneHostEnvFake) SessionsBeadStore() beads.SessionStore {
+// Stores is a single-store city over the env's store, with no projection: its
+// sessions handle wraps exactly the store a test set.
+func (e *laneHostEnvFake) Stores() storeref.Stores {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return beads.SessionStore{Store: e.store}
+	return storeref.NewStores(storeref.Topology{Work: storeref.Leg{Ref: storeref.WorkRef, Store: e.store}}, storeref.StoresOptions{})
 }
 
 // setStore replaces the sessions store the env answers.
@@ -2201,5 +2204,31 @@ func TestExplicitEmptyAuthoritativeRollsBackAndWarns(t *testing.T) {
 	gh.start()
 	if logs := gh.logLines(); len(logs) != 1 || !strings.Contains(logs[0], "[daemon] nudge_dispatcher is deprecated") || strings.Contains(logs[0], "remove it") {
 		t.Fatalf("logs = %q, want the nudge_dispatcher deprecation, without asking for removal", logs)
+	}
+}
+
+// laneStoreWithoutBatches is a store whose guarded batches are hidden: a lane
+// host refuses to run over it.
+type laneStoreWithoutBatches struct{ beads.Store }
+
+// TestLaneHostServesTheSessionsBindingOnASplitCity pins the lane host's
+// sessions reads to the sessions class on a split city (typed-stores T6c):
+// the host decides to run over the sessions binding, which holds guarded
+// batches, though the work store beside it does not, and its op store opens
+// over that binding.
+func TestLaneHostServesTheSessionsBindingOnASplitCity(t *testing.T) {
+	binding := newLaneTestStore()
+	f := newLaneFixtureOver(t, binding)
+	work := laneStoreWithoutBatches{beads.NewMemStore()}
+	cs := &controllerState{cityBeadStore: work, storageRoutes: splitRoutes(binding), cfg: f.cfg, sp: f.sp, cityPath: f.dir, beadsQuiescent: new(atomic.Bool)}
+	h := newConversationLaneHost(cs, []string{"message"}, session.StopRequestsLive)
+	if state := h.decide(); state != laneHostStateRunning {
+		t.Fatalf("decide = %q (%s), want running over the sessions binding", state, h.reason)
+	}
+	if _, _, err := h.store(); err != nil {
+		t.Fatalf("store = %v, want the op store opened over the sessions binding", err)
+	}
+	if !sameBeadStore(h.stOver, binding) {
+		t.Errorf("the op store opened over %T, want the sessions binding", h.stOver)
 	}
 }

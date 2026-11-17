@@ -1,10 +1,13 @@
 package session
 
 import (
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // TestListAllSessionBeads exercises the type+label union helper across the
@@ -64,7 +67,7 @@ func TestListAllSessionBeads(t *testing.T) {
 		t.Fatalf("create unrelated bead: %v", err)
 	}
 
-	got, err := ListAllSessionBeads(store, beads.ListQuery{})
+	got, err := ListAllSessionBeads(beadstest.Sessions(store), beads.ListQuery{})
 	if err != nil {
 		t.Fatalf("ListAllSessionBeads: %v", err)
 	}
@@ -115,7 +118,7 @@ func TestListAllSessionBeads_IncludeClosed(t *testing.T) {
 	}
 
 	// Default (IncludeClosed=false): only the open bead.
-	got, err := ListAllSessionBeads(store, beads.ListQuery{})
+	got, err := ListAllSessionBeads(beadstest.Sessions(store), beads.ListQuery{})
 	if err != nil {
 		t.Fatalf("ListAllSessionBeads open-only: %v", err)
 	}
@@ -124,7 +127,7 @@ func TestListAllSessionBeads_IncludeClosed(t *testing.T) {
 	}
 
 	// IncludeClosed=true: both.
-	got, err = ListAllSessionBeads(store, beads.ListQuery{IncludeClosed: true})
+	got, err = ListAllSessionBeads(beadstest.Sessions(store), beads.ListQuery{IncludeClosed: true})
 	if err != nil {
 		t.Fatalf("ListAllSessionBeads include-closed: %v", err)
 	}
@@ -149,7 +152,7 @@ func TestListAllSessionBeads_DedupedAcrossLegs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create healthy: %v", err)
 	}
-	got, err := ListAllSessionBeads(store, beads.ListQuery{})
+	got, err := ListAllSessionBeads(beadstest.Sessions(store), beads.ListQuery{})
 	if err != nil {
 		t.Fatalf("ListAllSessionBeads: %v", err)
 	}
@@ -187,7 +190,7 @@ func TestListAllSessionBeads_SortRespected(t *testing.T) {
 		time.Sleep(2 * time.Millisecond)
 	}
 
-	asc, err := ListAllSessionBeads(store, beads.ListQuery{Sort: beads.SortCreatedAsc})
+	asc, err := ListAllSessionBeads(beadstest.Sessions(store), beads.ListQuery{Sort: beads.SortCreatedAsc})
 	if err != nil {
 		t.Fatalf("asc: %v", err)
 	}
@@ -200,7 +203,7 @@ func TestListAllSessionBeads_SortRespected(t *testing.T) {
 		}
 	}
 
-	desc, err := ListAllSessionBeads(store, beads.ListQuery{Sort: beads.SortCreatedDesc})
+	desc, err := ListAllSessionBeads(beadstest.Sessions(store), beads.ListQuery{Sort: beads.SortCreatedDesc})
 	if err != nil {
 		t.Fatalf("desc: %v", err)
 	}
@@ -247,7 +250,7 @@ func TestListAllSessionBeads_GlobalSortAcrossLegs(t *testing.T) {
 		t.Fatalf("create b2: %v", err)
 	}
 
-	asc, err := ListAllSessionBeads(store, beads.ListQuery{Sort: beads.SortCreatedAsc})
+	asc, err := ListAllSessionBeads(beadstest.Sessions(store), beads.ListQuery{Sort: beads.SortCreatedAsc})
 	if err != nil {
 		t.Fatalf("asc: %v", err)
 	}
@@ -261,7 +264,7 @@ func TestListAllSessionBeads_GlobalSortAcrossLegs(t *testing.T) {
 		}
 	}
 
-	desc, err := ListAllSessionBeads(store, beads.ListQuery{Sort: beads.SortCreatedDesc})
+	desc, err := ListAllSessionBeads(beadstest.Sessions(store), beads.ListQuery{Sort: beads.SortCreatedDesc})
 	if err != nil {
 		t.Fatalf("desc: %v", err)
 	}
@@ -302,7 +305,7 @@ func TestListAllSessionBeads_LimitAppliedOnce(t *testing.T) {
 		time.Sleep(2 * time.Millisecond)
 	}
 
-	got, err := ListAllSessionBeads(store, beads.ListQuery{Limit: 2, Sort: beads.SortCreatedAsc})
+	got, err := ListAllSessionBeads(beadstest.Sessions(store), beads.ListQuery{Limit: 2, Sort: beads.SortCreatedAsc})
 	if err != nil {
 		t.Fatalf("ListAllSessionBeads: %v", err)
 	}
@@ -316,7 +319,7 @@ func TestListAllSessionBeads_LimitAppliedOnce(t *testing.T) {
 
 // TestListAllSessionBeads_NilStore returns empty without error.
 func TestListAllSessionBeads_NilStore(t *testing.T) {
-	got, err := ListAllSessionBeads(nil, beads.ListQuery{})
+	got, err := ListAllSessionBeads(beads.SessionStore{}, beads.ListQuery{})
 	if err != nil {
 		t.Errorf("nil store should not error, got %v", err)
 	}
@@ -379,5 +382,95 @@ func TestListAll_CachePartialDoesNotReadThroughToBackingStore(t *testing.T) {
 	}
 	if gotIDs[direct.ID] {
 		t.Errorf("bead %s written directly to backing after PrimeActive leaked into the census — ListAll should be cache-served under a partial prime, not read through to backing", direct.ID)
+	}
+}
+
+// bdRefusesSessionType is the error a bd store whose type registry does not
+// define the session type returns for a listing filtered by it, as BdStore
+// wraps it: an adopted store gc does not serve keeps bd's own types until the
+// operator registers gc's (gc doctor --fix --check custom-types:<rig>).
+const bdRefusesSessionType = `bd list both tiers: bd list: bd list: exit status 1: Error: invalid issue type "session" (valid: bug, feature, task, epic, chore, decision)`
+
+// typeRefusingStore answers a listing filtered by refusedType with err and
+// every other listing from Store.
+type typeRefusingStore struct {
+	beads.Store
+	refusedType string
+	err         error
+	rows        []beads.Bead // returned alongside err (a partial result)
+}
+
+func (s typeRefusingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Type == s.refusedType {
+		return s.rows, s.err
+	}
+	return s.Store.List(q)
+}
+
+// TestListAllSessionBeads_AStoreThatDoesNotDefineTheTypeHoldsNoneOfIt: a store
+// whose type registry has no session type cannot hold a row of it, so its
+// refusal of the type-filtered leg is an empty leg, not a failed read. The
+// label leg still answers. Before this, a city that adopted a bd store gc does
+// not serve never became ready under the v2 reconciler (every new city's
+// default): its boot census read the rig's sessions leg, the store refused the
+// type, and the census retried forever.
+func TestListAllSessionBeads_AStoreThatDoesNotDefineTheTypeHoldsNoneOfIt(t *testing.T) {
+	inner := beads.NewMemStore()
+	labeled, err := inner.Create(beads.Bead{
+		Title:    "labeled",
+		Type:     BeadType,
+		Labels:   []string{LabelSession},
+		Metadata: map[string]string{"session_name": "labeled"},
+	})
+	if err != nil {
+		t.Fatalf("create labeled session bead: %v", err)
+	}
+	if _, err := inner.Create(beads.Bead{Title: "work", Type: "task"}); err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	store := typeRefusingStore{Store: inner, refusedType: BeadType, err: errors.New(bdRefusesSessionType)}
+
+	got, err := ListAllSessionBeads(beadstest.Sessions(store), beads.ListQuery{})
+	if err != nil {
+		t.Fatalf("ListAllSessionBeads over a store that does not define the session type = %v, want the label leg's answer and no error", err)
+	}
+	if len(got) != 1 || got[0].ID != labeled.ID {
+		t.Fatalf("got %d bead(s) %+v, want the one labeled session bead %s", len(got), got, labeled.ID)
+	}
+}
+
+// TestListAllSessionBeads_ARefusedTypeKeepsAnotherTiersRows: the refusal can
+// arrive as a partial result, when the ephemeral tier answered and the durable
+// tier refused the type. The rows the other tier returned are kept.
+func TestListAllSessionBeads_ARefusedTypeKeepsAnotherTiersRows(t *testing.T) {
+	inner := beads.NewMemStore()
+	wisp := beads.Bead{ID: "ad-wisp-1", Title: "ephemeral session", Type: BeadType, Status: "open", Metadata: map[string]string{"session_name": "ephemeral"}}
+	store := typeRefusingStore{
+		Store:       inner,
+		refusedType: BeadType,
+		rows:        []beads.Bead{wisp},
+		err:         &beads.PartialResultError{Op: "bd list both tiers", Err: fmt.Errorf("bd list: %w", errors.New(bdRefusesSessionType))},
+	}
+
+	got, err := ListAllSessionBeads(beadstest.Sessions(store), beads.ListQuery{})
+	if err != nil {
+		t.Fatalf("ListAllSessionBeads = %v, want the other tier's rows and no error", err)
+	}
+	if len(got) != 1 || got[0].ID != wisp.ID {
+		t.Fatalf("got %+v, want the ephemeral tier's session row %s", got, wisp.ID)
+	}
+}
+
+// TestListAllSessionBeads_AFailedTypeLegStillFails: only a refusal of the type
+// is read as an empty leg. A store that could not answer has told the census
+// nothing, and the read fails as before.
+func TestListAllSessionBeads_AFailedTypeLegStillFails(t *testing.T) {
+	store := typeRefusingStore{
+		Store:       beads.NewMemStore(),
+		refusedType: BeadType,
+		err:         errors.New("bd list both tiers: bd list: dial tcp 127.0.0.1:3307: connect: connection refused"),
+	}
+	if _, err := ListAllSessionBeads(beadstest.Sessions(store), beads.ListQuery{}); err == nil {
+		t.Fatal("ListAllSessionBeads over an unreachable store returned no error; a failed read must not read as an empty one")
 	}
 }

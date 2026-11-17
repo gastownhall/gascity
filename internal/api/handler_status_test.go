@@ -648,8 +648,12 @@ func seedStatusBodyState(t *testing.T) *fakeState {
 	}
 	state.stores["myrig"] = rigStore
 
-	cityStore := beads.NewMemStore()
-	if _, err := cityStore.Create(beads.Bead{
+	// The session lives in a relocated sessions store and the city's work
+	// store holds no work, so the work counts are the rig's alone: BeadStores
+	// carries the city, and status counts its persisted rows too.
+	state.cityBeadStore = beads.NewMemStore()
+	sessionStore := beads.NewMemStore()
+	if _, err := sessionStore.Create(beads.Bead{
 		Type:   session.BeadType,
 		Status: "open",
 		Labels: []string{session.LabelSession},
@@ -661,7 +665,7 @@ func seedStatusBodyState(t *testing.T) *fakeState {
 	}); err != nil {
 		t.Fatalf("Create session bead: %v", err)
 	}
-	state.cityBeadStore = cityStore
+	state.sessionsBeadStore = sessionStore
 	return state
 }
 

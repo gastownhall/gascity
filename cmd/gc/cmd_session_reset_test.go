@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
@@ -224,6 +225,7 @@ func TestCmdSessionKill_ClearsCircuitBreaker(t *testing.T) {
 		t.Fatalf("precondition: expected breaker OPEN for %q after 4 restarts", identity)
 	}
 
+	registerSessionResetTestRuntime(t, cityDir)
 	lis, err := startControllerSocket(
 		cityDir,
 		controllerHostingStandalone,
@@ -400,6 +402,7 @@ func TestCmdSessionKill_ClearsCircuitBreakerForAsleepNamedSession(t *testing.T) 
 		t.Fatalf("precondition: expected breaker OPEN for %q after 4 restarts", identity)
 	}
 
+	registerSessionResetTestRuntime(t, cityDir)
 	lis, err := startControllerSocket(
 		cityDir,
 		controllerHostingStandalone,
@@ -947,15 +950,32 @@ func TestCmdSessionReset_RollsBackStuckPendingCreate(t *testing.T) {
 	if got.Status != "closed" {
 		t.Fatalf("status = %q, want closed: reset left the unfinished create holding its claim (pending_create_claim=%q)", got.Status, got.Metadata["pending_create_claim"])
 	}
-	if err := session.EnsureAliasAvailable(reloaded, "sky", ""); err != nil {
+	if err := session.EnsureAliasAvailable(beadstest.Sessions(reloaded), "sky", ""); err != nil {
 		t.Fatalf("alias still held after reset: %v", err)
 	}
 }
 
+// registerSessionResetTestRuntime registers a single-store runtime for cityDir
+// over a store opened at the city, as a real controller registers its runtime:
+// the controller socket's session commands answer from that registration.
+func registerSessionResetTestRuntime(t *testing.T, cityDir string) {
+	t.Helper()
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt(%s): %v", cityDir, err)
+	}
+	registerResidencyRoutes(cityDir, nil, func() beads.Store { return store })
+	t.Cleanup(func() {
+		unregisterResidencyRoutes(cityDir, nil)
+		_ = closeBeadStoreHandle(store)
+	})
+}
+
 // startSessionResetTestController serves the real controller socket for
-// cityDir until the test ends.
+// cityDir until the test ends, behind a registered runtime.
 func startSessionResetTestController(t *testing.T, cityDir string) {
 	t.Helper()
+	registerSessionResetTestRuntime(t, cityDir)
 	lis, err := startControllerSocket(
 		cityDir,
 		controllerHostingStandalone,
@@ -1041,7 +1061,7 @@ func TestCmdSessionReset_RefusesUnknownStateRowWithoutWriting(t *testing.T) {
 	if ops := cliOpRows(t, h.opStore); len(ops) != 0 {
 		t.Fatalf("op rows = %+v, want none", ops)
 	}
-	row, err := c.reload(t).Get(c.bead.ID)
+	row, err := c.reloadSessions(t).Get(c.bead.ID)
 	if err != nil {
 		t.Fatalf("Get(%s): %v", c.bead.ID, err)
 	}
@@ -1062,7 +1082,7 @@ func TestCmdSessionReset_RefusesUnknownStateRowWithoutWriting(t *testing.T) {
 func TestCmdSessionReset_ClosedRowIsAnsweredClosedWhateverItsCloseCode(t *testing.T) {
 	h := newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": "auto"})
 	c := newCLIOpCity(t, h, map[string]string{"state": "gc_swept"})
-	if err := c.store.Close(c.bead.ID); err != nil {
+	if err := c.sessions.Close(c.bead.ID); err != nil {
 		t.Fatalf("Close(%s): %v", c.bead.ID, err)
 	}
 	startSessionResetTestController(t, c.dir)
