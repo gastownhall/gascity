@@ -11,7 +11,7 @@ import (
 )
 
 // questionInteraction is what a runtime reports for an open AskUserQuestion
-// dialog: a question the operator answers in the terminal, with no options.
+// dialog: a question the operator answers by respond (select) or in the terminal.
 func questionInteraction() *runtime.PendingInteraction {
 	return &runtime.PendingInteraction{
 		RequestID: "tmux-question-0123456789abcdef",
@@ -103,12 +103,12 @@ func TestPendingInteractionErrorWordingIsKindAware(t *testing.T) {
 		t.Fatalf("PendingInteractionError(question) = %v, want ErrPendingInteraction", err)
 	}
 	text := err.Error()
-	for _, banned := range []string{"approve or deny", "respond", "permission prompt"} {
+	for _, banned := range []string{"approve or deny", "permission prompt"} {
 		if strings.Contains(text, banned) {
 			t.Errorf("question refusal %q mentions %q, which does not apply to it", text, banned)
 		}
 	}
-	for _, want := range []string{"question", "How do you want to proceed?", "gc session attach"} {
+	for _, want := range []string{"question", "How do you want to proceed?", "gc session attach", "select one of its options"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("question refusal %q does not mention %q", text, want)
 		}

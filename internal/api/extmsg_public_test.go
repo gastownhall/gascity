@@ -29,7 +29,7 @@ func newPublicAdmissionEnv(t *testing.T) (*opsEnv, *publicAdmissionTestState, ex
 	t.Helper()
 	e, lane := newLaneOpsEnv(t, "message")
 	messages := newOpsTestStore()
-	services := extmsg.NewServices(beadstest.Mail(messages), lane.SessionsBeadStore())
+	services := extmsg.NewServices(beadstest.Mail(messages), lane.Stores().Sessions())
 	e.fs.adapterReg = extmsg.NewAdapterRegistry()
 	e.fs.extmsgSvc = &services
 	state := &publicAdmissionTestState{lanePokeState: lane, messaging: beads.MailStore{Store: messages}}

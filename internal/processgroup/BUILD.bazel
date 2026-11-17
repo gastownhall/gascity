@@ -2,15 +2,26 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "processgroup",
-    srcs = ["processgroup_unix.go"],
+    srcs = [
+        "ownership.go",
+        "processgroup_unix.go",
+        "processgroup_windows.go",
+    ],
     importpath = "github.com/gastownhall/gascity/internal/processgroup",
     visibility = ["//:__subpackages__"],
+    deps = select({
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 go_test(
     name = "processgroup_test",
     srcs = [
         "processgroup_unix_test.go",
+        "processgroup_windows_test.go",
         "testenv_import_test.go",
     ],
     embed = [":processgroup"],
@@ -61,6 +72,9 @@ go_test(
         ],
         "@rules_go//go/platform:solaris": [
             "//internal/processgroup/processgrouptest",
+        ],
+        "@rules_go//go/platform:windows": [
+            "@org_golang_x_sys//windows",
         ],
         "//conditions:default": [],
     }),

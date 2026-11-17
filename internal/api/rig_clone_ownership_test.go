@@ -13,7 +13,7 @@ func TestRigCloneOwnershipManifestPersistsAcrossRetryAndSweep(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := RigProvisionManifest{RigName: "app", CreatedDir: "/external/project", CreatedDirIdentity: "17:531", CreatedDirIdentityRequired: true}
-	if err := persistManifest(store, record.ID, before); err != nil {
+	if err := persistManifest(beads.WorkStore{Store: store}, record.ID, before); err != nil {
 		t.Fatal(err)
 	}
 	got, err := store.Get(record.ID)
@@ -27,7 +27,7 @@ func TestRigCloneOwnershipManifestPersistsAcrossRetryAndSweep(t *testing.T) {
 	if got.Metadata[metaIdemCreatedDirIdentity] != "17:531" {
 		t.Fatalf("physical identity not durable: %+v", got.Metadata)
 	}
-	if err := persistManifest(store, record.ID, RigProvisionManifest{DoltDB: "owned_app"}); err != nil {
+	if err := persistManifest(beads.WorkStore{Store: store}, record.ID, RigProvisionManifest{DoltDB: "owned_app"}); err != nil {
 		t.Fatal(err)
 	}
 	got, err = store.Get(record.ID)
@@ -54,10 +54,10 @@ func TestRigCloneRequiredIdentityIntentCannotBecomeLegacy(t *testing.T) {
 		t.Fatal(err)
 	}
 	first := RigProvisionManifest{CreatedDir: "/city/inside", CreatedDirIdentityRequired: true}
-	if err := persistManifest(store, record.ID, first); err != nil {
+	if err := persistManifest(beads.WorkStore{Store: store}, record.ID, first); err != nil {
 		t.Fatal(err)
 	}
-	if err := persistManifest(store, record.ID, RigProvisionManifest{CreatedDir: first.CreatedDir}); err != nil {
+	if err := persistManifest(beads.WorkStore{Store: store}, record.ID, RigProvisionManifest{CreatedDir: first.CreatedDir}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := store.Get(record.ID)

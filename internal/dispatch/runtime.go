@@ -492,7 +492,7 @@ func processScopeCheck(store beads.GraphStore, bead beads.Bead, opts ProcessOpti
 	opts.tracef("scope-check bead=%s begin root=%s scope=%s", bead.ID, rootID, scopeRef)
 
 	subjectID, err := tracePhase(opts, bead.ID, "resolve-subject-id", func() (string, error) {
-		return resolveScopeCheckSubjectID(store, bead.ID)
+		return resolveScopeCheckSubjectID(store, bead)
 	})
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: resolving subject: %w", bead.ID, err)
@@ -1872,52 +1872,93 @@ func reconcileTerminalScopedMemberWithOptions(store beads.GraphStore, bead beads
 	return reconcileScopeForTerminalMember(store, bead, opts, scopeMemberClosed)
 }
 
-func resolveBlockingSubjectID(store beads.GraphStore, beadID string) (string, error) {
-	deps, err := store.DepList(beadID, "down")
+// resolveBlockingSubjectID returns the step a ralph or retry control
+// evaluates: its first blocker within its own workflow root (see
+// controlSubjectBlockers).
+func resolveBlockingSubjectID(store beads.GraphStore, control beads.Bead) (string, error) {
+	blockers, err := controlSubjectBlockers(store, control)
 	if err != nil {
 		return "", err
 	}
-	for _, dep := range deps {
-		if dep.Type == "blocks" {
-			return dep.DependsOnID, nil
-		}
+	if len(blockers) == 0 {
+		return "", fmt.Errorf("no blocking dependency")
 	}
-	return "", fmt.Errorf("no blocking dependency")
+	return blockers[0].ID, nil
 }
 
 // resolveScopeCheckSubjectID returns the step a scope-check finalizes. A
 // scope-check for an on_complete source blocks on both the source and its
 // <source>-fanout control; the fanout edge is a readiness gate only, so the
-// subject is the first blocker that is not a fanout control, independent of
-// dependency order.
-func resolveScopeCheckSubjectID(store beads.GraphStore, beadID string) (string, error) {
-	deps, err := store.DepList(beadID, "down")
+// subject is the first same-root blocker that is not a fanout control,
+// independent of dependency order.
+func resolveScopeCheckSubjectID(store beads.GraphStore, control beads.Bead) (string, error) {
+	blockers, err := controlSubjectBlockers(store, control)
 	if err != nil {
 		return "", err
-	}
-	var blockers []string
-	for _, dep := range deps {
-		if dep.Type == "blocks" {
-			blockers = append(blockers, dep.DependsOnID)
-		}
 	}
 	switch len(blockers) {
 	case 0:
 		return "", fmt.Errorf("no blocking dependency")
 	case 1:
-		return blockers[0], nil
+		return blockers[0].ID, nil
 	}
-	for _, id := range blockers {
-		blocker, err := store.Get(id)
-		if err != nil {
-			return "", fmt.Errorf("loading blocker %s: %w", id, err)
-		}
+	ids := make([]string, 0, len(blockers))
+	for _, blocker := range blockers {
 		if blocker.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindFanout {
+			ids = append(ids, blocker.ID)
 			continue
 		}
-		return id, nil
+		return blocker.ID, nil
 	}
-	return "", fmt.Errorf("no non-fanout blocking dependency among %v", blockers)
+	return "", fmt.Errorf("no non-fanout blocking dependency among %v", ids)
+}
+
+// controlSubjectBlockers returns the beads a control blocks on that can be its
+// subject, in dependency order. A control's subject is a step of its own
+// workflow, but a control can also block on beads of another workflow: a drain
+// item instantiated behind a predecessor member blocks every one of its steps
+// on that member's item root (drainWorkflowExternalDeps). Such an edge is a
+// readiness gate only; taking it as the subject would finalize the control
+// against another workflow's outcome. So when the control names its root and
+// more than one blocker exists, only blockers stamped with that same root
+// qualify. A single blocker is the subject without a read, and a control whose
+// blockers carry no same-root stamp keeps every blocker, as before.
+func controlSubjectBlockers(store beads.GraphStore, control beads.Bead) ([]beads.Bead, error) {
+	deps, err := store.DepList(control.ID, "down")
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for _, dep := range deps {
+		if dep.Type == "blocks" {
+			ids = append(ids, dep.DependsOnID)
+		}
+	}
+	if len(ids) == 1 {
+		return []beads.Bead{{ID: ids[0]}}, nil
+	}
+	all := make([]beads.Bead, 0, len(ids))
+	for _, id := range ids {
+		blocker, err := store.Get(id)
+		if err != nil {
+			return nil, fmt.Errorf("loading blocker %s: %w", id, err)
+		}
+		all = append(all, blocker)
+	}
+	rootID := strings.TrimSpace(control.Metadata[beadmeta.RootBeadIDMetadataKey])
+	if rootID == "" {
+		return all, nil
+	}
+	sameRoot := make([]beads.Bead, 0, len(all))
+	for _, blocker := range all {
+		if strings.TrimSpace(blocker.Metadata[beadmeta.RootBeadIDMetadataKey]) == rootID {
+			sameRoot = append(sameRoot, blocker)
+		}
+	}
+	if len(sameRoot) == 0 {
+		return all, nil
+	}
+	return sameRoot, nil
 }
 
 func resolveScopeBody(store beads.GraphStore, rootID, scopeRef, traceID string, opts ProcessOptions) (beads.Bead, error) {
@@ -2394,11 +2435,47 @@ func terminalAbortScopeFailureMember(store beads.GraphStore, rootID, finalizerID
 		if candidate.ID == finalizerID {
 			continue
 		}
-		if terminalAbortScopeFailure(candidate) {
+		if terminalAbortScopeFailure(candidate) && !supersededRalphBodyMember(candidate, all) {
 			return candidate, true, nil
 		}
 	}
 	return beads.Bead{}, false, nil
+}
+
+// supersededRalphBodyMember reports whether bead is a ralph body member
+// (gc.ralph_step_id + gc.attempt) whose owning ralph control closed
+// gc.outcome=pass: a later iteration of its loop succeeded, so its own failure
+// must not fail the workflow at finalize. The owner is the control of the
+// innermost loop in the member's step ref, which is the ref up to its last
+// ".iteration.<attempt>" segment, matched against a control's gc.step_ref by
+// equality or dotted suffix (iteration-1 refs are short, the control's is
+// full). Zero or several matching controls, or an owner that is not closed
+// with gc.outcome=pass, leave the member terminal.
+func supersededRalphBodyMember(bead beads.Bead, members []beads.Bead) bool {
+	attempt := strings.TrimSpace(bead.Metadata[beadmeta.AttemptMetadataKey])
+	if strings.TrimSpace(bead.Metadata[beadmeta.RalphStepIDMetadataKey]) == "" || attempt == "" {
+		return false
+	}
+	stepRef := strings.TrimSpace(bead.Metadata[beadmeta.StepRefMetadataKey])
+	cut := strings.LastIndex(stepRef+".", ".iteration."+attempt+".")
+	if cut <= 0 {
+		return false
+	}
+	loopRef := stepRef[:cut]
+	var owner beads.Bead
+	matches := 0
+	for _, member := range members {
+		if member.Metadata[beadmeta.KindMetadataKey] != beadmeta.KindRalph {
+			continue
+		}
+		ref := member.Metadata[beadmeta.StepRefMetadataKey]
+		if ref == loopRef || strings.HasSuffix(ref, "."+loopRef) {
+			owner = member
+			matches++
+		}
+	}
+	return matches == 1 && owner.Status == "closed" &&
+		strings.TrimSpace(owner.Metadata[beadmeta.OutcomeMetadataKey]) == beadmeta.OutcomePass
 }
 
 func terminalAbortScopeFailure(bead beads.Bead) bool {
@@ -2420,6 +2497,9 @@ func terminalAbortScopeFailure(bead beads.Bead) bool {
 	// bead ran; its own failure must not outvote a passing later iteration at
 	// finalize (#4008). The logical bead's own final disposition is the
 	// authoritative signal. A genuinely terminal, non-superseded hard failure
-	// still returns true.
+	// still returns true. A ralph body member carries no gc.logical_bead_id; it
+	// is superseded when its owning ralph control passed, which needs the
+	// workflow's other beads, so terminalAbortScopeFailureMember checks it
+	// (supersededRalphBodyMember).
 	return !isRetryAttemptSubject(bead)
 }

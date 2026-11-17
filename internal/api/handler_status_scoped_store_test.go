@@ -75,7 +75,7 @@ func TestStatusSessionSnapshotUsesScopedStoreWhenAvailable(t *testing.T) {
 	}
 	s := &Server{state: state}
 
-	snapshot := s.statusSessionSnapshot(context.Background())
+	snapshot := s.statusSessionSnapshot(context.Background(), s.state.Stores())
 
 	if _, ok := snapshot.bySessionName["scoped-session"]; !ok {
 		t.Errorf("snapshot missing scoped-session; bySessionName = %+v, want the scoped store's read used", snapshot.bySessionName)
@@ -101,7 +101,7 @@ func TestStatusSessionSnapshotFallsBackWhenScopedStoreUnavailable(t *testing.T) 
 	// ScopedStoreLike's answer for a MemStore-backed shared store.
 	s := &Server{state: state}
 
-	snapshot := s.statusSessionSnapshot(context.Background())
+	snapshot := s.statusSessionSnapshot(context.Background(), s.state.Stores())
 
 	if _, ok := snapshot.bySessionName["shared-session"]; !ok {
 		t.Errorf("snapshot missing shared-session; bySessionName = %+v, want fallback to the shared store", snapshot.bySessionName)
@@ -119,7 +119,7 @@ func TestStatusSessionSnapshotSurfacesScopedStoreResolutionError(t *testing.T) {
 	}
 	s := &Server{state: state}
 
-	snapshot := s.statusSessionSnapshot(context.Background())
+	snapshot := s.statusSessionSnapshot(context.Background(), s.state.Stores())
 
 	if len(snapshot.partialErrors) == 0 {
 		t.Fatal("partialErrors empty, want the scoped-store resolution error surfaced")
@@ -164,7 +164,7 @@ func TestStatusSessionSnapshotKillsBdChildOnTimeout(t *testing.T) {
 	s := &Server{state: state}
 
 	start := time.Now()
-	_ = s.statusSessionSnapshot(context.Background())
+	_ = s.statusSessionSnapshot(context.Background(), s.state.Stores())
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
 		t.Fatalf("statusSessionSnapshot blocked %s; want bounded by statusStoreReadTimeout", elapsed)
 	}
@@ -202,7 +202,7 @@ func TestStatusListStoreWithTimeoutUsesScopedStoreWhenAvailable(t *testing.T) {
 		return scoped, nil
 	}
 
-	rows, err := statusListStoreWithTimeout(context.Background(), state, shared, beads.ListQuery{AllowScan: true})
+	rows, err := statusListStoreWithTimeout(context.Background(), state, testWorkLeg(t, shared), beads.ListQuery{AllowScan: true})
 	if err != nil {
 		t.Fatalf("statusListStoreWithTimeout: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestStatusListStoreWithTimeoutFallsBackWhenScopedStoreUnavailable(t *testin
 	}
 	state := newFakeState(t)
 
-	rows, err := statusListStoreWithTimeout(context.Background(), state, shared, beads.ListQuery{AllowScan: true})
+	rows, err := statusListStoreWithTimeout(context.Background(), state, testWorkLeg(t, shared), beads.ListQuery{AllowScan: true})
 	if err != nil {
 		t.Fatalf("statusListStoreWithTimeout: %v", err)
 	}
@@ -240,7 +240,7 @@ func TestStatusListStoreWithTimeoutSurfacesScopedStoreResolutionError(t *testing
 		return nil, errors.New("resolving dolt credentials: boom")
 	}
 
-	_, err := statusListStoreWithTimeout(context.Background(), state, beads.NewMemStore(), beads.ListQuery{AllowScan: true})
+	_, err := statusListStoreWithTimeout(context.Background(), state, testWorkLeg(t, beads.NewMemStore()), beads.ListQuery{AllowScan: true})
 	if err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("statusListStoreWithTimeout error = %v, want it to contain the resolution error", err)
 	}
@@ -263,7 +263,7 @@ func TestStatusReadyStoreWithTimeoutUsesScopedStoreWhenAvailable(t *testing.T) {
 		return scoped, nil
 	}
 
-	rows, err := statusReadyStoreWithTimeout(context.Background(), state, &legacyReadyStore{Store: shared})
+	rows, err := statusReadyStoreWithTimeout(context.Background(), state, testWorkLeg(t, &legacyReadyStore{Store: shared}))
 	if err != nil {
 		t.Fatalf("statusReadyStoreWithTimeout: %v", err)
 	}
@@ -278,7 +278,7 @@ func TestStatusReadyStoreWithTimeoutSurfacesScopedStoreResolutionError(t *testin
 		return nil, errors.New("resolving dolt credentials: boom")
 	}
 
-	_, err := statusReadyStoreWithTimeout(context.Background(), state, &legacyReadyStore{Store: beads.NewMemStore()})
+	_, err := statusReadyStoreWithTimeout(context.Background(), state, testWorkLeg(t, &legacyReadyStore{Store: beads.NewMemStore()}))
 	if err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("statusReadyStoreWithTimeout error = %v, want it to contain the resolution error", err)
 	}
@@ -288,7 +288,7 @@ func TestStatusReadyStoreWithTimeoutHonorsCanceledRequest(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := statusReadyStoreWithTimeout(ctx, newFakeState(t), beads.NewMemStore())
+	_, err := statusReadyStoreWithTimeout(ctx, newFakeState(t), testWorkLeg(t, beads.NewMemStore()))
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("statusReadyStoreWithTimeout error = %v, want context.Canceled", err)
 	}
@@ -306,7 +306,7 @@ func TestStatusReadyStoreWithTimeoutRejectsContextBlindReady(t *testing.T) {
 	}
 	t.Cleanup(func() { close(store.release) })
 
-	_, err := statusReadyStoreWithTimeout(context.Background(), newFakeState(t), store)
+	_, err := statusReadyStoreWithTimeout(context.Background(), newFakeState(t), testWorkLeg(t, store))
 	if err == nil || !strings.Contains(err.Error(), "context-aware ready") {
 		t.Fatalf("statusReadyStoreWithTimeout error = %v, want unsupported context-aware ready error", err)
 	}
@@ -334,7 +334,7 @@ func TestStatusReadyStoreWithTimeoutUsesCachingStoreProjection(t *testing.T) {
 		return beads.NewMemStore(), nil
 	}
 
-	rows, err := statusReadyStoreWithTimeout(context.Background(), state, cache)
+	rows, err := statusReadyStoreWithTimeout(context.Background(), state, testWorkLeg(t, cache))
 	if err != nil {
 		t.Fatalf("statusReadyStoreWithTimeout: %v", err)
 	}
@@ -358,7 +358,7 @@ func TestStatusReadyStoreWithTimeoutDoesNotFallbackWhenCacheUnavailable(t *testi
 		return beads.NewMemStore(), nil
 	}
 
-	rows, err := statusReadyStoreWithTimeout(context.Background(), state, cache)
+	rows, err := statusReadyStoreWithTimeout(context.Background(), state, testWorkLeg(t, cache))
 	if !errors.Is(err, beads.ErrCacheUnavailable) {
 		t.Fatalf("statusReadyStoreWithTimeout error = %v, want ErrCacheUnavailable", err)
 	}
@@ -390,7 +390,7 @@ func TestStatusReadyStoreWithTimeoutWaitsForScopedResolutionCleanup(t *testing.T
 
 		resultDone := make(chan error, 1)
 		go func() {
-			_, err := statusReadyStoreWithTimeout(context.Background(), state, &legacyReadyStore{Store: beads.NewMemStore()})
+			_, err := statusReadyStoreWithTimeout(context.Background(), state, testWorkLeg(t, &legacyReadyStore{Store: beads.NewMemStore()}))
 			resultDone <- err
 		}()
 
@@ -447,7 +447,7 @@ func TestStatusStoreWorkCountsWaitsForReadyResolutionCleanup(t *testing.T) {
 			context.Background(),
 			state,
 			"rig test",
-			&legacyReadyStore{Store: beads.NewMemStore()},
+			testWorkLeg(t, &legacyReadyStore{Store: beads.NewMemStore()}),
 			false,
 			true,
 		)
@@ -510,7 +510,7 @@ func TestStatusReadyStoreWithTimeoutDoesNotPinOnCtxBlindResolution(t *testing.T)
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := statusReadyStoreWithTimeout(context.Background(), state, &legacyReadyStore{Store: beads.NewMemStore()})
+		_, err := statusReadyStoreWithTimeout(context.Background(), state, testWorkLeg(t, &legacyReadyStore{Store: beads.NewMemStore()}))
 		done <- err
 	}()
 
@@ -533,7 +533,7 @@ func TestStatusReadyStoreWithTimeoutBoundsSlowScopedStoreResolution(t *testing.T
 	state.scopedStoreFn = cancelableStatusWorkScopedStoreResolution
 
 	start := time.Now()
-	_, err := statusReadyStoreWithTimeout(context.Background(), state, &legacyReadyStore{Store: beads.NewMemStore()})
+	_, err := statusReadyStoreWithTimeout(context.Background(), state, testWorkLeg(t, &legacyReadyStore{Store: beads.NewMemStore()}))
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("statusReadyStoreWithTimeout blocked %s on scoped-store resolution; want bounded by statusStoreReadTimeout", elapsed)
 	}
@@ -570,7 +570,7 @@ func TestStatusListStoreWithTimeoutKillsBdChildOnTimeout(t *testing.T) {
 	}
 
 	start := time.Now()
-	_, _ = statusListStoreWithTimeout(context.Background(), state, beads.NewMemStore(), beads.ListQuery{AllowScan: true})
+	_, _ = statusListStoreWithTimeout(context.Background(), state, testWorkLeg(t, beads.NewMemStore()), beads.ListQuery{AllowScan: true})
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
 		t.Fatalf("statusListStoreWithTimeout blocked %s; want bounded by statusStoreReadTimeout", elapsed)
 	}
@@ -607,7 +607,7 @@ func TestStatusReadyStoreWithTimeoutKillsBdChildOnTimeout(t *testing.T) {
 	}
 
 	start := time.Now()
-	_, _ = statusReadyStoreWithTimeout(context.Background(), state, &legacyReadyStore{Store: beads.NewMemStore()})
+	_, _ = statusReadyStoreWithTimeout(context.Background(), state, testWorkLeg(t, &legacyReadyStore{Store: beads.NewMemStore()}))
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
 		t.Fatalf("statusReadyStoreWithTimeout blocked %s; want bounded by statusStoreReadTimeout", elapsed)
 	}
@@ -639,7 +639,7 @@ func TestStatusSessionSnapshotBoundsSlowScopedStoreResolution(t *testing.T) {
 	s := &Server{state: state}
 
 	start := time.Now()
-	snapshot := s.statusSessionSnapshot(context.Background())
+	snapshot := s.statusSessionSnapshot(context.Background(), s.state.Stores())
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("statusSessionSnapshot blocked %s on scoped-store resolution; want bounded by statusStoreReadTimeout", elapsed)
 	}
@@ -661,7 +661,7 @@ func TestStatusListStoreWithTimeoutBoundsSlowScopedStoreResolution(t *testing.T)
 	state.scopedStoreFn = slowStatusWorkScopedStoreResolution
 
 	start := time.Now()
-	_, err := statusListStoreWithTimeout(context.Background(), state, beads.NewMemStore(), beads.ListQuery{AllowScan: true})
+	_, err := statusListStoreWithTimeout(context.Background(), state, testWorkLeg(t, beads.NewMemStore()), beads.ListQuery{AllowScan: true})
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("statusListStoreWithTimeout blocked %s on scoped-store resolution; want bounded by statusStoreReadTimeout", elapsed)
 	}
@@ -748,7 +748,7 @@ func TestStatusWorkCountsEmptyBdWorkCacheWithRelocatedGraph(t *testing.T) {
 		return nil, errors.New("unexpected scoped/live fallback")
 	}
 	server := &Server{state: state}
-	counts, partialErrors := server.statusWorkCounts(context.Background(), nil)
+	counts, partialErrors := server.statusWorkCounts(context.Background(), state.Stores(), nil)
 	if len(partialErrors) != 0 {
 		t.Fatalf("partial errors = %v, want complete empty work/graph counts", partialErrors)
 	}

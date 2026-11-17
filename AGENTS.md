@@ -24,6 +24,7 @@ next to that code; read the matching file before changing it.
 
 | When you touch | Read first |
 |---|---|
+| Running or trying Gas City | README "Get it running" (no build) |
 | HTTP/SSE, events, extmsg, CLI API calls, OpenAPI or dashboard | `internal/api/AGENTS.md` |
 | `internal/config/` | `internal/config/AGENTS.md` |
 | Rig/storage | `internal/rig/AGENTS.md`, `internal/beads/AGENTS.md` |

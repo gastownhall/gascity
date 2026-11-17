@@ -89,6 +89,38 @@ func TestNativeQuestionRefusesUnboundOrStaleAnswers(t *testing.T) {
 	}
 }
 
+// Respond's select reaches a question bound to its native request as it does
+// any other page: it names the page by the native request ID Pending reports,
+// types the option's key once and leaves the request-bound answer path alone.
+// A select naming another request sends nothing.
+func TestNativeBoundQuestionTakesSelectByItsNativeRequest(t *testing.T) {
+	withFastRespondVerify(t, time.Second)
+	bound := func() (*Tmux, *questionAnswerExecutor) {
+		ex := &questionAnswerExecutor{paneExecutor: paneExecutor{pane: nativeClaudeQuestion, inMode: "0"}, after: "● Done.\n\n❯ \n"}
+		tm := &Tmux{cfg: DefaultConfig(), exec: ex}
+		installNativeClaudeRecord(t, tm, nativeClaudeQuestion)
+		return tm, ex
+	}
+	tm, ex := bound()
+	pending, err := tm.Pending("q")
+	if err != nil || pending == nil || pending.Metadata["answer_action"] != "answer" {
+		t.Fatalf("Pending=%+v,%v; want the natively bound question", pending, err)
+	}
+	if err := tm.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: QuestionSelectAction, Text: "Owl"}); err != nil {
+		t.Fatalf("Respond(select Owl) = %v, want nil", err)
+	}
+	if want := []string{"2"}; !slices.Equal(ex.keys, want) {
+		t.Fatalf("keys = %q, want %q typed once", ex.keys, want)
+	}
+
+	tm, ex = bound()
+	err = tm.Respond("q", runtime.InteractionResponse{RequestID: "tmux-question-0123456789abcdef", Action: QuestionSelectAction, Text: "Owl"})
+	if !errors.Is(err, runtime.ErrInteractionGone) {
+		t.Fatalf("Respond(select) naming another request = %v, want runtime.ErrInteractionGone", err)
+	}
+	requireNoKeys(t, ex.calls, false)
+}
+
 type nativeAnswerExecutor struct {
 	paneExecutor
 	literal            []string
@@ -1183,7 +1215,9 @@ func TestNativeClaudeReviewCannotBindAsAnAuthoredQuestion(t *testing.T) {
 			if err != nil || pending == nil || pending.Kind != "question" {
 				t.Fatalf("review must remain visible: Pending=%+v, %v", pending, err)
 			}
-			if len(pending.Options) != 0 || pending.Metadata["answer_action"] != "" {
+			// The review page's own menu is what Respond's select picks; the
+			// request-bound answer action gains nothing from the authored text.
+			if !slices.Equal(pending.Options, []string{"Submit answers", "Cancel"}) || pending.Metadata["answer_action"] != "" {
 				t.Fatalf("review gained ordinary question authority from matching authored text: %+v", pending)
 			}
 			if err := tm.Respond("q", runtime.InteractionResponse{RequestID: pending.RequestID, Action: "answer", Text: "Submit answers"}); !errors.Is(err, runtime.ErrInteractionActionUnavailable) {
@@ -1211,7 +1245,9 @@ func TestNativeClaudeHeaderlessReviewRemainsManualAfterLastAnswer(t *testing.T) 
 		t.Fatalf("broad review fallback gained automatic submission: keys=%q Enter=%d literal=%q", ex.keys, ex.entered, ex.literal)
 	}
 	held, err := tm.Pending("q")
-	if err != nil || held == nil || held.Kind != "question" || len(held.Options) != 0 || held.Metadata["answer_action"] != "" {
-		t.Fatalf("headerless review must remain visible and read-only: %+v, %v", held, err)
+	// The review stays visible with no request-bound answer; its own menu is
+	// what Respond's select picks.
+	if err != nil || held == nil || held.Kind != "question" || !slices.Equal(held.Options, []string{"Submit answers", "Cancel"}) || held.Metadata["answer_action"] != "" {
+		t.Fatalf("headerless review must remain visible with no request-bound answer: %+v, %v", held, err)
 	}
 }

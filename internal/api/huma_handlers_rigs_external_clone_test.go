@@ -69,7 +69,7 @@ func (s *externalCloneManifestState) ProvisionRigFromGit(ctx context.Context, r 
 	if err := onManifest(manifest); err != nil {
 		return config.Rig{}, err
 	}
-	record, err := lookupIdemRecord(s.cityBeadStore, filepath.Clean(s.CityPath()), "req-absolute-durable-1")
+	record, err := lookupIdemRecord(beads.WorkStore{Store: s.cityBeadStore}, filepath.Clean(s.CityPath()), "req-absolute-durable-1")
 	if err != nil || record == nil || record.Metadata["gc.idem.created_dir_identity_required"] != "true" || record.Metadata[metaIdemCreatedDir] != r.Path {
 		return config.Rig{}, fmt.Errorf("first absolute intent was not durable: record=%v err=%w", record, err)
 	}
@@ -95,7 +95,7 @@ func TestRigCreateAsyncAbsoluteClonePersistsRequiredOwnership(t *testing.T) {
 		t.Fatalf("absolute clone with durable ID: status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	waitForEventType(t, state.eventProv, events.RequestResultRigCreate, 3*time.Second)
-	record, err := lookupIdemRecord(state.cityBeadStore, filepath.Clean(state.CityPath()), "req-absolute-durable-1")
+	record, err := lookupIdemRecord(beads.WorkStore{Store: state.cityBeadStore}, filepath.Clean(state.CityPath()), "req-absolute-durable-1")
 	if err != nil || record == nil {
 		t.Fatalf("durable record missing: %v %v", record, err)
 	}

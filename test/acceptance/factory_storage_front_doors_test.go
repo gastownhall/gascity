@@ -17,11 +17,15 @@ import (
 
 // initProxiedSingleStore keeps recorder and legacy-storage controls on an
 // explicitly selected single-store topology. The proxied/local selector keeps
-// the factory pack while excluding automatic infrastructure separation.
+// the factory pack while excluding automatic infrastructure separation, and
+// --storage=single keeps the city off the born-split default: the subject is
+// bd's proxy, and these environments put the tool-home wrapper on PATH ahead
+// of the real bd that BD_BIN names, so a split city's gc bd, which runs the bd
+// on PATH, would refuse it.
 // Ordinary no-selector default coverage uses the real bd separately.
 func initProxiedSingleStore(t *testing.T, city *helpers.City, noStart bool) {
 	t.Helper()
-	flags := []string{"--beads-transport", "proxied", "--beads-target", "local"}
+	flags := []string{"--beads-transport", "proxied", "--beads-target", "local", "--storage=single"}
 	if noStart {
 		city.InitNoStart("claude", flags...)
 	} else {

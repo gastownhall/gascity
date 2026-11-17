@@ -3,7 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -19,15 +22,16 @@ import (
 //
 // A graph.v2 workflow root and its steps live in the relocated binding; its
 // synthetic input convoy and the source work it tracks stay in the work store.
-// The production InputDone / SkipDoneWorkflow / ReclaimStale seams run a bd
+// The production InputVerdict / RetireWorkflow / ReclaimStale seams run a bd
 // subprocess in the agent's work directory, so on a split city they could not
 // read the root: the "input work already terminal, retire the workflow" path
 // never fired, and the pool re-served the same step every tick.
 //
 // The work store here is a real FileStore and the binding a real SQLite store,
 // fenced to the infrastructure namespaces. The base seams are the production
-// functions (workflowInputDone, skipDoneWorkflow) over the work store, exactly
-// as hookInputDoneWithBdStore runs them over the bd store.
+// functions (workflowInputDone, skipDoneWorkflow, failPurgedWorkflow) over the
+// work store, exactly as hookInputDoneWithBdStore and
+// hookRetireWorkflowWithBdStore run them over the bd store.
 
 type doneWorkflowSplitFixture struct {
 	work     beads.Store
@@ -95,16 +99,34 @@ func newDoneWorkflowSplitFixture(t *testing.T, sourceClosed bool) doneWorkflowSp
 	return f
 }
 
+// stampedStep adds to the binding an open routed step that carries the input
+// convoy id beside its root id, as a formula's step metadata may stamp it.
+func (f doneWorkflowSplitFixture) stampedStep(t *testing.T) beads.Bead {
+	t.Helper()
+	step, err := f.binding.Create(beads.Bead{Title: "stamped step", Type: "task", Metadata: map[string]string{
+		beadmeta.RootBeadIDMetadataKey:    f.root.ID,
+		beadmeta.InputConvoyIDMetadataKey: f.convoyID,
+		beadmeta.RoutedToMetadataKey:      "worker",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return step
+}
+
 // baseOps are the work-scope seams: the production functions over the work
 // store, the way the default seams run them over the agent's bd store.
 func (f doneWorkflowSplitFixture) baseOps(t *testing.T) hookClaimOps {
 	t.Helper()
 	return hookClaimOps{
-		InputDone: func(_ context.Context, _ string, _ []string, candidate beads.Bead, ids []string) (string, bool, error) {
-			return workflowInputDone(beadstest.Work(f.work), candidate, ids)
+		InputVerdict: func(ctx context.Context, _ string, _ []string, candidate beads.Bead, ids []string, prove workflowInputAbsenceProver) (workflowInputVerdict, error) {
+			return workflowInputDone(ctx, beadstest.Work(f.work), candidate, ids, prove)
 		},
-		SkipDoneWorkflow: func(_ context.Context, _ string, _ []string, rootID string) error {
-			return skipDoneWorkflow(f.work, rootID)
+		RetireWorkflow: func(ctx context.Context, _ string, _ []string, verdict workflowInputVerdict) error {
+			if verdict.State == workflowInputPurged {
+				return failPurgedWorkflow(ctx, f.work, verdict.RootID)
+			}
+			return skipDoneWorkflow(f.work, verdict.RootID)
 		},
 		ReadWorkMeta: func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, error) {
 			return f.work.Get(beadID)
@@ -161,18 +183,27 @@ func (f doneWorkflowSplitFixture) assertOpen(t *testing.T, ids ...string) {
 
 // A step of a binding-resident workflow whose input work is terminal is
 // retired: the root and its open steps close as skipped in the binding, and
-// the candidate is dropped.
+// the candidate is dropped. A step that carries the input convoy id itself
+// retires the same workflow through its root.
 func TestClassRoutedHookRetiresABindingResidentDoneWorkflow(t *testing.T) {
-	f := newDoneWorkflowSplitFixture(t, true)
-	ops := classRoutedHookClaimOps(f.baseOps(t), f.route)
+	for _, stamped := range []bool{false, true} {
+		t.Run(fmt.Sprintf("step stamped with the input id=%t", stamped), func(t *testing.T) {
+			f := newDoneWorkflowSplitFixture(t, true)
+			candidate := f.step
+			if stamped {
+				candidate = f.stampedStep(t)
+			}
+			ops := classRoutedHookClaimOps(f.baseOps(t), f.route)
 
-	kept, stderr := f.retire(t, ops, f.step)
-	if len(kept) != 0 {
-		t.Fatalf("candidate %s kept (stderr=%q); its workflow %s has terminal input work and must be retired", f.step.ID, stderr, f.root.ID)
-	}
-	f.assertSkipped(t, f.root.ID, f.step.ID)
-	if src, err := f.work.Get(f.source.ID); err != nil || src.Status != "closed" {
-		t.Errorf("source %s: status=%q err=%v; the retirement must not touch the work store", f.source.ID, src.Status, err)
+			kept, stderr := f.retire(t, ops, candidate)
+			if len(kept) != 0 {
+				t.Fatalf("candidate %s kept (stderr=%q); its workflow %s has terminal input work and must be retired", candidate.ID, stderr, f.root.ID)
+			}
+			f.assertSkipped(t, f.root.ID, f.step.ID, candidate.ID)
+			if src, err := f.work.Get(f.source.ID); err != nil || src.Status != "closed" {
+				t.Errorf("source %s: status=%q err=%v; the retirement must not touch the work store", f.source.ID, src.Status, err)
+			}
+		})
 	}
 }
 
@@ -225,6 +256,135 @@ func TestClassRoutedHookReadsWorkflowSeatsFromTheBinding(t *testing.T) {
 		t.Fatalf("candidate %s dropped (stderr=%q); its input member is held by %s, a seat of this workflow", f.step.ID, stderr, assignee)
 	}
 	f.assertOpen(t, f.root.ID, f.step.ID)
+}
+
+// A binding-resident workflow whose input convoy is gone from the work store
+// is retired only on the city-wide absence proof: input still held by another
+// store keeps the candidate, and input absent everywhere closes the root and
+// its open steps as purged in the binding, leaving the work store untouched.
+func TestClassRoutedHookRetiresPurgedInput(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		absentInCity bool
+		stamped      bool // the candidate is a step carrying the input convoy id
+	}{
+		{name: "input in another store", absentInCity: false},
+		{name: "input absent everywhere", absentInCity: true},
+		{name: "input absent everywhere, step stamped with the input id", absentInCity: true, stamped: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newDoneWorkflowSplitFixture(t, false)
+			candidate := f.step
+			if tc.stamped {
+				candidate = f.stampedStep(t)
+			}
+			if err := f.work.Delete(f.convoyID); err != nil {
+				t.Fatalf("purging the input convoy %s: %v", f.convoyID, err)
+			}
+			prover := &recordingProver{absent: map[string]bool{f.convoyID: tc.absentInCity}}
+			ops := classRoutedHookClaimOps(f.baseOps(t), f.route)
+			ops.ProveInputAbsent = prover.prove
+
+			kept, stderr := f.retire(t, ops, candidate)
+			if len(prover.calls) != 1 || !slices.Equal(prover.calls[0], []string{f.convoyID}) {
+				t.Fatalf("prover calls = %v, want one proof of [%s]", prover.calls, f.convoyID)
+			}
+			if !tc.absentInCity {
+				if len(kept) != 1 {
+					t.Fatalf("candidate %s dropped (stderr=%q); its input convoy still exists in another store", candidate.ID, stderr)
+				}
+				f.assertOpen(t, f.root.ID, f.step.ID)
+				return
+			}
+			if len(kept) != 0 {
+				t.Fatalf("candidate %s kept (stderr=%q); its input convoy %s exists in no store", candidate.ID, stderr, f.convoyID)
+			}
+			assertPurgeRetired(t, f.binding, f.root.ID, f.step.ID, candidate.ID)
+			if !strings.Contains(stderr, f.root.ID) || !strings.Contains(stderr, f.convoyID) {
+				t.Errorf("stderr = %q, want it to name the retired root %s and the absent convoy %s", stderr, f.root.ID, f.convoyID)
+			}
+			if done, err := f.binding.Get(f.done.ID); err != nil || done.Status != "closed" ||
+				done.Metadata[beadmeta.OutcomeMetadataKey] != "" || done.Metadata[beadmeta.FailureClassMetadataKey] != "" ||
+				done.Metadata[beadmeta.FailureReasonMetadataKey] != "" || done.Metadata["close_reason"] != "" {
+				t.Errorf("finished step %s: status=%q metadata=%v err=%v; its recorded outcome must survive", f.done.ID, done.Status, done.Metadata, err)
+			}
+			if src, err := f.work.Get(f.source.ID); err != nil || src.Status == "closed" {
+				t.Errorf("source %s: status=%q err=%v; the retirement must not touch the work store", f.source.ID, src.Status, err)
+			}
+		})
+	}
+}
+
+// fixtureProveAbsent proves ids absent from exactly stores: a not-found from
+// each proves, one hit disproves, any other read error is returned. The
+// production prover's own rules are pinned in hook_claim_input_purge_test.go;
+// these rows need only a proof that spans the stores they stage.
+func fixtureProveAbsent(stores ...workflowInputReader) workflowInputAbsenceProver {
+	return func(ctx context.Context, ids []string) (bool, error) {
+		for _, id := range ids {
+			for _, store := range stores {
+				if err := ctx.Err(); err != nil {
+					return false, err
+				}
+				_, err := store.Get(id)
+				if err == nil {
+					return false, nil
+				}
+				if !errors.Is(err, beads.ErrNotFound) {
+					return false, fmt.Errorf("proving %s absent: %w", id, err)
+				}
+			}
+		}
+		return true, nil
+	}
+}
+
+// A convoy gone from both legs the claim reads but still held by a third store
+// the proof reads keeps a binding-resident workflow live: the third store is
+// read once, the candidate stays, and nothing closes — even when the work
+// store keeps the deleted convoy's edges to terminal work.
+func TestClassRoutedHookKeepsPurgedInputWhenAThirdStoreHoldsTheConvoy(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		seed func(t *testing.T, f doneWorkflowSplitFixture) string // returns the convoy id the root names
+	}{{
+		name: "convoy only in the third store",
+		seed: func(t *testing.T, f doneWorkflowSplitFixture) string {
+			if err := f.binding.SetMetadata(f.root.ID, beadmeta.InputConvoyIDMetadataKey, "gc-held-convoy"); err != nil {
+				t.Fatal(err)
+			}
+			return "gc-held-convoy"
+		},
+	}, {
+		name: "deleted convoy left terminal edges in the work store",
+		seed: func(t *testing.T, f doneWorkflowSplitFixture) string {
+			if err := f.work.Close(f.source.ID); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.work.Delete(f.convoyID); err != nil {
+				t.Fatalf("deleting the input convoy %s: %v", f.convoyID, err)
+			}
+			return f.convoyID
+		},
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newDoneWorkflowSplitFixture(t, false)
+			convoyID := tc.seed(t, f)
+			third := &proveAbsentGetStore{id: convoyID, present: true}
+			ops := classRoutedHookClaimOps(f.baseOps(t), f.route)
+			ops.ProveInputAbsent = fixtureProveAbsent(f.work, f.binding, third)
+
+			kept, stderr := f.retire(t, ops, f.step)
+
+			if len(kept) != 1 {
+				t.Fatalf("candidate %s dropped (stderr=%q); its input convoy still lives in a store the proof reads", f.step.ID, stderr)
+			}
+			f.assertOpen(t, f.root.ID, f.step.ID)
+			if third.gets != 1 {
+				t.Fatalf("third store read %d times, want the one read that found %s", third.gets, convoyID)
+			}
+		})
+	}
 }
 
 // The unrouted seams cannot see the root at all, which is the treadmill.

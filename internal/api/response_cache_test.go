@@ -206,10 +206,17 @@ func TestHandleStatusCachedObservationAgeSurvivesStoreRefresh(t *testing.T) {
 					srv.responseCacheMu.Unlock()
 					if path == "stale" {
 						statusResponseTTLFloor = 0
-						if !srv.beginResponseRefresh(key) {
-							t.Fatal("could not hold background refresh for stale-body observation")
-						}
-						t.Cleanup(func() { srv.endResponseRefresh(key) })
+						// Hold the view's build slot, the guard a stale read's
+						// background refresh checks, so no rebuild replaces
+						// the body under observation.
+						srv.responseCacheMu.Lock()
+						srv.statusBuildSlotLocked(key).running = &statusBuild{done: make(chan struct{})}
+						srv.responseCacheMu.Unlock()
+						t.Cleanup(func() {
+							srv.responseCacheMu.Lock()
+							delete(srv.statusBuilds, key)
+							srv.responseCacheMu.Unlock()
+						})
 					}
 					state.eventProv.(*events.Fake).Record(events.Event{Type: events.BeadCreated, Actor: "human"})
 					for _, elapsed := range []time.Duration{5 * time.Second, 10 * time.Second} {

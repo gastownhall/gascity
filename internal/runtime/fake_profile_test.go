@@ -43,6 +43,7 @@ var optionalInterfaces = map[string]reflect.Type{
 	"FencedInputProvider":                  reflect.TypeFor[runtime.FencedInputProvider](),
 	"FencedInteractionProvider":            reflect.TypeFor[runtime.FencedInteractionProvider](),
 	"FreshActivityProvider":                reflect.TypeFor[runtime.FreshActivityProvider](),
+	"HeldFileProvider":                     reflect.TypeFor[runtime.HeldFileProvider](),
 	"FreshLivenessObserver":                reflect.TypeFor[runtime.FreshLivenessObserver](),
 	"IdentityObserver":                     reflect.TypeFor[runtime.IdentityObserver](),
 	"IdentitySidecarProvider":              reflect.TypeFor[runtime.IdentitySidecarProvider](),
@@ -53,6 +54,7 @@ var optionalInterfaces = map[string]reflect.Type{
 	"InputClearProvider":                   reflect.TypeFor[runtime.InputClearProvider](),
 	"InteractionProvider":                  reflect.TypeFor[runtime.InteractionProvider](),
 	"InterruptBoundaryWaitProvider":        reflect.TypeFor[runtime.InterruptBoundaryWaitProvider](),
+	"InterruptNoteProvider":                reflect.TypeFor[runtime.InterruptNoteProvider](),
 	"InterruptedTurnResetProvider":         reflect.TypeFor[runtime.InterruptedTurnResetProvider](),
 	"InventoryGate":                        reflect.TypeFor[runtime.InventoryGate](),
 	"InventoryLister":                      reflect.TypeFor[runtime.InventoryLister](),
@@ -67,8 +69,6 @@ var optionalInterfaces = map[string]reflect.Type{
 	"ProgramStatusHoldProvider":            reflect.TypeFor[runtime.ProgramStatusHoldProvider](),
 	"ProgramStatusProvider":                reflect.TypeFor[runtime.ProgramStatusProvider](),
 	"ProgramStatusShadowProvider":          reflect.TypeFor[runtime.ProgramStatusShadowProvider](),
-	"BootstrapInputObserver":               reflect.TypeFor[runtime.BootstrapInputObserver](),
-	"ProviderAvailabilityObserver":         reflect.TypeFor[runtime.ProviderAvailabilityObserver](),
 	"RelaunchProvider":                     reflect.TypeFor[runtime.RelaunchProvider](),
 	"Router":                               reflect.TypeFor[runtime.Router](),
 	"ServerDeathConfirmer":                 reflect.TypeFor[runtime.ServerDeathConfirmer](),
@@ -79,7 +79,9 @@ var optionalInterfaces = map[string]reflect.Type{
 	"SessionRosterProvider":                reflect.TypeFor[runtime.SessionRosterProvider](),
 	"SharedListing":                        reflect.TypeFor[runtime.SharedListing](),
 	"SleepCapabilityProvider":              reflect.TypeFor[runtime.SleepCapabilityProvider](),
+	"StartupNudgeHandbackProvider":         reflect.TypeFor[runtime.StartupNudgeHandbackProvider](),
 	"SteerCapabilityProvider":              reflect.TypeFor[runtime.SteerCapabilityProvider](),
+	"TmuxSubtreeFence":                     reflect.TypeFor[runtime.TmuxSubtreeFence](),
 	"TransportCapabilityProvider":          reflect.TypeFor[runtime.TransportCapabilityProvider](),
 	"TurnEventProvider":                    reflect.TypeFor[runtime.TurnEventProvider](),
 	"TurnFenceProvider":                    reflect.TypeFor[runtime.TurnFenceProvider](),
@@ -88,6 +90,8 @@ var optionalInterfaces = map[string]reflect.Type{
 	"TurnRunningProvider":                  reflect.TypeFor[runtime.TurnRunningProvider](),
 	"UnattendedSessionStopper":             reflect.TypeFor[runtime.UnattendedSessionStopper](),
 	"V2ReadinessReporter":                  reflect.TypeFor[runtime.V2ReadinessReporter](),
+	"BootstrapInputObserver":               reflect.TypeFor[runtime.BootstrapInputObserver](),
+	"ProviderAvailabilityObserver":         reflect.TypeFor[runtime.ProviderAvailabilityObserver](),
 	"ReconcilerOwnedMergeablePathProvider": reflect.TypeFor[runtime.ReconcilerOwnedMergeablePathProvider](),
 }
 
@@ -213,8 +217,8 @@ func execV2Pack(t *testing.T) string {
 // answer from a fixed trait (sleep capability, fresh reads, an identity
 // sidecar, a transport, an idle-proof budget, a turn-interrupt mode, input
 // fencing, response fencing, local transcripts, a steer mode, observable
-// identity, v2 readiness, an available inventory, an attested listing), or
-// no backend checked.
+// identity, v2 readiness, an available inventory, an attested listing, a
+// process-table scan), or no backend checked.
 func TestFakeProfilesMatchTheirBackends(t *testing.T) {
 	backends := productionBackends(t)
 	for p := runtime.ProfileTmux; p <= runtime.ProfileExecV2; p++ {
@@ -239,7 +243,7 @@ func TestFakeProfilesMatchTheirBackends(t *testing.T) {
 // traits are p's answers to the optional interfaces that report a backend's
 // fixed traits, "-" for one it does not implement.
 func traits(p runtime.Provider) string {
-	out := []string{"-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"}
+	out := []string{"-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"}
 	if s, ok := p.(runtime.SleepCapabilityProvider); ok {
 		out[0] = string(s.SleepCapability("s"))
 	}
@@ -283,8 +287,11 @@ func traits(p runtime.Provider) string {
 	if f, ok := p.(runtime.ListingAttestation); ok {
 		out[13] = strconv.FormatBool(f.ListRunningComplete())
 	}
+	if f, ok := p.(runtime.ConditionalProcessTableScanner); ok {
+		out[14] = strconv.FormatBool(f.CanScanProcessTable())
+	}
 	if f, ok := p.(runtime.ReconcilerOwnedMergeablePathProvider); ok {
-		out[14] = strconv.FormatBool(f.SupportsReconcilerOwnedMergeablePaths())
+		out[15] = strconv.FormatBool(f.SupportsReconcilerOwnedMergeablePaths())
 	}
 	return strings.Join(out, " ")
 }

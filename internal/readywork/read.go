@@ -297,7 +297,7 @@ type legResult struct {
 
 func listRead(q beads.ListQuery) legRead {
 	return func(_ context.Context, leg Leg) legResult {
-		rows, err := beads.HandlesFor(leg.Store).Live.List(q)
+		rows, err := beads.LiveFor(leg.Store).List(q)
 		return legResult{rows: rows, err: err}
 	}
 }
@@ -507,7 +507,7 @@ type legBlockers struct {
 func readLegBlockers(ctx context.Context, cs *crossStore, legs []Leg, own int, rows []beads.Bead) legBlockers {
 	leg := legs[own]
 	out := legBlockers{blockers: make(map[string][]ReadyBeadBlocker, len(rows)), errs: make(map[string]error)}
-	live := beads.HandlesFor(leg.Store).Live
+	live := beads.LiveFor(leg.Store)
 	deps := make([][]beads.Dep, len(rows))
 	depErrs := make([]error, len(rows))
 	fanout.Bounded(len(rows), LegFanOut, func(i int) {

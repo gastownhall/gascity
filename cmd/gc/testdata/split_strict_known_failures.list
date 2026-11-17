@@ -6,7 +6,6 @@
 # fails the gate's TESTS verdict and TestSplitStrictGateInputsParse until it is
 # replaced with why the test fails under the gate.
 # The nightly downward ratchet (--check) fails on an entry that now passes.
-TestAnEarlierMigrationsReclassifiedRowsKeepTheFenceOpen	fails under the gate: drain fence fails closed = false, want true (probe error: loading session "gcg-session-904dc4b6bb": getting bead "gcg-session-904dc4b6bb": bead not found)
 TestAnUnknownClassNameStaysOnTheWorkLedger	fails under the gate: unknown class resolved to 0x6315ef68e20, want the work store 0x6315cefe540
 TestAttachGitHubPRRepairWorkflowStaysOnTheOneStoreOnSingleStoreCity	fails under the gate: the repair workflow's wisp root is not in the one store a single-store city has
 TestAutocloseSweepClosesMoleculeForALostStepClose	fails under the gate: molecule root open after the sweep, want closed
@@ -128,9 +127,6 @@ TestFormulaCookRootOnlyLegacyWispStaysOnTheOneStoreOnSingleStoreCity	fails under
 TestFormulaCookStandaloneGraphV2StampsRunRootStoreScope	fails under the gate: get root gcg-1: bead "gcg-1" is not in this store: bead not found
 TestFormulaCookStandaloneGraphV2StampsRunRootStoreScopeForRig	fails under the gate: get root gcg-1: bead "gcg-1" is not in this store: bead not found
 TestGraphPlacementRuleTable	fails under the gate: split=false city: graphPlacementForScope = *splittest.view(0x28a1790d2300), want *beads.FileStore(0x28a175ea0ee0)
-TestHookClaimDrainFenceFailsClosedOnAStorageGateRefusal	fails under the gate: code = 0, want 2 (fence failed closed: unknown, not empty and not drained); stderr=gc hook --claim: drain-pending probe unavailable for gcg-session-904dc4b6bb: 
-TestHookDiscoveryDrainFenceFailsClosedOnAStorageGateRefusal	fails under the gate: code = 0, want 2 (fence failed closed); stderr=gc hook: drain-pending probe unavailable for gcg-session-904dc4b6bb: loading session "gcg-session-904dc4b6bb": ge
-TestHookDrainPendingProbeCarriesTheStorageGateRefusal	fails under the gate: the probe's error lost the standing-refusal mark, so the fence cannot tell it from a hiccup: loading session "gcg-session-904dc4b6bb": getting bead "gcg-session
 TestHookIdentityFallbackResolvesAsBefore	fails under the gate: session beads = 0, want 1
 TestHookRequestBudget	fails under the gate: session beads = 0, want 1
 TestHookRequestBudgetOnAWorkerSite	fails under the gate: session beads = 0, want 1
@@ -251,7 +247,6 @@ TestSingleStoreConvergenceIsUnchanged	fails under the gate: single-store rig sco
 TestSplitEnvTopologies	fails under the gate: resolveClassStore("graph") on the single-store topology did not collapse to the work store
 TestSplitEnvTopologiesWithRigLeg	fails under the gate: resolveClassStore("graph") on the single-store topology did not collapse to the work store
 TestSplitTopologyConformance	fails under the gate: minted wisp gc-2 has Ephemeral=true, want false: policy-wrapped=false (a wrapped front door maps the wisp policy onto the ephemeral tier under bd-1.0.5; a reloc
-TestStandingGateRefusalIsNotTransient	fails under the gate: stranded-city refusal: err=loading session "gcg-session-904dc4b6bb": getting bead "gcg-session-904dc4b6bb": bead not found transient=false failsClosed=false; wa
 TestStorageGateServesAConvergedCityFromTheBinding	fails under the gate: work stopped resolving to the work store on a converged city
 TestStoreOpensWithoutTheMemoStayOwned	fails under the gate: store 0 closed 0 times, want 1
 TestSweepOrderTrackingCommandClosesAllStaleTracking	fails under the gate: Get(gcg-1): bead "gcg-1" is not in this store: bead not found

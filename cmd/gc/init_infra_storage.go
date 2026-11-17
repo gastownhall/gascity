@@ -81,15 +81,35 @@ func freshInitInfrastructureCandidate(fs fsys.FS, city string, adopting bool) bo
 	return true
 }
 
+// freshInitInfrastructureEnabled reports whether this process records native
+// infrastructure for a fresh bundled factory scaffold at all: Dolt is not
+// skipped and the bead provider is bd.
+func freshInitInfrastructureEnabled() bool {
+	if gcDoltSkip() {
+		return false
+	}
+	provider := strings.TrimSpace(os.Getenv("GC_BEADS"))
+	return provider == "" || provider == "bd"
+}
+
+// freshInitInfrastructureConfigEligible reports whether cfg, a fresh bundled
+// factory scaffold's city config, leaves its infrastructure to the native
+// initializer: no external Dolt host, include, other bead provider or backend,
+// and no native-transport, conditional-write or forced-fallback opt-out. Its
+// [storage] and [ops] are the caller's to check, as it holds them.
+func freshInitInfrastructureConfigEligible(cfg *config.City) bool {
+	return cfg.Dolt.Host == "" && len(cfg.Include) == 0 && len(cfg.Workspace.LegacyIncludes()) == 0 &&
+		(cfg.Beads.Backend == "" || cfg.Beads.Backend == "dolt") &&
+		cfg.Beads.NativeTransport != "off" && cfg.Beads.ConditionalWrites != "off" &&
+		!beads.ForceNativeFallbackActive() &&
+		(cfg.Beads.Provider == "" || cfg.Beads.Provider == "bd")
+}
+
 // recordFreshInitInfrastructure runs before API registration, but starts no
 // database. An explicit storage/operation policy, another bead provider, and
 // preserved/adopted data keep their current behavior.
 func recordFreshInitInfrastructure(fs fsys.FS, city string, fresh bool) error {
-	if !fresh || gcDoltSkip() {
-		return nil
-	}
-	provider := strings.TrimSpace(os.Getenv("GC_BEADS"))
-	if provider != "" && provider != "bd" {
+	if !fresh || !freshInitInfrastructureEnabled() {
 		return nil
 	}
 	raw, err := fs.ReadFile(filepath.Join(city, "city.toml"))
@@ -101,7 +121,7 @@ func recordFreshInitInfrastructure(fs fsys.FS, city string, fresh bool) error {
 	if err != nil {
 		return err
 	}
-	if md.IsDefined("storage") || md.IsDefined("ops") || cfg.Dolt.Host != "" || len(cfg.Include) != 0 || len(cfg.Workspace.LegacyIncludes()) != 0 || (cfg.Beads.Backend != "" && cfg.Beads.Backend != "dolt") || cfg.Beads.NativeTransport == "off" || cfg.Beads.ConditionalWrites == "off" || beads.ForceNativeFallbackActive() || (cfg.Beads.Provider != "" && cfg.Beads.Provider != "bd") {
+	if md.IsDefined("storage") || md.IsDefined("ops") || !freshInitInfrastructureConfigEligible(&cfg) {
 		return nil
 	}
 	packRaw, eligible, err := bundledInitInfrastructurePack(fs, city, cfg.Beads.Provider)

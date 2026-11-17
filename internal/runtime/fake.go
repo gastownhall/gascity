@@ -128,6 +128,11 @@ type Fake struct {
 	// its ProgramPanes row, while every fresh read (ProgramStatusShadowRead,
 	// ProgramStatusHoldRead) judges ProgramPanes. Absent, both agree.
 	ProgramCachedPanes map[string]ProgramPaneRow
+	// StartupNudgeHandbacks are the startup nudges a FullFake hands back
+	// once per session name ([StartupNudgeHandbackProvider]), as a leaf
+	// whose Start found its program blocked through the startup ladder.
+	// Use SetStartupNudgeHandback while other goroutines may read the fake.
+	StartupNudgeHandbacks map[string]string
 	// ProgramStatusErrors fail a FullFake's ProgramStatus by session name.
 	ProgramStatusErrors map[string]error
 	// ProgramCaptureHealErrors fail a FullFake's HealProgramCapture by
@@ -147,6 +152,12 @@ type Fake struct {
 	// ScreenReadErrors fail a FullFake's TurnRunning by session name, as a
 	// screen that cannot be captured does.
 	ScreenReadErrors map[string]error
+	// HeldOpen are the files a FullFake's HeldFiles names by session name,
+	// as the files a running session's process tree holds open.
+	HeldOpen map[string][]string
+	// HeldOpenErrors fail a FullFake's HeldFiles by session name, as a
+	// process tree that cannot be read does.
+	HeldOpenErrors map[string]error
 	// PaneActivity is the activity a FullFake's FreshActivity reads by
 	// session name, the session's own clock where it has moved past the
 	// Activity that GetLastActivity serves, as a pane that drew after the

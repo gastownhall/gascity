@@ -29,11 +29,13 @@ package main
 // binding stale until the re-copy's own marker lands.
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/coordclass"
 )
@@ -112,6 +114,11 @@ func runInfraBatches(clock infraEngineClock, phase string, total, size int, fn f
 		}
 	}
 	return nil
+}
+
+// infraRowLister is the row list every store answers.
+type infraRowLister interface {
+	List(query beads.ListQuery) ([]beads.Bead, error)
 }
 
 // infraEdgeLister is the per-anchor edge read every store answers.
@@ -239,6 +246,11 @@ type infraCopyPlan struct {
 	// blind names the protocol of a payload-blind source (see
 	// beads.DepMetadataAbsentByProtocol).
 	blind string
+	// boundary is the cross-boundary plan (D9, cross_boundary_plan.go): the
+	// edges the copy writes, the gates it mints, and the boundary edges it
+	// records on the moved rows. copied is boundary.Copy as a set.
+	boundary crossBoundaryResult
+	copied   map[beads.DepPair]bool
 }
 
 // payload is the payload the source holds on issue -> dependsOn.
@@ -249,32 +261,50 @@ func (p infraCopyPlan) payload(issue, dependsOn string) infraEdgePayload {
 	return infraEdgePayload{}
 }
 
-// internalEdges is every within-infra edge of the plan, each with the payload
-// it carries, in a stable order.
-func (p infraCopyPlan) internalEdges() []beads.DepWithPayload {
-	var out []beads.DepWithPayload
-	for _, b := range p.rows {
-		for _, d := range p.down[b.ID] {
-			if !p.infraIDs[d.DependsOnID] {
-				continue
-			}
-			out = append(out, beads.DepWithPayload{Dep: d, Payload: p.payload(d.IssueID, d.DependsOnID).Payload})
-		}
+// copiedEdges is every edge the plan copies, each with the payload it
+// carries, in a stable order: the edges between two moved rows, and an
+// external: reference a moved row holds.
+func (p infraCopyPlan) copiedEdges() []beads.DepWithPayload {
+	out := make([]beads.DepWithPayload, 0, len(p.boundary.Copy))
+	for _, d := range p.boundary.Copy {
+		out = append(out, beads.DepWithPayload{Dep: d, Payload: p.payload(d.IssueID, d.DependsOnID).Payload})
 	}
 	return out
 }
 
-// infraCrossEdgesAtRisk is every edge from a work bead into a row of the plan
-// that the clear re-adds once the row is gone, sorted: what a work store that
-// refuses an edge onto a bead it no longer holds drops. A blocking edge onto a
-// row whose copy satisfies it is released instead, as the clear releases it.
+// plannedRow is the form of the source row b the copy creates in the
+// binding: the stamp, and the record of its boundary edges not copied.
+func (p infraCopyPlan) plannedRow(b beads.Bead) beads.Bead {
+	return withInfraCrossEdgeRecords(infraMigrationRow(b), p.boundary.Records[b.ID])
+}
+
+// withInfraCrossEdgeRecords returns b carrying records as its
+// gc.migrated_cross_edges, without mutating the caller's map; b unchanged
+// when there are none.
+func withInfraCrossEdgeRecords(b beads.Bead, records []rigCrossEdgeRecord) beads.Bead {
+	if len(records) == 0 {
+		return b
+	}
+	raw, err := json.Marshal(records)
+	if err != nil {
+		return b
+	}
+	metadata := make(beads.StringMap, len(b.Metadata)+1)
+	for key, value := range b.Metadata {
+		metadata[key] = value
+	}
+	metadata[beadmeta.MigratedCrossEdgesMetadataKey] = string(raw)
+	b.Metadata = metadata
+	return b
+}
+
+// infraCrossEdgesAtRisk is every edge from a work bead into a row of the
+// plan, sorted: the clear drops each once the row is gone (it re-adds no
+// edge, D9) and records it on its work bead.
 func infraCrossEdgesAtRisk(plan infraCopyPlan) []infraBackupEdge {
 	var out []infraBackupEdge
 	for _, row := range plan.rows {
 		for _, d := range plan.up[row.ID] {
-			if beads.IsReadyBlockingDependencyType(d.Type) && beads.DependencySatisfied(row.Status, beads.ReadinessWorkOutcome(row.Metadata)) {
-				continue
-			}
 			out = append(out, infraBackupEdge{IssueID: d.IssueID, DependsOnID: d.DependsOnID, Type: d.Type})
 		}
 	}
@@ -288,6 +318,9 @@ func infraCrossEdgesAtRisk(plan infraCopyPlan) []infraBackupEdge {
 type infraPrepared struct {
 	kept  map[string]bool
 	edges map[beads.DepPair]beads.DepWithPayload
+	// gates are the planned cross-store gates an earlier attempt already
+	// minted, by (owner, blocker): kept, not minted again.
+	gates map[beads.DepPair]string
 	// stamped counts the rows an earlier attempt left in the binding, kept
 	// or not.
 	stamped int
@@ -326,13 +359,18 @@ func infraPayloadDifference(id string, wantDeps, gotDeps []beads.Dep, infraIDs m
 // carries equal, and the binding holds no edge of it the source does not. A
 // missing edge, or one whose type or payload changed, is written again by
 // the copy (an upsert), so it needs no delete.
-func infraKeepStampedRow(plan infraCopyPlan, want beads.Bead, got beads.Bead, gotDeps []beads.Dep) bool {
-	if beadCopyDifference(want, got) != "" || infraCopyClassDifference(want, got) != "" {
+func infraKeepStampedRow(plan infraCopyPlan, want beads.Bead, got beads.Bead, gotDeps []beads.Dep, gates map[beads.DepPair]string) bool {
+	if beadCopyDifference(plan.plannedRow(want), got) != "" || infraCopyClassDifference(want, got) != "" {
 		return false
 	}
 	planned := map[string]bool{}
+	for _, g := range plan.boundary.Gates {
+		if id := gates[beads.DepPair{IssueID: g.Owner.ID, DependsOnID: g.Blocker}]; id != "" && g.Owner.ID == want.ID {
+			planned[id] = true
+		}
+	}
 	for _, d := range plan.down[want.ID] {
-		if plan.infraIDs[d.DependsOnID] {
+		if plan.copied[beads.DepPair{IssueID: want.ID, DependsOnID: d.DependsOnID}] {
 			planned[d.DependsOnID] = true
 		}
 	}

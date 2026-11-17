@@ -1103,7 +1103,8 @@ var stopVerifyPollInterval = 250 * time.Millisecond
 // "City stopped.". It lists the city's runtime until a complete listing is
 // empty, for up to stopVerifyListTimeout: a session still listed, an
 // incomplete listing, or a listing that does not answer by then fails the
-// stop, each reported. A runtime that does not attest its listing proves
+// stop, each reported. A listing started before the deadline may answer up to
+// one stopVerifyPollInterval past it. A runtime that does not attest its listing proves
 // nothing either way, nor does one whose listing is shared with other cities
 // (k8s's namespace), and a provider that cannot be opened is reported; none
 // of these changes the outcome the controller reported, as before.
@@ -1129,10 +1130,13 @@ func confirmControllerStopForStop(cfg *config.City, cityPath string, stderr io.W
 			l.names, l.complete = listRunningForStop(sp, &l.report)
 			done <- l
 		}()
+		// A listing started before the deadline gets at least one poll
+		// interval to answer: the poll can sleep into the deadline, and a
+		// runtime that answers promptly is not a wedged one.
 		var l *listed
 		select {
 		case l = <-done:
-		case <-time.After(time.Until(deadline)):
+		case <-time.After(max(time.Until(deadline), stopVerifyPollInterval)):
 			fmt.Fprintf(stderr, "gc stop: stop not confirmed: the runtime did not answer a listing within %s after the controller stopped (a wedged runtime server?), so sessions may still be running; resolve it and run gc stop again\n", stopVerifyListTimeout) //nolint:errcheck // best-effort stderr
 			return false
 		}

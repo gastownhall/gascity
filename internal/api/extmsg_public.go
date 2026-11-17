@@ -35,7 +35,7 @@ func (l extmsgPublicLane) openStore(requireHost bool) (*opjournal.Store, error) 
 	if requireHost && !l.s.laneExecutes(opjournal.KindMessage) {
 		return nil, apierr.OpJournalUnavailable.Msg("public delivery requires a running message conversation lane")
 	}
-	over := l.s.state.SessionsBeadStore()
+	over := l.s.state.Stores().Sessions()
 	prefix, ok := beads.As[beads.IDPrefixReporter](over)
 	if !ok || prefix.IDPrefix() == "" {
 		return nil, apierr.OpJournalUnavailable.Msg("Sessions writer has no ID namespace")
@@ -61,7 +61,7 @@ func (l extmsgPublicLane) Ready(ctx context.Context) error {
 }
 
 func (l extmsgPublicLane) ResolveRecipient(ctx context.Context, r extmsg.PublicRecipient) (string, error) {
-	store := l.s.state.SessionsBeadStore()
+	store := l.s.state.Stores().Sessions()
 	if _, ok := beads.As[beads.IDPrefixReporter](store); !ok {
 		return "", apierr.OpJournalUnavailable.Msg("Sessions store unavailable")
 	}
@@ -89,7 +89,7 @@ func (l extmsgPublicLane) Prepare(ctx context.Context, d extmsg.PublicDelivery, 
 	if err != nil {
 		return "", err
 	}
-	info, err := session.NewStore(l.s.state.SessionsBeadStore()).Get(d.ResolvedSessionID)
+	info, err := session.NewStore(l.s.state.Stores().Sessions()).Get(d.ResolvedSessionID)
 	if publicRecipientMissing(err) {
 		return "", &extmsg.PublicDeliveryError{Code: "target_gone", Cause: err}
 	}
@@ -212,8 +212,8 @@ func (s *Server) publicRecipientKey(ctx context.Context, selector string) (strin
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	store := s.state.SessionsBeadStore()
-	spec, named, err := s.findNamedSessionSpecForTarget(store, selector)
+	store := s.state.Stores().Sessions()
+	spec, named, err := s.findNamedSessionSpecForTarget(selector)
 	if err != nil {
 		return "", err
 	}
@@ -229,7 +229,7 @@ func (s *Server) publicRecipientKey(ctx context.Context, selector string) (strin
 		return "", err
 	}
 	if identity := strings.TrimSpace(info.ConfiguredNamedIdentity); identity != "" {
-		spec, ok, err := s.findNamedSessionSpecForTarget(store, identity)
+		spec, ok, err := s.findNamedSessionSpecForTarget(identity)
 		if err != nil {
 			return "", err
 		}
@@ -292,11 +292,11 @@ func (s *Server) validatePublicRecipients(ctx context.Context, svc *extmsg.Servi
 	}
 	identities := make(map[string]string)
 	seen := make(map[string]bool)
-	store := s.state.SessionsBeadStore()
+	store := s.state.Stores().Sessions()
 	for _, r := range recipients {
 		selector := r.SessionID
 		if selector == "" {
-			spec, ok, err := s.findNamedSessionSpecForTarget(store, r.AgentIdentity)
+			spec, ok, err := s.findNamedSessionSpecForTarget(r.AgentIdentity)
 			if err != nil {
 				return nil, err
 			}

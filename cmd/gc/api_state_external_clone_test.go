@@ -376,7 +376,7 @@ func TestExternalRigCloneAbsoluteInsideCityIncompleteIdentitySurvivesSweep(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := api.SweepOrphanRigProvisions(context.Background(), store, cs.cityPath, cs); err == nil {
+	if err := api.SweepOrphanRigProvisions(context.Background(), beads.WorkStore{Store: store}, cs.cityPath, cs); err == nil {
 		t.Fatal("sweep accepted an incomplete absolute ownership intent")
 	}
 	if data, err := os.ReadFile(sentinel); err != nil || string(data) != "keep" {

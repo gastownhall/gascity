@@ -68,7 +68,9 @@ func TestHandleStatusFreshBuildsInsteadOfServingTheSavedBody(t *testing.T) {
 	state := newFakeState(t)
 	store := &countingStore{Store: beads.NewMemStore()}
 	state.stores["myrig"] = store
-	state.cityBeadStore = store.Store
+	// A city work store of its own keeps the build complete (and so saved)
+	// without the city leg counting the rig's rows a second time.
+	state.cityBeadStore = beads.NewMemStore()
 	srv := New(state)
 	h := newTestCityHandlerWith(t, state, srv)
 
@@ -186,7 +188,9 @@ func TestHandleStatusFreshAnswersWithTheSavedBodyWhenItsBuildOverruns(t *testing
 	state := newFakeState(t)
 	store := &countingStore{Store: beads.NewMemStore()}
 	state.stores["myrig"] = store
-	state.cityBeadStore = store.Store
+	// A city work store of its own keeps the build complete (and so saved)
+	// without the city leg counting the rig's rows a second time.
+	state.cityBeadStore = beads.NewMemStore()
 	srv := New(state)
 	h := newTestCityHandlerWith(t, state, srv)
 
@@ -296,7 +300,9 @@ func TestHandleStatusFreshWithNothingSavedWaitsForItsBuild(t *testing.T) {
 	state := newFakeState(t)
 	store := &countingStore{Store: beads.NewMemStore()}
 	state.stores["myrig"] = store
-	state.cityBeadStore = store.Store
+	// A city work store of its own keeps the build complete (and so saved)
+	// without the city leg counting the rig's rows a second time.
+	state.cityBeadStore = beads.NewMemStore()
 	if _, err := store.Create(beads.Bead{Title: "new work", Type: "task"}); err != nil {
 		t.Fatal(err)
 	}
@@ -484,7 +490,9 @@ func TestHandleStatusFreshFalseKeepsTheCache(t *testing.T) {
 	state := newFakeState(t)
 	store := &countingStore{Store: beads.NewMemStore()}
 	state.stores["myrig"] = store
-	state.cityBeadStore = store.Store
+	// A city work store of its own keeps the build complete (and so saved)
+	// without the city leg counting the rig's rows a second time.
+	state.cityBeadStore = beads.NewMemStore()
 	h := newTestCityHandler(t, state)
 
 	getStatusBody(t, h, state, "/status")

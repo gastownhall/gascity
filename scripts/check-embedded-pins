@@ -10,12 +10,20 @@ Checks:
             bundled content moves ahead of the pin between releases by design.
   stale     No example or doc carries a superseded bundled, gastown or
             gascity pin (internal/config/public_packs.go Superseded* lists).
-  releases  deps.env BD_VERSION is the latest published Beads release (or
-            advisory under --bd-advisory). Runtime bd and external Dolt must
-            match GC's required native CLI compatibility test toolchain.
-            Beads' own installer default is informational: it is not GC's
-            external-server qualification. The native integration test must
-            still execute; matching declarations alone is not runtime proof.
+  releases  deps.env BD_VERSION is the latest published (non-prerelease)
+            gastownhall/beads release (or advisory under --bd-advisory, the RC
+            Gate, which turns a newer beads release into a warning and checks
+            Dolt against the pinned bd instead). Runtime bd and external Dolt
+            must match GC's required native CLI compatibility test toolchain.
+            The native integration test must still execute; matching
+            declarations alone is not runtime proof. DOLT_VERSION is also at
+            least the Dolt version that beads release qualifies
+            (scripts/ci/install-dolt.sh at the tag): beads measures each Dolt
+            release before raising its pin (Dolt 2.3.x regressed
+            DOLT_RESET('--hard')), so DOLT_VERSION never falls below the
+            qualified pin. It can sit above it: Beads' own installer default
+            is not GC's external-server qualification, Gas City keeps its own
+            Dolt floor (TestDoltVersionPins), and CI runs that version.
 
 The public gastown/gascity pack pins are checked against the registry by
 scripts/update-bundled-gastown-pack --check.
@@ -132,7 +140,8 @@ def check_bundled(root: Path) -> list[str]:
         errors.append(
             f"bundled core/bd/dolt content changed since BundledPackImportVersion {commit[:12]} "
             f"({len(changed)} file(s), e.g. {changed[0]}); bump the pin to a commit with this "
-            "content and append the old pin to SupersededBundledPackImportVersions"
+            "content and append the old pin to SupersededBundledPackImportVersions "
+            "(on a release branch: RELEASING.md, \"Re-pin the bundled packs\")"
         )
     return errors
 
@@ -216,6 +225,15 @@ def gc_native_compatibility_pair(root: Path) -> tuple[str, str]:
     return "v" + ".".join(bd[0]), ".".join(dolt[0])
 
 
+def release_version(value: str) -> tuple[int, ...] | None:
+    """(2, 6, 0) for "2.6.0" or "v2.6"; None for anything that is not a release version."""
+    match = re.fullmatch(r"v?(\d+(?:\.\d+){0,2})", value)
+    if not match:
+        return None
+    parts = tuple(int(part) for part in match.group(1).split("."))
+    return parts + (0,) * (3 - len(parts))
+
+
 def check_releases(root: Path, latest_bd: str | None, qualified_dolt: str | None, bd_advisory: bool) -> list[str]:
     env = deps_env(root)
     bd = env.get("BD_VERSION", "")
@@ -231,18 +249,29 @@ def check_releases(root: Path, latest_bd: str | None, qualified_dolt: str | None
         errors.append(f"deps.env DOLT_VERSION={dolt}, GC native compatibility target uses Dolt {tested_dolt}")
     online = qualified_dolt is None
     latest_bd = latest_bd or latest_release_tag(BEADS_REPO)
+    qualifying_bd = latest_bd
     if bd != latest_bd:
         message = f"deps.env BD_VERSION={bd}, latest beads release is {latest_bd}"
         if bd_advisory:
             print(f"::warning title=bd pin behind latest beads release::{message}")
+            qualifying_bd = bd
         else:
             errors.append(message)
+    qualified_dolt = qualified_dolt or beads_installer_dolt(qualifying_bd)
+    have, floor = release_version(dolt), release_version(qualified_dolt)
+    if have is None:
+        errors.append(f"deps.env DOLT_VERSION={dolt} is not a release version")
+    elif floor is None:
+        errors.append(f"beads {qualifying_bd} qualifies Dolt {qualified_dolt!r}, which is not a release version")
+    elif have < floor:
+        errors.append(
+            f"deps.env DOLT_VERSION={dolt} is older than Dolt {qualified_dolt}, which beads {qualifying_bd} qualifies"
+        )
     if online:
-        installer_dolt = beads_installer_dolt(bd)
         upstream = latest_release_tag(DOLT_REPO).lstrip("v")
         print(f"bd {bd} (latest {latest_bd}); dolt {dolt} "
               f"(GC native test pair {tested_bd}/{tested_dolt}; "
-              f"Beads installer default {installer_dolt}; upstream latest {upstream})")
+              f"beads {qualifying_bd} qualifies {qualified_dolt}; upstream latest {upstream})")
     return errors
 
 

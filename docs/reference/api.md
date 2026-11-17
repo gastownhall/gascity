@@ -523,8 +523,31 @@ held; they never act as question answers.
 
 The runtime opens and answers the provider's own question control. Clients use
 the supervisor API rather than reading provider logs or sending terminal keys.
-When `metadata.answer_action` is absent, the current native frame cannot be
-answered through the API; use `gc session attach` to answer in the terminal.
+When `metadata.answer_action` is absent, the current native frame takes no
+request-bound `answer`.
+
+A question dialog also lists in `options` the options a `select` can pick.
+Answer it with `POST .../respond` and `action` `select`, `text` naming one of
+those options by label (or by number, when no option carries that label), and
+the question's `request_id`:
+
+```json
+{
+  "request_id": "<request_id from pending>",
+  "action": "select",
+  "text": "Keep holding"
+}
+```
+
+A `select` types that option's key once. Without `metadata.answer_action` the
+`request_id` names the page by its visible content, so it cannot tell a later
+identical question from this one. A `select` is refused on a multi-select page
+(use `answers` when `metadata.multi_select` is `"true"`), on a page whose
+options show previews, and on a native Codex question (use `answer`). A page
+that takes neither action lists no options and is answered in the session's
+terminal (`gc session attach`), as are free-text and chat rows without
+`metadata.free_text`. A `respond` the page does not offer returns 409
+`invalid_interaction`.
 
 A native approval (`kind: "approval"`) reports its response authority in
 `metadata.request_identity`:
@@ -593,6 +616,35 @@ restarts it rebuilds what it has announced from that log, so it announces
 nothing twice and clears what was answered while it was down. A client
 connecting without a cursor starts at the head of the log, so it should
 read `GET /v0/city/{cityName}/pending` once and apply events from there.
+
+### Session List Changes
+
+A client that shows the city's sessions can follow the event stream
+instead of polling `GET /v0/city/{cityName}/sessions`:
+
+| Event | Fires when | Payload |
+|---|---|---|
+| `session.created` | a session joins the open set: it was created, or a closed session was reopened | `SessionCreatedPayload`: `session_id`, `template`, `title`, `alias`, `agent_name` |
+| `session.closed` | a session leaves the open set: it closed | `SessionClosedPayload`: the same fields plus `reason`, the close reason the session records |
+
+Each fires once per transition, for sessions created or closed by any
+path (the CLI, the API, or the orchestrator's own pools), whether or not
+a client is watching. Each also agrees with the session list when it
+fires: a late or out-of-date report of a session's state announces
+nothing. The envelope's `subject` and `session_id` are the session ID.
+Read the session list once when you connect, then apply these events;
+reconnect with `Last-Event-ID` (or `after_seq` / `after_cursor`) to get
+the transitions you missed.
+
+Treat the events as idempotent updates to the list you read:
+
+- After the orchestrator restarts, an open session is announced as
+  created the first time it changes, and a close can be announced a
+  second time.
+- A transition that happens while the orchestrator is down can be missed.
+- A session that closes and reopens, or reopens and closes, before the
+  orchestrator has processed the first change is announced only in the
+  state it ends in.
 
 ### Transport vs Semantic Type
 

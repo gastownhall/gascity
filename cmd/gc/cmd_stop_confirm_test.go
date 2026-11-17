@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -129,6 +130,47 @@ func TestConfirmControllerStopForStop(t *testing.T) {
 			}
 		})
 	}
+}
+
+// slowLastListProvider answers its first listing at once and every later
+// one after delay, all listing the same survivor. Run it in a synctest
+// bubble, where the delay is fake time.
+type slowLastListProvider struct {
+	*runtime.Fake
+	calls *atomic.Int32
+	delay time.Duration
+}
+
+func (p slowLastListProvider) ListRunning(prefix string) ([]string, error) {
+	if p.calls.Add(1) > 1 {
+		<-time.After(p.delay)
+	}
+	return p.Fake.ListRunning(prefix)
+}
+
+// Kills reporting a runtime that answers as wedged because the poll slept
+// into the deadline: the final listing starts with almost no time left and
+// answers well within one poll interval, so the stop names the survivor
+// instead of saying the runtime did not answer a listing.
+//
+// On fake time: the first listing answers at 0 and the poll sleeps to 250ms,
+// 50ms before the 300ms deadline; the final listing answers at 375ms, inside
+// its poll-interval window (500ms) but after the deadline.
+func TestConfirmControllerStopGivesTheFinalListingAPollIntervalToAnswer(t *testing.T) {
+	var calls atomic.Int32
+	sp := slowLastListProvider{Fake: runningFake(t, "worker-1"), calls: &calls, delay: 125 * time.Millisecond}
+	stopProbeProvider(t, sp, 300*time.Millisecond)
+	stopVerifyPollInterval = 250 * time.Millisecond
+	cityPath := t.TempDir()
+	synctest.Test(t, func(t *testing.T) {
+		var stderr lockedBuffer
+		if got := confirmControllerStopForStop(&config.City{}, cityPath, &stderr); got {
+			t.Fatalf("confirmed a stop with worker-1 still running (stderr %q)", stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "worker-1 still running") {
+			t.Fatalf("stderr %q, want the survivor worker-1 named, not a wedged listing", stderr.String())
+		}
+	})
 }
 
 // Kills the standalone controller path reporting success over survivors: a

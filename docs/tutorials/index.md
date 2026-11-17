@@ -10,6 +10,10 @@ and cleanup. Keep its `bright-lights` city and `practice` repository.
 The primary path through these tutorials continues that project using the
 default Gas City pack and your existing provider:
 
+The tutorials use the latest Homebrew release of `gc`. If you followed the
+[Quickstart](/getting-started/quickstart), you already have `~/my-city`;
+Tutorial 01 tells you where to pick up.
+
 1. [Cities and Rigs](/tutorials/01-cities-and-rigs) — inspect the city and register your own repositories in place.
 2. [Agents](/tutorials/02-agents) — submit a reusable greeting API to the built-in workers.
 3. [Sessions](/tutorials/03-sessions) — observe, stop and resume that persistent work.

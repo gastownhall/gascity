@@ -23,6 +23,7 @@ import (
 func TestFreshGasCityScaffoldRecordsNativeInfrastructureBeforeRegistration(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "")
+	admitInitSplitBD(t)
 	fs := fsys.NewFake()
 	city := "/new-gascity"
 	var stdout, stderr bytes.Buffer
@@ -32,6 +33,56 @@ func TestFreshGasCityScaffoldRecordsNativeInfrastructureBeforeRegistration(t *te
 	witness := filepath.Join(city, ".gc", "init-infrastructure.json")
 	if _, err := fs.ReadFile(witness); err != nil {
 		t.Fatalf("a fresh default city must record native infrastructure intent before the API can register/start it: %v", err)
+	}
+	// The scaffold leaves [storage] to the native initializer, which refuses
+	// to append its own to a city that already declares one.
+	written, err := config.Parse(fs.Files[filepath.Join(city, "city.toml")])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if written.Storage != nil {
+		t.Fatalf("scaffold wrote [storage] ahead of the native initializer: %+v", written.Storage)
+	}
+}
+
+// The native initializer splits a fresh default city only where a split city
+// serves it: a city gc init holds single-store (here a bd a split city's gc bd
+// refuses) or one asked single-store records no native intent either, and an
+// explicit --storage=split keeps the born-split block it asked for.
+func TestNativeInfrastructureFollowsInitStorageDecision(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		choice    initStorageChoice
+		inventory string
+		wantSplit bool
+	}{
+		{name: "held single-store", inventory: ""},
+		{name: "asked single-store", choice: initStorageSingle, inventory: "bd-1.3.4"},
+		{name: "asked split", choice: initStorageSplit, inventory: "bd-1.3.4", wantSplit: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_BEADS", "bd")
+			t.Setenv("GC_DOLT", "")
+			initStorageFakeBD(t)
+			stubInitBDVersion(t, "bd version 1.3.4 (7ef2fd05e: HEAD@7ef2fd05eb0c)")
+			stubInitSplitBDJudge(t, tc.inventory, nil)
+			fs := fsys.NewFake()
+			city := "/new-gascity"
+			var stdout, stderr bytes.Buffer
+			if code := doInit(fs, city, wizardConfig{configName: "gascity", provider: "codex", storage: tc.choice}, "", &stdout, &stderr, false); code != 0 {
+				t.Fatalf("scaffold = %d: %s", code, stderr.String())
+			}
+			if _, err := fs.ReadFile(filepath.Join(city, ".gc", "init-infrastructure.json")); err == nil {
+				t.Fatal("native infrastructure intent recorded for a city whose storage gc init already decided")
+			}
+			written, err := config.Parse(fs.Files[filepath.Join(city, "city.toml")])
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := written.Storage != nil; got != tc.wantSplit {
+				t.Fatalf("city.toml [storage] present = %t, want %t", got, tc.wantSplit)
+			}
+		})
 	}
 }
 
@@ -252,6 +303,7 @@ func TestNativeInfrastructureExplicitStorageOpsAndExistingDataStayUntouched(t *t
 func TestNativeInfrastructureHTTPScaffoldDefersAndResumesBeforeBootstrap(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_DOLT", "")
+	admitInitSplitBD(t)
 	t.Setenv("GC_HOME", t.TempDir())
 	city := filepath.Join(t.TempDir(), "api-native-city")
 	oldOps := initInfrastructureDefaultOps

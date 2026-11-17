@@ -365,7 +365,7 @@ func startMemScopedWorkflow(t *testing.T) (*beads.MemStore, string, string) {
 	}
 
 	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
-	deps.Store = store
+	deps = slingDepsWithStore(deps, store)
 	deps.CityPath = t.TempDir()
 
 	worker, ok := resolveAgentIdentity(cfg, "worker", "")
@@ -678,7 +678,7 @@ func TestGraphWorkflowControlLaneUsesOwningStoreScope(t *testing.T) {
 			}
 			runner := newFakeRunner()
 			deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
-			deps.Store = ownerStore
+			deps = slingDepsWithStore(deps, ownerStore)
 			deps.StoreRef = tt.storeRef
 			deps.CityPath = t.TempDir()
 

@@ -197,20 +197,22 @@ func crossStoreGateID(store beads.GraphStore, control beads.Bead, blockerID stri
 //     pass or fail (WorkflowSkippedCloseReason);
 //   - the finalizer's sweep of a canceled run (workflowCanceledMemberCloseReason);
 //   - POST /runs/{id}/cancel (sourceworkflow.RunCanceledCloseReason);
-//   - gc hook --claim's skip of a workflow whose input is already done, and
-//     the order-tracking sweep of stale order wisp subtrees (both close by
-//     gc.root_bead_id).
+//   - gc hook --claim's skip of a workflow whose input is already done, its
+//     retirement of a workflow whose input was purged
+//     (HookInputPurgedWorkflowCloseReason), and the order-tracking sweep of
+//     stale order wisp subtrees (all close by gc.root_bead_id).
 //
 // A scope abort (scopeAbortSkippedCloseReason) closes only the members of one
 // scope, which a gate never is.
 var controllerCloseReasons = map[string]bool{
-	molecule.SubtreeClosedReason:                   true,
-	sourceworkflow.WorkflowSubtreeClosedReason:     true,
-	sourceworkflow.WorkflowSkippedCloseReason:      true,
-	sourceworkflow.RunCanceledCloseReason:          true,
-	workflowCanceledMemberCloseReason:              true,
-	sourceworkflow.HookSkipDoneWorkflowCloseReason: true,
-	sourceworkflow.StaleOrderWispCloseReason:       true,
+	molecule.SubtreeClosedReason:                      true,
+	sourceworkflow.WorkflowSubtreeClosedReason:        true,
+	sourceworkflow.WorkflowSkippedCloseReason:         true,
+	sourceworkflow.RunCanceledCloseReason:             true,
+	workflowCanceledMemberCloseReason:                 true,
+	sourceworkflow.HookSkipDoneWorkflowCloseReason:    true,
+	sourceworkflow.HookInputPurgedWorkflowCloseReason: true,
+	sourceworkflow.StaleOrderWispCloseReason:          true,
 }
 
 // IsControllerClosedCrossStoreGate reports whether gate is a closed
@@ -608,8 +610,10 @@ func OpenCrossStoreGatesNaming(store beads.GraphStore, blockerID string) ([]bead
 	})
 }
 
-// CrossStoreBlockerResolver reads every blocker in ids from the stores other
-// than the gates' own, in ONE batched read per store, and returns what it read.
+// CrossStoreBlockerResolver reads every blocker in ids from every store that
+// may hold it, in ONE batched read per store, and returns what it read. The
+// gates' own store is one of them: a migration can move a gate's blocker into
+// it after the gate was minted.
 //
 // A store it cannot read does not fail the pass: the resolver marks every id
 // that store may hold undecided and names the store in Unreadable, so the pass

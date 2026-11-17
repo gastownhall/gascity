@@ -70,6 +70,13 @@ var SupersededBundledPackImportVersions = []string{
 	// predates the content those binaries embedded, so it is served from
 	// embedded content and never fetched (isSupersededEmbeddedOnlyPin).
 	"sha:f895c0ff47d6ee9334ed282a416387eb5b084d24",
+	// The pins v1.5.1 shipped from hotfix/1.5.1, whose [release-only]
+	// re-pins never reached main: its first pin (274c1cfb70), its pin
+	// after #7498 (40404c6cfd), and v1.5.1's own (bae3ebb2b4). Without them
+	// a main build reads a city v1.5.1 created as deliberately pinned.
+	"sha:3dcfe0969e26aac651c5c65c0a5d73f2d8cc16c5",
+	"sha:505dcdcbce087c7b29c6a6eeb4ca37fe646b5e42",
+	"sha:2e643dc2eb5ff84d9853ecaa6961a87a8e4043ae",
 	"sha:e38ce9cc55d15fa351199c042f0d07aba1a347af",
 	"sha:b21ab3b27bd09f9130fb457e6fbf9e3570ea7297",
 	"sha:bca762adc8ef16fdc7de301b6b31b5ae4dfe2607",

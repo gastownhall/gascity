@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/overlay"
 )
@@ -70,18 +71,18 @@ func StageSessionWorkDir(cfg Config) error {
 // StageSessionWorkDirWithWarnings applies provider-aware pack overlays, the
 // agent overlay, and CopyFiles staging before a provider starts the session
 // process. Nonfatal overlay preservation warnings are written to warnings.
-func StageSessionWorkDirWithWarnings(cfg Config, warnings io.Writer) error {
+func StageSessionWorkDirWithWarnings(cfg Config, warnings io.Writer, opts ...StageOption) error {
 	if err := ValidateReconcilerOwnedCopyFiles(cfg); err != nil {
 		return err
 	}
 	if cfg.WorkDir != "" {
 		for _, od := range cfg.PackOverlayDirs {
-			if err := StageConfiguredProviderOverlayDir(od, cfg.WorkDir, cfg, warnings); err != nil {
+			if err := StageConfiguredProviderOverlayDir(od, cfg.WorkDir, cfg, warnings, opts...); err != nil {
 				return fmt.Errorf("pack overlay %q -> %q: %w", od, cfg.WorkDir, err)
 			}
 		}
 		if cfg.OverlayDir != "" {
-			if err := StageConfiguredProviderOverlayDir(cfg.OverlayDir, cfg.WorkDir, cfg, warnings); err != nil {
+			if err := StageConfiguredProviderOverlayDir(cfg.OverlayDir, cfg.WorkDir, cfg, warnings, opts...); err != nil {
 				return fmt.Errorf("overlay %q -> %q: %w", cfg.OverlayDir, cfg.WorkDir, err)
 			}
 		}
@@ -156,12 +157,12 @@ func sameCleanPath(a, b string) bool {
 // according to cfg's provider slots and mergeable-settings ownership policy.
 // Reconciler-owned workdirs preserve mergeable settings installed before
 // startup; isolated workdirs keep the legacy full-staging behavior.
-func StageConfiguredProviderOverlayDir(srcDir, dstDir string, cfg Config, warnings io.Writer) error {
+func StageConfiguredProviderOverlayDir(srcDir, dstDir string, cfg Config, warnings io.Writer, opts ...StageOption) error {
 	providers := EffectiveOverlayProviderNames(cfg)
 	if len(cfg.ReconcilerOwnedMergeablePaths) > 0 {
-		return StageProviderOverlayDirSkippingPaths(srcDir, dstDir, providers, cfg.ReconcilerOwnedMergeablePaths, warnings)
+		return StageProviderOverlayDirSkippingPaths(srcDir, dstDir, providers, cfg.ReconcilerOwnedMergeablePaths, warnings, opts...)
 	}
-	return StageProviderOverlayDir(srcDir, dstDir, providers, warnings)
+	return StageProviderOverlayDir(srcDir, dstDir, providers, warnings, opts...)
 }
 
 // EffectiveOverlayProviderNames returns the provider overlay slots to stage for
@@ -209,7 +210,14 @@ func stageCopyFiles(workDir string, copyFiles []CopyEntry) error {
 		if sameFile(cf.Src, effectiveDst) {
 			continue
 		}
-		if err := StagePath(cf.Src, dst); err != nil {
+		relPath, err := filepath.Rel(workDir, effectiveDst)
+		if err != nil || strings.HasPrefix(relPath, ".."+string(filepath.Separator)) || relPath == ".." {
+			relPath = cf.RelDst
+			if relPath == "" {
+				relPath = filepath.Base(effectiveDst)
+			}
+		}
+		if err := StagePathWithRel(cf.Src, dst, relPath); err != nil {
 			return fmt.Errorf("copy file %q -> %q: %w", cf.Src, dst, err)
 		}
 	}
@@ -239,9 +247,10 @@ type PreserveFunc func(relPath string, existing []byte) bool
 type StageOption func(*stageConfig)
 
 type stageConfig struct {
-	preserve PreserveFunc
-	staged   map[string]bool
-	mu       *sync.Mutex
+	preserve    PreserveFunc
+	staged      map[string]bool
+	mu          *sync.Mutex
+	skipTracked bool
 }
 
 // WithPreserve installs a predicate consulted for every non-directory overlay
@@ -260,6 +269,30 @@ func WithPreserve(preserve PreserveFunc) StageOption {
 		c.staged = staged
 		c.mu = mu
 	}
+}
+
+// WithSkipTrackedOverlays makes provider-overlay staging leave files alone when
+// the destination worktree tracks their paths. Non-Windows platforms default
+// to off (staging_tracked_other.go); managed worker worktrees opt in.
+func WithSkipTrackedOverlays() StageOption {
+	return func(c *stageConfig) {
+		c.skipTracked = true
+	}
+}
+
+func trackedOverlayGitEnv() []string {
+	env := execenv.Environ()
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		key, _, _ := strings.Cut(entry, "=")
+		switch key {
+		case "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR":
+			continue
+		default:
+			out = append(out, entry)
+		}
+	}
+	return out
 }
 
 // StageProviderOverlayDirSkippingMergeable copies a provider-aware overlay
@@ -343,6 +376,18 @@ func stageProviderOverlayDir(srcDir, dstDir string, providers []string, skip fun
 			opt(&cfg)
 		}
 	}
+	if cfg.skipTracked || defaultSkipTrackedOverlays() {
+		trackedSkip := trackedOverlaySkip(dstDir, providerOverlayFileCandidates(srcDir, providers), warnings)
+		base := skip
+		if trackedSkip != nil {
+			skip = func(relPath string, isDir bool) bool {
+				if base != nil && base(relPath, isDir) {
+					return true
+				}
+				return trackedSkip(relPath, isDir)
+			}
+		}
+	}
 	if cfg.preserve != nil {
 		base := skip
 		skip = func(relPath string, isDir bool) bool {
@@ -389,6 +434,70 @@ func stageProviderOverlayDir(srcDir, dstDir string, providers []string, skip fun
 	return nil
 }
 
+func providerOverlayFileCandidates(srcDir string, providers []string) []string {
+	var out []string
+	collectOverlayFiles(srcDir, "", func(rel string) {
+		if !providerUniversalCandidate(rel) {
+			return
+		}
+		out = append(out, filepath.Clean(rel))
+	})
+	seen := make(map[string]bool, len(providers))
+	for _, provider := range providers {
+		provider = strings.TrimSpace(provider)
+		if provider == "" || seen[provider] {
+			continue
+		}
+		seen[provider] = true
+		providerDir := filepath.Join(srcDir, overlay.PerProviderDir, provider)
+		collectOverlayFiles(providerDir, "", func(rel string) {
+			out = append(out, filepath.Clean(rel))
+		})
+	}
+	return out
+}
+
+func collectOverlayFiles(root, rel string, appendRel func(string)) {
+	dir := root
+	if rel != "" {
+		dir = filepath.Join(root, rel)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		entryRel := entry.Name()
+		if rel != "" {
+			entryRel = filepath.Join(rel, entry.Name())
+		}
+		if providerRuntimeMirrorCandidate(entryRel) {
+			continue
+		}
+		if entry.IsDir() {
+			collectOverlayFiles(root, entryRel, appendRel)
+			continue
+		}
+		appendRel(entryRel)
+	}
+}
+
+func providerUniversalCandidate(relPath string) bool {
+	clean := filepath.Clean(relPath)
+	return !providerRuntimeMirrorCandidate(clean) && !providerPerProviderCandidate(clean)
+}
+
+func providerRuntimeMirrorCandidate(relPath string) bool {
+	clean := filepath.Clean(relPath)
+	return clean == ".gc" || strings.HasPrefix(clean, ".gc"+string(filepath.Separator))
+}
+
+func providerPerProviderCandidate(relPath string) bool {
+	clean := filepath.Clean(relPath)
+	return clean == overlay.PerProviderDir || filepath.Dir(clean) == overlay.PerProviderDir ||
+		strings.HasPrefix(clean, overlay.PerProviderDir+string(filepath.Separator))
+}
+
 func splitOverlayWarnings(raw string) (string, string) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -430,8 +539,14 @@ func StageDir(srcDir, dstDir string) error {
 // StagePath copies a file or directory and returns any per-file warnings as an
 // error so callers can fail fast instead of ignoring partial staging.
 func StagePath(src, dst string) error {
+	return StagePathWithRel(src, dst, "")
+}
+
+// StagePathWithRel copies a file or directory and applies platform adaptation
+// for single files using relPath as the destination-relative path.
+func StagePathWithRel(src, dst, relPath string) error {
 	var stderr bytes.Buffer
-	if err := overlay.CopyFileOrDir(src, dst, &stderr); err != nil {
+	if err := overlay.CopyFileOrDirWithRel(src, dst, relPath, &stderr); err != nil {
 		return err
 	}
 	if stderr.Len() > 0 {

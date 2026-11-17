@@ -57,6 +57,26 @@ type startConfig struct {
 
 // marshalStartConfig converts a [runtime.Config] to JSON for the exec script.
 func marshalStartConfig(cfg runtime.Config) ([]byte, error) {
+	return json.Marshal(newStartConfig(cfg))
+}
+
+// marshalHostStagedStartConfig is marshalStartConfig for a pack sharing the
+// host filesystem whose host work gc did itself (Provider.startConfigFor):
+// the overlays and copied files it staged (with the reconciler-owned
+// mergeable paths that name copied files), the pre_start it ran, and the
+// session_setup it runs after the launch are left out, so the pack does
+// exactly what the config carries. work_dir_exclude stays: it is the floor
+// of what an export of the work dir skips, not work gc did.
+func marshalHostStagedStartConfig(cfg runtime.Config) ([]byte, error) {
+	sc := newStartConfig(cfg)
+	sc.PackOverlayDirs, sc.OverlayDir, sc.CopyFiles = nil, "", nil
+	sc.ReconcilerOwnedMergeablePaths = nil
+	sc.PreStart, sc.SessionSetup, sc.SessionSetupScript = nil, nil, ""
+	return json.Marshal(sc)
+}
+
+// newStartConfig is cfg's full start config.
+func newStartConfig(cfg runtime.Config) startConfig {
 	owned := make(map[string]bool, len(cfg.ReconcilerOwnedMergeablePaths))
 	for _, rel := range cfg.ReconcilerOwnedMergeablePaths {
 		owned[path.Clean(filepath.ToSlash(rel))] = true
@@ -95,5 +115,5 @@ func marshalStartConfig(cfg runtime.Config) ([]byte, error) {
 	if cfg.WorkDir != "" {
 		sc.WorkDirExclude = citylayout.WorkDirExportExcludes()
 	}
-	return json.Marshal(sc)
+	return sc
 }

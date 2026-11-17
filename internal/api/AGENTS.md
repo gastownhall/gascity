@@ -640,6 +640,12 @@ payload text. The fields `conversationOpRecord` adds to `ConversationOp` are
 set only on the op routes and `op.changed`; a session command's answer keeps
 `conversationOpWire`.
 
+`session.created` and `session.closed` are the controller's too: its bead
+event watcher derives them from session beads' `bead.*` notifications
+(SESSION-OBSERVE-LIST-EVENTS in `internal/session/REQUIREMENTS.md`), and
+`POST /v0/events` and `gc event emit` refuse them
+(`events.IsSessionListDerived`).
+
 Native question answers use the existing `/respond` contract with `action:
 answer` and a required explicit `request_id`, validated in the session domain
 before any legacy/lane op admission. Keep the existing op keys, payload digest
