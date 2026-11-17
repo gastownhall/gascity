@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -240,6 +241,14 @@ func exitTestProcess(code int) {
 	os.Exit(code)
 }
 
+// answeringProviderExternalDial is the default test dialer: every endpoint
+// accepts the connection.
+func answeringProviderExternalDial(context.Context, string, string) (net.Conn, error) {
+	client, server := net.Pipe()
+	_ = server.Close()
+	return client, nil
+}
+
 func TestMain(m *testing.M) {
 	maybeRunHostedBeadsCredentialProvider()
 	maybeRunProductMetricsDirectChildEnvSpy()
@@ -248,6 +257,9 @@ func TestMain(m *testing.M) {
 	// Infrastructure spawns never probe the host's systemd user manager from
 	// tests; tests that exercise scoping install a fake (infra_scope_test.go).
 	disableInfraScopeForTests()
+	// Provider-owned external init dials its endpoint first; the fixtures use
+	// made-up hosts. Tests that exercise the dial install their own dialer.
+	providerExternalDial = answeringProviderExternalDial
 
 	// testscript re-executes the test binary as "gc" or "bd" for each txtar
 	// command. On that path we must not create a new temp root — the parent

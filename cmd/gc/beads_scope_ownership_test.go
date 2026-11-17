@@ -935,24 +935,34 @@ func TestProviderOwnedFreshRigInheritsReadyExternalBinding(t *testing.T) {
 		cityConfig   string
 		sidecar      string
 		wantEndpoint string
+		// wantDial is the (network, address) the init's reachability probe
+		// dials; empty when the transport is not probed.
+		wantDial [2]string
+		// endpointDown makes the dial fail: init must refuse before the
+		// provider script runs, for a probed transport only.
+		endpointDown bool
+		wantRefused  bool
 	}{
 		{
 			name:         "direct tcp",
 			intent:       providerScopeIntent{Transport: "direct", Target: "external"},
 			cityConfig:   "gc.endpoint_origin: city_canonical\ndolt.mode: server\ndolt.host: db.example.test\ndolt.port: 4406\ndolt.auto-start: false\n",
 			wantEndpoint: "db.example.test|4406||||",
+			wantDial:     [2]string{"tcp", "db.example.test:4406"},
 		},
 		{
 			name:         "direct raw bd canonical tcp",
 			intent:       providerScopeIntent{Transport: "direct", Target: "external"},
 			cityConfig:   "dolt.mode: server\ndolt.host: raw-bd.example.test\ndolt.port: 4407\ndolt.auto-start: false\n",
 			wantEndpoint: "raw-bd.example.test|4407||||",
+			wantDial:     [2]string{"tcp", "raw-bd.example.test:4407"},
 		},
 		{
 			name:         "direct unix",
 			intent:       providerScopeIntent{Transport: "direct", Target: "external"},
 			cityConfig:   "gc.endpoint_origin: city_canonical\ndolt.mode: server\ndolt.socket: /var/run/dolt/direct.sock\ndolt.auto-start: false\n",
 			wantEndpoint: "|||||/var/run/dolt/direct.sock",
+			wantDial:     [2]string{"unix", "/var/run/dolt/direct.sock"},
 		},
 		{
 			name:         "proxied tcp",
@@ -965,6 +975,30 @@ func TestProviderOwnedFreshRigInheritsReadyExternalBinding(t *testing.T) {
 			intent:       providerScopeIntent{Transport: "proxied", Target: "external"},
 			sidecar:      `{"external":{"socket":"/var/run/dolt/upstream.sock"}}`,
 			wantEndpoint: "||||/var/run/dolt/upstream.sock|",
+		},
+		{
+			name:         "direct tcp endpoint down is refused before the script runs",
+			intent:       providerScopeIntent{Transport: "direct", Target: "external"},
+			cityConfig:   "gc.endpoint_origin: city_canonical\ndolt.mode: server\ndolt.host: db.example.test\ndolt.port: 4406\ndolt.auto-start: false\n",
+			wantDial:     [2]string{"tcp", "db.example.test:4406"},
+			endpointDown: true,
+			wantRefused:  true,
+		},
+		{
+			name:         "direct unix endpoint down is refused before the script runs",
+			intent:       providerScopeIntent{Transport: "direct", Target: "external"},
+			cityConfig:   "gc.endpoint_origin: city_canonical\ndolt.mode: server\ndolt.socket: /var/run/dolt/direct.sock\ndolt.auto-start: false\n",
+			wantDial:     [2]string{"unix", "/var/run/dolt/direct.sock"},
+			endpointDown: true,
+			wantRefused:  true,
+		},
+		{
+			// Proxied external is unevidenced (G8): the probe is direct only.
+			name:         "proxied tcp endpoint down still runs the script",
+			intent:       providerScopeIntent{Transport: "proxied", Target: "external"},
+			sidecar:      `{"external":{"host":"proxy-upstream.example.test","port":5506}}`,
+			wantEndpoint: "||proxy-upstream.example.test|5506||",
+			endpointDown: true,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1004,8 +1038,33 @@ func TestProviderOwnedFreshRigInheritsReadyExternalBinding(t *testing.T) {
 			if err := persistProviderScopeOwnership(city, rig, tt.intent); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := runProviderOwnedScopeInit(city, rig, "fresh", script); err != nil {
-				t.Fatalf("runProviderOwnedScopeInit: %v", err)
+			dial := answeringProviderExternalDial
+			if tt.endpointDown {
+				dial = refusedProviderExternalDial
+			}
+			dialed := installProviderExternalDial(t, dial)
+			_, initErr := runProviderOwnedScopeInit(city, rig, "fresh", script)
+			if *dialed != tt.wantDial {
+				t.Fatalf("probe dialed %q, want %q", *dialed, tt.wantDial)
+			}
+			if tt.wantRefused {
+				if initErr == nil {
+					t.Fatal("runProviderOwnedScopeInit against a dead endpoint = nil, want a refusal")
+				}
+				if _, err := os.Stat(logPath); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("provider script ran against a dead endpoint (stat %s: %v)", logPath, err)
+				}
+				if _, err := os.Stat(filepath.Join(rig, ".beads", "dolt")); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("a refused init left %s behind (stat err %v)", filepath.Join(rig, ".beads", "dolt"), err)
+				}
+				entry, owned, err := providerOwnedScopeState(city, rig)
+				if err != nil || !owned || entry.State != providerScopeInitializing {
+					t.Fatalf("rig journal after a refused init = (%+v, %v, %v), want still initializing", entry, owned, err)
+				}
+				return
+			}
+			if initErr != nil {
+				t.Fatalf("runProviderOwnedScopeInit: %v", initErr)
 			}
 			data, err := os.ReadFile(logPath)
 			if err != nil {
@@ -1215,12 +1274,25 @@ func TestProviderOwnedScopeInitScrubsPendingLocalEnvironmentAndPreservesExternal
 		wantPort   string
 		wantSocket string
 		wantDB     string
+		// wantDial is the (network, address) the init's reachability probe
+		// dials; empty when the scope is not probed.
+		wantDial [2]string
+		// endpointDown makes the dial fail: a probed scope is refused before
+		// the provider script runs, any other still runs it.
+		endpointDown bool
+		wantRefused  bool
 	}{
 		{name: "direct local", intent: providerScopeIntent{Transport: "direct", Target: "local"}, wantTarget: "local"},
 		{name: "proxied local", intent: providerScopeIntent{Transport: "proxied", Target: "local"}, wantTarget: "local"},
-		{name: "direct external", intent: providerScopeIntent{Transport: "direct", Target: "external"}, wantTarget: "external", wantHost: "db.example.test", wantPort: "4406", wantDB: "bd_external"},
+		{name: "direct external", intent: providerScopeIntent{Transport: "direct", Target: "external"}, wantTarget: "external", wantHost: "db.example.test", wantPort: "4406", wantDB: "bd_external", wantDial: [2]string{"tcp", "db.example.test:4406"}},
 		{name: "proxied external", intent: providerScopeIntent{Transport: "proxied", Target: "external"}, wantTarget: "external", wantHost: "db.example.test", wantPort: "4406", wantDB: "bd_external"},
-		{name: "direct external unix", intent: providerScopeIntent{Transport: "direct", Target: "external"}, wantTarget: "external", wantSocket: "/var/run/dolt/external.sock", wantDB: "bd_external"},
+		{name: "direct external unix", intent: providerScopeIntent{Transport: "direct", Target: "external"}, wantTarget: "external", wantSocket: "/var/run/dolt/external.sock", wantDB: "bd_external", wantDial: [2]string{"unix", "/var/run/dolt/external.sock"}},
+		{name: "direct external endpoint down", intent: providerScopeIntent{Transport: "direct", Target: "external"}, wantTarget: "external", wantHost: "db.example.test", wantPort: "4406", wantDB: "bd_external", wantDial: [2]string{"tcp", "db.example.test:4406"}, endpointDown: true, wantRefused: true},
+		{name: "direct external unix endpoint down", intent: providerScopeIntent{Transport: "direct", Target: "external"}, wantTarget: "external", wantSocket: "/var/run/dolt/external.sock", wantDB: "bd_external", wantDial: [2]string{"unix", "/var/run/dolt/external.sock"}, endpointDown: true, wantRefused: true},
+		// Proxied external is unevidenced (G8) and local owns its own server:
+		// neither is probed, so a dead endpoint changes nothing for them.
+		{name: "proxied external endpoint down", intent: providerScopeIntent{Transport: "proxied", Target: "external"}, wantTarget: "external", wantHost: "db.example.test", wantPort: "4406", wantDB: "bd_external", endpointDown: true},
+		{name: "direct local endpoint down", intent: providerScopeIntent{Transport: "direct", Target: "local"}, wantTarget: "local", endpointDown: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			city := t.TempDir()
@@ -1256,8 +1328,33 @@ func TestProviderOwnedScopeInitScrubsPendingLocalEnvironmentAndPreservesExternal
 			if err := persistProviderScopeOwnership(city, city, tt.intent); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := runProviderOwnedScopeInit(city, city, "pending", script); err != nil {
-				t.Fatalf("runProviderOwnedScopeInit: %v", err)
+			dial := answeringProviderExternalDial
+			if tt.endpointDown {
+				dial = refusedProviderExternalDial
+			}
+			dialed := installProviderExternalDial(t, dial)
+			_, initErr := runProviderOwnedScopeInit(city, city, "pending", script)
+			if *dialed != tt.wantDial {
+				t.Fatalf("probe dialed %q, want %q", *dialed, tt.wantDial)
+			}
+			if tt.wantRefused {
+				if initErr == nil {
+					t.Fatal("runProviderOwnedScopeInit against a dead endpoint = nil, want a refusal")
+				}
+				if _, err := os.Stat(logPath); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("provider script ran against a dead endpoint (stat %s: %v)", logPath, err)
+				}
+				if _, err := os.Stat(filepath.Join(city, ".beads", "dolt")); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("a refused init left %s behind (stat err %v)", filepath.Join(city, ".beads", "dolt"), err)
+				}
+				entry, owned, err := providerOwnedScopeState(city, city)
+				if err != nil || !owned || entry.State != providerScopeInitializing {
+					t.Fatalf("city journal after a refused init = (%+v, %v, %v), want still initializing", entry, owned, err)
+				}
+				return
+			}
+			if initErr != nil {
+				t.Fatalf("runProviderOwnedScopeInit: %v", initErr)
 			}
 			got, err := os.ReadFile(logPath)
 			if err != nil {
