@@ -52,7 +52,7 @@ func TestCustomTypesCheck_MissingTypes(t *testing.T) {
 	// TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext.
 	testOwnedHome(t)
 
-	dir := guardedTempDir(t)
+	dir := guardedWorkspaceDir(t)
 	beadsDir := filepath.Join(dir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -321,7 +321,7 @@ func TestCustomTypesCheck_TableDrift(t *testing.T) {
 	// TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext.
 	testOwnedHome(t)
 
-	dir := guardedTempDir(t)
+	dir := guardedWorkspaceDir(t)
 
 	runBD := func(args ...string) string {
 		t.Helper()
@@ -413,7 +413,7 @@ func TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext(t *testing.T) {
 
 	home := testOwnedHome(t)
 
-	dir := guardedTempDir(t)
+	dir := guardedWorkspaceDir(t)
 
 	runBD := func(args ...string) string {
 		t.Helper()
@@ -523,8 +523,8 @@ func TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint(t *testing.T) 
 		return out
 	}
 
-	targetDir := guardedTempDir(t)
-	decoyDir := guardedTempDir(t)
+	targetDir := guardedWorkspaceDir(t)
+	decoyDir := guardedWorkspaceDir(t)
 	var targetPort, decoyPort string
 	t.Cleanup(func() {
 		for _, store := range []struct {

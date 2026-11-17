@@ -1099,3 +1099,52 @@ func TestMigrationWindowFailedRigScopeStartStopsWhatItStarted(t *testing.T) {
 		t.Fatalf("stops = %d, active = %v: the refused window left what it started running", provider.stops, activeMigrationWindow(cityPath) != nil)
 	}
 }
+
+// TestStorageMigrateFromWorkStartsTheProxiedRigsItProbes: the city copy's
+// cross-boundary plan reads the bound rigs for blockers the work store does
+// not hold, so the --from-work window starts each rig scope bd owns, and
+// only those, and only when it started the provider, as --from-rigs does.
+func TestStorageMigrateFromWorkStartsTheProxiedRigsItProbes(t *testing.T) {
+	for _, down := range []bool{true, false} {
+		request, _ := exclusionCity(t)
+		packs, plain := t.TempDir(), t.TempDir()
+		request.Cfg.Rigs = append(request.Cfg.Rigs,
+			config.Rig{Name: "packs", Prefix: "gp", Path: packs},
+			config.Rig{Name: "plain", Prefix: "pl", Path: plain},
+			config.Rig{Name: "unbound", Prefix: "ub"})
+		writeScopeBeadsMetadata(t, packs, `{"database":"dolt","backend":"dolt","dolt_mode":"proxied-server","dolt_database":"gp"}`)
+		provider := &migrationWindowProvider{down: down}
+		stubMigrationWindowProvider(t, provider)
+		if code, said := migrateFor(t, request); code != 0 {
+			t.Fatalf("down=%v: migrate = %d: %s", down, code, said)
+		}
+		want := []string{}
+		if down {
+			want = []string{normalizePathForCompare(packs)}
+		}
+		got := make([]string, 0, len(provider.scopeStarts))
+		for _, root := range provider.scopeStarts {
+			got = append(got, normalizePathForCompare(root))
+		}
+		if strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Fatalf("down=%v: the window started rig scopes %v, want %v", down, got, want)
+		}
+	}
+}
+
+// TestTheFromWorkWindowSaysWhyAnUnreadableRigRefusesTheCopy: a bound rig
+// whose proxied-server ownership cannot be read refuses the whole copy, and
+// the refusal says so, names the rig scope and the fix, and writes nothing.
+func TestTheFromWorkWindowSaysWhyAnUnreadableRigRefusesTheCopy(t *testing.T) {
+	request, _ := exclusionCity(t)
+	broken := t.TempDir()
+	request.Cfg.Rigs = append(request.Cfg.Rigs, config.Rig{Name: "broken", Prefix: "br", Path: broken})
+	writeScopeBeadsMetadata(t, broken, `{"database":"dolt","backend":"dolt","dolt_mode":`)
+	provider := &migrationWindowProvider{down: true}
+	stubMigrationWindowProvider(t, provider)
+	code, said := migrateFor(t, request)
+	if code == 0 || !strings.Contains(said, "cannot tell whether bd owns a proxied server for rig scope") || !strings.Contains(said, "the whole run is refused") {
+		t.Fatalf("migrate = %d: %s; want the whole copy refused, saying why", code, said)
+	}
+	assertNoConvergenceMarker(t, mustResolveInfraTarget(t, request.CityPath, request.Cfg), "a refused window records nothing")
+}

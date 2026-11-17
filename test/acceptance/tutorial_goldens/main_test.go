@@ -29,7 +29,7 @@ var (
 func TestMain(m *testing.M) {
 	if !hasClaudeAuth() || (!useClaudeForCodex() && !hasCodexAuth()) {
 		if !hostProviderMode() {
-			fmt.Fprintf(os.Stderr, "tutorial-goldens: skipping package: on a developer box the provider CLIs run under an isolated HOME holding a copy of their credentials, and none was found to copy (~/.claude/.credentials.json, ~/.codex/auth.json, or ANTHROPIC_API_KEY/OPENAI_API_KEY). Set %s=1 to run them against your real home instead, which writes test trust entries into your ~/.claude.json\n", helpers.EnvAllowHostClaude)
+			fmt.Fprintf(os.Stderr, "tutorial-goldens: skipping package: on a developer box the provider CLIs run under an isolated HOME holding a copy of their credentials, and none was found to copy (~/.claude/.credentials.json, ~/.codex/auth.json, or ANTHROPIC_API_KEY/OPENAI_API_KEY). Set %s=1 to run them against your real home instead, which writes test trust entries into your ~/.claude.json; gc then keeps bd on the tool-home wrapper, so the tutorial cities start single-store and the pages' split-only checks are skipped\n", helpers.EnvAllowHostClaude)
 			os.Exit(0)
 		}
 		if useClaudeForCodex() {
@@ -94,9 +94,12 @@ func tutorialTmuxTmpDir(runtimeDir string) string {
 }
 
 // newTutorialBaseEnv builds the tutorial Env. A non-empty bdPath is staged in
-// the tutorial bin dir behind the tool-home wrapper: gc and the tutorial's own
-// `bd` commands run with the real HOME, and bd must never resolve the
-// operator's ~/.beads (or a user-level dolt.shared-server: true) through it.
+// the tutorial bin dir behind the tool-home wrapper, first on PATH, for the
+// pages' own `bd` commands: they run with gc's HOME, which in host mode is the
+// real one, and bd must never resolve the operator's ~/.beads (or a user-level
+// dolt.shared-server: true) through it. gc itself runs the real bd (BD_BIN),
+// which a split city's gc bd requires, everywhere but host mode off a CI
+// runner.
 func newTutorialBaseEnv(gcBinary, home, runtimeDir, bdPath string) *helpers.Env {
 	env := helpers.NewEnv(gcBinary, home, runtimeDir)
 	if hostProviderMode() {
@@ -105,6 +108,19 @@ func newTutorialBaseEnv(gcBinary, home, runtimeDir, bdPath string) *helpers.Env 
 		// which resolve their state through the host HOME and read trust from
 		// the real ~/.claude.json (the shim drops CLAUDE_CONFIG_DIR).
 		env.WithHostHome().WithHostClaudeState()
+		// Leaving the isolated HOME put gc back on the tool-home wrapper, and
+		// gc init splits a new city only on bd's own Go binary. A CI runner's
+		// home is discarded with it, so gc runs the real bd there and the
+		// tutorial cities are born split, as the pages say. Under the
+		// developer opt-in the home is theirs: gc stays on the wrapper, and
+		// the cities start single-store (tutorialWorkspace.citiesBornSplit).
+		if bdPath != "" && helpers.HostHomeIsDisposable() {
+			realBD, err := filepath.Abs(bdPath)
+			if err != nil {
+				panic("tutorial-goldens: resolving the bd path: " + err.Error())
+			}
+			env.WithRealBD(realBD)
+		}
 	}
 	// Otherwise gc keeps NewEnv's isolated HOME, which is also where the
 	// provider CLIs run with a copy of their credentials (providerHome).
@@ -809,6 +825,43 @@ func TestTutorialProvidersUseTheHostHomeOnCI(t *testing.T) {
 			}
 			if got := providerHome(home); got != hostHomeDir() {
 				t.Fatalf("providerHome = %q, want the host home %q", got, hostHomeDir())
+			}
+		})
+	}
+}
+
+// gc init splits a new city only on bd's own Go binary, so on a CI runner the
+// host-mode Env hands gc the real bd (BD_BIN) while the pages' raw `bd` keeps
+// the tool-home wrapper first on PATH. Under the developer opt-in gc stays on
+// the wrapper: a real bd would resolve user-level state under their home.
+func TestTutorialHostModeRunsTheRealBDOnlyOnCI(t *testing.T) {
+	bd := filepath.Join(t.TempDir(), "bd")
+	writeFile(t, bd, "#!/bin/sh\nexit 0\n", 0o755)
+	for _, tc := range []struct {
+		key, val string
+		realBD   bool
+	}{
+		{"GITHUB_ACTIONS", "true", true},
+		{helpers.EnvAllowHostClaude, "1", false},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			devBoxProviderMode(t)
+			t.Setenv(tc.key, tc.val)
+			home := t.TempDir()
+			env := newTutorialBaseEnv("/tmp/fake-gc", home, filepath.Join(home, "runtime"), bd)
+			if got := env.RunsRealBD(); got != tc.realBD {
+				t.Fatalf("RunsRealBD() = %v, want %v", got, tc.realBD)
+			}
+			wantBDBin := ""
+			if tc.realBD {
+				wantBDBin = bd
+			}
+			if got := env.Get("BD_BIN"); got != wantBDBin {
+				t.Fatalf("BD_BIN = %q, want %q", got, wantBDBin)
+			}
+			wrapper := filepath.Join(home, ".local", "bin", "bd")
+			if got := findExecutableInPath(env.Get("PATH"), "bd"); got != wrapper {
+				t.Fatalf("the first bd on PATH is %q, want the tool-home wrapper %s for the pages' raw bd", got, wrapper)
 			}
 		})
 	}

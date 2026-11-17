@@ -418,21 +418,6 @@ func (q *beadsNudgeQueue) Lookup(ids []string, now time.Time) (map[string]nudgeq
 	return buckets, nudgeQueueQuarantined("Lookup", corrupt)
 }
 
-// ListLive returns the queue's live items as of now, split into pending and
-// in flight, for the queue-mode shim that moves live work out of the beads
-// queue. It is one indexed read of the live records. Dead letters are not
-// live, and neither is an item past its deliver-by deadline, which reads as
-// dead. An undecodable record is skipped and reported as a partial result
-// beside the items that did decode.
-func (q *beadsNudgeQueue) ListLive(now time.Time) (pending, inFlight []nudgequeue.Item, err error) {
-	entries, corrupt, err := q.wholeQueueEntries(now, nudgeQueueStateLive)
-	if err != nil {
-		return nil, nil, err
-	}
-	state := nudgeQueueBucketState(entries, now)
-	return state.Pending, state.InFlight, nudgeQueueQuarantined("ListLive", corrupt)
-}
-
 // DueKeys returns, sorted and unique, the non-empty queue keys with an item
 // that reads as pending and is due at now: a due pending item, or an in-flight
 // item whose lease has run out. It is one indexed read of the live records,
@@ -1427,6 +1412,19 @@ func encodeNudgeItem(item nudgequeue.Item, state string, extra map[string]string
 func nudgeQueueUnclaim(update map[string]string) beads.UpdateOpts {
 	unassigned, open := "", "open"
 	return beads.UpdateOpts{Assignee: &unassigned, Status: &open, Metadata: update}
+}
+
+// IsNudgeQueueRecord reports whether b is a beads nudge queue record.
+func IsNudgeQueueRecord(b beads.Bead) bool {
+	if b.Type != nudgeQueueBeadType {
+		return false
+	}
+	for _, label := range b.Labels {
+		if label == nudgeQueueLabel {
+			return true
+		}
+	}
+	return false
 }
 
 // nudgeQueueBeadID derives the queue bead id for a nudge id. It is a hash so

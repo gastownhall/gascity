@@ -766,7 +766,7 @@ test-bd-cli-contract-home-isolation:
 ## is the only contract that needs a real CAS-capable bd. Every pinned bd
 ## (BD_PREV_VERSION, BD_VERSION and BD_CURRENT_REF) carries
 ## `--if-assignee`/`--if-status`, so the row's capability skip fires on none
-## of them. CI runs the row only against the BD_CURRENT_REF bd (v1.3.2):
+## of them. CI runs the row only against the BD_CURRENT_REF bd (v1.3.4):
 ## strictly in //internal/beads:bd_conditional_release_contract_test, and in
 ## the integration-packages lane. A BD_PREV_VERSION cell is ga-7ryjc6.
 ## GC_REQUIRE_BD_CONDITIONAL_RELEASE=1 turns the row's capability skip into a
@@ -1034,12 +1034,28 @@ $(GOLANGCI_LINT):
 
 ## install-oapi-codegen: install pinned oapi-codegen so the spec→client drift
 ## test (TestGeneratedClientInSync) can regenerate client_gen.go without skipping.
+# Retries like $(GOLANGCI_LINT): spec-ci installs this on every CI run, and the
+# tool's own module graph (not gascity's go.sum) comes from the module proxy,
+# so one transient proxy stream error would otherwise fail the required Check.
 .PHONY: install-oapi-codegen
 install-oapi-codegen:
-	@if ! command -v oapi-codegen >/dev/null; then \
-		echo "Installing oapi-codegen..." >&2; \
-		go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.6.0; \
-	fi
+	@if command -v oapi-codegen >/dev/null; then exit 0; fi; \
+	echo "Installing oapi-codegen..." >&2; \
+	attempt=1; max_attempts=5; delay=2; \
+	while [ $$attempt -le $$max_attempts ]; do \
+		echo "oapi-codegen install attempt $$attempt/$$max_attempts" >&2; \
+		if go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.6.0; then \
+			exit 0; \
+		fi; \
+		if [ $$attempt -lt $$max_attempts ]; then \
+			echo "oapi-codegen install failed; retrying in $${delay}s..." >&2; \
+			sleep $$delay; \
+		fi; \
+		attempt=$$((attempt + 1)); \
+		delay=$$((delay * 2)); \
+	done; \
+	echo "ERROR: failed to install oapi-codegen after $$max_attempts attempts" >&2; \
+	exit 1
 
 ## install-oasdiff: install the pinned oasdiff used by openapi-breaking-check.
 ## Reinstalls when the binary on disk is a different version.

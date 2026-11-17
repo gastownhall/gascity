@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // newTerminalRootRetryControl builds the minimal graph the retry dispatcher
@@ -82,12 +83,12 @@ func TestProcessControlStopsControlWhenWorkflowRootTerminallyClosed(t *testing.T
 			control := newTerminalRootRetryControl(t, store, rootOutcome, nil)
 
 			var traceBuf bytes.Buffer
-			opts := ProcessOptions{Tracef: func(format string, args ...any) {
+			opts := ProcessOptions{Work: beadstest.Work(store), Tracef: func(format string, args ...any) {
 				fmt.Fprintf(&traceBuf, format, args...)
 				traceBuf.WriteByte('\n')
 			}}
 
-			result, err := ProcessControl(store, mustGet(t, store, control.ID), opts)
+			result, err := ProcessControl(beadstest.Graph(store), mustGet(t, store, control.ID), opts)
 			if err != nil {
 				t.Fatalf("ProcessControl: %v", err)
 			}
@@ -138,7 +139,7 @@ func TestProcessControlKeepsTeardownTailRunningUnderCanceledRoot(t *testing.T) {
 		"gc.scope_role": "teardown",
 	})
 
-	result, err := ProcessControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl: %v", err)
 	}
@@ -168,7 +169,7 @@ func TestProcessControlKeepsTeardownTailRunningUnderTerminalRoot(t *testing.T) {
 		"gc.scope_role": "teardown",
 	})
 
-	result, err := ProcessControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl: %v", err)
 	}
@@ -188,7 +189,7 @@ func TestProcessControlKeepsRunningUnderOpenRoot(t *testing.T) {
 	store := beads.NewMemStore()
 	control := newTerminalRootRetryControl(t, store, "", nil)
 
-	result, err := ProcessControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	result, err := ProcessControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("ProcessControl: %v", err)
 	}

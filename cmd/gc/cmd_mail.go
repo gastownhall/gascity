@@ -582,7 +582,7 @@ func cmdMailCheckWithFormat(args []string, inject bool, hookFormat string, stdou
 	if cityPathErr != nil {
 		return doMailCheckFallback(args, inject, hookFormat, stdout, stderr)
 	}
-	c, reason := mailCheckAPIClient(cityPath)
+	c, reason := mailCheckClient(cityPath, inject)
 	// An injecting check reads the mailbox in process whatever the controller
 	// says (routeMailCheck), and any check without a controller does. Its config
 	// load above ran the builtin readiness pass the routing read needs, so
@@ -603,6 +603,25 @@ var mailCheckAPIClient = func(cityPath string) (*api.Client, string) {
 		return c, ""
 	}
 	return nil, apiClientFallbackReason(cityPath)
+}
+
+// mailInjectProbeClient resolves the client an injecting check probes for a
+// degraded-read notice before it reads the mailbox in process
+// (routeMailCheck): a standalone controller's [api] endpoint only
+// (standaloneAPIClient). In a supervisor-hosted city that probe would be a
+// supervisor inbox listing on every agent prompt, about half a second ahead of
+// the same read done locally, so there the hook reads the mailbox directly.
+// Indirected through a var so tests choose the client.
+var mailInjectProbeClient = standaloneAPIClient
+
+// mailCheckClient resolves the API client a `gc mail check` routes through:
+// mailInjectProbeClient for an injecting check, mailCheckAPIClient for every
+// other. An injecting check uses no fallback reason (routeMailCheck).
+func mailCheckClient(cityPath string, inject bool) (*api.Client, string) {
+	if inject {
+		return mailInjectProbeClient(cityPath), ""
+	}
+	return mailCheckAPIClient(cityPath)
 }
 
 // Route-log reasons for API-capable mail reads that take the local path

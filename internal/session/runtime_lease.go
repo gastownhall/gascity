@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -667,11 +666,11 @@ func runtimeLeaseFlockIdentity(f *os.File, token string) string {
 	if err != nil {
 		return ""
 	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
+	dev, ino, ok := runtimeLeaseFileID(f, fi)
 	if !ok {
 		return ""
 	}
-	return fmt.Sprintf("%s/%d/%d/%s", boot, st.Dev, st.Ino, token)
+	return fmt.Sprintf("%s/%d/%d/%s", boot, dev, ino, token)
 }
 
 // runtimeLeaseMinTTL is RuntimeLeaseMargin; the cross-process tests shorten it.
@@ -694,9 +693,9 @@ func lockRuntimeNameFile(city, name string, now time.Time) (f *os.File, token, p
 	if err != nil {
 		return nil, "", "", fmt.Errorf("%w: opening lock: %w", ErrRuntimeLeaseLocalFS, err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if busy, err := tryLockRuntimeNameFile(f); err != nil {
 		f.Close() //nolint:errcheck // closing after a refused lock
-		if errors.Is(err, syscall.EWOULDBLOCK) {
+		if busy {
 			body, _ := os.ReadFile(path)
 			_, holder, _ := strings.Cut(string(body), "\n")
 			return nil, "", "", &RuntimeLeaseBusyError{Name: name, Holder: strings.TrimSpace(holder), Local: true}
@@ -731,8 +730,8 @@ func unlockRuntimeNameFile(f *os.File) {
 	if f == nil {
 		return
 	}
-	syscall.Flock(int(f.Fd()), syscall.LOCK_UN) //nolint:errcheck // close releases it too
-	f.Close()                                   //nolint:errcheck // best-effort cleanup
+	releaseRuntimeNameFileLock(f)
+	f.Close() //nolint:errcheck // best-effort cleanup
 }
 
 // newRuntimeLeaseHolder names one acquire: host/pid/nonce.
