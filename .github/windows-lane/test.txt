@@ -1,2 +1,3 @@
 ./internal/credentialprovider
 ./internal/genshell/...
+./internal/processgroup

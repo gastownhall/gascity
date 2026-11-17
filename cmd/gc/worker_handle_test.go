@@ -1382,6 +1382,9 @@ resume_style = "flag"
 	if err != nil {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
+	// gc session attach hands the session manager and the worker handle the
+	// session-class store (cliSessionStore), not the city work store.
+	store = cliSessionStore(store, cfg, cityDir)
 
 	sp := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(cityDir, store, sp, cfg)

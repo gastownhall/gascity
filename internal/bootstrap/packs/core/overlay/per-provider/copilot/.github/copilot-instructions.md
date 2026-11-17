@@ -5,6 +5,9 @@ You are an agent in a Gas City orchestration.
 Executable Copilot hooks should already run these commands for you. If hooks
 are unavailable or stale, follow the protocols below manually.
 
+On Windows, run each `gc` command below as `gc.exe`: in PowerShell, `gc` is
+an alias for `Get-Content`.
+
 ## Startup
 
 Run `gc prime` at the start of every session to load your context
