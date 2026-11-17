@@ -161,17 +161,30 @@ func listSessionBeadsByMetadata(store beads.SessionStore, key, value string, all
 		// metadata. Treat any other raw status as invalid for live resolution.
 		query.Status = "open"
 	}
-	raw, err := store.List(query)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]beads.Bead, 0, len(raw))
-	for _, b := range raw {
-		if !IsSessionBeadOrRepairable(b) {
-			continue
+	// A metadata key has no index: keyed by it alone the store compares it
+	// on every bead it holds, closed history of every other kind included.
+	// The beads this accepts are the session beads (IsSessionBeadOrRepairable):
+	// those of the session type, and those with no type carrying the session
+	// label. Each of the two is an indexed predicate, so the lookup is asked
+	// once for each and the answers joined; a bead of both is kept once.
+	typed, labeled := query, query
+	typed.Type = BeadType
+	labeled.Label = LabelSession
+	out := make([]beads.Bead, 0, 2)
+	seen := make(map[string]bool, 2)
+	for _, q := range []beads.ListQuery{typed, labeled} {
+		raw, err := store.List(q)
+		if err != nil {
+			return nil, err
 		}
-		normalizeEmptyType(&b)
-		out = append(out, b)
+		for _, b := range raw {
+			if seen[b.ID] || !IsSessionBeadOrRepairable(b) {
+				continue
+			}
+			seen[b.ID] = true
+			normalizeEmptyType(&b)
+			out = append(out, b)
+		}
 	}
 	return out, nil
 }
