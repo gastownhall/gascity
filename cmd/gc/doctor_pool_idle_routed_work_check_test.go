@@ -7,7 +7,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
@@ -303,6 +305,15 @@ func (s poolIdleRoutedWorkTierStore) List(q beads.ListQuery) ([]beads.Bead, erro
 	return append([]beads.Bead(nil), s.wispRouted...), nil
 }
 
+// Ready serves the wisp-tier routed work the same way List does: only to a
+// caller that asks for both tiers.
+func (s poolIdleRoutedWorkTierStore) Ready(q ...beads.ReadyQuery) ([]beads.Bead, error) {
+	if len(q) == 0 || q[0].TierMode != beads.TierBoth {
+		return s.Store.Ready(q...)
+	}
+	return append([]beads.Bead(nil), s.wispRouted...), nil
+}
+
 func TestPoolIdleRoutedWorkCheckReadsBothTiers(t *testing.T) {
 	cityDir := t.TempDir()
 	cfg := &config.City{
@@ -573,5 +584,121 @@ func TestPoolIdleRoutedWorkCheckStopsWhenAbandoned(t *testing.T) {
 	lists, routed := store.calls()
 	if opened != 0 || lists != 0 || len(routed) != 0 {
 		t.Fatalf("abandoned check kept issuing store calls: opened=%d sessionLists=%d routed=%v", opened, lists, routed)
+	}
+}
+
+func poolIdleWorkRoutedBeadWithID(id string) beads.Bead {
+	b := poolIdleWorkRoutedBead("gascity/builder", "")
+	b.ID = id
+	return b
+}
+
+func runPoolIdleRoutedWorkCheck(t *testing.T, store beads.Store) *doctor.CheckResult {
+	t.Helper()
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "builder", Dir: "gascity"}},
+	}
+	return newPoolIdleRoutedWorkCheck(cfg, t.TempDir(), func(_ string) (beads.Store, error) {
+		return store, nil
+	}).Run(&doctor.CheckContext{})
+}
+
+func TestPoolIdleRoutedWorkCheckCountsOnlyClaimableRoutedWork(t *testing.T) {
+	blocked := poolIdleWorkRoutedBeadWithID("GA-BLOCKED")
+	budget := poolIdleWorkRoutedBeadWithID("GA-BUDGET")
+	budget.Metadata[beadmeta.BudgetDeferredUntilMetadataKey] = time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	held := poolIdleWorkRoutedBeadWithID("GA-HELD")
+	held.Labels = []string{"hold:mayor"}
+	claimable := poolIdleWorkRoutedBeadWithID("GA-CLAIMABLE")
+	blocker := beads.Bead{ID: "BLK-1", Type: "task", Status: "open"}
+
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		poolIdleWorkSessionBead("gascity/builder", "active", ""),
+		blocker, blocked, budget, held, claimable,
+	}, []beads.Dep{{IssueID: "GA-BLOCKED", DependsOnID: "BLK-1", Type: "blocks"}})
+
+	result := runPoolIdleRoutedWorkCheck(t, store)
+
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want warning for the claimable bead: %#v", result.Status, result)
+	}
+	details := strings.Join(result.Details, "\n")
+	if !strings.Contains(details, "GA-CLAIMABLE") {
+		t.Fatalf("details missing the claimable bead:\n%s", details)
+	}
+	for _, unwanted := range []string{"GA-BLOCKED", "GA-BUDGET", "GA-HELD"} {
+		if strings.Contains(details, unwanted) {
+			t.Fatalf("details list %s, which an idle instance cannot claim:\n%s", unwanted, details)
+		}
+	}
+}
+
+func TestPoolIdleRoutedWorkCheckOKWhenAllRoutedWorkIsUnclaimable(t *testing.T) {
+	blocked := poolIdleWorkRoutedBeadWithID("GA-BLOCKED")
+	budget := poolIdleWorkRoutedBeadWithID("GA-BUDGET")
+	budget.Metadata[beadmeta.BudgetDeferredUntilMetadataKey] = time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	held := poolIdleWorkRoutedBeadWithID("GA-HELD")
+	held.Labels = []string{"Hold:External"}
+
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		poolIdleWorkSessionBead("gascity/builder", "active", ""),
+		{ID: "BLK-1", Type: "task", Status: "open"},
+		blocked, budget, held,
+	}, []beads.Dep{{IssueID: "GA-BLOCKED", DependsOnID: "BLK-1", Type: "blocks"}})
+
+	result := runPoolIdleRoutedWorkCheck(t, store)
+
+	if result.Status != doctor.StatusOK {
+		t.Fatalf("status = %v, want ok when every routed bead is blocked, budget-deferred or held: %#v", result.Status, result)
+	}
+}
+
+func TestPoolIdleRoutedWorkCheckBudgetStampThatIsNotInTheFutureStaysClaimable(t *testing.T) {
+	for name, stamp := range map[string]string{
+		"malformed": "not-a-timestamp",
+		"expired":   time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
+	} {
+		t.Run(name, func(t *testing.T) {
+			b := poolIdleWorkRoutedBeadWithID("GA-STAMPED")
+			b.Metadata[beadmeta.BudgetDeferredUntilMetadataKey] = stamp
+			store := beads.NewMemStoreFrom(0, []beads.Bead{
+				poolIdleWorkSessionBead("gascity/builder", "active", ""), b,
+			}, nil)
+
+			result := runPoolIdleRoutedWorkCheck(t, store)
+
+			if result.Status != doctor.StatusWarning {
+				t.Fatalf("status = %v, want warning (a %s budget stamp must not hide the bead): %#v", result.Status, name, result)
+			}
+			if details := strings.Join(result.Details, "\n"); !strings.Contains(details, "GA-STAMPED") {
+				t.Fatalf("details missing GA-STAMPED:\n%s", details)
+			}
+		})
+	}
+}
+
+// poolIdleRoutedWorkReadyErrStore fails the readiness read, which the check
+// uses to tell dependency-blocked work from claimable work.
+type poolIdleRoutedWorkReadyErrStore struct {
+	beads.Store
+}
+
+func (poolIdleRoutedWorkReadyErrStore) Ready(...beads.ReadyQuery) ([]beads.Bead, error) {
+	return nil, errors.New("ready backend down")
+}
+
+func TestPoolIdleRoutedWorkCheckReportsReadinessReadFailure(t *testing.T) {
+	store := poolIdleRoutedWorkReadyErrStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{
+		poolIdleWorkSessionBead("gascity/builder", "active", ""),
+		poolIdleWorkRoutedBead("gascity/builder", ""),
+	}, nil)}
+
+	result := runPoolIdleRoutedWorkCheck(t, store)
+
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want warning, not a silent OK, when readiness cannot be read: %#v", result.Status, result)
+	}
+	if details := strings.Join(result.Details, "\n"); !strings.Contains(details, "ready backend down") {
+		t.Fatalf("details missing the readiness error:\n%s", details)
 	}
 }
