@@ -976,11 +976,17 @@ func TestLaneWorkerNextDelay(t *testing.T) {
 	}
 }
 
-// TestLaneWorkerRechecksAStartingWake pins the quick recheck through a woken
-// session's start: a pass that finds the session starting rechecks at
-// laneWakeRecheck up to startFor after the recorded wake, and otherwise waits
-// for the op's own Next. A take, or any other wait, ends it.
-func TestLaneWorkerRechecksAStartingWake(t *testing.T) {
+// TestLaneWorkerRechecksAStartingSession pins the quick recheck through a
+// session's start: a pass that finds its op waiting on a session still being
+// created or started rechecks at laneWakeRecheck, whoever started the session,
+// up to startFor after the worker first saw it starting (or after the wake the
+// lane recorded), and otherwise waits for the op's own Next.
+//
+// A session a create request is starting gets no wake from the lane and its
+// row is written in process, so nothing rings the lane when it becomes ready:
+// without the recheck its first message waits for the anti-entropy scan, up
+// to a minute after the agent could have taken it.
+func TestLaneWorkerRechecksAStartingSession(t *testing.T) {
 	next := laneT0.Add(24 * time.Hour)
 	blocked := func(detail string) lanePassOutcome {
 		return lanePassOutcome{res: opjournal.PassResult{Next: next, Waits: []opjournal.OpWait{
@@ -989,19 +995,24 @@ func TestLaneWorkerRechecksAStartingWake(t *testing.T) {
 	}
 	starting, held := blocked(session.ContentGateStarting), blocked(session.ContentGateHeld)
 	woke := lanePassOutcome{res: opjournal.PassResult{Wake: true}, wake: session.WakeRecorded}
+	notDormant := lanePassOutcome{res: opjournal.PassResult{Wake: true, Next: next, Waits: starting.res.Waits}, wake: session.WakeNotDormant}
 	took := lanePassOutcome{res: opjournal.PassResult{Took: opjournal.TakeContent}}
 	for _, tc := range []struct {
 		name    string
 		before  []lanePassOutcome
 		advance time.Duration
+		last    *lanePassOutcome
 		quick   bool
 	}{
-		{name: "no wake recorded"},
+		{name: "starting, no wake recorded", quick: true},
+		{name: "starting, the wake refused as not dormant", last: &notDormant, quick: true},
 		{name: "after a recorded wake", before: []lanePassOutcome{woke}, quick: true},
 		{name: "still starting inside startFor", before: []lanePassOutcome{woke, starting}, advance: time.Minute - time.Second, quick: true},
-		{name: "startFor passed", before: []lanePassOutcome{woke, starting}, advance: time.Minute},
-		{name: "another wait ended it", before: []lanePassOutcome{woke, held}},
-		{name: "a take ended it", before: []lanePassOutcome{woke, took}},
+		{name: "startFor passed since the wake", before: []lanePassOutcome{woke, starting}, advance: time.Minute},
+		{name: "still starting inside startFor, no wake", before: []lanePassOutcome{starting}, advance: time.Minute - time.Second, quick: true},
+		{name: "startFor passed since it was first seen starting", before: []lanePassOutcome{starting}, advance: time.Minute},
+		{name: "starting again after another wait", before: []lanePassOutcome{starting, held}, advance: time.Minute, quick: true},
+		{name: "starting again after a take", before: []lanePassOutcome{woke, took}, quick: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clk := &laneTestClock{now: laneT0}
@@ -1014,10 +1025,20 @@ func TestLaneWorkerRechecksAStartingWake(t *testing.T) {
 			if tc.quick {
 				want = laneWakeRecheck
 			}
-			if d, idle := w.nextDelay(starting); d != want || idle {
+			out := starting
+			if tc.last != nil {
+				out = *tc.last
+			}
+			if d, idle := w.nextDelay(out); d != want || idle {
 				t.Errorf("delay %s idle %v, want %s", d, idle, want)
 			}
 		})
+	}
+	// Any other content block is not a start: it changes on no schedule of
+	// the lane's, and is not looked at again early.
+	w := &conversationLaneWorker{clk: &laneTestClock{now: laneT0}, startFor: time.Minute}
+	if d, idle := w.nextDelay(held); d != next.Sub(laneT0) || idle {
+		t.Errorf("held: delay %s idle %v, want the op's own Next", d, idle)
 	}
 }
 
