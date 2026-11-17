@@ -63,6 +63,14 @@ func TestENOSPCSkipHoldsOnlyWhileTheDiskIsShort(t *testing.T) {
 		// 0 turns gc's disk warning off; it must leave the skip on the default floor.
 		{name: "ENOSPC with floor 0 and disk short", log: "ENOSPC\n", availKB: strconv.Itoa(gib), floor: "0", wantSkip: true},
 		{name: "ENOSPC with floor 0 and space back", log: "ENOSPC\n", availKB: strconv.Itoa(3 * gib), floor: "0", wantSkip: false},
+		// A leading 0 must read as decimal, not octal (0900 is no octal number).
+		{name: "ENOSPC with a zero-padded floor and disk short", log: "ENOSPC\n", availKB: strconv.Itoa(gib), floor: "02147483648", wantSkip: true},
+		{name: "ENOSPC with a zero-padded small floor", log: "ENOSPC\n", availKB: strconv.Itoa(gib), floor: "0900", wantSkip: false},
+		// More than 18 digits could overflow shell arithmetic; it means the default floor.
+		{name: "ENOSPC with an oversized floor and disk short", log: "ENOSPC\n", availKB: strconv.Itoa(gib), floor: "9999999999999999999", wantSkip: true},
+		{name: "ENOSPC with an oversized floor and space back", log: "ENOSPC\n", availKB: strconv.Itoa(3 * gib), floor: "9999999999999999999", wantSkip: false},
+		// A floor that is not a whole KiB rounds up, so exactly 2 GiB is still short of 2 GiB + 1 byte.
+		{name: "ENOSPC with a floor just over a KiB boundary", log: "ENOSPC\n", availKB: strconv.Itoa(2 * gib), floor: "2147483649", wantSkip: true},
 	}
 	for label, detector := range enospcDetectors(t) {
 		for _, tc := range cases {

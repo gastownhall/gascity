@@ -380,3 +380,64 @@ echo "/dev/fake 99999999 1 %d 1%% /"
 		})
 	}
 }
+
+// TestRestartENOSPCMeasuresTheCityBeadsStoreWithoutDataDirOverride pins that,
+// with GC_DOLT_DATA_DIR unset, the ENOSPC guard measures the same data
+// directory the fsync-stall guard resolves (the city's .beads/dolt when it
+// exists), not the log's directory.
+func TestRestartENOSPCMeasuresTheCityBeadsStoreWithoutDataDirOverride(t *testing.T) {
+	root := repoRoot(t)
+	helper, err := os.ReadFile(filepath.Join(root, "..", "assets", "scripts", "dolt-enospc.sh"))
+	if err != nil {
+		t.Fatalf("read real enospc helper: %v", err)
+	}
+	const gib = 1 << 20 // in the 1024-byte blocks df -Pk reports
+	port, cleanup := startReachableTCPListener(t)
+	defer cleanup()
+
+	cityPath := t.TempDir()
+	bdLog := writeFakeBeadsBDForRestart(t, cityPath, map[string]int{"stop": 0, "start": 0})
+	if err := os.WriteFile(filepath.Join(cityPath, ".gc", "scripts", "dolt-enospc.sh"), helper, 0o644); err != nil {
+		t.Fatalf("write real enospc helper: %v", err)
+	}
+	logPath := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt", "dolt.log")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		t.Fatalf("mkdir dolt log dir: %v", err)
+	}
+	if err := os.WriteFile(logPath, []byte("fatal: no space left on device\n"), 0o644); err != nil {
+		t.Fatalf("write dolt log: %v", err)
+	}
+	dataDir := filepath.Join(cityPath, ".beads", "dolt")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+	binDir := filepath.Join(cityPath, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	dfLog := filepath.Join(cityPath, "df.log")
+	writeExecutable(t, filepath.Join(binDir, "df"), fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do last=$arg; done
+printf '%%s\n' "$last" >> %q
+echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+echo "/dev/fake 99999999 1 %d 1%% /"
+`, dfLog, gib))
+
+	out, err := runRestartWithEnv(t, cityPath, root, []string{
+		fmt.Sprintf("GC_DOLT_PORT=%d", port),
+		"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+	})
+	if err == nil || !strings.Contains(string(out), "recent Dolt log shows ENOSPC") {
+		t.Fatalf("restart with the disk short did not refuse (err=%v):\n%s", err, out)
+	}
+	if ops, _ := os.ReadFile(bdLog); strings.TrimSpace(string(ops)) != "" {
+		t.Fatalf("restart invoked gc-beads-bd despite ENOSPC refusal: %q\n%s", ops, out)
+	}
+	dfArgs, err := os.ReadFile(dfLog)
+	if err != nil {
+		t.Fatalf("df was never called: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(dfArgs)); got != dataDir {
+		t.Fatalf("df measured %q, want the city beads store %q", got, dataDir)
+	}
+}

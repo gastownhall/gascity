@@ -42,11 +42,16 @@ enospc_disk_has_headroom() {
     case "$enospc_floor" in
         ''|*[!0-9]*) enospc_floor=2147483648 ;;
     esac
+    # Read the floor as decimal: shell arithmetic takes a leading 0 as octal.
+    enospc_floor=$(printf '%s' "$enospc_floor" | sed 's/^0*//')
+    [ -n "$enospc_floor" ] || enospc_floor=0
+    # More than 18 digits can overflow shell arithmetic.
+    [ "${#enospc_floor}" -le 18 ] || enospc_floor=2147483648
     # 0 means "no disk warning" to gc; it must not switch the skip off.
     [ "$enospc_floor" -gt 0 ] || enospc_floor=2147483648
     enospc_avail_kb=$(df -Pk "$enospc_dir" 2>/dev/null | awk 'NR == 2 { print $4 }')
     case "$enospc_avail_kb" in
         ''|*[!0-9]*) return 1 ;;
     esac
-    [ "$enospc_avail_kb" -ge $((enospc_floor / 1024)) ]
+    [ "$enospc_avail_kb" -ge $(( (enospc_floor + 1023) / 1024 )) ]
 }

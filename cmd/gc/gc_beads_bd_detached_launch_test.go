@@ -61,7 +61,7 @@ exec sleep 60
 	for _, key := range append([]string{"PATH", "FAKE_DOLT_ENV_FILE"}, managedDoltSessionScopedEnvKeys...) {
 		env = removeEnvKey(env, key)
 	}
-	cmd.Env = append(env,
+	env = append(env,
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"FAKE_DOLT_ENV_FILE="+envFile,
 		"GC_SESSION_ID=starter-session",
@@ -69,6 +69,7 @@ exec sleep 60
 		"GC_AGENT=starter-agent",
 		"BEADS_HOLDER_TOKEN=starter-token",
 	)
+	cmd.Env = env
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("launch harness: %v\n%s", err, out)
