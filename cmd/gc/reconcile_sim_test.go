@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -790,9 +791,17 @@ func (s *sim) pass() {
 	}
 }
 
-// parkedOrder orders parked effects by row key.
+// parkedOrder orders parked effects by row, then by submit sequence. A create
+// has no row yet, so two creates one pass submits tie on the row; by row alone
+// they keep the order their goroutines parked in, and a step's release, which
+// picks by index, follows goroutine scheduling. CreatePlan.Seq is stamped on
+// every admitted intent and is unique per submit; CreatePlan.Token is random,
+// so it would not make the order replayable.
 func parkedOrder(a, b *simEffect) int {
-	return strings.Compare(a.it.Key.Leg+a.it.Key.ID, b.it.Key.Leg+b.it.Key.ID)
+	return cmp.Or(
+		strings.Compare(a.it.Key.Leg+a.it.Key.ID, b.it.Key.Leg+b.it.Key.ID),
+		cmp.Compare(a.it.CreatePlan.Seq, b.it.CreatePlan.Seq),
+	)
 }
 
 // release runs parked effect i to its end and waits for its settlement, or,
