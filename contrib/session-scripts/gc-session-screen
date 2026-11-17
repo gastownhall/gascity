@@ -599,7 +599,7 @@ case "$op" in
     # Record the window process (the wrapper, which execs the agent), so a
     # box screen later lists dead is not read free while its agent runs.
     for i in 1 2 3 4 5; do
-      wpid=$(ps -e -o pid= -o ppid= | awk -v p="$PID" '$2 == p { print $1; exit }') || wpid=""
+      wpid=$(ps -e -o pid= -o ppid= | awk -v p="$PID" '$2 == p && !seen { print $1; seen = 1 }') || wpid=""
       if [ -n "$wpid" ]; then
         start_of "$wpid"
         if [ -n "$START" ]; then write_file "$META/$name.window" "$BOOT $wpid $START"; fi
@@ -948,7 +948,7 @@ case "$op" in
     # Read work_dir from the wrapper script's cd line.
     work_dir=""
     if [ -f "$META/$name.wrapper.sh" ]; then
-      work_dir=$(sed -n 's/^cd //p' "$META/$name.wrapper.sh" | head -1)
+      work_dir=$(sed -n 's/^cd //p' "$META/$name.wrapper.sh" | sed -n '1p')
       work_dir=$(eval "printf %s $work_dir")
     fi
     [ -z "$work_dir" ] && exit 0

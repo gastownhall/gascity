@@ -73,7 +73,7 @@ if [ "$version_status" -ne 0 ]; then
     echo "install dolt: https://docs.dolthub.com/introduction/installation"
     exit 1
 fi
-version=$(printf '%s\n' "$version_output" | head -1)
+version=$(head -1 <<<"$version_output")
 if [ -z "$version" ]; then
     echo "unrecognized dolt version output: $version"
     echo "install dolt: https://docs.dolthub.com/introduction/installation"

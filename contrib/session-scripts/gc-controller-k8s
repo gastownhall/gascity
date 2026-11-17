@@ -400,7 +400,7 @@ case "$op" in
     controller_started=false
     for i in $(seq 1 30); do
       logs=$("${KUBECTL[@]}" logs "$POD_NAME" --tail=50 2>/dev/null || true)
-      if echo "$logs" | grep -Eq "Controller started\.|City started\."; then
+      if grep -Eq "Controller started\.|City started\." <<<"$logs"; then
         controller_started=true
         break
       fi

@@ -119,7 +119,7 @@ wait_for_pool_agent() {
     while [ "$elapsed" -lt "$timeout" ]; do
         local status_output
         status_output=$(cd "$DEMO_CITY" && gc rig status "$RIG_NAME" 2>/dev/null || true)
-        if echo "$status_output" | grep -q "running"; then
+        if grep -q "running" <<<"$status_output"; then
             echo ""
             echo "$status_output"
             return 0
@@ -162,7 +162,7 @@ part1() {
 
     step "Rig directory is empty — no code yet"
     echo -e "  ${NARR_DIM}\$ ls -la $RIG_DIR/${NARR_NC}"
-    ls -la "$RIG_DIR/" | grep -v '^\.' | head -5 || echo "    (empty — just .beads/)"
+    ls -la "$RIG_DIR/" | grep -v '^\.' | sed -n '1,5p' || echo "    (empty — just .beads/)"
     echo ""
 
     # Ensure reconciler picks up the new rig's implicit pool agents.

@@ -30,7 +30,7 @@ if [ "$rc" -ne 0 ]; then
     printf 'go_test_run: failing:\n%s\n\n' "$summary" >&2
   fi
   if grep -q '^panic: test timed out' "$log"; then
-    sed -n '/^panic: test timed out/,$p' "$log" | head -n 120 >&2
+    sed -n '/^panic: test timed out/,$p' "$log" | sed -n '1,120p' >&2
     echo "go_test_run: $exe $* outlived its -test.timeout" >&2
   else
     filtered | tail -n 400 >&2
