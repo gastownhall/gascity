@@ -264,7 +264,17 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 			blockingErrors++
 			continue
 		}
-		status, severity, detail := classifyOrderFiring(order, now, cadence, lastFired, startedAt)
+		bound, err := cronLatenessBound(order, now, cadence, lastFired)
+		if err != nil {
+			worst = worseStatus(worst, StatusError)
+			result.Details = append(result.Details, fmt.Sprintf("%s: cannot compute next scheduled run: %v", orderDisplayName(order), err))
+			if firstNonOK == "" {
+				firstNonOK = orderHistoryHintTarget(order)
+			}
+			blockingErrors++
+			continue
+		}
+		status, severity, detail := classifyOrderFiring(order, now, cadence, lastFired, startedAt, bound)
 		if cadence > expected {
 			detail += fmt.Sprintf(" (interval %s; the %s dispatch floor sets its cadence)",
 				formatDispatchFloorDuration(expected), formatDispatchFloorDuration(floor))
@@ -742,7 +752,35 @@ func latestOrderFiredAt(evts []events.Event, subject string) time.Time {
 	return latest
 }
 
-func classifyOrderFiring(order orders.Order, now time.Time, expected time.Duration, lastFired, controllerStarted time.Time) (CheckStatus, CheckSeverity, string) {
+// cronLatenessBound caps how much of a cron order's age counts against it. An
+// order is judged by what its schedule owes, not by raw age: a schedule with
+// uneven gaps ("30 1,2,4 * * *" fires three times in four hours, then idles for
+// twenty-one; "0 9 * * 1-5" idles over a weekend) is healthy while its long gap
+// runs, and its minimum gap, which sets `expected`, would read that as stale.
+//
+// The bound is expected plus how late the first slot after lastFired already
+// is, so age past the bound is a gap the schedule asked for, and a missed slot
+// is judged by its own lateness. For a regular schedule the first slot after
+// lastFired comes within one `expected`, so the bound is never below the age
+// and the classification is the plain age-based one. A non-cron order, and one
+// that has never fired, has no bound (a zero return).
+func cronLatenessBound(order orders.Order, now time.Time, expected time.Duration, lastFired time.Time) (time.Duration, error) {
+	if order.Trigger != "cron" || lastFired.IsZero() {
+		return 0, nil
+	}
+	slot, due, err := orders.CronOccurrenceAfter(order, lastFired, now)
+	if err != nil {
+		return 0, err
+	}
+	if !due {
+		return expected, nil
+	}
+	return expected + nonNegativeDuration(now.Sub(slot)), nil
+}
+
+// classifyOrderFiring judges one order's last firing. A positive bound caps the
+// age the thresholds read (see cronLatenessBound); zero leaves the age alone.
+func classifyOrderFiring(order orders.Order, now time.Time, expected time.Duration, lastFired, controllerStarted time.Time, bound time.Duration) (CheckStatus, CheckSeverity, string) {
 	name := orderDisplayName(order)
 	if lastFired.IsZero() {
 		if controllerStarted.IsZero() {
@@ -763,13 +801,23 @@ func classifyOrderFiring(order orders.Order, now time.Time, expected time.Durati
 	}
 
 	age := nonNegativeDuration(now.Sub(lastFired))
+	judged := age
+	note := ""
+	if bound > 0 && bound < age {
+		judged = bound
+		if late := bound - expected; late > 0 {
+			note = fmt.Sprintf(", scheduled run %s late", formatOrderFiringDuration(late))
+		} else {
+			note = ", next scheduled run not yet due"
+		}
+	}
 	switch {
-	case age >= expected*3:
-		return StatusError, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s (CRITICAL: stale)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
-	case age >= expected+expected/2:
-		return StatusWarning, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s (overdue)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
+	case judged >= expected*3:
+		return StatusError, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s%s (CRITICAL: stale)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected), note)
+	case judged >= expected+expected/2:
+		return StatusWarning, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s%s (overdue)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected), note)
 	default:
-		return StatusOK, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
+		return StatusOK, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s%s", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected), note)
 	}
 }
 

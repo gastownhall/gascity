@@ -1256,3 +1256,80 @@ func TestCheckEventStart(t *testing.T) {
 		t.Fatal("unreadable head: CheckEventStart returned no error")
 	}
 }
+
+func TestCronOccurrenceAfter(t *testing.T) {
+	utc := func(day, hour, minute, sec int) time.Time {
+		return time.Date(2026, 11, day, hour, minute, sec, 0, time.UTC)
+	}
+	// donna-bench's deliberate three tries a day (gm-d9n7j).
+	const threeTries = "30 1,2,4 * * *"
+
+	tests := []struct {
+		name     string
+		schedule string
+		after    time.Time
+		now      time.Time
+		want     time.Time // zero: no occurrence in (after, now]
+	}{
+		{"no slot between a 04:30 run and 11:00", threeTries, utc(16, 4, 30, 31), utc(16, 11, 0, 0), time.Time{}},
+		{"first slot after the run, next day", threeTries, utc(16, 4, 30, 31), utc(17, 1, 45, 0), utc(17, 1, 30, 0)},
+		{"first slot, not the latest, when several elapsed", threeTries, utc(16, 4, 30, 31), utc(17, 3, 0, 0), utc(17, 1, 30, 0)},
+		{"the slot the run itself belongs to is not owed again", threeTries, utc(17, 1, 30, 20), utc(17, 1, 31, 0), time.Time{}},
+		{"slot at exactly now counts", threeTries, utc(16, 4, 30, 31), utc(17, 1, 30, 0), utc(17, 1, 30, 0)},
+		{"every 15 minutes", "*/15 * * * *", utc(17, 12, 0, 20), utc(17, 12, 40, 0), utc(17, 12, 15, 0)},
+		{"weekday-only schedule over a weekend", "0 9 * * 1-5", utc(13, 9, 0, 5), utc(15, 12, 0, 0), time.Time{}},
+		{"weekday-only schedule on Monday morning", "0 9 * * 1-5", utc(13, 9, 0, 5), utc(16, 9, 10, 0), utc(16, 9, 0, 0)},
+		{"after is not before now: nothing owed", threeTries, utc(17, 5, 0, 0), utc(17, 4, 0, 0), time.Time{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := Order{Name: "o", Trigger: "cron", Schedule: tt.schedule}
+			got, ok, err := CronOccurrenceAfter(a, tt.after, tt.now)
+			if err != nil {
+				t.Fatalf("CronOccurrenceAfter: %v", err)
+			}
+			if ok != !tt.want.IsZero() {
+				t.Fatalf("ok = %v, want %v (got %s)", ok, !tt.want.IsZero(), got)
+			}
+			if !got.Equal(tt.want) {
+				t.Fatalf("occurrence = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+// The slot is a wall-clock reading in the order's own zone, as the dispatcher
+// reads it, not in the zone of the caller's timestamps.
+func TestCronOccurrenceAfter_UsesOrderTimeZone(t *testing.T) {
+	la, err := time.LoadLocation("America/Los_Angeles")
+	if err != nil {
+		t.Fatalf("LoadLocation: %v", err)
+	}
+	a := Order{Name: "o", Trigger: "cron", Schedule: "30 4 * * *", TZ: "America/Los_Angeles"}
+	after := time.Date(2026, 11, 17, 0, 0, 0, 0, time.UTC) // 16:00 PST, Nov 16
+	now := time.Date(2026, 11, 17, 13, 0, 0, 0, time.UTC)  // 05:00 PST, Nov 17
+	want := time.Date(2026, 11, 17, 4, 30, 0, 0, la)       // 12:30 UTC
+	got, ok, err := CronOccurrenceAfter(a, after, now)
+	if err != nil {
+		t.Fatalf("CronOccurrenceAfter: %v", err)
+	}
+	if !ok || !got.Equal(want) {
+		t.Fatalf("occurrence = %s (ok=%v), want %s", got, ok, want)
+	}
+}
+
+func TestCronOccurrenceAfter_RejectsBadInput(t *testing.T) {
+	now := time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
+	after := now.Add(-time.Hour)
+	for name, a := range map[string]Order{
+		"unparseable schedule": {Name: "o", Trigger: "cron", Schedule: "nope * * * *"},
+		"wrong field count":    {Name: "o", Trigger: "cron", Schedule: "* * *"},
+		"bad tz":               {Name: "o", Trigger: "cron", Schedule: "0 7 * * *", TZ: "America/New_Yrok"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, ok, err := CronOccurrenceAfter(a, after, now); err == nil || ok {
+				t.Fatalf("CronOccurrenceAfter = ok %v, err %v; want an error", ok, err)
+			}
+		})
+	}
+}

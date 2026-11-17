@@ -200,6 +200,51 @@ func resolveOrderLocation(a Order, now time.Time) (*time.Location, error) {
 	return loc, nil
 }
 
+// maxCronOccurrenceLookback bounds CronOccurrenceAfter's scan, as it bounds the
+// dispatcher's own catch-up scan, so a very old `after` cannot spin.
+const maxCronOccurrenceLookback = 366 * 24 * time.Hour
+
+// CronOccurrenceAfter returns the first scheduled slot of a cron order that
+// falls after `after` and no later than `now`: the firing the order owes since
+// `after`. ok is false when no slot has come due in that window, whether
+// because the next one is still ahead or because the schedule has no slot in
+// it (a weekday-only cron over a weekend). The error is non-nil for an
+// unparseable schedule or an invalid tz, never a quiet "nothing owed".
+//
+// The slot is read in the order's own zone (resolveOrderLocation), exactly as
+// the dispatcher's checkCron reads it, and `after` is truncated to its minute
+// so the slot a firing itself belongs to is not owed a second time. A window
+// longer than a year is scanned from a year before `now`.
+//
+// A spring-forward slot that falls inside the nonexistent hour matches no real
+// minute here, though checkCron fires it once at the first real minute after
+// the jump. That reads as "not owed", the lenient direction for a health check.
+func CronOccurrenceAfter(a Order, after, now time.Time) (time.Time, bool, error) {
+	if err := ValidateCronSchedule(a.Schedule); err != nil {
+		return time.Time{}, false, fmt.Errorf("order %q: bad cron schedule: %w", a.ScopedName(), err)
+	}
+	fields := strings.Fields(a.Schedule)
+	loc, err := resolveOrderLocation(a, now)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	now = now.In(loc)
+	start := after.In(loc).Truncate(time.Minute).Add(time.Minute)
+	if floor := now.Add(-maxCronOccurrenceLookback).Truncate(time.Minute); start.Before(floor) {
+		start = floor
+	}
+	for t := start; !t.After(now); t = t.Add(time.Minute) {
+		matched, err := CronScheduleMatchesAt(fields, t)
+		if err != nil {
+			return time.Time{}, false, fmt.Errorf("order %q: %w", a.ScopedName(), err)
+		}
+		if matched {
+			return t, true, nil
+		}
+	}
+	return time.Time{}, false, nil
+}
+
 // wallMinuteLayout renders a wall-clock reading to minute granularity.
 // Two instants with the same rendering occupy the same wall-clock slot —
 // including the DST fall-back hour, where two distinct instants share one
