@@ -51,8 +51,83 @@ func seedStepFixture(beadsIn []stepFixtureBead) *beads.MemStore {
 // in-progress and entry steps, the claimed and routed bridges, and the
 // description fallback with its ten-bead sample.
 func TestActiveWispStepSingleReadMatchesPerQuestionReads(t *testing.T) {
+	cases, wantStep := stepResolutionCases()
+	assignees := []string{stepFixtureIdentity, "tc-1"}
+	for name, fixture := range cases {
+		t.Run(name, func(t *testing.T) {
+			store := seedStepFixture(fixture)
+			want, wantErr := resolveActiveWispStep(store, testStores(store, &splitStoreHandle{Store: store}), assignees)
+			rec := beadstest.NewOpRecordingStore(store)
+			got, gotErr := resolveActiveWispStep(rec, testStores(rec, rec), assignees)
+			if (wantErr == nil) != (gotErr == nil) {
+				t.Fatalf("errors differ: single read %v, per question %v", gotErr, wantErr)
+			}
+			if stepID(got) != stepID(want) {
+				t.Fatalf("single read resolved %q, per-question reads %q", stepID(got), stepID(want))
+			}
+			if stepID(got) != wantStep[name] {
+				t.Fatalf("resolved %q, want %q", stepID(got), wantStep[name])
+			}
+			if n := claimedListings(rec); n != 1 {
+				t.Fatalf("asked the store %d in-progress questions for the identities, want 1", n)
+			}
+		})
+	}
+}
+
+// TestActiveWispStepSplitStoresListTheWorkStoreOnce is the same rule for a
+// split city: the work store is asked once what is in progress for the
+// identities, and the root types, the claimed bridge and the description
+// fallback are answered from that listing. Asked per question, a work store
+// served through bd runs four listings of four bd calls each on every prompt,
+// and three of them are the same listing.
+func TestActiveWispStepSplitStoresListTheWorkStoreOnce(t *testing.T) {
+	cases, wantStep := stepResolutionCases()
+	assignees := []string{stepFixtureIdentity, "tc-1"}
+	for name, fixture := range cases {
+		t.Run(name, func(t *testing.T) {
+			store := seedStepFixture(fixture)
+			work := beadstest.NewOpRecordingStore(store)
+			got, err := resolveActiveWispStep(work, testStores(work, &splitStoreHandle{Store: store}), assignees)
+			if err != nil {
+				t.Fatalf("resolveActiveWispStep: %v", err)
+			}
+			if stepID(got) != wantStep[name] {
+				t.Fatalf("resolved %q, want %q", stepID(got), wantStep[name])
+			}
+			if n := claimedListings(work); n != 1 {
+				t.Fatalf("asked the work store %d in-progress questions for the identities, want 1: %+v", n, work.Ops())
+			}
+			for _, op := range work.Ops() {
+				if op.Kind == beadstest.OpList && op.Query.Status == "in_progress" && len(op.Query.Assignees) > 0 &&
+					(op.Query.Type != "" || op.Query.Limit != 0 || op.Query.Sort != beads.SortCreatedDesc) {
+					t.Fatalf("the work store's one listing is %+v, want every in-progress bead of the identities, newest created first", op.Query)
+				}
+			}
+		})
+	}
+}
+
+// claimedListings counts the listings rec was asked for the identities'
+// in-progress beads.
+func claimedListings(rec *beadstest.OpRecordingStore) int {
+	n := 0
+	for _, op := range rec.Ops() {
+		if op.Kind == beadstest.OpList && op.Query.Status == "in_progress" && len(op.Query.Assignees) > 0 {
+			n++
+		}
+	}
+	return n
+}
+
+// stepFixtureIdentity is the identity the step fixtures claim work for.
+const stepFixtureIdentity = "probe-a"
+
+// stepResolutionCases are populations covering every resolution branch, and
+// the step each resolves to.
+func stepResolutionCases() (map[string][]stepFixtureBead, map[string]string) {
 	ip, open := "in_progress", "open"
-	me := "probe-a"
+	me := stepFixtureIdentity
 	manyClaimed := func(n int) []stepFixtureBead {
 		var out []stepFixtureBead
 		for i := 0; i < n; i++ {
@@ -130,33 +205,7 @@ func TestActiveWispStepSingleReadMatchesPerQuestionReads(t *testing.T) {
 		"claimed bridge":                              "s-1",
 		"routed bridge":                               "s-1",
 	}
-	assignees := []string{me, "tc-1"}
-	for name, fixture := range cases {
-		t.Run(name, func(t *testing.T) {
-			store := seedStepFixture(fixture)
-			want, wantErr := resolveActiveWispStep(store, testStores(store, &splitStoreHandle{Store: store}), assignees)
-			rec := beadstest.NewOpRecordingStore(store)
-			got, gotErr := resolveActiveWispStep(rec, testStores(rec, rec), assignees)
-			if (wantErr == nil) != (gotErr == nil) {
-				t.Fatalf("errors differ: single read %v, per question %v", gotErr, wantErr)
-			}
-			if stepID(got) != stepID(want) {
-				t.Fatalf("single read resolved %q, per-question reads %q", stepID(got), stepID(want))
-			}
-			if stepID(got) != wantStep[name] {
-				t.Fatalf("resolved %q, want %q", stepID(got), wantStep[name])
-			}
-			claimedLists := 0
-			for _, op := range rec.Ops() {
-				if op.Kind == beadstest.OpList && op.Query.Status == "in_progress" && len(op.Query.Assignees) > 0 {
-					claimedLists++
-				}
-			}
-			if claimedLists != 1 {
-				t.Fatalf("asked the store %d in-progress questions for the identities, want 1", claimedLists)
-			}
-		})
-	}
+	return cases, wantStep
 }
 
 func stepID(b *beads.Bead) string {
