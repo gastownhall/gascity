@@ -215,6 +215,16 @@ func nativeListTypeRefused(err error) bool {
 	return errors.Is(err, issueops.ErrValidation) || IsIssueTypeRefused(err)
 }
 
+// ListTypeRefused reports whether err is a store refusing a listing because
+// of the type it was asked for: bd, and the native role, refuse a typed
+// listing of a type the scope does not register. The store is not unavailable
+// and may still hold beads of that type; a caller that must have them lists
+// without the type and applies it to the rows, as NativeDoltStore.List does
+// for itself.
+func ListTypeRefused(err error) bool {
+	return err != nil && nativeListTypeRefused(err)
+}
+
 // NativeListRequestKeyed reports whether req carries a predicate that narrows
 // the backend's candidate set below the whole ledger. A request without one
 // returns every row of both tiers, closed rows included, and is the full walk
