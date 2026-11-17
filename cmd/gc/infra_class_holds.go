@@ -141,10 +141,7 @@ func infraCarryParkedHold(b beads.Bead) beads.Bead {
 		hold.DeferUntil = b.DeferUntil.UTC().Format(time.RFC3339Nano)
 	}
 	raw, _ := json.Marshal(hold) // a struct of strings always encodes
-	metadata := make(beads.StringMap, len(b.Metadata)+1)
-	for key, value := range b.Metadata {
-		metadata[key] = value
-	}
+	metadata := cloneBeadMetadata(b.Metadata)
 	metadata[beadmeta.MigratedParkedHoldMetadataKey] = string(raw)
 	b.Metadata = metadata
 	until := infraParkedDeferUntil

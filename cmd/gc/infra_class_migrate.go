@@ -3013,10 +3013,7 @@ func importInfraSnapshot(destination beads.Store, plan infraCopyPlan, prepared i
 // the only thing that writes edges, and the source's own materialized dep rows
 // are what it reads, so nothing is lost.
 func infraMigrationRow(b beads.Bead) beads.Bead {
-	metadata := make(beads.StringMap, len(b.Metadata)+1)
-	for key, value := range b.Metadata {
-		metadata[key] = value
-	}
+	metadata := cloneBeadMetadata(b.Metadata)
 	metadata[infraMigrationStampKey] = config.StorageWorkBinding
 	b.Metadata = metadata
 	b.Dependencies = nil

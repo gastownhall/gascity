@@ -288,10 +288,7 @@ func withInfraCrossEdgeRecords(b beads.Bead, records []rigCrossEdgeRecord) beads
 	if err != nil {
 		return b
 	}
-	metadata := make(beads.StringMap, len(b.Metadata)+1)
-	for key, value := range b.Metadata {
-		metadata[key] = value
-	}
+	metadata := cloneBeadMetadata(b.Metadata)
 	metadata[beadmeta.MigratedCrossEdgesMetadataKey] = string(raw)
 	b.Metadata = metadata
 	return b
