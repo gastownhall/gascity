@@ -1125,6 +1125,89 @@ func TestAttachGraphApplyPlanReferencesAttachRootOnEveryStep(t *testing.T) {
 	}
 }
 
+// TestAttachStampsIssueVarOnRootAndEveryStep is the regression for
+// ga-lm6ep2g: Route A (gc formula cook --attach) left gc.var.issue unset on
+// the sub-DAG, so nothing tied it back to its source the way Route B's gc
+// sling does. The value is resolved once: the caller's Vars["issue"] when it
+// is non-empty, otherwise the attach bead id. An empty Vars["issue"] is how a
+// formula's empty default reaches Attach, so it counts as absent.
+func TestAttachStampsIssueVarOnRootAndEveryStep(t *testing.T) {
+	const issueKey = beadmeta.FormulaVarPrefix + "issue"
+	for _, tc := range []struct {
+		name string
+		vars map[string]string
+		want func(attachID string) string
+	}{
+		{name: "caller supplied", vars: map[string]string{"issue": "ga-source1"}, want: func(string) string { return "ga-source1" }},
+		{name: "vars absent", vars: nil, want: func(id string) string { return id }},
+		{name: "issue key absent", vars: map[string]string{"other": "x"}, want: func(id string) string { return id }},
+		{name: "issue empty", vars: map[string]string{"issue": ""}, want: func(id string) string { return id }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			root := setupWorkflow(t, store)
+			control := setupWorkflowChild(t, store, root.ID, "Control")
+			result, err := Attach(context.Background(), beadstest.GraphMolecule(store), makeWorkflowRecipe("attempt", "build", "run"), control.ID, AttachOptions{IdempotencyKey: "a", Vars: tc.vars})
+			if err != nil {
+				t.Fatalf("attach: %v", err)
+			}
+			want := tc.want(control.ID)
+			if len(result.IDMapping) != 3 {
+				t.Fatalf("IDMapping has %d beads, want root plus two steps", len(result.IDMapping))
+			}
+			for stepID, beadID := range result.IDMapping {
+				bead, err := store.Get(beadID)
+				if err != nil {
+					t.Fatalf("get %s: %v", beadID, err)
+				}
+				if got := bead.Metadata[issueKey]; got != want {
+					t.Errorf("step %s bead %s %s = %q, want %q", stepID, beadID, issueKey, got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestAttachGraphApplyPlanStampsIssueVarOnEveryNode covers the same
+// ga-lm6ep2g contract on the graph-apply creation path, where step metadata
+// reaches the beads through the plan nodes rather than per-bead creates.
+func TestAttachGraphApplyPlanStampsIssueVarOnEveryNode(t *testing.T) {
+	const issueKey = beadmeta.FormulaVarPrefix + "issue"
+	prev := IsGraphApplyEnabled()
+	SetGraphApplyEnabled(true)
+	t.Cleanup(func() { SetGraphApplyEnabled(prev) })
+
+	for _, tc := range []struct {
+		name string
+		vars map[string]string
+		want func(attachID string) string
+	}{
+		{name: "caller supplied", vars: map[string]string{"issue": "ga-source1"}, want: func(string) string { return "ga-source1" }},
+		{name: "issue empty", vars: map[string]string{"issue": ""}, want: func(id string) string { return id }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
+			root := setupWorkflow(t, store.MemStore)
+			control := setupWorkflowChild(t, store.MemStore, root.ID, "Control")
+			if _, err := Attach(context.Background(), beadstest.GraphMolecule(store), makeWorkflowRecipe("attempt", "build", "run"), control.ID, AttachOptions{IdempotencyKey: "a", Vars: tc.vars}); err != nil {
+				t.Fatalf("attach: %v", err)
+			}
+			if store.calls != 1 || store.plan == nil {
+				t.Fatalf("graph apply calls = %d, want 1", store.calls)
+			}
+			want := tc.want(control.ID)
+			if len(store.plan.Nodes) != 3 {
+				t.Fatalf("plan has %d nodes, want root plus two steps", len(store.plan.Nodes))
+			}
+			for _, node := range store.plan.Nodes {
+				if got := node.Metadata[issueKey]; got != want {
+					t.Errorf("node %s metadata %s = %q, want %q", node.Key, issueKey, got, want)
+				}
+			}
+		})
+	}
+}
+
 // setupV1MoleculeAttachment reproduces the production shape gc sling leaves
 // behind for a source bead that already has a live v1 attachment: an open
 // molecule M (type molecule, no gc.kind) with one open step child and
