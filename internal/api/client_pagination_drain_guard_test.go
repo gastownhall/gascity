@@ -32,12 +32,16 @@ import (
 // entry is a conscious contract decision: a list method that drops a page
 // silently is the defect this guard exists to stop. Keys are "Client.Method" for
 // methods and the bare name for functions.
-var pagedCallerAllowlist = map[string]string{}
+var pagedCallerAllowlist = map[string]string{
+	"Client.ListMailInbox": "sends no limit or cursor and MailListView carries no NextCursor: the server returns the whole inbox, and its only caller, gc mail check, counts with max(Total, len(Items))",
+}
 
 // pagedParamsWithoutClientCaller names the paged endpoints no internal/api
 // function calls, with where the paging is handled instead. A paged endpoint in
 // neither set is unclassified, so a new one cannot ship unnoticed.
-var pagedParamsWithoutClientCaller = map[string]string{}
+var pagedParamsWithoutClientCaller = map[string]string{
+	"GetV0CityByCityNameEventsParams": "no Client method lists events: cmd/gc (cmd_events.go) calls the generated endpoint and walks the pages itself",
+}
 
 // pagedFuncInfo is what the guard records about one function declaration.
 type pagedFuncInfo struct {

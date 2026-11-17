@@ -44,6 +44,11 @@ Violating any fails the build; full rationale is in the architecture docs.
   queue only through `State.NudgeQueue`; only `seededState` builds a
   `nudgequeue.StateFileQueue`. Enforced by
   `TestAPIReachesTheNudgeQueueOnlyThroughState`.
+- **Client list methods drain.** A function in `internal/api` that
+  calls a paged list endpoint (a generated `Params` type with a
+  `Cursor` field) follows `next_cursor` to the end, or is named in
+  `pagedCallerAllowlist` with a one-line reason. Enforced by
+  `TestClientPagedListMethodsDrainOrAreAllowlisted`.
 
 ## Configuration publication
 
