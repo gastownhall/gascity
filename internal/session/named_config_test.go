@@ -1,8 +1,11 @@
 package session
 
 import (
+	"context"
 	"errors"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
@@ -1472,6 +1475,259 @@ func TestDemandOnlySingletonWakeRefused(t *testing.T) {
 		info := Info{Template: "worker", PoolManaged: true, MetadataState: tt.state}
 		if got := DemandOnlySingletonWakeRefused(cfg, agent, info); got != tt.want {
 			t.Errorf("DemandOnlySingletonWakeRefused(state=%q) = %v, want %v", tt.state, got, tt.want)
+		}
+	}
+}
+
+// duplicateClaimantSpec is the spec the SESS-012 election tests resolve. It
+// carries a backing agent so a bead stamped with the template alone (pass 2)
+// qualifies as canonical.
+func duplicateClaimantSpec() NamedSessionSpec {
+	return NamedSessionSpec{
+		Agent:       &config.Agent{Name: "mayor"},
+		Identity:    "mayor",
+		SessionName: "test-city--mayor",
+		Mode:        "always",
+	}
+}
+
+// duplicateClaimantPasses are the two canonical passes of
+// findCanonicalNamedSessionBeadStrict: pass 1 matches the configured identity
+// metadata, pass 2 matches the runtime session_name plus the backing template.
+func duplicateClaimantPasses(spec NamedSessionSpec) []struct {
+	name string
+	meta func() map[string]string
+} {
+	return []struct {
+		name string
+		meta func() map[string]string
+	}{
+		{"pass1-configured-identity", func() map[string]string {
+			return map[string]string{
+				NamedSessionMetadataKey:      "true",
+				NamedSessionIdentityMetadata: spec.Identity,
+				"session_name":               spec.SessionName,
+			}
+		}},
+		{"pass2-session-name-template", func() map[string]string {
+			return map[string]string{
+				"template":     "mayor",
+				"session_name": spec.SessionName,
+			}
+		}},
+	}
+}
+
+func duplicateClaimantBead(id, generation string, createdAt time.Time, meta map[string]string) beads.Bead {
+	if generation != "" {
+		meta["generation"] = generation
+	}
+	return beads.Bead{
+		ID:        id,
+		Type:      BeadType,
+		Status:    "open",
+		Labels:    []string{LabelSession},
+		CreatedAt: createdAt,
+		Metadata:  meta,
+	}
+}
+
+// TestFindCanonicalNamedSession_DuplicateClaimantsElectSESS012WinnerInAnyOrder
+// pins the election among several qualifying canonical claimants: the winner is
+// the one the reconcilers keep (NamedSessionWinsCanonicalRepairInfo: higher
+// generation, then newer CreatedAt, then larger ID) whatever order the store
+// listed the candidates in, for the bead and Info selectors alike.
+func TestFindCanonicalNamedSession_DuplicateClaimantsElectSESS012WinnerInAnyOrder(t *testing.T) {
+	spec := duplicateClaimantSpec()
+	t0 := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	variants := []struct {
+		name string
+		a, b func(meta map[string]string) beads.Bead
+		want string
+	}{
+		{
+			name: "generation",
+			a:    func(m map[string]string) beads.Bead { return duplicateClaimantBead("dup-a", "1", t0, m) },
+			b:    func(m map[string]string) beads.Bead { return duplicateClaimantBead("dup-b", "2", t0, m) },
+			want: "dup-b",
+		},
+		{
+			// The newer row has the smaller ID, so CreatedAt must outrank ID.
+			name: "created-at",
+			a: func(m map[string]string) beads.Bead {
+				return duplicateClaimantBead("dup-a", "1", t0.Add(time.Second), m)
+			},
+			b:    func(m map[string]string) beads.Bead { return duplicateClaimantBead("dup-z", "1", t0, m) },
+			want: "dup-a",
+		},
+		{
+			name: "id",
+			a:    func(m map[string]string) beads.Bead { return duplicateClaimantBead("dup-a", "1", t0, m) },
+			b:    func(m map[string]string) beads.Bead { return duplicateClaimantBead("dup-b", "1", t0, m) },
+			want: "dup-b",
+		},
+	}
+	for _, pass := range duplicateClaimantPasses(spec) {
+		for _, v := range variants {
+			a, b := v.a(pass.meta()), v.b(pass.meta())
+			for _, order := range [][]beads.Bead{{a, b}, {b, a}} {
+				name := pass.name + "/" + v.name + "/" + order[0].ID + "-first"
+				t.Run(name, func(t *testing.T) {
+					got, ok := FindCanonicalNamedSessionBead(order, spec)
+					if !ok || got.ID != v.want {
+						t.Errorf("FindCanonicalNamedSessionBead() = (%q, %v), want %q", got.ID, ok, v.want)
+					}
+					infos := []Info{infoFromPersistedBead(order[0]), infoFromPersistedBead(order[1])}
+					gotInfo, ok := FindCanonicalNamedSessionInfo(infos, spec)
+					if !ok || gotInfo.ID != v.want {
+						t.Errorf("FindCanonicalNamedSessionInfo() = (%q, %v), want %q", gotInfo.ID, ok, v.want)
+					}
+				})
+			}
+		}
+	}
+}
+
+// TestFindCanonicalNamedSession_PassOneBeatsPassTwoRegardlessOfRank pins that
+// the election never crosses passes: a configured-identity claimant wins over a
+// session_name claimant even when the latter outranks it on generation.
+func TestFindCanonicalNamedSession_PassOneBeatsPassTwoRegardlessOfRank(t *testing.T) {
+	spec := duplicateClaimantSpec()
+	t0 := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	passes := duplicateClaimantPasses(spec)
+	pass1 := duplicateClaimantBead("pass1", "1", t0, passes[0].meta())
+	pass2 := duplicateClaimantBead("pass2", "9", t0.Add(time.Hour), passes[1].meta())
+	for _, order := range [][]beads.Bead{{pass1, pass2}, {pass2, pass1}} {
+		got, ok := FindCanonicalNamedSessionBead(order, spec)
+		if !ok || got.ID != "pass1" {
+			t.Errorf("FindCanonicalNamedSessionBead(%s first) = (%q, %v), want pass1", order[0].ID, got.ID, ok)
+		}
+		gotInfo, ok := FindCanonicalNamedSessionInfo([]Info{infoFromPersistedBead(order[0]), infoFromPersistedBead(order[1])}, spec)
+		if !ok || gotInfo.ID != "pass1" {
+			t.Errorf("FindCanonicalNamedSessionInfo(%s first) = (%q, %v), want pass1", order[0].ID, gotInfo.ID, ok)
+		}
+	}
+}
+
+// reverseListStore serves every List newest-row-first, the order bd's default
+// listing returns, over a MemStore that lists oldest-first.
+type reverseListStore struct{ *beads.MemStore }
+
+func (s reverseListStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	items, err := s.MemStore.List(q)
+	slices.Reverse(items)
+	return items, err
+}
+
+func createDuplicateClaimants(t *testing.T, store beads.Store, spec NamedSessionSpec) map[string]string {
+	t.Helper()
+	title := map[string]string{}
+	for _, name := range []string{"canonical-first", "canonical-second"} {
+		created, err := store.Create(beads.Bead{
+			Title:  name,
+			Type:   BeadType,
+			Labels: []string{LabelSession},
+			Metadata: map[string]string{
+				NamedSessionMetadataKey:      "true",
+				NamedSessionIdentityMetadata: spec.Identity,
+				"session_name":               spec.SessionName,
+			},
+		})
+		if err != nil {
+			t.Fatalf("Create(%s): %v", name, err)
+		}
+		title[created.ID] = name
+	}
+	return title
+}
+
+// TestLookupConfiguredNamedSession_DuplicateCanonicalIgnoresStoreOrder pins that
+// the lookup elects the SESS-012 winner (same generation, so the newer row) from
+// a store that lists oldest-first, one that lists newest-first, and a primed
+// CachingStore, whose cache-served List is in Go map order.
+func TestLookupConfiguredNamedSession_DuplicateCanonicalIgnoresStoreOrder(t *testing.T) {
+	spec := NamedSessionSpec{Identity: "mayor", SessionName: "test-city--mayor"}
+
+	forward := beads.NewMemStore()
+	title := createDuplicateClaimants(t, forward, spec)
+	cache := beads.NewCachingStoreForTest(forward, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	stores := []struct {
+		name  string
+		store beads.Store
+		calls int
+	}{
+		{"oldest-first", forward, 1},
+		{"newest-first", reverseListStore{forward}, 1},
+		// Map order differs per call, so one lookup proves nothing.
+		{"primed-caching-store", cache, 200},
+	}
+	for _, tc := range stores {
+		t.Run(tc.name, func(t *testing.T) {
+			picks := map[string]int{}
+			for i := 0; i < tc.calls; i++ {
+				lookup, err := LookupConfiguredNamedSession(beadstest.Sessions(tc.store), spec)
+				if err != nil {
+					t.Fatalf("LookupConfiguredNamedSession: %v", err)
+				}
+				if !lookup.HasCanonical {
+					t.Fatal("HasCanonical = false, want the newer canonical bead")
+				}
+				picks[title[lookup.Canonical.ID]]++
+			}
+			if len(picks) != 1 || picks["canonical-second"] != tc.calls {
+				t.Errorf("canonical picks over %d lookups = %v, want all canonical-second (same generation, newer CreatedAt)", tc.calls, picks)
+			}
+		})
+	}
+}
+
+// TestLookupConfiguredNamedSession_DuplicateConflictIgnoresStoreOrder pins that
+// the conflict bead named in the lookup is the oldest claimant, in the
+// session_name leg and the alias leg alike, whatever order the store lists in.
+func TestLookupConfiguredNamedSession_DuplicateConflictIgnoresStoreOrder(t *testing.T) {
+	spec := NamedSessionSpec{Identity: "mayor", SessionName: "test-city--mayor"}
+	legs := []struct {
+		name string
+		meta map[string]string
+	}{
+		{"session-name", map[string]string{"session_name": spec.SessionName}},
+		{"alias", map[string]string{"alias": spec.Identity}},
+	}
+	for _, leg := range legs {
+		for _, reversed := range []bool{false, true} {
+			name := leg.name + "/oldest-first"
+			if reversed {
+				name = leg.name + "/newest-first"
+			}
+			t.Run(name, func(t *testing.T) {
+				mem := beads.NewMemStore()
+				title := map[string]string{}
+				for _, n := range []string{"conflict-first", "conflict-second"} {
+					meta := map[string]string{"template": "other", "agent_name": "other"}
+					for k, v := range leg.meta {
+						meta[k] = v
+					}
+					created, err := mem.Create(beads.Bead{Title: n, Type: BeadType, Labels: []string{LabelSession}, Metadata: meta})
+					if err != nil {
+						t.Fatalf("Create(%s): %v", n, err)
+					}
+					title[created.ID] = n
+				}
+				var store beads.Store = mem
+				if reversed {
+					store = reverseListStore{mem}
+				}
+				lookup, err := LookupConfiguredNamedSession(beadstest.Sessions(store), spec)
+				if err != nil {
+					t.Fatalf("LookupConfiguredNamedSession: %v", err)
+				}
+				if !lookup.HasConflict || title[lookup.Conflict.ID] != "conflict-first" {
+					t.Errorf("Conflict = (%q, %v), want conflict-first", title[lookup.Conflict.ID], lookup.HasConflict)
+				}
+			})
 		}
 	}
 }
