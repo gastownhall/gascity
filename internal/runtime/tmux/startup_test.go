@@ -1657,6 +1657,35 @@ func TestDoStartSession_DeadlineAfterUnconfirmedNudgeKeepsLiveSession(t *testing
 		callsByMethod(t, ops, "runSetupCommand", 0)
 	})
 
+	t.Run("dead pane", func(t *testing.T) {
+		ctx := &nudgeDeadlineCtx{Context: context.Background()}
+		running := true
+		ops := &fakeStartOps{
+			hasSessionResult:       true,
+			isSessionRunningResult: &running,
+			sendKeysErr:            ErrNudgeSubmitUnconfirmed,
+		}
+		ops.sendKeysHook = func() {
+			ctx.tripped = true
+			running = false
+		}
+		cfg := runtime.Config{
+			Command:     "claude",
+			Nudge:       "start working",
+			SessionLive: []string{"echo live"},
+		}
+
+		err := doStartSession(ctx, ops, "test", cfg, DefaultConfig().SetupTimeout)
+		if err == nil {
+			t.Fatal("doStartSession = nil, want an error: a deadline with a dead pane must not be forgiven")
+		}
+		if !errors.Is(err, runtime.ErrSessionDiedDuringStartup) {
+			t.Fatalf("doStartSession = %v, want runtime.ErrSessionDiedDuringStartup for a present session with a dead pane", err)
+		}
+		callsByMethod(t, ops, "recordUnconfirmedNudge", 1)
+		callsByMethod(t, ops, "runSetupCommand", 0)
+	})
+
 	t.Run("cancel", func(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -3997,12 +4026,22 @@ func TestDoStartSession_DeadlineErrorNamesStage(t *testing.T) {
 			want: "running session_setup" + deadline,
 		},
 		{
-			name: "startup nudge",
+			name: "startup nudge with session gone",
+			arm: func(ops *fakeStartOps, expire func()) {
+				ops.hasSessionResult = true
+				ops.sendKeysHook = func() {
+					expire()
+					ops.hasSessionResult = false
+				}
+			},
+			want: "sending startup nudge" + deadline,
+		},
+		{
+			name: "startup nudge with session alive",
 			arm: func(ops *fakeStartOps, expire func()) {
 				ops.hasSessionResult = true
 				ops.sendKeysHook = expire
 			},
-			want: "sending startup nudge" + deadline,
 		},
 	})
 }
