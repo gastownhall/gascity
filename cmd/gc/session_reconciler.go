@@ -1001,7 +1001,7 @@ func finalizeDrainAckStoppedSession(
 			// Pool worktrees are transient by design — reclaim disk when the
 			// session bead is retired, same as the stranded-repair and
 			// pool-freeable close paths below. Skipped under safety gates
-			// (uncommitted, unpushed, stashed) and overridable via
+			// (uncommitted, unpushed) and overridable via
 			// cfg.Daemon.AutoPruneWorkerDir (gascity#8093).
 			pruneAgentHomeWorktreeIfSafeInfo(info, cityPath, cfg, stderr)
 			// write-returns-Info (Step 6d): the caller's snapshot fold is ApplyPatch(the
