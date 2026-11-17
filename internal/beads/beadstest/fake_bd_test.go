@@ -247,3 +247,40 @@ func TestFakeBdBackedCloseForwardsTheMetadataReasonToBd(t *testing.T) {
 		t.Errorf("bd close_reason column = %q, want the forwarded %q", rows[0].CloseReason, "shipped in def456")
 	}
 }
+
+// TestCachingStoreOverFakeBdDefaultCloseCausesNoSpuriousUpdate pins the
+// CachingStore case of the close_reason store-contract ruling: a bead closed
+// with bd's default reason, through the cache or behind it, leaves the cache
+// and bd agreeing, so a later live list and two reconciles emit no
+// bead.updated for it. The bead.closed count is the positive control: it shows
+// the notification path was live, so the absence of an update is not vacuous.
+func TestCachingStoreOverFakeBdDefaultCloseCausesNoSpuriousUpdate(t *testing.T) {
+	for _, via := range []string{"cache", "backing"} {
+		t.Run(via, func(t *testing.T) {
+			backing := NewFakeBd().NewBdStore()
+			seed, err := backing.Create(beads.Bead{Title: "closed with bd's default", Type: "task"})
+			mustNoErr(t, "Create", err)
+			cs, rec := primedNotifyingCache(t, backing)
+			if via == "cache" {
+				mustNoErr(t, "cache Close", cs.Close(seed.ID))
+			} else {
+				mustNoErr(t, "backing Close", backing.Close(seed.ID))
+			}
+			_, err = cs.List(beads.ListQuery{AllowScan: true, IncludeClosed: true, Live: true})
+			mustNoErr(t, "live List", err)
+			cs.ReconcileNowForTest()
+			cs.ReconcileNowForTest()
+			if got := rec.closes(seed.ID); got != 1 {
+				t.Errorf("bead.closed notifications = %d, want exactly 1; notifications=%s", got, rec)
+			}
+			rec.mu.Lock()
+			events := append([]string(nil), rec.events...)
+			rec.mu.Unlock()
+			for _, e := range events {
+				if e == "bead.updated "+seed.ID {
+					t.Errorf("a close with bd's default reason caused %q; notifications=%v", e, events)
+				}
+			}
+		})
+	}
+}
