@@ -229,7 +229,9 @@ func ListTypeRefused(err error) bool {
 // the backend's candidate set below the whole ledger. A request without one
 // returns every row of both tiers, closed rows included, and is the full walk
 // the list-request tripwire counts. An IDFilter is one: the exact batch read
-// (GetExactBatch) narrows its listing to the ids it reads.
+// (GetExactBatch) narrows its listing to the ids it reads. An ExcludeStatus
+// is not one: it leaves closed history in the backing, but a request that
+// carries nothing else still reads every active row.
 func NativeListRequestKeyed(req issueops.ListRequest) bool {
 	return req.IDFilter != "" ||
 		req.ParentID != "" ||

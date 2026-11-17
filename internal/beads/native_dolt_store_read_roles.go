@@ -60,14 +60,16 @@ import (
 // is a substitute. AllFlag is stated because it says what it does in the member
 // name rather than in a magic status value.
 //
-// There is no ExcludeStatus member to spell "everything but closed"
-// with, so gc's "open" and its not-closed default cannot be pushed down; gc's
-// three-value projection (mapBdStatus, ListQuery.Matches) is the only
-// definition of them and runs Go-side. The two statuses that map one-to-one
-// onto a bd status are pushed beside AllFlag (nativeListRequestFromListQuery),
-// which keeps the pinned-flag default lifted under a named status. One
-// exception: a Live "open" is pushed as bd's raw "open" (nativeListPushesRawOpen).
-// That is the backing's own answer, and Live callers are owed it.
+// gc's three-value projection (mapBdStatus, ListQuery.Matches) is the only
+// definition of gc's statuses and still runs Go-side over what comes back.
+// What the request carries only narrows the read, exactly: the two statuses
+// that map one-to-one onto a bd status are pushed beside AllFlag
+// (nativeListRequestFromListQuery), which keeps the pinned-flag default lifted
+// under a named status; gc's not-closed default leaves bd's "closed" out, and
+// gc's "open" leaves out "closed" and "in_progress" (ExcludeStatus, which is
+// appended to AllFlag's set and lifts nothing). One exception: a Live "open"
+// is pushed as bd's raw "open" (nativeListPushesRawOpen). That is the
+// backing's own answer, and Live callers are owed it.
 //
 // The four include flags lift the type and plane suppressions in the same
 // spirit. They are stated individually rather than as IncludeAllTypes because
@@ -855,8 +857,18 @@ func nativeListRequestFromListQuery(query ListQuery, pushableTypes map[string]bo
 	if !query.CreatedBefore.IsZero() {
 		req.CreatedBefore = zeroTimePtr(query.CreatedBefore)
 	}
-	if nativeListPushableStatus(query.Status) || nativeListPushesRawOpen(query) {
+	switch {
+	case nativeListPushableStatus(query.Status) || nativeListPushesRawOpen(query):
 		req.Status = query.Status
+	case query.Status == "open":
+		// gc's "open" is every bd status but closed and in_progress
+		// (mapBdStatus), so those two are what the backing leaves out.
+		req.ExcludeStatus = []string{"closed", "in_progress"}
+	case query.Status == "" && !query.IncludeClosed:
+		// gc's not-closed default (ListQuery.Matches): closed rows stay in
+		// the backing. Without it every default listing reads the scope's
+		// whole closed history and drops it in Go.
+		req.ExcludeStatus = []string{"closed"}
 	}
 	if pushableTypes[query.Type] {
 		req.IssueType = query.Type

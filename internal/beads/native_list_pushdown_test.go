@@ -26,12 +26,24 @@ type planShape struct {
 	assignee  string
 	status    string
 	issueType string
+	// exclude is the request's ExcludeStatus, joined with commas.
+	exclude string
 }
+
+// The two status exclusions a plan pushes: gc's not-closed default, and gc's
+// "open", which is every bd status but closed and in_progress.
+const (
+	notClosed = "closed"
+	gcOpen    = "closed,in_progress"
+)
 
 func shapesOf(plan []issueops.ListRequest) []planShape {
 	out := make([]planShape, 0, len(plan))
 	for _, req := range plan {
-		out = append(out, planShape{assignee: req.Assignee, status: req.Status, issueType: req.IssueType})
+		out = append(out, planShape{
+			assignee: req.Assignee, status: req.Status, issueType: req.IssueType,
+			exclude: strings.Join(req.ExcludeStatus, ","),
+		})
 	}
 	return out
 }
@@ -51,22 +63,22 @@ func TestNativeListPlanPushesEveryExactFilter(t *testing.T) {
 		{
 			name:  "one plural assignee is the singular predicate",
 			query: ListQuery{Assignees: []string{"worker"}},
-			want:  []planShape{{assignee: "worker"}},
+			want:  []planShape{{assignee: "worker", exclude: notClosed}},
 		},
 		{
 			name:  "plural assignees fan out one keyed request each",
 			query: ListQuery{Type: "message", Status: "open", Assignees: []string{"worker", "gc-1"}},
-			want:  []planShape{{assignee: "worker"}, {assignee: "gc-1"}},
+			want:  []planShape{{assignee: "worker", exclude: gcOpen}, {assignee: "gc-1", exclude: gcOpen}},
 		},
 		{
 			name:  "duplicate assignees are asked once",
 			query: ListQuery{Assignees: []string{"worker", "worker", "gc-1"}},
-			want:  []planShape{{assignee: "worker"}, {assignee: "gc-1"}},
+			want:  []planShape{{assignee: "worker", exclude: notClosed}, {assignee: "gc-1", exclude: notClosed}},
 		},
 		{
 			name:  "an empty assignee means unassigned, which the request cannot say",
 			query: ListQuery{Assignees: []string{"worker", ""}},
-			want:  []planShape{{}},
+			want:  []planShape{{exclude: notClosed}},
 		},
 		{
 			// A session's inbox joins its closed predecessors' routes, so a hook
@@ -87,9 +99,24 @@ func TestNativeListPlanPushesEveryExactFilter(t *testing.T) {
 			want:  []planShape{{status: "closed"}},
 		},
 		{
-			name:  "gc open is every bd status but two, so it stays client-side",
+			name:  "gc open is every bd status but two, so those two are excluded",
 			query: ListQuery{Status: "open", Label: "gc:session"},
+			want:  []planShape{{exclude: gcOpen}},
+		},
+		{
+			name:  "the default listing leaves closed rows in the backing",
+			query: ListQuery{Label: "gc:op", Metadata: map[string]string{"gc.op.open": "gc-1"}},
+			want:  []planShape{{exclude: notClosed}},
+		},
+		{
+			name:  "a listing that admits closed rows excludes nothing",
+			query: ListQuery{Label: "order-tracking", IncludeClosed: true},
 			want:  []planShape{{}},
+		},
+		{
+			name:  "a scan of the not-closed set is the active set, not the ledger",
+			query: ListQuery{AllowScan: true},
+			want:  []planShape{{exclude: notClosed}},
 		},
 		{
 			// sr-i54yd: a Live read is owed the backing's raw answer, as BdStore's
@@ -102,7 +129,7 @@ func TestNativeListPlanPushesEveryExactFilter(t *testing.T) {
 		{
 			name:  "a registered non-infra type is pushed",
 			query: ListQuery{Type: "session", Status: "open"},
-			want:  []planShape{{issueType: "session"}},
+			want:  []planShape{{issueType: "session", exclude: gcOpen}},
 		},
 		{
 			name:  "molecule steps are pushed with their status",
@@ -112,12 +139,12 @@ func TestNativeListPlanPushesEveryExactFilter(t *testing.T) {
 		{
 			name:  "an infra type would read the ephemeral plane alone, so it stays client-side",
 			query: ListQuery{Type: "message", Assignee: "worker"},
-			want:  []planShape{{assignee: "worker"}},
+			want:  []planShape{{assignee: "worker", exclude: notClosed}},
 		},
 		{
 			name:  "rig was a bd default infra type until Jun 2026, so it stays client-side",
 			query: ListQuery{Type: "rig", Status: "open"},
-			want:  []planShape{{}},
+			want:  []planShape{{exclude: gcOpen}},
 		},
 		{
 			name:  "a type gc does not register would be refused, so it stays client-side",

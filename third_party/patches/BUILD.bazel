@@ -3,6 +3,7 @@ package(default_visibility = ["//visibility:public"])
 exports_files([
     "eventsapi_schema_build.patch",
     "dolt_go_serial.patch",
+    "beads_list_exclude_status.patch",
     "beads_migrations.patch",
     "flatbuffers_v23_importpath.patch",
     "protoc_gen_validate_build.patch",

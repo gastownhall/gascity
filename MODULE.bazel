@@ -265,7 +265,13 @@ go_deps.module_override(
 )
 go_deps.module_override(
     patch_strip = 1,
-    patches = ["//third_party/patches:beads_migrations.patch"],
+    patches = [
+        "//third_party/patches:beads_migrations.patch",
+        # issueops.ListRequest.ExcludeStatus, the library half of beads #7647
+        # (in v1.4.0-rc.1 and later), so a listing can leave closed rows in
+        # the backing. Drop this patch when the pin reaches a release with it.
+        "//third_party/patches:beads_list_exclude_status.patch",
+    ],
     path = "github.com/steveyegge/beads",
 )
 

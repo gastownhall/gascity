@@ -1,0 +1,106 @@
+diff --git a/internal/workapi/list.go b/internal/workapi/list.go
+index 1798824c1..1a5e80dce 100644
+--- a/internal/workapi/list.go
++++ b/internal/workapi/list.go
+@@ -248,6 +248,16 @@ func BuildListFilter(in issueops.ListRequest, cfg ListConfig) (types.IssueFilter
+ 		}
+ 		filter.ExcludeStatus = excludeStatuses
+ 	}
++	// The caller's own exclusions (ListRequest.ExcludeStatus) are APPENDED to
++	// the defaults above, never in place of them: excluding `blocked` must not
++	// re-admit closed rows. They apply on every arm, AllFlag and an explicit
++	// Status included, which is what lets a caller drop closed history
++	// (AllFlag with ExcludeStatus "closed") without enumerating every status.
++	excluded, err := ParseExcludeStatus(in.ExcludeStatus, cfg.CustomStatusNames())
++	if err != nil {
++		return filter, err
++	}
++	filter.ExcludeStatus = append(filter.ExcludeStatus, excluded...)
+ 
+ 	if in.Priority != nil {
+ 		p := *in.Priority
+@@ -497,6 +507,31 @@ func ValidStatusList(customStatusNames []string) string {
+ 	return validList
+ }
+ 
++// ParseExcludeStatus reads a caller's status exclusion list — the listing's
++// ExcludeStatus — into the statuses it names. Entries may be comma-separated
++// and are trimmed; blanks are skipped. Each name IS validated against the
++// workspace vocabulary (built-in statuses plus customStatusNames): a
++// misspelled exclusion would silently exclude nothing and answer a WIDER set,
++// so a typo is ErrValidation instead.
++func ParseExcludeStatus(raw []string, customStatusNames []string) ([]types.Status, error) {
++	var out []types.Status
++	for _, entry := range raw {
++		for _, s := range strings.Split(entry, ",") {
++			s = strings.TrimSpace(s)
++			if s == "" {
++				continue
++			}
++			status := types.Status(s)
++			if !status.IsValidWithCustom(customStatusNames) {
++				return nil, fmt.Errorf("invalid exclude-status %q (valid: %s)%.0w",
++					s, ValidStatusList(customStatusNames), issueops.ErrValidation)
++			}
++			out = append(out, status)
++		}
++	}
++	return out, nil
++}
++
+ // ApplyStatusFilter parses a status selector - one status, or a
+ // comma-separated OR set - onto the filter.
+ func ApplyStatusFilter(filter *types.IssueFilter, status string, customStatusNames []string) error {
+diff --git a/issueops/reader.go b/issueops/reader.go
+index a5b54cf78..09af39653 100644
+--- a/issueops/reader.go
++++ b/issueops/reader.go
+@@ -134,6 +134,24 @@ type ListRequest struct {
+ 	// so `pinned` and `hooked` are the two spellings that also drop that
+ 	// predicate — every other status narrows to unflagged rows.
+ 	Status string
++	// ExcludeStatus names statuses to leave out, on top of whatever Status or
++	// the default exclusions select (it never re-admits a row they hide).
++	// Entries may be comma-separated, and each name is validated against the
++	// workspace vocabulary (built-in plus custom statuses): an unknown name is
++	// ErrValidation rather than excluding nothing, because a silently ignored
++	// exclusion answers a wider set. With AllFlag there are no default
++	// exclusions, so the listing keeps every status not named here, without
++	// the caller having to enumerate every status it wants.
++	//
++	// It is a predicate on the status column, so it applies to both planes a
++	// request reads, and it leaves the pinned-FLAG predicate where the rest of
++	// the request put it. The ReadyFlag arm refuses it; see that field.
++	//
++	// IT IS A LIBRARY MEMBER ONLY AT THIS VERSION. No `bd list` flag sets it
++	// and GET /v0/beads/issues has no parameter for it: that server refuses
++	// an `exclude_status` query parameter as unknown rather than answering
++	// the wider set.
++	ExcludeStatus []string
+ 	// IssueType is validated against the workspace vocabulary — unlike
+ 	// ReadyRequest.IssueType, which matches nothing rather than failing.
+ 	IssueType   string
+@@ -357,7 +375,7 @@ type ListRequest struct {
+ 	// fields rather than answering a wider question than was asked. That is
+ 	// IDFilter, TitleSearch, SpecPrefix, the four *Contains fields,
+ 	// ExternalRef, every Created/Updated/Closed/Defer/Due bound, DeferredFlag,
+-	// OverdueFlag, EmptyDesc, NoLabels, NoParent, PinnedFlag, PriorityMin,
++	// OverdueFlag, EmptyDesc, NoLabels, NoParent, PinnedFlag, ExcludeStatus, PriorityMin,
+ 	// PriorityMax, and the keyset position. There is no fallback: no
+ 	// combination of the two silently widens the answer.
+ 	//
+diff --git a/issueops/reader_ready_scope.go b/issueops/reader_ready_scope.go
+index bf3ee326c..2993415e1 100644
+--- a/issueops/reader_ready_scope.go
++++ b/issueops/reader_ready_scope.go
+@@ -90,6 +90,10 @@ var readyScopeFields = []readyScopeField{
+ 	{"NoLabels", "--no-labels", func(r ListRequest) bool { return r.NoLabels }},
+ 	{"NoParent", "--no-parent", func(r ListRequest) bool { return r.NoParent }},
+ 	{"PinnedFlag", "--pinned", func(r ListRequest) bool { return r.PinnedFlag }},
++	// No `bd list` flag sets ExcludeStatus, and at this version no wire
++	// parameter carries it either; the label is the wire name later releases
++	// give it, so the refusal reads the same there.
++	{"ExcludeStatus", "exclude_status", func(r ListRequest) bool { return len(r.ExcludeStatus) > 0 }},
+ 
+ 	{"PriorityMin", "--priority-min", func(r ListRequest) bool { return r.PriorityMin != nil }},
+ 	{"PriorityMax", "--priority-max", func(r ListRequest) bool { return r.PriorityMax != nil }},

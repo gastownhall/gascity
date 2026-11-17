@@ -204,11 +204,22 @@ func IndexedRows(rows []beads.Bead, query beads.ListQuery) int {
 				statuses[status] = true
 			}
 		}
+		excluded := map[string]bool{}
+		for _, entry := range req.ExcludeStatus {
+			for _, status := range strings.Split(entry, ",") {
+				if status = strings.TrimSpace(status); status != "" {
+					excluded[status] = true
+				}
+			}
+		}
 		for _, row := range rows {
 			if len(ids) > 0 && !ids[row.ID] {
 				continue
 			}
 			if len(statuses) > 0 && !statuses[row.Status] {
+				continue
+			}
+			if excluded[row.Status] {
 				continue
 			}
 			if req.IssueType != "" && row.Type != req.IssueType {
