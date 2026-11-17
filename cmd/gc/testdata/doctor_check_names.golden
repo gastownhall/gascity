@@ -106,6 +106,7 @@ dolt-unbound-databases
 dolt-corrupt-aside
 dolt-compact-state
 dolt-journal-size
+dolt-archive-dicts
 dolt-log-size
 dolt-config
 dolt-version

@@ -572,6 +572,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	register(doctor.NewDoltCorruptAsideCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
 	register(doctor.NewDoltCompactStateCheck(cityPath, opts.SkipManagedDoltCheck))
 	register(doctor.NewDoltJournalSizeCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
+	register(doctor.NewDoltArchiveDictCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
 	// Managed Dolt server log growth canary. dolt.log is opened O_APPEND at
 	// every start and nothing rotates or truncates it, so it accumulates for
 	// the life of the pack runtime directory.
