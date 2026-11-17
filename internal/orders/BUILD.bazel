@@ -78,6 +78,9 @@ go_library(
         "@rules_go//go/platform:solaris": [
             "//internal/processgroup",
         ],
+        "@rules_go//go/platform:windows": [
+            "//internal/processgroup",
+        ],
         "//conditions:default": [],
     }),
 )

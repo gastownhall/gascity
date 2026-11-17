@@ -18,6 +18,7 @@ go_library(
 go_test(
     name = "exec_test",
     srcs = [
+        "batchfile_windows_test.go",
         "br_script_test.go",
         "br_test.go",
         "exec_test.go",
