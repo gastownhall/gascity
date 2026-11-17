@@ -86,7 +86,7 @@ func (s *SQLiteStore) UpdateIfMatch(id string, expectedRevision int64, opts Upda
 	}
 	return s.conditionalWrite(id, expectedRevision, func(ctx context.Context, tx *sql.Tx, b Bead) error {
 		next := applySQLiteUpdateOpts(b, opts)
-		next.UpdatedAt = time.Now()
+		next.UpdatedAt = time.Now().UTC()
 		return s.upsertBeadTx(ctx, tx, next)
 	})
 }
@@ -101,7 +101,7 @@ func (s *SQLiteStore) CloseIfMatch(id string, expectedRevision int64) error {
 			setBeadStatus(&b, "closed")
 			recordCloseReason(&b)
 		}
-		b.UpdatedAt = time.Now()
+		b.UpdatedAt = time.Now().UTC()
 		return s.upsertBeadTx(ctx, tx, b)
 	})
 }
@@ -120,7 +120,7 @@ func (s *SQLiteStore) CloseWithMetadataIfMatch(id string, expectedRevision int64
 	var closed Bead
 	err := s.conditionalWrite(id, expectedRevision, func(ctx context.Context, tx *sql.Tx, b Bead) error {
 		next := applySQLiteUpdateOpts(b, UpdateOpts{Status: &closedStatus, Metadata: metadata})
-		next.UpdatedAt = time.Now()
+		next.UpdatedAt = time.Now().UTC()
 		if err := s.upsertBeadTx(ctx, tx, next); err != nil {
 			return err
 		}
@@ -212,7 +212,7 @@ func (s *SQLiteStore) CompareAndSetMetadataKey(id, key, expected, next string) (
 			b.Metadata = make(map[string]string, 1)
 		}
 		b.Metadata[key] = next
-		b.UpdatedAt = time.Now()
+		b.UpdatedAt = time.Now().UTC()
 		if err := s.upsertBeadTx(ctx, tx, b); err != nil {
 			return err
 		}

@@ -63,7 +63,7 @@ func (s *SQLiteStore) Claim(id, assignee string) (Bead, bool, error) {
 		before := b
 		b.Assignee = assignee
 		b.Status = "in_progress"
-		b.UpdatedAt = time.Now()
+		b.UpdatedAt = time.Now().UTC()
 		if err := s.upsertBeadTx(ctx, tx, b); err != nil {
 			return err
 		}

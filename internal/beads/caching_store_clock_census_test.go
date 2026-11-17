@@ -20,8 +20,8 @@ func TestCachingStoreWallClockReadsCensus(t *testing.T) {
 		"cachedReadyLocked":   {"now := time.Now().UTC()": true},
 		"readyFromCache":      {"now := time.Now().UTC()": true}, // Ready and ReadyPreferCache share it
 		"CachedReady":         {"now := time.Now().UTC()": true},
-		"ReleaseIfCurrent":    {"b.UpdatedAt = time.Now()": true}, // a patched row mirrors the backing
-		"TransferIfCurrent":   {"b.UpdatedAt = time.Now()": true},
+		"ReleaseIfCurrent":    {"b.UpdatedAt = time.Now().UTC()": true}, // a patched row mirrors the backing
+		"TransferIfCurrent":   {"b.UpdatedAt = time.Now().UTC()": true},
 	}
 	measured := map[string]bool{"runReconciliation": true} // time.Since: real latencies
 	wall := regexp.MustCompile(`time\.(Now|Since|Until)\(`)

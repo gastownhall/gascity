@@ -127,7 +127,7 @@ func (s *SQLiteStore) guardedUpdateTx(ctx context.Context, tx *sql.Tx, idx int, 
 		return guardedPreconditionError(idx, u.ID, *u.ExpectedRevision, before.Revision, "")
 	}
 	next := applySQLiteUpdateOpts(before, u.Opts)
-	next.UpdatedAt = time.Now()
+	next.UpdatedAt = time.Now().UTC()
 	if err := s.upsertBeadTx(ctx, tx, next); err != nil {
 		return err
 	}

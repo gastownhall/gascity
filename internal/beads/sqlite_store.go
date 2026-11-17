@@ -775,7 +775,7 @@ func (s *SQLiteStore) normalizeCreate(b Bead) (Bead, error) {
 		b.Type = "task"
 	}
 	if b.CreatedAt.IsZero() {
-		b.CreatedAt = time.Now()
+		b.CreatedAt = time.Now().UTC()
 	}
 	if b.UpdatedAt.IsZero() {
 		b.UpdatedAt = b.CreatedAt
@@ -1193,6 +1193,11 @@ func scanSQLiteBead(row sqliteScanner) (Bead, error) {
 	if err := json.Unmarshal([]byte(raw), &b); err != nil {
 		return Bead{}, err
 	}
+	// Rows written before the store stamped UTC carry the host's zone offset in
+	// bead_json; the instant is the same, so print it in UTC without rewriting
+	// the stored row.
+	b.CreatedAt = b.CreatedAt.UTC()
+	b.UpdatedAt = b.UpdatedAt.UTC()
 	// Bead.Revision and ClaimFence are json:"-". Revision lives in the current
 	// table column while ClaimFence uses the rollback-compatible kv carrier;
 	// every SELECT feeding this scanner projects both values.
@@ -1312,7 +1317,7 @@ func (s *SQLiteStore) rewriteBead(id string, apply func(Bead) Bead) error {
 		if sqliteRowUnchanged(before, b) {
 			return nil // commit nothing: the deferred rollback ends the transaction
 		}
-		b.UpdatedAt = time.Now()
+		b.UpdatedAt = time.Now().UTC()
 		if err := s.upsertBeadTx(ctx, tx, b); err != nil {
 			return err
 		}
@@ -1377,7 +1382,7 @@ func (s *SQLiteStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error
 		before := b
 		b.Status = "open"
 		b.Assignee = ""
-		b.UpdatedAt = time.Now()
+		b.UpdatedAt = time.Now().UTC()
 		if err := s.upsertBeadTx(ctx, tx, b); err != nil {
 			return err
 		}
@@ -2001,7 +2006,7 @@ func (t *sqliteStoreTx) Update(id string, opts UpdateOpts) error {
 	}
 	before := b
 	b = applySQLiteUpdateOpts(b, opts)
-	b.UpdatedAt = time.Now()
+	b.UpdatedAt = time.Now().UTC()
 	if err := t.store.upsertBeadTx(t.ctx, t.tx, b); err != nil {
 		return err
 	}
@@ -2026,7 +2031,7 @@ func (t *sqliteStoreTx) Close(id string) error {
 	before := b
 	setBeadStatus(&b, "closed")
 	recordCloseReason(&b)
-	b.UpdatedAt = time.Now()
+	b.UpdatedAt = time.Now().UTC()
 	if err := t.store.upsertBeadTx(t.ctx, t.tx, b); err != nil {
 		return err
 	}

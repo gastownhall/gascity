@@ -70,7 +70,7 @@ func (m *MemStore) closeWithMetadataIfMatch(id string, expectedRevision int64, m
 	if !wasClosed {
 		recordCloseReason(&m.beads[i])
 	}
-	m.beads[i].UpdatedAt = time.Now()
+	m.beads[i].UpdatedAt = time.Now().UTC()
 	m.beads[i].Revision++
 	return cloneBead(m.beads[i]), nil
 }

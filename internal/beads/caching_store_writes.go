@@ -245,7 +245,7 @@ func (c *CachingStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, erro
 		row, found = c.patchedCachedRowLocked(id, func(b *Bead) {
 			setBeadStatus(b, "open")
 			b.Assignee = ""
-			b.UpdatedAt = time.Now()
+			b.UpdatedAt = time.Now().UTC()
 		})
 	}
 	if !raced {
@@ -305,7 +305,7 @@ func (c *CachingStore) TransferIfCurrent(id, fromAssignee, toAssignee string) (b
 	if !refreshed {
 		row, found = c.patchedCachedRowLocked(id, func(b *Bead) {
 			b.Assignee = toAssignee
-			b.UpdatedAt = time.Now()
+			b.UpdatedAt = time.Now().UTC()
 		})
 	}
 	if !raced {
