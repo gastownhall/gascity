@@ -600,7 +600,7 @@ func TestNativeDoltStoreJournalRecheckDoesNotWaitOutAnOpenWindow(t *testing.T) {
 		}},
 		{name: "EventsJournalActive", run: func() error {
 			if !store.EventsJournalActive() {
-				return errors.New("false; the re-check keeps the last answer, true")
+				return errors.New("false; the re-check must resolve the scope's journal on, true")
 			}
 			return nil
 		}},

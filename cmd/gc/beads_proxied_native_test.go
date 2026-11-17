@@ -937,7 +937,7 @@ func TestProxiedGuardRecoveryHoldsTheOpenToTheReadBudget(t *testing.T) {
 	}
 	if limit := beads.ProxiedReadBudget(); openBudget <= 0 || openBudget > limit {
 		t.Fatalf("the recovery's library open had %s left on its clock, want at most the read budget %s: "+
-			"it holds the process-global open-env lock on a background timer with no caller waiting",
+			"it holds the process-wide projection window on a background timer with no caller waiting",
 			openBudget.Round(time.Second), limit)
 	}
 }

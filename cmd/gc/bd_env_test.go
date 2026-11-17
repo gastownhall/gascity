@@ -5721,7 +5721,7 @@ func TestMirrorBeadsDoltScopeEnvReadsAmbientTLSViaNativeOpenGuard(t *testing.T) 
 		t.Fatalf("mirror did not read ambient TLS via the native-open env guard (guarded accessor key seen = %q)", calledKey)
 	}
 	if got := env["BEADS_DOLT_SERVER_TLS"]; got != "guarded-tls" {
-		t.Fatalf("external BEADS_DOLT_SERVER_TLS = %q, want %q (from the mutex-guarded ambient read)", got, "guarded-tls")
+		t.Fatalf("external BEADS_DOLT_SERVER_TLS = %q, want %q (from the stubbed ambient read)", got, "guarded-tls")
 	}
 }
 

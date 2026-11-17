@@ -376,6 +376,10 @@ func TestProjectionExitIsIdempotent(t *testing.T) {
 		t.Errorf("a repeated exit ended the next window: sequence = %d", got)
 	}
 	if n := len(projectionToken); n != 0 {
+		// Take the stray token back out: the channel holds one, so the
+		// next exit would block sending into it and the test would hang
+		// to its timeout instead of reporting this failure.
+		<-projectionToken
 		t.Errorf("a repeated exit released the next window's token: %d in the channel", n)
 	}
 	next()
