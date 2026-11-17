@@ -65,6 +65,10 @@ type execLabelUpdateFailStore struct {
 	beads.Store
 }
 
+type execOutcomeUpdateFailStore struct {
+	beads.Store
+}
+
 type eventCursorUpdateFailStore struct {
 	beads.Store
 }
@@ -191,6 +195,15 @@ func (s execLabelUpdateFailStore) Update(id string, opts beads.UpdateOpts) error
 	for _, label := range opts.Labels {
 		if label == "exec" {
 			return fmt.Errorf("exec label failed")
+		}
+	}
+	return s.Store.Update(id, opts)
+}
+
+func (s execOutcomeUpdateFailStore) Update(id string, opts beads.UpdateOpts) error {
+	for _, label := range opts.Labels {
+		if label == "exec" || label == "exec-failed" {
+			return fmt.Errorf("outcome label unavailable")
 		}
 	}
 	return s.Store.Update(id, opts)
@@ -8603,6 +8616,165 @@ func TestOrderDispatchClosesTrackingBead(t *testing.T) {
 		}
 	}
 	t.Error("tracking bead not found")
+}
+
+func TestOrderDispatchTrackingCloseReasonNamesDispatchFailures(t *testing.T) {
+	const (
+		failedPrefix  = "order dispatch failed: "
+		successReason = "order dispatch completed: tracking bead lifecycle finished"
+	)
+	cases := []struct {
+		name             string
+		formula          bool
+		requiredParam    bool
+		vars             map[string]string
+		cursorReadFails  bool
+		wrapStore        func(beads.Store) beads.Store
+		execErr          error
+		wantExecCalls    int
+		wantFailureEvent string
+		wantReason       string
+	}{
+		{
+			name:             "missing_required_param_exec",
+			requiredParam:    true,
+			wantFailureEvent: "missing required param(s): repo",
+			wantReason:       failedPrefix + `order "release-exec": missing required param(s): repo`,
+		},
+		{
+			name:             "empty_required_param_exec",
+			requiredParam:    true,
+			vars:             map[string]string{"repo": ""},
+			wantFailureEvent: "missing required param(s): repo",
+			wantReason:       failedPrefix + `order "release-exec": missing required param(s): repo`,
+		},
+		{
+			name:             "missing_required_param_formula",
+			formula:          true,
+			requiredParam:    true,
+			wantFailureEvent: "missing required param(s): repo",
+			wantReason:       failedPrefix + `order "release-exec": missing required param(s): repo`,
+		},
+		{
+			name:             "empty_required_param_formula",
+			formula:          true,
+			requiredParam:    true,
+			vars:             map[string]string{"repo": ""},
+			wantFailureEvent: "missing required param(s): repo",
+			wantReason:       failedPrefix + `order "release-exec": missing required param(s): repo`,
+		},
+		{
+			name:             "event_cursor_read_fails",
+			cursorReadFails:  true,
+			wantFailureEvent: "reading event cursor: events provider unavailable",
+			wantReason:       failedPrefix + "reading event cursor: events provider unavailable",
+		},
+		{
+			name: "event_cursor_label_fails",
+			wrapStore: func(store beads.Store) beads.Store {
+				return eventCursorUpdateFailStore{Store: store}
+			},
+			wantFailureEvent: "event cursor label failed",
+			wantReason:       failedPrefix + "event cursor label failed for seq=1: setting order run cursor on {{tracking_id}}: event cursor label failed",
+		},
+		{
+			name: "outcome_label_fails_after_success",
+			wrapStore: func(store beads.Store) beads.Store {
+				return execOutcomeUpdateFailStore{Store: store}
+			},
+			wantExecCalls:    1,
+			wantFailureEvent: "outcome label unavailable",
+			wantReason:       successReason,
+		},
+		{
+			name: "outcome_label_fails_after_command_failure",
+			wrapStore: func(store beads.Store) beads.Store {
+				return execOutcomeUpdateFailStore{Store: store}
+			},
+			execErr:          errors.New("command refused release"),
+			wantExecCalls:    1,
+			wantFailureEvent: "outcome label unavailable",
+			wantReason:       failedPrefix + "command refused release",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var backing beads.Store = beads.NewMemStore()
+			if tc.wrapStore != nil {
+				backing = tc.wrapStore(backing)
+			}
+			store := strictCloseReasonStore{Store: backing}
+			tracking, err := store.Create(beads.Bead{
+				Title:  "order:release-exec",
+				Labels: []string{"order-run:release-exec", labelOrderTracking},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			eventLog := events.NewFake()
+			eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+			var ep events.Provider = eventLog
+			if tc.cursorReadFails {
+				ep = events.NewFailFake()
+			}
+			order := orders.Order{
+				Name:    "release-exec",
+				Trigger: "event",
+				On:      events.BeadClosed,
+				Exec:    "scripts/release.sh",
+			}
+			if tc.formula {
+				order.Exec = ""
+				order.Formula = "release"
+			}
+			if tc.requiredParam {
+				order.Params = map[string]orders.OrderParam{"repo": {Required: true}}
+			}
+			var calls int
+			execRun := func(context.Context, string, string, []string) ([]byte, error) {
+				calls++
+				return nil, tc.execErr
+			}
+			var rec memRecorder
+			ad := buildOrderDispatcherFromListExec([]orders.Order{order}, store, ep, execRun, &rec)
+			if ad == nil {
+				t.Fatal("expected non-nil dispatcher")
+			}
+			mad := ad.(*memoryOrderDispatcher)
+			var stderr bytes.Buffer
+			mad.stderr = &stderr
+			cityPath := t.TempDir()
+			mad.addInflight()
+			mad.dispatchOne(context.Background(), store, execStoreTarget{ScopeRoot: cityPath}, order, cityPath, tracking.ID, tc.vars, nil)
+
+			if calls != tc.wantExecCalls {
+				t.Errorf("exec calls = %d, want %d", calls, tc.wantExecCalls)
+			}
+			// Check that the intended failure seam fired, including bookkeeping
+			// errors that must not replace the command's own outcome.
+			foundFailure := false
+			for _, e := range rec.events {
+				if e.Type == events.OrderFailed && strings.Contains(e.Message, tc.wantFailureEvent) {
+					foundFailure = true
+				}
+			}
+			if !foundFailure {
+				t.Fatalf("missing order.failed containing %q; events = %+v; stderr = %s", tc.wantFailureEvent, rec.events, stderr.String())
+			}
+			all := trackingBeads(t, store, "order-run:release-exec")
+			if len(all) != 1 {
+				t.Fatalf("tracking beads = %d, want 1", len(all))
+			}
+			if all[0].Status != "closed" {
+				t.Fatalf("tracking bead status = %q, want closed; stderr = %s", all[0].Status, stderr.String())
+			}
+			wantReason := strings.ReplaceAll(tc.wantReason, "{{tracking_id}}", fmt.Sprintf("%q", tracking.ID))
+			if got := all[0].Metadata["close_reason"]; got != wantReason {
+				t.Errorf("close_reason = %q, want %q", got, wantReason)
+			}
+		})
+	}
 }
 
 func TestOrderDispatchSkipsOpenWork(t *testing.T) {
