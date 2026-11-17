@@ -53,6 +53,10 @@
 #   GC_DOLT_REMOTE_<DB>                   (optional) — select which remote to
 #                     push to when a database has several, or to permit
 #                     pushing to a non-file:// remote (see Remote resolution).
+#                     On a proxied city DOLT_FETCH and DOLT_PUSH run inside
+#                     bd's db-proxy-child sql-server, so remote credentials
+#                     (ssh, git, aws) come from the environment of the process
+#                     that started that child, not from the gc dolt sync caller.
 #   GC_DOLT_SYNC_PUSH_TIMEOUT_SECS
 #     (default: 1800) — wall-clock bound for SQL-mode remote push. Increase for
 #                     slow links or large first pushes (a multi-GB first push to
@@ -848,6 +852,17 @@ sync_proxied_scopes() {
     ps_label="city"
     [ -n "$SCOPE_RIG" ] && ps_label="rig:$SCOPE_RIG"
 
+    # A scope whose metadata already names a .no-sync database is skipped
+    # without a bd call, so an idle proxy and its Dolt child stay asleep.
+    if [ -n "$ps_path" ]; then
+      pre_db=$(proxied_metadata_field "$ps_path/.beads/metadata.json" dolt_database)
+      if [ -n "$pre_db" ] && valid_database_name "$pre_db" && [ -f "$ps_path/.beads/dolt/$pre_db/.no-sync" ]; then
+        [ -n "$db_filter" ] && [ "$pre_db" != "$db_filter" ] && continue
+        echo "  $pre_db: skipped (.no-sync)"
+        continue
+      fi
+    fi
+
     ps_err=$(mktemp) || {
       echo "  $ps_label: ERROR: cannot create temp file for scope diagnostics" >&2
       total_count=$((total_count + 1))
@@ -870,7 +885,7 @@ sync_proxied_scopes() {
       continue
     fi
     rm -f "$ps_err"
-    name=$(printf '%s\n' "$ps_db_csv" | tr -d '\r' | awk 'NF { last = $0 } END { print last }')
+    name=$(printf '%s\n' "$ps_db_csv" | tr -d '\r' | awk 'NF { last = $0 } END { gsub(/^"|"$/, "", last); print last }')
     if ! valid_database_name "$name"; then
       echo "  $ps_label: ERROR: bd reported an unusable database name: $name" >&2
       total_count=$((total_count + 1))
@@ -878,7 +893,7 @@ sync_proxied_scopes() {
       continue
     fi
     [ -n "$db_filter" ] && [ "$name" != "$db_filter" ] && continue
-    case "$ps_visited" in *" $name "*) continue ;; esac
+    case "$ps_visited" in *" $name "*) echo "  $ps_label: $name already synced via an earlier scope"; continue ;; esac
     ps_visited="$ps_visited$name "
     if [ -n "$ps_path" ] && [ -f "$ps_path/.beads/dolt/$name/.no-sync" ]; then
       echo "  $name: skipped (.no-sync)"

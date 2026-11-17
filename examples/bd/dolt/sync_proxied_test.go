@@ -49,7 +49,9 @@ state=%s
 printf 'gc %%s\n' "$*" >> "$log"
 if [ "${1:-}" = "rig" ] && [ "${2:-}" = "list" ]; then
   [ -z "${FAKE_RIG_LIST_FAIL:-}" ] || { echo "fake gc: rig list failed" >&2; exit 1; }
-  printf '%%s\n' "${FAKE_RIG_LIST_JSON:-{\"rigs\":[]\}}"
+  rigs_json=${FAKE_RIG_LIST_JSON:-}
+  [ -n "$rigs_json" ] || rigs_json='{"rigs":[]}'
+  printf '%%s\n' "$rigs_json"
   exit 0
 fi
 if [ "${1:-}" != "bd" ]; then
@@ -416,6 +418,11 @@ func TestSyncProxiedHonorsDBFilterAndNoSyncMarker(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(webPath, ".beads", "dolt", "webdb", ".no-sync"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// The web rig's metadata names its database, so the .no-sync skip is
+	// decided without waking the scope through gc bd.
+	if err := os.WriteFile(filepath.Join(webPath, ".beads", "metadata.json"), []byte(`{"dolt_database":"webdb"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	env := []string{
 		"FAKE_RIG_LIST_JSON=" + rigListJSON(
 			rigEntry("api", apiPath, false, false),
@@ -438,6 +445,12 @@ func TestSyncProxiedHonorsDBFilterAndNoSyncMarker(t *testing.T) {
 	}
 	if got := fake.pushes(t, "hq"); len(got) != 1 {
 		t.Fatalf("shared database hq pushes = %q, want exactly one", got)
+	}
+	if !strings.Contains(out, "  rig:twin: hq already synced via an earlier scope") {
+		t.Fatalf("output does not report the deduped scope:\n%s", out)
+	}
+	if log := fake.log(t); strings.Contains(log, "--rig web") {
+		t.Fatalf("sync contacted the .no-sync web scope:\n%s", log)
 	}
 
 	_, binDir2, fake2 := newProxiedSyncCity(t)
