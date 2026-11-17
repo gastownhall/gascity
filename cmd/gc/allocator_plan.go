@@ -730,9 +730,9 @@ func (p *decidePass) planNamed() {
 }
 
 // namedCandidates are the rows a configured named session's canonical row is
-// looked up in: the occupancy without its identity duplicates, which never
-// stand for their identity, so the lookup takes the first claimant in census
-// order.
+// looked up in: rows (an occupancy list) without its identity duplicates, which
+// never stand for their identity, so the lookup elects among the claimants
+// identityDuplicates left standing.
 func (p *decidePass) namedCandidates(rows []session.Info) []session.Info {
 	if !slices.Contains(slices.Collect(maps.Values(p.none)), reasonIdentityDuplicate) {
 		return rows
