@@ -372,12 +372,22 @@ func Attach(ctx context.Context, store beads.MoleculeTarget, recipe *formula.Rec
 		return nil, fmt.Errorf("validate runtime vars: %w", err)
 	}
 
+	// Resolve gc.var.issue once so the sub-DAG root and every step agree: the
+	// caller's issue var when non-empty, otherwise the attach bead. An empty var
+	// counts as absent because a formula's empty default for "issue" reaches
+	// Attach that way (ga-lm6ep2g).
+	issue := opts.Vars["issue"]
+	if issue == "" {
+		issue = attachBeadID
+	}
+
 	// Stamp every step with the parent workflow's graph metadata.
 	for i := range recipe.Steps {
 		if recipe.Steps[i].Metadata == nil {
 			recipe.Steps[i].Metadata = make(map[string]string)
 		}
 		recipe.Steps[i].Metadata[beadmeta.RootBeadIDMetadataKey] = rootBeadID
+		recipe.Steps[i].Metadata[beadmeta.FormulaVarPrefix+"issue"] = issue
 		if rootStoreRef != "" {
 			recipe.Steps[i].Metadata[beadmeta.RootStoreRefMetadataKey] = rootStoreRef
 		}
