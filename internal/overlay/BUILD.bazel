@@ -7,6 +7,8 @@ go_library(
         "lint.go",
         "merge.go",
         "overlay.go",
+        "platform_other.go",
+        "platform_windows.go",
     ],
     embedsrcs = [
         "released/kiro-AGENTS-v1.2.0.txt",
@@ -25,6 +27,7 @@ go_test(
         "merge_test.go",
         "overlay_test.go",
         "per_provider_test.go",
+        "platform_windows_test.go",
         "skip_mergeable_test.go",
         "testenv_import_test.go",
     ],

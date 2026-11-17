@@ -36,12 +36,12 @@
   it before transferring the connection so late cancellation cannot close a
   successful session or interfere with retry cleanup.
 - Read the parent environment (`execenv.Environ`) before taking the lifecycle
-  lock or publishing the sentinel. The read waits out an in-flight native beads
-  store open and cannot be canceled, so holding either across it makes `Stop`
-  for the name wait out the open. A `Stop` during the read finds no session,
-  so `Start` checks its context again after the read
-  (`TestStartWaitingOutAProcessEnvProjectionLeavesTheProviderServing`,
-  `TestStartCanceledWhileWaitingOutAProcessEnvProjectionSpawnsNothing`).
+  lock or publishing the sentinel. The read never waits for an in-flight native
+  beads store open (it answers with the environment the open found), but it is
+  still not a read to hold the lock across. A `Stop` during the read finds no
+  session, so `Start` checks its context again after the read
+  (`TestStartDuringAProcessEnvProjectionLeavesTheProviderServing`,
+  `TestStartCanceledDuringTheParentEnvReadSpawnsNothing`).
 
 # ACP Turn Events
 
