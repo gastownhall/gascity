@@ -379,6 +379,20 @@ describe('isWorkerSession', () => {
     ).toBe(true);
   });
 
+  it('counts a pool session named after its provider (gascity#9230)', () => {
+    // A pool on the default `claude` provider has no worker/polecat role in its
+    // name. The Agents rows list it as running, so the header count must too.
+    expect(
+      isWorkerSession(
+        gcSession({
+          template: 'claude',
+          session_name: 'claude-gcg-session-abc123',
+          rig: 'gascity',
+        }),
+      ),
+    ).toBe(true);
+  });
+
   it("counts a worker reported in the 'running' state", () => {
     // isRunningAgent / isSessionStreamable / stateTone all honour 'running';
     // isWorkerSession must too, or a worker in that state is silently dropped
@@ -416,7 +430,9 @@ describe('isWorkerSession', () => {
     );
   });
 
-  it('excludes a non-worker rig session (no worker/pool role)', () => {
-    expect(isWorkerSession(gcSession({ template: 'reviewer', rig: 'gascity' }))).toBe(false);
+  it('counts a non-orchestration rig session with no worker/pool role (gascity#9230)', () => {
+    // Option (a): the header counts every running non-orchestration session,
+    // matching the Agents rows. Only orchestration is excluded.
+    expect(isWorkerSession(gcSession({ template: 'reviewer', rig: 'gascity' }))).toBe(true);
   });
 });

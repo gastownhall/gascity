@@ -98,13 +98,6 @@ export function isPerRigDispatcher(s: DashboardSession): boolean {
 // direct work, they don't perform it. The exclusion reuses the orchestration
 // predicates above plus the role markers below.
 
-// A worker session's template/name ends in a worker/pool role — `polecat`,
-// `scix-worker`, `worker-1` — optionally with a numeric slot suffix, and may
-// carry a trailing `-gc-XXXXX` spawned-session handle. Anchored to the END so a
-// role like `oversight-worker-review` (not a worker) doesn't slip through on a
-// mid-string match.
-const WORKER_ROLE_RX = /(?:worker|polecat)(?:-\d+)?$/;
-
 // Per-rig orchestration markers that DON'T live in ORCHESTRATION_TEMPLATES
 // (which only covers the rig-less cross-rig set). A rig-scoped project-lead or
 // chief-of-staff directs that rig's work; it is not a worker.
@@ -115,9 +108,10 @@ const RIG_ORCHESTRATION_RX = /(?:\.project-lead|chief-of-staff)$/;
  * the Work-in-flight section counts. Requires a live state (`active` or
  * `running` — the same running signal isRunningAgent / isSessionStreamable /
  * stateTone honour, so a worker reported as `running` is not silently dropped),
- * a worker/pool role in the template or runtime name, and that the session is
- * NOT any flavour of orchestration (cross-rig, per-rig dispatcher,
- * project-lead, chief-of-staff).
+ * and that the session is NOT any flavour of orchestration (cross-rig,
+ * per-rig dispatcher, project-lead, chief-of-staff). No name-based role check:
+ * a pool named after its provider (`claude`) is a worker too, matching the
+ * agent rows the Agents page lists.
  */
 export function isWorkerSession(s: DashboardSession): boolean {
   if (s.state !== 'active' && s.state !== 'running') return false;
@@ -127,15 +121,7 @@ export function isWorkerSession(s: DashboardSession): boolean {
   if (RIG_ORCHESTRATION_RX.test(template) || RIG_ORCHESTRATION_RX.test(alias)) {
     return false;
   }
-  // The worker role can surface in the template (`polecat`, `scix-worker`) or,
-  // for a dynamically-spawned slot, in the runtime session_name
-  // (`polecat-gc-335825`). Strip any `-gc-XXXXX` handle first so the role
-  // anchor matches the cleaned name.
-  const sessionName = s.session_name;
-  const candidates = [template, alias, sessionName]
-    .filter((c) => c.length > 0)
-    .map((c) => cleanWorkerName(c));
-  return candidates.some((c) => WORKER_ROLE_RX.test(c));
+  return true;
 }
 
 function normalizeRigKey(name: string): string {
