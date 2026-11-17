@@ -40,19 +40,44 @@ func initProxiedSingleStore(t *testing.T, city *helpers.City, noStart bool) {
 	}
 }
 
-// The ordinary factory default must remain covered separately from the
-// explicitly single-store recording controls. This uses bd's real Go binary,
-// preserves the public factory/default-rig imports, and retires both the work
-// proxy and the independently owned infrastructure server.
-func TestBeadsFactoryDefaultStorageFrontDoors(t *testing.T) {
+// The ordinary factory default: a city born split, its infrastructure classes
+// on the local SQLite binding. This uses bd's real Go binary.
+func TestBeadsFactoryDefaultStorageIsSQLiteSplit(t *testing.T) {
 	bdPath, doltPath := requireProxiedTooling(t)
 	env := proxiedEnv(t, bdPath, doltPath).WithRealBD(bdPath)
+	city := helpers.NewCity(t, env)
+	t.Cleanup(func() {
+		stopIfPairsRemain(t, env, city.Dir, city.Dir)
+	})
+	city.Init("claude") // No topology selector: exercise the actual default.
+	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(city.Dir, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	storage := cfg.EffectiveStorage()
+	if storage.Classes.Work == storage.Classes.Graph || storage.Bindings[storage.Classes.Graph].Provider != config.StorageProviderSQLiteBeads {
+		t.Fatalf("ordinary factory did not put its infrastructure classes on the SQLite binding: %+v", storage)
+	}
+	if _, err := os.Stat(filepath.Join(city.Dir, ".gc", "init-infrastructure.json")); err == nil {
+		t.Fatal("ordinary factory recorded a native infrastructure intent")
+	}
+	assertDoctorGreen(t, city, "ordinary split factory")
+}
+
+// The native infrastructure workspace, which a factory city takes only when
+// asked for by name, must remain covered separately from the explicitly
+// single-store recording controls. This uses bd's real Go binary, preserves
+// the public factory/default-rig imports, and retires both the work proxy and
+// the independently owned infrastructure server.
+func TestBeadsFactoryNativeInfrastructureFrontDoors(t *testing.T) {
+	bdPath, doltPath := requireProxiedTooling(t)
+	env := proxiedEnv(t, bdPath, doltPath).WithRealBD(bdPath).With("GC_INIT_INFRASTRUCTURE", "native")
 	rig := createNamedGitRig(t, "factory-rig")
 	city := helpers.NewCity(t, env)
 	t.Cleanup(func() {
 		stopIfPairsRemain(t, env, city.Dir, city.Dir, rig)
 	})
-	city.Init("claude") // No topology selector: exercise the actual default.
+	city.Init("claude") // No topology selector: the native workspace is the opt-in above.
 	assertProxiedScope(t, env, city.Dir, "factory work store")
 	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(city.Dir, "city.toml"))
 	if err != nil {
@@ -60,7 +85,7 @@ func TestBeadsFactoryDefaultStorageFrontDoors(t *testing.T) {
 	}
 	storage := cfg.EffectiveStorage()
 	if storage.Classes.Work == storage.Classes.Graph || storage.Bindings[storage.Classes.Graph].Provider != config.StorageProviderBeadsWorkspace {
-		t.Fatalf("ordinary factory did not separate native infrastructure: %+v", storage)
+		t.Fatalf("a factory asked for native infrastructure did not separate it: %+v", storage)
 	}
 	infra := filepath.Join(city.Dir, ".gc", "storage", "infra")
 	var journal scopeOwnershipDoc
@@ -99,7 +124,7 @@ func TestBeadsFactoryDefaultStorageFrontDoors(t *testing.T) {
 	if !rolesPinned {
 		t.Fatalf("factory lost its pinned default-rig imports: %+v", imports)
 	}
-	assertDoctorGreen(t, city, "ordinary split factory")
+	assertDoctorGreen(t, city, "native split factory")
 	city.RigAdd(rig, "")
 	assertProxiedScope(t, env, rig, "factory rig work store")
 	composed, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(city.Dir, "city.toml"))

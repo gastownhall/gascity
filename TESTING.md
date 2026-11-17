@@ -2197,10 +2197,12 @@ conformance evidence.
 Recorder-backed storage controls explicitly select `--beads-transport proxied
 --beads-target local` and verify that every class remains in the work store
 before counting forks. This preserves the factory pack while selecting the
-single-store compatibility shape. `TestBeadsFactoryDefaultStorageFrontDoors`
+single-store compatibility shape. `TestBeadsFactoryDefaultStorageIsSQLiteSplit`
 separately exercises ordinary no-selector initialization with bd's real binary:
-split ownership, public/default-rig imports, front-door writes, restart, and
-stopped doctor with and without `--fix`. A control's fork census is not a
+a city born split onto the SQLite binding. `TestBeadsFactoryNativeInfrastructureFrontDoors`
+exercises the native infrastructure workspace a factory city takes with
+`GC_INIT_INFRASTRUCTURE=native`: split ownership, public/default-rig imports,
+front-door writes, restart, and stopped doctor with and without `--fix`. A control's fork census is not a
 measurement of the split default. See the
 [acceptance helper rules](test/acceptance/helpers/AGENTS.md).
 

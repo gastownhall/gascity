@@ -1432,10 +1432,16 @@ func warnEmptyTemplateMissingBootstrapProfile(wiz wizardConfig, stderr io.Writer
 }
 
 func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, stdout, stderr io.Writer, preserveExisting bool) int {
-	// Only this bundled factory scaffold opts into born-split infrastructure.
+	// A fresh city is born split onto the SQLite binding (resolveInitStorage),
+	// this bundled factory scaffold included. The native infrastructure
+	// workspace serves the same classes from Dolt through the beads library,
+	// where the cost of an infrastructure read grows with the closed history,
+	// so it is taken only when the operator asks for it by name
+	// (GC_INIT_INFRASTRUCTURE=native), and only for this scaffold.
 	// Authored/file/directory composition and explicit topology choices retain
 	// their existing storage policy without an initializer making it implicit.
-	infraFresh := wiz.configName == defaultInitTemplate && !wiz.hostedDolt.enabled() && !wiz.hostedDolt.selectorRequested() &&
+	infraFresh := nativeInitInfrastructureRequested() &&
+		wiz.configName == defaultInitTemplate && !wiz.hostedDolt.enabled() && !wiz.hostedDolt.selectorRequested() &&
 		freshInitInfrastructureCandidate(fs, cityPath, preserveExisting || initAdoptStoreFlag)
 
 	warnEmptyTemplateMissingBootstrapProfile(wiz, stderr)
