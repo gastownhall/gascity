@@ -586,6 +586,8 @@ func TestMCPMailImageUpgradesPatchedOSPackages(t *testing.T) {
 		"gzip", "libpcre2-8-0", "libsqlite3-0",
 		// apt set, CVE-2026-109518, fixed in 3.0.4.
 		"apt", "libapt-pkg7.0",
+		// zlib CVE-2026-76844 and CVE-2026-85091, fixed in 1:1.3.dfsg+really1.3.1-1+deb13u1.
+		"zlib1g",
 	} {
 		if !strings.Contains(upgrade, "\n    "+pkg+" \\") {
 			t.Errorf("contrib/k8s/Dockerfile.mail --only-upgrade list missing %q", pkg)
