@@ -17,7 +17,7 @@ while true; do
     inbox=$(gc mail inbox "$GC_AGENT" 2>/dev/null || true)
 
     # Step 2: Process each unread message
-    if echo "$inbox" | bead_id_rows | grep -q .; then
+    if echo "$inbox" | bead_id_rows | grep . >/dev/null; then
         echo "$inbox" | bead_id_rows | while read -r line; do
             id=$(echo "$line" | awk '{print $1}')
 

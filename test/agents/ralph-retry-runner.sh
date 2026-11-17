@@ -7,10 +7,10 @@ cd "$GC_CITY"
 
 while true; do
     assigned=$(bd list --assignee="$GC_AGENT" --status=open --json 2>/dev/null || true)
-    bead_id=$(echo "$assigned" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    bead_id=$(echo "$assigned" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | sed -n '1p')
     if [ -n "$bead_id" ]; then
         bead_json=$(bd show --json "$bead_id")
-        attempt=$(echo "$bead_json" | sed -n 's/.*"gc.attempt"[[:space:]]*:[[:space:]]*"\([0-9][0-9]*\)".*/\1/p' | head -1)
+        attempt=$(echo "$bead_json" | sed -n 's/.*"gc.attempt"[[:space:]]*:[[:space:]]*"\([0-9][0-9]*\)".*/\1/p' | sed -n '1p')
         if [ -z "$attempt" ]; then
             attempt=1
         fi

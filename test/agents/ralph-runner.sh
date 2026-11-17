@@ -8,7 +8,7 @@ cd "$GC_CITY"
 
 while true; do
     assigned=$(bd list --assignee="$GC_AGENT" --status=open --json 2>/dev/null || true)
-    bead_id=$(echo "$assigned" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    bead_id=$(echo "$assigned" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | sed -n '1p')
     if [ -n "$bead_id" ]; then
         printf 'hello from ralph\n' > "$GC_CITY/ralph-demo.txt"
         bd close "$bead_id"

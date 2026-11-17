@@ -16,8 +16,8 @@ ASSIGNEE="${GC_SESSION_NAME:-$GC_AGENT}"
 
 while true; do
     hooked=$(bd ready --assignee="$ASSIGNEE" 2>/dev/null || true)
-    if echo "$hooked" | bead_id_rows | grep -q .; then
-        work_id=$(echo "$hooked" | bead_id_rows | head -1 | awk '{print $1}')
+    if echo "$hooked" | bead_id_rows | grep . >/dev/null; then
+        work_id=$(echo "$hooked" | bead_id_rows | sed -n '1p' | awk '{print $1}')
 
         # Step 1: Create feature branch
         if [ -n "${GC_DIR:-}" ] && [ -d "$GC_DIR" ]; then

@@ -15,7 +15,7 @@ cd "$GC_CITY"
 while true; do
     # Check inbox for instructions
     inbox=$(gc mail inbox "$GC_AGENT" 2>/dev/null || true)
-    if echo "$inbox" | bead_id_rows | grep -q .; then
+    if echo "$inbox" | bead_id_rows | grep . >/dev/null; then
         echo "$inbox" | bead_id_rows | while read -r line; do
             id=$(echo "$line" | awk '{print $1}')
             gc mail read "$id" 2>/dev/null || true
@@ -24,7 +24,7 @@ while true; do
 
     # Scan for orphaned beads (open, no assignee)
     ready=$(bd ready 2>/dev/null || true)
-    if echo "$ready" | bead_id_rows | grep -q .; then
+    if echo "$ready" | bead_id_rows | grep . >/dev/null; then
         echo "$ready" | bead_id_rows | while read -r line; do
             id=$(echo "$line" | awk '{print $1}')
             # Signal recovery by sending mail to mayor

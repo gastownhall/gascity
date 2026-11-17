@@ -16,14 +16,14 @@ ASSIGNEE="${GC_SESSION_NAME:-$GC_AGENT}"
 
 while true; do
     hooked=$(bd ready --assignee="$ASSIGNEE" 2>/dev/null || true)
-    if echo "$hooked" | bead_id_rows | grep -q .; then
-        work_id=$(echo "$hooked" | bead_id_rows | head -1 | awk '{print $1}')
+    if echo "$hooked" | bead_id_rows | grep . >/dev/null; then
+        work_id=$(echo "$hooked" | bead_id_rows | sed -n '1p' | awk '{print $1}')
 
         if [ -n "${GC_DIR:-}" ] && [ -d "$GC_DIR" ]; then
             cd "$GC_DIR"
 
             # Find the branch to merge (convention: gc/*/work_id)
-            branch=$(git branch -r 2>/dev/null | grep "$work_id" | head -1 | tr -d ' ' || true)
+            branch=$(git branch -r 2>/dev/null | grep "$work_id" | sed -n '1p' | tr -d ' ' || true)
             if [ -n "$branch" ]; then
                 git checkout main 2>/dev/null || true
                 git merge "$branch" --no-edit 2>/dev/null || true
@@ -38,8 +38,8 @@ while true; do
     fi
 
     ready=$(bd ready 2>/dev/null || true)
-    if echo "$ready" | bead_id_rows | grep -q .; then
-        id=$(echo "$ready" | bead_id_rows | head -1 | awk '{print $1}')
+    if echo "$ready" | bead_id_rows | grep . >/dev/null; then
+        id=$(echo "$ready" | bead_id_rows | sed -n '1p' | awk '{print $1}')
         bd update "$id" --assignee="$ASSIGNEE" 2>/dev/null || true
         continue
     fi
