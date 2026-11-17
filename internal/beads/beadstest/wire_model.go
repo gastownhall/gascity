@@ -174,3 +174,91 @@ func DescribeListQuery(q beads.ListQuery) string {
 	}
 	return strings.Join(parts, " ")
 }
+
+// IndexedRows prices one listing on a ledger holding rows: how many of them a
+// backend must examine to answer it, summed over the requests the native store
+// sends for query (beads.NativeListPlan).
+//
+// A backend seeks what it indexes — the id, the status, the type, the
+// assignee, the labels, the parent — and compares everything else, metadata
+// included, on each row those leave. So a request that pushes none of them
+// examines every row of the ledger, closed history included, however few it
+// returns; WireModel's keyed/unkeyed split does not see that, because a
+// metadata filter narrows the answer without narrowing the read.
+//
+// The parent predicate is modeled as the direct children, which is all a
+// fixture needs. Tests compare this figure across two ledger sizes: a read on
+// a per-message path must cost the same whatever history the ledger holds.
+func IndexedRows(rows []beads.Bead, query beads.ListQuery) int {
+	total := 0
+	for _, req := range beads.NativeListPlan(query) {
+		ids := map[string]bool{}
+		for _, id := range strings.Split(req.IDFilter, ",") {
+			if id = strings.TrimSpace(id); id != "" {
+				ids[id] = true
+			}
+		}
+		statuses := map[string]bool{}
+		for _, status := range strings.Split(req.Status, ",") {
+			if status = strings.TrimSpace(status); status != "" {
+				statuses[status] = true
+			}
+		}
+		for _, row := range rows {
+			if len(ids) > 0 && !ids[row.ID] {
+				continue
+			}
+			if len(statuses) > 0 && !statuses[row.Status] {
+				continue
+			}
+			if req.IssueType != "" && row.Type != req.IssueType {
+				continue
+			}
+			if req.Assignee != "" && row.Assignee != req.Assignee {
+				continue
+			}
+			if req.ParentID != "" && row.ParentID != req.ParentID {
+				continue
+			}
+			labeled := true
+			for _, label := range req.Labels {
+				found := false
+				for _, have := range row.Labels {
+					found = found || have == label
+				}
+				labeled = labeled && found
+			}
+			if !labeled {
+				continue
+			}
+			total++
+		}
+	}
+	return total
+}
+
+// ClosedHistory seeds store with n closed order-run records, the rows a city
+// accumulates by running: one per firing of each periodic order, kept until
+// retention deletes them.
+func ClosedHistory(store beads.Store, n int) error {
+	for i := range n {
+		b, err := store.Create(beads.Bead{
+			Title:    fmt.Sprintf("order:history-%d", i),
+			Type:     "task",
+			Labels:   []string{"order-tracking", "order-run:history"},
+			Metadata: map[string]string{"gc.order": "history"},
+		})
+		if err != nil {
+			return fmt.Errorf("seeding closed history row %d: %w", i, err)
+		}
+		if err := store.Close(b.ID); err != nil {
+			return fmt.Errorf("closing history row %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
+// LedgerRows returns every row store holds, both tiers, closed included.
+func LedgerRows(store beads.Store) ([]beads.Bead, error) {
+	return store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true, TierMode: beads.TierBoth})
+}
