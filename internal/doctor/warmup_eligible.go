@@ -66,6 +66,10 @@ func (c *DeprecatedAttachmentFieldsCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the
 // `gc start` warm-up scan.
+func (c *DoltArchiveDictCheck) WarmupEligible() bool { return false }
+
+// WarmupEligible returns false; this check is not part of the
+// `gc start` warm-up scan.
 func (c *DoltCompactStateCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the
