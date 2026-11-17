@@ -18,6 +18,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
@@ -11872,4 +11873,65 @@ func TestOrderFormulaVars(t *testing.T) {
 			t.Fatalf("binding_prefix set for a pack with two bindings: %v", got)
 		}
 	})
+}
+
+// TestStoreOpenDescendantsMembershipReadLeavesClosedRowsInTheStore is the scale
+// rule for the stranding check every workflow delete runs: the membership read
+// keeps only open members, so it asks the store for the not-closed set and its
+// cost does not grow with the ledger's closed history. Asked for closed rows
+// too, each delete compared the root's id against every bead the store holds,
+// and a sweep reaping hundreds of expired order runs spent most of the store's
+// time doing it.
+func TestStoreOpenDescendantsMembershipReadLeavesClosedRowsInTheStore(t *testing.T) {
+	cost := func(history int) (examined int) {
+		t.Helper()
+		mem := beads.NewMemStore()
+		if err := beadstest.ClosedHistory(mem, history); err != nil {
+			t.Fatal(err)
+		}
+		root, err := mem.Create(beads.Bead{Title: "order:digest", Type: "task", Labels: []string{"order-run:digest"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		closedMember, err := mem.Create(beads.Bead{Title: "done step", Metadata: map[string]string{"gc.root_bead_id": root.ID}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := mem.Close(closedMember.ID); err != nil {
+			t.Fatal(err)
+		}
+		openMember, err := mem.Create(beads.Bead{Title: "open step", Metadata: map[string]string{"gc.root_bead_id": root.ID}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := beadstest.NewOpRecordingStore(mem)
+		open, err := storeOpenDescendantIDs(rec, root.ID, nil)
+		if err != nil {
+			t.Fatalf("storeOpenDescendantIDs: %v", err)
+		}
+		if len(open) != 1 || open[0] != openMember.ID {
+			t.Fatalf("open descendants = %v, want the one open member %s", open, openMember.ID)
+		}
+		rows, err := beadstest.LedgerRows(mem)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, op := range rec.Ops() {
+			if op.Kind != beadstest.OpList {
+				continue
+			}
+			if _, membership := op.Query.Metadata["gc.root_bead_id"]; membership && op.Query.IncludeClosed {
+				t.Errorf("the membership read %+v asks for closed rows it then discards", op.Query)
+			}
+			examined += beadstest.IndexedRows(rows, op.Query)
+		}
+		return examined
+	}
+	small, large := cost(30), cost(300)
+	if small != large {
+		t.Fatalf("the stranding check examines %d rows over 30 closed order runs and %d over 300; a delete's check must not grow with the store's history", small, large)
+	}
+	if small == 0 {
+		t.Fatal("the stranding check examined no row; the model priced nothing")
+	}
 }

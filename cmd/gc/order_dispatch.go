@@ -3066,10 +3066,13 @@ func storeHasOpenDescendants(store beads.Store, rootID string, skip func(beads.B
 // single-flight is never weakened for un-stamped or partial-stamp data.
 func storeOpenDescendantIDs(store beads.Store, rootID string, skip func(beads.Bead) bool) ([]string, error) {
 	reader := beads.HandlesFor(store).Live
+	// Only open members are kept below, so the read asks for the not-closed
+	// set: a store that can leave closed rows where they are then compares
+	// the root's id against its active rows, not its whole history. This read
+	// runs once per delete the wisp GC makes.
 	members, err := reader.List(beads.ListQuery{
-		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
-		IncludeClosed: true,
-		TierMode:      beads.TierBoth,
+		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: rootID},
+		TierMode: beads.TierBoth,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("listing wisp members of %s: %w", rootID, err)
