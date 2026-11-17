@@ -7535,11 +7535,7 @@ max = -1
 			}
 			writeBuiltinImportsLock(t, dir, "core")
 
-			orig, _ := os.Getwd()
-			t.Cleanup(func() { _ = os.Chdir(orig) })
-			if err := os.Chdir(dir); err != nil {
-				t.Fatal(err)
-			}
+			t.Chdir(dir)
 			t.Setenv("GC_CITY_PATH", dir)
 
 			prime := func(agent string) string {
