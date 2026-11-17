@@ -46,3 +46,46 @@ func assertWindowInvisible(t *testing.T, when string, env []string) {
 		t.Errorf("BD_BIN %s = %v, want [/ambient/bd]", when, got)
 	}
 }
+
+// A projection that fails partway through its key list rolls back only what it
+// touched. os.Setenv rejects a value with a NUL byte, so a failure at the second
+// key leaves the third unreached: its ambient value must survive the rollback,
+// and the keys the projection did reach must read as they did before the call,
+// including a key that was unset.
+func TestWithProjectedOpenEnvLockedFailureKeepsAmbientOfUnreachedKeys(t *testing.T) {
+	const (
+		reached   = "GC_TEST_PROJECTION_REACHED"
+		failing   = "GC_TEST_PROJECTION_FAILING"
+		unreached = "GC_TEST_PROJECTION_UNREACHED"
+	)
+	t.Setenv(reached, "ambient-reached")
+	t.Setenv(failing, "placeholder")
+	if err := os.Unsetenv(failing); err != nil {
+		t.Fatalf("unsetting %s: %v", failing, err)
+	}
+	t.Setenv(unreached, "keep")
+	holdProjectionWindow(t, nil, nil)
+
+	restore, err := withProjectedOpenEnvLocked(
+		[]string{reached, failing, unreached},
+		map[string]string{reached: "ok", failing: "x\x00y"},
+		"",
+	)
+	if err == nil {
+		restore()
+		t.Fatal("withProjectedOpenEnvLocked with a NUL-byte value: err = nil, want the projection to fail")
+	}
+	if restore != nil {
+		t.Errorf("withProjectedOpenEnvLocked returned a restore func alongside its error")
+	}
+
+	if got := os.Getenv(unreached); got != "keep" {
+		t.Errorf("%s = %q after the failed projection, want %q: the rollback unset a key the projection never reached", unreached, got, "keep")
+	}
+	if got := os.Getenv(reached); got != "ambient-reached" {
+		t.Errorf("%s = %q after the failed projection, want %q", reached, got, "ambient-reached")
+	}
+	if got, ok := os.LookupEnv(failing); ok {
+		t.Errorf("%s = %q after the failed projection, want it unset as before the call", failing, got)
+	}
+}
