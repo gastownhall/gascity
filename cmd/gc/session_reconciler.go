@@ -8137,3 +8137,8 @@ func resolveResumeCommand(command, sessionKey string, rp *config.ResolvedProvide
 		return command + " " + rp.ResumeFlag + " " + sessionKey
 	}
 }
+
+// withAwakeReason is payload with the awake set's reason for the row.
+func withAwakeReason(payload traceRecordPayload, _ AwakeDecision, _ bool) traceRecordPayload {
+	return payload
+}

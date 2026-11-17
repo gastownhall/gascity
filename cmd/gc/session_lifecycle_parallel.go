@@ -176,6 +176,9 @@ type startCandidate struct {
 	tp    TemplateParams
 	order int
 
+	// awakeReason is the awake set's reason for waking this row.
+	awakeReason string
+
 	// configured mirrors configuredNames[name()] at the pipeline's true
 	// construction site (reconcileSessionBeadsTracedWithNamedDemand). It
 	// propagates by value through preparedStart.candidate to

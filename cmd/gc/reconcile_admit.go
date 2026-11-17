@@ -126,6 +126,9 @@ type intent struct {
 	Reason   string      // the arm's reason, for the trace
 	Endpoint endpointKey // config-only; a start or create is gated on it
 	Rank     time.Time   // orders starts oldest first: wakeFairnessTime (START-009)
+
+	// AwakeReason is the awake set's reason for waking the row.
+	AwakeReason string
 	// CreatePlan is a create's plan; Floor marks a pool create that
 	// satisfies a min_active_sessions floor, for the fair share.
 	CreatePlan createPlan
