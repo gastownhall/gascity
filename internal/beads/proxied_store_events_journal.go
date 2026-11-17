@@ -27,10 +27,10 @@ var _ journalops.Journal = (*ProxiedStore)(nil)
 // journal back on, and recovering from the refusal is a gap
 // (ErrEventsJournalInactive says why).
 //
-// One transient refusal comes ahead of inactive. Resolving the activation can
-// wait out another native open's whole window, and a stand-down or re-pin
-// inside that wait drops the leaf the read started from, so the leaf is read
-// again once the activation is resolved. A leaf that changed refuses with
+// One transient refusal comes ahead of inactive. Resolving the activation reads
+// scope config files, and a stand-down or re-pin during that read drops the
+// leaf the read started from, so the leaf is read again once the activation is
+// resolved. A leaf that changed refuses with
 // ErrEventsJournalUnavailable whatever the activation said: that answer may be
 // the dropped leaf's pin's, and the next call answers for the current one.
 //
@@ -111,8 +111,8 @@ func (a *proxiedJournalActivation) forget() {
 
 // journalActive returns the cached activation, resolving it — outside mu,
 // since it reads the scope's config — when nothing is cached. The resolution
-// is not bounded by a reader's ctx yet (ga-3gfh0h): it waits out any native
-// open's window that holds the environment it reads.
+// reads the ambient environment through execenv.LookupEnv, which never waits
+// for a native open's projection window, and the scope's config file.
 func (s *ProxiedStore) journalActive() bool {
 	s.mu.RLock()
 	cached, pin := s.journal, s.pin
