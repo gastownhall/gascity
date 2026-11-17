@@ -236,6 +236,7 @@ go_test(
         "//internal/testpolicy/timingplancli",
         "//internal/testpolicy/timingsummary",
         "//internal/testutil",
+        "@cc_mvdan_sh_v3//syntax",
         "@com_github_burntsushi_toml//:toml",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],
