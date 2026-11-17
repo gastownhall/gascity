@@ -6,6 +6,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -234,15 +235,18 @@ func (c *poolIdleRoutedWorkCheck) collectIdleInstances(store beads.Store, pools 
 }
 
 // unclaimedRoutedWork returns the sorted IDs of open, unassigned beads in store
-// routed to template — a targeted gc.routed_to metadata lookup, never a
-// full-store scan.
+// routed to template that an idle instance could claim right now — a targeted
+// gc.routed_to metadata lookup, never a full-store scan. Beads held by a
+// dispatch-hold label, inside a gc.budget_deferred_until window, or blocked by
+// an unfinished dependency are left out, as the claim path leaves them alone.
 func unclaimedRoutedWork(store beads.Store, template string) ([]string, error) {
+	handles := beads.HandlesFor(store)
 	// Live so bd's raw --status=open filter drops blocked/deferred rows
 	// before mapBdStatus collapses them into "open" and the check reports
 	// work the instance is correct to leave alone (same tradeoff as
 	// listOpenForControllerDemandLive). FederatedReadTier because a
 	// relocated class leg answers at exactly the tier asked.
-	items, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
+	items, err := handles.Live.List(beads.ListQuery{
 		Status:   "open",
 		TierMode: beads.FederatedReadTier,
 		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: template},
@@ -250,12 +254,33 @@ func unclaimedRoutedWork(store beads.Store, template string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var beadIDs []string
+	now := time.Now()
+	candidates := map[string]bool{}
 	for _, b := range items {
-		if strings.TrimSpace(b.Assignee) != "" || b.Status != "open" {
+		if strings.TrimSpace(b.Assignee) != "" || b.Status != "open" ||
+			beadmeta.HasDispatchHold(b.Labels) || hookCandidateBudgetDeferred(b, now) {
 			continue
 		}
-		beadIDs = append(beadIDs, b.ID)
+		candidates[b.ID] = true
+	}
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	// A dependency-blocked bead stays status open, so only the readiness read
+	// tells it apart from claimable work.
+	ready, err := handles.Live.Ready(beads.ReadyQuery{
+		TierMode:       beads.FederatedReadTier,
+		Unassigned:     true,
+		MetadataEquals: map[string]string{beadmeta.RoutedToMetadataKey: template},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("reading ready work: %w", err)
+	}
+	var beadIDs []string
+	for _, b := range ready {
+		if candidates[b.ID] {
+			beadIDs = append(beadIDs, b.ID)
+		}
 	}
 	sort.Strings(beadIDs)
 	return beadIDs, nil
