@@ -1606,6 +1606,14 @@ func runProviderOwnedScopeInit(cityPath, dir, prefix, script string) (bool, erro
 	if entry.State == providerScopeInitializing && entry.Intent.Transport == "proxied" {
 		env = overlayEnvEntries(env, map[string]string{"BEADS_DOLT_PROXIED_SERVER": "1"})
 	}
+	if entry.State == providerScopeInitializing && entry.Intent.Transport == "direct" && entry.Intent.Target == "external" {
+		// bd init against a dead external endpoint leaves an empty .beads/dolt
+		// that the retry then refuses as a legacy workspace; dial first so a
+		// dead endpoint stops the init before bd writes anything.
+		if err := probeProviderExternalEndpoint(context.Background(), env); err != nil {
+			return false, err
+		}
+	}
 	args := []string{"init", dir, prefix}
 	database := ""
 	if entry.Intent.Target == "external" && !samePath(cityPath, dir) {
