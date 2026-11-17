@@ -356,6 +356,15 @@ func (r stepResolution) activeMoleculeIn(assignees []string) (*beads.Bead, activ
 					Limit:     activeMoleculeSample,
 					Sort:      beads.SortCreatedDesc,
 				})
+				if beads.ListTypeRefused(err) {
+					// The store cannot push this type: bd refuses a typed
+					// listing of a type its scope does not register, and gc
+					// does not register "wisp". That is not a failed read.
+					// Ask for the identities' in-progress beads without the
+					// type and keep the rows of it, which is what the native
+					// store answers a refused type with.
+					results, err = claimedRootsOfType(reader, assignees, molType)
+				}
 				return err
 			})
 			if err != nil {
@@ -380,6 +389,29 @@ func (r stepResolution) activeMoleculeIn(assignees []string) (*beads.Bead, activ
 		}
 	}
 	return nil, nil, nil
+}
+
+// claimedRootsOfType is the typed root listing of activeMoleculeIn for a
+// reader that refuses to push molType: the newest activeMoleculeSample
+// in-progress beads of that type assigned to assignees, cut from the reader's
+// claimed work after the type is applied. It reads one leg of the molecule
+// union, inside that leg's federated read.
+func claimedRootsOfType(reader activeStepReader, assignees []string, molType string) ([]beads.Bead, error) {
+	rows, err := listClaimedWork(reader, assignees)
+	if err != nil {
+		return nil, err
+	}
+	var roots []beads.Bead
+	for _, b := range rows {
+		if b.Type != molType {
+			continue
+		}
+		roots = append(roots, b)
+		if len(roots) == activeMoleculeSample {
+			break
+		}
+	}
+	return roots, nil
 }
 
 // mostRecentlyUpdatedMolecule returns the most recently updated of the sampled
