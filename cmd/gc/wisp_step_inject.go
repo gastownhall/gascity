@@ -191,6 +191,36 @@ type stepResolution struct {
 	// the work ledger (the Molecule{Active} plan's legs). nil means the graph
 	// store alone.
 	molecules []stepMoleculeLeg
+	// workClaimed is the work store's claimed work, listed at most once for
+	// the whole resolution, when the work and graph stores are distinct.
+	// activeStep sets it; nil means each question lists the work store itself.
+	workClaimed *workClaimedListing
+}
+
+// workClaimedListing is one resolution's listing of the work store's claimed
+// work (listClaimedWork), taken on the first question that needs it. Every
+// in-progress question a split resolution asks its work store is a projection
+// of that listing: the roots of one type, the newest claimed beads the bridge
+// follows, the newest with a description. Asked separately they are four
+// listings, and over a store served through bd each is a run of subprocesses
+// on every prompt.
+type workClaimedListing struct {
+	once sync.Once
+	list func() ([]beads.Bead, error)
+	rows *claimedWork
+	err  error
+}
+
+// get returns the listing, or the error it failed with.
+func (l *workClaimedListing) get() (*claimedWork, error) {
+	l.once.Do(func() {
+		rows, err := l.list()
+		l.rows, l.err = &claimedWork{rows: rows}, err
+	})
+	if l.err != nil {
+		return nil, l.err
+	}
+	return l.rows, nil
 }
 
 // moleculeReaders returns the readers a molecule root and its steps may live
@@ -211,6 +241,10 @@ func (r stepResolution) activeStep(oneStore bool, assignees []string) (*beads.Be
 	// these identities" question below from one listing; split classes ask
 	// each store their own.
 	var claimed *claimedWork
+	if !oneStore && r.work != nil {
+		work := r.work
+		r.workClaimed = &workClaimedListing{list: func() ([]beads.Bead, error) { return listClaimedWork(work, assignees) }}
+	}
 	if oneStore {
 		rows, err := listClaimedWork(r.work, assignees)
 		if err != nil {
@@ -313,6 +347,8 @@ func listClaimedWork(store activeStepReader, assignees []string) ([]beads.Bead, 
 }
 
 // newest returns the n newest claimed beads.
+//
+//nolint:unparam // the bridge and description samples are separate constants that happen to be equal
 func (c *claimedWork) newest(n int) []beads.Bead {
 	if len(c.rows) <= n {
 		return c.rows
@@ -320,21 +356,28 @@ func (c *claimedWork) newest(n int) []beads.Bead {
 	return c.rows[:n]
 }
 
+// rootsOfType returns the newest activeMoleculeSample claimed beads of
+// molType: what a listing of that type, cut at the sample, returns.
+func (c *claimedWork) rootsOfType(molType string) []beads.Bead {
+	var sample []beads.Bead
+	for _, b := range c.rows {
+		if b.Type != molType {
+			continue
+		}
+		sample = append(sample, b)
+		if len(sample) == activeMoleculeSample {
+			break
+		}
+	}
+	return sample
+}
+
 // activeMolecule is stepResolution.activeMolecule answered from the claimed
 // work: of each root type in turn, the newest activeMoleculeSample roots, the
 // most recently updated of them.
 func (c *claimedWork) activeMolecule(logf func(format string, args ...any)) *beads.Bead {
 	for _, molType := range activeMoleculeTypes {
-		var sample []beads.Bead
-		for _, b := range c.rows {
-			if b.Type != molType {
-				continue
-			}
-			sample = append(sample, b)
-			if len(sample) == activeMoleculeSample {
-				break
-			}
-		}
+		sample := c.rootsOfType(molType)
 		if best := mostRecentlyUpdatedMolecule(sample, molType, logf); best != nil {
 			return best
 		}
@@ -360,19 +403,31 @@ func (r stepResolution) activeMoleculeIn(assignees []string) (*beads.Bead, activ
 	for _, molType := range activeMoleculeTypes {
 		var sample []beads.Bead
 		owner := map[string]activeStepReader{}
-		for _, leg := range legs {
+		for i, leg := range legs {
 			// One leg of the molecule union (Molecule{Active}): graph roots in
 			// the graph store, v1 poured molecules (work class) on the work
 			// leg. The listing reads through the leg; the owner the reads that
 			// follow take is its strict reader.
-			results, err := leg.list.List(beads.ListQuery{
-				Status:    "in_progress",
-				Type:      molType,
-				Assignees: assignees,
-				TierMode:  beads.TierBoth,
-				Limit:     activeMoleculeSample,
-				Sort:      beads.SortCreatedDesc,
-			})
+			var results []beads.Bead
+			var err error
+			if r.workClaimed != nil && len(legs) > 1 && i == len(legs)-1 {
+				// The work leg, which follows the graph leg: its roots of
+				// this type are among its claimed work, which one listing
+				// answers for the whole resolution.
+				var claimed *claimedWork
+				if claimed, err = r.workClaimed.get(); err == nil {
+					results = claimed.rootsOfType(molType)
+				}
+			} else {
+				results, err = leg.list.List(beads.ListQuery{
+					Status:    "in_progress",
+					Type:      molType,
+					Assignees: assignees,
+					TierMode:  beads.TierBoth,
+					Limit:     activeMoleculeSample,
+					Sort:      beads.SortCreatedDesc,
+				})
+			}
 			if beads.ListTypeRefused(err) {
 				// The store cannot push this type: bd refuses a typed
 				// listing of a type its scope does not register, and gc does
@@ -416,17 +471,7 @@ func claimedRootsOfType(reader activeStepReader, assignees []string, molType str
 	if err != nil {
 		return nil, err
 	}
-	var roots []beads.Bead
-	for _, b := range rows {
-		if b.Type != molType {
-			continue
-		}
-		roots = append(roots, b)
-		if len(roots) == activeMoleculeSample {
-			break
-		}
-	}
-	return roots, nil
+	return (&claimedWork{rows: rows}).rootsOfType(molType), nil
 }
 
 // mostRecentlyUpdatedMolecule returns the most recently updated of the sampled
@@ -476,13 +521,22 @@ func (r stepResolution) rootViaBridge(assignees []string) *beads.Bead {
 
 // rootViaBridgeIn is rootViaBridge returning the reader that holds the root.
 func (r stepResolution) rootViaBridgeIn(assignees []string) (*beads.Bead, activeStepReader) {
-	results, err := r.work.List(beads.ListQuery{
-		Status:    "in_progress",
-		Assignees: assignees,
-		TierMode:  beads.TierBoth,
-		Limit:     claimedBridgeSample,
-		Sort:      beads.SortCreatedDesc,
-	})
+	var results []beads.Bead
+	var err error
+	if r.workClaimed != nil {
+		var claimed *claimedWork
+		if claimed, err = r.workClaimed.get(); err == nil {
+			results = claimed.newest(claimedBridgeSample)
+		}
+	} else {
+		results, err = r.work.List(beads.ListQuery{
+			Status:    "in_progress",
+			Assignees: assignees,
+			TierMode:  beads.TierBoth,
+			Limit:     claimedBridgeSample,
+			Sort:      beads.SortCreatedDesc,
+		})
+	}
 	if err == nil {
 		if root, reader := r.firstMoleculeRootIn(results); root != nil {
 			return root, reader
@@ -642,6 +696,13 @@ func (r stepResolution) entryStepChildIn(reader activeStepReader, moleculeID str
 // ten candidates are the newest claimed work, first in created order newest
 // first, so the answer does not depend on the store's default listing order.
 func (r stepResolution) beadWithDescription(assignees []string) (*beads.Bead, error) {
+	if r.workClaimed != nil {
+		claimed, err := r.workClaimed.get()
+		if err != nil {
+			return nil, err
+		}
+		return firstWithDescription(claimed.newest(claimedDescriptionSample)), nil
+	}
 	results, err := r.work.List(beads.ListQuery{
 		Status:    "in_progress",
 		Assignees: assignees,
