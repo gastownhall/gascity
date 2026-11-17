@@ -1701,16 +1701,26 @@ if [ "$TOTAL_SCOPES" -eq 0 ]; then
 fi
 order_outcome_write
 
-# Report. Only a measured age (age=<seconds>s) and a held stale-issue burst's
-# size (held=<N>, with the line that repeats it) are normalized out of the
-# fingerprint, so a stale backup that merely grows older, or a held burst that
-# grows, stays one incident while a change of state (age=absent,
-# age=unparseable, a burst held or released) notifies at once. The burst's
+# Report. Only a measured age (age=<seconds>s), a held stale-issue burst's
+# size (held=<N>, with the line that repeats it) and the order of magnitude of
+# a leading backlog count are normalized out of the fingerprint, so a stale
+# backup that merely grows older, a held burst that grows, or a backlog whose
+# count drifts inside one decade stays one incident, while a change of state
+# (age=absent, age=unparseable, a burst held or released, a count that gains a
+# digit, a second scope) notifies at once. A leading count ("<scope>: 2047
+# stale open wisps ...") is reduced to its digit count, one '#' per digit:
+# 2047 and 3500 are both "####", 12047 is "#####". The sed loop rewrites one
+# digit per pass and runs on every line, so it needs no address. The burst's
 # normalization runs from held=<N>: to the end of its line, which stops at its
 # own anomaly only because record_anomaly ends each anomaly with a newline. A
 # clean run resolves the incident so its next occurrence notifies at once.
 if [ -n "$ANOMALIES" ]; then
-    ANOMALY_FINGERPRINT=$(printf '%s' "$ANOMALIES" | sed -E 's/age=[0-9]+s/age=<dynamic>/g; s/held=[0-9]+:.*/held=<dynamic>/')
+    ANOMALY_FINGERPRINT=$(printf '%s' "$ANOMALIES" | sed -E \
+        -e ':count' \
+        -e 's/^([^ ]+: #*)[0-9]([0-9]* (stale open wisps|open mail-wisps|terminal session-state beads pruned|closed session beads pruned))/\1#\2/' \
+        -e 't count' \
+        -e 's/age=[0-9]+s/age=<dynamic>/g' \
+        -e 's/held=[0-9]+:.*/held=<dynamic>/')
     raise_incident "reaper:anomalies" "$ANOMALY_FINGERPRINT" \
         "ESCALATION: Reaper anomalies detected [MEDIUM]" "$ANOMALIES" || true
 else
