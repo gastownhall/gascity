@@ -101,7 +101,7 @@ read_runtime_state_flag() (
   state_file="$1"
   key="$2"
   [ -f "$state_file" ] || return 0
-  value=$(sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\\([^,}[:space:]]*\\).*/\\1/p" "$state_file" 2>/dev/null | head -1 || true)
+  value=$(sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\\([^,}[:space:]]*\\).*/\\1/p" "$state_file" 2>/dev/null | sed -n '1p' || true)
   case "$value" in
     true|false)
       printf '%s\n' "$value"
@@ -113,14 +113,14 @@ read_runtime_state_number() (
   state_file="$1"
   key="$2"
   [ -f "$state_file" ] || return 0
-  sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p" "$state_file" 2>/dev/null | head -1 || true
+  sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p" "$state_file" 2>/dev/null | sed -n '1p' || true
 )
 
 read_runtime_state_string() (
   state_file="$1"
   key="$2"
   [ -f "$state_file" ] || return 0
-  sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$state_file" 2>/dev/null | head -1 || true
+  sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$state_file" 2>/dev/null | sed -n '1p' || true
 )
 
 canonical_path() (

@@ -190,7 +190,7 @@ wait_for 30 "bridge forward" grep -q "inbound $CHAT_ID" "$DEMO/bridge.log"
 grep "inbound $CHAT_ID" "$DEMO/bridge.log" | tail -1
 wait_for 30 "agent nudge" grep -q "status of the build" "$NUDGE_LOG"
 bold "agent session received:"
-sed -n '/<system-reminder>/,/<\/system-reminder>/p' "$NUDGE_LOG" | head -20
+sed -n '/<system-reminder>/,/<\/system-reminder>/p' "$NUDGE_LOG" | sed -n '1,20p'
 
 step "OUTBOUND: the session replies through gc"
 REPLY="**assistant:** Build is green — all tests passing."

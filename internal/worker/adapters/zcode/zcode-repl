@@ -123,7 +123,7 @@ if (( node_probe_status != 0 )); then
     die_config "$NODE_BIN --version could not run (exit $node_probe_status): ${node_probe:-no output} — a spawn failure, not a version problem"
 fi
 node_version="$node_probe"
-if ! printf '%s\n' "${node_version#v}" | awk -F. '{exit !($1 > 22 || ($1 == 22 && $2 >= 5))}'; then
+if ! awk -F. '{exit !($1 > 22 || ($1 == 22 && $2 >= 5))}' <<<"${node_version#v}"; then
     die_config "$NODE_BIN is ${node_version:-an unknown version}; the ZCode bundle needs node >= 22.5 (it imports node:sqlite) — set ZCODE_NODE_BIN"
 fi
 

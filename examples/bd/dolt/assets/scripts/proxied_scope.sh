@@ -19,7 +19,7 @@ GC_DOLT_PROXIED_SKIP_REASON="bd-owned-proxied-scope"
 # proxied_metadata_field <metadata.json> <key> prints a top-level string value.
 proxied_metadata_field() {
   [ -f "$1" ] || return 0
-  sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$1" 2>/dev/null | head -1
+  sed -n "s/.*\"$2\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$1" 2>/dev/null | sed -n '1p'
 }
 
 # bd_owns_proxied_scope [scope] succeeds when the scope's persisted beads
