@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"math/rand"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -229,5 +230,79 @@ func TestNativeDoltNamespaceCensusComparesBytesUnderAFoldingCollation(t *testing
 				t.Fatalf("an id column reporting collation %q claimed GCG-1 for the gcg namespace", collation)
 			}
 		})
+	}
+}
+
+// TestNamespaceGapSQLAgreesWithTheByteRule checks the seeking form against the
+// rule it stands for, on populations nobody chose: random ids and prefixes over
+// an alphabet that crowds the dash's neighbors in byte order, so prefixes nest,
+// touch and sort between each other's runs. For each population the gap
+// predicate, run over a byte-ordered column, must select a row exactly when
+// some id is outside every namespace. A false clean retires a probe over beads
+// that are still there, so this form is held to the rule row for row.
+func TestNamespaceGapSQLAgreesWithTheByteRule(t *testing.T) {
+	const alphabet = "!,-./0ab"
+	rng := rand.New(rand.NewSource(20261117))
+	word := func(longest int) string {
+		n := 1 + rng.Intn(longest)
+		b := make([]byte, n)
+		for i := range b {
+			b[i] = alphabet[rng.Intn(len(alphabet))]
+		}
+		return string(b)
+	}
+	inNamespace := func(id string, prefixes []string) bool {
+		for _, p := range prefixes {
+			if id == p || strings.HasPrefix(id, p+"-") {
+				return true
+			}
+		}
+		return false
+	}
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "gaps.db"))
+	if err != nil {
+		t.Fatalf("opening the pool: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec("CREATE TABLE ids (id TEXT PRIMARY KEY)"); err != nil {
+		t.Fatal(err)
+	}
+	for round := range 400 {
+		prefixes := make([]string, 1+rng.Intn(4))
+		for i := range prefixes {
+			prefixes[i] = word(3)
+		}
+		ids := map[string]bool{}
+		for range 1 + rng.Intn(12) {
+			id := word(5)
+			if rng.Intn(2) == 0 {
+				// Bias toward the namespaces' own edges.
+				id = prefixes[rng.Intn(len(prefixes))] + word(2)
+			}
+			ids[id] = true
+		}
+		if _, err := db.Exec("DELETE FROM ids"); err != nil {
+			t.Fatal(err)
+		}
+		want := false
+		for id := range ids {
+			if _, err := db.Exec("INSERT INTO ids (id) VALUES (?)", id); err != nil {
+				t.Fatalf("seeding %q: %v", id, err)
+			}
+			want = want || !inNamespace(id, prefixes)
+		}
+		where, args := namespaceGapSQL("id", prefixes)
+		var found string
+		err := db.QueryRow("SELECT id FROM ids WHERE "+where+" LIMIT 1", args...).Scan(&found)
+		got := err == nil
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("round %d: %v", round, err)
+		}
+		if got != want {
+			t.Fatalf("round %d: prefixes %q over ids %v: the gap predicate found a resident (%q) = %v, the byte rule says %v", round, prefixes, ids, found, got, want)
+		}
+		if got && inNamespace(found, prefixes) {
+			t.Fatalf("round %d: prefixes %q: the gap predicate selected %q, which a namespace claims", round, prefixes, found)
+		}
 	}
 }
