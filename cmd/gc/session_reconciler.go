@@ -4829,9 +4829,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// Session should be awake but isn't — wake it.
 			if isFailedCreateSessionInfo(info) {
 				if trace != nil {
-					trace.RecordDecision(TraceSiteReconcilerWakeDecision, TraceReasonWake, TraceOutcomeFailedCreate, target.tp.TemplateName, name, traceRecordPayload{
+					trace.RecordDecision(TraceSiteReconcilerWakeDecision, TraceReasonWake, TraceOutcomeFailedCreate, target.tp.TemplateName, name, withAwakeReason(traceRecordPayload{
 						"pending_create_claim": strings.TrimSpace(info.PendingCreateClaimMetadata),
-					})
+					}, decision, hasDec))
 				}
 				continue
 			}
@@ -4875,10 +4875,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// lease still carries the marker this pass read (mc-5a1ma).
 			if pendingCreateStartInFlightInfo(info, clk, startupTimeout) && !startAbandoned(store, cityPath, info) {
 				if trace != nil {
-					trace.RecordDecision(TraceSiteReconcilerWakeDecision, TraceReasonWake, TraceOutcomeStartInFlight, target.tp.TemplateName, name, traceRecordPayload{
+					trace.RecordDecision(TraceSiteReconcilerWakeDecision, TraceReasonWake, TraceOutcomeStartInFlight, target.tp.TemplateName, name, withAwakeReason(traceRecordPayload{
 						"pending_create_claim": strings.TrimSpace(info.PendingCreateClaimMetadata),
 						"last_woke_at":         info.LastWokeAt,
-					})
+					}, decision, hasDec))
 				}
 				continue
 			}
@@ -4935,9 +4935,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			}
 
 			if trace != nil {
-				trace.RecordDecision(TraceSiteReconcilerWakeDecision, TraceReasonWake, TraceOutcomeStartCandidate, target.tp.TemplateName, name, traceRecordPayload{
+				trace.RecordDecision(TraceSiteReconcilerWakeDecision, TraceReasonWake, TraceOutcomeStartCandidate, target.tp.TemplateName, name, withAwakeReason(traceRecordPayload{
 					"should_wake": shouldWake,
-				})
+				}, decision, hasDec))
 			}
 			if fold := recordCurrentBeadIDOnWake(target.info, sessFront, decision.AssignedWorkBeadID, stderr); fold != nil {
 				tick.apply(target.info.ID, fold)
@@ -4949,10 +4949,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// sanctioned re-reads at prepareStartCandidateForCity / refreshAsyncStartResult
 			// refresh it before the commit decision.
 			startCandidates = append(startCandidates, startCandidate{
-				info:       infoByID[target.info.ID],
-				tp:         target.tp,
-				order:      len(startCandidates),
-				configured: configuredNames[name],
+				info:        infoByID[target.info.ID],
+				tp:          target.tp,
+				order:       len(startCandidates),
+				configured:  configuredNames[name],
+				awakeReason: decision.Reason,
 			})
 		}
 
@@ -8138,7 +8139,16 @@ func resolveResumeCommand(command, sessionKey string, rp *config.ResolvedProvide
 	}
 }
 
-// withAwakeReason is payload with the awake set's reason for the row.
-func withAwakeReason(payload traceRecordPayload, _ AwakeDecision, _ bool) traceRecordPayload {
+// withAwakeReason is payload with the awake set's reason for the row under
+// awake_reason. A row the awake set did not decide, or decided without a
+// reason, adds nothing.
+func withAwakeReason(payload traceRecordPayload, d AwakeDecision, hasDec bool) traceRecordPayload {
+	if !hasDec || d.Reason == "" {
+		return payload
+	}
+	if payload == nil {
+		payload = traceRecordPayload{}
+	}
+	payload["awake_reason"] = d.Reason
 	return payload
 }

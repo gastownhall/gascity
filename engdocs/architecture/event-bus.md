@@ -263,7 +263,7 @@ API/SSE projection:
 
 | Constant | Value | Emitted by |
 |---|---|---|
-| `SessionWoke` | `session.woke` | `cmd/gc/session_lifecycle_parallel.go` when a reconciler start succeeds |
+| `SessionWoke` | `session.woke` | `cmd/gc/session_lifecycle_parallel.go` (legacy) and `cmd/gc/reconcile_effect_launch.go` (v2) when a reconciler start succeeds; the envelope `message` is the awake set's reason for the wake (`routed-demand`, `named-demand`, `work-query`, `pending-create`, `explicit-wake`, ...), empty when the awake set did not decide the start |
 | `SessionStopped` | `session.stopped` | `cmd/gc/session_lifecycle_parallel.go`, `cmd/gc/session_reconciler.go`, `cmd/gc/controller.go`, `cmd/gc/cmd_handoff.go`, `cmd/gc/cmd_session.go` |
 | `SessionCrashed` | `session.crashed` | `cmd/gc/session_reconciler.go` when a runtime exists but the expected child process is gone |
 | `SessionDraining` | `session.draining` | `cmd/gc/session_reconciler.go`, `cmd/gc/cmd_runtime_drain.go`, `cmd/gc/cmd_handoff.go` |

@@ -326,7 +326,7 @@ func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, er
 	}
 	// session.woke once the commit has landed, as legacy records it after
 	// its commit: at the effect's end, whether or not afterCommit ran.
-	woke := events.Event{Type: events.SessionWoke, Actor: "gc", Subject: in.tp.DisplayName(), SessionID: in.row.ID}
+	woke := events.Event{Type: events.SessionWoke, Actor: "gc", Subject: in.tp.DisplayName(), Message: c.it.AwakeReason, SessionID: in.row.ID}
 	c.onExit(func(final settlement) {
 		if final.Outcome == settledLanded && c.start.rec != nil {
 			c.start.rec.Record(woke)

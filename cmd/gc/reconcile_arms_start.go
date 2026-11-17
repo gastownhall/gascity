@@ -254,7 +254,13 @@ func (r *rowFacts) startIntent(reason string) (intent, bool) {
 	}
 	r.rests |= restRuntime // bringUp reads the runtime fresh and decides on it (S1)
 	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
-	return intent{Kind: intentStart, Reason: reason, Basis: basis, Endpoint: e.Endpoint, Rank: wakeFairnessTime(startCandidate{info: r.row.Info}), Patch: patch, Class: class, Kept: kept}, true
+	// The awake set's reason is the entry's only when the row is wanted
+	// awake: a heartbeat respawn (A17) starts a row the awake set did not wake.
+	var awakeReason string
+	if e.Desired == desireWake {
+		awakeReason = e.Reason
+	}
+	return intent{Kind: intentStart, Reason: reason, Basis: basis, Endpoint: e.Endpoint, Rank: wakeFairnessTime(startCandidate{info: r.row.Info}), AwakeReason: awakeReason, Patch: patch, Class: class, Kept: kept}, true
 }
 
 // startHealed is heal, an A6 row write, or the start the start arms (A17,

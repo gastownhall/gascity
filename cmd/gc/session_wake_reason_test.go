@@ -118,8 +118,10 @@ func TestWithAwakeReason(t *testing.T) {
 
 // Kills a reconciler whose three wake_decision records (failed_create,
 // start_in_flight, start_candidate) omit the awake-set reason: each carries
-// awake_reason, here "pending-create", the reason a pending-create row's
-// decision gives.
+// awake_reason: the reason the awake set gave the row. A pending-create row
+// the awake set counts as creating under scale demand gets "scaled:creating"
+// (the scaled arm supersedes "pending-create"); a failed-create row is not
+// creating, so it keeps "pending-create".
 func TestWakeDecisionTraceRecordsCarryAwakeReason(t *testing.T) {
 	now := func(e *capacityEnv) string { return e.clk.Now().UTC().Format(time.RFC3339) }
 	for _, tc := range []struct {
@@ -127,14 +129,15 @@ func TestWakeDecisionTraceRecordsCarryAwakeReason(t *testing.T) {
 		outcome TraceOutcomeCode
 		extra   func(e *capacityEnv) map[string]string
 		holder  bool // a live holder has the start's runtime lease: the start is in flight, not abandoned
+		reason  string
 	}{
-		{"start_candidate", TraceOutcomeStartCandidate, func(*capacityEnv) map[string]string { return nil }, false},
+		{"start_candidate", TraceOutcomeStartCandidate, func(*capacityEnv) map[string]string { return nil }, false, "scaled:creating"},
 		{"failed_create", TraceOutcomeFailedCreate, func(*capacityEnv) map[string]string {
 			return map[string]string{"state": string(sessionpkg.StateFailedCreate)}
-		}, false},
+		}, false, "pending-create"},
 		{"start_in_flight", TraceOutcomeStartInFlight, func(e *capacityEnv) map[string]string {
 			return map[string]string{"state": string(sessionpkg.StateCreating), "last_woke_at": now(e)}
-		}, true},
+		}, true, "scaled:creating"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newCapacityEnv(t, false, "a")
@@ -157,8 +160,8 @@ func TestWakeDecisionTraceRecordsCarryAwakeReason(t *testing.T) {
 				t.Fatalf("no wake_decision/%s record; records: %v", tc.name, e.records(TraceSiteReconcilerWakeDecision))
 			}
 			for _, r := range seen {
-				if r.Fields["awake_reason"] != "pending-create" {
-					t.Fatalf("wake_decision/%s fields = %v, want awake_reason %q", tc.name, r.Fields, "pending-create")
+				if r.Fields["awake_reason"] != tc.reason {
+					t.Fatalf("wake_decision/%s fields = %v, want awake_reason %q", tc.name, r.Fields, tc.reason)
 				}
 			}
 		})
@@ -167,8 +170,9 @@ func TestWakeDecisionTraceRecordsCarryAwakeReason(t *testing.T) {
 
 // Kills a start path that loses the real reason between the awake set and
 // session.woke: through the whole reconciler, legacy's tick and v2's pass
-// each record the explicit wake's reason ("explicit-wake") as the Message of
-// the one session.woke they emit.
+// each record the awake set's reason for the explicitly woken named row as the
+// Message of the one session.woke they emit. That reason is "named-always": the
+// named-session arm supersedes "explicit-wake" for a named row.
 func TestSessionWokeCarriesTheAwakeReasonOnBothStartPaths(t *testing.T) {
 	const fixture = "an explicit wake starts a parked named row"
 	var f parityFixture
@@ -197,8 +201,8 @@ func TestSessionWokeCarriesTheAwakeReasonOnBothStartPaths(t *testing.T) {
 			}
 		}
 		rec.mu.Unlock()
-		if len(woke) != 1 || woke[0].Message != "explicit-wake" {
-			t.Errorf("%s path: session.woke events = %+v, want exactly one with Message %q", path, woke, "explicit-wake")
+		if len(woke) != 1 || woke[0].Message != "named-always" {
+			t.Errorf("%s path: session.woke events = %+v, want exactly one with Message %q", path, woke, "named-always")
 		}
 	}
 }
