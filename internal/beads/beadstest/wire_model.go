@@ -243,10 +243,9 @@ func IndexedRows(rows []beads.Bead, query beads.ListQuery) int {
 func ClosedHistory(store beads.Store, n int) error {
 	for i := range n {
 		b, err := store.Create(beads.Bead{
-			Title:    fmt.Sprintf("order:history-%d", i),
-			Type:     "task",
-			Labels:   []string{"order-tracking", "order-run:history"},
-			Metadata: map[string]string{"gc.order": "history"},
+			Title:  fmt.Sprintf("order:history-%d", i),
+			Type:   "task",
+			Labels: []string{"order-tracking", "order-run:history"},
 		})
 		if err != nil {
 			return fmt.Errorf("seeding closed history row %d: %w", i, err)
