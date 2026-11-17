@@ -774,7 +774,13 @@ func (s *sim) pass() {
 		}
 	}
 	s.lastSeq = s.inflight.seq
-	slices.SortFunc(s.parked, func(a, b *simEffect) int { return strings.Compare(a.it.Key.Leg+a.it.Key.ID, b.it.Key.Leg+b.it.Key.ID) })
+	slices.SortFunc(s.parked, parkedOrder)
+	for i := 1; i < len(s.parked); i++ {
+		if a, b := s.parked[i-1], s.parked[i]; parkedOrder(a, b) == 0 {
+			s.t.Fatalf("seed %d: parked %s %v (submit seq %d) and %s %v (submit seq %d) tie, so a step's release would follow the order their goroutines parked",
+				s.seed, a.it.Kind, a.it.Key, a.it.CreatePlan.Seq, b.it.Kind, b.it.Key, b.it.CreatePlan.Seq)
+		}
+	}
 	for i := 0; i < len(s.held); i++ {
 		if s.held[i].passes--; s.held[i].passes < 0 {
 			s.publish(s.held[i])
@@ -782,6 +788,11 @@ func (s *sim) pass() {
 			i--
 		}
 	}
+}
+
+// parkedOrder orders parked effects by row key.
+func parkedOrder(a, b *simEffect) int {
+	return strings.Compare(a.it.Key.Leg+a.it.Key.ID, b.it.Key.Leg+b.it.Key.ID)
 }
 
 // release runs parked effect i to its end and waits for its settlement, or,
@@ -2041,4 +2052,24 @@ func (s *sim) paneAttached(row beads.Bead) bool {
 	defer s.sp.mu.Unlock()
 	rt := s.sp.rts[row.Metadata["session_name"]]
 	return rt != nil && rt.attached
+}
+
+// TestSimParkedOrderBreaksCreateTiesBySubmitSequence pins the order a pass
+// leaves its parked effects in: creates have no row yet, so two creates one
+// pass submits order by their submit sequence, not by which goroutine parked
+// first.
+func TestSimParkedOrderBreaksCreateTiesBySubmitSequence(t *testing.T) {
+	parked := []*simEffect{
+		{it: intent{Kind: intentCreate, CreatePlan: createPlan{Seq: 17}}},
+		{it: intent{Kind: intentStart, Key: rowKey{Leg: "city", ID: "gc-1"}, CreatePlan: createPlan{Seq: 3}}},
+		{it: intent{Kind: intentCreate, CreatePlan: createPlan{Seq: 16}}},
+	}
+	slices.SortFunc(parked, parkedOrder)
+	var got []uint64
+	for _, e := range parked {
+		got = append(got, e.it.CreatePlan.Seq)
+	}
+	if want := []uint64{16, 17, 3}; !slices.Equal(got, want) {
+		t.Fatalf("parked submit sequences = %v, want %v: creates by sequence, then rows", got, want)
+	}
 }
