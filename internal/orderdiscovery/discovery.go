@@ -17,9 +17,9 @@ import (
 // Returning nil skips that rig and continues scanning remaining rigs.
 type RigScanErrorHandler func(rigName string, err error) error
 
-// OverrideErrorHandler handles a failed [orders.ApplyOverrides] call.
-// Returning nil preserves the scanned orders without applying the invalid
-// override set.
+// OverrideErrorHandler handles a failed [orders.ApplyOverrides] call, whose
+// error names every override that has no name or matches no order. Returning
+// nil keeps the scanned orders with every other override applied.
 type OverrideErrorHandler func(err error) error
 
 // ValidateErrorHandler handles an order validation failure after config

@@ -572,6 +572,52 @@ test_bead_id_branch_resolves_multi_level_subbead_id() {
     rm -rf "$repo" "$fbd"
 }
 
+# _assert_branch_resolves_whole <label> <branch> <full-id>: the branch's bead
+# id must resolve whole, never truncated. Two observations, since resolution
+# output is otherwise invisible: (1) the session's in-progress assignment IS
+# that id, so a correct resolution prints no WARNING at all; a truncated id
+# disagrees with the assignment and warns. (2) the assignment disagrees, so the
+# WARNING that results names the id the resolver actually picked.
+_assert_branch_resolves_whole() {
+    local label="$1" branch="$2" id="$3" repo fbd out rc
+    repo="$(new_repo_with_branch "$branch")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    write_show_json "$fbd" "$id" "in_progress" "agent-x" "tmpl-x" "[]"
+    printf '[{"id":"%s"}]' "$id" > "$fbd/fake-bd-state/list-json"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] && ! grep -q "WARNING" <<<"$out"; then
+        record_pass "resolve/$label-no-warning-when-assignment-is-same-id (rc=0, no WARNING)"
+    else
+        record_fail "resolve/$label-no-warning-when-assignment-is-same-id" "expected rc=0 and no WARNING for branch $branch / assignment $id, got rc=$rc, output: $out"
+    fi
+    printf '[{"id":"ga-other01.9"}]' > "$fbd/fake-bd-state/list-json"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] && grep -qF "branch name resolves to $id but" <<<"$out"; then
+        record_pass "resolve/$label-resolves-full-id (rc=0, warning names $id whole)"
+    else
+        record_fail "resolve/$label-resolves-full-id" "expected rc=0 with the warning naming $id whole, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# Regression (ga-oomi8sp): current bead ids have SEVEN characters after "ga-"
+# (e.g. ga-qi3glw4); the resolver's six-character-only pattern truncated them
+# to ga-qi3glw and then checked ownership of that nonexistent id.
+test_bead_id_branch_resolves_seven_char_id() {
+    _assert_branch_resolves_whole "seven-char-id" "fix/ga-abcdefg-step-reminder" "ga-abcdefg"
+}
+
+test_bead_id_branch_resolves_seven_char_subbead_id() {
+    _assert_branch_resolves_whole "seven-char-subbead-id" "builder/ga-abcdefg.2-slug" "ga-abcdefg.2"
+}
+
+# The legacy six-character shape must keep resolving whole, the slug after the
+# id's trailing "-" must not be absorbed into it.
+test_bead_id_branch_resolves_six_char_legacy_id() {
+    _assert_branch_resolves_whole "six-char-id" "fix/ga-abcdef-slug" "ga-abcdef"
+}
+
 test_bead_id_fallback_used_when_branch_no_match() {
     local repo fbd out rc
     repo="$(new_repo_with_branch "chore/unrelated-cleanup")"
@@ -1276,6 +1322,9 @@ run_all() {
     test_retry_parse_failure_message_mentions_retry_before_no_verify
     test_bead_id_branch_wins_and_warns_on_disagreement
     test_bead_id_branch_resolves_multi_level_subbead_id
+    test_bead_id_branch_resolves_seven_char_id
+    test_bead_id_branch_resolves_seven_char_subbead_id
+    test_bead_id_branch_resolves_six_char_legacy_id
     test_bead_id_fallback_used_when_branch_no_match
     test_bead_id_branch_reused_prefers_open_successor_when_branch_bead_closed
     test_bead_id_branch_reused_successor_match_via_branch_metadata_alone

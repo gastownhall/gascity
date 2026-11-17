@@ -55,7 +55,7 @@ func TestSweepIsRefusedAtEveryStartersEntry(t *testing.T) {
 			_, err := m.mgr.TryWaitIdleNudge(ctx, sweep, missing, "test", "hi", "cmd", hints)
 			return err
 		},
-		"StartRuntimeOnly": func() error { return m.mgr.StartRuntimeOnly(ctx, sweep, missing, "cmd", hints) },
+		"StartRuntimeOnly": func() error { return m.mgr.StartRuntimeOnly(ctx, sweep, missing, Incarnation{}, "cmd", hints) },
 	} {
 		if err := call(); !errors.Is(err, ErrSweepStarts) {
 			t.Errorf("%s by a sweep on a missing row = %v, want ErrSweepStarts at entry", name, err)

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/session"
@@ -52,13 +53,12 @@ func (s *Server) extmsgDefaultAgentForConversation() func(extmsg.ConversationRef
 	if cfg == nil || len(cfg.ExtMsg.DefaultRoutes) == 0 {
 		return nil
 	}
-	store := s.state.SessionsBeadStore().Store
 	return func(ref extmsg.ConversationRef) string {
 		agent := cfg.ExtMsgDefaultRouteAgent(ref.Provider, ref.AccountID)
 		if agent == "" {
 			return ""
 		}
-		spec, ok, err := s.findNamedSessionSpecForTarget(store, agent)
+		spec, ok, err := s.findNamedSessionSpecForTarget(agent)
 		if err != nil || !ok {
 			log.Printf("extmsg: default-route agent %q for %s/%s does not resolve to a configured named session (err=%v)", agent, ref.Provider, ref.AccountID, err)
 			return ""
@@ -73,8 +73,8 @@ func (s *Server) extmsgDefaultAgentForConversation() func(extmsg.ConversationRef
 // without materializing one. HandleOutbound uses it to authorize publishes on
 // agent-bound conversations.
 func (s *Server) extmsgResolveSessionSelector() func(ctx context.Context, selector string) (string, error) {
-	store := s.state.SessionsBeadStore().Store
-	if store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return nil
 	}
 	return func(ctx context.Context, selector string) (string, error) {
@@ -94,11 +94,11 @@ func extmsgHandleLabel(value string) string {
 }
 
 func (s *Server) extmsgSessionHandleForSelector(selector string) string {
-	store := s.state.SessionsBeadStore().Store
-	if store == nil {
+	sessions := s.state.Stores().Sessions()
+	if sessions == (beads.SessionStore{}) {
 		return extmsgHandleLabel(selector)
 	}
-	resolvedID, err := session.ResolveSessionIDAllowClosed(store, selector)
+	resolvedID, err := session.ResolveSessionIDAllowClosed(sessions, selector)
 	if err != nil {
 		return extmsgHandleLabel(selector)
 	}
@@ -106,8 +106,8 @@ func (s *Server) extmsgSessionHandleForSelector(selector string) string {
 }
 
 func (s *Server) extmsgSessionHandleForResolvedID(resolvedID, fallback string) string {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
+	store := s.state.Stores().Sessions()
+	if store == (beads.SessionStore{}) {
 		return extmsgHandleLabel(fallback)
 	}
 	source, ok := session.NewStore(store).ExtmsgHandleSource(resolvedID)
@@ -138,8 +138,8 @@ func (s *Server) extmsgNotifyMembers(
 	// Sessions class, and a WRITE path: the member fan-out below materializes a
 	// configured named session that has no live bead yet, so through the work
 	// store on a relocated city every cold-wake mints a stranded session bead.
-	store := s.state.SessionsBeadStore().Store
-	if svc == nil || store == nil {
+	store := s.state.Stores().Sessions()
+	if svc == nil || store == (beads.SessionStore{}) {
 		return
 	}
 	caller := extmsg.Caller{Kind: extmsg.CallerController, ID: "extmsg-notify"}
@@ -163,7 +163,7 @@ func (s *Server) extmsgNotifyMembers(
 
 	notifyResolved := func(sessionSelector, resolvedID string) {
 		handle := s.extmsgSessionHandleForResolvedID(resolvedID, sessionSelector)
-		nudge := formatExtmsgNotifyReminder(extmsgNotifyReminder{
+		nudge := s.extmsgNotice(extmsgNotifyReminder{
 			Provider:                conv.Provider,
 			ConversationID:          conv.ConversationID,
 			ActorDisplay:            actorDisplayName,

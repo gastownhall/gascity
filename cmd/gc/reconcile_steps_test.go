@@ -33,7 +33,7 @@ type casMemStore struct {
 func newCASMemStore(t *testing.T) *casMemStore {
 	t.Helper()
 	s := &casMemStore{MemStore: beads.NewMemStore()}
-	if err := beads.StampOpenedStore(s.MemStore, "MemStore", gate.Auto, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(s.MemStore, "MemStore", gate.Auto, false, nil, nil); err != nil {
 		t.Fatalf("stamp: %v", err)
 	}
 	return s
@@ -265,7 +265,7 @@ func (s *waitWriteLog) UpdateIfMatch(id string, rev int64, o beads.UpdateOpts) e
 func newWaitClearOracle(t *testing.T) (*waitWriteLog, []string) {
 	t.Helper()
 	s := &waitWriteLog{MemStore: beads.NewMemStore(), watch: map[string]bool{}}
-	if err := beads.StampOpenedStore(s.MemStore, "MemStore", gate.Auto, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(s.MemStore, "MemStore", gate.Auto, false, nil, nil); err != nil {
 		t.Fatalf("stamp: %v", err)
 	}
 	held := map[string]string{"wait_hold": "true", "sleep_intent": "wait-hold", "sleep_reason": "wait-hold"}
@@ -385,7 +385,7 @@ func TestPrepareWaitWakeStateClearsAnOrphanedWaitHold(t *testing.T) {
 		},
 	} {
 		store := beads.NewMemStore()
-		if err := beads.StampOpenedStore(store, "MemStore", gate.Auto, nil, nil); err != nil { // v2 writes by CAS
+		if err := beads.StampOpenedStore(store, "MemStore", gate.Auto, false, nil, nil); err != nil { // v2 writes by CAS
 			t.Fatal(err)
 		}
 		row := func(title string) string {

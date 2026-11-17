@@ -52,7 +52,7 @@ func TestCustomTypesCheck_MissingTypes(t *testing.T) {
 	// TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext.
 	testOwnedHome(t)
 
-	dir := guardedTempDir(t)
+	dir := guardedWorkspaceDir(t)
 	beadsDir := filepath.Join(dir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -321,7 +321,7 @@ func TestCustomTypesCheck_TableDrift(t *testing.T) {
 	// TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext.
 	testOwnedHome(t)
 
-	dir := guardedTempDir(t)
+	dir := guardedWorkspaceDir(t)
 
 	runBD := func(args ...string) string {
 		t.Helper()
@@ -337,8 +337,8 @@ func TestCustomTypesCheck_TableDrift(t *testing.T) {
 	runBD("init", "--non-interactive", "-p", "tst", "--skip-hooks", "--skip-agents")
 	runBD("config", "set", "types.custom", strings.Join(RequiredCustomTypes, ","))
 
-	// Locate the embedded dolt DB directory the same way production code
-	// does (internal/beads.(*BdStore).embeddedDoltDir), rather than
+	// Locate the embedded dolt DB directory from metadata.json's
+	// dolt_database (bd's own layout: .beads/embeddeddolt/<db>), rather than
 	// hand-deriving the sanitized database name from the prefix.
 	metadataPath := filepath.Join(dir, ".beads", "metadata.json")
 	dbName, ok, err := contract.ReadDoltDatabase(fsys.OSFS{}, metadataPath)
@@ -413,7 +413,7 @@ func TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext(t *testing.T) {
 
 	home := testOwnedHome(t)
 
-	dir := guardedTempDir(t)
+	dir := guardedWorkspaceDir(t)
 
 	runBD := func(args ...string) string {
 		t.Helper()
@@ -523,8 +523,8 @@ func TestCustomTypesCheck_ServerBackedStoreIgnoresAmbientEndpoint(t *testing.T) 
 		return out
 	}
 
-	targetDir := guardedTempDir(t)
-	decoyDir := guardedTempDir(t)
+	targetDir := guardedWorkspaceDir(t)
+	decoyDir := guardedWorkspaceDir(t)
 	var targetPort, decoyPort string
 	t.Cleanup(func() {
 		for _, store := range []struct {

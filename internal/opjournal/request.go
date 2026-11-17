@@ -3,6 +3,8 @@ package opjournal
 import (
 	"fmt"
 	"slices"
+	"strconv"
+	"strings"
 	"time"
 	"unicode/utf8"
 )
@@ -127,6 +129,11 @@ func validateRequestShape(op Op, spec Spec) error {
 	if err := validateScope(op.Scope, spec); err != nil {
 		return err
 	}
+	if spec.Kind == KindRespond {
+		if err := validateRespondShape(op); err != nil {
+			return err
+		}
+	}
 	if op.After != "" {
 		if !spec.AllowsAfter {
 			return invalidf("%s ops take no after", spec.Kind)
@@ -164,6 +171,20 @@ func validateProducer(p Producer) error {
 		return invalidf("owner epoch %d is negative", p.OwnerEpoch)
 	}
 	return nil
+}
+
+// ValidatePayload refuses a payload Propose would refuse for an op of kind,
+// whatever the op's conversation: over MaxInlinePayload
+// (ErrPayloadTooLarge), not valid UTF-8, empty for a kind that requires a
+// payload, or set for a kind that takes none (ErrInvalidRequest). An unknown
+// kind is ErrUnknownKind. Producers check a payload with it before they know
+// the conversation.
+func ValidatePayload(kind Kind, payload string) error {
+	spec, err := Lookup(kind)
+	if err != nil {
+		return err
+	}
+	return validatePayload(payload, spec)
 }
 
 func validatePayload(payload string, spec Spec) error {
@@ -339,7 +360,67 @@ func validateOutcome(o Outcome, cancel Cancel) error {
 	if err := validateOptionalText("result turn", r.Turn); err != nil {
 		return err
 	}
-	return validateOptionalText("result via", r.Via)
+	if err := validateOptionalText("result via", r.Via); err != nil {
+		return err
+	}
+	return validateDeliveryResult(o)
+}
+
+// The runtime acks and link confidences this build knows. A stored value
+// outside them is a newer build's, read as ErrUnsupportedValue.
+var (
+	ackKinds        = []AckKind{AckDelivered, AckDeliveredUnobserved, AckInBand}
+	linkConfidences = []LinkConfidence{LinkExact, LinkCorrelated, LinkAmbiguous, LinkNone}
+)
+
+// maxMessageIDLen bounds a runtime's message id in the delivery record.
+const maxMessageIDLen = 255
+
+// validateDeliveryResult checks an outcome's delivery record and turn link:
+// only a succeeded outcome carries them; a record has a seq, a time and a
+// known ack; a link needs a record and a basis, and names a turn exactly when
+// its confidence is not none.
+func validateDeliveryResult(o Outcome) error {
+	r := o.Result
+	d := r.Delivery
+	if !d.IsZero() {
+		if o.Arm != ArmSucceeded {
+			return invalidf("only a succeeded outcome carries a delivery record")
+		}
+		if d.Seq < 1 || d.At.IsZero() {
+			return invalidf("a delivery record needs a seq >= 1 and a time")
+		}
+		if !slices.Contains(ackKinds, d.Ack) {
+			return invalidf("delivery ack %q is not delivered, delivered_unobserved or in_band", d.Ack)
+		}
+		if !storableTime(d.At) || !storableTime(d.MessageAt) {
+			return invalidf("delivery record times must fall in years 0 through 9999")
+		}
+		if d.MessageID != "" {
+			if err := validateText("delivery message id", d.MessageID, maxMessageIDLen); err != nil {
+				return err
+			}
+		}
+	}
+	if r.TurnLink == "" {
+		if r.TurnBasis != "" {
+			return invalidf("a turn basis needs a turn link")
+		}
+		return nil
+	}
+	if d.IsZero() {
+		return invalidf("a turn link needs a delivery record")
+	}
+	if !slices.Contains(linkConfidences, r.TurnLink) {
+		return invalidf("turn link %q is not exact, correlated, ambiguous or none", r.TurnLink)
+	}
+	if err := validateToken("turn basis", string(r.TurnBasis)); err != nil {
+		return err
+	}
+	if (r.TurnLink == LinkNone) != (r.Turn == "") {
+		return invalidf("a %s turn link names a turn exactly when it is not none", r.TurnLink)
+	}
+	return nil
 }
 
 // validateState checks the platform-owned fields of op.
@@ -390,6 +471,9 @@ func validateState(op Op, spec Spec) error {
 	} else if op.Cancel != (Cancel{}) {
 		return invalidf("a cancel without by is not recorded")
 	}
+	if err := validateLaneState(op, spec); err != nil {
+		return err
+	}
 	if len(op.Transitions) > maxTransitions {
 		return invalidf("%d transitions, max %d", len(op.Transitions), maxTransitions)
 	}
@@ -402,6 +486,78 @@ func validateState(op Op, spec Spec) error {
 		}
 	}
 	return nil
+}
+
+// maxLastErrorLen bounds gc.op.last_error.
+const maxLastErrorLen = 512
+
+// validateLaneState checks the conversation lane's bookkeeping fields: only a
+// conversation-lane lane op carries them, and each is in range.
+func validateLaneState(op Op, spec Spec) error {
+	laneFields := !op.RetryAt.IsZero() || op.Failures != 0 || op.MaybeDelivered != 0 ||
+		op.DeliveryKey != "" || op.LastError != "" ||
+		!op.Outcome.Result.Delivery.IsZero() || op.Outcome.Result.TurnLink != ""
+	if !laneFields {
+		return nil
+	}
+	if op.Executor.Legacy() || spec.Lane != LaneConversation {
+		return invalidf("a %s %s op carries no conversation-lane bookkeeping", op.Executor, op.Kind)
+	}
+	if op.Failures < 0 {
+		return invalidf("failures %d is negative", op.Failures)
+	}
+	if op.MaybeDelivered < 0 || op.MaybeDelivered > op.Attempt {
+		return invalidf("maybe_delivered %d is outside 0..attempt (%d)", op.MaybeDelivered, op.Attempt)
+	}
+	if op.DeliveryKey != "" {
+		if err := validateDeliveryKey(op.DeliveryKey); err != nil {
+			return err
+		}
+	}
+	if op.LastError != "" {
+		return validateLastError(op.LastError)
+	}
+	return nil
+}
+
+// validateDeliveryKey checks a delivery key: <op id>:<n>, n a canonical
+// integer >= 1.
+func validateDeliveryKey(key string) error {
+	head, n, ok := splitDeliveryKey(key)
+	if !ok || !validOpID(head) || n < 1 {
+		return invalidf("delivery key %q is not <op id>:<n> with n >= 1", key)
+	}
+	return nil
+}
+
+// splitDeliveryKey splits a delivery key into its head op id and number. ok
+// is false when the number is not a canonical integer.
+func splitDeliveryKey(key string) (head string, n int64, ok bool) {
+	i := strings.LastIndexByte(key, ':')
+	if i < 0 {
+		return "", 0, false
+	}
+	head, num := key[:i], key[i+1:]
+	v, err := strconv.ParseInt(num, 10, 64)
+	if err != nil || strconv.FormatInt(v, 10) != num {
+		return "", 0, false
+	}
+	return head, v, true
+}
+
+// validateLastError checks gc.op.last_error: <token>[: <text>], at most
+// maxLastErrorLen bytes of UTF-8 without control characters.
+func validateLastError(v string) error {
+	switch {
+	case len(v) > maxLastErrorLen:
+		return invalidf("last error is %d bytes, max %d", len(v), maxLastErrorLen)
+	case !utf8.ValidString(v):
+		return invalidf("last error is not valid UTF-8")
+	case hasControl(v):
+		return invalidf("last error contains control characters")
+	}
+	token, _, _ := strings.Cut(v, ": ")
+	return validateToken("last error token", token)
 }
 
 // appendTransition appends t, keeping the first transition and the most

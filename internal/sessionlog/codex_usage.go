@@ -737,3 +737,35 @@ func ExtractCodexTailUsageFromSearchPaths(searchPaths []string, path string) ([]
 	}
 	return ExtractCodexTailUsage(safePath)
 }
+
+// codexHistoryUsage extracts per-invocation usage from every record the full
+// transcript parser read. The first observation of a cumulative total fixes the
+// invocation's timestamp and model: a later duplicate snapshot must not move
+// the usage onto a newer assistant message or relabel it with a newer model.
+func codexHistoryUsage(entries []codexEntry) []TailUsage {
+	var usages []TailUsage
+	seen := make(map[string]bool)
+	var model string
+	for _, entry := range entries {
+		if entry.raw.Type != "turn_context" && entry.raw.Type != "event_msg" {
+			continue
+		}
+		var payload codexUsagePayload
+		if json.Unmarshal(entry.raw.Payload, &payload) != nil {
+			continue
+		}
+		if entry.raw.Type == "turn_context" {
+			if payload.Model != "" {
+				model = payload.Model
+			}
+			continue
+		}
+		usage, ok := codexTokenCountUsage(entry.raw, payload, model)
+		if !ok || seen[usage.MessageID] {
+			continue
+		}
+		seen[usage.MessageID] = true
+		usages = append(usages, usage)
+	}
+	return usages
+}

@@ -129,11 +129,12 @@ func TestEffortChoicesUseCanonicalTiers(t *testing.T) {
 // choice that yields no args is a pin the launch path would accept and then
 // drop. The empty "Default" entry is the one legitimate no-args choice.
 func TestEveryDeclaredChoiceRendersFlags(t *testing.T) {
-	// permission_mode "standard" (antigravity) and mcp_approval "prompt"
-	// (cursor) intentionally render nothing: they name the CLI's own default
-	// behavior rather than a flag.
+	// permission_mode "standard" (antigravity), mcp_approval "prompt"
+	// (cursor) and ask_user "on" (copilot) intentionally render nothing:
+	// they name the CLI's own default behavior rather than a flag.
 	noFlagChoices := map[string]bool{
 		"antigravity/permission_mode/standard": true,
+		"copilot/ask_user/on":                  true,
 		"cursor/mcp_approval/prompt":           true,
 	}
 	for name, spec := range BuiltinProviders() {

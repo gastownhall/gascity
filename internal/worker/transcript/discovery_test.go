@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -844,5 +845,112 @@ func TestDiscoverScopedPathZCodeKeysBySeat(t *testing.T) {
 	}
 	if got := DiscoverScopedPath([]string{base}, "claude/tmux-cli", workDir, "pool-1", "gcg-session-a", "1"); got != "" {
 		t.Fatalf("DiscoverScopedPath(claude) = %q, want empty for a non-zcode family", got)
+	}
+}
+
+// Kills a keyed-lookup predicate that disagrees with DiscoverKeyedPath: a
+// family it resolves by key reported as keyless, or a keyless one as keyed.
+func TestHasKeyedLookupMatchesDiscoverKeyedPath(t *testing.T) {
+	for provider, want := range map[string]bool{
+		"claude": true, "claude/tmux-cli": true, "codex": true, "gemini": true, "kimi": true, "pi": true,
+		"zcode": true, "zcode/tmux-cli": true,
+		"opencode": true, "mimocode": false,
+	} {
+		if got := HasKeyedLookup(provider); got != want {
+			t.Errorf("HasKeyedLookup(%q) = %v, want %v", provider, got, want)
+		}
+	}
+	// A keyless family resolves nothing by key, however the key is spelled.
+	if got := DiscoverKeyedPath([]string{t.TempDir()}, "mimocode", t.TempDir(), "key"); got != "" {
+		t.Fatalf("DiscoverKeyedPath(mimocode) = %q, want none", got)
+	}
+}
+
+// Kills an OpenCode keyed lookup that returns the newest export in the root
+// instead of the one the session key names.
+func TestDiscoverKeyedPathOpenCodePrefersKeyOverNewest(t *testing.T) {
+	root := t.TempDir()
+	workDir := t.TempDir()
+	write := func(id string, mtime time.Time) string {
+		path := filepath.Join(root, id+".json")
+		body := `{"info":{"id":"` + id + `","directory":"` + filepath.ToSlash(workDir) + `"},"messages":[]}`
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, mtime, mtime); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	now := time.Now()
+	want := write("ses_x", now.Add(-time.Hour))
+	write("ses_y", now)
+
+	if got := DiscoverKeyedPath([]string{root}, "opencode", workDir, "ses_x"); got != want {
+		t.Fatalf("DiscoverKeyedPath(opencode, ses_x) = %q, want %q", got, want)
+	}
+}
+
+// Kills an exact keyed-lookup predicate that admits a family whose by-key
+// lookup can return another conversation's file, or refuses an exact one.
+func TestHasExactKeyedLookup(t *testing.T) {
+	for provider, want := range map[string]bool{
+		"claude": true, "claude/tmux-cli": true, "codex": true, "kimi": true, "pi": true, "zcode": true,
+		"opencode": true, "gemini": false, "mimocode": false,
+	} {
+		if got := HasExactKeyedLookup(provider); got != want {
+			t.Errorf("HasExactKeyedLookup(%q) = %v, want %v", provider, got, want)
+		}
+	}
+}
+
+func TestKeyedProbeRoots(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	defaults := sessionlog.DefaultSearchPaths()
+	given := []string{"/observed/claude"}
+	tests := []struct {
+		name        string
+		searchPaths []string
+		provider    string
+		want        []string
+	}{
+		{name: "empty list gives the defaults", provider: "claude", want: defaults},
+		{name: "claude keeps the given roots", searchPaths: given, provider: "claude", want: given},
+		{name: "claude family by name keeps the given roots", searchPaths: given, provider: " Claude-Eco ", want: given},
+		{name: "other provider gives the defaults", searchPaths: given, provider: "kimi", want: defaults},
+		{name: "pi gives the defaults", searchPaths: given, provider: "pi", want: defaults},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := KeyedProbeRoots(tt.searchPaths, tt.provider); !slices.Equal(got, tt.want) {
+				t.Fatalf("KeyedProbeRoots(%v, %q) = %v, want %v", tt.searchPaths, tt.provider, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestClaudeConfigProjectsRoot(t *testing.T) {
+	abs := filepath.Join(t.TempDir(), "claude")
+	tests := []struct {
+		name     string
+		env      map[string]string
+		wantRoot string
+		wantOK   bool
+	}{
+		{name: "absolute", env: map[string]string{"CLAUDE_CONFIG_DIR": abs}, wantRoot: filepath.Join(abs, "projects"), wantOK: true},
+		{name: "whitespace padded absolute", env: map[string]string{"CLAUDE_CONFIG_DIR": "  " + abs + "\t"}, wantRoot: filepath.Join(abs, "projects"), wantOK: true},
+		{name: "unset", env: nil},
+		{name: "empty", env: map[string]string{"CLAUDE_CONFIG_DIR": "  "}},
+		{name: "relative", env: map[string]string{"CLAUDE_CONFIG_DIR": "rel/claude"}},
+		{name: "home relative", env: map[string]string{"CLAUDE_CONFIG_DIR": "~/.claude-alt"}},
+		{name: "bare tilde", env: map[string]string{"CLAUDE_CONFIG_DIR": "~"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root, ok := ClaudeConfigProjectsRoot(tt.env)
+			if root != tt.wantRoot || ok != tt.wantOK {
+				t.Fatalf("ClaudeConfigProjectsRoot(%v) = (%q, %v), want (%q, %v)", tt.env, root, ok, tt.wantRoot, tt.wantOK)
+			}
+		})
 	}
 }

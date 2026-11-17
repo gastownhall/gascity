@@ -88,6 +88,14 @@ func (c *doltDriftCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 			// not gc's to re-pin, so there is no drift to report or fix.
 			continue
 		}
+		if bdOwnedDirect, err := scopeIsBdOwnedDirectExternal(c.cityPath, rig.Path); err != nil {
+			errors = append(errors, fmt.Sprintf("rig %q classify store binding: %v", rig.Name, err))
+			continue
+		} else if bdOwnedDirect {
+			// bd bound this rig to a server gc does not run: its port file is
+			// bd's, and the port-file sync Fix runs leaves it alone.
+			continue
+		}
 		rigState, err := resolveDesiredRigEndpointState(c.cityPath, rig, cityState)
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("rig %q resolve endpoint state: %v", rig.Name, err))
