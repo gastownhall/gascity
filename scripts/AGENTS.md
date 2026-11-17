@@ -81,3 +81,15 @@ lines only; a new integration-only test file costs one sorted record line.
 The shard rule is `i % shard_total == shard_index - 1` in
 `scripts/test-go-test-shard` (`TestRuntimeTmuxIntegrationShardUsesCheckedManifestOnLinux`
 restates it and runs each shard through the real script).
+
+## No early-exit reader at the end of a pipe under pipefail
+
+Never end a pipe in a reader that can stop before its input ends (`grep -q`,
+`-m`, `-l`, `head`, `sed ...q`, `awk ...exit`) in bash, in a POSIX file that sets
+or inherits `pipefail`, or in a workflow `run:` block with `pipefail`. The
+producer dies of SIGPIPE (141) and a match becomes a miss once its output
+outgrows the pipe buffer. Use a here-string or a drain (`cmd | grep P
+>/dev/null`). `TestShellNoEarlyExitReaderUnderPipefail` fails on every such site,
+with no exemption mechanism: no allow-comment, no baseline, no directory
+exclusion. The rewrite table, the scope rule and the measured flip rates are in
+`engdocs/contributors/shell-pipefail-early-exit.md`.
