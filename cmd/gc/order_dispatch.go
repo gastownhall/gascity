@@ -45,10 +45,15 @@ const (
 	labelOrderTracking    = "order-tracking"
 	labelTriggerEnvFailed = "trigger-env-failed"
 
-	orderTrackingSweepOrder                = "order-tracking-sweep"
-	orderTrackingBeadPolicyName            = "order_tracking"
-	defaultOrderTrackingSweepStaleAfter    = 10 * time.Minute
-	minClosedOrderTrackingRetained         = 10
+	orderTrackingSweepOrder             = "order-tracking-sweep"
+	orderTrackingBeadPolicyName         = "order_tracking"
+	defaultOrderTrackingSweepStaleAfter = 10 * time.Minute
+	minClosedOrderTrackingRetained      = 10
+	// orderTrackingRetentionDeleteChunk is how many expired runs the
+	// retention sweep clears before it deletes them, so a sweep that is cut
+	// off (it runs as an exec order with a timeout) keeps every chunk it
+	// finished.
+	orderTrackingRetentionDeleteChunk      = 100
 	legacyOrderTrackingRetentionBucket     = "\x00legacy-unscoped-order-tracking"
 	orderTrackingSweepWatchdogInterval     = 30 * time.Second
 	orderTrackingSweepWatchdogStaleAfter   = 2 * time.Minute
@@ -3801,6 +3806,19 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 	var cleared []string
 	var retained []string
 	var deleteErr error
+	deleted := 0
+	// The expired runs are deleted a chunk at a time, as their checks clear.
+	// Checking all of them first leaves a sweep that is cut off (the order's
+	// timeout) with nothing deleted, however far it got; a backlog too large
+	// to check in one run would then never shrink.
+	flush := func() error {
+		if err := deleteWorkflowBeadsBatch(store, cleared); err != nil {
+			return fmt.Errorf("deleting %d closed order-tracking beads: %w", len(cleared), err)
+		}
+		deleted += len(cleared)
+		cleared = cleared[:0]
+		return nil
+	}
 	for _, runs := range byOrder {
 		sort.Slice(runs, func(i, j int) bool {
 			left := orderTrackingClosedReferenceTime(runs[i])
@@ -3826,13 +3844,19 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 				continue
 			}
 			cleared = append(cleared, run.ID)
+			if len(cleared) >= orderTrackingRetentionDeleteChunk {
+				if err := flush(); err != nil {
+					logRetainedForLiveDescendants(retained)
+					return deleted, errors.Join(deleteErr, err)
+				}
+			}
 		}
 	}
 	logRetainedForLiveDescendants(retained)
-	if err := deleteWorkflowBeadsBatch(store, cleared); err != nil {
-		return 0, errors.Join(deleteErr, fmt.Errorf("deleting %d closed order-tracking beads: %w", len(cleared), err))
+	if err := flush(); err != nil {
+		return deleted, errors.Join(deleteErr, err)
 	}
-	return len(cleared), deleteErr
+	return deleted, deleteErr
 }
 
 // logRetainedForLiveDescendants reports the candidates the retention prune

@@ -4389,6 +4389,85 @@ func TestOrderTrackingRetentionDeletesExpiredRunsInOneBatch(t *testing.T) {
 	}
 }
 
+// retentionKilledStore ends a sweep the way the order's timeout does: the
+// process stops in the middle of its stranding checks. It panics on the
+// membership read after checksLeft of them.
+type retentionKilledStore struct {
+	*orderTrackingRetentionBatchStore
+	checksLeft int
+}
+
+var errRetentionSweepKilled = errors.New("sweep killed")
+
+func (s *retentionKilledStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if _, membership := q.Metadata[beadmeta.RootBeadIDMetadataKey]; membership {
+		if s.checksLeft == 0 {
+			panic(errRetentionSweepKilled)
+		}
+		s.checksLeft--
+	}
+	return s.orderTrackingRetentionBatchStore.List(q)
+}
+
+// TestOrderTrackingRetentionDeletesAsItGoes is the progress rule for the
+// retention sweep: the expired runs are deleted a chunk at a time as their
+// stranding checks clear, not all at once after the last check. The sweep runs
+// as an exec order with a timeout; checking every expired run before deleting
+// any means a backlog too large to check inside that timeout is never reduced,
+// and every later run starts the same checks over while the backlog grows.
+func TestOrderTrackingRetentionDeletesAsItGoes(t *testing.T) {
+	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
+	policy := orderTrackingRetentionPolicy{deleteAfterClose: 24 * time.Hour}
+	expired := 2*orderTrackingRetentionDeleteChunk + 50
+
+	t.Run("a whole sweep deletes every expired run, a chunk at a time", func(t *testing.T) {
+		store := &orderTrackingRetentionBatchStore{
+			orderTrackingRetentionDeleteStore: newOrderTrackingRetentionDeleteStore(now, minClosedOrderTrackingRetained+expired, ""),
+		}
+		deleted, err := sweepClosedOrderTrackingRetention(store, now, policy, nil)
+		if err != nil || deleted != expired {
+			t.Fatalf("sweep = (%d, %v), want (%d, nil)", deleted, err, expired)
+		}
+		var sizes []int
+		for _, batch := range store.batches {
+			sizes = append(sizes, len(batch))
+		}
+		if want := []int{orderTrackingRetentionDeleteChunk, orderTrackingRetentionDeleteChunk, 50}; !slices.Equal(sizes, want) {
+			t.Fatalf("delete batches = %v, want %v", sizes, want)
+		}
+		left, err := store.List(beads.ListQuery{Label: labelOrderTracking, IncludeClosed: true, TierMode: beads.TierBoth})
+		if err != nil || len(left) != minClosedOrderTrackingRetained {
+			t.Fatalf("%d tracking beads left (%v), want the %d latest", len(left), err, minClosedOrderTrackingRetained)
+		}
+	})
+
+	t.Run("a sweep cut off mid-check keeps what it already deleted", func(t *testing.T) {
+		store := &retentionKilledStore{
+			orderTrackingRetentionBatchStore: &orderTrackingRetentionBatchStore{
+				orderTrackingRetentionDeleteStore: newOrderTrackingRetentionDeleteStore(now, minClosedOrderTrackingRetained+expired, ""),
+			},
+			// Two full chunks, each checked per run and again as a set, then
+			// part of the third.
+			checksLeft: 4*orderTrackingRetentionDeleteChunk + 30,
+		}
+		func() {
+			defer func() {
+				if err, _ := recover().(error); !errors.Is(err, errRetentionSweepKilled) {
+					t.Fatalf("the sweep ended with %v, want it cut off mid-check", err)
+				}
+			}()
+			_, _ = sweepClosedOrderTrackingRetention(store, now, policy, nil)
+		}()
+		left, err := store.orderTrackingRetentionBatchStore.List(beads.ListQuery{Label: labelOrderTracking, IncludeClosed: true, TierMode: beads.TierBoth})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if gone := minClosedOrderTrackingRetained + expired - len(left); gone != 2*orderTrackingRetentionDeleteChunk {
+			t.Fatalf("a sweep cut off after two chunks' checks deleted %d run(s), want %d: a backlog it cannot finish checking must still shrink", gone, 2*orderTrackingRetentionDeleteChunk)
+		}
+	})
+}
+
 func TestOrderTrackingRetentionBatchKeepsRunWithOpenStep(t *testing.T) {
 	now := time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
 	for _, bounded := range []bool{false, true} {
