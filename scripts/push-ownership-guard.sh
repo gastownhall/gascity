@@ -280,7 +280,7 @@ _pog_resolve_bead_id() {
 
     local branch_id=""
     if [[ -n "$branch" ]]; then
-        branch_id="$(grep -oE 'ga-[0-9a-z]{6,}(\.[0-9]+)*' <<<"$branch" | head -1 || true)"
+        branch_id="$(grep -oE 'ga-[0-9a-z]{6,}(\.[0-9]+)*' <<<"$branch" | sed -n '1p' || true)"
     fi
 
     # assignee_read_failed distinguishes "the read failed" (ambiguity) from

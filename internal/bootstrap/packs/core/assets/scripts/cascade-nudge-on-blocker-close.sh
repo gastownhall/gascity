@@ -87,7 +87,7 @@ set_rig_args() {
     # beads falls back to default scope, which is where they live.
     _rig="$(printf '%s' "$RIGS_JSON" \
         | jq -r --arg p "$_prefix" '(.rigs // [])[] | select(.prefix == $p and (.hq != true)) | .name' 2>/dev/null \
-        | head -1)"
+        | sed -n '1p')"
     if [ -n "$_rig" ]; then
         RIG_ARG1="--rig"
         RIG_ARG2="$_rig"

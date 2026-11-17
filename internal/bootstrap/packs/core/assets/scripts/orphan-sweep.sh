@@ -531,7 +531,7 @@ reset_orphan_if_current() {
     fi
 
     reset_output=$(gc bd release-if-current "$bead_id" "$expected_assignee" ${scope_args[@]+"${scope_args[@]}"} 2>/dev/null) || return 1
-    reset_state=$(printf '%s\n' "$reset_output" | awk 'NF { print $1; exit }')
+    reset_state=$(awk 'NF { print $1; exit }' <<<"$reset_output")
     case "$reset_state" in
         released)
             # The cause rides metadata, not notes: a claim on a graph step of a

@@ -49,7 +49,7 @@ configure_linux_system_cgo_fallback() {
     [[ -f "$sys_usr_include/unicode/uregex.h" ]] || return 0
     if "$cc_bin" -E -Wp,-v -x c /dev/null 2>&1 |
         sed 's/^[[:space:]]*//' |
-        grep -F -x -q "$sys_usr_include"; then
+        grep -F -x "$sys_usr_include" >/dev/null; then
         return 0
     fi
 

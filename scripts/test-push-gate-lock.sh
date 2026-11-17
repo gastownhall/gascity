@@ -499,7 +499,7 @@ assert_true "wiring.sources_lib"   grep -q 'push-gate-lock-lib.sh' "$LOCAL_PARAL
 assert_true "wiring.calls_acquire" grep -q 'push_gate_acquire_slot' "$LOCAL_PARALLEL"
 assert_true "wiring.has_override"  grep -q 'GC_PUSH_GATE_NO_CAP'   "$LOCAL_PARALLEL"
 
-acq_line="$(grep -n 'push_gate_acquire_slot ' "$LOCAL_PARALLEL" | head -1 | cut -d: -f1)"
+acq_line="$(grep -n 'push_gate_acquire_slot ' "$LOCAL_PARALLEL" | sed -n '1p' | cut -d: -f1)"
 if [[ -n "$acq_line" ]]; then
     LOSER_BLOCK="$(sed -n "${acq_line},$((acq_line + 10))p" "$LOCAL_PARALLEL")"
     assert_contains "wiring.timeout_exits_75" "$LOSER_BLOCK" "exit 75"
@@ -515,8 +515,8 @@ assert_true "wiring.releases_slot_on_exit" grep -qE 'trap .*push_gate_release_sl
 # daemon a job leaks — inherits a copy and can pin the slot past this
 # invocation's death. Line ordering is the assertion: a close that lands after
 # the fan-out is worthless.
-close_line="$(grep -nE 'exec \$\{gate_fd\}>&-' "$LOCAL_PARALLEL" | head -1 | cut -d: -f1)"
-fanout_line="$(grep -n 'xargs -0' "$LOCAL_PARALLEL" | head -1 | cut -d: -f1)"
+close_line="$(grep -nE 'exec \$\{gate_fd\}>&-' "$LOCAL_PARALLEL" | sed -n '1p' | cut -d: -f1)"
+fanout_line="$(grep -n 'xargs -0' "$LOCAL_PARALLEL" | sed -n '1p' | cut -d: -f1)"
 if [[ -n "$close_line" && -n "$fanout_line" && "$close_line" -lt "$fanout_line" ]]; then
     record_pass "wiring.closes_gate_fd_before_fanout"
 else

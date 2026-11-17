@@ -304,7 +304,7 @@ truncate_push_stderr_for_state() {
         printf '%s' ""
         return
     fi
-    printf '%s' "$raw" | LC_ALL=C awk -v max="$max_bytes" '
+    LC_ALL=C awk -v max="$max_bytes" '
         BEGIN { total = 0 }
         {
             line = $0
@@ -323,7 +323,7 @@ truncate_push_stderr_for_state() {
             printf "%s", line
             total += len
         }
-    '
+    ' <<<"$raw"
 }
 
 # Record a successful push in state so `gc doctor` can surface a timestamp for
@@ -826,7 +826,7 @@ check_archive_gc_free_space() {
         return 0
     fi
     # shellcheck disable=SC2012  # pack names are pack-<hex>.pack
-    largest_pack=$(ls -S "$ARCHIVE_REPO"/.git/objects/pack/pack-*.pack 2>/dev/null | head -n 1) || largest_pack=""
+    largest_pack=$(ls -S "$ARCHIVE_REPO"/.git/objects/pack/pack-*.pack 2>/dev/null | sed -n '1p') || largest_pack=""
     rest_kb="$archive_kb"
     if [ -n "$largest_pack" ]; then
         largest_kb=$(( $(wc -c < "$largest_pack" | tr -d ' ') / 1024 ))
@@ -1002,7 +1002,7 @@ archived_file_is_legacy_format() {
     local head
 
     git -C "$ARCHIVE_REPO" cat-file -e "HEAD:$path" 2>/dev/null || return 1
-    head=$(git -C "$ARCHIVE_REPO" show "HEAD:$path" 2>/dev/null | head -c 16 | tr -d '[:space:]')
+    head=$(head -c 16 < <(git -C "$ARCHIVE_REPO" show "HEAD:$path" 2>/dev/null) | tr -d '[:space:]')
     case "$head" in
         '{"rows"'* | '{}') return 0 ;;
     esac
