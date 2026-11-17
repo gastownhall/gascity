@@ -321,6 +321,81 @@ func TestDoSlingForceOverridesThirdPartyRoute(t *testing.T) {
 	}
 }
 
+// assignRoutedBeadToTarget stamps BL-1's assignee as the sling target, the
+// stale-assignment shape where the assignee names the target while
+// gc.routed_to names someone else.
+func assignRoutedBeadToTarget(t *testing.T, store *beads.MemStore, a config.Agent) {
+	t.Helper()
+	assignee := a.QualifiedName()
+	if err := store.Update("BL-1", beads.UpdateOpts{Assignee: &assignee}); err != nil {
+		t.Fatalf("assigning BL-1 to the target: %v", err)
+	}
+}
+
+// TestDoSlingRefusesThirdPartyRouteWhenAssignedToTarget pins that the
+// third-party refusal also holds when the bead is assigned to the sling target:
+// the assigned-target convoy-recovery shortcut must not hide a route that names
+// neither the target nor the caller.
+func TestDoSlingRefusesThirdPartyRouteWhenAssignedToTarget(t *testing.T) {
+	for _, noConvoy := range []bool{false, true} {
+		name := "auto-convoy"
+		if noConvoy {
+			name = "no-convoy"
+		}
+		t.Run(name, func(t *testing.T) {
+			a, deps, store, router := routedConflictFixture("rig/third-party", "rig/caller")
+			assignRoutedBeadToTarget(t, store, a)
+
+			_, err := DoSling(SlingOpts{Target: a, BeadOrFormula: "BL-1", NoConvoy: noConvoy}, deps, store)
+			if err == nil {
+				t.Fatal("expected DoSling to refuse a third-party gc.routed_to on a bead assigned to the target")
+			}
+			if !strings.Contains(err.Error(), "--force") {
+				t.Errorf("error %q does not point at --force", err)
+			}
+			if len(router.routed) != 0 {
+				t.Fatalf("router called %d time(s), want 0: refusal must precede routing", len(router.routed))
+			}
+		})
+	}
+}
+
+// TestDoSlingRefusesUnresolvedCallerWhenAssignedToTarget pins the fail-closed
+// rule on the assigned-target path: an empty caller identity matches no route.
+func TestDoSlingRefusesUnresolvedCallerWhenAssignedToTarget(t *testing.T) {
+	a, deps, store, router := routedConflictFixture("rig/third-party", "")
+	assignRoutedBeadToTarget(t, store, a)
+
+	if _, err := DoSling(SlingOpts{Target: a, BeadOrFormula: "BL-1"}, deps, store); err == nil {
+		t.Fatal("expected DoSling to refuse when the caller identity is unresolved")
+	}
+	if len(router.routed) != 0 {
+		t.Fatalf("router called %d time(s), want 0", len(router.routed))
+	}
+}
+
+// TestDoSlingAllowsCallerRouteWhenAssignedToTarget pins that a route held by
+// the caller stays allowed on the assigned-target path.
+func TestDoSlingAllowsCallerRouteWhenAssignedToTarget(t *testing.T) {
+	a, deps, store, _ := routedConflictFixture("rig/caller", "rig/caller")
+	assignRoutedBeadToTarget(t, store, a)
+
+	if _, err := DoSling(SlingOpts{Target: a, BeadOrFormula: "BL-1"}, deps, store); err != nil {
+		t.Fatalf("DoSling: %v", err)
+	}
+}
+
+// TestDoSlingForceOverridesThirdPartyRouteWhenAssignedToTarget pins --force on
+// the assigned-target path.
+func TestDoSlingForceOverridesThirdPartyRouteWhenAssignedToTarget(t *testing.T) {
+	a, deps, store, _ := routedConflictFixture("rig/third-party", "rig/caller")
+	assignRoutedBeadToTarget(t, store, a)
+
+	if _, err := DoSling(SlingOpts{Target: a, BeadOrFormula: "BL-1", Force: true}, deps, store); err != nil {
+		t.Fatalf("DoSling with Force: %v", err)
+	}
+}
+
 // TestDoSlingDryRunNeverRefusesConflict pins that a dry run reports instead of
 // failing: the CLI renders the conflict in its preview.
 func TestDoSlingDryRunNeverRefusesConflict(t *testing.T) {
