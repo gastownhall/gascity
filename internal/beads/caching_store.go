@@ -43,6 +43,9 @@ type CachingStore struct {
 	// reconcileGate, when set, is asked before each periodic reconcile; a
 	// false answer skips that cycle (WithReconcileGate).
 	reconcileGate func() bool
+	// storeWork, when set, counts each of the cache's own background reads as
+	// its owner's store work (WithStoreWork).
+	storeWork func() (end func())
 	// now is the clock every window and due time reads (WithClock); nil
 	// reads the real one. Read it through clockNow.
 	now func() time.Time
@@ -626,6 +629,36 @@ func WithReconcileGate(allowed func() bool) CachingStoreOption {
 	return func(c *CachingStore) {
 		c.reconcileGate = allowed
 	}
+}
+
+// WithStoreWork makes the cache count its own background reads (PrimeActive,
+// Prime, and each reconcile cycle, from before it asks its reconcile gate) as
+// its owner's store work: begin is called as the read starts and the func it
+// returns as the read ends.
+func WithStoreWork(begin func() (end func())) CachingStoreOption {
+	return func(c *CachingStore) {
+		c.storeWork = begin
+	}
+}
+
+// JoinCachingStoreOptions applies opts, in order, as one option.
+func JoinCachingStoreOptions(opts ...CachingStoreOption) CachingStoreOption {
+	return func(c *CachingStore) {
+		for _, opt := range opts {
+			if opt != nil {
+				opt(c)
+			}
+		}
+	}
+}
+
+// beginStoreWork counts one background read as the owner's store work
+// (WithStoreWork) and returns the func that ends it.
+func (c *CachingStore) beginStoreWork() func() {
+	if c.storeWork == nil {
+		return func() {}
+	}
+	return c.storeWork()
 }
 
 // WithClock sets the clock the cache's windows and due times read: the
@@ -1505,6 +1538,7 @@ func (c *CachingStore) fetchDirtyOverlay(todo []string, suppressed map[string]st
 // cachePartial state: filtered active queries and Get hit cache for primed
 // beads, while closed-bead queries still delegate to the backing store.
 func (c *CachingStore) PrimeActive() error {
+	defer c.beginStoreWork()()
 	c.mu.RLock()
 	startSeq, startScan := c.mutationSeq, c.scanGen
 	c.mu.RUnlock()
@@ -1589,6 +1623,7 @@ func (c *CachingStore) PrimeActive() error {
 // Retries up to 3 times on failure since bd list can time out under
 // concurrent dolt load.
 func (c *CachingStore) Prime(ctx context.Context) error {
+	defer c.beginStoreWork()()
 	if ctx == nil {
 		ctx = context.Background()
 	}

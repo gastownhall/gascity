@@ -206,6 +206,20 @@ periodic read would keep a suspended scope warm for good.
   stop runs last. A drain-ack stop empties the provider's session list before
   it releases its runtime lease in the session store, so the empty list alone
   does not mean the last write has landed.
+  - The caches' own background reads count as that work: a reconcile cycle
+    (from before it asks its gate, so the gate is asked once and the cycle's
+    later reads are still seen), `PrimeActive` and `Prime` (`beads.WithStoreWork`).
+  - So does the bead event watcher's backlog. It applies events off the tick,
+    and applying one reads the stores (the session list's confirmation read of
+    a closed session's bead), so the retire waits until the watcher has applied
+    every event the log holds. An unreadable log head counts as pending.
+  - These waits gate city quiescence (`enterBeadsQuiescenceIfDue`) only. A
+    rig suspended on its own is retired once its sessions are gone, and a late
+    read that restarts its pair is undone on a later tick. The waits also leave
+    out three gaps, each bounded by the same convergence: a prime that starts
+    before the controller state exists, a backlog that builds while the watcher
+    is between retries, and an event check whose backing read outlives its
+    deadline.
   - A rig is stopped when its own sessions are gone; the city and every rig
     when nothing runs at all.
   - The check reads the proxy record and the process table, never a store.
