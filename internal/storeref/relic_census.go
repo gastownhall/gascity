@@ -114,9 +114,10 @@ func HasLegacyResidents(b ClassBinding) bool {
 // asked directly, and it is asked instead of the scan rather than as well as it
 // — running both would make the fast path a pure cost.
 //
-// The fallback is not a legacy path. A binding served by the native Dolt engine
-// reaches its rows through the beads library and holds no SQL of its own, so it
-// cannot implement the capability and lists exactly as before.
+// The fallback is not a legacy path. A native Dolt engine answers the census
+// over the pool its library handle exports (beads.NativeDoltStore), and one
+// whose handle exports none cannot, so it is listed exactly as before; so is
+// a mem, file or exec store.
 //
 // Discovery goes through beads.NamespaceCensusFor rather than a bare assertion
 // on beads.NamespaceCensus, because the binding this runs against is not always

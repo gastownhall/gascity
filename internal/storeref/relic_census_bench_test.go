@@ -15,7 +15,8 @@ package storeref
 // A store that can answer the verdict itself takes beads.NamespaceCensus, so
 // these measure the predicate. BenchmarkRelicCensusScanFallback_10k measures the
 // listing form the same population takes on a store without the capability,
-// which is both what this replaced and what a native-Dolt binding still pays.
+// which is both what this replaced and what a store that cannot answer the
+// verdict itself still pays.
 
 import (
 	"fmt"

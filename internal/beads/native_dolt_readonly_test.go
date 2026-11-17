@@ -93,6 +93,8 @@ var nativeStoreMethodKinds = map[string]nativeStoreMethodKind{
 	"ApplyGuarded":                nativeStoreMutation,
 	"WaitForParentProjection":     nativeStoreRead,
 	"Count":                       nativeStoreRead,
+	"HasResidentOutside":          nativeStoreRead,
+	"NamespaceCensusHandle":       nativeStoreRead,
 	"ReadEventsJournalPage":       nativeStoreRead,
 	"EventsJournalActive":         nativeStoreLifecycle,
 	"DepMetadata":                 nativeStoreRead,
