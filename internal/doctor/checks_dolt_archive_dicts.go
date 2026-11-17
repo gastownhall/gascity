@@ -25,8 +25,6 @@ const (
 	// leaves headroom to act before that.
 	doltArchiveDictWarnDefault = int64(200)
 
-	doltArchiveDictWarnEnv = "GC_DOLT_ARCHIVE_DICT_WARN_COUNT"
-
 	// doltArchiveVersion is the only archive format version the footer
 	// parser understands.
 	doltArchiveVersion = 3
@@ -113,7 +111,7 @@ func (c *DoltArchiveDictCheck) Run(ctx *CheckContext) *CheckResult {
 		return r
 	}
 
-	limit := doltEnvByteThreshold(doltArchiveDictWarnEnv, doltArchiveDictWarnDefault)
+	limit := doltEnvByteThreshold("GC_DOLT_ARCHIVE_DICT_WARN_COUNT", doltArchiveDictWarnDefault)
 
 	targets, unresolved := managedLocalDoltScanTargets(c.cityPath)
 	if c.applicableKnown {
@@ -207,7 +205,7 @@ func (c *DoltArchiveDictCheck) Run(ctx *CheckContext) *CheckResult {
 	for _, p := range problems {
 		details = append(details, fmt.Sprintf("unreadable: %s %s: %s", p.db, p.rel, p.reason))
 	}
-	details = append(details, fmt.Sprintf("warn threshold: %s (default %d, current %d)", doltArchiveDictWarnEnv, doltArchiveDictWarnDefault, limit))
+	details = append(details, fmt.Sprintf("warn threshold: GC_DOLT_ARCHIVE_DICT_WARN_COUNT (default %d, current %d)", doltArchiveDictWarnDefault, limit))
 	r.Details = details
 
 	if len(over) > 0 || len(problems) > 0 {
