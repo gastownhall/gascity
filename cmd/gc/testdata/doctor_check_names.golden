@@ -109,6 +109,7 @@ dolt-journal-size
 dolt-log-size
 dolt-config
 dolt-version
+bd-schema
 events-log
 events-log-size
 bd-backup-size
