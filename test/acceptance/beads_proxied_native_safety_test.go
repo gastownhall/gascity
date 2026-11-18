@@ -433,6 +433,15 @@ func TestProxiedNativeSafety(t *testing.T) {
 		// one row below, on the production window itself. The cursor gate
 		// keeps its coverage in internal/beads TestAdmitTable, and the
 		// projected author pair in cmd/gc TestProxiedOpenEnvForPinGolden.
+		//
+		// They are not registered at all, so nothing reports them as passed,
+		// and none skips (TestProxiedAcceptanceRowsNeverSkipInRow). This line
+		// is what puts their absence, and its reason, in the gate's output.
+		t.Log("NOT RUN on this bd-only data port: no-migrate-behind-ignored, no-migrate-ahead-main and author-latched-at-open. " +
+			"Their instrument is a plain MySQL session or a library open on the proxy's data port, which accepts only bd's BDPROXY1 hello, " +
+			"and the lane declines this proxy from its record (data_auth_required) before any probe or open. " +
+			"bd-only-port-refuses-the-library runs in their place; the cursor gate keeps internal/beads TestAdmitTable, " +
+			"and the projected author pair cmd/gc TestProxiedOpenEnvForPinGolden.")
 		t.Run("bd-only-port-refuses-the-library", func(t *testing.T) {
 			// The production window, the production endpoint map, and bd's
 			// LIVE proxy: the open the lane never attempts, made directly.
