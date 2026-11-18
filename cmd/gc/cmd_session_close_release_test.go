@@ -314,6 +314,9 @@ const namedCloseSessionTemplate = "{{.City}}-{{.Agent}}"
 // session `reviewer` (rig-qualified when the fixture declares a rig), backed
 // by the agent `worker`. declared controls whether the [[named_session]]
 // entry is still configured; the bead records the same identity either way.
+// The session bead lives in the session-class store, where production keeps
+// it; store is the city work store, which holds the claims. Under the
+// split-strict gate the two are different views, as on a split city.
 type namedCloseCity struct {
 	dir      string
 	store    beads.Store
@@ -351,11 +354,8 @@ func newNamedCloseCity(t *testing.T, rig string, declared bool) *namedCloseCity 
 	if runtimeName == identity {
 		t.Fatalf("fixture runtime name %q equals the identity; the runtime-address case would be vacuous", runtimeName)
 	}
-	store, err := openCityStoreAt(cityDir)
-	if err != nil {
-		t.Fatalf("openCityStoreAt: %v", err)
-	}
-	sessionBead, err := store.Create(beads.Bead{
+	store := openCityWorkStoreForTest(t, cityDir)
+	sessionBead, err := openCitySessionStoreForTest(t, cityDir).Create(beads.Bead{
 		Title:  "named reviewer incarnation",
 		Type:   session.BeadType,
 		Labels: []string{session.LabelSession},
@@ -407,12 +407,22 @@ func (c *namedCloseCity) close(t *testing.T) {
 	if code := cmdSessionClose([]string{c.session.ID}, "", &stdout, &stderr, false); code != 0 {
 		t.Fatalf("cmdSessionClose = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
-	if got := c.get(t, c.session.ID); got.Status != "closed" {
+	if got := c.sessionRow(t); got.Status != "closed" {
 		t.Fatalf("session bead status = %q, want closed", got.Status)
 	}
 }
 
-// get reads id back through a freshly opened city store.
+// sessionRow reads the session bead back through the session-class store.
+func (c *namedCloseCity) sessionRow(t *testing.T) beads.Bead {
+	t.Helper()
+	got, err := openCitySessionStoreForTest(t, c.dir).Get(c.session.ID)
+	if err != nil {
+		t.Fatalf("Get(session bead %s): %v", c.session.ID, err)
+	}
+	return got
+}
+
+// get reads the work bead id back through a freshly opened city work store.
 func (c *namedCloseCity) get(t *testing.T, id string) beads.Bead {
 	t.Helper()
 	reopened, err := openCityStoreAt(c.dir)
@@ -486,7 +496,8 @@ var namedCloseRigCases = []struct{ name, rig string }{
 // pins ga-o8xf41: closing the current bead of a named session whose identity
 // is still configured must not release work addressed to the identity. The
 // controller re-materializes the identity, so that work still has an owner;
-// a claim no lane serves is not the close's to strand either.
+// a claim no lane serves is not the close's to strand either. The closed
+// bead's current_claim_bead_id is still cleared.
 func TestCmdSessionCloseOnConfiguredNamedSessionPreservesIdentityAssignedWork(t *testing.T) {
 	for _, tc := range namedCloseRigCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -494,6 +505,9 @@ func TestCmdSessionCloseOnConfiguredNamedSessionPreservesIdentityAssignedWork(t 
 			queued := c.claim(t, c.identity, "open", c.route)
 			held := c.claim(t, c.identity, "in_progress", c.route)
 			unserved := c.claim(t, c.identity, "in_progress", "nowhere/lane")
+			if err := openCitySessionStoreForTest(t, c.dir).SetMetadata(c.session.ID, beadmeta.CurrentClaimBeadIDMetadataKey, held.ID); err != nil {
+				t.Fatalf("stamp current claim: %v", err)
+			}
 
 			c.close(t)
 
@@ -502,6 +516,9 @@ func TestCmdSessionCloseOnConfiguredNamedSessionPreservesIdentityAssignedWork(t 
 			}
 			if hits := c.strandedAlertsNaming(t, queued.ID, held.ID, unserved.ID); len(hits) != 0 {
 				t.Errorf("session.stranded_claims = %+v, want none naming identity-addressed work", hits)
+			}
+			if claim := c.sessionRow(t).Metadata[beadmeta.CurrentClaimBeadIDMetadataKey]; claim != "" {
+				t.Errorf("closed session %s = %q, want cleared even though the identity keeps its work", beadmeta.CurrentClaimBeadIDMetadataKey, claim)
 			}
 		})
 	}
@@ -680,7 +697,8 @@ func TestCmdSessionCloseOnRemovedNamedSessionReleasesIdentityAssignedWork(t *tes
 // tells an operator about the session's assigned work: the closed
 // incarnation's work is released, a still-configured named session's
 // identity keeps its own, unserved work stays and is reported stranded, and
-// `gc session kill` is the way to keep the same session bead and assignments.
+// `gc session kill` is the way to restart a named session on the same session
+// bead and assignments.
 func TestSessionCloseHelpDocumentsWorkRelease(t *testing.T) {
 	var discard bytes.Buffer
 	long := strings.Join(strings.Fields(newSessionCloseCmd(&discard, &discard).Long), " ")
