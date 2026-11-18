@@ -77,6 +77,23 @@ func RuntimeEnvWithSessionContext(info Info, generation, continuationEpoch int, 
 		env["GC_AGENT"] = identity
 		env["BEADS_ACTOR"] = identity
 	}
+	// GC_BEAD_ID is the work bead the session has claimed for itself through
+	// `gc hook --claim` (SetCurrentClaim's stamp). Prompts resolve their
+	// current molecule with ${GC_BEAD_ID:-} and used to fall back to
+	// discovery queries when it was unset — queries that miss open-assigned
+	// and ephemeral rows, which is the duplicate-pour loop: a restart-per-cycle
+	// session re-resolves nothing, pours a fresh wisp, and the assigned one
+	// accumulates. The claim stamp is the root truth those fallbacks were
+	// approximating: SetCurrentClaim's contract has every caller clear it on
+	// each path that takes the work back off the session, so a non-empty stamp
+	// names a bead this session owns. Leave it unset when no claim is stamped —
+	// a session that has not claimed yet (a pool seat before its first
+	// `gc hook --claim`, or a prompt-bootstrap wake whose pre-assigned wisp is
+	// still open) has no bead to name, and the widened discovery queries remain
+	// the correct answer there.
+	if bead := strings.TrimSpace(info.CurrentClaimBeadID); bead != "" {
+		env["GC_BEAD_ID"] = bead
+	}
 	return env
 }
 
