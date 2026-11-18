@@ -49,3 +49,32 @@ func doctorLiveSessionNames(cityPath string, cfg *config.City) doctor.LiveSessio
 		return names, nil
 	}
 }
+
+// doctorSessionRegistry returns the session registry the agent-sessions and
+// orphan-sessions checks read: each open session row's runtime session name,
+// mapped to the configured agent it runs. It lists the rows the way gc
+// session list and the controller do (the type+label union) from the session
+// coordination-class store, so a city that relocates its sessions class is
+// read from that binding. Each call reads afresh, and a failed or partial read
+// is returned as an error, so a check that cannot read the registry says so
+// instead of calling every bead-named session orphaned.
+func doctorSessionRegistry(cityPath string, cfg *config.City) doctor.SessionRegistry {
+	return func() (map[string]string, error) {
+		store, err := openSessionProviderStore(cityPath)
+		if err != nil {
+			return nil, err
+		}
+		infos, err := cliSessionFrontDoor(store, cfg, cityPath).ListAll(session.ListAllOptions{})
+		if err != nil {
+			return nil, err
+		}
+		names := make(map[string]string, len(infos))
+		for _, info := range infos {
+			if info.Closed || info.SessionName == "" {
+				continue
+			}
+			names[info.SessionName] = resolvedSessionTemplateInfo(info, cfg)
+		}
+		return names, nil
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -862,7 +863,7 @@ func TestAgentSessionsCheck_AllRunning(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{{Name: "mayor"}},
 	}
-	c := NewAgentSessionsCheck(cfg, "test", "", sp)
+	c := NewAgentSessionsCheck(cfg, "test", "", sp, nil)
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Errorf("status = %d, want OK; msg = %s", r.Status, r.Message)
@@ -876,7 +877,7 @@ func TestAgentSessionsCheck_Missing(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{{Name: "mayor"}},
 	}
-	c := NewAgentSessionsCheck(cfg, "test", "", sp)
+	c := NewAgentSessionsCheck(cfg, "test", "", sp, nil)
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusWarning {
 		t.Errorf("status = %d, want Warning; msg = %s", r.Status, r.Message)
@@ -890,10 +891,50 @@ func TestAgentSessionsCheck_SkipsSuspended(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{{Name: "worker", Suspended: true}},
 	}
-	c := NewAgentSessionsCheck(cfg, "test", "", sp)
+	c := NewAgentSessionsCheck(cfg, "test", "", sp, nil)
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Errorf("status = %d, want OK (suspended skipped); msg = %s", r.Status, r.Message)
+	}
+}
+
+// A pool instance or bead-named session is named after its session row, not
+// after agent.SessionNameFor; a running one the registry maps to an agent gives
+// that agent a session, and an agent whose registered sessions are not running
+// has none.
+func TestAgentSessionsCheck_RegisteredSessionCounts(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker-gcg-7", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}, {Name: "probe"}}}
+	registry := func() (map[string]string, error) {
+		return map[string]string{"worker-gcg-7": "worker", "s-gcg-9": "probe"}, nil
+	}
+	r := NewAgentSessionsCheck(cfg, "test", "", sp, registry).Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if want := []string{"probe"}; !reflect.DeepEqual(r.Details, want) {
+		t.Fatalf("details = %v, want %v", r.Details, want)
+	}
+}
+
+// A registry that cannot be read leaves the check unable to tell which agents
+// have sessions; it says so instead of naming every pool agent sessionless.
+func TestAgentSessionsCheck_UnreadableRegistryWarns(t *testing.T) {
+	sp := runtime.NewFake()
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	registry := func() (map[string]string, error) { return nil, errors.New("session store unavailable") }
+	r := NewAgentSessionsCheck(cfg, "test", "", sp, registry).Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "session registry") {
+		t.Fatalf("message = %q, want it to name the session registry", r.Message)
+	}
+	if len(r.Details) != 0 {
+		t.Fatalf("details = %v, want none", r.Details)
 	}
 }
 
@@ -1124,7 +1165,7 @@ func TestOrphanSessionsCheck_NoOrphans(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{{Name: "mayor"}},
 	}
-	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp, nil)
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusOK {
 		t.Errorf("status = %d, want OK; msg = %s", r.Status, r.Message)
@@ -1143,7 +1184,7 @@ func TestOrphanSessionsCheck_Found(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{{Name: "mayor"}},
 	}
-	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp, nil)
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusWarning {
 		t.Errorf("status = %d, want Warning; msg = %s", r.Status, r.Message)
@@ -1162,7 +1203,7 @@ func TestOrphanSessionsCheck_Fix(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{{Name: "mayor"}},
 	}
-	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp, nil)
 	if err := c.Fix(&CheckContext{}); err != nil {
 		t.Fatalf("Fix() error: %v", err)
 	}
@@ -1196,7 +1237,7 @@ func TestOrphanSessionsCheck_FixTreatsDownedServerAsFixedButReportsStopFailures(
 			sp.StopErrors["stale-worker"] = tc.stopErr
 
 			cfg := &config.City{Agents: []config.Agent{{Name: "mayor"}}}
-			err := NewOrphanSessionsCheck(cfg, "test", "", sp).Fix(&CheckContext{CityPath: t.TempDir()})
+			err := NewOrphanSessionsCheck(cfg, "test", "", sp, nil).Fix(&CheckContext{CityPath: t.TempDir()})
 			if tc.wantErr == nil {
 				if err != nil {
 					t.Fatalf("Fix() error = %v, want nil for an orphan already gone with its server", err)
@@ -1232,7 +1273,7 @@ func TestOrphanSessionsCheck_FixSkipsWhenControllerRunning(t *testing.T) {
 	cfg := &config.City{
 		Agents: []config.Agent{{Name: "mayor"}},
 	}
-	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp, nil)
 	err := c.Fix(&CheckContext{CityPath: cityDir})
 	if err == nil {
 		t.Fatal("Fix() error = nil, want refusal while controller is running")
@@ -1258,7 +1299,7 @@ func TestOrphanSessionsCheck_PartialListWarns(t *testing.T) {
 	}
 
 	cfg := &config.City{}
-	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp, nil)
 	r := c.Run(&CheckContext{})
 	if r.Status != StatusWarning {
 		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
@@ -1278,9 +1319,91 @@ func TestOrphanSessionsCheck_FixFailsOnPartialList(t *testing.T) {
 	}
 
 	cfg := &config.City{}
-	c := NewOrphanSessionsCheck(cfg, "test", "", sp)
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp, nil)
 	if err := c.Fix(&CheckContext{}); err == nil {
 		t.Fatal("Fix() error = nil, want partial list failure")
+	}
+}
+
+// A running session with an open registry row is accounted for, whatever its
+// name; Run reports and Fix stops only a session neither config nor the
+// registry accounts for.
+func TestOrphanSessionsCheck_RegisteredSessionsAreNotOrphans(t *testing.T) {
+	sp := runtime.NewFake()
+	for _, name := range []string{"worker-gcg-7", "s-gcg-9", "stale-worker"} {
+		if err := sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	registry := func() (map[string]string, error) {
+		return map[string]string{"worker-gcg-7": "worker", "s-gcg-9": "worker"}, nil
+	}
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp, registry)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if want := []string{"stale-worker"}; !reflect.DeepEqual(r.Details, want) {
+		t.Fatalf("details = %v, want %v", r.Details, want)
+	}
+	if err := c.Fix(&CheckContext{CityPath: t.TempDir()}); err != nil {
+		t.Fatalf("Fix() error: %v", err)
+	}
+	if sp.IsRunning("stale-worker") {
+		t.Error("orphan session still running after fix")
+	}
+	for _, name := range []string{"worker-gcg-7", "s-gcg-9"} {
+		if !sp.IsRunning(name) {
+			t.Errorf("registered session %q was stopped by fix", name)
+		}
+	}
+}
+
+// A registry that cannot be read makes every bead-named session look orphaned;
+// Run warns without naming any, and Fix stops nothing.
+func TestOrphanSessionsCheck_UnreadableRegistryStopsNothing(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker-gcg-7", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	registryErr := errors.New("session store unavailable")
+	registry := func() (map[string]string, error) { return nil, registryErr }
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp, registry)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if len(r.Details) != 0 {
+		t.Fatalf("details = %v, want none", r.Details)
+	}
+	err := c.Fix(&CheckContext{CityPath: t.TempDir()})
+	if !errors.Is(err, registryErr) {
+		t.Fatalf("Fix() error = %v, want it to wrap %v", err, registryErr)
+	}
+	if n := sp.CountCalls("Stop", "worker-gcg-7"); n != 0 {
+		t.Errorf("Stop called %d times, want 0 when the registry cannot be read", n)
+	}
+}
+
+// A session row is written before its runtime starts, so reading the rows after
+// listing the runtimes never takes a just-started session for an orphan.
+func TestOrphanSessionsCheck_ReadsRegistryAfterListing(t *testing.T) {
+	sp := runtime.NewFake()
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	listingsSeen := 0
+	registry := func() (map[string]string, error) {
+		listingsSeen += sp.CountCalls("ListRunning", "")
+		return map[string]string{}, nil
+	}
+	c := NewOrphanSessionsCheck(cfg, "test", "", sp, registry)
+	c.Run(&CheckContext{})
+	if err := c.Fix(&CheckContext{CityPath: t.TempDir()}); err != nil {
+		t.Fatalf("Fix() error: %v", err)
+	}
+	if listingsSeen != 3 {
+		t.Fatalf("registry reads saw %d prior listings in total, want 3 (Run after 1, Fix after 2)", listingsSeen)
 	}
 }
 
