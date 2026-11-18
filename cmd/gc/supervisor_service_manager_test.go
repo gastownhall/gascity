@@ -169,3 +169,20 @@ func mustAbs(t *testing.T, path string) string {
 	}
 	return abs
 }
+
+// TestInstallSupervisorServiceRefusesUnsupportedGOOSWithTypedMessage pins the
+// install refusal text on every host: installSupervisorService takes the GOOS
+// explicitly, so a platform without a service manager is exercised on Linux
+// and macOS CI too.
+func TestInstallSupervisorServiceRefusesUnsupportedGOOSWithTypedMessage(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if code := installSupervisorService("freebsd", &supervisorServiceData{}, &stdout, &stderr); code == 0 {
+		t.Fatalf("installSupervisorService(freebsd) = 0, want nonzero; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	got := stderr.String()
+	for _, want := range []string{"no service manager gc installs into", "freebsd"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("install stderr = %q, want %q", got, want)
+		}
+	}
+}
