@@ -774,6 +774,10 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 	_ = m.store.SetMetadata(id, "transport", transport)
 }
 
+// orphanScanErrorLogs paces killExistingOrphans' scan-error line per city.
+// Managers are built per start, so the pacing state outlives any one of them.
+var orphanScanErrorLogs = &proctable.ScanErrorLog{}
+
 // killExistingOrphans terminates any untracked runtime whose session ID and
 // city match the session about to start, then confirms each is dead. It returns
 // a non-nil error when an orphan could not be confirmed dead, or, terminating
@@ -786,8 +790,8 @@ func (m *Manager) persistTransport(id, provider, transport string) {
 // LiveUnlisted, which terminates none: a partial result is worth acting on. Where orphanScanErrorsRefuseStart is set (Windows), the scan
 // error is then fatal to the gate too, joined with any termination failures
 // rather than logged, because an incomplete scan cannot establish the one fact
-// this gate exists to establish. Elsewhere it is only logged, as
-// ProcessTableScanner allows.
+// this gate exists to establish. Elsewhere it is only logged, paced per city
+// by orphanScanErrorLogs, as ProcessTableScanner allows.
 //
 // On Windows the gate also refuses while a session a more elevated gc started
 // in this city could still be running, since the scan here cannot read it, and
@@ -836,7 +840,7 @@ const maxOrphanPasses = 3
 // verb is referenced, and lease-checked, in killExistingOrphans itself.
 func (m *Manager) killOrphanPass(scanner runtime.ProcessTableScanner, terminate func(runtime.LiveRuntime) error, sessionID, cityPath string) (int, error) {
 	found, scanErr := scanner.FindRuntimesBySessionID(sessionID)
-	if scanErr != nil && !orphanScanErrorsRefuseStart {
+	if scanErr != nil && !orphanScanErrorsRefuseStart && orphanScanErrorLogs.Report(cityPath, scanErr, m.now()) {
 		log.Printf("session: scanning for orphaned runtimes for %s (failing closed): %s", sessionID, proctable.SummarizeScanError(scanErr))
 	}
 	var termErrs []error
