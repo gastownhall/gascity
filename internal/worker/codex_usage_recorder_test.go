@@ -233,3 +233,77 @@ func TestSweepCodexUsageDrainsBacklogOverBoundedPasses(t *testing.T) {
 		t.Fatalf("progress = %+v, want cursor total:450 mirrored in the checkpoint", progress)
 	}
 }
+
+// restart replaces the fixture's factory with a fresh one over the same store,
+// sink and search root, keeping its codex page limits: a gc restart between
+// sweeps, with only the session bead's committed progress carried over.
+func (fx *codexRecorderFixture) restart(t *testing.T) {
+	t.Helper()
+	limits := fx.factory.codexUsageLimits
+	factory, err := NewFactory(FactoryConfig{
+		Store:       fx.store,
+		Provider:    runtime.NewFake(),
+		SearchPaths: []string{fx.root},
+		UsageSink:   usage.NewLocalSink(fx.sinkPath),
+	})
+	if err != nil {
+		t.Fatalf("NewFactory after restart: %v", err)
+	}
+	factory.codexUsageLimits = limits
+	fx.factory = factory
+}
+
+// TestSweepCodexUsageKeepsModelContextAcrossPagesAndRestart puts the model
+// context of an invocation more than 2 MiB back, behind tool output, then
+// switches model and lets Codex re-emit that invocation's snapshot after the
+// new turn_context. Bounded pages split the read and gc restarts in between:
+// each invocation is billed once with its own model and time.
+func TestSweepCodexUsageKeepsModelContextAcrossPagesAndRestart(t *testing.T) {
+	fx := newCodexRecorderFixture(t)
+	fx.factory.codexUsageLimits.MaxBytes = 512 * 1024
+	lines := []map[string]any{
+		codexWorkerSessionMeta(fx.meta["work_dir"]),
+		fx.turnContext(0, "gpt-5.5"),
+		fx.tokenCount(1, 150),
+	}
+	lines = append(lines, codexToolOutputs(320, 8*1024)...) // 2.5 MiB
+	lines = append(lines,
+		fx.tokenCount(2, 300),
+		fx.turnContext(3, "gpt-5.6"),
+		fx.tokenCount(4, 300), // the re-emitted snapshot of total:300
+		fx.tokenCount(5, 450),
+	)
+	fx.write(t, lines)
+
+	if _, settled, err := fx.sweep(t); err != nil || settled {
+		t.Fatalf("first bounded pass settled=%v err=%v; want an unsettled backlog", settled, err)
+	}
+	fx.restart(t)
+	if _, settled, err := fx.sweep(t); err != nil || settled {
+		t.Fatalf("pass after restart settled=%v err=%v; want backlog still pending", settled, err)
+	}
+	fx.restart(t)
+	fx.sweepUntilSettled(t, 20)
+
+	ids, byID := fx.logicalFacts(t)
+	if want := []string{"total:150", "total:300", "total:450"}; !reflect.DeepEqual(ids, want) {
+		t.Fatalf("logical facts = %v, want %v", ids, want)
+	}
+	want := map[string]struct {
+		model string
+		sec   int
+	}{
+		"total:150": {"gpt-5.5", 1},
+		"total:300": {"gpt-5.5", 2},
+		"total:450": {"gpt-5.6", 5},
+	}
+	for id, w := range want {
+		f := byID[id]
+		if f.Model != w.model {
+			t.Fatalf("%s model = %q, want %q", id, f.Model, w.model)
+		}
+		if at := fx.start.Add(time.Duration(w.sec) * time.Second).UnixMilli(); f.At != at {
+			t.Fatalf("%s at = %d, want its own invocation time %d", id, f.At, at)
+		}
+	}
+}

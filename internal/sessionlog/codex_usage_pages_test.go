@@ -229,3 +229,62 @@ func TestCodexUsageCheckpointRoundTrip(t *testing.T) {
 		t.Fatal("undecodable checkpoint must be an error")
 	}
 }
+
+// TestReadCodexUsagePageKeepsModelContextAcrossPagesAndRestart reads a rollout
+// whose model context lies more than 2 MiB before an invocation, followed by a
+// model switch and the re-emitted snapshot of that invocation, in bounded
+// pages whose checkpoint is stored and parsed between each (a restart).
+func TestReadCodexUsagePageKeepsModelContextAcrossPagesAndRestart(t *testing.T) {
+	lines := []string{
+		codexSessionMetaLine("2026-04-16T21:49:30.734Z", "/work/dir"),
+		codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.5"),
+		codexTokenCountLine("2026-04-16T21:49:38.304Z", 150, 100, 0, 50, 0),
+	}
+	lines = append(lines, codexFillerLines(t, 2*1024*1024+512*1024)...)
+	lines = append(lines,
+		codexTokenCountLine("2026-04-16T21:50:38.304Z", 300, 100, 0, 50, 0),
+		codexTurnContextLine("2026-04-16T21:50:40.000Z", "gpt-5.6"),
+		codexTokenCountLine("2026-04-16T21:50:40.100Z", 300, 100, 0, 50, 0), // re-emission
+		codexTokenCountLine("2026-04-16T21:50:48.304Z", 450, 100, 0, 50, 0),
+	)
+	root, path := codexPagesRollout(t, lines)
+
+	type got struct{ id, model, at string }
+	var facts []got
+	var cp CodexUsageCheckpoint
+	pages := 0
+	for more := true; more; pages++ {
+		if pages > 100 {
+			t.Fatal("pages never drained")
+		}
+		page, err := ReadCodexUsagePage(context.Background(), CodexUsagePageRequest{
+			SearchPaths: []string{root}, Path: path, From: cp,
+			Limits: CodexUsagePageLimits{MaxBytes: 256 * 1024},
+		})
+		if err != nil {
+			t.Fatalf("page %d: %v", pages, err)
+		}
+		for _, e := range page.Entries {
+			facts = append(facts, got{e.Usage.MessageID, e.Usage.Model, e.Usage.Timestamp.UTC().Format("15:04:05.000")})
+		}
+		raw, err := MarshalCodexUsageCheckpoint(page.Checkpoint)
+		if err != nil {
+			t.Fatalf("marshal page %d checkpoint: %v", pages, err)
+		}
+		if cp, err = ParseCodexUsageCheckpoint(raw); err != nil {
+			t.Fatalf("parse page %d checkpoint: %v", pages, err)
+		}
+		more = page.More
+	}
+	if pages < 3 {
+		t.Fatalf("read in %d pages, want the 256 KiB budget to split the 2 MiB gap", pages)
+	}
+	want := []got{
+		{"total:150", "gpt-5.5", "21:49:38.304"},
+		{"total:300", "gpt-5.5", "21:50:38.304"},
+		{"total:450", "gpt-5.6", "21:50:48.304"},
+	}
+	if !reflect.DeepEqual(facts, want) {
+		t.Fatalf("facts = %+v, want %+v", facts, want)
+	}
+}
