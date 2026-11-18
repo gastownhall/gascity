@@ -143,18 +143,41 @@ func (a SessionLogAdapter) TailUsage(path, cursorID string) ([]sessionlog.TailUs
 	return sessionlog.ExtractTailUsageSinceFromSearchPaths(a.SearchPaths, path, cursorID)
 }
 
-// CodexTailUsage reads per-invocation token usage from the tail of a codex
-// rollout transcript. Validation merges the codex default roots
+// CodexTailUsage reads per-invocation token usage from a codex rollout
+// transcript with bounded forward pages instead of a fixed tail window, so a
+// rollout that grew more than the old window between reads loses nothing
+// (ga-amrzyf case 2). Validation merges the codex default roots
 // (~/.codex/sessions) on top of the configured search paths, because
 // a.SearchPaths alone holds claude-style roots that would reject real codex
 // rollout locations.
-// cursorID is accepted for signature symmetry with TailUsage but not yet
-// honored: the codex extractor collapses on cumulative totals rather than
-// per-message identity, so window growth needs its own correctness argument.
-// The codex family therefore keeps the fixed tail window for now.
+//
+// cursorID is the caller's last-collected invocation identity (a cumulative
+// total or entry timestamp), not a byte offset, so it cannot seed a seek;
+// the read pages forward from byte zero (or the persisted checkpoint, once
+// one exists) and entries at or before the cursor may come back too — the
+// caller's cursor filter decides what is new, exactly as it does for the
+// OpenCode export.
 func (a SessionLogAdapter) CodexTailUsage(path, cursorID string) ([]sessionlog.TailUsage, error) {
 	_ = cursorID
-	return sessionlog.ExtractCodexTailUsageFromSearchPaths(a.SearchPaths, path)
+	var usages []sessionlog.TailUsage
+	var resume *sessionlog.CodexUsageCheckpoint
+	for range 4096 {
+		page, err := sessionlog.ReadCodexUsagePageFromSearchPaths(a.SearchPaths, path, resume, sessionlog.CodexUsagePageBudgets{})
+		if err != nil {
+			return nil, err
+		}
+		usages = append(usages, page.Usages...)
+		if !page.More {
+			return usages, nil
+		}
+		if resume != nil && page.Final.Offset <= resume.Offset {
+			// No forward progress (a pending torn tail): stop rather than
+			// spin; the bytes stay uncommitted for a later call.
+			return usages, nil
+		}
+		resume = &page.Final
+	}
+	return nil, fmt.Errorf("codex usage read of %q did not drain within 4096 pages", path)
 }
 
 // OpenCodeTailUsage reads per-invocation token usage from a mirrored OpenCode

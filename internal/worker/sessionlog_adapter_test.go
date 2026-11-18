@@ -1812,3 +1812,46 @@ func TestCodexSnapshotAndActivityAgreeOnExplicitCompletion(t *testing.T) {
 		}
 	}
 }
+
+// TestSessionLogAdapterCodexTailUsageHonorsCursorPastTailWindow pins ga-amrzyf
+// case 2: a codex rollout that grows by more than the fixed tail window between
+// reads must still return every invocation appended after cursorID, the way
+// TailUsage grows its window toward the cursor for claude transcripts.
+func TestSessionLogAdapterCodexTailUsageHonorsCursorPastTailWindow(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "2026", "11", "02", "rollout-codex-cursor.jsonl")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir codex transcript dir: %v", err)
+	}
+	tokenCount := func(ts string, total int) string {
+		return fmt.Sprintf(`{"timestamp":%q,"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":%d},"last_token_usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150},"model_context_window":258400}}}`, ts, total)
+	}
+	filler := fmt.Sprintf(`{"timestamp":"2026-11-02T00:00:03Z","type":"response_item","payload":{"type":"function_call_output","output":%q}}`, strings.Repeat("x", 4096))
+	lines := []string{
+		`{"timestamp":"2026-11-02T00:00:00Z","type":"turn_context","payload":{"model":"gpt-5.5"}}`,
+		tokenCount("2026-11-02T00:00:01Z", 150), // already collected: the cursor
+		tokenCount("2026-11-02T00:00:02Z", 300), // appended since the cursor
+	}
+	for i := 0; i < 32; i++ { // ~128 KiB of tool output, twice the tail window
+		lines = append(lines, filler)
+	}
+	lines = append(lines, tokenCount("2026-11-02T00:00:04Z", 450))
+	writeLines(t, path, lines...)
+
+	usages, err := (SessionLogAdapter{SearchPaths: []string{root}}).CodexTailUsage(path, "2026-11-02T00:00:01Z")
+	if err != nil {
+		t.Fatalf("CodexTailUsage: %v", err)
+	}
+	// Entries at or before the cursor may come back too; the caller filters them.
+	got := make(map[string]bool)
+	var ids []string
+	for _, u := range usages {
+		got[u.EntryUUID] = true
+		ids = append(ids, u.EntryUUID)
+	}
+	for _, want := range []string{"2026-11-02T00:00:02Z", "2026-11-02T00:00:04Z"} {
+		if !got[want] {
+			t.Errorf("CodexTailUsage since cursor = %v, missing invocation %s appended after the cursor (lost to the fixed 64 KiB tail)", ids, want)
+		}
+	}
+}
