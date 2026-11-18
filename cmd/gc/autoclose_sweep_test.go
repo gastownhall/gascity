@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 var sweepEpoch = time.Date(2026, 10, 4, 0, 0, 0, 0, time.UTC)
@@ -649,7 +650,7 @@ func TestLiveCloseOwnerTakesTheRowThatReadsClosed(t *testing.T) {
 			if tc.noRelic {
 				probed = nil
 			}
-			owner, live, err := liveCloseOwner([]beads.Store{work, relic}, id, probed)
+			owner, live, err := liveCloseOwner(testStores(work, relic), []storeref.StoreRef{storeref.WorkRef}, []beads.Store{work, relic}, id, probed)
 			if got := confirmInferredClose(live, err); got != tc.want {
 				t.Fatalf("verdict = %v (row %q, err %v), want %v", got, live.Status, err, tc.want)
 			}

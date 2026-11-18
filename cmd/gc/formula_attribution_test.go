@@ -60,7 +60,7 @@ func slingGraphRun(t *testing.T, store beads.Store, formula, sourceID string) be
 	}
 	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
 	deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
-	deps.Store = store
+	deps = slingDepsWithStore(deps, store)
 	config.InjectImplicitAgents(cfg)
 	addTestControlDispatcherAgents(cfg, "", "frontend")
 	opts := testOpts(a, sourceID)

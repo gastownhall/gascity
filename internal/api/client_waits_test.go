@@ -147,8 +147,8 @@ func TestWaitList_TypedRungPreservesSubSecondOrder(t *testing.T) {
 
 	state := newFakeState(t)
 	// Seed both waits verbatim (NewMemStoreFrom preserves the explicit CreatedAt
-	// that Create would otherwise overwrite). SessionsBeadStore falls back to
-	// cityBeadStore, which the /v0/waits handler reads.
+	// that Create would otherwise overwrite). Stores().Sessions() wraps
+	// cityBeadStore when nothing is relocated, and the /v0/waits handler reads it.
 	state.cityBeadStore = beads.NewMemStoreFrom(2, []beads.Bead{late, early}, nil)
 
 	ts := httptest.NewServer(newTestCityHandler(t, state))
