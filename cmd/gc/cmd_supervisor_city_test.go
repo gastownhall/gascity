@@ -2034,10 +2034,20 @@ func TestCmdStopSupervisorManagedCityReliesOnSupervisorCleanup(t *testing.T) {
 	t.Setenv("GC_BEADS", "exec:"+script)
 	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
 
+	// The supervisor's controller serves the city until the unregister's
+	// reconcile stops it.
+	sockPath := filepath.Join(cityPath, ".gc", "controller.sock")
+	lis, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lis.Close() //nolint:errcheck
+
 	withSupervisorTestHooks(
 		t,
 		func(_, _ io.Writer) int { return 0 },
 		func(_, _ io.Writer) int {
+			_ = lis.Close()
 			if err := shutdownBeadsProvider(cityPath); err != nil {
 				t.Fatalf("shutdownBeadsProvider: %v", err)
 			}
@@ -2049,26 +2059,27 @@ func TestCmdStopSupervisorManagedCityReliesOnSupervisorCleanup(t *testing.T) {
 		time.Millisecond,
 	)
 
-	sockPath := filepath.Join(cityPath, ".gc", "controller.sock")
-	lis, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lis.Close() //nolint:errcheck
-
 	stopped := make(chan struct{}, 1)
 	go func() {
-		conn, acceptErr := lis.Accept()
-		if acceptErr != nil {
-			return
+		for {
+			conn, acceptErr := lis.Accept()
+			if acceptErr != nil {
+				return
+			}
+			buf := make([]byte, 32)
+			n, _ := conn.Read(buf)
+			switch line := string(buf[:n]); {
+			case strings.Contains(line, "stop"):
+				select {
+				case stopped <- struct{}{}:
+				default:
+				}
+				conn.Write([]byte("ok\n")) //nolint:errcheck
+			case strings.Contains(line, "ping"):
+				conn.Write([]byte("4242\n")) //nolint:errcheck
+			}
+			conn.Close() //nolint:errcheck
 		}
-		defer conn.Close() //nolint:errcheck
-		buf := make([]byte, 32)
-		n, _ := conn.Read(buf)
-		if strings.Contains(string(buf[:n]), "stop") {
-			stopped <- struct{}{}
-		}
-		conn.Write([]byte("ok\n")) //nolint:errcheck
 	}()
 
 	var stdout, stderr bytes.Buffer

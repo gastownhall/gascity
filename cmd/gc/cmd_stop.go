@@ -143,6 +143,21 @@ func cmdStopJSONSequence(args []string, stdout, stderr io.Writer, force bool, js
 	}
 
 	unregisteredFromSupervisor := false
+	runLoadedCityStop := func(cfg *config.City, flow func(cityPath string, cfg *config.City, force bool, stdout, stderr io.Writer, extendCap func(time.Duration)) int) stopCommandOutcome {
+		stopLoadedCity := func(extendCap func(time.Duration)) stopCommandOutcome {
+			return stopCommandOutcome{
+				code:         flow(cityPath, cfg, force, stopStdout, stderr, extendCap),
+				cityPath:     cityPath,
+				unregistered: unregisteredFromSupervisor,
+			}
+		}
+		if wallClockCapApplied {
+			// The operator's --timeout is the cap; the stop does not grow it.
+			return stopLoadedCity(nil)
+		}
+		return runStopWithExtendableWallClockCap(defaultStopWallClockTimeout(cfg), stderr, nil, stopLoadedCity)
+	}
+	served := registeredCityControllerServing(cityPath)
 	handled, code, ownership := unregisterCityFromSupervisorForStop(cityPath, stopStdout, stderr, "gc stop", force, unregisterTx)
 	if ownership != nil {
 		// The supervisor stopped the controller; hold its lock until the bead
@@ -160,7 +175,16 @@ func cmdStopJSONSequence(args []string, stdout, stderr io.Writer, force bool, js
 		// supervisor could fall through to the standalone stop while this
 		// process still holds the lock that path waits on.
 		if ownership != nil || supervisorAliveHook() != 0 {
-			if cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard); err == nil && !confirmControllerStopForStop(cfg, cityPath, stderr) {
+			cfg, cfgErr := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+			if cfgErr == nil && !served {
+				// No controller served the city (a failed stop just restored
+				// its registration, or the supervisor is backing off a start),
+				// so the unregister stopped none of its sessions: stop them
+				// here, as the standalone stop does, under the controller lock
+				// so the city cannot be relaunched underneath.
+				return runLoadedCityStop(cfg, stopCityWithoutControllerForStop)
+			}
+			if cfgErr == nil && !confirmControllerStopForStop(cfg, cityPath, stderr) {
 				return stopCommandOutcome{code: 1, cityPath: cityPath}
 			}
 			if !stopCityManagedBeadsProviderAfterSuccessfulStop(cityPath, stderr) {
@@ -180,18 +204,7 @@ func cmdStopJSONSequence(args []string, stdout, stderr io.Writer, force bool, js
 		return stopCommandOutcome{code: 1, cityPath: cityPath}
 	}
 
-	stopLoadedCity := func(extendCap func(time.Duration)) stopCommandOutcome {
-		return stopCommandOutcome{
-			code:         cmdStopBodyWithoutSuccessExtendingCap(cityPath, cfg, force, stopStdout, stderr, extendCap),
-			cityPath:     cityPath,
-			unregistered: unregisteredFromSupervisor,
-		}
-	}
-	if wallClockCapApplied {
-		// The operator's --timeout is the cap; the stop does not grow it.
-		return stopLoadedCity(nil)
-	}
-	return runStopWithExtendableWallClockCap(defaultStopWallClockTimeout(cfg), stderr, nil, stopLoadedCity)
+	return runLoadedCityStop(cfg, cmdStopBodyWithoutSuccessExtendingCap)
 }
 
 func runStopWithWallClockCap(wallClockCap time.Duration, stderr io.Writer, unregisterTx *supervisorUnregisterTransaction, stop func() stopCommandOutcome) stopCommandOutcome {
@@ -436,7 +449,6 @@ func cmdStopBodyWithoutSuccessExtendingCap(cityPath string, cfg *config.City, fo
 		fmt.Fprintf(stderr, "gc stop: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cityName := loadedCityName(cfg, cityPath)
 
 	// If a controller is running, ask it to shut down (it stops agents).
 	stopResult := tryStopControllerWithForce(cityPath, stdout, force)
@@ -469,6 +481,18 @@ func cmdStopBodyWithoutSuccessExtendingCap(cityPath string, cfg *config.City, fo
 		fmt.Fprintf(stderr, "gc stop: %v\n", stopResult.failClosedError()) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	return stopCityWithoutControllerForStop(cityPath, cfg, force, stdout, stderr, extendCap)
+}
+
+// stopCityWithoutControllerForStop is gc stop's own stop of a city no
+// controller serves: the standalone stop runs it once no controller took the
+// stop request, and the supervisor stop runs it when no controller served the
+// city, so the supervisor's reconcile stopped none of its sessions. It stops
+// the city's sessions and orphans, tears down the runtime server, and stops
+// the bead store last. extendCap grows the default wall-clock cap (nil when
+// the cap is the operator's --timeout, or there is none).
+func stopCityWithoutControllerForStop(cityPath string, cfg *config.City, force bool, stdout, stderr io.Writer, extendCap func(time.Duration)) int {
+	cityName := loadedCityName(cfg, cityPath)
 
 	// A city that is already stopped has nothing for this stop to do, and on
 	// a provider-owned proxied store the rest of this flow is not free: the
@@ -1094,6 +1118,21 @@ var stopVerifyListTimeout = 10 * time.Second
 
 // stopVerifyPollInterval spaces the confirming listings.
 var stopVerifyPollInterval = 250 * time.Millisecond
+
+// registeredCityControllerServing reports whether a controller answers on the
+// controller socket of a city registered with the supervisor. gc stop asks
+// before it unregisters the city: the supervisor's reconcile stops a city's
+// sessions only through the controller serving it, so a registered city no
+// controller serves (one whose registration a failed stop just restored, or
+// one the supervisor is backing off starting) has nothing else to stop them.
+// An unregistered city answers false without a probe: gc stop takes the
+// standalone path there, which asks its controller itself.
+func registeredCityControllerServing(cityPath string) bool {
+	if _, registered, err := registeredCityEntry(normalizePathForCompare(cityPath)); err != nil || !registered {
+		return false
+	}
+	return controllerAlive(cityPath) != 0
+}
 
 // confirmControllerStopForStop reports whether a stop the controller handled
 // (the supervisor's, or a standalone controller's) left no session of the
