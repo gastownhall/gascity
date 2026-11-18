@@ -1251,15 +1251,22 @@ func testStructuredPromotionWithoutReconnect(t *testing.T, surface string, holdF
 		gate.Release()
 	}
 	// The handler checks history once right after its first fallback frame,
-	// before it first selects on the poll channel, so a transcript that is
-	// already complete promotes on that check and no tick is ever read. A
-	// transcript that lands later promotes on a tick. Offer ticks until the
-	// promotion frame is complete instead of requiring one to be consumed.
+	// before it first selects on the poll channel. In the gated case the
+	// transcript is complete before that check, so the stream must promote on
+	// it with no tick: offering one would hide the loss of that check. In the
+	// ungated case the transcript may land after that check and promote on a
+	// tick, so offer ticks until the promotion frame is complete instead of
+	// requiring one to be consumed.
 	const promotionMarker = `"reset_reason":"stream_changed"`
 	deadline := time.Now().Add(hangBudget)
 	for !sseFrameComplete(rec.BodyString(), promotionMarker) {
 		if time.Now().After(deadline) {
 			t.Fatalf("structured peek stream never promoted to history; body:\n%s", rec.BodyString())
+		}
+		if holdFirstHistoryCheck {
+			// Must promote on the pre-poll history check; never offer a tick.
+			time.Sleep(10 * time.Millisecond)
+			continue
 		}
 		select {
 		case structuredPeekPoll <- time.Now():
