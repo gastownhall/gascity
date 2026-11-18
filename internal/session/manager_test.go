@@ -6329,6 +6329,77 @@ func TestPersistCodexUsageCheckpointIfCurrent(t *testing.T) {
 	}
 }
 
+// TestResetCodexUsageCheckpoint pins the refuted-checkpoint recovery: when the
+// rollout a checkpoint names is replaced or truncated, the drain clears the
+// stored value so the replay's smaller-offset commits can land against the
+// source that now exists — the same-source staleness fence must not wedge a
+// checkpoint the source itself refutes (ga-amrzyf AC-8).
+func TestResetCodexUsageCheckpoint(t *testing.T) {
+	store := beads.NewMemStore()
+	mgr := newTestManager(t, store, runtime.NewFake())
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "chat", Command: "codex", WorkDir: "/tmp", Provider: "codex", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	rawCheckpoint := func(sourcePath string, offset int64) string {
+		t.Helper()
+		raw, err := json.Marshal(codexUsageCheckpointEnvelope{Version: 1, SourcePath: sourcePath, Offset: offset})
+		if err != nil {
+			t.Fatalf("marshal checkpoint: %v", err)
+		}
+		return string(raw)
+	}
+	stored := func() string {
+		b, err := store.Get(info.ID)
+		if err != nil {
+			t.Fatalf("store.Get: %v", err)
+		}
+		return b.Metadata[MetadataKeyCodexUsageCheckpoint]
+	}
+
+	rollout := "/codex/sessions/2026/11/18/rollout-a.jsonl"
+	refuted := rawCheckpoint(rollout, 1161)
+	if err := mgr.PersistCodexUsageCheckpointIfCurrent(info.ID, refuted); err != nil {
+		t.Fatalf("persist: %v", err)
+	}
+
+	// Precondition: while the old checkpoint stands, the same-source fence
+	// refuses the replay's smaller-offset replacement.
+	replacement := rawCheckpoint(rollout, 870)
+	if err := mgr.PersistCodexUsageCheckpointIfCurrent(info.ID, replacement); err != nil {
+		t.Fatalf("persist fenced write: %v", err)
+	}
+	if got := stored(); got != refuted {
+		t.Fatalf("precondition: a smaller same-source offset must be fenced, got %q", got)
+	}
+
+	// The drain resets the refuted checkpoint, and the replacement lands.
+	if err := mgr.ResetCodexUsageCheckpoint(info.ID); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	if got := stored(); got != "" {
+		t.Fatalf("stored checkpoint after reset = %q, want cleared", got)
+	}
+	if err := mgr.PersistCodexUsageCheckpointIfCurrent(info.ID, replacement); err != nil {
+		t.Fatalf("persist after reset: %v", err)
+	}
+	if got := stored(); got != replacement {
+		t.Fatalf("stored checkpoint after reset+persist = %q, want the replacement", got)
+	}
+
+	// Reset is a no-op over an already-cleared value, and over an empty id.
+	if err := mgr.ResetCodexUsageCheckpoint(info.ID); err != nil {
+		t.Fatalf("reset over cleared value: %v", err)
+	}
+	if got := stored(); got != "" {
+		t.Fatalf("reset over empty = %q, want still cleared", got)
+	}
+	if err := mgr.ResetCodexUsageCheckpoint(""); err != nil {
+		t.Fatalf("reset empty id: %v", err)
+	}
+}
+
 // TestTranscriptPathZCodeResolvesEachSeatByBeadID pins the wiring that keys a
 // zcode transcript by the seat. Two seats can share session_name and
 // continuation_epoch (a pool slot re-seated within one run), and the adapter's

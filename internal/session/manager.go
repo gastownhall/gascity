@@ -2634,6 +2634,28 @@ func (m *Manager) PersistCodexUsageCheckpointIfCurrent(id, raw string) error {
 	})
 }
 
+// ResetCodexUsageCheckpoint clears the stored codex usage checkpoint under the
+// session mutation lock. The usage drain calls it when the source itself
+// refutes the stored checkpoint (a replaced or truncated rollout): the replay
+// then commits smaller offsets against the source that now exists, which the
+// same-source staleness fence in [Manager.PersistCodexUsageCheckpointIfCurrent]
+// would otherwise refuse forever, leaving every later pass re-refuting and
+// replaying. An empty id, or an already-cleared value, is a no-op.
+func (m *Manager) ResetCodexUsageCheckpoint(id string) error {
+	if id == "" {
+		return nil
+	}
+	return withSessionMutationLock(id, func() error {
+		if _, _, err := m.loadSessionBead(id, true); err != nil {
+			return err
+		}
+		if err := m.store.SetMetadata(id, MetadataKeyCodexUsageCheckpoint, ""); err != nil {
+			return fmt.Errorf("clearing codex usage checkpoint: %w", err)
+		}
+		return nil
+	})
+}
+
 // sessionNameFor derives the tmux session name from a bead ID.
 // Uses the "s-" prefix to avoid collision with agent sessions.
 func sessionNameFor(beadID string) string {

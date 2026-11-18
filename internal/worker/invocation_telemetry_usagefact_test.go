@@ -2401,13 +2401,14 @@ func TestFactorySweepCodexLegacyCursorReplayBillsOnlyPostFloorUsage(t *testing.T
 	}
 }
 
-// newCodexSweepUsageFactory builds the worker test harness the AC-8 holding
+// newCodexSweepUsageHarness builds the worker test harness the AC-8 holding
 // tests share: a factory over a memory store whose codex search root and usage
-// sink live in test temporaries, plus one started codex session.
-func newCodexSweepUsageFactory(t *testing.T) (factory *Factory, store *beads.MemStore, sinkPath string) {
+// sink live in test temporaries, plus one started codex session ready for a
+// keyless end-of-interval sweep.
+func newCodexSweepUsageHarness(t *testing.T) (factory *Factory, store *beads.MemStore, sinkPath, codexRoot, workDir, id string) {
 	t.Helper()
-	codexRoot := t.TempDir()
-	workDir := t.TempDir()
+	codexRoot = t.TempDir()
+	workDir = t.TempDir()
 	sinkPath = filepath.Join(t.TempDir(), "usage.jsonl")
 	store = beads.NewMemStore()
 	factory, err := NewFactory(FactoryConfig{
@@ -2434,9 +2435,185 @@ func newCodexSweepUsageFactory(t *testing.T) (factory *Factory, store *beads.Mem
 	if err := h.Start(context.Background(), handleActor(t, h, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	t.Cleanup(func() { _ = h.Stop(context.Background()) })
-	// The rollout root is the factory's search path; recover it for writers.
-	factoryRoot := factory.Adapter().SearchPaths[0]
-	t.Cleanup(func() { _ = factoryRoot })
-	return factory, store, sinkPath
+	return factory, store, sinkPath, codexRoot, workDir, h.sessionID
+}
+
+// setCodexSweepIntervalMeta stamps the metadata a keyless end-of-interval
+// codex sweep reads: the awake window and the run attribution.
+func setCodexSweepIntervalMeta(t *testing.T, store *beads.MemStore, id string, awake, slept time.Time) {
+	t.Helper()
+	for k, v := range map[string]string{
+		"awake_started_at": awake.Format(time.RFC3339),
+		"slept_at":         slept.Format(time.RFC3339),
+		"molecule_id":      "run-Z",
+	} {
+		if err := store.SetMetadata(id, k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestFactorySweepCodexTornTailHoldsSettlementUntilCompleted pins AC-8: a
+// rollout whose final record the writer has not newline-terminated drains its
+// complete prefix — facts emitted, checkpoint committed through the last
+// complete line — but never settles, and only the pass after the writer
+// completes the line settles.
+func TestFactorySweepCodexTornTailHoldsSettlementUntilCompleted(t *testing.T) {
+	factory, store, sinkPath, codexRoot, workDir, id := newCodexSweepUsageHarness(t)
+
+	awake := time.Date(2026, 6, 15, 10, 5, 0, 0, time.UTC)
+	slept := awake.Add(90 * time.Second)
+	path := writeCodexRolloutAtTimes(t, codexRoot, awake, workDir,
+		"019e0000-eeee-7000-8000-000000000005", map[string][3]int{
+			"2026-06-15T10:05:30.000Z": {150, 100, 50},
+			"2026-06-15T10:06:00.000Z": {450, 250, 200},
+		})
+	// Tear the final record: strip its terminator, so the last line is a
+	// pending write rather than a parseable record.
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(path, st.Size()-1); err != nil {
+		t.Fatal(err)
+	}
+	setCodexSweepIntervalMeta(t, store, id, awake, slept)
+
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := slept.Add(time.Minute)
+	emitted, settled, err := factory.SweepSessionModelUsage(context.Background(), id, b.Metadata, now)
+	if err != nil {
+		t.Fatalf("SweepSessionModelUsage (torn): %v", err)
+	}
+	if emitted != 1 {
+		t.Fatalf("emitted = %d, want 1 (the complete prefix only)", emitted)
+	}
+	if settled {
+		t.Fatal("a torn final record must hold settlement: the pass reports incomplete, not done")
+	}
+	after, err := store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cp, err := sessionlog.ParseCodexUsageCheckpoint(after.Metadata[sessionpkg.MetadataKeyCodexUsageCheckpoint])
+	if err != nil {
+		t.Fatalf("the torn pass must still commit its prefix checkpoint: %v", err)
+	}
+	if cp.LastInvocationID != "total:150" {
+		t.Fatalf("checkpoint last invocation = %q, want total:150 (committed through the last complete line)", cp.LastInvocationID)
+	}
+
+	// The writer completes the line; the next pass settles on it alone.
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte("\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	completed, err := store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	emitted2, settled2, err := factory.SweepSessionModelUsage(context.Background(), id, completed.Metadata, now)
+	if err != nil {
+		t.Fatalf("SweepSessionModelUsage (completed): %v", err)
+	}
+	if emitted2 != 1 || !settled2 {
+		t.Fatalf("after completion: emitted = %d, settled = %v; want 1, true (only the held-back record remains)", emitted2, settled2)
+	}
+	facts, _, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatalf("ReadFacts: %v", err)
+	}
+	ids := map[string]bool{}
+	for _, fact := range facts {
+		ids[fact.UpstreamReqID] = true
+	}
+	if !ids["total:150"] || !ids["total:450"] {
+		t.Fatalf("sink identities = %v, want both total:150 and total:450", ids)
+	}
+}
+
+// TestFactorySweepCodexTruncatedSourceDropsCheckpointAndReplays pins AC-8: a
+// rollout replaced by a shorter one after a committed checkpoint is refuted on
+// resume (the committed offset lies beyond the source), the checkpoint is
+// dropped, and the pass replays from zero — no error to the caller, bounded
+// work, settlement describing the source that now exists, and no sink identity
+// invented or lost.
+func TestFactorySweepCodexTruncatedSourceDropsCheckpointAndReplays(t *testing.T) {
+	factory, store, sinkPath, codexRoot, workDir, id := newCodexSweepUsageHarness(t)
+
+	awake := time.Date(2026, 6, 15, 10, 5, 0, 0, time.UTC)
+	slept := awake.Add(90 * time.Second)
+	path := writeCodexRolloutAtTimes(t, codexRoot, awake, workDir,
+		"019e0000-ffff-7000-8000-000000000006", map[string][3]int{
+			"2026-06-15T10:05:30.000Z": {150, 100, 50},
+			"2026-06-15T10:06:00.000Z": {450, 250, 200},
+		})
+	setCodexSweepIntervalMeta(t, store, id, awake, slept)
+
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := slept.Add(time.Minute)
+	emitted, settled, err := factory.SweepSessionModelUsage(context.Background(), id, b.Metadata, now)
+	if err != nil || !settled || emitted != 2 {
+		t.Fatalf("first sweep: emitted = %d, settled = %v, err = %v; want 2, true, nil", emitted, settled, err)
+	}
+
+	// Replace the source with a shorter one (rotation or truncation under the
+	// checkpoint): the committed offset now lies beyond the file.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cut := strings.LastIndex(string(raw[:len(raw)-1]), "\n")
+	if cut < 0 {
+		t.Fatal("fixture must hold more than one line")
+	}
+	if err := os.WriteFile(path, raw[:cut+1], 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	replaced, err := store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	emitted2, settled2, err2 := factory.SweepSessionModelUsage(context.Background(), id, replaced.Metadata, now)
+	if err2 != nil {
+		t.Fatalf("a refuted checkpoint must surface no caller error: %v", err2)
+	}
+	if !settled2 {
+		t.Fatal("the replay over the shorter source must drain and settle")
+	}
+	if emitted2 != 1 {
+		t.Fatalf("emitted = %d, want 1 (the from-zero replay re-covers the remaining record; dedup collapses it)", emitted2)
+	}
+	after, err := store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cp, err := sessionlog.ParseCodexUsageCheckpoint(after.Metadata[sessionpkg.MetadataKeyCodexUsageCheckpoint])
+	if err != nil || cp.LastInvocationID != "total:150" {
+		t.Fatalf("checkpoint after replay = %+v (err %v), want last invocation total:150 against the source that now exists", cp, err)
+	}
+	facts, _, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatalf("ReadFacts: %v", err)
+	}
+	ids := map[string]bool{}
+	for _, fact := range facts {
+		ids[fact.UpstreamReqID] = true
+	}
+	if len(ids) != 2 || !ids["total:150"] || !ids["total:450"] {
+		t.Fatalf("sink identities = %v, want exactly the two the original source produced", ids)
+	}
 }

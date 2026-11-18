@@ -1011,7 +1011,12 @@ func drainCodexUsagePages(
 		if perr != nil {
 			if resume != nil && errors.Is(perr, sessionlog.ErrCodexUsageResumeInvalid) {
 				// The checkpoint cannot describe this rollout (replaced,
-				// truncated, re-keyed): drop it and replay from zero.
+				// truncated, re-keyed): drop it and replay from zero. Clear
+				// the stored value too — the replay commits smaller offsets
+				// against the source that now exists, and the conditional
+				// persist's same-source fence would refuse them forever
+				// while the refuted checkpoint stands.
+				resetCodexUsageCheckpoint(manager, id)
 				slog.Debug("codex usage drain: checkpoint does not fit the rollout; replaying from zero",
 					slog.String("session_id", id), slog.Any("error", perr))
 				resume = nil
@@ -1113,6 +1118,20 @@ func persistCodexUsageCheckpoint(manager *sessionpkg.Manager, id string, cp sess
 	}
 	if err := manager.PersistCodexUsageCheckpointIfCurrent(id, raw); err != nil {
 		slog.Debug("codex usage drain: persisting codex usage checkpoint failed; next pass may re-read",
+			slog.String("session_id", id), slog.Any("error", err))
+	}
+}
+
+// resetCodexUsageCheckpoint clears the stored checkpoint when the source
+// refuted it, logging (not failing) on a store error: the next pass re-reads
+// the refuted checkpoint, drops it, and replays from zero — bounded, and the
+// idempotency key collapses what the replay re-emits.
+func resetCodexUsageCheckpoint(manager *sessionpkg.Manager, id string) {
+	if manager == nil {
+		return
+	}
+	if err := manager.ResetCodexUsageCheckpoint(id); err != nil {
+		slog.Debug("codex usage drain: clearing a refuted checkpoint failed; next pass may replay from zero",
 			slog.String("session_id", id), slog.Any("error", err))
 	}
 }

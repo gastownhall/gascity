@@ -1051,6 +1051,118 @@ func TestEmitDueComputeFactsRetriesUnsettledModelSweep(t *testing.T) {
 	}
 }
 
+// TestEmitDueComputeFactsHoldsSettlementOnTornRollout pins AC-8 at the
+// terminal lane: a rollout whose final record lacks its terminator drains its
+// complete prefix but reports the sweep unsettled, so the interval is stamped
+// neither swept nor committed and stays a retry candidate; once the writer
+// completes the line the retry settles and stamps both markers.
+func TestEmitDueComputeFactsHoldsSettlementOnTornRollout(t *testing.T) {
+	cityPath := t.TempDir()
+	workDir := t.TempDir()
+	codexRoot := t.TempDir()
+	sinkPath := filepath.Join(cityPath, ".gc", "usage.jsonl")
+
+	store := beads.NewMemStore()
+	start := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	slept := start.Add(90 * time.Second)
+	b, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Status: "open",
+		Title:  "codex session",
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"state":            "asleep",
+			"session_name":     "codex-1",
+			"awake_started_at": start.Format(time.RFC3339),
+			"slept_at":         slept.Format(time.RFC3339),
+			"session_key":      codexSweepSessionKey,
+			"work_dir":         workDir,
+			"provider":         "codex",
+			"builtin_ancestor": "codex",
+			"molecule_id":      "run-Z",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{Daemon: config.DaemonConfig{ObservePaths: []string{codexRoot}}}
+	cs := &controllerState{cityBeadStore: store, usageSink: usage.NewLocalSink(sinkPath), cityName: "demo", cityPath: cityPath}
+	cr := &CityRuntime{cs: cs, cfg: cfg, sp: runtime.NewFake(), cityName: "demo", cityPath: cityPath, stderr: io.Discard}
+	info := session.Info{ID: b.ID, MetadataState: "asleep", AwakeStartedAt: start.Format(time.RFC3339)}
+
+	// A rollout mid-write: the complete prefix is parseable, the final record
+	// lacks its terminator.
+	writeCodexRolloutForSweep(t, codexRoot, workDir, [][3]int{
+		{150, 100, 50},
+		{450, 200, 100},
+	})
+	rollouts, err := filepath.Glob(filepath.Join(codexRoot, "*", "*", "*", "rollout-*.jsonl"))
+	if err != nil || len(rollouts) != 1 {
+		t.Fatalf("fixture rollout not found: %v (%d matches)", err, len(rollouts))
+	}
+	st, err := os.Stat(rollouts[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(rollouts[0], st.Size()-1); err != nil {
+		t.Fatal(err)
+	}
+
+	cr.emitDueComputeFacts(context.Background(), []session.Info{info}, false)
+	facts1, _, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatalf("ReadFacts (tick 1): %v", err)
+	}
+	if kindCount(facts1, usage.KindCompute) != 1 {
+		t.Fatalf("tick 1 compute facts = %d, want 1 (compute is never delayed by a pending sweep)", kindCount(facts1, usage.KindCompute))
+	}
+	if kindCount(facts1, usage.KindModel) != 1 {
+		t.Fatalf("tick 1 model facts = %d, want 1 (the complete prefix's fact must flow)", kindCount(facts1, usage.KindModel))
+	}
+	afterTick1, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterTick1.Metadata[usageComputeEmittedAtKey] != "" || afterTick1.Metadata[usageModelSweptAtKey] != "" {
+		t.Fatalf("a torn rollout must hold terminal settlement: compute=%q swept=%q, want both unset",
+			afterTick1.Metadata[usageComputeEmittedAtKey], afterTick1.Metadata[usageModelSweptAtKey])
+	}
+
+	// The writer completes the record between ticks.
+	f, err := os.OpenFile(rollouts[0], os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte("\n")); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	cr.emitDueComputeFacts(context.Background(), []session.Info{info}, false)
+	facts2, _, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatalf("ReadFacts (tick 2): %v", err)
+	}
+	if got := kindCount(facts2, usage.KindCompute); got != 1 {
+		t.Fatalf("tick 2 compute facts = %d, want 1 (dedup by IdempotencyKey)", got)
+	}
+	if got := kindCount(facts2, usage.KindModel); got != 2 {
+		t.Fatalf("tick 2 model facts = %d, want 2 (the held-back record recovered): %+v", got, facts2)
+	}
+	afterTick2, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	awake := start.Format(time.RFC3339)
+	if afterTick2.Metadata[usageComputeEmittedAtKey] != awake || afterTick2.Metadata[usageModelSweptAtKey] != awake {
+		t.Fatalf("tick 2 must stamp both markers (%q): compute=%q swept=%q",
+			awake, afterTick2.Metadata[usageComputeEmittedAtKey], afterTick2.Metadata[usageModelSweptAtKey])
+	}
+}
+
 // writeCodexRolloutForSweepAt fabricates a codex rollout at the local-date path
 // the codex CLI would use for `at` (session_meta cwd=workDir, a turn_context
 // model, one token_count per {total, lastInput, lastOutput}). Unlike

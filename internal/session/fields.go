@@ -546,7 +546,7 @@ var registry = slices.Concat([]Field{
 	same(ClassAdvisory, false, sites(legacy("cmd/gc/usage_compute.go", "emitComputeFactForBead"), legacy("cmd/gc/usage_compute.go", "CityRuntime.settleClosedInterval")), "usage_compute_emitted_at"),
 	same(ClassAdvisory, false, sites(legacy("cmd/gc/usage_compute.go", "CityRuntime.emitDueComputeFacts"), legacy("cmd/gc/usage_compute.go", "CityRuntime.settleClosedInterval")), "usage_model_swept_at"),
 	same(ClassAdvisory, false, sites(op(srcManager, "Manager.PersistInvocationUsageCursor")), "invocation_usage_cursor"),
-	same(ClassAdvisory, false, sites(op(srcManager, "Manager.PersistCodexUsageCheckpointIfCurrent")), MetadataKeyCodexUsageCheckpoint),
+	same(ClassAdvisory, false, sites(op(srcManager, "Manager.PersistCodexUsageCheckpointIfCurrent"), op(srcManager, "Manager.ResetCodexUsageCheckpoint")), MetadataKeyCodexUsageCheckpoint),
 	same(ClassAdvisory, false, sites(legacy(srcTransition, "ClosePatch"), op(srcManager, "Manager.CloseDetailed"), legacy("cmd/gc/usage_compute.go", "CityRuntime.settleClosedInterval")),
 		MetadataKeyUsageClosePending, MetadataKeyUsageClosedAt),
 	same(ClassAdvisory, false, sites(legacy(srcTransition, "ClosePatch"), op(srcManager, "Manager.CloseDetailed"), legacy(srcBeads, "reopenNamedSessionBatch"),
