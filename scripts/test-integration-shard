@@ -133,6 +133,7 @@ cmd_gc_integration_tests=(
   TestBlockedRepairOnRealBdIsHarmlessOnACleanStore
   TestBlockedRepairOnRealBdRestoresOverBlockedWork
   TestCapstoneIntegrationRealMinter
+  TestCityRestoreRoundTripsAManagedDoltSplitWithItsWisps
   TestControllerDiscoversAddedCronOrderWithoutRestart
   TestGcBdBurnAndWispGCJudgesReadRealBd
   TestGcBdBurnJudgeCoversAProxiedServerCascade

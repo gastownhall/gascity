@@ -342,6 +342,12 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 	if err := storageReverseRefusal(cityPath, storageReverseRoot(cityPath, cfg)); err != nil {
 		return nil, fmt.Errorf("%s: %w", logPrefix, err)
 	}
+	// So does a city restore that has not ended, proven or accepted unproven
+	// (storage_snapshot_city.go): one failed read of one file on a city that
+	// never restored.
+	if err := storageCityRestoreBootRefusal(cityPath); err != nil {
+		return nil, fmt.Errorf("%s: %w", logPrefix, err)
+	}
 	if cfg == nil || cfg.Storage == nil {
 		if blocked, held := revertHoldingNote(storageSplitNone, cityPath); held {
 			advice := infraMigrationOperatorAdvice(blocked, logPrefix)
