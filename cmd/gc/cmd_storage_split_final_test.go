@@ -64,13 +64,16 @@ func (c *guidedSplitCity) bindingRows() int {
 // gate's remedy (`gc storage migrate --from-work`), which converges the
 // binding. The binding is the city's state now: --abandon refuses and names
 // the split, never "Finish the split", doctor says the same, and the split
-// resumes from where it was abandoned and finishes.
+// resumes from where it was abandoned and finishes, over a city.toml edited
+// since too, which still composes the split's [storage].
 func TestStorageSplitAnInterruptedAbandonThenBootsRemedyResumes(t *testing.T) {
 	for _, tc := range []struct {
 		name, seam, from string
+		edit             bool
 	}{
-		{"abandoned from configured", "copying rows", splitPhaseConfigured},
-		{"abandoned from configuring", "split city.toml", splitPhaseConfiguring},
+		{"abandoned from configured", "copying rows", splitPhaseConfigured, false},
+		{"abandoned from configuring", "split city.toml", splitPhaseConfiguring, false},
+		{"abandoned from configuring, city.toml edited since", "split city.toml", splitPhaseConfiguring, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newGuidedSplitCity(t)
@@ -83,6 +86,9 @@ func TestStorageSplitAnInterruptedAbandonThenBootsRemedyResumes(t *testing.T) {
 			}
 			if state, _ := readInfraConvergenceState(c.target()); state != infraConvergenceMarked {
 				t.Fatalf("precondition: the binding is %v after the remedy", state)
+			}
+			if tc.edit {
+				c.writeTOML(c.readTOML() + "# an operator's edit after the remedy\n")
 			}
 			toml, rows := c.readTOML(), c.bindingRows()
 
@@ -106,8 +112,114 @@ func TestStorageSplitAnInterruptedAbandonThenBootsRemedyResumes(t *testing.T) {
 				t.Fatalf("the resumed split still records an abandon from %s", j.AbandonedFrom)
 			}
 			c.assertSplit()
+			if c.readTOML() != toml {
+				t.Fatalf("the resumed split rewrote city.toml:\n%s\nwant it kept as it was:\n%s", c.readTOML(), toml)
+			}
 		})
 	}
+}
+
+// TestStorageSplitResumesAtConfiguringOverAnEditedCityTOML: a split killed
+// once it wrote city.toml, its journal still at configuring, whose city.toml
+// is then edited, with or without boot's remedy (`gc storage migrate
+// --from-work`) converging the binding in between. The file is neither one
+// the journal records, but it composes the split's [storage], so the split
+// resumes, keeps the edit and finishes; the journal keeps the after-hash of
+// the file the split wrote, so the reverse removes [storage] in place and
+// keeps the edit.
+func TestStorageSplitResumesAtConfiguringOverAnEditedCityTOML(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		remedy bool
+	}{
+		{"after boot's remedy converged the binding", true},
+		{"unconverged", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newGuidedSplitCity(t)
+			c.killSplitAt("split city.toml")
+			written := c.journal().CityTOMLAfterSHA256
+			if tc.remedy {
+				c.assertBoot("gc storage migrate --from-work")
+				var out, errOut bytes.Buffer
+				if code := doStorageMigrate(context.Background(), c.reload(), &out, &errOut); code != 0 {
+					t.Fatalf("the boot's remedy = %d: %s", code, errOut.String())
+				}
+				if state, _ := readInfraConvergenceState(c.target()); state != infraConvergenceMarked {
+					t.Fatalf("precondition: the binding is %v after the remedy", state)
+				}
+			}
+			// The edit is outside [storage], so removing the section in place
+			// keeps it.
+			const edit = "# an operator's edit while the split was stopped"
+			c.writeTOML(strings.Replace(c.readTOML(), "# trailing comment", edit, 1))
+			if j := c.journal(); j.Phase != splitPhaseConfiguring || !strings.Contains(c.readTOML(), edit) || sha256Hex([]byte(c.readTOML())) == written {
+				t.Fatalf("precondition: the journal is at %s, or city.toml is not edited:\n%s", j.Phase, c.readTOML())
+			}
+
+			code, stdout, stderr := c.split(splitOptions{})
+			if code != 0 || !strings.Contains(stderr, "in place and keeps the change") {
+				t.Fatalf("the split over the edited city.toml = %d:\n%s\n%s", code, stdout, stderr)
+			}
+			c.assertSplit()
+			if !strings.Contains(c.readTOML(), edit) {
+				t.Fatalf("the split did not keep the edit:\n%s", c.readTOML())
+			}
+			if c.journal().CityTOMLAfterSHA256 != written {
+				t.Fatal("the resume rewrote the after-hash to the edited file")
+			}
+			var out, errOut bytes.Buffer
+			if code := doStorageReverse(context.Background(), c.reload(), reverseOptions{Mode: reverseToWork}, &out, &errOut); code != 0 {
+				t.Fatalf("--to-work = %d:\n%s\n%s", code, out.String(), errOut.String())
+			}
+			if got := c.readTOML(); !strings.Contains(got, edit) || strings.Contains(got, "[storage") {
+				t.Fatalf("city.toml after the reverse:\n%s\nwant the edit kept and [storage] gone", got)
+			}
+		})
+	}
+}
+
+// TestStorageSplitAbandonRefusesOverTheClearedNote: a split killed during its
+// clear has written the city-side cleared note. With the binding's root moved
+// aside its marker reads absent, yet the work store no longer holds the
+// city's infrastructure state, so --abandon refuses, names the note and
+// changes nothing: the journal, city.toml, the floor and the snapshot's pin
+// stay. With the root put back, the split finishes.
+func TestStorageSplitAbandonRefusesOverTheClearedNote(t *testing.T) {
+	c := newGuidedSplitCity(t)
+	c.killSplitAt("clearing")
+	target := c.target()
+	aside := target.Root + ".aside"
+	if err := os.Rename(target.Root, aside); err != nil {
+		t.Fatal(err)
+	}
+	if state, err := readInfraConvergenceState(target); err != nil || state != infraConvergenceAbsent {
+		t.Fatalf("precondition: the binding is %v, %v; want absent", state, err)
+	}
+	read := func(path string) string {
+		t.Helper()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	journalPath, floorPath := storageSplitJournalPath(c.request.CityPath), minGCVersionPath(c.request.CityPath)
+	j, journal, toml, floor := c.journal(), read(journalPath), c.readTOML(), read(floorPath)
+	code, _, stderr := c.split(splitOptions{Abandon: true})
+	if code == 0 || !strings.Contains(stderr, infraClearedNotePath(c.request.CityPath)) {
+		t.Fatalf("--abandon over a cleared work store = %d: %s", code, stderr)
+	}
+	if read(journalPath) != journal || c.readTOML() != toml || read(floorPath) != floor || !fileExists(splitSnapshotPinPath(j)) {
+		t.Fatal("the refused --abandon changed the journal, city.toml, the floor or the snapshot's pin")
+	}
+	if err := os.Rename(aside, target.Root); err != nil {
+		t.Fatal(err)
+	}
+	if code, stdout, stderr := c.split(splitOptions{}); code != 0 {
+		t.Fatalf("the split with the binding's root back = %d:\n%s\n%s", code, stdout, stderr)
+	}
+	c.assertSplit()
 }
 
 // TestStorageSplitAbandonRefusesAnUnknownPhase (NIT 2): a journal phase this

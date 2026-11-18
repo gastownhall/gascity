@@ -561,8 +561,9 @@ func TestStorageSplitPinsOnlyASnapshotItsJournalNames(t *testing.T) {
 
 // TestStorageSplitReadsCityTOMLUnderTheLock (NIT 5): the bytes P4a records
 // are read under the lock and must be the ones the run judged; and a resume
-// of the edit refuses a city.toml that is neither the bytes before nor the
-// bytes it writes.
+// of the edit refuses a city.toml that does not compose the split's
+// [storage], whether the judge reads it so or the file changes under the run
+// before P4b reads it.
 func TestStorageSplitReadsCityTOMLUnderTheLock(t *testing.T) {
 	t.Run("changed while waiting", func(t *testing.T) {
 		c := newGuidedSplitCity(t)
@@ -583,19 +584,52 @@ func TestStorageSplitReadsCityTOMLUnderTheLock(t *testing.T) {
 			t.Fatal("the refused split wrote city.toml")
 		}
 	})
-	t.Run("neither before nor after", func(t *testing.T) {
+	// anotherStorage is the split's city.toml with its binding moved: it
+	// authors a [storage], and not the split's.
+	anotherStorage := func(t *testing.T, c *guidedSplitCity) string {
+		t.Helper()
+		edited := strings.Replace(c.readTOML(), `path = ".gc/store"`, `path = ".gc/elsewhere"`, 1)
+		if edited == c.readTOML() {
+			t.Fatalf("precondition: city.toml binds no .gc/store:\n%s", edited)
+		}
+		return edited
+	}
+	t.Run("another storage", func(t *testing.T) {
 		c := newGuidedSplitCity(t)
 		c.killSplitAt("split city.toml")
-		edited := strings.Replace(c.readTOML(), "# trailing comment", "# edited mid-write", 1)
+		edited := anotherStorage(t, c)
 		c.writeTOML(edited)
+		if cfg := c.reload().Cfg; cfg.Storage == nil || splitStorageMatches(cfg) {
+			t.Fatal("precondition: the edited city.toml does not author another [storage]")
+		}
 		code, _, stderr := c.split(splitOptions{})
-		if code == 0 || !strings.Contains(stderr, "neither the file the split recorded") {
-			t.Fatalf("a resume over an unrecognized city.toml = %d: %s", code, stderr)
+		if code == 0 || !strings.Contains(stderr, "not the one the split") {
+			t.Fatalf("a resume over another [storage] = %d: %s", code, stderr)
 		}
 		// The judge refuses it up front (round 2, Codex F4): no note promises
 		// to keep an edit that the write would then refuse.
 		if strings.Contains(stderr, "keeps the change") {
 			t.Fatalf("the refusal also promised to keep the edit: %s", stderr)
+		}
+		if c.readTOML() != edited || c.journal().Phase != splitPhaseConfiguring {
+			t.Fatal("the refused resume wrote city.toml or moved the journal")
+		}
+	})
+	t.Run("another storage under the run", func(t *testing.T) {
+		c := newGuidedSplitCity(t)
+		c.killSplitAt("split city.toml")
+		edited := anotherStorage(t, c)
+		prev := infraEngineCrashPoint
+		t.Cleanup(func() { infraEngineCrashPoint = prev })
+		infraEngineCrashPoint = func(p string) error {
+			if p == "split guarded" {
+				c.writeTOML(edited)
+			}
+			return nil
+		}
+		code, _, stderr := c.split(splitOptions{})
+		if code == 0 || !strings.Contains(stderr, "not the one the split") {
+			t.Fatalf("a resume whose city.toml changed under it = %d: %s", code, stderr)
 		}
 		if c.readTOML() != edited || c.journal().Phase != splitPhaseConfiguring {
 			t.Fatal("the refused resume wrote city.toml or moved the journal")

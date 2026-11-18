@@ -490,7 +490,8 @@ func TestStorageSplitJournalJudge(t *testing.T) {
 		{"readied, authored by hand", splitJudgement{journal: at(splitPhaseReadied), authored: true, splitting: true}, splitRefuse, "", "--abandon"},
 		{"configuring, file as before", splitJudgement{journal: at(splitPhaseConfiguring), sha: "before"}, splitFresh, "starting it over", ""},
 		{"configuring, file written", splitJudgement{journal: at(splitPhaseConfiguring), authored: true, splitting: true, sha: "after"}, splitResume, "", ""},
-		{"configuring, the split's storage edited", splitJudgement{journal: at(splitPhaseConfiguring), authored: true, splitting: true, sha: "other"}, splitRefuse, "", "neither the file the split recorded"},
+		{"configuring, the split's storage edited", splitJudgement{journal: at(splitPhaseConfiguring), authored: true, splitting: true, sha: "other"}, splitResume, "in place and keeps the change", ""},
+		{"configuring, another storage", splitJudgement{journal: at(splitPhaseConfiguring), authored: true, sha: "other"}, splitRefuse, "", "not the one the split"},
 		{"configuring, file edited, no storage", splitJudgement{journal: at(splitPhaseConfiguring), sha: "other"}, splitFresh, "before it wrote city.toml, and city.toml has changed since; starting a new split", ""},
 		{"configured, as written", splitJudgement{journal: at(splitPhaseConfigured), authored: true, splitting: true, sha: "after"}, splitResume, "", ""},
 		{"city converged, edited", splitJudgement{journal: at(splitPhaseCityConverged), authored: true, splitting: true, sha: "edited"}, splitResume, "in place and keeps the change", ""},
@@ -829,6 +830,32 @@ func TestStorageSplitBudgetOverrunIsANoteAndPauses(t *testing.T) {
 		t.Fatalf("the rerun = %d:\n%s\n%s", code, stdout, stderr)
 	}
 	c.assertSplit()
+}
+
+// TestStorageSplitBudgetStartsWithTheCopy: the time budget is spent from P6
+// on, as the rehearsal's estimate judges it and as `migrate --from-work`
+// spends it: the deadline the copy reads is the budget from after P4, not
+// from when the window opened, before P0, P3 and P2.
+func TestStorageSplitBudgetStartsWithTheCopy(t *testing.T) {
+	c := newGuidedSplitCity(t)
+	var configured, deadline time.Time
+	prev := infraEngineCrashPoint
+	t.Cleanup(func() { infraEngineCrashPoint = prev })
+	infraEngineCrashPoint = func(p string) error {
+		switch p {
+		case "split " + splitPhaseConfigured:
+			configured = time.Now()
+		case "prepare":
+			deadline = infraEngineClockFor(c.request.CityPath).deadline
+		}
+		return nil
+	}
+	if code, stdout, stderr := c.split(splitOptions{}); code != 0 {
+		t.Fatalf("split = %d:\n%s\n%s", code, stdout, stderr)
+	}
+	if configured.IsZero() || deadline.Before(configured.Add(c.request.TimeBudget)) {
+		t.Fatalf("the copy's deadline is %v, before the budget %v from the end of P4 (%v)", deadline, c.request.TimeBudget, configured)
+	}
 }
 
 // TestStorageSplitPreflightBlockWritesNothing: a rehearsal block refuses the
