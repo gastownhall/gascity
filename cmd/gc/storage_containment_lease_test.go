@@ -7,7 +7,6 @@ import (
 	"errors"
 	"io"
 	"testing"
-	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
@@ -111,7 +110,6 @@ func TestStrandRecheckPublishesTheLeaseAndRefreshesItsAge(t *testing.T) {
 		t.Fatal("no recheck for a converged city")
 	}
 
-	time.Sleep(2 * time.Millisecond) // make TakenAt's advance unambiguous
 	s.tick()
 	afterTick := routes.lease.Load()
 	if afterTick == nil || !afterTick.TakenAt.After(boot.TakenAt) {
