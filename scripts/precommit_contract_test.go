@@ -482,7 +482,7 @@ func TestPreCommitFailsClosedWhenGoBlockStagesSpecAsSideEffectAndNpmAbsent(t *te
 	// to EOF: one that exits without reading races the hook's printf, which
 	// dies of SIGPIPE whenever the stub exits first, and bash exits 141
 	// without printing anything (the silent CI flake on loaded runners).
-	writeExecutable(t, formatStagedGoPath, "#!/usr/bin/env bash\ncat >/dev/null\nexit 0\n")
+	writeExecutable(t, formatStagedGoPath, drainStdinStub)
 	runGit("add", "-A")
 	runGit("commit", "-m", "init")
 
@@ -584,6 +584,29 @@ func TestPreCommitWarnsOnlyWhenNpmAbsentAndSpecNotStaged(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "npm not on PATH") {
 		t.Fatalf("pre-commit hook should still warn when npm is absent, got:\n%s", out)
+	}
+}
+
+// drainStdinStub is the stub scripts/precommit-format-staged-go the npm-absent
+// fixtures install. It reads its stdin to EOF with the external `cat`, so every
+// tool it names must resolve on restrictedPathWithoutNpm's PATH.
+const drainStdinStub = "#!/usr/bin/env bash\ncat >/dev/null\nexit 0\n"
+
+// TestRestrictedPathWithoutNpmProvidesToolsTheDrainStubUses pins the PATH the
+// npm-absent fixtures run under. When `cat` is missing there, the stub fails
+// with 127 without reading stdin, exits at once, and the hook's printf (under
+// `set -o pipefail`) dies of SIGPIPE: the flake drainStdinStub exists to stop.
+// The PATH must still lack npm, or the fixtures would not be npm-absent.
+func TestRestrictedPathWithoutNpmProvidesToolsTheDrainStubUses(t *testing.T) {
+	binDir := restrictedPathWithoutNpm(t, nil)
+	for _, tool := range []string{"cat"} {
+		if _, err := os.Stat(filepath.Join(binDir, tool)); err != nil {
+			t.Errorf("restrictedPathWithoutNpm has no %q, but drainStdinStub runs it: the stub fails "+
+				"with 127 without reading stdin and the hook's printf can die of SIGPIPE: %v", tool, err)
+		}
+	}
+	if _, err := os.Lstat(filepath.Join(binDir, "npm")); err == nil {
+		t.Errorf("restrictedPathWithoutNpm provides npm, so the npm-absent fixtures are not npm-absent")
 	}
 }
 
