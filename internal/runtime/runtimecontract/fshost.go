@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -253,15 +252,7 @@ func probeFSHostAgentPIDOnHost(ctx context.Context, r *runner, hs runtime.Protoc
 	if err != nil || pid <= 0 {
 		return StatusFail, fmt.Sprintf("observe reports agent_pid %q, want the agent's host pid", o.AgentPID)
 	}
-	switch err := syscall.Kill(pid, 0); {
-	case errors.Is(err, syscall.ESRCH):
-		return StatusFail, fmt.Sprintf("agent_pid %d is no process on this host (a pid from another pid namespace?)", pid)
-	case errors.Is(err, syscall.EPERM):
-		return StatusFail, fmt.Sprintf("agent_pid %d belongs to another user", pid)
-	case err != nil:
-		return StatusFail, fmt.Sprintf("agent_pid %d: %v", pid, err)
-	}
-	return StatusPass, fmt.Sprintf("agent_pid %d is a live host process of the caller's user", pid)
+	return hostPIDLiveness(pid)
 }
 
 func probeFSHostHomeView(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {

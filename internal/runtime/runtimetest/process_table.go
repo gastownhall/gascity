@@ -13,7 +13,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -551,7 +550,7 @@ func killLeftover(pidFile, token string) {
 	if err != nil || !slices.ContainsFunc(bytes.Split(env, []byte{0}), func(kv []byte) bool { return string(kv) == "GC_LEFTOVER_TOKEN="+token }) {
 		return
 	}
-	_ = syscall.Kill(-pid, syscall.SIGKILL)
+	killProcessGroup(pid)
 }
 
 // randomToken is a fresh hex token.

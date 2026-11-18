@@ -12,6 +12,8 @@ go_library(
         "contracts.go",
         "dolt_env.go",
         "host_staging.go",
+        "process_group_unix.go",
+        "process_group_windows.go",
         "process_table.go",
         "program_status.go",
         "program_status_fake.go",
