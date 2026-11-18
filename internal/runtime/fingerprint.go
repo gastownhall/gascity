@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -689,6 +691,19 @@ func CoreFingerprintBreakdown(cfg Config) BreakdownV1 {
 			hashSortedStringSet(h, "reconciler_owned_mergeable_paths", cfg.ReconcilerOwnedMergeablePaths)
 		})
 	}
+	// Upstream and OperatorEnv are conditional, as in the core hash, so a
+	// breakdown that sets neither stays byte-identical to one stored before
+	// these fields existed.
+	if cfg.Upstream != "" {
+		fields["Upstream"] = fieldHash(func(h hash.Hash) {
+			hashOptionalString(h, "upstream", cfg.Upstream)
+		})
+	}
+	if len(cfg.OperatorEnv) > 0 {
+		fields["OperatorEnv"] = fieldHash(func(h hash.Hash) {
+			hashSortedMap(h, cfg.OperatorEnv)
+		})
+	}
 	var copyEntries []BreakdownCopyEntry
 	if len(cfg.CopyFiles) > 0 {
 		copyEntries = make([]BreakdownCopyEntry, 0, len(cfg.CopyFiles))
@@ -774,6 +789,10 @@ func LogCoreFingerprintDrift(w io.Writer, name string, storedJSON string, curren
 			}
 		case "PreStart":
 			fmt.Fprintf(w, "    PreStart: %v\n", current.PreStart) //nolint:errcheck // best-effort diag
+		case "Upstream":
+			fmt.Fprintf(w, "    Upstream: %q\n", current.Upstream) //nolint:errcheck // best-effort diag; a name, not the serving env
+		case "OperatorEnv":
+			fmt.Fprintf(w, "    OperatorEnv keys: %v\n", slices.Sorted(maps.Keys(current.OperatorEnv))) //nolint:errcheck // best-effort diag; values may be secrets
 		case "OverlayDir":
 			fmt.Fprintf(w, "    OverlayDir: %q\n", current.OverlayDir) //nolint:errcheck // best-effort diag
 		case "OverlayProviders":
@@ -843,10 +862,12 @@ func parseStoredBreakdown(stored string) (fields map[string]string, copyEntries 
 	return nil, nil, false
 }
 
-// diffBreakdownFields returns the sorted list of field names where the
-// stored and current per-field hashes differ.
 const emptyBreakdownFieldHash = "e3b0c44298fc1c14" // first 16 hex chars of SHA-256(empty)
 
+// diffBreakdownFields returns the sorted list of field names where the
+// stored and current per-field hashes differ, a field only one side carries
+// (a conditional one such as Upstream, OperatorEnv or
+// ReconcilerOwnedMergeablePaths) included.
 func diffBreakdownFields(stored, current map[string]string) []string {
 	var diffs []string
 	for field, ch := range current {
@@ -854,14 +875,17 @@ func diffBreakdownFields(stored, current map[string]string) []string {
 			diffs = append(diffs, field)
 		}
 	}
-	// The optional ownership field is absent when unset, so unlike the older
-	// fixed-shape fields a removal must be detected from the stored side. Ignore
-	// SHA-256(empty) written by the brief pre-fix v5 shape: it represented the
-	// same unset policy and must remain upgrade-compatible.
-	if storedHash, wasOwned := stored["ReconcilerOwnedMergeablePaths"]; wasOwned {
-		if _, stillOwned := current["ReconcilerOwnedMergeablePaths"]; !stillOwned && storedHash != emptyBreakdownFieldHash {
-			diffs = append(diffs, "ReconcilerOwnedMergeablePaths")
+	for field, storedHash := range stored {
+		if _, ok := current[field]; ok {
+			continue
 		}
+		// Ignore SHA-256(empty) written for the ownership field by the brief
+		// pre-fix v5 shape: it represented the same unset policy and must
+		// remain upgrade-compatible.
+		if field == "ReconcilerOwnedMergeablePaths" && storedHash == emptyBreakdownFieldHash {
+			continue
+		}
+		diffs = append(diffs, field)
 	}
 	sort.Strings(diffs)
 	return diffs

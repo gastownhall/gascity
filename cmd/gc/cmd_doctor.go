@@ -590,6 +590,10 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	register(doctor.NewDoltLogSizeCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
 	register(doctor.NewDoltConfigCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
 	register(doctor.NewScopedDoltVersionCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
+	// gc migrates a bd database only while bootstrapping it; this names every
+	// other one whose schema differs from the linked beads library's, with
+	// the command an operator runs (see bd_schema_gap.go).
+	register(newBdSchemaDoctorCheck(cfg, activeRigs, opts.SkipRigDoltChecks))
 	register(&doctor.EventsLogCheck{})
 	register(doctor.NewEventLogSizeCheck())
 	// bd auto-backup growth canary. bd's auto-backup pipeline (upstream of
@@ -1245,7 +1249,11 @@ func openStoreForCity(cityPath string) func(string) (beads.Store, error) {
 // the next check either, and re-attempting it once per check is how one
 // unreachable scope turned into a doctor run that spent its whole budget
 // failing the same way.
-func perRunStoreFactory(open func(string) (beads.Store, error)) func(string) (beads.Store, error) {
+//
+// observe, when given, is told each scope directory the factory opens, once,
+// when the open succeeds: a caller that owns the run's handles (the guided
+// split's demand repairs) closes exactly those.
+func perRunStoreFactory(open func(string) (beads.Store, error), observe ...func(dir string)) func(string) (beads.Store, error) {
 	type opened struct {
 		store beads.Store
 		err   error
@@ -1261,6 +1269,11 @@ func perRunStoreFactory(open func(string) (beads.Store, error)) func(string) (be
 		}
 		store, err := open(dirPath)
 		cache[key] = opened{store: store, err: err}
+		if err == nil {
+			for _, o := range observe {
+				o(dirPath)
+			}
+		}
 		return store, err
 	}
 }

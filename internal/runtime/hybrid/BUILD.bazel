@@ -20,6 +20,7 @@ go_test(
     srcs = [
         "bootstrap_input_test.go",
         "composite_forward_test.go",
+        "conformance_test.go",
         "fence_test.go",
         "hybrid_test.go",
         "nudge_keyed_test.go",
@@ -34,6 +35,7 @@ go_test(
     embed = [":hybrid"],
     deps = [
         "//internal/runtime",
+        "//internal/runtime/runtimetest",
         "//internal/testenv",
     ],
 )

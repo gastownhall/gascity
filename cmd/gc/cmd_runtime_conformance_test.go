@@ -69,9 +69,44 @@ func TestRuntimeConformanceCmd_JSONReport(t *testing.T) {
 	}
 }
 
+// Kills a conformance run that an advisory FAIL fails: a pack whose only
+// failure is an observation requirement (here copy-to, which fails a
+// missing source) sees the FAIL but exits 0 with ok:true, so its CI does
+// not go red on a gc upgrade that adds an advisory group.
+func TestRuntimeConformanceCmd_AdvisoryFailExitsZero(t *testing.T) {
+	script := conformanceScript(t, `  copy-to)    echo "no such source" >&2; exit 1 ;;
+`)
+	var stdout, stderr bytes.Buffer
+	cmd := newRuntimeConformanceCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{"--json", script})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("an advisory-only FAIL must exit 0: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	var payload struct {
+		OK bool `json:"ok"`
+		runtimecontract.Report
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("stdout is not a JSON report: %v\n%s", err, stdout.String())
+	}
+	if !payload.OK {
+		t.Errorf("ok = false for an advisory-only FAIL; want true:\n%s", stdout.String())
+	}
+	if payload.Summary.Failed != 1 {
+		t.Errorf("summary %+v: want the advisory FAIL still counted", payload.Summary)
+	}
+}
+
 // conformantConformanceScript writes a stateful RPP script that passes the
 // full runtimecontract catalog.
 func conformantConformanceScript(t *testing.T) string {
+	t.Helper()
+	return conformanceScript(t, "")
+}
+
+// conformanceScript writes conformantConformanceScript's script with extra
+// case arms ahead of its unknown-op arm.
+func conformanceScript(t *testing.T, extra string) string {
 	t.Helper()
 	state := t.TempDir()
 	return writeRPPScript(t, `
@@ -84,7 +119,7 @@ case "$op" in
   is-running) if [ -e "$S/$name" ]; then echo true; else echo false; fi ;;
   exec)       sh -c "$(cat)" ;;
   provision)  cat >/dev/null ;;
-  *) exit 2 ;;
+`+extra+`  *) exit 2 ;;
 esac
 `)
 }
