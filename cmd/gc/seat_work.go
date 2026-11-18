@@ -74,11 +74,12 @@ func (l seatWorkLeg) unread(statuses []string) error {
 
 // seatWorkQuery is one question about a seat's work: beads in one of statuses,
 // assigned to one of scope's identities, that are not session or mail beads and
-// that keep (when set) accepts. keep sees the live bead and the store it lives
-// in.
+// that row and keep (each when set) accept. row sees the live bead alone; keep
+// sees it and the store it lives in.
 type seatWorkQuery struct {
 	scope    workScope
 	statuses []string
+	row      func(b beads.Bead) bool
 	keep     func(store beads.Store, b beads.Bead) (bool, error)
 }
 
@@ -293,6 +294,9 @@ func (q seatWorkQuery) accepts(store beads.Store, b beads.Bead, ids, statuses ma
 		return false, nil
 	}
 	if sessionpkg.IsSessionBeadOrRepairable(b) || beadmail.IsMessageBead(b) {
+		return false, nil
+	}
+	if q.row != nil && !q.row(b) {
 		return false, nil
 	}
 	if q.keep == nil {

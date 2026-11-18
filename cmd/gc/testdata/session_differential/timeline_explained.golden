@@ -94,8 +94,6 @@ row:gc-1:state resolved
 === a live quarantined row 29s after wake
 ## 0 seed (+0s)
 @ +0s
-provider:RemoveMeta s-gc-1 legacy="11" v2="" [drain-stop-lag]
-provider:SetMeta s-gc-1 legacy="4" v2="" [drain-stop-lag]
 row:gc-1:effective_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
 row:gc-1:requested_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
 row:gc-1:sleep_capability legacy="full" v2="" [sleep-policy-keys]
@@ -104,16 +102,12 @@ row:gc-1:sleep_policy_source legacy="legacy_off" v2="" [sleep-policy-keys]
 ## 1 alive (+29s)
 ## 2 settled (+1m19s)
 @ +39s
-provider:RemoveMeta s-gc-1 resolved
-provider:SetMeta s-gc-1 resolved
 row:gc-1:currently_processing_bead_id legacy="gw-1" v2="" [§12.2#37 current-bead-lag]
 @ +49s
 row:gc-1:currently_processing_bead_id resolved
 === a live quarantined row 31s after wake
 ## 0 seed (+0s)
 @ +0s
-provider:RemoveMeta s-gc-1 legacy="11" v2="" [drain-stop-lag]
-provider:SetMeta s-gc-1 legacy="4" v2="" [drain-stop-lag]
 row:gc-1:effective_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
 row:gc-1:requested_sleep_after_idle legacy="off" v2="" [sleep-policy-keys]
 row:gc-1:sleep_capability legacy="full" v2="" [sleep-policy-keys]
@@ -121,8 +115,6 @@ row:gc-1:sleep_policy_fingerprint legacy="value=off|class=interactive_resume|sou
 row:gc-1:sleep_policy_source legacy="legacy_off" v2="" [sleep-policy-keys]
 ## 1 alive (+31s)
 @ +30s
-provider:RemoveMeta s-gc-1 resolved
-provider:SetMeta s-gc-1 resolved
 row:gc-1:currently_processing_bead_id legacy="gw-1" v2="" [§12.2#37 current-bead-lag]
 @ +31s
 row:gc-1:currently_processing_bead_id resolved

@@ -276,15 +276,16 @@ func TestReconcileSessionBeads_StrandsWhatIsNotParked(t *testing.T) {
 // The parked fixtures' end states, asserted on both copies: parity alone
 // would pass two copies wrong the same way.
 func TestParkedSeatFixturesEndStates(t *testing.T) {
-	strandedEvents := func(o parityOutcome) int {
+	eventCount := func(o parityOutcome, typ string) int {
 		n := 0
 		for k, c := range o.events {
-			if strings.HasPrefix(k, "session.stranded ") {
+			if strings.HasPrefix(k, typ+" ") {
 				n += c
 			}
 		}
 		return n
 	}
+	strandedEvents := func(o parityOutcome) int { return eventCount(o, events.SessionStranded) }
 	for name, check := range map[string]func(t *testing.T, copyName string, o parityOutcome){
 		"a seat asleep on its drain holding only a blocked pin stays parked": func(t *testing.T, copyName string, o parityOutcome) {
 			row, pin := o.rows["gc-1"], o.work["gp-1"]
@@ -292,6 +293,21 @@ func TestParkedSeatFixturesEndStates(t *testing.T) {
 				t.Fatalf("%s: row %s %v, %d stranded events; want parked: asleep, open, unmarked", copyName, row.Status, row.Metadata, strandedEvents(o))
 			}
 			// Its conversation is kept for the resume the wake will make.
+			if row.Metadata["session_key"] != "conversation-1" {
+				t.Fatalf("%s: session_key %q, want the parked seat's conversation kept", copyName, row.Metadata["session_key"])
+			}
+			if pin.Assignee != "gc-1" || pin.Status != "open" {
+				t.Fatalf("%s: pin %s/%q, want open on its seat", copyName, pin.Status, pin.Assignee)
+			}
+		},
+		"a held seat idle past its idle_timeout parks": func(t *testing.T, copyName string, o parityOutcome) {
+			row, pin := o.rows["gc-1"], o.work["gp-1"]
+			if idleKills := eventCount(o, events.SessionIdleKilled); idleKills != 1 {
+				t.Fatalf("%s: %d session.idle_killed events, want the idle stop's one", copyName, idleKills)
+			}
+			if row.Status == "closed" || row.Metadata["state"] != "asleep" || row.Metadata["sleep_reason"] != "idle" || row.Metadata[strandedEventEmittedKey] != "" || strandedEvents(o) != 0 {
+				t.Fatalf("%s: row %s %v, %d stranded events; want parked: asleep on idle, open, unmarked", copyName, row.Status, row.Metadata, strandedEvents(o))
+			}
 			if row.Metadata["session_key"] != "conversation-1" {
 				t.Fatalf("%s: session_key %q, want the parked seat's conversation kept", copyName, row.Metadata["session_key"])
 			}

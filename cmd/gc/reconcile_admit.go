@@ -176,6 +176,12 @@ type intent struct {
 	// since none of that session's work is in flight there. The zero value
 	// holds over one.
 	Workless bool
+	// HeldWork marks A20's idle or no-wake-reason signal of a seat the
+	// held-work keep covers (heldWorkSeat): its L5 also reads the work the
+	// seat holds, live (readSignalWork), as legacy's held-work cancel reads
+	// it at the controller's own ack, so work assigned since the pass's
+	// held-work read refuses the signal.
+	HeldWork bool
 	// Rests are the fresh facts the decision rests on, which only a fresh
 	// kind's arm records: its effect reads them and decides again on them.
 	Rests rests

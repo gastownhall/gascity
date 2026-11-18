@@ -55,12 +55,15 @@ import (
 // work, from its slept_at. Past it, the seat takes the stranded path (marker,
 // session.stranded, the confirm grace, the repair), which returns the work to
 // the pool, so a seat that cannot come back never holds work forever. It
-// covers a long review loop (hours) and a day of waiting on a human.
+// covers a long review loop (hours) and a day of waiting on a human. The
+// held-work keep holds a live seat to the same bound, from its wake
+// (heldWorkInBound).
 const parkedWorkMaxHold = 24 * time.Hour
 
 // parkedSleptAtFutureSkew bounds how far past the pass time a seat's slept_at
-// may sit and still park it: a later one proves nothing (a clock stepped
-// back, a bad write), and must never stretch parkedWorkMaxHold.
+// may sit and still park it, and its last_woke_at still leave it to the
+// held-work keep: a later one proves nothing (a clock stepped back, a bad
+// write), and must never stretch parkedWorkMaxHold.
 const parkedSleptAtFutureSkew = 5 * time.Minute
 
 // parkVerdict is one row's park decision for a pass.

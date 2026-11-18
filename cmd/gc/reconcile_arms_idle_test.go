@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"io"
+	"maps"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -116,15 +117,65 @@ func TestArmIdleTimeout(t *testing.T) {
 }
 
 // Kills an idle finalize that parks or closes the row (v5.7, SESS-576): it
-// sleeps it, with legacy's sleep reason.
+// sleeps it, with legacy's sleep reason. A held seat's stop sleeps it as the
+// timer drain the held-work keep held back would have, legacy's too
+// (CompleteDrainPatch(idle), a fresh-wake row's conversation reset with it).
 func TestIdleFinishes(t *testing.T) {
 	for _, tc := range []struct {
 		fin    func(finalizeFacts) finalizeChoice
 		reason session.SleepReason
-	}{{idleTimeoutFinish, session.SleepReasonIdleTimeout}, {idleExhaustedFinish, session.SleepReasonAssignedWorkExhausted}} {
-		if got := tc.fin(finalizeFacts{Now: censusNow}); !got.AsSleep || got.Patch["sleep_reason"] != string(tc.reason) {
+	}{{idleTimeoutFinish, session.SleepReasonIdleTimeout}, {idleExhaustedFinish, session.SleepReasonAssignedWorkExhausted}, {idleTimeoutHeldWorkFinish, session.SleepReasonIdle}} {
+		if got := tc.fin(finalizeFacts{Now: censusNow}); !got.AsSleep || got.CloseSeat || got.Patch["sleep_reason"] != string(tc.reason) {
 			t.Fatalf("finalize %+v, want a sleep for %q", got, tc.reason)
 		}
+	}
+	for _, fresh := range []bool{false, true} {
+		got := idleTimeoutHeldWorkFinish(finalizeFacts{Now: censusNow, FreshWake: fresh})
+		if want := session.CompleteDrainPatch(censusNow, string(session.SleepReasonIdle), fresh); !maps.Equal(got.Patch, want) {
+			t.Fatalf("fresh wake %t: held seat's finalize %v, want the drain's %v", fresh, got.Patch, want)
+		}
+	}
+}
+
+// Kills an idle stop that ends the held-work keep's hold in the strand (#8534
+// review, iteration 1): A15's stop of a seat holding work the keep counts
+// (seatHoldsWork, a partial held-work read included) finishes as its timer
+// drain would (idleTimeoutHeldWorkFinish), which A21 parks, inside the keep's
+// bound or past it, where the drain may still be running; a seat holding
+// nothing the keep counts, and the defer streak's forced stop, keep their own
+// finalize.
+func TestArmIdleTimeoutFinishesAHeldSeatAsItsDrain(t *testing.T) {
+	pool := []string{"pool_managed", "true"}
+	held := func(c *healCase) { c.w.Demand.HeldWork = []beads.Bead{{ID: "gw-1", Status: "open", Assignee: c.k.ID}} }
+	for _, tc := range []struct {
+		name  string
+		meta  []string
+		setup func(*healCase)
+		want  session.SleepReason
+	}{
+		{name: "a pool seat holding blocked work", meta: pool, setup: held, want: session.SleepReasonIdle},
+		{name: "a pool seat past the keep's bound holding blocked work", meta: slices.Concat(pool, []string{"last_woke_at", censusNow.Add(-parkedWorkMaxHold).Format(time.RFC3339)}), setup: held, want: session.SleepReasonIdle},
+		{name: "a pool seat over a partial held-work read", meta: pool, setup: func(c *healCase) { c.w.Demand.HeldWorkPartial = true }, want: session.SleepReasonIdle},
+		{name: "a pool seat holding nothing", meta: pool, setup: func(*healCase) {}, want: session.SleepReasonIdleTimeout},
+		{name: "a row the keep does not cover", setup: held, want: session.SleepReasonIdleTimeout},
+		{name: "a pool seat under a wait", meta: slices.Concat(pool, []string{"sleep_intent", "wait-hold"}), setup: held, want: session.SleepReasonIdleTimeout},
+		{name: "the forced stop of a held seat", meta: pool, setup: func(c *healCase) {
+			held(c)
+			c.a.Snapshot.Entries[c.k].AssignedWork = &assignedWorkView{BeadID: "gw-1"}
+			c.idleView(map[rowKey]int{c.k: 4}, nil)
+		}, want: session.SleepReasonAssignedWorkExhausted},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := idleCase(t, idleCity(), time.Hour, contentUnread, tc.meta...)
+			tc.setup(c)
+			it, ok := c.idleArm()
+			if !ok || it.Kind != intentStop || it.Finish == nil {
+				t.Fatalf("armIdleTimeout = %+v (%v), want the idle stop", it, ok)
+			}
+			if got := it.Finish(finalizeFacts{Now: censusNow}); got.Patch["sleep_reason"] != string(tc.want) {
+				t.Fatalf("the stop's finalize sleeps on %q, want %q", got.Patch["sleep_reason"], tc.want)
+			}
+		})
 	}
 }
 
