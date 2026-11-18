@@ -108,14 +108,36 @@ type containmentLease struct {
 	// FreshMS is this lease's freshness budget in milliseconds, computed
 	// once at publish time from the recheck's adaptive interval and its
 	// last check duration (design doc §4.3): min(10 min, 2×interval + last
-	// duration). It does not change between serves of the same lease.
+	// duration). It does not change between serves of the same lease,
+	// except that a transient recheck failure stretches it to the full
+	// ten-minute cap (Q3; extendLeaseOnTransientFailure).
 	FreshMS int64
+	// RecheckFailing is true once a transient recheck failure has kept this
+	// verdict from being refreshed (Q3, design doc §5): the verdict below
+	// is not known to be stale, only unconfirmed since LastAttemptAt. A
+	// standing (non-transient) fault never reaches this state — it
+	// withdraws the lease instead (storage_boot.go's tick()).
+	RecheckFailing bool
+	// LastAttemptAt is when the strand recheck most recently tried to
+	// refresh this verdict, successful or not. It equals TakenAt on a
+	// freshly published lease and moves on every later transient failure,
+	// while TakenAt keeps naming the last DEFINITIVE check.
+	LastAttemptAt time.Time
 	// Basis is the containment basis captured for this verdict.
 	Basis containmentBasis
+	// Serving and ServesDegraded are infraMigrationReport.serving() and
+	// .servesDegraded() at the time this verdict was taken (design review
+	// MUST 1): a refusing and a degraded-serving verdict both name the
+	// stranded outcome and otherwise look alike on the wire, and a caller
+	// that cannot tell them apart from Outcome and Stranded alone has no
+	// way to know whether this city is serving anything at all.
+	Serving, ServesDegraded bool
 	// ProvenBeads, LostCrossEdges, Stranded, PresumedReused and
 	// Declassifiable mirror the same-named infraMigrationReport fields.
 	// Stranded and PresumedReused are capped at leaseListCap; Complete
-	// reports whether either list was truncated to fit.
+	// reports whether either list was truncated to fit. Declassifiable is
+	// dropped along with Stranded, not independently capped, when Stranded
+	// itself had to be truncated (newContainmentLease).
 	ProvenBeads    int
 	LostCrossEdges []string
 	Stranded       []string
@@ -125,18 +147,24 @@ type containmentLease struct {
 }
 
 // containmentLeaseWire is containmentLease's JSON reply shape (design doc
-// §4.1): {v, pid, binding, database, outcome, age_ms, fresh_ms,
-// basis{marker, manifest, cleared, database, work_store, classifier},
-// proven_beads, lost_cross_edges, stranded, presumed_reused, declassifiable,
-// complete}.
+// §4.1): {v, pid, binding, database, outcome, serving, serves_degraded,
+// age_ms, fresh_ms, recheck_failing, last_attempt_ms, basis{marker,
+// manifest, cleared, database, work_store, classifier}, proven_beads,
+// lost_cross_edges, stranded, presumed_reused, declassifiable, complete}.
+// serving, serves_degraded, recheck_failing and last_attempt_ms are all
+// part of v1 (design review MUST 1 and MUST 2): v does not bump for them.
 type containmentLeaseWire struct {
 	V              int                 `json:"v"`
 	PID            int                 `json:"pid"`
 	Binding        string              `json:"binding"`
 	Database       string              `json:"database"`
 	Outcome        string              `json:"outcome"`
+	Serving        bool                `json:"serving"`
+	ServesDegraded bool                `json:"serves_degraded"`
 	AgeMS          int64               `json:"age_ms"`
 	FreshMS        int64               `json:"fresh_ms"`
+	RecheckFailing bool                `json:"recheck_failing"`
+	LastAttemptMS  int64               `json:"last_attempt_ms"`
 	Basis          containmentBasis    `json:"basis"`
 	ProvenBeads    int                 `json:"proven_beads"`
 	LostCrossEdges []string            `json:"lost_cross_edges,omitempty"`
@@ -146,9 +174,9 @@ type containmentLeaseWire struct {
 	Complete       bool                `json:"complete"`
 }
 
-// wire renders l as of now, using the controller's own clock for AgeMS: the
-// same lease answers every caller with its own true age, never a value
-// frozen at publish time.
+// wire renders l as of now, using the controller's own clock for AgeMS and
+// LastAttemptMS: the same lease answers every caller with its own true
+// ages, never a value frozen at publish time.
 func (l *containmentLease) wire(now time.Time) containmentLeaseWire {
 	return containmentLeaseWire{
 		V:              containmentLeaseProtocolVersion,
@@ -156,8 +184,12 @@ func (l *containmentLease) wire(now time.Time) containmentLeaseWire {
 		Binding:        l.Binding,
 		Database:       l.Database,
 		Outcome:        l.Outcome,
+		Serving:        l.Serving,
+		ServesDegraded: l.ServesDegraded,
 		AgeMS:          now.Sub(l.TakenAt).Milliseconds(),
 		FreshMS:        l.FreshMS,
+		RecheckFailing: l.RecheckFailing,
+		LastAttemptMS:  now.Sub(l.LastAttemptAt).Milliseconds(),
 		Basis:          l.Basis,
 		ProvenBeads:    l.ProvenBeads,
 		LostCrossEdges: l.LostCrossEdges,
@@ -172,27 +204,43 @@ func (l *containmentLease) wire(now time.Time) containmentLeaseWire {
 // freshMS is the recheck's current freshness budget (storage_boot.go's
 // adaptive-interval math); takenAt is when report's check began. It returns
 // nil for a report with no captured basis (not configured, genesis, an
-// identity mismatch, uncheckable): there is nothing there a one-shot could
-// compare itself against, so nothing is published (design doc §4.6).
+// identity mismatch, uncheckable: there is nothing there a one-shot could
+// compare itself against) and, independently of basis, for any report whose
+// Outcome is not itself one a lease is ever published for
+// (leaseableOutcome) — a standing fault discovered mid-check keeps its
+// basis (confirmInfraContainment's own comment on that), so the basis check
+// alone does not reject it; design doc §4.6.
 func newContainmentLease(target infraBindingTarget, report infraMigrationReport, freshMS int64, takenAt time.Time) *containmentLease {
-	if report.basis.empty() {
+	if report.basis.empty() || !report.leaseableOutcome() {
 		return nil
 	}
 	stranded, strandedComplete := capLeaseList(report.Stranded)
 	presumed, presumedComplete := capLeaseList(report.PresumedReused)
+	declassifiable := report.Declassifiable
+	if !strandedComplete {
+		// Declassifiable only ever names ids within Stranded (it maps a
+		// subset of them to the metadata that clears them); a Stranded cut
+		// short of leaseListCap can no longer vouch for it, so both are
+		// dropped together rather than publish a Declassifiable that
+		// answers for ids the truncated Stranded no longer lists.
+		stranded, declassifiable = nil, nil
+	}
 	return &containmentLease{
 		PID:            os.Getpid(),
 		Binding:        target.Binding,
 		Database:       target.Database,
 		Outcome:        report.Outcome.String(),
+		Serving:        report.serving(),
+		ServesDegraded: report.servesDegraded(),
 		TakenAt:        takenAt,
 		FreshMS:        freshMS,
+		LastAttemptAt:  takenAt,
 		Basis:          report.basis,
 		ProvenBeads:    report.ProvenBeads,
 		LostCrossEdges: report.LostCrossEdges,
 		Stranded:       stranded,
 		PresumedReused: presumed,
-		Declassifiable: report.Declassifiable,
+		Declassifiable: declassifiable,
 		Complete:       strandedComplete && presumedComplete,
 	}
 }
@@ -247,11 +295,21 @@ func captureContainmentBasis(cityPath string, target infraBindingTarget) (contai
 // mtime_ns, ctime_ns) when changeSensitive and the platform exposes an
 // inode; just (dev, ino) otherwise, for the database file, which this exists
 // to catch a RESTORE of, not an ordinary write through the binding this
-// process already has open. Falls back to a "sha256:"-prefixed content hash
-// where there is no inode (Windows, design doc §4.6). A missing file stamps
-// as "absent", itself a fact worth comparing: the manifest and the cleared
-// note are both written by temp+rename, so a transition through "absent" is
-// real information, not a race this glosses over.
+// process already has open. A missing file stamps as "absent", itself a
+// fact worth comparing: the manifest and the cleared note are both written
+// by temp+rename, so a transition through "absent" is real information,
+// not a race this glosses over.
+//
+// Where there is no inode (Windows), the manifest and cleared-note stamps
+// (changeSensitive) fall back to a "sha256:"-prefixed content hash: both
+// are small, process-written files, so hashing them costs nothing. The
+// database stamp never does: it names the live SQLite file the binding has
+// open, often large, and hashing it on every basis capture would make the
+// capture itself one of the heaviest things this process does. There, with
+// no inode, the stamp is the literal "unsupported" (design review SHOULD
+// 5) — a value that can never equal a later basis's, so a RESTORE this
+// stamp exists to catch is never silently taken for a match on a platform
+// that cannot name the file well enough to tell.
 func containmentBasisStamp(path string, changeSensitive bool) (string, error) {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -267,6 +325,9 @@ func containmentBasisStamp(path string, changeSensitive bool) (string, error) {
 		ctimeNS, _ := statCtimeNanosBestEffort(info)
 		return fmt.Sprintf("dev=%d;ino=%d;size=%d;mtime_ns=%d;ctime_ns=%d",
 			dev, ino, info.Size(), info.ModTime().UnixNano(), ctimeNS), nil
+	}
+	if !changeSensitive {
+		return "unsupported", nil
 	}
 	sum, err := fileSHA256(path)
 	if err != nil {
@@ -363,7 +424,8 @@ func classifierBasisString() string {
 	}
 	digest := hex.EncodeToString(h.Sum(nil))
 	build := fmt.Sprintf("%s@%s", version, commit)
-	if version == "dev" || commit == "unknown" || strings.HasSuffix(commit, dirtySuffix) {
+	_, pseudo := goPseudoVersionBase(versionBuilt)
+	if version == "dev" || commit == "unknown" || strings.HasSuffix(commit, dirtySuffix) || pseudo {
 		build += "#" + classifierBasisNonce
 	}
 	return fmt.Sprintf("gen=%d;digest=%s;build=%s", coordclass.CurrentGeneration, digest, build)
