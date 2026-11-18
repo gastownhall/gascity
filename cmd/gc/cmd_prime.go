@@ -639,11 +639,13 @@ func primeHookSessionStart(ctx primeHookContext) bool {
 // hookIdentityEnv are the environment markers that show gc, rather than a
 // human, started the process a hook is running inside. gc's session lifecycle
 // sets the session and agent variables and its managed hook wrappers set
-// GC_MANAGED_SESSION_HOOK. The codex and antigravity overlays do bake
-// GC_MANAGED_SESSION_HOOK=1 into their staged `gc prime --hook` command, so a
-// human-launched session there passes this gate — those two also set
-// GC_HOOK_EVENT_NAME=SessionStart and stay covered by the live-session gate
-// below.
+// GC_MANAGED_SESSION_HOOK. Every overlay that bakes GC_MANAGED_SESSION_HOOK=1
+// into its staged `gc prime --hook` command (claude, codex, antigravity,
+// gemini, kiro, kimi, pi, omp) lets a human-launched session there pass this
+// gate. Each also sets GC_HOOK_EVENT_NAME=SessionStart on that same invocation,
+// which keeps it covered by the live-session gate below. The marker must never
+// ride a non-SessionStart invocation whose output reaches the model; pi's
+// PreCompact use is safe only because pi discards that output.
 var hookIdentityEnv = []string{
 	"GC_SESSION_ID",
 	"GC_SESSION_NAME",

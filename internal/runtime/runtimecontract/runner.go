@@ -101,8 +101,11 @@ func run(ctx context.Context, executable string, opts Options, selected func(Cod
 			continue
 		}
 		status, detail := probe(ctx, r, report.Protocol)
+		if status == StatusFail && advisory(req.Group) {
+			detail = "advisory, does not gate v2_ready: " + detail
+		}
 		report.record(req, status, detail)
-		if status == StatusFail {
+		if status == StatusFail && !advisory(req.Group) {
 			report.V2Failed = append(report.V2Failed, req.Code)
 		}
 	}
@@ -153,8 +156,8 @@ func (r *runner) opTimeout(ctx context.Context, timeout time.Duration, stdin []b
 func (r *runner) opEnv(ctx context.Context, timeout time.Duration, env []string, stdin []byte, args ...string) outcome {
 	var cmdEnv []string
 	if env != nil {
-		// Read before the op's deadline: execenv.Environ waits out an
-		// in-flight native store open, and that wait is not the op's.
+		// Read before the op's deadline, so the read is not the op's. During
+		// a native store open it is the environment as the open found it.
 		cmdEnv = append(execenv.Environ(), env...)
 	}
 	opCtx, cancel := context.WithTimeout(ctx, timeout)

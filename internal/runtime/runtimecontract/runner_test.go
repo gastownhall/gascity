@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -350,6 +351,22 @@ func TestEveryRequirementIsGated(t *testing.T) {
 		{ReqInputExit80OneLine, oedit("nudge", `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || { echo '{"outcome":"gone"}'; head -c 70000 /dev/zero | tr '\0' '\n'; exit 80; };`), "exits 80 with a gone line padded past gc's 64 KiB stdout cap"},
 		{ReqInputExit80OneLine, oedit("nudge", `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || { printf '{"outcome":"gone","detail":"%s"}\n' "$(head -c 1025 /dev/zero | tr '\0' x)"; exit 80; };`), "exits 80 with a detail past 1 KiB"},
 	}
+	// observationMutants edit Bodies, the default-carrier golden, which
+	// declares report-activity; opsObservationMutants edit NonTmuxBodies,
+	// whose carrier.ops makes peek and clear-scrollback mandatory.
+	observationMutants := []mutant{
+		{ReqObservationPeek, edit("peek", `cat "$box/cmd0"; echo`, `echo "cannot read the screen" >&2; exit 1`), "peek of a running box fails"},
+		{ReqObservationPeek, set("peek", `exit 2`), "the v2 profile is declared but peek is not implemented"},
+		{ReqObservationLastActivity, set("get-last-activity", `echo "no activity store" >&2; exit 1`), "get-last-activity of a running box fails"},
+		{ReqObservationLastActivity, set("get-last-activity", `echo yesterday`), "get-last-activity answers a time gc cannot parse"},
+		{ReqObservationLastActivity, set("get-last-activity", `exit 2`), "report-activity declared but get-last-activity is not implemented"},
+		{ReqObservationClearScrollback, set("clear-scrollback", `echo "cannot clear" >&2; exit 1`), "clear-scrollback of a running box fails"},
+		{ReqObservationCopyTo, set("copy-to", `[ -e "$3" ] || { echo "no such source" >&2; exit 1; }`), "copy-to of a missing source fails"},
+	}
+	opsObservationMutants := []mutant{
+		{ReqObservationPeek, set("peek", `exit 2`), "carrier.ops declared but peek is not implemented"},
+		{ReqObservationClearScrollback, set("clear-scrollback", `exit 2`), "carrier.ops declared but clear-scrollback is not implemented"},
+	}
 	// atMostOnceMutants edit the at-most-once golden, whose written nudge
 	// answers delivered_unobserved and keeps no send record.
 	typedLine := `printf '%s\n' "$txt" >> "$box/typed"; `
@@ -380,6 +397,12 @@ func TestEveryRequirementIsGated(t *testing.T) {
 	}
 	for _, m := range inputMutants {
 		all = append(all, gated{m, inputBase})
+	}
+	for _, m := range observationMutants {
+		all = append(all, gated{m, reference.Bodies})
+	}
+	for _, m := range opsObservationMutants {
+		all = append(all, gated{m, reference.NonTmuxBodies})
 	}
 	for _, m := range atMostOnceMutants {
 		all = append(all, gated{m, func() map[string]string {
@@ -415,8 +438,151 @@ func TestEveryRequirementIsGated(t *testing.T) {
 				t.Errorf("mutant (%s) did not fail %s: status=%s detail=%q — the check is vacuous",
 					m.whatItBreaks, m.target, res.Status, res.Detail)
 			}
-			if report.V2Ready {
+			req := requirementFor(t, m.target)
+			switch {
+			case advisory(req.Group) && !report.V2Ready:
+				t.Errorf("mutant (%s) failed advisory %s yet reads not v2-ready (failed %v): an advisory requirement does not gate v2_ready", m.whatItBreaks, m.target, report.V2Failed)
+			case !advisory(req.Group) && report.V2Ready:
 				t.Errorf("mutant (%s) failed %s yet reads v2-ready", m.whatItBreaks, m.target)
+			}
+		})
+	}
+}
+
+// requirementFor returns the catalog requirement code names.
+func requirementFor(t *testing.T, code Code) Requirement {
+	t.Helper()
+	for _, req := range catalog {
+		if req.Code == code {
+			return req
+		}
+	}
+	t.Fatalf("no catalog requirement %s", code)
+	return Requirement{}
+}
+
+// The observation group lands advisory: a pack that fails one of its
+// requirements sees the FAIL, marked advisory, but stays v2-ready, and the
+// code stays out of v2_failed until the group is made strict.
+// Kills: an observation FAIL that takes a pack off v2_ready, and an advisory
+// FAIL that is not reported.
+func TestObservationFailLeavesV2Ready(t *testing.T) {
+	bodies := reference.InputOutcomeBodies(reference.HostFSBodies())
+	bodies["copy-to"] = `[ -e "$3" ] || { echo "no such source" >&2; exit 1; }`
+	report := runGolden(t, writeScript(t, t.TempDir(), bodies))
+	res := resultFor(t, report, ReqObservationCopyTo)
+	if res.Status != StatusFail {
+		t.Fatalf("%s = %s (%s), want FAIL", res.Code, res.Status, res.Detail)
+	}
+	if !strings.Contains(res.Detail, "advisory") {
+		t.Errorf("%s detail %q does not say the FAIL is advisory", res.Code, res.Detail)
+	}
+	for _, other := range report.Results {
+		if other.Code != ReqObservationCopyTo && other.Status == StatusFail {
+			t.Errorf("only %s should fail, but %s failed: %s", ReqObservationCopyTo, other.Code, other.Detail)
+		}
+	}
+	if !report.V2Ready || len(report.V2Failed) != 0 {
+		t.Errorf("v2-ready %v, failed %v; want v2-ready with nothing in v2_failed", report.V2Ready, report.V2Failed)
+	}
+	if report.Failed() || report.RequiredFailed() != 0 {
+		t.Errorf("Failed() = %v, RequiredFailed() = %d for an advisory-only FAIL; want a passing run", report.Failed(), report.RequiredFailed())
+	}
+}
+
+// The advisory set is exactly RPP-OBSERVATION-001..004: the group lands
+// non-gating while every other requirement keeps gating v2_ready.
+func TestAdvisorySetIsTheObservationGroup(t *testing.T) {
+	want := map[Code]bool{
+		"RPP-OBSERVATION-001": true,
+		"RPP-OBSERVATION-002": true,
+		"RPP-OBSERVATION-003": true,
+		"RPP-OBSERVATION-004": true,
+	}
+	got := map[Code]bool{}
+	for _, req := range catalog {
+		if advisory(req.Group) {
+			got[req.Code] = true
+		}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("advisory set = %v, want %v", got, want)
+	}
+}
+
+// Kills an observation group whose gate is wrong: an op that answers exit 2
+// SKIPs unless a declared token makes it mandatory (carrier.ops or the v2
+// profile for peek, as gc's exec provider holds it; carrier.ops for
+// clear-scrollback, input-outcome for clear-scrollback, report-activity
+// for get-last-activity); copy-to is optional under every handshake; and
+// a present op is held to its answer whatever is declared.
+func TestObservationGroupGatesOnWhatIsDeclared(t *testing.T) {
+	ops := []string{"peek", "get-last-activity", "clear-scrollback", "copy-to"}
+	for _, tc := range []struct {
+		name   string
+		caps   []string
+		absent bool
+		want   map[Code]Status
+	}{
+		{
+			name:   "nothing declared, ops absent",
+			caps:   nil,
+			absent: true,
+			want:   map[Code]Status{ReqObservationPeek: StatusSkip, ReqObservationLastActivity: StatusSkip, ReqObservationClearScrollback: StatusSkip, ReqObservationCopyTo: StatusSkip},
+		},
+		{
+			name: "nothing declared, ops present",
+			caps: nil,
+			want: map[Code]Status{ReqObservationPeek: StatusPass, ReqObservationLastActivity: StatusPass, ReqObservationClearScrollback: StatusPass, ReqObservationCopyTo: StatusPass},
+		},
+		{
+			name:   "carrier.ops declared, ops absent",
+			caps:   []string{runtime.ProtocolCapabilityCarrierOps},
+			absent: true,
+			want:   map[Code]Status{ReqObservationPeek: StatusFail, ReqObservationLastActivity: StatusSkip, ReqObservationClearScrollback: StatusFail, ReqObservationCopyTo: StatusSkip},
+		},
+		{
+			name:   "input-outcome declared, ops absent",
+			caps:   []string{runtime.ProtocolCapabilityInputOutcome},
+			absent: true,
+			want:   map[Code]Status{ReqObservationPeek: StatusSkip, ReqObservationLastActivity: StatusSkip, ReqObservationClearScrollback: StatusFail, ReqObservationCopyTo: StatusSkip},
+		},
+		{
+			name:   "v2 profile declared, ops absent",
+			caps:   []string{runtime.ProtocolCapabilityObserveV1, runtime.ProtocolCapabilityReportAttachment},
+			absent: true,
+			want:   map[Code]Status{ReqObservationPeek: StatusFail, ReqObservationLastActivity: StatusSkip, ReqObservationClearScrollback: StatusSkip, ReqObservationCopyTo: StatusSkip},
+		},
+		{
+			name:   "observe.v1 alone declared, ops absent",
+			caps:   []string{runtime.ProtocolCapabilityObserveV1},
+			absent: true,
+			want:   map[Code]Status{ReqObservationPeek: StatusSkip, ReqObservationLastActivity: StatusSkip, ReqObservationClearScrollback: StatusSkip, ReqObservationCopyTo: StatusSkip},
+		},
+		{
+			name:   "report-activity declared, ops absent",
+			caps:   []string{runtime.ProtocolCapabilityReportActivity},
+			absent: true,
+			want:   map[Code]Status{ReqObservationPeek: StatusSkip, ReqObservationLastActivity: StatusFail, ReqObservationClearScrollback: StatusSkip, ReqObservationCopyTo: StatusSkip},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bodies := reference.Bodies()
+			caps := make([]string, len(tc.caps))
+			for i, c := range tc.caps {
+				caps[i] = `"` + c + `"`
+			}
+			bodies["protocol"] = `echo '{"version":0,"capabilities":[` + strings.Join(caps, ",") + `]}'`
+			if tc.absent {
+				for _, op := range ops {
+					delete(bodies, op)
+				}
+			}
+			report := runGolden(t, writeScript(t, t.TempDir(), bodies))
+			for code, want := range tc.want {
+				if res := resultFor(t, report, code); res.Status != want {
+					t.Errorf("%s = %s (%s), want %s", code, res.Status, res.Detail, want)
+				}
 			}
 		})
 	}

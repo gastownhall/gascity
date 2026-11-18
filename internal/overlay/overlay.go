@@ -204,12 +204,7 @@ func copyDirRecursive(srcBase, dstBase, rel string, stderr io.Writer, preserveEx
 		src := filepath.Join(srcBase, entryRel)
 		dst := filepath.Join(dstBase, entryRel)
 		if preserveExisting != nil && preserveExisting(entryRel, dst) {
-			preserve, err := shouldPreserveExistingOverlayFile(src, dst, entryRel)
-			if err != nil {
-				fmt.Fprintf(stderr, "overlay: stat %q: %v\n", dst, err) //nolint:errcheck
-				continue
-			}
-			if preserve {
+			if _, err := os.Stat(dst); err == nil {
 				// A dst byte-identical to src already holds exactly what this
 				// overlay would stage, whichever writer put it there (typically
 				// gc's own Kiro AGENTS.md fallback from an earlier stage).
@@ -219,6 +214,9 @@ func copyDirRecursive(srcBase, dstBase, rel string, stderr io.Writer, preserveEx
 					continue
 				}
 				fmt.Fprintf(stderr, "%s%q; skipped %q\n", PreserveExistingWarningPrefix, dst, src) //nolint:errcheck
+				continue
+			} else if !os.IsNotExist(err) {
+				fmt.Fprintf(stderr, "overlay: stat %q: %v\n", dst, err) //nolint:errcheck
 				continue
 			}
 		}
@@ -564,41 +562,6 @@ func copyCanonicalJSONFile(src, dst, relPath string) error {
 		return fmt.Errorf("creating parent for %q: %w", dst, err)
 	}
 	return os.WriteFile(dst, canonical, info.Mode().Perm()|0o200)
-}
-
-func shouldPreserveExistingOverlayFile(src, dst, relPath string) (bool, error) {
-	if !platformAdaptsPath(relPath) {
-		_, err := os.Stat(dst)
-		if err == nil {
-			return true, nil
-		}
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	existing, err := os.ReadFile(dst)
-	if err == nil {
-		raw, readErr := os.ReadFile(src)
-		if readErr == nil {
-			adapted := AdaptSettingsForPlatform(relPath, raw)
-			if string(adapted) != string(raw) && !preservePlatformManagedFile(relPath, existing, raw, adapted) {
-				return false, nil
-			}
-		}
-		return true, nil
-	}
-	if os.IsNotExist(err) {
-		return false, nil
-	}
-	_, statErr := os.Stat(dst)
-	if statErr == nil {
-		return true, nil
-	}
-	if os.IsNotExist(statErr) {
-		return false, nil
-	}
-	return false, statErr
 }
 
 func copyFileForPlatform(src, dst, relPath string) error {

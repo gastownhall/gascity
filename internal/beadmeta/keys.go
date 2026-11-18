@@ -399,6 +399,15 @@ const (
 	// blocks literal it removed because only the binding holds <id>; there
 	// the entry, payload included, is the only trace of that edge.
 	MigratedCrossEdgesMetadataKey = "gc.migrated_cross_edges"
+	// MigratedParkedHoldMetadataKey records, on a bead a storage migration
+	// carried into a class binding, the hold bd parked it with in its
+	// source store and the binding cannot record (an undated deferral, or a
+	// status such as blocked, pinned or hooked): a JSON object
+	// {status, defer_until}. The binding holds such a bead with a defer_until
+	// far in the future instead, so it stays out of every ready view, and
+	// the reverse migration (`gc storage migrate --to-work`) restores the
+	// recorded status and defer_until from it.
+	MigratedParkedHoldMetadataKey = "gc.migrated_parked_hold"
 	// TriggerBeadStoreRefMetadataKey records the store ref of the bead named by
 	// TriggerBeadIDMetadataKey. Like that key it is controller demand
 	// bookkeeping and never reaches the session's shell.
@@ -781,6 +790,7 @@ var KnownMetadataKeys = []string{
 	InfraMigratedFromMetadataKey,
 	InfraReversedFromMetadataKey,
 	MigratedCrossEdgesMetadataKey,
+	MigratedParkedHoldMetadataKey,
 	TriggerBeadStoreRefMetadataKey,
 	TruncatedMetadataKey,
 	WorkBranchMetadataKey,

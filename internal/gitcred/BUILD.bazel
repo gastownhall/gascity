@@ -28,6 +28,7 @@ go_test(
     srcs = [
         "autherror_test.go",
         "helper_fixture_other_test.go",
+        "helper_fixture_windows_test.go",
         "inject_keepalive_drift_test.go",
         "inject_test.go",
         "match_test.go",

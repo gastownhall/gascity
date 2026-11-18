@@ -77,6 +77,47 @@ func RemoveStorageFromCityTOML(content []byte) ([]byte, error) {
 	return []byte(result), nil
 }
 
+// AppendStorageToCityTOML returns content with block, a [storage] section
+// and its sub-tables, appended after everything else, for the guided split
+// (S5 §5.2 P4). Every other byte of content is kept, comments and key order
+// included, and the block takes the file's line ending. It is refused when
+// content already declares a storage key or block declares anything but
+// storage, and, like the edits above, the result must decode to content's
+// document with exactly block's storage added.
+func AppendStorageToCityTOML(content, block []byte) ([]byte, error) {
+	var want, add map[string]any
+	if _, err := toml.Decode(string(content), &want); err != nil {
+		return nil, fmt.Errorf("parsing city.toml: %w", err)
+	}
+	if _, declared := want["storage"]; declared {
+		return nil, fmt.Errorf("%w: it already declares [storage]", ErrSurgicalStorageEditUnsupported)
+	}
+	if _, err := toml.Decode(string(block), &add); err != nil {
+		return nil, fmt.Errorf("parsing the [storage] block: %w", err)
+	}
+	if _, ok := add["storage"]; !ok || len(add) != 1 {
+		return nil, errors.New("the block to append must declare [storage] and nothing else")
+	}
+	eol := "\n"
+	if strings.Contains(string(content), "\r\n") {
+		eol = "\r\n"
+	}
+	text := strings.TrimRight(strings.ReplaceAll(string(block), "\r\n", "\n"), "\n")
+	result := string(content)
+	if result != "" && !strings.HasSuffix(result, "\n") {
+		result += eol
+	}
+	if result != "" {
+		result += eol
+	}
+	result += strings.ReplaceAll(text, "\n", eol) + eol
+	want["storage"] = add["storage"]
+	if err := checkCityTOMLEdit(want, result); err != nil {
+		return nil, err
+	}
+	return []byte(result), nil
+}
+
 // sessionReconcilerLine matches a session_reconciler assignment, capturing the
 // text before its value and the text after it (a trailing comment).
 var sessionReconcilerLine = regexp.MustCompile(`^([ \t]*session_reconciler[ \t]*=[ \t]*)("[^"]*"|'[^']*')([ \t]*(?:#.*)?\r?)$`)

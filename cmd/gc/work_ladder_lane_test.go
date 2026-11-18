@@ -292,6 +292,73 @@ func TestWorkLadderReleasesAnUnstartedClaim(t *testing.T) {
 	}
 }
 
+// gascity#8152. A one_shot agent's seat executes by running its process,
+// not by answering a prompt: process exit, crash recovery and idle_timeout
+// already own it, so the ladder must not govern it at all — same claim,
+// same quiet window as TestWorkLadderReleasesAnUnstartedClaim (which does
+// get nudged three times then released), but this seat's agent is
+// configured one_shot and must see none of it.
+func TestWorkLadderExcludesOneShotLifecycleSeat(t *testing.T) {
+	c := newLadderCity(t)
+	c.env.Cfg.Agents[0].Lifecycle = config.AgentLifecycleOneShot
+	id := c.claim("never started, one-shot script")
+	c.run(30*time.Minute, 30*time.Second, nil)
+	if len(c.nudgedAt) != 0 {
+		t.Fatalf("nudges at %v, want none: a one_shot seat is not the ladder's", c.nudgedAt)
+	}
+	b, _ := c.work.Get(id)
+	if b.Status != "in_progress" || b.Assignee != c.seat {
+		t.Fatalf("claim %q assignee %q, want untouched (still held by the seat)", b.Status, b.Assignee)
+	}
+	if rel := c.events(events.WorkReleased); len(rel) != 0 {
+		t.Fatalf("work.released = %+v, want none", rel)
+	}
+	if meta := c.row().Metadata[session.WorkLadderKey]; meta != "" {
+		t.Fatalf("work_ladder cell = %q, want unwritten: the row was never governed", meta)
+	}
+	if len(c.posted) != 0 {
+		t.Fatalf("posted %+v, want no recycles", c.posted)
+	}
+}
+
+// gascity#8152. A seat whose agent turns one_shot while its cell still
+// holds a pending release (a config change mid-release, or an older binary
+// that crashed after committing it) must not keep that release forever: the
+// hook would refuse the claim's start for good. The next pass drops it and
+// does nothing else — no nudge, no release, no recycle.
+func TestWorkLadderOneShotSeatDropsInheritedRelease(t *testing.T) {
+	c := newLadderCity(t)
+	id := c.claim("being released when the agent turned one_shot")
+	key := workladder.ClaimKey{Store: "city", Bead: id}
+	cell := workladder.Record{
+		V: 1, Gen: 7, Entries: []workladder.Entry{{Key: key, Kind: workladder.KindClaim, Rung: workladder.RungClaimed, Since: c.now, Attempts: 3, Last: c.now}},
+		Release: &workladder.ReleaseMark{Key: key, Gen: 7, At: c.now},
+	}
+	c.setRow(map[string]string{session.WorkLadderKey: workladder.EncodeLadder(cell)})
+	if !session.WorkLadderReleases(c.row().Metadata[session.WorkLadderKey], "", id) {
+		t.Fatal("the hook does not see the pending release")
+	}
+	c.env.Cfg.Agents[0].Lifecycle = config.AgentLifecycleOneShot
+	nudges, released, posted := len(c.nudgedAt), len(c.events(events.WorkReleased)), len(c.posted)
+	c.pass()
+	if session.WorkLadderReleases(c.row().Metadata[session.WorkLadderKey], "", id) {
+		t.Fatal("the pending release outlived the one_shot exclusion")
+	}
+	b, _ := c.work.Get(id)
+	if b.Status != "in_progress" || b.Assignee != c.seat {
+		t.Fatalf("claim %q assignee %q, want untouched (still held by the seat)", b.Status, b.Assignee)
+	}
+	if len(c.nudgedAt) != nudges {
+		t.Fatalf("nudges at %v, want none in the one_shot pass", c.nudgedAt)
+	}
+	if rel := c.events(events.WorkReleased); len(rel) != released {
+		t.Fatalf("work.released = %+v, want none in the one_shot pass", rel)
+	}
+	if len(c.posted) != posted {
+		t.Fatalf("posted %+v, want no recycles", c.posted)
+	}
+}
+
 // agentRaceStore is a session store whose first CAS on row runs agent first: the
 // agent's own write lands between the ladder's read and its CAS.
 type agentRaceStore struct {

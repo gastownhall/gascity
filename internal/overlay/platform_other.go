@@ -14,16 +14,6 @@ func platformAdaptsDirectoryCopies() bool {
 	return false
 }
 
-// ManagedFileNeedsPlatformUpgrade returns nil: this platform has no
-// platform-adapted managed file bytes to upgrade.
-func ManagedFileNeedsPlatformUpgrade(_ string, _, _ []byte) func([]byte) bool {
-	return nil
-}
-
-func preservePlatformManagedFile(_ string, _, _, _ []byte) bool {
-	return false
-}
-
 func platformPreserveExistingPath(relPath string) bool {
 	return relPath == "AGENTS.md"
 }
