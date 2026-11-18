@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/usage"
 )
 
@@ -948,13 +949,15 @@ func TestLegacySessionEntryGuardBlocksAndCountsUnderV2(t *testing.T) {
 	})
 }
 
-// newDeadRuntimeCorpseFixture builds a runtime over one pool session row
-// (awake, creation_complete five seconds old, so inside the post-create
-// protection window) whose pane is kept but dead: the row a one-shot worker
-// leaves when it exits seconds after its start. The pool has no work, so its
-// demand is zero once that row is closed.
-func newDeadRuntimeCorpseFixture(t *testing.T) (cr *CityRuntime, store beads.Store, corpseID string, stderr *lockedBuffer) {
+// newDeadRuntimeCorpseFixture builds a legacy city runtime over the real
+// supervisor desired-state build, a pool template "worker" (min 0, max 2)
+// with no work behind it, and one open ephemeral pool row that completed
+// creation seconds ago and whose listed runtime is dead. It returns the
+// runtime, its session store, the fake behind the runtime provider and the
+// seeded row's ID.
+func newDeadRuntimeCorpseFixture(t *testing.T) (*CityRuntime, beads.Store, *runtime.Fake, string) {
 	t.Helper()
+	// Host IO pressure must not skip the fixture's passes.
 	t.Setenv(fsPressureThresholdEnv, "100")
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
@@ -963,115 +966,221 @@ func newDeadRuntimeCorpseFixture(t *testing.T) (cr *CityRuntime, store beads.Sto
 	if err != nil {
 		t.Fatalf("open config: %v", err)
 	}
-	if _, err := f.WriteString("\n[[agent]]\nname = \"worker\"\nstart_command = \"true\"\nmin_active_sessions = 0\nmax_active_sessions = 2\n"); err != nil {
+	if _, err := f.WriteString("\n[daemon]\nsession_reconciler = \"legacy\"\n\n[[agent]]\nname = \"worker\"\nstart_command = \"true\"\nmin_active_sessions = 0\nmax_active_sessions = 2\n"); err != nil {
+		_ = f.Close()
 		t.Fatalf("append config: %v", err)
 	}
-	_ = f.Close()
+	if err := f.Close(); err != nil {
+		t.Fatalf("close config: %v", err)
+	}
 	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
 
-	store = beads.NewMemStore()
-	justCompleted := time.Now().Add(-5 * time.Second).UTC().Format(time.RFC3339)
-	corpse, err := store.Create(beads.Bead{
+	store := beads.NewMemStore()
+	row, err := store.Create(beads.Bead{
 		Title:  "worker",
 		Type:   sessionBeadType,
-		Labels: []string{sessionBeadLabel, "agent:worker"},
-		Metadata: map[string]string{
-			"session_name":         "worker-1",
-			"template":             "worker",
-			"agent_name":           "worker",
-			"pool_slot":            "1",
-			poolManagedMetadataKey: boolMetadata(true),
-			"session_origin":       "ephemeral",
-			"state":                "awake",
-			"state_reason":         "creation_complete",
-			"creation_complete_at": justCompleted,
-			"last_woke_at":         justCompleted,
-			"continuation_epoch":   "1",
-			"generation":           "1",
-		},
+		Labels: []string{sessionBeadLabel},
 	})
 	if err != nil {
 		t.Fatalf("Create(session): %v", err)
 	}
-	// The worker exited: its pane is kept (remain-on-exit) but dead.
-	sp := newDeadRuntimeArtifactProvider()
-	sp.visible["worker-1"] = true
-	sp.dead["worker-1"] = true
+	name := "worker-" + row.ID
+	if err := store.SetMetadataBatch(row.ID, map[string]string{
+		"template":             "worker",
+		"session_name":         name,
+		"session_origin":       "ephemeral",
+		"pool_managed":         "true",
+		"state":                "awake",
+		"state_reason":         "creation_complete",
+		"creation_complete_at": time.Now().Add(-5 * time.Second).UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("SetMetadataBatch(session): %v", err)
+	}
 
-	stderr = &lockedBuffer{}
-	cr = newTestCityRuntime(t, CityRuntimeParams{
+	fake := runtime.NewFake()
+	if err := fake.Start(context.Background(), name, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("Start(%s): %v", name, err)
+	}
+	fake.Zombies[name] = true
+	sp := runtime.NewFakeProfile(runtime.ProfileTmux, runtime.FullFake{Fake: fake})
+
+	cr := newTestCityRuntime(t, CityRuntimeParams{
 		CityPath:                cityPath,
 		CityName:                "test-city",
 		TomlPath:                tomlPath,
 		ConfigRev:               configRev,
-		ConfigDirty:             &atomic.Bool{},
 		Cfg:                     cfg,
 		SP:                      sp,
-		BuildFn:                 supervisorBuildAgentsFn(cityPath, "test-city", stderr),
-		BuildFnWithSessionBeads: supervisorBuildAgentsFnWithSessionBeads(cityPath, "test-city", stderr),
+		BuildFnWithSessionBeads: supervisorBuildAgentsFnWithSessionBeads(cityPath, "test-city", io.Discard),
 		Dops:                    newDrainOps(sp),
 		Rec:                     events.Discard,
 		Stdout:                  io.Discard,
-		Stderr:                  stderr,
+		Stderr:                  io.Discard,
 	})
 	cr.od = nil
 	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
 	cs.cityBeadStore = store
 	cr.setControllerState(cs)
 	cr.sessionDrains = newDrainTracker()
-	return cr, store, corpse.ID, stderr
+	cr.trace = newSessionReconcilerTraceManager(cityPath, "test-city", io.Discard)
+	return cr, store, fake, row.ID
 }
 
-// assertDeadRuntimeCorpseClosedWithoutSuccessor fails unless the corpse row
-// is closed and no open session bead exists for its template.
-func assertDeadRuntimeCorpseClosedWithoutSuccessor(t *testing.T, store beads.Store, corpseID, pass string, stderr *lockedBuffer) {
+// assertDeadRuntimeCorpseClosedWithoutSuccessor checks the pass closed the
+// seeded row as dead-runtime and minted nothing: the only session row, open
+// or closed, is the seed, and the fake saw no Start beyond the seeding one.
+func assertDeadRuntimeCorpseClosedWithoutSuccessor(t *testing.T, cr *CityRuntime, store beads.Store, fake *runtime.Fake, seedID string) {
 	t.Helper()
-	got, err := store.Get(corpseID)
+	if !cr.waitForAsyncStarts() {
+		t.Fatal("async starts did not settle")
+	}
+	seed, err := store.Get(seedID)
 	if err != nil {
-		t.Fatalf("Get(corpse): %v", err)
+		t.Fatalf("Get(%s): %v", seedID, err)
 	}
-	if got.Status != "closed" {
-		t.Fatalf("corpse row status = %q after the %s, want closed\nstderr:\n%s", got.Status, pass, stderr.String())
+	if want := sessionpkg.CanonicalCloseReason("dead-runtime"); seed.Status != "closed" || seed.Metadata["close_reason"] != want {
+		t.Fatalf("seed row %s status %q close_reason %q, want closed with %q", seedID, seed.Status, seed.Metadata["close_reason"], want)
 	}
-	open, err := loadSessionBeads(store)
+	rows, err := store.List(beads.ListQuery{Label: sessionBeadLabel, IncludeClosed: true})
 	if err != nil {
-		t.Fatalf("loadSessionBeads: %v", err)
+		t.Fatalf("List(sessions): %v", err)
 	}
-	for _, b := range open {
-		if b.Metadata["template"] == "worker" {
-			t.Errorf("%s created successor session %s (session_name %q) with no demand\nstderr:\n%s", pass, b.ID, b.Metadata["session_name"], stderr.String())
+	for _, r := range rows {
+		if r.ID != seedID {
+			t.Errorf("pass minted successor session %s (session_name %q, status %q) with no demand", r.ID, r.Metadata["session_name"], r.Status)
 		}
 	}
-}
-
-// Kills: the demand build reading the session snapshot loaded before the
-// dead-runtime corpse cleanup. A pool session that exits seconds after its
-// creation_complete is still inside the post-create protection window, so a
-// stale snapshot counts the row the cleanup just closed as a fresh session
-// and the tick mints a successor for it. With no work, that successor exits
-// the same way and the template respawns forever.
-func TestCityRuntimeTickDoesNotRespawnPoolSessionClosedAsDeadRuntime(t *testing.T) {
-	cr, store, corpseID, stderr := newDeadRuntimeCorpseFixture(t)
-
-	runFixtureTick(cr, "patrol")
-
-	assertDeadRuntimeCorpseClosedWithoutSuccessor(t, store, corpseID, "tick", stderr)
-	if n := cr.demandSnapshot.result.PoolDesiredCounts["worker"]; n != 0 {
-		t.Errorf("poolDesired[worker] = %d, want 0: the row closed as dead-runtime was counted as fresh demand", n)
+	starts := 0
+	for _, c := range fake.SnapshotCalls() {
+		if c.Method == "Start" {
+			starts++
+		}
+	}
+	if starts != 1 {
+		t.Errorf("runtime Start calls = %d, want 1 (the fixture's seeding start only)", starts)
 	}
 }
 
-// Kills: the startup step's demand build reading the session snapshot loaded
-// before the dead-runtime corpse cleanup (the reload dropped from the cleanup
-// phase, or a startup-only copy of that phase without it). A controller that
-// boots over a pool row whose worker exited seconds earlier closes the row,
-// then counts it as a fresh session and mints a successor with no work.
-func TestCityRuntimeStartupDoesNotRespawnPoolSessionClosedAsDeadRuntime(t *testing.T) {
-	cr, store, corpseID, stderr := newDeadRuntimeCorpseFixture(t)
-
-	if !cr.startupReconcile(context.Background()) {
-		t.Fatalf("the startup step did not complete\nstderr:\n%s", stderr.String())
+// Kills: the corpse cleanup closing a fresh pool row while the demand build
+// reads the snapshot taken before that close. The stale row sits inside its
+// post-create protection window, so it counts as demand of one and the same
+// pass mints a successor with no work behind it, forever.
+func TestCityRuntimeDoesNotRespawnPoolSessionClosedAsDeadRuntime(t *testing.T) {
+	for _, trigger := range []string{"patrol", "poke"} {
+		t.Run(trigger, func(t *testing.T) {
+			cr, store, fake, seedID := newDeadRuntimeCorpseFixture(t)
+			runFixtureTick(cr, trigger)
+			assertDeadRuntimeCorpseClosedWithoutSuccessor(t, cr, store, fake, seedID)
+			if cr.demandSnapshot == nil {
+				t.Fatal("the tick left no demand snapshot")
+			}
+			if got := cr.demandSnapshot.result.PoolDesiredCounts["worker"]; got != 0 {
+				t.Errorf("poolDesired[worker] = %d, want 0", got)
+			}
+		})
 	}
+	t.Run("startup", func(t *testing.T) {
+		cr, store, fake, seedID := newDeadRuntimeCorpseFixture(t)
+		if !cr.startupReconcile(context.Background()) {
+			t.Fatal("the startup step did not complete")
+		}
+		assertDeadRuntimeCorpseClosedWithoutSuccessor(t, cr, store, fake, seedID)
+	})
+}
 
-	assertDeadRuntimeCorpseClosedWithoutSuccessor(t, store, corpseID, "startup", stderr)
+// corpseCleanupReload is the trace record a pass writes right after its
+// corpse cleanup record, when that record is a session snapshot load.
+func corpseCleanupReload(t *testing.T, records []SessionReconcilerTraceRecord) (SessionReconcilerTraceRecord, bool) {
+	t.Helper()
+	var ops []SessionReconcilerTraceRecord
+	for _, r := range records {
+		if r.RecordType == TraceRecordOperation && r.SiteCode != TraceSiteRuntimeInventoryPass && !phaseInternalRecord(fmt.Sprint(r.Fields["operation_name"])) {
+			ops = append(ops, r)
+		}
+	}
+	for i, r := range ops {
+		if r.SiteCode != TraceSiteControllerTickPhase || r.Fields["operation_name"] != "cleanup_dead_runtime_session_corpses" {
+			continue
+		}
+		if i+1 < len(ops) && ops[i+1].SiteCode == TraceSiteSessionSnapshot {
+			return ops[i+1], true
+		}
+		return SessionReconcilerTraceRecord{}, false
+	}
+	t.Fatalf("no cleanup_dead_runtime_session_corpses record in:\n\t%s", strings.Join(operationRecords(records), "\n\t"))
+	return SessionReconcilerTraceRecord{}, false
+}
+
+// Kills: the reload after a corpse cleanup that cleaned something going
+// untraced, or traced anywhere but right after the cleanup with the refreshed
+// snapshot's open count, so `gc trace` cannot show why the pass read the
+// store again.
+func TestCityRuntimeCorpseCleanupTracesSnapshotReload(t *testing.T) {
+	for _, pass := range []string{"patrol", "poke", "startup"} {
+		t.Run(pass, func(t *testing.T) {
+			cr, _, _, _ := newDeadRuntimeCorpseFixture(t)
+			if pass == "startup" {
+				if !cr.startupReconcile(context.Background()) {
+					t.Fatal("the startup step did not complete")
+				}
+			} else {
+				runFixtureTick(cr, pass)
+			}
+			if !cr.waitForAsyncStarts() {
+				t.Fatal("async starts did not settle")
+			}
+			reload, ok := corpseCleanupReload(t, closeTrace(t, cr))
+			if !ok {
+				t.Fatal("no session snapshot load record right after the corpse cleanup that closed the seed row")
+			}
+			if got := reload.Fields["operation_name"]; got != "load_session_snapshot.after_corpse_cleanup" {
+				t.Errorf("record after the corpse cleanup is %q, want load_session_snapshot.after_corpse_cleanup", got)
+			}
+			if got := fmt.Sprint(reload.Fields["open_session_count"]); got != "0" {
+				t.Errorf("reload open_session_count = %s, want 0 (the refreshed snapshot without the closed seed row)", got)
+			}
+		})
+	}
+}
+
+// Kills: a reload after a corpse cleanup that cleaned nothing. The seed row's
+// runtime is alive, so the cleanup reports zero and the pass must not read
+// the session store again or trace a reload it did not do.
+func TestCityRuntimeCorpseCleanupSkipsReloadWhenNothingCleaned(t *testing.T) {
+	for _, pass := range []string{"patrol", "poke", "startup"} {
+		t.Run(pass, func(t *testing.T) {
+			cr, store, fake, seedID := newDeadRuntimeCorpseFixture(t)
+			delete(fake.Zombies, "worker-"+seedID)
+			if pass == "startup" {
+				if !cr.startupReconcile(context.Background()) {
+					t.Fatal("the startup step did not complete")
+				}
+			} else {
+				runFixtureTick(cr, pass)
+			}
+			if !cr.waitForAsyncStarts() {
+				t.Fatal("async starts did not settle")
+			}
+			seed, err := store.Get(seedID)
+			if err != nil {
+				t.Fatalf("Get(%s): %v", seedID, err)
+			}
+			if seed.Status == "closed" {
+				t.Fatalf("corpse cleanup closed seed row %s whose runtime is alive", seedID)
+			}
+			ops := operationRecords(closeTrace(t, cr))
+			cleanup := false
+			for _, op := range ops {
+				if strings.HasSuffix(op, " cleanup_dead_runtime_session_corpses") {
+					cleanup = true
+				}
+				if strings.HasSuffix(op, " load_session_snapshot.after_corpse_cleanup") {
+					t.Errorf("pass traced a corpse cleanup reload although nothing was cleaned:\n\t%s", strings.Join(ops, "\n\t"))
+				}
+			}
+			if !cleanup {
+				t.Fatalf("no cleanup_dead_runtime_session_corpses record in:\n\t%s", strings.Join(ops, "\n\t"))
+			}
+		})
+	}
 }
