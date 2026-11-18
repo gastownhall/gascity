@@ -136,7 +136,7 @@ func newContractHarness(t *testing.T) *contractHarness {
 		}
 	})
 
-	wiring, err := newControllerWiring(cfg, func(string) (string, bool) { return "", false }, stderr)
+	wiring, err := newControllerWiring(cfg, "", func(string) (string, bool) { return "", false }, stderr)
 	if err != nil {
 		t.Fatalf("controller wiring: %v", err)
 	}

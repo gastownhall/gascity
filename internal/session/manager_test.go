@@ -7,15 +7,18 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
@@ -99,6 +102,11 @@ type orphanScanProvider struct {
 	findErr      error
 	terminateErr error
 	events       []string
+	// afterTerminate lists, by PID, the roots a termination leaves behind: a
+	// descendant whose parent carried the session too, and which the next scan
+	// reports as a root of its own.
+	afterTerminate map[int][]runtime.LiveRuntime
+	terminatedPIDs []int
 }
 
 func (p *orphanScanProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
@@ -121,9 +129,29 @@ func (p *orphanScanProvider) FindRuntimesBySessionID(id string) ([]runtime.LiveR
 	return out, p.findErr
 }
 
+// TerminateRuntime records the call and, when it succeeds, does what a real
+// termination does to the next scan: the runtime is gone from it, and whatever
+// it orphaned appears in its place.
 func (p *orphanScanProvider) TerminateRuntime(r runtime.LiveRuntime) error {
 	p.events = append(p.events, "terminate:"+r.SessionID)
-	return p.terminateErr
+	if p.terminateErr != nil {
+		return p.terminateErr
+	}
+	p.terminatedPIDs = append(p.terminatedPIDs, r.PID)
+	p.results = slices.DeleteFunc(p.results, func(live runtime.LiveRuntime) bool { return live.PID == r.PID })
+	p.results = append(p.results, p.afterTerminate[r.PID]...)
+	return nil
+}
+
+// orphanGateEvents is what the pre-start gate records around terminating one
+// orphan: where terminating a root can surface new ones, a second scan
+// confirms it surfaced none.
+func orphanGateEvents(id string) []string {
+	events := []string{"find:" + id, "terminate:" + id}
+	if proctable.RescanAfterTermination {
+		events = append(events, "find:"+id)
+	}
+	return events
 }
 
 type nonRunningStopRecorder struct {
@@ -430,9 +458,207 @@ func TestCreateKillsUntrackedOrphanBeforeStart(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	want := []string{"find:" + info.ID, "terminate:" + info.ID, "start:" + info.ID}
+	want := append(orphanGateEvents(info.ID), "start:"+info.ID)
 	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
 		t.Fatalf("events = %v, want %v", sp.events, want)
+	}
+}
+
+// setRootIsCityInfrastructure replaces the pre-start fence's classification
+// for one test.
+func setRootIsCityInfrastructure(t *testing.T, classify func(runtime.LiveRuntime) (bool, error)) {
+	t.Helper()
+	prev := rootIsCityInfrastructure
+	rootIsCityInfrastructure = classify
+	t.Cleanup(func() { rootIsCityInfrastructure = prev })
+}
+
+func TestCreateLeavesAnInfrastructureRootAloneAndStarts(t *testing.T) {
+	setRootIsCityInfrastructure(t, func(runtime.LiveRuntime) (bool, error) { return true, nil })
+	store := beads.NewMemStore()
+	sp := &orphanScanProvider{
+		city:    t.TempDir(),
+		Fake:    runtime.NewFake(),
+		results: []runtime.LiveRuntime{{PID: 1234, StartIdentity: "7"}},
+	}
+	mgr := newTestManager(t, store, sp, WithCityPath(sp.city))
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "my chat", Command: "claude", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	want := []string{"find:" + info.ID, "start:" + info.ID}
+	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
+		t.Fatalf("events = %v, want %v", sp.events, want)
+	}
+}
+
+// TestCreateRefusesStartWhenAnOrphanCannotBeClassified is the regression test
+// for a root whose command line could not be read passing the infrastructure
+// fence as "not infrastructure". Where orphan scan errors refuse the start
+// (Windows), it must be neither terminated nor passed over: the start is
+// refused, as for an orphan that could not be confirmed dead.
+func TestCreateRefusesStartWhenAnOrphanCannotBeClassified(t *testing.T) {
+	if !orphanScanErrorsRefuseStart {
+		t.Skip("orphan scan errors refuse the start only on Windows")
+	}
+	setRootIsCityInfrastructure(t, func(runtime.LiveRuntime) (bool, error) {
+		return false, errors.New("command line unreadable")
+	})
+	store := beads.NewMemStore()
+	sp := &orphanScanProvider{
+		city:    t.TempDir(),
+		Fake:    runtime.NewFake(),
+		results: []runtime.LiveRuntime{{PID: 1234, StartIdentity: "7"}},
+	}
+	mgr := newTestManager(t, store, sp, WithCityPath(sp.city))
+
+	_, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "my chat", Command: "claude", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err == nil || !strings.Contains(err.Error(), "command line unreadable") {
+		t.Fatalf("Create error = %v, want a refusal carrying the classification failure", err)
+	}
+	for _, e := range sp.events {
+		if strings.HasPrefix(e, "terminate:") || strings.HasPrefix(e, "start:") {
+			t.Fatalf("events = %v; a root that could not be classified must be neither terminated nor started beside", sp.events)
+		}
+	}
+}
+
+// TestCreateLeavesAnUnclassifiableRootRunningAndStarts is the same root where
+// orphan scan errors do not refuse the start: the classification failure is
+// logged, the root is left running rather than terminated on a command line
+// nobody read, and the replacement starts.
+func TestCreateLeavesAnUnclassifiableRootRunningAndStarts(t *testing.T) {
+	if orphanScanErrorsRefuseStart {
+		t.Skip("orphan scan errors refuse the start on this platform")
+	}
+	setRootIsCityInfrastructure(t, func(runtime.LiveRuntime) (bool, error) {
+		return false, errors.New("command line unreadable")
+	})
+	store := beads.NewMemStore()
+	sp := &orphanScanProvider{
+		city:    t.TempDir(),
+		Fake:    runtime.NewFake(),
+		results: []runtime.LiveRuntime{{PID: 1234, StartIdentity: "7"}},
+	}
+	mgr := newTestManager(t, store, sp, WithCityPath(sp.city))
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "my chat", Command: "claude", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	want := []string{"find:" + info.ID, "start:" + info.ID}
+	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
+		t.Fatalf("events = %v, want %v", sp.events, want)
+	}
+}
+
+// TestCreateStartsAfterAPartialOrphanScan pins a scan that returned a root and
+// an error, where orphan scan errors do not refuse the start: the root the scan
+// did surface is terminated, the error is logged, and the replacement starts.
+func TestCreateStartsAfterAPartialOrphanScan(t *testing.T) {
+	if orphanScanErrorsRefuseStart {
+		t.Skip("orphan scan errors refuse the start on this platform")
+	}
+	setRootIsCityInfrastructure(t, func(runtime.LiveRuntime) (bool, error) { return false, nil })
+	store := beads.NewMemStore()
+	sp := &orphanScanProvider{
+		city:    t.TempDir(),
+		Fake:    runtime.NewFake(),
+		findErr: errors.New("partial scan failed"),
+		results: []runtime.LiveRuntime{{PID: 1234, StartIdentity: "7"}},
+	}
+	mgr := newTestManager(t, store, sp, WithCityPath(sp.city))
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "my chat", Command: "claude", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	want := append(orphanGateEvents(info.ID), "start:"+info.ID)
+	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
+		t.Fatalf("events = %v, want %v", sp.events, want)
+	}
+}
+
+// TestCreateRefusesStartAfterAPartialOrphanScan is the same scan where orphan
+// scan errors refuse the start (Windows): the root it did surface is still
+// terminated, but the start is refused on the scan error.
+func TestCreateRefusesStartAfterAPartialOrphanScan(t *testing.T) {
+	if !orphanScanErrorsRefuseStart {
+		t.Skip("orphan scan errors refuse the start only on Windows")
+	}
+	setRootIsCityInfrastructure(t, func(runtime.LiveRuntime) (bool, error) { return false, nil })
+	store := beads.NewMemStore()
+	sp := &orphanScanProvider{
+		city:    t.TempDir(),
+		Fake:    runtime.NewFake(),
+		findErr: errors.New("partial scan failed"),
+		results: []runtime.LiveRuntime{{PID: 1234, StartIdentity: "7"}},
+	}
+	mgr := newTestManager(t, store, sp, WithCityPath(sp.city))
+
+	_, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "my chat", Command: "claude", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err == nil || !strings.Contains(err.Error(), "partial scan failed") {
+		t.Fatalf("Create error = %v, want a refusal carrying the scan error", err)
+	}
+	if !slices.Equal(sp.terminatedPIDs, []int{1234}) {
+		t.Fatalf("terminated PIDs %v, want [1234]: the root a partial scan surfaced is still terminated; events = %v", sp.terminatedPIDs, sp.events)
+	}
+	if hasEventPrefix(sp.events, "start:") {
+		t.Fatalf("Start was attempted after a partial scan; events = %v", sp.events)
+	}
+}
+
+// TestCreateScansAgainForRootsItsTerminationsSurfaced is the orphan the gate
+// never saw. While it scanned, the grandchild's parent carried the session's
+// identity too, so the grandchild was no root; once that parent exited it was
+// one, and no scan was left to find it. Where terminating a root can surface
+// new ones, the gate scans until a pass terminates nothing.
+func TestCreateScansAgainForRootsItsTerminationsSurfaced(t *testing.T) {
+	sp := &orphanScanProvider{
+		city:           t.TempDir(),
+		Fake:           runtime.NewFake(),
+		results:        []runtime.LiveRuntime{{PID: 1234, StartIdentity: "7"}},
+		afterTerminate: map[int][]runtime.LiveRuntime{1234: {{PID: 5678, StartIdentity: "9"}}},
+	}
+	mgr := newTestManager(t, beads.NewMemStore(), sp, WithCityPath(sp.city))
+
+	if _, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "my chat", Command: "claude", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	want := []int{1234}
+	if proctable.RescanAfterTermination {
+		want = []int{1234, 5678}
+	}
+	if !slices.Equal(sp.terminatedPIDs, want) {
+		t.Fatalf("terminated PIDs %v, want %v; events = %v", sp.terminatedPIDs, want, sp.events)
+	}
+}
+
+// TestCreateRefusesWhileOrphansKeepSurfacing bounds those scans: a runtime
+// whose every termination surfaces another is not confirmed gone.
+func TestCreateRefusesWhileOrphansKeepSurfacing(t *testing.T) {
+	if !proctable.RescanAfterTermination {
+		t.Skip("terminating a root surfaces no new roots on this platform")
+	}
+	chain := map[int][]runtime.LiveRuntime{}
+	for pid := 100; pid <= 100+maxOrphanPasses; pid++ {
+		chain[pid] = []runtime.LiveRuntime{{PID: pid + 1, StartIdentity: "1"}}
+	}
+	sp := &orphanScanProvider{
+		city:           t.TempDir(),
+		Fake:           runtime.NewFake(),
+		results:        []runtime.LiveRuntime{{PID: 100, StartIdentity: "1"}},
+		afterTerminate: chain,
+	}
+	mgr := newTestManager(t, beads.NewMemStore(), sp, WithCityPath(sp.city))
+
+	_, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "my chat", Command: "claude", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err == nil || !strings.Contains(err.Error(), "still appearing") {
+		t.Fatalf("Create error = %v, want a refusal while orphans keep surfacing", err)
+	}
+	if hasEventPrefix(sp.events, "start:") {
+		t.Fatalf("Start was attempted while orphans kept surfacing; events = %v", sp.events)
 	}
 }
 
@@ -504,7 +730,7 @@ func TestCreateKillsUntrackedOrphanFromSameCityBeforeStartWithNormalizedPath(t *
 		t.Fatalf("Create: %v", err)
 	}
 
-	want := []string{"find:" + info.ID, "terminate:" + info.ID, "start:" + info.ID}
+	want := append(orphanGateEvents(info.ID), "start:"+info.ID)
 	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
 		t.Fatalf("events = %v, want %v", sp.events, want)
 	}
@@ -673,7 +899,7 @@ func TestStartProceedsWhenOrphanConfirmedDead(t *testing.T) {
 	if err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	want := []string{"find:" + info.ID, "terminate:" + info.ID, "start:" + info.ID}
+	want := append(orphanGateEvents(info.ID), "start:"+info.ID)
 	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
 		t.Fatalf("events = %v, want %v", sp.events, want)
 	}
@@ -691,12 +917,118 @@ func TestStartRuntimeOnlyProceedsWhenOrphanConfirmedDead(t *testing.T) {
 	if err := startRuntimeOnly(t, mgr, info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
 		t.Fatalf("StartRuntimeOnly: %v", err)
 	}
-	want := []string{"find:" + info.ID, "terminate:" + info.ID, "start:" + info.ID}
+	want := append(orphanGateEvents(info.ID), "start:"+info.ID)
 	if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
 		t.Fatalf("events = %v, want %v", sp.events, want)
 	}
 	if !sp.IsRunning(info.SessionName) {
 		t.Fatalf("runtime session %q not running after respawn", info.SessionName)
+	}
+}
+
+// AC-7: an untracked root carrying this session's identity and city that the
+// provider claims as a live runtime it does not list (LiveUnlisted: a pane of
+// its socket on a server it cannot reach) is not an orphan: the start refuses
+// with ErrRuntimeUnavailable naming the pid, terminating nothing, not even a
+// reparented sibling, and starting nothing.
+func TestStartRefusesLiveUnlistedRoot(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		start func(mgr *Manager, info Info) error
+	}{
+		{"Start", func(mgr *Manager, info Info) error {
+			return mgr.Start(context.Background(), testActor(mgr, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
+		}},
+		{"StartRuntimeOnly", func(mgr *Manager, info Info) error {
+			return startRuntimeOnly(t, mgr, info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr, sp, info := seedSuspendedResumeTarget(t)
+			sp.results = []runtime.LiveRuntime{
+				{PID: 1235, PPID: 1},
+				{PID: 1234, PPID: 4200, ParentIsProviderInfrastructure: true, LiveUnlisted: true},
+			}
+
+			err := tc.start(mgr, info)
+			if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("%s error = %v, want it to wrap runtime.ErrRuntimeUnavailable", tc.name, err)
+			}
+			if !strings.Contains(err.Error(), "pid=1234") {
+				t.Fatalf("%s error = %v, want it to name pid=1234", tc.name, err)
+			}
+			if hasEventPrefix(sp.events, "terminate:") || hasEventPrefix(sp.events, "start:") {
+				t.Fatalf("events = %v, want no terminate and no start", sp.events)
+			}
+		})
+	}
+}
+
+// AC-7: a LiveUnlisted claim the provider makes on a listing that failed
+// (the scan returns a whole-scan failure: its tracking is unknown) refuses
+// the start like any claim, and the refusal names that failure, since the
+// provider could only not rule the root out. Without a scan error, or with
+// only unreadable entries, which leave tracking known, it says the root is
+// the provider's.
+func TestStartRefusalNamesAFailedListing(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		findErr error
+		want    []string
+		notWant string
+	}{
+		{"no scan error", nil, []string{"belongs to the provider but is not listed by it"}, "could not rule it out"},
+		{"unreadable entry", &proctable.EntryError{PID: 77, Err: errors.New("reading environ of pid 77: permission denied")}, []string{"belongs to the provider but is not listed by it"}, "could not rule it out"},
+		{"failed listing", errors.New("exec provider pack: tracking: exec provider pack inventory: context deadline exceeded"), []string{"could not rule it out", "inventory: context deadline exceeded"}, "belongs to the provider but"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr, sp, info := seedSuspendedResumeTarget(t)
+			sp.results = []runtime.LiveRuntime{{PID: 1234, PPID: 1, LiveUnlisted: true}}
+			sp.findErr = tc.findErr
+
+			err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
+			if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("Start error = %v, want it to wrap runtime.ErrRuntimeUnavailable", err)
+			}
+			for _, want := range append([]string{"pid=1234"}, tc.want...) {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("Start error = %v, want it to contain %q", err, want)
+				}
+			}
+			if strings.Contains(err.Error(), tc.notWant) {
+				t.Errorf("Start error = %v, want no %q", err, tc.notWant)
+			}
+			if hasEventPrefix(sp.events, "terminate:") || hasEventPrefix(sp.events, "start:") {
+				t.Fatalf("events = %v, want no terminate and no start", sp.events)
+			}
+		})
+	}
+}
+
+// AC-7: a root with no LiveUnlisted claim is an orphan whoever its parent is:
+// one reparented to init, and one whose parent is tmux but which its provider
+// does not claim (a subprocess or ACP provider, or a tmux server an agent
+// started on a socket of its own) are terminated and the start proceeds.
+func TestStartRuntimeOnlyTerminatesRootsTheProviderDoesNotClaim(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		root runtime.LiveRuntime
+	}{
+		{name: "reparented", root: runtime.LiveRuntime{PID: 1234, PPID: 1}},
+		{name: "tmux-parented", root: runtime.LiveRuntime{PID: 1234, PPID: 4200, ParentIsProviderInfrastructure: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr, sp, info := seedSuspendedResumeTarget(t)
+			sp.results = []runtime.LiveRuntime{tc.root}
+
+			if err := startRuntimeOnly(t, mgr, info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
+				t.Fatalf("StartRuntimeOnly: %v", err)
+			}
+			want := []string{"find:" + info.ID, "terminate:" + info.ID, "start:" + info.ID}
+			if got := strings.Join(sp.events, ","); got != strings.Join(want, ",") {
+				t.Fatalf("events = %v, want %v", sp.events, want)
+			}
+		})
 	}
 }
 
@@ -1360,7 +1692,7 @@ func TestCreateSessionNamedWithTransport_FailedStartDoesNotBurnExplicitName(t *t
 	if _, err := mgr.CreateSession(context.Background(), CreateOptions{ExplicitName: "sky", Template: "helper", Title: "first", Command: "claude", WorkDir: "/tmp", Provider: "claude", Transport: "", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}}); err == nil {
 		t.Fatal("expected start failure")
 	}
-	if err := ensureSessionNameAvailable(store, "sky"); err != nil {
+	if err := ensureSessionNameAvailable(beadstest.Sessions(store), "sky"); err != nil {
 		t.Fatalf("ensureSessionNameAvailable after failed start = %v, want nil", err)
 	}
 
@@ -1720,7 +2052,7 @@ func TestClose_NamedSessionByIdentityRetiresIdentifiers(t *testing.T) {
 	}
 
 	// The freed runtime name must be available for a fresh session.
-	if err := ensureSessionNameAvailable(store, "test-city--refinery"); err != nil {
+	if err := ensureSessionNameAvailable(beadstest.Sessions(store), "test-city--refinery"); err != nil {
 		t.Fatalf("ensureSessionNameAvailable after close = %v, want nil", err)
 	}
 }
@@ -4464,6 +4796,36 @@ func TestPendingByNameProbesProviderWithoutBeadLookup(t *testing.T) {
 	}
 }
 
+// TestProgramStatusByNameReadsTheRuntimeReading proves SESSION-RUNTIME-033:
+// the manager passes the runtime's judged program-status reading through
+// unchanged, reads Unread from a runtime without the capability, and returns
+// a missing session's error rather than inventing a reading.
+func TestProgramStatusByNameReadsTheRuntimeReading(t *testing.T) {
+	sp := runtime.NewFake()
+	mgr := newTestManager(t, beads.NewMemStore(), runtime.FullFake{Fake: sp})
+	if err := sp.Start(context.Background(), "s", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	row := runtime.ProgramPaneRow{
+		Mode: runtime.ProgramStatusShadow, CaptureGate: true, PaneID: "%1",
+		PanePipe: true, Tap: "n.%1", TapLiveness: runtime.ProgramTapAlive,
+		RecordForm: runtime.ProgramRecordDecoded,
+		Record:     runtime.ProgramStatus{Nonce: "n.%1", State: runtime.ProgramBlocked, Kind: runtime.ProgramBlockAuth, Seq: 2, Progress: -1, Reported: true},
+	}
+	sp.SetProgramPane("s", row)
+	got, err := mgr.ProgramStatusByName("s")
+	if err != nil || got != runtime.JudgeProgramStatus(row) || !got.Blocked() || got.Decides() {
+		t.Fatalf("ProgramStatusByName = %+v, %v; want the judged shadow blocked reading", got, err)
+	}
+	if _, err := mgr.ProgramStatusByName("gone"); !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("missing session: %v, want ErrSessionNotFound", err)
+	}
+	plain := newTestManager(t, beads.NewMemStore(), sp)
+	if got, err := plain.ProgramStatusByName("s"); err != nil || got != (runtime.ProgramStatus{}) {
+		t.Fatalf("runtime without the capability: %+v, %v; want Unread", got, err)
+	}
+}
+
 type pendingSessionGoneProvider struct {
 	*runtime.Fake
 }
@@ -4579,7 +4941,10 @@ func TestPendingAndRespondDoNotSwallowUnrelatedNotFoundErrors(t *testing.T) {
 	}
 }
 
-func TestSendRejectsPendingInteraction(t *testing.T) {
+// TestSendQueuesInsteadOfTypingIntoPendingInteraction: a default send never
+// types into a pending prompt; it is queued for after the prompt is answered.
+func TestSendQueuesInsteadOfTypingIntoPendingInteraction(t *testing.T) {
+	stubSubmitPoller(t)
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
 	mgr := newTestManager(t, store, sp)
@@ -4595,9 +4960,9 @@ func TestSendRejectsPendingInteraction(t *testing.T) {
 		Prompt:    "approve?",
 	})
 
-	_, err = mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", "", runtime.Config{})
-	if !errors.Is(err, ErrPendingInteraction) {
-		t.Fatalf("Send error = %v, want %v", err, ErrPendingInteraction)
+	out, err := mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", "", runtime.Config{})
+	if err != nil || !out.Queued {
+		t.Fatalf("Send = %+v, %v; want queued behind the pending interaction", out, err)
 	}
 	for _, call := range sp.Calls {
 		if call.Method == "Nudge" && call.Name == info.SessionName {
@@ -6198,5 +6563,35 @@ func TestCloseRidesALifecycleWrite(t *testing.T) {
 	}
 	if b, _ := store.Get(info.ID); b.Status != "closed" {
 		t.Fatalf("status %s, want closed", b.Status)
+	}
+}
+
+// TestManagerCloseStampsUsageCloseMarker: an operator close does not build its
+// terminal patch from ClosePatch, so it merges the usage close marker itself;
+// without it an operator-closed interval would never be accounted (#6672).
+func TestManagerCloseStampsUsageCloseMarker(t *testing.T) {
+	store := beads.NewMemStore()
+	mgr := newTestManager(t, store, runtime.NewFake())
+	closeAt := time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)
+	mgr.clk = &clock.Fake{Time: closeAt}
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "codex", WorkDir: "/tmp", Provider: "codex", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := mgr.Close(context.Background(), testActor(mgr, ActorOperator), info.ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	closed, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed.Status != "closed" {
+		t.Fatalf("status = %q, want closed", closed.Status)
+	}
+	if got := closed.Metadata["usage_close_pending"]; got != "true" {
+		t.Errorf("usage_close_pending = %q, want true", got)
+	}
+	if got := closed.Metadata["usage_closed_at"]; got != closeAt.Format(time.RFC3339Nano) {
+		t.Errorf("usage_closed_at = %q, want %q", got, closeAt.Format(time.RFC3339Nano))
 	}
 }

@@ -384,3 +384,57 @@ func TestRepairPoolSlotWorkDirClobberThenStampPreservesLiveWorkDir(t *testing.T)
 			got.Metadata[beadmeta.WorkDirMetadataKey], liveWorkDir)
 	}
 }
+
+// A pool session identified only by pool_slot (pool_managed unset) is still
+// pool-managed: isPoolManagedSessionInfo is the canonical predicate, and the
+// raw Info.PoolManaged field under-detects it.
+func TestStampRunSessionIdentityPoolSlotOnlySessionDoesNotManufactureWorktreeEvidence(t *testing.T) {
+	const (
+		sessionName = "builder-gc-slotonly"
+		baseDir     = "/home/ds/gascity-worktrees/beads/builder"
+		beadDir     = "/home/ds/gascity-worktrees/beads/builder/worktrees/be-p5su8"
+	)
+	run := beads.Bead{
+		ID: "be-p5su8", Type: "task", Status: "in_progress", Assignee: sessionName,
+		Metadata: map[string]string{"work_dir": beadDir},
+	}
+	mem := beads.NewMemStoreFrom(0, []beads.Bead{run}, nil)
+	store := &countingStore{Store: mem}
+	poolSession := stampTestSession(sessionName, baseDir)
+	poolSession.Metadata["pool_slot"] = "1"
+	sessions := newSessionBeadSnapshot([]beads.Bead{poolSession})
+
+	stampRunSessionIdentity(gaConfig(), []beads.Bead{run}, []beads.Store{store}, sessions, io.Discard)
+
+	got, err := mem.Get(run.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", run.ID, err)
+	}
+	if value, exists := got.Metadata["gc.work_dir"]; exists {
+		t.Fatalf("gc.work_dir = %q: pool base dir stamped over the bead's per-bead work_dir %q", value, beadDir)
+	}
+}
+
+func TestStampRunSessionIdentityPoolSlotOnlySessionDoesNotStampRunRootWorkDir(t *testing.T) {
+	const (
+		sessionName = "builder-gc-slotonly"
+		baseDir     = "/home/ds/gascity-worktrees/beads/builder"
+	)
+	root := beads.Bead{ID: "be-root", Type: "molecule", Status: "in_progress", Metadata: map[string]string{"gc.kind": "workflow"}}
+	step := beads.Bead{ID: "be-step", Type: "step", Status: "in_progress", Assignee: sessionName, Metadata: map[string]string{"gc.step_ref": "wf.work", "gc.root_bead_id": "be-root"}}
+	mem := beads.NewMemStoreFrom(0, []beads.Bead{root, step}, nil)
+	store := &countingStore{Store: mem}
+	poolSession := stampTestSession(sessionName, baseDir)
+	poolSession.Metadata["pool_slot"] = "1"
+	sessions := newSessionBeadSnapshot([]beads.Bead{poolSession})
+
+	stampRunSessionIdentity(gaConfig(), []beads.Bead{step}, []beads.Store{store}, sessions, io.Discard)
+
+	gotRoot, err := mem.Get(root.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", root.ID, err)
+	}
+	if value, exists := gotRoot.Metadata["gc.work_dir"]; exists {
+		t.Fatalf("root gc.work_dir = %q: pool base dir propagated to the run root without ownership evidence", value)
+	}
+}

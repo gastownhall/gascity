@@ -136,6 +136,119 @@ func TestRepairStrandedPoolWorkerBead_DefersAndKeepsSessionOpenWhenUnassignFails
 	}
 }
 
+// strandedDetachedSpec is the gc.detached probe detachStrandedWork stamps.
+const strandedDetachedSpec = "tmux:gctest-repair:soak-loop"
+
+// detachStrandedWork stamps strandedDetachedSpec on work and returns it as
+// the store now holds it.
+func detachStrandedWork(t *testing.T, store beads.Store, work beads.Bead) beads.Bead {
+	t.Helper()
+	if err := store.SetMetadata(work.ID, detachedProbeMetadataKey, strandedDetachedSpec); err != nil {
+		t.Fatalf("stamp gc.detached: %v", err)
+	}
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("reload work bead: %v", err)
+	}
+	return got
+}
+
+// The repair releases nothing whose detached runtime may still run: a claim
+// whose probe reports it alive, or observes nothing, stays assigned with its
+// gc.detached, and the session bead stays open with it, tick after tick.
+// Closed, the bead would leave that work assigned to a retired session.
+func TestRepairStrandedPoolWorkerBead_HoldsDetachedWorkItsProbeDoesNotAttestDead(t *testing.T) {
+	for _, p := range []struct {
+		name  string
+		setup func(t *testing.T)
+	}{
+		{"alive", func(t *testing.T) { installFakeTmuxServer(t, "gctest-repair", fakeTmuxListSessions("soak-loop")) }},
+		{"error: no server socket", func(t *testing.T) {
+			t.Setenv("TMUX_TMPDIR", shortTmuxTmpDir(t))
+			installFakeTmux(t, "exit 1")
+		}},
+		{"error: the server does not answer", func(t *testing.T) { installFakeTmuxServer(t, "gctest-repair", "exit 2") }},
+		{"timeout", func(t *testing.T) { installFakeTmuxServer(t, "gctest-repair", "sleep 2") }},
+	} {
+		t.Run(p.name, func(t *testing.T) {
+			store, session, work := strandedRepairFixture(t)
+			work = detachStrandedWork(t, store, work)
+			p.setup(t)
+			now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
+			session.Metadata[strandedEventEmittedKey] = now.Add(-strandedRepairConfirmGrace - time.Minute).Format(time.RFC3339)
+
+			for tick := 1; tick <= 2; tick++ {
+				var stderr bytes.Buffer
+				if repairStrandedPoolWorkerBead(testSeatWork("", servingCity("worker"), store, nil), store, seedSessionInfo(session), &clock.Fake{Time: now}, &stderr) {
+					t.Fatalf("tick %d: repair closed the session bead over a held claim; stderr=%q", tick, stderr.String())
+				}
+				got, _ := store.Get(work.ID)
+				if got.Status != "in_progress" || got.Assignee != session.ID || got.Metadata[detachedProbeMetadataKey] != strandedDetachedSpec {
+					t.Fatalf("tick %d: work status=%q assignee=%q gc.detached=%q, want the held claim untouched", tick, got.Status, got.Assignee, got.Metadata[detachedProbeMetadataKey])
+				}
+				if row, _ := store.Get(session.ID); row.Status != "open" {
+					t.Fatalf("tick %d: session status = %q, want open while its claim is held", tick, row.Status)
+				}
+			}
+		})
+	}
+}
+
+// A held claim keeps the session bead open even after the repair released the
+// slot's other work.
+func TestRepairStrandedPoolWorkerBead_ReleasesTheRestButKeepsTheSlotForAHeldClaim(t *testing.T) {
+	store, session, plain := strandedRepairFixture(t)
+	held, err := store.Create(beads.Bead{
+		Title:    "detached work",
+		Type:     "task",
+		Assignee: session.ID,
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker", detachedProbeMetadataKey: strandedDetachedSpec},
+	})
+	if err != nil {
+		t.Fatalf("create detached work bead: %v", err)
+	}
+	installFakeTmuxServer(t, "gctest-repair", "exit 2")
+	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
+	session.Metadata[strandedEventEmittedKey] = now.Add(-strandedRepairConfirmGrace - time.Minute).Format(time.RFC3339)
+
+	var stderr bytes.Buffer
+	if repairStrandedPoolWorkerBead(testSeatWork("", servingCity("worker"), store, nil), store, seedSessionInfo(session), &clock.Fake{Time: now}, &stderr) {
+		t.Fatalf("repair closed the session bead over a held claim; stderr=%q", stderr.String())
+	}
+	if got, _ := store.Get(plain.ID); got.Status != "open" || got.Assignee != "" {
+		t.Fatalf("unprobed work status=%q assignee=%q, want released", got.Status, got.Assignee)
+	}
+	if got, _ := store.Get(held.ID); got.Assignee != session.ID {
+		t.Fatalf("held work assignee = %q, want %s", got.Assignee, session.ID)
+	}
+	if row, _ := store.Get(session.ID); row.Status != "open" {
+		t.Fatalf("session status = %q, want open while its claim is held", row.Status)
+	}
+}
+
+// Work whose detached probe attests its runtime dead is stranded: the repair
+// releases it, clearing gc.detached in the release so the reopened bead
+// carries no dead probe into its next claim, then closes the session bead.
+func TestRepairStrandedPoolWorkerBead_ReleasesDeadDetachedWorkClearingTheProbe(t *testing.T) {
+	store, session, work := strandedRepairFixture(t)
+	work = detachStrandedWork(t, store, work)
+	installFakeTmuxServer(t, "gctest-repair", fakeTmuxListSessions())
+	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
+	session.Metadata[strandedEventEmittedKey] = now.Add(-strandedRepairConfirmGrace - time.Minute).Format(time.RFC3339)
+
+	var stderr bytes.Buffer
+	if !repairStrandedPoolWorkerBead(testSeatWork("", servingCity("worker"), store, nil), store, seedSessionInfo(session), &clock.Fake{Time: now}, &stderr) {
+		t.Fatalf("expected repair to close the session bead; stderr=%q", stderr.String())
+	}
+	got, _ := store.Get(work.ID)
+	if got.Status != "open" || got.Assignee != "" || got.Metadata[detachedProbeMetadataKey] != "" {
+		t.Fatalf("work status=%q assignee=%q gc.detached=%q, want released with gc.detached cleared", got.Status, got.Assignee, got.Metadata[detachedProbeMetadataKey])
+	}
+	if row, _ := store.Get(session.ID); row.Status != "closed" {
+		t.Fatalf("session status = %q, want closed", row.Status)
+	}
+}
+
 // Without a stranded marker the leak has not been confirmed this generation, so
 // the repair defers even if the caller reached it — the diagnostic gates the
 // destructive clear.

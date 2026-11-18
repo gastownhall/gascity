@@ -45,14 +45,34 @@ new rig — both authenticated by a fresh, request-bound grant your machine mint
 
 ## 2. Mint the city keypair
 
+The operator machine needs the `gc-write-mint` grant minter beside `gc`. Release
+archives and the Homebrew formula ship both binaries from the same tag; from a
+source checkout, install the minter at the tag your `gc` was built from:
+
+```bash
+go install github.com/gastownhall/gascity/cmd/gc-write-mint@<tag>
+```
+
 The server holds only the **public** key; the private key stays on the operator
-machine (`0600`). `gc-write-mint` accepts a PEM PKCS#8, or a raw / hex / base64
-32-byte ed25519 seed.
+machine (`0600`). `gc-write-mint keygen` writes a PEM PKCS#8 ed25519 private key
+and prints the server's verify-key entry:
+
+```bash
+gc-write-mint keygen --kid k1 --out ~/.gc/keys/city.ed25519
+# -> k1:<base64 ed25519 pubkey>
+```
+
+The kid must not contain `:`, `,` or whitespace. `keygen` creates the key
+directory (`0700`) if it is missing and refuses to replace an existing key file
+unless you pass `--force`.
+
+<Accordion title="Generate the key with openssl instead">
+
+`gc-write-mint` also accepts a key you generate yourself: a PEM PKCS#8, or a raw
+/ hex / base64 32-byte ed25519 seed.
 
 ```bash
 mkdir -p ~/.gc/keys && chmod 700 ~/.gc/keys
-
-# Generate a PKCS#8 private key.
 openssl genpkey -algorithm ed25519 -out ~/.gc/keys/city.ed25519
 chmod 600 ~/.gc/keys/city.ed25519
 
@@ -61,6 +81,8 @@ openssl pkey -in ~/.gc/keys/city.ed25519 -pubout -outform DER \
   | tail -c 32 | base64
 # -> <base64 ed25519 pubkey>
 ```
+
+</Accordion>
 
 The verify key is configured as `kid:base64pub` (comma-separable for rotation),
 e.g. `k1:<base64 ed25519 pubkey>`.
@@ -108,6 +130,50 @@ write-auth verify key is set; mutations are gated ONLY by the network front`.
 public hostname in `[supervisor] allowed_hosts` or every request dies **421**.
 The standalone `gc controller` allows any host (the network front is the
 boundary), so it needs no `allowed_hosts`.
+
+**Rotating keys without a restart (supervisor only).** On a `gc supervisor`
+deployment, add, rotate, or revoke a key by editing
+`[supervisor] write_auth_verify_key` in `$GC_HOME/supervisor.toml`, then run:
+
+```bash
+gc supervisor reload
+# Reconciliation triggered.
+# write-auth keys reloaded: added [k2], removed [k1]
+```
+
+The supervisor re-reads the key list and swaps it in place; cities and their
+sessions keep running. The command prints the kids the reload added, removed,
+or replaced (a new key under an existing kid), and the supervisor log
+(`gc supervisor logs`) records the same line. `kill -HUP <supervisor pid>`
+reloads the same way but reports only to the log.
+
+A saved edit goes live at the next supervisor reload of any kind. `gc start`,
+`gc init`, `gc register`, `gc unregister`, and commands that poke a
+supervisor-managed city reload the supervisor too, so save a key edit only when
+you mean to apply it.
+
+Once a reload drops a kid, every grant it signed fails at once, including
+grants minted before the reload. To rotate with no gap:
+
+1. List the old and new keys together (`k1:<old>,k2:<new>`) and reload.
+2. Move every minter to `k2`.
+3. Wait until the grants `k1` already signed have expired: a write grant lives
+   at most 2 minutes, plus 30 seconds of clock-skew allowance.
+4. Drop `k1` and reload again.
+
+If the supervisor refuses the new list, it keeps the current keys, and
+`gc supervisor reload` prints why and exits 1. A reload refuses when:
+
+- the key list is malformed or empty, or `supervisor.toml` cannot be read;
+- the file sets a key but write-auth was off at startup (a reload cannot turn
+  write-auth on or off; restart instead);
+- the file sets a key but `GC_CITY_WRITE_PUBKEY` is set too (the env overrides
+  the file, so manage keys in one place).
+
+A reload changes only the write-auth keys: `read_auth_verify_key` and every
+other `supervisor.toml` setting take effect when the supervisor restarts. The
+standalone `gc controller` reads its key only at startup; restart it to change
+keys.
 
 ## 4. Configure the client context
 

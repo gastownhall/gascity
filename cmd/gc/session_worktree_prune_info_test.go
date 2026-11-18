@@ -173,30 +173,6 @@ func TestPruneAgentHomeWorktreeIfSafeInfo_UnpushedProbeError(t *testing.T) {
 	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
 
-func TestPruneAgentHomeWorktreeIfSafeInfo_HasStashes(t *testing.T) {
-	fx := newPruneFixture(t)
-	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, hasStashes: true, currentBranch: "builder/ga-ghi789"})
-
-	var stderr bytes.Buffer
-	pruneAgentHomeWorktreeIfSafeInfo(fx.sessionInfo(), fx.cityPath, fx.cfg, &stderr)
-	if !strings.Contains(stderr.String(), "stashed work") {
-		t.Errorf("expected stashes-reason log; got %q", stderr.String())
-	}
-	assertWorktreeStaleMarker(t, fx.workerDir, "builder/ga-ghi789", "stashed-work")
-}
-
-func TestPruneAgentHomeWorktreeIfSafeInfo_StashProbeError(t *testing.T) {
-	fx := newPruneFixture(t)
-	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, stashesErr: errors.New("boom")})
-
-	var stderr bytes.Buffer
-	pruneAgentHomeWorktreeIfSafeInfo(fx.sessionInfo(), fx.cityPath, fx.cfg, &stderr)
-	if !strings.Contains(stderr.String(), "stash probe failed") {
-		t.Errorf("expected stash-error log; got %q", stderr.String())
-	}
-	assertNoWorktreeStaleMarker(t, fx.workerDir)
-}
-
 func TestPruneAgentHomeWorktreeIfSafeInfo_RigPathUnresolved(t *testing.T) {
 	fx := newPruneFixture(t)
 	fx.cfg.Rigs = nil
@@ -275,6 +251,107 @@ func TestPruneAgentHomeWorktreeIfSafeInfo_UsesConfiguredWorktreesRoot(t *testing
 	if !rigProbe.removeInvoked || rigProbe.removedPath != configuredWorker {
 		t.Fatalf("WorktreeRemove path = %q, invoked=%v; stderr=%q", rigProbe.removedPath, rigProbe.removeInvoked, stderr.String())
 	}
+}
+
+// managedSeatInfo is the closing pool seat of ga-tlus3e.22: the controller
+// started it inside a work bead's verified managed worktree, so both
+// work-dir keys of its row record that worktree's path.
+func managedSeatInfo(path string) sessionpkg.Info {
+	return sessionpkg.Info{
+		ID:                  "session-1",
+		WorkDir:             path,
+		WorkDirCanonical:    path,
+		Template:            "demo/worker",
+		SessionNameMetadata: "demo/worker-1",
+	}
+}
+
+// TestPruneAgentHomeWorktreeIfSafeInfo_LeavesManagedWorktreeOfAnotherOwner
+// reproduces ga-tlus3e.22: a pool seat's work dir is a work bead's managed
+// worktree whose provenance names another owner, and the seat closes. The
+// worktree is clean and pushed, so before the ownership gate the prune
+// force-removed it, leaving the owner only its branch.
+func TestPruneAgentHomeWorktreeIfSafeInfo_LeavesManagedWorktreeOfAnotherOwner(t *testing.T) {
+	cityPath := t.TempDir()
+	rigRoot, spec := managedPruneWorktree(t, cityPath)
+	cfg := &config.City{Rigs: []config.Rig{{Name: "demo", Path: rigRoot}}}
+
+	var stderr bytes.Buffer
+	pruneAgentHomeWorktreeIfSafeInfo(managedSeatInfo(spec.Path), cityPath, cfg, &stderr)
+
+	assertManagedWorktreeIntact(t, spec, stderr.String())
+	if !strings.Contains(stderr.String(), "managed worktree") || !strings.Contains(stderr.String(), spec.Owner) {
+		t.Errorf("expected a managed-worktree refusal naming owner %q; got %q", spec.Owner, stderr.String())
+	}
+}
+
+// TestPruneAgentHomeWorktreeIfSafeInfo_LeavesDirtyManagedWorktreeUnmarked
+// pins that the ownership gate runs before the git safety probes: a closing
+// seat writes no .worktree-stale marker into another owner's checkout,
+// which would add an untracked file to it.
+func TestPruneAgentHomeWorktreeIfSafeInfo_LeavesDirtyManagedWorktreeUnmarked(t *testing.T) {
+	cityPath := t.TempDir()
+	rigRoot, spec := managedPruneWorktree(t, cityPath)
+	cfg := &config.City{Rigs: []config.Rig{{Name: "demo", Path: rigRoot}}}
+	wip := filepath.Join(spec.Path, "wip.txt")
+	if err := os.WriteFile(wip, []byte("wip\n"), 0o644); err != nil {
+		t.Fatalf("write wip: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	pruneAgentHomeWorktreeIfSafeInfo(managedSeatInfo(spec.Path), cityPath, cfg, &stderr)
+
+	assertManagedWorktreeIntact(t, spec, stderr.String())
+	assertNoWorktreeStaleMarker(t, spec.Path)
+	if _, err := os.Stat(wip); err != nil {
+		t.Fatalf("owner's uncommitted file is gone: %v", err)
+	}
+}
+
+// TestPruneAgentHomeWorktreeIfSafeInfo_UnresolvedGitDirFailsClosed pins
+// that a worker_dir whose git dir cannot be resolved is left alone: without
+// it the prune cannot tell whether a provisioner owns the worktree.
+func TestPruneAgentHomeWorktreeIfSafeInfo_UnresolvedGitDirFailsClosed(t *testing.T) {
+	fx := newPruneFixture(t)
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, gitDirErr: errors.New("rev-parse boom")})
+	rigProbe := &fakeGitProbe{isRepo: true}
+	fx.setProbe(fx.rigRoot, rigProbe)
+
+	var stderr bytes.Buffer
+	pruneAgentHomeWorktreeIfSafeInfo(fx.sessionInfo(), fx.cityPath, fx.cfg, &stderr)
+	if rigProbe.removeInvoked {
+		t.Fatal("WorktreeRemove called although the worker_dir's ownership could not be read")
+	}
+	if !strings.Contains(stderr.String(), "rev-parse boom") {
+		t.Errorf("expected git-dir error in log; got %q", stderr.String())
+	}
+	assertNoWorktreeStaleMarker(t, fx.workerDir)
+}
+
+// TestPruneAgentHomeWorktreeIfSafeInfo_UnreadableProvenanceFailsClosed pins
+// that only a provenance record that does not exist marks a worker_dir as
+// unmanaged; one that cannot be read keeps the worktree.
+func TestPruneAgentHomeWorktreeIfSafeInfo_UnreadableProvenanceFailsClosed(t *testing.T) {
+	fx := newPruneFixture(t)
+	// A git dir that is a regular file: reading any record inside it fails
+	// with something other than "does not exist".
+	notADir := filepath.Join(fx.cityPath, "git-dir-file")
+	if err := os.WriteFile(notADir, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write git dir file: %v", err)
+	}
+	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, gitDir: notADir})
+	rigProbe := &fakeGitProbe{isRepo: true}
+	fx.setProbe(fx.rigRoot, rigProbe)
+
+	var stderr bytes.Buffer
+	pruneAgentHomeWorktreeIfSafeInfo(fx.sessionInfo(), fx.cityPath, fx.cfg, &stderr)
+	if rigProbe.removeInvoked {
+		t.Fatal("WorktreeRemove called although the worker_dir's provenance could not be read")
+	}
+	if !strings.Contains(stderr.String(), "not pruning worker_dir") {
+		t.Errorf("expected refusal log; got %q", stderr.String())
+	}
+	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
 
 func TestPruneAgentHomeWorktreeIfSafeInfo_NilConfig(t *testing.T) {

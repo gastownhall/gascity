@@ -13,8 +13,10 @@
 #
 # Coverage: acquire/hold/deny/release, the bounded wait and its return code,
 # FD inheritance (a detached descendant must not pin a slot), dead-holder
-# diagnostics, the missing-flock degrade path, malformed tunables, the
-# GC_PUSH_GATE_NO_CAP escape hatch, both city-root resolution modes, the
+# diagnostics, automatic reap of leaked descendants when the stamped holder
+# PID is dead (ga-34a), slot-holder discovery (fuser first, lsof fallback),
+# the missing-flock degrade path, malformed tunables,
+# the GC_PUSH_GATE_NO_CAP escape hatch, both city-root resolution modes, the
 # slots-dir fallback, and static assertions that scripts/test-local-parallel
 # wires all of it up — including closing the gate FD before the fan-out.
 
@@ -210,6 +212,159 @@ if push_gate_acquire_slot "$DEAD_SLOTS" FD_DEAD "holder-dead"; then
     push_gate_release_slot "$FD_DEAD"
 else
     record_fail "describe.flags_dead_holder" "could not acquire a slot to set up the case"
+fi
+
+# ---------------- reap: leaked descendant of a dead holder is killed, slot frees (ga-34a) ----------------
+# Production leak: the gate process dies (pool-slot retirement, SIGKILL) while
+# a descendant still holds the slot FD. The stamp PID is dead; flock stays
+# held. Acquire must reap that descendant instead of burning the wait bound
+# until an operator runs lsof + kill by hand.
+REAP_SLOTS="$WORK/reap-slots"
+if command -v setsid >/dev/null 2>&1 && { command -v lsof >/dev/null 2>&1 || command -v fuser >/dev/null 2>&1; }; then
+    REAP_PIDFILE="$WORK/reap-sleeper.pid"
+    rm -f "$REAP_PIDFILE"
+    LIB="$LIB" DIR="$REAP_SLOTS" PIDFILE="$REAP_PIDFILE" PUSH_GATE_MAX_CONCURRENT=1 \
+        bash -c '
+            . "$LIB"
+            fd=""
+            push_gate_acquire_slot "$DIR" fd "leaker" || exit 2
+            # Detach a sleeper that inherits the slot FD, then vanish so the
+            # stamp PID is dead while the sleeper keeps the flock.
+            setsid bash -c "echo \$\$ > \"\$PIDFILE\"; exec sleep 60" &
+            sleep 0.3
+            exit 0
+        '
+    SLEEPER_PID="$(cat "$REAP_PIDFILE" 2>/dev/null || true)"
+    if flock -n "$REAP_SLOTS/slot-0.lock" -c 'exit 0' 2>/dev/null; then
+        record_fail "reap.leaked_descendant_holds_slot_before_acquire" \
+            "slot was free; leak fixture did not pin it (sleeper pid='${SLEEPER_PID:-}')"
+        kill "$SLEEPER_PID" 2>/dev/null || true
+    else
+        record_pass "reap.leaked_descendant_holds_slot_before_acquire"
+        # A waiter probing the slot opens the file for an instant without the
+        # lock. Stretch that instant across the reaper's first look: the
+        # reaper must kill only what still holds the file after it settles.
+        bash -c 'exec 7<"$1"; sleep 0.5; exec 7<&-; exec sleep 30' _ "$REAP_SLOTS/slot-0.lock" &
+        PROBER_PID=$!
+        # The wait bound is wide on purpose. A successful reap sleeps 1.2s
+        # (the 1s settle look plus 0.2s of TERM grace) and runs two
+        # lsof/fuser scans, each of which walks every process on the host:
+        # about 2.5s per scan on a shared agent host with ~3,800 processes
+        # at load ~50, so this acquire takes 6-7s there and grows with the
+        # host's process count. The check therefore asserts what its name
+        # says -- the acquire returned before the configured bound --
+        # instead of a tight wall-clock budget. A reaper that never fires
+        # times out at the bound and fails this check and the ACQUIRED
+        # check below.
+        REAP_MAX_WAIT=20
+        START="$(date +%s)"
+        REAP_OUT="$(LIB="$LIB" DIR="$REAP_SLOTS" PUSH_GATE_MAX_CONCURRENT=1 \
+            PUSH_GATE_MAX_WAIT_SECONDS="$REAP_MAX_WAIT" PUSH_GATE_POLL_SECONDS=1 \
+            bash -c '. "$LIB"; if push_gate_acquire_slot "$DIR" z reaper; then echo ACQUIRED; else echo DENIED; fi' 2>&1)"
+        ELAPSED=$(( $(date +%s) - START ))
+        REAP_TAIL="$(printf '%s\n' "$REAP_OUT" | tail -1)"
+        assert_eq "reap.acquire_succeeds_after_reaping_leak" "$REAP_TAIL" "ACQUIRED"
+        assert_contains "reap.diagnostic_names_leaked_descendant" "$REAP_OUT" "reaping leaked descendant"
+        if (( ELAPSED < REAP_MAX_WAIT )); then
+            record_pass "reap.did_not_burn_full_wait_bound"
+        else
+            REAP_LOAD="$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null || uptime 2>/dev/null | sed 's/.*load average[s]*: //' || echo unknown)"
+            record_fail "reap.did_not_burn_full_wait_bound" \
+                "acquire took ${ELAPSED}s, not under the ${REAP_MAX_WAIT}s wait bound (host load: ${REAP_LOAD:-unknown})"
+        fi
+        if [[ -n "$SLEEPER_PID" ]] && kill -0 "$SLEEPER_PID" 2>/dev/null; then
+            record_fail "reap.leaked_descendant_killed" "sleeper pid $SLEEPER_PID still alive"
+            kill "$SLEEPER_PID" 2>/dev/null || true
+        else
+            record_pass "reap.leaked_descendant_killed"
+        fi
+        if kill -0 "$PROBER_PID" 2>/dev/null; then
+            record_pass "reap.spares_transient_opener"
+        else
+            record_fail "reap.spares_transient_opener" "pid $PROBER_PID only opened the slot file briefly, without the lock, and was killed"
+        fi
+        kill "$PROBER_PID" 2>/dev/null || true
+        wait "$PROBER_PID" 2>/dev/null || true
+    fi
+else
+    echo "  skip reap.leaked_descendant_* — need setsid and lsof/fuser"
+fi
+
+# ---------------- reap: holder discovery prefers fuser, falls back to lsof ----------------
+# lsof walks every process's descriptor table and costs seconds on a loaded
+# host; fuser answers the same question for one file far faster. Discovery
+# must use fuser when it is present and only fall back to lsof without it.
+HOLDER_FILE="$WORK/holder-probe.lock"
+: >"$HOLDER_FILE"
+STUB_BIN="$WORK/stub-lsof-bin"
+mkdir -p "$STUB_BIN"
+LSOF_MARK="$WORK/lsof-called"
+# Absolute interpreter: the fallback case runs with a PATH that has no bash.
+cat >"$STUB_BIN/lsof" <<STUB
+#!$BASH
+: >"$LSOF_MARK"
+echo 424242
+STUB
+chmod +x "$STUB_BIN/lsof"
+if command -v fuser >/dev/null 2>&1; then
+    rm -f "$LSOF_MARK"
+    exec 8<"$HOLDER_FILE"
+    PREFER_OUT="$(PATH="$STUB_BIN:$PATH" _push_gate_slot_holder_pids "$HOLDER_FILE" | tr '\n' ' ')"
+    exec 8<&-
+    assert_false "holders.prefers_fuser_over_lsof" test -e "$LSOF_MARK"
+    assert_contains "holders.fuser_finds_open_holder" " $PREFER_OUT " " $$ "
+else
+    echo "  skip holders.prefers_fuser_over_lsof — need fuser"
+fi
+# Fallback: a PATH holding only the stub lsof and tr (no fuser).
+FALLBACK_BIN="$WORK/fallback-bin"
+mkdir -p "$FALLBACK_BIN"
+cp -f "$STUB_BIN/lsof" "$FALLBACK_BIN/lsof"
+if TR_BIN="$(command -v tr)"; then
+    ln -sf "$TR_BIN" "$FALLBACK_BIN/tr"
+fi
+rm -f "$LSOF_MARK"
+FALLBACK_OUT="$(PATH="$FALLBACK_BIN" _push_gate_slot_holder_pids "$HOLDER_FILE" | tr '\n' ' ')"
+assert_true "holders.falls_back_to_lsof_without_fuser" test -e "$LSOF_MARK"
+assert_contains "holders.lsof_fallback_output" " $FALLBACK_OUT " " 424242 "
+
+# ---------------- reap: a live holder still writing its stamp is spared ----------------
+# A new holder wins flock before it rewrites the stamp, so for an instant the
+# slot is locked under the previous holder's dead PID. Stretch that instant
+# across the reaper's first look: the reaper must see the fresh stamp when it
+# settles and leave the live holder alone.
+STAMP_SLOTS="$WORK/stamp-slots"
+if command -v lsof >/dev/null 2>&1 || command -v fuser >/dev/null 2>&1; then
+    mkdir -p "$STAMP_SLOTS"
+    bash -c 'exit 0' &
+    DEAD_PID=$!
+    wait "$DEAD_PID" 2>/dev/null || true
+    STAMP_READY="$WORK/stamp-ready"
+    rm -f "$STAMP_READY"
+    bash -c '
+        exec 9<>"$1"
+        flock -n 9 || exit 2
+        printf "%s stale-stamp\n" "$2" >"$1"
+        : >"$3"
+        sleep 0.5
+        printf "%s fresh-stamp\n" "$$" >"$1"
+        exec sleep 30
+    ' _ "$STAMP_SLOTS/slot-0.lock" "$DEAD_PID" "$STAMP_READY" &
+    HOLDER_PID=$!
+    for _ in $(seq 1 50); do [[ -f "$STAMP_READY" ]] && break; sleep 0.05; done
+    STAMP_OUT="$(LIB="$LIB" DIR="$STAMP_SLOTS" PUSH_GATE_MAX_CONCURRENT=1 \
+        PUSH_GATE_MAX_WAIT_SECONDS=2 PUSH_GATE_POLL_SECONDS=1 \
+        bash -c '. "$LIB"; if push_gate_acquire_slot "$DIR" z reaper; then echo ACQUIRED; else echo DENIED; fi' 2>&1)"
+    assert_eq "reap.waits_on_live_holder" "$(printf '%s\n' "$STAMP_OUT" | tail -1)" "DENIED"
+    if kill -0 "$HOLDER_PID" 2>/dev/null; then
+        record_pass "reap.spares_live_holder_writing_stamp"
+    else
+        record_fail "reap.spares_live_holder_writing_stamp" "live holder $HOLDER_PID was killed: $STAMP_OUT"
+    fi
+    kill "$HOLDER_PID" 2>/dev/null || true
+    wait "$HOLDER_PID" 2>/dev/null || true
+else
+    echo "  skip reap.spares_live_holder_writing_stamp — need lsof/fuser"
 fi
 
 # ---------------- missing flock(1): degrade best-effort, never block ----------------

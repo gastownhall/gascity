@@ -18,11 +18,13 @@ import (
 // window its gate passes (TestFederatedInProgressTierServesTheFirstServableRowOfTheWindow).
 // The window excludes the dispatch holds and ends at its first unblocked row, so
 // a row past the one the tier serves is never resolved
-// (TestFederatedInProgressTierServesTheClaimAheadOfAnUnresolvableRow).
+// (TestFederatedInProgressTierServesTheClaimAheadOfAnUnresolvableRow). It
+// excludes mail too, so a claimed mail wisp cannot be that first unblocked row
+// (TestFederatedInProgressTierSkipsAssignedMailWisp).
 func TestAssignedInProgressTierFederatesOnSplitTopology(t *testing.T) {
 	for _, shellVar := range []string{"id", "cand"} {
 		got := assignedInProgressTierCommand(shellVar, QueryTopology{FederatedReady: true})
-		want := `r=$(gc ready --status in_progress --assignee="$` + shellVar + `" --exclude-label "hold:mayor" --exclude-label "hold:external" --until-unblocked --json --limit=20)` +
+		want := `r=$(gc ready --status in_progress --assignee="$` + shellVar + `" --exclude-type=message --exclude-label "hold:mayor" --exclude-label "hold:external" --until-unblocked --json --limit=20)` +
 			workQueryReadFailure("gc ready --status in_progress") + `; ` +
 			servableInProgressRowsScript(1)
 		if got != want {

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 )
 
@@ -53,7 +54,7 @@ func TestLookupNamedSession_LiveAliasOwnedBeadResolvesCanonically(t *testing.T) 
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	lookup, err := LookupConfiguredNamedSession(store, spec)
+	lookup, err := LookupConfiguredNamedSession(beadstest.Sessions(store), spec)
 	if err != nil {
 		t.Fatalf("LookupConfiguredNamedSession: %v", err)
 	}
@@ -96,7 +97,7 @@ func TestLookupNamedSession_IneligibleOwnBeadDoesNotBlockItsName(t *testing.T) {
 			if NamedSessionContinuityEligible(b) {
 				t.Fatalf("fixture is continuity-eligible; this case must be ineligible")
 			}
-			lookup, err := LookupConfiguredNamedSession(store, spec)
+			lookup, err := LookupConfiguredNamedSession(beadstest.Sessions(store), spec)
 			if err != nil {
 				t.Fatalf("LookupConfiguredNamedSession: %v", err)
 			}

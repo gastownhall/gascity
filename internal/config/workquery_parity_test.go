@@ -105,12 +105,13 @@ func oldEffectiveOnDeath(a *Agent, topo QueryTopology) string {
 		route = a.PoolName
 	}
 	_ = topo
-	ephemeralRead := bdQueryEphemeralInProgressQuietShell() + ` | ` +
-		`jq -r --arg assignee ` + shellquote.Quote(a.QualifiedName()) + ` '.[] | select((.assignee // "") == $assignee) | [.id, ` + jqMeta(beadmeta.RunTargetMetadataKey) + `, ` + jqMeta(beadmeta.RoutedToMetadataKey) + `] | @tsv' 2>/dev/null; `
-	return `{ ` +
-		`bd list --assignee=` + a.QualifiedName() +
-		` --status=in_progress --json 2>/dev/null | ` +
+	ephemeralRead := `if r=$(` + bdQueryEphemeralStatusShell("in_progress") + ` 2>/dev/null); then printf '%s\n' "$r" | ` +
+		`jq -r --arg assignee ` + shellquote.Quote(a.QualifiedName()) + ` '.[] | select((.assignee // "") == $assignee) | [.id, ` + jqMeta(beadmeta.RunTargetMetadataKey) + `, ` + jqMeta(beadmeta.RoutedToMetadataKey) + `] | @tsv' 2>/dev/null; ` +
+		`else printf 'gc-recovery: on_death read failed: bd query (exit %s)\n' "$?" >&3; fi; `
+	return `exec 3>&1; { ` +
+		`if r=$(bd list --assignee=` + a.QualifiedName() + ` --status=in_progress --json 2>/dev/null); then printf '%s\n' "$r" | ` +
 		`jq -r '.[] | [.id, ` + jqMeta(beadmeta.RunTargetMetadataKey) + `, ` + jqMeta(beadmeta.RoutedToMetadataKey) + `] | @tsv' 2>/dev/null; ` +
+		`else printf 'gc-recovery: on_death read failed: bd list (exit %s)\n' "$?" >&3; fi; ` +
 		ephemeralRead +
 		`} | ` +
 		`while IFS="$(printf '\t')" read -r id run_target routed_to; do ` +
@@ -131,14 +132,17 @@ func oldEffectiveOnBoot(a *Agent, topo QueryTopology) string {
 		template = a.PoolName
 	}
 	_ = topo
-	ephemeralRead := bdQueryEphemeralInProgressQuietShell() + ` | ` +
-		`jq -r --arg template "$template" '.[] | select((.assignee // "") == "") | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == $template) or ((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.RunTargetMetadataKey) + ` == $template) and (` + jqMeta(beadmeta.KindMetadataKey) + ` == "` + beadmeta.KindWorkflow + `"))) | .id' 2>/dev/null; `
-	return `template=` + shellquote.Quote(template) + `; ` +
+	ephemeralRead := `if r=$(` + bdQueryEphemeralStatusShell("in_progress") + ` 2>/dev/null); then printf '%s\n' "$r" | ` +
+		`jq -r --arg template "$template" '.[] | select((.assignee // "") == "") | select((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == $template) or ((` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") and (` + jqMeta(beadmeta.RunTargetMetadataKey) + ` == $template) and (` + jqMeta(beadmeta.KindMetadataKey) + ` == "` + beadmeta.KindWorkflow + `"))) | .id' 2>/dev/null; ` +
+		`else printf 'gc-recovery: on_boot read failed: bd query (exit %s)\n' "$?" >&3; fi; `
+	return `template=` + shellquote.Quote(template) + `; exec 3>&1; ` +
 		`{ ` +
-		`bd list --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$template" --status=in_progress --no-assignee --json 2>/dev/null | ` +
+		`if r=$(bd list --metadata-field "` + beadmeta.RoutedToMetadataKey + `=$template" --status=in_progress --no-assignee --json 2>/dev/null); then printf '%s\n' "$r" | ` +
 		`jq -r '.[].id' 2>/dev/null; ` +
-		`bd list --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$template" --metadata-field "` + beadmeta.KindMetadataKey + `=` + beadmeta.KindWorkflow + `" --status=in_progress --no-assignee --json 2>/dev/null | ` +
+		`else printf 'gc-recovery: on_boot read failed: bd list ` + beadmeta.RoutedToMetadataKey + ` (exit %s)\n' "$?" >&3; fi; ` +
+		`if r=$(bd list --metadata-field "` + beadmeta.RunTargetMetadataKey + `=$template" --metadata-field "` + beadmeta.KindMetadataKey + `=` + beadmeta.KindWorkflow + `" --status=in_progress --no-assignee --json 2>/dev/null); then printf '%s\n' "$r" | ` +
 		`jq -r '.[] | select(` + jqMeta(beadmeta.RoutedToMetadataKey) + ` == "") | .id' 2>/dev/null; ` +
+		`else printf 'gc-recovery: on_boot read failed: bd list ` + beadmeta.RunTargetMetadataKey + ` (exit %s)\n' "$?" >&3; fi; ` +
 		ephemeralRead +
 		`} | awk 'NF && !seen[$0]++' | ` +
 		`xargs -rI{} sh -c 'if ! err=$(bd update "$1" --status open 2>&1 >/dev/null); then printf "gc-recovery: on_boot reopen failed for %s: %s\n" "$1" "$err"; fi' _ {}`

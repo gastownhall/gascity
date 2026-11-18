@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -1584,6 +1585,33 @@ func TestResource() { time.Sleep(1) }
 			wantTagged: true,
 		},
 		{
+			name:   "go build unix runs on the default lane",
+			source: "//go:build unix\n\npackage sample\nimport \"time\"\nfunc TestResource() { time.Sleep(1) }\n",
+		},
+		{
+			name:   "go build not windows runs on the default lane",
+			source: "//go:build !windows\n\npackage sample\nimport \"time\"\nfunc TestResource() { time.Sleep(1) }\n",
+		},
+		{
+			name:   "go build not darwin and not windows runs on the default lane",
+			source: "//go:build !darwin && !windows\n\npackage sample\nimport \"time\"\nfunc TestResource() { time.Sleep(1) }\n",
+		},
+		{
+			name:       "go build integration and unix",
+			source:     "//go:build integration && unix\n\npackage sample\nimport \"time\"\nfunc TestResource() { time.Sleep(1) }\n",
+			wantTagged: true,
+		},
+		{
+			name:       "go build integration or dolt_integration and unix",
+			source:     "//go:build (integration || dolt_integration) && unix\n\npackage sample\nimport \"time\"\nfunc TestResource() { time.Sleep(1) }\n",
+			wantTagged: true,
+		},
+		{
+			name:       "go build windows",
+			source:     "//go:build windows\n\npackage sample\nimport \"time\"\nfunc TestResource() { time.Sleep(1) }\n",
+			wantTagged: true,
+		},
+		{
 			name:       "go build after UTF-8 BOM",
 			source:     "\ufeff//go:build integration\n\npackage sample\nimport \"time\"\nfunc TestResource() { time.Sleep(1) }\n",
 			wantTagged: true,
@@ -2554,6 +2582,43 @@ func requireErrorContains(t *testing.T, err error, want string) {
 	}
 	if !strings.Contains(err.Error(), want) {
 		t.Fatalf("error = %q, want substring %q", err, want)
+	}
+}
+
+// TestWalkedTopsCoverEveryTestRoot: with no git index (Bazel runfiles), the
+// census walks only walkedTops, so a top-level directory that holds a Go test
+// and is not among them goes uncounted under Bazel while the git index counts
+// it.
+func TestWalkedTopsCoverEveryTestRoot(t *testing.T) {
+	root := repositoryRoot(t)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatalf("read %s: %v", root, err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "bazel-") || slices.Contains(walkedTops, name) {
+			continue
+		}
+		var test string
+		err := filepath.WalkDir(filepath.Join(root, name), func(path string, d os.DirEntry, err error) error {
+			switch {
+			case err != nil:
+				return err
+			case d.IsDir() && strings.HasPrefix(d.Name(), "."):
+				return filepath.SkipDir
+			case !d.IsDir() && strings.HasSuffix(d.Name(), "_test.go"):
+				test = path
+				return filepath.SkipAll
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", name, err)
+		}
+		if test != "" {
+			t.Errorf("%s holds a Go test (%s), but walkedTops does not walk it: a census under Bazel would not count it", name, test)
+		}
 	}
 }
 

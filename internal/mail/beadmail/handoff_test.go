@@ -15,7 +15,7 @@ import (
 // former direct store.Create at the cmd/gc call site produced.
 func TestSendHandoffConfinesBeadSerialization(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	msg, _, err := p.SendHandoff(mail.HandoffIntent{
 		From:     "mayor",
@@ -87,7 +87,7 @@ func TestSendHandoffConfinesBeadSerialization(t *testing.T) {
 // for handoff mail.
 func TestSendHandoffResolvesSenderRoute(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	sess, err := store.Create(beads.Bead{
 		Type:   session.BeadType,
@@ -139,7 +139,7 @@ func autoHandoffIntent() mail.HandoffIntent {
 }
 
 func TestSendHandoffSuppressesWhileUnreadHandoffPending(t *testing.T) {
-	p := New(beads.NewMemStore())
+	p := newTestProvider(beads.NewMemStore())
 
 	first, suppressed, err := p.SendHandoff(autoHandoffIntent())
 	if err != nil || suppressed {
@@ -159,7 +159,7 @@ func TestSendHandoffSuppressesWhileUnreadHandoffPending(t *testing.T) {
 
 func TestSendHandoffResendsAfterPendingHandoffRead(t *testing.T) {
 	store := beads.NewMemStore()
-	p := New(store)
+	p := newTestProvider(store)
 
 	first, _, err := p.SendHandoff(autoHandoffIntent())
 	if err != nil {
