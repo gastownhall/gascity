@@ -148,7 +148,7 @@ else
   tar -xzf "${tmp}/${archive}" -C "$tmp"
   src="${tmp}/br"
   if [[ ! -x "$src" ]]; then
-    src="$(find "$tmp" -type f -name br -perm -111 | head -n 1)"
+    src="$(find "$tmp" -type f -name br -perm -111 | sed -n '1p')"
   fi
   if [[ -z "${src:-}" || ! -x "$src" ]]; then
     echo "br binary not found in ${archive}" >&2

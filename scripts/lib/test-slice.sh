@@ -49,7 +49,7 @@ gc_test_slice_should_wrap() {
   # pipefail callers cannot misread an early grep exit as a failure.
   local unit_files
   unit_files="$(systemctl --user list-unit-files "$GC_TEST_SLICE_UNIT" 2>/dev/null)" || return 1
-  printf '%s\n' "$unit_files" | grep -qsF "$GC_TEST_SLICE_UNIT" || return 1
+  grep -qsF "$GC_TEST_SLICE_UNIT" <<<"$unit_files" || return 1
   # Pre-flight: prove scope allocation actually works before committing the
   # real command to it (containers and stale sessions can pass the checks
   # above yet fail systemd-run). Fall back to plain execution otherwise.

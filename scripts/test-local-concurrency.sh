@@ -147,7 +147,7 @@ assert_true "wiring.calls_gc_inner_parallelism"     grep -q 'gc_inner_parallelis
 assert_true "wiring.exports_goflags_dash_p"         grep -qE 'GOFLAGS=.*-p='           "$LOCAL_PARALLEL"
 assert_true "wiring.usage_mentions_inner_p_seam"    grep -q 'GC_TEST_INNER_P'          "$LOCAL_PARALLEL"
 
-echo_line="$(grep -n '^echo "Running' "$LOCAL_PARALLEL" | head -1 | cut -d: -f1)"
+echo_line="$(grep -n '^echo "Running' "$LOCAL_PARALLEL" | sed -n '1p' | cut -d: -f1)"
 if [[ -n "$echo_line" ]]; then
     ECHO_TEXT="$(sed -n "${echo_line}p" "$LOCAL_PARALLEL")"
     assert_contains "wiring.echo_reports_inner_p" "$ECHO_TEXT" "inner_p="
@@ -159,8 +159,8 @@ fi
 # fast) and full) case blocks — line-ranged the same way the push-gate
 # precedent isolates a case block, so a call sitting in some other block (or
 # only one of the two) can't false-positive a bare whole-file grep.
-fast_start="$(grep -n '^  fast)' "$LOCAL_PARALLEL" | head -1 | cut -d: -f1)"
-fast_end="$(grep -n '^  cmd-gc-process)' "$LOCAL_PARALLEL" | head -1 | cut -d: -f1)"
+fast_start="$(grep -n '^  fast)' "$LOCAL_PARALLEL" | sed -n '1p' | cut -d: -f1)"
+fast_end="$(grep -n '^  cmd-gc-process)' "$LOCAL_PARALLEL" | sed -n '1p' | cut -d: -f1)"
 if [[ -n "$fast_start" && -n "$fast_end" ]]; then
     FAST_BLOCK="$(sed -n "${fast_start},${fast_end}p" "$LOCAL_PARALLEL")"
     assert_contains "wiring.fast_case_calls_selftest" "$FAST_BLOCK" "add_local_concurrency_selftest_job"
@@ -168,8 +168,8 @@ else
     record_fail "wiring.fast_case_calls_selftest" "could not locate the fast) case block in $LOCAL_PARALLEL"
 fi
 
-full_start="$(grep -n '^  full)' "$LOCAL_PARALLEL" | head -1 | cut -d: -f1)"
-full_end="$(grep -n '^  \*)' "$LOCAL_PARALLEL" | head -1 | cut -d: -f1)"
+full_start="$(grep -n '^  full)' "$LOCAL_PARALLEL" | sed -n '1p' | cut -d: -f1)"
+full_end="$(grep -n '^  \*)' "$LOCAL_PARALLEL" | sed -n '1p' | cut -d: -f1)"
 if [[ -n "$full_start" && -n "$full_end" ]]; then
     FULL_BLOCK="$(sed -n "${full_start},${full_end}p" "$LOCAL_PARALLEL")"
     assert_contains "wiring.full_case_calls_selftest" "$FULL_BLOCK" "add_local_concurrency_selftest_job"

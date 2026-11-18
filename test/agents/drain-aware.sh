@@ -21,15 +21,15 @@ while true; do
     fi
 
     hooked=$(bd ready --assignee="$ASSIGNEE" 2>/dev/null || true)
-    if echo "$hooked" | bead_id_rows | grep -q .; then
-        id=$(echo "$hooked" | bead_id_rows | head -1 | awk '{print $1}')
+    if echo "$hooked" | bead_id_rows | grep . >/dev/null; then
+        id=$(echo "$hooked" | bead_id_rows | sed -n '1p' | awk '{print $1}')
         bd close "$id"
         continue
     fi
 
     ready=$(bd ready 2>/dev/null || true)
-    if echo "$ready" | bead_id_rows | grep -q .; then
-        id=$(echo "$ready" | bead_id_rows | head -1 | awk '{print $1}')
+    if echo "$ready" | bead_id_rows | grep . >/dev/null; then
+        id=$(echo "$ready" | bead_id_rows | sed -n '1p' | awk '{print $1}')
         bd update "$id" --assignee="$ASSIGNEE" 2>/dev/null || true
         continue
     fi

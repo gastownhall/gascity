@@ -167,7 +167,7 @@ while IFS= read -r row; do
     key="claims-stalled:$episode"
     case "$type" in
         agent.claims_stalled)
-            if printf '%s\n' "$RESUMED" | grep -qxF -- "$episode"; then
+            if grep -qxF -- "$episode" <<<"$RESUMED"; then
                 continue
             fi
             body="$message

@@ -161,7 +161,7 @@ br_to_gc() {
   local payload
   payload=$(cat)
   local first
-  first=$(printf '%s' "$payload" | br_stream_objects | head -n 1)
+  first=$(printf '%s' "$payload" | br_stream_objects | sed -n '1p')
   if [ -z "$first" ]; then
     echo '{}'
     return 0

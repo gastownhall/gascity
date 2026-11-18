@@ -41,7 +41,7 @@ PY
         return 0
     fi
 
-    sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$file" 2>/dev/null | head -1 || true
+    sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$file" 2>/dev/null | sed -n '1p' || true
 }
 
 json_number_field() {
@@ -68,7 +68,7 @@ PY
         return 0
     fi
 
-    sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p" "$file" 2>/dev/null | head -1 || true
+    sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p" "$file" 2>/dev/null | sed -n '1p' || true
 }
 
 json_bool_field() {
@@ -82,7 +82,7 @@ json_bool_field() {
         return 0
     fi
 
-    sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\\(true\\|false\\).*/\\1/p" "$file" 2>/dev/null | head -1 || true
+    sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\\(true\\|false\\).*/\\1/p" "$file" 2>/dev/null | sed -n '1p' || true
 }
 
 # config_value <config.yaml> <section.field> prints a two-part dotted
@@ -171,7 +171,7 @@ resolve_database() {
     if [ -z "$db" ]; then
         if beads_dir=$(find_beads_dir); then
             metadata="$beads_dir/metadata.json"
-            db=$(json_string_field "$metadata" "dolt_database" | head -1)
+            db=$(json_string_field "$metadata" "dolt_database" | sed -n '1p')
         fi
     fi
 
@@ -205,9 +205,9 @@ resolve_port_from_runtime_state() {
 
     while IFS= read -r state_file; do
         [ -f "$state_file" ] || continue
-        running=$(json_bool_field "$state_file" "running" | head -1)
+        running=$(json_bool_field "$state_file" "running" | sed -n '1p')
         [ "$running" = "true" ] || continue
-        port=$(json_number_field "$state_file" "port" | head -1)
+        port=$(json_number_field "$state_file" "port" | sed -n '1p')
         if [ -n "$port" ]; then
             printf '%s\n' "$port"
             return 0

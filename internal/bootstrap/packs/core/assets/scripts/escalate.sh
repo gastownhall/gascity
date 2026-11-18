@@ -92,7 +92,7 @@ if [ -z "$SUBJECT" ]; then
     exit 2
 fi
 
-if [ -n "$SEVERITY" ] && ! printf '%s' "$SUBJECT" | grep -Eq '\[[^]]+\]$'; then
+if [ -n "$SEVERITY" ] && ! grep -Eq '\[[^]]+\]$' <<<"$SUBJECT"; then
     SUBJECT="$SUBJECT [$SEVERITY]"
 fi
 

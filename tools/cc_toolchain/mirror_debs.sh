@@ -16,7 +16,7 @@ root=$(git rev-parse --show-toplevel)
 module="$root/MODULE.bazel"
 mirror=$(grep -o "https://github.com/$repo/releases/download/[^/]*/{sha256}.deb" "$module")
 tag=${1:-$(basename "$(dirname "$mirror")")}
-snapshot=$(grep -o 'https://snapshot\.ubuntu\.com/ubuntu/[0-9TZ]*/' "$module" | head -1)
+snapshot=$(grep -o 'https://snapshot\.ubuntu\.com/ubuntu/[0-9TZ]*/' "$module" | sed -n '1p')
 
 if ! gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
 	gh release create "$tag" --repo "$repo" --prerelease --latest=false \

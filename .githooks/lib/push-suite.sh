@@ -188,7 +188,7 @@ worker_env_refusal() {
   issue="$(printf '%s\n' "$out" | sed -n 's/^::error title=rbe worker-env drift::\(https:[^ :]*\):.*/\1/p')"
   if [ "$status" -eq 1 ] && [ -n "$issue" ]; then
     echo "main's worker-env pin $pin has an open drift issue, $issue: no live worker serves it until the re-pin lands"
-  elif [ "$status" -ne 0 ] || printf '%s\n' "$out" | grep -q '^::warning title=rbe worker-env preflight::'; then
+  elif [ "$status" -ne 0 ] || grep -q '^::warning title=rbe worker-env preflight::' <<<"$out"; then
     echo "pre-push: could not check $repo's rbe worker-env drift issues (gh); executing remotely anyway" >&2
   fi
 }

@@ -378,7 +378,7 @@ report_failed_jobs() {
     job_log="$dir/${job}.log"
     echo "  ${job} (log: ${job_log})" >&2
     if grep -q '^--- FAIL:' "$job_log" 2>/dev/null; then
-      grep -A2 '^--- FAIL:' "$job_log" | head -n 40 | sed 's/^/    /' >&2 || true
+      grep -A2 '^--- FAIL:' "$job_log" | sed -n '1,40p' | sed 's/^/    /' >&2 || true
     elif [[ -f "$job_log" ]]; then
       tail -n 40 "$job_log" | sed 's/^/    /' >&2 || true
     fi

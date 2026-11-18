@@ -477,7 +477,7 @@ case "$op" in
 
   read)
     id="${1:?usage: gc-mail-mcp-agent-mail read <id>}"
-    if ! printf '%s' "$id" | grep -qE '^[0-9]+$'; then
+    if ! grep -qE '^[0-9]+$' <<<"$id"; then
       echo "invalid message ID: $id" >&2
       exit 1
     fi
@@ -544,7 +544,7 @@ case "$op" in
 
   get)
     id="${1:?usage: gc-mail-mcp-agent-mail get <id>}"
-    if ! printf '%s' "$id" | grep -qE '^[0-9]+$'; then
+    if ! grep -qE '^[0-9]+$' <<<"$id"; then
       echo "invalid message ID: $id" >&2
       exit 1
     fi
@@ -596,7 +596,7 @@ case "$op" in
 
   mark-read)
     id="${1:?usage: gc-mail-mcp-agent-mail mark-read <id>}"
-    if ! printf '%s' "$id" | grep -qE '^[0-9]+$'; then
+    if ! grep -qE '^[0-9]+$' <<<"$id"; then
       echo "invalid message ID: $id" >&2
       exit 1
     fi
@@ -622,7 +622,7 @@ case "$op" in
 
   mark-unread)
     id="${1:?usage: gc-mail-mcp-agent-mail mark-unread <id>}"
-    if ! printf '%s' "$id" | grep -qE '^[0-9]+$'; then
+    if ! grep -qE '^[0-9]+$' <<<"$id"; then
       echo "invalid message ID: $id" >&2
       exit 1
     fi
@@ -822,7 +822,7 @@ case "$op" in
   delete)
     # Alias for archive.
     id="${1:?usage: gc-mail-mcp-agent-mail delete <id>}"
-    if ! printf '%s' "$id" | grep -qE '^[0-9]+$'; then
+    if ! grep -qE '^[0-9]+$' <<<"$id"; then
       echo "invalid message ID: $id" >&2
       exit 1
     fi
@@ -854,7 +854,7 @@ case "$op" in
 
   archive)
     id="${1:?usage: gc-mail-mcp-agent-mail archive <id>}"
-    if ! printf '%s' "$id" | grep -qE '^[0-9]+$'; then
+    if ! grep -qE '^[0-9]+$' <<<"$id"; then
       echo "invalid message ID: $id" >&2
       exit 1
     fi

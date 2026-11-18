@@ -1031,7 +1031,7 @@ jobs:
               --tls_client_certificate="$CERT" --tls_client_key="$KEY" \
               --remote_upload_local_results </dev/null 2>&1 | tee "$log" || rc=$?
             if [ "$rc" -ne 0 ] && grep -q '^INFO: Build completed successfully' "$log" &&
-              ! grep '^ERROR:' "$log" | grep -qv "^ERROR: Couldn't start the build. Unable to run tests$"; then
+              ! grep '^ERROR:' "$log" | grep -v "^ERROR: Couldn't start the build. Unable to run tests$" >/dev/null; then
               rc=0
             fi
             echo "rrc-seed: \`$cmd\`: exit $rc, $(( $(date +%s) - start ))s" | tee -a "$GITHUB_STEP_SUMMARY"
@@ -1074,7 +1074,7 @@ jobs:
             exit 0
           fi
           conclusion=$(gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/attempts/$RUN_ATTEMPT/jobs" \
-            --jq '.jobs[] | select(.name | endswith("bazel / split-strict")) | .conclusion' | head -n1)
+            --jq '.jobs[] | select(.name | endswith("bazel / split-strict")) | .conclusion' | sed -n '1p')
           echo "split-strict lane: ${conclusion:-not found}" | tee -a "$GITHUB_STEP_SUMMARY"
           case "$conclusion" in
             success) exit 0 ;;
@@ -1142,7 +1142,7 @@ jobs:
             rc=0
             bazel "${args[@]}" --nobuild --loading_phase_threads=64 </dev/null 2>&1 | tee "$log" || rc=$?
             if [ "$rc" -ne 0 ] && grep -q '^INFO: Build completed successfully' "$log" &&
-              ! grep '^ERROR:' "$log" | grep -qv "^ERROR: Couldn't start the build. Unable to run tests$"; then
+              ! grep '^ERROR:' "$log" | grep -v "^ERROR: Couldn't start the build. Unable to run tests$" >/dev/null; then
               rc=0
             fi
             [ "$rc" -eq 0 ] || exit "$rc"

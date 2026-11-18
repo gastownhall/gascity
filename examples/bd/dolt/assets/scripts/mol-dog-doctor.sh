@@ -237,7 +237,7 @@ BACKUP_STALE_ITEMS=""
 for db in $USER_DBS; do
     db_dir="$DOLT_DATA_DIR/$db"
     if [ -d "$db_dir/.dolt" ]; then
-        if (cd "$db_dir" && run_bounded 30 dolt backup 2>/dev/null | awk '{print $1}' | grep -qxF -e default -e "${db}-backup"); then
+        if (cd "$db_dir" && run_bounded 30 dolt backup 2>/dev/null | awk '{print $1}' | grep -xF -e default -e "${db}-backup" >/dev/null); then
             BACKUP_ELIGIBLE_DBS="$BACKUP_ELIGIBLE_DBS $db"
         else
             append_backup_stale "$db backup remote missing"

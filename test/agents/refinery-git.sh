@@ -34,7 +34,7 @@ while true; do
             fi
 
             # Find the remote branch matching this work_id
-            branch=$(git branch -r 2>/dev/null | grep "$work_id" | head -1 | tr -d ' ' || true)
+            branch=$(git branch -r 2>/dev/null | grep "$work_id" | sed -n '1p' | tr -d ' ' || true)
 
             if [ -n "$branch" ]; then
                 # Merge to the remote default branch and push. Let merge/push
