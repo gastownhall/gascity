@@ -53,9 +53,11 @@
 #       per OS user, because a lock directory or file another user or a
 #       sudo run created is not writable by this one; initializers running
 #       as different OS users share a lock only when this names one
-#       directory they can all write to). Where flock is installed, init
-#       must be able to create its lock file here, and fails naming the
-#       file when it cannot. Not under GC_CITY_PATH on purpose: two
+#       directory they can all write to). Where flock is installed, an init
+#       that takes the lock must be able to create its lock file here, and
+#       fails naming the file when it cannot. An init that only adopts an
+#       existing database that does not look like an interrupted bootstrap
+#       never takes it. Not under GC_CITY_PATH on purpose: two
 #       cities/worktrees that share one managed Dolt server can target the
 #       same dolt_database from different city paths, so the lock must
 #       resolve to the same file for both regardless of which city each
@@ -529,6 +531,20 @@ managed_backing_store_exists() {
 #
 # After CREATE DATABASE, polls with USE <db> to wait for catalog propagation
 # (CREATE DATABASE returns before the catalog is fully updated).
+#
+# GC_DATABASE_CREATED_BY_ENSURE answers for this call alone: every call resets
+# it, and a later call finds the database visible. INIT_CREATED_DATABASE is
+# the stricter fact whether gc may migrate the database
+# (init_bootstraps_database) rests on, kept for the rest of the process: on
+# top of this call's own view, the database it just created must hold nothing
+# bd wrote. The call's view alone is not proof. A USE can fail for a
+# transient reason, and a loopback endpoint gc does not manage keeps its
+# databases outside DATA_DIR, so a database that has been on the server all
+# along can read as "absent, then created". Such a database holds bd's tables
+# or its migration history, and a new one holds neither. Only a definite
+# "empty" counts; an unanswered probe does not. It starts false here, so a
+# value in the environment never counts.
+INIT_CREATED_DATABASE=false
 ensure_database_registered() {
     local db="$1"
     GC_DATABASE_CREATED_BY_ENSURE=false
@@ -565,6 +581,11 @@ ensure_database_registered() {
         if server_sql "USE \`$db\`" >/dev/null 2>&1; then
             if [ "$backing_absent" = true ]; then
                 GC_DATABASE_CREATED_BY_ENSURE=true
+                local holds_bd_tables=0
+                bd_runtime_store_holds_bd_tables "$db" || holds_bd_tables=$?
+                if [ "$holds_bd_tables" -eq 1 ]; then
+                    INIT_CREATED_DATABASE=true
+                fi
             fi
             return 0
         fi
@@ -1227,7 +1248,11 @@ bd_bootstrap_interrupted() {
 # that was in flight has committed, or its process has died, by the time the
 # lock is granted), and the lock stays held through the migration step that
 # follows, which releases it. Prints what it did: this is a destructive step,
-# gated on the database holding no issues.
+# gated on the database holding no issues. A reset is recorded in
+# INIT_HEALED_BOOTSTRAP: the migration step re-runs the migrations the reset
+# discarded, which makes this init the database's bootstrap
+# (init_bootstraps_database).
+INIT_HEALED_BOOTSTRAP=false
 heal_interrupted_bootstrap() {
     local db="$1"
     bd_bootstrap_interrupted "$db" || return 0
@@ -1239,16 +1264,46 @@ heal_interrupted_bootstrap() {
     echo "warning: database '$db' holds an interrupted bd bootstrap (uncommitted schema changes, no issues); discarding its working set and re-running migrations" >&2
     server_sql "USE \`$db\`; CALL DOLT_RESET('--hard')" >/dev/null 2>&1 \
         || die "failed to reset the interrupted bootstrap working set of database '$db'"
+    INIT_HEALED_BOOTSTRAP=true
 }
 
-# finish_bd_schema_migrations completes a schema that is clean but behind
-# (the state a healed bootstrap is in, and the state the old readiness probe
-# accepted as ready): bd's store open applies pending migrations, and
-# `bd migrate schema` is the idempotent entry point for exactly that. The
-# migration runs under the shared init lock: while a step is in flight this
-# database looks like an interrupted bootstrap, and only the lock keeps a
-# concurrent initializer's heal from resetting it. Without flock no heal can
-# run at all, so there is nothing to exclude.
+# init_bootstraps_database reports whether this init is bootstrapping the
+# database it pinned, the only kind of database gc runs `bd migrate schema`
+# on (see finish_bd_schema_migrations): this init's ensure_database_registered
+# created it, so creating it was consent for its schema, or
+# heal_interrupted_bootstrap just reset an interrupted bootstrap of it, whose
+# discarded migrations the step re-runs. Any other database already existed
+# on its server before this init, and clients gc cannot see may depend on it.
+init_bootstraps_database() {
+    [ "$INIT_CREATED_DATABASE" = true ] || [ "$INIT_HEALED_BOOTSTRAP" = true ]
+}
+
+# finish_bd_schema_migrations completes the schema of a database this init is
+# bootstrapping, and leaves every other database at the schema it has.
+#
+# `bd migrate schema` is bd's explicit consent to a one-way migration: since
+# bd 1.3.0 for a database on a shared server (gastownhall/beads#5920), and in
+# bd releases that carry bd's migration-consent gate for every existing
+# database (gastownhall/beads#5764). Migrating promotes the schema for every
+# client of the database at once, and a bd built for the older schema then
+# refuses the database. Whether every client is ready is an operator's call,
+# so gc makes it only for a database it is bootstrapping
+# (init_bootstraps_database): one this init created, or an interrupted
+# bootstrap this init just reset. Every other database keeps its schema and
+# init carries on: gc start, gc reload and gc doctor name a database whose
+# schema differs from the one the beads library linked into gc expects, with
+# the command an operator runs.
+# That includes a database whose bootstrap was interrupted and left clean,
+# which an earlier init created: nothing here can tell it from a database that
+# clients have been using all along.
+#
+# For a database being bootstrapped this completes a schema that is clean but
+# behind (the state a healed bootstrap is in): bd's store open applies pending
+# migrations, and `bd migrate schema` is the idempotent entry point for exactly
+# that. The migration runs under the shared init lock: while a step is in
+# flight this database looks like an interrupted bootstrap, and only the lock
+# keeps a concurrent initializer's heal from resetting it. Without flock no
+# heal can run at all, so there is nothing to exclude.
 #
 # `bd migrate schema` arrived in bd 1.0.5. An older bd's `migrate` has no
 # subcommands: it would take `schema` as an ignored argument and run the bare
@@ -1259,12 +1314,15 @@ heal_interrupted_bootstrap() {
 # the step reports a version this reads. A skipped step still drops the hold
 # a heal left.
 #
-# From bd 1.3.0 the verb is also bd's consent to promote the schema of a
-# database on a shared server (gastownhall/beads#5920), which can lock out
-# an older bd that uses the same database, so what bd reports the step did
-# goes to stderr instead of being dropped.
+# What bd reports the step did goes to stderr instead of being dropped.
 finish_bd_schema_migrations() {
     local dir="$1" db="$2" out bd_version
+    if ! init_bootstraps_database; then
+        # A heal that re-checked under its exclusive hold and found nothing
+        # to reset leaves that hold behind; drop it here, as the step would.
+        release_init_lock
+        return 0
+    fi
     bd_version=$(bd_version_number 8>&-)
     case "$bd_version" in
         0.* | v0.* | 1.0.[0-4] | v1.0.[0-4] | 1.0.[0-4][-+]* | v1.0.[0-4][-+]*)
@@ -4602,15 +4660,14 @@ op_init() {
                 # by an older gc may have none.
                 ensure_current_era_version_witness "$dir" "$dolt_database"
                 # A config table proves a bootstrap started, not that it
-                # finished. Complete any pending migrations before reporting
-                # the scope ready: a healed database, or one whose bootstrap
-                # was interrupted and then left clean, sits behind the
-                # binary's schema, and bd's read-only opens never migrate, so
-                # nothing else would finish it. On a dirty database that
-                # holds issues this is also where bd's dirty-table guard is
-                # allowed to speak, instead of the scope reporting ready over
-                # a half-migrated store. `bd migrate schema` only; the bare
-                # repo-id migration stays off this path
+                # finished. A database this init is bootstrapping (it created
+                # it, or the heal above just reset it) gets its pending
+                # migrations completed before the scope reports ready: it sits
+                # behind the binary's schema, and bd's read-only opens never
+                # migrate, so nothing else would finish it. Any other database
+                # keeps its schema; finish_bd_schema_migrations says why.
+                # `bd migrate schema` only; the bare repo-id migration stays
+                # off this path
                 # (TestGcBeadsBdInitUsesProjectIDHelperWithoutRepoIDMigration).
                 finish_bd_schema_migrations "$dir" "$dolt_database"
                 # GC owns canonical metadata/config normalization after this backend
@@ -4658,9 +4715,9 @@ op_init() {
     # plain init refuses the latter as "already initialized". So once the
     # canonical metadata is in place this path takes the same decision the
     # metadata-present branch takes: heal an interrupted bootstrap, then
-    # ADOPT a present schema (finish its migrations, normalize, identity) or
-    # FORCE-seed a missing one. Only a database with no bd schema reaches
-    # bd init at all.
+    # ADOPT a present schema (finish the migrations of one this init is
+    # bootstrapping, normalize, identity) or FORCE-seed a missing one. Only a
+    # database with no bd schema reaches bd init at all.
     heal_interrupted_bootstrap "$dolt_database"
     if [ "$GC_SCOPE_METADATA_PRESEEDED" = "1" ] && [ -z "$bd_init_force" ]; then
         if probe_schema_state_or_die "$dolt_database"; then
