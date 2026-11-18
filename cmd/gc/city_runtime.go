@@ -2920,6 +2920,13 @@ func (cr *CityRuntime) reloadConfigTraced(
 			time.Sleep(cityRuntimeReloadLifecycleRetryDelay)
 		}
 	}
+	// The lifecycle migrates only a database it is bootstrapping. Every other
+	// one whose schema differs from the linked beads library's goes back to
+	// the operator in the reply, with the command that migrates it, whether
+	// or not the lifecycle succeeded.
+	for _, notice := range bdSchemaNoticesFor(cityRoot, nextCfg) {
+		appendWarning(notice)
+	}
 	if lifecycleErr != nil {
 		err := fmt.Errorf("config reload: %w", lifecycleErr)
 		fmt.Fprintf(cr.stderr, "%s: %v (keeping old config)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
