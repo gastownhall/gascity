@@ -708,13 +708,14 @@ func (f *Factory) sweepSessionModelUsage(
 	}
 	if path == "" {
 		if (keylessCodex || keylessClaude) && emptyIsPermanent {
-			// Clean, PERMANENT miss: the keyless codex workdir fallback found nothing
-			// (ambiguity / out-of-window / TZ), or the claude lookup REFUSED a shared
-			// workdir it cannot disambiguate. Neither is resolved by a retry, so settle
-			// so compute can commit and the recently-closed window is not re-swept
-			// every tick. (A keyed miss below stays transient, and so does a keyless
-			// claude session that is unambiguous but whose transcript is merely not
-			// written yet: both may simply not be flushed.)
+			// Clean, PERMANENT miss: the keyless codex workdir fallback cleanly
+			// REFUSED an ambiguity (two root rollouts share the cwd), or the claude
+			// lookup REFUSED a shared workdir it cannot disambiguate. Neither is
+			// resolved by a retry, so settle so compute can commit and the
+			// recently-closed window is not re-swept every tick. (A keyed miss below
+			// stays transient, and so does a keyless claude session that is
+			// unambiguous but whose transcript is merely not written yet: both may
+			// simply not be flushed.)
 			slog.Debug("model-usage sweep: keyless transcript miss is permanent; settling",
 				slog.String("session_id", id), slog.String("provider", family))
 			return 0, true, nil
@@ -736,14 +737,15 @@ func (f *Factory) sweepSessionModelUsage(
 // settled classifies a miss with the same meaning SweepSessionModelUsage gives
 // it, so a caller that memoizes discovery can distinguish the two kinds: true
 // means there is definitively nothing to find (an unregistered provider family;
-// a keyless codex session whose bounded workdir+window fallback came up empty
-// on a CLEAN scan; or a keyless claude session whose transcript lookup cleanly
+// a keyless codex scan that cleanly REFUSED an ambiguity — two root rollouts
+// share the cwd; or a keyless claude session whose transcript lookup cleanly
 // refused an ambiguous shared workdir) and re-running discovery is pure waste;
 // false means the miss is transient (a keyed rollout not flushed yet, a keyless
-// codex scan clouded by an I/O fault, which leaves both an empty result and a
-// lone hit non-definitive, a keyless claude lookup that failed to read the store,
-// or an unambiguous keyless claude session whose transcript is not written yet)
-// and a later attempt may resolve it. A found path is always settled.
+// codex CLEAN zero-match whose rollout may still appear, a keyless codex scan
+// clouded by an I/O fault, which leaves both an empty result and a lone hit
+// non-definitive, a keyless claude lookup that failed to read the store, or an
+// unambiguous keyless claude session whose transcript is not written yet) and a
+// later attempt may resolve it. A found path is always settled.
 func (f *Factory) DiscoverSweepTranscript(id string, meta map[string]string, now time.Time) (path string, settled bool) {
 	id = strings.TrimSpace(id)
 	if f == nil || id == "" || meta == nil {
@@ -906,12 +908,15 @@ func (f *Factory) sweepResolvedTranscript(ctx context.Context, family, id string
 //
 // The returned emptyIsPermanent is meaningful only when path is empty on a CLEAN
 // lookup: it reports whether a retry could ever resolve the miss. It is true for
-// the keyless-codex fallback (a closed session's rollout is already on disk, so a
-// clean zero is ambiguity/out-of-window/TZ) and for the claude manager's
-// shared-workdir ambiguity refusal and its no-workdir case — neither changes while
-// the pool shares that directory. It is FALSE for a claude session that is
-// unambiguous but whose transcript simply has not been written yet, and for a keyed
-// codex miss, both of which a later tick may resolve.
+// the keyless-codex fallback's ambiguity refusal (two root rollouts share the
+// cwd; a retry cannot disambiguate) and its no-workdir/no-anchor skip, and for
+// the claude manager's shared-workdir ambiguity refusal and its no-workdir case
+// — none of these change while the pool shares that directory. It is FALSE for
+// a keyless codex CLEAN zero-match (the rollout may appear after the session
+// started — a late flush or a rollout written only at the first turn), for a
+// claude session that is unambiguous but whose transcript simply has not been
+// written yet, and for a keyed codex miss — all of which a later tick may
+// resolve.
 func (f *Factory) discoverSweepTranscript(family, id string, meta map[string]string, now time.Time) (path string, scanClean bool, emptyIsPermanent bool) {
 	switch family {
 	case "codex":
@@ -932,7 +937,12 @@ func (f *Factory) discoverSweepTranscript(family, id string, meta map[string]str
 		}
 		scan := sessionlog.FindCodexSessionFileNearScan(
 			f.searchPaths, workDir, notBefore, codexInvocationDiscoveryWindow)
-		return scan.Path, scan.Clean, true
+		// Only the ambiguity refusal is permanent: two root rollouts share the
+		// cwd and a retry cannot disambiguate a stable ambiguity. A CLEAN
+		// zero-match is transient — a keyless rollout can appear after the
+		// session's first sweeps (late flush, rollout written at first turn) —
+		// so discovery retries on the caller's floor instead of settling.
+		return scan.Path, scan.Clean, scan.Ambiguous
 	case "opencode":
 		// Keyed only, like discoverOpenCodeInvocationTranscript: the export is
 		// named for the session_key, and the manager's workdir fallback could
