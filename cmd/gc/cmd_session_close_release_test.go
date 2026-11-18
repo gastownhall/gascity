@@ -509,13 +509,31 @@ func TestCmdSessionCloseOnConfiguredNamedSessionPreservesIdentityAssignedWork(t 
 
 // TestConfiguredNamedSessionStableAddresses pins which beads' stable
 // addresses `gc session close` leaves claimed: only a named-session bead
-// whose identity still resolves to a configured spec with its backing agent.
+// whose identity still names a configured spec with its backing agent
+// exactly, never through the bare-name fallback, since the re-materialized
+// bead serves only the qualified form. A bead that keeps work keeps every
+// form of its identity that named demand counts.
 func TestConfiguredNamedSessionStableAddresses(t *testing.T) {
 	configured := func() *config.City {
 		return &config.City{
 			Workspace:     config.Workspace{Name: "test-city", SessionTemplate: namedCloseSessionTemplate},
 			Agents:        []config.Agent{{Name: "worker"}},
 			NamedSessions: []config.NamedSession{{Name: "reviewer", Template: "worker"}},
+		}
+	}
+	// bound declares `reviewer` and its backing agent under the binding
+	// `ops` (rig-scoped when rig is set), so the qualified identity is
+	// [rig/]ops.reviewer and the bare `reviewer` resolves only through the
+	// bare-name fallback.
+	bound := func(rig string) func() *config.City {
+		return func() *config.City {
+			cfg := configured()
+			if rig != "" {
+				cfg.Rigs = []config.Rig{{Name: rig}}
+			}
+			cfg.Agents = []config.Agent{{Name: "worker", Dir: rig, BindingName: "ops"}}
+			cfg.NamedSessions = []config.NamedSession{{Name: "reviewer", Template: "worker", Dir: rig, BindingName: "ops"}}
+			return cfg
 		}
 	}
 	named := func(meta map[string]string) beads.Bead {
@@ -561,12 +579,39 @@ func TestConfiguredNamedSessionStableAddresses(t *testing.T) {
 			cfg.Agents = nil
 			return cfg
 		}, nil},
+		{"bound identity", named(map[string]string{
+			namedSessionIdentityMetadata: "ops.reviewer",
+			"session_name":               "test-city-ops__reviewer",
+		}), bound(""), []string{"ops.reviewer", "test-city-ops__reviewer"}},
+		{"rig-scoped bound identity", named(map[string]string{
+			namedSessionIdentityMetadata: "myrig/ops.reviewer",
+			"session_name":               "test-city-myrig--ops__reviewer",
+		}), bound("myrig"), []string{"myrig/ops.reviewer", "test-city-myrig--ops__reviewer"}},
+		{"bare identity of a bound session", named(nil), bound(""), nil},
+		{"bare identity of a rig-scoped bound session", named(nil), bound("myrig"), nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := tc.cfg()
-			got := configuredNamedSessionStableAddresses(tc.bead, cfg, loadedCityName(cfg, "/cities/dir-city"))
+			cityName := loadedCityName(cfg, "/cities/dir-city")
+			got := configuredNamedSessionStableAddresses(tc.bead, cfg, cityName)
 			if !slices.Equal(got, tc.want) {
 				t.Errorf("configuredNamedSessionStableAddresses = %q, want %q", got, tc.want)
+			}
+			if len(tc.want) == 0 {
+				return
+			}
+			// Work under a form of the identity that named demand counts
+			// (namedSessionAssigneeMatchesSpec) belongs to the session the
+			// controller re-materializes, so the close must keep that form.
+			identity := namedSessionIdentity(tc.bead)
+			spec, ok := findNamedSessionSpec(cfg, cityName, identity)
+			if !ok {
+				t.Fatalf("findNamedSessionSpec(%q) found no spec for a bead that keeps work", identity)
+			}
+			for _, assignee := range []string{identity, spec.SessionName, spec.BareIdentity, tc.bead.Metadata["session_name"], tc.bead.ID} {
+				if namedSessionAssigneeMatchesSpec(spec, identity, assignee) && !slices.Contains(got, assignee) {
+					t.Errorf("named demand counts %q as %q's work, but the close releases it", assignee, identity)
+				}
 			}
 		})
 	}

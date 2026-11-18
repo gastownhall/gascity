@@ -2312,15 +2312,25 @@ its name), a rerun by the alias closes that session.`,
 // leaves claimed: when b is a named-session bead whose identity and backing
 // template are still configured, the controller re-materializes that
 // identity under its configured runtime name, so work addressed to either
-// still has an owner. Any other bead, a removed identity's included, yields
-// nil and its claims release as usual.
+// still has an owner. The identity must name its [[named_session]] entry
+// exactly: the re-materialized bead serves only the qualified form, so an
+// identity that resolves only through the bare-name fallback keeps nothing.
+// Any other bead, a removed identity's included, yields nil and its claims
+// release as usual.
 func configuredNamedSessionStableAddresses(b beads.Bead, cfg *config.City, cityName string) []string {
-	if !configuredNamedSessionBeadHasSpec(b, cfg, cityName) {
+	if cfg == nil || !isNamedSessionBead(b) {
 		return nil
 	}
 	identity := namedSessionIdentity(b)
+	if identity == "" {
+		return nil
+	}
+	spec, ok := findNamedSessionSpec(cfg, cityName, identity)
+	if !ok || spec.Named.QualifiedName() != identity {
+		return nil
+	}
 	addresses := []string{identity}
-	if runtimeName := strings.TrimSpace(config.NamedSessionRuntimeName(cityName, cfg.Workspace, identity)); runtimeName != "" && runtimeName != identity {
+	if runtimeName := strings.TrimSpace(spec.SessionName); runtimeName != "" && runtimeName != identity {
 		addresses = append(addresses, runtimeName)
 	}
 	return addresses
