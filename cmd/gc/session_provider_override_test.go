@@ -82,4 +82,11 @@ func TestProviderOverrideRefreshWaitsForStop(t *testing.T) {
 	if again := desiredRowIdentity(identityCity(), tp, info.ApplyPatch(stopped.Meta), nextRaw); len(again.Meta) != 0 {
 		t.Fatalf("repeat refresh: %v", again.Meta)
 	}
+	// A deferred first start may already hold the previous provider's key.
+	// A resume-only replacement cannot use that preallocated key either.
+	info.StartedConfigHash, raw["started_config_hash"] = "", ""
+	unstarted := desiredRowIdentity(identityCity(), tp, info, raw)
+	if next := info.ApplyPatch(unstarted.Meta); next.SessionKey != "" {
+		t.Fatalf("provider switch kept an unstarted conversation key: %q", next.SessionKey)
+	}
 }

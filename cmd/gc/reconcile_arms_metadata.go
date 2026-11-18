@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -61,6 +62,7 @@ type rowRefreshKeys map[string]string
 // refreshKeyNames are rowRefreshKeys' keys.
 var refreshKeyNames = []string{
 	"state", "started_config_hash",
+	beadmeta.BrainParentSIDMetadataKey,
 	"work_dir", "wake_mode", "session_key", "continuation_epoch", "command", "provider", "provider_kind",
 	"builtin_ancestor", "resume_flag", "resume_style", "resume_command", "session_id_flag", "close_reason", "closed_at",
 }

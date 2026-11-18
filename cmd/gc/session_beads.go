@@ -336,7 +336,7 @@ func queueChangedResolvedProviderSessionMetadata(existing map[string]string, que
 			queue(key, value)
 		}
 	}
-	if existing["started_config_hash"] != "" {
+	if existing["started_config_hash"] != "" || existing["session_key"] != "" || existing[beadmeta.BrainParentSIDMetadataKey] != "" {
 		for key, value := range session.ProviderSwitchResetPatch(session.ProviderFamilyFromMetadata(existing, ""), resolvedProviderLaunchFamily(resolved)) {
 			queueChanged(key, value)
 		}
