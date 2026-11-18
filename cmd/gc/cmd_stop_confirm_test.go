@@ -284,12 +284,14 @@ func TestCmdStopSupervisorManagedCityConfirmsTheStop(t *testing.T) {
 // reconcile to stop, so gc stop must stop its sessions itself, under the
 // controller lock the unregister claimed, rather than only confirm and fail
 // with them "still running after the controller stopped". A runtime that
-// cannot be listed still fails the stop and restores the registration.
+// cannot be listed, or a bead store that will not stop, still fails the stop
+// and restores the registration, as on the path a controller stopped.
 func TestCmdStopSupervisorManagedCityWithNoControllerStopsItsSessions(t *testing.T) {
 	for _, c := range []struct {
 		name       string
 		sp         func(t *testing.T) (runtime.Provider, *runtime.Fake)
 		reloaded   func(f *runtime.Fake)
+		storeErr   error
 		wantCode   int
 		wantStderr []string
 	}{
@@ -301,7 +303,7 @@ func TestCmdStopSupervisorManagedCityWithNoControllerStopsItsSessions(t *testing
 			},
 		},
 		{
-			name: "a relaunch the reconcile stopped already stopped them",
+			name: "the supervisor's reload already stopped them",
 			sp: func(t *testing.T) (runtime.Provider, *runtime.Fake) {
 				f := runningFake(t, "worker-1")
 				return f, f
@@ -316,6 +318,16 @@ func TestCmdStopSupervisorManagedCityWithNoControllerStopsItsSessions(t *testing
 			},
 			wantCode:   1,
 			wantStderr: []string{"the runtime inventory was incomplete", "restored registration for 'supervised-city'"},
+		},
+		{
+			name: "the bead store will not stop",
+			sp: func(t *testing.T) (runtime.Provider, *runtime.Fake) {
+				f := runningFake(t, "worker-1")
+				return f, f
+			},
+			storeErr:   errors.New("dolt still serving"),
+			wantCode:   1,
+			wantStderr: []string{"gc stop: bead store: dolt still serving", "restored registration for 'supervised-city'"},
 		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -356,7 +368,7 @@ func TestCmdStopSupervisorManagedCityWithNoControllerStopsItsSessions(t *testing
 			overrideShutdownBeadsProviderForStop(t, func(string) error {
 				providerStops.Add(1)
 				lockHeldAtProviderStop.Store(probeControllerLockHeld(t, cityDir))
-				return nil
+				return c.storeErr
 			})
 
 			var stdout, stderr lockedBuffer

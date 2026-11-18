@@ -190,10 +190,13 @@ indicate bugs.
 - **`gc stop` keeps the controller lock through bead-store shutdown**:
   once the controller has stopped (acknowledged `stop`, or the supervisor
   stopped it during unregister), `gc stop` takes `.gc/controller.lock` and
-  holds it until the bead-store provider is retired, releasing it on every
-  exit path (and before any unregister rollback). A supervisor restart or a
-  second `gc start` therefore cannot bring a controller up against a
-  provider that is being torn down; it fails the lock instead.
+  holds it until the bead-store provider is retired. When no controller
+  served a registered city at all, the lock the unregister claimed is held
+  through `gc stop`'s own stop of the city's sessions as well. The lock is
+  released on every exit path (and before any unregister rollback). A
+  supervisor restart or a second `gc start` therefore cannot bring a
+  controller up against a provider that is being torn down; it fails the
+  lock instead.
 
 - **Config reload preserves city identity**: `tryReloadConfig()` rejects
   any reload where `workspace.name` changes. The city name is locked at

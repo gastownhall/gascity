@@ -160,10 +160,12 @@ func cmdStopJSONSequence(args []string, stdout, stderr io.Writer, force bool, js
 	served := registeredCityControllerServing(cityPath)
 	handled, code, ownership := unregisterCityFromSupervisorForStop(cityPath, stopStdout, stderr, "gc stop", force, unregisterTx)
 	if ownership != nil {
-		// The supervisor stopped the controller; hold its lock until the bead
-		// store below is retired. It is released when this returns, before
-		// the caller commits or rolls back the unregister, so a restored
-		// registration never finds the lock still held by this stop.
+		// The supervisor stopped the controller, or none served the city;
+		// hold its lock until the bead store below is retired (with none
+		// serving, through gc stop's own stop of the sessions first). It is
+		// released when this returns, before the caller commits or rolls
+		// back the unregister, so a restored registration never finds the
+		// lock still held by this stop.
 		defer ownership.Close() //nolint:errcheck // releasing the flock cannot fail meaningfully
 	}
 	if handled {
@@ -181,8 +183,13 @@ func cmdStopJSONSequence(args []string, stdout, stderr io.Writer, force bool, js
 				// its registration, or the supervisor is backing off a start),
 				// so the unregister stopped none of its sessions: stop them
 				// here, as the standalone stop does, under the controller lock
-				// so the city cannot be relaunched underneath.
-				return runLoadedCityStop(cfg, stopCityWithoutControllerForStop)
+				// so the city cannot be relaunched underneath. A bead store
+				// that will not stop fails the stop, as it does where a
+				// controller stopped the city, so the registration is
+				// restored rather than the store left running unmanaged.
+				return runLoadedCityStop(cfg, func(cityPath string, cfg *config.City, force bool, stdout, stderr io.Writer, extendCap func(time.Duration)) int {
+					return stopCityWithoutControllerForStop(cityPath, cfg, force, stdout, stderr, extendCap, true)
+				})
 			}
 			if cfgErr == nil && !confirmControllerStopForStop(cfg, cityPath, stderr) {
 				return stopCommandOutcome{code: 1, cityPath: cityPath}
@@ -481,7 +488,7 @@ func cmdStopBodyWithoutSuccessExtendingCap(cityPath string, cfg *config.City, fo
 		fmt.Fprintf(stderr, "gc stop: %v\n", stopResult.failClosedError()) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	return stopCityWithoutControllerForStop(cityPath, cfg, force, stdout, stderr, extendCap)
+	return stopCityWithoutControllerForStop(cityPath, cfg, force, stdout, stderr, extendCap, false)
 }
 
 // stopCityWithoutControllerForStop is gc stop's own stop of a city no
@@ -490,8 +497,11 @@ func cmdStopBodyWithoutSuccessExtendingCap(cityPath string, cfg *config.City, fo
 // city, so the supervisor's reconcile stopped none of its sessions. It stops
 // the city's sessions and orphans, tears down the runtime server, and stops
 // the bead store last. extendCap grows the default wall-clock cap (nil when
-// the cap is the operator's --timeout, or there is none).
-func stopCityWithoutControllerForStop(cityPath string, cfg *config.City, force bool, stdout, stderr io.Writer, extendCap func(time.Duration)) int {
+// the cap is the operator's --timeout, or there is none). requireStoreStop
+// makes a bead store that will not stop fail the stop (the supervisor stop,
+// which restores the registration on failure); the standalone stop only
+// warns.
+func stopCityWithoutControllerForStop(cityPath string, cfg *config.City, force bool, stdout, stderr io.Writer, extendCap func(time.Duration), requireStoreStop bool) int {
 	cityName := loadedCityName(cfg, cityPath)
 
 	// A city that is already stopped has nothing for this stop to do, and on
@@ -661,7 +671,9 @@ func stopCityWithoutControllerForStop(cityPath string, cfg *config.City, force b
 	// city's sessions, and this call retires them again.
 	if err := shutdownBeadsProviderForStop(cityPath); err != nil {
 		fmt.Fprintf(stderr, "gc stop: bead store: %v\n", err) //nolint:errcheck // best-effort stderr
-		// Non-fatal warning.
+		if requireStoreStop {
+			return 1
+		}
 	}
 
 	return code
