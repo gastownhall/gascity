@@ -349,3 +349,30 @@ func TestBaseRefMissing(t *testing.T) {
 		t.Error("BaseRefMissing in a non-repository = true, want false (cannot decide)")
 	}
 }
+
+// TestBaseRefMissingIsFalseWhenGitFailsAnotherWay pins the other half of the
+// "cannot decide" contract in BaseRefMissing's doc: in a directory git accepts
+// as a repository, a probe that fails with any status but git's "no such ref"
+// 1 proves nothing about the ref, so the refusal built on it must not fire. A
+// damaged packed-refs file is such a failure: rev-parse dies with 128 while
+// rev-parse --git-dir, which IsRepo runs, still succeeds.
+func TestBaseRefMissingIsFalseWhenGitFailsAnotherWay(t *testing.T) {
+	dir := initTestRepo(t)
+	g := New(dir)
+	// Control: before the damage, the same unknown ref is missing.
+	if !g.BaseRefMissing("no-such-base") {
+		t.Fatal("BaseRefMissing(no-such-base) = false in a healthy repository, want true")
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".git", "packed-refs"), []byte("not a packed-refs line\n"), 0o600); err != nil {
+		t.Fatalf("damaging packed-refs: %v", err)
+	}
+	// The probe, not the repository check, has to be what fails here;
+	// otherwise the IsRepo guard alone would satisfy this test.
+	if !g.IsRepo() {
+		t.Fatal("IsRepo() = false with a damaged packed-refs file, want true")
+	}
+	if g.BaseRefMissing("no-such-base") {
+		_, probeErr := g.RevParseVerifyCommit("no-such-base")
+		t.Errorf("BaseRefMissing(no-such-base) = true with a damaged packed-refs file, want false (cannot decide); the probe itself says: %v", probeErr)
+	}
+}
