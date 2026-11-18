@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/usage"
@@ -409,5 +410,98 @@ func TestSweepCodexUsageRetriesSinkAndStoreFailuresAcrossRestarts(t *testing.T) 
 	progress, err := fx.factory.manager.InvocationUsageProgress(fx.id)
 	if err != nil || progress.Cursor != "total:600" {
 		t.Fatalf("final progress = %+v, %v; want cursor total:600", progress, err)
+	}
+}
+
+// TestMessageRecordsCodexUsageOldestFirstThroughFailure runs a prompt op
+// before any sweep, on a rollout whose backlog is past the 64 KiB tail, with
+// the second fact write failing: the op records the oldest invocation and
+// commits only through it, and the next op recovers the rest.
+func TestMessageRecordsCodexUsageOldestFirstThroughFailure(t *testing.T) {
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+	sinkPath := filepath.Join(t.TempDir(), "usage.jsonl")
+	store := beads.NewMemStore()
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), runtime.NewFake(), sessionpkg.WithCityPath(t.TempDir()))
+	sink := &failNthModelSink{inner: usage.NewLocalSink(sinkPath), n: 2}
+	handle, err := NewSessionHandle(SessionHandleConfig{
+		Manager:     manager,
+		SearchPaths: []string{searchBase},
+		UsageSink:   sink,
+		Session: SessionSpec{
+			Profile:  ProfileCodexTmuxCLI,
+			Template: "probe",
+			Title:    "Probe",
+			Command:  "codex",
+			WorkDir:  workDir,
+			Provider: "codex",
+			Metadata: map[string]string{"agent_name": "myrig/polecat-1"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewSessionHandle: %v", err)
+	}
+	actor := handleActor(t, handle, sessionpkg.ActorAgent)
+	if err := handle.Start(context.Background(), actor); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	woke := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	at := func(sec int) string {
+		return woke.Add(time.Duration(sec) * time.Second).Format("2006-01-02T15:04:05.000Z07:00")
+	}
+	lines := []map[string]any{
+		codexWorkerSessionMeta(workDir),
+		codexWorkerTurnContext(),
+		// Before the wake: an earlier interval's invocation, not billed now.
+		codexWorkerTokenCount(woke.Add(-2*time.Hour).Format(time.RFC3339), 100, 50, 0, 25),
+		codexWorkerTokenCount(at(1), 150, 75, 0, 37),
+		codexWorkerTokenCount(at(2), 300, 75, 0, 37),
+	}
+	lines = append(lines, codexToolOutputs(16, 8*1024)...)
+	lines = append(lines, codexWorkerTokenCount(at(3), 450, 75, 0, 37))
+	writeWorkerTestJSONL(t, codexWorkerRolloutPathWithID(t, searchBase, woke, codexRecorderRolloutID), lines)
+	if err := store.SetMetadataBatch(handle.sessionID, map[string]string{
+		"session_key":  codexRecorderRolloutID,
+		"last_woke_at": woke.Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("SetMetadataBatch: %v", err)
+	}
+
+	factIDs := func() []string {
+		t.Helper()
+		facts, _, err := usage.ReadFacts(sinkPath)
+		if err != nil {
+			t.Fatalf("ReadFacts: %v", err)
+		}
+		var ids []string
+		for _, f := range facts {
+			if f.Kind == usage.KindModel {
+				ids = append(ids, f.UpstreamReqID)
+			}
+		}
+		sort.Strings(ids)
+		return ids
+	}
+
+	if _, err := handle.Message(context.Background(), actor, MessageRequest{Text: "hello"}); err != nil {
+		t.Fatalf("Message: %v", err)
+	}
+	if got, want := factIDs(), []string{"total:150"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("facts after the failing op = %v, want %v", got, want)
+	}
+	progress, err := manager.InvocationUsageProgress(handle.sessionID)
+	if err != nil {
+		t.Fatalf("InvocationUsageProgress: %v", err)
+	}
+	if progress.Cursor != "total:150" || !strings.Contains(progress.CodexCheckpoint, `"cursor":"total:150"`) {
+		t.Fatalf("progress after the failing op = %+v, want it committed through total:150 only", progress)
+	}
+
+	if _, err := handle.Message(context.Background(), actor, MessageRequest{Text: "again"}); err != nil {
+		t.Fatalf("second Message: %v", err)
+	}
+	if got, want := factIDs(), []string{"total:150", "total:300", "total:450"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("facts after the next op = %v, want %v", got, want)
 	}
 }

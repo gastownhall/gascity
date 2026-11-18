@@ -775,10 +775,11 @@ func TestMessageRecordsWrappedCodexModelFactViaLadder(t *testing.T) {
 	}
 
 	rollout := codexWorkerRolloutPathWithID(t, searchBase, time.Now(), sessionUUID)
+	at5, at10 := codexSinceWakeTS(5), codexSinceWakeTS(10)
 	writeWorkerTestJSONL(t, rollout, []map[string]any{
 		codexWorkerSessionMeta(workDir),
 		codexWorkerTurnContext(),
-		codexWorkerTokenCount("2026-06-12T10:00:05.000Z", 15917, 15562, 10624, 355),
+		codexWorkerTokenCount(at5, 15917, 15562, 10624, 355),
 	})
 	if _, err := h.Message(context.Background(), handleActor(t, h, sessionpkg.ActorAgent), MessageRequest{Text: "hello"}); err != nil {
 		t.Fatalf("Message: %v", err)
@@ -788,8 +789,8 @@ func TestMessageRecordsWrappedCodexModelFactViaLadder(t *testing.T) {
 	writeWorkerTestJSONL(t, rollout, []map[string]any{
 		codexWorkerSessionMeta(workDir),
 		codexWorkerTurnContext(),
-		codexWorkerTokenCount("2026-06-12T10:00:05.000Z", 15917, 15562, 10624, 355),
-		codexWorkerTokenCount("2026-06-12T10:00:10.000Z", 34114, 17888, 15232, 309),
+		codexWorkerTokenCount(at5, 15917, 15562, 10624, 355),
+		codexWorkerTokenCount(at10, 34114, 17888, 15232, 309),
 	})
 	if _, err := h.Nudge(context.Background(), handleActor(t, h, sessionpkg.ActorAgent), NudgeRequest{Text: "still there?"}); err != nil {
 		t.Fatalf("Nudge: %v", err)

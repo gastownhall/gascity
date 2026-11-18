@@ -46,12 +46,13 @@ func defaultPricingRegistry() *pricing.Registry {
 // prompt-operation (message/nudge) finish: prompt submission returns at
 // keystroke-delivery time, so the transcript tail at that point holds
 // previously COMPLETED invocations — the turn this operation triggers is
-// recorded by the next prompt operation on the session. Entries beyond the
-// extractor's scan window — which for claude grows from the 64KB tail up to
-// 16MB until the persisted cursor is in view, and for codex stays at that
-// fixed 64KB tail (the per-family coverage ceiling is stated in full on
-// SweepSessionModelUsage) — or after the final prompt op of a session go
-// unrecorded.
+// recorded by the next prompt operation on the session. For claude, entries
+// beyond the extractor's scan window — which grows from the 64KB tail up to
+// 16MB until the persisted cursor is in view (the per-family coverage ceiling
+// is stated in full on SweepSessionModelUsage) — or after the final prompt op
+// of a session go unrecorded. Codex runs the sweeps' paged recorder
+// (recordCodexInvocationUsage), so its backlog is never cut by a window and
+// what one op leaves pending the next op or sweep records.
 //
 // Coverage is per transcript provider family, driven by the
 // invocationUsageSpecs registry, with per-family discovery bounds:
@@ -163,6 +164,10 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 			slog.String("session_id", id), slog.String("provider", providerFamily))
 		return
 	}
+	if providerFamily == "codex" {
+		h.recordCodexInvocationUsage(ctx, id, path, info, pr.Metadata)
+		return
+	}
 	// Read the cursor BEFORE extracting: it bounds how far back the scan
 	// window must reach, so invocations appended since the last pass are not
 	// lost to the fixed tail window.
@@ -185,35 +190,16 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 		return
 	}
 
-	agentName := strings.TrimSpace(info.AgentName)
-	if agentName == "" {
-		agentName = strings.TrimSpace(info.Alias)
-	}
-	if agentName == "" {
-		agentName = strings.TrimSpace(info.SessionName)
-	}
-	formulaName := resolveFormulaName(h.resolveBead, h.formulaMemo, pr.Metadata, id)
-	// Model usage facts flow to the configured usage sink (gc costs / external
-	// aggregators), independent of the metrics above and of operation-event
-	// recording: a sink-only handle (CLI factory path) still emits. Resolved once
-	// per loop because the gate is per-handle.
-	emitFacts := h.usageFactRecordingEnabled()
-	now := time.Now().UTC()
+	emit := h.invocationUsageEmitter(ctx, id, info, pr.Metadata, providerFamily)
 	for _, u := range pending {
-		labels := telemetry.InvocationLabels{
-			AgentName: agentName,
-			Model:     u.Model,
-			Provider:  providerFamily,
-		}
-		telemetry.RecordInvocationTokens(ctx, labels,
-			int64(u.InputTokens), int64(u.OutputTokens),
-			int64(u.CacheReadTokens), int64(u.CacheCreationTokens))
-		cost, priced := invocationCost(h.pricing, providerFamily, u)
-		if priced {
-			telemetry.RecordInvocationCostEstimate(ctx, labels, cost)
-		}
-		if emitFacts {
-			h.recordModelUsageFact(modelUsageFact(u, pr.Metadata, id, id, info.SessionName, providerFamily, cost, priced, now, formulaName))
+		if err := emit(u); err != nil {
+			// Best-effort, but never a silent drop (engdocs/design/usage-facts-v0.md):
+			// a misconfigured exec: sink, a full disk, or a permissions error must be
+			// visible to the operator rather than quietly losing usage facts.
+			slog.Warn("recording model usage fact failed; fact dropped",
+				slog.String("session_id", id),
+				slog.String("upstream_req_id", usageIdentity(u)),
+				slog.Any("error", err))
 		}
 	}
 	// Best-effort: a failed cursor write means the next prompt op may
@@ -222,6 +208,72 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 	if err := h.manager.PersistInvocationUsageCursor(id, usageIdentity(pending[len(pending)-1])); err != nil {
 		slog.Debug("persisting invocation usage cursor failed; next prompt op may re-record",
 			slog.String("session_id", id), slog.Any("error", err))
+	}
+}
+
+// recordCodexInvocationUsage is the prompt-op seam's codex lane: one bounded
+// codexUsagePass, the same recorder the model-usage sweeps run, so the seam
+// records every invocation since the checkpoint oldest first and commits only
+// through the last one emitted. A fresh read emits nothing timed before the
+// wake that started the session's current run (last_woke_at, else the bead's
+// creation) less the discovery slack. A pass the sink or the store stops leaves
+// the rest pending for the next prompt op or sweep, and is logged.
+func (h *SessionHandle) recordCodexInvocationUsage(ctx context.Context, id, path string, info sessionpkg.Info, meta map[string]string) {
+	pass := codexUsagePass{
+		manager:   h.manager,
+		adapter:   h.adapter,
+		id:        id,
+		path:      path,
+		emitFloor: codexUsageEmitFloor(codexInvocationAnchor(info.CreatedAt, meta)),
+		record:    h.invocationUsageEmitter(ctx, id, info, meta, "codex"),
+	}
+	// The read and the commit outlive the prompt op's request context, as the
+	// fact writes do: the pass is bounded by its page limits instead.
+	emitted, settled, err := pass.run(context.WithoutCancel(ctx))
+	if err != nil {
+		slog.Warn("invocation telemetry: codex usage pass stopped; the rest stays pending",
+			slog.String("session_id", id), slog.Int("emitted", emitted), slog.Any("error", err))
+		return
+	}
+	slog.Debug("invocation telemetry: codex usage pass",
+		slog.String("session_id", id), slog.Int("emitted", emitted), slog.Bool("settled", settled))
+}
+
+// invocationUsageEmitter returns the prompt-op seam's per-invocation recorder:
+// token and cost metrics, then, when the handle has a usage sink, the model
+// usage fact, whose write error it returns. Metrics fire before the sink write
+// so they are recorded even when it fails.
+func (h *SessionHandle) invocationUsageEmitter(ctx context.Context, id string, info sessionpkg.Info, meta map[string]string, family string) func(sessionlog.TailUsage) error {
+	agentName := strings.TrimSpace(info.AgentName)
+	if agentName == "" {
+		agentName = strings.TrimSpace(info.Alias)
+	}
+	if agentName == "" {
+		agentName = strings.TrimSpace(info.SessionName)
+	}
+	formulaName := resolveFormulaName(h.resolveBead, h.formulaMemo, meta, id)
+	// Model usage facts flow to the configured usage sink (gc costs / external
+	// aggregators), independent of the metrics and of operation-event
+	// recording: a sink-only handle (CLI factory path) still emits.
+	emitFacts := h.usageFactRecordingEnabled()
+	now := time.Now().UTC()
+	return func(u sessionlog.TailUsage) error {
+		labels := telemetry.InvocationLabels{
+			AgentName: agentName,
+			Model:     u.Model,
+			Provider:  family,
+		}
+		telemetry.RecordInvocationTokens(ctx, labels,
+			int64(u.InputTokens), int64(u.OutputTokens),
+			int64(u.CacheReadTokens), int64(u.CacheCreationTokens))
+		cost, priced := invocationCost(h.pricing, family, u)
+		if priced {
+			telemetry.RecordInvocationCostEstimate(ctx, labels, cost)
+		}
+		if !emitFacts {
+			return nil
+		}
+		return h.writeModelUsageFact(modelUsageFact(u, meta, id, id, info.SessionName, family, cost, priced, now, formulaName))
 	}
 }
 
@@ -402,10 +454,7 @@ func discoverInvocationTranscriptViaManager(h *SessionHandle, id string, _ time.
 // rollouts yield "" — telemetry silently records nothing rather than
 // misattributing.
 func discoverCodexInvocationTranscript(h *SessionHandle, _ string, createdAt time.Time, meta map[string]string) string {
-	anchor := createdAt
-	if woke, err := time.Parse(time.RFC3339, strings.TrimSpace(meta["last_woke_at"])); err == nil {
-		anchor = woke
-	}
+	anchor := codexInvocationAnchor(createdAt, meta)
 	workDir := contract.WorkerDirFromMetadata(meta)
 	if sessionKey := strings.TrimSpace(meta["session_key"]); sessionKey != "" {
 		return sessionlog.FindCodexSessionFileByID(
@@ -417,6 +466,16 @@ func discoverCodexInvocationTranscript(h *SessionHandle, _ string, createdAt tim
 		anchor,
 		codexInvocationDiscoveryWindow,
 	)
+}
+
+// codexInvocationAnchor is the prompt-op seam's wake anchor for a codex
+// session: its last_woke_at metadata (set by reconciler wakes), else the bead's
+// creation time for a directly-created session.
+func codexInvocationAnchor(createdAt time.Time, meta map[string]string) time.Time {
+	if woke, err := time.Parse(time.RFC3339, strings.TrimSpace(meta["last_woke_at"])); err == nil {
+		return woke
+	}
+	return createdAt
 }
 
 // actingBeadID returns the work bead the controller says the session is on:

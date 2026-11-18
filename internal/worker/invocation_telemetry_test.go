@@ -547,6 +547,19 @@ func codexWorkerTurnContext() map[string]any {
 	}
 }
 
+// codexPreWakeTS is a rollout timestamp from an earlier interval, before the
+// wake the session's current run started at: the codex recorder does not bill
+// it on a fresh read.
+func codexPreWakeTS() string {
+	return time.Now().UTC().Add(-2 * time.Hour).Format("2006-01-02T15:04:05.000Z")
+}
+
+// codexSinceWakeTS is a rollout timestamp sec seconds from now, inside the
+// session's current run.
+func codexSinceWakeTS(sec int) string {
+	return time.Now().UTC().Add(time.Duration(sec) * time.Second).Format("2006-01-02T15:04:05.000Z")
+}
+
 // codexWorkerTokenCount mirrors a real token_count event: cumulative
 // total_token_usage plus per-call last_token_usage.
 func codexWorkerTokenCount(ts string, total, lastInput, lastCached, lastOutput int) map[string]any {
@@ -593,13 +606,14 @@ func TestMessageRecordsCodexInvocationTokens(t *testing.T) {
 	reader := setupInvocationMetricsReader(t)
 	handle, _, searchBase, workDir := newFamilyTelemetryHandle(t, ProfileCodexTmuxCLI, "codex", "codex", nil)
 
-	// Two completed API calls in the rollout; with no persisted cursor only
-	// the newest must be recorded.
+	// Two completed API calls in the rollout; with no persisted progress only
+	// the one since the session's wake is recorded: the other belongs to an
+	// earlier interval.
 	writeWorkerTestJSONL(t, codexWorkerRolloutPath(t, searchBase, time.Now()), []map[string]any{
 		codexWorkerSessionMeta(workDir),
 		codexWorkerTurnContext(),
-		codexWorkerTokenCount("2026-06-12T10:00:05.000Z", 15917, 15562, 10624, 355),
-		codexWorkerTokenCount("2026-06-12T10:00:10.000Z", 34114, 17888, 15232, 309),
+		codexWorkerTokenCount(codexPreWakeTS(), 15917, 15562, 10624, 355),
+		codexWorkerTokenCount(codexSinceWakeTS(10), 34114, 17888, 15232, 309),
 	})
 
 	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "hello"}); err != nil {
@@ -659,8 +673,8 @@ func TestMessageRecordsCodexTokensForResumedSession(t *testing.T) {
 	writeWorkerTestJSONL(t, codexWorkerRolloutPathWithID(t, searchBase, time.Now().Add(-3*time.Hour), sessionUUID), []map[string]any{
 		codexWorkerSessionMeta(workDir),
 		codexWorkerTurnContext(),
-		codexWorkerTokenCount("2026-06-12T10:00:05.000Z", 15917, 15562, 10624, 355),
-		codexWorkerTokenCount("2026-06-12T10:00:10.000Z", 34114, 17888, 15232, 309),
+		codexWorkerTokenCount(codexPreWakeTS(), 15917, 15562, 10624, 355),
+		codexWorkerTokenCount(codexSinceWakeTS(10), 34114, 17888, 15232, 309),
 	})
 	// The codex hook captured the provider session id, and the reconciler
 	// recorded the wake that resumed it.
@@ -709,7 +723,7 @@ func TestCodexKeyedMissDoesNotFallBackToWindow(t *testing.T) {
 	writeWorkerTestJSONL(t, codexWorkerRolloutPath(t, searchBase, time.Now()), []map[string]any{
 		codexWorkerSessionMeta(workDir),
 		codexWorkerTurnContext(),
-		codexWorkerTokenCount("2026-06-12T10:00:10.000Z", 34114, 17888, 15232, 309),
+		codexWorkerTokenCount(codexSinceWakeTS(10), 34114, 17888, 15232, 309),
 	})
 	if err := store.SetMetadata(handle.sessionID, "session_key", "019d9845-cccc-7000-8000-000000000777"); err != nil {
 		t.Fatalf("SetMetadata(session_key): %v", err)
@@ -738,7 +752,7 @@ func TestMessageRecordsCodexTokensFreshWakeWithoutSessionKey(t *testing.T) {
 	writeWorkerTestJSONL(t, codexWorkerRolloutPath(t, searchBase, time.Now()), []map[string]any{
 		codexWorkerSessionMeta(workDir),
 		codexWorkerTurnContext(),
-		codexWorkerTokenCount("2026-06-12T10:00:10.000Z", 34114, 17888, 15232, 309),
+		codexWorkerTokenCount(codexSinceWakeTS(10), 34114, 17888, 15232, 309),
 	})
 	if err := store.SetMetadata(handle.sessionID, "last_woke_at", time.Now().UTC().Format(time.RFC3339)); err != nil {
 		t.Fatalf("SetMetadata(last_woke_at): %v", err)
@@ -779,7 +793,7 @@ func TestMessageRecordsCodexTokensBehindSymlinkedRoot(t *testing.T) {
 	writeWorkerTestJSONL(t, codexWorkerRolloutPath(t, target, time.Now()), []map[string]any{
 		codexWorkerSessionMeta(workDir),
 		codexWorkerTurnContext(),
-		codexWorkerTokenCount("2026-06-12T10:00:10.000Z", 34114, 17888, 15232, 309),
+		codexWorkerTokenCount(codexSinceWakeTS(10), 34114, 17888, 15232, 309),
 	})
 
 	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "hello"}); err != nil {
@@ -815,7 +829,7 @@ func TestCodexCostFlowsWithConfiguredPricing(t *testing.T) {
 	writeWorkerTestJSONL(t, codexWorkerRolloutPath(t, searchBase, time.Now()), []map[string]any{
 		codexWorkerSessionMeta(workDir),
 		codexWorkerTurnContext(),
-		codexWorkerTokenCount("2026-06-12T10:00:10.000Z", 34114, 17888, 15232, 309),
+		codexWorkerTokenCount(codexSinceWakeTS(10), 34114, 17888, 15232, 309),
 	})
 
 	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "hello"}); err != nil {
@@ -845,11 +859,14 @@ func TestMessageAdvancesCodexCursor(t *testing.T) {
 	handle, store, searchBase, workDir := newFamilyTelemetryHandle(t, ProfileCodexTmuxCLI, "codex", "codex", nil)
 
 	rollout := codexWorkerRolloutPath(t, searchBase, time.Now())
+	// The first call predates the session's wake; the rewrite keeps every
+	// earlier line byte for byte, as an appending rollout does.
+	preWake, at10, at20 := codexPreWakeTS(), codexSinceWakeTS(10), codexSinceWakeTS(20)
 	writeWorkerTestJSONL(t, rollout, []map[string]any{
 		codexWorkerSessionMeta(workDir),
 		codexWorkerTurnContext(),
-		codexWorkerTokenCount("2026-06-12T10:00:05.000Z", 15917, 15562, 10624, 355),
-		codexWorkerTokenCount("2026-06-12T10:00:10.000Z", 34114, 17888, 15232, 309),
+		codexWorkerTokenCount(preWake, 15917, 15562, 10624, 355),
+		codexWorkerTokenCount(at10, 34114, 17888, 15232, 309),
 	})
 	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "first"}); err != nil {
 		t.Fatalf("Message(first): %v", err)
@@ -860,9 +877,9 @@ func TestMessageAdvancesCodexCursor(t *testing.T) {
 	writeWorkerTestJSONL(t, rollout, []map[string]any{
 		codexWorkerSessionMeta(workDir),
 		codexWorkerTurnContext(),
-		codexWorkerTokenCount("2026-06-12T10:00:05.000Z", 15917, 15562, 10624, 355),
-		codexWorkerTokenCount("2026-06-12T10:00:10.000Z", 34114, 17888, 15232, 309),
-		codexWorkerTokenCount("2026-06-12T10:00:20.000Z", 56066, 21683, 17792, 269),
+		codexWorkerTokenCount(preWake, 15917, 15562, 10624, 355),
+		codexWorkerTokenCount(at10, 34114, 17888, 15232, 309),
+		codexWorkerTokenCount(at20, 56066, 21683, 17792, 269),
 	})
 	if _, err := handle.Message(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), MessageRequest{Text: "second"}); err != nil {
 		t.Fatalf("Message(second): %v", err)

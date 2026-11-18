@@ -222,13 +222,7 @@ func (h *SessionHandle) currentOperationSessionInfo() (sessionpkg.Info, sessionp
 // invocation-telemetry seam (see recordInvocationTelemetry); a nil/discard sink
 // is a no-op.
 func (h *SessionHandle) recordModelUsageFact(f usage.Fact) {
-	if h.usageSink == nil || h.usageSink == usage.Discard {
-		return
-	}
-	// A fresh background context: this runs after the prompt op returns, so the
-	// request context may already be canceled, and a durable fact write must not
-	// be aborted by that. The sink enforces its own timeout.
-	if err := h.usageSink.Record(context.Background(), f); err != nil {
+	if err := h.writeModelUsageFact(f); err != nil {
 		// Best-effort, but never a silent drop (engdocs/design/usage-facts-v0.md):
 		// a misconfigured exec: sink, a full disk, or a permissions error must be
 		// visible to the operator rather than quietly losing usage facts.
@@ -237,6 +231,18 @@ func (h *SessionHandle) recordModelUsageFact(f usage.Fact) {
 			slog.String("upstream_req_id", f.UpstreamReqID),
 			slog.Any("error", err))
 	}
+}
+
+// writeModelUsageFact writes f to the handle's usage sink and returns the
+// sink's error. A handle without a sink writes nothing.
+func (h *SessionHandle) writeModelUsageFact(f usage.Fact) error {
+	if h.usageSink == nil || h.usageSink == usage.Discard {
+		return nil
+	}
+	// A fresh background context: this runs after the prompt op returns, so the
+	// request context may already be canceled, and a durable fact write must not
+	// be aborted by that. The sink enforces its own timeout.
+	return h.usageSink.Record(context.Background(), f)
 }
 
 func (h *SessionHandle) recordWorkerOperationEvent(payload operationEventPayload) {
