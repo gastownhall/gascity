@@ -3185,9 +3185,10 @@ func reapStaleSessionBeads(
 		if !info.PendingCreateClaim && strings.TrimSpace(info.LastWokeAt) != "" {
 			continue
 		}
-		// Startup grace: don't reap beads younger than the creating-state
-		// timeout. Use the latest known start boundary, not just CreatedAt,
-		// because a long-lived bead may have been woken moments ago.
+		// Startup grace: don't reap until the creating-state timeout has elapsed
+		// from the latest known start boundary. Consider CreatedAt, the effective
+		// pending-create marker (pending_create_started_at), and last_woke_at so a
+		// long-lived bead is not reaped just after its pending-create episode or wake.
 		// Zero CreatedAt means unknown age — skip conservatively.
 		startedAt, ok := staleReapStartBoundaryInfo(info)
 		if !ok {
@@ -3848,8 +3849,10 @@ func stopStillBoundClosedRuntimeLeased(store beads.Store, cityPath, name, ownerI
 	return true, sp.Stop(name)
 }
 
-// fencedInfrastructureRootSet remembers, per city, which fenced
-// infrastructure roots the orphan sweep has already reported.
+// fencedInfrastructureRootSet remembers, per city, which fenced roots —
+// city infrastructure and detached user services — the orphan sweep has
+// already reported. The set keeps the infrastructure name it was born
+// with.
 type fencedInfrastructureRootSet struct {
 	mu     sync.Mutex
 	byCity map[string]map[string]struct{}
@@ -3965,6 +3968,29 @@ func processRootReapable(live runtime.LiveRuntime, selfPID, subreaperPID int) bo
 		!live.ParentIsProviderInfrastructure && pidutil.IsReparentedOrphan(live.PPID, subreaperPID)
 }
 
+// processRootFence is why the sweep holds a reapable root's termination:
+// the root is city infrastructure by argv, or a detached foreign systemd
+// user service, reported with its unit, ppid and command name so a root
+// the fence spares can be identified from the log. "" means the root may
+// be reaped. A root the classifier cannot read (the scan's start identity
+// is missing, or its command line is unreadable) returns the error, and the
+// caller leaves it running: a root that cannot be classified is not
+// reaped. The caller re-checks the fence every sweep and reports each
+// fenced root once per process through the sweep's existing suppression.
+func processRootFence(live runtime.LiveRuntime) (string, error) {
+	infrastructure, err := sweepRootIsCityInfrastructure(live)
+	if err != nil {
+		return "", err
+	}
+	if infrastructure {
+		return "city infrastructure (managed Dolt watchdog, bd proxy or nudge poller)", nil
+	}
+	if unit := proctable.DetachedUserServiceUnit(live.PID); unit != "" {
+		return fmt.Sprintf("detached user service %s (ppid=%d name=%q)", unit, live.PPID, live.Name), nil
+	}
+	return "", nil
+}
+
 // processScanErrorLogRepeat is how often the orphan sweep repeats a scan
 // error of an unchanged shape (mc-ygved): unreadable entries recur every
 // tick on a busy host and say nothing new.
@@ -4050,9 +4076,10 @@ func sweepProcessTableOrphans(
 
 	cityPath = normalizePathForCompare(strings.TrimSpace(cityPath))
 	// A fenced root is reported once per process (pid + start time), not on
-	// every patrol: a stamped watchdog or bd proxy stays fenced for its whole
-	// life. The set is replaced each sweep, so it holds only roots that are
-	// still present and never grows past one city's live infrastructure.
+	// every patrol: a stamped watchdog, bd proxy or detached user service
+	// stays fenced for its whole life. The set is replaced each sweep, so it
+	// holds only roots that are still present and never grows past one
+	// city's live infrastructure.
 	previouslyFenced := fencedInfrastructureRoots.take(cityPath)
 	fenced := make(map[string]struct{})
 	defer fencedInfrastructureRoots.put(cityPath, fenced)
@@ -4095,24 +4122,30 @@ func sweepProcessTableOrphans(
 		if rule == "" {
 			continue
 		}
-		// The root's incarnation is over — reap below, unless the root is city
-		// infrastructure that merely inherited the session's environment (a
-		// managed Dolt scope watchdog, bd's db-proxy-child or gc's nudge poller
-		// started from an agent shell). Terminating a watchdog or proxy signals
-		// its process group and takes the city's Dolt server down with it
-		// (#6316). The fence is per-process argv, so it also covers processes
-		// stamped before their spawners began scrubbing session identity. A root
-		// that cannot be classified is left running and reported.
-		infrastructure, err := sweepRootIsCityInfrastructure(live)
+		// The root's incarnation is over — reap below, unless a kill-path
+		// fence holds the termination. The root may be city infrastructure
+		// that merely inherited the session's environment (a managed Dolt
+		// scope watchdog, bd's db-proxy-child or gc's nudge poller started
+		// from an agent shell): terminating one signals its process group
+		// and takes the city's Dolt server down with it (#6316), and the
+		// fence is per-process argv, so it also covers processes stamped
+		// before their spawners began scrubbing session identity. Or it may
+		// be a detached systemd user service: a foreign unit of its own whose
+		// environment carries the session's identity (inherited from the user
+		// manager's environment, or set with `systemd-run --user --setenv`).
+		// It is not this session's runtime, and a later incarnation's cleanup
+		// must not end it. A root that cannot be classified is left running
+		// and reported.
+		reason, err := processRootFence(live)
 		if err != nil {
 			fmt.Fprintf(stderr, "session reconciler: leaving process-table orphan pid=%d session=%s running: %v\n", live.PID, live.SessionID, err) //nolint:errcheck
 			continue
 		}
-		if infrastructure {
+		if reason != "" {
 			key := strconv.Itoa(live.PID) + ":" + proctable.RootStartIdentity(live.PID)
 			fenced[key] = struct{}{}
 			if _, reported := previouslyFenced[key]; !reported {
-				fmt.Fprintf(stderr, "session reconciler: leaving process-table root pid=%d session=%s alone: city infrastructure (managed Dolt watchdog, bd proxy or nudge poller)\n", live.PID, live.SessionID) //nolint:errcheck
+				fmt.Fprintf(stderr, "session reconciler: leaving process-table root pid=%d session=%s alone: %s\n", live.PID, live.SessionID, reason) //nolint:errcheck
 			}
 			continue
 		}
@@ -4206,13 +4239,19 @@ func stopRuntimeBeforeSessionBeadMutationInfo(
 // WI-6 R1: raw form is now oracle-only — reapStaleSessionBeads reads via
 // staleReapStartBoundaryInfo. It survives solely as the raw side of the
 // TestSessionClassifierInfoEquivalence timeBoolChecks "staleReapStartBoundary"
-// row; delete it together with that row (whose recent-wake fixture pins the
-// last_woke_at-upgrade branch on both forms).
+// row; delete it together with that row. The future marker in the
+// "fresh-creating" fixture exercises raw/typed parity; the recent-wake fixture
+// pins the last_woke_at boundary update on both forms.
 func staleReapStartBoundary(b beads.Bead) (time.Time, bool) {
 	if b.CreatedAt.IsZero() {
 		return time.Time{}, false
 	}
 	startedAt := b.CreatedAt
+	if raw := strings.TrimSpace(b.Metadata["pending_create_started_at"]); raw != "" {
+		if attemptAt, err := time.Parse(time.RFC3339, raw); err == nil && attemptAt.After(startedAt) {
+			startedAt = attemptAt
+		}
+	}
 	if raw := strings.TrimSpace(b.Metadata["last_woke_at"]); raw != "" {
 		if wokeAt, err := time.Parse(time.RFC3339, raw); err == nil && wokeAt.After(startedAt) {
 			startedAt = wokeAt
@@ -4222,14 +4261,19 @@ func staleReapStartBoundary(b beads.Bead) (time.Time, bool) {
 }
 
 // staleReapStartBoundaryInfo is the session.Info sibling of staleReapStartBoundary:
-// it computes the reap start boundary from Info.CreatedAt and the raw last_woke_at
-// mirror (Info.LastWokeAt), identical to the raw form. Equivalence is pinned by
-// TestSessionClassifierInfoEquivalence.
+// it computes the reap start boundary from Info.CreatedAt and the raw
+// pending_create_started_at / last_woke_at mirrors, identical to the raw form.
+// Equivalence is pinned by TestSessionClassifierInfoEquivalence.
 func staleReapStartBoundaryInfo(i session.Info) (time.Time, bool) {
 	if i.CreatedAt.IsZero() {
 		return time.Time{}, false
 	}
 	startedAt := i.CreatedAt
+	if raw := strings.TrimSpace(i.PendingCreateStartedAt); raw != "" {
+		if attemptAt, err := time.Parse(time.RFC3339, raw); err == nil && attemptAt.After(startedAt) {
+			startedAt = attemptAt
+		}
+	}
 	if raw := strings.TrimSpace(i.LastWokeAt); raw != "" {
 		if wokeAt, err := time.Parse(time.RFC3339, raw); err == nil && wokeAt.After(startedAt) {
 			startedAt = wokeAt
