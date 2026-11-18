@@ -135,10 +135,11 @@ type snapshotOptions struct {
 	// City makes a snapshot with the work store a way back to the whole city
 	// (`restore --city`): it records city.toml and the city's storage
 	// records, and copies a managed Dolt's data directory with the server
-	// stopped. `gc storage snapshot --work` sets it. The reverse's mandatory
-	// snapshot (R0) does not: it holds a binding, which --city never
-	// restores, so the copy would stop the server mid-reverse and take the
-	// disk for nothing.
+	// stopped. `gc storage snapshot --work` sets it, and so does the guided
+	// split's mandatory snapshot, the way back its report names. The
+	// reverse's mandatory snapshot (R0) does not: it holds a binding, which
+	// --city never restores, so the copy would stop the server mid-reverse
+	// and take the disk for nothing.
 	City bool
 }
 
