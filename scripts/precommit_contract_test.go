@@ -625,7 +625,8 @@ func restrictedPathWithoutNpm(t *testing.T, stubs map[string]string) string {
 	// sh+env are required for beads-chain.sh's `#!/usr/bin/env sh` shebang
 	// under a restricted PATH (env is absolute in the shebang, but then looks
 	// up `sh` on PATH). timeout is optional; without it the chain still runs.
-	for _, name := range []string{"bash", "sh", "env", "git", "xargs"} {
+	// cat is required by drainStdinStub (and the other stdin-draining stubs).
+	for _, name := range []string{"bash", "sh", "env", "git", "xargs", "cat"} {
 		realPath, err := exec.LookPath(name)
 		if err != nil {
 			t.Fatalf("resolve real %s on test host PATH: %v", name, err)
