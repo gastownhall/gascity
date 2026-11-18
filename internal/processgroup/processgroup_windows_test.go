@@ -190,25 +190,47 @@ func waitForDescendants(t *testing.T, root int) []processIdentity {
 	return nil
 }
 
+// TestStartCommandFailureAfterStartWaitsForCommand cancels the command's
+// context and then fails StartCommand after a successful Start, so the
+// abandon path and exec's context watcher run against each other.
+//
+// The hook fails only once the watcher has entered Cancel. The watcher picks,
+// in a single select, between handing Wait its result and calling Cancel. If
+// abandon's Wait is already receiving when the watcher first runs, both cases
+// are ready, and Go may pick the handoff, so Cancel is never called. Before
+// abandon there is no Wait yet, so cancellation is the only case the watcher
+// can take. The hook waits for Cancel to start, not to finish: Cancel blocks
+// on ownedMu, which StartCommand holds until abandon releases it.
 func TestStartCommandFailureAfterStartWaitsForCommand(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	cmd := exec.CommandContext(ctx, os.Getenv("ComSpec"), "/c", "exit", "0")
 	cmd.WaitDelay = 50 * time.Millisecond
+	cancelEntered := make(chan struct{})
 	cancelDone := make(chan struct{})
 	cmd.Cancel = func() error {
 		defer close(cancelDone)
+		close(cancelEntered)
 		return KillCommandGroup(cmd, 0, Options{})
 	}
 	injected := errors.New("injected start failure")
+	cancelObserved := false
 	startCommandAfterStartForTest = func(*exec.Cmd) error {
 		cancel()
+		select {
+		case <-cancelEntered:
+			cancelObserved = true
+		case <-time.After(10 * time.Second):
+		}
 		return injected
 	}
 	t.Cleanup(func() { startCommandAfterStartForTest = nil })
 
 	if _, err := StartCommand(cmd, SurviveRelease); !errors.Is(err, injected) {
 		t.Fatalf("StartCommand = %v, want the injected failure", err)
+	}
+	if !cancelObserved {
+		t.Fatal("CommandContext did not invoke Cancel after its context was canceled")
 	}
 	if cmd.Process == nil {
 		t.Fatal("test did not reach the post-Start failure path")
