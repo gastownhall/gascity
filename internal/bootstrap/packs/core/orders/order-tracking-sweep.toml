@@ -2,8 +2,17 @@
 # exec dispatches, and prunes expired closed tracking history according to
 # [beads.policies.order_tracking].delete_after_close. Fresh tracking beads are
 # left alone so in-flight orders keep their normal single-flight protection.
+#
+# The prune deletes expired history a chunk at a time as it clears its
+# checks. --check-budget stops the checks at 3m, under the 5m timeout, which
+# leaves time for the last chunk's delete (no longer than a minute of checks)
+# and the rest of the command. A run that stops there keeps what it deleted,
+# declares a partial outcome (order.skipped) naming each store it did not
+# finish, and leaves the rest of the backlog to the next run. The timeout,
+# the 300s exec default, is explicit so the two values change together.
 [order]
 description = "Close stale order-tracking beads and prune expired tracking history"
 trigger = "cooldown"
 interval = "1m"
-exec = "gc order sweep-tracking --stale-after 10m --quiet --confirm"
+timeout = "5m"
+exec = "gc order sweep-tracking --stale-after 10m --check-budget 3m --quiet --confirm"

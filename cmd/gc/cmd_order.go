@@ -286,6 +286,7 @@ func (b orderHistoryBounds) cutoff(now time.Time) (time.Time, bool) {
 
 func newOrderSweepTrackingCmd(stdout, stderr io.Writer) *cobra.Command {
 	staleAfter := defaultOrderTrackingSweepStaleAfter
+	var checkBudget time.Duration
 	includeWisps := false
 	dryRun := false
 	quiet := false
@@ -300,8 +301,18 @@ older than --stale-after so a fresh in-flight order is not interrupted.
 Closed order-tracking history is deleted after
 [beads.policies.order_tracking].delete_after_close, defaulting to 7d, while
 always retaining at least the latest 10 closed tracking beads per order.
-The manual command runs to completion; controller startup and watchdog sweeps
-use bounded cleanup to avoid spending an unbounded tick on stale work.
+Expired history is deleted a chunk at a time as it clears its checks, so a
+run cut off part way keeps what it already deleted. Without --check-budget
+the command runs to completion; controller startup and watchdog sweeps use
+bounded cleanup to avoid spending an unbounded tick on stale work.
+
+--check-budget bounds how long the retention checks run, for a run that has
+to end inside a timeout; the packaged order-tracking-sweep order sets it.
+Once the budget is spent the command stops checking, deletes what already
+cleared, names on stderr each store it did not finish, and exits 0. Run as
+an exec order, it also declares the run partial (GC_ORDER_OUTCOME_FILE), so
+the run is recorded as order.skipped with outcome partial rather than as a
+plain success. The rest of the backlog waits for the next run.
 
 Use --include-wisps for operator recovery of abandoned order-run wisp
 subtrees whose open descendants are also older than --stale-after. Pass one
@@ -314,7 +325,7 @@ proceed. This guard prevents accidental mass-deletes without an explicit
 operator acknowledgement.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdOrderSweepTrackingWithOptions(staleAfter, includeWisps, dryRun, quiet, confirm, args, stdout, stderr) != 0 {
+			if cmdOrderSweepTrackingWithOptions(staleAfter, checkBudget, includeWisps, dryRun, quiet, confirm, args, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -322,6 +333,7 @@ operator acknowledgement.`,
 		ValidArgsFunction: completeOrderNames,
 	}
 	cmd.Flags().DurationVar(&staleAfter, "stale-after", defaultOrderTrackingSweepStaleAfter, "minimum age for an open tracking bead to be closed")
+	cmd.Flags().DurationVar(&checkBudget, "check-budget", 0, "stop the retention checks after this long and report the run as partial (0 = no limit)")
 	cmd.Flags().BoolVar(&includeWisps, "include-wisps", false, "also close stale order-run wisp subtrees with open descendants")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "report stale order-tracking and order wisp beads without closing them")
 	cmd.Flags().BoolVar(&quiet, "quiet", false, "suppress success output")
@@ -1939,9 +1951,21 @@ func bulkDeleteConfirmThreshold() int {
 	return defaultBulkDeleteConfirmThreshold
 }
 
-func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dryRun, quiet, confirm bool, orderNames []string, stdout, stderr io.Writer) int {
+// validateOrderSweepTrackingDurations checks sweep-tracking's duration flags:
+// --stale-after must be positive, and --check-budget must not be negative.
+func validateOrderSweepTrackingDurations(staleAfter, checkBudget time.Duration) error {
 	if staleAfter <= 0 {
-		fmt.Fprintln(stderr, "gc order sweep-tracking: --stale-after must be positive") //nolint:errcheck // best-effort stderr
+		return errors.New("--stale-after must be positive")
+	}
+	if checkBudget < 0 {
+		return errors.New("--check-budget must not be negative")
+	}
+	return nil
+}
+
+func cmdOrderSweepTrackingWithOptions(staleAfter, checkBudget time.Duration, includeWisps, dryRun, quiet, confirm bool, orderNames []string, stdout, stderr io.Writer) int {
+	if err := validateOrderSweepTrackingDurations(staleAfter, checkBudget); err != nil {
+		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	cityPath, err := resolveCity()
@@ -1977,14 +2001,20 @@ func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dr
 		return 1
 	}
 	now := time.Now()
+	// The check budget counts from here, so it covers stale-close and the
+	// confirm count as well as the retention checks, on the retention sweep's
+	// own wall clock: the one it checks the budget against.
+	checkStart := orderTrackingRetentionNow()
 	var result orderTrackingSweepResult
 	var sweepErr error
 	var retentionResult orderTrackingRetentionSweepResult
 	var retentionErr error
-	// Set when the bulk-delete confirm gate blocks the retention sweep. By that
-	// point stale-close has already run, so normal reporting still happens and
-	// the non-zero exit is deferred to the end of the function.
-	confirmGateBlocked := false
+	// Set when the retention half has to fail the command: the bulk-delete
+	// confirm gate held the deletes back, or a sweep the check budget cut
+	// short could not be declared to the order runner. By that point
+	// stale-close has already run, so normal reporting still happens and the
+	// non-zero exit is deferred to the end of the function.
+	retentionFailed := false
 	if dryRun {
 		result, sweepErr = sweepStaleOrderTrackingAcrossStoresDryRun(stores, wispStore, now, staleAfter, onlyOrders, includeWisps)
 	} else {
@@ -1998,7 +2028,7 @@ func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dr
 		// Fail-closed: a store read error blocks deletion rather than proceeding
 		// unguarded — a degraded store is exactly when accidental mass deletion
 		// is most dangerous.
-		retentionPolicy := orderTrackingRetentionPolicyForSweep(cfg, now)
+		retentionPolicy := orderTrackingRetentionPolicyForSweep(cfg, checkStart, checkBudget)
 		eligible, countErr := countClosedOrderTrackingRetentionEligible(stores, now, retentionPolicy, onlyOrders)
 		threshold := bulkDeleteConfirmThreshold()
 		switch {
@@ -2006,15 +2036,16 @@ func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dr
 			fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
 				"gc order sweep-tracking: cannot count eligible beads for confirm gate: %v — aborting to avoid unguarded bulk delete\n",
 				countErr)
-			confirmGateBlocked = true
+			retentionFailed = true
 		case eligible > threshold && !confirm:
 			fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
 				"gc order sweep-tracking: %d beads would be deleted — rerun with --confirm to proceed (GC_BULK_DELETE_CONFIRM_THRESHOLD=%d)\n",
 				eligible, threshold)
-			confirmGateBlocked = true
+			retentionFailed = true
 		default:
 			retentionResult, retentionErr = sweepClosedOrderTrackingRetentionAcrossStores(stores, now, retentionPolicy, onlyOrders)
 			result.trackingDeleted = retentionResult.deleted
+			retentionFailed = !reportOrderTrackingRetentionCutShort(retentionResult, stderr)
 		}
 	}
 	if err := errors.Join(openErr, sweepErr, retentionErr); err != nil {
@@ -2040,7 +2071,7 @@ func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dr
 			fmt.Fprintf(stdout, "%s %d stale order-tracking bead(s)%s\n", verb, result.trackingClosed, deletedClause) //nolint:errcheck // best-effort stdout
 		}
 	}
-	if confirmGateBlocked {
+	if retentionFailed {
 		return 1
 	}
 	return 0
@@ -2051,6 +2082,39 @@ func orderTrackingSweepErrorIsFatal(result orderTrackingSweepResult, retentionRe
 		return true
 	}
 	return retentionErr != nil && retentionResult.storesSwept == 0
+}
+
+// orderTrackingRetentionCutShortReason is the outcome-declaration reason each
+// store a budget-stopped retention sweep did not finish carries.
+const orderTrackingRetentionCutShortReason = "check budget spent before every expired closed run was checked"
+
+// reportOrderTrackingRetentionCutShort reports a retention sweep the check
+// budget cut short: a line on stderr naming each store it did not finish and,
+// when the command runs as an exec order, a partial outcome declaration. An
+// exec order's output is kept only when it exits non-zero, so without the
+// declaration a backlog that never catches up would be recorded as a plain
+// success on every run. It returns false, having said why on stderr, when the
+// declaration could not be written: the command must then exit non-zero.
+func reportOrderTrackingRetentionCutShort(result orderTrackingRetentionSweepResult, stderr io.Writer) bool {
+	if len(result.cutShort) == 0 {
+		return true
+	}
+	fmt.Fprintf(stderr, "gc order sweep-tracking: the check budget ran out before every expired closed order-tracking bead was checked in %s (%d deleted); the rest wait for the next run\n", //nolint:errcheck // best-effort stderr
+		strings.Join(result.cutShort, ", "), result.deleted)
+	scopes := make([]orders.ExecOutcomeScope, 0, len(result.cutShort))
+	for _, label := range result.cutShort {
+		scopes = append(scopes, orders.ExecOutcomeScope{Scope: label, Reason: orderTrackingRetentionCutShortReason})
+	}
+	err := declareOrderOutcome(orders.ExecOutcome{
+		Outcome: orders.ExecOutcomePartial,
+		Reason:  fmt.Sprintf("order-tracking retention stopped at its check budget with %d closed bead(s) deleted", result.deleted),
+		Scopes:  scopes,
+	})
+	if err != nil {
+		fmt.Fprintf(stderr, "gc order sweep-tracking: %v\n", err) //nolint:errcheck // best-effort stderr
+		return false
+	}
+	return true
 }
 
 func orderTrackingSweepRequiredTargetKeysForOrders(cityPath string, cfg *config.City, onlyOrders map[string]struct{}) (map[string][]string, error) {

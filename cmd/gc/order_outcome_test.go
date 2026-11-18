@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -179,4 +181,55 @@ func TestPrintOrderRunOutcomeReportsUnreadableDeclaration(t *testing.T) {
 	if stdout.Len() != 0 || !strings.Contains(stderr.String(), "unreadable outcome declaration") {
 		t.Fatalf("stdout = %q, stderr = %q", stdout.String(), stderr.String())
 	}
+}
+
+// TestDeclareOrderOutcomeWritesWhatTheOrderRunnerReads pins the declaring
+// side against the order runner's own reader: a gc command running as an
+// exec order writes a declaration orderOutcomeFile.read decodes back
+// unchanged, and a command run by hand (no GC_ORDER_OUTCOME_FILE) has no one
+// to declare to and writes nothing.
+func TestDeclareOrderOutcomeWritesWhatTheOrderRunnerReads(t *testing.T) {
+	want := orders.ExecOutcome{
+		Outcome: orders.ExecOutcomePartial,
+		Reason:  "order-tracking retention stopped at its check budget",
+		Scopes:  []orders.ExecOutcomeScope{{Scope: "city", Reason: "check budget spent"}},
+	}
+
+	t.Run("run by hand", func(t *testing.T) {
+		t.Setenv(orders.ExecOutcomeFileEnv, "")
+		if err := declareOrderOutcome(want); err != nil {
+			t.Fatalf("declareOrderOutcome = %v, want nil with no outcome file", err)
+		}
+	})
+
+	t.Run("run as an exec order", func(t *testing.T) {
+		f, err := newOrderOutcomeFile()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if err := f.remove(); err != nil {
+				t.Error(err)
+			}
+		})
+		t.Setenv(orders.ExecOutcomeFileEnv, f.path)
+		if err := declareOrderOutcome(want); err != nil {
+			t.Fatalf("declareOrderOutcome: %v", err)
+		}
+		got, ok, err := f.read()
+		if err != nil || !ok {
+			t.Fatalf("read = (%+v, %t, %v), want the declaration", got, ok, err)
+		}
+		if got.Outcome != want.Outcome || got.Reason != want.Reason || !slices.Equal(got.Scopes, want.Scopes) {
+			t.Fatalf("read = %+v, want %+v", got, want)
+		}
+	})
+
+	t.Run("an outcome file that cannot be written", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "missing", "outcome.json")
+		t.Setenv(orders.ExecOutcomeFileEnv, path)
+		if err := declareOrderOutcome(want); err == nil || !strings.Contains(err.Error(), path) {
+			t.Fatalf("declareOrderOutcome = %v, want an error naming %s", err, path)
+		}
+	})
 }
