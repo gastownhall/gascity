@@ -98,6 +98,51 @@ type controllerIdentityReply struct {
 	// SessionReconciler is the session reconciler the controller latched at
 	// boot ("legacy" or "v2"); empty from a controller that predates it.
 	SessionReconciler string `json:"session_reconciler,omitempty"`
+	// ProcessManager names the outside process manager that owns this
+	// controller's lifecycle (a container runtime or service manager), as
+	// declared by the deployment through GC_PROCESS_MANAGER. Stopping such a
+	// controller ends the managed process; nothing hands it over to the
+	// supervisor afterwards. Empty when the deployment declares none.
+	ProcessManager string `json:"process_manager,omitempty"`
+}
+
+// processManagerEnv and processManagerCityEnv are how a deployment declares
+// that an outside process manager owns a city's controller, e.g.
+// GC_PROCESS_MANAGER=docker and GC_PROCESS_MANAGER_CITY=/city in a container
+// image whose entrypoint runs "gc start --foreground /city", or
+// GC_PROCESS_MANAGER=systemd in a service unit. It is an explicit contract
+// rather than an inference from process ancestry: a wrapper shell hides a
+// managed controller from its init, and a hand-started controller orphaned
+// to PID 1 has no manager at all.
+//
+// The declaration must name the city it covers. Agent sessions and other
+// children of the managed controller inherit its environment, so a separate
+// city one of them starts (a test city, an isolated workflow) sees the same
+// variables; binding them to the managed city's path keeps that controller
+// from claiming a manager that does not own it. Two controllers cannot serve
+// one city path at once (controller.lock), so the binding is unambiguous.
+const (
+	processManagerEnv     = "GC_PROCESS_MANAGER"
+	processManagerCityEnv = "GC_PROCESS_MANAGER_CITY"
+)
+
+// controllerProcessManager returns the process manager the deployment
+// declared for the controller of cityPath, or "" when it declared none or
+// declared one for a different city. The value is a display name, so it is
+// trimmed and capped.
+func controllerProcessManager(getenv func(string) string, cityPath string) string {
+	name := strings.TrimSpace(getenv(processManagerEnv))
+	if name == "" {
+		return ""
+	}
+	declaredCity := strings.TrimSpace(getenv(processManagerCityEnv))
+	if declaredCity == "" || !pathutil.SamePath(declaredCity, cityPath) {
+		return ""
+	}
+	if len(name) > 64 {
+		name = name[:64]
+	}
+	return name
 }
 
 type sessionCircuitResetRequest struct {
@@ -222,7 +267,7 @@ func handleControllerConn(
 		case line == "ping":
 			fmt.Fprintf(conn, "%d\n", os.Getpid()) //nolint:errcheck // best-effort
 		case line == controllerIdentityCommand:
-			writeJSONLine(conn, controllerIdentityReply{PID: os.Getpid(), HostingMode: hostingMode, SessionReconciler: wake.latchedModeName()})
+			writeJSONLine(conn, controllerIdentityReply{PID: os.Getpid(), HostingMode: hostingMode, SessionReconciler: wake.latchedModeName(), ProcessManager: controllerProcessManager(os.Getenv, cityPath)})
 		case line == "poke" || strings.HasPrefix(line, pokeKeyedCommandPrefix):
 			// "poke" or "poke:<json key>" (see reconcile_enqueue.go): a
 			// non-blocking enqueue for event-driven wake, e.g. after sling
