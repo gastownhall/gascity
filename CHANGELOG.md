@@ -1346,6 +1346,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gc convoy create` ignored an explicit `--rig` (#8696).** The convoy
+  landed in the first issue's store, or in the city store when no issues
+  were given, so an empty convoy created with `--rig <rig>` could never
+  track that rig's beads: every later `gc convoy add` failed with
+  `bead not found`. The convoy now lands in the named rig's store. The
+  value is a rig name, matched as `gc bd` and `gc formula` match it. A
+  non-empty `--rig` that names no rig (including the city name and
+  path-looking values such as `./dir`, `dir/` or an absolute directory,
+  which convoy create used to accept by ignoring the flag), a rig with no
+  path binding, or an issue whose prefix routes to another store now
+  fails before anything is written. An empty `--rig` and runs without
+  `--rig` keep the old placement.
+
 - **Adopting or restarting with a bd store bound to a loopback Dolt server
   gc does not run works.** A store `bd init --server --external` bound to a
   dolt sql-server on `127.0.0.1`/`localhost`/`::1` was classified as gc's own

@@ -474,3 +474,30 @@ func TestListAllSessionBeads_AFailedTypeLegStillFails(t *testing.T) {
 		t.Fatal("ListAllSessionBeads over an unreachable store returned no error; a failed read must not read as an empty one")
 	}
 }
+
+// TestResolveSessionID_ResolvesOnAStoreThatRefusesTheSessionType: a name
+// lookup goes through the same type+label union as ListAllSessionBeads, so
+// a store whose type registry does not define the session type (an adopted
+// rig store gc does not serve) still resolves a name by the label leg alone,
+// rather than failing the whole lookup on the type leg's refusal.
+func TestResolveSessionID_ResolvesOnAStoreThatRefusesTheSessionType(t *testing.T) {
+	inner := beads.NewMemStore()
+	target, err := inner.Create(beads.Bead{
+		Title:    "labeled",
+		Type:     BeadType,
+		Labels:   []string{LabelSession},
+		Metadata: map[string]string{"session_name": "worker-1"},
+	})
+	if err != nil {
+		t.Fatalf("create labeled session bead: %v", err)
+	}
+	store := typeRefusingStore{Store: inner, refusedType: BeadType, err: errors.New(bdRefusesSessionType)}
+
+	id, err := ResolveSessionID(beadstest.Sessions(store), "worker-1")
+	if err != nil {
+		t.Fatalf("ResolveSessionID over a store that does not define the session type = %v, want the label leg's answer and no error", err)
+	}
+	if id != target.ID {
+		t.Fatalf("got %q, want %q", id, target.ID)
+	}
+}
