@@ -149,7 +149,7 @@ func newRuntimeConformanceJSON(report runtimecontract.Report, capReport *runtime
 		Environment:   capReport,
 	}
 	if failed {
-		message := fmt.Sprintf("%d required requirements failed", report.Summary.Failed)
+		message := fmt.Sprintf("%d required requirements failed", report.RequiredFailed())
 		if capReport != nil {
 			message += fmt.Sprintf(", %d declared capabilities failed", capReport.Summary.Failed)
 		}
