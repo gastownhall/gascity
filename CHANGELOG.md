@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **`gc-session-docker` renames a city's containers.** They are now
+  `<city key>--<session>` (see Fixed). A container started before the upgrade
+  keeps its old name, which the script no longer looks for, so gc starts a new
+  one beside it. Stop each city that uses the script (`gc stop`) before
+  upgrading, or remove its old containers after
+  (`docker ps --filter label=gc.managed=true`).
 - **New cities are born split.** `gc init` now writes a `[storage]` section
   that keeps work in the work ledger and puts the five infrastructure classes
   (graph, sessions, messaging, orders, nudges) in one SQLite store under
@@ -1346,6 +1352,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gc-session-docker` keeps each city's containers apart.** Two cities on
+  one Docker host shared containers, because the script named each after its
+  session alone: a second city's `start mayor` found the first city's `mayor`
+  running and returned without starting its own, and its `stop mayor` removed
+  the first city's. With `GC_EXEC_CITY_NAME` and `GC_EXEC_CITY_PATH`, which gc
+  sets on every op, a container is now named `<city key>--<session>` and
+  labeled `gc.city=<city path>`, and `list-running` lists only the city's own
+  sessions. The key is the city's name plus a checksum of its path. Without
+  the variables, names are as before (#9191).
 - **Adopting or restarting with a bd store bound to a loopback Dolt server
   gc does not run works.** A store `bd init --server --external` bound to a
   dolt sql-server on `127.0.0.1`/`localhost`/`::1` was classified as gc's own

@@ -232,6 +232,41 @@ func TestDockerSessionScript(t *testing.T) {
 		}
 	})
 
+	t.Run("cities on one host keep their containers apart", func(t *testing.T) {
+		// Two cities that share a name, each starting a session of the same name.
+		const shared = "gc-docker-city"
+		cityA, cityB := *e, *e
+		cityA.city, cityB.city = filepath.Join(work, "city-a"), filepath.Join(work, "city-b")
+		cfg := mustJSON(t, map[string]any{
+			"command":  "sleep 300",
+			"work_dir": work,
+			"env":      map[string]string{"GC_DOCKER_IMAGE": testImage, "GC_DOCKER_HOME_MOUNT": "false"},
+		})
+		for _, c := range []*dockerSessionEnv{&cityA, &cityB} {
+			if out, errOut, code := c.op(t, cfg, "start", shared); code != 0 {
+				t.Fatalf("start %s in %s: exit %d\n%s%s", shared, c.city, code, out, errOut)
+			}
+			t.Cleanup(func() { c.op(t, "", "stop", shared) })
+		}
+
+		if got := e.docker(t, "ps", "--filter", "label=gc.agent="+shared, "--format", "{{.Names}}"); len(strings.Fields(got)) != 2 {
+			t.Fatalf("containers for session %s = %q, want one per city", shared, got)
+		}
+		for _, c := range []*dockerSessionEnv{&cityA, &cityB} {
+			if out, _, _ := c.op(t, "", "list-running", ""); out != shared {
+				t.Errorf("list-running in %s = %q, want only its own session, %s", c.city, out, shared)
+			}
+		}
+
+		cityA.op(t, "", "stop", shared)
+		if out, _, _ := cityA.op(t, "", "is-running", shared); out != "false" {
+			t.Errorf("after its stop, is-running in %s = %q, want false", cityA.city, out)
+		}
+		if out, _, _ := cityB.op(t, "", "is-running", shared); out != "true" {
+			t.Errorf("after %s stopped its session, is-running in %s = %q, want true", cityA.city, cityB.city, out)
+		}
+	})
+
 	t.Run("session_setup runs inside the container", func(t *testing.T) {
 		name := session + "-setup"
 		// The marker is under the bind-mounted work dir, so a touch inside
@@ -331,6 +366,9 @@ type dockerSessionEnv struct {
 	bin    string
 	home   string
 	script string
+	// city, when set, is the city path its ops run for, as gc sets
+	// GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH for a provider serving a city.
+	city string
 }
 
 func newDockerSessionEnv(t *testing.T) *dockerSessionEnv {
@@ -396,12 +434,16 @@ func mustJSON(t *testing.T, v any) string {
 }
 
 func (e *dockerSessionEnv) environ() []string {
-	return []string{
+	env := []string{
 		"PATH=" + e.bin + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"HOME=" + e.home,
 		RootEnv + "=" + e.host.Root,
 		"LANG=C.UTF-8",
 	}
+	if e.city != "" {
+		env = append(env, "GC_EXEC_CITY_NAME=city", "GC_EXEC_CITY_PATH="+e.city)
+	}
+	return env
 }
 
 // op runs one exec-protocol operation; stdout is trimmed of its trailing
