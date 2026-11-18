@@ -3,6 +3,7 @@
 //
 // OpenCode's plugin API is ESM and hook-oriented:
 //   - event() is side-effect-only (no prompt injection)
+//   - chat.message mutates a new user message's parts before it is saved
 //   - experimental.chat.system.transform mutates output.system
 //   - experimental.session.compacting → inject context before compaction
 //
@@ -11,17 +12,17 @@
 //     as session-id persistence and poller bootstrap)
 //   - experimental.session.compacting → gc handoff --auto "context cycle"
 //     and inject the handoff confirmation into the compaction context
-//   - experimental.chat.system.transform → inject gc prime --hook, queued
-//     nudges, and unread mail into the system prompt for each turn. The
-//     cached prime is prepended to system[0] so the role stays at the head;
-//     the per-turn text (nudges with their clock line, unread mail) is
-//     appended as a trailing system entry so it lands after every stable
-//     entry and the provider's prompt-cache prefix survives across turns.
+//   - experimental.chat.system.transform → prepend the cached gc prime --hook
+//     to system[0], so the role stays at the head of a system prompt that is
+//     identical on every generation
+//   - chat.message → add the per-turn text (queued nudges with their clock
+//     line, unread mail) to the user message that opens the turn, so it
+//     becomes saved conversation history and the provider's prompt-cache
+//     prefix survives across turns
 //
 // OpenCode instantiates one plugin per directory, not per session. The
 // agent's root session, every subagent child session the task tool opens and
-// any other session in the directory share this module's closure, so all
-// per-turn state below is keyed by session id.
+// any other session in the directory share this module's closure.
 
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
@@ -29,15 +30,12 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const GC_OPENCODE_HOOK_VERSION = 8;
+const GC_OPENCODE_HOOK_VERSION = 9;
 const GC_BIN = process.env.GC_BIN || "gc";
 // GC_BIN is the explicit override. The fallback order matches Pi hooks so
 // sibling providers resolve the same installed gc before developer-local bins.
 const PATH_PREFIX =
   `/opt/homebrew/bin:/usr/local/bin:${process.env.HOME}/go/bin:${process.env.HOME}/.local/bin:`;
-// RECENT_USER_MESSAGES is how many user-message ids each session remembers
-// to tell a new turn from a late update to an earlier message (see openTurn).
-const RECENT_USER_MESSAGES = 64;
 
 async function runCommand(directory, args, warnOnFailure, extraEnv = {}) {
   try {
@@ -165,28 +163,6 @@ async function mirrorTranscript(directory, client, sessionID) {
 export default async function gascityPlugin({ directory, client }) {
   let cachedPrime = null;
 
-  // experimental.chat.system.transform fires once per model generation, not
-  // once per user turn: OpenCode triggers it from LLM.stream, so every tool
-  // call in a turn rebuilds the prefix. `gc nudge drain --inject` is
-  // consumptive, so draining on every generation emptied the queue several
-  // times per turn and the drained items landed in whichever generation won
-  // the race; each run also opened store connections (#5552). Agent.generate,
-  // which drafts a new agent's config, fires it too but with no session id,
-  // so that call takes readTurnVolatile's drain-every-time fallback.
-  //
-  // turns maps a session id to the turn its consumptive commands last ran
-  // for and the text they returned; later generations of the same turn
-  // repeat that text so every generation in a turn carries identical system
-  // messages. Keying by session keeps a child session's user message from
-  // reopening the parent's turn. Entries are never removed: one small record
-  // per session, holding at most RECENT_USER_MESSAGES message ids, for the
-  // life of the process is the accepted bound.
-  //
-  // This scopes the cache, not the queue. Every session in the process runs
-  // gc with the same identity, so a drain from a child or human session in
-  // this directory still consumes the agent's nudge queue; only the text
-  // each session repeats for its own turn is kept apart here.
-  const turns = new Map();
   // childSessions records sessions created with a parent (subagents). Their
   // lifecycle events must not refresh the shared prime or hand their id to
   // `gc prime --hook` as the provider resume key.
@@ -205,89 +181,11 @@ export default async function gascityPlugin({ directory, client }) {
 
   // readVolatile returns the per-turn text: `gc nudge drain --inject` emits a
   // `Current time: ...` line on every call even with an empty queue, and
-  // unread mail changes as it arrives. Neither may sit ahead of stable text.
+  // unread mail changes as it arrives. `gc nudge drain` is consumptive.
   async function readVolatile() {
     const nudges = await run(directory, "nudge", "drain", "--inject");
     const mail = await run(directory, "mail", "check", "--inject");
     return [nudges, mail].filter(Boolean).join("\n\n");
-  }
-
-  function turnState(sessionID) {
-    sessionID = String(sessionID || "");
-    if (!sessionID) {
-      return null;
-    }
-    let state = turns.get(sessionID);
-    if (!state) {
-      state = {
-        currentTurnID: "",
-        drainedTurnID: null,
-        volatile: Promise.resolve(""),
-        userMessageIDs: new Set(),
-      };
-      turns.set(sessionID, state);
-    }
-    return state;
-  }
-
-  // openTurn records the user message that starts a session's turn. It is
-  // driven by message.updated alone: OpenCode persists the user message and
-  // publishes that event before it starts the turn's first generation.
-  // OpenCode 1.18 calls the event hook while publishing; 1.14 delivers it on
-  // a separate subscriber fiber, which relies on that delivery running ahead
-  // of the first generation (the prompt loop awaits several steps before it
-  // generates). Neither awaits the hook, so the event handler must record
-  // the turn before its first await. No chat.message hook is registered for
-  // this (see the transform below).
-  //
-  // Only a user message the session has not reported before opens a turn.
-  // OpenCode also emits message.updated for an older user message when a
-  // background fiber finishes that message's diff summary; the fiber is
-  // forked and never joined, and a new prompt does not wait for the session
-  // to go idle, so the update can land any number of turns later. Treating
-  // it as current would rewind the turn and either withhold the new turn's
-  // drain or drain a second time and change its system text mid-turn.
-  // Message ids cannot tell the two apart by order: the 12 hex digits after
-  // `msg_` are the low 48 bits of the creation time in 1/4096 ms, which wrap
-  // every 2^36 ms (last on 2026-08-14), and the clock can step backwards, so
-  // a new message can sort below the current turn's. Each session instead
-  // remembers its most recent RECENT_USER_MESSAGES user-message ids; any
-  // other id opens a turn. An update that lands after its id aged out of
-  // that window opens one too and costs one extra drain, never a withheld
-  // one.
-  function openTurn(sessionID, messageID) {
-    const state = turnState(sessionID);
-    if (!state || !messageID) {
-      return;
-    }
-    messageID = String(messageID);
-    if (state.userMessageIDs.has(messageID)) {
-      return;
-    }
-    state.userMessageIDs.add(messageID);
-    if (state.userMessageIDs.size > RECENT_USER_MESSAGES) {
-      // A Set iterates in insertion order, so the first id is the oldest.
-      state.userMessageIDs.delete(state.userMessageIDs.values().next().value);
-    }
-    state.currentTurnID = messageID;
-  }
-
-  // readTurnVolatile runs the consumptive commands once per turn per session.
-  // With no session id or no known turn — events not delivered, or a payload
-  // without the fields above — it drains every time, so nudges are never
-  // silently withheld.
-  async function readTurnVolatile(sessionID) {
-    const state = turnState(sessionID);
-    if (!state || !state.currentTurnID) {
-      return readVolatile();
-    }
-    if (state.drainedTurnID !== state.currentTurnID) {
-      // Claim the turn before awaiting so concurrent generations of the same
-      // turn share this pending drain instead of each reaching gc.
-      state.drainedTurnID = state.currentTurnID;
-      state.volatile = readVolatile();
-    }
-    return state.volatile;
   }
 
   // isChildSession reports whether a session was opened by another session.
@@ -331,15 +229,38 @@ export default async function gascityPlugin({ directory, client }) {
     }
   }
 
-  // appendVolatileSystem places the per-turn text after every stable entry.
-  // OpenCode folds system[1..] into one message only while system[0] is still
-  // its own header, so after prependStableSystem ran this entry stays a
-  // separate trailing system message; the prompt-cache prefix ends at the
-  // stable text instead of at the prime.
-  function appendVolatileSystem(system, volatile) {
-    if (volatile) {
-      system.push(volatile);
+  // appendVolatilePart drains the per-turn text into the user message that
+  // opens a turn, as a synthetic text part after the user's own parts.
+  // OpenCode sends the system entries ahead of the conversation, so text that
+  // changes every turn in the system prompt would sit ahead of the whole
+  // history, and each turn's request would share only the system prompt with
+  // the last one: a provider's prompt cache would miss on the entire
+  // conversation once per turn. As a saved part it is history instead, and
+  // every later request repeats it unchanged. OpenCode saves output.parts,
+  // ordered by id, right after chat.message returns and sends synthetic
+  // text parts to the model, so the part takes the last part's id plus a
+  // suffix (ids only need a "prt" prefix) to sort right after it.
+  async function appendVolatilePart(output) {
+    const message = output?.message;
+    const parts = output?.parts;
+    const last = Array.isArray(parts) ? parts.at(-1) : undefined;
+    // The drain is consumptive: with nowhere to put the text, leave the
+    // nudges queued for the next turn.
+    if (!message?.id || !last?.id) {
+      return;
     }
+    const volatile = await readVolatile();
+    if (!volatile) {
+      return;
+    }
+    parts.push({
+      id: `${last.id}gc`,
+      sessionID: message.sessionID,
+      messageID: message.id,
+      type: "text",
+      text: volatile,
+      synthetic: true,
+    });
   }
 
   return {
@@ -356,15 +277,6 @@ export default async function gascityPlugin({ directory, client }) {
           }
           return;
         case "message.updated":
-          {
-            // A new user message opens a turn for its own session.
-            const info = event?.properties?.info;
-            if (info && info.role === "user" && info.id) {
-              openTurn(info.sessionID || sessionIDFromEvent(event), info.id);
-            }
-          }
-          await mirrorTranscript(directory, client, sessionIDFromEvent(event));
-          return;
         case "session.idle":
           await mirrorTranscript(directory, client, sessionIDFromEvent(event));
           return;
@@ -373,16 +285,17 @@ export default async function gascityPlugin({ directory, client }) {
       }
     },
 
-    // No chat.message hook: OpenCode persists output.message.system on the
-    // user message and joins it into the tail of system[0] on every
-    // generation of that turn, so anything written there re-enters the
-    // stable header and undoes the split below. It is not needed to open
-    // the turn either; message.updated precedes the first generation.
-    "experimental.chat.system.transform": async (input, output) => {
-      const prime = await readPrime();
-      const volatile = await readTurnVolatile(input?.sessionID);
-      prependStableSystem(output.system, prime);
-      appendVolatileSystem(output.system, volatile);
+    // chat.message fires once per user prompt, before OpenCode saves it. It
+    // must not write output.message.system: OpenCode joins that field into
+    // system[0] on every generation of the turn.
+    "chat.message": async (_input, output) => {
+      await appendVolatilePart(output);
+    },
+
+    // experimental.chat.system.transform fires on every model generation
+    // (each tool call in a turn), so it adds only the stable prime.
+    "experimental.chat.system.transform": async (_input, output) => {
+      prependStableSystem(output.system, await readPrime());
     },
 
     "experimental.session.compacting": async (_input, output) => {
