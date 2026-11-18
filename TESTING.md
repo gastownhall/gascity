@@ -1379,6 +1379,21 @@ the last observed state, and have one named boundary owner. Busy loops and a
 fixed sleep before the helper are forbidden. The deadline rule below supplies
 safety timeouts; those deadlines must not determine the normal test duration.
 
+### A fixture that picks a port holds it
+
+Remote Bazel executors share one loopback port space, so a number picked by
+bind-and-close can be handed to another action's `bind(0)` before the fixture
+binds it. In `cmd/gc`, a fixture that needs a port number before its child or
+server binds it takes it from `holdLoopbackPort`, `reserveRandomTCPPort` or
+`listenOnRandomPort`, which keep the number held until `t.Cleanup` (on Linux,
+bound on `127.0.0.1` and `[::1]` with `SO_REUSEADDR`, so the fixture's own
+SO_REUSEADDR bind still succeeds). Do not close a picked port and re-bind it by
+number. A fixture that starts a python listener child reports a failed start
+through `listenerChildFailure`, which carries the child's exit status and
+stderr. `pidutil.ListenerPID` returns the first holder it finds and does not
+distinguish address families, so a foreign `[::1]:P` listener can answer for a
+`127.0.0.1:P` lookup; the held twin keeps a fixture's own number off that path.
+
 ## Test doubles and conformance are one contract
 
 A fast substitute is trustworthy only when it is held to the same observable

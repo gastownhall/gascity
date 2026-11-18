@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -19,6 +18,8 @@ import (
 	"github.com/gastownhall/gascity/internal/nudgepoller"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/pidutil"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
+	"github.com/gastownhall/gascity/internal/processgroup"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
@@ -960,14 +961,23 @@ var (
 func ensureSessionSubmitPoller(cityPath, agentName, sessionName string) error {
 	pidPath := sessionSubmitPollerPIDPath(cityPath, sessionName, agentName)
 	return withSessionSubmitPollerPIDLock(pidPath, func() error {
-		if running, _ := existingSessionSubmitPollerPID(pidPath, cityPath, sessionName, agentName); running {
+		running, err := existingSessionSubmitPollerPID(pidPath, cityPath, sessionName, agentName)
+		if err != nil {
+			// The recorded PID is live but could not be identified. Starting a
+			// replacement here would overwrite the pidfile and leave two
+			// pollers delivering the same nudges, and nothing downstream can
+			// undo that. Refuse instead: the caller retries, and a PID that has
+			// genuinely exited reads as not-running on the next pass.
+			return fmt.Errorf("checking for an existing nudge poller: %w", err)
+		}
+		if running {
 			return nil
 		}
 		exe, err := sessionSubmitPollerExecutable()
 		if err != nil {
 			return err
 		}
-		if isGoTestExecutable(exe) {
+		if nudgepoller.IsGoTestExecutable(exe) {
 			return fmt.Errorf("refusing to start nudge poller with Go test binary %q", exe)
 		}
 		cmd := newSessionSubmitPollerCommand(exe, execenv.Environ(), cityPath, sessionName, agentName)
@@ -978,7 +988,7 @@ func ensureSessionSubmitPoller(cityPath, agentName, sessionName string) error {
 		defer logFile.Close() //nolint:errcheck
 		cmd.Stdout = logFile
 		cmd.Stderr = logFile
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		processgroup.StartCommandInNewGroup(cmd)
 		if err := cmd.Start(); err != nil {
 			return err
 		}
@@ -1000,42 +1010,6 @@ func newSessionSubmitPollerCommand(exe string, environ []string, cityPath, sessi
 	return cmd
 }
 
-func isGoTestExecutable(path string) bool {
-	argv0 := ""
-	if len(os.Args) > 0 {
-		argv0 = os.Args[0]
-	}
-	return isGoTestExecutableFor(path, argv0, os.Getenv("TEST_SRCDIR"))
-}
-
-// isGoTestExecutableFor reports whether path names a Go test binary, given the
-// running process's argv0 and TEST_SRCDIR.
-func isGoTestExecutableFor(path, argv0, testSrcdir string) bool {
-	// The running bazel test binary drops the .test suffix but keeps the
-	// <target>_test name and exports TEST_SRCDIR; probes that exec a renamed
-	// spy binary must not match. Sibling gates such as internal/testenv and
-	// cmd/gc/test_guard.go need no symlink comparison: they classify only the
-	// running process, by an argv0 basename that is <target>_test whether or
-	// not bazel exec'd it through a symlink.
-	if testSrcdir != "" && strings.HasSuffix(filepath.Base(path), "_test") && isRunningBinary(path, argv0) {
-		return true
-	}
-	return strings.HasSuffix(filepath.Base(path), ".test")
-}
-
-// isRunningBinary reports whether path, as reported by os.Executable, is the
-// binary argv0 names. Bazel execs a test through its runfiles path, which is a
-// symlink under local execution; on Linux os.Executable reads /proc/self/exe,
-// which names the symlink's resolved target, so argv0 is also compared after
-// resolving symlinks.
-func isRunningBinary(path, argv0 string) bool {
-	if path == argv0 {
-		return true
-	}
-	resolved, err := filepath.EvalSymlinks(argv0)
-	return err == nil && resolved == path
-}
-
 func sessionSubmitPollerPIDPath(cityPath, sessionName, agentName string) string {
 	return citylayout.RuntimePath(cityPath, "nudges", "pollers", nudgepoller.PollerFileStem(sessionName, agentName)+".pid")
 }
@@ -1044,6 +1018,13 @@ func sessionSubmitPollerLogPath(cityPath, sessionName, agentName string) string 
 	return citylayout.RuntimePath(cityPath, "nudges", "pollers", nudgepoller.PollerFileStem(sessionName, agentName)+".log")
 }
 
+// existingSessionSubmitPollerPID reports whether the recorded PID is still this
+// session's poller.
+//
+// A non-nil error means the PID is LIVE but its identity could not be read, so
+// whether it is the poller is unknown. That is deliberately distinct from
+// (false, nil): the caller must not create a second singleton on the strength
+// of a check that did not run.
 func existingSessionSubmitPollerPID(pidPath, cityPath, sessionName, agentName string) (bool, error) {
 	data, err := os.ReadFile(pidPath)
 	if errors.Is(err, os.ErrNotExist) {
@@ -1063,11 +1044,13 @@ func existingSessionSubmitPollerPID(pidPath, cityPath, sessionName, agentName st
 	if cityPath == "" || sessionName == "" || agentName == "" {
 		return false, nil
 	}
-	if pidutil.AliveWithCmdline(pid, nudgepoller.CmdlineMatcher(cityPath, sessionName, agentName)) {
-		return true, nil
-	}
-	return false, nil
+	return submitPollerIdentity(pid, nudgepoller.CmdlineMatcher(cityPath, sessionName, agentName))
 }
+
+// submitPollerIdentity is existingSessionSubmitPollerPID's identity probe. It is
+// a variable only so a test can stage a live PID whose identity cannot be read,
+// which no host reliably produces on demand.
+var submitPollerIdentity = pidutil.AliveWithCmdline
 
 func writeSessionSubmitPollerPID(pidPath string, pid int) error {
 	data := []byte(fmt.Sprintf("%d\n", pid))
@@ -1087,9 +1070,10 @@ func withSessionSubmitPollerPIDLock(pidPath string, fn func() error) error {
 		return fmt.Errorf("opening nudge poller lock: %w", err)
 	}
 	defer lockFile.Close() //nolint:errcheck
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+	lock, err := filelock.Acquire(lockFile, filelock.Options{Mode: filelock.Exclusive, Label: lockPath})
+	if err != nil {
 		return fmt.Errorf("locking nudge poller: %w", err)
 	}
-	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) //nolint:errcheck
+	defer lock.Release() //nolint:errcheck
 	return fn()
 }

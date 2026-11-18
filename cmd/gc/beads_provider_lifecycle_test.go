@@ -29,18 +29,7 @@ import (
 
 func freeLoopbackPort(t *testing.T) string {
 	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
-	defer func() {
-		_ = listener.Close()
-	}()
-	addr, ok := listener.Addr().(*net.TCPAddr)
-	if !ok {
-		t.Fatalf("listener addr = %T, want *net.TCPAddr", listener.Addr())
-	}
-	return strconv.Itoa(addr.Port)
+	return strconv.Itoa(reserveRandomTCPPort(t))
 }
 
 func setScopedBeadsProviderForTest(t *testing.T, scopeRoot, provider string) {
@@ -9228,8 +9217,15 @@ func TestGcBeadsBdInitDoltliteInitializesDelegatedBdWrites(t *testing.T) {
 		"BD_NON_INTERACTIVE=1",
 		"PATH="+os.Getenv("PATH"),
 	)...)
-	created, err := create.CombinedOutput()
+	// Output, not CombinedOutput: bd logs diagnostics to stderr behind a bare
+	// timestamp, and merged ahead of the JSON document it breaks the parse
+	// below. stderr stays reachable on the failure path via *exec.ExitError.
+	created, err := create.Output()
 	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			t.Fatalf("bd create after doltlite init failed: %v\nstdout:\n%s\nstderr:\n%s", err, created, exitErr.Stderr)
+		}
 		t.Fatalf("bd create after doltlite init failed: %v\n%s", err, created)
 	}
 	var createdIssue struct {
