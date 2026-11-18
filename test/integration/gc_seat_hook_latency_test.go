@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -336,19 +337,9 @@ dir = %q
 		runGCDoltWithEnv(env, "", "supervisor", "stop", "--wait") //nolint:errcheck // best-effort cleanup
 	})
 
-	// The city must actually be born split, and bd-served (not the native
-	// role GC_BEADS_PROXIED_NATIVE would select): those are exactly the
-	// conditions under which bd's refusal of an unregistered type turned into
-	// a 503 rather than an empty result.
-	if mode, ok, metaErr := contract.ReadDoltMode(fsys.OSFS{}, filepath.Join(cityDir, ".beads", "metadata.json")); metaErr != nil || !ok || mode != "proxied-server" {
-		t.Fatalf("city .beads/metadata.json dolt_mode = %q (ok=%v, err=%v), want %q", mode, ok, metaErr, "proxied-server")
-	}
-	if v := os.Getenv("GC_BEADS_PROXIED_NATIVE"); v != "" {
-		t.Fatalf("GC_BEADS_PROXIED_NATIVE=%q is set; this test needs the bd-served proxied work store, not the native role", v)
-	}
-
 	template := gcSeatHookRig + "/seat"
 	waitForActiveSessionTargets(t, cityDir, []string{template}, 60*time.Second)
+	requireBornSplitBdServedRig(t, cityDir, rigDir)
 	seat := gcSeatHookSession(t, cityDir, template)
 
 	seatEnv := env
@@ -367,14 +358,19 @@ dir = %q
 		seatEnv = replaceEnv(seatEnv, k, v)
 	}
 
-	out, err := runCommand(cityDir, seatEnv, integrationGCCommandTimeout, gcBinary, "bd", "create",
+	// The seat's work is seeded with the pinned bd in the rig, straight into
+	// the bd-served work store the reminder reads. gc bd on a split city first
+	// checks the bd it would run against gc's pinned inventory
+	// (bdClassFlipGuard), and refuses this harness's bd, a tool-home wrapper
+	// script with no Go build info.
+	out, err := runCommandStdout(rigDir, seatEnv, integrationGCCommandTimeout, realBDBinary, "create",
 		"--title", "active work", "--description", "do the thing", "--assignee", seat.SessionName, "--json")
 	if err != nil {
-		t.Fatalf("gc bd create: %v\noutput: %s", err, out)
+		t.Fatalf("bd create: %v\nstdout: %s", err, out)
 	}
 	beadID := gcBdLatencyCreatedID(t, out)
-	if out, err := runCommand(cityDir, seatEnv, integrationGCCommandTimeout, gcBinary, "bd", "update", beadID, "--status", "in_progress"); err != nil {
-		t.Fatalf("gc bd update %s --status in_progress: %v\noutput: %s", beadID, err, out)
+	if out, err := runCommand(rigDir, seatEnv, integrationGCCommandTimeout, realBDBinary, "update", beadID, "--status", "in_progress"); err != nil {
+		t.Fatalf("bd update %s --status in_progress: %v\noutput: %s", beadID, err, out)
 	}
 
 	transcript := filepath.Join(root, "transcript.jsonl")
@@ -402,6 +398,43 @@ dir = %q
 	}
 	if !strings.Contains(stdout.String(), beadID) {
 		t.Fatalf("stdout does not name the in-progress bead %s:\n%s", beadID, stdout.String())
+	}
+}
+
+// requireBornSplitBdServedRig fails unless the city is the shape #9237 needs.
+// It must be born split: a single-store city answers the step reminder's
+// in-progress questions from one untyped listing and never sends a typed one.
+// Its rig's work store, the store the reminder reads, must be served through
+// bd (proxied-server dolt_mode, not the native role GC_BEADS_PROXIED_NATIVE
+// selects), because only bd refuses a type it does not register. On any other
+// shape the test passes on main as well and guards nothing.
+func requireBornSplitBdServedRig(t *testing.T, cityDir, rigDir string) {
+	t.Helper()
+	// gc init --file writes the source config's [storage] into city.toml, and
+	// this city has no include fragment that could move it, so city.toml alone
+	// says whether the split survived init. It is decoded without composing
+	// the city's pack imports, which need the isolated GC_HOME.
+	cityToml := filepath.Join(cityDir, "city.toml")
+	data, err := os.ReadFile(cityToml)
+	if err != nil {
+		t.Fatalf("reading %s: %v", cityToml, err)
+	}
+	cfg, err := config.Parse(data)
+	if err != nil {
+		t.Fatalf("parsing %s: %v\n%s", cityToml, err, data)
+	}
+	// "infra" is the binding the test's [storage] block puts graph on.
+	if got := cfg.EffectiveStorage().Classes.Graph; got != "infra" {
+		t.Fatalf("%s [storage.classes] graph = %q, want %q: gc init --file did not keep the split:\n%s", cityToml, got, "infra", data)
+	}
+	for _, scope := range []string{cityDir, rigDir} {
+		metadata := filepath.Join(scope, ".beads", "metadata.json")
+		if mode, ok, err := contract.ReadDoltMode(fsys.OSFS{}, metadata); err != nil || !ok || mode != "proxied-server" {
+			t.Fatalf("%s dolt_mode = %q (ok=%v, err=%v), want %q", metadata, mode, ok, err, "proxied-server")
+		}
+	}
+	if v := os.Getenv("GC_BEADS_PROXIED_NATIVE"); v != "" {
+		t.Fatalf("GC_BEADS_PROXIED_NATIVE=%q is set; this test needs the bd-served proxied work store, not the native role", v)
 	}
 }
 
