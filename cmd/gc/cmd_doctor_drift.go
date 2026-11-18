@@ -205,8 +205,9 @@ func (c *doltDriftCheck) CanFix() bool {
 // Fix re-pins the configured .beads/dolt-server.port files to the managed city
 // port, repairing Case-B and Case-D drift. It reuses the same
 // syncConfiguredDoltPortFiles path that `gc start` runs at startup, so a stale
-// or missing rig port file no longer requires a full restart to correct. The doctor framework re-runs Run
-// afterward to verify (and to surface any remaining non-re-pinnable drift).
+// or missing rig port file no longer requires a full restart to correct. The
+// doctor framework re-runs Run afterward to verify (and to surface any
+// remaining non-re-pinnable drift).
 func (c *doltDriftCheck) Fix(ctx *doctor.CheckContext) error {
 	if c.cfg == nil {
 		return fmt.Errorf("dolt-drift: no city config available to re-pin port files")
@@ -245,6 +246,15 @@ func rigExpectsManagedPortMirror(cityPath string, rig config.Rig, cityState cont
 		if cityBound {
 			return false, nil
 		}
+	}
+	// The sync leaves the managed port unresolved for a city bd binds
+	// directly to a server gc does not run, so it writes no rig mirror.
+	cityBdOwnedDirect, err := scopeIsBdOwnedDirectExternal(cityPath, cityPath)
+	if err != nil {
+		return false, err
+	}
+	if cityBdOwnedDirect {
+		return false, nil
 	}
 	rigProviderOwned, err := scopeProviderOwned(cityPath, rig.Path)
 	if err != nil {
