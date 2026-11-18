@@ -99,7 +99,10 @@ func (s *Server) buildWorkflowSnapshot(workflowID, fallbackScopeKind, fallbackSc
 	// (gascity#2940). The one exception is a root the residency resolver pins
 	// to the graph binding: the binding is its authority, so the sweep is
 	// skipped (graphBindingWorkflowRoot).
-	stores := s.workflowStores()
+	// One epoch for the legs and the residency plan below, so the graph leg
+	// and the binding owner the resolver pins are read from the same rig set.
+	st := s.state.Stores()
+	stores, _ := workflowLegs(st, s.state.CityName(), workflowLegQuery{})
 	storesScanned := make([]string, 0, len(stores))
 	seenStoreRefs := make(map[string]bool, len(stores))
 	matches := make([]workflowRootMatch, 0)
@@ -124,7 +127,7 @@ func (s *Server) buildWorkflowSnapshot(workflowID, fallbackScopeKind, fallbackSc
 	// proxied-local rigs. A decline or anything the snapshot cannot use falls
 	// through to the sweep unchanged.
 	if graph, ok := workflowGraphStore(stores); ok {
-		if root, ok := s.graphBindingWorkflowRoot(graph, workflowID); ok {
+		if root, ok := s.graphBindingWorkflowRoot(st, graph, workflowID); ok {
 			if match, ok := selectWorkflowRootMatch([]workflowRootMatch{{info: graph, root: root}}, fallbackScopeKind, fallbackScopeRef, cityScopeRef); ok {
 				return s.snapshotFromStore(match.info, match.root, fallbackScopeKind, fallbackScopeRef, cityScopeRef, []string{graph.ref}, false, snapshotIndex)
 			}
@@ -199,11 +202,12 @@ func (s *Server) buildWorkflowSnapshot(workflowID, fallbackScopeKind, fallbackSc
 	return s.snapshotFromStore(match.info, match.root, fallbackScopeKind, fallbackScopeRef, cityScopeRef, storesScanned, listPartial, snapshotIndex)
 }
 
-// workflowGraphStore returns the relocated graph binding's entry from a
-// workflowStores list; a city whose graph class is not relocated has none.
+// workflowGraphStore returns the relocated graph binding's leg from a
+// workflowLegs list (a non-zero Reader); a city whose graph class is not
+// relocated has none.
 func workflowGraphStore(stores []workflowStoreInfo) (workflowStoreInfo, bool) {
 	for _, info := range stores {
-		if info.store != nil && strings.HasPrefix(info.ref, workflowGraphStoreRefPrefix+":") {
+		if info.leg.Reader.Ref() != "" && strings.HasPrefix(info.ref, workflowGraphStoreRefPrefix+":") {
 			return info, true
 		}
 	}
@@ -211,23 +215,23 @@ func workflowGraphStore(stores []workflowStoreInfo) (workflowStoreInfo, bool) {
 }
 
 // graphBindingWorkflowRoot returns the workflow root when the residency
-// resolver pins id to the graph binding (storeref.ResolveBindingOwner, which
-// never reads a work store). It declines on anything else: no binding owner,
-// another binding, a resolver or read fault, or a bead that is not this
-// workflow's root. The caller's sweep then reads every store and reports any
-// fault itself.
-func (s *Server) graphBindingWorkflowRoot(graph workflowStoreInfo, workflowID string) (beads.Bead, bool) {
-	plan, err := storeref.Plan(storeref.ByID{ID: workflowID, WorkAxis: apiWorkAxis{s}}, s.residencyTopology())
+// resolver, planned over the epoch st the legs came from, pins id to the graph
+// binding (storeref.ResolveBindingOwner, which never reads a work store). It
+// declines on anything else: no binding owner, another binding, a resolver or
+// read fault, or a bead that is not this workflow's root. The caller's sweep
+// then reads every store and reports any fault itself.
+func (s *Server) graphBindingWorkflowRoot(st storeref.Stores, graph workflowStoreInfo, workflowID string) (beads.Bead, bool) {
+	plan, err := storeref.Plan(storeref.ByID{ID: workflowID, WorkAxis: apiWorkAxis{s: s, st: st}}, st.Topology())
 	if err != nil {
 		return beads.Bead{}, false
 	}
 	owner, found, err := storeref.ResolveBindingOwner(plan, workflowID)
-	if err != nil || !found || owner.Store != graph.store {
+	if err != nil || !found || !beads.SameStore(owner.Store, graph.leg.Reader) {
 		return beads.Bead{}, false
 	}
 	root := owner.Bead
 	if !owner.Read {
-		if root, err = owner.Store.Get(workflowID); err != nil {
+		if root, err = graph.leg.Reader.Get(workflowID); err != nil {
 			return beads.Bead{}, false
 		}
 	}
@@ -868,10 +872,6 @@ func workflowLegNamed(st storeref.Stores, infos []workflowStoreInfo, ref string)
 		}
 	}
 	return workflowStoreInfo{}, false
-}
-
-func (s *Server) workflowStores() []workflowStoreInfo {
-	return workflowStores(s.state)
 }
 
 func workflowCityScopeRef(cityName string) string {

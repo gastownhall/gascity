@@ -1705,7 +1705,8 @@ func TestWorkflowGetSkipsMetadataListSweepWhenIDResolvesDirectly(t *testing.T) {
 	}
 }
 
-func createGraphWorkflowRoot(t *testing.T, store beads.Store, scopeKind, scopeRef string) beads.Bead {
+// createGraphWorkflowRoot creates a graph.v2 workflow root scoped rig:alpha.
+func createGraphWorkflowRoot(t *testing.T, store beads.Store) beads.Bead {
 	t.Helper()
 	root, err := store.Create(beads.Bead{
 		Title: "Graph workflow",
@@ -1713,8 +1714,8 @@ func createGraphWorkflowRoot(t *testing.T, store beads.Store, scopeKind, scopeRe
 		Metadata: map[string]string{
 			"gc.kind":                     "workflow",
 			"gc.formula_contract":         "graph.v2",
-			beadmeta.ScopeKindMetadataKey: scopeKind,
-			beadmeta.ScopeRefMetadataKey:  scopeRef,
+			beadmeta.ScopeKindMetadataKey: "rig",
+			beadmeta.ScopeRefMetadataKey:  "alpha",
 		},
 	})
 	if err != nil {
@@ -1738,7 +1739,7 @@ func TestWorkflowGetReadsGraphNamespaceRootFromTheBindingOnly(t *testing.T) {
 	graph := &beads.MemStore{IDPrefix: "gcg"}
 	state.graphBeadStore = graph
 	state.stores = map[string]beads.Store{"alpha": alpha, "beta": beta}
-	root := createGraphWorkflowRoot(t, graph, "rig", "alpha")
+	root := createGraphWorkflowRoot(t, graph)
 	if !strings.HasPrefix(root.ID, "gcg-") {
 		t.Fatalf("graph root id = %q, want the gcg namespace", root.ID)
 	}
@@ -1775,7 +1776,7 @@ func TestWorkflowGetSweepsWorkStoresWhenTheBindingMissesAGraphNamespaceID(t *tes
 	state.graphBeadStore = &beads.MemStore{IDPrefix: "gcg"}
 	legacy := &beads.MemStore{IDPrefix: "gcg"}
 	state.stores = map[string]beads.Store{"alpha": legacy}
-	root := createGraphWorkflowRoot(t, legacy, "rig", "alpha")
+	root := createGraphWorkflowRoot(t, legacy)
 
 	h := newTestCityHandler(t, state)
 	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/workflow/"+root.ID+"?scope_kind=rig&scope_ref=alpha"), nil)
@@ -1791,5 +1792,94 @@ func TestWorkflowGetSweepsWorkStoresWhenTheBindingMissesAGraphNamespaceID(t *tes
 	}
 	if snapshot.RootBeadID != root.ID || snapshot.ResolvedRootStore != "rig:alpha" {
 		t.Fatalf("snapshot root %q in %q, want %q in rig:alpha", snapshot.RootBeadID, snapshot.ResolvedRootStore, root.ID)
+	}
+}
+
+// A migration twin — the same id left in a rig store with a different body —
+// does not compete with the binding's copy: the resolver pins the id to the
+// graph binding, so the snapshot serves the binding's row and reads no work
+// store.
+func TestWorkflowGetServesTheBindingCopyOverAWorkStoreTwin(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "test-city"
+	city := &getCountingStore{Store: beads.NewMemStore()}
+	twinStore := &beads.MemStore{IDPrefix: "gcg", HonorExplicitIDs: true}
+	alpha := &getCountingStore{Store: twinStore}
+	state.cityBeadStore = city
+	graph := &beads.MemStore{IDPrefix: "gcg"}
+	state.graphBeadStore = graph
+	state.stores = map[string]beads.Store{"alpha": alpha}
+	root := createGraphWorkflowRoot(t, graph)
+	if _, err := twinStore.Create(beads.Bead{
+		ID:    root.ID,
+		Title: "Frozen twin",
+		Type:  "task",
+		Metadata: map[string]string{
+			"gc.kind":                     "workflow",
+			"gc.formula_contract":         "graph.v2",
+			beadmeta.ScopeKindMetadataKey: "rig",
+			beadmeta.ScopeRefMetadataKey:  "alpha",
+		},
+	}); err != nil {
+		t.Fatalf("Create(twin): %v", err)
+	}
+
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/workflow/"+root.ID+"?scope_kind=rig&scope_ref=alpha"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var snapshot workflowSnapshotResponse
+	if err := json.NewDecoder(rec.Body).Decode(&snapshot); err != nil {
+		t.Fatalf("Decode(snapshot): %v", err)
+	}
+	if snapshot.RootBeadID != root.ID {
+		t.Fatalf("root_bead_id = %q, want %q", snapshot.RootBeadID, root.ID)
+	}
+	if !strings.HasPrefix(snapshot.ResolvedRootStore, workflowGraphStoreRefPrefix+":") {
+		t.Fatalf("resolved_root_store = %q, want the graph binding", snapshot.ResolvedRootStore)
+	}
+	var title string
+	for _, b := range snapshot.Beads {
+		if b.ID == root.ID {
+			title = b.Title
+		}
+	}
+	if title != "Graph workflow" {
+		t.Fatalf("root title = %q, want the binding copy %q", title, "Graph workflow")
+	}
+	if n := city.gets.Load() + alpha.gets.Load(); n != 0 {
+		t.Fatalf("work stores were read %d time(s) with the binding holding the root; want 0", n)
+	}
+}
+
+// A binding root whose scope the request does not match is declined by the
+// shortcut and falls through to the sweep, which reads the work stores and
+// answers as it always has.
+func TestWorkflowGetFallsThroughToTheSweepOnABindingRootScopeMismatch(t *testing.T) {
+	state := newFakeState(t)
+	state.cityName = "test-city"
+	city := &getCountingStore{Store: beads.NewMemStore()}
+	alpha := &getCountingStore{Store: beads.NewMemStore()}
+	beta := &getCountingStore{Store: beads.NewMemStore()}
+	state.cityBeadStore = city
+	graph := &beads.MemStore{IDPrefix: "gcg"}
+	state.graphBeadStore = graph
+	state.stores = map[string]beads.Store{"alpha": alpha, "beta": beta}
+	root := createGraphWorkflowRoot(t, graph)
+
+	h := newTestCityHandler(t, state)
+	req := httptest.NewRequest(http.MethodGet, cityURL(state, "/workflow/"+root.ID+"?scope_kind=rig&scope_ref=beta"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 from the sweep: %s", rec.Code, rec.Body.String())
+	}
+	if n := city.gets.Load() + alpha.gets.Load() + beta.gets.Load(); n == 0 {
+		t.Fatalf("work stores were not read; want the scope-mismatched binding root to fall through to the sweep")
 	}
 }
