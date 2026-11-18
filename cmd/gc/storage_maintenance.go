@@ -47,6 +47,15 @@ package main
 // provider this run started; one a killed run started stays running and
 // recorded.
 //
+// A gc-managed Dolt found already running on the city the verb stopped is
+// adopted: nothing of the city's own uses it (the verb holds the controller
+// lock), so it is a server a one-shot bd read or an earlier command started
+// and left (ga-683m7f), and a writer on it is one nothing proved stopped. The
+// window judges its sessions as it judges a server it started, records it,
+// and stops it on close, so the verb leaves the city's provider stopped as `gc
+// stop` left it. A window that refuses leaves an adopted server running and
+// unrecorded, as it found it.
+//
 // The window records that it started the provider in .gc/storage-window.json
 // before the start, and removes the record once the provider is stopped. A
 // stop that fails keeps the record and fails the run, whatever the run did. A
@@ -98,6 +107,7 @@ var migrationWindowSessionSettle = 3 * time.Second
 // replace them: the real ones start, stop and dial Dolt servers.
 var (
 	migrationWindowProviderDown  = migrationProviderDown
+	migrationWindowAdoptable     = migrationProviderAdoptable
 	migrationWindowStartProvider = ensureBeadsProvider
 	migrationWindowStopProvider  = shutdownBeadsProvider
 	migrationWindowSessions      = managedDoltSessionLister
@@ -120,6 +130,9 @@ type migrationSourceWindow struct {
 	started bool
 	// startedHere reports that this run started it, not a killed one before.
 	startedHere bool
+	// adopted reports that this run found the gc-managed Dolt running on the
+	// stopped city and took it over: closing the window stops it.
+	adopted bool
 	// lane is the city work store's lane, as its last open in the window
 	// reported it (laneKnown false until one has).
 	lane      beads.BeadsDiagnostic
@@ -191,6 +204,13 @@ func openMigrationSource(lock *os.File, cityPath string, cfg *config.City, logPr
 		w.started = true
 		fmt.Fprintf(stderr, "%s: an earlier run started the bead-store provider and did not stop it (%s); this run stops it when it ends\n", logPrefix, migrationWindowRecordPath(cityPath)) //nolint:errcheck // best-effort stderr
 	}
+	if !down && !inherited {
+		adopt, err := migrationWindowAdoptable(cityPath)
+		if err != nil {
+			return nil, fmt.Errorf("checking for a managed Dolt left running on the stopped city: %w", err)
+		}
+		w.started, w.adopted = adopt, adopt
+	}
 	if down {
 		if err := writeMigrationWindowRecord(cityPath); err != nil {
 			return nil, err
@@ -224,13 +244,22 @@ func openMigrationSource(lock *os.File, cityPath string, cfg *config.City, logPr
 			return nil, errors.Join(err, w.abandon())
 		}
 	}
+	if w.adopted {
+		// Recorded only once its sessions are judged: a window that refuses
+		// leaves the server as it found it.
+		if err := writeMigrationWindowRecord(cityPath); err != nil {
+			return nil, errors.Join(err, w.abandon())
+		}
+		fmt.Fprintf(stderr, "%s: the city's managed Dolt was running although the city is stopped (something started it and left it); this run uses it and stops it when it ends\n", logPrefix) //nolint:errcheck // best-effort stderr
+	}
 	return w, nil
 }
 
 // abandon ends a window that refused before its verb ran. It stops the
 // provider only when this run started it. A provider a killed run started is
 // left running and recorded: the refusal may name a session of whoever has
-// started it since, and the next window owns it again.
+// started it since, and the next window owns it again. An adopted one is left
+// running as it was found.
 func (w *migrationSourceWindow) abandon() error {
 	if !w.startedHere {
 		w.started = false
@@ -245,7 +274,10 @@ func (w *migrationSourceWindow) refuseForeignSessions(logPrefix string, stderr i
 	ctx, cancel := context.WithTimeout(context.Background(), migrationWindowSessionSettle+migrationWindowSessionTimeout)
 	defer cancel()
 	who := "this run started"
-	if !w.startedHere {
+	switch {
+	case w.adopted:
+		who = "this run found running on the stopped city"
+	case !w.startedHere:
 		who = "an earlier run started"
 	}
 	list, closeList, listable, err := migrationWindowSessions(ctx, w.cityPath)
@@ -267,7 +299,7 @@ func (w *migrationSourceWindow) refuseForeignSessions(logPrefix string, stderr i
 		// The server reaps a session this process just closed a moment later,
 		// so one still there once the settle has passed is another client's.
 		if len(sessions) == 0 || !time.Now().Before(deadline) {
-			return migrationForeignSessionRefusal(sessions)
+			return migrationForeignSessionRefusal(sessions, who)
 		}
 		time.Sleep(migrationWindowSessionSettle / 10)
 	}
@@ -311,8 +343,9 @@ func managedDoltSessionLister(_ context.Context, cityPath string) (func(context.
 }
 
 // migrationForeignSessionRefusal is the refusal for the sessions another
-// client holds on a Dolt server the window started, or nil when there are none.
-func migrationForeignSessionRefusal(sessions []beads.DoltConnection) error {
+// client holds on the Dolt server the window started or adopted (who says
+// which), or nil when there are none.
+func migrationForeignSessionRefusal(sessions []beads.DoltConnection, who string) error {
 	if len(sessions) == 0 {
 		return nil
 	}
@@ -324,7 +357,7 @@ func migrationForeignSessionRefusal(sessions []beads.DoltConnection) error {
 		}
 		names = append(names, fmt.Sprintf("session %d: %s@%s on %s (%s)", s.ID, s.User, s.Host, db, s.Command))
 	}
-	return fmt.Errorf("the Dolt server this run just started already has %d other client session(s) (%s), and each can write to the work store. Stop whatever holds them (a surviving agent, a bd process, a shell) and run this again", len(sessions), strings.Join(names, "; "))
+	return fmt.Errorf("the Dolt server %s has %d other client session(s) (%s), and each can write to the work store. Stop whatever holds them (a surviving agent, a bd process, a shell) and run this again", who, len(sessions), strings.Join(names, "; "))
 }
 
 // Close ends the window: when the window started the provider, it stops it
@@ -506,6 +539,31 @@ func migrationProviderDown(cityPath string) (bool, error) {
 		return false, err
 	}
 	return runProviderOpWithEnv(strings.TrimPrefix(provider, "exec:"), env, "health") != nil, nil
+}
+
+// migrationProviderAdoptable reports whether the city's gc-managed Dolt is
+// running: on a city whose controller lock the verb holds, a server gc stop
+// would have stopped, so the window adopts it. Only a managed Dolt gc owns the
+// lifecycle of qualifies; an external or hosted server, a bd-owned proxy
+// (always started, migrationProviderDown) and an exec provider never do.
+func migrationProviderAdoptable(cityPath string) (bool, error) {
+	if owned, err := cityScopeProviderOwned(cityPath); err != nil || owned {
+		return false, err
+	}
+	if !cityUsesBdStoreContract(cityPath) {
+		return false, nil
+	}
+	if _, err := os.Stat(scopeMetadataJSONPath(cityPath)); err != nil {
+		return false, nil // no bd workspace: nothing gc runs
+	}
+	if gcDoltSkip() || scopeUsesProxiedDoltMode(cityPath, cityPath) {
+		return false, nil
+	}
+	owned, err := managedDoltLifecycleOwned(cityPath)
+	if err != nil || !owned {
+		return false, err
+	}
+	return currentManagedDoltPort(cityPath) != "", nil
 }
 
 func migrationWindowRecordPath(cityPath string) string {
