@@ -102,6 +102,7 @@ go_test(
         "scan_darwin_command_test.go",
         "scan_darwin_records_test.go",
         "scan_darwin_start_test.go",
+        "scan_goos_coverage_test.go",
         "scan_linux_test.go",
         "scan_relay_linux_test.go",
         "scan_stub_test.go",
@@ -115,6 +116,10 @@ go_test(
         "user_service_stub_test.go",
         "user_service_test.go",
     ],
+    data = glob(
+        ["**"],
+        exclude = ["BUILD.bazel"],
+    ),
     embed = [":proctable"],
     deps = [
         "//internal/beads/proxyendpoint",
