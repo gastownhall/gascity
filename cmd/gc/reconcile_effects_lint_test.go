@@ -37,7 +37,7 @@ import (
 //     no effect or step writes.
 var effectBannedMethods = []string{
 	"ApplyPatch", "ApplyPatchInfo", "UpdateMetadataInfo", "SetMetadata", "SetMetadataBatch", "SetMarker", "SetState",
-	"Sleep", "SetWaitHold", "SetPinAwake", "RecordCurrentBead",
+	"Sleep", "SetWaitHold", "SetPinAwake", "RecordCurrentBead", "RecordCurrentBeadWithRoot",
 	"SetCurrentClaim", "SetStatusOpen", "RepairType", "RepairTypeBestEffort", "SetLocalString", "CloseWithoutReason",
 	"UpdateMetadataFenced", "ApplyPatchIfLifecycleUnchanged", "WithPendingCreateRollback", "CommitClose",
 	"RollbackPendingCreateAtomically", "CloseWithMetadataIfMatch", "ApplyPatchIfLifecycleUnchangedUnder",

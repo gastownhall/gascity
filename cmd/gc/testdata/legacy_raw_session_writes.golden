@@ -20,4 +20,4 @@ internal/session/chat.go 5
 internal/session/incarnation.go 1
 internal/session/manager.go 2
 internal/session/runtime_lease.go 2
-internal/session/store.go 4
+internal/session/store.go 5

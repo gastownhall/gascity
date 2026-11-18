@@ -147,7 +147,7 @@ func TestLiveSweepFormulaAttributionFromRealSlingAndReconcilerPointer(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if patch := recordCurrentBeadIDOnWake(info, front, step.ID, io.Discard); patch == nil {
+	if patch := recordCurrentBeadIDOnWake(info, front, step.ID, step.Metadata["gc.root_bead_id"], io.Discard); patch == nil {
 		t.Fatalf("reconciler wake stamp wrote nothing for %s", step.ID)
 	}
 
@@ -220,7 +220,7 @@ func TestPromptOpFormulaAttributionFromRealSlingAndReconcilerPointer(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if patch := recordCurrentBeadIDOnWake(info, front, step.ID, io.Discard); patch == nil {
+	if patch := recordCurrentBeadIDOnWake(info, front, step.ID, step.Metadata["gc.root_bead_id"], io.Discard); patch == nil {
 		t.Fatalf("reconciler wake stamp wrote nothing for %s", step.ID)
 	}
 
@@ -299,7 +299,7 @@ func TestLiveSweepPointerIntoSuspendedRigIsUnattributedWithZeroReads(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	recordCurrentBeadIDOnWake(info, front, step.ID, io.Discard)
+	recordCurrentBeadIDOnWake(info, front, step.ID, step.Metadata["gc.root_bead_id"], io.Discard)
 
 	h.tick()
 	wantAllNamed(t, modelFactFormulaNames(t, h.sinkPath), "", 2)
@@ -358,7 +358,7 @@ func TestLiveSweepPointerIntoResumedRigRecoversAttribution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if patch := recordCurrentBeadIDOnWake(info, front, step.ID, io.Discard); patch == nil {
+	if patch := recordCurrentBeadIDOnWake(info, front, step.ID, step.Metadata["gc.root_bead_id"], io.Discard); patch == nil {
 		t.Fatalf("reconciler wake stamp wrote nothing for %s", step.ID)
 	}
 
