@@ -99,6 +99,9 @@ type Server struct {
 	// and is threaded into each factory; otherwise every poll re-parses an
 	// unchanged mirror.
 	activityMemo *worker.DerivedActivityMemo
+	// formulaMemo remembers the formula each acting bead belongs to across the
+	// per-request worker factories (usage attribution).
+	formulaMemo *worker.FormulaNameMemo
 
 	// agentVisibilityWaitTimeout overrides the POST /agents visibility wait
 	// in tests. Zero uses defaultAgentVisibilityWaitTimeout.
@@ -122,12 +125,20 @@ type Server struct {
 	// beginResponseRefresh / endResponseRefresh in response_cache.go.
 	responseRefreshing map[string]bool
 
+	// statusBuilds holds each /status view's running and queued build by
+	// response-cache key, guarded by responseCacheMu: the builds a
+	// stale-while-revalidate serve starts and ?fresh=true reads wait on. See
+	// statusBuildSlot in handler_status.go.
+	statusBuilds map[string]*statusBuildSlot
+
 	// storeHealth caches the on-disk size walk and maintenance-log read
 	// for /v0/status's StoreHealth block. Refreshed on expiry; missing
 	// store directories produce a zero-value entry so repeated requests
-	// don't re-walk a fresh city between maintenance runs.
+	// don't re-walk a fresh city between maintenance runs. storeHealthErr
+	// holds only a memoized retained-row list overrun (cachedStoreHealth).
 	storeHealthMu       sync.Mutex
 	storeHealthEntry    *StatusStoreHealth
+	storeHealthErr      error
 	storeHealthExpires  time.Time
 	storeHealthComputer func(ctx context.Context) (*StatusStoreHealth, error)
 	storeHealthFlight   singleflight.Group
@@ -191,6 +202,12 @@ type Server struct {
 	// operator config, never attacker input, so the set is bounded by config.
 	webhookAccessFaultMu     sync.Mutex
 	webhookAccessFaultLogged map[string]struct{}
+
+	// suspensionStateFault is the suspension-state read fault the active-bead
+	// lookup last logged, "" while the file reads; see
+	// suspensionStateFaultChanged.
+	suspensionStateFaultMu sync.Mutex
+	suspensionStateFault   string
 
 	// webhookMaxBody overrides the /hook/ request body cap in tests. Zero uses
 	// defaultMaxWebhookBodyBytes.
@@ -297,6 +314,7 @@ func newServerFor(state State, readOnly bool, city *cityOps) *Server {
 		webhookDedup:   newWebhookDedupCache(defaultWebhookDedupTTL),
 		webhookLimiter: newWebhookRateLimiter(),
 		activityMemo:   worker.NewDerivedActivityMemo(),
+		formulaMemo:    worker.NewFormulaNameMemo(),
 	}
 	// Latch the rollout snapshot once: prefer the State's boot latch (the
 	// production controllerState); fall back to resolving from Config() for

@@ -120,7 +120,7 @@ func TestNudgeNowDeliversWhenNoPromptAppears(t *testing.T) {
 // confirm loop must not keep retrying Enter while a prompt is on screen.
 func TestSubmitEnterAndConfirmStopsAtPendingPrompt(t *testing.T) {
 	calls := 0
-	send := func() error {
+	send := func(int) error {
 		calls++
 		if calls > 1 {
 			return runtime.ErrPendingInteraction
@@ -142,7 +142,7 @@ func TestSubmitEnterAndConfirmStopsAtPendingPrompt(t *testing.T) {
 // as a prompt on screen does.
 func TestSubmitEnterAndConfirmStopsWhenALookCannotReadThePane(t *testing.T) {
 	calls := 0
-	send := func() error {
+	send := func(int) error {
 		calls++
 		if calls > 1 {
 			return fmt.Errorf("%w: capture-pane: timed out", errPromptLookFailed)
@@ -180,7 +180,7 @@ func TestNudgeSessionReportsARefusedReSendUnconfirmed(t *testing.T) {
 	dropText := func(context.Context, string, string, time.Duration) error { return nil }
 
 	err := tm.nudgeSession(context.Background(), pane.sessionName, "run the tests", dropText,
-		func(string) bool { return false }, func(string) []string { return []string{"Enter"} }, look)
+		func(string) bool { return false }, func(string) []string { return []string{"Enter"} }, look, false)
 	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) || !errors.Is(err, runtime.ErrNudgeDeliveryUnconfirmed) {
 		t.Fatalf("nudgeSession = %v, want ErrNudgeSubmitUnconfirmed, a runtime.ErrNudgeDeliveryUnconfirmed", err)
 	}

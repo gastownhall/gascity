@@ -49,6 +49,12 @@ type ConversationLaneHost interface {
 	// API wrote one of its lane ops, so the op does not wait for the host's
 	// anti-entropy scan.
 	PokeConversationLane(conversation string)
+	// AwaitConversationOp waits until op id of conversation closes, or ctx
+	// ends, and returns the op as last read: closed, or still open when ctx
+	// ended. It wakes at the end of each pass over the conversation and
+	// re-reads the op at least every second. A read that fails is an
+	// error.
+	AwaitConversationOp(ctx context.Context, conversation, id string) (opjournal.Op, error)
 }
 
 // conversationLaneKinds is the kinds the city's running lane host executes,
@@ -208,26 +214,22 @@ func (s *Server) humaHandleConversationOpPropose(ctx context.Context, input *Con
 	if err := opjournal.ValidateClientKey(key); err != nil {
 		return nil, apierr.InvalidIdempotencyKey.Msg("invalid_idempotency_key: " + err.Error())
 	}
-	sessions := s.state.SessionsBeadStore()
-	if sessions.Store == nil {
+	sessions := s.state.Stores().Sessions()
+	if sessions == (beads.SessionStore{}) {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
 	st, err := s.conversationOpStore()
 	if err != nil {
 		return nil, err
 	}
-	preview, err := st.Preview(proposeRequest(previewConversation, key, minted, producer, body))
-	if err != nil {
+	if _, err := st.Preview(proposeRequest(previewConversation, key, minted, producer, body)); err != nil {
 		return nil, proposeError(err)
-	}
-	if spec, err := opjournal.Lookup(preview.Kind); err == nil && spec.Class == opjournal.ClassContent && !preview.Policy.Message.When.LaneLowered() {
-		return nil, apierr.WhenNotSupported.Msgf("when_not_supported: this build's conversation lane does not deliver a %q message; this request wrote nothing", preview.Policy.Message.When)
 	}
 	cursor, err := s.currentCityEventCursor()
 	if err != nil {
 		return nil, apierr.ServiceUnavailable.Msg(err.Error())
 	}
-	conv, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, sessions.Store, input.ID)
+	conv, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, sessions, input.ID)
 	if err != nil {
 		return nil, humaResolveError(err)
 	}
@@ -329,11 +331,11 @@ func (s *Server) humaHandleConversationOpCancel(_ context.Context, input *Conver
 // conversationOpTarget resolves a read or cancel's session, closed sessions
 // included, and opens the op store.
 func (s *Server) conversationOpTarget(target string) (string, *opjournal.Store, error) {
-	sessions := s.state.SessionsBeadStore()
-	if sessions.Store == nil {
+	sessions := s.state.Stores().Sessions()
+	if sessions == (beads.SessionStore{}) {
 		return "", nil, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
-	conv, err := s.resolveSessionIDAllowClosedWithConfig(sessions.Store, target)
+	conv, err := s.resolveSessionIDAllowClosedWithConfig(sessions, target)
 	if err != nil {
 		return "", nil, humaResolveError(err)
 	}

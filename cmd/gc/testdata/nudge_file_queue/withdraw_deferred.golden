@@ -226,7 +226,7 @@ state.json:
 ### claim every wait nudge
 result: [wait-w1-0-1 wait-w2-0-1 wait-w3-0-1 wait-w4-0-1] err=<nil>
 rewrote_state: true
-store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
 state.json:
 {
   "in_flight": [
@@ -307,7 +307,7 @@ state.json:
 ### release all but wait-w2-0-1
 result: <nil>
 rewrote_state: true
-store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
 state.json:
 {
   "pending": [
@@ -469,7 +469,7 @@ state.json:
 
 ### withdraw whose shadow write fails keeps the item
 result: injected shadow write failure
-rewrote_state: true
+rewrote_state: false
 store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
 op Get BEAD-3
 state.json:

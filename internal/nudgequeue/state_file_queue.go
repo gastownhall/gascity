@@ -9,16 +9,17 @@ import "github.com/gastownhall/gascity/internal/beads"
 type StateFileQueue struct {
 	// CityPath is the city whose queue this is.
 	CityPath string
-	// Shadows is the nudges-class store holding the queue's shadow beads; nil
-	// means the withdrawal removes queue entries and touches no shadow.
-	Shadows beads.Store
+	// Shadows is the nudges-class store holding the queue's shadow beads; the
+	// zero handle means the withdrawal removes queue entries and touches no
+	// shadow.
+	Shadows beads.NudgesStore
 }
 
 // EnqueueDeferred appends item to the pending bucket. It runs no maintenance,
 // writes no shadow and does not check for a duplicate id: a deferred submit
 // mints a fresh id for every message.
 func (q StateFileQueue) EnqueueDeferred(item Item) error {
-	return WithState(q.CityPath, func(state *State) error {
+	return WithStateFor(q.CityPath, "enqueue_deferred", func(state *State) error {
 		state.Pending = append(state.Pending, item)
 		SortState(state)
 		return nil

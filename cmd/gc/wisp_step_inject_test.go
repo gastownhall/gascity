@@ -9,7 +9,7 @@ import (
 )
 
 func TestResolveActiveWispStep_NoStore(t *testing.T) {
-	b, err := resolveActiveWispStep(nil, nil, []string{"alice"})
+	b, err := resolveActiveWispStep(nil, testStores(nil, nil), []string{"alice"})
 	if err != nil || b != nil {
 		t.Fatalf("expected nil, nil; got %v, %v", b, err)
 	}
@@ -17,7 +17,7 @@ func TestResolveActiveWispStep_NoStore(t *testing.T) {
 
 func TestResolveActiveWispStep_NoAssignees(t *testing.T) {
 	store := beads.NewMemStore()
-	b, err := resolveActiveWispStep(store, store, nil)
+	b, err := resolveActiveWispStep(store, testStores(store, store), nil)
 	if err != nil || b != nil {
 		t.Fatalf("expected nil, nil; got %v, %v", b, err)
 	}
@@ -46,7 +46,7 @@ func TestResolveActiveWispStep_FoundWithDescription(t *testing.T) {
 		Assignee:    "alice",
 	})
 
-	b, err := resolveActiveWispStep(store, store, []string{"alice"})
+	b, err := resolveActiveWispStep(store, testStores(store, store), []string{"alice"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestResolveActiveWispStep_SkipsEmptyDescription(t *testing.T) {
 		Assignee: "alice",
 	})
 
-	b, err := resolveActiveWispStep(store, store, []string{"alice"})
+	b, err := resolveActiveWispStep(store, testStores(store, store), []string{"alice"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -84,7 +84,7 @@ func TestResolveActiveWispStep_WrongAssignee(t *testing.T) {
 		Assignee:    "bob",
 	})
 
-	b, err := resolveActiveWispStep(store, store, []string{"alice"})
+	b, err := resolveActiveWispStep(store, testStores(store, store), []string{"alice"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestResolveActiveWispStep_MultipleAssignees(t *testing.T) {
 		Assignee:    "bob",
 	})
 
-	b, err := resolveActiveWispStep(store, store, []string{"alice", "bob"})
+	b, err := resolveActiveWispStep(store, testStores(store, store), []string{"alice", "bob"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -151,7 +151,7 @@ func TestResolveActiveWispStep_MoleculeInProgressStep(t *testing.T) {
 		ParentID:    mol.ID,
 	})
 
-	b, err := resolveActiveWispStep(store, store, []string{"alice"})
+	b, err := resolveActiveWispStep(store, testStores(store, store), []string{"alice"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -184,7 +184,7 @@ func TestResolveActiveWispStep_MoleculeEntryStepFallback(t *testing.T) {
 		ParentID:    mol.ID,
 	})
 
-	b, err := resolveActiveWispStep(store, store, []string{"alice"})
+	b, err := resolveActiveWispStep(store, testStores(store, store), []string{"alice"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -206,7 +206,7 @@ func TestResolveActiveWispStep_MoleculeNoSteps(t *testing.T) {
 		Assignee: "alice",
 	})
 
-	b, err := resolveActiveWispStep(store, store, []string{"alice"})
+	b, err := resolveActiveWispStep(store, testStores(store, store), []string{"alice"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -234,7 +234,7 @@ func TestResolveActiveWispStep_WispTypeMolecule(t *testing.T) {
 		ParentID:    wisp.ID,
 	})
 
-	b, err := resolveActiveWispStep(store, store, []string{"alice"})
+	b, err := resolveActiveWispStep(store, testStores(store, store), []string{"alice"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -284,7 +284,7 @@ func TestResolveActiveWispStep_AttachedMoleculeIDBridge(t *testing.T) {
 		t.Fatalf("SetMetadata(molecule_id): %v", err)
 	}
 
-	b, err := resolveActiveWispStep(store, store, []string{"alice"})
+	b, err := resolveActiveWispStep(store, testStores(store, store), []string{"alice"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -396,7 +396,7 @@ func TestResolveActiveWispStepSpansTheClassBoundary(t *testing.T) {
 		t.Fatalf("SetMetadata(molecule_id): %v", err)
 	}
 
-	b, err := resolveActiveWispStep(work, graph, []string{"alice"})
+	b, err := resolveActiveWispStep(work, testStores(work, graph), []string{"alice"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -424,7 +424,7 @@ func TestResolveActiveWispStepKeepsTheLegacyFallbackOnWork(t *testing.T) {
 		Assignee:    "alice",
 	})
 
-	b, err := resolveActiveWispStep(work, graph, []string{"alice"})
+	b, err := resolveActiveWispStep(work, testStores(work, graph), []string{"alice"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -464,4 +464,46 @@ func TestWispStepResolutionListingsStateTheirOrder(t *testing.T) {
 	if bounded != 4 {
 		t.Fatalf("recorded %d bounded listings, want the two molecule types, the bridge and the legacy fallback", bounded)
 	}
+}
+
+// Review 3b: a v1 POURED molecule is work class, so on a split city its root
+// and steps live in the WORK store. The resolution must find the agent's
+// in-progress step there, both when the root is the agent's claimed molecule
+// and when it is reached through a source bead's molecule_id bridge.
+func TestResolveActiveWispStepFindsAWorkResidentPouredMolecule(t *testing.T) {
+	t.Run("claimed-root", func(t *testing.T) {
+		work := beads.NewMemStore()
+		graph := beads.NewMemStoreFrom(100, nil, nil)
+		// No descriptions anywhere, so the legacy description fallback cannot
+		// answer for the molecule path.
+		root := mustCreateInProgress(t, work, beads.Bead{Title: "Formula: mol-poured", Type: "molecule", Assignee: "alice"})
+		step := mustCreateInProgress(t, work, beads.Bead{Title: "Step 1", Type: "step", ParentID: root.ID})
+		b, err := resolveActiveWispStep(work, testStores(work, graph), []string{"alice"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if b == nil || b.ID != step.ID {
+			t.Fatalf("resolved %+v, want the work-resident step %s", b, step.ID)
+		}
+	})
+	t.Run("bridge", func(t *testing.T) {
+		work := beads.NewMemStore()
+		graph := beads.NewMemStoreFrom(100, nil, nil)
+		root, err := work.Create(beads.Bead{Title: "Formula: mol-poured", Type: "molecule"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		step := mustCreateInProgress(t, work, beads.Bead{Title: "Step 1", Description: "do it", Type: "step", ParentID: root.ID})
+		source := mustCreateInProgress(t, work, beads.Bead{Title: "source", Description: "source desc", Type: "task", Assignee: "alice"})
+		if err := work.SetMetadata(source.ID, beadmeta.MoleculeIDMetadataKey, root.ID); err != nil {
+			t.Fatal(err)
+		}
+		b, err := resolveActiveWispStep(work, testStores(work, graph), []string{"alice"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if b == nil || b.ID != step.ID {
+			t.Fatalf("resolved %+v, want the work-resident step %s through the bridge", b, step.ID)
+		}
+	})
 }

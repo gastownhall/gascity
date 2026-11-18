@@ -129,6 +129,11 @@ func validateRequestShape(op Op, spec Spec) error {
 	if err := validateScope(op.Scope, spec); err != nil {
 		return err
 	}
+	if spec.Kind == KindRespond {
+		if err := validateRespondShape(op); err != nil {
+			return err
+		}
+	}
 	if op.After != "" {
 		if !spec.AllowsAfter {
 			return invalidf("%s ops take no after", spec.Kind)

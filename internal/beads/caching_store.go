@@ -36,10 +36,16 @@ type CachingStore struct {
 	// eventPrefixes, when set, are the id namespaces whose bead events this
 	// cache applies, in place of idPrefix (WithEventIDPrefixes).
 	eventPrefixes []string
-	epoch         uint64 // names this instance in every CacheRevision it issues
+	// logicalReadTier, when set, answers a read left at the zero tier
+	// (TierIssues) across both tiers (WithLogicalReadTier).
+	logicalReadTier bool
+	epoch           uint64 // names this instance in every CacheRevision it issues
 	// reconcileGate, when set, is asked before each periodic reconcile; a
 	// false answer skips that cycle (WithReconcileGate).
 	reconcileGate func() bool
+	// storeWork, when set, counts each of the cache's own background reads as
+	// its owner's store work (WithStoreWork).
+	storeWork func() (end func())
 	// now is the clock every window and due time reads (WithClock); nil
 	// reads the real one. Read it through clockNow.
 	now func() time.Time
@@ -116,6 +122,16 @@ type CachingStore struct {
 	// costs no lock when idle.
 	unannouncedCloses    map[string]queuedClose
 	hasUnannouncedCloses atomic.Bool
+	// unannouncedUpdates holds rows a read installed over a held open row
+	// whose status, assignee or metadata it changed: another process's claim
+	// or update that a live list, dirty-row read or dirty overlay saw before
+	// the reconcile did. The next notification (or the read's own drain)
+	// announces them as bead.updated, the update-shaped twin of
+	// unannouncedCloses (see caching_store_read_announce.go).
+	// hasUnannouncedUpdates mirrors len(unannouncedUpdates) > 0 so the drain
+	// costs no lock when idle.
+	unannouncedUpdates    map[string]Bead
+	hasUnannouncedUpdates atomic.Bool
 	// closeIntents tracks, per bead, the closing writes (Close, a closing
 	// Update, the conditional closers) between their backing write and their
 	// claim of the bead.closed announcement (claimCloseLocked), and the close
@@ -342,11 +358,17 @@ func (o CacheObservation) CacheRev() CacheRevision {
 //     set, empty on such a backing, so until a later scan reads the edges a
 //     census can show a row without an edge a settled dependency write added.
 //   - A scan can roll a refetch back. Get, the overlay and a Live or Parent
-//     list clear or skip a row's beadSeq when they install it (RefreshRow
-//     stamps a changed row), so a reconcile whose listing predates the
-//     install, or a full Prime replace or PrimeActive that no mutation
-//     followed, installs its older row over it. It covers no local write
-//     (not a C5.4 breach) and lasts until the next scan.
+//     list clear or skip a row's beadSeq when they install it, except that
+//     an install that put a row the cache did not hold, or changed a held
+//     row's status, assignee or metadata, is stamped, as RefreshRow stamps a
+//     changed row (fenceReadInstallLocked). A reconcile whose listing
+//     predates an unstamped install, or a full Prime replace or PrimeActive
+//     that no mutation followed, installs its older row over it. It covers
+//     no local write (not a C5.4 breach) and lasts until the next scan.
+//   - Two refetches of one row cannot be ordered. A refetch that began
+//     before another's stamped install is refused, though its backing read
+//     may be the newer one: the cache keeps the stamped row until a read that
+//     begins after the stamp, or the next scan, installs the newer one.
 //   - An uncached event installs only its backing read, so a new row whose
 //     read fails or lags at event time waits for the next reconcile to
 //     appear.
@@ -449,6 +471,9 @@ type CacheStats struct {
 	CadenceDriver string
 	// ReconcileRequests counts RequestReconcile calls.
 	ReconcileRequests int64
+	// ReconcilePaused reports that the cache's reconcile gate (WithReconcileGate)
+	// was closed when Stats ran, so its periodic re-scans are skipped until it opens.
+	ReconcilePaused bool
 }
 
 const (
@@ -598,11 +623,42 @@ func WithEventIDPrefixes(prefixes ...string) CachingStoreOption {
 // the cache resumes reconciling as soon as allowed answers true again. A
 // caller whose backing store must not be touched for a while (its scope is
 // quiescent) uses this to stop the loop's full scans without rebuilding the
-// cache.
+// cache. Stats also calls allowed, so it must be safe for concurrent use, must
+// not block, and must not call back into the cache.
 func WithReconcileGate(allowed func() bool) CachingStoreOption {
 	return func(c *CachingStore) {
 		c.reconcileGate = allowed
 	}
+}
+
+// WithStoreWork makes the cache count its own background reads (PrimeActive,
+// Prime, and each reconcile cycle, from before it asks its reconcile gate) as
+// its owner's store work: begin is called as the read starts and the func it
+// returns as the read ends.
+func WithStoreWork(begin func() (end func())) CachingStoreOption {
+	return func(c *CachingStore) {
+		c.storeWork = begin
+	}
+}
+
+// JoinCachingStoreOptions applies opts, in order, as one option.
+func JoinCachingStoreOptions(opts ...CachingStoreOption) CachingStoreOption {
+	return func(c *CachingStore) {
+		for _, opt := range opts {
+			if opt != nil {
+				opt(c)
+			}
+		}
+	}
+}
+
+// beginStoreWork counts one background read as the owner's store work
+// (WithStoreWork) and returns the func that ends it.
+func (c *CachingStore) beginStoreWork() func() {
+	if c.storeWork == nil {
+		return func() {}
+	}
+	return c.storeWork()
 }
 
 // WithClock sets the clock the cache's windows and due times read: the
@@ -944,6 +1000,14 @@ type absorbOpts struct {
 	// an event already on the bus. Every other absorb that closes a cached row
 	// queues the close for the next notification (see unannouncedCloses).
 	closeAnnounced bool
+	// announceRead marks an install by a read that refetched the row from the
+	// backing (a live list, a dirty-row Get, the dirty overlay): a change it
+	// installs over a held open row is queued for a bead.updated announcement
+	// (see unannouncedUpdates), and an install that changed what a consumer
+	// reads is stamped so no read begun before it installs an older row over
+	// it (fenceReadInstallLocked). Writes, reconcile diffs and applied events
+	// announce for themselves or came from the bus, and leave it false.
+	announceRead bool
 	// closeClaimed says the caller is a closing write of this cache that
 	// claimed, or declined because it was announced elsewhere, the
 	// bead.closed of the row it installs (claimCloseLocked): unlike
@@ -974,6 +1038,7 @@ func (c *CachingStore) absorbFreshLocked(id string, bead Bead, now time.Time, op
 	bead = c.absorbReadyProjectionLocked(id, bead, opts)
 	c.beads[id] = cloneBead(bead)
 	c.trackCloseTransitionLocked(id, previous, hadPrevious, bead, opts.closeAnnounced, opts.closeClaimed)
+	c.trackReadUpdateLocked(id, previous, hadPrevious, bead, opts.announceRead)
 	switch opts.depsMode {
 	case depsExplicit:
 		c.deps[id] = cloneDeps(opts.deps)
@@ -1002,6 +1067,7 @@ func (c *CachingStore) absorbFreshLocked(id string, bead Bead, now time.Time, op
 	case seqClearBeadSeqOnly:
 		delete(c.beadSeq, id)
 	}
+	c.fenceReadInstallLocked(id, previous, hadPrevious, bead, opts.announceRead)
 }
 
 // absorbReadyProjectionLocked decides what happens to a row's is_blocked
@@ -1083,6 +1149,34 @@ func (c *CachingStore) readyPredicateCanAnswerLocked(deps []Dep) bool {
 	return true
 }
 
+// readyEdgesJudgeableLocked is readyPredicateCanAnswerLocked for a reader
+// that trusts the cache row by row (ReadyJudgmentContext). The
+// dependency-derived predicate reads a row's direct ready-blocking edges, as
+// the Ready of a store that strands absent targets does (SQLite, the
+// in-memory stores), so for such a store it reproduces a lost verdict exactly
+// when every ready-blocking edge lands on a resident row: a non-blocking edge
+// (tracks, relates-to, parent-child) is read by none of them, and the
+// controller judges rows this way only on such a store's cache. bd's verdict
+// reads more than the predicate models: it propagates blocked-ness down
+// parent-child edges, judges a waits-for edge by the target's children rather
+// than the target, and counts a pinned target as satisfied. A parent-child
+// edge keeps the row unjudged; over a bd backing the rest is the same
+// approximation readyPredicateCanAnswerLocked makes. Caller must hold c.mu.
+func (c *CachingStore) readyEdgesJudgeableLocked(deps []Dep) bool {
+	for _, dep := range deps {
+		if dep.Type == "parent-child" {
+			return false
+		}
+		if !isReadyBlockingDependencyType(dep.Type) {
+			continue
+		}
+		if _, resident := c.beads[dep.DependsOnID]; !resident {
+			return false
+		}
+	}
+	return true
+}
+
 // markReadyProjectionLostLocked records that this row's projected verdict is
 // gone. Whether that costs the row its readiness answer is decided at read time
 // by readyProjectionUnknownLocked, so the mark itself stays a pure function of
@@ -1146,6 +1240,7 @@ func (c *CachingStore) readyProjectionUnknownLocked(id string) bool {
 // mode.
 func (c *CachingStore) evictLocked(id string) {
 	c.advanceObservationLocked()
+	c.dropQueuedUpdateLocked(id)
 	delete(c.beads, id)
 	delete(c.silentCloses, id)
 	delete(c.deps, id)
@@ -1255,8 +1350,8 @@ func (c *CachingStore) cacheServableLocked() bool {
 // survived the bounded retry. No backing I/O happens under c.mu (I7).
 func (c *CachingStore) readCacheWithOverlay(gate func() bool, collect func(suppressed map[string]struct{})) error {
 	// Deferred so it runs after every unlock below: a dirty-row refresh can be
-	// the first reader to see a close made by another process.
-	defer c.announceUnannouncedCloses()
+	// the first reader to see a close or a claim made by another process.
+	defer c.announceReadInstalls()
 	suppressed := make(map[string]struct{})
 	for pass := 0; pass < 2; pass++ {
 		c.mu.RLock()
@@ -1305,9 +1400,10 @@ func (c *CachingStore) readCacheWithOverlay(gate func() bool, collect func(suppr
 				continue
 			}
 			opts := absorbOpts{
-				depsMode:   depsFromFields,
-				seqMode:    seqClearBeadSeqOnly,
-				clearDirty: true,
+				depsMode:     depsFromFields,
+				seqMode:      seqClearBeadSeqOnly,
+				clearDirty:   true,
+				announceRead: true,
 			}
 			// R1: rows whose backing.Get carried no dependency fields had their
 			// authoritative deps fetched separately; install them verbatim so the
@@ -1442,6 +1538,7 @@ func (c *CachingStore) fetchDirtyOverlay(todo []string, suppressed map[string]st
 // cachePartial state: filtered active queries and Get hit cache for primed
 // beads, while closed-bead queries still delegate to the backing store.
 func (c *CachingStore) PrimeActive() error {
+	defer c.beginStoreWork()()
 	c.mu.RLock()
 	startSeq, startScan := c.mutationSeq, c.scanGen
 	c.mu.RUnlock()
@@ -1526,6 +1623,7 @@ func (c *CachingStore) PrimeActive() error {
 // Retries up to 3 times on failure since bd list can time out under
 // concurrent dolt load.
 func (c *CachingStore) Prime(ctx context.Context) error {
+	defer c.beginStoreWork()()
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1614,12 +1712,12 @@ func (c *CachingStore) prime(ctx context.Context) error {
 
 	now := c.clockNow()
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if c.fullScanGen > startScan {
 		// A reconcile merged after this listing started (full Primes do not
 		// overlap). It is as complete and may be newer, and it promoted the
 		// cache live, so this merges nothing, including the store-wide flags,
 		// as a reconcile skips after a newer full Prime.
+		c.mu.Unlock()
 		return nil
 	}
 	// The replace runs only when no mutation or merge followed the listing:
@@ -1627,6 +1725,7 @@ func (c *CachingStore) prime(ctx context.Context) error {
 	replace := c.mutationSeq == startSeq && c.scanGen == startScan
 	c.scanGen++
 	c.fullScanGen = c.scanGen
+	reverify := false
 	if replace {
 		nextBeads := beadMap
 		nextDeps := depsFromBeads(beadMap, depMap, depsComplete && depErr == nil)
@@ -1638,28 +1737,23 @@ func (c *CachingStore) prime(ctx context.Context) error {
 		// carried over from the old cache keep theirs.
 		nextReadyLost := make(map[string]struct{})
 		for id, current := range c.beads {
-			if fresh, exists := beadMap[id]; exists {
-				if _, keep := c.recentLocalBeadConflictLocked(id, fresh, now, true); keep {
-					nextBeads[id] = cloneBead(current)
-					if deps, ok := c.deps[id]; ok {
-						nextDeps[id] = cloneDeps(deps)
-					}
-					if _, lost := c.readyProjectionLost[id]; lost {
-						nextReadyLost[id] = struct{}{}
-					}
-					c.carryRecentLocalMutationLocked(id, nextDirty, nextBeadSeq, nextLocalBeadAt)
-				}
+			carry, unverified := c.primeCarriesLocked(id, current, beadMap, now)
+			if !carry {
 				continue
 			}
-			if current.Status != "closed" && recentLocalMutation(c.localBeadAt[id], now) {
-				nextBeads[id] = cloneBead(current)
-				if deps, ok := c.deps[id]; ok {
-					nextDeps[id] = cloneDeps(deps)
-				}
-				if _, lost := c.readyProjectionLost[id]; lost {
-					nextReadyLost[id] = struct{}{}
-				}
-				c.carryRecentLocalMutationLocked(id, nextDirty, nextBeadSeq, nextLocalBeadAt)
+			nextBeads[id] = cloneBead(current)
+			if deps, ok := c.deps[id]; ok {
+				nextDeps[id] = cloneDeps(deps)
+			}
+			if _, lost := c.readyProjectionLost[id]; lost {
+				nextReadyLost[id] = struct{}{}
+			}
+			c.carryRecentLocalMutationLocked(id, nextDirty, nextBeadSeq, nextLocalBeadAt)
+			if unverified {
+				// Dirty, so reads take the backing for the row until a
+				// refresh or the re-verify settles it.
+				nextDirty[id] = struct{}{}
+				reverify = true
 			}
 		}
 		if depErr != nil {
@@ -1674,17 +1768,18 @@ func (c *CachingStore) prime(ctx context.Context) error {
 		}
 		c.beads = nextBeads
 		c.deps = nextDeps
-		c.depsComplete = depsComplete && depErr == nil
+		c.setDepsCompleteLocked(depsComplete && depErr == nil, "prime: dependency read incomplete")
 		c.dirty = nextDirty
 		c.beadSeq = nextBeadSeq
 		c.localBeadAt = nextLocalBeadAt
 		c.readyProjectionLost = nextReadyLost
 		c.deletedSeq = make(map[string]uint64)
-		// The replace dropped every beadSeq fence and the deletion fences;
-		// like an eviction, it keeps the write fences of the rows it drops
-		// for the next reconcile to retain. It runs only when no mutation
-		// followed startSeq, so every start below the current seq saw one
-		// and is refused wholesale (writeFencedLocked).
+		// The replace dropped the beadSeq fences of the rows it replaced or
+		// dropped, and the deletion fences; like an eviction, it keeps the
+		// write fences of the rows it drops (the ones it holds closed) for
+		// the next reconcile to retain. It runs only when no mutation
+		// followed startSeq, so every start below the current seq saw one and
+		// is refused wholesale (writeFencedLocked).
 		c.fenceFloor = c.mutationSeq
 	} else {
 		for id, b := range beadMap {
@@ -1705,7 +1800,7 @@ func (c *CachingStore) prime(ctx context.Context) error {
 			}
 			c.absorbFreshLocked(id, b, now, opts)
 		}
-		c.depsComplete = false
+		c.markDepsIncompleteLocked("prime raced a write: rows kept from the cache")
 	}
 	c.state = cacheLive
 	c.syncFailures = 0
@@ -1716,7 +1811,37 @@ func (c *CachingStore) prime(ctx context.Context) error {
 	c.markFreshLocked(now)
 	c.lastScanAt = now
 	c.updateStatsLocked()
+	c.mu.Unlock()
+	if reverify {
+		// Ask for the re-verify now rather than a cadence after this scan:
+		// it announces the carried rows' closes, and a reconcile this Prime
+		// made discard its merge re-arms only a request it took itself.
+		c.RequestReconcile()
+	}
 	return nil
+}
+
+// primeCarriesLocked reports whether a full Prime's replace keeps current, the
+// row the cache holds for id, over what the scan (beadMap) returned, and
+// whether the kept row is unverified. A listed row is kept only when a recent
+// local write changed it, which the scan may predate. A row absent from the
+// scan is not known to be closed: the listing is active-only, so a row closed,
+// deleted, or merely omitted behind the cache looks the same here. Every
+// non-closed one is kept for the next cacheFullScanQuery reconcile, whose
+// per-id re-verify (recoverMissingFromList) merges an alive row back,
+// announces a verified close exactly once, or defers on error; only a row the
+// cache already holds closed is dropped. A kept absent row is unverified
+// unless a recent local write vouches for the cached row, as it does for a
+// listed one. Caller must hold c.mu.
+func (c *CachingStore) primeCarriesLocked(id string, current Bead, beadMap map[string]Bead, now time.Time) (carry, unverified bool) {
+	if fresh, listed := beadMap[id]; listed {
+		_, keep := c.recentLocalBeadConflictLocked(id, fresh, now, true)
+		return keep, false
+	}
+	if current.Status == "closed" {
+		return false, false
+	}
+	return true, !recentLocalMutation(c.localBeadAt[id], now)
 }
 
 func (c *CachingStore) beginFullPrime() (*fullPrimeCycle, bool) {
@@ -1927,10 +2052,15 @@ func (c *CachingStore) Stopped() <-chan struct{} {
 
 // Stats returns current cache statistics.
 func (c *CachingStore) Stats() CacheStats {
+	// The gate is immutable after construction; ask it outside c.mu so it can
+	// never deadlock against the cache.
+	paused := c.reconcileGate != nil && !c.reconcileGate()
+
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
 	s := c.stats
+	s.ReconcilePaused = paused
 	switch c.state {
 	case cachePartial:
 		s.State = "partial"

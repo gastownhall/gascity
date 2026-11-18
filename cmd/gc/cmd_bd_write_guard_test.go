@@ -129,18 +129,27 @@ func TestGcBdWriteGuardDoesNotOpenTheScopeStore(t *testing.T) {
 // read, because the close gate and the claim-identity close consume the bead
 // itself; so does a write naming an unprefixed id, which bd rewrites
 // (TestGcBdWriteGuardReadsAnUnprefixedIDWhereBdResolvesIDsExactly).
+//
+// The guard's reads are the ones before the write. A close also reads its bead
+// back after the write, to announce bead.closed with the committed row
+// (bd_close_events.go); that read-back is counted on its own, and so is the one
+// edge read the announcement makes for a bead that read closed with no edges.
+// The edge read runs beside the read-back rather than after it, which is why a
+// close is three bd trips in series and not four (ga-svwt5ka).
 func TestGcBdWriteGuardSkipsTheReadWhereBdResolvesIDsExactly(t *testing.T) {
 	cases := []struct {
-		name      string
-		args      []string
-		wantReads int
+		name          string
+		args          []string
+		wantReads     int
+		wantReadBacks int
+		wantEdgeReads int
 	}{
-		{"update", []string{"update", "demo-abc", "--status", "in_progress"}, 0},
-		{"update metadata", []string{"update", "demo-abc", "--set-metadata", "k=v"}, 0},
-		{"reopen", []string{"reopen", "demo-abc"}, 0},
-		{"heartbeat", []string{"heartbeat", "demo-abc"}, 0},
-		{"close reads for the gate and claim identity", []string{"close", "demo-abc"}, 1},
-		{"update to closed reads for the gate", []string{"update", "demo-abc", "--status", "closed"}, 1},
+		{"update", []string{"update", "demo-abc", "--status", "in_progress"}, 0, 0, 0},
+		{"update metadata", []string{"update", "demo-abc", "--set-metadata", "k=v"}, 0, 0, 0},
+		{"reopen", []string{"reopen", "demo-abc"}, 0, 0, 0},
+		{"heartbeat", []string{"heartbeat", "demo-abc"}, 0, 0, 0},
+		{"close reads for the gate and claim identity", []string{"close", "demo-abc"}, 1, 1, 1},
+		{"update to closed reads for the gate", []string{"update", "demo-abc", "--status", "closed"}, 1, 1, 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -148,19 +157,32 @@ func TestGcBdWriteGuardSkipsTheReadWhereBdResolvesIDsExactly(t *testing.T) {
 			setCwd(t, cityDir)
 			// bd's http store refuses partial-id search: ids resolve exactly.
 			writeBoundBackendMetadata(t, cityDir, "http")
+			// The bead reads open until the write is logged, then closed with no
+			// edges: a close's read-back confirms the transition.
 			calls := writeBatchGuardBdStub(t, `    "show --json demo-abc")
-      printf '[{"id":"demo-abc","status":"open"}]\n' ;;`)
+      if grep -qE '^(close demo-abc|update demo-abc --status closed)' "$LOG"; then
+        printf '[{"id":"demo-abc","status":"closed"}]\n'
+      else
+        printf '[{"id":"demo-abc","status":"open"}]\n'
+      fi ;;`)
 
 			var stdout, stderr bytes.Buffer
 			if code := doBd(tc.args, &stdout, &stderr); code != 0 {
 				t.Fatalf("doBd(%v) = %d, want 0; stderr=%q", tc.args, code, stderr.String())
 			}
 			log := readBdCallLog(t, calls)
-			if got := strings.Count(log, "show --json demo-abc"); got != tc.wantReads {
+			write := strings.Index(log, strings.Join(tc.args, " "))
+			if write < 0 {
+				t.Fatalf("the write was not forwarded to bd:\n%s", log)
+			}
+			if got := strings.Count(log[:write], "show --json demo-abc"); got != tc.wantReads {
 				t.Fatalf("guard reads = %d, want %d:\n%s", got, tc.wantReads, log)
 			}
-			if !strings.Contains(log, strings.Join(tc.args, " ")) {
-				t.Fatalf("the write was not forwarded to bd:\n%s", log)
+			if got := strings.Count(log[write:], "show --json demo-abc"); got != tc.wantReadBacks {
+				t.Fatalf("read-backs after the write = %d, want %d:\n%s", got, tc.wantReadBacks, log)
+			}
+			if got := strings.Count(log[write:], "dep list demo-abc"); got != tc.wantEdgeReads {
+				t.Fatalf("edge reads after the write = %d, want %d:\n%s", got, tc.wantEdgeReads, log)
 			}
 		})
 	}

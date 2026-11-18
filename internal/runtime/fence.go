@@ -162,6 +162,12 @@ var (
 	ErrInputFenceUnsupported = errors.New("runtime cannot fence this session's input")
 	// ErrInvalidInputFence reports a fence that names no incarnation.
 	ErrInvalidInputFence = errors.New("input fence names no incarnation")
+	// ErrInputNotSent reports a fenced input that failed before any of its
+	// effect (the input FenceMismatchError.Partial counts) was sent, for a
+	// reason that is neither a miss nor ErrRuntimeUnavailable: checking the
+	// fence, or staging the input, failed. An error without it makes no
+	// such claim.
+	ErrInputNotSent = errors.New("fenced input failed before it was sent")
 )
 
 // What a FenceMismatchError found instead of a fence digest.
@@ -223,7 +229,8 @@ type FencedNudge struct {
 // ErrInvalidInputFence, or (InputFencing none) ErrInputFenceUnsupported
 // before any input. A runtime with no server to ask at all (tmux with no
 // server running) returns ErrRuntimeUnavailable instead of a mismatch: it
-// cannot tell absent from unreachable.
+// cannot tell absent from unreachable. A call that fails for another reason
+// before any of its effect was sent may wrap ErrInputNotSent.
 type FencedInputProvider interface {
 	// InputFencing reports how the runtime fences session name's input. It
 	// is a static trait: it reads no runtime state.
@@ -371,4 +378,55 @@ func InterruptWithContext(ctx context.Context, p Provider, name string) error {
 		return fp.InterruptFenced(ctx, name, f)
 	}
 	return p.Interrupt(name)
+}
+
+// launchIDTag versions the LaunchID format. Queued items carry launch ids in
+// this format, so a new format needs a new tag and a new queue reference kind.
+const launchIDTag = "gascity/launch/v1"
+
+// LaunchID is the public identity of the launch an instance token names: the
+// first 16 hex characters of sha256 over the length-prefixed tag and token,
+// the construction Digest uses, domain-separated from it. It is safe to store
+// and log where the token, a capability, is not; it is equal exactly when the
+// tokens are. The empty token has no launch: its LaunchID is "".
+func LaunchID(token string) string {
+	if token == "" {
+		return ""
+	}
+	sum := sha256.Sum256(fenceLP(fenceLP(nil, launchIDTag), token))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+// ReadLaunchID reads the LaunchID of the launch running as session name: one
+// GetMeta of its InstanceTokenEnv through p. It reports false when that read
+// cannot name a launch: no session, a runtime that cannot answer, no token,
+// or a runtime that keeps no session metadata.
+func ReadLaunchID(p Provider, name string) (string, bool) {
+	if p == nil || name == "" {
+		return "", false
+	}
+	token, err := p.GetMeta(name, InstanceTokenEnv)
+	if err != nil || token == "" {
+		return "", false
+	}
+	return LaunchID(token), true
+}
+
+// ReadInputFence reads the fence of the incarnation running as session name:
+// its InstanceTokenEnv, RuntimeEpochEnv and ContinuationEpochEnv through p,
+// read as InputFenceFromEnv reads an environment. It reports false when the
+// token cannot be read (see ReadLaunchID) or a counter's read fails.
+func ReadInputFence(p Provider, name string) (InputFence, bool) {
+	if p == nil || name == "" {
+		return InputFence{}, false
+	}
+	env := make(map[string]string, 3)
+	for _, key := range []string{InstanceTokenEnv, RuntimeEpochEnv, ContinuationEpochEnv} {
+		value, err := p.GetMeta(name, key)
+		if err != nil {
+			return InputFence{}, false
+		}
+		env[key] = value
+	}
+	return InputFenceFromEnv(env)
 }

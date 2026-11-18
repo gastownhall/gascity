@@ -5,6 +5,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // A Ralph loop advances an outer iteration by CLONING the prior iteration's
@@ -148,7 +149,7 @@ func TestAppendRalphRetryLegacyAdvancesIterationAndKeepsNestedRetryCounters(t *t
 		plainMember.ID:  plainMember,
 	}
 
-	mapping, err := appendRalphRetryLegacy(store, logical.ID, subject, check, attemptSet,
+	mapping, err := appendRalphRetryLegacy(beadstest.Graph(store), logical.ID, subject, check, attemptSet,
 		1, 2, "review-loop.iteration.1", "review-loop.iteration.2", nil)
 	if err != nil {
 		t.Fatalf("appendRalphRetryLegacy: %v", err)

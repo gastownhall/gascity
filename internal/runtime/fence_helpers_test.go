@@ -160,6 +160,7 @@ const maxUnfencedBackends = 3
 var fencedBackends = map[runtime.Profile]runtime.InputFencing{
 	runtime.ProfileTmux:       runtime.InputFencingAtomic,
 	runtime.ProfileExec:       runtime.InputFencingAtomic,
+	runtime.ProfileExecV2:     runtime.InputFencingAtomic,
 	runtime.ProfileACP:        runtime.InputFencingChecked,
 	runtime.ProfileSubprocess: runtime.InputFencingChecked,
 	runtime.ProfileT3Bridge:   runtime.InputFencingChecked,

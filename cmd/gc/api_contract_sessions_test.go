@@ -29,7 +29,9 @@ func (h *contractHarness) createAgentSession(t *testing.T, title string) genclie
 	if acc.Status != "accepted" {
 		t.Fatalf("create session status = %q, want accepted", acc.Status)
 	}
-	e := h.awaitSuccess(t, contractAccepted{RequestID: acc.RequestId, EventCursor: acc.EventCursor}, events.RequestResultSessionCreate)
+	accepted := contractAccepted{RequestID: acc.RequestId, EventCursor: acc.EventCursor}
+	e := h.awaitSuccess(t, accepted, events.RequestResultSessionCreate)
+	h.expectSessionRequestOutcome(t, accepted, "session.create", e)
 	var payload struct {
 		Session genclient.SessionResponse `json:"session"`
 	}
@@ -81,6 +83,7 @@ func (h *contractHarness) openStream(t *testing.T, what string, open func(ctx co
 func contractSessionsFamily(t *testing.T, h *contractHarness) {
 	c, ctx, city := h.client, h.ctx, contractCityName
 	sess := h.createAgentSession(t, "contract session")
+	h.expectUnknownRequestNotFound(t)
 
 	list, err := c.GetV0CityByCityNameSessionsWithResponse(ctx, city, &genclient.GetV0CityByCityNameSessionsParams{Template: ptr(contractAgent)})
 	expectStatus(t, "list sessions", list, err, http.StatusOK)
@@ -163,6 +166,17 @@ func contractSessionsFamily(t *testing.T, h *contractHarness) {
 		t.Fatalf("city pending missing %s: %s", runtimePendingApproval.RequestID, cityPending.Body)
 	}
 	h.sp.SetPendingInteraction(sess.SessionName, nil)
+
+	// Turn read: the harness runtime neither observes turns nor runs agents
+	// whose transcripts gc reads, so the session has no turn source, which is
+	// a 200 unsupported answer, never a 5xx. An unknown session is 404.
+	turn, err := c.GetV0CityByCityNameSessionByIdTurnWithResponse(ctx, city, sess.Id)
+	expectStatus(t, "session turn", turn, err, http.StatusOK)
+	if got := mustJSON(t, "session turn", turn.JSON200, turn); got.Source != "none" || got.Observation != "unsupported" || got.Current != nil || got.SessionId != sess.Id {
+		t.Fatalf("session turn = %s, want source none, observation unsupported", contractBody(turn))
+	}
+	noTurn, err := c.GetV0CityByCityNameSessionByIdTurnWithResponse(ctx, city, "gc-no-such-session")
+	expectStatus(t, "unknown session turn", noTurn, err, http.StatusNotFound)
 
 	perm, err := c.PostV0CityByCityNameSessionByIdPermissionModeWithResponse(ctx, city, sess.Id,
 		&genclient.PostV0CityByCityNameSessionByIdPermissionModeParams{XGCRequest: contractCSRF},
@@ -268,7 +282,8 @@ func (h *contractHarness) submitAndExpectDelivered(t *testing.T, sess genclient.
 		genclient.SubmitSessionJSONRequestBody{Message: "contract submit"})
 	expectStatus(t, "submit session", resp, err, http.StatusAccepted)
 	acc := mustJSON(t, "submit session", resp.JSON202, resp)
-	h.awaitSuccess(t, contractAccepted{RequestID: acc.RequestId, EventCursor: acc.EventCursor}, events.RequestResultSessionSubmit)
+	accepted := contractAccepted{RequestID: acc.RequestId, EventCursor: acc.EventCursor}
+	h.expectSessionRequestOutcome(t, accepted, "session.submit", h.awaitSuccess(t, accepted, events.RequestResultSessionSubmit))
 	h.expectRuntimeReceived(t, sess.SessionName, "contract submit")
 }
 
@@ -281,7 +296,8 @@ func (h *contractHarness) messageAndExpectDelivered(t *testing.T, sess genclient
 		genclient.SendSessionMessageJSONRequestBody{Message: "contract message"})
 	expectStatus(t, "send session message", resp, err, http.StatusAccepted)
 	acc := mustJSON(t, "send session message", resp.JSON202, resp)
-	h.awaitSuccess(t, contractAccepted{RequestID: acc.RequestId, EventCursor: acc.EventCursor}, events.RequestResultSessionMessage)
+	accepted := contractAccepted{RequestID: acc.RequestId, EventCursor: acc.EventCursor}
+	h.expectSessionRequestOutcome(t, accepted, "session.message", h.awaitSuccess(t, accepted, events.RequestResultSessionMessage))
 	h.expectRuntimeReceived(t, sess.SessionName, "contract message")
 }
 

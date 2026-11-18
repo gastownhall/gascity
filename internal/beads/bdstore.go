@@ -18,7 +18,9 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/telemetry"
+	"github.com/steveyegge/beads/issueops"
 )
 
 const (
@@ -28,6 +30,8 @@ const (
 
 // CommandRunner executes a command in the given directory and returns stdout bytes.
 // The dir argument sets the working directory; name and args specify the command.
+// A runner must be safe for concurrent use: a two-tier List calls it from two
+// goroutines at once (see listTierPair).
 type CommandRunner func(dir, name string, args ...string) ([]byte, error)
 
 var (
@@ -133,6 +137,10 @@ func execCommandRunner(parent context.Context, env map[string]string, withoutAmb
 		}
 
 		cmd := exec.CommandContext(ctx, execName, args...)
+		if err := execenv.CheckBatchFileArgs(cmd); err != nil {
+			trace("refused", err)
+			return nil, fmt.Errorf("running %s: %w", name, err)
+		}
 		cmd.WaitDelay = 2 * time.Second
 		prepareCommandForTimeout(cmd)
 		cmd.Dir = dir
@@ -280,17 +288,65 @@ func classifyBDExecResult(parent, ctx context.Context, name string, timeout time
 // every other shape — a single line, stderr that already leads with the error,
 // stderr with no bd error line, empty stderr, a non-bd command — composes
 // byte-for-byte what it composed before.
+//
+// bd's .beads/.env notices (isBdEnvFileNotice) go last, after whatever says
+// what failed, and do not count as stderr when choosing between the streams.
+// bd v1.3.3 and later print one on every command for each key outside their
+// .beads/.env allowlist. v1.3.3 also refused the GT_ROOT line every rig `gc rig
+// add` creates carries there (v1.3.4 admits GT_ROOT again), and any other key a
+// user puts in that file still draws the notice. If those lines counted, a --json failure bd reports only on stdout (bd close, dep
+// list, label add) would lose its envelope: the error text would hold just the
+// notices, and the text classifiers (isBdNotFound, isBdTransientWriteError)
+// would stop recognizing it.
 func bdFailureDetail(name string, out []byte, stderr string) string {
 	detail := strings.TrimSpace(stderr)
 	if name != "bd" {
 		return detail
 	}
+	detail, notices := splitBdEnvFileNotices(detail)
 	if detail == "" {
 		// bd writes structured errors to stdout under --json while stderr is
 		// often empty.
-		return bdStdoutErrorDetail(out)
+		detail = bdStdoutErrorDetail(out)
+	} else {
+		detail = hoistBdErrorLines(detail)
 	}
-	return hoistBdErrorLines(detail)
+	switch {
+	case notices == "":
+		return detail
+	case detail == "":
+		return notices
+	default:
+		return detail + "\n" + notices
+	}
+}
+
+// isBdEnvFileNotice reports whether line is the notice bd (v1.3.3 and later,
+// gastownhall/beads#7879) prints to stderr for a .beads/.env key outside its
+// allowlist: "beads: ignoring <KEY> from .beads/.env (<reason>)". bd prints it
+// before the command runs and ignores the key, so the line says nothing about
+// why a command failed.
+func isBdEnvFileNotice(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	return strings.HasPrefix(trimmed, "beads: ignoring ") && strings.Contains(trimmed, " from .beads/.env (")
+}
+
+// splitBdEnvFileNotices separates bd's .beads/.env notices from the rest of
+// detail, each part keeping its lines in their original order. Detail without
+// a notice comes back unchanged.
+func splitBdEnvFileNotices(detail string) (rest, notices string) {
+	if !strings.Contains(detail, " from .beads/.env (") {
+		return detail, ""
+	}
+	var kept, moved []string
+	for _, line := range strings.Split(detail, "\n") {
+		if isBdEnvFileNotice(line) {
+			moved = append(moved, line)
+			continue
+		}
+		kept = append(kept, line)
+	}
+	return strings.TrimSpace(strings.Join(kept, "\n")), strings.Join(moved, "\n")
 }
 
 // bdErrorLinePrefixes are the prefixes bd stamps on the lines that say what
@@ -430,6 +486,11 @@ type BdStore struct {
 	// serve. Empty on every city that keeps all classes on one store, which is
 	// what makes the SQL guard inert there. See bdsql_relocation.go.
 	relocatedClasses []RelocatedClass
+
+	// txProjectionTimeout bounds a staged Tx's wait for an update to read
+	// back (waitForUpdateProjection). Zero means bdTxProjectionTimeout; tests
+	// shorten it.
+	txProjectionTimeout time.Duration
 
 	readyProjectionMu      sync.Mutex
 	readyProjectionChecked bool
@@ -644,10 +705,15 @@ func (s *BdStore) SetPurgeRunner(fn PurgeRunnerFunc) {
 // Purge runs "bd purge" to remove closed ephemeral beads from the given
 // beads directory. Uses a 60-second timeout as a safety circuit breaker.
 // The beadsDir is the .beads/ directory path; bd runs from its parent.
+// A real purge passes --force: without it bd purge only previews and exits
+// non-zero when anything matches. A dry run passes --dry-run and never
+// --force.
 func (s *BdStore) Purge(beadsDir string, dryRun bool) (PurgeResult, error) {
 	args := []string{"purge", "--json"}
 	if dryRun {
 		args = append(args, "--dry-run")
+	} else {
+		args = append(args, "--force")
 	}
 
 	dir := filepath.Dir(beadsDir)
@@ -1049,6 +1115,16 @@ func IsPartialResult(err error) bool {
 	return errors.As(err, &partial)
 }
 
+// IsIssueTypeRefused reports whether err is a store refusing a bead type its
+// type registry does not define. bd validates a list's --type, like a
+// create's, against the store's built-in and custom types and answers
+// `invalid issue type "<type>"`; a store gc does not serve (an adopted rig
+// store, until gc's types are registered) keeps bd's own registry. The
+// refusal proves the store holds no row of that type, since bd creates none.
+func IsIssueTypeRefused(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "invalid issue type")
+}
+
 // IsTimeoutError reports whether err was caused by a store/bd query exceeding
 // its time budget — a per-command bd exec timeout (bdExecTimeoutError, "timed
 // out after ...") or a context deadline. It deliberately excludes cancellation
@@ -1186,7 +1262,7 @@ func (b *bdIssue) toBead() Bead {
 			}
 		}
 	}
-	status, indefinitelyDeferred := normalizedBdReadState(b.Status, b.DeferUntil)
+	status, indefinitelyDeferred := normalizedBdReadState(b.Status)
 	return Bead{
 		ID:                   b.ID,
 		Title:                b.Title,
@@ -1210,6 +1286,7 @@ func (b *bdIssue) toBead() Bead {
 		IsBlocked:            b.IsBlocked.ptr(),
 		CloseReason:          bdCloseReason(status, b.CloseReason),
 		IndefinitelyDeferred: indefinitelyDeferred,
+		SourceStatus:         b.Status,
 		Revision:             int64(b.Revision),
 	}
 }
@@ -1377,12 +1454,18 @@ func isExactIDQueryable(id string) bool {
 	return true
 }
 
+// isBdClaimConflictMessage reports whether bd refused a claim because of the
+// bead's own state: another actor holds it, or its status is not claimable
+// (closed, deferred or blocked since the caller read it). bd prints the
+// latter as beads' ErrNotClaimable sentinel followed by the status, on both its
+// direct and proxied-server update paths. Either refusal wrote nothing.
 func isBdClaimConflictMessage(msg string) bool {
 	msg = strings.ToLower(msg)
 	return strings.Contains(msg, "already assigned") ||
 		strings.Contains(msg, "already claimed") ||
 		strings.Contains(msg, "claimed by") ||
-		strings.Contains(msg, "claim conflict")
+		strings.Contains(msg, "claim conflict") ||
+		strings.Contains(msg, strings.ToLower(issueops.ErrNotClaimable.Error()))
 }
 
 // mapBdStatus maps bd's statuses to Gas City's 3. bd uses: open,
@@ -1399,11 +1482,14 @@ func mapBdStatus(s string) string {
 	}
 }
 
-// normalizedBdReadState preserves bd's status-based indefinite deferral after
-// richer bd statuses collapse to Gas City's three-state model. A time-bound
-// deferral remains governed by DeferUntil so it can become ready after expiry.
-func normalizedBdReadState(status string, deferUntil *time.Time) (string, bool) {
-	return mapBdStatus(status), status == "deferred" && deferUntil == nil
+// normalizedBdReadState preserves bd's status-based deferral after richer bd
+// statuses collapse to Gas City's three-state model. bd's deferred status is a
+// deferral in its own right, dated or not: defer_until only says when bd's own
+// sweep may lift the deferral, and gc honors the lift once the store records
+// it. bd's ready query filters on the raw status, so a row the store still
+// records deferred is never served, whatever its date (#6207).
+func normalizedBdReadState(status string) (string, bool) {
+	return mapBdStatus(status), status == "deferred"
 }
 
 type optionalBool struct {
@@ -1861,9 +1947,11 @@ func isBdSQLUnsupportedInEmbeddedMode(err error) bool {
 
 // Claim atomically claims an open bead through bd update --claim.
 //
-// It returns ok=false when bd reports that another actor won the claim race.
-// The caller controls the claim actor through the store's CommandRunner
-// environment, typically BEADS_ACTOR.
+// It returns ok=false with a nil error when bd refuses the claim because of
+// the bead's own state: another actor holds it, or its status is not claimable.
+// That is the conflict verdict SQLiteStore.Claim and NativeDoltStore.Claim
+// return for the same refusals. The caller controls the claim actor through the
+// store's CommandRunner environment, typically BEADS_ACTOR.
 func (s *BdStore) Claim(id string) (Bead, bool, error) {
 	out, err := s.runBDTransientWriteOutput("update", id, "--claim", "--json")
 	if err != nil {
@@ -2264,8 +2352,20 @@ func (tx *bdStoreTx) apply() error {
 	return nil
 }
 
+// waitForUpdateProjection polls id until a read shows opts, so the staged
+// Tx's next write (bd close, or the post-close re-assert) acts on the row the
+// previous update left: bd update can clobber unspecified fields in
+// dolt-server mode, and a read can lag the write. It runs after bd exited 0 on
+// the update, reporting it committed, so on timeout only the read-back is
+// missing: the error wraps ErrWriteUnconfirmed. The bound is internal
+// (txProjectionTimeout, else bdTxProjectionTimeout); Store.Tx carries no
+// caller context.
 func (s *BdStore) waitForUpdateProjection(id string, opts UpdateOpts) error {
-	ctx, cancel := context.WithTimeout(context.Background(), bdTxProjectionTimeout)
+	timeout := s.txProjectionTimeout
+	if timeout <= 0 {
+		timeout = bdTxProjectionTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	ticker := time.NewTicker(bdParentProjectionPollInterval)
@@ -2284,10 +2384,14 @@ func (s *BdStore) waitForUpdateProjection(id string, opts UpdateOpts) error {
 		}
 		select {
 		case <-ctx.Done():
+			// bd exited 0 on the update, reporting it committed: only the
+			// read-back is missing. Report that, not a failed write, so a
+			// caller re-reads instead of answering "failed" for a write that
+			// landed.
 			if lastErr != nil {
-				return fmt.Errorf("updating bead %q: waiting for tx update projection: %w (last check error: %w)", id, ctx.Err(), lastErr)
+				return fmt.Errorf("updating bead %q: %w: waiting for tx update projection: %w (last check error: %w)", id, ErrWriteUnconfirmed, ctx.Err(), lastErr)
 			}
-			return fmt.Errorf("updating bead %q: waiting for tx update projection: %w", id, ctx.Err())
+			return fmt.Errorf("updating bead %q: %w: waiting for tx update projection: %w", id, ErrWriteUnconfirmed, ctx.Err())
 		case <-ticker.C:
 		}
 	}
@@ -2867,6 +2971,155 @@ func (s *BdStore) listByTier(query ListQuery) ([]Bead, error) {
 }
 
 func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
+	// Two or more Assignees has no single bd-list flag to carry it (--assignee
+	// takes one value): bdServerQueryForAssignees falls back to an unpredicated
+	// scan of every row of the type for bdListRequiresClientLimit to force
+	// unbounded, which a route like "rig/agent" with two spellings turns into
+	// a full-type scan on every read (GH#7794). Fan out to one predicated read
+	// per distinct assignee instead: the set nativeListFanOutAssignees picks
+	// for NativeDoltStore's plan, where an empty entry ("unassigned", which
+	// --assignee cannot say) keeps the scan.
+	//
+	// That narrows this bd list leg only. TierWisps and TierBoth also read
+	// listEphemeral's bd query leg, which has no assignee clause for two or
+	// more assignees and still reads every ephemeral row the query's other
+	// filters match. GH#7794 stays open for that leg, and mail is ephemeral,
+	// so a multi-route inbox read still pays it. TierWisps keeps the scan on
+	// this leg too; that is a conservative scope choice, not a necessity, as
+	// its bd list leg could fan out the same way.
+	if query.TierMode != TierWisps && len(query.Assignees) >= 2 {
+		if assignees := nativeListFanOutAssignees(query); assignees != nil {
+			return s.listViaBDListFannedOutByAssignee(query, assignees)
+		}
+	}
+	result, partialErr, err := s.fetchViaBDList(query)
+	if err != nil {
+		return nil, err
+	}
+	filtered := applyListQuery(result, query)
+	if partialErr != nil {
+		if len(filtered) == 0 {
+			return nil, fmt.Errorf("bd list: %w", partialErr.Err)
+		}
+		// Surface partial-parse outcomes so callers can distinguish a complete
+		// list from one that silently dropped entries. Treating a partial list
+		// as authoritative has driven a runaway cache-reconcile loop in the
+		// past (synthesizing bead.closed for beads that were merely dropped
+		// by parseIssuesTolerant).
+		return filtered, partialErr
+	}
+	return filtered, nil
+}
+
+// bdListAssigneeFanOutLimit bounds how many of listViaBDListFannedOutByAssignee's
+// per-assignee bd list reads run at once. A session's own inbox reads three
+// routes (id, alias, session name), which fit in one round; a mailbox with a
+// long alias history reads more, and the bound keeps that read from forking
+// one bd subprocess per route at once.
+const bdListAssigneeFanOutLimit = 4
+
+// listViaBDListFannedOutByAssignee serves a List query with two or more
+// Assignees as one independently-predicated `bd list --assignee=X` read per
+// entry of assignees, the distinct set listViaBDList picked, instead of the
+// unpredicated full-type scan bdServerQueryForAssignees falls back to
+// (GH#7794). Each read reuses fetchViaBDList with a single Assignee, so every
+// other filter keeps the exact bd-side semantics it already has for one
+// assignee; Limit is forced to 0 on each so applyListQuery below — the only
+// place that can limit correctly across assignees — sees every candidate row
+// from every one of them, the same unbounded-fetch discipline
+// bdListRequiresClientLimit already applies to the single full-scan read this
+// replaces.
+//
+// A FANNED-OUT READ IS SEVERAL SNAPSHOTS, as NativeListPlan says of the
+// native store's: a bead whose assignee moves between two of the reads can be
+// seen by both or by neither. The rows are unioned by ID, keeping the first
+// copy, and a caller that needs one instant's answer passes a singular
+// Assignee.
+//
+// bd list answers in bd's default listing order — priority ascending, then
+// created_at descending, then id (beads' sqlbuild.OrderByForColumns with no
+// sort key) — which sortBeadsNativeListDefaultOrder reproduces for
+// NativeDoltStore's union. For SortDefault this union is put back into that
+// order too, so a Limit keeps the prefix the single scan would have kept;
+// applyListQuery applies an explicit Sort. bd v1.0.4 orders its issues rows
+// and its wisps rows separately, issues rows first, so there that holds for a
+// read answered from one table, as every --type=message read is.
+//
+// A hard error from any one read fails the whole List and discards the rows
+// the other reads returned, as a hard error fails the single scan and
+// NativeDoltStore's fan-out.
+//
+// The reads run concurrently, at most bdListAssigneeFanOutLimit at once: each
+// is its own bd subprocess round trip, and a session's own inbox reads three
+// routes on every mail hook and prime, so read in series they cost those
+// hooks two extra round trips each (ga-59slarrd). Like listTierPair's two
+// halves, they share the store's CommandRunner. Their results are combined in
+// assignees' order whatever order they finish in, so the copy a union keeps,
+// the error a failed List reports and the partial-result error stay those of
+// the first read in that order.
+func (s *BdStore) listViaBDListFannedOutByAssignee(query ListQuery, assignees []string) ([]Bead, error) {
+	type assigneeRead struct {
+		rows    []Bead
+		partial *PartialResultError
+		err     error
+	}
+	reads := make([]assigneeRead, len(assignees))
+	slots := make(chan struct{}, bdListAssigneeFanOutLimit)
+	var wg sync.WaitGroup
+	for i, assignee := range assignees {
+		single := query
+		single.Assignees = nil
+		single.Assignee = assignee
+		single.Limit = 0
+		wg.Add(1)
+		slots <- struct{}{}
+		go func(read *assigneeRead) {
+			defer wg.Done()
+			defer func() { <-slots }()
+			read.rows, read.partial, read.err = s.fetchViaBDList(single)
+		}(&reads[i])
+	}
+	wg.Wait()
+	var (
+		merged  []Bead
+		partial *PartialResultError
+	)
+	seen := make(map[string]bool)
+	for _, read := range reads {
+		if read.err != nil {
+			return nil, read.err
+		}
+		for _, row := range read.rows {
+			if seen[row.ID] {
+				continue
+			}
+			seen[row.ID] = true
+			merged = append(merged, row)
+		}
+		if read.partial != nil && partial == nil {
+			partial = read.partial
+		}
+	}
+	if query.Sort == SortDefault {
+		sortBeadsNativeListDefaultOrder(merged)
+	}
+	filtered := applyListQuery(merged, query)
+	if partial != nil {
+		if len(filtered) == 0 {
+			return nil, fmt.Errorf("bd list: %w", partial.Err)
+		}
+		return filtered, partial
+	}
+	return filtered, nil
+}
+
+// fetchViaBDList runs `bd list` for query and returns the raw rows (before
+// applyListQuery's client-side filter/sort/limit) plus a partial-parse error
+// if parseIssuesTolerant dropped any. Split out of listViaBDList so the
+// assignee fan-out above can combine several independently-predicated reads'
+// raw rows before a single applyListQuery pass runs over all of them,
+// instead of each read sorting and limiting on its own.
+func (s *BdStore) fetchViaBDList(query ListQuery) ([]Bead, *PartialResultError, error) {
 	serverQuery, clientFilteredAssignees := bdServerQueryForAssignees(query)
 	limit := serverQuery.Limit
 	if bdListRequiresClientLimit(query, serverQuery, clientFilteredAssignees) {
@@ -2915,7 +3168,7 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 
 	out, err := s.runBDTransientRead(args...)
 	if err != nil {
-		return nil, fmt.Errorf("bd list: %w", err)
+		return nil, nil, fmt.Errorf("bd list: %w", err)
 	}
 	issues, parseErr := parseIssuesTolerant(extractJSON(out))
 	// Latched from what bd RETURNED, before applyListQuery: a store that
@@ -2927,19 +3180,10 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 		result[i] = issues[i].toBead()
 	}
 	s.noteInlineDependencyProjection(issues, result)
-	filtered := applyListQuery(result, query)
 	if parseErr != nil {
-		if len(filtered) == 0 {
-			return nil, fmt.Errorf("bd list: %w", parseErr)
-		}
-		// Surface partial-parse outcomes so callers can distinguish a complete
-		// list from one that silently dropped entries. Treating a partial list
-		// as authoritative has driven a runaway cache-reconcile loop in the
-		// past (synthesizing bead.closed for beads that were merely dropped
-		// by parseIssuesTolerant).
-		return filtered, &PartialResultError{Op: "bd list", Err: parseErr}
+		return result, &PartialResultError{Op: "bd list", Err: parseErr}, nil
 	}
-	return filtered, nil
+	return result, nil, nil
 }
 
 func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssignees bool) bool {
@@ -2999,13 +3243,35 @@ func bdServerQueryForAssignees(query ListQuery) (ListQuery, bool) {
 func (s *BdStore) listWispsTier(query ListQuery) ([]Bead, error) {
 	listQ := query
 	listQ.TierMode = TierWisps
-	listResult, listErr := s.listViaBDList(listQ)
-
 	ephemeralQ := query
 	ephemeralQ.TierMode = TierWisps
-	ephemeralResult, ephemeralErr := s.listEphemeral(ephemeralQ)
+	pair := s.listTierPair(listQ, ephemeralQ)
+	return mergeListTierResults(query, "bd list wisps tier", pair.list, pair.listErr, pair.ephemeral, pair.ephemeralErr)
+}
 
-	return mergeListTierResults(query, "bd list wisps tier", listResult, listErr, ephemeralResult, ephemeralErr)
+// tierPairResult is what listTierPair read from each tier.
+type tierPairResult struct {
+	list         []Bead
+	listErr      error
+	ephemeral    []Bead
+	ephemeralErr error
+}
+
+// listTierPair reads one two-tier List's two halves at once: listQ through
+// bd list and ephemeralQ through bd query. They are independent reads, each its
+// own bd subprocess, so read one after the other a two-tier List costs every
+// caller two bd round trips in series instead of one (ga-3js1ayv). Both halves
+// call the store's CommandRunner, so the two reads can run it concurrently.
+func (s *BdStore) listTierPair(listQ, ephemeralQ ListQuery) tierPairResult {
+	var r tierPairResult
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.ephemeral, r.ephemeralErr = s.listEphemeral(ephemeralQ)
+	}()
+	r.list, r.listErr = s.listViaBDList(listQ)
+	<-done
+	return r
 }
 
 // listEphemeral reads only ephemeral rows using `bd query "ephemeral=true AND
@@ -3020,6 +3286,10 @@ func (s *BdStore) listEphemeral(query ListQuery) ([]Bead, error) {
 	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "type", serverQuery.Type)
 	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "assignee", serverQuery.Assignee)
 	clauses, serverFilteredOnly = appendBdQueryClause(clauses, serverFilteredOnly, "parent", serverQuery.ParentID)
+	// Metadata narrows the read only; applyListQuery below still applies
+	// every metadata filter, and canApplyWispsServerLimit keeps the limit
+	// client-side whenever one is set.
+	clauses = appendBdQueryMetadataClauses(clauses, serverQuery.Metadata)
 
 	args := []string{"query", "--json", strings.Join(clauses, " AND ")}
 	if serverQuery.IncludeClosed || serverQuery.Status == "closed" {
@@ -3159,6 +3429,52 @@ func appendBdQueryClause(clauses []string, serverFilteredOnly bool, field, value
 	return append(clauses, field+"="+value), serverFilteredOnly
 }
 
+// appendBdQueryMetadataClauses adds a metadata.<key>="<value>" clause for each
+// filter bd query evaluates exactly like matchesMetadata on every supported
+// bd. bd compares JSON_UNQUOTE(JSON_EXTRACT(metadata, key)) = value, so a
+// pushed clause never drops a row the client filter keeps. The others stay
+// client-side only:
+//   - an empty value, which the client filter matches against a missing key;
+//   - a key outside [a-z_][a-z0-9_.]*: bd v1.0.4 lowercases the key and
+//     rejects '/' in a query identifier;
+//   - a value outside printable ASCII: bd's lexer reads quoted strings a
+//     byte at a time;
+//   - a value starting with '{' or '[': the client sees an object or array
+//     as bd's indented output text, which Dolt's comparison text differs
+//     from in whitespace.
+func appendBdQueryMetadataClauses(clauses []string, metadata map[string]string) []string {
+	keys := make([]string, 0, len(metadata))
+	for k, v := range metadata {
+		if isPortableBdQueryMetadataKey(k) && isPortableBdQueryMetadataValue(v) {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		clauses = append(clauses, "metadata."+k+"="+quoteBdQueryValue(metadata[k]))
+	}
+	return clauses
+}
+
+func isPortableBdQueryMetadataKey(key string) bool {
+	if key == "" {
+		return false
+	}
+	for i, r := range key {
+		switch {
+		case r >= 'a' && r <= 'z', r == '_':
+		case i > 0 && (r >= '0' && r <= '9' || r == '.'):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func isPortableBdQueryMetadataValue(value string) bool {
+	return value != "" && value[0] != '{' && value[0] != '[' && isPrintableASCII(value)
+}
+
 // isBdQueryEmptinessValue reports whether bd's query DSL reads value as the
 // "unset" sentinel (assignee=none, label=null) rather than as a literal.
 func isBdQueryEmptinessValue(value string) bool {
@@ -3214,13 +3530,10 @@ func isBareBdQueryValue(value string) bool {
 func (s *BdStore) listBothTiers(query ListQuery) ([]Bead, error) {
 	listQ := query
 	listQ.TierMode = TierBoth
-	listResult, listErr := s.listViaBDList(listQ)
-
 	ephemeralQ := query
 	ephemeralQ.TierMode = TierWisps
-	ephemeralResult, ephemeralErr := s.listEphemeral(ephemeralQ)
-
-	return mergeListTierResults(query, "bd list both tiers", listResult, listErr, ephemeralResult, ephemeralErr)
+	pair := s.listTierPair(listQ, ephemeralQ)
+	return mergeListTierResults(query, "bd list both tiers", pair.list, pair.listErr, pair.ephemeral, pair.ephemeralErr)
 }
 
 func mergeListTierResults(query ListQuery, op string, primary []Bead, primaryErr error, ephemeral []Bead, ephemeralErr error) ([]Bead, error) {
@@ -3591,11 +3904,39 @@ func (s *BdStore) DepList(id, direction string) ([]Dep, error) {
 
 // DepListBatch fetches "down" deps for multiple issue IDs in a single bd
 // subprocess call. Returns a map from issue ID to its deps.
+//
+// The answer is bd's raw dependency records, for one anchor as for many, so an
+// edge whose target has no row in this database — a dangling edge, or one to
+// another store — is in it. bd picks its output shape by how many ids it is
+// handed: several print the records, but one prints the depended-on beads'
+// rows, a join that drops exactly those edges. A lone anchor is therefore
+// named twice, which bd answers with the records shape (bd itself suggests
+// `bd dep list <id> <id>` for the raw edges); a record that a repeated anchor
+// yields twice is kept once. An anchor's edges never depend on how many
+// anchors were asked about.
+//
+// Output that is not dependency records fails the read. bd before v1.3
+// answers a multi-id call with the rows instead when its batched read fails or
+// an anchor does not resolve; read as records those rows carry no anchor, and
+// filing their edges under "" would report every anchor as edge-free.
+//
+// A backend that does not implement the read at all — the bd/Postgres backend
+// answers `operation "IssueRelations" not supported by the postgres backend`
+// (measured on maintainer-city, ga-7i7ts) — is reported with
+// ErrDepListBatchUnsupported and no map, never as an empty map. An empty map
+// reads to every caller as "these anchors have no edges": close ordering would
+// drop its blockers and the scope-skip walk would see no dependencies. The
+// sentinel sends each caller to its per-anchor reads, exactly as a wrapper
+// without the batch does.
 func (s *BdStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	args := append([]string{"dep", "list"}, ids...)
+	anchors := ids
+	if len(ids) == 1 {
+		anchors = []string{ids[0], ids[0]}
+	}
+	args := append([]string{"dep", "list"}, anchors...)
 	args = append(args, "--json")
 	out, err := s.runBDTransientRead(args...)
 	if err != nil {
@@ -3603,14 +3944,7 @@ func (s *BdStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 			return make(map[string][]Dep), nil
 		}
 		if isBdOperationUnsupported(err) {
-			// Some backends don't implement this at all — e.g. the Postgres
-			// backend answers `operation "IssueRelations" not supported by
-			// the postgres backend` (measured on maintainer-city, ga-7i7ts).
-			// Callers use this as a post-filter over an already-correct bd
-			// answer, so "no evidence of blocking" is the safe degrade:
-			// today's (pre-gc.work_outcome-filter) behavior, not a hard
-			// failure of the read that got them here.
-			return make(map[string][]Dep), nil
+			return nil, fmt.Errorf("batch dep list: %w: %w", ErrDepListBatchUnsupported, err)
 		}
 		return nil, fmt.Errorf("batch dep list: %w", err)
 	}
@@ -3629,16 +3963,21 @@ func (s *BdStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 		return nil, fmt.Errorf("batch dep list: parsing JSON: %w", err)
 	}
 	result := make(map[string][]Dep, len(ids))
+	seen := make(map[Dep]bool, len(records))
 	for _, r := range records {
+		if r.IssueID == "" || r.DependsOnID == "" {
+			return nil, errors.New("batch dep list: bd printed a row that is not a dependency record (no issue_id or depends_on_id)")
+		}
 		depType := r.Type
 		if depType == "" {
 			depType = "blocks"
 		}
-		result[r.IssueID] = append(result[r.IssueID], Dep{
-			IssueID:     r.IssueID,
-			DependsOnID: r.DependsOnID,
-			Type:        depType,
-		})
+		dep := Dep{IssueID: r.IssueID, DependsOnID: r.DependsOnID, Type: depType}
+		if seen[dep] {
+			continue
+		}
+		seen[dep] = true
+		result[r.IssueID] = append(result[r.IssueID], dep)
 	}
 	return result, nil
 }

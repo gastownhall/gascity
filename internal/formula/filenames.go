@@ -32,3 +32,13 @@ func TrimTOMLFilename(path string) (string, bool) {
 		return "", false
 	}
 }
+
+// TrimFormulaExt returns name without the formula file extension a caller may
+// have spelled it with ("loop-flow.toml", "loop-flow.formula.json"): the name
+// ResolveWithSource looks up (GitHub #3704). A bare name comes back as is.
+func TrimFormulaExt(name string) string {
+	if trimmed, ok := TrimTOMLFilename(name); ok {
+		return trimmed
+	}
+	return strings.TrimSuffix(name, FormulaExtJSON)
+}

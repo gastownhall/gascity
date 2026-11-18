@@ -864,3 +864,45 @@ tz = "Amrica/New_York"
 		t.Errorf("error = %q, want it to name the invalid tz", err)
 	}
 }
+
+func TestScanAllOverrideHandlerKeepsOverridesAfterUnmatchedOne(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "backup", `[order]
+exec = "scripts/backup.sh"
+trigger = "cooldown"
+interval = "1h"
+`)
+
+	disabled := false
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+		},
+		Orders: config.OrdersConfig{
+			Overrides: []config.OrderOverride{
+				{Name: "missing"},
+				{Name: "backup", Enabled: &disabled},
+			},
+		},
+	}
+
+	var handled string
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{
+		OnOverrideError: func(err error) error {
+			handled = err.Error()
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	if !strings.Contains(handled, `order "missing" not found`) {
+		t.Fatalf("handled override error = %q, want missing-order error", handled)
+	}
+	if len(aa) != 1 {
+		t.Fatalf("got %d orders, want 1", len(aa))
+	}
+	if aa[0].IsEnabled() {
+		t.Fatal("backup enabled: the enabled=false override after the unmatched one was not applied")
+	}
+}

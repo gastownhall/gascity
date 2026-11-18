@@ -82,6 +82,14 @@
 // builds a child env from scratch must carry GIT_TEMPLATE_DIR into it, or the
 // repos that child makes lose the guard, and a child that is a test binary
 // installs a template of its own in its temp dir.
+//
+// Dolt event flush: in a go-test binary init() also sets
+// DOLT_DISABLE_EVENT_FLUSH. dolt forks a detached `dolt send-metrics` after each
+// command unless that variable is present, and metrics.disabled in the dolt
+// global config does not stop the fork, so every dolt a test runs, directly or
+// through gc or bd, would otherwise leave a metrics process behind. The variable
+// is a presence switch; dolt does not read its value. Testscript subcommand mode
+// skips it with the scrub, because testscript owns that child env exactly.
 package testenv
 
 import (
@@ -115,6 +123,10 @@ func isGoTestBinary() bool {
 // the list are scrubbed as usual; the passthrough var itself is unset so the
 // list does not flow onward to further subprocesses.
 const PassthroughVar = "GC_TESTENV_PASSTHROUGH"
+
+// doltDisableEventFlushVar is the variable dolt checks, by presence only, before
+// it forks the detached `dolt send-metrics` it otherwise runs after each command.
+const doltDisableEventFlushVar = "DOLT_DISABLE_EVENT_FLUSH"
 
 // LeakVectorVars is the list of env vars that point at live-city paths,
 // session identities, bead stores, or Dolt runtimes. If any of these survive
@@ -179,6 +191,12 @@ var LeakVectorVars = []string{
 	"GC_LANE_FAILPOINT",
 	"GC_OPS_CONTENT",
 	"GC_OPS_CONTROL",
+	// GC_OPS_FAILPOINT makes a test-hooks gc kill itself, park a request or
+	// fail an op's closes at an op recording crash point
+	// (cmd/gc/ops_failpoint.go). A leaked shell value would make a gc child a
+	// test starts do so, so the scrub owns it; tests that want it set it on
+	// the child.
+	"GC_OPS_FAILPOINT",
 	"GC_OPS_LIFECYCLE",
 	"GC_SESSION_ID",
 	"GC_SESSION_NAME",
@@ -379,4 +397,7 @@ func init() {
 		}
 	}
 	seedGitTemplate()
+	// Not a leak vector, so the scrub above leaves it alone and a passthrough
+	// list cannot name it; set unconditionally because only its presence counts.
+	_ = os.Setenv(doltDisableEventFlushVar, "1")
 }

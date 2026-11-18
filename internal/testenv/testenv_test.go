@@ -80,6 +80,17 @@ func TestMetricsOptOutVarsAreLeakVectors(t *testing.T) {
 	}
 }
 
+// TestInitDisablesDoltEventFlush verifies init() sets DOLT_DISABLE_EVENT_FLUSH
+// for every go-test binary. dolt forks a detached `dolt send-metrics` after
+// each command unless the variable is present, whatever metrics.disabled says,
+// so a test that runs dolt, directly or through gc or bd, inherits the switch
+// from the process instead of from a per-test Setenv.
+func TestInitDisablesDoltEventFlush(t *testing.T) {
+	if got := os.Getenv("DOLT_DISABLE_EVENT_FLUSH"); got != "1" {
+		t.Fatalf("DOLT_DISABLE_EVENT_FLUSH = %q after testenv init, want %q", got, "1")
+	}
+}
+
 // TestLaneFailpointIsALeakVector pins GC_LANE_FAILPOINT into
 // LeakVectorVars: a value leaked from a developer's shell would make a
 // test-hooks gc child (or a unit test that enables the stamp) SIGKILL itself
@@ -87,6 +98,16 @@ func TestMetricsOptOutVarsAreLeakVectors(t *testing.T) {
 func TestLaneFailpointIsALeakVector(t *testing.T) {
 	if !slices.Contains(testenv.LeakVectorVars, "GC_LANE_FAILPOINT") {
 		t.Error("GC_LANE_FAILPOINT missing from LeakVectorVars; an ambient value would make a test's gc child kill itself")
+	}
+}
+
+// TestOpsFailpointIsALeakVector pins GC_OPS_FAILPOINT into LeakVectorVars: a
+// value leaked from a developer's shell would make a test-hooks gc child kill
+// itself, park a request or fail an op's closes at an op recording crash
+// point, so the scrub must own it.
+func TestOpsFailpointIsALeakVector(t *testing.T) {
+	if !slices.Contains(testenv.LeakVectorVars, "GC_OPS_FAILPOINT") {
+		t.Error("GC_OPS_FAILPOINT missing from LeakVectorVars; an ambient value would make a test's gc child kill itself")
 	}
 }
 
@@ -155,6 +176,7 @@ func TestInitSkipsScrubInTestscriptSubcommandMode(t *testing.T) {
 		for _, name := range testenv.LeakVectorVars {
 			lines = append(lines, name+"="+os.Getenv(name))
 		}
+		lines = append(lines, "DOLT_DISABLE_EVENT_FLUSH="+os.Getenv("DOLT_DISABLE_EVENT_FLUSH"))
 		os.Stdout.WriteString(strings.Join(lines, "\n") + "\n") //nolint:errcheck
 		os.Exit(0)
 	}
@@ -185,6 +207,11 @@ func TestInitSkipsScrubInTestscriptSubcommandMode(t *testing.T) {
 		if !strings.Contains(got, name+"=kept-"+name) {
 			t.Errorf("%s was scrubbed but should survive in subcommand mode; child output:\n%s", name, got)
 		}
+	}
+	// Testscript owns the env of the gc or bd it re-invokes, so init() must not
+	// decide dolt's behavior for it either.
+	if !strings.Contains(got, "DOLT_DISABLE_EVENT_FLUSH=\n") {
+		t.Errorf("init() set DOLT_DISABLE_EVENT_FLUSH in subcommand mode; child output:\n%s", got)
 	}
 }
 

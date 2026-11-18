@@ -21,7 +21,7 @@ func mergeStrategyCity(strategy string) *config.City {
 }
 
 func TestSlingMergeStrategy_PrefersExplicitFlag(t *testing.T) {
-	deps := SlingDeps{Cfg: mergeStrategyCity("mr"), Store: beads.NewMemStore()}
+	deps := withStore(SlingDeps{Cfg: mergeStrategyCity("mr")}, beads.NewMemStore())
 	a := config.Agent{Name: "polecat", Dir: "scamper"}
 
 	if got := SlingMergeStrategy("direct", "SC-1", deps, a); got != "direct" {
@@ -30,7 +30,7 @@ func TestSlingMergeStrategy_PrefersExplicitFlag(t *testing.T) {
 }
 
 func TestSlingMergeStrategy_UsesRigDefaultByBeadPrefix(t *testing.T) {
-	deps := SlingDeps{Cfg: mergeStrategyCity("mr"), Store: beads.NewMemStore()}
+	deps := withStore(SlingDeps{Cfg: mergeStrategyCity("mr")}, beads.NewMemStore())
 	a := config.Agent{Name: "polecat"} // no Dir — bead-prefix lookup must win
 
 	if got := SlingMergeStrategy("", "SC-1", deps, a); got != "mr" {
@@ -39,7 +39,7 @@ func TestSlingMergeStrategy_UsesRigDefaultByBeadPrefix(t *testing.T) {
 }
 
 func TestSlingMergeStrategy_UsesRigDefaultByAgent(t *testing.T) {
-	deps := SlingDeps{Cfg: mergeStrategyCity("mr"), Store: beads.NewMemStore()}
+	deps := withStore(SlingDeps{Cfg: mergeStrategyCity("mr")}, beads.NewMemStore())
 	a := config.Agent{Name: "polecat", Dir: "scamper"}
 
 	if got := SlingMergeStrategy("", "", deps, a); got != "mr" {
@@ -48,7 +48,7 @@ func TestSlingMergeStrategy_UsesRigDefaultByAgent(t *testing.T) {
 }
 
 func TestSlingMergeStrategy_EmptyWhenRigHasNoDefault(t *testing.T) {
-	deps := SlingDeps{Cfg: mergeStrategyCity(""), Store: beads.NewMemStore()}
+	deps := withStore(SlingDeps{Cfg: mergeStrategyCity("")}, beads.NewMemStore())
 	a := config.Agent{Name: "polecat", Dir: "scamper"}
 
 	if got := SlingMergeStrategy("", "SC-1", deps, a); got != "" {
@@ -57,7 +57,7 @@ func TestSlingMergeStrategy_EmptyWhenRigHasNoDefault(t *testing.T) {
 }
 
 func TestSlingMergeStrategy_EmptyWhenNoConfig(t *testing.T) {
-	deps := SlingDeps{Store: beads.NewMemStore()}
+	deps := withStore(SlingDeps{}, beads.NewMemStore())
 	a := config.Agent{Name: "polecat", Dir: "scamper"}
 
 	if got := SlingMergeStrategy("", "SC-1", deps, a); got != "" {
@@ -66,7 +66,7 @@ func TestSlingMergeStrategy_EmptyWhenNoConfig(t *testing.T) {
 }
 
 func TestSlingMergeStrategy_TrimsExplicitFlag(t *testing.T) {
-	deps := SlingDeps{Cfg: mergeStrategyCity("mr"), Store: beads.NewMemStore()}
+	deps := withStore(SlingDeps{Cfg: mergeStrategyCity("mr")}, beads.NewMemStore())
 	a := config.Agent{Name: "polecat", Dir: "scamper"}
 
 	if got := SlingMergeStrategy("  ", "SC-1", deps, a); got != "mr" {
@@ -82,7 +82,7 @@ func slingRigBead(t *testing.T, rigDefault, explicitMerge string) beads.Bead {
 	t.Helper()
 	runner := newFakeRunner()
 	deps := testDeps(mergeStrategyCity(rigDefault), runtime.NewFake(), runner.run)
-	deps.Store = seededStore("SC-1")
+	deps = withStore(deps, seededStore("SC-1"))
 	a := config.Agent{Name: "polecat", Dir: "scamper", MaxActiveSessions: intPtr(1)}
 
 	if _, err := DoSling(SlingOpts{Target: a, BeadOrFormula: "SC-1", Merge: explicitMerge}, deps, deps.Store); err != nil {

@@ -130,10 +130,26 @@ func TestBacklogDepthCheckStoreErrorIsGraceful(t *testing.T) {
 	}
 }
 
+// openBacklogTestSQLiteStore opens a fresh SQLite Beads store, which has the
+// assignment claim the beads nudge queue requires.
+func openBacklogTestSQLiteStore(t *testing.T) beads.Store {
+	t.Helper()
+	opened, err := beads.OpenSQLiteStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore: %v", err)
+	}
+	store, ok := opened.(*beads.SQLiteStore)
+	if !ok {
+		t.Fatalf("store type %T", opened)
+	}
+	t.Cleanup(func() { _ = store.CloseStore() })
+	return store
+}
+
 // A beads nudge queue record is a delivery chore, as a gc:nudge shadow is
 // (DES-NQ D14): without it a city in beads mode reads its queue as backlog.
 func TestBacklogDepthCountsNudgeQueueRecordsAsNotifications(t *testing.T) {
-	store := openShimTestBeadsStore(t)
+	store := openBacklogTestSQLiteStore(t)
 	queue, err := storebinding.NewBeadsNudgeQueue(beads.NudgesStore{Store: store})
 	if err != nil {
 		t.Fatalf("NewBeadsNudgeQueue: %v", err)

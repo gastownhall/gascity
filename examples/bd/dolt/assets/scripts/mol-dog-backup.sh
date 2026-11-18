@@ -304,7 +304,7 @@ if [ -n "${GC_BACKUP_DATABASES:-}" ]; then
 fi
 database_selected() {
     [ -z "$DATABASE_FILTER" ] && return 0
-    printf '%s\n' "$DATABASE_FILTER" | grep -qxF "$1"
+    grep -qxF -- "$1" <<<"$DATABASE_FILTER"
 }
 
 SCOPE_SPECS="city"
@@ -426,7 +426,7 @@ Each backup sync was attempted up to $BACKUP_SYNC_ATTEMPTS times with a ${BACKUP
 
 A scope listed here has no backup newer than its last successful sync, so the recoverable copy is as old as that run. Check freshness per scope with gc bd backup status." \
         "dolt-backup:required-sync" "$FAILED_DBS|$FAILED_DETAILS" \
-        2>/dev/null || true
+        || true
 else
     dolt_resolve_incident "dolt-backup:required-sync" || true
 fi
