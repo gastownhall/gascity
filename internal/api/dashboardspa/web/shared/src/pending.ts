@@ -10,8 +10,11 @@
 //
 // `kind` is a free-form string upstream (no enum, no "needs-human-judgment"
 // marker — spike wf4c), so it is carried verbatim as the `reason` and never
-// used to classify urgency (ZFC). `options` is the authoritative set of
-// response verbs for R11's accept/decline; do not hardcode allow/deny.
+// used to classify urgency (ZFC). `options` is what the runtime advertises for
+// answering the interaction: display labels, not verbs. Absent, null or empty
+// means nothing is advertised, and the Agents roster offers no Approve/Deny.
+// The dashboard sends the canonical words approve/deny and the runtime resolves
+// them, so never gate on a particular option string.
 
 import type { AlertItem } from './alert.js';
 import { makeAlertDedupKey } from './alert.js';
@@ -22,7 +25,7 @@ export interface PendingInteraction {
   readonly request_id: string;
   readonly kind: string;
   readonly prompt?: string;
-  /** Accepted response verbs for this interaction (R11). Null/absent upstream when unconstrained. */
+  /** Labels the runtime advertises for answering this interaction. Absent, null or empty: nothing is advertised. */
   readonly options?: readonly string[];
   readonly metadata?: Readonly<Record<string, string>>;
 }
