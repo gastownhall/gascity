@@ -94,11 +94,11 @@ func TestNudgeSiblingPollersTakeNoLock(t *testing.T) {
 		skips := &nudgePollSkips{cityPath: h.city}
 		census := h.census
 		within(t, "a sibling's gate and skip check", 200*time.Millisecond, func() {
-			if gate.hasDue(sibling, now) {
+			if gate.hasDue(sibling, nil, now) {
 				t.Fatalf("sibling s-%d sees due work fenced to live s-1", i)
 			}
 			// The poll loop's skip check after a tick that delivered nothing.
-			countNudgePollSkip(gate, skips, sibling, nil, now, nil)
+			countNudgePollSkip(gate, skips, sibling, nil, nil, now, nil)
 		})
 		if len(skips.counts) != 0 {
 			t.Fatalf("sibling s-%d counted skips %v", i, skips.counts)
@@ -108,7 +108,7 @@ func TestNudgeSiblingPollersTakeNoLock(t *testing.T) {
 		}
 		census = h.census
 		within(t, "a sibling's claim", 200*time.Millisecond, func() {
-			claimed, err := claimDueQueuedNudgeBatchForTarget(h.city, sibling, now)
+			claimed, err := claimDueQueuedNudgeBatchForTarget(h.city, sibling, nil, now)
 			if err != nil || len(claimed) != 0 {
 				t.Fatalf("sibling s-%d claim = %v, %v; want nothing and no error", i, nqCharItems(claimed), err)
 			}
@@ -138,23 +138,23 @@ func TestNudgePollGateCensusCacheOnlySkips(t *testing.T) {
 	sibling := h.target("s-2", "")
 	gate := newNudgePollGate()
 	now := time.Now()
-	if gate.hasDue(sibling, now) {
+	if gate.hasDue(sibling, nil, now) {
 		t.Fatal("gate sees work fenced to live s-1")
 	}
 	// s-1 drains. Inside the cache window the gate still skips.
 	h.live = map[string]struct{}{"s-2": {}}
 	census := h.census
-	if gate.hasDue(sibling, now.Add(nudgePollCensusTTL/2)) {
+	if gate.hasDue(sibling, nil, now.Add(nudgePollCensusTTL/2)) {
 		t.Fatal("gate re-read the census inside its cache window")
 	}
 	if h.census != census {
 		t.Fatalf("gate asked the census %d times inside its cache window", h.census-census)
 	}
 	// Past the window it re-reads and sees the adoption.
-	if !gate.hasDue(sibling, now.Add(nudgePollCensusTTL+time.Second)) {
+	if !gate.hasDue(sibling, nil, now.Add(nudgePollCensusTTL+time.Second)) {
 		t.Fatal("gate past its cache window does not see the adoptable nudge")
 	}
-	claimed, err := claimDueQueuedNudgeBatchForTarget(h.city, sibling, now.Add(nudgePollCensusTTL+time.Second))
+	claimed, err := claimDueQueuedNudgeBatchForTarget(h.city, sibling, nil, now.Add(nudgePollCensusTTL+time.Second))
 	if err != nil || len(claimed) != 1 || claimed[0].SessionID != "s-2" {
 		t.Fatalf("claim = %v, %v; want n-1 adopted onto s-2", nqCharItems(claimed), err)
 	}
@@ -171,11 +171,11 @@ func TestNudgeClaimAfterAnAdoptingGateReadsAFreshCensus(t *testing.T) {
 	sibling := h.target("s-2", "")
 	gate := newNudgePollGate()
 	now := time.Now()
-	if !gate.hasDue(sibling, now) {
+	if !gate.hasDue(sibling, nil, now) {
 		t.Fatal("gate does not see the adoptable nudge")
 	}
 	h.live = map[string]struct{}{"s-1": {}, "s-2": {}}
-	claimed, err := claimDueQueuedNudgeBatchForTarget(h.city, sibling, now)
+	claimed, err := claimDueQueuedNudgeBatchForTarget(h.city, sibling, nil, now)
 	if err != nil || len(claimed) != 0 {
 		t.Fatalf("claim with a fresh census showing s-1 live = %v, %v; want nothing", nqCharItems(claimed), err)
 	}
@@ -200,7 +200,7 @@ func TestNudgeNoOpVerbsTakeNoLock(t *testing.T) {
 
 	now := time.Now()
 	within(t, "a claim with nothing claimable", 50*time.Millisecond, func() {
-		claimed, err := claimDueQueuedNudgesForTarget(h.city, alpha, now)
+		claimed, err := claimDueQueuedNudgesForTarget(h.city, alpha, nil, now)
 		if err != nil || len(claimed) != 0 {
 			t.Fatalf("claim = %v, %v", nqCharItems(claimed), err)
 		}
@@ -234,7 +234,7 @@ func TestNudgeNoOpVerbsTakeNoLock(t *testing.T) {
 
 	// A day on, the item has expired: the claim's maintenance changes the
 	// state, so it needs the lock, and times out against the held one.
-	_, err := claimDueQueuedNudgesForTarget(h.city, alpha, now.Add(defaultQueuedNudgeTTL+time.Hour))
+	_, err := claimDueQueuedNudgesForTarget(h.city, alpha, nil, now.Add(defaultQueuedNudgeTTL+time.Hour))
 	if !errors.Is(err, nudgequeue.ErrQueueBusy) {
 		t.Fatalf("a claim whose maintenance expires an item under a held lock: err = %v, want ErrQueueBusy", err)
 	}
@@ -254,14 +254,14 @@ func TestNudgeClaimWhoseItemWasTakenAfterTheDryRun(t *testing.T) {
 	var inode uint64
 	nudgeClaimAfterDryRun = func() {
 		nudgeClaimAfterDryRun = nil
-		claimed, err := claimDueQueuedNudgesForTarget(h.city, alpha, now)
+		claimed, err := claimDueQueuedNudgesForTarget(h.city, alpha, nil, now)
 		if err != nil || len(claimed) != 1 {
 			t.Errorf("the other writer's claim = %v, %v", nqCharItems(claimed), err)
 		}
 		inode = stateInodeForTest(t, h.city)
 	}
 	t.Cleanup(func() { nudgeClaimAfterDryRun = nil })
-	claimed, err := claimDueQueuedNudgesForTarget(h.city, alpha, now)
+	claimed, err := claimDueQueuedNudgesForTarget(h.city, alpha, nil, now)
 	if err != nil || len(claimed) != 0 {
 		t.Fatalf("claim after losing the race = %v, %v; want nothing", nqCharItems(claimed), err)
 	}
@@ -347,7 +347,7 @@ func TestNudgeClaimCensusJudgesOnlyFencesItsSnapshotHeld(t *testing.T) {
 			if c.batch {
 				claim = claimDueQueuedNudgeBatchForTarget
 			}
-			claimed, err := claim(h.city, alpha, time.Now())
+			claimed, err := claim(h.city, alpha, nil, time.Now())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -379,7 +379,7 @@ func TestNudgeClaimBatchAdoptsAPinnedBatchWithAMemberNotYetDue(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	pinned, err := claimDueQueuedNudgeBatchForTarget(h.city, h.target("s-gone", ""), time.Now())
+	pinned, err := claimDueQueuedNudgeBatchForTarget(h.city, h.target("s-gone", ""), nil, time.Now())
 	if err != nil || len(pinned) != 2 {
 		t.Fatalf("s-gone's batch claim = %v, %v", nqCharItems(pinned), err)
 	}
@@ -389,7 +389,7 @@ func TestNudgeClaimBatchAdoptsAPinnedBatchWithAMemberNotYetDue(t *testing.T) {
 	if err := releaseQueuedNudgeClaimsUntil(h.city, []string{"n-2"}, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	claimed, err := claimDueQueuedNudgeBatchForTarget(h.city, h.target("s-new", "2"), time.Now())
+	claimed, err := claimDueQueuedNudgeBatchForTarget(h.city, h.target("s-new", "2"), nil, time.Now())
 	if err != nil || len(claimed) != 2 {
 		t.Fatalf("claim of the pinned batch = %v, %v; want n-1 and n-2 adopted whole", nqCharItems(claimed), err)
 	}
@@ -468,15 +468,15 @@ func TestCountNudgePollSkipCountsOnlyClaimableWork(t *testing.T) {
 	gate := newNudgePollGate()
 	skips := &nudgePollSkips{cityPath: h.city}
 	self := h.target("s-new", "")
-	countNudgePollSkip(gate, skips, self, nil, now, nil)
+	countNudgePollSkip(gate, skips, self, nil, nil, now, nil)
 	if len(skips.counts) != 0 {
 		t.Fatalf("an empty queue counted skips %v", skips.counts)
 	}
 	if err := enqueueQueuedNudgeWithStore(h.city, h.shadow(), h.item("n-1", "alpha", -time.Minute, queuedNudgeOptions{})); err != nil {
 		t.Fatal(err)
 	}
-	countNudgePollSkip(gate, skips, self, nil, now, nil)
-	countNudgePollSkip(gate, skips, self, errors.New("delivery failed"), now, nil)
+	countNudgePollSkip(gate, skips, self, nil, nil, now, nil)
+	countNudgePollSkip(gate, skips, self, nil, errors.New("delivery failed"), now, nil)
 	if skips.counts["not-delivered"] != 1 || skips.counts["not-delivered-error"] != 1 {
 		t.Fatalf("skips = %v, want one not-delivered and one not-delivered-error", skips.counts)
 	}
