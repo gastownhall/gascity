@@ -1998,7 +1998,7 @@ func cmdOrderSweepTrackingWithOptions(staleAfter time.Duration, includeWisps, dr
 		// Fail-closed: a store read error blocks deletion rather than proceeding
 		// unguarded — a degraded store is exactly when accidental mass deletion
 		// is most dangerous.
-		retentionPolicy := orderTrackingRetentionPolicyForConfig(cfg)
+		retentionPolicy := orderTrackingRetentionPolicyForSweep(cfg, now)
 		eligible, countErr := countClosedOrderTrackingRetentionEligible(stores, now, retentionPolicy, onlyOrders)
 		threshold := bulkDeleteConfirmThreshold()
 		switch {

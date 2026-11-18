@@ -45,10 +45,25 @@ const (
 	labelOrderTracking    = "order-tracking"
 	labelTriggerEnvFailed = "trigger-env-failed"
 
-	orderTrackingSweepOrder                = "order-tracking-sweep"
-	orderTrackingBeadPolicyName            = "order_tracking"
-	defaultOrderTrackingSweepStaleAfter    = 10 * time.Minute
-	minClosedOrderTrackingRetained         = 10
+	orderTrackingSweepOrder             = "order-tracking-sweep"
+	orderTrackingBeadPolicyName         = "order_tracking"
+	defaultOrderTrackingSweepStaleAfter = 10 * time.Minute
+	minClosedOrderTrackingRetained      = 10
+	// orderTrackingRetentionDeleteChunk is how many expired runs the
+	// retention sweep clears before it deletes them, so a sweep that is cut
+	// off (it runs as an exec order with a timeout) keeps every chunk it
+	// finished.
+	orderTrackingRetentionDeleteChunk = 100
+	// orderTrackingRetentionChunkSpan also bounds a chunk, by wall time: a
+	// chunk-by-count alone stalls once each membership listing (the per-run
+	// stranding check) takes long enough that a full chunk's checks run past
+	// the sweep's own timeout before the first delete.
+	orderTrackingRetentionChunkSpan = time.Minute
+	// orderTrackingRetentionBudget is how long sweepClosedOrderTrackingRetention
+	// keeps checking candidates before it stops and returns what it has
+	// deleted so far, leaving headroom inside the order's own timeout for the
+	// final flush and the rest of the command.
+	orderTrackingRetentionBudget           = 3 * time.Minute
 	legacyOrderTrackingRetentionBucket     = "\x00legacy-unscoped-order-tracking"
 	orderTrackingSweepWatchdogInterval     = 30 * time.Second
 	orderTrackingSweepWatchdogStaleAfter   = 2 * time.Minute
@@ -115,6 +130,13 @@ const (
 var defaultOrderTrackingDeleteAfterClose = config.BeadPolicyConfig{
 	DeleteAfterClose: config.DefaultOrderTrackingDeleteAfterClose,
 }.DeleteAfterCloseDuration()
+
+// orderTrackingRetentionNow is the wall clock the retention sweep measures
+// its chunk span and check budget against. It is distinct from the now a
+// caller passes to sweepClosedOrderTrackingRetention, which is the reference
+// time for the retention cutoff itself (a fixed date in tests); overriding
+// this var lets a test fake elapsed wall time without disturbing that.
+var orderTrackingRetentionNow = time.Now
 
 var (
 	// shellExecPostCancelWaitDelay is os/exec's pipe-close wait after
@@ -3465,6 +3487,11 @@ type orderTrackingRetentionSweepResult struct {
 type orderTrackingRetentionPolicy struct {
 	deleteAfterClose time.Duration
 	retainLast       int
+	// checkUntil bounds how long sweepClosedOrderTrackingRetention keeps
+	// checking candidates; zero means no limit. It is set by the caller
+	// (orderTrackingRetentionPolicyForSweep), never derived from a clock
+	// inside the sweep itself.
+	checkUntil time.Time
 }
 
 func orderTrackingRetentionPolicyForConfig(cfg *config.City) orderTrackingRetentionPolicy {
@@ -3480,6 +3507,17 @@ func orderTrackingRetentionPolicyForConfig(cfg *config.City) orderTrackingRetent
 			policy.deleteAfterClose = duration
 		}
 	}
+	return policy
+}
+
+// orderTrackingRetentionPolicyForSweep is orderTrackingRetentionPolicyForConfig
+// plus a check budget: checkUntil is start plus orderTrackingRetentionBudget,
+// so the retention sweep stops checking candidates with headroom inside the
+// order's own timeout for its final flush and the rest of the command. start
+// is the command's own start time, not a clock read inside the sweep.
+func orderTrackingRetentionPolicyForSweep(cfg *config.City, start time.Time) orderTrackingRetentionPolicy {
+	policy := orderTrackingRetentionPolicyForConfig(cfg)
+	policy.checkUntil = start.Add(orderTrackingRetentionBudget)
 	return policy
 }
 
@@ -3775,6 +3813,11 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 	if policy.deleteAfterClose <= 0 {
 		return 0, nil
 	}
+	// A budget already spent before the first candidate: nothing to do, and
+	// no point paying for the list below.
+	if !policy.checkUntil.IsZero() && !orderTrackingRetentionNow().Before(policy.checkUntil) {
+		return 0, nil
+	}
 	// retainLast is intentionally package-internal and hardcoded; config can
 	// shorten the TTL but cannot remove the recent-history floor.
 	if policy.retainLast < minClosedOrderTrackingRetained {
@@ -3798,6 +3841,22 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 	var cleared []string
 	var retained []string
 	var deleteErr error
+	deleted := 0
+	budgetStopped := false
+	chunkStart := orderTrackingRetentionNow()
+	// The expired runs are deleted a chunk at a time, as their checks clear.
+	// Checking all of them first leaves a sweep that is cut off (the order's
+	// timeout) with nothing deleted, however far it got; a backlog too large
+	// to check in one run would then never shrink.
+	flush := func() error {
+		if err := deleteWorkflowBeadsBatch(store, cleared); err != nil {
+			return fmt.Errorf("deleting %d closed order-tracking beads: %w", len(cleared), err)
+		}
+		deleted += len(cleared)
+		cleared = cleared[:0]
+		return nil
+	}
+sweep:
 	for _, runs := range byOrder {
 		sort.Slice(runs, func(i, j int) bool {
 			left := orderTrackingClosedReferenceTime(runs[i])
@@ -3814,6 +3873,22 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 			if !orderTrackingClosedReferenceTime(run).Before(cutoff) {
 				continue
 			}
+			// A chunk is bounded by count or by wall time, whichever comes
+			// first: a membership listing slow enough (a large ledger) would
+			// otherwise let one chunk's checks run past the sweep's own
+			// timeout before its first delete.
+			if len(cleared) >= orderTrackingRetentionDeleteChunk ||
+				(len(cleared) > 0 && orderTrackingRetentionNow().Sub(chunkStart) >= orderTrackingRetentionChunkSpan) {
+				if err := flush(); err != nil {
+					logRetainedForLiveDescendants(retained)
+					return deleted, errors.Join(deleteErr, err)
+				}
+				chunkStart = orderTrackingRetentionNow()
+			}
+			if !policy.checkUntil.IsZero() && !orderTrackingRetentionNow().Before(policy.checkUntil) {
+				budgetStopped = true
+				break sweep
+			}
 			if err := assertWorkflowDeleteLeavesNothingStranded(store, run.ID, nil); err != nil {
 				if errors.Is(err, errWorkflowDeleteLiveDescendants) {
 					retained = append(retained, run.ID)
@@ -3826,10 +3901,13 @@ func sweepClosedOrderTrackingRetention(store beads.Store, now time.Time, policy 
 		}
 	}
 	logRetainedForLiveDescendants(retained)
-	if err := deleteWorkflowBeadsBatch(store, cleared); err != nil {
-		return 0, errors.Join(deleteErr, fmt.Errorf("deleting %d closed order-tracking beads: %w", len(cleared), err))
+	if err := flush(); err != nil {
+		return deleted, errors.Join(deleteErr, err)
 	}
-	return len(cleared), deleteErr
+	if budgetStopped {
+		log.Printf("order-tracking retention: stopped at the check budget with %d closed bead(s) deleted so far", deleted)
+	}
+	return deleted, deleteErr
 }
 
 // logRetainedForLiveDescendants reports the candidates the retention prune
