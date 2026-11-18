@@ -1011,3 +1011,108 @@ func TestBaseGoldenSkipsOnlyTheFSHostGroup(t *testing.T) {
 		})
 	}
 }
+
+// cityOnlyGolden wraps the full golden in reference.CityOnlyScript and
+// returns the wrapper and its ops log.
+func cityOnlyGolden(t *testing.T) (path, opsLog string) {
+	t.Helper()
+	dir := t.TempDir()
+	opsLog = filepath.Join(dir, "ops.log")
+	path = filepath.Join(dir, "city-only")
+	if err := os.WriteFile(path, []byte(reference.CityOnlyScript(writeGolden(t), opsLog)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path, opsLog
+}
+
+// cityGroups selects the groups whose ops name cities, inject faults or
+// send server-stop: the ones a run's city reaches.
+func cityGroups(c Code) bool {
+	for _, req := range catalog {
+		if req.Code == c {
+			switch req.Group {
+			case GroupProtocol, GroupLifecycle, GroupObserve, GroupInput, GroupServer:
+				return true
+			}
+			return false
+		}
+	}
+	return false
+}
+
+// Kills a run outside a city that runs its ops in no city: a runtime that
+// serves only a city, as gc's own ops always name one, refuses them and
+// fails the run. Run outside a city, every op names a city, the run's own a
+// private one, which is gone after the run, and whose server is ended by a
+// final server-stop; a probe's own city and its faults still reach the
+// runtime.
+func TestRunOutsideACityRunsInAPrivateCity(t *testing.T) {
+	t.Setenv("GC_EXEC_CITY_NAME", "")
+	t.Setenv("GC_EXEC_CITY_PATH", "")
+	path, opsLog := cityOnlyGolden(t)
+
+	report, err := run(context.Background(), path, Options{}, cityGroups)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected := 0
+	for _, res := range report.Results {
+		if !cityGroups(res.Code) {
+			continue
+		}
+		selected++
+		if res.Status != StatusPass {
+			t.Errorf("%s (%s) = %s (%s), want PASS", res.Code, res.Group, res.Status, res.Detail)
+		}
+	}
+	if selected == 0 {
+		t.Fatal("no requirement selected")
+	}
+	ops, err := reference.ReadCityOps(opsLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) == 0 || ops[0].Args != "protocol" || ops[0].City == "" {
+		t.Fatalf("first op = %v, want protocol in a city", ops[:min(1, len(ops))])
+	}
+	private := ops[0].City
+	var last string
+	for _, op := range ops {
+		if op.City == "" {
+			t.Errorf("op %q named no city", op.Args)
+		}
+		if op.City == private {
+			last = op.Args
+		}
+	}
+	if _, err := os.Stat(private); !os.IsNotExist(err) {
+		t.Errorf("private city %s after the run: stat err = %v, want it removed", private, err)
+	}
+	if last != "server-stop" {
+		t.Errorf("last op in the private city = %q, want server-stop: the run left its server running", last)
+	}
+}
+
+// Kills a run from a city that leaves that city: with GC_EXEC_CITY_PATH set,
+// the run's ops run there, and it sends the caller's city no server-stop.
+func TestRunFromACityRunsThere(t *testing.T) {
+	path, opsLog := cityOnlyGolden(t)
+	t.Setenv("GC_EXEC_CITY_NAME", "live")
+	t.Setenv("GC_EXEC_CITY_PATH", "/live/city")
+
+	if _, err := run(context.Background(), path, Options{}, cityGroups); err != nil {
+		t.Fatal(err)
+	}
+	ops, err := reference.ReadCityOps(opsLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) == 0 || ops[0].Args != "protocol" || ops[0].City != "/live/city" {
+		t.Fatalf("first op = %v, want protocol in the caller's city /live/city", ops[:min(1, len(ops))])
+	}
+	for _, op := range ops {
+		if op.Args == "server-stop" && op.City == "/live/city" {
+			t.Error("server-stop sent to the caller's city")
+		}
+	}
+}

@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/runtime/runtimecontract/reference"
 )
 
 // refConfig parameterizes the golden reference runtime: which capabilities it
@@ -225,5 +227,47 @@ func TestEveryCapabilityIsGated(t *testing.T) {
 					m.target, got.Status, got.Detail)
 			}
 		})
+	}
+}
+
+// Kills a run outside a city that runs its ops in no city: a runtime that
+// serves only a city, as gc's own ops always name one, refuses its handshake,
+// and every capability it would declare goes unchecked. Run outside a city,
+// every op names a private city, which is gone after the run, and whose
+// server is ended by a final server-stop.
+func TestRunOutsideACityRunsInAPrivateCity(t *testing.T) {
+	t.Setenv("GC_EXEC_CITY_NAME", "")
+	t.Setenv("GC_EXEC_CITY_PATH", "")
+	cfg := goldenConfig()
+	cfg.caps = append(cfg.caps, "server-lifecycle")
+	dir := t.TempDir()
+	opsLog := filepath.Join(dir, "ops.log")
+	path := filepath.Join(dir, "city-only")
+	if err := os.WriteFile(path, []byte(reference.CityOnlyScript(writeRef(t, cfg), opsLog)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	rep := run(t, path)
+	if rep.Summary.Passed != len(catalog) {
+		t.Errorf("passed %d/%d, want every declared capability to pass; results %+v", rep.Summary.Passed, len(catalog), rep.Results)
+	}
+	ops, err := reference.ReadCityOps(opsLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ops) == 0 || ops[0].Args != "protocol" || ops[0].City == "" {
+		t.Fatalf("ops = %v, want protocol first, in a city", ops)
+	}
+	private := ops[0].City
+	for _, op := range ops {
+		if op.City != private {
+			t.Errorf("op %q ran in %q, want the private city %s", op.Args, op.City, private)
+		}
+	}
+	if _, err := os.Stat(private); !os.IsNotExist(err) {
+		t.Errorf("private city %s after the run: stat err = %v, want it removed", private, err)
+	}
+	if last := ops[len(ops)-1].Args; last != "server-stop" {
+		t.Errorf("last op = %q, want server-stop: the run left its server running", last)
 	}
 }

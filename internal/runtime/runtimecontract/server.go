@@ -15,20 +15,30 @@ import (
 // handshake declares server-lifecycle.
 //
 // server-stop names no session: it ends every session of the city it runs
-// in. So every op of a server probe runs in a private city (privateCity),
-// never in the GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH the run inherited,
-// and a run from a city leaves that city's sessions running.
+// in. So every op of a server probe runs in a private city of its own
+// (privateCity), never in the city the rest of the run runs in, and a run
+// from a city leaves that city's sessions running.
 
-// privateCity returns the env of a city no live city uses, for one server
-// probe: GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH name a fresh temp dir,
-// which remove deletes.
+// privateCity returns the env of a city no live city uses, for a run outside
+// a city or for one server probe: GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH
+// name a fresh temp dir, which remove deletes.
 func privateCity() (env []string, remove func(), err error) {
 	dir, err := os.MkdirTemp("", "gc-rpp-city-")
 	if err != nil {
-		return nil, nil, fmt.Errorf("creating a private city to run server-stop in: %w", err)
+		return nil, nil, fmt.Errorf("creating a private city: %w", err)
 	}
 	env = []string{"GC_EXEC_CITY_NAME=" + filepath.Base(dir), "GC_EXEC_CITY_PATH=" + dir}
 	return env, func() { _ = os.RemoveAll(dir) }, nil
+}
+
+// endPrivateServer sends server-stop to the run's private city when hs
+// declares server-lifecycle, as gc does to a city it stops: the server the
+// run's sessions brought up there ends with the run, an interrupted one
+// included. The server probes gate the op itself, so its outcome is unread.
+func endPrivateServer(ctx context.Context, r *runner, hs runtime.ProtocolInfo) {
+	if declared, _ := serverDeclared(hs); declared {
+		r.opEnv(context.WithoutCancel(ctx), r.opts.OpTimeout, nil, nil, "server-stop")
+	}
 }
 
 // serverStop runs server-stop in city and returns a non-pass status when it

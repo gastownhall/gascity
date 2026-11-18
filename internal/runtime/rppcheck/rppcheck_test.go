@@ -634,14 +634,17 @@ func TestRun_StartConfigCarriesCommandAndWorkDir(t *testing.T) {
 	}
 }
 
+// Kills a canceled run whose cleanup stop does not run, or runs outside the
+// private city the session started in, or leaves that city behind.
 func TestRun_CanceledRunStopsSessionViaDetachedContext(t *testing.T) {
+	t.Setenv("GC_EXEC_CITY_PATH", "")
 	state := t.TempDir()
 	body := strings.Replace(conformantScript(state),
 		`is-running)        if [ -f "$state/$name.running" ]; then echo true; else echo false; fi`,
 		`is-running)        touch "$state/is-running-called"; exec sleep 30`, 1)
 	body = strings.Replace(body,
 		`stop)              rm -f "$state/$name.running"`,
-		`stop)              echo "$name" >> "$state/stop.log"; rm -f "$state/$name.running"`, 1)
+		`stop)              echo "${GC_EXEC_CITY_PATH:-}|$name" >> "$state/stop.log"; rm -f "$state/$name.running"`, 1)
 	script := writeScript(t, t.TempDir(), body)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -674,8 +677,15 @@ func TestRun_CanceledRunStopsSessionViaDetachedContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cleanup stop never ran after cancellation: %v", err)
 	}
-	if !strings.Contains(string(stops), "cancel-session") {
+	first, _, _ := strings.Cut(string(stops), "\n")
+	city, name, _ := strings.Cut(first, "|")
+	if name != "cancel-session" {
 		t.Errorf("cleanup stop log %q missing the session name", stops)
+	}
+	if city == "" {
+		t.Errorf("cleanup stop log %q: the stop named no city, not the private city the session started in", stops)
+	} else if _, err := os.Stat(city); !os.IsNotExist(err) {
+		t.Errorf("private city %s after the canceled run: stat err = %v, want it removed", city, err)
 	}
 }
 
@@ -1020,5 +1030,137 @@ func TestRun_InputOutcomeRefusalOnARunningSessionFails(t *testing.T) {
 	}
 	if c := findCheck(t, res, "optional: interrupt"); c.Status != StatusFail {
 		t.Errorf("post-stop interrupt answering not_sent = %s (%s), want FAIL: only gone answers a stopped session", c.Status, c.Detail)
+	}
+}
+
+// cityOnly wraps the executable at runtime in reference.CityOnlyScript and
+// returns the wrapper and its ops log.
+func cityOnly(t *testing.T, runtime string) (script, opsLog string) {
+	t.Helper()
+	dir := t.TempDir()
+	opsLog = filepath.Join(dir, "ops.log")
+	script = filepath.Join(dir, "city-only")
+	if err := os.WriteFile(script, []byte(reference.CityOnlyScript(runtime, opsLog)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return script, opsLog
+}
+
+// cityOps reads the ops a cityOnly wrapper logged.
+func cityOps(t *testing.T, opsLog string) []reference.CityOp {
+	t.Helper()
+	ops, err := reference.ReadCityOps(opsLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ops
+}
+
+// reportFailures logs every failed check of res as a test error.
+func reportFailures(t *testing.T, res Result) {
+	t.Helper()
+	for _, c := range res.Checks {
+		if c.Status == StatusFail {
+			t.Errorf("%s failed: %s", c.Name, c.Detail)
+		}
+	}
+}
+
+// Kills a check run outside a city that runs its ops in no city: a runtime
+// that serves only a city, as gc's own ops always name one, refuses them and
+// fails the check. Run outside a city, every op names a private city, which
+// is gone after the run, and whose server is ended by a final server-stop.
+func TestRun_OutsideACityRunsInAPrivateCity(t *testing.T) {
+	t.Setenv("GC_EXEC_CITY_NAME", "")
+	t.Setenv("GC_EXEC_CITY_PATH", "")
+	script, opsLog := cityOnly(t, outcomeReference(t, nil))
+
+	res, err := Run(context.Background(), script, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reportFailures(t, res)
+	for _, name := range []string{serverStopCheck, serverStopIdempotentCheck, inputOutcomeCheck} {
+		if c := findCheck(t, res, name); c.Status != StatusPass {
+			t.Errorf("%s = %s (%s), want PASS", name, c.Status, c.Detail)
+		}
+	}
+	ops := cityOps(t, opsLog)
+	if len(ops) == 0 || ops[0].Args != "protocol" {
+		t.Fatalf("ops = %v, want protocol first", ops)
+	}
+	private := ops[0].City
+	var last string
+	for _, op := range ops {
+		if op.City == "" {
+			t.Errorf("op %q named no city", op.Args)
+		}
+		if op.City == private {
+			last = op.Args
+		}
+	}
+	if private == "" {
+		t.Fatal("protocol named no city")
+	}
+	if _, err := os.Stat(private); !os.IsNotExist(err) {
+		t.Errorf("private city %s after the run: stat err = %v, want it removed", private, err)
+	}
+	if last != "server-stop" {
+		t.Errorf("last op in the private city = %q, want server-stop: the check left its server running", last)
+	}
+}
+
+// Kills a check run outside a city that sends server-stop to a runtime that
+// does not declare server-lifecycle.
+func TestRun_OutsideACitySendsNoServerStopToAnUndeclaredRuntime(t *testing.T) {
+	t.Setenv("GC_EXEC_CITY_NAME", "")
+	t.Setenv("GC_EXEC_CITY_PATH", "")
+	script, opsLog := cityOnly(t, observeReference(t, map[string]string{
+		"protocol": `echo '{"version":0,"capabilities":["observe.v1","report-attachment"]}'`,
+	}))
+
+	res, err := Run(context.Background(), script, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reportFailures(t, res)
+	for _, op := range cityOps(t, opsLog) {
+		if op.Args == "server-stop" {
+			t.Errorf("server-stop sent in %q to a runtime not declaring server-lifecycle", op.City)
+		}
+	}
+}
+
+// Kills a check run from a city that leaves that city: with
+// GC_EXEC_CITY_PATH set, the check's ops run there, its server checks run in
+// a city of their own, and it sends the caller's city no server-stop.
+func TestRun_FromACityRunsThere(t *testing.T) {
+	script, opsLog := cityOnly(t, outcomeReference(t, nil))
+	t.Setenv("GC_EXEC_CITY_NAME", "live")
+	t.Setenv("GC_EXEC_CITY_PATH", "/live/city")
+
+	res, err := Run(context.Background(), script, Options{SessionName: "from-city"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reportFailures(t, res)
+	var protocol, start, serverStart bool
+	for _, op := range cityOps(t, opsLog) {
+		switch {
+		case op.Args == "protocol" && op.City == "/live/city":
+			protocol = true
+		case op.Args == "start from-city" && op.City == "/live/city":
+			start = true
+		case op.Args == "start from-city-server" && op.City != "/live/city" && op.City != "":
+			serverStart = true
+		case op.Args == "server-stop" && op.City == "/live/city":
+			t.Error("server-stop sent to the caller's city")
+		}
+	}
+	if !protocol || !start {
+		t.Errorf("protocol in the caller's city = %v, start from-city there = %v, want both", protocol, start)
+	}
+	if !serverStart {
+		t.Error("the server check's session did not start in a city of its own")
 	}
 }

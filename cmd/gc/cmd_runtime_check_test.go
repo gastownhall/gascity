@@ -327,3 +327,29 @@ func TestRuntimeCheckCmd_NudgeFallbackDeclarationIsSmokeTested(t *testing.T) {
 		t.Errorf("output should FAIL the nudge check for a declared-but-unimplemented nudge-fallback runtime; got:\n%s", stdout.String())
 	}
 }
+
+// cityOnlyRPPScript wraps the script at path in one that, like a runtime
+// keying its server per city, refuses every op that names no city.
+func cityOnlyRPPScript(t *testing.T, path string) string {
+	t.Helper()
+	return writeRPPScript(t, fmt.Sprintf(`if [ -z "${GC_EXEC_CITY_PATH:-}" ]; then echo "$1: GC_EXEC_CITY_PATH is not set" >&2; exit 1; fi
+exec %q "$@"
+`, path))
+}
+
+// Kills a gc runtime check run from a shell outside any city that runs its
+// ops in no city, which a runtime serving only cities refuses.
+func TestRuntimeCheckCmd_RunsOutsideACity(t *testing.T) {
+	t.Setenv("GC_EXEC_CITY_NAME", "")
+	t.Setenv("GC_EXEC_CITY_PATH", "")
+	var stdout, stderr bytes.Buffer
+	cmd := newRuntimeCheckCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{cityOnlyRPPScript(t, conformantRPPScript(t))})
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	if out := stdout.String(); !strings.Contains(out, "0 failed") {
+		t.Errorf("output should report zero failures:\n%s", out)
+	}
+}

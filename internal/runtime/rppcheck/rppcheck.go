@@ -118,9 +118,16 @@ type startConfig struct {
 	Command string `json:"command,omitempty"`
 }
 
+// cityPathEnv names the city path gc sets on every op it runs.
+const cityPathEnv = "GC_EXEC_CITY_PATH"
+
 // Run validates the executable against RPP v0 and returns per-check
-// results. It returns an error only when the run cannot start at all
-// (executable not found); protocol violations are recorded as failed
+// results. Every op runs in a city, as gc's own ops do: the inherited
+// GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH when GC_EXEC_CITY_PATH is set,
+// otherwise a private city (privateCity) removed when Run returns, after
+// server-stop there for a script declaring server-lifecycle. It returns an
+// error only when the run cannot start at all (executable not found, or no
+// private city can be made); protocol violations are recorded as failed
 // checks, never as errors.
 func Run(ctx context.Context, executable string, opts Options) (Result, error) {
 	path, err := exec.LookPath(executable)
@@ -130,6 +137,15 @@ func Run(ctx context.Context, executable string, opts Options) (Result, error) {
 	opts.applyDefaults()
 
 	c := &checker{path: path, opts: opts}
+	if execenv.Getenv(cityPathEnv) == "" {
+		city, removeCity, err := privateCity()
+		if err != nil {
+			return Result{}, fmt.Errorf("checking %s outside a city: %w", executable, err)
+		}
+		defer removeCity()
+		c.city = city
+		defer c.endPrivateServer(ctx)
+	}
 	c.checkHandshake(ctx)
 	c.checkLifecycle(ctx)
 	c.checkServerLifecycle(ctx)
@@ -139,9 +155,23 @@ func Run(ctx context.Context, executable string, opts Options) (Result, error) {
 
 // checker accumulates check results across the run.
 type checker struct {
-	path   string
-	opts   Options
+	path string
+	opts Options
+	// city is the env of the private city every op runs in; nil means every
+	// op runs in the city it inherited. An op's own env replaces it.
+	city   []string
 	result Result
+}
+
+// endPrivateServer sends server-stop to the check's private city when the
+// handshake declares server-lifecycle, as gc does to a city it stops: the
+// server the check's sessions brought up there ends with the check, an
+// interrupted one included. The server-lifecycle checks gate the op itself,
+// so this records nothing.
+func (c *checker) endPrivateServer(ctx context.Context) {
+	if c.result.Protocol.Has(runtime.ProtocolCapabilityServerLifecycle) {
+		c.runOpTimeout(context.WithoutCancel(ctx), c.opts.OpTimeout, nil, "server-stop")
+	}
 }
 
 func (c *checker) record(name string, status Status, detail string) {
@@ -170,14 +200,16 @@ func (c *checker) runOpTimeout(ctx context.Context, timeout time.Duration, stdin
 	return c.runOpEnv(ctx, timeout, nil, stdin, args...)
 }
 
-// runOpEnv is runOpTimeout with env added to the executable's environment
-// (a city's GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH).
+// runOpEnv is runOpTimeout with the check's private city, then env, added
+// to the executable's environment. The last value of a key wins, so an
+// op's own city (a server check's GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH)
+// replaces the check's, while other keys add to it.
 func (c *checker) runOpEnv(ctx context.Context, timeout time.Duration, env []string, stdin []byte, args ...string) opResult {
 	var cmdEnv []string
-	if env != nil {
+	if c.city != nil || env != nil {
 		// Read before the op's deadline, so the read is not the op's. During
 		// a native store open it is the environment as the open found it.
-		cmdEnv = append(execenv.Environ(), env...)
+		cmdEnv = append(append(execenv.Environ(), c.city...), env...)
 	}
 	opCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -487,9 +519,9 @@ func (c *checker) goneAfterStop(op string, res opResult) bool {
 // script that does not declare the token is not sent server-stop.
 //
 // server-stop names no session: it ends every session of the city it runs
-// in. So every op here runs in a private city (privateCity), never in the
-// GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH the check inherited, and a check
-// run from a city leaves that city's sessions running.
+// in. So every op here runs in a private city of its own (privateCity),
+// never in the city the rest of the check runs in, and a check run from a
+// city leaves that city's sessions running.
 func (c *checker) checkServerLifecycle(ctx context.Context) {
 	if !c.result.Protocol.Has(runtime.ProtocolCapabilityServerLifecycle) {
 		return
@@ -545,12 +577,13 @@ func (c *checker) checkServerLifecycle(ctx context.Context) {
 	}
 }
 
-// privateCity returns the env of a city no live city uses: GC_EXEC_CITY_NAME
-// and GC_EXEC_CITY_PATH name a fresh temp dir, which remove deletes.
+// privateCity returns the env of a city no live city uses, for a check run
+// outside a city or for its server checks: GC_EXEC_CITY_NAME and
+// GC_EXEC_CITY_PATH name a fresh temp dir, which remove deletes.
 func privateCity() (env []string, remove func(), err error) {
 	dir, err := os.MkdirTemp("", "gc-rpp-check-city-")
 	if err != nil {
-		return nil, nil, fmt.Errorf("creating a private city to run server-stop in: %w", err)
+		return nil, nil, fmt.Errorf("creating a private city: %w", err)
 	}
 	env = []string{"GC_EXEC_CITY_NAME=" + filepath.Base(dir), "GC_EXEC_CITY_PATH=" + dir}
 	return env, func() { _ = os.RemoveAll(dir) }, nil

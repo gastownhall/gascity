@@ -4259,11 +4259,19 @@ idle-boundary declared as well, "capability carrier.ops: ready-prompt
 metadata" requires set-meta and get-meta to round-trip a non-default ready
 prompt byte for byte, because gc keeps each session's prompt there.
 
+Every operation runs in a city, as gc's own operations do. With
+GC_EXEC_CITY_PATH set, the check runs in the city GC_EXEC_CITY_NAME and
+GC_EXEC_CITY_PATH name. With it unset or empty, as in a shell outside any
+city, the check runs in a private city: GC_EXEC_CITY_NAME and
+GC_EXEC_CITY_PATH name a fresh temporary directory, removed when the check
+ends or is interrupted. A runtime whose handshake declares server-lifecycle
+is sent server-stop there first, so the check leaves no server behind.
+
 A runtime whose handshake declares server-lifecycle is sent server-stop,
 which ends every session of the city it runs in, twice. The check runs it,
-and the session it checks it against, in a private city: GC_EXEC_CITY_NAME
-and GC_EXEC_CITY_PATH name a fresh temporary directory, never the city you
-run the check from. A runtime that does not scope its server by
+and the session it checks it against, in a private city of their own:
+GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH name a fresh temporary directory,
+never the city the rest of the check runs in. A runtime that does not scope its server by
 GC_EXEC_CITY_PATH ends every session the server holds, so check it only
 against a backend that no live city uses.
 
@@ -4295,11 +4303,19 @@ Unlike "gc runtime check" (a lighter smoke test), each requirement is
 proven to gate: the suite is kept honest by negative tests in which a
 broken reference fails exactly its requirement's check.
 
+Every operation runs in a city, as gc's own operations do. With
+GC_EXEC_CITY_PATH set, the suite, and the --env suite, run in the city
+GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH name. With it unset or empty, as in
+a shell outside any city, each runs in a private city: GC_EXEC_CITY_NAME and
+GC_EXEC_CITY_PATH name a fresh temporary directory, removed when the run
+ends or is interrupted. A runtime whose handshake declares server-lifecycle
+is sent server-stop there first, so the run leaves no server behind.
+
 A runtime whose handshake declares server-lifecycle is sent server-stop,
 which ends every session of the city it runs in (the server group). The
-suite runs it, and the sessions it checks it against, in a private city:
-GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH name a fresh temporary directory,
-never the city you run the suite from. A runtime that does not scope its
+suite runs it, and the sessions it checks it against, in a private city of
+their own: GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH name a fresh temporary
+directory, never the city the rest of the suite runs in. A runtime that does not scope its
 server by GC_EXEC_CITY_PATH ends every session the server holds, so check it
 only against a backend that no live city uses.
 
