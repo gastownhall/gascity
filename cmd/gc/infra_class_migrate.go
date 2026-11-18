@@ -475,6 +475,18 @@ type infraMigrationReport struct {
 	// Clear is what the operator command's clear pass did, on the paths that
 	// ran one.
 	Clear infraClearResult
+	// basis is the containment basis confirmInfraContainment captured just
+	// before classifyInfraContainmentGap's work-store read — the stat tuple
+	// (or content hash) of everything that read depended on, taken while the
+	// manifest was still the one this verdict is about. It is the zero value
+	// on every outcome that never reaches that read (not configured, genesis,
+	// an identity mismatch, an unrecorded manifest, every uncheckable), which
+	// is exactly how storage_containment_lease.go recognizes a report with
+	// nothing to publish. It is lowercase, unlike every other field here, on
+	// purpose: it is bookkeeping for one consumer (the strand recheck's lease
+	// publish), not part of the evidence this struct exists to carry to an
+	// operator or an event.
+	basis containmentBasis
 }
 
 // serving reports whether this outcome leaves the binding safe to route reads
@@ -1914,19 +1926,43 @@ func confirmInfraContainment(cityPath string, target infraBindingTarget, logPref
 				target.Database, target.ManifestPath()),
 		}
 	}
+	// Captured here, before classifyInfraContainmentGap's work-store read:
+	// this is the only point in this function where the manifest this verdict
+	// is about is known good and the expensive read has not started. A basis
+	// taken after that read could stamp a manifest rewritten mid-read, and
+	// then agree with a one-shot's later re-check that read the rewritten
+	// one too — exactly the race this exists to catch (design doc §4.1 F2).
+	// A failure capturing it does not fail this check: the basis is purely
+	// advisory (the lease it feeds is never consulted for a refusal, design
+	// doc §1), so a report with no basis simply is not published as one.
+	basis, basisErr := captureContainmentBasis(cityPath, target)
+	if basisErr != nil {
+		basis = containmentBasis{}
+	}
 	gap, err := classifyInfraContainmentGap(cityPath, target, manifest)
 	if err != nil {
-		return reportUncheckableConvergence(target, logPrefix, stderr, err)
+		// The basis was already captured above, before this read failed, and
+		// stays valid regardless: it stamps the manifest and marker, not the
+		// work-store read. It is kept on the report even though this outcome
+		// (uncheckable) is never published as a lease (storage_boot.go's
+		// tick() gates on Outcome before that, not on basis presence) — the
+		// basis-emptiness check on the publishing side exists to catch a
+		// failed CAPTURE, not a failed check.
+		report := reportUncheckableConvergence(target, logPrefix, stderr, err)
+		report.basis = basis
+		return report
 	}
 	if len(gap.Stranded) == 0 {
 		note, notePresent, err := readInfraClearedNote(cityPath)
 		if err != nil {
-			return reportUncheckableConvergence(target, logPrefix, stderr, err)
+			report := reportUncheckableConvergence(target, logPrefix, stderr, err)
+			report.basis = basis
+			return report
 		}
 		if len(gap.Retained) > 0 || (notePresent && !note.Complete) {
-			return infraMigrationReport{Outcome: infraMigrationRetained, Retained: gap.Retained, Unrecorded: gap.Unrecorded, ProvenBeads: manifest.Len(), LostCrossEdges: note.LostCrossEdges}
+			return infraMigrationReport{Outcome: infraMigrationRetained, Retained: gap.Retained, Unrecorded: gap.Unrecorded, ProvenBeads: manifest.Len(), LostCrossEdges: note.LostCrossEdges, basis: basis}
 		}
-		return infraMigrationReport{Outcome: infraMigrationConverged, ProvenBeads: manifest.Len(), LostCrossEdges: note.LostCrossEdges}
+		return infraMigrationReport{Outcome: infraMigrationConverged, ProvenBeads: manifest.Len(), LostCrossEdges: note.LostCrossEdges, basis: basis}
 	}
 	// The removed-since count is context for reading the strand, not a second
 	// alarm: on a city whose wisp GC has run it is large and entirely expected,
@@ -1942,11 +1978,14 @@ func confirmInfraContainment(cityPath string, target infraBindingTarget, logPref
 		logPrefix, len(gap.Stranded), target.Database, infraStrandedIDList(gap.Stranded), residue, infraStrandedAdviceFor(gap.Stranded, gap.HeldDifferent, gap.PresumedReused, gap.Declassifiable))
 	note, notePresent, err := readInfraClearedNote(cityPath)
 	if err != nil {
-		return reportUncheckableConvergence(target, logPrefix, stderr, err)
+		report := reportUncheckableConvergence(target, logPrefix, stderr, err)
+		report.basis = basis
+		return report
 	}
 	return infraMigrationReport{
 		Outcome: infraMigrationStranded, Stranded: gap.Stranded, HeldDifferent: gap.HeldDifferent, PresumedReused: gap.PresumedReused, Declassifiable: gap.Declassifiable,
 		Retained: gap.Retained, Unrecorded: gap.Unrecorded, ClearUnfinished: notePresent && !note.Complete, LostCrossEdges: note.LostCrossEdges,
+		basis: basis,
 	}
 }
 

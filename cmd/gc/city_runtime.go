@@ -742,6 +742,18 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	// rig suspended now is censused when it resumes (censusResumedRigs).
 	cr.startRigResidueCensus(ctx)
 
+	// The verdict the boot gate already reached is this city's first
+	// containment lease: storage-verdict (controller.go) can answer it
+	// immediately, without waiting for the first recheck tick below. Route
+	// registration (registerResidencyRoutes) always runs before run() is
+	// called, so servedContainmentLease can already find these routes by
+	// the time this publishes. Boot itself carries no basis for a genesis
+	// city — recordInfraGenesis never calls confirmInfraContainment — so
+	// there is nothing to publish for one; its first recheck tick publishes
+	// instead (boot-check-design.md §4.6, "Genesis: the first tick
+	// publishes").
+	publishBootContainmentLease(cr.storageRoutes)
+
 	// The containment check the boot gate ran, again every
 	// strandRecheckInterval, read-only and report-only: a write that strands
 	// rows after boot becomes a storage.binding.stranded event.
