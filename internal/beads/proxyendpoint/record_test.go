@@ -56,6 +56,44 @@ func TestReadDecodesEveryFieldBdWrites(t *testing.T) {
 	}
 }
 
+// TestReadDecodesTheDataPortProtocolMarker reads proxy.pid in bd's own
+// spelling: the documents below have the fields, in order, of a record beads
+// v1.4.0-rc.3 wrote for a live proxy (the values are placeholders), and the
+// same document as a bd from before the control_proto marker writes it.
+// Marshaling a Record and reading it back, as TestReadDecodesEveryFieldBdWrites
+// does, would agree with any tag spelling.
+func TestReadDecodesTheDataPortProtocolMarker(t *testing.T) {
+	const fields = `"pid":4242,"port":45123,"upstream_id":"abc","schema":2,"kind":"db-proxy",` +
+		`"birth":"linux-v1:boot:99887766","root_id":"abc","control_port":45124`
+	for _, tc := range []struct {
+		name      string
+		doc       string
+		wantProto int
+		wantAuth  bool
+	}{
+		{name: "beads v1.4.0 marks its BDPROXY1 proxy", doc: `{` + fields + `,"control_proto":1}`, wantProto: 1, wantAuth: true},
+		{name: "a bd from before the marker", doc: `{` + fields + `}`, wantProto: 0, wantAuth: false},
+		{name: "a marker value this package has not seen", doc: `{` + fields + `,"control_proto":2}`, wantProto: 2, wantAuth: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.WriteFile(PIDPath(root), []byte(tc.doc), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			got, err := Read(root)
+			if err != nil {
+				t.Fatalf("Read: %v", err)
+			}
+			if got.ControlProto != tc.wantProto {
+				t.Errorf("ControlProto = %d, want %d", got.ControlProto, tc.wantProto)
+			}
+			if got.RequiresDataAuth() != tc.wantAuth {
+				t.Errorf("RequiresDataAuth() = %v, want %v for control_proto %d", got.RequiresDataAuth(), tc.wantAuth, got.ControlProto)
+			}
+		})
+	}
+}
+
 func TestReadAbsentAndMalformed(t *testing.T) {
 	t.Run("absent is ErrNoProxy", func(t *testing.T) {
 		if _, err := Read(t.TempDir()); !errors.Is(err, ErrNoProxy) {

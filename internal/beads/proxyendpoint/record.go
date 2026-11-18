@@ -12,9 +12,10 @@
 // plus the process table.
 //
 // The schema mirrors beads v1.3.0 internal/storage/dbproxy/pidfile/pidfile.go
-// (schema 2). Nothing in gc writes these files, so the risk this package
-// carries is misreading one: a field read wrongly is a field gc would use to
-// dial the wrong process.
+// (schema 2), plus the control_proto marker beads v1.4.0 added to it (see
+// Record.RequiresDataAuth). Nothing in gc writes these files, so the risk this
+// package carries is misreading one: a field read wrongly is a field gc would
+// use to dial the wrong process.
 package proxyendpoint
 
 import (
@@ -101,7 +102,32 @@ type Record struct {
 	Birth       string `json:"birth,omitempty"`
 	RootID      string `json:"root_id,omitempty"`
 	ControlPort int    `json:"control_port,omitempty"`
+	// ControlProto is the control-listener protocol marker beads v1.4.0
+	// writes (pidfile.ControlProtoIdentMAC, 1); a record an older bd wrote
+	// carries none. See RequiresDataAuth for what gc reads from it.
+	ControlProto int `json:"control_proto,omitempty"`
 }
+
+// RequiresDataAuth reports whether the proxy this record names authenticates
+// every data-port connection with bd's BDPROXY1 handshake, which gc cannot
+// perform.
+//
+// beads v1.4.0 (beads#7885, for #7884) made the proxy read a client-first
+// hello keyed by the owner-only proxy.secret before it dials Dolt or writes a
+// single MySQL byte, and close, unanswered, any connection that sends none
+// within five seconds. The same change introduced the control_proto marker,
+// and bd's own proxy discovery reads a record without it as a pre-upgrade
+// proxy (beads dbproxy/proxy/endpoint.go isPreMACIdentRefusal). So the marker
+// is the record-only answer to "can a plain MySQL client use this data
+// port": a record with no marker names a proxy that serves plain MySQL there,
+// and a record with any marker, including a value this package has not seen,
+// names one that serves only bd.
+//
+// gc has no way across that handshake. This package never reads proxy.secret,
+// and beads exports no BDPROXY1 dialer and no library open that uses one
+// (beads#8412 is unmerged; beads#8323 and the 1.4.0 Known issues), so a plain
+// session against such a port waits for a greeting that never comes.
+func (r Record) RequiresDataAuth() bool { return r.ControlProto != 0 }
 
 // Sentinel outcomes of reading and validating a record. They are sentinels
 // rather than message text because every caller branches on them: doctor

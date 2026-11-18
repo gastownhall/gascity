@@ -1533,6 +1533,14 @@ func describeEndpointAccount(payload beadsStorePayloadDoc) string {
 // from the flag-off one in exactly one variable: same city, same bd, same
 // recording shim, same GC_HOME — because a fork count is only evidence about
 // the flag if nothing else moved.
+//
+// A bd from beads v1.4.0 on serves its proxy's data port to bd alone (the
+// BDPROXY1 handshake, beads#7885), so the lane cannot serve it and declines it
+// from the proxy record with data_auth_required (proxiedDataPortBdOnly). There
+// the two rows that measure a served lane measure that refusal instead: the
+// flag costs nothing over the flag-off lane — no ping, no extra fork, the
+// verdict on the payload — and doctor reports the declined lane over a live
+// proxy.
 func runProxiedNativeLaneGates(t *testing.T, bdPath, doltPath string) {
 	t.Helper()
 	env, bdCalls := proxiedEnvRecordingBD(t, bdPath, doltPath)
@@ -1563,9 +1571,11 @@ func runProxiedNativeLaneGates(t *testing.T, bdPath, doltPath string) {
 	})
 	city.InitNoStart("claude")
 
+	var bdOnly bool
 	t.Run("precondition-gc-initialised", func(t *testing.T) {
 		assertProxiedScope(t, env, cityRoot, "the fork-gate city")
 		assertGCInitialisedProxiedPrecondition(t, env, cityRoot, "the fork-gate city")
+		bdOnly = proxiedDataPortBdOnly(t, proxiedScopeProxyRoot(t, cityRoot), "the fork-gate city")
 		// Quiescence, proved rather than assumed: with no command running,
 		// nothing may fork bd. This is the assumption every count below rests
 		// on, and it is the one that was silently false on a started city.
@@ -1607,10 +1617,10 @@ func runProxiedNativeLaneGates(t *testing.T, bdPath, doltPath string) {
 	t.Run("status-zero-forks", func(t *testing.T) {
 		bdCalls.Reset()
 		start := time.Now()
-		out, err := helpers.RunGC(lane, cityRoot, "status", "--json")
+		out, stderr, err := helpers.RunGCStreams(lane, cityRoot, "status", "--json")
 		wall := time.Since(start)
 		if err != nil {
-			t.Fatalf("gc status --json (flag on): %v\n%s", err, out)
+			t.Fatalf("gc status --json (flag on): %v\n%s%s", err, out, stderr)
 		}
 		forks, pings := bdCalls.Count(), bdCalls.Count("ping")
 		// Wall time is an artifact, not a gate. A threshold here would be a
@@ -1623,6 +1633,35 @@ func runProxiedNativeLaneGates(t *testing.T, bdPath, doltPath string) {
 			t.Errorf("gc status --json spent %d bd ping(s) on a healthy proxy, want 0:\n%s", pings, bdCalls.Describe())
 		}
 		assertProxiedNativePerfHeadroom(t, "gc status --json", wall, proxiedNativeStatusPerfTarget)
+		if bdOnly {
+			// The lane cannot serve a proxy whose data port only bd can use,
+			// so the snapshot takes the bd front door the flag-off lane takes,
+			// and the flag must cost nothing over it. Fork parity alone cannot
+			// tell a lane that declined from the record from one that dialed
+			// the port and sat out its probe budget (budget_exhausted costs the
+			// same forks two seconds later); the verdict on the payload can.
+			var status struct {
+				Beads *struct {
+					Store   string `json:"beads_store"`
+					Proxied *struct {
+						Verdict string `json:"verdict"`
+					} `json:"proxied"`
+				} `json:"beads"`
+			}
+			lastJSONLine(t, out, &status)
+			if status.Beads == nil || status.Beads.Proxied == nil || status.Beads.Proxied.Verdict != proxiedDataAuthVerdict {
+				t.Fatalf("gc status --json reported beads %s, want store BdStore with the lane's verdict %s on a proxy whose data port only bd can use",
+					strings.TrimSpace(out), proxiedDataAuthVerdict)
+			}
+			if status.Beads.Store != "BdStore" {
+				t.Errorf("gc status --json beads_store = %q, want BdStore once the lane declined", status.Beads.Store)
+			}
+			if forks != flagOffForks {
+				t.Fatalf("gc status --json forked bd %d time(s) with the flag on and %d with it off; a lane that declines from the proxy record costs nothing over the flag-off lane:\n%s",
+					forks, flagOffForks, bdCalls.Describe())
+			}
+			return
+		}
 		if forks != 0 {
 			t.Fatalf("gc status --json forked bd %d time(s) on a proxied city with the native lane on, want 0 — the session snapshot is two store.List calls (internal/session/list_all.go) and both must be served by the native leaf:\n%s",
 				forks, bdCalls.Describe())
@@ -1766,6 +1805,34 @@ func runProxiedNativeLaneGates(t *testing.T, bdPath, doltPath string) {
 		}
 		if offPayload.Proxied != nil {
 			t.Errorf("the flag-off lane published a proxied account it must not have: %s", describeProxiedAccount(offPayload))
+		}
+
+		if bdOnly {
+			// The lane declined the proxy because only bd can use its data
+			// port: the same bd front door and gate as the flag-off lane, the
+			// verdict on the account, and doctor's own endpoint account still
+			// reading the proxy as live, because the refusal is about the
+			// protocol and never about the proxy's health.
+			if payload.Store != "BdStore" || payload.PreflightGate != "proxied_provider" {
+				t.Fatalf("beads-store payload = store %q gate %q on a proxy whose data port only bd can use, want BdStore/proxied_provider — a declined lane takes the flag-off lane's front door.\n  message:  %s\n  proxied:  %s\n  endpoint: %s",
+					payload.Store, payload.PreflightGate, result.Message, describeProxiedAccount(payload), describeEndpointAccount(payload))
+			}
+			if payload.Proxied == nil || payload.Proxied.Verdict != proxiedDataAuthVerdict {
+				t.Fatalf("the flag-on lane's account is %s, want verdict %s: a lane that declined must say why", describeProxiedAccount(payload), proxiedDataAuthVerdict)
+			}
+			if payload.Proxied.Demoted {
+				t.Errorf("a lane that never served reports a demoted handle: %s", result.Message)
+			}
+			if e := payload.Endpoint; e == nil || e.Verdict != "live" || e.Evidence != "argv+birth" || !strings.HasPrefix(e.IdlePolicy, "never") || e.Generation == "" {
+				t.Errorf("doctor's endpoint account is %s, want bd's live never-idle proxy proved on argv+birth evidence", describeEndpointAccount(payload))
+			}
+			if !strings.Contains(result.Message, "verdict="+proxiedDataAuthVerdict) {
+				t.Errorf("beads-store message = %q, want it to name the verdict", result.Message)
+			}
+			if result.Status != "ok" {
+				t.Errorf("beads-store = %s for a declined lane; the bd front door is a supported store for a proxied scope: %s", result.Status, result.Message)
+			}
+			return
 		}
 
 		if payload.Store != "NativeDoltStore" {

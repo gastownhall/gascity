@@ -189,14 +189,20 @@ func TestProxiedNativeSafety(t *testing.T) {
 		env: env, lane: lane, calls: bdCalls, bdPath: bdPath,
 		city: city, root: cityRoot, proxyDir: proxiedScopeProxyRoot(t, cityRoot),
 	}
+	fixture.bdOnly = proxiedDataPortBdOnly(t, fixture.proxyDir, "the safety city")
 
 	// One `gc doctor --json` in the flag-on lane, before anything is disturbed:
 	// the lane has to be serving natively or none of the rows below are about it.
+	//
+	// Unless only bd can use the proxy's data port (a bd from beads v1.4.0
+	// on): the lane can never serve such a proxy, and its settled answer is
+	// the declared refusal. The no-spawn rows below are still about the lane —
+	// its escalation ladder runs before that refusal — and so are the library
+	// rows, which open the library against a STOPPED proxy. The rows that need a
+	// served lane or a plain MySQL session on the data port give way to
+	// bd-only-port-refuses-the-library.
 	payload, result := readBeadsStorePayload(t, lane, cityRoot, "the safety city")
-	if payload.Store != "NativeDoltStore" {
-		t.Fatalf("the safety city is not serving natively, so none of these rows would be about the lane: store=%q %s\n  %s",
-			payload.Store, describeProxiedAccount(payload), result.Message)
-	}
+	fixture.assertLaneSettled(t, payload, result, "the safety city did not settle, so none of these rows would be about the lane")
 
 	t.Run("no-spawn-control", func(t *testing.T) {
 		// The instrument, before the claim. Two properties, both required for the
@@ -322,9 +328,20 @@ func TestProxiedNativeSafety(t *testing.T) {
 		// opened in-process. So the control is a scratch scope whose metadata
 		// says plain dolt_mode "server" with no port (ResolveServerMode:
 		// owned), opened through the SAME production window, with the SAME
-		// endpoint map less the two gate keys, against the SAME dead port. The
-		// only differences from the row below are the two keys and the mode
-		// that makes the library server-backed without them.
+		// endpoint map less its gate keys. The only differences from the row
+		// below are those keys and the mode that makes the library
+		// server-backed without them.
+		//
+		// The gate keys were two, and from beads v1.4.0 they are three: an
+		// ambient BEADS_DOLT_SERVER_PORT marks a non-proxied workspace
+		// externally managed, and the library never auto-starts for one
+		// (beads#5934, ResolveServerMode check 2c). Left in the map, the port
+		// fenced this control's auto-start on its own and the instrument
+		// recorded nothing, so the control clears it too, and the auto-start
+		// asks the OS for a port, as the library does for an owned server no
+		// setting names one for. The row below keeps all three: its claim is
+		// about the production map, which carries them all, against the
+		// stopped proxy's dead port.
 		sentinel.Reset()
 		sentinel.TrapThisProcess(t)
 
@@ -342,21 +359,22 @@ func TestProxiedNativeSafety(t *testing.T) {
 		}
 		delete(controlEnv, "BEADS_DOLT_SERVER_MODE")
 		delete(controlEnv, "BEADS_DOLT_AUTO_START")
+		delete(controlEnv, "BEADS_DOLT_SERVER_PORT")
 
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 		store, err := beads.OpenNativeDoltStoreAtProxied(ctx, scratch, controlEnv)
 		if err == nil {
 			store.CloseStore() //nolint:errcheck // unexpected handle
-			t.Fatalf("the control's open SUCCEEDED against the stopped proxy's port %s, so something is serving it and neither row below is about a dead port",
-				productionEnv["BEADS_DOLT_SERVER_PORT"])
+			t.Fatalf("the control's open SUCCEEDED for a scratch scope no Dolt server serves, so something served it or the trap did not hold, and neither row below is about a dead port:\n%s",
+				sentinel.Describe())
 		}
 		t.Logf("control open error: %v", err)
 
 		mine := sentinel.FromThisProcess()
 		t.Logf("sentinel recorded %d dolt exec(s) from this process (pid %d):\n%s", len(mine), os.Getpid(), sentinel.Describe())
 		if len(mine) == 0 {
-			t.Fatalf("with the two gates cleared the library's auto-start recorded NO dolt exec from this process, so the sentinel is not the dolt the library resolves and the negative row below would pass by construction; open error: %v",
+			t.Fatalf("with its gate keys cleared the library's auto-start recorded NO dolt exec from this process, so the sentinel is not the dolt the library resolves and the negative row below would pass by construction; open error: %v",
 				err)
 		}
 		if leaked := waitForNoDoltProcesses(t, scratch, 10*time.Second); len(leaked) > 0 {
@@ -400,7 +418,58 @@ func TestProxiedNativeSafety(t *testing.T) {
 
 	// Everything below needs a served lane again.
 	healed := fixture.heal(t, "before the no-migrate rows")
-	t.Logf("the safety city is serving natively again at generation %s", healed)
+	t.Logf("the safety city's lane settled again at generation %s (%s)", healed, fixture.settledLane())
+
+	if fixture.bdOnly {
+		// The three rows after this one cannot be measured on a proxy whose
+		// data port only bd can use. Both no-migrate rows skew the cursor
+		// tables over a plain MySQL session on that port and read the cursor
+		// gate against a lane that serves once they match, and the author row
+		// writes through a library handle opened over it: the port admits
+		// neither, and the lane declines this proxy from its record before
+		// its probe or any library open (data_auth_required, asserted above).
+		// What those rows protect, that no library handle of gc's migrates or
+		// writes bd's database through the proxy, is measured instead by the
+		// one row below, on the production window itself. The cursor gate
+		// keeps its coverage in internal/beads TestAdmitTable, and the
+		// projected author pair in cmd/gc TestProxiedOpenEnvForPinGolden.
+		t.Run("bd-only-port-refuses-the-library", func(t *testing.T) {
+			// The production window, the production endpoint map, and bd's
+			// LIVE proxy: the open the lane never attempts, made directly.
+			// It must fail closed. A handle would be gc's library talking to
+			// bd's database past the BDPROXY1 handshake (or to whatever else
+			// answered); a dolt exec would be gc starting a server for a scope
+			// bd owns; and an embedded store appearing under .beads is the
+			// silent fallback beads lists as a 1.4.0 Known issue (beads#8323):
+			// a new, empty database where bd never reads.
+			sentinel.Reset()
+			sentinel.TrapThisProcess(t)
+			env := proxiedAuthorWindowEnv(t, cityRoot, city)
+			embedded := filepath.Join(cityRoot, ".beads", "embeddeddolt")
+			if _, err := os.Stat(embedded); err == nil {
+				t.Fatalf("%s exists before the open, so this row could not tell whether the open created it", embedded)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			start := time.Now()
+			storage, err := beads.OpenNativeStorageAtProxied(ctx, cityRoot, env)
+			if err == nil {
+				_ = storage.Close()
+				t.Fatalf("the proxied window opened the library over bd's proxy on port %s, whose data port accepts only bd's BDPROXY1 handshake",
+					env["BEADS_DOLT_SERVER_PORT"])
+			}
+			t.Logf("the proxied window's library open over the bd-only data port %s failed closed after %s: %v",
+				env["BEADS_DOLT_SERVER_PORT"], time.Since(start).Round(time.Millisecond), err)
+			if mine := sentinel.FromThisProcess(); len(mine) != 0 {
+				t.Errorf("the open exec'd dolt %d time(s) from this process for a scope bd owns:\n%s", len(mine), sentinel.Describe())
+			}
+			if _, err := os.Stat(embedded); err == nil {
+				t.Errorf("the open left an embedded store at %s: gc's window fell back to a new, empty database instead of failing (beads#8323)", embedded)
+			}
+		})
+		return
+	}
 
 	t.Run("no-migrate-behind-ignored", func(t *testing.T) {
 		// A database whose IGNORED lane is behind this binary's pinned cursor.
