@@ -21,9 +21,14 @@ import (
 // session bead → template and re-stamps gc.routed_to, returning each bead to
 // pool demand. Returns the count of restored beads.
 //
-// A back-reference that names a configured named session is never restored:
-// that seat's open unassigned work was parked by the seat, not detached, and the
-// template route its session bead carries is the pool's lane, not the seat's.
+// A back-reference that names a configured named session is restored only when
+// the template route its session bead carries is that seat's own lane: a seat
+// declared without a name of its own takes the template's qualified name as its
+// identity and claims that route itself. Any other named seat's template route
+// is its template pool's, so the sweep leaves the seat's work unrouted (vetoed)
+// rather than hand it to a pool instance. That veto is not a parking mechanism:
+// parking work by hand takes a canonical hold or a blocked/deferred status, which
+// every route-restore lane honors (engdocs/contributors/hold-label-conventions.md).
 //
 // Recovery is judgment-free (ZFC): it reads the original pool route from the
 // session bead's own template metadata and re-stamps gc.routed_to. The bead
@@ -35,11 +40,13 @@ func sweepDetachedHandoffOrphans(store beads.Store) (int, error) {
 }
 
 // detachedOrphanSweepResult is one leg's convergence outcome, in the terms the
-// pass's operator line reports: what it found, what it repaired, and what the
-// answer cost in store round trips.
+// pass's operator line reports: what it found, what it repaired, what it left
+// unrouted on purpose (a named-seat veto), and what the answer cost in store
+// round trips.
 type detachedOrphanSweepResult struct {
 	candidates int
 	restored   int
+	vetoed     int
 	reads      int
 }
 
@@ -117,9 +124,14 @@ func sweepDetachedHandoffOrphansOnLeg(store, routeStore beads.Store, ownSessions
 	handles := beads.HandlesFor(store)
 	var errs []error
 	for _, c := range candidates {
-		route := routeIndex.route(c.sessionID, c.sessionName)
+		route, vetoed := routeIndex.route(c.sessionID, c.sessionName)
+		if vetoed {
+			log.Printf("sweepDetachedHandoffOrphans: left bead %s unrouted: gc.session_id=%q / gc.session_name=%q names a configured named session whose template route is not shown to be its own lane", c.id, c.sessionID, c.sessionName)
+			result.vetoed++
+			continue
+		}
 		if route == "" {
-			log.Printf("sweepDetachedHandoffOrphans: no recoverable route for bead %s (gc.session_id=%q / gc.session_name=%q not found in any session bead, the session carries no template, the session name is ambiguous, or the back-reference names a configured named session, whose open unassigned work is parked by that seat, not detached)", c.id, c.sessionID, c.sessionName)
+			log.Printf("sweepDetachedHandoffOrphans: no recoverable route for bead %s (gc.session_id=%q / gc.session_name=%q not found in any session bead, the session carries no template, or the session name is ambiguous)", c.id, c.sessionID, c.sessionName)
 			continue
 		}
 		// Re-read the live bead immediately before writing, through the cache-
@@ -139,8 +151,8 @@ func sweepDetachedHandoffOrphansOnLeg(store, routeStore beads.Store, ownSessions
 			errs = append(errs, fmt.Errorf("bead %s: re-reading before route restore: %w", c.id, getErr))
 			continue
 		}
-		if !isDetachedHandoffOrphanCandidate(live) ||
-			routeIndex.route(strings.TrimSpace(live.Metadata[beadmeta.SessionIDMetadataKey]), strings.TrimSpace(live.Metadata[beadmeta.SessionNameMetadataKey])) != route {
+		liveRoute, _ := routeIndex.route(strings.TrimSpace(live.Metadata[beadmeta.SessionIDMetadataKey]), strings.TrimSpace(live.Metadata[beadmeta.SessionNameMetadataKey]))
+		if !isDetachedHandoffOrphanCandidate(live) || liveRoute != route {
 			continue // claimed, closed, or re-routed since the snapshot — don't clobber
 		}
 		result.reads++
@@ -270,15 +282,16 @@ func isDetachedHandoffOrphanCandidate(b beads.Bead) bool {
 // session_name match, so a duplicated session name never restores work to the wrong
 // pool.
 //
-// Configured named session beads never answer with a route. Their IDs and
-// session names are recorded as vetoes instead, so a back-reference that names a
-// named seat cannot fall back by session_name to a plain session bead that shares
-// the name, in either store of the leg's union.
+// A configured named session bead whose template route is not shown to be its
+// own lane (detachedOrphanVetoesNamedSeat) never answers with a route. Its ID and
+// session name are recorded as vetoes instead, so a back-reference that names
+// such a seat cannot fall back by session_name to a plain session bead that
+// shares the name, in either store of the leg's union.
 type detachedOrphanRouteIndex struct {
 	byID       map[string]string   // session-bead ID → pool route
 	byName     map[string]string   // session_name → pool route, only when unambiguous
-	namedIDs   map[string]struct{} // configured named session-bead IDs: never restored
-	namedNames map[string]struct{} // configured named session_names: never restored by name
+	namedIDs   map[string]struct{} // vetoed named session-bead IDs: never restored
+	namedNames map[string]struct{} // vetoed named session_names: never restored by name
 }
 
 // newDetachedOrphanRouteIndex returns an empty index whose maps are all non-nil,
@@ -294,28 +307,28 @@ func newDetachedOrphanRouteIndex() detachedOrphanRouteIndex {
 
 // route resolves the pool route for a detached orphan, preferring the exact
 // session-bead ID over the session_name fallback. It returns "" when neither
-// resolves — including when the session_name was dropped as ambiguous — and when
-// the back-reference names a configured named session: an ID naming one refuses
-// outright, with no name fallback, and a name naming one refuses unless the ID
-// matched a plain session bead exactly.
-func (idx detachedOrphanRouteIndex) route(sessionID, sessionName string) string {
+// resolves, including when the session_name was dropped as ambiguous. It returns
+// "" with vetoed true when the back-reference names a vetoed named seat: an ID
+// naming one refuses outright, with no name fallback, and a name naming one
+// refuses unless the ID matched a plain session bead exactly.
+func (idx detachedOrphanRouteIndex) route(sessionID, sessionName string) (route string, vetoed bool) {
 	if sessionID != "" {
 		if _, named := idx.namedIDs[sessionID]; named {
-			return ""
+			return "", true
 		}
 		if r := idx.byID[sessionID]; r != "" {
-			return r
+			return r, false
 		}
 	}
 	if sessionName != "" {
 		if _, named := idx.namedNames[sessionName]; named {
-			return ""
+			return "", true
 		}
 		if r := idx.byName[sessionName]; r != "" {
-			return r
+			return r, false
 		}
 	}
-	return ""
+	return "", false
 }
 
 // backfill copies entries from other for keys idx does not already own, so the
@@ -341,6 +354,34 @@ func (idx detachedOrphanRouteIndex) backfill(other detachedOrphanRouteIndex) {
 	}
 }
 
+// veto records a vetoed named seat's session-bead ID and session_name, so a
+// back-reference naming either is refused rather than resolved.
+func (idx detachedOrphanRouteIndex) veto(sb beads.Bead) {
+	if id := strings.TrimSpace(sb.ID); id != "" {
+		idx.namedIDs[id] = struct{}{}
+	}
+	if sn := strings.TrimSpace(sb.Metadata["session_name"]); sn != "" {
+		idx.namedNames[sn] = struct{}{}
+	}
+}
+
+// detachedOrphanVetoesNamedSeat reports whether sb is a configured named session,
+// recognized by its flag or its recorded identity, whose recoverable route is not
+// shown to be its own lane. A seat claims the work routed to its identity, so the
+// route is its own lane exactly when it equals that identity: a seat declared
+// without a name of its own takes its template's qualified name as its identity
+// (config.NamedSession.IdentityName), and the template route its session bead
+// carries is then the seat's. A seat named apart from its template would hand the
+// restored work to the template's pool instead, and a seat that records no
+// identity cannot be shown to own the route.
+func detachedOrphanVetoesNamedSeat(sb beads.Bead, route string) bool {
+	if !session.WasConfiguredNamedSession(sb) {
+		return false
+	}
+	identity := session.NamedSessionIdentity(sb)
+	return identity == "" || identity != route
+}
+
 // buildDetachedOrphanRouteIndex indexes every session bead (open or closed) that
 // carries a template, keyed both by the session bead's ID (matched against a work
 // bead's gc.session_id) and by session_name. Closed session beads are included
@@ -349,10 +390,12 @@ func (idx detachedOrphanRouteIndex) backfill(other detachedOrphanRouteIndex) {
 // name index so an ambiguous name never resolves to an arbitrary route; the unique
 // per-ID entry still resolves such an orphan exactly.
 //
-// A configured named session bead is never indexed for a route: its ID and
-// session_name are recorded as vetoes (even on a partial list, and even without a
-// template — a veto can only refuse a restore, never invent a route), and it takes
-// no part in name-ambiguity accounting.
+// A configured named session bead that detachedOrphanVetoesNamedSeat vetoes is
+// never indexed for a route: its ID and session_name are recorded as vetoes
+// (even on a partial list, and even without a template — a veto can only refuse
+// a restore, never invent a route), and it takes no part in name-ambiguity
+// accounting. A named seat whose template route is its own lane is indexed like
+// any session bead.
 func buildDetachedOrphanRouteIndex(store beads.Store) (detachedOrphanRouteIndex, error) {
 	idx := newDetachedOrphanRouteIndex()
 	// Relic leg (S4 debt) when store is a work leg rather than the sessions
@@ -379,19 +422,11 @@ func buildDetachedOrphanRouteIndex(store beads.Store) (detachedOrphanRouteIndex,
 	// entirely when the list is partial, degrading to exact-gc.session_id recovery.
 	ambiguousNames := map[string]bool{}
 	for _, sb := range all {
-		if session.WasConfiguredNamedSession(sb) {
-			// A configured named seat, recognized by its flag or its recorded
-			// identity, parked its open unassigned work rather than detaching it;
-			// its template route is the pool's, not the seat's.
-			if id := strings.TrimSpace(sb.ID); id != "" {
-				idx.namedIDs[id] = struct{}{}
-			}
-			if sn := strings.TrimSpace(sb.Metadata["session_name"]); sn != "" {
-				idx.namedNames[sn] = struct{}{}
-			}
+		route := retiredSessionFallbackRoute(sb)
+		if detachedOrphanVetoesNamedSeat(sb, route) {
+			idx.veto(sb)
 			continue
 		}
-		route := retiredSessionFallbackRoute(sb)
 		if route == "" {
 			continue // no template/agent_name → carries no recoverable route
 		}

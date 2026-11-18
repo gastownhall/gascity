@@ -1372,14 +1372,14 @@ func TestDetachedOrphanRoutesForLegNamedVetoSurvivesBackfill(t *testing.T) {
 			if err != nil {
 				t.Fatalf("detachedOrphanRoutesForLeg: %v", err)
 			}
-			if got := idx.route("N-1", name); got != "" {
-				t.Errorf("route(N-1, %q)=%q, want empty", name, got)
+			if got, vetoed := idx.route("N-1", name); got != "" || !vetoed {
+				t.Errorf("route(N-1, %q)=(%q, %t), want (\"\", true)", name, got, vetoed)
 			}
-			if got := idx.route("", name); got != "" {
-				t.Errorf("route(\"\", %q)=%q, want empty", name, got)
+			if got, vetoed := idx.route("", name); got != "" || !vetoed {
+				t.Errorf("route(\"\", %q)=(%q, %t), want (\"\", true)", name, got, vetoed)
 			}
-			if got := idx.route("P-1", name); got != tc.plainByID {
-				t.Errorf("route(P-1, %q)=%q, want %q", name, got, tc.plainByID)
+			if got, vetoed := idx.route("P-1", name); got != tc.plainByID || vetoed != (tc.plainByID == "") {
+				t.Errorf("route(P-1, %q)=(%q, %t), want (%q, %t)", name, got, vetoed, tc.plainByID, tc.plainByID == "")
 			}
 		})
 	}
@@ -1415,5 +1415,52 @@ func TestSweepDetachedHandoffOrphans_SkipsIdentityOnlyNamedSessionWork(t *testin
 	}
 	if got := mustRoutedTo(t, store, "W-N"); got != "" {
 		t.Fatalf("gc.routed_to=%q, want empty", got)
+	}
+}
+
+// detachedOrphanSeatBeadWithIdentity is detachedOrphanNamedSeatBead with its
+// recorded identity given outright. An empty identity leaves the flag alone.
+func detachedOrphanSeatBeadWithIdentity(id, sessionName, template, identity string) beads.Bead {
+	b := detachedOrphanNamedSeatBead(id, sessionName, template)
+	if identity == "" {
+		delete(b.Metadata, namedSessionIdentityMetadata)
+		return b
+	}
+	b.Metadata[namedSessionIdentityMetadata] = identity
+	return b
+}
+
+// A [[named_session]] declared without a name of its own takes its template's
+// qualified name as its identity (config.NamedSession.IdentityName), so the
+// template route its session bead carries is the seat's own lane: the seat
+// claims gc.routed_to=<template> work itself, its GC_ALIAS being the probe
+// target. Its detached work is restored to that route, by ID or by name alone,
+// or nothing would ever route it again. A seat that records no identity (the
+// flag alone) cannot be shown to own the route and stays vetoed, as does a seat
+// named apart from its template (TestSweepDetachedHandoffOrphans_SkipsNamedSessionWork).
+func TestSweepDetachedHandoffOrphans_RestoresNamedSeatWorkToItsOwnTemplateRoute(t *testing.T) {
+	const template = "gascity/worker"
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		detachedOrphanSeatBeadWithIdentity("N-1", "gascity--worker", template, template),
+		detachedOrphanSeatBeadWithIdentity("N-2", "gascity--flagged", template, ""),
+		detachedOrphanParkedWork("W-ID", "N-1", ""),
+		detachedOrphanParkedWork("W-NAME", "", "gascity--worker"),
+		detachedOrphanParkedWork("W-FLAG", "N-2", "gascity--flagged"),
+	}, nil)
+
+	result, err := sweepDetachedHandoffOrphansWithRouteStore(store, nil)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if result.candidates != 3 || result.restored != 2 || result.vetoed != 1 {
+		t.Fatalf("candidates=%d restored=%d vetoed=%d, want 3, 2 and 1", result.candidates, result.restored, result.vetoed)
+	}
+	for _, id := range []string{"W-ID", "W-NAME"} {
+		if got := mustRoutedTo(t, store, id); got != template {
+			t.Errorf("%s gc.routed_to=%q, want the seat's own route %q", id, got, template)
+		}
+	}
+	if got := mustRoutedTo(t, store, "W-FLAG"); got != "" {
+		t.Errorf("W-FLAG gc.routed_to=%q, want empty: a seat with no recorded identity cannot be shown to own its template route", got)
 	}
 }
