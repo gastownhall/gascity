@@ -120,18 +120,11 @@ func (s *Server) buildWorkflowSnapshot(workflowID, fallbackScopeKind, fallbackSc
 	// mid-scan, so it is correct even when the city store yields no match.
 	cityScopeRef := workflowCityScopeRef(s.state.CityName())
 
-	// When the residency resolver pins the root to the relocated graph
-	// binding, the binding is its authority and any work store's copy is a
-	// frozen migration twin, so the snapshot reads the binding alone and skips
-	// the sweep, whose Get misses cost a bd call per store on a city of
-	// proxied-local rigs. A decline or anything the snapshot cannot use falls
+	// A root the residency resolver pins to the graph binding is served from
+	// the binding alone (tryGraphBindingSnapshot); anything else falls
 	// through to the sweep unchanged.
-	if graph, ok := workflowGraphStore(stores); ok {
-		if root, ok := s.graphBindingWorkflowRoot(st, graph, workflowID); ok {
-			if match, ok := selectWorkflowRootMatch([]workflowRootMatch{{info: graph, root: root}}, fallbackScopeKind, fallbackScopeRef, cityScopeRef); ok {
-				return s.snapshotFromStore(match.info, match.root, fallbackScopeKind, fallbackScopeRef, cityScopeRef, []string{graph.ref}, false, snapshotIndex)
-			}
-		}
+	if snap, served, err := s.tryGraphBindingSnapshot(st, stores, workflowID, fallbackScopeKind, fallbackScopeRef, cityScopeRef, snapshotIndex); served {
+		return snap, err
 	}
 
 	var firstGetErr error
@@ -200,6 +193,42 @@ func (s *Server) buildWorkflowSnapshot(workflowID, fallbackScopeKind, fallbackSc
 	}
 
 	return s.snapshotFromStore(match.info, match.root, fallbackScopeKind, fallbackScopeRef, cityScopeRef, storesScanned, listPartial, snapshotIndex)
+}
+
+// tryGraphBindingSnapshot serves the snapshot from the relocated graph
+// binding when the residency resolver pins the root there: the binding is its
+// authority and any work store's copy is a frozen migration twin, so the
+// snapshot reads the binding alone and skips the sweep, whose Get misses cost
+// a bd call per store on a city of proxied-local rigs. It reports served false
+// on a decline (no graph leg, a refused graph class, which is never probed, or
+// anything graphBindingWorkflowRoot or the scope match declines), and the
+// caller's sweep then answers unchanged.
+func (s *Server) tryGraphBindingSnapshot(st storeref.Stores, stores []workflowStoreInfo, workflowID, fallbackScopeKind, fallbackScopeRef, cityScopeRef string, snapshotIndex uint64) (*workflowSnapshotResponse, bool, error) {
+	graph, ok := workflowGraphStore(stores)
+	if !ok || graphLegRefused(st, graph) {
+		return nil, false, nil
+	}
+	root, ok := s.graphBindingWorkflowRoot(st, graph, workflowID)
+	if !ok {
+		return nil, false, nil
+	}
+	match, ok := selectWorkflowRootMatch([]workflowRootMatch{{info: graph, root: root}}, fallbackScopeKind, fallbackScopeRef, cityScopeRef)
+	if !ok {
+		return nil, false, nil
+	}
+	snap, err := s.snapshotFromStore(match.info, match.root, fallbackScopeKind, fallbackScopeRef, cityScopeRef, []string{graph.ref}, false, snapshotIndex)
+	return snap, true, err
+}
+
+// graphLegRefused reports whether the graph leg reads the city's graph class
+// handle and that handle is a standing storage refusal (a worker site that
+// serves no binding), which answers every read with its refusal.
+func graphLegRefused(st storeref.Stores, graph workflowStoreInfo) bool {
+	handle := st.Graph()
+	if _, refused := beads.As[storeref.RefusingStore](handle); !refused {
+		return false
+	}
+	return beads.SameStore(handle, graph.leg.Reader)
 }
 
 // workflowGraphStore returns the relocated graph binding's leg from a
