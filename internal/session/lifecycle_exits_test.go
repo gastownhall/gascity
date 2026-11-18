@@ -5,6 +5,25 @@ import (
 	"time"
 )
 
+func TestProviderSwitchResetPatch(t *testing.T) {
+	for _, pair := range [][2]string{{"codex", "codex"}, {"", "codex"}, {"claude", ""}} {
+		if p := ProviderSwitchResetPatch(pair[0], pair[1]); len(p) != 0 {
+			t.Fatalf("same/unknown family reset: %v", p)
+		}
+	}
+	p := ProviderSwitchResetPatch("claude", "codex")
+	for _, key := range []string{"session_key", "started_config_hash", "resume_launch", "resume_failures", "gc.brain_parent_sid"} {
+		if value, ok := p[key]; !ok || value != "" {
+			t.Fatalf("incompatible %s retained: %v", key, p)
+		}
+	}
+	for _, key := range []string{"alias", "session_name", "configured_named_identity"} {
+		if _, ok := p[key]; ok {
+			t.Fatalf("identity %s changed: %v", key, p)
+		}
+	}
+}
+
 // These tests pin the exit-classification ladder extracted from the
 // reconciler's checkStability/checkChurn pair. The lanes are a contract:
 // rate-limit screen detection, then rapid-crash (death inside the stability

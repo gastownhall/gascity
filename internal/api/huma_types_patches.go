@@ -1,6 +1,10 @@
 package api
 
-import "github.com/gastownhall/gascity/internal/beads"
+import (
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/configedit"
+)
 
 // Per-domain Huma input/output types for the patches handler
 // group. Split out of the original huma_types.go; mirrors the layout
@@ -37,16 +41,39 @@ func (i *AgentPatchGetQualifiedInput) QualifiedName() string {
 type AgentPatchSetInput struct {
 	CityScope
 	Body struct {
-		Dir       string            `json:"dir,omitempty" doc:"Agent directory scope (legacy targeting key; prefer rig)."`
-		Rig       string            `json:"rig,omitempty" doc:"Rig targeting key. \"*\" matches the agent name across all rigs and city. Mutually exclusive with dir."`
-		Name      string            `json:"name,omitempty" doc:"Agent name."`
-		Provider  *string           `json:"provider,omitempty" doc:"Override the agent's provider."`
-		WorkDir   *string           `json:"work_dir,omitempty" doc:"Override session working directory."`
-		TmuxAlias *string           `json:"tmux_alias,omitempty" doc:"Override tmux session name template."`
-		Scope     *string           `json:"scope,omitempty" doc:"Override agent scope."`
-		Suspended *bool             `json:"suspended,omitempty" doc:"Override suspended state."`
-		Env       map[string]string `json:"env,omitempty" doc:"Override environment variables."`
+		Dir            string            `json:"dir,omitempty" doc:"Agent directory scope (legacy targeting key; prefer rig)."`
+		Rig            string            `json:"rig,omitempty" doc:"Rig targeting key. \"*\" matches the agent name across all rigs and city. Mutually exclusive with dir."`
+		Name           string            `json:"name,omitempty" doc:"Agent name."`
+		Provider       *string           `json:"provider,omitempty" doc:"Override the agent's provider."`
+		WorkDir        *string           `json:"work_dir,omitempty" doc:"Override session working directory."`
+		TmuxAlias      *string           `json:"tmux_alias,omitempty" doc:"Override tmux session name template."`
+		Scope          *string           `json:"scope,omitempty" doc:"Override agent scope."`
+		Suspended      *bool             `json:"suspended,omitempty" doc:"Override suspended state."`
+		Env            map[string]string `json:"env,omitempty" doc:"Override environment variables."`
+		OptionDefaults map[string]string `json:"option_defaults,omitempty" doc:"Override provider option defaults, including model."`
 	}
+}
+
+// AgentPatchMergeInput changes provider defaults at the next start. The existing
+// config-drift policy may restart an idle session; a write sends no runtime command.
+type AgentPatchMergeInput struct {
+	CityScope
+	Body configedit.AgentPatchMerge
+}
+
+// AgentPatchMergeOutput includes the previous patch and the new CAS revision.
+type AgentPatchMergeOutput struct {
+	Body configedit.AgentPatchMergeResult
+}
+
+// AgentPatchOutput preserves the patch GET body and adds its content revision.
+// A 404 means no patch exists; use the literal revision "absent" to create it.
+type AgentPatchOutput struct {
+	Index     uint64  `header:"X-GC-Index"`
+	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Seconds since the server's bead cache was refreshed."`
+	CacheRefresh
+	Revision string `header:"X-GC-Patch-Revision" doc:"Content revision required by PATCH /patches/agents. A missing patch has revision absent."`
+	Body     config.AgentPatch
 }
 
 // AgentPatchDeleteInput is the Huma input for

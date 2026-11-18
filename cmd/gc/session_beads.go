@@ -318,6 +318,8 @@ func stampResolvedProviderSessionMetadata(meta map[string]string, resolved *conf
 // write when unchanged, honoring the write-if-changed reconcile contract), and
 // a nil resolution queues nothing: a failed resolution must not wipe good
 // metadata.
+// A committed running session keeps this projection until stopped; a stopped
+// provider-family change resets its incompatible continuation in the same batch.
 //
 // session_id_flag is a peer projection field of resume_flag: the reactive
 // startup-death strip (stripSessionIDFlag via retryFreshStartAfterStaleKey)
@@ -326,12 +328,17 @@ func stampResolvedProviderSessionMetadata(meta map[string]string, resolved *conf
 // `--session-id <key>` command. Projecting it here lets an upgraded bead gain
 // the flag in the same tick its key is backfilled.
 func queueChangedResolvedProviderSessionMetadata(existing map[string]string, queue func(string, string), resolved *config.ResolvedProvider) {
-	if queue == nil || resolved == nil {
+	if queue == nil || resolved == nil || !sessionLaunchRefreshAllowed(existing) {
 		return
 	}
 	queueChanged := func(key, value string) {
 		if existing[key] != value {
 			queue(key, value)
+		}
+	}
+	if existing["started_config_hash"] != "" {
+		for key, value := range session.ProviderSwitchResetPatch(session.ProviderFamilyFromMetadata(existing, ""), resolvedProviderLaunchFamily(resolved)) {
+			queueChanged(key, value)
 		}
 	}
 	name := strings.TrimSpace(resolved.Name)
@@ -348,6 +355,29 @@ func queueChangedResolvedProviderSessionMetadata(existing map[string]string, que
 	queueChanged("resume_style", resolved.ResumeStyle)
 	queueChanged("resume_command", resolved.ResumeCommand)
 	queueChanged("session_id_flag", resolved.SessionIDFlag)
+}
+
+// A committed runtime keeps its launch and delivery metadata until it stops.
+// Uncommitted legacy rows retain the backfill path.
+func sessionLaunchRefreshAllowed(existing map[string]string) bool {
+	return existing["started_config_hash"] == "" || !sessionStateMayBeRunning(existing["state"])
+}
+
+// stoppedProviderLaunchPatch projects resolved config only at a stopped-runtime
+// boundary. A missing resolution leaves the recorded launch untouched.
+func stoppedProviderLaunchPatch(info session.Info, tp TemplateParams) session.MetadataPatch {
+	rp := tp.ResolvedProvider
+	if rp == nil {
+		return session.MetadataPatch{}
+	}
+	ancestor := strings.TrimSpace(rp.BuiltinAncestor)
+	if ancestor == rp.Name {
+		ancestor = ""
+	}
+	return session.ProviderLaunchConfigPatch(info, session.ProviderLaunchConfig{
+		Name: rp.Name, Family: resolvedProviderLaunchFamily(rp), Kind: resolvedProviderFamilyMetadata(rp), Ancestor: ancestor, Command: tp.Command,
+		Resume: session.ProviderResume{ResumeFlag: rp.ResumeFlag, ResumeStyle: rp.ResumeStyle, ResumeCommand: rp.ResumeCommand, SessionIDFlag: rp.SessionIDFlag},
+	})
 }
 
 func canRebindConfiguredNamedSession(b beads.Bead, identity, sessionName, backingTemplate string) bool {
@@ -2416,14 +2446,14 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 		// the authoritative command source for respawn. If agent config changes
 		// (e.g., adding `[option_defaults] model = "opus"`, or switching the
 		// agent's provider), the freshly resolved values differ from the stored
-		// ones; sync here so the bead matches the current config. An empty
+		// ones; sync after the committed runtime stops. An empty
 		// resolved command and a nil resolution are ignored to avoid clobbering
 		// stored values when resolution fails transiently. A successful
 		// resolution refreshes the provider projection, clearing the family and
 		// resume fields it leaves empty (gc-rhp36, #8539); without it they
 		// freeze at their creation-time provider after an agent.toml provider
 		// switch while command alone follows.
-		if tp.Command != "" && b.Metadata["command"] != tp.Command {
+		if sessionLaunchRefreshAllowed(b.Metadata) && tp.Command != "" && b.Metadata["command"] != tp.Command {
 			queueMeta("command", tp.Command)
 		}
 		queueChangedResolvedProviderSessionMetadata(b.Metadata, queueMeta, tp.ResolvedProvider)

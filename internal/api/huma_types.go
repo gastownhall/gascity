@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api/apierr"
+
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
@@ -254,6 +256,10 @@ func mutationError(err error) error {
 	msg := err.Error()
 	var providerCatalogErr *config.ProviderCatalogError
 	switch {
+	case errors.Is(err, configedit.ErrRevisionConflict):
+		return apierr.PatchRevisionConflict.Msg(msg)
+	case errors.Is(err, configedit.ErrPatchScope):
+		return apierr.PatchScopeConflict.Msg(msg)
 	case errors.Is(err, configedit.ErrNotFound):
 		return huma.Error404NotFound(msg)
 	case errors.Is(err, configedit.ErrAlreadyExists):

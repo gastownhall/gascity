@@ -5,6 +5,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/configedit"
 )
 
 // rawConfig returns the state's raw (pre-composition) config, or nil when the
@@ -45,24 +46,25 @@ func (s *Server) humaHandleAgentPatchList(_ context.Context, _ *AgentPatchListIn
 
 // humaHandleAgentPatchGet is the Huma-typed handler for
 // GET /v0/city/{cityName}/patches/agent/{base} (unqualified).
-func (s *Server) humaHandleAgentPatchGet(_ context.Context, input *AgentPatchGetInput) (*IndexOutput[config.AgentPatch], error) {
+func (s *Server) humaHandleAgentPatchGet(_ context.Context, input *AgentPatchGetInput) (*AgentPatchOutput, error) {
 	return s.agentPatchByName(input.Name)
 }
 
 // humaHandleAgentPatchGetQualified is the Huma-typed handler for
 // GET /v0/city/{cityName}/patches/agent/{dir}/{base}.
-func (s *Server) humaHandleAgentPatchGetQualified(_ context.Context, input *AgentPatchGetQualifiedInput) (*IndexOutput[config.AgentPatch], error) {
+func (s *Server) humaHandleAgentPatchGetQualified(_ context.Context, input *AgentPatchGetQualifiedInput) (*AgentPatchOutput, error) {
 	return s.agentPatchByName(input.QualifiedName())
 }
 
-func (s *Server) agentPatchByName(name string) (*IndexOutput[config.AgentPatch], error) {
+func (s *Server) agentPatchByName(name string) (*AgentPatchOutput, error) {
 	index := s.latestIndex()
 	cfg := s.patchConfig()
 	for _, p := range cfg.Patches.Agents {
 		if p.TargetQualifiedName() == name {
-			return &IndexOutput[config.AgentPatch]{
-				Index: index,
-				Body:  p,
+			return &AgentPatchOutput{
+				Index:    index,
+				Revision: configedit.AgentPatchRevision(&p),
+				Body:     p,
 			}, nil
 		}
 	}
@@ -77,15 +79,16 @@ func (s *Server) humaHandleAgentPatchSet(_ context.Context, input *AgentPatchSet
 	}
 
 	patch := config.AgentPatch{
-		Dir:       input.Body.Dir,
-		Rig:       input.Body.Rig,
-		Name:      input.Body.Name,
-		Provider:  input.Body.Provider,
-		WorkDir:   input.Body.WorkDir,
-		TmuxAlias: input.Body.TmuxAlias,
-		Scope:     input.Body.Scope,
-		Suspended: input.Body.Suspended,
-		Env:       input.Body.Env,
+		Dir:            input.Body.Dir,
+		Rig:            input.Body.Rig,
+		Name:           input.Body.Name,
+		Provider:       input.Body.Provider,
+		WorkDir:        input.Body.WorkDir,
+		TmuxAlias:      input.Body.TmuxAlias,
+		Scope:          input.Body.Scope,
+		Suspended:      input.Body.Suspended,
+		Env:            input.Body.Env,
+		OptionDefaults: input.Body.OptionDefaults,
 	}
 
 	// Validate at the edge so a patch that would hard-fail the next config
@@ -106,6 +109,20 @@ func (s *Server) humaHandleAgentPatchSet(_ context.Context, input *AgentPatchSet
 	resp.Body.Status = "ok"
 	resp.Body.AgentPatch = qn
 	return resp, nil
+}
+
+// humaHandleAgentPatchMerge preserves all fields outside the requested override
+// and leaves validation, CAS and scope checks inside the publication transaction.
+func (s *Server) humaHandleAgentPatchMerge(_ context.Context, input *AgentPatchMergeInput) (*AgentPatchMergeOutput, error) {
+	mutator, ok := s.state.(AgentPatchMerger)
+	if !ok {
+		return nil, errMutationsNotSupported
+	}
+	result, err := mutator.MergeAgentPatch(input.Body)
+	if err != nil {
+		return nil, mutationError(err)
+	}
+	return &AgentPatchMergeOutput{Body: result}, nil
 }
 
 // humaHandleAgentPatchDelete is the Huma-typed handler for

@@ -145,6 +145,47 @@ export type AgentPatch = {
     WorkDir: string | null;
 };
 
+export type AgentPatchMerge = {
+    /**
+     * Remove this patch's provider field, exposing the underlying configuration.
+     */
+    clear_provider?: boolean;
+    /**
+     * Remove the entire patch under the expected revision, restoring prior absence.
+     */
+    delete?: boolean;
+    dir?: string;
+    /**
+     * Exact singleton agent template name; qualify its rig with dir or rig.
+     */
+    name: string;
+    /**
+     * Merge these option defaults, including model, preserving other keys.
+     */
+    option_defaults?: {
+        [key: string]: string;
+    };
+    /**
+     * Provider override for the next start.
+     */
+    provider?: string;
+    /**
+     * Remove these option keys from this patch, exposing underlying defaults.
+     */
+    remove_options?: Array<string> | null;
+    /**
+     * Expected X-GC-Patch-Revision from GET, or absent for a missing patch.
+     */
+    revision: string;
+    rig?: string;
+};
+
+export type AgentPatchMergeResult = {
+    after?: AgentPatch;
+    before?: AgentPatch;
+    revision: string;
+};
+
 export type AgentPatchSetInputBody = {
     /**
      * Agent directory scope (legacy targeting key; prefer rig).
@@ -160,6 +201,12 @@ export type AgentPatchSetInputBody = {
      * Agent name.
      */
     name?: string;
+    /**
+     * Override provider option defaults, including model.
+     */
+    option_defaults?: {
+        [key: string]: string;
+    };
     /**
      * Override the agent's provider.
      */
@@ -1400,7 +1447,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | AgentClaimsPayload | BackendCredentialResolvedPayload | BeadClaimFailedPayload | BeadClaimLoopHeldPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlCheckUnlaunchablePayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | FactRecordedPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OpChangedPayload | OpsRecordingDegradedPayload | OrderInapplicablePayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestAcceptedPayload | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionClosedPayload | SessionConfigDriftDeferredPayload | SessionCreateSucceededPayload | SessionCreatedPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionProgramStatusShadowPayload | SessionResetStalledPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StorageRigPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkLadderPayload | WorkRateLimitedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | AgentClaimsPayload | BackendCredentialResolvedPayload | BeadClaimFailedPayload | BeadClaimLoopHeldPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlCheckUnlaunchablePayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | FactRecordedPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OpChangedPayload | OpsRecordingDegradedPayload | OrderInapplicablePayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestAcceptedPayload | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionClosedPayload | SessionConfigDriftDeferredPayload | SessionCreateSucceededPayload | SessionCreatedPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionProgramStatusShadowPayload | SessionResetStalledPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | SessionWokePayload | StorageBindingOutcomePayload | StorageRigPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkLadderPayload | WorkRateLimitedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -5844,6 +5891,21 @@ export type SessionWakeRefusedPayload = {
     wake_request: string;
 };
 
+export type SessionWokePayload = {
+    /**
+     * Effective configured model, when the provider declares one.
+     */
+    model?: string;
+    /**
+     * Resolved provider name used for this start.
+     */
+    provider?: string;
+    /**
+     * Resolved provider family used for delivery.
+     */
+    provider_kind?: string;
+};
+
 export type SlingBatchSummary = {
     /**
      * Container bead type, e.g. convoy.
@@ -8880,7 +8942,7 @@ export type TypedEventStreamEnvelopeSessionWoke = {
     actor: string;
     depends_on_step_ids?: Array<string>;
     message?: string;
-    payload: NoPayload;
+    payload: SessionWokePayload;
     run_id?: string;
     seq: number;
     session_id?: string;
@@ -11635,7 +11697,7 @@ export type TypedTaggedEventStreamEnvelopeSessionWoke = {
     city: string;
     depends_on_step_ids?: Array<string>;
     message?: string;
-    payload: NoPayload;
+    payload: SessionWokePayload;
     run_id?: string;
     seq: number;
     session_id?: string;
@@ -18413,6 +18475,70 @@ export type GetV0CityByCityNamePatchesAgentsResponses = {
 };
 
 export type GetV0CityByCityNamePatchesAgentsResponse = GetV0CityByCityNamePatchesAgentsResponses[keyof GetV0CityByCityNamePatchesAgentsResponses];
+
+export type PatchV0CityByCityNamePatchesAgentsData = {
+    body: AgentPatchMerge;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/patches/agents';
+};
+
+export type PatchV0CityByCityNamePatchesAgentsErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Not Implemented
+     */
+    501: ErrorModel;
+};
+
+export type PatchV0CityByCityNamePatchesAgentsError = PatchV0CityByCityNamePatchesAgentsErrors[keyof PatchV0CityByCityNamePatchesAgentsErrors];
+
+export type PatchV0CityByCityNamePatchesAgentsResponses = {
+    /**
+     * OK
+     */
+    200: AgentPatchMergeResult;
+};
+
+export type PatchV0CityByCityNamePatchesAgentsResponse = PatchV0CityByCityNamePatchesAgentsResponses[keyof PatchV0CityByCityNamePatchesAgentsResponses];
 
 export type PutV0CityByCityNamePatchesAgentsData = {
     body: AgentPatchSetInputBody;
