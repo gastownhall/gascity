@@ -1080,6 +1080,11 @@ type CodexSessionCandidate struct {
 	WorkDir   string
 	StartedAt time.Time
 	ModTime   time.Time
+	// Child reports that session_meta marks the rollout as a spawned
+	// (subagent) thread: a source object carrying a "subagent" key, or a
+	// non-empty parent_thread_id. A child shares its parent's cwd and window,
+	// so unkeyed root discovery must not count it as the session's root.
+	Child bool
 }
 
 // FindCodexSessionFileByIDNoWindow resolves a Codex transcript by provider
@@ -1417,8 +1422,10 @@ func codexSessionCandidateScan(path string) (candidate CodexSessionCandidate, ok
 		Type      string `json:"type"`
 		Timestamp string `json:"timestamp"`
 		Payload   struct {
-			CWD       string `json:"cwd"`
-			Timestamp string `json:"timestamp"`
+			CWD            string          `json:"cwd"`
+			Timestamp      string          `json:"timestamp"`
+			Source         json.RawMessage `json:"source"`
+			ParentThreadID string          `json:"parent_thread_id"`
 		} `json:"payload"`
 	}
 	if err := json.Unmarshal(scanner.Bytes(), &meta); err != nil {
@@ -1441,7 +1448,20 @@ func codexSessionCandidateScan(path string) (candidate CodexSessionCandidate, ok
 		WorkDir:   meta.Payload.CWD,
 		StartedAt: startedAt,
 		ModTime:   modTime,
+		Child:     codexSourceIsSubagent(meta.Payload.Source) || strings.TrimSpace(meta.Payload.ParentThreadID) != "",
 	}, true, true
+}
+
+// codexSourceIsSubagent reports whether a session_meta source value is an
+// object carrying a "subagent" key, Codex's marker for a spawned thread. A
+// string source ("cli", "exec", "vscode") or an absent one is not a child.
+func codexSourceIsSubagent(raw json.RawMessage) bool {
+	var source map[string]json.RawMessage
+	if len(raw) == 0 || json.Unmarshal(raw, &source) != nil {
+		return false
+	}
+	_, ok := source["subagent"]
+	return ok
 }
 
 func parseCodexSessionTime(raw string) time.Time {
@@ -1466,10 +1486,12 @@ func codexSessionCWDMatches(path, workDir string) bool {
 // codexSessionCWDMatchesScan is codexSessionCWDMatches with a clean-scan signal:
 // clean is false only when the cwd probe's file open failed with a non-ENOENT IO
 // fault (see codexSessionCandidateScan), so a scanner can distinguish a transient
-// probe failure from a genuine cwd mismatch.
+// probe failure from a genuine cwd mismatch. It is the unkeyed root predicate: a
+// rollout marked as a spawned child thread never matches, so a subagent sharing
+// the root's cwd neither stands in for the root nor makes it ambiguous.
 func codexSessionCWDMatchesScan(path, workDir string) (match bool, clean bool) {
 	candidate, ok, clean := codexSessionCandidateScan(path)
-	if !ok {
+	if !ok || candidate.Child {
 		return false, clean
 	}
 	cwd := candidate.WorkDir

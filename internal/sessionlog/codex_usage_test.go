@@ -1593,3 +1593,79 @@ func TestCodexTailMetaKeepsModelAndContextPastLifecycleBudget(t *testing.T) {
 		t.Errorf("Activity = %q, want unknown", meta.Activity)
 	}
 }
+
+// writeCodexChildRolloutAt writes a rollout whose session_meta carries the
+// given raw source JSON and parent_thread_id, the markers Codex records on a
+// spawned (subagent) thread's rollout.
+func writeCodexChildRolloutAt(t *testing.T, root string, ts time.Time, uuid, cwd, sourceJSON, parentThreadID string) string {
+	t.Helper()
+	local := ts.In(time.Local)
+	dir := filepath.Join(root, local.Format("2006"), local.Format("01"), local.Format("02"))
+	path := filepath.Join(dir, "rollout-"+local.Format("2006-01-02T15-04-05")+"-"+uuid+".jsonl")
+	stamp := ts.UTC().Format(time.RFC3339Nano)
+	parent := ""
+	if parentThreadID != "" {
+		parent = fmt.Sprintf(`,"parent_thread_id":%q`, parentThreadID)
+	}
+	writeCodexUsageLines(t, path, []string{
+		fmt.Sprintf(`{"timestamp":%q,"type":"session_meta","payload":{"id":%q,"timestamp":%q,"cwd":%q,"originator":"codex-tui","cli_version":"0.130.0","source":%s%s,"model_provider":"openai"}}`, stamp, uuid, stamp, cwd, sourceJSON, parent),
+	})
+	return path
+}
+
+func TestFindCodexSessionFileNearSkipsChildRollouts(t *testing.T) {
+	anchor := time.Date(2026, 6, 10, 14, 30, 0, 0, time.Local)
+	window := 10 * time.Minute
+	workDir := "/work/near-children"
+	const rootID = "019d9845-bbbb-7000-8000-000000000001"
+
+	cases := []struct {
+		name           string
+		sourceJSON     string
+		parentThreadID string
+	}{
+		{name: "subagent thread_spawn source", sourceJSON: `{"subagent":{"thread_spawn":{"parent_thread_id":"` + rootID + `","depth":1}}}`},
+		{name: "subagent named source", sourceJSON: `{"subagent":"review"}`},
+		{name: "parent_thread_id only", sourceJSON: `"exec"`, parentThreadID: rootID},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			want := writeCodexRolloutAt(t, root, anchor.Add(time.Minute), rootID, workDir)
+			writeCodexChildRolloutAt(t, root, anchor.Add(3*time.Minute), "019d9845-bbbb-7000-8000-000000000002", workDir, tc.sourceJSON, tc.parentThreadID)
+			scan := FindCodexSessionFileNearClassified([]string{root}, workDir, anchor, window)
+			if scan.Path != want || !scan.Clean || scan.Ambiguous {
+				t.Fatalf("FindCodexSessionFileNearClassified = %+v, want root %q clean and unambiguous", scan, want)
+			}
+		})
+	}
+
+	t.Run("child alone is not a root match", func(t *testing.T) {
+		root := t.TempDir()
+		writeCodexChildRolloutAt(t, root, anchor.Add(time.Minute), "019d9845-bbbb-7000-8000-000000000003", workDir, `{"subagent":{"thread_spawn":{"parent_thread_id":"`+rootID+`"}}}`, "")
+		scan := FindCodexSessionFileNearClassified([]string{root}, workDir, anchor, window)
+		if scan.Path != "" || scan.Ambiguous || !scan.Clean {
+			t.Fatalf("FindCodexSessionFileNearClassified = %+v, want clean zero match", scan)
+		}
+	})
+
+	t.Run("forked root without child markers stays a root", func(t *testing.T) {
+		root := t.TempDir()
+		want := writeCodexChildRolloutAt(t, root, anchor.Add(time.Minute), "019d9845-bbbb-7000-8000-000000000004", workDir, `"cli"`, "")
+		scan := FindCodexSessionFileNearClassified([]string{root}, workDir, anchor, window)
+		if scan.Path != want {
+			t.Fatalf("FindCodexSessionFileNearClassified = %+v, want unmarked rollout %q", scan, want)
+		}
+	})
+
+	t.Run("two roots stay ambiguous", func(t *testing.T) {
+		root := t.TempDir()
+		writeCodexRolloutAt(t, root, anchor.Add(time.Minute), rootID, workDir)
+		writeCodexRolloutAt(t, root, anchor.Add(2*time.Minute), "019d9845-bbbb-7000-8000-000000000005", workDir)
+		writeCodexChildRolloutAt(t, root, anchor.Add(3*time.Minute), "019d9845-bbbb-7000-8000-000000000006", workDir, `{"subagent":"review"}`, "")
+		scan := FindCodexSessionFileNearClassified([]string{root}, workDir, anchor, window)
+		if scan.Path != "" || !scan.Ambiguous {
+			t.Fatalf("FindCodexSessionFileNearClassified = %+v, want ambiguous refusal", scan)
+		}
+	})
+}
