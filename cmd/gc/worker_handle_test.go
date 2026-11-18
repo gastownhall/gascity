@@ -1557,6 +1557,67 @@ command = "/bin/echo"
 	}
 }
 
+// TestWorkerObserveSessionTargetWithConfigNameTargetIssuesOneExactIDGet pins
+// the fallout of the duplicate exact-id probe removed from
+// workerHandleForSessionTargetWithRuntimeHintsWithConfig: a session_name
+// target is never a bead ID, so the exact-id probe for it always misses, and
+// before this it missed twice — once in ResolveSessionRecordByExactID, once
+// again inside the ResolveSessionID fallback it fed into. Now it misses
+// once; the name lookup proceeds straight to ResolveLiveSessionIDByName.
+// `gc nudge poll` repeats this resolve every few seconds per live session,
+// each miss a `bd show` CLI fork on a non-mem store.
+func TestWorkerObserveSessionTargetWithConfigNameTargetIssuesOneExactIDGet(t *testing.T) {
+	cityDir := t.TempDir()
+	writePhase0InterfaceCity(t, cityDir, `[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "worker"
+provider = "stub"
+
+[providers.stub]
+command = "/bin/echo"
+`)
+
+	cfg, err := loadCityConfig(cityDir)
+	if err != nil {
+		t.Fatalf("loadCityConfig: %v", err)
+	}
+	backing, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	backing = cliSessionStore(backing, cfg, cityDir)
+	sp := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(cityDir, backing, sp, cfg)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Probe", Command: "/bin/echo", WorkDir: t.TempDir(), Provider: "stub", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{Command: "/bin/echo"}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	store := &sessionGetSpyStore{Store: backing}
+	obs, err := workerObserveSessionTargetWithConfig(cityDir, store, sp, cfg, info.SessionName)
+	if err != nil {
+		t.Fatalf("workerObserveSessionTargetWithConfig: %v", err)
+	}
+	if !obs.Running {
+		t.Fatalf("obs.Running = false, want true after Create started runtime")
+	}
+
+	var hits int
+	for _, id := range store.getIDs {
+		if id == info.SessionName {
+			hits++
+		}
+	}
+	if hits != 1 {
+		t.Fatalf("store.Get(%q) called %d times, want exactly 1; all Get IDs: %v", info.SessionName, hits, store.getIDs)
+	}
+}
+
 func TestWorkerObserveSessionTargetWithConfigFallsBackToRunningRuntimeHandle(t *testing.T) {
 	sp := runtime.NewFake()
 	if err := sp.Start(context.Background(), "mayor", runtime.Config{Command: "echo"}); err != nil {

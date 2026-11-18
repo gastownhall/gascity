@@ -1178,6 +1178,43 @@ func TestAllocator_HonoredExplicitWakeIsNeverDrained(t *testing.T) {
 	}
 }
 
+// Kills an honored-wake check (CONTRACT D7 rule 4) and a suspension check
+// that resolve a rig's named session's template only by exact name: a
+// scope="rig" agent with no dir backs "rig-a/worker" through its rig-stamped
+// copy (findSessionAgentByTemplate), as the awake set's explicit wake
+// resolves it. On a live rig the row's pending explicit wake wakes it and is
+// honored, so no drain finalize can read the wake served; on a suspended rig
+// the wake is not honored, and the row drains as suspended, as a rig-bound
+// agent's row does, not as orphaned.
+func TestAllocator_RigNamedSessionOfDirlessRigAgentHonorsExplicitWake(t *testing.T) {
+	const identity = "rig-a/worker"
+	cfg := &config.City{
+		Rigs:          []config.Rig{{Name: "rig-a", Path: "/rigs/rig-a"}},
+		Agents:        []config.Agent{{Name: "worker", Scope: "rig"}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand", Scope: "rig", Dir: "rig-a"}},
+	}
+	row := sessionRow("gc-1",
+		"template", identity, "state", "asleep", "generation", "1",
+		"session_name", config.NamedSessionRuntimeName("city", cfg.Workspace, identity),
+		"configured_named_session", "true", "configured_named_identity", identity, "configured_named_mode", "on_demand",
+		"slept_at", ago(time.Hour), "wake_request", "explicit", "wake_requested_at", ago(time.Minute))
+	t.Run("live rig", func(t *testing.T) {
+		e := entryOf(t, newAllocFixture(t, cfg).sessions(row).decide(), "gc-1")
+		if e.Desired != desireWake || e.Reason != "explicit-wake" || !e.WakeHonored {
+			t.Fatalf("rig named row = %s/%s honored %t, want an honored explicit wake", e.Desired, e.Reason, e.WakeHonored)
+		}
+	})
+	t.Run("suspended rig", func(t *testing.T) {
+		f := newAllocFixture(t, cfg).sessions(row)
+		f.in.SuspendedRigPaths = map[string]bool{"/rigs/rig-a": true}
+		e := entryOf(t, f.decide(), "gc-1")
+		if e.Desired == desireWake || e.WakeHonored || e.DrainReason != drainSuspended {
+			t.Fatalf("rig named row on a suspended rig = %s/%s honored %t drain %q, want an unhonored wake and a %s drain",
+				e.Desired, e.Reason, e.WakeHonored, e.DrainReason, drainSuspended)
+		}
+	})
+}
+
 // Kills a resume: true that consumes an operator's suspend on a pool row
 // without recording its wake (session.Store.ResumeHeld, SESSION-START-022):
 // the suspend alone kept the row, so a pass that read it before the lane
