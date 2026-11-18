@@ -474,12 +474,12 @@ func (c *BinaryCheck) Fix(_ *CheckContext) error { return nil }
 
 // SessionRegistry reads the open session rows from the store the city keeps
 // its sessions in and returns each row's runtime session name mapped to the
-// qualified name of the agent it runs. It leaves out a row whose agent is no
-// longer configured, so that agent's runtime stays an orphan. The runtime names a pool instance or a
-// bead-named session after its session row, not after agent.SessionNameFor,
-// so the session checks read the registry to know which running sessions the
-// city accounts for. A nil SessionRegistry knows only the
-// agent.SessionNameFor names.
+// qualified name of the agent it runs. It leaves out a row whose agent or
+// named session is no longer configured, so that row's runtime stays an
+// orphan. The runtime names a pool instance or a bead-named session after its
+// session row, not after agent.SessionNameFor, so the session checks read the
+// registry to know which running sessions the city accounts for. A nil
+// SessionRegistry knows only the agent.SessionNameFor names.
 type SessionRegistry func() (map[string]string, error)
 
 func (r SessionRegistry) read() (map[string]string, error) {
@@ -550,11 +550,8 @@ func (c *AgentSessionsCheck) Run(_ *CheckContext) *CheckResult {
 // that an error-free listing is complete. It returns nil when the listing
 // proves no absence: the provider does not attest it, or it failed.
 func (c *AgentSessionsCheck) attestedRunning() map[string]bool {
-	if !runtime.ListRunningAttested(c.sp) {
-		return nil
-	}
-	running, err := c.sp.ListRunning("") // per-city socket isolation: all sessions belong to this city
-	if err != nil {
+	running, attested, err := runtime.ListRunningWithAttestation(c.sp, "") // per-city socket isolation: all sessions belong to this city
+	if !attested || err != nil {
 		return nil
 	}
 	listed := make(map[string]bool, len(running))
