@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -287,4 +288,133 @@ func TestReadCodexUsagePageKeepsModelContextAcrossPagesAndRestart(t *testing.T) 
 	if !reflect.DeepEqual(facts, want) {
 		t.Fatalf("facts = %+v, want %+v", facts, want)
 	}
+}
+
+func appendCodexUsageRaw(t *testing.T, path, s string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open %q for append: %v", path, err)
+	}
+	defer f.Close() //nolint:errcheck // test file
+	if _, err := f.WriteString(s); err != nil {
+		t.Fatalf("append to %q: %v", path, err)
+	}
+}
+
+// TestReadCodexUsagePageReportsIncompleteReads pins what a pass reports for
+// each way it cannot read its rollout completely: the issue, whether the
+// invocations around it are emitted, and where the checkpoint resumes.
+func TestReadCodexUsagePageReportsIncompleteReads(t *testing.T) {
+	head := []string{
+		codexSessionMetaLine("2026-04-16T21:49:30.734Z", "/work/dir"),
+		codexTurnContextLine("2026-04-16T21:49:30.901Z", "gpt-5.5"),
+		codexTokenCountLine("2026-04-16T21:49:38.304Z", 150, 100, 0, 50, 0),
+	}
+	headBytes := int64(len(strings.Join(head, "\n")) + 1)
+	tc300 := codexTokenCountLine("2026-04-16T21:49:39.304Z", 300, 100, 0, 50, 0)
+	tc450 := codexTokenCountLine("2026-04-16T21:49:40.304Z", 450, 100, 0, 50, 0)
+	read := func(t *testing.T, root, path string, from CodexUsageCheckpoint, limits CodexUsagePageLimits) CodexUsagePage {
+		t.Helper()
+		page, err := ReadCodexUsagePage(context.Background(), CodexUsagePageRequest{SearchPaths: []string{root}, Path: path, From: from, Limits: limits})
+		if err != nil {
+			t.Fatalf("ReadCodexUsagePage: %v", err)
+		}
+		return page
+	}
+	ids := func(page CodexUsagePage) []string {
+		var out []string
+		for _, e := range page.Entries {
+			out = append(out, e.Usage.MessageID)
+		}
+		return out
+	}
+	expect := func(t *testing.T, page CodexUsagePage, wantIDs []string, wantIssue string) {
+		t.Helper()
+		if got := ids(page); !reflect.DeepEqual(got, wantIDs) {
+			t.Fatalf("ids = %v, want %v", got, wantIDs)
+		}
+		if !reflect.DeepEqual(page.Issues, []string{wantIssue}) {
+			t.Fatalf("issues = %v, want [%s]", page.Issues, wantIssue)
+		}
+		if !page.Incomplete() {
+			t.Fatal("a page with an issue must be incomplete")
+		}
+	}
+
+	t.Run("torn tail stays pending", func(t *testing.T) {
+		root, path := codexPagesRollout(t, head)
+		appendCodexUsageRaw(t, path, tc300)
+		page := read(t, root, path, CodexUsageCheckpoint{}, CodexUsagePageLimits{})
+		expect(t, page, []string{"total:150"}, CodexUsageIssueTornTail)
+		if page.Checkpoint.Offset != headBytes {
+			t.Fatalf("offset = %d, want %d: the torn record must stay unread", page.Checkpoint.Offset, headBytes)
+		}
+		appendCodexUsageRaw(t, path, "\n")
+		next := read(t, root, path, page.Checkpoint, CodexUsagePageLimits{})
+		if got := ids(next); !reflect.DeepEqual(got, []string{"total:300"}) || next.Incomplete() {
+			t.Fatalf("after the record completes = %v, more=%v issues=%v; want [total:300], complete", got, next.More, next.Issues)
+		}
+	})
+
+	t.Run("oversized usage record is skipped and reported", func(t *testing.T) {
+		big := strings.TrimSuffix(tc300, "}") + `,"zz_pad":"` + strings.Repeat("p", 4096) + `"}`
+		root, path := codexPagesRollout(t, append(append(append([]string(nil), head...), big), tc450))
+		limits := CodexUsagePageLimits{MaxRecordBytes: 2048}
+		page := read(t, root, path, CodexUsageCheckpoint{}, limits)
+		expect(t, page, []string{"total:150", "total:450"}, CodexUsageIssueOversizedRecord)
+		next := read(t, root, path, page.Checkpoint, limits)
+		if len(next.Entries) != 0 || next.Incomplete() {
+			t.Fatalf("re-read past the oversized record = %v, more=%v issues=%v; want nothing", ids(next), next.More, next.Issues)
+		}
+	})
+
+	t.Run("oversized record past the read window is discarded over passes", func(t *testing.T) {
+		big := strings.TrimSuffix(tc300, "}") + `,"zz_pad":"` + strings.Repeat("p", 8192) + `"}`
+		root, path := codexPagesRollout(t, append(append(append([]string(nil), head...), big), tc450))
+		limits := CodexUsagePageLimits{MaxBytes: 1024, MaxRecordBytes: 2048}
+		got, pages, _ := drainCodexUsagePages(t, root, path, CodexUsageCheckpoint{}, limits)
+		if !reflect.DeepEqual(got, []string{"total:150", "total:450"}) {
+			t.Fatalf("drained ids = %v, want [total:150 total:450]", got)
+		}
+		reported := false
+		for _, p := range pages {
+			for _, issue := range p.Issues {
+				reported = reported || issue == CodexUsageIssueOversizedRecord
+			}
+		}
+		if !reported {
+			t.Fatal("no pass reported the oversized usage record")
+		}
+	})
+
+	t.Run("malformed record is reported", func(t *testing.T) {
+		root, path := codexPagesRollout(t, append(append(append([]string(nil), head...), `{"type":"event_msg","payload":{"type":"token_count"`), tc450))
+		page := read(t, root, path, CodexUsageCheckpoint{}, CodexUsagePageLimits{})
+		expect(t, page, []string{"total:150", "total:450"}, CodexUsageIssueMalformedRecord)
+	})
+
+	t.Run("truncated source restarts from byte zero", func(t *testing.T) {
+		root, path := codexPagesRollout(t, append(append([]string(nil), head...), tc300))
+		first := read(t, root, path, CodexUsageCheckpoint{}, CodexUsagePageLimits{})
+		writeCodexUsageLines(t, path, head)
+		page := read(t, root, path, first.Checkpoint, CodexUsagePageLimits{})
+		expect(t, page, []string{"total:150"}, CodexUsageIssueSourceTruncated)
+		if page.Checkpoint.Offset != headBytes {
+			t.Fatalf("offset = %d, want the replay to reach %d", page.Checkpoint.Offset, headBytes)
+		}
+	})
+
+	t.Run("replaced source restarts from byte zero", func(t *testing.T) {
+		root, path := codexPagesRollout(t, append(append([]string(nil), head...), tc300))
+		first := read(t, root, path, CodexUsageCheckpoint{}, CodexUsagePageLimits{})
+		replaced := append([]string(nil), head...)
+		replaced[0] = strings.Replace(replaced[0], "019d9845-4273", "019d9845-9999", 1)
+		writeCodexUsageLines(t, path, append(append(replaced, tc300), tc450))
+		page := read(t, root, path, first.Checkpoint, CodexUsagePageLimits{})
+		expect(t, page, []string{"total:150", "total:300", "total:450"}, CodexUsageIssueSourceReplaced)
+		if page.Checkpoint.SourceID != "019d9845-9999-7ee3-a7d7-15b71ec6f096" {
+			t.Fatalf("source id = %q, want the replacement's", page.Checkpoint.SourceID)
+		}
+	})
 }

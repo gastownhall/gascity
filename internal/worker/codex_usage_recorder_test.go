@@ -2,7 +2,9 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -556,5 +558,139 @@ func TestSweepCodexUsageReplaysLegacyCursorUnderFloor(t *testing.T) {
 		if got, want := byID[id].IdempotencyKey, usage.ModelIdempotencyKey("run-R", id); got != want {
 			t.Fatalf("%s key = %q, want %q", id, got, want)
 		}
+	}
+}
+
+// appendCodexRolloutRaw appends s to the rollout as written, with no newline
+// added.
+func appendCodexRolloutRaw(t *testing.T, path, s string) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("open %q for append: %v", path, err)
+	}
+	defer f.Close() //nolint:errcheck // test file
+	if _, err := f.WriteString(s); err != nil {
+		t.Fatalf("append to %q: %v", path, err)
+	}
+}
+
+func codexRecordJSON(t *testing.T, record map[string]any) string {
+	t.Helper()
+	raw, err := json.Marshal(record)
+	if err != nil {
+		t.Fatalf("marshal rollout record: %v", err)
+	}
+	return string(raw)
+}
+
+// TestSweepCodexUsageLeavesIncompletePassesUnsettled meets each way a pass
+// cannot read its rollout completely: an unterminated final record, a usage
+// record over the record limit, a record that is not JSON, and a rollout
+// truncated or replaced under its checkpoint. The pass that meets it returns
+// unsettled, so no lane stamps the interval swept on it, and the sweeps after
+// it still converge on billing every readable invocation once.
+func TestSweepCodexUsageLeavesIncompletePassesUnsettled(t *testing.T) {
+	type pass struct {
+		emitted int
+		settled bool
+	}
+	cases := []struct {
+		name string
+		// write lays out the rollout and may change it between the passes:
+		// it runs before pass i with i = 0, 1, ....
+		write    func(t *testing.T, fx *codexRecorderFixture, i int)
+		passes   []pass
+		wantFact []string
+	}{
+		{
+			name: "torn final record stays pending",
+			write: func(t *testing.T, fx *codexRecorderFixture, i int) {
+				switch i {
+				case 0:
+					fx.write(t, []map[string]any{codexWorkerSessionMeta(fx.meta["work_dir"]), fx.turnContext(0, "gpt-5.5"), fx.tokenCount(1, 150)})
+					appendCodexRolloutRaw(t, fx.path, codexRecordJSON(t, fx.tokenCount(2, 300)))
+				case 1:
+					appendCodexRolloutRaw(t, fx.path, "\n")
+				}
+			},
+			passes:   []pass{{1, false}, {1, true}},
+			wantFact: []string{"total:150", "total:300"},
+		},
+		{
+			name: "oversized usage record is reported",
+			write: func(t *testing.T, fx *codexRecorderFixture, i int) {
+				if i != 0 {
+					return
+				}
+				fx.write(t, []map[string]any{codexWorkerSessionMeta(fx.meta["work_dir"]), fx.turnContext(0, "gpt-5.5"), fx.tokenCount(1, 150)})
+				big := codexRecordJSON(t, fx.tokenCount(2, 300))
+				big = strings.TrimSuffix(big, "}") + `,"zz_pad":"` + strings.Repeat("p", 1100*1024) + `"}` + "\n"
+				appendCodexRolloutRaw(t, fx.path, big)
+				appendCodexRolloutRaw(t, fx.path, codexRecordJSON(t, fx.tokenCount(3, 450))+"\n")
+			},
+			passes:   []pass{{2, false}, {0, true}},
+			wantFact: []string{"total:150", "total:450"},
+		},
+		{
+			name: "malformed record is reported",
+			write: func(t *testing.T, fx *codexRecorderFixture, i int) {
+				if i != 0 {
+					return
+				}
+				fx.write(t, []map[string]any{codexWorkerSessionMeta(fx.meta["work_dir"]), fx.turnContext(0, "gpt-5.5"), fx.tokenCount(1, 150)})
+				appendCodexRolloutRaw(t, fx.path, `{"timestamp":"`+fx.at(2)+`","type":"event_msg","payload":{"type":"token_count"`+"\n")
+				appendCodexRolloutRaw(t, fx.path, codexRecordJSON(t, fx.tokenCount(3, 450))+"\n")
+			},
+			passes:   []pass{{2, false}, {0, true}},
+			wantFact: []string{"total:150", "total:450"},
+		},
+		{
+			name: "truncated rollout replays from the start",
+			write: func(t *testing.T, fx *codexRecorderFixture, i int) {
+				switch i {
+				case 0:
+					fx.write(t, []map[string]any{codexWorkerSessionMeta(fx.meta["work_dir"]), fx.turnContext(0, "gpt-5.5"), fx.tokenCount(1, 150), fx.tokenCount(2, 300), codexToolOutput(1024)})
+				case 1:
+					fx.write(t, []map[string]any{codexWorkerSessionMeta(fx.meta["work_dir"]), fx.turnContext(0, "gpt-5.5"), fx.tokenCount(1, 150)})
+				}
+			},
+			passes:   []pass{{2, true}, {1, false}, {0, true}},
+			wantFact: []string{"total:150", "total:300"},
+		},
+		{
+			name: "replaced rollout replays from the start",
+			write: func(t *testing.T, fx *codexRecorderFixture, i int) {
+				switch i {
+				case 0:
+					fx.write(t, []map[string]any{codexWorkerSessionMeta(fx.meta["work_dir"]), fx.turnContext(0, "gpt-5.5"), fx.tokenCount(1, 150), fx.tokenCount(2, 300)})
+				case 1:
+					meta := codexWorkerSessionMeta(fx.meta["work_dir"])
+					meta["payload"].(map[string]any)["id"] = "019e0000-dddd-7000-8000-000000000004"
+					fx.write(t, []map[string]any{meta, fx.turnContext(0, "gpt-5.5"), fx.tokenCount(1, 150), fx.tokenCount(2, 300), fx.tokenCount(3, 450)})
+				}
+			},
+			passes:   []pass{{2, true}, {3, false}, {0, true}},
+			wantFact: []string{"total:150", "total:300", "total:450"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newCodexRecorderFixture(t)
+			for i, want := range tc.passes {
+				tc.write(t, fx, i)
+				emitted, settled, err := fx.sweep(t)
+				if err != nil {
+					t.Fatalf("pass %d: %v", i, err)
+				}
+				if (pass{emitted, settled}) != want {
+					t.Fatalf("pass %d = emitted %d, settled %v; want emitted %d, settled %v", i, emitted, settled, want.emitted, want.settled)
+				}
+			}
+			ids, _ := fx.logicalFacts(t)
+			if !reflect.DeepEqual(ids, tc.wantFact) {
+				t.Fatalf("logical facts = %v, want %v", ids, tc.wantFact)
+			}
+		})
 	}
 }
