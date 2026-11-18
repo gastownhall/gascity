@@ -461,8 +461,8 @@ func TestWispStepResolutionListingsStateTheirOrder(t *testing.T) {
 			t.Errorf("%s(%+v) cuts %d rows in the store's default order, want newest created first", op.Method, op.Query, op.Query.Limit)
 		}
 	}
-	if bounded != 4 {
-		t.Fatalf("recorded %d bounded listings, want the two molecule types, the bridge and the legacy fallback", bounded)
+	if bounded != 3 {
+		t.Fatalf("recorded %d bounded listings, want the one molecule type, the bridge and the legacy fallback", bounded)
 	}
 }
 
