@@ -930,9 +930,9 @@ func (f *Factory) discoverSweepTranscript(family, id string, meta map[string]str
 				slog.String("session_id", id))
 			return "", true, true
 		}
-		scanPath, scanClean := sessionlog.FindCodexSessionFileNearScan(
+		scan := sessionlog.FindCodexSessionFileNearScan(
 			f.searchPaths, workDir, notBefore, codexInvocationDiscoveryWindow)
-		return scanPath, scanClean, true
+		return scan.Path, scan.Clean, true
 	case "opencode":
 		// Keyed only, like discoverOpenCodeInvocationTranscript: the export is
 		// named for the session_key, and the manager's workdir fallback could

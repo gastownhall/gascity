@@ -64,6 +64,7 @@ go_test(
         "claude_api_error_test.go",
         "claude_project_slug_test.go",
         "codex_batch_test.go",
+        "codex_child_scan_test.go",
         "codex_history_usage_test.go",
         "codex_reader_test.go",
         "codex_turn_error_test.go",

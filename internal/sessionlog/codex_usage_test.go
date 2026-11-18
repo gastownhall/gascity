@@ -1287,17 +1287,17 @@ func TestFindCodexSessionFileNearScanReportsScanCleanliness(t *testing.T) {
 	t.Run("clean hit reports scanClean=true", func(t *testing.T) {
 		root := t.TempDir()
 		want := writeCodexRolloutAt(t, root, anchor.Add(2*time.Minute), "019d9845-cccc-7000-8000-000000000001", workDir)
-		got, clean := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
-		if got != want || !clean {
-			t.Fatalf("got (%q,%v), want (%q,true)", got, clean, want)
+		scan := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
+		if scan.Path != want || !scan.Clean || scan.Ambiguous {
+			t.Fatalf("got %+v, want {Path:%q, Clean:true}", scan, want)
 		}
 	})
 
 	t.Run("clean zero-match reports scanClean=true", func(t *testing.T) {
 		root := t.TempDir() // no rollouts
-		got, clean := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
-		if got != "" || !clean {
-			t.Fatalf("got (%q,%v), want (\"\",true) for a clean empty scan", got, clean)
+		scan := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
+		if scan.Path != "" || !scan.Clean || scan.Ambiguous {
+			t.Fatalf("got %+v, want clean zero-match for a clean empty scan", scan)
 		}
 	})
 
@@ -1305,9 +1305,9 @@ func TestFindCodexSessionFileNearScanReportsScanCleanliness(t *testing.T) {
 		root := t.TempDir()
 		writeCodexRolloutAt(t, root, anchor.Add(time.Minute), "019d9845-cccc-7000-8000-000000000003", workDir)
 		writeCodexRolloutAt(t, root, anchor.Add(2*time.Minute), "019d9845-cccc-7000-8000-000000000004", workDir)
-		got, clean := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
-		if got != "" || !clean {
-			t.Fatalf("got (%q,%v), want (\"\",true) — ambiguity is a clean, definitive refusal", got, clean)
+		scan := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
+		if scan.Path != "" || !scan.Clean || !scan.Ambiguous {
+			t.Fatalf("got %+v, want {Ambiguous:true, Clean:true} — ambiguity is a clean, definitive refusal", scan)
 		}
 	})
 
@@ -1325,11 +1325,11 @@ func TestFindCodexSessionFileNearScanReportsScanCleanliness(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = os.Chmod(dayDir, 0o755) })
 
-		got, clean := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
-		if got != "" {
-			t.Fatalf("got %q, want empty (the matching rollout is behind an unreadable dir)", got)
+		scan := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
+		if scan.Path != "" {
+			t.Fatalf("got %q, want empty (the matching rollout is behind an unreadable dir)", scan.Path)
 		}
-		if clean {
+		if scan.Clean {
 			t.Fatal("a non-ENOENT readdir fault during the scan must report scanClean=false")
 		}
 
@@ -1337,9 +1337,9 @@ func TestFindCodexSessionFileNearScanReportsScanCleanliness(t *testing.T) {
 		if err := os.Chmod(dayDir, 0o755); err != nil {
 			t.Fatalf("restore chmod: %v", err)
 		}
-		got2, clean2 := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
-		if got2 != path || !clean2 {
-			t.Fatalf("after fault cleared: got (%q,%v), want (%q,true)", got2, clean2, path)
+		scan2 := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
+		if scan2.Path != path || !scan2.Clean || scan2.Ambiguous {
+			t.Fatalf("after fault cleared: got %+v, want {Path:%q, Clean:true}", scan2, path)
 		}
 	})
 
@@ -1364,11 +1364,11 @@ func TestFindCodexSessionFileNearScanReportsScanCleanliness(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = os.Chmod(siblingDay, 0o755) })
 
-		got, clean := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
-		if got != want {
-			t.Fatalf("got %q, want the one visible match %q (the wrapper path is unchanged by dirtiness)", got, want)
+		scan := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
+		if scan.Path != want {
+			t.Fatalf("got %q, want the one visible match %q (the wrapper path is unchanged by dirtiness)", scan.Path, want)
 		}
-		if clean {
+		if scan.Clean {
 			t.Fatal("a dirty scan with one visible match must report scanClean=false (a hidden second rollout would make it ambiguous)")
 		}
 
@@ -1376,9 +1376,9 @@ func TestFindCodexSessionFileNearScanReportsScanCleanliness(t *testing.T) {
 		if err := os.Chmod(siblingDay, 0o755); err != nil {
 			t.Fatalf("restore chmod: %v", err)
 		}
-		got2, clean2 := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
-		if got2 != want || !clean2 {
-			t.Fatalf("after fault cleared: got (%q,%v), want (%q,true)", got2, clean2, want)
+		scan2 := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
+		if scan2.Path != want || !scan2.Clean || scan2.Ambiguous {
+			t.Fatalf("after fault cleared: got %+v, want {Path:%q, Clean:true}", scan2, want)
 		}
 	})
 
@@ -1400,11 +1400,11 @@ func TestFindCodexSessionFileNearScanReportsScanCleanliness(t *testing.T) {
 		}
 		t.Cleanup(func() { _ = os.Chmod(sealed, 0o644) })
 
-		got, clean := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
-		if got != want {
-			t.Fatalf("got %q, want the one visible match %q", got, want)
+		scan := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
+		if scan.Path != want {
+			t.Fatalf("got %q, want the one visible match %q", scan.Path, want)
 		}
-		if clean {
+		if scan.Clean {
 			t.Fatal("a per-file cwd-probe open fault with one visible match must report scanClean=false")
 		}
 
@@ -1414,9 +1414,9 @@ func TestFindCodexSessionFileNearScanReportsScanCleanliness(t *testing.T) {
 		if err := os.Chmod(sealed, 0o644); err != nil {
 			t.Fatalf("restore chmod: %v", err)
 		}
-		got2, clean2 := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
-		if got2 != "" || !clean2 {
-			t.Fatalf("after fault cleared: got (%q,%v), want (\"\",true) — two visible same-cwd matches are a clean ambiguity refusal", got2, clean2)
+		scan2 := FindCodexSessionFileNearScan([]string{root}, workDir, anchor, window)
+		if scan2.Path != "" || !scan2.Clean || !scan2.Ambiguous {
+			t.Fatalf("after fault cleared: got %+v, want {Ambiguous:true, Clean:true} — two visible same-cwd matches are a clean ambiguity refusal", scan2)
 		}
 	})
 

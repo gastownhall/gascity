@@ -814,29 +814,50 @@ func FindCodexSessionFile(searchPaths []string, workDir string) string {
 // "" and telemetry silently records nothing, consistent with the bounded
 // best-effort contract.
 func FindCodexSessionFileNear(searchPaths []string, workDir string, anchor time.Time, window time.Duration) string {
-	path, _ := FindCodexSessionFileNearScan(searchPaths, workDir, anchor, window)
-	return path
+	return FindCodexSessionFileNearScan(searchPaths, workDir, anchor, window).Path
 }
 
-// FindCodexSessionFileNearScan is FindCodexSessionFileNear with a clean-scan
-// signal. scanClean is false when ANY os.ReadDir or cwd-probe open during the scan
-// failed with a non-ENOENT IO fault (EMFILE/ESTALE/EACCES and similar), so a
-// caller that must decide whether its result is definitive can tell a genuine
-// zero/ambiguous match (scanClean true — retrying cannot change it) from a
-// transient scan fault (scanClean false — a later, unclouded scan may surface a
-// rollout the fault hid). An ambiguity refusal (>1 visible match) returns
-// scanClean true regardless of unrelated IO noise: more matches cannot make it
-// less ambiguous. A single visible match returns scanClean = !dirty — a
-// concurrent fault could have hidden a second same-cwd, in-window rollout, so a
-// lone hit is definitive only when the scan was clean; the keyless sweep uses
-// this to retry rather than settle on a non-definitive singleton. Bad inputs
-// (empty workDir, zero anchor, non-positive window) return ("", true) — a clean
-// no-op, not a fault. FindCodexSessionFileNear is the string-only wrapper; it
-// discards scanClean and returns the same path (matches[0] for one hit, "" for
-// zero/ambiguous), so its callers are byte-identical to before.
-func FindCodexSessionFileNearScan(searchPaths []string, workDir string, anchor time.Time, window time.Duration) (string, bool) {
+// CodexNearScan is FindCodexSessionFileNearScan's typed verdict, separating the
+// three outcomes a caller that must decide whether a miss is definitive needs
+// told apart: a plain zero-match, a refusal, and a scan that could not see the
+// whole window.
+type CodexNearScan struct {
+	// Path is the single unambiguous root rollout found, "" otherwise.
+	Path string
+	// Clean is false when ANY os.ReadDir or cwd-probe open during the scan
+	// failed with a non-ENOENT IO fault (EMFILE/ESTALE/EACCES and similar), so
+	// a caller that must decide whether the result is definitive can tell a
+	// genuine zero-match or refusal (Clean true — a fault-free retry cannot
+	// change a zero-match into a hit, but see Path) from a transient scan fault
+	// (Clean false — a later, unclouded scan may surface a rollout the fault
+	// hid). A single visible match returns Clean = !dirty — a concurrent fault
+	// could have hidden a second same-cwd, in-window rollout, so a lone hit is
+	// definitive only when the scan was clean. Bad inputs (empty workDir, zero
+	// anchor, non-positive window) are a clean no-op, not a fault.
+	Clean bool
+	// Ambiguous is the definitive refusal: more than one physically distinct
+	// root rollout matched the (cwd, window), so attribution is refused no
+	// matter what a retry could surface. It is true regardless of unrelated IO
+	// noise: more matches cannot make it less ambiguous.
+	Ambiguous bool
+}
+
+// FindCodexSessionFileNearScan is FindCodexSessionFileNear with a typed
+// verdict. A keyless caller uses Ambiguous and Clean to classify its miss:
+// an ambiguous refusal and a dirty scan are the only non-retryable and
+// retryable failures respectively, while a CLEAN zero-match says the window
+// held no root rollout at scan time — for a LIVE session a late rollout can
+// still appear, so that zero-match alone is not an attribution verdict.
+// Rollouts whose session_meta marks them as child threads (a non-"cli"
+// source or a parent_thread_id) are not root candidates: they are excluded
+// before matching, so two children with no root are a clean zero-match
+// rather than an ambiguity. FindCodexSessionFileNear is the string-only
+// wrapper; it discards the verdict and returns the same path (matches[0] for
+// one hit, "" for zero/ambiguous), so its callers are byte-identical to
+// before.
+func FindCodexSessionFileNearScan(searchPaths []string, workDir string, anchor time.Time, window time.Duration) CodexNearScan {
 	if workDir == "" || anchor.IsZero() || window <= 0 {
-		return "", true
+		return CodexNearScan{Clean: true}
 	}
 	start := anchor.Add(-time.Minute)
 	end := anchor.Add(window)
@@ -846,17 +867,17 @@ func FindCodexSessionFileNearScan(searchPaths []string, workDir string, anchor t
 	for _, root := range mergeCodexSearchPaths(searchPaths) {
 		collectCodexRolloutsNear(root, workDir, start, end, true, seen, &matches, &dirty)
 		if len(matches) > 1 {
-			return "", true // ambiguous: a definitive refusal, independent of scan noise
+			return CodexNearScan{Clean: true, Ambiguous: true} // definitive refusal, independent of scan noise
 		}
 	}
 	if len(matches) == 1 {
 		// One visible match, but a dirty scan may have hidden a second same-cwd,
 		// in-window rollout, so the lone hit is definitive only when the scan was
-		// clean. The string-only wrapper discards this bool and still returns
+		// clean. The string-only wrapper discards this and still returns
 		// matches[0], keeping prompt-op behavior unchanged.
-		return matches[0], !dirty
+		return CodexNearScan{Path: matches[0], Clean: !dirty}
 	}
-	return "", !dirty
+	return CodexNearScan{Clean: !dirty}
 }
 
 // appendCodexRolloutMatch appends path to matches unless its physical
@@ -1048,6 +1069,11 @@ type CodexSessionCandidate struct {
 	WorkDir   string
 	StartedAt time.Time
 	ModTime   time.Time
+	// Child marks a rollout whose session_meta names a child origin (a
+	// non-"cli" source or a parent_thread_id). Unkeyed discovery skips child
+	// candidates so a sub-agent thread is never attributed as the session's
+	// root conversation; keyed lookups still resolve them by session id.
+	Child bool
 }
 
 // FindCodexSessionFileByIDNoWindow resolves a Codex transcript by provider
@@ -1225,7 +1251,7 @@ func appendCodexCandidatesFromDir(dir, workDir string, seen map[string]bool, out
 			continue
 		}
 		candidate, ok := codexSessionCandidate(path)
-		if !ok || candidate.WorkDir != workDir {
+		if !ok || candidate.Child || candidate.WorkDir != workDir {
 			continue
 		}
 		seen[key] = true
@@ -1385,8 +1411,10 @@ func codexSessionCandidateScan(path string) (candidate CodexSessionCandidate, ok
 		Type      string `json:"type"`
 		Timestamp string `json:"timestamp"`
 		Payload   struct {
-			CWD       string `json:"cwd"`
-			Timestamp string `json:"timestamp"`
+			CWD            string `json:"cwd"`
+			Timestamp      string `json:"timestamp"`
+			Source         string `json:"source"`
+			ParentThreadID string `json:"parent_thread_id"`
 		} `json:"payload"`
 	}
 	if err := json.Unmarshal(scanner.Bytes(), &meta); err != nil {
@@ -1409,7 +1437,26 @@ func codexSessionCandidateScan(path string) (candidate CodexSessionCandidate, ok
 		WorkDir:   meta.Payload.CWD,
 		StartedAt: startedAt,
 		ModTime:   modTime,
+		// A rollout whose session_meta names a child origin — a non-"cli"
+		// source (sub-agent threads announce their own) or an explicit
+		// parent_thread_id — is a child, not a root. A missing or "cli"
+		// source keeps the rollout a root candidate, so transcripts that
+		// carry no markers behave exactly as before.
+		Child: isCodexChildRollout(meta.Payload.Source, meta.Payload.ParentThreadID),
 	}, true, true
+}
+
+// isCodexChildRollout reports whether a session_meta payload's markers
+// identify the rollout as a child thread rather than a root conversation.
+// Explicit markers only: an empty source and no parent are a root (legacy
+// transcripts carry no markers at all), and "cli" is the root origin the CLI
+// itself stamps.
+func isCodexChildRollout(source, parentThreadID string) bool {
+	if strings.TrimSpace(parentThreadID) != "" {
+		return true
+	}
+	source = strings.TrimSpace(source)
+	return source != "" && source != "cli"
 }
 
 func parseCodexSessionTime(raw string) time.Time {
@@ -1431,13 +1478,20 @@ func codexSessionCWDMatches(path, workDir string) bool {
 	return match
 }
 
-// codexSessionCWDMatchesScan is codexSessionCWDMatches with a clean-scan signal:
-// clean is false only when the cwd probe's file open failed with a non-ENOENT IO
-// fault (see codexSessionCandidateScan), so a scanner can distinguish a transient
-// probe failure from a genuine cwd mismatch.
+// codexSessionCWDMatchesScan is codexSessionCWDMatches with a clean-scan
+// signal: clean is false only when the cwd probe's file open failed with a
+// non-ENOENT IO fault (see codexSessionCandidateScan), so a scanner can
+// distinguish a transient probe failure from a genuine cwd mismatch. Child
+// rollouts (see CodexSessionCandidate.Child) never match: unkeyed discovery
+// attributes a session only to its root conversation.
 func codexSessionCWDMatchesScan(path, workDir string) (match bool, clean bool) {
 	candidate, ok, clean := codexSessionCandidateScan(path)
 	if !ok {
+		return false, clean
+	}
+	if candidate.Child {
+		// A child rollout is not this session's root conversation. The miss
+		// is a genuine mismatch, not a probe fault, so clean stays as probed.
 		return false, clean
 	}
 	cwd := candidate.WorkDir
