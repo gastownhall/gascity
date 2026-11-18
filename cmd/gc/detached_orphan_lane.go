@@ -445,9 +445,11 @@ func restoreDetachedOrphanRoute(store beads.Store, live beads.Bead, resolver *de
 		return detachedOrphanRestoreOutcome{err: fmt.Errorf("bead %s: %w", live.ID, err)}
 	}
 	if route == "" {
-		// No recoverable route: the session bead is gone, carries no template, or
-		// its name is ambiguous. Counted as unresolved rather than logged per
-		// tick — the convergence scan says so once, loudly, with its own line.
+		// No recoverable route: the session bead is gone, carries no template,
+		// its name is ambiguous, or the back-reference names a configured named
+		// session, whose open unassigned work is parked by that seat, not
+		// detached. Counted as unresolved rather than logged per tick — the
+		// convergence scan says so once, loudly, with its own line.
 		return detachedOrphanRestoreOutcome{}
 	}
 	if setErr := store.SetMetadata(live.ID, beadmeta.RoutedToMetadataKey, route); setErr != nil {

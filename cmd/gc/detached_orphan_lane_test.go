@@ -569,3 +569,33 @@ func TestCompletionFactIndexWiringAbsorbsAndInvalidates(t *testing.T) {
 	standalone.absorbCompletionFact(fact)
 	standalone.invalidateCompletionFacts()
 }
+
+// TestDetachedOrphanLaneDeltaSkipsNamedSessionWork: the tick's delta pass
+// resolves routes through the same index as the backstop, so a named seat's
+// parked work it observed stays unrouted (counted unresolved) while the pool
+// orphan beside it is restored.
+func TestDetachedOrphanLaneDeltaSkipsNamedSessionWork(t *testing.T) {
+	seat := detachedOrphanParkedWork("D-N", "N-7", "seat-a")
+	cr, store := detachedOrphanRuntime(t,
+		detachedOrphanSessionBead(),
+		detachedOrphanNamedSeatBead("N-7", "seat-a", detachedOrphanTestPool),
+		detachedOrphanWorkBead("D-1"),
+		seat)
+	lane := cr.detachedOrphanLaneOf()
+	lane.observe(beadCreatedEvent(t, detachedOrphanWorkBead("D-1")))
+	lane.observe(beadCreatedEvent(t, seat))
+
+	report := cr.sweepDetachedHandoffOrphansDelta()
+	if report.err != nil {
+		t.Fatalf("delta pass: %v", report.err)
+	}
+	if report.restored != 1 || report.unresolved != 1 {
+		t.Fatalf("delta restored=%d unresolved=%d, want 1 and 1", report.restored, report.unresolved)
+	}
+	if got := mustRoutedTo(t, store, "D-N"); got != "" {
+		t.Fatalf("named seat's parked work gc.routed_to=%q, want empty", got)
+	}
+	if got := mustRoutedTo(t, store, "D-1"); got != detachedOrphanTestPool {
+		t.Fatalf("pool orphan gc.routed_to=%q, want %q", got, detachedOrphanTestPool)
+	}
+}

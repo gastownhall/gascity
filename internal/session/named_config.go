@@ -308,7 +308,7 @@ func NamedSessionIdentity(b beads.Bead) string {
 	return strings.TrimSpace(b.Metadata[NamedSessionIdentityMetadata])
 }
 
-// wasConfiguredNamedSession reports whether a bead was created for a configured
+// WasConfiguredNamedSession reports whether a bead was created for a configured
 // named session, recognized by either the configured-named-session boolean flag
 // or a recorded configured-named identity.
 //
@@ -318,7 +318,7 @@ func NamedSessionIdentity(b beads.Bead) string {
 // be treated as a configured named session. Otherwise its reserved runtime
 // session name is never released and permanently blocks the on-demand respawn
 // of a same-named session (the refinery no-respawn class in ga-n2d).
-func wasConfiguredNamedSession(b beads.Bead) bool {
+func WasConfiguredNamedSession(b beads.Bead) bool {
 	return IsNamedSessionBead(b) || NamedSessionIdentity(b) != ""
 }
 
@@ -327,7 +327,7 @@ func wasConfiguredNamedSession(b beads.Bead) bool {
 // agent_name, or template/role label — resolve to the given configured owner
 // identity (the qualified named-session identity reclaiming a runtime name).
 //
-// This broadens wasConfiguredNamedSession recognition for ga-n2d Gap C. A
+// This broadens WasConfiguredNamedSession recognition for ga-n2d Gap C. A
 // pre-ga841 named-session bead (the kg4uh4-class phantom) can carry an EMPTY
 // configured_named_identity and no boolean flag, holding its identity only via
 // alias / agent_name / a template (role) label such as
@@ -383,7 +383,7 @@ func configuredNamedIdentitySignalsMatch(b beads.Bead, owner string) bool {
 // configured_named_identity, so preserveConfiguredNamedSessionBead keeps them
 // open upstream and the non-empty recorded identity short-circuits here. Only
 // the empty-identity legacy phantom (the documented Gap B class) is recyclable.
-// Recognition is gated on wasConfiguredNamedSession OR
+// Recognition is gated on WasConfiguredNamedSession OR
 // configuredNamedIdentitySignalsMatch — the same recognition the closed-bead
 // name release uses (ga-841 / Gap A) — so that closing actually frees the name.
 func RecyclableDeadConfiguredNamePhantom(b beads.Bead, cfg *config.City, cityName string) (string, bool) {
@@ -405,7 +405,7 @@ func RecyclableDeadConfiguredNamePhantom(b beads.Bead, cfg *config.City, cityNam
 	if NamedSessionIdentity(b) != "" {
 		return "", false
 	}
-	if wasConfiguredNamedSession(b) || configuredNamedIdentitySignalsMatch(b, identity) {
+	if WasConfiguredNamedSession(b) || configuredNamedIdentitySignalsMatch(b, identity) {
 		return identity, true
 	}
 	return "", false
@@ -460,7 +460,7 @@ func NamedSessionIdentityInfo(i Info) string {
 }
 
 // wasConfiguredNamedSessionInfo is the session.Info mirror of
-// wasConfiguredNamedSession.
+// WasConfiguredNamedSession.
 func wasConfiguredNamedSessionInfo(i Info) bool {
 	return IsNamedSessionInfo(i) || NamedSessionIdentityInfo(i) != ""
 }

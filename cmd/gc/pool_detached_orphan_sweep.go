@@ -21,6 +21,10 @@ import (
 // session bead → template and re-stamps gc.routed_to, returning each bead to
 // pool demand. Returns the count of restored beads.
 //
+// A back-reference that names a configured named session is never restored:
+// that seat's open unassigned work was parked by the seat, not detached, and the
+// template route its session bead carries is the pool's lane, not the seat's.
+//
 // Recovery is judgment-free (ZFC): it reads the original pool route from the
 // session bead's own template metadata and re-stamps gc.routed_to. The bead
 // re-enters pool demand; the formula re-evaluates it from there. No role names
@@ -115,7 +119,7 @@ func sweepDetachedHandoffOrphansOnLeg(store, routeStore beads.Store, ownSessions
 	for _, c := range candidates {
 		route := routeIndex.route(c.sessionID, c.sessionName)
 		if route == "" {
-			log.Printf("sweepDetachedHandoffOrphans: no recoverable route for bead %s (gc.session_id=%q / gc.session_name=%q not found in any session bead, the session carries no template, or the session name is ambiguous)", c.id, c.sessionID, c.sessionName)
+			log.Printf("sweepDetachedHandoffOrphans: no recoverable route for bead %s (gc.session_id=%q / gc.session_name=%q not found in any session bead, the session carries no template, the session name is ambiguous, or the back-reference names a configured named session, whose open unassigned work is parked by that seat, not detached)", c.id, c.sessionID, c.sessionName)
 			continue
 		}
 		// Re-read the live bead immediately before writing, through the cache-
@@ -166,7 +170,7 @@ func sweepDetachedHandoffOrphansOnLeg(store, routeStore beads.Store, ownSessions
 func detachedOrphanRoutesForLeg(store, routeStore beads.Store, ownSessions bool) (detachedOrphanRouteIndex, int, error) {
 	if !ownSessions {
 		if routeStore == nil {
-			return detachedOrphanRouteIndex{byID: map[string]string{}, byName: map[string]string{}}, 0, nil
+			return newDetachedOrphanRouteIndex(), 0, nil
 		}
 		index, err := buildDetachedOrphanRouteIndex(routeStore)
 		if err != nil {
@@ -265,21 +269,48 @@ func isDetachedHandoffOrphanCandidate(b beads.Bead) bool {
 // route. This mirrors internal/session/resolve.go's refusal to act on an ambiguous
 // session_name match, so a duplicated session name never restores work to the wrong
 // pool.
+//
+// Configured named session beads never answer with a route. Their IDs and
+// session names are recorded as vetoes instead, so a back-reference that names a
+// named seat cannot fall back by session_name to a plain session bead that shares
+// the name, in either store of the leg's union.
 type detachedOrphanRouteIndex struct {
-	byID   map[string]string // session-bead ID → pool route
-	byName map[string]string // session_name → pool route, only when unambiguous
+	byID       map[string]string   // session-bead ID → pool route
+	byName     map[string]string   // session_name → pool route, only when unambiguous
+	namedIDs   map[string]struct{} // configured named session-bead IDs: never restored
+	namedNames map[string]struct{} // configured named session_names: never restored by name
+}
+
+// newDetachedOrphanRouteIndex returns an empty index whose maps are all non-nil,
+// so backfill can write into any of them.
+func newDetachedOrphanRouteIndex() detachedOrphanRouteIndex {
+	return detachedOrphanRouteIndex{
+		byID:       map[string]string{},
+		byName:     map[string]string{},
+		namedIDs:   map[string]struct{}{},
+		namedNames: map[string]struct{}{},
+	}
 }
 
 // route resolves the pool route for a detached orphan, preferring the exact
 // session-bead ID over the session_name fallback. It returns "" when neither
-// resolves — including when the session_name was dropped as ambiguous.
+// resolves — including when the session_name was dropped as ambiguous — and when
+// the back-reference names a configured named session: an ID naming one refuses
+// outright, with no name fallback, and a name naming one refuses unless the ID
+// matched a plain session bead exactly.
 func (idx detachedOrphanRouteIndex) route(sessionID, sessionName string) string {
 	if sessionID != "" {
+		if _, named := idx.namedIDs[sessionID]; named {
+			return ""
+		}
 		if r := idx.byID[sessionID]; r != "" {
 			return r
 		}
 	}
 	if sessionName != "" {
+		if _, named := idx.namedNames[sessionName]; named {
+			return ""
+		}
 		if r := idx.byName[sessionName]; r != "" {
 			return r
 		}
@@ -289,7 +320,8 @@ func (idx detachedOrphanRouteIndex) route(sessionID, sessionName string) string 
 
 // backfill copies entries from other for keys idx does not already own, so the
 // primary store wins on conflict and the cross store only fills gaps. Both the ID
-// and the (already ambiguity-pruned) name maps are unioned this way.
+// and the (already ambiguity-pruned) name maps are unioned this way. The named-
+// session vetoes are unioned outright: a veto from either store wins.
 func (idx detachedOrphanRouteIndex) backfill(other detachedOrphanRouteIndex) {
 	for id, route := range other.byID {
 		if _, exists := idx.byID[id]; !exists {
@@ -301,6 +333,12 @@ func (idx detachedOrphanRouteIndex) backfill(other detachedOrphanRouteIndex) {
 			idx.byName[sn] = route
 		}
 	}
+	for id := range other.namedIDs {
+		idx.namedIDs[id] = struct{}{}
+	}
+	for sn := range other.namedNames {
+		idx.namedNames[sn] = struct{}{}
+	}
 }
 
 // buildDetachedOrphanRouteIndex indexes every session bead (open or closed) that
@@ -310,8 +348,13 @@ func (idx detachedOrphanRouteIndex) backfill(other detachedOrphanRouteIndex) {
 // session_name shared by session beads with conflicting routes is dropped from the
 // name index so an ambiguous name never resolves to an arbitrary route; the unique
 // per-ID entry still resolves such an orphan exactly.
+//
+// A configured named session bead is never indexed for a route: its ID and
+// session_name are recorded as vetoes (even on a partial list, and even without a
+// template — a veto can only refuse a restore, never invent a route), and it takes
+// no part in name-ambiguity accounting.
 func buildDetachedOrphanRouteIndex(store beads.Store) (detachedOrphanRouteIndex, error) {
-	idx := detachedOrphanRouteIndex{byID: map[string]string{}, byName: map[string]string{}}
+	idx := newDetachedOrphanRouteIndex()
 	// Relic leg (S4 debt) when store is a work leg rather than the sessions
 	// store: a scope store holds session beads only as pre-split rows.
 	var all []beads.Bead
@@ -336,12 +379,16 @@ func buildDetachedOrphanRouteIndex(store beads.Store) (detachedOrphanRouteIndex,
 	// entirely when the list is partial, degrading to exact-gc.session_id recovery.
 	ambiguousNames := map[string]bool{}
 	for _, sb := range all {
-		if isNamedSessionBead(sb) {
-			// A configured named session's work is not its template pool's:
-			// the named identity serves it, and a bead it left open and
-			// unassigned was parked, not detached by a failed done sequence.
-			// Indexed, the template route re-stamped it and a pool instance
-			// the city never named claimed it.
+		if session.WasConfiguredNamedSession(sb) {
+			// A configured named seat, recognized by its flag or its recorded
+			// identity, parked its open unassigned work rather than detaching it;
+			// its template route is the pool's, not the seat's.
+			if id := strings.TrimSpace(sb.ID); id != "" {
+				idx.namedIDs[id] = struct{}{}
+			}
+			if sn := strings.TrimSpace(sb.Metadata["session_name"]); sn != "" {
+				idx.namedNames[sn] = struct{}{}
+			}
 			continue
 		}
 		route := retiredSessionFallbackRoute(sb)
