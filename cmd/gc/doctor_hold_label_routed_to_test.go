@@ -307,3 +307,161 @@ type holdLabelListErrorStore struct {
 func (s holdLabelListErrorStore) List(beads.ListQuery) ([]beads.Bead, error) {
 	return nil, errors.New("listing failed")
 }
+
+// TestHoldLabelRoutedToAcceptsBindingQualifiedRoute covers the
+// namespace-blind false positive on cities that import actors through pack
+// bindings: a hold:<value> label names its next actor by bare value
+// ("mayor"), but the gc.routed_to identity of a bound agent or named
+// session is binding-qualified ("gastown.mayor"). An exact suffix
+// comparison reads a correctly routed bead as drifted, and the suggested
+// --fix would overwrite the working route with an unroutable bare suffix.
+// The check must accept the qualified route (agent and named-session
+// aliases), keep the legacy bare route for v2-routed-to-namespace to
+// rewrite rather than double-report it, and backfill the binding-qualified
+// identity on repair.
+func TestHoldLabelRoutedToAcceptsBindingQualifiedRoute(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{
+		Agents:        []config.Agent{{Name: "mayor", Scope: "city", BindingName: "gastown"}},
+		NamedSessions: []config.NamedSession{{Name: "boot", Template: "boot", BindingName: "gastown"}},
+	}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		// Correctly routed under the binding: never flagged, survives --fix.
+		{
+			ID: "B-1", Title: "held", Type: "task", Status: "blocked",
+			Labels:   []string{"hold:mayor", "witness"},
+			Metadata: map[string]string{"gc.routed_to": "gastown.mayor"},
+		},
+		// Routed through the named-session alias: same acceptance.
+		{
+			ID: "B-2", Title: "held", Type: "task", Status: "open",
+			Labels:   []string{"hold:boot"},
+			Metadata: map[string]string{"gc.routed_to": "gastown.boot"},
+		},
+		// Missing route: flagged; --fix backfills the binding-qualified
+		// identity, not the bare suffix.
+		{ID: "B-3", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:mayor"}},
+		// Stale route: flagged; --fix corrects it to the binding-qualified
+		// identity.
+		{
+			ID: "B-4", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:mayor"},
+			Metadata: map[string]string{"gc.routed_to": "reviewer"},
+		},
+		// Legacy bare route: accepted HERE. Rewriting short forms to their
+		// canonical identity is v2-routed-to-namespace's jurisdiction, so the
+		// two checks must not double-report the same bead.
+		{
+			ID: "B-5", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:mayor"},
+			Metadata: map[string]string{"gc.routed_to": "mayor"},
+		},
+		// No hold label: untouched regardless of route form.
+		{
+			ID: "T-1", Title: "work", Type: "task", Status: "open",
+			Metadata: map[string]string{"gc.routed_to": "gastown.mayor"},
+		},
+	}, nil)
+	check := newHoldLabelRoutedToCheck(cfg, cityDir, func(path string) (beads.Store, error) {
+		if path != cityDir {
+			return nil, fmt.Errorf("unexpected store path %q", path)
+		}
+		return store, nil
+	})
+
+	res := check.Run(&doctor.CheckContext{})
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("Run status = %v, want warning (B-3 and B-4 only): %#v", res.Status, res)
+	}
+	details := strings.Join(res.Details, "\n")
+	for _, want := range []string{"B-3", "B-4"} {
+		if !strings.Contains(details, want) {
+			t.Fatalf("details missing %q:\n%s", want, details)
+		}
+	}
+	for _, notWant := range []string{"B-1", "B-2", "B-5", "T-1"} {
+		if strings.Contains(details, notWant) {
+			t.Fatalf("details should not mention %q:\n%s", notWant, details)
+		}
+	}
+
+	if err := check.Fix(&doctor.CheckContext{}); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	wantRoutes := map[string]string{
+		"B-1": "gastown.mayor", // untouched
+		"B-2": "gastown.boot",  // untouched
+		"B-3": "gastown.mayor", // backfilled binding-qualified, not bare
+		"B-4": "gastown.mayor", // corrected from the stale reviewer route
+		"B-5": "mayor",         // left for v2-routed-to-namespace to rewrite
+		"T-1": "gastown.mayor", // untouched
+	}
+	for id, want := range wantRoutes {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("get %s: %v", id, err)
+		}
+		if got := b.Metadata["gc.routed_to"]; got != want {
+			t.Errorf("%s gc.routed_to = %q, want %q", id, got, want)
+		}
+	}
+	if res2 := check.Run(&doctor.CheckContext{}); res2.Status != doctor.StatusOK {
+		t.Fatalf("post-fix Run status = %v, want OK: %#v", res2.Status, res2)
+	}
+}
+
+// TestHoldLabelRoutedToAmbiguousBoundValue pins the conservative side of the
+// binding resolution: when the bare hold value is a short form bound to
+// several distinct identities, no single route can be derived. Any one of
+// the bound identities satisfies the hold and an exact bare match still
+// does, but --fix must refuse to guess and report the bead instead of
+// stamping an arbitrary identity over its route.
+func TestHoldLabelRoutedToAmbiguousBoundValue(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{
+		Agents: []config.Agent{
+			{Name: "mayor", Scope: "city", BindingName: "gastown"},
+			{Name: "mayor", Scope: "city", BindingName: "acme"},
+		},
+	}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		// One of the bound identities: satisfied.
+		{
+			ID: "A-1", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:mayor"},
+			Metadata: map[string]string{"gc.routed_to": "gastown.mayor"},
+		},
+		// Unrouted: flagged, but --fix must not guess between identities.
+		{ID: "A-2", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:mayor"}},
+		// Exact bare form: satisfied here; canonicalization is the namespace
+		// check's call.
+		{
+			ID: "A-3", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:mayor"},
+			Metadata: map[string]string{"gc.routed_to": "mayor"},
+		},
+	}, nil)
+	check := newHoldLabelRoutedToCheck(cfg, cityDir, func(path string) (beads.Store, error) {
+		if path != cityDir {
+			return nil, fmt.Errorf("unexpected store path %q", path)
+		}
+		return store, nil
+	})
+
+	res := check.Run(&doctor.CheckContext{})
+	if res.Status != doctor.StatusWarning {
+		t.Fatalf("Run status = %v, want warning (A-2 only): %#v", res.Status, res)
+	}
+	details := strings.Join(res.Details, "\n")
+	if !strings.Contains(details, "A-2") || strings.Contains(details, "A-1") || strings.Contains(details, "A-3") {
+		t.Fatalf("details = %q, want only A-2", details)
+	}
+
+	fixErr := check.Fix(&doctor.CheckContext{})
+	if fixErr == nil || !strings.Contains(fixErr.Error(), "A-2") {
+		t.Fatalf("Fix error = %v, want ambiguous-route report naming A-2", fixErr)
+	}
+	a2, err := store.Get("A-2")
+	if err != nil {
+		t.Fatalf("get A-2: %v", err)
+	}
+	if got := a2.Metadata["gc.routed_to"]; got != "" {
+		t.Errorf("A-2 gc.routed_to = %q, want untouched empty (fix must not guess between bound identities)", got)
+	}
+}

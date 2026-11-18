@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -20,10 +21,20 @@ const holdLabelExternalValue = "external"
 const holdLabelClearedValue = "cleared"
 
 // holdLabelRoutedToCheck detects beads carrying a hold:<value> label whose
-// gc.routed_to metadata is missing or does not match <value>. gc.routed_to is
-// the sole persisted routing key (ga-eld2x); a hold:<value> label with no
-// matching gc.routed_to has silently drifted from its intended route.
-// --fix backfills gc.routed_to from the label value.
+// gc.routed_to metadata does not name the same actor. A hold label names its
+// next actor by bare value ("mayor"); gc.routed_to is the sole persisted
+// routing key (ga-eld2x) and names actors by their configured route
+// identity, which in a city that imports the actor through a pack binding is
+// binding-qualified ("gastown.mayor"). The comparison therefore goes through
+// boundRoutedToAliases — the same short-form→canonical map the
+// v2-routed-to-namespace check rewrites from — so a correctly routed bead
+// never reads as drifted, while the bare label suffix stays accepted where
+// it is itself a live route identity (rewriting short forms is the
+// namespace check's jurisdiction, not this one's).
+// --fix backfills gc.routed_to from the label value, preferring the
+// binding-qualified identity when the bare value resolves to exactly one;
+// backfilling the bare suffix in a bound city would stamp an unroutable
+// identity over the very route this check exists to protect.
 type holdLabelRoutedToCheck struct {
 	cfg      *config.City
 	cityPath string
@@ -58,16 +69,36 @@ func holdLabelValue(labels []string) (string, bool) {
 }
 
 // holdRouteTarget is a single bead whose hold:<value> label and gc.routed_to
-// metadata have drifted apart.
+// metadata have drifted apart. routes holds the binding-qualified route
+// identities want is a bound short form of, if any (several when the short
+// form is ambiguous).
 type holdRouteTarget struct {
 	label  string
 	store  beads.Store
 	beadID string
 	want   string
 	got    string
+	routes []string
+}
+
+// holdRouteMatches reports whether got names the same actor a hold:<value>
+// label names: the bare value itself — exact, which also covers unbound
+// agents, whose route identity IS the bare name — or any binding-qualified
+// identity the value is a bound short form of.
+func holdRouteMatches(got, want string, routes []string) bool {
+	if got == want {
+		return true
+	}
+	for _, route := range routes {
+		if got == route {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *holdLabelRoutedToCheck) collect() (targets []holdRouteTarget, skipped []string) {
+	aliases := boundRoutedToAliases(c.cfg)
 	scopes := []struct{ label, path string }{{"city", c.cityPath}}
 	if c.cfg != nil {
 		for _, rig := range c.cfg.Rigs {
@@ -103,10 +134,11 @@ func (c *holdLabelRoutedToCheck) collect() (targets []holdRouteTarget, skipped [
 				continue
 			}
 			got := strings.TrimSpace(b.Metadata[beadmeta.RoutedToMetadataKey])
-			if got == want {
+			routes := aliases[want]
+			if holdRouteMatches(got, want, routes) {
 				continue
 			}
-			targets = append(targets, holdRouteTarget{label: sc.label, store: store, beadID: b.ID, want: want, got: got})
+			targets = append(targets, holdRouteTarget{label: sc.label, store: store, beadID: b.ID, want: want, got: got, routes: routes})
 		}
 	}
 	return targets, skipped
@@ -135,15 +167,33 @@ func (c *holdLabelRoutedToCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult
 		details)
 }
 
+// Fix backfills each drifted bead's gc.routed_to from its hold label value,
+// preferring the single binding-qualified identity when the bare value is a
+// bound short form. When the value is bound to several identities the
+// intended route is genuinely ambiguous: those beads are reported rather
+// than guessed at, mirroring v2-routed-to-namespace's multi-canonical
+// policy. Fix is partial-failure-tolerant like that check: a SetMetadata
+// error on one bead, or a store this check could not scan, does not stop it
+// from attempting every other repair — every error encountered is
+// accumulated and returned together via errors.Join.
 func (c *holdLabelRoutedToCheck) Fix(_ *doctor.CheckContext) error {
 	targets, skipped := c.collect()
+	var errs []error
 	for _, tgt := range targets {
-		if err := tgt.store.SetMetadata(tgt.beadID, beadmeta.RoutedToMetadataKey, tgt.want); err != nil {
-			return fmt.Errorf("%s bead %s: backfill gc.routed_to: %w", tgt.label, tgt.beadID, err)
+		value := tgt.want
+		switch {
+		case len(tgt.routes) == 1:
+			value = tgt.routes[0]
+		case len(tgt.routes) > 1:
+			errs = append(errs, fmt.Errorf("%s bead %s: hold:%s is bound to several route identities (%s); set gc.routed_to to the intended one", tgt.label, tgt.beadID, tgt.want, strings.Join(tgt.routes, ", ")))
+			continue
+		}
+		if err := tgt.store.SetMetadata(tgt.beadID, beadmeta.RoutedToMetadataKey, value); err != nil {
+			errs = append(errs, fmt.Errorf("%s bead %s: backfill gc.routed_to: %w", tgt.label, tgt.beadID, err))
 		}
 	}
 	if len(skipped) > 0 {
-		return fmt.Errorf("hold-label-routed-to skipped %d scope(s): %s", len(skipped), strings.Join(skipped, "; "))
+		errs = append(errs, fmt.Errorf("hold-label-routed-to skipped %d scope(s): %s", len(skipped), strings.Join(skipped, "; ")))
 	}
-	return nil
+	return errors.Join(errs...)
 }
