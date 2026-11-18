@@ -111,6 +111,18 @@ func TestProbeSessionReadsTheIgnoredLanesCursorReality(t *testing.T) {
 			wantEffective: 21,
 		},
 		{
+			// beads v1.4.0 (#7931): wisp_id_tombstones is created by
+			// ignored/0030, so a clone at the pinned ignored=31 that lost it is
+			// one the library believes at 29 and replays 0030-0031 against.
+			name:          "a missing wisp_id_tombstones floors the lane at 29",
+			absentTables:  map[string]bool{"wisp_id_tombstones": true},
+			ignored:       31,
+			wantLimited:   true,
+			wantFloor:     29,
+			wantMissing:   "wisp_id_tombstones",
+			wantEffective: 29,
+		},
+		{
 			// Floored tables do not short-circuit: the column is still read,
 			// and its lower floor wins.
 			name:          "a missing sentinel column lowers a floored table's floor",
@@ -295,7 +307,7 @@ func TestProbeSessionReadsHeadOnItsFirstStatement(t *testing.T) {
 		t.Fatalf("the session asked for HEAD in %d statement(s), want exactly 1: %v", headReads, statements)
 	}
 	// A healthy database at 66/26 with every sentinel present: two cursor
-	// existence checks, two MAX reads, two sentinel tables, three floored
+	// existence checks, two MAX reads, two sentinel tables, four floored
 	// sentinel tables, and the sentinel column (its table's existence, then
 	// SHOW COLUMNS). HEAD adds none of them.
 	if want := 4 + len(ignoredSentinelTables) + len(ignoredSentinelFlooredTables) + 2; len(statements) != want {

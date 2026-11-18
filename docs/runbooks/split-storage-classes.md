@@ -713,11 +713,12 @@ unchanged.
 
 **Reads:** `show`, `list`, `ready`, `search`, `query`, `count`, `children`,
 `blocked`, `stale`, `status`, `statuses`, `types`, `where`, `info`, `context`,
-`version`, `help`, `human`, `prime`, `history`, `graph`, `export`, `state`,
-`state list`, `comments`, `comments list`, `label list`, `label list-all`,
-`dep list`, `dep tree`, `dep cycles`, `mol current`, `mol show`,
-`mol progress`, `formula list`, `formula show`, `gate list`, `config get`,
-`config list`, `config show`, `backup status`, `dolt status`, `dolt show`.
+`version`, `help`, `human`, `prime`, `history`, `versions`, `graph`, `export`,
+`state`, `state list`, `comments`, `comments list`, `label list`,
+`label list-all`, `dep list`, `dep tree`, `dep cycles`, `mol current`,
+`mol show`, `mol progress`, `formula list`, `formula show`, `gate list`,
+`config get`, `config list`, `config show`, `backup status`, `dolt status`,
+`dolt show`.
 gc serves its own `release-if-current` itself.
 
 **Writes that change no field the class depends on:** `close`, `reopen`,

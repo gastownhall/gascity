@@ -159,7 +159,8 @@ func PinnedSchemaCursors() (main, ignored int) {
 // contradicts down to a "reality floor" — min(raw, 11) when
 // `leases.granted_node` is missing, min(raw, 18) or min(raw, 21) when the
 // dolt_ignored `events` or `bd_events_journal`/`bd_events_seq` tables are
-// (beads v1.3.1), and 0 when `wisps`/`wisp_dependencies` are — and beads
+// (beads v1.3.1), min(raw, 29) when `wisp_id_tombstones` is (beads v1.4.0),
+// and 0 when `wisps`/`wisp_dependencies` are — and beads
 // documents these shapes as real in the field. Comparing the RAW
 // cursor therefore proved nothing: a database at raw ignored=26 with the
 // sentinel absent passed this gate, the proxied open is WRITABLE

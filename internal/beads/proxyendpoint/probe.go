@@ -97,7 +97,9 @@ const (
 // schema corroborates it, and when a sentinel is missing it clamps the cursor
 // down (beads v1.3.0 internal/storage/schema/schema.go, currentVersion ->
 // cursorRealityFloor, and ignoredSource's sentinelTables/sentinelColumns at
-// :290-311; beads v1.3.1 adds sentinelFlooredTables). beads documents both
+// :290-311; beads v1.3.1 adds sentinelFlooredTables; beads v1.4.0 moves the
+// clamp into readCursor -> cursorReality, keeping cursorRealityFloor as a
+// wrapper, and adds the wisp_id_tombstones floored table). beads documents both
 // contradicted shapes as real in the field: a
 // historical ignored-v16 ordinal collision leaves `leases` present without the
 // column 0016 adds, and a database materialized out of band can be missing the
@@ -132,12 +134,16 @@ type IgnoredSentinelFlooredTable struct {
 }
 
 // ignoredSentinelFlooredTables are in the library's probing order. events is
-// created by ignored/0019 and bd_events_journal/bd_events_seq by ignored/0022,
-// hence floors 18 and 21.
+// created by ignored/0019, bd_events_journal/bd_events_seq by ignored/0022 and
+// wisp_id_tombstones by ignored/0030 (beads v1.4.0, #7931), hence floors 18,
+// 21 and 29. A clone at ignored 31 that lost wisp_id_tombstones is one the
+// library believes is at 29, and its next writable open replays ignored
+// 0030-0031, re-creating the table empty.
 var ignoredSentinelFlooredTables = []IgnoredSentinelFlooredTable{
 	{Table: "events", Floor: 18},
 	{Table: "bd_events_journal", Floor: 21},
 	{Table: "bd_events_seq", Floor: 21},
+	{Table: "wisp_id_tombstones", Floor: 29},
 }
 
 // IgnoredSentinelFlooredTables returns the ignored lane's floored sentinel

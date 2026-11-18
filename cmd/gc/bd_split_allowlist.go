@@ -90,6 +90,7 @@ var bdSplitAllowlist = map[string]bdSplitCommand{
 	"human":          {why: "help text"},
 	"prime":          {why: "prints workflow context"},
 	"history":        {why: "read"},
+	"versions":       {why: "read"},
 	"graph":          {why: "read"},
 	"export":         {why: "writes JSONL out of the ledger"},
 	"state":          {why: "read"},
