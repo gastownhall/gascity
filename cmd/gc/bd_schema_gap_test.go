@@ -265,18 +265,22 @@ func TestCollectBdSchemaReportReportsGapsAndUnreadableDatabases(t *testing.T) {
 // so none of them is read.
 func TestBdSchemaScopeEligibleOnlyForServerModeBdScopes(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		provider string
-		backend  string
-		metadata string
-		want     bool
+		name      string
+		provider  string
+		backend   string
+		metadata  string
+		gcManaged bool
+		want      bool
 	}{
-		{"bd scope in server mode", "", "", `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`, true},
-		{"bd scope in embedded mode", "", "", `{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"hq"}`, false},
-		{"bd scope in proxied-server mode", "", "", `{"database":"dolt","backend":"dolt","dolt_mode":"proxied-server","dolt_database":"hq"}`, false},
-		{"bd scope on DoltLite", "", "doltlite", `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`, false},
-		{"bd scope bound to a store gc does not serve", "", "", `{"backend":"dolt","storage_endpoint":"opaque-remote","storage_database":"work"}`, false},
-		{"file store", "file", "", "", false},
+		{"bd scope gc manages, in server mode", "", "", `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`, true, true},
+		// A server-mode scope gc has not claimed is a native bd store whose
+		// ownership is unproven: gc refuses it rather than migrating it.
+		{"bd scope in server mode that gc has not claimed", "", "", `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`, false, false},
+		{"bd scope in embedded mode", "", "", `{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"hq"}`, false, false},
+		{"bd scope in proxied-server mode", "", "", `{"database":"dolt","backend":"dolt","dolt_mode":"proxied-server","dolt_database":"hq"}`, false, false},
+		{"bd scope on DoltLite", "", "doltlite", `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`, true, false},
+		{"bd scope bound to a store gc does not serve", "", "", `{"backend":"dolt","storage_endpoint":"opaque-remote","storage_database":"work"}`, false, false},
+		{"file store", "file", "", "", false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("GC_BEADS", tc.provider)
@@ -290,6 +294,9 @@ func TestBdSchemaScopeEligibleOnlyForServerModeBdScopes(t *testing.T) {
 				if err := os.WriteFile(scopeMetadataJSONPath(cityPath), []byte(tc.metadata), 0o600); err != nil {
 					t.Fatal(err)
 				}
+			}
+			if tc.gcManaged {
+				writeRigEndpointCanonicalConfig(t, cityPath, contract.ConfigState{IssuePrefix: "gc", EndpointOrigin: contract.EndpointOriginManagedCity, EndpointStatus: contract.EndpointStatusVerified})
 			}
 			if got := bdSchemaScopeEligible(cityPath, cityPath); got != tc.want {
 				t.Fatalf("bdSchemaScopeEligible = %v, want %v", got, tc.want)
