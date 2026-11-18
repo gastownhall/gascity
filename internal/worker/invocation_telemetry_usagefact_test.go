@@ -2056,3 +2056,142 @@ func TestFactorySweepCodexUsageMatchesUninterruptedRunAcrossRestarts(t *testing.
 		}
 	}
 }
+
+// TestPromptOpCodexTelemetryLeavesRemainderRecoverable pins AC-6: a prompt
+// operation before any sweep drives the SAME codex page recorder the sweep
+// uses — oldest-first, advancing only through successfully processed entries —
+// so the conservative newest-only fallback cannot strand a prefix. With the
+// second fact write failing, the seam records the first invocation and leaves
+// the remainder for a later pass, which the sweep then recovers.
+func TestPromptOpCodexTelemetryLeavesRemainderRecoverable(t *testing.T) {
+	searchBase := t.TempDir()
+	workDir := t.TempDir()
+	sinkPath := filepath.Join(t.TempDir(), "usage.jsonl")
+
+	store := beads.NewMemStore()
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), runtime.NewFake(), sessionpkg.WithCityPath(t.TempDir()))
+	// Fail the SECOND model-fact write ever: the prompt op records the first
+	// invocation, then stops; the sweep must recover the remainder.
+	sink := &failOnNthModelSink{inner: usage.NewLocalSink(sinkPath), n: 2}
+	h, err := NewSessionHandle(SessionHandleConfig{
+		Manager:     manager,
+		SearchPaths: []string{searchBase},
+		UsageSink:   sink,
+		Session: SessionSpec{
+			Profile:  ProfileCodexTmuxCLI,
+			Template: "probe",
+			Title:    "Probe",
+			Command:  "codex",
+			WorkDir:  workDir,
+			Provider: "codex",
+			Metadata: map[string]string{"agent_name": "myrig/polecat-1"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewSessionHandle: %v", err)
+	}
+	if err := h.Start(context.Background(), handleActor(t, h, sessionpkg.ActorAgent)); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	id := h.sessionID
+
+	sessionUUID := "019d9845-aaaa-7000-8000-00000000ac"
+	for k, v := range map[string]string{
+		"session_key": sessionUUID,
+		"molecule_id": "run-Y",
+	} {
+		if err := store.SetMetadata(id, k, v); err != nil {
+			t.Fatalf("SetMetadata(%s): %v", k, err)
+		}
+	}
+	rollout := codexWorkerRolloutPathWithID(t, searchBase, time.Now(), sessionUUID)
+	writeWorkerTestJSONL(t, rollout, []map[string]any{
+		codexWorkerSessionMeta(workDir),
+		codexWorkerTurnContext(),
+		codexWorkerTokenCount("2026-06-12T10:00:05.000Z", 150, 100, 0, 50),
+		codexWorkerTokenCount("2026-06-12T10:00:10.000Z", 300, 200, 0, 100),
+		codexWorkerTokenCount("2026-06-12T10:00:15.000Z", 450, 250, 0, 200),
+	})
+	if _, err := h.Message(context.Background(), handleActor(t, h, sessionpkg.ActorAgent), MessageRequest{Text: "hello"}); err != nil {
+		t.Fatalf("Message: %v", err)
+	}
+
+	// The seam processed oldest-first: the first fact recorded, the second
+	// write failed, the third left pending — and the cursor plus checkpoint
+	// advanced only through the first success.
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur := b.Metadata[sessionpkg.MetadataKeyInvocationUsageCursor]; cur != "total:150" {
+		t.Fatalf("flat cursor after prompt op = %q, want total:150 (advanced only through the last success, oldest-first)", cur)
+	}
+	cpRaw := b.Metadata[sessionpkg.MetadataKeyCodexUsageCheckpoint]
+	if cpRaw == "" {
+		t.Fatal("the prompt-op seam must commit the shared codex usage checkpoint")
+	}
+	cp, err := sessionlog.ParseCodexUsageCheckpoint(cpRaw)
+	if err != nil {
+		t.Fatalf("stored checkpoint does not parse: %v", err)
+	}
+	if cp.LastInvocationID != "total:150" {
+		t.Fatalf("checkpoint last invocation = %q, want total:150", cp.LastInvocationID)
+	}
+	facts, warnings, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatalf("ReadFacts: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected sink warnings: %v", warnings)
+	}
+	if len(facts) != 1 || facts[0].UpstreamReqID != "total:150" {
+		t.Fatalf("after the prompt op the sink holds %+v, want exactly the first invocation total:150", facts)
+	}
+
+	// The sweep resumes the SAME checkpoint and recovers the remainder the
+	// seam left: the second invocation (whose write failed) and the third
+	// (never reached).
+	factory, err := NewFactory(FactoryConfig{
+		Store:       store,
+		Provider:    runtime.NewFake(),
+		SearchPaths: []string{searchBase},
+		UsageSink:   sink,
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+	refreshed, err := store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	emitted, settled, err := factory.SweepSessionModelUsageAtPath(context.Background(), id, refreshed.Metadata, rollout, time.Unix(3, 0).UTC())
+	if err != nil {
+		t.Fatalf("SweepSessionModelUsageAtPath: %v", err)
+	}
+	if !settled {
+		t.Fatal("the sweep drained the remainder and must settle")
+	}
+	if emitted != 2 {
+		t.Fatalf("sweep emitted = %d, want 2 (the remainder the seam left, no re-emission)", emitted)
+	}
+
+	facts, warnings, err = usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatalf("ReadFacts: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected sink warnings: %v", warnings)
+	}
+	if len(facts) != 3 {
+		t.Fatalf("want all 3 invocations recorded exactly once, got %d: %+v", len(facts), facts)
+	}
+	got := map[string]bool{}
+	for _, f := range facts {
+		got[f.UpstreamReqID] = true
+	}
+	for _, want := range []string{"total:150", "total:300", "total:450"} {
+		if !got[want] {
+			t.Fatalf("fact %q missing from the sink: %+v", want, facts)
+		}
+	}
+}

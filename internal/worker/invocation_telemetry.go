@@ -163,6 +163,14 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 			slog.String("session_id", id), slog.String("provider", providerFamily))
 		return
 	}
+	if providerFamily == "codex" {
+		// The codex arm runs the SAME page recorder the sweep uses
+		// (drainCodexUsagePages), oldest-first with committed checkpoints, so
+		// the conservative newest-only fallback below cannot strand a prefix
+		// the sweep cannot recover.
+		h.recordCodexInvocationTelemetry(ctx, id, info, pr.Metadata, path, providerFamily)
+		return
+	}
 	// Read the cursor BEFORE extracting: it bounds how far back the scan
 	// window must reach, so invocations appended since the last pass are not
 	// lost to the fixed tail window.
@@ -223,6 +231,56 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 		slog.Debug("persisting invocation usage cursor failed; next prompt op may re-record",
 			slog.String("session_id", id), slog.Any("error", err))
 	}
+}
+
+// recordCodexInvocationTelemetry is the codex arm of the prompt-op seam: it
+// drains the rollout through the shared page recorder (drainCodexUsagePages)
+// oldest-first, mirroring OTel metrics per invocation and emitting facts when
+// the handle's sink gate is open. A failed fact write stops the drain with
+// progress committed only through the last success, so the remainder stays
+// recoverable by the next prompt op or the end-of-interval sweep.
+func (h *SessionHandle) recordCodexInvocationTelemetry(ctx context.Context, id string, info sessionpkg.Info, meta map[string]string, path, providerFamily string) {
+	agentName := strings.TrimSpace(info.AgentName)
+	if agentName == "" {
+		agentName = strings.TrimSpace(info.Alias)
+	}
+	if agentName == "" {
+		agentName = strings.TrimSpace(info.SessionName)
+	}
+	formulaName := resolveFormulaName(h.resolveBead, h.formulaMemo, meta, id)
+	emitFacts := h.usageFactRecordingEnabled()
+	now := time.Now().UTC()
+	_, _, _ = drainCodexUsagePages(ctx, h.manager, h.adapter.SearchPaths, path, id, meta, func(ctx context.Context, u sessionlog.TailUsage) error {
+		labels := telemetry.InvocationLabels{
+			AgentName: agentName,
+			Model:     u.Model,
+			Provider:  providerFamily,
+		}
+		telemetry.RecordInvocationTokens(ctx, labels,
+			int64(u.InputTokens), int64(u.OutputTokens),
+			int64(u.CacheReadTokens), int64(u.CacheCreationTokens))
+		cost, priced := invocationCost(h.pricing, providerFamily, u)
+		if priced {
+			telemetry.RecordInvocationCostEstimate(ctx, labels, cost)
+		}
+		if !emitFacts {
+			return nil
+		}
+		fact := modelUsageFact(u, meta, id, id, info.SessionName, providerFamily, cost, priced, now, formulaName)
+		// A fresh background context: this runs after the prompt op returns, so
+		// the request context may already be canceled, and a durable fact write
+		// must not be aborted by that. The sink enforces its own timeout.
+		if err := h.usageSink.Record(context.Background(), fact); err != nil {
+			// Best-effort on the prompt path, but never a silent drop: the
+			// drain stops here and the remainder stays recoverable.
+			slog.Warn("recording model usage fact failed; leaving the remainder for a later pass",
+				slog.String("run_id", fact.RunID),
+				slog.String("upstream_req_id", fact.UpstreamReqID),
+				slog.Any("error", err))
+			return err
+		}
+		return nil
+	})
 }
 
 // invocationCost prices one invocation. A cost the provider's own transcript
@@ -876,35 +934,12 @@ func (f *Factory) recordSweepUsageFact(ctx context.Context, sink usage.Sink, reg
 	return sink.Record(ctx, fact)
 }
 
-// codexUsageSweepPageLimit bounds how many pages one sweep tick drains before
-// deferring the remainder to a later tick.
-const codexUsageSweepPageLimit = 4096
-
-// sweepCodexUsagePages is the codex arm of sweepResolvedTranscript: it drives
-// the forward page reader (ReadCodexUsagePage) directly so each pass's
-// committed checkpoint carries progress across process restarts, emitting
-// every fact BEFORE persisting the continuation it covers — on a sink failure
-// the checkpoint commits only through the last successful fact, so the retry
-// resumes at the gap rather than skipping it, and retries across restarts
-// reproduce an uninterrupted run's facts (ga-amrzyf case 2). The flat
-// invocation cursor is mirrored alongside for compatibility with the legacy
-// lane. A stored checkpoint that cannot be parsed, or that the resolved
-// rollout refutes (replaced, truncated, re-keyed), is dropped and the read
-// restarts from byte zero — a bounded replay whose re-emitted facts the
-// idempotency key collapses. An incomplete page (oversized or malformed
-// records) or a pending torn tail leaves the interval unsettled.
+// sweepCodexUsagePages is the codex arm of sweepResolvedTranscript: it drains
+// the rollout through the shared codex recorder (drainCodexUsagePages), which
+// the prompt-op seam also uses, so neither can strand a prefix the other
+// cannot recover.
 func (f *Factory) sweepCodexUsagePages(ctx context.Context, id string, meta map[string]string, path string, now time.Time) (emitted int, settled bool, err error) {
 	sink := f.usageSink
-	adapter := f.Adapter()
-	var resume *sessionlog.CodexUsageCheckpoint
-	if raw := strings.TrimSpace(meta[sessionpkg.MetadataKeyCodexUsageCheckpoint]); raw != "" {
-		if cp, perr := sessionlog.ParseCodexUsageCheckpoint(raw); perr != nil {
-			slog.Debug("model-usage sweep: stored codex checkpoint unreadable; replaying from zero",
-				slog.String("session_id", id), slog.Any("error", perr))
-		} else {
-			resume = &cp
-		}
-	}
 	registry := f.pricing
 	if registry == nil {
 		registry = defaultPricingRegistry()
@@ -912,21 +947,60 @@ func (f *Factory) sweepCodexUsagePages(ctx context.Context, id string, meta map[
 	workerName := strings.TrimSpace(meta["session_name"])
 	agentName := sweepAgentName(meta)
 	formulaName := resolveFormulaName(f.resolveBead, f.formulaMemo, meta, id)
+	return drainCodexUsagePages(ctx, f.manager, f.Adapter().SearchPaths, path, id, meta, func(ctx context.Context, u sessionlog.TailUsage) error {
+		return f.recordSweepUsageFact(ctx, sink, registry, "codex", id, meta, u, workerName, agentName, formulaName, now)
+	})
+}
+
+// codexUsageSweepPageLimit bounds how many pages one drain pass reads before
+// deferring the remainder to a later pass.
+const codexUsageSweepPageLimit = 4096
+
+// drainCodexUsagePages drains a codex rollout's usage oldest-first through the
+// forward page reader, shared by the end-of-interval sweep and the prompt-op
+// seam so the seam's old newest-only fallback cannot strand a prefix the
+// sweep cannot recover (ga-amrzyf case 2). emit is called per usage in file
+// order and its error stops the drain; progress commits only through the last
+// successful emission — the codex usage checkpoint on the session row plus
+// the mirrored flat invocation cursor — so the remainder stays recoverable by
+// a later pass. A stored checkpoint that cannot be parsed, or that the
+// resolved rollout refutes (replaced, truncated, re-keyed), is dropped and
+// the read restarts from byte zero — a bounded replay whose re-emitted facts
+// the idempotency key collapses. settled reports that the source drained with
+// no coverage hole (More false, nothing incomplete); err carries the emit
+// failure.
+func drainCodexUsagePages(
+	ctx context.Context,
+	manager *sessionpkg.Manager,
+	searchPaths []string,
+	path, id string,
+	meta map[string]string,
+	emit func(ctx context.Context, u sessionlog.TailUsage) error,
+) (emitted int, settled bool, err error) {
+	var resume *sessionlog.CodexUsageCheckpoint
+	if raw := strings.TrimSpace(meta[sessionpkg.MetadataKeyCodexUsageCheckpoint]); raw != "" {
+		if cp, perr := sessionlog.ParseCodexUsageCheckpoint(raw); perr != nil {
+			slog.Debug("codex usage drain: stored checkpoint unreadable; replaying from zero",
+				slog.String("session_id", id), slog.Any("error", perr))
+		} else {
+			resume = &cp
+		}
+	}
 	lastRecorded := ""
 	for range codexUsageSweepPageLimit {
-		page, perr := sessionlog.ReadCodexUsagePageFromSearchPaths(adapter.SearchPaths, path, resume, sessionlog.CodexUsagePageBudgets{})
+		page, perr := sessionlog.ReadCodexUsagePageFromSearchPaths(searchPaths, path, resume, sessionlog.CodexUsagePageBudgets{})
 		if perr != nil {
 			if resume != nil && errors.Is(perr, sessionlog.ErrCodexUsageResumeInvalid) {
 				// The checkpoint cannot describe this rollout (replaced,
 				// truncated, re-keyed): drop it and replay from zero.
-				slog.Debug("model-usage sweep: codex checkpoint does not fit the rollout; replaying from zero",
+				slog.Debug("codex usage drain: checkpoint does not fit the rollout; replaying from zero",
 					slog.String("session_id", id), slog.Any("error", perr))
 				resume = nil
 				continue
 			}
-			// Transient: a torn mid-write tail can fail the parse; retry on a later tick.
-			slog.Debug("model-usage sweep: usage extraction failed; will retry",
-				slog.String("session_id", id), slog.String("provider", "codex"), slog.Any("error", perr))
+			// Transient: a torn mid-write tail can fail the parse; retry on a later pass.
+			slog.Debug("codex usage drain: page read failed; will retry",
+				slog.String("session_id", id), slog.Any("error", perr))
 			return emitted, false, nil
 		}
 		startOffset := int64(0)
@@ -935,8 +1009,11 @@ func (f *Factory) sweepCodexUsagePages(ctx context.Context, id string, meta map[
 		}
 		lastSuccess := -1
 		for i, u := range page.Usages {
-			if recErr := f.recordSweepUsageFact(ctx, sink, registry, "codex", id, meta, u, workerName, agentName, formulaName, now); recErr != nil {
-				err = recErr
+			if emitErr := emit(ctx, u); emitErr != nil {
+				// Stop at the first failure and commit only through the last
+				// success, so the next pass resumes here instead of skipping
+				// the gap.
+				err = emitErr
 				break
 			}
 			emitted++
@@ -956,16 +1033,16 @@ func (f *Factory) sweepCodexUsagePages(ctx context.Context, id string, meta map[
 			}
 		}
 		if committed {
-			f.persistCodexUsageCheckpoint(id, commit)
+			persistCodexUsageCheckpoint(manager, id, commit)
 		}
 		if lastRecorded != "" {
-			if cursorErr := f.manager.PersistInvocationUsageCursor(id, lastRecorded); cursorErr != nil {
-				slog.Debug("model-usage sweep: persisting invocation usage cursor failed; next sweep may re-record",
+			if cursorErr := manager.PersistInvocationUsageCursor(id, lastRecorded); cursorErr != nil {
+				slog.Debug("codex usage drain: persisting invocation usage cursor failed; next pass may re-record",
 					slog.String("session_id", id), slog.Any("error", cursorErr))
 			}
 		}
 		if err != nil {
-			// Settled only when the whole pending batch reached the sink: the
+			// Settled only when every pending fact reached the sink: the
 			// checkpoint advanced only through the last success, and the retry
 			// resumes at the gap.
 			return emitted, false, err
@@ -973,7 +1050,7 @@ func (f *Factory) sweepCodexUsagePages(ctx context.Context, id string, meta map[
 		if page.Incomplete != "" {
 			// A coverage hole (oversized or malformed record) must surface, not
 			// settle: the terminal lane must not stamp this interval swept.
-			slog.Debug("model-usage sweep: codex rollout read incomplete; will retry",
+			slog.Debug("codex usage drain: rollout read incomplete; will retry",
 				slog.String("session_id", id), slog.String("reason", page.Incomplete))
 			return emitted, false, nil
 		}
@@ -982,29 +1059,32 @@ func (f *Factory) sweepCodexUsagePages(ctx context.Context, id string, meta map[
 		}
 		if page.Final.Offset == startOffset {
 			// No committed progress: the tail line is pending its terminator.
-			// Retry on a later tick.
+			// Retry on a later pass.
 			return emitted, false, nil
 		}
 		resume = &page.Final
 	}
-	slog.Debug("model-usage sweep: codex rollout did not drain within the page limit; will retry",
+	slog.Debug("codex usage drain: rollout did not drain within the page limit; will retry",
 		slog.String("session_id", id), slog.Int("page_limit", codexUsageSweepPageLimit))
 	return emitted, false, nil
 }
 
 // persistCodexUsageCheckpoint marshals and conditionally stores one codex
-// usage checkpoint, logging (not failing) on a store error: the next sweep
+// usage checkpoint, logging (not failing) on a store error: the next pass
 // re-reads from the older checkpoint, and the idempotency key collapses any
 // re-emitted fact.
-func (f *Factory) persistCodexUsageCheckpoint(id string, cp sessionlog.CodexUsageCheckpoint) {
+func persistCodexUsageCheckpoint(manager *sessionpkg.Manager, id string, cp sessionlog.CodexUsageCheckpoint) {
+	if manager == nil {
+		return
+	}
 	raw, err := sessionlog.MarshalCodexUsageCheckpoint(cp)
 	if err != nil {
-		slog.Debug("model-usage sweep: marshaling codex usage checkpoint failed",
+		slog.Debug("codex usage drain: marshaling codex usage checkpoint failed",
 			slog.String("session_id", id), slog.Any("error", err))
 		return
 	}
-	if err := f.manager.PersistCodexUsageCheckpointIfCurrent(id, raw); err != nil {
-		slog.Debug("model-usage sweep: persisting codex usage checkpoint failed; next sweep may re-read",
+	if err := manager.PersistCodexUsageCheckpointIfCurrent(id, raw); err != nil {
+		slog.Debug("codex usage drain: persisting codex usage checkpoint failed; next pass may re-read",
 			slog.String("session_id", id), slog.Any("error", err))
 	}
 }
