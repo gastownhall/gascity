@@ -2579,7 +2579,8 @@ func (s *BdStore) runBDTransientWriteOutputWhen(shouldRetry func(error) bool, ar
 // runBDTransientRead runs a read-only bd command, retrying on transient Dolt
 // connection errors (invalid connection, broken pipe, etc.). Reads are
 // idempotent so retry is unconditional on isBdAmbiguousWriteError, with no
-// stable-ID guard needed.
+// stable-ID guard needed — except a caller-deadline timeout, which no retry
+// can outlive.
 func (s *BdStore) runBDTransientRead(args ...string) ([]byte, error) {
 	var (
 		out []byte
@@ -2587,7 +2588,7 @@ func (s *BdStore) runBDTransientRead(args ...string) ([]byte, error) {
 	)
 	for attempt := 1; attempt <= bdTransientReadAttempts; attempt++ {
 		out, err = s.runner(s.dir, "bd", args...)
-		if err == nil || !isBdAmbiguousWriteError(err) || attempt == bdTransientReadAttempts {
+		if err == nil || isBdCallerDeadlineError(err) || !isBdAmbiguousWriteError(err) || attempt == bdTransientReadAttempts {
 			return out, err
 		}
 		time.Sleep(time.Duration(attempt) * 50 * time.Millisecond)
@@ -2634,7 +2635,7 @@ func isDoltliteMetadata(backend, database string) bool {
 }
 
 func isBdTransientWriteError(err error) bool {
-	if err == nil {
+	if err == nil || isBdCallerDeadlineError(err) {
 		return false
 	}
 	msg := err.Error()
@@ -2673,6 +2674,25 @@ func isBdAmbiguousWriteError(err error) bool {
 		strings.Contains(msg, "broken pipe") ||
 		strings.Contains(msg, "timed out after") ||
 		strings.Contains(msg, "deadline exceeded")
+}
+
+// isBdCallerDeadlineError reports whether err is a bd exec timeout attributed
+// to the caller's own deadline — the "(caller deadline)" marker
+// bdExecTimeoutError stamps when the parent context's deadline bound the
+// command instead of the per-command timeout. Once that error surfaces the
+// caller's budget is already spent, so a retry can only re-run the command
+// against an expired context, fail instantly with a "0s" budget, and — via
+// the retry loops' last-error return — mask the real budget the first
+// attempt reported. The transient-write and transient-read retry loops treat
+// it as terminal for that reason. Ambiguity is unchanged: the write may
+// still have committed, so isBdAmbiguousWriteError keeps matching the
+// "timed out after" text and the no-replay guards (id-less create, release,
+// conditional writes) keep refusing to replay it.
+func isBdCallerDeadlineError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "(caller deadline)")
 }
 
 // Ping verifies the bd binary is accessible by running a no-op command.

@@ -97,6 +97,61 @@ func TestExecCommandRunnerWithEnvContextTimeoutReportsCallerDeadline(t *testing.
 	}
 }
 
+// TestBdStoreClaimDoesNotRetryCallerDeadlineTimeout proves a bd write that
+// exhausts the caller's deadline is not replayed: the caller's budget is
+// already spent, so attempts 2 and 3 could only fail instantly against the
+// expired context, and the loop's last-error return would mask the real
+// budget the first attempt reported — a 10s claim budget surfacing as
+// "timed out after 0s". The claim path is the one the stall reports come
+// through.
+func TestBdStoreClaimDoesNotRetryCallerDeadlineTimeout(t *testing.T) {
+	calls := 0
+	runner := func(_, _ string, _ ...string) ([]byte, error) {
+		calls++
+		if calls == 1 {
+			return nil, errors.New("timed out after 10s (caller deadline)")
+		}
+		return nil, errors.New("timed out after 0s (caller deadline)")
+	}
+	s := NewBdStore("/city", runner)
+	_, _, err := s.Claim("bd-1")
+	if err == nil {
+		t.Fatal("Claim() error = nil, want caller-deadline timeout")
+	}
+	if calls != 1 {
+		t.Fatalf("runner calls = %d, want 1: a spent caller deadline cannot be retried", calls)
+	}
+	if !strings.Contains(err.Error(), "10s") {
+		t.Fatalf("Claim() error = %v, want the first attempt's real budget (10s), not a 0s replay", err)
+	}
+}
+
+// TestBdStoreReadDoesNotRetryCallerDeadlineTimeout proves the read retry
+// loop shares the guard: a bd read that exhausts the caller's deadline is
+// not replayed either, so the error the caller sees keeps the budget it
+// actually had left.
+func TestBdStoreReadDoesNotRetryCallerDeadlineTimeout(t *testing.T) {
+	calls := 0
+	runner := func(_, _ string, _ ...string) ([]byte, error) {
+		calls++
+		if calls == 1 {
+			return nil, errors.New("timed out after 10s (caller deadline)")
+		}
+		return nil, errors.New("timed out after 0s (caller deadline)")
+	}
+	s := NewBdStore("/city", runner)
+	_, err := s.runBDTransientRead("ready", "--json")
+	if err == nil {
+		t.Fatal("runBDTransientRead() error = nil, want caller-deadline timeout")
+	}
+	if calls != 1 {
+		t.Fatalf("runner calls = %d, want 1: a spent caller deadline cannot be retried", calls)
+	}
+	if !strings.Contains(err.Error(), "10s") {
+		t.Fatalf("runBDTransientRead() error = %v, want the first attempt's real budget (10s), not a 0s replay", err)
+	}
+}
+
 func TestBDCommandTimeoutForReadCommands(t *testing.T) {
 	if got := bdCommandTimeoutFor("bd", []string{"list", "--json"}); got != bdReadCommandTimeout {
 		t.Fatalf("bd list timeout = %s, want %s", got, bdReadCommandTimeout)

@@ -43,6 +43,14 @@ func TestIsBdTransientWriteError(t *testing.T) {
 		{name: "mysql invalid connection", err: errors.New("exit status 1: [mysql] invalid connection"), want: true},
 		{name: "broken pipe", err: errors.New("exit status 1: write: broken pipe"), want: true},
 
+		// A per-command exec timeout is ambiguous — the write may have
+		// committed — and stays retryable. A caller-deadline timeout is NOT:
+		// the caller's budget is already spent, so a replay can only fail
+		// instantly with a "0s" error that masks the real budget.
+		{name: "per-command exec timeout", err: errors.New("timed out after 2m0s"), want: true},
+		{name: "caller-deadline timeout", err: errors.New("timed out after 10s (caller deadline)"), want: false},
+		{name: "caller-deadline timeout zero budget", err: errors.New("timed out after 0s (caller deadline)"), want: false},
+
 		// Generic permanent errors: unchanged.
 		{name: "plain bd failure", err: errors.New("exit status 1: no issue found bd-42"), want: false},
 	}
