@@ -293,19 +293,26 @@ func (b CodexUsagePageBudgets) defaults() (int64, int) {
 	return input, facts
 }
 
+// ErrCodexUsageResumeInvalid reports a checkpoint that cannot describe the
+// source it was resumed against: a foreign schema version, a path binding
+// mismatch, an offset the current source cannot honor (replaced or
+// truncated), or one not on a committed line boundary. A caller that receives
+// it may drop the checkpoint and restart the read from byte zero.
+var ErrCodexUsageResumeInvalid = errors.New("codex usage checkpoint does not fit the source")
+
 // validateCodexUsageResume refuses a checkpoint that cannot describe this
 // source: a foreign schema version, a path binding mismatch, an offset beyond
 // the file (replaced or truncated), or an offset that does not sit on a
 // committed line boundary.
 func validateCodexUsageResume(resume *CodexUsageCheckpoint, path string, size int64) error {
 	if resume.Version != codexUsageCheckpointVersion {
-		return fmt.Errorf("resuming codex usage read of %q: checkpoint version %d is not %d", path, resume.Version, codexUsageCheckpointVersion)
+		return fmt.Errorf("resuming codex usage read of %q: checkpoint version %d is not %d: %w", path, resume.Version, codexUsageCheckpointVersion, ErrCodexUsageResumeInvalid)
 	}
 	if resume.SourcePath != "" && !sameFilePath(resume.SourcePath, path) {
-		return fmt.Errorf("resuming codex usage read of %q: checkpoint belongs to %q", path, resume.SourcePath)
+		return fmt.Errorf("resuming codex usage read of %q: checkpoint belongs to %q: %w", path, resume.SourcePath, ErrCodexUsageResumeInvalid)
 	}
 	if resume.Offset < 0 || resume.Offset > size {
-		return fmt.Errorf("resuming codex usage read of %q: checkpoint offset %d is outside the %d-byte source (replaced or truncated)", path, resume.Offset, size)
+		return fmt.Errorf("resuming codex usage read of %q: checkpoint offset %d is outside the %d-byte source (replaced or truncated): %w", path, resume.Offset, size, ErrCodexUsageResumeInvalid)
 	}
 	if resume.Offset == 0 {
 		return nil
@@ -323,7 +330,7 @@ func validateCodexUsageResume(resume *CodexUsageCheckpoint, path string, size in
 		return fmt.Errorf("resuming codex usage read of %q: %w", path, err)
 	}
 	if prev[0] != '\n' {
-		return fmt.Errorf("resuming codex usage read of %q: checkpoint offset %d is not on a committed line boundary", path, resume.Offset)
+		return fmt.Errorf("resuming codex usage read of %q: checkpoint offset %d is not on a committed line boundary: %w", path, resume.Offset, ErrCodexUsageResumeInvalid)
 	}
 	return nil
 }

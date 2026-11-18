@@ -1841,3 +1841,218 @@ func TestFactorySweepClosedIntervalModelUsageClaudeReadsTheIntervalKey(t *testin
 		t.Fatalf("keyless interval = %d, settled %t, %v; want nothing recorded and settled", emitted, settled, err)
 	}
 }
+
+// failOnNthModelSink fails exactly the n-th (1-based) model-fact Record,
+// then delegates: a deterministic mid-batch sink failure for
+// restart-equivalence tests.
+type failOnNthModelSink struct {
+	inner usage.Sink
+	n     int
+	seen  int
+}
+
+func (s *failOnNthModelSink) Record(ctx context.Context, f usage.Fact) error {
+	if f.Kind == usage.KindModel {
+		s.seen++
+		if s.seen == s.n {
+			return fmt.Errorf("transient sink failure at model fact %d", s.n)
+		}
+	}
+	return s.inner.Record(ctx, f)
+}
+
+// writeCodexRolloutForCheckpointTest writes a keyless codex rollout whose
+// second and third invocations sit beyond the old fixed 64 KiB tail window
+// (~128 KiB of tool output follows the first), so only committed forward
+// progress can recover them. It returns the rollout path.
+func writeCodexRolloutForCheckpointTest(t *testing.T, root string, ts time.Time, cwd, uuid string) string {
+	t.Helper()
+	stamp := func(d time.Duration) string {
+		return ts.Add(d).UTC().Format("2006-01-02T15:04:05.000Z07:00")
+	}
+	lines := []map[string]any{
+		codexWorkerSessionMeta(cwd),
+		codexWorkerTurnContext(),
+		codexWorkerTokenCount(stamp(1*time.Second), 150, 100, 0, 50),
+	}
+	for i := range 32 {
+		lines = append(lines, map[string]any{
+			"timestamp": stamp(time.Duration(i+2)*time.Second + time.Millisecond),
+			"type":      "response_item",
+			"payload":   map[string]any{"type": "function_call_output", "output": strings.Repeat("x", 4096)},
+		})
+	}
+	lines = append(lines,
+		codexWorkerTokenCount(stamp(40*time.Second), 300, 200, 0, 100),
+		codexWorkerTokenCount(stamp(41*time.Second), 450, 250, 0, 200),
+	)
+	path := codexWorkerRolloutPathWithID(t, root, ts, uuid)
+	writeWorkerTestJSONL(t, path, lines)
+	return path
+}
+
+// TestFactorySweepCodexUsageMatchesUninterruptedRunAcrossRestarts pins
+// AC-5: with a mid-batch sink failure and a fresh factory per tick (a process
+// restart between them), the codex sweep's committed checkpoint carries
+// progress — emit before checkpoint, commit only through the last successful
+// fact — so the retry drains the remainder and the final fact set equals an
+// uninterrupted run's: every eligible invocation exactly once, none lost.
+func TestFactorySweepCodexUsageMatchesUninterruptedRunAcrossRestarts(t *testing.T) {
+	codexRoot := t.TempDir()
+	workDir := t.TempDir()
+	sinkPath := filepath.Join(t.TempDir(), "usage.jsonl")
+
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	// Fail the SECOND model-fact write ever: tick 1 records the first
+	// invocation then stops; the restarts must recover the rest.
+	sink := &failOnNthModelSink{inner: usage.NewLocalSink(sinkPath), n: 2}
+	newFactory := func() *Factory {
+		f, err := NewFactory(FactoryConfig{
+			Store:       store,
+			Provider:    sp,
+			SearchPaths: []string{codexRoot},
+			UsageSink:   sink,
+		})
+		if err != nil {
+			t.Fatalf("NewFactory: %v", err)
+		}
+		return f
+	}
+	factory := newFactory()
+
+	h, err := factory.Session(SessionSpec{
+		Profile:  ProfileCodexTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "codex",
+		WorkDir:  workDir,
+		Provider: "codex",
+		Metadata: map[string]string{"agent_name": "myrig/polecat-1"},
+	})
+	if err != nil {
+		t.Fatalf("Session: %v", err)
+	}
+	if err := h.Start(context.Background(), handleActor(t, h, sessionpkg.ActorAgent)); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	id := h.sessionID
+
+	start := time.Date(2026, 6, 15, 10, 0, 0, 0, time.UTC)
+	slept := start.Add(time.Minute)
+	writeCodexRolloutForCheckpointTest(t, codexRoot, start, workDir,
+		"019e0000-cccc-7000-8000-000000000003")
+
+	for k, v := range map[string]string{
+		"awake_started_at": start.Format(time.RFC3339),
+		"slept_at":         slept.Format(time.RFC3339),
+		"molecule_id":      "run-Z",
+	} {
+		if err := store.SetMetadata(id, k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	meta := func() map[string]string {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b.Metadata
+	}
+	m := meta()
+	if m["provider"] != "codex" || m["work_dir"] != workDir {
+		t.Fatalf("precondition: provider/work_dir = %q/%q", m["provider"], m["work_dir"])
+	}
+	if m["session_key"] != "" {
+		t.Fatalf("precondition: session_key = %q, want empty (keyless path)", m["session_key"])
+	}
+	now := slept.Add(time.Minute)
+
+	// Tick 1: the first fact records; the second write fails; the sweep is
+	// unsettled and the checkpoint advances only through the last success.
+	emitted, settled, err := factory.SweepSessionModelUsage(context.Background(), id, m, now)
+	if err == nil {
+		t.Fatal("tick 1 must surface the sink Record error")
+	}
+	if settled {
+		t.Fatal("a mid-batch sink failure must leave the interval unsettled")
+	}
+	if emitted != 1 {
+		t.Fatalf("tick 1 emitted = %d, want 1 (the write before the failure)", emitted)
+	}
+	after1 := meta()
+	cpRaw := after1[sessionpkg.MetadataKeyCodexUsageCheckpoint]
+	if cpRaw == "" {
+		t.Fatal("tick 1 must commit the checkpoint through the last successful fact")
+	}
+	cp, err := sessionlog.ParseCodexUsageCheckpoint(cpRaw)
+	if err != nil {
+		t.Fatalf("stored checkpoint does not parse: %v", err)
+	}
+	if cp.LastInvocationID != "total:150" {
+		t.Fatalf("checkpoint last invocation = %q, want total:150", cp.LastInvocationID)
+	}
+	if cp.Offset <= 0 {
+		t.Fatalf("checkpoint offset = %d, want committed progress past the first invocation", cp.Offset)
+	}
+	if cur := after1[sessionpkg.MetadataKeyInvocationUsageCursor]; cur != "total:150" {
+		t.Fatalf("flat cursor after tick 1 = %q, want total:150 (mirrored)", cur)
+	}
+
+	// Restart 1: a fresh factory over the same store resumes from the
+	// committed checkpoint — past the first invocation and the filler beyond
+	// the old fixed tail window — and drains the remainder.
+	factory2 := newFactory()
+	emitted2, settled2, err := factory2.SweepSessionModelUsage(context.Background(), id, after1, now)
+	if err != nil {
+		t.Fatalf("restart 1 SweepSessionModelUsage: %v", err)
+	}
+	if !settled2 {
+		t.Fatal("restart 1 drained the remainder and must settle")
+	}
+	if emitted2 != 2 {
+		t.Fatalf("restart 1 emitted = %d, want 2 (only the remainder, no re-emission)", emitted2)
+	}
+
+	// Restart 2: nothing new; a settled sweep must not re-emit.
+	factory3 := newFactory()
+	emitted3, settled3, err := factory3.SweepSessionModelUsage(context.Background(), id, meta(), now)
+	if err != nil {
+		t.Fatalf("restart 2 SweepSessionModelUsage: %v", err)
+	}
+	if !settled3 || emitted3 != 0 {
+		t.Fatalf("restart 2 = (%d emitted, %t settled), want (0, true): a drained rollout re-emits nothing", emitted3, settled3)
+	}
+	if cur := meta()[sessionpkg.MetadataKeyInvocationUsageCursor]; cur != "total:450" {
+		t.Fatalf("flat cursor after drain = %q, want total:450", cur)
+	}
+
+	facts, warnings, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatalf("ReadFacts: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected sink warnings: %v", warnings)
+	}
+	// The uninterrupted run's set: one fact per eligible invocation.
+	want := map[string][2]int{ // UpstreamReqID -> {InputTokens, OutputTokens}
+		"total:150": {100, 50},
+		"total:300": {200, 100},
+		"total:450": {250, 200},
+	}
+	if len(facts) != len(want) {
+		t.Fatalf("want %d facts (the uninterrupted run's set), got %d: %+v", len(want), len(facts), facts)
+	}
+	for _, f := range facts {
+		exp, ok := want[f.UpstreamReqID]
+		if !ok {
+			t.Fatalf("unexpected fact %q", f.UpstreamReqID)
+		}
+		if f.InputTokens != exp[0] || f.OutputTokens != exp[1] {
+			t.Fatalf("fact %q tokens = %d/%d, want %d/%d", f.UpstreamReqID, f.InputTokens, f.OutputTokens, exp[0], exp[1])
+		}
+		if f.RunID != "run-Z" || f.Provider != "codex" || f.Model != "gpt-5.5" {
+			t.Fatalf("fact %q attribution = run %s provider %s model %s", f.UpstreamReqID, f.RunID, f.Provider, f.Model)
+		}
+	}
+}
