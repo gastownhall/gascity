@@ -521,6 +521,12 @@ func TestDoSessionWake_NoRunnableTemplateAgeGate(t *testing.T) {
 // suspended_on_start default, and the runtime override `gc rig
 // suspend`/`gc rig resume` writes to .gc/runtime/suspension-state.json,
 // which must win over the authored default in either direction.
+//
+// The dirlessAgent rows run the same table for a rig-scoped agent with no
+// dir (bare qualified name, rig-qualified template): the wake verdict
+// resolves it the way the controller built the session, so a live rig wakes
+// with wake_request=explicit recorded on the bead and a suspended rig
+// still refuses with the rig-resume hint.
 func TestDoSessionWake_SuspendedRigRejectsWake(t *testing.T) {
 	suspendOverride, resumeOverride := true, false
 	tests := []struct {
@@ -530,7 +536,10 @@ func TestDoSessionWake_SuspendedRigRejectsWake(t *testing.T) {
 		// runtimeOverride, when non-nil, is seeded into the runtime
 		// suspension state as an explicit `gc rig suspend`/`gc rig
 		// resume` choice, which must beat rigSuspended.
-		runtimeOverride  *bool
+		runtimeOverride *bool
+		// dirlessAgent runs the case against a rig-scoped agent with no
+		// dir instead of a dir-bound one.
+		dirlessAgent     bool
 		wantCode         int
 		wantStderrSubstr string
 	}{
@@ -558,6 +567,34 @@ func TestDoSessionWake_SuspendedRigRejectsWake(t *testing.T) {
 			runtimeOverride: &resumeOverride,
 			wantCode:        0,
 		},
+		{
+			name:         "dirless rig-scoped agent wakes normally",
+			rigSuspended: false,
+			dirlessAgent: true,
+			wantCode:     0,
+		},
+		{
+			name:            "dirless rig-scoped agent, runtime resume beats authored default",
+			rigSuspended:    true,
+			runtimeOverride: &resumeOverride,
+			dirlessAgent:    true,
+			wantCode:        0,
+		},
+		{
+			name:             "dirless rig-scoped agent on suspended rig rejects wake",
+			rigSuspended:     true,
+			dirlessAgent:     true,
+			wantCode:         1,
+			wantStderrSubstr: `rig "frontend" is suspended`,
+		},
+		{
+			name:             "dirless rig-scoped agent, runtime suspend beats authored default",
+			rigSuspended:     false,
+			runtimeOverride:  &suspendOverride,
+			dirlessAgent:     true,
+			wantCode:         1,
+			wantStderrSubstr: `rig "frontend" is suspended`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -580,8 +617,15 @@ func TestDoSessionWake_SuspendedRigRejectsWake(t *testing.T) {
 				t.Fatalf("store.Create(session bead): %v", err)
 			}
 
+			agent := config.Agent{Name: "worker", Dir: "frontend"}
+			if tt.dirlessAgent {
+				// Rig-scoped agent with no dir: its named session expands
+				// with dir = rig, so the bead template is rig-qualified
+				// while the agent's qualified name stays bare.
+				agent = config.Agent{Name: "worker", Scope: "rig"}
+			}
 			cfg := &config.City{
-				Agents: []config.Agent{{Name: "worker", Dir: "frontend"}},
+				Agents: []config.Agent{agent},
 				Rigs:   []config.Rig{{Name: "frontend", SuspendedOnStart: tt.rigSuspended}},
 			}
 			cityPath := "/city"
@@ -629,6 +673,13 @@ func TestDoSessionWake_SuspendedRigRejectsWake(t *testing.T) {
 			}
 			if got := stdout.String(); !strings.Contains(got, "wake requested") {
 				t.Fatalf("stdout = %q, want wake requested", got)
+			}
+			updated, err := store.Get(sessionBead.ID)
+			if err != nil {
+				t.Fatalf("store.Get(%s): %v", sessionBead.ID, err)
+			}
+			if got := updated.Metadata["wake_request"]; got != "explicit" {
+				t.Fatalf("wake_request = %q, want explicit", got)
 			}
 		})
 	}
