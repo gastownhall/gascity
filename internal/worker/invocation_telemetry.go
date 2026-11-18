@@ -966,9 +966,13 @@ const codexUsageSweepPageLimit = 4096
 // a later pass. A stored checkpoint that cannot be parsed, or that the
 // resolved rollout refutes (replaced, truncated, re-keyed), is dropped and
 // the read restarts from byte zero — a bounded replay whose re-emitted facts
-// the idempotency key collapses. settled reports that the source drained with
-// no coverage hole (More false, nothing incomplete); err carries the emit
-// failure.
+// the idempotency key collapses, as does a checkpoint the flat invocation
+// cursor disagrees with. A replay from zero also applies the awake-interval
+// emission floor: invocations stamped before the session's awake start are
+// parsed and committed past but never billed, so the session is not charged
+// for the history it woke on top of. settled reports that the source drained
+// with no coverage hole (More false, nothing incomplete); err carries the
+// emit failure.
 func drainCodexUsagePages(
 	ctx context.Context,
 	manager *sessionpkg.Manager,
@@ -986,6 +990,21 @@ func drainCodexUsagePages(
 			resume = &cp
 		}
 	}
+	// The flat cursor is shared with older lanes and other writers. When it
+	// names an invocation the checkpoint never reached — or the checkpoint
+	// one the cursor never saw — the two disagree about progress, and
+	// resuming from the checkpoint could strand a prefix the cursor's writer
+	// expected billed. Drop the checkpoint and replay from zero: bounded, and
+	// the idempotency key collapses what the replay re-emits.
+	flatCursor := strings.TrimSpace(meta[sessionpkg.MetadataKeyInvocationUsageCursor])
+	if resume != nil && flatCursor != "" && resume.LastInvocationID != "" && flatCursor != resume.LastInvocationID {
+		slog.Debug("codex usage drain: flat cursor disagrees with the checkpoint; replaying from zero",
+			slog.String("session_id", id),
+			slog.String("flat_cursor", flatCursor),
+			slog.String("checkpoint_last_invocation", resume.LastInvocationID))
+		resume = nil
+	}
+	floor := codexUsageEmissionFloor(meta)
 	lastRecorded := ""
 	for range codexUsageSweepPageLimit {
 		page, perr := sessionlog.ReadCodexUsagePageFromSearchPaths(searchPaths, path, resume, sessionlog.CodexUsagePageBudgets{})
@@ -1009,6 +1028,15 @@ func drainCodexUsagePages(
 		}
 		lastSuccess := -1
 		for i, u := range page.Usages {
+			if !floor.IsZero() && !u.Timestamp.IsZero() && u.Timestamp.Before(floor) {
+				// Parsed and committed past, but never billed: this
+				// invocation predates the session's awake interval —
+				// history the session woke on top of, which earlier
+				// conversations or beads already own. The checkpoint still
+				// advances through it, so the drain makes progress.
+				lastSuccess = i
+				continue
+			}
 			if emitErr := emit(ctx, u); emitErr != nil {
 				// Stop at the first failure and commit only through the last
 				// success, so the next pass resumes here instead of skipping
@@ -1087,6 +1115,27 @@ func persistCodexUsageCheckpoint(manager *sessionpkg.Manager, id string, cp sess
 		slog.Debug("codex usage drain: persisting codex usage checkpoint failed; next pass may re-read",
 			slog.String("session_id", id), slog.Any("error", err))
 	}
+}
+
+// codexUsageEmissionFloor is the earliest rollout timestamp a drain pass may
+// bill: one minute before the session's awake start. A codex session that
+// resumed an existing rollout wakes on top of invocations earlier
+// conversations already billed (or that predate this bead entirely), so a
+// replay from zero — the legacy flat-cursor migration, a dropped or refuted
+// checkpoint, a foreign cursor write — parses those invocations to keep the
+// checkpoint moving but must not bill them to this interval. A missing or
+// unparsable awake start means no floor: nothing distinguishes the session's
+// own history, so the drain bills what it reads.
+func codexUsageEmissionFloor(meta map[string]string) time.Time {
+	raw := strings.TrimSpace(meta["awake_started_at"])
+	if raw == "" {
+		return time.Time{}
+	}
+	awake, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return time.Time{}
+	}
+	return awake.Add(-time.Minute)
 }
 
 // discoverSweepTranscript resolves the transcript for the end-of-interval model

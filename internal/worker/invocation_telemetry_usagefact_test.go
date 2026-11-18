@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -2194,4 +2195,248 @@ func TestPromptOpCodexTelemetryLeavesRemainderRecoverable(t *testing.T) {
 			t.Fatalf("fact %q missing from the sink: %+v", want, facts)
 		}
 	}
+}
+
+// writeCodexRolloutAtTimes writes a keyless codex rollout with token counts
+// at explicit timestamps, so a test can place invocations around an awake
+// interval's emission floor.
+func writeCodexRolloutAtTimes(t *testing.T, root string, fileTs time.Time, cwd, uuid string, stamps map[string][3]int) string {
+	t.Helper()
+	lines := []map[string]any{
+		codexWorkerSessionMeta(cwd),
+		codexWorkerTurnContext(),
+	}
+	for ts, tc := range stamps {
+		lines = append(lines, codexWorkerTokenCount(ts, tc[0], tc[1], 0, tc[2]))
+	}
+	// map iteration is random: sort by timestamp for a deterministic file.
+	slices.SortStableFunc(lines[2:], func(a, b map[string]any) int {
+		return strings.Compare(a["timestamp"].(string), b["timestamp"].(string))
+	})
+	path := codexWorkerRolloutPathWithID(t, root, fileTs, uuid)
+	writeWorkerTestJSONL(t, path, lines)
+	return path
+}
+
+// TestFactorySweepCodexLegacyCursorReplayBillsOnlyPostFloorUsage pins AC-7:
+// with a legacy flat cursor and existing facts, the current-interval replay
+// runs from zero with the SAME keys — old facts stay unchanged (first-wins,
+// including their model), the missing eligible fact is added, and usage
+// before the awake floor is parsed but never newly billed. A later foreign
+// cursor write invalidates the checkpoint and replays again.
+func TestFactorySweepCodexLegacyCursorReplayBillsOnlyPostFloorUsage(t *testing.T) {
+	codexRoot := t.TempDir()
+	workDir := t.TempDir()
+	sinkPath := filepath.Join(t.TempDir(), "usage.jsonl")
+
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	factory, err := NewFactory(FactoryConfig{
+		Store:       store,
+		Provider:    sp,
+		SearchPaths: []string{codexRoot},
+		UsageSink:   usage.NewLocalSink(sinkPath),
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+	h, err := factory.Session(SessionSpec{
+		Profile:  ProfileCodexTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "codex",
+		WorkDir:  workDir,
+		Provider: "codex",
+		Metadata: map[string]string{"agent_name": "myrig/polecat-1"},
+	})
+	if err != nil {
+		t.Fatalf("Session: %v", err)
+	}
+	if err := h.Start(context.Background(), handleActor(t, h, sessionpkg.ActorAgent)); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	id := h.sessionID
+
+	awake := time.Date(2026, 6, 15, 10, 5, 0, 0, time.UTC)
+	slept := awake.Add(90 * time.Second)
+	writeCodexRolloutAtTimes(t, codexRoot, awake, workDir,
+		"019e0000-dddd-7000-8000-000000000004", map[string][3]int{
+			// Pre-floor (before awake − 1min): parsed, never billed.
+			"2026-06-15T10:03:00.000Z": {100, 60, 40},
+			"2026-06-15T10:03:45.000Z": {150, 100, 50},
+			// In-interval: billable.
+			"2026-06-15T10:05:30.000Z": {300, 200, 100},
+			"2026-06-15T10:06:00.000Z": {450, 250, 200},
+		})
+
+	// Legacy state: the old code recorded through total:300 and stranded the
+	// prefix behind the cursor; no checkpoint exists.
+	if err := store.SetMetadata(id, sessionpkg.MetadataKeyInvocationUsageCursor, "total:300"); err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range map[string]string{
+		"awake_started_at": awake.Format(time.RFC3339),
+		"slept_at":         slept.Format(time.RFC3339),
+		"molecule_id":      "run-Z",
+	} {
+		if err := store.SetMetadata(id, k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// An existing fact under the SAME key the replay will reuse, with the
+	// model the old lane recorded: first-wins must keep it untouched.
+	legacySink := usage.NewLocalSink(sinkPath)
+	if err := legacySink.Record(context.Background(), modelUsageFact(sessionlog.TailUsage{
+		MessageID:    "total:300",
+		EntryUUID:    "2026-06-15T10:05:30.000Z",
+		Model:        "gpt-4.9-old",
+		InputTokens:  200,
+		OutputTokens: 100,
+		Timestamp:    time.Date(2026, 6, 15, 10, 5, 30, 0, time.UTC),
+	}, map[string]string{"molecule_id": "run-Z"}, id, id, "", "codex", 0, false, awake, "")); err != nil {
+		t.Fatalf("pre-seeding legacy fact: %v", err)
+	}
+
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := slept.Add(time.Minute)
+	emitted, settled, err := factory.SweepSessionModelUsage(context.Background(), id, b.Metadata, now)
+	if err != nil {
+		t.Fatalf("SweepSessionModelUsage: %v", err)
+	}
+	if !settled {
+		t.Fatal("a sweep that drained the rollout must settle")
+	}
+	if emitted != 2 {
+		t.Fatalf("emitted = %d, want 2 (the missing total:450 plus the same-key total:300)", emitted)
+	}
+
+	facts, warnings, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatalf("ReadFacts: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected sink warnings: %v", warnings)
+	}
+	byID := map[string]usage.Fact{}
+	for _, f := range facts {
+		byID[f.UpstreamReqID] = f
+	}
+	if len(byID) != 2 {
+		t.Fatalf("want exactly the in-interval identities in the sink, got %d: %+v", len(byID), byID)
+	}
+	for _, pre := range []string{"total:100", "total:150"} {
+		if _, ok := byID[pre]; ok {
+			t.Fatalf("pre-floor usage %q must not be newly billed", pre)
+		}
+	}
+	old, ok := byID["total:300"]
+	if !ok || old.Model != "gpt-4.9-old" {
+		t.Fatalf("old fact total:300 = %+v, want its first-wins record (model gpt-4.9-old) unchanged", old)
+	}
+	added, ok := byID["total:450"]
+	if !ok || added.Model != "gpt-5.5" || added.InputTokens != 250 || added.OutputTokens != 200 {
+		t.Fatalf("missing eligible fact total:450 = %+v, want it added with the rollout's model and tokens", added)
+	}
+
+	after, err := store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur := after.Metadata[sessionpkg.MetadataKeyInvocationUsageCursor]; cur != "total:450" {
+		t.Fatalf("flat cursor after replay = %q, want total:450 (mirrored)", cur)
+	}
+	cpRaw := after.Metadata[sessionpkg.MetadataKeyCodexUsageCheckpoint]
+	if cpRaw == "" {
+		t.Fatal("the replay must commit a checkpoint")
+	}
+	cp, err := sessionlog.ParseCodexUsageCheckpoint(cpRaw)
+	if err != nil {
+		t.Fatalf("stored checkpoint does not parse: %v", err)
+	}
+	if cp.LastInvocationID != "total:450" {
+		t.Fatalf("checkpoint last invocation = %q, want total:450", cp.LastInvocationID)
+	}
+
+	// A foreign cursor write (a legacy lane moving the flat cursor without
+	// the checkpoint) invalidates the checkpoint and replays from zero —
+	// bounded, floored, and deduplicated to no net change in the sink.
+	if err := store.SetMetadata(id, sessionpkg.MetadataKeyInvocationUsageCursor, "total:150"); err != nil {
+		t.Fatal(err)
+	}
+	foreign, err := store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	emitted2, settled2, err := factory.SweepSessionModelUsage(context.Background(), id, foreign.Metadata, now)
+	if err != nil {
+		t.Fatalf("sweep after foreign cursor: %v", err)
+	}
+	if !settled2 {
+		t.Fatal("the post-invalidation replay drained the rollout and must settle")
+	}
+	if emitted2 != 2 {
+		t.Fatalf("emitted after foreign cursor = %d, want 2 (a from-zero replay re-covers the billable pair)", emitted2)
+	}
+	facts2, _, err := usage.ReadFacts(sinkPath)
+	if err != nil {
+		t.Fatalf("ReadFacts: %v", err)
+	}
+	// The replay re-recorded the billable pair; first-wins dedup on read
+	// must collapse them into the same two identities — no new ones.
+	byID2 := map[string]usage.Fact{}
+	for _, f := range facts2 {
+		byID2[f.UpstreamReqID] = f
+	}
+	if len(byID2) != 2 {
+		t.Fatalf("sink holds %d fact identities after the replay, want 2 (no new identities): %+v", len(byID2), byID2)
+	}
+	if again, ok := byID2["total:300"]; !ok || again.Model != "gpt-4.9-old" {
+		t.Fatalf("first-wins must survive the replay: total:300 = %+v, want the legacy record (model gpt-4.9-old)", again)
+	}
+	if _, ok := byID2["total:100"]; ok {
+		t.Fatal("the from-zero replay must apply the emission floor: total:100 was never billed")
+	}
+}
+
+// newCodexSweepUsageFactory builds the worker test harness the AC-8 holding
+// tests share: a factory over a memory store whose codex search root and usage
+// sink live in test temporaries, plus one started codex session.
+func newCodexSweepUsageFactory(t *testing.T) (factory *Factory, store *beads.MemStore, sinkPath string) {
+	t.Helper()
+	codexRoot := t.TempDir()
+	workDir := t.TempDir()
+	sinkPath = filepath.Join(t.TempDir(), "usage.jsonl")
+	store = beads.NewMemStore()
+	factory, err := NewFactory(FactoryConfig{
+		Store:       store,
+		Provider:    runtime.NewFake(),
+		SearchPaths: []string{codexRoot},
+		UsageSink:   usage.NewLocalSink(sinkPath),
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+	h, err := factory.Session(SessionSpec{
+		Profile:  ProfileCodexTmuxCLI,
+		Template: "probe",
+		Title:    "Probe",
+		Command:  "codex",
+		WorkDir:  workDir,
+		Provider: "codex",
+		Metadata: map[string]string{"agent_name": "myrig/polecat-1"},
+	})
+	if err != nil {
+		t.Fatalf("Session: %v", err)
+	}
+	if err := h.Start(context.Background(), handleActor(t, h, sessionpkg.ActorAgent)); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = h.Stop(context.Background()) })
+	// The rollout root is the factory's search path; recover it for writers.
+	factoryRoot := factory.Adapter().SearchPaths[0]
+	t.Cleanup(func() { _ = factoryRoot })
+	return factory, store, sinkPath
 }
