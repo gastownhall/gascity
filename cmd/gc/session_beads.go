@@ -1257,7 +1257,7 @@ func unclaimWorkAssignedToRetiredSessionBead(
 	fallbackRoute string,
 	stderr io.Writer,
 ) ReleaseOutcome {
-	return unclaimWorkAssignedToRetiredSessionBeadVia(legs, store, sessionBead, fallbackRoute, stderr)
+	return unclaimWorkAssignedToRetiredSessionBeadVia(legs, store, sessionBead, fallbackRoute, nil, stderr)
 }
 
 // unclaimWorkAssignedToRetiredSessionBeadVia is unclaimWorkAssignedToRetiredSessionBead
@@ -1268,11 +1268,18 @@ func unclaimWorkAssignedToRetiredSessionBead(
 // does not live, so the close logged "clearing current claim on retired
 // session ...: getting bead ...: bead not found" and left
 // current_claim_bead_id stamped on the closed session.
+//
+// preserve names assignees the release leaves alone: work held under them is
+// not this session's to release, so it is neither released nor kept as
+// stranded. `gc session close` passes a still-configured named session's
+// stable addresses, which the identity's next session serves; nil releases
+// under every identity the bead persisted.
 func unclaimWorkAssignedToRetiredSessionBeadVia(
 	legs WorkLegs,
 	sessionStore beads.Store,
 	sessionBead beads.Bead,
 	fallbackRoute string,
+	preserve []string,
 	stderr io.Writer,
 ) ReleaseOutcome {
 	if sessionStore == nil || strings.TrimSpace(sessionBead.ID) == "" {
@@ -1289,7 +1296,7 @@ func unclaimWorkAssignedToRetiredSessionBeadVia(
 	if err := clearSessionCurrentClaim(sessionStore, sessionBead.ID); err != nil {
 		fmt.Fprintf(stderr, "session beads: clearing current claim on retired session %s: %v\n", sessionBead.ID, err) //nolint:errcheck
 	}
-	scope := releaseScopeOwn(sessionBead)
+	scope := releaseScopeOwn(sessionBead).except(assigneePreserveSet(preserve))
 	seat := releaseSeatOfBead(sessionBead)
 	seat.fallback = fallbackRoute // "" keeps whatever routing each claim carries
 	out, err := ReleaseClaims(seatWorkFor(legs, scope), scope, seat, releaseRetired, ReleaseOpts{})
