@@ -608,12 +608,13 @@ func (cr *CityRuntime) sweepLiveSessionModelUsage(
 	}
 	if memo.path == "" {
 		// A settled miss is definitive for this epoch (unregistered provider family;
-		// a keyless codex session whose CLEAN workdir+window scan found nothing —
-		// ambiguity, an out-of-window filename, or a TZ shift, none of which a retry
-		// resolves; or a keyless claude session whose transcript lookup cleanly
-		// REFUSED an ambiguous shared workdir, which stays ambiguous while the pool
-		// shares it — note an unambiguous claude session whose transcript is merely
-		// not written yet is NOT settled, so the live lane keeps rediscovering it).
+		// a keyless codex session whose CLEAN workdir+window scan REFUSED an
+		// ambiguous match, or that has no workdir or start to bound a scan; or a
+		// keyless claude session whose transcript lookup cleanly REFUSED an
+		// ambiguous shared workdir, which stays ambiguous while the pool shares it).
+		// A keyless session whose transcript is merely not written yet — a clean
+		// zero codex match, or an unambiguous claude lookup — is NOT settled, so the
+		// live lane keeps rediscovering it on the sweep cadence.
 		// Record it so the scan is never repeated; the session's usage is
 		// still recovered by the terminal sweep when its interval ends, and a re-wake
 		// starts a fresh epoch that discovers again.

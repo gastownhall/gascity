@@ -835,8 +835,39 @@ func FindCodexSessionFileNear(searchPaths []string, workDir string, anchor time.
 // discards scanClean and returns the same path (matches[0] for one hit, "" for
 // zero/ambiguous), so its callers are byte-identical to before.
 func FindCodexSessionFileNearScan(searchPaths []string, workDir string, anchor time.Time, window time.Duration) (string, bool) {
+	scan := FindCodexSessionFileNearClassified(searchPaths, workDir, anchor, window)
+	return scan.Path, scan.Clean
+}
+
+// CodexNearScan is the classified result of a bounded (cwd, wake-window)
+// codex rollout lookup. Exactly one of three verdicts holds:
+//
+//   - Path set: one physically distinct root rollout matched. Clean reports
+//     whether the scan was free of IO faults, so the match is definitive.
+//   - Ambiguous: more than one root rollout matched, a definitive refusal that
+//     no later scan can undo (more rollouts never make it less ambiguous).
+//     Clean is always true.
+//   - Neither: nothing matched. On a Clean scan that says only that no
+//     matching rollout exists YET, which a later scan may change; on a dirty
+//     scan a fault may have hidden one.
+//
+// Invalid is set instead when the inputs cannot bound a scan (empty workDir,
+// zero anchor, non-positive window): nothing is scanned, and no retry with the
+// same inputs can find anything.
+type CodexNearScan struct {
+	Path      string
+	Clean     bool
+	Ambiguous bool
+	Invalid   bool
+}
+
+// FindCodexSessionFileNearClassified is FindCodexSessionFileNear with its
+// verdict classified (CodexNearScan), so a caller can tell a rollout that is
+// not written yet from an ambiguity refusal: FindCodexSessionFileNearScan
+// reports both as a clean empty path.
+func FindCodexSessionFileNearClassified(searchPaths []string, workDir string, anchor time.Time, window time.Duration) CodexNearScan {
 	if workDir == "" || anchor.IsZero() || window <= 0 {
-		return "", true
+		return CodexNearScan{Clean: true, Invalid: true}
 	}
 	start := anchor.Add(-time.Minute)
 	end := anchor.Add(window)
@@ -846,17 +877,18 @@ func FindCodexSessionFileNearScan(searchPaths []string, workDir string, anchor t
 	for _, root := range mergeCodexSearchPaths(searchPaths) {
 		collectCodexRolloutsNear(root, workDir, start, end, true, seen, &matches, &dirty)
 		if len(matches) > 1 {
-			return "", true // ambiguous: a definitive refusal, independent of scan noise
+			// Ambiguous: a definitive refusal, independent of scan noise.
+			return CodexNearScan{Clean: true, Ambiguous: true}
 		}
 	}
 	if len(matches) == 1 {
 		// One visible match, but a dirty scan may have hidden a second same-cwd,
 		// in-window rollout, so the lone hit is definitive only when the scan was
-		// clean. The string-only wrapper discards this bool and still returns
-		// matches[0], keeping prompt-op behavior unchanged.
-		return matches[0], !dirty
+		// clean. The string-only wrapper discards Clean and still returns the
+		// path, keeping prompt-op behavior unchanged.
+		return CodexNearScan{Path: matches[0], Clean: !dirty}
 	}
-	return "", !dirty
+	return CodexNearScan{Clean: !dirty}
 }
 
 // appendCodexRolloutMatch appends path to matches unless its physical

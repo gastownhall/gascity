@@ -731,13 +731,12 @@ func TestEmitDueComputeFactsBacksOffUnresolvedLiveSweepDiscovery(t *testing.T) {
 	}
 }
 
-// TestEmitDueComputeFactsStopsRetryingSettledLiveSweepMiss pins the other half of
-// the miss memoization: a DEFINITIVE miss is not retried at all. A keyless codex
-// session whose bounded (work_dir, wake-window) scan comes up empty on a CLEAN
-// scan has nothing to find — the outcome is ambiguity, an out-of-window filename,
-// or a TZ shift, none of which a retry resolves — so the live lane records the
-// verdict once and stops scanning for that awake epoch.
-func TestEmitDueComputeFactsStopsRetryingSettledLiveSweepMiss(t *testing.T) {
+// TestEmitDueComputeFactsRediscoversLateKeylessCodexRollout pins ga-amrzyf
+// case 1: a keyless codex session scanned before its rollout exists found a
+// clean ZERO match, which only says the rollout is not written yet. The live
+// lane must retry discovery on the sweep cadence instead of settling the miss
+// for the whole awake epoch, so the rollout that appears later is billed.
+func TestEmitDueComputeFactsRediscoversLateKeylessCodexRollout(t *testing.T) {
 	workDir := t.TempDir()
 	codexRoot := t.TempDir()
 	start := liveSweepStart()
@@ -745,22 +744,42 @@ func TestEmitDueComputeFactsStopsRetryingSettledLiveSweepMiss(t *testing.T) {
 	h := newLiveSweepHarness(t, codexRoot, liveCodexSessionMeta(start, workDir, ""))
 
 	h.tick()
-	memo := h.memo()
-	if !memo.settledMiss {
-		t.Fatalf("a clean keyless scan that found nothing is definitive and must settle: memo=%+v", memo)
+	if memo := h.memo(); memo.settledMiss {
+		t.Fatalf("a clean keyless scan that found no rollout yet must not settle: memo=%+v", memo)
 	}
 
-	// Even with the floor cleared AND a matching rollout now on disk, the settled
-	// miss is never re-attempted. Nothing is lost: the interval's usage is still
-	// recovered by the terminal sweep when the session finally closes, and a re-wake
-	// starts a fresh epoch that discovers again.
 	writeCodexRolloutForSweepAt(t, codexRoot, start, workDir, "019e7777-cccc-7000-8000-00000000000c", [][3]int{
 		{150, 100, 50},
+		{450, 200, 100},
 	})
 	h.expireSweepThrottle()
 	h.tick()
+	if got := rawSinkModelFactCount(t, h.sinkPath); got != 2 {
+		t.Fatalf("model facts = %d, want 2: the late keyless rollout must be rediscovered once the cadence expires", got)
+	}
+}
+
+// TestEmitDueComputeFactsStopsRetryingAmbiguousLiveSweepMiss pins the definitive
+// half of the miss memoization: a keyless codex session whose bounded
+// (work_dir, wake-window) scan finds two rollouts refuses attribution, and more
+// rollouts can never make it less ambiguous, so the live lane records the verdict
+// once and stops scanning for that awake epoch.
+func TestEmitDueComputeFactsStopsRetryingAmbiguousLiveSweepMiss(t *testing.T) {
+	workDir := t.TempDir()
+	codexRoot := t.TempDir()
+	start := liveSweepStart()
+	writeCodexRolloutForSweepAt(t, codexRoot, start, workDir, "019e7777-cccc-7000-8000-00000000000a", [][3]int{{150, 100, 50}})
+	writeCodexRolloutForSweepAt(t, codexRoot, start.Add(time.Second), workDir, "019e7777-cccc-7000-8000-00000000000b", [][3]int{{150, 100, 50}})
+	h := newLiveSweepHarness(t, codexRoot, liveCodexSessionMeta(start, workDir, ""))
+
+	h.tick()
+	if memo := h.memo(); !memo.settledMiss {
+		t.Fatalf("an ambiguous keyless scan is definitive and must settle: memo=%+v", memo)
+	}
+	h.expireSweepThrottle()
+	h.tick()
 	if got := rawSinkModelFactCount(t, h.sinkPath); got != 0 {
-		t.Fatalf("model facts = %d, want 0: a settled discovery miss must never re-run discovery", got)
+		t.Fatalf("model facts = %d, want 0: an ambiguous keyless session must never be attributed", got)
 	}
 	if got := h.cursor(t); got != "" {
 		t.Fatalf("invocation_usage_cursor = %q, want unset (nothing was swept)", got)

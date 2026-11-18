@@ -736,14 +736,18 @@ func (f *Factory) sweepSessionModelUsage(
 // settled classifies a miss with the same meaning SweepSessionModelUsage gives
 // it, so a caller that memoizes discovery can distinguish the two kinds: true
 // means there is definitively nothing to find (an unregistered provider family;
-// a keyless codex session whose bounded workdir+window fallback came up empty
-// on a CLEAN scan; or a keyless claude session whose transcript lookup cleanly
-// refused an ambiguous shared workdir) and re-running discovery is pure waste;
-// false means the miss is transient (a keyed rollout not flushed yet, a keyless
-// codex scan clouded by an I/O fault, which leaves both an empty result and a
-// lone hit non-definitive, a keyless claude lookup that failed to read the store,
-// or an unambiguous keyless claude session whose transcript is not written yet)
-// and a later attempt may resolve it. A found path is always settled.
+// a keyless codex session whose bounded workdir+window fallback refused an
+// ambiguous match on a CLEAN scan, or has no workdir or start to bound one; or a
+// keyless claude session whose transcript lookup cleanly refused an ambiguous
+// shared workdir) and re-running discovery is pure waste; false means the miss
+// is transient (a keyed rollout not flushed yet, a keyless codex scan that
+// cleanly found no rollout yet, a keyless codex scan clouded by an I/O fault,
+// which leaves both an empty result and a lone hit non-definitive, a keyless
+// claude lookup that failed to read the store, or an unambiguous keyless claude
+// session whose transcript is not written yet) and a later attempt may resolve
+// it. A found path is always settled. Unlike the terminal sweep, which reads a
+// closed interval whose rollout is already on disk, a clean zero codex match
+// here is not definitive: the live session may still write its rollout.
 func (f *Factory) DiscoverSweepTranscript(id string, meta map[string]string, now time.Time) (path string, settled bool) {
 	id = strings.TrimSpace(id)
 	if f == nil || id == "" || meta == nil {
@@ -753,8 +757,23 @@ func (f *Factory) DiscoverSweepTranscript(id string, meta map[string]string, now
 	if _, ok := invocationUsageSpecs[family]; !ok {
 		return "", true
 	}
-	path, scanClean, emptyIsPermanent := f.discoverSweepTranscript(family, id, meta, now)
 	keyless := strings.TrimSpace(meta["session_key"]) == ""
+	if family == "codex" && keyless {
+		// A live keyless codex session is scanned while it runs, so a clean zero
+		// match only says its rollout is not written yet: unlike the terminal
+		// sweep's verdict, it stays unsettled and is rediscovered on the sweep
+		// cadence. Only an ambiguity refusal, or inputs that cannot bound a scan,
+		// settle the epoch.
+		scan := keylessCodexSweepScan(f.searchPaths, meta, now)
+		if !scan.Clean {
+			return "", false
+		}
+		if scan.Path == "" {
+			return "", scan.Ambiguous || scan.Invalid
+		}
+		return scan.Path, true
+	}
+	path, scanClean, emptyIsPermanent := f.discoverSweepTranscript(family, id, meta, now)
 	keylessCodex := family == "codex" && keyless
 	keylessClaude := family == "claude" && keyless
 	if (keylessCodex || keylessClaude) && !scanClean {
@@ -923,16 +942,14 @@ func (f *Factory) discoverSweepTranscript(family, id string, meta map[string]str
 		}
 		// Keyless fallback (Design B): resolve by cwd + wake window. Requires a
 		// workdir to key on and a non-zero interval start to anchor the window;
-		// without either, FindCodexSessionFileNear cannot bound its scan and the
-		// sweep records nothing — a clean, permanent miss.
-		if workDir == "" || notBefore.IsZero() {
+		// without either, the scan cannot be bounded and the sweep records
+		// nothing — a clean, permanent miss.
+		scan := keylessCodexSweepScan(f.searchPaths, meta, now)
+		if scan.Invalid {
 			slog.Debug("model-usage sweep: keyless codex has no workdir/anchor for fallback; skipping",
 				slog.String("session_id", id))
-			return "", true, true
 		}
-		scanPath, scanClean := sessionlog.FindCodexSessionFileNearScan(
-			f.searchPaths, workDir, notBefore, codexInvocationDiscoveryWindow)
-		return scanPath, scanClean, true
+		return scan.Path, scan.Clean, true
 	case "opencode":
 		// Keyed only, like discoverOpenCodeInvocationTranscript: the export is
 		// named for the session_key, and the manager's workdir fallback could
@@ -957,6 +974,16 @@ func (f *Factory) discoverSweepTranscript(family, id string, meta map[string]str
 			return strings.TrimSpace(path), true, false
 		}
 	}
+}
+
+// keylessCodexSweepScan runs the bounded (cwd, wake-window) rollout lookup for
+// a codex session with no session_key, anchored at the interval start
+// (awake_started_at) with codexInvocationDiscoveryWindow. A session without a
+// workdir or an interval start yields an Invalid scan.
+func keylessCodexSweepScan(searchPaths []string, meta map[string]string, now time.Time) sessionlog.CodexNearScan {
+	notBefore, _ := sweepIntervalWindow(meta, now)
+	return sessionlog.FindCodexSessionFileNearClassified(
+		searchPaths, contract.WorkerDirFromMetadata(meta), notBefore, codexInvocationDiscoveryWindow)
 }
 
 // discoverClosedIntervalTranscript is discoverSweepTranscript for the interval
