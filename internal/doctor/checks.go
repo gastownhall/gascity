@@ -474,7 +474,8 @@ func (c *BinaryCheck) Fix(_ *CheckContext) error { return nil }
 
 // SessionRegistry reads the open session rows from the store the city keeps
 // its sessions in and returns each row's runtime session name mapped to the
-// qualified name of the agent it runs. The runtime names a pool instance or a
+// qualified name of the agent it runs. It leaves out a row whose agent is no
+// longer configured, so that agent's runtime stays an orphan. The runtime names a pool instance or a
 // bead-named session after its session row, not after agent.SessionNameFor,
 // so the session checks read the registry to know which running sessions the
 // city accounts for. A nil SessionRegistry knows only the
@@ -523,12 +524,13 @@ func (c *AgentSessionsCheck) Run(_ *CheckContext) *CheckResult {
 	for _, names := range byAgent {
 		sort.Strings(names)
 	}
+	listed := c.attestedRunning()
 	var missing []string
 	for _, a := range c.cfg.Agents {
 		if a.Suspended {
 			continue
 		}
-		if !c.hasRunningSession(byAgent[a.QualifiedName()], a.QualifiedName()) {
+		if !c.hasRunningSession(listed, byAgent[a.QualifiedName()], a.QualifiedName()) {
 			missing = append(missing, a.QualifiedName())
 		}
 	}
@@ -544,16 +546,39 @@ func (c *AgentSessionsCheck) Run(_ *CheckContext) *CheckResult {
 	return r
 }
 
+// attestedRunning lists the running sessions once, when the provider attests
+// that an error-free listing is complete. It returns nil when the listing
+// proves no absence: the provider does not attest it, or it failed.
+func (c *AgentSessionsCheck) attestedRunning() map[string]bool {
+	if !runtime.ListRunningAttested(c.sp) {
+		return nil
+	}
+	running, err := c.sp.ListRunning("") // per-city socket isolation: all sessions belong to this city
+	if err != nil {
+		return nil
+	}
+	listed := make(map[string]bool, len(running))
+	for _, s := range running {
+		listed[s] = true
+	}
+	return listed
+}
+
 // hasRunningSession reports whether one of the agent's registry sessions, or
-// its agent.SessionNameFor name, is running. It probes lazily, stopping at the
-// first running session.
-func (c *AgentSessionsCheck) hasRunningSession(registered []string, qualifiedName string) bool {
-	for _, sn := range registered {
+// its agent.SessionNameFor name, is running. A name absent from an attested
+// listing is not running and is not probed; any other name is confirmed through
+// IsRunning, stopping at the first running session.
+func (c *AgentSessionsCheck) hasRunningSession(listed map[string]bool, registered []string, qualifiedName string) bool {
+	names := append(append([]string(nil), registered...), agent.SessionNameFor(c.cityName, qualifiedName, c.sessionTemplate))
+	for _, sn := range names {
+		if listed != nil && !listed[sn] {
+			continue
+		}
 		if c.sp.IsRunning(sn) {
 			return true
 		}
 	}
-	return c.sp.IsRunning(agent.SessionNameFor(c.cityName, qualifiedName, c.sessionTemplate))
+	return false
 }
 
 // CanFix returns false.
@@ -669,7 +694,9 @@ func (c *OrphanSessionsCheck) expectedSessions() (map[string]bool, error) {
 // Name returns the check identifier.
 func (c *OrphanSessionsCheck) Name() string { return "orphan-sessions" }
 
-// Run finds sessions with the city prefix that don't match any configured agent.
+// Run finds running sessions that neither a configured agent's
+// agent.SessionNameFor name nor an open registry row of a configured agent
+// accounts for.
 func (c *OrphanSessionsCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	prefix := "" // per-city socket isolation: all sessions belong to this city

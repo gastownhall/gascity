@@ -5,6 +5,7 @@ import (
 	"io"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -149,6 +150,110 @@ func TestDoctorSessionRegistryReadsTheSessionStoreOnBothTopologies(t *testing.T)
 		}
 		want := map[string]string{sessionName: "worker", "worker-unlabeled": "worker"}
 		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("session registry = %v, want %v", got, want)
+		}
+	})
+}
+
+// doctorRetiredSessionRows writes open session rows for agents config no longer
+// has, with the runtime names the controller would leave behind: one still
+// active, one the controller already marked orphaned. It returns their runtime
+// session names.
+func doctorRetiredSessionRows(t *testing.T, cityPath string, cfg *config.City) []string {
+	t.Helper()
+	work, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("opening city store: %v", err)
+	}
+	t.Cleanup(func() { _ = closeBeadStoreHandle(work) })
+	sessions := cliSessionStore(work, cfg, cityPath)
+	rows := []map[string]string{
+		{"template": "retired", "state": "active", "session_name": "retired"},
+		{"template": "gone", "state": "orphaned", "session_name": "gone-gcg-x"},
+	}
+	names := make([]string, 0, len(rows))
+	for _, meta := range rows {
+		if _, err := sessions.Create(beads.Bead{
+			Type:     session.BeadType,
+			Labels:   []string{session.LabelSession},
+			Metadata: meta,
+		}); err != nil {
+			t.Fatalf("creating session row for %q: %v", meta["template"], err)
+		}
+		names = append(names, meta["session_name"])
+	}
+	return names
+}
+
+// The runtime of an agent removed from config is orphaned even while its
+// session row is still open: the controller drains it as "configured agent
+// removed", and with the controller down nothing closes the row. gc doctor's
+// orphan-sessions check, as buildDoctorChecks wires it, reports it, and --fix
+// stops it while the configured agent's pool session keeps running. This holds
+// wherever the city keeps its sessions.
+func TestDoctorOrphanSessionsReportsRemovedAgentRuntimesOnBothTopologies(t *testing.T) {
+	doctorTopologies(t, func(t *testing.T, split bool) {
+		cityPath, cfg, sessionName := doctorSessionCity(t, split)
+		retired := doctorRetiredSessionRows(t, cityPath, cfg)
+		sp := runtime.NewFake()
+		for _, name := range append([]string{sessionName, "stray-runtime"}, retired...) {
+			if err := sp.Start(t.Context(), name, runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		oldBuild := buildSessionProviderByName
+		buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+			return sp, nil
+		}
+		t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+
+		var orphans doctor.Check
+		for _, c := range buildDoctorChecks(cityPath, cfg, nil, buildDoctorChecksOpts{
+			SkipCityDoltCheck:    true,
+			SkipManagedDoltCheck: true,
+			SkipStorePreflight:   true,
+		}) {
+			if c.Name() == "orphan-sessions" {
+				orphans = c
+			}
+		}
+		if orphans == nil {
+			t.Fatal("buildDoctorChecks registered no orphan-sessions check")
+		}
+		ctx := &doctor.CheckContext{CityPath: cityPath}
+		r := orphans.Run(ctx)
+		got := append([]string(nil), r.Details...)
+		sort.Strings(got)
+		want := append([]string{"stray-runtime"}, retired...)
+		sort.Strings(want)
+		if r.Status != doctor.StatusWarning || !reflect.DeepEqual(got, want) {
+			t.Fatalf("orphan-sessions = %d %q %v, want Warning naming %v", r.Status, r.Message, r.Details, want)
+		}
+		if err := orphans.Fix(ctx); err != nil {
+			t.Fatalf("orphan-sessions Fix: %v", err)
+		}
+		for _, name := range want {
+			if sp.IsRunning(name) {
+				t.Errorf("orphan %q still running after Fix", name)
+			}
+		}
+		if !sp.IsRunning(sessionName) {
+			t.Errorf("configured agent's pool session %q was stopped by Fix", sessionName)
+		}
+	})
+}
+
+// The session registry maps only rows whose agent is still configured: a row
+// for an agent removed from config does not account for its runtime.
+func TestDoctorSessionRegistryLeavesOutRemovedAgentsOnBothTopologies(t *testing.T) {
+	doctorTopologies(t, func(t *testing.T, split bool) {
+		cityPath, cfg, sessionName := doctorSessionCity(t, split)
+		doctorRetiredSessionRows(t, cityPath, cfg)
+		got, err := doctorSessionRegistry(cityPath, cfg)()
+		if err != nil {
+			t.Fatalf("reading the session registry: %v", err)
+		}
+		if want := map[string]string{sessionName: "worker"}; !reflect.DeepEqual(got, want) {
 			t.Fatalf("session registry = %v, want %v", got, want)
 		}
 	})

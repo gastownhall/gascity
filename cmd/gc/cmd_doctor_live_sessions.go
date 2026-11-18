@@ -15,6 +15,7 @@ func doctorLiveSessionInfos(cityPath string, cfg *config.City) ([]session.Info, 
 	if err != nil {
 		return nil, err
 	}
+	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort close of a read-only handle
 	infos, err := session.NewStore(beads.SessionStore{Store: cliSessionStore(store, cfg, cityPath)}).ListLabeledSessionInfosUnfiltered()
 	if err != nil {
 		return nil, err
@@ -52,8 +53,10 @@ func doctorLiveSessionNames(cityPath string, cfg *config.City) doctor.LiveSessio
 
 // doctorSessionRegistry returns the session registry the agent-sessions and
 // orphan-sessions checks read: each open session row's runtime session name,
-// mapped to the configured agent it runs. It lists the rows the way gc
-// session list and the controller do (the type+label union) from the session
+// mapped to the configured agent it runs. A row whose agent is no longer
+// configured is left out: the controller drains that runtime as orphaned, so
+// the row must not account for it. It lists the rows the way gc session list
+// and the controller do (the type+label union) from the session
 // coordination-class store, so a city that relocates its sessions class is
 // read from that binding. Each call reads afresh, and a failed or partial read
 // is returned as an error, so a check that cannot read the registry says so
@@ -64,6 +67,7 @@ func doctorSessionRegistry(cityPath string, cfg *config.City) doctor.SessionRegi
 		if err != nil {
 			return nil, err
 		}
+		defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort close of a read-only handle
 		infos, err := cliSessionFrontDoor(store, cfg, cityPath).ListAll(session.ListAllOptions{})
 		if err != nil {
 			return nil, err
@@ -73,7 +77,11 @@ func doctorSessionRegistry(cityPath string, cfg *config.City) doctor.SessionRegi
 			if info.Closed || info.SessionName == "" {
 				continue
 			}
-			names[info.SessionName] = resolvedSessionTemplateInfo(info, cfg)
+			template := resolvedSessionTemplateInfo(info, cfg)
+			if findSessionAgentByTemplate(cfg, template) == nil {
+				continue
+			}
+			names[info.SessionName] = template
 		}
 		return names, nil
 	}

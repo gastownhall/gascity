@@ -938,6 +938,77 @@ func TestAgentSessionsCheck_UnreadableRegistryWarns(t *testing.T) {
 	}
 }
 
+// A provider that attests its listing is listed once: a registered session
+// absent from the listing is not running and is never probed, so an agent with
+// many asleep rows costs no per-row provider call. A listed session is still
+// confirmed through IsRunning.
+func TestAgentSessionsCheck_AttestedListingSkipsUnlistedProbes(t *testing.T) {
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "worker-gcg-9", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker"}, {Name: "probe"}}}
+	registry := func() (map[string]string, error) {
+		return map[string]string{
+			"worker-gcg-1": "worker", "worker-gcg-2": "worker", "worker-gcg-9": "worker",
+			"s-gcg-3": "probe", "s-gcg-4": "probe",
+		}, nil
+	}
+	r := NewAgentSessionsCheck(cfg, "test", "", sp, registry).Run(&CheckContext{})
+	if want := []string{"probe"}; r.Status != StatusWarning || !reflect.DeepEqual(r.Details, want) {
+		t.Fatalf("result = %d %q %v, want Warning naming %v", r.Status, r.Message, r.Details, want)
+	}
+	if n := sp.CountCalls("ListRunning", ""); n != 1 {
+		t.Errorf("ListRunning called %d times, want 1", n)
+	}
+	for _, name := range []string{"worker-gcg-1", "worker-gcg-2", "s-gcg-3", "s-gcg-4", "worker", "probe"} {
+		if n := sp.CountCalls("IsRunning", name); n != 0 {
+			t.Errorf("IsRunning(%q) called %d times, want 0: it is not in the attested listing", name, n)
+		}
+	}
+	if n := sp.CountCalls("IsRunning", "worker-gcg-9"); n != 1 {
+		t.Errorf("IsRunning(worker-gcg-9) called %d times, want 1 to confirm the listed session", n)
+	}
+}
+
+// A listing the provider does not attest, or one that fails, proves no
+// absence: the check probes each name through IsRunning as before.
+func TestAgentSessionsCheck_UnattestedOrFailedListingProbesEachName(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sp   func(*runtime.Fake) runtime.Provider
+	}{
+		{"unattested", func(f *runtime.Fake) runtime.Provider {
+			f.ListingUnattested = true
+			return f
+		}},
+		{"partial", func(f *runtime.Fake) runtime.Provider {
+			return &partialListDoctorProvider{Fake: f, listErr: &runtime.PartialListError{Err: errors.New("remote backend down")}}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := runtime.NewFake()
+			if err := fake.Start(context.Background(), "worker-gcg-9", runtime.Config{}); err != nil {
+				t.Fatal(err)
+			}
+			sp := tc.sp(fake)
+			cfg := &config.City{Agents: []config.Agent{{Name: "worker"}, {Name: "probe"}}}
+			registry := func() (map[string]string, error) {
+				return map[string]string{"worker-gcg-9": "worker", "s-gcg-3": "probe"}, nil
+			}
+			r := NewAgentSessionsCheck(cfg, "test", "", sp, registry).Run(&CheckContext{})
+			if want := []string{"probe"}; r.Status != StatusWarning || !reflect.DeepEqual(r.Details, want) {
+				t.Fatalf("result = %d %q %v, want Warning naming %v", r.Status, r.Message, r.Details, want)
+			}
+			for _, name := range []string{"worker-gcg-9", "s-gcg-3", "probe"} {
+				if n := fake.CountCalls("IsRunning", name); n != 1 {
+					t.Errorf("IsRunning(%q) called %d times, want 1: the listing proves no absence", name, n)
+				}
+			}
+		})
+	}
+}
+
 // --- ZombieSessionsCheck ---
 
 func TestZombieSessionsCheck_NoZombies(t *testing.T) {
