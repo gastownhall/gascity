@@ -234,7 +234,7 @@ func TestLoose() {
 			reported := strings.Join(problems, "\n")
 			for _, fn := range []string{"TestMigrated", "TestLoose", "TestRenamed"} {
 				if !strings.Contains(reported, fn) {
-					t.Errorf("problems %q do not report %s", problems, fn)
+					t.Errorf("problems %q omit %s", problems, fn)
 				}
 			}
 			if len(problems) != 3 {
