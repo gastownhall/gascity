@@ -505,3 +505,56 @@ func TestMessageRecordsCodexUsageOldestFirstThroughFailure(t *testing.T) {
 		t.Fatalf("facts after the next op = %v, want %v", got, want)
 	}
 }
+
+// TestSweepCodexUsageReplaysLegacyCursorUnderFloor starts from what an older
+// gc left: a flat cursor at total:300, the fact it billed for that invocation,
+// and no checkpoint. The sweep replays the current interval: the billed fact
+// keeps its key (no second copy), the invocations the tail window lost are
+// added, and an invocation before the interval's floor is not billed.
+func TestSweepCodexUsageReplaysLegacyCursorUnderFloor(t *testing.T) {
+	fx := newCodexRecorderFixture(t)
+	lines := []map[string]any{
+		codexWorkerSessionMeta(fx.meta["work_dir"]),
+		fx.turnContext(-7200, "gpt-5.5"),
+		fx.tokenCount(-7200, 100), // an earlier interval's invocation
+		fx.tokenCount(1, 150),
+	}
+	lines = append(lines, codexToolOutputs(16, 8*1024)...)
+	lines = append(lines, fx.tokenCount(2, 300))
+	lines = append(lines, codexToolOutputs(16, 8*1024)...)
+	lines = append(lines, fx.tokenCount(3, 450))
+	fx.write(t, lines)
+
+	legacy := usage.Fact{
+		RunID:          "run-R",
+		SessionID:      fx.id,
+		Kind:           usage.KindModel,
+		Model:          "gpt-5.5",
+		Provider:       "codex",
+		InputTokens:    1,
+		UpstreamReqID:  "total:300",
+		At:             fx.start.Add(2 * time.Second).UnixMilli(),
+		IdempotencyKey: usage.ModelIdempotencyKey("run-R", "total:300"),
+	}
+	if err := usage.NewLocalSink(fx.sinkPath).Record(context.Background(), legacy); err != nil {
+		t.Fatalf("seed legacy fact: %v", err)
+	}
+	if err := fx.store.SetMetadata(fx.id, sessionpkg.MetadataKeyInvocationUsageCursor, "total:300"); err != nil {
+		t.Fatalf("seed legacy cursor: %v", err)
+	}
+
+	fx.sweepUntilSettled(t, 5)
+
+	ids, byID := fx.logicalFacts(t)
+	if want := []string{"total:150", "total:300", "total:450"}; !reflect.DeepEqual(ids, want) {
+		t.Fatalf("logical facts = %v, want %v (total:100 predates the interval)", ids, want)
+	}
+	if got := byID["total:300"]; got != legacy {
+		t.Fatalf("total:300 = %+v, want the legacy fact kept under its key %+v", got, legacy)
+	}
+	for _, id := range []string{"total:150", "total:450"} {
+		if got, want := byID[id].IdempotencyKey, usage.ModelIdempotencyKey("run-R", id); got != want {
+			t.Fatalf("%s key = %q, want %q", id, got, want)
+		}
+	}
+}
