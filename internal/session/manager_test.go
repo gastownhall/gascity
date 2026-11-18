@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -6224,6 +6225,107 @@ func TestPersistInvocationUsageCursor(t *testing.T) {
 	}
 	if got := b.Metadata[MetadataKeyInvocationUsageCursor]; got != "u2" {
 		t.Fatalf("cursor metadata after no-ops = %q, want u2", got)
+	}
+}
+
+// TestPersistCodexUsageCheckpointIfCurrent pins the conditional commit of a
+// codex usage checkpoint: progress may advance (or repeat) for a rollout, a
+// checkpoint naming a different rollout replaces the stored one, but a stale
+// write for the same rollout never rewinds committed progress — an
+// out-of-order recorder must not lose the bytes a later pass already covered
+// (ga-amrzyf case 2).
+func TestPersistCodexUsageCheckpointIfCurrent(t *testing.T) {
+	store := beads.NewMemStore()
+	mgr := newTestManager(t, store, runtime.NewFake())
+
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "chat", Command: "claude", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	rawCheckpoint := func(sourcePath string, offset int64) string {
+		t.Helper()
+		raw, err := json.Marshal(codexUsageCheckpointEnvelope{Version: 1, SourcePath: sourcePath, Offset: offset})
+		if err != nil {
+			t.Fatalf("marshal checkpoint: %v", err)
+		}
+		return string(raw)
+	}
+	stored := func() string {
+		b, err := store.Get(info.ID)
+		if err != nil {
+			t.Fatalf("store.Get: %v", err)
+		}
+		return b.Metadata[MetadataKeyCodexUsageCheckpoint]
+	}
+
+	rolloutA := "/codex/sessions/2026/11/18/rollout-a.jsonl"
+	// A first checkpoint stores.
+	first := rawCheckpoint(rolloutA, 100)
+	if err := mgr.PersistCodexUsageCheckpointIfCurrent(info.ID, first); err != nil {
+		t.Fatalf("persist first: %v", err)
+	}
+	if got := stored(); got != first {
+		t.Fatalf("stored checkpoint = %q, want %q", got, first)
+	}
+
+	// A newer offset for the same rollout advances.
+	second := rawCheckpoint(rolloutA, 200)
+	if err := mgr.PersistCodexUsageCheckpointIfCurrent(info.ID, second); err != nil {
+		t.Fatalf("persist second: %v", err)
+	}
+	if got := stored(); got != second {
+		t.Fatalf("stored checkpoint after advance = %q, want %q", got, second)
+	}
+
+	// A stale offset for the same rollout never rewinds committed progress.
+	stale := rawCheckpoint(rolloutA, 150)
+	if err := mgr.PersistCodexUsageCheckpointIfCurrent(info.ID, stale); err != nil {
+		t.Fatalf("persist stale: %v", err)
+	}
+	if got := stored(); got != second {
+		t.Fatalf("stored checkpoint after stale write = %q, want the newer %q kept", got, second)
+	}
+
+	// A checkpoint naming a different rollout replaces the stored one: a
+	// fresh rollout starts fresh progress.
+	rolloutB := "/codex/sessions/2026/11/18/rollout-b.jsonl"
+	fresh := rawCheckpoint(rolloutB, 10)
+	if err := mgr.PersistCodexUsageCheckpointIfCurrent(info.ID, fresh); err != nil {
+		t.Fatalf("persist fresh rollout: %v", err)
+	}
+	if got := stored(); got != fresh {
+		t.Fatalf("stored checkpoint after fresh rollout = %q, want %q", got, fresh)
+	}
+
+	// An unparseable checkpoint is an error and writes nothing.
+	if err := mgr.PersistCodexUsageCheckpointIfCurrent(info.ID, "not json"); err == nil {
+		t.Fatal("an unparseable checkpoint must be an error, not a silent write")
+	}
+	if got := stored(); got != fresh {
+		t.Fatalf("stored checkpoint after refused write = %q, want %q kept", got, fresh)
+	}
+
+	// A stored value that cannot be parsed cannot fence a valid write.
+	if err := store.SetMetadata(info.ID, MetadataKeyCodexUsageCheckpoint, "}corrupt{"); err != nil {
+		t.Fatalf("corrupt stored checkpoint: %v", err)
+	}
+	repaired := rawCheckpoint(rolloutB, 20)
+	if err := mgr.PersistCodexUsageCheckpointIfCurrent(info.ID, repaired); err != nil {
+		t.Fatalf("persist over corrupt: %v", err)
+	}
+	if got := stored(); got != repaired {
+		t.Fatalf("stored checkpoint after repair = %q, want %q", got, repaired)
+	}
+
+	// Empty id or checkpoint is a no-op, not an error.
+	if err := mgr.PersistCodexUsageCheckpointIfCurrent("", rawCheckpoint(rolloutB, 30)); err != nil {
+		t.Fatalf("persist empty id: %v", err)
+	}
+	if err := mgr.PersistCodexUsageCheckpointIfCurrent(info.ID, "   "); err != nil {
+		t.Fatalf("persist blank checkpoint: %v", err)
+	}
+	if got := stored(); got != repaired {
+		t.Fatalf("stored checkpoint after no-ops = %q, want %q", got, repaired)
 	}
 }
 

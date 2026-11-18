@@ -30,31 +30,60 @@ const (
 // CodexUsageCheckpoint is the committed forward-progress state of one codex
 // rollout usage read: everything at or before Offset has been parsed, and the
 // fields beside it are the parser state at that boundary, so a later pass
-// resumes exactly where this one stopped.
+// resumes exactly where this one stopped. MarshalCodexUsageCheckpoint and
+// ParseCodexUsageCheckpoint are its persisted form.
 type CodexUsageCheckpoint struct {
 	// Version is the checkpoint schema version (codexUsageCheckpointVersion).
-	Version int
+	Version int `json:"version"`
 	// SourcePath and SourceID bind the checkpoint to the rollout it describes:
 	// the path the read resolved to and the session_meta payload.id observed at
 	// the head of that file. A resume against a different source is refused.
-	SourcePath string
-	SourceID   string
+	SourcePath string `json:"source_path"`
+	SourceID   string `json:"source_id,omitempty"`
 	// Offset is a committed complete-line boundary: every byte before it has
 	// been parsed. An unterminated trailing line is never committed.
-	Offset int64
+	Offset int64 `json:"offset"`
 	// TurnModel is the model announced by the last turn_context at or before
 	// Offset. It labels invocations the next pass finds before any newer
 	// announcement, so model context that scrolled past every window still
 	// prices later usage.
-	TurnModel string
+	TurnModel string `json:"turn_model,omitempty"`
 	// LastInvocationID, LastInvocationModel and LastInvocationAt describe the
 	// last usage emitted at or before Offset: its cumulative-total identity,
 	// first-observed model and first-observed time. A later pass uses them to
 	// recognize the duplicate snapshot the CLI re-emits after the next
 	// turn_context without counting it twice.
-	LastInvocationID    string
-	LastInvocationModel string
-	LastInvocationAt    time.Time
+	LastInvocationID    string    `json:"last_invocation_id,omitempty"`
+	LastInvocationModel string    `json:"last_invocation_model,omitempty"`
+	LastInvocationAt    time.Time `json:"last_invocation_at"`
+}
+
+// MarshalCodexUsageCheckpoint renders a checkpoint in its persisted form: a
+// JSON document stamped with the current schema version, small enough to store
+// as session metadata. Consumers round-trip continuations through it so a
+// bounded read resumes where it stopped across handle and process churn
+// (ga-amrzyf case 2).
+func MarshalCodexUsageCheckpoint(cp CodexUsageCheckpoint) (string, error) {
+	cp.Version = codexUsageCheckpointVersion
+	raw, err := json.Marshal(cp)
+	if err != nil {
+		return "", fmt.Errorf("marshaling codex usage checkpoint: %w", err)
+	}
+	return string(raw), nil
+}
+
+// ParseCodexUsageCheckpoint decodes a persisted checkpoint. A document with a
+// foreign schema version, or anything that does not parse, is an error rather
+// than a zero checkpoint, which would silently restart committed progress.
+func ParseCodexUsageCheckpoint(raw string) (CodexUsageCheckpoint, error) {
+	var cp CodexUsageCheckpoint
+	if err := json.Unmarshal([]byte(raw), &cp); err != nil {
+		return CodexUsageCheckpoint{}, fmt.Errorf("parsing codex usage checkpoint: %w", err)
+	}
+	if cp.Version != codexUsageCheckpointVersion {
+		return CodexUsageCheckpoint{}, fmt.Errorf("parsing codex usage checkpoint: version %d is not %d", cp.Version, codexUsageCheckpointVersion)
+	}
+	return cp, nil
 }
 
 // CodexUsagePageBudgets bounds one ReadCodexUsagePage pass. Zero values select

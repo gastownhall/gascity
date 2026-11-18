@@ -2577,6 +2577,63 @@ func (m *Manager) PersistInvocationUsageCursor(id, cursor string) error {
 	})
 }
 
+// MetadataKeyCodexUsageCheckpoint stores the committed forward-progress
+// checkpoint of a codex rollout's model-usage read, as the opaque JSON
+// document sessionlog's MarshalCodexUsageCheckpoint produces. It survives
+// handle and process churn so a bounded read resumes where it stopped
+// instead of restarting from byte zero. See PersistCodexUsageCheckpointIfCurrent.
+const MetadataKeyCodexUsageCheckpoint = "codex_usage_checkpoint"
+
+// codexUsageCheckpointEnvelope carries just the ordering fields the session
+// layer needs from a stored checkpoint document; the rest stays opaque to it.
+type codexUsageCheckpointEnvelope struct {
+	Version    int    `json:"version"`
+	SourcePath string `json:"source_path"`
+	Offset     int64  `json:"offset"`
+}
+
+// PersistCodexUsageCheckpointIfCurrent stores the codex usage checkpoint on an
+// existing session unless the stored one already describes more progress on
+// the same rollout: a write whose offset does not advance the stored
+// checkpoint's for that source is a no-op, so an out-of-order recorder cannot
+// rewind committed progress. A checkpoint naming a different source replaces
+// the stored one (a fresh rollout starts fresh progress), as does a valid
+// write over a stored value that does not parse, which cannot fence anything.
+// The document is otherwise opaque to the session layer. A closed session is
+// accepted, like the invocation usage cursor: the usage lane sweeps a closed
+// row's last interval. Empty id or checkpoint is a no-op; a checkpoint that
+// does not parse as JSON is an error with nothing written.
+func (m *Manager) PersistCodexUsageCheckpointIfCurrent(id, raw string) error {
+	raw = strings.TrimSpace(raw)
+	if id == "" || raw == "" {
+		return nil
+	}
+	var next codexUsageCheckpointEnvelope
+	if err := json.Unmarshal([]byte(raw), &next); err != nil {
+		return fmt.Errorf("parsing codex usage checkpoint: %w", err)
+	}
+	return withSessionMutationLock(id, func() error {
+		b, _, err := m.loadSessionBead(id, true)
+		if err != nil {
+			return err
+		}
+		if priorRaw := strings.TrimSpace(b.Metadata[MetadataKeyCodexUsageCheckpoint]); priorRaw != "" {
+			var prior codexUsageCheckpointEnvelope
+			if err := json.Unmarshal([]byte(priorRaw), &prior); err == nil &&
+				prior.SourcePath != "" && prior.SourcePath == next.SourcePath &&
+				prior.Offset > next.Offset {
+				// Stale: the stored checkpoint already covers more of the same
+				// rollout. Keep it.
+				return nil
+			}
+		}
+		if err := m.store.SetMetadata(id, MetadataKeyCodexUsageCheckpoint, raw); err != nil {
+			return fmt.Errorf("storing codex usage checkpoint: %w", err)
+		}
+		return nil
+	})
+}
+
 // sessionNameFor derives the tmux session name from a bead ID.
 // Uses the "s-" prefix to avoid collision with agent sessions.
 func sessionNameFor(beadID string) string {

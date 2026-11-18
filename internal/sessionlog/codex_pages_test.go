@@ -223,3 +223,106 @@ func TestReadCodexUsagePageCollapsesDuplicateEmissionsWithinAPage(t *testing.T) 
 		t.Fatalf("post-switch model = %q, want gpt-5.6", u.Model)
 	}
 }
+
+// TestCodexUsageCheckpointRoundTrip pins the checkpoint's persisted form: a
+// marshal/parse cycle reproduces every field, a foreign version is refused,
+// and garbage is an error rather than a zero checkpoint that would silently
+// restart progress.
+func TestCodexUsageCheckpointRoundTrip(t *testing.T) {
+	cp := CodexUsageCheckpoint{
+		Version:             codexUsageCheckpointVersion,
+		SourcePath:          "/codex/2026/11/18/rollout-x.jsonl",
+		SourceID:            "019e7777-eeee-7000-8000-00000000000f",
+		Offset:              12345,
+		TurnModel:           "gpt-5.5",
+		LastInvocationID:    "total:450",
+		LastInvocationModel: "gpt-5.5",
+		LastInvocationAt:    time.Date(2026, 11, 18, 10, 0, 0, 0, time.UTC),
+	}
+	raw, err := MarshalCodexUsageCheckpoint(cp)
+	if err != nil {
+		t.Fatalf("MarshalCodexUsageCheckpoint: %v", err)
+	}
+	back, err := ParseCodexUsageCheckpoint(raw)
+	if err != nil {
+		t.Fatalf("ParseCodexUsageCheckpoint: %v", err)
+	}
+	if back != cp {
+		t.Fatalf("round trip = %+v, want %+v", back, cp)
+	}
+
+	foreign := strings.Replace(raw, fmt.Sprintf(`"version":%d`, codexUsageCheckpointVersion), `"version":99`, 1)
+	if _, err := ParseCodexUsageCheckpoint(foreign); err == nil {
+		t.Fatal("a foreign checkpoint version must be refused, not parsed")
+	}
+	if _, err := ParseCodexUsageCheckpoint("not json"); err == nil {
+		t.Fatal("garbage must be an error, not a zero checkpoint")
+	}
+}
+
+// TestReadCodexUsagePageSpansRestartWithDistantModelContext pins ga-amrzyf
+// case 3's mechanism on the page reader: a turn_context more than 2 MiB before
+// its invocations (far past the old 1 MiB model-seed budget) still labels them
+// when pages thread a checkpoint across a restart, and a later switch plus
+// re-emission keeps the original invocation's model and time.
+func TestReadCodexUsagePageSpansRestartWithDistantModelContext(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollout-distant-model.jsonl")
+	var lines []string
+	lines = append(lines,
+		`{"timestamp":"2026-11-18T09:00:00Z","type":"turn_context","payload":{"model":"gpt-5.5"}}`,
+		codexTokenCountLine("2026-11-18T09:00:01Z", 150, 100, 0, 50, 0),
+	)
+	// More than 2 MiB of tool output between the announcement and the next
+	// invocation: past the old seed scan, and past several 512 KiB pages.
+	for i := range 520 {
+		lines = append(lines, codexPageFillerLine(time.Date(2026, 11, 18, 9, 0, 2, i*1000000, time.UTC).Format(time.RFC3339Nano)))
+	}
+	lines = append(lines,
+		codexTokenCountLine("2026-11-18T10:00:00Z", 300, 200, 0, 100, 0),
+		`{"timestamp":"2026-11-18T10:00:01Z","type":"turn_context","payload":{"model":"gpt-5.6"}}`,
+		codexTokenCountLine("2026-11-18T10:00:02Z", 300, 200, 0, 100, 0), // re-emission
+		codexTokenCountLine("2026-11-18T10:00:03Z", 450, 250, 0, 200, 0),
+	)
+	writeCodexUsageLines(t, path, lines)
+
+	// Drain in 512 KiB pages, round-tripping every continuation through the
+	// persisted form between passes: each resume is a restart.
+	var usages []TailUsage
+	resume := (*CodexUsageCheckpoint)(nil)
+	passes := 0
+	for passes < 64 {
+		if resume != nil {
+			raw, err := MarshalCodexUsageCheckpoint(*resume)
+			if err != nil {
+				t.Fatalf("marshal continuation: %v", err)
+			}
+			parsed, err := ParseCodexUsageCheckpoint(raw)
+			if err != nil {
+				t.Fatalf("parse continuation: %v", err)
+			}
+			resume = &parsed
+		}
+		page, err := ReadCodexUsagePage(context.Background(), path, resume, CodexUsagePageBudgets{InputBytes: 512 * 1024})
+		if err != nil {
+			t.Fatalf("pass %d: %v", passes, err)
+		}
+		usages = append(usages, page.Usages...)
+		passes++
+		if !page.More {
+			break
+		}
+		resume = &page.Final
+	}
+	if passes < 3 {
+		t.Fatalf("drain took %d passes, want the 2 MiB gap to span several 512 KiB pages", passes)
+	}
+	if got := strings.Join(codexPageUsageIDs(usages), ","); got != "total:150,total:300,total:450" {
+		t.Fatalf("identities = %s, want three invocations once each (re-emission collapsed or skipped)", got)
+	}
+	if u := usages[1]; u.Model != "gpt-5.5" || u.Timestamp.UTC().Format(time.RFC3339) != "2026-11-18T10:00:00Z" {
+		t.Fatalf("distant-context invocation = model %q at %v, want gpt-5.5 at 10:00:00Z (the >2 MiB-back announcement labels it)", u.Model, u.Timestamp)
+	}
+	if u := usages[2]; u.Model != "gpt-5.6" {
+		t.Fatalf("post-switch invocation model = %q, want gpt-5.6", u.Model)
+	}
+}
