@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -239,12 +240,19 @@ func TestSweepCodexUsageDrainsBacklogOverBoundedPasses(t *testing.T) {
 // sweeps, with only the session bead's committed progress carried over.
 func (fx *codexRecorderFixture) restart(t *testing.T) {
 	t.Helper()
+	fx.restartWith(t, usage.NewLocalSink(fx.sinkPath), fx.store)
+}
+
+// restartWith is restart with the new factory writing facts to sink and
+// session progress through store, each of which may wrap the fixture's own.
+func (fx *codexRecorderFixture) restartWith(t *testing.T, sink usage.Sink, store beads.Store) {
+	t.Helper()
 	limits := fx.factory.codexUsageLimits
 	factory, err := NewFactory(FactoryConfig{
-		Store:       fx.store,
+		Store:       store,
 		Provider:    runtime.NewFake(),
 		SearchPaths: []string{fx.root},
-		UsageSink:   usage.NewLocalSink(fx.sinkPath),
+		UsageSink:   sink,
 	})
 	if err != nil {
 		t.Fatalf("NewFactory after restart: %v", err)
@@ -305,5 +313,101 @@ func TestSweepCodexUsageKeepsModelContextAcrossPagesAndRestart(t *testing.T) {
 		if at := fx.start.Add(time.Duration(w.sec) * time.Second).UnixMilli(); f.At != at {
 			t.Fatalf("%s at = %d, want its own invocation time %d", id, f.At, at)
 		}
+	}
+}
+
+// failNthModelSink fails the nth model fact written to it, once.
+type failNthModelSink struct {
+	inner  usage.Sink
+	n      int
+	writes int
+}
+
+func (s *failNthModelSink) Record(ctx context.Context, f usage.Fact) error {
+	if f.Kind == usage.KindModel {
+		s.writes++
+		if s.writes == s.n {
+			return errors.New("transient sink failure")
+		}
+	}
+	return s.inner.Record(ctx, f)
+}
+
+// failingProgressStore fails the next fails writes of the codex usage
+// checkpoint.
+type failingProgressStore struct {
+	beads.Store
+	fails int
+}
+
+func (s *failingProgressStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	if _, ok := kvs[sessionpkg.MetadataKeyCodexUsageCheckpoint]; ok && s.fails > 0 {
+		s.fails--
+		return errors.New("transient store failure")
+	}
+	return s.Store.SetMetadataBatch(id, kvs)
+}
+
+// TestSweepCodexUsageRetriesSinkAndStoreFailuresAcrossRestarts fails a fact
+// write mid-page, restarts, fails the progress commit after the rest were
+// written, restarts again and retries: the logical facts equal those of an
+// uninterrupted run, with no invocation lost.
+func TestSweepCodexUsageRetriesSinkAndStoreFailuresAcrossRestarts(t *testing.T) {
+	fx := newCodexRecorderFixture(t)
+	lines := []map[string]any{
+		codexWorkerSessionMeta(fx.meta["work_dir"]),
+		fx.turnContext(0, "gpt-5.5"),
+		fx.tokenCount(1, 150),
+	}
+	lines = append(lines, codexToolOutputs(16, 8*1024)...)
+	lines = append(lines, fx.tokenCount(2, 300))
+	lines = append(lines, codexToolOutputs(16, 8*1024)...)
+	lines = append(lines,
+		fx.tokenCount(3, 450),
+		fx.turnContext(4, "gpt-5.6"),
+		fx.tokenCount(5, 450),
+		fx.tokenCount(6, 600),
+	)
+
+	// The uninterrupted run, over its own session and sink.
+	ref := newCodexRecorderFixture(t)
+	ref.write(t, lines)
+	ref.sweepUntilSettled(t, 5)
+	wantIDs, wantFacts := ref.logicalFacts(t)
+
+	fx.write(t, lines)
+	fx.restartWith(t, &failNthModelSink{inner: usage.NewLocalSink(fx.sinkPath), n: 2}, fx.store)
+	if emitted, settled, err := fx.sweep(t); err == nil || settled || emitted != 1 {
+		t.Fatalf("sweep with a failing second write = %d, %v, %v; want 1 recorded, unsettled, the sink error", emitted, settled, err)
+	}
+	if progress, err := fx.factory.manager.InvocationUsageProgress(fx.id); err != nil || progress.Cursor != "total:150" {
+		t.Fatalf("progress after the sink failure = %+v, %v; want it committed through total:150", progress, err)
+	}
+
+	fx.restartWith(t, usage.NewLocalSink(fx.sinkPath), &failingProgressStore{Store: fx.store, fails: 1})
+	if _, settled, err := fx.sweep(t); err == nil || settled {
+		t.Fatalf("sweep with a failing commit settled=%v err=%v; want unsettled with the store error", settled, err)
+	}
+
+	fx.restart(t)
+	fx.sweepUntilSettled(t, 5)
+
+	ids, facts := fx.logicalFacts(t)
+	if !reflect.DeepEqual(ids, wantIDs) {
+		t.Fatalf("logical facts = %v, want the uninterrupted run's %v", ids, wantIDs)
+	}
+	for _, id := range ids {
+		got, want := facts[id], wantFacts[id]
+		got.SessionID, want.SessionID = "", ""
+		if got != want {
+			t.Fatalf("%s = %+v, want the uninterrupted run's %+v", id, got, want)
+		}
+	}
+	if want := []string{"total:150", "total:300", "total:450", "total:600"}; !reflect.DeepEqual(ids, want) {
+		t.Fatalf("logical facts = %v, want %v", ids, want)
+	}
+	progress, err := fx.factory.manager.InvocationUsageProgress(fx.id)
+	if err != nil || progress.Cursor != "total:600" {
+		t.Fatalf("final progress = %+v, %v; want cursor total:600", progress, err)
 	}
 }
