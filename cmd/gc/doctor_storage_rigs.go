@@ -39,7 +39,7 @@ func (c *storageRigsCheck) Run(*doctor.CheckContext) *doctor.CheckResult {
 	}
 	var details, findings []string
 	reused := 0
-	for _, r := range censusRigs(c.cityPath, c.cfg, target, false) {
+	for _, r := range censusRigs(c.cityPath, c.cfg, target) {
 		if r.blocking() {
 			details = append(details, rigCensusLine(r))
 		}

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // The wisp GC purge, on its own lane.
@@ -197,7 +198,8 @@ func (cr *CityRuntime) runWispGCLanePass(ctx context.Context, wake bool, ran *bo
 		// touched until it resumes.
 		return
 	}
-	graphStore := cr.graphBeadStore()
+	stores := cr.cityStores()
+	graphStore := stores.Graph()
 	if graphStore == (beads.GraphStore{}) {
 		return
 	}
@@ -212,7 +214,7 @@ func (cr *CityRuntime) runWispGCLanePass(ctx context.Context, wake bool, ran *bo
 		return
 	}
 	*ran = true
-	cr.purgeWispGC(wg, graphStore)
+	cr.purgeWispGC(wg, stores, graphStore)
 	lane.notePass(time.Now())
 }
 
@@ -221,9 +223,10 @@ func (cr *CityRuntime) runWispGCLanePass(ctx context.Context, wake bool, ran *bo
 // arm through the typed messaging-class store. The closed session purge arm
 // gets the sessions class only when it is relocated onto a SQLite infra
 // ledger; on an unsplit city it gets nothing and never touches the work
-// store. The purge is recorded as the wisp_gc operation in its own trace
-// cycle, aborted if the purge panics.
-func (cr *CityRuntime) purgeWispGC(wg wispGC, graphStore beads.GraphStore) {
+// store. Its readers are planned over stores, the epoch graphStore came from.
+// The purge is recorded as the wisp_gc operation in its own trace cycle,
+// aborted if the purge panics.
+func (cr *CityRuntime) purgeWispGC(wg wispGC, stores storeref.Stores, graphStore beads.GraphStore) {
 	trace := cr.beginWispGCLaneTrace()
 	completion := TraceCompletionAborted
 	defer func() {
@@ -240,7 +243,13 @@ func (cr *CityRuntime) purgeWispGC(wg wispGC, graphStore beads.GraphStore) {
 	if _, relocated := graphClassBinding(cr.storageRoutes); relocated { // residency:allow — asks only whether the graph class is relocated; the legs come from the census plan (workLegs)
 		legs = cr.workLegs()
 	}
-	purged, gcErr := wg.runGC(legs, graphStore, cr.infraSessionLedger(), cr.mailBeadStore(), time.Now())
+	// The pass's readers: the epoch's Molecule{Roots} plan over the
+	// census legs (graph alone when legs is nil).
+	roots := wispGCGraphRoots(stores, graphStore)
+	if legs != nil {
+		roots = legs.wispGCRoots(stores, graphStore)
+	}
+	purged, gcErr := wg.runGC(roots, legs, graphStore, cr.infraSessionLedger(), cr.mailBeadStore(), time.Now())
 	payload := map[string]any{"purged": purged}
 	if legs != nil {
 		// The work arm runs on its own lane; the purge only wakes it and

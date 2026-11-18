@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/execenv"
 )
 
 const (
@@ -56,6 +57,10 @@ func generateTitle(provider *config.ResolvedProvider, message, workDir string) s
 	cmd := exec.CommandContext(ctx, provider.Command, args...)
 	if workDir != "" {
 		cmd.Dir = workDir
+	}
+	if execenv.CheckBatchFileArgs(cmd) != nil {
+		// A batch-file provider would hand the message to cmd.exe.
+		return truncateTitle(message)
 	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

@@ -67,6 +67,29 @@ func TestResolveSessionSleepPolicyExecPackCapability(t *testing.T) {
 			wantReason:     "interactive_capability_insufficient",
 		},
 	}
+	for _, row := range []struct {
+		name, caps string
+		full       bool
+	}{
+		{"ops full", `"carrier.ops","report-activity","report-attachment","idle-boundary"`, true},
+		{"ops missing activity", `"carrier.ops","report-attachment","idle-boundary"`, false},
+		{"ops missing attachment", `"carrier.ops","report-activity","idle-boundary"`, false},
+		{"ops missing idle boundary", `"carrier.ops","report-activity","report-attachment"`, false},
+	} {
+		capability, effective, reason := runtime.SessionSleepCapabilityTimedOnly, config.SessionSleepOff, "interactive_capability_insufficient"
+		if row.full {
+			capability, effective, reason = runtime.SessionSleepCapabilityFull, "60s", ""
+		}
+		tests = append(tests, struct {
+			name           string
+			handshake      string
+			wantCapability runtime.SessionSleepCapability
+			wantEffective  string
+			wantReason     string
+		}{
+			row.name, `{"version":0,"capabilities":[` + row.caps + `]}`, capability, effective, reason,
+		})
+	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sp := exec.NewSeamBacked(writeHandshakePack(t, tt.handshake))

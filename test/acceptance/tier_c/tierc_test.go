@@ -269,17 +269,24 @@ func TestGastown_PolecatImplementsRefineryMerges(t *testing.T) {
 	t.Logf("Slung work to polecat: %s", strings.TrimSpace(out))
 	attachedWorkflowID := parseAttachedWorkflowID(out)
 
+	// These reads go through gc, which sees the same beads on either
+	// topology. Tier C runs gc on the tool-home bd wrapper (WithHostHome),
+	// which a split city's gc bd refuses, so gc init --from starts this copy
+	// of the split example single-store. A split copy would keep the
+	// attached workflow root in the infrastructure store, which raw bd does
+	// not read: gc ready federates every store, and gc bd show answers an
+	// infrastructure id from the binding.
 	routeKey := gastownRigAgent(rigName, "polecat")
-	readyOut, err := bdCmd(testEnvC, rigDir, "ready", "--metadata-field", "gc.routed_to="+routeKey, "--unassigned", "--json", "--limit=20")
-	require.NoError(t, err, "bd ready")
+	readyOut, err := gcJSON(c, "ready", "--metadata-field", "gc.routed_to="+routeKey, "--unassigned", "--json", "--limit=20")
+	require.NoError(t, err, "gc ready: %s", readyOut)
 	var ready []beadJSON
 	require.NoError(t, json.Unmarshal([]byte(readyOut), &ready), "unmarshal ready queue")
 	require.Len(t, ready, 1, "expected only the routed source/workflow root in the ready queue")
 	require.NotContains(t, ready[0].ID, ".", "expected source/workflow root id, not a step id")
 
 	outerID := ready[0].ID
-	outerOut, err := bdCmd(testEnvC, rigDir, "show", outerID, "--json")
-	require.NoError(t, err, "bd show outer")
+	outerOut, err := gcJSON(c, "bd", "show", outerID, "--json")
+	require.NoError(t, err, "gc bd show outer: %s", outerOut)
 	var outer []beadJSON
 	require.NoError(t, json.Unmarshal([]byte(outerOut), &outer), "unmarshal outer bead")
 	require.Len(t, outer, 1, "expected one outer bead")
@@ -289,8 +296,8 @@ func TestGastown_PolecatImplementsRefineryMerges(t *testing.T) {
 	}
 	require.NotEmpty(t, moleculeID, "routed bead should carry or be the attached workflow/molecule root")
 
-	rootOut, err := bdCmd(testEnvC, rigDir, "show", moleculeID, "--json")
-	require.NoError(t, err, "bd show molecule root")
+	rootOut, err := gcJSON(c, "bd", "show", moleculeID, "--json")
+	require.NoError(t, err, "gc bd show molecule root: %s", rootOut)
 	var root []beadJSON
 	require.NoError(t, json.Unmarshal([]byte(rootOut), &root), "unmarshal molecule root")
 	require.Len(t, root, 1, "expected one molecule root")
@@ -627,6 +634,18 @@ func parseAttachedWorkflowID(output string) string {
 		return ""
 	}
 	return strings.TrimSpace(match[1])
+}
+
+// gcJSON runs a gc read in the city directory and returns its stdout, the JSON
+// the caller parses. Stderr carries advisories, such as config-load notices,
+// that would corrupt the parse, so it joins the output only when the command
+// fails.
+func gcJSON(c *helpers.City, args ...string) (string, error) {
+	stdout, stderr, err := helpers.RunGCStreams(c.Env, c.Dir, args...)
+	if err != nil {
+		return stdout + stderr, err
+	}
+	return stdout, nil
 }
 
 func bdCmd(env *helpers.Env, dir string, args ...string) (string, error) {

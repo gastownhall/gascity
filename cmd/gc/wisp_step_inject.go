@@ -3,10 +3,8 @@ package main
 import (
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"os"
-	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -14,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/extmsg"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // wispStepInjectionContent resolves the agent's current in-progress formula
@@ -53,8 +52,7 @@ func wispStepInjectionContentInProcess(effective string) string {
 	if store == nil {
 		return ""
 	}
-	routeCfg, _ := loadCityConfigWithoutBuiltinPackRefresh(effective, io.Discard)
-	b, err := resolveActiveWispStep(store, cliGraphStore(store, routeCfg, effective).Store, assignees)
+	b, err := resolveActiveWispStep(store, cliStores(effective, store), assignees)
 	if err != nil || b == nil {
 		return ""
 	}
@@ -130,15 +128,46 @@ func wispStepAssignees() []string {
 // Both stores, because the resolution spans two classes: roots and type=step
 // children are ClassGraph, the assignee-owned beads it starts from are work.
 // Ambiguities are logged to the process log, which is the hook's stderr.
-func resolveActiveWispStep(workStore, graphStore beads.Store, assignees []string) (*beads.Bead, error) {
+//
+// stores is the one-shot epoch over workStore (cliStores): its graph handle is
+// the graph store, and the molecule readers are its Molecule{Active} plan:
+// the graph store, then workStore when it is another store.
+func resolveActiveWispStep(workStore beads.Store, stores storeref.Stores, assignees []string) (*beads.Bead, error) {
 	if workStore == nil || len(assignees) == 0 {
 		return nil, nil
 	}
-	if graphStore == nil {
-		graphStore = workStore
+	plan, err := stores.Plan(storeref.Molecule{Kind: storeref.MoleculeActive, Scope: storeref.WorkRef, Near: workStore, NearRef: stepWorkStoreRef})
+	if err != nil {
+		return nil, fmt.Errorf("planning the step reminder's molecule readers: %w", err)
 	}
-	r := stepResolution{work: workStore, graph: graphStore, logf: log.Printf}
-	return r.activeStep(sameStoreHandle(workStore, graphStore), assignees)
+	// The graph reader is the plan's graph leg, strict: the graph store, or
+	// workStore when the epoch has none (the plan drops a missing leg).
+	r := stepResolution{work: workStore, logf: log.Printf}
+	storeref.EachTypedLeg(plan, func(leg storeref.TypedLeg) { r.molecules = append(r.molecules, stepMoleculeLegOf(leg, false)) })
+	r.graph = r.molecules[0].strict
+	return r.activeStep(len(plan.Legs) == 1, assignees)
+}
+
+// stepWorkStoreRef names the reminder's work store in its molecule plan.
+const stepWorkStoreRef = storeref.StoreRef("the step reminder's work store")
+
+// stepMoleculeLeg is one molecule reader of the step resolution: list reads
+// the in-progress molecule listing through the plan's federated leg (graph
+// roots in the graph store, v1 poured molecules on the work ledger), and
+// strict every other read of that store (a root by id, its step children),
+// which today's readers make unmarked and the gate polices (F6).
+type stepMoleculeLeg struct {
+	list   activeStepReader
+	strict activeStepReader
+}
+
+// stepMoleculeLegOf is a plan leg as a molecule reader, read live (past any
+// cache) when live is set: the controller's, over its request-bound clones.
+func stepMoleculeLegOf(leg storeref.TypedLeg, live bool) stepMoleculeLeg {
+	if live {
+		return stepMoleculeLeg{list: beads.LiveFor(leg.Reader), strict: beads.LiveFor(leg.Strict)}
+	}
+	return stepMoleculeLeg{list: leg.Reader, strict: leg.Strict}
 }
 
 // activeStepReader is the read surface the step resolution needs from a store.
@@ -159,17 +188,18 @@ type stepResolution struct {
 	// molecules are the readers a molecule root and its steps are looked up
 	// in, in order: the graph store, then — when the two are distinct stores —
 	// the work store, because a v1 POURED molecule is work class and lives on
-	// the work ledger. activeStep sets it; nil means the graph store alone.
-	molecules []activeStepReader
+	// the work ledger (the Molecule{Active} plan's legs). nil means the graph
+	// store alone.
+	molecules []stepMoleculeLeg
 }
 
 // moleculeReaders returns the readers a molecule root and its steps may live
 // in (see stepResolution.molecules).
-func (r stepResolution) moleculeReaders() []activeStepReader {
+func (r stepResolution) moleculeReaders() []stepMoleculeLeg {
 	if len(r.molecules) > 0 {
 		return r.molecules
 	}
-	return []activeStepReader{r.graph}
+	return []stepMoleculeLeg{{list: r.graph, strict: r.graph}}
 }
 
 // activeStep is resolveActiveWispStep over r. oneStore says whether the work
@@ -177,10 +207,6 @@ func (r stepResolution) moleculeReaders() []activeStepReader {
 // in-progress question; it is decided by the caller, which holds the stores
 // themselves rather than readers over them.
 func (r stepResolution) activeStep(oneStore bool, assignees []string) (*beads.Bead, error) {
-	r.molecules = []activeStepReader{r.graph}
-	if !oneStore && r.work != nil {
-		r.molecules = append(r.molecules, r.work)
-	}
 	// One store holding both classes answers every "what is in progress for
 	// these identities" question below from one listing; split classes ask
 	// each store their own.
@@ -316,15 +342,6 @@ func (c *claimedWork) activeMolecule(logf func(format string, args ...any)) *bea
 	return nil
 }
 
-// sameStoreHandle reports whether a and b are the same store handle.
-func sameStoreHandle(a, b beads.Store) bool {
-	if a == nil || b == nil {
-		return false
-	}
-	ta := reflect.TypeOf(a)
-	return ta == reflect.TypeOf(b) && ta.Kind() == reflect.Pointer && a == b
-}
-
 // activeMolecule returns the agent's in-progress molecule bead.
 // When multiple molecules are found, the most recently updated of the five
 // newest is returned and the ambiguity is logged. The sample is cut in created
@@ -339,24 +356,22 @@ func (r stepResolution) activeMolecule(assignees []string) (*beads.Bead, error) 
 // the reader that holds the molecule it picked. The sample per type is the
 // newest activeMoleculeSample roots across the readers.
 func (r stepResolution) activeMoleculeIn(assignees []string) (*beads.Bead, activeStepReader, error) {
-	readers := r.moleculeReaders()
+	legs := r.moleculeReaders()
 	for _, molType := range activeMoleculeTypes {
 		var sample []beads.Bead
 		owner := map[string]activeStepReader{}
-		for _, reader := range readers {
-			// One leg of the molecule union (S3a): graph roots in the graph
-			// store, v1 poured molecules (work class) on the work legs.
-			var results []beads.Bead
-			err := beads.FederatedRead(func() (err error) {
-				results, err = reader.List(beads.ListQuery{
-					Status:    "in_progress",
-					Type:      molType,
-					Assignees: assignees,
-					TierMode:  beads.TierBoth,
-					Limit:     activeMoleculeSample,
-					Sort:      beads.SortCreatedDesc,
-				})
-				return err
+		for _, leg := range legs {
+			// One leg of the molecule union (Molecule{Active}): graph roots in
+			// the graph store, v1 poured molecules (work class) on the work
+			// leg. The listing reads through the leg; the owner the reads that
+			// follow take is its strict reader.
+			results, err := leg.list.List(beads.ListQuery{
+				Status:    "in_progress",
+				Type:      molType,
+				Assignees: assignees,
+				TierMode:  beads.TierBoth,
+				Limit:     activeMoleculeSample,
+				Sort:      beads.SortCreatedDesc,
 			})
 			if err != nil {
 				return nil, nil, fmt.Errorf("listing in-progress %s beads: %w", molType, err)
@@ -365,11 +380,11 @@ func (r stepResolution) activeMoleculeIn(assignees []string) (*beads.Bead, activ
 				if _, dup := owner[b.ID]; dup {
 					continue
 				}
-				owner[b.ID] = reader
+				owner[b.ID] = leg.strict
 				sample = append(sample, b)
 			}
 		}
-		if len(readers) > 1 {
+		if len(legs) > 1 {
 			sort.SliceStable(sample, func(i, j int) bool { return sample[i].CreatedAt.After(sample[j].CreatedAt) })
 			if len(sample) > activeMoleculeSample {
 				sample = sample[:activeMoleculeSample]
@@ -512,10 +527,10 @@ func (r stepResolution) firstMoleculeRootIn(candidates []beads.Bead) (*beads.Bea
 			continue
 		}
 		var lastErr error
-		for _, reader := range r.moleculeReaders() {
-			root, err := reader.Get(rootID)
+		for _, leg := range r.moleculeReaders() {
+			root, err := leg.strict.Get(rootID)
 			if err == nil {
-				return &root, reader
+				return &root, leg.strict
 			}
 			lastErr = err
 			if !errors.Is(err, beads.ErrNotFound) {

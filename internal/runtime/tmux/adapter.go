@@ -474,6 +474,13 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	found, scanErr := proctable.ScanBySessionID(id)
 	running, listErr := p.ListRunning("")
+	if runtime.IsRuntimeServerAbsent(listErr) {
+		// No tmux server means no session can be gc-tracked, so every scanned
+		// root is provably untracked. Treating this as a scan failure refused
+		// the first start of every city (and every start after the server
+		// exits), because nothing would ever start the server.
+		running, listErr = nil, nil
+	}
 	if listErr != nil {
 		// Fail CLOSED: without the live-session list we cannot prove which
 		// scanned roots are gc-tracked, so none is marked tracked. Marking
@@ -1920,8 +1927,9 @@ func (o *tmuxStartOps) disableMouseAndActivity(name string) error {
 }
 
 func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration) error {
-	// Read the base env before arming the deadline: execenv.Environ waits out
-	// an in-flight native store open, and that wait is not the command's.
+	// Read the base env before arming the deadline, so the read is not the
+	// command's. During a native store open it is the environment as the open
+	// found it.
 	baseEnv := execenv.Environ()
 	// Deadline shape: with setupMaxTimeout unset (the default) the command
 	// gets the historical fixed wall-clock deadline. With it set, the budget
@@ -2403,10 +2411,24 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 	}
 
 	// Step 6.5: Run session_live commands (idempotent, re-applicable).
+	//
+	// The nudge above is warning-only, but each confirm poll is a tmux
+	// capture that does not watch ctx. Under load those polls consume the
+	// parent deadline after the nudge was already classified unconfirmed.
+	// Returning that deadline fails Start, and Provider.Start then tears
+	// down a session that is still alive. Treat it like a ready-probe
+	// deadline: keep going when the session survived. A real cancel, or a
+	// deadline whose session has already died, still fails the start.
+	// The kept session still gets its session_live commands: they run
+	// detached from the lapsed deadline, each bounded by setupTimeout.
+	liveCtx := ctx
 	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("sending startup nudge: %w", err)
+		if err := ignoreDeadlineIfSessionAlive(ops, name, "sending startup nudge", err); err != nil {
+			return err
+		}
+		liveCtx = context.WithoutCancel(ctx)
 	}
-	runSessionLive(ctx, ops, name, cfg, os.Stderr, setupTimeout)
+	runSessionLive(liveCtx, ops, name, cfg, os.Stderr, setupTimeout)
 
 	return nil
 }

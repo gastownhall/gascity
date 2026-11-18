@@ -31,6 +31,7 @@
 ./internal/fanout
 ./internal/fanout/fanouttest
 ./internal/gchome
+./internal/genshell/...
 ./internal/hostboot
 ./internal/logutil
 ./internal/loopbackport
@@ -43,6 +44,7 @@
 ./internal/poolplan
 ./internal/pricing
 ./internal/processenv
+./internal/processgroup
 ./internal/processgroup/processgrouptest
 ./internal/productmetrics
 ./internal/promptmeta

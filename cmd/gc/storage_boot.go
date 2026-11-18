@@ -312,7 +312,7 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 	// A gc older than the split's recorded floor reads none of it, whatever
 	// the config says (storage_min_gc_version.go). One failed stat on a city
 	// that has none.
-	if err := minGCVersionRefusal(cityPath, version); err != nil {
+	if err := minGCVersionRefusal(cityPath, gcVersionForFloor()); err != nil {
 		return nil, fmt.Errorf("%s: %w", logPrefix, err)
 	}
 
@@ -335,6 +335,19 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 	// The shape passed to the hold is the one an absent section resolves to —
 	// every class on the work binding — because that is what deleting it
 	// means, and it is the same question the explicit spelling asks below.
+	// An open reverse migration holds every shape of config alike: before its
+	// R4 the city still names its binding, after it the section is gone, and
+	// either way the stores hold a copy in flight (storage_reverse.go). One
+	// failed read of one file on a city that never reversed.
+	if err := storageReverseRefusal(cityPath, storageReverseRoot(cityPath, cfg)); err != nil {
+		return nil, fmt.Errorf("%s: %w", logPrefix, err)
+	}
+	// So does a city restore that has not ended, proven or accepted unproven
+	// (storage_snapshot_city.go): one failed read of one file on a city that
+	// never restored.
+	if err := storageCityRestoreBootRefusal(cityPath); err != nil {
+		return nil, fmt.Errorf("%s: %w", logPrefix, err)
+	}
 	if cfg == nil || cfg.Storage == nil {
 		if blocked, held := revertHoldingNote(storageSplitNone, cityPath); held {
 			advice := infraMigrationOperatorAdvice(blocked, logPrefix)

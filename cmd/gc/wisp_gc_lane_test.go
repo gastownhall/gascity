@@ -37,7 +37,7 @@ func newBlockingWispGC() *blockingWispGC {
 
 func (b *blockingWispGC) shouldRun(time.Time) bool { return true }
 
-func (b *blockingWispGC) runGC(wispGCLegs, beads.GraphStore, beads.SessionStore, beads.MailStore, time.Time) (int, error) {
+func (b *blockingWispGC) runGC(wispGCRoots, wispGCLegs, beads.GraphStore, beads.SessionStore, beads.MailStore, time.Time) (int, error) {
 	b.runs.Add(1)
 	b.started <- struct{}{}
 	<-b.release
@@ -61,7 +61,7 @@ type countingWispGC struct {
 
 func (c countingWispGC) shouldRun(time.Time) bool { return true }
 
-func (c countingWispGC) runGC(wispGCLegs, beads.GraphStore, beads.SessionStore, beads.MailStore, time.Time) (int, error) {
+func (c countingWispGC) runGC(wispGCRoots, wispGCLegs, beads.GraphStore, beads.SessionStore, beads.MailStore, time.Time) (int, error) {
 	c.runs.Add(1)
 	return 0, nil
 }
@@ -226,7 +226,7 @@ type notDueWispGC struct{ runs *atomic.Int32 }
 
 func (n notDueWispGC) shouldRun(time.Time) bool { return false }
 
-func (n notDueWispGC) runGC(wispGCLegs, beads.GraphStore, beads.SessionStore, beads.MailStore, time.Time) (int, error) {
+func (n notDueWispGC) runGC(wispGCRoots, wispGCLegs, beads.GraphStore, beads.SessionStore, beads.MailStore, time.Time) (int, error) {
 	n.runs.Add(1)
 	return 0, nil
 }
@@ -277,7 +277,7 @@ type orderRecordingWispGC struct{ order *orderedRuntimeEvents }
 
 func (o orderRecordingWispGC) shouldRun(time.Time) bool { return true }
 
-func (o orderRecordingWispGC) runGC(wispGCLegs, beads.GraphStore, beads.SessionStore, beads.MailStore, time.Time) (int, error) {
+func (o orderRecordingWispGC) runGC(wispGCRoots, wispGCLegs, beads.GraphStore, beads.SessionStore, beads.MailStore, time.Time) (int, error) {
 	o.order.record("purge")
 	return 0, nil
 }
@@ -647,8 +647,8 @@ func TestWispGCLane_StopWaitsForPurgeInFlight(t *testing.T) {
 	}
 }
 
-// routeRecordingWispGC is an always-due tracker that records the stores and
-// legs its purge was handed, and returns a fixed count and error.
+// routeRecordingWispGC is an always-due tracker that records the readers,
+// stores and legs its purge was handed, and returns a fixed count and error.
 type routeRecordingWispGC struct {
 	purged int
 	err    error
@@ -656,6 +656,7 @@ type routeRecordingWispGC struct {
 }
 
 type wispGCPurgeArgs struct {
+	roots wispGCRoots
 	legs  wispGCLegs
 	graph beads.GraphStore
 	mail  beads.MailStore
@@ -663,8 +664,8 @@ type wispGCPurgeArgs struct {
 
 func (r routeRecordingWispGC) shouldRun(time.Time) bool { return true }
 
-func (r routeRecordingWispGC) runGC(legs wispGCLegs, graph beads.GraphStore, _ beads.SessionStore, mail beads.MailStore, _ time.Time) (int, error) {
-	*r.got = wispGCPurgeArgs{legs: legs, graph: graph, mail: mail}
+func (r routeRecordingWispGC) runGC(roots wispGCRoots, legs wispGCLegs, graph beads.GraphStore, _ beads.SessionStore, mail beads.MailStore, _ time.Time) (int, error) {
+	*r.got = wispGCPurgeArgs{roots: roots, legs: legs, graph: graph, mail: mail}
 	return r.purged, r.err
 }
 
@@ -706,6 +707,27 @@ func TestWispGCLane_ReportsPurgeInItsOwnTraceCycle(t *testing.T) {
 	}
 	if got.legs == nil {
 		t.Error("purge on a relocated city got no work legs")
+	}
+	// The purge's readers are the epoch's Molecule{Roots} plan over the
+	// census legs: the graph placement reads the purge's graph store, and
+	// each census work leg reads the census's store for it.
+	if graph, err := got.roots.graphReader(); err != nil || !beads.SameStore(graph, got.graph) {
+		t.Errorf("purge graph reader = %v (err %v), want a reader over the purge's graph store", graph, err)
+	}
+	if got.legs != nil {
+		workLegs := 0
+		got.legs.eachLeg(func(ref string, store beads.Store) {
+			if store == nil || sameBeadStore(store, got.graph.Store) {
+				return
+			}
+			workLegs++
+			if leg, err := got.roots.workLeg(ref); err != nil || !beads.SameStore(leg, store) {
+				t.Errorf("purge reader for work leg %q = %v (err %v), want a reader over the census's store", ref, leg, err)
+			}
+		})
+		if workLegs == 0 {
+			t.Error("the relocated city's census names no work leg to read")
+		}
 	}
 	select {
 	case <-cr.workGCLaneOf().wakeCh:
@@ -996,7 +1018,7 @@ type panickingWispGC struct{}
 
 func (panickingWispGC) shouldRun(time.Time) bool { return true }
 
-func (panickingWispGC) runGC(wispGCLegs, beads.GraphStore, beads.SessionStore, beads.MailStore, time.Time) (int, error) {
+func (panickingWispGC) runGC(wispGCRoots, wispGCLegs, beads.GraphStore, beads.SessionStore, beads.MailStore, time.Time) (int, error) {
 	panic("purge boom")
 }
 
@@ -1045,7 +1067,7 @@ func (g *dueOnceGatedWispGC) shouldRun(time.Time) bool {
 	return true
 }
 
-func (g *dueOnceGatedWispGC) runGC(wispGCLegs, beads.GraphStore, beads.SessionStore, beads.MailStore, time.Time) (int, error) {
+func (g *dueOnceGatedWispGC) runGC(wispGCRoots, wispGCLegs, beads.GraphStore, beads.SessionStore, beads.MailStore, time.Time) (int, error) {
 	g.runs.Add(1)
 	g.startOnce.Do(func() { close(g.started) })
 	<-g.release

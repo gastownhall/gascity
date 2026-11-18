@@ -20,7 +20,8 @@ import (
 // city's gc bd refuses a wrapper script; it resolves user-level state under
 // gc's isolated HOME, which is test-owned. An Env whose gc leaves that HOME
 // (WithHostHome, With("HOME")), or a test that asks (WithWrappedBD), runs bd
-// through LinkBeadsTooling's wrapper instead, re-homed under the tool home.
+// through LinkBeadsTooling's wrapper instead, re-homed under the tool home,
+// unless on a CI runner it hands gc the real bd again (WithRealBD).
 // See package toolhome for what bd resolves from HOME and the incident this
 // guards against.
 

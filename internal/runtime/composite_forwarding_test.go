@@ -35,6 +35,7 @@ var unforwarded = map[string]map[string]struct{ Class, Reason, Bead string }{
 		"TurnRunningProvider":          {"deliberate", "the live turn reading is read on the routed leaf (runtime.TurnRunningFor)", ""},
 		"V2ReadinessReporter":          {"deliberate", "v2 readiness is a leaf's handshake, judged per leaf (PAR-EXEC C0.8 walks inventoryLeaves)", ""},
 		"SharedListing":                {"deliberate", "runtime.ListRunningShared walks Backends to every leaf (gc stop's confirmation, cmd/gc/cmd_stop.go)", ""},
+		"TmuxSubtreeFence":             {"deliberate", "the composite's own scan reports only the PIDs its fencing default leaf reports (runtime.FindRuntimesAcross)", ""},
 	},
 	"hybrid": {
 		"FreshByConstruction":          {"deliberate", "as auto's", ""},
@@ -58,6 +59,7 @@ var unforwarded = map[string]map[string]struct{ Class, Reason, Bead string }{
 		"V2ReadinessReporter":          {"deliberate", "as auto's", ""},
 		"FreshLivenessObserver":        {"deliberate", "hybrid's read is its leaves' cached one, so a hop through it proves absence only by its attested listing (cmd/gc/reconcile_effect_runtime.go unlistedElsewhere)", ""},
 		"TransportCapabilityProvider":  {"deliberate", "production's hybrid is tmux over k8s (cmd/gc/providers.go newHybridProvider), and neither has it", ""},
+		"TmuxSubtreeFence":             {"deliberate", "hybrid scans its local leaf alone, whose own scan applies the leaf's fence", ""},
 	},
 }
 

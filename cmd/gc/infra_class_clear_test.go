@@ -643,7 +643,7 @@ func TestRevertingToTheWorkBindingAfterAClearRefusesBoot(t *testing.T) {
 		if err == nil {
 			t.Fatalf("%s: a cleared city started with no infrastructure state", name)
 		}
-		for _, want := range []string{"NO infrastructure state", "Restoring the work store from the backup", infraRetainedBackupName, infraClearedNotePath(cityPath)} {
+		for _, want := range []string{"NO infrastructure state", storageReverseInstruction(reverseToWork, nil), "Restoring the work store from the backup", infraRetainedBackupName, infraClearedNotePath(cityPath)} {
 			if !strings.Contains(err.Error(), want) {
 				t.Errorf("%s: the refusal does not mention %q: %v", name, want, err)
 			}

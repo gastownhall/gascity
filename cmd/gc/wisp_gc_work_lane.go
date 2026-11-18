@@ -100,7 +100,11 @@ type workArmLeg struct {
 // per pass, ~6 an hour city-wide at the 10-minute wisp-GC cadence. That is a
 // backstop rate for a backlog; the reactive autoclose and the graph arm do the
 // routine work.
-func (w *workMoleculeGC) pass(ctx context.Context, legs wispGCLegs, graph beads.Store, ttl time.Duration, now time.Time) (int, error) {
+//
+// roots are the pass's readers (WorkLegs.wispGCRoots): each leg's root listings go
+// through its census ref's reader, and a leg with no reader is listed as a
+// leg whose listing failed (no close, no purge, its memos kept).
+func (w *workMoleculeGC) pass(ctx context.Context, roots wispGCRoots, legs wispGCLegs, graph beads.Store, ttl time.Duration, now time.Time) (int, error) {
 	if legs == nil || legs.unusable() != nil || ttl <= 0 {
 		return 0, nil
 	}
@@ -137,14 +141,23 @@ func (w *workMoleculeGC) pass(ctx context.Context, legs wispGCLegs, graph beads.
 			break
 		}
 		l := ls[(start+i)%len(ls)]
-		open, err := enumerateWorkClassMoleculeRoots(l.store, "open", "in_progress")
+		reader, rerr := roots.workLeg(l.ref)
+		var open []beads.Bead
+		err := rerr
+		if err == nil {
+			open, err = enumerateWorkClassMoleculeRoots(reader, "open", "in_progress")
+		}
 		if err != nil {
 			errs = errors.Join(errs, fmt.Errorf("listing open work-class molecule roots on %s: %w", l.ref, err))
 		}
 		if budget.ctxDone() {
 			break
 		}
-		closed, cerr := enumerateWorkClassMoleculeRoots(l.store, "closed")
+		var closed []beads.Bead
+		cerr := rerr
+		if cerr == nil {
+			closed, cerr = enumerateWorkClassMoleculeRoots(reader, "closed")
+		}
 		if cerr != nil {
 			errs = errors.Join(errs, fmt.Errorf("listing closed work-class molecule roots on %s: %w", l.ref, cerr))
 		}
@@ -183,7 +196,7 @@ func (w *workMoleculeGC) pass(ctx context.Context, legs wispGCLegs, graph beads.
 					candidates = append(candidates, r)
 				}
 			}
-			holders := wispGCHolders{graph: graph, own: l.store}
+			holders := wispGCHolders{graph: graph, roots: roots, own: l.store, ownRef: l.ref}
 			errs = errors.Join(errs, closeAbandonedRootCandidatesMode(l.store, candidates, holders, now, abandonedCloseMode{
 				enforce:    closeAbandonedEnforced(),
 				dryRunHint: fmt.Sprintf("set %s=1 to enforce", closeAbandonedEnv),
@@ -374,7 +387,8 @@ func (cr *CityRuntime) runWorkGCLanePass(ctx context.Context, now time.Time) {
 	lane := cr.workGCLaneOf()
 	graph := resolveGraphStore(cr.storageRoutes, cr.cityBeadStore(), cfg, cr.cityPath, cr.rec)
 	legs := cr.workLegs()
-	purged, err := lane.gc.pass(ctx, legs, graph, ttl, now)
+	roots := legs.wispGCRoots(cr.cityStores(), graph)
+	purged, err := lane.gc.pass(ctx, roots, legs, graph, ttl, now)
 	if err != nil {
 		for _, line := range strings.Split(err.Error(), "\n") {
 			if line != "" {

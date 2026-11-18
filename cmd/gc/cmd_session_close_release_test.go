@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -299,6 +300,332 @@ func TestCmdSessionCloseWithoutConfigRefusesOnlyOverClaims(t *testing.T) {
 			refused := strings.Contains(stderr.String(), "refusing to close")
 			if holds && (code == 0 || !refused) || !holds && (code != 0 || refused) {
 				t.Fatalf("cmdSessionClose = %d, stderr %q; want refused %t", code, stderr.String(), holds)
+			}
+		})
+	}
+}
+
+// namedCloseSessionTemplate gives a named session's runtime name a city
+// prefix, so it differs from the identity and work addressed to each is a
+// distinct case.
+const namedCloseSessionTemplate = "{{.City}}-{{.Agent}}"
+
+// namedCloseCity is a file-store city holding the active bead of a named
+// session `reviewer` (rig-qualified when the fixture declares a rig), backed
+// by the agent `worker`. declared controls whether the [[named_session]]
+// entry is still configured; the bead records the same identity either way.
+type namedCloseCity struct {
+	dir      string
+	store    beads.Store
+	session  beads.Bead
+	identity string
+	runtime  string
+	route    string // a served gc.routed_to
+}
+
+func newNamedCloseCity(t *testing.T, rig string, declared bool) *namedCloseCity {
+	t.Helper()
+	cityDir := t.TempDir()
+	dirLine, identity, route := "", "reviewer", "worker"
+	var toml strings.Builder
+	toml.WriteString("[workspace]\nname = \"test-city\"\nsession_template = \"" + namedCloseSessionTemplate + "\"\n\n[beads]\nprovider = \"file\"\n")
+	if rig != "" {
+		rigDir := filepath.Join(cityDir, rig)
+		if err := os.MkdirAll(rigDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		toml.WriteString("\n[[rigs]]\nname = \"" + rig + "\"\npath = \"" + rigDir + "\"\n")
+		dirLine, identity, route = "dir = \""+rig+"\"\n", rig+"/reviewer", rig+"/worker"
+	}
+	toml.WriteString("\n[[agent]]\nname = \"worker\"\n" + dirLine + "start_command = \"true\"\nmax_active_sessions = 1\n")
+	if declared {
+		toml.WriteString("\n[[named_session]]\nname = \"reviewer\"\ntemplate = \"worker\"\n" + dirLine)
+	}
+	writePhase0InterfaceCity(t, cityDir, toml.String())
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_DIR", t.TempDir())
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_SESSION", "fake")
+
+	runtimeName := config.NamedSessionRuntimeName("test-city", config.Workspace{SessionTemplate: namedCloseSessionTemplate}, identity)
+	if runtimeName == identity {
+		t.Fatalf("fixture runtime name %q equals the identity; the runtime-address case would be vacuous", runtimeName)
+	}
+	store, err := openCityStoreAt(cityDir)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "named reviewer incarnation",
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"session_name":               runtimeName,
+			"template":                   route,
+			"state":                      "active",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: identity,
+			namedSessionModeMetadata:     "on_demand",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create(session bead): %v", err)
+	}
+	return &namedCloseCity{dir: cityDir, store: store, session: sessionBead, identity: identity, runtime: runtimeName, route: route}
+}
+
+// claim seeds a work bead assigned to assignee with status and gc.routed_to
+// route, and returns it as stored.
+func (c *namedCloseCity) claim(t *testing.T, assignee, status, route string) beads.Bead {
+	t.Helper()
+	w, err := c.store.Create(beads.Bead{
+		Title:    "work for " + assignee,
+		Type:     "task",
+		Assignee: assignee,
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: route},
+	})
+	if err != nil {
+		t.Fatalf("Create(work bead): %v", err)
+	}
+	if status != "open" {
+		if err := c.store.Update(w.ID, beads.UpdateOpts{Status: &status}); err != nil {
+			t.Fatalf("mark work %s: %v", status, err)
+		}
+	}
+	got, err := c.store.Get(w.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+// close runs `gc session close` on the session bead by ID and checks it
+// closed.
+func (c *namedCloseCity) close(t *testing.T) {
+	t.Helper()
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionClose([]string{c.session.ID}, "", &stdout, &stderr, false); code != 0 {
+		t.Fatalf("cmdSessionClose = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if got := c.get(t, c.session.ID); got.Status != "closed" {
+		t.Fatalf("session bead status = %q, want closed", got.Status)
+	}
+}
+
+// get reads id back through a freshly opened city store.
+func (c *namedCloseCity) get(t *testing.T, id string) beads.Bead {
+	t.Helper()
+	reopened, err := openCityStoreAt(c.dir)
+	if err != nil {
+		t.Fatalf("reopen city store: %v", err)
+	}
+	got, err := reopened.Get(id)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", id, err)
+	}
+	return got
+}
+
+// assertUntouched checks the close left want's claim as it was: same
+// assignee, status and route, and no stranded stamp.
+func (c *namedCloseCity) assertUntouched(t *testing.T, want beads.Bead) {
+	t.Helper()
+	got := c.get(t, want.ID)
+	if got.Assignee != want.Assignee || got.Status != want.Status {
+		t.Errorf("work addressed to %q = (assignee %q, status %q), want (%q, %q) left to the still-configured identity", want.Assignee, got.Assignee, got.Status, want.Assignee, want.Status)
+	}
+	if g, w := got.Metadata[beadmeta.RoutedToMetadataKey], want.Metadata[beadmeta.RoutedToMetadataKey]; g != w {
+		t.Errorf("work addressed to %q gc.routed_to = %q, want %q", want.Assignee, g, w)
+	}
+	if s := got.Metadata[beadmeta.StrandedMetadataKey]; s != "" {
+		t.Errorf("work addressed to %q stamped stranded (%q) by the close, want unstamped", want.Assignee, s)
+	}
+}
+
+// assertReleased checks the close released want's claim: assignee cleared,
+// status open, and its route kept.
+func (c *namedCloseCity) assertReleased(t *testing.T, want beads.Bead) {
+	t.Helper()
+	got := c.get(t, want.ID)
+	if got.Assignee != "" || got.Status != "open" {
+		t.Errorf("work addressed to %q = (assignee %q, status %q), want released to (\"\", open)", want.Assignee, got.Assignee, got.Status)
+	}
+	if g, w := got.Metadata[beadmeta.RoutedToMetadataKey], want.Metadata[beadmeta.RoutedToMetadataKey]; g != w {
+		t.Errorf("released work gc.routed_to = %q, want its route %q kept", g, w)
+	}
+}
+
+// strandedAlertsNaming returns the city's session.stranded_claims events
+// for the session that name any of ids.
+func (c *namedCloseCity) strandedAlertsNaming(t *testing.T, ids ...string) []events.Event {
+	t.Helper()
+	evs, err := events.ReadAll(filepath.Join(c.dir, ".gc", "events.jsonl"))
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("reading city events: %v", err)
+	}
+	var hits []events.Event
+	for _, e := range evs {
+		if e.Type != events.SessionStrandedClaims || e.Subject != c.session.ID {
+			continue
+		}
+		if slices.ContainsFunc(ids, func(id string) bool { return strings.Contains(string(e.Payload), id) }) {
+			hits = append(hits, e)
+		}
+	}
+	return hits
+}
+
+// namedCloseRigCases are the identity shapes each named-session close test
+// runs: a city-scoped identity and a rig-qualified one.
+var namedCloseRigCases = []struct{ name, rig string }{
+	{"city identity", ""},
+	{"rig-qualified identity", "myrig"},
+}
+
+// TestCmdSessionCloseOnConfiguredNamedSessionPreservesIdentityAssignedWork
+// pins ga-o8xf41: closing the current bead of a named session whose identity
+// is still configured must not release work addressed to the identity. The
+// controller re-materializes the identity, so that work still has an owner;
+// a claim no lane serves is not the close's to strand either.
+func TestCmdSessionCloseOnConfiguredNamedSessionPreservesIdentityAssignedWork(t *testing.T) {
+	for _, tc := range namedCloseRigCases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newNamedCloseCity(t, tc.rig, true)
+			queued := c.claim(t, c.identity, "open", c.route)
+			held := c.claim(t, c.identity, "in_progress", c.route)
+			unserved := c.claim(t, c.identity, "in_progress", "nowhere/lane")
+
+			c.close(t)
+
+			for _, w := range []beads.Bead{queued, held, unserved} {
+				c.assertUntouched(t, w)
+			}
+			if hits := c.strandedAlertsNaming(t, queued.ID, held.ID, unserved.ID); len(hits) != 0 {
+				t.Errorf("session.stranded_claims = %+v, want none naming identity-addressed work", hits)
+			}
+		})
+	}
+}
+
+// TestConfiguredNamedSessionStableAddresses pins which beads' stable
+// addresses `gc session close` leaves claimed: only a named-session bead
+// whose identity still resolves to a configured spec with its backing agent.
+func TestConfiguredNamedSessionStableAddresses(t *testing.T) {
+	configured := func() *config.City {
+		return &config.City{
+			Workspace:     config.Workspace{Name: "test-city", SessionTemplate: namedCloseSessionTemplate},
+			Agents:        []config.Agent{{Name: "worker"}},
+			NamedSessions: []config.NamedSession{{Name: "reviewer", Template: "worker"}},
+		}
+	}
+	named := func(meta map[string]string) beads.Bead {
+		m := map[string]string{
+			"session_name":               "test-city-reviewer",
+			"template":                   "worker",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "reviewer",
+		}
+		for k, v := range meta {
+			m[k] = v
+		}
+		return beads.Bead{ID: "gc-1", Metadata: m}
+	}
+	for _, tc := range []struct {
+		name string
+		bead beads.Bead
+		cfg  func() *config.City
+		want []string
+	}{
+		{"still-configured identity", named(nil), configured, []string{"reviewer", "test-city-reviewer"}},
+		{"runtime name equals the identity", named(nil), func() *config.City {
+			cfg := configured()
+			cfg.Workspace.SessionTemplate = ""
+			return cfg
+		}, []string{"reviewer"}},
+		{"city name from the directory", named(nil), func() *config.City {
+			cfg := configured()
+			cfg.Workspace.Name = ""
+			return cfg
+		}, []string{"reviewer", "dir-city-reviewer"}},
+		{"named-session flag absent", named(map[string]string{namedSessionMetadataKey: ""}), configured, nil},
+		{"empty identity", named(map[string]string{namedSessionIdentityMetadata: ""}), configured, nil},
+		{"synthetic ID-only snapshot", beads.Bead{ID: "gc-1"}, configured, nil},
+		{"nil config", named(nil), func() *config.City { return nil }, nil},
+		{"identity removed from config", named(nil), func() *config.City {
+			cfg := configured()
+			cfg.NamedSessions = nil
+			return cfg
+		}, nil},
+		{"backing template missing", named(nil), func() *config.City {
+			cfg := configured()
+			cfg.Agents = nil
+			return cfg
+		}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := tc.cfg()
+			got := configuredNamedSessionStableAddresses(tc.bead, cfg, loadedCityName(cfg, "/cities/dir-city"))
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("configuredNamedSessionStableAddresses = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCmdSessionCloseOnConfiguredNamedSessionPreservesRuntimeAssignedWork:
+// the runtime name of a still-configured named session is as stable as its
+// identity (the controller re-materializes the identity under it), so work
+// addressed to the runtime name stays claimed through the close too.
+func TestCmdSessionCloseOnConfiguredNamedSessionPreservesRuntimeAssignedWork(t *testing.T) {
+	for _, tc := range namedCloseRigCases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newNamedCloseCity(t, tc.rig, true)
+			queued := c.claim(t, c.runtime, "open", c.route)
+			held := c.claim(t, c.runtime, "in_progress", c.route)
+
+			c.close(t)
+
+			c.assertUntouched(t, queued)
+			c.assertUntouched(t, held)
+		})
+	}
+}
+
+// TestCmdSessionCloseOnConfiguredNamedSessionReleasesBeadIDAssignedWork: the
+// preserved stable addresses narrow the close's release, never empty it. A
+// claim addressed to the dying bead's own ID is still released into its route
+// while the identity's work stays claimed.
+func TestCmdSessionCloseOnConfiguredNamedSessionReleasesBeadIDAssignedWork(t *testing.T) {
+	for _, tc := range namedCloseRigCases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newNamedCloseCity(t, tc.rig, true)
+			own := c.claim(t, c.session.ID, "in_progress", c.route)
+			identity := c.claim(t, c.identity, "in_progress", c.route)
+
+			c.close(t)
+
+			c.assertReleased(t, own)
+			c.assertUntouched(t, identity)
+		})
+	}
+}
+
+// TestCmdSessionCloseOnRemovedNamedSessionReleasesIdentityAssignedWork: once
+// the identity is gone from config no session will serve its addresses
+// again, so the close releases identity- and runtime-addressed work as it
+// always has. The bead still records the identity; only config decides.
+func TestCmdSessionCloseOnRemovedNamedSessionReleasesIdentityAssignedWork(t *testing.T) {
+	for _, tc := range namedCloseRigCases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newNamedCloseCity(t, tc.rig, false)
+			identity := c.claim(t, c.identity, "in_progress", c.route)
+			runtimeAddressed := c.claim(t, c.runtime, "in_progress", c.route)
+			own := c.claim(t, c.session.ID, "in_progress", c.route)
+
+			c.close(t)
+
+			for _, w := range []beads.Bead{identity, runtimeAddressed, own} {
+				c.assertReleased(t, w)
 			}
 		})
 	}
