@@ -317,11 +317,13 @@ func TestExecInputFenceWarningNeedsBoth(t *testing.T) {
 		script := writeRPPScript(t, `[ "$1" = protocol ] && { echo '{"version":0,"capabilities":["observe.v1","report-attachment"`+caps+`]}'; exit 0; }; exit 2
 `)
 		cfg := &config.City{Session: config.SessionConfig{Provider: "exec:" + script}}
-		if _, warn := execRuntimeDoctorDetail(cfg, "", nil, reconcilerV2); (warn != "") != want {
-			t.Errorf("capabilities %q under v2: warn %q, want %v", caps, warn, want)
+		if _, warn, hint := execRuntimeDoctorDetail(cfg, "", nil, reconcilerV2); (warn != "") != want || (hint != "") != want {
+			t.Errorf("capabilities %q under v2: warn %q, hint %q, want both: %v", caps, warn, hint, want)
+		} else if want && !strings.Contains(hint, "declare proc.exec and input-fence") {
+			t.Errorf("capabilities %q under v2: hint %q, want the input-fence declaration", caps, hint)
 		}
-		if _, warn := execRuntimeDoctorDetail(cfg, "", nil, reconcilerLegacy); warn != "" {
-			t.Errorf("capabilities %q under legacy: warn %q, want none", caps, warn)
+		if _, warn, hint := execRuntimeDoctorDetail(cfg, "", nil, reconcilerLegacy); warn != "" || hint != "" {
+			t.Errorf("capabilities %q under legacy: warn %q, hint %q, want none", caps, warn, hint)
 		}
 	}
 }

@@ -20,7 +20,7 @@ func TestSubprocessSeamConformance(t *testing.T) {
 
 	runtimetest.RunProviderTests(t, func(t *testing.T) (runtime.Provider, runtime.Config, string) {
 		return NewSeamBackedWithDir(testutil.ShortTempDir(t, "gc-subproc-seam-")), runtime.Config{
-			Command: "sleep 300",
+			Command: cmdSleepMedium,
 			WorkDir: t.TempDir(),
 		}, fmt.Sprintf("gc-subproc-seam-%d", atomic.AddInt64(&counter, 1))
 	})
@@ -38,7 +38,7 @@ func TestSubprocessDefaultDirSeamConformance(t *testing.T) {
 
 	runtimetest.RunProviderTests(t, func(t *testing.T) (runtime.Provider, runtime.Config, string) {
 		return NewSeamBacked(), runtime.Config{
-			Command: "sleep 300",
+			Command: cmdSleepMedium,
 			WorkDir: t.TempDir(),
 		}, fmt.Sprintf("gc-subproc-default-%d-%d", os.Getpid(), atomic.AddInt64(&counter, 1))
 	})

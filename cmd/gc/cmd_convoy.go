@@ -17,6 +17,7 @@ import (
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/spf13/cobra"
 )
 
@@ -2109,7 +2110,9 @@ func doConvoyCheckAcrossStoresJSON(stores []convoyStoreView, unopened int, rec e
 	binding := classBindingStore(stores)
 	closed, failed := 0, 0
 	for _, item := range convoys {
-		ok, err := closeCompletedConvoyAcross(item.store, binding, item.bead)
+		// One frame per convoy store: the children plan reads the convoy's own
+		// store and the binding, and plans over no route (scopeStores).
+		ok, err := closeCompletedConvoyAcross(scopeStores("", nil, item.store), item.store, binding, item.bead)
 		switch {
 		case errors.Is(err, errAutocloseRefused), errors.Is(err, beads.ErrNotFound):
 			// The convoy changed or went away after the list; the next check decides it again.
@@ -2455,14 +2458,17 @@ func doConvoyAutoclose(beadID string, stdout, stderr io.Writer) {
 	// so rig-store closes autoclose their convoys instead of silently
 	// no-op'ing (#3411).
 	//
-	// The hook passes no cross-store homes (convoyAutocloseHomes{}): bd runs
+	// The hook's frame is the one store bd ran it for (scopeStores over no
+	// route and no city path: no worker-site descriptor is read): that store
+	// is its work store, so its Convoy(Parent) plan reads no work home, and
+	// it passes no cross-store homes (convoyAutocloseHomes{}): bd runs
 	// it for the stores bd serves, which on a split city are the work ledgers,
 	// and resolving a parent's or a binding child's store here would open a
 	// second handle on the binding per close. The controller's reactive
 	// autoclose and its sweep (beadCloseAutoclose) cover binding rows and the
 	// cross-store convoy children on a split city.
 	if store, _, ok := autocloseOwningStore(beadID, cityPath); ok {
-		doConvoyAutocloseWith(store, convoyAutocloseHomes{}, rec, beadID, stdout, stderr)
+		doConvoyAutocloseWith(store, scopeStores("", nil, store), convoyAutocloseHomes{}, rec, beadID, stdout, stderr)
 		return
 	}
 
@@ -2474,7 +2480,7 @@ func doConvoyAutoclose(beadID string, stdout, stderr io.Writer) {
 	if err != nil {
 		return
 	}
-	doConvoyAutocloseWith(store, convoyAutocloseHomes{}, rec, beadID, stdout, stderr)
+	doConvoyAutocloseWith(store, scopeStores("", nil, store), convoyAutocloseHomes{}, rec, beadID, stdout, stderr)
 }
 
 // autocloseOwningStore resolves the store that owns beadID, and the store
@@ -2575,10 +2581,6 @@ func autocloseCityPathForStoreRoot(storeRoot string) string {
 // what the closed bead's own store does not hold. The zero value is a store
 // that holds everything: the bd on_close hook path and a single-store city.
 type convoyAutocloseHomes struct {
-	// parent names the WORK store a legacy parent id belongs to, read when
-	// the closed bead's own store does not hold the parent; nil, or a nil
-	// answer, means the parent shares the closed bead's store.
-	parent func(id string) beads.Store
 	// children is the class binding whose legacy children of a work convoy
 	// are counted too, or nil when the city relocates no class.
 	children beads.Store
@@ -2593,7 +2595,9 @@ type convoyAutocloseHomes struct {
 // A convoy is work class, so on a split city it stays on the work ledger while
 // a graph row parented under it (a graph root poured with a parent) lives in
 // the class binding. The parent is read from the closed bead's own store first
-// and then from its work home (homes.parent), and the convoy is decided and
+// and then from its work home (storeref.ConvoyParent over stores: the rig its
+// id's prefix names, else the city; none for a work store's row or a
+// reserved id), and the convoy is decided and
 // closed where it lives. The own store leads as every by-id read on a split
 // city reads the binding before the work ledger: a relic (a row migrated into
 // the binding under its work-ledger id) keeps the parent it migrated with, and
@@ -2602,7 +2606,7 @@ type convoyAutocloseHomes struct {
 // must not answer for that parent. The convoy's legacy children are counted in
 // the binding too (homes.children), so a child still open there keeps a
 // work-ledger convoy open, whichever child closed last.
-func doConvoyAutocloseWith(store beads.Store, homes convoyAutocloseHomes, rec events.Recorder, beadID string, stdout, _ io.Writer) autocloseRun {
+func doConvoyAutocloseWith(store beads.Store, stores storeref.Stores, homes convoyAutocloseHomes, rec events.Recorder, beadID string, stdout, _ io.Writer) autocloseRun {
 	var run autocloseRun
 	bead, err := store.Get(beadID)
 	if err != nil {
@@ -2612,15 +2616,22 @@ func doConvoyAutocloseWith(store beads.Store, homes convoyAutocloseHomes, rec ev
 
 	seen := make(map[string]bool)
 	if bead.ParentID != "" {
-		var home beads.Store
-		if homes.parent != nil {
-			home = homes.parent(bead.ParentID)
+		// The epoch's Convoy(Parent) plan: the row's own store, then the
+		// parent id's work home. The owner's store is taken raw, because the
+		// convoy's child-store choice (convoyChildStore) compares it with
+		// the row's store. Only a not-found moves the lookup on.
+		var parent beads.Bead
+		var parentStore beads.Store
+		plan, err := stores.Plan(storeref.Convoy{Kind: storeref.ConvoyParent, ID: bead.ParentID, Near: store, NearRef: autocloseNearRef})
+		if err == nil {
+			var owner storeref.Owner
+			owner, err = storeref.ResolveOwnerRow(plan, bead.ParentID)
+			parent, parentStore = owner.Bead, owner.Store
 		}
-		parent, parentStore, err := autocloseLocate(bead.ParentID, store, home)
 		run.note(err)
 		if err == nil {
 			seen[parent.ID] = true
-			autocloseConvoyIfCompleteAcross(parentStore, convoyChildStore(parentStore, store, homes), rec, parent, stdout, &run)
+			autocloseConvoyIfCompleteAcross(stores, parentStore, convoyChildStore(parentStore, store, homes), rec, parent, stdout, &run)
 		}
 	}
 
@@ -2637,7 +2648,7 @@ func doConvoyAutocloseWith(store beads.Store, homes convoyAutocloseHomes, rec ev
 			continue
 		}
 		seen[convoy.ID] = true
-		autocloseConvoyIfCompleteAcross(store, convoyChildStore(store, store, homes), rec, convoy, stdout, &run)
+		autocloseConvoyIfCompleteAcross(stores, store, convoyChildStore(store, store, homes), rec, convoy, stdout, &run)
 	}
 	return run
 }
@@ -2666,67 +2677,63 @@ func convoyStillAutocloses(convoy beads.Bead) bool {
 // autocloses and every member is terminal, for the reactive autoclose and gc
 // convoy check alike. Its legacy children may also sit in childStore (nil, or
 // store itself: none elsewhere); a child in either store that is not terminal
-// keeps the convoy open. The row it decided from may be stale (a cached row; a
-// convoy labeled owned or closed by an operator since), so the close goes
-// through the autoclose fence, which re-reads the convoy live first. It
-// reports whether this call closed it; a fenced close that lost its CAS
-// returns errAutocloseRefused.
-func closeCompletedConvoyAcross(store, childStore beads.Store, convoy beads.Bead) (bool, error) {
+// keeps the convoy open. The children are the epoch's Convoy(Children) plan,
+// walked lazily: childStore is read only once every child in store is
+// terminal, so on the common path (an open sibling) it costs nothing. The row
+// it decided from may be stale (a cached row; a convoy labeled owned or closed
+// by an operator since), so the close goes through the autoclose fence, which
+// re-reads the convoy live first. It reports whether this call closed it; a
+// fenced close that lost its CAS returns errAutocloseRefused.
+func closeCompletedConvoyAcross(stores storeref.Stores, store, childStore beads.Store, convoy beads.Bead) (bool, error) {
 	if !convoyStillAutocloses(convoy) {
 		return false, nil
 	}
-	across := childStore != nil && !sameBeadStore(childStore, store)
-	var children []beads.Bead
-	var err error
-	if across {
-		// The convoy's own leg of a two-store child union: a legacy child
-		// that lives in childStore is counted below.
-		err = beads.FederatedRead(func() error {
-			var listErr error
-			children, listErr = listConvoyChildren(store, convoy.ID, true)
-			return listErr
-		})
-	} else {
-		children, err = listConvoyChildren(store, convoy.ID, true)
-	}
+	plan, err := stores.Plan(storeref.Convoy{Kind: storeref.ConvoyChildren, Near: store, NearRef: convoyStoreRef, Elsewhere: childStore})
 	if err != nil {
 		return false, fmt.Errorf("children of %s: %w", convoy.ID, err)
 	}
-	for _, ch := range children {
-		if !convoycore.IsTerminalStatus(ch.Status) {
-			return false, nil
-		}
-	}
-	// The second store is read only once every child here is terminal: on
-	// the common path (an open sibling) it costs nothing.
-	if across {
-		var elsewhere []beads.Bead
-		// The second leg of the union: children that live in the convoy's
-		// own store were counted above. It states its tier, as every leg of
-		// a federation does (beads.FederatedReadTier): the class binding is
-		// the raw engine, with no policy layer to widen a TierIssues list,
-		// and an open ephemeral child it left out would close the convoy.
-		err := beads.FederatedRead(func() error {
-			var listErr error
-			elsewhere, listErr = childStore.List(beads.ListQuery{
+	var children []beads.Bead
+	var readErr error
+	open := false
+	_, err = storeref.TypedWalk(plan, func(leg storeref.TypedLeg) (bool, error) {
+		var got []beads.Bead
+		var err error
+		if leg.Role == storeref.RoleNear {
+			got, err = convoycore.MembersOn(leg.Reader, convoy.ID, true)
+		} else {
+			// The second leg: children that live in the convoy's own store
+			// were counted above. It states its tier, as every leg of a
+			// federation does (beads.FederatedReadTier): the class binding is
+			// the raw engine, with no policy layer to widen a TierIssues list,
+			// and an open ephemeral child it left out would close the convoy.
+			got, err = leg.Reader.List(beads.ListQuery{
 				ParentID:      convoy.ID,
 				IncludeClosed: true,
 				Sort:          beads.SortCreatedAsc,
 				TierMode:      beads.FederatedReadTier,
 			})
-			return listErr
-		})
-		if err != nil {
-			return false, fmt.Errorf("children of %s: %w", convoy.ID, err)
 		}
-		for _, ch := range elsewhere {
+		if err != nil {
+			// Kept on this side of the walk, so the error reads as it always
+			// has (gc convoy check prints it).
+			readErr = err
+			return true, nil
+		}
+		for _, ch := range got {
 			if !convoycore.IsTerminalStatus(ch.Status) {
-				return false, nil
+				open = true
+				return true, nil
 			}
 		}
-		children = append(children, elsewhere...)
-	}
-	if len(children) == 0 {
+		children = append(children, got...)
+		return false, nil
+	})
+	switch {
+	case err != nil:
+		return false, fmt.Errorf("children of %s: %w", convoy.ID, err)
+	case readErr != nil:
+		return false, fmt.Errorf("children of %s: %w", convoy.ID, readErr)
+	case open || len(children) == 0:
 		return false, nil
 	}
 	closed, err := autocloseCloseIfStill(store, convoy.ID, convoyAutocloseReason, convoyStillAutocloses, func() error {
@@ -2738,11 +2745,14 @@ func closeCompletedConvoyAcross(store, childStore beads.Store, convoy beads.Bead
 	return closed, nil
 }
 
+// convoyStoreRef names a convoy's own store in its children plan.
+const convoyStoreRef = storeref.StoreRef("the convoy's store")
+
 // autocloseConvoyIfCompleteAcross closes convoy when it is complete, counting
 // its legacy children in childStore too (closeCompletedConvoyAcross; nil: in
 // store only), and announces the close.
-func autocloseConvoyIfCompleteAcross(store, childStore beads.Store, rec events.Recorder, convoy beads.Bead, stdout io.Writer, run *autocloseRun) {
-	closed, err := closeCompletedConvoyAcross(store, childStore, convoy)
+func autocloseConvoyIfCompleteAcross(stores storeref.Stores, store, childStore beads.Store, rec events.Recorder, convoy beads.Bead, stdout io.Writer, run *autocloseRun) {
+	closed, err := closeCompletedConvoyAcross(stores, store, childStore, convoy)
 	run.note(err)
 	if err != nil || !closed {
 		return

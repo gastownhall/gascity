@@ -79,13 +79,13 @@ var contractCoverage = map[string]classification{
 	"ClearScrollback_NoError": {Deferred: "observation group not yet ported"},
 	"CopyTo_NoError":          {Deferred: "observation group not yet ported"},
 
-	// --- Signaling group (deferred) ---
-	"SendKeys_RunningSession":  {Deferred: "signaling group not yet ported"},
-	"SendKeys_MissingSession":  {Deferred: "signaling group not yet ported"},
-	"Interrupt_RunningSession": {Deferred: "signaling group not yet ported"},
-	"Interrupt_MissingSession": {Deferred: "signaling group not yet ported"},
-	"Nudge_RunningSession":     {Deferred: "signaling group not yet ported"},
-	"Nudge_MissingSession":     {Deferred: "signaling group not yet ported"},
+	// --- Signaling group (the input group backs it under input-outcome) ---
+	"SendKeys_RunningSession":  {Code: ReqInputKeysDelivered},
+	"SendKeys_MissingSession":  {Code: ReqInputKeysAbsentGone},
+	"Interrupt_RunningSession": {Code: ReqInputKeysDelivered},
+	"Interrupt_MissingSession": {Code: ReqInputKeysAbsentGone},
+	"Nudge_RunningSession":     {Code: ReqInputNudgeDelivered},
+	"Nudge_MissingSession":     {Code: ReqInputNudgeAbsentGone},
 
 	// --- Fenced input (deferred: an optional in-process capability) ---
 	"FencedInput_MatchingFenceDelivers":            {Deferred: "optional in-process capability; RPP has no fenced-input op"},
@@ -120,6 +120,19 @@ var wireOnlyCodes = map[Code]bool{
 	ReqObserveCityScoped:           true,
 	ReqObserveInventoryHasActivity: true,
 	ReqObservePeekNoScreen:         true,
+
+	// The input group's typed answers under the faults, the per-op words and
+	// the exit-code shapes (input-outcome): no runtime.Provider method states
+	// them; gc reads them in the exec provider. The missing-session and
+	// running-session answers back the signaling cases.
+	ReqInputWordsAllowedOnOp:    true,
+	ReqInputBlockedNotTyped:     true,
+	ReqInputUnavailable:         true,
+	ReqInputLostReplyUnknown:    true,
+	ReqInputExitZeroIsDelivered: true,
+	ReqInputHeldSendTypedOnce:   true,
+	ReqInputExit80OneLine:       true,
+	ReqInputDeadBoxGone:         true,
 }
 
 // conformanceSourcePath is the in-tree provider contract whose cases this

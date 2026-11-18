@@ -350,6 +350,9 @@ func doStorageSnapshotRestore(ctx context.Context, request storageOperatorReques
 	if err != nil {
 		return fail(err)
 	}
+	if err := storageReverseRefusal(request.CityPath, target.Root); err != nil {
+		return fail(err)
+	}
 	if !bound {
 		return fail(errors.New("this city's [storage.classes] assign its infrastructure classes to no binding, so there is no binding to restore"))
 	}

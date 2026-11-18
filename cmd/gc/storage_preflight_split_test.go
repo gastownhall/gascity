@@ -785,6 +785,7 @@ func TestSplitPreflightRefusesACityWithAConvergenceMarker(t *testing.T) {
 					t.Errorf("the report says %q:\n%s", a, out)
 				}
 			}
+			assertCopyChecksSkippedForTheCutover(t, out)
 		})
 	}
 }

@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 	"github.com/gastownhall/gascity/internal/runtime/tmux"
 )
 
@@ -84,6 +86,19 @@ var probes = map[Code]probe{
 	ReqFSHostRunsWhatItCarries: probeFSHostRunsWhatItCarries,
 	ReqFSHostAgentPIDOnHost:    probeFSHostAgentPIDOnHost,
 	ReqFSHostHomeView:          probeFSHostHomeView,
+
+	ReqInputNudgeDelivered:      probeInputNudgeDelivered,
+	ReqInputNudgeAbsentGone:     probeInputNudgeAbsentGone,
+	ReqInputKeysAbsentGone:      probeInputKeysAbsentGone,
+	ReqInputWordsAllowedOnOp:    probeInputWordsAllowedOnOp,
+	ReqInputBlockedNotTyped:     probeInputBlockedNotTyped,
+	ReqInputUnavailable:         probeInputUnavailable,
+	ReqInputLostReplyUnknown:    probeInputLostReplyUnknown,
+	ReqInputExitZeroIsDelivered: probeInputExitZeroIsDelivered,
+	ReqInputHeldSendTypedOnce:   probeInputHeldSendTypedOnce,
+	ReqInputExit80OneLine:       probeInputExit80OneLine,
+	ReqInputDeadBoxGone:         probeInputDeadBoxGone,
+	ReqInputKeysDelivered:       probeInputKeysDelivered,
 }
 
 func probeProtocolHandshake(ctx context.Context, r *runner, _ runtime.ProtocolInfo) (Status, string) {
@@ -208,9 +223,6 @@ func probeExec(ctx context.Context, r *runner, _ runtime.ProtocolInfo) (Status, 
 // runs over exec, quoted as gc quotes every exec command (each argument
 // single-quoted): the session the agent runs in, then the capture gc's idle
 // wait takes through the tmux carrier.
-//
-// TODO(gh#8903 PR 2): once the carrier is selectable per pack, check the
-// declared carrier's idle read instead of assuming tmux.
 var idleBoundaryCommands = []string{
 	quoteArgv("tmux", "has-session", "-t", "main"),
 	quoteArgv("tmux", "capture-pane", "-t", "main", "-p", "-S", "-"+strconv.Itoa(tmux.PromptObservationLines)),
@@ -227,19 +239,40 @@ func quoteArgv(argv ...string) string {
 	return strings.Join(quoted, " ")
 }
 
-// idleBoundaryPeers are the capabilities idle-boundary takes effect with:
-// without all of them gc gives the pack no idle boundary whatever it
-// declares.
-var idleBoundaryPeers = []string{
-	runtime.ProtocolCapabilityConnectionExec,
-	runtime.ProtocolCapabilityReportActivity,
-	runtime.ProtocolCapabilityReportAttachment,
+// idleBoundaryPeers are the capabilities idle-boundary takes effect with on
+// the default carrier: without all of them gc gives the pack no idle boundary
+// whatever it declares. opsIdleBoundaryPeers are carrier.ops's.
+var (
+	idleBoundaryPeers = []string{
+		runtime.ProtocolCapabilityConnectionExec,
+		runtime.ProtocolCapabilityReportActivity,
+		runtime.ProtocolCapabilityReportAttachment,
+	}
+	opsIdleBoundaryPeers = []string{
+		runtime.ProtocolCapabilityReportActivity,
+		runtime.ProtocolCapabilityReportAttachment,
+	}
+)
+
+// idleBoundaryPeersNote is a passing idle-boundary probe's note on the peers
+// the handshake does not declare, without which the declaration takes no
+// effect; "" when it declares them all.
+func idleBoundaryPeersNote(hs runtime.ProtocolInfo, peers []string) string {
+	var missing []string
+	for _, c := range peers {
+		if !hs.Has(c) {
+			missing = append(missing, c)
+		}
+	}
+	if len(missing) == 0 {
+		return ""
+	}
+	return "; idle-boundary takes effect only with " + strings.Join(missing, ", ") + ", which the handshake does not declare"
 }
 
-// probeIdleBoundary verifies that a declared idle-boundary holds: the script
-// says its agent runs in the in-box tmux session `main`, so in a started box
-// that session must exist and its pane must be readable over exec, which is
-// how gc reads the idle boundary. It gates on the declaration, not on
+// probeIdleBoundary verifies the selected carrier's declared idle read. The
+// undeclared default checks in-box tmux main over exec; carrier.ops checks
+// is-running and peek, without a tmux command. It gates on the declaration, not on
 // behavior: a script that does not declare idle-boundary gets no idle wait
 // from gc whatever its box runs, so it SKIPs. Whether the pane shows a ready
 // prompt depends on the agent, not the pack, so the probe reads the pane
@@ -248,11 +281,8 @@ func probeIdleBoundary(ctx context.Context, r *runner, hs runtime.ProtocolInfo) 
 	if !hs.Has(runtime.ProtocolCapabilityIdleBoundary) {
 		return StatusSkip, "idle-boundary not declared — gc reads no idle boundary from the box"
 	}
-	var missing []string
-	for _, c := range idleBoundaryPeers {
-		if !hs.Has(c) {
-			missing = append(missing, c)
-		}
+	if hs.Has(runtime.ProtocolCapabilityCarrierOps) {
+		return probeOpsIdleBoundary(ctx, r, hs)
 	}
 	name := r.nextName()
 	if status, detail := requireStart(ctx, r, name); status != StatusPass {
@@ -269,10 +299,98 @@ func probeIdleBoundary(ctx context.Context, r *runner, hs runtime.ProtocolInfo) 
 			return StatusFail, fmt.Sprintf("%s over exec failed: %v (idle-boundary declares that the agent runs in the box's tmux session main)", command, out.err)
 		}
 	}
-	if len(missing) > 0 {
-		return StatusPass, fmt.Sprintf("the box's tmux session main answers has-session and the idle capture over exec; idle-boundary takes effect only with %s, which the handshake does not declare", strings.Join(missing, ", "))
+	return StatusPass, "the box's tmux session main answers has-session and the idle capture over exec" + idleBoundaryPeersNote(hs, idleBoundaryPeers)
+}
+
+// probeOpsIdleBoundary is probeIdleBoundary for a script that selects
+// carrier.ops. In a box started with a sentinel command, is-running must
+// answer true, peek must show the sentinel (opsPeekShows), and the session's
+// ready-prompt store must round-trip a non-default prompt
+// (opsReadyPromptStore). The sentinel may appear as command text or output;
+// this is not an idle classifier.
+func probeOpsIdleBoundary(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
+	name := r.nextName()
+	sentinel := "GC_RPP_IDLE_READ_" + name
+	started := r.startCommand(ctx, name, "echo "+quoteArgv(sentinel)+"; exec "+r.opts.Command)
+	if started.unsupported {
+		return StatusFail, "start returned exit 2; start is a required op"
 	}
-	return StatusPass, "the box's tmux session main answers has-session and the idle capture over exec"
+	if started.err != nil {
+		return StatusFail, "start for carrier.ops idle read failed: " + started.err.Error()
+	}
+	defer r.stop(ctx, name)
+	if status, detail := expectRunning(ctx, r, name, true, "for carrier.ops idle read"); status != StatusPass {
+		return status, detail
+	}
+	if status, detail := opsPeekShows(ctx, r, name, sentinel); status != StatusPass {
+		return status, detail
+	}
+	if status, detail := opsReadyPromptStore(ctx, r, name); status != StatusPass {
+		return status, detail
+	}
+	return StatusPass, "carrier.ops is-running is true, peek 120 shows the started agent's command line or output, and get-meta answers the ready prompt set-meta stored" + idleBoundaryPeersNote(hs, opsIdleBoundaryPeers)
+}
+
+// opsPeekShows polls peek 120 until it shows sentinel. A screen-only peek can
+// race the command's first rendered output after start, so the window,
+// min(3s, the op timeout), bounds the whole poll, not each peek.
+func opsPeekShows(ctx context.Context, r *runner, name, sentinel string) (Status, string) {
+	readLimit := min(3*time.Second, r.opts.OpTimeout)
+	readCtx, cancel := context.WithTimeout(ctx, readLimit)
+	defer cancel()
+	// lastDetail describes the last peek that completed inside the window. A
+	// peek the window's deadline cut short says nothing about the pack, so it
+	// never replaces an earlier, real read.
+	lastDetail := "no peek completed within the window"
+	for {
+		out := r.peek(readCtx, name, tmux.PromptObservationLines)
+		if out.err == nil && !out.unsupported && strings.Contains(out.stdout, sentinel) {
+			return StatusPass, ""
+		}
+		if readCtx.Err() != nil {
+			return StatusFail, fmt.Sprintf("carrier.ops idle read timed out after %s: %s", readLimit, lastDetail)
+		}
+		if out.unsupported {
+			return StatusFail, "declares carrier.ops and idle-boundary but peek is unimplemented (exit 2)"
+		}
+		lastDetail = fmt.Sprintf("peek does not show the started agent's command line or output (last output = %q)", out.stdout)
+		if out.err != nil {
+			lastDetail = fmt.Sprintf("carrier.ops peek failed: %v (last output = %q)", out.err, out.stdout)
+		}
+		timer := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-readCtx.Done():
+			timer.Stop()
+			return StatusFail, fmt.Sprintf("carrier.ops idle read timed out after %s: %s", readLimit, lastDetail)
+		case <-timer.C:
+		}
+	}
+}
+
+// opsReadyPromptProbe is the ready prompt opsReadyPromptStore stores: not the
+// default one, non-ASCII and ending in a space, as codex's is, so a store
+// that drops, trims or re-encodes the value fails.
+const opsReadyPromptProbe = "› "
+
+// opsReadyPromptStore checks the store gc keeps a carrier.ops session's ready
+// prompt in: set-meta stores a non-default prompt under
+// sessionexec.ReadyPromptMetaKey, and get-meta must answer it as gc reads it
+// back (sessionexec.ParseReadyPromptMeta). Without that store every provider
+// instance that did not start the session waits for the default prompt, so a
+// session whose agent shows another one never reads as idle there.
+func opsReadyPromptStore(ctx context.Context, r *runner, name string) (Status, string) {
+	key := sessionexec.ReadyPromptMetaKey
+	if err := r.setMeta(ctx, name, key, opsReadyPromptProbe); err != nil {
+		return StatusFail, fmt.Sprintf("declares carrier.ops and idle-boundary but set-meta %s failed: %v; gc keeps the session's ready prompt there", key, err)
+	}
+	got, err := r.getMeta(ctx, name, key)
+	if err != nil {
+		return StatusFail, fmt.Sprintf("declares carrier.ops and idle-boundary but get-meta %s failed: %v; gc reads the session's ready prompt back from there", key, err)
+	}
+	if prefix, found := sessionexec.ParseReadyPromptMeta(got); !found || prefix != opsReadyPromptProbe {
+		return StatusFail, fmt.Sprintf("get-meta %s answered %q after set-meta stored %q; other gc processes would not recover the session's ready prompt", key, got, opsReadyPromptProbe)
+	}
+	return StatusPass, ""
 }
 
 // probeProvision verifies the runtime/transport un-weld's box-without-agent op:
