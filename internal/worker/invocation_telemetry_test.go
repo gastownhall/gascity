@@ -593,8 +593,8 @@ func TestMessageRecordsCodexInvocationTokens(t *testing.T) {
 	reader := setupInvocationMetricsReader(t)
 	handle, _, searchBase, workDir := newFamilyTelemetryHandle(t, ProfileCodexTmuxCLI, "codex", "codex", nil)
 
-	// Two completed API calls in the rollout; with no persisted cursor only
-	// the newest must be recorded.
+	// Two completed API calls in the rollout; with no persisted cursor or
+	// checkpoint the prompt-op drain records every call, oldest-first.
 	writeWorkerTestJSONL(t, codexWorkerRolloutPath(t, searchBase, time.Now()), []map[string]any{
 		codexWorkerSessionMeta(workDir),
 		codexWorkerTurnContext(),
@@ -608,9 +608,9 @@ func TestMessageRecordsCodexInvocationTokens(t *testing.T) {
 
 	out := collectInvocationMetrics(t, reader)
 	wantTokens := map[string]int64{
-		"gc.agent.tokens.input":      17888 - 15232,
-		"gc.agent.tokens.output":     309,
-		"gc.agent.tokens.cache_read": 15232,
+		"gc.agent.tokens.input":      (15562 - 10624) + (17888 - 15232),
+		"gc.agent.tokens.output":     355 + 309,
+		"gc.agent.tokens.cache_read": 10624 + 15232,
 	}
 	for name, want := range wantTokens {
 		got, attrSets := invocationInt64Total(out, name)
@@ -677,9 +677,9 @@ func TestMessageRecordsCodexTokensForResumedSession(t *testing.T) {
 
 	out := collectInvocationMetrics(t, reader)
 	wantTokens := map[string]int64{
-		"gc.agent.tokens.input":      17888 - 15232,
-		"gc.agent.tokens.output":     309,
-		"gc.agent.tokens.cache_read": 15232,
+		"gc.agent.tokens.input":      (15562 - 10624) + (17888 - 15232),
+		"gc.agent.tokens.output":     355 + 309,
+		"gc.agent.tokens.cache_read": 10624 + 15232,
 	}
 	for name, want := range wantTokens {
 		if got, _ := invocationInt64Total(out, name); got != want {
@@ -870,9 +870,9 @@ func TestMessageAdvancesCodexCursor(t *testing.T) {
 
 	out := collectInvocationMetrics(t, reader)
 	wantTokens := map[string]int64{
-		"gc.agent.tokens.input":      (17888 - 15232) + (21683 - 17792),
-		"gc.agent.tokens.output":     309 + 269,
-		"gc.agent.tokens.cache_read": 15232 + 17792,
+		"gc.agent.tokens.input":      (15562 - 10624) + (17888 - 15232) + (21683 - 17792),
+		"gc.agent.tokens.output":     355 + 309 + 269,
+		"gc.agent.tokens.cache_read": 10624 + 15232 + 17792,
 	}
 	for name, want := range wantTokens {
 		if got, _ := invocationInt64Total(out, name); got != want {
