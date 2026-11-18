@@ -5159,16 +5159,20 @@ func executePlannedStartsTraced(
 				}
 				// A start whose record another holder took while its batch
 				// prepared is no restart, as a refused PreWake is not, and
-				// leaves the row to that holder; any other failed extension
-				// is no wake failure either, and leaves its PreWake marker for
-				// the abandoned-start recovery.
+				// leaves the row to that holder, its breaker metadata too:
+				// only this process's breaker entry goes back. Any other
+				// failed extension is no wake failure either: the row's
+				// breaker metadata goes back only under the start's lease,
+				// and its PreWake marker stays for the abandoned-start
+				// recovery.
 				unlaunched = append(unlaunched, func(err error) {
-					cb.restoreEntrySnapshot(sessFront, candidate.info.ID, identity, cbBefore, cbNow, stderr)
-					outcome := "failed"
 					if errors.Is(err, sessionpkg.ErrRuntimeLeaseLost) {
-						outcome = "deferred_by_runtime_lease"
+						cb.restoreEntry(identity, cbBefore)
+						drop("deferred_by_runtime_lease", err)
+						return
 					}
-					drop(outcome, err)
+					cb.restoreEntrySnapshotUnder(candidate.lease, candidate.info.ID, identity, cbBefore, cbNow, stderr)
+					drop("failed", err)
 				})
 			}
 			offset = end

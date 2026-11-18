@@ -5,7 +5,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -938,14 +940,15 @@ func (p *rowAtStartProvider) rowAtStart(name string) (map[string]string, bool) {
 // leasedBatchFixture is three creating rows, w1 to w3, that the legacy start
 // leases and launches in one batch, in a city with a runtime dir.
 type leasedBatchFixture struct {
-	store   beads.Store
-	sp      *rowAtStartProvider
-	cands   []startCandidate
-	ids     map[string]string
-	cfg     *config.City
-	desired map[string]TemplateParams
-	city    string
-	log     synchronizedBuffer
+	store      beads.Store
+	sp         *rowAtStartProvider
+	cands      []startCandidate
+	ids        map[string]string
+	identities map[string]string // runtime name -> breaker identity (enableBreaker)
+	cfg        *config.City
+	desired    map[string]TemplateParams
+	city       string
+	log        synchronizedBuffer
 }
 
 func newLeasedBatchFixture(t *testing.T, store beads.Store) *leasedBatchFixture {
@@ -1044,40 +1047,111 @@ func TestBatchedStartsExtendTheirRecordBeforeLaunch(t *testing.T) {
 	}
 }
 
+// enableBreaker turns the named-session circuit breaker on, under an identity
+// per row that tag makes unique, and returns each start's restart count so
+// far (restarts).
+func (f *leasedBatchFixture) enableBreaker(t *testing.T, tag string) map[string]int {
+	t.Helper()
+	f.cfg.Daemon.SessionCircuitBreaker = true
+	f.identities = map[string]string{}
+	before := map[string]int{}
+	for i := range f.cands {
+		name := f.cands[i].tp.SessionName
+		f.identities[name] = tag + "-" + name
+		if err := f.store.SetMetadataBatch(f.ids[name], map[string]string{sessionpkg.NamedSessionIdentityMetadata: f.identities[name]}); err != nil {
+			t.Fatal(err)
+		}
+		f.cands[i].info.ConfiguredNamedIdentity = f.identities[name]
+		before[name] = f.restarts(name)
+	}
+	return before
+}
+
+// restarts is the breaker's restart count for name's identity.
+func (f *leasedBatchFixture) restarts(name string) int {
+	return len(defaultSessionCircuitBreaker().entrySnapshot(f.identities[name]).entryRestarts())
+}
+
+// requireSkipped fails t unless the batch launched every start but
+// skipped's, logged skipped's start with outcome, counted a restart only for
+// a launched start (against before, from enableBreaker), recorded no wake
+// failure, and released skipped's flock and every async slot.
+func (f *leasedBatchFixture) requireSkipped(t *testing.T, skipped, outcome string, before map[string]int, limiter *asyncStartLimiter) {
+	t.Helper()
+	for name := range f.ids {
+		if _, started := f.sp.rowAtStart(name); started == (name == skipped) {
+			t.Errorf("%s: Start called = %v, want %v; log %q", name, started, name != skipped, f.log.String())
+		}
+		if grew := f.restarts(name) > before[name]; grew == (name == skipped) {
+			t.Errorf("%s: circuit restarts %d -> %d, want counted only for a launched start", name, before[name], f.restarts(name))
+		}
+	}
+	if !regexp.MustCompile(`session=` + skipped + ` [^\n]*outcome=` + outcome + `\b`).MatchString(f.log.String()) {
+		t.Errorf("log %q, want %s's start logged %s", f.log.String(), skipped, outcome)
+	}
+	episodes, err := f.store.List(beads.ListQuery{Type: sessionpkg.StartupHealthEpisodeType, IncludeClosed: true})
+	if err != nil || len(episodes) != 0 {
+		t.Errorf("startup-health episodes = %v (%v), want none", episodes, err)
+	}
+	_, release, err := tryRuntimeLease(f.store, f.city, skipped, "", 0)
+	if err != nil {
+		t.Fatalf("%s's flock after its skipped launch: %v, want released", skipped, err)
+	}
+	release()
+	limiter.mu.Lock()
+	inFlight := limiter.inFlight
+	limiter.mu.Unlock()
+	if inFlight != 0 {
+		t.Errorf("async slots in flight = %d, want every slot released", inFlight)
+	}
+}
+
+// startLifecycleKeys are the row's lifecycle facts that a start which never
+// launched leaves as its PreWake wrote them.
+var startLifecycleKeys = []string{"state", "generation", "instance_token", "last_woke_at", "pending_create_claim", "started_config_hash", "wake_attempts"}
+
 // takenOverKeys are the row's keys a start that lost its record to another
-// holder leaves to that holder: the record and the lifecycle facts.
-var takenOverKeys = []string{
+// holder leaves to that holder: the record, the lifecycle facts and the
+// breaker state.
+var takenOverKeys = slices.Concat([]string{
 	sessionpkg.RuntimeLeaseHolderKey, sessionpkg.RuntimeLeaseEpochKey, sessionpkg.RuntimeLeaseExpiresKey,
 	sessionpkg.RuntimeLeaseTTLKey, sessionpkg.RuntimeLeaseFlockKey,
-	"state", "generation", "instance_token", "last_woke_at", "pending_create_claim", "started_config_hash", "wake_attempts",
+}, startLifecycleKeys, sessionCircuitMetadataKeys)
+
+// takerCircuitMetadata is the breaker state of a holder that took a row's
+// record over: an open circuit and a restart history that no start in these
+// tests records.
+var takerCircuitMetadata = map[string]string{
+	sessionCircuitStateMetadata:             "open",
+	sessionCircuitRestartsMetadata:          `["2026-10-09T11:00:00Z","2026-10-09T11:01:00Z"]`,
+	sessionCircuitLastRestartMetadata:       "2026-10-09T11:01:00Z",
+	sessionCircuitLastProgressMetadata:      "2026-10-09T10:00:00Z",
+	sessionCircuitLastObservedMetadata:      "2026-10-09T11:01:30Z",
+	sessionCircuitProgressSignatureMetadata: "taker-signature",
+	sessionCircuitOpenedAtMetadata:          "2026-10-09T11:01:00Z",
+	sessionCircuitOpenRestartCountMetadata:  "2",
+	sessionCircuitResetGenerationMetadata:   "3",
+}
+
+// takeOverRecord writes another holder's record on row id, with that
+// holder's breaker state.
+func takeOverRecord(store beads.Store, id string) error {
+	patch := map[string]string{sessionpkg.RuntimeLeaseHolderKey: "other/1/n", sessionpkg.RuntimeLeaseEpochKey: "9"}
+	maps.Copy(patch, takerCircuitMetadata)
+	return store.SetMetadataBatch(id, patch)
 }
 
 // TestBatchedStartSkipsALaunchWhoseRecordWasTakenOver (AC-3): a start whose
 // row record another holder took while its batch prepared is never launched.
-// It leaves the row to the taker, is no wake failure and no restart, releases
-// its slot and flock, and is logged deferred; the batch's other starts launch.
+// It leaves the row to the taker, the taker's breaker state included, is no
+// wake failure and no restart, releases its slot and flock, and is logged
+// deferred; the batch's other starts launch.
 func TestBatchedStartSkipsALaunchWhoseRecordWasTakenOver(t *testing.T) {
 	for _, async := range []bool{false, true} {
 		mode := map[bool]string{false: "sync", true: "async"}[async]
 		t.Run(mode, func(t *testing.T) {
 			f := newLeasedBatchFixture(t, beads.NewMemStore())
-			f.cfg.Daemon.SessionCircuitBreaker = true
-			identities := map[string]string{}
-			for i := range f.cands {
-				name := f.cands[i].tp.SessionName
-				identities[name] = "x04u8f-" + mode + "-" + name
-				if err := f.store.SetMetadataBatch(f.ids[name], map[string]string{sessionpkg.NamedSessionIdentityMetadata: identities[name]}); err != nil {
-					t.Fatal(err)
-				}
-				f.cands[i].info.ConfiguredNamedIdentity = identities[name]
-			}
-			restarts := func(name string) int {
-				return len(defaultSessionCircuitBreaker().entrySnapshot(identities[name]).entryRestarts())
-			}
-			before := map[string]int{}
-			for name := range f.ids {
-				before[name] = restarts(name)
-			}
+			before := f.enableBreaker(t, "x04u8f-"+mode)
 			var calls int
 			var lost string
 			var takenOver map[string]string
@@ -1086,7 +1160,7 @@ func TestBatchedStartSkipsALaunchWhoseRecordWasTakenOver(t *testing.T) {
 					lost = c.tp.SessionName
 				}
 				if calls == 3 {
-					if err := f.store.SetMetadataBatch(f.ids[lost], map[string]string{sessionpkg.RuntimeLeaseHolderKey: "other/1/n", sessionpkg.RuntimeLeaseEpochKey: "9"}); err != nil {
+					if err := takeOverRecord(f.store, f.ids[lost]); err != nil {
 						t.Fatal(err)
 					}
 					takenOver = mustGetBead(t, f.store, f.ids[lost]).Metadata
@@ -1097,44 +1171,100 @@ func TestBatchedStartSkipsALaunchWhoseRecordWasTakenOver(t *testing.T) {
 			if calls != 3 {
 				t.Fatalf("prepared %d candidates, want 3; log %q", calls, f.log.String())
 			}
-			for name := range f.ids {
-				_, started := f.sp.rowAtStart(name)
-				if started == (name == lost) {
-					t.Errorf("%s: Start called = %v, want %v; log %q", name, started, name != lost, f.log.String())
-				}
-			}
+			f.requireSkipped(t, lost, "deferred_by_runtime_lease", before, limiter)
 			meta := mustGetBead(t, f.store, f.ids[lost]).Metadata
 			for _, key := range takenOverKeys {
 				if meta[key] != takenOver[key] {
 					t.Errorf("%s: %s = %q, want the taker's %q", lost, key, meta[key], takenOver[key])
 				}
 			}
-			episodes, err := f.store.List(beads.ListQuery{Type: sessionpkg.StartupHealthEpisodeType, IncludeClosed: true})
-			if err != nil || len(episodes) != 0 {
-				t.Errorf("startup-health episodes = %v (%v), want none", episodes, err)
-			}
-			if !regexp.MustCompile(`session=` + lost + ` [^\n]*outcome=deferred_by_runtime_lease`).MatchString(f.log.String()) {
-				t.Errorf("log %q, want %s's start logged deferred_by_runtime_lease", f.log.String(), lost)
-			}
-			for name := range f.ids {
-				grew := restarts(name) > before[name]
-				if grew == (name == lost) {
-					t.Errorf("%s: circuit restarts %d -> %d, want counted only for a launched start", name, before[name], restarts(name))
-				}
-			}
-			_, release, err := tryRuntimeLease(f.store, f.city, lost, "", 0)
-			if err != nil {
-				t.Fatalf("%s's flock after its skipped launch: %v, want released", lost, err)
-			}
-			release()
-			if async {
-				limiter.mu.Lock()
-				inFlight := limiter.inFlight
-				limiter.mu.Unlock()
-				if inFlight != 0 {
-					t.Errorf("async slots in flight = %d, want every slot released", inFlight)
-				}
-			}
 		})
+	}
+}
+
+// failExtensionStore fails the record extension's write on row id:
+// ExtendRecord's patch, the record's expiry and TTL alone, which no other
+// record write is. With takeOver, another holder takes the row's record
+// first, as a takeover racing the failed write would. atFailure is the row
+// as the write failed.
+type failExtensionStore struct {
+	*beads.MemStore
+	id        string
+	takeOver  bool
+	atFailure map[string]string
+}
+
+func (s *failExtensionStore) SetMetadataBatch(id string, kvs map[string]string) error {
+	_, expires := kvs[sessionpkg.RuntimeLeaseExpiresKey]
+	_, ttl := kvs[sessionpkg.RuntimeLeaseTTLKey]
+	if id != s.id || len(kvs) != 2 || !expires || !ttl {
+		return s.MemStore.SetMetadataBatch(id, kvs)
+	}
+	if s.takeOver {
+		if err := takeOverRecord(s.MemStore, id); err != nil {
+			return err
+		}
+	}
+	b, err := s.Get(id)
+	if err != nil {
+		return err
+	}
+	s.atFailure = maps.Clone(b.Metadata)
+	return errors.New("extension write failed")
+}
+
+// TestBatchedStartWhoseExtensionFailsIsNotLaunched: a start whose record
+// extension fails for a reason other than a takeover is never launched. It is
+// no wake failure and no restart: its breaker entry goes back, and the row's
+// breaker state follows only through a write fenced on its lease, so a holder
+// that took the record as the write failed keeps its own. It leaves its
+// PreWake marker for the abandoned-start recovery, releases its slot and
+// flock, and is logged failed; the batch's other starts launch.
+func TestBatchedStartWhoseExtensionFailsIsNotLaunched(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		takeOver bool
+	}{{"record_kept", false}, {"record_taken", true}} {
+		for _, async := range []bool{false, true} {
+			mode := map[bool]string{false: "sync", true: "async"}[async]
+			t.Run(tc.name+"/"+mode, func(t *testing.T) {
+				store := &failExtensionStore{MemStore: beads.NewMemStore(), takeOver: tc.takeOver}
+				f := newLeasedBatchFixture(t, store)
+				before := f.enableBreaker(t, "x04u8f-ext-"+tc.name+"-"+mode)
+				const failed = "w2"
+				store.id = f.ids[failed]
+				circuitBefore := sessionpkg.CircuitStateFromMetadata(mustGetBead(t, f.store, store.id).Metadata)
+				limiter := f.run(t, async)
+				if store.atFailure == nil {
+					t.Fatalf("%s's record was never extended; log %q", failed, f.log.String())
+				}
+				f.requireSkipped(t, failed, "failed", before, limiter)
+				if store.atFailure["last_woke_at"] == "" {
+					t.Fatalf("%s at its extension = %v, want its PreWake's in-flight marker", failed, store.atFailure)
+				}
+				keys := startLifecycleKeys
+				if tc.takeOver {
+					keys = takenOverKeys
+				}
+				meta := mustGetBead(t, f.store, store.id).Metadata
+				for _, key := range keys {
+					if meta[key] != store.atFailure[key] {
+						t.Errorf("%s: %s = %q, want %q as its extension found it", failed, key, meta[key], store.atFailure[key])
+					}
+				}
+				if tc.takeOver {
+					return
+				}
+				if sessionpkg.CircuitStateFromMetadata(store.atFailure).Restarts == "" {
+					t.Fatalf("%s at its extension = %v, want its restart recorded", failed, store.atFailure)
+				}
+				if circuit := sessionpkg.CircuitStateFromMetadata(meta); circuit != circuitBefore {
+					t.Errorf("%s's breaker state = %+v, want %+v from before its start", failed, circuit, circuitBefore)
+				}
+				if holder := meta[sessionpkg.RuntimeLeaseHolderKey]; holder != "" {
+					t.Errorf("%s's record holder = %q, want the record cleared at release", failed, holder)
+				}
+			})
+		}
 	}
 }
