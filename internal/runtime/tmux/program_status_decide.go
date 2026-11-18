@@ -12,7 +12,14 @@ import (
 // The OSC 7501 cutover decisions at the tmux leaf (ga-f4ovjm.76). Under the
 // switch on, two leaf decisions the second shadow measured with the
 // program's own record now decide with it, through the same pure rules the
-// shadow recorded (runtime.ProgramStartupVerdict, runtime.ProgramSettleVerdict):
+// shadow recorded (runtime.ProgramStartupVerdict, runtime.ProgramSettleVerdict),
+// each only for a provider that opts into it (program_status decide_startup,
+// decide_settle; ga-f4ovjm.79): a provider that does not decides it from the
+// screen alone, exactly as under off. The startup ladder runs inside the
+// start, which carries the opt-in in its arm; the settle follows an
+// interrupt any process may send, so its opt-in is bound to the pane
+// (programSettleOption) as the hold declaration is, and heal keeps it
+// current:
 //
 //   - the startup ladder (startup_ladder): a turn start past the baseline
 //     taken before the first send confirms the startup nudge (positive
@@ -40,10 +47,18 @@ import (
 // on with its nudge handed back (startupNudgeHandback).
 var errStartupNudgeBlocked = fmt.Errorf("%w: the program reports a dialog, so the startup nudge was not typed", runtime.ErrPendingInteraction)
 
+// programSettleOption is the pane option a settle-declaring arm sets to the
+// pane's id (set-option -F "#{pane_id}"): the pane's provider opts the
+// interrupt settle into deciding with the record
+// ([runtime.ProgramStatusArm.DecideSettle]). A value set at window, session
+// or global scope declares nothing for this pane.
+const programSettleOption = "@gc_ps_settle"
+
 // programStartupLadder wraps the startup ladder's send and busy look to
-// decide with session's record under the switch on, against a baseline read
-// before the ladder's first send. Off on, both are returned as they are and
-// nothing is read.
+// decide with session's record under the switch on, for a start whose arm
+// opts into it (arm.DecideStartup), against a baseline read before the
+// ladder's first send. Off on, or without the opt-in, both are returned as
+// they are and nothing is read.
 //
 //   - Before each send, a live blocked record holds it: errStartupNudgeBlocked,
 //     nothing typed. Once an earlier attempt typed the nudge, a dialog
@@ -56,8 +71,8 @@ var errStartupNudgeBlocked = fmt.Errorf("%w: the program reports a dialog, so th
 //   - The busy look reads a confirmed record as busy (the nudge landed) and
 //     a blocked one as not busy (the next send holds); otherwise the scan's
 //     look decides.
-func (t *Tmux) programStartupLadder(session string, send func() error, busy func() (bool, error)) (func() error, func() (bool, error)) {
-	if t.programStatusMode() != runtime.ProgramStatusOn {
+func (t *Tmux) programStartupLadder(session string, arm runtime.ProgramStatusArm, send func() error, busy func() (bool, error)) (func() error, func() (bool, error)) {
+	if !arm.DecideStartup || t.programStatusMode() != runtime.ProgramStatusOn {
 		return send, busy
 	}
 	// A baseline that could not be read, or is not valid, credits nothing
@@ -129,7 +144,10 @@ const programInterruptWindow = 5 * time.Second
 // a dialog raised since the interrupt. A blocked record the interrupt has not
 // moved yet (the dialog its keys may be canceling, before the program
 // reports again) decides nothing. Anything else, a reading that does not
-// decide included, leaves the scan to decide (false, nil). ok is false, and
+// decide included, leaves the scan to decide (false, nil), and so does a
+// reading whose pane no longer declares the settle: heal withdraws the
+// declaration under the same nonce, so a wait the note armed decides as
+// under off from the first reading that shows it gone. ok is false, and
 // the wait is the scan's alone, when the switch is not on or no interrupt
 // was noted within the window.
 func (t *Tmux) programSettle(session string, at time.Time) (check func() (bool, error), ok bool) {
@@ -142,7 +160,7 @@ func (t *Tmux) programSettle(session string, at time.Time) (check func() (bool, 
 	}
 	return func() (bool, error) {
 		d, ok := t.programDecide(session)
-		if !ok {
+		if !ok || !d.reading.Status.SettleDeclared {
 			return false, nil
 		}
 		s := d.reading.Status
@@ -162,12 +180,13 @@ func (t *Tmux) programSettle(session string, at time.Time) (check func() (bool, 
 // noteProgramInterrupt keeps session's record position as gc interrupts it
 // under the switch on, for the settle wait that follows (programSettle). It
 // takes one fresh read before the interrupt's keys, as the shadow does
-// (shadowNoteInterrupt); a read that fails notes nothing, and the wait is the
+// (shadowNoteInterrupt); a read that fails, or a pane that does not declare
+// the settle (programSettleOption), notes nothing, and the wait is the
 // scan's. A baseline that is not valid settles only on a later valid record
 // of its nonce that changed since (runtime.ProgramSettleVerdict).
 func (t *Tmux) noteProgramInterrupt(session string) {
-	r, _, ok := t.decisionRead(session)
-	if !ok {
+	r, pane, ok := t.decisionRead(session)
+	if !ok || !pane.settleDeclared() {
 		return
 	}
 	t.keepInterrupt(session, shadowInterrupt{baseline: r.Status.Baseline(), at: time.Now()})
@@ -177,8 +196,8 @@ func (t *Tmux) noteProgramInterrupt(session string) {
 // on, name's record position before the keys of an interrupt its caller
 // sends itself (a soft-Escape family's Escape), taken as Interrupt takes its
 // own (noteProgramInterrupt), so the idle wait after those keys is that
-// interrupt's settle. Off on it reads nothing; the shadow notes only
-// Interrupt's own.
+// interrupt's settle when the pane declares it. Off on it reads nothing; the
+// shadow notes only Interrupt's own.
 func (p *Provider) NoteInterrupt(name string) {
 	p.tm.noteProgramInterrupt(name)
 }

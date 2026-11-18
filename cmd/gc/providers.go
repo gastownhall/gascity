@@ -1087,10 +1087,9 @@ var (
 // rest of the process, silently disabling the very telemetry this path exists
 // to carry. The next factory construction retries.
 //
-// Wiring this recorder live has one visible side effect on the CLI path:
-// worker's operation telemetry re-enriches session identity after a runtime
-// mutation, so EnrichInfo now issues a trailing IsRunning probe that callers
-// (and tests) see after Start/Stop.
+// Wiring this recorder live adds no provider call: worker's operation telemetry
+// names the session from the persisted record alone, so callers (and tests) see
+// the same provider calls after Start/Stop with or without it.
 func cliFactoryEventsRecorder(cityPath string, cfg *config.City) events.Recorder {
 	cityPath = strings.TrimSpace(cityPath)
 	if cityPath == "" {

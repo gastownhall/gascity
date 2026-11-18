@@ -3005,9 +3005,8 @@ func deleteWorkflowBeadsBatchGuarded(store beads.Store, ids []string) error {
 }
 
 // deleteWorkflowBead removes a single workflow bead after proving the delete
-// strands nothing. Every unbatched caller (order-tracking retention, wisp
-// orphan reaping) goes through here, so the guard covers the class rather than
-// one pruner: deleteWorkflowBead has several callers and any of them can be
+// strands nothing. Every unbatched caller (wisp orphan reaping) goes through
+// here, so the guard covers the class rather than one pruner: any caller can be
 // handed a root (ga-ejwo1q).
 func deleteWorkflowBead(store beads.Store, id string) error {
 	if err := assertWorkflowDeleteLeavesNothingStranded(store, id, nil); err != nil {

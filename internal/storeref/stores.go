@@ -23,13 +23,15 @@ package storeref
 // every operation, exactly as the routes did. A refused city still serves work
 // from its work ledger, and so do these handles.
 //
-// Stores reads Topology.Work, Topology.Rigs and Topology.Bindings. It answers
-// the city scope for every class, and a rig scope for the two classes a rig
-// scope has: its work store (Rig) and the graph store a molecule launched at
-// it is placed in (GraphFor). Sessions, mail, orders and nudges are city
+// Stores reads Topology.Work, Topology.Rigs and Topology.Bindings, and keeps
+// the prefixes, census bits and relic-free bits they carry for Topology. It
+// answers the city scope for every class, and a rig scope for the two classes
+// a rig scope has: its work store (Rig) and the graph store a molecule
+// launched at it is placed in (GraphFor). Sessions, mail, orders and nudges are city
 // classes, so no rig frame exists for them: a sessions handle over a rig work
-// store would be the misroute shape. Plan-ordered federated legs arrive with
-// T7.
+// store would be the misroute shape. Stores.Plan (stores_plan.go) plans the
+// federations over these handles, and Stores.Topology is the topology they
+// were minted as.
 //
 // NewStores and Place take raw stores and hand out handles over them, so the
 // storeclass lint confines their callers (tools/nogo/analyzers/storeclass).
@@ -101,6 +103,9 @@ type StoresOptions struct {
 type Stores struct {
 	city beads.ClassStores
 	rigs []rigStores
+	// topo is the minted topology (mintedTopology): the epoch's legs over the
+	// handles' own stores.
+	topo Topology
 }
 
 // rigStores is one rig scope's handles.
@@ -109,6 +114,10 @@ type rigStores struct {
 	ref   StoreRef
 	work  beads.WorkStore
 	graph beads.GraphStore
+	// orders is the orders placement over the rig's frame, by Place's rule:
+	// the order dispatcher reads a rig order's run evidence there
+	// (resolveOrderStore). It is not handed out; Stores.Plan reads it.
+	orders beads.OrdersStore
 }
 
 // RigWork is one rig's work store, as Stores.Rigs lists it.
@@ -139,11 +148,13 @@ func NewStores(t Topology, opts StoresOptions) Stores {
 		}
 		frame := Topology{Work: leg, Bindings: t.Bindings, Refused: t.Refused}
 		h := beads.MintClassStores(beads.MintSpec{
-			Work:  Place(frame, opts, coordclass.ClassWork),
-			Graph: Place(frame, opts, coordclass.ClassGraph),
+			Work:   Place(frame, opts, coordclass.ClassWork),
+			Graph:  Place(frame, opts, coordclass.ClassGraph),
+			Orders: Place(frame, opts, coordclass.ClassOrders),
 		})
-		s.rigs = append(s.rigs, rigStores{name: name, ref: RigRef(name), work: h.Work, graph: h.Graph})
+		s.rigs = append(s.rigs, rigStores{name: name, ref: RigRef(name), work: h.Work, graph: h.Graph, orders: h.Orders})
 	}
+	s.topo = mintedTopology(t, opts, s)
 	return s
 }
 

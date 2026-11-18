@@ -50,6 +50,25 @@ type ProgramStatusBinding struct {
 	// when its capture is armed (create, respawn, heal), and heal keeps it
 	// current. Unset inherits.
 	HoldMidTurn *bool `toml:"hold_mid_turn,omitempty"`
+	// DecideStartup opts the startup ladder into deciding with the program's
+	// own record under the [session] program_status switch on: a turn start
+	// past the record read before the first send confirms the startup nudge,
+	// and a live blocked record holds the send (nothing is typed into the
+	// dialog) and, once the ladder runs out, hands the nudge back to be
+	// queued for the session. Without it the ladder decides from the screen
+	// alone, exactly as under off. Declare it only for a program whose
+	// records were shown to agree with the ladder's outcomes. Unset inherits.
+	DecideStartup *bool `toml:"decide_startup,omitempty"`
+	// DecideSettle opts the interrupt settle into deciding with the program's
+	// own record under the [session] program_status switch on: the idle wait
+	// that follows an interrupt gc sent returns at the first root boundary
+	// past the pre-interrupt record, and a dialog the program reports since
+	// ends it as a pending interaction, so no further keys are sent. Without
+	// it the wait decides from the screen alone, exactly as under off. It
+	// reaches a pane when its capture is armed (create, respawn, heal), and
+	// heal keeps it current. Declare it only for a program whose records were
+	// shown to agree with the settle's outcomes. Unset inherits.
+	DecideSettle *bool `toml:"decide_settle,omitempty"`
 	// Env is forced into the session environment when capture is armed (for
 	// example PI_PROGRAM_STATUS = "1"). It is not part of the launch
 	// fingerprint, so changing it does not relaunch running agents: keys gc
@@ -73,10 +92,12 @@ func (b ProgramStatusBinding) Declaration(acp bool) runtime.ProgramStatusArm {
 		return runtime.ProgramStatusArm{}
 	}
 	return runtime.ProgramStatusArm{
-		Capture:     true,
-		App:         b.App,
-		Relay:       b.Relay != nil && *b.Relay,
-		HoldMidTurn: b.HoldMidTurn != nil && *b.HoldMidTurn,
+		Capture:       true,
+		App:           b.App,
+		Relay:         b.Relay != nil && *b.Relay,
+		HoldMidTurn:   b.HoldMidTurn != nil && *b.HoldMidTurn,
+		DecideStartup: b.DecideStartup != nil && *b.DecideStartup,
+		DecideSettle:  b.DecideSettle != nil && *b.DecideSettle,
 	}
 }
 
@@ -107,13 +128,15 @@ func (b ProgramStatusBinding) clone() ProgramStatusBinding {
 	out := b
 	out.Relay = cloneBoolPtr(b.Relay)
 	out.HoldMidTurn = cloneBoolPtr(b.HoldMidTurn)
+	out.DecideStartup = cloneBoolPtr(b.DecideStartup)
+	out.DecideSettle = cloneBoolPtr(b.DecideSettle)
 	out.Env = maps.Clone(b.Env)
 	return out
 }
 
 // mergeProgramStatusBinding layers over on base: a non-empty protocol or app
-// overrides, a non-nil relay or hold_mid_turn overrides, and env merges per key with over
-// winning (an empty value is copied verbatim, which withholds the variable).
+// overrides, a non-nil relay, hold_mid_turn, decide_startup or decide_settle
+// overrides, and env merges per key with over winning (an empty value is copied verbatim, which withholds the variable).
 func mergeProgramStatusBinding(base, over ProgramStatusBinding) ProgramStatusBinding {
 	out := base.clone()
 	if over.Protocol != "" {
@@ -127,6 +150,12 @@ func mergeProgramStatusBinding(base, over ProgramStatusBinding) ProgramStatusBin
 	}
 	if over.HoldMidTurn != nil {
 		out.HoldMidTurn = cloneBoolPtr(over.HoldMidTurn)
+	}
+	if over.DecideStartup != nil {
+		out.DecideStartup = cloneBoolPtr(over.DecideStartup)
+	}
+	if over.DecideSettle != nil {
+		out.DecideSettle = cloneBoolPtr(over.DecideSettle)
 	}
 	if over.Env != nil {
 		merged := make(map[string]string, len(out.Env)+len(over.Env))

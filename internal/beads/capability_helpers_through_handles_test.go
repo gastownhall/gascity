@@ -86,6 +86,9 @@ var handleWraps = map[string]func(Store) Store{
 	"nested handles":  func(s Store) Store { return GraphStore{WorkStore{s}} },
 	"a graph target":  func(s Store) Store { return GraphMolecule(GraphStore{s}) },
 	"a sessions view": func(s Store) Store { return SessionStore{s} },
+	"a resident":      func(s Store) Store { return MintResident(s, "") },
+	"a federated leg": func(s Store) Store { return MintResidentLeg(MintFederatedLeg(s, "")) },
+	"a relic leg":     func(s Store) Store { return MintResidentLeg(MintRelicLeg(s, "")) },
 }
 
 // TestCapabilityHelpersSeeThroughClassHandles (typed-stores T6a) pins that

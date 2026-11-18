@@ -7,9 +7,9 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -24,8 +24,14 @@ import (
 // raw commands are typed into the pane and never register anything. State
 // files drive the scenario (registered / pane_gone / busy / name_taken /
 // agent_blocked, plus the startup-delivery verdicts prompt_stalled /
-// prompt_times_out / prompt_blocked and wait_times_out, and the startup-dialog
-// screens of startup_dialogs_test.go), and calls.log records every verb so
+// prompt_stalled_echo / prompt_times_out / prompt_blocked / prompt_not_ready_once /
+// prompt_not_ready_always / prompt_not_ready_times and wait_times_out, and
+// enter_rejects_not_ready for a turn typed ahead of the TUI, and
+// marker_above_held_turn for a not-ready line drawn above a turn still in the
+// box; hang for a herdr that never answers; and the startup-dialog screens of
+// startup_dialogs_test.go), a "screen" file that `pane read` returns when no
+// startup-dialog screen applies, and
+// calls.log records every verb so
 // tests can assert what was — and crucially was NOT — issued (the spawn storm
 // was one placement per reconcile tick). Like herdr, an `agent wait` that does
 // not name blocked holds while the agent is blocked on a dialog, until the
@@ -48,12 +54,7 @@ func newFakeHerdrProvider(t *testing.T) (*Provider, string) {
 func newFakeHerdrProviderForSession(t *testing.T, session string) (*Provider, string) {
 	t.Helper()
 	state := t.TempDir()
-	// The FIFO an `agent wait` on a blocked agent holds on: nothing writes it,
-	// so the fake's read blocks until the caller's ctx kills the fake, with no
-	// child process left to outlive the kill.
-	if err := syscall.Mkfifo(filepath.Join(state, "wait_hold"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	makeWaitHold(t, state)
 	metaDir := t.TempDir()
 	script := filepath.Join(t.TempDir(), "herdr")
 	fake := `#!/bin/sh
@@ -61,6 +62,8 @@ STATE='` + state + `'
 METADIR='` + metaDir + `'
 shift 2
 printf '%s\n' "$*" >> "$STATE/calls.log"
+# hang: a herdr CLI that never answers, so it runs until it is killed.
+if [ -e "$STATE/hang" ]; then exec sleep 3600; fi
 # herdr ≥0.8.2 reads an agent on the untrusted trust dialog as blocked, unless
 # the scenario has it read that dialog as idle (dialog_reads_idle).
 blocked() { [ -e "$STATE/trust_dialog" ] && [ ! -e "$STATE/trusted" ] && [ ! -e "$STATE/dialog_reads_idle" ]; }
@@ -136,6 +139,13 @@ agent_wait)
     printf '%s' '{"error":{"code":"agent_not_found","message":"agent target not found"}}'
   elif [ -e "$STATE/wait_times_out" ]; then
     printf '%s' '{"error":{"code":"timeout","message":"timed out waiting for agent status"}}'
+  elif [ -e "$STATE/enter_rejects_not_ready" ] && case "$*" in *"--until idle"*) false ;; *) true ;; esac; then
+    # The agent is idle from launch on and a rejected submit leaves it idle:
+    # only the readiness wait settles.
+    printf '%s' '{"error":{"code":"timeout","message":"timed out waiting for agent status"}}'
+  elif [ -e "$STATE/marker_above_held_turn" ] && case "$*" in *"--until idle"*) false ;; *) true ;; esac; then
+    # The turn never leaves the box: only the readiness wait settles.
+    printf '%s' '{"error":{"code":"timeout","message":"timed out waiting for agent status"}}'
   elif [ -p "$STATE/agent_wait_entered" ]; then
     # A boot that never idles: tell the test the wait is in flight, then hold
     # it until the caller's ctx kills it. Builtins only, so no child outlives
@@ -162,6 +172,33 @@ agent_wait)
 agent_prompt)
   if [ ! -e "$STATE/registered" ]; then
     printf '%s' '{"error":{"code":"agent_not_found","message":"agent target not found"}}'
+  elif [ -e "$STATE/enter_rejects_not_ready" ] && [ ! -e "$STATE/rejected_on_enter" ]; then
+    # Typed before the agent's TUI was up: nothing on screen changes.
+    printf '%s' '{"error":{"code":"agent_prompt_stalled","message":"no state change observed after submission"}}'
+  elif [ -e "$STATE/marker_above_held_turn" ]; then
+    # The TUI comes up drawing a not-ready line from its resumed history above
+    # a composer that still holds the typed turn, whose CR and Enters it lost:
+    # no rejection, the turn is in the box. The file says when: 0 at the first
+    # prompt's stall, N at the Nth Enter.
+    printf '%s' "$4" > "$STATE/typed"
+    if [ "$(cat "$STATE/marker_above_held_turn")" = 0 ] && [ ! -e "$STATE/held_turn_drawn" ]; then
+      printf '%s\n%s%s\n' '` + fakeNotReadyLine + `' '` + fakeComposer + `' "$4" >> "$STATE/screen"
+      : > "$STATE/held_turn_drawn"
+    fi
+    printf '%s' '{"error":{"code":"agent_prompt_stalled","message":"no state change observed after submission"}}'
+  elif [ -e "$STATE/prompt_not_ready_once" ] || [ -e "$STATE/prompt_not_ready_always" ]; then
+    # The agent consumed the submit, printed a not-ready line and stayed idle:
+    # herdr sees the same unchanged state as a swallowed CR, but the input box
+    # is empty. _once lets the next prompt through.
+    rm -f "$STATE/prompt_not_ready_once"
+    printf '%s' '` + fakeRejectedScreen + `' >> "$STATE/screen"
+    printf '%s' '{"error":{"code":"agent_prompt_stalled","message":"no state change observed after submission"}}'
+  elif [ -e "$STATE/prompt_not_ready_times" ] && [ "$(cat "$STATE/prompt_not_ready_times")" -gt 0 ]; then
+    # Rejects as not ready as many times as the file says, then lets prompts
+    # through: an agent that takes a while to become ready.
+    echo $(( $(cat "$STATE/prompt_not_ready_times") - 1 )) > "$STATE/prompt_not_ready_times"
+    printf '%s' '` + fakeRejectedScreen + `' >> "$STATE/screen"
+    printf '%s' '{"error":{"code":"agent_prompt_stalled","message":"no state change observed after submission"}}'
   elif blocked; then
     # herdr ≥0.8.2 refuses a prompt to an agent waiting at a dialog and sends
     # no text or Enter.
@@ -171,6 +208,10 @@ agent_prompt)
     # No state change inside herdr's fixed 5000ms window: the submit CR never
     # reached the TUI and the text sits unsubmitted in an idle input box.
     prompt_error '{"error":{"code":"agent_prompt_stalled","message":"no state change observed after submission"}}'
+  elif [ -e "$STATE/prompt_stalled_echo" ]; then
+    # A swallowed CR whose typed text stays on screen in the input box.
+    printf '%s\n' "$4" >> "$STATE/screen"
+    printf '%s' '{"error":{"code":"agent_prompt_stalled","message":"no state change observed after submission"}}'
   elif [ -e "$STATE/prompt_times_out" ]; then
     # The state-change gate passed (the CR landed) but no --until state was
     # observed before --timeout. herdr only reports this when --timeout
@@ -245,8 +286,29 @@ pane_read)
     fi
   elif [ -e "$STATE/trust_dialog" ] || [ -e "$STATE/late_trust_dialog" ] || [ -e "$STATE/ready_prompt" ]; then
     printf '%s\n' '❯ '
+  elif [ -e "$STATE/screen" ]; then
+    cat "$STATE/screen"
+  else
+    printf '%s' '` + fakeIdleScreen + `'
   fi ;;
 pane_send-keys)
+  # enter_rejects_not_ready: the TUI came up holding the typed-ahead turn, and
+  # the Enter numbered in the file submits it while the agent is not ready,
+  # which consumes it and prints the not-ready line.
+  if [ -e "$STATE/enter_rejects_not_ready" ]; then
+    printf '.' >> "$STATE/enters"
+    if [ $(( $(wc -c < "$STATE/enters") )) -eq "$(cat "$STATE/enter_rejects_not_ready")" ]; then
+      printf '%s' '` + fakeRejectedScreen + `' >> "$STATE/screen"
+      : > "$STATE/rejected_on_enter"
+    fi
+  fi
+  # marker_above_held_turn: see agent_prompt; the Enter is lost.
+  if [ -e "$STATE/marker_above_held_turn" ]; then
+    printf '.' >> "$STATE/enters"
+    if [ $(( $(wc -c < "$STATE/enters") )) -eq "$(cat "$STATE/marker_above_held_turn")" ]; then
+      printf '%s\n%s%s\n' '` + fakeNotReadyLine + `' '` + fakeComposer + `' "$(cat "$STATE/typed")" >> "$STATE/screen"
+    fi
+  fi
   case " $* " in
     *" enter "*)
       if [ -e "$STATE/trust_dialog" ]; then : > "$STATE/trusted"; fi
@@ -262,11 +324,21 @@ esac
 	}
 	p := New(session, metaDir, t.TempDir(), time.Second, time.Second)
 	p.c.bin = script
+	if goruntime.GOOS == "windows" {
+		p.c.bin = newGoFakeHerdr(t, fakeHerdrSpec{Mode: "provider", State: state, MetaDir: metaDir})
+		// herdr names its Windows pipe after the socket path, and the pipe
+		// namespace is machine-wide: a path under the real config directory
+		// would serve, or dial, the pipe of a real session by that name.
+		p.c.sockPath = filepath.Join(t.TempDir(), "herdr.sock")
+	}
 	// The paste fallback's settle delay guards a real paste racing a real
 	// submit; against a shell script there is no race, and the production 1s
 	// would be per-test wall-clock the resource census cannot see (it counts
 	// only time.Sleep written directly in a _test.go).
 	p.c.settleDelay = time.Millisecond
+	// The not-ready retry delay waits for a real agent to finish loading;
+	// against a fake there is nothing to wait for.
+	p.c.rejectDelay = time.Millisecond
 	return p, state
 }
 
@@ -289,12 +361,23 @@ func setState(t *testing.T, state, flag string) {
 
 // listenHerdrSocket plants a live unix listener at the session's socket path so
 // ConfigureServer's serverAlive dial succeeds without launching a real server.
+// On Windows it serves the named pipe herdr would serve that path on instead,
+// which needs no directory, so none is made or removed there.
 // Must resolve the path through p.c.socketPath() itself, not a hand-rolled
 // reconstruction — a second copy of that logic silently drifts from the real
 // one (ga-nqlb8q: it did, once socketPath() started honoring XDG_CONFIG_HOME).
 func listenHerdrSocket(t *testing.T, p *Provider) {
 	t.Helper()
 	sock := p.c.socketPath()
+	if goruntime.GOOS == "windows" {
+		l, err := listenHerdrEndpoint(sock)
+		if err != nil {
+			t.Fatal(err)
+		}
+		acceptAndClose(l)
+		t.Cleanup(func() { _ = l.Close() })
+		return
+	}
 	if err := os.MkdirAll(filepath.Dir(sock), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -439,7 +522,7 @@ func TestStartRawPathExecsThroughPaneShell(t *testing.T) {
 		t.Fatalf("Start: %v", err)
 	}
 	calls := fakeCalls(t, state)
-	if !strings.Contains(calls, "pane run %5 exec /bin/sh -c ") {
+	if !rawLaunchTyped(calls) {
 		t.Fatalf("Start did not exec the raw command through the pane shell:\n%s", calls)
 	}
 	if strings.Contains(calls, "agent start") {
@@ -509,6 +592,10 @@ func TestStartRecyclesAllStaleTabs(t *testing.T) {
 // rewriteFake patches the fake herdr script in place.
 func rewriteFake(t *testing.T, p *Provider, old, replacement string) {
 	t.Helper()
+	if goruntime.GOOS == "windows" {
+		rewriteGoFake(t, p, old, replacement)
+		return
+	}
 	b, err := os.ReadFile(p.c.bin)
 	if err != nil {
 		t.Fatal(err)

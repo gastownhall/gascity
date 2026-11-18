@@ -102,12 +102,21 @@ invocation the generated work query builds, not with all of "bd ready" —
 "gc ready --help" lists what it takes. A city that relocates no class is
 unaffected.
 
-All arguments after "gc bd" are forwarded to bd unchanged, with one
-exception: a "list" that filters on the wisps (ephemeral) tier —
+All arguments after "gc bd" are forwarded to bd unchanged, with two
+exceptions. A "list" that filters on the wisps (ephemeral) tier —
 "--type=molecule", "--type=wisp", "--mol-type", "--wisp-type" — also gets
 "--include-infra". bd skips that tier on any list without the flag, so those
 filters would otherwise return [] and exit 0 on a ledger full of live
-molecules. Every other list is forwarded as written. "heartbeat
+molecules. Every other list is forwarded as written. A ready frontier —
+"ready", or "list --ready" — also gets "--exclude-type=session" and
+"--exclude-label=order-tracking". gc's per-agent session beads and per-run
+order-tracking beads are open, unassigned and unblocked for their whole
+lifetime, so bd would list them as claimable work; claiming or closing one
+edits the reconciler's own state. Each exclusion is dropped when the argv
+already names what it would hide ("--type session", "--label
+order-tracking") or already excludes it. The label exclusion is also
+dropped when "--skip-labels" is set, which bd will not combine with
+"--exclude-label". "heartbeat
 <issue-id>" forwards to bd's native heartbeat, which refreshes the claim's
 lease and fails loudly when the caller no longer owns it. "show <id>
 --watch" (or "show --current --watch", or the "view" alias) is served by gc
@@ -473,9 +482,27 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// molecules. See bd_wisp_tier.go.
 	bdArgs = rewriteBdWispTierArgs(bdArgs)
 
+	// A ready frontier (`ready`, or `list --ready`) hides gc's own session and
+	// order-tracking beads, which bd would otherwise list as claimable work.
+	// See bd_ready_internal.go.
+	bdArgs = rewriteBdReadyInternalArgs(bdArgs)
+
 	// Refuse a dropped --set-metadata pair before any store work, so nothing is
 	// written and the exit code is honest. bd applies the subset and exits 0.
 	if msg, mistyped := mistypedMetadataPairRefusal(bdArgs); mistyped {
+		fmt.Fprint(stderr, msg) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	// Assignee shape guard (crn-23jqc): refuse a non-empty --assignee value
+	// with an empty rig or role segment (e.g. "cairn/", "/pm", "a//b") before
+	// it reaches bd. Such a value is invisible to both --assignee=<role>
+	// exact matching and --unassigned matching, so a bead written with it
+	// becomes silently unreachable by every agent. "" (clear) is unaffected.
+	// Pure argv analysis with no store dependency, so it runs here alongside
+	// its sibling refusal — ahead of the by-ID class route, which would
+	// otherwise serve the write in process and never reach a later guard.
+	if msg, refused := bdAssigneeShapeRefusal(bdArgs); refused {
 		fmt.Fprint(stderr, msg) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -587,11 +614,18 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// `update --add-label wisp`, `label add <id> gc:session`, `update --type
 	// message`, or an `import` of an archive taken before the split each turn
 	// work-store rows into infrastructure-class rows in place, and one such row
-	// makes every later routed gc command refuse until the fleet is stopped. It
-	// runs after the by-id door, which has already served or refused every
-	// binding resident, so what reaches it is the work scope's. A single-store
-	// city holds every class in its one store and the guard passes everything
-	// through unchanged.
+	// is invisible to its class readers until it is repaired. It
+	// runs after the by-id door (maybeRouteBdByID), which serves or refuses
+	// the binding residents it probes: the subjects of a served verb, a write
+	// mutation, a by-id read or a subject-table verb (bdByIDSubjectTable),
+	// and every reserved-prefix id an argv OUTSIDE that table addresses. It
+	// does not probe a non-subject position of a table verb (comment text, a
+	// `dep remove` target, a label), nor a work-prefixed id in an argv no
+	// scanner reduces to subjects (a verb in no table, a flag outside the
+	// manifest), so such an argv can reach this guard naming a binding
+	// resident; the guard does not decide residence (bdClassFlipGuard). A
+	// single-store city holds every class in its one store and the guard
+	// passes everything through unchanged.
 	var classGuardStore beads.Store
 	classGuard := bdClassFlipGuard(cfg, target.ScopeRoot, bdArgs, bdClassGuardDeps{
 		stdin: os.Stdin,

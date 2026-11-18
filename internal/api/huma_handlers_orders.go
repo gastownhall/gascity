@@ -410,7 +410,7 @@ func (s *Server) humaHandleOrderHistoryDetail(_ context.Context, input *OrderHis
 	// the orders leg this only finds one because the shape this build serves
 	// happens to serve both classes from one store — the co-residency the feed
 	// already refuses to rely on.
-	storeInfos := appendOrdersClassStoreInfo(workflowStores(s.state), s.state, workflowCityScopeRef(s.state.CityName()))
+	storeInfos := appendOrdersClassStoreInfo(workflowWritableStores(s.state), s.state, workflowCityScopeRef(s.state.CityName()))
 	if input.StoreRef != "" {
 		info, ok := workflowStoreByRef(s.state, input.StoreRef)
 		if !ok {
@@ -516,7 +516,9 @@ func appendOrdersClassStoreInfo(infos []workflowStoreInfo, state State, cityName
 		return infos
 	}
 	for _, info := range infos {
-		if info.store == ordersStore {
+		// By physical identity: a workflow leg's store is its handle
+		// (workflowWritableStores), and == never matches a handle.
+		if beads.SameStore(info.store, ordersStore) {
 			return infos
 		}
 	}

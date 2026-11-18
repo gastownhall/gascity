@@ -101,7 +101,7 @@ func Phase1Profiles() []Profile {
 			// so it runs under the relay. Recorded under gc's tmux against a
 			// local mock API: the probe, then BEL-terminated reports.
 			ProgramStatus: ProgramStatusExpectation{
-				ProgramStatusDeclaration: ProgramStatusDeclaration{Declared: true, App: "claude-code", Relay: true},
+				ProgramStatusDeclaration: ProgramStatusDeclaration{Declared: true, App: "claude-code", Relay: true, DecideStartup: true, DecideSettle: true},
 				Verified:                 "Claude Code 2.1.311",
 				Emission: ProgramStatusEmission{
 					FirstReport: []string{"term bel", "raw " + osc7501ProbeBELHex, "report state=idle:app=claude-code"},
@@ -141,7 +141,7 @@ func Phase1Profiles() []Profile {
 			// no relay. Recorded under gc's tmux against a local mock API:
 			// ST-terminated reports.
 			ProgramStatus: ProgramStatusExpectation{
-				ProgramStatusDeclaration: ProgramStatusDeclaration{Declared: true, App: "codex", HoldMidTurn: true},
+				ProgramStatusDeclaration: ProgramStatusDeclaration{Declared: true, App: "codex", HoldMidTurn: true, DecideStartup: true},
 				Verified:                 "codex-cli 0.165.0",
 				Emission: ProgramStatusEmission{
 					FirstReport: []string{"report state=idle:app=codex"},

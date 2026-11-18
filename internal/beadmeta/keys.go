@@ -383,6 +383,12 @@ const (
 	// resumed attempt can tell a row it wrote from content the destination
 	// already owned.
 	InfraMigratedFromMetadataKey = "gc.infra_migrated_from"
+	// InfraReversedFromMetadataKey stamps a bead the reverse migration (`gc
+	// storage migrate --to-work` or --to-rigs) copied out of a binding back
+	// into a work or rig store, with the binding and the run, so a resumed
+	// reverse can tell a row it wrote from one the store already held, and
+	// --abort-reverse removes exactly those rows.
+	InfraReversedFromMetadataKey = "gc.infra_reversed_from"
 	// MigratedCrossEdgesMetadataKey records, on a bead, the cross-boundary
 	// edges a writer dropped rather than write across stores: a JSON list of
 	// {dir, type, other, other_status_at_import, payload, action}. No
@@ -773,6 +779,7 @@ var KnownMetadataKeys = []string{
 	TerminalMetadataKey,
 	TriggerBeadIDMetadataKey,
 	InfraMigratedFromMetadataKey,
+	InfraReversedFromMetadataKey,
 	MigratedCrossEdgesMetadataKey,
 	TriggerBeadStoreRefMetadataKey,
 	TruncatedMetadataKey,

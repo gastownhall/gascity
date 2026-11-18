@@ -15,9 +15,11 @@ import (
 // TestWakeStartRefusal is the one will-not-start predicate (CONTRACT v5.9
 // D8 7(a)) the API wake and `gc session wake` share: each refusal arm, and no
 // refusal where an override wakes the session (pin_awake on a latched seat,
-// assigned work on a latched one, and pool demand, unseen here, on a
-// non-interactive latch). A drained pool seat is refused pinned or not; an
-// asleep pool seat, pinned or not, is not refused but uncertain (it starts
+// assigned work on a latched one, the explicit wake just recorded on a
+// latched one when no sleep intent outranks it and no later sleep served it,
+// as the reconciler's demand override reads it, and pool demand, unseen here,
+// on a non-interactive latch). A drained pool seat is refused pinned or not;
+// an asleep pool seat, pinned or not, is not refused but uncertain (it starts
 // only for pool demand). Assigned work parked on a dispatch hold overrides the
 // latch only when it is in_progress, a claimed ownership fact that stays
 // hold-transparent (ga-5736js); held OPEN work is neither wake readiness nor
@@ -26,6 +28,8 @@ import (
 // waiting on demand. An open respawn circuit refuses only under legacy, the
 // one reconciler that reads it: under v2 it is stale state.
 func TestWakeStartRefusal(t *testing.T) {
+	now := time.Now().UTC()
+	earlier, later := now.Add(-time.Hour).Format(time.RFC3339), now.Format(time.RFC3339)
 	for name, tc := range map[string]struct {
 		agent     config.Agent
 		rigs      []config.Rig
@@ -61,6 +65,20 @@ func TestWakeStartRefusal(t *testing.T) {
 		"abandoned create":      {agent: config.Agent{Name: "worker"}, info: sessionpkg.Info{Template: "worker", MetadataState: "creating"}, want: "create never completed"},
 		"non-interactive latch": {agent: config.Agent{Name: "worker", SleepAfterIdle: "1m", Attach: boolPtr(false)}, info: sessionpkg.Info{Template: "worker", SessionNameMetadata: "worker", SleepReason: "idle"}},
 		"idle latch":            {agent: config.Agent{Name: "worker", SleepAfterIdle: "1m"}, info: sessionpkg.Info{Template: "worker", SessionNameMetadata: "worker", SleepReason: "idle"}, want: "idle sleep policy"},
+		"latch with a recorded wake": {
+			agent: config.Agent{Name: "worker", SleepAfterIdle: "1m"},
+			info:  sessionpkg.Info{Template: "worker", SessionNameMetadata: "worker", SleepReason: "idle", SleptAt: earlier, WakeRequest: "explicit", WakeRequestedAt: later},
+		},
+		"latch with a recorded wake a sleep intent outranks": {
+			agent: config.Agent{Name: "worker", SleepAfterIdle: "1m"},
+			info:  sessionpkg.Info{Template: "worker", SessionNameMetadata: "worker", SleepReason: "idle", SleptAt: earlier, WakeRequest: "explicit", WakeRequestedAt: later, SleepIntent: sleepIntentIdle},
+			want:  "idle sleep policy",
+		},
+		"latch with a wake its sleep served": {
+			agent: config.Agent{Name: "worker", SleepAfterIdle: "1m"},
+			info:  sessionpkg.Info{Template: "worker", SessionNameMetadata: "worker", SleepReason: "idle", SleptAt: later, WakeRequest: "explicit", WakeRequestedAt: earlier},
+			want:  "idle sleep policy",
+		},
 		"latch with held open work": {
 			agent: config.Agent{Name: "worker", SleepAfterIdle: "1m"}, info: sessionpkg.Info{ID: "gc-1", Template: "worker", SessionNameMetadata: "worker", SleepReason: "idle"},
 			heldWork: "open", want: "idle sleep policy",

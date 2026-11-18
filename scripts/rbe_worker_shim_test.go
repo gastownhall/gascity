@@ -925,6 +925,12 @@ func TestRBEWorkerPoolWorkflowIsolatesActions(t *testing.T) {
 			if got, want := step.Env["CAS_MAX_BYTES"], "${{ vars.RBE_CAS_MAX_BYTES || '' }}"; got != want {
 				t.Errorf("worker step CAS_MAX_BYTES = %q, want %q", got, want)
 			}
+			// The setup downloads' mirror (rbe-worker rbe-fetch; every file
+			// checked against the pin's sha256): off unless the repository
+			// variable names it, so merging changes nothing.
+			if got, want := step.Env["RBE_DIST_MIRROR"], "${{ vars.RBE_DIST_MIRROR || '' }}"; got != want {
+				t.Errorf("worker step RBE_DIST_MIRROR = %q, want %q", got, want)
+			}
 			// The OSS pool keeps the script's defaults (tier oss, :443) and its
 			// own certificate; the fork tier is rbe-fork-pool.yml's alone.
 			for _, k := range []string{"WORKER_TIER", "RBE_WEST_PORT"} {

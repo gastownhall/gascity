@@ -18,15 +18,10 @@ import (
 )
 
 // BeadFromGetters tries multiple BeadQuerier implementations and returns
-// the first successful result. It skips an absent getter: nil, and a store
-// that is no store (beads.IsNilStore), such as a zero class handle, which is
-// non-nil once boxed into a BeadQuerier and panics on its first Get.
+// the first successful result. It skips an absent getter (absentQuerier).
 func BeadFromGetters(id string, getters ...BeadQuerier) (beads.Bead, bool) {
 	for _, getter := range getters {
-		if getter == nil {
-			continue
-		}
-		if store, ok := getter.(beads.Store); ok && beads.IsNilStore(store) {
+		if absentQuerier(getter) {
 			continue
 		}
 		b, err := getter.Get(id)
@@ -35,6 +30,17 @@ func BeadFromGetters(id string, getters ...BeadQuerier) (beads.Bead, bool) {
 		}
 	}
 	return beads.Bead{}, false
+}
+
+// absentQuerier reports whether q is no querier: nil, or a store that is no
+// store (beads.IsNilStore), such as a zero class handle, which is non-nil once
+// boxed into a BeadQuerier and panics on its first Get.
+func absentQuerier(q BeadQuerier) bool {
+	if q == nil {
+		return true
+	}
+	store, ok := q.(beads.Store)
+	return ok && beads.IsNilStore(store)
 }
 
 // CollectAttachedBeads finds all molecule/workflow attachments for a parent bead.
@@ -201,20 +207,14 @@ func nonNilStores(stores []beads.Store) []beads.Store {
 // attachments themselves in graph first, then work. On a single-store city the
 // two are the same store and every lookup is the pre-split one.
 type attachmentScope struct {
-	work  beads.Store
-	graph beads.Store
-}
-
-// singleStoreAttachmentScope is the scope of a caller that hands one store for
-// both the source bead and its attachments.
-func singleStoreAttachmentScope(store beads.Store) attachmentScope {
-	return attachmentScope{work: store, graph: store}
+	work  beads.WorkStore
+	graph beads.GraphStore
 }
 
 // attachmentScope is the scope of this sling: the source bead in Store, its
-// attachments wherever graphStore() poured them.
+// attachments wherever GraphStore poured them.
 func (deps SlingDeps) attachmentScope() attachmentScope {
-	return attachmentScope{work: deps.Store, graph: deps.graphStore()}
+	return attachmentScope{work: deps.Store, graph: deps.GraphStore}
 }
 
 // stores returns the stores an attachment may live in, in lookup order: the
@@ -225,27 +225,17 @@ func (deps SlingDeps) attachmentScope() attachmentScope {
 // and the graph store it pours through), in lookup order; no topology, no
 // binding census and no namespace is consulted.
 func (s attachmentScope) stores() []beads.Store {
+	noGraph, noWork := s.graph == (beads.GraphStore{}), s.work == (beads.WorkStore{})
 	switch {
-	case s.graph == nil && s.work == nil:
+	case noGraph && noWork:
 		return nil
-	case s.graph == nil:
+	case noGraph:
 		return []beads.Store{s.work} // residency:allow — the caller's own two handles (work, graph), not a store enumeration
-	case s.work == nil || sameStoreValue(s.graph, s.work):
+	case noWork || beads.SameStore(s.graph, s.work):
 		return []beads.Store{s.graph} // residency:allow — the caller's own two handles (work, graph), not a store enumeration
 	default:
 		return []beads.Store{s.graph, s.work} // residency:allow — the caller's own two handles (work, graph), not a store enumeration
 	}
-}
-
-// sameStoreValue reports whether a and b are the same store value; a store
-// type that is not comparable reads as different.
-func sameStoreValue(a, b beads.Store) (same bool) {
-	defer func() {
-		if recover() != nil {
-			same = false
-		}
-	}()
-	return a == b
 }
 
 // liveConvoyTrackedWorkflowRoots returns the live (non-terminal, per
@@ -276,15 +266,15 @@ func sameStoreValue(a, b beads.Store) (same bool) {
 // convoyStore is queried for the tracking edges -- the convoy always lives
 // co-resident with the target bead it tracks (TrackItemIn enforces this at
 // write time). rootStore is queried for the roots themselves, which may live
-// in a different store when graph beads are relocated (deps.graphStore()).
+// in a different store when graph beads are relocated (deps.GraphStore).
 // The common case passes the same store for both.
-func liveConvoyTrackedWorkflowRoots(convoyStore, rootStore beads.Store, beadID, formulaName string) ([]beads.Bead, error) {
+func liveConvoyTrackedWorkflowRoots(convoyStore beads.WorkStore, rootStore beads.GraphStore, beadID, formulaName string) ([]beads.Bead, error) {
 	beadID = strings.TrimSpace(beadID)
 	formulaName = strings.TrimSpace(formulaName)
-	if convoyStore == nil || rootStore == nil || beadID == "" || formulaName == "" {
+	if convoyStore == (beads.WorkStore{}) || rootStore == (beads.GraphStore{}) || beadID == "" || formulaName == "" {
 		return nil, nil
 	}
-	convoys, err := convoycore.TrackingConvoysForItem(beads.WorkStore{Store: convoyStore}, beadID)
+	convoys, err := convoycore.TrackingConvoysForItem(convoyStore, beadID)
 	if err != nil {
 		return nil, fmt.Errorf("listing tracking convoys for %s: %w", beadID, err)
 	}
@@ -353,7 +343,7 @@ func liveConvoyTrackedWorkflowRoots(convoyStore, rootStore beads.Store, beadID, 
 // duplicate-detection checkLegacySourceWorkflowConflict performs at launch
 // time, so the dry-run "Pre-check" line reflects real coverage instead of
 // reporting a vacuous "no existing molecule/wisp children" pass (#5420).
-func LiveConvoyTrackedWorkflowRoots(convoyStore, rootStore beads.Store, beadID, formulaName string) ([]beads.Bead, error) {
+func LiveConvoyTrackedWorkflowRoots(convoyStore beads.WorkStore, rootStore beads.GraphStore, beadID, formulaName string) ([]beads.Bead, error) {
 	return liveConvoyTrackedWorkflowRoots(convoyStore, rootStore, beadID, formulaName)
 }
 
@@ -381,33 +371,30 @@ func IsMoleculeAttachment(b beads.Bead) bool {
 	return strings.EqualFold(strings.TrimSpace(b.Type), "molecule")
 }
 
-// findBlockingMolecule is the error-returning core behind FindBlockingMolecule
-// and HasMoleculeChildren. It returns the first open attached molecule/wisp
-// child, and surfaces the attachment-probe error only when no live attachment
-// was found -- a discovered live attachment is definitive even if the probe was
-// partial. Callers that must fail closed can inspect the error to tell "no
-// attachment" apart from "probe failed". Read-only -- does not auto-burn.
-func findBlockingMolecule(q BeadQuerier, beadID string, scope attachmentScope) (label, id string, err error) {
-	att, err := findBlockingAttachment(q, beadID, scope)
-	if att == nil {
-		return "", "", err
+// attachmentChildQuerier is the querier a probe lists a parent's DB children
+// through: q when it can list, else the scope's work store, else none.
+func attachmentChildQuerier(q BeadQuerier, scope attachmentScope) BeadChildQuerier {
+	if cq, ok := q.(BeadChildQuerier); ok {
+		return cq
 	}
-	return AttachmentLabel(att.Bead), att.Bead.ID, nil
+	if scope.work != (beads.WorkStore{}) {
+		return scope.work
+	}
+	return nil
 }
 
-// findBlockingAttachment is findBlockingMolecule returning the live attachment
-// itself (nil when none was found).
+// findBlockingAttachment returns the first open attached molecule/wisp child
+// (nil when none was found), and surfaces the attachment-probe error only when
+// no live attachment was found -- a discovered live attachment is definitive
+// even if the probe was partial. Callers that must fail closed can inspect the
+// error to tell "no attachment" apart from "probe failed". Read-only -- does
+// not auto-burn.
 func findBlockingAttachment(q BeadQuerier, beadID string, scope attachmentScope) (*AttachedBead, error) {
 	parent, ok := BeadFromGetters(beadID, q, scope.work)
 	if !ok {
 		return nil, nil
 	}
-	var childQuerier BeadChildQuerier
-	if cq, ok := q.(BeadChildQuerier); ok {
-		childQuerier = cq
-	} else if cq, ok := any(scope.work).(BeadChildQuerier); ok {
-		childQuerier = cq
-	}
+	childQuerier := attachmentChildQuerier(q, scope)
 	attachments, probeErr := CollectAttachments(parent, childQuerier, scope.stores()...)
 	for i := range attachments {
 		if attachments[i].Bead.Status != "closed" {
@@ -419,38 +406,17 @@ func findBlockingAttachment(q BeadQuerier, beadID string, scope attachmentScope)
 	return nil, probeErr
 }
 
-// FindBlockingMolecule checks if the bead has any open attached molecule
-// or wisp children. Returns the blocking attachment's label and ID, or
-// empty strings if none (or if the attachment probe could not complete).
-// Read-only -- does not auto-burn. Attachments are read from store; a caller
-// that holds SlingDeps uses SlingDeps.FindBlockingMolecule, which also reads
-// the graph store the sling pours through.
-func FindBlockingMolecule(q BeadQuerier, beadID string, store beads.Store) (label, id string) {
-	label, id, _ = findBlockingMolecule(q, beadID, singleStoreAttachmentScope(store))
-	return label, id
-}
-
-// FindBlockingMolecule is the package-level FindBlockingMolecule over this
-// sling's stores: the source bead in Store, its attachments in the graph store
-// first, then Store.
+// FindBlockingMolecule checks if the bead has any open attached molecule or
+// wisp children, reading the source bead in Store and its attachments in the
+// graph store first, then Store. Returns the blocking attachment's label and
+// ID, or empty strings if none (or if the attachment probe could not
+// complete). Read-only -- does not auto-burn.
 func (deps SlingDeps) FindBlockingMolecule(q BeadQuerier, beadID string) (label, id string) {
-	label, id, _ = findBlockingMolecule(q, beadID, deps.attachmentScope())
-	return label, id
-}
-
-// HasMoleculeChildren reports whether the bead has any open attached molecule
-// or wisp children. The returned error is non-nil only when the attachment
-// probe could not complete and no live attachment was found, so a caller that
-// must fail closed -- such as the --on idempotency override -- can preserve its
-// safe state instead of mistaking a probe failure for "no molecule". Read-only
-// -- does not auto-burn.
-func HasMoleculeChildren(q BeadQuerier, beadID string, store beads.Store) (bool, error) {
-	return hasMoleculeChildrenIn(q, beadID, singleStoreAttachmentScope(store))
-}
-
-func hasMoleculeChildrenIn(q BeadQuerier, beadID string, scope attachmentScope) (bool, error) {
-	label, _, err := findBlockingMolecule(q, beadID, scope)
-	return label != "", err
+	att, _ := findBlockingAttachment(q, beadID, deps.attachmentScope())
+	if att == nil {
+		return "", ""
+	}
+	return AttachmentLabel(att.Bead), att.Bead.ID
 }
 
 // CloseAttachedSubtree closes an attached workflow or molecule root and any
@@ -467,8 +433,8 @@ func CloseAttachedSubtree(store beads.Store, attached beads.Bead) (int, error) {
 	return molecule.CloseSubtree(storeMolecule, attached.ID)
 }
 
-func clearAttachmentMetadata(store beads.Store, parent beads.Bead, attached beads.Bead) error {
-	if store == nil || strings.TrimSpace(parent.ID) == "" || strings.TrimSpace(attached.ID) == "" {
+func clearAttachmentMetadata(store beads.WorkStore, parent beads.Bead, attached beads.Bead) error {
+	if store == (beads.WorkStore{}) || strings.TrimSpace(parent.ID) == "" || strings.TrimSpace(attached.ID) == "" {
 		return nil
 	}
 	if strings.TrimSpace(parent.Metadata["workflow_id"]) == attached.ID {
@@ -484,6 +450,11 @@ func clearAttachmentMetadata(store beads.Store, parent beads.Bead, attached bead
 	return nil
 }
 
+// checkNoMoleculeChildren returns an error if the bead already has an
+// attached molecule or wisp child that is still open; allowLiveWorkflow
+// permits an existing live workflow attachment (a --force graph launch that
+// will supersede the root under the source-workflow lock). Auto-burn messages
+// go to result.AutoBurned.
 func checkNoMoleculeChildren(q BeadQuerier, beadID string, scope attachmentScope, result *SlingResult, allowLiveWorkflow bool) error {
 	parent, ok := BeadFromGetters(beadID, q, scope.work)
 	if !ok {
@@ -491,12 +462,7 @@ func checkNoMoleculeChildren(q BeadQuerier, beadID string, scope attachmentScope
 	}
 	parentUnassigned := strings.TrimSpace(parent.Assignee) == ""
 
-	var childQuerier BeadChildQuerier
-	if cq, ok := q.(BeadChildQuerier); ok {
-		childQuerier = cq
-	} else if cq, ok := any(scope.work).(BeadChildQuerier); ok {
-		childQuerier = cq
-	}
+	childQuerier := attachmentChildQuerier(q, scope)
 	attachments, err := CollectAttachments(parent, childQuerier, scope.stores()...)
 	probeErr := attachmentProbeFailure(beadID, err)
 
@@ -640,32 +606,8 @@ func (e *MoleculeAttachedError) Unwrap() error {
 	return subtreeProbeError(e.BeadID, e.Label, e.AttachmentID, e.Unreadable)
 }
 
-// CheckNoMoleculeChildren returns an error if the bead already has an attached
-// molecule or wisp child that is still open. Auto-burn messages go to result.AutoBurned.
-func CheckNoMoleculeChildren(q BeadQuerier, beadID string, store beads.Store, result *SlingResult) error {
-	return checkNoMoleculeChildren(q, beadID, singleStoreAttachmentScope(store), result, false)
-}
-
-// CheckBatchNoMoleculeChildren checks all open children for existing molecule
-// attachments before any wisps are created.
-func CheckBatchNoMoleculeChildren(q BeadChildQuerier, open []beads.Bead, store beads.Store, result *SlingResult) error {
-	return checkBatchNoMoleculeChildren(q, open, singleStoreAttachmentScope(store), result, false)
-}
-
-// CheckNoMoleculeChildrenAllowLiveWorkflow is like CheckNoMoleculeChildren
-// but permits an existing live workflow attachment (used on --force graph
-// launches that will supersede the existing root under the source-workflow
-// lock).
-func CheckNoMoleculeChildrenAllowLiveWorkflow(q BeadQuerier, beadID string, store beads.Store, result *SlingResult) error {
-	return checkNoMoleculeChildren(q, beadID, singleStoreAttachmentScope(store), result, true)
-}
-
-// CheckBatchNoMoleculeChildrenAllowLiveWorkflow is the batch variant of
-// CheckNoMoleculeChildrenAllowLiveWorkflow.
-func CheckBatchNoMoleculeChildrenAllowLiveWorkflow(q BeadChildQuerier, open []beads.Bead, store beads.Store, result *SlingResult) error {
-	return checkBatchNoMoleculeChildren(q, open, singleStoreAttachmentScope(store), result, true)
-}
-
+// checkBatchNoMoleculeChildren is checkNoMoleculeChildren for all open
+// children of a batch, before any wisps are created.
 func checkBatchNoMoleculeChildren(q BeadChildQuerier, open []beads.Bead, scope attachmentScope, result *SlingResult, allowLiveWorkflow bool) error {
 	var problems []string
 	// workflowConflicts tracks children whose already-attached root is a
@@ -823,7 +765,7 @@ func needsConvoyRecovery(q BeadQuerier, b beads.Bead, deps SlingDeps, opts BeadC
 	return true, nil
 }
 
-func hasLiveTrackingConvoy(store beads.Store, itemID string) (bool, error) {
+func hasLiveTrackingConvoy(store beads.WorkStore, itemID string) (bool, error) {
 	live, err := liveTrackingConvoys(store, itemID)
 	if err != nil {
 		return false, err
@@ -845,11 +787,11 @@ func hasLiveTrackingConvoy(store beads.Store, itemID string) (bool, error) {
 // (session/order-tracking bookkeeping) are skipped. Those track the item for
 // their own bookkeeping and are neither dispatch roots to reuse nor duplicates
 // to reap.
-func liveTrackingConvoys(store beads.Store, itemID string) ([]beads.Bead, error) {
-	if store == nil {
+func liveTrackingConvoys(store beads.WorkStore, itemID string) ([]beads.Bead, error) {
+	if store == (beads.WorkStore{}) {
 		return nil, nil
 	}
-	convoys, err := convoycore.TrackingConvoysForItem(beads.WorkStore{Store: store}, itemID)
+	convoys, err := convoycore.TrackingConvoysForItem(store, itemID)
 	if err != nil {
 		return nil, fmt.Errorf("listing tracking convoys for %s: %w", itemID, err)
 	}
@@ -873,7 +815,7 @@ func AutoConvoyRootTitle(beadID string) string { return "sling-" + beadID }
 // liveAutoConvoyRoots is liveTrackingConvoys narrowed to the auto-convoy roots
 // finalize minted for itemID, oldest first. This is the reuse/reap set: a
 // convoy that merely tracks the bead is somebody else's convoy.
-func liveAutoConvoyRoots(store beads.Store, itemID string) ([]beads.Bead, error) {
+func liveAutoConvoyRoots(store beads.WorkStore, itemID string) ([]beads.Bead, error) {
 	live, err := liveTrackingConvoys(store, itemID)
 	if err != nil {
 		return nil, err
@@ -906,10 +848,10 @@ const convoyReapReason = "convoy reap: superseded duplicate root"
 // Callers must pass only unowned roots. The "owned" label is what suppresses
 // convoy autoclose, so closing one here would silently convert a
 // caller-managed lifecycle into an auto-managed one.
-func reapSupersededConvoyRoots(store beads.Store, superseded []beads.Bead, keptID string) []string {
+func reapSupersededConvoyRoots(store beads.WorkStore, superseded []beads.Bead, keptID string) []string {
 	var problems []string
 	for _, root := range superseded {
-		if err := convoycore.CloseWithReason(beads.WorkStore{Store: store}, root.ID, convoyReapReason); err != nil {
+		if err := convoycore.CloseWithReason(store, root.ID, convoyReapReason); err != nil {
 			problems = append(problems,
 				fmt.Sprintf("reaping convoy root %s superseded by %s: %v", root.ID, keptID, err))
 		}
@@ -980,7 +922,7 @@ func checkReadBeadState(q BeadQuerier, b beads.Bead, beadID string, a config.Age
 		// work, two sessions. Treat a claim by any of this pool's own sessions
 		// as idempotent (assigneeIsOwnPoolSession); a claim by a different
 		// pool still falls through to the warning below.
-		claimedByOwnPoolSession := isMulti && assigneeIsOwnPoolSession(b.Assignee, target, q, deps.Store)
+		claimedByOwnPoolSession := isMulti && assigneeIsOwnPoolSession(b.Assignee, target, deps.Sessions)
 		if b.Assignee == "" || b.Assignee == target || claimedByOwnPoolSession {
 			return resolveConvoyRecovery(q, b, deps, opts, beadID)
 		}
@@ -1013,10 +955,11 @@ func checkReadBeadState(q BeadQuerier, b beads.Bead, beadID string, a config.Age
 // claimed before the upgrade. Since #6324 an unaliased pool session claims
 // under its session bead ID, which carries no pool prefix, so the assignee is
 // also resolved as a bead ID: it is this pool's own when it names an open
-// session bead created from target. getters are tried in order; the first
-// that resolves the exact ID decides (bd resolves partial IDs, so a result
-// whose ID differs from assignee is not a match).
-func assigneeIsOwnPoolSession(assignee, target string, getters ...BeadQuerier) bool {
+// session bead created from target. The session bead is read in sessions, the
+// city's sessions store, the only store that holds it: a work store either
+// lacks it or, on a migrated city, holds a stale copy. bd resolves partial
+// IDs, so a result whose ID differs from assignee is not a match.
+func assigneeIsOwnPoolSession(assignee, target string, sessions beads.SessionStore) bool {
 	assignee = strings.TrimSpace(assignee)
 	if assignee == "" || target == "" {
 		return false
@@ -1024,8 +967,11 @@ func assigneeIsOwnPoolSession(assignee, target string, getters ...BeadQuerier) b
 	if strings.HasPrefix(assignee, target+"-") {
 		return true
 	}
-	sb, ok := BeadFromGetters(assignee, getters...)
-	if !ok || sb.ID != assignee {
+	if sessions == (beads.SessionStore{}) {
+		return false
+	}
+	sb, err := sessions.Get(assignee)
+	if err != nil || sb.ID != assignee {
 		return false
 	}
 	return session.IsOpenSessionOfTemplate(sb, target)

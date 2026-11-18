@@ -134,16 +134,20 @@ var cacheOmittedCapabilities = map[string]func(beads.Store) bool{
 	// The batch copy capabilities (S5-C), engine-only like the single-row
 	// forms above: the migration's copy opens the binding engine itself.
 	"CreateWithForeignIDBatch": nil,
-	"DepAddBatch":              nil,
-	"DepMetadataBatch":         nil,
-	"DepRemoveBatch":           nil,
-	"DepAddWithMetadata":       nil,
-	"HasResidentOutside":       nil,
-	"SequenceFloor":            nil,
-	"SetSequenceFloor":         nil,
-	"AdvanceSequenceFloor":     nil,
-	"StoreHealthPath":          nil,
-	"ReadOnly":                 nil,
+	// The reverse migration's created form (S5-G), engine-only: the reverse
+	// opens the store it copies into itself.
+	"CreatedForm":          nil,
+	"AcceptsDanglingDep":   nil,
+	"DepAddBatch":          nil,
+	"DepMetadataBatch":     nil,
+	"DepRemoveBatch":       nil,
+	"DepAddWithMetadata":   nil,
+	"HasResidentOutside":   nil,
+	"SequenceFloor":        nil,
+	"SetSequenceFloor":     nil,
+	"AdvanceSequenceFloor": nil,
+	"StoreHealthPath":      nil,
+	"ReadOnly":             nil,
 	// (DepListBatch is carried, not omitted: a cached bd store paid one
 	// `bd dep list` per member of every close order behind a failed
 	// assertion. The cache answers the anchors it holds from memory as
@@ -350,8 +354,9 @@ func TestBindingCacheSurvivesConfigReload(t *testing.T) {
 }
 
 // TestClassBindingHasLegacyResidentsUnwrapsCache pins the boot census lookup
-// once the binding is cached: the census keyed its verdict by the engine it
-// read, and the class accessors now hand out the cache. Kills: a lookup keyed on
+// (storageRoutes.hasLegacyResidents, which the epoch's topology carries) once
+// the binding is cached: the census keyed its verdict by the engine it read,
+// and the class accessors now hand out the cache. Kills: a lookup keyed on
 // the wrapper, which misses and answers the pessimistic "relics" for a clean
 // binding, keeping every by-id probe alive forever.
 func TestClassBindingHasLegacyResidentsUnwrapsCache(t *testing.T) {
@@ -370,7 +375,7 @@ func TestClassBindingHasLegacyResidentsUnwrapsCache(t *testing.T) {
 	if _, cached := graph.(*beads.CachingStore); !cached {
 		t.Fatalf("graph class resolves to %T, want the binding cache", graph)
 	}
-	if cs.ClassBindingHasLegacyResidents(graph) {
+	if cs.storageRoutes.hasLegacyResidents(graph) {
 		t.Fatal("a clean binding reads as holding relics once cached; the census lookup is keyed on the wrapper")
 	}
 }

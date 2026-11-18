@@ -2958,10 +2958,11 @@ func TestCmdWorkflowReopenSourcePreRoutesGraphWrappedSource(t *testing.T) {
 	}
 
 	deps, slingStdout, slingStderr := testDeps(graphWorkSlingTestCity(t), runtime.NewFake(), newFakeRunner().run)
-	deps.Store = store
+	deps = slingDepsWithStore(deps, store)
 	// The workflow is graph class: it goes to the graph store gc sling
 	// resolves for this city, the source stays in the work store.
-	deps.GraphStore = resolveGraphStore(cliStorageRoutes(cityDir), store, deps.Cfg, cityDir, nil)
+	deps.GraphStore = beadstest.Graph(resolveGraphStore(cliStorageRoutes(cityDir), store, deps.Cfg, cityDir, nil))
+	deps.Sessions = beadstest.Sessions(resolveSessionStore(cliStorageRoutes(cityDir), store, deps.Cfg, cityDir, nil))
 	maxPolecats := 5
 	a := config.Agent{Name: "polecat", MaxActiveSessions: &maxPolecats}
 
