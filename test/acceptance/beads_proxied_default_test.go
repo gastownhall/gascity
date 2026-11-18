@@ -1823,8 +1823,8 @@ func runProxiedNativeLaneGates(t *testing.T, bdPath, doltPath string) {
 			if payload.Proxied.Demoted {
 				t.Errorf("a lane that never served reports a demoted handle: %s", result.Message)
 			}
-			if e := payload.Endpoint; e == nil || e.Verdict != "live" || e.Evidence != "argv+birth" || !strings.HasPrefix(e.IdlePolicy, "never") || e.Generation == "" {
-				t.Errorf("doctor's endpoint account is %s, want bd's live never-idle proxy proved on argv+birth evidence", describeEndpointAccount(payload))
+			if e := payload.Endpoint; e == nil || e.Verdict != "live" || e.Evidence != proxiedLiveEvidence() || !strings.HasPrefix(e.IdlePolicy, "never") || e.Generation == "" {
+				t.Errorf("doctor's endpoint account is %s, want bd's live never-idle proxy proved on %s evidence", describeEndpointAccount(payload), proxiedLiveEvidence())
 			}
 			if !strings.Contains(result.Message, "verdict="+proxiedDataAuthVerdict) {
 				t.Errorf("beads-store message = %q, want it to name the verdict", result.Message)

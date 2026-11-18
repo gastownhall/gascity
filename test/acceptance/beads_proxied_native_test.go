@@ -42,6 +42,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -129,6 +130,17 @@ func (c *proxiedNativeCity) settledLane() string {
 	return "a served NativeDoltStore"
 }
 
+// proxiedLiveEvidence is the liveness evidence gc can establish for bd's proxy
+// on this host: argv plus bd's process-birth token on Linux, argv alone
+// elsewhere, because proxyendpoint's birth recipe is Linux-only
+// (birth_other.go records evidence argv).
+func proxiedLiveEvidence() string {
+	if runtime.GOOS == "linux" {
+		return "argv+birth"
+	}
+	return "argv"
+}
+
 // assertLaneSettled is a row's check that the flag-on lane settled on a
 // healthy proxy, and returns the generation it settled on.
 //
@@ -149,7 +161,7 @@ func (c *proxiedNativeCity) assertLaneSettled(t *testing.T, payload beadsStorePa
 		return payload.Proxied.Endpoint.Generation
 	}
 	declined := payload.Store == "BdStore" && payload.Proxied != nil && payload.Proxied.Verdict == proxiedDataAuthVerdict
-	live := payload.Endpoint != nil && payload.Endpoint.Verdict == "live" && payload.Endpoint.Evidence == "argv+birth"
+	live := payload.Endpoint != nil && payload.Endpoint.Verdict == "live" && payload.Endpoint.Evidence == proxiedLiveEvidence()
 	if !declined || !live {
 		t.Fatalf("%s: store=%q %s\n  endpoint: %s\n  %s\n  want %s",
 			failure, payload.Store, describeProxiedAccount(payload), describeEndpointAccount(payload), result.Message, c.settledLane())
