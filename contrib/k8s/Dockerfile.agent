@@ -23,10 +23,10 @@ FROM golang:1.27.4-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e13857
 # deps.env BD_CURRENT_VERSION -- not deps.env BD_VERSION, which is the published
 # tarball CI installs and may lag. The `grep Version = "${bd_version}"` below
 # fails the build if this drifts from the fetched source.
-ARG BD_VERSION=v1.3.4
-ARG BD_SOURCE_REF=7ef2fd05eb0cd3bdbde051f93cfc14ccf270cdde
-ARG BD_SOURCE_SHA256=fcf0e7a23c889b24a6c4cc0edb5053a602d3a410dc1fb0c6efaa5574c3118682
-ARG BD_BUILD=7ef2fd05eb0
+ARG BD_VERSION=v1.4.0-rc.3
+ARG BD_SOURCE_REF=d42ff8dc678c050f9b1ffcd9adfe0b037d497e0d
+ARG BD_SOURCE_SHA256=4cfef0da680bf1dfa65b588bb94aa587274ad89efc6c121ee0a4f8518274b4c6
+ARG BD_BUILD=d42ff8dc678
 ARG BD_BRANCH=HEAD
 ARG GRPC_VERSION=1.83.2
 ARG THRIFT_VERSION=0.24.0
