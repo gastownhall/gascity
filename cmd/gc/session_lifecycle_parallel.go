@@ -2038,7 +2038,7 @@ func runPreparedStartCandidate(
 	startCtxErr := startCtx.Err()
 	// A startup nudge the session's program held back behind a dialog
 	// (program_status = "on", row A20) is queued, never typed or failed.
-	if qerr := queueStartupNudgeHandback(cityPath, cfg, sp, item.candidate.info, item.candidate.name(), err == nil, time.Now()); qerr != nil {
+	if qerr := queueStartupNudgeHandback(cityPath, cfg, sp, item.candidate.info, item.candidate.name(), item.cfg.Env[runtime.InstanceTokenEnv], err == nil, time.Now()); qerr != nil {
 		log.Printf("gc start: %v", qerr)
 	}
 	// diedDuringStartup starts true when the provider/resume layer already
@@ -2232,12 +2232,11 @@ func startOutcomeDefersCommit(outcome TraceOutcomeCode) bool {
 	return outcome == TraceOutcomeSessionInitializing || outcome == TraceOutcomeDeferred
 }
 
+// appendInitialMessageToStartupNudge composes the startup nudge that carries
+// msg (session.AppendInitialMessage): the session layer owns the composition,
+// so a handed-back nudge is split by the same rule (session.SplitInitialMessage).
 func appendInitialMessageToStartupNudge(nudge, msg string) string {
-	userMessage := "User message:\n" + msg
-	if nudge != "" {
-		return nudge + startupPromptNudgeSeparator + userMessage
-	}
-	return userMessage
+	return sessionpkg.AppendInitialMessage(nudge, msg)
 }
 
 func restartPromptNudge(prompt, nudge string) string {

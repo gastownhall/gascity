@@ -2384,6 +2384,7 @@ go_test(
         "startup_nudge_handback_test.go",
         "startup_prompt_contract_test.go",
         "startup_prompt_delivery_test.go",
+        "startup_turn_launch_test.go",
         "status_api_url_test.go",
         "status_json_schema_contract_test.go",
         "status_provider_test.go",
