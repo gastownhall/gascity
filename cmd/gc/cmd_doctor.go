@@ -285,8 +285,17 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	register(&doctor.ImplicitImportCacheCheck{})
 	register(&doctor.DeprecatedAttachmentFieldsCheck{})
 	// Reads only ctx.CityPath, so it stays outside the config gate: a broken
-	// city.toml is precisely when session diagnostics need to be visible.
-	register(doctor.NewNudgeUnconfirmedCheck())
+	// city.toml is precisely when session diagnostics need to be visible. It
+	// scopes itself to live sessions through the session store, which doctor
+	// will not start for a stopped city; there it counts every session
+	// directory and says so.
+	liveSessionNames := doctorLiveSessionNames(cityPath, cfg)
+	if cityStoreStopped {
+		liveSessionNames = func() (map[string]struct{}, error) {
+			return nil, errors.New("city store is not running")
+		}
+	}
+	register(doctor.NewNudgeUnconfirmedCheck(doctor.WithLiveSessionNames(liveSessionNames)))
 
 	// Config-dependent checks run only when city.toml loaded cleanly. If it
 	// fails, the core config check above reports the parse error.

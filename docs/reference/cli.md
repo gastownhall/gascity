@@ -496,6 +496,11 @@ Delegates to the provider's lifecycle health operation. For exec
 providers (including bd/dolt), the script handles multi-tier checking
 and recovery internally. For the file provider, always succeeds (no-op).
 
+For bd (dolt), a server that answers SQL is not enough: the city's
+database must be in the server catalog (and, for a gc-managed server,
+on disk), its default branch head must resolve, and a sample write and
+read against it must succeed. Any failure reports unhealthy.
+
 Also used by the beads-health system order for periodic monitoring.
 
 ```
@@ -5465,6 +5470,10 @@ them.
 It resolves its destination from [storage.classes], so it has nothing to check
 until that section names a binding. On a city with no infrastructure split it
 reports exactly that and exits non-zero — author the split first.
+
+It starts no bead-store provider: on a city whose provider is down, or with
+a proxied server stopped, it says so and what lets a later run read, runs every
+check that reads no store, skips each that reads one, and exits non-zero.
 
 It names every check that would refuse, not only the first: a check that
 blocks does not stop the report, and a check that depends on one that blocked
