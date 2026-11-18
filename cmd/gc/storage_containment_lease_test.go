@@ -455,7 +455,14 @@ func TestHandleControllerConnStorageVerdict(t *testing.T) {
 		t.Fatalf("no age_ms in %v", m1)
 	}
 
-	time.Sleep(20 * time.Millisecond)
+	// Back-date the published lease's TakenAt instead of a wall-clock sleep:
+	// age_ms is now.Sub(TakenAt), so this advances it deterministically,
+	// with no risk of a sub-millisecond gap between two fast net.Pipe
+	// round trips leaving age_ms unchanged (c2's bug either way: it
+	// hardcodes age_ms to 0 regardless of TakenAt).
+	backdated := *routesA.lease.Load()
+	backdated.TakenAt = backdated.TakenAt.Add(-50 * time.Millisecond)
+	routesA.lease.Store(&backdated)
 
 	second := verdict(cityA)
 	var m2 map[string]any
@@ -545,18 +552,29 @@ func TestStrandRecheckWiresQuiescenceFromCityRuntime(t *testing.T) {
 	t.Cleanup(func() { strandRecheckInterval = prevInterval })
 
 	var opens atomic.Int64
+	opened := make(chan struct{}, 8)
 	prevOpen := openInfraMigrationSource
 	t.Cleanup(func() { openInfraMigrationSource = prevOpen })
 	openInfraMigrationSource = func(p string) (beads.Store, error) {
 		opens.Add(1)
+		opened <- struct{}{}
 		return prevOpen(p)
 	}
 
 	cr := &CityRuntime{storageRoutes: routes, cityPath: cityPath, rec: events.NewFake(), stderr: io.Discard, logPrefix: "gc start"}
 	cr.beadsQuiescent.Store(true)
 
+	// A quiescent city's ticks skip the open entirely (no signal to wait
+	// on for that): give the ticker a bounded, interruptible window to
+	// fire — select on time.After rather than a fixed time.Sleep, so a
+	// loaded machine only ever makes this slower, never flaky — then
+	// check nothing opened.
 	stop := cr.startStrandRecheck(context.Background())
-	time.Sleep(60 * time.Millisecond)
+	select {
+	case <-opened:
+		t.Fatal("a quiescent city's wired-up recheck opened the work store")
+	case <-time.After(200 * time.Millisecond):
+	}
 	stop()
 	if n := opens.Load(); n != 0 {
 		t.Fatalf("a quiescent city's wired-up recheck opened the work store %d time(s), want 0", n)
@@ -564,11 +582,12 @@ func TestStrandRecheckWiresQuiescenceFromCityRuntime(t *testing.T) {
 
 	cr.beadsQuiescent.Store(false)
 	stop = cr.startStrandRecheck(context.Background())
-	time.Sleep(60 * time.Millisecond)
-	stop()
-	if n := opens.Load(); n == 0 {
+	select {
+	case <-opened:
+	case <-time.After(5 * time.Second):
 		t.Fatal("a non-quiescent city's wired-up recheck never opened the work store")
 	}
+	stop()
 }
 
 // TestContainmentLeaseRejectsNonDefinitiveOrBasislessReports is SHOULD 4:
