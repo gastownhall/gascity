@@ -645,10 +645,12 @@ func (p *Provider) provisionBox(ctx context.Context, name string, cfg runtime.Co
 // otherwise creates it (first launch after provision). A FreshOnly launch never
 // respawns: an existing agent session fails it, as an ordinary start failure, so
 // startFresh's token-gated cleanup removes the box it provisioned. It then
-// dismisses startup dialogs — the same
-// Go-side orchestration the welded Start runs. The `exec` op runs in the box's
-// working directory and the box env is set at provision time, so neither an
-// explicit -c nor -e is needed (workdir + env are provision-half). (Un-weld B3b.)
+// publishes the launch's identity, whose failure fails the launch as a
+// failed fence publish does (publishLaunchIdentity), and dismisses startup
+// dialogs — the same Go-side orchestration the welded Start runs. The
+// `exec` op runs in the box's working directory and the box env is set at
+// provision time, so neither an explicit -c nor -e is needed (workdir + env
+// are provision-half). (Un-weld B3b.)
 // It clears the turn an earlier launch of name handed back; this launch's own
 // is handed back after it (finishSeparableLaunch).
 func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Config) error {
@@ -661,7 +663,9 @@ func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Con
 		if err := p.runLaunchOp(ctx, name, cfg); err != nil {
 			return err
 		}
-		p.publishLaunchIdentity(ctx, name, cfg)
+		if err := p.publishLaunchIdentity(ctx, name, cfg); err != nil {
+			return err
+		}
 		p.publishReadyPrompt(ctx, name, cfg)
 		return p.dismissStartupDialogs(ctx, name, cfg)
 	}
@@ -687,7 +691,9 @@ func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Con
 	} else if code != 0 {
 		return fmt.Errorf("exec provider: launching agent in %q: tmux exited %d", name, code)
 	}
-	p.publishLaunchIdentity(ctx, name, cfg)
+	if err := p.publishLaunchIdentity(ctx, name, cfg); err != nil {
+		return err
+	}
 	p.publishReadyPrompt(ctx, name, cfg)
 	return p.dismissStartupDialogs(ctx, name, cfg)
 }
@@ -698,7 +704,8 @@ func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Con
 // for a pack sharing the host filesystem, then runs session_setup on the host
 // again, as the launch after provision does and as tmux re-runs it on a
 // relaunch, and hands the first turn back for its caller to queue
-// (finishSeparableLaunch). Pre_start and
+// (finishSeparableLaunch). A launch that fails, its identity publish
+// included, fails the relaunch and hands nothing back. Pre_start and
 // staging are not redone: the box is warm. A welded pack has no in-place
 // relaunch (the agent is welded into `start`), so it degrades to a full
 // reprovision (Stop+Start), which is still correct. On a

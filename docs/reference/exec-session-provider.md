@@ -217,7 +217,7 @@ first:
 
 | Rule | What the queue does |
 |---|---|
-| Identity | Right after the launch, the orchestrator writes the launch's `GC_RUNTIME_EPOCH`, `GC_CONTINUATION_EPOCH` and then `GC_INSTANCE_TOKEN` with `set-meta`. A key the start config does not carry keeps the box's value. A failed write is logged, stops the writes that follow it and removes nothing. The queue reads the keys back with `get-meta` to tell which launch runs now. |
+| Identity | Right after the launch, the orchestrator writes the launch's `GC_RUNTIME_EPOCH`, `GC_CONTINUATION_EPOCH` and then `GC_INSTANCE_TOKEN` with `set-meta`, all within one operation timeout. A key the start config does not carry keeps the box's value. A failed write is read back with `get-meta`. If the box already holds the value, as it does for a key `provision` seeded, the writes go on. Otherwise the launch fails, and the start or relaunch with it, so no first turn is queued for a launch the queue could not tell apart: a failed start is torn down like any failed launch, and a failed relaunch falls back to a restart. Nothing is removed. The queue reads the keys back with `get-meta` to tell which launch runs now. |
 | Delivery | The turn goes only to the launch that produced it, alone, and before every other queued item of the session. The send is fenced to that launch when the pack declares `input-fence`. |
 | Replacement | When another launch replaces the session first, the old turn is dropped (`stale-launch`) and the new launch's own turn goes instead. |
 | Ordering | Reminders queued earlier, and messages sent to the session while its turn is still queued, wait behind the turn. |
@@ -262,12 +262,13 @@ Known limits of the first turn on the un-welded path:
   orchestrator writes its identity, `get-meta` still answers the replaced
   launch. On a pack that cannot fence, a first turn of the replaced launch
   that is still queued can be typed into the new agent in that window.
-  A fresh start has no such window: `provision` seeds the new launch's
-  identity before the agent exists.
-- A failed identity write on a warm relaunch leaves the replaced launch's
-  token, possibly with the new launch's counters, until the next launch
-  writes them, so the queue can misjudge which launch its first turn
-  belongs to.
+  A `fresh_only` start has no such window: `provision` seeds the new
+  launch's identity before the box is visible (rule 5 of
+  [observe.v1](#observev1-reconciler-v2)).
+- A failed identity write fails a warm relaunch after its new agent has
+  started. Until the restart that follows replaces that agent, `get-meta`
+  can still answer the replaced launch's token, possibly with the new
+  launch's counters, so the window above lasts until then.
 - A send that may only reach a live session (the conversation lane's
   message op, a mail notice, a sling nudge) is reported undelivered while
   the first turn waits in the queue, but not while the queue is delivering
@@ -491,7 +492,10 @@ incarnation's fence on it. When `start`, or the fence publish after it, then
 fails and the box stays up (it reports that the session already exists, or
 `is-running` said it was running before the attempt), gc puts the fence back
 on the same pane, as long as the pane's root process is unchanged and no
-other fence has been set since.
+other fence has been set since. A `launch` (`proc.launch`) clears the fence
+the same way, and when the `launch` op, or the fence publish after it,
+fails, gc puts the fence back under the same conditions, so an agent that a
+refused `launch` left running keeps taking fenced input.
 
 Fenced input sends nothing until tmux in the box answers the fence read. A
 live tmux server without the `main` session or its agent pane answers that

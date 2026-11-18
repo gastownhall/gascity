@@ -2,8 +2,8 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"os"
 	"sync"
 	"time"
 
@@ -46,17 +46,28 @@ func (p *Provider) launchConfig(cfg runtime.Config) ([]byte, error) {
 
 // runLaunchOp starts the agent in name's box through the `launch` op. A pack
 // that can fence has the previous incarnation's fence cleared before the op
-// and this one's published after it, as a welded start does.
+// and this one's published after it, as a welded start does. When the op or
+// the publish fails, the cleared fence goes back on the pane
+// (restoreInputFence), as after a welded start a live box refused: a launch
+// refused before it replaced the agent leaves that agent running, with the
+// fence it held. The restore applies only to the pane and root process that
+// held the fence, so an agent the op did replace never gets its
+// predecessor's.
 func (p *Provider) runLaunchOp(ctx context.Context, name string, cfg runtime.Config) error {
 	data, err := p.launchConfig(cfg)
 	if err != nil {
 		return err
 	}
-	p.clearInputFence(ctx, name)
+	saved := p.clearInputFence(ctx, name)
 	if _, err := p.runWithContext(ctx, p.startTimeout, data, launchOp, name); err != nil {
+		p.restoreInputFence(context.WithoutCancel(ctx), name, saved)
 		return fmt.Errorf("exec provider: launching agent in %q: %w", name, err)
 	}
-	return p.publishInputFence(ctx, name, cfg)
+	if err := p.publishInputFence(ctx, name, cfg); err != nil {
+		p.restoreInputFence(context.WithoutCancel(ctx), name, saved)
+		return err
+	}
+	return nil
 }
 
 // launchIdentityKeys are the identity keys a separable launch publishes
@@ -72,24 +83,58 @@ var launchIdentityKeys = []string{runtime.RuntimeEpochEnv, runtime.ContinuationE
 // same get-meta reads (runtime.ReadInputFence), so they must answer this
 // launch from the moment Start returns, whatever the pack's own launch op
 // stored. A key cfg.Env does not carry is left as the box holds it (a warm
-// relaunch without a token keeps the box's). Each write runs under the
-// provider's op timeout, not what is left of the start's ctx, so a start
-// that spent its budget on the launch still publishes. A failed write is
-// reported, not returned, and removes nothing: the agent runs, and the box
-// keeps the token it held (on a fresh start, the one provision seeded for
-// this launch).
-func (p *Provider) publishLaunchIdentity(ctx context.Context, name string, cfg runtime.Config) {
-	ctx = context.WithoutCancel(ctx)
+// relaunch without a token keeps the box's). The writes run past the
+// start's ctx, so a start that spent its budget on the launch still
+// publishes, and share one op timeout, so a store that hangs holds the start
+// for one op timeout at most.
+//
+// A failed write is read back with get-meta, and stands when the box
+// already holds the value (on a fresh start, the one provision seeded for
+// this launch). Otherwise publishLaunchIdentity returns the error, and the
+// launch fails: a launch reported up under an identity get-meta cannot
+// answer would have its first turn held, and the session's sends behind
+// it, until the turn expired, and one under its predecessor's would have
+// the turn misjudged. Nothing is removed, so the box keeps the token it held
+// for the failed start's cleanup. A runtime that keeps no metadata
+// (runtime.ErrMetaUnsupported) has no identity to publish: nothing is
+// written, nothing fails, and its turn is queued unbound
+// (session.StartupTurnLaunchID).
+func (p *Provider) publishLaunchIdentity(ctx context.Context, name string, cfg runtime.Config) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.timeout)
+	defer cancel()
 	for _, key := range launchIdentityKeys {
 		value, ok := cfg.Env[key]
 		if !ok || value == "" {
 			continue
 		}
-		if _, err := p.runWithContext(ctx, p.timeout, []byte(value), "set-meta", name, key); err != nil {
-			fmt.Fprintf(os.Stderr, "exec provider: session %q: publishing the launch's %s: %v; its queued first turn waits until get-meta answers it\n", name, key, err)
-			return
+		err := p.writeLaunchIdentityKey(ctx, name, key, value)
+		if errors.Is(err, runtime.ErrMetaUnsupported) {
+			return nil
+		}
+		if err != nil {
+			return err
 		}
 	}
+	return nil
+}
+
+// writeLaunchIdentityKey writes key's value for name with set-meta, under
+// publishLaunchIdentity's deadline. A failed write stands when get-meta
+// reads the key back holding value; an unsupported one is returned as it is
+// (runtime.ErrMetaUnsupported). The error names the key, never the value.
+func (p *Provider) writeLaunchIdentityKey(ctx context.Context, name, key, value string) error {
+	_, err := p.runWithContext(ctx, p.timeout, []byte(value), "set-meta", name, key)
+	if err == nil || errors.Is(err, runtime.ErrMetaUnsupported) {
+		return err
+	}
+	held, readErr := p.runWithContext(ctx, p.timeout, nil, "get-meta", name, key)
+	switch {
+	case readErr != nil:
+		return fmt.Errorf("exec provider: session %q: publishing the launch's %s: %w; reading it back: %w", name, key, err, readErr)
+	case held != value:
+		return fmt.Errorf("exec provider: session %q: publishing the launch's %s: %w; get-meta answers another value", name, key, err)
+	}
+	return nil
 }
 
 // withoutNudge is cfg without its first turn, which a separable launch hands

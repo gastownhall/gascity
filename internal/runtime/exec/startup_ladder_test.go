@@ -202,12 +202,43 @@ func TestUnweldedSlowHostSetupStillHandsBackFirstTurn(t *testing.T) {
 }
 
 // identityPackOps is launchPackOps with a metadata store ($dir/meta.<key>)
-// whose launch op records no identity of its own.
+// whose launch op records no identity of its own. set-meta of a key exits 1
+// while $dir/fail-set.<key> exists.
 func identityPackOps() map[string]string {
 	ops := launchPackOps()
-	ops["set-meta"] = `v=$(cat); printf %s "$v" > "$dir/meta.$3"`
+	ops["set-meta"] = `if [ -f "$dir/fail-set.$3" ]; then echo "store down" >&2; exit 1; fi; v=$(cat); printf %s "$v" > "$dir/meta.$3"`
 	ops["get-meta"] = `if [ -f "$dir/meta.$3" ]; then cat "$dir/meta.$3"; fi`
 	return ops
+}
+
+// tmuxLaunchPackCaps is the handshake of a pack that un-welds start with
+// gc's tmux launch over exec: proc.provision with proc.exec.
+const tmuxLaunchPackCaps = `{"version":0,"capabilities":["proc.provision","proc.exec"]}`
+
+// tmuxIdentityPackOps is identityPackOps for a pack whose agent gc starts in
+// the box's tmux over exec, with no launch op: has-session answers whether
+// the agent runs, and new-session or respawn-pane starts it.
+func tmuxIdentityPackOps() map[string]string {
+	ops := identityPackOps()
+	delete(ops, launchOp)
+	ops["exec"] = `cmd=$(cat); case "$cmd" in *has-session*) [ -f "$dir/running" ] ;; *new-session*|*respawn-pane*) : > "$dir/running" ;; *) exit 1 ;; esac`
+	return ops
+}
+
+// unweldedIdentityPack is a pack that un-welds start over a metadata store
+// that records no identity of its own: its handshake and op bodies.
+type unweldedIdentityPack struct {
+	label, caps string
+	ops         map[string]string
+}
+
+// unweldedIdentityPacks are such packs, one for each way gc launches the
+// agent: the launch op, and gc's tmux launch over exec.
+func unweldedIdentityPacks() []unweldedIdentityPack {
+	return []unweldedIdentityPack{
+		{"launch op", launchPackCaps, identityPackOps()},
+		{"tmux over exec", tmuxLaunchPackCaps, tmuxIdentityPackOps()},
+	}
 }
 
 // identityConfig is a start config carrying one launch's identity.
@@ -222,32 +253,117 @@ func identityConfig(token string, generation, epoch int) runtime.Config {
 // Kills an un-welded launch whose identity the queue cannot read when Start
 // returns (the queue's claim then holds the handed-back turn until it expires, and
 // the pre-send fence read releases it on every pass): Start and a Relaunch
-// publish the instance token and both epochs of the launch they ran, so
-// runtime.ReadLaunchID and runtime.ReadInputFence answer that launch, never
-// the one it replaced.
+// publish the instance token and both epochs of the launch they ran, through
+// the launch op or the tmux launch over exec, so runtime.ReadLaunchID and
+// runtime.ReadInputFence answer that launch, never the one it replaced.
 func TestUnweldedLaunchPublishesItsIdentity(t *testing.T) {
-	script, _ := observePack(t, launchPackCaps, identityPackOps())
+	for _, pack := range unweldedIdentityPacks() {
+		t.Run(pack.label, func(t *testing.T) {
+			script, _ := observePack(t, pack.caps, pack.ops)
+			sp := NewSeamBacked(script)
+			first := identityConfig("tok-first", 3, 2)
+			if err := sp.Start(t.Context(), "s", first); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			wantIdentity := func(cfg runtime.Config, after string) {
+				t.Helper()
+				if id, ok := runtime.ReadLaunchID(sp, "s"); !ok || id != runtime.LaunchID(cfg.Env[runtime.InstanceTokenEnv]) {
+					t.Fatalf("ReadLaunchID %s = %q, %v; want the launch's id", after, id, ok)
+				}
+				want, _ := runtime.InputFenceFromEnv(cfg.Env)
+				if got, ok := runtime.ReadInputFence(sp, "s"); !ok || got != want {
+					t.Fatalf("ReadInputFence %s = %v, %v; want %v", after, got, ok, want)
+				}
+			}
+			wantIdentity(first, "after Start")
+			second := identityConfig("tok-second", 4, 5)
+			if err := sp.(runtime.RelaunchProvider).Relaunch(t.Context(), "s", second); err != nil {
+				t.Fatalf("Relaunch: %v", err)
+			}
+			wantIdentity(second, "after Relaunch")
+		})
+	}
+}
+
+// Kills a launch reported up under an identity get-meta does not answer: on
+// a non-fresh start of a pack whose provision seeds no identity, a failed
+// set-meta of any identity key left the box without that key's value, yet
+// Start returned nil and handed the first turn back, which its caller bound
+// to the start's token, so every claim held the turn, and every send to the
+// session behind it, until the turn expired a day later. A failed write that
+// the box does not already hold fails the launch, by either launch path:
+// Start returns an error naming the key, the start's teardown stops the box,
+// and nothing is handed back.
+func TestFailedIdentityWriteFailsTheStart(t *testing.T) {
+	for _, pack := range unweldedIdentityPacks() {
+		for _, failing := range launchIdentityKeys {
+			t.Run(pack.label+"/"+failing, func(t *testing.T) {
+				script, dir := observePack(t, pack.caps, pack.ops)
+				sp := NewSeamBacked(script)
+				writeFile(t, filepath.Join(dir, "fail-set."+failing), "")
+				err := sp.Start(t.Context(), "s", identityConfig("tok-x", 1, 1))
+				if err == nil {
+					t.Fatalf("Start = nil after a failed %s write: the launch is reported up under an identity get-meta does not answer", failing)
+				}
+				if !strings.Contains(err.Error(), failing) {
+					t.Errorf("Start = %v, want the error to name %s, the key whose write failed", err, failing)
+				}
+				if turn, ok := runtime.TakeStartupNudgeHandback(sp, "s"); ok {
+					t.Fatalf("handback %q after the failed start: its caller would queue it bound to a launch no read names", turn.Text)
+				}
+				if ran := opsRan(t, dir); !slices.Contains(ran, "stop") {
+					t.Fatalf("ops = %v: the failed launch left the box it provisioned", ran)
+				}
+			})
+		}
+	}
+}
+
+// Kills a warm relaunch reported up under the replaced launch's identity: a
+// failed set-meta of one of the new launch's keys left the box holding the
+// replaced launch's value for it beside the new values written before it
+// (the token is written last, so a failed token write leaves tok-first with
+// the new epochs 4 and 5), yet Relaunch returned nil and handed its first
+// turn back, which its caller bound to the replaced launch. The relaunch
+// fails and hands nothing back, so its caller falls back to the restart.
+func TestFailedIdentityWriteFailsTheRelaunch(t *testing.T) {
+	for _, failing := range launchIdentityKeys {
+		t.Run(failing, func(t *testing.T) {
+			script, dir := observePack(t, identityBoxCaps, identityBoxOps())
+			sp := seamBacked(NewProvider(script))
+			if err := sp.Start(t.Context(), "s", identityConfig("tok-first", 3, 2)); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			runtime.TakeStartupNudgeHandback(sp, "s")
+			writeFile(t, filepath.Join(dir, "fail-set."+failing), "")
+			if err := sp.Relaunch(t.Context(), "s", identityConfig("tok-second", 4, 5)); err == nil {
+				fence, known := runtime.ReadInputFence(sp, "s")
+				t.Fatalf("Relaunch = nil after a failed %s write, with get-meta answering %+v (known %v): the new launch is reported up under the replaced one's identity", failing, fence, known)
+			}
+			if turn, ok := runtime.TakeStartupNudgeHandback(sp, "s"); ok {
+				t.Fatalf("handback %q after the failed relaunch: its caller would queue it bound to the replaced launch", turn.Text)
+			}
+		})
+	}
+}
+
+// Kills a launch failed over a store the pack does not keep: a pack that
+// un-welds start but answers its metadata ops exit 2, against the metadata
+// requirement (runtime.ErrMetaUnsupported), has no identity to publish, so
+// its start still succeeds and hands the first turn back, which its caller
+// queues unbound (session.StartupTurnLaunchID).
+func TestLaunchWithoutAMetadataStoreHandsTheTurnBack(t *testing.T) {
+	script, dir := observePack(t, launchPackCaps, launchPackOps())
 	sp := NewSeamBacked(script)
-	first := identityConfig("tok-first", 3, 2)
-	if err := sp.Start(t.Context(), "s", first); err != nil {
-		t.Fatalf("Start: %v", err)
+	if err := sp.Start(t.Context(), "s", identityConfig("tok-x", 1, 1)); err != nil {
+		t.Fatalf("Start = %v, want nil: a pack without a metadata store has its turn queued unbound", err)
 	}
-	wantIdentity := func(cfg runtime.Config, after string) {
-		t.Helper()
-		if id, ok := runtime.ReadLaunchID(sp, "s"); !ok || id != runtime.LaunchID(cfg.Env[runtime.InstanceTokenEnv]) {
-			t.Fatalf("ReadLaunchID %s = %q, %v; want the launch's id", after, id, ok)
-		}
-		want, _ := runtime.InputFenceFromEnv(cfg.Env)
-		if got, ok := runtime.ReadInputFence(sp, "s"); !ok || got != want {
-			t.Fatalf("ReadInputFence %s = %v, %v; want %v", after, got, ok, want)
-		}
+	if ran := opsRan(t, dir); !slices.Contains(ran, "set-meta") {
+		t.Fatalf("ops = %v: no set-meta ran, so the fixture does not model the missing store", ran)
 	}
-	wantIdentity(first, "after Start")
-	second := identityConfig("tok-second", 4, 5)
-	if err := sp.(runtime.RelaunchProvider).Relaunch(t.Context(), "s", second); err != nil {
-		t.Fatalf("Relaunch: %v", err)
+	if turn, ok := runtime.TakeStartupNudgeHandback(sp, "s"); !ok || turn.Text != "first turn" {
+		t.Fatalf("handback = %+v, %v; want the first turn", turn, ok)
 	}
-	wantIdentity(second, "after Relaunch")
 }
 
 // Kills a launch after a Provision the welded `start` op served (the
@@ -340,7 +456,7 @@ const identityBoxCaps = `{"version":0,"capabilities":["proc.provision","proc.lau
 // write that store, and `observe` reports the box with the store's token.
 // `stop` destroys the box and its store. The launch op exits 1 while
 // $dir/fail-launch exists, and set-meta of a key exits 1 while
-// $dir/fail-set.<key> exists.
+// $dir/fail-set.<key> exists (identityPackOps).
 func identityBoxOps() map[string]string {
 	ops := identityPackOps()
 	ops["provision"] = `cat > "$dir/provision.stdin"; ` +
@@ -349,7 +465,6 @@ func identityBoxOps() map[string]string {
 		`v=$(sed -n "s/.*\"$k\":\"\([^\"]*\)\".*/\1/p" "$dir/provision.stdin"); ` +
 		`if [ -n "$v" ]; then printf %s "$v" > "$dir/meta.$k"; fi; done; : > "$dir/box"`
 	ops["launch"] = `cat > "$dir/launch.stdin"; if [ -f "$dir/fail-launch" ]; then echo "launch refused" >&2; exit 1; fi; : > "$dir/running"`
-	ops["set-meta"] = `if [ -f "$dir/fail-set.$3" ]; then echo "store down" >&2; exit 1; fi; ` + ops["set-meta"]
 	ops["remove-meta"] = `rm -f "$dir/meta.$3"`
 	ops["observe"] = `cat > /dev/null; if [ -f "$dir/box" ]; then tok=; ` +
 		`if [ -f "$dir/meta.` + runtime.InstanceTokenEnv + `" ]; then tok=$(cat "$dir/meta.` + runtime.InstanceTokenEnv + `"); fi; ` +
@@ -430,11 +545,12 @@ func TestFailedUnweldedRelaunchKeepsTheRunningToken(t *testing.T) {
 	}
 }
 
-// Kills a failed identity write that removes the token: on a fresh start
-// provision seeded the launch's own token, so removing it after a failed
-// write of any identity key deletes the new launch's correct identity, and
-// the queue holds its first turn as if the launch were unknown. A failed
-// write is logged and removes nothing.
+// Kills a failed identity write that removes the token, or fails a launch
+// whose identity reads: on a fresh start provision seeded the launch's own
+// token, so removing it after a failed write of any identity key deletes the
+// new launch's correct identity, and the queue holds its first turn as if
+// the launch were unknown. A failed write removes nothing and is read back,
+// and a key that already holds the launch's value lets the start succeed.
 func TestFailedIdentityWriteKeepsTheSeededToken(t *testing.T) {
 	for _, failing := range launchIdentityKeys {
 		t.Run(failing, func(t *testing.T) {
@@ -468,11 +584,29 @@ func TestLaunchIdentityOutlivesTheStartContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	cfg := identityConfig("tok-late", 2, 3)
-	p.publishLaunchIdentity(ctx, "s", cfg)
+	if err := p.publishLaunchIdentity(ctx, "s", cfg); err != nil {
+		t.Fatalf("publishLaunchIdentity under a spent ctx: %v", err)
+	}
 	for _, key := range launchIdentityKeys {
 		if got := readLog(t, filepath.Join(dir, "meta."+key)); got != cfg.Env[key] {
 			t.Errorf("%s = %q after a publish under a spent ctx, want %q", key, got, cfg.Env[key])
 		}
+	}
+}
+
+// Kills identity writes that each get an op timeout of their own: a store
+// that answers slowly, or hangs, held the start up to one op timeout per key
+// past its ctx, beyond the reconciler's reserve for a start. The writes, and
+// the read-back of a failed one, share one op timeout, and a publish cut off
+// by it fails.
+func TestLaunchIdentityWritesShareOneOpTimeout(t *testing.T) {
+	ops := identityPackOps()
+	ops["set-meta"] = `sleep 0.4; ` + ops["set-meta"]
+	script, _ := observePack(t, launchPackCaps, ops)
+	p := NewProvider(script)
+	p.timeout = time.Second
+	if err := p.publishLaunchIdentity(t.Context(), "s", identityConfig("tok-slow", 2, 3)); err == nil {
+		t.Fatal("three 0.4s writes published within a 1s op timeout: each write ran under a timeout of its own")
 	}
 }
 
