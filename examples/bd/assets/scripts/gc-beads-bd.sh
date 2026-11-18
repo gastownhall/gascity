@@ -2229,6 +2229,12 @@ data_dir: "$DATA_DIR"
 # 2.6.0+. Scheduled compaction (gc dolt compact) still handles history
 # flattening — see #1918, #1200 for that lineage. Override via city.toml
 # [dolt] auto_gc_enabled or GC_DOLT_AUTO_GC_ENABLED.
+#
+# Hazard: Dolt's generational GC makes a separate pass over dolt_ignore'd
+# tables and the working set that no table-level retention policy protects, so
+# auto-GC can destroy dolt_ignore'd data (ga-vrq5pu: mail and wisps). A city
+# that keeps state in dolt_ignore'd tables should override auto_gc_enabled to
+# false.
 behavior:
   auto_gc_behavior:
     enable: $auto_gc_enabled
@@ -2351,14 +2357,19 @@ check_read_only() {
 }
 
 load_health_check_from_gc() {
-    local gc_bin host output key value
+    local gc_bin host output key value health_db="${1:-}" health_data_dir="${2:-}"
     host=$(connect_host)
     gc_bin=$(resolve_gc_helper_bin)
     [ -n "$gc_bin" ] || return 1
-    output=$("$gc_bin" dolt-state health-check --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --check-read-only </dev/null 2>/dev/null) || return 1
+    set -- --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --check-read-only
+    [ -n "$health_db" ] && set -- "$@" --database "$health_db"
+    [ -n "$health_data_dir" ] && set -- "$@" --data-dir "$health_data_dir"
+    output=$("$gc_bin" dolt-state health-check "$@" </dev/null 2>/dev/null) || return 1
     GC_HEALTH_QUERY_READY="false"
     GC_HEALTH_READ_ONLY=""
     GC_HEALTH_CONNECTION_COUNT=""
+    GC_HEALTH_DATABASE_READY=""
+    GC_HEALTH_DATABASE_ERROR=""
     while IFS="$(printf '	')" read -r key value; do
         case "$key" in
             query_ready)
@@ -2370,11 +2381,75 @@ load_health_check_from_gc() {
             connection_count)
                 GC_HEALTH_CONNECTION_COUNT="$value"
                 ;;
+            database_ready)
+                GC_HEALTH_DATABASE_READY="$value"
+                ;;
+            database_error)
+                GC_HEALTH_DATABASE_ERROR="$value"
+                ;;
         esac
     done <<EOF
 $output
 EOF
     return 0
+}
+
+# city_health_database prints the city scope's Dolt database: the one every
+# city-level bead read and write goes through. A server can answer SQL while
+# this database is missing from its catalog or its default branch head will
+# not resolve, so health has to prove the database itself, not just the
+# server. Empty until the city scope names a database.
+city_health_database() {
+    read_existing_dolt_database "$GC_CITY_PATH/.beads/metadata.json"
+}
+
+# city_health_data_dir prints the data dir that must hold the city database's
+# repository on disk. Only a gc-managed local server keeps its data under
+# DATA_DIR; an external endpoint, loopback or not, keeps its databases
+# somewhere this script cannot see, so the on-disk check is skipped for it.
+city_health_data_dir() {
+    is_remote && return 0
+    [ "$(beads_config_value "$GC_CITY_PATH/.beads/config.yaml" gc.endpoint_origin)" = "managed_city" ] || return 0
+    printf '%s\n' "$DATA_DIR"
+}
+
+# check_city_database is the helper-less form of the database checks
+# `gc dolt-state health-check --database` runs: the repository is on disk
+# (managed servers only), the database is in the catalog, and its default
+# branch head resolves. Prints the failure and returns 1 when any fails.
+check_city_database() {
+    local db="$1" data_dir="$2" host output head db_lower entry entry_name found
+    if [ -n "$data_dir" ] && [ ! -d "$data_dir/$db/.dolt" ]; then
+        # Dolt matches database names case-insensitively, so a repository
+        # directory that differs only in case counts.
+        found=false
+        db_lower=$(printf '%s' "$db" | tr '[:upper:]' '[:lower:]')
+        for entry in "$data_dir"/*/; do
+            [ -d "$entry" ] || continue
+            entry_name=$(basename "$entry")
+            if [ "$(printf '%s' "$entry_name" | tr '[:upper:]' '[:lower:]')" = "$db_lower" ] && [ -d "$data_dir/$entry_name/.dolt" ]; then
+                found=true
+                break
+            fi
+        done
+        if [ "$found" != "true" ]; then
+            echo "database \"$db\" absent from data dir $data_dir"
+            return 1
+        fi
+    fi
+    host=$(connect_host)
+    if ! output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+        sql -r csv -q "USE $(quote_dolt_identifier "$db"); SELECT DOLT_HASHOF('HEAD') AS head" 2>&1); then
+        echo "database \"$db\" default branch head unresolvable: $(printf '%s' "$output" | tr '\n' ' ')"
+        return 1
+    fi
+    head=$(printf '%s\n' "$output" | tail -n 1 | tr -d '[:space:]')
+    case "$head" in
+        ''|*[!0-9a-v]*) ;;
+        *) [ "${#head}" -eq 32 ] && return 0 ;;
+    esac
+    echo "database \"$db\" default branch head unresolvable: unexpected head \"$head\""
+    return 1
 }
 
 load_wait_ready_from_gc() {
@@ -2465,6 +2540,38 @@ wait_for_managed_pid_ready() {
         attempt=$((attempt + 1))
     done
     return 1
+}
+
+# launch_dolt_sql_server_detached starts dolt sql-server for the start path
+# that runs without the gc helper and prints the server PID. The server is
+# city infrastructure, not part of whatever process ran the start, so it is
+# detached the way the managed start detaches it: it leads its own session
+# (setsid) or, where setsid is missing, its own process group (job control),
+# so a kill aimed at the caller's process group leaves it running; and it
+# drops the per-session identity variables, so a process-table sweep keyed on
+# GC_SESSION_ID does not count it as the caller's. The variable list mirrors
+# managedDoltSessionScopedEnvKeys in cmd/gc/dolt_start_managed.go. Close the
+# startup lock fd in the child so the flock is released when this starter
+# exits.
+launch_dolt_sql_server_detached() {
+    (
+        for key in GC_HOOK_DEADLINE GC_SESSION_ID GC_SESSION_NAME GC_ALIAS \
+            GC_AGENT GC_TEMPLATE GC_SESSION_ORIGIN GC_RUNTIME_EPOCH \
+            GC_CONTINUATION_EPOCH GC_INSTANCE_TOKEN BEADS_HOLDER_TOKEN \
+            BEADS_ACTOR CLAUDE_CODE_SESSION_ID; do
+            unset "$key"
+        done
+        if command -v setsid >/dev/null 2>&1; then
+            # Without job control the background child is not a process
+            # group leader, so setsid(1) calls setsid(2) in place and the
+            # PID below is the server's.
+            nohup setsid sh -c 'exec 9>&-; exec dolt sql-server --config "$1"' sh "$CONFIG_FILE" < /dev/null >> "$LOG_FILE" 2>&1 &
+        else
+            set -m
+            nohup sh -c 'exec 9>&-; exec dolt sql-server --config "$1"' sh "$CONFIG_FILE" < /dev/null >> "$LOG_FILE" 2>&1 &
+        fi
+        echo "$!"
+    )
 }
 
 load_start_managed_from_gc() {
@@ -3684,10 +3791,8 @@ op_start() {
             log_offset=$(wc -c < "$LOG_FILE" 2>/dev/null || echo 0)
         fi
 
-        # Start dolt sql-server with config file. Close the startup lock fd in
-        # the child so the flock is released when this starter exits.
-        nohup sh -c 'exec 9>&-; exec dolt sql-server --config "$1"' sh "$CONFIG_FILE" >> "$LOG_FILE" 2>&1 &
-        local server_pid=$!
+        local server_pid
+        server_pid=$(launch_dolt_sql_server_detached)
 
         # Write PID file.
         echo "$server_pid" > "$PID_FILE"
@@ -4730,16 +4835,25 @@ op_store_bridge() {
     return $?
 }
 op_health() {
-    local conn_count="" read_only_status
+    local conn_count="" read_only_status health_db health_data_dir db_failure
 
     # TCP check.
     if ! tcp_check; then
         die "dolt server not reachable on $(connect_host):$DOLT_PORT"
     fi
 
-    if load_health_check_from_gc; then
+    health_db=$(city_health_database)
+    health_data_dir=""
+    [ -n "$health_db" ] && health_data_dir=$(city_health_data_dir)
+
+    if load_health_check_from_gc "$health_db" "$health_data_dir"; then
         if [ "$GC_HEALTH_QUERY_READY" != "true" ]; then
             die "dolt query probe failed (information_schema.SCHEMATA)"
+        fi
+        # Fail closed: a requested database the helper did not report ready
+        # is unhealthy, whether it reported a failure or nothing at all.
+        if [ -n "$health_db" ] && [ "$GC_HEALTH_DATABASE_READY" != "true" ]; then
+            die "dolt city database unavailable: ${GC_HEALTH_DATABASE_ERROR:-health check did not report database \"$health_db\"}"
         fi
         if ! is_remote && [ "$GC_HEALTH_READ_ONLY" = "true" ]; then
             die "dolt server is in read-only mode"
@@ -4752,6 +4866,10 @@ op_health() {
         # Query probe.
         if ! do_query_probe; then
             die "dolt query probe failed (information_schema.SCHEMATA)"
+        fi
+
+        if [ -n "$health_db" ] && ! db_failure=$(check_city_database "$health_db" "$health_data_dir"); then
+            die "dolt city database unavailable: $db_failure"
         fi
 
         # Imposter detection disabled: TCP + query probe passed, server is
@@ -4837,7 +4955,31 @@ else
         tail -n 1000 "$LOG_FILE" 2>/dev/null \
             | grep -qE 'no space left on device|copy_file_range:.*no space|ENOSPC' \
             || return 1
+        enospc_disk_has_headroom && return 1
         return 0
+    }
+
+    enospc_disk_has_headroom() {
+        enospc_dir="${DATA_DIR:-}"
+        if [ -z "$enospc_dir" ] || [ ! -d "$enospc_dir" ]; then
+            enospc_dir=$(dirname "$LOG_FILE")
+        fi
+        enospc_floor="${GC_DOLT_WARN_FREE_BYTES:-2147483648}"
+        case "$enospc_floor" in
+            ''|*[!0-9]*) enospc_floor=2147483648 ;;
+        esac
+        # Read the floor as decimal: shell arithmetic takes a leading 0 as octal.
+        enospc_floor=$(printf '%s' "$enospc_floor" | sed 's/^0*//')
+        [ -n "$enospc_floor" ] || enospc_floor=0
+        # More than 18 digits can overflow shell arithmetic.
+        [ "${#enospc_floor}" -le 18 ] || enospc_floor=2147483648
+        # 0 means "no disk warning" to gc; it must not switch the skip off.
+        [ "$enospc_floor" -gt 0 ] || enospc_floor=2147483648
+        enospc_avail_kb=$(df -Pk "$enospc_dir" 2>/dev/null | awk 'NR == 2 { print $4 }')
+        case "$enospc_avail_kb" in
+            ''|*[!0-9]*) return 1 ;;
+        esac
+        [ "$enospc_avail_kb" -ge $(( (enospc_floor + 1023) / 1024 )) ]
     }
 fi
 
@@ -4856,7 +4998,7 @@ fi
 
 # op_recover stops the dolt server, restarts it, and verifies health.
 op_recover() {
-    local read_only_status
+    local read_only_status recover_db recover_data_dir recover_db_failure
 
     if is_remote; then
         die "recovery not supported for remote dolt servers"
@@ -4867,7 +5009,8 @@ op_recover() {
     # itself amplifies the failure: each restart triggers a conjoin/backup
     # sync that writes another partial table file to the backup remote.
     # Require manual intervention (free disk space) before recovery
-    # resumes. See gastownhall/gascity#2158.
+    # resumes; the skip lifts once the data dir is back above the free-space
+    # floor (see dolt-enospc.sh). See gastownhall/gascity#2158.
     if recovery_should_skip_due_to_enospc; then
         echo "skipping dolt recovery: recent dolt log shows ENOSPC — manual intervention required" >&2
         echo "  free disk space, then re-run health checks" >&2
@@ -4892,6 +5035,20 @@ op_recover() {
             echo "detected read-only dolt server — restarting" >&2
         fi
         DOLT_PORT="$GC_RECOVER_PORT"
+        # The helper's recovery health check proves only the server. A
+        # server that answers SQL while the city database is still missing
+        # or unreadable is not recovered.
+        recover_db=$(city_health_database)
+        if [ -n "$recover_db" ]; then
+            recover_data_dir=$(city_health_data_dir)
+            if load_health_check_from_gc "$recover_db" "$recover_data_dir"; then
+                if [ "$GC_HEALTH_DATABASE_READY" != "true" ]; then
+                    die "dolt city database still unavailable after recovery: ${GC_HEALTH_DATABASE_ERROR:-health check did not report database \"$recover_db\"}"
+                fi
+            elif ! recover_db_failure=$(check_city_database "$recover_db" "$recover_data_dir"); then
+                die "dolt city database still unavailable after recovery: $recover_db_failure"
+            fi
+        fi
         return 0
     elif [ "$GC_RECOVER_MANAGED_USED" = "true" ]; then
         if [ "$GC_RECOVER_DIAGNOSED_READ_ONLY" = "true" ]; then

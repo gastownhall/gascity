@@ -24,7 +24,7 @@ func TestMain(m *testing.M) {
 // it declares: the conformance kit passes every requirement but the ones
 // it does not declare (exec, provision, the fault and city-scope tokens,
 // report-activity's last_activity, the listing fault the fault token
-// gates, and server-lifecycle).
+// gates, server-lifecycle, and the copy-to op it does not implement).
 func TestObserveProfileIsConformant(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "fakeruntime")
@@ -51,6 +51,13 @@ func TestObserveProfileIsConformant(t *testing.T) {
 		// The profile does not declare fs.host.
 		runtimecontract.ReqFSHostSharedView: true, runtimecontract.ReqFSHostSameUser: true, runtimecontract.ReqFSHostLocal: true,
 		runtimecontract.ReqFSHostRunsWhatItCarries: true, runtimecontract.ReqFSHostAgentPIDOnHost: true, runtimecontract.ReqFSHostHomeView: true,
+		// The profile does not declare input-outcome.
+		runtimecontract.ReqInputNudgeDelivered: true, runtimecontract.ReqInputNudgeAbsentGone: true, runtimecontract.ReqInputKeysAbsentGone: true,
+		runtimecontract.ReqInputWordsAllowedOnOp: true, runtimecontract.ReqInputBlockedNotTyped: true, runtimecontract.ReqInputUnavailable: true,
+		runtimecontract.ReqInputLostReplyUnknown: true, runtimecontract.ReqInputExitZeroIsDelivered: true, runtimecontract.ReqInputHeldSendTypedOnce: true,
+		runtimecontract.ReqInputExit80OneLine: true, runtimecontract.ReqInputDeadBoxGone: true, runtimecontract.ReqInputKeysDelivered: true,
+		// The profile does not implement copy-to.
+		runtimecontract.ReqObservationCopyTo: true,
 	}
 	for _, res := range report.Results {
 		switch {

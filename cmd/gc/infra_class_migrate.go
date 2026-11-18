@@ -633,8 +633,8 @@ func infraMigrationOperatorAdvice(report infraMigrationReport, logPrefix string)
 			logPrefix, report.Target.Binding, len(report.Stranded), infraStrandedIDList(report.Stranded))
 	case infraMigrationGenesisBlocked:
 		if report.Cleared != nil {
-			return fmt.Sprintf("%s: this city's work store was cleared of its infrastructure beads into binding %q (%s records it), and [storage.classes] now leave every class on %q. Started this way the city would run with NO infrastructure state: its workflows, sessions, messages, orders and nudges are in that binding, and the pre-cutover rows are in the backup %s. To keep serving the split, point the classes back at %q. To roll back to the work store, stop the city, restore the backup into the work store as described under \"Restoring the work store from the backup\" in docs/runbooks/split-storage-classes.md, and then remove %s as your attestation that the restore is done. Beads written to the binding after the cutover are not in the backup, and a rollback loses them.",
-				logPrefix, report.Cleared.Binding, report.ServedNotePath, config.StorageWorkBinding, report.Cleared.Backup, report.Cleared.Binding, report.ServedNotePath)
+			return fmt.Sprintf("%s: this city's work store was cleared of its infrastructure beads into binding %q (%s records it), and [storage.classes] now leave every class on %q. Started this way the city would run with NO infrastructure state: its workflows, sessions, messages, orders and nudges are in that binding, and the pre-cutover rows are in the backup %s. To keep serving the split, point the classes back at %q. %s The fallback is the backup: stop the city, restore it into the work store as described under \"Restoring the work store from the backup\" in the same runbook, and then remove %s as your attestation that the restore is done. Beads written to the binding after the cutover are not in the backup, and that rollback loses them.",
+				logPrefix, report.Cleared.Binding, report.ServedNotePath, config.StorageWorkBinding, report.Cleared.Backup, report.Cleared.Binding, storageReverseRollbackAdvice(), report.ServedNotePath)
 		}
 		if report.ServedProvider == "" {
 			// The note exists but could not be read. It is still evidence
@@ -645,6 +645,11 @@ func infraMigrationOperatorAdvice(report infraMigrationReport, logPrefix string)
 		} else {
 			situation = fmt.Sprintf("%s: this city's infrastructure classes are served from binding %q (provider %q), and this configuration points them somewhere else. Nothing here proves the configured target holds what the served binding holds, so this refuses rather than risk making every bead written there invisible. Verify or recover the served binding's contents first; removing %s is the operator's attestation that they are recovered, still reachable through the new configuration, or deliberately abandoned.",
 				logPrefix, report.ServedBinding, report.ServedProvider, report.ServedNotePath)
+			// A revert to the work store, of a binding the reverse can copy
+			// from: the reverse is the rollback that loses nothing.
+			if report.Target.Binding == config.StorageWorkBinding && report.ServedProvider == config.StorageProviderSQLiteBeads {
+				situation += " " + storageReverseRollbackAdvice()
+			}
 		}
 		// Neither canned tail applies: the revert grant is evidence about the
 		// NEW target and says nothing about the served binding this outcome
@@ -1498,9 +1503,10 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 	// The edges that cross the boundary (D9), decided before the destination
 	// is touched: a refused shape writes nothing.
 	//
-	// Every hold is judged before any refusal returns, so one refusal names
-	// them all: the edge holds (the boundary plan) and the holds bd keeps in
-	// a carried bead's status (infra_class_holds.go).
+	// Every edge hold the boundary plan cannot carry is judged before the
+	// refusal returns, so one refusal names them all. The holds bd keeps in a
+	// carried bead's status are no refusal: they cross as parked holds
+	// (infraCarryParkedHold).
 	if err := infraCopyHoldsRefusal(cityPath, nil, &plan, all, from == infraMigrationFromBackup); err != nil {
 		return fail(err)
 	}
@@ -2114,6 +2120,14 @@ func sortedSetKeys(set map[string]bool) []string {
 // work-store opener, and creates nothing: a converged city must not be mutated
 // by its own convergence check.
 func classifyInfraContainmentGap(cityPath string, target infraBindingTarget, manifest infraCopyManifest) (infraContainmentGap, error) {
+	return classifyInfraContainmentGapLeaving(cityPath, target, manifest, nil)
+}
+
+// classifyInfraContainmentGapLeaving is classifyInfraContainmentGap without
+// the work-store rows leave reports, which it neither classifies nor judges
+// by the binding's row under their id: a reverse leaves out the rows it
+// wrote itself, which would otherwise cost one binding read each.
+func classifyInfraContainmentGapLeaving(cityPath string, target infraBindingTarget, manifest infraCopyManifest, leave func(beads.Bead) bool) (infraContainmentGap, error) {
 	source, err := openInfraMigrationSource(cityPath)
 	if err != nil {
 		return infraContainmentGap{}, fmt.Errorf("opening work store: %w", err)
@@ -2123,6 +2137,9 @@ func classifyInfraContainmentGap(cityPath string, target infraBindingTarget, man
 	rows, err := readInfraSnapshotAt(source, manifest.Generation)
 	if err != nil {
 		return infraContainmentGap{}, err
+	}
+	if leave != nil {
+		rows = slices.DeleteFunc(rows, leave)
 	}
 
 	// Opened even when the work store holds nothing to classify — the normal
@@ -2570,12 +2587,12 @@ type infraMintedGate struct {
 }
 
 // infraCopyHoldsRefusal plans the city copy's boundary edges
-// (planInfraCityBoundary) and checks the holds bd keeps in a carried bead's
-// status (infraCopyParkedRefusal), and refuses with every hold either finds,
-// in one refusal. The migration and preflight both run it.
+// (planInfraCityBoundary) and refuses with every edge hold the plan cannot
+// carry, in one refusal. The holds bd keeps in a carried bead's status cross
+// as parked holds (infraCarryParkedHold). The migration and preflight both
+// run it.
 func infraCopyHoldsRefusal(cityPath string, cfg *config.City, plan *infraCopyPlan, all map[string]beads.Bead, fromBackup bool) error {
-	boundary := planInfraCityBoundary(cityPath, cfg, plan, all, fromBackup)
-	return errors.Join(infraCopyParkedRefusal(*plan, time.Now()), boundary)
+	return planInfraCityBoundary(cityPath, cfg, plan, all, fromBackup)
 }
 
 // infraUnheldExternalBlockers names each open moved row that waits, through
@@ -2996,10 +3013,7 @@ func importInfraSnapshot(destination beads.Store, plan infraCopyPlan, prepared i
 // the only thing that writes edges, and the source's own materialized dep rows
 // are what it reads, so nothing is lost.
 func infraMigrationRow(b beads.Bead) beads.Bead {
-	metadata := make(beads.StringMap, len(b.Metadata)+1)
-	for key, value := range b.Metadata {
-		metadata[key] = value
-	}
+	metadata := cloneBeadMetadata(b.Metadata)
 	metadata[infraMigrationStampKey] = config.StorageWorkBinding
 	b.Metadata = metadata
 	b.Dependencies = nil
@@ -3019,7 +3033,8 @@ func infraMigrationRow(b beads.Bead) beads.Bead {
 	// to dependency-derived readiness" (beads.Bead.IsBlocked), and the dep rows
 	// that fallback reads ARE witnessed bidirectionally by verifyInfraCopy.
 	b.IsBlocked = nil
-	return b
+	// A hold bd keeps in the status crosses as a parked hold.
+	return infraCarryParkedHold(b)
 }
 
 // verifyInfraCopy is the equality stage: the destination must hold exactly the
@@ -3116,7 +3131,7 @@ func verifyInfraCopy(openDestination func() (beads.Store, error), source beads.S
 		if !ok {
 			return nil, nil, fmt.Errorf("bead %s missing from binding", want.ID)
 		}
-		if diff := beadCopyDifference(withInfraCrossEdgeRecords(want, plan.boundary.Records[want.ID]), got); diff != "" {
+		if diff := beadCopyDifference(withInfraCrossEdgeRecords(infraCarryParkedHold(want), plan.boundary.Records[want.ID]), got); diff != "" {
 			return nil, nil, fmt.Errorf("bead %s differs after copy: %s", want.ID, diff)
 		}
 		if diff := infraCopyClassDifference(want, got); diff != "" {

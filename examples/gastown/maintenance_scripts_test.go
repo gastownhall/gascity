@@ -6348,6 +6348,7 @@ func TestReaperOrderAndScriptDefaults(t *testing.T) {
 		{envName: "GC_REAPER_MAX_AGE", want: "24h"},
 		{envName: "GC_REAPER_PURGE_AGE", want: "168h"},
 		{envName: "GC_REAPER_STALE_ISSUE_AGE", want: "720h"},
+		{envName: "GC_REAPER_STALE_ISSUE_BURST_MAX", want: "25"},
 	} {
 		if got := extractShellDefault(t, script, check.envName); got != check.want {
 			t.Errorf("%s default = %q, want %q", check.envName, got, check.want)
@@ -7950,9 +7951,9 @@ const maintenanceBdAppliedIDsJSON = `    if [ -n "${BD_CLOSE_FAIL:-}" ]; then
 //     ("rig:api") the way gc refuses a rig with no path binding;
 //   - fails for scopes listed in FAKE_UNREACHABLE_SCOPES or in the
 //     unreachable-scopes file next to the stub (writeUnreachableScopesStub);
-//   - refuses `sql` for scopes listed in FAKE_SQL_UNSUPPORTED_SCOPES the way
-//     bd does for an embedded store (or an HTTP workspace), which still
-//     serves its other verbs;
+//   - refuses `sql` for scopes listed in FAKE_SQL_UNSUPPORTED_SCOPES with
+//     bd's refusal for an embedded store, which still serves its other verbs
+//     (an HTTP workspace refuses `sql` with other text, not modeled here);
 //   - hands every other verb to the `bd` test double on PATH (a default one
 //     is installed next to gc unless the test brings its own), exporting the
 //     scope as GC_FAKE_SCOPE.
@@ -7992,6 +7993,8 @@ const maintenanceGCScopeRoute = `if [ "${1:-}" = "rig" ] && [ "${2:-}" = "list" 
   fi
   if [ -n "${FAKE_RIG_LIST_JSON:-}" ]; then
     printf '%s\n' "$FAKE_RIG_LIST_JSON"
+  elif [ -n "${FAKE_RIG_LIST_FILE:-}" ]; then
+    cat "$FAKE_RIG_LIST_FILE"
   else
     printf '{"rigs":[]}\n'
   fi
@@ -13227,6 +13230,50 @@ func TestCrossRigDepsSkipsInternalDeps(t *testing.T) {
 	s := string(log)
 	if strings.Contains(s, "dep remove") || strings.Contains(s, "dep add") {
 		t.Fatalf("internal-only deps must not trigger bd dep remove/add; bd log:\n%s", s)
+	}
+}
+
+// A suspended rig listed first among more suspended prefixes than a pipe
+// buffer holds must still be skipped. A `printf | grep -q` membership check
+// under pipefail reads as a miss here: grep exits on the early match while
+// printf is still writing, and printf's SIGPIPE fails the pipeline.
+func TestCrossRigDepsSkipsSuspendedRigListedFirstInLargeRigList(t *testing.T) {
+	closed := `[{"id":"ga-blocker"}]`
+	deps := `[{"id":"external:other-rig:rig-dep-1"}]`
+
+	type rigRow struct {
+		Name      string `json:"name"`
+		HQ        bool   `json:"hq"`
+		Suspended bool   `json:"suspended"`
+		Prefix    string `json:"prefix"`
+	}
+	rigs := []rigRow{{Name: "gascity", Suspended: true, Prefix: "ga"}}
+	for i := 0; i < 3000; i++ {
+		rigs = append(rigs, rigRow{
+			Name:      fmt.Sprintf("parked-%04d", i),
+			Suspended: true,
+			Prefix:    fmt.Sprintf("parked-rig-prefix-%04d-%020d", i, i),
+		})
+	}
+	rigJSON, err := json.Marshal(map[string][]rigRow{"rigs": rigs})
+	if err != nil {
+		t.Fatalf("Marshal(rig list): %v", err)
+	}
+	rigListFile := filepath.Join(t.TempDir(), "rig-list.json")
+	if err := os.WriteFile(rigListFile, rigJSON, 0o644); err != nil {
+		t.Fatalf("WriteFile(rig list): %v", err)
+	}
+
+	bdLog, env := crossRigDepsEnv(t, closed, deps)
+	env["FAKE_RIG_LIST_FILE"] = rigListFile
+	runScript(t, coreScriptPath("cross-rig-deps.sh"), env)
+
+	log, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	if len(log) != 0 {
+		t.Fatalf("bead of suspended rig ga must be left cold; bd log:\n%s", log)
 	}
 }
 

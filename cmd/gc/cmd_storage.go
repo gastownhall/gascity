@@ -230,6 +230,7 @@ operator arranges rather than something a program can observe.`,
 		newStorageVouchBdCmd(surface, stdout, stderr),
 		newStorageRemoteStageCmd(stdout, stderr),
 		newStorageSnapshotCmd(surface, stdout, stderr),
+		newStorageSplitCmd(surface, stdout, stderr),
 	)
 	return cmd
 }
@@ -261,6 +262,11 @@ func newStorageMigrateCmd(surface storageCommandSurface, stdout, stderr io.Write
 		fromRigs     bool
 		rigNames     []string
 		abandonRig   bool
+		toWork       bool
+		toRigs       bool
+		abortReverse bool
+		reconciler   string
+		dryRun       bool
 		fleetStopped bool
 		forced       []string
 		timeBudget   time.Duration
@@ -326,28 +332,60 @@ from the rows it had not yet removed. That holds for the re-copy of a binding
 whose database is gone too: before it creates the database it writes a record
 beside the marker (infra.recopying), and until its own marker lands the binding
 stays unconverged, so boot refuses it and the same command resumes it, whether
-the run paused, failed or was killed.`,
+the run paused, failed or was killed.
+
+--to-work reverses the split. It takes a snapshot of the binding, the work
+store and the rigs, pinned, then copies the binding's current rows back
+(keeping their ids and edge payloads, and restoring each cross-store edge a
+migration recorded) and proves each copy: a rig's imported rows into its
+store, everything else into the work store. Then it removes [storage] from
+city.toml (or restores the bytes from before the split), renames the split's
+notes and records *.reverted-<run>, and archives the binding root the same
+way. It refuses, naming each bead and the fix, an open cross-store gate, an
+open row the binding minted for a rig's scope, an edge that would join two
+open rows in different stores or hold an open row behind a blocker in another
+store that has not released it (open, or closed with gc.work_outcome=blocked),
+and an edge payload its destination cannot write. An explicit
+session_reconciler = "v2" refuses too, unless --reconciler=legacy rewrites it
+in the same edit. --dry-run prints the plan and every refusal and writes
+nothing; it takes no lock and needs no --fleet-stopped, so it rehearses on a
+live city.
+
+--to-rigs --rig X returns rig X's imported rows to its store and keeps the
+city split: the binding's copies go once the rig's are proven, and the rig
+reads as awaiting import again.
+
+Every row a reverse writes carries gc.infra_reversed_from, and until the
+binding is changed (its archive, or a to-rigs clear) --abort-reverse removes
+exactly those rows and puts back what the reverse changed. A reverse pauses on
+--time-budget and continues on the next run, as the copy does; while one is
+open, boot and the other storage commands refuse the city.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			sources := 0
-			for _, set := range []bool{fromWork, fromBackup, fromRigs} {
+			for _, set := range []bool{fromWork, fromBackup, fromRigs, toWork, toRigs, abortReverse} {
 				if set {
 					sources++
 				}
 			}
 			if sources != 1 {
-				fmt.Fprintf(stderr, "gc %s %s: pass exactly one of --%s, --%s or --%s. The source is stated explicitly rather than detected, so a source added later cannot inherit another's behavior by silence\n", //nolint:errcheck // best-effort stderr
-					surface.Namespace, surface.Verb, surface.Flag, storageFromBackupFlag, storageFromRigsFlag)
+				fmt.Fprintf(stderr, "gc %s %s: pass exactly one of --%s, --%s, --%s, --%s, --%s or --%s. The source is stated explicitly rather than detected, so a source added later cannot inherit another's behavior by silence\n", //nolint:errcheck // best-effort stderr
+					surface.Namespace, surface.Verb, surface.Flag, storageFromBackupFlag, storageFromRigsFlag, storageToWorkFlag, storageToRigsFlag, storageAbortReverseFlag)
 				return errExit
 			}
-			// The rig import and the abandon do not check the budget, so a
-			// budget passed to either is refused rather than silently ignored.
-			if cmd.Flags().Changed(storageTimeBudgetFlag) && (fromRigs || abandonRig) {
-				fmt.Fprintf(stderr, "gc %s %s: --%s bounds the work-store copy and clear (--%s, --%s); the rig import and --%s do not check it, so it is refused rather than ignored\n", //nolint:errcheck // best-effort stderr
-					surface.Namespace, surface.Verb, storageTimeBudgetFlag, surface.Flag, storageFromBackupFlag, storageAbandonRigStoreFlag)
+			// The rig import, the abandon and the abort do not check the
+			// budget, so a budget passed to any is refused rather than
+			// silently ignored.
+			if cmd.Flags().Changed(storageTimeBudgetFlag) && (fromRigs || abandonRig || abortReverse) {
+				fmt.Fprintf(stderr, "gc %s %s: --%s bounds the copies and the clear (--%s, --%s, --%s, --%s); the rig import, --%s and --%s do not check it, so it is refused rather than ignored\n", //nolint:errcheck // best-effort stderr
+					surface.Namespace, surface.Verb, storageTimeBudgetFlag, surface.Flag, storageFromBackupFlag, storageToWorkFlag, storageToRigsFlag, storageAbandonRigStoreFlag, storageAbortReverseFlag)
 				return errExit
 			}
-			if len(rigNames) > 0 && !fromRigs {
-				fmt.Fprintf(stderr, "gc %s %s: --%s narrows --%s and means nothing without it\n", surface.Namespace, surface.Verb, storageRigFlag, storageFromRigsFlag) //nolint:errcheck // best-effort stderr
+			if len(rigNames) > 0 && !fromRigs && !toRigs && !toWork {
+				fmt.Fprintf(stderr, "gc %s %s: --%s narrows --%s or --%s and means nothing without it\n", surface.Namespace, surface.Verb, storageRigFlag, storageFromRigsFlag, storageToRigsFlag) //nolint:errcheck // best-effort stderr
+				return errExit
+			}
+			if (cmd.Flags().Changed(storageReconcilerFlag) && !toWork) || (dryRun && !toWork && !toRigs) {
+				fmt.Fprintf(stderr, "gc %s %s: --%s goes with --%s, and --%s with --%s or --%s\n", surface.Namespace, surface.Verb, storageReconcilerFlag, storageToWorkFlag, storageDryRunFlag, storageToWorkFlag, storageToRigsFlag) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
 			force, err := parseStorageForce(forced)
@@ -374,6 +412,14 @@ the run paused, failed or was killed.`,
 			if fromRigs {
 				return exitForCode(doStorageMigrateFromRigs(cmd.Context(), request, rigNames, stdout, stderr))
 			}
+			switch {
+			case abortReverse:
+				return exitForCode(doStorageAbortReverse(cmd.Context(), request, stdout, stderr))
+			case toWork:
+				return exitForCode(doStorageReverse(cmd.Context(), request, reverseOptions{Mode: reverseToWork, Rigs: rigNames, Reconciler: reconciler, DryRun: dryRun}, stdout, stderr))
+			case toRigs:
+				return exitForCode(doStorageReverse(cmd.Context(), request, reverseOptions{Mode: reverseToRigs, Rigs: rigNames, DryRun: dryRun}, stdout, stderr))
+			}
 			return exitForCode(doStorageMigrate(cmd.Context(), request, stdout, stderr))
 		},
 	}
@@ -384,9 +430,19 @@ the run paused, failed or was killed.`,
 	cmd.Flags().BoolVar(&fromRigs, storageFromRigsFlag, false,
 		"import each rig's graph and infrastructure beads into the city binding")
 	cmd.Flags().StringSliceVar(&rigNames, storageRigFlag, nil,
-		"with --"+storageFromRigsFlag+", import only this rig (repeatable)")
+		"with --"+storageFromRigsFlag+", import only this rig; with --"+storageToRigsFlag+", return this rig (repeatable)")
 	cmd.Flags().BoolVar(&abandonRig, storageAbandonRigStoreFlag, false,
 		"with --"+storageFromRigsFlag+" --"+storageRigFlag+" X, record X's clear complete without its store, once the binding is proven to hold every row X's import recorded (for a rig store that is permanently gone)")
+	cmd.Flags().BoolVar(&toWork, storageToWorkFlag, false,
+		"reverse the split: copy the binding's current rows back into the work and rig stores, prove them, and retire [storage] and the binding")
+	cmd.Flags().BoolVar(&toRigs, storageToRigsFlag, false,
+		"with --"+storageRigFlag+" X, return rig X's imported rows from the binding to its store and keep the city split")
+	cmd.Flags().BoolVar(&abortReverse, storageAbortReverseFlag, false,
+		"abandon an unfinished --"+storageToWorkFlag+" or --"+storageToRigsFlag+": remove exactly the rows it wrote and put back what it changed")
+	cmd.Flags().StringVar(&reconciler, storageReconcilerFlag, "",
+		"with --"+storageToWorkFlag+", rewrite [daemon] session_reconciler to this value (legacy) in the same city.toml edit")
+	cmd.Flags().BoolVar(&dryRun, storageDryRunFlag, false,
+		"with --"+storageToWorkFlag+" or --"+storageToRigsFlag+", print what would move and every refusal, and write nothing (no lock, no --"+storageFleetStoppedFlag+": a live rehearsal)")
 	cmd.Flags().BoolVar(&fleetStopped, storageFleetStoppedFlag, false,
 		"attest that "+storageFleetStoppedAttestation)
 	addStorageForceFlag(cmd, &forced)
@@ -489,6 +545,10 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if err := storageReverseRefusal(request.CityPath, target.Root); err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if !ok {
 		fmt.Fprintf(stderr, "%s: this city's [storage.classes] do not assign %s to one shared non-work binding, so there is nothing to migrate. %s\n", //nolint:errcheck // best-effort stderr
 			logPrefix, infraMigrationClassList(), storageSupportedTopologyStatement)
@@ -561,10 +621,47 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 	}
 	defer window.closeReporting(logPrefix, stderr, &code)
 	window.setTimeBudget(request.TimeBudget)
+	result, code := runCityMigration(ctx, request, target, plan, shared, logPrefix, stderr, "")
+	if code != 0 {
+		return code
+	}
+	// The window closes before the run reports: a provider its stop left
+	// running fails the run, and the report then says to start nothing.
+	window.closeReporting(logPrefix, stderr, &code)
+	startCity := " Start the city with `gc start`."
+	if code != 0 {
+		startCity = ""
+	}
+	fmt.Fprintf(stdout, "Migrated. %s now serves %s from %s; %s%s.%s\n", //nolint:errcheck // best-effort stdout
+		target.Binding, infraMigrationClassList(), target.Database, describeInfraClear(result.report.Clear), relowerSuccessClause(result.relowered), startCity)
+	if awaiting := rigsWithoutImportRecord(request.CityPath, request.Cfg, target); len(awaiting) > 0 {
+		fmt.Fprintf(stdout, "Rigs awaiting import (their graph rows stay readable until then): %s. Import them with `%s`.\n", strings.Join(awaiting, ", "), rigImportAllInstruction()) //nolint:errcheck // best-effort stdout
+	}
+	return code
+}
+
+// cityMigrationResult is what a city migration that converged did.
+type cityMigrationResult struct {
+	report    infraMigrationReport
+	relowered opjournal.RelowerReport
+}
+
+// runCityMigration is the city migration inside the caller's controller lock,
+// shared-store exclusion, guard and maintenance window: the foreign-row census
+// an attested shared store calls for, the copy (or the re-copy from the
+// backup) and the clear, the served-binding note, and the re-lowering of the
+// converged binding's deliver-now units. It returns a non-zero exit code on
+// anything short of converged: 75 when the time budget paused it. The caller
+// closes the window and reports; `gc storage migrate --from-work` and the
+// guided split share it. unconverged, when the caller gives it, is the advice
+// said and recorded for a copy that stopped before its convergence marker, in
+// place of the engine's, whose remedy is `gc storage migrate --from-work`:
+// the guided split names its own command, which keeps its journal.
+func runCityMigration(ctx context.Context, request storageOperatorRequest, target infraBindingTarget, plan *storebinding.StoragePlan, shared sharedStoreExclusion, logPrefix string, stderr io.Writer, unconverged string) (cityMigrationResult, int) {
 	if shared.Attested && !request.FromBackup {
 		if err := sharedStoreForeignRowRefusal(request.CityPath, request.Cfg); err != nil {
 			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-			return 1
+			return cityMigrationResult{}, 1
 		}
 	}
 
@@ -589,15 +686,20 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 		// still under way.
 		fmt.Fprintf(stderr, "%s: %v (exit %d)\n", logPrefix, report.Paused, storagePausedExitCode) //nolint:errcheck // best-effort stderr
 		recordStorageBindingOutcome(rec, report, report.Paused.Error())
-		return storagePausedExitCode
+		return cityMigrationResult{}, storagePausedExitCode
 	}
 	if !report.serving() {
 		advice := infraMigrationOperatorAdvice(report, logPrefix)
+		// An unconverged copy whose binding could not be read keeps the
+		// engine's advice: it puts the hazard of a missing volume first.
+		if unconverged != "" && report.Outcome == infraMigrationUnconverged && report.BindingProbe == nil {
+			advice = unconverged
+		}
 		if advice != "" {
 			fmt.Fprintln(stderr, advice) //nolint:errcheck // best-effort stderr
 		}
 		recordStorageBindingOutcome(rec, report, advice)
-		return 1
+		return cityMigrationResult{}, 1
 	}
 	recordStorageBindingOutcome(rec, report, "")
 	// The served-binding note, now rather than at the first boot: the binding
@@ -609,32 +711,21 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 	// already current.
 	if err := recordServedBinding(plan, request.CityPath, request.Cfg.EffectiveStorage(), target); err != nil {
 		fmt.Fprintf(stderr, "%s: recording the served binding: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return 1
+		return cityMigrationResult{}, 1
 	}
 	// The last step, on a converged binding only: every other binding handle
 	// of this command is closed, and the step opens the binding as the
 	// runtime serves it.
-	var relowered opjournal.RelowerReport
+	result := cityMigrationResult{report: report}
 	if converged, ok := report.convergedBinding(plan, request.CityPath, request.Cfg); ok {
-		relowered, err = relowerConvergedNowUnits(ctx, converged, rec, logPrefix, stderr)
+		relowered, err := relowerConvergedNowUnits(ctx, converged, rec, logPrefix, stderr)
 		if err != nil {
 			fmt.Fprintln(stderr, relowerFailureAdvice(logPrefix, target.Binding, err)) //nolint:errcheck // best-effort stderr
-			return 1
+			return cityMigrationResult{}, 1
 		}
+		result.relowered = relowered
 	}
-	// The window closes before the run reports: a provider its stop left
-	// running fails the run, and the report then says to start nothing.
-	window.closeReporting(logPrefix, stderr, &code)
-	startCity := " Start the city with `gc start`."
-	if code != 0 {
-		startCity = ""
-	}
-	fmt.Fprintf(stdout, "Migrated. %s now serves %s from %s; %s%s.%s\n", //nolint:errcheck // best-effort stdout
-		target.Binding, infraMigrationClassList(), target.Database, describeInfraClear(report.Clear), relowerSuccessClause(relowered), startCity)
-	if awaiting := rigsWithoutImportRecord(request.CityPath, request.Cfg, target); len(awaiting) > 0 {
-		fmt.Fprintf(stdout, "Rigs awaiting import (their graph rows stay readable until then): %s. Import them with `%s`.\n", strings.Join(awaiting, ", "), rigImportAllInstruction()) //nolint:errcheck // best-effort stdout
-	}
-	return code
+	return result, 0
 }
 
 // acquireStorageMigrationGuard takes the city's storage migration guard, with
@@ -661,7 +752,7 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 		return code
 	}
 	fmt.Fprintln(stdout, "rigs:") //nolint:errcheck // best-effort stdout
-	if reportRigCensus(stdout, censusRigs(request.CityPath, request.Cfg, target, false)) != 0 {
+	if reportRigCensus(stdout, censusRigs(request.CityPath, request.Cfg, target)) != 0 {
 		code = 1
 	}
 	return code
@@ -674,6 +765,10 @@ func doStorageStatusCity(request storageOperatorRequest, stdout, stderr io.Write
 	storage := request.Cfg.EffectiveStorage()
 	fmt.Fprintf(stdout, "city: %s\n", request.CityPath)                           //nolint:errcheck // best-effort stdout
 	fmt.Fprintf(stdout, "[storage] configured: %t\n", request.Cfg.Storage != nil) //nolint:errcheck // best-effort stdout
+	if err := storageReverseRefusal(request.CityPath, storageReverseRoot(request.CityPath, request.Cfg)); err != nil {
+		fmt.Fprintf(stdout, "reverse: BLOCKED — %v\n", err) //nolint:errcheck // best-effort stdout
+		return 1
+	}
 	for _, class := range storageClassOrder() {
 		fmt.Fprintf(stdout, "  %-9s -> %s\n", class, storage.Classes.BindingFor(class)) //nolint:errcheck // best-effort stdout
 	}

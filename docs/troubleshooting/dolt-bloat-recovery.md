@@ -103,8 +103,9 @@ the underlying reason (see **Compact Quarantine Reasons** below) before
 reclaiming. Like the offline `dolt gc --archive-level=0` procedure above,
 it writes classic table files. Unlike that procedure,
 `--gc-only` runs against the live managed server and does not require stopping
-the city — though quiescing writers still makes the GC faster and more
-thorough.
+the city, but it skips any database with a connected session (see the live-session
+gate in `gc dolt compact --help`), so quiesce writers first; `--force` overrides
+the skip.
 
 ### A full GC canceled at the read timeout
 
@@ -253,12 +254,22 @@ Markers left by runs from before this guard existed:
   reports the database as diverged until you reconcile it. Either re-clone
   from the remote, or push the flattened history during an announced window
   (see below).
-- **`compact-pending-push/<database>`**: the marker is held untouched, and
-  nothing is force-pushed. Compact reports it on stderr, emits a
+- **`compact-pending-push/<database>`**: when the marker's remote is still
+  configured, the marker is held untouched, and
+  nothing is force-pushed. (A marker whose remote was removed is reported as
+  unsatisfiable instead; see below.) Compact reports it on stderr, emits a
   `dolt.compact.quarantine` event of type `compact-pending-push-held`, and
   mails the compactor alert recipient (`GC_DOLT_COMPACT_ALERT_TO`, default
   `mayor`). Reminders follow the same cadence as quarantine alerts. Reconcile
   it the same way as a pending-GC marker.
+
+A `compact-pending-push` marker whose remote has since been removed can never
+be retried, whether or not the database still has other remotes. Compact stops
+treating it as a stale-marker or held alert and reports it once, as a `dolt.compact.quarantine` event of type
+`compact-pending-push-unsatisfiable` plus one mail. The event repeats every
+run; the mail does not. The marker is left untouched and the database stays
+blocked. Restore the remote, or clear the marker after you reconcile the
+database by hand.
 
 > **Warning:** re-cloning from the remote discards every commit made to the
 > local database since the flatten. Those writes exist only locally. Before
@@ -634,6 +645,10 @@ path also refuses, except for the four auto-clearable reasons above, which it
 may clear on its own after proving content preservation. The refusal output
 repeats the marker path, reason, key evidence fields, and the clear/retry
 command so operators have the next action without opening this runbook first.
+
+Separately, `gc dolt compact` skips `CALL DOLT_GC` on a database that has live
+sessions connected, or whose session probe fails. The log names the database and
+the next run retries; `--force` runs the GC anyway.
 
 ## When to Escalate
 
