@@ -6595,3 +6595,67 @@ func TestManagerCloseStampsUsageCloseMarker(t *testing.T) {
 		t.Errorf("usage_closed_at = %q, want %q", got, closeAt.Format(time.RFC3339Nano))
 	}
 }
+
+func TestCommitInvocationUsageProgress(t *testing.T) {
+	store := beads.NewMemStore()
+	mgr := newTestManager(t, store, runtime.NewFake())
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "chat", Command: "codex", WorkDir: "/tmp", Provider: "codex", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	start, err := mgr.InvocationUsageProgress(info.ID)
+	if err != nil {
+		t.Fatalf("InvocationUsageProgress: %v", err)
+	}
+	if start != (InvocationUsageProgress{}) {
+		t.Fatalf("fresh progress = %+v, want zero", start)
+	}
+
+	first := InvocationUsageProgress{Cursor: "total:150", CodexCheckpoint: `{"v":1,"offset":10}`}
+	if err := mgr.CommitInvocationUsageProgress(info.ID, start, first); err != nil {
+		t.Fatalf("commit first: %v", err)
+	}
+	b, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if b.Metadata[MetadataKeyInvocationUsageCursor] != "total:150" || b.Metadata[MetadataKeyCodexUsageCheckpoint] != `{"v":1,"offset":10}` {
+		t.Fatalf("stored progress = %q / %q", b.Metadata[MetadataKeyInvocationUsageCursor], b.Metadata[MetadataKeyCodexUsageCheckpoint])
+	}
+
+	// A commit based on a stale read writes nothing.
+	stale := InvocationUsageProgress{Cursor: "total:300", CodexCheckpoint: `{"v":1,"offset":20}`}
+	if err := mgr.CommitInvocationUsageProgress(info.ID, start, stale); !errors.Is(err, ErrInvocationUsageProgressConflict) {
+		t.Fatalf("stale commit err = %v, want ErrInvocationUsageProgressConflict", err)
+	}
+	// A cursor another writer moved makes the next commit conflict too.
+	if err := mgr.PersistInvocationUsageCursor(info.ID, "msg_other"); err != nil {
+		t.Fatalf("PersistInvocationUsageCursor: %v", err)
+	}
+	if err := mgr.CommitInvocationUsageProgress(info.ID, first, stale); !errors.Is(err, ErrInvocationUsageProgressConflict) {
+		t.Fatalf("commit over moved cursor err = %v, want ErrInvocationUsageProgressConflict", err)
+	}
+	got, err := mgr.InvocationUsageProgress(info.ID)
+	if err != nil {
+		t.Fatalf("InvocationUsageProgress: %v", err)
+	}
+	if want := (InvocationUsageProgress{Cursor: "msg_other", CodexCheckpoint: first.CodexCheckpoint}); got != want {
+		t.Fatalf("progress after conflicts = %+v, want %+v", got, want)
+	}
+
+	// A closed session still takes its last interval's progress.
+	if err := store.Close(info.ID); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if err := mgr.CommitInvocationUsageProgress(info.ID, got, stale); err != nil {
+		t.Fatalf("commit on closed session: %v", err)
+	}
+	if got, err := mgr.InvocationUsageProgress(info.ID); err != nil || got != stale {
+		t.Fatalf("closed-session progress = %+v, %v; want %+v", got, err, stale)
+	}
+
+	if err := mgr.CommitInvocationUsageProgress("", start, first); err == nil {
+		t.Fatal("empty session id must be an error")
+	}
+}

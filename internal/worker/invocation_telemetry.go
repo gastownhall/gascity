@@ -625,13 +625,13 @@ func usagesSinceCursor(usages []sessionlog.TailUsage, cursor string) []sessionlo
 //     SweepSessionModelUsage and SweepSessionModelUsageAtPath share
 //     sweepResolvedTranscript, which reads the cursor from session-bead
 //     metadata.
-//   - codex: still the fixed 64KB tail, and still silently lossy.
-//     SessionLogAdapter.CodexTailUsage accepts the cursor and discards it, so a
-//     very long autonomous interval recovers only its final few invocations and
-//     the earlier model/cost facts of that interval are lost with no log line.
-//     Widening it needs its own correctness argument rather than this one: the
-//     codex extractor collapses on cumulative totals rather than per-message
-//     identity, so the cursor is not a usable stop condition there.
+//   - codex: no window. codexUsagePass reads the rollout forward from the
+//     checkpoint committed on the session bead
+//     (session.MetadataKeyCodexUsageCheckpoint, mirroring the flat cursor), in
+//     pages bounded by bytes and invocations, and commits after the last
+//     invocation recorded. A backlog larger than one page is drained over
+//     later passes, each reported unsettled until the rollout's end is
+//     reached, so no invocation is lost to the size of the gap.
 //
 // Neither risk the old blanket "do not widen" ceiling cited survives
 // cursor-bounded growth, which is why claude was widened. The scan is not
@@ -817,7 +817,22 @@ func (f *Factory) SweepSessionModelUsageAtPath(ctx context.Context, id string, m
 // sweepResolvedTranscript owns the post-discovery model-usage sweep shared by
 // the discovery-driven and already-resolved entry points.
 func (f *Factory) sweepResolvedTranscript(ctx context.Context, family, id string, meta map[string]string, path string, now time.Time) (emitted int, settled bool, err error) {
-	sink := f.usageSink
+	emit := f.sweepUsageEmitter(ctx, family, id, meta, now)
+	if family == "codex" {
+		// Codex reads its rollout forward from the session's checkpoint, so a
+		// backlog of any depth drains over bounded passes instead of being cut
+		// to the newest tail.
+		notBefore, _ := sweepIntervalWindow(meta, now)
+		return codexUsagePass{
+			manager:   f.manager,
+			adapter:   f.Adapter(),
+			limits:    f.codexUsageLimits,
+			id:        id,
+			path:      path,
+			emitFloor: codexUsageEmitFloor(notBefore),
+			record:    emit,
+		}.run(ctx)
+	}
 	// Read the cursor BEFORE extracting: it bounds how far back the scan
 	// window must reach, so a sweep that falls more than one window behind
 	// still recovers the whole backlog instead of the tail's last few entries.
@@ -834,34 +849,9 @@ func (f *Factory) sweepResolvedTranscript(ctx context.Context, family, id string
 		// Swept: the transcript was read and the cursor is already current.
 		return 0, true, nil
 	}
-	registry := f.pricing
-	if registry == nil {
-		registry = defaultPricingRegistry()
-	}
-	workerName := strings.TrimSpace(meta["session_name"])
-	agentName := sweepAgentName(meta)
-	formulaName := resolveFormulaName(f.resolveBead, f.formulaMemo, meta, id)
 	lastRecorded := ""
 	for _, u := range pending {
-		cost, priced := invocationCost(registry, family, u)
-		// Mirror the prompt-op seam's OTel metrics so the agents this sweep recovers
-		// facts for also get live gc.agent.tokens.* / cost series — the family keys
-		// the label identically to the emitted fact's Provider so metrics and facts
-		// agree. Metrics fire before the sink write: they must be recorded even if the
-		// sink Record below fails.
-		labels := telemetry.InvocationLabels{
-			AgentName: agentName,
-			Model:     u.Model,
-			Provider:  family,
-		}
-		telemetry.RecordInvocationTokens(ctx, labels,
-			int64(u.InputTokens), int64(u.OutputTokens),
-			int64(u.CacheReadTokens), int64(u.CacheCreationTokens))
-		if priced {
-			telemetry.RecordInvocationCostEstimate(ctx, labels, cost)
-		}
-		fact := modelUsageFact(u, meta, id, id, workerName, family, cost, priced, now, formulaName)
-		if recErr := sink.Record(ctx, fact); recErr != nil {
+		if recErr := emit(u); recErr != nil {
 			// Stop at the first failure and advance the cursor only through the last
 			// success, so the next sweep resumes here instead of skipping the gap.
 			err = recErr
@@ -881,6 +871,40 @@ func (f *Factory) sweepResolvedTranscript(ctx context.Context, family, id string
 	// remainder — the cursor advanced only through the last success, and the
 	// IdempotencyKey collapses any already-recorded fact on the retry.
 	return emitted, err == nil, err
+}
+
+// sweepUsageEmitter returns the sweep's per-invocation emit: the live
+// gc.agent.tokens.* / cost metrics, then the usage fact into the factory's
+// sink. Its error is the sink's.
+func (f *Factory) sweepUsageEmitter(ctx context.Context, family, id string, meta map[string]string, now time.Time) func(sessionlog.TailUsage) error {
+	sink := f.usageSink
+	registry := f.pricing
+	if registry == nil {
+		registry = defaultPricingRegistry()
+	}
+	workerName := strings.TrimSpace(meta["session_name"])
+	agentName := sweepAgentName(meta)
+	formulaName := resolveFormulaName(f.resolveBead, f.formulaMemo, meta, id)
+	return func(u sessionlog.TailUsage) error {
+		cost, priced := invocationCost(registry, family, u)
+		// Mirror the prompt-op seam's OTel metrics so the agents this sweep recovers
+		// facts for also get live gc.agent.tokens.* / cost series — the family keys
+		// the label identically to the emitted fact's Provider so metrics and facts
+		// agree. Metrics fire before the sink write: they must be recorded even if the
+		// sink Record below fails.
+		labels := telemetry.InvocationLabels{
+			AgentName: agentName,
+			Model:     u.Model,
+			Provider:  family,
+		}
+		telemetry.RecordInvocationTokens(ctx, labels,
+			int64(u.InputTokens), int64(u.OutputTokens),
+			int64(u.CacheReadTokens), int64(u.CacheCreationTokens))
+		if priced {
+			telemetry.RecordInvocationCostEstimate(ctx, labels, cost)
+		}
+		return sink.Record(ctx, modelUsageFact(u, meta, id, id, workerName, family, cost, priced, now, formulaName))
+	}
 }
 
 // discoverSweepTranscript resolves the transcript for the end-of-interval model

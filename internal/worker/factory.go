@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/usage"
 )
 
@@ -86,6 +87,9 @@ type Factory struct {
 	// builds — so per-request handles do not each re-derive an unchanged
 	// mirror's activity.
 	activityMemo *DerivedActivityMemo
+	// codexUsageLimits bounds each codex usage recorder pass; zero fields take
+	// the sessionlog defaults.
+	codexUsageLimits sessionlog.CodexUsagePageLimits
 }
 
 // NewFactory constructs a Factory backed by a session.Manager configured for

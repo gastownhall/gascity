@@ -2,6 +2,7 @@ package worker
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -155,6 +156,15 @@ func (a SessionLogAdapter) TailUsage(path, cursorID string) ([]sessionlog.TailUs
 func (a SessionLogAdapter) CodexTailUsage(path, cursorID string) ([]sessionlog.TailUsage, error) {
 	_ = cursorID
 	return sessionlog.ExtractCodexTailUsageFromSearchPaths(a.SearchPaths, path)
+}
+
+// CodexUsagePage reads one bounded forward page of a codex rollout's usage
+// from req.From (sessionlog.ReadCodexUsagePage). Validation merges the codex
+// default roots on top of the configured search paths, as CodexTailUsage does;
+// req.SearchPaths is replaced by the adapter's.
+func (a SessionLogAdapter) CodexUsagePage(ctx context.Context, req sessionlog.CodexUsagePageRequest) (sessionlog.CodexUsagePage, error) {
+	req.SearchPaths = append([]string(nil), a.SearchPaths...)
+	return sessionlog.ReadCodexUsagePage(ctx, req)
 }
 
 // OpenCodeTailUsage reads per-invocation token usage from a mirrored OpenCode

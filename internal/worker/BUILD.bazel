@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "activity_memo.go",
         "catalog.go",
+        "codex_usage_recorder.go",
         "factory.go",
         "factory_resolved.go",
         "formula_name_memo.go",
@@ -71,6 +72,7 @@ go_test(
         "actor_helpers_test.go",
         "codex_history_metadata_test.go",
         "codex_usage_attach_test.go",
+        "codex_usage_recorder_test.go",
         "factory_deferred_submits_test.go",
         "factory_resolved_test.go",
         "factory_test.go",

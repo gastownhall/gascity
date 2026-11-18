@@ -893,8 +893,10 @@ func TestFactorySweepSessionModelUsageKeylessCodexDiscoversByWorkdir(t *testing.
 		"gc.active_work_bead": "run-Z.step-1",
 		// NB: NO session_key — the whole point of Design B.
 	}
+	// The recorder reads and commits usage progress on the session bead.
+	sessionID := newCodexSweepSessionBead(t, store, meta)
 	now := slept.Add(time.Minute)
-	emitted, settled, err := factory.SweepSessionModelUsage(context.Background(), "gcg-codex-wisp-1", meta, now)
+	emitted, settled, err := factory.SweepSessionModelUsage(context.Background(), sessionID, meta, now)
 	if err != nil {
 		t.Fatalf("SweepSessionModelUsage: %v", err)
 	}
@@ -1385,10 +1387,12 @@ func TestFactorySweepSessionModelUsageKeylessCodexDirtyScanRetries(t *testing.T)
 		"molecule_id":         "run-Z",
 		"gc.active_work_bead": "run-Z.step-1",
 	}
+	// The recorder reads and commits usage progress on the session bead.
+	sessionID := newCodexSweepSessionBead(t, store, meta)
 	now := slept.Add(time.Minute)
 
 	// Tick 1: dirty scan → transient miss, NOT settled.
-	emitted, settled, err := factory.SweepSessionModelUsage(context.Background(), "gcg-codex-wisp-1", meta, now)
+	emitted, settled, err := factory.SweepSessionModelUsage(context.Background(), sessionID, meta, now)
 	if err != nil {
 		t.Fatalf("SweepSessionModelUsage (dirty tick): %v", err)
 	}
@@ -1403,7 +1407,7 @@ func TestFactorySweepSessionModelUsageKeylessCodexDirtyScanRetries(t *testing.T)
 	if err := os.Chmod(dayDir, 0o755); err != nil {
 		t.Fatalf("restore chmod: %v", err)
 	}
-	emitted2, settled2, err := factory.SweepSessionModelUsage(context.Background(), "gcg-codex-wisp-1", meta, now)
+	emitted2, settled2, err := factory.SweepSessionModelUsage(context.Background(), sessionID, meta, now)
 	if err != nil {
 		t.Fatalf("SweepSessionModelUsage (clean tick): %v", err)
 	}
@@ -1474,11 +1478,13 @@ func TestFactorySweepSessionModelUsageKeylessCodexDirtySingletonRetries(t *testi
 		"molecule_id":         "run-Z",
 		"gc.active_work_bead": "run-Z.step-1",
 	}
+	// The recorder reads and commits usage progress on the session bead.
+	sessionID := newCodexSweepSessionBead(t, store, meta)
 	now := slept.Add(time.Minute)
 
 	// Tick 1: one visible match, but the sealed sibling clouds the scan → the
 	// singleton is non-definitive, so mint nothing and do NOT settle.
-	emitted, settled, err := factory.SweepSessionModelUsage(context.Background(), "gcg-codex-wisp-1", meta, now)
+	emitted, settled, err := factory.SweepSessionModelUsage(context.Background(), sessionID, meta, now)
 	if err != nil {
 		t.Fatalf("SweepSessionModelUsage (dirty singleton tick): %v", err)
 	}
@@ -1497,7 +1503,7 @@ func TestFactorySweepSessionModelUsageKeylessCodexDirtySingletonRetries(t *testi
 	if err := os.Chmod(sealed, 0o644); err != nil {
 		t.Fatalf("restore chmod: %v", err)
 	}
-	emitted2, settled2, err := factory.SweepSessionModelUsage(context.Background(), "gcg-codex-wisp-1", meta, now)
+	emitted2, settled2, err := factory.SweepSessionModelUsage(context.Background(), sessionID, meta, now)
 	if err != nil {
 		t.Fatalf("SweepSessionModelUsage (clean tick): %v", err)
 	}
@@ -1840,4 +1846,22 @@ func TestFactorySweepClosedIntervalModelUsageClaudeReadsTheIntervalKey(t *testin
 	if emitted, settled, err := factory.SweepClosedIntervalModelUsage(context.Background(), id, interval, time.Unix(3, 0).UTC()); err != nil || !settled || emitted != 0 {
 		t.Fatalf("keyless interval = %d, settled %t, %v; want nothing recorded and settled", emitted, settled, err)
 	}
+}
+
+// newCodexSweepSessionBead creates the session bead a codex sweep commits its
+// usage progress on, returning its id. The retired gc.active_work_bead pointer
+// the sweep meta still carries is not a session row field, so the row omits it.
+func newCodexSweepSessionBead(t *testing.T, store beads.Store, meta map[string]string) string {
+	t.Helper()
+	row := make(map[string]string, len(meta))
+	for k, v := range meta {
+		if k != "gc.active_work_bead" {
+			row[k] = v
+		}
+	}
+	b, err := store.Create(beads.Bead{Title: "codex", Type: sessionpkg.BeadType, Labels: []string{sessionpkg.LabelSession}, Metadata: row})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	return b.ID
 }

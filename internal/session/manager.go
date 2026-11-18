@@ -2577,6 +2577,81 @@ func (m *Manager) PersistInvocationUsageCursor(id, cursor string) error {
 	})
 }
 
+// MetadataKeyCodexUsageCheckpoint stores the forward-read checkpoint of a
+// Codex session's rollout (sessionlog.CodexUsageCheckpoint, encoded): where
+// usage accounting stopped and the parser context before it. It is committed
+// with MetadataKeyInvocationUsageCursor through
+// CommitInvocationUsageProgress, and mirrors that cursor so a cursor another
+// writer moved invalidates it.
+const MetadataKeyCodexUsageCheckpoint = "codex_usage_checkpoint"
+
+// InvocationUsageProgress is a session's invocation-usage accounting state:
+// the flat cursor every family keeps and, for Codex, the encoded rollout
+// checkpoint.
+type InvocationUsageProgress struct {
+	Cursor          string
+	CodexCheckpoint string
+}
+
+// ErrInvocationUsageProgressConflict reports that a session's usage progress
+// changed between the read a commit was based on and the commit.
+var ErrInvocationUsageProgressConflict = errors.New("invocation usage progress changed concurrently")
+
+// InvocationUsageProgress reads a session's usage progress from the store.
+// A closed session is accepted, as for PersistInvocationUsageCursor.
+func (m *Manager) InvocationUsageProgress(id string) (InvocationUsageProgress, error) {
+	b, _, err := m.loadSessionBead(id, true)
+	if err != nil {
+		return InvocationUsageProgress{}, err
+	}
+	return invocationUsageProgressOf(b.Metadata), nil
+}
+
+func invocationUsageProgressOf(meta map[string]string) InvocationUsageProgress {
+	return InvocationUsageProgress{
+		Cursor:          strings.TrimSpace(meta[MetadataKeyInvocationUsageCursor]),
+		CodexCheckpoint: strings.TrimSpace(meta[MetadataKeyCodexUsageCheckpoint]),
+	}
+}
+
+// CommitInvocationUsageProgress replaces a session's usage progress with next
+// when it still equals expect, the progress the caller's read started from.
+// Both keys are written in one batch under the session mutation lock, so a
+// cursor and the checkpoint that mirrors it never land apart. Progress that
+// moved since expect returns ErrInvocationUsageProgressConflict and writes
+// nothing; the caller rereads and retries. A closed session is accepted.
+func (m *Manager) CommitInvocationUsageProgress(id string, expect, next InvocationUsageProgress) error {
+	if id == "" {
+		return fmt.Errorf("committing invocation usage progress: empty session id")
+	}
+	next.Cursor = strings.TrimSpace(next.Cursor)
+	next.CodexCheckpoint = strings.TrimSpace(next.CodexCheckpoint)
+	return withSessionMutationLock(id, func() error {
+		b, _, err := m.loadSessionBead(id, true)
+		if err != nil {
+			return err
+		}
+		current := invocationUsageProgressOf(b.Metadata)
+		if current != expect {
+			return fmt.Errorf("%w: session %s", ErrInvocationUsageProgressConflict, id)
+		}
+		batch := map[string]string{}
+		if next.Cursor != current.Cursor {
+			batch[MetadataKeyInvocationUsageCursor] = next.Cursor
+		}
+		if next.CodexCheckpoint != current.CodexCheckpoint {
+			batch[MetadataKeyCodexUsageCheckpoint] = next.CodexCheckpoint
+		}
+		if len(batch) == 0 {
+			return nil
+		}
+		if err := m.store.SetMetadataBatch(id, batch); err != nil {
+			return fmt.Errorf("storing invocation usage progress: %w", err)
+		}
+		return nil
+	})
+}
+
 // sessionNameFor derives the tmux session name from a bead ID.
 // Uses the "s-" prefix to avoid collision with agent sessions.
 func sessionNameFor(beadID string) string {
