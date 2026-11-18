@@ -33,13 +33,14 @@ var Analyzer = New(Config{
 		},
 	},
 	// The release primitives (R9 REL): every release path goes through
-	// ReleaseClaims, whose body (releaseListed) hands each claim to
-	// releaseServed, which alone names the release writes; the rest is their
-	// own layering.
+	// ReleaseClaims, whose body (releaseListed) hands each claim, past its
+	// route guard, to releaseServed, which alone names the release writes; the
+	// rest is their own layering.
 	Releases: map[string]map[string]string{
 		"workAssignment.ReleaseWorkBead":         {"releaseServed": "the verb's release of one claim"},
 		"workAssignment.ReleaseDetachedWorkBead": {"releaseServed": "the verb's release of one claim carrying gc.detached, clearing it in the release write"},
 		"releaseOrphanedPoolAssignment":          {"releaseServed": "the verb's release of one claim (the orphan write)"},
+		"releaseServed":                          {"releaseListed": "the verb's body, past its route guard"},
 		"workAssignment.releaseWorkBead": {
 			"workAssignment.ReleaseWorkBead":         "its body",
 			"workAssignment.ReleaseDetachedWorkBead": "its body, clearing gc.detached in the release write",
@@ -55,6 +56,7 @@ var Analyzer = New(Config{
 		"releaseAssignmentFenced": {
 			"workAssignment.releaseWorkBead":   "its fenced tier",
 			"workAssignment.ReassignWorkBead":  "a reassignment's fenced write, not a release",
+			"seatHandover.handOver":            "a seat hand-over's fenced reassignment, not a release",
 			"releasePoolAssignmentWithRecheck": "its fenced write",
 		},
 	},
