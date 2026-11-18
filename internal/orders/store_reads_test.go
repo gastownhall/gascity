@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/convergence"
 )
@@ -154,7 +155,7 @@ func TestRecentRunsAllOpenRunsUseLiveTier(t *testing.T) {
 	// The stale sweep clears the gate OpenRuns holds, so it must see the same
 	// Live set, not the cache snapshot.
 	spy.queries = nil
-	if _, err := st.StaleOpenRuns(time.Now().Add(time.Hour)); err != nil {
+	if _, err := st.StaleOpenRuns(time.Now().Add(time.Hour), time.Now()); err != nil {
 		t.Fatalf("StaleOpenRuns(): %v", err)
 	}
 	assertAllLive(t, "StaleOpenRuns", spy.queries)
@@ -164,7 +165,7 @@ func TestRecentRunsAllOpenRunsUseLiveTier(t *testing.T) {
 	assertSweepQueryShape(t, "StaleOpenRuns", spy.queries, "open", "in_progress")
 
 	spy.queries = nil
-	if _, err := st.StaleNotClosedRuns(time.Now().Add(time.Hour)); err != nil {
+	if _, err := st.StaleNotClosedRuns(time.Now().Add(time.Hour), time.Now()); err != nil {
 		t.Fatalf("StaleNotClosedRuns(): %v", err)
 	}
 	assertAllLive(t, "StaleNotClosedRuns", spy.queries)
@@ -173,7 +174,7 @@ func TestRecentRunsAllOpenRunsUseLiveTier(t *testing.T) {
 	assertSweepQueryShape(t, "StaleNotClosedRuns", spy.queries, "")
 
 	spy.queries = nil
-	if _, err := st.OrphanedOpenRuns(); err != nil {
+	if _, err := st.OrphanedOpenRuns(time.Now()); err != nil {
 		t.Fatalf("OrphanedOpenRuns(): %v", err)
 	}
 	assertAllLive(t, "OrphanedOpenRuns", spy.queries)
@@ -418,7 +419,7 @@ func TestStaleOpenRunsCutoff(t *testing.T) {
 	st := NewStore(beads.OrdersStore{Store: mem})
 
 	// cutoff after the bead's creation → stale.
-	stale, err := st.StaleOpenRuns(old.CreatedAt.Add(time.Hour))
+	stale, err := st.StaleOpenRuns(old.CreatedAt.Add(time.Hour), time.Now())
 	if err != nil {
 		t.Fatalf("StaleOpenRuns(): %v", err)
 	}
@@ -426,7 +427,7 @@ func TestStaleOpenRunsCutoff(t *testing.T) {
 		t.Fatalf("StaleOpenRuns(after) = %+v, want the old run", stale)
 	}
 	// cutoff before the bead's creation → not stale.
-	fresh, err := st.StaleOpenRuns(old.CreatedAt.Add(-time.Hour))
+	fresh, err := st.StaleOpenRuns(old.CreatedAt.Add(-time.Hour), time.Now())
 	if err != nil {
 		t.Fatalf("StaleOpenRuns(): %v", err)
 	}
@@ -463,14 +464,14 @@ func TestStaleNotClosedRunsListsEveryNotClosedStatusAtOrBeforeCutoff(t *testing.
 	st := ordersStoreOver(beads.NewMemStoreFrom(len(seed), seed, nil))
 	cutoff := base.Add(5 * time.Minute)
 
-	stale, err := st.StaleNotClosedRuns(cutoff)
+	stale, err := st.StaleNotClosedRuns(cutoff, time.Now())
 	if err != nil {
 		t.Fatalf("StaleNotClosedRuns(): %v", err)
 	}
 	if got, want := runIDs(stale), []string{"gc-open", "gc-claimed", "gc-parked", "gc-marker"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("StaleNotClosedRuns() IDs = %v, want every not-closed bead at or before the cutoff, oldest-first %v", got, want)
 	}
-	bounded, err := st.StaleOpenRuns(cutoff)
+	bounded, err := st.StaleOpenRuns(cutoff, time.Now())
 	if err != nil {
 		t.Fatalf("StaleOpenRuns(): %v", err)
 	}
@@ -486,9 +487,9 @@ func TestSweepReadersOverAZeroHandleListNothing(t *testing.T) {
 	st := NewStore(beads.OrdersStore{})
 	cutoff := time.Now()
 	for name, read := range map[string]func() ([]OrderRun, error){
-		"StaleOpenRuns":      func() ([]OrderRun, error) { return st.StaleOpenRuns(cutoff) },
-		"StaleNotClosedRuns": func() ([]OrderRun, error) { return st.StaleNotClosedRuns(cutoff) },
-		"OrphanedOpenRuns":   st.OrphanedOpenRuns,
+		"StaleOpenRuns":      func() ([]OrderRun, error) { return st.StaleOpenRuns(cutoff, time.Now()) },
+		"StaleNotClosedRuns": func() ([]OrderRun, error) { return st.StaleNotClosedRuns(cutoff, time.Now()) },
+		"OrphanedOpenRuns":   func() ([]OrderRun, error) { return st.OrphanedOpenRuns(cutoff) },
 	} {
 		if runs, err := read(); runs != nil || err != nil {
 			t.Errorf("%s over a zero handle = (%v, %v), want (nil, nil)", name, runs, err)
@@ -506,12 +507,54 @@ func TestOrphanedOpenRunsExcludesTriggerEnvFailed(t *testing.T) {
 	if _, err := mem.Create(beads.Bead{Title: "order:b", Labels: []string{"order-run:b", "order-tracking", "trigger-env-failed"}}); err != nil {
 		t.Fatal(err)
 	}
-	runs, err := NewStore(beads.OrdersStore{Store: mem}).OrphanedOpenRuns()
+	runs, err := NewStore(beads.OrdersStore{Store: mem}).OrphanedOpenRuns(time.Now())
 	if err != nil {
 		t.Fatalf("OrphanedOpenRuns(): %v", err)
 	}
 	if len(runs) != 1 || runs[0].Scoped != "a" {
 		t.Fatalf("OrphanedOpenRuns() = %+v, want only a (trigger-env-failed excluded)", runs)
+	}
+}
+
+func TestTrackingSweepRespectsDispatchDeadline(t *testing.T) {
+	now := time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name     string
+		deadline string
+		outcome  RunOutcome
+		wantRuns int
+		wantErr  bool
+	}{
+		{name: "live", deadline: now.Add(time.Hour).Format(time.RFC3339Nano)},
+		{name: "cleanup grace", deadline: now.Add(-30 * time.Second).Format(time.RFC3339Nano)},
+		{name: "grace boundary", deadline: now.Add(-dispatchCompletionGrace).Format(time.RFC3339Nano), wantRuns: 1},
+		{name: "expired", deadline: now.Add(-time.Hour).Format(time.RFC3339Nano), wantRuns: 1},
+		{name: "legacy", wantRuns: 1},
+		{name: "outcome persisted", deadline: now.Add(time.Hour).Format(time.RFC3339Nano), outcome: RunOutcomeExec, wantRuns: 1},
+		{name: "malformed", deadline: "not-a-deadline", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mem := beads.NewMemStore()
+			b, err := mem.Create(beads.Bead{
+				Title: "order:long-suite", Labels: baseLabels("long-suite", tc.outcome),
+				Metadata: map[string]string{beadmeta.OrderDispatchDeadlineMetadataKey: tc.deadline},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A fresh front door models a sweep in a different process: only the
+			// persisted record can protect the run, not an in-memory dispatch map.
+			st := NewStore(beads.OrdersStore{Store: mem})
+			for name, read := range map[string]func() ([]OrderRun, error){
+				"stale":    func() ([]OrderRun, error) { return st.StaleOpenRuns(b.CreatedAt, now) },
+				"orphaned": func() ([]OrderRun, error) { return st.OrphanedOpenRuns(now) },
+			} {
+				runs, err := read()
+				if (err != nil) != tc.wantErr || len(runs) != tc.wantRuns {
+					t.Errorf("%s sweep = (%+v, %v), want %d runs, error=%t", name, runs, err, tc.wantRuns, tc.wantErr)
+				}
+			}
+		})
 	}
 }
 
@@ -573,7 +616,7 @@ func primedCacheWithBackingOnlyTracking(t *testing.T) (*beads.CachingStore, bead
 func TestStaleOpenRunsBypassesCache(t *testing.T) {
 	cache, written := primedCacheWithBackingOnlyTracking(t)
 
-	runs, err := ordersStoreOver(cache).StaleOpenRuns(time.Now().Add(time.Hour))
+	runs, err := ordersStoreOver(cache).StaleOpenRuns(time.Now().Add(time.Hour), time.Now())
 	if err != nil {
 		t.Fatalf("StaleOpenRuns(): %v", err)
 	}
@@ -587,7 +630,7 @@ func TestStaleOpenRunsBypassesCache(t *testing.T) {
 func TestStaleNotClosedRunsBypassesCache(t *testing.T) {
 	cache, written := primedCacheWithBackingOnlyTracking(t)
 
-	runs, err := ordersStoreOver(cache).StaleNotClosedRuns(time.Now().Add(time.Hour))
+	runs, err := ordersStoreOver(cache).StaleNotClosedRuns(time.Now().Add(time.Hour), time.Now())
 	if err != nil {
 		t.Fatalf("StaleNotClosedRuns(): %v", err)
 	}
@@ -606,7 +649,7 @@ func TestOrphanedOpenRunsBypassesCache(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	runs, err := ordersStoreOver(cache).OrphanedOpenRuns()
+	runs, err := ordersStoreOver(cache).OrphanedOpenRuns(time.Now())
 	if err != nil {
 		t.Fatalf("OrphanedOpenRuns(): %v", err)
 	}
@@ -646,21 +689,21 @@ func TestSweepReadsOldestFirst(t *testing.T) {
 	want := []string{"gc-c", "gc-a", "gc-b", "gc-f", "gc-d", "gc-e"}
 	st := ordersStoreOver(beads.NewMemStoreFrom(len(seed), seed, nil))
 
-	stale, err := st.StaleOpenRuns(time.Now())
+	stale, err := st.StaleOpenRuns(time.Now(), time.Now())
 	if err != nil {
 		t.Fatalf("StaleOpenRuns(): %v", err)
 	}
 	if got := runIDs(stale); !reflect.DeepEqual(got, want) {
 		t.Errorf("StaleOpenRuns() IDs = %v, want oldest-first %v", got, want)
 	}
-	notClosed, err := st.StaleNotClosedRuns(time.Now())
+	notClosed, err := st.StaleNotClosedRuns(time.Now(), time.Now())
 	if err != nil {
 		t.Fatalf("StaleNotClosedRuns(): %v", err)
 	}
 	if got := runIDs(notClosed); !reflect.DeepEqual(got, want) {
 		t.Errorf("StaleNotClosedRuns() IDs = %v, want oldest-first %v", got, want)
 	}
-	orphaned, err := st.OrphanedOpenRuns()
+	orphaned, err := st.OrphanedOpenRuns(time.Now())
 	if err != nil {
 		t.Fatalf("OrphanedOpenRuns(): %v", err)
 	}
@@ -689,15 +732,15 @@ func TestSweepReadsKeepInProgressAndExcludeClosed(t *testing.T) {
 	openBead, inProgress, closedBead := mk("open"), mk("in_progress"), mk("closed")
 	st := ordersStoreOver(mem)
 
-	stale, err := st.StaleOpenRuns(time.Now().Add(time.Hour))
+	stale, err := st.StaleOpenRuns(time.Now().Add(time.Hour), time.Now())
 	if err != nil {
 		t.Fatalf("StaleOpenRuns(): %v", err)
 	}
-	notClosed, err := st.StaleNotClosedRuns(time.Now().Add(time.Hour))
+	notClosed, err := st.StaleNotClosedRuns(time.Now().Add(time.Hour), time.Now())
 	if err != nil {
 		t.Fatalf("StaleNotClosedRuns(): %v", err)
 	}
-	orphaned, err := st.OrphanedOpenRuns()
+	orphaned, err := st.OrphanedOpenRuns(time.Now())
 	if err != nil {
 		t.Fatalf("OrphanedOpenRuns(): %v", err)
 	}
@@ -748,7 +791,7 @@ func TestStaleOpenRunsListsABeadClaimedBetweenItsReadsOnce(t *testing.T) {
 	}
 	st := ordersStoreOver(&claimAfterFirstReadStore{Store: mem, claim: b.ID})
 
-	runs, err := st.StaleOpenRuns(time.Now().Add(time.Hour))
+	runs, err := st.StaleOpenRuns(time.Now().Add(time.Hour), time.Now())
 	if err != nil {
 		t.Fatalf("StaleOpenRuns(): %v", err)
 	}

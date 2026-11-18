@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
@@ -58,6 +59,29 @@ func TestCreateRunWithTriggerEnvFailedOutcome(t *testing.T) {
 	wantLabels := []string{"order-run:rig/agent", "order-tracking", "trigger-env-failed"}
 	if !reflect.DeepEqual(got.Labels, wantLabels) {
 		t.Errorf("labels = %v, want %v", got.Labels, wantLabels)
+	}
+}
+
+func TestCreateRunPersistsDeadlineAtCreation(t *testing.T) {
+	st, rec := recordingOrdersStore()
+	deadline := time.Date(2026, 10, 28, 18, 0, 0, 123, time.UTC)
+	run, err := st.CreateRun("long-suite", RunOpts{Deadline: deadline})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := rec.CallsForOp("Create")
+	if len(created) != 1 || created[0].Bead.Metadata[beadmeta.OrderDispatchDeadlineMetadataKey] != deadline.Format(time.RFC3339Nano) {
+		t.Fatalf("creation must carry dispatch deadline atomically: %+v", created)
+	}
+	if len(rec.CallsForOp("SetMetadata")) != 0 {
+		t.Fatal("deadline must not be a separate post-creation write")
+	}
+	b, err := st.store.Get(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := b.Metadata[beadmeta.OrderDispatchDeadlineMetadataKey]; got != deadline.Format(time.RFC3339Nano) {
+		t.Errorf("persisted deadline = %q, want %s", got, deadline.Format(time.RFC3339Nano))
 	}
 }
 
