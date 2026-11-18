@@ -1307,6 +1307,7 @@ go_test(
         "cmd_doctor_drift_test.go",
         "cmd_doctor_extract_test.go",
         "cmd_doctor_json_ok_test.go",
+        "cmd_doctor_live_sessions_test.go",
         "cmd_doctor_local_test.go",
         "cmd_doctor_order_firing_test.go",
         "cmd_doctor_order_outcome_test.go",
