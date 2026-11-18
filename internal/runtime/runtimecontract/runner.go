@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
+	"github.com/gastownhall/gascity/internal/runtime/runtimecontract/privatecity"
 )
 
 // Options tune a conformance run. The zero value is CI-ready.
@@ -61,17 +62,16 @@ func (o *Options) applyDefaults() {
 	}
 }
 
-// cityPathEnv names the city path gc sets on every op it runs.
-const cityPathEnv = "GC_EXEC_CITY_PATH"
-
 // Run validates the executable against the full conformance catalog and
 // returns a per-requirement report. Every op runs in a city, as gc's own ops
 // do: the inherited GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH when
-// GC_EXEC_CITY_PATH is set, otherwise a private city (privateCity) removed
-// when Run returns, after server-stop there for an executable declaring
-// server-lifecycle. It returns an error only when the run cannot start at
-// all (executable not resolvable, or no private city can be made); contract
-// violations are recorded as failed results, never as errors.
+// GC_EXEC_CITY_PATH is set, otherwise a private city removed when Run
+// returns. Every private city the run makes, its own and its probes', is
+// sent server-stop before it is removed when the executable declares
+// server-lifecycle (a failed one is a Warning). It returns an error only
+// when the run cannot start at all (executable not resolvable, or no
+// private city can be made); contract violations are recorded as failed
+// results, never as errors.
 //
 // Run emits exactly one [Result] per [Catalog] requirement, in catalog
 // order (enforced by TestRunCoversEveryCatalogRequirement).
@@ -92,16 +92,13 @@ func run(ctx context.Context, executable string, opts Options, selected func(Cod
 	}
 	r := &runner{path: path, opts: opts}
 	report := Report{Executable: path}
-	if execenv.Getenv(cityPathEnv) == "" {
-		city, removeCity, err := privateCity()
+	if !privatecity.Inherited() {
+		city, removeCity, err := privatecity.New(privateCityPrefix)
 		if err != nil {
 			return Report{}, fmt.Errorf("running %s outside a city: %w", executable, err)
 		}
 		defer removeCity()
 		r.city = city
-		// A closure: report.Protocol is read when the run ends, after the
-		// handshake set it.
-		defer func() { endPrivateServer(ctx, r, report.Protocol) }()
 	}
 
 	// Resolve the handshake once; capability-gated probes consult it.
@@ -128,6 +125,10 @@ func run(ctx context.Context, executable string, opts Options, selected func(Cod
 		}
 	}
 	report.V2Ready = len(report.V2Missing) == 0 && len(report.V2Failed) == 0
+	if r.city != nil {
+		endServer(ctx, r, report.Protocol, nil)
+	}
+	report.Warnings = r.warnings
 	return report, nil
 }
 
@@ -136,9 +137,12 @@ type runner struct {
 	path string
 	opts Options
 	// city is the env of the private city every op runs in; nil means every
-	// op runs in the city the run inherited. An op's own env replaces it.
+	// op runs in the city the run inherited. An op's own city keys replace
+	// it.
 	city    []string
 	counter int
+	// warnings collect the run's Report.Warnings.
+	warnings []string
 }
 
 // nextName returns a fresh, unique session name for a probe.
@@ -174,8 +178,8 @@ func (r *runner) opTimeout(ctx context.Context, timeout time.Duration, stdin []b
 
 // opEnv is opTimeout with the run's private city, then env, added to the
 // executable's environment (GC_EXEC_CITY_PATH, GC_RPP_FAULT for the observe
-// group). The last value of a key wins, so a probe's own city replaces the
-// run's, while other keys, a fault among them, add to it.
+// group). The last value of a key wins, so the city keys of a probe's own
+// city replace the run's, while other keys, a fault among them, add to it.
 func (r *runner) opEnv(ctx context.Context, timeout time.Duration, env []string, stdin []byte, args ...string) outcome {
 	var cmdEnv []string
 	if r.city != nil || env != nil {

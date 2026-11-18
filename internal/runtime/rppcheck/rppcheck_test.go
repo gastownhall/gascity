@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/runtimecontract/reference"
 )
 
@@ -1162,5 +1163,145 @@ func TestRun_FromACityRunsThere(t *testing.T) {
 	}
 	if !serverStart {
 		t.Error("the server check's session did not start in a city of its own")
+	}
+}
+
+// lastOpIn returns the last op logged in city, empty for none.
+func lastOpIn(ops []reference.CityOp, city string) string {
+	var last string
+	for _, op := range ops {
+		if op.City == city {
+			last = op.Args
+		}
+	}
+	return last
+}
+
+// Kills an interrupted check run outside a city that removes its private
+// city without the final server-stop, leaving the server a session brought
+// up there keyed to a path that no longer exists: the stop must run on a
+// cancellation-detached context.
+func TestRun_CanceledBareRunSendsServerStopToItsPrivateCity(t *testing.T) {
+	t.Setenv("GC_EXEC_CITY_NAME", "")
+	t.Setenv("GC_EXEC_CITY_PATH", "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Cancel, as a Ctrl-C would, once the first is-running blocks.
+	blocking, release, err := reference.OnFirstOp(outcomeReference(t, map[string]string{
+		"is-running": `exec sleep 30`,
+	}), "is-running", t.TempDir(), cancel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(release)
+	script, opsLog := cityOnly(t, blocking)
+
+	res, err := Run(ctx, script, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Protocol.Has(runtime.ProtocolCapabilityServerLifecycle) {
+		t.Fatalf("handshake %+v does not declare server-lifecycle; the test needs it", res.Protocol)
+	}
+	ops := cityOps(t, opsLog)
+	if len(ops) == 0 || ops[0].City == "" {
+		t.Fatalf("ops = %v, want protocol first, in a private city", ops)
+	}
+	private := ops[0].City
+	if last := lastOpIn(ops, private); last != "server-stop" {
+		t.Errorf("last op in the private city of the canceled run = %q, want server-stop", last)
+	}
+	if _, err := os.Stat(private); !os.IsNotExist(err) {
+		t.Errorf("private city %s after the canceled run: stat err = %v, want it removed", private, err)
+	}
+}
+
+// Kills a check run outside a city whose server checks run in the run's own
+// private city rather than one of their own, as when the run's city is
+// appended after the op's (the last value of a key wins): server-stop there
+// would end the run's sessions too.
+func TestRun_OutsideACityServerChecksUseACityOfTheirOwn(t *testing.T) {
+	t.Setenv("GC_EXEC_CITY_NAME", "")
+	t.Setenv("GC_EXEC_CITY_PATH", "")
+	script, opsLog := cityOnly(t, outcomeReference(t, nil))
+
+	res, err := Run(context.Background(), script, Options{SessionName: "bare"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reportFailures(t, res)
+	ops := cityOps(t, opsLog)
+	if len(ops) == 0 || ops[0].City == "" {
+		t.Fatalf("ops = %v, want protocol first, in a private city", ops)
+	}
+	private := ops[0].City
+	var serverCity string
+	for _, op := range ops {
+		if op.Args == "start bare-server" {
+			serverCity = op.City
+		}
+	}
+	switch serverCity {
+	case "":
+		t.Fatal("the server check's session started in no city")
+	case private:
+		t.Fatalf("the server check's session started in the run's private city %s, want a city of its own", private)
+	}
+	var runStops, serverStops int
+	for _, op := range ops {
+		if op.Args != "server-stop" {
+			continue
+		}
+		switch op.City {
+		case private:
+			runStops++
+		case serverCity:
+			serverStops++
+		}
+	}
+	if runStops != 1 {
+		t.Errorf("server-stops in the run's private city = %d, want 1, the final one", runStops)
+	}
+	if serverStops < 3 {
+		t.Errorf("server-stops in the server checks' city = %d, want the two checked ones and a final one", serverStops)
+	}
+	if last := lastOpIn(ops, serverCity); last != "server-stop" {
+		t.Errorf("last op in the server checks' city = %q, want the final server-stop", last)
+	}
+	if _, err := os.Stat(serverCity); !os.IsNotExist(err) {
+		t.Errorf("server checks' city %s after the run: stat err = %v, want it removed", serverCity, err)
+	}
+}
+
+// Kills a check run that swallows a final server-stop that fails before it
+// removes a private city: the server may still run, keyed to a deleted path,
+// so the run reports it as a warning naming the city.
+func TestRun_FailedFinalServerStopIsAWarning(t *testing.T) {
+	t.Setenv("GC_EXEC_CITY_NAME", "")
+	t.Setenv("GC_EXEC_CITY_PATH", "")
+	script, opsLog := cityOnly(t, outcomeReference(t, map[string]string{
+		"server-stop": `echo "server still up" >&2; exit 1`,
+	}))
+
+	res, err := Run(context.Background(), script, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := cityOps(t, opsLog)
+	if len(ops) == 0 || ops[0].City == "" {
+		t.Fatalf("ops = %v, want protocol first, in a private city", ops)
+	}
+	private := ops[0].City
+	var named bool
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "server-stop in private city "+private+" ") && strings.Contains(w, "server still up") {
+			named = true
+		}
+	}
+	if !named {
+		t.Errorf("warnings %q: want one naming the run's private city %s and server-stop's stderr", res.Warnings, private)
+	}
+	if len(res.Warnings) != 2 {
+		t.Errorf("warnings %q: want 2, the run's city's and the server checks' city's", res.Warnings)
 	}
 }

@@ -8,8 +8,10 @@ package reference
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 )
 
 // The golden reference's observe.v1 op bodies. Every box is the directory
@@ -366,4 +368,35 @@ func ReadCityOps(opsLog string) ([]CityOp, error) {
 		ops = append(ops, CityOp{City: city, Args: args})
 	}
 	return ops, nil
+}
+
+// OnFirstOp writes, into dir, a wrapper around the executable at
+// runtimePath that runs every op through it, stdin passed through, and
+// calls fn once the wrapper first runs op, so a test can act on an op
+// beginning (cancel a run, as a Ctrl-C would) with no polling: the wrapper
+// signals through a FIFO. Call release when the test ends; it unblocks the
+// wait when op never ran.
+func OnFirstOp(runtimePath, op, dir string, fn func()) (wrapper string, release func(), err error) {
+	fifo := filepath.Join(dir, "first-"+op)
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		return "", nil, fmt.Errorf("making the first-op FIFO: %w", err)
+	}
+	wrapper = filepath.Join(dir, "on-first-"+op)
+	script := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = '%s' ] && [ -p '%s' ]; then echo "$1" > '%s'; rm -f '%s'; fi
+exec '%s' "$@"
+`, op, fifo, fifo, fifo, runtimePath)
+	if err := os.WriteFile(wrapper, []byte(script), 0o755); err != nil {
+		return "", nil, fmt.Errorf("writing the first-op wrapper: %w", err)
+	}
+	go func() {
+		_, _ = os.ReadFile(fifo) // blocks until the first op writes, or release
+		fn()
+	}()
+	release = func() {
+		if f, err := os.OpenFile(fifo, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+			_ = f.Close()
+		}
+	}
+	return wrapper, release, nil
 }

@@ -9,6 +9,7 @@ go_library(
         "//internal/execenv",
         "//internal/runtime",
         "//internal/runtime/exec",
+        "//internal/runtime/runtimecontract/privatecity",
     ],
 )
 
@@ -21,6 +22,7 @@ go_test(
     ],
     embed = [":rppcheck"],
     deps = [
+        "//internal/runtime",
         "//internal/runtime/runtimecontract/reference",
         "//internal/testenv",
     ],

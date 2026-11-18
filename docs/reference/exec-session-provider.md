@@ -436,10 +436,14 @@ in one city leaves another city's sessions running, only for a script that
 also declares `city-scoped`). `gc runtime check` runs it twice, the second
 time to check that it is idempotent. Both commands run the op, and the
 sessions they check it against, in a private city of their own:
-`GC_EXEC_CITY_NAME` and `GC_EXEC_CITY_PATH` name a fresh temporary directory,
-never the city the rest of the run uses. A script that does not scope its server by `GC_EXEC_CITY_PATH`
-ends every session the server holds, so check it only against a backend that
-no live city uses.
+`GC_EXEC_CITY_NAME` and `GC_EXEC_CITY_PATH` name a fresh temporary
+directory, never the city the rest of the run uses. The `city-scoped` probes
+use private cities too. Before either command removes a private city, an
+interrupted run included, it sends that city a final `server-stop`, and
+reports one that does not exit 0 as a warning, since the server it was to
+end may still be running. A script that does not scope its server by
+`GC_EXEC_CITY_PATH` ends every session the server holds, so check it only
+against a backend that no live city uses.
 
 ### Typed input outcomes (`input-outcome`)
 
@@ -1353,8 +1357,8 @@ process and remember the answer per version of the file.
 set them on every operation too: to the caller's city when
 `GC_EXEC_CITY_PATH` is set, otherwise, as in a shell outside any city, to a
 private city. That city is a fresh temporary directory, removed when the run
-ends or is interrupted, after `server-stop` there for a script declaring
-`server-lifecycle`. So a script that serves only cities may refuse any
+ends or is interrupted, after a final `server-stop` there for a script
+declaring `server-lifecycle`. So a script that serves only cities may refuse any
 operation but `protocol` that names no city, and still pass both commands.
 
 gc sets `GC_EXEC_DEADLINE_MS` on every operation it runs under a deadline

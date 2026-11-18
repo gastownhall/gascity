@@ -16,6 +16,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/runtimecontract/privatecity"
 )
 
 const (
@@ -36,8 +37,6 @@ const (
 	// concern. The transcripts probe plants in SRC and asserts arrival in DEST.
 	transcriptsSrcEnv  = "GC_TRANSCRIPTS_SRC"
 	transcriptsDestEnv = "GC_TRANSCRIPTS_DEST"
-	// cityPathEnv names the city path gc sets on every op it runs.
-	cityPathEnv = "GC_EXEC_CITY_PATH"
 )
 
 // Options tune a capability run. The zero value is CI-ready.
@@ -66,20 +65,21 @@ func (o *Options) applyDefaults() {
 // Run verifies the runtime's declared env.* capabilities. Every op runs in a
 // city, as gc's own ops do: the inherited GC_EXEC_CITY_NAME and
 // GC_EXEC_CITY_PATH when GC_EXEC_CITY_PATH is set, otherwise a private city
-// (privateCity) removed when Run returns, after server-stop there for a
-// runtime declaring server-lifecycle. It returns an error only when the run
-// cannot start (executable unresolvable, or a fixture dir or private city
-// cannot be made); capability violations are recorded as failed results.
-func Run(ctx context.Context, executable string, opts Options) (Report, error) {
+// removed when Run returns, after server-stop there for a runtime declaring
+// server-lifecycle (a failed one is a Warning). It returns an error only
+// when the run cannot start (executable unresolvable, or a fixture dir or
+// private city cannot be made); capability violations are recorded as
+// failed results.
+func Run(ctx context.Context, executable string, opts Options) (report Report, err error) {
 	path, err := exec.LookPath(executable)
 	if err != nil {
 		return Report{}, fmt.Errorf("resolving executable %q: %w", executable, err)
 	}
 	opts.applyDefaults()
 	r := &runner{path: path, opts: opts}
-	report := Report{Executable: path}
-	if execenv.Getenv(cityPathEnv) == "" {
-		city, removeCity, err := privateCity()
+	report = Report{Executable: path}
+	if !privatecity.Inherited() {
+		city, removeCity, err := privatecity.New("gc-cb-city-")
 		if err != nil {
 			return Report{}, fmt.Errorf("running %s outside a city: %w", executable, err)
 		}
@@ -124,9 +124,14 @@ func Run(ctx context.Context, executable string, opts Options) (Report, error) {
 	}
 	if r.city != nil && hs.Has(runtime.ProtocolCapabilityServerLifecycle) {
 		// As gc does to a city it stops: the server the run's session brought
-		// up in its private city ends with the run, an interrupted one
-		// included. Its outcome is unread; the conformance suite gates it.
-		defer func() { _, _, _ = r.invoke(context.WithoutCancel(ctx), r.opts.OpTimeout, nil, "server-stop") }()
+		// up in its private city ends before the city is removed, an
+		// interrupted run's included. The conformance suite gates the op, so
+		// one that does not exit 0 here is a Warning, not a result.
+		defer func() {
+			if w := r.endServer(ctx); w != "" {
+				report.Warnings = append(report.Warnings, w)
+			}
+		}()
 	}
 
 	// Fixture: a work_dir with a sentinel + a known session identity.
@@ -263,16 +268,18 @@ func (r *runner) opEnv() []string {
 	return env
 }
 
-// privateCity returns the env of a city no live city uses, for a run outside
-// a city: GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH name a fresh temp dir,
-// which remove deletes.
-func privateCity() (env []string, remove func(), err error) {
-	dir, err := os.MkdirTemp("", "gc-cb-city-")
-	if err != nil {
-		return nil, nil, fmt.Errorf("creating a private city: %w", err)
+// endServer sends server-stop to the run's private city on a
+// cancellation-detached context and returns the warning for one that does
+// not exit 0, empty when it does.
+func (r *runner) endServer(ctx context.Context) string {
+	_, code, err := r.invoke(context.WithoutCancel(ctx), r.opts.OpTimeout, nil, "server-stop")
+	if err == nil && code != 0 {
+		err = fmt.Errorf("exit %d", code)
 	}
-	env = []string{"GC_EXEC_CITY_NAME=" + filepath.Base(dir), "GC_EXEC_CITY_PATH=" + dir}
-	return env, func() { _ = os.RemoveAll(dir) }, nil
+	if err != nil {
+		return privatecity.ServerStopWarning(r.city, err)
+	}
+	return ""
 }
 
 // execIn runs a command inside the session via the RPP exec op (command on
