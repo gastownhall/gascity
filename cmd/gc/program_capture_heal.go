@@ -154,6 +154,9 @@ func healProgramCaptureReadings(sp runtime.Provider, programs map[string]runtime
 	var tally programCaptureHealTally
 	var names []string
 	for name, r := range programs {
+		if _, ok := runtime.ProgramCaptureHealerFor(sp, name); !ok {
+			continue
+		}
 		if r.Validity != runtime.ProgramStatusUnread && r.Validity != runtime.ProgramStatusExited {
 			names = append(names, name)
 		}

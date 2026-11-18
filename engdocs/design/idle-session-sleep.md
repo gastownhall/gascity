@@ -510,6 +510,14 @@ probe, abort the idle-sleep attempt for that tick.
   `5s`, because each pane capture is a full round trip to the box and two
   of them cannot reliably fit in `1s`; a timed-out probe fails closed on
   every tick. The v2 effect pass's `provedIdle` uses the same timeout.
+  Exec packs declaring program-status under mode on first take a fresh
+  bounded status read per observation. ProgramIdleVerdict decides only a
+  deciding reading, with no extra activity op. Indeterminate falls back to
+  the pane; a failed read switches to the pane for the rest of the wait.
+  Two consecutive idle observations must have the same source. The 1s
+  status sub-bound and any prompt read share the existing hard deadline;
+  the advertised budget remains 5s, and program-status alone grants no
+  idle boundary.
   The cap means no single idle wait exceeds the bound every other
   effect-fence probe already has; it is not a per-pass bound, because
   `provedIdle` runs after the other fence legs, one after another.

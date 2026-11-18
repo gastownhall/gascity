@@ -25,7 +25,15 @@ var execIdlePollInterval = tmux.IdlePollInterval
 // needs the read while GC_READY_PROMPT_PREFIX is absent. Both figures are
 // break-even ceilings: a round trip of exactly 2.4s (or 1.6s) ends the last
 // observation at the deadline, where it no longer counts (see
-// waitForPaneIdle). A package variable so tests can change it.
+// waitForPaneIdle). With R the prompt read, S a status read bounded to 1s,
+// P a pane read and 0.2s pauses, deciding status twice costs R+2S+0.2.
+// Status idle, failed status, then two pane idles costs R+2S+2P+0.4
+// (uniform trips below 0.92s with R, 1.15s without). A 1s failed read costs
+// R+S+1+2P+0.4 (0.9s/1.2s). Status idle followed by two indeterminate
+// reads and pane idles costs R+3S+2P+0.4 (0.767s/0.92s); two such fallback
+// observations cost R+2S+2P+0.2 (0.96s/1.2s). A first-read hang costs
+// R+1+2P+0.2 (1.27s/1.9s). Reader flapping can exhaust the bound.
+// A package variable so tests can change it.
 var execIdleProbeBudget = 5 * time.Second
 
 // idleBoundaryDeclared reports whether the pack declared everything an idle
@@ -44,6 +52,7 @@ func (p *Provider) idleBoundaryDeclared() bool {
 // WaitForIdle scans for the agent's own prompt rather than the default one. A
 // blank prefix records the default.
 func (p *Provider) rememberReadyPrompt(name string, cfg runtime.Config) {
+	p.forgetProgramStatus(name)
 	p.readyPrompts.Store(name, idlePromptPrefix(cfg.ReadyPromptPrefix))
 }
 
@@ -206,7 +215,8 @@ func (p *Provider) readOpsReadyPrompt(ctx context.Context, name string) (string,
 	return prefix, found, nil
 }
 
-// WaitForIdle waits until the selected carrier shows the session's ready prompt
+// WaitForIdle prefers a fresh deciding program status under mode on when
+// declared; otherwise it waits until the selected carrier shows the ready prompt
 // with no busy indicator on two consecutive observations, and implements
 // [runtime.IdleWaitProvider]. Each observation captures the last
 // tmux.PromptObservationLines lines through the carrier and applies
@@ -244,7 +254,11 @@ func (p *Provider) waitForIdle(ctx context.Context, c runtime.Carrier, name stri
 	if remaining <= 0 {
 		return fmt.Errorf("exec provider: %q not idle within %s: %w (reading the ready prompt used the whole timeout)", name, timeout, unobservedTimeout())
 	}
-	return waitForPaneIdle(ctx, c, time.Now, name, prefix, remaining)
+	if !p.handshakeCapability(runtime.ProtocolCapabilityProgramStatus) {
+		return waitForPaneIdle(ctx, c, time.Now, name, prefix, remaining)
+	}
+	reader := &statusPreferringReader{p: p, pane: paneIdleReader{c}, read: p.readProgramStatus}
+	return waitForIdleReadings(ctx, reader, time.Now, name, prefix, remaining)
 }
 
 // waitForPaneIdle is WaitForIdle's poll loop over carrier c, reading time from
@@ -269,34 +283,71 @@ const (
 	readingCaptureError
 )
 
-// idleReader supplies observations. Polling, consecutive observations and the
-// deadline belong to the wait, so another reading source can share that policy.
-type idleReader interface {
-	readIdle(context.Context, string, string) (idleReading, error)
+type idleSource uint8
+
+const (
+	sourcePane idleSource = iota
+	sourceStatus
+)
+
+type idleObservation struct {
+	reading idleReading
+	source  idleSource
 }
 
-// paneIdleReader is the sole reading source: carrier Peek followed by the
-// same classifier the local tmux provider uses.
+// idleReader supplies pane or program-status observations. Polling, reader
+// identity, consecutive observations and the deadline belong to the wait.
+type idleReader interface {
+	readIdle(context.Context, string, string) (idleObservation, error)
+}
+
+// paneIdleReader reads carrier Peek with the local tmux classifier.
 type paneIdleReader struct{ c runtime.Carrier }
 
-func (r paneIdleReader) readIdle(ctx context.Context, name, prefix string) (idleReading, error) {
+func (r paneIdleReader) readIdle(ctx context.Context, name, prefix string) (idleObservation, error) {
 	out, err := r.c.Peek(ctx, name, tmux.PromptObservationLines)
 	if err != nil {
-		return readingCaptureError, err
+		return idleObservation{readingCaptureError, sourcePane}, err
 	}
 	idle, err := tmux.ClassifyIdlePane(paneLines(out), prefix)
 	if idle {
-		return readingIdle, nil
+		return idleObservation{readingIdle, sourcePane}, nil
 	}
 	if err != nil {
-		return readingUnclassifiable, err
+		return idleObservation{readingUnclassifiable, sourcePane}, err
 	}
-	return readingBusy, nil
+	return idleObservation{readingBusy, sourcePane}, nil
+}
+
+type statusPreferringReader struct {
+	p      *Provider
+	pane   paneIdleReader
+	read   func(context.Context, string, time.Duration) (runtime.ProgramStatus, error)
+	failed bool
+}
+
+func (r *statusPreferringReader) readIdle(ctx context.Context, name, prefix string) (idleObservation, error) {
+	if !r.failed && r.p.programStatusMode() == runtime.ProgramStatusOn {
+		status, err := r.read(ctx, name, programStatusIdleReadBound)
+		if err != nil {
+			r.failed = true
+		} else if status.Decides() {
+			// No activity op: a hold is bounded from the observed Since alone.
+			switch runtime.ProgramIdleVerdict(status, time.Time{}, programStatusNow()) {
+			case runtime.ProgramVerdictIdle:
+				return idleObservation{readingIdle, sourceStatus}, nil
+			case runtime.ProgramVerdictBusy, runtime.ProgramVerdictPending:
+				return idleObservation{readingBusy, sourceStatus}, nil
+			}
+		}
+	}
+	return r.pane.readIdle(ctx, name, prefix)
 }
 
 func waitForIdleReadings(ctx context.Context, r idleReader, now func() time.Time, name, promptPrefix string, timeout time.Duration) error {
 	deadline := now().Add(timeout)
 	consecutive := 0
+	var previous idleSource
 	sawBusy := false
 	var lastErr error
 	for {
@@ -317,13 +368,17 @@ func waitForIdleReadings(ctx context.Context, r idleReader, now func() time.Time
 			// Only capture errors belong in lastErr (boundedReading reads an
 			// abandoned read as one); a completed classification error must
 			// not replace the last capture error, even at the deadline.
-			if err != nil && reading == readingCaptureError {
+			if err != nil && reading.reading == readingCaptureError {
 				lastErr = err
 			}
 			break
 		}
-		switch reading {
+		switch reading.reading {
 		case readingIdle:
+			if consecutive > 0 && previous != reading.source {
+				consecutive = 0
+			}
+			previous = reading.source
 			consecutive++
 			if consecutive >= tmux.IdleRequiredObservations {
 				return nil
@@ -361,14 +416,14 @@ func waitForIdleReadings(ctx context.Context, r idleReader, now func() time.Time
 // limit, and returns no later than that (see bounded). A read the limit cut
 // short is a capture error: bounded abandons it without a reading, and its
 // error names the capture.
-func boundedReading(ctx context.Context, r idleReader, name, prefix string, limit time.Duration) (idleReading, bool, error) {
-	reading, expired, err := bounded(ctx, limit, func(ctx context.Context) (idleReading, error) {
+func boundedReading(ctx context.Context, r idleReader, name, prefix string, limit time.Duration) (idleObservation, bool, error) {
+	reading, expired, err := bounded(ctx, limit, func(ctx context.Context) (idleObservation, error) {
 		return r.readIdle(ctx, name, prefix)
 	})
 	if err != nil && expired {
 		err = fmt.Errorf("exec provider: capturing %q: %w", name, err)
-		if reading == 0 {
-			reading = readingCaptureError
+		if reading.reading == 0 {
+			reading.reading = readingCaptureError
 		}
 	}
 	return reading, expired, err

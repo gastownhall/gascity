@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
@@ -159,6 +160,45 @@ func assertInputGroupPasses(t *testing.T, variants map[string]map[string]string)
 	}
 }
 
+// newestPStatus ignores the requested held name but preserves the golden's
+// missing-name and backend-fault checks. The sequence, not mtime, orders boxes.
+const newestPStatus = `"$(latest=0; newest=""; for b in "$B"/*; do [ -f "$b/id" ] || continue; id=$(cat "$b/id"); seq=${id#obj-}; if [ "$seq" -gt "$latest" ]; then latest=$seq; newest=$b; fi; done; cat "$newest/pstatus")"`
+
+// shortenPStatusAwait bounds awaitPStatus to 1s for a negative case that
+// waits out the whole bound; the golden and positive cases keep 3s.
+func shortenPStatusAwait(t *testing.T) {
+	t.Helper()
+	old := pstatusAwaitLimit
+	pstatusAwaitLimit = time.Second
+	t.Cleanup(func() { pstatusAwaitLimit = old })
+}
+
+func TestPStatusNameIgnoringPackFailsOnlyFollowsReport(t *testing.T) {
+	shortenPStatusAwait(t)
+	bodies := reference.Bodies()
+	bodies["program-status"] = strings.Replace(bodies["program-status"], `"$(cat "$box/pstatus")"`, newestPStatus, 1)
+	path := writeScript(t, t.TempDir(), bodies)
+	report, err := run(t.Context(), path, Options{}, func(c Code) bool {
+		return c == ReqPStatusAnswers || c == ReqPStatusFollowsReport || c == ReqPStatusMissingSession
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []Code{ReqPStatusAnswers, ReqPStatusFollowsReport, ReqPStatusMissingSession} {
+		want := StatusPass
+		if c == ReqPStatusFollowsReport {
+			want = StatusFail
+		}
+		got := resultFor(t, report, c)
+		if got.Status != want {
+			t.Errorf("name-ignoring pack %s = %s, want %s: %s", c, got.Status, want, got.Detail)
+		}
+		if c == ReqPStatusFollowsReport && !strings.HasPrefix(got.Detail, "first session after another session started:") {
+			t.Errorf("name-ignoring pack %s failed outside the re-read: %q", c, got.Detail)
+		}
+	}
+}
+
 // TestEveryRequirementIsGated is the negative-gating proof: for each
 // requirement, a reference that violates exactly that behavior must FAIL
 // exactly that requirement's check. This is what upgrades "probed" to
@@ -207,6 +247,12 @@ func TestEveryRequirementIsGated(t *testing.T) {
 		whatItBreaks string
 	}
 	mutants := []mutant{
+		{ReqPStatusAnswers, set("program-status", `echo '{"state":'`), "malformed program status"},
+		{ReqPStatusAnswers, set("program-status", `exit 2`), "declared op is unknown"},
+		{ReqPStatusFollowsReport, set("program-status", `echo '{"state":"working"}'`), "constant status"},
+		{ReqPStatusFollowsReport, edit("program-status", `"$(cat "$box/pstatus")"`, newestPStatus), "answers the newest box for every name"},
+		{ReqPStatusFollowsReport, edit("program-status", `"$(cat "$box/pstatus")"`, `"$(sed 's/working/TEMP/;s/idle/working/;s/TEMP/idle/' "$box/pstatus")"`), "opposite state"},
+		{ReqPStatusMissingSession, edit("program-status", `exit 66`, `echo '{"state":"idle"}'; exit 0`), "state for a missing session"},
 		{ReqProtocolHandshake, set("protocol", `echo 'not json at all'`), "malformed handshake"},
 		{ReqLifecycleStartRunning, set("is-running", `echo false`), "session never reports running"},
 		{ReqLifecycleDuplicateErr, set("start", `cat >/dev/null; mkdir -p "$box"; for f in id created cmd0 procs; do : > "$box/$f"; done`), "duplicate start silently succeeds"},
@@ -398,6 +444,9 @@ func TestEveryRequirementIsGated(t *testing.T) {
 
 	for _, m := range all {
 		t.Run(string(m.target)+"/"+m.whatItBreaks, func(t *testing.T) {
+			if m.target == ReqPStatusFollowsReport {
+				shortenPStatusAwait(t)
+			}
 			bodies := m.base()
 			for op, body := range m.bodies {
 				if _, ok := bodies[op]; !ok {
@@ -687,12 +736,13 @@ func TestPortedGroupsGateOnWhatIsDeclared(t *testing.T) {
 // group skip, and an undeclared pack is never sent the token's op.
 func TestEveryTokenGroupSkipsWhenUndeclared(t *testing.T) {
 	for group, token := range map[Group]string{
-		GroupServer: runtime.ProtocolCapabilityServerLifecycle,
-		GroupInput:  runtime.ProtocolCapabilityInputOutcome,
+		GroupServer:  runtime.ProtocolCapabilityServerLifecycle,
+		GroupInput:   runtime.ProtocolCapabilityInputOutcome,
+		GroupPStatus: runtime.ProtocolCapabilityProgramStatus,
 	} {
 		bodies := reference.InputOutcomeBodies(reference.Bodies())
 		var caps []string
-		for _, c := range []string{"observe.v1", "report-attachment", "report-activity", "conformance-faults", "city-scoped", runtime.ProtocolCapabilityServerLifecycle, runtime.ProtocolCapabilityInputOutcome} {
+		for _, c := range []string{"observe.v1", "report-attachment", "report-activity", "conformance-faults", "city-scoped", runtime.ProtocolCapabilityServerLifecycle, runtime.ProtocolCapabilityInputOutcome, runtime.ProtocolCapabilityProgramStatus} {
 			if c != token {
 				caps = append(caps, `"`+c+`"`)
 			}

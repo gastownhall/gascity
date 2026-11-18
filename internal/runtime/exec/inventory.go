@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -150,6 +151,9 @@ func (p *Provider) inventory(ctx context.Context) (inventoryListing, error) {
 	if err != nil {
 		return inventoryListing{}, fmt.Errorf("exec provider %s inventory: %w", p.script, err)
 	}
+	if l.complete {
+		p.dropAbsentPrograms(l.names)
+	}
 	return l, nil
 }
 
@@ -184,6 +188,10 @@ func (p *Provider) ListRunningComplete() bool {
 // held name gone. An incomplete inventory returns them with a
 // [runtime.PartialListError]; a failed one returns none.
 func (p *Provider) ListInventory(prefix string) ([]string, map[string]runtime.InventoryEntry, error) {
+	return p.listInventory(prefix, true)
+}
+
+func (p *Provider) listInventory(prefix string, poll bool) ([]string, map[string]runtime.InventoryEntry, error) {
 	l, err := p.inventory(context.Background())
 	if err != nil {
 		return nil, nil, err
@@ -199,10 +207,130 @@ func (p *Provider) ListInventory(prefix string) ([]string, map[string]runtime.In
 			entries[name] = e
 		}
 	}
+	if poll {
+		p.pollProgramStatus(entries)
+	}
 	if !l.complete {
 		return names, entries, &runtime.PartialListError{Err: errors.New("exec provider " + p.script + " inventory: the listing is incomplete")}
 	}
 	return names, entries, nil
+}
+
+var (
+	programStatusPollWorkers = 8
+	programStatusPollBound   = 3 * time.Second
+)
+
+func (p *Provider) dropAbsentPrograms(names []string) {
+	present := make(map[string]bool, len(names))
+	for _, name := range names {
+		present[name] = true
+	}
+	p.programs.mu.Lock()
+	defer p.programs.mu.Unlock()
+	for name := range p.programs.sessions {
+		if !present[name] {
+			delete(p.programs.sessions, name)
+		}
+	}
+}
+
+func (p *Provider) pollProgramStatus(entries map[string]runtime.InventoryEntry) {
+	if p.programStatusMode() == runtime.ProgramStatusOff || !p.handshakeCapability(runtime.ProtocolCapabilityProgramStatus) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), programStatusPollBound)
+	defer cancel()
+	p.pollProgramStatusRead(ctx, entries, p.readProgramStatus)
+}
+
+// pollProgramStatusRead owns the bounded pool and rotation; the function value
+// lets timing tests exercise the same pool without a subprocess clock.
+func (p *Provider) pollProgramStatusRead(ctx context.Context, entries map[string]runtime.InventoryEntry, read func(context.Context, string, time.Duration) (runtime.ProgramStatus, error)) {
+	type candidate struct {
+		name string
+		at   time.Time
+	}
+	var candidates []candidate
+	p.programs.mu.Lock()
+	for name, entry := range entries {
+		if entry.DeadKnown && !entry.AllPanesDead {
+			e := p.programSessionLocked(name)
+			candidates = append(candidates, candidate{name, e.lastPoll})
+		}
+	}
+	p.programs.mu.Unlock()
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].at.Equal(candidates[j].at) {
+			return candidates[i].name < candidates[j].name
+		}
+		return candidates[i].at.Before(candidates[j].at)
+	})
+	type result struct {
+		name   string
+		status runtime.ProgramStatus
+		err    error
+	}
+	results := make(chan result, len(candidates))
+	jobs := make(chan string)
+	for range min(programStatusPollWorkers, len(candidates)) {
+		go func() {
+			for name := range jobs {
+				if ctx.Err() != nil {
+					continue
+				}
+				p.programs.mu.Lock()
+				e := p.programSessionLocked(name)
+				attemptedAt := programStatusNow()
+				p.programs.mu.Unlock()
+				status, err := read(ctx, name, programStatusReadTimeout)
+				// A read cut short by the total budget keeps its priority.
+				// Otherwise a fixed final wave can time out every pass.
+				if ctx.Err() == nil {
+					p.programs.mu.Lock()
+					if p.programs.sessions[name] == e {
+						e.lastPoll = attemptedAt
+					}
+					p.programs.mu.Unlock()
+				}
+				results <- result{name, status, err}
+			}
+		}()
+	}
+	go func() {
+		defer close(jobs)
+		for _, c := range candidates {
+			select {
+			case jobs <- c.name:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	apply := func(r result) {
+		if r.err == nil {
+			e := entries[r.name]
+			e.Program = r.status
+			entries[r.name] = e
+		}
+	}
+	for range candidates {
+		select {
+		case r := <-results:
+			apply(r)
+		case <-ctx.Done():
+			// Keep completed outcomes already queued before the deadline.
+			// Late reads are discarded by readProgramStatus's parent fence.
+			for {
+				select {
+				case r := <-results:
+					apply(r)
+				default:
+					return
+				}
+			}
+		}
+	}
 }
 
 // Inventory is one well-formed `inventory` answer as gc reads it: every

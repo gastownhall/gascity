@@ -75,6 +75,7 @@ const (
 	GroupServer     Group = "server"
 	GroupFSHost     Group = "fshost"
 	GroupInput      Group = "input"
+	GroupPStatus    Group = "pstatus"
 
 	// The ported RunProviderTests groups (ported.go). Every requirement is
 	// Optional: an op that answers exit 2 SKIPs (unless a declared token
@@ -250,6 +251,15 @@ const (
 	ReqInputExit80OneLine       Code = "RPP-INPUT-010"
 	ReqInputDeadBoxGone         Code = "RPP-INPUT-011"
 	ReqInputKeysDelivered       Code = "RPP-INPUT-012"
+
+	// The pstatus group checks the program-status token (RUNTIME-RPP-038): a
+	// script declaring it answers `program-status <name>` with one object gc
+	// accepts, reports the state each session's own program requested, read
+	// by that session's name, and exits 66 for a name no box holds. Every
+	// requirement is Optional: SKIP when program-status is not declared.
+	ReqPStatusAnswers        Code = "RPP-PSTATUS-001"
+	ReqPStatusFollowsReport  Code = "RPP-PSTATUS-002"
+	ReqPStatusMissingSession Code = "RPP-PSTATUS-003"
 )
 
 // catalog is the authoritative, ordered requirement list. Run walks it in
@@ -334,6 +344,10 @@ var catalog = []Requirement{
 	{ReqInputExit80OneLine, GroupInput, "exit 80 always carries exactly one outcome line gc reads as typed: a non-success word the op may answer", true},
 	{ReqInputDeadBoxGone, GroupInput, "under GC_RPP_FAULT=dead (the box holds the name but nothing runs in it: observe reports it dead), every driving op exits 80 gone and types nothing: gone means no running box holds the name (declared conformance-faults only)", true},
 	{ReqInputKeysDelivered, GroupInput, "send-keys, interrupt and clear-scrollback to a running box exit 0 with stdout empty or exactly one delivered line", true},
+
+	{ReqPStatusAnswers, GroupPStatus, "program-status answers one object gc accepts for a running session; a declared exit 2 fails (declared program-status only)", true},
+	{ReqPStatusFollowsReport, GroupPStatus, "program-status reads each session by its own name; the first keeps its working state after the second starts idle (declared program-status only)", true},
+	{ReqPStatusMissingSession, GroupPStatus, "program-status on a name no box holds answers exit 66 (declared program-status only)", true},
 }
 
 // Catalog returns the authoritative requirement list in run order. The

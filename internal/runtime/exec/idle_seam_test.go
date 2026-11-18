@@ -31,7 +31,7 @@ func TestPaneIdleReaderReadings(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, err := (paneIdleReader{readingCarrier{screen: tc.screen, err: tc.err}}).readIdle(context.Background(), "s", "❯ ")
-			if got != tc.want {
+			if got.reading != tc.want {
 				t.Fatalf("reading=%v, want %v", got, tc.want)
 			}
 			if (err != nil) != (tc.want == readingUnclassifiable || tc.want == readingCaptureError) {
@@ -43,8 +43,9 @@ func TestPaneIdleReaderReadings(t *testing.T) {
 
 type idleReaderFunc func(context.Context, string, string) (idleReading, error)
 
-func (f idleReaderFunc) readIdle(ctx context.Context, name, prefix string) (idleReading, error) {
-	return f(ctx, name, prefix)
+func (f idleReaderFunc) readIdle(ctx context.Context, name, prefix string) (idleObservation, error) {
+	reading, err := f(ctx, name, prefix)
+	return idleObservation{reading, sourcePane}, err
 }
 
 func TestIdleReadingAtDeadlinePreservesCaptureError(t *testing.T) {

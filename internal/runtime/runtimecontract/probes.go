@@ -23,6 +23,9 @@ type probe func(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status
 // probes maps every catalog Code to its check. TestProbesCoverCatalog
 // asserts this map covers the catalog exactly.
 var probes = map[Code]probe{
+	ReqPStatusAnswers:             probePStatusAnswers,
+	ReqPStatusFollowsReport:       probePStatusFollowsReport,
+	ReqPStatusMissingSession:      probePStatusMissingSession,
 	ReqProtocolHandshake:          probeProtocolHandshake,
 	ReqLifecycleStartRunning:      probeStartRunning,
 	ReqLifecycleDuplicateErr:      probeDuplicateErr,

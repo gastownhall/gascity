@@ -9,6 +9,7 @@ go_library(
         "observe.go",
         "ported.go",
         "probes.go",
+        "program_status.go",
         "report.go",
         "runner.go",
         "server.go",
@@ -29,6 +30,7 @@ go_test(
     srcs = [
         "lockstep_test.go",
         "nontmux_test.go",
+        "program_status_regression_test.go",
         "runner_test.go",
         "screen_reference_test.go",
         "screen_script_test.go",

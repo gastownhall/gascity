@@ -58,6 +58,9 @@ const (
 // against the live pane in the same read. It is the program's claim:
 // positive-only evidence with no heartbeat. Counters compare only within
 // one Nonce (one capture incarnation). Text (title, msg) is never carried here.
+// Exec derives counters and timestamps from polls on gc's clock; its nonce
+// identifies the provider instance, local generation and pack incarnation.
+// Exec produces neither not_armed nor reader_lost and verifies no tap.
 type ProgramStatus struct {
 	Mode            ProgramStatusMode // stamped on every reading; "" reads as off
 	Validity        ProgramStatusValidity
@@ -180,7 +183,8 @@ func (s ProgramStatus) AdvancedPast(b ProgramBaseline) bool {
 // switch off it returns an Unread reading and nil error; a pane it has not
 // armed reads not_armed; a missing session returns an error wrapping
 // [ErrSessionNotFound]; an unobservable runtime returns one wrapping
-// [ErrRuntimeUnavailable].
+// [ErrRuntimeUnavailable]. Exec reads the declaring pack's program-status op
+// through a bounded cache instead of arming capture; its binding is not consulted.
 type ProgramStatusProvider interface {
 	ProgramStatus(name string) (ProgramStatus, error)
 }

@@ -1802,6 +1802,8 @@ type SessionConfig struct {
 	// (the default) changes nothing. "shadow" arms capture on declared
 	// providers ([providers.<p>.program_status]) and compares readings
 	// without changing any decision. "on" lets valid readings decide.
+	// An exec pack declaring program-status is read regardless of the provider
+	// binding's capture declaration and app filter, which are not consulted.
 	ProgramStatus string `toml:"program_status,omitempty" jsonschema:"enum=off,enum=shadow,enum=on,default=off"`
 }
 

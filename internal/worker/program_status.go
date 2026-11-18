@@ -7,7 +7,8 @@ import "github.com/gastownhall/gascity/internal/runtime"
 // (no such capability, a missing session, an unobservable runtime) is the
 // Unread reading: it carries no state, so a consumer reads the session's
 // program status as unknown, never as idle. tmux serves the reading from its
-// shared state cache, so this forks nothing per call.
+// shared state cache, and exec from a bounded cache, where a cold read can
+// run one pack op.
 func ProgramStatusOf(sp runtime.Provider, sessionName string) runtime.ProgramStatus {
 	ps, err := runtime.ReadProgramStatus(sp, sessionName)
 	if err != nil {

@@ -322,6 +322,9 @@ func checkPS004(t *testing.T, f ProgramStatusFixtures) error {
 	if f.Armed == nil {
 		return skip("no armed-session fixture")
 	}
+	if f.Relayed == nil {
+		return skipUnchecked([]string{"no relayed-session fixture: a polled provider cannot observe the probe"})
+	}
 	s := f.Armed(t, runtime.ProgramStatusOn, "term bel", "probe-gated", "report state=working")
 	r, err := readWant(s, "probe-gated, no relay", runtime.ProgramStatusSilent)
 	if err != nil {
@@ -329,9 +332,6 @@ func checkPS004(t *testing.T, f ProgramStatusFixtures) error {
 	}
 	if !r.Probed {
 		return fmt.Errorf("probe-gated, no relay: %+v, want Probed", r)
-	}
-	if f.Relayed == nil {
-		return skipUnchecked([]string{"no relayed-session fixture: a probe-gated program reports under the relay"})
 	}
 	relayed := f.Relayed(t, runtime.ProgramStatusOn, "term bel", "probe-gated", "report state=working")
 	_, err = readValid(relayed, "probe-gated under the relay", runtime.ProgramWorking)

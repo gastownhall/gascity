@@ -116,6 +116,15 @@ const (
 	// one runtime sentinel. A gc that does not read the token sees exit 80 as
 	// an ordinary failure, so a refusal never reads as delivered.
 	ProtocolCapabilityInputOutcome = "input-outcome"
+	// ProtocolCapabilityProgramStatus declares that the executable implements
+	// the `program-status <name>` op, which answers one JSON object for the
+	// root of the session's own agent program, the terminal's state word
+	// forwarded unchanged. The exec provider's ProgramStatusProvider reads it
+	// under the [session] program_status switch; under on, its idle wait may
+	// use it. It grants no idle boundary. A name the pack holds no session
+	// under exits 66 ([ExitCodeNoScreen]); a held box whose program exited
+	// answers exit 0 with "exited": true. Exit 2 from the declared op fails.
+	ProtocolCapabilityProgramStatus = "program-status"
 )
 
 // InputOutcome is one word of the input-outcome wire

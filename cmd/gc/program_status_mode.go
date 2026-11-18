@@ -6,7 +6,7 @@ import (
 )
 
 // programStatusModeSetter is a session leaf that arms and reads program
-// status under the city switch it is given (the tmux provider).
+// status under the city switch it is given (tmux and exec leaves).
 type programStatusModeSetter interface {
 	SetProgramStatusMode(mode runtime.ProgramStatusMode)
 }

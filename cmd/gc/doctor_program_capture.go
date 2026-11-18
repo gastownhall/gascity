@@ -66,10 +66,12 @@ func readProgramCaptureState(cfg *config.City, loadSessions func() (*sessionBead
 		if !ok {
 			continue
 		}
+		_, captures := runtime.ProgramCaptureHealerFor(sp, name)
 		reading, readErr := ps.ProgramStatus(name)
 		st.Sessions = append(st.Sessions, doctor.ProgramCaptureSession{
 			Name:     name,
 			Declared: programCaptureWant(cfg, info).Capture,
+			Captures: captures,
 			Reading:  reading,
 			ReadErr:  readErr,
 		})

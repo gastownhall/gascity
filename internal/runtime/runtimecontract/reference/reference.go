@@ -30,6 +30,7 @@ const (
 		`printf %s "$cfg" | sed -n 's/.*"process_names":\[\([^]]*\)\].*/\1/p' | tr -d '"' > "$box.tmp/procs"; ` +
 		`printf %s "$cfg" | sed -n 's/.*"command":"\([^" ]*\).*/\1/p' > "$box.tmp/cmd0"; ` +
 		`n=$(cat "$S/seq" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$S/seq"; printf 'obj-%s' "$n" > "$box.tmp/id"; date +%s > "$box.tmp/created"; ` +
+		`printf %s "$cfg" | sed -n 's/.*7501;state=\([a-z]*\).*/\1/p' > "$box.tmp/pstatus"; ` +
 		`mv "$box.tmp" "$box"`
 
 	goldenObserveIdentity = `ident`
@@ -106,7 +107,7 @@ release() { if [ "${GC_RPP_FAULT:-}" != hold_send ] && [ -f "$box/held" ]; then 
 // behavior.
 func Bodies() map[string]string {
 	return map[string]string{
-		"protocol":          `echo '{"version":0,"capabilities":["observe.v1","report-attachment","report-activity","conformance-faults","city-scoped","idle-boundary","server-lifecycle"]}'`,
+		"protocol":          `echo '{"version":0,"capabilities":["observe.v1","report-attachment","report-activity","conformance-faults","city-scoped","idle-boundary","server-lifecycle","program-status"]}'`,
 		"start":             goldenStart,
 		"stop":              `rm -rf "$box"`,
 		"is-running":        `if [ -d "$box" ]; then echo true; else echo false; fi`,
@@ -121,6 +122,7 @@ func Bodies() map[string]string {
 		"inventory":         goldenInventory,
 		"kill-object":       goldenKillObject,
 		"peek":              goldenPeek,
+		"program-status":    faultGuard + `if [ ! -d "$box" ]; then exit 66; fi; printf '{"state":"%s"}\n' "$(cat "$box/pstatus")"`,
 		"exec":              goldenExec,
 		// provision = the box half: consume the config and succeed WITHOUT
 		// creating the box, so is-running stays false; the box is exec-able
@@ -172,7 +174,7 @@ const (
 // received as start.json.
 func HostFSBodies() map[string]string {
 	b := Bodies()
-	b["protocol"] = `echo '{"version":0,"capabilities":["observe.v1","report-attachment","report-activity","conformance-faults","city-scoped","idle-boundary","server-lifecycle","fs.host"],"locality":"local"}'`
+	b["protocol"] = `echo '{"version":0,"capabilities":["observe.v1","report-attachment","report-activity","conformance-faults","city-scoped","idle-boundary","server-lifecycle","program-status","fs.host"],"locality":"local"}'`
 	b["start"] = strings.Replace(strings.Replace(b["start"],
 		`mkdir -p "$box.tmp"; `, `mkdir -p "$box.tmp"; `+goldenHostFSStage, 1),
 		`mv "$box.tmp" "$box"`, goldenHostFSLaunch+`mv "$box.tmp" "$box"`, 1)

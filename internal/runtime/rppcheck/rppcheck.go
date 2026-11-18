@@ -239,6 +239,7 @@ func (c *checker) runOpEnv(ctx context.Context, timeout time.Duration, env []str
 // capability-to-op map. input-outcome types the driving ops' answers rather
 // than promising an op, so it maps to "" and checkInputOutcome checks it.
 var knownCapabilities = map[string]string{
+	runtime.ProtocolCapabilityProgramStatus:    "program-status",
 	runtime.ProtocolCapabilityReportAttachment: "is-attached",
 	runtime.ProtocolCapabilityReportActivity:   "get-last-activity",
 	runtime.ProtocolCapabilityObserveV1:        "observe, inventory, kill-object",
@@ -603,6 +604,9 @@ func (c *checker) remainingCheckNames() []string {
 	if observe {
 		names = append(names, observeCheck, inventoryCheck, killObjectCheck)
 	}
+	if c.result.Protocol.Has(runtime.ProtocolCapabilityProgramStatus) {
+		names = append(names, programStatusCheck)
+	}
 	names = append(names, "lifecycle: stop", "lifecycle: is-running after stop")
 	if observe {
 		names = append(names, observeAbsentCheck)
@@ -641,6 +645,28 @@ func (c *checker) checkSessionOps(ctx context.Context, name string) {
 		c.checkObserve(ctx, observeCheck, name, "running")
 		c.checkInventory(ctx, name)
 		c.checkKillObjectBogus(ctx, name)
+	}
+	c.checkProgramStatus(ctx, name)
+}
+
+const programStatusCheck = "capability program-status: program-status"
+
+func (c *checker) checkProgramStatus(ctx context.Context, name string) {
+	if !c.result.Protocol.Has(runtime.ProtocolCapabilityProgramStatus) {
+		return
+	}
+	res := c.runOp(ctx, nil, "program-status", name)
+	switch {
+	case res.unsupported:
+		c.record(programStatusCheck, StatusFail, "declared in the handshake but not implemented (exit 2)")
+	case res.err != nil:
+		c.record(programStatusCheck, StatusFail, "program-status failed")
+	default:
+		if _, err := sessionexec.ParseProgramStatus([]byte(res.stdout)); err != nil {
+			c.record(programStatusCheck, StatusFail, err.Error())
+		} else {
+			c.record(programStatusCheck, StatusPass, "")
+		}
 	}
 }
 
