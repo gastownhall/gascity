@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -634,15 +635,24 @@ func TestFinalizeDrainAckStopPendingRemindsTheLiveWedgeOnly(t *testing.T) {
 			e.setMeta(map[string]string{"work_dir": t.TempDir(), "provider": "claude"})
 			cfg := &config.City{Agents: []config.Agent{{Name: "worker", StartCommand: "true"}}}
 
+			// The queued async stop pokes the controller when it finishes; keep
+			// that off the real supervisor socket. Not parallel — swaps a
+			// package-level seam, bound at queue time.
+			oldPoke := drainAckAsyncStopPokeController
+			drainAckAsyncStopPokeController = func(string, reconcilekey.Key) error { return nil }
+			t.Cleanup(func() { drainAckAsyncStopPokeController = oldPoke })
+
 			// The queued async stop takes the runtime lease in the city's
-			// lock dir: let it finish before the dir is removed.
+			// lock dir: it must finish before the dir is removed.
 			tracker := &asyncStartTracker{}
 			finalizeDrainAckStopPendingSessions(
 				t.TempDir(), cfg, e.sp, beads.SessionStore{Store: e.store}, testSeatWork(t.TempDir(), cfg, beads.SessionStore{Store: e.store}, nil),
 				[]sessionpkg.Info{e.info()}, nil, newDrainTracker(), tracker,
 				e.clk, nil, e.out,
 			)
-			tracker.wait(5 * time.Second)
+			if !tracker.wait(5 * time.Second) {
+				t.Fatal("async drain-ack stop teardown did not finish within 5s; its lease would outlive the temp dir")
+			}
 
 			if n := len(e.nudges()); n != tc.wantNudges {
 				t.Errorf("nudge count = %d, want %d", n, tc.wantNudges)
