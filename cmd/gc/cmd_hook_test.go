@@ -2851,6 +2851,81 @@ max = 5
 	}
 }
 
+// TestCmdHookUnaliasedPoolSessionFindsCityStoreWork guards the rig→city read
+// federation for an unaliased rig pool session. Such a session runs with no
+// alias and with GC_AGENT/BEADS_ACTOR set to its session bead id
+// (clearPoolTemplateRuntimeIdentity), so its runtime identity carries no
+// "<rig>/" prefix. The hook must still take the rig from the configured agent
+// and query the city store, where the controller's demand probe already counts
+// work routed to the pool; otherwise the controller keeps starting sessions that
+// find no work.
+func TestCmdHookUnaliasedPoolSessionFindsCityStoreWork(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_TMUX_SESSION", "host-session")
+	cityDir := t.TempDir()
+	fakeBin := t.TempDir()
+	rigDir := filepath.Join(cityDir, "myrig")
+
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := fmt.Sprintf(`[workspace]
+name = "test-city"
+
+[[rigs]]
+name = "myrig"
+path = %q
+
+[[agent]]
+name = "polecat"
+dir = "myrig"
+
+[agent.pool]
+min = 0
+max = 5
+`, rigDir)
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The fake bd answers with one ready row routed to the pool ONLY when
+	// queried against the CITY store; every rig-scoped query sees [].
+	cityBeads := filepath.Join(cityDir, ".beads")
+	fakeBD := filepath.Join(fakeBin, "bd")
+	script := fmt.Sprintf(`#!/bin/sh
+case "$BEADS_DIR" in
+  %s*) printf '[{"id":"td-city1","status":"open","title":"city work routed to the pool","metadata":{"gc.routed_to":"myrig/polecat"}}]' ;;
+  *) printf '[]' ;;
+esac
+`, cityBeads)
+	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_DIR", rigDir)
+	// An unaliased pool session's runtime env: blank alias, bead-id identity.
+	t.Setenv("GC_TEMPLATE", "myrig/polecat")
+	t.Setenv("GC_SESSION_NAME", "polecat-gc-sess1")
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_AGENT", "gc-sess1")
+	t.Setenv("BEADS_ACTOR", "gc-sess1")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHook(nil, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHook() = %d, want 0 (city-store work routed to the pool must surface); stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "td-city1") {
+		t.Fatalf("stdout = %q, want the city-store bead td-city1", stdout.String())
+	}
+}
+
 func TestWorkQueryEnvForDirOverridesInheritedPWD(t *testing.T) {
 	env := []string{
 		"PATH=/tmp/bin",
