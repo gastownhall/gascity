@@ -356,6 +356,10 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 				return orderInapplicableBackend(cityPath, cfg, a)
 			})))
 		register(doctor.NewOrderOutcomeHealthyCheck(cfg, cityPath))
+		register(doctor.NewOrderDispatchFloorCheck(cfg, cityPath,
+			doctor.WithOrderDispatchFloorInapplicableFunc(func(a orders.Order) (string, bool) {
+				return orderInapplicableBackend(cityPath, cfg, a)
+			})))
 		register(newCodexHooksDriftCheck(cityPath, codexHookWorkDirs(cityPath, cfg)))
 		register(doctor.NewRigPackCoverageCheck(cfg, cityPath))
 		register(newPackRuntimesDoctorCheck(cfg))
@@ -492,11 +496,13 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			registerCityStoreCheck(newRouteRecoveryQuarantineCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newCrossStoreGatesCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newStorageRigsCheck(cfg, cityPath))
+			registerCityStoreCheck(newStorageSplitCheck(cfg, cityPath))
 			registerCityStoreCheck(newDanglingBlockingEdgesCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newHoldLabelRoutedToCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newPoolIdleRoutedWorkCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newV2DemandMigrationsCheck(cfg, cityPath, storeFactory))
 			registerCityStoreCheck(newV2SessionMigrationCheck(cfg, cityPath))
+			registerCityStoreCheck(newExecRuntimeIdentityCheck(cfg, cityPath, sessionSP, sessionSPErr))
 			if !cityStoreStopped {
 				reconcilerCheck.capabilities = func() ([]v2StoreCapability, error) {
 					store, err := storeFactory(cityPath)

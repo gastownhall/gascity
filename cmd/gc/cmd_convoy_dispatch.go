@@ -194,7 +194,7 @@ func runControlDispatcherInStore(cityPath, storePath, beadID string, stdout, std
 		return fmt.Errorf("opening scoped control store %q: %w", storePath, err)
 	}
 	// The whole dispatch below is synchronous — ProcessControl consumes its
-	// store-bearing options (RecycleSession, MemberStores) before it returns, the
+	// store-bearing options (RecycleSession, Work) before it returns, the
 	// caller's own EmitCurrent step runs inline after it, and nothing retains
 	// store past this call — so releasing the scope handle we just opened at
 	// return is safe and stops leaking one bd/Dolt store (and its connections)
@@ -268,7 +268,8 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 		return err
 	}
 
-	opts := dispatch.ProcessOptions{CityPath: cityPath, StorePath: storePath}
+	graph, work := beads.GraphStore{Store: graphStore}, beads.WorkStore{Store: store}
+	opts := controlDispatchOptions(cityPath, storePath, graph, work, controlMemberTail(bead.Metadata[beadmeta.KindMetadataKey], graph, work))
 	opts.Tracef = workflowTracef
 	loadCfg := false
 	// This is a per-kind capability switch (does this control kind need city
@@ -330,9 +331,6 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 			if err := assertDrainRootScopeMatchesDispatch(bead, workflowStoreRefForDir(storePath, cityPath, loadedCityName(cfg, cityPath), cfg)); err != nil {
 				return err
 			}
-			if graphStore != store {
-				opts.MemberStores = []beads.Store{store}
-			}
 		case "retry-eval":
 			// A retry-eval validating a required artifact resolves the
 			// artifact worktree through the workflow's source bead or input
@@ -340,24 +338,18 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 			// supply the work leg as the member tail so that read crosses the
 			// class boundary. Route-gated exactly like the drain: on every
 			// other city graphStore IS store and the tail stays empty.
-			if graphStore != store {
-				opts.MemberStores = []beads.Store{store} // residency:allow route-gated work-leg tail for the retry lane's cross-store required-artifact source read; same shape as the drain arm above
-			}
 			opts.RecycleSession = recycleDispatchSubjectSession(cityPath, store, cfg)
 		case "retry", "ralph":
 			opts.FormulaSearchPaths = workflowFormulaSearchPaths(cfg, bead)
 			// Same cross-store required-artifact source resolution as
 			// retry-eval above.
-			if graphStore != store {
-				opts.MemberStores = []beads.Store{store} // residency:allow route-gated work-leg tail for the retry lane's cross-store required-artifact source read; same shape as the drain arm above
-			}
 			opts.RecycleSession = recycleDispatchSubjectSession(cityPath, store, cfg)
 		}
 	}
 
-	result, err := dispatch.ProcessControl(graphStore, bead, opts)
+	result, err := dispatch.ProcessControl(graph, bead, opts)
 	if err != nil {
-		return handleControlDispatchError(cityPath, storePath, graphStore, bead, beadID, err, stderr)
+		return handleControlDispatchError(cityPath, storePath, graph, bead, beadID, err, stderr)
 	}
 	if !result.Processed {
 		return errControlNotProcessed
@@ -386,6 +378,49 @@ func runControlDispatcherDeferringEmits(cityPath, storePath string, store beads.
 	}
 	fmt.Fprintln(stdout) //nolint:errcheck
 	return nil
+}
+
+// controlMemberTail reports whether a control of kind, held in graph and
+// dispatched from the scope store work, reads its work beads through work as
+// a member tail. The kinds that read beads they did not create — a drain's
+// convoy members, a retry lane's required-artifact source — need it, but only
+// when the graph class relocated: on any other city graph and work are one
+// physical store, and no tail keeps each of those reads on the single store
+// the control runs in.
+func controlMemberTail(kind string, graph beads.GraphStore, work beads.WorkStore) bool {
+	relocated := !beads.SameStore(graph, work)
+	switch kind {
+	case beadmeta.KindDrain, beadmeta.KindRetryEval, beadmeta.KindRetry, beadmeta.KindRalph:
+		return relocated
+	}
+	return false
+}
+
+// controlDispatchOptions is the store half of a control dispatch's options.
+// work is the scope store the control was dispatched from and graph the
+// ledger that holds the control.
+//
+// Work is the scope store: it owns every convoy and the work members a drain
+// expands over, and it is the store dispatch's work-class reads took before
+// the work handle was named (the member tail when the graph class relocated,
+// else the control's own store, which is then this same store).
+//
+// Sessions is the graph store: attempt routing has always resolved session
+// targets through the control's own store, which on a split city is the
+// binding that holds the sessions class too. The conversion relabels it until
+// typed-store T9 hands dispatch the city's sessions handle.
+//
+// With memberTail the scope store is also the work-class member tail, so
+// membership and member reads cross the class boundary (controlMemberTail
+// decides it).
+func controlDispatchOptions(cityPath, storePath string, graph beads.GraphStore, work beads.WorkStore, memberTail bool) dispatch.ProcessOptions {
+	return dispatch.ProcessOptions{
+		CityPath:   cityPath,
+		StorePath:  storePath,
+		Work:       work,
+		MemberTail: memberTail,
+		Sessions:   beads.SessionStore(graph),
+	}
 }
 
 // validateDispatchSessionProviderConfig checks, once when a control
@@ -442,9 +477,9 @@ func recycleDispatchSubjectSession(cityPath string, store beads.Store, cfg *conf
 // quarantined; any other classification quarantines on the first refusal. It
 // returns nil once the bead is quarantined and the (possibly quiet-wrapped)
 // cause when the bead should be retried.
-func handleControlDispatchError(cityPath, storePath string, graphStore beads.Store, bead beads.Bead, beadID string, cause error, stderr io.Writer) error {
+func handleControlDispatchError(cityPath, storePath string, graph beads.GraphStore, bead beads.Bead, beadID string, cause error, stderr io.Writer) error {
 	if errors.Is(cause, dispatch.ErrControlDriftPending) {
-		return handleControlDriftRefusal(cityPath, storePath, graphStore, bead, beadID, cause, stderr)
+		return handleControlDriftRefusal(cityPath, storePath, graph, bead, beadID, cause, stderr)
 	}
 	if errors.Is(cause, dispatch.ErrControlPending) {
 		// Routine "not yet" — a retry waiting for its subject, a drain waiting
@@ -460,7 +495,7 @@ func handleControlDispatchError(cityPath, storePath string, graphStore beads.Sto
 		return cause
 	case dispatch.TierSemantic:
 		retry, recordErr := dispatch.RecordSemanticControlRetry(
-			graphStore, beadID, cause, workflowTraceNow().UTC(), semanticControlRetryBudget())
+			graph, beadID, cause, workflowTraceNow().UTC(), semanticControlRetryBudget())
 		if recordErr != nil {
 			// Losing the budget write is itself a store problem: keep the
 			// pre-tier behavior (retry) rather than escalating on it.
@@ -484,7 +519,7 @@ func handleControlDispatchError(cityPath, storePath string, graphStore beads.Sto
 	// because RecordSemanticControlRetry already persisted first_seen/count/error
 	// on the bead, so `bd show` still explains the stall even when the event is
 	// lost.
-	settleFailure, quarantineErr := quarantineControlFailureBead(graphStore, bead, cause)
+	settleFailure, quarantineErr := quarantineControlFailureBead(graph, bead, cause)
 	if quarantineErr != nil {
 		return errors.Join(cause, quarantineErr)
 	}
@@ -495,7 +530,7 @@ func handleControlDispatchError(cityPath, storePath string, graphStore beads.Sto
 			settleFailure.RootBeadID, settleFailure.FinalizerBeadID, cause)
 	}
 	if stalled != nil {
-		emitControlStalled(cityPath, storePath, graphStore, bead, cause, *stalled, quarantineControlStall, stderr)
+		emitControlStalled(cityPath, storePath, graph, bead, cause, *stalled, quarantineControlStall, stderr)
 		_, _ = fmt.Fprintf(stderr,
 			"control dispatch: stalled bead=%s attempts=%d first_seen=%s budget=%s reason=%v\n",
 			beadID, stalled.Attempts, stalled.FirstSeen.UTC().Format(time.RFC3339),
@@ -524,7 +559,13 @@ func handleControlDispatchError(cityPath, storePath string, graphStore beads.Sto
 // A verbatim repeat is additionally marked quiet so a permanently-pending bead
 // stops resetting the serve loop's idle backoff, mirroring the Tier-B repeat
 // arm in handleControlDispatchError above.
-func handleControlDriftRefusal(cityPath, storePath string, graphStore beads.Store, bead beads.Bead, beadID string, cause error, stderr io.Writer) error {
+//
+// One drift does not need the horizon to be known: a check whose script cannot
+// be launched. It is announced on control.check_unlaunchable on its first
+// refusal and again whenever the refusal changes, so the hold is visible from
+// the first sweep instead of only after the budget; the disposition itself is
+// unchanged.
+func handleControlDriftRefusal(cityPath, storePath string, graph beads.GraphStore, bead beads.Bead, beadID string, cause error, stderr io.Writer) error {
 	if strings.TrimSpace(bead.Metadata[beadmeta.ControlPendingStalledMetadataKey]) == "true" &&
 		dispatch.PendingControlRefusalRecorded(bead, cause) {
 		// Past the horizon, repeating verbatim: the escalation already fired
@@ -541,7 +582,7 @@ func handleControlDriftRefusal(cityPath, storePath string, graphStore beads.Stor
 		return dispatch.MarkQuietControllerRetry(cause)
 	}
 	pending, recordErr := dispatch.RecordPendingControlRetry(
-		graphStore, beadID, cause, workflowTraceNow().UTC(), semanticControlRetryBudget())
+		graph, beadID, cause, workflowTraceNow().UTC(), semanticControlRetryBudget())
 	if recordErr != nil {
 		// Losing the budget write must not change the disposition: pending is
 		// still pending, and escalating on a failed bookkeeping write would
@@ -552,15 +593,24 @@ func handleControlDriftRefusal(cityPath, storePath string, graphStore beads.Stor
 	workflowTracef("control-pending-budget bead=%s attempts=%d first_seen=%s expired=%t repeat=%t err=%v",
 		beadID, pending.Attempts, pending.FirstSeen.UTC().Format(time.RFC3339), pending.Expired, pending.Repeat, cause)
 
+	var unlaunchable *dispatch.UnlaunchableCheckError
+	if !pending.Repeat && errors.As(cause, &unlaunchable) {
+		// A check that cannot launch will not heal by waiting, so the operator
+		// hears about it now rather than at the stall horizon. Edge-triggered
+		// on the reason the record just persisted: a first refusal or a changed
+		// one announces, a verbatim repeat (Repeat) never does, across
+		// dispatcher restarts too.
+		emitControlCheckUnlaunchable(cityPath, storePath, bead, unlaunchable, cause, stderr)
+	}
 	if pending.Expired && strings.TrimSpace(bead.Metadata[beadmeta.ControlPendingStalledMetadataKey]) != "true" {
 		// Latch BEFORE emitting, matching the quarantine path above: a crash
 		// between the two drops one event, which the persisted
 		// gc.control_pending_* keys still explain, whereas emitting first would
 		// re-announce on every sweep if the latch write failed.
-		if latchErr := graphStore.SetMetadata(beadID, beadmeta.ControlPendingStalledMetadataKey, "true"); latchErr != nil {
+		if latchErr := graph.SetMetadata(beadID, beadmeta.ControlPendingStalledMetadataKey, "true"); latchErr != nil {
 			workflowTracef("control-pending-budget bead=%s latching stalled escalation failed err=%v", beadID, latchErr)
 		} else {
-			emitControlStalled(cityPath, storePath, graphStore, bead, cause, pending, pendingControlStall, stderr)
+			emitControlStalled(cityPath, storePath, graph, bead, cause, pending, pendingControlStall, stderr)
 			_, _ = fmt.Fprintf(stderr,
 				"control dispatch: pending stalled bead=%s attempts=%d first_seen=%s budget=%s reason=%v\n",
 				beadID, pending.Attempts, pending.FirstSeen.UTC().Format(time.RFC3339),
@@ -683,6 +733,41 @@ func emitControlStalled(cityPath, storePath string, store beads.Store, bead bead
 	}
 }
 
+// emitControlCheckUnlaunchable publishes the control.check_unlaunchable record
+// for a check control held open because its script cannot be launched, plus a
+// stderr line for the dispatcher log. It changes nothing about the hold: the
+// bead stays open and keeps retrying, and the stall horizon still escalates on
+// control.stalled.
+func emitControlCheckUnlaunchable(cityPath, storePath string, bead beads.Bead, unlaunchable *dispatch.UnlaunchableCheckError, cause error, stderr io.Writer) {
+	rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
+	payload := events.ControlCheckUnlaunchablePayload{
+		BeadID:     bead.ID,
+		Kind:       strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]),
+		RootBeadID: rootID,
+		StorePath:  storePath,
+		CheckPath:  unlaunchable.CheckPath,
+		Error:      controlQuarantineReason(cause, "check_unlaunchable"),
+	}
+
+	rec := openCityRecorderAt(cityPath, stderr)
+	rec.Record(events.Event{
+		Type:    events.ControlCheckUnlaunchable,
+		Actor:   "controller",
+		Subject: bead.ID,
+		Message: fmt.Sprintf("control bead %s held open: check %q cannot be launched: %s",
+			bead.ID, payload.CheckPath, payload.Error),
+		Payload: events.ControlCheckUnlaunchablePayloadJSON(payload),
+		RunID:   rootID,
+	})
+	if closer, ok := rec.(io.Closer); ok {
+		if err := closer.Close(); err != nil {
+			fmt.Fprintf(stderr, "warning: control dispatch: closing event recorder for %s: %v\n", bead.ID, err) //nolint:errcheck // the announcement is best-effort; the hold stands regardless
+		}
+	}
+	_, _ = fmt.Fprintf(stderr, "control dispatch: check unlaunchable bead=%s check_path=%q held open reason=%v\n",
+		bead.ID, payload.CheckPath, cause)
+}
+
 // emitControlRootSettleFailed publishes the control.root_settle_failed record
 // for a workflow root that a quarantined finalizer could not close, mirroring
 // emitControlStalled's pattern above. The marker write onto the root
@@ -738,7 +823,7 @@ type rootSettleFailure struct {
 // make progress. When the bead is a workflow-finalize control whose workflow
 // root fails to settle behind it, the returned *rootSettleFailure is non-nil
 // so the caller can surface the stranded root instead of it going silent.
-func quarantineControlFailureBead(store beads.Store, bead beads.Bead, cause error) (*rootSettleFailure, error) {
+func quarantineControlFailureBead(store beads.GraphStore, bead beads.Bead, cause error) (*rootSettleFailure, error) {
 	beadID := bead.ID
 	failureReason := "control_dispatch_error"
 	if errors.Is(cause, dispatch.ErrControlGraphMalformed) {
@@ -835,7 +920,7 @@ func recordRootSettleFailure(store beads.Store, rootID, finalizerBeadID string, 
 // this the root never reaches Status=="closed" and survives every
 // rootSettled-gated check forever even though its finalizer is dead. See
 // ga-japz50 / ga-xn8ml8.
-func settleRootForQuarantinedFinalizer(store beads.Store, finalizer beads.Bead) error {
+func settleRootForQuarantinedFinalizer(store beads.GraphStore, finalizer beads.Bead) error {
 	rootID := strings.TrimSpace(finalizer.Metadata[beadmeta.RootBeadIDMetadataKey])
 	if rootID == "" || rootID == finalizer.ID {
 		return nil
@@ -1523,7 +1608,8 @@ func decorateDynamicFragmentRecipe(fragment *formula.FragmentRecipe, source bead
 		if binding, ok := controlRoutes[rigContext]; ok {
 			return binding, nil
 		}
-		binding, err := graphroute.ControlDispatcherBinding(store, cityName, cfg, rigContext, cliGraphrouteDeps(cityPath))
+		// store is the caller's graph/scope store, not the sessions class: graphroute resolves session targets through it, as it always has (typed-store T9(d)).
+		binding, err := graphroute.ControlDispatcherBinding(beads.SessionStore{Store: store}, cityName, cfg, rigContext, cliGraphrouteDeps(cityPath))
 		if err != nil {
 			return graphRouteBinding{}, err
 		}
@@ -1607,6 +1693,8 @@ func graphRouteBindingRigContext(binding graphRouteBinding) string {
 }
 
 func decorateDrainItemRecipe(recipe *formula.Recipe, source beads.Bead, store beads.Store, storeRef, cityName, cityPath string, cfg *config.City) error {
+	// store is the caller's graph/scope store, not the sessions class: graphroute resolves session targets through it, as it always has (typed-store T9(d)).
+	storeSessions := beads.SessionStore{Store: store}
 	if recipe == nil {
 		return fmt.Errorf("recipe is nil")
 	}
@@ -1619,7 +1707,7 @@ func decorateDrainItemRecipe(recipe *formula.Recipe, source beads.Bead, store be
 			}
 			scopeKind := strings.TrimSpace(source.Metadata[beadmeta.ScopeKindMetadataKey])
 			scopeRef := strings.TrimSpace(source.Metadata[beadmeta.ScopeRefMetadataKey])
-			return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", scopeKind, scopeRef, storeRef, graphroute.GraphRouteBinding{}, store, cityName, cfg, cliGraphrouteDeps(cityPath))
+			return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", scopeKind, scopeRef, storeRef, graphroute.GraphRouteBinding{}, storeSessions, cityName, cfg, cliGraphrouteDeps(cityPath))
 		}
 		binding, err := graphFallbackBindingForBead(source, store, cityName, cityPath, cfg)
 		if err != nil {
@@ -1634,7 +1722,7 @@ func decorateDrainItemRecipe(recipe *formula.Recipe, source beads.Bead, store be
 		}
 		scopeKind := strings.TrimSpace(source.Metadata[beadmeta.ScopeKindMetadataKey])
 		scopeRef := strings.TrimSpace(source.Metadata[beadmeta.ScopeRefMetadataKey])
-		return graphroute.DecorateGraphWorkflowRecipe(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", scopeKind, scopeRef, storeRef, binding.QualifiedName, binding.SessionName, store, cityName, cfg, cliGraphrouteDeps(cityPath))
+		return graphroute.DecorateGraphWorkflowRecipe(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", scopeKind, scopeRef, storeRef, binding.QualifiedName, binding.SessionName, storeSessions, cityName, cfg, cliGraphrouteDeps(cityPath))
 	}
 	vars, err := drainItemRecipeVars(recipe)
 	if err != nil {
@@ -1642,11 +1730,11 @@ func decorateDrainItemRecipe(recipe *formula.Recipe, source beads.Bead, store be
 	}
 	scopeKind := strings.TrimSpace(source.Metadata[beadmeta.ScopeKindMetadataKey])
 	scopeRef := strings.TrimSpace(source.Metadata[beadmeta.ScopeRefMetadataKey])
-	if binding, ok, err := graphroute.ResolveGraphDirectSessionBinding(store, cityName, cfg, routedTo, workflowExecutionRigContext(source), cliGraphrouteDeps(cityPath)); err != nil {
+	if binding, ok, err := graphroute.ResolveGraphDirectSessionBinding(storeSessions, cityName, cfg, routedTo, workflowExecutionRigContext(source), cliGraphrouteDeps(cityPath)); err != nil {
 		return err
 	} else if ok {
 		defaultRoute := graphroute.GraphRouteBinding{DirectSessionID: binding.DirectSessionID, RigContext: binding.RigContext}
-		return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", scopeKind, scopeRef, storeRef, defaultRoute, store, cityName, cfg, cliGraphrouteDeps(cityPath))
+		return graphroute.DecorateGraphWorkflowRecipeWithDefaultBinding(recipe, graphroute.GraphWorkflowRouteVars(recipe, vars), "", scopeKind, scopeRef, storeRef, defaultRoute, storeSessions, cityName, cfg, cliGraphrouteDeps(cityPath))
 	}
 	return applyGraphRouting(recipe, nil, routedTo, vars, scopeKind, scopeRef, storeRef, store, cityName, cityPath, cfg)
 }
@@ -1684,7 +1772,8 @@ func graphFallbackBindingForBead(source beads.Bead, store beads.Store, cityName,
 		return graphRouteBinding{SessionName: source.Assignee}, nil
 	}
 	rigContext := workflowExecutionRigContext(source)
-	if binding, ok, err := graphroute.ResolveGraphDirectSessionBinding(store, cityName, cfg, routedTo, rigContext, cliGraphrouteDeps(cityPath)); err != nil {
+	// store is the caller's graph/scope store, not the sessions class: graphroute resolves session targets through it, as it always has (typed-store T9(d)).
+	if binding, ok, err := graphroute.ResolveGraphDirectSessionBinding(beads.SessionStore{Store: store}, cityName, cfg, routedTo, rigContext, cliGraphrouteDeps(cityPath)); err != nil {
 		return graphRouteBinding{}, err
 	} else if ok {
 		return binding, nil
@@ -2694,7 +2783,7 @@ func reopenSourceRoute(b beads.Bead) string {
 // reported by the time this runs, so a lookup or convoy-update failure here is
 // surfaced as a warning rather than failing the overall command.
 func reopenTrackingConvoysForReopenedSource(store beads.Store, sourceID string, stdout, stderr io.Writer) {
-	convoys, err := convoycore.TrackingConvoysForItem(store, sourceID)
+	convoys, err := convoycore.TrackingConvoysForItem(beads.WorkStore{Store: store}, sourceID)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "warning: gc workflow reopen-source: listing tracking convoys for %s: %v\n", sourceID, err)
 		return
@@ -3170,7 +3259,8 @@ func (c *sourceWorkflowMatchCollector) scanStore(index int, info convoyStoreView
 		var roots []beads.Bead
 		err := beads.RelicRead(func() error {
 			var listErr error
-			roots, listErr = sourceworkflow.ListLiveRootsInCity(info.store, currentSourceID, currentSourceStoreRef, rootStoreRef, c.cityName)
+			// info.store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
+			roots, listErr = sourceworkflow.ListLiveRootsInCity(beads.GraphMolecule(beads.GraphStore{Store: info.store}), currentSourceID, currentSourceStoreRef, rootStoreRef, c.cityName)
 			return listErr
 		})
 		if err != nil {

@@ -26,8 +26,8 @@ import (
 )
 
 // stopSocketReplyMargin is how much longer a cross-process stop waits for the
-// owner's "ok" than the stop grace itself, covering the SIGKILL and reap that
-// follow an expired grace.
+// owner's reply than the owner's own stop and reap graces, covering scheduling
+// and the socket round trip.
 const stopSocketReplyMargin = 2 * time.Second
 
 // Config holds ACP provider settings.
@@ -74,9 +74,9 @@ func (c *Config) stopGrace() time.Duration {
 }
 
 // stopSocketTimeout bounds a cross-process stop request: the owner replies
-// only after its grace has run out and the process is gone.
+// only after its stop grace and the post-SIGKILL reap grace have both run out.
 func (c *Config) stopSocketTimeout() time.Duration {
-	return c.stopGrace() + stopSocketReplyMargin
+	return c.stopGrace() + runtime.ManagedProcessReapGrace + stopSocketReplyMargin
 }
 
 func (c *Config) outputBufferLines() int {
@@ -627,6 +627,10 @@ func (p *Provider) handshake(ctx context.Context, sc *sessionConn, workDir strin
 
 // Stop terminates the named session. Returns nil if it doesn't exist
 // (idempotent). Sends SIGTERM first, then SIGKILL after a grace period.
+//
+// A process that outlives SIGKILL yields [runtime.ErrProcessNotConfirmedDead],
+// in-process or relayed from the owner's control socket. Stop then keeps the
+// session's sidecars and socket for the retry: the process may still be alive.
 //
 // A dead connection whose name another provider has already rebound is not
 // this provider's to tear down. Stop evicts its own stale bookkeeping and
@@ -1232,7 +1236,9 @@ func (p *Provider) startControlSocket(name string, cmd *exec.Cmd, done <-chan st
 }
 
 // handleControlConn reads a command from the connection and acts on the process.
-// A "stop" escalates from SIGTERM to SIGKILL after stopGrace. An "interrupt"
+// A "stop" escalates from SIGTERM to SIGKILL after stopGrace and replies
+// [runtime.StopReplyNotConfirmedDead] instead of "ok" when the process outlives
+// SIGKILL. An "interrupt"
 // is fire-and-forget: it replies at once and runs owner.interrupt, the owner's
 // session/cancel-and-settle logic, in the background. "turn" and
 // "interrupt-turn <id>" answer from the owner's turn record (see
@@ -1253,8 +1259,11 @@ func handleControlConn(conn net.Conn, cmd *exec.Cmd, done <-chan struct{}, stopG
 	case controlTurn:
 		fmt.Fprintf(conn, "%s\n", owner.turn()) //nolint:errcheck
 	case "stop":
-		_ = runtime.TerminateManagedProcess(cmd, done, stopGrace)
-		conn.Write([]byte("ok\n")) //nolint:errcheck
+		reply := "ok\n"
+		if err := runtime.TerminateManagedProcess(cmd, done, stopGrace); errors.Is(err, runtime.ErrProcessNotConfirmedDead) {
+			reply = runtime.StopReplyNotConfirmedDead + "\n"
+		}
+		conn.Write([]byte(reply)) //nolint:errcheck
 	case "interrupt":
 		// The settle can take the whole cancel_timeout plus the SIGINT
 		// retries, far longer than the caller's socket deadline, and the
@@ -1348,8 +1357,13 @@ func (p *Provider) sendSocketCommand(name, command string, timeout time.Duration
 				return err
 			}
 			scanner := bufio.NewScanner(conn)
-			if scanner.Scan() && scanner.Text() == "ok" {
-				return nil
+			if scanner.Scan() {
+				switch scanner.Text() {
+				case "ok":
+					return nil
+				case runtime.StopReplyNotConfirmedDead:
+					return runtime.ErrProcessNotConfirmedDead
+				}
 			}
 			if err := scanner.Err(); err != nil {
 				return err

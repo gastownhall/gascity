@@ -202,7 +202,7 @@ func nudgeStalledPoolExecution(
 	if sp == nil || cfg == nil || store == nil || snapshotPartial {
 		return // hot reconcile path: never panic on a half-built dependency
 	}
-	if sess, ok := store.(beads.SessionStore); ok && sess.Store == nil {
+	if beads.IsNilStore(store) {
 		return
 	}
 	runNudgeBackstop(sp, store, sessionBeads, nil, now, stdout, executionClaimNudgeLabel, poolExecutionBackstop{

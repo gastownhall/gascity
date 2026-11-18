@@ -761,8 +761,9 @@ func routeRigList(cityPath string, c *api.Client, nilReason string, jsonOutput b
 // effective suspension); a rig the controller has not loaded yet has no
 // running agent and the on-disk suspension doRigList reads. HQ info and
 // per-rig beads status are derived locally (neither lives on the API
-// response); the output carries an _cache_age_s envelope field (JSON) or
-// staleness banner (human).
+// response); the JSON output carries an _cache_age_s envelope field, which
+// the server reports as 0 because the rig list is not read from the bead
+// cache, and human output prints no cache-age footer.
 func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.RigView], jsonOutput bool, stdout, stderr io.Writer) int {
 	// CLI-unification Move-1: mirror doRigList — suppress advisory config
 	// warnings (e.g. missing builtin-pack import) in --json mode so both the
@@ -815,6 +816,7 @@ func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.R
 	for i := range cfg.Rigs {
 		rig := cfg.Rigs[i]
 		suspended, running := suspNames[rig.Name], false
+		federation, namespace := rigListFederation(&rig)
 		if view, ok := loaded[rig.Name]; ok {
 			suspended, running = view.Suspended, view.RunningCount > 0
 		}
@@ -827,6 +829,8 @@ func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.R
 			Running:             running,
 			DefaultSlingTarget:  rig.DefaultSlingTarget,
 			DefaultSlingTargets: rig.DefaultSlingTargets,
+			Federation:          federation,
+			Namespace:           namespace,
 			Beads:               rigBeadsStatus(fs, rig.Path),
 		})
 	}
@@ -835,10 +839,6 @@ func renderRigListFromAPI(fs fsys.FS, cityPath string, cr api.CachedRead[[]api.R
 		return renderRigListJSON(result, stdout, stderr)
 	}
 	renderRigListText(loadedCityName(cfg, cityPath), result, stdout)
-	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
-		fmt.Fprintln(stdout, "")                                                               //nolint:errcheck // best-effort stdout
-		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck // best-effort stdout
-	}
 	return 0
 }
 
@@ -866,8 +866,8 @@ func renderRigListJSON(result RigListJSON, stdout, stderr io.Writer) int {
 
 // renderRigListText renders the human rig-list table from result. displayName is
 // the HQ header name (loadedCityName), which intentionally differs from the HQ
-// item's JSON Name (EffectiveCityName). Shared by both rig-list paths; the
-// API-render path appends its own cache-age banner after calling this.
+// item's JSON Name (EffectiveCityName). Shared by both rig-list paths, so
+// their human output is identical.
 func renderRigListText(displayName string, result RigListJSON, stdout io.Writer) {
 	w := func(s string) { fmt.Fprintln(stdout, s) } //nolint:errcheck // best-effort stdout
 	w("")
@@ -892,14 +892,16 @@ func renderRigListText(displayName string, result RigListJSON, stdout io.Writer)
 		if rig.DefaultBranch != "" {
 			w(fmt.Sprintf("    Default branch: %s", rig.DefaultBranch))
 		}
+		if rig.Federation != "" {
+			line := "    Federation: " + rig.Federation
+			if rig.Namespace != "" {
+				line += " (namespace: " + rig.Namespace + ")"
+			}
+			w(line + " (not enforced by this build)")
+		}
 		w(fmt.Sprintf("    Beads:  %s", rig.Beads))
 	}
 }
-
-// cacheAgeBannerThresholdSeconds is the cache-age cutoff above which human
-// output appends the "reconciler may be lagging" banner. Matches the
-// enabler contract D5 documented in the ga-h6w plan.
-const cacheAgeBannerThresholdSeconds = 30.0
 
 // RigListJSON is the JSON output format for "gc rig list --json".
 type RigListJSON struct {
@@ -925,7 +927,24 @@ type RigListItem struct {
 	Running             bool     `json:"running"`
 	DefaultSlingTarget  string   `json:"default_sling_target,omitempty"`
 	DefaultSlingTargets []string `json:"default_sling_targets,omitempty"`
-	Beads               string   `json:"beads"`
+	// Federation and Namespace mirror the rig's federation settings. Each is
+	// present only when it differs from its default ("city" and "shared"), so
+	// output for a rig that sets neither is unchanged.
+	Federation string `json:"federation,omitempty"`
+	Namespace  string `json:"namespace,omitempty"`
+	Beads      string `json:"beads"`
+}
+
+// rigListFederation returns the rig's federation and namespace for rig-list
+// output, each blank when it is the default.
+func rigListFederation(r *config.Rig) (federation, namespace string) {
+	if r.FederationGuarded() {
+		federation = r.EffectiveFederation()
+	}
+	if r.NamespaceExclusive() {
+		namespace = r.EffectiveNamespace()
+	}
+	return federation, namespace
 }
 
 type RigListSummary struct {
@@ -1001,6 +1020,7 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 		if jsonOutput {
 			running = rigHasRunningAgent(cfg, cfg.Rigs[i].Name, sp)
 		}
+		federation, namespace := rigListFederation(&cfg.Rigs[i])
 		result.Rigs = append(result.Rigs, RigListItem{
 			Name:                cfg.Rigs[i].Name,
 			Path:                cfg.Rigs[i].Path,
@@ -1010,6 +1030,8 @@ func doRigList(fs fsys.FS, cityPath string, jsonOutput bool, stdout, stderr io.W
 			Running:             running,
 			DefaultSlingTarget:  cfg.Rigs[i].DefaultSlingTarget,
 			DefaultSlingTargets: cfg.Rigs[i].DefaultSlingTargets,
+			Federation:          federation,
+			Namespace:           namespace,
 			Beads:               rigBeadsStatus(fs, cfg.Rigs[i].Path),
 		})
 	}

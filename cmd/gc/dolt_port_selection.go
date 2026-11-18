@@ -156,6 +156,10 @@ func repairedManagedDoltRuntimeState(_ string, layout managedDoltRuntimeLayout, 
 	}
 	repaired := state
 	repaired.Running = true
+	if holderPID != state.PID {
+		// The recorded infra scope is the old PID's, not the holder's.
+		repaired.InfraScope = ""
+	}
 	repaired.PID = holderPID
 	repaired.DataDir = layout.DataDir
 	if strings.TrimSpace(repaired.StartedAt) == "" {

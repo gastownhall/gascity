@@ -144,7 +144,7 @@ func boundedOrder(c compiled) (beads.ReadyOrder, bool) {
 // readyRead reads one leg's whole ready set for q, live.
 func readyRead(q beads.ReadyQuery) legRead {
 	return func(_ context.Context, leg Leg) legResult {
-		rows, err := beads.HandlesFor(leg.Store).Live.Ready(q)
+		rows, err := beads.LiveFor(leg.Store).Ready(q)
 		return legResult{rows: rows, err: err}
 	}
 }
@@ -285,7 +285,7 @@ func narrowedAnswerIsExact(ctx context.Context, legs []Leg, c compiled, items []
 			held[i] = true
 			return
 		}
-		_, err := beads.HandlesFor(legs[probes[i].leg].Store).Live.Get(probes[i].id)
+		_, err := beads.LiveFor(legs[probes[i].leg].Store).Get(probes[i].id)
 		held[i] = !errors.Is(err, beads.ErrNotFound)
 	})
 	return !slices.Contains(held, true)

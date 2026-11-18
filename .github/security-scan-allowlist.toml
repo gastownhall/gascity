@@ -1,0 +1,85 @@
+# Accepted dependency risks for the weekly security scan
+# (.github/workflows/security-scan.yml).
+#
+# .github/workflows/scripts/security_scan_gate.py is the only reader. Each
+# entry accepts one advisory for one package release in one source: the
+# lockfile osv-scanner found it in, or the Go module directory govulncheck
+# scanned. The same advisory at another version, or in another lockfile, still
+# blocks. The id may be any of the finding's ids or aliases, so a CVE id also
+# covers the GHSA id of the same advisory.
+#
+# osv-scanner does not read this file, and could not: its own [[IgnoredVulns]]
+# match an id in every file it scans, and it rejects the scope keys here. The
+# workflow runs it with no ignores, so the gate sees every finding, and the
+# gate also leaves the findings it accepts out of the SARIF code scanning gets.
+#
+# Rules, enforced by TestSecurityScanAllowlistMirrorsTrivyWaivers
+# (scripts/security_scan_allowlist_test.go) and the gate itself:
+#   - every entry has an id, an ignoreUntil date, a reason, and the source,
+#     package and version it accepts the advisory in;
+#   - the file holds nothing but [[IgnoredVulns]] entries: any other setting,
+#     such as osv-scanner's [[PackageOverrides]], would change nothing here,
+#     so the gate refuses it;
+#   - the source lock pins that package at that version;
+#   - every entry mirrors a documented waiver in .trivyignore.yaml with the
+#     same id, the same expiry date and a path naming the same release. The
+#     rationale lives there; the reason here is a one-line pointer. A risk is
+#     accepted once, in one reviewed place, and both scans stop accepting it
+#     on the same day.
+#
+# An entry stops accepting on its ignoreUntil date, the day Trivy stops
+# honoring the expired_at it mirrors, and the scheduled scan fails until the
+# pin moves or the waiver is re-reviewed in .trivyignore.yaml and here
+# together.
+
+# gc-mcp-mail Python lock (.github/requirements/mcp-agent-mail.txt): filelock
+# held below 4 and GitPython on 3.1.x by owner decision after the review of
+# #8307. See the gc-mcp-mail block in .trivyignore.yaml.
+
+[[IgnoredVulns]]
+id = "CVE-2026-112940"
+ignoreUntil = 2027-01-26
+source = ".github/requirements/mcp-agent-mail.txt"
+package = "filelock"
+version = "3.29.0"
+reason = "GHSA-v4x8-3wr5-3wq8, filelock 3.29.0 ReadWriteLock; unused by gc-mcp-mail (.trivyignore.yaml)"
+
+[[IgnoredVulns]]
+id = "CVE-2026-114145"
+ignoreUntil = 2027-01-26
+source = ".github/requirements/mcp-agent-mail.txt"
+package = "gitpython"
+version = "3.1.62"
+reason = "GHSA-83vg-56qc-22m7, GitPython 3.1.62 submodule clone; not called by mcp-agent-mail (.trivyignore.yaml)"
+
+[[IgnoredVulns]]
+id = "GHSA-23mf-xhv8-69c2"
+ignoreUntil = 2027-01-26
+source = ".github/requirements/mcp-agent-mail.txt"
+package = "gitpython"
+version = "3.1.62"
+reason = "GitPython 3.1.62; not reachable from mcp-agent-mail (.trivyignore.yaml)"
+
+[[IgnoredVulns]]
+id = "GHSA-f9j4-qggq-h239"
+ignoreUntil = 2027-01-26
+source = ".github/requirements/mcp-agent-mail.txt"
+package = "gitpython"
+version = "3.1.62"
+reason = "GitPython 3.1.62; not reachable from mcp-agent-mail (.trivyignore.yaml)"
+
+[[IgnoredVulns]]
+id = "GHSA-w8jc-g24h-crhw"
+ignoreUntil = 2027-01-26
+source = ".github/requirements/mcp-agent-mail.txt"
+package = "gitpython"
+version = "3.1.62"
+reason = "GitPython 3.1.62 ls_remote/merge_base/move wrappers; not called by mcp-agent-mail (.trivyignore.yaml)"
+
+[[IgnoredVulns]]
+id = "GHSA-m64x-33q8-m5h7"
+ignoreUntil = 2027-01-26
+source = ".github/requirements/mcp-agent-mail.txt"
+package = "gitpython"
+version = "3.1.62"
+reason = "GitPython 3.1.62 parse_actor_and_date CPU DoS; reachable, accepted 2026-11-01 for the shipped mcp-mail deployment only (.trivyignore.yaml)"

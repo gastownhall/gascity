@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"log"
 	"strings"
 	"time"
 
@@ -200,6 +201,11 @@ func relaunchCall(ctx context.Context, c txCaps, p relaunchPlan) (relaunched, er
 			return out, nil
 		}
 		out.Err = r.Relaunch(ctx, p.name, prepared.cfg)
+		// A startup nudge the session's program held back behind a dialog
+		// (program_status = "on", row A20) is queued, never typed or failed.
+		if err := queueStartupNudgeHandback(p.w.CityPath, launchCityConfig(p.w), p.leaf, p.row, p.name, out.Err == nil, p.now); err != nil {
+			log.Printf("v2 relaunch %s: %v", p.row.ID, err)
+		}
 	}
 	out.OK = out.Err == nil
 	return out, nil
@@ -283,7 +289,7 @@ func driftRestartPatch(tp TemplateParams, row session.Info, now time.Time) sessi
 	if preserve {
 		patch["started_config_hash"] = hash
 	}
-	for _, k := range []string{namedSessionConfigDriftDeferredAtMetadata, namedSessionConfigDriftDeferredKeyMetadata, sessionAttachedConfigDriftDeferredAtMetadata, sessionAttachedConfigDriftDeferredKeyMetadata} {
+	for _, k := range []string{namedSessionConfigDriftDeferredAtMetadata, namedSessionConfigDriftDeferredKeyMetadata, sessionAttachedConfigDriftDeferredAtMetadata, sessionAttachedConfigDriftDeferredKeyMetadata, configDriftEscalatedAtMetadata} {
 		patch[k] = ""
 	}
 	return patch

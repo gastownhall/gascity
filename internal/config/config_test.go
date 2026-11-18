@@ -4517,6 +4517,48 @@ name = "mayor"
 	}
 }
 
+// --- DriftDeferralEscalateAfter tests ---
+
+func TestDaemonDriftDeferralEscalateAfter(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want time.Duration
+	}{
+		{"unset uses one hour", "", time.Hour},
+		{"positive is honored", "90m", 90 * time.Minute},
+		{"unparseable uses one hour", "an hour", time.Hour},
+		{"zero uses one hour", "0s", time.Hour},
+		{"negative uses one hour", "-5m", time.Hour},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := DaemonConfig{DriftDeferralEscalateAfter: tc.raw}
+			if got := d.DriftDeferralEscalateAfterDuration(); got != tc.want {
+				t.Errorf("DriftDeferralEscalateAfterDuration() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	if DefaultDriftDeferralEscalateAfter != time.Hour {
+		t.Errorf("DefaultDriftDeferralEscalateAfter = %v, want 1h", DefaultDriftDeferralEscalateAfter)
+	}
+}
+
+func TestParseDriftDeferralEscalateAfter(t *testing.T) {
+	cfg, err := Parse([]byte(`
+[workspace]
+name = "test"
+
+[daemon]
+drift_deferral_escalate_after = "45m"
+`))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := cfg.Daemon.DriftDeferralEscalateAfterDuration(); got != 45*time.Minute {
+		t.Errorf("DriftDeferralEscalateAfterDuration() = %v, want 45m", got)
+	}
+}
+
 // --- StartReadyTimeout tests ---
 
 func TestDaemonStartReadyTimeoutDefault(t *testing.T) {
@@ -8661,5 +8703,29 @@ func TestDefaultDoltReadTimeoutMillisPreservesOuterDeadlineHeadroom(t *testing.T
 	if DefaultDoltReadTimeoutMillis*2 > DefaultDoltWriteTimeoutMillis {
 		t.Fatalf("DefaultDoltReadTimeoutMillis (%d) leaves less than half of DefaultDoltWriteTimeoutMillis (%d) as headroom for #3101's outer wall-clock deadline to catch a stuck connection pile-up first",
 			DefaultDoltReadTimeoutMillis, DefaultDoltWriteTimeoutMillis)
+	}
+}
+
+func TestOrdersConfig_EffectiveMaxDispatchesPerTick(t *testing.T) {
+	intPtr := func(n int) *int { return &n }
+	for _, tc := range []struct {
+		name string
+		in   *int
+		want int
+	}{
+		{"unset uses the default", nil, DefaultMaxOrderDispatchesPerTick},
+		{"zero uses the default", intPtr(0), DefaultMaxOrderDispatchesPerTick},
+		{"negative uses the default", intPtr(-3), DefaultMaxOrderDispatchesPerTick},
+		{"positive is honored", intPtr(9), 9},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := OrdersConfig{MaxDispatchesPerTick: tc.in}.EffectiveMaxDispatchesPerTick()
+			if got != tc.want {
+				t.Fatalf("EffectiveMaxDispatchesPerTick() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+	if DefaultMaxOrderDispatchesPerTick != 4 {
+		t.Fatalf("DefaultMaxOrderDispatchesPerTick = %d, want 4", DefaultMaxOrderDispatchesPerTick)
 	}
 }

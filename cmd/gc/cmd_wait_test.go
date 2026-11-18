@@ -4282,9 +4282,52 @@ func TestRouteWaitList_PassesWaitBeadLabelConstant(t *testing.T) {
 	}
 }
 
-// TestRouteWaitList_StaleBannerOver30s confirms the >30 s cache-age banner on
-// the typed rung.
-func TestRouteWaitList_StaleBannerOver30s(t *testing.T) {
+// TestRouteWaitInspect_CacheAgeFooterOnStderr confirms that on the typed rung
+// `gc wait inspect` prints the cache-age footer on stderr, not stdout, once the
+// served age is more than twice the reported re-scan interval.
+func TestRouteWaitInspect_CacheAgeFooterOnStderr(t *testing.T) {
+	t.Setenv("GC_DEBUG", "0")
+	cityPath := writeWaitTestCity(t)
+	ok := okWaitInspectHandler(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ok.ServeHTTP(&behindCacheResponseWriter{ResponseWriter: w}, r)
+	}))
+	defer srv.Close()
+	c := api.NewCityScopedClient(srv.URL, "test-city")
+
+	var stdout, stderr bytes.Buffer
+	if code := routeWaitInspect(cityPath, c, "", "ga-wait-1", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
+	}
+	assertCacheAgeFooterOnStderr(t, stdout.String(), stderr.String())
+}
+
+// behindCacheResponseWriter overrides the wrapped handler's freshness headers
+// with setBehindCacheHeaders' just before it writes the status line.
+type behindCacheResponseWriter struct {
+	http.ResponseWriter
+	wrote bool
+}
+
+func (w *behindCacheResponseWriter) WriteHeader(code int) {
+	if !w.wrote {
+		w.wrote = true
+		setBehindCacheHeaders(w.ResponseWriter)
+	}
+	w.ResponseWriter.WriteHeader(code)
+}
+
+func (w *behindCacheResponseWriter) Write(b []byte) (int, error) {
+	if !w.wrote {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(b)
+}
+
+// TestRouteWaitList_CacheAgeFooterOnStderr confirms that on the typed rung
+// `gc wait list` prints the cache-age footer on stderr, not stdout, once the
+// served age is more than twice the reported re-scan interval.
+func TestRouteWaitList_CacheAgeFooterOnStderr(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
 	cityPath := writeWaitTestCity(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -4292,7 +4335,7 @@ func TestRouteWaitList_StaleBannerOver30s(t *testing.T) {
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("X-GC-Cache-Age-S", "45")
+		setBehindCacheHeaders(w)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"waits": []map[string]any{}, "capped": false})
 	}))
@@ -4303,9 +4346,7 @@ func TestRouteWaitList_StaleBannerOver30s(t *testing.T) {
 	if code := routeWaitList(cityPath, c, "", "", "", false, &stdout, &stderr); code != 0 {
 		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "cache age: 45s") {
-		t.Errorf("stale banner missing from human output:\n%s", stdout.String())
-	}
+	assertCacheAgeFooterOnStderr(t, stdout.String(), stderr.String())
 }
 
 // TestRouteWaitList_ThreeRungByteIdentical is the cross-rung byte-identity pin
