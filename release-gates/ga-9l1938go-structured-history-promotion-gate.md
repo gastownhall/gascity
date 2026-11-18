@@ -25,7 +25,7 @@ gate_base_sha: 9039b3a61f0d70ef3ca9f03838bfd7b14e0d0ebe
 merge_head: 50083e7e6d1df20c8f7f80fb7d4c84d16774175c
 merge_tree: 932b35c6316e838326d56f7a7219211cf630e552
 merge_validation: merge authority rechecks the current PR head, merge state and required CI at merge time; this gate records its pinned tree.
-deploy_mode: remote; push_remote: fork; heavy_mode: none; stack: none
+deploy_mode: remote; push_remote: origin; heavy_mode: none; stack: none
 build_vet: bazel build --config=remote-exec --keep_going --noremote_local_fallback //...; same with --output_groups=nogo_fix; both exit 0 (c6-remote-{build,vet}.bep.json).
 policy_lane: PASS — shell release/routed-row/topology/residency/hook guards; 14 policy/format Bazel targets; full-tree nogo covered by criterion 6.
 drift_lane: PASS — 7 generated-file targets, OpenAPI sync, make bazel-sync plus empty git diff, make dashboard-check and npm preview smoke. Each lane used its own fresh tree and gate-base.sh run.
@@ -89,7 +89,8 @@ SHARED-HUNKS: one atomic-writer hunk; eight promotion-file hunks (sync import, s
 
 ## Required CI closure
 
-ci_required_closure: /usr/bin/python3 /home/jaword/projects/gc-management/packs/actual/deployer/scripts/ci_required_triggers.py /var/tmp/deploy-ga-9l1938go.l5Tjq81f/merge 9039b3a61f0d70ef3ca9f03838bfd7b14e0d0ebe e814e8705a8bd6799933de23a263bfb0f891c77f fork
+ci_required_closure: /usr/bin/python3 /home/jaword/projects/gc-management/packs/actual/deployer/scripts/ci_required_triggers.py /var/tmp/deploy-ga-9l1938go.l5Tjq81f/merge 9039b3a61f0d70ef3ca9f03838bfd7b14e0d0ebe e814e8705a8bd6799933de23a263bfb0f891c77f origin
+Actual-origin PR classification is byte-identical to the earlier fork plan; the same six exact-tree job accounts apply. The final push probe confirmed origin writable.
 workflow_blob: fa2c1f1b1466278b2eed8f4288d5a4f8eb3cc612; 6 LEAF jobs.
 
 | Job | Account | Evidence |
