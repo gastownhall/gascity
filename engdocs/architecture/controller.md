@@ -191,12 +191,21 @@ indicate bugs.
   once the controller has stopped (acknowledged `stop`, or the supervisor
   stopped it during unregister), `gc stop` takes `.gc/controller.lock` and
   holds it until the bead-store provider is retired. When no controller
-  served a registered city at all, the lock the unregister claimed is held
-  through `gc stop`'s own stop of the city's sessions as well. The lock is
-  released on every exit path (and before any unregister rollback). A
-  supervisor restart or a second `gc start` therefore cannot bring a
-  controller up against a provider that is being torn down; it fails the
-  lock instead.
+  served a registered city at all, `gc stop` stops the city's sessions
+  itself, but only under the lock the unregister claimed once the
+  supervisor dropped the city; without it (the supervisor missed the
+  unregister's probe), `gc stop` only confirms the stop, as after a
+  controller stopped. Its own stop owns the lock until it ends, even after
+  a wall-clock cap stops waiting for it. Before the lock is released, that
+  stop is confirmed against the runtime the same way: a session that
+  survived its stop fails it and restores the registration. A cap that
+  fires while the stop runs leaves the city unregistered rather than
+  restore a registration the supervisor would relaunch under it, printing
+  the path to run `gc stop` on to finish the stop (the city's name no
+  longer resolves). The stop that holds the lock releases it on every exit
+  path. While `gc stop` holds the lock, a supervisor restart or a second
+  `gc start` cannot bring a controller up against a provider that is being
+  torn down; it fails the lock instead.
 
 - **Config reload preserves city identity**: `tryReloadConfig()` rejects
   any reload where `workspace.name` changes. The city name is locked at
