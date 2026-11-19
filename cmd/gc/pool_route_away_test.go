@@ -97,6 +97,20 @@ func requireReleasedRouteAway(t *testing.T, store beads.Store, released []releas
 	}
 }
 
+func requireKeptByHolder(t *testing.T, store beads.Store, released []releasedPoolAssignment, work beads.Bead) {
+	t.Helper()
+	if len(released) != 0 {
+		t.Fatalf("released = %+v, want none: the holder %q keeps its claim", released, work.Assignee)
+	}
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("reload work: %v", err)
+	}
+	if got.Status != "in_progress" || got.Assignee != work.Assignee {
+		t.Fatalf("work = status %q assignee %q, want in_progress held by %q", got.Status, got.Assignee, work.Assignee)
+	}
+}
+
 // TestRouteAwayReleasedThroughProductionComposition is #7004: a live session
 // a-1 of alpha hands bead X off to beta with gc sling, which leaves a-1 as the
 // assignee. Past the settle window the tick's sweep releases X to beta's pool,
@@ -120,4 +134,24 @@ func TestRouteAwayReleasedThroughProductionComposition(t *testing.T) {
 	if counts["beta"] != 1 || counts["alpha"] != 0 {
 		t.Fatalf("scale-check demand = %v, want beta=1 alpha=0 once the handoff is released", counts)
 	}
+}
+
+// TestRouteAwaySettleWindowBoundary pins the lower bound of the settle window:
+// a handoff stamped one second inside the window is still settling, so the
+// holder keeps it; one stamped exactly a window ago has settled and is
+// released to the target pool.
+func TestRouteAwaySettleWindowBoundary(t *testing.T) {
+	cfg := routeAwayCity()
+	open := []session.Info{routeAwayHolder()}
+
+	t.Run("one second inside the window is kept", func(t *testing.T) {
+		store := beads.NewMemStore()
+		work := seedRouteAwayWork(t, store, "a-1", "beta", routedAtAgo(routeAwaySettleWindow-time.Second))
+		requireKeptByHolder(t, store, singleStoreRouteAwayTick(store, cfg, open, work), work)
+	})
+	t.Run("exactly one window old is released", func(t *testing.T) {
+		store := beads.NewMemStore()
+		work := seedRouteAwayWork(t, store, "a-1", "beta", routedAtAgo(routeAwaySettleWindow))
+		requireReleasedRouteAway(t, store, singleStoreRouteAwayTick(store, cfg, open, work), work)
+	})
 }
