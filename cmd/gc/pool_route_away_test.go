@@ -247,3 +247,56 @@ func TestRouteAwayKeepsClaimsTheSweepCannotJudge(t *testing.T) {
 		requireKeptByHolder(t, ownerStore, released, work)
 	})
 }
+
+// TestRouteAwayReachesClaimsAcrossStores pins that a holder reaches a claim
+// for route-away exactly where the sweep's ownership guard says it holds one:
+// on a split city through the claim refs (assignedWorkClaimRefs), and from a
+// city-scoped agent into every rig store. A settled handoff to another pool is
+// released there; one routed to the holder's own agent is not.
+func TestRouteAwayReachesClaimsAcrossStores(t *testing.T) {
+	settled := routedAtAgo(2 * routeAwaySettleWindow)
+
+	t.Run("a split-topology claim on the leading arm is released", func(t *testing.T) {
+		cfg, cityPath, infos := rigScopedWakeFixture(t)
+		cfg.Agents = append(cfg.Agents, config.Agent{Name: "reviewer", Dir: "riga", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)})
+		binding := beads.NewMemStore()
+		seedSplitRoutes(t, cityPath, binding)
+		work := beads.NewMemStore()
+		meta := routedAtAgo(2 * routeAwaySettleWindow)
+		meta[beadmeta.RoutedToMetadataKey] = "riga/reviewer"
+		claim := seedRouteAwayWork(t, work, "test-city--worker-1", meta)
+
+		released := routeAwayTick(work, work, cfg, cityPath, infos, []beads.Bead{claim}, []beads.Store{work}, []string{""}, nil, routeAwayNow)
+		requireReleasedRouteAway(t, work, released, claim)
+	})
+
+	cityScopedHolderTick := func(t *testing.T, routedTo string) (beads.Store, beads.Bead, []releasedPoolAssignment) {
+		t.Helper()
+		cityPath := t.TempDir()
+		seedNoRoutes(t, cityPath)
+		cfg := &config.City{
+			Rigs: []config.Rig{{Name: "repo", Path: t.TempDir()}},
+			Agents: []config.Agent{
+				{Name: "alpha", Scope: "city", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
+				{Name: "beta", Dir: "repo", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
+			},
+		}
+		cityStore := beads.NewMemStore()
+		rigStore := beads.NewMemStore()
+		meta := map[string]string{beadmeta.RoutedToMetadataKey: routedTo}
+		for k, v := range settled {
+			meta[k] = v
+		}
+		claim := seedRouteAwayWork(t, rigStore, "a-1", meta)
+		released := routeAwayTick(cityStore, cityStore, cfg, cityPath, []session.Info{routeAwayHolder()}, []beads.Bead{claim}, []beads.Store{rigStore}, []string{"repo"}, map[string]beads.Store{"repo": rigStore}, routeAwayNow)
+		return rigStore, claim, released
+	}
+	t.Run("a city-scoped holder's rig claim routed to a rig pool is released", func(t *testing.T) {
+		rigStore, claim, released := cityScopedHolderTick(t, "repo/beta")
+		requireReleasedRouteAway(t, rigStore, released, claim)
+	})
+	t.Run("a city-scoped holder's rig claim routed to its own agent is kept", func(t *testing.T) {
+		rigStore, claim, released := cityScopedHolderTick(t, "alpha")
+		requireKeptByHolder(t, rigStore, released, claim)
+	})
+}
