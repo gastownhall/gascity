@@ -25,6 +25,20 @@ type Options struct {
 	// Darwin it means either "every member is a zombie" or "a live member we
 	// may not signal".
 	LiveMembers func(pgid int) (int, error)
+
+	// MemberStates lists the members of process group pgid with their states,
+	// for the error of a persistent EPERM.
+	MemberStates func(pgid int) ([]MemberState, error)
+
+	// EPERMSettle bounds how long a signal that keeps answering EPERM for a
+	// group with a live member is retried before it is reported.
+	EPERMSettle time.Duration
+}
+
+// MemberState is one member of a process group and its kernel state.
+type MemberState struct {
+	Pid   int
+	State string
 }
 
 func (o Options) kill(pid int, sig syscall.Signal) error {

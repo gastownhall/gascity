@@ -149,6 +149,7 @@ func epermOptions(live func(int) (int, error)) Options {
 	return Options{
 		CurrentGroupID: func() int { return 12345 },
 		PollPeriod:     time.Millisecond,
+		EPERMSettle:    5 * time.Millisecond,
 		Kill:           epermKill,
 		LiveMembers:    live,
 	}
@@ -285,5 +286,137 @@ func TestTerminateSIGKILLEPERMWithLiveMemberKeepsTheError(t *testing.T) {
 
 	if err := Terminate(45678, 5*time.Millisecond, opts); !errors.Is(err, syscall.EPERM) {
 		t.Errorf("Terminate() = %v, want EPERM: a live member we may not signal is still there", err)
+	}
+}
+
+// exitingMember models the window Darwin opens when a group's only member has
+// begun to exit on its own (an agent that reads EOF on stdin as Stop closes it):
+// the member is not yet a zombie, so the member reader counts it live, and
+// kill(-pgid, sig) answers EPERM until the exit settles. After settle signals
+// the group is cleared: it takes the signal (end nil) or has nothing left to
+// signal (end ESRCH).
+type exitingMember struct {
+	settle int
+	end    error
+	calls  int
+	sent   bool
+}
+
+func (m *exitingMember) kill(_ int, sig syscall.Signal) error {
+	if sig == 0 {
+		if m.sent {
+			return syscall.ESRCH
+		}
+		return syscall.EPERM
+	}
+	m.calls++
+	if m.calls <= m.settle {
+		return syscall.EPERM
+	}
+	m.sent = true
+	return m.end
+}
+
+func exitingOptions(m *exitingMember) Options {
+	opts := epermOptions(liveMembers(1, nil))
+	opts.Kill = m.kill
+	opts.EPERMSettle = 2 * time.Second
+	return opts
+}
+
+func TestEPERMFromExitingMemberSettlesAtEverySignalSite(t *testing.T) {
+	cmd := &exec.Cmd{Process: &os.Process{Pid: 45678}}
+	for _, end := range []error{nil, syscall.ESRCH} {
+		sites := map[string]func(Options) error{
+			"Terminate": func(o Options) error { return Terminate(45678, time.Second, o) },
+			"InterruptCommand": func(o Options) error {
+				return InterruptCommand(cmd, 45678, o)
+			},
+			"KillCommandGroup": func(o Options) error {
+				return KillCommandGroup(cmd, 45678, o)
+			},
+			"terminateManagedCommandGraces": func(o Options) error {
+				done := make(chan struct{})
+				close(done)
+				return terminateManagedCommandGraces(cmd, 45678, done, time.Second, time.Millisecond, o)
+			},
+		}
+		for name, site := range sites {
+			m := &exitingMember{settle: 3, end: end}
+			if err := site(exitingOptions(m)); err != nil {
+				t.Errorf("%s (member exit ends %v) = %v, want nil: EPERM from a member that is exiting settles", name, end, err)
+			}
+			if m.calls <= m.settle {
+				t.Errorf("%s (member exit ends %v) sent %d signals, want more than %d: the EPERM was not retried", name, end, m.calls, m.settle)
+			}
+		}
+	}
+}
+
+func TestEPERMFromExitingMemberThatBecomesZombieIsGone(t *testing.T) {
+	reads := 0
+	opts := epermOptions(func(int) (int, error) {
+		reads++
+		if reads <= 2 {
+			return 1, nil
+		}
+		return 0, nil
+	})
+	opts.EPERMSettle = 2 * time.Second
+
+	if err := Terminate(45678, time.Second, opts); err != nil {
+		t.Errorf("Terminate() = %v, want nil: the member became a zombie while the EPERM was settling", err)
+	}
+	if reads <= 2 {
+		t.Errorf("member reader consulted %d times, want more than 2: the EPERM was not retried", reads)
+	}
+}
+
+func TestPersistentEPERMErrorCarriesMemberOutcome(t *testing.T) {
+	cmd := &exec.Cmd{Process: &os.Process{Pid: 45678}}
+	states := func(int) ([]MemberState, error) {
+		return []MemberState{{Pid: 4242, State: "SRUN"}, {Pid: 4243, State: "SZOMB"}}, nil
+	}
+	cases := map[string]struct {
+		live func(int) (int, error)
+		want []string
+	}{
+		"live member": {liveMembers(1, nil), []string{"EPERM", "live members=1", "pid 4242 SRUN", "pid 4243 SZOMB"}},
+		"unreadable":  {liveMembers(0, errors.New("sysctl failed")), []string{"EPERM", "sysctl failed", "pid 4242 SRUN"}},
+	}
+	for name, c := range cases {
+		opts := epermOptions(c.live)
+		opts.MemberStates = states
+		sites := map[string]func() error{
+			"Terminate":        func() error { return Terminate(45678, time.Millisecond, opts) },
+			"InterruptCommand": func() error { return InterruptCommand(cmd, 45678, opts) },
+			"terminateManagedCommandGraces": func() error {
+				done := make(chan struct{})
+				close(done)
+				return terminateManagedCommandGraces(cmd, 45678, done, time.Second, time.Millisecond, opts)
+			},
+		}
+		for site, run := range sites {
+			err := run()
+			if !errors.Is(err, syscall.EPERM) {
+				t.Errorf("%s/%s = %v, want EPERM kept", name, site, err)
+				continue
+			}
+			for _, want := range c.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("%s/%s error = %q, want it to contain %q", name, site, err, want)
+				}
+			}
+		}
+	}
+}
+
+func TestPersistentEPERMErrorSaysWhenMemberStatesCannotBeRead(t *testing.T) {
+	opts := epermOptions(liveMembers(1, nil))
+	opts.MemberStates = func(int) ([]MemberState, error) { return nil, errors.New("kinfo unavailable") }
+
+	err := Terminate(45678, time.Millisecond, opts)
+	if !errors.Is(err, syscall.EPERM) || !strings.Contains(err.Error(), "kinfo unavailable") {
+		t.Errorf("Terminate() = %v, want EPERM naming the state-read failure", err)
 	}
 }
