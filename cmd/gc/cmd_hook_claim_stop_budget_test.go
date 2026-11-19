@@ -308,3 +308,80 @@ func TestHookClaimReclaimKeepsItsBudgetAfterEarlierStopGate(t *testing.T) {
 	f.wantNeverClaimed(stranded.ID)
 	f.wantClosed(stranded.ID, "skipped")
 }
+
+// deadlineWorkflowStore fails a read whose context is already spent, the way
+// bd fails a read started after its caller deadline, and serves every other
+// read normally.
+type deadlineWorkflowStore struct {
+	beads.Store
+	ctx context.Context
+}
+
+func (s deadlineWorkflowStore) Get(id string) (beads.Bead, error) {
+	if err := s.ctx.Err(); err != nil {
+		return beads.Bead{}, fmt.Errorf("getting %s: %w", id, err)
+	}
+	return s.Store.Get(id)
+}
+
+// TestHookClaimPostCASRecheckHasItsOwnBudget covers AC-4: the claim CAS spends
+// its whole budget while the workflow root settles under it, and the post-CAS
+// re-check must read on an unexpired budget of its own, detect the stop and
+// close the claim as skipped rather than hand it out. On the shared-context
+// base the re-check read on the CAS's expired context, WorkflowStopReason
+// failed open, and the stopped step was served.
+func TestHookClaimPostCASRecheckHasItsOwnBudget(t *testing.T) {
+	shortenHookClaimBudget(t)
+	for _, tc := range []struct {
+		name     string
+		assignee string
+	}{
+		{name: "routed"},
+		{name: "ready assignment", assignee: "worker-1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newHookWorkflowStopFixture(t)
+			root := f.root("do-work", "")
+			step := f.step("implement", root.ID, nil)
+			if tc.assignee != "" {
+				assignee := tc.assignee
+				if err := f.store.Update(step.ID, beads.UpdateOpts{Assignee: &assignee}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			f.served = []string{step.ID}
+
+			ops := f.ops()
+			// The gate reads fine on a live budget and fail on a spent one,
+			// the way bd does.
+			ops.WorkflowStore = func(ctx context.Context, _ string, _ []string, _, _ string) beads.Store {
+				return deadlineWorkflowStore{Store: f.store, ctx: ctx}
+			}
+			// The CAS commits, the root settles under it, and the CAS then
+			// spends its whole budget before returning.
+			baseClaim := ops.Claim
+			ops.Claim = func(ctx context.Context, dir string, env []string, id, assignee string) (beads.Bead, bool, error) {
+				claimed, ok, err := baseClaim(ctx, dir, env, id, assignee)
+				if err != nil || !ok {
+					return claimed, ok, err
+				}
+				f.closeAs(root.ID, "fail", nil)
+				<-ctx.Done()
+				return claimed, ok, err
+			}
+			var emissions hookClaimBudgetEmissions
+			emissions.install(&ops)
+
+			code, got, stderr := runBudgetClaim(t, budgetClaimOpts(), ops)
+
+			if got != "" {
+				t.Fatalf("doHookClaim = %d handed out %q, want nothing: the root settled under the claim (claims=%v)\nstderr=%s",
+					code, got, f.claims, stderr)
+			}
+			f.wantClosed(step.ID, "skipped")
+			if len(f.claims) != 1 || f.claims[0] != step.ID {
+				t.Fatalf("claim CASes = %v, want exactly [%s]", f.claims, step.ID)
+			}
+		})
+	}
+}
