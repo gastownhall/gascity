@@ -420,3 +420,23 @@ func TestPersistentEPERMErrorSaysWhenMemberStatesCannotBeRead(t *testing.T) {
 		t.Errorf("Terminate() = %v, want EPERM naming the state-read failure", err)
 	}
 }
+
+// Off Darwin there is no member reader, and a Darwin read that fails reads the
+// same: an EPERM there cannot be told apart by waiting, so it is reported on the
+// first signal rather than after the settle window.
+func TestEPERMWithUnreadableMembersIsNotRetried(t *testing.T) {
+	calls := 0
+	opts := epermOptions(liveMembers(0, errors.New("sysctl failed")))
+	opts.EPERMSettle = time.Hour
+	opts.Kill = func(int, syscall.Signal) error {
+		calls++
+		return syscall.EPERM
+	}
+
+	if err := InterruptCommand(&exec.Cmd{Process: &os.Process{Pid: 45678}}, 45678, opts); !errors.Is(err, syscall.EPERM) {
+		t.Errorf("InterruptCommand() = %v, want EPERM", err)
+	}
+	if calls != 1 {
+		t.Errorf("signal sent %d times, want 1: an unreadable group is not retried", calls)
+	}
+}

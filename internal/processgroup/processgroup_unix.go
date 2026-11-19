@@ -90,35 +90,43 @@ func groupGone(pgid int, err error, opts Options) bool {
 // signalGroup delivers sig to every member of process group pgid and returns nil
 // once it has, or once the group has nothing left to signal.
 //
-// An EPERM is retried for the settle window before it is believed: on Darwin a
-// member that is exiting is neither a zombie nor signalable, so a stop that
-// races the agent's own exit sees EPERM for a moment and then ESRCH or a zombie.
-// An EPERM that outlasts the window is a member this process may not signal, and
-// is returned, wrapped, with what the member reader saw.
+// An EPERM for a group the member reader shows to hold a live member is retried
+// for the settle window before it is believed: on Darwin a member that is
+// exiting is neither a zombie nor signalable, so a stop that races the agent's
+// own exit sees EPERM for a moment and then ESRCH or a zombie. An EPERM that
+// outlasts the window is a member this process may not signal. One for a group
+// that cannot be read at all (no reader on this platform, or the read failed) is
+// not retried, since waiting would not tell it apart. Either is returned,
+// wrapped, with what the member reader saw.
 func signalGroup(pgid int, sig syscall.Signal, opts Options) error {
 	settle := opts.epermSettle()
 	deadline := time.Now().Add(settle)
 	for {
 		err := opts.kill(-pgid, sig)
-		if err == nil || groupGone(pgid, err, opts) {
+		if err == nil || errors.Is(err, syscall.ESRCH) {
 			return nil
 		}
 		if !errors.Is(err, syscall.EPERM) {
 			return err
 		}
-		if !time.Now().Before(deadline) {
-			return fmt.Errorf("%w: signal still refused (EPERM) after %s: %s", err, settle, memberOutcome(pgid, opts))
+		live, rerr := opts.liveMembers(pgid)
+		if rerr == nil && live == 0 {
+			return nil
+		}
+		if rerr != nil || !time.Now().Before(deadline) {
+			return fmt.Errorf("%w: signal still refused (EPERM) after %s: %s", err, settle, memberOutcome(pgid, live, rerr, opts))
 		}
 		time.Sleep(opts.pollPeriod())
 	}
 }
 
-// memberOutcome describes what the member reader says about process group pgid,
-// for the error of an EPERM that persisted.
-func memberOutcome(pgid int, opts Options) string {
+// memberOutcome describes what the member reader says about process group pgid
+// (live and rerr are the answer of liveMembers), for the error of an EPERM that
+// persisted.
+func memberOutcome(pgid, live int, rerr error, opts Options) string {
 	var b strings.Builder
-	if live, err := opts.liveMembers(pgid); err != nil {
-		fmt.Fprintf(&b, "member query failed: %v", err)
+	if rerr != nil {
+		fmt.Fprintf(&b, "member query failed: %v", rerr)
 	} else {
 		fmt.Fprintf(&b, "live members=%d", live)
 	}
