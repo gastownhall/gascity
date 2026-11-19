@@ -296,6 +296,11 @@ type Info struct {
 	// clearing last_woke_at, so a same-tick sleep/drain-ack falls back to this
 	// instead of collapsing straight to CreatedAt (#2574).
 	SleptAt string // slept_at (raw)
+	// LastStartFailedAt is the RAW last_start_failed_at metadata (RFC3339 or
+	// empty): when a start last failed in prepare or pre_start, stamped by
+	// StartFailedPatch in the write that clears last_woke_at. The wake budget
+	// ranks a failed session no earlier than its failure (wakeFairnessTime).
+	LastStartFailedAt string // last_start_failed_at (raw)
 	// SuspendedAt is the RAW suspended_at metadata (RFC3339 or empty), stamped
 	// by a suspend. The process-table orphan sweep reads it, after SleptAt, as
 	// the row's last stop.

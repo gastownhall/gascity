@@ -360,8 +360,8 @@ func TestAbandonStepClasses(t *testing.T) {
 	}{
 		{"terminal", terminal, txRuntime{Class: rtAbsent}, session.MetadataPatch(providerTerminalErrorPatch("model_not_found", gatherNow)), "", false, false, ""},
 		{"rate-limit", limited, txRuntime{Class: rtAbsent}, foldClass(session.RateLimitQuarantinePatch(), session.Cell(map[string]string{}, session.ActorController, session.DispEvent{Kind: session.EvQuarantine, Until: gatherNow.Add(defaultRateLimitQuarantineDuration)}, gatherNow)), "", false, false, ""},
-		{"prepare", prepare, txRuntime{Class: rtAbsent}, session.MetadataPatch{"last_woke_at": ""}, "", false, false, ""},
-		{"configured named pending, not died", named, txRuntime{Class: rtAbsent}, session.MetadataPatch{"last_woke_at": ""}, "", false, false, ""},
+		{"prepare", prepare, txRuntime{Class: rtAbsent}, session.StartFailedPatch(gatherNow), "", false, false, ""},
+		{"configured named pending, not died", named, txRuntime{Class: rtAbsent}, session.StartFailedPatch(gatherNow), "", false, false, ""},
 		{"configured named pending, died", namedDied, txRuntime{Class: rtAbsent}, nil, "", true, false, ""},
 		{"pending, timed out", timedOut, txRuntime{Class: rtAbsent}, nil, "", true, false, events.SessionColdStartTimeout},
 		{"pending, own zombie", pending(other), txRuntime{Class: rtZombie, Same: true, Identity: runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "4", Token: "tok-4"}}, nil, "", true, true, ""},

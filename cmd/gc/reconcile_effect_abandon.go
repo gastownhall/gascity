@@ -20,16 +20,18 @@ import (
 // its own token and still settles failed with its cause (an abandon,
 // txStep.Fail with a Write):
 //   - a capacity refusal restores what PreWake wrote (commitStep);
-//   - a prepare failure clears last_woke_at and accrues #46;
+//   - a prepare failure clears last_woke_at, stamps last_start_failed_at and
+//     accrues #46;
 //   - a terminal provider error parks the row (START-028); a rate-limit
 //     screen quarantines it (START-022/029);
 //   - a pending create tears down its own runtime and rolls the row back,
 //     accruing #46 (START-031/033); a configured named one that did not
-//     die keeps its row and clears last_woke_at;
+//     die keeps its row, clears last_woke_at and stamps
+//     last_start_failed_at;
 //   - any other failure restores PreWake, unless PreWake found the row
 //     already creating (#7570's kept marker), and accrues a wake failure,
 //     resetting the conversation unless its transcript is on disk
-//     (START-035).
+//     (START-035), and stamps last_start_failed_at.
 //
 // A deferred outcome, an MCP persist error and a commit-time error write
 // nothing: S1 adopts or launches next pass. A10's rollback is the same
@@ -164,7 +166,7 @@ func abandonStep(v txView) txStep {
 		patch, class := rateLimitQuarantine(v.Row, v.Now)
 		return abandon(patch, class, facts)
 	case f.cause == causePrepare, f.pending && f.terminal == "" && f.configured && !f.died:
-		return abandon(session.MetadataPatch{"last_woke_at": ""}, session.DispositionPatch{}, facts)
+		return abandon(session.StartFailedPatch(v.Now), session.DispositionPatch{}, facts)
 	case f.pending:
 		td, cause := ownTeardown(v)
 		if cause != "" {
@@ -191,13 +193,15 @@ func abandonStep(v txView) txStep {
 // still creating (an operator who killed it mid-start owns it): the
 // conversation reset unless the failure keeps it (failureKeepsConversation;
 // unprobeable providers included) short of the resume backstop, and one
-// wake attempt more, quarantined at the threshold.
+// wake attempt more, quarantined at the threshold. Every such failure stamps
+// last_start_failed_at, as legacy's commitStartFailure does.
 func otherFailurePatch(row session.Info, meta map[string]string, f startFailureRead, now time.Time) (_ session.MetadataPatch, _ session.DispositionPatch, quarantined bool) {
 	patch := session.MetadataPatch{}
 	var class session.DispositionPatch
 	if !f.relaunched {
 		patch, class = restorePatch(f.undo, meta)
 	}
+	maps.Copy(patch, session.StartFailedAtPatch(now))
 	if !creating(row) {
 		return patch, class, false
 	}

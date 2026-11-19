@@ -459,6 +459,16 @@ var registry = slices.Concat([]Field{
 	{Key: beadmeta.OptionMetadataPrefix, Family: true, Class: ClassLaunchConfig, Writers: sites(op(srcManager, "Manager.UpdateTemplateOverrides"))},
 	{Key: beadmeta.LabelRevisionMetadataKey, Class: ClassAdvisory, NewKey: true, NoWriter: "written by internal/beads' native Dolt label CAS (LL1), outside the census dirs; a version stamp no decision reads"},
 	{Key: beadmeta.InfraMigratedFromMetadataKey, Class: ClassAdvisory, Writers: sites(legacy("cmd/gc/infra_class_migrate.go", "infraMigrationRow"))},
+	// A failed start's pacing stamp (ga-z4joq0): both modes write it and the
+	// wake budget's rank reads it, so it is not a new key (R1's rollback
+	// rule): a rolled-back legacy keeps writing and reading it.
+	{
+		Key: LastStartFailedAtKey, Class: ClassAdvisory,
+		Writers: sites(legacy(srcTransition, "StartFailedPatch"), legacy(srcTransition, "StartFailedAtPatch"),
+			legacy(srcLifecycle, "endFailedStartInFlightLease"), legacy(srcLifecycle, "restoreFailedStartPreWakeState"), legacy(srcLifecycle, "commitStartFailure"),
+			v2(srcAbandon, "abandonStep"), v2(srcAbandon, "otherFailurePatch")),
+		Readers: sites(legacy(srcLifecycle, "wakeFairnessTime"), v2("cmd/gc/reconcile_arms_start.go", "rowFacts.startIntent")),
+	},
 	// Usage compute attributes a row by its run chain (beadmeta's runIDChainKeys).
 	{Key: beadmeta.MoleculeIDMetadataKey, Class: ClassAdvisory, NoWriter: "no session-row writer: work beads carry it; usage compute reads a row's run chain", Readers: sites(legacy("cmd/gc/usage_compute.go", "emitComputeFactForBead"))},
 	// External clients' open-world family; gc itself writes only the project id.

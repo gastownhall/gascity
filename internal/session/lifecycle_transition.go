@@ -536,6 +536,28 @@ func SleepPatch(now time.Time, reason string) MetadataPatch {
 	}
 }
 
+// LastStartFailedAtKey is the advisory RFC3339 stamp of a start that failed
+// in prepare or pre_start. The wake budget ranks the session no earlier than
+// it (cmd/gc's wakeFairnessTime), so clearing the failed attempt's
+// last_woke_at does not send it back to the front of a contended budget.
+const LastStartFailedAtKey = "last_start_failed_at"
+
+// StartFailedAtPatch stamps last_start_failed_at alone, for a failed start
+// whose last_woke_at is restored by its PreWake undo or kept as a relaunch's
+// marker.
+func StartFailedAtPatch(now time.Time) MetadataPatch {
+	return MetadataPatch{LastStartFailedAtKey: now.UTC().Format(time.RFC3339)}
+}
+
+// StartFailedPatch ends a start that failed in prepare or pre_start: its
+// in-flight lease (last_woke_at) cleared and last_start_failed_at stamped in
+// the one write.
+func StartFailedPatch(now time.Time) MetadataPatch {
+	patch := StartFailedAtPatch(now)
+	patch["last_woke_at"] = ""
+	return patch
+}
+
 // KeepQuarantineReason drops patch's sleep_reason while the row's quarantine
 // is in force at now and its reason is the quarantine's (quarantine,
 // rate_limit, context-churn): a finalize landing after a late quarantine
