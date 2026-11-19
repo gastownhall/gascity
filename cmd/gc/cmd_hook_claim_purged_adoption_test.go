@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 // The adoption tier against a purged bead.
@@ -36,15 +38,19 @@ type purgedAdoptionEnv struct {
 	prove func(ids []string) (bool, error)
 	// session sets GC_SESSION_ID so the session current-claim seams run.
 	session bool
+	// stamp and stampErr are the ReadSessionClaim fake's answer.
+	stamp    string
+	stampErr error
 	// clearErr is returned by the StampSessionClaim spy.
 	clearErr error
 
-	reads   []string
-	proofs  [][]string
-	claims  []string
-	sessSpy sessionClaimSpy
-	stdout  bytes.Buffer
-	stderr  bytes.Buffer
+	reads      []string
+	proofs     [][]string
+	stampReads []string
+	claims     []string
+	sessSpy    sessionClaimSpy
+	stdout     bytes.Buffer
+	stderr     bytes.Buffer
 }
 
 const purgedAdoptionSessionID = "mc-sess1"
@@ -76,6 +82,10 @@ func (e *purgedAdoptionEnv) ops() hookClaimOps {
 		StampWorkMeta:     noopStampWorkMeta,
 		StampSessionClaim: e.sessSpy.fn,
 		PublishRunMap:     noopPublishRunMap,
+		ReadSessionClaim: func(sessionID string) (string, error) {
+			e.stampReads = append(e.stampReads, sessionID)
+			return e.stamp, e.stampErr
+		},
 	}
 	if e.prove != nil {
 		ops.ProveInputAbsent = func(_ context.Context, ids []string) (bool, error) {
@@ -163,6 +173,111 @@ func TestHookClaimPurgedAdoptionDropsAProvenMissingBead(t *testing.T) {
 
 		if code != 1 || len(e.proofs) != 1 {
 			t.Fatalf("code = %d proofs = %v, want the proven-missing drain after one proof; stderr=%s", code, e.proofs, e.stderr.String())
+		}
+	})
+}
+
+// AC-2: the session's current-claim stamp is cleared only when it names the
+// dropped bead, and before any later claim in the same invocation re-stamps.
+func TestHookClaimPurgedAdoptionClearsOnlyItsOwnStamp(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		extraRows  []string
+		stamp      string
+		stampErr   error
+		clearErr   error
+		wantCode   int
+		wantWrites []string
+		wantStderr string
+	}{
+		{name: "stamp names the dead bead", stamp: "work-1", wantCode: 1, wantWrites: []string{""}},
+		{
+			name: "cleared before the next claim restamps", extraRows: []string{purgedAdoptionOpenRow},
+			stamp: "work-1", wantCode: 0, wantWrites: []string{"", "work-2"},
+		},
+		{name: "empty stamp", stamp: "", wantCode: 1, wantWrites: nil},
+		{name: "stamp names other live work", stamp: "work-9", wantCode: 1, wantWrites: nil},
+		{
+			name: "unreadable stamp is left alone", stampErr: errors.New("session store down"),
+			wantCode: 1, wantWrites: nil, wantStderr: "session store down",
+		},
+		{
+			name: "a failed clear changes no exit code", stamp: "work-1", clearErr: errors.New("clear refused"),
+			wantCode: 1, wantWrites: []string{""}, wantStderr: "clear refused",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := &purgedAdoptionEnv{
+				extraRows: tc.extraRows,
+				missing:   map[string]bool{"work-1": true},
+				prove:     proveAbsent,
+				session:   true,
+				stamp:     tc.stamp,
+				stampErr:  tc.stampErr,
+				clearErr:  tc.clearErr,
+			}
+
+			code := e.run()
+
+			if code != tc.wantCode {
+				t.Fatalf("code = %d, want %d; stdout=%s stderr=%s", code, tc.wantCode, e.stdout.String(), e.stderr.String())
+			}
+			if strings.Join(e.sessSpy.beadIDs, ",") != strings.Join(tc.wantWrites, ",") || len(e.sessSpy.beadIDs) != len(tc.wantWrites) {
+				t.Fatalf("session claim writes = %q, want %q", e.sessSpy.beadIDs, tc.wantWrites)
+			}
+			if len(e.stampReads) != 1 || e.stampReads[0] != purgedAdoptionSessionID {
+				t.Errorf("stamp reads = %v, want exactly one read of %s", e.stampReads, purgedAdoptionSessionID)
+			}
+			if tc.wantStderr != "" && !strings.Contains(e.stderr.String(), tc.wantStderr) {
+				t.Errorf("stderr = %q, want it to report %q", e.stderr.String(), tc.wantStderr)
+			}
+		})
+	}
+
+	t.Run("no session reads no stamp", func(t *testing.T) {
+		e := &purgedAdoptionEnv{missing: map[string]bool{"work-1": true}, prove: proveAbsent, stamp: "work-1"}
+
+		if code := e.run(); code != 1 {
+			t.Fatalf("code = %d, want 1; stderr=%s", code, e.stderr.String())
+		}
+		if len(e.stampReads) != 0 || len(e.sessSpy.beadIDs) != 0 {
+			t.Fatalf("stamp reads = %v writes = %q, want none without a session id", e.stampReads, e.sessSpy.beadIDs)
+		}
+	})
+}
+
+// sessionCurrentClaimVia is the read half of the claim stamp, through the same
+// session front door the stamp writes through.
+func TestSessionCurrentClaimVia(t *testing.T) {
+	t.Run("returns the stamp", func(t *testing.T) {
+		front := hookCurrentFrontDoor(t, "work-1")
+		got, err := sessionCurrentClaimVia(func() (*session.Store, error) { return front, nil }, hookCurrentSessionID)
+		if err != nil || got != "work-1" {
+			t.Fatalf("sessionCurrentClaimVia = (%q, %v), want (work-1, nil)", got, err)
+		}
+	})
+
+	t.Run("wraps a front-door error", func(t *testing.T) {
+		boom := errors.New("front door down")
+		_, err := sessionCurrentClaimVia(func() (*session.Store, error) { return nil, boom }, hookCurrentSessionID)
+		if !errors.Is(err, boom) || !strings.Contains(err.Error(), hookCurrentSessionID) {
+			t.Fatalf("err = %v, want the front-door error wrapped with the session id", err)
+		}
+	})
+
+	t.Run("wraps an unreadable session", func(t *testing.T) {
+		front := hookCurrentFrontDoor(t, "work-1")
+		_, err := sessionCurrentClaimVia(func() (*session.Store, error) { return front, nil }, "mc-absent")
+		if err == nil || !strings.Contains(err.Error(), "mc-absent") {
+			t.Fatalf("err = %v, want the absent session named", err)
+		}
+	})
+
+	t.Run("empty id never opens the front door", func(t *testing.T) {
+		opened := false
+		got, err := sessionCurrentClaimVia(func() (*session.Store, error) { opened = true; return nil, nil }, "  ")
+		if err != nil || got != "" || opened {
+			t.Fatalf("sessionCurrentClaimVia(\"\") = (%q, %v) opened=%v, want (\"\", nil) without opening", got, err, opened)
 		}
 	})
 }

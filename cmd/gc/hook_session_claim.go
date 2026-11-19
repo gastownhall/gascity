@@ -487,6 +487,31 @@ func sessionTriggerBeadVia(front sessionFrontGetter, sessionID string) (string, 
 	return strings.TrimSpace(info.TriggerBeadID), nil
 }
 
+// hookSessionCurrentClaim is the production ReadSessionClaim seam: the
+// session row's current-claim stamp, read through the routed front door the
+// stamp is written through.
+func hookSessionCurrentClaim(sessionID string) (string, error) {
+	return sessionCurrentClaimVia(sessionCurrentClaimFrontDoor, sessionID)
+}
+
+// sessionCurrentClaimVia is hookSessionCurrentClaim through front. An empty
+// session id has no stamp and never opens the front door.
+func sessionCurrentClaimVia(front sessionFrontGetter, sessionID string) (string, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return "", nil
+	}
+	sessFront, err := front()
+	if err != nil {
+		return "", fmt.Errorf("opening the session front door for %q: %w", sessionID, err)
+	}
+	beadID, err := sessFront.CurrentClaimBeadID(sessionID)
+	if err != nil {
+		return "", fmt.Errorf("reading the current claim of session %q: %w", sessionID, err)
+	}
+	return beadID, nil
+}
+
 // hookClaimStoreRefForDir is the production StoreRef seam: the work leg at
 // dir, as the work cells key a claim residing in it ("city" or
 // "rig:<name>"), or "" when the city or its config cannot be read or dir is
