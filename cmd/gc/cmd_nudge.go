@@ -1206,6 +1206,15 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 			lastFreeOS = now
 		}
 
+		// A suspended city is quiescent: once the suspension has drained this
+		// session, every store read below (the due gate's census, the
+		// observation, the delivery) would restart the bd and Dolt servers the
+		// controller retired (ga-5uties7y).
+		if nudgePollCitySuspendedDrained(target, sp) {
+			fmt.Fprintf(stderr, "gc nudge poll: city is suspended and session %q is not running; exiting and leaving queued nudges for the resume\n", target.sessionName) //nolint:errcheck
+			return 0
+		}
+
 		// Cheap gate, read before paying for the expensive observe/deliver
 		// pair: this target's queue state alone (no tmux/session probe) tells
 		// us whether there is anything to deliver this tick. When nothing is
@@ -1919,6 +1928,16 @@ func requestWorkerSiteNudgeWake(target nudgeTarget, store beads.Store) (session.
 	return outcome, nil
 }
 
+// nudgeTargetRuntimeHandle is the runtime handle factory builds for target's
+// session runtime, by its session name. A target with a session row gets the
+// session's startup-turn barrier (worker.Factory.SessionRuntimeHandle): its
+// nudges wait behind a first turn the session's queue still holds, the
+// queue's own delivery of that turn aside, as the session manager's sends do.
+func nudgeTargetRuntimeHandle(factory *worker.Factory, target nudgeTarget) (worker.Handle, error) {
+	return factory.SessionRuntimeHandle(target.sessionID, target.sessionName,
+		strings.TrimSpace(target.providerFamily()), strings.TrimSpace(target.sessionTransport()), target.processNames())
+}
+
 func workerHandleForNudgeTarget(target nudgeTarget, store beads.Store, sp runtime.Provider) (worker.Handle, error) {
 	programShadowDecideForTarget(target)
 	if target.sessionName != "" {
@@ -1940,16 +1959,11 @@ func workerHandleForNudgeTarget(target nudgeTarget, store beads.Store, sp runtim
 				return nil, err
 			}
 		}
-		handle, err := runtimeWorkerHandleWithConfig(
-			target.cityPath,
-			store,
-			sp,
-			target.cfg,
-			target.sessionName,
-			strings.TrimSpace(target.providerFamily()),
-			strings.TrimSpace(target.sessionTransport()),
-			target.processNames(),
-		)
+		factory, err := workerFactoryWithConfig(target.cityPath, store, sp, target.cfg)
+		var handle worker.Handle
+		if err == nil {
+			handle, err = nudgeTargetRuntimeHandle(factory, target)
+		}
 		if err == nil {
 			return handle, nil
 		}

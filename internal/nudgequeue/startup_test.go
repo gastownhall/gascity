@@ -138,3 +138,43 @@ func TestStartupBarrierHoldsBehindATurnNotYetClaimable(t *testing.T) {
 		t.Errorf("an empty barrier holds an item")
 	}
 }
+
+// Kills a direct send that types ahead of a session's still-queued startup
+// turn, one held by a turn that cannot be delivered to it, and a send that
+// passes a turn the queue is delivering without being that delivery: only a
+// send under the key the turn is pinned to passes it.
+func TestHasLiveStartupTurn(t *testing.T) {
+	now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	turn := startupTestTurn("t", "L1", "s-1", now.Add(-time.Minute))
+	unfenced := startupTestTurn("u", "L1", "", now.Add(-time.Minute))
+	other := startupTestTurn("o", "L1", "s-2", now.Add(-time.Minute))
+	expired := startupTestTurn("e", "L1", "s-1", now.Add(-2*time.Hour))
+	plain := turn
+	plain.Reference = nil
+	claimed := turn
+	claimed.DeliveryBatch = "b-1"
+	plainInBatch := plain
+	plainInBatch.DeliveryBatch = "b-1"
+	for _, tc := range []struct {
+		name  string
+		key   string
+		items []Item
+		want  bool
+	}{
+		{"the session's turn", "", []Item{plain, turn}, true},
+		{"an unfenced turn", "", []Item{unfenced}, true},
+		{"another session's turn", "", []Item{other}, false},
+		{"an expired turn", "", []Item{expired}, false},
+		{"a plain submit", "", []Item{plain}, false},
+		{"nothing", "", nil, false},
+		{"an unkeyed send behind a claimed turn", "", []Item{claimed}, true},
+		{"a send under another delivery's key", "b-2", []Item{claimed}, true},
+		{"a keyed send behind an unclaimed turn", "b-1", []Item{turn}, true},
+		{"the delivery of the turn itself", "b-1", []Item{claimed, plainInBatch}, false},
+		{"the delivery of the turn, another turn behind it", "b-1", []Item{claimed, turn}, true},
+	} {
+		if got := HasLiveStartupTurn("s-1", tc.key, tc.items, now); got != tc.want {
+			t.Errorf("%s: HasLiveStartupTurn(key %q) = %v, want %v", tc.name, tc.key, got, tc.want)
+		}
+	}
+}

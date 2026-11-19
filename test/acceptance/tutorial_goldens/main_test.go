@@ -19,8 +19,6 @@ import (
 	"github.com/gastownhall/gascity/test/dolttest"
 )
 
-const canonicalTutorialRoot = "docs/tutorials"
-
 var (
 	goldenGCBinary string
 	goldenBDPath   string
