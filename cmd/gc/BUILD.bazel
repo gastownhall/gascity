@@ -2026,6 +2026,7 @@ go_test(
         "ready_federation_test.go",
         "ready_work_api_test.go",
         "reaper_op_rows_test.go",
+        "reconcile_admit_standing_test.go",
         "reconcile_admit_test.go",
         "reconcile_arms_baseline_test.go",
         "reconcile_arms_close_test.go",

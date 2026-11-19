@@ -141,6 +141,10 @@ type selectionEntry struct {
 	Reason      string
 	WakeReasons []WakeReason
 	InDesired   bool
+	// Standing is a Wake entry's AwakeDecision.Standing: a wake
+	// configuration alone produces (named-always, min-active, pin) for a row
+	// with no work, which admission orders after demand (START-009).
+	Standing bool
 	// AssignedWork is the awake decision's assigned-work anchor.
 	AssignedWork *assignedWorkView
 	DrainReason  string

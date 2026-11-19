@@ -125,7 +125,11 @@ type intent struct {
 	Key      rowKey      // the row; zero for a create
 	Reason   string      // the arm's reason, for the trace
 	Endpoint endpointKey // config-only; a start or create is gated on it
-	Rank     time.Time   // orders starts oldest first: wakeFairnessTime (START-009)
+	Rank     time.Time   // orders starts oldest first within their tier: wakeFairnessTime (START-009)
+	// Standing marks a start for a wake configuration alone produces
+	// (selectionEntry.Standing): it is admitted after the demand starts and
+	// the creates, from the tokens they leave.
+	Standing bool
 	// CreatePlan is a create's plan; Floor marks a pool create that
 	// satisfies a min_active_sessions floor, for the fair share.
 	CreatePlan createPlan
@@ -255,9 +259,10 @@ type admission struct {
 	poolAdmitted bool
 }
 
-// admit is the pass's admission (P4). In order: starts, in LRU rank with
-// probe rotation inside each endpoint; adopts; named creates, then pool
-// creates in fair-share order; the other probing effects; row writes. Each
+// admit is the pass's admission (P4). In order: demand starts, in LRU rank
+// with probe rotation inside each endpoint; adopts; named creates, then pool
+// creates in fair-share order; standing starts (intent.Standing), as the
+// demand starts are ordered; the other probing effects; row writes. Each
 // intent is checked against the boot gate, its row's backoff, the swap
 // pause, then its class's caps.
 //
@@ -320,30 +325,50 @@ func admit(in admitInput, intents []intent) admitResult {
 	return res
 }
 
-// order sorts intents into admission order, stably, and gathers the pool
-// creates' fair-share demand.
-func (a *admission) order(intents []intent) []intent {
-	tier := func(it intent) int {
-		switch spec, ok := effectSpecs[it.Kind]; {
-		case !ok:
-			return 6
-		case spec.class == capStarts:
-			return 0
-		case it.Kind == intentAdopt:
-			return 1
-		case spec.class == capCreates && it.named():
-			return 2
-		case spec.class == capCreates:
-			return 3
-		case spec.class == capProbing:
-			return 4
-		}
-		return 5
+// admitTier is an intent's place in admission order (admission.order).
+type admitTier int
+
+const (
+	tierStarts admitTier = iota
+	tierAdopts
+	tierNamedCreates
+	tierPoolCreates
+	tierStandingStarts
+	tierProbing
+	tierOther
+	tierUnknown
+)
+
+// admitTierOf is it's admission tier.
+func admitTierOf(it intent) admitTier {
+	switch spec, ok := effectSpecs[it.Kind]; {
+	case !ok:
+		return tierUnknown
+	case spec.class == capStarts && it.Standing:
+		return tierStandingStarts
+	case spec.class == capStarts:
+		return tierStarts
+	case it.Kind == intentAdopt:
+		return tierAdopts
+	case spec.class == capCreates && it.named():
+		return tierNamedCreates
+	case spec.class == capCreates:
+		return tierPoolCreates
+	case spec.class == capProbing:
+		return tierProbing
 	}
+	return tierOther
+}
+
+// order sorts intents into admission order, stably, and gathers the pool
+// creates' fair-share demand. Each start tier is in LRU rank, then key, with
+// probe rotation inside each endpoint's slots.
+func (a *admission) order(intents []intent) []intent {
+	startTier := func(t admitTier) bool { return t == tierStarts || t == tierStandingStarts }
 	out := slices.Clone(intents)
 	sort.SliceStable(out, func(i, j int) bool {
 		x, y := out[i], out[j]
-		if tx, ty := tier(x), tier(y); tx != ty || tx != 0 {
+		if tx, ty := admitTierOf(x), admitTierOf(y); tx != ty || !startTier(tx) {
 			return tx < ty
 		}
 		if !x.Rank.Equal(y.Rank) {
@@ -351,14 +376,19 @@ func (a *admission) order(intents []intent) []intent {
 		}
 		return x.Key.Leg < y.Key.Leg || (x.Key.Leg == y.Key.Leg && x.Key.ID < y.Key.ID)
 	})
-	starts := 0
-	for starts < len(out) && tier(out[starts]) == 0 {
-		starts++
+	for lo := 0; lo < len(out); {
+		tier, hi := admitTierOf(out[lo]), lo+1
+		for hi < len(out) && admitTierOf(out[hi]) == tier {
+			hi++
+		}
+		if startTier(tier) {
+			rotateProbeSlots(out[lo:hi], func(it intent) endpointKey { return it.Endpoint },
+				func(k endpointKey, it intent) int { return a.in.Endpoints[k].Refusals[it.Key.ID] })
+		}
+		lo = hi
 	}
-	rotateProbeSlots(out[:starts], func(it intent) endpointKey { return it.Endpoint },
-		func(k endpointKey, it intent) int { return a.in.Endpoints[k].Refusals[it.Key.ID] })
-	for _, it := range out[starts:] {
-		if tier(it) != 3 {
+	for _, it := range out {
+		if admitTierOf(it) != tierPoolCreates {
 			continue
 		}
 		i := slices.IndexFunc(a.demands, func(d poolplan.Demand) bool { return d.Template == it.CreatePlan.Template })
@@ -405,7 +435,9 @@ func (a *admission) admitOne(it *intent) string {
 	}
 	switch spec.class {
 	case capStarts:
-		held, cause := a.startCause(it.Key, it.Endpoint, a.bucket.Tokens, 0)
+		// A standing start follows the creates, so it may spend only the
+		// tokens they leave; a demand start precedes them (createTokens 0).
+		held, cause := a.startCause(it.Key, it.Endpoint, a.bucket.Tokens-a.createTokens, 0)
 		if a.starved = a.starved || cause == causeAwaitingBudget; cause != "" {
 			return cause
 		}
