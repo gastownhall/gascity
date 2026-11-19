@@ -1,0 +1,195 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
+)
+
+// The tests in this file pin #9178: every store operation of a claim tier —
+// the pre-CAS workflow stop gate, the stale reclaim, the claim CAS and the
+// post-CAS re-check — runs on a budget of its own, so a slow ancestry read
+// cannot leave a later operation an expired context. They shorten the package
+// mutation budget, so none of them run in parallel.
+
+// hookClaimTestBudget is the shortened claim budget these tests run with: long
+// enough that an operation started on a fresh budget finishes inside it, short
+// enough that spending a whole budget costs the suite little.
+const hookClaimTestBudget = 300 * time.Millisecond
+
+// shortenHookClaimBudget sets the reserved claim budget for one test.
+func shortenHookClaimBudget(t *testing.T, d time.Duration) {
+	t.Helper()
+	old := hookClaimMutationTimeout
+	hookClaimMutationTimeout = d
+	t.Cleanup(func() { hookClaimMutationTimeout = old })
+}
+
+// budgetSpendingStore is the workflow store a stop gate opens, bound to the
+// context the gate opened it with. A read of a slow id finishes only once that
+// context is done — an ancestry read that spends the gate's whole budget — and
+// then returns the row.
+type budgetSpendingStore struct {
+	beads.Store
+	ctx  context.Context
+	slow map[string]bool
+}
+
+func (s budgetSpendingStore) Get(id string) (beads.Bead, error) {
+	if s.slow[id] {
+		<-s.ctx.Done()
+	}
+	return s.Store.Get(id)
+}
+
+// budgetClaimRecorder records the context state each claim write saw.
+type budgetClaimRecorder struct {
+	claimExpired []bool
+}
+
+// bdLikeClaim wraps claim the way bd honors the caller deadline: a CAS started
+// on an expired context fails without writing.
+func (r *budgetClaimRecorder) bdLikeClaim(claim hookClaimFunc) hookClaimFunc {
+	return func(ctx context.Context, dir string, env []string, id, assignee string) (beads.Bead, bool, error) {
+		expired := ctx.Err() != nil
+		r.claimExpired = append(r.claimExpired, expired)
+		if expired {
+			return beads.Bead{}, false, fmt.Errorf("claiming bead %q: timed out after 0s (caller deadline)", id)
+		}
+		return claim(ctx, dir, env, id, assignee)
+	}
+}
+
+// slowStopGate makes every stop-gate read of the slow ids spend the gate's
+// whole budget.
+func slowStopGate(f *hookWorkflowStopFixture, slow ...string) hookWorkflowStoreFunc {
+	ids := map[string]bool{}
+	for _, id := range slow {
+		ids[id] = true
+	}
+	return func(ctx context.Context, _ string, _ []string, _, _ string) beads.Store {
+		return budgetSpendingStore{Store: f.store, ctx: ctx, slow: ids}
+	}
+}
+
+// budgetClaimRun is one `gc hook --claim` invocation's observable result.
+type budgetClaimRun struct {
+	code   int
+	handed string
+	reason string
+	stdout string
+	stderr string
+}
+
+func runBudgetClaim(t *testing.T, ops hookClaimOps, autoReclaim bool) budgetClaimRun {
+	t.Helper()
+	if ops.EmitClaimFailed == nil {
+		ops.EmitClaimFailed = func(string, hookClaimOptions, error) {}
+	}
+	if ops.EmitClaimWindowExpired == nil {
+		ops.EmitClaimWindowExpired = func(hookClaimWindowExpiry) {}
+	}
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("query", t.TempDir(), hookClaimOptions{
+		Assignee:               "worker-1",
+		IdentityCandidates:     []string{"worker-1"},
+		RouteTargets:           []string{"worker"},
+		DrainAck:               true,
+		JSON:                   true,
+		AutoReclaimStaleClaims: autoReclaim,
+	}, ops, &stdout, &stderr)
+	run := budgetClaimRun{code: code, stdout: stdout.String(), stderr: stderr.String()}
+	for _, line := range strings.Split(strings.TrimSpace(run.stdout), "\n") {
+		var result hookClaimJSONResult
+		if json.Unmarshal([]byte(line), &result) != nil {
+			continue
+		}
+		run.reason = result.Reason
+		if result.Action == "work" {
+			run.handed = result.BeadID
+		}
+	}
+	return run
+}
+
+// assign pins id to assignee, the shape of a ready assignment.
+func (f *hookWorkflowStopFixture) assign(id, assignee string) {
+	f.t.Helper()
+	if err := f.store.Update(id, beads.UpdateOpts{Assignee: &assignee}); err != nil {
+		f.t.Fatalf("assign %s: %v", id, err)
+	}
+}
+
+// claimTiers are the two tiers that run a claim CAS: a routed candidate
+// reaches the fresh tier, one already assigned to this session the ready tier.
+var claimTiers = []struct {
+	name     string
+	assignee string
+	reason   string
+}{
+	{name: "routed", reason: "claimed"},
+	{name: "ready assignment", assignee: "worker-1", reason: "ready_assignment"},
+}
+
+func wantHandedOut(t *testing.T, f *hookWorkflowStopFixture, run budgetClaimRun, id, reason string) {
+	t.Helper()
+	if run.code != 0 || run.handed != id || run.reason != reason {
+		t.Fatalf("doHookClaim = %d handed out %q (%s), want 0 handing out %s (%s); claims=%v\nstdout=%s\nstderr=%s",
+			run.code, run.handed, run.reason, id, reason, f.claims, run.stdout, run.stderr)
+	}
+	for _, starved := range []string{"caller deadline", "deadline exhausted"} {
+		if strings.Contains(run.stderr, starved) {
+			t.Fatalf("stderr reports %q: a claim write ran on a spent budget\nstderr=%s", starved, run.stderr)
+		}
+	}
+	got := f.get(id)
+	if got.Status != "in_progress" || got.Assignee != "worker-1" {
+		t.Fatalf("%s = status %q assignee %q, want in_progress worker-1", id, got.Status, got.Assignee)
+	}
+}
+
+func wantEveryClaimUnexpired(t *testing.T, rec *budgetClaimRecorder) {
+	t.Helper()
+	if len(rec.claimExpired) == 0 {
+		t.Fatal("no claim CAS ran")
+	}
+	for i, expired := range rec.claimExpired {
+		if expired {
+			t.Fatalf("claim CAS %d ran on an expired context (claims expired=%v)", i, rec.claimExpired)
+		}
+	}
+}
+
+// TestHookClaimCASKeepsItsBudgetWhenStopGateSpendsItsOwn (AC-1): a stop gate
+// whose ancestry read spends its whole budget on a live root must leave the
+// claim CAS an unexpired budget of its own, so the candidate is handed out.
+func TestHookClaimCASKeepsItsBudgetWhenStopGateSpendsItsOwn(t *testing.T) {
+	for _, tier := range claimTiers {
+		t.Run(tier.name, func(t *testing.T) {
+			shortenHookClaimBudget(t, hookClaimTestBudget)
+			f := newHookWorkflowStopFixture(t)
+			live := f.root("live run", "")
+			step := f.step("implement", live.ID, nil)
+			if tier.assignee != "" {
+				f.assign(step.ID, tier.assignee)
+			}
+			f.served = []string{step.ID}
+
+			rec := &budgetClaimRecorder{}
+			ops := f.ops()
+			ops.WorkflowStore = slowStopGate(f, live.ID)
+			ops.Claim = rec.bdLikeClaim(ops.Claim)
+
+			run := runBudgetClaim(t, ops, false)
+
+			wantHandedOut(t, f, run, step.ID, tier.reason)
+			wantEveryClaimUnexpired(t, rec)
+		})
+	}
+}

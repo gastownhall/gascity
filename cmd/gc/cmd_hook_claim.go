@@ -979,7 +979,9 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		if hookClaimWorkflowStop(ctx, candidate, claimActor, opts, ops, dir, stderr) {
 			continue
 		}
-		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, claimActor)
+		casCtx, casCancel := ops.claimMutationContext()
+		claimed, ok, err := ops.Claim(casCtx, dir, opts.Env, candidate.ID, claimActor)
+		casCancel()
 		// The straddle fence asks when the CAS landed; stamp it before the
 		// re-stamp and the workflow re-check below spend any more store time.
 		landedAt := ops.nowOrWallClock()
@@ -1184,7 +1186,9 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		if hookClaimWorkflowStop(ctx, candidate, opts.Assignee, opts, ops, dir, stderr) {
 			continue
 		}
-		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, opts.Assignee)
+		casCtx, casCancel := ops.claimMutationContext()
+		claimed, ok, err := ops.Claim(casCtx, dir, opts.Env, candidate.ID, opts.Assignee)
+		casCancel()
 		// The straddle fence asks when the CAS landed; stamp it before the
 		// workflow re-check below spends any more store time.
 		landedAt := ops.nowOrWallClock()
