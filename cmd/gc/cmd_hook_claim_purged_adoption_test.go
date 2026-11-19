@@ -28,6 +28,8 @@ const purgedAdoptionDeadRow = `{"id":"work-1","status":"in_progress","assignee":
 // dead row (plus any extra rows), with recording fakes on every seam the
 // existing-assignment tier and the claim tiers touch.
 type purgedAdoptionEnv struct {
+	// deadRow, when set, replaces purgedAdoptionDeadRow as the first row.
+	deadRow string
 	// extraRows are appended to the work query's output after the dead row.
 	extraRows []string
 	// missing lists the ids the canonical readback answers ErrNotFound for.
@@ -48,6 +50,7 @@ type purgedAdoptionEnv struct {
 	proofs     [][]string
 	stampReads []string
 	claims     []string
+	stopReads  []string
 	sessSpy    sessionClaimSpy
 	stdout     bytes.Buffer
 	stderr     bytes.Buffer
@@ -59,7 +62,15 @@ func (e *purgedAdoptionEnv) ops() hookClaimOps {
 	e.sessSpy.err = e.clearErr
 	ops := hookClaimOps{
 		Runner: func(string, string) (string, error) {
-			return "[" + strings.Join(append([]string{purgedAdoptionDeadRow}, e.extraRows...), ",") + "]", nil
+			dead := purgedAdoptionDeadRow
+			if e.deadRow != "" {
+				dead = e.deadRow
+			}
+			return "[" + strings.Join(append([]string{dead}, e.extraRows...), ",") + "]", nil
+		},
+		WorkflowStore: func(_ context.Context, _ string, _ []string, beadID, _ string) beads.Store {
+			e.stopReads = append(e.stopReads, beadID)
+			return nil
 		},
 		ReadWorkMeta: func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, error) {
 			e.reads = append(e.reads, beadID)
@@ -342,5 +353,48 @@ func TestHookClaimPurgedAdoptionKeepsTheFailOpenFloor(t *testing.T) {
 	}
 	if len(e.proofs) != 0 {
 		t.Fatalf("proofs = %v, want the prover never called for a non-not-found readback error", e.proofs)
+	}
+}
+
+// AC-5: dropping a proven-missing assignment re-selects over the rows left, so
+// a second live assignment is adopted in the same invocation rather than the
+// seat draining every tick for as long as the stale row is cached.
+func TestHookClaimPurgedAdoptionReselectsTheNextAssignment(t *testing.T) {
+	e := &purgedAdoptionEnv{
+		extraRows: []string{`{"id":"work-2","status":"in_progress","assignee":"worker-1","metadata":{"gc.routed_to":"worker"}}`},
+		missing:   map[string]bool{"work-1": true},
+		prove:     proveAbsent,
+	}
+
+	code := e.run()
+
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stdout=%s stderr=%s", code, e.stdout.String(), e.stderr.String())
+	}
+	if !strings.Contains(e.stdout.String(), `"reason":"existing_assignment"`) || !strings.Contains(e.stdout.String(), `"bead_id":"work-2"`) {
+		t.Fatalf("stdout = %q, want work-2 adopted as existing_assignment", e.stdout.String())
+	}
+	if strings.Join(e.reads, ",") != "work-1,work-2" {
+		t.Fatalf("canonical reads = %v, want [work-1 work-2]", e.reads)
+	}
+}
+
+// A proven-missing row never reaches the stopped-workflow gate: there is no
+// bead left to close, and the gate would only try to write to one.
+func TestHookClaimPurgedAdoptionSkipsTheStopGate(t *testing.T) {
+	e := &purgedAdoptionEnv{
+		deadRow: `{"id":"work-1","status":"in_progress","assignee":"worker-1",` +
+			`"metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1"}}`,
+		missing: map[string]bool{"work-1": true},
+		prove:   proveAbsent,
+	}
+
+	if code := e.run(); code != 1 {
+		t.Fatalf("code = %d, want 1; stderr=%s", code, e.stderr.String())
+	}
+	for _, id := range e.stopReads {
+		if id == "work-1" {
+			t.Fatalf("stop gate opened the workflow store for %v, want the missing work-1 never gated", e.stopReads)
+		}
 	}
 }

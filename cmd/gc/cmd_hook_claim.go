@@ -635,22 +635,30 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		return hookClaimResult{}
 	}
 
-	if result, bead, ok := hookClaimExistingAssignment(candidates, *opts); ok {
+	// Each pass that finds a proven-missing assignment drops that one row and
+	// looks again, so the loop is bounded by the candidates.
+	for {
+		result, bead, ok := hookClaimExistingAssignment(candidates, *opts)
+		if !ok {
+			break
+		}
 		// Adoption mints no CAS, so until now it minted its receipt on the word
 		// of the work query alone — and a stale caching-store row survives long
 		// enough to re-serve a bead the dispatcher already gave to a fresher
 		// seat. Certify against the canonical store before promising it.
 		verdict, canonicalAssignee := certifyHookAdoption(bead, *opts, *ops, dir, stderr)
+		if verdict == hookAdoptionMissing {
+			// No store of the city holds it: it is no longer a candidate, and
+			// another assignment, then the claim tiers below, are the recovery.
+			dropMissingHookAdoption(bead.ID, *opts, *ops, stderr)
+			candidates = withoutHookCandidate(candidates, bead.ID)
+			continue
+		}
 		// Holding a bead is no reason to resume it once its workflow stopped:
 		// the step a worker took before its root failed is exactly the one a
 		// re-poll would otherwise hand straight back. A stopped bead is closed
 		// and not adopted, and the claim tiers below look for live work.
-		if verdict == hookAdoptionMissing {
-			// No store of the city holds it: it is no longer a candidate, and
-			// the claim tiers below are the recovery.
-			dropMissingHookAdoption(bead.ID, *opts, *ops, stderr)
-			candidates = withoutHookCandidate(candidates, bead.ID)
-		} else if verdict != hookAdoptionRefused && !hookClaimStoppedAdoption(bead, canonicalAssignee, *opts, *ops, dir, stderr) {
+		if verdict != hookAdoptionRefused && !hookClaimStoppedAdoption(bead, canonicalAssignee, *opts, *ops, dir, stderr) {
 			if restamped, adopt := restampHookAdoption(bead, canonicalAssignee, verdict, *opts, *ops, dir, stderr); adopt {
 				bead = restamped
 				result.Assignee = restamped.Assignee
@@ -668,6 +676,7 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		// #5716 loop, while a drain leaves the bead in place, adoptable by the
 		// next attempt once the store recovers, and the operator with the
 		// recovery command restampHookAdoption printed.
+		break
 	}
 
 	readyResult := claimFirstReadyHookAssignment(candidates, *opts, *ops, dir, stdout, stderr)
