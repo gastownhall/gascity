@@ -2988,6 +2988,14 @@ type DaemonConfig struct {
 	// single tick. Fresh generic pool session-bead creation uses the same
 	// budget so the controller does not materialize more ordinary pool sessions
 	// than it can wake. Bounded dependency-floor prerequisites are exempt.
+	// When more sessions are ready to start than the budget allows, sessions
+	// woken for work (assigned or routed work, demand-driven pool and
+	// on-demand sessions, explicit wakes, attached terminals) start before
+	// sessions kept up only by configuration (named sessions with mode
+	// "always", min_active_sessions floors, pins) that have no work; within
+	// each group the session least recently woken, or least recently failed
+	// to start, goes first. When the budget is not exhausted, every ready
+	// session starts in the same tick.
 	// Nil (unset) defaults to 5. Values <= 0 are treated as the default — set a
 	// positive integer to override.
 	MaxWakesPerTick *int `toml:"max_wakes_per_tick,omitempty" jsonschema:"default=5"`
