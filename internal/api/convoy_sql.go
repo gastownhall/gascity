@@ -446,16 +446,54 @@ func (s *Server) tryFullWorkflowSQL(workflowID, fallbackScopeKind, fallbackScope
 		return nil, errNoSQLWorkflowStores
 	}
 
-	type sqlWorkflowRootMatch struct {
-		candidate workflowSQLStoreCandidate
-		root      beads.Bead
+	matches, err := s.probeWorkflowSQLRoots(candidates, workflowID)
+	if err != nil {
+		return nil, err
 	}
-	matches := make([]sqlWorkflowRootMatch, 0, len(candidates))
-	// Retain the first genuine probe failure (Dolt unreachable, query error)
-	// so a fully-failed sweep surfaces the real cause rather than a synthetic
-	// "not found" — that real cause is exactly what the #2940 fallback log
-	// needs to be actionable. A clean miss (ok == false, err == nil) is not a
-	// failure: the workflow simply isn't in that store.
+
+	cityScopeRef := workflowCityScopeRef(s.state.CityName())
+	selectedRoot, chosen, err := selectWorkflowSQLMatch(matches, fallbackScopeKind, fallbackScopeRef, cityScopeRef)
+	if err != nil {
+		return nil, err
+	}
+
+	host, port, database, user, password, err := resolveDoltConnection(s.state.CityPath(), chosen.path)
+	if err != nil {
+		return nil, err
+	}
+
+	workflowBeads, beadIndex, depMap, err := workflowSQLSnapshot(user, password, host, port, database, selectedRoot.ID)
+	if err != nil {
+		return nil, err
+	}
+	if len(workflowBeads) == 0 {
+		return nil, fmt.Errorf("no beads found")
+	}
+
+	root, ok := beadIndex[selectedRoot.ID]
+	if !ok {
+		return nil, fmt.Errorf("root bead not found in SQL results")
+	}
+
+	return workflowSQLSnapshotResponse(root, workflowBeads, beadIndex, depMap, chosen.info, fallbackScopeKind, fallbackScopeRef, snapshotIndex), nil
+}
+
+// workflowSQLRootMatch is one SQL candidate store that holds the workflow root.
+type workflowSQLRootMatch struct {
+	candidate workflowSQLStoreCandidate
+	root      beads.Bead
+}
+
+// probeWorkflowSQLRoots asks every candidate store with a direct SQL endpoint
+// for the workflow root. A proxied-local scope has no endpoint and is skipped,
+// and a sweep that skips every candidate is errNoSQLWorkflowStores. The first
+// genuine probe failure (Dolt unreachable, query error) is retained so a
+// fully-failed sweep surfaces the real cause rather than a synthetic "not
+// found" — that real cause is exactly what the #2940 fallback log needs to be
+// actionable. A clean miss (ok == false, err == nil) is not a failure: the
+// workflow simply isn't in that store.
+func (s *Server) probeWorkflowSQLRoots(candidates []workflowSQLStoreCandidate, workflowID string) ([]workflowSQLRootMatch, error) {
+	matches := make([]workflowSQLRootMatch, 0, len(candidates))
 	var firstProbeErr error
 	sqlStores := 0
 	for _, candidate := range candidates {
@@ -480,7 +518,7 @@ func (s *Server) tryFullWorkflowSQL(workflowID, fallbackScopeKind, fallbackScope
 		if !ok {
 			continue
 		}
-		matches = append(matches, sqlWorkflowRootMatch{candidate: candidate, root: root})
+		matches = append(matches, workflowSQLRootMatch{candidate: candidate, root: root})
 	}
 	if sqlStores == 0 {
 		return nil, errNoSQLWorkflowStores
@@ -491,8 +529,13 @@ func (s *Server) tryFullWorkflowSQL(workflowID, fallbackScopeKind, fallbackScope
 		}
 		return nil, fmt.Errorf("workflow %q not found in sql stores", workflowID)
 	}
+	return matches, nil
+}
 
-	cityScopeRef := workflowCityScopeRef(s.state.CityName())
+// selectWorkflowSQLMatch picks the root among the matching SQL stores the way
+// the sweep does (selectWorkflowRootMatch) and returns it with the candidate
+// store that holds it.
+func selectWorkflowSQLMatch(matches []workflowSQLRootMatch, fallbackScopeKind, fallbackScopeRef, cityScopeRef string) (beads.Bead, workflowSQLStoreCandidate, error) {
 	workflowMatches := make([]workflowRootMatch, 0, len(matches))
 	for _, match := range matches {
 		workflowMatches = append(workflowMatches, workflowRootMatch{
@@ -502,48 +545,25 @@ func (s *Server) tryFullWorkflowSQL(workflowID, fallbackScopeKind, fallbackScope
 	}
 	selected, ok := selectWorkflowRootMatch(workflowMatches, fallbackScopeKind, fallbackScopeRef, cityScopeRef)
 	if !ok {
-		return nil, fmt.Errorf("sql root match selection failed")
+		return beads.Bead{}, workflowSQLStoreCandidate{}, fmt.Errorf("sql root match selection failed")
 	}
-
-	var chosen workflowSQLStoreCandidate
-	foundCandidate := false
 	for _, match := range matches {
 		if match.root.ID == selected.root.ID && match.candidate.info.ref == selected.info.ref {
-			chosen = match.candidate
-			foundCandidate = true
-			break
+			return selected.root, match.candidate, nil
 		}
 	}
-	if !foundCandidate {
-		return nil, fmt.Errorf("sql root match candidate missing")
-	}
+	return beads.Bead{}, workflowSQLStoreCandidate{}, fmt.Errorf("sql root match candidate missing")
+}
 
-	host, port, database, user, password, err := resolveDoltConnection(s.state.CityPath(), chosen.path)
-	if err != nil {
-		return nil, err
-	}
+// workflowSQLSnapshotResponse assembles the snapshot a SQL read of one store
+// answers with. It collects physical deps only — logical nodes are computed by
+// real-world app.
+func workflowSQLSnapshotResponse(root beads.Bead, workflowBeads []beads.Bead, beadIndex map[string]beads.Bead, depMap map[string][]beads.Dep, info workflowStoreInfo, fallbackScopeKind, fallbackScopeRef string, snapshotIndex uint64) *workflowSnapshotResponse {
+	workflowDeps, partial := collectWorkflowDeps(&prefetchedDepStore{deps: depMap}, beadIndex)
 
-	workflowBeads, beadIndex, depMap, err := workflowSQLSnapshot(user, password, host, port, database, selected.root.ID)
-	if err != nil {
-		return nil, err
-	}
-	if len(workflowBeads) == 0 {
-		return nil, fmt.Errorf("no beads found")
-	}
+	scopeKind, scopeRef := workflowSQLSnapshotScope(root, info, fallbackScopeKind, fallbackScopeRef)
 
-	root, ok := beadIndex[selected.root.ID]
-	if !ok {
-		return nil, fmt.Errorf("root bead not found in SQL results")
-	}
-
-	store := &prefetchedDepStore{deps: depMap}
-
-	// Collect physical deps only — logical nodes are computed by real-world app.
-	workflowDeps, partial := collectWorkflowDeps(store, beadIndex)
-
-	scopeKind, scopeRef := workflowSQLSnapshotScope(root, chosen.info, fallbackScopeKind, fallbackScopeRef)
-
-	storeRef := chosen.info.ref
+	storeRef := info.ref
 	beadResponses := make([]workflowBeadResponse, 0, len(workflowBeads))
 	for _, bead := range workflowBeads {
 		beadResponses = append(beadResponses, workflowBeadResponseFromBead(bead))
@@ -568,7 +588,7 @@ func (s *Server) tryFullWorkflowSQL(workflowID, fallbackScopeKind, fallbackScope
 	if snapshotIndex > 0 {
 		snapshot.SnapshotEventSeq = &snapshotIndex
 	}
-	return snapshot, nil
+	return snapshot
 }
 
 func workflowSQLSnapshotScope(root beads.Bead, info workflowStoreInfo, fallbackScopeKind, fallbackScopeRef string) (string, string) {
