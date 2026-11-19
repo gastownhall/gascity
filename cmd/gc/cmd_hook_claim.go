@@ -266,8 +266,11 @@ type hookClaimOps struct {
 	// verdict's state says: gc.outcome=skipped for complete input, a hard
 	// failure with gc.failure_reason=input_purged for purged input.
 	RetireWorkflow hookRetireWorkflowFunc
-	// ProveInputAbsent proves workflow input ids absent from every store of
-	// the city. Nil proves nothing, so no input is ever read as purged.
+	// ProveInputAbsent proves ids absent from every store of the city: the
+	// workflow inputs the retirement gate reads as purged, and an adopted
+	// bead whose canonical readback found nothing (certifyHookAdoption). Nil
+	// proves nothing, so no input is ever read as purged and no adoption as
+	// missing.
 	ProveInputAbsent workflowInputAbsenceProver
 	// EmitClaimRejected publishes a bead.claim_rejected event when a claim is
 	// lost to a different live claimant (ADR-0009). Best-effort.
@@ -636,7 +639,11 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		// the step a worker took before its root failed is exactly the one a
 		// re-poll would otherwise hand straight back. A stopped bead is closed
 		// and not adopted, and the claim tiers below look for live work.
-		if verdict != hookAdoptionRefused && !hookClaimStoppedAdoption(bead, canonicalAssignee, *opts, *ops, dir, stderr) {
+		if verdict == hookAdoptionMissing {
+			// No store of the city holds it: it is no longer a candidate, and
+			// the claim tiers below are the recovery.
+			candidates = withoutHookCandidate(candidates, bead.ID)
+		} else if verdict != hookAdoptionRefused && !hookClaimStoppedAdoption(bead, canonicalAssignee, *opts, *ops, dir, stderr) {
 			if restamped, adopt := restampHookAdoption(bead, canonicalAssignee, verdict, *opts, *ops, dir, stderr); adopt {
 				bead = restamped
 				result.Assignee = restamped.Assignee
@@ -1432,6 +1439,11 @@ const (
 	// hookAdoptionRefused: the canonical store names a different owner. The
 	// receipt is withheld.
 	hookAdoptionRefused
+	// hookAdoptionMissing: the claim's store answered not-found AND the
+	// city-wide absence proof found the bead in no store — it was purged
+	// since it was claimed. The receipt is withheld and the row is no longer
+	// an adoption candidate.
+	hookAdoptionMissing
 	// hookClaimMinted: not an adoption at all — a claim tier just won this
 	// claim and read it back canonically. It tells restampHookAdoption that a
 	// failed re-stamp must still hand the bead out (with the recovery
@@ -1463,8 +1475,7 @@ func certifyHookAdoption(bead beads.Bead, opts hookClaimOptions, ops hookClaimOp
 	defer cancel()
 	canonical, err := ops.ReadWorkMeta(ctx, dir, opts.Env, beadID, opts.Assignee)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc hook --claim: adopting %s without a canonical ownership readback: %v\n", beadID, err) //nolint:errcheck
-		return hookAdoptionUnverified, ""
+		return certifyUnreadableHookAdoption(beadID, err, ops, stderr), ""
 	}
 	if !hookClaimHasIdentity(canonical.Assignee, opts.IdentityCandidates) {
 		_, _ = fmt.Fprintf(stderr,
@@ -1479,6 +1490,47 @@ func certifyHookAdoption(bead beads.Bead, opts hookClaimOptions, ops hookClaimOp
 		return hookAdoptionRefused, ""
 	}
 	return hookAdoptionOwned, strings.TrimSpace(canonical.Assignee)
+}
+
+// withoutHookCandidate returns candidates minus the row whose id is beadID.
+func withoutHookCandidate(candidates []beads.Bead, beadID string) []beads.Bead {
+	kept := make([]beads.Bead, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.ID != beadID {
+			kept = append(kept, candidate)
+		}
+	}
+	return kept
+}
+
+// certifyUnreadableHookAdoption decides an adoption whose canonical readback
+// failed with err.
+//
+// A not-found from the claim's own store is not proof the bead is gone: a rig
+// seat's work query federates the city store and the class binding, which its
+// readback does not read (see hookStartedKeyFor). So absence is decided only
+// by the city-wide prover, and only after a not-found — any other readback
+// error, a nil prover, a prover that found the bead or could not finish all
+// leave the adoption hookAdoptionUnverified, the fail-open floor.
+func certifyUnreadableHookAdoption(beadID string, err error, ops hookClaimOps, stderr io.Writer) hookAdoptionVerdict {
+	if !hookClaimBeadIsElsewhere(err) || ops.ProveInputAbsent == nil {
+		fmt.Fprintf(stderr, "gc hook --claim: adopting %s without a canonical ownership readback: %v\n", beadID, err) //nolint:errcheck
+		return hookAdoptionUnverified
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
+	defer cancel()
+	absent, proofErr := ops.ProveInputAbsent(ctx, []string{beadID})
+	switch {
+	case proofErr != nil:
+		fmt.Fprintf(stderr, "gc hook --claim: adopting %s without a canonical ownership readback: %v (proving it absent from the city failed: %v)\n", beadID, err, proofErr) //nolint:errcheck
+		return hookAdoptionUnverified
+	case absent:
+		fmt.Fprintf(stderr, "gc hook --claim: not re-serving %s: no store of the city holds it (purged since it was claimed)\n", beadID) //nolint:errcheck
+		return hookAdoptionMissing
+	default:
+		fmt.Fprintf(stderr, "gc hook --claim: adopting %s without a canonical ownership readback: %v\n", beadID, err) //nolint:errcheck
+		return hookAdoptionUnverified
+	}
 }
 
 // restampHookAdoption rewrites an adopted bead's assignee from a legacy
