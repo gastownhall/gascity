@@ -125,10 +125,15 @@ done
 case " %s " in
   *" $db "*) exec %s "${args[@]}" ;;
 esac
+# The live-session probe selects no database and reads the server-wide
+# processlist, which any sql-server answers whatever it serves.
+case "$query" in
+  *information_schema.processlist*) exec %s "${args[@]}" ;;
+esac
 printf 'db=%%s query=%%s\n' "$db" "$query" >> %s
 printf 'error on line 1 for query %%s: Error 1049 (HY000): database not found: %%s\n' "$query" "$db" >&2
 exit 1
-`, strings.Join(served, " "), shellQuote(inner), shellQuote(fixture.doltLog)))
+`, strings.Join(served, " "), shellQuote(inner), shellQuote(inner), shellQuote(fixture.doltLog)))
 }
 
 // makeCompactRigConfigUnreadable removes every permission from the rig's

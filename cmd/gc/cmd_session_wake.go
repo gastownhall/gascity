@@ -381,11 +381,14 @@ func sessionWakeHasRunnableTemplateInfo(info session.Info, cfg *config.City) boo
 }
 
 // sessionWakeResolveAgentInfo resolves the config.Agent that owns this
-// session's template, the same lookup sessionWakeHasRunnableTemplateInfo
-// uses to decide runnability. Returns nil when cfg is nil or no agent
-// matches -- callers that also need "is there a runnable template"
-// should treat a nil cfg as runnable themselves, since this helper
-// can't distinguish "no cfg" from "no match" on its own.
+// session's template the way the controller built the session, the same
+// lookup sessionWakeHasRunnableTemplateInfo uses to decide runnability:
+// findSessionAgentByTemplate's exact, migration and rig-stamped matches.
+// The rig-stamped copy a generic scope="rig" agent resolves to is not an
+// element of cfg.Agents, so callers only read it. Returns nil when cfg is
+// nil or no agent matches -- callers that also need "is there a runnable
+// template" should treat a nil cfg as runnable themselves, since this
+// helper can't distinguish "no cfg" from "no match" on its own.
 func sessionWakeResolveAgentInfo(info session.Info, cfg *config.City) *config.Agent {
 	if cfg == nil {
 		return nil
@@ -394,7 +397,7 @@ func sessionWakeResolveAgentInfo(info session.Info, cfg *config.City) *config.Ag
 	if template == "" {
 		template = info.Template
 	}
-	return findAgentByTemplate(cfg, template)
+	return findSessionAgentByTemplate(cfg, template)
 }
 
 func sessionWakeRequestedCreateInfo(info session.Info) bool {

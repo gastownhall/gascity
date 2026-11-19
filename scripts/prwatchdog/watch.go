@@ -7,9 +7,13 @@ import (
 	"time"
 )
 
-// Fetcher retrieves the current set of check runs for a head commit.
+// Fetcher retrieves the observed CI state for a head commit.
 type Fetcher interface {
 	FetchCheckRuns(ctx context.Context, headSHA string) ([]CheckRun, error)
+	// FetchAwaitingApproval reports whether the head's workflows are held
+	// for a maintainer's approval. That state creates check suites but no
+	// check runs, so FetchCheckRuns cannot see it.
+	FetchAwaitingApproval(ctx context.Context, headSHA string) (bool, error)
 }
 
 // Clock reports the current time, abstracted for testability.
@@ -66,7 +70,7 @@ func Watch(ctx context.Context, fetcher Fetcher, clock Clock, sleeper Sleeper, o
 			}
 		}
 
-		eval := Evaluate(Input{
+		in := Input{
 			HeadSHA:                  opts.HeadSHA,
 			CheckRuns:                runs,
 			Elapsed:                  elapsed,
@@ -74,7 +78,19 @@ func Watch(ctx context.Context, fetcher Fetcher, clock Clock, sleeper Sleeper, o
 			NeedsMacLabel:            opts.NeedsMacLabel,
 			NeedsReviewFormulasLabel: opts.NeedsReviewFormulasLabel,
 			FetchError:               err,
-		})
+		}
+		eval := Evaluate(in)
+		if eval.Terminal && eval.Reason == reasonTestsNeverRan && eval.Summary.Check == wordNeverRan {
+			// Asked once, and only now: the lookup costs a request against
+			// the rate limit and matters only to this one verdict.
+			awaiting, lookupErr := fetcher.FetchAwaitingApproval(ctx, opts.HeadSHA)
+			if lookupErr != nil {
+				eval.Reason = fmt.Sprintf("%s (could not check for pending approval: %v)", eval.Reason, lookupErr)
+			} else if awaiting {
+				in.AwaitingApproval = true
+				eval = Evaluate(in)
+			}
+		}
 		if eval.Terminal {
 			return eval
 		}

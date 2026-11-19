@@ -73,11 +73,12 @@ var contractCoverage = map[string]classification{
 	"SetMeta_OverwritesPrevious":     {Code: ReqMetaOverwritesPrevious},
 	"Meta_MultipleKeys":              {Code: ReqMetaMultipleKeysIndependent},
 
-	// --- Observation group (deferred) ---
-	"Peek_NoError":            {Deferred: "observation group not yet ported"},
-	"GetLastActivity_NoError": {Deferred: "observation group not yet ported"},
-	"ClearScrollback_NoError": {Deferred: "observation group not yet ported"},
-	"CopyTo_NoError":          {Deferred: "observation group not yet ported"},
+	// --- Observation (wire-checked, advisory: a FAIL does not gate v2_ready
+	// yet) ---
+	"Peek_NoError":            {Code: ReqObservationPeek},
+	"GetLastActivity_NoError": {Code: ReqObservationLastActivity},
+	"ClearScrollback_NoError": {Code: ReqObservationClearScrollback},
+	"CopyTo_NoError":          {Code: ReqObservationCopyTo},
 
 	// --- Signaling group (the input group backs it under input-outcome) ---
 	"SendKeys_RunningSession":  {Code: ReqInputKeysDelivered},

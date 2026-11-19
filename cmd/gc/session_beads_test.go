@@ -17,7 +17,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -30,6 +29,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
@@ -265,12 +265,16 @@ func citySessionIdentifierLockHeld(cityPath, identifier string) (bool, error) {
 		return false, err
 	}
 	defer f.Close() //nolint:errcheck
-	err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	lock, err := filelock.Acquire(f, filelock.Options{
+		Mode:        filelock.Exclusive,
+		NonBlocking: true,
+		Label:       lockPath,
+	})
 	if err == nil {
-		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = lock.Release()
 		return false, nil
 	}
-	if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+	if errors.Is(err, filelock.ErrBusy) {
 		return true, nil
 	}
 	return false, err
@@ -7499,6 +7503,109 @@ func TestReapStaleSessionBeads_HonorsRecentWakeOnCreatingBead(t *testing.T) {
 	}
 }
 
+// TestReapStaleSessionBeads_HonorsRecentPendingCreateStart prevents an
+// in-progress create on an old session bead from being reaped against its
+// original CreatedAt instead of the current create attempt's grace boundary.
+func TestReapStaleSessionBeads_HonorsRecentPendingCreateStart(t *testing.T) {
+	testCity := t.TempDir()
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	created, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker-1",
+			"state":        "creating",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Simulate a long-lived claimless row whose create attempt began only 20s
+	// ago, exercising the reaper's one-minute creating-state grace branch.
+	now := created.CreatedAt.Add(10 * time.Minute)
+	recentCreate := now.Add(-20 * time.Second).UTC().Format(time.RFC3339)
+	if err := store.SetMetadata(created.ID, "pending_create_started_at", recentCreate); err != nil {
+		t.Fatalf("SetMetadata(pending_create_started_at): %v", err)
+	}
+
+	var stderr bytes.Buffer
+	got := reapStaleSessionBeads(testCity, store, testSeatWork(testCity, nil, store, nil), sp, nil, nil, &clock.Fake{Time: now}, &stderr)
+	if got != 0 {
+		t.Fatalf("reapStaleSessionBeads() = %d, want 0 (the create attempt is within its one-minute grace)\nstderr: %s", got, stderr.String())
+	}
+	open, err := loadSessionBeads(store)
+	if err != nil {
+		t.Fatalf("loadSessionBeads: %v", err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("open beads = %d, want 1", len(open))
+	}
+}
+
+func TestReapStaleSessionBeads_ReapsWhenPendingCreateStartIsStaleOrInvalid(t *testing.T) {
+	tests := []struct {
+		name   string
+		marker func(time.Time) string
+	}{
+		{
+			name: "older than CreatedAt",
+			marker: func(createdAt time.Time) string {
+				return createdAt.Add(-time.Minute).UTC().Format(time.RFC3339)
+			},
+		},
+		{
+			name: "malformed",
+			marker: func(time.Time) string {
+				return "not-a-timestamp"
+			},
+		},
+		{
+			name: "newer than CreatedAt but outside grace",
+			marker: func(createdAt time.Time) string {
+				return createdAt.Add(8 * time.Minute).UTC().Format(time.RFC3339)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testCity := t.TempDir()
+			store := beads.NewMemStore()
+			sp := runtime.NewFake()
+			created, err := store.Create(beads.Bead{
+				Title:  "worker",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name": "worker-1",
+					"state":        "creating",
+				},
+			})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if err := store.SetMetadata(created.ID, "pending_create_started_at", tt.marker(created.CreatedAt)); err != nil {
+				t.Fatalf("SetMetadata(pending_create_started_at): %v", err)
+			}
+
+			now := created.CreatedAt.Add(10 * time.Minute)
+			var stderr bytes.Buffer
+			got := reapStaleSessionBeads(testCity, store, testSeatWork(testCity, nil, store, nil), sp, nil, nil, &clock.Fake{Time: now}, &stderr)
+			if got != 1 {
+				t.Fatalf("reapStaleSessionBeads() = %d, want 1 (the effective start boundary is past grace)\nstderr: %s", got, stderr.String())
+			}
+			open, err := loadSessionBeads(store)
+			if err != nil {
+				t.Fatalf("loadSessionBeads: %v", err)
+			}
+			if len(open) != 0 {
+				t.Fatalf("open beads = %d, want 0", len(open))
+			}
+		})
+	}
+}
+
 // TestReapStaleSessionBeads_NeverStartedPendingCreateNotReapedInPendingWindow
 // pins the gc-5tyf5 over-reaping fix: a never-started pending-create bead (no
 // last_woke_at) sitting at 7 minutes — past the 5-minute stalePendingCreateTimeout
@@ -8938,6 +9045,38 @@ func TestSweepProcessTableOrphansContinuesAfterErrors(t *testing.T) {
 		t.Fatalf("terminated = %s, want gm-reaped", got)
 	}
 	for _, want := range []string{"partial scan failed", "gm-reaped", "gm-term-fails", "terminate failed"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
+		}
+	}
+}
+
+// TestSweepProcessTableOrphansLeavesARootItCannotClassify pins that a root the
+// infrastructure fence could not read is neither reaped nor passed over in
+// silence, and that it does not stop the sweep reaping the roots it can.
+func TestSweepProcessTableOrphansLeavesARootItCannotClassify(t *testing.T) {
+	store := beads.NewMemStore()
+	sp := newProcessTableSweepProvider(
+		runtime.LiveRuntime{SessionID: "gm-unreadable", PID: 301, PPID: 1, StartIdentity: "7", IsTracked: false},
+		runtime.LiveRuntime{SessionID: "gm-reaped", PID: 302, PPID: 1, StartIdentity: "8", IsTracked: false},
+	)
+	prev := sweepRootIsCityInfrastructure
+	sweepRootIsCityInfrastructure = func(live runtime.LiveRuntime) (bool, error) {
+		if live.PID == 301 {
+			return false, errors.New("command line unreadable")
+		}
+		return false, nil
+	}
+	t.Cleanup(func() { sweepRootIsCityInfrastructure = prev })
+
+	var stderr bytes.Buffer
+	if got := sweepProcessTableOrphans(sp, newSessionBeadSnapshot(nil), nil, store, "", &stderr); got != 1 {
+		t.Fatalf("sweepProcessTableOrphans() = %d, want 1; stderr=%q", got, stderr.String())
+	}
+	if got := terminatedSessionIDs(sp.terminated); got != "gm-reaped" {
+		t.Fatalf("terminated = %s, want only gm-reaped: the unclassified root must be left running", got)
+	}
+	for _, want := range []string{"pid=301", "command line unreadable"} {
 		if !strings.Contains(stderr.String(), want) {
 			t.Fatalf("stderr = %q, want %q", stderr.String(), want)
 		}

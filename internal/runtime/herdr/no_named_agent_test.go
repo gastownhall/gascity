@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -43,6 +44,9 @@ func registryFake(t *testing.T, registered []string, rejection string) (bin, tra
 	}
 
 	trace = filepath.Join(t.TempDir(), "verbs")
+	if goruntime.GOOS == "windows" {
+		return newGoFakeHerdr(t, fakeHerdrSpec{Mode: "registry", Trace: trace, List: list, Rejection: rejection}), trace
+	}
 	reject := "    echo '" + rejection + "'\n"
 	switch {
 	case rejection == "!!echo-argv":
