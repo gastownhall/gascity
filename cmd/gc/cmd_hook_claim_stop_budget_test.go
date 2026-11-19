@@ -180,3 +180,63 @@ func TestHookClaimCASKeepsItsBudgetWhenStopGateSpendsItsOwn(t *testing.T) {
 		})
 	}
 }
+
+// TestHookClaimLaterCandidateKeepsBudgetAfterEarlierStopGate covers AC-2: a
+// first candidate's stop gate spends its whole budget closing it as stopped,
+// and the live candidate behind it must still be gated and claimed on fresh
+// budgets. On the shared-context base the fresh tier broke out of the loop
+// into a no_work drain and the ready tier exited 1 with "claim deadline
+// exhausted", stranding the live work.
+func TestHookClaimLaterCandidateKeepsBudgetAfterEarlierStopGate(t *testing.T) {
+	shortenHookClaimBudget(t)
+	for _, tc := range []struct {
+		name     string
+		assignee string
+	}{
+		{name: "routed"},
+		{name: "ready assignment", assignee: "worker-1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newHookWorkflowStopFixture(t)
+			failed := f.root("stopped run", "")
+			stranded := f.step("implement", failed.ID, nil)
+			f.closeAs(failed.ID, "fail", nil)
+			live := f.root("live run", "")
+			next := f.step("next", live.ID, nil)
+			if tc.assignee != "" {
+				for _, id := range []string{stranded.ID, next.ID} {
+					assignee := tc.assignee
+					if err := f.store.Update(id, beads.UpdateOpts{Assignee: &assignee}); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			f.served = []string{stranded.ID, next.ID}
+
+			ops := f.ops()
+			// Both gates' ancestry reads spend their whole budget before
+			// answering.
+			ops.WorkflowStore = func(ctx context.Context, _ string, _ []string, _, _ string) beads.Store {
+				return budgetSpendingStore{Store: f.store, ctx: ctx, slowIDs: map[string]bool{failed.ID: true, live.ID: true}}
+			}
+			var casCalls []budgetCtxCall
+			ops.Claim = bdDeadlineClaim(ops.Claim, &casCalls)
+			var emissions hookClaimBudgetEmissions
+			emissions.install(&ops)
+
+			code, got, stderr := runBudgetClaim(t, budgetClaimOpts(), ops)
+
+			if code != 0 || got != next.ID {
+				t.Fatalf("doHookClaim = %d handing out %q, want 0 handing out the live step %s behind the stopped one; claims=%v\nstderr=%s",
+					code, got, next.ID, f.claims, stderr)
+			}
+			f.wantNeverClaimed(stranded.ID)
+			f.wantClosed(stranded.ID, "skipped")
+			for _, call := range casCalls {
+				if call.ctxErr != nil {
+					t.Fatalf("claim CAS for %s started on a spent context: %v", call.beadID, call.ctxErr)
+				}
+			}
+		})
+	}
+}
