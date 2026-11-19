@@ -2443,6 +2443,7 @@ go_test(
         "storage_boot_test.go",
         "storage_boot_workspace_integration_test.go",
         "storage_boot_workspace_test.go",
+        "storage_containment_lease_cadence_test.go",
         "storage_containment_lease_fetch_counter_test.go",
         "storage_containment_lease_fetch_test.go",
         "storage_containment_lease_holds_test.go",
