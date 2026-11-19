@@ -2748,7 +2748,7 @@ calls = 1
 [[count]]
 path = "internal/runtime/runtimecapability/runner_test.go"
 resource = "listener_helper"
-calls = 1
+calls = 2
 
 [[count]]
 path = "internal/runtime/runtimecontract/runner_test.go"

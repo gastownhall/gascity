@@ -1286,30 +1286,3 @@ func openStoreResultForCity(cityPath string) func(string) (beads.StoreOpenResult
 		return openStoreResultAtForCity(dirPath, cityPath)
 	}
 }
-
-// doctorSessionRegistry returns the session registry reader the
-// agent-sessions and orphan-sessions checks use: each open session row's
-// runtime session name mapped to the agent it runs, resolved the way the
-// runtime resolves it. Unlike doctorLiveSessionSinks, a store failure is
-// returned, so a check that cannot read the registry says so instead of
-// reporting every pool instance and bead-named session as orphaned.
-func doctorSessionRegistry(cityPath string, cfg *config.City) doctor.SessionRegistry {
-	return func() (map[string]string, error) {
-		store, err := openSessionProviderStore(cityPath)
-		if err != nil {
-			return nil, err
-		}
-		infos, err := cliSessionFrontDoor(store, cfg, cityPath).ListLabeledSessionInfosUnfiltered()
-		if err != nil {
-			return nil, err
-		}
-		names := make(map[string]string, len(infos))
-		for _, info := range infos {
-			if info.SessionName == "" {
-				continue
-			}
-			names[info.SessionName] = resolvedSessionTemplateInfo(info, cfg)
-		}
-		return names, nil
-	}
-}
