@@ -385,3 +385,51 @@ func TestHookClaimPostCASRecheckHasItsOwnBudget(t *testing.T) {
 		})
 	}
 }
+
+// TestHookClaimFreshTierSpentBudgetAttemptsNoCAS pins the fresh tier's
+// own-budget refusal (AC-5): with no mutation budget at all
+// (hookClaimMutationTimeout = 0) the claim CAS's context is born spent, and
+// the tier must refuse to attempt it — stopping to the shared drain rather
+// than manufacturing deadline-exceeded skips — the fresh-tier twin of
+// TestReadyHookAssignmentDeadlineDoesNotFallThroughToFreshWork.
+func TestHookClaimFreshTierSpentBudgetAttemptsNoCAS(t *testing.T) {
+	// No mutation budget at all, the same package-var swap
+	// TestReadyHookAssignmentDeadlineDoesNotFallThroughToFreshWork makes.
+	oldTimeout := hookClaimMutationTimeout
+	hookClaimMutationTimeout = 0
+	t.Cleanup(func() { hookClaimMutationTimeout = oldTimeout })
+	f := newHookWorkflowStopFixture(t)
+	live := f.root("live run", "")
+	step := f.step("implement", live.ID, nil)
+	f.served = []string{step.ID}
+
+	ops := f.ops()
+	ops.Claim = func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
+		t.Fatal("claim CAS must not run when the claim budget is born spent")
+		return beads.Bead{}, false, nil
+	}
+	var emissions hookClaimBudgetEmissions
+	emissions.install(&ops)
+
+	var stdout, stderr bytes.Buffer
+	code := doHookClaim("query", t.TempDir(), budgetClaimOpts(), ops, &stdout, &stderr)
+
+	if code != 0 {
+		t.Fatalf("doHookClaim = %d, want 0 with a no-work drain; stderr=%s", code, stderr.String())
+	}
+	var drain hookClaimJSONResult
+	drained := false
+	for _, line := range strings.Split(strings.TrimSpace(stdout.String()), "\n") {
+		var result hookClaimJSONResult
+		if json.Unmarshal([]byte(line), &result) == nil && result.Action == "drain" {
+			drain = result
+			drained = true
+		}
+	}
+	if !drained || drain.Reason != hookClaimReasonNoWork {
+		t.Fatalf("drain = %+v (found %t), want the no_work drain the spent-budget break keeps", drain, drained)
+	}
+	if got := f.get(step.ID); got.Status != "open" || got.Assignee != "" {
+		t.Fatalf("step = status %q assignee %q, want untouched", got.Status, got.Assignee)
+	}
+}
