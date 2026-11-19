@@ -23,13 +23,20 @@ import (
 // v2-ready pack sharing the host can scan (canScan,
 // runtime.ConditionalProcessTableScanner): for any other pack,
 // runtime.AsProcessTableScanner reads it as having none, and its methods
-// find nothing and terminate nothing.
+// find nothing and terminate nothing. For a pack whose agent runs outside
+// tmux, the scanner never reports a process that a tmux server or client
+// carrying a session's GC_SESSION_ID hosts (FindRuntimesBySessionID), and an
+// auto composite over the pack reports only what this scan reports
+// (FencesTmuxSubtrees): no cleanup of gc's ends a tmux session an agent or a
+// user runs inside such a box.
 
 var (
 	_ runtime.ProcessTableScanner            = (*Provider)(nil)
 	_ runtime.ConditionalProcessTableScanner = (*Provider)(nil)
+	_ runtime.TmuxSubtreeFence               = (*Provider)(nil)
 	_ runtime.ProcessTableScanner            = (*seamBackedProvider)(nil)
 	_ runtime.ConditionalProcessTableScanner = (*seamBackedProvider)(nil)
+	_ runtime.TmuxSubtreeFence               = (*seamBackedProvider)(nil)
 )
 
 // sessionlessEnviron is gc's environment (execenv.Environ) without the
@@ -78,18 +85,32 @@ func (p *Provider) CanScanProcessTable() bool {
 }
 
 // FindRuntimesBySessionID implements [runtime.ProcessTableScanner] with the
-// host's process-table scan (proctable.ScanBySessionID). A root is tracked
-// when a box the pack's inventory lists carries its session id. A root the
-// inventory cannot rule out (it failed, timed out or was partial, or a
-// listed box's identity is unreadable and the root names no other session)
-// is LiveUnlisted and the failure is returned, so no caller reaps a live
-// box's process on a listing it could not read. A pack that cannot scan
-// finds nothing.
+// host's process-table scan. A pack whose agent runs outside tmux
+// (FencesTmuxSubtrees) is scanned outside tmux
+// (proctable.ScanBySessionIDOutsideTmux): a tmux server an agent or an
+// attached user founds inside its box (`tmux new -d`, the user's default
+// server when none was running) carries the session's GC_SESSION_ID, so the
+// shared scan would read each of its panes as the session's root, and a
+// start's orphan kill or the drain-ack escalation would end the pane's
+// process group. A pack whose agent runs in its box's tmux
+// (agentRunsInBoxTmux) gets the shared scan (proctable.ScanBySessionID), as
+// the tmux runtime does: its agent is one of those panes.
+//
+// A root is tracked when a box the pack's inventory lists carries its
+// session id. A root the inventory cannot rule out (it failed, timed out or
+// was partial, or a listed box's identity is unreadable and the root names
+// no other session) is LiveUnlisted and the failure is returned, so no
+// caller reaps a live box's process on a listing it could not read. A pack
+// that cannot scan finds nothing.
 func (p *Provider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	if !p.canScan() {
 		return nil, nil
 	}
-	found, scanErr := proctable.ScanBySessionID(id)
+	scan := proctable.ScanBySessionIDOutsideTmux
+	if !p.FencesTmuxSubtrees() {
+		scan = proctable.ScanBySessionID
+	}
+	found, scanErr := scan(id)
 	if len(found) == 0 {
 		return found, scanErr
 	}
@@ -116,6 +137,30 @@ func (p *Provider) trackingContext(id string) (context.Context, context.CancelFu
 		timeout = defaultScanListingTimeout
 	}
 	return context.WithTimeout(context.Background(), timeout)
+}
+
+// FencesTmuxSubtrees implements [runtime.TmuxSubtreeFence]: the scan
+// fences tmux subtrees unless the pack's agent runs in its box's tmux
+// (agentRunsInBoxTmux). An auto composite over a pack whose scan fences
+// reports only the PIDs this scan reports, since its ACP backend's scan
+// still reports the panes of a tmux server founded inside a box.
+func (p *Provider) FencesTmuxSubtrees() bool {
+	return !p.agentRunsInBoxTmux()
+}
+
+// agentRunsInBoxTmux reports a pack whose agent runs in its box's tmux
+// session main: it declares the exec connection (proc.exec) without
+// carrier.ops, so gc drives the agent through tmux over `exec`, an exit 2
+// being the command's own and never a fallback to the dedicated ops, and
+// with proc.provision gc launches the agent there itself (launchAgent). That
+// tmux server copied the box's environment, the session's GC_SESSION_ID
+// included, so its panes are the box's own processes, as the tmux runtime's
+// panes are its sessions. Any other pack is read as running its agent
+// outside tmux: carrier.ops sends no tmux command, and a pack without
+// proc.exec is driven over its dedicated ops once its `exec` exits 2, so a
+// pack whose agent runs in an in-box tmux declares proc.exec.
+func (p *Provider) agentRunsInBoxTmux() bool {
+	return !p.opsCarrierSelected() && p.handshakeCapability(runtime.ProtocolCapabilityConnectionExec)
 }
 
 // TerminateRuntime implements [runtime.ProcessTableScanner]: it ends a
@@ -237,6 +282,11 @@ func (s *seamBackedProvider) CanScanProcessTable() bool {
 // (non-seam).
 func (s *seamBackedProvider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
 	return s.raw.FindRuntimesBySessionID(id)
+}
+
+// FencesTmuxSubtrees passes through to the underlying provider (non-seam).
+func (s *seamBackedProvider) FencesTmuxSubtrees() bool {
+	return s.raw.FencesTmuxSubtrees()
 }
 
 // TerminateRuntime passes through to the underlying provider (non-seam).

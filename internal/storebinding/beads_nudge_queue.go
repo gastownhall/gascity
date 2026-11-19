@@ -279,7 +279,9 @@ func (q *beadsNudgeQueue) EnqueueDeferred(item nudgequeue.Item) error {
 // ClaimDue claims every due pending item addressed to target, honoring the
 // session-generation fence. Each claim is one compare-and-swap on the bead's
 // assignee, so exactly one concurrent claimant wins each item; a claimant that
-// loses simply moves to the next candidate.
+// loses simply moves to the next candidate. The target session's startup
+// turns are judged first (judgeStartup): while one stands, ClaimDue claims at
+// most that turn.
 func (q *beadsNudgeQueue) ClaimDue(target ClaimTarget, now time.Time) ([]nudgequeue.Item, error) {
 	if len(target.QueueKeys) == 0 {
 		return nil, nil
@@ -288,11 +290,38 @@ func (q *beadsNudgeQueue) ClaimDue(target ClaimTarget, now time.Time) ([]nudgequ
 	if err != nil {
 		return nil, err
 	}
+	turn, hold, entries, skipped, err := q.judgeStartup(target, entries, now)
+	corrupt = append(corrupt, skipped...)
+	if err != nil {
+		return nil, err
+	}
+	if hold {
+		if turn, err = q.unpinSharedStartupTurn(turn, now); err != nil {
+			return nil, err
+		}
+		if turn == nil {
+			return nil, nudgeQueueQuarantined("ClaimDue", corrupt)
+		}
+		claimed, err := q.claimEntries([]nudgeQueueEntry{*turn}, now)
+		if err != nil {
+			return claimed, err
+		}
+		return claimed, nudgeQueueQuarantined("ClaimDue", corrupt)
+	}
 	candidates, err := q.claimCandidates(entries, newNudgeClaimFence(target), now)
 	if err != nil {
 		return nil, err
 	}
+	claimed, err := q.claimEntries(candidates, now)
+	if err != nil {
+		return claimed, err
+	}
+	return claimed, nudgeQueueQuarantined("ClaimDue", corrupt)
+}
 
+// claimEntries claims each candidate under a lease of its own, skipping one
+// another claimant took first.
+func (q *beadsNudgeQueue) claimEntries(candidates []nudgeQueueEntry, now time.Time) ([]nudgequeue.Item, error) {
 	var claimed []nudgequeue.Item
 	for _, candidate := range candidates {
 		// A live candidate that still carries an assignee holds a lease that
@@ -328,11 +357,85 @@ func (q *beadsNudgeQueue) ClaimDue(target ClaimTarget, now time.Time) ([]nudgequ
 		item.LeaseUntil = lease.until
 		claimed = append(claimed, item)
 	}
-	return claimed, nudgeQueueQuarantined("ClaimDue", corrupt)
+	return claimed, nil
+}
+
+// judgeStartup judges the startup turns of target's session among entries
+// (nudgequeue.JudgeStartupTurns). When one is due it asks target.LiveLaunch,
+// then reads the keyed records again and judges that read, holding a turn it
+// had not seen before the ask. It dead-letters the turns judged stale, in
+// flight or not, and the pending ones judged superseded; a superseded turn
+// found in flight leaves the claim nothing. It returns the turn to claim
+// alone, if any, whether the claim takes nothing else, and the entries the
+// rest of the claim reads, with the records the second read skipped.
+func (q *beadsNudgeQueue) judgeStartup(target ClaimTarget, entries []nudgeQueueEntry, now time.Time) (*nudgeQueueEntry, bool, []nudgeQueueEntry, []error, error) {
+	judgement := nudgeQueueStartupJudgement(target, entries, now, nudgequeue.LiveLaunch{})
+	var corrupt []error
+	if judgement.NeedsLaunch {
+		launch := AskLiveLaunch(target, judgement.Members)
+		var err error
+		if entries, corrupt, err = q.keyedEntries(target.QueueKeys, now); err != nil {
+			return nil, true, nil, nil, err
+		}
+		judgement = nudgeQueueStartupJudgement(target, entries, now, launch)
+	}
+	for _, id := range judgement.Stale {
+		if err := q.markDead(id, nudgequeue.StaleLaunchReason, nudgeQueueTerminalStateFor(nudgequeue.StaleLaunchReason), now); err != nil {
+			return nil, true, entries, corrupt, err
+		}
+	}
+	for _, id := range judgement.Superseded {
+		inFlight, err := q.supersedePendingTurn(id, now)
+		if err != nil {
+			return nil, true, entries, corrupt, err
+		}
+		if inFlight {
+			return nil, true, entries, corrupt, nil
+		}
+	}
+	if judgement.Claim == "" {
+		return nil, judgement.Hold, entries, corrupt, nil
+	}
+	for i := range entries {
+		if entries[i].item.ID == judgement.Claim {
+			return &entries[i], true, entries, corrupt, nil
+		}
+	}
+	return nil, true, entries, corrupt, nil
+}
+
+// nudgeQueueStartupJudgement judges entries' live records for target as of
+// now.
+func nudgeQueueStartupJudgement(target ClaimTarget, entries []nudgeQueueEntry, now time.Time, launch nudgequeue.LiveLaunch) nudgequeue.StartupJudgement {
+	var pending, inFlight []nudgequeue.Item
+	for _, entry := range entries {
+		switch entry.state {
+		case nudgeQueueStateLive:
+			pending = append(pending, entry.item)
+		case nudgeQueueInFlight:
+			inFlight = append(inFlight, entry.item)
+		}
+	}
+	return nudgequeue.JudgeStartupTurns(target.SessionID, pending, inFlight, now, launch)
+}
+
+// supersedePendingTurn dead-letters a startup turn as superseded while it is
+// still pending, and reports whether it found the turn in flight instead.
+func (q *beadsNudgeQueue) supersedePendingTurn(nudgeID string, now time.Time) (bool, error) {
+	inFlight := false
+	err := q.mutate(nudgeID, now, func(entry nudgeQueueEntry) (beads.UpdateOpts, bool, error) {
+		inFlight = entry.state == nudgeQueueInFlight
+		if entry.state != nudgeQueueStateLive {
+			return beads.UpdateOpts{}, false, nil
+		}
+		return nudgeQueueDeadUpdate(nudgequeue.SupersededReason, nudgeQueueTerminalStateFor(nudgequeue.SupersededReason), now), true, nil
+	})
+	return inFlight, err
 }
 
 // claimCandidates returns, in canonical delivery order, the entries a claim may
-// take: live, unclaimed, due, and passing fence. An expired entry it meets is
+// take: live, unclaimed, due, passing fence, and not a startup turn
+// (judgeStartup claims those). An expired entry it meets is
 // touched, so it is repaired: dead-lettered here rather than left for the next
 // maintenance pass.
 func (q *beadsNudgeQueue) claimCandidates(entries []nudgeQueueEntry, fence *nudgeClaimFence, now time.Time) ([]nudgeQueueEntry, error) {
@@ -347,7 +450,7 @@ func (q *beadsNudgeQueue) claimCandidates(entries []nudgeQueueEntry, fence *nudg
 			}
 			continue
 		}
-		if entry.item.DeliverAfter.After(now) {
+		if entry.item.DeliverAfter.After(now) || nudgequeue.IsStartupTurn(entry.item) {
 			continue
 		}
 		if !fence.passes(entry.item) {
@@ -420,18 +523,23 @@ func (q *beadsNudgeQueue) Lookup(ids []string, now time.Time) (map[string]nudgeq
 
 // DueKeys returns, sorted and unique, the non-empty queue keys with an item
 // that reads as pending and is due at now: a due pending item, or an in-flight
-// item whose lease has run out. It is one indexed read of the live records,
+// item whose lease has run out, unless a startup turn of its session or key
+// that is not yet claimable holds it (nudgequeue.StartupBarrier). It is one indexed read of the live records,
 // filtered in memory; undecodable records are reported as a partial result.
 func (q *beadsNudgeQueue) DueKeys(now time.Time) ([]string, error) {
 	entries, corrupt, err := q.wholeQueueEntries(now, nudgeQueueStateLive)
 	if err != nil {
 		return nil, err
 	}
+	var barrier nudgequeue.StartupBarrier
+	for _, entry := range entries {
+		barrier.Add(entry.item, entry.state == nudgeQueueInFlight, now)
+	}
 	seen := map[string]bool{}
 	var keys []string
 	for _, entry := range entries {
 		key := entry.item.Agent
-		if key == "" || seen[key] || entry.item.DeliverAfter.After(now) {
+		if key == "" || seen[key] || entry.item.DeliverAfter.After(now) || barrier.Holds(entry.item) {
 			continue
 		}
 		if bucket, ok := nudgeQueueBucketOf(entry, now); !ok || bucket != nudgequeue.BucketPending {
@@ -944,14 +1052,20 @@ func (q *beadsNudgeQueue) markDead(nudgeID, lastError, terminalState string, now
 		if entry.state != nudgeQueueStateLive && entry.state != nudgeQueueInFlight {
 			return beads.UpdateOpts{}, false, nil
 		}
-		return nudgeQueueUnclaim(map[string]string{
-			nudgeMetaQueueState:     nudgeQueueStateDead,
-			nudgeMetaDeadAt:         formatNudgeTime(now),
-			nudgeMetaLastError:      lastError,
-			nudgeMetaTerminalState:  terminalState,
-			nudgeMetaTerminalReason: lastError,
-			nudgeMetaTerminalAt:     formatNudgeTime(now),
-		}), true, nil
+		return nudgeQueueDeadUpdate(lastError, terminalState, now), true, nil
+	})
+}
+
+// nudgeQueueDeadUpdate is the write that dead-letters a live record at now
+// with lastError and terminalState, releasing any claim on it.
+func nudgeQueueDeadUpdate(lastError, terminalState string, now time.Time) beads.UpdateOpts {
+	return nudgeQueueUnclaim(map[string]string{
+		nudgeMetaQueueState:     nudgeQueueStateDead,
+		nudgeMetaDeadAt:         formatNudgeTime(now),
+		nudgeMetaLastError:      lastError,
+		nudgeMetaTerminalState:  terminalState,
+		nudgeMetaTerminalReason: lastError,
+		nudgeMetaTerminalAt:     formatNudgeTime(now),
 	})
 }
 

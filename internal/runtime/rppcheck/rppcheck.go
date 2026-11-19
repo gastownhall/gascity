@@ -19,13 +19,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
+	"github.com/gastownhall/gascity/internal/runtime/runtimecontract/privatecity"
 )
 
 // Status is the outcome of a single conformance check.
@@ -52,6 +52,10 @@ type Result struct {
 	// executable has no protocol op or the handshake failed.
 	Protocol runtime.ProtocolInfo
 	Checks   []Check
+	// Warnings name what the run could not clean up and did not gate: a
+	// final server-stop in a private city that did not exit 0 before the
+	// city was removed.
+	Warnings []string
 }
 
 // Failed reports whether any check failed.
@@ -119,8 +123,13 @@ type startConfig struct {
 }
 
 // Run validates the executable against RPP v0 and returns per-check
-// results. It returns an error only when the run cannot start at all
-// (executable not found); protocol violations are recorded as failed
+// results. Every op runs in a city, as gc's own ops do: the inherited
+// GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH when GC_EXEC_CITY_PATH is set,
+// otherwise a private city removed when Run returns, after server-stop there
+// for a script declaring server-lifecycle (a failed one is a Warning). It
+// returns an
+// error only when the run cannot start at all (executable not found, or no
+// private city can be made); protocol violations are recorded as failed
 // checks, never as errors.
 func Run(ctx context.Context, executable string, opts Options) (Result, error) {
 	path, err := exec.LookPath(executable)
@@ -130,17 +139,59 @@ func Run(ctx context.Context, executable string, opts Options) (Result, error) {
 	opts.applyDefaults()
 
 	c := &checker{path: path, opts: opts}
+	if !privatecity.Inherited() {
+		city, removeCity, err := privatecity.New(privateCityPrefix)
+		if err != nil {
+			return Result{}, fmt.Errorf("checking %s outside a city: %w", executable, err)
+		}
+		defer removeCity()
+		c.city = city
+	}
 	c.checkHandshake(ctx)
 	c.checkLifecycle(ctx)
 	c.checkServerLifecycle(ctx)
+	c.checkInputOutcome(ctx)
+	if c.city != nil {
+		c.endServer(ctx, nil)
+	}
 	return c.result, nil
 }
 
 // checker accumulates check results across the run.
 type checker struct {
-	path   string
-	opts   Options
+	path string
+	opts Options
+	// city is the env of the private city every op runs in; nil means every
+	// op runs in the city it inherited. An op's own city keys replace it.
+	city   []string
 	result Result
+}
+
+// privateCityPrefix starts the name of every private city the check makes.
+const privateCityPrefix = "gc-rpp-check-city-"
+
+// endServer sends server-stop to a private city the check is done with (city,
+// or the check's own for nil) when the handshake declares server-lifecycle,
+// as gc does to a city it stops: the server the check's sessions brought up
+// there ends before the city is removed, an interrupted check's included, on
+// a cancellation-detached context. The server-lifecycle checks gate the op
+// itself, so a server-stop that does not exit 0 here is a Warning, not a
+// check.
+func (c *checker) endServer(ctx context.Context, city []string) {
+	if !c.result.Protocol.Has(runtime.ProtocolCapabilityServerLifecycle) {
+		return
+	}
+	res := c.runOpEnv(context.WithoutCancel(ctx), c.opts.OpTimeout, city, nil, "server-stop")
+	err := res.err
+	if res.unsupported {
+		err = errors.New("exit 2, although the handshake declares server-lifecycle")
+	}
+	if err != nil {
+		if city == nil {
+			city = c.city
+		}
+		c.result.Warnings = append(c.result.Warnings, privatecity.ServerStopWarning(city, err))
+	}
 }
 
 func (c *checker) record(name string, status Status, detail string) {
@@ -152,6 +203,12 @@ type opResult struct {
 	stdout      string
 	unsupported bool  // exit 2 — op not implemented
 	err         error // any failure other than exit 2, stderr included
+	// exitCode and failedStdout are a failed op's exit status (-1 when it
+	// had none) and its raw stdout: under input-outcome an exit 80 carries
+	// its outcome line there, read untrimmed so gc's stdout cap reads on what
+	// the script printed (sessionexec.ReadExit80Outcome).
+	exitCode     int
+	failedStdout string
 }
 
 // runOp invokes the executable with the op timeout.
@@ -163,14 +220,16 @@ func (c *checker) runOpTimeout(ctx context.Context, timeout time.Duration, stdin
 	return c.runOpEnv(ctx, timeout, nil, stdin, args...)
 }
 
-// runOpEnv is runOpTimeout with env added to the executable's environment
-// (a city's GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH).
+// runOpEnv is runOpTimeout with the check's private city, then env, added
+// to the executable's environment. The last value of a key wins, so the
+// city keys of an op's own city (a server check's GC_EXEC_CITY_NAME and
+// GC_EXEC_CITY_PATH) replace the check's, while other keys add to it.
 func (c *checker) runOpEnv(ctx context.Context, timeout time.Duration, env []string, stdin []byte, args ...string) opResult {
 	var cmdEnv []string
-	if env != nil {
-		// Read before the op's deadline: execenv.Environ waits out an
-		// in-flight native store open, and that wait is not the op's.
-		cmdEnv = append(execenv.Environ(), env...)
+	if c.city != nil || env != nil {
+		// Read before the op's deadline, so the read is not the op's. During
+		// a native store open it is the environment as the open found it.
+		cmdEnv = append(append(execenv.Environ(), c.city...), env...)
 	}
 	opCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -206,7 +265,11 @@ func (c *checker) runOpEnv(ctx context.Context, timeout time.Duration, env []str
 		case msg == "":
 			msg = err.Error()
 		}
-		return opResult{err: fmt.Errorf("%s: %s", strings.Join(args, " "), msg)}
+		code := -1
+		if errors.As(err, &exitErr) {
+			code = exitErr.ExitCode()
+		}
+		return opResult{err: fmt.Errorf("%s: %s", strings.Join(args, " "), msg), exitCode: code, failedStdout: stdout.String()}
 	}
 	return opResult{stdout: strings.TrimRight(stdout.String(), "\n")}
 }
@@ -217,12 +280,16 @@ func (c *checker) runOpEnv(ctx context.Context, timeout time.Duration, env []str
 // city-scoped) promise no op of their own, so they map to "": they are
 // listed only so the handshake check does not report them as unknown, and
 // `gc runtime conformance` checks the behavior they claim. idle-boundary is
-// a claim about the box's tmux, read over exec, not an op of its own, so it
+// a claim about the selected carrier's idle read, not an op of its own, so it
 // maps to "" too (RPP-CONN-002 checks it), and so does proc.exec, whose exec
 // op `gc runtime conformance` checks (RPP-CONN-001) and which the
 // idle-boundary migration warning names. fs.host is a promise about where a
 // box runs, checked by the conformance fshost group, so it maps to "" as
 // well; declared without locality local it draws a warning instead.
+// carrier.ops maps to "" too; its five driving ops, and with idle-boundary
+// its ready-prompt store, are required checks below, not a single
+// capability-to-op map. input-outcome types the driving ops' answers rather
+// than promising an op, so it maps to "" and checkInputOutcome checks it.
 var knownCapabilities = map[string]string{
 	runtime.ProtocolCapabilityReportAttachment: "is-attached",
 	runtime.ProtocolCapabilityReportActivity:   "get-last-activity",
@@ -231,6 +298,8 @@ var knownCapabilities = map[string]string{
 	runtime.ProtocolCapabilityIdleBoundary:     "",
 	runtime.ProtocolCapabilityServerLifecycle:  "server-stop",
 	runtime.ProtocolCapabilityFSHost:           "",
+	runtime.ProtocolCapabilityCarrierOps:       "",
+	runtime.ProtocolCapabilityInputOutcome:     "",
 	"conformance-faults":                       "",
 	"city-scoped":                              "",
 }
@@ -251,6 +320,10 @@ const (
 	serverStopCheck           = "capability server-lifecycle: server-stop"
 	serverStopIdempotentCheck = "capability server-lifecycle: server-stop idempotent"
 )
+
+// inputOutcomeCheck is the input-outcome smoke check (`gc runtime
+// conformance` gates the token in full as the input group).
+const inputOutcomeCheck = "capability input-outcome: nudge to an absent name"
 
 const handshakeCheck = "protocol handshake"
 
@@ -288,8 +361,8 @@ func (c *checker) checkHandshake(ctx context.Context) {
 	if len(unknown) > 0 {
 		detail += fmt.Sprintf("; ignoring unknown capabilities %v", unknown)
 	}
-	if missingIdleBoundary(info) {
-		detail += "; " + idleBoundaryMigrationWarning
+	if warning := idleBoundaryWarning(info); warning != "" {
+		detail += "; " + warning
 	}
 	if info.Has(runtime.ProtocolCapabilityFSHost) && !info.SharesHostFS() {
 		detail += "; " + fsHostWithoutLocalityWarning
@@ -307,14 +380,30 @@ const fsHostWithoutLocalityWarning = `warning: fs.host is declared without "loca
 // declares the three capabilities that once gave it an idle boundary but not
 // idle-boundary, which it now also needs: it passes, but gc gives it no idle
 // wait and its interactive sessions do not sleep.
-const idleBoundaryMigrationWarning = "warning: proc.exec, report-activity and report-attachment are declared without idle-boundary, so gc gives this runtime no idle wait and timed_only sleep; that is expected for a runtime whose box runs no tmux, otherwise declare idle-boundary (the agent runs in the box's tmux session main)"
+const idleBoundaryMigrationWarning = "warning: proc.exec, report-activity and report-attachment are declared without idle-boundary, so gc gives this runtime no idle wait and timed_only sleep; declare idle-boundary for tmux session main, or carrier.ops and idle-boundary if the pack's peek reads the agent's screen"
 
-// missingIdleBoundary reports whether the handshake declares proc.exec,
-// report-activity and report-attachment but not idle-boundary: the set the exec
+const opsIdleBoundaryMigrationWarning = "warning: carrier.ops, report-activity and report-attachment are declared without idle-boundary, so gc gives this runtime no idle wait and timed_only sleep; declare idle-boundary if peek reads the agent's screen"
+
+// idleBoundaryWarning is the handshake check's warning for a script in the
+// missingIdleBoundary state, worded for the carrier it selects; "" for any
+// other script.
+func idleBoundaryWarning(info runtime.ProtocolInfo) string {
+	switch {
+	case !missingIdleBoundary(info):
+		return ""
+	case info.Has(runtime.ProtocolCapabilityCarrierOps):
+		return opsIdleBoundaryMigrationWarning
+	default:
+		return idleBoundaryMigrationWarning
+	}
+}
+
+// missingIdleBoundary reports whether the handshake declares a carrier's
+// needs, report-activity and report-attachment but not idle-boundary: the set the exec
 // provider's idleBoundaryDeclared requires, less the token. Change them
 // together.
 func missingIdleBoundary(info runtime.ProtocolInfo) bool {
-	return info.Has(runtime.ProtocolCapabilityConnectionExec) &&
+	return (info.Has(runtime.ProtocolCapabilityConnectionExec) || info.Has(runtime.ProtocolCapabilityCarrierOps)) &&
 		info.Has(runtime.ProtocolCapabilityReportActivity) &&
 		info.Has(runtime.ProtocolCapabilityReportAttachment) &&
 		!info.Has(runtime.ProtocolCapabilityIdleBoundary)
@@ -395,8 +484,53 @@ func (c *checker) checkLifecycle(ctx context.Context) {
 	// probe would tear the session down and let a broken stop op pass
 	// the is-running-after-stop assertion on interrupt's side effect.
 	// Post-stop it exercises the documented missing-session contract:
-	// best-effort, exit 0.
-	c.checkOptional(ctx, "optional: interrupt", nil, "interrupt", name)
+	// best-effort, exit 0, or under input-outcome exit 80 gone.
+	c.checkDrivingOpAfterStop(ctx, "interrupt", name)
+}
+
+// checkInputOutcome sends a nudge to a name no session holds, as a script
+// declaring input-outcome must answer with exit 80 and one valid gone line,
+// never the exit 0 gc reads as delivered. A script that does not declare the
+// token is not checked.
+func (c *checker) checkInputOutcome(ctx context.Context) {
+	if !c.result.Protocol.Has(runtime.ProtocolCapabilityInputOutcome) {
+		return
+	}
+	res := c.runOp(ctx, []byte("gc runtime check probe"), "nudge", c.opts.SessionName+"-absent")
+	switch {
+	case res.unsupported:
+		c.record(inputOutcomeCheck, StatusFail, "input-outcome declared but nudge not implemented (exit 2)")
+		return
+	case res.err == nil:
+		c.record(inputOutcomeCheck, StatusFail, "nudge to a name no session holds exited 0, which gc reads as delivered; want exit 80 with the outcome gone")
+		return
+	case res.exitCode != runtime.ExitCodeInputOutcome:
+		c.record(inputOutcomeCheck, StatusFail, fmt.Sprintf("nudge to a name no session holds exited %d, want exit %d with the outcome gone: %v", res.exitCode, runtime.ExitCodeInputOutcome, res.err))
+		return
+	}
+	word, _, err := sessionexec.ReadExit80Outcome("nudge", res.failedStdout)
+	switch {
+	case err != nil:
+		c.record(inputOutcomeCheck, StatusFail, fmt.Sprintf("exit 80 without exactly one valid outcome line: %v", err))
+	case word != runtime.InputOutcomeGone:
+		c.record(inputOutcomeCheck, StatusFail, fmt.Sprintf("nudge to a name no session holds answered %q, want gone", word))
+	default:
+		c.record(inputOutcomeCheck, StatusPass, "exit 80 gone")
+	}
+}
+
+// goneAfterStop reports a driving op's answer to the session rppcheck has
+// just stopped as an exit 80 gone under input-outcome: the answer a script
+// declaring the token owes a name no running box holds. Any other typed
+// word, and every typed answer from a running session, is not accepted: a
+// driving op that refuses the session rppcheck started and verified running
+// is a broken op, whichever word it names.
+func (c *checker) goneAfterStop(op string, res opResult) bool {
+	if !c.result.Protocol.Has(runtime.ProtocolCapabilityInputOutcome) || res.exitCode != runtime.ExitCodeInputOutcome {
+		return false
+	}
+	word, _, err := sessionexec.ReadExit80Outcome(op, res.failedStdout)
+	return err == nil && word == runtime.InputOutcomeGone
 }
 
 // checkServerLifecycle runs the server-stop a script declaring
@@ -405,20 +539,22 @@ func (c *checker) checkLifecycle(ctx context.Context) {
 // script that does not declare the token is not sent server-stop.
 //
 // server-stop names no session: it ends every session of the city it runs
-// in. So every op here runs in a private city (privateCity), never in the
-// GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH the check inherited, and a check
-// run from a city leaves that city's sessions running.
+// in. So every op here runs in a private city of its own, never in the city
+// the rest of the check runs in, and a check run from a city leaves that
+// city's sessions running. The city's last op, once its session is stopped,
+// is a final server-stop (endServer), so no server outlives the check.
 func (c *checker) checkServerLifecycle(ctx context.Context) {
 	if !c.result.Protocol.Has(runtime.ProtocolCapabilityServerLifecycle) {
 		return
 	}
-	city, removeCity, err := privateCity()
+	city, removeCity, err := privatecity.New(privateCityPrefix)
 	if err != nil {
 		c.record(serverStopCheck, StatusFail, err.Error())
 		c.record(serverStopIdempotentCheck, StatusSkip, "skipped: no private city to run server-stop in")
 		return
 	}
 	defer removeCity()
+	defer c.endServer(ctx, city)
 	name := c.opts.SessionName + "-server"
 	cfg, err := json.Marshal(startConfig{WorkDir: c.opts.WorkDir, Command: c.opts.Command})
 	if err != nil {
@@ -463,17 +599,6 @@ func (c *checker) checkServerLifecycle(ctx context.Context) {
 	}
 }
 
-// privateCity returns the env of a city no live city uses: GC_EXEC_CITY_NAME
-// and GC_EXEC_CITY_PATH name a fresh temp dir, which remove deletes.
-func privateCity() (env []string, remove func(), err error) {
-	dir, err := os.MkdirTemp("", "gc-rpp-check-city-")
-	if err != nil {
-		return nil, nil, fmt.Errorf("creating a private city to run server-stop in: %w", err)
-	}
-	env = []string{"GC_EXEC_CITY_NAME=" + filepath.Base(dir), "GC_EXEC_CITY_PATH=" + dir}
-	return env, func() { _ = os.RemoveAll(dir) }, nil
-}
-
 // checkRequiredBool asserts is-running prints exactly the wanted value
 // with exit 0. The exec provider reads errors as false, but the
 // documented contract is `true` or `false` on stdout and conformance
@@ -508,9 +633,15 @@ func (c *checker) remainingCheckNames() []string {
 		"optional: process-alive",
 		c.nudgeCheckName(),
 		"optional: metadata round-trip",
-		"optional: peek",
+		c.drivingCheckName("peek"),
 		"optional: list-running",
 	)
+	if c.result.Protocol.Has(runtime.ProtocolCapabilityCarrierOps) {
+		names = append(names, c.drivingCheckName("send-keys"), c.drivingCheckName("clear-scrollback"))
+	}
+	if c.readyPromptStoreRequired() {
+		names = append(names, readyPromptStoreCheck)
+	}
 	observe := c.result.Protocol.Has(runtime.ProtocolCapabilityObserveV1)
 	if observe {
 		names = append(names, observeCheck, inventoryCheck, killObjectCheck)
@@ -519,7 +650,7 @@ func (c *checker) remainingCheckNames() []string {
 	if observe {
 		names = append(names, observeAbsentCheck)
 	}
-	return append(names, "lifecycle: stop idempotent", "optional: interrupt")
+	return append(names, "lifecycle: stop idempotent", c.drivingCheckName("interrupt"))
 }
 
 func (c *checker) skipRemainingChecks(detail string) {
@@ -540,8 +671,15 @@ func (c *checker) checkSessionOps(ctx context.Context, name string) {
 	c.checkProcessAlive(ctx, name)
 	c.checkNudge(ctx, name)
 	c.checkMetadataRoundTrip(ctx, name)
-	c.checkOptional(ctx, "optional: peek", nil, "peek", name, "10")
+	c.checkDrivingOp(ctx, "peek", name, "10")
 	c.checkListRunning(ctx, name)
+	if c.result.Protocol.Has(runtime.ProtocolCapabilityCarrierOps) {
+		c.checkDrivingOp(ctx, "send-keys", name, "Enter")
+		c.checkDrivingOp(ctx, "clear-scrollback", name)
+	}
+	if c.readyPromptStoreRequired() {
+		c.checkReadyPromptStore(ctx, name)
+	}
 	if c.result.Protocol.Has(runtime.ProtocolCapabilityObserveV1) {
 		c.checkObserve(ctx, observeCheck, name, "running")
 		c.checkInventory(ctx, name)
@@ -698,9 +836,8 @@ func (c *checker) checkProcessAlive(ctx context.Context, name string) {
 	}
 }
 
-// checkOptional probes an op whose absence is acceptable.
-func (c *checker) checkOptional(ctx context.Context, check string, stdin []byte, args ...string) {
-	res := c.runOp(ctx, stdin, args...)
+// recordOptional records res for an op whose absence is acceptable.
+func (c *checker) recordOptional(check string, res opResult) {
 	switch {
 	case res.unsupported:
 		c.record(check, StatusSkip, "not implemented (exit 2)")
@@ -711,10 +848,57 @@ func (c *checker) checkOptional(ctx context.Context, check string, stdin []byte,
 	}
 }
 
-// nudgeCheckName is the name checkNudge reports its result under, escalated
-// by RequireNudge so remainingCheckNames's start-failure skip listing names
-// the same check checkNudge would have run.
+func (c *checker) drivingCheckName(op string) string {
+	if c.result.Protocol.Has(runtime.ProtocolCapabilityCarrierOps) {
+		return "capability carrier.ops: " + op
+	}
+	return "optional: " + op
+}
+
+// checkDrivingOp keeps the optional path unchanged; an explicit carrier.ops
+// declaration obliges the op, so an unsupported op is a failed promise.
+func (c *checker) checkDrivingOp(ctx context.Context, args ...string) {
+	c.recordDrivingOp(c.drivingCheckName(args[0]), c.runOp(ctx, nil, args...))
+}
+
+// checkDrivingOpAfterStop is checkDrivingOp for a session rppcheck has
+// stopped, where an exit 80 gone (goneAfterStop) is the answer a script
+// declaring input-outcome owes.
+func (c *checker) checkDrivingOpAfterStop(ctx context.Context, args ...string) {
+	check := c.drivingCheckName(args[0])
+	res := c.runOp(ctx, nil, args...)
+	if c.goneAfterStop(args[0], res) {
+		c.record(check, StatusPass, "typed outcome gone")
+		return
+	}
+	c.recordDrivingOp(check, res)
+}
+
+// recordDrivingOp records res for a driving op: optional unless carrier.ops
+// is declared.
+func (c *checker) recordDrivingOp(check string, res opResult) {
+	if !c.result.Protocol.Has(runtime.ProtocolCapabilityCarrierOps) {
+		c.recordOptional(check, res)
+		return
+	}
+	switch {
+	case res.unsupported:
+		c.record(check, StatusFail, "carrier.ops declared but op not implemented (exit 2)")
+	case res.err != nil:
+		c.record(check, StatusFail, res.err.Error())
+	default:
+		c.record(check, StatusPass, "")
+	}
+}
+
+// nudgeCheckName is the name checkNudge reports its result under. carrier.ops
+// takes precedence over RequireNudge and requires all five driving ops.
+// Otherwise RequireNudge selects required rather than optional nudge. The
+// start-failure skip listing uses this same name as checkNudge.
 func (c *checker) nudgeCheckName() string {
+	if c.result.Protocol.Has(runtime.ProtocolCapabilityCarrierOps) {
+		return c.drivingCheckName("nudge")
+	}
 	if c.opts.RequireNudge {
 		return "required: nudge"
 	}
@@ -732,6 +916,10 @@ func (c *checker) checkNudge(ctx context.Context, name string) {
 	res := c.runOp(ctx, []byte("gc runtime check probe"), "nudge", name)
 	switch {
 	case res.unsupported:
+		if c.result.Protocol.Has(runtime.ProtocolCapabilityCarrierOps) {
+			c.record(check, StatusFail, "carrier.ops declared but nudge not implemented (exit 2)")
+			return
+		}
 		if c.opts.RequireNudge {
 			c.record(check, StatusFail, "declared prompt_delivery=nudge-fallback but nudge is not implemented (exit 2)")
 			return
@@ -799,6 +987,58 @@ func (c *checker) checkMetadataRoundTrip(ctx context.Context, name string) {
 	default:
 		c.record(check, StatusPass, "")
 	}
+}
+
+// readyPromptStoreCheck is the name checkReadyPromptStore reports under.
+const readyPromptStoreCheck = "capability carrier.ops: ready-prompt metadata"
+
+// readyPromptStoreProbe is the ready prompt checkReadyPromptStore stores: not
+// the default one, non-ASCII and ending in a space, as codex's is, so a store
+// that drops, trims or re-encodes the value fails.
+const readyPromptStoreProbe = "› "
+
+// readyPromptStoreRequired reports a handshake declaring carrier.ops and
+// idle-boundary, whose sessions' ready prompts gc keeps in the pack's
+// metadata (checkReadyPromptStore).
+func (c *checker) readyPromptStoreRequired() bool {
+	return c.result.Protocol.Has(runtime.ProtocolCapabilityCarrierOps) &&
+		c.result.Protocol.Has(runtime.ProtocolCapabilityIdleBoundary)
+}
+
+// checkReadyPromptStore requires the store a carrier.ops pack with
+// idle-boundary keeps each session's ready prompt in. gc stores the prompt
+// with set-meta after start, and every provider instance that did not start
+// the session (a restarted orchestrator, a CLI process) reads it back with
+// get-meta and waits for what it recovers (sessionexec.ParseReadyPromptMeta).
+// Without a store that answers it byte for byte, those instances wait for the
+// default prompt, so a session whose agent shows another never reads as idle
+// although the pack reports full idle sleep. Unlike the optional metadata
+// round-trip, an absent op therefore fails.
+func (c *checker) checkReadyPromptStore(ctx context.Context, name string) {
+	key := sessionexec.ReadyPromptMetaKey
+	set := c.runOp(ctx, []byte(readyPromptStoreProbe), "set-meta", name, key)
+	switch {
+	case set.unsupported:
+		c.record(readyPromptStoreCheck, StatusFail, "carrier.ops and idle-boundary declared but set-meta is not implemented (exit 2)")
+		return
+	case set.err != nil:
+		c.record(readyPromptStoreCheck, StatusFail, set.err.Error())
+		return
+	}
+	get := c.runOp(ctx, nil, "get-meta", name, key)
+	switch {
+	case get.unsupported:
+		c.record(readyPromptStoreCheck, StatusFail, "carrier.ops and idle-boundary declared but get-meta is not implemented (exit 2)")
+		return
+	case get.err != nil:
+		c.record(readyPromptStoreCheck, StatusFail, get.err.Error())
+		return
+	}
+	if prefix, found := sessionexec.ParseReadyPromptMeta(get.stdout); !found || prefix != readyPromptStoreProbe {
+		c.record(readyPromptStoreCheck, StatusFail, fmt.Sprintf("get-meta %s answered %q after set-meta stored %q; other gc processes would not recover the session's ready prompt", key, get.stdout, readyPromptStoreProbe))
+		return
+	}
+	c.record(readyPromptStoreCheck, StatusPass, "")
 }
 
 // checkListRunning requires the conformance session to appear when the

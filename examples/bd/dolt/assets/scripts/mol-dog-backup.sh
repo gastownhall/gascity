@@ -304,7 +304,7 @@ if [ -n "${GC_BACKUP_DATABASES:-}" ]; then
 fi
 database_selected() {
     [ -z "$DATABASE_FILTER" ] && return 0
-    printf '%s\n' "$DATABASE_FILTER" | grep -qxF "$1"
+    grep -qxF -- "$1" <<<"$DATABASE_FILTER"
 }
 
 SCOPE_SPECS="city"

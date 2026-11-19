@@ -4,6 +4,8 @@ go_library(
     name = "dolttest",
     srcs = [
         "dolttest.go",
+        "dolttest_unix.go",
+        "dolttest_windows.go",
         "sqlserver.go",
     ],
     importpath = "github.com/gastownhall/gascity/test/dolttest",

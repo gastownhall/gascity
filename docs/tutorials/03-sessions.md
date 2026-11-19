@@ -39,7 +39,7 @@ $ cat city.toml
 [workspace]
 provider = "claude"
 
-# ... yours also has [providers] and [defaults.rig.imports] tables
+# ... yours also has [providers], [defaults.rig.imports] and [storage] tables
 
 [[rigs]]
 name = "hello-world"   # from the Quickstart
@@ -86,10 +86,10 @@ a fresh live session to watch.)
 ~/my-project
 $ gc session list --template my-project/reviewer
 ID       TEMPLATE             STATE     REASON  TARGET        TITLE     WORKDIR                AGE  LAST ACTIVE
-mc-8sfd  my-project/reviewer  creating  create  reviewer-a1b  reviewer  /Users/you/my-project  1s   -
+gcg-14   my-project/reviewer  creating  create  reviewer-a1b  reviewer  /Users/you/my-project  1s   -
 
 ~/my-project
-$ gc session peek mc-8sfd   # use the ID your list printed
+$ gc session peek gcg-14   # use the ID your list printed
 › [my-city] my-project/reviewer • 2026-04-07T11:56:59
 
   # Code Reviewer Agent
@@ -160,8 +160,8 @@ and the mayor up for ten hours (your IDs, ages, and states will differ):
 ~/my-project
 $ gc session list
 ID       TEMPLATE             STATE     REASON          TARGET        TITLE     WORKDIR                AGE  LAST ACTIVE
-mc-8sfd  my-project/reviewer  creating  create          reviewer-a1b  reviewer  /Users/you/my-project  1s   -
-mc-5o1   mayor                active    session,config  mayor         mayor     /Users/you/my-city     10h  14m ago
+gcg-14   my-project/reviewer  creating  create          reviewer-a1b  reviewer  /Users/you/my-project  1s   -
+gcg-2    mayor                active    session,config  mayor         mayor     /Users/you/my-city     10h  14m ago
 ```
 
 The reviewer will go idle and be shut down once its work is done. The mayor has
@@ -204,7 +204,7 @@ script or another non-interactive shell):
 ```shell
 ~/my-project
 $ gc session attach mayor
-Attaching to session mc-5o1 (mayor)...
+Attaching to session gcg-2 (mayor)...
 ```
 
 And as soon as you do, you'll be dropped into [a tmux
@@ -235,7 +235,7 @@ Confirm the session remains available after the nudge:
 ~/my-city
 $ gc session list
 ID      TEMPLATE  STATE   REASON          TARGET  TITLE  WORKDIR             AGE  LAST ACTIVE
-mc-5o1  mayor     active  session,config  mayor   mayor  /Users/you/my-city  10h  5s ago
+gcg-2   mayor     active  session,config  mayor   mayor  /Users/you/my-city  10h  5s ago
 ```
 
 ## Session logs
