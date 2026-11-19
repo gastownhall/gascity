@@ -1502,6 +1502,7 @@ go_test(
         "compute_awake_bridge_test.go",
         "compute_awake_set_min_active_test.go",
         "compute_awake_set_routed_demand_idle_test.go",
+        "compute_awake_set_standing_test.go",
         "compute_awake_set_test.go",
         "config_drift_episode_test.go",
         "config_hash_test.go",

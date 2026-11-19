@@ -76,7 +76,7 @@ func awakeKeyingDiff(input AwakeInput) string {
 // pre-refactor algorithm, or "" when they agree. Where the legacy result is
 // map-order dependent, both sides are normalized first.
 func awakePreRefactorDiff(input AwakeInput) string {
-	got, want := ComputeAwakeSet(input), computeAwakeSetPreRefactor(input)
+	got, want := withoutStanding(ComputeAwakeSet(input)), computeAwakeSetPreRefactor(input)
 	if legacyAwakeMapOrderDependent(input) {
 		got, want = normalizeScaledReasons(got), normalizeScaledReasons(want)
 	}
@@ -84,6 +84,17 @@ func awakePreRefactorDiff(input AwakeInput) string {
 		return fmt.Sprintf("name-keyed result differs from pre-refactor:\n got=%+v\nwant=%+v", got, want)
 	}
 	return ""
+}
+
+// withoutStanding clears AwakeDecision.Standing, a classification the frozen
+// pre-refactor algorithm predates (compute_awake_set_standing_test.go pins it).
+func withoutStanding(m map[string]AwakeDecision) map[string]AwakeDecision {
+	out := make(map[string]AwakeDecision, len(m))
+	for k, d := range m {
+		d.Standing = false
+		out[k] = d
+	}
+	return out
 }
 
 // legacyAwakeMapOrderDependent reports whether session-name keying is

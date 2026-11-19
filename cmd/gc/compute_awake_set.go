@@ -196,6 +196,36 @@ type AwakeDecision struct {
 	// restart-style cycle so the next wake starts a fresh conversation on
 	// the newly assigned bead.
 	RequiresFreshCycle bool
+	// Standing is true when configuration alone keeps the session up: it
+	// wakes as named-always, min-active or pin (or reset-pending in place of
+	// one of those, or of no reason), with no assigned work and no named,
+	// routed or work-query demand for its identity (standingWake). Both
+	// reconcilers spend a contended wake budget on every other (demand)
+	// wake first.
+	Standing bool
+}
+
+// standingWakeReasons are the wake reasons configuration alone produces.
+// The list is closed: any other reason, including one added later, is a
+// demand wake, so a new reason is never deprioritized by accident.
+var standingWakeReasons = map[string]bool{
+	"named-always": true,
+	"min-active":   true,
+	"pin":          true,
+}
+
+// standingWake reports whether a wake with the final reason, the reason a
+// reset-pending wake displaced ("" when none), and the session's demand is
+// a standing wake: kept up only by configuration. The caller applies it to
+// waking decisions only.
+func standingWake(reason, displacedReason string, hasAssignedWork, namedDemand bool) bool {
+	if hasAssignedWork || namedDemand {
+		return false
+	}
+	if reason == "reset-pending" {
+		return displacedReason == "" || standingWakeReasons[displacedReason]
+	}
+	return standingWakeReasons[reason]
 }
 
 // awakeKey selects how computeAwakeSetKeyed keys its decisions and reads the
@@ -323,6 +353,10 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 			desired[key(bead)] = "explicit-wake"
 		}
 	}
+	// namedDemand marks the keys of named-always sessions whose identity has
+	// named, routed or work-query demand: their wake is demand, not standing,
+	// though their reason stays named-always.
+	namedDemand := make(map[string]bool)
 	// Named sessions
 	for _, ns := range input.NamedSessions {
 		if agent, ok := lookupAgent(ns.Identity); ok && agent.Suspended {
@@ -330,12 +364,23 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 		}
 		switch ns.Mode {
 		case "always":
+			demand := input.NamedSessionDemand[ns.Identity] || input.NamedSessionRoutedDemand[ns.Identity] || input.NamedSessionWorkQ[ns.Identity]
 			if bead := namedBead(ns); bead != nil {
 				if !bead.DependencyOnly {
 					desired[key(*bead)] = "named-always"
+					if demand {
+						namedDemand[key(*bead)] = true
+					}
 				}
 			} else {
 				desireName(desired, ns.Identity, "named-always")
+				if demand {
+					keys := make(map[string]string)
+					desireName(keys, ns.Identity, "named-always")
+					for k := range keys {
+						namedDemand[k] = true
+					}
+				}
 			}
 		case "on_demand":
 			reason := ""
@@ -559,6 +604,10 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 	// A legitimate reset-pending session is asleep-but-not-drained (restart
 	// request, config-drift reset) or already carries pending-create/
 	// explicit-wake — both remain unaffected by this guard.
+	//
+	// displaced keeps the reason reset-pending overwrote ("" for none), so a
+	// reset of a standing wake stays standing (standingWake).
+	displaced := make(map[string]string)
 	for _, bead := range input.SessionBeads {
 		if !bead.ContinuationResetPending || bead.RestartRequested || bead.WaitHold || bead.Drained {
 			continue
@@ -566,7 +615,10 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 		switch desired[key(bead)] {
 		case "pending-create", "explicit-wake":
 			continue
+		case "reset-pending":
+			// A row sharing the key already recorded what it displaced.
 		default:
+			displaced[key(bead)] = desired[key(bead)]
 			desired[key(bead)] = "reset-pending"
 		}
 	}
@@ -719,6 +771,8 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 		// list, breaking wave-based starts (where dep starts in wave 0
 		// and dependent starts in wave 1).
 
+		decision.Standing = decision.ShouldWake &&
+			standingWake(decision.Reason, displaced[name], hasAssignedWork, namedDemand[name])
 		result[name] = decision
 	}
 
