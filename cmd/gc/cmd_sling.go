@@ -15,7 +15,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -930,11 +929,7 @@ func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	default:
 		return fmt.Errorf("built-in sling routing requires a store")
 	}
-	routedTo := req.Target
-	if r.deps.Cfg != nil {
-		routedTo = agentutil.NormalizePoolRouteTarget(r.deps.Cfg, req.Target)
-	}
-	if err := store.SetMetadata(req.BeadID, beadmeta.RoutedToMetadataKey, routedTo); err != nil {
+	if err := sling.SetBuiltInRoute(store, r.deps.Cfg, req, time.Now()); err != nil {
 		return fmt.Errorf("setting gc.routed_to on %s: %w", req.BeadID, err)
 	}
 	return nil

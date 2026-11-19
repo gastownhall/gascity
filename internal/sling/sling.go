@@ -138,6 +138,11 @@ type RouteRequest struct {
 	WorkDir  string            // rig directory for command execution
 	Env      map[string]string // extra env vars (GC_SLING_TARGET, etc.)
 	Force    bool              // allow best-effort routing when the bead is absent
+	// PriorRoutedTo is the bead's gc.routed_to as the core read it before
+	// this route, empty when unset or unread. A built-in router stamps
+	// gc.routed_at only when the route it writes differs from it
+	// (SetBuiltInRoute).
+	PriorRoutedTo string
 	// Store is the molecule target that holds BeadID and that built-in
 	// routing must stamp. An absent target means the router's own default
 	// store (the work store the sling was configured with). A formula wisp

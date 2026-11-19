@@ -2444,6 +2444,7 @@ go_test(
         "sling_remote_test.go",
         "sling_reserved_class_test.go",
         "sling_residence_s4b_test.go",
+        "sling_route_stamp_test.go",
         "sling_runner_fixture_other_test.go",
         "sling_runner_fixture_windows_test.go",
         "sling_seam_test.go",
