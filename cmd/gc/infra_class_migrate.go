@@ -456,6 +456,14 @@ type infraMigrationReport struct {
 	// Target is the resolved destination the outcome is about. Its zero value
 	// belongs to the outcomes that resolved nothing.
 	Target infraBindingTarget
+	// CheckedAt is when this report's check began, set once by
+	// storageBootGate for the boot verdict (before checkInfraClassConvergence
+	// or checkBornSplitDiscipline runs) and by strandRecheck.tick for every
+	// later one. A containment lease ages from it (containmentLease.TakenAt),
+	// never from when the lease is published: the boot lease is published
+	// only once CityRuntime.run starts, and the rest of boot in between is
+	// age the verdict really has.
+	CheckedAt time.Time
 	// BindingProvenEmpty is positive evidence, read from the binding itself,
 	// that the binding holds nothing a revert would abandon. Its zero value is
 	// "not proven", so a path that never establishes it can only ever withhold
@@ -475,6 +483,29 @@ type infraMigrationReport struct {
 	// Clear is what the operator command's clear pass did, on the paths that
 	// ran one.
 	Clear infraClearResult
+	// basis is the containment basis confirmInfraContainment captures first,
+	// before any of its own reads — the stat tuple (or content hash) of
+	// everything a later read in this check could possibly depend on, taken
+	// before any of them has run. It is empty on a report
+	// confirmInfraContainment never produced (not configured, genesis, an
+	// identity mismatch from the caller's own hold), on a failed capture
+	// (basisErr), and on the boot that back-filled a legacy marker
+	// (confirmInfraConvergence); otherwise it is populated on every outcome
+	// confirmInfraContainment returns, uncheckable included. Basis presence
+	// is therefore NOT what gates publishing a lease for an uncheckable
+	// outcome — Outcome itself is (leaseableOutcome, checked by
+	// newContainmentLease). basis and basisErr are lowercase, unlike every
+	// other field here, on purpose: they are bookkeeping for the containment
+	// lease (storage_containment_lease.go), not part of the evidence this
+	// struct exists to carry to an operator or an event.
+	basis containmentBasis
+	// basisErr is why the capture left basis empty: a basis file that would
+	// not read, or a marker whose recorded work-store identity contradicts
+	// this city's (captureContainmentBasis). Nil whenever the capture
+	// succeeded. The strand recheck prints it once per change
+	// (strandRecheck.noteBasisCapture), since a report without a basis
+	// publishes no lease and one-shot processes then take the full check.
+	basisErr error
 }
 
 // serving reports whether this outcome leaves the binding safe to route reads
@@ -510,6 +541,27 @@ func (r infraMigrationReport) serving() bool {
 func (r infraMigrationReport) servesDegraded() bool {
 	return r.Outcome == infraMigrationStranded && len(r.Stranded) > 0 && len(r.HeldDifferent) == 0 &&
 		len(r.Retained) == 0 && !r.ClearUnfinished
+}
+
+// leaseableOutcome reports whether this report's Outcome is one a
+// containment lease is ever published for: Converged, Genesis, Retained or
+// Stranded — a superset of newStrandRecheck's switch, which starts a
+// recheck only for Converged, Genesis and Stranded (Retained never gets a
+// recheck to begin with, so this set never actually sees it in practice,
+// but a lease published once at boot for a Retained verdict is still
+// leaseable on its own terms). Every other outcome — notably Uncheckable,
+// whose basis stays populated on a standing fault discovered mid-check
+// (confirmInfraContainment's comment on its own basis capture) — is a fact
+// about the CHECK, not a verdict a one-shot could compare itself against,
+// and newContainmentLease rejects it on Outcome alone, independent of
+// whether basis happens to be populated.
+func (r infraMigrationReport) leaseableOutcome() bool {
+	switch r.Outcome {
+	case infraMigrationConverged, infraMigrationGenesis, infraMigrationRetained, infraMigrationStranded:
+		return true
+	default:
+		return false
+	}
 }
 
 // infraStrandedServingLine is the serving verdict `gc storage status` prints
@@ -1503,9 +1555,10 @@ func runInfraClassMigrationFrom(cityPath string, target infraBindingTarget, from
 	// The edges that cross the boundary (D9), decided before the destination
 	// is touched: a refused shape writes nothing.
 	//
-	// Every hold is judged before any refusal returns, so one refusal names
-	// them all: the edge holds (the boundary plan) and the holds bd keeps in
-	// a carried bead's status (infra_class_holds.go).
+	// Every edge hold the boundary plan cannot carry is judged before the
+	// refusal returns, so one refusal names them all. The holds bd keeps in a
+	// carried bead's status are no refusal: they cross as parked holds
+	// (infraCarryParkedHold).
 	if err := infraCopyHoldsRefusal(cityPath, nil, &plan, all, from == infraMigrationFromBackup); err != nil {
 		return fail(err)
 	}
@@ -1858,6 +1911,17 @@ func confirmInfraConvergence(cityPath string, target infraBindingTarget, logPref
 		// the next boot to try again.
 		if err := backfillMarkerWorkStoreIdentityGuarded(cityPath, target, current); err != nil {
 			fmt.Fprintf(stderr, "%s: recording the work-store identity in %s: %v\n", logPrefix, target.MarkerPath(), err) //nolint:errcheck // best-effort stderr
+		} else {
+			// report.basis was captured before this rewrite (confirmInfraContainment
+			// captures first thing, ahead of this caller's own backfill), so its
+			// Marker stamp already names a file this process itself just changed
+			// underneath it — publishing that basis would hand a caller a basis
+			// no later read of the same marker will ever match again, on this of
+			// all boots. Rather than re-stamp around a write already committed,
+			// drop the basis: newContainmentLease then skips publishing this once,
+			// and the very next check captures a basis after the backfill it will
+			// not race again.
+			report.basis = containmentBasis{}
 		}
 	}
 	return report
@@ -1894,8 +1958,36 @@ func markerWorkStoreIdentityHold(cityPath string, target infraBindingTarget, log
 }
 
 // confirmInfraContainment is confirmInfraConvergence's containment re-check,
-// once the marker's work-store identity is known not to contradict this city.
+// with its containment basis captured ahead of every read the check makes.
+// Boot and the split preflight run it once markerWorkStoreIdentityHold has
+// found that the marker's work-store identity does not contradict this city;
+// the strand recheck runs it without that hold, and its basis capture is
+// what keeps the lease it publishes off a contradicting work store
+// (captureContainmentBasis).
+//
+// The capture is a step of its own, before checkInfraContainment reads
+// anything — the manifest (which may itself read the marker, for a legacy
+// manifest's bound), the work store, the binding or the cleared note — so a
+// basis can never stamp a manifest or marker rewritten mid-check and then
+// agree with a one-shot's later re-check that read the rewritten one too
+// (design doc §4.1 F2). A failed capture does not fail the check: the basis
+// is purely advisory (the lease it feeds is never consulted for a refusal,
+// design doc §1), so the report keeps the error (basisErr) beside an empty
+// basis and is simply not published as a lease. newContainmentLease also
+// rejects any Outcome but Converged, Genesis, Retained or Stranded outright,
+// so the basis an uncheckable report keeps is never published either way.
 func confirmInfraContainment(cityPath string, target infraBindingTarget, logPrefix string, stderr io.Writer) infraMigrationReport {
+	basis, basisErr := captureContainmentBasis(cityPath, target)
+	report := checkInfraContainment(cityPath, target, logPrefix, stderr)
+	report.basis, report.basisErr = basis, basisErr
+	return report
+}
+
+// checkInfraContainment is the containment re-check itself: it reads the
+// copy manifest, classifies the work store's infrastructure rows against the
+// binding (classifyInfraContainmentGap) and reads the cleared note, and
+// reports what they show. confirmInfraContainment is its only caller.
+func checkInfraContainment(cityPath string, target infraBindingTarget, logPrefix string, stderr io.Writer) infraMigrationReport {
 	manifest, recorded, err := readInfraCopyManifestRecord(target)
 	if err != nil {
 		return reportUncheckableConvergence(target, logPrefix, stderr, err)
@@ -2586,12 +2678,12 @@ type infraMintedGate struct {
 }
 
 // infraCopyHoldsRefusal plans the city copy's boundary edges
-// (planInfraCityBoundary) and checks the holds bd keeps in a carried bead's
-// status (infraCopyParkedRefusal), and refuses with every hold either finds,
-// in one refusal. The migration and preflight both run it.
+// (planInfraCityBoundary) and refuses with every edge hold the plan cannot
+// carry, in one refusal. The holds bd keeps in a carried bead's status cross
+// as parked holds (infraCarryParkedHold). The migration and preflight both
+// run it.
 func infraCopyHoldsRefusal(cityPath string, cfg *config.City, plan *infraCopyPlan, all map[string]beads.Bead, fromBackup bool) error {
-	boundary := planInfraCityBoundary(cityPath, cfg, plan, all, fromBackup)
-	return errors.Join(infraCopyParkedRefusal(*plan, time.Now()), boundary)
+	return planInfraCityBoundary(cityPath, cfg, plan, all, fromBackup)
 }
 
 // infraUnheldExternalBlockers names each open moved row that waits, through
@@ -3012,10 +3104,7 @@ func importInfraSnapshot(destination beads.Store, plan infraCopyPlan, prepared i
 // the only thing that writes edges, and the source's own materialized dep rows
 // are what it reads, so nothing is lost.
 func infraMigrationRow(b beads.Bead) beads.Bead {
-	metadata := make(beads.StringMap, len(b.Metadata)+1)
-	for key, value := range b.Metadata {
-		metadata[key] = value
-	}
+	metadata := cloneBeadMetadata(b.Metadata)
 	metadata[infraMigrationStampKey] = config.StorageWorkBinding
 	b.Metadata = metadata
 	b.Dependencies = nil
@@ -3035,7 +3124,8 @@ func infraMigrationRow(b beads.Bead) beads.Bead {
 	// to dependency-derived readiness" (beads.Bead.IsBlocked), and the dep rows
 	// that fallback reads ARE witnessed bidirectionally by verifyInfraCopy.
 	b.IsBlocked = nil
-	return b
+	// A hold bd keeps in the status crosses as a parked hold.
+	return infraCarryParkedHold(b)
 }
 
 // verifyInfraCopy is the equality stage: the destination must hold exactly the
@@ -3132,7 +3222,7 @@ func verifyInfraCopy(openDestination func() (beads.Store, error), source beads.S
 		if !ok {
 			return nil, nil, fmt.Errorf("bead %s missing from binding", want.ID)
 		}
-		if diff := beadCopyDifference(withInfraCrossEdgeRecords(want, plan.boundary.Records[want.ID]), got); diff != "" {
+		if diff := beadCopyDifference(withInfraCrossEdgeRecords(infraCarryParkedHold(want), plan.boundary.Records[want.ID]), got); diff != "" {
 			return nil, nil, fmt.Errorf("bead %s differs after copy: %s", want.ID, diff)
 		}
 		if diff := infraCopyClassDifference(want, got); diff != "" {

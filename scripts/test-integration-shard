@@ -133,6 +133,7 @@ cmd_gc_integration_tests=(
   TestBlockedRepairOnRealBdIsHarmlessOnACleanStore
   TestBlockedRepairOnRealBdRestoresOverBlockedWork
   TestCapstoneIntegrationRealMinter
+  TestCityRestoreRoundTripsAManagedDoltSplitWithItsWisps
   TestControllerDiscoversAddedCronOrderWithoutRestart
   TestGcBdBurnAndWispGCJudgesReadRealBd
   TestGcBdBurnJudgeCoversAProxiedServerCascade
@@ -161,10 +162,12 @@ cmd_gc_integration_tests=(
   TestStartRecycleSparesAZombiesOperatorPaneOnRealTmux
   TestStopRefusesARuntimeReplacedAtTheCallOnRealTmux
   TestStorageGateServesACityFromItsBeadsWorkspace
+  TestStorageMigrateAdoptsAManagedDoltLeftRunningOnTheStoppedCity
   TestStorageMigrateDoesNotCountItsOwnPooledSessions
   TestStorageMigrateMovesAStoppedManagedDoltCityInsideTheMaintenanceWindow
   TestStorageMigrateRefusesAForeignSessionOnTheManagedDoltItStarted
   TestStorageSnapshotHostedBdWorkStore
+  TestStorageSplitGuidedOnAStoppedManagedDoltCity
   TestTheCityFloorHoldsOnARealBdStore
   TestTheDefaultFloorOpenerReachesARealBdCity
 )

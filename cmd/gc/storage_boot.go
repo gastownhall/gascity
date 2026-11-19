@@ -132,6 +132,64 @@ type storageRoutes struct {
 	// it publishes only a CHANGE from what boot already recorded.
 	bootVerdict infraMigrationReport
 	target      infraBindingTarget
+	// lease is this process's live containment lease for target: the boot
+	// verdict above, then every definitive strand-recheck tick after it
+	// (storage_containment_lease.go). Nil until the first report that
+	// captures a basis. Never persisted — Option D of the design — and read
+	// only by servedContainmentLease, via the controller socket's
+	// "storage-verdict" case (controller.go).
+	lease atomic.Pointer[containmentLease]
+}
+
+// servedContainmentLease returns the containment lease the process
+// registered to serve cityPath is currently publishing, or ok=false when no
+// routes are registered for it (an older controller's reply, and a process
+// mid-boot before registerResidencyRoutes runs, both look like this to a
+// caller) or when routes are registered and no lease is published for them:
+// before CityRuntime.run publishes the boot verdict; after a boot that had
+// no basis to publish (genesis, a legacy-marker back-fill, a failed
+// capture), until the first definitive recheck tick, at least a full
+// strandRecheckInterval later; and after the recheck withdrew the lease,
+// until a definitive tick publishes one again (strandRecheck.tick).
+func servedContainmentLease(cityPath string) (*containmentLease, bool) {
+	entry, ok := registeredResidencyEntry(cityPath)
+	if !ok || entry.routes == nil {
+		return nil, false
+	}
+	lease := entry.routes.lease.Load()
+	if lease == nil {
+		return nil, false
+	}
+	return lease, true
+}
+
+// publishBootContainmentLease publishes routes' boot verdict as this
+// process's first containment lease, the moment it is called (CityRuntime's
+// run, after route registration). routes.bootVerdict carries no basis for an
+// outcome that never ran confirmInfraContainment's work-store read —
+// notably genesis, which recordInfraGenesis produces directly — and
+// newContainmentLease is the one place that distinguishes that case, so
+// there is nothing else for this function to check.
+//
+// The boot verdict's own check duration was never measured as a recheck
+// tick's is, so this seeds the freshness budget with a zero check duration
+// and this slice's fixed recheck interval: strandRecheckFreshness(10 min,
+// 0) is the 10-minute cap (strandRecheckFreshCap's comment). TakenAt is the
+// check itself (bootVerdict.CheckedAt), not this call, which can run later
+// in boot — so the budget already starts being spent on whatever boot does
+// in between, not only on the wait for the first recheck tick.
+func publishBootContainmentLease(routes *storageRoutes) {
+	if routes == nil {
+		return
+	}
+	freshMS := strandRecheckFreshness(strandRecheckInterval, 0).Milliseconds()
+	takenAt := routes.bootVerdict.CheckedAt
+	if takenAt.IsZero() {
+		takenAt = time.Now()
+	}
+	if lease := newContainmentLease(routes.target, routes.bootVerdict, freshMS, takenAt); lease != nil {
+		routes.lease.Store(lease)
+	}
 }
 
 // hasLegacyResidents reports the boot census's verdict for a binding store.
@@ -312,7 +370,7 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 	// A gc older than the split's recorded floor reads none of it, whatever
 	// the config says (storage_min_gc_version.go). One failed stat on a city
 	// that has none.
-	if err := minGCVersionRefusal(cityPath, version); err != nil {
+	if err := minGCVersionRefusal(cityPath, gcVersionForFloor()); err != nil {
 		return nil, fmt.Errorf("%s: %w", logPrefix, err)
 	}
 
@@ -340,6 +398,12 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 	// either way the stores hold a copy in flight (storage_reverse.go). One
 	// failed read of one file on a city that never reversed.
 	if err := storageReverseRefusal(cityPath, storageReverseRoot(cityPath, cfg)); err != nil {
+		return nil, fmt.Errorf("%s: %w", logPrefix, err)
+	}
+	// So does a city restore that has not ended, proven or accepted unproven
+	// (storage_snapshot_city.go): one failed read of one file on a city that
+	// never restored.
+	if err := storageCityRestoreBootRefusal(cityPath); err != nil {
 		return nil, fmt.Errorf("%s: %w", logPrefix, err)
 	}
 	if cfg == nil || cfg.Storage == nil {
@@ -411,6 +475,12 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", logPrefix, err)
 	}
+	// Recorded before the check that follows runs, so the lease it may end
+	// up seeding (publishBootContainmentLease) ages from when this process
+	// actually looked, not from whenever CityRuntime.run gets around to
+	// publishing it — which, between this gate returning and that publish,
+	// can be however long the rest of boot takes.
+	checkedAt := time.Now()
 	var report infraMigrationReport
 	if ok {
 		report = checkInfraClassConvergence(cityPath, cfg, logPrefix, stderr)
@@ -446,6 +516,7 @@ func storageBootGate(cityPath string, cfg *config.City, logPrefix string, rec ev
 			report.Target = target
 		}
 	}
+	report.CheckedAt = checkedAt
 	// A stranded city whose binding names no id twice serves degraded
 	// (infraMigrationReport.servesDegraded): the stranded rows stay invisible
 	// to their class readers, and this process says so once, here, rather than
@@ -942,7 +1013,36 @@ func printStorageWarningOnce(w io.Writer, msg string) {
 // check its boot ran (strandRecheck). Every one-shot gc process already pays
 // one such read-only census; the controller pays one per interval. Zero
 // disables it. A var so a test can shorten it.
+//
+// It seeds s.run's ticker, whose period never changes: the cadence is
+// fixed. The design's adaptive cadence (max(60s, 10×last check duration),
+// design doc §4.3) is not implemented.
 var strandRecheckInterval = 10 * time.Minute
+
+// strandRecheckFreshCap bounds how long a lease is ever treated as fresh,
+// regardless of interval or check duration (design doc §4.3) — the owner's
+// bound on how long a stale verdict is served while rechecks keep failing
+// (Q3): doctor's WARN past this point is slice 3. It is also, in this
+// slice, the freshness every definitive tick's lease actually gets: with
+// the interval fixed at strandRecheckInterval (10 min), 2×interval alone
+// (20 min) already exceeds this cap, so strandRecheckFreshness(interval, d)
+// = min(20 min+d, cap) = this cap for every d ≥ 0, regardless of how long
+// the check itself took — the cap, not the check duration, decides the
+// budget in this slice.
+const strandRecheckFreshCap = 10 * time.Minute
+
+// strandRecheckFreshness is a lease's freshness budget (design doc §4.3):
+// min(10 min, 2×interval + last check duration). A caller (slice 2) accepts
+// a lease only while its age is within this budget. This slice always
+// calls it with interval = strandRecheckInterval, the fixed cadence, which
+// collapses it to the constant strandRecheckFreshCap (see that const's
+// comment) — slice 2 is what makes interval vary.
+func strandRecheckFreshness(interval, lastCheckDuration time.Duration) time.Duration {
+	if fresh := 2*interval + lastCheckDuration; fresh < strandRecheckFreshCap {
+		return fresh
+	}
+	return strandRecheckFreshCap
+}
 
 // strandRecheck is the controller's periodic, read-only re-run of the boot
 // gate's containment check (confirmInfraContainment). The controller runs the
@@ -970,6 +1070,23 @@ type strandRecheck struct {
 	// at boot); faulted is set while the last published verdict is uncheckable.
 	last    string
 	faulted bool
+	// routes is where this recheck publishes its lease
+	// (storage_containment_lease.go); nil in the tests that build a
+	// strandRecheck without one, which simply never publish.
+	routes *storageRoutes
+	// quiescent reports whether this city's work store is currently
+	// suspended (CityRuntime.beadsQuiescent.Load, wired by
+	// startStrandRecheck). Nil means never quiescent, which is what every
+	// direct construction of a strandRecheck in this package's own tests
+	// (predating F3) keeps doing.
+	quiescent func() bool
+	// lastCheckDuration is what the most recent measured tick cost, one of
+	// strandRecheckFreshness's two inputs (the other, interval, is the
+	// fixed strandRecheckInterval in this slice — see that var's comment).
+	lastCheckDuration time.Duration
+	// basisFault is the text of the basis-capture failure noteBasisCapture
+	// last printed, or "" once a definitive tick captured a basis again.
+	basisFault string
 }
 
 // newStrandRecheck seeds the recheck with the verdict the gate served on, so
@@ -986,7 +1103,7 @@ func newStrandRecheck(routes *storageRoutes, cityPath string, rec events.Recorde
 	}
 	return &strandRecheck{
 		cityPath: cityPath, target: routes.target, rec: rec, stderr: stderr, logPrefix: logPrefix,
-		last: strandRecheckKey(routes.bootVerdict),
+		last: strandRecheckKey(routes.bootVerdict), routes: routes,
 	}
 }
 
@@ -1012,19 +1129,55 @@ func (s *strandRecheck) tick() {
 			fmt.Fprintf(s.stderr, "%s: the strand recheck panicked and was skipped: %v\n", s.logPrefix, r) //nolint:errcheck // best-effort stderr
 		}
 	}()
+	if s.quiescent != nil && s.quiescent() {
+		// F3: a suspended city's work store must not be woken by a recheck it
+		// never asked for (boot-check-design.md F3). The lease simply ages;
+		// a lapsed one sends a caller back to the full check, same as if
+		// this process were not running at all.
+		return
+	}
+	takenAt := time.Now()
 	report := confirmInfraContainment(s.cityPath, s.target, s.logPrefix, io.Discard)
+	s.lastCheckDuration = time.Since(takenAt)
 	report.Target = s.target
+	report.CheckedAt = takenAt
 	if report.Outcome == infraMigrationUncheckable {
 		if report.Transient || s.faulted {
 			if report.Transient && s.stderr != nil {
 				fmt.Fprintf(s.stderr, "%s: the strand recheck could not run this time: %v\n", s.logPrefix, report.Fault) //nolint:errcheck // best-effort stderr
 			}
+			// Q3: a transient failure must not drop the lease a definitive
+			// verdict already published — the city it describes has not
+			// stopped being contained just because this tick could not
+			// re-confirm it. The lease is kept but re-dated and flagged, up
+			// to strandRecheckFreshCap past its own TakenAt (owner decision
+			// Q3): a lease never outlives that cap no matter how long the
+			// recheck keeps failing.
+			s.extendLeaseOnTransientFailure(takenAt)
 			return
 		}
+		// A standing (non-transient) fault is not a lease to keep stale: it
+		// means this process no longer knows whether the binding still
+		// holds, so a caller must fall back to its own full check rather
+		// than trust one this recheck can no longer vouch for.
 		s.faulted = true
+		if s.routes != nil {
+			s.routes.lease.Store(nil)
+		}
 		recordStrandRecheckOutcome(s.rec, report, infraMigrationOperatorAdvice(report, s.logPrefix))
 		return
 	}
+	// Every definitive verdict publishes a lease, even one that repeats the
+	// last one: a lease exists to be fresh, and withholding a republish
+	// because nothing changed would let it age out while the city is in
+	// fact still fine. Events stay change-only below; only the lease is
+	// published on every tick. A verdict whose basis capture failed
+	// publishes nil, withdrawing the lease. That includes a work store the
+	// marker's recorded identity contradicts: boot refuses one
+	// (markerWorkStoreIdentityHold), and this recheck learns of it only
+	// from the capture (captureContainmentBasis).
+	s.noteBasisCapture(report.basisErr)
+	s.publishLease(report, takenAt)
 	key := strandRecheckKey(report)
 	if key == s.last && !s.faulted {
 		return
@@ -1039,6 +1192,65 @@ func (s *strandRecheck) tick() {
 			s.logPrefix, len(report.Stranded), infraStrandedIDList(report.Stranded), infraStrandedServingLine(report))
 	}
 	recordStrandRecheckOutcome(s.rec, report, advice)
+}
+
+// publishLease stores whatever newContainmentLease makes of this report,
+// including nil: a definitive verdict whose basis capture failed (or one
+// newContainmentLease otherwise refuses) must not leave a stale, possibly no
+// longer true, previously-published lease still being served — it withdraws
+// it instead, the same way a standing fault does in tick(). No-op with no
+// routes to publish to, which is every strandRecheck this package's own
+// tests construct directly.
+func (s *strandRecheck) publishLease(report infraMigrationReport, takenAt time.Time) {
+	if s.routes == nil {
+		return
+	}
+	freshMS := strandRecheckFreshness(strandRecheckInterval, s.lastCheckDuration).Milliseconds()
+	s.routes.lease.Store(newContainmentLease(s.target, report, freshMS, takenAt))
+}
+
+// noteBasisCapture prints, once per distinct failure, why a definitive tick
+// captured no containment basis (infraMigrationReport.basisErr). That tick
+// publishes no lease, so a process asking for one over the controller
+// socket gets no answer and takes its own full check, and without this line
+// nothing would say why. A tick whose capture succeeds re-arms it, so a
+// failure that returns is printed again.
+func (s *strandRecheck) noteBasisCapture(basisErr error) {
+	if basisErr == nil {
+		s.basisFault = ""
+		return
+	}
+	fault := basisErr.Error()
+	if fault == s.basisFault {
+		return
+	}
+	s.basisFault = fault
+	if s.stderr != nil {
+		fmt.Fprintf(s.stderr, "%s: the strand recheck serves no containment lease until this clears: %v\n", s.logPrefix, basisErr) //nolint:errcheck // best-effort stderr
+	}
+}
+
+// extendLeaseOnTransientFailure re-stores the last definitive lease this
+// recheck published, extending its freshness budget to the full
+// strandRecheckFreshCap measured from its own TakenAt and marking it
+// RecheckFailing, instead of letting it age on the normal interval while
+// this process cannot confirm it either way (owner decision Q3). A no-op
+// with no routes, or with no lease published — none yet, or one this
+// recheck withdrew: a transient failure never brings a lease back, only a
+// definitive tick does.
+func (s *strandRecheck) extendLeaseOnTransientFailure(attemptAt time.Time) {
+	if s.routes == nil {
+		return
+	}
+	current := s.routes.lease.Load()
+	if current == nil {
+		return
+	}
+	extended := *current
+	extended.FreshMS = strandRecheckFreshCap.Milliseconds()
+	extended.RecheckFailing = true
+	extended.LastAttemptAt = attemptAt
+	s.routes.lease.Store(&extended)
 }
 
 // run ticks every interval until ctx ends.
@@ -1065,6 +1277,11 @@ func (cr *CityRuntime) startStrandRecheck(ctx context.Context) (stop func()) {
 	if strandRecheckInterval <= 0 || s == nil {
 		return func() {}
 	}
+	// F3: a suspended city's Dolt must not be woken by a recheck it never
+	// asked for (boot-check-design.md F3). s.quiescent is read fresh on
+	// every tick, so a city that un-suspends resumes rechecking on its very
+	// next tick with no restart needed.
+	s.quiescent = cr.beadsQuiescent.Load
 	ctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 	go func() {

@@ -61,6 +61,49 @@ func TestHookRootContinuation(t *testing.T) {
 	}
 }
 
+func TestHookRootExcludesClaimant(t *testing.T) {
+	for _, status := range []string{"open", "ready", "in_progress"} {
+		t.Run(status, func(t *testing.T) {
+			owner := ""
+			beadStatus := status
+			switch status {
+			case "ready":
+				beadStatus, owner = "open", "seat"
+			case "in_progress":
+				owner = "seat"
+			}
+			excluded := scopedHookBead("excluded", "root-a", beadStatus, owner)
+			excluded.Metadata[beadmeta.ExcludeClaimantsMetadataKey] = "seat"
+			opts, ops, run, claims := scopedHookFixture(t, "open", []beads.Bead{excluded})
+			var out, errOut bytes.Buffer
+			code := claimHookWorkWithRunner("unused generic query", "/rig", nil, nil, opts, ops, run, nil, &out, &errOut)
+			if code != 0 || len(*claims) != 0 || strings.Contains(out.String(), `"action":"work"`) {
+				t.Fatalf("code=%d out=%s err=%s claims=%v", code, &out, &errOut, *claims)
+			}
+		})
+	}
+}
+
+func TestHookRootContinuationSkipsExcludedSibling(t *testing.T) {
+	claimed := scopedHookBead("step-a", "root-a", "open", "")
+	excluded := scopedHookBead("excluded", "root-a", "open", "")
+	excluded.Metadata[beadmeta.ExcludeClaimantsMetadataKey] = "seat"
+	allowed := scopedHookBead("allowed", "root-a", "open", "")
+	rows := []beads.Bead{claimed, excluded, allowed}
+	opts, ops, _, _ := scopedHookFixture(t, "open", rows)
+	opts.SessionID = "session-a"
+	store := ops.WorkflowStore(context.Background(), "/rig", nil, "root-a", "")
+	ops.ListContinuation = func(context.Context, string, []string, string, string) ([]beads.Bead, error) { return rows, nil }
+	assigned, err := preassignHookContinuationGroup(claimed, opts, ops, "/rig")
+	if err != nil || len(assigned) != 1 || assigned[0] != "allowed" {
+		t.Fatalf("assigned=%v err=%v, want only allowed", assigned, err)
+	}
+	got, err := store.Get("excluded")
+	if err != nil || got.Assignee != "" {
+		t.Fatalf("excluded sibling: bead=%+v err=%v, want unassigned", got, err)
+	}
+}
+
 func TestHookRootLostRaceAndReadFailures(t *testing.T) {
 	for _, mode := range []string{"race", "query error", "claim error", "bad json", "null", "partial decode"} {
 		t.Run(mode, func(t *testing.T) {

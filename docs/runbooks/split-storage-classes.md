@@ -44,6 +44,83 @@ is: swap the config, run one command, start the city.
   a provider a downstream fork compiled in creates its binding at first boot
   and moves nothing. This command's one source is the work store.
 
+## The short path: `gc storage split`
+
+`gc storage split` runs Steps 1 to 4b below as one command, on a stopped
+city that authors no `[storage]` yet:
+
+```
+gc stop
+gc storage split --dry-run            # the rehearsal: gc storage preflight --split
+gc storage split --fleet-stopped
+gc start
+```
+
+Before you stop the city, find every `gc` an agent can run: the first one on
+the PATH agent sessions get (`[workspace.env]`'s `PATH` when the city sets
+one, otherwise your `PATH` with `~/.local/bin` and `~/bin` ahead of it and
+`~/go/bin` after it), and any other a provider's or an agent's own `PATH`,
+or a remote host, gives its sessions. Each must be 1.6.0 or later, the
+version floor the split writes; replace or remove an older one. An older gc
+does not read the split, so it writes infrastructure beads into the work
+store, where they are stranded. The rehearsal checks only the first `gc` on
+the session PATH.
+
+Two kinds of build have no release version to compare, and are reported
+rather than refused: a `dev` build, and a `go install …@<ref>` build, whose
+Go pseudo-version (`v1.5.2-0.<date>-<commit>`) names a commit, not the
+release its prefix suggests, though `gc version` prints only that prefix. A
+`gc` the rehearsal cannot read the build of (a wrapper script around the
+real binary) is reported too. Make sure each such gc is built from a commit
+that has the split.
+
+In order, under one controller lock and one maintenance window, it:
+
+1. rehearses the split (`gc storage preflight --split`) and refuses, writing
+   nothing, on any blocking check, a `gc` on the session PATH older than the
+   version floor among them. A copy that will exceed `--time-budget` is
+   a note, not a refusal: the run pauses (exit 75) and the same command
+   continues it;
+2. snapshots the work store and every rig into `.gc/snapshots/` and pins the
+   snapshot;
+3. runs legacy's demand-migration repairs once, when the split city will run
+   the v2 reconciler, so the rows it copies are the repaired ones;
+4. appends the `[storage]` block from Step 1 to `city.toml`, keeping every other
+   byte, and writes `.gc/min-gc-version` (1.6.0, or a higher floor already
+   there): a gc that reads that file refuses a split city when it is older;
+5. migrates the city (Step 4), then imports every rig (Step 4b);
+6. checks the result as `gc storage status` and `gc doctor --check
+   storage-split` do, then names `gc start`, the rollback and the snapshot.
+
+It records each step in `.gc/storage-split.journal.json`, with `city.toml`'s
+bytes from before the split. Run the same command again, with the same
+`--force` attestations, to continue a split that stopped: on its time
+budget, on a rig whose import refused (the city is split and serves
+meanwhile, and `gc doctor` warns until the split finishes), or because the
+run was killed. A split that stopped before it wrote `city.toml` starts over,
+because the city may have run since.
+
+It takes the same attestations as the commands it runs:
+`--force=remote-runtime` for a city whose sessions run on remote hosts (they
+refuse mail, nudges and session lookups until worker-site transport exists),
+and `--force=shared-store:<identity>` for a work or rig store another
+registered city uses, with that city stopped by `gc supervisor stop --wait`.
+A bare `--force` refuses.
+
+**Rolling back.** Before the city's copy converges, `gc storage split
+--abandon --fleet-stopped` puts `city.toml` back, puts the version floor back
+as it was before the split (or removes it if there was none), deletes the rows
+it copied into the binding, and unpins the snapshot. A split stopped before it
+wrote `city.toml` only has its journal closed and its snapshot unpinned. After that, run
+`gc storage migrate --to-work --fleet-stopped` ("Reversing the split" below).
+It copies the binding's rows back and, when `city.toml` is still the file the
+split wrote, restores the file's bytes from before the split. A reverse of a
+split that stopped (on a rig, say) leaves the split's journal open, and
+`gc doctor` warns about it: `gc storage split --abandon --fleet-stopped` then
+closes the journal and unpins the split's snapshot, and changes nothing else.
+
+The rest of this runbook is the same cutover, one command at a time.
+
 ## Step 1: author the split
 
 Add the class map and the binding it names. Either half may live in an include
@@ -357,19 +434,39 @@ names, under `external refs`, every open bead the copy moves that waits on an
 `external:<id>` whose bead no store holds: it arrives blocked, so close or
 re-point the edge first if it should not wait. Every other edge between a
 moved bead and one that stays is dropped and recorded on the moved bead
-(`gc.migrated_cross_edges`). A hold
-the binding cannot express makes the migration refuse, before anything is
-copied, naming each bead and its fix; `gc storage preflight` reports the same
-refusal under `holds`:
+(`gc.migrated_cross_edges`).
 
-- **an undated deferral** (`bd` status `deferred` with no future
-  `defer_until`): give the bead a dated deferral, `bd defer <id> --until
-  <date>`, which the copy carries as `defer_until`, or undefer it;
-- **any other status `bd` parks a bead with** (`blocked`, `pinned`, `hooked`,
-  or a custom status): the binding stores only `open`, `in_progress` and
-  `closed`, and the bead would arrive `open` and ready. Keep it parked with a
-  dated deferral (`bd defer <id> --until <date>`), release it (`bd update <id>
-  --status open`), or close it;
+A bead `bd` parks by its status crosses parked. The binding stores only
+`open`, `in_progress` and `closed`, so an undated deferral (`bd` status
+`deferred` with no `defer_until`) and any other status `bd` parks a bead with
+(`blocked`, `pinned`, `hooked`, `review`, `testing`, or a custom status)
+cross as an open bead deferred until 9999-12-31, with the status and the
+`defer_until` it had recorded on it (`gc.migrated_parked_hold`). The binding
+leaves a bead deferred into the future out of every ready view and every read
+of live work, and refuses to claim it, as `bd` refuses to claim a parked bead,
+so a parked bead neither wakes a session nor keeps one from closing. The rig
+import carries them the same way, and `gc storage preflight` lists them under
+`parked holds` when its `holds` check passes. A dated deferral crosses as
+its `defer_until`, which the binding honors; one already due wakes in the
+binding as `bd`'s own sweep would wake it. A bead `bd` defers until exactly
+9999-12-31T00:00:00Z, the date the copy parks with, crosses as it is, with its
+status and that date recorded the same way.
+
+A parked bead stays parked in the split city. `gc bd update <id> --claim`
+refuses it. A status write keeps the deferral, so `gc bd update <id> --status`
+gives a deferred bead no status but `open` or `closed`: `--status in_progress`
+would leave it in progress but hidden from every hook. No `gc bd` verb clears
+a binding bead's deferral (`defer`, `undefer` and `update --defer` are refused
+for it), so release a bead in the work store before the window if it is to be
+worked after it. After cutover a parked bead can only be closed, or returned
+by `gc storage migrate --to-work` (`--to-rigs` for a bead a rig import
+carried), which puts the recorded status and `defer_until` back on each bead
+still parked.
+
+A hold the binding cannot express makes the migration refuse, before anything
+is copied, naming each bead and its fix; `gc storage preflight` reports the
+same refusal under `holds`:
+
 - **a `waits-for` or `conditional-blocks` edge onto unfinished work**: a
   cross-store gate encodes only `blocks`. Finish the work bead, close the
   infrastructure bead, or replace the edge with a `blocks` edge;
@@ -391,13 +488,16 @@ as gc models it: id, title, status, type, description, priority, assignee,
 sender, parent, ref, labels, metadata, the ephemeral and no-history bits,
 timestamps, defer-until, and every dependency edge touching the bead with its
 payload. That is exactly the set of fields the copy carried into the binding
-and the equality stage proved. It does **not** hold the fields only `bd` models:
-notes, comments, close reason and closed-at, design, acceptance criteria, the
-event history, and the indefinitely-deferred state. Those were never copied
-into the binding either (an open bead in the indefinitely-deferred state is
-refused, see **Holds**). On a native-Dolt work store each removal is a Dolt
-commit, so until Dolt garbage-collects that history, `dolt` (`AS OF` a commit
-before the clear) is the full-fidelity backstop for them.
+and the equality stage proved. Beside them it records the raw status `bd`
+held the bead in (`source_status`) and whether `bd` recorded it deferred
+(`indefinitely_deferred`), as the rig import's backup does, so a re-copy from
+the backup carries a parked bead parked again (see **Holds**), and the restore
+below puts the raw status back. It does
+**not** hold the fields only `bd` models: notes, comments, close reason and
+closed-at, design, acceptance criteria, and the event history. Those were
+never copied into the binding either. On a native-Dolt work store each removal
+is a Dolt commit, so until Dolt garbage-collects that history, `dolt` (`AS OF`
+a commit before the clear) is the full-fidelity backstop for them.
 
 **Batches, the time budget, and resuming.** The copy and the clear run in
 batches: rows are created 500 to a transaction, edges 2,000 to one, the edges
@@ -1443,7 +1543,8 @@ row with its edges and their payloads:
 | Store | Exact copy |
 |---|---|
 | SQLite binding | `VACUUM INTO`, proven with `PRAGMA integrity_check`. The copy is one self-contained file in rollback-journal mode |
-| Native Dolt | a Dolt tag, `gc-storage-snapshot-<id>-<dir hash>`, of HEAD |
+| The city's managed Dolt | its data directory, copied with the server stopped, when the snapshot's maintenance window started the server (otherwise a Dolt tag, as below) |
+| Other native Dolt | a Dolt tag, `gc-storage-snapshot-<id>-<dir hash>`, of HEAD |
 | bd CLI, hosted bd | `bd export --all` |
 | File | a copy of the file |
 | Generic exec | none |
@@ -1457,10 +1558,74 @@ Know what each one can bring back:
 - **A Dolt tag holds the committed tables only.** bd keeps wisps in
   `dolt_ignore`'d tables, so they are not in the tag; the JSONL holds them. A
   working set with uncommitted changes is noted in the manifest.
-- **The binding is restorable** (below). A work store is restored by hand:
-  `CALL DOLT_RESET('--hard', '<tag>')` on its Dolt, or `bd import` of the
-  snapshot's `work/export.jsonl`. `gc storage migrate --to-work` is the
-  automated rollback.
+- **The binding is restorable** (below).
+- **The whole city is restorable** from a snapshot taken before the split,
+  when each of its stores has a file copy or a managed Dolt data directory.
+  Take it with `gc storage snapshot --work --rigs --fleet-stopped` before you
+  add `[storage]` and run `gc storage migrate --from-work`, as `gc storage
+  preflight --split` lists it. `gc storage snapshot restore <id> --city
+  --fleet-stopped` puts back the stores, city.toml and the city's storage
+  records (`.gc/min-gc-version`, the served-binding and cleared notes), moves
+  the binding root aside, and proves each restored store against the
+  snapshot's JSONL. Only `gc storage snapshot --work` copies the data
+  directory: the mandatory snapshot `gc storage migrate --to-work` takes
+  holds the binding, which `--city` never restores, so it takes a Dolt tag.
+  The data directory copied is the one the managed Dolt serves,
+  `<city>/.beads/dolt`. A `GC_DOLT_DATA_DIR` in the environment that names
+  another directory refuses the snapshot and the restore. The copy holds
+  every database the server serves. Without `--rigs`, the snapshot of a city
+  whose rigs keep their stores there is refused before it starts or stops
+  anything, because it would record no store for those databases. A database no store
+  of the city keeps (gc's probe database `__gc_probe`, the one `gc rig
+  remove` leaves behind) is named in a note on the work store: the restore
+  puts it back as the copy holds it and names it unproven.
+
+  The restore refuses before anything moves:
+  - a snapshot that holds a binding;
+  - a snapshot of a split city (one that records a served-binding or cleared
+    note);
+  - a city.toml that, with the city's include fragments as they are now,
+    still declares a split;
+  - a store whose copy is a Dolt tag or a bd export;
+  - a data directory copy holding a rig's database the snapshot records no
+    store for, which the restore would roll back unproven;
+  - a rig imported since the snapshot whose store the snapshot does not
+    hold;
+  - a store it replaces that another registered city also uses: the work
+    store, a rig's, or any other database of the managed Dolt's data
+    directory. The restore replaces each store whole, so it cannot leave the
+    other city's rows as they are. `--force=shared-store:<identity>` does not
+    lift this, and the restore refuses it. `gc storage migrate --to-work` is
+    the way back for a city whose store another city shares;
+  - a live controller;
+  - a running managed Dolt;
+  - too little disk for the data directory copy.
+
+  Every file it replaces is kept as `*.pre-restore-<ts>`. city.toml is
+  copied aside, so it is never missing. The work-dir export leaves these
+  files out. The journal, `.gc/storage-city-restore.json`, holds `gc start`
+  and every other writing storage command until the restore ends, and keeps
+  the snapshot pinned against retention until then. Run again, the same
+  command finishes an interrupted restore.
+
+  The snapshot records when it took each copy and when it read the store's
+  rows for the JSONL. A row the JSONL dates in between, each moment taken to
+  the second, was written during the snapshot. The restore reports it, with
+  where its later content is kept, and the proof passes. Any other
+  difference fails the proof, and the city stays held. Resolve it and run the
+  restore again. When that cannot be done, add `--accept-unproven` to end the
+  restore anyway. It records the rows the proof failed on in the journal and
+  in `.gc/storage-attestations.log`, a `#gc:unproven` line each after the
+  acceptance, so the record outlives the journal the next restore replaces.
+  It lists every file the restore kept aside, and releases the city.
+
+  The copy of a managed Dolt's data directory is refused, before the server
+  stops, when it would leave less than the managed Dolt's critical floor
+  (`GC_DOLT_MIN_FREE_BYTES`) free, and `gc storage preflight --split` counts
+  the data directory in its disk estimate. `gc storage migrate --to-work` is
+  the other way back; on native Dolt it refuses an edge that carries a
+  payload, and `gc storage preflight --split` says under `way back` whether
+  the city has any.
 
 A snapshot directory holds `manifest.json` only once every file in it has
 been re-read and proven, so a directory without one is an interrupted
@@ -1925,11 +2090,17 @@ want served, or that the binding's contents are deliberately abandoned.
 This puts the pre-cutover infrastructure rows back into a `bd` work store, for
 a rollback after the clear. It restores the state **as of the cutover**: beads
 written to the binding since then are not in the backup and are lost by the
-rollback, and the fields listed under "What the backup holds" are not restored.
+rollback, and the fields the backup does not hold (see "What the backup holds,
+and what it does not") are not restored.
 That includes progress: a workflow step that was open at the cutover and
 finished in the binding afterwards comes back open, and the restored city
 dispatches it again. Check the binding (`gc bd show <id>` before the revert)
 for any step whose work must not run twice.
+Each row that was not closed comes back with the raw status `bd` held it in,
+a parked one included: the transform takes it from the entry's
+`source_status`, or `deferred` from its `indefinitely_deferred`. A backup an
+earlier gc wrote records neither, and its rows come back with gc's folded
+status, a parked one as `open`.
 Edge payloads (a `waits_for` gate's `{"gate":"any-children"}`) are not carried
 by `bd import`; a restored gate reads as the default, `all-children`. Verified
 with `bd` 1.3.2-rc.1. The transform marks every ephemeral and no-history row
@@ -1953,10 +2124,12 @@ notes stand — that refusal is what sent you here:
 B=<binding root>/infra.retained-source.jsonl
 
 # The rows, with their outbound edges and parent links, each ephemeral and
-# no-history row marked for bd's dolt_ignore'd tables.
+# no-history row marked for bd's dolt_ignore'd tables, and each row that was
+# not closed in the raw status bd held it in.
 cat > /tmp/gc-restore.jq <<'JQ'
 select(.bead)
 | .bead as $b
+| (.source_status // (if .indefinitely_deferred then "deferred" else null end)) as $raw
 | ([(.deps // [])[] | {issue_id, depends_on_id, type}]
    + (if $b.parent then [{issue_id: $b.id, depends_on_id: $b.parent, type: "parent-child"}] else [] end)
    | unique_by([.depends_on_id, .type])) as $deps
@@ -1965,6 +2138,7 @@ select(.bead)
 | .dependencies = $deps
 | if $b.from then .metadata = (($b.metadata // {}) + {from: $b.from}) else . end
 | if $b.ephemeral or $b.no_history then .wisp_plane = true else . end
+| if $raw and $b.status != "closed" then .status = $raw else . end
 JQ
 jq -c -f /tmp/gc-restore.jq "$B" > /tmp/gc-restore.jsonl
 gc bd import /tmp/gc-restore.jsonl

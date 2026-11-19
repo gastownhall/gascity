@@ -2,6 +2,7 @@ package scripts_test
 
 import (
 	"errors"
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -160,6 +161,103 @@ func TestCheckRoutedTestRowsRejectsUnlistedMatrix(t *testing.T) {
 			out, code := runRoutedRowsGuard(t, root)
 			if code == 0 || !strings.Contains(out, want) {
 				t.Fatalf("unlisted matrix with %d rows: exit=%d, want %q:\n%s", count, code, want, out)
+			}
+		})
+	}
+}
+
+// TestCheckRoutedTestRowsIgnoresUnrelatedMarkerText keeps values, arguments
+// and commented-out case names from enrolling ordinary files as matrices.
+func TestCheckRoutedTestRowsIgnoresUnrelatedMarkerText(t *testing.T) {
+	const listed = "cmd/gc/cmd_status_test.go"
+	const unlisted = "cmd/gc/cmd_ordinary_test.go"
+	manifest := listed + "\n"
+	for _, tc := range []struct {
+		name, prefix, line, suffix string
+	}{
+		{"wantReason", "var cases = []struct{ wantReason string }{\n", "{wantReason: %q},\n", "}\n"},
+		{"nilReason", "var cases = []struct{ nilReason string }{\n", "{nilReason: %q},\n", "}\n"},
+		{"call_arguments", "func consume(string) {}\nfunc useRows() {\n", "consume(%q)\n", "}\n"},
+		{"line_comments", "", "// {name: %q},\n", ""},
+		{"block_comments", "/*\n", "{name: %q},\n", "*/\n"},
+	} {
+		for _, count := range []int{1, len(routedMatrixRows)} {
+			t.Run(fmt.Sprintf("%s/%d_markers", tc.name, count), func(t *testing.T) {
+				var source strings.Builder
+				source.WriteString("package main\n" + tc.prefix)
+				for _, row := range routedMatrixRows[:count] {
+					fmt.Fprintf(&source, tc.line, row)
+				}
+				source.WriteString(tc.suffix)
+				root := routedRowsFixture(t, &manifest, map[string]string{
+					listed:   readFile(t, repoRoot(t), listed),
+					unlisted: source.String(),
+				})
+				if out, code := runRoutedRowsGuard(t, root); code != 0 || strings.TrimSpace(out) != "" {
+					t.Fatalf("unrelated %s text enrolled a matrix (exit %d):\n%s", tc.name, code, out)
+				}
+			})
+		}
+	}
+}
+
+// TestCheckRoutedTestRowsRecognizesCaseNameSpacing preserves discovery and
+// manifest enforcement for valid Go field spacing, including gofmt's tabs.
+func TestCheckRoutedTestRowsRecognizesCaseNameSpacing(t *testing.T) {
+	const path = "cmd/gc/cmd_spacing_test.go"
+	const listed = "cmd/gc/cmd_status_test.go"
+	for _, tc := range []struct{ name, space string }{
+		{"no_space", ""}, {"space", " "}, {"tab", "\t"}, {"multiple_spaces", "   "},
+	} {
+		for _, enrolled := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/listed=%t", tc.name, enrolled), func(t *testing.T) {
+				var source strings.Builder
+				// The real rows, in the same file as unrelated reason values.
+				source.WriteString("package main\nvar cases = []struct{ name, wantReason string }{\n")
+				for _, row := range routedMatrixRows {
+					fmt.Fprintf(&source, "{name:%s%q, wantReason: %q},\n", tc.space, row, row)
+				}
+				source.WriteString("}\n")
+				manifest := listed + "\n"
+				if enrolled {
+					manifest += path + "\n"
+				}
+				root := routedRowsFixture(t, &manifest, map[string]string{
+					listed: readFile(t, repoRoot(t), listed), path: source.String(),
+				})
+				out, code := runRoutedRowsGuard(t, root)
+				if enrolled {
+					if code != 0 {
+						t.Fatalf("listed matrix rejected (exit %d):\n%s", code, out)
+					}
+				} else if code == 0 || !strings.Contains(out, "ADD TO MANIFEST: "+path) {
+					t.Fatalf("unlisted matrix: exit=%d, want ADD TO MANIFEST:\n%s", code, out)
+				}
+			})
+		}
+	}
+}
+
+// TestCheckRoutedTestRowsRejectsCommentOnlyListedMatrix ensures commented-out
+// case names cannot satisfy the manifest's required six-row denominator.
+func TestCheckRoutedTestRowsRejectsCommentOnlyListedMatrix(t *testing.T) {
+	const path = "cmd/gc/cmd_comments_test.go"
+	manifest := path + "\n"
+	for _, tc := range []struct{ name, prefix, line, suffix string }{
+		{"line_comments", "", "// {name: %q},\n", ""},
+		{"block_comments", "/*\n", "{name: %q},\n", "*/\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var source strings.Builder
+			source.WriteString("package main\n" + tc.prefix)
+			for _, row := range routedMatrixRows {
+				fmt.Fprintf(&source, tc.line, row)
+			}
+			source.WriteString(tc.suffix)
+			root := routedRowsFixture(t, &manifest, map[string]string{path: source.String()})
+			out, code := runRoutedRowsGuard(t, root)
+			if code == 0 || !strings.Contains(out, "MANIFEST FILE UNDER-COVERED: "+path+" has 0/6 rows") {
+				t.Fatalf("comment-only matrix: exit=%d, want 0/6 under-covered failure:\n%s", code, out)
 			}
 		})
 	}
