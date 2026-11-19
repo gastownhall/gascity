@@ -435,11 +435,15 @@ it.
 in one city leaves another city's sessions running, only for a script that
 also declares `city-scoped`). `gc runtime check` runs it twice, the second
 time to check that it is idempotent. Both commands run the op, and the
-sessions they check it against, in a private city: `GC_EXEC_CITY_NAME` and
-`GC_EXEC_CITY_PATH` name a fresh temporary directory, never the city you run
-them from. A script that does not scope its server by `GC_EXEC_CITY_PATH`
-ends every session the server holds, so check it only against a backend that
-no live city uses.
+sessions they check it against, in a private city of their own:
+`GC_EXEC_CITY_NAME` and `GC_EXEC_CITY_PATH` name a fresh temporary
+directory, never the city the rest of the run uses. The `city-scoped` probes
+use private cities too. Before either command removes a private city, an
+interrupted run included, it sends that city a final `server-stop`, and
+reports one that does not exit 0 as a warning, since the server it was to
+end may still be running. A script that does not scope its server by
+`GC_EXEC_CITY_PATH` ends every session the server holds, so check it only
+against a backend that no live city uses.
 
 ### Typed input outcomes (`input-outcome`)
 
@@ -807,7 +811,12 @@ sessions: a process that left the agent's process group and outlived its
 terminal, carrying the session's `GC_SESSION_ID` and `GC_CITY_PATH`. The
 orphan sweep ends such a process once its session is closed, or stopped with
 no live box under its name, and a session's start ends its own stopped
-incarnation's leftovers first. A leftover counts as live while a box the
+incarnation's leftovers first. Neither ends a leftover that runs in a systemd
+user service unit of its own, one whose environment carries the session's
+identity (inherited after `systemctl --user import-environment` from an agent
+shell, or set with `systemd-run --user --setenv`): gc logs it with its unit
+and leaves it running. A leftover in the unit of gc's own supervisor is still ended. A
+leftover counts as live while a box the
 script's [`inventory`](#inventory) lists carries its `GC_SESSION_ID`; for a
 listed box whose `GC_SESSION_ID` reads empty, the leftover's
 `GC_SESSION_NAME` decides. gc does not scan for the sessions of a script
@@ -887,8 +896,8 @@ Start a process that serves several boxes, such as a multiplexer or a daemon
 the boxes run under, from the operation's own environment, never after
 applying a start config's `env`. A process that carries a session's
 `GC_SESSION_ID` and outlives that session's box is that session's leftover:
-gc ends it with its process group, and every box it serves goes down with
-it.
+unless it runs in a systemd user service unit of its own, gc ends it with its
+process group, and every box it serves goes down with it.
 
 `gc runtime conformance` checks the promise in its `fshost` group: a box's
 command copies a file the runner wrote and records its `id -u`, which the
@@ -1272,6 +1281,7 @@ skipped when its op answers exit 2 and failed when it answers wrongly:
 | `process` | `RPP-PROCESS-001` to `002` | `process-alive` with no names answers `true`; after `stop` it never answers `true` or empty. |
 | `concurrency` | `RPP-CONCURRENCY-001` to `005` | Under `observe.v1`: `start`, `stop`, `is-running`, `process-alive` and `list-running` on distinct names all work at once. |
 | `observe` | `RPP-OBSERVE-017` to `018` | With `report-attachment`: `is-attached` answers `false`, exit 0, for a running box with no client and for a name no box holds. |
+| `observation` | `RPP-OBSERVATION-001` to `004` | On a running box: `peek` exits 0; `get-last-activity` exits 0 with an RFC3339 time or nothing; `clear-scrollback` exits 0; `copy-to` of a missing source exits 0. An exit 2 fails `peek` under `carrier.ops` or the v2 profile (`observe.v1` with `report-attachment`), `clear-scrollback` under `carrier.ops` or `input-outcome`, and `get-last-activity` under `report-activity`. Advisory for now: a failure is reported but affects neither `v2_ready` nor the exit code. |
 
 ### Switching an existing exec city to v2
 
@@ -1342,6 +1352,14 @@ several cities on one backend scopes its boxes and listings by them. A
 handshake should still read no state and answer the same for every city:
 `gc start`, the orchestrator and `gc doctor` each probe it in their own
 process and remember the answer per version of the file.
+
+`gc runtime check` and `gc runtime conformance` (its `--env` suite included)
+set them on every operation too: to the caller's city when
+`GC_EXEC_CITY_PATH` is set, otherwise, as in a shell outside any city, to a
+private city. That city is a fresh temporary directory, removed when the run
+ends or is interrupted, after a final `server-stop` there for a script
+declaring `server-lifecycle`. So a script that serves only cities may refuse any
+operation but `protocol` that names no city, and still pass both commands.
 
 gc sets `GC_EXEC_DEADLINE_MS` on every operation it runs under a deadline
 — all of them but `attach`, and `watch-startup` when its start has none —

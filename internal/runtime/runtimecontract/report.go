@@ -39,7 +39,8 @@ type Report struct {
 	Protocol runtime.ProtocolInfo `json:"protocol"`
 	// V2Ready says the executable is fit for reconciler v2: its handshake
 	// declares what v2 needs from an exec runtime (V2Missing names what it
-	// lacks, exec.V2ProfileGaps) and it failed no requirement (V2Failed).
+	// lacks, exec.V2ProfileGaps) and it failed no requirement (V2Failed)
+	// but an advisory one, whose FAIL is in Results alone.
 	V2Ready   bool     `json:"v2_ready"`
 	V2Missing []string `json:"v2_missing,omitempty"`
 	V2Failed  []Code   `json:"v2_failed,omitempty"`
@@ -47,12 +48,28 @@ type Report struct {
 	Results []Result `json:"results"`
 	// Summary counts the result statuses.
 	Summary Summary `json:"summary"`
+	// Warnings name what the run could not clean up and did not gate: a
+	// final server-stop in a private city that did not exit 0 before the
+	// city was removed.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // Failed reports whether any required requirement failed. A run with only
-// passes and skips is a conformant run.
+// passes, skips and advisory FAILs is a conformant run.
 func (r Report) Failed() bool {
-	return r.Summary.Failed > 0
+	return r.RequiredFailed() > 0
+}
+
+// RequiredFailed counts the FAILs that fail the run: every FAIL but an
+// advisory group's, which Summary.Failed still counts.
+func (r Report) RequiredFailed() int {
+	n := 0
+	for _, res := range r.Results {
+		if res.Status == StatusFail && !advisory(res.Group) {
+			n++
+		}
+	}
+	return n
 }
 
 func (r *Report) record(req Requirement, status Status, detail string) {

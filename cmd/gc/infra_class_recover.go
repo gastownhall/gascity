@@ -1628,7 +1628,7 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 			return 1
 		}
 		if moved[b.ID] {
-			if diff := beadCopyDifference(b, got); diff != "" {
+			if diff := beadCopyDifference(infraCarryParkedHold(b), got); diff != "" {
 				fmt.Fprintf(stderr, "%s: bead %s differs after the copy: %s. The manifest was NOT extended\n", logPrefix, b.ID, diff) //nolint:errcheck // best-effort stderr
 				return 1
 			}
