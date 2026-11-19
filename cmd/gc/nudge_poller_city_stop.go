@@ -62,6 +62,12 @@ func nudgePollCityStopped(target nudgeTarget, sp runtime.Provider) bool {
 	return !sp.IsRunning(target.sessionName)
 }
 
+// nudgePollCitySuspendedDrained is a signature stub so the red tests compile;
+// the green commit gives it its behavior.
+func nudgePollCitySuspendedDrained(_ nudgeTarget, _ runtime.Provider) bool {
+	return false
+}
+
 // stopCityNudgePollers terminates every live nudge poller of cityPath, found
 // through the PID files under the city's pollers directory.
 //
