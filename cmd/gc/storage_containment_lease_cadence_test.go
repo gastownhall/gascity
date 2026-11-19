@@ -8,6 +8,7 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -157,5 +158,58 @@ func TestStrandRecheckPanicExtendsTheLeaseLikeATransientFailure(t *testing.T) {
 	}
 	if after.Outcome != before.Outcome || after.Serving != before.Serving {
 		t.Errorf("the panicked tick changed the verdict it was extending: before %+v, after %+v", before, after)
+	}
+}
+
+// TestStrandRecheckNextIntervalKillSwitchIsFixedCadence (owner decision
+// 2026-11-19): with GC_STORAGE_CONTAINMENT_LEASE=off, the recheck's
+// cadence is the FIXED strandRecheckInterval, not the adaptive formula —
+// the adaptive cadence exists to keep a published lease fresh, and with
+// the switch off nothing is published for it to serve.
+func TestStrandRecheckNextIntervalKillSwitchIsFixedCadence(t *testing.T) {
+	resetContainmentLeaseKillSwitchForTest(t)
+	t.Setenv(containmentLeaseKillSwitchEnv, "off")
+	prev := strandRecheckInterval
+	t.Cleanup(func() { strandRecheckInterval = prev })
+	strandRecheckInterval = 7 * time.Minute
+
+	for _, d := range []time.Duration{0, time.Second, time.Hour} {
+		if got := strandRecheckNextInterval(d); got != strandRecheckInterval {
+			t.Errorf("strandRecheckNextInterval(%s) with the switch off = %s, want the fixed %s", d, got, strandRecheckInterval)
+		}
+	}
+}
+
+// TestStrandRecheckKillSwitchPublishesNoLease (owner decision 2026-11-19):
+// with the switch off, neither the boot publish nor a definitive recheck
+// tick stores a lease — the controller publishes and serves none of it.
+func TestStrandRecheckKillSwitchPublishesNoLease(t *testing.T) {
+	resetContainmentLeaseKillSwitchForTest(t)
+	t.Setenv(containmentLeaseKillSwitchEnv, "off")
+
+	cityPath := t.TempDir()
+	writeScopeProjectID(t, cityPath, "prj-switch-off")
+	cfg := infraSplitConfig(t.TempDir())
+	stubInfraMigrationSource(t)
+
+	var boot bytes.Buffer
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, &boot)
+	if err != nil {
+		t.Fatalf("genesis boot refused: %v\n%s", err, boot.String())
+	}
+	t.Cleanup(func() { _ = routes.close() })
+
+	publishBootContainmentLease(routes)
+	if l := routes.lease.Load(); l != nil {
+		t.Fatalf("publishBootContainmentLease stored a lease with the kill switch set: %+v", l)
+	}
+
+	s := newStrandRecheck(routes, cityPath, events.NewFake(), io.Discard, "gc start")
+	if s == nil {
+		t.Fatal("no recheck")
+	}
+	s.tick()
+	if l := routes.lease.Load(); l != nil {
+		t.Fatalf("a definitive recheck tick stored a lease with the kill switch set: %+v", l)
 	}
 }

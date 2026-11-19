@@ -179,7 +179,7 @@ func TestHoldBeforeLeaseStillRefusesUnleased(t *testing.T) {
 		cityPath, cfg, _, _ := convergedCityWithRecheckLease(t)
 		writeScopeProjectID(t, cityPath, "prj-recreated")
 		var log bytes.Buffer
-		if boot := checkInfraClassConvergence(cityPath, cfg, "gc start", &log); boot.Outcome != infraMigrationIdentityMismatch {
+		if boot := checkInfraClassConvergenceWith(cityPath, cfg, "gc start", &log, storageBootGateOpts{}); boot.Outcome != infraMigrationIdentityMismatch {
 			t.Fatalf("unleased re-check over a recreated work store = %s, want identity-mismatch: %s", boot.Outcome, log.String())
 		}
 	})
@@ -191,7 +191,7 @@ func TestHoldBeforeLeaseStillRefusesUnleased(t *testing.T) {
 			t.Fatalf("writing the served-binding note: %v", err)
 		}
 		var log bytes.Buffer
-		if boot := checkInfraClassConvergence(cityPath, cfg, "gc start", &log); boot.Outcome != infraMigrationGenesisBlocked {
+		if boot := checkInfraClassConvergenceWith(cityPath, cfg, "gc start", &log, storageBootGateOpts{}); boot.Outcome != infraMigrationGenesisBlocked {
 			t.Fatalf("unleased re-check with a mismatched served-binding note = %s, want genesis-blocked: %s", boot.Outcome, log.String())
 		}
 	})

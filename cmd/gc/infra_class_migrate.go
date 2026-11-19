@@ -1000,10 +1000,10 @@ func resolveInfraBindingTarget(cityPath string, cfg *config.City) (infraBindingT
 	}, true, nil
 }
 
-// checkInfraClassConvergence decides, without moving a single bead, whether a
-// city may serve its infrastructure classes from the binding its config names.
-// It returns both what it concluded and the evidence the operator instruction
-// is derived from.
+// checkInfraClassConvergenceWith decides, without moving a single bead,
+// whether a city may serve its infrastructure classes from the binding its
+// config names. It returns both what it concluded and the evidence the
+// operator instruction is derived from.
 //
 // The two are computed by different code deliberately. The verdict can be
 // reached through many chains; the evidence is then read from the binding
@@ -1016,14 +1016,10 @@ func resolveInfraBindingTarget(cityPath string, cfg *config.City) (infraBindingT
 // destination is a genesis city's empty proven copy and marker, which record
 // that a city with nothing to move has nothing to move. That is the zero-row
 // degenerate of the copy the operator command performs, not a copy of its own.
-func checkInfraClassConvergence(cityPath string, cfg *config.City, logPrefix string, stderr io.Writer) infraMigrationReport {
-	return checkInfraClassConvergenceWith(cityPath, cfg, logPrefix, stderr, storageBootGateOpts{})
-}
-
-// checkInfraClassConvergenceWith is checkInfraClassConvergence, threading
-// opts down to confirmInfraConvergenceWith (design doc §4.4, slice 2): the
-// one place a lease can short-circuit the work-store read. Every caller but
-// the CLI funnel uses the no-lease wrapper above.
+//
+// opts threads down to confirmInfraConvergenceWith (design doc §4.4, slice
+// 2): the one place a lease can short-circuit the work-store read. Only the
+// CLI funnel ever sets opts.lease; every other caller passes the zero value.
 func checkInfraClassConvergenceWith(cityPath string, cfg *config.City, logPrefix string, stderr io.Writer, opts storageBootGateOpts) infraMigrationReport {
 	target, ok, err := resolveInfraBindingTarget(cityPath, cfg)
 	if err != nil {

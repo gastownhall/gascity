@@ -48,10 +48,13 @@ func TestFetchContainmentLeaseHungListenerFallsBackFast(t *testing.T) {
 	if ok {
 		t.Fatal("a hung listener that never replies must not be accepted as a lease")
 	}
-	// Generous versus the 250ms read timeout alone (dial and write should
-	// both succeed against an Accept-ing listener almost instantly), but
-	// nowhere near the 15s hook budget this exists to protect.
-	if elapsed > 2*time.Second {
+	// Tight enough that a mutant widening the 250ms read timeout (to, say,
+	// 1.5s) is caught here rather than passing a bound generous enough to
+	// hide it: still comfortably above the ~450ms worst case (dial and
+	// write should both succeed against an Accept-ing listener almost
+	// instantly), but nowhere near the 15s hook budget this exists to
+	// protect.
+	if elapsed > time.Second {
 		t.Fatalf("fetchContainmentLease took %s against a hung listener, want well under its own ~450ms worst case budget, nowhere near a 15s hook timeout", elapsed)
 	}
 }

@@ -371,7 +371,10 @@ func resolveCLIStorageRoutesFor(cityPath string, cfg *config.City) (routes *stor
 		// containment lease (design doc §4.4, §4.5 slice 2): a one-shot
 		// command, not a long-lived controller, is the process this slice
 		// exists to stop re-reading the whole work ledger.
-		routes, err := storageBootGateWith(cityPath, nil, cliStorageLogPrefix, nil, &diagnostics, storageBootGateOpts{lease: true})
+		// A nil cfg takes storageBootGateWith's "no [storage] section"
+		// branch before it ever reaches a lease-consuming check, so
+		// opts.lease can make no difference here; the zero value says so.
+		routes, err := storageBootGate(cityPath, nil, cliStorageLogPrefix, nil, &diagnostics)
 		if err != nil {
 			printCLIStorageDiagnostics(&diagnostics)
 			printCLIStorageRefusal(err)

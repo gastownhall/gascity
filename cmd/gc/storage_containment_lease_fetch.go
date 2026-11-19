@@ -14,20 +14,42 @@ import (
 	"encoding/json"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
-// containmentLeaseKillSwitchEnv disables slice 2's lease consumer entirely
-// when set to "off" (case-insensitive): fetchContainmentLease then behaves
-// as though no controller answered, and every caller falls back to the
-// full check, same as today. It changes nothing on the controller side —
-// storage_containment_lease.go keeps publishing and serving leases — so
-// turning it back on needs no restart.
+// containmentLeaseKillSwitchEnv disables the whole containment-lease feature
+// when set to "off" (case-insensitive), in every process, not only the
+// one-shot consumer this file otherwise belongs to (owner decision):
+//
+//   - the controller publishes and serves no lease (publishBootContainmentLease,
+//     strandRecheck.publishLease);
+//   - the controller's recheck falls back to the fixed strandRecheckInterval
+//     cadence instead of the adaptive one (strandRecheckNextInterval);
+//   - a one-shot process's fetchContainmentLease behaves as though no
+//     controller answered, so every caller falls back to the full check,
+//     same as today.
+//
+// It is read once per process (containmentLeaseDisabledOnce), not on every
+// call: every site above must agree for the life of the process, rather
+// than one seeing the switch flip mid-boot while another does not.
 const containmentLeaseKillSwitchEnv = "GC_STORAGE_CONTAINMENT_LEASE"
 
-// containmentLeaseDisabled reports whether the kill switch is set.
-func containmentLeaseDisabled() bool {
+// containmentLeaseDisabledOnce caches containmentLeaseDisabled's answer for
+// the life of the process. A var, not a plain sync.Once wrapper, so a test
+// can replace it (resetContainmentLeaseKillSwitchForTest) to observe a
+// t.Setenv take effect, the way every other per-process cache in this
+// package is made testable.
+var containmentLeaseDisabledOnce = sync.OnceValue(readContainmentLeaseKillSwitch)
+
+func readContainmentLeaseKillSwitch() bool {
 	return strings.EqualFold(os.Getenv(containmentLeaseKillSwitchEnv), "off")
+}
+
+// containmentLeaseDisabled reports whether the kill switch is set, read
+// once per process.
+func containmentLeaseDisabled() bool {
+	return containmentLeaseDisabledOnce()
 }
 
 // Slice 2's own socket timeouts (design doc §4.5): short enough that a hung
@@ -111,11 +133,15 @@ func acceptContainmentLease(wire containmentLeaseWire, target infraBindingTarget
 	if basis.empty() || wire.Basis.empty() || basis != wire.Basis {
 		return infraMigrationReport{}, false
 	}
-	age := time.Duration(wire.AgeMS) * time.Millisecond
-	if age < 0 || age > containmentLeaseAcceptCap {
+	// Compared entirely in int64 milliseconds: converting an attacker- or
+	// bug-supplied AgeMS to a time.Duration (nanoseconds) by multiplying by
+	// time.Millisecond can overflow int64 for an age nowhere near this
+	// process's own clock (18446744073710ms, ~584 years, wraps to a small or
+	// negative duration and would otherwise be accepted).
+	if wire.AgeMS < 0 || wire.AgeMS > containmentLeaseAcceptCap.Milliseconds() {
 		return infraMigrationReport{}, false
 	}
-	if age > time.Duration(wire.FreshMS)*time.Millisecond {
+	if wire.AgeMS > wire.FreshMS {
 		return infraMigrationReport{}, false
 	}
 	if wire.RecheckFailing && wire.RecheckFailingFromWorkStore {
@@ -125,11 +151,16 @@ func acceptContainmentLease(wire containmentLeaseWire, target infraBindingTarget
 	switch wire.Outcome {
 	case infraMigrationConverged.String():
 		outcome = infraMigrationConverged
-	case infraMigrationGenesis.String():
-		outcome = infraMigrationGenesis
 	case infraMigrationStranded.String():
 		outcome = infraMigrationStranded
 	default:
+		// Genesis is deliberately not accepted here, even though
+		// newContainmentLease publishes a lease for it: it is the FIRST
+		// definitive verdict a city can ever carry, and accepting it over
+		// the wire would let a one-shot process treat "no infrastructure
+		// bead has ever landed" as settled fact from a stale answer instead
+		// of its own fresh read, for an outcome whose whole point is a
+		// one-time transition this build never gets to repeat.
 		// A version mismatch takes care of a wire shape this build does not
 		// speak; this takes care of an outcome string it speaks but does
 		// not recognize (garbage, or a future outcome this build predates).

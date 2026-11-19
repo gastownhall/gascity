@@ -177,13 +177,13 @@ func servedContainmentLease(cityPath string) (*containmentLease, bool) {
 // adaptive cadence from (strandRecheckIntervalFloor, strandRecheckNextInterval(0)):
 // strandRecheckFreshness(strandRecheckIntervalFloor, 0) is 2 minutes — Q1's
 // "about 2 min by default" — not the 10-minute cap, so this lease is never
-// served longer than the first recheck tick needs to refresh it
-// (carry-over 5). TakenAt is the check itself (bootVerdict.CheckedAt), not
+// served longer than the first recheck tick needs to refresh it. TakenAt is
+// the check itself (bootVerdict.CheckedAt), not
 // this call, which can run later in boot — so the budget already starts
 // being spent on whatever boot does in between, not only on the wait for
 // the first recheck tick.
 func publishBootContainmentLease(routes *storageRoutes) {
-	if routes == nil {
+	if routes == nil || containmentLeaseDisabled() {
 		return
 	}
 	freshMS := strandRecheckFreshness(strandRecheckIntervalFloor, 0).Milliseconds()
@@ -510,17 +510,11 @@ func storageBootGateWith(cityPath string, cfg *config.City, logPrefix string, re
 	checkedAt := time.Now()
 	var report infraMigrationReport
 	if ok {
-		// The lease is slice 2's own opt-in (design doc §4.4, §4.5): every
-		// caller but the CLI funnel passes the zero value here, so this
-		// stays the exact call the no-lease wrapper always made, and
-		// checkInfraClassConvergence keeps a real production call site
-		// whose logPrefix actually varies by caller, not just the fixed
-		// string every test passes it.
-		if opts.lease {
-			report = checkInfraClassConvergenceWith(cityPath, cfg, logPrefix, stderr, opts)
-		} else {
-			report = checkInfraClassConvergence(cityPath, cfg, logPrefix, stderr)
-		}
+		// The lease is slice 2's own opt-in (design doc §4.4, §4.5): only
+		// the CLI funnel ever passes a non-zero opts here, so this one call
+		// covers every caller — there is no second, lease-less call to
+		// branch to, since opts's own zero value already means no lease.
+		report = checkInfraClassConvergenceWith(cityPath, cfg, logPrefix, stderr, opts)
 	} else {
 		// The shape is the supported one, so the only thing that can have
 		// refused the target is the provider: this build carries the migration
@@ -1048,7 +1042,10 @@ func printStorageWarningOnce(w io.Writer, msg string) {
 
 // strandRecheckInterval seeds the FIRST interval of a controller's
 // containment recheck (strandRecheck.run); every interval after that is
-// adaptive (strandRecheckNextInterval, design doc §4.3, carry-over 1).
+// adaptive (strandRecheckNextInterval, design doc §4.3, carry-over 1) —
+// unless GC_STORAGE_CONTAINMENT_LEASE=off, in which case this is every
+// interval, fixed, because the adaptive cadence exists to keep a published
+// lease fresh and the kill switch stops anything from being published.
 // Every one-shot gc process already pays one such read-only census; the
 // controller pays one per interval. Zero disables it. A var so a test can
 // shorten the first wait.
@@ -1061,8 +1058,7 @@ var strandRecheckInterval = 10 * time.Minute
 // what publishBootContainmentLease seeds the very first lease's freshness
 // budget with (strandRecheckFreshness(strandRecheckIntervalFloor, 0) = 2
 // minutes, matching Q1's "about 2 min by default"), so the boot lease is
-// never served longer than the first recheck tick needs to refresh it
-// (carry-over 5, "seed the first recheck so the boot lease doesn't lapse").
+// never served longer than the first recheck tick needs to refresh it.
 const strandRecheckIntervalFloor = 60 * time.Second
 
 // strandRecheckNextInterval is the adaptive cadence itself (design doc §4.3,
@@ -1072,6 +1068,13 @@ const strandRecheckIntervalFloor = 60 * time.Second
 // keeping the controller's own overhead bounded — while a cheap check (the
 // common case) is rechecked at the floor.
 func strandRecheckNextInterval(lastCheckDuration time.Duration) time.Duration {
+	// Owner decision: GC_STORAGE_CONTAINMENT_LEASE=off reverts the recheck to
+	// the fixed cadence (strandRecheckInterval, 10 minutes by default)
+	// instead of the adaptive one — the adaptive formula exists to keep a
+	// published lease fresh, and with the switch off nothing publishes one.
+	if containmentLeaseDisabled() {
+		return strandRecheckInterval
+	}
 	if adaptive := 10 * lastCheckDuration; adaptive > strandRecheckIntervalFloor {
 		return adaptive
 	}
@@ -1283,7 +1286,7 @@ func (s *strandRecheck) tick() {
 // routes to publish to, which is every strandRecheck this package's own
 // tests construct directly.
 func (s *strandRecheck) publishLease(report infraMigrationReport, takenAt time.Time) {
-	if s.routes == nil {
+	if s.routes == nil || containmentLeaseDisabled() {
 		return
 	}
 	// The freshness budget is computed from the NEXT adaptive interval —
@@ -1324,8 +1327,12 @@ func (s *strandRecheck) noteBasisCapture(basisErr error) {
 // with no routes, or with no lease published — none yet, or one this
 // recheck withdrew: a transient failure never brings a lease back, only a
 // definitive tick does.
+//
+// Called only from tick()'s panic recover: a panic's origin is unknown, so
+// it is attributed to the work store (fromWorkStore = true) rather than
+// assumed innocent of it.
 func (s *strandRecheck) extendLeaseOnTransientFailure(attemptAt time.Time) {
-	s.extendLeaseOnTransientFailureFromWorkStore(attemptAt, false)
+	s.extendLeaseOnTransientFailureFromWorkStore(attemptAt, true)
 }
 
 // extendLeaseOnTransientFailureFor is extendLeaseOnTransientFailure, also
@@ -1337,6 +1344,16 @@ func (s *strandRecheck) extendLeaseOnTransientFailureFor(report infraMigrationRe
 	s.extendLeaseOnTransientFailureFromWorkStore(attemptAt, report.FaultFromWorkStore)
 }
 
+// extendLeaseOnTransientFailureFromWorkStore is sticky in fromWorkStore: once
+// any attempt in a failing streak is attributed to the work store, the
+// extended lease stays flagged for every attempt after it, even one that
+// fails elsewhere (a deliberately drained basis-capture path, an unrelated
+// transient). Only a definitive tick (publishLease) ever republishes a lease
+// from scratch and so is the only place the flag clears. Without this, a
+// panic or fault inside the work-store read could be followed by one
+// attempt that fails for an unrelated reason, and the caller would then
+// accept a lease whose staleness the work-store fault is still the true
+// cause of.
 func (s *strandRecheck) extendLeaseOnTransientFailureFromWorkStore(attemptAt time.Time, fromWorkStore bool) {
 	if s.routes == nil {
 		return
@@ -1348,7 +1365,7 @@ func (s *strandRecheck) extendLeaseOnTransientFailureFromWorkStore(attemptAt tim
 	extended := *current
 	extended.FreshMS = strandRecheckFreshCap.Milliseconds()
 	extended.RecheckFailing = true
-	extended.RecheckFailureFromWorkStore = fromWorkStore
+	extended.RecheckFailureFromWorkStore = current.RecheckFailureFromWorkStore || fromWorkStore
 	extended.LastAttemptAt = attemptAt
 	s.routes.lease.Store(&extended)
 }
@@ -1405,8 +1422,8 @@ func (cr *CityRuntime) startStrandRecheck(ctx context.Context) (stop func()) {
 // min(strandRecheckInterval, strandRecheckIntervalFloor). In production,
 // where strandRecheckInterval stays at its 10-minute default, this clips
 // the first tick down to the floor (60s) so it runs well inside the boot
-// lease's own 2-minute freshness budget (publishBootContainmentLease,
-// carry-over 5) — a boot lease must not lapse waiting for a recheck that
+// lease's own 2-minute freshness budget (publishBootContainmentLease) — a
+// boot lease must not lapse waiting for a recheck that
 // has not had a reason yet to shorten its own cadence. A test that shortens
 // strandRecheckInterval below the floor (to get a prompt first tick) keeps
 // doing exactly that: min leaves it untouched.

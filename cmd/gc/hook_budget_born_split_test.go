@@ -29,7 +29,6 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"net"
 	"os"
 	"path/filepath"
 	"testing"
@@ -150,24 +149,15 @@ func TestHookBudgetBornSplitUnleased(t *testing.T) {
 }
 
 // bornSplitLeaseListener serves a real containment lease — captured by an
-// actual controller-side check, never built by hand — from a bare
-// net.Listen("unix", controllerSocketPath(cityDir)), answering only the
-// storage-verdict command. It deliberately bypasses
-// registerResidencyRoutes/handleControllerConn's full dispatch: this test
-// is only exercising the socket protocol slice 2's fetchContainmentLease
-// speaks, not the controller's residency registry.
+// actual controller-side check, never built by hand — over
+// listenControllerSocketForTest, answering only the storage-verdict
+// command. It deliberately bypasses registerResidencyRoutes/
+// handleControllerConn's full dispatch: this test is only exercising the
+// socket protocol slice 2's fetchContainmentLease speaks, not the
+// controller's residency registry.
 func bornSplitLeaseListener(t *testing.T, cityDir string, lease *containmentLease) {
 	t.Helper()
-	sockPath := controllerSocketPath(cityDir)
-	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
-		t.Fatalf("MkdirAll(socket dir): %v", err)
-	}
-	_ = os.Remove(sockPath)
-	lis, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatalf("Listen(%s): %v", sockPath, err)
-	}
-	t.Cleanup(func() { _ = lis.Close() })
+	lis := listenControllerSocketForTest(t, cityDir)
 	go func() {
 		for {
 			conn, err := lis.Accept()

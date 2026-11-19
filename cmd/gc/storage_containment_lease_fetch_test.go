@@ -7,6 +7,8 @@ package main
 // refusal (Q7).
 
 import (
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -159,9 +161,12 @@ func TestAcceptContainmentLeaseRecheckFailingNotFromWorkStore(t *testing.T) {
 	}
 }
 
-// TestAcceptContainmentLeaseOutcomes covers every outcome this build does
-// lease (Converged, Genesis, Stranded degraded-serving), each with the
-// Serving/ServesDegraded flags a real publisher would compute for it.
+// TestAcceptContainmentLeaseOutcomes covers every outcome acceptContainmentLease
+// accepts over the wire (Converged, Stranded degraded-serving), each with
+// the Serving/ServesDegraded flags a real publisher would compute for it.
+// Genesis is deliberately NOT one of them — see
+// TestAcceptContainmentLeaseGenesisIsNeverAccepted — even though
+// newContainmentLease publishes a lease for it on the controller side.
 func TestAcceptContainmentLeaseOutcomes(t *testing.T) {
 	cases := []struct {
 		name           string
@@ -171,7 +176,6 @@ func TestAcceptContainmentLeaseOutcomes(t *testing.T) {
 		stranded       []string
 	}{
 		{"converged", infraMigrationConverged, true, false, nil},
-		{"genesis", infraMigrationGenesis, true, false, nil},
 		{"stranded degraded-serving", infraMigrationStranded, false, true, []string{"wk-1"}},
 	}
 	for _, c := range cases {
@@ -208,22 +212,71 @@ func TestAcceptContainmentLeaseStrandedNotDegradedIsRejected(t *testing.T) {
 	}
 }
 
-// TestFetchContainmentLeaseKillSwitch (carry-over per design doc §4.5,
-// Q4): GC_STORAGE_CONTAINMENT_LEASE=off makes fetchContainmentLease behave
-// as though no controller answered, without touching the socket at all.
-func TestFetchContainmentLeaseKillSwitch(t *testing.T) {
-	t.Setenv(containmentLeaseKillSwitchEnv, "off")
-	if _, ok := fetchContainmentLease(t.TempDir()); ok {
-		t.Fatal("the kill switch must make every fetch fail closed")
+// TestAcceptContainmentLeaseGenesisIsNeverAccepted is the NIT companion to
+// TestAcceptContainmentLeaseOutcomes: Genesis is the first definitive
+// verdict a city can ever carry, and a one-shot process must re-prove it
+// itself rather than take a stale answer for the one outcome whose whole
+// point is a transition this build never gets to repeat. Rejected exactly
+// like any other outcome this build does not lease, by the same default
+// case in acceptContainmentLease's switch.
+func TestAcceptContainmentLeaseGenesisIsNeverAccepted(t *testing.T) {
+	wire, target, basis := goodLeaseFixture()
+	wire.Outcome = infraMigrationGenesis.String()
+	if _, ok := acceptContainmentLease(wire, target, basis); ok {
+		t.Fatal("a Genesis lease was accepted; it must always take the full check")
 	}
 }
 
-// TestFetchContainmentLeaseKillSwitchCaseInsensitive proves the match is
-// not literal-string-only.
-func TestFetchContainmentLeaseKillSwitchCaseInsensitive(t *testing.T) {
-	t.Setenv(containmentLeaseKillSwitchEnv, "OFF")
-	if _, ok := fetchContainmentLease(t.TempDir()); ok {
-		t.Fatal("GC_STORAGE_CONTAINMENT_LEASE=OFF must disable the lease the same as lowercase")
+// resetContainmentLeaseKillSwitchForTest clears containmentLeaseDisabled's
+// once-per-process cache (owner decision: the switch is read once per
+// process) so a test that t.Setenv's the var can observe it take effect,
+// and restores the previous cache on cleanup.
+func resetContainmentLeaseKillSwitchForTest(t *testing.T) {
+	t.Helper()
+	prev := containmentLeaseDisabledOnce
+	containmentLeaseDisabledOnce = sync.OnceValue(readContainmentLeaseKillSwitch)
+	t.Cleanup(func() { containmentLeaseDisabledOnce = prev })
+}
+
+// TestFetchContainmentLeaseKillSwitch (carry-over per design doc §4.5, Q4;
+// owner decision 2026-11-19) serves a REAL lease over a real controller
+// socket — so this proves the switch, not merely the absence of a
+// controller to ask: with it off, fetchContainmentLease refuses a lease a
+// caller without the switch set would accept.
+func TestFetchContainmentLeaseKillSwitch(t *testing.T) {
+	cityPath, _, _, lease := convergedCityWithRecheckLease(t)
+	bornSplitLeaseListener(t, cityPath, lease)
+
+	resetContainmentLeaseKillSwitchForTest(t)
+	if _, ok := fetchContainmentLease(cityPath); !ok {
+		t.Fatal("fixture: a real lease served over the socket, switch unset, was not fetched")
+	}
+
+	resetContainmentLeaseKillSwitchForTest(t)
+	t.Setenv(containmentLeaseKillSwitchEnv, "off")
+	if _, ok := fetchContainmentLease(cityPath); ok {
+		t.Fatal("GC_STORAGE_CONTAINMENT_LEASE=off must refuse a lease a real controller is serving")
+	}
+}
+
+// TestFetchContainmentLeaseKillSwitchExactValue proves the switch is exact:
+// only "off" (case-insensitively) disables it. Any other value — including
+// one that merely looks like an intent to disable it — must still fetch
+// the lease a real controller is serving.
+func TestFetchContainmentLeaseKillSwitchExactValue(t *testing.T) {
+	cityPath, _, _, lease := convergedCityWithRecheckLease(t)
+	bornSplitLeaseListener(t, cityPath, lease)
+
+	for _, v := range []string{"OFF", "Off", "disabled", "0", "false", "true"} {
+		t.Run(v, func(t *testing.T) {
+			resetContainmentLeaseKillSwitchForTest(t)
+			t.Setenv(containmentLeaseKillSwitchEnv, v)
+			_, ok := fetchContainmentLease(cityPath)
+			wantOk := !strings.EqualFold(v, "off")
+			if ok != wantOk {
+				t.Fatalf("%s=%q: fetch ok=%v, want %v", containmentLeaseKillSwitchEnv, v, ok, wantOk)
+			}
+		})
 	}
 }
 
@@ -238,5 +291,31 @@ func TestFetchContainmentLeaseGarbageReply(t *testing.T) {
 	go acceptOnceAndReply(t, lis, "not json at all\n")
 	if _, ok := fetchContainmentLease(cityDir); ok {
 		t.Fatal("a reply that will not parse must be rejected, not accepted or panicked on")
+	}
+}
+
+// TestAcceptContainmentLeaseAgeOverflowRejected is a NIT: an AgeMS a one-shot
+// process never produced itself (18446744073710ms, about 584 years) must
+// not survive the int64-millisecond-to-time.Duration conversion by
+// overflowing into something small or negative that the cap then lets
+// through. acceptContainmentLease now compares entirely in milliseconds.
+func TestAcceptContainmentLeaseAgeOverflowRejected(t *testing.T) {
+	wire, target, basis := goodLeaseFixture()
+	wire.AgeMS = 18446744073710
+	if _, ok := acceptContainmentLease(wire, target, basis); ok {
+		t.Errorf("age_ms=%d (~584 years) was accepted", wire.AgeMS)
+	}
+}
+
+// TestAcceptContainmentLeaseBothBasesEmptyRejected is a NIT: two empty
+// bases are trivially "equal" by Go's struct comparison, but neither one
+// says anything, so the pair must still be rejected (acceptContainmentLease
+// already checks wire.Basis.empty() independently of basis.empty(), but
+// this pins both being empty at once rather than just one).
+func TestAcceptContainmentLeaseBothBasesEmptyRejected(t *testing.T) {
+	wire, target, _ := goodLeaseFixture()
+	wire.Basis = containmentBasis{}
+	if _, ok := acceptContainmentLease(wire, target, containmentBasis{}); ok {
+		t.Fatal("two empty bases were accepted")
 	}
 }
