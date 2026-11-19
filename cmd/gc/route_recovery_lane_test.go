@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -983,5 +984,226 @@ func TestRouteRecoveryBackstopConcurrentWithStandaloneStoreReload(t *testing.T) 
 	}
 	if cr.cityBeadStore() == nil {
 		t.Fatal("the reload did not open the standalone city store")
+	}
+}
+
+// TestLiveOpenCandidatesSingleIDAnswersTheRawOpen pins the single-id shortcut
+// to the store's raw open, decided from the one Get row alone. MemStore keeps
+// the SourceStatus, IndefinitelyDeferred and DeferUntil a caller sets, so its
+// rows stand in for a bd-family Get, which folds every parked status to "open"
+// and records the raw one beside it.
+func TestLiveOpenCandidatesSingleIDAnswersTheRawOpen(t *testing.T) {
+	farFuture := time.Date(9999, time.December, 31, 0, 0, 0, 0, time.UTC)
+	longAgo := time.Date(2000, time.January, 1, 0, 0, 0, 0, time.UTC)
+	row := func(mutate func(*beads.Bead)) *beads.Bead {
+		b := unroutedWorkBead("L-1")
+		mutate(&b)
+		return &b
+	}
+	parked := func(source string, indefinitely bool, until *time.Time) *beads.Bead {
+		return row(func(b *beads.Bead) {
+			b.SourceStatus = source
+			b.IndefinitelyDeferred = indefinitely
+			b.DeferUntil = until
+		})
+	}
+	for _, tc := range []struct {
+		name string
+		row  *beads.Bead // nil: the id is not in the store
+		kept bool
+	}{
+		{name: "deferred undated", row: parked("deferred", true, nil)},
+		{name: "deferred dated", row: parked("deferred", true, &farFuture)},
+		{name: "deferred without IndefinitelyDeferred", row: parked("deferred", false, nil)},
+		{name: "blocked", row: parked("blocked", false, nil)},
+		{name: "review", row: parked("review", false, nil)},
+		{name: "testing", row: parked("testing", false, nil)},
+		{name: "hooked", row: parked("hooked", false, nil)},
+		{name: "pinned", row: parked("pinned", false, nil)},
+		{name: "in_progress", row: row(func(b *beads.Bead) { b.Status = "in_progress" })},
+		{name: "closed", row: row(func(b *beads.Bead) { b.Status = "closed" })},
+		{name: "missing id"},
+		{name: "no source status", row: row(func(*beads.Bead) {}), kept: true},
+		{name: "source status open", row: parked("open", false, nil), kept: true},
+		{name: "source status open deferred into the future", row: parked("open", false, &farFuture), kept: true},
+		{name: "no source status with a past deferral", row: parked("", false, &longAgo), kept: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var seed []beads.Bead
+			if tc.row != nil {
+				seed = append(seed, *tc.row)
+			}
+			store := &countingRouteStore{Store: beads.NewMemStoreFrom(0, seed, nil)}
+			rows, reads, err := liveOpenCandidates(store, []string{"L-1"})
+			if err != nil {
+				t.Fatalf("liveOpenCandidates: %v", err)
+			}
+			if kept := len(rows) == 1 && rows[0].ID == "L-1"; kept != tc.kept || len(rows) > 1 {
+				t.Fatalf("rows = %+v, want kept=%t", rows, tc.kept)
+			}
+			if reads != 1 || store.gets != 1 || store.lists != 0 {
+				t.Fatalf("reads=%d gets=%d lists=%d, want 1 Get and no List", reads, store.gets, store.lists)
+			}
+		})
+	}
+}
+
+// TestLiveOpenCandidatesSingleIDMatchesTheBatchedAnswer pins the contract the
+// shortcut exists under: an id asked about alone is in the answer exactly when
+// it is in the batched Live "open" answer for that id plus an undeferred open
+// control. Whether a row deferred by its defer_until alone is in a store's raw
+// open is that store's own rule, so the lone call defers to it.
+func TestLiveOpenCandidatesSingleIDMatchesTheBatchedAnswer(t *testing.T) {
+	now := time.Now().UTC()
+	future, past := now.Add(48*time.Hour), now.Add(-48*time.Hour)
+	parkedHold := infraParkedDeferUntil
+	type rowSpec struct {
+		name    string
+		until   *time.Time
+		status  string // "" leaves the created row open
+		missing bool   // never created: the id names no row
+	}
+	rowsToSeed := []rowSpec{
+		{name: "open"},
+		{name: "parked hold", until: &parkedHold},
+		{name: "deferred into the future", until: &future},
+		{name: "deferral due", until: &past},
+		{name: "in_progress", status: "in_progress"},
+		{name: "closed", status: "closed"},
+		{name: "missing", missing: true},
+	}
+	undeferredIn := map[string]bool{"open": true, "deferral due": true, "in_progress": false, "closed": false, "missing": false}
+	withDated := func(parked bool) map[string]bool {
+		want := maps.Clone(undeferredIn)
+		want["parked hold"], want["deferred into the future"] = parked, parked
+		return want
+	}
+	for _, tc := range []struct {
+		name   string
+		open   func(t *testing.T) beads.Store
+		wantIn map[string]bool
+	}{
+		{
+			name: "SQLiteStore",
+			open: func(t *testing.T) beads.Store {
+				opened, err := beads.OpenSQLiteStore(t.TempDir())
+				if err != nil {
+					t.Fatalf("open sqlite store: %v", err)
+				}
+				sqlite := opened.(*beads.SQLiteStore)
+				t.Cleanup(func() { _ = sqlite.CloseStore() })
+				return sqlite
+			},
+			wantIn: withDated(false),
+		},
+		{
+			name:   "MemStore",
+			open:   func(*testing.T) beads.Store { return beads.NewMemStore() },
+			wantIn: withDated(true),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backing := tc.open(t)
+			control, err := backing.Create(beads.Bead{Title: "control", Type: "task"})
+			if err != nil {
+				t.Fatalf("create control: %v", err)
+			}
+			ids := map[string]string{}
+			for _, spec := range rowsToSeed {
+				if spec.missing {
+					ids[spec.name] = "zz-missing-1"
+					continue
+				}
+				created, err := backing.Create(beads.Bead{Title: spec.name, Type: "task", DeferUntil: spec.until})
+				if err != nil {
+					t.Fatalf("create %s: %v", spec.name, err)
+				}
+				ids[spec.name] = created.ID
+				switch spec.status {
+				case "":
+				case "closed":
+					if err := backing.Close(created.ID); err != nil {
+						t.Fatalf("close %s: %v", spec.name, err)
+					}
+				default:
+					status := spec.status
+					if err := backing.Update(created.ID, beads.UpdateOpts{Status: &status}); err != nil {
+						t.Fatalf("set %s status: %v", spec.name, err)
+					}
+				}
+			}
+			store := &countingRouteStore{Store: backing}
+			for _, spec := range rowsToSeed {
+				id := ids[spec.name]
+				before := store.reads()
+				alone, aloneReads, err := liveOpenCandidates(store, []string{id})
+				if err != nil {
+					t.Fatalf("%s alone: %v", spec.name, err)
+				}
+				issued := store.reads() - before
+				batched, _, err := liveOpenCandidates(store, []string{id, control.ID})
+				if err != nil {
+					t.Fatalf("%s batched: %v", spec.name, err)
+				}
+				inAlone, inBatched := hasBeadID(alone, id), hasBeadID(batched, id)
+				if inAlone != inBatched {
+					t.Errorf("%s: alone has it=%t, batched has it=%t; the lone answer must match the batched one", spec.name, inAlone, inBatched)
+				}
+				if !hasBeadID(batched, control.ID) {
+					t.Errorf("%s: the batched answer %v left out the undeferred open control", spec.name, batched)
+				}
+				if want := tc.wantIn[spec.name]; inBatched != want {
+					t.Errorf("%s: batched has it=%t, want %t", spec.name, inBatched, want)
+				}
+				wantReads := 1
+				if spec.until != nil && spec.until.After(now) {
+					wantReads = 2
+				}
+				if aloneReads != wantReads || issued != wantReads {
+					t.Errorf("%s alone reported %d round trip(s) and issued %d, want %d", spec.name, aloneReads, issued, wantReads)
+				}
+			}
+		})
+	}
+}
+
+func hasBeadID(rows []beads.Bead, id string) bool {
+	return slices.ContainsFunc(rows, func(b beads.Bead) bool { return b.ID == id })
+}
+
+// TestRouteRecoveryDeltaLeavesALoneParkedCandidateUnrouted: a bead bd parks
+// keeps its recoverable route unstamped when it is the only candidate an event
+// named, as it already is in a batch. The raw-open control is the same bead,
+// restored, so the lane under test can still repair.
+func TestRouteRecoveryDeltaLeavesALoneParkedCandidateUnrouted(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		source       string
+		indefinitely bool
+		want         string
+	}{
+		{name: "blocked", source: "blocked"},
+		{name: "deferred", source: "deferred", indefinitely: true},
+		{name: "raw open control", source: "open", want: routeRecoveryTestPool},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bead := unroutedWorkBead("P-1")
+			bead.SourceStatus = tc.source
+			bead.IndefinitelyDeferred = tc.indefinitely
+			cr, store := routeRecoveryRuntime(t, bead)
+			cr.routeRecoveryLaneOf().observe(beadCreatedEvent(t, bead))
+
+			report := cr.recoverUnroutedWorkRoutesDelta()
+			wantRestored := 0
+			if tc.want != "" {
+				wantRestored = 1
+			}
+			if report.restored != wantRestored {
+				t.Fatalf("delta restored %d (err=%v), want %d for a %s bead", report.restored, report.err, wantRestored, tc.source)
+			}
+			if got := mustRoutedTo(t, store, "P-1"); got != tc.want {
+				t.Fatalf("P-1 gc.routed_to = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
