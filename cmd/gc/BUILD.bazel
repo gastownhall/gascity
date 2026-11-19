@@ -2348,6 +2348,7 @@ go_test(
         "session_types_test.go",
         "session_w3_split_equiv_test.go",
         "session_w4_split_equiv_test.go",
+        "session_wake_budget_routed_pool_test.go",
         "session_wake_fairness_pin_test.go",
         "session_wake_refused_test.go",
         "session_wake_test.go",

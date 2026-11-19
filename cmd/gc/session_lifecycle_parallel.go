@@ -196,6 +196,14 @@ type startCandidate struct {
 	// (preWakeCommitUnder); the runtime-only start runs under it. Zero for a
 	// start with no session row, which has none.
 	inc sessionpkg.Incarnation
+
+	// standing is true when the awake set classified this wake as standing —
+	// configuration alone keeps the session up and no work or named demand
+	// is behind it (AwakeDecision.Standing, #7680). The wake arm sets it at
+	// the append; every other construction site leaves it false (demand).
+	// The per-tick wake budget starts demand candidates ahead of standing
+	// ones; within each class the least-recently-woken order is unchanged.
+	standing bool
 }
 
 // name reads the RAW session_name metadata off the typed twin
@@ -240,12 +248,18 @@ func wakeFairnessTime(c startCandidate) time.Time {
 	return time.Time{}
 }
 
-// sortCandidatesByWakeFairness orders candidates least-recently-woken first so a
-// budget-limited tick rotates wakes across sessions instead of always deferring
-// the same back-of-order sessions. Stable on the original order for ties. Callers
-// must only sort within a dependency wave (every candidate's deps are satisfied).
+// sortCandidatesByWakeFairness orders candidates demand first, then
+// least-recently-woken, so a budget-limited tick starts the sessions with
+// work behind them before the ones configuration alone keeps up (#7680) and
+// rotates wakes across sessions instead of always deferring the same
+// back-of-order sessions. Stable on the original order for ties. Callers
+// must only sort within a dependency wave (every candidate's deps are
+// satisfied).
 func sortCandidatesByWakeFairness(candidates []startCandidate) {
 	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].standing != candidates[j].standing {
+			return !candidates[i].standing
+		}
 		return wakeFairnessTime(candidates[i]).Before(wakeFairnessTime(candidates[j]))
 	})
 }
@@ -4927,16 +4941,28 @@ func executePlannedStartsTraced(
 			}
 			ready = append(ready, candidate)
 		}
-		// Fairness: spend a budget-limited tick on the least-recently-woken
-		// candidates first. The wave order is a stable dependency topo-sort, so
-		// without this the same back-of-order sessions are deferred_by_wake_budget
-		// every tick. Sorting within the dependency wave is safe: every
-		// candidate here already has its dependencies satisfied.
+		// Fairness: spend a budget-limited tick on the demand candidates
+		// first (sessions with work or an explicit request behind the wake),
+		// then the least-recently-woken within each class. The wave order is
+		// a stable dependency topo-sort, so without this the same
+		// back-of-order sessions are deferred_by_wake_budget every tick.
+		// Sorting within the dependency wave is safe: every candidate here
+		// already has its dependencies satisfied.
 		sortCandidatesByWakeFairness(ready)
 		// Probe rotation: among sessions on a refusing endpoint, the ones
 		// refused least this episode go first, so a poisoned oldest session
-		// cannot monopolize the half-open probe.
-		sortCandidatesByProbeRotation(ready, capacityGuard)
+		// cannot monopolize the half-open probe. It runs within each class
+		// (the demand prefix, then the standing suffix) so rotation never
+		// moves a standing start ahead of a demand one (#7680).
+		standingAt := len(ready)
+		for i, candidate := range ready {
+			if candidate.standing {
+				standingAt = i
+				break
+			}
+		}
+		sortCandidatesByProbeRotation(ready[:standingAt], capacityGuard)
+		sortCandidatesByProbeRotation(ready[standingAt:], capacityGuard)
 		for offset := 0; offset < len(ready); {
 			if wakeCount >= maxWakes {
 				for _, candidate := range ready[offset:] {

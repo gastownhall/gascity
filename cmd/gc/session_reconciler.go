@@ -4960,6 +4960,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				tp:         target.tp,
 				order:      len(startCandidates),
 				configured: configuredNames[name],
+				standing:   hasDec && decision.Standing,
 			})
 		}
 
