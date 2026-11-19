@@ -2,12 +2,14 @@ package main
 
 import (
 	"errors"
+	"io"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
 // The start-failure stamp (#7680, change 4): last_start_failed_at is written
@@ -156,5 +158,112 @@ func TestAbandonStampsStartFailedOnRetryArms(t *testing.T) {
 	limited.rateLimit = true
 	if step := abandonStep(abandonView(k, creating, txRuntime{Class: rtAbsent}, limited)); step.Write["last_start_failed_at"] != "" {
 		t.Fatalf("a rate-limit quarantine stamped %q; the quarantined row is not retryable in place", step.Write["last_start_failed_at"])
+	}
+}
+
+// TestStartFailedStampAbsentOnRefusedDeferredAndRolledBackArms pins the
+// design's NOT list (#7680, change 4): the arms that do not leave the row
+// retryable in place must not write last_start_failed_at. The capacity
+// refusal and the async refresh release run the PLAIN restore; the deferral
+// and panic-recovery paths run the PLAIN lease clear; a superseded PreWake
+// restores only the circuit-breaker snapshot; a pending-create rollback
+// closes the row through the failed-create close patches, whose terminal
+// metadata is no place for a fairness stamp. Only the stamping siblings write
+// it (AC-6).
+func TestStartFailedStampAbsentOnRefusedDeferredAndRolledBackArms(t *testing.T) {
+	now := time.Date(2026, 10, 12, 11, 18, 5, 0, time.UTC)
+	woke := now.Add(-time.Minute).Format(time.RFC3339)
+	m := beads.NewMemStore()
+	sessFront := sessionFrontDoor(m)
+	mkRow := func(id string) beads.Bead {
+		t.Helper()
+		bead, err := m.Create(beads.Bead{
+			ID:     id,
+			Title:  "w",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"session_name":   "w",
+				"template":       "w",
+				"state":          "creating",
+				"instance_token": "tok-4",
+				"last_woke_at":   woke,
+				"wake_request":   "",
+			},
+		})
+		if err != nil {
+			t.Fatalf("Create(%s): %v", id, err)
+		}
+		return bead
+	}
+
+	// Capacity refusal and async refresh release: the plain restore puts the
+	// row back without the stamp — the endpoint or the refresh refused, the
+	// session did not fail.
+	bead := mkRow("gc-1")
+	prepared := preparedStart{
+		candidate: startCandidate{info: sessiontest.SeedBead(t, bead), tp: TemplateParams{TemplateName: "w", SessionName: "w"}},
+		preWakeUndo: preWakeUndo{
+			token:   "tok-4",
+			written: session.MetadataPatch{"state": "creating", "last_woke_at": woke, "wake_request": ""},
+			restore: session.MetadataPatch{"state": "asleep", "last_woke_at": "", "wake_request": "explicit"},
+		},
+	}
+	restorePreWakeState(prepared, sessFront, io.Discard)
+	b, err := m.Get("gc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Metadata["state"] != "asleep" || b.Metadata["last_woke_at"] != "" {
+		t.Fatalf("plain restore wrote state=%q last_woke_at=%q; the restore itself must still run", b.Metadata["state"], b.Metadata["last_woke_at"])
+	}
+	if _, stamped := b.Metadata["last_start_failed_at"]; stamped {
+		t.Fatal("the plain restorePreWakeState stamped last_start_failed_at; only the marking sibling (a failed start) may")
+	}
+
+	// Deferral and panic recovery release the lease with the plain clear,
+	// which writes only last_woke_at="".
+	mkRow("gc-2")
+	clearPendingStartInFlightLease("gc-2", sessFront, io.Discard)
+	b, err = m.Get("gc-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Metadata["last_woke_at"] != "" {
+		t.Fatal("the plain clear did not clear last_woke_at; the pin is vacuous")
+	}
+	if _, stamped := b.Metadata["last_start_failed_at"]; stamped {
+		t.Fatal("the plain clearPendingStartInFlightLease stamped last_start_failed_at; only the marking sibling (a failed start) may")
+	}
+
+	// A superseded PreWake restores the circuit-breaker entry snapshot and
+	// nothing else.
+	mkRow("gc-3")
+	cb := newSessionCircuitBreaker(sessionCircuitBreakerConfig{})
+	snap := cb.entrySnapshot("ident")
+	if _, err := recordSessionCircuitBreakerRestart(sessFront, "gc-3", cb, "ident", now); err != nil {
+		t.Fatalf("recording a breaker restart: %v", err)
+	}
+	cb.restoreEntrySnapshot(sessFront, "gc-3", "ident", snap, now, io.Discard)
+	b, err = m.Get("gc-3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, hasState := b.Metadata[session.SessionCircuitStateMetadataKey]; !hasState {
+		t.Fatal("the breaker restore wrote no circuit metadata; the pin is vacuous")
+	}
+	if _, stamped := b.Metadata["last_start_failed_at"]; stamped {
+		t.Fatal("a superseded PreWake stamped last_start_failed_at; the row moved, not failed")
+	}
+
+	// Pending-create rollback closes the row: the failed-create close patches
+	// (legacy's, and v2's rollbackPatch twin) carry no stamp — the row ends,
+	// and its successor is a new row with a fresh fairness chain.
+	if _, stamped := failedCreateClosePatch(session.Info{ID: "gc-4"}, now)["last_start_failed_at"]; stamped {
+		t.Fatal("legacy's failed-create close patch stamps last_start_failed_at; the rolled-back row closes")
+	}
+	rollback, _ := rollbackPatch(session.Info{ID: "gc-4"}, now, nil)
+	if _, stamped := rollback["last_start_failed_at"]; stamped {
+		t.Fatal("v2's rollbackPatch stamps last_start_failed_at; the rolled-back row closes")
 	}
 }
