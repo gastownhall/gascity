@@ -289,3 +289,26 @@ func TestHookClaimReclaimKeepsItsBudgetAfterEarlierStopGate(t *testing.T) {
 	f.wantClosed(stopped.ID, "skipped")
 	f.wantNeverClaimed(stopped.ID)
 }
+
+// TestHookClaimFreshTierSpentBudgetAttemptsNoCAS (AC-5): with every claim
+// budget spent at creation, the fresh tier refuses to start a CAS on routed
+// work it cannot finish in time; the ids stay open for the next poll.
+func TestHookClaimFreshTierSpentBudgetAttemptsNoCAS(t *testing.T) {
+	shortenHookClaimBudget(t, 0)
+	f := newHookWorkflowStopFixture(t)
+	live := f.root("live run", "")
+	first := f.step("implement", live.ID, nil)
+	second := f.step("review", live.ID, nil)
+	f.served = []string{first.ID, second.ID}
+
+	run := runBudgetClaim(t, f.ops(), false)
+
+	if len(f.claims) != 0 || run.handed != "" {
+		t.Fatalf("claims=%v handed out %q, want no CAS on a spent budget\nstdout=%s\nstderr=%s", f.claims, run.handed, run.stdout, run.stderr)
+	}
+	for _, id := range []string{first.ID, second.ID} {
+		if got := f.get(id); got.Status != "open" || got.Assignee != "" {
+			t.Fatalf("%s = status %q assignee %q, want open and unassigned", id, got.Status, got.Assignee)
+		}
+	}
+}
