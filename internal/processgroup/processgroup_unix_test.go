@@ -433,8 +433,12 @@ func TestEPERMWithUnreadableMembersIsNotRetried(t *testing.T) {
 		return syscall.EPERM
 	}
 
-	if err := InterruptCommand(&exec.Cmd{Process: &os.Process{Pid: 45678}}, 45678, opts); !errors.Is(err, syscall.EPERM) {
+	err := InterruptCommand(&exec.Cmd{Process: &os.Process{Pid: 45678}}, 45678, opts)
+	if !errors.Is(err, syscall.EPERM) {
 		t.Errorf("InterruptCommand() = %v, want EPERM", err)
+	}
+	if err != nil && (!strings.Contains(err.Error(), "not retried") || strings.Contains(err.Error(), "after ")) {
+		t.Errorf("InterruptCommand() error = %q, want it to say the signal was not retried, with no settle window", err)
 	}
 	if calls != 1 {
 		t.Errorf("signal sent %d times, want 1: an unreadable group is not retried", calls)

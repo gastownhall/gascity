@@ -22,6 +22,11 @@ const defaultPollPeriod = 25 * time.Millisecond
 // idle host, longer under load.
 const defaultEPERMSettle = 2 * time.Second
 
+// ManagedStopSignalRetryBudget is the most TerminateManagedCommand can add to
+// its stop and reap graces by retrying EPERM: one settle window at SIGTERM and
+// one at SIGKILL.
+const ManagedStopSignalRetryBudget = 2 * defaultEPERMSettle
+
 // Options configures process-group cleanup.
 type Options struct {
 	Kill           func(pid int, sig syscall.Signal) error
@@ -113,7 +118,10 @@ func signalGroup(pgid int, sig syscall.Signal, opts Options) error {
 		if rerr == nil && live == 0 {
 			return nil
 		}
-		if rerr != nil || !time.Now().Before(deadline) {
+		if rerr != nil {
+			return fmt.Errorf("%w: signal refused (EPERM); members unreadable, not retried: %s", err, memberOutcome(pgid, live, rerr, opts))
+		}
+		if !time.Now().Before(deadline) {
 			return fmt.Errorf("%w: signal still refused (EPERM) after %s: %s", err, settle, memberOutcome(pgid, live, rerr, opts))
 		}
 		time.Sleep(opts.pollPeriod())
