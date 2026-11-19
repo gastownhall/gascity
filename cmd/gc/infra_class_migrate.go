@@ -453,6 +453,17 @@ type infraMigrationReport struct {
 	// its fail-open contract for it (hookDrainProbeFailsClosed). A stale
 	// marker, a missing manifest or an unresolvable target is not transient.
 	Transient bool
+	// FaultFromWorkStore is set alongside Transient when Fault's read was of
+	// the WORK STORE specifically (classifyInfraContainmentGapLeaving's
+	// source, never the binding, the manifest or the cleared note). Slice
+	// 2's containment lease needs this one distinction Transient itself
+	// does not carry: a transient fault reading the binding or a local file
+	// says nothing about whether the work store's rows still match the
+	// lease's basis, but a transient fault reading the WORK STORE is a
+	// fault in the very read the lease exists to avoid repeating, so a
+	// one-shot must not accept a recheck_failing lease resting on one
+	// (design doc carry-over 3; faultFromWorkStore).
+	FaultFromWorkStore bool
 	// Target is the resolved destination the outcome is about. Its zero value
 	// belongs to the outcomes that resolved nothing.
 	Target infraBindingTarget
@@ -1000,6 +1011,14 @@ func resolveInfraBindingTarget(cityPath string, cfg *config.City) (infraBindingT
 // that a city with nothing to move has nothing to move. That is the zero-row
 // degenerate of the copy the operator command performs, not a copy of its own.
 func checkInfraClassConvergence(cityPath string, cfg *config.City, logPrefix string, stderr io.Writer) infraMigrationReport {
+	return checkInfraClassConvergenceWith(cityPath, cfg, logPrefix, stderr, storageBootGateOpts{})
+}
+
+// checkInfraClassConvergenceWith is checkInfraClassConvergence, threading
+// opts down to confirmInfraConvergenceWith (design doc §4.4, slice 2): the
+// one place a lease can short-circuit the work-store read. Every caller but
+// the CLI funnel uses the no-lease wrapper above.
+func checkInfraClassConvergenceWith(cityPath string, cfg *config.City, logPrefix string, stderr io.Writer, opts storageBootGateOpts) infraMigrationReport {
 	target, ok, err := resolveInfraBindingTarget(cityPath, cfg)
 	if err != nil {
 		// The destination did not resolve, so there is no binding to read
@@ -1012,15 +1031,19 @@ func checkInfraClassConvergence(cityPath string, cfg *config.City, logPrefix str
 	if !ok {
 		return infraMigrationReport{Outcome: infraMigrationNotConfigured}
 	}
-	report := inspectInfraConvergence(cityPath, target, logPrefix, stderr)
+	report := inspectInfraConvergenceWith(cityPath, target, logPrefix, stderr, opts)
 	report.Target = target
 	report.BindingProvenEmpty, report.BindingProbe = infraBindingHoldsNothing(target)
 	return report
 }
 
-// inspectInfraConvergence maps what the binding and the source say to a verdict,
-// as the inspection half of a report: the outcome and, when the binding has
-// stranded writes, the ids the refusal must name.
+// inspectInfraConvergenceWith maps what the binding and the source say to a
+// verdict, as the inspection half of a report: the outcome and, when the
+// binding has stranded writes, the ids the refusal must name. opts threads
+// down to confirmInfraConvergenceWith for the one state (a marked marker)
+// that ever reaches it — every caller but the CLI funnel passes the zero
+// value, which is the no-lease behavior this function always had before
+// slice 2 (design doc §4.4, §4.5).
 //
 // The marker is read first, once, because it decides which instruction a later
 // failure is allowed to carry: the revert is safe on a city that never
@@ -1028,7 +1051,7 @@ func checkInfraClassConvergence(cityPath string, cfg *config.City, logPrefix str
 // convergence re-proved; a city without one is either a genesis (nothing to
 // move, so it is admitted and recorded) or a city whose infrastructure state is
 // still in the work store, which is the refusal that names the command.
-func inspectInfraConvergence(cityPath string, target infraBindingTarget, logPrefix string, stderr io.Writer) infraMigrationReport {
+func inspectInfraConvergenceWith(cityPath string, target infraBindingTarget, logPrefix string, stderr io.Writer, opts storageBootGateOpts) infraMigrationReport {
 	say := func(err error) infraMigrationReport {
 		outcome := infraMigrationUncheckable
 		fmt.Fprintf(stderr, "%s: storage class migration: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
@@ -1049,7 +1072,7 @@ func inspectInfraConvergence(cityPath string, target infraBindingTarget, logPref
 	}
 	switch state {
 	case infraConvergenceMarked:
-		return confirmInfraConvergence(cityPath, target, logPrefix, stderr)
+		return confirmInfraConvergenceWith(cityPath, target, logPrefix, stderr, opts)
 	case infraConvergenceStale:
 		// A marker recording another work store holds first: the re-copy the
 		// remedy below names would carry that store's rows into this city
@@ -1892,9 +1915,32 @@ func removeInfraRecopyRecord(target infraBindingTarget) error {
 // reporting the city unconverged and handing it the revert, which is the one
 // instruction that would abandon everything written since cutover.
 func confirmInfraConvergence(cityPath string, target infraBindingTarget, logPrefix string, stderr io.Writer) infraMigrationReport {
+	return confirmInfraConvergenceWith(cityPath, target, logPrefix, stderr, storageBootGateOpts{})
+}
+
+// confirmInfraConvergenceWith is confirmInfraConvergence, consulting a
+// controller-served containment lease (design doc §4.4, slice 2) before
+// paying for confirmInfraContainment's own work-store read, when opts.lease
+// asks for it.
+//
+// Every per-process hold still runs first and unconditionally —
+// markerWorkStoreIdentityHold above all: the recheck that publishes leases
+// never runs it (it has no marker to hold against; storage_boot.go's
+// strandRecheck), so a work store recreated out from under a converged
+// marker must be caught here, by THIS process's own identity read, before
+// the lease is ever reached (design review R11, carry-over 2). The lease is
+// then consulted only when the marker records an identity (storeRecorded):
+// a legacy marker takes the full check regardless of opts, which is also
+// what back-fills the identity below.
+func confirmInfraConvergenceWith(cityPath string, target infraBindingTarget, logPrefix string, stderr io.Writer, opts storageBootGateOpts) infraMigrationReport {
 	storeRecorded, current, hold := markerWorkStoreIdentityHold(cityPath, target, logPrefix, stderr)
 	if hold != nil {
 		return *hold
+	}
+	if opts.lease && storeRecorded {
+		if leased, ok := leasedContainmentReport(cityPath, target); ok {
+			return leased
+		}
 	}
 	report := confirmInfraContainment(cityPath, target, logPrefix, stderr)
 	if report.Outcome == infraMigrationConverged && !storeRecorded && !current.empty() {
@@ -2061,8 +2107,28 @@ func reportUncheckableConvergence(target infraBindingTarget, logPrefix string, s
 		Outcome: infraMigrationUncheckable,
 		Fault: fmt.Errorf("%s converged (%s records it) and the stranded-write re-check could not run: %w",
 			target.Database, target.MarkerPath(), cause),
-		Transient: isTransientStoreFault(cause),
+		Transient:          isTransientStoreFault(cause),
+		FaultFromWorkStore: faultFromWorkStore(cause),
 	}
+}
+
+// infraWorkStoreFault wraps an error that happened reading the WORK STORE —
+// never the binding, a local manifest or a cleared note — so that origin
+// survives unwrapping all the way to confirmInfraContainment's report and
+// from there to a containment lease's RecheckFailureFromWorkStore (design
+// doc carry-over 3). It changes nothing about how the error is classified or
+// displayed: isTransientStoreFault still reads straight through it via
+// Unwrap, and its Error() is the wrapped error's own text verbatim.
+type infraWorkStoreFault struct{ err error }
+
+func (f infraWorkStoreFault) Error() string { return f.err.Error() }
+func (f infraWorkStoreFault) Unwrap() error { return f.err }
+
+// faultFromWorkStore reports whether err, or anything it wraps, is an
+// infraWorkStoreFault: the read that failed was of the work store itself.
+func faultFromWorkStore(err error) bool {
+	var f infraWorkStoreFault
+	return errors.As(err, &f)
 }
 
 // infraContainmentGap is what one containment re-check found: the source infra
@@ -2224,13 +2290,13 @@ func classifyInfraContainmentGap(cityPath string, target infraBindingTarget, man
 func classifyInfraContainmentGapLeaving(cityPath string, target infraBindingTarget, manifest infraCopyManifest, leave func(beads.Bead) bool) (infraContainmentGap, error) {
 	source, err := openInfraMigrationSource(cityPath)
 	if err != nil {
-		return infraContainmentGap{}, fmt.Errorf("opening work store: %w", err)
+		return infraContainmentGap{}, infraWorkStoreFault{fmt.Errorf("opening work store: %w", err)}
 	}
 	defer closeBeadStoreHandle(source) //nolint:errcheck // best-effort close
 
 	rows, err := readInfraSnapshotAt(source, manifest.Generation)
 	if err != nil {
-		return infraContainmentGap{}, err
+		return infraContainmentGap{}, infraWorkStoreFault{fmt.Errorf("reading work store: %w", err)}
 	}
 	if leave != nil {
 		rows = slices.DeleteFunc(rows, leave)

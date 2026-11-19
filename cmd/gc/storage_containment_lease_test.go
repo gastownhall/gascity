@@ -916,11 +916,15 @@ func TestStorageBootGateChecksCheckedAtBeforeTheCheckRuns(t *testing.T) {
 	}
 }
 
-// TestStrandRecheckTickFreshMSEqualsTheCap is round 2's SHOULD 2 (i4): a
-// definitive tick's lease gets the full strandRecheckFreshCap, not merely
-// something less than it reached by taking the uncapped branch of
-// strandRecheckFreshness's comparison.
-func TestStrandRecheckTickFreshMSEqualsTheCap(t *testing.T) {
+// TestStrandRecheckTickFreshMSMatchesTheAdaptiveFormula is slice 2's
+// successor to round 2's i4 (which pinned FreshMS at the fixed-cadence cap,
+// true only while interval was hardcoded at strandRecheckInterval). With
+// the adaptive cadence wired up (design doc §4.3, carry-over 1), a fast
+// definitive tick's lease gets strandRecheckFreshness(strandRecheckNextInterval(d), d)
+// for its own measured duration d, not the 10-minute cap — a city whose
+// check is cheap gets a shorter, not longer, freshness budget, because its
+// own recheck comes back around sooner.
+func TestStrandRecheckTickFreshMSMatchesTheAdaptiveFormula(t *testing.T) {
 	cityPath, cfg, _, _ := convergedInfraCity(t)
 	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, io.Discard)
 	if err != nil {
@@ -938,8 +942,12 @@ func TestStrandRecheckTickFreshMSEqualsTheCap(t *testing.T) {
 	if lease == nil {
 		t.Fatal("a definitive tick published no lease")
 	}
-	if lease.FreshMS != strandRecheckFreshCap.Milliseconds() {
-		t.Fatalf("FreshMS = %d, want the cap %d after a definitive tick (i4)", lease.FreshMS, strandRecheckFreshCap.Milliseconds())
+	want := strandRecheckFreshness(strandRecheckNextInterval(s.lastCheckDuration), s.lastCheckDuration).Milliseconds()
+	if lease.FreshMS != want {
+		t.Fatalf("FreshMS = %d, want %d from the adaptive formula (measured duration %s)", lease.FreshMS, want, s.lastCheckDuration)
+	}
+	if lease.FreshMS >= strandRecheckFreshCap.Milliseconds() {
+		t.Fatalf("FreshMS = %d, want well under the cap %d for a fast fixture check", lease.FreshMS, strandRecheckFreshCap.Milliseconds())
 	}
 }
 
