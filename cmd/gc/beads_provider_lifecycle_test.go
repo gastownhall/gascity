@@ -7738,7 +7738,13 @@ case "$cmd" in
     printf '%%s\n' "$@" > %q
     exit 0
     ;;
-  config|migrate|list)
+  migrate)
+    case "$*" in
+      *" --db "*) echo "Schema migrated to v62" ;;
+    esac
+    exit 0
+    ;;
+  config|list)
     exit 0
     ;;
   *"information_schema.tables"*"schema_migrations"*)
@@ -7906,7 +7912,13 @@ case "$cmd" in
     printf '%%s\n' "$@" > %q
     exit 0
     ;;
-  config|migrate|list)
+  migrate)
+    case "$*" in
+      *" --db "*) echo "Schema migrated to v62" ;;
+    esac
+    exit 0
+    ;;
+  config|list)
     exit 0
     ;;
   *"information_schema.tables"*"schema_migrations"*)
@@ -8008,7 +8020,13 @@ func TestGcBeadsBdInitWaitsForSchemaVisibilityBeforeRuntimeRepair(t *testing.T) 
 	fakeBdScript := `#!/bin/sh
 set -eu
 case "${1:-}" in
-  init|config|migrate|list)
+  migrate)
+    case "$*" in
+      *" --db "*) echo "Schema migrated to v62" ;;
+    esac
+    exit 0
+    ;;
+  init|config|list)
     exit 0
     ;;
   *)

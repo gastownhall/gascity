@@ -89,7 +89,7 @@ esac
 	}
 
 	bdBody := fmt.Sprintf(`#!/bin/sh
-printf '%%s\n' "$*" >> %q
+printf '%%s BEADS_DIR=%%s MODE=%%s\n' "$*" "${BEADS_DIR:-}" "${BEADS_DOLT_SERVER_MODE:-}" >> %q
 case "$1 $2" in
   "migrate schema")
     if [ %t = true ]; then
@@ -124,14 +124,16 @@ exit 0
 
 // run executes the wait against database hq and returns its stderr and exit
 // status.
-func (f *schemaTargetFixture) run(t *testing.T) (stderr string, exit int) {
+func (f *schemaTargetFixture) run(t *testing.T, extraEnv ...string) (stderr string, exit int) {
 	t.Helper()
-	_, stderr, err := runGCBeadsBdCommand(t, append(os.Environ(),
+	env := append(os.Environ(),
 		"PATH="+f.binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"DOLT_PORT=42188",
 		"DOLT_USER=root",
 		"DOLT_PASSWORD=",
-	), "bash", "-c", f.script+"wait_for_bd_runtime_schema hq\n")
+	)
+	env = append(env, extraEnv...)
+	_, stderr, err := runGCBeadsBdCommand(t, env, "bash", "-c", f.script+"wait_for_bd_runtime_schema hq\n")
 	return stderr, exitCodeOf(t, err)
 }
 
@@ -147,8 +149,8 @@ func (f *schemaTargetFixture) run(t *testing.T) (stderr string, exit int) {
 func TestWaitForBdRuntimeSchemaIsNotReadyWhileCursorBehindTarget(t *testing.T) {
 	f := newSchemaTargetFixture(t, false, 60)
 	stderr, exit := f.run(t)
-	if exit == 0 {
-		t.Fatalf("wait_for_bd_runtime_schema succeeded with the config table present and the cursor stalled at 60 of 66; a stalled migration must not read as ready")
+	if exit != 3 {
+		t.Fatalf("wait_for_bd_runtime_schema exited %d with the config table present and the cursor stalled at 60 of 66; want 3 (cursor behind target), a stalled migration must not read as ready; stderr:\n%s", exit, stderr)
 	}
 	for _, want := range []string{"hq", "60", "66", "bd migrate schema"} {
 		if !strings.Contains(stderr, want) {
@@ -221,13 +223,46 @@ func TestWaitForBdRuntimeSchemaPassesAheadOfTargetCursorThrough(t *testing.T) {
 func TestWaitForBdRuntimeSchemaFailsLoudlyWhenTargetUnknown(t *testing.T) {
 	f := newSchemaTargetFixture(t, true, 66)
 	stderr, exit := f.run(t)
-	if exit == 0 {
-		t.Fatalf("wait_for_bd_runtime_schema succeeded without knowing the target schema version")
+	if exit != 2 {
+		t.Fatalf("wait_for_bd_runtime_schema exited %d without knowing the target schema version; want 2 (target unknown); stderr:\n%s", exit, stderr)
 	}
 	if !strings.Contains(stderr, "target") {
 		t.Errorf("failure message does not say the target schema version is unknown; stderr:\n%s", stderr)
 	}
 	if !strings.Contains(stderr, "bd: cannot create throwaway database") {
 		t.Errorf("failure message drops the probe's own output, so the operator cannot see why bd gave no version; stderr:\n%s", stderr)
+	}
+}
+
+// TestWaitForBdRuntimeSchemaProbeDropsTheLiveScopeRouting pins the probe's
+// isolation: op_init exports the live scope's BEADS_DIR, and the gc parent may
+// pass BEADS_DOLT_SERVER_* down. The throwaway `migrate schema --db` probe must
+// run with that routing removed, so nothing but --db names its database.
+func TestWaitForBdRuntimeSchemaProbeDropsTheLiveScopeRouting(t *testing.T) {
+	f := newSchemaTargetFixture(t, false, 66)
+	stderr, exit := f.run(t,
+		"BEADS_DIR=/nonexistent/live",
+		"BEADS_DOLT_SERVER_MODE=1",
+		"BEADS_DOLT_SERVER_HOST=10.0.0.1",
+	)
+	if exit != 0 {
+		t.Fatalf("wait_for_bd_runtime_schema failed (exit %d) for a cursor at target; stderr:\n%s", exit, stderr)
+	}
+	raw, err := os.ReadFile(f.bdLog)
+	if err != nil {
+		t.Fatalf("bd was never invoked: %v", err)
+	}
+	probes := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		if !strings.HasPrefix(line, "migrate schema --db ") {
+			continue
+		}
+		probes++
+		if !strings.HasSuffix(line, " BEADS_DIR= MODE=") {
+			t.Errorf("throwaway probe inherited the live scope's routing: %q", line)
+		}
+	}
+	if probes == 0 {
+		t.Fatalf("wait never ran the throwaway `bd migrate schema --db` probe; bd calls: %s", raw)
 	}
 }
