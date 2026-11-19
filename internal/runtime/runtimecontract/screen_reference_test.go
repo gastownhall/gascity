@@ -30,11 +30,11 @@ func screenReferencePath(t *testing.T) string {
 // TestScreenReferenceIsConformant runs the full catalog against
 // gc-session-screen in a private state directory (its screen sockets live
 // there too): it must pass every requirement it does not skip, read
-// v2-ready, and skip only what it does not declare (exec, provision, fs.host,
-// report-activity's last_activity). Skipped where screen, jq, flock, cksum
-// or procps ps is missing, each of which the script requires: macOS has
-// only BSD ps, so the Mac lane skips it, and in CI it runs on the Bazel
-// lane's RBE workers.
+// v2-ready, and skip only what it does not declare (exec, provision and
+// launch, fs.host, report-activity's last_activity). Skipped where screen,
+// jq, flock, cksum or procps ps is missing, each of which the script
+// requires: macOS has only BSD ps, so the Mac lane skips it, and in CI it
+// runs on the Bazel lane's RBE workers.
 func TestScreenReferenceIsConformant(t *testing.T) {
 	for _, tool := range []string{"screen", "jq", "flock", "cksum", "bash"} {
 		if _, err := exec.LookPath(tool); err != nil {
@@ -68,9 +68,14 @@ func TestScreenReferenceIsConformant(t *testing.T) {
 		t.Errorf("handshake: v2-ready %v (missing %v), locality %q; want v2-ready and local", report.V2Ready, report.V2Missing, report.Protocol.Locality)
 	}
 	// The script owns no server of its own (each box is its own screen
-	// session), so it does not declare server-lifecycle.
+	// session), so it does not declare server-lifecycle; nor does it type
+	// outcomes (input-outcome), so the whole input group skips. It has no
+	// clear-scrollback op, which neither carrier.ops nor input-outcome makes
+	// mandatory for it.
 	wantSkip := map[Code]bool{
-		ReqConnectionExec: true, ReqConnectionIdleBoundary: true, ReqProvisionBoxWithoutAgent: true, ReqObserveInventoryHasActivity: true,
+		ReqObservationClearScrollback: true,
+		ReqConnectionExec:             true, ReqConnectionIdleBoundary: true, ReqProvisionBoxWithoutAgent: true, ReqObserveInventoryHasActivity: true,
+		ReqProvisionLaunchStartsAgent: true, ReqProvisionLaunchReplaces: true, ReqProvisionLaunchFreshOnly: true, ReqProvisionLaunchIdentity: true,
 		ReqFSHostSharedView: true, ReqFSHostSameUser: true, ReqFSHostLocal: true, ReqFSHostRunsWhatItCarries: true, ReqFSHostAgentPIDOnHost: true, ReqFSHostHomeView: true,
 		ReqServerStopIdempotent: true, ReqServerStartAfterStop: true, ReqServerStopEndsSession: true,
 		ReqServerStopSparesOtherCities: true,
@@ -79,7 +84,7 @@ func TestScreenReferenceIsConformant(t *testing.T) {
 		switch {
 		case res.Status == StatusFail:
 			t.Errorf("%s failed: %s", res.Code, res.Detail)
-		case res.Status == StatusSkip && !wantSkip[res.Code]:
+		case res.Status == StatusSkip && !wantSkip[res.Code] && res.Group != GroupInput:
 			t.Errorf("%s skipped: %s", res.Code, res.Detail)
 		}
 	}

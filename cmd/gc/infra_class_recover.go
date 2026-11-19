@@ -861,6 +861,10 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if err := storageReverseRefusal(request.CityPath, target.Root); err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	if !ok {
 		reportUnresolvedInfraBinding(request, logPrefix, stdout, stderr)
 		return 1
@@ -1624,7 +1628,7 @@ func doStorageRecoverStranded(ctx context.Context, request storageOperatorReques
 			return 1
 		}
 		if moved[b.ID] {
-			if diff := beadCopyDifference(b, got); diff != "" {
+			if diff := beadCopyDifference(infraCarryParkedHold(b), got); diff != "" {
 				fmt.Fprintf(stderr, "%s: bead %s differs after the copy: %s. The manifest was NOT extended\n", logPrefix, b.ID, diff) //nolint:errcheck // best-effort stderr
 				return 1
 			}

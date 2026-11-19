@@ -187,11 +187,49 @@ func (f *fakeState) IsQuarantined(sessionName string) bool { return f.quarantine
 func (f *fakeState) ClearCrashHistory(sessionName string)  { delete(f.quarantined, sessionName) }
 func (f *fakeState) CityBeadStore() beads.Store            { return splittest.GateWorkView(f.cityBeadStore) }
 
-func (f *fakeState) ScopedStoreLike(ctx context.Context, existing beads.Store) (beads.Store, error) {
+// ScopedStoreLike binds leg through scopedStoreFn as controllerState binds it
+// through scopedStoreLike: storeref.BindLeg hands the function the raw store
+// the plan leg holds, a nil answer keeps the leg unbound, and an error is
+// returned as is.
+func (f *fakeState) ScopedStoreLike(ctx context.Context, leg storeref.TypedLeg) (storeref.TypedLeg, bool, error) {
 	if f.scopedStoreFn == nil {
-		return nil, nil
+		return leg, false, nil
 	}
-	return f.scopedStoreFn(ctx, existing)
+	cloned := false
+	var scopeErr error
+	bound, err := storeref.BindLeg(leg, func(existing beads.Store) (beads.Store, error) {
+		scoped, err := f.scopedStoreFn(ctx, existing)
+		if err != nil || scoped == nil {
+			scopeErr = err
+			return existing, nil
+		}
+		cloned = true
+		return scoped, nil
+	})
+	switch {
+	case scopeErr != nil:
+		return storeref.TypedLeg{}, false, scopeErr
+	case err != nil:
+		return storeref.TypedLeg{}, false, err
+	case !cloned:
+		return leg, false, nil
+	}
+	return bound, true, nil
+}
+
+// testWorkLeg is store as the one work leg of a city that holds nothing else
+// (storeref.WorkScope), read as the API reads a plan's leg; a zero leg for a
+// nil store. No gate projection: the leg reads store itself.
+func testWorkLeg(t testing.TB, store beads.Store) storeref.TypedLeg {
+	t.Helper()
+	if store == nil {
+		return storeref.TypedLeg{}
+	}
+	leg, ok := cityWorkLeg(storeref.NewStores(storeref.Topology{Work: storeref.Leg{Ref: storeref.WorkRef, Store: store}}, storeref.StoresOptions{}))
+	if !ok {
+		t.Fatalf("no work leg over %T", store)
+	}
+	return leg
 }
 
 func (f *fakeState) NudgeQueue() NudgeQueue {
@@ -378,6 +416,10 @@ type fakeMutatorState struct {
 	serializeMu    sync.Mutex
 	serializeCalls atomic.Int32
 
+	// createRigErr, when set, is what CreateRig returns instead of adding the
+	// rig: the refusal the real provisioning would answer.
+	createRigErr error
+
 	// provisionGate, when non-nil, blocks ProvisionRigFromGit until it is closed
 	// or receives — lets a test hold a provision in flight to exercise the
 	// live-index replay path deterministically.
@@ -516,6 +558,9 @@ func (f *fakeMutatorState) DeleteAgent(name string) error {
 }
 
 func (f *fakeMutatorState) CreateRig(r config.Rig) error {
+	if f.createRigErr != nil {
+		return f.createRigErr
+	}
 	f.cfg.Rigs = append(f.cfg.Rigs, r)
 	return nil
 }

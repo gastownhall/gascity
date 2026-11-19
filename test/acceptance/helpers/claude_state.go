@@ -38,15 +38,24 @@ func underRealUserHome(path string) bool {
 // EnvAllowHostClaude opts a run in to Claude state writes under the real user
 // home, for a developer who has decided their own ~/.claude.json may take the
 // test's trust entries. CI runners need no opt-in: their home is discarded
-// with the runner (GITHUB_ACTIONS=true).
+// with the runner (HostHomeIsDisposable).
 const EnvAllowHostClaude = "GC_TEST_ALLOW_HOST_CLAUDE"
+
+// HostHomeIsDisposable reports whether this run is on a GitHub Actions runner
+// (GITHUB_ACTIONS=true), whose home is discarded with it. There a test may let
+// a tool resolve user-level state under the host home: Claude state
+// (HostClaudeStateAllowed), and the bd gc runs unwrapped (Env.WithRealBD).
+func HostHomeIsDisposable() bool {
+	return strings.TrimSpace(os.Getenv("GITHUB_ACTIONS")) == "true"
+}
 
 // HostClaudeStateAllowed reports whether this run may write Claude state under
 // the real user home at all: on a GitHub Actions runner, or with
 // GC_TEST_ALLOW_HOST_CLAUDE=1. Everywhere else — a developer box — the refusal
-// stands even for an Env that asked with WithHostClaudeState.
+// stands even for an Env that asked with WithHostClaudeState. The opt-in lends
+// the home to Claude state only: a bd gc runs unwrapped stays off it.
 func HostClaudeStateAllowed() bool {
-	return strings.TrimSpace(os.Getenv("GITHUB_ACTIONS")) == "true" ||
+	return HostHomeIsDisposable() ||
 		strings.TrimSpace(os.Getenv(EnvAllowHostClaude)) == "1"
 }
 

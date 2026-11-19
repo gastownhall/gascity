@@ -185,14 +185,23 @@ type slingDeps = sling.SlingDeps
 // SlingRunner is an alias for sling.SlingRunner.
 type SlingRunner = sling.SlingRunner
 
-// shellSlingRunner runs a command via sh -c and returns stdout.
+// shellSlingRunner runs a command through the platform's command interpreter
+// (runtime.ShellCommandContext: `sh -c` on Unix, PowerShell on Windows) and
+// returns stdout. A command the platform refuses
+// (runtime.ShellCommandUnavailable) starts nothing.
 // Times out after 30 seconds. If dir is non-empty, the command runs in
 // that directory (needed for rig-scoped beads whose .beads/ lives there).
 // Extra env vars are appended to the process environment.
 func shellSlingRunner(dir, command string, env map[string]string) (string, error) {
+	if reason := runtime.ShellCommandUnavailable(command); reason != "" {
+		return "", fmt.Errorf("sling query refused: %s", reason)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	cmd, err := runtime.ShellCommandContext(ctx, command)
+	if err != nil {
+		return "", fmt.Errorf("running %q: %w", command, err)
+	}
 	if dir != "" {
 		cmd.Dir = dir
 	}
@@ -310,6 +319,43 @@ func openSlingStore(cfg *config.City, cityPath, beadOrFormula string, sourceBead
 		return "", nil, "store_open_failed", fmt.Sprintf("gc sling: %v", err)
 	}
 	return storeDir, store, "", ""
+}
+
+// slingCoordinationBeadRefusal refuses a sling of id when the city's class
+// binding holds it and work, the store the sling acts on, does not: a bead in
+// the reserved coordination-class namespace, such as the workflow root a v2
+// gc formula cook mints on a split city. gc sling routes work-ledger beads and
+// cannot route one the binding holds (#5974); without this the sling reports
+// the bead missing and points at --force, which cannot route it either. When
+// work holds the id (the prefix is only advisory on work stores) the bead
+// routes as before, and an id no store holds keeps the missing-bead path. A
+// work store that cannot be read is left to the sling's own read of it, which
+// reports the failure.
+//
+// A binding that cannot be read, when work does not hold the id, leaves
+// whether the binding holds it unknown: that is probeErr, a read failure the
+// caller reports as such, never the refusal.
+func slingCoordinationBeadRefusal(cityPath, id string, work sling.BeadQuerier) (refusal, probeErr error) {
+	if _, reserved := reservedClassPrefixForID(id); !reserved || !isBeadIDCandidate(id) {
+		return nil, nil
+	}
+	binding := slingResidenceBinding(cityPath)
+	if binding == nil {
+		return nil, nil
+	}
+	if work != nil {
+		if held, err := sling.ProbeBeadInStore(work, id); err != nil || held {
+			return nil, nil
+		}
+	}
+	held, err := sling.ProbeBeadInStore(binding, id)
+	if err != nil {
+		return nil, fmt.Errorf("%s is not in the work ledger, and the city's infrastructure store, which mints ids like it, could not be read: %w", id, err)
+	}
+	if !held {
+		return nil, nil
+	}
+	return fmt.Errorf("%s is in this city's infrastructure store (workflow roots and steps, sessions, mail, order runs, queued nudges), and gc sling routes only work-ledger beads. To run a formula, launch it with gc sling <target> <formula> --formula, or with --on <formula> against a work bead; gc formula cook only creates a workflow's beads", id), nil
 }
 
 // applySlingInlineBead resolves inline-text mode: when the sling argument is prose
@@ -464,6 +510,15 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 	storeDir, store, errCode, errMsg := openSlingStore(cfg, cityPath, beadOrFormula, sourceBead, a)
 	if errCode != "" {
 		return fail(errCode, errMsg)
+	}
+	if !isFormula && !fromStdin && !sourceBead.exists {
+		refusal, probeErr := slingCoordinationBeadRefusal(cityPath, beadOrFormula, store)
+		if probeErr != nil {
+			return fail("source_bead_probe_failed", fmt.Sprintf("gc sling: %v", probeErr))
+		}
+		if refusal != nil {
+			return fail("bead_not_slingable", fmt.Sprintf("gc sling: %v", refusal))
+		}
 	}
 	storeRef := workflowStoreRefForDir(storeDir, cityPath, cityName, cfg)
 	storeEnv, err := slingStoreEnvWithError(cfg, cityPath, storeDir)
@@ -855,6 +910,9 @@ func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 		if agentCfg, ok := findAgentByQualified(r.deps.Cfg, req.Target); ok && isCustomSlingQuery(agentCfg) {
 			if r.deps.Runner == nil {
 				return fmt.Errorf("custom sling_query requires a runner")
+			}
+			if err := sling.CheckSlingQueryBeadID(req.BeadID); err != nil {
+				return err
 			}
 			slingCmd, _ := sling.BuildSlingCommandForAgent("sling_query", agentCfg.EffectiveSlingQuery(), req.BeadID, r.deps.CityPath, r.deps.CityName, agentCfg, r.deps.Cfg.Rigs)
 			_, err := r.deps.Runner(req.WorkDir, slingCmd, req.Env)
@@ -1969,7 +2027,11 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store, city bead
 				Source:   "sling",
 				Wake:     worker.NudgeWakeLiveOnly,
 			})
-			if nudgeErr == nil && result.Delivered {
+			// A nudge whose turn start went unobserved
+			// (runtime.ErrNudgeDeliveredUnobserved, from any runtime) was
+			// still delivered: queueing it too would type it twice.
+			delivered := nudgeErr == nil && result.Delivered
+			if delivered || nudgeErr != nil && runtime.NudgeDelivered(nudgeErr) {
 				telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), nil)
 				var sessFront *session.Store
 				if store != nil {

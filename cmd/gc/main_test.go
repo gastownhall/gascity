@@ -243,8 +243,13 @@ func exitTestProcess(code int) {
 func TestMain(m *testing.M) {
 	maybeRunHostedBeadsCredentialProvider()
 	maybeRunProductMetricsDirectChildEnvSpy()
+	maybeRunControllerTokenChildSpy()
+	maybeRunNativeFakeBd()
 	maybeRunFakeDoltSQLServer()
 	maybeRunControlDispatchSigtermChild()
+	// Infrastructure spawns never probe the host's systemd user manager from
+	// tests; tests that exercise scoping install a fake (infra_scope_test.go).
+	disableInfraScopeForTests()
 
 	// testscript re-executes the test binary as "gc" or "bd" for each txtar
 	// command. On that path we must not create a new temp root — the parent
@@ -333,6 +338,12 @@ func TestMain(m *testing.M) {
 	// floor would reach for a bd that does not serve it; the tests that pin
 	// the floor install their own surface.
 	cityHashConfigOpener = func(string) (cityHashConfig, error) { return cityHashConfig{}, nil }
+	// The split's rehearsal and the storage-split doctor check run `gc
+	// version` on the gc an agent session would find (B10). A test never runs
+	// a gc from the host's PATH or home: by default it finds none, and the
+	// tests that pin the probe install their own (stubSessionPathGC) or call
+	// probeSessionPathGCVersion.
+	minGCVersionPathProbe = func(*config.City) (string, string, error) { return "", "", nil }
 	if err := os.Setenv("XDG_RUNTIME_DIR", runtimeDir); err != nil {
 		panic(err)
 	}
@@ -2781,6 +2792,7 @@ func mapKeys(m map[string]TemplateParams) []string {
 // --- gc init (doInit with fsys.Fake) ---
 
 func TestDoInitSuccess(t *testing.T) {
+	admitInitSplitBD(t)
 	f := fsys.NewFake()
 	// No pre-existing files — doInit creates everything from scratch.
 
@@ -2802,6 +2814,11 @@ func TestDoInitSuccess(t *testing.T) {
 	if !strings.Contains(out, "bright-lights") {
 		t.Errorf("stdout missing city name: %q", out)
 	}
+	written, err := config.Parse(f.Files[filepath.Join("/bright-lights", "city.toml")])
+	if err != nil {
+		t.Fatalf("parsing the written city.toml: %v", err)
+	}
+	assertBornSplit(t, written)
 
 	// Verify .gc/ and the new city-root conventions were created (no rigs/ — created on demand by gc rig add).
 	if !f.Dirs[filepath.Join("/bright-lights", ".gc")] {
@@ -3483,6 +3500,7 @@ func TestRunWizardEOFStdin(t *testing.T) {
 }
 
 func TestDoInitWithWizardConfig(t *testing.T) {
+	admitInitSplitBD(t)
 	f := fsys.NewFake()
 	wiz := wizardConfig{
 		interactive:     true,
@@ -3669,6 +3687,7 @@ func TestDoInitWithCustomTemplate(t *testing.T) {
 }
 
 func TestDoInitWithProviderFlagAndBootstrapProfile(t *testing.T) {
+	admitInitSplitBD(t)
 	f := fsys.NewFake()
 	wiz := wizardConfig{
 		configName:       "minimal",

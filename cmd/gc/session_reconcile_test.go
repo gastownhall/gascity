@@ -1027,6 +1027,8 @@ func TestComputeWorkSet_ExplicitRigWorkQueryUsesRigPassword(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	workQuery := platformCommand(`sh -c 'test "$BEADS_DOLT_PASSWORD" = "rig-secret" && printf "[{\"id\":\"DM-1\"}]"'`,
+		`if ($env:BEADS_DOLT_PASSWORD -ceq 'rig-secret') { '[{"id":"DM-1"}]' }`)
 	cfg := &config.City{
 		Rigs: []config.Rig{{
 			Name: "demo",
@@ -1035,7 +1037,7 @@ func TestComputeWorkSet_ExplicitRigWorkQueryUsesRigPassword(t *testing.T) {
 		Agents: []config.Agent{{
 			Name:      "worker",
 			Dir:       "demo",
-			WorkQuery: `sh -c 'test "$BEADS_DOLT_PASSWORD" = "rig-secret" && printf "[{\"id\":\"DM-1\"}]"'`,
+			WorkQuery: workQuery,
 		}},
 	}
 
@@ -2579,11 +2581,12 @@ func TestHealStatePatchProjectsRuntimeLiveness(t *testing.T) {
 				return b
 			}(),
 			want: map[string]string{
-				"state":                      "asleep",
-				"sleep_reason":               string(sessionpkg.SleepReasonRuntimeMissing),
-				"session_key":                "",
-				"started_config_hash":        "",
-				"continuation_reset_pending": "true",
+				"state":                        "asleep",
+				"sleep_reason":                 string(sessionpkg.SleepReasonRuntimeMissing),
+				"session_key":                  "",
+				"started_config_hash":          "",
+				"continuation_reset_pending":   "true",
+				sessionpkg.ResetCommittedAtKey: "",
 				// Priming markers share started_config_hash's lifetime (S19
 				// Stage 2 C-6): the continuation reset clears them too.
 				sessionpkg.PrimedAtMetadataKey:           "",
@@ -2665,13 +2668,14 @@ func TestHealStatePatchProjectsRuntimeLiveness(t *testing.T) {
 				return b
 			}(),
 			want: map[string]string{
-				"state":                      "asleep",
-				"sleep_reason":               string(sessionpkg.SleepReasonRuntimeMissing),
-				"session_key":                "",
-				"started_config_hash":        "",
-				"continuation_reset_pending": "true",
-				"pending_create_claim":       "",
-				"pending_create_started_at":  "",
+				"state":                        "asleep",
+				"sleep_reason":                 string(sessionpkg.SleepReasonRuntimeMissing),
+				"session_key":                  "",
+				"started_config_hash":          "",
+				"continuation_reset_pending":   "true",
+				"pending_create_claim":         "",
+				"pending_create_started_at":    "",
+				sessionpkg.ResetCommittedAtKey: "",
 				// Priming markers share started_config_hash's lifetime (S19
 				// Stage 2 C-6): the continuation reset clears them too.
 				sessionpkg.PrimedAtMetadataKey:           "",

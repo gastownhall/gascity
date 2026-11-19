@@ -56,7 +56,7 @@ func computeAwakeSetPreRefactor(input AwakeInput) map[string]AwakeDecision {
 		if !bead.ExplicitWake || bead.State == "closed" || bead.DependencyOnly {
 			continue
 		}
-		if agent, ok := agentsByName[bead.Template]; ok && !agent.Suspended {
+		if bead.ExplicitWakeStartable {
 			desired[bead.SessionName] = "explicit-wake"
 		}
 	}
