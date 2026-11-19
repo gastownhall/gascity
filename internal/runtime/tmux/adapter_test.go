@@ -393,6 +393,84 @@ func TestProvider_RelaunchInWarmSession(t *testing.T) {
 	}
 }
 
+func TestProvider_RelaunchAppliesMouseOnToAgentWindow(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	for _, tc := range []struct {
+		name          string
+		startMouseOn  bool
+		humanActivity string
+		wantActivity  string
+	}{
+		{name: "on to off", startMouseOn: true, wantActivity: "off"},
+		{name: "off to on", humanActivity: "on"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.SocketName = privateSocketName("mouse-window")
+			p := NewProviderWithConfig(cfg)
+			name := "gc-test-relaunch-mouse-window"
+			socketPath := namedSocketPath(cfg.SocketName)
+			t.Cleanup(func() {
+				if err := p.TeardownServer(); err != nil && !errors.Is(err, ErrNoServer) {
+					t.Errorf("tear down test tmux server: %v", err)
+				}
+				if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+					t.Errorf("remove test tmux socket: %v", err)
+				}
+			})
+
+			launch := runtime.Config{Command: "sleep 300", MouseOn: tc.startMouseOn}
+			if err := p.Start(context.Background(), name, launch); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			agentPane, err := agentPaneID(p.tm, name)
+			if err != nil {
+				t.Fatalf("agent pane: %v", err)
+			}
+
+			// Creating a window without -d selects it, as a human opening a
+			// second window would. Keep its local option distinguishable from
+			// the agent window's expected option in both mouse-mode directions.
+			humanPane, err := p.tm.run("new-window", "-P", "-F", "#{pane_id}", "-t", paneTarget(name), "sleep 300")
+			if err != nil {
+				t.Fatalf("create human window: %v", err)
+			}
+			if tc.humanActivity != "" {
+				if _, err := p.tm.run("set-option", "-w", "-t", humanPane, "monitor-activity", tc.humanActivity); err != nil {
+					t.Fatalf("set human window activity: %v", err)
+				}
+			}
+			active, err := p.tm.run("display-message", "-p", "-t", paneTarget(name), "#{pane_id}")
+			if err != nil {
+				t.Fatalf("read active pane: %v", err)
+			}
+			if active != humanPane {
+				t.Fatalf("active pane = %q, want human pane %q (precondition)", active, humanPane)
+			}
+
+			launch.MouseOn = !tc.startMouseOn
+			if err := p.Relaunch(context.Background(), name, launch); err != nil {
+				t.Fatalf("Relaunch: %v", err)
+			}
+			for _, window := range []struct{ name, pane, want string }{
+				{"agent", agentPane, tc.wantActivity},
+				{"human", humanPane, tc.humanActivity},
+			} {
+				activity, err := p.tm.run("show-options", "-w", "-q", "-v", "-t", window.pane, "monitor-activity")
+				if err != nil {
+					t.Fatalf("read %s window activity: %v", window.name, err)
+				}
+				if activity != window.want {
+					t.Errorf("%s window monitor-activity = %q, want %q", window.name, activity, window.want)
+				}
+			}
+		})
+	}
+}
+
 // Relaunch replaces the agent pane (the first pane of the first window), not
 // whichever pane is active. A human who split the agent's window and then
 // opened and focused a second window must keep both: before the fix,
