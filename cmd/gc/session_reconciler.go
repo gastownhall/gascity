@@ -4889,6 +4889,21 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				}
 				continue
 			}
+			// A session of a suspended rig is not a start candidate: it would
+			// spend a wake slot and PreWake only to fail in the start's own
+			// suspension check. It keeps its row and pending-create claim, so
+			// the first pass after the rig resumes starts it. Skipped before the
+			// breaker, provider-health and capacity gates, which it never reaches.
+			if rigName := strings.TrimSpace(target.tp.RigName); rigName != "" && rigEffectivelySuspended(cfg, suspState, rigName) {
+				logStandingCondition(dt, stderr, target.info.ID, rigSuspendedStartKind, fmt.Sprintf(
+					"session reconciler: not starting %s: rig %q is suspended", name, rigName), clk.Now())
+				if trace != nil {
+					trace.RecordDecision(TraceSiteReconcilerWakeDecision, TraceReasonSuspended, TraceOutcomeSkipped, target.tp.TemplateName, name, traceRecordPayload{
+						"rig": rigName,
+					})
+				}
+				continue
+			}
 			// Respawn circuit breaker: for named sessions the supervisor
 			// will otherwise retry indefinitely. This phase only blocks
 			// already-OPEN breakers; restart accounting happens at the

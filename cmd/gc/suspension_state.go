@@ -91,3 +91,24 @@ func buildEffectiveSuspendedRigNames(cfg *config.City, st suspensionstate.State)
 	}
 	return names
 }
+
+// rigSuspendedStartKind is the standing condition of a legacy start
+// candidate the reconciler skips because its rig is suspended.
+const rigSuspendedStartKind = "rig_suspended.start"
+
+// rigEffectivelySuspended reports whether rigName is suspended under st: the
+// runtime override wins, otherwise the rig's authored default
+// ([config.Rig.EffectiveSuspendedOnStart]) applies. A rig cfg does not
+// declare has no authored default.
+func rigEffectivelySuspended(cfg *config.City, st suspensionstate.State, rigName string) bool {
+	suspendedOnStart := false
+	if cfg != nil {
+		for i := range cfg.Rigs {
+			if cfg.Rigs[i].Name == rigName {
+				suspendedOnStart = cfg.Rigs[i].EffectiveSuspendedOnStart()
+				break
+			}
+		}
+	}
+	return suspensionstate.EffectiveRigSuspended(st, rigName, suspendedOnStart)
+}
