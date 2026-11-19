@@ -2426,6 +2426,7 @@ go_test(
         "start_deferral_memo_test.go",
         "start_gate_classification_test.go",
         "start_output_test.go",
+        "startup_delivered_flag_comment_test.go",
         "startup_health_backoff_test.go",
         "startup_health_materialization_test.go",
         "startup_health_reconcile_test.go",
