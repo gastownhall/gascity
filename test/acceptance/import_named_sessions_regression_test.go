@@ -124,11 +124,11 @@ func hasNamedSession(sessions []namedSessionListEntry, template, sessionName str
 	return false
 }
 
-// decodeSessionListJSON parses the two renderings emitted by
-// `gc session list --json`: the API envelope (_cache_age_s and sessions) and
-// the local result (schema_version, ok, filters, sessions, summary). Both
-// carry a snake_case sessions array; the legacy bare-array shape is gone, and
-// the final branch only tolerates a payload that is not an object.
+// decodeSessionListJSON parses the one document `gc session list --json`
+// prints on every route (schema_version, ok, filters, sessions, summary, plus
+// _cache_age_s when the API serves the read). Its sessions array is
+// snake_case; the legacy bare-array shape is gone, and the final branch only
+// tolerates a payload that is not an object.
 func decodeSessionListJSON(raw []byte) []namedSessionListEntry {
 	type envelopeShape struct {
 		Sessions []struct {

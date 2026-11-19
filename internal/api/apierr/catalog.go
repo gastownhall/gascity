@@ -76,6 +76,12 @@ var (
 	// client cannot today distinguish "pick a different name" from "resume/stop
 	// first" by code or prefix.
 	SessionConflict = Register(ProblemType{Code: "session-conflict", Status: http.StatusConflict, Title: "Session State Conflict"})
+	// SessionInactive refuses gc session peek's read (GET /session/{id} with
+	// peek_strict=true) of a suspended or closed session, which has no runtime
+	// to peek. The detail is the session domain's own message, so a client
+	// prints what a local peek prints. Other session operations still answer
+	// an inactive session with session-conflict.
+	SessionInactive = Register(ProblemType{Code: "session-inactive", Status: http.StatusConflict, Title: "Session Not Active"})
 	// TranscriptCursorInvalidated means a stable transcript entry cursor no
 	// longer exists in the provider's current transcript view. Clients recover
 	// by discarding the cursor and fetching a fresh snapshot.

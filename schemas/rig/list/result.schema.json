@@ -30,7 +30,7 @@
     },
     "_cache_age_s": {
       "type": "number",
-      "description": "Age in seconds of the supervisor read-model cache for API-routed output."
+      "description": "API-routed output only: the bead-cache age the server reported for this read (its X-GC-Cache-Age-S header). The server builds the rig list from config, the suspension state and runtime probes, not from its bead cache, so it reports 0."
     },
     "rigs": {
       "type": "array",
@@ -70,6 +70,29 @@
           },
           "default_sling_target": {
             "type": "string"
+          },
+          "default_sling_targets": {
+            "type": "array",
+            "description": "Configured default sling targets the rig picks among at random, when set.",
+            "items": {
+              "type": "string"
+            }
+          },
+          "federation": {
+            "type": "string",
+            "enum": [
+              "city",
+              "rig"
+            ],
+            "description": "Rig federation setting; present only when not the default \"city\"."
+          },
+          "namespace": {
+            "type": "string",
+            "enum": [
+              "shared",
+              "exclusive"
+            ],
+            "description": "Rig namespace declaration; present only when not the default \"shared\"."
           },
           "beads": {
             "type": "string"

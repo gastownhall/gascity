@@ -250,6 +250,39 @@ func followConditionalWritesResolveTarget(store Store) Store {
 	return store
 }
 
+// idPrefixMaxHops bounds IDPrefixFor's walk through declared resolve targets.
+const idPrefixMaxHops = 8
+
+// IDPrefixFor returns the first non-empty IDPrefix() along store and the
+// resolve targets it declares (ConditionalWritesResolveTargeter), or "". A
+// wrapper that embeds a store, such as a typed class handle or a policy store,
+// hides the store's IDPrefix the way it hides the conditional-writes stamp, and
+// declares the same target for both; this follows it to the store that mints
+// the ids. The walk is bounded, and it ends at a nil or typed-nil target.
+func IDPrefixFor(store Store) string {
+	cur := store
+	for range idPrefixMaxHops {
+		if p, ok := cur.(interface{ IDPrefix() string }); ok {
+			if prefix := p.IDPrefix(); prefix != "" {
+				return prefix
+			}
+		}
+		t, ok := cur.(ConditionalWritesResolveTargeter)
+		if !ok {
+			return ""
+		}
+		next := t.ConditionalWritesResolveTarget()
+		if next == nil {
+			return ""
+		}
+		if v := reflect.ValueOf(next); v.Kind() == reflect.Pointer && v.IsNil() {
+			return ""
+		}
+		cur = next
+	}
+	return ""
+}
+
 // ConditionalWritesRequiredError reports that the resolved store cannot
 // perform conditional writes while the factory-stamped mode is require: the
 // caller must fail closed — retrying, surfacing, or stalling — and MUST NOT

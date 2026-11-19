@@ -90,6 +90,22 @@ func (cr *CityRuntime) claimLoopGuardOf() *claimLoopGuard {
 	return cr.claimLoop
 }
 
+// claimStallGuardOf is the runtime's claims-stall guard, created on first use
+// and configured from the runtime's config. Its alerts go to the runtime's
+// recorder and stderr.
+func (cr *CityRuntime) claimStallGuardOf() *claimStallGuard {
+	cr.claimStallOnce.Do(func() {
+		record := func(e events.Event) {
+			if cr.rec != nil {
+				cr.rec.Record(e)
+			}
+		}
+		cr.claimStall = newClaimStallGuard(record, cr.stderr)
+		cr.claimStall.configure(cr.cfg)
+	})
+	return cr.claimStall
+}
+
 // routeRecoveryEventProvider is the journal the delta feed tails, or nil when
 // this runtime has no controller state (every one-shot and standalone runtime).
 // A nil provider leaves the lane backstop-only, loudly, rather than pretending a
@@ -259,6 +275,10 @@ func (cr *CityRuntime) startTickDeltaLanes(ctx context.Context, prov events.Prov
 	// change is covered by the hold's own expiry.
 	claimLoop := cr.claimLoopGuardOf()
 	registerClaimLoopGuard(ctx, cr.cityPath, claimLoop)
+	// So does the claims-stall guard: a missed event delays a stall by a
+	// seat at most, and its holds run out on their own.
+	claimStall := cr.claimStallGuardOf()
+	registerClaimStallGuard(ctx, cr.cityPath, claimStall)
 	watchJournalForDeltaLanes(ctx, prov,
 		func() {
 			route.force(backstopReasonCursorGap)
@@ -272,6 +292,7 @@ func (cr *CityRuntime) startTickDeltaLanes(ctx context.Context, prov events.Prov
 			orphans.observe(evt)
 			cr.absorbCompletionFact(evt)
 			claimLoop.observe(evt)
+			claimStall.observe(evt)
 		})
 	go cr.runRouteRecoveryBackstopLoop(ctx, route)
 	// The cross-store gate lane reads work stores, so it polls off the tick

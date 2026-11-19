@@ -94,6 +94,12 @@ type ProviderSpec struct {
 	ReadyDelayMs int `toml:"ready_delay_ms,omitempty" jsonschema:"minimum=0"`
 	// ReadyPromptPrefix is the string prefix that indicates the provider is ready for input.
 	ReadyPromptPrefix string `toml:"ready_prompt_prefix,omitempty"`
+	// NotReadyMarkers lists text the provider prints when it discards a
+	// submitted prompt because it is not ready for input yet, although its
+	// input prompt is already showing (Copilot prints "Managed account policy
+	// is still loading" until its policy loads). A runtime that sees one
+	// appear after delivering the startup prompt delivers the prompt again.
+	NotReadyMarkers []string `toml:"not_ready_markers,omitempty"`
 	// ProcessNames lists process names to look for when checking if the provider is running.
 	ProcessNames []string `toml:"process_names,omitempty"`
 	// EmitsPermissionWarning is tri-state: nil = inherit, &true = enable,
@@ -173,6 +179,10 @@ type ProviderSpec struct {
 	// the right names for this harness, so an upstream preset is portable across
 	// harnesses (claude → ANTHROPIC_*, codex → OPENAI_*).
 	UpstreamEnv UpstreamEnvBinding `toml:"upstream_env,omitempty"`
+	// ProgramStatus declares whether this harness's program reports its own
+	// state over the OSC 7501 Program Status Protocol and how gc captures the
+	// reports. Inert unless [session] program_status is "shadow" or "on".
+	ProgramStatus ProgramStatusBinding `toml:"program_status,omitempty"`
 	// PrintArgs are CLI arguments that enable one-shot non-interactive mode.
 	// The provider prints its response to stdout and exits. When empty, the
 	// provider does not support one-shot invocation.
@@ -242,6 +252,7 @@ type ResolvedProvider struct {
 	PromptFlag             string
 	ReadyDelayMs           int
 	ReadyPromptPrefix      string
+	NotReadyMarkers        []string
 	ProcessNames           []string
 	EmitsPermissionWarning bool
 	AcceptStartupDialogs   *bool
@@ -257,6 +268,7 @@ type ResolvedProvider struct {
 	PermissionModes        map[string]string
 	OptionsSchema          []ProviderOption
 	UpstreamEnv            UpstreamEnvBinding
+	ProgramStatus          ProgramStatusBinding
 	PrintArgs              []string
 	TitleModel             string
 	ACPCommand             string
@@ -507,6 +519,7 @@ func providerSpecFromWorker(spec workerbuiltin.BuiltinProviderSpec) ProviderSpec
 		PromptFlag:             spec.PromptFlag,
 		ReadyDelayMs:           spec.ReadyDelayMs,
 		ReadyPromptPrefix:      spec.ReadyPromptPrefix,
+		NotReadyMarkers:        cloneStrings(spec.NotReadyMarkers),
 		ProcessNames:           cloneStrings(spec.ProcessNames),
 		EmitsPermissionWarning: boolPtr(spec.EmitsPermissionWarning),
 		AcceptStartupDialogs:   cloneBoolPtr(spec.AcceptStartupDialogs),
@@ -528,11 +541,37 @@ func providerSpecFromWorker(spec workerbuiltin.BuiltinProviderSpec) ProviderSpec
 			APIKey:    spec.UpstreamAPIKeyEnv,
 			AuthToken: spec.UpstreamAuthTokenEnv,
 		},
-		PrintArgs:  cloneStrings(spec.PrintArgs),
-		TitleModel: spec.TitleModel,
-		ACPCommand: spec.ACPCommand,
-		ACPArgs:    cloneStrings(spec.ACPArgs),
+		ProgramStatus: programStatusBindingFromWorker(spec),
+		PrintArgs:     cloneStrings(spec.PrintArgs),
+		TitleModel:    spec.TitleModel,
+		ACPCommand:    spec.ACPCommand,
+		ACPArgs:       cloneStrings(spec.ACPArgs),
 	}
+}
+
+// programStatusBindingFromWorker lifts a built-in profile's flat
+// program-status fields into the config binding. An unset relay,
+// hold_mid_turn, decide_startup or decide_settle stays nil so a city layer
+// can still inherit or override it.
+func programStatusBindingFromWorker(spec workerbuiltin.BuiltinProviderSpec) ProgramStatusBinding {
+	b := ProgramStatusBinding{
+		Protocol: spec.ProgramStatusProtocol,
+		App:      spec.ProgramStatusApp,
+		Env:      cloneStringMap(spec.ProgramStatusEnv),
+	}
+	if spec.ProgramStatusRelay {
+		b.Relay = boolPtr(true)
+	}
+	if spec.ProgramStatusHoldMidTurn {
+		b.HoldMidTurn = boolPtr(true)
+	}
+	if spec.ProgramStatusDecideStartup {
+		b.DecideStartup = boolPtr(true)
+	}
+	if spec.ProgramStatusDecideSettle {
+		b.DecideSettle = boolPtr(true)
+	}
+	return b
 }
 
 func providerOptionsFromWorker(options []workerbuiltin.BuiltinProviderOption) []ProviderOption {

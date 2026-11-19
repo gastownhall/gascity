@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
 
 // newSliceTestTmux returns a Tmux backed by a fakeExecutor with the agent
@@ -76,9 +78,11 @@ func TestAgentSliceWrapsRespawnPane(t *testing.T) {
 	if err := tm.RespawnPaneWithWorkDir("%0", "/work", "claude --resume"); err != nil {
 		t.Fatalf("RespawnPaneWithWorkDir: %v", err)
 	}
+	// The pane command ends respawn-pane, the list's first command.
 	args := exec.calls[0]
-	if got := args[len(args)-1]; got != want {
-		t.Fatalf("respawn-with-workdir command = %q, want %q", got, want)
+	sep := slices.Index(args, ";")
+	if sep < 1 || args[sep-1] != want {
+		t.Fatalf("respawn-with-workdir command in %q, want %q", args, want)
 	}
 }
 
@@ -193,7 +197,7 @@ func TestAgentInputTarget_WrappedPane(t *testing.T) {
 
 	panePID := strconv.Itoa(os.Getpid())
 	deadline := time.Now().Add(5 * time.Second)
-	for !hasDescendantWithNames(panePID, []string{"sleep"}, 0) {
+	for !snapshotHasDescendant(panePID, "sleep") {
 		if time.Now().After(deadline) {
 			t.Fatal("sleep child never became visible to the process-tree walk")
 		}
@@ -225,6 +229,7 @@ func TestAgentInputTarget_WrappedPane(t *testing.T) {
 // requests return a dead PID with no descendants, modeling the startup window
 // where systemd-run exists but the agent has not exec'd yet.
 type wrappedWaitExecutor struct {
+	paneCommand  string // the wrapper the pane reports; "" means systemd-run
 	deadPID      string
 	livePID      string
 	livePIDAfter int
@@ -240,6 +245,9 @@ func (e *wrappedWaitExecutor) execute(args []string) (string, error) {
 			// Agent-pane reads: the session's one, unmarked pane.
 			switch args[len(args)-1] {
 			case agentPaneMarkerFormat + "\t#{pane_current_command}":
+				if e.paneCommand != "" {
+					return "pane\t" + e.paneCommand, nil
+				}
 				return "pane\tsystemd-run", nil
 			case agentPaneMarkerFormat + "\t#{pane_pid}":
 				e.pidRequests++
@@ -280,7 +288,7 @@ func TestWaitForCommand_WrappedPane(t *testing.T) {
 
 	livePID := strconv.Itoa(os.Getpid())
 	deadline := time.Now().Add(5 * time.Second)
-	for !hasDescendantWithNames(livePID, []string{"sleep"}, 0) {
+	for !snapshotHasDescendant(livePID, "sleep") {
 		if time.Now().After(deadline) {
 			t.Fatal("sleep child never became visible to the process-tree walk")
 		}
@@ -312,4 +320,14 @@ func TestWaitForCommand_WrappedPane(t *testing.T) {
 			t.Fatalf("pane PID requested %d times, want >= 3 (wait must keep polling until the descendant appears)", exec.pidRequests)
 		}
 	})
+}
+
+// snapshotHasDescendant reports whether a process named in names runs below
+// pid in a fresh process-table snapshot, the view the pane probes judge by.
+func snapshotHasDescendant(pid string, names ...string) bool {
+	processes, err := fetchProcessSnapshot(context.Background())
+	if err != nil {
+		return false
+	}
+	return processes.hasDescendantWithNames(pid, proctable.ProcessNameSet(names), 0)
 }

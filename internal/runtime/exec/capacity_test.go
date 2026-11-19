@@ -16,7 +16,7 @@ import (
 func TestClassifyExecExit_TempFailOnlyForStartOp(t *testing.T) {
 	base := errors.New("exec provider /pack start worker: broker at capacity")
 
-	err := classifyExecExit("start", runtime.ExitCodeTempFail, "broker at capacity", base)
+	err := classifyExecExit("start", runtime.ExitCodeTempFail, "broker at capacity", false, base)
 	if !runtime.IsProviderCapacity(err) {
 		t.Fatalf("start+75 = %v, want capacity", err)
 	}
@@ -28,19 +28,19 @@ func TestClassifyExecExit_TempFailOnlyForStartOp(t *testing.T) {
 		t.Fatalf("start+75 = %q, want the formatted adapter error unchanged", err)
 	}
 
-	if err := classifyExecExit("stop", runtime.ExitCodeTempFail, "busy", base); err == nil || runtime.IsProviderCapacity(err) {
+	if err := classifyExecExit("stop", runtime.ExitCodeTempFail, "busy", false, base); err == nil || runtime.IsProviderCapacity(err) {
 		t.Fatalf("stop+75 = %v, want a plain error", err)
 	}
-	if err := classifyExecExit("start", 1, "broker at capacity", base); runtime.IsProviderCapacity(err) || !errors.Is(err, base) {
+	if err := classifyExecExit("start", 1, "broker at capacity", false, base); runtime.IsProviderCapacity(err) || !errors.Is(err, base) {
 		t.Fatalf("start+1 = %v, want the plain adapter error", err)
 	}
-	if err := classifyExecExit("start", 2, "", base); !errors.Is(err, base) {
+	if err := classifyExecExit("start", 2, "", false, base); !errors.Is(err, base) {
 		t.Fatalf("start+2 = %v, want the plain adapter error (start cannot be an unknown op)", err)
 	}
-	if err := classifyExecExit("start", 1, `session "worker" already exists`, base); !errors.Is(err, runtime.ErrSessionExists) {
+	if err := classifyExecExit("start", 1, `session "worker" already exists`, false, base); !errors.Is(err, runtime.ErrSessionExists) {
 		t.Fatalf("start collision = %v, want ErrSessionExists", err)
 	}
-	if err := classifyExecExit("start", 2, `session "worker" already exists`, base); !errors.Is(err, runtime.ErrSessionExists) {
+	if err := classifyExecExit("start", 2, `session "worker" already exists`, false, base); !errors.Is(err, runtime.ErrSessionExists) {
 		t.Fatalf("start collision+2 = %v, want ErrSessionExists", err)
 	}
 }
@@ -51,7 +51,7 @@ func TestClassifyExecExit_TempFailOnlyForStartOp(t *testing.T) {
 func TestClassifyExecExit_CollisionBeatsTempFail(t *testing.T) {
 	base := errors.New(`exec provider /pack start x: session "x" already exists`)
 
-	err := classifyExecExit("start", runtime.ExitCodeTempFail, `session "x" already exists`, base)
+	err := classifyExecExit("start", runtime.ExitCodeTempFail, `session "x" already exists`, false, base)
 	if !errors.Is(err, runtime.ErrSessionExists) {
 		t.Fatalf("collision+75 = %v, want ErrSessionExists", err)
 	}

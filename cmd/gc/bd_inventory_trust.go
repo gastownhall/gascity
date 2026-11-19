@@ -595,8 +595,8 @@ func recordBdVouchUsed(cityPath, bdPath, sum, inventory string) {
 }
 
 // bdSplitRefusalEvent is the gc_bd.refused event: one per split-city gc bd
-// refusal, so a refusal swallowed by a script's `|| true` (wisp-compact.sh,
-// the deacon's mol burn) still shows up in the city's event log, and so the
+// refusal, so a refusal swallowed by a script's `|| true` (for example
+// a pack script's mol burn) still shows up in the city's event log, and so the
 // allowlist's burn-in can see which commands callers actually need.
 const bdSplitRefusalEvent = "gc_bd.refused"
 
@@ -741,7 +741,10 @@ func bdBindingDependents(cityPath string, ids []string) (map[string][]string, er
 				out[id] = append(out[id], d.IssueID)
 			}
 		}
-		gates, err := dispatch.OpenCrossStoreGatesNaming(binding.Store, id)
+		// A cross-store gate is a graph bead, and the sole class binding holds
+		// the relocated classes, graph among them. The binding is still a raw
+		// residency leg, so this relabels it (typed-store T7 types it).
+		gates, err := dispatch.OpenCrossStoreGatesNaming(beads.GraphStore{Store: binding.Store}, id)
 		if err != nil {
 			return nil, fmt.Errorf("listing the binding's open gates waiting on %s: %w", id, err)
 		}
