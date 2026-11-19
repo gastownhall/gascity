@@ -281,3 +281,48 @@ func TestSessionCurrentClaimVia(t *testing.T) {
 		}
 	})
 }
+
+// AC-3: a not-found readback without a complete city-wide proof of absence is
+// adopted exactly as today — the bead may live in a store the claim's own
+// readback does not read — and the stamp is left alone.
+func TestHookClaimPurgedAdoptionNeedsACompleteProof(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		prove      func([]string) (bool, error)
+		wantProofs int
+		wantStderr string
+	}{
+		{name: "nil prover", prove: nil, wantProofs: 0, wantStderr: "without a canonical ownership readback"},
+		{name: "found somewhere", prove: func([]string) (bool, error) { return false, nil }, wantProofs: 1, wantStderr: "without a canonical ownership readback"},
+		{name: "proof failed", prove: func([]string) (bool, error) { return false, errors.New("rig store unreachable") }, wantProofs: 1, wantStderr: "rig store unreachable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := &purgedAdoptionEnv{
+				missing: map[string]bool{"work-1": true},
+				prove:   tc.prove,
+				session: true,
+				stamp:   "work-1",
+			}
+
+			code := e.run()
+
+			if code != 0 {
+				t.Fatalf("code = %d, want 0; stderr=%s", code, e.stderr.String())
+			}
+			if !strings.Contains(e.stdout.String(), `"reason":"existing_assignment"`) || !strings.Contains(e.stdout.String(), `"bead_id":"work-1"`) {
+				t.Fatalf("stdout = %q, want work-1 adopted as existing_assignment", e.stdout.String())
+			}
+			if len(e.proofs) != tc.wantProofs {
+				t.Errorf("proofs = %v, want %d", e.proofs, tc.wantProofs)
+			}
+			for _, id := range e.sessSpy.beadIDs {
+				if id == "" {
+					t.Fatalf("session claim writes = %q, want no clear of an unproven adoption", e.sessSpy.beadIDs)
+				}
+			}
+			if !strings.Contains(e.stderr.String(), tc.wantStderr) {
+				t.Errorf("stderr = %q, want %q", e.stderr.String(), tc.wantStderr)
+			}
+		})
+	}
+}
