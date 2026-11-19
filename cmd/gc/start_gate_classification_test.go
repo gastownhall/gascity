@@ -66,6 +66,7 @@ var startOutcomeClassification = map[string]startOutcomeClass{
 	"deferred_by_runtime_lease":     {reason: "clause (a): its own runtime name is leased by another holder"},
 	"deferred_by_endpoint_capacity": {reason: "own hold: endpointCapacityGuard.HoldsPendingCreate already keeps the row"},
 	"user_held":                     {reason: "clause (a): the session's own state, held by the user"},
+	"skipped_session_busy":          {reason: "clause (a): the session's own mutation lock is held by another goroutine; the skip writes nothing and the next pass retries"},
 	"context_canceled":              {reason: "the cancel rule: a canceled run commits nothing"},
 
 	// Post-attempt: the candidate was offered a start and the attempt ran.
