@@ -6333,3 +6333,49 @@ func TestDoSlingDryRunReroutesClaimedBeadReportsBeadMethod(t *testing.T) {
 		t.Fatalf("dry run executed commands: %v", runner.calls)
 	}
 }
+
+// TestDoSlingRouteOnlyConflictingOnFormulaReturnsConflict covers a bead the
+// target already claims, routed elsewhere, that carries a live molecule for a
+// different formula. An explicit --on naming another formula must fail with
+// the live-attachment conflict, as on the idempotent path, rather than
+// silently re-routing the bead and dropping the request.
+func TestDoSlingRouteOnlyConflictingOnFormulaReturnsConflict(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	store, beadID := assignedSingleSessionBead(t, "reviewers")
+	mol, err := store.Create(beads.Bead{
+		Title:    "mol-a",
+		Type:     "molecule",
+		Status:   "open",
+		ParentID: beadID,
+		Metadata: map[string]string{"gc.formula_name": "mol-a"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create(molecule): %v", err)
+	}
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps = withStore(deps, store)
+
+	opts := testOpts(a, beadID)
+	opts.OnFormula = "mol-b"
+	_, err = DoSling(opts, deps, store)
+	var molErr *MoleculeAttachedError
+	if !errors.As(err, &molErr) {
+		t.Fatalf("DoSling --on mol-b: err=%v, want *MoleculeAttachedError", err)
+	}
+	if molErr.AttachmentID != mol.ID {
+		t.Fatalf("MoleculeAttachedError names %q, want the live attachment %q", molErr.AttachmentID, mol.ID)
+	}
+	got, err := store.Get(beadID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", beadID, err)
+	}
+	if routed := got.Metadata["gc.routed_to"]; routed != "reviewers" {
+		t.Fatalf("gc.routed_to = %q, want it left at %q after the conflict", routed, "reviewers")
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("runner calls = %q, want none after the conflict", runner.calls)
+	}
+}

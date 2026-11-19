@@ -227,8 +227,8 @@ func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDep
 		// the route without attaching a formula, under the same claim guard as
 		// the idempotent path above.
 		result.routeOnly = true
-		if decision, probeErr := onFormulaNeedsAttachment(opts, querier, deps); probeErr == nil && decision.SkippedForClaim {
-			result.BeadWarnings = append(result.BeadWarnings, skippedForClaimWarning(opts, a, decision.Assignee))
+		if err := resolveRouteOnlyAttachment(opts, a, deps, querier, result); err != nil {
+			return false, err
 		}
 	}
 	if !check.Idempotent {
@@ -250,6 +250,27 @@ func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDep
 		result.NudgeAgent = &a
 	}
 	return true, nil
+}
+
+// resolveRouteOnlyAttachment applies the idempotent path's attachment guards
+// to a route-only re-route. An assigned source carrying a live molecule for a
+// different --on formula fails with that conflict rather than being silently
+// re-routed; a failed attachment probe and a formula skipped for the claim are
+// surfaced as bead warnings. A route-only bead is assigned by definition, so
+// the unassigned burn-and-attach case does not apply.
+func resolveRouteOnlyAttachment(opts SlingOpts, a config.Agent, deps SlingDeps, querier BeadQuerier, result *SlingResult) error {
+	decision, probeErr := onFormulaNeedsAttachment(opts, querier, deps)
+	switch {
+	case decision.Conflict != nil && !decision.ConflictSourceUnassigned:
+		return decision.Conflict
+	case probeErr != nil:
+		result.BeadWarnings = append(result.BeadWarnings, fmt.Sprintf(
+			"could not verify molecule attachment for %s; re-routing without attaching a formula: %v",
+			opts.BeadOrFormula, probeErr))
+	case decision.SkippedForClaim:
+		result.BeadWarnings = append(result.BeadWarnings, skippedForClaimWarning(opts, a, decision.Assignee))
+	}
+	return nil
 }
 
 // skippedForClaimWarning reports a formula attach skipped because assignee
