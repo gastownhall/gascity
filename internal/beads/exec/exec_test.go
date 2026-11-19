@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
@@ -1227,15 +1228,15 @@ func TestGetAndListRejectNonStringExcludeClaimants(t *testing.T) {
 			script := writeScript(t, dir, `
 case "$1" in
   get)
-    echo '{"id":"EX-1","title":"test","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z","metadata":{"gc.exclude_claimants":`+value+`,"flag":true}}'
+    echo '{"id":"EX-1","title":"test","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z","metadata":{"`+beadmeta.ExcludeClaimantsMetadataKey+`":`+value+`,"flag":true}}'
     ;;
   *) exit 2 ;;
 esac
 `)
 			s := NewStore(script)
 			_, err := s.Get("EX-1")
-			if err == nil || !strings.Contains(err.Error(), "gc.exclude_claimants") || !strings.Contains(err.Error(), "must be a string") {
-				t.Fatalf("Get %s: got %v, want error naming gc.exclude_claimants", value, err)
+			if err == nil || !strings.Contains(err.Error(), beadmeta.ExcludeClaimantsMetadataKey) || !strings.Contains(err.Error(), "must be a string") {
+				t.Fatalf("Get %s: got %v, want error naming %s", value, err, beadmeta.ExcludeClaimantsMetadataKey)
 			}
 			if !errors.Is(err, beads.ErrMetadataParse) {
 				t.Fatalf("Get %s: got %v, want ErrMetadataParse", value, err)
@@ -1246,15 +1247,15 @@ esac
 			script := writeScript(t, dir, `
 case "$1" in
   list)
-    echo '[{"id":"EX-1","title":"test","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z","metadata":{"gc.exclude_claimants":`+value+`}}]'
+    echo '[{"id":"EX-1","title":"test","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z","metadata":{"`+beadmeta.ExcludeClaimantsMetadataKey+`":`+value+`}}]'
     ;;
   *) exit 2 ;;
 esac
 `)
 			s := NewStore(script)
 			_, err := s.ListOpen()
-			if err == nil || !strings.Contains(err.Error(), "gc.exclude_claimants") || !strings.Contains(err.Error(), "must be a string") {
-				t.Fatalf("List %s: got %v, want error naming gc.exclude_claimants", value, err)
+			if err == nil || !strings.Contains(err.Error(), beadmeta.ExcludeClaimantsMetadataKey) || !strings.Contains(err.Error(), "must be a string") {
+				t.Fatalf("List %s: got %v, want error naming %s", value, err, beadmeta.ExcludeClaimantsMetadataKey)
 			}
 			if !errors.Is(err, beads.ErrMetadataParse) {
 				t.Fatalf("List %s: got %v, want ErrMetadataParse", value, err)
@@ -1268,7 +1269,7 @@ func TestGet_stringExcludeClaimantsRoundTrips(t *testing.T) {
 	script := writeScript(t, dir, `
 case "$1" in
   get)
-    echo '{"id":"EX-1","title":"test","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z","metadata":{"gc.exclude_claimants":"reviewer-one","flag":true,"retries":3}}'
+    echo '{"id":"EX-1","title":"test","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z","metadata":{"`+beadmeta.ExcludeClaimantsMetadataKey+`":"reviewer-one","flag":true,"retries":3}}'
     ;;
   *) exit 2 ;;
 esac
@@ -1279,8 +1280,8 @@ esac
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if got.Metadata["gc.exclude_claimants"] != "reviewer-one" {
-		t.Errorf("exclude = %q, want reviewer-one", got.Metadata["gc.exclude_claimants"])
+	if got.Metadata[beadmeta.ExcludeClaimantsMetadataKey] != "reviewer-one" {
+		t.Errorf("exclude = %q, want reviewer-one", got.Metadata[beadmeta.ExcludeClaimantsMetadataKey])
 	}
 	if got.Metadata["flag"] != "true" {
 		t.Errorf("flag = %q, want true (non-string coercion unchanged)", got.Metadata["flag"])
@@ -1291,7 +1292,7 @@ esac
 }
 
 func TestCreateAndUpdateRejectNonStringExcludeClaimants(t *testing.T) {
-	bad := `{"id":"EX-1","title":"test","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z","metadata":{"gc.exclude_claimants":["reviewer-one"]}}`
+	bad := `{"id":"EX-1","title":"test","status":"open","type":"task","created_at":"2026-01-01T00:00:00Z","metadata":{"` + beadmeta.ExcludeClaimantsMetadataKey + `":["reviewer-one"]}}`
 	dir := t.TempDir()
 	script := writeScript(t, dir, `
 case "$1" in
@@ -1307,11 +1308,11 @@ case "$1" in
 esac
 `)
 	s := NewStore(script)
-	if _, err := s.Create(beads.Bead{Title: "test"}); err == nil || !strings.Contains(err.Error(), "gc.exclude_claimants") {
-		t.Fatalf("Create: got %v, want error naming gc.exclude_claimants", err)
+	if _, err := s.Create(beads.Bead{Title: "test"}); err == nil || !strings.Contains(err.Error(), beadmeta.ExcludeClaimantsMetadataKey) {
+		t.Fatalf("Create: got %v, want error naming %s", err, beadmeta.ExcludeClaimantsMetadataKey)
 	}
-	if err := s.Update("EX-1", beads.UpdateOpts{}); err == nil || !strings.Contains(err.Error(), "gc.exclude_claimants") {
-		t.Fatalf("Update: got %v, want error naming gc.exclude_claimants", err)
+	if err := s.Update("EX-1", beads.UpdateOpts{}); err == nil || !strings.Contains(err.Error(), beadmeta.ExcludeClaimantsMetadataKey) {
+		t.Fatalf("Update: got %v, want error naming %s", err, beadmeta.ExcludeClaimantsMetadataKey)
 	}
 }
 

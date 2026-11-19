@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/execenv"
 )
@@ -287,22 +288,20 @@ func cloneTimePtr(v *time.Time) *time.Time {
 	return &cloned
 }
 
-const excludeClaimantsMetadataKey = "gc.exclude_claimants"
-
 // coerceMetadata converts raw JSON metadata values to strings. Backing stores
 // may return numbers or booleans; the domain model is map[string]string.
 //
 // gc.exclude_claimants is a comma-separated identity list. A non-string JSON
 // value must not become its raw text: that text matches no claimant, so the
-// exclusion would fail open. Reject it with the same message as the other
-// metadata decoders.
+// exclusion would fail open. The exec store rejects it with
+// beads.ErrMetadataParse.
 func coerceMetadata(raw map[string]json.RawMessage) (map[string]string, error) {
 	if len(raw) == 0 {
 		return nil, nil
 	}
 	m := make(map[string]string, len(raw))
 	for k, v := range raw {
-		if k == excludeClaimantsMetadataKey && (len(v) == 0 || v[0] != '"') {
+		if k == beadmeta.ExcludeClaimantsMetadataKey && (len(v) == 0 || v[0] != '"') {
 			return nil, fmt.Errorf("metadata %s must be a string: %w", k, beads.ErrMetadataParse)
 		}
 		var s string
