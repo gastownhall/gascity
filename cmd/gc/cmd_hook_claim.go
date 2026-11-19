@@ -1158,10 +1158,9 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			if ops.claimWindowSpent() {
 				return refuseExpiredHookClaimWindow(candidate.ID, ops, stderr)
 			}
-			if ctx.Err() != nil {
-				break
-			}
-			reclaimed, previousOwner, err := ops.ReclaimStale(ctx, dir, opts.Env, candidate.ID)
+			reclaimCtx, reclaimCancel := ops.claimMutationContext()
+			reclaimed, previousOwner, err := ops.ReclaimStale(reclaimCtx, dir, opts.Env, candidate.ID)
+			reclaimCancel()
 			if err != nil || !reclaimed {
 				// Best-effort optimization, not a claim path of its own: any
 				// non-reclaim outcome leaves the candidate untouched (FR4) and

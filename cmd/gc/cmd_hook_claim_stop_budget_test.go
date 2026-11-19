@@ -50,7 +50,9 @@ func (s budgetSpendingStore) Get(id string) (beads.Bead, error) {
 
 // budgetClaimRecorder records the context state each claim write saw.
 type budgetClaimRecorder struct {
-	claimExpired []bool
+	claimExpired   []bool
+	reclaimExpired []bool
+	reclaimedStale []string
 }
 
 // bdLikeClaim wraps claim the way bd honors the caller deadline: a CAS started
@@ -63,6 +65,27 @@ func (r *budgetClaimRecorder) bdLikeClaim(claim hookClaimFunc) hookClaimFunc {
 			return beads.Bead{}, false, fmt.Errorf("claiming bead %q: timed out after 0s (caller deadline)", id)
 		}
 		return claim(ctx, dir, env, id, assignee)
+	}
+}
+
+// reclaimFrom reverts a stale lease in f's store the way bd's reclaim does,
+// refusing like bd when the context it was handed is already spent.
+func (r *budgetClaimRecorder) reclaimFrom(f *hookWorkflowStopFixture) hookClaimReclaimFunc {
+	return func(ctx context.Context, _ string, _ []string, id string) (bool, string, error) {
+		expired := ctx.Err() != nil
+		r.reclaimExpired = append(r.reclaimExpired, expired)
+		if expired {
+			return false, "", fmt.Errorf("reclaiming bead %q: timed out after 0s (caller deadline)", id)
+		}
+		current, err := f.store.Get(id)
+		if err != nil {
+			return false, "", err
+		}
+		none := ""
+		if err := f.store.Update(id, beads.UpdateOpts{Assignee: &none}); err != nil {
+			return false, "", err
+		}
+		return true, current.Assignee, nil
 	}
 }
 
@@ -227,4 +250,42 @@ func TestHookClaimLaterCandidateKeepsBudgetAfterEarlierStopGate(t *testing.T) {
 			f.wantNeverClaimed(stopped.ID)
 		})
 	}
+}
+
+// TestHookClaimReclaimKeepsItsBudgetAfterEarlierStopGate (AC-3): after the
+// first candidate's stop gate spends its whole budget, the fresh tier still
+// reclaims the stale lease behind it and claims it, each write on an unexpired
+// budget of its own.
+func TestHookClaimReclaimKeepsItsBudgetAfterEarlierStopGate(t *testing.T) {
+	shortenHookClaimBudget(t, hookClaimTestBudget)
+	f := newHookWorkflowStopFixture(t)
+	failed := f.root("failed run", "")
+	stopped := f.step("implement", failed.ID, nil)
+	f.closeAs(failed.ID, "fail", nil)
+	live := f.root("live run", "")
+	stale := f.step("implement", live.ID, nil)
+	f.assign(stale.ID, "dead-worker")
+	f.served = []string{stopped.ID, stale.ID}
+
+	rec := &budgetClaimRecorder{}
+	ops := f.ops()
+	ops.WorkflowStore = slowStopGate(f, failed.ID)
+	ops.Claim = rec.bdLikeClaim(ops.Claim)
+	ops.ReclaimStale = rec.reclaimFrom(f)
+	ops.EmitHookClaimReclaimedStale = func(beadID, previousOwner, _ string) {
+		rec.reclaimedStale = append(rec.reclaimedStale, beadID+"<-"+previousOwner)
+	}
+
+	run := runBudgetClaim(t, ops, true)
+
+	wantHandedOut(t, f, run, stale.ID, "claimed")
+	wantEveryClaimUnexpired(t, rec)
+	if len(rec.reclaimExpired) != 1 || rec.reclaimExpired[0] {
+		t.Fatalf("reclaim contexts expired = %v, want one reclaim on an unexpired budget", rec.reclaimExpired)
+	}
+	if want := []string{stale.ID + "<-dead-worker"}; len(rec.reclaimedStale) != 1 || rec.reclaimedStale[0] != want[0] {
+		t.Fatalf("reclaimed_stale events = %v, want %v", rec.reclaimedStale, want)
+	}
+	f.wantClosed(stopped.ID, "skipped")
+	f.wantNeverClaimed(stopped.ID)
 }
