@@ -2220,6 +2220,7 @@ go_test(
         "rig_remote_test.go",
         "rig_scope_resolution_test.go",
         "root_argv_test.go",
+        "route_away_event_test.go",
         "route_equivalence_beads_test.go",
         "route_equivalence_cache_age_footer_test.go",
         "route_equivalence_convoy_test.go",
