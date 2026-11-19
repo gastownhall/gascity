@@ -234,18 +234,24 @@ func startLeaseName(c startCandidate) string {
 // sleep->re-wake fairness (a SleepPatch clears last_woke_at before the append,
 // so the fallback kicks in) is pinned by TestWakeFairnessInfoTwinCharacterization
 // — the slept_at middle tier keeps a session that slept recently from jumping
-// the queue ahead of one that has been waiting since creation.
+// the queue ahead of one that has been waiting since creation. The chain is
+// advanced to the later of itself and the advisory last_start_failed_at stamp
+// a failed attempt wrote in the same write that undid its PreWake (#7680), so
+// a row that just failed a start sorts behind its class's steady state
+// instead of back to its front (its last_woke_at was cleared).
 func wakeFairnessTime(c startCandidate) time.Time {
-	if t, err := time.Parse(time.RFC3339, c.info.LastWokeAt); err == nil {
-		return t
+	var t time.Time
+	if w, err := time.Parse(time.RFC3339, c.info.LastWokeAt); err == nil {
+		t = w
+	} else if s, err := time.Parse(time.RFC3339, c.info.SleptAt); err == nil {
+		t = s
+	} else if !c.info.CreatedAt.IsZero() {
+		t = c.info.CreatedAt
 	}
-	if t, err := time.Parse(time.RFC3339, c.info.SleptAt); err == nil {
-		return t
+	if f, err := time.Parse(time.RFC3339, c.info.LastStartFailedAt); err == nil && f.After(t) {
+		t = f
 	}
-	if !c.info.CreatedAt.IsZero() {
-		return c.info.CreatedAt
-	}
-	return time.Time{}
+	return t
 }
 
 // sortCandidatesByWakeFairness orders candidates demand first, then
@@ -2659,6 +2665,22 @@ func clearPendingStartInFlightLease(handle string, sessFront *sessionpkg.Store, 
 	setMeta(sessFront, handle, "last_woke_at", "", stderr) //nolint:errcheck
 }
 
+// clearPendingStartInFlightLeaseMarkingStartFailed clears last_woke_at as
+// clearPendingStartInFlightLease does, and stamps last_start_failed_at in the
+// same write (#7680): the attempt is over and it FAILED, so the row's
+// wake-fairness key must not fall back to its old chain value — that would
+// sort it back to the front of its class on the next pass. Only the failure
+// arms that leave the row retryable call this; the arms that hand the row to
+// someone else (a superseded PreWake, a deferral) keep the plain clear.
+func clearPendingStartInFlightLeaseMarkingStartFailed(handle string, sessFront *sessionpkg.Store, failedAt time.Time, stderr io.Writer) {
+	if strings.TrimSpace(handle) == "" || sessFront == nil {
+		return
+	}
+	patch := sessionpkg.MetadataPatch{"last_woke_at": ""}
+	maps.Copy(patch, sessionpkg.StartFailedPatch(failedAt))
+	setMetaBatch(sessFront, handle, patch, stderr) //nolint:errcheck
+}
+
 // stopStaleAsyncStartRuntime stops the runtime a discarded async start may have
 // left behind. It normally requires positive attribution (GC_SESSION_ID or the
 // instance token) so it never stops a box it cannot prove is this attempt's.
@@ -3468,6 +3490,24 @@ func newPreWakeUndo(current sessionpkg.Info, persisted map[string]string, writte
 // landing after the re-read is not overwritten; on stores without conditional
 // writes only that read-to-write window stays unfenced.
 func restorePreWakeState(prepared preparedStart, sessFront *sessionpkg.Store, stderr io.Writer) {
+	restorePreWakeStateWith(prepared, sessFront, nil, stderr)
+}
+
+// restorePreWakeStateMarkingStartFailed is restorePreWakeState for a start
+// that FAILED (not was refused): it stamps last_start_failed_at inside the
+// same fenced restore write (#7680), because the restore clears last_woke_at
+// and without the stamp the row's wake-fairness key would fall back to its
+// older chain value and sort it back to the front of its class on the next
+// pass.
+func restorePreWakeStateMarkingStartFailed(prepared preparedStart, sessFront *sessionpkg.Store, failedAt time.Time, stderr io.Writer) {
+	t := failedAt
+	restorePreWakeStateWith(prepared, sessFront, &t, stderr)
+}
+
+// restorePreWakeStateWith is the restore's body: the fence, and the
+// last_start_failed_at stamp failedAt carries (nil: none), folded into the
+// same fenced write the restore makes.
+func restorePreWakeStateWith(prepared preparedStart, sessFront *sessionpkg.Store, failedAt *time.Time, stderr io.Writer) {
 	id := strings.TrimSpace(prepared.candidate.info.ID)
 	undo := prepared.preWakeUndo
 	if id == "" || sessFront == nil || undo.written == nil {
@@ -3483,6 +3523,9 @@ func restorePreWakeState(prepared preparedStart, sessFront *sessionpkg.Store, st
 				if written := undo.written[key]; persisted.Metadata[key] == written && value != written {
 					patch[key] = value
 				}
+			}
+			if failedAt != nil {
+				maps.Copy(patch, sessionpkg.StartFailedPatch(*failedAt))
 			}
 			return sessionpkg.UndoDisposition(undo.before, undo.class, persisted.Metadata).Into(id, patch)
 		})
@@ -3635,8 +3678,10 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 			// attempt's in-flight lease: the attempt is over, and a lease left
 			// behind holds the retry as start_in_flight until
 			// startup_timeout+7s has passed (ga-vohht8). The startup-health
-			// episode recorded above still bounds a crash loop.
-			clearPendingStartInFlightLease(info.ID, sessFront, stderr)
+			// episode recorded above still bounds a crash loop. The clear
+			// stamps the failure (#7680) so the row's wake-fairness key does
+			// not sort it back to the front of its class.
+			clearPendingStartInFlightLeaseMarkingStartFailed(info.ID, sessFront, clk.Now().UTC(), stderr)
 		}
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, string(result.outcome), result.started, result.finished, result.err, result.phases)
 		return
@@ -3656,9 +3701,14 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	relaunched := sessionpkg.State(strings.TrimSpace(undo.restore["state"])) == sessionpkg.StateCreating
 	switch {
 	case undo.written != nil && !relaunched:
-		restorePreWakeState(result.prepared, sessFront, stderr)
+		restorePreWakeStateMarkingStartFailed(result.prepared, sessFront, clk.Now().UTC(), stderr)
 	case undo.written == nil:
-		if err := sessFront.SetMarker(info.ID, "last_woke_at", ""); err != nil {
+		// The clear and the #7680 failure stamp share one write, so the
+		// row's wake-fairness key cannot read a torn pair (cleared lease,
+		// no stamp).
+		patch := sessionpkg.MetadataPatch{"last_woke_at": ""}
+		maps.Copy(patch, sessionpkg.StartFailedPatch(clk.Now().UTC()))
+		if err := sessFront.ApplyPatch(info.ID, patch); err != nil {
 			fmt.Fprintf(stderr, "session reconciler: clearing last_woke_at for %s: %v\n", name, err) //nolint:errcheck
 		}
 	}
@@ -3669,7 +3719,7 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	// (WakeAttemptsMetadata / SessionKey / StartedConfigHash — the last two reflecting
 	// buildPreparedStart's stale-resume clears / session_key mint via the
 	// prepareStartCandidateForCity + refreshAsyncStartResult coherence refresh). The
-	// SetMarker of last_woke_at="" above is not one of those reads, so the twin need
+	// last_woke_at="" clear above is not one of those reads, so the twin need
 	// not carry it. Terminal failure arm; discard the fold (never assign back into
 	// infoByID — this is the async start goroutine). The persist lands via
 	// recordWakeFailure's ApplyPatchInfo/SetMarker writes.
@@ -5148,7 +5198,11 @@ func executePlannedStartsTraced(
 					if errors.Is(err, errPreWakeSuperseded) {
 						cb.restoreEntrySnapshot(sessFront, candidate.info.ID, identity, cbBefore, cbNow, stderr)
 					} else {
-						clearPendingStartInFlightLease(candidate.info.ID, sessFront, stderr)
+						// A prepare that failed on its own merits leaves the row
+						// retryable, so the clear stamps the failure (#7680): a
+						// plain clear would sort the row back to the front of
+						// its wake-fairness class on the next pass.
+						clearPendingStartInFlightLeaseMarkingStartFailed(candidate.info.ID, sessFront, cbNow, stderr)
 					}
 					fmt.Fprintf(stderr, "session reconciler: pre-wake %s: %s\n", candidate.name(), formatLifecycleError(err)) //nolint:errcheck
 					drop("failed", err)

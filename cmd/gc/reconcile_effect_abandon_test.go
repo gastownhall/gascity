@@ -320,7 +320,7 @@ func TestAbandonStepClasses(t *testing.T) {
 	}
 	relaunch := other
 	relaunch.relaunched = true
-	if step := abandonStep(abandonView(k, creating, txRuntime{Class: rtAbsent}, relaunch)); step.Write["state"] != "" || step.Write["last_woke_at"] != "" || step.Write["wake_attempts"] != "3" {
+	if step := abandonStep(abandonView(k, creating, txRuntime{Class: rtAbsent}, relaunch)); step.Write["state"] != "" || step.Write["last_woke_at"] != "" || step.Write["last_start_failed_at"] != "" || step.Write["wake_attempts"] != "3" {
 		t.Fatalf("a relaunch: %+v, want its marker kept and the wake failure accrued", step.Write)
 	}
 	killed := poolRow("gc-1", "worker", 1, "asleep", "generation", "4", "instance_token", "tok-4", "sleep_reason", "killed")
@@ -360,8 +360,8 @@ func TestAbandonStepClasses(t *testing.T) {
 	}{
 		{"terminal", terminal, txRuntime{Class: rtAbsent}, session.MetadataPatch(providerTerminalErrorPatch("model_not_found", gatherNow)), "", false, false, ""},
 		{"rate-limit", limited, txRuntime{Class: rtAbsent}, foldClass(session.RateLimitQuarantinePatch(), session.Cell(map[string]string{}, session.ActorController, session.DispEvent{Kind: session.EvQuarantine, Until: gatherNow.Add(defaultRateLimitQuarantineDuration)}, gatherNow)), "", false, false, ""},
-		{"prepare", prepare, txRuntime{Class: rtAbsent}, session.MetadataPatch{"last_woke_at": ""}, "", false, false, ""},
-		{"configured named pending, not died", named, txRuntime{Class: rtAbsent}, session.MetadataPatch{"last_woke_at": ""}, "", false, false, ""},
+		{"prepare", prepare, txRuntime{Class: rtAbsent}, session.MetadataPatch{"last_woke_at": "", "last_start_failed_at": gatherNow.Format(time.RFC3339)}, "", false, false, ""},
+		{"configured named pending, not died", named, txRuntime{Class: rtAbsent}, session.MetadataPatch{"last_woke_at": "", "last_start_failed_at": gatherNow.Format(time.RFC3339)}, "", false, false, ""},
 		{"configured named pending, died", namedDied, txRuntime{Class: rtAbsent}, nil, "", true, false, ""},
 		{"pending, timed out", timedOut, txRuntime{Class: rtAbsent}, nil, "", true, false, events.SessionColdStartTimeout},
 		{"pending, own zombie", pending(other), txRuntime{Class: rtZombie, Same: true, Identity: runtimeIdentity{Known: true, SessionID: "gc-1", Epoch: "4", Token: "tok-4"}}, nil, "", true, true, ""},

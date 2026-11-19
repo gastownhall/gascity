@@ -274,6 +274,17 @@ func PreWakePatch(input PreWakePatchInput) MetadataPatch {
 	return patch
 }
 
+// StartFailedPatch is the advisory last_start_failed_at stamp a failed start
+// attempt writes in the same write that undoes its PreWake, on the arms that
+// leave the row retryable (#7680). Wake fairness reads it as the later of its
+// chain and the stamp, so the row's cleared last_woke_at does not sort it
+// back to the front of its class on the next pass. It is never cleared: a
+// later successful wake or sleep stamps a newer chain key, and the later-of
+// rule makes the stale stamp inert.
+func StartFailedPatch(now time.Time) MetadataPatch {
+	return MetadataPatch{"last_start_failed_at": now.UTC().Format(time.RFC3339)}
+}
+
 // ContinuationResetWakePatch records a controller-owned fresh wake for a
 // session whose pending continuation reset was observed while a stale runtime
 // was still alive. It clears reset_committed_at, as a passive re-arm.

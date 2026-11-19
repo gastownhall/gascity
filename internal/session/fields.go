@@ -534,6 +534,18 @@ var registry = slices.Concat([]Field{
 	same(ClassAdvisory, false, sites(op("internal/session/waits.go", "StampWaitLookupCapMetadata")),
 		"wait_lookup_capped_at", "wait_lookup_capped_label", "wait_lookup_capped_limit", "wait_lookup_capped_source"),
 	same(ClassAdvisory, false, sites(legacyCommit), "awake_started_at", PrimedAtMetadataKey, PromptHashMetadataKey),
+	// The #7680 start-failure stamp: minted once, written by both
+	// controllers in the same write that undoes a failed attempt's PreWake
+	// (only the arms that leave the row retryable), and read by wake
+	// fairness as the later of its chain and the stamp, so a row that just
+	// failed a start does not sort back to the front of its class. Not a
+	// new key (CONTRACT R1): the twins write the same metadata, legacy and
+	// v2 alike.
+	[]Field{{
+		Key: "last_start_failed_at", Class: ClassAdvisory,
+		Writers: sites(legacy(srcTransition, "StartFailedPatch"), v2(srcTransition, "StartFailedPatch")),
+		Readers: sites(legacy(srcLifecycle, "wakeFairnessTime"), v2(srcLifecycle, "wakeFairnessTime")),
+	}},
 	// The thread a runtime hosts the session in (runtime.SessionBinding):
 	// recorded at each confirmed start (create, resume, pending-create
 	// recovery), read by no decision.

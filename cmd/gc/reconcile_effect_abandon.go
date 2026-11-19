@@ -164,7 +164,12 @@ func abandonStep(v txView) txStep {
 		patch, class := rateLimitQuarantine(v.Row, v.Now)
 		return abandon(patch, class, facts)
 	case f.cause == causePrepare, f.pending && f.terminal == "" && f.configured && !f.died:
-		return abandon(session.MetadataPatch{"last_woke_at": ""}, session.DispositionPatch{}, facts)
+		// The clear stamps the failure (#7680), legacy's twin, so the row's
+		// wake-fairness key does not sort it back to the front of its class
+		// on the next pass.
+		patch := session.MetadataPatch{"last_woke_at": ""}
+		maps.Copy(patch, session.StartFailedPatch(v.Now))
+		return abandon(patch, session.DispositionPatch{}, facts)
 	case f.pending:
 		td, cause := ownTeardown(v)
 		if cause != "" {
@@ -197,6 +202,12 @@ func otherFailurePatch(row session.Info, meta map[string]string, f startFailureR
 	var class session.DispositionPatch
 	if !f.relaunched {
 		patch, class = restorePatch(f.undo, meta)
+		// The restore stamps the failure (#7680), legacy's twin, in the same
+		// write: the restore clears last_woke_at, and without the stamp the
+		// row's wake-fairness key falls back to its older chain value and
+		// sorts it back to the front of its class. A relaunch keeps its
+		// marker and writes nothing, as legacy's does.
+		maps.Copy(patch, session.StartFailedPatch(now))
 	}
 	if !creating(row) {
 		return patch, class, false
