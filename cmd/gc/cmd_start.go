@@ -620,7 +620,13 @@ func doStartWithNameOverrideJSON(args []string, controllerMode bool, stdout, std
 	if jsonOut {
 		startStdout = io.Discard
 	}
-	if code := registerCityWithSupervisorNamed(cityPath, nameOverride, startStdout, stderr, "gc start", true); code != 0 {
+	code := registerCityWithSupervisorNamed(cityPath, nameOverride, startStdout, stderr, "gc start", true)
+	// The supervisor ran the bead lifecycle, so its notices for databases left
+	// for an operator to migrate went to its log; repeat them here, whether
+	// or not the city came up (a city store the pinned bd cannot open is one
+	// way it does not).
+	printBdSchemaStartWarnings(cityPath, stderr)
+	if code != 0 {
 		return code
 	}
 	warnStage1MCPSkips(cityPath, exec.LookPath, stderr)
@@ -661,6 +667,18 @@ func printRigFederationStartWarnings(cityPath string, stderr io.Writer) {
 	for _, w := range config.RigFederationWarnings(cfg.Rigs) {
 		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
 	}
+}
+
+// printBdSchemaStartWarnings writes gc start's warning for each bd database
+// whose schema differs from the linked beads library's (bdSchemaNotices). A
+// config that does not load says nothing here; the start reports it.
+func printBdSchemaStartWarnings(cityPath string, stderr io.Writer) {
+	cfg, err := loadCityConfigFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), io.Discard)
+	if err != nil {
+		return
+	}
+	resolveRigPaths(cityPath, cfg.Rigs)
+	writeBdSchemaNotices(stderr, "gc start: warning: ", bdSchemaNoticesFor(cityPath, cfg))
 }
 
 // resolveStartDir resolves the city directory for start/restart. The
@@ -1871,57 +1889,6 @@ func checkAgentImages(sp runtime.Provider, agents []config.Agent, _ io.Writer) e
 		}
 	}
 	return nil
-}
-
-// countRunningPoolInstances counts how many pool instances are currently
-// running for a given pool agent. For bounded pools, checks static names
-// (1..max). For unlimited pools, discovers via prefix matching.
-//
-// Uses ListRunning with the city prefix for a single batch call instead
-// of N individual IsRunning calls. For exec providers (K8s), this reduces
-// N subprocess spawns to 1.
-func countRunningPoolInstances(agentName, agentDir string, sp0 scaleParams, a *config.Agent, cityName, sessionTemplate string, sp runtime.Provider) int { //nolint:unparam // agentName varies in production use
-	isUnlimited := sp0.Max < 0
-	if isUnlimited {
-		// Unlimited: count by prefix matching.
-		instances := discoverPoolInstances(agentName, agentDir, sp0, a, cityName, sessionTemplate, sp)
-		count := 0
-		for _, qn := range instances {
-			sn := sessionName(nil, cityName, qn, sessionTemplate)
-			if running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, sn); err == nil && running {
-				count++
-			}
-		}
-		return count
-	}
-
-	// Bounded: build the set of expected pool runtime session names.
-	expected := make(map[string]bool, sp0.Max)
-	for _, qualifiedInstance := range discoverPoolInstances(agentName, agentDir, sp0, a, cityName, sessionTemplate, sp) {
-		expected[sessionName(nil, cityName, qualifiedInstance, sessionTemplate)] = true
-	}
-
-	// Single ListRunning call, then intersect with expected set.
-	// Per-city socket isolation: all sessions belong to this city.
-	running, err := sp.ListRunning("")
-	if err != nil {
-		// Fallback: individual IsRunning calls (original behavior).
-		count := 0
-		for sn := range expected {
-			if running, err := workerSessionTargetRunningWithConfig("", nil, sp, nil, sn); err == nil && running {
-				count++
-			}
-		}
-		return count
-	}
-
-	count := 0
-	for _, name := range running {
-		if expected[name] {
-			count++
-		}
-	}
-	return count
 }
 
 // buildFingerprintExtra builds the fpExtra map for an agent's fingerprint

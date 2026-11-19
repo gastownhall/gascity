@@ -5481,6 +5481,71 @@ func TestSyncSessionBeads_ProjectsSessionIDFlag(t *testing.T) {
 	}
 }
 
+// syncProviderProjection creates a worker session bead, overwrites its
+// provider projection with stored (a missing key stored empty), syncs it
+// under resolved and returns the bead's metadata; a second sync under the
+// same resolution must write nothing.
+func syncProviderProjection(t *testing.T, stored map[string]string, resolved *config.ResolvedProvider) map[string]string {
+	t.Helper()
+	cs := &countingStore{Store: beads.NewMemStore()}
+	clk := &clock.Fake{Time: time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	_ = sp.Start(context.TODO(), "worker", runtime.Config{Command: "run-worker"})
+	ds := map[string]TemplateParams{"worker": {TemplateName: "worker", Command: "run-worker"}}
+	var stderr bytes.Buffer
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	created := allSessionBeads(t, cs)
+	if len(created) != 1 {
+		t.Fatalf("expected 1 bead after the create tick, got %d", len(created))
+	}
+	overlay := make(map[string]string, len(providerProjectionKeys))
+	for _, k := range providerProjectionKeys {
+		overlay[k] = stored[k]
+	}
+	if err := cs.SetMetadataBatch(created[0].ID, overlay); err != nil {
+		t.Fatalf("SetMetadataBatch(stored projection): %v", err)
+	}
+
+	ds["worker"] = TemplateParams{TemplateName: "worker", Command: "run-worker", ResolvedProvider: resolved}
+	clk.Advance(time.Minute)
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	got := allSessionBeads(t, cs)[0].Metadata
+
+	writesBefore := cs.writes
+	clk.Advance(time.Minute)
+	syncSessionBeads("", cs, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	if cs.writes != writesBefore {
+		t.Errorf("an unchanged sync wrote metadata (%d -> %d writes); the projection must be diff-gated (#1205)", writesBefore, cs.writes)
+	}
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+	return got
+}
+
+// TestSyncSessionBeads_ProviderProjectionClearsMissingFields guards #8539:
+// existing-session sync makes a successful provider resolution
+// authoritative for the six family and resume keys, so a key the resolved
+// provider leaves empty clears instead of keeping the previous provider's
+// value; a nil resolution keeps all seven stored keys.
+func TestSyncSessionBeads_ProviderProjectionClearsMissingFields(t *testing.T) {
+	for _, tc := range providerProjectionCases(t) {
+		t.Run(tc.name, func(t *testing.T) {
+			got := syncProviderProjection(t, tc.stored, tc.resolved)
+			for _, k := range providerProjectionKeys {
+				if got[k] != tc.want[k] {
+					t.Errorf("%s = %q after sync, want %q", k, got[k], tc.want[k])
+				}
+			}
+			if tc.family != "" {
+				if family := session.ProviderFamilyFromMetadata(got, ""); family != tc.family {
+					t.Errorf("provider family = %q after sync, want %q", family, tc.family)
+				}
+			}
+		})
+	}
+}
+
 func TestSyncSessionBeadsWithSnapshot_RefreshesMissingNamedSessionFromStore(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
@@ -7431,6 +7496,109 @@ func TestReapStaleSessionBeads_HonorsRecentWakeOnCreatingBead(t *testing.T) {
 	got := reapStaleSessionBeads(testCity, store, testSeatWork(testCity, nil, store, nil), sp, nil, nil, &clock.Fake{Time: now}, &stderr)
 	if got != 0 {
 		t.Fatalf("reapStaleSessionBeads() = %d, want 0 (a recent wake must advance the reap boundary off the 10m-old CreatedAt)\nstderr: %s", got, stderr.String())
+	}
+}
+
+// TestReapStaleSessionBeads_HonorsRecentPendingCreateStart prevents an
+// in-progress create on an old session bead from being reaped against its
+// original CreatedAt instead of the current create attempt's grace boundary.
+func TestReapStaleSessionBeads_HonorsRecentPendingCreateStart(t *testing.T) {
+	testCity := t.TempDir()
+	store := beads.NewMemStore()
+	sp := runtime.NewFake()
+	created, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker-1",
+			"state":        "creating",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Simulate a long-lived claimless row whose create attempt began only 20s
+	// ago, exercising the reaper's one-minute creating-state grace branch.
+	now := created.CreatedAt.Add(10 * time.Minute)
+	recentCreate := now.Add(-20 * time.Second).UTC().Format(time.RFC3339)
+	if err := store.SetMetadata(created.ID, "pending_create_started_at", recentCreate); err != nil {
+		t.Fatalf("SetMetadata(pending_create_started_at): %v", err)
+	}
+
+	var stderr bytes.Buffer
+	got := reapStaleSessionBeads(testCity, store, testSeatWork(testCity, nil, store, nil), sp, nil, nil, &clock.Fake{Time: now}, &stderr)
+	if got != 0 {
+		t.Fatalf("reapStaleSessionBeads() = %d, want 0 (the create attempt is within its one-minute grace)\nstderr: %s", got, stderr.String())
+	}
+	open, err := loadSessionBeads(store)
+	if err != nil {
+		t.Fatalf("loadSessionBeads: %v", err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("open beads = %d, want 1", len(open))
+	}
+}
+
+func TestReapStaleSessionBeads_ReapsWhenPendingCreateStartIsStaleOrInvalid(t *testing.T) {
+	tests := []struct {
+		name   string
+		marker func(time.Time) string
+	}{
+		{
+			name: "older than CreatedAt",
+			marker: func(createdAt time.Time) string {
+				return createdAt.Add(-time.Minute).UTC().Format(time.RFC3339)
+			},
+		},
+		{
+			name: "malformed",
+			marker: func(time.Time) string {
+				return "not-a-timestamp"
+			},
+		},
+		{
+			name: "newer than CreatedAt but outside grace",
+			marker: func(createdAt time.Time) string {
+				return createdAt.Add(8 * time.Minute).UTC().Format(time.RFC3339)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testCity := t.TempDir()
+			store := beads.NewMemStore()
+			sp := runtime.NewFake()
+			created, err := store.Create(beads.Bead{
+				Title:  "worker",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name": "worker-1",
+					"state":        "creating",
+				},
+			})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			if err := store.SetMetadata(created.ID, "pending_create_started_at", tt.marker(created.CreatedAt)); err != nil {
+				t.Fatalf("SetMetadata(pending_create_started_at): %v", err)
+			}
+
+			now := created.CreatedAt.Add(10 * time.Minute)
+			var stderr bytes.Buffer
+			got := reapStaleSessionBeads(testCity, store, testSeatWork(testCity, nil, store, nil), sp, nil, nil, &clock.Fake{Time: now}, &stderr)
+			if got != 1 {
+				t.Fatalf("reapStaleSessionBeads() = %d, want 1 (the effective start boundary is past grace)\nstderr: %s", got, stderr.String())
+			}
+			open, err := loadSessionBeads(store)
+			if err != nil {
+				t.Fatalf("loadSessionBeads: %v", err)
+			}
+			if len(open) != 0 {
+				t.Fatalf("open beads = %d, want 0", len(open))
+			}
+		})
 	}
 }
 

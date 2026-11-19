@@ -12,7 +12,7 @@ import (
 )
 
 // ProgramStatusFixtures supplies the sessions the RUNTIME-CONTRACT-017 cases
-// (PS-001…PS-015) read, for a provider implementing
+// (PS-001…PS-016) read, for a provider implementing
 // [runtime.ProgramStatusProvider]. Each fixture starts a session whose agent
 // pane runs the scripted OSC 7501 emitter (package
 // runtimetest/osc7501emitter/emit) under the given city switch mode,
@@ -35,6 +35,13 @@ type ProgramStatusFixtures struct {
 	// Held starts a session as Armed does, its capture armed declaring the
 	// mid-turn hold (runtime.ProgramStatusArm.HoldMidTurn).
 	Held func(t *testing.T, mode runtime.ProgramStatusMode, script ...string) ProgramStatusSession
+	// Nudged starts a session as Armed does, with startup nudge nudge
+	// (runtime.Config.Nudge), its start opting the startup ladder into
+	// deciding with the record when decide is true
+	// (runtime.ProgramStatusArm.DecideStartup): its program reports script,
+	// and the capture has published it, before the start's startup ladder
+	// begins. Typed into the program, nudge runs as its next step.
+	Nudged func(t *testing.T, mode runtime.ProgramStatusMode, decide bool, nudge string, script ...string) ProgramStatusSession
 }
 
 // ProgramStatusSession is one session a [ProgramStatusFixtures] fixture
@@ -94,7 +101,7 @@ func skipUnchecked(unchecked []string) error {
 	return skip("unchecked: " + strings.Join(unchecked, "; "))
 }
 
-// programStatusCases are PS-001…PS-015 in order.
+// programStatusCases are PS-001…PS-016 in order.
 var programStatusCases = []programStatusCase{
 	{"PS-001_SwitchOffReadsUnread", checkPS001},
 	{"PS-002_FirstReportIsValid", checkPS002},
@@ -111,9 +118,10 @@ var programStatusCases = []programStatusCase{
 	{"PS-013_ForeignPipeIsNeverTakenOver", checkPS013},
 	{"PS-014_HealRearmsAndDisarms", checkPS014},
 	{"PS-015_HoldReadIsDeclaredOnAndBounded", checkPS015},
+	{"PS-016_StartupNudgeBehindADialogIsHandedBack", checkPS016},
 }
 
-// RunProgramStatusContract runs the RUNTIME-CONTRACT-017 cases, PS-001…PS-015:
+// RunProgramStatusContract runs the RUNTIME-CONTRACT-017 cases, PS-001…PS-016:
 // a program-status reading is the pane program's own bounded claim, valid
 // only from the pane's own armed incarnation with its reader attached,
 // Unread under the switch off, and never revalidated after a respawn. Heal
@@ -622,9 +630,9 @@ func checkPS013(t *testing.T, f ProgramStatusFixtures) error {
 // PS-014: heal arms a not_armed pane, re-arms one whose pipe closed, leaves
 // a healthy capture alone, and disarms when the switch goes off; each
 // re-armed pane reads valid at its next report. A healthy capture whose
-// mid-turn hold declaration differs from want's has it set (backfilled on a
-// pane armed before its provider declared it) or withdrawn, the capture
-// otherwise untouched.
+// mid-turn hold or interrupt-settle declaration differs from want's has it
+// set (backfilled on a pane armed before its provider declared it) or
+// withdrawn, the capture otherwise untouched.
 func checkPS014(t *testing.T, f ProgramStatusFixtures) error {
 	if f.Armed == nil || f.Unarmed == nil {
 		return skip("needs armed- and unarmed-session fixtures")
@@ -653,6 +661,9 @@ func checkPS014(t *testing.T, f ProgramStatusFixtures) error {
 		return wantSessionNotFound("heal of a missing session", missing)
 	}
 	if err := checkHoldDeclarationHeal(t, f); err != nil {
+		return err
+	}
+	if err := checkSettleDeclarationHeal(t, f); err != nil {
 		return err
 	}
 
@@ -770,6 +781,117 @@ func checkPS015(t *testing.T, f ProgramStatusFixtures) error {
 		}
 	}
 	return nil
+}
+
+// startupNudgeStep is the startup nudge PS-016 starts with: typed into the
+// program, it reports a turn start, so the record shows whether it was typed.
+const startupNudgeStep = "report state=working"
+
+// startupNudgeWait bounds how long PS-016 waits for a typed nudge's report.
+const startupNudgeWait = 10 * time.Second
+
+// PS-016: under the switch on, a start opting the startup ladder into the
+// record ([runtime.ProgramStatusArm.DecideStartup]) whose program reports a
+// dialog (a live blocked root) through its whole startup ladder types no
+// nudge, succeeds, and hands the nudge back once
+// ([runtime.TakeStartupNudgeHandback]) for its caller to queue (design §10.2
+// row A20); such a start whose program is at an input boundary types its
+// nudge, which the program's turn start confirms, and hands nothing back. A
+// start without the opt-in decides as under off: its nudge is typed into the
+// dialog and nothing is handed back.
+func checkPS016(t *testing.T, f ProgramStatusFixtures) error {
+	if f.Nudged == nil {
+		return skip("needs a nudged-start fixture")
+	}
+	if err := checkUndecidedStartupNudge(t, f); err != nil {
+		return err
+	}
+	s := f.Nudged(t, runtime.ProgramStatusOn, true, startupNudgeStep, "report state=blocked:kind=permission")
+	nudge, ok := runtime.TakeStartupNudgeHandback(s.Provider, s.Name)
+	if !ok || nudge != startupNudgeStep {
+		return fmt.Errorf("blocked start: handback %q (%v), want the startup nudge %q", nudge, ok, startupNudgeStep)
+	}
+	if again, ok := runtime.TakeStartupNudgeHandback(s.Provider, s.Name); ok {
+		return fmt.Errorf("blocked start: handback %q taken twice", again)
+	}
+	if _, err := readValid(s, "blocked start, after the ladder", runtime.ProgramBlocked); err != nil {
+		return fmt.Errorf("%w: the nudge was typed into the dialog", err)
+	}
+	s = f.Nudged(t, runtime.ProgramStatusOn, true, startupNudgeStep, "report state=idle")
+	if nudge, ok := runtime.TakeStartupNudgeHandback(s.Provider, s.Name); ok {
+		return fmt.Errorf("idle start: handback %q, want none", nudge)
+	}
+	return awaitTypedStartupNudge(s, "idle start")
+}
+
+// checkUndecidedStartupNudge is PS-016's opt-in half: under the switch on, a
+// start that does not opt the startup ladder into the record decides it as
+// under off, so a dialog the program reports holds nothing: the nudge is
+// typed (it runs as the program's next step, a turn start) and nothing is
+// handed back.
+func checkUndecidedStartupNudge(t *testing.T, f ProgramStatusFixtures) error {
+	s := f.Nudged(t, runtime.ProgramStatusOn, false, startupNudgeStep, "report state=blocked:kind=permission")
+	if nudge, ok := runtime.TakeStartupNudgeHandback(s.Provider, s.Name); ok {
+		return fmt.Errorf("undecided blocked start: handback %q, want none: the start did not opt into the record", nudge)
+	}
+	return awaitTypedStartupNudge(s, "undecided blocked start")
+}
+
+// awaitTypedStartupNudge waits, up to startupNudgeWait, for s's record to
+// show the turn start a typed startup nudge reports.
+func awaitTypedStartupNudge(s ProgramStatusSession, label string) error {
+	deadline := time.Now().Add(startupNudgeWait)
+	for {
+		r, err := read(s)
+		if err != nil {
+			return fmt.Errorf("%s: %w", label, err)
+		}
+		if r.Running() {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%s: reading %+v after %s, want the typed nudge's turn start", label, r, startupNudgeWait)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// checkSettleDeclarationHeal is PS-014's settle half: a healthy capture
+// armed without the interrupt-settle declaration
+// ([runtime.ProgramStatusArm.DecideSettle]) has it backfilled when want
+// declares it, is left alone once it matches, and has it withdrawn when want
+// stops declaring it; each change shows on the next reading
+// ([runtime.ProgramStatus.SettleDeclared]), which keeps reading valid, and
+// the hold declaration is left as want has it.
+func checkSettleDeclarationHeal(t *testing.T, f ProgramStatusFixtures) error {
+	a := f.Armed(t, runtime.ProgramStatusOn, "report state=working")
+	settling := runtime.ProgramStatusArm{Capture: true, DecideSettle: true}
+	declared := func(label string, want bool) error {
+		r, err := readValid(a, label, runtime.ProgramWorking)
+		if err != nil {
+			return err
+		}
+		if r.SettleDeclared != want || r.HoldDeclared {
+			return fmt.Errorf("%s: reading %+v, want settle declared %v and no hold", label, r, want)
+		}
+		return nil
+	}
+	if err := declared("armed without the settle", false); err != nil {
+		return err
+	}
+	if err := heal(a, "settle backfill", settling, runtime.ProgramCaptureDeclared); err != nil {
+		return err
+	}
+	if err := declared("settle backfilled", true); err != nil {
+		return err
+	}
+	if err := heal(a, "settle backfilled, converged", settling, runtime.ProgramCaptureUnchanged); err != nil {
+		return err
+	}
+	if err := heal(a, "settle withdrawal", captureAll, runtime.ProgramCaptureDeclared); err != nil {
+		return err
+	}
+	return declared("settle withdrawn", false)
 }
 
 // checkHoldDeclarationHeal is PS-014's hold half: a healthy capture armed

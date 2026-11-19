@@ -22,6 +22,7 @@ type SessionRuntimeResolver func(info sessionpkg.Info, sessionKind string, metad
 // FactoryConfig constructs worker-owned session handles and catalogs without
 // leaking session.Manager setup into higher layers.
 type FactoryConfig struct {
+	// Store is the sessions store; nil, or a zero class handle, is none.
 	Store    beads.Store
 	Provider runtime.Provider
 	// CityPath is the city whose runtime leases the manager's starts and
@@ -90,6 +91,11 @@ type Factory struct {
 // NewFactory constructs a Factory backed by a session.Manager configured for
 // the caller's city/runtime context.
 func NewFactory(cfg FactoryConfig) (*Factory, error) {
+	if beads.IsNilStore(cfg.Store) {
+		// A zero class handle boxed into Store is non-nil and panics on its
+		// first call: every nil check below must see it as no store.
+		cfg.Store = nil
+	}
 	opts := make([]sessionpkg.ManagerOption, 0, 5)
 	if cfg.CityPath != "" || cfg.ResolveTransport != nil {
 		opts = append(opts, sessionpkg.WithCityPath(cfg.CityPath))

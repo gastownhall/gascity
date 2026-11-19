@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/coordclass"
 )
@@ -69,19 +70,43 @@ func (c engineCity) migrate(t *testing.T) (infraMigrationReport, string) {
 func isInfra(b beads.Bead) bool { return coordclass.Classify(b) != coordclass.ClassWork }
 
 // assertNotLossy proves a converged city carried everything: the binding
-// holds exactly the source's infrastructure rows, every field the copy
-// carries equal, every within-infra edge with its type and payload and no
-// other; the retained-source backup records every infrastructure row with
-// every edge touching it, cross-store edges and payloads included; and the
-// work store holds its work rows and nothing else.
+// holds exactly the source's infrastructure rows plus one S3b gate per open
+// blocks edge onto unfinished work (D9), every field the copy carries equal
+// and each boundary edge recorded on its row, every within-infra edge with
+// its type and payload, each external: reference, each owner's edge onto its
+// gate, and no other; the retained-source backup records every
+// infrastructure row with every edge touching it, cross-store edges and
+// payloads included; and the work store holds its work rows and nothing
+// else, with no edge onto a moved row re-added.
 func (c engineCity) assertNotLossy(t *testing.T) {
 	t.Helper()
 	infraIDs := map[string]bool{}
 	want := map[string]beads.Bead{}
+	work := map[string]beads.Bead{}
 	for _, b := range c.rows {
 		if isInfra(b) {
 			infraIDs[b.ID] = true
 			want[b.ID] = b
+		} else {
+			work[b.ID] = b
+		}
+	}
+	// boundary: rows with an edge out of the slice, which always carry a
+	// record; inbound: rows only edges from work reach, which carry one
+	// unless a re-copy from the backup (which holds no such edge) wrote them.
+	gated := map[[2]string]bool{}
+	boundary, inbound := map[string]bool{}, map[string]bool{}
+	for _, d := range c.deps {
+		if !infraIDs[d.IssueID] && infraIDs[d.DependsOnID] {
+			inbound[d.DependsOnID] = true
+		}
+		if !infraIDs[d.IssueID] || infraIDs[d.DependsOnID] {
+			continue
+		}
+		boundary[d.IssueID] = true
+		w, isWork := work[d.DependsOnID]
+		if isWork && d.Type == "blocks" && want[d.IssueID].Status != "closed" && !beads.DependencySatisfied(w.Status, beads.ReadinessWorkOutcome(w.Metadata)) {
+			gated[[2]string{d.IssueID, d.DependsOnID}] = true
 		}
 	}
 	binding, err := openInfraBindingReadOnly(c.target)
@@ -93,24 +118,48 @@ func (c engineCity) assertNotLossy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(held) != len(want) {
-		t.Fatalf("the binding holds %d rows, want the %d infrastructure rows", len(held), len(want))
+	if len(gated) == 0 {
+		t.Fatal("the fixture has no gated edge, so the gate checks below prove nothing")
 	}
+	if len(held) != len(want)+len(gated) {
+		t.Fatalf("the binding holds %d rows, want the %d infrastructure rows and %d gates", len(held), len(want), len(gated))
+	}
+	gateOf := map[string]string{} // owner -> gate
 	for _, got := range held {
 		w, ok := want[got.ID]
 		if !ok {
-			t.Fatalf("the binding holds %s, which is not an infrastructure row of the source", got.ID)
+			key := [2]string{got.Metadata[beadmeta.CrossStoreGateOwnerMetadataKey], got.Metadata[beadmeta.CrossStoreBlockerMetadataKey]}
+			if !gated[key] {
+				t.Fatalf("the binding holds %s, which is neither an infrastructure row of the source nor a planned gate", got.ID)
+			}
+			delete(gated, key)
+			gateOf[key[0]] = got.ID
+			continue
 		}
-		if diff := beadCopyDifference(w, got); diff != "" {
+		recorded := got.Metadata[beadmeta.MigratedCrossEdgesMetadataKey] != ""
+		if recorded != boundary[got.ID] && (!recorded || !inbound[got.ID]) {
+			t.Fatalf("row %s carries a cross-edge record = %v, want %v", got.ID, recorded, boundary[got.ID])
+		}
+		stripped := got
+		stripped.Metadata = beads.StringMap{}
+		for k, v := range got.Metadata {
+			if k != beadmeta.MigratedCrossEdgesMetadataKey {
+				stripped.Metadata[k] = v
+			}
+		}
+		if diff := beadCopyDifference(w, stripped); diff != "" {
 			t.Fatalf("row %s differs in the binding: %s", got.ID, diff)
 		}
 	}
 	reader := binding.(beads.DepMetadataReader)
 	wantEdges := map[[2]string]string{}
 	for _, d := range c.deps {
-		if infraIDs[d.IssueID] && infraIDs[d.DependsOnID] {
+		if infraIDs[d.IssueID] && (infraIDs[d.DependsOnID] || strings.HasPrefix(d.DependsOnID, "external:")) {
 			wantEdges[[2]string{d.IssueID, d.DependsOnID}] = d.Type
 		}
+	}
+	for owner, gate := range gateOf {
+		wantEdges[[2]string{owner, gate}] = "blocks"
 	}
 	gotEdges := 0
 	for id := range want {
@@ -136,7 +185,7 @@ func (c engineCity) assertNotLossy(t *testing.T) {
 		}
 	}
 	if gotEdges != len(wantEdges) {
-		t.Fatalf("the binding holds %d within-infra edges, want %d", gotEdges, len(wantEdges))
+		t.Fatalf("the binding holds %d carried edges, want %d", gotEdges, len(wantEdges))
 	}
 
 	backup, present, err := readInfraRetainedBackup(c.target)
@@ -198,37 +247,45 @@ func (c engineCity) assertNotLossy(t *testing.T) {
 		t.Fatalf("the work store holds %d rows after the clear, want its %d work rows", len(left), len(c.rows)-len(want))
 	}
 
-	// Every cross-store edge from a work bead into a moved row is back in
-	// the work store after the clear, unless it was a blocking edge the
-	// binding's copy already satisfies, which the clear releases. A resumed
-	// clear that forgot a row an earlier run removed would leave it out.
-	kept := 0
+	// No edge from a work bead onto a moved row is in the work store after
+	// the clear: it is never re-added (D9), and the backup above records it.
+	crossing := 0
 	for _, d := range c.deps {
 		if infraIDs[d.IssueID] || !infraIDs[d.DependsOnID] {
 			continue
 		}
-		target := want[d.DependsOnID]
-		released := beads.IsReadyBlockingDependencyType(d.Type) && beads.DependencySatisfied(target.Status, beads.ReadinessWorkOutcome(target.Metadata))
+		crossing++
 		deps, err := c.source.DepList(d.IssueID, "down")
 		if err != nil {
 			t.Fatal(err)
 		}
-		held := false
 		for _, got := range deps {
-			if got.DependsOnID == d.DependsOnID && got.Type == d.Type {
-				held = true
+			if got.DependsOnID == d.DependsOnID {
+				t.Fatalf("the cross-store edge %s -[%s]-> %s is in the work store after the clear", d.IssueID, d.Type, d.DependsOnID)
 			}
 		}
-		if held == released {
-			t.Fatalf("the cross-store edge %s -[%s]-> %s is held=%v after the clear, want held=%v (released only when the binding satisfies it)", d.IssueID, d.Type, d.DependsOnID, held, !released)
-		}
-		if held {
-			kept++
-		}
 	}
-	if kept == 0 {
-		t.Fatal("the fixture has no kept cross-store edge, so the check above proves nothing")
+	if crossing == 0 {
+		t.Fatal("the fixture has no cross-store edge, so the check above proves nothing")
 	}
+}
+
+// plannedInfraCopy is the plan the migration copies source by: its edges,
+// their payloads and the cross-boundary decisions (D9).
+func plannedInfraCopy(t *testing.T, source beads.Store) infraCopyPlan {
+	t.Helper()
+	rows, all, err := readInfraSnapshotRows(source, coordclass.CurrentGeneration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := infraSourceEdgePayloadRefusal(source, rows, infraRowIDs(all))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := planInfraCityBoundary(t.TempDir(), nil, &plan, all, false); err != nil {
+		t.Fatal(err)
+	}
+	return plan
 }
 
 func backupEdgeKeys(edges []infraBackupEdge, key func(infraBackupEdge) string) []string {
@@ -643,7 +700,7 @@ func TestVerifyInfraCopyNamesARowTheCopyInvented(t *testing.T) {
 	_ = closeBeadStoreHandle(binding)
 	// The work store as it was before the clear: the fixture is deterministic.
 	restored := newMCShapedInfraCity(t, 60).source()
-	_, err = verifyInfraCopy(func() (beads.Store, error) { return openInfraDestination(city.target) }, restored, nil)
+	_, _, err = verifyInfraCopy(func() (beads.Store, error) { return openInfraDestination(city.target) }, restored, plannedInfraCopy(t, restored))
 	if err == nil || !strings.Contains(err.Error(), "mc-invented") {
 		t.Fatalf("verifyInfraCopy = %v, want a refusal naming mc-invented", err)
 	}

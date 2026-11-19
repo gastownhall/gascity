@@ -5,6 +5,7 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -12,9 +13,10 @@ import (
 // TestRootStoreRefIsNeverMappedToAStoreWithoutAResidenceProbe is the design
 // §2.1 pin: gc.root_store_ref is a run's SCOPE, never its location. On a split
 // city every graph bead lives in the binding whatever its scope, so a reader
-// that turns the key into a store (workflowStoreByRef) must first probe the
-// graph binding (workflowGraphStoreInfo) in the same function. A new reader
-// that maps the key straight to a store fails here.
+// that turns the key into a store (workflowStoreByRef, or workflowLegNamed
+// over the workflow legs) must first probe the graph binding
+// (workflowGraphLeg) in the same function. A new reader that maps the key
+// straight to a store fails here.
 func TestRootStoreRefIsNeverMappedToAStoreWithoutAResidenceProbe(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	if err != nil {
@@ -43,17 +45,17 @@ func TestRootStoreRefIsNeverMappedToAStoreWithoutAResidenceProbe(t *testing.T) {
 					return true
 				}
 				switch callName(call) {
-				case "workflowGraphStoreInfo":
+				case "workflowGraphLeg":
 					if probeAt == token.NoPos {
 						probeAt = call.Pos()
 					}
-				case "workflowStoreByRef":
-					if len(call.Args) < 2 || !mentions(call.Args[1], "RootStoreRefMetadataKey") {
+				case "workflowStoreByRef", "workflowLegNamed":
+					if !slices.ContainsFunc(call.Args, func(arg ast.Expr) bool { return mentions(arg, "RootStoreRefMetadataKey") }) {
 						return true
 					}
 					checked++
 					if probeAt == token.NoPos || probeAt > call.Pos() {
-						t.Errorf("%s: %s maps gc.root_store_ref to a store without first probing the graph binding (workflowGraphStoreInfo); the key is scope, never location",
+						t.Errorf("%s: %s maps gc.root_store_ref to a store without first probing the graph binding (workflowGraphLeg); the key is scope, never location",
 							fset.Position(call.Pos()), fn.Name.Name)
 					}
 				}
@@ -62,7 +64,7 @@ func TestRootStoreRefIsNeverMappedToAStoreWithoutAResidenceProbe(t *testing.T) {
 		}
 	}
 	if checked == 0 {
-		t.Fatal("found no reader mapping gc.root_store_ref to a store; the guard is checking nothing (was workflowStoreByRef renamed?)")
+		t.Fatal("found no reader mapping gc.root_store_ref to a store; the guard is checking nothing (were workflowStoreByRef and workflowLegNamed renamed?)")
 	}
 }
 
