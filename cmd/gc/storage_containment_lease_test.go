@@ -5,6 +5,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -65,7 +66,11 @@ func rewriteInfraManifestInPlace(t *testing.T, target infraBindingTarget) {
 // work-store List call classifyInfraContainmentGap makes, the report
 // carries the manifest's stamp from BEFORE that call, not after. Mutant 13
 // ("basis taken after the read") moves the capture past the read and this
-// test catches it directly, by comparing the two possible answers.
+// test catches it directly, by comparing the two possible answers. The
+// capture is a step of its own in confirmInfraContainment, ahead of the
+// whole of checkInfraContainment, so the same order also covers the
+// manifest read: checkInfraContainment has no point between that read and
+// this List where the capture could move without being rewritten into it.
 func TestConfirmInfraContainmentCapturesTheBasisBeforeTheRead(t *testing.T) {
 	cityPath, _, source, target := convergedInfraCity(t)
 
@@ -630,11 +635,12 @@ func TestContainmentLeaseRejectsNonDefinitiveOrBasislessReports(t *testing.T) {
 // is asserted at its true captured value, not the fixed wrong one each of
 // mutants b1-b5 forces (an empty marker hash, an empty work-store string,
 // "absent" regardless of a real cleared note, an empty database stamp, an
-// empty classifier). A dev build's classifier also carries
-// classifierBasisNonce, so two different nonces produce two different
-// classifier strings (kills b8_nonce_dropped, which stops the nonce from
-// ever reaching the string).
+// empty classifier). The classifier of a build with no commit stamp also
+// carries classifierBasisNonce, so two different nonces produce two
+// different classifier strings (kills b8_nonce_dropped, which stops the
+// nonce from ever reaching the string).
 func TestContainmentBasisCapturesEveryField(t *testing.T) {
+	setGCBuildIdentity(t, "dev", "unknown", "(devel)")
 	cityPath, _, _, target := convergedInfraCity(t)
 	if err := writeInfraClearedNote(cityPath, infraClearedNote{Binding: target.Binding, Database: target.Database, Complete: true}); err != nil {
 		t.Fatalf("writing the cleared note: %v", err)
@@ -783,8 +789,10 @@ func basisFieldDiff(a, b containmentBasis) []string {
 // does, and the manifest's stamp catches a temp+rename that keeps the same
 // (dev, ino) (b6, already covered by
 // TestConfirmInfraContainmentCapturesTheBasisBeforeTheRead but pinned again
-// here end to end).
+// here end to end). The build has no commit stamp, so the classifier field
+// carries the nonce the last step changes.
 func TestCaptureContainmentBasisFieldSensitivity(t *testing.T) {
+	setGCBuildIdentity(t, "dev", "unknown", "(devel)")
 	cityPath, _, _, target := convergedInfraCity(t)
 	capture := func() containmentBasis {
 		b, err := captureContainmentBasis(cityPath, target)
@@ -1023,26 +1031,189 @@ func TestHandleControllerConnStorageVerdictAfterATransientTick(t *testing.T) {
 	}
 }
 
-// TestClassifierBasisStringAddsNonceForAPseudoVersion is round 2's NIT (n2):
-// a pseudo-version build (go install …@<ref>) has no build identity to
-// compare, the same as a dev or dirty one, so its classifier stamp also
-// carries classifierBasisNonce — even when version and commit are both
-// otherwise ordinary release values.
-func TestClassifierBasisStringAddsNonceForAPseudoVersion(t *testing.T) {
-	prevVersion, prevCommit, prevBuilt := version, commit, versionBuilt
-	t.Cleanup(func() { version, commit, versionBuilt = prevVersion, prevCommit, prevBuilt })
-	version = "1.2.3"
-	commit = "abc1234567"
-	versionBuilt = "v1.2.3-0.20210101000000-abcdef012345"
+// setGCBuildIdentity runs the test as a gc whose normalized version is v,
+// built as built (setGCVersion), from commit stamp c.
+func setGCBuildIdentity(t *testing.T, v, c, built string) {
+	t.Helper()
+	setGCVersion(t, v, built)
+	prev := commit
+	commit = c
+	t.Cleanup(func() { commit = prev })
+}
 
-	prevNonce := classifierBasisNonce
-	t.Cleanup(func() { classifierBasisNonce = prevNonce })
-	classifierBasisNonce = "nonce-pseudo-a"
-	a := classifierBasisString()
-	classifierBasisNonce = "nonce-pseudo-b"
-	b := classifierBasisString()
-	if a == b {
-		t.Fatalf("a pseudo-version build's classifier string did not change with the nonce: %q == %q (n2)", a, b)
+// TestClassifierBasisStringNonceFollowsTheBuildIdentity: a build whose
+// commit stamp names its code — known, at least minAbbrevCommitLen long,
+// from a clean tree, not a Go pseudo-version — gives the same classifier
+// string in every process whatever its version, since an untagged `make
+// build` stamps version=dev beside a clean commit on every Makefile-built
+// fleet. A build with no such identity carries classifierBasisNonce, so no
+// other process's basis ever matches it; the pseudo-version row has an
+// ordinary release version and commit and still gets the nonce.
+func TestClassifierBasisStringNonceFollowsTheBuildIdentity(t *testing.T) {
+	cases := []struct {
+		name                   string
+		version, commit, built string
+		trusted                bool
+	}{
+		{"an untagged make build of a clean commit", "dev", "c91f5744a2", "(devel)", true},
+		{"a release build", "1.2.3", "c91f5744a2", "1.2.3", true},
+		{"a full toolchain revision", "dev", "c91f5744a2b3c4d5e6f708192a3b4c5d6e7f8091", "(devel)", true},
+		{"a dirty tree", "dev", "c91f5744a2" + dirtySuffix, "(devel)", false},
+		{"no commit stamped", "dev", "unknown", "(devel)", false},
+		{"an empty commit stamp", "dev", "", "(devel)", false},
+		{"an abbreviation too short to name a commit", "dev", "c91f57", "(devel)", false},
+		{"a Go pseudo-version", "1.2.3", "abc1234567", "v1.2.3-0.20210101000000-abcdef012345", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			setGCBuildIdentity(t, c.version, c.commit, c.built)
+			prevNonce := classifierBasisNonce
+			t.Cleanup(func() { classifierBasisNonce = prevNonce })
+			classifierBasisNonce = "nonce-a"
+			a := classifierBasisString()
+			classifierBasisNonce = "nonce-b"
+			b := classifierBasisString()
+			if c.trusted && a != b {
+				t.Fatalf("two processes of one clean, known build disagree: %q != %q", a, b)
+			}
+			if !c.trusted && a == b {
+				t.Fatalf("a build with no trustworthy identity matches another process: %q == %q", a, b)
+			}
+		})
+	}
+
+	// Trusting the commit stamp must not make two different commits agree.
+	setGCBuildIdentity(t, "dev", "c91f5744a2", "(devel)")
+	one := classifierBasisString()
+	commit = "d02e6855b3"
+	if other := classifierBasisString(); other == one {
+		t.Fatalf("builds of two different commits share a classifier string: %q", one)
+	}
+}
+
+// convergedInfraCityOfProject is convergedInfraCity for a work store with
+// project id project, so its convergence marker records an identity that a
+// recreated .beads (writeScopeProjectID again) contradicts.
+func convergedInfraCityOfProject(t *testing.T, project string) (cityPath string, cfg *config.City, target infraBindingTarget) {
+	t.Helper()
+	cityPath = t.TempDir()
+	writeScopeProjectID(t, cityPath, project)
+	source := stubInfraMigrationSource(t)
+	mustCreateInfraBead(t, source, beads.Bead{Title: "session", Type: "session", Labels: []string{"gc:session"}})
+	cfg = infraSplitConfig(filepath.Join(cityPath, ".gc", "store"))
+	var log bytes.Buffer
+	if got := migrateInfraClasses(t, cityPath, cfg, &log); got.Outcome != infraMigrationConverged {
+		t.Fatalf("cutover outcome = %v, want converged; log: %s", got.Outcome, log.String())
+	}
+	return cityPath, cfg, mustResolveInfraTarget(t, cityPath, cfg)
+}
+
+// TestStrandRecheckWithdrawsTheLeaseWhenTheWorkStoreIsRecreated is B15 for
+// the lease. A city's .beads is recreated (a new project id) under a live
+// controller. Boot refuses that city as identity-mismatch, but the recheck
+// runs no identity hold of its own, so each tick would otherwise stamp the
+// new identity into its basis and keep serving a fresh, serving, converged
+// lease that matches the files. The tick withdraws the lease instead,
+// prints why once rather than on every tick, and publishes again once the
+// identity agrees with the marker again.
+func TestStrandRecheckWithdrawsTheLeaseWhenTheWorkStoreIsRecreated(t *testing.T) {
+	cityPath, cfg, target := convergedInfraCityOfProject(t, "prj-original")
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, io.Discard)
+	if err != nil {
+		t.Fatalf("the converged city refused: %v", err)
+	}
+	t.Cleanup(func() { _ = routes.close() })
+	publishBootContainmentLease(routes)
+	if routes.lease.Load() == nil {
+		t.Fatal("fixture: the boot verdict published no lease")
+	}
+
+	var stderr bytes.Buffer
+	s := newStrandRecheck(routes, cityPath, events.NewFake(), &stderr, "gc start")
+	if s == nil {
+		t.Fatal("no recheck for a converged city")
+	}
+	s.tick()
+	if routes.lease.Load() == nil {
+		t.Fatal("fixture: a definitive tick on the original work store published no lease")
+	}
+
+	writeScopeProjectID(t, cityPath, "prj-recreated")
+	if boot := confirmInfraConvergence(cityPath, target, "gc start", io.Discard); boot.Outcome != infraMigrationIdentityMismatch {
+		t.Fatalf("fixture: boot's own check of the recreated work store = %v, want %v", boot.Outcome, infraMigrationIdentityMismatch)
+	}
+	for tick := 1; tick <= 2; tick++ {
+		s.tick()
+		if lease := routes.lease.Load(); lease != nil {
+			t.Fatalf("tick %d served a lease for a work store the marker's identity contradicts: outcome=%s serving=%v complete=%v work_store=%s",
+				tick, lease.Outcome, lease.Serving, lease.Complete, lease.Basis.WorkStore)
+		}
+	}
+	const withdrawn = "serves no containment lease"
+	if got := strings.Count(stderr.String(), withdrawn); got != 1 {
+		t.Errorf("two ticks printed the withdrawal %d times, want once:\n%s", got, stderr.String())
+	}
+	for _, want := range []string{"prj-original", "prj-recreated"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("the withdrawal line does not name %q:\n%s", want, stderr.String())
+		}
+	}
+
+	writeScopeProjectID(t, cityPath, "prj-original")
+	s.tick()
+	if routes.lease.Load() == nil {
+		t.Fatal("a definitive tick on the original work store again published no lease")
+	}
+}
+
+// TestCaptureContainmentBasisRefusesAContradictingWorkStoreIdentity pins
+// the capture's own identity check directly: no basis for a work store the
+// marker's recorded identity contradicts, nor for a marker whose identity
+// line will not parse, while a legacy marker, which records no identity,
+// contradicts nothing, as it does for boot's hold.
+func TestCaptureContainmentBasisRefusesAContradictingWorkStoreIdentity(t *testing.T) {
+	cityPath, _, target := convergedInfraCityOfProject(t, "prj-original")
+	if _, err := captureContainmentBasis(cityPath, target); err != nil {
+		t.Fatalf("fixture: the original work store's capture failed: %v", err)
+	}
+
+	writeScopeProjectID(t, cityPath, "prj-recreated")
+	basis, err := captureContainmentBasis(cityPath, target)
+	if err == nil || !basis.empty() {
+		t.Fatalf("capturing a recreated work store = (%+v, %v), want an empty basis and an error", basis, err)
+	}
+	for _, want := range []string{target.MarkerPath(), "prj-original", "prj-recreated"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the capture error %q does not name %q", err, want)
+		}
+	}
+
+	data, err := os.ReadFile(target.MarkerPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacy []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, workStoreIdentityLinePrefix) {
+			legacy = append(legacy, line)
+		}
+	}
+	if len(legacy) == len(strings.Split(string(data), "\n")) {
+		t.Fatalf("fixture: the marker records no work-store line to remove:\n%s", data)
+	}
+	legacyMarker := strings.Join(legacy, "\n")
+	if err := os.WriteFile(target.MarkerPath(), []byte(legacyMarker), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := captureContainmentBasis(cityPath, target); err != nil {
+		t.Fatalf("a legacy marker, which records no work-store identity, failed the capture: %v", err)
+	}
+
+	if err := os.WriteFile(target.MarkerPath(), []byte(workStoreIdentityLinePrefix+"project=%zz\n"+legacyMarker), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if basis, err := captureContainmentBasis(cityPath, target); err == nil || !basis.empty() {
+		t.Fatalf("capturing a marker whose work-store line will not parse = (%+v, %v), want an empty basis and an error", basis, err)
 	}
 }
 
@@ -1104,7 +1275,9 @@ func TestLegacyMarkerBackfillPublishesNoBootLease(t *testing.T) {
 // SHOULD A, reviewer probe R6: a definitive tick whose basis capture failed
 // gets no lease from newContainmentLease (nil), and publishLease must store
 // that nil rather than silently leave an earlier, now possibly wrong,
-// converged lease being served.
+// converged lease being served. The tick must be definitive (its stranded
+// event says so), or the standing-fault branch would withdraw the lease and
+// leave publishLease untested; and it says why it serves none.
 func TestStrandRecheckWithdrawsStaleLeaseWhenTheBasisCaptureFails(t *testing.T) {
 	cityPath, cfg, source, target := convergedInfraCity(t)
 	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, io.Discard)
@@ -1113,7 +1286,9 @@ func TestStrandRecheckWithdrawsStaleLeaseWhenTheBasisCaptureFails(t *testing.T) 
 	}
 	t.Cleanup(func() { _ = routes.close() })
 
-	s := newStrandRecheck(routes, cityPath, events.NewFake(), io.Discard, "gc start")
+	rec := events.NewFake()
+	var stderr bytes.Buffer
+	s := newStrandRecheck(routes, cityPath, rec, &stderr, "gc start")
 	if s == nil {
 		t.Fatal("no recheck for a converged city")
 	}
@@ -1138,5 +1313,11 @@ func TestStrandRecheckWithdrawsStaleLeaseWhenTheBasisCaptureFails(t *testing.T) 
 	s.tick()
 	if lease := routes.lease.Load(); lease != nil {
 		t.Fatalf("a definitive tick whose basis capture failed still served a stale lease: %+v (SHOULD A)", lease)
+	}
+	if len(rec.Events) != 1 || rec.Events[0].Type != events.StorageBindingStranded {
+		t.Fatalf("the second tick recorded %+v, want exactly one %s: the tick was not definitive", rec.Events, events.StorageBindingStranded)
+	}
+	if !strings.Contains(stderr.String(), "serves no containment lease") || !strings.Contains(stderr.String(), target.MarkerPath()) {
+		t.Errorf("the tick did not say why it serves no lease:\n%s", stderr.String())
 	}
 }

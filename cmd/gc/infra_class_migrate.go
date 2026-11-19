@@ -470,11 +470,10 @@ type infraMigrationReport struct {
 	// CheckedAt is when this report's check began, set once by
 	// storageBootGate for the boot verdict (before checkInfraClassConvergence
 	// or checkBornSplitDiscipline runs) and by strandRecheck.tick for every
-	// later one. It is the one true age basis a containment lease publishes
-	// with: computing a lease's age from the publish call's own time.Now()
-	// instead, as the boot path once did, counts the whole rest of boot
-	// between the check and CityRuntime.run's publish as zero age it never
-	// was (design review SHOULD 2).
+	// later one. A containment lease ages from it (containmentLease.TakenAt),
+	// never from when the lease is published: the boot lease is published
+	// only once CityRuntime.run starts, and the rest of boot in between is
+	// age the verdict really has.
 	CheckedAt time.Time
 	// BindingProvenEmpty is positive evidence, read from the binding itself,
 	// that the binding holds nothing a revert would abandon. Its zero value is
@@ -498,19 +497,26 @@ type infraMigrationReport struct {
 	// basis is the containment basis confirmInfraContainment captures first,
 	// before any of its own reads — the stat tuple (or content hash) of
 	// everything a later read in this check could possibly depend on, taken
-	// before any of them has run. It is the zero value only on a report this
-	// function never produced at all (not configured, genesis, an identity
-	// mismatch from the caller's own marker read) or on a capture failure;
-	// it is populated on every outcome confirmInfraContainment itself
-	// returns, uncheckable included. Basis presence is therefore NOT what
-	// gates publishing a lease for an uncheckable outcome — Outcome itself
-	// is (leaseableOutcome, checked by newContainmentLease) — and
-	// storage_containment_lease.go's empty() check exists only to catch a
-	// failed capture. It is lowercase, unlike every other field here, on
-	// purpose: it is bookkeeping for one consumer (the strand recheck's
-	// lease publish), not part of the evidence this struct exists to carry
-	// to an operator or an event.
+	// before any of them has run. It is empty on a report
+	// confirmInfraContainment never produced (not configured, genesis, an
+	// identity mismatch from the caller's own hold), on a failed capture
+	// (basisErr), and on the boot that back-filled a legacy marker
+	// (confirmInfraConvergence); otherwise it is populated on every outcome
+	// confirmInfraContainment returns, uncheckable included. Basis presence
+	// is therefore NOT what gates publishing a lease for an uncheckable
+	// outcome — Outcome itself is (leaseableOutcome, checked by
+	// newContainmentLease). basis and basisErr are lowercase, unlike every
+	// other field here, on purpose: they are bookkeeping for the containment
+	// lease (storage_containment_lease.go), not part of the evidence this
+	// struct exists to carry to an operator or an event.
 	basis containmentBasis
+	// basisErr is why the capture left basis empty: a basis file that would
+	// not read, or a marker whose recorded work-store identity contradicts
+	// this city's (captureContainmentBasis). Nil whenever the capture
+	// succeeded. The strand recheck prints it once per change
+	// (strandRecheck.noteBasisCapture), since a report without a basis
+	// publishes no lease and one-shot processes then take the full check.
+	basisErr error
 }
 
 // serving reports whether this outcome leaves the binding safe to route reads
@@ -1960,8 +1966,7 @@ func confirmInfraConvergenceWith(cityPath string, target infraBindingTarget, log
 			// all boots. Rather than re-stamp around a write already committed,
 			// drop the basis: newContainmentLease then skips publishing this once,
 			// and the very next check captures a basis after the backfill it will
-			// not race again (design review NIT: "publish after the back-fill, or
-			// not at all").
+			// not race again.
 			report.basis = containmentBasis{}
 		}
 	}
@@ -1999,32 +2004,39 @@ func markerWorkStoreIdentityHold(cityPath string, target infraBindingTarget, log
 }
 
 // confirmInfraContainment is confirmInfraConvergence's containment re-check,
-// once the marker's work-store identity is known not to contradict this city.
+// with its containment basis captured ahead of every read the check makes.
+// Boot and the split preflight run it once markerWorkStoreIdentityHold has
+// found that the marker's work-store identity does not contradict this city;
+// the strand recheck runs it without that hold, and its basis capture is
+// what keeps the lease it publishes off a contradicting work store
+// (captureContainmentBasis).
+//
+// The capture is a step of its own, before checkInfraContainment reads
+// anything — the manifest (which may itself read the marker, for a legacy
+// manifest's bound), the work store, the binding or the cleared note — so a
+// basis can never stamp a manifest or marker rewritten mid-check and then
+// agree with a one-shot's later re-check that read the rewritten one too
+// (design doc §4.1 F2). A failed capture does not fail the check: the basis
+// is purely advisory (the lease it feeds is never consulted for a refusal,
+// design doc §1), so the report keeps the error (basisErr) beside an empty
+// basis and is simply not published as a lease. newContainmentLease also
+// rejects any Outcome but Converged, Genesis, Retained or Stranded outright,
+// so the basis an uncheckable report keeps is never published either way.
 func confirmInfraContainment(cityPath string, target infraBindingTarget, logPrefix string, stderr io.Writer) infraMigrationReport {
-	// Captured first, before readInfraCopyManifestRecord (which itself may
-	// read the marker, for a legacy manifest's bound) and before
-	// classifyInfraContainmentGap's work-store read: this is the earliest
-	// point in this function, so a basis taken here can never stamp a
-	// manifest or marker already rewritten mid-check. A basis taken any
-	// later risks exactly that race: it would stamp a manifest rewritten
-	// between this function's reads, and then agree with a one-shot's later
-	// re-check that read the rewritten one too (design doc §4.1 F2). A
-	// failure capturing it does not fail this check: the basis is purely
-	// advisory (the lease it feeds is never consulted for a refusal, design
-	// doc §1), so a report with no basis simply is not published as one —
-	// and newContainmentLease also rejects any Outcome but Converged,
-	// Genesis, Retained or Stranded outright, so a captured-but-uncheckable
-	// basis (every return below but the last three) is never published
-	// either way.
 	basis, basisErr := captureContainmentBasis(cityPath, target)
-	if basisErr != nil {
-		basis = containmentBasis{}
-	}
+	report := checkInfraContainment(cityPath, target, logPrefix, stderr)
+	report.basis, report.basisErr = basis, basisErr
+	return report
+}
+
+// checkInfraContainment is the containment re-check itself: it reads the
+// copy manifest, classifies the work store's infrastructure rows against the
+// binding (classifyInfraContainmentGap) and reads the cleared note, and
+// reports what they show. confirmInfraContainment is its only caller.
+func checkInfraContainment(cityPath string, target infraBindingTarget, logPrefix string, stderr io.Writer) infraMigrationReport {
 	manifest, recorded, err := readInfraCopyManifestRecord(target)
 	if err != nil {
-		report := reportUncheckableConvergence(target, logPrefix, stderr, err)
-		report.basis = basis
-		return report
+		return reportUncheckableConvergence(target, logPrefix, stderr, err)
 	}
 	if !recorded {
 		// No manifest, no check. Every absence from the binding would have to be
@@ -2037,33 +2049,21 @@ func confirmInfraContainment(cityPath string, target infraBindingTarget, logPref
 			Outcome: infraMigrationUncheckable,
 			Fault: fmt.Errorf("%s converged before %s was recorded, so stranded-write detection is off for this city; re-converge the binding to restore the check",
 				target.Database, target.ManifestPath()),
-			basis: basis,
 		}
 	}
 	gap, err := classifyInfraContainmentGap(cityPath, target, manifest)
 	if err != nil {
-		// The basis was already captured above, at the top of this function,
-		// and stays valid regardless: it stamps the manifest and marker, not
-		// the work-store read. It is kept on the report even though this
-		// outcome (uncheckable) is never published as a lease
-		// (newContainmentLease rejects any non-leaseable Outcome outright) —
-		// the basis-emptiness check on the publishing side exists to catch a
-		// failed CAPTURE, not a failed check.
-		report := reportUncheckableConvergence(target, logPrefix, stderr, err)
-		report.basis = basis
-		return report
+		return reportUncheckableConvergence(target, logPrefix, stderr, err)
 	}
 	if len(gap.Stranded) == 0 {
 		note, notePresent, err := readInfraClearedNote(cityPath)
 		if err != nil {
-			report := reportUncheckableConvergence(target, logPrefix, stderr, err)
-			report.basis = basis
-			return report
+			return reportUncheckableConvergence(target, logPrefix, stderr, err)
 		}
 		if len(gap.Retained) > 0 || (notePresent && !note.Complete) {
-			return infraMigrationReport{Outcome: infraMigrationRetained, Retained: gap.Retained, Unrecorded: gap.Unrecorded, ProvenBeads: manifest.Len(), LostCrossEdges: note.LostCrossEdges, basis: basis}
+			return infraMigrationReport{Outcome: infraMigrationRetained, Retained: gap.Retained, Unrecorded: gap.Unrecorded, ProvenBeads: manifest.Len(), LostCrossEdges: note.LostCrossEdges}
 		}
-		return infraMigrationReport{Outcome: infraMigrationConverged, ProvenBeads: manifest.Len(), LostCrossEdges: note.LostCrossEdges, basis: basis}
+		return infraMigrationReport{Outcome: infraMigrationConverged, ProvenBeads: manifest.Len(), LostCrossEdges: note.LostCrossEdges}
 	}
 	// The removed-since count is context for reading the strand, not a second
 	// alarm: on a city whose wisp GC has run it is large and entirely expected,
@@ -2079,14 +2079,11 @@ func confirmInfraContainment(cityPath string, target infraBindingTarget, logPref
 		logPrefix, len(gap.Stranded), target.Database, infraStrandedIDList(gap.Stranded), residue, infraStrandedAdviceFor(gap.Stranded, gap.HeldDifferent, gap.PresumedReused, gap.Declassifiable))
 	note, notePresent, err := readInfraClearedNote(cityPath)
 	if err != nil {
-		report := reportUncheckableConvergence(target, logPrefix, stderr, err)
-		report.basis = basis
-		return report
+		return reportUncheckableConvergence(target, logPrefix, stderr, err)
 	}
 	return infraMigrationReport{
 		Outcome: infraMigrationStranded, Stranded: gap.Stranded, HeldDifferent: gap.HeldDifferent, PresumedReused: gap.PresumedReused, Declassifiable: gap.Declassifiable,
 		Retained: gap.Retained, Unrecorded: gap.Unrecorded, ClearUnfinished: notePresent && !note.Complete, LostCrossEdges: note.LostCrossEdges,
-		basis: basis,
 	}
 }
 
