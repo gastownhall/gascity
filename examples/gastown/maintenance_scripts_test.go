@@ -4582,6 +4582,33 @@ func TestReaperWorkflowRootCensusChecksTheCandidatesItFinds(t *testing.T) {
 	}
 }
 
+func TestReaperCountsEarlyMatchInLargeCloseResponse(t *testing.T) {
+	// An early match must survive grep exiting before its producer finishes.
+	f := newWorkflowRootCensusFixture(t, "issue", "root-a:close root-b:close")
+	response := filepath.Join(t.TempDir(), "response.json")
+	data := `[{"id":"root-a"},{"id":"` + strings.Repeat("x", 1<<20) + `"},{"id":"root-b"}]`
+	if err := os.WriteFile(response, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f.env["BD_CLOSE_JSON_FILE"] = response
+	bd := filepath.Join(f.binDir, "bd")
+	if err := os.Rename(bd, bd+"-original"); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, bd, `#!/bin/sh
+if [ "$1" = close ]; then
+  cat "$BD_CLOSE_JSON_FILE"
+  exit 0
+fi
+exec "$(dirname "$0")/bd-original" "$@"
+`)
+	f.runReaper(t)
+	gcText := f.read(t, f.gcLog)
+	if strings.Contains(gcText, "ESCALATION") || !strings.Contains(gcText, "workflow_roots:2,") {
+		t.Fatalf("successful closes reported as failures:\n%s", gcText)
+	}
+}
+
 func TestReaperWorkflowRootCensusKeepsItsClosesWhenTheRunBudgetRunsOut(t *testing.T) {
 	for _, kind := range []string{"wisp", "issue"} {
 		t.Run(kind, func(t *testing.T) {
