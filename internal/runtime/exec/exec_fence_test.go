@@ -22,8 +22,14 @@ func boxScript(t *testing.T, read, guarded string, separable bool) (script, call
 	dir := t.TempDir()
 	calls = filepath.Join(dir, "calls")
 	caps := `"proc.exec","input-fence"`
+	meta := ""
 	if separable {
 		caps += `,"proc.provision"`
+		// A pack that un-welds start keeps the launch identity gc writes
+		// after the launch (RPP-PROVISION-005).
+		meta = `  set-meta) cat > "` + dir + `/meta.$3" ;;
+  get-meta) cat "` + dir + `/meta.$3" 2>/dev/null; true ;;
+`
 	}
 	script = writeScript(t, dir, `
 op="$1"
@@ -39,7 +45,7 @@ case "$op" in
     esac
     ;;
   start|provision|stop) cat > /dev/null ;;
-  *) exit 2 ;;
+`+meta+`  *) exit 2 ;;
 esac
 `)
 	return script, calls
@@ -570,6 +576,8 @@ esac
 case "$1" in
   protocol) echo '{"version":0,"capabilities":["proc.exec","proc.provision"]}' ;;
   exec) cat >> `+calls+`; echo >> `+calls+` ;;
+  set-meta) cat > "`+dir+`/meta.$3" ;;
+  get-meta) cat "`+dir+`/meta.$3" 2>/dev/null; true ;;
   *) exit 2 ;;
 esac
 `)

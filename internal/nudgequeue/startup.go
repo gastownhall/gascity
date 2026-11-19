@@ -55,13 +55,20 @@ func IsStartupTurn(item Item) bool {
 }
 
 // HasLiveStartupTurn reports whether items, read from a queue at now, hold a
-// startup turn of session sessionID that is still to be delivered: one not
-// expired, fenced to sessionID or unfenced. A send typed straight into that
+// startup turn of session sessionID that a send made under deliveryKey
+// would reach the agent ahead of: one not expired, fenced to sessionID or
+// unfenced, whether pending or in flight, and not pinned to deliveryKey. A
+// send under the key of the batch a claim pinned a turn to (DeliveryBatch)
+// is the queue's delivery of that turn, so the turn does not hold it; an
+// empty deliveryKey matches no turn. Any other send typed straight into the
 // session would reach its agent ahead of the turn, so the sender queues it
 // instead, where the claim's barrier delivers the turn first.
-func HasLiveStartupTurn(sessionID string, items []Item, now time.Time) bool {
+func HasLiveStartupTurn(sessionID, deliveryKey string, items []Item, now time.Time) bool {
 	for _, item := range items {
 		if !IsStartupTurn(item) || expiredAt(item, now) {
+			continue
+		}
+		if deliveryKey != "" && item.DeliveryBatch == deliveryKey {
 			continue
 		}
 		if item.SessionID == "" || item.SessionID == sessionID {

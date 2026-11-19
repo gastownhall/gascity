@@ -1919,6 +1919,16 @@ func requestWorkerSiteNudgeWake(target nudgeTarget, store beads.Store) (session.
 	return outcome, nil
 }
 
+// nudgeTargetRuntimeHandle is the runtime handle factory builds for target's
+// session runtime, by its session name. A target with a session row gets the
+// session's startup-turn barrier (worker.Factory.SessionRuntimeHandle): its
+// nudges wait behind a first turn the session's queue still holds, the
+// queue's own delivery of that turn aside, as the session manager's sends do.
+func nudgeTargetRuntimeHandle(factory *worker.Factory, target nudgeTarget) (worker.Handle, error) {
+	return factory.SessionRuntimeHandle(target.sessionID, target.sessionName,
+		strings.TrimSpace(target.providerFamily()), strings.TrimSpace(target.sessionTransport()), target.processNames())
+}
+
 func workerHandleForNudgeTarget(target nudgeTarget, store beads.Store, sp runtime.Provider) (worker.Handle, error) {
 	programShadowDecideForTarget(target)
 	if target.sessionName != "" {
@@ -1940,16 +1950,11 @@ func workerHandleForNudgeTarget(target nudgeTarget, store beads.Store, sp runtim
 				return nil, err
 			}
 		}
-		handle, err := runtimeWorkerHandleWithConfig(
-			target.cityPath,
-			store,
-			sp,
-			target.cfg,
-			target.sessionName,
-			strings.TrimSpace(target.providerFamily()),
-			strings.TrimSpace(target.sessionTransport()),
-			target.processNames(),
-		)
+		factory, err := workerFactoryWithConfig(target.cityPath, store, sp, target.cfg)
+		var handle worker.Handle
+		if err == nil {
+			handle, err = nudgeTargetRuntimeHandle(factory, target)
+		}
 		if err == nil {
 			return handle, nil
 		}

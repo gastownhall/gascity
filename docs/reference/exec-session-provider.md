@@ -217,7 +217,7 @@ first:
 
 | Rule | What the queue does |
 |---|---|
-| Identity | Right after the launch, the orchestrator writes the launch's `GC_RUNTIME_EPOCH`, `GC_CONTINUATION_EPOCH` and then `GC_INSTANCE_TOKEN` with `set-meta`, all within one operation timeout. A key the start config does not carry keeps the box's value. A failed write is read back with `get-meta`. If the box already holds the value, as it does for a key `provision` seeded, the writes go on. Otherwise the launch fails, and the start or relaunch with it, so no first turn is queued for a launch the queue could not tell apart: a failed start is torn down like any failed launch, and a failed relaunch falls back to a restart. Nothing is removed. The queue reads the keys back with `get-meta` to tell which launch runs now. |
+| Identity | Right after the launch, the orchestrator writes the launch's `GC_RUNTIME_EPOCH`, `GC_CONTINUATION_EPOCH` and then `GC_INSTANCE_TOKEN` with `set-meta`, all within one operation timeout. A key the start config does not carry keeps the box's value. A failed write is read back with `get-meta`. If the box already holds the value, as it does for a key `provision` seeded, the writes go on. Otherwise the launch fails, and the start or relaunch with it, so no first turn is queued for a launch the queue could not tell apart: a failed start is torn down like any failed launch, and a failed relaunch falls back to a restart. A `set-meta` that exits 2 (no metadata store) is not read back and fails the launch the same way. Nothing is removed. The queue reads the keys back with `get-meta` to tell which launch runs now. |
 | Delivery | The turn goes only to the launch that produced it, alone, and before every other queued item of the session. The send is fenced to that launch when the pack declares `input-fence`. |
 | Replacement | When another launch replaces the session first, the old turn is dropped (`stale-launch`) and the new launch's own turn goes instead. |
 | Ordering | Reminders queued earlier, and messages sent to the session while its turn is still queued, wait behind the turn. |
@@ -228,9 +228,11 @@ and `remove-meta` for every box. For such a script, exit 2 from one of them
 is a missing store, not an unknown op: conformance fails the metadata
 requirements on it, as it does under `observe.v1`, and `RPP-PROVISION-005`
 checks that `get-meta` answers the identity keys `set-meta` stored after the
-launch. The orchestrator reports such an exit 2 as a missing store too. A
-session whose runtime keeps no metadata has its first turn queued as a
-plain submit, without the rules above.
+launch. The orchestrator reports such an exit 2 as a missing store too, and
+from `set-meta` it fails the launch, as the Identity rule says. A script
+without a metadata store therefore cannot start an agent on this path: its
+first turn could be bound to no launch, so messages sent to the session
+would reach the agent ahead of it.
 
 The queue reads the answer as the [typed input
 outcomes](#typed-input-outcomes-input-outcome) say: delivered and
@@ -270,17 +272,25 @@ Known limits of the first turn on the un-welded path:
   can still answer the replaced launch's token, possibly with the new
   launch's counters, so the window above lasts until then.
 - A send that may only reach a live session (the conversation lane's
-  message op, a mail notice, a sling nudge) is reported undelivered while
-  the first turn waits in the queue, but not while the queue is delivering
-  it, so it can reach the agent alongside the turn.
-- If the queue cannot be read, such a send is reported undelivered as if a
-  first turn were waiting.
-- In a city without the conversation lane, the warm-bind claim nudge and
-  the drain reminder are typed with the provider's `nudge` directly and do
-  not wait behind a queued first turn.
-- A script that un-welds start but keeps no metadata, against the
-  metadata requirement above, gets no binding: its first turn is queued as
-  a plain submit, and the rules in the table do not apply to it.
+  message op, a mail or sling notice) is reported undelivered until the
+  first turn is delivered, and the answer does not say that a first turn
+  is waiting.
+- If the queue or the session's record cannot be read, such a send is
+  reported undelivered as if a first turn were waiting.
+- When the conversation lane does not deliver messages
+  (`[ops] authoritative` does not list `message`), and for a session no
+  lane serves, the orchestrator's reminders are typed with the provider's
+  `nudge` directly and do not wait behind a queued first turn: the claim,
+  continuation and execution backstops, the warm-bind claim nudge, the
+  drain reminder and the work ladder's direct delivery. A backstop's first
+  reminder comes 90 seconds after it first sees the seat's claim, so a
+  claim reminder can reach the agent before a first turn that is still
+  waiting out `ready_delay_ms` and the starvation bypass.
+- A script whose `get-meta` exits 2 although its `set-meta` stored the
+  launch's identity, against the metadata requirement above, gets no
+  binding: its first turn is queued as a plain submit, the rules in the
+  table do not apply to it, and a message sent to the session can reach
+  the agent ahead of it.
 
 **The connection primitive (slim RPP).** `exec` is the connection op
 (`RPP-CONN-001`). It is optional; conformance checks output and command exit

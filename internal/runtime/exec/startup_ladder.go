@@ -94,11 +94,12 @@ var launchIdentityKeys = []string{runtime.RuntimeEpochEnv, runtime.ContinuationE
 // launch fails: a launch reported up under an identity get-meta cannot
 // answer would have its first turn held, and the session's sends behind
 // it, until the turn expired, and one under its predecessor's would have
-// the turn misjudged. Nothing is removed, so the box keeps the token it held
-// for the failed start's cleanup. A runtime that keeps no metadata
-// (runtime.ErrMetaUnsupported) has no identity to publish: nothing is
-// written, nothing fails, and its turn is queued unbound
-// (session.StartupTurnLaunchID).
+// the turn misjudged. A runtime that keeps no metadata
+// (runtime.ErrMetaUnsupported) fails the launch too, as a pack that
+// un-welds start must keep the launch identity (RPP-PROVISION-005): its
+// turn could be bound to no launch, so it would be queued as a plain
+// submit, which the session's sends overtake. Nothing is removed, so the
+// box keeps the token it held for the failed start's cleanup.
 func (p *Provider) publishLaunchIdentity(ctx context.Context, name string, cfg runtime.Config) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.timeout)
 	defer cancel()
@@ -107,11 +108,7 @@ func (p *Provider) publishLaunchIdentity(ctx context.Context, name string, cfg r
 		if !ok || value == "" {
 			continue
 		}
-		err := p.writeLaunchIdentityKey(ctx, name, key, value)
-		if errors.Is(err, runtime.ErrMetaUnsupported) {
-			return nil
-		}
-		if err != nil {
+		if err := p.writeLaunchIdentityKey(ctx, name, key, value); err != nil {
 			return err
 		}
 	}
@@ -120,12 +117,17 @@ func (p *Provider) publishLaunchIdentity(ctx context.Context, name string, cfg r
 
 // writeLaunchIdentityKey writes key's value for name with set-meta, under
 // publishLaunchIdentity's deadline. A failed write stands when get-meta
-// reads the key back holding value; an unsupported one is returned as it is
-// (runtime.ErrMetaUnsupported). The error names the key, never the value.
+// reads the key back holding value. An unsupported one
+// (runtime.ErrMetaUnsupported) is never read back: the box keeps no
+// metadata, so the error wraps it and names the requirement. The error
+// names the key, never the value.
 func (p *Provider) writeLaunchIdentityKey(ctx context.Context, name, key, value string) error {
 	_, err := p.runWithContext(ctx, p.timeout, []byte(value), "set-meta", name, key)
-	if err == nil || errors.Is(err, runtime.ErrMetaUnsupported) {
-		return err
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, runtime.ErrMetaUnsupported):
+		return fmt.Errorf("exec provider: session %q: publishing the launch's %s: a pack that un-welds start (proc.provision) must keep the launch identity in its metadata store (RPP-PROVISION-005): %w", name, key, err)
 	}
 	held, readErr := p.runWithContext(ctx, p.timeout, nil, "get-meta", name, key)
 	switch {

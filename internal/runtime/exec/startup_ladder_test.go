@@ -347,22 +347,47 @@ func TestFailedIdentityWriteFailsTheRelaunch(t *testing.T) {
 	}
 }
 
-// Kills a launch failed over a store the pack does not keep: a pack that
-// un-welds start but answers its metadata ops exit 2, against the metadata
-// requirement (runtime.ErrMetaUnsupported), has no identity to publish, so
-// its start still succeeds and hands the first turn back, which its caller
-// queues unbound (session.StartupTurnLaunchID).
-func TestLaunchWithoutAMetadataStoreHandsTheTurnBack(t *testing.T) {
-	script, dir := observePack(t, launchPackCaps, launchPackOps())
-	sp := NewSeamBacked(script)
-	if err := sp.Start(t.Context(), "s", identityConfig("tok-x", 1, 1)); err != nil {
-		t.Fatalf("Start = %v, want nil: a pack without a metadata store has its turn queued unbound", err)
-	}
-	if ran := opsRan(t, dir); !slices.Contains(ran, "set-meta") {
-		t.Fatalf("ops = %v: no set-meta ran, so the fixture does not model the missing store", ran)
-	}
-	if turn, ok := runtime.TakeStartupNudgeHandback(sp, "s"); !ok || turn.Text != "first turn" {
-		t.Fatalf("handback = %+v, %v; want the first turn", turn, ok)
+// Kills a launch reported up over a store the pack does not keep: a pack
+// that un-welds start but answers its metadata ops exit 2, against the
+// metadata requirement (runtime.ErrMetaUnsupported), had its start succeed
+// and hand the first turn back. Its caller could bind that turn to no
+// launch, so it queued it as a plain submit, which the session's sends
+// overtook. The launch fails by either launch path: Start returns an error
+// that wraps runtime.ErrMetaUnsupported and names the key, after the first
+// refused write and with no get-meta read-back, the start's teardown stops
+// the box, and nothing is handed back.
+func TestLaunchWithoutAMetadataStoreFails(t *testing.T) {
+	for _, pack := range unweldedIdentityPacks() {
+		t.Run(pack.label, func(t *testing.T) {
+			ops := make(map[string]string, len(pack.ops))
+			for op, body := range pack.ops {
+				if op != "set-meta" && op != "get-meta" {
+					ops[op] = body
+				}
+			}
+			script, dir := observePack(t, pack.caps, ops)
+			sp := NewSeamBacked(script)
+			err := sp.Start(t.Context(), "s", identityConfig("tok-x", 1, 1))
+			if !errors.Is(err, runtime.ErrMetaUnsupported) {
+				t.Fatalf("Start = %v, want the launch failed on the missing metadata store (runtime.ErrMetaUnsupported)", err)
+			}
+			if !strings.Contains(err.Error(), runtime.RuntimeEpochEnv) {
+				t.Errorf("Start = %v, want the error to name %s, the first identity key the store refused", err, runtime.RuntimeEpochEnv)
+			}
+			ran := opsRan(t, dir)
+			writes := 0
+			for _, op := range ran {
+				if op == "set-meta" {
+					writes++
+				}
+			}
+			if writes != 1 || slices.Contains(ran, "get-meta") || !slices.Contains(ran, "stop") {
+				t.Fatalf("ops = %v; want the one set-meta the store refused, no read-back, and the failed launch's teardown stopping the box", ran)
+			}
+			if turn, ok := runtime.TakeStartupNudgeHandback(sp, "s"); ok {
+				t.Fatalf("handback %q after the failed start: its caller would queue it bound to no launch, and the session's sends would overtake it", turn.Text)
+			}
+		})
 	}
 }
 

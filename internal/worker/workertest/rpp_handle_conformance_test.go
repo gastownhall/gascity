@@ -451,16 +451,21 @@ const rppFirstTurn = "start on the release checklist"
 // golden in launch mode has no idle boundary, so the queued turn waits it.
 const rppFirstTurnReadyDelay = 300
 
+// rppFirstTurnBatch is the delivery key WC-RPP-004's claim pins the first
+// turn to and sends it under, as the queue's claim does.
+const rppFirstTurnBatch = "nudge-batch-first-turn"
+
 // firstTurnQueuedResult evaluates WC-RPP-004: a session started through a
 // SessionHandle on the golden reference in launch mode (proc.provision with
 // proc.launch, no exec) starts without typing its first turn, which waits in
 // the session's queue once as the user's submit, not due before
 // ready_delay_ms past the start, bound to the launch the runtime reads as
 // running, so a claim supplying that read (LiveLaunch) takes it alone. Sent
-// as the queue sends it, through the handle and fenced by the pre-send
-// read, it is typed once (the delivered half); a pack refusing it with
-// each refusal word answers with that typed refusal and types nothing, so
-// the queue keeps it for a retry (the refusal half).
+// as the queue sends it, through the handle under the key of the batch the
+// claim pinned it to and fenced by the pre-send read, it is typed once (the
+// delivered half); a pack refusing it with each refusal word answers with
+// that typed refusal and types nothing, so the queue keeps it for a retry
+// (the refusal half).
 func firstTurnQueuedResult(t *testing.T) Result {
 	t.Helper()
 	for _, word := range []runtime.InputOutcome{
@@ -556,11 +561,13 @@ func firstTurnQueuedResult(t *testing.T) Result {
 			return Fail(rppHandleProfile, RequirementRPPFirstTurnQueued,
 				fmt.Sprintf("%s: the pre-send fence read = %s, %v; want the turn's launch, or the queue releases it on every pass", label, fence, ok))
 		}
-		// The queue claims the turn before it sends it: in flight, it no
-		// longer holds the live-only send that carries it.
+		// The queue claims the turn before it sends it, pinned to the batch
+		// it delivers under: in flight, the turn still holds every send but
+		// the one under that key, which carries it.
 		if err := nudgequeue.WithState(cityPath, func(state *nudgequeue.State) error {
 			state.Pending = slices.DeleteFunc(state.Pending, func(item nudgequeue.Item) bool { return item.ID == turn.ID })
 			claimed := turn
+			claimed.DeliveryBatch = rppFirstTurnBatch
 			claimed.LeaseUntil = time.Now().Add(time.Minute)
 			state.InFlight = append(state.InFlight, claimed)
 			return nil
@@ -572,6 +579,7 @@ func firstTurnQueuedResult(t *testing.T) Result {
 			Delivery:      worker.NudgeDeliveryDefault,
 			Source:        "queue",
 			Wake:          worker.NudgeWakeLiveOnly,
+			DeliveryKey:   rppFirstTurnBatch,
 			Fence:         fence,
 			AllowUnfenced: true,
 		})

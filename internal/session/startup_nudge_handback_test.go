@@ -824,14 +824,21 @@ func TestSendToARunningSessionWaitsBehindItsQueuedStartupTurn(t *testing.T) {
 	}
 }
 
+// claimedStartupTurnBatch is the delivery key moveStartupTurns pins the
+// turns it claims to.
+const claimedStartupTurnBatch = "nudge-batch-startup-turn"
+
 // moveStartupTurns moves the startup turns queued under cityPath into the
-// in-flight bucket, as the queue's claim of them does.
+// in-flight bucket, pinned to claimedStartupTurnBatch, as the queue's claim
+// of them does.
 func moveStartupTurns(t *testing.T, cityPath string) {
 	t.Helper()
 	if err := nudgequeue.WithState(cityPath, func(state *nudgequeue.State) error {
 		var kept []nudgequeue.Item
 		for _, item := range state.Pending {
 			if nudgequeue.IsStartupTurn(item) {
+				item.DeliveryBatch = claimedStartupTurnBatch
+				item.ClaimedAt = time.Now().UTC()
 				item.LeaseUntil = time.Now().Add(time.Minute)
 				state.InFlight = append(state.InFlight, item)
 				continue
@@ -856,8 +863,8 @@ func (idleHandbackProvider) SnapshotIdle(string) (bool, error) { return true, ni
 // startup turn the queue still holds for it: SendLiveOnly and a wait-idle
 // TryWaitIdleNudgeLiveOnly report it undelivered and type nothing, so the
 // lane waits and the mail and sling paths fall back to the queue, behind the
-// turn. Once the queue has claimed the turn (in flight: the queue's own
-// delivery of it, and of the items behind it), live-only sends type again.
+// turn. TestSendsWaitBehindAStartupTurnTheQueueIsDelivering covers the turn
+// once the queue has claimed it.
 func TestLiveOnlySendsWaitBehindAPendingStartupTurn(t *testing.T) {
 	stubSubmitPoller(t)
 	sp := &idleHandbackProvider{&handbackStartProvider{Fake: runtime.NewFake(), nudge: handbackStartNudge}}
@@ -870,47 +877,100 @@ func TestLiveOnlySendsWaitBehindAPendingStartupTurn(t *testing.T) {
 	if items := queuedHandbacks(t, mgr, info.ID); len(items) != 1 || !nudgequeue.IsStartupTurn(items[0]) {
 		t.Fatalf("queued %+v; want the create's startup turn", items)
 	}
+	wantLiveOnlyHeld(context.Background(), t, mgr, sp.Fake, info.ID, "behind a pending turn")
+}
+
+// wantLiveOnlyHeld fails unless every live-only delivery to session id made
+// under ctx (SendLiveOnly, SendImmediateLiveOnly, TryWaitIdleNudgeLiveOnly)
+// reports undelivered with no error and types nothing into sp; what names
+// the case.
+func wantLiveOnlyHeld(ctx context.Context, t *testing.T, mgr *Manager, sp *runtime.Fake, id, what string) {
+	t.Helper()
+	before := len(sp.SnapshotCalls())
+	if sent, err := mgr.SendLiveOnly(ctx, id, "lane message", nil); err != nil || sent {
+		t.Fatalf("%s: SendLiveOnly = %v, %v; want undelivered", what, sent, err)
+	}
+	if sent, err := mgr.SendImmediateLiveOnly(ctx, id, "lane steer", nil); err != nil || sent {
+		t.Fatalf("%s: SendImmediateLiveOnly = %v, %v; want undelivered", what, sent, err)
+	}
+	if waited, err := mgr.TryWaitIdleNudgeLiveOnly(ctx, id, "mail", "mail notice", nil); err != nil || waited {
+		t.Fatalf("%s: TryWaitIdleNudgeLiveOnly = %v, %v; want undelivered", what, waited, err)
+	}
+	if typed := typedLive(sp.SnapshotCalls()[before:]); len(typed) != 0 {
+		t.Fatalf("%s: live-only sends typed %q ahead of the startup turn", what, typed)
+	}
+}
+
+// Kills a send that types into a running session while the queue delivers
+// its startup turn: once the claim moved the turn in flight, anything typed
+// before the queue's own send of it lands reaches the agent first. A live-only
+// delivery, unkeyed or under another delivery's key (the conversation lane's
+// own), reports undelivered; a Send queues its text behind the turn and a
+// wake-capable wait-idle nudge reports undelivered, for its caller to queue;
+// none types. Only the queue's delivery of the turn itself, made under the
+// delivery key the claim pinned it to, goes through, live-only and wait-idle
+// alike.
+func TestSendsWaitBehindAStartupTurnTheQueueIsDelivering(t *testing.T) {
+	stubSubmitPoller(t)
+	sp := &idleHandbackProvider{&handbackStartProvider{Fake: runtime.NewFake(), nudge: handbackStartNudge}}
+	mgr := newTestManager(t, beads.NewMemStore(), sp)
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.WaitForIdleErrors[info.SessionName] = nil // an idle claude session: the wait-idle nudge would type
 	city, err := mgr.CityDir()
 	if err != nil {
 		t.Fatal(err)
 	}
-	liveOnly := func(what string) {
-		t.Helper()
-		before := len(sp.SnapshotCalls())
-		sent, err := mgr.SendLiveOnly(context.Background(), info.ID, "lane message", nil)
-		if err != nil || sent {
-			t.Fatalf("%s: SendLiveOnly = %v, %v; want undelivered", what, sent, err)
-		}
-		waited, err := mgr.TryWaitIdleNudgeLiveOnly(context.Background(), info.ID, "mail", "mail notice", nil)
-		if err != nil || waited {
-			t.Fatalf("%s: TryWaitIdleNudgeLiveOnly = %v, %v; want undelivered", what, waited, err)
-		}
-		if typed := typedLive(sp.SnapshotCalls()[before:]); len(typed) != 0 {
-			t.Fatalf("%s: live-only sends typed %q ahead of the startup turn", what, typed)
-		}
-	}
-	liveOnly("behind a pending turn")
-
 	moveStartupTurns(t, city.Path())
+
+	wantLiveOnlyHeld(context.Background(), t, mgr, sp.Fake, info.ID, "unkeyed, with the turn in flight")
+	wantLiveOnlyHeld(runtime.WithNudgeDeliveryKey(context.Background(), "lane:op-1"), t, mgr, sp.Fake, info.ID, "under another delivery's key, with the turn in flight")
+
+	hints := runtime.Config{WorkDir: info.WorkDir}
 	before := len(sp.SnapshotCalls())
-	if sent, err := mgr.SendLiveOnly(context.Background(), info.ID, "queued item", nil); err != nil || !sent {
-		t.Fatalf("SendLiveOnly with the turn in flight = %v, %v; want delivered: the queue's own delivery is not held", sent, err)
+	outcome, err := mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", BuildResumeCommand(info), hints)
+	if err != nil || !outcome.Queued {
+		t.Fatalf("Send with the turn in flight = %+v, %v; want it queued behind the turn", outcome, err)
 	}
-	if waited, err := mgr.TryWaitIdleNudgeLiveOnly(context.Background(), info.ID, "queue", "queued wait", nil); err != nil || !waited {
-		t.Fatalf("TryWaitIdleNudgeLiveOnly with the turn in flight = %v, %v; want delivered", waited, err)
+	b, sessName, err := mgr.sessionBead(info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	delivered, err := mgr.tryWaitIdleNudgeLocked(context.Background(), testActor(mgr, ActorOperator), info.ID, b, deferredNudgeSource, sessName, "reminder", BuildResumeCommand(info), hints)
+	if err != nil || delivered {
+		t.Fatalf("wait-idle nudge with the turn in flight = delivered %v, %v; want undelivered, for its caller to queue", delivered, err)
+	}
+	if typed := typedLive(sp.SnapshotCalls()[before:]); len(typed) != 0 {
+		t.Fatalf("Send and wait-idle nudge typed %q ahead of the turn in flight", typed)
+	}
+	if items := queuedHandbacks(t, mgr, info.ID); len(items) != 1 || items[0].Message != "hello" {
+		t.Fatalf("queued %+v; want the message behind the turn in flight", items)
+	}
+
+	own := runtime.WithNudgeDeliveryKey(context.Background(), claimedStartupTurnBatch)
+	before = len(sp.SnapshotCalls())
+	if sent, err := mgr.SendLiveOnly(own, info.ID, handbackStartNudge, nil); err != nil || !sent {
+		t.Fatalf("the queue's delivery of the turn, SendLiveOnly under its key = %v, %v; want delivered", sent, err)
+	}
+	if waited, err := mgr.TryWaitIdleNudgeLiveOnly(own, info.ID, "queue", handbackStartNudge, nil); err != nil || !waited {
+		t.Fatalf("the queue's delivery of the turn, TryWaitIdleNudgeLiveOnly under its key = %v, %v; want delivered", waited, err)
 	}
 	if typed := typedLive(sp.SnapshotCalls()[before:]); len(typed) != 2 {
-		t.Fatalf("typed %q with the turn in flight; want both live-only sends", typed)
+		t.Fatalf("the queue's delivery of the turn typed %q; want both sends", typed)
 	}
 }
 
 // snapshotOnlyQueue is a deferred-submit queue whose listing must not be
 // used for the startup-turn barrier: its ListForAgent runs the city queue's
-// maintenance (and here fails), while Snapshot is a pure read.
+// maintenance (and here fails), while Snapshot is a pure read that fails
+// with snapshotErr when set.
 type snapshotOnlyQueue struct {
-	state    nudgequeue.State
-	enqueued []nudgequeue.Item
-	listed   int
+	state       nudgequeue.State
+	snapshotErr error
+	enqueued    []nudgequeue.Item
+	listed      int
 }
 
 func (q *snapshotOnlyQueue) EnqueueDeferred(item nudgequeue.Item) error {
@@ -923,20 +983,21 @@ func (q *snapshotOnlyQueue) ListForAgent(string, time.Time) (pending, inFlight, 
 	return nil, nil, nil, errors.New("maintenance lock busy")
 }
 
-func (q *snapshotOnlyQueue) Snapshot() (nudgequeue.State, error) { return q.state, nil }
+func (q *snapshotOnlyQueue) Snapshot() (nudgequeue.State, error) { return q.state, q.snapshotErr }
 
 // Kills a startup-turn barrier read that takes the queue's maintaining
 // listing on every send (the city's file queue runs a maintenance pass, a
 // flock and a state.json write under it, so a busy lock turned a
 // deliverable send into a queued one): the barrier reads the queue's
 // snapshot, never ListForAgent, and finds the turn there under the
-// session's alias as under its id.
+// session's alias, and under an alias it had (the claim reads those too),
+// as under its id.
 func TestStartupTurnBarrierReadsTheQueueSnapshot(t *testing.T) {
 	stubSubmitPoller(t)
 	q := &snapshotOnlyQueue{}
 	sp := runtime.NewFake()
 	mgr := newTestManager(t, beads.NewMemStore(), sp, WithDeferredSubmitQueue(q))
-	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual", "alias": "helper-1"}})
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual", "alias": "helper-1", "alias_history": "helper-0"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -953,11 +1014,92 @@ func TestStartupTurnBarrierReadsTheQueueSnapshot(t *testing.T) {
 	if queued, typed := send("no turn"); queued || len(typed) != 1 {
 		t.Fatalf("Send with no turn queued = queued %v, typed %q; want it typed live: the barrier must not read the failing listing", queued, typed)
 	}
-	q.state.Pending = []nudgequeue.Item{{ID: "turn", Agent: "helper-1", SessionID: info.ID, Message: handbackStartNudge, Source: nudgequeue.SourceSubmit, Reference: nudgequeue.StartupTurnReference("L1")}}
-	if queued, typed := send("behind"); !queued || len(typed) != 0 {
-		t.Fatalf("Send behind a turn queued under the alias = queued %v, typed %q; want it queued", queued, typed)
+	turn := nudgequeue.Item{ID: "turn", SessionID: info.ID, Message: handbackStartNudge, Source: nudgequeue.SourceSubmit, Reference: nudgequeue.StartupTurnReference("L1")}
+	for _, key := range []string{"helper-1", "helper-0"} {
+		turn.Agent = key
+		q.state.Pending = []nudgequeue.Item{turn}
+		if queued, typed := send("behind"); !queued || len(typed) != 0 {
+			t.Fatalf("Send behind a turn queued under %q = queued %v, typed %q; want it queued", key, queued, typed)
+		}
 	}
 	if q.listed != 0 {
 		t.Fatalf("the barrier called ListForAgent %d time(s); want the snapshot alone", q.listed)
+	}
+}
+
+// Kills a startup-turn barrier that fails open when it cannot read the
+// queue: a send typed then can reach the agent ahead of a first turn the
+// queue holds. With a queue whose Snapshot fails, SendLiveOnly,
+// SendImmediateLiveOnly and TryWaitIdleNudgeLiveOnly report undelivered and
+// Send queues its text; nothing is typed.
+func TestStartupTurnBarrierHoldsSendsWhenTheQueueCannotBeRead(t *testing.T) {
+	stubSubmitPoller(t)
+	q := &snapshotOnlyQueue{}
+	sp := &idleHandbackProvider{&handbackStartProvider{Fake: runtime.NewFake()}}
+	mgr := newTestManager(t, beads.NewMemStore(), sp, WithDeferredSubmitQueue(q))
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	sp.WaitForIdleErrors[info.SessionName] = nil // an idle claude session: the wait-idle nudge would type
+	q.snapshotErr = errors.New("reading state.json: input/output error")
+	wantLiveOnlyHeld(context.Background(), t, mgr, sp.Fake, info.ID, "with the queue unreadable")
+	before := len(sp.SnapshotCalls())
+	outcome, err := mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
+	if err != nil || !outcome.Queued {
+		t.Fatalf("Send with the queue unreadable = %+v, %v; want it queued", outcome, err)
+	}
+	if typed := typedLive(sp.SnapshotCalls()[before:]); len(typed) != 0 {
+		t.Fatalf("Send typed %q with the queue unreadable", typed)
+	}
+	if len(q.enqueued) != 1 || q.enqueued[0].Message != "hello" {
+		t.Fatalf("enqueued %+v; want the message queued", q.enqueued)
+	}
+}
+
+// getFailingStore is a store whose Get fails with err.
+type getFailingStore struct {
+	beads.Store
+	err error
+}
+
+func (s getFailingStore) Get(string) (beads.Bead, error) { return beads.Bead{}, s.err }
+
+// Kills a barrier for sends that type into a session's runtime without the
+// Manager (worker.RuntimeHandle: the queue's deliveries, the conversation
+// lane, mail and sling notices to a running session) that differs from the
+// Manager's own: StartupTurnQueued holds a send behind the session's pending
+// or claimed startup turn and passes the queue's delivery of that turn, under
+// the key the claim pinned it to; a row that does not exist holds nothing,
+// and one that cannot be read holds the send.
+func TestStartupTurnQueuedIsTheBarrierForRuntimeOnlySends(t *testing.T) {
+	stubSubmitPoller(t)
+	sp := &handbackStartProvider{Fake: runtime.NewFake(), nudge: handbackStartNudge}
+	mgr := newTestManager(t, beads.NewMemStore(), sp)
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	ctx := context.Background()
+	if !mgr.StartupTurnQueued(ctx, info.ID) {
+		t.Fatal("StartupTurnQueued with the turn pending = false, want true")
+	}
+	city, err := mgr.CityDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	moveStartupTurns(t, city.Path())
+	if !mgr.StartupTurnQueued(ctx, info.ID) {
+		t.Fatal("StartupTurnQueued with the turn in flight, unkeyed = false, want true")
+	}
+	if mgr.StartupTurnQueued(runtime.WithNudgeDeliveryKey(ctx, claimedStartupTurnBatch), info.ID) {
+		t.Fatal("StartupTurnQueued for the queue's delivery of the turn = true, want false")
+	}
+	if mgr.StartupTurnQueued(ctx, "gc-no-such-session") {
+		t.Fatal("StartupTurnQueued for a session with no row = true, want false: no queue item is fenced to it")
+	}
+	unreadable := newTestManager(t, getFailingStore{Store: beads.NewMemStore(), err: errors.New("store unavailable")}, sp)
+	if !unreadable.StartupTurnQueued(ctx, info.ID) {
+		t.Fatal("StartupTurnQueued with the row unreadable = false, want true: an unknown row holds the send")
 	}
 }

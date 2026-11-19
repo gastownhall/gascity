@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -275,6 +276,149 @@ func TestQueueDeliversHandedBackFirstTurnOnceAfterReadiness(t *testing.T) {
 		t.Fatalf("pass after delivery = delivered %v, sent %q; want nothing: the turn is delivered once", delivered, sent)
 	}
 	h.wantQueueEmpty(t)
+}
+
+// Kills a live-only nudge that types into a running session ahead of the
+// first turn its queue still holds: a mail or sling notice, which builds its
+// handle as gc session nudge and the queue's pass do
+// (workerHandleForNudgeTarget, the conversation lane's runtime handle
+// alike), is undelivered and types nothing while the turn waits, so it
+// falls back to the queue behind it. The queue's own pass still delivers the
+// turn through the same handle, under its batch key, and the notice types
+// once the turn is delivered.
+func TestALiveOnlyNudgeWaitsBehindTheQueuedFirstTurn(t *testing.T) {
+	h := newHandbackQueueHarness(t, runtime.StartupNudge{Text: handbackNudge})
+	notice := func(what string) bool {
+		t.Helper()
+		handle, err := workerHandleForNudgeTarget(h.target, h.store, h.fake)
+		if err != nil {
+			t.Fatalf("%s: workerHandleForNudgeTarget: %v", what, err)
+		}
+		before := len(h.fake.SnapshotCalls())
+		result, err := handle.Nudge(context.Background(), sessionActor(session.ActorAgent, h.dir), worker.NudgeRequest{
+			Text: "you have mail", Delivery: worker.NudgeDeliveryDefault, Source: "mail", Wake: worker.NudgeWakeLiveOnly,
+		})
+		if err != nil {
+			t.Fatalf("%s: Nudge: %v", what, err)
+		}
+		var typed []string
+		for _, call := range h.fake.SnapshotCalls()[before:] {
+			if call.Method == "Nudge" || call.Method == "NudgeNow" {
+				typed = append(typed, call.Message)
+			}
+		}
+		if result.Delivered != (len(typed) == 1) {
+			t.Fatalf("%s: Nudge = %+v, typed %q; want it typed exactly when delivered", what, result, typed)
+		}
+		return result.Delivered
+	}
+	if notice("behind the queued first turn") {
+		t.Fatal("a live-only notice typed ahead of the session's queued first turn")
+	}
+	delivered, sent := h.pass(t)
+	if !delivered || len(sent) != 1 || sent[0] != handbackNudge {
+		t.Fatalf("pass = delivered %v, sent %q; want the queue's delivery of the first turn, not held by its own turn", delivered, sent)
+	}
+	h.wantQueueEmpty(t)
+	if !notice("after the first turn") {
+		t.Fatal("a live-only notice was held after the first turn was delivered")
+	}
+}
+
+// laneDeliveryRecorder is a lane executor that records the result of each
+// delivery it makes.
+type laneDeliveryRecorder struct {
+	*conversationLaneExec
+	results *[]opjournal.DeliveryResult
+}
+
+func (e laneDeliveryRecorder) Deliver(ctx context.Context, d opjournal.Delivery) opjournal.DeliveryResult {
+	res := e.conversationLaneExec.Deliver(ctx, d)
+	*e.results = append(*e.results, res)
+	return res
+}
+
+// Kills a conversation-lane message that types ahead of the first turn its
+// session's queue still holds. The lane builds its runtime handle in its own
+// executor (conversationLaneExec.handle), not through
+// workerHandleForNudgeTarget, and a handle built there without the
+// session's id asks no startup-turn barrier. While the turn is pending, and
+// while the queue delivers it (in flight, pinned to its claim's batch key,
+// which the lane's own delivery key never matches), the lane's delivery is
+// a transient NotDelivered and types nothing; once the queue has acked the
+// turn, the lane delivers the message.
+func TestLaneMessageWaitsBehindTheQueuedFirstTurn(t *testing.T) {
+	f := newLaneFixture(t)
+	info := f.rowInfo(t)
+	f.sp.SetStartupNudgeHandbackAt(f.name, runtime.StartupNudge{Text: handbackNudge})
+	if err := queueStartupNudgeHandback(f.dir, f.cfg, runtime.FullFake{Fake: f.sp}, info, f.name, f.token, true, time.Now()); err != nil {
+		t.Fatalf("queueStartupNudgeHandback: %v", err)
+	}
+	pending, _, _, err := listQueuedNudgesForTarget(f.dir, resolveNudgeTargetFromSessionInfo(f.dir, f.cfg, info), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || !nudgequeue.IsStartupTurn(pending[0]) {
+		t.Fatalf("queued %+v; want the session's first turn, bound to its launch", pending)
+	}
+	st := f.laneStore(t)
+	l := f.lane(t, st)
+	op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "please run the tests"))
+	var results []opjournal.DeliveryResult
+	pass := func(when string) opjournal.DeliveryResult {
+		t.Helper()
+		if retry := f.get(t, st, op.ID).RetryAt; retry.After(f.clk.Now()) {
+			f.clk.Advance(retry.Sub(f.clk.Now()) + time.Second)
+		}
+		before := len(results)
+		if _, err := f.pass(context.Background(), t, l, st, func(e *conversationLaneExec) opjournal.Executor {
+			return laneDeliveryRecorder{conversationLaneExec: e, results: &results}
+		}); err != nil {
+			t.Fatalf("%s: Pass: %v", when, err)
+		}
+		if len(results) != before+1 {
+			t.Fatalf("%s: the pass made %d deliveries, want 1", when, len(results)-before)
+		}
+		return results[len(results)-1]
+	}
+	held := func(when string) {
+		t.Helper()
+		res := pass(when)
+		if nd, ok := res.(opjournal.NotDelivered); !ok || !nd.Transient {
+			t.Fatalf("%s: lane delivery = %#v, want a transient NotDelivered behind the first turn", when, res)
+		}
+		if calls := f.nudges(); len(calls) != 0 {
+			t.Fatalf("%s: runtime nudges = %+v, want none: the lane typed ahead of the first turn", when, calls)
+		}
+	}
+	held("with the first turn pending")
+
+	const batch = "nudge-batch-first-turn"
+	if err := nudgequeue.WithState(f.dir, func(state *nudgequeue.State) error {
+		for _, item := range state.Pending {
+			item.DeliveryBatch, item.ClaimedAt, item.LeaseUntil = batch, time.Now().UTC(), time.Now().Add(time.Minute)
+			state.InFlight = append(state.InFlight, item)
+		}
+		state.Pending = nil
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	held("with the queue delivering the first turn")
+
+	if err := nudgequeue.WithState(f.dir, func(state *nudgequeue.State) error {
+		state.InFlight = nil // the queue acked its delivery
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	res := pass("after the first turn")
+	if _, ok := res.(opjournal.Delivered); !ok {
+		t.Fatalf("lane delivery after the first turn = %#v, want delivered", res)
+	}
+	if calls := f.nudges(); len(calls) != 1 || calls[0].Message != "please run the tests" {
+		t.Fatalf("runtime nudges after the first turn = %+v, want the lane's message once", calls)
+	}
 }
 
 // Kills a handed-back first turn that a runtime refusal drops, dead-letters

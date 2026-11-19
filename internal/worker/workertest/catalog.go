@@ -238,7 +238,7 @@ func RPPHandleCatalog() []Requirement {
 		{
 			Code:        RequirementRPPFirstTurnQueued,
 			Group:       "rpp",
-			Description: "On the un-welded launch path (a pack declaring proc.provision and proc.launch), Start never types the first turn: the start succeeds and the turn waits in the session's queue once as the user's submit (nudgequeue.SourceSubmit), not due before ready_delay_ms past the start for a pack without an idle boundary, and bound to the launch runtime.ReadLaunchID reads (nudgequeue.StartupTurnReference), so a claim whose LiveLaunch reads the runtime takes it alone. Sent as the queue sends it, fenced by runtime.ReadInputFence, it is typed once; a pack refusing it (busy, pending_interaction, rejected or not_sent) types nothing and answers the typed refusal, so the queue retries it.",
+			Description: "On the un-welded launch path (a pack declaring proc.provision and proc.launch), Start never types the first turn: the start succeeds and the turn waits in the session's queue once as the user's submit (nudgequeue.SourceSubmit), not due before ready_delay_ms past the start for a pack without an idle boundary, and bound to the launch runtime.ReadLaunchID reads (nudgequeue.StartupTurnReference), so a claim whose LiveLaunch reads the runtime takes it alone. Sent as the queue sends it, under the delivery key of the batch the claim pinned it to and fenced by runtime.ReadInputFence, it is typed once; a pack refusing it (busy, pending_interaction, rejected or not_sent) types nothing and answers the typed refusal, so the queue retries it.",
 		},
 		{
 			Code:        RequirementRPPHostFSTranscriptTurns,
