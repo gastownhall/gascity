@@ -240,3 +240,71 @@ func TestHookClaimLaterCandidateKeepsBudgetAfterEarlierStopGate(t *testing.T) {
 		})
 	}
 }
+
+// TestHookClaimReclaimKeepsItsBudgetAfterEarlierStopGate covers AC-3: with
+// AutoReclaimStaleClaims on, a reclaim-eligible candidate reached after an
+// earlier candidate's stop gate spent its whole budget must get its reclaim
+// and its claim CAS on unexpired budgets of their own, and the reclaimed
+// candidate is handed out. On the shared-context base the spent-budget break
+// before the reclaim stopped the loop before the reclaim ever ran.
+func TestHookClaimReclaimKeepsItsBudgetAfterEarlierStopGate(t *testing.T) {
+	shortenHookClaimBudget(t)
+	f := newHookWorkflowStopFixture(t)
+	failed := f.root("stopped run", "")
+	stranded := f.step("implement", failed.ID, nil)
+	f.closeAs(failed.ID, "fail", nil)
+	live := f.root("live run", "")
+	stale := f.step("retry me", live.ID, nil)
+	staleAssignee := "dead-worker"
+	if err := f.store.Update(stale.ID, beads.UpdateOpts{Assignee: &staleAssignee}); err != nil {
+		t.Fatal(err)
+	}
+	f.served = []string{stranded.ID, stale.ID}
+
+	ops := f.ops()
+	ops.WorkflowStore = func(ctx context.Context, _ string, _ []string, _, _ string) beads.Store {
+		return budgetSpendingStore{Store: f.store, ctx: ctx, slowIDs: map[string]bool{failed.ID: true}}
+	}
+	var reclaimCalls []budgetCtxCall
+	ops.ReclaimStale = func(ctx context.Context, _ string, _ []string, beadID string) (bool, string, error) {
+		reclaimCalls = append(reclaimCalls, budgetCtxCall{beadID: beadID, ctxErr: ctx.Err()})
+		if ctx.Err() != nil {
+			return false, "", ctx.Err()
+		}
+		none := ""
+		if err := f.store.Update(beadID, beads.UpdateOpts{Assignee: &none}); err != nil {
+			return false, "", err
+		}
+		return true, staleAssignee, nil
+	}
+	var casCalls []budgetCtxCall
+	ops.Claim = bdDeadlineClaim(ops.Claim, &casCalls)
+	var emissions hookClaimBudgetEmissions
+	emissions.install(&ops)
+
+	opts := budgetClaimOpts()
+	opts.AutoReclaimStaleClaims = true
+	code, got, stderr := runBudgetClaim(t, opts, ops)
+
+	if code != 0 || got != stale.ID {
+		t.Fatalf("doHookClaim = %d handing out %q, want 0 handing out the reclaimed step %s; claims=%v\nstderr=%s",
+			code, got, stale.ID, f.claims, stderr)
+	}
+	if len(reclaimCalls) != 1 || reclaimCalls[0].beadID != stale.ID {
+		t.Fatalf("reclaim calls = %v, want exactly one on %s", reclaimCalls, stale.ID)
+	}
+	if err := reclaimCalls[0].ctxErr; err != nil {
+		t.Fatalf("reclaim for %s started on a spent context: %v", reclaimCalls[0].beadID, err)
+	}
+	for _, call := range casCalls {
+		if call.ctxErr != nil {
+			t.Fatalf("claim CAS for %s started on a spent context: %v", call.beadID, call.ctxErr)
+		}
+	}
+	if len(emissions.reclaimedStale) != 1 || emissions.reclaimedStale[0] != [3]string{stale.ID, staleAssignee, "worker-1"} {
+		t.Fatalf("reclaimed_stale emissions = %v, want exactly one naming %s reclaimed from %s for worker-1",
+			emissions.reclaimedStale, stale.ID, staleAssignee)
+	}
+	f.wantNeverClaimed(stranded.ID)
+	f.wantClosed(stranded.ID, "skipped")
+}
