@@ -4,7 +4,7 @@
 
 - Deploy bead: ga-29bi5s9a; build: ga-0l533y; review: ga-mqd3k4d.
 - Reviewed commit: 818e37e5ecf071ed48d7247f83e1213ea50ab062 (resolved commit object).
-- Deploy mode: remote; base branch: main; base ref: origin/main; push remote: fork.
+- Deploy mode: remote; base branch: main; base ref: origin/main; push remote: origin.
 - Gate base: 7b5614ac70d1031111f072370536bfd440199b34.
 - Validated merge: bf02bd15b1468ff703c4eb8609d31a2307c9035f; tree: a7f3542486f5370b4cc862b5bfd5857edcd93ef6.
 - Evidence date: 2026-11-19 UTC; retained run: /var/tmp/deploy-ga-29bi5s9a-20261119.dT4uB2Vi.
@@ -165,7 +165,7 @@ Compact execution:
 
 ## Required CI job accounting
 
-ci_required_closure: python3 ci_required_triggers.py /var/tmp/gc-merge-ga-29bi5s9a.VDkOqN 7b5614ac70d1031111f072370536bfd440199b34 818e37e5ecf071ed48d7247f83e1213ea50ab062 fork; rc0; workflow blob fa2c1f1b1466278b2eed8f4288d5a4f8eb3cc612; 6 LEAF jobs need a status
+ci_required_closure: python3 ci_required_triggers.py /var/tmp/gc-merge-ga-29bi5s9a.VDkOqN 7b5614ac70d1031111f072370536bfd440199b34 818e37e5ecf071ed48d7247f83e1213ea50ab062 origin; rc0; workflow blob fa2c1f1b1466278b2eed8f4288d5a4f8eb3cc612; 6 LEAF jobs need a status
 
 | Job | Status | Evidence |
 |-----|--------|----------|
@@ -204,3 +204,7 @@ supplied release criteria and TESTING.md govern.
 The PR must state: post-command --city/--rig selecting another city used to be
 ignored and now exits 1 without executing the script. Put cross-city scope before
 the pack binding, or change directory to the target city.
+
+Publication preflight: origin push dry-run rc0, with all 298 pre-push targets passing.
+Direct origin access supersedes the earlier fork assumption; origin and fork CI closure
+computations are byte-identical. Active staged pre-commit docsync passed.
