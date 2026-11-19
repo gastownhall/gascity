@@ -196,6 +196,18 @@ type AwakeDecision struct {
 	// restart-style cycle so the next wake starts a fresh conversation on
 	// the newly assigned bead.
 	RequiresFreshCycle bool
+	// Standing is true when this wake is standing rather than demand: the
+	// session has no work behind it and is kept awake only by
+	// configuration — a named session with mode "always", a
+	// min_active_sessions floor, a pin, or a continuation reset that
+	// displaced no reason or another standing one. Every other wake is
+	// demand (assigned or routed work, named/routed/work-query demand,
+	// explicit wakes, pending creates, attached or pending terminals, and
+	// any reason added later — the standing allowlist is closed, so a new
+	// reason can never be starved by accident). The per-tick wake budget
+	// starts demand sessions ahead of standing ones (#7680); within each
+	// class the least-recently-woken order is unchanged.
+	Standing bool
 }
 
 // awakeKey selects how computeAwakeSetKeyed keys its decisions and reads the
@@ -264,6 +276,20 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 			}
 		}
 	}
+	// desireNameFlag records a boolean flag for a session name the same way
+	// desireName records a reason, so a demand signal keyed like a desire
+	// reaches every row the desire would.
+	desireNameFlag := func(flags map[string]bool, name string) {
+		if keyBy != awakeKeyBeadID {
+			flags[name] = true
+			return
+		}
+		for _, b := range input.SessionBeads {
+			if b.SessionName == name {
+				flags[b.ID] = true
+			}
+		}
+	}
 	// namedBead is the row a configured named session resolves to. Keyed by
 	// name, that is the first row carrying the resolved session name.
 	namedBead := func(ns AwakeNamedSession) *AwakeSessionBead {
@@ -305,6 +331,17 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 	// compatible wake causes (pending create, named-always, assigned work) may
 	// still reuse the same bead.
 	desired := make(map[string]string) // key → reason
+	// displaced records, for each key the reset-pending pass below
+	// overwrites, the reason it displaced (possibly empty), so the standing
+	// classification can tell a reset that displaced no reason (or a
+	// standing one) from one that displaced a demand reason.
+	displaced := make(map[string]string)
+	// namedDemandByKey records, for each key a named mode "always" entry
+	// desires, whether the identity also has named, routed or work-query
+	// demand: an always identity's Reason is always "named-always", so its
+	// demand signal lives in these flags, not in Reason. A standing wake
+	// requires their absence.
+	namedDemandByKey := make(map[string]bool)
 
 	// Newly created beads that still carry a controller create claim must be
 	// launched at least once, even if the work signal that materialized them
@@ -330,7 +367,19 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 		}
 		switch ns.Mode {
 		case "always":
-			if bead := namedBead(ns); bead != nil {
+			// Demand flags: an always identity with named, routed or
+			// work-query demand is demand, not standing, even though its
+			// Reason below stays "named-always".
+			hasDemand := input.NamedSessionDemand[ns.Identity] || input.NamedSessionRoutedDemand[ns.Identity] || input.NamedSessionWorkQ[ns.Identity]
+			bead := namedBead(ns)
+			if hasDemand {
+				if bead != nil {
+					namedDemandByKey[key(*bead)] = true
+				} else {
+					desireNameFlag(namedDemandByKey, ns.Identity)
+				}
+			}
+			if bead != nil {
 				if !bead.DependencyOnly {
 					desired[key(*bead)] = "named-always"
 				}
@@ -567,6 +616,7 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 		case "pending-create", "explicit-wake":
 			continue
 		default:
+			displaced[key(bead)] = desired[key(bead)]
 			desired[key(bead)] = "reset-pending"
 		}
 	}
@@ -719,10 +769,43 @@ func computeAwakeSetKeyed(input AwakeInput, keyBy awakeKey) map[string]AwakeDeci
 		// list, breaking wave-based starts (where dep starts in wave 0
 		// and dependent starts in wave 1).
 
+		// Classify the wake once (#7680): a wake with no work behind it
+		// that configuration alone keeps up is standing; the wake budget
+		// starts demand sessions ahead of it. Only computed when the
+		// decision wakes — suppressed reasons are not candidates.
+		if decision.ShouldWake {
+			decision.Standing = standingWake(decision.Reason, displaced[name], decision.HasAssignedWork, namedDemandByKey[name])
+		}
+
 		result[name] = decision
 	}
 
 	return result
+}
+
+// standingWake reports whether a wake decision is standing — a session kept
+// awake only by configuration, with no work behind it: its reason is a named
+// mode "always" desire, a min_active_sessions floor or a pin, or a
+// continuation reset that displaced no reason or another standing one, and it
+// has no assigned work and no named, routed or work-query demand for its
+// identity. Every other wake is demand — work or an explicit request is
+// waiting on it. The allowlist is closed, so a reason added later is demand
+// by default and can never be starved by accident (#7680).
+func standingWake(reason, displacedReason string, hasAssignedWork, namedDemand bool) bool {
+	if hasAssignedWork || namedDemand {
+		return false
+	}
+	switch reason {
+	case "named-always", "min-active", "pin":
+		return true
+	case "reset-pending":
+		// A reset displaces the reason that desired the session before:
+		// standing only when there was none (nothing else wanted it) or the
+		// displaced reason was itself standing.
+		return displacedReason == "" || standingWake(displacedReason, "", false, false)
+	default:
+		return false
+	}
 }
 
 func countAssignedScaleSlots(beads []AwakeSessionBead, workBeads []AwakeWorkBead, named []AwakeNamedSession, template string) int {

@@ -74,9 +74,17 @@ func awakeKeyingDiff(input AwakeInput) string {
 
 // awakePreRefactorDiff reports how ComputeAwakeSet disagrees with the
 // pre-refactor algorithm, or "" when they agree. Where the legacy result is
-// map-order dependent, both sides are normalized first.
+// map-order dependent, both sides are normalized first. The frozen
+// pre-refactor copy predates the Standing classification (#7680), so that
+// field is cleared on the live side: the differential compares the fields
+// the refactor froze, and standingWake's own table test covers the new
+// behavior.
 func awakePreRefactorDiff(input AwakeInput) string {
 	got, want := ComputeAwakeSet(input), computeAwakeSetPreRefactor(input)
+	for k, d := range got {
+		d.Standing = false
+		got[k] = d
+	}
 	if legacyAwakeMapOrderDependent(input) {
 		got, want = normalizeScaledReasons(got), normalizeScaledReasons(want)
 	}
@@ -363,7 +371,7 @@ func TestComputeAwakeSetKeyedByIDNamedResolvesToIdentityRow(t *testing.T) {
 		Now: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC),
 	}
 	got := computeAwakeSetKeyed(in, awakeKeyBeadID)
-	want := map[string]AwakeDecision{"gc-1": {}, "gc-2": {ShouldWake: true, Reason: "named-always"}}
+	want := map[string]AwakeDecision{"gc-1": {}, "gc-2": {ShouldWake: true, Reason: "named-always", Standing: true}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("bead-ID keying:\n got=%+v\nwant=%+v", got, want)
 	}
@@ -384,9 +392,9 @@ func TestComputeAwakeSetKeyedByIDUnresolvedNamedDesiresEveryRowWithItsName(t *te
 	}
 	got := computeAwakeSetKeyed(in, awakeKeyBeadID)
 	want := map[string]AwakeDecision{
-		"gc-1": {ShouldWake: true, Reason: "named-always"},
+		"gc-1": {ShouldWake: true, Reason: "named-always", Standing: true},
 		"gc-2": {},
-		"gc-3": {ShouldWake: true, Reason: "named-always"},
+		"gc-3": {ShouldWake: true, Reason: "named-always", Standing: true},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("bead-ID keying:\n got=%+v\nwant=%+v", got, want)
