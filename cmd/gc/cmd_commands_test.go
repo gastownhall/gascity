@@ -2094,7 +2094,7 @@ func TestPackLeafScopeAfterLeafNeverSilentlyRetargets(t *testing.T) {
 	t.Chdir(cityA)
 	t.Setenv("GC_CITY_PATH", cityA)
 
-	refused :=[]struct {
+	refused := []struct {
 		name string
 		args []string
 	}{
@@ -2108,6 +2108,8 @@ func TestPackLeafScopeAfterLeafNeverSilentlyRetargets(t *testing.T) {
 		{name: "valued true help beside other city", args: []string{"backstage", "hello", "--help=true", "--city", cityB}},
 		{name: "malformed help beside unresolved rig", args: []string{"backstage", "hello", "-h=maybe", "--rig=missing-rig"}},
 		{name: "same city then other city", args: []string{"backstage", "hello", "--city", cityA, "--city", cityB}},
+		{name: "bound city with rig of other city", args: []string{"backstage", "hello", "--city", cityA, "--rig=" + targetRig}},
+		{name: "bound city with rig that does not resolve", args: []string{"backstage", "hello", "--city", cityA, "--rig=missing-rig"}},
 	}
 	for _, test := range refused {
 		t.Run("refuses "+test.name, func(t *testing.T) {
@@ -2149,6 +2151,11 @@ func TestPackLeafScopeAfterLeafNeverSilentlyRetargets(t *testing.T) {
 			name: "rig of the bound city reaches the script unchanged",
 			args: []string{"backstage", "hello", "--rig=" + localRig, "payload"},
 			want: "city-a-hello args:<--rig=" + localRig + "><payload>\n",
+		},
+		{
+			name: "bound city with its own rig",
+			args: []string{"backstage", "hello", "--city", cityA, "--rig=" + localRig, "payload"},
+			want: "city-a-hello args:<--city><" + cityA + "><--rig=" + localRig + "><payload>\n",
 		},
 	}
 	for _, test := range passed {

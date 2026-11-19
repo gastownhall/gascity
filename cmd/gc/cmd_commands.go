@@ -270,8 +270,43 @@ func resolvedPackCommandHelpAction(cmd *cobra.Command) packCommandAction {
 // resolves to the bound city (including the pre-leaf scope that selected it) is
 // harmless and passes. Tokens after "--" are left to the script.
 func checkDiscoveredLeafScope(entry config.DiscoveredCommand, cityPath string, args []string) error {
-	var city, rig string
-	var citySet, rigSet bool
+	city, rig, citySet, rigSet := scanDiscoveredLeafScope(args)
+	if !citySet && !rigSet {
+		return nil
+	}
+
+	var selected string
+	var err error
+	if citySet && city == "" || rigSet && rig == "" {
+		err = errors.New("empty --city or --rig value")
+	} else {
+		selected, err = resolveCityForExplicitScope(city, rig, citySet, rigSet)
+	}
+	if err == nil && citySet && rigSet {
+		// With both flags set, resolution takes the --city value and never
+		// checks the rig, so resolve the rig on its own: it must belong to the
+		// bound city too.
+		rigCity, rigErr := resolveCityForExplicitScope("", rig, true, true)
+		switch {
+		case rigErr != nil:
+			err = rigErr
+		case !samePath(rigCity, cityPath):
+			selected = rigCity
+		}
+	}
+	if err == nil && samePath(selected, cityPath) {
+		return nil
+	}
+	reason := fmt.Sprintf("it would run against city %s, not the one selected", cityPath)
+	if err != nil {
+		reason = fmt.Sprintf("the selected scope does not resolve (%v)", err)
+	}
+	return fmt.Errorf("--city/--rig is not supported after the command name: %s; put it before the pack binding (gc --city <dir> %s ...) or cd to the target city", reason, entry.BindingName)
+}
+
+// scanDiscoveredLeafScope reports the last --city and --rig values in a pack
+// leaf's argv, stopping at "--".
+func scanDiscoveredLeafScope(args []string) (city, rig string, citySet, rigSet bool) {
 scan:
 	for i := 0; i < len(args); i++ {
 		switch arg := args[i]; {
@@ -294,25 +329,7 @@ scan:
 			rig, rigSet = strings.TrimPrefix(arg, "--rig="), true
 		}
 	}
-	if !citySet && !rigSet {
-		return nil
-	}
-
-	var selected string
-	var err error
-	if citySet && city == "" || rigSet && rig == "" {
-		err = errors.New("empty --city or --rig value")
-	} else {
-		selected, err = resolveCityForExplicitScope(city, rig, citySet, rigSet)
-	}
-	if err == nil && samePath(selected, cityPath) {
-		return nil
-	}
-	reason := fmt.Sprintf("it would run against city %s, not the one selected", cityPath)
-	if err != nil {
-		reason = fmt.Sprintf("the selected scope does not resolve (%v)", err)
-	}
-	return fmt.Errorf("--city/--rig is not supported after the command name: %s; put it before the pack binding (gc --city <dir> %s ...) or cd to the target city", reason, entry.BindingName)
+	return city, rig, citySet, rigSet
 }
 
 func resolveDiscoveredLeafAction(cmd *cobra.Command, args []string, invoke func() int) packCommandAction {
