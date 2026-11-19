@@ -326,3 +326,21 @@ func TestHookClaimPurgedAdoptionNeedsACompleteProof(t *testing.T) {
 		})
 	}
 }
+
+// AC-4: a readback that failed for any reason but not-found is evidence of
+// nothing; the bead is served as today and the prover is never asked.
+func TestHookClaimPurgedAdoptionKeepsTheFailOpenFloor(t *testing.T) {
+	e := &purgedAdoptionEnv{readbackErr: errors.New("store unreachable"), prove: proveAbsent}
+
+	code := e.run()
+
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr=%s", code, e.stderr.String())
+	}
+	if !strings.Contains(e.stdout.String(), `"reason":"existing_assignment"`) || !strings.Contains(e.stdout.String(), `"bead_id":"work-1"`) {
+		t.Fatalf("stdout = %q, want work-1 served as existing_assignment", e.stdout.String())
+	}
+	if len(e.proofs) != 0 {
+		t.Fatalf("proofs = %v, want the prover never called for a non-not-found readback error", e.proofs)
+	}
+}
