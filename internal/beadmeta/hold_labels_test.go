@@ -44,3 +44,23 @@ func TestHasDispatchHold(t *testing.T) {
 		}
 	}
 }
+
+func TestHasHumanLabel(t *testing.T) {
+	cases := []struct {
+		name   string
+		labels []string
+		want   bool
+	}{
+		{"nil", nil, false},
+		{"unrelated", []string{"needs-mayor", "mpr-human-hold", "human-hold"}, false},
+		{"dispatch hold is not human", []string{HoldMayorLabel, HoldExternalLabel}, false},
+		{"human", []string{"x", HumanLabel}, true},
+		{"space trimmed", []string{"  human "}, true},
+		{"case kept, as bd's --exclude-label keeps it", []string{"Human"}, false},
+	}
+	for _, tc := range cases {
+		if got := HasHumanLabel(tc.labels); got != tc.want {
+			t.Errorf("%s: HasHumanLabel(%q) = %v, want %v", tc.name, tc.labels, got, tc.want)
+		}
+	}
+}

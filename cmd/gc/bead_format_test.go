@@ -1,7 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 func TestParseBeadFormat(t *testing.T) {
@@ -56,5 +59,30 @@ func TestToonVal(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("toonVal(%q) = %q, want %q", tt.in, got, tt.want)
 		}
+	}
+}
+
+// TestFilterBeadsWithNoMatchIsEmptyNotNil proves a --label/--status filter
+// that matches nothing yields an empty slice that prints [] like the direct
+// store read, never null.
+func TestFilterBeadsWithNoMatchIsEmptyNotNil(t *testing.T) {
+	in := []beads.Bead{{ID: "gc-1", Status: "open", Labels: []string{"x"}}}
+	for name, f := range map[string]beadFilters{
+		"label":  {label: "nope"},
+		"status": {status: "closed"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := filterBeads(in, f)
+			if got == nil || len(got) != 0 {
+				t.Fatalf("filterBeads = %#v, want empty non-nil slice", got)
+			}
+			data, err := json.Marshal(got)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if string(data) != "[]" {
+				t.Fatalf("json = %s, want []", data)
+			}
+		})
 	}
 }

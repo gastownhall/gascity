@@ -4,10 +4,14 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/runtimecontract/reference"
 )
 
 // writeScript creates an executable shell script in dir and returns its path.
@@ -217,6 +221,98 @@ func TestRun_UnknownDeclaredCapabilityIgnored(t *testing.T) {
 	}
 	if hasCheck(res, "capability future-cap") {
 		t.Error("unknown capability produced a capability check")
+	}
+}
+
+// idle-boundary is a capability gc honors, so the handshake check must not
+// call it unknown; it promises no op of its own, so it adds no capability
+// check (gc runtime conformance checks it as RPP-CONN-002).
+// Kills: a token gc acts on reported as ignored.
+func TestRun_IdleBoundaryCapabilityIsKnown(t *testing.T) {
+	state := t.TempDir()
+	const from = `["report-attachment","report-activity"]`
+	script := conformantScript(state)
+	if !strings.Contains(script, from) {
+		t.Fatalf("conformant script declares no %s to extend", from)
+	}
+	body := strings.Replace(script, from, `["report-attachment","report-activity","idle-boundary"]`, 1)
+	res := runScript(t, body, Options{})
+
+	if res.Failed() {
+		t.Fatalf("Failed() = true with idle-boundary declared: %+v", res.Checks)
+	}
+	if c := findCheck(t, res, "protocol handshake"); strings.Contains(c.Detail, "unknown") {
+		t.Errorf("handshake detail = %q, want idle-boundary not reported as unknown", c.Detail)
+	}
+	if hasCheck(res, "capability idle-boundary") {
+		t.Error("idle-boundary produced a capability check")
+	}
+}
+
+// A pack declaring proc.exec, report-activity and report-attachment without
+// idle-boundary is in a recognizable migration state: it passes, but is told
+// gc gives it no idle wait. Declaring idle-boundary, or not declaring all
+// three, silences the warning.
+// Kills: a pack that silently drops to timed_only sleep (gh#8903).
+func TestRun_WarnsOnTheTripleWithoutIdleBoundary(t *testing.T) {
+	const from = `["report-attachment","report-activity"]`
+	for _, tc := range []struct {
+		caps string
+		warn bool
+	}{
+		{`["report-attachment","report-activity","proc.exec"]`, true},
+		{`["report-attachment","report-activity","proc.exec","idle-boundary"]`, false},
+		{`["report-attachment","report-activity"]`, false},
+	} {
+		script := conformantScript(t.TempDir())
+		if !strings.Contains(script, from) {
+			t.Fatalf("conformant script declares no %s to replace", from)
+		}
+		res := runScript(t, strings.Replace(script, from, tc.caps, 1), Options{})
+		if res.Failed() {
+			t.Fatalf("%s: Failed() = true: %+v", tc.caps, res.Checks)
+		}
+		detail := findCheck(t, res, "protocol handshake").Detail
+		if got := strings.Contains(detail, idleBoundaryMigrationWarning); got != tc.warn {
+			t.Errorf("%s: handshake detail %q, want migration warning %v", tc.caps, detail, tc.warn)
+		}
+		if strings.Contains(detail, "unknown") {
+			t.Errorf("%s: handshake detail %q reports a capability gc honors as unknown", tc.caps, detail)
+		}
+	}
+}
+
+// fs.host narrows locality local: a handshake declaring it without
+// "locality": "local" passes, but is told gc reads fs.host as undeclared and
+// does no host work for it. With locality local, fs.host is a token gc
+// honors, not an unknown one.
+// Kills: a pack whose fs.host gc silently ignores.
+func TestRun_WarnsOnFSHostWithoutLocalityLocal(t *testing.T) {
+	const from = `{"version":0,"capabilities":["report-attachment","report-activity"]}`
+	for _, tc := range []struct {
+		handshake string
+		warn      bool
+	}{
+		{`{"version":0,"capabilities":["report-attachment","report-activity","fs.host"]}`, true},
+		{`{"version":0,"capabilities":["report-attachment","report-activity","fs.host"],"locality":"remote"}`, true},
+		{`{"version":0,"capabilities":["report-attachment","report-activity","fs.host"],"locality":"local"}`, false},
+		{`{"version":0,"capabilities":["report-attachment","report-activity"],"locality":"local"}`, false},
+	} {
+		script := conformantScript(t.TempDir())
+		if !strings.Contains(script, from) {
+			t.Fatalf("conformant script declares no %s to replace", from)
+		}
+		res := runScript(t, strings.Replace(script, from, tc.handshake, 1), Options{})
+		if res.Failed() {
+			t.Fatalf("%s: Failed() = true: %+v", tc.handshake, res.Checks)
+		}
+		detail := findCheck(t, res, "protocol handshake").Detail
+		if got := strings.Contains(detail, fsHostWithoutLocalityWarning); got != tc.warn {
+			t.Errorf("%s: handshake detail %q, want the fs.host locality warning %v", tc.handshake, detail, tc.warn)
+		}
+		if strings.Contains(detail, "unknown") {
+			t.Errorf("%s: handshake detail %q reports a capability gc honors as unknown", tc.handshake, detail)
+		}
 	}
 }
 
@@ -539,14 +635,17 @@ func TestRun_StartConfigCarriesCommandAndWorkDir(t *testing.T) {
 	}
 }
 
+// Kills a canceled run whose cleanup stop does not run, or runs outside the
+// private city the session started in, or leaves that city behind.
 func TestRun_CanceledRunStopsSessionViaDetachedContext(t *testing.T) {
+	t.Setenv("GC_EXEC_CITY_PATH", "")
 	state := t.TempDir()
 	body := strings.Replace(conformantScript(state),
 		`is-running)        if [ -f "$state/$name.running" ]; then echo true; else echo false; fi`,
 		`is-running)        touch "$state/is-running-called"; exec sleep 30`, 1)
 	body = strings.Replace(body,
 		`stop)              rm -f "$state/$name.running"`,
-		`stop)              echo "$name" >> "$state/stop.log"; rm -f "$state/$name.running"`, 1)
+		`stop)              echo "${GC_EXEC_CITY_PATH:-}|$name" >> "$state/stop.log"; rm -f "$state/$name.running"`, 1)
 	script := writeScript(t, t.TempDir(), body)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -579,8 +678,15 @@ func TestRun_CanceledRunStopsSessionViaDetachedContext(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cleanup stop never ran after cancellation: %v", err)
 	}
-	if !strings.Contains(string(stops), "cancel-session") {
+	first, _, _ := strings.Cut(string(stops), "\n")
+	city, name, _ := strings.Cut(first, "|")
+	if name != "cancel-session" {
 		t.Errorf("cleanup stop log %q missing the session name", stops)
+	}
+	if city == "" {
+		t.Errorf("cleanup stop log %q: the stop named no city, not the private city the session started in", stops)
+	} else if _, err := os.Stat(city); !os.IsNotExist(err) {
+		t.Errorf("private city %s after the canceled run: stat err = %v, want it removed", city, err)
 	}
 }
 
@@ -662,5 +768,540 @@ func TestRun_RequireNudgeStartFailureSkipsWithRequiredName(t *testing.T) {
 	}
 	if hasCheck(res, "optional: nudge") {
 		t.Error("optional: nudge should not appear when RequireNudge is set, even after a start failure")
+	}
+}
+
+// observeReference writes the runtimecontract golden reference, which
+// declares observe.v1, with bodies overriding its ops.
+func observeReference(t *testing.T, bodies map[string]string) string {
+	t.Helper()
+	all := reference.Bodies()
+	for op, body := range bodies {
+		all[op] = body
+	}
+	path := filepath.Join(t.TempDir(), "golden")
+	if err := os.WriteFile(path, []byte(reference.Script(t.TempDir(), all)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// Kills a smoke check that does not run, or does not gate, the observe.v1
+// ops a script declares: the golden passes all four; a script whose
+// observe, inventory, kill-object or post-stop observe misbehaves fails
+// exactly that check.
+func TestRun_ObserveV1Smoke(t *testing.T) {
+	checks := []string{observeCheck, inventoryCheck, killObjectCheck, observeAbsentCheck}
+	res, err := Run(context.Background(), observeReference(t, nil), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range checks {
+		if c := findCheck(t, res, name); c.Status != StatusPass {
+			t.Errorf("golden: %s = %s (%s), want PASS", name, c.Status, c.Detail)
+		}
+	}
+	for check, bodies := range map[string]map[string]string{
+		observeCheck:                       {"observe": `exit 2`},
+		observeCheck + " (no object)":      {"observe": `cat >/dev/null; if [ -d "$box" ]; then echo '{"state":"running","identity":null}'; else echo '{"state":"absent"}'; fi`},
+		inventoryCheck + " (not complete)": {"inventory": `printf '{"complete":false,"sessions":[{"name":"%s","state":"running","object":{"id":"a","created":"b"}}]}' "$(basename "$B"/*)"`},
+		inventoryCheck:                     {"inventory": `echo '{"complete":true,"sessions":[]}'`},
+		killObjectCheck:                    {"kill-object": `cat >/dev/null; echo killed`},
+		observeAbsentCheck:                 {"stop": `if [ -d "$box" ]; then : > "$box/stopped"; fi`, "is-running": `if [ -d "$box" ] && [ ! -f "$box/stopped" ]; then echo true; else echo false; fi`},
+	} {
+		res, err := Run(context.Background(), observeReference(t, bodies), Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c := findCheck(t, res, strings.SplitN(check, " (", 2)[0]); c.Status != StatusFail {
+			t.Errorf("mutant for %s: %s (%s), want FAIL", check, c.Status, c.Detail)
+		}
+	}
+}
+
+// A script declaring observe.v1 whose start fails reports the observe.v1
+// checks as skipped, so the report carries the full check set.
+func TestRun_ObserveV1ChecksSkippedWhenStartFails(t *testing.T) {
+	res, err := Run(context.Background(), observeReference(t, map[string]string{"start": `cat >/dev/null; exit 1`}), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{observeCheck, inventoryCheck, killObjectCheck, observeAbsentCheck} {
+		if c := findCheck(t, res, name); c.Status != StatusSkip {
+			t.Errorf("%s = %s, want SKIP after a failed start", name, c.Status)
+		}
+	}
+	if hasCheck(minimalResult(t), observeCheck) {
+		t.Error("a script without observe.v1 reports observe.v1 checks")
+	}
+}
+
+func minimalResult(t *testing.T) Result {
+	t.Helper()
+	return runScript(t, minimalScript(t.TempDir()), Options{})
+}
+
+// Kills a smoke check that does not run, or does not gate, the server-stop a
+// script declaring server-lifecycle owes: the golden passes both checks; a
+// server-stop that is not implemented, leaves the session running, or fails
+// the second time fails its check; and an undeclared script is not sent it.
+func TestRun_ServerLifecycleSmoke(t *testing.T) {
+	res, err := Run(context.Background(), observeReference(t, nil), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{serverStopCheck, serverStopIdempotentCheck} {
+		if c := findCheck(t, res, name); c.Status != StatusPass {
+			t.Errorf("golden: %s = %s (%s), want PASS", name, c.Status, c.Detail)
+		}
+	}
+	for check, body := range map[string]string{
+		serverStopCheck + " (exit 2)":           `exit 2`,
+		serverStopCheck + " (leaves a session)": `:`,
+		serverStopIdempotentCheck:               `if [ -f "$S/server-stopped" ]; then exit 1; fi; : > "$S/server-stopped"; rm -rf "$B"`,
+	} {
+		res, err := Run(context.Background(), observeReference(t, map[string]string{"server-stop": body}), Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c := findCheck(t, res, strings.SplitN(check, " (", 2)[0]); c.Status != StatusFail {
+			t.Errorf("mutant for %s: %s (%s), want FAIL", check, c.Status, c.Detail)
+		}
+	}
+	if hasCheck(minimalResult(t), serverStopCheck) {
+		t.Error("a script without server-lifecycle reports a server-stop check")
+	}
+}
+
+// Kills a server-stop smoke check run in the city the check inherited: gc
+// runtime check run from a city must leave that city's sessions running,
+// though the golden's server-stop, like a city-scoped pack's, ends every
+// session of the city it runs in.
+func TestRun_ServerStopSparesTheCallersCity(t *testing.T) {
+	script := observeReference(t, nil)
+	t.Setenv("GC_EXEC_CITY_NAME", "live")
+	t.Setenv("GC_EXEC_CITY_PATH", "/live/city")
+	const sentinel = "live-city-sentinel"
+	if out, err := scriptOp(script, `{"command":"sleep 300"}`, "start", sentinel); err != nil {
+		t.Fatalf("starting %s in the caller's city: %v (%s)", sentinel, err, out)
+	}
+	res, err := Run(context.Background(), script, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := findCheck(t, res, serverStopCheck); c.Status != StatusPass {
+		t.Fatalf("%s = %s (%s), want PASS: the check must run server-stop", serverStopCheck, c.Status, c.Detail)
+	}
+	if out, err := scriptOp(script, "", "is-running", sentinel); err != nil || out != "true" {
+		t.Fatalf("%s in the caller's city: is-running = %q (%v) after the check, want true: the check's server-stop ended a session of the city it was run from", sentinel, out, err)
+	}
+}
+
+// scriptOp runs one op of script in the test's environment, the city a check
+// started from it inherits.
+func scriptOp(script, stdin string, args ...string) (string, error) {
+	cmd := exec.Command(script, args...)
+	cmd.Stdin = strings.NewReader(stdin)
+	out, err := cmd.Output()
+	return strings.TrimSpace(string(out)), err
+}
+
+// outcomeReference writes the input-outcome golden with bodies overridden.
+func outcomeReference(t *testing.T, bodies map[string]string) string {
+	t.Helper()
+	all := reference.InputOutcomeBodies(reference.Bodies())
+	for op, body := range bodies {
+		all[op] = body
+	}
+	path := filepath.Join(t.TempDir(), "golden")
+	if err := os.WriteFile(path, []byte(reference.Script(t.TempDir(), all)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// Kills an input-outcome smoke check that does not run, or does not gate,
+// the nudge to an absent name a script declaring the token owes: the golden
+// passes it, and every other check too (its post-stop interrupt answers a
+// typed gone, not the undeclared exit 0); a nudge answering an absent name
+// with exit 0, an empty exit 80, another word or exit 1 fails it; and an
+// undeclared script is not checked.
+func TestRun_InputOutcomeSmoke(t *testing.T) {
+	res, err := Run(context.Background(), outcomeReference(t, nil), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Failed() {
+		for _, c := range res.Checks {
+			if c.Status == StatusFail {
+				t.Errorf("golden: %s failed: %s", c.Name, c.Detail)
+			}
+		}
+	}
+	if c := findCheck(t, res, inputOutcomeCheck); c.Status != StatusPass {
+		t.Errorf("golden: %s = %s (%s), want PASS", inputOutcomeCheck, c.Status, c.Detail)
+	}
+	if c := findCheck(t, res, "optional: interrupt"); c.Status != StatusPass || !strings.Contains(c.Detail, "gone") {
+		t.Errorf("golden: post-stop interrupt = %s (%s), want PASS on a typed gone", c.Status, c.Detail)
+	}
+	golden := reference.InputOutcomeBodies(reference.Bodies())["nudge"]
+	for name, body := range map[string]string{
+		"exit 0":       strings.Replace(golden, `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || exit 0;`, 1),
+		"empty 80":     strings.Replace(golden, `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || exit 80;`, 1),
+		"another word": strings.Replace(golden, `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || out not_sent;`, 1),
+		"exit 1":       strings.Replace(golden, `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || exit 1;`, 1),
+		"past the cap": strings.Replace(golden, `[ -d "$box" ] || out gone;`, `[ -d "$box" ] || `+goneBeyondCap+`;`, 1),
+	} {
+		if body == golden {
+			t.Fatalf("mutant %s does not apply", name)
+		}
+		res, err := Run(context.Background(), outcomeReference(t, map[string]string{"nudge": body}), Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c := findCheck(t, res, inputOutcomeCheck); c.Status != StatusFail {
+			t.Errorf("mutant %s: %s = %s (%s), want FAIL", name, inputOutcomeCheck, c.Status, c.Detail)
+		}
+	}
+	res, err = Run(context.Background(), outcomeReference(t, map[string]string{"interrupt": `[ -d "$box" ] || ` + goneBeyondCap + `; out not_sent`}), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := findCheck(t, res, "optional: interrupt"); c.Status == StatusPass && strings.Contains(c.Detail, "gone") {
+		t.Errorf("post-stop interrupt answering gone past gc's stdout cap = %s (%s), want it not read as a typed gone", c.Status, c.Detail)
+	}
+	if hasCheck(observeResult(t), inputOutcomeCheck) {
+		t.Error("a script without input-outcome reports an input-outcome check")
+	}
+}
+
+// goneBeyondCap is a shell exit-80 answer of one gone line padded with
+// trailing newlines past gc's stdout cap (sessionexec.InputOutcomeStdoutCap),
+// which gc reads as malformed.
+const goneBeyondCap = `{ echo '{"outcome":"gone"}'; head -c 70000 /dev/zero | tr '\0' '\n'; exit 80; }`
+
+// observeResult runs the check over the base golden, which does not declare
+// input-outcome.
+func observeResult(t *testing.T) Result {
+	t.Helper()
+	res, err := Run(context.Background(), observeReference(t, nil), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return res
+}
+
+// Kills a check that reads a typed refusal from a driving op to the session
+// rppcheck just started and verified running as a pass: a nudge that never
+// delivers fails "required: nudge" whatever word it answers, a carrier.ops
+// key op that always answers rejected fails its carrier.ops check, and the
+// post-stop interrupt accepts only gone.
+func TestRun_InputOutcomeRefusalOnARunningSessionFails(t *testing.T) {
+	for _, word := range []string{"not_sent", "rejected", "gone", "unavailable", "busy", "pending_interaction"} {
+		path := outcomeReference(t, map[string]string{"nudge": `cat >/dev/null; out ` + word})
+		res, err := Run(context.Background(), path, Options{RequireNudge: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c := findCheck(t, res, "required: nudge"); c.Status != StatusFail {
+			t.Errorf("nudge always %s: required: nudge = %s (%s), want FAIL", word, c.Status, c.Detail)
+		}
+		if !res.Failed() {
+			t.Errorf("nudge always %s: the run did not fail", word)
+		}
+	}
+
+	ops := reference.InputOutcomeBodies(reference.NonTmuxBodies())
+	ops["send-keys"] = `out rejected`
+	path := filepath.Join(t.TempDir(), "golden")
+	if err := os.WriteFile(path, []byte(reference.Script(t.TempDir(), ops)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Run(context.Background(), path, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := findCheck(t, res, "capability carrier.ops: send-keys"); c.Status != StatusFail {
+		t.Errorf("send-keys always rejected: %s (%s), want FAIL", c.Status, c.Detail)
+	}
+
+	res, err = Run(context.Background(), outcomeReference(t, map[string]string{"interrupt": `out not_sent`}), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := findCheck(t, res, "optional: interrupt"); c.Status != StatusFail {
+		t.Errorf("post-stop interrupt answering not_sent = %s (%s), want FAIL: only gone answers a stopped session", c.Status, c.Detail)
+	}
+}
+
+// cityOnly wraps the executable at runtime in reference.CityOnlyScript and
+// returns the wrapper and its ops log.
+func cityOnly(t *testing.T, runtime string) (script, opsLog string) {
+	t.Helper()
+	dir := t.TempDir()
+	opsLog = filepath.Join(dir, "ops.log")
+	script = filepath.Join(dir, "city-only")
+	if err := os.WriteFile(script, []byte(reference.CityOnlyScript(runtime, opsLog)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return script, opsLog
+}
+
+// cityOps reads the ops a cityOnly wrapper logged.
+func cityOps(t *testing.T, opsLog string) []reference.CityOp {
+	t.Helper()
+	ops, err := reference.ReadCityOps(opsLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ops
+}
+
+// reportFailures logs every failed check of res as a test error.
+func reportFailures(t *testing.T, res Result) {
+	t.Helper()
+	for _, c := range res.Checks {
+		if c.Status == StatusFail {
+			t.Errorf("%s failed: %s", c.Name, c.Detail)
+		}
+	}
+}
+
+// Kills a check run outside a city that runs its ops in no city: a runtime
+// that serves only a city, as gc's own ops always name one, refuses them and
+// fails the check. Run outside a city, every op names a private city, which
+// is gone after the run, and whose server is ended by a final server-stop.
+func TestRun_OutsideACityRunsInAPrivateCity(t *testing.T) {
+	t.Setenv("GC_EXEC_CITY_NAME", "")
+	t.Setenv("GC_EXEC_CITY_PATH", "")
+	script, opsLog := cityOnly(t, outcomeReference(t, nil))
+
+	res, err := Run(context.Background(), script, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reportFailures(t, res)
+	for _, name := range []string{serverStopCheck, serverStopIdempotentCheck, inputOutcomeCheck} {
+		if c := findCheck(t, res, name); c.Status != StatusPass {
+			t.Errorf("%s = %s (%s), want PASS", name, c.Status, c.Detail)
+		}
+	}
+	ops := cityOps(t, opsLog)
+	if len(ops) == 0 || ops[0].Args != "protocol" {
+		t.Fatalf("ops = %v, want protocol first", ops)
+	}
+	private := ops[0].City
+	var last string
+	for _, op := range ops {
+		if op.City == "" {
+			t.Errorf("op %q named no city", op.Args)
+		}
+		if op.City == private {
+			last = op.Args
+		}
+	}
+	if private == "" {
+		t.Fatal("protocol named no city")
+	}
+	if _, err := os.Stat(private); !os.IsNotExist(err) {
+		t.Errorf("private city %s after the run: stat err = %v, want it removed", private, err)
+	}
+	if last != "server-stop" {
+		t.Errorf("last op in the private city = %q, want server-stop: the check left its server running", last)
+	}
+}
+
+// Kills a check run outside a city that sends server-stop to a runtime that
+// does not declare server-lifecycle.
+func TestRun_OutsideACitySendsNoServerStopToAnUndeclaredRuntime(t *testing.T) {
+	t.Setenv("GC_EXEC_CITY_NAME", "")
+	t.Setenv("GC_EXEC_CITY_PATH", "")
+	script, opsLog := cityOnly(t, observeReference(t, map[string]string{
+		"protocol": `echo '{"version":0,"capabilities":["observe.v1","report-attachment"]}'`,
+	}))
+
+	res, err := Run(context.Background(), script, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reportFailures(t, res)
+	for _, op := range cityOps(t, opsLog) {
+		if op.Args == "server-stop" {
+			t.Errorf("server-stop sent in %q to a runtime not declaring server-lifecycle", op.City)
+		}
+	}
+}
+
+// Kills a check run from a city that leaves that city: with
+// GC_EXEC_CITY_PATH set, the check's ops run there, its server checks run in
+// a city of their own, and it sends the caller's city no server-stop.
+func TestRun_FromACityRunsThere(t *testing.T) {
+	script, opsLog := cityOnly(t, outcomeReference(t, nil))
+	t.Setenv("GC_EXEC_CITY_NAME", "live")
+	t.Setenv("GC_EXEC_CITY_PATH", "/live/city")
+
+	res, err := Run(context.Background(), script, Options{SessionName: "from-city"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reportFailures(t, res)
+	var protocol, start, serverStart bool
+	for _, op := range cityOps(t, opsLog) {
+		switch {
+		case op.Args == "protocol" && op.City == "/live/city":
+			protocol = true
+		case op.Args == "start from-city" && op.City == "/live/city":
+			start = true
+		case op.Args == "start from-city-server" && op.City != "/live/city" && op.City != "":
+			serverStart = true
+		case op.Args == "server-stop" && op.City == "/live/city":
+			t.Error("server-stop sent to the caller's city")
+		}
+	}
+	if !protocol || !start {
+		t.Errorf("protocol in the caller's city = %v, start from-city there = %v, want both", protocol, start)
+	}
+	if !serverStart {
+		t.Error("the server check's session did not start in a city of its own")
+	}
+}
+
+// lastOpIn returns the last op logged in city, empty for none.
+func lastOpIn(ops []reference.CityOp, city string) string {
+	var last string
+	for _, op := range ops {
+		if op.City == city {
+			last = op.Args
+		}
+	}
+	return last
+}
+
+// Kills an interrupted check run outside a city that removes its private
+// city without the final server-stop, leaving the server a session brought
+// up there keyed to a path that no longer exists: the stop must run on a
+// cancellation-detached context.
+func TestRun_CanceledBareRunSendsServerStopToItsPrivateCity(t *testing.T) {
+	t.Setenv("GC_EXEC_CITY_NAME", "")
+	t.Setenv("GC_EXEC_CITY_PATH", "")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Cancel, as a Ctrl-C would, once the first is-running blocks.
+	blocking, release, err := reference.OnFirstOp(outcomeReference(t, map[string]string{
+		"is-running": `exec sleep 30`,
+	}), "is-running", t.TempDir(), cancel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(release)
+	script, opsLog := cityOnly(t, blocking)
+
+	res, err := Run(ctx, script, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Protocol.Has(runtime.ProtocolCapabilityServerLifecycle) {
+		t.Fatalf("handshake %+v does not declare server-lifecycle; the test needs it", res.Protocol)
+	}
+	ops := cityOps(t, opsLog)
+	if len(ops) == 0 || ops[0].City == "" {
+		t.Fatalf("ops = %v, want protocol first, in a private city", ops)
+	}
+	private := ops[0].City
+	if last := lastOpIn(ops, private); last != "server-stop" {
+		t.Errorf("last op in the private city of the canceled run = %q, want server-stop", last)
+	}
+	if _, err := os.Stat(private); !os.IsNotExist(err) {
+		t.Errorf("private city %s after the canceled run: stat err = %v, want it removed", private, err)
+	}
+}
+
+// Kills a check run outside a city whose server checks run in the run's own
+// private city rather than one of their own, as when the run's city is
+// appended after the op's (the last value of a key wins): server-stop there
+// would end the run's sessions too.
+func TestRun_OutsideACityServerChecksUseACityOfTheirOwn(t *testing.T) {
+	t.Setenv("GC_EXEC_CITY_NAME", "")
+	t.Setenv("GC_EXEC_CITY_PATH", "")
+	script, opsLog := cityOnly(t, outcomeReference(t, nil))
+
+	res, err := Run(context.Background(), script, Options{SessionName: "bare"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reportFailures(t, res)
+	ops := cityOps(t, opsLog)
+	if len(ops) == 0 || ops[0].City == "" {
+		t.Fatalf("ops = %v, want protocol first, in a private city", ops)
+	}
+	private := ops[0].City
+	var serverCity string
+	for _, op := range ops {
+		if op.Args == "start bare-server" {
+			serverCity = op.City
+		}
+	}
+	switch serverCity {
+	case "":
+		t.Fatal("the server check's session started in no city")
+	case private:
+		t.Fatalf("the server check's session started in the run's private city %s, want a city of its own", private)
+	}
+	var runStops, serverStops int
+	for _, op := range ops {
+		if op.Args != "server-stop" {
+			continue
+		}
+		switch op.City {
+		case private:
+			runStops++
+		case serverCity:
+			serverStops++
+		}
+	}
+	if runStops != 1 {
+		t.Errorf("server-stops in the run's private city = %d, want 1, the final one", runStops)
+	}
+	if serverStops < 3 {
+		t.Errorf("server-stops in the server checks' city = %d, want the two checked ones and a final one", serverStops)
+	}
+	if last := lastOpIn(ops, serverCity); last != "server-stop" {
+		t.Errorf("last op in the server checks' city = %q, want the final server-stop", last)
+	}
+	if _, err := os.Stat(serverCity); !os.IsNotExist(err) {
+		t.Errorf("server checks' city %s after the run: stat err = %v, want it removed", serverCity, err)
+	}
+}
+
+// Kills a check run that swallows a final server-stop that fails before it
+// removes a private city: the server may still run, keyed to a deleted path,
+// so the run reports it as a warning naming the city.
+func TestRun_FailedFinalServerStopIsAWarning(t *testing.T) {
+	t.Setenv("GC_EXEC_CITY_NAME", "")
+	t.Setenv("GC_EXEC_CITY_PATH", "")
+	script, opsLog := cityOnly(t, outcomeReference(t, map[string]string{
+		"server-stop": `echo "server still up" >&2; exit 1`,
+	}))
+
+	res, err := Run(context.Background(), script, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := cityOps(t, opsLog)
+	if len(ops) == 0 || ops[0].City == "" {
+		t.Fatalf("ops = %v, want protocol first, in a private city", ops)
+	}
+	private := ops[0].City
+	var named bool
+	for _, w := range res.Warnings {
+		if strings.Contains(w, "server-stop in private city "+private+" ") && strings.Contains(w, "server still up") {
+			named = true
+		}
+	}
+	if !named {
+		t.Errorf("warnings %q: want one naming the run's private city %s and server-stop's stderr", res.Warnings, private)
+	}
+	if len(res.Warnings) != 2 {
+		t.Errorf("warnings %q: want 2, the run's city's and the server checks' city's", res.Warnings)
 	}
 }

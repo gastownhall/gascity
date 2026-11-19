@@ -15,9 +15,10 @@ import (
 // cmdSlingRemote routes a sling mutation to a REMOTE city over the control
 // plane. The remote server does all config and store resolution, so this
 // forwards the raw sling parameters (target, bead-or-formula, --on, vars,
-// scope, force, title) and renders the result. Modes that require local state
-// are refused with a clear message: inline text (needs a locally-created bead),
-// the 1-arg form (infers the target from local rig config), and the
+// scope, force, title) and renders the result. Inline text and --stdin create
+// the task bead remotely first (see createRemoteInlineBead), then sling it by
+// ID. Modes that require local state are refused with a clear message: the
+// 1-arg form (infers the target from local rig config), and the
 // --dry-run/--nudge flags the server API does not model.
 func cmdSlingRemote(c *api.Client, target *remoteTarget, args []string, isFormula, doNudge, force bool, title string, vars []string, merge string, noConvoy, owned, reassign bool, onFormula string, noFormula, fromStdin, dryRun bool, scopeKind, scopeRef string, jsonOutput bool, stdout, stderr io.Writer) int {
 	fail := func(code, message string) int {
@@ -28,9 +29,6 @@ func cmdSlingRemote(c *api.Client, target *remoteTarget, args []string, isFormul
 		return 1
 	}
 
-	if fromStdin {
-		return fail("unsupported_remote", "gc sling: --stdin (inline text) is not supported for a remote city; sling an existing bead")
-	}
 	if dryRun {
 		return fail("unsupported_remote", "gc sling: --dry-run is not supported for a remote city")
 	}
@@ -44,26 +42,32 @@ func cmdSlingRemote(c *api.Client, target *remoteTarget, args []string, isFormul
 		return fail("unsupported_remote", "gc sling: --nudge delivery for a remote city lands separately; sling without --nudge")
 	}
 
-	// A remote city cannot infer the default target from local rig config, so an
-	// explicit target is required (the 2-arg form).
-	if len(args) != 2 {
-		return fail("invalid_arguments", "gc sling: a remote city requires an explicit target and an existing bead/formula: gc sling <target> <bead-or-formula>")
-	}
-	// Inline text (a bead-or-formula argument with whitespace) auto-creates a
-	// task bead locally, but a remote city has no such path — the sling API takes
-	// only an existing bead ID or a formula name. Refuse it with a clear message
-	// (a bead ID / formula name never contains whitespace) rather than forwarding
-	// prose as a bogus bead ID.
-	if !isFormula && strings.ContainsAny(args[1], " \t\n") {
-		return fail("unsupported_remote", "gc sling: inline text is not supported for a remote city; sling an existing bead by ID")
+	work, errCode, errMsg := resolveRemoteSlingWork(args, isFormula, fromStdin)
+	if errCode != "" {
+		return fail(errCode, errMsg)
 	}
 
 	vmap, err := parseSlingVars(vars)
 	if err != nil {
 		return fail("invalid_arguments", "gc sling: "+err.Error())
 	}
+
+	// Echo the resolved target (human mode only) so the operator can see which
+	// control plane this mutation is about to hit — matching `gc rig add` and
+	// guarding against a silent write to a remote city selected by a stale env or
+	// sticky-default context.
+	if !jsonOutput {
+		fmt.Fprintln(stderr, formatRemoteTarget(target)) //nolint:errcheck // best-effort stderr
+	}
+
+	if work.inline {
+		if work, errCode, errMsg = createRemoteInlineBead(c, work, scopeKind, scopeRef, jsonOutput, stdout); errCode != "" {
+			return fail(errCode, errMsg)
+		}
+	}
+
 	req := api.SlingRequest{
-		Target:    args[0],
+		Target:    work.target,
 		Title:     title,
 		Vars:      vmap,
 		ScopeKind: scopeKind,
@@ -77,33 +81,192 @@ func cmdSlingRemote(c *api.Client, target *remoteTarget, args []string, isFormul
 	}
 	switch {
 	case isFormula:
-		req.Formula = args[1]
+		req.Formula = work.beadOrFormula
 	case onFormula != "":
 		// The API spells `--on <formula> <bead>` as formula + attached_bead_id.
 		req.Formula = onFormula
-		req.AttachedBeadID = args[1]
+		req.AttachedBeadID = work.beadOrFormula
 	default:
-		req.Bead = args[1]
-	}
-
-	// Echo the resolved target (human mode only) so the operator can see which
-	// control plane this mutation is about to hit — matching `gc rig add` and
-	// guarding against a silent write to a remote city selected by a stale env or
-	// sticky-default context.
-	if !jsonOutput {
-		fmt.Fprintln(stderr, formatRemoteTarget(target)) //nolint:errcheck // best-effort stderr
+		req.Bead = work.beadOrFormula
 	}
 
 	res, err := c.Sling(req)
 	if err != nil {
-		return fail("sling_failed", "gc sling: "+err.Error())
+		return fail("sling_failed", remoteSlingFailureMessage(err, target, work, remoteSlingResumeFlags{
+			onFormula: onFormula, title: title, vars: vars, merge: merge,
+			noConvoy: noConvoy, owned: owned, reassign: reassign, force: force,
+			noFormula: noFormula, scopeKind: scopeKind, scopeRef: scopeRef, jsonOutput: jsonOutput,
+		}))
 	}
 	if onFormula != "" {
-		if msg := checkRemoteOnAttach(c, &res, args[0], args[1], onFormula); msg != "" {
+		if msg := checkRemoteOnAttach(c, &res, work.target, work.beadOrFormula, onFormula); msg != "" {
 			return fail("attached_to_container", msg)
 		}
 	}
 	return renderRemoteSlingResult(res, onFormula != "", jsonOutput, stdout, stderr)
+}
+
+// remoteSlingWork is what a remote sling routes: the target, and the bead ID,
+// formula name, or inline text to route to it.
+type remoteSlingWork struct {
+	target        string
+	beadOrFormula string
+	// inline marks beadOrFormula as the title of a task bead to create first,
+	// with description as its body.
+	inline      bool
+	description string
+	// createdID is the bead created from the inline text; beadOrFormula then
+	// names it.
+	createdID string
+}
+
+// resolveRemoteSlingWork reads what a remote sling routes from its arguments.
+// With --stdin the one argument is the target and stdin holds the bead text
+// (first line = title, rest = description), exactly as the local path reads
+// it; otherwise the explicit 2-arg form is required, and an argument that
+// contains whitespace is inline text. Either text becomes a task bead unless
+// it names a formula. On failure it returns a non-empty (errCode, errMsg) pair.
+func resolveRemoteSlingWork(args []string, isFormula, fromStdin bool) (work remoteSlingWork, errCode, errMsg string) {
+	if fromStdin {
+		if len(args) != 1 {
+			return work, "invalid_arguments", "gc sling: --stdin requires exactly 1 argument (target)"
+		}
+		var title, description string
+		if title, description, errCode, errMsg = readSlingStdinBead(); errCode != "" {
+			return work, errCode, errMsg
+		}
+		return remoteSlingWork{target: args[0], beadOrFormula: title, inline: !isFormula, description: description}, "", ""
+	}
+	// A remote city cannot infer the default target from local rig config, so an
+	// explicit target is required (the 2-arg form).
+	if len(args) != 2 {
+		return work, "invalid_arguments", "gc sling: a remote city requires an explicit target and a bead, formula, or inline text: gc sling <target> <bead-or-formula>"
+	}
+	work = remoteSlingWork{target: args[0], beadOrFormula: args[1]}
+	// Inline text: a bead ID or formula name never contains whitespace, so an
+	// argument that does is prose to create a task bead from, as locally.
+	if !isFormula && strings.ContainsAny(args[1], " \t\n") {
+		if err := refuseMultiLineInlineText(args[1]); err != nil {
+			return work, "inline_bead_resolve_failed", "gc sling: " + err.Error()
+		}
+		work.inline = true
+	}
+	return work, "", ""
+}
+
+// createRemoteInlineBead creates the task bead for inline text in the remote
+// city and returns the work to sling: that bead, by ID, to the resolved target.
+// The target is resolved first, as the local path resolves the agent before it
+// creates anything, so a target the sling cannot reach fails with nothing
+// written. The bead is created in the resolved agent's rig store, or the city
+// store for a city-scoped agent: the store the local path opens for the target,
+// and the one the sling routes the bead from. On failure it returns a non-empty
+// (errCode, errMsg) pair.
+func createRemoteInlineBead(c *api.Client, work remoteSlingWork, scopeKind, scopeRef string, jsonOutput bool, stdout io.Writer) (remoteSlingWork, string, string) {
+	slingTarget, rig, err := resolveRemoteSlingTarget(c, work.target, scopeKind, scopeRef)
+	if err != nil {
+		return work, "target_resolve_failed", fmt.Sprintf("gc sling: %v; nothing was created", err)
+	}
+	created, err := c.CreateBead(api.CreateBeadRequest{
+		Rig:         rig,
+		Title:       work.beadOrFormula,
+		Description: work.description,
+		Type:        slingInlineBeadType,
+	})
+	if err != nil {
+		return work, "bead_create_failed", "gc sling: creating bead: " + err.Error()
+	}
+	if !jsonOutput {
+		fmt.Fprintf(stdout, "Created %s — %q\n", created.ID, work.beadOrFormula) //nolint:errcheck // best-effort stdout
+	}
+	return remoteSlingWork{target: slingTarget, beadOrFormula: created.ID, createdID: created.ID}, "", ""
+}
+
+// resolveRemoteSlingTarget resolves the agent a remote sling to slingTarget
+// reaches, as the server's sling does (qualifySlingTarget, then the agent
+// lookup), and returns the name to sling to and the agent's rig. Under
+// --scope-kind rig a bare target names the agent in the scope rig, and the
+// agent must belong to that rig: the server refuses any other, and a bare name
+// it does not qualify resolves only to a city-scoped agent.
+func resolveRemoteSlingTarget(c *api.Client, slingTarget, scopeKind, scopeRef string) (name, rig string, err error) {
+	rigScope := scopeKind == "rig"
+	scopeRef = strings.TrimSpace(scopeRef)
+	name = slingTarget
+	if rigScope && !strings.Contains(slingTarget, "/") {
+		name = scopeRef + "/" + slingTarget
+	}
+	agent, err := c.GetAgent(name)
+	if err != nil {
+		return "", "", fmt.Errorf("resolving target %q: %w", name, err)
+	}
+	if rigScope && agent.Rig != scopeRef {
+		return "", "", fmt.Errorf("--scope-ref %s conflicts with target %s in rig %q", scopeRef, name, agent.Rig)
+	}
+	return name, agent.Rig, nil
+}
+
+// remoteSlingFailureMessage is the error a failed remote sling reports. The
+// create and the sling are two requests, not one transaction, so a failed sling
+// of a bead created from inline text leaves the bead behind: the message names
+// it and the command that routes it, which repeats the original sling flags
+// with the inline text replaced by the bead, instead of a re-run that would
+// create another. A refusal from the server routed nothing. A request that
+// failed in transport, or that the server failed while handling it, may have
+// routed the bead and launched its workflow first, so the message says to check
+// the bead before resuming: with --force, the resume would replace that
+// workflow.
+func remoteSlingFailureMessage(err error, target *remoteTarget, work remoteSlingWork, flags remoteSlingResumeFlags) string {
+	if work.createdID == "" {
+		return "gc sling: " + err.Error()
+	}
+	resume := remoteSlingResumeCommand(target, work.target, work.createdID, flags)
+	if api.IsConnError(err) || api.IsServerError(err) {
+		return fmt.Sprintf("gc sling: %v\ngc sling: routing created bead %s may have succeeded; check it with: gc %s beads show %s\ngc sling: if it was not routed, resume with: %s",
+			err, work.createdID, remoteInvocationFlags(target), shellSingleQuote(work.createdID), resume)
+	}
+	return fmt.Sprintf("gc sling: %v\ngc sling: created bead %s was not routed; resume with: %s", err, work.createdID, resume)
+}
+
+// remoteSlingResumeFlags are the sling flags of an inline invocation,
+// reproduced in the command that resumes its failed sling.
+type remoteSlingResumeFlags struct {
+	onFormula, title, merge, scopeKind, scopeRef            string
+	vars                                                    []string
+	noConvoy, owned, reassign, force, noFormula, jsonOutput bool
+}
+
+// remoteSlingResumeCommand is the command that slings an already-created bead
+// to slingTarget on the same remote city with the original invocation's sling
+// flags, so re-running it does the same sling. Every interpolated value is
+// shell-quoted.
+func remoteSlingResumeCommand(target *remoteTarget, slingTarget, beadID string, f remoteSlingResumeFlags) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "gc %s sling %s %s", remoteInvocationFlags(target), shellSingleQuote(slingTarget), shellSingleQuote(beadID))
+	value := func(flag, v string) {
+		if v != "" {
+			fmt.Fprintf(&b, " --%s %s", flag, shellSingleQuote(v))
+		}
+	}
+	toggle := func(flag string, set bool) {
+		if set {
+			b.WriteString(" --" + flag)
+		}
+	}
+	value("on", f.onFormula)
+	value("title", f.title)
+	for _, kv := range f.vars {
+		value("var", kv)
+	}
+	value("merge", f.merge)
+	toggle("no-convoy", f.noConvoy)
+	toggle("owned", f.owned)
+	toggle("reassign", f.reassign)
+	toggle("force", f.force)
+	toggle("no-formula", f.noFormula)
+	value("scope-kind", f.scopeKind)
+	value("scope-ref", f.scopeRef)
+	toggle("json", f.jsonOutput)
+	return b.String()
 }
 
 // checkRemoteOnAttach catches a remote server older than this client

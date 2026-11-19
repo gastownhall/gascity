@@ -63,17 +63,67 @@ const (
 	cliReconcilerModeLeg = 500 * time.Millisecond
 )
 
-// cliLaneExecutesMessage reports whether [ops] authoritative lists message.
-func cliLaneExecutesMessage(cfg *config.City) bool {
-	return cfg != nil && cfg.Ops.LaneExecutes(string(opjournal.KindMessage))
+// cliLaneKinds is effectiveLaneKinds over sessions, the sessions-class store
+// a CLI path opened (nil when none opened, which runs the unset default
+// nowhere).
+func cliLaneKinds(cfg *config.City, sessions beads.Store) (kinds []string, defaulted bool) {
+	if isNilBeadStore(sessions) {
+		return effectiveLaneKinds(cfg, beads.SessionStore{})
+	}
+	return effectiveLaneKinds(cfg, sessionFrontDoor(sessions).Store())
 }
 
-// laneServesSession reports whether a conversation lane can type into the
-// session named sessName: a keystroke-mode runtime (laneTypesLive), or a
-// protocol-mode one whose runtime row carries a host stamp serving message
-// for view's generation (hostedElsewhere), whose lane then delivers.
+// cliLaneExecutesMessage reports whether the conversation lane executes
+// message for cfg over sessions, the sessions-class store the CLI opened:
+// [ops] authoritative lists it, or, unset, sessions is one the default runs
+// the lane over (effectiveLaneKinds).
+func cliLaneExecutesMessage(cfg *config.City, sessions beads.Store) bool {
+	kinds, _ := cliLaneKinds(cfg, sessions)
+	return slices.Contains(kinds, string(opjournal.KindMessage))
+}
+
+// cliLaneExecutesMessageAt is cliLaneExecutesMessage for a path that holds
+// no store yet: it opens the city's store only when [ops] authoritative is
+// unset, to tell whether the default runs the lane over its sessions class.
+// A store that does not open leaves the default undecided, so the path takes
+// its legacy route, which opens the store itself and reports the failure.
+func cliLaneExecutesMessageAt(cityPath string, cfg *config.City) bool {
+	switch {
+	case cliLaneMessageOff(cfg):
+		return false
+	case cliLaneMessageListed(cfg):
+		return true
+	}
+	store, err := openCityStoreAtWithConfig(cityPath, cfg)
+	if err != nil || isNilBeadStore(store) {
+		return false
+	}
+	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort
+	return cliLaneExecutesMessage(cfg, cliSessionStore(store, cfg, cityPath))
+}
+
+// cliLaneMessageListed reports whether cfg's [ops] authoritative is set and
+// lists message, which no store can change. A path that refuses a request
+// whose store did not open does so only then; with the list unset it takes
+// the legacy path instead, since the default cannot be decided without the
+// store.
+func cliLaneMessageListed(cfg *config.City) bool {
+	return cfg != nil && cfg.Ops.AuthoritativeSet() && cfg.Ops.LaneExecutes(string(opjournal.KindMessage))
+}
+
+// cliLaneMessageOff reports whether no sessions store can put message on
+// the lane for cfg: no config, or an [ops] authoritative that is set and
+// does not list it. A path checks it before it opens a store to decide.
+func cliLaneMessageOff(cfg *config.City) bool {
+	return cfg == nil || cfg.Ops.AuthoritativeSet() && !cfg.Ops.LaneExecutes(string(opjournal.KindMessage))
+}
+
+// laneServesSession reports whether a conversation lane can deliver into
+// the session named sessName: a runtime the live executor serves
+// (laneServesLive), or one whose runtime row carries a host stamp serving
+// message for view's generation (hostedElsewhere), whose lane then delivers.
 func laneServesSession(sp runtime.Provider, st *opjournal.Store, sessName string, view opjournal.ConversationView) (bool, error) {
-	if laneTypesLive(sp, sessName) {
+	if laneServesLive(sp, sessName) {
 		return true, nil
 	}
 	row, _, found, err := st.Runtime(view.ID)
@@ -120,40 +170,54 @@ func cliLaneUnavailable(cause any) string {
 	return fmt.Sprintf("op journal cannot record this request (%v); the nudge did not run", cause)
 }
 
-// cliLaneNudgePreflight refuses, before the target resolves, a lane nudge
-// whose op cannot be written: no nudge store, a sessions store that cannot
-// host lanes or open as a lane store, an invalid key or a payload the
-// journal refuses. It reports
-// the refusal and answers errMessageOpRefused.
-func cliLaneNudgePreflight(cityPath string, cfg *config.City, store beads.NudgesStore, req cliOpRequest) error {
+// cliLaneNudgePreflight decides, before the target resolves, whether a
+// nudge takes the lane (cliLaneExecutesMessage over the nudge store's
+// sessions class), and refuses a lane nudge whose op cannot be written: no
+// nudge store while [ops] authoritative lists message, a sessions store that
+// cannot host lanes or open as a lane store, an invalid key or a payload the
+// journal refuses. It reports the refusal and answers errMessageOpRefused.
+// lane false (no error) means the nudge takes OJ-5's path instead: message
+// is not listed, or the list is unset and the store is not one the default
+// runs the lane over, or did not open.
+func cliLaneNudgePreflight(cityPath string, cfg *config.City, store beads.NudgesStore, req cliOpRequest) (lane bool, err error) {
+	if cliLaneMessageOff(cfg) {
+		return false, nil
+	}
 	refusal := &cliOp{req: req}
 	if store.Store == nil {
+		if !cliLaneMessageListed(cfg) {
+			return false, nil
+		}
 		refusal.refuse(cliOpCodeUnavailable, cliLaneUnavailable("the nudge store did not open"), "", req.key)
-		return errMessageOpRefused
+		return true, errMessageOpRefused
 	}
 	sessions := cliSessionStore(store.Store, cfg, cityPath)
+	if !cliLaneExecutesMessage(cfg, sessions) {
+		return false, nil
+	}
 	if err := laneStoreCapability(sessions); err != nil {
 		refusal.refuse(cliOpCodeUnavailable, err.Error(), "", req.key)
-		return errMessageOpRefused
+		return true, errMessageOpRefused
 	}
 	if _, err := opjournal.NewLaneStore(beads.SessionStore{Store: sessions}, cliOpClock); err != nil {
 		refusal.refuse(cliOpCodeUnavailable, cliLaneUnavailable(err), "", req.key)
-		return errMessageOpRefused
+		return true, errMessageOpRefused
 	}
 	if code, message, ok := cliLaneCheckRequest(req.key, req.payload); !ok {
 		refusal.refuse(code, message, "", req.key)
-		return errMessageOpRefused
+		return true, errMessageOpRefused
 	}
-	return nil
+	return true, nil
 }
 
 // resolveSessionNudgeTarget is resolveNudgeTarget for gc session nudge,
-// recorded as req: when [ops] authoritative lists message it first runs the
-// lane preflight (cliLaneNudgePreflight), else OJ-5's (messageOpPreflight).
+// recorded as req: it first runs the lane preflight
+// (cliLaneNudgePreflight), and OJ-5's (messageOpPreflight) for a nudge that
+// does not take the lane.
 func resolveSessionNudgeTarget(identifier string, req cliOpRequest, warningWriter ...io.Writer) (nudgeTarget, error) {
 	return resolveNudgeTargetAfter(identifier, false, func(cityPath string, cfg *config.City, store beads.NudgesStore) error {
-		if cliLaneExecutesMessage(cfg) {
-			return cliLaneNudgePreflight(cityPath, cfg, store, req)
+		if lane, err := cliLaneNudgePreflight(cityPath, cfg, store, req); lane || err != nil {
+			return err
 		}
 		return messageOpPreflight(cityPath, cfg, store, req)
 	}, warningWriter...)
@@ -192,19 +256,26 @@ func (n *cliLaneNudge) warnf(format string, args ...any) {
 }
 
 // deliverSessionNudgeLane carries out a nudge on the conversation lane when
-// [ops] authoritative lists message, the target names a session row and a
-// lane host can type into the session. It reports handled false, having
-// written and printed nothing, when the nudge takes the legacy path instead.
+// the lane executes message (cliLaneExecutesMessage), the target names a
+// session row and a lane host can type into the session. It reports handled
+// false, having written and printed nothing, when the nudge takes the legacy
+// path instead.
 func deliverSessionNudgeLane(target nudgeTarget, store beads.Store, sp runtime.Provider, message string, mode nudgeDeliveryMode, key string, jsonOutput bool, stdout, stderr io.Writer) (handled bool, code int) {
-	if !cliLaneExecutesMessage(target.cfg) || target.sessionID == "" {
+	if cliLaneMessageOff(target.cfg) || target.sessionID == "" {
 		return false, 0
 	}
 	n := &cliLaneNudge{target: target, sp: sp, message: message, mode: mode, asJSON: jsonOutput, stdout: stdout, stderr: stderr, key: key}
 	if isNilBeadStore(store) {
+		if !cliLaneMessageListed(target.cfg) {
+			return false, 0
+		}
 		n.refusal().refuse(cliOpCodeUnavailable, cliLaneUnavailable("the nudge store did not open"), "", key)
 		return true, 1
 	}
 	n.sessions = cliSessionStore(store, target.cfg, target.cityPath)
+	if !cliLaneExecutesMessage(target.cfg, n.sessions) {
+		return false, 0
+	}
 	st, err := opjournal.NewLaneStore(beads.SessionStore{Store: n.sessions}, cliOpClock)
 	if err != nil {
 		n.refusal().refuse(cliOpCodeUnavailable, cliLaneUnavailable(err), "", key)
@@ -234,6 +305,10 @@ func deliverSessionNudgeLane(target nudgeTarget, store beads.Store, sp runtime.P
 // run proposes the op, runs the inline pass in a live mode, reports and
 // rings.
 func (n *cliLaneNudge) run() int {
+	principal, actor := cliPrincipal(cliOpLookupEnv)
+	if code, refused := n.refuseImmediateBehindPendingInteraction(principal); refused {
+		return code
+	}
 	minted := n.key == ""
 	if minted {
 		k, err := legacyop.MintKey()
@@ -243,7 +318,6 @@ func (n *cliLaneNudge) run() int {
 		}
 		n.key = k
 	}
-	principal, actor := cliPrincipal(cliOpLookupEnv)
 	op, created, err := n.st.Propose(opjournal.Request{
 		Conversation: n.target.sessionID,
 		Kind:         opjournal.KindMessage,
@@ -277,6 +351,47 @@ func (n *cliLaneNudge) run() int {
 	code := n.report(op.ID, !created, res, passErr)
 	n.ring(op.ID)
 	return code
+}
+
+// refuseImmediateBehindPendingInteraction is the front door's refusal,
+// before anything is written, of an explicit immediate nudge to a session
+// waiting on a pending interaction (a permission prompt or a question,
+// which typed text would answer), worded as the legacy path's
+// (immediateNudgeBehindPendingInteractionError): an immediate nudge cannot
+// wait for the answer, where wait-idle and queued nudges are proposed and
+// the lane holds them until it is answered. A look that fails refuses too,
+// as the legacy path's immediate look does. A key that names an op under
+// principal is a rerun the op answers (replay), so it is not looked at.
+func (n *cliLaneNudge) refuseImmediateBehindPendingInteraction(principal string) (code int, refused bool) {
+	if n.mode != nudgeDeliveryImmediate || n.keyNamesOp(principal) {
+		return 0, false
+	}
+	pending, err := nudgeTargetPendingInteraction(n.target, n.sessions, n.sp, n.mode, n.stderr)
+	switch {
+	case err != nil:
+		n.refusal().refuse(cliOpCodePendingCheckUnavailable, fmt.Sprintf("%v; nothing was written, retry", err), "", n.key)
+		return 1, true
+	case pending == nil:
+		return 0, false
+	}
+	why := immediateNudgeBehindPendingInteractionError(n.target, describeWorkerPendingInteraction(pending), isQuestionInteraction(pending))
+	n.refusal().refuse(cliOpCodePendingInteraction, why.Error(), "", n.key)
+	return 1, true
+}
+
+// keyNamesOp reports whether the nudge's --key names an op of its
+// conversation under principal. A key that names none, no key, or a read
+// that fails reports false.
+func (n *cliLaneNudge) keyNamesOp(principal string) bool {
+	if n.key == "" {
+		return false
+	}
+	id, err := opjournal.DeriveID(n.st.Prefix(), n.target.sessionID, principal, n.key)
+	if err != nil {
+		return false
+	}
+	_, err = n.st.Get(id)
+	return err == nil
 }
 
 // replay answers a key that names an existing op: a closed op replays its

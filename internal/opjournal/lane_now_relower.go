@@ -93,7 +93,7 @@ const hasLoweredNowPage = 64
 // row's keys, not the op, so a row that does not decode counts:
 // RelowerNowUnits reports it.
 func HasLoweredNowMessages(store beads.SessionStore) (bool, error) {
-	if isNilStore(store.Store) {
+	if beads.IsNilStore(store) {
 		return false, errors.New("probing for lowered deliver-now messages: store is required")
 	}
 	for _, status := range relowerUnitStatuses {

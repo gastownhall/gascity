@@ -68,7 +68,7 @@ func tallyV2SessionMigration(cfg *config.City, cityName string, rows []session.I
 // v2SessionMigrationKeys is what one open row counts under: an unknown state,
 // its pool-slot session name, its configured named identity ("" for none).
 func v2SessionMigrationKeys(cfg *config.City, cityName string, info session.Info) (state string, unknown bool, slot, named string) {
-	if !isKnownStateInfo(info) && !isDrainAckStopPendingInfo(info) {
+	if isUnknownStateInfo(info) {
 		state, unknown = info.MetadataState, true
 	}
 	if name := strings.TrimSpace(info.SessionName); name != "" && strings.TrimSpace(info.PoolSlot) != "" {

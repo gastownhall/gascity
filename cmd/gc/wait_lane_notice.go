@@ -6,7 +6,7 @@ package main
 // instead of a queue item: keyed wait:<waitNudgeID(wait)>, so each delivery
 // attempt is its own op, caused by the wait, delivered at the boundary while
 // the session runs (live_only: the wait's readiness already drives the
-// wake), and scoped to the wait's registered continuation epoch when it
+// wake), and scoped to the continuation epoch the wait belongs to when it
 // names one. The wait's nudge_id then holds the op id, recorded before the
 // op is proposed, which its finalize, withdraw and re-arm read
 // (opjournal.IsOpID) in place of a queue shadow's. The notice's outcome ends
@@ -51,12 +51,15 @@ const waitNoticeWithdrawReason = "its wait was withdrawn"
 func waitNoticeKey(nudgeID string) string { return "wait:" + nudgeID }
 
 // waitNoticeRequest is the lane notice of wait's nudge attempt nudgeID to
-// conversation conv, carrying message.
-func waitNoticeRequest(conv string, wait sessionpkg.WaitInfo, nudgeID, message string) opjournal.Request {
+// session info's conversation, carrying message, scoped to the epoch the
+// wait belongs to on info (WaitInfo.DeliveryEpoch): the notice of a wait
+// registered while a fresh restart was pending goes to the conversation the
+// reset opened, under the attempt's key all the same.
+func waitNoticeRequest(info sessionpkg.Info, wait sessionpkg.WaitInfo, nudgeID, message string) opjournal.Request {
 	req := cliLaneNotice(waitNoticePrincipal, wait.ID, message, opjournal.WakeLiveOnly)
 	req.ClientKey = waitNoticeKey(nudgeID)
-	req.Conversation = conv
-	if epoch, err := strconv.ParseInt(strings.TrimSpace(wait.RegisteredEpoch), 10, 64); err == nil && epoch > 0 {
+	req.Conversation = info.ID
+	if epoch, err := strconv.ParseInt(strings.TrimSpace(wait.DeliveryEpoch(info)), 10, 64); err == nil && epoch > 0 {
 		req.Scope = opjournal.Scope{Kind: opjournal.ScopeContext, Epoch: epoch}
 	}
 	return req
@@ -80,7 +83,7 @@ func dispatchWaitNotice(lane plannerNoticeLane, sessFront *sessionpkg.Store, inf
 	if err != nil {
 		return false, fmt.Errorf("opening the lane store for wait %s: %w", wait.ID, err)
 	}
-	req := waitNoticeRequest(info.ID, wait, nudgeID, message)
+	req := waitNoticeRequest(info, wait, nudgeID, message)
 	preview, err := st.Preview(req)
 	switch {
 	case plannerNoticeRefused(err):

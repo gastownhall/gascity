@@ -90,9 +90,9 @@ func newHookBudgetFixture(t *testing.T) hookBudgetFixture {
 	t.Setenv("GC_TEMPLATE", hookBudgetIdentity)
 	t.Setenv(managedSessionHookEnv, "1")
 
-	prevAPI := mailCheckAPIClient
-	mailCheckAPIClient = func(string) (*api.Client, string) { return nil, "" }
-	t.Cleanup(func() { mailCheckAPIClient = prevAPI })
+	prevAPI := mailInjectProbeClient
+	mailInjectProbeClient = func(string) *api.Client { return nil }
+	t.Cleanup(func() { mailInjectProbeClient = prevAPI })
 	prevStepAPI := activeWorkStepAPIClient
 	activeWorkStepAPIClient = func(string) (*api.Client, string) { return nil, "controller-down" }
 	t.Cleanup(func() { activeWorkStepAPIClient = prevStepAPI })

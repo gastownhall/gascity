@@ -246,6 +246,42 @@ func TestStageFilesSurfacesKiroPreservationWarning(t *testing.T) {
 	}
 }
 
+// A work dir that already holds gc's own Kiro fallback is seeded into the pod
+// stage and then re-staged by the same overlay. Keeping it preserves nothing,
+// so pod staging must stage the fallback without a warning.
+func TestStageFilesQuietWhenWorkDirHoldsKiroFallback(t *testing.T) {
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, "AGENTS.md"), []byte("fallback instructions"), 0o644); err != nil {
+		t.Fatalf("write staged Kiro fallback: %v", err)
+	}
+
+	packOverlay := t.TempDir()
+	fallbackInstructions := filepath.Join(packOverlay, "per-provider", "kiro", "AGENTS.md")
+	if err := os.MkdirAll(filepath.Dir(fallbackInstructions), 0o755); err != nil {
+		t.Fatalf("mkdir Kiro fallback instructions: %v", err)
+	}
+	if err := os.WriteFile(fallbackInstructions, []byte("fallback instructions"), 0o644); err != nil {
+		t.Fatalf("write Kiro fallback instructions: %v", err)
+	}
+
+	var warnings bytes.Buffer
+	ops := newCapturingStageOps()
+	err := stageFiles(context.Background(), ops, "gc-kiro", runtime.Config{
+		WorkDir:         workDir,
+		ProviderName:    "kiro",
+		PackOverlayDirs: []string{packOverlay},
+	}, "", &warnings)
+	if err != nil {
+		t.Fatalf("stageFiles: %v", err)
+	}
+	if got := ops.files["/workspace/AGENTS.md"]; got != "fallback instructions" {
+		t.Fatalf("staged AGENTS.md = %q, want the Kiro fallback", got)
+	}
+	if got := warnings.String(); got != "" {
+		t.Fatalf("warnings = %q, want none for a work dir that already holds the fallback", got)
+	}
+}
+
 func TestStageFilesPropagatesFatalProviderOverlayError(t *testing.T) {
 	workDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(workDir, "AGENTS.md"), []byte("project instructions"), 0o600); err != nil {

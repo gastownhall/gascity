@@ -150,13 +150,14 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 	envBatch, _ := sp.(runtime.EnvironmentBatchProvider)
 	runtimeSessions := s.newAgentSessionResolver(ctx, cfg, cityName)
 
+	pools := newRequestSessionListing(sp)
 	var agents []agentResponse
 	var partialErrors []string
 	for _, a := range cfg.Agents {
 		// Provenance is a property of the declared agent, shared by every
 		// pool-expanded instance, so compute it once per source agent.
 		pack, packDerived := agentPackProvenance(a, rawCfg, cfg)
-		expanded, expandErr := expandAgentChecked(a, cityName, sessTmpl, sp, cfg.NamedSessions)
+		expanded, expandErr := expandAgentChecked(a, cityName, sessTmpl, pools, cfg.NamedSessions)
 		// A runtime server that is not running at all (tmux before its first
 		// session) has no sessions; that is a complete answer, not a failure.
 		if runtime.IsRuntimeServerAbsent(expandErr) {
@@ -299,7 +300,11 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 				}
 			}
 			quarantined := s.state.IsQuarantined(sessionName)
-			resp.State = computeAgentState(suspended, quarantined, effectiveRunning, resp.ActiveBead, lastActivity)
+			var program runtime.ProgramStatus
+			if running {
+				program = programStatusUnder(configuredProgramStatusMode(cfg), sp, sessionName)
+			}
+			resp.State = computeAgentState(suspended, quarantined, effectiveRunning, resp.ActiveBead, lastActivity, program)
 
 			if wantPeek && running {
 				if output, err := sp.Peek(sessionName, 5); err == nil {
@@ -310,6 +315,8 @@ func (s *Server) humaHandleAgentList(ctx context.Context, input *AgentListInput)
 			if running && provider == "claude" && canAttributeSession(a, ea.qualifiedName, cfg, s.state.CityPath()) {
 				s.enrichSessionMeta(&resp, a, ea.qualifiedName)
 			}
+			obs := observeProgram(program, resp.Activity)
+			resp.ProgramStatus, resp.Activity, resp.ActivitySource = obs.status, obs.activity, obs.activitySource
 
 			agents = append(agents, resp)
 		}
@@ -444,11 +451,17 @@ func (s *Server) agentByName(ctx context.Context, name string) (*IndexOutput[age
 		}
 	}
 	quarantined := s.state.IsQuarantined(sessionName)
-	resp.State = computeAgentState(suspended, quarantined, effectiveRunning, resp.ActiveBead, lastActivity)
+	var program runtime.ProgramStatus
+	if running {
+		program = programStatusUnder(configuredProgramStatusMode(cfg), sp, sessionName)
+	}
+	resp.State = computeAgentState(suspended, quarantined, effectiveRunning, resp.ActiveBead, lastActivity, program)
 
 	if running && provider == "claude" && canAttributeSession(agentCfg, name, cfg, s.state.CityPath()) {
 		s.enrichSessionMeta(&resp, agentCfg, name)
 	}
+	obs := observeProgram(program, resp.Activity)
+	resp.ProgramStatus, resp.Activity, resp.ActivitySource = obs.status, obs.activity, obs.activitySource
 
 	return &IndexOutput[agentResponse]{
 		Index: index,
