@@ -139,3 +139,59 @@ func TestSameTOMLDocument(t *testing.T) {
 		t.Fatal("a file without [storage] declares it")
 	}
 }
+
+const appendStorageBlock = "[storage]\n[storage.classes]\nwork = \"work\"\ngraph = \"infra\"\n[storage.bindings.infra]\nprovider = \"sqlite-beads\"\npath = \".gc/store\"\n"
+
+// TestAppendStorageToCityTOMLKeepsEveryByte: the split appends its block and
+// changes nothing else, comments, key order, a missing trailing newline and
+// CRLF line endings included.
+func TestAppendStorageToCityTOMLKeepsEveryByte(t *testing.T) {
+	for _, tc := range []struct {
+		name, content, want string
+	}{
+		{
+			"comments and tables",
+			"# my city\n[workspace]\nname = \"c\" # keep\n\n[[rigs]]\nname = \"r\"\npath = \"r\"\n",
+			"# my city\n[workspace]\nname = \"c\" # keep\n\n[[rigs]]\nname = \"r\"\npath = \"r\"\n\n" + appendStorageBlock,
+		},
+		{
+			"no trailing newline",
+			"[workspace]\nname = \"c\"",
+			"[workspace]\nname = \"c\"\n\n" + appendStorageBlock,
+		},
+		{
+			"CRLF",
+			"[workspace]\r\nname = \"c\"\r\n",
+			"[workspace]\r\nname = \"c\"\r\n\r\n" + strings.ReplaceAll(appendStorageBlock, "\n", "\r\n"),
+		},
+		{"empty", "", appendStorageBlock},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := AppendStorageToCityTOML([]byte(tc.content), []byte(appendStorageBlock))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != tc.want {
+				t.Fatalf("got\n%q\nwant\n%q", got, tc.want)
+			}
+			removed, err := RemoveStorageFromCityTOML(got)
+			if err != nil || !SameTOMLDocument(removed, []byte(tc.content)) {
+				t.Fatalf("removing the appended block = %q, %v; want the original document", removed, err)
+			}
+		})
+	}
+}
+
+// TestAppendStorageToCityTOMLRefuses: a file that declares storage already,
+// or a block that declares anything but storage, is refused.
+func TestAppendStorageToCityTOMLRefuses(t *testing.T) {
+	if _, err := AppendStorageToCityTOML([]byte("[storage.classes]\nwork = \"work\"\n"), []byte(appendStorageBlock)); !errors.Is(err, ErrSurgicalStorageEditUnsupported) || !strings.Contains(err.Error(), "already declares [storage]") {
+		t.Fatalf("over a declared [storage] = %v", err)
+	}
+	if _, err := AppendStorageToCityTOML([]byte("[workspace]\nname = \"c\"\n"), []byte("[daemon]\nx = 1\n"+appendStorageBlock)); err == nil {
+		t.Fatal("a block declaring [daemon] too was appended")
+	}
+	if _, err := AppendStorageToCityTOML([]byte("[workspace]\nname = \"c\"\n"), []byte("[daemon]\nx = 1\n")); err == nil {
+		t.Fatal("a block without [storage] was appended")
+	}
+}

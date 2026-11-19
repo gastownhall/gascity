@@ -14,6 +14,8 @@ import (
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/dispatch"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 )
 
@@ -610,6 +612,148 @@ func TestControlDispatchDrainNamesTheWorkLegForConvoyMembership(t *testing.T) {
 		if resumed[i].UnitConvoyID != manifest[i].UnitConvoyID {
 			t.Fatalf("resumed row %d unit convoy = %q, want the first pass's %q", i, resumed[i].UnitConvoyID, manifest[i].UnitConvoyID)
 		}
+	}
+}
+
+// TestConvoyCheckRetiresTheUnitsOfADrainTheRootGateClosed is the end-to-end
+// regression for the paths #8173's leak continued through, on a converged split
+// city. The real dispatcher expands a drain, which mints its unit convoys in the
+// scope store. The workflow root is then canceled or settled, and the next
+// dispatch closes the drain through the root gate without running the drain, so
+// the drain never retires its units and is never processed again. `gc convoy
+// check`, reading the drain control from the class binding, is what retires
+// them: skipped, since no row reached a verdict, with the retirement reason.
+func TestConvoyCheckRetiresTheUnitsOfADrainTheRootGateClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		stop         func(t *testing.T, graph beads.Store, rootID string)
+		drainOutcome string
+	}{
+		{
+			name: "canceled root",
+			stop: func(t *testing.T, graph beads.Store, rootID string) {
+				if err := graph.SetMetadata(rootID, beadmeta.CancelRequestedMetadataKey, "true"); err != nil {
+					t.Fatalf("cancel workflow root: %v", err)
+				}
+			},
+			drainOutcome: beadmeta.OutcomeCanceled,
+		},
+		{
+			name: "settled root",
+			stop: func(t *testing.T, graph beads.Store, rootID string) {
+				if err := graph.Close(rootID); err != nil {
+					t.Fatalf("close workflow root: %v", err)
+				}
+			},
+			drainOutcome: beadmeta.OutcomeSkipped,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			scopeStore := beads.NewMemStore()
+			graphStore := beads.NewMemStoreFrom(1000, nil, nil)
+			seedCLIStorageRoutes(t, cityPath, messagingSplitRoutes(graphStore))
+
+			convoy, err := scopeStore.Create(beads.Bead{
+				Title:    "input convoy",
+				Type:     "convoy",
+				Metadata: map[string]string{beadmeta.SyntheticMetadataKey: "true"},
+			})
+			if err != nil {
+				t.Fatalf("create input convoy: %v", err)
+			}
+			var memberIDs []string
+			for _, title := range []string{"first", "second"} {
+				member, err := scopeStore.Create(beads.Bead{Title: title, Type: "task"})
+				if err != nil {
+					t.Fatalf("create member: %v", err)
+				}
+				if err := convoycore.TrackItemIn(convoycore.MemberClasses{Convoy: beadstest.Work(scopeStore)}, convoy.ID, member.ID); err != nil {
+					t.Fatalf("track member: %v", err)
+				}
+				memberIDs = append(memberIDs, member.ID)
+			}
+			root, err := graphStore.Create(beads.Bead{
+				Title: "workflow",
+				Type:  "task",
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey: beadmeta.KindWorkflow,
+					"gc.formula_contract":    "graph.v2",
+					"gc.input_convoy_id":     convoy.ID,
+				},
+			})
+			if err != nil {
+				t.Fatalf("create workflow root: %v", err)
+			}
+			drain, err := graphStore.Create(beads.Bead{
+				Title: "drain",
+				Type:  "task",
+				Metadata: map[string]string{
+					beadmeta.KindMetadataKey:         "drain",
+					beadmeta.RootBeadIDMetadataKey:   root.ID,
+					beadmeta.RootStoreRefMetadataKey: "city:test-city",
+					"gc.drain_context":               "separate",
+					"gc.drain_formula":               "drain-item",
+					"gc.drain_member_access":         "read",
+				},
+			})
+			if err != nil {
+				t.Fatalf("create drain control: %v", err)
+			}
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents:    []config.Agent{{Name: config.ControlDispatcherAgentName, StartCommand: "gc convoy control --serve"}},
+			}
+			cfg.FormulaLayers.City = []string{splitClassDrainFormulaDir(t)}
+
+			var stdout, stderr bytes.Buffer
+			if err := runControlDispatcherWithStoreAndConfig(cityPath, cityPath, scopeStore, drain.ID, cfg, &stdout, &stderr); err != nil {
+				t.Fatalf("control dispatch (expand): %v; stderr=%q", err, stderr.String())
+			}
+			expanded := beadByID(t, graphStore, drain.ID)
+			if expanded.Status != "open" || expanded.Metadata[beadmeta.DrainStateMetadataKey] != beadmeta.DrainStateExpanded {
+				t.Fatalf("after the first pass: status=%q gc.drain_state=%q, want open and %q; stderr=%q", expanded.Status, expanded.Metadata[beadmeta.DrainStateMetadataKey], beadmeta.DrainStateExpanded, stderr.String())
+			}
+			rows := parseDrainManifestRows(t, expanded.Metadata[beadmeta.DrainManifestMetadataKey])
+			if len(rows) != len(memberIDs) {
+				t.Fatalf("manifest rows = %d, want %d", len(rows), len(memberIDs))
+			}
+
+			tc.stop(t, graphStore, root.ID)
+			stdout.Reset()
+			stderr.Reset()
+			if err := runControlDispatcherWithStoreAndConfig(cityPath, cityPath, scopeStore, drain.ID, cfg, &stdout, &stderr); err != nil {
+				t.Fatalf("control dispatch (stopped root): %v; stderr=%q", err, stderr.String())
+			}
+			closed := beadByID(t, graphStore, drain.ID)
+			if closed.Status != "closed" || closed.Metadata[beadmeta.OutcomeMetadataKey] != tc.drainOutcome {
+				t.Fatalf("drain = status %q outcome %q, want closed/%s by the root gate; stderr=%q", closed.Status, closed.Metadata[beadmeta.OutcomeMetadataKey], tc.drainOutcome, stderr.String())
+			}
+			for _, row := range rows {
+				if unit := beadByID(t, scopeStore, row.UnitConvoyID); unit.Status == "closed" {
+					t.Fatalf("unit convoy %s closed with the drain; this test exercises the units a gate-closed drain leaves for the check", unit.ID)
+				}
+			}
+
+			stdout.Reset()
+			stderr.Reset()
+			views := []convoyStoreView{{store: scopeStore}, {store: graphStore, role: convoyViewClassBinding}}
+			if code := doConvoyCheckAcrossStores(views, events.Discard, &stdout, &stderr); code != 0 {
+				t.Fatalf("gc convoy check exited %d: %s", code, stderr.String())
+			}
+			for _, row := range rows {
+				unit := beadByID(t, scopeStore, row.UnitConvoyID)
+				if unit.Status != "closed" || unit.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeSkipped || unit.Metadata["close_reason"] != dispatch.DrainUnitRetiredCloseReason {
+					t.Errorf("unit convoy %s = status %q gc.outcome %q close_reason %q, want closed/skipped with the retirement reason",
+						unit.ID, unit.Status, unit.Metadata[beadmeta.OutcomeMetadataKey], unit.Metadata["close_reason"])
+				}
+			}
+			for _, id := range append([]string{convoy.ID}, memberIDs...) {
+				if bead := beadByID(t, scopeStore, id); bead.Status == "closed" {
+					t.Errorf("%s closed; the check retires the drain's units, not its input convoy or the items", id)
+				}
+			}
+		})
 	}
 }
 

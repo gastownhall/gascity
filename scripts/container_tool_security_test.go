@@ -171,7 +171,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		"litellm>=1.106.5",
 		"filelock>=3.29.0,<4",
 		"opentelemetry-api>=1.45.1",
-		"dnspython>=2.9.0",
+		"dnspython>=2.9.2",
 		"joserfc>=1.7.5",
 	} {
 		if !strings.Contains(input, want) {
@@ -208,7 +208,7 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 		"filelock==3.29.0 \\",
 		"opentelemetry-api==1.45.1 \\",
 		"authlib==1.9.1 \\",
-		"dnspython==2.9.0 \\",
+		"dnspython==2.9.2 \\",
 		// Lock-only CVE bumps: no input floor, so this pin is their only guard.
 		"bleach==6.4.0 \\",
 		"h2==4.4.1 \\",

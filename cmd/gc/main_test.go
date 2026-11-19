@@ -336,6 +336,12 @@ func TestMain(m *testing.M) {
 	// floor would reach for a bd that does not serve it; the tests that pin
 	// the floor install their own surface.
 	cityHashConfigOpener = func(string) (cityHashConfig, error) { return cityHashConfig{}, nil }
+	// The split's rehearsal and the storage-split doctor check run `gc
+	// version` on the gc an agent session would find (B10). A test never runs
+	// a gc from the host's PATH or home: by default it finds none, and the
+	// tests that pin the probe install their own (stubSessionPathGC) or call
+	// probeSessionPathGCVersion.
+	minGCVersionPathProbe = func(*config.City) (string, string, error) { return "", "", nil }
 	if err := os.Setenv("XDG_RUNTIME_DIR", runtimeDir); err != nil {
 		panic(err)
 	}

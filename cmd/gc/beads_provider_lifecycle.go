@@ -156,6 +156,9 @@ var (
 	initDirIfReadyInitAndHookDir      = initAndHookDir
 	initDirIfReadyWaitForManagedDolt  = waitForManagedDoltInitReady
 	initAndHookDirWaitForScopeReady   = waitForBeadsScopeReadyAfterRecovery
+	// startBeadsLifecycleInitRig is how the bead lifecycle initializes each
+	// rig, replaced by the tests that pin how it treats a rig it cannot serve.
+	startBeadsLifecycleInitRig = initAndHookDir
 )
 
 func isRetryableManagedDoltLifecycleError(err error) bool {
@@ -194,7 +197,13 @@ func isRetryableManagedDoltLifecycleError(err error) bool {
 // which holds the city to that record. Rigs must have absolute paths before
 // calling (resolve relative paths first).
 func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer) error {
-	if err := startBeadsLifecycleResolvingCityDatabase(cityPath, cfg, stderr, nil); err != nil {
+	err := startBeadsLifecycleResolvingCityDatabase(cityPath, cfg, stderr, nil)
+	// Init migrates only a database it is bootstrapping. Name every other
+	// one whose schema differs from the linked beads library's, with the
+	// command an operator runs, whether or not the lifecycle succeeded: a
+	// city store the pinned bd cannot open is one way it fails.
+	writeBdSchemaNotices(stderr, "warning: ", bdSchemaNoticesFor(cityPath, cfg))
+	if err != nil {
 		return err
 	}
 	// The binding boot leaves behind is the one every reload must keep.
@@ -307,7 +316,17 @@ func startBeadsLifecycleResolvingCityDatabase(cityPath string, cfg *config.City,
 			continue
 		}
 		prefix := cfg.Rigs[i].EffectivePrefix()
-		if err := initAndHookDir(cityPath, cfg.Rigs[i].Path, prefix); err != nil {
+		if err := startBeadsLifecycleInitRig(cityPath, cfg.Rigs[i].Path, prefix); err != nil {
+			// A rig whose database the pinned bd cannot open because of its
+			// schema waits for an operator to migrate it (init migrates only
+			// a database it is bootstrapping). Leave that rig unserved, as
+			// the runtime leaves any rig whose store will not open, rather
+			// than take the whole city down for it.
+			var unserved *bdSchemaUnservedError
+			if errors.As(err, &unserved) {
+				fmt.Fprintf(stderr, "init rig %q beads: %v; leaving the rig unserved until its database is migrated\n", cfg.Rigs[i].Name, err) //nolint:errcheck // best-effort stderr
+				continue
+			}
 			return fmt.Errorf("init rig %q beads: %w", cfg.Rigs[i].Name, err)
 		}
 	}
@@ -1069,7 +1088,7 @@ func initAndHookDirResolvingDatabase(cityPath, dir, prefix string, bootStore *ci
 			return fmt.Errorf("sync managed dolt port mirrors after init: %w", err)
 		}
 		if err := initAndHookDirWaitForScopeReady(context.Background(), dir, cityPath, time.Now().Add(10*time.Second)); err != nil {
-			return fmt.Errorf("waiting for initialized bead scope readiness: %w", err)
+			return scopeReadinessError(cityPath, dir, err)
 		}
 		// Strong post-init validation: confirm the canonical database
 		// actually exists on the running Dolt server. The scope-ready
@@ -2772,7 +2791,12 @@ func managedDoltRuntimeProcessOwned(state doltRuntimeState, layout managedDoltRu
 	if holderPID > 0 && holderPID != state.PID {
 		return false
 	}
-	owned, deleted := inspectManagedDoltOwnership(state.PID, layout)
+	owned, deleted, err := inspectManagedDoltOwnership(state.PID, layout)
+	if err != nil {
+		// Ownership undecided: refuse to adopt the process as ours. This gate
+		// only grants trust, so declining is the safe direction.
+		return false
+	}
 	if deleted {
 		return false
 	}
