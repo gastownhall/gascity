@@ -369,9 +369,10 @@ func (p *Provider) launchOrchestration(ctx context.Context, name string, cfg run
 	// would only trigger a respawn storm; record the strand durably instead
 	// so it is machine-visible and countable. For a warm-bind slot, the
 	// event-based claim nudge (startPreparedStartCandidate's warm-reuse
-	// branch) also re-delivers on the next reconcile tick; for every other
-	// path nudgeStalledPoolClaims remains the reconcile-tick backstop of
-	// last resort.
+	// branch) also re-delivers on the next reconcile tick. For a pool slot
+	// nudgeStalledPoolClaims is one reconcile-tick backstop among several:
+	// the execution backstop covers a claim that never becomes execution, and
+	// a named session is outside nudgeStalledPoolClaims entirely.
 	if err := p.c.deliverStartupTurn(ctx, launch.paneID, startupText, launch.mode, cfg.NotReadyMarkers, cfg.ReadyPromptPrefix); err != nil {
 		p.recordStartupDeliveryUnconfirmed(name, launch.paneID, idleOutcome, err)
 	}
@@ -495,7 +496,10 @@ func hasSessionSetup(cfg runtime.Config) bool {
 // nudge (e.g. an oversight tick). Deliver the prime first (the behavioral prompt)
 // then the nudge (the first task): returning only the nudge left such sessions
 // unprimed, because the prime was dropped and GC_STARTUP_PROMPT_DELIVERED=1 also
-// suppresses the SessionStart hook's fallback copy of the prime. A pool slot has
+// suppresses the SessionStart hook's fallback copy of the prime. That flag
+// means a startup delivery was configured or attempted for this incarnation,
+// not confirmed receipt; primed_at on the session bead is the durable
+// confirmation. A pool slot has
 // no prime, so its claim nudge is returned byte-for-byte unchanged. Returns ""
 // when there is nothing to deliver (deterministic workers, suppressed prompt).
 func startupDeliveryText(cfg runtime.Config) string {

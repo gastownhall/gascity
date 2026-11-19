@@ -110,8 +110,9 @@ type runtimeFacts struct {
 	// live is true when a matching runtime session is present and alive.
 	live bool
 	// primedEnv is true when the live runtime env carries
-	// GC_STARTUP_PROMPT_DELIVERED — the prompt was delivered this runtime but may
-	// not yet be durably recorded.
+	// GC_STARTUP_PROMPT_DELIVERED — a startup delivery was configured or
+	// attempted this runtime. That is not confirmed receipt, and it is not yet
+	// durably recorded as primed_at.
 	primedEnv bool
 }
 
@@ -132,8 +133,9 @@ const (
 	actionStampCanonicalIdentity
 	// actionStampPrimedFromRuntime persists primed_at from an observed-live
 	// runtime that already carries GC_STARTUP_PROMPT_DELIVERED but lacks the
-	// durable confirmation. It heals the durable world with NO nudge — the prompt
-	// already landed this incarnation.
+	// durable confirmation. It heals the durable world with NO nudge — a startup
+	// delivery was already attempted this incarnation, so a repeat nudge is
+	// withheld and primed_at is stamped from the flag alone.
 	actionStampPrimedFromRuntime
 	// actionAttemptPrime is the two-phase delivery: stamp the write-ahead attempt
 	// marker, deliver via worker.Handle.Nudge, then stamp the confirmation. It is
