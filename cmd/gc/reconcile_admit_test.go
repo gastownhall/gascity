@@ -375,6 +375,42 @@ func TestAdmitLRUOrderUsesWakeFairnessTime(t *testing.T) {
 	}
 }
 
+// TestAdmitStandingStartDefersToRoutedPoolCreate is the #7680 v2 scenario
+// (AC-2): with 2 tokens, a standing start with the OLDEST rank (an idle
+// always-mode restart that slept long ago), a demand start and a pool create
+// for routed work — the demand start and the pool create are admitted and
+// the standing start defers causeAwaitingBudget, because the standing start
+// cannot spend the token the create holds for its row's first start. A pure
+// LRU order would admit the standing start first and starve the routed pool.
+func TestAdmitStandingStartDefersToRoutedPoolCreate(t *testing.T) {
+	in := admitIn(2, 4)
+	demand := startOn(2, "", time.Hour)
+	standing := startOn(1, "", 2*time.Hour) // oldest rank
+	standing.Standing = true
+	create := poolCreate("w", "")
+	res := admit(in, []intent{demand, standing, create})
+	if got := keysOf(res.Admitted); fmt.Sprint(got) != "[start:gc-2 create:]" {
+		t.Fatalf("admitted %v, want the demand start then the routed pool create", got)
+	}
+	if len(res.Deferred) != 1 || res.Deferred[0].Kind != intentStart || res.Deferred[0].Key.ID != standing.Key.ID || res.Deferred[0].Cause != causeAwaitingBudget {
+		t.Fatalf("deferred %+v, want only the standing start behind causeAwaitingBudget", res.Deferred)
+	}
+}
+
+// TestAdmitStandingStartRunsWhenBudgetIsFree pins the other half of #7680:
+// standing starts are ordered behind demand and creates, never excluded.
+// With a free budget every start is admitted, whatever its class.
+func TestAdmitStandingStartRunsWhenBudgetIsFree(t *testing.T) {
+	in := admitIn(3, 4)
+	demand := startOn(1, "", time.Hour)
+	standing := startOn(2, "", 2*time.Hour)
+	standing.Standing = true
+	res := admit(in, []intent{standing, demand})
+	if got := keysOf(res.Admitted); fmt.Sprint(got) != "[start:gc-1 start:gc-2]" {
+		t.Fatalf("admitted %v, want both starts admitted demand-first", got)
+	}
+}
+
 // Kills a create admitted when its row's first start could not be: no token
 // left after the starts, the city cap reached, or its endpoint shut.
 func TestAdmitCreateOnlyIfStartAdmissible(t *testing.T) {

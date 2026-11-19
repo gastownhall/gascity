@@ -125,7 +125,17 @@ type intent struct {
 	Key      rowKey      // the row; zero for a create
 	Reason   string      // the arm's reason, for the trace
 	Endpoint endpointKey // config-only; a start or create is gated on it
-	Rank     time.Time   // orders starts oldest first: wakeFairnessTime (START-009)
+	// Rank orders starts oldest first within their tier: wakeFairnessTime
+	// (START-009). The standing tier admits after the pool creates, so Rank
+	// orders standing starts only among themselves (#7680).
+	Rank time.Time
+	// Standing marks a start the awake set classified standing —
+	// configuration alone keeps the session up and no work or named demand
+	// is behind it (#7680). Admission runs demand starts (tier 0) before
+	// any create and standing starts after the pool creates, so a standing
+	// restart cannot take a token or a slot a routed pool create holds for
+	// its row's first start. Rank still orders within each start tier.
+	Standing bool
 	// CreatePlan is a create's plan; Floor marks a pool create that
 	// satisfies a min_active_sessions floor, for the fair share.
 	CreatePlan createPlan
@@ -255,11 +265,12 @@ type admission struct {
 	poolAdmitted bool
 }
 
-// admit is the pass's admission (P4). In order: starts, in LRU rank with
-// probe rotation inside each endpoint; adopts; named creates, then pool
-// creates in fair-share order; the other probing effects; row writes. Each
-// intent is checked against the boot gate, its row's backoff, the swap
-// pause, then its class's caps.
+// admit is the pass's admission (P4). In order: demand starts, in LRU rank
+// with probe rotation inside each endpoint; adopts; named creates, then pool
+// creates in fair-share order; standing starts (configuration-only wakes),
+// ranked and probe-rotated among themselves; the other probing effects; row
+// writes. Each intent is checked against the boot gate, its row's backoff,
+// the swap pause, then its class's caps.
 //
 //gc:pure
 func admit(in admitInput, intents []intent) admitResult {
@@ -320,45 +331,79 @@ func admit(in admitInput, intents []intent) admitResult {
 	return res
 }
 
+// The admission tiers, in order: demand starts, then adopts, then named
+// creates, then pool creates in fair-share order, then standing starts
+// (configuration-only wakes, #7680 — after the pool creates, so a standing
+// restart can never take a token or a create slot a routed pool create holds
+// for its row's first start), then the probing effects, the other row
+// writes, and kinds the spec table does not know.
+const (
+	tierStarts = iota
+	tierAdopts
+	tierNamedCreates
+	tierPoolCreates
+	tierStandingStarts
+	tierProbing
+	tierOther
+	tierUnknown
+)
+
 // order sorts intents into admission order, stably, and gathers the pool
 // creates' fair-share demand.
 func (a *admission) order(intents []intent) []intent {
 	tier := func(it intent) int {
-		switch spec, ok := effectSpecs[it.Kind]; {
+		spec, ok := effectSpecs[it.Kind]
+		switch {
 		case !ok:
-			return 6
+			return tierUnknown
+		case spec.class == capStarts && it.Standing:
+			return tierStandingStarts
 		case spec.class == capStarts:
-			return 0
+			return tierStarts
 		case it.Kind == intentAdopt:
-			return 1
+			return tierAdopts
 		case spec.class == capCreates && it.named():
-			return 2
+			return tierNamedCreates
 		case spec.class == capCreates:
-			return 3
+			return tierPoolCreates
 		case spec.class == capProbing:
-			return 4
+			return tierProbing
 		}
-		return 5
+		return tierOther
 	}
 	out := slices.Clone(intents)
 	sort.SliceStable(out, func(i, j int) bool {
 		x, y := out[i], out[j]
-		if tx, ty := tier(x), tier(y); tx != ty || tx != 0 {
+		tx, ty := tier(x), tier(y)
+		if tx != ty {
 			return tx < ty
+		}
+		// Rank-then-key orders both start tiers; every other tier keeps
+		// today's stable order.
+		if tx != tierStarts && tx != tierStandingStarts {
+			return false
 		}
 		if !x.Rank.Equal(y.Rank) {
 			return x.Rank.Before(y.Rank)
 		}
 		return x.Key.Leg < y.Key.Leg || (x.Key.Leg == y.Key.Leg && x.Key.ID < y.Key.ID)
 	})
-	starts := 0
-	for starts < len(out) && tier(out[starts]) == 0 {
-		starts++
+	demandStarts := 0
+	for demandStarts < len(out) && tier(out[demandStarts]) == tierStarts {
+		demandStarts++
 	}
-	rotateProbeSlots(out[:starts], func(it intent) endpointKey { return it.Endpoint },
+	standingStarts := demandStarts
+	for standingStarts < len(out) && tier(out[standingStarts]) == tierStandingStarts {
+		standingStarts++
+	}
+	// Probe rotation runs within each start tier, so a refusing endpoint
+	// never rotates a standing start ahead of a demand one.
+	rotateProbeSlots(out[:demandStarts], func(it intent) endpointKey { return it.Endpoint },
 		func(k endpointKey, it intent) int { return a.in.Endpoints[k].Refusals[it.Key.ID] })
-	for _, it := range out[starts:] {
-		if tier(it) != 3 {
+	rotateProbeSlots(out[demandStarts:standingStarts], func(it intent) endpointKey { return it.Endpoint },
+		func(k endpointKey, it intent) int { return a.in.Endpoints[k].Refusals[it.Key.ID] })
+	for _, it := range out[standingStarts:] {
+		if tier(it) != tierPoolCreates {
 			continue
 		}
 		i := slices.IndexFunc(a.demands, func(d poolplan.Demand) bool { return d.Template == it.CreatePlan.Template })
@@ -405,7 +450,12 @@ func (a *admission) admitOne(it *intent) string {
 	}
 	switch spec.class {
 	case capStarts:
-		held, cause := a.startCause(it.Key, it.Endpoint, a.bucket.Tokens, 0)
+		// The same leftover rule createCause uses: a start cannot spend a
+		// token an admitted create holds for its row's first start.
+		// Demand starts run before any create (createTokens is still 0
+		// then), so they are unaffected; a standing start can no longer
+		// take a held token (#7680).
+		held, cause := a.startCause(it.Key, it.Endpoint, a.bucket.Tokens-a.createTokens, 0)
 		if a.starved = a.starved || cause == causeAwaitingBudget; cause != "" {
 			return cause
 		}

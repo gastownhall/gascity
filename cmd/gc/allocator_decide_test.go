@@ -319,6 +319,33 @@ func TestAllocator_CitySuspended_PublishesSuspendedNotEmptySelection(t *testing.
 	}
 }
 
+// The #7680 implementer check: a stopped always named session restarting on
+// its existing open canonical row is a START the awake set classifies
+// standing — not a named create — so admission tiers it behind the routed
+// pool creates without changing its wake.
+func TestAllocator_StoppedAlwaysNamedRowIsAStandingStart(t *testing.T) {
+	d := newAllocFixture(t, chatCity("always")).sessions(chatRow("gc-1", "1")).decide()
+	if hasNamedPlan(d) {
+		t.Fatalf("an existing open canonical row restarts as a start, not a named create: plans %+v", d.Plans)
+	}
+	e := entryOf(t, d, "gc-1")
+	if e.Desired != desireWake || e.Reason != "named-always" {
+		t.Fatalf("entry %s/%s, want the named-always wake", e.Desired, e.Reason)
+	}
+	if !e.Standing {
+		t.Fatalf("an always named row with no work or named demand behind the wake must classify standing (#7680)")
+	}
+	// The same row with direct work behind it (an in-progress bead
+	// assigned to the identity) is demand, not standing.
+	f := newAllocFixture(t, chatCity("always"))
+	f.in.Demand.AssignedWork = []beads.Bead{{ID: "w-1", Status: "in_progress", Assignee: "chat"}}
+	f.in.Demand.AssignedStoreRefs = []string{""}
+	d = f.sessions(chatRow("gc-1", "1")).decide()
+	if e := entryOf(t, d, "gc-1"); e.Desired != desireWake || e.Standing {
+		t.Fatalf("with assigned work: %s standing=%v, want a demand wake", e.Desired, e.Standing)
+	}
+}
+
 // Kills: v2 killing on suspend what legacy leaves alone (owner decision at
 // P3-5a review; session_reconciler.go:2414-2436): a partial store read, an
 // uncertain liveness, a pending create within its lease and open assigned

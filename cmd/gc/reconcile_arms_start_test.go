@@ -81,6 +81,32 @@ func TestDecideRowStartGates(t *testing.T) {
 	}
 }
 
+// Kills a start that drops or fabricates the awake set's standing
+// classification (#7680): a wake classified standing (configuration alone
+// keeps the session up) carries Standing on its start intent, so admission
+// tiers it behind the pool creates; a demand start leaves it false.
+func TestStartIntentCarriesTheStandingClassification(t *testing.T) {
+	woke := gatherNow.Add(-time.Hour).Format(time.RFC3339)
+	for _, tc := range []struct {
+		name     string
+		standing bool
+	}{{"standing", true}, {"demand", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newHealCase(t, livenessGone, desireWake, "state", "asleep", "last_woke_at", woke)
+			e := c.a.Snapshot.Entries[c.k]
+			e.Endpoint = "provider:claude"
+			e.Standing = tc.standing
+			info := c.w.Census.Rows[c.k].Info
+			tp := TemplateParams{TemplateName: "worker", ResolvedProvider: &config.ResolvedProvider{Name: "claude"}}
+			c.w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(info): {TP: tp}}}
+			it, next := decideRow(c.w, c.a, c.k)
+			if it.Kind != intentStart || it.Standing != tc.standing || !next.IsZero() {
+				t.Fatalf("decideRow = (%q, standing %v, next %v), want a start carrying standing=%v", it.Kind, it.Standing, next, tc.standing)
+			}
+		})
+	}
+}
+
 // Kills a second Launch over a runtime that is already up, and an adopt of
 // a committed row or of a runtime that is not the row's own: a creating row
 // whose own runtime reads alive and Current is adopted; a committed one,

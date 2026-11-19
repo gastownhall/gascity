@@ -168,6 +168,11 @@ type selectionEntry struct {
 	// own stop holding only blocked pre-assigned work, which A21 holds
 	// without the stranded branch until its bound (ga-ylpbsy.16).
 	Park parkVerdict
+	// Standing is the awake decision's standing classification of the wake
+	// (#7680): configuration alone keeps the session up, with no work or
+	// named demand behind it. Only a row classification sets (with the
+	// wake desire); an honored explicit wake leaves it false.
+	Standing bool
 }
 
 // rowBasis is the row incarnation the pass saw.

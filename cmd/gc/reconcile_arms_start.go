@@ -254,7 +254,7 @@ func (r *rowFacts) startIntent(reason string) (intent, bool) {
 	}
 	r.rests |= restRuntime // bringUp reads the runtime fresh and decides on it (S1)
 	basis := rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}
-	return intent{Kind: intentStart, Reason: reason, Basis: basis, Endpoint: e.Endpoint, Rank: wakeFairnessTime(startCandidate{info: r.row.Info}), Patch: patch, Class: class, Kept: kept}, true
+	return intent{Kind: intentStart, Reason: reason, Basis: basis, Endpoint: e.Endpoint, Standing: e.Standing, Rank: wakeFairnessTime(startCandidate{info: r.row.Info}), Patch: patch, Class: class, Kept: kept}, true
 }
 
 // startHealed is heal, an A6 row write, or the start the start arms (A17,

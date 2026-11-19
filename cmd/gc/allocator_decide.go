@@ -652,6 +652,7 @@ func (p *decidePass) classify(decisions map[string]AwakeDecision) {
 		switch {
 		case e.InDesired && d.ShouldWake:
 			e.Desired, e.Reason = desireWake, d.Reason
+			e.Standing = d.Standing
 			// A wake that rests only on an uncertain attach keeps the row
 			// and never starts it (stage 3a as amended).
 			if d.Reason == "attached" && e.ObservationUncertain {
