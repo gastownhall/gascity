@@ -1206,6 +1206,15 @@ func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.D
 			lastFreeOS = now
 		}
 
+		// A suspended city is quiescent: once the suspension has drained this
+		// session, every store read below (the due gate's census, the
+		// observation, the delivery) would restart the bd and Dolt servers the
+		// controller retired (ga-5uties7y).
+		if nudgePollCitySuspendedDrained(target, sp) {
+			fmt.Fprintf(stderr, "gc nudge poll: city is suspended and session %q is not running; exiting and leaving queued nudges for the resume\n", target.sessionName) //nolint:errcheck
+			return 0
+		}
+
 		// Cheap gate, read before paying for the expensive observe/deliver
 		// pair: this target's queue state alone (no tmux/session probe) tells
 		// us whether there is anything to deliver this tick. When nothing is

@@ -29,8 +29,15 @@ import (
 //   - nudgePollCityStopped lets a poller that still survives notice that its
 //     city is down and exit before its next store read.
 //
-// Neither touches the nudge queue: queued nudges stay queued and deliver once
-// a poller runs again after the next start.
+// A suspended city is quiescent too (beads_quiescence.go), but its controller
+// keeps running, so nudgePollCityStopped never fires for it.
+// nudgePollCitySuspendedDrained covers it: once the suspension has stopped the
+// poller's session, the poller exits before its next store read, which would
+// restart the pair the controller retired, for as long as a queued nudge kept
+// the poller waiting out its missing-session grace (ga-5uties7y).
+//
+// None of them touches the nudge queue: queued nudges stay queued and deliver
+// once a poller runs again after the next start or resume.
 
 const (
 	// nudgePollerStopGrace bounds how long stopCityNudgePoller waits for a
@@ -62,10 +69,20 @@ func nudgePollCityStopped(target nudgeTarget, sp runtime.Provider) bool {
 	return !sp.IsRunning(target.sessionName)
 }
 
-// nudgePollCitySuspendedDrained is a signature stub so the red tests compile;
-// the green commit gives it its behavior.
-func nudgePollCitySuspendedDrained(_ nudgeTarget, _ runtime.Provider) bool {
-	return false
+// nudgePollCitySuspendedDrained reports whether the poller's city is
+// suspended and the target session's runtime is not running. It reads the
+// suspension state file and the city config the poller loaded, never the bead
+// store or the nudge queue, and probes the runtime only for a suspended city.
+//
+// Both conditions are required. A session still running in a suspended city
+// is one the suspension has not drained yet; its poller keeps delivering. A
+// suspended city wakes no session, so once the session is gone nothing will
+// claim the poller's queued nudges before the resume.
+func nudgePollCitySuspendedDrained(target nudgeTarget, sp runtime.Provider) bool {
+	if !effectiveCitySuspended(target.cfg, loadSuspensionStateBestEffort(target.cityPath)) {
+		return false
+	}
+	return !sp.IsRunning(target.sessionName)
 }
 
 // stopCityNudgePollers terminates every live nudge poller of cityPath, found
