@@ -4259,13 +4259,22 @@ idle-boundary declared as well, "capability carrier.ops: ready-prompt
 metadata" requires set-meta and get-meta to round-trip a non-default ready
 prompt byte for byte, because gc keeps each session's prompt there.
 
+Every operation runs in a city, as gc's own operations do. With
+GC_EXEC_CITY_PATH set, the check runs in the city GC_EXEC_CITY_NAME and
+GC_EXEC_CITY_PATH name, and never sends that city server-stop. With it
+unset or empty, as in a shell outside any city, the check runs in a
+private city: GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH name a fresh
+temporary directory, removed when the check ends or is interrupted.
+
 A runtime whose handshake declares server-lifecycle is sent server-stop,
-which ends every session of the city it runs in, twice. The check runs it,
-and the session it checks it against, in a private city: GC_EXEC_CITY_NAME
-and GC_EXEC_CITY_PATH name a fresh temporary directory, never the city you
-run the check from. A runtime that does not scope its server by
-GC_EXEC_CITY_PATH ends every session the server holds, so check it only
-against a backend that no live city uses.
+which ends every session of the city it runs in, twice. The check runs
+it, and the session it checks it against, in a private city of their
+own, never the city the rest of the check runs in. Before it removes a
+private city, the check, an interrupted one too, sends that city a final
+server-stop; one that does not exit 0 is reported as a warning, as the
+server it was to end may still be running. A runtime that does not scope
+its server by GC_EXEC_CITY_PATH ends every session the server holds, so
+check it only against a backend that no live city uses.
 
 The argument is an executable (path or PATH name) or a pack-declared
 runtime name: when it names a [runtimes.&lt;name&gt;] entry from the current
@@ -4295,13 +4304,23 @@ Unlike "gc runtime check" (a lighter smoke test), each requirement is
 proven to gate: the suite is kept honest by negative tests in which a
 broken reference fails exactly its requirement's check.
 
+Every operation runs in a city, as gc's own operations do. With
+GC_EXEC_CITY_PATH set, the suite and the --env suite run in the city
+GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH name, and never send that city
+server-stop. With it unset or empty, as in a shell outside any city, each
+runs in a private city: GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH name a
+fresh temporary directory, removed when the run ends or is interrupted.
+
 A runtime whose handshake declares server-lifecycle is sent server-stop,
 which ends every session of the city it runs in (the server group). The
-suite runs it, and the sessions it checks it against, in a private city:
-GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH name a fresh temporary directory,
-never the city you run the suite from. A runtime that does not scope its
-server by GC_EXEC_CITY_PATH ends every session the server holds, so check it
-only against a backend that no live city uses.
+suite runs it, and the sessions it checks it against, in private cities
+of their own, never the city the rest of the suite runs in; the
+city-scope probes use private cities too. Before it removes a private
+city, the run, an interrupted one too, sends that city a final
+server-stop; one that does not exit 0 is reported as a warning, as the
+server it was to end may still be running. A runtime that does not scope
+its server by GC_EXEC_CITY_PATH ends every session the server holds, so
+check it only against a backend that no live city uses.
 
 The argument is an executable (path or PATH name) or a pack-declared
 runtime name from the current city's packs. Path-like or existing-file
@@ -4672,6 +4691,19 @@ gc session attach <session-id-or-alias> [flags]
 ## gc session close
 
 End a conversation. Stops the runtime if active and closes the bead.
+
+Open and in-progress work assigned to the closed session (its ID or session
+name) is released: it reopens unassigned on the route it carries, and work
+with no route of its own takes the session's template as its route. Work whose
+route no agent serves stays assigned to the closed session and is reported as
+stranded (session.stranded_claims).
+
+A still-configured named session keeps the work assigned to its configured
+named identity and its runtime name: that work stays assigned, and the
+controller creates the session again to serve it. Once the named session is
+removed from config, a close releases that work too. To restart a named
+session and keep the same session bead and its assignments, use gc session
+kill.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor). A rerun
 with the same --key replays the close only when it names the session by its

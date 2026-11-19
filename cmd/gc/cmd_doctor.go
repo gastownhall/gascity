@@ -448,9 +448,10 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 				register(doctor.ErrorCheck("session-provider", err.Error()))
 				sessionSPErr = err
 			} else {
-				register(doctor.NewAgentSessionsCheck(cfg, cityName, st, sp))
+				registry := doctorSessionRegistry(cityPath, cfg)
+				register(doctor.NewAgentSessionsCheck(cfg, cityName, st, sp, registry))
 				register(doctor.NewZombieSessionsCheck(cfg, cityName, st, sp))
-				register(doctor.NewOrphanSessionsCheck(cfg, cityName, st, sp))
+				register(doctor.NewOrphanSessionsCheck(cfg, cityName, st, sp, registry))
 				sessionSP = sp
 			}
 		}
@@ -581,6 +582,10 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	register(doctor.NewDoltLogSizeCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
 	register(doctor.NewDoltConfigCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
 	register(doctor.NewScopedDoltVersionCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
+	// gc migrates a bd database only while bootstrapping it; this names every
+	// other one whose schema differs from the linked beads library's, with
+	// the command an operator runs (see bd_schema_gap.go).
+	register(newBdSchemaDoctorCheck(cfg, activeRigs, opts.SkipRigDoltChecks))
 	register(&doctor.EventsLogCheck{})
 	register(doctor.NewEventLogSizeCheck())
 	// bd auto-backup growth canary. bd's auto-backup pipeline (upstream of

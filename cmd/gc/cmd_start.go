@@ -633,7 +633,13 @@ func doStartWithNameOverrideJSON(args []string, controllerMode bool, stdout, std
 	if jsonOut {
 		startStdout = io.Discard
 	}
-	if code := registerCityWithSupervisorNamed(cityPath, nameOverride, startStdout, stderr, "gc start", true); code != 0 {
+	code := registerCityWithSupervisorNamed(cityPath, nameOverride, startStdout, stderr, "gc start", true)
+	// The supervisor ran the bead lifecycle, so its notices for databases left
+	// for an operator to migrate went to its log; repeat them here, whether
+	// or not the city came up (a city store the pinned bd cannot open is one
+	// way it does not).
+	printBdSchemaStartWarnings(cityPath, stderr)
+	if code != 0 {
 		return code
 	}
 	warnStage1MCPSkips(cityPath, exec.LookPath, stderr)
@@ -674,6 +680,18 @@ func printRigFederationStartWarnings(cityPath string, stderr io.Writer) {
 	for _, w := range config.RigFederationWarnings(cfg.Rigs) {
 		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
 	}
+}
+
+// printBdSchemaStartWarnings writes gc start's warning for each bd database
+// whose schema differs from the linked beads library's (bdSchemaNotices). A
+// config that does not load says nothing here; the start reports it.
+func printBdSchemaStartWarnings(cityPath string, stderr io.Writer) {
+	cfg, err := loadCityConfigFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), io.Discard)
+	if err != nil {
+		return
+	}
+	resolveRigPaths(cityPath, cfg.Rigs)
+	writeBdSchemaNotices(stderr, "gc start: warning: ", bdSchemaNoticesFor(cityPath, cfg))
 }
 
 // resolveStartDir resolves the city directory for start/restart. The
