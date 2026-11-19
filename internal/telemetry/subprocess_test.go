@@ -327,6 +327,7 @@ func TestSetProcessOTELAttrs_Disabled(t *testing.T) {
 	t.Setenv(EnvMetricsURL, "")
 	t.Setenv(EnvLogsURL, "")
 	t.Setenv(EnvOTLPEndpoint, "")
+	t.Setenv("BD_OTEL_ENABLED", "")
 	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
 	t.Setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "")
 
@@ -335,6 +336,9 @@ func TestSetProcessOTELAttrs_Disabled(t *testing.T) {
 	if v := os.Getenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"); v != "" {
 		t.Errorf("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT should not be set when telemetry disabled, got %q", v)
 	}
+	if v := os.Getenv("BD_OTEL_ENABLED"); v != "" {
+		t.Errorf("BD_OTEL_ENABLED should not be set when telemetry disabled, got %q", v)
+	}
 }
 
 func TestSetProcessOTELAttrs_NoLegacyNames(t *testing.T) {
@@ -342,6 +346,8 @@ func TestSetProcessOTELAttrs_NoLegacyNames(t *testing.T) {
 	t.Setenv(EnvLogsURL, "")
 	t.Setenv(EnvOTLPEndpoint, "http://collector:4318")
 	t.Setenv("BD_OTEL_ENABLED", "")
+	t.Setenv("BD_OTEL_METRICS_URL", "")
+	t.Setenv("BD_OTEL_LOGS_URL", "")
 	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
 	t.Setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "")
 	t.Setenv("GC_ALIAS", "")
@@ -365,6 +371,7 @@ func TestSetProcessOTELAttrs_StandardEndpointOnly(t *testing.T) {
 	t.Setenv(EnvMetricsURL, "")
 	t.Setenv(EnvLogsURL, "")
 	t.Setenv(EnvOTLPEndpoint, "http://collector:4318")
+	t.Setenv("BD_OTEL_ENABLED", "")
 	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
 	t.Setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "")
 	t.Setenv("CLAUDE_CODE_ENABLE_TELEMETRY", "")
@@ -391,6 +398,10 @@ func TestSetProcessOTELAttrs_Enabled(t *testing.T) {
 	logsURL := "http://localhost:9428/insert/opentelemetry/v1/logs"
 	t.Setenv(EnvMetricsURL, metricsURL)
 	t.Setenv(EnvLogsURL, logsURL)
+	t.Setenv("BD_OTEL_ENABLED", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "")
+	t.Setenv("CLAUDE_CODE_ENABLE_TELEMETRY", "")
 	t.Setenv("GC_ALIAS", "")
 	t.Setenv("GC_AGENT", "")
 	t.Setenv("GC_RIG", "")
@@ -412,6 +423,10 @@ func TestSetProcessOTELAttrs_Enabled(t *testing.T) {
 func TestSetProcessOTELAttrs_SetsResourceAttrs(t *testing.T) {
 	t.Setenv(EnvMetricsURL, "http://localhost:8428/opentelemetry/api/v1/push")
 	t.Setenv(EnvLogsURL, "")
+	t.Setenv("BD_OTEL_ENABLED", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "")
+	t.Setenv("CLAUDE_CODE_ENABLE_TELEMETRY", "")
 	t.Setenv("GC_ALIAS", "")
 	t.Setenv("GC_AGENT", "mayor")
 	t.Setenv("GC_RIG", "tower")
@@ -432,6 +447,10 @@ func TestSetProcessOTELAttrs_SetsResourceAttrs(t *testing.T) {
 func TestSetProcessOTELAttrs_MergesExistingResourceAttrs(t *testing.T) {
 	t.Setenv(EnvMetricsURL, "http://localhost:8428/opentelemetry/api/v1/push")
 	t.Setenv(EnvLogsURL, "")
+	t.Setenv("BD_OTEL_ENABLED", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "")
+	t.Setenv("CLAUDE_CODE_ENABLE_TELEMETRY", "")
 	t.Setenv("GC_ALIAS", "")
 	t.Setenv("GC_AGENT", "mayor")
 	t.Setenv("GC_RIG", "")
@@ -449,6 +468,7 @@ func TestSetProcessOTELAttrs_MergesExistingResourceAttrs(t *testing.T) {
 func TestSetProcessOTELAttrs_RepeatedMergeIsIdempotent(t *testing.T) {
 	t.Setenv(EnvMetricsURL, "http://localhost:8428/opentelemetry/api/v1/push")
 	t.Setenv(EnvLogsURL, "")
+	t.Setenv("BD_OTEL_ENABLED", "")
 	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
 	t.Setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "")
 	t.Setenv("CLAUDE_CODE_ENABLE_TELEMETRY", "")
@@ -473,6 +493,7 @@ func TestSetProcessOTELAttrs_ThenOTELEnvMap_NoDuplicateLabels(t *testing.T) {
 	// second copy of the GC labels from the already-mutated process env.
 	t.Setenv(EnvMetricsURL, "http://localhost:8428/opentelemetry/api/v1/push")
 	t.Setenv(EnvLogsURL, "")
+	t.Setenv("BD_OTEL_ENABLED", "")
 	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
 	t.Setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "")
 	t.Setenv("CLAUDE_CODE_ENABLE_TELEMETRY", "")
@@ -494,6 +515,10 @@ func TestSetProcessOTELAttrs_ThenOTELEnvMap_NoDuplicateLabels(t *testing.T) {
 func TestSetProcessOTELAttrs_PreservesUserAttrsWithoutGCContext(t *testing.T) {
 	t.Setenv(EnvMetricsURL, "http://localhost:8428/opentelemetry/api/v1/push")
 	t.Setenv(EnvLogsURL, "")
+	t.Setenv("BD_OTEL_ENABLED", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "")
+	t.Setenv("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT", "")
+	t.Setenv("CLAUDE_CODE_ENABLE_TELEMETRY", "")
 	t.Setenv("GC_ALIAS", "")
 	t.Setenv("GC_AGENT", "")
 	t.Setenv("GC_RIG", "")
