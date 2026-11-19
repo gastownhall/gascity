@@ -209,7 +209,7 @@ func writeOrderEnabledFilterFixture(t *testing.T, cityDir, name string) {
 		t.Fatalf("mkdir orders: %v", err)
 	}
 	content := `[order]
-exec = "scripts/` + name + `.sh"
+exec = "scripts/` + name + `"
 trigger = "cooldown"
 interval = "1m"
 `
