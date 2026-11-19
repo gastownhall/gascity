@@ -68,6 +68,7 @@ case "$op" in
     if [ -f "$S/is-running.fails" ]; then exit 1; fi
     if [ -f "$S/$name.running" ]; then echo true; else echo false; fi ;;
   exec) cmd=$(cat); case "$cmd" in *has-session*) exit 1 ;; *) exit 0 ;; esac ;;
+  launch) cat > "$S/$op.$name.json"; : > "$S/$name.running" ;;
   *) exit 2 ;;
 esac
 `
@@ -584,10 +585,10 @@ func TestHostStagingIntoADeadBox(t *testing.T) {
 }
 
 // TestSeparableRelaunchRunsHostSessionSetup pins the separable relaunch:
-// the agent is respawned in the warm box over the exec op, and for a pack
-// sharing the host filesystem gc then runs session_setup on the host again,
-// as the launch after provision does (the tmux provider re-runs it on a
-// relaunch too). Without fs.host the pack owns session_setup and gc runs
+// the agent is relaunched in the warm box, over exec or through the launch
+// op, and for a pack sharing the host filesystem gc then runs session_setup
+// on the host again, as the launch after provision does (the tmux provider
+// re-runs it on a relaunch too). Without fs.host the pack owns session_setup and gc runs
 // nothing on the host.
 func TestSeparableRelaunchRunsHostSessionSetup(t *testing.T) {
 	for _, tc := range []struct {
@@ -596,6 +597,7 @@ func TestSeparableRelaunchRunsHostSessionSetup(t *testing.T) {
 	}{
 		{"fs.host", hostFSSeparableLaunch, true},
 		{"without fs.host", `{"version":0,"capabilities":["proc.provision","proc.exec"],"locality":"local"}`, false},
+		{"fs.host, proc.launch", `{"version":0,"capabilities":["fs.host","proc.provision","proc.launch"],"locality":"local"}`, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newHostStageFixture(t, tc.handshake)

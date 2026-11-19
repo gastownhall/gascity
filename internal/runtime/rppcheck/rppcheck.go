@@ -118,8 +118,9 @@ func (o *Options) applyDefaults() {
 // checker speaks the documented protocol, not the Go client's
 // serialization helper.
 type startConfig struct {
-	WorkDir string `json:"work_dir,omitempty"`
-	Command string `json:"command,omitempty"`
+	WorkDir   string `json:"work_dir,omitempty"`
+	Command   string `json:"command,omitempty"`
+	FreshOnly bool   `json:"fresh_only,omitempty"`
 }
 
 // Run validates the executable against RPP v0 and returns per-check
@@ -149,6 +150,7 @@ func Run(ctx context.Context, executable string, opts Options) (Result, error) {
 	}
 	c.checkHandshake(ctx)
 	c.checkLifecycle(ctx)
+	c.checkProvisionLaunch(ctx)
 	c.checkServerLifecycle(ctx)
 	c.checkInputOutcome(ctx)
 	if c.city != nil {
@@ -290,6 +292,8 @@ func (c *checker) runOpEnv(ctx context.Context, timeout time.Duration, env []str
 // its ready-prompt store, are required checks below, not a single
 // capability-to-op map. input-outcome types the driving ops' answers rather
 // than promising an op, so it maps to "" and checkInputOutcome checks it.
+// proc.provision and proc.launch promise the provision and launch ops, which
+// checkProvisionLaunch runs for a handshake that un-welds start.
 var knownCapabilities = map[string]string{
 	runtime.ProtocolCapabilityReportAttachment: "is-attached",
 	runtime.ProtocolCapabilityReportActivity:   "get-last-activity",
@@ -300,6 +304,8 @@ var knownCapabilities = map[string]string{
 	runtime.ProtocolCapabilityFSHost:           "",
 	runtime.ProtocolCapabilityCarrierOps:       "",
 	runtime.ProtocolCapabilityInputOutcome:     "",
+	runtime.ProtocolCapabilityProvision:        "provision",
+	runtime.ProtocolCapabilityLaunch:           "launch",
 	"conformance-faults":                       "",
 	"city-scoped":                              "",
 }
@@ -320,6 +326,18 @@ const (
 	serverStopCheck           = "capability server-lifecycle: server-stop"
 	serverStopIdempotentCheck = "capability server-lifecycle: server-stop idempotent"
 )
+
+// The proc.provision and proc.launch smoke checks (`gc runtime conformance`
+// gates the tokens in full as the provision group).
+const (
+	provisionCheck       = "capability proc.provision: provision"
+	launchCheck          = "capability proc.launch: launch"
+	launchFreshOnlyCheck = "capability proc.launch: fresh_only launch on a running agent"
+)
+
+// exitCodeFreshCollision is a fresh_only start, provision or launch refusing a
+// name a box or an agent holds (EX_CANTCREAT).
+const exitCodeFreshCollision = 73
 
 // inputOutcomeCheck is the input-outcome smoke check (`gc runtime
 // conformance` gates the token in full as the input group).
@@ -596,6 +614,128 @@ func (c *checker) checkServerLifecycle(ctx context.Context) {
 		c.record(serverStopIdempotentCheck, StatusFail, fmt.Sprintf("second server-stop must succeed with no server running: %s", again.err))
 	default:
 		c.record(serverStopIdempotentCheck, StatusPass, "")
+	}
+}
+
+// checkProvisionLaunch runs the un-welded start gc sends a handshake that
+// un-welds start (runtime.ProtocolInfo.SeparableLaunch): provision exits 0
+// and leaves is-running false, and under proc.launch a launch into that box
+// exits 0 with is-running true, and a fresh_only launch over the running
+// agent exits 73. A welded handshake is sent neither op, as gc sends it
+// neither. Like the server checks, it runs in a private city of its own,
+// whose last ops are the session's stop and a final server-stop
+// (endServer).
+func (c *checker) checkProvisionLaunch(ctx context.Context) {
+	if !c.result.Protocol.SeparableLaunch() {
+		return
+	}
+	launch := c.result.Protocol.Has(runtime.ProtocolCapabilityLaunch)
+	skipLaunch := func(detail string) {
+		if launch {
+			c.record(launchCheck, StatusSkip, detail)
+			c.record(launchFreshOnlyCheck, StatusSkip, detail)
+		}
+	}
+	cfg, err := json.Marshal(startConfig{WorkDir: c.opts.WorkDir, Command: c.opts.Command})
+	var fresh []byte
+	if err == nil {
+		fresh, err = json.Marshal(startConfig{WorkDir: c.opts.WorkDir, Command: c.opts.Command, FreshOnly: true})
+	}
+	if err != nil {
+		c.record(provisionCheck, StatusFail, fmt.Sprintf("marshaling start config: %v", err))
+		skipLaunch("skipped: no start config")
+		return
+	}
+	city, removeCity, err := privatecity.New(privateCityPrefix)
+	if err != nil {
+		c.record(provisionCheck, StatusFail, err.Error())
+		skipLaunch("skipped: no private city to provision in")
+		return
+	}
+	defer removeCity()
+	defer c.endServer(ctx, city)
+	name := c.opts.SessionName + "-launch"
+	// Whatever provision and launch do, the session is stopped (stop is
+	// idempotent), on a cancellation-detached context so an interrupted run
+	// does not leak it.
+	defer c.runOpEnv(context.WithoutCancel(ctx), c.opts.OpTimeout, city, nil, "stop", name)
+	if !c.checkProvision(ctx, city, name, cfg) {
+		skipLaunch("skipped: provision failed")
+		return
+	}
+	if !launch {
+		return
+	}
+	if !c.checkLaunch(ctx, city, name, cfg) {
+		c.record(launchFreshOnlyCheck, StatusSkip, "skipped: launch started no agent")
+		return
+	}
+	c.checkLaunchFreshOnly(ctx, city, name, fresh)
+}
+
+// checkProvision sends provision for name in city and checks it prepares the
+// box without its agent. It reports whether provision exited 0, so the launch
+// checks have a box to launch into.
+func (c *checker) checkProvision(ctx context.Context, city []string, name string, cfg []byte) bool {
+	res := c.runOpEnv(ctx, c.opts.StartTimeout, city, cfg, "provision", name)
+	switch {
+	case res.unsupported:
+		c.record(provisionCheck, StatusFail, "proc.provision declared but provision not implemented (exit 2)")
+		return false
+	case res.err != nil:
+		c.record(provisionCheck, StatusFail, res.err.Error())
+		return false
+	}
+	switch running := c.runOpEnv(ctx, c.opts.OpTimeout, city, nil, "is-running", name); {
+	case running.unsupported || running.err != nil:
+		c.record(provisionCheck, StatusFail, fmt.Sprintf("is-running after provision did not answer: %v", running.err))
+	case running.stdout != "false":
+		c.record(provisionCheck, StatusFail, fmt.Sprintf("is-running after provision = %q, want \"false\": provision prepares the box without its agent, which gc launches after it", running.stdout))
+	default:
+		c.record(provisionCheck, StatusPass, "")
+	}
+	return true
+}
+
+// checkLaunch sends launch for name in city, into the box provision
+// prepared, and checks it starts the agent. It reports whether the agent
+// runs.
+func (c *checker) checkLaunch(ctx context.Context, city []string, name string, cfg []byte) bool {
+	res := c.runOpEnv(ctx, c.opts.StartTimeout, city, cfg, "launch", name)
+	switch {
+	case res.unsupported:
+		c.record(launchCheck, StatusFail, "proc.launch declared but launch not implemented (exit 2): gc starts every agent of this runtime through it")
+		return false
+	case res.err != nil:
+		c.record(launchCheck, StatusFail, res.err.Error())
+		return false
+	}
+	switch running := c.runOpEnv(ctx, c.opts.OpTimeout, city, nil, "is-running", name); {
+	case running.unsupported || running.err != nil:
+		c.record(launchCheck, StatusFail, fmt.Sprintf("is-running after launch did not answer: %v", running.err))
+		return false
+	case running.stdout != "true":
+		c.record(launchCheck, StatusFail, fmt.Sprintf("is-running after launch = %q, want \"true\"", running.stdout))
+		return false
+	default:
+		c.record(launchCheck, StatusPass, "")
+		return true
+	}
+}
+
+// checkLaunchFreshOnly sends a fresh_only launch for name in city, whose
+// agent runs, and checks it refuses with exit 73 rather than replacing it.
+func (c *checker) checkLaunchFreshOnly(ctx context.Context, city []string, name string, fresh []byte) {
+	res := c.runOpEnv(ctx, c.opts.StartTimeout, city, fresh, "launch", name)
+	switch {
+	case res.unsupported:
+		c.record(launchFreshOnlyCheck, StatusFail, "proc.launch declared but launch not implemented (exit 2)")
+	case res.err == nil:
+		c.record(launchFreshOnlyCheck, StatusFail, fmt.Sprintf("exited 0, want %d: a fresh_only launch never replaces a running agent", exitCodeFreshCollision))
+	case res.exitCode != exitCodeFreshCollision:
+		c.record(launchFreshOnlyCheck, StatusFail, fmt.Sprintf("exited %d, want %d: %v", res.exitCode, exitCodeFreshCollision, res.err))
+	default:
+		c.record(launchFreshOnlyCheck, StatusPass, fmt.Sprintf("exit %d", exitCodeFreshCollision))
 	}
 }
 

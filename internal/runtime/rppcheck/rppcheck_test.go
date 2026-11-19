@@ -1305,3 +1305,219 @@ func TestRun_FailedFinalServerStopIsAWarning(t *testing.T) {
 		t.Errorf("warnings %q: want 2, the run's city's and the server checks' city's", res.Warnings)
 	}
 }
+
+// launchBodies returns the proc.provision and proc.launch golden's bodies.
+func launchBodies() map[string]string {
+	return reference.LaunchBodies(reference.Bodies())
+}
+
+// launchReference writes the proc.provision and proc.launch golden with
+// bodies overridden.
+func launchReference(t *testing.T, bodies map[string]string) string {
+	t.Helper()
+	all := launchBodies()
+	for op, body := range bodies {
+		all[op] = body
+	}
+	path := filepath.Join(t.TempDir(), "golden")
+	if err := os.WriteFile(path, []byte(reference.Script(t.TempDir(), all)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// proc.provision and proc.launch are tokens gc honors, so the handshake
+// check must not call them unknown.
+// Kills: a token gc acts on reported as ignored.
+func TestRun_ProvisionAndLaunchAreKnown(t *testing.T) {
+	res, err := Run(context.Background(), launchReference(t, nil), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := findCheck(t, res, handshakeCheck); strings.Contains(c.Detail, "unknown") {
+		t.Errorf("handshake detail %q reports a declared token as unknown", c.Detail)
+	}
+}
+
+// Kills a smoke check that does not run, or does not gate, the un-welded
+// start a script declaring proc.provision and proc.launch is sent: the golden
+// passes all three checks; a launch answering exit 2 (which fails the pack's
+// first start), a launch that starts no agent, a fresh_only launch replacing
+// the running agent, a provision answering exit 2 and a provision that
+// starts the agent each fail their check.
+func TestRun_ProvisionLaunchSmoke(t *testing.T) {
+	res, err := Run(context.Background(), launchReference(t, nil), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reportFailures(t, res)
+	for _, name := range []string{provisionCheck, launchCheck, launchFreshOnlyCheck} {
+		if c := findCheck(t, res, name); c.Status != StatusPass {
+			t.Errorf("golden: %s = %s (%s), want PASS", name, c.Status, c.Detail)
+		}
+	}
+
+	golden := launchBodies()
+	const freshRefusal = "if [ -n \"$fresh\" ]; then exit 73; fi; reap"
+	ignoresFresh := strings.Replace(golden["launch"], freshRefusal, "reap", 1)
+	if ignoresFresh == golden["launch"] {
+		t.Fatalf("golden launch %q has no fresh_only refusal to remove", golden["launch"])
+	}
+	for _, m := range []struct {
+		name                       string
+		bodies                     map[string]string
+		provision, launch, freshly Status
+	}{
+		{"launch exit 2", map[string]string{"launch": `cat >/dev/null; exit 2`}, StatusPass, StatusFail, StatusSkip},
+		{"launch starts nothing", map[string]string{"launch": `cat >/dev/null`}, StatusPass, StatusFail, StatusSkip},
+		{"launch ignores fresh_only", map[string]string{"launch": ignoresFresh}, StatusPass, StatusPass, StatusFail},
+		{"provision exit 2", map[string]string{"provision": `cat >/dev/null; exit 2`}, StatusFail, StatusSkip, StatusSkip},
+		{"provision starts the agent", map[string]string{"provision": golden["start"]}, StatusFail, StatusPass, StatusPass},
+	} {
+		res, err := Run(context.Background(), launchReference(t, m.bodies), Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !res.Failed() {
+			t.Errorf("mutant %s: Failed() = false, want true", m.name)
+		}
+		for name, want := range map[string]Status{provisionCheck: m.provision, launchCheck: m.launch, launchFreshOnlyCheck: m.freshly} {
+			if c := findCheck(t, res, name); c.Status != want {
+				t.Errorf("mutant %s: %s = %s (%s), want %s", m.name, name, c.Status, c.Detail, want)
+			}
+		}
+	}
+}
+
+// Kills a smoke check gated on the tokens rather than on the start gc sends:
+// provision runs for every handshake that un-welds start (proc.provision with
+// proc.launch, or with proc.exec and without carrier.ops), launch only under
+// proc.launch, and an inert declaration is sent neither, though its tokens are
+// known.
+func TestRun_ProvisionLaunchSmokeFollowsTheUnweldedStart(t *testing.T) {
+	const golden = `"server-lifecycle","proc.provision","proc.launch"`
+	for _, tc := range []struct {
+		caps      string
+		provision bool
+	}{
+		{`"server-lifecycle","proc.provision","proc.exec"`, true},
+		{`"server-lifecycle","proc.provision"`, false},
+		{`"server-lifecycle","proc.provision","proc.exec","carrier.ops"`, false},
+		{`"server-lifecycle","proc.launch"`, false},
+	} {
+		protocol := launchBodies()["protocol"]
+		if !strings.Contains(protocol, golden) {
+			t.Fatalf("golden protocol %q does not declare %s", protocol, golden)
+		}
+		res, err := Run(context.Background(), launchReference(t, map[string]string{
+			"protocol": strings.Replace(protocol, golden, tc.caps, 1),
+		}), Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := hasCheck(res, provisionCheck); got != tc.provision {
+			t.Errorf("%s: provision check run = %v, want %v", tc.caps, got, tc.provision)
+		}
+		if hasCheck(res, launchCheck) || hasCheck(res, launchFreshOnlyCheck) {
+			t.Errorf("%s: a launch check ran for a handshake gc sends no launch", tc.caps)
+		}
+		if c := findCheck(t, res, handshakeCheck); strings.Contains(c.Detail, "unknown") {
+			t.Errorf("%s: handshake detail %q reports a declared token as unknown", tc.caps, c.Detail)
+		}
+	}
+}
+
+// Kills a provision and launch smoke check run in the city the check
+// inherited, or one that leaves its box or its server behind: its ops run in
+// a private city of their own, whose last op is the final server-stop, and
+// which is removed.
+func TestRun_ProvisionLaunchSmokeUsesACityOfItsOwn(t *testing.T) {
+	script, opsLog := cityOnly(t, launchReference(t, nil))
+	t.Setenv("GC_EXEC_CITY_NAME", "live")
+	t.Setenv("GC_EXEC_CITY_PATH", "/live/city")
+
+	res, err := Run(context.Background(), script, Options{SessionName: "from-city"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reportFailures(t, res)
+	ops := cityOps(t, opsLog)
+	var city string
+	for _, op := range ops {
+		if op.Args == "provision from-city-launch" {
+			city = op.City
+		}
+	}
+	switch city {
+	case "":
+		t.Fatal("provision from-city-launch ran in no city")
+	case "/live/city":
+		t.Fatal("provision from-city-launch ran in the caller's city, want a city of its own")
+	}
+	var launches int
+	for _, op := range ops {
+		if strings.HasPrefix(op.Args, "launch ") {
+			launches++
+			if op.City != city {
+				t.Errorf("%q ran in %q, want the provision's city %s", op.Args, op.City, city)
+			}
+		}
+	}
+	if launches != 2 {
+		t.Errorf("launches = %d, want the launch and the fresh_only launch", launches)
+	}
+	if last := lastOpIn(ops, city); last != "server-stop" {
+		t.Errorf("last op in the provision and launch city = %q, want the final server-stop", last)
+	}
+	if _, err := os.Stat(city); !os.IsNotExist(err) {
+		t.Errorf("provision and launch city %s after the run: stat err = %v, want it removed", city, err)
+	}
+}
+
+// Kills an interrupted provision and launch smoke check that leaves the
+// launched session running: its stop runs on a cancellation-detached
+// context, in the check's city, before the final server-stop there.
+func TestRun_CanceledProvisionLaunchStopsItsSession(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Cancel, as a Ctrl-C would, once the launch blocks.
+	blocking, release, err := reference.OnFirstOp(launchReference(t, map[string]string{
+		"launch": `cat >/dev/null; exec sleep 30`,
+	}), "launch", t.TempDir(), cancel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(release)
+	script, opsLog := cityOnly(t, blocking)
+	t.Setenv("GC_EXEC_CITY_NAME", "live")
+	t.Setenv("GC_EXEC_CITY_PATH", "/live/city")
+
+	if _, err := Run(ctx, script, Options{SessionName: "canceled"}); err != nil {
+		t.Fatal(err)
+	}
+	ops := cityOps(t, opsLog)
+	var city string
+	for _, op := range ops {
+		if op.Args == "provision canceled-launch" {
+			city = op.City
+		}
+	}
+	if city == "" || city == "/live/city" {
+		t.Fatalf("provision canceled-launch ran in %q, want a private city of its own", city)
+	}
+	var stopped bool
+	for _, op := range ops {
+		if op.Args == "stop canceled-launch" && op.City == city {
+			stopped = true
+		}
+	}
+	if !stopped {
+		t.Error("the canceled check did not stop canceled-launch in its city")
+	}
+	if last := lastOpIn(ops, city); last != "server-stop" {
+		t.Errorf("last op in the canceled check's city = %q, want the final server-stop", last)
+	}
+	if _, err := os.Stat(city); !os.IsNotExist(err) {
+		t.Errorf("the canceled check's city %s: stat err = %v, want it removed", city, err)
+	}
+}
