@@ -393,7 +393,13 @@ func releaseOrphanedPoolAssignments(
 			// positive-evidence checks above can only ever SKIP a release, so
 			// running them first costs nothing and keeps the protected count
 			// reporting exactly the claims the gate saved.
-			if !routedAway && claimGate.claimMayStillBeHeld(assignee, wb.ID, sessionStoreLiveAssignee) {
+			// A routed-away claim's holder is live by construction, so only the
+			// gate's observability half applies to it.
+			if routedAway {
+				if claimGate.claimIsUnobservable(assignee, wb.ID) {
+					continue
+				}
+			} else if claimGate.claimMayStillBeHeld(assignee, wb.ID, sessionStoreLiveAssignee) {
 				continue
 			}
 			// The sessions binding is not the only ledger that can hold a session
@@ -414,7 +420,11 @@ func releaseOrphanedPoolAssignments(
 			// ref can then resolve to DIFFERENT stores — collapsing them onto one
 			// cached answer could release a live holder's claim. Require both, and
 			// leave the fallback unmemoized rather than risk that.
-			if ownerStore != nil && !routedAway {
+			// A routed-away claim skips the probe only where the owner store is
+			// the sessions store, whose sessions the route-away judgment already
+			// saw; a session living only in a separate owner store is one it
+			// could not judge.
+			if ownerStore != nil && (!routedAway || !beads.SameStore(ownerStore, sessionStore)) {
 				live := false
 				probeCallStart := time.Now()
 				if storeAware && storeRefAware {

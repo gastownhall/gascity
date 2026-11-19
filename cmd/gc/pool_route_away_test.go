@@ -27,9 +27,9 @@ func routeAwayHolder() session.Info {
 	return session.Info{ID: "a-1", Template: "alpha", SessionOrigin: "ephemeral", PoolManaged: true, PoolSlot: "1"}
 }
 
-// seedRouteAwayWork creates bead X: claimed in_progress by the holder a-1,
-// routed to beta, with meta merged over the route (a "" value deletes the key).
-func seedRouteAwayWork(t *testing.T, store beads.Store, meta map[string]string) beads.Bead {
+// seedRouteAwayWork creates bead X: claimed in_progress by holder, routed to
+// beta, with meta merged over the route (a "" value deletes the key).
+func seedRouteAwayWork(t *testing.T, store beads.Store, holder string, meta map[string]string) beads.Bead {
 	t.Helper()
 	metadata := map[string]string{beadmeta.RoutedToMetadataKey: "beta"}
 	for k, v := range meta {
@@ -39,7 +39,7 @@ func seedRouteAwayWork(t *testing.T, store beads.Store, meta map[string]string) 
 		}
 		metadata[k] = v
 	}
-	work, err := store.Create(beads.Bead{Title: "escalated ticket", Type: "task", Status: "open", Assignee: "a-1", Metadata: metadata})
+	work, err := store.Create(beads.Bead{Title: "escalated ticket", Type: "task", Status: "open", Assignee: holder, Metadata: metadata})
 	if err != nil {
 		t.Fatalf("create work: %v", err)
 	}
@@ -119,7 +119,7 @@ func requireKeptByHolder(t *testing.T, store beads.Store, released []releasedPoo
 func TestRouteAwayReleasedThroughProductionComposition(t *testing.T) {
 	store := beads.NewMemStore()
 	cfg := routeAwayCity()
-	work := seedRouteAwayWork(t, store, routedAtAgo(2*routeAwaySettleWindow))
+	work := seedRouteAwayWork(t, store, "a-1", routedAtAgo(2*routeAwaySettleWindow))
 
 	released := singleStoreRouteAwayTick(store, cfg, []session.Info{routeAwayHolder()}, work)
 	requireReleasedRouteAway(t, store, released, work)
@@ -146,12 +146,12 @@ func TestRouteAwaySettleWindowBoundary(t *testing.T) {
 
 	t.Run("one second inside the window is kept", func(t *testing.T) {
 		store := beads.NewMemStore()
-		work := seedRouteAwayWork(t, store, routedAtAgo(routeAwaySettleWindow-time.Second))
+		work := seedRouteAwayWork(t, store, "a-1", routedAtAgo(routeAwaySettleWindow-time.Second))
 		requireKeptByHolder(t, store, singleStoreRouteAwayTick(store, cfg, open, work), work)
 	})
 	t.Run("exactly one window old is released", func(t *testing.T) {
 		store := beads.NewMemStore()
-		work := seedRouteAwayWork(t, store, routedAtAgo(routeAwaySettleWindow))
+		work := seedRouteAwayWork(t, store, "a-1", routedAtAgo(routeAwaySettleWindow))
 		requireReleasedRouteAway(t, store, singleStoreRouteAwayTick(store, cfg, open, work), work)
 	})
 }
@@ -174,8 +174,76 @@ func TestRouteAwayUnsettlingStampsAreSettled(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := beads.NewMemStore()
-			work := seedRouteAwayWork(t, store, tc.meta)
+			work := seedRouteAwayWork(t, store, "a-1", tc.meta)
 			requireReleasedRouteAway(t, store, singleStoreRouteAwayTick(store, cfg, open, work), work)
 		})
 	}
+}
+
+// TestRouteAwayKeepsClaimsTheSweepCannotJudge pins the settled handoffs the
+// sweep still keeps for their live holder, each because something it cannot
+// see past may still be serving the bead: a session of the target agent, an
+// owner of no known agent, an identity this city cannot observe, a control
+// bead the dispatcher owns, a bead waiting on a person, or a graph-resident
+// session in the bead's own owner store.
+func TestRouteAwayKeepsClaimsTheSweepCannotJudge(t *testing.T) {
+	cfg := routeAwayCity()
+	settled := routedAtAgo(2 * routeAwaySettleWindow)
+
+	t.Run("an open session of the target agent shares the identity", func(t *testing.T) {
+		store := beads.NewMemStore()
+		work := seedRouteAwayWork(t, store, "a-1", settled)
+		sibling := session.Info{ID: "b-1", Template: "beta", Alias: "a-1", SessionOrigin: "ephemeral", PoolManaged: true, PoolSlot: "1"}
+		open := []session.Info{routeAwayHolder(), sibling}
+		requireKeptByHolder(t, store, singleStoreRouteAwayTick(store, cfg, open, work), work)
+	})
+	t.Run("the owner resolves to no agent", func(t *testing.T) {
+		store := beads.NewMemStore()
+		work := seedRouteAwayWork(t, store, "a-1", settled)
+		holder := routeAwayHolder()
+		holder.Template = "retired"
+		requireKeptByHolder(t, store, singleStoreRouteAwayTick(store, cfg, []session.Info{holder}, work), work)
+	})
+	t.Run("the identity is unobservable to this city", func(t *testing.T) {
+		store := beads.NewMemStore()
+		work := seedRouteAwayWork(t, store, "far/a-1", settled)
+		holder := routeAwayHolder()
+		holder.Alias = "far/a-1"
+		requireKeptByHolder(t, store, singleStoreRouteAwayTick(store, cfg, []session.Info{holder}, work), work)
+	})
+	t.Run("the bead is a control bead", func(t *testing.T) {
+		store := beads.NewMemStore()
+		meta := routedAtAgo(2 * routeAwaySettleWindow)
+		meta[beadmeta.KindMetadataKey] = beadmeta.KindFanout
+		work := seedRouteAwayWork(t, store, "a-1", meta)
+		requireKeptByHolder(t, store, singleStoreRouteAwayTick(store, cfg, []session.Info{routeAwayHolder()}, work), work)
+	})
+	t.Run("the bead waits on a person", func(t *testing.T) {
+		store := beads.NewMemStore()
+		work := seedRouteAwayWork(t, store, "a-1", settled)
+		if err := store.Update(work.ID, beads.UpdateOpts{Labels: []string{beadmeta.HumanLabel}}); err != nil {
+			t.Fatalf("label work human: %v", err)
+		}
+		work, err := store.Get(work.ID)
+		if err != nil {
+			t.Fatalf("reload work: %v", err)
+		}
+		requireKeptByHolder(t, store, singleStoreRouteAwayTick(store, cfg, []session.Info{routeAwayHolder()}, work), work)
+	})
+	t.Run("a graph-resident session in a separate owner store answers to the assignee", func(t *testing.T) {
+		sessionStore := beads.NewMemStore()
+		ownerStore := beads.NewMemStore()
+		work := seedRouteAwayWork(t, ownerStore, "a-1", settled)
+		if _, err := ownerStore.Create(beads.Bead{
+			Title:    "graph run session",
+			Type:     sessionBeadType,
+			Status:   "open",
+			Labels:   []string{sessionBeadLabel},
+			Metadata: map[string]string{"session_name": "a-1"},
+		}); err != nil {
+			t.Fatalf("create graph-resident session: %v", err)
+		}
+		released := routeAwayTick(sessionStore, sessionStore, cfg, "", []session.Info{routeAwayHolder()}, []beads.Bead{work}, []beads.Store{ownerStore}, []string{""}, nil, routeAwayNow)
+		requireKeptByHolder(t, ownerStore, released, work)
+	})
 }

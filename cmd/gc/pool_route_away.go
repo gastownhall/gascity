@@ -106,8 +106,9 @@ func routeAwaySettled(routedAt string, now time.Time) bool {
 }
 
 // routeAwayReleasable reports whether claimed bead wb was handed off away
-// from its live holder and the handoff has settled at now: wb is routed to
-// the generic-ephemeral pool target (template, resolved by the caller), its
+// from its live holder and the handoff has settled at now: wb is no control
+// bead (the dispatcher, not a pool, owns those), it is routed to the
+// generic-ephemeral pool target (template, resolved by the caller), its
 // assignee is a session identity rather than the bare target template, every
 // open session answering to that identity in wb's store resolves to an agent
 // other than target, and its gc.routed_at stamp is settled. Such a claim is
@@ -115,7 +116,7 @@ func routeAwaySettled(routedAt string, now time.Time) bool {
 // holder keeps it forever and the target never sees demand.
 func routeAwayReleasable(owners routeAwayOwnerIndex, wb beads.Bead, target *config.Agent, template, workStoreRef string, storeRefAware bool, now time.Time) bool {
 	assignee := strings.TrimSpace(wb.Assignee)
-	if target == nil || assignee == "" {
+	if target == nil || assignee == "" || beadmeta.IsControlKind(wb.Metadata[beadmeta.KindMetadataKey]) {
 		return false
 	}
 	if assignee == strings.TrimSpace(template) || assignee == target.QualifiedName() {
