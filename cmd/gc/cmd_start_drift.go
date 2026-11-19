@@ -561,7 +561,8 @@ func defaultRestartHelpers() restartHelpers {
 		WaitExit: func(pid int) error {
 			return waitForPIDExit(pid, driftKillTimeout, driftKillEscalateTimeout)
 		},
-		Spawn: spawnDetachedSupervisor,
+		Spawn:           spawnDetachedSupervisor,
+		KeepTmuxSockets: refuseSupervisorRestartTmuxSocketDirMove,
 	}
 }
 

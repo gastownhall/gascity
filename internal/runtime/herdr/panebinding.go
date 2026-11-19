@@ -3,6 +3,7 @@ package herdr
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -29,6 +30,8 @@ const (
 	metaBoundPane      = "GC_HERDR_PANE_ID"
 	metaBoundTab       = "GC_HERDR_TAB_ID"
 	metaBoundWorkspace = "GC_HERDR_WORKSPACE_ID"
+	metaBoundShellPID  = "GC_HERDR_SHELL_PID"
+	metaBoundShellID   = "GC_HERDR_SHELL_START_IDENTITY"
 	metaBoundMode      = "GC_HERDR_LAUNCH_MODE"
 	// metaBoundName holds the exact session name (sidecar directories use the
 	// sanitized form, which is lossy), so ListRunning can enumerate bound
@@ -79,8 +82,9 @@ type paneLookupOps struct {
 	// boundAge reports how long ago the binding was persisted (a very large
 	// value when unknown, so pre-upgrade bindings are still reapable).
 	boundAge func() time.Duration
-	// reapPane closes an exited agent's leftover pane (best-effort).
-	reapPane func(paneID string)
+	// reapPane closes an exited agent's leftover pane. A pane herdr answers
+	// is already gone counts as closed; any other failure is returned.
+	reapPane func(paneID string) error
 	// probePane inspects the bound pane. A zero probe with nil error means
 	// herdr confirmed the pane gone; a non-nil error means the probe itself
 	// failed (transport), which proves nothing either way.
@@ -102,7 +106,8 @@ type paneLookupOps struct {
 // per completed wisp otherwise. Within the grace the pane resolves untouched
 // (an in-flight Start provisionally bound it). A binding whose pane is
 // confirmed gone is cleared and resolves absent; a transport failure on
-// either tier surfaces as an error and clears nothing.
+// either tier, or a reap whose close failed, surfaces as an error and clears
+// nothing, so the next resolution still finds the pane.
 func resolveBinding(ops paneLookupOps) (paneID string, running bool, err error) {
 	a, ok, err := ops.getAgent()
 	if err != nil {
@@ -127,7 +132,9 @@ func resolveBinding(ops paneLookupOps) (paneID string, running bool, err error) 
 		return pane, true, nil
 	}
 	if ops.boundAge() > bindingLaunchGrace {
-		ops.reapPane(pane)
+		if err := ops.reapPane(pane); err != nil {
+			return "", false, fmt.Errorf("reaping exited agent pane %s: %w", pane, err)
+		}
 		ops.clearBinding()
 		return "", false, nil
 	}
@@ -139,14 +146,18 @@ func resolveBinding(ops paneLookupOps) (paneID string, running bool, err error) 
 // by Start after the agent (fresh or adopted) is up; Stop's clearMeta
 // removes it.
 func (p *Provider) bindPlacement(name string, info agentInfo, mode string) error {
-	for key, val := range map[string]string{
+	values := map[string]string{
 		metaBoundPane:      info.PaneID,
 		metaBoundTab:       info.TabID,
 		metaBoundWorkspace: info.WorkspaceID,
 		metaBoundMode:      mode,
 		metaBoundName:      name,
 		metaBoundAt:        strconv.FormatInt(time.Now().Unix(), 10),
-	} {
+	}
+	for key, val := range p.boundPaneIdentity(context.Background(), info.PaneID) {
+		values[key] = val
+	}
+	for key, val := range values {
 		if val == "" {
 			continue
 		}
@@ -163,32 +174,54 @@ func (p *Provider) clearPaneBinding(name string) {
 	_ = p.RemoveMeta(name, metaBoundPane)
 	_ = p.RemoveMeta(name, metaBoundTab)
 	_ = p.RemoveMeta(name, metaBoundWorkspace)
+	p.clearPaneBindingPlatform(name)
 	_ = p.RemoveMeta(name, metaBoundMode)
 	_ = p.RemoveMeta(name, metaBoundName)
 	_ = p.RemoveMeta(name, metaBoundAt)
 }
 
-// boundSessionNames enumerates the session names with a live-looking sidecar
-// binding (a stored name and pane id), for ListRunning to merge with herdr's
-// registry — which never sees raw shell sessions.
-func (p *Provider) boundSessionNames() []string {
+type boundSession struct {
+	name string
+	pane string
+	tab  string
+}
+
+// boundSessions enumerates sessions with a live-looking sidecar binding, for
+// ListRunning and registry-name resolution to merge with herdr's registry —
+// which never sees raw shell sessions and can also auto-name a bound pane by
+// detected agent kind.
+func (p *Provider) boundSessions() []boundSession {
 	entries, err := os.ReadDir(p.metaDir)
 	if err != nil {
 		return nil
 	}
-	var names []string
+	var sessions []boundSession
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
-		name, err := readMetaFile(filepath.Join(p.metaDir, e.Name(), sanitize(metaBoundName)))
+		dir := filepath.Join(p.metaDir, e.Name())
+		name, err := readMetaFile(filepath.Join(dir, sanitize(metaBoundName)))
 		if err != nil || name == "" {
 			continue
 		}
-		if pane, err := readMetaFile(filepath.Join(p.metaDir, e.Name(), sanitize(metaBoundPane))); err != nil || pane == "" {
+		pane, err := readMetaFile(filepath.Join(dir, sanitize(metaBoundPane)))
+		if err != nil || pane == "" {
 			continue
 		}
-		names = append(names, name)
+		tab, _ := readMetaFile(filepath.Join(dir, sanitize(metaBoundTab)))
+		sessions = append(sessions, boundSession{name: name, pane: pane, tab: tab})
+	}
+	return sessions
+}
+
+// boundSessionNames preserves the older enumeration shape for callers that
+// only need the gc session names.
+func (p *Provider) boundSessionNames() []string {
+	sessions := p.boundSessions()
+	names := make([]string, 0, len(sessions))
+	for _, s := range sessions {
+		names = append(names, s.name)
 	}
 	return names
 }
@@ -216,7 +249,7 @@ func (p *Provider) probePane(ctx context.Context, paneID string) (paneProbe, err
 		}
 		return paneProbe{}, err
 	}
-	return paneProbeFrom(shellPID, fg), nil
+	return p.shellProbe(shellPID, fg)
 }
 
 // interactiveShells are the interactive shells a fresh pane idles in; a pane
@@ -296,7 +329,16 @@ func (p *Provider) lookupOps(ctx context.Context, name string) paneLookupOps {
 			return time.Since(time.Unix(ts, 0))
 		},
 		probePane:    func(paneID string) (paneProbe, error) { return p.probePane(ctx, paneID) },
-		reapPane:     func(paneID string) { _ = p.c.closePane(ctx, paneID) },
+		reapPane:     func(paneID string) error { return p.closeExitedPane(ctx, paneID) },
 		clearBinding: func() { p.clearPaneBinding(name) },
 	}
+}
+
+// closeExitedPane closes an exited agent's leftover pane. A pane herdr answers
+// is already gone counts as closed.
+func (p *Provider) closeExitedPane(ctx context.Context, paneID string) error {
+	if err := p.c.closePane(ctx, paneID); err != nil && !paneGone(err) {
+		return err
+	}
+	return nil
 }

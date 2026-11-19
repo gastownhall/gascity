@@ -15,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -408,7 +409,7 @@ func TestOperatorResumeClearsAStaleAck(t *testing.T) {
 			}
 		}
 		city := t.TempDir()
-		if err := session.NewManagerWithOptions(store, sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), b.ID, "claude", runtime.Config{}); err != nil {
+		if err := session.NewManagerWithOptions(beadstest.Sessions(store), sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), b.ID, "claude", runtime.Config{}); err != nil {
 			t.Fatalf("running %t: attach: %v", running, err)
 		}
 		got, err := store.Get(b.ID)
@@ -511,7 +512,7 @@ func TestSignalNeverStrandsAnOperatorStart(t *testing.T) {
 				mstore = &attachRaceStore{MemStore: store.(*beads.MemStore), beforeClear: signal}
 			}
 			city := p.World.CityPath
-			err := session.NewManagerWithOptions(mstore, sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), it.Key.ID, "claude", runtime.Config{})
+			err := session.NewManagerWithOptions(beadstest.Sessions(mstore), sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), it.Key.ID, "claude", runtime.Config{})
 			got, gerr := store.Get(it.Key.ID)
 			if gerr != nil {
 				t.Fatal(gerr)
@@ -551,7 +552,7 @@ func TestOperatorStartClearsARequestBegunBeforeItsLease(t *testing.T) {
 	}
 	sp := &attachRaceSP{Fake: runtime.NewFake(), onIsRunning: begin}
 	city := t.TempDir()
-	if err := session.NewManagerWithOptions(store, sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), b.ID, "claude", runtime.Config{}); err != nil {
+	if err := session.NewManagerWithOptions(beadstest.Sessions(store), sp, session.WithCityPath(city)).Attach(context.Background(), testActorIn(t, session.ActorOperator, city), b.ID, "claude", runtime.Config{}); err != nil {
 		t.Fatalf("attach: %v", err)
 	}
 	got, err := store.Get(b.ID)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -267,6 +268,191 @@ func TestSplitStoreWork_PoolSlotCloseGateReadsTheWorkStore(t *testing.T) {
 					}
 				})
 			}
+		}
+	}
+}
+
+// sqliteBindingForTest is a split city's class binding as production serves
+// it: a SQLite store, raw or behind the controller's primed CachingStore.
+func sqliteBindingForTest(t *testing.T, cached bool) beads.Store {
+	t.Helper()
+	engine, err := beads.OpenSQLiteStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("opening the binding: %v", err)
+	}
+	t.Cleanup(func() {
+		if closer, ok := engine.(interface{ CloseStore() error }); ok {
+			_ = closer.CloseStore()
+		}
+	})
+	if cached {
+		return cachedWorkStore(t, engine)
+	}
+	return engine
+}
+
+// assignedParkedRoot creates, in binding, an open workflow molecule root
+// assigned to assignee: as the storage migration carries one bd parked
+// (infraCarryParkedHold) when parked, else as a plain open root.
+func assignedParkedRoot(t *testing.T, binding beads.Store, assignee string, parked bool) beads.Bead {
+	t.Helper()
+	root := beads.Bead{Title: "workflow root", Type: "molecule", Status: "open", Assignee: assignee, Metadata: beads.StringMap{beadmeta.KindMetadataKey: "workflow"}}
+	if parked {
+		root.SourceStatus = "blocked"
+		root = infraCarryParkedHold(root)
+	}
+	created, err := binding.Create(root)
+	if err != nil {
+		t.Fatalf("creating the root: %v", err)
+	}
+	return created
+}
+
+// A bead the storage migration carried parked into the binding (owner decision
+// D-a: open, deferred to infraParkedDeferUntil) is parked there as bd parked
+// it in the work store, for every reader of the binding's Live "open". It does
+// not hold its seat's close gate, and an assigned parked molecule root is no
+// wake demand. Before the binding left out a row deferred into the future,
+// each read counted the row as live work: a seat holding it never closed, and
+// its root woke a session whose hook then dropped it, every tick. A root the
+// copy did not park still holds the gate and is demand, so the binding leg is
+// read.
+func TestSplitStoreWork_ACarriedParkedRowIsNoSeatWorkAndNoWakeDemand(t *testing.T) {
+	for _, cached := range []bool{false, true} {
+		for _, parked := range []bool{true, false} {
+			name := fmt.Sprintf("cached=%v/parked=%v", cached, parked)
+			for _, path := range seatWorkPaths {
+				t.Run(name+"/close gate/"+path, func(t *testing.T) {
+					cityPath := t.TempDir()
+					cfg := &config.City{Workspace: config.Workspace{Name: "kill-town"}, Agents: []config.Agent{persistentWorker()}}
+					binding := sqliteBindingForTest(t, cached)
+					registerWorkShapeWith(t, cityPath, "split", binding, beads.NewMemStore())
+					seat := createCanonicalPoolSession(t, binding, &cfg.Agents[0], seatWorkNow.Add(-time.Hour), 1)
+					assignedParkedRoot(t, binding, seat.ID, parked)
+					info := sessionInfosFromBeads([]beads.Bead{seat})[0]
+					sw := seatWorkOn(path, cityPath, cfg, binding, nil, info)
+
+					closed := closeSeat(binding, sw, info, closeWhy{reason: "drained", gate: closeGated}, seatWorkNow, io.Discard)
+
+					if closed != parked {
+						t.Fatalf("close = %v, want %v", closed, parked)
+					}
+				})
+			}
+			t.Run(name+"/wake demand", func(t *testing.T) {
+				cityPath := t.TempDir()
+				cfg := &config.City{Workspace: config.Workspace{Name: "kill-town"}, Agents: []config.Agent{persistentWorker()}}
+				binding := sqliteBindingForTest(t, cached)
+				work := beads.NewMemStore()
+				registerWorkShapeWith(t, cityPath, "split", binding, work)
+				root := assignedParkedRoot(t, binding, "kill-town/worker-1", parked)
+
+				_, _, _, readyAssigned, partial := collectAssignedWorkBeadsWithStores(cityPath, cfg, work, nil, nil, nil)
+
+				if partial {
+					t.Fatal("the assigned-work scan reported partial")
+				}
+				demand := false
+				for key, ready := range readyAssigned {
+					if key.ID == root.ID && ready {
+						demand = true
+					}
+				}
+				if demand == parked {
+					t.Fatalf("root %s is wake demand = %v, want %v (readyAssigned %v)", root.ID, demand, !parked, readyAssigned)
+				}
+			})
+		}
+	}
+}
+
+// A claim does not take a bead the storage migration carried parked, so the
+// row stays parked for its claimant and for the controller alike: the
+// binding's claim refuses a row deferred into the future, as bd refuses to
+// claim a parked bead. When the claim took one, the deferral stayed on an
+// in_progress row: every hook read dropped it as deferred, so its claimant's
+// crash-recovery read could not find it, while the controller counted it as
+// that claimant's wake demand, and a release returned it parked again. A root
+// the copy did not park is claimed, served on its claimant's hook, counted as
+// its demand, and back in the Live "open" once released.
+func TestSplitStoreWork_AClaimOfACarriedParkedRowIsRefused(t *testing.T) {
+	const claimant = "kill-town/worker-1"
+	for _, cached := range []bool{false, true} {
+		for _, parked := range []bool{true, false} {
+			t.Run(fmt.Sprintf("cached=%v/parked=%v", cached, parked), func(t *testing.T) {
+				cityPath := t.TempDir()
+				cfg := &config.City{Workspace: config.Workspace{Name: "kill-town"}, Agents: []config.Agent{persistentWorker()}}
+				binding := sqliteBindingForTest(t, cached)
+				work := beads.NewMemStore()
+				registerWorkShapeWith(t, cityPath, "split", binding, work)
+				root := assignedParkedRoot(t, binding, claimant, parked)
+				owner, ok := binding.(interface {
+					Claim(id, assignee string) (beads.Bead, bool, error)
+					ReleaseIfCurrent(id, expectedAssignee string) (bool, error)
+				})
+				if !ok {
+					t.Fatalf("the binding %T neither claims nor releases", binding)
+				}
+
+				_, claimed, err := owner.Claim(root.ID, claimant)
+				if err != nil {
+					t.Fatalf("Claim: %v", err)
+				}
+				if claimed == parked {
+					t.Fatalf("Claim took the root = %v, want %v", claimed, !parked)
+				}
+				got, err := binding.Get(root.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if parked && (got.Status != "open" || got.DeferUntil == nil || !got.DeferUntil.Equal(infraParkedDeferUntil) || got.Metadata[beadmeta.MigratedParkedHoldMetadataKey] == "") {
+					t.Fatalf("the refused claim changed the parked root: %+v", got)
+				}
+
+				rows := readyRowsForAssignee(t, mustReadyLegs(t, "kill-town", work, nil, binding), claimant)
+				encoded, err := json.Marshal(rows)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if served := workQueryHasReadyWork(filterUnreadyHookCandidates(string(encoded), time.Now())); served == parked {
+					t.Errorf("the claimant's hook serves the root = %v, want %v (rows %+v)", served, !parked, rows)
+				}
+
+				_, _, _, readyAssigned, partial := collectAssignedWorkBeadsWithStores(cityPath, cfg, work, nil, nil, nil)
+				if partial {
+					t.Fatal("the assigned-work scan reported partial")
+				}
+				demand := false
+				for key, ready := range readyAssigned {
+					if key.ID == root.ID && ready {
+						demand = true
+					}
+				}
+				if demand == parked {
+					t.Errorf("root %s is wake demand = %v, want %v (readyAssigned %v)", root.ID, demand, !parked, readyAssigned)
+				}
+
+				released, err := owner.ReleaseIfCurrent(root.ID, claimant)
+				if err != nil {
+					t.Fatalf("ReleaseIfCurrent: %v", err)
+				}
+				if released == parked {
+					t.Errorf("ReleaseIfCurrent released the root = %v, want %v", released, !parked)
+				}
+				live, err := binding.List(beads.ListQuery{Status: "open", Live: true, AllowScan: true, TierMode: beads.TierBoth})
+				if err != nil {
+					t.Fatalf("Live List(open): %v", err)
+				}
+				inLive := false
+				for _, b := range live {
+					if b.ID == root.ID {
+						inLive = true
+					}
+				}
+				if inLive == parked {
+					t.Errorf("root %s in the Live open after the release = %v, want %v", root.ID, inLive, !parked)
+				}
+			})
 		}
 	}
 }

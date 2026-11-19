@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/formula"
 )
 
@@ -83,7 +84,7 @@ func TestRetryInsideLaterIterationGetsItsFullRetryBudget(t *testing.T) {
 	mustDep(t, store, control.ID, first.ID, "blocks")
 
 	for n := 1; n <= 3; n++ {
-		result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+		result, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 		if err != nil {
 			t.Fatalf("round %d: %v", n, err)
 		}
@@ -144,7 +145,7 @@ func TestRetryAttemptKeyUpgradeFromV142InFlightMolecule(t *testing.T) {
 	})
 	mustDep(t, store, control.ID, first.ID, "blocks")
 
-	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	result, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("round 1: %v", err)
 	}
@@ -159,7 +160,7 @@ func TestRetryAttemptKeyUpgradeFromV142InFlightMolecule(t *testing.T) {
 		t.Errorf("spawned attempt counters = retry_attempt %q attempt %q, want 3 and 3", next.Metadata["gc.retry_attempt"], next.Metadata["gc.attempt"])
 	}
 	failTransient(t, store, next.ID)
-	result, err = processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	result, err = processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("round 2: %v", err)
 	}
@@ -188,7 +189,7 @@ func TestRetryAttemptKeyUpgradeFromPreKeyV150Molecule(t *testing.T) {
 	})
 	mustDep(t, store, control.ID, first.ID, "blocks")
 
-	result, err := processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	result, err := processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("round 1: %v", err)
 	}
@@ -206,7 +207,7 @@ func TestRetryAttemptKeyUpgradeFromPreKeyV150Molecule(t *testing.T) {
 		t.Fatalf("set pass: %v", err)
 	}
 	mustClose(t, store, second.ID)
-	result, err = processRetryControl(store, mustGet(t, store, control.ID), ProcessOptions{})
+	result, err = processRetryControl(beadstest.Graph(store), mustGet(t, store, control.ID), ProcessOptions{Work: beadstest.Work(store)})
 	if err != nil {
 		t.Fatalf("round 2: %v", err)
 	}
@@ -336,7 +337,7 @@ max_active_sessions = 1
 		"gc.execution_routed_to": "gascity/claude",
 	}})
 
-	if err := spawnNextAttempt(t.Context(), store, loop, 2, ProcessOptions{CityPath: cityPath}); err != nil {
+	if err := spawnNextAttempt(t.Context(), beadstest.Graph(store), loop, 2, ProcessOptions{Work: beadstest.Work(store), CityPath: cityPath}); err != nil {
 		t.Fatalf("spawnNextAttempt: %v", err)
 	}
 	control := findAttemptByRef(t, store, root.ID, "mol.review-loop.iteration.2.apply-fixes")

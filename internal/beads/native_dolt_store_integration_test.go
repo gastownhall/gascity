@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net"
 	"os"
 	"os/exec"
@@ -291,13 +292,26 @@ func startTestDoltServer(t testing.TB) int {
 		t.Skip("dolt binary not in PATH")
 	}
 
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("pick free port: %v", err)
+	// The candidate is chosen outside the ports a test must never bind or
+	// reach (3307, 45865, 8123) before anything binds it.
+	port := 0
+	for range 50 {
+		candidate := 20000 + rand.IntN(40000)
+		if reservedDoltTestPorts[candidate] {
+			continue
+		}
+		lis, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(candidate))
+		if err != nil {
+			continue
+		}
+		if err := lis.Close(); err != nil {
+			t.Fatalf("release test port: %v", err)
+		}
+		port = candidate
+		break
 	}
-	port := lis.Addr().(*net.TCPAddr).Port
-	if err := lis.Close(); err != nil {
-		t.Fatalf("release test port: %v", err)
+	if port == 0 {
+		t.Fatal("no free port outside the reserved ones")
 	}
 
 	dataDir := t.TempDir()

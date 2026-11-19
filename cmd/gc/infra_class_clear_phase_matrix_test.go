@@ -3,7 +3,8 @@ package main
 // Phase matrix for the retained-copy clear, contributed by the lane split151
 // delta review (rel15/review-split151.md, A5): a kill at every store mutation
 // of a clear, on file-like, cascading and Dolt-like stores. Every kill point
-// must converge, settle cross-store edges, and keep every edge in the backup.
+// must converge, remove every cross-store edge without re-adding one (D9),
+// and keep every edge in the backup.
 
 import (
 	"bytes"
@@ -11,7 +12,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -80,8 +80,19 @@ func seedPhaseFixture(t *testing.T, s beads.Store) phaseFixture {
 	f.s1 = mustCreateInfraBead(t, s, beads.Bead{Title: "s1", Type: "task", Metadata: beads.StringMap{"gc.root_bead_id": f.root.ID}})
 	f.s2 = mustCreateInfraBead(t, s, beads.Bead{Title: "s2", Type: "task", Metadata: beads.StringMap{"gc.root_bead_id": f.root.ID}})
 	f.done = mustCreateInfraBead(t, s, beads.Bead{Title: "done graft", Type: "task", Metadata: beads.StringMap{"gc.kind": "workflow"}})
+	// Finished before the cutover: an open work bead blocked by an open
+	// moved bead refuses the copy (D9).
+	if err := s.Close(f.done.ID); err != nil {
+		t.Fatal(err)
+	}
 	f.sess = mustCreateInfraBead(t, s, beads.Bead{Title: "sess", Type: "session", Labels: []string{"gc:session"}})
-	f.w1 = mustCreateInfraBead(t, s, beads.Bead{Title: "w1 waits s2", Type: "task"})
+	f.w1 = mustCreateInfraBead(t, s, beads.Bead{Title: "w1 waited on s2", Type: "task"})
+	// Closed: an open work bead blocked by the open s2 refuses the copy
+	// (D9's W -> D row), which TestTheCopyRefusesAWorkBeadBlockedByAnOpenMovedBead
+	// pins.
+	if err := s.Close(f.w1.ID); err != nil {
+		t.Fatal(err)
+	}
 	f.w2 = mustCreateInfraBead(t, s, beads.Bead{Title: "w2 waits done", Type: "task"})
 	f.w3 = mustCreateInfraBead(t, s, beads.Bead{Title: "w3 related root", Type: "task"})
 	for _, e := range []beads.Dep{
@@ -133,8 +144,9 @@ func runPhaseMatrix(t *testing.T, cascade, refuse bool) {
 				}
 			} else {
 				if first.Outcome == infraMigrationConverged {
-					// a fault swallowed into Unrestorable is acceptable only for restore adds
-					t.Logf("fault at %d absorbed: lost=%v", k, first.LostCrossEdges)
+					// The fault hit a mutation the run tolerates (an edge
+					// already gone).
+					t.Logf("fault at %d absorbed", k)
 				} else if got := checkInfraClassConvergence(cityPath, cfg, "gc start", &bytes.Buffer{}); got.serving() {
 					t.Fatalf("boot SERVES after a kill at mutation %d (outcome %s)", k, got.Outcome)
 				}
@@ -159,17 +171,13 @@ func runPhaseMatrix(t *testing.T, cascade, refuse bool) {
 			if err != nil || !note.Complete {
 				t.Errorf("note incomplete: %+v %v", note, err)
 			}
-			w1Lost := false
-			for _, e := range note.LostCrossEdges {
-				if strings.HasPrefix(e, f.w1.ID+" ") {
-					w1Lost = true
+			if len(note.LostCrossEdges) != 0 {
+				t.Errorf("the clear recorded lost edges %v; it re-adds none, so it loses none", note.LostCrossEdges)
+			}
+			for _, w := range []beads.Bead{f.w1, f.w2, f.w3} {
+				if deps, _ := ps.DepList(w.ID, "down"); len(deps) != 0 {
+					t.Errorf("%s still holds %+v after kill@%d: a cross-store edge survived or was re-added", w.ID, deps, k)
 				}
-			}
-			if slices.Contains(ready, f.w1.ID) && !w1Lost {
-				t.Errorf("w1 ready early with no lost_cross_edges record: %v", note.LostCrossEdges)
-			}
-			if refuse && !w1Lost {
-				t.Errorf("refusing store but w1 edge not recorded lost: %v", note.LostCrossEdges)
 			}
 			// Backup integrity: every row and every edge.
 			entries, _, err := readInfraRetainedBackup(target)
