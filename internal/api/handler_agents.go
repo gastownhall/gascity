@@ -707,6 +707,13 @@ func (s *Server) enrichSessionMeta(resp *agentResponse, agentCfg config.Agent, q
 	resp.Activity = meta.Activity
 }
 
+// providerIsClaudeFamily reports whether provider runs Claude: the builtin
+// itself or a custom provider whose base chain ends in it, which writes the
+// same session files.
+func providerIsClaudeFamily(provider string, cfg *config.City) bool {
+	return config.BuiltinFamily(provider, cfg.Providers) == "claude"
+}
+
 // canAttributeSession reports whether session file attribution is unambiguous
 // for the given agent in its rig. Returns false when multiple Claude agents
 // or multi-session instances share the same rig directory, since we can't
@@ -725,7 +732,7 @@ func canAttributeSession(agentCfg config.Agent, qualifiedName string, cfg *confi
 	}
 	count := 0
 	for _, a := range cfg.Agents {
-		if agentProviderName(&a, cfg) == "claude" {
+		if providerIsClaudeFamily(agentProviderName(&a, cfg), cfg) {
 			if isMultiSessionAgent(a) {
 				if multiSessionSharesWorkDir(cityPath, cityName, target, a, cfg.Rigs) {
 					return false
