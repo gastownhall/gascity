@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **gc no longer migrates an existing bd database's schema; an operator
+  does.** `bd migrate schema` is bd's consent to a one-way schema change for
+  every client of a database (gastownhall/beads#5920 on a shared server,
+  gastownhall/beads#5764 for any existing database). The bd pack's init ran it
+  on every scope whose database already had a schema, on every `gc start` and
+  `gc reload`, so whenever the pinned bd was newer than a database, gc
+  consented on the operator's behalf and could lock out every older bd that
+  shares it. Init now runs it only on a database it is
+  bootstrapping: one this init created, or an interrupted bootstrap it has
+  just reset. Every other database keeps its schema, and init still reports
+  the scope ready instead of failing it. `gc start`, `gc reload` (as reply
+  warnings) and the new `bd-schema` check of `gc doctor` print a
+  `bd schema:` line for each database whose schema differs from the beads
+  library linked into gc, naming both schemas, what the pinned bd reports and
+  the command an operator runs once every client of the database is ready
+  (`gc bd --city <city> [--rig <rig>] migrate schema`, or the pinned bd with
+  `BEADS_DIR` pinned on a split city, whose `gc bd` refuses `migrate`). A rig
+  whose database the pinned bd then cannot open because of that difference is
+  left unserved, with a line in the city's log saying so, instead of failing
+  the whole start or reload; the city's own database still has to open. Upgrade bd, then migrate
+  each database yourself (see "Databases Gas City leaves to you" in "Upgrading
+  an Existing City"); `beads.allow_schema_behind_migrate = true` still lets
+  gc's own store migrate a database that is behind. A database whose
+  bootstrap an earlier init left clean but unfinished is no longer completed
+  on the next start; its `bd schema:` line names the command. Embedded scopes
+  are unaffected: init never ran the step on them, and bd decides whether
+  they migrate. gc measures against its linked beads library, which an OSS
+  city's pinned bd can differ from; a newer bd can refuse writes to a
+  database gc reports as current, and its own message names the schema it
+  needs.
+
 - **New cities are born split.** `gc init` now writes a `[storage]` section
   that keeps work in the work ledger and puts the five infrastructure classes
   (graph, sessions, messaging, orders, nudges) in one SQLite store under

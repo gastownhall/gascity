@@ -87,16 +87,20 @@ open a migrated database.
 
 Skip this section if your city was already running `bd` 1.3.0 or newer.
 
-Beads 1.3 moves the database schema from v53 to v66. `bd` migrates a store it
-runs itself automatically, but a city's databases live on the Dolt server Gas
-City manages. `bd` treats that server as shared, because other clients may
-still be running an older `bd`, so it waits for you to ask by name. Until you
-do, `bd` refuses every write, and most reads fail too: `bd list`, `bd show`
-and `bd ready` stop with `table not found: leases`. Gas City does not run
-this migration for you.
+Beads 1.3 moves the database schema from v53 to v66. Migrating is one-way: a
+`bd` built for the older schema refuses a migrated database. A city's
+databases live on the Dolt server Gas City manages, where any agent, order or
+`bd` on the machine may still run an older `bd`, so `bd` migrates one only when
+you ask by name. Until you do, `bd` refuses every write, and most reads fail
+too: `bd list`, `bd show` and `bd ready` stop with `table not found: leases`.
+
+Gas City does not run this migration for you; see
+[Databases Gas City leaves to you](#databases-gas-city-leaves-to-you).
 
 The city and each rig have their own database, so migrate each one. Start the
-city's Dolt server without its agents, migrate, then start the city:
+city's Dolt server without its agents, migrate, then start the city. On a city
+that splits its storage, `gc bd` refuses `migrate`: run the command the
+`bd schema:` line gives for each database instead.
 
 ```bash
 cd ~/my-city
@@ -127,6 +131,41 @@ If you start the city before migrating, `gc start` fails with
 and the city registered. Run the two `migrate schema` commands; the supervisor
 retries and the city comes up on its own, with no second `gc start`.
 </Note>
+
+## Databases Gas City leaves to you
+
+Gas City runs `bd migrate schema` only on a database it is creating. Every
+other database keeps its schema until you migrate it, whichever `bd` the city
+pins: migrating changes the schema for every client of the database at once,
+and a `bd` built for the older schema refuses it afterwards, so it is your
+call when every client is ready. The one exception is a city that sets
+`beads.allow_schema_behind_migrate = true`, which lets Gas City's own store
+migrate a database that is behind when it opens it.
+
+You do not have to track which databases are left. `gc start`, `gc reload`
+(without `--async`) and the `bd-schema` check of `gc doctor` name each database
+whose schema differs from the one built into `gc`, with the command that
+migrates it:
+
+```text
+gc start: warning: bd schema: rig "my-project" database "mp" on 127.0.0.1:3307 is at schema v53/11 (main/ignored migration lanes), behind v66/26, the schema of the beads library linked into gc (the pinned bd reports "bd version 1.3.4"). … an operator migrates it with a bd at that schema: gc bd --city /home/me/my-city --rig my-project migrate schema
+```
+
+On a city that splits its storage the line gives the pinned `bd` itself, run
+in the rig's directory with `BEADS_DIR` set to it. Run that from a shell with
+no `BEADS_DOLT_*` variables set, or `bd` may reach another server.
+
+`gc` compares each database with the Beads library it is built with, and the
+`bd` you run can differ from that library. A `bd` newer than the library can
+still refuse a database `gc` reports as current, and its own message names the
+schema it needs. A `bd` older than the schema a line names has nothing to
+apply: upgrade `bd` before you migrate.
+
+A rig whose database the city's `bd` cannot open because of such a schema
+difference does not stop the city: `gc start` and `gc reload` leave that rig
+unserved, the city's log says so, and the other rigs are served until you
+migrate it. The city's own database has no such fallback, so the city does
+not start until it is migrated.
 
 ## Start the city and check it
 

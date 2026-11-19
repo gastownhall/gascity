@@ -138,3 +138,19 @@ func TestRuntimeConformanceCmd_ReportsV2Readiness(t *testing.T) {
 		}
 	}
 }
+
+// Kills a gc runtime conformance run from a shell outside any city that runs
+// its ops in no city, which a runtime serving only cities refuses.
+func TestRuntimeConformanceCmd_RunsOutsideACity(t *testing.T) {
+	t.Setenv("GC_EXEC_CITY_NAME", "")
+	t.Setenv("GC_EXEC_CITY_PATH", "")
+	var stdout, stderr bytes.Buffer
+	cmd := newRuntimeConformanceCmd(&stdout, &stderr)
+	cmd.SetArgs([]string{cityOnlyRPPScript(t, conformantConformanceScript(t))})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("Execute: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	if out := stdout.String(); !strings.Contains(out, "0 failed") {
+		t.Errorf("conformant executable should report 0 failed outside a city; got:\n%s", out)
+	}
+}

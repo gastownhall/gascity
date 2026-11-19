@@ -7,8 +7,11 @@ package reference
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 )
 
 // The golden reference's observe.v1 op bodies. Every box is the directory
@@ -323,4 +326,77 @@ func Script(stateDir string, bodies map[string]string) string {
 	}
 	b.WriteString("  *) exit 2 ;;\nesac\n")
 	return b.String()
+}
+
+// CityOnlyScript renders a wrapper around the executable at runtimePath that
+// serves only a city, as gc's own ops always name one: every op, protocol
+// included, exits 1 when GC_EXEC_CITY_PATH is unset or empty, and any other
+// op runs runtimePath, stdin passed through. Each invocation first appends
+// the city it names and its arguments to opsLog (ReadCityOps), so a test can
+// tell which city every op ran in.
+func CityOnlyScript(runtimePath, opsLog string) string {
+	return fmt.Sprintf(`#!/bin/sh
+printf '%%s\t%%s\n' "${GC_EXEC_CITY_PATH:-}" "$*" >> '%s'
+if [ -z "${GC_EXEC_CITY_PATH:-}" ]; then echo "$1: GC_EXEC_CITY_PATH is not set: this runtime serves only a city" >&2; exit 1; fi
+exec '%s' "$@"
+`, opsLog, runtimePath)
+}
+
+// CityOp is one op a CityOnlyScript wrapper logged: the GC_EXEC_CITY_PATH it
+// ran in, empty for none, and its arguments joined by spaces.
+type CityOp struct {
+	City string
+	Args string
+}
+
+// ReadCityOps returns the ops a CityOnlyScript wrapper logged to opsLog, in
+// invocation order.
+func ReadCityOps(opsLog string) ([]CityOp, error) {
+	data, err := os.ReadFile(opsLog)
+	if err != nil {
+		return nil, fmt.Errorf("reading the city-only ops log: %w", err)
+	}
+	var ops []CityOp
+	for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		city, args, ok := strings.Cut(line, "\t")
+		if !ok {
+			return nil, fmt.Errorf("city-only ops log line %q has no tab", line)
+		}
+		ops = append(ops, CityOp{City: city, Args: args})
+	}
+	return ops, nil
+}
+
+// OnFirstOp writes, into dir, a wrapper around the executable at
+// runtimePath that runs every op through it, stdin passed through, and
+// calls fn once the wrapper first runs op, so a test can act on an op
+// beginning (cancel a run, as a Ctrl-C would) with no polling: the wrapper
+// signals through a FIFO. Call release when the test ends; it unblocks the
+// wait when op never ran.
+func OnFirstOp(runtimePath, op, dir string, fn func()) (wrapper string, release func(), err error) {
+	fifo := filepath.Join(dir, "first-"+op)
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		return "", nil, fmt.Errorf("making the first-op FIFO: %w", err)
+	}
+	wrapper = filepath.Join(dir, "on-first-"+op)
+	script := fmt.Sprintf(`#!/bin/sh
+if [ "$1" = '%s' ] && [ -p '%s' ]; then echo "$1" > '%s'; rm -f '%s'; fi
+exec '%s' "$@"
+`, op, fifo, fifo, fifo, runtimePath)
+	if err := os.WriteFile(wrapper, []byte(script), 0o755); err != nil {
+		return "", nil, fmt.Errorf("writing the first-op wrapper: %w", err)
+	}
+	go func() {
+		_, _ = os.ReadFile(fifo) // blocks until the first op writes, or release
+		fn()
+	}()
+	release = func() {
+		if f, err := os.OpenFile(fifo, os.O_WRONLY|syscall.O_NONBLOCK, 0); err == nil {
+			_ = f.Close()
+		}
+	}
+	return wrapper, release, nil
 }
