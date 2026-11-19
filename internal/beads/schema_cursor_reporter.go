@@ -63,7 +63,11 @@ func (s *NativeDoltStore) SchemaCursor(ctx context.Context) (current, target int
 	if !ok {
 		return 0, 0, fmt.Errorf("%w: the linked library's %T exports no UnderlyingDB", ErrSchemaCursorUnavailable, storage)
 	}
-	current, err = beadsschema.CurrentVersion(ctx, accessor.UnderlyingDB())
+	db := accessor.UnderlyingDB()
+	if db == nil {
+		return 0, 0, fmt.Errorf("%w: the linked library's %T exported a nil UnderlyingDB", ErrSchemaCursorUnavailable, storage)
+	}
+	current, err = beadsschema.CurrentVersion(ctx, db)
 	if err != nil {
 		return 0, 0, err
 	}
