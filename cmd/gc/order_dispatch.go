@@ -57,7 +57,9 @@ const (
 	// orderTrackingRetentionChunkSpan also bounds a chunk, by wall time: a
 	// chunk-by-count alone stalls once each membership listing (the per-run
 	// stranding check) takes long enough that a full chunk's checks run past
-	// the sweep's own timeout before the first delete.
+	// the sweep's own timeout before the first delete. The span is checked
+	// between candidate checks, so it bounds when a chunk's flush starts, not
+	// how long the in-flight check, the flush or any store operation takes.
 	orderTrackingRetentionChunkSpan        = time.Minute
 	legacyOrderTrackingRetentionBucket     = "\x00legacy-unscoped-order-tracking"
 	orderTrackingSweepWatchdogInterval     = 30 * time.Second
@@ -3497,6 +3499,8 @@ type orderTrackingRetentionPolicy struct {
 
 // budgetSpent reports whether the policy's check budget, if it has one, has
 // run out on the retention sweep's wall clock (orderTrackingRetentionNow).
+// The sweep asks between candidate checks, so the budget bounds when checking
+// stops, not how long an in-flight check, store read or chunk delete takes.
 func (p orderTrackingRetentionPolicy) budgetSpent() bool {
 	return !p.checkUntil.IsZero() && !orderTrackingRetentionNow().Before(p.checkUntil)
 }
@@ -3936,7 +3940,9 @@ type orderTrackingRetentionChunk struct {
 // runs or has been open for orderTrackingRetentionChunkSpan, whichever comes
 // first, and opens the next one. The span bound matters on a large ledger: a
 // membership listing slow enough would otherwise let one chunk's checks run
-// past the sweep's own timeout before its first delete.
+// past the sweep's own timeout before its first delete. It is called between
+// candidate checks, so the span bounds when a flush starts; the flush itself
+// (the set-level re-check and delete) runs with no deadline.
 func (c *orderTrackingRetentionChunk) flushIfDue() error {
 	if len(c.ids) == 0 {
 		return nil

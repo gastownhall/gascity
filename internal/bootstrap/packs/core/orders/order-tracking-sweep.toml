@@ -4,12 +4,15 @@
 # left alone so in-flight orders keep their normal single-flight protection.
 #
 # The prune deletes expired history a chunk at a time as it clears its
-# checks. --check-budget stops the checks at 3m, under the 5m timeout, which
-# leaves time for the last chunk's delete (no longer than a minute of checks)
-# and the rest of the command. A run that stops there keeps what it deleted,
-# declares a partial outcome (order.skipped) naming each store it did not
-# finish, and leaves the rest of the backlog to the next run. The timeout,
-# the 300s exec default, is explicit so the two values change together.
+# checks. --check-budget and the chunk span are cooperative limits, checked
+# between candidate checks: --check-budget stops starting new retention
+# checks at 3m. It does not bound an in-flight store read, the final chunk's
+# set-level re-check and delete, or stale-close and the confirm count; the 5m
+# timeout leaves headroom for those. A run that stops there keeps what it
+# deleted, declares a partial outcome (order.skipped) naming each store it
+# did not finish, and leaves the rest of the backlog to the next run. The
+# timeout, the 300s exec default, is explicit so the two values change
+# together.
 [order]
 description = "Close stale order-tracking beads and prune expired tracking history"
 trigger = "cooldown"

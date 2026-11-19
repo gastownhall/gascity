@@ -4530,12 +4530,15 @@ func TestPackagedOrderTrackingSweepPassesConfirm(t *testing.T) {
 }
 
 // TestPackagedOrderTrackingSweepBudgetsItsChecksInsideItsTimeout pins the
-// packaged core sweep order to a --check-budget that ends its retention
-// checks inside the order's own timeout, with room left for the last chunk's
-// delete (no longer than orderTrackingRetentionChunkSpan of checks). Without
-// the budget, or with one the timeout cuts off, a backlog too large to check
-// in one run is killed on every run instead of ending cleanly and declaring
-// the run partial.
+// packaged core sweep order's configured headroom: a --check-budget that,
+// plus one orderTrackingRetentionChunkSpan, is less than the order's own
+// timeout. The budget and span are cooperative limits checked between
+// candidate checks, so this does not guarantee the run finishes in time (an
+// in-flight store read, the final chunk's re-check and delete, stale-close
+// and the confirm count are unbounded); it pins that the configuration leaves
+// room for them. Without the budget, or with one the timeout cuts off, a
+// backlog too large to check in one run is killed on every run instead of
+// ending cleanly and declaring the run partial.
 func TestPackagedOrderTrackingSweepBudgetsItsChecksInsideItsTimeout(t *testing.T) {
 	chdirToRealPackageDir(t)
 	const packOrderPath = "../../internal/bootstrap/packs/core/orders/order-tracking-sweep.toml"
@@ -4565,7 +4568,7 @@ func TestPackagedOrderTrackingSweepBudgetsItsChecksInsideItsTimeout(t *testing.T
 		t.Fatalf("exec = %q sets no --check-budget, want one inside the order's timeout", packed.Exec)
 	}
 	if timeout := packed.TimeoutOrDefault(); budget+orderTrackingRetentionChunkSpan >= timeout {
-		t.Fatalf("--check-budget %s plus a chunk's %s does not end inside the order's %s timeout", budget, orderTrackingRetentionChunkSpan, timeout)
+		t.Fatalf("--check-budget %s plus a chunk span of %s leaves no configured headroom under the order's %s timeout", budget, orderTrackingRetentionChunkSpan, timeout)
 	}
 }
 
