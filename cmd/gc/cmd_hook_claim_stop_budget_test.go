@@ -193,3 +193,38 @@ func TestHookClaimCASKeepsItsBudgetWhenStopGateSpendsItsOwn(t *testing.T) {
 		})
 	}
 }
+
+// TestHookClaimLaterCandidateKeepsBudgetAfterEarlierStopGate (AC-2): the first
+// candidate's stop gate spends its whole budget and closes it under a failed
+// root; the live candidate behind it is gated and claimed on fresh budgets
+// rather than abandoned as if the tier's time were gone.
+func TestHookClaimLaterCandidateKeepsBudgetAfterEarlierStopGate(t *testing.T) {
+	for _, tier := range claimTiers {
+		t.Run(tier.name, func(t *testing.T) {
+			shortenHookClaimBudget(t, hookClaimTestBudget)
+			f := newHookWorkflowStopFixture(t)
+			failed := f.root("failed run", "")
+			stopped := f.step("implement", failed.ID, nil)
+			f.closeAs(failed.ID, "fail", nil)
+			live := f.root("live run", "")
+			next := f.step("implement", live.ID, nil)
+			if tier.assignee != "" {
+				f.assign(stopped.ID, tier.assignee)
+				f.assign(next.ID, tier.assignee)
+			}
+			f.served = []string{stopped.ID, next.ID}
+
+			rec := &budgetClaimRecorder{}
+			ops := f.ops()
+			ops.WorkflowStore = slowStopGate(f, failed.ID)
+			ops.Claim = rec.bdLikeClaim(ops.Claim)
+
+			run := runBudgetClaim(t, ops, false)
+
+			wantHandedOut(t, f, run, next.ID, tier.reason)
+			wantEveryClaimUnexpired(t, rec)
+			f.wantClosed(stopped.ID, "skipped")
+			f.wantNeverClaimed(stopped.ID)
+		})
+	}
+}

@@ -967,10 +967,6 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		if ops.claimWindowSpent() {
 			return refuseExpiredHookClaimWindow(candidate.ID, ops, stderr)
 		}
-		if ctx.Err() != nil {
-			fmt.Fprintf(stderr, "gc hook --claim: ready assignment %s claim deadline exhausted: %v\n", candidate.ID, ctx.Err()) //nolint:errcheck
-			return hookClaimResult{terminal: true, code: 1}
-		}
 		// Use the bead's current own-identity assignee as the claim actor.
 		// BEADS_ACTOR may be represented by the runtime name, session bead id,
 		// or alias; bd's idempotent --claim path requires the actor to match the
@@ -980,6 +976,14 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 			continue
 		}
 		casCtx, casCancel := ops.claimMutationContext()
+		if budgetErr := casCtx.Err(); budgetErr != nil {
+			// The CAS's own budget was spent before it started. This session
+			// already owns the bead, so refuse rather than fall through to
+			// unrelated fresh work.
+			casCancel()
+			fmt.Fprintf(stderr, "gc hook --claim: ready assignment %s claim deadline exhausted: %v\n", candidate.ID, budgetErr) //nolint:errcheck
+			return hookClaimResult{terminal: true, code: 1}
+		}
 		claimed, ok, err := ops.Claim(casCtx, dir, opts.Env, candidate.ID, claimActor)
 		casCancel()
 		// The straddle fence asks when the CAS landed; stamp it before the
@@ -1171,14 +1175,6 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		if ops.claimWindowSpent() {
 			return refuseExpiredHookClaimWindow(candidate.ID, ops, stderr)
 		}
-		if ctx.Err() != nil {
-			// The shared claim budget is spent (an earlier slow-failing claim
-			// consumed it). Stop rather than attempting the remaining candidates
-			// with an already-expired context, which would only manufacture
-			// deadline-exceeded skips on ids never really tried; they are reclaimed
-			// next tick (NDI).
-			break
-		}
 		// Neither the work query nor bd ready knows a workflow stopped: a step's
 		// only link to its root is a non-blocking tracks edge, so a step under a
 		// failed or canceled root stays ready. This gate is what keeps it from
@@ -1187,6 +1183,14 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			continue
 		}
 		casCtx, casCancel := ops.claimMutationContext()
+		if casCtx.Err() != nil {
+			// The CAS's own budget was spent before it started, which only a
+			// non-positive mutation timeout does. Stop rather than manufacture
+			// deadline-exceeded skips on ids never really tried; they are
+			// reclaimed next tick (NDI).
+			casCancel()
+			break
+		}
 		claimed, ok, err := ops.Claim(casCtx, dir, opts.Env, candidate.ID, opts.Assignee)
 		casCancel()
 		// The straddle fence asks when the CAS landed; stamp it before the
