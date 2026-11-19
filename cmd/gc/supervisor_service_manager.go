@@ -23,10 +23,11 @@ var errSupervisorServiceManagerUnsupported = errors.New("supervisor service mana
 // every platform — a service manager only adds start-on-login and restart
 // supervision on top of it.
 //
-// Gas City must not register a Windows service to close that gap. A service
-// runs in a session with no desktop and no user profile, which is exactly what
-// a supervisor that launches interactive agent sessions cannot do; installing
-// one would produce a supervisor that starts and then cannot do its job.
+// Registering a Windows service to close that gap is out of scope until
+// service support lands in a later PR. A service runs in a session with no
+// desktop and no user profile, which is exactly what a supervisor that
+// launches interactive agent sessions cannot work in, so registering one now
+// would produce a supervisor that starts and then cannot do its job.
 type supervisorServiceManagerUnsupportedError struct {
 	GOOS string
 	Op   string
