@@ -384,8 +384,8 @@ func TestAdmitLRUOrderUsesWakeFairnessTime(t *testing.T) {
 // LRU order would admit the standing start first and starve the routed pool.
 func TestAdmitStandingStartDefersToRoutedPoolCreate(t *testing.T) {
 	in := admitIn(2, 4)
-	demand := startOn(2, "", time.Hour)
-	standing := startOn(1, "", 2*time.Hour) // oldest rank
+	demand := startOn(2, "", -time.Hour)     // woken an hour ago
+	standing := startOn(1, "", -2*time.Hour) // slept two hours ago: the oldest rank
 	standing.Standing = true
 	create := poolCreate("w", "")
 	res := admit(in, []intent{demand, standing, create})
@@ -408,6 +408,32 @@ func TestAdmitStandingStartRunsWhenBudgetIsFree(t *testing.T) {
 	res := admit(in, []intent{standing, demand})
 	if got := keysOf(res.Admitted); fmt.Sprint(got) != "[start:gc-1 start:gc-2]" {
 		t.Fatalf("admitted %v, want both starts admitted demand-first", got)
+	}
+}
+
+// TestAdmitStandingClassKeepsLeastRecentlyWokenOrder pins the within-class
+// order of the standing tier (AC-3): the standing starts left after demand
+// work and creates compete among themselves least-recently-woken first
+// (START-009), exactly as the demand class does. With three standing starts
+// and one token, the oldest rank is admitted and the two fresher standing
+// starts defer.
+func TestAdmitStandingClassKeepsLeastRecentlyWokenOrder(t *testing.T) {
+	in := admitIn(1, 4)
+	oldest := startOn(1, "", -3*time.Hour)
+	mid := startOn(2, "", -2*time.Hour)
+	fresh := startOn(3, "", -time.Minute)
+	oldest.Standing, mid.Standing, fresh.Standing = true, true, true
+	res := admit(in, []intent{fresh, mid, oldest})
+	if got := keysOf(res.Admitted); fmt.Sprint(got) != "[start:gc-1]" {
+		t.Fatalf("admitted %v, want only the oldest standing start", got)
+	}
+	if len(res.Deferred) != 2 {
+		t.Fatalf("deferred %v, want the two fresher standing starts", res.Deferred)
+	}
+	for _, it := range res.Deferred {
+		if it.Kind != intentStart || it.Cause != causeAwaitingBudget {
+			t.Fatalf("deferred %+v, want standing starts behind causeAwaitingBudget", it)
+		}
 	}
 }
 

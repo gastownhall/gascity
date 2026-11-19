@@ -1,14 +1,19 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
 
 // TestWakeFairnessRoutedPoolWorkNotStarvedByIdlePatrolRestarts reproduces
@@ -146,5 +151,100 @@ func TestWakeBudgetStartsRoutedPoolWorkBeforeIdlePatrolRestarts(t *testing.T) {
 	}
 	if deferred != len(named) {
 		t.Fatalf("deferred_by_wake_budget logged for %d of %d standing named sessions\nstderr:\n%s", deferred, len(named), env.stderr.String())
+	}
+}
+
+// TestWakeBudgetStandingClassKeepsLeastRecentlyWokenOrder pins the
+// within-class order of the standing candidates (AC-3): once demand work is
+// admitted first, the standing restarts left compete among themselves exactly
+// as the demand class does — least-recently-woken first (START-009) — and the
+// budget never reorders them by anything else. With three standing candidates
+// and a budget of 2, the two oldest wake; the freshest defers.
+func TestWakeBudgetStandingClassKeepsLeastRecentlyWokenOrder(t *testing.T) {
+	sp := runtime.NewFake()
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 10, 12, 11, 18, 5, 0, time.UTC)}
+	budget := 2
+	cfg := &config.City{Daemon: config.DaemonConfig{MaxWakesPerTick: &budget}}
+
+	mkTP := func(name string) TemplateParams {
+		return TemplateParams{
+			Command:      "true",
+			SessionName:  name,
+			TemplateName: name,
+			ResolvedProvider: &config.ResolvedProvider{
+				Name:          "claude",
+				Command:       "claude",
+				PromptMode:    "arg",
+				ResumeFlag:    "--resume",
+				ResumeStyle:   "flag",
+				SessionIDFlag: "--session-id",
+			},
+		}
+	}
+
+	// Distinct wake times: old-a 3h ago, old-b 2h ago, fresh 1m ago. All are
+	// standing candidates (the wake arm derives the flag from
+	// AwakeDecision.Standing), so they all sit in the standing class and the
+	// budget must go least-recently-woken first.
+	specs := []struct{ name, lastWoke string }{
+		{"old-a", "2026-10-12T08:18:05Z"},
+		{"old-b", "2026-10-12T09:18:05Z"},
+		{"fresh", "2026-10-12T11:17:05Z"},
+	}
+	desired := map[string]TemplateParams{}
+	var candidates []startCandidate
+	for i, s := range specs {
+		sess, err := store.Create(beads.Bead{
+			Title:  s.name,
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"session_name":   s.name,
+				"agent_name":     s.name,
+				"template":       s.name,
+				"state":          "creating",
+				"generation":     "1",
+				"instance_token": "test-token",
+				"live_hash":      runtime.LiveFingerprint(runtime.Config{Command: "test-cmd"}),
+				"last_woke_at":   s.lastWoke,
+			},
+		})
+		if err != nil {
+			t.Fatalf("Create(%s): %v", s.name, err)
+		}
+		tp := mkTP(s.name)
+		desired[s.name] = tp
+		candidates = append(candidates, startCandidate{info: sessiontest.SeedBead(t, sess), tp: tp, order: i, standing: true})
+	}
+
+	woken := executePlannedStartsTraced(
+		context.Background(),
+		candidates,
+		cfg,
+		desired,
+		sp,
+		store,
+		"",
+		t.TempDir(),
+		clk,
+		events.Discard,
+		5*time.Second,
+		ioDiscard{},
+		ioDiscard{},
+		nil,
+		withStartStabilityWaiter(immediateStartStabilityWaiter),
+		withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter),
+	)
+	if woken != budget {
+		t.Fatalf("woken = %d, want %d", woken, budget)
+	}
+	for _, name := range []string{"old-a", "old-b"} {
+		if !sp.IsRunning(name) {
+			t.Fatalf("least-recently-woken standing session %q deferred behind fresher standing siblings", name)
+		}
+	}
+	if sp.IsRunning("fresh") {
+		t.Fatal("freshest standing session started ahead of older standing siblings — standing class lost its least-recently-woken order")
 	}
 }
