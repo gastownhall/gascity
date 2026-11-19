@@ -202,11 +202,7 @@ func addDiscoveredLeaf(root *cobra.Command, entry config.DiscoveredCommand, city
 		DisableFlagParsing: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			action := resolveDiscoveredLeafAction(cmd, args, func() int {
-				if err := checkDiscoveredLeafScope(entry, cityPath, args); err != nil {
-					fmt.Fprintf(stderr, "gc %s %s: %v\n", entry.BindingName, strings.Join(entry.Command, " "), err) //nolint:errcheck // best-effort stderr
-					return 1
-				}
-				return runDiscoveredCommand(entry, cityPath, cityName, args, stdin(), stdout, stderr)
+				return runScopedDiscoveredCommand(entry, cityPath, cityName, args, stdout, stderr)
 			})
 			return executeProductMetricsPackAction(cmd, action).err()
 		},
@@ -262,6 +258,16 @@ func resolvedPackCommandHelpAction(cmd *cobra.Command) packCommandAction {
 	})
 }
 
+// runScopedDiscoveredCommand runs a pack leaf after checkDiscoveredLeafScope
+// confirms its argv does not select a city other than the bound one.
+func runScopedDiscoveredCommand(entry config.DiscoveredCommand, cityPath, cityName string, args []string, stdout, stderr io.Writer) int {
+	if err := checkDiscoveredLeafScope(entry, cityPath, args); err != nil {
+		fmt.Fprintf(stderr, "gc %s %s: %v\n", entry.BindingName, strings.Join(entry.Command, " "), err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	return runDiscoveredCommand(entry, cityPath, cityName, args, stdin(), stdout, stderr)
+}
+
 // checkDiscoveredLeafScope refuses a --city or --rig in a pack leaf's argv that
 // selects a different city than the one the leaf was bound to. The leaf's city
 // is captured when the command tree is built, before a DisableFlagParsing
@@ -282,10 +288,11 @@ func checkDiscoveredLeafScope(entry config.DiscoveredCommand, cityPath string, a
 	} else {
 		selected, err = resolveCityForExplicitScope(city, rig, citySet, rigSet)
 	}
-	if err == nil && citySet && rigSet {
-		// With both flags set, resolution takes the --city value and never
-		// checks the rig, so resolve the rig on its own: it must belong to the
-		// bound city too.
+	if err == nil && rigSet {
+		// Resolution takes any --city value, including a pre-leaf --city
+		// already parsed into cityFlag, and then never checks the rig; that
+		// would mask the rig, so resolve the rig on its own: it must belong to
+		// the bound city too.
 		rigCity, rigErr := resolveCityForExplicitScope("", rig, true, true)
 		switch {
 		case rigErr != nil:
@@ -661,7 +668,7 @@ func resolveDiscoveredCommandFallback(args []string, cfg *config.City, cityPath 
 				})
 			}
 			return resolvedPackCommandAction(func() int {
-				return runDiscoveredCommand(entry, cityPath, cityName, commandArgs, stdin(), stdout, stderr)
+				return runScopedDiscoveredCommand(entry, cityPath, cityName, commandArgs, stdout, stderr)
 			})
 		}
 	}

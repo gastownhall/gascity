@@ -2110,6 +2110,8 @@ func TestPackLeafScopeAfterLeafNeverSilentlyRetargets(t *testing.T) {
 		{name: "same city then other city", args: []string{"backstage", "hello", "--city", cityA, "--city", cityB}},
 		{name: "bound city with rig of other city", args: []string{"backstage", "hello", "--city", cityA, "--rig=" + targetRig}},
 		{name: "bound city with rig that does not resolve", args: []string{"backstage", "hello", "--city", cityA, "--rig=missing-rig"}},
+		{name: "pre-leaf bound city with post-leaf rig of other city", args: []string{"--city", cityA, "backstage", "hello", "--rig=" + targetRig}},
+		{name: "pre-leaf bound city with post-leaf rig that does not resolve", args: []string{"--city", cityA, "backstage", "hello", "--rig=missing-rig"}},
 	}
 	for _, test := range refused {
 		t.Run("refuses "+test.name, func(t *testing.T) {
@@ -2157,6 +2159,11 @@ func TestPackLeafScopeAfterLeafNeverSilentlyRetargets(t *testing.T) {
 			args: []string{"backstage", "hello", "--city", cityA, "--rig=" + localRig, "payload"},
 			want: "city-a-hello args:<--city><" + cityA + "><--rig=" + localRig + "><payload>\n",
 		},
+		{
+			name: "pre-leaf bound city with post-leaf own rig",
+			args: []string{"--city", cityA, "backstage", "hello", "--rig=" + localRig, "payload"},
+			want: "city-a-hello args:<--city><" + cityA + "><--rig=" + localRig + "><payload>\n",
+		},
 	}
 	for _, test := range passed {
 		t.Run(test.name, func(t *testing.T) {
@@ -2177,6 +2184,77 @@ func TestPackLeafScopeAfterLeafNeverSilentlyRetargets(t *testing.T) {
 			if code != 0 || strings.Contains(stderr.String(), "not supported after") || strings.Contains(stdout.String(), "city-a-hello args:") {
 				t.Fatalf("%s help dispatch = exit %d stdout=%q stderr=%q, want help output without a scope refusal or script run", scenario, code, stdout.String(), stderr.String())
 			}
+		}
+	})
+}
+
+// TestDiscoveredCommandFallbackRefusesCrossCityScope pins that the root
+// fallback route applies the same post-leaf scope guard as the cobra leaf: a
+// --city naming another city is refused before the script runs, while the
+// bound city, help, and arguments after "--" are left alone.
+func TestDiscoveredCommandFallbackRefusesCrossCityScope(t *testing.T) {
+	t.Setenv("GC_HOME", t.TempDir())
+	t.Setenv("GC_CITY", "")
+	t.Setenv("GC_CITY_PATH", "")
+	t.Setenv("GC_CITY_ROOT", "")
+	t.Setenv("GC_DIR", "")
+	t.Setenv("GC_RIG", "")
+
+	cityA := setupPackExitCity(t)
+	cityB := setupPackExitCity(t)
+	writeE1ArgEchoCommand(t, cityA, "city-a-hello", "hello")
+	sourceDir := filepath.Join(cityA, "commands", "hello")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "testcity"},
+		PackCommands: []config.DiscoveredCommand{{
+			BindingName: "backstage",
+			PackName:    "backstage",
+			Command:     []string{"hello"},
+			RunScript:   filepath.Join(sourceDir, "run.sh"),
+			SourceDir:   sourceDir,
+		}},
+	}
+	t.Chdir(cityA)
+	t.Setenv("GC_CITY_PATH", cityA)
+
+	t.Run("other city is refused", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		outcome := tryDiscoveredCommandFallback([]string{"backstage", "hello", "--city", cityB}, cfg, cityA, &stdout, &stderr)
+		if !outcome.handled || outcome.exitCode != 1 || stdout.Len() != 0 || !strings.Contains(stderr.String(), "not supported after") {
+			t.Fatalf("outcome = %+v stdout=%q stderr=%q, want exit 1 refusal without script output", outcome, stdout.String(), stderr.String())
+		}
+	})
+
+	for _, test := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "bound city runs",
+			args: []string{"backstage", "hello", "--city", cityA},
+			want: "city-a-hello args:<--city><" + cityA + ">\n",
+		},
+		{
+			name: "after terminator passes through",
+			args: []string{"backstage", "hello", "--", "--city", cityB},
+			want: "city-a-hello args:<--><--city><" + cityB + ">\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			outcome := tryDiscoveredCommandFallback(test.args, cfg, cityA, &stdout, &stderr)
+			if !outcome.handled || outcome.exitCode != 0 || stdout.String() != test.want || stderr.Len() != 0 {
+				t.Fatalf("outcome = %+v stdout=%q stderr=%q, want exit 0 stdout=%q", outcome, stdout.String(), stderr.String(), test.want)
+			}
+		})
+	}
+
+	t.Run("help beside other city is not refused", func(t *testing.T) {
+		var stdout, stderr bytes.Buffer
+		outcome := tryDiscoveredCommandFallback([]string{"backstage", "hello", "--help", "--city", cityB}, cfg, cityA, &stdout, &stderr)
+		if !outcome.handled || outcome.exitCode != 0 || strings.Contains(stderr.String(), "not supported after") || strings.Contains(stdout.String(), "city-a-hello args:") {
+			t.Fatalf("outcome = %+v stdout=%q stderr=%q, want help without refusal or script run", outcome, stdout.String(), stderr.String())
 		}
 	})
 }
