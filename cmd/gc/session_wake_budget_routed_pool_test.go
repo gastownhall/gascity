@@ -248,3 +248,97 @@ func TestWakeBudgetStandingClassKeepsLeastRecentlyWokenOrder(t *testing.T) {
 		t.Fatal("freshest standing session started ahead of older standing siblings — standing class lost its least-recently-woken order")
 	}
 }
+
+// TestWakeBudgetFreeBudgetStartsEveryStandingCandidate is the legacy half of
+// AC-4: standing restarts are ordered behind demand work, never excluded.
+// When the budget covers every candidate — demand and standing alike — all of
+// them start in the same pass; the standing class is a priority order, not a
+// filter.
+func TestWakeBudgetFreeBudgetStartsEveryStandingCandidate(t *testing.T) {
+	sp := runtime.NewFake()
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 10, 12, 11, 18, 5, 0, time.UTC)}
+	budget := 4
+	cfg := &config.City{Daemon: config.DaemonConfig{MaxWakesPerTick: &budget}}
+
+	mkTP := func(name string) TemplateParams {
+		return TemplateParams{
+			Command:      "true",
+			SessionName:  name,
+			TemplateName: name,
+			ResolvedProvider: &config.ResolvedProvider{
+				Name:          "claude",
+				Command:       "claude",
+				PromptMode:    "arg",
+				ResumeFlag:    "--resume",
+				ResumeStyle:   "flag",
+				SessionIDFlag: "--session-id",
+			},
+		}
+	}
+
+	// Two demand pool sessions (routed work) and two standing named restarts:
+	// four candidates, four slots, so none may defer.
+	specs := []struct {
+		name     string
+		lastWoke string
+		standing bool
+	}{
+		{"pool-1", "2026-10-12T11:17:05Z", false},
+		{"pool-2", "2026-10-12T11:17:06Z", false},
+		{"named-1", "2026-10-12T09:18:05Z", true},
+		{"named-2", "2026-10-12T08:18:05Z", true},
+	}
+	desired := map[string]TemplateParams{}
+	var candidates []startCandidate
+	for i, s := range specs {
+		sess, err := store.Create(beads.Bead{
+			Title:  s.name,
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel},
+			Metadata: map[string]string{
+				"session_name":   s.name,
+				"agent_name":     s.name,
+				"template":       s.name,
+				"state":          "creating",
+				"generation":     "1",
+				"instance_token": "test-token",
+				"live_hash":      runtime.LiveFingerprint(runtime.Config{Command: "test-cmd"}),
+				"last_woke_at":   s.lastWoke,
+			},
+		})
+		if err != nil {
+			t.Fatalf("Create(%s): %v", s.name, err)
+		}
+		tp := mkTP(s.name)
+		desired[s.name] = tp
+		candidates = append(candidates, startCandidate{info: sessiontest.SeedBead(t, sess), tp: tp, order: i, standing: s.standing})
+	}
+
+	woken := executePlannedStartsTraced(
+		context.Background(),
+		candidates,
+		cfg,
+		desired,
+		sp,
+		store,
+		"",
+		t.TempDir(),
+		clk,
+		events.Discard,
+		5*time.Second,
+		ioDiscard{},
+		ioDiscard{},
+		nil,
+		withStartStabilityWaiter(immediateStartStabilityWaiter),
+		withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter),
+	)
+	if woken != len(specs) {
+		t.Fatalf("woken = %d, want %d (a free budget starts every candidate)", woken, len(specs))
+	}
+	for _, s := range specs {
+		if !sp.IsRunning(s.name) {
+			t.Fatalf("standing-priority order deferred %q on a free budget — standing is an order, not a filter", s.name)
+		}
+	}
+}
