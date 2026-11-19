@@ -7,8 +7,8 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/mail"
-	"github.com/gastownhall/gascity/internal/mail/beadmail"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -20,7 +20,7 @@ import (
 func TestPrimeUnreadMailFromInboxMatchesPerCandidateCheck(t *testing.T) {
 	clearGCEnv(t)
 	store := beads.NewMemStore()
-	p := beadmail.New(store)
+	p := newTestBeadMail(store)
 	sessionBead, err := store.Create(beads.Bead{
 		Type:     session.BeadType,
 		Labels:   []string{session.LabelSession},
@@ -39,7 +39,7 @@ func TestPrimeUnreadMailFromInboxMatchesPerCandidateCheck(t *testing.T) {
 	t.Setenv("GC_AGENT", "rig/sky-agent")
 
 	want := primeUnreadMailMessages(p)
-	info, _, err := session.ResolveSessionRecordByExactID(store, sessionBead.ID)
+	info, _, err := session.ResolveSessionRecordByExactID(beadstest.Sessions(store), sessionBead.ID)
 	if err != nil {
 		t.Fatalf("ResolveSessionRecordByExactID: %v", err)
 	}

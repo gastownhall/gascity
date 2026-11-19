@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // gas-4cu: a failed rig add must not leave a half-built .beads/ behind. The
@@ -228,20 +229,23 @@ func TestProvisionBeadsFileIsNotAFailedRestore(t *testing.T) {
 	}
 }
 
-// A .beads/ that held no store before the add (only .beads/formulas, say) is
-// not restored: what init wrote there stays, because a git_url teardown reads
-// the database init minted from that metadata.json.
-func TestProvisionLeavesInitFilesInNonStoreBeadsDir(t *testing.T) {
+// A .beads/ that held no store before the add (only .beads/formulas, say)
+// loses what a failed init added to it — the markers that would make the
+// retry refuse it as an existing store, and any other debris — and keeps every
+// entry it had, untouched.
+func TestProvisionRemovesInitFilesFromNonStoreBeadsDir(t *testing.T) {
 	initErr := errors.New("boom")
 	deps, req := provisionWithFailingStoreInit(t, func(_, dir, _ string) (bool, error) {
-		writePartialStore(t, dir)
+		writeInitDebris(t, dir, "storerig")
+		if err := os.MkdirAll(filepath.Join(dir, ".beads", "dolt", "storerig"), 0o755); err != nil {
+			t.Fatal(err)
+		}
 		return false, initErr
 	})
-	formula := filepath.Join(req.Path, ".beads", "formulas", "keep.toml")
-	if err := os.MkdirAll(filepath.Dir(formula), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(formula, []byte("formula = \"keep\"\n"), 0o644); err != nil {
+	beads := filepath.Join(req.Path, ".beads")
+	formula := writeNonStoreBeadsDir(t, req.Path)
+	readme := filepath.Join(beads, "README.md")
+	if err := os.WriteFile(readme, []byte("notes\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -249,11 +253,231 @@ func TestProvisionLeavesInitFilesInNonStoreBeadsDir(t *testing.T) {
 	if provErr == nil || provErr.Error() != initErr.Error() {
 		t.Fatalf("Provision error = %v, want the bare init error", provErr)
 	}
-	if _, err := os.Stat(formula); err != nil {
-		t.Fatalf("pre-existing .beads content was removed: %v", err)
+	if got, want := beadsEntryNames(t, req.Path), "README.md,formulas"; got != want {
+		t.Errorf(".beads entries after the failed add = %s, want %s", got, want)
+	}
+	for path, want := range map[string]string{formula: nonStoreFormulaBody, readme: "notes\n"} {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("pre-existing .beads content was removed: %v", err)
+		}
+		if string(got) != want {
+			t.Errorf("%s = %q, want %q", path, got, want)
+		}
+	}
+}
+
+// A failed init over a non-store .beads/ does not leave the retry refused at
+// the fresh-add store guard (the gas-4cu shape).
+func TestProvisionRetriesAfterFailedInitInNonStoreBeadsDir(t *testing.T) {
+	initErr := errors.New("managed Dolt server unreachable while inspecting existing store")
+	fail := true
+	deps, req := provisionWithFailingStoreInit(t, func(_, dir, prefix string) (bool, error) {
+		writeInitDebris(t, dir, prefix)
+		if fail {
+			return false, initErr
+		}
+		return false, nil
+	})
+	formula := writeNonStoreBeadsDir(t, req.Path)
+
+	if _, _, provErr := Provision(deps, req); !errors.Is(provErr, initErr) {
+		t.Fatalf("first Provision error = %v, want the init failure", provErr)
+	}
+	fail = false
+	if _, _, retryErr := Provision(deps, req); retryErr != nil {
+		t.Fatalf("retry after a failed init = %v, want success", retryErr)
+	}
+	if got, err := os.ReadFile(formula); err != nil || string(got) != nonStoreFormulaBody {
+		t.Errorf("pre-existing .beads content after the retry = %q, %v; want %q", got, err, nonStoreFormulaBody)
+	}
+}
+
+// ga-hfly3b.44: a failed init that narrowed a non-store .beads/ puts its mode
+// back.
+func TestProvisionRestoresNonStoreBeadsDirModeWhenInitFails(t *testing.T) {
+	initErr := errors.New("boom")
+	deps, req := provisionWithFailingStoreInit(t, func(_, dir, _ string) (bool, error) {
+		if err := os.Chmod(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return false, initErr
+	})
+	writeNonStoreBeadsDir(t, req.Path)
+	beads := filepath.Join(req.Path, ".beads")
+	if err := os.Chmod(beads, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, provErr := Provision(deps, req); !errors.Is(provErr, initErr) {
+		t.Fatalf("Provision error = %v, want the init failure", provErr)
+	}
+	assertDirPerm(t, beads, 0o755)
+}
+
+// ga-hfly3b.44: a failed adopt that narrowed the store's .beads/ puts its mode
+// back along with the files.
+func TestProvisionRestoresAdoptedStoreDirModeWhenInitFails(t *testing.T) {
+	initErr := errors.New("boom")
+	deps, req := provisionWithFailingStoreInit(t, func(_, dir, _ string) (bool, error) {
+		if err := os.Chmod(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return false, initErr
+	})
+	beads := adoptStoreRequest(t, &deps, &req)
+	if _, _, provErr := Provision(deps, req); !errors.Is(provErr, initErr) {
+		t.Fatalf("Provision error = %v, want the init failure", provErr)
+	}
+	assertDirPerm(t, beads, 0o755)
+	if got, err := os.ReadFile(filepath.Join(beads, "config.yaml")); err != nil || string(got) != adoptedConfigYAML {
+		t.Errorf("config.yaml after failed adopt = %q, %v; want %q", got, err, adoptedConfigYAML)
+	}
+}
+
+// ga-hfly3b.44: an adopt whose init narrows .beads/ and succeeds, but whose
+// guarded write window then fails, rolls the directory's mode back too.
+func TestProvisionRollbackRestoresAdoptedStoreDirMode(t *testing.T) {
+	deps, req := provisionWithFailingStoreInit(t, func(_, dir, _ string) (bool, error) {
+		if err := os.Chmod(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		return false, nil
+	})
+	routesErr := errors.New("routes rejected")
+	deps.WriteRoutes = func(string, *config.City) error { return routesErr }
+	beads := adoptStoreRequest(t, &deps, &req)
+	if _, _, provErr := Provision(deps, req); !errors.Is(provErr, routesErr) {
+		t.Fatalf("Provision error = %v, want the routes failure", provErr)
+	}
+	assertDirPerm(t, beads, 0o755)
+}
+
+// removeFailingFS fails every Remove under prefix.
+type removeFailingFS struct {
+	fsys.FS
+	prefix string
+}
+
+func (f removeFailingFS) Remove(name string) error {
+	if strings.HasPrefix(name, f.prefix) {
+		return &os.PathError{Op: "remove", Path: name, Err: syscall.EACCES}
+	}
+	return f.FS.Remove(name)
+}
+
+// A cleanup of a non-store .beads/ that cannot remove what init added is
+// reported with the init error rather than swallowed.
+func TestProvisionReportsFailedCleanupOfNonStoreBeadsDir(t *testing.T) {
+	initErr := errors.New("boom")
+	deps, req := provisionWithFailingStoreInit(t, func(_, dir, prefix string) (bool, error) {
+		writeInitDebris(t, dir, prefix)
+		return false, initErr
+	})
+	writeNonStoreBeadsDir(t, req.Path)
+	deps.FS = removeFailingFS{FS: fsys.OSFS{}, prefix: filepath.Join(req.Path, ".beads") + string(filepath.Separator)}
+
+	_, _, provErr := Provision(deps, req)
+	if !errors.Is(provErr, initErr) {
+		t.Fatalf("Provision error = %v, want the init failure", provErr)
+	}
+	if !strings.Contains(provErr.Error(), "(rollback failed: ") || !strings.Contains(provErr.Error(), "metadata.json") {
+		t.Fatalf("failed cleanup not reported: %v", provErr)
+	}
+}
+
+// A non-store .beads/ record never joins a post-init rollback: an init that
+// succeeded leaves its store there when the guarded write window fails, as
+// for a fresh add, so a teardown can still read it.
+func TestProvisionWriteWindowRollbackKeepsStoreInitCreatedInNonStoreBeadsDir(t *testing.T) {
+	deps, req := provisionWithFailingStoreInit(t, func(_, dir, prefix string) (bool, error) {
+		writeInitDebris(t, dir, prefix)
+		return false, nil
+	})
+	routesErr := errors.New("routes rejected")
+	deps.WriteRoutes = func(string, *config.City) error { return routesErr }
+	writeNonStoreBeadsDir(t, req.Path)
+	if _, _, provErr := Provision(deps, req); !errors.Is(provErr, routesErr) {
+		t.Fatalf("Provision error = %v, want the routes failure", provErr)
 	}
 	if _, err := os.Stat(filepath.Join(req.Path, ".beads", "metadata.json")); err != nil {
-		t.Fatalf("metadata.json init wrote into a non-store .beads/ was removed: %v", err)
+		t.Errorf("metadata.json a successful init wrote was removed by the write-window rollback: %v", err)
+	}
+}
+
+const (
+	nonStoreFormulaBody = "formula = \"keep\"\n"
+	adoptedConfigYAML   = "issue_prefix: storerig\n"
+)
+
+// writeNonStoreBeadsDir gives the rig a .beads/ holding only formulas/keep.toml
+// and returns that file's path.
+func writeNonStoreBeadsDir(t *testing.T, rigPath string) string {
+	t.Helper()
+	formula := filepath.Join(rigPath, ".beads", "formulas", "keep.toml")
+	if err := os.MkdirAll(filepath.Dir(formula), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(formula, []byte(nonStoreFormulaBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return formula
+}
+
+// writeInitDebris writes what a store init leaves in .beads/ before it fails:
+// the store markers and a runtime port file.
+func writeInitDebris(t *testing.T, rigPath, prefix string) {
+	t.Helper()
+	beads := filepath.Join(rigPath, ".beads")
+	for name, data := range map[string]string{
+		"metadata.json":    `{"backend":"dolt","dolt_database":"` + prefix + `"}`,
+		"config.yaml":      "issue_prefix: " + prefix + "\n",
+		"dolt-server.port": "3307\n",
+	} {
+		if err := os.WriteFile(filepath.Join(beads, name), []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// adoptStoreRequest turns req into an --adopt of a store at 0755 holding
+// metadata.json and config.yaml, and returns its .beads/ path.
+func adoptStoreRequest(t *testing.T, deps *Deps, req *ProvisionRequest) string {
+	t.Helper()
+	req.Adopt = true
+	req.Prefix = "storerig"
+	deps.StoreContract = func(string) bool { return true }
+	writePartialStore(t, req.Path)
+	beads := filepath.Join(req.Path, ".beads")
+	if err := os.WriteFile(filepath.Join(beads, "config.yaml"), []byte(adoptedConfigYAML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(beads, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return beads
+}
+
+func beadsEntryNames(t *testing.T, rigPath string) string {
+	t.Helper()
+	entries, err := os.ReadDir(filepath.Join(rigPath, ".beads"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	return strings.Join(names, ",")
+}
+
+func assertDirPerm(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Errorf("%s mode = %v, want %v", path, got, want)
 	}
 }
 

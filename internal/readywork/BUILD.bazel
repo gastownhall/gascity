@@ -25,6 +25,7 @@ go_test(
         "crossstore_test.go",
         "enrich_test.go",
         "federate_test.go",
+        "handle_legs_test.go",
         "pushdown_test.go",
         "query_test.go",
         "testenv_import_test.go",
@@ -32,6 +33,7 @@ go_test(
     embed = [":readywork"],
     deps = [
         "//internal/beads",
+        "//internal/beads/beadstest",
         "//internal/beads/splittest",
         "//internal/fanout/fanouttest",
         "//internal/testenv",

@@ -80,6 +80,10 @@ func RunCloseNotificationTests(t *testing.T, newBacking func(t *testing.T) beads
 			_, err := cs.RefreshRow(seed.ID)
 			mustNoErr(t, "RefreshRow", err)
 		}},
+		{"ExternalCloseSeenByPrime", always, func(t *testing.T, cs *beads.CachingStore, backing beads.Store, seed beads.Bead) {
+			mustNoErr(t, "backing Close", backing.Close(seed.ID))
+			mustNoErr(t, "Prime", cs.Prime(context.Background()))
+		}},
 	}
 
 	for _, m := range mutations {

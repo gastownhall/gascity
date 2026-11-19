@@ -1,3 +1,9 @@
+//go:build unix
+
+// The adapter under test is a bash script driven through a POSIX pty, and the
+// harness places each run in its own process group with Setpgid. Both are the
+// substance of the test rather than scaffolding around it.
+
 package zcode_test
 
 import (

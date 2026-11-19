@@ -233,6 +233,9 @@ func (s *Server) humaHandleEventEmit(_ context.Context, input *EventEmitInput) (
 	if events.IsJournalDerived(input.Body.Type) {
 		return nil, apierr.ValidationFailed.Msgf("journal_derived: %s is derived by the controller from an operation-journal row and cannot be emitted", input.Body.Type)
 	}
+	if events.IsSessionListDerived(input.Body.Type) {
+		return nil, apierr.ValidationFailed.Msgf("session_list_derived: %s is derived by the controller from a session bead's bead events and cannot be emitted", input.Body.Type)
+	}
 	// Idempotency: append at most once per Idempotency-Key — the log is
 	// append-only, so a timed-out retry would otherwise double-emit (and
 	// double any projection built over the log). The cached value is just the

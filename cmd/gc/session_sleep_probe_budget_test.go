@@ -28,9 +28,9 @@ func (l budgetLeaf) IdleProbeBudget() time.Duration { return l.budget }
 // of the routed leaf, an exec pack without an idle boundary getting the larger
 // budget, and an unclamped budget stalling the effect pass past the fence bound.
 func TestIdleSleepProbeTimeoutFor(t *testing.T) {
-	const idleBoundary = `{"version":0,"capabilities":["proc.exec","report-activity","report-attachment"]}`
+	const idleBoundary = `{"version":0,"capabilities":["proc.exec","report-activity","report-attachment","idle-boundary"]}`
 	declared := exec.NewSeamBacked(writeHandshakePack(t, idleBoundary))
-	undeclared := exec.NewSeamBacked(writeHandshakePack(t, `{"version":0,"capabilities":["report-activity","report-attachment"]}`))
+	undeclared := exec.NewSeamBacked(writeHandshakePack(t, `{"version":0,"capabilities":["proc.exec","report-activity","report-attachment"]}`))
 	fake := func() runtime.Provider { return runtime.NewFake() }
 
 	tests := []struct {

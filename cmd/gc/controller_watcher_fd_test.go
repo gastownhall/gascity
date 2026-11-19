@@ -1,3 +1,9 @@
+//go:build unix
+
+// Counting a process's open descriptors means reading /proc/<pid>/fd. Windows
+// has no such view, and the file-descriptor leak this guards against is a
+// POSIX resource-exhaustion shape rather than a portable one.
+
 package main
 
 import (

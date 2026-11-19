@@ -118,6 +118,7 @@ var excludedFromCore = map[string]string{
 	"StartupEnvelope":        "T3 startup metadata, explicitly excluded from Core",
 	"ReadyPromptPrefix":      "startup readiness hint",
 	"ReadyDelayMs":           "startup readiness hint",
+	"NotReadyMarkers":        "startup readiness hint",
 	"ProcessNames":           "liveness-check hint",
 	"EmitsPermissionWarning": "startup dialog hint",
 	"Nudge":                  "post-ready typed text",

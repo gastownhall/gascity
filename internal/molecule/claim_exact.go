@@ -96,7 +96,7 @@ const (
 //
 // onSuccess.Metadata must not set beadmeta.ClaimGenerationMetadataKey; doing
 // so returns ErrClaimGenerationReserved without writing anything.
-func ClaimExact(store beads.Store, id string, want ClaimExactPreconditions, fromGeneration string, onSuccess beads.UpdateOpts) (beads.Bead, ClaimExactOutcome, error) {
+func ClaimExact(store beads.MoleculeTarget, id string, want ClaimExactPreconditions, fromGeneration string, onSuccess beads.UpdateOpts) (beads.Bead, ClaimExactOutcome, error) {
 	if _, reserved := onSuccess.Metadata[beadmeta.ClaimGenerationMetadataKey]; reserved {
 		return beads.Bead{}, "", fmt.Errorf("claim exact %q: %w", id, ErrClaimGenerationReserved)
 	}
@@ -119,7 +119,7 @@ func ClaimExact(store beads.Store, id string, want ClaimExactPreconditions, from
 		return b, "", fmt.Errorf("claim exact %q: %w", id, err)
 	}
 
-	writer, ok := beads.ConditionalWriterFor(store)
+	writer, ok := beads.As[beads.ConditionalWriter](store)
 	if !ok {
 		return b, "", fmt.Errorf("claim exact %q: %w", id, beads.ErrConditionalWriteUnsupported)
 	}
@@ -158,7 +158,7 @@ func claimEffectsWithGeneration(onSuccess beads.UpdateOpts, toGeneration string)
 // fallback if the re-read itself fails. It is only used on error paths where
 // the caller already has a reasonably fresh bead in hand and a failed re-read
 // should not turn into an empty, uninformative zero value.
-func bestEffortGet(store beads.Store, id string, fallback beads.Bead) beads.Bead {
+func bestEffortGet(store beads.MoleculeTarget, id string, fallback beads.Bead) beads.Bead {
 	if fresh, err := store.Get(id); err == nil {
 		return fresh
 	}

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -1308,6 +1310,67 @@ func TestNewSessionWithCommandAndEnvMarksUnsetKeysRemovedFromSessionEnv(t *testi
 	}
 }
 
+// Every session env pins the demand-spawn keys (processenv.DemandSpawnEnvKeys)
+// empty, and that withholding has to survive into respawn-pane the way a
+// credential's does: a warm box an older gc provisioned holds its own
+// `-e GC_TRIGGER_BEAD_ID`, and a tmux server started from an agent's pane holds
+// that pane's ids in its global env (gastownhall/gascity#5738). A stamped
+// seat's GC_SPAWN_ORIGIN=demand is a value, not a withholding, so it is never
+// marked; an unstamped seat pins it empty and has it marked too.
+func TestDemandSpawnKeysMarkedRemovedOnCreateAndRespawn(t *testing.T) {
+	triggerKeys := []string{
+		"GC_TRIGGER_BEAD_ID",
+		"GC_TRIGGER_BEAD_STORE_REF",
+		"GC_TRIGGER_WORK_BEAD_ID",
+		"GC_TRIGGER_WORK_STORE_REF",
+	}
+	seats := []struct {
+		name   string
+		origin string // GC_SPAWN_ORIGIN in the launch env
+		marked []string
+	}{
+		{"stamped", "demand", triggerKeys},
+		{"unstamped", "", append([]string{"GC_SPAWN_ORIGIN"}, triggerKeys...)},
+	}
+	paths := []struct {
+		name string
+		run  func(*Tmux, map[string]string) error
+	}{
+		{"create", func(tm *Tmux, env map[string]string) error {
+			return tm.NewSessionWithCommandAndEnv("gc-test-demand-pin", "", "claude", env)
+		}},
+		{"respawn", func(tm *Tmux, env map[string]string) error {
+			return (&tmuxStartOps{tm: tm}).respawnAgent("gc-test-demand-pin", "/proj", "claude", env)
+		}},
+	}
+	for _, path := range paths {
+		for _, seat := range seats {
+			t.Run(path.name+"/"+seat.name, func(t *testing.T) {
+				exec := &fakeExecutor{out: "agent\t@1.%0"}
+				tm := NewTmux()
+				tm.exec = exec
+
+				env := map[string]string{"GC_CITY": "/tmp/city", "GC_SPAWN_ORIGIN": seat.origin}
+				for _, key := range triggerKeys {
+					env[key] = ""
+				}
+				if err := path.run(tm, env); err != nil {
+					t.Fatalf("%s: %v", path.name, err)
+				}
+				var marked []string
+				for _, call := range exec.calls {
+					if i := slices.Index(call, "set-environment"); i >= 0 && slices.Contains(call[i:], "-r") {
+						marked = append(marked, call[len(call)-1])
+					}
+				}
+				if !slices.Equal(marked, seat.marked) {
+					t.Errorf("keys marked removed from the session env = %v, want %v", marked, seat.marked)
+				}
+			})
+		}
+	}
+}
+
 // TestNewTmuxCommandBoundsPipeWait pins the WaitDelay on every real tmux
 // subprocess. The hang it bounds needs a stopped tmux server holding the
 // client's stdio (passed over SCM_RIGHTS), which the executor seam cannot
@@ -1392,6 +1455,103 @@ func TestSnapshotIdleSeparatesBusyFromIndeterminate(t *testing.T) {
 				}
 			case !tc.wantIndeterminate && err != nil:
 				t.Errorf("err = %v, want nil", err)
+			}
+		})
+	}
+}
+
+// A gc command run inside a pane of the city's named server must reach that
+// same server. With -L, tmux builds the socket path from the caller's
+// TMUX_TMPDIR, which can differ from the controller's, so the server named
+// by $TMUX has to be pinned explicitly with -S (issue #8116). The pin holds
+// only when $TMUX names this provider's own socket: same basename, inside
+// the tmux-<uid> directory -L itself would resolve under some TMUX_TMPDIR.
+// Every other $TMUX shape keeps today's -L, and an empty SocketName keeps
+// the default server.
+func TestRunPinsCallerServerFromTMUX(t *testing.T) {
+	uid := os.Getuid()
+	pinned := fmt.Sprintf("/run/user/%d/tmux-%d/bright-lights", uid, uid)
+	cases := []struct {
+		name       string
+		socketName string
+		tmux       string
+		want       []string
+	}{
+		{
+			name:       "inside_the_named_server",
+			socketName: "bright-lights",
+			tmux:       pinned + ",4242,0",
+			want:       []string{"-u", "-S", pinned, "list-sessions"},
+		},
+		{
+			name:       "outside_tmux",
+			socketName: "bright-lights",
+			tmux:       "",
+			want:       []string{"-u", "-L", "bright-lights", "list-sessions"},
+		},
+		{
+			name:       "other_socket_name",
+			socketName: "bright-lights",
+			tmux:       fmt.Sprintf("/run/user/%d/tmux-%d/default,4242,0", uid, uid),
+			want:       []string{"-u", "-L", "bright-lights", "list-sessions"},
+		},
+		{
+			name:       "not_a_tmux_uid_dir",
+			socketName: "bright-lights",
+			tmux:       fmt.Sprintf("/run/user/%d/x/bright-lights,4242,0", uid),
+			want:       []string{"-u", "-L", "bright-lights", "list-sessions"},
+		},
+		{
+			name:       "other_uid_dir",
+			socketName: "bright-lights",
+			tmux:       fmt.Sprintf("/run/user/%d/tmux-%d/bright-lights,4242,0", uid, uid+1),
+			want:       []string{"-u", "-L", "bright-lights", "list-sessions"},
+		},
+		{
+			name:       "relative_path",
+			socketName: "bright-lights",
+			tmux:       fmt.Sprintf("tmux-%d/bright-lights,4242,0", uid),
+			want:       []string{"-u", "-L", "bright-lights", "list-sessions"},
+		},
+		{
+			name:       "unclean_path",
+			socketName: "bright-lights",
+			tmux:       fmt.Sprintf("/run/user/%d/../%d/tmux-%d/bright-lights,4242,0", uid, uid, uid),
+			want:       []string{"-u", "-L", "bright-lights", "list-sessions"},
+		},
+		{
+			name:       "comma_leading",
+			socketName: "bright-lights",
+			tmux:       ",4242,0",
+			want:       []string{"-u", "-L", "bright-lights", "list-sessions"},
+		},
+		{
+			name:       "default_socket",
+			socketName: "",
+			tmux:       pinned + ",4242,0",
+			want:       []string{"-u", "list-sessions"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TMUX", tc.tmux)
+			t.Setenv("TMUX_TMPDIR", "/tmp/elsewhere")
+			fe := &fakeExecutor{}
+			tm := &Tmux{cfg: Config{SocketName: tc.socketName}, exec: fe}
+			if _, err := tm.run("list-sessions"); err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if len(fe.calls) != 1 {
+				t.Fatalf("expected 1 call, got %d", len(fe.calls))
+			}
+			got := fe.calls[0]
+			if len(got) != len(tc.want) {
+				t.Fatalf("args = %v, want %v", got, tc.want)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Fatalf("args = %v, want %v", got, tc.want)
+				}
 			}
 		})
 	}
