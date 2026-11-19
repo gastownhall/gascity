@@ -8,11 +8,19 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"syscall"
 	"time"
 )
 
 const defaultPollPeriod = 25 * time.Millisecond
+
+// defaultEPERMSettle is how long a signal that keeps answering EPERM for a
+// group with a live member is retried. A member that has begun to exit on its
+// own (an agent that reads EOF on its stdin as the stop closes it) is not yet a
+// zombie, and Darwin answers EPERM until the exit finishes: milliseconds on an
+// idle host, longer under load.
+const defaultEPERMSettle = 2 * time.Second
 
 // Options configures process-group cleanup.
 type Options struct {
@@ -77,6 +85,74 @@ func groupGone(pgid int, err error, opts Options) bool {
 	}
 	live, rerr := opts.liveMembers(pgid)
 	return rerr == nil && live == 0
+}
+
+// signalGroup delivers sig to every member of process group pgid and returns nil
+// once it has, or once the group has nothing left to signal.
+//
+// An EPERM is retried for the settle window before it is believed: on Darwin a
+// member that is exiting is neither a zombie nor signalable, so a stop that
+// races the agent's own exit sees EPERM for a moment and then ESRCH or a zombie.
+// An EPERM that outlasts the window is a member this process may not signal, and
+// is returned, wrapped, with what the member reader saw.
+func signalGroup(pgid int, sig syscall.Signal, opts Options) error {
+	settle := opts.epermSettle()
+	deadline := time.Now().Add(settle)
+	for {
+		err := opts.kill(-pgid, sig)
+		if err == nil || groupGone(pgid, err, opts) {
+			return nil
+		}
+		if !errors.Is(err, syscall.EPERM) {
+			return err
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("%w: signal still refused (EPERM) after %s: %s", err, settle, memberOutcome(pgid, opts))
+		}
+		time.Sleep(opts.pollPeriod())
+	}
+}
+
+// memberOutcome describes what the member reader says about process group pgid,
+// for the error of an EPERM that persisted.
+func memberOutcome(pgid int, opts Options) string {
+	var b strings.Builder
+	if live, err := opts.liveMembers(pgid); err != nil {
+		fmt.Fprintf(&b, "member query failed: %v", err)
+	} else {
+		fmt.Fprintf(&b, "live members=%d", live)
+	}
+	members, err := opts.memberStates(pgid)
+	if err != nil {
+		fmt.Fprintf(&b, "; member states unavailable: %v", err)
+		return b.String()
+	}
+	if len(members) == 0 {
+		b.WriteString("; no members listed")
+		return b.String()
+	}
+	b.WriteString("; members:")
+	for i, m := range members {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		fmt.Fprintf(&b, " pid %d %s", m.Pid, m.State)
+	}
+	return b.String()
+}
+
+func (o Options) memberStates(pgid int) ([]MemberState, error) {
+	if o.MemberStates != nil {
+		return o.MemberStates(pgid)
+	}
+	return defaultMemberStates(pgid)
+}
+
+func (o Options) epermSettle() time.Duration {
+	if o.EPERMSettle > 0 {
+		return o.EPERMSettle
+	}
+	return defaultEPERMSettle
 }
 
 func (o Options) pollPeriod() time.Duration {
@@ -181,13 +257,13 @@ func Terminate(pgid int, timeout time.Duration, opts Options) error {
 	if unsafeGroup(pgid, opts) {
 		return fmt.Errorf("refusing to signal unsafe process group %d", pgid)
 	}
-	if err := opts.kill(-pgid, syscall.SIGTERM); err != nil && !groupGone(pgid, err, opts) {
+	if err := signalGroup(pgid, syscall.SIGTERM, opts); err != nil {
 		return err
 	}
 	if err := waitForExit(pgid, timeout, opts); err == nil {
 		return nil
 	}
-	if err := opts.kill(-pgid, syscall.SIGKILL); err != nil && !groupGone(pgid, err, opts) {
+	if err := signalGroup(pgid, syscall.SIGKILL, opts); err != nil {
 		return err
 	}
 	return waitForExit(pgid, timeout, opts)
@@ -236,7 +312,7 @@ func KillCommandGroup(cmd *exec.Cmd, knownPGID int, opts Options) error {
 	if unsafeGroup(pgid, opts) {
 		return fmt.Errorf("refusing to signal unsafe process group %d", pgid)
 	}
-	if err := opts.kill(-pgid, syscall.SIGKILL); err != nil && !groupGone(pgid, err, opts) {
+	if err := signalGroup(pgid, syscall.SIGKILL, opts); err != nil {
 		return killDirect(cmd.Process, fmt.Errorf("kill process group %d: %w", pgid, err))
 	}
 	return nil
@@ -259,7 +335,7 @@ func InterruptCommand(cmd *exec.Cmd, knownPGID int, opts Options) error {
 	if unsafeGroup(pgid, opts) {
 		return fmt.Errorf("refusing to signal unsafe process group %d", pgid)
 	}
-	if err := opts.kill(-pgid, syscall.SIGINT); err != nil && !groupGone(pgid, err, opts) {
+	if err := signalGroup(pgid, syscall.SIGINT, opts); err != nil {
 		return err
 	}
 	return nil
@@ -288,7 +364,7 @@ func terminateManagedCommandGraces(cmd *exec.Cmd, knownPGID int, done <-chan str
 		}
 	}
 	if pgid > 0 && !unsafeGroup(pgid, opts) {
-		if termErr := opts.kill(-pgid, syscall.SIGTERM); termErr != nil && !groupGone(pgid, termErr, opts) {
+		if termErr := signalGroup(pgid, syscall.SIGTERM, opts); termErr != nil {
 			return fmt.Errorf("request stop of process group %d: %w", pgid, termErr)
 		}
 	}

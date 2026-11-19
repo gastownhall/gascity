@@ -12,3 +12,7 @@ var errMembersUnavailable = errors.New("processgroup: group members are not read
 func defaultLiveMembers(int) (int, error) {
 	return 0, errMembersUnavailable
 }
+
+func defaultMemberStates(int) ([]MemberState, error) {
+	return nil, errMembersUnavailable
+}
