@@ -201,6 +201,7 @@ func TestResolveProviderWorkspaceProvider(t *testing.T) {
 	// No model or effort flags: codex uses the user's own config for both.
 	codexWantArgs := []string{
 		"--dangerously-bypass-approvals-and-sandbox",
+		"--no-daemon",
 	}
 	if len(defaultArgs) != len(codexWantArgs) {
 		t.Errorf("ResolveDefaultArgs() = %v, want %v", defaultArgs, codexWantArgs)
@@ -1301,7 +1302,7 @@ func TestResolveProviderChainLeafArgsOverrideInheritedCodexDefaults(t *testing.T
 		t.Fatalf("resolved launch command = %q, want one medium effort flag", command)
 	}
 	resumeCommand := strings.ReplaceAll(resolved.ResumeCommand, "{{.SessionKey}}", "session-123")
-	if !strings.Contains(resumeCommand, "resume -c model_reasoning_effort=medium session-123") {
+	if !strings.Contains(resumeCommand, "resume -c model_reasoning_effort=medium --no-daemon session-123") {
 		t.Fatalf("resolved resume command = %q, missing medium effort default before session key", resumeCommand)
 	}
 }
@@ -1709,7 +1710,7 @@ func TestResolveProviderAgentOptionDefaultsUpdateWrappedResumeDefaults(t *testin
 		t.Fatalf("ResolveProvider: %v", err)
 	}
 	resumeCommand := strings.ReplaceAll(resolved.ResumeCommand, "{{.SessionKey}}", "session-123")
-	if !strings.Contains(resumeCommand, "resume -c model_reasoning_effort=high session-123") {
+	if !strings.Contains(resumeCommand, "resume -c model_reasoning_effort=high --no-daemon session-123") {
 		t.Fatalf("resolved resume command = %q, missing agent effort default before session key", resumeCommand)
 	}
 	if strings.Contains(resumeCommand, "model_reasoning_effort=medium") {

@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **Codex sessions now launch with `--no-daemon`, which needs codex-cli
+  0.169 or newer.** Since 0.169, Codex runs every session's tools and hooks
+  in one shared per-user app-server daemon with the environment of the
+  session that started it, so every Gas City Codex session acted as that one
+  session (its `GC_SESSION_ID`, `GC_AGENT` and `GC_BIN`). The builtin `codex`
+  provider's new `daemon` option defaults to `off`. On an older Codex, which
+  rejects the flag, set `option_defaults = { daemon = "on" }`.
 - **gc no longer migrates an existing bd database's schema; an operator
   does.** `bd migrate schema` is bd's consent to a one-way schema change for
   every client of a database (gastownhall/beads#5920 on a shared server,

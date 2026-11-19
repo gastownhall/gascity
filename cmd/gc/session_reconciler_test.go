@@ -14259,7 +14259,7 @@ func TestResolveResumeCommand(t *testing.T) {
 			command:    "aimux run codex -- --dangerously-bypass-approvals-and-sandbox --model gpt-5.3-codex -c model_reasoning_effort=medium",
 			sessionKey: "def-456",
 			provider:   codexMini,
-			want:       "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex resume -c model_reasoning_effort=medium def-456",
+			want:       "aimux run codex -- --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex resume -c model_reasoning_effort=medium --no-daemon def-456",
 		},
 	}
 	for _, tt := range tests {

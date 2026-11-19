@@ -100,6 +100,20 @@ effort from your own Codex configuration; Gas City passes no `--model` or
 is logged in (a ChatGPT-account login serves a different set than an API key),
 so pin a model only when you know the account can use it.
 
+Codex sessions launch with `--no-daemon`. Since codex-cli 0.169, Codex runs
+the tools and hooks of every session on the machine inside one shared
+app-server daemon, which keeps the environment of the session that started it.
+Under Gas City, every Codex session would then read, claim, mail and write
+beads as that one session. `--no-daemon` runs each session in its own process,
+even when a daemon is already running. Codex releases before 0.169 reject the
+flag; for those, opt out:
+
+```toml
+# agent.toml
+provider = "codex"
+option_defaults = { daemon = "on" }   # off (default) · on
+```
+
 ```toml
 # Custom endpoint (an OpenAI-compatible proxy / Azure OpenAI / vLLM)
 [upstreams.openai-proxy]

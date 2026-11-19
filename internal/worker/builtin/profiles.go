@@ -440,6 +440,23 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 			// (ga-fyh addendum). Passing it through lets codex accept or
 			// reject it; silently ignoring it was never a correct answer.
 			codexEffortOption(),
+			// Since codex-cli 0.169 the TUI runs its tools and hooks in one
+			// shared per-user app-server daemon, which keeps the environment
+			// of whichever session started it. Every session would then act
+			// as that one session (its GC_SESSION_ID, GC_AGENT, GC_BIN), so
+			// the default launches with --no-daemon, which runs the session
+			// in-process even when a daemon is already running. "on" emits
+			// nothing, for a codex older than 0.169 that rejects the flag.
+			{
+				Key:     "daemon",
+				Label:   "Shared App-Server Daemon",
+				Type:    "select",
+				Default: "off",
+				Choices: []BuiltinOptionChoice{
+					{Value: "off", Label: "Off (session runs its own tools)", FlagArgs: []string{"--no-daemon"}},
+					{Value: "on", Label: "On (codex default; shared daemon)", FlagArgs: []string{}},
+				},
+			},
 		},
 	},
 	"gemini": {
