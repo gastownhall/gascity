@@ -29,7 +29,7 @@ test_cmd_scope: full-suite
 test_exec_mode: remote-exec
 criterion3_valid: true
 heavy_mode: none
-failure_attribution: none
+failure_attribution: TestDatedWaiversAgainstToday -> ga-5550q2dx | publication pre-push only, clause 3a MECHANISM (canonical suite has zero failures)
 waiver_ref: none
 ci_lane_run: n/a (no CI-config diff)
 
@@ -160,3 +160,17 @@ Full CAS artifact verification retained: 12 lines; /home/jaword/projects/gc-mana
 Full tested merge bundle retained: 26 lines; /home/jaword/projects/gc-management/.gc/artifacts/gascity/ga-v98m6lg/gate-20261119T030946Z-843mxei1/tested-merge.bundle; SHA256 92331351ce51742c5ddd966a2a46097f84ec6a701cd4d3361933e7f8ec6d324e.
 Full scratch cleanup proof retained: 6 lines; /home/jaword/projects/gc-management/.gc/artifacts/gascity/ga-v98m6lg/gate-20261119T030946Z-843mxei1/merge-scratch-cleaned.json; SHA256 78d8fe98d979fdbf86c898fc865cd167e9a602a93bb0f21e664c1172fb017957.
 Full normal publication hook selection retained: 22 lines; /home/jaword/projects/gc-management/.gc/artifacts/gascity/ga-v98m6lg/gate-20261119T030946Z-843mxei1/publication-worker-pin-selection.json; SHA256 00cf6b45d034a46ab2104587940f6665b954b0e8490399a13532d28a4f425cda.
+
+## Publication hook attribution
+
+The ordinary bare-branch pre-push ran its full Bazel suite with fork-cache, completing rc1: 288/289 targets PASS; only TestDatedWaiversAgainstToday failed on historical catalog/census waivers. This is not a criterion-3 failure: that same test PASSed by name in the complete canonical current-base run above.
+
+failure_attribution: TestDatedWaiversAgainstToday -> ga-5550q2dx | clause 3: a MECHANISM — full module test-import closure rc0 contains no changed cmd/gc package or production input. Clause1: failing test/function untouched. Clause2: existing tracker opened; its 2026-11-18 sighting explicitly names this centralized waiver-clock test and stale-catalog condition. Clause4: no package/path overlap. First such hit on this deploy bead. The landed renewal 08190f2b9975f9415fd0621483b6a54961f1379d is in the pinned gate base, absent from the reviewed source. The normal hook's failure is retained, never retried into green.
+
+The standing pre-push exception in non-diff-owned-gate-failure.md.tmpl permits a specific-head no-verify push after this attribution. It grants no waiver and changes no source; live ownership, exact source ancestry, branch safety, gate size and clean status are checked separately before that push. This record-only descendant retains the reviewed source unchanged. No clearance is carried across a changed source head.
+
+Full pre-push attribution retained: 39 lines; /home/jaword/projects/gc-management/.gc/artifacts/gascity/ga-v98m6lg/gate-20261119T030946Z-843mxei1/hook-failure/attribution.json; SHA256 ecd2d47c26503e7eb1e321a6f83f65e6dd0a5608e2ebd3e5c48acf9819bca812.
+Full pre-push failed-test log retained: 65 lines; /home/jaword/projects/gc-management/.gc/artifacts/gascity/ga-v98m6lg/gate-20261119T030946Z-843mxei1/hook-failure/waiverexpiry.log; SHA256 df97bc04a2265c43baaa5917c76655208db34077c81d1956cc3ae3ceee6f7864.
+Full test-import closure retained: 22 lines; /home/jaword/projects/gc-management/.gc/artifacts/gascity/ga-v98m6lg/gate-20261119T030946Z-843mxei1/hook-failure/import-closure.stdout; SHA256 112b838fa368d06af8445a74c4ff3c35ddeafaf2c54ad6a28764e2064dee840f.
+Full full normal pre-push output retained: 370 lines; /home/jaword/projects/gc-management/.gc/artifacts/gascity/ga-v98m6lg/gate-20261119T030946Z-843mxei1/push-terminal.stdout; SHA256 00f2aa1feaa98da1fdb19f30fb02a08e89b88e98f9d8b3c402deca78b7a1fddf.
+Full full normal pre-push stderr retained: 559 lines; /home/jaword/projects/gc-management/.gc/artifacts/gascity/ga-v98m6lg/gate-20261119T030946Z-843mxei1/push-terminal.stderr; SHA256 b6d38ac34a05178dde90187493f625ccbf23b0e2b2f9390aee02ebd1e02da64a.
