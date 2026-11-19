@@ -13,6 +13,7 @@ package main
 import (
 	"bytes"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -105,6 +106,66 @@ func TestHoldBeforeLeaseServedBindingNote(t *testing.T) {
 	}
 	if boot.ServedProvider != "outoftree-engine" {
 		t.Errorf("the hold's report does not carry the previously served provider: %+v", boot)
+	}
+}
+
+// TestLegacyMarkerAlwaysTakesTheFullCheckEvenLeased is boot-check-design.md
+// §4.8 mutant 16 ("accept a legacy marker"): confirmInfraConvergenceWith's
+// lease shortcut is gated on storeRecorded, not only on opts.lease, because
+// a legacy marker (recorded==false) is exactly what the full check's own
+// backfill (confirmInfraConvergenceWith, just past the lease branch) exists
+// to fix. A lease published against this same, still-legacy city can have a
+// basis that matches perfectly — nothing about storeRecorded rides on the
+// wire — so if the gate ever drops to opts.lease alone, this city takes the
+// leased shortcut forever and the backfill never runs.
+func TestLegacyMarkerAlwaysTakesTheFullCheckEvenLeased(t *testing.T) {
+	cityPath := t.TempDir()
+	writeScopeProjectID(t, cityPath, "prj-legacy")
+	cfg := infraSplitConfig(filepath.Join(t.TempDir(), "store"))
+	stubInfraMigrationSource(t)
+	target := mustResolveInfraTarget(t, cityPath, cfg)
+
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, io.Discard)
+	if err != nil {
+		t.Fatalf("genesis boot refused: %v", err)
+	}
+	_ = routes.close()
+
+	// Strip the marker back to its legacy, pre-identity one-line shape.
+	data, err := os.ReadFile(target.MarkerPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	legacy := lines[len(lines)-1] + "\n"
+	if err := os.WriteFile(target.MarkerPath(), []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, recorded, err := readMarkerWorkStoreIdentity(target.MarkerPath()); err != nil || recorded {
+		t.Fatalf("fixture: marker = (recorded=%v, err=%v), want a legacy marker with no identity recorded", recorded, err)
+	}
+
+	// A real recheck tick against this still-legacy city: its basis is
+	// whatever the city looks like right now, which a later re-check of the
+	// same, unchanged city will capture identically.
+	recheck := &strandRecheck{
+		cityPath: cityPath, target: target, stderr: io.Discard, logPrefix: "gc start",
+		routes: &storageRoutes{target: target},
+	}
+	recheck.tick()
+	lease := recheck.routes.lease.Load()
+	if lease == nil || lease.Outcome != infraMigrationConverged.String() || !lease.Serving {
+		t.Fatalf("the recheck's lease = %+v, want a serving Converged lease to make the bypass worth proving", lease)
+	}
+	bornSplitLeaseListener(t, cityPath, lease)
+
+	var log bytes.Buffer
+	report := checkInfraClassConvergenceWith(cityPath, cfg, "gc start", &log, storageBootGateOpts{lease: true})
+	if report.Outcome != infraMigrationConverged {
+		t.Fatalf("leased re-check of a legacy-marker city = %s, want converged: %s", report.Outcome, log.String())
+	}
+	if _, recorded, err := readMarkerWorkStoreIdentity(target.MarkerPath()); err != nil || !recorded {
+		t.Fatalf("after a leased re-check the marker = (recorded=%v, err=%v), want the full check's backfill to have run; a legacy marker must never take the lease shortcut", recorded, err)
 	}
 }
 
