@@ -255,12 +255,14 @@ func (r *runner) startCommand(ctx context.Context, name, command string) outcome
 // provision sends a provision config for name and returns the raw outcome.
 // provision mirrors start's payload but is the box-without-agent half of the
 // un-weld: it creates a reachable box without launching the agent (exit 2 =
-// the optional op is unimplemented).
-func (r *runner) provision(ctx context.Context, name string) outcome {
+// the optional op is unimplemented). freshOnly marks the config fresh_only,
+// as gc's fresh start (createFresh) sends it.
+func (r *runner) provision(ctx context.Context, name string, freshOnly bool) outcome {
 	cfg, _ := json.Marshal(struct {
-		WorkDir string `json:"work_dir,omitempty"`
-		Command string `json:"command,omitempty"`
-	}{WorkDir: r.opts.WorkDir, Command: r.opts.Command})
+		WorkDir   string `json:"work_dir,omitempty"`
+		Command   string `json:"command,omitempty"`
+		FreshOnly bool   `json:"fresh_only,omitempty"`
+	}{WorkDir: r.opts.WorkDir, Command: r.opts.Command, FreshOnly: freshOnly})
 	return r.opTimeout(ctx, r.opts.StartTimeout, cfg, "provision", name)
 }
 
