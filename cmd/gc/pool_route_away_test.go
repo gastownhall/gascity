@@ -27,11 +27,11 @@ func routeAwayHolder() session.Info {
 	return session.Info{ID: "a-1", Template: "alpha", SessionOrigin: "ephemeral", PoolManaged: true, PoolSlot: "1"}
 }
 
-// seedRouteAwayWork creates bead X: claimed in_progress by holder, routed to
-// routedTo, with meta merged over the route (a "" value deletes the key).
-func seedRouteAwayWork(t *testing.T, store beads.Store, holder, routedTo string, meta map[string]string) beads.Bead {
+// seedRouteAwayWork creates bead X: claimed in_progress by the holder a-1,
+// routed to beta, with meta merged over the route (a "" value deletes the key).
+func seedRouteAwayWork(t *testing.T, store beads.Store, meta map[string]string) beads.Bead {
 	t.Helper()
-	metadata := map[string]string{beadmeta.RoutedToMetadataKey: routedTo}
+	metadata := map[string]string{beadmeta.RoutedToMetadataKey: "beta"}
 	for k, v := range meta {
 		if v == "" {
 			delete(metadata, k)
@@ -39,7 +39,7 @@ func seedRouteAwayWork(t *testing.T, store beads.Store, holder, routedTo string,
 		}
 		metadata[k] = v
 	}
-	work, err := store.Create(beads.Bead{Title: "escalated ticket", Type: "task", Status: "open", Assignee: holder, Metadata: metadata})
+	work, err := store.Create(beads.Bead{Title: "escalated ticket", Type: "task", Status: "open", Assignee: "a-1", Metadata: metadata})
 	if err != nil {
 		t.Fatalf("create work: %v", err)
 	}
@@ -119,7 +119,7 @@ func requireKeptByHolder(t *testing.T, store beads.Store, released []releasedPoo
 func TestRouteAwayReleasedThroughProductionComposition(t *testing.T) {
 	store := beads.NewMemStore()
 	cfg := routeAwayCity()
-	work := seedRouteAwayWork(t, store, "a-1", "beta", routedAtAgo(2*routeAwaySettleWindow))
+	work := seedRouteAwayWork(t, store, routedAtAgo(2*routeAwaySettleWindow))
 
 	released := singleStoreRouteAwayTick(store, cfg, []session.Info{routeAwayHolder()}, work)
 	requireReleasedRouteAway(t, store, released, work)
@@ -146,12 +146,36 @@ func TestRouteAwaySettleWindowBoundary(t *testing.T) {
 
 	t.Run("one second inside the window is kept", func(t *testing.T) {
 		store := beads.NewMemStore()
-		work := seedRouteAwayWork(t, store, "a-1", "beta", routedAtAgo(routeAwaySettleWindow-time.Second))
+		work := seedRouteAwayWork(t, store, routedAtAgo(routeAwaySettleWindow-time.Second))
 		requireKeptByHolder(t, store, singleStoreRouteAwayTick(store, cfg, open, work), work)
 	})
 	t.Run("exactly one window old is released", func(t *testing.T) {
 		store := beads.NewMemStore()
-		work := seedRouteAwayWork(t, store, "a-1", "beta", routedAtAgo(routeAwaySettleWindow))
+		work := seedRouteAwayWork(t, store, routedAtAgo(routeAwaySettleWindow))
 		requireReleasedRouteAway(t, store, singleStoreRouteAwayTick(store, cfg, open, work), work)
 	})
+}
+
+// TestRouteAwayUnsettlingStampsAreSettled pins that no gc.routed_at value can
+// hold a routed-away claim from its target: an absent, blank or malformed
+// stamp, or one more than a window in the future, counts as settled, and the
+// claim is released.
+func TestRouteAwayUnsettlingStampsAreSettled(t *testing.T) {
+	cfg := routeAwayCity()
+	open := []session.Info{routeAwayHolder()}
+	for _, tc := range []struct {
+		name string
+		meta map[string]string
+	}{
+		{name: "absent", meta: nil},
+		{name: "blank", meta: map[string]string{beadmeta.RoutedAtMetadataKey: "   "}},
+		{name: "malformed", meta: map[string]string{beadmeta.RoutedAtMetadataKey: "yesterday"}},
+		{name: "more than a window in the future", meta: routedAtAgo(-(routeAwaySettleWindow + time.Second))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			work := seedRouteAwayWork(t, store, tc.meta)
+			requireReleasedRouteAway(t, store, singleStoreRouteAwayTick(store, cfg, open, work), work)
+		})
+	}
 }

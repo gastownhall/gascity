@@ -93,15 +93,16 @@ func openSessionRefReaches(ownerRef, workStoreRef string) bool {
 }
 
 // routeAwaySettled reports whether a handoff stamped routedAt (gc.routed_at)
-// has settled at now: false only while the stamp parses and is less than
-// routeAwaySettleWindow old. A missing or malformed stamp is settled, so no
-// stamp can keep a routed-away claim from its target.
+// has settled at now: false only while the stamp parses and lies in
+// (now-routeAwaySettleWindow, now+routeAwaySettleWindow]. A missing or
+// malformed stamp, or one more than a window ahead of now (a skewed or forged
+// clock), is settled, so no stamp can keep a routed-away claim from its target.
 func routeAwaySettled(routedAt string, now time.Time) bool {
 	at, ok := beadmeta.ParseRoutedAt(routedAt)
 	if !ok {
 		return true
 	}
-	return !at.After(now.Add(-routeAwaySettleWindow))
+	return !at.After(now.Add(-routeAwaySettleWindow)) || at.After(now.Add(routeAwaySettleWindow))
 }
 
 // routeAwayReleasable reports whether claimed bead wb was handed off away
