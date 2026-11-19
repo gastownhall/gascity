@@ -19,6 +19,12 @@ type Options struct {
 	Kill           func(pid int, sig syscall.Signal) error
 	CurrentGroupID func() int
 	PollPeriod     time.Duration
+
+	// LiveMembers reports how many members of process group pgid are not
+	// zombies. It is how an EPERM from kill(-pgid, ...) is told apart: on
+	// Darwin it means either "every member is a zombie" or "a live member we
+	// may not signal".
+	LiveMembers func(pgid int) (int, error)
 }
 
 func (o Options) kill(pid int, sig syscall.Signal) error {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -133,4 +134,118 @@ func TestTerminateCommandPreservesGroupFailureAfterDirectKill(t *testing.T) {
 		t.Fatalf("TerminateCommand() error = %v, want unsafe process group detail", err)
 	}
 	_ = cmd.Wait()
+}
+
+// epermKill answers every signal with EPERM, the errno a Darwin kill(-pgid) gives
+// both for a group whose members are all zombies and for a live member the
+// caller may not signal. Only the member-state reader tells them apart.
+func epermKill(_ int, _ syscall.Signal) error { return syscall.EPERM }
+
+func liveMembers(n int, err error) func(int) (int, error) {
+	return func(int) (int, error) { return n, err }
+}
+
+func epermOptions(live func(int) (int, error)) Options {
+	return Options{
+		CurrentGroupID: func() int { return 12345 },
+		PollPeriod:     time.Millisecond,
+		Kill:           epermKill,
+		LiveMembers:    live,
+	}
+}
+
+func startSleep(t *testing.T) *exec.Cmd {
+	t.Helper()
+	processgrouptest.RequireRealProcessSignals(t)
+	cmd := exec.Command("sleep", "10")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start sleep: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	return cmd
+}
+
+func TestEPERMFromAllZombieGroupIsGone(t *testing.T) {
+	opts := epermOptions(liveMembers(0, nil))
+
+	if err := Terminate(45678, time.Millisecond, opts); err != nil {
+		t.Errorf("Terminate() = %v, want nil", err)
+	}
+	if err := InterruptCommand(&exec.Cmd{Process: &os.Process{Pid: 45678}}, 45678, opts); err != nil {
+		t.Errorf("InterruptCommand() = %v, want nil", err)
+	}
+	if err := KillCommandGroup(&exec.Cmd{Process: &os.Process{Pid: 45678}}, 45678, opts); err != nil {
+		t.Errorf("KillCommandGroup() = %v, want nil", err)
+	}
+	if alive(45678, opts) {
+		t.Error("alive() = true, want false for a group of only zombies")
+	}
+}
+
+func TestTerminateManagedCommandTreatsAllZombieEPERMAsGone(t *testing.T) {
+	done := make(chan struct{})
+	close(done)
+	cmd := &exec.Cmd{Process: &os.Process{Pid: 45678}}
+
+	err := terminateManagedCommandGraces(cmd, 45678, done, time.Second, time.Millisecond, epermOptions(liveMembers(0, nil)))
+	if err != nil {
+		t.Fatalf("terminateManagedCommandGraces() = %v, want nil", err)
+	}
+}
+
+func TestEPERMWithLiveMemberKeepsTheError(t *testing.T) {
+	opts := epermOptions(liveMembers(1, nil))
+
+	if err := Terminate(45678, time.Millisecond, opts); !errors.Is(err, syscall.EPERM) {
+		t.Errorf("Terminate() = %v, want EPERM", err)
+	}
+	if err := InterruptCommand(&exec.Cmd{Process: &os.Process{Pid: 45678}}, 45678, opts); !errors.Is(err, syscall.EPERM) {
+		t.Errorf("InterruptCommand() = %v, want EPERM", err)
+	}
+	if !alive(45678, opts) {
+		t.Error("alive() = false, want true: a live member we may not signal is still there")
+	}
+	done := make(chan struct{})
+	close(done)
+	cmd := &exec.Cmd{Process: &os.Process{Pid: 45678}}
+	if err := terminateManagedCommandGraces(cmd, 45678, done, time.Second, time.Millisecond, opts); !errors.Is(err, syscall.EPERM) {
+		t.Errorf("terminateManagedCommandGraces() = %v, want EPERM", err)
+	}
+}
+
+// KillCommandGroup falls back to a direct kill of the leader when the group
+// signal fails, so the live-member case needs a real process to land that on.
+func TestKillCommandGroupEPERMWithLiveMemberKeepsTheError(t *testing.T) {
+	err := KillCommandGroup(startSleep(t), 45678, epermOptions(liveMembers(1, nil)))
+	if !errors.Is(err, syscall.EPERM) {
+		t.Errorf("KillCommandGroup() = %v, want EPERM", err)
+	}
+}
+
+func TestEPERMWithUnreadableMembersKeepsTheError(t *testing.T) {
+	opts := epermOptions(liveMembers(0, errors.New("sysctl failed")))
+
+	if err := Terminate(45678, time.Millisecond, opts); !errors.Is(err, syscall.EPERM) {
+		t.Errorf("Terminate() = %v, want EPERM", err)
+	}
+	if !alive(45678, opts) {
+		t.Error("alive() = false, want true when the group cannot be read")
+	}
+}
+
+func TestEPERMIsUnchangedWithoutAMemberReader(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("Darwin reads the real process table")
+	}
+	opts := epermOptions(nil)
+
+	if err := Terminate(45678, time.Millisecond, opts); !errors.Is(err, syscall.EPERM) {
+		t.Errorf("Terminate() = %v, want EPERM", err)
+	}
+	if !alive(45678, opts) {
+		t.Error("alive() = false, want true: EPERM reads as alive off Darwin")
+	}
 }
