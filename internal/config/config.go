@@ -2988,8 +2988,10 @@ type DaemonConfig struct {
 	// single tick. Fresh generic pool session-bead creation uses the same
 	// budget so the controller does not materialize more ordinary pool sessions
 	// than it can wake. Bounded dependency-floor prerequisites are exempt.
-	// Nil (unset) defaults to 5. Values <= 0 are treated as the default — set a
-	// positive integer to override.
+	// Within the budget, routed pool work outranks standing always-mode
+	// restarts, and within each group the session least recently woken, or
+	// least recently failed, starts first. Nil (unset) defaults to 5. Values
+	// <= 0 are treated as the default — set a positive integer to override.
 	MaxWakesPerTick *int `toml:"max_wakes_per_tick,omitempty" jsonschema:"default=5"`
 	// NudgeDispatcher selects how queued nudges get delivered to running
 	// sessions. "legacy" (default) auto-spawns a per-session `gc nudge poll`
