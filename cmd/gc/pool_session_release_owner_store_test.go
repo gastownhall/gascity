@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 )
@@ -88,6 +89,7 @@ func TestReleaseOrphanedPoolAssignmentsReadsLivenessFromWorkOwnerStore(t *testin
 		nil,
 		nil,
 		nil, nil,
+		time.Now(),
 	)
 
 	if len(released) != 0 {
@@ -141,6 +143,7 @@ func TestReleaseOrphanedPoolAssignmentsReleasesWhenNoStoreHoldsTheSession(t *tes
 		nil,
 		nil,
 		nil, nil,
+		time.Now(),
 	)
 
 	if len(released) != 1 || released[0].ID != work.ID {

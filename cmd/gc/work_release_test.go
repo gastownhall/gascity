@@ -277,7 +277,7 @@ func TestReleasePathsKeepEveryStrand(t *testing.T) {
 		if err := c.store.Close(c.seat.ID); err != nil {
 			t.Fatal(err)
 		}
-		releaseOrphanedPoolAssignments(c.store, beads.SessionStore{Store: c.store}, c.cfg, c.path, nil, assigned, nil, nil, nil, nil, nil, nil)
+		releaseOrphanedPoolAssignments(c.store, beads.SessionStore{Store: c.store}, c.cfg, c.path, nil, assigned, nil, nil, nil, nil, nil, nil, time.Now())
 		c.assertStrandTable(t, "open")
 	})
 	t.Run("retired session", func(t *testing.T) {

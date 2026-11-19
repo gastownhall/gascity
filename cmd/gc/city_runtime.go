@@ -3453,7 +3453,8 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 	// arm of this very tick is about to act on (the release-first ordering plus
 	// snapshot staleness otherwise produces the wake/release/retire treadmill).
 	preWakeCandidates, preWakeCandidateRefs := filterAssignedWorkBeadsForSessionWake(cr.cfg, cr.cityPath, store, sessionBeads.OpenInfos(), assignedWorkBeads, assignedWorkStoreRefs)
-	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(store, sessStore, cr.cfg, cr.cityPath, sessionBeads.OpenInfos(), result, rigStores, protectedWakeWorkKeys(preWakeCandidates, preWakeCandidateRefs), recordPhase, &cr.deadAssigneeKeeps)
+	tickNow := time.Now()
+	released := releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(store, sessStore, cr.cfg, cr.cityPath, sessionBeads.OpenInfos(), result, rigStores, protectedWakeWorkKeys(preWakeCandidates, preWakeCandidateRefs), recordPhase, &cr.deadAssigneeKeeps, tickNow)
 	recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.release_orphaned_pool_assignments", phaseStart, map[string]any{
 		"released_count": len(released),
 	})
@@ -3465,7 +3466,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		// (clear dead assignee, reset in_progress→open) already ran above and is
 		// gated on confirmed non-liveness; emit the event BEFORE the snapshot
 		// filter so the dead assignee and route can still be read off the beads.
-		emitDeadAssigneeReopenedEvents(cr.rec, assignedWorkBeads, released, time.Now())
+		emitDeadAssigneeReopenedEvents(cr.rec, assignedWorkBeads, released, tickNow)
 		assignedWorkBeads, assignedWorkStoreRefs, assignedWorkStores = filterReleasedAssignedWorkSnapshot(assignedWorkBeads, assignedWorkStoreRefs, assignedWorkStores, released)
 	}
 	detectStrandedClaims(sw.Legs(), sessStore.Store, sessionBeads.OpenInfos(), cr.strandedClaimAlerter(), time.Now())

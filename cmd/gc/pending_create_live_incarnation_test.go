@@ -79,7 +79,7 @@ func releaseOrphanedWork(t *testing.T, env *reconcilerTestEnv, sessionID string,
 		open = sessionInfosFromBeads([]beads.Bead{row})
 	}
 	cfg := &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)}}}
-	releaseOrphanedPoolAssignments(env.store, beads.SessionStore{Store: env.store}, cfg, "", open, []beads.Bead{work}, nil, nil, nil, nil, nil, nil)
+	releaseOrphanedPoolAssignments(env.store, beads.SessionStore{Store: env.store}, cfg, "", open, []beads.Bead{work}, nil, nil, nil, nil, nil, nil, time.Now())
 	got, err := env.store.Get(work.ID)
 	if err != nil {
 		t.Fatal(err)

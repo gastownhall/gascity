@@ -76,6 +76,10 @@ func sessionBeadAssigneeIdentitiesForConfigInfo(i session.Info, cfg *config.City
 type releasedPoolAssignment struct {
 	ID    string
 	Index int
+	// RoutedAway marks a claim released because its live holder's agent is
+	// not the pool the bead is routed to (routeAwayReleasable), rather than
+	// because its holder is dead.
+	RoutedAway bool
 }
 
 // PoolSessionName derives the bead-ID-scoped runtime session name for a pool
@@ -160,6 +164,7 @@ func releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 	protectedWakeWork map[storeScopedBeadKey]struct{},
 	recordPhase func(TraceSiteCode, string, time.Time, map[string]any),
 	keeps *deadAssigneeKeepLog,
+	now time.Time,
 ) []releasedPoolAssignment {
 	// Partial input snapshots can make active work look orphaned for this
 	// tick only: missing work affects drain decisions, and missing sessions
@@ -167,7 +172,7 @@ func releaseOrphanedPoolAssignmentsWhenSnapshotsComplete(
 	if result.snapshotQueryPartial() {
 		return nil
 	}
-	return releaseOrphanedPoolAssignments(store, sessionStore, cfg, cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStores, result.AssignedWorkStoreRefs, rigStores, protectedWakeWork, recordPhase, keeps)
+	return releaseOrphanedPoolAssignments(store, sessionStore, cfg, cityPath, openSessionInfos, result.AssignedWorkBeads, result.AssignedWorkStores, result.AssignedWorkStoreRefs, rigStores, protectedWakeWork, recordPhase, keeps, now)
 }
 
 // protectedWakeWorkKeys indexes the wake-candidate slice by store ref + bead ID
@@ -208,7 +213,9 @@ func protectedWakeWorkKeys(wakeCandidates []beads.Bead, wakeCandidateStoreRefs [
 }
 
 // releaseOrphanedPoolAssignments reopens active pool-routed work whose
-// assignee no longer maps to any open session bead. This also recovers
+// assignee no longer maps to any open session bead, or whose live holder's
+// agent is not the pool the work was routed away to (routeAwayReleasable,
+// judged at now). This also recovers
 // pool-routed work left in_progress with no assignee, which cannot be claimed
 // again until it is moved back to open.
 //
@@ -234,6 +241,7 @@ func releaseOrphanedPoolAssignments(
 	protectedWakeWork map[storeScopedBeadKey]struct{},
 	recordPhase func(TraceSiteCode, string, time.Time, map[string]any),
 	keepLog *deadAssigneeKeepLog, // nil: log every keep
+	now time.Time,
 ) []releasedPoolAssignment {
 	if store == nil || cfg == nil || len(assignedWorkBeads) == 0 {
 		return nil
@@ -285,6 +293,9 @@ func releaseOrphanedPoolAssignments(
 		}
 	}
 
+	// Built on the first claimed bead, so a sweep over unassigned work alone
+	// resolves no claim refs.
+	var routeAwayOwners routeAwayOwnerIndex
 	var released []releasedPoolAssignment
 	claimGate := newForeignClaimGate(cfg, sessionStore)
 	defer claimGate.log()
@@ -304,15 +315,6 @@ func releaseOrphanedPoolAssignments(
 		if storeRefAware {
 			workStoreRef = assignedWorkStoreRefs[i]
 		}
-		// Retain work the same tick's wake arm is about to act on: the release
-		// pass runs first over a pre-tick snapshot in which a replacement
-		// session bead may not exist yet, and releasing here both drops a live
-		// claim and starves the wake demand that would have protected the slot.
-		// Uncertainty about session materialization is not permission to reopen
-		// work (retain rather than reap, gc-ft31x).
-		if _, ok := protectedWakeWork[storeScopedBeadKey{StoreRef: workStoreRef, ID: wb.ID}]; ok {
-			continue
-		}
 		assignee := strings.TrimSpace(wb.Assignee)
 		if assignee == "" && wb.Status == "in_progress" && isCanonicalWorkflowRoot(wb) {
 			continue
@@ -323,6 +325,34 @@ func releaseOrphanedPoolAssignments(
 		}
 		agentCfg := findAgentByTemplate(cfg, template)
 		if agentCfg == nil || !agentCfg.SupportsGenericEphemeralSessions() {
+			continue
+		}
+		// A claim handed off away from its live holder (gc sling to another
+		// agent rewrites only gc.routed_to) is released past its settle
+		// window even though that holder is open: every guard below that keeps
+		// a claim for a live holder would otherwise keep it forever, and the
+		// target pool would never see it as demand.
+		routedAway := false
+		if assignee != "" {
+			if routeAwayOwners == nil {
+				var claimRefs []string
+				if storeRefAware {
+					claimRefs = assignedWorkClaimRefs(cityPath, cfg, store)
+				}
+				routeAwayOwners = makeRouteAwayOwnerIndex(cityPath, cfg, claimRefs, openSessionInfos, storeRefAware)
+			}
+			routedAway = routeAwayReleasable(routeAwayOwners, wb, agentCfg, template, workStoreRef, storeRefAware, now)
+		}
+		// Retain work the same tick's wake arm is about to act on: the release
+		// pass runs first over a pre-tick snapshot in which a replacement
+		// session bead may not exist yet, and releasing here both drops a live
+		// claim and starves the wake demand that would have protected the slot.
+		// Uncertainty about session materialization is not permission to reopen
+		// work (retain rather than reap, gc-ft31x). A routed-away claim is not
+		// protected: once released its holder cannot claim it back, since
+		// unassigned work is claimed only through its route, so the
+		// wake/release/retire treadmill cannot restart.
+		if _, ok := protectedWakeWork[storeScopedBeadKey{StoreRef: workStoreRef, ID: wb.ID}]; ok && !routedAway {
 			continue
 		}
 		// Resolved before the liveness gates because the graph-resident-session
@@ -341,7 +371,7 @@ func releaseOrphanedPoolAssignments(
 				continue
 			}
 		} else {
-			if openSessionOwnsWork(legacyOpenIdentifiers, openIdentifiers, assignee, workStoreRef, storeRefAware) {
+			if !routedAway && openSessionOwnsWork(legacyOpenIdentifiers, openIdentifiers, assignee, workStoreRef, storeRefAware) {
 				continue
 			}
 			if assigneePreservesNamedSessionRoute(cfg, cityPath, template, assignee, workStoreRef, storeRefAware) {
@@ -363,7 +393,7 @@ func releaseOrphanedPoolAssignments(
 			// positive-evidence checks above can only ever SKIP a release, so
 			// running them first costs nothing and keeps the protected count
 			// reporting exactly the claims the gate saved.
-			if claimGate.claimMayStillBeHeld(assignee, wb.ID, sessionStoreLiveAssignee) {
+			if !routedAway && claimGate.claimMayStillBeHeld(assignee, wb.ID, sessionStoreLiveAssignee) {
 				continue
 			}
 			// The sessions binding is not the only ledger that can hold a session
@@ -384,7 +414,7 @@ func releaseOrphanedPoolAssignments(
 			// ref can then resolve to DIFFERENT stores — collapsing them onto one
 			// cached answer could release a live holder's claim. Require both, and
 			// leave the fallback unmemoized rather than risk that.
-			if ownerStore != nil {
+			if ownerStore != nil && !routedAway {
 				live := false
 				probeCallStart := time.Now()
 				if storeAware && storeRefAware {
@@ -413,7 +443,7 @@ func releaseOrphanedPoolAssignments(
 			keepLog.log(wb.ID, assignee, out.Why[wb.ID])
 			continue
 		}
-		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
+		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i, RoutedAway: routedAway})
 	}
 	if recordPhase != nil {
 		recordPhase(TraceSiteControllerTickPhase, "bead_reconcile.release_orphaned_pool_assignments.release_sweep", sweepStart, map[string]any{

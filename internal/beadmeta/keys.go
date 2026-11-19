@@ -304,6 +304,7 @@ const (
 	RootStoreRefMetadataKey          = "gc.root_store_ref"
 	RouteQuarantineMetadataKey       = "gc.route_recovery_quarantined"
 	RouteQuarantineReasonMetadataKey = "gc.route_recovery_quarantine_reason"
+	RoutedAtMetadataKey              = "gc.routed_at" // when a built-in router last changed gc.routed_to (see FormatRoutedAt); a timestamp, never a route
 	RoutedToMetadataKey              = "gc.routed_to"
 	RunTargetMetadataKey             = "gc.run_target"
 	RuntimeVarsMetadataKey           = "gc.graphv2_vars.v1"
@@ -757,6 +758,7 @@ var KnownMetadataKeys = []string{
 	RootStoreRefMetadataKey,
 	RouteQuarantineMetadataKey,
 	RouteQuarantineReasonMetadataKey,
+	RoutedAtMetadataKey,
 	RoutedToMetadataKey,
 	RunTargetMetadataKey,
 	RuntimeVarsMetadataKey,
