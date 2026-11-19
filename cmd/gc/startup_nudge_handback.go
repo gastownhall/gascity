@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -17,11 +19,18 @@ import (
 // (started), queues it: under program_status = "on", a nudge the session's
 // program held back behind a dialog through the whole startup ladder is never
 // typed and never fails the start (design §10.2 row A20). It waits in the
-// session's queue as a user's submit (nudgequeue.SourceSubmit), stamped with
-// the started row's continuation, and is delivered verbatim after the dialog
-// is answered. A start that failed has its handback taken and dropped, and a
-// leaf that handed nothing back queues nothing.
-func queueStartupNudgeHandback(cityPath string, cfg *config.City, leaf runtime.Provider, info session.Info, name string, started bool, now time.Time) error {
+// session's queue as a user's submit, stamped with the started row's
+// continuation and bound to the launch that stands
+// (session.StartupTurnLaunchID: the leaf's live token, else startToken, the
+// one the start carried), so the queue delivers it to that launch alone,
+// ahead of the session's other items, and drops it once another launch
+// replaces it. The row's one-shot initial message is split off as its own
+// submit (session.StartupHandbackItems). In legacy dispatcher mode it starts
+// the session's poller, since nothing else may
+// (startNudgePollerUnlessDispatched). A
+// start that failed has its handback taken and dropped, and a leaf that
+// handed nothing back queues nothing.
+func queueStartupNudgeHandback(cityPath string, cfg *config.City, leaf runtime.Provider, info session.Info, name, startToken string, started bool, now time.Time) error {
 	nudge, ok := runtime.TakeStartupNudgeHandback(leaf, name)
 	if !ok || !started {
 		return nil
@@ -32,10 +41,22 @@ func queueStartupNudgeHandback(cityPath string, cfg *config.City, leaf runtime.P
 		cfg = &config.City{}
 	}
 	target := resolveNudgeTargetFromSessionInfo(cityPath, cfg, info)
-	item := newQueuedNudgeWithOptions(target.agentKey(), nudge, nudgequeue.SourceSubmit, now, queuedNudgeOptionsFromTarget(target))
-	if err := openNudgeQueue(cityPath, beads.NudgesStore{}).Queue.EnqueueDeferred(item); err != nil {
-		return fmt.Errorf("queueing session %s's startup nudge behind its program's dialog: %w", info.ID, err)
+	overrides, err := session.ParseTemplateOverridesFromInfo(info)
+	if err != nil {
+		log.Printf("session %s: reading its initial message to split from the startup nudge: %v", info.ID, err)
 	}
-	pingNudgeWakeSocket(cityPath)
-	return nil
+	turn := newQueuedNudgeWithOptions(target.agentKey(), nudge, nudgequeue.SourceSubmit, now, queuedNudgeOptionsFromTarget(target))
+	items := session.StartupHandbackItems(turn, session.StartupTurnLaunchID(leaf, name, startToken), overrides[session.InitialMessageOverrideKey], newQueuedNudgeID())
+	queue := openNudgeQueue(cityPath, beads.NudgesStore{}).Queue
+	var errs []error
+	for _, item := range items {
+		if err := queue.EnqueueDeferred(item); err != nil {
+			errs = append(errs, fmt.Errorf("queueing session %s's startup nudge %s behind its program's dialog: %w", info.ID, item.ID, err))
+		}
+	}
+	if len(errs) < len(items) {
+		pingNudgeWakeSocket(cityPath)
+		startNudgePollerUnlessDispatched(target)
+	}
+	return errors.Join(errs...)
 }

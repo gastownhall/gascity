@@ -38,13 +38,23 @@ Unlike "gc runtime check" (a lighter smoke test), each requirement is
 proven to gate: the suite is kept honest by negative tests in which a
 broken reference fails exactly its requirement's check.
 
+Every operation runs in a city, as gc's own operations do. With
+GC_EXEC_CITY_PATH set, the suite and the --env suite run in the city
+GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH name, and never send that city
+server-stop. With it unset or empty, as in a shell outside any city, each
+runs in a private city: GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH name a
+fresh temporary directory, removed when the run ends or is interrupted.
+
 A runtime whose handshake declares server-lifecycle is sent server-stop,
 which ends every session of the city it runs in (the server group). The
-suite runs it, and the sessions it checks it against, in a private city:
-GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH name a fresh temporary directory,
-never the city you run the suite from. A runtime that does not scope its
-server by GC_EXEC_CITY_PATH ends every session the server holds, so check it
-only against a backend that no live city uses.
+suite runs it, and the sessions it checks it against, in private cities
+of their own, never the city the rest of the suite runs in; the
+city-scope probes use private cities too. Before it removes a private
+city, the run, an interrupted one too, sends that city a final
+server-stop; one that does not exit 0 is reported as a warning, as the
+server it was to end may still be running. A runtime that does not scope
+its server by GC_EXEC_CITY_PATH ends every session the server holds, so
+check it only against a backend that no live city uses.
 
 The argument is an executable (path or PATH name) or a pack-declared
 runtime name from the current city's packs. Path-like or existing-file
@@ -69,6 +79,7 @@ under "environment". Exits non-zero if any required requirement fails.`,
 				fmt.Fprintf(stderr, "gc runtime conformance: %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
+			printRuntimeRunWarnings(stderr, "gc runtime conformance", report.Warnings)
 
 			if !asJSON {
 				for _, res := range report.Results {
@@ -96,6 +107,7 @@ under "environment". Exits non-zero if any required requirement fails.`,
 					return errExit
 				}
 				capReport = &r
+				printRuntimeRunWarnings(stderr, "gc runtime conformance: capability run", capReport.Warnings)
 				if !asJSON {
 					fmt.Fprintf(stdout, "\nenvironment capabilities (declared: %v):\n", capReport.Capabilities) //nolint:errcheck
 					for _, res := range capReport.Results {
@@ -149,7 +161,7 @@ func newRuntimeConformanceJSON(report runtimecontract.Report, capReport *runtime
 		Environment:   capReport,
 	}
 	if failed {
-		message := fmt.Sprintf("%d required requirements failed", report.Summary.Failed)
+		message := fmt.Sprintf("%d required requirements failed", report.RequiredFailed())
 		if capReport != nil {
 			message += fmt.Sprintf(", %d declared capabilities failed", capReport.Summary.Failed)
 		}

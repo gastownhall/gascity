@@ -1379,6 +1379,21 @@ the last observed state, and have one named boundary owner. Busy loops and a
 fixed sleep before the helper are forbidden. The deadline rule below supplies
 safety timeouts; those deadlines must not determine the normal test duration.
 
+### A fixture that picks a port holds it
+
+Remote Bazel executors share one loopback port space, so a number picked by
+bind-and-close can be handed to another action's `bind(0)` before the fixture
+binds it. In `cmd/gc`, a fixture that needs a port number before its child or
+server binds it takes it from `holdLoopbackPort`, `reserveRandomTCPPort` or
+`listenOnRandomPort`, which keep the number held until `t.Cleanup` (on Linux,
+bound on `127.0.0.1` and `[::1]` with `SO_REUSEADDR`, so the fixture's own
+SO_REUSEADDR bind still succeeds). Do not close a picked port and re-bind it by
+number. A fixture that starts a python listener child reports a failed start
+through `listenerChildFailure`, which carries the child's exit status and
+stderr. `pidutil.ListenerPID` returns the first holder it finds and does not
+distinguish address families, so a foreign `[::1]:P` listener can answer for a
+`127.0.0.1:P` lookup; the held twin keeps a fixture's own number off that path.
+
 ## Test doubles and conformance are one contract
 
 A fast substitute is trustworthy only when it is held to the same observable
@@ -1740,6 +1755,7 @@ all-source audit while staying outside untagged and Small debt.
 | Medium owner | `internal/runtime/exec` package `exec` | TestMain: tmux | ga-cp3hwi | runtime exec TestMain is the checked Medium owner that confines the exec op's tmux clients to a private socket root; TestMain points the binary at a private TMUX_TMPDIR and drops TMUX/TMUX_PANE before any test runs, so the tmux commands the exec provider sends over a host-run exec op never reach the developer's tmux server; TestExecOpTmuxClientsCannotReachTheHostServer guards it | P0.4c-tmux | 2026-12-31 |
 | Medium owner | `internal/runtime/herdr` package `herdr` | TestServerAliveDetectsLiveServer: net_listen | ga-cp3hwi | herdr live-server liveness regression is a checked Medium stream-listener owner; the Unix stream listener is confined to TestServerAliveDetectsLiveServer and closed by test cleanup | P0.4c-listener | 2026-12-31 |
 | Medium owner | `internal/runtime/herdr` package `herdr` | TestServerAliveRejectsStaleSocket: net_listen | ga-cp3hwi | herdr stale-socket liveness regression is a checked Medium stream-listener owner; the Unix stream listener is confined to TestServerAliveRejectsStaleSocket and closed before liveness detection | P0.4c-listener | 2026-12-31 |
+| Medium owner | `internal/runtime/k8s` package `k8s` | TestDynamicUserWrapperPreservesCommand: subprocess | ga-cp3hwi | Kubernetes launch-command transport regression is a checked Medium subprocess owner; the /bin/sh executions are confined to TestDynamicUserWrapperPreservesCommand; test-owned su and tmux scripts receive a private PATH and temporary files, so a real shell verifies the decoded command reaches tmux as one argument | P0.4b | 2026-12-31 |
 | Medium owner | `internal/runtime/tmux` package `tmux` | TestMain: environment, tmux | ga-cp3hwi | runtime tmux TestMain is the checked Medium owner for isolated tmux process and socket cleanup; only declared environment and tmux calls lexically inside TestMain leave Small debt | P0.4c-tmux | 2026-12-31 |
 | Medium owner | `internal/session/sessiontest` package `sessiontest_test` | TestNoCityRefusalWithoutTheGateExits: subprocess | ga-cp3hwi | the no-city gate's unarmed self-test is a checked Medium subprocess owner; the probe process is confined to TestNoCityRefusalWithoutTheGateExits, which re-execs the test binary on its own probe: a refusal in a binary that does not run the gate exits that binary, so only a real child run shows it failing before its test can pass | P0.4b | 2026-12-31 |
 | Medium owner | `internal/session` package `session` | TestNoCityGateFailsTheRun: subprocess | ga-cp3hwi | the no-city gate's self-test is a checked Medium subprocess owner; the probe processes are confined to TestNoCityGateFailsTheRun, which re-execs the test binary on its own probe: the gate decides the exit code of a whole test binary after its last test, so only a real child run shows an undeclared refusal failing a run whose tests all pass | P0.4b | 2026-12-31 |
@@ -2776,7 +2792,13 @@ Other reusable-support boundaries remain explicit follow-up work:
 The hybrid row deliberately chooses `cmd/gc.newHybridProvider` as its
 construction boundary because that is the wrapper returned directly by the
 runtime registry. This ledger does not recursively claim the wrapper's internal
-tmux, K8s, or hybrid constructors.
+tmux or K8s constructors, and the wrapper itself stays waived: it builds the K8s
+backend before it consults its routing predicate, so the shared contract cannot
+run against it without a Kubernetes client configuration. The separate
+`runtime.composition.hybrid` row proves only `hybrid.New` over two in-memory
+fakes with every session routed locally; the remote route is covered by the
+package's fake-backed routing tests, and the wrapper's conditional construction
+remains ungated.
 
 `runtime.NewFake`, `auto.New`, `exec.NewSeamBackedForCity`,
 `subprocess.NewSeamBackedWithDir`, and `acp.NewSeamBackedWithDir` are
@@ -2810,7 +2832,7 @@ This table is rendered from `internal/testutil/providerledger` and checked by `b
 | `runtime.builtin.fail` | production_provider, reusable_double | `internal/runtime.Fake` | `runtime.Provider` | `internal/runtime.NewFailFake` | runtime.builtin/exact:fail; reusable: internal/runtime/fake.go | `runtime.Provider` | not applicable: intentional faulting double: a successful lifecycle cannot be exercised, so the successful-provider contract is not applicable |
 | `runtime.builtin.fake` | production_provider, reusable_double | `internal/runtime.Fake` | `runtime.Provider` | `internal/runtime.NewFake` | runtime.builtin/exact:fake; reusable: internal/runtime/fake.go | `runtime.Provider` | proved by internal/runtime/fake_conformance_test.go#TestFakeConformance |
 | `runtime.builtin.herdr` | production_provider | — | `runtime.Provider` | `internal/runtime/herdr.New` | runtime.builtin/exact:herdr | `runtime.Provider` | waived by ga-80po0c.3 through 2026-12-31: the full conformance run is an opt-in live journey (make test-herdr-live, or GC_FAST_UNIT=0) and skips in the unit lane, in short mode, and when the herdr executable is absent |
-| `runtime.builtin.hybrid` | production_provider | — | `runtime.Provider` | `cmd/gc.newHybridProvider` | runtime.builtin/exact:hybrid | `runtime.Provider` | waived by ga-80po0c.3 through 2026-12-26: cmd/gc.newHybridProvider is the selected registry construction boundary; its internal tmux, K8s, and hybrid constructors are not claimed here, and the wrapper has no full shared runtime contract. Renewed by owner decision 2026-10-05 to unblock gc 1.5.1 validation, and again on 2026-11-07; the underlying test gap must be fixed separately. |
+| `runtime.builtin.hybrid` | production_provider | — | `runtime.Provider` | `cmd/gc.newHybridProvider` | runtime.builtin/exact:hybrid | `runtime.Provider` | waived by ga-80po0c.3 through 2026-12-26: cmd/gc.newHybridProvider is the selected registry construction boundary. It builds the K8s backend before it consults its routing predicate, so the shared runtime contract cannot run against the wrapper without a Kubernetes client configuration. Its tmux and K8s constructors are not claimed here; internal/runtime/hybrid.New is proved separately by runtime.composition.hybrid, and the wrapper's own conditional construction stays ungated. Renewed by owner decision 2026-10-05 to unblock gc 1.5.1 validation, and again on 2026-11-07; the underlying test gap must be fixed separately. |
 | `runtime.builtin.k8s` | production_provider | — | `runtime.Provider` | `internal/runtime/k8s.NewSeamBacked` | runtime.builtin/exact:k8s | `runtime.Provider` | waived by ga-80po0c.3 through 2026-12-16: no runnable harness proves NewSeamBacked() against a live Kubernetes API plus pod exec lifecycle; every k8s package test drives newProviderWithOps(fake) instead of the real constructor, and no kind/integration-tagged harness exists in internal/runtime/k8s. Renewed by owner decision 2026-11-07; the underlying test gap must be fixed separately. |
 | `runtime.builtin.ssh` | production_provider | — | `runtime.Provider` | `internal/runtime/ssh.NewSeamBacked` | runtime.builtin/prefix:ssh: | `runtime.Provider` | proved by internal/runtime/ssh/conformance_integration_test.go#TestSSHConformance (hermetic ssh-client boundary; real-client transport behavior (exit-255 collapse, BatchMode/known_hosts, interactive attach) not covered) |
 | `runtime.builtin.subprocess` | production_provider | — | `runtime.Provider` | `internal/runtime/subprocess.NewSeamBacked` | runtime.builtin/exact:subprocess | `runtime.Provider` | proved by internal/runtime/subprocess/seam_conformance_test.go#TestSubprocessDefaultDirSeamConformance |
@@ -2818,6 +2840,7 @@ This table is rendered from `internal/testutil/providerledger` and checked by `b
 | `runtime.builtin.t3bridge` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/exact:t3bridge | `runtime.Provider` | waived by ga-80po0c.3 through 2026-12-11: the production T3 bridge composition has focused tests but no full shared runtime contract. Renewed by owner decision 2026-11-07; the underlying test gap must be fixed separately. |
 | `runtime.builtin.tmux` | production_provider | — | `runtime.Provider` | `internal/runtime/tmux.NewSeamBackedWithConfig` | runtime.builtin/exact:tmux | `runtime.Provider` | proved by internal/runtime/tmux/adapter_test.go#TestTmuxConformance |
 | `runtime.composition.auto` | production_provider | — | `runtime.Provider` | `internal/runtime/auto.New` | source: cmd/gc/providers.go#resolveSessionTransportProvider — conditional transport composition is outside the runtime registry | `runtime.Provider` | proved by internal/runtime/auto/conformance_test.go#TestAutoConformance (default-route conformance; ACP route covered by focused auto routing tests) |
+| `runtime.composition.hybrid` | production_provider | — | `runtime.Provider` | `internal/runtime/hybrid.New` | source: cmd/gc/providers.go#newHybridProvider — conditional local/remote composition is constructed inside the wrapper, not the runtime registry | `runtime.Provider` | proved by internal/runtime/hybrid/conformance_test.go#TestHybridConformance (local-route conformance via RunProviderTests; remote-route delegation covered separately by internal/runtime/hybrid's fake-backed unit tests) |
 | `runtime.worker-site.guard` | production_provider | — | `runtime.Provider` | `internal/runtime/guard.New` | source: cmd/gc/providers.go#resolveWorkerSpec — a worker site's control-plane descriptor selects the guard, outside the runtime registry | `runtime.Provider` | not applicable: worker-site guard: it refuses every runtime operation, so the successful-provider contract is not applicable |
 <!-- END CHECKED RUNTIME PROVIDER LEDGER -->
 

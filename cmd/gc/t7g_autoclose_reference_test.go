@@ -155,7 +155,7 @@ func closeCompletedConvoyAcrossReference(store, childStore beads.Store, convoy b
 	if len(children) == 0 {
 		return false, nil
 	}
-	closed, err := autocloseCloseIfStill(store, convoy.ID, convoyAutocloseReason, convoyStillAutocloses, func() error {
+	closed, err := autocloseCloseIfStill(store, convoy.ID, convoyAutocloseReason, nil, convoyStillAutocloses, func() error {
 		return closeConvoyWithReason(store, convoy.ID, convoyAutocloseReason)
 	})
 	if err != nil {
@@ -783,7 +783,7 @@ func TestMoleculeAutocloseClosesThroughTheResidentHandle(t *testing.T) {
 			target := fedCreate(t, backing, beads.Bead{Title: "root", Type: "molecule"})
 			cache := beads.NewCachingStoreForTest(backing, nil)
 			unconditional := 0
-			closed, err := autocloseCloseIfStill(wrap.fn(cache), target.ID, moleculeAutocloseReason, func(b beads.Bead) bool { return b.Status != "closed" }, func() error {
+			closed, err := autocloseCloseIfStill(wrap.fn(cache), target.ID, moleculeAutocloseReason, nil, func(b beads.Bead) bool { return b.Status != "closed" }, func() error {
 				unconditional++
 				return cache.Close(target.ID)
 			})

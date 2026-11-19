@@ -14,125 +14,17 @@ import (
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
-// The T7b.3 equivalence table: storeref's WorkFederation legs, labeled as
-// T7e.2 will label them (t7b3-design.md §5; the live* helpers below are that
-// labeling, which T7e.2 promotes to production), run beside main's frozen leg
-// builders (work_federation_legs_reference_test.go) on every T7d shape, under
-// every rig variant, gate on and off, each side on a fresh fixture. A run must
-// pick the same legs, in the same order, under the same labels and flags, and
-// reading each leg the way its reader does must touch the same physical stores
-// in the same order with the same split-strict verdict and leave the same rows
-// behind. Two differences are declared (t7bDeclared), and each is pinned on
-// its own.
-
-// liveBeadListLeg is GET /v0/beads' leg over a typed leg.
-type liveBeadListLeg struct {
-	label string
-	leg   storeref.TypedLeg
-	graph bool
-}
-
-// liveWorkScopeByName is the scope a rig-scoped request names: the rig the
-// epoch opened under that name, else the city under its own name (State's
-// BeadStores alias), else none.
-func liveWorkScopeByName(st storeref.Stores, cityName, name string) (storeref.StoreRef, bool) {
-	if _, ok := st.Rig(name); ok {
-		return storeref.RigRef(name), true
-	}
-	if name == cityName && !beads.IsNilStore(st.Work()) {
-		return storeref.WorkRef, true
-	}
-	return "", false
-}
-
-// liveRigLabel is a WorkFederation work leg's label: "rig <name>", the city
-// under its own name.
-func liveRigLabel(l storeref.TypedLeg, cityName string) (string, string) {
-	if l.Ref == storeref.WorkRef {
-		return "rig " + cityName, cityName
-	}
-	name, _ := storeref.ScopeRigContext(string(l.Ref))
-	return "rig " + name, name
-}
-
-// liveBeadListLegs is GET /v0/beads' legs from one epoch.
-func liveBeadListLegs(st storeref.Stores, cityName, rig string) ([]liveBeadListLeg, error) {
-	in := storeref.WorkFederation{Kind: storeref.WorkList, CityName: cityName, SuspendedRigs: storeref.WorkReadsSuspendedRigs}
-	if rig != "" {
-		scope, ok := liveWorkScopeByName(st, cityName, rig)
-		if !ok {
-			return nil, nil
-		}
-		in = storeref.WorkFederation{Kind: storeref.WorkScope, Scope: scope}
-	}
-	plan, err := st.Plan(in)
-	if err != nil {
-		return nil, err
-	}
-	var legs []liveBeadListLeg
-	storeref.EachTypedLeg(plan, func(l storeref.TypedLeg) {
-		switch label, _ := liveRigLabel(l, cityName); {
-		case l.Role == storeref.RoleFederationTail:
-			legs = append(legs, liveBeadListLeg{label: "graph", leg: l, graph: true})
-		case rig != "":
-			legs = append(legs, liveBeadListLeg{label: "rig " + rig, leg: l})
-		default:
-			legs = append(legs, liveBeadListLeg{label: label, leg: l})
-		}
-	})
-	return legs, nil
-}
-
-// liveWorkQuery is a status work-count query over a typed leg.
-type liveWorkQuery struct {
-	label         string
-	leg           storeref.TypedLeg
-	includeStored bool
-	includeReady  bool
-}
-
-// liveStatusWorkQueries is statusWorkCounts' queries from one epoch: the
-// city's ready leg, then the WorkList legs, the suspended rigs skipped before
-// the legs are deduped (Q2), and the count of opened rigs skipped.
-func liveStatusWorkQueries(st storeref.Stores, cityName string, cacheColdRigs map[string]bool) ([]liveWorkQuery, int, error) {
-	var queries []liveWorkQuery
-	if plan, err := st.Plan(storeref.WorkFederation{Kind: storeref.WorkScope, Scope: storeref.WorkRef}); err == nil {
-		storeref.EachTypedLeg(plan, func(l storeref.TypedLeg) {
-			queries = append(queries, liveWorkQuery{label: "city", leg: l, includeReady: true})
-		})
-	}
-	skip, excluded := liveColdRefs(st, cacheColdRigs)
-	plan, err := st.Plan(storeref.WorkFederation{Kind: storeref.WorkList, CityName: cityName, SuspendedRigs: storeref.WorkSkipsRigs, Skip: skip})
-	if err != nil {
-		return nil, 0, err
-	}
-	storeref.EachTypedLeg(plan, func(l storeref.TypedLeg) {
-		if l.Role == storeref.RoleFederationTail {
-			queries = append(queries, liveWorkQuery{label: "graph", leg: l, includeReady: true})
-			return
-		}
-		label, name := liveRigLabel(l, cityName)
-		queries = append(queries, liveWorkQuery{label: label, leg: l, includeStored: true, includeReady: l.Ref != storeref.WorkRef && name != cityName})
-	})
-	return queries, excluded, nil
-}
-
-// liveColdRefs is the refs of the opened rigs cold names, and their count.
-func liveColdRefs(st storeref.Stores, cold map[string]bool) ([]storeref.StoreRef, int) {
-	var skip []storeref.StoreRef
-	for _, r := range st.Rigs() {
-		if cold[r.Name] {
-			skip = append(skip, storeref.RigRef(r.Name))
-		}
-	}
-	return skip, len(skip)
-}
-
-// liveSweepPlan is the retired-session sweep's plan from one epoch.
-func liveSweepPlan(s *Server, st storeref.Stores) (storeref.ResolvedPlan, error) {
-	skip, _ := liveColdRefs(st, s.loadCacheColdRigs())
-	return st.Plan(storeref.WorkFederation{Kind: storeref.WorkSweep, SuspendedRigs: storeref.WorkSkipsRigs, Skip: skip})
-}
+// The T7b.3 equivalence table, live since T7e.2: the API's WorkFederation leg
+// builders (beadListFanOut, statusWorkQueries, retiredSessionSweep over
+// storeref.Sweep), run beside main's frozen leg builders
+// (work_federation_legs_reference_test.go) on every T7d shape, under every rig
+// variant, gate on and off, each side on a fresh fixture. A run must pick the
+// same legs, in the same order, under the same labels and flags, and reading
+// each leg the way its reader does must touch the same physical stores in the
+// same order with the same split-strict verdict and leave the same rows
+// behind. Two differences are declared (Q2's status rule, and the sweep's
+// federated reads), and each is pinned on its own. The handlers that read
+// these legs are compared whole in work_federation_handlers_equivalence_test.go.
 
 // t7bVariant changes a built fixture's rigs: a rig sharing another's store,
 // configured rigs suspended by effective state (the API's cold set), a
@@ -184,7 +76,8 @@ var t7bVariants = []t7bVariant{
 // from the name map before sortedRigNames dedupes it, so a store it shares
 // with a warm rig or the city stays counted through that name; every such
 // rig is excluded; and a cold name the state opened no rig under (a
-// configured rig whose store did not open, named like the city) no longer
+// suspended configured rig named like the city that buildStores skipped for
+// having no path; a failed open still opens an unavailableStore) no longer
 // drops the city's alias. Every other line is main's.
 func q2StatusWorkQueries(s *Server, cacheColdRigs map[string]bool) ([]frozenWorkQuery, int) {
 	stores := s.state.BeadStores()
@@ -306,11 +199,8 @@ func t7bOps(city string) []t7bOp {
 				}
 				return strings.Join(out, "; ")
 			},
-			live: func(t *testing.T, fx t7dFixture) string {
-				legs, err := liveBeadListLegs(fx.state.Stores(), fx.state.CityName(), rig)
-				if err != nil {
-					t.Fatal(err)
-				}
+			live: func(_ *testing.T, fx t7dFixture) string {
+				legs := beadListFanOut(fx.state.Stores(), fx.state.CityName(), rig)
 				var out []string
 				for _, leg := range legs {
 					rows, err := leg.leg.Reader.List(t7bListQuery)
@@ -334,12 +224,9 @@ func t7bOps(city string) []t7bOp {
 			queries, excluded := q2StatusWorkQueries(s, s.loadCacheColdRigs())
 			return t7bFrozenStatus(fx, queries, excluded)
 		},
-		live: func(t *testing.T, fx t7dFixture) string {
+		live: func(_ *testing.T, fx t7dFixture) string {
 			s := New(fx.state)
-			queries, excluded, err := liveStatusWorkQueries(fx.state.Stores(), fx.state.CityName(), s.loadCacheColdRigs())
-			if err != nil {
-				t.Fatal(err)
-			}
+			queries, excluded := statusWorkQueries(fx.state.Stores(), fx.state.CityName(), s.loadCacheColdRigs())
 			out := []string{fmt.Sprintf("excluded=%d", excluded)}
 			for _, q := range queries {
 				_, counter := beads.ReaderAs[beads.Counter](q.leg.Strict)
@@ -350,9 +237,9 @@ func t7bOps(city string) []t7bOp {
 		},
 	})
 	for _, held := range []bool{false, true} {
-		move := reassignOpenWorkAssignedToSession
+		move, frozenMove := reassignOpenWorkAssignedToSession, frozenReassignOpenWorkAssignedToSession
 		if held {
-			move = reassignHeldOpenWorkAssignedToSession
+			move, frozenMove = reassignHeldOpenWorkAssignedToSession, frozenReassignHeldOpenWorkAssignedToSession
 		}
 		for _, old := range []string{"sess-old", "tw-worker"} {
 			ops = append(ops, t7bOp{
@@ -362,13 +249,14 @@ func t7bOps(city string) []t7bOp {
 					s := New(fx.state)
 					var out []string
 					for _, store := range frozenRetiredSessionWorkStores(s, s.state.Stores().Sessions()) {
-						out = append(out, fmt.Sprintf("%s %v", fx.name(store), move(store, old, "sess-new")))
+						out = append(out, fmt.Sprintf("%s %v", fx.name(store), frozenMove(store, old, "sess-new")))
 					}
 					return strings.Join(out, "; ")
 				},
 				live: func(t *testing.T, fx t7dFixture) string {
 					s := New(fx.state)
-					plan, err := liveSweepPlan(s, fx.state.Stores())
+					st := fx.state.Stores()
+					plan, err := st.Plan(retiredSessionSweep(st, s.loadCacheColdRigs()))
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -540,9 +428,12 @@ func TestStatusWorkLegsDropColdRigsBeforeDedupe(t *testing.T) {
 			live:    "excluded=1 city:city rig a0:beta rig alpha:alpha rig test-city:city",
 		},
 		{
-			// A configured rig named like the city whose store did not open:
-			// main's cold name hid the city's alias, so the city's stored
-			// counts went uncounted; it names no opened rig now.
+			// A suspended configured rig named like the city that buildStores
+			// skipped (it has no path), so the epoch opened no rig under that
+			// name: main's cold name hid the city's alias, so the city's
+			// stored counts went uncounted; it names no opened rig now. A rig
+			// whose store failed to open is still opened (an unavailableStore
+			// replaces the city under its name), so it does not move.
 			variant: "cold rig named like the city",
 			frozen:  "excluded=1 city:city rig alpha:alpha rig beta:beta",
 			live:    "excluded=0 city:city rig alpha:alpha rig beta:beta rig test-city:city",
@@ -567,10 +458,7 @@ func TestStatusWorkLegsDropColdRigsBeforeDedupe(t *testing.T) {
 		if w := strings.Join(got, " "); w != tc.frozen {
 			t.Errorf("%s: frozen %s, want %s", tc.variant, w, tc.frozen)
 		}
-		live, excluded, err := liveStatusWorkQueries(fx.state.Stores(), fx.state.CityName(), cold)
-		if err != nil {
-			t.Fatal(err)
-		}
+		live, excluded := statusWorkQueries(fx.state.Stores(), fx.state.CityName(), cold)
 		got = []string{fmt.Sprintf("excluded=%d", excluded)}
 		for _, q := range live {
 			got = append(got, q.label+":"+fx.name(q.leg.Strict))

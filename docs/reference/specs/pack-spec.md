@@ -494,10 +494,13 @@ time or via the `pack-runtimes` doctor check below. Pack authors can
 self-verify ahead of production: `gc runtime check <name>` resolves the
 declaration and smoke-tests it by invoking the runtime's `nudge` operation
 against a throwaway conformance session, failing the run (`required: nudge`)
-when nudge is absent or broken. That smoke-tests the operation, not that an
-oversized prompt reroutes end to end — a pack that never runs it and
-declares `nudge-fallback` falsely still will not fail until an oversized
-prompt actually reaches that runtime at session start.
+when nudge is absent or broken. A runtime whose handshake declares
+`carrier.ops` reports the same probe as `capability carrier.ops: nudge`,
+alongside that carrier's other required driving operations. That
+smoke-tests the operation, not that an oversized prompt reroutes end to
+end — a pack that never runs it and declares `nudge-fallback` falsely still
+will not fail until an oversized prompt actually reaches that runtime at
+session start.
 
 City composition registers declared runtimes into a city-wide selection
 registry (`City.Runtimes`), including runtimes declared by rig-imported packs.

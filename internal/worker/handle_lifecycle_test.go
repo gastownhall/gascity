@@ -218,7 +218,7 @@ func TestStartCommandRotatedKeyTranscriptProbe(t *testing.T) {
 				commitStart(t, f)
 				// A churn reset keeps started_config_hash and clears the key,
 				// which the session sync then mints anew.
-				if err := f.store.SetMetadataBatch(f.id, sessionpkg.ConversationResetPatch(false)); err != nil {
+				if err := f.store.SetMetadataBatch(f.id, sessionpkg.ConversationResetPatch(false, time.Now())); err != nil {
 					t.Fatalf("SetMetadataBatch(churn reset): %v", err)
 				}
 				if err := f.store.SetMetadata(f.id, "session_key", backfilledKey); err != nil {

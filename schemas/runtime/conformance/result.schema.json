@@ -89,6 +89,12 @@
     "summary": {
       "$ref": "#/$defs/summary"
     },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
     "environment": {
       "type": "object",
       "required": [
@@ -142,6 +148,12 @@
         },
         "summary": {
           "$ref": "#/$defs/summary"
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "additionalProperties": true

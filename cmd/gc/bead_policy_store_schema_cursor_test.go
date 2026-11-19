@@ -240,6 +240,29 @@ provider = "claude"
 		}
 	})
 
+	// A cursor read that starts just before the deadline fails with
+	// context.DeadlineExceeded; the wait must still report the stall it saw.
+	t.Run("stalled, then the last read runs out of time", func(t *testing.T) {
+		calls := 0
+		prev := observeOpenedStore
+		observeOpenedStore = func(_ string, store beads.Store) beads.Store {
+			return &deadlineAfterFirstCursorStore{Store: store, calls: &calls}
+		}
+		t.Cleanup(func() { observeOpenedStore = prev })
+		err := wait()
+		if err == nil {
+			t.Fatal("the wait passed a scope stalled at v60 of v66")
+		}
+		if calls < 2 {
+			t.Fatalf("the cursor was read %d time(s); the subtest needs a read past the stalled one", calls)
+		}
+		for _, want := range []string{"v60", "v66", "bd migrate schema"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("wait error %q does not name %q: a deadline on the last read hid the stalled migration", err, want)
+			}
+		}
+	})
+
 	t.Run("at target", func(t *testing.T) {
 		openWith(t, 66, 66)
 		if err := wait(); err != nil {
@@ -253,4 +276,20 @@ provider = "claude"
 			t.Fatalf("the wait refused a scope ahead of its target (skew belongs to the open path): %v", err)
 		}
 	})
+}
+
+// deadlineAfterFirstCursorStore reports a cursor stalled at v60 of v66 on its
+// first read and context.DeadlineExceeded on every read after it, as a read
+// that starts just before the scope-ready deadline does.
+type deadlineAfterFirstCursorStore struct {
+	beads.Store
+	calls *int
+}
+
+func (s *deadlineAfterFirstCursorStore) SchemaCursor(context.Context) (int, int, error) {
+	*s.calls++
+	if *s.calls == 1 {
+		return 60, 66, nil
+	}
+	return 0, 0, context.DeadlineExceeded
 }

@@ -227,4 +227,7 @@ func TestWaitForBdRuntimeSchemaFailsLoudlyWhenTargetUnknown(t *testing.T) {
 	if !strings.Contains(stderr, "target") {
 		t.Errorf("failure message does not say the target schema version is unknown; stderr:\n%s", stderr)
 	}
+	if !strings.Contains(stderr, "bd: cannot create throwaway database") {
+		t.Errorf("failure message drops the probe's own output, so the operator cannot see why bd gave no version; stderr:\n%s", stderr)
+	}
 }
