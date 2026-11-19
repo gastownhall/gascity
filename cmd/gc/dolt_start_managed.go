@@ -1119,8 +1119,9 @@ func terminateManagedDoltPID(cityPath string, pid int) error {
 // pidAlive then reports the reused process as alive, the grace runs to its
 // deadline, and a bare-PID SIGKILL would land on the stranger. Re-verifying just
 // before the kill closes that window. A nil guard keeps the legacy unconditional
-// behavior for callers that never snapshotted an identity (test watchdog,
-// recovery cleanup, pre-handshake scope watchdog).
+// behavior for callers that never snapshotted an identity (recovery cleanup,
+// terminateManagedDoltTestPID, and runManagedDoltTestWatchdog's teardown of its
+// own dolt child).
 func terminateManagedDoltPIDGuarded(cityPath string, pid int, identityMatches func() bool) error {
 	if pid <= 0 {
 		return nil
