@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 )
 
@@ -50,4 +51,40 @@ func acceptOnceAndReply(t *testing.T, lis net.Listener, reply string) {
 		return
 	}
 	_, _ = conn.Write([]byte(reply))
+}
+
+// countingControllerSocket serves cityDir's controller socket and counts
+// every connection whose one-line command is storageVerdictCommand,
+// closing every connection without a reply either way. T4 (design doc
+// §4.4/§4.5): fetchContainmentLease is reached only from
+// confirmInfraConvergenceWith when opts.lease is set, which only
+// cli_storage_routes.go's two funnel call sites ever do — so this counter
+// must stay at zero for every other production entry point, whether or not
+// it would otherwise want a verdict.
+//
+// The count is specifically of storage-verdict commands, not of
+// connections: several of T4's production entry points legitimately ping
+// this same socket for an unrelated reason (controllerAlive, checking
+// whether a controller is running at all), and a bare connection count
+// would conflate that with the lease fetch this test is about.
+func countingControllerSocket(t *testing.T, cityDir string) *atomic.Int32 {
+	t.Helper()
+	lis := listenControllerSocketForTest(t, cityDir)
+	var count atomic.Int32
+	go func() {
+		for {
+			conn, err := lis.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close() //nolint:errcheck
+				scanner := bufio.NewScanner(conn)
+				if scanner.Scan() && scanner.Text() == storageVerdictCommand {
+					count.Add(1)
+				}
+			}()
+		}
+	}()
+	return &count
 }
