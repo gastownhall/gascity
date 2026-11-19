@@ -187,6 +187,13 @@ type startCandidate struct {
 	// never produce a startResult and so never read it.
 	configured bool
 
+	// standing mirrors the candidate's AwakeDecision.Standing at the append
+	// site: a wake configuration alone produces (named-always, min-active,
+	// pin) for a session with no work. A contended wake budget spends its
+	// slots on demand candidates first (sortCandidatesByWakeFairness). Zero
+	// (demand) on the non-pipeline construction sites, which never sort.
+	standing bool
+
 	// lease is the runtime lease the start holds from before PreWake through
 	// its commit (I-LEASE): the name's flock, and the row's record from just
 	// before PreWake; nil without a city runtime dir.
@@ -240,14 +247,26 @@ func wakeFairnessTime(c startCandidate) time.Time {
 	return time.Time{}
 }
 
-// sortCandidatesByWakeFairness orders candidates least-recently-woken first so a
-// budget-limited tick rotates wakes across sessions instead of always deferring
-// the same back-of-order sessions. Stable on the original order for ties. Callers
-// must only sort within a dependency wave (every candidate's deps are satisfied).
+// sortCandidatesByWakeFairness orders demand candidates before standing ones
+// (startCandidate.standing), so a budget-limited tick spends its slots on
+// sessions woken for work before sessions configuration alone keeps up, and
+// within each class least-recently-woken first so the tick rotates wakes
+// across sessions instead of always deferring the same back-of-order sessions.
+// Stable on the original order for ties. Callers must only sort within a
+// dependency wave (every candidate's deps are satisfied).
 func sortCandidatesByWakeFairness(candidates []startCandidate) {
 	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].standing != candidates[j].standing {
+			return !candidates[i].standing
+		}
 		return wakeFairnessTime(candidates[i]).Before(wakeFairnessTime(candidates[j]))
 	})
+}
+
+// demandPrefixLen is the length of the demand prefix of candidates sorted by
+// sortCandidatesByWakeFairness: the index of the first standing candidate.
+func demandPrefixLen(candidates []startCandidate) int {
+	return sort.Search(len(candidates), func(i int) bool { return candidates[i].standing })
 }
 
 func (c startCandidate) logicalTemplate(cfg *config.City) string {
@@ -4935,8 +4954,11 @@ func executePlannedStartsTraced(
 		sortCandidatesByWakeFairness(ready)
 		// Probe rotation: among sessions on a refusing endpoint, the ones
 		// refused least this episode go first, so a poisoned oldest session
-		// cannot monopolize the half-open probe.
-		sortCandidatesByProbeRotation(ready, capacityGuard)
+		// cannot monopolize the half-open probe. It rotates within each class
+		// so a standing session never takes a demand session's slot.
+		demand := demandPrefixLen(ready)
+		sortCandidatesByProbeRotation(ready[:demand], capacityGuard)
+		sortCandidatesByProbeRotation(ready[demand:], capacityGuard)
 		for offset := 0; offset < len(ready); {
 			if wakeCount >= maxWakes {
 				for _, candidate := range ready[offset:] {
