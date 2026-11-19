@@ -28,7 +28,6 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
-	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/telemetry"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -2840,17 +2839,7 @@ func startPreparedStartCandidate(
 		if err != nil {
 			return false, fmt.Errorf("loading suspension state before starting session %q: %w", name, err)
 		}
-		suspendedOnStart := false
-		if cfg != nil {
-			for i := range cfg.Rigs {
-				rig := &cfg.Rigs[i]
-				if rig.Name == rigName {
-					suspendedOnStart = rig.EffectiveSuspendedOnStart()
-					break
-				}
-			}
-		}
-		if suspensionstate.EffectiveRigSuspended(st, rigName, suspendedOnStart) {
+		if rigEffectivelySuspended(cfg, st, rigName) {
 			return false, fmt.Errorf("rig %q is suspended", rigName)
 		}
 	}

@@ -4889,6 +4889,22 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				}
 				continue
 			}
+			// A suspended rig holds its sessions (#7680, change 5): its idle
+			// always-mode patrol restarts must not spend start slots routed
+			// pool work needs. The skip precedes every PreWake write, so the
+			// held row keeps its state, its wake accounting and any
+			// pending-create claim — a resume restarts this row rather than
+			// racing a fresh create.
+			if rigName := strings.TrimSpace(target.tp.RigName); rigName != "" && rigEffectivelySuspended(cfg, suspState, rigName) {
+				logStandingCondition(dt, stderr, target.info.ID, "rig_suspended.wake", fmt.Sprintf(
+					"session reconciler: holding wake for %s: rig %q is suspended", name, rigName), clk.Now())
+				if trace != nil {
+					trace.RecordDecision(TraceSiteReconcilerWakeDecision, TraceReasonSuspended, TraceOutcomeSkipped, target.tp.TemplateName, name, traceRecordPayload{
+						"rig": rigName,
+					})
+				}
+				continue
+			}
 			// Respawn circuit breaker: for named sessions the supervisor
 			// will otherwise retry indefinitely. This phase only blocks
 			// already-OPEN breakers; restart accounting happens at the

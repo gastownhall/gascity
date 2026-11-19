@@ -1,6 +1,8 @@
 package main
 
 import (
+	"strings"
+
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
@@ -61,6 +63,27 @@ func resumeRigInState(st *suspensionstate.State, name string) bool {
 	f := false
 	suspensionstate.SetRig(st, name, &f)
 	return true
+}
+
+// rigEffectivelySuspended reports whether the rig named rigName is
+// effectively suspended: the runtime override in st wins over the rig's
+// authored suspended_on_start default. A blank rig name, or one the city's
+// config does not list, is never suspended.
+func rigEffectivelySuspended(cfg *config.City, st suspensionstate.State, rigName string) bool {
+	rigName = strings.TrimSpace(rigName)
+	if rigName == "" {
+		return false
+	}
+	suspendedOnStart := false
+	if cfg != nil {
+		for i := range cfg.Rigs {
+			if cfg.Rigs[i].Name == rigName {
+				suspendedOnStart = cfg.Rigs[i].EffectiveSuspendedOnStart()
+				break
+			}
+		}
+	}
+	return suspensionstate.EffectiveRigSuspended(st, rigName, suspendedOnStart)
 }
 
 // isRigSuspendedInState reports whether the runtime state explicitly

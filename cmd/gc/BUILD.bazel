@@ -2351,6 +2351,7 @@ go_test(
         "session_wake_budget_routed_pool_test.go",
         "start_failed_stamp_test.go",
         "session_wake_fairness_pin_test.go",
+        "suspended_rig_wake_skip_test.go",
         "session_wake_refused_test.go",
         "session_wake_test.go",
         "session_worktree_prune_info_test.go",
