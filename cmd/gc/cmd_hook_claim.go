@@ -888,8 +888,12 @@ func (ops *hookClaimOps) claimLandingAge(landedAt time.Time) time.Duration {
 	return landedAt.Sub(ops.InvokedAt)
 }
 
-// claimMutationContext bounds a claim-write child by the reserved mutation
-// budget, hookClaimMutationTimeout, measured from when the claim tier starts.
+// claimMutationContext bounds one claim-write child — a claim CAS or a stale
+// reclaim — by the reserved mutation budget, hookClaimMutationTimeout, measured
+// from when that child starts. Each write gets a context of its own, created
+// right before the call, so nothing earlier in the tier can spend it: not the
+// workflow stop gate's ancestry reads (which run on their own budget, see
+// hookClaimWorkflowStop), not a reclaim, and not an earlier candidate.
 //
 // The claim budget is deliberately SEPARATE from the read budget. It used to be
 // min(mutation timeout, what remains of the claim window), which let a slow
@@ -947,8 +951,6 @@ func refuseExpiredHookClaimWindow(candidateID string, ops hookClaimOps, stderr i
 // bead this session already owns, and claiming unrelated fresh work would
 // strand it.
 func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stdout, stderr io.Writer) hookClaimResult {
-	ctx, cancel := ops.claimMutationContext()
-	defer cancel()
 	claimsErrored := false
 	now := ops.nowOrWallClock()
 	for _, candidate := range candidates {
@@ -972,7 +974,7 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		// or alias; bd's idempotent --claim path requires the actor to match the
 		// existing assignee exactly.
 		claimActor := strings.TrimSpace(candidate.Assignee)
-		if hookClaimWorkflowStop(ctx, candidate, claimActor, opts, ops, dir, stderr) {
+		if hookClaimWorkflowStop(candidate, claimActor, opts, ops, dir, stderr) {
 			continue
 		}
 		casCtx, casCancel := ops.claimMutationContext()
@@ -1068,7 +1070,7 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		// The race window: the workflow can stop between the pre-claim check
 		// and the CAS landing. Re-check the claim just won rather than hand the
 		// worker a step under a root that settled in between.
-		if hookClaimWorkflowStop(ctx, claimed, claimed.Assignee, opts, ops, dir, stderr) {
+		if hookClaimWorkflowStop(claimed, claimed.Assignee, opts, ops, dir, stderr) {
 			continue
 		}
 		result := hookClaimJSONResult{
@@ -1118,8 +1120,6 @@ func hookClaimBeadIsElsewhere(err error) bool {
 // store before the shared no-work drain; the result's claimsErrored flag records
 // whether any skip was an error so that drain stays distinguishable from idle.
 func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stdout, stderr io.Writer) hookClaimResult {
-	ctx, cancel := ops.claimMutationContext()
-	defer cancel()
 	claimsErrored := false
 	now := ops.nowOrWallClock()
 	seatManaged := sync.OnceValue(func() bool {
@@ -1178,7 +1178,7 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		// only link to its root is a non-blocking tracks edge, so a step under a
 		// failed or canceled root stays ready. This gate is what keeps it from
 		// minting a new obligation.
-		if hookClaimWorkflowStop(ctx, candidate, opts.Assignee, opts, ops, dir, stderr) {
+		if hookClaimWorkflowStop(candidate, opts.Assignee, opts, ops, dir, stderr) {
 			continue
 		}
 		casCtx, casCancel := ops.claimMutationContext()
@@ -1258,7 +1258,7 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 		}
 		claimed = mergeHookClaimCandidateMetadata(candidate, claimed)
 		// Re-check across the CAS, as the ready tier does.
-		if hookClaimWorkflowStop(ctx, claimed, claimed.Assignee, opts, ops, dir, stderr) {
+		if hookClaimWorkflowStop(claimed, claimed.Assignee, opts, ops, dir, stderr) {
 			continue
 		}
 		result := hookClaimJSONResult{
@@ -1370,14 +1370,21 @@ func hookClaimWorkflowLinked(candidate beads.Bead) bool {
 // one of them takes it. actor is the identity the close writes as — the
 // assignee the bead carries, so bd's assignee fence admits it.
 //
+// The gate reads and closes on a bounded budget of its own,
+// hookClaimMutationTimeout from when it opens the store, and takes no context
+// from its caller: the ancestry walk on a loaded store can spend its whole
+// budget, and that must never come out of the claim CAS's reserve (#9178).
+//
 // A failed read of the ancestry fails open, the same trade the drain-pending
 // probe makes: one store hiccup must not idle every seat, and the claim CAS
 // that follows runs against the same store. A failed close still withholds the
 // bead; it stays visible to the next poll, which re-runs this gate.
-func hookClaimWorkflowStop(ctx context.Context, candidate beads.Bead, actor string, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) bool {
+func hookClaimWorkflowStop(candidate beads.Bead, actor string, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) bool {
 	if !hookClaimWorkflowLinked(candidate) || ops.WorkflowStore == nil {
 		return false
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
+	defer cancel()
 	store := ops.WorkflowStore(ctx, dir, opts.Env, candidate.ID, actor)
 	// store may hold a graph or a v1 work molecule: a relabel until the T7 Molecule intent (typed-store T5a).
 	stop, err := molecule.WorkflowStopReason(beads.GraphMolecule(beads.GraphStore{Store: store}), candidate)
@@ -1410,9 +1417,7 @@ func hookClaimStoppedAdoption(bead beads.Bead, canonicalAssignee string, opts ho
 	if actor == "" {
 		actor = strings.TrimSpace(bead.Assignee)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
-	defer cancel()
-	return hookClaimWorkflowStop(ctx, bead, actor, opts, ops, dir, stderr)
+	return hookClaimWorkflowStop(bead, actor, opts, ops, dir, stderr)
 }
 
 // reportHookClaimRejected publishes a bead.claim_rejected event (ADR-0009) when a

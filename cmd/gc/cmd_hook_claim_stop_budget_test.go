@@ -48,6 +48,20 @@ func (s budgetSpendingStore) Get(id string) (beads.Bead, error) {
 	return s.Store.Get(id)
 }
 
+// deadlineHonoringStore is a workflow store that fails every read once the
+// context it was opened with is done, as a bd child bound to that context does.
+type deadlineHonoringStore struct {
+	beads.Store
+	ctx context.Context
+}
+
+func (s deadlineHonoringStore) Get(id string) (beads.Bead, error) {
+	if err := s.ctx.Err(); err != nil {
+		return beads.Bead{}, fmt.Errorf("showing bead %q: timed out after 0s (caller deadline): %w", id, err)
+	}
+	return s.Store.Get(id)
+}
+
 // budgetClaimRecorder records the context state each claim write saw.
 type budgetClaimRecorder struct {
 	claimExpired   []bool
@@ -310,5 +324,49 @@ func TestHookClaimFreshTierSpentBudgetAttemptsNoCAS(t *testing.T) {
 		if got := f.get(id); got.Status != "open" || got.Assignee != "" {
 			t.Fatalf("%s = status %q assignee %q, want open and unassigned", id, got.Status, got.Assignee)
 		}
+	}
+}
+
+// TestHookClaimPostCASRecheckHasItsOwnBudget (AC-4): the workflow root settles
+// while the claim CAS is in flight and the CAS spends its whole budget. The
+// re-check across the CAS must read on an unexpired budget of its own, see the
+// stop and close the claim, not fail open and hand the step out.
+func TestHookClaimPostCASRecheckHasItsOwnBudget(t *testing.T) {
+	for _, tier := range claimTiers {
+		t.Run(tier.name, func(t *testing.T) {
+			shortenHookClaimBudget(t, hookClaimTestBudget)
+			f := newHookWorkflowStopFixture(t)
+			root := f.root("do-work", "")
+			step := f.step("implement", root.ID, nil)
+			if tier.assignee != "" {
+				f.assign(step.ID, tier.assignee)
+			}
+			f.served = []string{step.ID}
+			f.afterClaim = func(string) { f.closeAs(root.ID, "fail", nil) }
+
+			rec := &budgetClaimRecorder{}
+			ops := f.ops()
+			ops.WorkflowStore = func(ctx context.Context, _ string, _ []string, _, _ string) beads.Store {
+				return deadlineHonoringStore{Store: f.store, ctx: ctx}
+			}
+			baseClaim := ops.Claim
+			// The CAS commits, then returns only once its whole budget is spent.
+			ops.Claim = rec.bdLikeClaim(func(ctx context.Context, dir string, env []string, id, assignee string) (beads.Bead, bool, error) {
+				claimed, ok, err := baseClaim(ctx, dir, env, id, assignee)
+				<-ctx.Done()
+				return claimed, ok, err
+			})
+
+			run := runBudgetClaim(t, ops, false)
+
+			if run.handed != "" {
+				t.Fatalf("handed out %q, want nothing once the root settled under the claim\nstdout=%s\nstderr=%s", run.handed, run.stdout, run.stderr)
+			}
+			if strings.Contains(run.stderr, "workflow stop check unavailable") {
+				t.Fatalf("the re-check failed open on a spent budget\nstderr=%s", run.stderr)
+			}
+			wantEveryClaimUnexpired(t, rec)
+			f.wantClosed(step.ID, "skipped")
+		})
 	}
 }
