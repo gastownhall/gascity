@@ -745,6 +745,7 @@ go_library(
         "status_provider.go",
         "status_timeouts_other.go",
         "storage_boot.go",
+        "storage_containment_lease.go",
         "storage_cotenant_liveness.go",
         "storage_id_floor.go",
         "storage_maintenance.go",
@@ -973,55 +974,9 @@ go_library(
         "@com_github_spf13_pflag//:pflag",
         "@com_github_steveyegge_beads//journalops",
         "@in_gopkg_yaml_v3//:yaml_v3",
+        "@org_golang_x_sys//unix",
         "@org_golang_x_term//:term",
-    ] + select({
-        "@rules_go//go/platform:aix": [
-            "@org_golang_x_sys//unix",
-        ],
-        "@rules_go//go/platform:android": [
-            "@org_golang_x_sys//unix",
-        ],
-        "@rules_go//go/platform:darwin": [
-            "@org_golang_x_sys//unix",
-        ],
-        "@rules_go//go/platform:dragonfly": [
-            "@org_golang_x_sys//unix",
-        ],
-        "@rules_go//go/platform:freebsd": [
-            "@org_golang_x_sys//unix",
-        ],
-        "@rules_go//go/platform:illumos": [
-            "@org_golang_x_sys//unix",
-        ],
-        "@rules_go//go/platform:ios": [
-            "@org_golang_x_sys//unix",
-        ],
-        "@rules_go//go/platform:js": [
-            "@org_golang_x_sys//unix",
-        ],
-        "@rules_go//go/platform:linux": [
-            "@org_golang_x_sys//unix",
-        ],
-        "@rules_go//go/platform:netbsd": [
-            "@org_golang_x_sys//unix",
-        ],
-        "@rules_go//go/platform:openbsd": [
-            "@org_golang_x_sys//unix",
-        ],
-        "@rules_go//go/platform:osx": [
-            "@org_golang_x_sys//unix",
-        ],
-        "@rules_go//go/platform:plan9": [
-            "@org_golang_x_sys//unix",
-        ],
-        "@rules_go//go/platform:qnx": [
-            "@org_golang_x_sys//unix",
-        ],
-        "@rules_go//go/platform:solaris": [
-            "@org_golang_x_sys//unix",
-        ],
-        "//conditions:default": [],
-    }),
+    ],
 )
 
 go_binary(
@@ -2488,6 +2443,7 @@ go_test(
         "storage_boot_test.go",
         "storage_boot_workspace_integration_test.go",
         "storage_boot_workspace_test.go",
+        "storage_containment_lease_test.go",
         "storage_cotenant_lock_test.go",
         "storage_id_floor_bd_integration_test.go",
         "storage_id_floor_test.go",
