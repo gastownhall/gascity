@@ -175,6 +175,21 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 	return result, nil
 }
 
+// checkBatchSlingBaseBranches runs checkSlingBaseBranch for every open child
+// of a container sling that launches formulaName, before any child is touched.
+// A plain-bead batch (formulaName == "") has no base_branch to check.
+func checkBatchSlingBaseBranches(formulaName string, open []beads.Bead, opts SlingOpts, deps SlingDeps, a config.Agent) error {
+	if formulaName == "" {
+		return nil
+	}
+	for _, child := range open {
+		if err := checkSlingBaseBranch(formulaName, child.ID, opts, deps, a); err != nil {
+			return fmt.Errorf("child %s: %w", child.ID, err)
+		}
+	}
+	return nil
+}
+
 // slingLaunchFormula names the formula DoSling will launch for opts and the
 // bead it attaches to ("" for a standalone formula), or "" when the sling
 // routes a plain bead. It mirrors DoSling's dispatch.
@@ -2223,6 +2238,12 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 		}
 	}
 
+	// Refuse an unresolvable base_branch for any child before the dry-run
+	// preview, so a convoy dry run reports what the real dispatch would do.
+	if err := checkBatchSlingBaseBranches(useFormula, open, opts, deps, a); err != nil {
+		return SlingResult{}, err
+	}
+
 	// Dry-run: return early with container preview info. Every child goes to
 	// the one target, so the batch result carries the target warnings once.
 	if opts.DryRun {
@@ -2254,11 +2275,6 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 		isGraph, err = isGraphSlingFormula(context.Background(), useFormula, searchPaths, formulaVars)
 		if err != nil {
 			return SlingResult{}, fmt.Errorf("instantiating formula %q on %s %s: %w", useFormula, b.Type, b.ID, err)
-		}
-		for _, child := range open {
-			if err := checkSlingBaseBranch(useFormula, child.ID, opts, deps, a); err != nil {
-				return SlingResult{}, fmt.Errorf("child %s: %w", child.ID, err)
-			}
 		}
 		if err := validateBatchSlingFormulaRuntimeVars(context.Background(), useFormula, searchPaths, opts, open, a, deps); err != nil {
 			return SlingResult{}, fmt.Errorf("instantiating formula %q on %s %s: %w", useFormula, b.Type, b.ID, err)

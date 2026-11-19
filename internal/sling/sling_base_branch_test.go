@@ -236,3 +236,74 @@ func TestDoSlingBatchRefusesUnresolvableBaseBranch(t *testing.T) {
 		}
 	}
 }
+
+// newBaseBranchConvoy creates a convoy with two open task children.
+func newBaseBranchConvoy(t *testing.T, deps SlingDeps) (beads.Bead, []beads.Bead) {
+	t.Helper()
+	convoy, err := deps.Store.Create(beads.Bead{Title: "convoy", Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var children []beads.Bead
+	for _, title := range []string{"one", "two"} {
+		c, err := deps.Store.Create(beads.Bead{Title: title, Type: "task", ParentID: convoy.ID, Status: "open"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		children = append(children, c)
+	}
+	return convoy, children
+}
+
+// A convoy dry run must refuse the same base_branch the real dispatch
+// refuses, instead of previewing a sling that cannot happen.
+func TestDoSlingBatchDryRunRefusesUnresolvableBaseBranch(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	deps.Branches = refCheckResolver{missing: map[string]bool{"ghost/base": true}}
+	convoy, children := newBaseBranchConvoy(t, deps)
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	opts := SlingOpts{Target: a, BeadOrFormula: convoy.ID, OnFormula: "code-review", DryRun: true, Vars: []string{"base_branch=ghost/base"}}
+	_, err := DoSlingBatch(opts, deps, deps.Store)
+	requireBaseBranchRefusal(t, err, "ghost/base", SlingFormulaRepoDir(children[0].ID, deps, a))
+}
+
+// nthMissingResolver reports a ref missing only on its nth probe (1-based),
+// so a batch test can make a later child, not the first, trigger a refusal.
+type nthMissingResolver struct {
+	n     int
+	calls *int
+}
+
+func (r nthMissingResolver) DefaultBranch(string) string { return "main" }
+
+func (r nthMissingResolver) BaseRefMissing(string, string) bool {
+	*r.calls++
+	return *r.calls == r.n
+}
+
+// The batch checks every child before touching any: when only the second
+// child's probe fails, the refusal names that child and neither is routed.
+func TestDoSlingBatchRefusesWhenALaterChildBaseIsMissing(t *testing.T) {
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	deps := testDeps(cfg, runtime.NewFake(), newFakeRunner().run)
+	var calls int
+	deps.Branches = nthMissingResolver{n: 2, calls: &calls}
+	convoy, children := newBaseBranchConvoy(t, deps)
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+	opts := SlingOpts{Target: a, BeadOrFormula: convoy.ID, OnFormula: "code-review", Vars: []string{"base_branch=release/v2"}}
+	_, err := DoSlingBatch(opts, deps, deps.Store)
+	requireBaseBranchRefusal(t, err, "release/v2", SlingFormulaRepoDir(children[1].ID, deps, a))
+	if !strings.Contains(err.Error(), "child "+children[1].ID) {
+		t.Errorf("error %q does not name the second child %s", err, children[1].ID)
+	}
+	for _, c := range children {
+		got, getErr := deps.Store.Get(c.ID)
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		if got.Metadata["gc.routed_to"] != "" || got.Assignee != "" {
+			t.Errorf("child %s touched by a refused batch sling: routed_to=%q assignee=%q", c.ID, got.Metadata["gc.routed_to"], got.Assignee)
+		}
+	}
+}
