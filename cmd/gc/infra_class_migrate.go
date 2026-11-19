@@ -539,13 +539,16 @@ func (r infraMigrationReport) servesDegraded() bool {
 
 // leaseableOutcome reports whether this report's Outcome is one a
 // containment lease is ever published for: Converged, Genesis, Retained or
-// Stranded, the same set newStrandRecheck's switch recognizes as a verdict
-// to recheck. Every other outcome — notably Uncheckable, whose basis stays
-// populated on a standing fault discovered mid-check (confirmInfraContainment's
-// comment on its own basis capture) — is a fact about the CHECK, not a
-// verdict a one-shot could compare itself against, and newContainmentLease
-// rejects it on Outcome alone, independent of whether basis happens to be
-// populated.
+// Stranded — a superset of newStrandRecheck's switch, which starts a
+// recheck only for Converged, Genesis and Stranded (Retained never gets a
+// recheck to begin with, so this set never actually sees it in practice,
+// but a lease published once at boot for a Retained verdict is still
+// leaseable on its own terms). Every other outcome — notably Uncheckable,
+// whose basis stays populated on a standing fault discovered mid-check
+// (confirmInfraContainment's comment on its own basis capture) — is a fact
+// about the CHECK, not a verdict a one-shot could compare itself against,
+// and newContainmentLease rejects it on Outcome alone, independent of
+// whether basis happens to be populated.
 func (r infraMigrationReport) leaseableOutcome() bool {
 	switch r.Outcome {
 	case infraMigrationConverged, infraMigrationGenesis, infraMigrationRetained, infraMigrationStranded:

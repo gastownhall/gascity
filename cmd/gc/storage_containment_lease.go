@@ -24,9 +24,10 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"reflect"
 	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/gastownhall/gascity/internal/coordclass"
 )
@@ -41,11 +42,13 @@ const containmentLeaseProtocolVersion = 1
 // connection closes with no reply, same as an unregistered city here.
 const storageVerdictCommand = "storage-verdict"
 
-// leaseListCap is the largest stranded or presumed-reused list a lease
-// carries complete. A longer list is truncated and Complete is set false,
-// which slice 2's caller must treat as "take the full check" (design doc
-// §4.4): a truncated refusal list names fewer ids than the city actually
-// has, and nothing here lets that be read as the whole truth.
+// leaseListCap is the largest stranded, presumed-reused or lost-cross-edge
+// list a lease carries complete. A longer list is never truncated and
+// served as a partial answer: newContainmentLease drops it to nil entirely
+// and sets Complete false, which slice 2's caller must treat as "take the
+// full check" (design doc §4.4) — a partial refusal list names fewer ids
+// than the city actually has, and nothing here lets that be read as the
+// whole truth.
 const leaseListCap = 1000
 
 // containmentBasis is every fact confirmInfraContainment's work-store read
@@ -58,9 +61,8 @@ type containmentBasis struct {
 	// bytes, which include the work-store identity line and the write time.
 	Marker string `json:"marker"`
 	// Manifest stamps the proven-copy manifest: (dev, ino, size, mtime_ns,
-	// ctime_ns) where the platform exposes an inode, else its content hash.
-	// Its rewrites are temp+rename (infra_copy_manifest.go), so a stamp
-	// taken before and after one never collides by chance.
+	// ctime_ns). Its rewrites are temp+rename (infra_copy_manifest.go), so a
+	// stamp taken before and after one never collides by chance.
 	Manifest string `json:"manifest"`
 	// Cleared stamps the cleared note the same way, or "absent" when there
 	// is none.
@@ -78,10 +80,12 @@ type containmentBasis struct {
 }
 
 // empty reports a basis with nothing captured: the zero value every report
-// that never reaches confirmInfraContainment's work-store read carries
-// (not configured, genesis, an identity mismatch, every uncheckable), and
-// exactly the signal that nothing should be published for it (design doc
-// §4.6, "Genesis: the first tick publishes").
+// that never reaches confirmInfraContainment's work-store read carries (not
+// configured, genesis, an identity mismatch, every uncheckable). It is the
+// signal newContainmentLease rejects on; since publishLease stores whatever
+// newContainmentLease returns, including nil, a report with an empty basis
+// does not merely add nothing — it actively withdraws any lease already
+// published (design doc §4.6, "Genesis: the first tick publishes").
 func (b containmentBasis) empty() bool {
 	return b == containmentBasis{}
 }
@@ -106,11 +110,14 @@ type containmentLease struct {
 	// own true age.
 	TakenAt time.Time
 	// FreshMS is this lease's freshness budget in milliseconds, computed
-	// once at publish time from the recheck's adaptive interval and its
-	// last check duration (design doc §4.3): min(10 min, 2×interval + last
-	// duration). It does not change between serves of the same lease,
-	// except that a transient recheck failure stretches it to the full
-	// ten-minute cap (Q3; extendLeaseOnTransientFailure).
+	// once at publish time from the recheck's interval (strandRecheckInterval
+	// — fixed in this slice, slice 2's to make adaptive) and its last check
+	// duration (design doc §4.3): min(10 min, 2×interval + last duration),
+	// which this slice's fixed interval collapses to the 10-minute cap
+	// regardless of the check duration (strandRecheckFreshCap's comment). It
+	// does not change between serves of the same lease, except that a
+	// transient recheck failure stretches it to the full ten-minute cap (Q3;
+	// extendLeaseOnTransientFailure).
 	FreshMS int64
 	// RecheckFailing is true once a transient recheck failure has kept this
 	// verdict from being refreshed (Q3, design doc §5): the verdict below
@@ -134,10 +141,11 @@ type containmentLease struct {
 	Serving, ServesDegraded bool
 	// ProvenBeads, LostCrossEdges, Stranded, PresumedReused and
 	// Declassifiable mirror the same-named infraMigrationReport fields.
-	// Stranded and PresumedReused are capped at leaseListCap; Complete
-	// reports whether either list was truncated to fit. Declassifiable is
-	// dropped along with Stranded, not independently capped, when Stranded
-	// itself had to be truncated (newContainmentLease).
+	// LostCrossEdges, Stranded and PresumedReused are each nil, not a
+	// partial list, once they are over leaseListCap; Complete reports
+	// whether any of the three was dropped for it. Declassifiable is
+	// dropped along with Stranded, not independently capped, whenever
+	// Stranded itself was (newContainmentLease).
 	ProvenBeads    int
 	LostCrossEdges []string
 	Stranded       []string
@@ -216,14 +224,15 @@ func newContainmentLease(target infraBindingTarget, report infraMigrationReport,
 	}
 	stranded, strandedComplete := capLeaseList(report.Stranded)
 	presumed, presumedComplete := capLeaseList(report.PresumedReused)
+	lostCrossEdges, lostComplete := capLeaseList(report.LostCrossEdges)
 	declassifiable := report.Declassifiable
 	if !strandedComplete {
 		// Declassifiable only ever names ids within Stranded (it maps a
-		// subset of them to the metadata that clears them); a Stranded cut
-		// short of leaseListCap can no longer vouch for it, so both are
-		// dropped together rather than publish a Declassifiable that
-		// answers for ids the truncated Stranded no longer lists.
-		stranded, declassifiable = nil, nil
+		// subset of them to the metadata that clears them); a Stranded
+		// dropped for being over leaseListCap can no longer vouch for it,
+		// so both are dropped together rather than publish a Declassifiable
+		// that answers for ids the dropped Stranded no longer lists.
+		declassifiable = nil
 	}
 	return &containmentLease{
 		PID:            os.Getpid(),
@@ -237,20 +246,24 @@ func newContainmentLease(target infraBindingTarget, report infraMigrationReport,
 		LastAttemptAt:  takenAt,
 		Basis:          report.basis,
 		ProvenBeads:    report.ProvenBeads,
-		LostCrossEdges: report.LostCrossEdges,
+		LostCrossEdges: lostCrossEdges,
 		Stranded:       stranded,
 		PresumedReused: presumed,
 		Declassifiable: declassifiable,
-		Complete:       strandedComplete && presumedComplete,
+		Complete:       strandedComplete && presumedComplete && lostComplete,
 	}
 }
 
-// capLeaseList truncates ids to leaseListCap, reporting whether it had to.
+// capLeaseList reports ids unchanged when it is within leaseListCap, else
+// drops it to nil entirely rather than truncate it: a partial list cannot
+// vouch for itself as the city's whole refusal or recovery set, and nothing
+// here lets slice 2's caller read it as one (leaseListCap's comment). The
+// bool reports whether ids was complete.
 func capLeaseList(ids []string) ([]string, bool) {
 	if len(ids) <= leaseListCap {
 		return ids, true
 	}
-	return ids[:leaseListCap], false
+	return nil, false
 }
 
 // captureContainmentBasis reads every fact confirmInfraContainment's
@@ -292,114 +305,32 @@ func captureContainmentBasis(cityPath string, target infraBindingTarget) (contai
 }
 
 // containmentBasisStamp fingerprints path's metadata: (dev, ino, size,
-// mtime_ns, ctime_ns) when changeSensitive and the platform exposes an
-// inode; just (dev, ino) otherwise, for the database file, which this exists
-// to catch a RESTORE of, not an ordinary write through the binding this
-// process already has open. A missing file stamps as "absent", itself a
-// fact worth comparing: the manifest and the cleared note are both written
-// by temp+rename, so a transition through "absent" is real information,
-// not a race this glosses over.
+// mtime_ns, ctime_ns) when changeSensitive; just (dev, ino) otherwise, for
+// the database file, which this exists to catch a RESTORE of, not an
+// ordinary write through the binding this process already has open. A
+// missing file stamps as "absent", itself a fact worth comparing: the
+// manifest and the cleared note are both written by temp+rename, so a
+// transition through "absent" is real information, not a race this glosses
+// over.
 //
-// Where there is no inode (Windows), the manifest and cleared-note stamps
-// (changeSensitive) fall back to a "sha256:"-prefixed content hash: both
-// are small, process-written files, so hashing them costs nothing. The
-// database stamp never does: it names the live SQLite file the binding has
-// open, often large, and hashing it on every basis capture would make the
-// capture itself one of the heaviest things this process does. There, with
-// no inode, the stamp is the literal "unsupported" (design review SHOULD
-// 5) — a value that can never equal a later basis's, so a RESTORE this
-// stamp exists to catch is never silently taken for a match on a platform
-// that cannot name the file well enough to tell.
+// x/sys/unix, not os.Stat, the way statBdBinary (bd_inventory_trust.go)
+// reads a binary's identity: cmd/gc is not one of this repo's
+// Windows-cross-compiled packages (no _windows.go file here, and it is in
+// none of .github/windows-lane's allowlists), so there is no inode-less
+// platform left to fall back for, and none is kept.
 func containmentBasisStamp(path string, changeSensitive bool) (string, error) {
-	info, err := os.Stat(path)
-	if err != nil {
+	var st unix.Stat_t
+	if err := unix.Stat(path, &st); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return "absent", nil
 		}
 		return "", err
 	}
-	if dev, ino, ok := statDevIno(info); ok {
-		if !changeSensitive {
-			return fmt.Sprintf("dev=%d;ino=%d", dev, ino), nil
-		}
-		ctimeNS, _ := statCtimeNanosBestEffort(info)
-		return fmt.Sprintf("dev=%d;ino=%d;size=%d;mtime_ns=%d;ctime_ns=%d",
-			dev, ino, info.Size(), info.ModTime().UnixNano(), ctimeNS), nil
-	}
 	if !changeSensitive {
-		return "unsupported", nil
+		return fmt.Sprintf("dev=%d;ino=%d", uint64(st.Dev), st.Ino), nil //nolint:unconvert // Darwin's field is signed int32.
 	}
-	sum, err := fileSHA256(path)
-	if err != nil {
-		return "", err
-	}
-	return "sha256:" + sum, nil
-}
-
-// statDevIno extracts (dev, ino) from info.Sys() by reflection, so this file
-// needs no //go:build variant: Linux's and Darwin's syscall.Stat_t both
-// expose Dev and Ino fields reflection can read uniformly, and Windows's
-// *syscall.Win32FileAttributeData has neither, so ok is false there and the
-// caller falls back to a content hash (design doc §4.6).
-func statDevIno(info os.FileInfo) (dev, ino uint64, ok bool) {
-	stat := reflect.Indirect(reflect.ValueOf(info.Sys()))
-	if !stat.IsValid() {
-		return 0, 0, false
-	}
-	d, ok1 := uintFieldValue(stat.FieldByName("Dev"))
-	i, ok2 := uintFieldValue(stat.FieldByName("Ino"))
-	if !ok1 || !ok2 {
-		return 0, 0, false
-	}
-	return d, i, true
-}
-
-// statCtimeNanosBestEffort extracts the inode-change time in nanoseconds, by
-// reflection, from whichever of the two field shapes glibc's and Darwin's
-// syscall.Stat_t use (Ctim or Ctimespec, both a {Sec, Nsec} struct) or,
-// failing that, a scalar Ctime field. ok is false where none is present
-// (Windows never reaches here: statDevIno already failed first, so the
-// ctime is never asked for there).
-func statCtimeNanosBestEffort(info os.FileInfo) (int64, bool) {
-	stat := reflect.Indirect(reflect.ValueOf(info.Sys()))
-	if !stat.IsValid() {
-		return 0, false
-	}
-	for _, name := range []string{"Ctim", "Ctimespec"} {
-		field := stat.FieldByName(name)
-		if !field.IsValid() || field.Kind() != reflect.Struct {
-			continue
-		}
-		sec, ok1 := intFieldValue(field.FieldByName("Sec"))
-		nsec, ok2 := intFieldValue(field.FieldByName("Nsec"))
-		if ok1 && ok2 {
-			return sec*1e9 + nsec, true
-		}
-	}
-	if nanos, ok := intFieldValue(stat.FieldByName("Ctime")); ok {
-		return nanos, true
-	}
-	return 0, false
-}
-
-func uintFieldValue(v reflect.Value) (uint64, bool) {
-	switch v.Kind() {
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		return v.Uint(), true
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		return uint64(v.Int()), true
-	}
-	return 0, false
-}
-
-func intFieldValue(v reflect.Value) (int64, bool) {
-	switch v.Kind() {
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		return v.Int(), true
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		return int64(v.Uint()), true
-	}
-	return 0, false
+	return fmt.Sprintf("dev=%d;ino=%d;size=%d;mtime_ns=%d;ctime_ns=%d",
+		uint64(st.Dev), st.Ino, st.Size, st.Mtim.Nano(), st.Ctim.Nano()), nil //nolint:unconvert // Darwin's field is signed int32.
 }
 
 // classifierBasisNonce makes a dev or pseudo build's classifier basis unique

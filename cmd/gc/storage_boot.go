@@ -171,8 +171,10 @@ func servedContainmentLease(cityPath string) (*containmentLease, bool) {
 // The boot verdict's own check duration was never measured as a recheck
 // tick's is, so this seeds the freshness budget with a zero check duration
 // and this slice's fixed recheck interval: strandRecheckFreshness(10 min,
-// 0) is the 10-minute cap, matching the real gap until the first tick with
-// no lapse in between (strandRecheckFreshCap's comment).
+// 0) is the 10-minute cap (strandRecheckFreshCap's comment). TakenAt is the
+// check itself (bootVerdict.CheckedAt), not this call, which can run later
+// in boot — so the budget already starts being spent on whatever boot does
+// in between, not only on the wait for the first recheck tick.
 func publishBootContainmentLease(routes *storageRoutes) {
 	if routes == nil {
 		return
@@ -1011,42 +1013,26 @@ func printStorageWarningOnce(w io.Writer, msg string) {
 //
 // It seeds s.run's ticker and never changes: slice 1 keeps today's fixed
 // cadence (design review, 2026-11-18 — "move adaptive cadence to slice 2,
-// where the lease has a consumer"). strandRecheckNextInterval below is the
-// adaptive formula slice 2 wires in; it is unused by s.run until then.
+// where the lease has a consumer"). The adaptive formula itself (max(60s,
+// 10×last check duration), design doc §4.3) is slice 2's to add back in,
+// once s.run actually calls it: this slice kept a pure, unwired copy of it
+// (strandRecheckNextInterval / strandRecheckIntervalFloor) and a test built
+// only to keep nogo's unused check from failing on it, and drops both
+// rather than carry dead code slice 2 can restate from the design doc in
+// one line (design review NIT).
 var strandRecheckInterval = 10 * time.Minute
-
-// strandRecheckIntervalFloor is the least a recheck's adaptive interval
-// would ever be allowed to shrink to (design doc §4.3): even an instant
-// check would not poll faster than this. Read only by
-// strandRecheckNextInterval, slice 2's not slice 1's.
-const strandRecheckIntervalFloor = 60 * time.Second
 
 // strandRecheckFreshCap bounds how long a lease is ever treated as fresh,
 // regardless of interval or check duration (design doc §4.3) — the owner's
 // bound on how long a stale verdict is served while rechecks keep failing
 // (Q3): doctor's WARN past this point is slice 3. It is also, in this
 // slice, the freshness every definitive tick's lease actually gets: with
-// the interval fixed at strandRecheckInterval (10 min),
-// strandRecheckFreshness(strandRecheckInterval, d) = min(10 min, 20
-// min+d) = this cap, for every d ≥ 0 — which is exactly Q3's bound, and
-// matches the real 10-minute gap until the next tick, with no window in
-// between where the lease could go stale before it is due to be refreshed.
+// the interval fixed at strandRecheckInterval (10 min), 2×interval alone
+// (20 min) already exceeds this cap, so strandRecheckFreshness(interval, d)
+// = min(20 min+d, cap) = this cap for every d ≥ 0, regardless of how long
+// the check itself took — the cap, not the check duration, decides the
+// budget in this slice.
 const strandRecheckFreshCap = 10 * time.Minute
-
-// strandRecheckNextInterval adapts the recheck's polling interval to its own
-// cost (design doc §4.3): max(60s, 10×last check duration). A slow check — a
-// large ledger, a loaded store — would not also become a tenth of the
-// controller's own CPU merely by being on a fixed ten-minute clock.
-//
-// Not called by this slice's s.run (strandRecheckInterval stays fixed); kept
-// here, pure and already tested, for slice 2 to wire in once the lease has a
-// consumer that benefits from a shorter interval.
-func strandRecheckNextInterval(lastCheckDuration time.Duration) time.Duration {
-	if adaptive := 10 * lastCheckDuration; adaptive > strandRecheckIntervalFloor {
-		return adaptive
-	}
-	return strandRecheckIntervalFloor
-}
 
 // strandRecheckFreshness is a lease's freshness budget (design doc §4.3):
 // min(10 min, 2×interval + last check duration). A caller (slice 2) accepts
@@ -1203,19 +1189,19 @@ func (s *strandRecheck) tick() {
 	recordStrandRecheckOutcome(s.rec, report, advice)
 }
 
-// publishLease stores the lease report captures, when it captured one
-// (report.basis is empty for a report confirmInfraContainment never ran its
-// work-store read for, e.g. a stale "not recorded" uncheckable tick does not
-// reach here at all). No-op with no routes to publish to, which is every
-// strandRecheck this package's own tests construct directly.
+// publishLease stores whatever newContainmentLease makes of this report,
+// including nil: a definitive verdict whose basis capture failed (or one
+// newContainmentLease otherwise refuses) must not leave a stale, possibly no
+// longer true, previously-published lease still being served — it withdraws
+// it instead, the same way a standing fault does in tick(). No-op with no
+// routes to publish to, which is every strandRecheck this package's own
+// tests construct directly.
 func (s *strandRecheck) publishLease(report infraMigrationReport, takenAt time.Time) {
 	if s.routes == nil {
 		return
 	}
 	freshMS := strandRecheckFreshness(strandRecheckInterval, s.lastCheckDuration).Milliseconds()
-	if lease := newContainmentLease(s.target, report, freshMS, takenAt); lease != nil {
-		s.routes.lease.Store(lease)
-	}
+	s.routes.lease.Store(newContainmentLease(s.target, report, freshMS, takenAt))
 }
 
 // extendLeaseOnTransientFailure re-stores the last definitive lease this
@@ -1243,10 +1229,10 @@ func (s *strandRecheck) extendLeaseOnTransientFailure(attemptAt time.Time) {
 }
 
 // run ticks every interval until ctx ends. This slice fixes that interval at
-// strandRecheckInterval for the life of the ticker; the adaptive period
-// strandRecheckNextInterval would compute from each tick's measured
-// duration is slice 2's, once the lease has a consumer that benefits from a
-// shorter one (design review SHOULD 3).
+// strandRecheckInterval for the life of the ticker; an adaptive period
+// computed from each tick's measured duration (design doc §4.3:
+// max(60s, 10×last check duration)) is slice 2's to add, once the lease has
+// a consumer that benefits from a shorter one (design review SHOULD 3).
 func (s *strandRecheck) run(ctx context.Context, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()

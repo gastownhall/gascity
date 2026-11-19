@@ -2701,28 +2701,3 @@ func TestStrandedEventCapsEveryIDList(t *testing.T) {
 		t.Errorf("an older event decodes serving=%v (err %v), want absent", old.Serving, err)
 	}
 }
-
-// TestStrandRecheckNextIntervalAdaptsToCheckDuration exercises slice 2's
-// adaptive-interval formula (design doc §4.3) directly — s.run does not
-// call it this slice (strandRecheckInterval stays fixed, design review
-// 2026-11-18), so without a test of its own strandRecheckNextInterval and
-// strandRecheckIntervalFloor would be unreachable from any build target and
-// fail nogo's unused check. The formula itself: max(60s, 10×duration).
-func TestStrandRecheckNextIntervalAdaptsToCheckDuration(t *testing.T) {
-	cases := []struct {
-		name     string
-		duration time.Duration
-		want     time.Duration
-	}{
-		{"an instant check floors at 60s", 0, strandRecheckIntervalFloor},
-		{"a check well under the floor's own threshold still floors", 1 * time.Second, strandRecheckIntervalFloor},
-		{"a slow check scales to ten times its own duration", 30 * time.Second, 5 * time.Minute},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := strandRecheckNextInterval(c.duration); got != c.want {
-				t.Errorf("strandRecheckNextInterval(%v) = %v, want %v", c.duration, got, c.want)
-			}
-		})
-	}
-}

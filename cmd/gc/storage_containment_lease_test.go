@@ -11,11 +11,14 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -702,5 +705,430 @@ func TestContainmentLeaseDropsStrandedAndDeclassifiableWhenOverCap(t *testing.T)
 	}
 	if lease.Declassifiable != nil {
 		t.Fatalf("Declassifiable = %v, want nil once Stranded is dropped", lease.Declassifiable)
+	}
+}
+
+// TestContainmentLeaseDropsPresumedReusedAndCapsLostCrossEdgesWhenOverCap is
+// round 2's NIT fix: PresumedReused over leaseListCap is dropped to nil the
+// same way Stranded is, not truncated to a partial list that could be read
+// as the whole one, and LostCrossEdges gets the identical treatment. Either
+// one being over cap, on its own, marks the lease incomplete.
+func TestContainmentLeaseDropsPresumedReusedAndCapsLostCrossEdgesWhenOverCap(t *testing.T) {
+	target := infraBindingTarget{Binding: "infra", Database: "infra.db"}
+	basis := containmentBasis{Marker: "sha256:x"}
+
+	overCap := make([]string, leaseListCap+5)
+	for i := range overCap {
+		overCap[i] = fmt.Sprintf("bead-%d", i)
+	}
+
+	t.Run("presumed reused", func(t *testing.T) {
+		report := infraMigrationReport{Outcome: infraMigrationStranded, Stranded: []string{"b1"}, PresumedReused: overCap, basis: basis}
+		lease := newContainmentLease(target, report, 1000, time.Now())
+		if lease == nil {
+			t.Fatal("newContainmentLease returned nil for a leaseable stranded report")
+		}
+		if lease.PresumedReused != nil {
+			t.Fatalf("PresumedReused = %v, want nil once over leaseListCap, not a truncated list", lease.PresumedReused)
+		}
+		if lease.Complete {
+			t.Fatal("Complete = true for an over-cap PresumedReused list")
+		}
+	})
+
+	t.Run("lost cross edges", func(t *testing.T) {
+		report := infraMigrationReport{Outcome: infraMigrationStranded, Stranded: []string{"b1"}, LostCrossEdges: overCap, basis: basis}
+		lease := newContainmentLease(target, report, 1000, time.Now())
+		if lease == nil {
+			t.Fatal("newContainmentLease returned nil for a leaseable stranded report")
+		}
+		if lease.LostCrossEdges != nil {
+			t.Fatalf("LostCrossEdges = %v, want nil once over leaseListCap", lease.LostCrossEdges)
+		}
+		if lease.Complete {
+			t.Fatal("Complete = true for an over-cap LostCrossEdges list")
+		}
+	})
+}
+
+// basisFieldDiff names which containmentBasis fields differ between a and b.
+func basisFieldDiff(a, b containmentBasis) []string {
+	var d []string
+	if a.Marker != b.Marker {
+		d = append(d, "marker")
+	}
+	if a.Manifest != b.Manifest {
+		d = append(d, "manifest")
+	}
+	if a.Cleared != b.Cleared {
+		d = append(d, "cleared")
+	}
+	if a.Database != b.Database {
+		d = append(d, "database")
+	}
+	if a.WorkStore != b.WorkStore {
+		d = append(d, "work_store")
+	}
+	if a.Classifier != b.Classifier {
+		d = append(d, "classifier")
+	}
+	return d
+}
+
+// TestCaptureContainmentBasisFieldSensitivity is round 2's SHOULD B,
+// reviewer probe R10: changing one real underlying fact at a time changes
+// exactly its own basis field and no other. A field read as a constant
+// (k1-k5), from the wrong file (k6, k7) or the wrong path (k8, a directory
+// that a database replacement never touches) never moves when its own fact
+// does, and the manifest's stamp catches a temp+rename that keeps the same
+// (dev, ino) (b6, already covered by
+// TestConfirmInfraContainmentCapturesTheBasisBeforeTheRead but pinned again
+// here end to end).
+func TestCaptureContainmentBasisFieldSensitivity(t *testing.T) {
+	cityPath, _, _, target := convergedInfraCity(t)
+	capture := func() containmentBasis {
+		b, err := captureContainmentBasis(cityPath, target)
+		if err != nil {
+			t.Fatalf("captureContainmentBasis: %v", err)
+		}
+		return b
+	}
+	prev := capture()
+	step := func(name, want string, do func()) {
+		t.Helper()
+		do()
+		now := capture()
+		if got := basisFieldDiff(prev, now); len(got) != 1 || got[0] != want {
+			t.Errorf("%s changed %v, want exactly [%s]", name, got, want)
+		}
+		prev = now
+	}
+
+	step("marker content", "marker", func() {
+		data, err := os.ReadFile(target.MarkerPath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target.MarkerPath(), append([]byte("# probe\n"), data...), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	})
+	step("manifest temp+rename", "manifest", func() { rewriteInfraManifestInPlace(t, target) })
+	step("cleared note written", "cleared", func() {
+		if err := writeInfraClearedNote(cityPath, infraClearedNote{Binding: target.Binding, Database: target.Database, Complete: true}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	step("database replaced by rename", "database", func() {
+		data, err := os.ReadFile(target.Database)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tmp := target.Database + ".rewrite"
+		if err := os.WriteFile(tmp, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(tmp, target.Database); err != nil {
+			t.Fatal(err)
+		}
+	})
+	step("work-store identity", "work_store", func() { writeScopeProjectID(t, cityPath, "prj-r10") })
+	step("classifier nonce", "classifier", func() {
+		old := classifierBasisNonce
+		t.Cleanup(func() { classifierBasisNonce = old })
+		classifierBasisNonce = "r10-nonce"
+	})
+}
+
+// TestConfirmInfraContainmentKeepsBasisWhenTheManifestWontRead is round 2's
+// SHOULD B: a malformed manifest fails readInfraCopyManifestRecord, but the
+// basis was captured before that read (this function's own comment on why)
+// and stays on the uncheckable report it returns — never emptied just
+// because the read after it failed.
+func TestConfirmInfraContainmentKeepsBasisWhenTheManifestWontRead(t *testing.T) {
+	cityPath, _, _, target := convergedInfraCity(t)
+	if err := os.Remove(target.ManifestPath()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(target.ManifestPath(), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	report := confirmInfraContainment(cityPath, target, "x", io.Discard)
+	if report.Outcome != infraMigrationUncheckable {
+		t.Fatalf("fixture: outcome = %v, want uncheckable with a directory where the manifest belongs", report.Outcome)
+	}
+	if report.basis.empty() {
+		t.Fatal("a malformed manifest emptied the basis captured before the read (m13b)")
+	}
+}
+
+// TestPublishBootContainmentLeaseTakenAtIsTheBootCheckedAt is round 2's
+// SHOULD 2 (a1): the boot lease's TakenAt names when the boot check itself
+// ran (routes.bootVerdict.CheckedAt), not whenever publishBootContainmentLease
+// happens to be called — which can be later, once the rest of boot is done.
+func TestPublishBootContainmentLeaseTakenAtIsTheBootCheckedAt(t *testing.T) {
+	cityPath, cfg, _, _ := convergedInfraCity(t)
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, io.Discard)
+	if err != nil {
+		t.Fatalf("the converged city refused: %v", err)
+	}
+	t.Cleanup(func() { _ = routes.close() })
+
+	publishBootContainmentLease(routes)
+	lease := routes.lease.Load()
+	if lease == nil {
+		t.Fatal("no lease published at boot")
+	}
+	if !lease.TakenAt.Equal(routes.bootVerdict.CheckedAt) {
+		t.Fatalf("lease.TakenAt = %v, want bootVerdict.CheckedAt %v (a1)", lease.TakenAt, routes.bootVerdict.CheckedAt)
+	}
+}
+
+// TestStorageBootGateChecksCheckedAtBeforeTheCheckRuns is round 2's SHOULD 2
+// (a2): CheckedAt is stamped from a clock read before the check runs
+// (storageBootGate's own comment on why), not after. Rather than sleep inside
+// the check to manufacture a measurable gap, the stub itself is the clock:
+// it records its own entry time, so this only needs CheckedAt to precede
+// that recording — true on any schedule, not just a slow one.
+func TestStorageBootGateChecksCheckedAtBeforeTheCheckRuns(t *testing.T) {
+	cityPath, cfg, _, _ := convergedInfraCity(t)
+	prev := openInfraMigrationSource
+	var checkEnteredAt time.Time
+	t.Cleanup(func() { openInfraMigrationSource = prev })
+	openInfraMigrationSource = func(p string) (beads.Store, error) {
+		checkEnteredAt = time.Now()
+		return prev(p)
+	}
+
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, io.Discard)
+	if err != nil {
+		t.Fatalf("the converged city refused: %v", err)
+	}
+	t.Cleanup(func() { _ = routes.close() })
+
+	checkedAt := routes.bootVerdict.CheckedAt
+	if checkEnteredAt.IsZero() {
+		t.Fatal("fixture: the check never entered the stub")
+	}
+	if checkedAt.After(checkEnteredAt) {
+		t.Fatalf("CheckedAt is %v, which is after the check itself started (%v) (a2)", checkedAt, checkEnteredAt)
+	}
+}
+
+// TestStrandRecheckTickFreshMSEqualsTheCap is round 2's SHOULD 2 (i4): a
+// definitive tick's lease gets the full strandRecheckFreshCap, not merely
+// something less than it reached by taking the uncapped branch of
+// strandRecheckFreshness's comparison.
+func TestStrandRecheckTickFreshMSEqualsTheCap(t *testing.T) {
+	cityPath, cfg, _, _ := convergedInfraCity(t)
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, io.Discard)
+	if err != nil {
+		t.Fatalf("the converged city refused: %v", err)
+	}
+	t.Cleanup(func() { _ = routes.close() })
+
+	s := newStrandRecheck(routes, cityPath, events.NewFake(), io.Discard, "gc start")
+	if s == nil {
+		t.Fatal("no recheck for a converged city")
+	}
+	s.tick()
+
+	lease := routes.lease.Load()
+	if lease == nil {
+		t.Fatal("a definitive tick published no lease")
+	}
+	if lease.FreshMS != strandRecheckFreshCap.Milliseconds() {
+		t.Fatalf("FreshMS = %d, want the cap %d after a definitive tick (i4)", lease.FreshMS, strandRecheckFreshCap.Milliseconds())
+	}
+}
+
+// TestHandleControllerConnStorageVerdictAfterATransientTick is round 2's
+// MUST 2 socket-level pin (t8, t9): once a transient recheck failure has
+// extended the lease, the wire reply actually carries recheck_failing (not
+// hardcoded false) and last_attempt_ms measured from LastAttemptAt (which
+// moved), not from TakenAt (which did not) — the two must read as
+// different ages.
+func TestHandleControllerConnStorageVerdictAfterATransientTick(t *testing.T) {
+	cityA, cfgA, _, _ := convergedInfraCity(t)
+	routesA, err := storageBootGate(cityA, cfgA, "gc start", nil, io.Discard)
+	if err != nil {
+		t.Fatalf("city A refused: %v", err)
+	}
+	t.Cleanup(func() { _ = routesA.close() })
+	publishBootContainmentLease(routesA)
+	registerResidencyRoutes(cityA, routesA, nil)
+	t.Cleanup(func() { unregisterResidencyRoutes(cityA, routesA) })
+
+	s := newStrandRecheck(routesA, cityA, events.NewFake(), io.Discard, "gc start")
+	if s == nil {
+		t.Fatal("no recheck for a converged city")
+	}
+
+	// Back-date the boot lease's TakenAt rather than sleep for a real gap:
+	// last_attempt_ms and age_ms both round to whole milliseconds, so the
+	// two ages need a genuine difference, not merely two clock reads that
+	// happen to land in the same millisecond.
+	boot := routesA.lease.Load()
+	if boot == nil {
+		t.Fatal("fixture: no boot lease published")
+	}
+	backdated := *boot
+	backdated.TakenAt = backdated.TakenAt.Add(-50 * time.Millisecond)
+	backdated.LastAttemptAt = backdated.TakenAt
+	routesA.lease.Store(&backdated)
+
+	prev := openInfraMigrationSource
+	t.Cleanup(func() { openInfraMigrationSource = prev })
+	openInfraMigrationSource = func(string) (beads.Store, error) {
+		return nil, errors.New(`Get "https://hosted-bd/v1/issues": dial tcp: i/o timeout`)
+	}
+	s.tick()
+	openInfraMigrationSource = prev
+
+	server, client := net.Pipe()
+	defer client.Close() //nolint:errcheck
+	go handleControllerConn(server, cityA, controllerHostingMode(""), func() {}, nil, nil, nil, nil, nil)
+	if _, err := client.Write([]byte(storageVerdictCommand + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	client.SetReadDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
+	data, _ := io.ReadAll(bufio.NewReader(client))
+
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("decode %q: %v", data, err)
+	}
+	if failing, ok := m["recheck_failing"].(bool); !ok || !failing {
+		t.Fatalf("recheck_failing = %v, want true after a transient tick (t8)", m["recheck_failing"])
+	}
+	lastAttemptMS, ok := m["last_attempt_ms"].(float64)
+	if !ok {
+		t.Fatalf("no last_attempt_ms in %v", m)
+	}
+	ageMS, ok := m["age_ms"].(float64)
+	if !ok {
+		t.Fatalf("no age_ms in %v", m)
+	}
+	if lastAttemptMS >= ageMS {
+		t.Fatalf("last_attempt_ms = %v, want less than age_ms = %v: LastAttemptAt is more recent than TakenAt (t9)", lastAttemptMS, ageMS)
+	}
+}
+
+// TestClassifierBasisStringAddsNonceForAPseudoVersion is round 2's NIT (n2):
+// a pseudo-version build (go install …@<ref>) has no build identity to
+// compare, the same as a dev or dirty one, so its classifier stamp also
+// carries classifierBasisNonce — even when version and commit are both
+// otherwise ordinary release values.
+func TestClassifierBasisStringAddsNonceForAPseudoVersion(t *testing.T) {
+	prevVersion, prevCommit, prevBuilt := version, commit, versionBuilt
+	t.Cleanup(func() { version, commit, versionBuilt = prevVersion, prevCommit, prevBuilt })
+	version = "1.2.3"
+	commit = "abc1234567"
+	versionBuilt = "v1.2.3-0.20210101000000-abcdef012345"
+
+	prevNonce := classifierBasisNonce
+	t.Cleanup(func() { classifierBasisNonce = prevNonce })
+	classifierBasisNonce = "nonce-pseudo-a"
+	a := classifierBasisString()
+	classifierBasisNonce = "nonce-pseudo-b"
+	b := classifierBasisString()
+	if a == b {
+		t.Fatalf("a pseudo-version build's classifier string did not change with the nonce: %q == %q (n2)", a, b)
+	}
+}
+
+// TestLegacyMarkerBackfillPublishesNoBootLease is round 2's NIT (n3): the
+// boot that backfills a legacy marker's work-store identity drops its own
+// report's basis right after the write (confirmInfraConvergence's own
+// comment on why: the basis it captured names a marker this process just
+// rewrote underneath it), so that boot publishes no lease at all. The very
+// next recheck tick captures a fresh basis and does publish one.
+func TestLegacyMarkerBackfillPublishesNoBootLease(t *testing.T) {
+	cityPath := t.TempDir()
+	writeScopeProjectID(t, cityPath, "prj-legacy")
+	cfg := infraSplitConfig(filepath.Join(cityPath, "store"))
+	stubInfraMigrationSource(t)
+	target := mustResolveInfraTarget(t, cityPath, cfg)
+
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, io.Discard)
+	if err != nil {
+		t.Fatalf("seeding the marker: %v", err)
+	}
+	_ = routes.close()
+
+	data, err := os.ReadFile(target.MarkerPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	// A legacy marker carries only the write-time line, no work-store
+	// identity line: what a pre-identity gc wrote.
+	if err := os.WriteFile(target.MarkerPath(), []byte(lines[len(lines)-1]+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	routes, err = storageBootGate(cityPath, cfg, "gc start", nil, io.Discard)
+	if err != nil {
+		t.Fatalf("the legacy-marker city refused: %v", err)
+	}
+	t.Cleanup(func() { _ = routes.close() })
+	if routes.bootVerdict.Outcome != infraMigrationConverged {
+		t.Fatalf("fixture: legacy-marker boot outcome = %v, want converged", routes.bootVerdict.Outcome)
+	}
+
+	publishBootContainmentLease(routes)
+	if lease := routes.lease.Load(); lease != nil {
+		t.Fatalf("a legacy-marker backfill boot published a lease: %+v (n3)", lease)
+	}
+
+	s := newStrandRecheck(routes, cityPath, events.NewFake(), io.Discard, "gc start")
+	if s == nil {
+		t.Fatal("no recheck for a converged city")
+	}
+	s.tick()
+	if routes.lease.Load() == nil {
+		t.Fatal("the first recheck tick after a legacy-marker backfill published no lease")
+	}
+}
+
+// TestStrandRecheckWithdrawsStaleLeaseWhenTheBasisCaptureFails is round 2's
+// SHOULD A, reviewer probe R6: a definitive tick whose basis capture failed
+// gets no lease from newContainmentLease (nil), and publishLease must store
+// that nil rather than silently leave an earlier, now possibly wrong,
+// converged lease being served.
+func TestStrandRecheckWithdrawsStaleLeaseWhenTheBasisCaptureFails(t *testing.T) {
+	cityPath, cfg, source, target := convergedInfraCity(t)
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, io.Discard)
+	if err != nil {
+		t.Fatalf("the converged city refused: %v", err)
+	}
+	t.Cleanup(func() { _ = routes.close() })
+
+	s := newStrandRecheck(routes, cityPath, events.NewFake(), io.Discard, "gc start")
+	if s == nil {
+		t.Fatal("no recheck for a converged city")
+	}
+	s.tick()
+	if routes.lease.Load() == nil {
+		t.Fatal("fixture: the first tick on a converged city published no lease")
+	}
+
+	// Make the basis capture fail (no marker to hash) and, independently,
+	// give the recheck a real stranded write plus an unfinished clear, so
+	// the report that comes back is still DEFINITIVE — not uncheckable,
+	// which already withdraws the lease on its own path (tick's standing-
+	// fault branch) and would not exercise publishLease at all.
+	if err := os.Remove(target.MarkerPath()); err != nil {
+		t.Fatal(err)
+	}
+	mustCreateInfraBead(t, source, beads.Bead{Title: "finding", Type: "task", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: "gc-1"}})
+	if err := writeInfraClearedNote(cityPath, infraClearedNote{Binding: target.Binding, Database: target.Database, Complete: false}); err != nil {
+		t.Fatal(err)
+	}
+
+	s.tick()
+	if lease := routes.lease.Load(); lease != nil {
+		t.Fatalf("a definitive tick whose basis capture failed still served a stale lease: %+v (SHOULD A)", lease)
 	}
 }
