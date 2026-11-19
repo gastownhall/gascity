@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -89,7 +90,7 @@ func (e *reconcilerTestEnv) assertResumedStaysUp(t *testing.T, id string, dops d
 
 func TestAttachAfterManagedSuspendStaysUp(t *testing.T) {
 	env, b, dops := heldDrainedSession(t)
-	mgr := session.NewManagerWithOptions(env.store, env.sp, session.WithClock(env.clk), session.WithCityPath(env.city))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(env.store), env.sp, session.WithClock(env.clk), session.WithCityPath(env.city))
 	if err := mgr.Attach(context.Background(), testActorIn(t, session.ActorOperator, env.city), b.ID, "test-cmd", runtime.Config{}); err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
@@ -156,7 +157,7 @@ func TestAttachAfterManagedSuspendSurvivesAMidResumeTick(t *testing.T) {
 			t.Errorf("mid-resume tick drain = %+v, want a user-hold drain (test premise)", ds)
 		}
 	}
-	mgr := session.NewManagerWithOptions(env.store, sp, session.WithClock(env.clk), session.WithCityPath(env.city))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(env.store), sp, session.WithClock(env.clk), session.WithCityPath(env.city))
 	if err := mgr.Attach(context.Background(), testActorIn(t, session.ActorOperator, env.city), b.ID, "test-cmd", runtime.Config{}); err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
@@ -190,7 +191,7 @@ func TestAttachSurvivesATickAndItsFollowUpDuringStart(t *testing.T) {
 			t.Error("the follow-up tick's stop killed the runtime the attach is starting")
 		}
 	}
-	mgr := session.NewManagerWithOptions(env.store, sp, session.WithClock(env.clk), session.WithCityPath(city))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(env.store), sp, session.WithClock(env.clk), session.WithCityPath(city))
 	if err := mgr.Attach(context.Background(), testActorIn(t, session.ActorOperator, city), b.ID, "test-cmd", runtime.Config{}); err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
@@ -241,7 +242,7 @@ func TestAttachSurvivesAStaleSnapshotDrainAck(t *testing.T) {
 					before, _ = env.store.Get(b.ID)
 				}
 			}
-			mgr := session.NewManagerWithOptions(env.store, sp, session.WithClock(env.clk), session.WithCityPath(city))
+			mgr := session.NewManagerWithOptions(beadstest.Sessions(env.store), sp, session.WithClock(env.clk), session.WithCityPath(city))
 			if err := mgr.Attach(context.Background(), testActorIn(t, session.ActorOperator, city), b.ID, "test-cmd", runtime.Config{}); err != nil {
 				t.Fatalf("Attach: %v", err)
 			}

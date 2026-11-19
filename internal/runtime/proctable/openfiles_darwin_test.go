@@ -17,3 +17,16 @@ func TestParseLsofNamePathsKeepsAbsolutePaths(t *testing.T) {
 		t.Fatalf("parseLsofNamePaths = %q, want %q", got, want)
 	}
 }
+
+// ProcessCwd reads a darwin process's working directory from lsof's field
+// output for its cwd descriptor, which must name exactly one absolute path.
+func TestParseLsofCwd(t *testing.T) {
+	if got, err := parseLsofCwd(4242, "p4242\nfcwd\nn/Users/user/city\n"); err != nil || got != "/Users/user/city" {
+		t.Fatalf("parseLsofCwd = %q, %v; want /Users/user/city", got, err)
+	}
+	for _, out := range []string{"", "p4242\nfcwd\nn->0x1234\n", "p4242\nfcwd\nn/a\nfcwd\nn/b\n"} {
+		if got, err := parseLsofCwd(4242, out); err == nil {
+			t.Fatalf("parseLsofCwd(%q) = %q, want an error", out, got)
+		}
+	}
+}

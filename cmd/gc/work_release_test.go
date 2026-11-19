@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -29,13 +30,79 @@ func TestReleasePoliciesTable(t *testing.T) {
 		releaseKilledSeat:     {statuses: []string{"open", "in_progress"}, startedKeeps: true, lane: laneDirect, seatRoute: true},
 		releaseDrainAck:       {statuses: []string{"in_progress"}, startedNamedKeeps: true, lane: laneCarried, seatRoute: true},
 		releaseCloseCascade:   {statuses: []string{"open", "in_progress"}, lane: laneCarried, seatRoute: true},
-		releaseStrandedRepair: {statuses: []string{"open", "in_progress"}, lane: laneCarried, seatRoute: true},
-		releaseOrphan:         {statuses: []string{"open", "in_progress"}, lane: laneDirect, pool: true},
+		releaseStrandedRepair: {statuses: []string{"open", "in_progress"}, lane: laneCarried, seatRoute: true, detached: true},
+		releaseOrphan:         {statuses: []string{"open", "in_progress"}, lane: laneDirect, pool: true, detached: true},
 		releaseRetired:        {statuses: []string{"open", "in_progress"}, lane: laneCarried, seatRoute: true},
 		releaseLadder:         {statuses: []string{"in_progress"}, lane: laneCarried, seatRoute: true},
+		releaseStalled:        {statuses: []string{"open", "in_progress"}, lane: laneCarried, seatRoute: true},
 	}
 	if !reflect.DeepEqual(releasePolicies, want) {
 		t.Fatalf("releasePolicies = %+v\nwant %+v", releasePolicies, want)
+	}
+}
+
+// No release path reopens a claim still carrying its gc.detached. The claim's
+// socket is gone, so a probe observes nothing: the paths with the detached
+// hold keep the claim, and every other path gives it back without probing
+// and clears gc.detached in the release write itself. Left on the reopened
+// bead, the probe would ride into the claim's next assignment, and the next
+// orphan or stranded pass would hold that claim for good on a socket no
+// probe can reach. The store fails a metadata-only write, so a clear that
+// rode a second write would leave the probe behind.
+func TestReleaseListedNeverReopensAClaimWithItsDetachedProbe(t *testing.T) {
+	spec := "tmux:" + filepath.Join(t.TempDir(), "gone") + ":soak-loop"
+	paths := []struct {
+		name string
+		why  releaseWhy
+	}{
+		{"killed seat", releaseKilledSeat},
+		{"drain-ack", releaseDrainAck},
+		{"close cascade", releaseCloseCascade},
+		{"stranded repair", releaseStrandedRepair},
+		{"orphan", releaseOrphan},
+		{"retired", releaseRetired},
+		{"ladder", releaseLadder},
+		{"stalled", releaseStalled},
+	}
+	if len(paths) != len(releasePolicies) {
+		t.Fatalf("%d paths for %d release policies: give the new policy a row", len(paths), len(releasePolicies))
+	}
+	resetDetachedProbeHoldLogForTest()
+	t.Cleanup(resetDetachedProbeHoldLogForTest)
+	for _, path := range paths {
+		t.Run(path.name, func(t *testing.T) {
+			p := releasePolicies[path.why]
+			store := &failSecondWriteStore{MemStore: beads.NewMemStore()}
+			// A started claim keeps the killed seat whole, so its claim is
+			// open; every other path gives back an in_progress claim.
+			status := "in_progress"
+			if p.startedKeeps {
+				status = "open"
+			}
+			claim := createWork(t, store, status, "worker-dead", map[string]string{
+				beadmeta.RoutedToMetadataKey: "worker",
+				detachedProbeMetadataKey:     spec,
+			})
+			store.updateCalls = 0
+
+			out := releaseListed([]seatWorkHit{{store: store, bead: claim}}, path.why, releaseSeat{}, testPoolReleaseConfig(), ReleaseOpts{})
+			got, err := store.Get(claim.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if p.detached {
+				if out.Why[claim.ID] != keptDetachedHeld || got.Assignee != "worker-dead" || got.Metadata[detachedProbeMetadataKey] != spec {
+					t.Fatalf("why=%q assignee=%q gc.detached=%q, want the claim held with its probe", out.Why[claim.ID], got.Assignee, got.Metadata[detachedProbeMetadataKey])
+				}
+				return
+			}
+			if len(out.Released) != 1 || store.updateCalls != 1 {
+				t.Fatalf("released %d claim(s) in %d write(s) (why %q), want it released in one write", len(out.Released), store.updateCalls, out.Why[claim.ID])
+			}
+			if got.Status != "open" || got.Assignee != "" || got.Metadata[detachedProbeMetadataKey] != "" {
+				t.Fatalf("status=%q assignee=%q gc.detached=%q, want reopened without gc.detached", got.Status, got.Assignee, got.Metadata[detachedProbeMetadataKey])
+			}
+		})
 	}
 }
 
@@ -472,6 +539,51 @@ func TestRetireRemovedNamedSessionAlertsOnKeptClaims(t *testing.T) {
 	}
 }
 
+// Retiring a removed named session releases the claims addressed to its
+// identity and runtime name that a lane serves, and keeps and alerts on the
+// identity's claim no lane serves: the retirement passes no preserve list,
+// so the stable addresses are its to release.
+func TestRetireRemovedConfiguredNamedSessionReleasesIdentityAssignedWork(t *testing.T) {
+	store := beads.NewMemStore()
+	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
+	b, err := store.Create(beads.Bead{Title: "retired reviewer", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
+		"session_name": "reviewer-runtime", "template": "worker", "state": "asleep",
+		namedSessionMetadataKey: "true", namedSessionIdentityMetadata: "reviewer", namedSessionModeMetadata: "on_demand",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	served := createWork(t, store, "in_progress", "reviewer", map[string]string{beadmeta.RoutedToMetadataKey: "worker"})
+	runtimeServed := createWork(t, store, "in_progress", "reviewer-runtime", map[string]string{beadmeta.RoutedToMetadataKey: "worker"})
+	unserved := createWork(t, store, "in_progress", "reviewer", map[string]string{beadmeta.RoutedToMetadataKey: "nowhere/lane"})
+	rec := events.NewFake()
+	sw := testSeatWork(t.TempDir(), servingCity("worker"), store, nil)
+	sw.alerts = &strandedClaimAlerts{rec: rec}
+	if !retireRemovedConfiguredNamedSessionBead(t.TempDir(), store, sw, runtime.NewFake(), b, now, io.Discard) {
+		t.Fatal("retire failed")
+	}
+	for _, w := range []beads.Bead{served, runtimeServed} {
+		got, err := store.Get(w.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Assignee != "" || got.Status != "open" || got.Metadata[beadmeta.RoutedToMetadataKey] != "worker" {
+			t.Errorf("served claim for %q = (assignee %q, status %q, route %q), want released to (\"\", open, worker)", w.Assignee, got.Assignee, got.Status, got.Metadata[beadmeta.RoutedToMetadataKey])
+		}
+	}
+	kept, err := store.Get(unserved.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kept.Assignee != "reviewer" || kept.Status != "in_progress" || kept.Metadata[beadmeta.StrandedSessionMetadataKey] != b.ID {
+		t.Errorf("unserved identity claim = (assignee %q, status %q, stranded_session %q), want kept on the retired seat and stamped %s", kept.Assignee, kept.Status, kept.Metadata[beadmeta.StrandedSessionMetadataKey], b.ID)
+	}
+	evts, _ := rec.List(events.Filter{Type: events.SessionStrandedClaims})
+	if len(evts) != 1 || !strings.Contains(string(evts[0].Payload), unserved.ID) || strings.Contains(string(evts[0].Payload), served.ID) {
+		t.Fatalf("session.stranded_claims = %+v, want one naming only %s", evts, unserved.ID)
+	}
+}
+
 // The killed seat's pre-gate costs no read for a seat whose open claims have
 // no route: laneDirect would keep them all (M26).
 func TestKilledSeatPreGateWantsARoutedClaim(t *testing.T) {
@@ -500,7 +612,7 @@ func TestOrphanCloseCompletesOverStrandedClaims(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newCloseOrphanEnv(t)
-			if err := beads.StampOpenedStore(env.store, "MemStore", gate.Auto, nil, nil); err != nil {
+			if err := beads.StampOpenedStore(env.store, "MemStore", gate.Auto, false, nil, nil); err != nil {
 				t.Fatal(err) // the stamp is a fenced write
 			}
 			if err := env.store.SetMetadataBatch(env.work.ID, tc.meta); err != nil {
@@ -537,7 +649,7 @@ func TestKilledSingletonSeatClosesOverAStrandedClaim(t *testing.T) {
 	agent := persistentWorker()
 	agent.MaxActiveSessions = intPtr(1)
 	e := newKilledSeatEnv(t, agent)
-	if err := beads.StampOpenedStore(e.mem, "MemStore", gate.Auto, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(e.mem, "MemStore", gate.Auto, false, nil, nil); err != nil {
 		t.Fatal(err) // the stamp is a fenced write
 	}
 	work := e.addWork(t, "open", e.seat.ID, map[string]string{beadmeta.RoutedToMetadataKey: "nowhere/lane"})
@@ -555,6 +667,7 @@ type detectorReadCounter struct {
 }
 
 func (s *detectorReadCounter) Get(id string) (beads.Bead, error) { s.gets++; return s.Store.Get(id) }
+
 func (s *detectorReadCounter) List(q beads.ListQuery) ([]beads.Bead, error) {
 	s.lists++
 	return s.Store.List(q)
@@ -833,7 +946,7 @@ func TestDeadAssigneeKeepLogDedupes(t *testing.T) {
 	for i, c := range []struct {
 		why  string
 		want bool
-	}{{"detached-alive", true}, {"detached-alive", false}, {"unserved-route", true}, {"", false}} {
+	}{{"detached-held", true}, {"detached-held", false}, {"unserved-route", true}, {"", false}} {
 		if got := l.log("w-1", "gc-dead", c.why); got != c.want {
 			t.Fatalf("step %d (%q): logged %t, want %t", i, c.why, got, c.want)
 		}
@@ -887,7 +1000,7 @@ func TestStrandedStampUnderConditionalWrites(t *testing.T) {
 	for _, mode := range []gate.Mode{gate.Require, gate.Auto} {
 		t.Run(string(mode), func(t *testing.T) {
 			store := beads.NewMemStore()
-			if err := beads.StampOpenedStore(store, "MemStore", mode, nil, nil); err != nil {
+			if err := beads.StampOpenedStore(store, "MemStore", mode, false, nil, nil); err != nil {
 				t.Fatal(err)
 			}
 			cfg := &config.City{Workspace: config.Workspace{Name: "probe-town"}, Agents: []config.Agent{persistentWorker()}}
@@ -926,7 +1039,7 @@ func TestStrandedStampUnderConditionalWrites(t *testing.T) {
 func incapableMemStore(t *testing.T, mode gate.Mode) *beads.MemStore {
 	t.Helper()
 	store := beads.NewMemStore()
-	if err := beads.StampOpenedStore(store, "MemStore", mode, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(store, "MemStore", mode, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	store.DisableConditionalWrites = true
@@ -1031,7 +1144,7 @@ func TestStampStrandedFencesANeverUpdatedSQLiteClaim(t *testing.T) {
 			t.Fatalf("OpenSQLiteStore: %v", err)
 		}
 		t.Cleanup(func() { _ = store.(*beads.SQLiteStore).CloseStore() })
-		if err := beads.StampOpenedStore(store, "SQLiteStore", gate.Auto, nil, nil); err != nil {
+		if err := beads.StampOpenedStore(store, "SQLiteStore", gate.Auto, false, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		return store
@@ -1076,7 +1189,7 @@ func TestStampStrandedFencesARevisionZeroClaim(t *testing.T) {
 			ID: "gc-1", Title: "claim", Type: "task", Status: "in_progress", Assignee: "repo/ada",
 			Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "nowhere/lane"},
 		}}, nil)
-		if err := beads.StampOpenedStore(store, "MemStore", gate.Auto, nil, nil); err != nil {
+		if err := beads.StampOpenedStore(store, "MemStore", gate.Auto, false, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		if got, err := store.Get("gc-1"); err != nil || got.Revision != 0 {

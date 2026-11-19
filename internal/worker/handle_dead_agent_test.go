@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -119,7 +120,7 @@ func TestSessionHandleNudgeOverACrashedAgent(t *testing.T) {
 	setup := func(t *testing.T, provider, transport string) (*SessionHandle, *runtime.Fake) {
 		store := beads.NewMemStore()
 		sp := runtime.NewFake()
-		manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
+		manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithCityPath(t.TempDir()))
 		b, err := store.Create(beads.Bead{Title: "w", Type: sessionpkg.BeadType, Labels: []string{sessionpkg.LabelSession}, Metadata: map[string]string{
 			"session_name": "s-dead", "template": "worker", "provider": provider, "work_dir": "/tmp", "command": provider, "state": string(sessionpkg.StateActive), "transport": transport,
 		}})

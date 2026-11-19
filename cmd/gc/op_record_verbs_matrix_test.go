@@ -138,9 +138,54 @@ type cliOpVerbCase struct {
 	// setup stubs the verb's collaborators; it may return the controller.
 	setup func(t *testing.T, c *cliOpCity) *cliOpController
 	run   func(c *cliOpCity, key string, asJSON bool, stdout, stderr io.Writer) int
+	// noJSON marks a verb with no --json: its refusals are checked by exit
+	// code and effect alone.
+	noJSON bool
+	// replayStdout, when set, is what a replay prints instead of the first
+	// run's output: a restart request's first run reports the poke, which a
+	// replay does not repeat.
+	replayStdout string
+	// schema is the verb's result schema path; empty is session <name>.
+	schema []string
+	// keyNamespace is the verb's --key namespace (cliOpRequest.keyNamespace):
+	// its op is stored under keyNamespace + --key.
+	keyNamespace string
 }
 
-// cliOpVerbCases are the five recorded verbs (DES-O0API §8.4).
+// resultSchema is the verb's result schema path.
+func (tc cliOpVerbCase) resultSchema() []string {
+	if tc.schema != nil {
+		return tc.schema
+	}
+	return []string{"session", tc.name}
+}
+
+// cliOpRestartToken is the instance token the restart verbs' row records and
+// their caller runs under (SG-3's fence).
+const cliOpRestartToken = "tok-cli-op-restart"
+
+// inSessionRestart runs a restart verb from inside the city's session: its
+// alias, runtime name and incarnation.
+func inSessionRestart(t *testing.T, c *cliOpCity) *cliOpController {
+	t.Helper()
+	t.Setenv("GC_ALIAS", killPokeSessionIdentity)
+	t.Setenv("GC_TMUX_SESSION", "")
+	t.Setenv("GC_SESSION_NAME", c.name)
+	t.Setenv("GC_INSTANCE_TOKEN", cliOpRestartToken)
+	return nil
+}
+
+// runHandoffVerb runs a self handoff as gc handoff [--key] [--json] would.
+func runHandoffVerb(_ *cliOpCity, key string, asJSON bool, stdout, stderr io.Writer) int {
+	out := stdout
+	if asJSON {
+		out = io.Discard
+	}
+	return cmdHandoff(handoffRun{args: []string{"context cycle"}, key: key, asJSON: asJSON, stdout: out, jsonOut: stdout, stderr: stderr})
+}
+
+// cliOpVerbCases are the recorded lifecycle verbs (DES-O0API §8.4), the
+// in-session restart requests (OJ-6) included.
 func cliOpVerbCases() []cliOpVerbCase {
 	return []cliOpVerbCase{
 		{
@@ -182,6 +227,22 @@ func cliOpVerbCases() []cliOpVerbCase {
 				return cmdSessionReset([]string{c.bead.ID}, key, stdout, stderr, asJSON)
 			},
 		},
+		{
+			name: "request-restart", kind: opjournal.KindRestart, policy: restartOpPolicy,
+			meta:  map[string]string{"instance_token": cliOpRestartToken},
+			setup: inSessionRestart, noJSON: true, replayStdout: "Restart requested.\n",
+			keyNamespace: legacyop.KeyNamespaceRequestRestart,
+			run: func(_ *cliOpCity, key string, _ bool, stdout, stderr io.Writer) int {
+				return cmdRuntimeRequestRestart(key, stdout, stderr)
+			},
+		},
+		{
+			name: "handoff", kind: opjournal.KindRestart, policy: restartOpPolicy,
+			meta:  map[string]string{"instance_token": cliOpRestartToken, namedSessionModeMetadata: "always"},
+			setup: inSessionRestart, replayStdout: "Handoff: restart requested.\n", schema: []string{"handoff"},
+			keyNamespace: legacyop.KeyNamespaceHandoff,
+			run:          runHandoffVerb,
+		},
 	}
 }
 
@@ -196,6 +257,27 @@ func stubSessionSuspendController(t *testing.T, managed bool) {
 	t.Cleanup(func() {
 		sessionSuspendManagedReconciler, sessionSuspendPokeController, sessionSuspendEnqueueController = oldManaged, oldPoke, oldEnqueue
 	})
+}
+
+// failureCode is a refused run's failure code: its --json envelope's, or,
+// for a verb with no --json, the code its stderr line implies.
+func (tc cliOpVerbCase) failureCode(t *testing.T, r cliOpVerbRun) string {
+	t.Helper()
+	if !tc.noJSON {
+		return cliOpFailureCode(t, []byte(r.stdout))
+	}
+	switch {
+	case strings.Contains(r.stderr, "in progress"):
+		return cliOpCodeInProgress
+	case strings.Contains(r.stderr, " closed failed"):
+		return cliOpCodeAlreadyFailed
+	case strings.Contains(r.stderr, "op journal cannot record this request"):
+		return cliOpCodeUnavailable
+	case strings.Contains(r.stderr, "invalid --key"):
+		return cliOpCodeInvalidKey
+	}
+	t.Fatalf("stderr %q names no op refusal", r.stderr)
+	return ""
 }
 
 // cliOpVerbRun is one verb run's result.
@@ -229,11 +311,11 @@ func (f *cliOpVerbFixture) run(key string, asJSON bool) cliOpVerbRun {
 	return cliOpVerbRun{code: code, stdout: stdout.String(), stderr: stderr.String()}
 }
 
-// proposeOpen writes an open op for the verb under key, as another CLI
+// proposeOpen writes an open op for the verb under --key key, as another CLI
 // process mid-run would leave it.
 func (f *cliOpVerbFixture) proposeOpen(t *testing.T, key string, at time.Time) opjournal.Op {
 	t.Helper()
-	return cliOpProposeOpen(t, f.h.opStore, f.tc.kind, f.c.bead.ID, key, f.tc.scope, at, f.tc.policy)
+	return cliOpProposeOpen(t, f.h.opStore, f.tc.kind, f.c.bead.ID, legacyop.NamespacedKey(f.tc.keyNamespace, key), f.tc.scope, at, f.tc.policy)
 }
 
 // TestSessionVerbOpOrderAtPropose: every verb proposes its op before its
@@ -314,7 +396,7 @@ func TestSessionResetOpRollbackOrderAtPropose(t *testing.T) {
 func TestSessionVerbOpOffWritesNothing(t *testing.T) {
 	for _, tc := range cliOpVerbCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			f := newCLIOpVerbFixture(t, tc, nil)
+			f := newCLIOpVerbFixture(t, tc, cliOpsOffEnv())
 			r := f.run("", true)
 			if r.code != 0 {
 				t.Fatalf("%s = %d; stderr=%s", tc.name, r.code, r.stderr)
@@ -324,6 +406,9 @@ func TestSessionVerbOpOffWritesNothing(t *testing.T) {
 			}
 			if ops := cliOpRows(t, f.h.opStore); len(ops) != 0 {
 				t.Fatalf("op rows = %+v, want none", ops)
+			}
+			if tc.noJSON {
+				return
 			}
 			m := cliOpJSON(t, []byte(r.stdout))
 			for _, k := range []string{"op_id", "key", "replayed"} {
@@ -348,8 +433,12 @@ func TestSessionVerbOpKeyReplaysWithoutActing(t *testing.T) {
 			after := f.c.snap(t)
 			second := f.run("replay-"+tc.name, false)
 			op := cliOpOnly(t, f.h.opStore)
-			if second.code != 0 || second.stdout != first.stdout {
-				t.Fatalf("replay = %d, stdout %q; want 0 and %q (stderr %s)", second.code, second.stdout, first.stdout, second.stderr)
+			wantStdout := first.stdout
+			if tc.replayStdout != "" {
+				wantStdout = tc.replayStdout
+			}
+			if second.code != 0 || second.stdout != wantStdout {
+				t.Fatalf("replay = %d, stdout %q; want 0 and %q (stderr %s)", second.code, second.stdout, wantStdout, second.stderr)
 			}
 			if !strings.Contains(second.stderr, "replayed op "+op.ID) {
 				t.Fatalf("replay stderr = %q, want it to name op %s", second.stderr, op.ID)
@@ -357,12 +446,15 @@ func TestSessionVerbOpKeyReplaysWithoutActing(t *testing.T) {
 			if d := f.c.snap(t).diff(after); d != "" {
 				t.Fatalf("a replay acted again: %s", d)
 			}
+			if tc.noJSON {
+				return
+			}
 			js := f.run("replay-"+tc.name, true)
 			m := cliOpJSON(t, []byte(js.stdout))
 			if js.code != 0 || m["replayed"] != true || m["op_id"] != op.ID || m["key"] != "replay-"+tc.name {
 				t.Fatalf("JSON replay = %d %v, want replayed op %s", js.code, m, op.ID)
 			}
-			validateJSONAgainstResultSchema(t, []string{"session", tc.name}, []byte(js.stdout))
+			validateJSONAgainstResultSchema(t, tc.resultSchema(), []byte(js.stdout))
 		})
 	}
 }
@@ -379,7 +471,7 @@ func TestSessionVerbOpInProgressRefuses(t *testing.T) {
 			if r.code != 1 {
 				t.Fatalf("%s = %d, want 1 for an op in progress; stderr=%s", tc.name, r.code, r.stderr)
 			}
-			if got := cliOpFailureCode(t, []byte(r.stdout)); got != cliOpCodeInProgress {
+			if got := tc.failureCode(t, r); got != cliOpCodeInProgress {
 				t.Fatalf("failure code = %q, want %s", got, cliOpCodeInProgress)
 			}
 			if d := f.c.snap(t).diff(before); d != "" {
@@ -405,7 +497,7 @@ func TestSessionVerbOpExpiredOpenOpReplaysFailed(t *testing.T) {
 			if r.code != 1 {
 				t.Fatalf("%s = %d, want 1; stderr=%s", tc.name, r.code, r.stderr)
 			}
-			if got := cliOpFailureCode(t, []byte(r.stdout)); got != cliOpCodeAlreadyFailed {
+			if got := tc.failureCode(t, r); got != cliOpCodeAlreadyFailed {
 				t.Fatalf("failure code = %q, want %s", got, cliOpCodeAlreadyFailed)
 			}
 			if d := f.c.snap(t).diff(before); d != "" {
@@ -448,7 +540,7 @@ func TestSessionVerbOpRequireRefusesAnIncapableStore(t *testing.T) {
 			if r.code != 1 {
 				t.Fatalf("%s = %d, want 1; stderr=%s", tc.name, r.code, r.stderr)
 			}
-			if got := cliOpFailureCode(t, []byte(r.stdout)); got != cliOpCodeUnavailable {
+			if got := tc.failureCode(t, r); got != cliOpCodeUnavailable {
 				t.Fatalf("failure code = %q, want %s", got, cliOpCodeUnavailable)
 			}
 			if d := f.c.snap(t).diff(before); d != "" {

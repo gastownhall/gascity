@@ -143,7 +143,9 @@ human_duration() {
 should_probe_sql=false
 is_external=false
 if is_local_dolt_host "$host"; then
-  pid=$(managed_runtime_listener_pid "$GC_DOLT_PORT" || true)
+  # The pid of a state file port resolution trusts names the server ahead
+  # of a lower pid that also listens on the port.
+  pid=$(managed_runtime_server_pid "$GC_DOLT_PORT" || true)
   if [ -n "$pid" ] || managed_runtime_tcp_reachable "$GC_DOLT_PORT"; then
     server_running=true
     [ -n "$pid" ] && server_pid="$pid"

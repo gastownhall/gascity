@@ -305,8 +305,8 @@ func TestPendingIdleSessionHasNothing(t *testing.T) {
 		t.Fatalf("Pending = %#v, %v; want nil, nil", pending, err)
 	}
 	err = f.p.Respond(f.name, runtime.InteractionResponse{RequestID: "acp-7", Action: "approve"})
-	if !errors.Is(err, runtime.ErrInteractionResponseInvalid) {
-		t.Fatalf("Respond with nothing outstanding = %v, want ErrInteractionResponseInvalid", err)
+	if !errors.Is(err, runtime.ErrInteractionGone) {
+		t.Fatalf("Respond with nothing outstanding = %v, want ErrInteractionGone", err)
 	}
 }
 
@@ -448,8 +448,8 @@ func TestPermissionRespondInvalidKeepsPending(t *testing.T) {
 		}
 	}
 	err := f.p.Respond(f.name, runtime.InteractionResponse{RequestID: strings.TrimSuffix(pending.RequestID, "7") + "99", Action: "approve"})
-	if !errors.Is(err, runtime.ErrInteractionResponseInvalid) {
-		t.Fatalf("Respond(mismatched id) = %v, want ErrInteractionResponseInvalid", err)
+	if !errors.Is(err, runtime.ErrInteractionGone) {
+		t.Fatalf("Respond(mismatched id) = %v, want ErrInteractionGone", err)
 	}
 
 	still, err := f.p.Pending(f.name)
@@ -577,8 +577,8 @@ func TestPermissionStaleRequestIDRejectedAfterRestart(t *testing.T) {
 	}
 
 	err := f.p.Respond(f.name, runtime.InteractionResponse{RequestID: stale.RequestID, Action: "approve"})
-	if !errors.Is(err, runtime.ErrInteractionResponseInvalid) {
-		t.Fatalf("Respond(stale RequestID) = %v, want ErrInteractionResponseInvalid", err)
+	if !errors.Is(err, runtime.ErrInteractionGone) {
+		t.Fatalf("Respond(stale RequestID) = %v, want ErrInteractionGone", err)
 	}
 	still, err := f.p.Pending(f.name)
 	if err != nil || still == nil || still.RequestID != fresh.RequestID {

@@ -9,13 +9,13 @@ import (
 // ExactMetadataSessionCandidates returns session beads matching any exact
 // metadata filter. Each filter must contain exactly one key/value pair; empty
 // filters are ignored. Results are deduplicated by bead ID in query order.
-func ExactMetadataSessionCandidates(store beads.Store, includeClosed bool, filters ...map[string]string) ([]beads.Bead, error) {
+func ExactMetadataSessionCandidates(store beads.SessionStore, includeClosed bool, filters ...map[string]string) ([]beads.Bead, error) {
 	return exactMetadataSessionCandidates(store, includeClosed, "", filters...)
 }
 
 // ExactMetadataSessionCandidatesWithStatus returns session beads matching any
 // exact metadata filter and the requested bead status.
-func ExactMetadataSessionCandidatesWithStatus(store beads.Store, status string, filters ...map[string]string) ([]beads.Bead, error) {
+func ExactMetadataSessionCandidatesWithStatus(store beads.SessionStore, status string, filters ...map[string]string) ([]beads.Bead, error) {
 	return exactMetadataSessionCandidates(store, false, strings.TrimSpace(status), filters...)
 }
 
@@ -25,7 +25,7 @@ func ExactMetadataSessionCandidatesWithStatus(store beads.Store, status string, 
 // escapes. It shares the dedup / query order / IsSessionBeadOrRepairable
 // semantics of ExactMetadataSessionCandidates. It is the typed feed for the
 // named-session retire lane, which needs only Info fields per candidate.
-func ExactMetadataSessionCandidatesInfo(store beads.Store, includeClosed bool, filters ...map[string]string) ([]Info, error) {
+func ExactMetadataSessionCandidatesInfo(store beads.SessionStore, includeClosed bool, filters ...map[string]string) ([]Info, error) {
 	candidates, err := exactMetadataSessionCandidates(store, includeClosed, "", filters...)
 	if err != nil {
 		return nil, err
@@ -37,8 +37,8 @@ func ExactMetadataSessionCandidatesInfo(store beads.Store, includeClosed bool, f
 	return out, nil
 }
 
-func exactMetadataSessionCandidates(store beads.Store, includeClosed bool, status string, filters ...map[string]string) ([]beads.Bead, error) {
-	if store == nil {
+func exactMetadataSessionCandidates(store beads.SessionStore, includeClosed bool, status string, filters ...map[string]string) ([]beads.Bead, error) {
+	if store == (beads.SessionStore{}) {
 		return nil, nil
 	}
 	seenQueries := make(map[string]bool, len(filters))

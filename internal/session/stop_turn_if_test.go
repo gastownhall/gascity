@@ -118,12 +118,17 @@ func newProtocolTurnSession(t *testing.T, turns ...string) (*Manager, *runtime.F
 }
 
 // assertTurnInterruptUnknown asserts err is unknown (runtime.ErrRuntimeUnavailable)
-// and in no other class a caller tells apart.
-func assertTurnInterruptUnknown(t *testing.T, err error) {
+// and in no other class a caller tells apart; maybeSent says whether it is
+// unknown whether the request reached the runtime (ErrInterruptOutcomeUnknown)
+// or nothing was sent.
+func assertTurnInterruptUnknown(t *testing.T, err error, maybeSent bool) {
 	t.Helper()
 	if !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrTurnNotEnded) ||
-		errors.Is(err, runtime.ErrTurnNotCurrent) {
+		errors.Is(err, runtime.ErrTurnNotCurrent) || errors.Is(err, runtime.ErrSessionNotFound) {
 		t.Fatalf("InterruptTurn = %v, want ErrRuntimeUnavailable alone", err)
+	}
+	if got := errors.Is(err, ErrInterruptOutcomeUnknown); got != maybeSent {
+		t.Fatalf("InterruptTurn = %v wraps ErrInterruptOutcomeUnknown %v, want %v", err, got, maybeSent)
 	}
 }
 
@@ -144,7 +149,7 @@ func TestManagerInterruptTurn(t *testing.T) {
 	t.Run("current turn settles", func(t *testing.T) {
 		mgr, sp, info := newProtocolTurnSession(t, "t1", "")
 		sp.FencedTurnInterrupts = true
-		ack, err := mgr.InterruptTurn(context.Background(), info.ID, "t1")
+		ack, _, err := mgr.InterruptTurn(context.Background(), info.ID, "t1", nil)
 		if err != nil || !ack.Fenced {
 			t.Fatalf("InterruptTurn = %+v, %v; want a fenced, settled interrupt", ack, err)
 		}
@@ -154,7 +159,7 @@ func TestManagerInterruptTurn(t *testing.T) {
 	})
 	t.Run("stale turn sends nothing", func(t *testing.T) {
 		mgr, sp, info := newProtocolTurnSession(t, "t2")
-		_, err := mgr.InterruptTurn(context.Background(), info.ID, "t1")
+		_, _, err := mgr.InterruptTurn(context.Background(), info.ID, "t1", nil)
 		var nc *runtime.TurnNotCurrentError
 		if !errors.As(err, &nc) || nc.Current.TurnID != "t2" {
 			t.Fatalf("InterruptTurn(stale) = %v, want *TurnNotCurrentError reading t2", err)
@@ -165,34 +170,39 @@ func TestManagerInterruptTurn(t *testing.T) {
 	})
 	t.Run("not ended", func(t *testing.T) {
 		mgr, _, info := newProtocolTurnSession(t, "t1")
-		if _, err := mgr.InterruptTurn(context.Background(), info.ID, "t1"); !errors.Is(err, runtime.ErrTurnNotEnded) {
+		if _, _, err := mgr.InterruptTurn(context.Background(), info.ID, "t1", nil); !errors.Is(err, runtime.ErrTurnNotEnded) {
 			t.Fatalf("InterruptTurn(never ends) = %v, want ErrTurnNotEnded", err)
 		}
 	})
 	t.Run("dispatch failure is unknown", func(t *testing.T) {
 		// A runtime's own errors name no class: a T3 RPC that failed, an
-		// ACP read's bare ctx error. Each is unknown, and only that.
+		// ACP read's bare ctx error, an ACP owner whose answer never came.
+		// Each is unknown, and only that, and may have reached the runtime
+		// (TurnFenceProvider.InterruptTurn's rule).
 		for name, dispatchErr := range map[string]error{
 			"rpc error":       errors.New("t3 rpc orchestration.dispatchCommand: connection reset by peer"),
 			"bare ctx error":  context.Canceled,
 			"already unknown": fmt.Errorf("bridge: %w", runtime.ErrRuntimeUnavailable),
+			"answer timed out": fmt.Errorf("%w: asking the owner of %q: %w", runtime.ErrRuntimeUnavailable, "s",
+				errors.New("read unix ->@acp: i/o timeout")),
 		} {
 			t.Run(name, func(t *testing.T) {
 				mgr, sp, info := newProtocolTurnSession(t, "t1")
 				sp.InterruptTurnErrors = map[string]error{info.SessionName: dispatchErr}
-				_, err := mgr.InterruptTurn(context.Background(), info.ID, "t1")
-				assertTurnInterruptUnknown(t, err)
+				_, _, err := mgr.InterruptTurn(context.Background(), info.ID, "t1", nil)
+				assertTurnInterruptUnknown(t, err, true)
 			})
 		}
 	})
 	t.Run("a ctx ended before the dispatch sends nothing", func(t *testing.T) {
 		// The lock is free, so InterruptTurn takes it although ctx ended:
-		// nothing is dispatched, and the result is unknown.
+		// nothing is dispatched, so the error is unavailable, and not
+		// ErrInterruptOutcomeUnknown.
 		mgr, sp, info := newProtocolTurnSession(t, "t1", "")
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		_, err := mgr.InterruptTurn(ctx, info.ID, "t1")
-		assertTurnInterruptUnknown(t, err)
+		_, _, err := mgr.InterruptTurn(ctx, info.ID, "t1", nil)
+		assertTurnInterruptUnknown(t, err, false)
 		if got := turnFenceCalls(sp); len(got) != 0 {
 			t.Fatalf("calls after ctx ended: %v", got)
 		}
@@ -202,7 +212,7 @@ func TestManagerInterruptTurn(t *testing.T) {
 		if err := mgr.store.SetMetadata(info.ID, "state", string(StateSuspended)); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := mgr.InterruptTurn(context.Background(), info.ID, "t1"); !errors.Is(err, runtime.ErrTurnNotCurrent) {
+		if _, _, err := mgr.InterruptTurn(context.Background(), info.ID, "t1", nil); !errors.Is(err, runtime.ErrTurnNotCurrent) {
 			t.Fatalf("InterruptTurn(suspended) = %v, want ErrTurnNotCurrent", err)
 		}
 		if got := turnFenceCalls(sp); len(got) != 0 {
@@ -213,7 +223,7 @@ func TestManagerInterruptTurn(t *testing.T) {
 		sp := runtime.NewFake()
 		mgr, info, _ := newFencedStopSessionOn(t, runtime.FullFake{Fake: sp}, sp, "claude", nil, runtime.TurnInterruptUnsupported)
 		sp.TurnScripts = map[string][]string{info.SessionName: {"t1"}}
-		if _, err := mgr.InterruptTurn(context.Background(), info.ID, "t1"); !errors.Is(err, ErrTurnInterruptUnsupported) {
+		if _, _, err := mgr.InterruptTurn(context.Background(), info.ID, "t1", nil); !errors.Is(err, ErrTurnInterruptUnsupported) {
 			t.Fatalf("InterruptTurn(unsupported) = %v, want ErrTurnInterruptUnsupported", err)
 		}
 		if got := turnFenceCalls(sp); len(got) != 0 {
@@ -226,7 +236,7 @@ func TestManagerInterruptTurn(t *testing.T) {
 		sp := runtime.NewFake()
 		mgr, info, _ := newFencedStopSessionOn(t, runtime.FullFake{Fake: sp}, sp, "claude", nil, runtime.TurnInterruptKeystroke)
 		sp.TurnScripts = map[string][]string{info.SessionName: {"t1", ""}}
-		if _, err := mgr.InterruptTurn(context.Background(), info.ID, "t1"); err != nil {
+		if _, _, err := mgr.InterruptTurn(context.Background(), info.ID, "t1", nil); err != nil {
 			t.Fatalf("InterruptTurn(keystroke mode) = %v, want nil", err)
 		}
 		if got, want := turnFenceCalls(sp), []string{"InterruptTurn(t1):sent", "WaitTurnEnded"}; !slices.Equal(got, want) {
@@ -235,7 +245,7 @@ func TestManagerInterruptTurn(t *testing.T) {
 	})
 	t.Run("runtime without a turn fence is unsupported", func(t *testing.T) {
 		mgr, sp, info, _ := newFencedStopSession(t, "claude", nil, runtime.TurnInterruptProtocol)
-		if _, err := mgr.InterruptTurn(context.Background(), info.ID, "t1"); !errors.Is(err, runtime.ErrTurnIdentityUnsupported) {
+		if _, _, err := mgr.InterruptTurn(context.Background(), info.ID, "t1", nil); !errors.Is(err, runtime.ErrTurnIdentityUnsupported) {
 			t.Fatalf("InterruptTurn(no fence) = %v, want ErrTurnIdentityUnsupported", err)
 		}
 		if sent := inputCalls(sp.SnapshotCalls(), info.SessionName); len(sent) != 0 {
@@ -457,8 +467,9 @@ func TestStopTurnGoneAtTheKeysWaitsForNothing(t *testing.T) {
 // Kills a follow-up interrupt sent on the first check alone: a soft-escape
 // family's Ctrl-C fallback interrupts whatever turn runs when it lands, so
 // a checked stop sends it only once the check passes again. A refusal sends
-// nothing more and fails the stop as sent but not seen to end, the refusal
-// in its text only.
+// nothing more: one saying the turn left Current is the turn's end, and any
+// other fails the stop as sent but not seen to end, the refusal in its text
+// only.
 func TestStopTurnIfChecksAgainBeforeTheFallback(t *testing.T) {
 	for _, fam := range []string{"codex", "kimi"} {
 		t.Run(fam+"/check passes again", func(t *testing.T) {
@@ -474,22 +485,34 @@ func TestStopTurnIfChecksAgainBeforeTheFallback(t *testing.T) {
 				t.Fatalf("check ran %d times, want 2: before the Escape and before the fallback", checks)
 			}
 		})
-		t.Run(fam+"/check refuses the fallback", func(t *testing.T) {
-			mgr, sp, info, _ := newFencedStopSession(t, fam, nil, runtime.TurnInterruptKeystroke)
-			checks := 0
-			err := mgr.StopTurnIf(context.Background(), info.ID, func() error {
-				if checks++; checks > 1 {
-					return &runtime.TurnNotCurrentError{Session: info.SessionName, TurnID: "t1"}
+		for _, refusal := range []struct {
+			name  string
+			err   error
+			ended bool
+		}{
+			{"the turn left current", &runtime.TurnNotCurrentError{Session: "s", TurnID: "t1"}, true},
+			{"the check could not answer", fmt.Errorf("checking turn %q: %w: %w", "t1", runtime.ErrRuntimeUnavailable, context.DeadlineExceeded), false},
+		} {
+			t.Run(fam+"/check refuses the fallback: "+refusal.name, func(t *testing.T) {
+				mgr, sp, info, _ := newFencedStopSession(t, fam, nil, runtime.TurnInterruptKeystroke)
+				checks := 0
+				err := mgr.StopTurnIf(context.Background(), info.ID, func() error {
+					if checks++; checks > 1 {
+						return refusal.err
+					}
+					return nil
+				})
+				switch {
+				case refusal.ended && err != nil:
+					t.Fatalf("StopTurnIf(fallback refused, turn ended) = %v, want nil", err)
+				case !refusal.ended && (!errors.Is(err, runtime.ErrTurnNotEnded) || errors.Is(err, runtime.ErrRuntimeUnavailable)):
+					t.Fatalf("StopTurnIf(fallback refused) = %v, want ErrTurnNotEnded alone: the Escape was sent", err)
 				}
-				return nil
+				if got, want := callMethods(inputCalls(sp.SnapshotCalls(), info.SessionName)), []string{"SendKeys(Escape)"}; !slices.Equal(got, want) {
+					t.Fatalf("sent %v, want %v: no fallback after a refusal", got, want)
+				}
 			})
-			if !errors.Is(err, runtime.ErrTurnNotEnded) || errors.Is(err, runtime.ErrTurnNotCurrent) {
-				t.Fatalf("StopTurnIf(fallback refused) = %v, want ErrTurnNotEnded alone: the Escape was sent", err)
-			}
-			if got, want := callMethods(inputCalls(sp.SnapshotCalls(), info.SessionName)), []string{"SendKeys(Escape)"}; !slices.Equal(got, want) {
-				t.Fatalf("sent %v, want %v: no fallback after a refusal", got, want)
-			}
-		})
+		}
 	}
 }
 
@@ -563,7 +586,7 @@ func TestManagerInterruptTurnEdges(t *testing.T) {
 		mgr, info, _ := newFencedStopSessionOn(t, rt, sp, "claude", nil, runtime.TurnInterruptProtocol)
 		rt.id = info.ID
 		sp.TurnScripts = map[string][]string{info.SessionName: {"t1", ""}}
-		if _, err := mgr.InterruptTurn(context.Background(), info.ID, "t1"); err != nil {
+		if _, _, err := mgr.InterruptTurn(context.Background(), info.ID, "t1", nil); err != nil {
 			t.Fatalf("InterruptTurn = %v", err)
 		}
 		if !errors.Is(lockErr, ErrSessionMutationBusy) {
@@ -580,8 +603,9 @@ func TestManagerInterruptTurnEdges(t *testing.T) {
 		defer close(release)
 		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 		defer cancel()
-		if _, err := mgr.InterruptTurn(ctx, info.ID, "t1"); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
-			t.Fatalf("InterruptTurn(lock held past ctx) = %v, want ErrRuntimeUnavailable", err)
+		_, _, err := mgr.InterruptTurn(ctx, info.ID, "t1", nil)
+		if !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, ErrInterruptOutcomeUnknown) {
+			t.Fatalf("InterruptTurn(lock held past ctx) = %v, want ErrRuntimeUnavailable, nothing sent", err)
 		}
 		if got := turnFenceCalls(sp); len(got) != 0 {
 			t.Fatalf("calls without the lock: %v", got)
@@ -590,14 +614,14 @@ func TestManagerInterruptTurnEdges(t *testing.T) {
 	t.Run("a backend without the fence is unsupported", func(t *testing.T) {
 		mgr, sp, info := newProtocolTurnSession(t, "t1")
 		sp.InterruptTurnErrors = map[string]error{info.SessionName: runtime.ErrInteractionUnsupported}
-		if _, err := mgr.InterruptTurn(context.Background(), info.ID, "t1"); !errors.Is(err, runtime.ErrTurnIdentityUnsupported) {
+		if _, _, err := mgr.InterruptTurn(context.Background(), info.ID, "t1", nil); !errors.Is(err, runtime.ErrTurnIdentityUnsupported) {
 			t.Fatalf("InterruptTurn(backend unsupported) = %v, want ErrTurnIdentityUnsupported", err)
 		}
 	})
 	t.Run("a gone runtime is not current", func(t *testing.T) {
 		mgr, sp, info := newProtocolTurnSession(t, "t1")
 		sp.TurnReadErrors = map[string][]error{info.SessionName: {runtime.ErrSessionNotFound}}
-		_, err := mgr.InterruptTurn(context.Background(), info.ID, "t1")
+		_, _, err := mgr.InterruptTurn(context.Background(), info.ID, "t1", nil)
 		var nc *runtime.TurnNotCurrentError
 		if !errors.As(err, &nc) || errors.Is(err, runtime.ErrSessionNotFound) {
 			t.Fatalf("InterruptTurn(runtime gone) = %v, want *TurnNotCurrentError", err)
@@ -608,17 +632,15 @@ func TestManagerInterruptTurnEdges(t *testing.T) {
 		// not read "maybe sent" as "nothing sent".
 		mgr, sp, info := newProtocolTurnSession(t, "t1")
 		sp.InterruptTurnErrors = map[string]error{info.SessionName: fmt.Errorf("%w: %w", runtime.ErrRuntimeUnavailable, runtime.ErrSessionNotFound)}
-		_, err := mgr.InterruptTurn(context.Background(), info.ID, "t1")
-		if !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrTurnNotCurrent) || errors.Is(err, runtime.ErrSessionNotFound) {
-			t.Fatalf("InterruptTurn(gone after an attempt) = %v, want ErrRuntimeUnavailable alone", err)
-		}
+		_, _, err := mgr.InterruptTurn(context.Background(), info.ID, "t1", nil)
+		assertTurnInterruptUnknown(t, err, true)
 	})
 	t.Run("a failed wait is not ended, and only that", func(t *testing.T) {
 		sp := runtime.NewFake()
 		rt := lockProbingTurns{FullFake: runtime.FullFake{Fake: sp}, waitErr: fmt.Errorf("bridge: %w", runtime.ErrRuntimeUnavailable)}
 		mgr, info, _ := newFencedStopSessionOn(t, rt, sp, "claude", nil, runtime.TurnInterruptProtocol)
 		sp.TurnScripts = map[string][]string{info.SessionName: {"t1"}}
-		_, err := mgr.InterruptTurn(context.Background(), info.ID, "t1")
+		_, _, err := mgr.InterruptTurn(context.Background(), info.ID, "t1", nil)
 		if !errors.Is(err, runtime.ErrTurnNotEnded) || errors.Is(err, runtime.ErrRuntimeUnavailable) {
 			t.Fatalf("InterruptTurn(wait fails) = %v, want ErrTurnNotEnded alone: it was sent", err)
 		}

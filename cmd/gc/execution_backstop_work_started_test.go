@@ -148,3 +148,63 @@ func TestExecutionBackstopReadsTheWorkStartedCell(t *testing.T) {
 		})
 	}
 }
+
+// TestExecutionBackstopAnAnswerToTheLastNudgeIsNotDrained (ga-uns4sw): a seat
+// that answers its last claim nudge by running its claim hook lands its
+// work_started entry inside that nudge's backoff. The entry vetoes the drain,
+// so the seat is never drained or reported stalled, and once the backoff has
+// passed it is held as executing.
+func TestExecutionBackstopAnAnswerToTheLastNudgeIsNotDrained(t *testing.T) {
+	const (
+		token    = "incarnation-2"
+		storeRef = "rig:gascity"
+	)
+	f := newExecutionBackstopFixture(t)
+	f.workStoreRef = "gascity" // AssignedWorkStoreRefs' bare rig name
+	f.setSessionMeta(t, map[string]string{
+		"instance_token": token,
+		"generation":     "2",
+		"last_woke_at":   f.now.Add(-20 * time.Minute).Format(time.RFC3339),
+	})
+	driveToLastNudge(t, f)
+	lastNudge := f.now
+
+	// The next pass finds the last nudge unanswered.
+	f.now = lastNudge.Add(10 * time.Second)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 0 || f.stalledEvents() != 0 {
+		t.Fatalf("a pass 10s after the last nudge: drains %v, step_stalled %d; want neither; stdout=%s",
+			f.drained, f.stalledEvents(), f.stdout.String())
+	}
+
+	// The seat runs its claim hook: work_started is CASOnly, so seed it by a
+	// CAS, as the hook writes it.
+	at := lastNudge.Add(20 * time.Second).UTC().Format(time.RFC3339)
+	raw := fmt.Sprintf(`{"v":1,"claims":[{"store":%q,"bead":%q,"gen":2,"at":%q,"via":"claim"}]}`, storeRef, f.work.ID, at)
+	if ok, err := f.store.(*beads.MemStore).CompareAndSetMetadataKey(f.session.ID, sessionpkg.WorkStartedKey, "", raw); err != nil || !ok {
+		t.Fatalf("seeding %s: ok=%v err=%v", sessionpkg.WorkStartedKey, ok, err)
+	}
+
+	for _, after := range []time.Duration{idleClaimNudgeBackoff - time.Second, idleClaimNudgeBackoff} {
+		f.now = lastNudge.Add(after)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+		if len(f.drained) != 0 || f.stalledEvents() != 0 {
+			t.Fatalf("%s after the last nudge, answered at +20s: drains %v, step_stalled %d; want neither; stdout=%s",
+				after, f.drained, f.stalledEvents(), f.stdout.String())
+		}
+	}
+	if got := f.sessionMeta(t, executionClaimHoldKey); !strings.HasPrefix(got, executionHoldExecuting) {
+		t.Fatalf("hold breadcrumb once the last backoff passed = %q, want %s", got, executionHoldExecuting)
+	}
+
+	// Quiet through every later window: still held, never drained.
+	f.tickStale(t)
+	if len(f.drained) != 0 || f.stalledEvents() != 0 {
+		t.Fatalf("long after the last nudge: drains %v, step_stalled %d; want neither", f.drained, f.stalledEvents())
+	}
+	if got := f.sessionMeta(t, executionClaimHoldKey); !strings.HasPrefix(got, executionHoldExecuting) {
+		t.Fatalf("hold breadcrumb long after the last nudge = %q, want %s", got, executionHoldExecuting)
+	}
+}

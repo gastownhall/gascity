@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -204,7 +205,7 @@ func TestLifecycleVerbsRefuseAnActorWithoutCityOrKind(t *testing.T) {
 func TestQueueForEachActor(t *testing.T) {
 	held := map[string]string{"state": string(StateAsleep), "held_until": "2099-01-01T00:00:00Z", "sleep_intent": "user-hold"}
 	unheld := map[string]string{"state": string(StateAsleep)}
-	mgr := NewManagerWithOptions(nil, runtime.NewFake())
+	mgr := NewManagerWithOptions(beads.SessionStore{}, runtime.NewFake())
 	for _, c := range []struct {
 		kind               ActorKind
 		queueHeld, queueUn bool

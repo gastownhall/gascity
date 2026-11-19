@@ -13,8 +13,9 @@ package main
 // The observer runs only while its conversation's worker does, and it keeps
 // that worker serving while observations are pending (DES-O1 §7.1): the
 // watch's first update, a turn the cells show running while the session's
-// runtime runs, a turn the lane's own content take is expected to start, and
-// an update that could not be folded and waits for its retry. The worker starts the watch only after a pass that
+// runtime runs, a turn the lane's own content take or deliver-now unit is
+// expected to start, and an update that could not be folded and waits for
+// its retry. The worker starts the watch only after a pass that
 // succeeded and found lane work, or with a kind listed in
 // [ops] authoritative, so with the list empty a conversation with no lane op
 // gets no observer. A new worker's observer rebuilds its tracking from the
@@ -371,13 +372,13 @@ func (e laneTurnExpect) metBy(obs opjournal.TurnObservation, next opjournal.Turn
 	return met
 }
 
-// expect records that a content take whose pass began at from ran an effect,
-// whose turn the observer waits for (DES-O1 §7.7): the worker keeps serving
-// until a read made from from shows a turn the take could have started
-// running or journaled (laneTurnExpect.started), or for laneTurnExpectFor
-// after the pass returned, now. A turn the cells already named is no such
-// turn, nor one the source started before from, so an earlier turn's end read
-// after the take does not end the wait.
+// expect records that a content take, or a deliver-now unit, whose pass began
+// at from ran an effect, whose turn the observer waits for (DES-O1 §7.7): the
+// worker keeps serving until a read made from from shows a turn the take could
+// have started running or journaled (laneTurnExpect.started), or for
+// laneTurnExpectFor after the pass returned, now. A turn the cells already
+// named is no such turn, nor one the source started before from, so an
+// earlier turn's end read after the take does not end the wait.
 func (o *laneTurnObserver) expect(from time.Time) {
 	o.expected = laneTurnExpect{From: from, Until: o.deps.now().Add(laneTurnExpectFor), Blind: !o.folded}
 	if o.folded {
@@ -477,12 +478,13 @@ func (o *laneTurnObserver) timerFired(ctx context.Context) {
 }
 
 // setInterrupting names the interrupt gc runs on a turn, so the fold
-// credits that turn's end to the op (X11 §5.4). The interrupt executor
-// (OJ-15) calls it before the effect and never clears it: the observer keeps
-// the ref until it folds that turn's end or a newer ref replaces it; a ref
-// whose turn no later fold names credits nothing. A ref without both an op
-// and a turn names nothing and changes nothing. A ref lost with its worker is recovered from the op rows
-// (laneTurnDeps.credits).
+// credits that turn's end to the op (X11 §5.4). No executor calls it yet
+// (ga-6plx6a): the interrupt executor (OJ-15) keeps its ref for its own
+// retries (laneInterrupts), and the fold credits an op from the op rows
+// (laneTurnDeps.credits). The observer keeps a ref it is given until it
+// folds that turn's end or a newer ref replaces it; a ref whose turn no
+// later fold names credits nothing. A ref without both an op and a turn
+// names nothing and changes nothing.
 func (o *laneTurnObserver) setInterrupting(ref opjournal.InterruptRef) {
 	if ref.Op == "" || ref.Turn == "" {
 		return
@@ -1143,10 +1145,10 @@ func (h *conversationLaneHost) newTurnObserver(conv string) *laneTurnObserver {
 			if h.turnHandle != nil {
 				return h.turnHandle(conv)
 			}
-			return workerHandleForSessionWithConfig(h.env.CityPath(), h.env.SessionsBeadStore().Store, h.env.SessionProvider(), h.env.Config(), conv)
+			return workerHandleForSessionWithConfig(h.env.CityPath(), h.env.Stores().Sessions().Store, h.env.SessionProvider(), h.env.Config(), conv)
 		},
 		generation: func() (laneTurnGeneration, error) {
-			live := sessionFrontDoor(laneLiveSessions{Store: h.env.SessionsBeadStore().Store})
+			live := sessionFrontDoor(laneLiveSessions{Store: h.env.Stores().Sessions().Store})
 			info, err := live.Get(conv)
 			switch {
 			case laneSessionGone(err), errors.Is(err, beads.ErrNotFound):
@@ -1161,7 +1163,7 @@ func (h *conversationLaneHost) newTurnObserver(conv string) *laneTurnObserver {
 			if err != nil {
 				return laneTurnRows{}, err
 			}
-			rows := laneLiveSessions{Store: h.env.SessionsBeadStore().Store}
+			rows := laneLiveSessions{Store: h.env.Stores().Sessions().Store}
 			batcher, ok := beads.GuardedBatcherFor(rows)
 			if !ok || batcher == nil {
 				return laneTurnRows{}, beads.ErrGuardedBatchUnsupported
@@ -1169,7 +1171,7 @@ func (h *conversationLaneHost) newTurnObserver(conv string) *laneTurnObserver {
 			return laneTurnRows{store: rows, batcher: batcher, prefix: st.Prefix()}, nil
 		},
 		running: func(context.Context) (bool, error) {
-			obs, err := workerObserveSessionTargetWithConfig(h.env.CityPath(), h.env.SessionsBeadStore().Store, h.env.SessionProvider(), h.env.Config(), conv)
+			obs, err := workerObserveSessionTargetWithConfig(h.env.CityPath(), h.env.Stores().Sessions().Store, h.env.SessionProvider(), h.env.Config(), conv)
 			switch {
 			case laneSessionGone(err):
 				return false, nil

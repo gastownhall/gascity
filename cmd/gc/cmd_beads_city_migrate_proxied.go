@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -573,7 +572,7 @@ func retireManagedDoltResidue(cityPath string, scope migrateProxiedScope) error 
 	}
 	// Only when nothing else lives there. The pack state dir is gc's, but it is
 	// not exclusively this pack's publication.
-	if err := os.Remove(layout.PackStateDir); err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, syscall.ENOTEMPTY) {
+	if err := os.Remove(layout.PackStateDir); err != nil && !errors.Is(err, os.ErrNotExist) && !fsys.IsDirNotEmpty(err) {
 		return fmt.Errorf("retire managed dolt pack state dir %s: %w", layout.PackStateDir, err)
 	}
 	return nil

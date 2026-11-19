@@ -69,8 +69,8 @@ type Spec struct {
 	Scopes []ScopeKind
 	// TurnScoped allows a turn on a session scope.
 	TurnScoped bool
-	// InteractionScoped requires an interaction (request id) on a session
-	// scope.
+	// InteractionScoped requires an interaction on a session scope: for a
+	// lane op the occurrence it answers, <request id>#<n> (RecordRaising).
 	InteractionScoped bool
 	// When lists the delivery modes a message may name; empty for every other
 	// kind.
@@ -129,7 +129,9 @@ var registry = []Spec{
 		DefaultScope: ScopeSession, Scopes: []ScopeKind{ScopeSession}, InteractionScoped: true,
 		PayloadRequired: true, PayloadAllowed: true,
 		StartWithin: time.Hour, FinishWithin: time.Hour + 5*time.Minute,
-		DefaultPolicy:       Policy{Guarantee: GuaranteeAtLeastOnce},
+		// A respond is at most once (validateRespondShape): a second attempt
+		// could answer a later, identical prompt.
+		DefaultPolicy:       Policy{Guarantee: GuaranteeAtMostOnce},
 		OnConversationClose: CloseRuleSkip,
 	},
 	{

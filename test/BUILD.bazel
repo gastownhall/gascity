@@ -24,6 +24,7 @@ test_suite(
     name = "integration_packages",
     tags = ["manual"],
     tests = [
+        "//cmd/gc-osc7501:gc-osc7501_test",
         "//cmd/gc-write-mint:gc-write-mint_test",
         "//cmd/gc:gc_integration_solo_tests",
         "//cmd/gc:gc_test",
@@ -46,6 +47,7 @@ test_suite(
         "//internal/storebinding/beadsworkspace:beadsworkspace_test",
         "//internal/storebinding:storebinding_test",
         "//test/containerhost:containerhost_test",
+        "//test/conversationlane:conversationlane_integration_solo_tests",
         "//test/conversationlane:conversationlane_test",
         "//test/dashport:dashport_test",
     ],

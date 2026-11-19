@@ -149,7 +149,7 @@ func TestAbandonedCreateSettlesAmbiguousWithToken(t *testing.T) {
 	if err := x.submit(rowKey{}, e); err != nil {
 		t.Fatal(err)
 	}
-	waitTimersAt(t, clk, plannerT0.Add(time.Minute), 2)
+	waitTimersAt(t, clk, plannerT0.Add(time.Minute), 1)
 	clk.Advance(time.Minute)
 	s := receive(t, posted)
 	if s.Outcome != settledAmbiguous || s.Token != "tok-1" || s.Seq != seq || s.Cause != causeDeadline {
@@ -189,7 +189,7 @@ func TestCreateAbandonedBeforeItsWriteStaysThrottled(t *testing.T) {
 	if err := x.submit(rowKey{}, e); err != nil {
 		t.Fatal(err)
 	}
-	waitTimersAt(t, clk, plannerT0.Add(time.Minute), 2)
+	waitTimersAt(t, clk, plannerT0.Add(time.Minute), 1)
 	clk.Advance(time.Minute)
 	s := receive(t, posted)
 	if s.Outcome != settledAmbiguous || s.BackoffKey != createBackoffKey(ident) || e.Latch.begin() {
@@ -483,7 +483,7 @@ func TestC07RefusalNamesTheFixForWhatTheStoresLack(t *testing.T) {
 		{"unfenced and blind", []v2StoreCapability{unfenced, blind}, "put the class on a store that fences and whose list reads carry revisions (SQLite or native Dolt)"},
 	} {
 		refusal := v2CapabilityRefusal(tc.caps)
-		if refusal == nil || !strings.Contains(refusal.Error(), "v2 never writes blind: "+tc.fix+", or remove") {
+		if refusal == nil || !strings.Contains(refusal.Error(), "v2 never writes blind: "+tc.fix+`, or set session_reconciler = "legacy"`) {
 			t.Errorf("%s: C0.7 = %v, want the fix %q", tc.name, refusal, tc.fix)
 		}
 	}
@@ -697,7 +697,7 @@ func primedCacheOver(t *testing.T, backing beads.Store) *beads.CachingStore {
 func fencingAtomicCloseStore(t *testing.T) beads.Store {
 	t.Helper()
 	store := beads.NewAtomicCloseMemStore()
-	if err := beads.StampOpenedStore(store, "MemStore", gate.Auto, nil, nil); err != nil {
+	if err := beads.StampOpenedStore(store, "MemStore", gate.Auto, false, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	return store
@@ -711,7 +711,7 @@ func TestDoctorC07ReadFiresNoDegradeEvent(t *testing.T) {
 	mem := beads.NewMemStore()
 	mem.DisableConditionalWrites = true
 	degraded := 0
-	if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, func(beads.ConditionalWritesDegrade) { degraded++ }, nil); err != nil {
+	if err := beads.StampOpenedStore(mem, "MemStore", gate.Auto, false, func(beads.ConditionalWritesDegrade) { degraded++ }, nil); err != nil {
 		t.Fatal(err)
 	}
 	caps := v2ClassStoreCapabilities(mem, mem, true)
@@ -733,7 +733,7 @@ func TestSessionReconcilerDoctorReportsC07(t *testing.T) {
 		name, mode string
 		want       doctor.CheckStatus
 	}{
-		{"legacy", "", doctor.StatusOK},
+		{"legacy", "legacy", doctor.StatusOK},
 		{"v2", "v2", doctor.StatusError},
 	} {
 		cfg := workerCity(1)

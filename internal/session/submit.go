@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -19,6 +18,8 @@ import (
 	"github.com/gastownhall/gascity/internal/nudgepoller"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/pidutil"
+	"github.com/gastownhall/gascity/internal/platform/filelock"
+	"github.com/gastownhall/gascity/internal/processgroup"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
@@ -229,6 +230,22 @@ func (m *Manager) submit(ctx context.Context, by Actor, id, message, resumeComma
 	return outcome, err
 }
 
+// QueueSubmit queues message for session id's next delivery boundary as a
+// user's submit (delivered as its prompt), sending nothing now. It is for a
+// message its caller has already accepted that the session cannot take yet,
+// such as a create's initial message to a session that came up waiting on a
+// pending interaction: the queue delivers it once the interaction is
+// answered.
+func (m *Manager) QueueSubmit(id, message string) error {
+	return withSessionMutationLock(id, func() error {
+		b, sessName, err := m.sessionBead(id)
+		if err != nil {
+			return err
+		}
+		return m.enqueueDeferredSubmitLocked(b, sessName, message, nudgequeue.SourceSubmit)
+	})
+}
+
 // pendingConversationRestart reports whether a fresh restart has been recorded
 // for this session but not yet carried out, so its live runtime — if any — is
 // the outgoing incarnation.
@@ -247,7 +264,12 @@ func (m *Manager) supportsFollowUpLocked(b beads.Bead) bool {
 // interruptAndSubmitLocked runs after submit's actor check. It reports
 // whether its send queued the message: a dead agent's (sendLocked, on
 // ensureDeliverable's fresh read) takes no interrupt keys and queues it for
-// the incarnation the controller's heal brings up.
+// the incarnation the controller's heal brings up, and a send refused
+// behind a pending interaction that opened after the session was prepared
+// for it is queued for after the interaction is answered. A preparation
+// that fails, or that a pending interaction holds off, is an error wrapping
+// ErrReplacementNotPrepared (prepareReplacementLocked): the interrupt was
+// sent, and the message is neither sent nor queued.
 func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config) (bool, error) {
 	// A row whose drain-ack stop is pending belongs to the controller's stop:
 	// no interrupt keys, no hard-restart stop (as ensureRunning refuses it).
@@ -294,13 +316,20 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id str
 			}
 			return false, err
 		}
-		return false, m.restartAndSendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
+		return m.restartAndSendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
 	}
 	interruptStartedAt := time.Now()
 	if err := m.stopTurnLocked(ctx, b, sessName, mode); err != nil {
 		return false, err
 	}
 	if err := m.waitForInterruptIdleLocked(ctx, b, sessName, mode, nil); err != nil {
+		if errors.Is(err, ErrPendingInteraction) {
+			// The interrupted session raised a dialog instead of settling
+			// (its program's own record says so, under program_status
+			// "on"): no more keys, no restart, and the message waits behind
+			// the dialog, as a refusal at the send below would.
+			return m.queueBehindPendingInteractionLocked(b, sessName, message, nudgequeue.SourceSubmit, false, err)
+		}
 		if mode == runtime.TurnInterruptProtocol {
 			// A protocol runtime's Stop may leave it running, so a restart
 			// would interrupt nothing and nudge the message into the turn.
@@ -311,7 +340,7 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id str
 		if stopErr := runtime.StopForCleanup(m.sp, sessName); stopErr != nil {
 			return false, fmt.Errorf("stopping session after idle timeout: %w", stopErr)
 		}
-		return false, m.restartAndSendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
+		return m.restartAndSendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
 	}
 	if err := m.waitForInterruptBoundaryLocked(ctx, b, sessName, interruptStartedAt); err != nil {
 		if mode == runtime.TurnInterruptProtocol {
@@ -320,40 +349,57 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id str
 		if stopErr := runtime.StopForCleanup(m.sp, sessName); stopErr != nil {
 			return false, fmt.Errorf("stopping session after interrupt boundary timeout: %w", stopErr)
 		}
-		return false, m.restartAndSendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
+		return m.restartAndSendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
 	}
-	if err := m.resetInterruptedTurnLocked(ctx, b, sessName); err != nil {
+	// The turn is interrupted now. A pending interaction that opened as it
+	// ended (the up-front refusal saw none) gets none of the preparation's
+	// keys, which would land in it, and the message is refused, not queued:
+	// a queued delivery would not prepare the session for it. One that
+	// opens after the preparation refuses the send below, and the prepared
+	// message is queued for after it is answered, never dropped.
+	if err := m.prepareReplacementLocked(ctx, b, id, sessName, mode); err != nil {
 		return false, err
 	}
-	if shouldClearInterruptedInputBeforeSubmit(b) && mode == runtime.TurnInterruptKeystroke {
-		if err := m.clearInterruptedInputLocked(ctx, b, sessName); err != nil {
-			return false, err
-		}
-	}
-	return m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, true, nudgequeue.SourceSubmit)
+	queued, err := m.sendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, true, nudgequeue.SourceSubmit)
+	return m.queueBehindPendingInteractionLocked(b, sessName, message, nudgequeue.SourceSubmit, queued, err)
 }
 
 // restartAndSendLocked replaces the runtime the interrupt just stopped. The
 // hold was decided before the stop, so the restart does not re-read it: the
 // dead runtime would make a heartbeat or unreadable hold refuse, losing the
 // session and the message. Only an operator's resume consumes a user hold
-// (Actor.consumesHold).
-func (m *Manager) restartAndSendLocked(ctx context.Context, by Actor, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config) error {
+// (Actor.consumesHold). It reports whether the message was queued: a
+// replacement whose start queued its first turn has the message queued behind
+// that turn; the replacement runtime's refusal to type into a prompt it came
+// up showing queues the message for after the prompt is answered, as the
+// outgoing turn is already gone, and so does its deferral of a turn already
+// running that the keys would interrupt (runtime.ErrSessionBusy), as
+// sendLocked queues it.
+func (m *Manager) restartAndSendLocked(ctx context.Context, by Actor, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config) (bool, error) {
+	ctx, started := withStartupNudgeRecorder(ctx)
 	if err := m.ensureRunning(ctx, by, id, b, sessName, resumeCommand, hints, true); err != nil {
-		return err
+		return false, err
+	}
+	if started.queued {
+		// The replacement queued its first turn: the message waits behind it.
+		return true, m.enqueueDeferredSubmitLocked(b, sessName, message, nudgequeue.SourceSubmit)
 	}
 	if err := m.waitUntilRunningLocked(ctx, id, sessName, 2*time.Second); err != nil {
-		return err
+		return false, err
 	}
 	if waiter, ok := m.sp.(runtime.IdleWaitProvider); ok && waitsForIdleAfterHardRestart(b) {
 		if err := waiter.WaitForIdle(ctx, sessName, 15*time.Second); err != nil && !errors.Is(err, runtime.ErrInteractionUnsupported) {
-			return fmt.Errorf("waiting for restarted session to become idle: %w", err)
+			return false, fmt.Errorf("waiting for restarted session to become idle: %w", err)
 		}
 	}
 	// This is a fresh replacement turn after a hard restart. The previous run's
 	// pending-interaction state is irrelevant, and probing tmux immediately after
 	// the restart is race-prone for Claude-backed sessions.
-	return m.nudgeSession(ctx, sessName, message, true)
+	err := m.nudgeSession(ctx, sessName, message, true)
+	if errors.Is(err, runtime.ErrSessionBusy) {
+		return true, m.enqueueDeferredSubmitLocked(b, sessName, message, nudgequeue.SourceSubmit)
+	}
+	return m.queueBehindPendingInteractionLocked(b, sessName, message, nudgequeue.SourceSubmit, false, err)
 }
 
 func (m *Manager) waitUntilRunningLocked(ctx context.Context, id, sessName string, timeout time.Duration) error {
@@ -401,6 +447,11 @@ func (m *Manager) sendTurnInterruptLocked(ctx context.Context, b beads.Bead, ses
 		return false, fmt.Errorf("%w: %s", ErrTurnInterruptUnsupported, sessName)
 	}
 	if usesSoftEscapeInterrupt(b) {
+		// The Escape is the interrupt: the leaf notes it first, as Interrupt
+		// notes its own, so the idle wait after it is the interrupt's settle
+		// (under program_status "on", a dialog raised since ends that wait,
+		// and no Ctrl-C fallback follows).
+		runtime.NoteInterrupt(m.sp, sessName)
 		if err := runtime.SendKeysWithContext(ctx, m.sp, sessName, "Escape"); err != nil {
 			return false, fmt.Errorf("interrupting session: %w", err)
 		}
@@ -419,8 +470,9 @@ func (m *Manager) sendTurnInterruptLocked(ctx context.Context, b beads.Bead, ses
 // Gemini's immediate confirm. The follow-up interrupts whatever turn runs
 // when it lands, so a checked stop (StopTurnIf) passes its check as still:
 // the follow-up goes only once still passes again, and a refusal sends
-// nothing more and fails the wait, the refusal in its text only, since the
-// first key was sent.
+// nothing more and fails the wait with a *followUpRefusedError, which wraps
+// none of the refusal, since the first key was sent: StopTurnWith reads the
+// refusal from it.
 func (m *Manager) waitForInterruptIdleLocked(ctx context.Context, b beads.Bead, sessName string, mode runtime.TurnInterruptMode, still func() error) error {
 	if !waitsForIdleAfterInterrupt(b) {
 		return nil
@@ -436,28 +488,33 @@ func (m *Manager) waitForInterruptIdleLocked(ctx context.Context, b beads.Bead, 
 		}
 		return err
 	}
-	followUp := func(what string) error {
+	// waited is the error of the idle wait before the follow-up, nil when
+	// none ran (followUpSendError).
+	followUp := func(what string, waited error) error {
 		if still != nil {
 			if err := still(); err != nil {
-				return fmt.Errorf("%s: not sent, the turn check refused it (%s)", what, err.Error())
+				return &followUpRefusedError{what: what, refusal: err}
 			}
 		}
 		if err := runtime.InterruptWithContext(ctx, m.sp, sessName); err != nil {
-			return fmt.Errorf("%s: %w", what, err)
+			return followUpSendError(what, waited, err)
 		}
 		return nil
 	}
 	if usesSoftEscapeInterrupt(b) && mode == runtime.TurnInterruptKeystroke {
 		if requiresImmediateInterruptConfirm(b) {
-			if err := followUp("confirming interrupt after soft escape"); err != nil {
+			if err := followUp("confirming interrupt after soft escape", nil); err != nil {
 				return err
 			}
 			return waitForIdle(15 * time.Second)
 		}
-		if err := waitForIdle(softInterruptFallbackWait); err == nil {
-			return nil
+		waited := waitForIdle(softInterruptFallbackWait)
+		if waited == nil || errors.Is(waited, ErrPendingInteraction) {
+			// A wait that ended on a dialog the interrupted session raised
+			// sends no fallback interrupt: the key would land in the dialog.
+			return waited
 		}
-		if err := followUp("interrupting session with control-c fallback"); err != nil {
+		if err := followUp("interrupting session with control-c fallback", waited); err != nil {
 			return err
 		}
 	}
@@ -465,17 +522,30 @@ func (m *Manager) waitForInterruptIdleLocked(ctx context.Context, b beads.Bead, 
 }
 
 func (m *Manager) waitForInterruptBoundaryLocked(ctx context.Context, b beads.Bead, sessName string, since time.Time) error {
+	_, err := m.readInterruptBoundaryLocked(ctx, b, sessName, since)
+	return err
+}
+
+// readInterruptBoundaryLocked is waitForInterruptBoundaryLocked, also
+// reporting whether a boundary wait ran: false when the family has none or
+// the runtime cannot wait for one (runtime.ErrInteractionUnsupported), which
+// passes without reading the turn.
+func (m *Manager) readInterruptBoundaryLocked(ctx context.Context, b beads.Bead, sessName string, since time.Time) (waited bool, err error) {
 	if !requiresInterruptBoundaryWait(b) {
-		return nil
+		return false, nil
 	}
 	waiter, ok := m.sp.(runtime.InterruptBoundaryWaitProvider)
 	if !ok {
-		return nil
+		return false, nil
 	}
-	if err := waiter.WaitForInterruptBoundary(ctx, sessName, since, interruptBoundaryWait); err != nil && !errors.Is(err, runtime.ErrInteractionUnsupported) {
-		return fmt.Errorf("waiting for interrupt boundary: %w", err)
+	err = waiter.WaitForInterruptBoundary(ctx, sessName, since, interruptBoundaryWait)
+	switch {
+	case errors.Is(err, runtime.ErrInteractionUnsupported):
+		return false, nil
+	case err != nil:
+		return true, fmt.Errorf("waiting for interrupt boundary: %w", err)
 	}
-	return nil
+	return true, nil
 }
 
 // ProviderFamilyFromMetadata returns the canonical provider family for session
@@ -579,6 +649,13 @@ func shouldClearInterruptedInputBeforeSubmit(b beads.Bead) bool {
 	default:
 		return false
 	}
+}
+
+// replacementSendsKeys reports whether preparing b's session for the
+// message that replaces its interrupted turn, sent as mode, types keys:
+// Gemini's turn reset, or the input clear after a keystroke interrupt.
+func replacementSendsKeys(b beads.Bead, mode runtime.TurnInterruptMode) bool {
+	return requiresInterruptedTurnReset(b) || shouldClearInterruptedInputBeforeSubmit(b) && mode == runtime.TurnInterruptKeystroke
 }
 
 func (m *Manager) resetInterruptedTurnLocked(ctx context.Context, b beads.Bead, sessName string) error {
@@ -815,13 +892,15 @@ const deferredNudgeSource = "session"
 // boundary under source (nudgequeue.SourceSubmit for a user's submit,
 // deferredNudgeSource for a nudge).
 func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message, source string) error {
-	queue := m.deferredQueue()
-	if queue == nil {
-		return errors.New("deferred submit is unavailable without a city path")
-	}
-	now := time.Now().UTC()
-	item := nudgequeue.Item{
-		ID:                "nudge-" + NewInstanceToken()[:12],
+	_, err := m.enqueueDeferredItemsLocked(b, sessName, []nudgequeue.Item{newDeferredSubmitItem(b, message, source, time.Now().UTC())})
+	return err
+}
+
+// newDeferredSubmitItem is message as a deferred submit for b's session
+// under source, queued at now.
+func newDeferredSubmitItem(b beads.Bead, message, source string, now time.Time) nudgequeue.Item {
+	return nudgequeue.Item{
+		ID:                newDeferredSubmitID(),
 		Agent:             deferredSubmitAgentKey(b),
 		SessionID:         b.ID,
 		ContinuationEpoch: deferredSubmitEpoch(b),
@@ -831,10 +910,32 @@ func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message, s
 		DeliverAfter:      now,
 		ExpiresAt:         now.Add(defaultQueuedSubmitTTL),
 	}
-	if err := queue.EnqueueDeferred(item); err != nil {
-		return fmt.Errorf("queueing deferred submit: %w", err)
+}
+
+// newDeferredSubmitID mints a deferred submit's id.
+func newDeferredSubmitID() string {
+	return "nudge-" + NewInstanceToken()[:12]
+}
+
+// enqueueDeferredItemsLocked queues items for sessName in order, every one
+// even when an earlier one fails, and reports whether any was queued and
+// every failure. When one was queued and the session takes follow-ups, it
+// starts the session's submit poller.
+func (m *Manager) enqueueDeferredItemsLocked(b beads.Bead, sessName string, items []nudgequeue.Item) (bool, error) {
+	queue := m.deferredQueue()
+	if queue == nil {
+		return false, errNoDeferredQueue
 	}
-	if m.supportsFollowUpLocked(b) {
+	queued := false
+	var errs []error
+	for _, item := range items {
+		if err := queue.EnqueueDeferred(item); err != nil {
+			errs = append(errs, fmt.Errorf("queueing deferred submit: %w", err))
+			continue
+		}
+		queued = true
+	}
+	if queued && m.supportsFollowUpLocked(b) {
 		// The item is queued either way: the supervisor's dispatcher also
 		// delivers it. A poller that did not start only loses the fast path,
 		// so say so instead of dropping the error.
@@ -842,7 +943,7 @@ func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message, s
 			log.Printf("session: %q: queued a deferred submit but could not start its poller: %v", sessName, err)
 		}
 	}
-	return nil
+	return queued, errors.Join(errs...)
 }
 
 // deferredSubmitEpoch returns the continuation epoch a deferred submit is
@@ -891,17 +992,26 @@ var (
 func ensureSessionSubmitPoller(cityPath, agentName, sessionName string) error {
 	pidPath := sessionSubmitPollerPIDPath(cityPath, sessionName, agentName)
 	return withSessionSubmitPollerPIDLock(pidPath, func() error {
-		if running, _ := existingSessionSubmitPollerPID(pidPath, cityPath, sessionName, agentName); running {
+		running, err := existingSessionSubmitPollerPID(pidPath, cityPath, sessionName, agentName)
+		if err != nil {
+			// The recorded PID is live but could not be identified. Starting a
+			// replacement here would overwrite the pidfile and leave two
+			// pollers delivering the same nudges, and nothing downstream can
+			// undo that. Refuse instead: the caller retries, and a PID that has
+			// genuinely exited reads as not-running on the next pass.
+			return fmt.Errorf("checking for an existing nudge poller: %w", err)
+		}
+		if running {
 			return nil
 		}
 		exe, err := sessionSubmitPollerExecutable()
 		if err != nil {
 			return err
 		}
-		if isGoTestExecutable(exe) {
+		if nudgepoller.IsGoTestExecutable(exe) {
 			return fmt.Errorf("refusing to start nudge poller with Go test binary %q", exe)
 		}
-		cmd := newSessionSubmitPollerCommand(exe, os.Environ(), cityPath, sessionName, agentName)
+		cmd := newSessionSubmitPollerCommand(exe, execenv.Environ(), cityPath, sessionName, agentName)
 		logFile, err := os.OpenFile(sessionSubmitPollerLogPath(cityPath, sessionName, agentName), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 		if err != nil {
 			return err
@@ -909,7 +1019,7 @@ func ensureSessionSubmitPoller(cityPath, agentName, sessionName string) error {
 		defer logFile.Close() //nolint:errcheck
 		cmd.Stdout = logFile
 		cmd.Stderr = logFile
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		processgroup.StartCommandInNewGroup(cmd)
 		if err := cmd.Start(); err != nil {
 			return err
 		}
@@ -931,42 +1041,6 @@ func newSessionSubmitPollerCommand(exe string, environ []string, cityPath, sessi
 	return cmd
 }
 
-func isGoTestExecutable(path string) bool {
-	argv0 := ""
-	if len(os.Args) > 0 {
-		argv0 = os.Args[0]
-	}
-	return isGoTestExecutableFor(path, argv0, os.Getenv("TEST_SRCDIR"))
-}
-
-// isGoTestExecutableFor reports whether path names a Go test binary, given the
-// running process's argv0 and TEST_SRCDIR.
-func isGoTestExecutableFor(path, argv0, testSrcdir string) bool {
-	// The running bazel test binary drops the .test suffix but keeps the
-	// <target>_test name and exports TEST_SRCDIR; probes that exec a renamed
-	// spy binary must not match. Sibling gates such as internal/testenv and
-	// cmd/gc/test_guard.go need no symlink comparison: they classify only the
-	// running process, by an argv0 basename that is <target>_test whether or
-	// not bazel exec'd it through a symlink.
-	if testSrcdir != "" && strings.HasSuffix(filepath.Base(path), "_test") && isRunningBinary(path, argv0) {
-		return true
-	}
-	return strings.HasSuffix(filepath.Base(path), ".test")
-}
-
-// isRunningBinary reports whether path, as reported by os.Executable, is the
-// binary argv0 names. Bazel execs a test through its runfiles path, which is a
-// symlink under local execution; on Linux os.Executable reads /proc/self/exe,
-// which names the symlink's resolved target, so argv0 is also compared after
-// resolving symlinks.
-func isRunningBinary(path, argv0 string) bool {
-	if path == argv0 {
-		return true
-	}
-	resolved, err := filepath.EvalSymlinks(argv0)
-	return err == nil && resolved == path
-}
-
 func sessionSubmitPollerPIDPath(cityPath, sessionName, agentName string) string {
 	return citylayout.RuntimePath(cityPath, "nudges", "pollers", nudgepoller.PollerFileStem(sessionName, agentName)+".pid")
 }
@@ -975,6 +1049,13 @@ func sessionSubmitPollerLogPath(cityPath, sessionName, agentName string) string 
 	return citylayout.RuntimePath(cityPath, "nudges", "pollers", nudgepoller.PollerFileStem(sessionName, agentName)+".log")
 }
 
+// existingSessionSubmitPollerPID reports whether the recorded PID is still this
+// session's poller.
+//
+// A non-nil error means the PID is LIVE but its identity could not be read, so
+// whether it is the poller is unknown. That is deliberately distinct from
+// (false, nil): the caller must not create a second singleton on the strength
+// of a check that did not run.
 func existingSessionSubmitPollerPID(pidPath, cityPath, sessionName, agentName string) (bool, error) {
 	data, err := os.ReadFile(pidPath)
 	if errors.Is(err, os.ErrNotExist) {
@@ -994,11 +1075,13 @@ func existingSessionSubmitPollerPID(pidPath, cityPath, sessionName, agentName st
 	if cityPath == "" || sessionName == "" || agentName == "" {
 		return false, nil
 	}
-	if pidutil.AliveWithCmdline(pid, nudgepoller.CmdlineMatcher(cityPath, sessionName, agentName)) {
-		return true, nil
-	}
-	return false, nil
+	return submitPollerIdentity(pid, nudgepoller.CmdlineMatcher(cityPath, sessionName, agentName))
 }
+
+// submitPollerIdentity is existingSessionSubmitPollerPID's identity probe. It is
+// a variable only so a test can stage a live PID whose identity cannot be read,
+// which no host reliably produces on demand.
+var submitPollerIdentity = pidutil.AliveWithCmdline
 
 func writeSessionSubmitPollerPID(pidPath string, pid int) error {
 	data := []byte(fmt.Sprintf("%d\n", pid))
@@ -1018,9 +1101,10 @@ func withSessionSubmitPollerPIDLock(pidPath string, fn func() error) error {
 		return fmt.Errorf("opening nudge poller lock: %w", err)
 	}
 	defer lockFile.Close() //nolint:errcheck
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+	lock, err := filelock.Acquire(lockFile, filelock.Options{Mode: filelock.Exclusive, Label: lockPath})
+	if err != nil {
 		return fmt.Errorf("locking nudge poller: %w", err)
 	}
-	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN) //nolint:errcheck
+	defer lock.Release() //nolint:errcheck
 	return fn()
 }

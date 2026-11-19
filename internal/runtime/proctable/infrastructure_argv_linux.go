@@ -13,7 +13,12 @@ import (
 
 // rootArgv reads pid's argv from the same procfs root the scanner enumerates.
 func rootArgv(pid int) ([]string, error) {
-	data, err := os.ReadFile(filepath.Join(scanRoot, strconv.Itoa(pid), "cmdline"))
+	return readArgv(scanRoot, pid)
+}
+
+// readArgv reads pid's argv from the procfs at root.
+func readArgv(root string, pid int) ([]string, error) {
+	data, err := os.ReadFile(filepath.Join(root, strconv.Itoa(pid), "cmdline"))
 	if err != nil {
 		return nil, err
 	}
@@ -25,9 +30,9 @@ func rootArgv(pid int) ([]string, error) {
 }
 
 func rootStartIdentity(pid int) string {
-	_, _, startTime, ok, err := readProcStatIdentity(filepath.Join(scanRoot, strconv.Itoa(pid), "stat"))
+	stat, ok, err := readProcStat(filepath.Join(scanRoot, strconv.Itoa(pid), "stat"))
 	if err != nil || !ok {
 		return ""
 	}
-	return startTime
+	return stat.startTime
 }

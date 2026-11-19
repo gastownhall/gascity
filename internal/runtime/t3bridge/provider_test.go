@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/runtimetest"
+	"github.com/gastownhall/gascity/internal/testutil"
 	"github.com/gorilla/websocket"
 )
 
@@ -744,6 +746,36 @@ func TestBuildThreadEnv_MirrorsDoltEndpointForNonDoltliteSessions(t *testing.T) 
 	}
 }
 
+// TestBuildThreadEnv_ForwardsSharedServerOptOutForWithheldDoltPort pins the
+// thread half of the gastownhall/gascity#1656 withhold. With the managed port
+// withheld, nothing in the thread env outranks a HOME-level
+// dolt.shared-server: true any more, so the thread's bd would read and write
+// the host-wide shared server instead of the managed one the scope's
+// .beads/dolt-server.port mirror tracks. The session env's shared-server
+// opt-out must therefore reach the thread, and no port may be rebuilt from it.
+func TestBuildThreadEnv_ForwardsSharedServerOptOutForWithheldDoltPort(t *testing.T) {
+	sessionEnv := runtimetest.WithheldManagedDoltEnv()
+	sessionEnv["GC_BEADS_BACKEND"] = "dolt"
+	sessionEnv["GC_SESSION_NAME"] = "gc--worker"
+
+	env := buildThreadEnv(sessionEnv)
+
+	for key, want := range map[string]string{
+		"BEADS_DOLT_SHARED_SERVER": "0",
+		"BD_DOLT_SHARED_SERVER":    "false",
+		"GC_DOLT_MANAGED_LOCAL":    "1",
+	} {
+		if got := env[key]; got != want {
+			t.Fatalf("%s = %q, want %q", key, got, want)
+		}
+	}
+	for _, key := range []string{"GC_DOLT_PORT", "BEADS_DOLT_PORT", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_SERVER_MODE"} {
+		if got, ok := env[key]; ok {
+			t.Fatalf("%s = %q rebuilt for a withheld port; the thread's bd must follow the scope's port mirror", key, got)
+		}
+	}
+}
+
 // TestBuildThreadEnv_PreservesHolderTokenAlignedToInstanceToken proves the GC_
 // allowlist does not strip the incarnation credential: BEADS_HOLDER_TOKEN
 // (BEADS_-prefixed, so dropped by the allowlist) is realigned to the surviving
@@ -1067,7 +1099,7 @@ func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3Bri
 	t.Helper()
 	ts := &t3BridgeTestServer{t: t, snapshot: snapshot, released: make(chan struct{})}
 	upgrader := websocket.Upgrader{}
-	ts.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ts.server = httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/auth/ws-token" || r.URL.Path == "/api/auth/bridge-ws-token" || r.URL.Path == "/api/auth/websocket-ticket" {
 			ts.mu.Lock()
 			ts.authRequestCount++
@@ -1241,7 +1273,7 @@ func newT3BridgeTestServer(t *testing.T, snapshot map[string]interface{}) *t3Bri
 		if err := conn.WriteJSON(resp); err != nil {
 			t.Errorf("write websocket response: %v", err)
 		}
-	}))
+	})))
 	return ts
 }
 
