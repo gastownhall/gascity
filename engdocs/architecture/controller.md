@@ -195,15 +195,18 @@ indicate bugs.
   itself, but only under the lock the unregister claimed once the
   supervisor dropped the city; without it (the supervisor missed the
   unregister's probe), `gc stop` only confirms the stop, as after a
-  controller stopped. Its own stop owns the lock until it ends, even after
-  a wall-clock cap stops waiting for it. Before the lock is released, that
-  stop is confirmed against the runtime the same way: a session that
-  survived its stop fails it and restores the registration. A cap that
-  fires while the stop runs leaves the city unregistered rather than
-  restore a registration the supervisor would relaunch under it, printing
-  the path to run `gc stop` on to finish the stop (the city's name no
-  longer resolves). The stop that holds the lock releases it on every exit
-  path. While `gc stop` holds the lock, a supervisor restart or a second
+  controller stopped. A runtime whose attested listing shows nothing
+  running needs no such stop: `gc stop` retires the bead store as after a
+  controller stopped, without reading the session store, which may be
+  what keeps the supervisor from starting the city. Its own stop owns the
+  lock until it ends, even after a wall-clock cap stops waiting for it.
+  Before the lock is released, that stop is confirmed against the runtime
+  the same way: a session that survived its stop fails it and restores
+  the registration. A cap that fires while the stop runs leaves the city
+  unregistered rather than restore a registration the supervisor would
+  relaunch under it, printing the path to run `gc stop` on to finish the
+  stop (the city's name no longer resolves). The stop that holds the lock
+  releases it on every exit path. While `gc stop` holds the lock, a supervisor restart or a second
   `gc start` cannot bring a controller up against a provider that is being
   torn down; it fails the lock instead.
 

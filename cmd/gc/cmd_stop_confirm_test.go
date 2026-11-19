@@ -13,6 +13,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -68,6 +69,14 @@ func lingering(t *testing.T, listings int32, names ...string) lingeringListProvi
 type sharedListProvider struct{ *runtime.Fake }
 
 func (sharedListProvider) ListRunningShared() bool { return true }
+
+// absentServerProvider is a runtime whose server is not running at all, as
+// after a stop tore it down: its listing fails with the server's absence.
+type absentServerProvider struct{ *runtime.Fake }
+
+func (absentServerProvider) ListRunning(string) ([]string, error) {
+	return nil, &runtime.PartialListError{Err: errors.New("no server running"), ServerAbsent: true}
+}
 
 // stopProbeProvider points the stop probe at sp, and bounds the confirming
 // listings at timeout, polled every timeout/10.
@@ -171,6 +180,53 @@ func TestConfirmControllerStopGivesTheFinalListingAPollIntervalToAnswer(t *testi
 		}
 		if !strings.Contains(stderr.String(), "worker-1 still running") {
 			t.Fatalf("stderr %q, want the survivor worker-1 named, not a wedged listing", stderr.String())
+		}
+	})
+}
+
+// Kills gc stop skipping its own stop of a registered city no controller
+// served on a runtime that does not prove nothing is running: only a listing
+// the runtime attests and does not share with other cities, answering
+// complete and empty (an absent runtime server holds no session), proves it.
+// A listed session, a failed or wedged listing, an unattested or shared one,
+// or a runtime that cannot be opened proves nothing, and the check is bounded.
+func TestCityRuntimeEmptyForStop(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	unattested := runningFake(t)
+	unattested.ListingUnattested = true
+	for _, c := range []struct {
+		name string
+		sp   runtime.Provider
+		want bool
+	}{
+		{"nothing running", runningFake(t), true},
+		{"the runtime server is not running", absentServerProvider{runningFake(t)}, true},
+		{"a session runs", runningFake(t, "worker-1"), false},
+		{"the listing fails", failingListProvider{runningFake(t)}, false},
+		{"the listing never answers", wedgedListProvider{runningFake(t), release}, false},
+		{"an unattested listing", unattested, false},
+		{"a listing shared with other cities", sharedListProvider{runningFake(t)}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			stopProbeProvider(t, c.sp, 50*time.Millisecond)
+			start := time.Now()
+			if got := cityRuntimeEmptyForStop(&config.City{}, t.TempDir()); got != c.want {
+				t.Fatalf("cityRuntimeEmptyForStop = %v, want %v", got, c.want)
+			}
+			if time.Since(start) > 5*time.Second {
+				t.Fatalf("the check took %s: it must be bounded", time.Since(start))
+			}
+		})
+	}
+	t.Run("the runtime cannot be opened", func(t *testing.T) {
+		oldProbe := sessionProviderForStopProbe
+		sessionProviderForStopProbe = func(*config.City, string) (runtime.Provider, error) {
+			return nil, errors.New("exec provider: script missing")
+		}
+		t.Cleanup(func() { sessionProviderForStopProbe = oldProbe })
+		if cityRuntimeEmptyForStop(&config.City{}, t.TempDir()) {
+			t.Fatal("cityRuntimeEmptyForStop = true over a runtime it could not open, want false")
 		}
 	})
 }
@@ -310,13 +366,14 @@ const workerAgentToml = "\n[[agent]]\nname = \"worker\"\nmax_active_sessions = 1
 // does a session, configured or not, that outlives its stop: the stop is
 // confirmed against the runtime, while gc stop still holds the controller
 // lock and the pending unregister, even though the runtime offers no server
-// teardown that would end the session.
+// teardown that would end the session. (A city with nothing running needs no
+// stop of its own; see
+// TestCmdStopSupervisorManagedCityWithNothingRunningSucceedsWithoutReadingItsStore.)
 func TestCmdStopSupervisorManagedCityWithNoControllerStopsItsSessions(t *testing.T) {
 	for _, c := range []struct {
 		name       string
 		sp         func(t *testing.T) (runtime.Provider, *runtime.Fake)
 		configured bool
-		reloaded   func(f *runtime.Fake)
 		storeErr   error
 		wantCode   int
 		wantStderr []string
@@ -359,14 +416,6 @@ func TestCmdStopSupervisorManagedCityWithNoControllerStopsItsSessions(t *testing
 			wantStderr: []string{"session(s) worker, worker-1 still running 100ms after gc stop tried to stop the city's sessions", "restored registration for 'supervised-city'"},
 		},
 		{
-			name: "the supervisor's reload already stopped them",
-			sp: func(t *testing.T) (runtime.Provider, *runtime.Fake) {
-				f := runningFake(t, "worker-1")
-				return f, f
-			},
-			reloaded: func(f *runtime.Fake) { _ = f.Stop("worker-1") },
-		},
-		{
 			name: "the runtime cannot be listed",
 			sp: func(t *testing.T) (runtime.Provider, *runtime.Fake) {
 				f := runningFake(t, "worker-1")
@@ -388,11 +437,7 @@ func TestCmdStopSupervisorManagedCityWithNoControllerStopsItsSessions(t *testing
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			sp, fake := c.sp(t)
-			var reload func()
-			if c.reloaded != nil {
-				reload = func() { c.reloaded(fake) }
-			}
-			cityDir, reg := unservedRegisteredCity(t, sp, "0s", 4242, reload)
+			cityDir, reg := unservedRegisteredCity(t, sp, "0s", 4242, nil)
 			if c.configured {
 				appendToFile(t, filepath.Join(cityDir, "city.toml"), workerAgentToml)
 			}
@@ -461,6 +506,138 @@ func TestCmdStopSupervisorManagedCityWithNoControllerStopsItsSessions(t *testing
 			}
 		})
 	}
+}
+
+// A registered city no controller served whose runtime proves that nothing is
+// running (nothing ever started, or the supervisor's reload already stopped
+// its sessions) leaves gc stop's own stop nothing to stop. gc stop unregisters
+// it and retires its bead store as after a controller stopped, without opening
+// the session store, as it did before it stopped such a city's sessions
+// itself. A session store that cannot list the city's sessions (a gc-managed
+// Dolt that is down, a stale proxy record: often why the supervisor keeps
+// failing to start the city) then does not fail the stop and hand the city
+// back to the supervisor's retries. The runtime is listed under the controller
+// lock the unregister claimed, with the registration removed, so nothing can
+// start after the listing.
+func TestCmdStopSupervisorManagedCityWithNothingRunningSucceedsWithoutReadingItsStore(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		running  []string
+		reloaded bool
+	}{
+		{"nothing ever ran", nil, false},
+		{"the supervisor's reload already stopped its sessions", []string{"worker-1"}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			fake := runningFake(t, c.running...)
+			var reload func()
+			if c.reloaded {
+				reload = func() {
+					for _, name := range c.running {
+						_ = fake.Stop(name)
+					}
+				}
+			}
+			cityDir, reg := unservedRegisteredCity(t, fake, "0s", 4242, reload)
+			storeOpens := unreadableSessionStore(t)
+			var listings, unguardedListings atomic.Int32
+			stopProbeProvider(t, confirmListingWatcher{Fake: fake, listed: func() {
+				listings.Add(1)
+				if entries, err := reg.List(); err != nil || len(entries) != 0 || !probeControllerLockHeld(t, cityDir) {
+					unguardedListings.Add(1)
+				}
+			}}, 100*time.Millisecond)
+			oldFactory := sessionProviderForStopCity
+			sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) {
+				t.Error("gc stop ran its own stop of a city with nothing running")
+				return nil, errors.New("unexpected own stop")
+			}
+			t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+
+			var stdout, stderr lockedBuffer
+			if code := cmdStopJSON([]string{cityDir}, &stdout, &stderr, 0, false, false); code != 0 || !strings.Contains(stdout.String(), "City stopped.") {
+				t.Fatalf("gc stop = %d, stdout %q, stderr %q; want City stopped.", code, stdout.String(), stderr.String())
+			}
+			if entries := registryEntries(t, reg); len(entries) != 0 {
+				t.Errorf("registry %v after gc stop, want the city unregistered", entries)
+			}
+			if got := storeOpens.Load(); got != 0 {
+				t.Errorf("gc stop opened the session store %d times, want none", got)
+			}
+			if listings.Load() == 0 {
+				t.Error("gc stop reported success without listing the runtime")
+			}
+			if got := unguardedListings.Load(); got != 0 {
+				t.Errorf("%d of %d listings ran without the controller lock held or with the city still registered", got, listings.Load())
+			}
+			if probeControllerLockHeld(t, cityDir) {
+				t.Error("controller lock still held after gc stop returned")
+			}
+		})
+	}
+}
+
+// gc stop's own stop of a registered city no controller served fails over a
+// session store that cannot list the city's sessions, since it cannot check
+// for one left creating by an interrupted start, and the registration is
+// restored. It still stops the sessions the runtime lists, so a rerun finds
+// nothing running and succeeds without opening the store: a store that stays
+// unreadable does not fail every later stop of the city.
+func TestCmdStopSupervisorManagedCityWithNoControllerFinishesOnARerunOverAnUnreadableStore(t *testing.T) {
+	fake := runningFake(t, "worker-1")
+	cityDir, reg := unservedRegisteredCity(t, fake, "0s", 4242, nil)
+	storeOpens := unreadableSessionStore(t)
+	overrideShutdownBeadsProviderForStop(t, func(string) error { return nil })
+
+	var stdout, stderr lockedBuffer
+	if code := cmdStopJSON([]string{cityDir}, &stdout, &stderr, 0, false, false); code != 1 {
+		t.Fatalf("gc stop = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	for _, want := range []string{"could not check for sessions left creating by an interrupted start", "injected: store unreadable", "restored registration for 'supervised-city'"} {
+		if !strings.Contains(stderr.String(), want) {
+			t.Errorf("stderr %q, want it to contain %q", stderr.String(), want)
+		}
+	}
+	if storeOpens.Load() == 0 {
+		t.Fatal("gc stop's own stop never opened the session store")
+	}
+	if running, _ := fake.ListRunning(""); len(running) != 0 {
+		t.Fatalf("sessions %v still running after gc stop's own stop", running)
+	}
+	if entries := registryEntries(t, reg); len(entries) != 1 {
+		t.Fatalf("registry %v, want the registration restored", entries)
+	}
+
+	opensBefore := storeOpens.Load()
+	var rerunOut, rerunErr lockedBuffer
+	if code := cmdStopJSON([]string{cityDir}, &rerunOut, &rerunErr, 0, false, false); code != 0 || !strings.Contains(rerunOut.String(), "City stopped.") {
+		t.Fatalf("rerun of gc stop = %d, stdout %q, stderr %q; want City stopped.", code, rerunOut.String(), rerunErr.String())
+	}
+	if got := storeOpens.Load() - opensBefore; got != 0 {
+		t.Errorf("the rerun opened the session store %d times, want none", got)
+	}
+	if entries := registryEntries(t, reg); len(entries) != 0 {
+		t.Errorf("registry %v after the rerun, want the city unregistered", entries)
+	}
+}
+
+// unreadableSessionStore makes the session store gc stop opens fail every
+// listing of the city's sessions, as a gc-managed Dolt that is down or a
+// proxied scope with a stale proxy record does, and counts the opens.
+func unreadableSessionStore(t *testing.T) *atomic.Int32 {
+	t.Helper()
+	var opens atomic.Int32
+	oldOpen := openCityStoreForStop
+	openCityStoreForStop = func(cityPath string) (beads.Store, error) {
+		opens.Add(1)
+		store, err := oldOpen(cityPath)
+		if err != nil {
+			return nil, err
+		}
+		return failingListByLabelStore{Store: store, err: errors.New("injected: store unreadable")}, nil
+	}
+	t.Cleanup(func() { openCityStoreForStop = oldOpen })
+	return &opens
 }
 
 // gc stop's own stop of a registered city no controller served grows the
@@ -750,10 +927,19 @@ func TestCmdStopSupervisorManagedCityWithNoControllerOnlyConfirmsWithoutTheLock(
 			if running, _ := fake.ListRunning(""); len(running) != 1 {
 				t.Errorf("sessions %v, want worker-1 left running", running)
 			}
-			for _, want := range []string{"worker-1 still running", "restored registration for 'supervised-city'"} {
+			// No controller stopped the sessions, and gc stop left them to a
+			// rerun: the report says so rather than blame a controller stop
+			// or the runtime.
+			for _, want := range []string{
+				"session(s) worker-1 still running 100ms after gc stop unregistered the city; no controller served the city, and gc stop did not stop them without its controller lock; run gc stop again",
+				"restored registration for 'supervised-city'",
+			} {
 				if !strings.Contains(stderr.String(), want) {
 					t.Errorf("stderr %q, want it to contain %q", stderr.String(), want)
 				}
+			}
+			if strings.Contains(stderr.String(), "after the controller stopped") {
+				t.Errorf("stderr %q blames a controller stop that never ran", stderr.String())
 			}
 			if strings.Contains(stdout.String(), "City stopped.") {
 				t.Errorf("stdout %q, want no success", stdout.String())

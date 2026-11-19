@@ -189,25 +189,44 @@ func cmdStopJSONSequence(args []string, stdout, stderr io.Writer, force bool, js
 		// process still holds the lock that path waits on.
 		if ownership != nil || supervisorAliveHook() != 0 {
 			cfg, cfgErr := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
-			if cfgErr == nil && !served && ownership != nil {
+			switch {
+			case cfgErr != nil:
+				// No config to confirm the stop against; the stop warns of it
+				// below.
+			case served:
+				if !confirmControllerStopForStop(cfg, cityPath, stderr) {
+					return stopCommandOutcome{code: 1, cityPath: cityPath}
+				}
+			case ownership == nil:
+				// No controller served the city, and the unregister claimed no
+				// controller lock: the supervisor missed its probe and answered
+				// only the one above, so a controller start may be in flight.
+				// gc stop then stops none of the city's sessions; it only
+				// confirms the stop, so a session still running fails it and
+				// restores the registration, and a rerun stops the city under
+				// the lock.
+				if !confirmSessionsStoppedForStop(cfg, cityPath, "after gc stop unregistered the city", "no controller served the city, and gc stop did not stop them without its controller lock; run gc stop again", stderr) {
+					return stopCommandOutcome{code: 1, cityPath: cityPath}
+				}
+			case !cityRuntimeEmptyForStop(cfg, cityPath):
 				// No controller served the city (a failed stop just restored
 				// its registration, or the supervisor is backing off a start),
-				// so the unregister stopped none of its sessions: stop them
-				// here, as the standalone stop does, and confirm none survived,
-				// under the controller lock the unregister claimed once the
+				// so the unregister stopped none of its sessions, and the
+				// runtime does not prove that none is running: stop them here,
+				// as the standalone stop does, and confirm none survived, under
+				// the controller lock the unregister claimed once the
 				// supervisor dropped the city, so the city cannot be relaunched
-				// underneath. Without that lock (the supervisor missed the
-				// unregister's probe and answered only the one above), a
-				// controller start may be in flight, so gc stop only confirms
-				// the stop below: a session still running fails it and
-				// restores the registration, and a rerun stops the city here.
+				// underneath.
 				lock := ownership
 				ownership = nil
 				return stopUnservedRegisteredCity(cityPath, cfg, lock, unregisterTx, runLoadedCityStop)
 			}
-			if cfgErr == nil && !confirmControllerStopForStop(cfg, cityPath, stderr) {
-				return stopCommandOutcome{code: 1, cityPath: cityPath}
-			}
+			// Under the lock the unregister claimed, a city no controller
+			// served gets here only when its runtime lists nothing running,
+			// and no controller can start a session under that lock: it needs
+			// no stop of gc stop's own, which reads the session store, so a
+			// store that cannot list the city's sessions (often what keeps the
+			// supervisor from starting it) does not fail its stop.
 			if !stopCityManagedBeadsProviderAfterSuccessfulStop(cityPath, stderr) {
 				return stopCommandOutcome{code: 1, cityPath: cityPath}
 			}
@@ -285,7 +304,7 @@ func stopAndConfirmUnservedRegisteredCity(cityPath string, cfg *config.City, for
 	if extendCap != nil {
 		extendCap(stopVerifyListTimeout + stopVerifyPollInterval)
 	}
-	if !confirmSessionsStoppedForStop(cfg, cityPath, "after gc stop tried to stop the city's sessions", stderr) {
+	if !confirmSessionsStoppedForStop(cfg, cityPath, "after gc stop tried to stop the city's sessions", stopSurvivorRemedy, stderr) {
 		return 1
 	}
 	return 0
@@ -1242,6 +1261,32 @@ func registeredCityControllerServing(cityPath string) bool {
 	return controllerAlive(cityPath) != 0
 }
 
+// cityRuntimeEmptyForStop reports whether the city's runtime proves that none
+// of its sessions is running: one listing that answers complete and empty
+// within stopVerifyListTimeout, from a runtime that attests its listing and
+// does not share it with other cities, the only listings
+// confirmSessionsStoppedForStop proves a stop with. An absent runtime server
+// holds no session (listRunningForStop). Any other answer, or a runtime that
+// cannot be opened, proves nothing. Like the confirmation, it lists through
+// the stop probe's provider, which does not read the bead store.
+func cityRuntimeEmptyForStop(cfg *config.City, cityPath string) bool {
+	sp, err := sessionProviderForStopProbe(cfg, cityPath)
+	if err != nil || !runtime.ListRunningAttested(sp) || runtime.ListRunningShared(sp) {
+		return false
+	}
+	empty := make(chan bool, 1)
+	go func() {
+		names, complete := listRunningForStop(sp, io.Discard)
+		empty <- complete && len(names) == 0
+	}()
+	select {
+	case ok := <-empty:
+		return ok
+	case <-time.After(stopVerifyListTimeout):
+		return false
+	}
+}
+
 // confirmControllerStopForStop reports whether a stop the controller handled
 // (the supervisor's, or a standalone controller's) left no session of the
 // city running (mc-3low3). The controller's shutdown is bounded, so a
@@ -1249,23 +1294,27 @@ func registeredCityControllerServing(cityPath string) bool {
 // tmux), outlives it, and gc stop must say so and fail rather than report
 // "City stopped." (see confirmSessionsStoppedForStop).
 func confirmControllerStopForStop(cfg *config.City, cityPath string, stderr io.Writer) bool {
-	return confirmSessionsStoppedForStop(cfg, cityPath, "after the controller stopped", stderr)
+	return confirmSessionsStoppedForStop(cfg, cityPath, "after the controller stopped", stopSurvivorRemedy, stderr)
 }
+
+// stopSurvivorRemedy is the remedy gc stop reports for a session that a stop
+// tried to end and that is still running: the runtime kept it.
+const stopSurvivorRemedy = "resolve the runtime and run gc stop again"
 
 // confirmSessionsStoppedForStop reports whether a stop left no session of the
 // city running. It lists the city's runtime until a complete listing is
 // empty, for up to stopVerifyListTimeout: a session still listed, an
 // incomplete listing, or a listing that does not answer by then fails the
 // stop, each reported as following after (the stop it confirms, such as
-// "after the controller stopped"). A listing started before the deadline may
-// answer up to one stopVerifyPollInterval past it. A runtime that does not
-// attest its listing proves nothing either way, nor does one whose listing is
-// shared with other cities (k8s's namespace), and a provider that cannot be
-// opened is reported; none of these changes the outcome the stop reported,
-// as before. It lists through the stop probe's provider
-// (newStopProbeSessionProvider), which does not read the bead store, so it
-// may run after the store is retired.
-func confirmSessionsStoppedForStop(cfg *config.City, cityPath, after string, stderr io.Writer) bool {
+// "after the controller stopped"), a session still listed with remedy. A
+// listing started before the deadline may answer up to one
+// stopVerifyPollInterval past it. A runtime that does not attest its listing
+// proves nothing either way, nor does one whose listing is shared with other
+// cities (k8s's namespace), and a provider that cannot be opened is reported;
+// none of these changes the outcome the stop reported, as before. It lists
+// through the stop probe's provider (newStopProbeSessionProvider), which does
+// not read the bead store, so it may run after the store is retired.
+func confirmSessionsStoppedForStop(cfg *config.City, cityPath, after, remedy string, stderr io.Writer) bool {
 	sp, err := sessionProviderForStopProbe(cfg, cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc stop: could not open the runtime to confirm the stop: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1311,7 +1360,7 @@ func confirmSessionsStoppedForStop(cfg *config.City, cityPath, after string, std
 		}
 		names := slices.Clone(l.names)
 		slices.Sort(names)
-		fmt.Fprintf(stderr, "gc stop: stop not confirmed: session(s) %s still running %s %s; resolve the runtime and run gc stop again\n", strings.Join(names, ", "), stopVerifyListTimeout, after) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "gc stop: stop not confirmed: session(s) %s still running %s %s; %s\n", strings.Join(names, ", "), stopVerifyListTimeout, after, remedy) //nolint:errcheck // best-effort stderr
 		return false
 	}
 }
