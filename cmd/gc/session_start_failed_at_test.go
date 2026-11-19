@@ -3,12 +3,16 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"slices"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -171,4 +175,191 @@ func TestAbandonStampsLastStartFailedAt(t *testing.T) {
 			}
 		})
 	}
+}
+
+// requireNoStartFailedStamp fails if row carries last_start_failed_at.
+func requireNoStartFailedStamp(t *testing.T, row beads.Bead) {
+	t.Helper()
+	if got, ok := row.Metadata[lastStartFailedAt]; ok {
+		t.Fatalf("%s = %q on %s, want no stamp: the start did not fail in prepare or pre_start", lastStartFailedAt, got, row.ID)
+	}
+}
+
+// TestLegacyStartNotFailedInPrepareOrPreStartLeavesNoStamp is AC-7 of
+// ga-z4joq0 in the legacy reconciler: a capacity refusal, a budget,
+// dependency or attribution deferral, a superseded PreWake, and a
+// provider-terminal, rate-limit or pending-create-rollback failure commit
+// without writing last_start_failed_at.
+func TestLegacyStartNotFailedInPrepareOrPreStartLeavesNoStamp(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("capacity refusal", func(t *testing.T) {
+		e := newCapacityEnv(t, true, "s")
+		c := asleepSession(t, e, nil)
+		e.sp.StartErrors["s"] = capacityRefusal("s", "")
+		e.start(ctx, c)
+		got := e.bead(t, c.info.ID)
+		if got.Metadata["state"] != "asleep" {
+			t.Fatalf("premise: state = %q, want the refusal to restore PreWake", got.Metadata["state"])
+		}
+		requireNoStartFailedStamp(t, got)
+	})
+
+	t.Run("budget deferral", func(t *testing.T) {
+		e := newCapacityEnv(t, false, "a", "b")
+		e.limitToOneWake()
+		a := e.pendingCreate(t, "a", "", nil)
+		b := e.pendingCreate(t, "b", "", nil)
+		if got := e.start(ctx, a, b); got != 1 {
+			t.Fatalf("premise: started %d, want 1 under a budget of 1", got)
+		}
+		requireNoStartFailedStamp(t, e.bead(t, a.info.ID))
+		requireNoStartFailedStamp(t, e.bead(t, b.info.ID))
+	})
+
+	t.Run("dependency deferral", func(t *testing.T) {
+		e := newCapacityEnv(t, false, "a", "b")
+		e.cfg.Agents[1].DependsOn = []string{"a"}
+		a := e.pendingCreate(t, "a", "", nil)
+		b := e.pendingCreate(t, "b", "", nil)
+		e.sp.StartErrors["a"] = errors.New("boom")
+		e.start(ctx, a, b)
+		if e.sp.IsRunning("b") {
+			t.Fatalf("premise: b started over its failed dependency")
+		}
+		requireNoStartFailedStamp(t, e.bead(t, b.info.ID))
+	})
+
+	t.Run("attribution deferral", func(t *testing.T) {
+		store := beads.NewMemStore()
+		sp := runtime.NewFake()
+		sp.StartErrors["worker"] = errors.New("launcher exited")
+		failIdentityReads(sp, "worker", "GC_SESSION_ID", "GC_INSTANCE_TOKEN")
+		row, err := store.Create(beads.Bead{Title: "worker", Type: session.BeadType})
+		if err != nil {
+			t.Fatal(err)
+		}
+		item := unattributedWorkerStart()
+		item.candidate.info.ID = row.ID
+		result := executePreparedStartWaveForCity(ctx, []preparedStart{item}, t.TempDir(), sp, nil, nil, 10*time.Second, 1)[0]
+		if result.outcome != TraceOutcomeDeferred {
+			t.Fatalf("premise: outcome = %q, want the attribution deferral", result.outcome)
+		}
+		clk := &clock.Fake{Time: time.Date(2026, 10, 12, 11, 0, 0, 0, time.UTC)}
+		commitStartResultTraced(result, sessionFrontDoor(store), clk, events.Discard, 0, io.Discard, io.Discard, nil)
+		requireNoStartFailedStamp(t, mustGetBead(t, store, row.ID))
+	})
+
+	// The executor takes the row's lease just before PreWake, so a PreWake is
+	// superseded only when another holder takes the lease over in between;
+	// prepare is driven directly under a lease already taken over.
+	t.Run("superseded PreWake", func(t *testing.T) {
+		f := newLeaseStartFixture(t, beads.NewMemStore())
+		f.cand.lease = f.hold(t)
+		defer f.cand.lease.Release()
+		if err := f.store.SetMetadataBatch(f.cand.info.ID, map[string]string{session.RuntimeLeaseHolderKey: "other/1/n", session.RuntimeLeaseEpochKey: "9"}); err != nil {
+			t.Fatal(err)
+		}
+		clk := &clock.Fake{Time: time.Date(2026, 10, 12, 11, 0, 0, 0, time.UTC)}
+		if _, err := prepareStartCandidateForCity(f.cand, f.city, "test-city", f.cfg, f.sp, f.store, clk, io.Discard, nil, dispatchOptionSources{}); !errors.Is(err, errPreWakeSuperseded) {
+			t.Fatalf("premise: prepare = %v, want errPreWakeSuperseded", err)
+		}
+		requireNoStartFailedStamp(t, mustGetBead(t, f.store, f.cand.info.ID))
+	})
+
+	t.Run("provider terminal", func(t *testing.T) {
+		e := newCapacityEnv(t, false, "s")
+		c := asleepSession(t, e, nil)
+		e.sp.StartErrors["s"] = errors.New("model_not_found: x")
+		e.start(ctx, c)
+		got := e.bead(t, c.info.ID)
+		if got.Metadata["sleep_reason"] == "idle" {
+			t.Fatalf("premise: sleep_reason = %q, want the terminal provider error marked", got.Metadata["sleep_reason"])
+		}
+		requireNoStartFailedStamp(t, got)
+	})
+
+	t.Run("rate limit", func(t *testing.T) {
+		e := newCapacityEnv(t, false, "s")
+		c := asleepSession(t, e, nil)
+		commitStartFailure(startResult{prepared: preparedStart{candidate: c}, err: errors.New("died during startup"), rateLimitScreen: true},
+			sessionFrontDoor(e.store), e.clk, events.Discard, 0, io.Discard, nil)
+		got := e.bead(t, c.info.ID)
+		if got.Metadata["quarantined_until"] == "" {
+			t.Fatalf("premise: no rate-limit quarantine on %v", got.Metadata)
+		}
+		requireNoStartFailedStamp(t, got)
+	})
+
+	t.Run("pending-create rollback", func(t *testing.T) {
+		e := newCapacityEnv(t, false, "p")
+		c := e.pendingCreate(t, "p", "", nil)
+		e.sp.StartErrors["p"] = errors.New("boom")
+		e.start(ctx, c)
+		got := e.bead(t, c.info.ID)
+		if got.Status != "closed" {
+			t.Fatalf("premise: status %q, want the unconfigured pending create rolled back", got.Status)
+		}
+		requireNoStartFailedStamp(t, got)
+	})
+}
+
+// TestAbandonWithoutPrepareOrPreStartFailureLeavesNoStamp is AC-7 of
+// ga-z4joq0 in v2: a capacity refusal and the abandon's terminal, rate-limit,
+// pending-teardown and attribution classes write no last_start_failed_at.
+func TestAbandonWithoutPrepareOrPreStartFailureLeavesNoStamp(t *testing.T) {
+	k := startKit(t, intentStart, "creating")
+	boom := errors.New("boom")
+	woke := gatherNow.Format(time.RFC3339)
+	creating := poolRow("gc-1", "worker", 1, "creating", "generation", "4", "instance_token", "tok-4", "last_woke_at", woke, "wake_attempts", "2")
+	undo := preWakeUndo{
+		token: "tok-4", written: session.MetadataPatch{"state": "creating", "last_woke_at": woke},
+		restore: session.MetadataPatch{"state": "asleep", "last_woke_at": ""},
+	}
+	other := startFailureRead{startFailure: startFailure{cause: causeStartError, err: boom, undo: undo, display: "worker"}}
+	pending := func(f startFailureRead) startFailureRead { f.pending = true; return f }
+	terminal := other
+	terminal.terminal = "model_not_found"
+	limited := other
+	limited.rateLimit = true
+	namedDied := pending(other)
+	namedDied.configured, namedDied.died, namedDied.cause = true, true, causeDiedDuringStartup
+	timedOut := pending(other)
+	timedOut.err = errors.Join(boom, context.DeadlineExceeded)
+	unattributed := pending(other)
+	unattributed.cause = causeAttribution
+	for _, c := range []struct {
+		name string
+		f    startFailureRead
+	}{
+		{"provider terminal", terminal},
+		{"rate limit", limited},
+		{"pending-create rollback", pending(other)},
+		{"pending-create rollback, timed out", timedOut},
+		{"pending-create rollback, terminal", pending(terminal)},
+		{"configured named pending, died", namedDied},
+		{"attribution deferral", unattributed},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			step := abandonStep(abandonView(k, creating, txRuntime{Class: rtAbsent}, c.f))
+			if got, ok := step.Write[lastStartFailedAt]; ok {
+				t.Fatalf("write %v carries %s = %q, want no stamp", step.Write, lastStartFailedAt, got)
+			}
+		})
+	}
+
+	t.Run("capacity refusal", func(t *testing.T) {
+		now := gatherNow
+		kit := failingLaunch(t, fmt.Errorf("quota: %w", runtime.ErrProviderCapacity), "asleep", "sleep_reason", "idle")
+		row := kit.p.World.Census.Rows[kit.it.Key]
+		tp := TemplateParams{TemplateName: "worker", ResolvedProvider: &config.ResolvedProvider{Name: "test-agent"}}
+		kit.p.World.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(row.Info): {TP: tp}}}
+		kit.p.held.start.capacity, kit.it.Endpoint = newEndpointCapacityGuard(func() time.Time { return now }), endpointKey("provider:test-agent")
+		if s := kit.runKind(); s.Cause != causeCapacity {
+			t.Fatalf("premise: settlement %+v, want a capacity refusal", s)
+		}
+		if got := kit.meta(lastStartFailedAt); got != "" {
+			t.Fatalf("%s = %q after a capacity refusal, want no stamp", lastStartFailedAt, got)
+		}
+	})
 }
