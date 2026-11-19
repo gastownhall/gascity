@@ -121,3 +121,29 @@ func TestAdmitOneClassStartsOldestFirst(t *testing.T) {
 		}
 	}
 }
+
+// TestWakeBudgetUncontendedStartsEveryClass is AC-4 of ga-z4joq0 in the
+// legacy reconciler: when the candidates number no more than
+// max_wakes_per_tick, standing and demand alike all start in the pass.
+func TestWakeBudgetUncontendedStartsEveryClass(t *testing.T) {
+	specs := []wakeClassSpec{
+		{"standing-old", "2020-01-01T00:00:00Z", true},
+		{"demand-new", "2026-06-04T03:29:00Z", false},
+		{"standing-new", "2026-06-04T03:29:00Z", true},
+	}
+	sp, log := runWakeClassBudget(t, len(specs), specs)
+	if got := runningOf(sp, specs); len(got) != len(specs) {
+		t.Fatalf("started %v, want all %d; log:\n%s", got, len(specs), log)
+	}
+}
+
+// TestAdmitUncontendedAdmitsEveryClass is AC-4 of ga-z4joq0 in v2
+// admission: with a token for each, the demand start, the pool create and
+// both standing starts are all admitted in the pass.
+func TestAdmitUncontendedAdmitsEveryClass(t *testing.T) {
+	intents := []intent{standingStartOn(1, "", -time.Hour), startOn(2, "", 0), poolCreate("worker", ""), standingStartOn(3, "", 0)}
+	res := admit(admitIn(len(intents), 4), intents)
+	if len(res.Admitted) != len(intents) || len(res.Deferred) != 0 {
+		t.Fatalf("admitted %v deferred %+v, want all %d", keysOf(res.Admitted), res.Deferred, len(intents))
+	}
+}
