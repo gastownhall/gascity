@@ -2269,6 +2269,70 @@ against a fresh database takes ~30s and reaches the current schema,
 `bd init --server --force` against an empty one is pinned at ~5.5s and does
 not.
 
+#### Observable test logs
+
+`scripts/go-test-observable` runs `go test -json` and writes the raw JSON event
+stream to a log, so a gate can read named `PASS` events after a green run and a
+failure keeps its full output for diagnosis. This applies to the Go-native
+wrapper and the `make` targets that call it (`make test-go`, `make test-mac`,
+`make test-cmd-gc-process`); the Bazel test engine does not necessarily go
+through it. The wrapper prints `observable go test: log=<path>` first, so the
+path of the log it wrote is always on stderr.
+
+Who owns the log decides who may delete it:
+
+| Run | Log path | Owner | Lifetime |
+|---|---|---|---|
+| Default (no `OBSERVABLE_TEST_LOG`) | `${TMPDIR:-/var/tmp}/gascity-observable-logs-<uid>/gascity-<name>.jsonl.XXXXXX` | The wrapper | Pruned once older than 72 hours |
+| `OBSERVABLE_TEST_LOG=<path>` | `<path>` | The caller | Never removed by the wrapper |
+
+The default directory is private to the user: the wrapper creates it with mode
+`0700`, tightens an existing one, and uses it only if it is a real directory
+(not a symlink) owned by the current user. If it cannot establish that
+directory it warns, writes the log directly under the scratch root, and prunes
+nothing.
+
+**The 72 hour floor.** A wrapper-owned log is kept at least 72 hours (4320
+minutes) after its last write. Pruning is opportunistic: it runs at the start
+of a later wrapper invocation, before the new log is allocated, and removes
+only regular files directly inside the wrapper's own directory that are older
+than the floor. It is not a scheduled job, so a log in an idle directory
+stays until the next wrapper run, and nothing outside that directory is ever
+touched. When it removes anything it prints
+`observable go test: pruned <N> expired log(s) older than 72h from <dir>`. Every
+housekeeping step is advisory: a failure is a warning and never changes the
+exit status of `go test`.
+
+**An explicit `OBSERVABLE_TEST_LOG` is caller-owned.** The wrapper deletes the
+file once, at the start of that run, and writes the new stream in its place, so
+a second run to the same path overwrites the first. It never creates the
+file's directory and never removes the file afterward. A run with an explicit
+path still prunes the default directory when that directory already exists and is
+usable (see above).
+The wrapper prints `log-retention: caller-owned, never removed by the wrapper`
+for these runs and `log-retention: wrapper-owned, pruned after 72h` for default
+ones.
+
+**Keeping a log.** Give each run you want to keep its own path, in a directory
+you own and outside `gascity-observable-logs-<uid>`:
+
+```bash
+mkdir -p "$HOME/test-evidence"
+OBSERVABLE_TEST_LOG="$HOME/test-evidence/cmd-gc-$(date -u +%Y%m%dT%H%M%SZ).jsonl" \
+  make test-cmd-gc-process
+```
+
+A log from a default run can also be copied out (`cp -f <path> <your-path>`)
+within the 72 hours. Delete only logs you named yourself; the files in the
+wrapper's directory are the wrapper's to prune.
+
+**Gate records embed derived evidence.** A reviewer or deployer record states
+the counts and the named test results it read (for example, which `PASS`
+events it found and how many tests ran), not only a log path. A scratch path is
+a locator that is valid for the retention window; read the log in the same
+gate session that produced it, and do not rely on the path as the durable
+record.
+
 #### Resource isolation via gascity-test.slice
 
 On hosts that provision a `gascity-test.slice` systemd user slice (resource
