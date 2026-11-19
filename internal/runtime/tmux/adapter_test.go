@@ -393,6 +393,71 @@ func TestProvider_RelaunchInWarmSession(t *testing.T) {
 	}
 }
 
+// MouseOn is a launch-half fingerprint field, so a mouse_mode edit on a live
+// session is relaunched in the warm box (ga-1rin4uzs). Start applies
+// MouseOn=false as session-level "mouse off" plus window-level
+// "monitor-activity off", and leaves both unset for MouseOn=true, so the
+// global settings show through. After a Relaunch the session's options must
+// be exactly what a fresh Start with the new value leaves, in both directions.
+func TestProvider_RelaunchAppliesMouseOn(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	cases := []struct {
+		name          string
+		start, relaun bool
+	}{
+		{"off to on", false, true},
+		{"on to off", true, false},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.SocketName = privateSocketName(fmt.Sprintf("mo%d", i))
+			p := NewProviderWithConfig(cfg)
+			name := fmt.Sprintf("gc-test-relaunch-mouse-%d", i)
+			_ = p.Stop(name)
+			defer func() { _ = p.Stop(name) }()
+			workDir := t.TempDir()
+			marker := filepath.Join(workDir, "marker")
+			agentCmd := func(tag string) string {
+				return fmt.Sprintf("sh -c 'echo %s > %s; sleep 300'", tag, marker)
+			}
+			opts := func() (mouse, activity string) {
+				mouse, _ = p.Tmux().run("show-options", "-q", "-v", "-t", name, "mouse")
+				activity, _ = p.Tmux().run("show-options", "-w", "-q", "-v", "-t", name, "monitor-activity")
+				return strings.TrimSpace(mouse), strings.TrimSpace(activity)
+			}
+			want := func(mouseOn bool) (string, string) {
+				if mouseOn {
+					return "", "" // nothing set at session/window level: the global setting shows through
+				}
+				return "off", "off"
+			}
+			if err := p.Start(context.Background(), name, runtime.Config{Command: agentCmd("created"), WorkDir: workDir, MouseOn: tc.start}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			waitForMarker(t, marker, "created")
+			sm, sa := opts()
+			wm, wa := want(tc.start)
+			t.Logf("after Start(MouseOn=%v): session mouse=%q window monitor-activity=%q", tc.start, sm, sa)
+			if sm != wm || sa != wa {
+				t.Fatalf("Start(MouseOn=%v) left mouse=%q monitor-activity=%q, want %q %q", tc.start, sm, sa, wm, wa)
+			}
+			if err := p.Relaunch(context.Background(), name, runtime.Config{Command: agentCmd("respawned"), WorkDir: workDir, MouseOn: tc.relaun}); err != nil {
+				t.Fatalf("Relaunch: %v", err)
+			}
+			waitForMarker(t, marker, "respawned")
+			rm, ra := opts()
+			wm, wa = want(tc.relaun)
+			t.Logf("after Relaunch(MouseOn=%v): session mouse=%q window monitor-activity=%q", tc.relaun, rm, ra)
+			if rm != wm || ra != wa {
+				t.Fatalf("Relaunch(MouseOn=%v) left mouse=%q monitor-activity=%q, want %q %q (what a fresh Start leaves)", tc.relaun, rm, ra, wm, wa)
+			}
+		})
+	}
+}
+
 // Relaunch replaces the agent pane (the first pane of the first window), not
 // whichever pane is active. A human who split the agent's window and then
 // opened and focused a second window must keep both: before the fix,

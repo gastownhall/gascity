@@ -297,7 +297,8 @@ func (p *Provider) RunLive(name string, cfg runtime.Config) error {
 // Relaunch re-launches the agent inside an already-provisioned (warm) tmux
 // session without re-creating it: the box, its session environment, and any
 // staged overlay/copy files are left intact; only the agent command is respawned
-// (respawn-pane -k) and the post-launch orchestration re-run. This is the
+// (respawn-pane -k), the MouseOn options applied as Start applies them, and the
+// post-launch orchestration re-run. This is the
 // agent-half of the runtime/transport un-weld (B1) — it lets the reconciler apply
 // a launch-only config change without the full reprovision a Stop+Start forces.
 // Unlike Start it does NOT regenerate the instance token, re-inject env hints, or
@@ -1541,6 +1542,7 @@ type startOps interface {
 	paneBusy(name string) (bool, error)
 	setRemainOnExit(name string) error
 	disableMouseAndActivity(name string) error
+	applyMouseMode(name string, mouseOn bool) error
 	runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration) error
 }
 
@@ -1926,6 +1928,26 @@ func (o *tmuxStartOps) disableMouseAndActivity(name string) error {
 	return nil
 }
 
+// applyMouseMode leaves the session's mouse option and the agent window's
+// monitor-activity option as doStartSession leaves a session it creates: both
+// "off" when mouseOn is false (disableMouseAndActivity), and neither set when
+// mouseOn is true, so the global settings show through. The agent pane is the
+// target, so a window a human opened and focused is left alone.
+func (o *tmuxStartOps) applyMouseMode(name string, mouseOn bool) error {
+	target, err := o.tm.agentPaneTarget(name)
+	if err != nil {
+		return err
+	}
+	if mouseOn {
+		_, mouseErr := o.tm.run("set-option", "-u", "-t", target, "mouse")
+		_, activityErr := o.tm.run("set-option", "-wu", "-t", target, "monitor-activity")
+		return errors.Join(mouseErr, activityErr)
+	}
+	_, mouseErr := o.tm.run("set-option", "-t", target, "mouse", "off")
+	_, activityErr := o.tm.run("set-option", "-w", "-t", target, "monitor-activity", "off")
+	return errors.Join(mouseErr, activityErr)
+}
+
 func (o *tmuxStartOps) runSetupCommand(ctx context.Context, cmd string, env map[string]string, timeout time.Duration) error {
 	// Read the base env before arming the deadline, so the read is not the
 	// command's. During a native store open it is the environment as the open
@@ -2216,7 +2238,8 @@ func finishLaunch(ctx context.Context, ops startOps, name string, cfg runtime.Co
 
 // doRelaunchSession relaunches the agent inside an ALREADY-PROVISIONED (warm) box
 // without re-creating it: it respawns the agent pane with the (possibly changed)
-// launch command, then re-runs the post-launch orchestration. This is the in-repo
+// launch command, applies the (possibly changed) MouseOn options, then re-runs
+// the post-launch orchestration. This is the in-repo
 // pragmatic half of the runtime/transport un-weld (B1) — Provision still owns box
 // creation; this owns the agent's launch into a box that already exists. The box
 // MUST exist: a missing session is an error, not a silent re-provision (the
@@ -2256,6 +2279,10 @@ func doRelaunchSession(ctx context.Context, ops startOps, name string, cfg runti
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("relaunch: respawning agent in session %q: %w", name, err)
 	}
+	// MouseOn is launch-half, so a mouse_mode change relaunches the agent in
+	// this box, whose options doStartSession set for the old value. Apply the
+	// new one the same way. Best-effort, as in doStartSession.
+	_ = ops.applyMouseMode(name, cfg.MouseOn)
 
 	return finishLaunch(ctx, ops, name, cfg, setupTimeout)
 }

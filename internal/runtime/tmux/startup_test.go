@@ -42,6 +42,8 @@ type startCall struct {
 	// handed, so a test can prove the artifact records what was classified.
 	exitStatus string
 	exitSignal string
+	// mouseOn is the value applyMouseMode was handed.
+	mouseOn bool
 }
 
 // fakeStartOps records calls with full arguments and simulates outcomes
@@ -76,6 +78,7 @@ type fakeStartOps struct {
 	hasSessionErr              error
 	setRemainOnExitErr         error
 	disableMouseAndActivityErr error
+	applyMouseModeErr          error
 	runSetupCommandErr         error
 	sendKeysErr                error
 	// sendKeysErrs, if non-empty, is consumed sequentially across calls
@@ -225,6 +228,11 @@ func (f *fakeStartOps) setRemainOnExit(name string) error {
 func (f *fakeStartOps) disableMouseAndActivity(name string) error {
 	f.calls = append(f.calls, startCall{method: "disableMouseAndActivity", name: name})
 	return f.disableMouseAndActivityErr
+}
+
+func (f *fakeStartOps) applyMouseMode(name string, mouseOn bool) error {
+	f.calls = append(f.calls, startCall{method: "applyMouseMode", name: name, mouseOn: mouseOn})
+	return f.applyMouseModeErr
 }
 
 func (f *fakeStartOps) capturePane(name string, _ int) (string, error) {
@@ -2723,6 +2731,7 @@ func TestDoRelaunchSession_RespawnsThenOrchestrates(t *testing.T) {
 	assertCallSequence(t, ops, []string{
 		"hasSession", // box must already exist
 		"respawnAgent",
+		"applyMouseMode",
 		"waitForCommand",
 		"acceptStartupDialogs",
 		"waitForReady",
@@ -2777,7 +2786,7 @@ func TestDoRelaunchSession_OneShotSkipsOrchestration(t *testing.T) {
 	if err := doRelaunchSession(context.Background(), ops, "sess", cfg, DefaultConfig().SetupTimeout); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	assertCallSequence(t, ops, []string{"hasSession", "respawnAgent"})
+	assertCallSequence(t, ops, []string{"hasSession", "respawnAgent", "applyMouseMode"})
 }
 
 // With no managed startup hints the relaunch is fire-and-forget after respawn.
@@ -2787,7 +2796,34 @@ func TestDoRelaunchSession_FireAndForget(t *testing.T) {
 	if err := doRelaunchSession(context.Background(), ops, "sess", runtime.Config{Command: "sleep 300"}, DefaultConfig().SetupTimeout); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	assertCallSequence(t, ops, []string{"hasSession", "respawnAgent"})
+	assertCallSequence(t, ops, []string{"hasSession", "respawnAgent", "applyMouseMode"})
+}
+
+// A relaunch reuses the box whose mouse options doStartSession set for the
+// old MouseOn, so it applies the new value after the respawn (ga-1rin4uzs).
+func TestDoRelaunchSession_AppliesMouseMode(t *testing.T) {
+	for _, mouseOn := range []bool{false, true} {
+		t.Run(fmt.Sprintf("MouseOn=%v", mouseOn), func(t *testing.T) {
+			ops := &fakeStartOps{hasSessionResult: true}
+			cfg := runtime.Config{Command: "sleep 300", MouseOn: mouseOn}
+			if err := doRelaunchSession(context.Background(), ops, "sess", cfg, DefaultConfig().SetupTimeout); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			assertCallSequence(t, ops, []string{"hasSession", "respawnAgent", "applyMouseMode"})
+			if got := callsByMethod(t, ops, "applyMouseMode", 1)[0]; got.name != "sess" || got.mouseOn != mouseOn {
+				t.Errorf("applyMouseMode(%q, %v), want (%q, %v)", got.name, got.mouseOn, "sess", mouseOn)
+			}
+		})
+	}
+}
+
+// Mouse options are best-effort, as in doStartSession: a failure to apply
+// them never fails the relaunch.
+func TestDoRelaunchSession_MouseModeFailureIsBestEffort(t *testing.T) {
+	ops := &fakeStartOps{hasSessionResult: true, applyMouseModeErr: errors.New("tmux: no server")}
+	if err := doRelaunchSession(context.Background(), ops, "sess", runtime.Config{Command: "sleep 300"}, DefaultConfig().SetupTimeout); err != nil {
+		t.Fatalf("doRelaunchSession = %v, want nil (mouse options are best-effort)", err)
+	}
 }
 
 // The relaunch reuses buildLaunchCommand, so a long prompt is respawned via the
