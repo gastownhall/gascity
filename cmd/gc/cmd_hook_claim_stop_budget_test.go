@@ -370,3 +370,55 @@ func TestHookClaimPostCASRecheckHasItsOwnBudget(t *testing.T) {
 		})
 	}
 }
+
+// TestHookClaimPreCASGateCarryingLandingPastReserveIsUnwound (AC-6): the stop
+// gate no longer spends the CAS's budget, so a slow pre-CAS gate can carry a
+// claim that passed the window fence to a landing past window + reserve. The
+// straddle fence still releases it rather than parking it on a gone turn.
+func TestHookClaimPreCASGateCarryingLandingPastReserveIsUnwound(t *testing.T) {
+	const window = time.Minute
+	for _, tier := range claimTiers {
+		t.Run(tier.name, func(t *testing.T) {
+			f := newHookWorkflowStopFixture(t)
+			live := f.root("live run", "")
+			step := f.step("implement", live.ID, nil)
+			if tier.assignee != "" {
+				f.assign(step.ID, tier.assignee)
+			}
+			f.served = []string{step.ID}
+
+			invokedAt := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+			clock := invokedAt
+			claimed := false
+			ops := f.ops()
+			ops.Now = func() time.Time { return clock }
+			ops.InvokedAt = invokedAt
+			ops.ClaimWindow = window
+			baseClaim := ops.Claim
+			ops.Claim = func(ctx context.Context, dir string, env []string, id, assignee string) (beads.Bead, bool, error) {
+				claimed = true
+				return baseClaim(ctx, dir, env, id, assignee)
+			}
+			// The pre-CAS gate's reads carry the invocation past window + reserve.
+			ops.WorkflowStore = func(context.Context, string, []string, string, string) beads.Store {
+				return slowWorkflowStore{Store: f.store, charge: func() {
+					if !claimed {
+						clock = invokedAt.Add(window + hookClaimMutationTimeout + time.Second)
+					}
+				}}
+			}
+
+			run := runBudgetClaim(t, ops, false)
+
+			if !claimed {
+				t.Fatalf("no claim CAS ran; the window fence must pass before the gate\nstderr=%s", run.stderr)
+			}
+			if run.code != 1 || run.handed != "" || !strings.Contains(run.stderr, "claim window") {
+				t.Fatalf("doHookClaim = %d handed out %q, want exit 1 with the straddle unwind\nstdout=%s\nstderr=%s", run.code, run.handed, run.stdout, run.stderr)
+			}
+			if got := f.get(step.ID); got.Status != "open" || got.Assignee != "" {
+				t.Fatalf("step = status %q assignee %q, want the straddling claim released", got.Status, got.Assignee)
+			}
+		})
+	}
+}
