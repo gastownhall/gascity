@@ -249,3 +249,41 @@ func TestEPERMIsUnchangedWithoutAMemberReader(t *testing.T) {
 		t.Error("alive() = false, want true: EPERM reads as alive off Darwin")
 	}
 }
+
+// sigkillThenZombies models a group that outlives SIGTERM and the grace period
+// and then has no member left to signal by the time SIGKILL is sent: every
+// signal before SIGKILL succeeds (a live member answers signal 0), and every
+// signal from SIGKILL on answers EPERM, the errno a Darwin kill(-pgid) gives a
+// group of only zombies.
+func sigkillThenZombies() func(int, syscall.Signal) error {
+	sigkilled := false
+	return func(_ int, sig syscall.Signal) error {
+		if sig == syscall.SIGKILL {
+			sigkilled = true
+		}
+		if sigkilled {
+			return syscall.EPERM
+		}
+		return nil
+	}
+}
+
+// Terminate reaches SIGKILL only when SIGTERM did not end the group within the
+// grace period, so an EPERM at that second site needs a pin of its own.
+func TestTerminateSIGKILLEPERMFromAllZombieGroupIsGone(t *testing.T) {
+	opts := epermOptions(liveMembers(0, nil))
+	opts.Kill = sigkillThenZombies()
+
+	if err := Terminate(45678, 5*time.Millisecond, opts); err != nil {
+		t.Errorf("Terminate() = %v, want nil: the group holds only zombies once SIGKILL answers EPERM", err)
+	}
+}
+
+func TestTerminateSIGKILLEPERMWithLiveMemberKeepsTheError(t *testing.T) {
+	opts := epermOptions(liveMembers(1, nil))
+	opts.Kill = sigkillThenZombies()
+
+	if err := Terminate(45678, 5*time.Millisecond, opts); !errors.Is(err, syscall.EPERM) {
+		t.Errorf("Terminate() = %v, want EPERM: a live member we may not signal is still there", err)
+	}
+}
