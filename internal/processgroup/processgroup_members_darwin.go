@@ -56,7 +56,7 @@ func defaultMemberStates(pgid int) ([]MemberState, error) {
 	for i := range procs {
 		members = append(members, MemberState{
 			Pid:   int(procs[i].Proc.P_pid),
-			State: memberStateName(int8(procs[i].Proc.P_stat)),
+			State: memberStateName(procs[i].Proc.P_stat),
 		})
 	}
 	return members, nil
