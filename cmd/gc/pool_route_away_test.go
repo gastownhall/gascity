@@ -184,8 +184,9 @@ func TestRouteAwayUnsettlingStampsAreSettled(t *testing.T) {
 // sweep still keeps for their live holder, each because something it cannot
 // see past may still be serving the bead: a session of the target agent, an
 // owner of no known agent, an identity this city cannot observe, a control
-// bead the dispatcher owns, a bead waiting on a person, or a graph-resident
-// session in the bead's own owner store.
+// bead the dispatcher owns, a bead waiting on a person, a graph-resident
+// session in the bead's own owner store, or a city-scoped owner serving its
+// own role's route in a rig scope.
 func TestRouteAwayKeepsClaimsTheSweepCannotJudge(t *testing.T) {
 	cfg := routeAwayCity()
 	settled := routedAtAgo(2 * routeAwaySettleWindow)
@@ -245,6 +246,26 @@ func TestRouteAwayKeepsClaimsTheSweepCannotJudge(t *testing.T) {
 		}
 		released := routeAwayTick(sessionStore, sessionStore, cfg, "", []session.Info{routeAwayHolder()}, []beads.Bead{work}, []beads.Store{ownerStore}, []string{""}, nil, routeAwayNow)
 		requireKeptByHolder(t, ownerStore, released, work)
+	})
+	t.Run("a cross-store-eligible owner keeps a claim routed to its own role in another scope", func(t *testing.T) {
+		store := beads.NewMemStore()
+		scoped := &config.City{
+			Rigs: []config.Rig{{Name: "riga", Path: t.TempDir()}},
+			Agents: []config.Agent{
+				{Name: "watcher", Scope: "city", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
+				{Name: "watcher", Dir: "riga", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(2)},
+			},
+		}
+		meta := routedAtAgo(2 * routeAwaySettleWindow)
+		meta[beadmeta.RoutedToMetadataKey] = "riga/watcher"
+		work := seedRouteAwayWork(t, store, "w-1", meta)
+		holder := session.Info{ID: "w-1", Template: "watcher", SessionOrigin: "ephemeral", PoolManaged: true, PoolSlot: "1"}
+		// The claim sits under the riga ref, outside the city watcher's own
+		// scope, but its route names the watcher's rig-scoped twin: a
+		// city-wide singleton serves its rig-routed role, so this is not a
+		// handoff and the holder keeps the claim.
+		released := routeAwayTick(store, store, scoped, "", []session.Info{holder}, []beads.Bead{work}, []beads.Store{store}, []string{"riga"}, nil, routeAwayNow)
+		requireKeptByHolder(t, store, released, work)
 	})
 }
 
