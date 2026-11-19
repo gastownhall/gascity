@@ -190,6 +190,13 @@ func readMarkerWorkStoreIdentity(markerPath string) (id workStoreIdentity, recor
 	if err != nil {
 		return workStoreIdentity{}, false, err
 	}
+	return parseMarkerWorkStoreIdentity(markerPath, data)
+}
+
+// parseMarkerWorkStoreIdentity reads the identity line out of a convergence
+// marker's bytes, already read from markerPath, which only names the file in
+// an error. recorded is false for a legacy marker with no such line.
+func parseMarkerWorkStoreIdentity(markerPath string, data []byte) (id workStoreIdentity, recorded bool, err error) {
 	for _, line := range strings.Split(string(data), "\n") {
 		rest, ok := strings.CutPrefix(strings.TrimSpace(line), strings.TrimSpace(workStoreIdentityLinePrefix)+" ")
 		if !ok {

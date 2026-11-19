@@ -72,20 +72,26 @@ type containmentBasis struct {
 	Database string `json:"database"`
 	// WorkStore is this city's work-store identity (workStoreIdentity.String):
 	// a recreated .beads changes it even when every field above is untouched.
+	// No basis is captured at all for a work store the marker's recorded
+	// identity contradicts (captureContainmentBasis), so a lease never names
+	// one.
 	WorkStore string `json:"work_store"`
 	// Classifier digests coordclass's generation, the classifier's labels,
-	// label prefixes and metadata keys, and this build's version: a binary
-	// that classifies differently must never be read as agreeing.
+	// label prefixes and metadata keys, and this build's version and commit:
+	// a binary that classifies differently must never be read as agreeing.
 	Classifier string `json:"classifier"`
 }
 
-// empty reports a basis with nothing captured: the zero value every report
-// that never reaches confirmInfraContainment's work-store read carries (not
-// configured, genesis, an identity mismatch, every uncheckable). It is the
-// signal newContainmentLease rejects on; since publishLease stores whatever
-// newContainmentLease returns, including nil, a report with an empty basis
-// does not merely add nothing — it actively withdraws any lease already
-// published (design doc §4.6, "Genesis: the first tick publishes").
+// empty reports a basis with nothing captured. A report carries one when
+// confirmInfraContainment never produced it (not configured, genesis, an
+// identity mismatch the caller's own hold returned), when its capture failed
+// (infraMigrationReport.basisErr says why), and on the boot that back-filled
+// a legacy marker's identity (confirmInfraConvergence drops the basis it
+// captured before that write). It is the signal newContainmentLease rejects
+// on; since publishLease stores whatever newContainmentLease returns,
+// including nil, a report with an empty basis does not merely add nothing —
+// it actively withdraws any lease already published (design doc §4.6,
+// "Genesis: the first tick publishes").
 func (b containmentBasis) empty() bool {
 	return b == containmentBasis{}
 }
@@ -133,11 +139,11 @@ type containmentLease struct {
 	// Basis is the containment basis captured for this verdict.
 	Basis containmentBasis
 	// Serving and ServesDegraded are infraMigrationReport.serving() and
-	// .servesDegraded() at the time this verdict was taken (design review
-	// MUST 1): a refusing and a degraded-serving verdict both name the
-	// stranded outcome and otherwise look alike on the wire, and a caller
-	// that cannot tell them apart from Outcome and Stranded alone has no
-	// way to know whether this city is serving anything at all.
+	// .servesDegraded() at the time this verdict was taken: a refusing and
+	// a degraded-serving verdict both name the stranded outcome and
+	// otherwise look alike on the wire, and a caller that cannot tell them
+	// apart from Outcome and Stranded alone has no way to know whether this
+	// city is serving anything at all.
 	Serving, ServesDegraded bool
 	// ProvenBeads, LostCrossEdges, Stranded, PresumedReused and
 	// Declassifiable mirror the same-named infraMigrationReport fields.
@@ -160,7 +166,7 @@ type containmentLease struct {
 // manifest, cleared, database, work_store, classifier}, proven_beads,
 // lost_cross_edges, stranded, presumed_reused, declassifiable, complete}.
 // serving, serves_degraded, recheck_failing and last_attempt_ms are all
-// part of v1 (design review MUST 1 and MUST 2): v does not bump for them.
+// part of v1: v does not bump for them.
 type containmentLeaseWire struct {
 	V              int                 `json:"v"`
 	PID            int                 `json:"pid"`
@@ -209,15 +215,14 @@ func (l *containmentLease) wire(now time.Time) containmentLeaseWire {
 }
 
 // newContainmentLease assembles the lease a definitive verdict publishes.
-// freshMS is the recheck's current freshness budget (storage_boot.go's
-// adaptive-interval math); takenAt is when report's check began. It returns
-// nil for a report with no captured basis (not configured, genesis, an
-// identity mismatch, uncheckable: there is nothing there a one-shot could
-// compare itself against) and, independently of basis, for any report whose
-// Outcome is not itself one a lease is ever published for
-// (leaseableOutcome) — a standing fault discovered mid-check keeps its
-// basis (confirmInfraContainment's own comment on that), so the basis check
-// alone does not reject it; design doc §4.6.
+// freshMS is the recheck's freshness budget (strandRecheckFreshness);
+// takenAt is when report's check began. It returns nil for a report with
+// no captured basis (containmentBasis.empty: there is nothing there a
+// one-shot could compare itself against) and, independently of basis, for
+// any report whose Outcome is not itself one a lease is ever published for
+// (leaseableOutcome) — an uncheckable report from confirmInfraContainment
+// keeps the basis it captured before the read that failed, so the basis
+// check alone does not reject it; design doc §4.6.
 func newContainmentLease(target infraBindingTarget, report infraMigrationReport, freshMS int64, takenAt time.Time) *containmentLease {
 	if report.basis.empty() || !report.leaseableOutcome() {
 		return nil
@@ -268,12 +273,20 @@ func capLeaseList(ids []string) ([]string, bool) {
 
 // captureContainmentBasis reads every fact confirmInfraContainment's
 // work-store read is about to depend on (design doc §4.2), for the caller to
-// attach to the report it is about to produce. A read failure here is never
-// fatal to the check itself — the basis is advisory, consulted by no
-// refusal (design doc §1, Q7) — so the caller treats a non-nil error as
-// "capture nothing", leaving the report's basis at its zero value.
+// attach to the report it is about to produce. A failure here is never fatal
+// to the check itself — the basis is advisory, consulted by no refusal
+// (design doc §1, Q7) — so the caller keeps the error beside an empty basis
+// (infraMigrationReport.basisErr), and no lease is published for that report.
+//
+// It also captures nothing for a work store the marker's recorded identity
+// contradicts (checkMarkerWorkStoreIdentity: the comparison boot refuses on
+// in markerWorkStoreIdentityHold). A lease says the binding holds THIS work
+// store's slice, and the strand recheck runs confirmInfraContainment without
+// that hold. The comparison reads the same marker bytes Marker digests and
+// the same identity WorkStore stamps, so however the files change around
+// the capture, no basis ever names an identity that was not compared.
 func captureContainmentBasis(cityPath string, target infraBindingTarget) (containmentBasis, error) {
-	markerSum, err := fileSHA256(target.MarkerPath())
+	marker, err := os.ReadFile(target.MarkerPath())
 	if err != nil {
 		return containmentBasis{}, fmt.Errorf("capturing the containment basis: reading %s: %w", target.MarkerPath(), err)
 	}
@@ -294,14 +307,34 @@ func captureContainmentBasis(cityPath string, target infraBindingTarget) (contai
 	if err != nil {
 		return containmentBasis{}, fmt.Errorf("capturing the containment basis: %w", err)
 	}
+	if err := checkMarkerWorkStoreIdentity(target.MarkerPath(), marker, workStore); err != nil {
+		return containmentBasis{}, fmt.Errorf("capturing the containment basis: %w", err)
+	}
+	markerSum := sha256.Sum256(marker)
 	return containmentBasis{
-		Marker:     "sha256:" + markerSum,
+		Marker:     "sha256:" + hex.EncodeToString(markerSum[:]),
 		Manifest:   manifestStamp,
 		Cleared:    clearedStamp,
 		Database:   databaseStamp,
 		WorkStore:  workStore.String(),
 		Classifier: classifierBasisString(),
 	}, nil
+}
+
+// checkMarkerWorkStoreIdentity returns an error when marker, the bytes of
+// the convergence marker at markerPath, records a work-store identity that
+// will not parse or that names another work store than current
+// (workStoreIdentityMismatch). A legacy marker records none and contradicts
+// nothing, as it does for boot's hold.
+func checkMarkerWorkStoreIdentity(markerPath string, marker []byte, current workStoreIdentity) error {
+	recorded, ok, err := parseMarkerWorkStoreIdentity(markerPath, marker)
+	if err != nil || !ok {
+		return err
+	}
+	if why := workStoreIdentityMismatch(recorded, current); why != "" {
+		return fmt.Errorf("%s: %s", markerPath, why)
+	}
+	return nil
 }
 
 // containmentBasisStamp fingerprints path's metadata: (dev, ino, size,
@@ -314,10 +347,10 @@ func captureContainmentBasis(cityPath string, target infraBindingTarget) (contai
 // over.
 //
 // x/sys/unix, not os.Stat, the way statBdBinary (bd_inventory_trust.go)
-// reads a binary's identity: cmd/gc is not one of this repo's
-// Windows-cross-compiled packages (no _windows.go file here, and it is in
-// none of .github/windows-lane's allowlists), so there is no inode-less
-// platform left to fall back for, and none is kept.
+// reads a binary's identity: gc ships for linux and darwin only
+// (.goreleaser.yml), and cmd/gc is in none of .github/windows-lane's
+// allowlists, so there is no inode-less platform to fall back for, and
+// none is kept.
 func containmentBasisStamp(path string, changeSensitive bool) (string, error) {
 	var st unix.Stat_t
 	if err := unix.Stat(path, &st); err != nil {
@@ -333,15 +366,16 @@ func containmentBasisStamp(path string, changeSensitive bool) (string, error) {
 		uint64(st.Dev), st.Ino, st.Size, st.Mtim.Nano(), st.Ctim.Nano()), nil //nolint:unconvert // Darwin's field is signed int32.
 }
 
-// classifierBasisNonce makes a dev or pseudo build's classifier basis unique
-// to this process, so it never matches another process's (design doc §4.2,
-// "Dev and pseudo builds never match"): there is no build identity to
-// compare in that case, so pid+start-time nanos stands in for one.
+// classifierBasisNonce makes the classifier basis of a build with no
+// trustworthy identity (classifierBuildIdentityTrusted) unique to this
+// process, so it never matches another process's (design doc §4.2): there
+// is no build identity to compare in that case, so pid+start-time nanos
+// stands in for one.
 var classifierBasisNonce = fmt.Sprintf("%d.%d", os.Getpid(), time.Now().UnixNano())
 
 // classifierBasisString digests coordclass's generation, its classifier's
-// labels, label prefixes and metadata keys, and this build's version, into
-// the containment basis's "classifier" field (design doc §4.2).
+// labels, label prefixes and metadata keys, and this build's version and
+// commit, into the containment basis's "classifier" field (design doc §4.2).
 func classifierBasisString() string {
 	h := sha256.New()
 	for _, l := range coordclass.ClassifierLabels() {
@@ -355,9 +389,25 @@ func classifierBasisString() string {
 	}
 	digest := hex.EncodeToString(h.Sum(nil))
 	build := fmt.Sprintf("%s@%s", version, commit)
-	_, pseudo := goPseudoVersionBase(versionBuilt)
-	if version == "dev" || commit == "unknown" || strings.HasSuffix(commit, dirtySuffix) || pseudo {
+	if !classifierBuildIdentityTrusted() {
 		build += "#" + classifierBasisNonce
 	}
 	return fmt.Sprintf("gen=%d;digest=%s;build=%s", coordclass.CurrentGeneration, digest, build)
+}
+
+// classifierBuildIdentityTrusted reports whether this binary's commit stamp
+// names the code it runs well enough for two processes to compare their
+// classifier bases: a known commit (knownGCBuildID), abbreviated to at least
+// minAbbrevCommitLen, from a clean tree, in a build that is not a Go
+// pseudo-version. The version plays no part: an untagged `make build`
+// stamps version=dev beside the commit it was built from, and two processes
+// built from one clean commit run the same classifier — the same trust
+// binary-drift detection places in a known commit (detectGCBinaryDrift).
+func classifierBuildIdentityTrusted() bool {
+	stamp := strings.TrimSpace(commit)
+	if !knownGCBuildID(stamp) || len(stamp) < minAbbrevCommitLen || strings.HasSuffix(stamp, dirtySuffix) {
+		return false
+	}
+	_, pseudo := goPseudoVersionBase(versionBuilt)
+	return !pseudo
 }
