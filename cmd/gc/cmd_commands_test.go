@@ -2091,17 +2091,10 @@ func TestPackLeafScopeAfterLeafNeverSilentlyRetargets(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	oldWD, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(cityA); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+	t.Chdir(cityA)
 	t.Setenv("GC_CITY_PATH", cityA)
 
-	refused := []struct {
+	refused :=[]struct {
 		name string
 		args []string
 	}{
@@ -2192,14 +2185,7 @@ func TestCoreCommandCityFlagStillSelectsCity(t *testing.T) {
 	t.Setenv("GC_RIG", "")
 	ambient := newRealCityDir(t, "ambient")
 	target := newRealCityDir(t, "target")
-	oldWD, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chdir(ambient); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chdir(oldWD) })
+	t.Chdir(ambient)
 	t.Setenv("GC_CITY_PATH", ambient)
 
 	var stdout, stderr bytes.Buffer

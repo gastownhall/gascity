@@ -249,7 +249,7 @@ calls = 1
 [[count]]
 path = "cmd/gc/cmd_commands_test.go"
 resource = "cwd"
-calls = 68
+calls = 64
 
 [[count]]
 path = "cmd/gc/cmd_commands_test.go"
