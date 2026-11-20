@@ -1344,14 +1344,16 @@ func TestRun_ProvisionAndLaunchAreKnown(t *testing.T) {
 // passes all three checks; a launch answering exit 2 (which fails the pack's
 // first start), a launch that starts no agent, a fresh_only launch replacing
 // the running agent, a provision answering exit 2 and a provision that
-// starts the agent each fail their check.
+// starts the agent each fail their check; a set-meta answering exit 2 fails
+// the metadata round-trip rather than skipping it, as gc fails the launch
+// whose identity it cannot publish (publishLaunchIdentity).
 func TestRun_ProvisionLaunchSmoke(t *testing.T) {
 	res, err := Run(context.Background(), launchReference(t, nil), Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	reportFailures(t, res)
-	for _, name := range []string{provisionCheck, launchCheck, launchFreshOnlyCheck} {
+	for _, name := range []string{provisionCheck, launchCheck, launchFreshOnlyCheck, metadataCheck} {
 		if c := findCheck(t, res, name); c.Status != StatusPass {
 			t.Errorf("golden: %s = %s (%s), want PASS", name, c.Status, c.Detail)
 		}
@@ -1364,15 +1366,16 @@ func TestRun_ProvisionLaunchSmoke(t *testing.T) {
 		t.Fatalf("golden launch %q has no fresh_only refusal to remove", golden["launch"])
 	}
 	for _, m := range []struct {
-		name                       string
-		bodies                     map[string]string
-		provision, launch, freshly Status
+		name                             string
+		bodies                           map[string]string
+		provision, launch, freshly, meta Status
 	}{
-		{"launch exit 2", map[string]string{"launch": `cat >/dev/null; exit 2`}, StatusPass, StatusFail, StatusSkip},
-		{"launch starts nothing", map[string]string{"launch": `cat >/dev/null`}, StatusPass, StatusFail, StatusSkip},
-		{"launch ignores fresh_only", map[string]string{"launch": ignoresFresh}, StatusPass, StatusPass, StatusFail},
-		{"provision exit 2", map[string]string{"provision": `cat >/dev/null; exit 2`}, StatusFail, StatusSkip, StatusSkip},
-		{"provision starts the agent", map[string]string{"provision": golden["start"]}, StatusFail, StatusPass, StatusPass},
+		{"launch exit 2", map[string]string{"launch": `cat >/dev/null; exit 2`}, StatusPass, StatusFail, StatusSkip, StatusPass},
+		{"launch starts nothing", map[string]string{"launch": `cat >/dev/null`}, StatusPass, StatusFail, StatusSkip, StatusPass},
+		{"launch ignores fresh_only", map[string]string{"launch": ignoresFresh}, StatusPass, StatusPass, StatusFail, StatusPass},
+		{"provision exit 2", map[string]string{"provision": `cat >/dev/null; exit 2`}, StatusFail, StatusSkip, StatusSkip, StatusPass},
+		{"provision starts the agent", map[string]string{"provision": golden["start"]}, StatusFail, StatusPass, StatusPass, StatusPass},
+		{"set-meta exit 2", map[string]string{"set-meta": `cat >/dev/null; exit 2`}, StatusPass, StatusPass, StatusPass, StatusFail},
 	} {
 		res, err := Run(context.Background(), launchReference(t, m.bodies), Options{})
 		if err != nil {
@@ -1381,7 +1384,7 @@ func TestRun_ProvisionLaunchSmoke(t *testing.T) {
 		if !res.Failed() {
 			t.Errorf("mutant %s: Failed() = false, want true", m.name)
 		}
-		for name, want := range map[string]Status{provisionCheck: m.provision, launchCheck: m.launch, launchFreshOnlyCheck: m.freshly} {
+		for name, want := range map[string]Status{provisionCheck: m.provision, launchCheck: m.launch, launchFreshOnlyCheck: m.freshly, metadataCheck: m.meta} {
 			if c := findCheck(t, res, name); c.Status != want {
 				t.Errorf("mutant %s: %s = %s (%s), want %s", m.name, name, c.Status, c.Detail, want)
 			}
@@ -1519,5 +1522,49 @@ func TestRun_CanceledProvisionLaunchStopsItsSession(t *testing.T) {
 	}
 	if _, err := os.Stat(city); !os.IsNotExist(err) {
 		t.Errorf("the canceled check's city %s: stat err = %v, want it removed", city, err)
+	}
+}
+
+// Kills an is-running that exits 2 after provision or launch reported as
+// "did not answer: <nil>": the detail names the exit 2 of a required op.
+func TestRun_ProvisionLaunchIsRunningExitTwoSaysSo(t *testing.T) {
+	for _, tc := range []struct {
+		name, isRunning, check string
+	}{
+		{"after provision", `if [ -d "$box" ]; then echo true; else case "$name" in *-launch) exit 2 ;; esac; echo false; fi`, provisionCheck},
+		{"after launch", `if [ -d "$box" ]; then case "$name" in *-launch) exit 2 ;; esac; echo true; else echo false; fi`, launchCheck},
+	} {
+		res, err := Run(context.Background(), launchReference(t, map[string]string{"is-running": tc.isRunning}), Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := findCheck(t, res, tc.check)
+		if c.Status != StatusFail {
+			t.Errorf("%s: %s = %s (%s), want FAIL", tc.name, tc.check, c.Status, c.Detail)
+		}
+		if strings.Contains(c.Detail, "<nil>") || !strings.Contains(c.Detail, "exit 2") {
+			t.Errorf("%s: %s detail = %q, want it to name the exit 2", tc.name, tc.check, c.Detail)
+		}
+	}
+}
+
+// input-fence is a token gc honors, so the handshake check must not call it
+// unknown; it promises no op of its own, so it adds no capability check.
+// Kills: a token gc acts on reported as ignored.
+func TestRun_InputFenceCapabilityIsKnown(t *testing.T) {
+	state := t.TempDir()
+	const from = `["report-attachment","report-activity"]`
+	script := conformantScript(state)
+	if !strings.Contains(script, from) {
+		t.Fatalf("conformant script declares no %s to extend", from)
+	}
+	body := strings.Replace(script, from, `["report-attachment","report-activity","`+runtime.ProtocolCapabilityInputFence+`"]`, 1)
+	res := runScript(t, body, Options{})
+
+	if c := findCheck(t, res, handshakeCheck); strings.Contains(c.Detail, "unknown") {
+		t.Errorf("handshake detail = %q, want %s not reported as unknown", c.Detail, runtime.ProtocolCapabilityInputFence)
+	}
+	if hasCheck(res, "capability "+runtime.ProtocolCapabilityInputFence) {
+		t.Errorf("%s produced a capability check", runtime.ProtocolCapabilityInputFence)
 	}
 }

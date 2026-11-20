@@ -293,7 +293,9 @@ func (c *checker) runOpEnv(ctx context.Context, timeout time.Duration, env []str
 // capability-to-op map. input-outcome types the driving ops' answers rather
 // than promising an op, so it maps to "" and checkInputOutcome checks it.
 // proc.provision and proc.launch promise the provision and launch ops, which
-// checkProvisionLaunch runs for a handshake that un-welds start.
+// checkProvisionLaunch runs for a handshake that un-welds start. input-fence
+// is a claim about the box's tmux (RUNTIME-CONTRACT-009), not an op, so it
+// maps to "".
 var knownCapabilities = map[string]string{
 	runtime.ProtocolCapabilityReportAttachment: "is-attached",
 	runtime.ProtocolCapabilityReportActivity:   "get-last-activity",
@@ -306,6 +308,7 @@ var knownCapabilities = map[string]string{
 	runtime.ProtocolCapabilityInputOutcome:     "",
 	runtime.ProtocolCapabilityProvision:        "provision",
 	runtime.ProtocolCapabilityLaunch:           "launch",
+	runtime.ProtocolCapabilityInputFence:       "",
 	"conformance-faults":                       "",
 	"city-scoped":                              "",
 }
@@ -334,10 +337,6 @@ const (
 	launchCheck          = "capability proc.launch: launch"
 	launchFreshOnlyCheck = "capability proc.launch: fresh_only launch on a running agent"
 )
-
-// exitCodeFreshCollision is a fresh_only start, provision or launch refusing a
-// name a box or an agent holds (EX_CANTCREAT).
-const exitCodeFreshCollision = 73
 
 // inputOutcomeCheck is the input-outcome smoke check (`gc runtime
 // conformance` gates the token in full as the input group).
@@ -688,7 +687,7 @@ func (c *checker) checkProvision(ctx context.Context, city []string, name string
 	}
 	switch running := c.runOpEnv(ctx, c.opts.OpTimeout, city, nil, "is-running", name); {
 	case running.unsupported || running.err != nil:
-		c.record(provisionCheck, StatusFail, fmt.Sprintf("is-running after provision did not answer: %v", running.err))
+		c.record(provisionCheck, StatusFail, "is-running after provision did not answer: "+unanswered(running))
 	case running.stdout != "false":
 		c.record(provisionCheck, StatusFail, fmt.Sprintf("is-running after provision = %q, want \"false\": provision prepares the box without its agent, which gc launches after it", running.stdout))
 	default:
@@ -712,7 +711,7 @@ func (c *checker) checkLaunch(ctx context.Context, city []string, name string, c
 	}
 	switch running := c.runOpEnv(ctx, c.opts.OpTimeout, city, nil, "is-running", name); {
 	case running.unsupported || running.err != nil:
-		c.record(launchCheck, StatusFail, fmt.Sprintf("is-running after launch did not answer: %v", running.err))
+		c.record(launchCheck, StatusFail, "is-running after launch did not answer: "+unanswered(running))
 		return false
 	case running.stdout != "true":
 		c.record(launchCheck, StatusFail, fmt.Sprintf("is-running after launch = %q, want \"true\"", running.stdout))
@@ -723,6 +722,15 @@ func (c *checker) checkLaunch(ctx context.Context, city []string, name string, c
 	}
 }
 
+// unanswered describes a required op that did not answer: its exit 2, which
+// leaves no error of its own, or its error.
+func unanswered(res opResult) string {
+	if res.unsupported {
+		return "exit 2, but it is a required op"
+	}
+	return res.err.Error()
+}
+
 // checkLaunchFreshOnly sends a fresh_only launch for name in city, whose
 // agent runs, and checks it refuses with exit 73 rather than replacing it.
 func (c *checker) checkLaunchFreshOnly(ctx context.Context, city []string, name string, fresh []byte) {
@@ -731,11 +739,11 @@ func (c *checker) checkLaunchFreshOnly(ctx context.Context, city []string, name 
 	case res.unsupported:
 		c.record(launchFreshOnlyCheck, StatusFail, "proc.launch declared but launch not implemented (exit 2)")
 	case res.err == nil:
-		c.record(launchFreshOnlyCheck, StatusFail, fmt.Sprintf("exited 0, want %d: a fresh_only launch never replaces a running agent", exitCodeFreshCollision))
-	case res.exitCode != exitCodeFreshCollision:
-		c.record(launchFreshOnlyCheck, StatusFail, fmt.Sprintf("exited %d, want %d: %v", res.exitCode, exitCodeFreshCollision, res.err))
+		c.record(launchFreshOnlyCheck, StatusFail, fmt.Sprintf("exited 0, want %d: a fresh_only launch never replaces a running agent", runtime.ExitCodeFreshCollision))
+	case res.exitCode != runtime.ExitCodeFreshCollision:
+		c.record(launchFreshOnlyCheck, StatusFail, fmt.Sprintf("exited %d, want %d: %v", res.exitCode, runtime.ExitCodeFreshCollision, res.err))
 	default:
-		c.record(launchFreshOnlyCheck, StatusPass, fmt.Sprintf("exit %d", exitCodeFreshCollision))
+		c.record(launchFreshOnlyCheck, StatusPass, fmt.Sprintf("exit %d", runtime.ExitCodeFreshCollision))
 	}
 }
 
@@ -772,7 +780,7 @@ func (c *checker) remainingCheckNames() []string {
 	names = append(names,
 		"optional: process-alive",
 		c.nudgeCheckName(),
-		"optional: metadata round-trip",
+		metadataCheck,
 		c.drivingCheckName("peek"),
 		"optional: list-running",
 	)
@@ -1072,19 +1080,29 @@ func (c *checker) checkNudge(ctx context.Context, name string) {
 	}
 }
 
+// metadataCheck is the name checkMetadataRoundTrip reports under.
+const metadataCheck = "optional: metadata round-trip"
+
 // checkMetadataRoundTrip validates set-meta/get-meta/remove-meta as one
 // unit: absent entirely is a skip, but a partial or lossy implementation
 // is a failure — gc's drain and lifecycle coordination depend on
-// metadata round-tripping faithfully.
+// metadata round-tripping faithfully. For a handshake that un-welds start
+// (runtime.ProtocolInfo.SeparableLaunch) absence is a failure too: gc binds
+// the first turn to the launch identity it publishes with set-meta
+// (publishLaunchIdentity), so it fails every launch of such a runtime.
 func (c *checker) checkMetadataRoundTrip(ctx context.Context, name string) {
 	const (
-		check = "optional: metadata round-trip"
+		check = metadataCheck
 		key   = "gc_rpp_check"
 		value = "rpp-check-value"
 	)
 
 	set := c.runOp(ctx, []byte(value), "set-meta", name, key)
 	if set.unsupported {
+		if c.result.Protocol.SeparableLaunch() {
+			c.record(check, StatusFail, "set-meta not implemented (exit 2): this handshake un-welds start, and gc fails a launch whose identity set-meta cannot publish")
+			return
+		}
 		c.record(check, StatusSkip, "set-meta not implemented (exit 2)")
 		return
 	}

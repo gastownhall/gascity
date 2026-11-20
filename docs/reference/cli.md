@@ -4281,7 +4281,9 @@ proc.launch, or with proc.exec and without carrier.ops) is sent
 provision, which must leave is-running false, and with proc.launch a
 launch into that box, which must leave is-running true, and a fresh_only
 launch over the running agent, which must exit 73. They run in a private
-city of their own, as server-stop does.
+city of their own, as server-stop does. Such a runtime must also keep
+metadata, since gc publishes each launch's identity with set-meta: a
+set-meta that exits 2 fails the metadata round-trip instead of skipping it.
 
 The argument is an executable (path or PATH name) or a pack-declared
 runtime name: when it names a [runtimes.&lt;name&gt;] entry from the current

@@ -29,10 +29,12 @@ const (
 	hostStageSession       = "s1"
 )
 
-// hostStageFixture is a pack that records the start config each `start` or
-// `provision` op received ($S/<op>.<name>.json) and whether, when it ran,
-// the work dir already held the pre_start marker and the session_setup
-// marker. A session is running while $S/<name>.running exists, and
+// hostStageFixture is a pack that records the start config each `start`,
+// `provision` or `launch` op received ($S/<op>.<name>.json) and whether,
+// when a `start` or `provision` ran, the work dir already held the pre_start
+// marker and the session_setup marker. `start`, `provision` and `launch`
+// each mark the session running. A session is running while
+// $S/<name>.running exists, and
 // `is-running` fails while $S/is-running.fails exists. Its `exec` answers
 // `tmux has-session` with 1 (no agent session yet) and every other command
 // with 0, so a separable launch succeeds without a tmux.

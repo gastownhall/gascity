@@ -230,7 +230,8 @@ first:
 A script that un-welds start must therefore implement `set-meta`, `get-meta`
 and `remove-meta` for every box. For such a script, exit 2 from one of them
 is a missing store, not an unknown op: conformance fails the metadata
-requirements on it, as it does under `observe.v1`, and `RPP-PROVISION-005`
+requirements on it, as it does under `observe.v1`, `gc runtime check` fails
+its metadata round-trip rather than skipping it, and `RPP-PROVISION-005`
 checks that `get-meta` answers the identity keys `set-meta` stored after the
 launch. The orchestrator reports such an exit 2 as a missing store too, and
 from `set-meta` it fails the launch, as the Identity rule says. A script
