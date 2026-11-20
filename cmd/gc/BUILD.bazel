@@ -1252,6 +1252,8 @@ go_test(
         "cache_notification_journal_test.go",
         "cache_notification_test.go",
         "cached_children_tier_test.go",
+        "canonical_path_ingest_test.go",
+        "canonical_path_strict_probe_test.go",
         "capstone_e2e_test.go",
         "capstone_integration_test.go",
         "census_residency_test.go",
