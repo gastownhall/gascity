@@ -3668,6 +3668,28 @@ func startAliasedSupervisorCity(t *testing.T) *aliasedSupervisorCity {
 	return c
 }
 
+// runningConfig returns the config the city runtime last published, read
+// under the runtime's service-state lock.
+func (c *aliasedSupervisorCity) runningConfig(t *testing.T) *config.City {
+	t.Helper()
+	var rt *CityRuntime
+	c.registry.ReadCallback(func(
+		cities map[string]*managedCity,
+		_ map[string]cityInitProgress,
+		_ map[string]*initFailRecord,
+		_ map[string]*panicRecord,
+	) {
+		if mc := cities[canonicalTestPath(c.path)]; mc != nil {
+			rt = mc.cr
+		}
+	})
+	if rt == nil {
+		t.Fatalf("no running city runtime for %s (stderr: %s)", c.path, c.stderr.String())
+	}
+	cfg, _ := rt.serviceProviderSnapshot()
+	return cfg
+}
+
 // waitReload sends a waiting reload over the city's controller socket.
 func (c *aliasedSupervisorCity) waitReload(t *testing.T) reloadControlReply {
 	t.Helper()
@@ -3704,5 +3726,41 @@ func TestSupervisorAliasedCityReloadsAgainstConfigName(t *testing.T) {
 		if strings.Contains(log, rejection) {
 			t.Fatalf("supervisor stderr contains %q; the reload was rejected against the registry alias (stderr: %s)", rejection, log)
 		}
+	}
+}
+
+// TestSupervisorAliasedCityReloadKeepsAliasIdentityAndSiteBinding proves an
+// applied reload of an aliased city takes the edit while keeping the
+// registered alias as its identity and leaving .gc/site.toml untouched.
+func TestSupervisorAliasedCityReloadKeepsAliasIdentityAndSiteBinding(t *testing.T) {
+	city := startAliasedSupervisorCity(t)
+	siteBefore, err := os.ReadFile(city.sitePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootPrefix := config.EffectiveHQPrefix(city.runningConfig(t))
+
+	city.setShutdownTimeout(t, "150ms")
+	reply := city.waitReload(t)
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reload outcome = %q (error %q), want %q (stderr: %s)", reply.Outcome, reply.Error, reloadOutcomeApplied, city.stderr.String())
+	}
+
+	cfg := city.runningConfig(t)
+	if got := cfg.Daemon.ShutdownTimeout; got != "150ms" {
+		t.Fatalf("running daemon.shutdown_timeout = %q, want the reloaded 150ms", got)
+	}
+	if got := config.EffectiveCityName(cfg, ""); got != "alias-city" {
+		t.Fatalf("running EffectiveCityName = %q, want alias-city", got)
+	}
+	if got := config.EffectiveHQPrefix(cfg); got != bootPrefix {
+		t.Fatalf("running EffectiveHQPrefix = %q, want the boot prefix %q", got, bootPrefix)
+	}
+	siteAfter, err := os.ReadFile(city.sitePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(siteAfter, siteBefore) {
+		t.Fatalf(".gc/site.toml changed across the reload:\nbefore: %q\nafter:  %q", siteBefore, siteAfter)
 	}
 }
