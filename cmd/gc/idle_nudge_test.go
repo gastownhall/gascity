@@ -1295,3 +1295,54 @@ func TestPoolClaimBackstopContent_ProcedureNudgeStillAsksToClaim(t *testing.T) {
 		t.Fatalf("claim backstop nudge = %q, want text that invokes gc hook --claim", got)
 	}
 }
+
+// claimRecoveryNudges is the nudge-value axis every claim-recovery site is
+// crossed with (#9196): blank and whitespace (the lanes' gates), a work
+// procedure, the bare claim line, the drain-ack claim line, and a shipped
+// merge-procedure nudge.
+var claimRecoveryNudges = []struct {
+	name  string
+	nudge string
+}{
+	{"empty", ""},
+	{"whitespace", " \t "},
+	{"procedure", procedureNudgeText},
+	{"claim line", "gc hook --claim --json"},
+	{"drain-ack claim line", "gc hook --claim --drain-ack --json"},
+	{"shipped merge procedure", "Check for merge-ready beads and merge them to main."},
+}
+
+// TestClaimRecoveryTextIgnoresTheConfiguredNudge crosses every
+// claim-recovery site with every nudge shape: the text a recovery path
+// delivers is its built-in line, never the template's configured nudge,
+// which is startup text and can be a work procedure that never says to
+// claim (#9196). Blank and unknown-template rows pin the lanes' gates,
+// which the fix leaves alone.
+func TestClaimRecoveryTextIgnoresTheConfiguredNudge(t *testing.T) {
+	for _, nv := range claimRecoveryNudges {
+		t.Run("warm bind, "+nv.name, func(t *testing.T) {
+			cfg := idleClaimTestCfg()
+			cfg.Agents[0].Nudge = nv.nudge
+			if got, want := warmBindClaimText(cfg, idleClaimPoolSession()), defaultPoolClaimNudge; got != want {
+				t.Fatalf("warm-bind text = %q, want the built-in claim line %q", got, want)
+			}
+		})
+	}
+	t.Run("warm bind, unknown template", func(t *testing.T) {
+		cfg := idleClaimTestCfg()
+		session := idleClaimPoolSession()
+		session.Metadata["template"] = "unknown-agent"
+		if got := warmBindClaimText(cfg, session); got != "" {
+			t.Fatalf("warm-bind text for an unknown template = %q, want empty (fail closed)", got)
+		}
+	})
+	t.Run("warm bind, suppressed startup prompt", func(t *testing.T) {
+		cfg := idleClaimTestCfg()
+		cfg.Agents = append(cfg.Agents, config.Agent{Name: config.ControlDispatcherAgentName, StartCommand: "gc convoy control --serve"})
+		session := idleClaimPoolSession()
+		session.Metadata["template"] = config.ControlDispatcherAgentName
+		if got := warmBindClaimText(cfg, session); got != "" {
+			t.Fatalf("warm-bind text for a prompt-suppressed template = %q, want empty", got)
+		}
+	})
+}
