@@ -3430,7 +3430,7 @@ dolt.auto-start: false
 
 	a := orders.Order{Name: "pg-env", Trigger: "cooldown", Interval: "1m", Exec: "true"}
 	var stdout, stderr bytes.Buffer
-	result := doOrderRunExecResult(a, cityDir, nil, nil, &stdout, &stderr)
+	result := doOrderRunExecResult(a, cityDir, nil, manualOrderRunDeadline(a, nil, time.Now()), nil, &stdout, &stderr)
 	if result.code == 0 {
 		t.Fatalf("doOrderRunExecResult = 0, want env failure; stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
@@ -3477,7 +3477,7 @@ prefix = "ct"
 	}
 
 	var stdout, stderr bytes.Buffer
-	result := doOrderRunExecResult(a, cityDir, cfg, nil, &stdout, &stderr)
+	result := doOrderRunExecResult(a, cityDir, cfg, manualOrderRunDeadline(a, cfg, time.Now()), nil, &stdout, &stderr)
 	if result.code == 0 {
 		t.Fatalf("doOrderRunExecResult = 0, want exec failure; stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
@@ -3525,7 +3525,7 @@ prefix = "ct"
 	}
 
 	var stdout, stderr bytes.Buffer
-	result := doOrderRunExecResult(a, cityDir, cfg, nil, &stdout, &stderr)
+	result := doOrderRunExecResult(a, cityDir, cfg, manualOrderRunDeadline(a, cfg, time.Now()), nil, &stdout, &stderr)
 	if result.code != 0 {
 		t.Fatalf("doOrderRunExecResult = %d, want exec success; stdout=%q stderr=%q", result.code, stdout.String(), stderr.String())
 	}
@@ -4770,4 +4770,137 @@ func TestOrderCheckNeverRunEventOrderReadsOnlyPastTheHead(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestOrderRunExecTrackedFollowsDispatchDeadlineContract proves a manual
+// tracked exec (`gc order run`) keeps the controller dispatch's deadline
+// contract when orders.max_timeout caps the order's timeout: its tracking bead
+// is created with the capped deadline, the stale and boot sweeps leave the
+// unfinished run open before that deadline plus the completion grace, and the
+// run is stopped at the deadline it persisted, naming the capped timeout.
+func TestOrderRunExecTrackedFollowsDispatchDeadlineContract(t *testing.T) {
+	persistedDeadline := func(t *testing.T, b beads.Bead) time.Time {
+		t.Helper()
+		raw, ok := b.Metadata[beadmeta.OrderRunDeadlineMetadataKey]
+		if !ok {
+			t.Fatalf("tracking bead %s metadata = %v, want %s stamped at creation", b.ID, b.Metadata, beadmeta.OrderRunDeadlineMetadataKey)
+		}
+		at, err := time.Parse(time.RFC3339Nano, raw)
+		if err != nil {
+			t.Fatalf("tracking bead %s deadline %q: %v", b.ID, raw, err)
+		}
+		return at
+	}
+
+	t.Run("protected while running", func(t *testing.T) {
+		dir := t.TempDir()
+		started := filepath.Join(dir, "started")
+		release := filepath.Join(dir, "release")
+		store := beads.NewMemStore()
+		cfg := &config.City{Orders: config.OrdersConfig{MaxTimeout: "30m"}}
+		a := orders.Order{
+			Name:     "long-manual",
+			Trigger:  "cooldown",
+			Interval: "1m",
+			Timeout:  "1h",
+			Exec:     fmt.Sprintf(`: > '%s'; while [ ! -e '%s' ]; do sleep 0.01; done`, started, release),
+		}
+
+		var stdout, stderr bytes.Buffer
+		before := time.Now()
+		done := make(chan int, 1)
+		go func() {
+			done <- doOrderRunExecTracked(a, dir, cfg, orders.NewStore(beads.OrdersStore{Store: store}), nil, nil, &stdout, &stderr)
+		}()
+		releaseRun := func() {
+			if err := os.WriteFile(release, nil, 0o644); err != nil {
+				t.Errorf("releasing exec: %v", err)
+			}
+		}
+		// A failing assertion must not strand the looping child.
+		t.Cleanup(releaseRun)
+		waitUntil := time.Now().Add(10 * time.Second)
+		for {
+			if _, err := os.Stat(started); err == nil {
+				break
+			}
+			if time.Now().After(waitUntil) {
+				t.Fatalf("exec did not start; stderr=%q", stderr.String())
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		after := time.Now()
+
+		tracked := trackingBeads(t, store, "order-run:long-manual")
+		if len(tracked) != 1 {
+			t.Fatalf("tracking beads = %d, want 1", len(tracked))
+		}
+		trackingID := tracked[0].ID
+		deadline := persistedDeadline(t, tracked[0])
+		if deadline.Before(before.Add(30*time.Minute)) || deadline.After(after.Add(30*time.Minute)) {
+			t.Fatalf("persisted deadline %s, want dispatch time plus the capped 30m timeout (in [%s, %s])", deadline, before.Add(30*time.Minute), after.Add(30*time.Minute))
+		}
+
+		sweepAt := before.Add(11 * time.Minute)
+		swept, sweepErr := sweepStaleOrderTrackingAcrossStoresLimit([]beads.Store{store}, nil, sweepAt, defaultOrderTrackingSweepStaleAfter, nil, orderTrackingSweepMetadataInitiator, false, 10, staleTrackingReadNotClosed)
+		booted, bootErr := sweepOrphanedOrderTracking(store, sweepAt)
+		releaseRun()
+		code := <-done
+		if sweepErr != nil || bootErr != nil {
+			t.Fatalf("sweeps: stale=%v boot=%v", sweepErr, bootErr)
+		}
+		if swept.trackingClosed != 0 || booted != 0 {
+			t.Fatalf("sweeps closed stale=%d boot=%d tracking beads, want 0 (the run is inside its capped deadline)", swept.trackingClosed, booted)
+		}
+		if code != 0 {
+			t.Fatalf("doOrderRunExecTracked = %d, want 0; stderr=%q", code, stderr.String())
+		}
+		b, err := store.Get(trackingID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", trackingID, err)
+		}
+		if b.Status != "closed" || !slicesContain(b.Labels, "exec") {
+			t.Fatalf("tracking bead %s = status %q labels %v, want closed with the exec outcome", trackingID, b.Status, b.Labels)
+		}
+	})
+
+	t.Run("stopped at persisted capped deadline", func(t *testing.T) {
+		dir := t.TempDir()
+		store := beads.NewMemStore()
+		cfg := &config.City{Orders: config.OrdersConfig{MaxTimeout: "50ms"}}
+		a := orders.Order{
+			Name:    "slow-manual",
+			Trigger: "manual",
+			Timeout: "5s",
+			Exec:    "while :; do :; done",
+		}
+
+		var stdout, stderr bytes.Buffer
+		before := time.Now()
+		code := doOrderRunExecTracked(a, dir, cfg, orders.NewStore(beads.OrdersStore{Store: store}), nil, nil, &stdout, &stderr)
+		end := time.Now()
+		if code == 0 {
+			t.Fatalf("doOrderRunExecTracked = 0, want timeout failure; stdout=%q stderr=%q", stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "order timeout of 50ms exceeded") {
+			t.Fatalf("stderr = %q, want the capped order timeout named", stderr.String())
+		}
+		tracked := trackingBeads(t, store, "order-run:slow-manual")
+		if len(tracked) != 1 {
+			t.Fatalf("tracking beads = %d, want 1", len(tracked))
+		}
+		deadline := persistedDeadline(t, tracked[0])
+		if deadline.Before(before.Add(50 * time.Millisecond)) {
+			t.Fatalf("persisted deadline %s is before dispatch+50ms (%s)", deadline, before.Add(50*time.Millisecond))
+		}
+		if end.Before(deadline) {
+			t.Fatalf("run ended at %s, before its persisted deadline %s", end, deadline)
+		}
+		if end.Sub(before) > time.Second {
+			t.Fatalf("run took %s, want stopped at the capped 50ms deadline", end.Sub(before))
+		}
+		if !slicesContain(tracked[0].Labels, "exec-failed") {
+			t.Fatalf("tracking bead labels = %v, want exec-failed", tracked[0].Labels)
+		}
+	})
 }

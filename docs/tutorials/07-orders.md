@@ -436,7 +436,9 @@ it's due — so a still-running pancakes batch doesn't get a second one piled on
 top.
 
 The open work an order run leaves is its tracking record, which records the
-run's deadline: the dispatch time plus its effective timeout. The recovery
+run's deadline: the dispatch time plus its effective timeout (the order's
+`timeout`, capped by `orders.max_timeout`). A manual `gc order run` of an exec
+order records its deadline the same way. The recovery
 sweeps that clear stale tracking records — the orchestrator's periodic
 watchdog, `gc order sweep-tracking`, and the sweep at orchestrator startup —
 leave an unfinished run's record open until that deadline and a one-minute
