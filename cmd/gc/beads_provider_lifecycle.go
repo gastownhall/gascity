@@ -1021,6 +1021,14 @@ func initAndHookDirResolvingDatabase(cityPath, dir, prefix string, bootStore *ci
 		if err := runProviderOwnedScopeLifecycleOpContext(context.Background(), cityPath, dir, "health"); err != nil {
 			return fmt.Errorf("provider-owned scope readiness: %w", err)
 		}
+		// Reconcile the scope's project identity (L1 identity.toml, L2
+		// metadata project_id, L3 the Dolt metadata table) on every pass,
+		// pending or ready: bd's init never reconciles L1 for a scope it
+		// owns, so without this the layers drift apart between init and the
+		// first command that needs a coherent identity.
+		if err := reconcileProviderOwnedScopeIdentityFn(context.Background(), cityPath, dir); err != nil {
+			return fmt.Errorf("provider-owned scope %q project identity: %w", dir, err)
+		}
 		if pending {
 			return markProviderScopeOwnershipReady(cityPath, dir)
 		}

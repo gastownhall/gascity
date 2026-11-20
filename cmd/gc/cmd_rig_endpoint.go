@@ -779,7 +779,7 @@ func readCanonicalProjectID(metadataPath string) (string, error) {
 	return readManagedMetadataProjectID(metadataPath)
 }
 
-func readDatabaseProjectID(ctx context.Context, db *sql.DB) (string, bool, error) {
+func readDatabaseProjectID(ctx context.Context, db projectIdentitySQL) (string, bool, error) {
 	var projectID string
 	if err := db.QueryRowContext(ctx, "SELECT value FROM metadata WHERE `key` = '_project_id'").Scan(&projectID); err != nil {
 		if err == sql.ErrNoRows || isMissingDoltMetadataTableError(err) {

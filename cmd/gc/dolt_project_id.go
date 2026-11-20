@@ -160,16 +160,6 @@ func ensureManagedDoltProjectIDAtTarget(metadataPath string, target contract.Dol
 	}
 
 	fs := fsys.OSFS{}
-	identityProjectID, identityOK, err := contract.ReadProjectIdentity(fs, scopeRoot)
-	if err != nil {
-		return managedDoltProjectIDReport{}, err
-	}
-
-	metadataProjectID, err := readManagedMetadataProjectID(metadataPath)
-	if err != nil {
-		return managedDoltProjectIDReport{}, err
-	}
-	metadataOK := metadataProjectID != ""
 
 	// Pooled handle owned by internal/doltpool; do not Close.
 	var db *sql.DB
@@ -188,15 +178,46 @@ func ensureManagedDoltProjectIDAtTarget(metadataPath string, target contract.Dol
 		return managedDoltProjectIDReport{}, err
 	}
 
-	databaseProjectID, ok, err := readDatabaseProjectID(ctx, db)
+	return reconcileScopeProjectIdentity(ctx, fs, scopeRoot, metadataPath, cityPath, db, rec)
+}
+
+// reconcileScopeProjectIdentity runs the three-layer project-identity
+// reconciliation over an open Dolt handle: it reads L1 (.beads/identity.toml),
+// L2 (metadata.json's project_id) and L3 (the Dolt metadata table), decides the
+// repair, and applies it. The caller owns the handle's lifetime.
+func reconcileScopeProjectIdentity(ctx context.Context, fs fsys.FS, scopeRoot, metadataPath, cityPath string, l3 projectIdentitySQL, rec events.Recorder) (managedDoltProjectIDReport, error) {
+	readL3 := func(ctx context.Context) (string, bool, error) {
+		return readDatabaseProjectID(ctx, l3)
+	}
+	seedL3 := func(ctx context.Context, projectID string) (bool, error) {
+		return seedDatabaseProjectID(ctx, l3, projectID)
+	}
+	return reconcileScopeProjectIdentityOverL3(ctx, fs, scopeRoot, metadataPath, cityPath, readL3, seedL3, rec)
+}
+
+// reconcileScopeProjectIdentityOverL3 is reconcileScopeProjectIdentity for
+// callers that reach L3 through something other than a single SQL handle: in
+// tests a table-driven double, and in the provider-owned path a session that
+// may be absent — with no proxy record there is nothing to dial, so L3 reads
+// as absent and seeding is a no-op until a later pass finds the proxy up.
+func reconcileScopeProjectIdentityOverL3(ctx context.Context, fs fsys.FS, scopeRoot, metadataPath, cityPath string, readL3 func(context.Context) (string, bool, error), seedL3 func(context.Context, string) (bool, error), rec events.Recorder) (managedDoltProjectIDReport, error) {
+	identityProjectID, identityOK, err := contract.ReadProjectIdentity(fs, scopeRoot)
+	if err != nil {
+		return managedDoltProjectIDReport{}, err
+	}
+
+	metadataProjectID, err := readManagedMetadataProjectID(metadataPath)
+	if err != nil {
+		return managedDoltProjectIDReport{}, err
+	}
+	metadataOK := metadataProjectID != ""
+
+	databaseProjectID, ok, err := readL3(ctx)
 	if err != nil {
 		return managedDoltProjectIDReport{}, err
 	}
 
 	decision := decideReconcile(identityProjectID, identityOK, metadataProjectID, metadataOK, databaseProjectID, ok)
-	seedL3 := func(ctx context.Context, projectID string) (bool, error) {
-		return seedDatabaseProjectID(ctx, db, projectID)
-	}
 	return applyReconcileDecision(ctx, fs, scopeRoot, metadataPath, decision, cityPath, rec, seedL3)
 }
 
@@ -653,7 +674,17 @@ func writeManagedMetadataProjectID(metadataPath, projectID string) (bool, error)
 	return true, nil
 }
 
-func seedDatabaseProjectID(ctx context.Context, db *sql.DB, projectID string) (bool, error) {
+// projectIdentitySQL is the statement surface the project-identity reconciler
+// needs from a Dolt handle. *sql.DB (a pooled handle from internal/doltpool)
+// and *sql.Conn (a single pinned session, as proxyendpoint.OpenSession
+// returns) both satisfy it, which is what lets the same read/seed helpers run
+// against a managed server or a provider-owned proxy session.
+type projectIdentitySQL interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+func seedDatabaseProjectID(ctx context.Context, db projectIdentitySQL, projectID string) (bool, error) {
 	existing, ok, err := readDatabaseProjectID(ctx, db)
 	if err != nil {
 		return false, err
@@ -673,7 +704,7 @@ func seedDatabaseProjectID(ctx context.Context, db *sql.DB, projectID string) (b
 	return true, nil
 }
 
-func ensureDatabaseMetadataTable(ctx context.Context, db *sql.DB) error {
+func ensureDatabaseMetadataTable(ctx context.Context, db projectIdentitySQL) error {
 	_, err := db.ExecContext(ctx, "CREATE TABLE IF NOT EXISTS metadata (`key` VARCHAR(255) PRIMARY KEY, value LONGTEXT)")
 	if err != nil {
 		return fmt.Errorf("ensure metadata table: %w", err)
