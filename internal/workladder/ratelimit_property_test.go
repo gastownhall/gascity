@@ -130,6 +130,13 @@ var rlMoveSlots = []RateLimitMove{
 	{RateLimitTransitionClosed, RateLimitCauseConversationChanged},
 }
 
+// These fixed worlds keep the rare exhausted/again branch covered when the
+// random sample is shortened. Both seeds also belong to the full sample.
+const (
+	rlAgainSeed       = 2755
+	rlAgainAcrossSeed = 3797
+)
+
 func (m *sync64Map) add(mv RateLimitMove) {
 	if i := slices.Index(rlMoveSlots, mv); i >= 0 {
 		m.m[i].Add(1)
@@ -733,24 +740,37 @@ func (w *rlWorld) run() error {
 	return nil
 }
 
-// rlWorlds is how many worlds each rate-limit sim runs: a fifth of the
-// ladder's sequences, since each world runs 160 passes over hours of pool
-// flips (20k worlds; 2k under -short).
-func rlWorlds() int { return sequences() / 5 }
+// rlWorlds is how many random worlds each rate-limit sim runs. Each world
+// runs 160 passes over hours of pool flips. Short runs add fixed seeds for
+// rare coverage branches after these random samples.
+func rlWorlds() int {
+	return sequences() / 5
+}
 
-// RL1-RL9 on one seat.
+// RL1-RL9 on one seat (20k full worlds; under -short, 2k random worlds plus
+// the fixed rare-branch world).
 func TestRateLimitInvariants(t *testing.T) {
 	forEachN(t, rlWorlds(), func(seed uint64) error { return newRLWorld(seed, 1).run() })
+	if testing.Short() {
+		if err := newRLWorld(rlAgainSeed, 1).run(); err != nil {
+			t.Fatal(err)
+		}
+	}
 	rlCovered(t)
 }
 
 // RL10: 2 to 5 seats on one or two provider names drawing on one pool,
-// with RL1-RL9 on every seat (5k worlds, about as many seat runs as the
-// one-seat sim).
+// with RL1-RL9 on every seat (5k full worlds; under -short, 500 random
+// worlds plus the fixed rare-branch world).
 func TestRateLimitInvariantsAcrossSeats(t *testing.T) {
 	forEachN(t, rlWorlds()/4, func(seed uint64) error {
 		return newRLWorld(seed, 2+int(seed%4)).run()
 	})
+	if testing.Short() {
+		if err := newRLWorld(rlAgainAcrossSeed, 2+rlAgainAcrossSeed%4).run(); err != nil {
+			t.Fatal(err)
+		}
+	}
 	rlCovered(t)
 }
 

@@ -37,38 +37,16 @@ go_test(
     ],
     args = [
         "-test.short",
-        "-test.skip=^TestRateLimitInvariants",
     ],
     data = _WORKLADDER_TEST_DATA,
     embed = [":workladder"],
-    # The landing suite uses the 10k property budget. Keep the 100k and
-    # rate-limit census proofs in the manual qualification target.
+    # The landing suite uses the 10k property budget. Rate-limit sims also run
+    # under -test.short (2k/500 random worlds plus fixed rare-branch seeds).
+    # The 100k ladder proof does not run in CI. Run it explicitly with:
+    # bazel test //internal/workladder:workladder_test \
+    #   --test_arg=-test.short=false --test_timeout=900
+    # The later --test_arg overrides this target's -test.short.
     shard_count = 6,
-    deps = ["//internal/testenv"],
-)
-
-go_test(
-    name = "workladder_qualification_test",
-    size = "large",
-    timeout = "long",
-    srcs = [
-        "codec_test.go",
-        "decide_test.go",
-        "notice_test.go",
-        "progress_test.go",
-        "property_test.go",
-        "purity_test.go",
-        "ratelimit_property_test.go",
-        "ratelimit_test.go",
-        "table_test.go",
-        "testenv_import_test.go",
-    ],
-    data = _WORKLADDER_TEST_DATA,
-    embed = [":workladder"],
-    shard_count = 12,
-    # Explicitly run the 100k property and rate-limit census proofs with:
-    # bazel test //internal/workladder:workladder_qualification_test
-    tags = ["manual"],
     deps = ["//internal/testenv"],
 )
 
