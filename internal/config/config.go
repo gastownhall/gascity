@@ -3744,13 +3744,14 @@ type Agent struct {
 	// prefixed with "//" resolve against the city root.
 	PromptTemplate string `toml:"prompt_template,omitempty"`
 	// Nudge is text typed into the agent's session after startup.
-	// Used for CLI agents that don't accept command-line prompts. For a known
-	// pool session whose trigger remains unclaimed after the 90-second recovery
-	// grace period, an empty or whitespace-only Nudge does not opt out: it sends
-	// "Run gc hook --claim --drain-ack --json now; if it returns work, execute
-	// it immediately." This fallback applies only to the initial stalled-claim
-	// recovery; continuation-claim recovery remains configured-only. Unknown
-	// templates receive no fallback.
+	// Used for CLI agents that don't accept command-line prompts. Claim
+	// recovery never re-sends it: when a backstop or the work ladder nudges
+	// an idle seat to claim, the controller sends its own built-in
+	// "gc hook --claim" instruction instead, whatever this field says — a
+	// nudge that is a work procedure is startup text, not a claim
+	// instruction. The legacy continuation and unstarted-claim backstops
+	// still nudge only agents whose Nudge is non-empty; unknown templates
+	// receive no recovery nudge.
 	Nudge string `toml:"nudge,omitempty"`
 	// Session overrides the session transport for this agent.
 	// "" (default) uses the city-level session provider (typically tmux).

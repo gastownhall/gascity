@@ -1376,4 +1376,50 @@ func TestClaimRecoveryTextIgnoresTheConfiguredNudge(t *testing.T) {
 			t.Fatalf("started-seat text for an unknown template = %q, want empty (fail closed)", got)
 		}
 	})
+	// The legacy continuation and unstarted-execution lanes send the
+	// built-in claim line when their configured-nudge gate opens (#9196),
+	// and nothing when it does not (#5227's gate unchanged).
+	for _, nv := range claimRecoveryNudges {
+		t.Run("continuation, "+nv.name, func(t *testing.T) {
+			cfg := idleClaimTestCfg()
+			cfg.Agents[0].Nudge = nv.nudge
+			want := ladderClaimedNudge
+			if strings.TrimSpace(nv.nudge) == "" {
+				want = ""
+			}
+			if got := (poolContinuationBackstop{cfg: cfg}).content(continuationPoolSession("session-bead-a", "session-a")); got != want {
+				t.Fatalf("continuation text = %q, want %q", got, want)
+			}
+		})
+		t.Run("execution unstarted, "+nv.name, func(t *testing.T) {
+			cfg := idleClaimTestCfg()
+			cfg.Agents[0].Nudge = nv.nudge
+			want := ladderClaimedNudge
+			if strings.TrimSpace(nv.nudge) == "" {
+				want = ""
+			}
+			s := idleClaimPoolSession()
+			s.Metadata[executionClaimNudgeWorkKey] = "bd-99" // held, never stamped started
+			if got := (poolExecutionBackstop{cfg: cfg}).content(s); got != want {
+				t.Fatalf("unstarted-claim text = %q, want %q", got, want)
+			}
+		})
+	}
+	t.Run("continuation, unknown template", func(t *testing.T) {
+		cfg := idleClaimTestCfg()
+		s := continuationPoolSession("session-bead-a", "session-a")
+		s.Metadata["template"] = "unknown-agent"
+		if got := (poolContinuationBackstop{cfg: cfg}).content(s); got != "" {
+			t.Fatalf("continuation text for an unknown template = %q, want empty (fail closed)", got)
+		}
+	})
+	t.Run("execution unstarted, unknown template", func(t *testing.T) {
+		cfg := idleClaimTestCfg()
+		s := idleClaimPoolSession()
+		s.Metadata["template"] = "unknown-agent"
+		s.Metadata[executionClaimNudgeWorkKey] = "bd-99"
+		if got := (poolExecutionBackstop{cfg: cfg}).content(s); got != "" {
+			t.Fatalf("unstarted-claim text for an unknown template = %q, want empty (fail closed)", got)
+		}
+	})
 }

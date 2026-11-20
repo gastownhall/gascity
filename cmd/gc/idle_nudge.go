@@ -928,11 +928,19 @@ func isUnclaimedTrigger(cfg *config.City, w beads.Bead) bool {
 	return assignee == "" || isKnownPoolTemplate(assignee, cfg)
 }
 
-// claimNudgeFor resolves the slot's configured startup nudge (the worker's
-// `gc hook --claim` line) from the agent template behind this session bead.
+// claimNudgeFor is the text the legacy continuation and unstarted-execution
+// backstops send when their gate opens: the built-in claim line, never the
+// template's configured nudge, which is startup text and can be a work
+// procedure that never says to claim (#9196). The gate is #5227's, left
+// alone: a template whose nudge is blank, or that the config does not name,
+// gets "" — those lanes nudge configured-nudge templates only, and their
+// pacing, escalation and drain behavior key on the empty text.
 func claimNudgeFor(cfg *config.City, session beads.Bead) string {
-	nudge, _ := configuredClaimNudgeFor(cfg, session)
-	return nudge
+	nudge, known := configuredClaimNudgeFor(cfg, session)
+	if !known || nudge == "" {
+		return ""
+	}
+	return ladderClaimedNudge
 }
 
 // stalledPoolClaimNudgeFor is the claim line the trigger backstop and the
@@ -964,6 +972,9 @@ func heldClaimNudgeFor(cfg *config.City, session beads.Bead, beadID string) stri
 	return fmt.Sprintf(defaultHeldClaimNudge, strings.TrimSpace(beadID))
 }
 
+// configuredClaimNudgeFor looks up the session's template's configured
+// nudge. known reports whether the config names the template at all: the
+// recovery paths' fail-closed gate.
 func configuredClaimNudgeFor(cfg *config.City, session beads.Bead) (string, bool) {
 	template := normalizedSessionTemplate(session, cfg)
 	if template == "" {
