@@ -2360,6 +2360,7 @@ go_test(
         "session_reconciler_drift_defer_test.go",
         "session_reconciler_drift_resume_test.go",
         "session_reconciler_fork_launch_test.go",
+        "session_reconciler_fresh_cycle_anchor_owner_test.go",
         "session_reconciler_fresh_cycle_guard_test.go",
         "session_reconciler_fresh_cycle_selfclaim_test.go",
         "session_reconciler_idle_probe_named_test.go",
