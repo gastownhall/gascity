@@ -645,6 +645,17 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		env[key] = val
 	}
 
+	// And for the demand-spawn keys, withheld the same way: a config-authored
+	// GC_SPAWN_ORIGIN=demand would mark a seat no trigger started as
+	// demand-spawned (the drain-time divergence gate keys on that marker),
+	// and a config-authored GC_TRIGGER_* id would name a trigger the seat was
+	// never spawned by. A row the controller stamps re-adds the marker after
+	// resolution (resolveTemplateForSessionBeadInfo, and the start-time
+	// sessionDemandSpawnEnv merge), so real demand seats keep it.
+	for _, key := range processenv.DemandSpawnEnvKeys {
+		env[key] = ""
+	}
+
 	// Step 11: Expand session setup templates. configDir was resolved ahead
 	// of Step 9 so the prompt's {{.ConfigDir}} and this SessionSetupContext
 	// agree (#5315).
