@@ -819,6 +819,25 @@ func TestGetRejectsNonMessageType(t *testing.T) {
 // ID-addressed op must reject a non-message bead and leave it unmutated,
 // matching Get's existing boundary.
 func TestIDAddressedOpsRejectNonMessageType(t *testing.T) {
+	// clearType blanks a bead's Type after creation: MemStore.Create
+	// defaults an empty Type to "task", so the empty-type case would
+	// otherwise just repeat the task case.
+	clearType := func(t *testing.T, store beads.Store, id string) beads.Bead {
+		t.Helper()
+		empty := ""
+		if err := store.Update(id, beads.UpdateOpts{Type: &empty}); err != nil {
+			t.Fatal(err)
+		}
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b.Type != "" {
+			t.Fatalf("fixture: untyped bead has Type %q, want empty (MemStore.Create defaults it)", b.Type)
+		}
+		return b
+	}
+
 	newNonMessageBeads := func(t *testing.T, store beads.Store) (task, untyped beads.Bead) {
 		t.Helper()
 		var err error
@@ -830,6 +849,7 @@ func TestIDAddressedOpsRejectNonMessageType(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		untyped = clearType(t, store, untyped.ID)
 		return task, untyped
 	}
 
@@ -859,7 +879,7 @@ func TestIDAddressedOpsRejectNonMessageType(t *testing.T) {
 
 	t.Run("Read", func(t *testing.T) {
 		store := beads.NewMemStore()
-		p := New(store)
+		p := newTestProvider(store)
 		task, untyped := newNonMessageBeads(t, store)
 
 		if _, err := p.Read(task.ID); err == nil {
@@ -875,7 +895,7 @@ func TestIDAddressedOpsRejectNonMessageType(t *testing.T) {
 
 	t.Run("MarkRead", func(t *testing.T) {
 		store := beads.NewMemStore()
-		p := New(store)
+		p := newTestProvider(store)
 		task, untyped := newNonMessageBeads(t, store)
 
 		if err := p.MarkRead(task.ID); err == nil {
@@ -893,7 +913,7 @@ func TestIDAddressedOpsRejectNonMessageType(t *testing.T) {
 		// Seed as already-"read" so an unexpected mutation (removing the
 		// label, flipping mail.read to "false") is visible.
 		store := beads.NewMemStore()
-		p := New(store)
+		p := newTestProvider(store)
 		task, err := store.Create(beads.Bead{
 			Title:    "task",
 			Type:     "task",
@@ -911,6 +931,7 @@ func TestIDAddressedOpsRejectNonMessageType(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		untyped = clearType(t, store, untyped.ID)
 
 		if err := p.MarkUnread(task.ID); err == nil {
 			t.Error("MarkUnread should reject non-message bead (Type=task)")
@@ -932,7 +953,7 @@ func TestIDAddressedOpsRejectNonMessageType(t *testing.T) {
 		// without that, the pre-fix code could reject for the unrelated
 		// "no sender to reply to" reason and mask whether the type guard ran.
 		store := beads.NewMemStore()
-		p := New(store)
+		p := newTestProvider(store)
 		task, err := store.Create(beads.Bead{Title: "task", Type: "task", From: "someone"})
 		if err != nil {
 			t.Fatal(err)
@@ -941,6 +962,7 @@ func TestIDAddressedOpsRejectNonMessageType(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		untyped = clearType(t, store, untyped.ID)
 
 		countOpen := func() int {
 			open, err := store.ListOpen()
