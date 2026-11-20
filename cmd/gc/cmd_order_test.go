@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -4772,6 +4773,22 @@ func TestOrderCheckNeverRunEventOrderReadsOnlyPastTheHead(t *testing.T) {
 	}
 }
 
+// createSignalStore closes created once its first Create lands in the wrapped
+// store, so a test can wait for that bead instead of polling for it.
+type createSignalStore struct {
+	beads.Store
+	once    sync.Once
+	created chan struct{}
+}
+
+func (s *createSignalStore) Create(b beads.Bead) (beads.Bead, error) {
+	created, err := s.Store.Create(b)
+	if err == nil {
+		s.once.Do(func() { close(s.created) })
+	}
+	return created, err
+}
+
 // TestOrderRunExecTrackedFollowsDispatchDeadlineContract proves a manual
 // tracked exec (`gc order run`) keeps the controller dispatch's deadline
 // contract when orders.max_timeout caps the order's timeout: its tracking bead
@@ -4794,23 +4811,23 @@ func TestOrderRunExecTrackedFollowsDispatchDeadlineContract(t *testing.T) {
 
 	t.Run("protected while running", func(t *testing.T) {
 		dir := t.TempDir()
-		started := filepath.Join(dir, "started")
 		release := filepath.Join(dir, "release")
 		store := beads.NewMemStore()
+		tracking := &createSignalStore{Store: store, created: make(chan struct{})}
 		cfg := &config.City{Orders: config.OrdersConfig{MaxTimeout: "30m"}}
 		a := orders.Order{
 			Name:     "long-manual",
 			Trigger:  "cooldown",
 			Interval: "1m",
 			Timeout:  "1h",
-			Exec:     fmt.Sprintf(`: > '%s'; while [ ! -e '%s' ]; do sleep 0.01; done`, started, release),
+			Exec:     fmt.Sprintf(`while [ ! -e '%s' ]; do sleep 0.01; done`, release),
 		}
 
 		var stdout, stderr bytes.Buffer
 		before := time.Now()
 		done := make(chan int, 1)
 		go func() {
-			done <- doOrderRunExecTracked(a, dir, cfg, orders.NewStore(beads.OrdersStore{Store: store}), nil, nil, &stdout, &stderr)
+			done <- doOrderRunExecTracked(a, dir, cfg, orders.NewStore(beads.OrdersStore{Store: tracking}), nil, nil, &stdout, &stderr)
 		}()
 		releaseRun := func() {
 			if err := os.WriteFile(release, nil, 0o644); err != nil {
@@ -4819,16 +4836,10 @@ func TestOrderRunExecTrackedFollowsDispatchDeadlineContract(t *testing.T) {
 		}
 		// A failing assertion must not strand the looping child.
 		t.Cleanup(releaseRun)
-		waitUntil := time.Now().Add(10 * time.Second)
-		for {
-			if _, err := os.Stat(started); err == nil {
-				break
-			}
-			if time.Now().After(waitUntil) {
-				t.Fatalf("exec did not start; stderr=%q", stderr.String())
-			}
-			time.Sleep(5 * time.Millisecond)
-		}
+		// From its create until the exec sees the release file, which is
+		// written only after the sweeps, the run's tracking bead is open and
+		// carries no outcome.
+		awaitClose(t, tracking.created, "creating the manual run's tracking bead")
 		after := time.Now()
 
 		tracked := trackingBeads(t, store, "order-run:long-manual")
