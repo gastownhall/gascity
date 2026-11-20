@@ -219,7 +219,7 @@ func TestCloseWorkflowRootNeverPassesOverQuarantine(t *testing.T) {
 				Status:   "closed",
 				Metadata: meta,
 			})
-			if err := closeWorkflowRoot(beadstest.Graph(store), b.ID, "pass", nil); !errors.Is(err, errRootQuarantined) {
+			if err := closeWorkflowRoot(beadstest.Graph(store), b.ID, "pass", []string{"skipped-blocker"}); !errors.Is(err, errRootQuarantined) {
 				t.Fatalf("closeWorkflowRoot err = %v, want errRootQuarantined", err)
 			}
 			after, err := store.Get(b.ID)
@@ -228,6 +228,9 @@ func TestCloseWorkflowRootNeverPassesOverQuarantine(t *testing.T) {
 			}
 			if got := after.Metadata["gc.outcome"]; got != "fail" {
 				t.Fatalf("gc.outcome = %q, want fail kept over a pass write", got)
+			}
+			if got, ok := after.Metadata["gc.skipped_blockers"]; ok {
+				t.Fatalf("gc.skipped_blockers = %q, want no marker from a refused pass", got)
 			}
 		})
 	}

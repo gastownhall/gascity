@@ -180,3 +180,61 @@ func TestProcessWorkflowFinalizeAllPassedWritesNoSkipMarker(t *testing.T) {
 		t.Fatalf("root gc.skipped_blockers = %q, want the key absent when no blocker was skipped", got)
 	}
 }
+
+// A skipped blocker in a workflow that does not pass changes nothing: the
+// outcome is today's, and no marker is written, whichever route made the
+// workflow non-pass (a failed blocker, a root the control dispatcher already
+// quarantined, or a run cancel).
+func TestProcessWorkflowFinalizeNonPassWritesNoSkipMarker(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name       string
+		rootMeta   map[string]string
+		quarantine bool
+		outcomes   []string
+		action     string
+		outcome    string
+	}{
+		{
+			name:     "failed blocker",
+			outcomes: []string{beadmeta.OutcomeSkipped, beadmeta.OutcomeFail},
+			action:   "workflow-fail",
+			outcome:  beadmeta.OutcomeFail,
+		},
+		{
+			name:       "control-quarantined root",
+			quarantine: true,
+			outcomes:   []string{beadmeta.OutcomeSkipped, beadmeta.OutcomePass},
+			action:     "workflow-fail",
+			outcome:    beadmeta.OutcomeFail,
+		},
+		{
+			name:     "cancel requested",
+			rootMeta: map[string]string{beadmeta.CancelRequestedMetadataKey: "true"},
+			outcomes: []string{beadmeta.OutcomeSkipped, beadmeta.OutcomePass},
+			action:   "workflow-canceled",
+			outcome:  beadmeta.OutcomeCanceled,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := beads.NewMemStore()
+			w := newSkippedBlockerWorkflow(t, store, tc.rootMeta, tc.outcomes...)
+			if tc.quarantine {
+				quarantineWorkflowRoot(t, store, w.root.ID)
+			}
+			result, root := processSkippedBlockerWorkflow(t, store, w)
+			if !result.Processed || result.Action != tc.action {
+				t.Fatalf("result = %+v, want processed %s", result, tc.action)
+			}
+			if root.Status != "closed" || root.Metadata[beadmeta.OutcomeMetadataKey] != tc.outcome {
+				t.Fatalf("root = %s/%q, want closed/%s", root.Status, root.Metadata[beadmeta.OutcomeMetadataKey], tc.outcome)
+			}
+			if got, ok := root.Metadata["gc.skipped_blockers"]; ok {
+				t.Fatalf("root gc.skipped_blockers = %q, want the key absent on a %s close", got, tc.outcome)
+			}
+		})
+	}
+}
