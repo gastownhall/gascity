@@ -454,6 +454,7 @@ go_test(
         "idempotency_test.go",
         "initiator_test.go",
         "keyset_page_test.go",
+        "launch_finalizer_test.go",
         "logwatcher_test.go",
         "loopback_transport_test.go",
         "mail_session_inbox_test.go",

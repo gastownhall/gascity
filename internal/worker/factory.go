@@ -67,6 +67,10 @@ type FactoryConfig struct {
 	// DeferredSubmits is where the factory's manager queues a submit a
 	// session cannot take yet. Nil keeps the city's state.json queue.
 	DeferredSubmits sessionpkg.DeferredSubmitQueue
+	// FinalizeLaunch finalizes the runtime.Config of every launch the factory's
+	// manager makes: a create, and a resume that starts a runtime. Nil leaves
+	// launches as the manager assembled them.
+	FinalizeLaunch sessionpkg.LaunchFinalizer
 }
 
 // Factory centralizes worker-boundary object construction for callers such as

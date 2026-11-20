@@ -653,6 +653,7 @@ type Manager struct {
 	staleKeyDetectionWaiter StaleKeyDetectionWaiter
 	leaseTTL                time.Duration       // the runtime lease records' TTL (WithRuntimeLeaseTTL)
 	deferredSubmits         DeferredSubmitQueue // injected deferred-submit queue (WithDeferredSubmitQueue)
+	launchFinalizer         LaunchFinalizer     // finalizes the config of a create or resume launch (WithLaunchFinalizer)
 }
 
 // PruneResult reports which sessions were pruned and which queued wait nudges

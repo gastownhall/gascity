@@ -299,6 +299,9 @@ func (s *seededState) ApplyStartupPrompt(_ session.Info, _ *config.ResolvedProvi
 	return hints, nil
 }
 
+// StartupPromptFinalizer is nil: a seeded city renders no startup prompts.
+func (s *seededState) StartupPromptFinalizer() session.LaunchFinalizer { return nil }
+
 // RawConfig returns the same snapshot as Config: a seeded city has no separate
 // raw (pre-expansion) config, so provenance reads see the expanded config.
 func (s *seededState) RawConfig() *config.City { return s.cfg }

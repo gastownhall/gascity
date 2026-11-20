@@ -2256,6 +2256,11 @@ func (cs *controllerState) ApplyStartupPrompt(info session.Info, resolved *confi
 	return startupPromptCity{path: cs.CityPath(), cfg: cfg, stderr: os.Stderr}.applyTo(info, resolved, transport, hints)
 }
 
+// StartupPromptFinalizer implements api.State.
+func (cs *controllerState) StartupPromptFinalizer() session.LaunchFinalizer {
+	return nil
+}
+
 // Config returns the current city config snapshot.
 func (cs *controllerState) Config() *config.City {
 	cs.mu.RLock()

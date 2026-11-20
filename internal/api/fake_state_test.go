@@ -96,6 +96,9 @@ type fakeState struct {
 	// hints unchanged — a state with no startup prompt to deliver — so tests that
 	// do not care about prompt delivery are unaffected.
 	startupPromptFn func(info session.Info, resolved *config.ResolvedProvider, transport string, hints runtime.Config) (runtime.Config, error)
+	// launchFinalizer backs StartupPromptFinalizer. Nil (the default) installs
+	// no finalizer.
+	launchFinalizer session.LaunchFinalizer
 }
 
 func newFakeState(t testing.TB) *fakeState {
@@ -397,6 +400,8 @@ func (f *fakeState) ApplyStartupPrompt(info session.Info, resolved *config.Resol
 	}
 	return hints, nil
 }
+
+func (f *fakeState) StartupPromptFinalizer() session.LaunchFinalizer { return f.launchFinalizer }
 
 func (f *fakeState) RawConfig() *config.City {
 	if f.rawCfg != nil {

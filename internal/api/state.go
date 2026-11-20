@@ -206,6 +206,12 @@ type State interface {
 	// prompt, or runs on a runtime that cannot carry a nudge. A non-nil error
 	// means the prompt cannot be delivered and the launch must not proceed.
 	ApplyStartupPrompt(info session.Info, resolved *config.ResolvedProvider, transport string, hints runtime.Config) (runtime.Config, error)
+
+	// StartupPromptFinalizer returns the launch finalizer every session manager
+	// and worker factory the API builds installs, so a launch the API performs
+	// (create or resume) carries the startup prompt through the same plan the
+	// reconciler launches with. Nil when the city renders no startup prompts.
+	StartupPromptFinalizer() session.LaunchFinalizer
 }
 
 // AgentUpdate holds optional fields for a partial agent update. Pointer fields
