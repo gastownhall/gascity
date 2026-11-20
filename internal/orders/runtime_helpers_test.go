@@ -98,7 +98,9 @@ func TestLastRunUsesRowsFromPartialTierError(t *testing.T) {
 }
 
 func TestLastRunFuncWithEventFallback_UsesStoreResult(t *testing.T) {
-	want := time.Date(2026, 6, 9, 0, 23, 0, 0, time.UTC)
+	// Relative to now so the competing event stays inside the fallback's
+	// lookback; a fixed date would let Since drop it and make this vacuous.
+	want := time.Now().Add(-48 * time.Hour)
 	storeFn := func(string) (time.Time, error) { return want, nil }
 	ep := events.NewFake()
 	// Event with a later timestamp — must NOT be chosen when store succeeds.
