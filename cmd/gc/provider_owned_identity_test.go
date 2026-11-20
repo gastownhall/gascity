@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -46,20 +47,12 @@ func writeProviderOwnedCity(t *testing.T, script string) string {
 
 // writeProviderOwnedLoggingInitScript writes a fake exec beads provider that
 // logs every op it is asked to run (lifecycle ops are invoked with the verb
-// alone, so the log path is baked in) and, when failInit is set, fails the
-// init op. It leaves the scope's files alone, so a test pre-seeds whatever
-// layer state its case needs.
-func writeProviderOwnedLoggingInitScript(t *testing.T, path, oplog string, failInit bool) {
+// alone, so the log path is baked in). It leaves the scope's files alone, so
+// a test pre-seeds whatever layer state its case needs.
+func writeProviderOwnedLoggingInitScript(t *testing.T, path, oplog string) {
 	t.Helper()
-	fail := "  :\n"
-	if failInit {
-		fail = "  exit 1\n"
-	}
 	body := "#!/bin/sh\n" +
 		"printf '%s\\n' \"$1\" >> '" + oplog + "'\n" +
-		"if [ \"$1\" = init ]; then\n" +
-		fail +
-		"fi\n" +
 		"exit 0\n"
 	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
@@ -102,19 +95,13 @@ func writeProviderOwnedScopeMetadata(t *testing.T, dir, projectID string) {
 
 // stubProviderOwnedIdentitySeams installs the L3-opener and recorder seams for
 // one test: the opener serves the double as L3 whatever endpoint resolution
-// produced (captured for the caller, with the count of opener invocations) and
-// the recorder records stamped events.
-func stubProviderOwnedIdentitySeams(t *testing.T, l3 *projectIdentityL3Double) (recorder *projectIdentityApplyRecordingRecorder, endpoint *providerOwnedIdentityEndpoint, openerCalls *int) {
+// produced, and the recorder records stamped events.
+func stubProviderOwnedIdentitySeams(t *testing.T, l3 *projectIdentityL3Double) (recorder *projectIdentityApplyRecordingRecorder) {
 	t.Helper()
 	recorder = &projectIdentityApplyRecordingRecorder{}
-	endpoint = &providerOwnedIdentityEndpoint{}
-	calls := 0
-	openerCalls = &calls
 	prevOpener := openProviderOwnedIdentityL3Fn
 	prevRecorder := openProviderOwnedIdentityRecorderFn
-	openProviderOwnedIdentityL3Fn = func(_ context.Context, ep providerOwnedIdentityEndpoint) (providerOwnedIdentityL3Session, error) {
-		calls++
-		*endpoint = ep
+	openProviderOwnedIdentityL3Fn = func(_ context.Context, _ providerOwnedIdentityEndpoint) (providerOwnedIdentityL3Session, error) {
 		return providerOwnedIdentityL3Session{read: l3.read, seed: l3.seed}, nil
 	}
 	openProviderOwnedIdentityRecorderFn = func(string) (events.Recorder, func()) {
@@ -124,7 +111,7 @@ func stubProviderOwnedIdentitySeams(t *testing.T, l3 *projectIdentityL3Double) (
 		openProviderOwnedIdentityL3Fn = prevOpener
 		openProviderOwnedIdentityRecorderFn = prevRecorder
 	})
-	return recorder, endpoint, openerCalls
+	return recorder
 }
 
 // TestInitAndHookDirProviderOwnedReconcileLayers: whatever drift the three
@@ -180,7 +167,7 @@ func TestInitAndHookDirProviderOwnedReconcileLayers(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			script := filepath.Join(t.TempDir(), "provider.sh")
-			writeProviderOwnedLoggingInitScript(t, script, filepath.Join(t.TempDir(), "oplog"), false)
+			writeProviderOwnedLoggingInitScript(t, script, filepath.Join(t.TempDir(), "oplog"))
 			city, dir := newProviderOwnedIdentityScope(t, script)
 			writeProviderOwnedScopeMetadata(t, dir, tc.l2)
 			if tc.l1 != "" {
@@ -189,7 +176,7 @@ func TestInitAndHookDirProviderOwnedReconcileLayers(t *testing.T) {
 				}
 			}
 			l3 := &projectIdentityL3Double{projectID: tc.l3}
-			recorder, _, _ := stubProviderOwnedIdentitySeams(t, l3)
+			recorder := stubProviderOwnedIdentitySeams(t, l3)
 
 			if err := initAndHookDirResolvingDatabase(city, dir, "prov", nil); err != nil {
 				t.Fatalf("initAndHookDirResolvingDatabase: %v", err)
@@ -568,4 +555,152 @@ func TestReconcileProviderOwnedScopeIdentityProxiedUsesOnePrivateSession(t *test
 	if _, ok, readErr := contract.ReadProjectIdentity(fsys.OSFS{}, scope); readErr != nil || ok {
 		t.Fatalf("identity.toml after a failed session = (%t, %v), want absent: no layer is written when L3 cannot open", ok, readErr)
 	}
+}
+
+// readProviderOwnedScopeFile returns a file's bytes for a before/after
+// comparison, skipping absent files as nil.
+func readProviderOwnedScopeFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		t.Fatal(err)
+	}
+	return data
+}
+
+// assertProviderOwnedScopeInitializing pins the failure contract: the entry
+// stays provider_initializing with its intent, so the next pass retries.
+func assertProviderOwnedScopeInitializing(t *testing.T, city, dir string) {
+	t.Helper()
+	entry, ok, err := providerScopeOwnership(city, dir)
+	if err != nil || !ok {
+		t.Fatalf("scope ownership = (%+v, %t, %v), want an entry", entry, ok, err)
+	}
+	if entry.State != providerScopeInitializing {
+		t.Fatalf("journal state after a failed reconcile = %q, want %q", entry.State, providerScopeInitializing)
+	}
+	if entry.Intent.Transport != "proxied" || entry.Intent.Target != "local" {
+		t.Fatalf("journal intent after a failed reconcile = %+v, want the original proxied local intent", entry.Intent)
+	}
+}
+
+// TestInitAndHookDirProviderOwnedIdentityFailureKeepsInitializing: a
+// reconcile that fails after bd's init already succeeded — a mismatch
+// refusal, an L3 write error, a non-live proxy, an unresolvable endpoint —
+// errors naming the scope, leaves the journal initializing with its intent,
+// touches nothing it did not already own, and a later pass with the cause
+// removed reaches ready.
+func TestInitAndHookDirProviderOwnedIdentityFailureKeepsInitializing(t *testing.T) {
+	const projectID = "11111111-2222-3333-4444-555555555555"
+	const wrongID = "99999999-8888-7777-6666-555555555555"
+
+	t.Run("mismatch refusal keeps initializing, then a repaired pass reaches ready", func(t *testing.T) {
+		clearProviderOwnedProxyEnvironment(t)
+		script := filepath.Join(t.TempDir(), "provider.sh")
+		writeProviderOwnedLoggingInitScript(t, script, filepath.Join(t.TempDir(), "oplog"))
+		city, dir := newProviderOwnedIdentityScope(t, script)
+		writeProviderOwnedScopeMetadata(t, dir, projectID)
+		if err := contract.WriteProjectIdentity(fsys.OSFS{}, dir, wrongID); err != nil {
+			t.Fatalf("pre-write a disagreeing L1: %v", err)
+		}
+		l3 := &projectIdentityL3Double{projectID: projectID}
+		stubProviderOwnedIdentitySeams(t, l3)
+		metadataPath := scopeMetadataJSONPath(dir)
+		identityPath := filepath.Join(dir, ".beads", "identity.toml")
+		metadataBefore := readProviderOwnedScopeFile(t, metadataPath)
+		identityBefore := readProviderOwnedScopeFile(t, identityPath)
+
+		err := initAndHookDirResolvingDatabase(city, dir, "prov", nil)
+		if err == nil {
+			t.Fatal("init pass with a mismatched identity returned no error, want the refusal")
+		}
+		for _, want := range []string{dir, "project identity", "MISMATCH"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("init pass error = %q, want it to name %q", err.Error(), want)
+			}
+		}
+		assertProviderOwnedScopeInitializing(t, city, dir)
+		if got := readProviderOwnedScopeFile(t, metadataPath); string(got) != string(metadataBefore) {
+			t.Fatalf("metadata.json changed on a refused reconcile: %q, want byte-identical %q", got, metadataBefore)
+		}
+		if got := readProviderOwnedScopeFile(t, identityPath); string(got) != string(identityBefore) {
+			t.Fatalf("identity.toml changed on a refused reconcile: %q, want byte-identical %q", got, identityBefore)
+		}
+
+		// Repair the disagreeing layer and run the pass again: it retries the
+		// whole sequence and this time commits ready.
+		if err := contract.WriteProjectIdentity(fsys.OSFS{}, dir, projectID); err != nil {
+			t.Fatalf("repair L1: %v", err)
+		}
+		if err := initAndHookDirResolvingDatabase(city, dir, "prov", nil); err != nil {
+			t.Fatalf("init pass after repair: %v", err)
+		}
+		entry, ok, err := providerScopeOwnership(city, dir)
+		if err != nil || !ok || entry.State != providerScopeReady {
+			t.Fatalf("scope ownership after repair = (%+v, %t, %v), want ready", entry, ok, err)
+		}
+	})
+
+	t.Run("L3 write error keeps initializing with the layers already written", func(t *testing.T) {
+		clearProviderOwnedProxyEnvironment(t)
+		script := filepath.Join(t.TempDir(), "provider.sh")
+		writeProviderOwnedLoggingInitScript(t, script, filepath.Join(t.TempDir(), "oplog"))
+		city, dir := newProviderOwnedIdentityScope(t, script)
+		writeProviderOwnedScopeMetadata(t, dir, projectID)
+		l3 := &projectIdentityL3Double{seedErr: errors.New("seed L3 unavailable")}
+		stubProviderOwnedIdentitySeams(t, l3)
+
+		err := initAndHookDirResolvingDatabase(city, dir, "prov", nil)
+		if err == nil || !strings.Contains(err.Error(), "seed L3 unavailable") {
+			t.Fatalf("init pass error = %v, want the L3 write failure to propagate", err)
+		}
+		assertProviderOwnedScopeInitializing(t, city, dir)
+		// The partial success the apply path pins: L1 was already written
+		// before the seed failed, and L2 was never touched.
+		if got, ok, readErr := contract.ReadProjectIdentity(fsys.OSFS{}, dir); readErr != nil || !ok || got != projectID {
+			t.Fatalf("L1 after a failed seed = (%q, %t, %v), want the already-written %q", got, ok, readErr, projectID)
+		}
+		if got, readErr := readManagedMetadataProjectID(scopeMetadataJSONPath(dir)); readErr != nil || got != projectID {
+			t.Fatalf("L2 after a failed seed = (%q, %v), want the untouched %q", got, readErr, projectID)
+		}
+	})
+
+	t.Run("non-live proxy record keeps initializing", func(t *testing.T) {
+		clearProviderOwnedProxyEnvironment(t)
+		script := filepath.Join(t.TempDir(), "provider.sh")
+		writeProviderOwnedLoggingInitScript(t, script, filepath.Join(t.TempDir(), "oplog"))
+		city, dir := newProviderOwnedIdentityScope(t, script)
+		writeProviderOwnedScopeMetadata(t, dir, projectID)
+		root := providerOwnedProxyRoot(t, dir, "dolt")
+		record := makeProviderOwnedProxyRecord(t, root, 4324, 45234)
+		writeProviderOwnedProxyRecord(t, root, record)
+		stubProviderOwnedProcessTable(t, record, root, false)
+
+		err := initAndHookDirResolvingDatabase(city, dir, "prov", nil)
+		if err == nil || !strings.Contains(err.Error(), "not live") {
+			t.Fatalf("init pass error = %v, want the non-live proxy refusal", err)
+		}
+		assertProviderOwnedScopeInitializing(t, city, dir)
+	})
+
+	t.Run("unresolvable endpoint keeps initializing", func(t *testing.T) {
+		clearProviderOwnedProxyEnvironment(t)
+		script := filepath.Join(t.TempDir(), "provider.sh")
+		writeProviderOwnedLoggingInitScript(t, script, filepath.Join(t.TempDir(), "oplog"))
+		city, dir := newProviderOwnedIdentityScope(t, script)
+		// A server-mode scope with no SQL endpoint recorded anywhere: no
+		// bd-owned pid/port pair, no external binding, no proxy.
+		if err := os.WriteFile(scopeMetadataJSONPath(dir), []byte(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"prov","project_id":"`+projectID+`"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		err := initAndHookDirResolvingDatabase(city, dir, "prov", nil)
+		if err == nil {
+			t.Fatal("init pass for a scope with no SQL endpoint returned no error, want a refusal")
+		}
+		assertProviderOwnedScopeInitializing(t, city, dir)
+	})
 }
