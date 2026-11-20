@@ -337,7 +337,7 @@ func TestPacedSQLiteWriterLeavesTheWriteLockToAWaitingWriter(t *testing.T) {
 			if _, err := tx.Exec(`INSERT OR REPLACE INTO kv(key,value) VALUES('paced-writer', ?)`, strconv.Itoa(i)); err != nil {
 				return
 			}
-			time.Sleep(20 * time.Millisecond)
+			<-time.After(20 * time.Millisecond) // hold the write lock, as a slow commit does
 			if tx.Commit() == nil && commits.Add(1) == 1 {
 				close(firstCommit)
 			}
