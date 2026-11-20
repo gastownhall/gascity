@@ -851,6 +851,8 @@ func TestWaitInfoHeldForPendingReset(t *testing.T) {
 	for _, tc := range []struct {
 		name             string
 		flagged          bool
+		named            bool
+		closed           bool
 		sessionEpoch     string
 		resetPending     string
 		restartRequested string
@@ -866,6 +868,14 @@ func TestWaitInfoHeldForPendingReset(t *testing.T) {
 		{name: "flagged/second-reset-at-next-epoch", flagged: true, sessionEpoch: "3", resetPending: "true", restartRequested: "true"},
 		{name: "flagged/blank-marker", flagged: true, sessionEpoch: "2", resetPending: "  ", restartRequested: "true"},
 		{name: "unflagged/reset-pending", sessionEpoch: "2", resetPending: "true", restartRequested: "true"},
+		{name: "named/restart-requested", named: true, sessionEpoch: "2", resetPending: "true", restartRequested: "true", want: true},
+		{name: "named/reset-committed", named: true, sessionEpoch: "2", resetPending: "true", resetCommittedAt: committedAt, want: true},
+		{name: "named/restart-requested-epochs-on", named: true, sessionEpoch: "4", resetPending: "true", restartRequested: "true", want: true},
+		{name: "named/marker-without-restart", named: true, sessionEpoch: "2", resetPending: "true"},
+		{name: "named/reset-withdrawn", named: true, sessionEpoch: "2", restartRequested: "true"},
+		{name: "named/started", named: true, sessionEpoch: "3", resetCommittedAt: committedAt},
+		{name: "closed-named/restart-requested", named: true, closed: true, sessionEpoch: "2", resetPending: "true", restartRequested: "true"},
+		{name: "closed-named/flagged-outgoing-incarnation", flagged: true, named: true, closed: true, sessionEpoch: "2", resetPending: "true", restartRequested: "true", want: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := WaitInfo{RegisteredEpoch: "2", RegisteredResetPending: tc.flagged}
@@ -874,10 +884,12 @@ func TestWaitInfoHeldForPendingReset(t *testing.T) {
 				ContinuationResetPending: tc.resetPending,
 				RestartRequested:         tc.restartRequested,
 				ResetCommittedAt:         tc.resetCommittedAt,
+				ConfiguredNamedSession:   tc.named,
+				Closed:                   tc.closed,
 			}
 			if got := w.HeldForPendingReset(s); got != tc.want {
-				t.Fatalf("HeldForPendingReset(flagged=%v, session epoch=%q reset_pending=%q restart_requested=%q reset_committed_at=%q) = %v, want %v",
-					tc.flagged, tc.sessionEpoch, tc.resetPending, tc.restartRequested, tc.resetCommittedAt, got, tc.want)
+				t.Fatalf("HeldForPendingReset(flagged=%v, session epoch=%q reset_pending=%q restart_requested=%q reset_committed_at=%q named=%v closed=%v) = %v, want %v",
+					tc.flagged, tc.sessionEpoch, tc.resetPending, tc.restartRequested, tc.resetCommittedAt, tc.named, tc.closed, got, tc.want)
 			}
 		})
 	}

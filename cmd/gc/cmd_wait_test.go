@@ -5330,6 +5330,7 @@ func TestDispatchReadyWaitNudges_HoldsWaitRegisteredDuringPendingReset(t *testin
 		name            string
 		reset           map[string]string
 		flagged         bool
+		named           bool
 		withdraw        bool
 		wantBeforeStart int
 	}{
@@ -5338,6 +5339,10 @@ func TestDispatchReadyWaitNudges_HoldsWaitRegisteredDuringPendingReset(t *testin
 		{name: "flagged-released-when-reset-withdrawn", reset: requested, flagged: true, withdraw: true, wantBeforeStart: 1},
 		{name: "flagged-nudged-when-no-restart-is-in-flight", reset: markerOnly, flagged: true, wantBeforeStart: 1},
 		{name: "unflagged-nudged-as-before", reset: requested, wantBeforeStart: 1},
+		{name: "named-held-until-start", reset: requested, named: true},
+		{name: "named-held-after-handoff-until-start", reset: committed, named: true},
+		{name: "named-released-when-reset-withdrawn", reset: requested, named: true, withdraw: true, wantBeforeStart: 1},
+		{name: "named-nudged-when-no-restart-is-in-flight", reset: markerOnly, named: true, wantBeforeStart: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			setWaitTestFileBeads(t)
@@ -5350,6 +5355,9 @@ func TestDispatchReadyWaitNudges_HoldsWaitRegisteredDuringPendingReset(t *testin
 				"state":              string(sessionpkg.StateActive),
 			}
 			maps.Copy(sessionMeta, tc.reset)
+			if tc.named {
+				namedResetWindowSession(sessionMeta)
+			}
 			sessionBead, err := store.Create(beads.Bead{
 				Type:     sessionBeadType,
 				Labels:   []string{sessionBeadLabel},

@@ -218,18 +218,30 @@ func (w WaitInfo) DeliveryEpoch(s Info) string {
 }
 
 // HeldForPendingReset reports whether the wait's reminder must wait for the
-// start that consumes the session's pending reset: the wait was registered for
-// the conversation that start opens, and the session is still the outgoing
-// incarnation at the registered epoch with a restart in flight. A restart is in
-// flight while the reset is pending and either requested (restart_requested) or
-// committed by the handoff (reset_committed_at), the reading the awake set
-// takes. The reset marker alone does not hold the reminder: the Manager's
-// stale-key recovery leaves it on the session it relaunched at the same epoch,
-// with no start coming to consume it.
+// start that consumes the session's pending reset, with a restart in flight
+// (restartInFlight). A session that keeps its waits across resets
+// (KeepsWaitsAcrossResets) holds every reminder then, so it reaches the
+// conversation the restart opens, not the one being torn down. Any other wait
+// is held only when it was registered for the conversation that start opens
+// and the session is still the outgoing incarnation at the registered epoch.
 func (w WaitInfo) HeldForPendingReset(s Info) bool {
-	return w.RegisteredResetPending &&
-		s.ContinuationEpoch == w.RegisteredEpoch &&
-		strings.TrimSpace(s.ContinuationResetPending) != "" &&
+	if !restartInFlight(s) {
+		return false
+	}
+	if KeepsWaitsAcrossResets(s) {
+		return true
+	}
+	return w.RegisteredResetPending && s.ContinuationEpoch == w.RegisteredEpoch
+}
+
+// restartInFlight reports whether session s has a restart in flight: its reset
+// is pending and either requested (restart_requested) or committed by the
+// handoff (reset_committed_at), the reading the awake set takes. The reset
+// marker alone is not a restart in flight: the Manager's stale-key recovery
+// leaves it on the session it relaunched at the same epoch, with no start
+// coming to consume it.
+func restartInFlight(s Info) bool {
+	return strings.TrimSpace(s.ContinuationResetPending) != "" &&
 		(strings.TrimSpace(s.RestartRequested) == "true" || strings.TrimSpace(s.ResetCommittedAt) != "")
 }
 
