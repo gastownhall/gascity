@@ -162,7 +162,8 @@ func TestPoolClaimBackstopContent_ProcedureNudgeStillAsksToClaim(t *testing.T) {
 // TestClaimRecoveryTextIgnoresTheConfiguredNudge crosses the configured nudge
 // values a pack can ship with every claim-recovery site: each sends its own
 // built-in text (issue #9196). The configured nudge's presence still gates
-// the legacy continuation and unstarted-execution lanes.
+// the legacy continuation and unstarted-execution lanes, and a template not in
+// the config gets "" at every site.
 func TestClaimRecoveryTextIgnoresTheConfiguredNudge(t *testing.T) {
 	const bead = "work-b"
 	sites := []struct {
@@ -220,6 +221,16 @@ func TestClaimRecoveryTextIgnoresTheConfiguredNudge(t *testing.T) {
 				}
 			})
 		}
+		t.Run(site.name+"/unknown template", func(t *testing.T) {
+			cfg := idleClaimTestCfg()
+			cfg.Agents[0].Nudge = idleClaimProcedureNudge
+			s := idleClaimPoolSession()
+			s.Metadata["instance_token"] = "tok-1"
+			s.Metadata["template"] = "unknown-agent"
+			if got := site.text(cfg, s); got != "" {
+				t.Fatalf("text for an unknown template = %q, want empty (fail closed)", got)
+			}
+		})
 	}
 }
 
