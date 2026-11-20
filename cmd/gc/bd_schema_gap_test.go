@@ -227,7 +227,7 @@ func TestBdSchemaGapNoticeCautionsThatAMigratorMovesBothLanes(t *testing.T) {
 	linked := linkedCursorsForTest()
 	want := fmt.Sprintf("v%d/%d", linked.Main, linked.Ignored)
 	caution := "The migrator must move both lanes, main and ignored, to " + want +
-		": one that moves only the main lane can leave a database no bd opens. Afterwards gc doctor --check bd-schema reads both lanes."
+		": one that moves only the main lane leaves it behind, where a bd may refuse to open it. Afterwards gc doctor --check bd-schema reads both lanes."
 	gap := bdSchemaGap{
 		scope:     bdSchemaScope{label: "city", root: "/srv/my-city"},
 		database:  "hq",

@@ -193,9 +193,12 @@ migrate_command = "cd {{shq .ScopeDir}} && BEADS_DIR={{shq .BeadsDir}} BEADS_DOL
 | `{{.Socket}}` | the Dolt server's Unix socket; empty over TCP |
 | `{{.Bd}}` | the `bd` the city pins for that scope, or `bd` if `gc` cannot resolve it |
 
-Values are raw; `shq` quotes one for a POSIX shell. Setting the server and
-database in the command keeps `bd` on the database the line names; run it from
-a shell with no other `BEADS_DOLT_*` variables set, as the line says. `gc`
+Values are raw; `shq` quotes one for a POSIX shell. On a server reached over
+TCP, setting the address and database in the command keeps `bd` on the
+database the line names; for a Unix socket, set `BEADS_DOLT_SERVER_SOCKET` from
+`{{.Socket}}` instead. Run it from a shell with no other `BEADS_DOLT_*`
+variables set, as the line says; `bd` then reads a server password from its
+credentials file. `gc`
 refuses to load a config whose template does not parse or does not render a
 single line for a sample city and rig database, and names
 `beads.migrate_command`. If the template fails for a real database, the line

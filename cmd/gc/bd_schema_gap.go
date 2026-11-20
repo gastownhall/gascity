@@ -170,9 +170,10 @@ func (g bdSchemaGap) migrateCommand(city bdSchemaCity, bdPath string) string {
 
 // twoLaneCaution is the sentence every behind notice puts ahead of its
 // command: bd records a schema in two migration lanes, and a migrator that
-// moves only the main one leaves the database at a schema nothing opens.
+// moves only the main one leaves the database behind, where a bd may refuse
+// to open it.
 func (g bdSchemaGap) twoLaneCaution() string {
-	return fmt.Sprintf(" The migrator must move both lanes, main and ignored, to %s: one that moves only the main lane can leave a database no bd opens. Afterwards gc doctor --check bd-schema reads both lanes.",
+	return fmt.Sprintf(" The migrator must move both lanes, main and ignored, to %s: one that moves only the main lane leaves it behind, where a bd may refuse to open it. Afterwards gc doctor --check bd-schema reads both lanes.",
 		bdSchemaCursors(g.linked))
 }
 
