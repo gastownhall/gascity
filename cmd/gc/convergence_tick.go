@@ -8,6 +8,7 @@ import (
 	"os/user"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -22,7 +23,65 @@ type convergenceRequest struct {
 	User    string            `json:"user,omitempty"` // resolved client-side for audit attribution
 	Params  map[string]string `json:"params"`         // command-specific parameters
 	replyCh chan convergenceReply
+	// handoff shares this request's admission state between the socket
+	// handler that enqueued it and whichever dispatcher receives a copy of
+	// it from the channel. nil marks an in-process request no socket handler
+	// is waiting on: it is always admitted.
+	handoff *convergenceHandoff
 }
+
+// Admission states stored in convergenceHandoff.state. Exactly one
+// queued→claimed or queued→withdrawn transition wins.
+const (
+	convergenceHandoffQueued    int32 = iota // enqueued, no dispatcher has it yet
+	convergenceHandoffClaimed                // a dispatcher took it and will run it
+	convergenceHandoffWithdrawn              // the socket handler gave up waiting; dispatchers must skip it
+)
+
+// convergenceHandoff settles admission of one convergence request between
+// the socket handler that enqueued it and the dispatcher that received it.
+// The pointer travels with the request value through the channel, so both
+// sides observe one shared state even though the request itself is copied.
+// The winning transition is what lets the socket handler report either
+// "certainly not applied" (withdrawn) or "possibly applied" (claimed)
+// instead of an error the queued request later contradicts (#8387).
+type convergenceHandoff struct {
+	state atomic.Int32
+}
+
+// claim admits the caller to execute the request, transitioning
+// queued→claimed. It reports false when the request was withdrawn (or
+// already claimed). A nil handoff — an in-process request no socket handler
+// is racing — is always admitted.
+func (h *convergenceHandoff) claim() bool {
+	if h == nil {
+		return true
+	}
+	return h.state.CompareAndSwap(convergenceHandoffQueued, convergenceHandoffClaimed)
+}
+
+// withdraw retracts a still-queued request, transitioning
+// queued→withdrawn, and reports whether this call is what retracted it. A
+// dispatcher that already claimed keeps running; withdrawal cannot
+// interrupt it.
+func (h *convergenceHandoff) withdraw() bool {
+	if h == nil {
+		return false
+	}
+	return h.state.CompareAndSwap(convergenceHandoffQueued, convergenceHandoffWithdrawn)
+}
+
+// Replies and dispatcher errors for a convergence request whose socket
+// reply wait expired (#8387). They replace the bare "controller did not
+// respond in time" so the caller knows whether retrying is safe.
+const (
+	// convergeWithdrawnReply keeps the old prefix for log scanners and adds
+	// the guarantee withdrawal provides: nothing ran, a retry is safe.
+	convergeWithdrawnReply = "controller did not respond in time; the request was withdrawn and not applied, so it is safe to retry"
+	// convergeWithdrawnError is the dispatcher's rejection for a request the
+	// socket handler withdrew; the wrapper logs it like any reply error.
+	convergeWithdrawnError = "request withdrawn before execution: client wait timed out"
+)
 
 // convergenceReply is the response from the event loop to a socket command.
 type convergenceReply struct {
@@ -417,6 +476,14 @@ func (cr *CityRuntime) safeHandleConvergenceRequest(ctx context.Context, req con
 // handleConvergenceRequest dispatches a single convergence command to the
 // scope selected by the request's "rig" parameter.
 func (cr *CityRuntime) handleConvergenceRequest(ctx context.Context, req convergenceRequest) convergenceReply {
+	// Settle admission before any state is read or written: a request the
+	// socket handler withdrew after its reply timeout must not execute when
+	// a dispatcher later drains it (#8387). This is the single claim site —
+	// the event loop, processConvergenceRequests, and direct callers all
+	// funnel through here.
+	if !req.handoff.claim() {
+		return convergenceReply{Error: convergeWithdrawnError}
+	}
 	if cr.convScopes == nil {
 		return convergenceReply{Error: "convergence not available (no bead store)"}
 	}

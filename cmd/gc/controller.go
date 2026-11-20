@@ -535,6 +535,7 @@ func handleConvergeSocketCmd(conn net.Conn, payload string, ch chan convergenceR
 		return
 	}
 	req.replyCh = make(chan convergenceReply, 1)
+	req.handoff = &convergenceHandoff{}
 	// Send to event loop with a timeout to prevent hanging if the loop is stuck.
 	select {
 	case ch <- req:
@@ -547,6 +548,14 @@ func handleConvergeSocketCmd(conn net.Conn, payload string, ch chan convergenceR
 	case reply := <-req.replyCh:
 		writeJSONLine(conn, reply)
 	case <-time.After(60 * time.Second):
+		// The reply wait expired. Withdraw the request so a dispatcher that
+		// has not picked it up yet never executes it after the caller was
+		// told it failed (#8387).
+		if req.handoff.withdraw() {
+			writeJSONLine(conn, convergenceReply{Error: convergeWithdrawnReply})
+			return
+		}
+		// A dispatcher already claimed the request and may still deliver.
 		writeJSONLine(conn, convergenceReply{Error: "controller did not respond in time"})
 	}
 }

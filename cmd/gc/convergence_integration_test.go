@@ -1,15 +1,19 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -1543,4 +1547,200 @@ func TestConvergenceIndex_MaintainedOnStateTransitions(t *testing.T) {
 	if closed.Status != "closed" {
 		t.Errorf("status = %q, want closed", closed.Status)
 	}
+}
+
+// --- Socket reply-timeout withdrawal (issue #8387) ---
+
+// socketConvergeReply runs handleConvergeSocketCmd over an in-memory pipe
+// and returns the JSON reply line it wrote. Nothing services ch unless the
+// caller does, so a command sent this way sits queued exactly as it does
+// while the event loop is busy inside a long tick.
+func socketConvergeReply(t *testing.T, ch chan convergenceRequest, payload string) string {
+	t.Helper()
+	server, client := net.Pipe()
+	t.Cleanup(func() {
+		server.Close() //nolint:errcheck // unblock a stranded goroutine
+		client.Close() //nolint:errcheck // unblock a stranded goroutine
+	})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handleConvergeSocketCmd(server, payload, ch)
+		server.Close() //nolint:errcheck // test pipe
+	}()
+	line, err := bufio.NewReader(client).ReadString('\n')
+	if err != nil {
+		t.Fatalf("reading socket reply: %v", err)
+	}
+	client.Close() //nolint:errcheck // test pipe
+	<-done
+	return line
+}
+
+// stderrString returns everything the test runtime has written to stderr.
+func stderrString(t *testing.T, cr *CityRuntime) string {
+	t.Helper()
+	buf, ok := cr.stderr.(*bytes.Buffer)
+	if !ok {
+		t.Fatal("test runtime stderr is not a bytes.Buffer")
+	}
+	return buf.String()
+}
+
+func assertConvergenceBeadCount(t *testing.T, store *beads.MemStore, want int) {
+	t.Helper()
+	loops, err := store.List(beads.ListQuery{Type: "convergence", IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("listing convergence beads: %v", err)
+	}
+	if len(loops) != want {
+		t.Errorf("convergence beads = %d, want %d", len(loops), want)
+	}
+}
+
+func assertLoopState(t *testing.T, store *beads.MemStore, beadID, want string) {
+	t.Helper()
+	b, err := store.Get(beadID)
+	if err != nil {
+		t.Fatalf("getting bead %s: %v", beadID, err)
+	}
+	if got := b.Metadata[convergence.FieldState]; got != want {
+		t.Errorf("loop %s state = %q, want %q", beadID, got, want)
+	}
+}
+
+// createLoopForTest creates a convergence loop through the direct dispatcher
+// (nil handoff: an in-process request is always admitted) and returns its
+// result.
+func createLoopForTest(t *testing.T, cr *CityRuntime, maxIterations string) convergence.CreateResult {
+	t.Helper()
+	reply := sendAndReceive(t, cr, convergenceRequest{
+		Command: "create",
+		Params: map[string]string{
+			"formula":        "test-formula",
+			"target":         "test-agent",
+			"max_iterations": maxIterations,
+		},
+	})
+	if reply.Error != "" {
+		t.Fatalf("fixture create: %s", reply.Error)
+	}
+	var created convergence.CreateResult
+	if err := json.Unmarshal(reply.Result, &created); err != nil {
+		t.Fatalf("fixture create unmarshal: %v", err)
+	}
+	return created
+}
+
+// stopLoopForTest terminates a loop through the direct dispatcher.
+func stopLoopForTest(t *testing.T, cr *CityRuntime, beadID string) {
+	t.Helper()
+	reply := sendAndReceive(t, cr, convergenceRequest{
+		Command: "stop",
+		BeadID:  beadID,
+		User:    "test-operator",
+	})
+	if reply.Error != "" {
+		t.Fatalf("fixture stop: %s", reply.Error)
+	}
+}
+
+// waitingManualLoopForTest creates a loop and drives it to waiting_manual
+// (manual gate mode, first wisp closed, one tick), the state approve and
+// iterate require.
+func waitingManualLoopForTest(t *testing.T, cr *CityRuntime, store *beads.MemStore, maxIterations string) convergence.CreateResult {
+	t.Helper()
+	created := createLoopForTest(t, cr, maxIterations)
+	if err := hqScope(t, cr).adapter.populateIndex(); err != nil {
+		t.Fatalf("populating active index: %v", err)
+	}
+	if err := store.Close(created.FirstWispID); err != nil {
+		t.Fatalf("closing first wisp: %v", err)
+	}
+	cr.convergenceTick(context.Background())
+	assertLoopState(t, store, created.BeadID, convergence.StateWaitingManual)
+	return created
+}
+
+// TestConvergeSocketTimeoutWithdrawsQueuedRequest (AC-1): while the event
+// loop is busy past the socket reply timeout, every convergence command is
+// told its request was withdrawn and not applied, and neither drain path —
+// processConvergenceRequests (the between-ticks drain, which logs the
+// withdrawal) nor the raw dispatcher — executes it afterward.
+func TestConvergeSocketTimeoutWithdrawsQueuedRequest(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		for _, command := range []string{"create", "approve", "iterate", "stop", "retry"} {
+			cr, store := setupConvergenceRuntime(t)
+			var payload string
+			var verify func(t *testing.T)
+			switch command {
+			case "create":
+				payload = `{"command":"create","params":{"formula":"test-formula","target":"test-agent","max_iterations":"3"}}`
+				verify = func(t *testing.T) {
+					assertConvergenceBeadCount(t, store, 0)
+				}
+			case "approve", "iterate":
+				created := waitingManualLoopForTest(t, cr, store, "3")
+				payload = fmt.Sprintf(`{"command":%q,"bead_id":%q,"user":"test-operator"}`, command, created.BeadID)
+				verify = func(t *testing.T) {
+					assertLoopState(t, store, created.BeadID, convergence.StateWaitingManual)
+				}
+			case "stop":
+				created := createLoopForTest(t, cr, "3")
+				payload = fmt.Sprintf(`{"command":"stop","bead_id":%q,"user":"test-operator"}`, created.BeadID)
+				verify = func(t *testing.T) {
+					assertLoopState(t, store, created.BeadID, convergence.StateActive)
+				}
+			case "retry":
+				created := createLoopForTest(t, cr, "3")
+				stopLoopForTest(t, cr, created.BeadID)
+				payload = fmt.Sprintf(`{"command":"retry","bead_id":%q,"user":"test-operator"}`, created.BeadID)
+				verify = func(t *testing.T) {
+					assertConvergenceBeadCount(t, store, 1)
+					assertLoopState(t, store, created.BeadID, convergence.StateTerminated)
+				}
+			}
+
+			// The event loop never services the channel: the command sits
+			// queued past the socket reply timeout.
+			line := socketConvergeReply(t, cr.convergenceReqCh, payload)
+			var reply convergenceReply
+			if err := json.Unmarshal([]byte(line), &reply); err != nil {
+				t.Fatalf("%s: decoding reply %q: %v", command, line, err)
+			}
+			if !strings.Contains(reply.Error, "controller did not respond in time") ||
+				!strings.Contains(reply.Error, "withdrawn") ||
+				!strings.Contains(reply.Error, "safe to retry") {
+				t.Errorf("%s: timeout reply = %q, want the withdrawn-and-not-applied message", command, reply.Error)
+			}
+			if len(cr.convergenceReqCh) != 1 {
+				t.Fatalf("%s: queued requests = %d, want 1", command, len(cr.convergenceReqCh))
+			}
+
+			// The tick ends: the wrapper the event loop drains through must
+			// skip the withdrawn request and log that it did.
+			cr.processConvergenceRequests(context.Background())
+			if !strings.Contains(stderrString(t, cr), "withdrawn before execution") {
+				t.Errorf("%s: drain via the wrapper did not log the withdrawal; stderr:\n%s", command, stderrString(t, cr))
+			}
+			verify(t)
+
+			// The raw dispatcher rejects a withdrawn request the same way,
+			// without logging — logging belongs to the wrapper.
+			line = socketConvergeReply(t, cr.convergenceReqCh, payload)
+			if err := json.Unmarshal([]byte(line), &reply); err != nil {
+				t.Fatalf("%s: decoding second reply %q: %v", command, line, err)
+			}
+			req := <-cr.convergenceReqCh
+			before := len(stderrString(t, cr))
+			direct := cr.handleConvergenceRequest(context.Background(), req)
+			if !strings.Contains(direct.Error, "withdrawn before execution") {
+				t.Errorf("%s: raw dispatcher error = %q, want the withdrawal rejection", command, direct.Error)
+			}
+			if got := stderrString(t, cr); len(got) != before {
+				t.Errorf("%s: raw dispatcher logged %q; only the wrapper logs", command, got[before:])
+			}
+			verify(t)
+		}
+	})
 }
