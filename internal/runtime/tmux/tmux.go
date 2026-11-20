@@ -3328,14 +3328,30 @@ func recoverStagedDraft(sawIdle bool, sendSubmit func(attempt int) error, wake f
 	}
 }
 
-// paneBusy reports whether the target pane shows an active processing indicator
-// (Claude's live spinner / "esc to interrupt"). Used to confirm a submitted turn.
+// paneBusy reports whether the target pane shows one of the shared scan's
+// active-processing indicators (Claude's live spinner / "esc to interrupt"),
+// without knowing the pane's family. The startup nudge ladder reads it between
+// retries; the verified submit's confirm loop reads the family-aware
+// paneBusyFor instead, which also sees grok's footer.
 func (t *Tmux) paneBusy(target string) (bool, error) {
 	lines, err := t.CapturePaneLines(target, promptObservationLines)
 	if err != nil {
 		return false, err
 	}
 	return paneContainsBusyIndicator(lines), nil
+}
+
+// paneBusyFor reports the target pane's busy reading for provider family: the
+// shared indicator scan every family gets, plus grok's own footer read below
+// its live composer (paneBusyReading). The verified submit's confirm loop
+// reads it, so a grok pane whose composer stays on screen while it works
+// still reads busy.
+func (t *Tmux) paneBusyFor(target, family string) (bool, error) {
+	lines, err := t.CapturePaneLines(target, promptObservationLines)
+	if err != nil {
+		return false, err
+	}
+	return paneBusyReading(lines, family), nil
 }
 
 // submitVerifyEligible reports whether the target runs a provider whose busy
@@ -3359,10 +3375,12 @@ func (t *Tmux) sniffVerifyEligibleFamily(target string) string {
 	return ""
 }
 
-// submitVerifyEligibleFamilies are the provider families whose busy indicator
-// paneContainsBusyIndicator can actually read: claude (its spinner/elapsed-timer
-// footer, the confirmed ga-bwm failure) and codex, whose TUI shows the same
-// "esc to interrupt" string that function has always matched.
+// submitVerifyEligibleFamilies are the provider families whose busy reading
+// the leaf can actually read: claude (its spinner/elapsed-timer footer, the
+// confirmed ga-bwm failure) and codex ("esc to interrupt") through
+// paneContainsBusyIndicator, and grok through its own Ctrl+c:cancel footer
+// read relative to its live composer (grokTurnRunning), which the shared scan
+// cannot see.
 //
 // Eligibility is what makes an unconfirmed submit an ERROR instead of a silent
 // success, and that is the point for codex: the best-effort fallback reports
@@ -3379,7 +3397,7 @@ func (t *Tmux) sniffVerifyEligibleFamily(target string) string {
 // listed family's busy reading reaches SnapshotIdle and TurnRunning callers,
 // so listing a family makes callers that wait out a (false, nil) SnapshotIdle
 // begin waiting on that family's indicator.
-var submitVerifyEligibleFamilies = []string{"claude", "codex"}
+var submitVerifyEligibleFamilies = []string{"claude", "codex", "grok"}
 
 func submitVerifyEligibleFamily(family string) bool {
 	for _, eligible := range submitVerifyEligibleFamilies {
@@ -3825,7 +3843,13 @@ func (t *Tmux) nudgeSession(
 	}
 	wake := func() { t.WakePaneIfDetached(session, target) }
 	if t.submitVerifyEligible(target) {
-		busy := func() (bool, error) { return t.paneBusy(target) }
+		verifyFamily, verifyFamilyErr := t.busyTrustFamily(target)
+		if verifyFamilyErr != nil {
+			// The family only widens the busy reading (grok's footer); a read
+			// that fails keeps the shared indicator scan, which needs none.
+			verifyFamily = ""
+		}
+		busy := func() (bool, error) { return t.paneBusyFor(target, verifyFamily) }
 		var mayResend func() (bool, error)
 		if interrupts {
 			// An interrupting submit is held and sent on the live screen's
@@ -5757,16 +5781,6 @@ func idlePromptPrefix(configured string) string {
 	return DefaultReadyPromptPrefix
 }
 
-// snapshotPaneIdle takes one observation of the session's pane and reports
-// whether it currently shows a ready prompt with no active-processing
-// indicator, resolving the session's configured ready-prompt prefix first. It
-// is the entry point for single-observation callers (SnapshotIdle); WaitForIdle
-// resolves the prefix once and polls snapshotPaneIdleWithPrefix directly so its
-// loop does not re-exec tmux show-environment on every 200ms tick.
-func (t *Tmux) snapshotPaneIdle(session string) (bool, error) {
-	return t.snapshotPaneIdleWithPrefix(session, t.resolveIdlePromptPrefix(session))
-}
-
 // resolveIdlePromptPrefix reads the session's configured ready-prompt prefix,
 // falling back to DefaultReadyPromptPrefix when it is unset or unreadable.
 func (t *Tmux) resolveIdlePromptPrefix(session string) string {
@@ -5776,23 +5790,27 @@ func (t *Tmux) resolveIdlePromptPrefix(session string) string {
 	return DefaultReadyPromptPrefix
 }
 
-// snapshotPaneIdleWithPrefix is the pure pane scan behind idle detection: it
-// captures the pane once and reports whether it shows promptPrefix with no
-// active-processing indicator. A busy-indicator string anywhere in the capture
-// is the scan's only busy reading, (false, nil): usually the live indicator,
-// though a stale frame or transcript text that contains one reads the same. A
-// capture showing neither an indicator string nor the prompt returns
-// [runtime.ErrIdleIndeterminate]: the prompt may be scrolled away, covered by
-// an alternate screen, or overwritten by a broadcast message, so its absence is
-// not evidence of work. A capture error is returned verbatim so callers can
-// distinguish a session that has gone away (ErrSessionNotFound / ErrNoServer)
-// from a transient read failure.
+// snapshotPaneIdleWithPrefix is the family-less form of the pure pane scan
+// behind idle detection: it captures the pane once and classifies it through
+// ClassifyIdlePane, whose busy reading is a shared-scan indicator string
+// anywhere in the capture. The leaf's family-carrying reads (SnapshotIdle, the
+// idle wait) use snapshotPaneIdleFor.
 func (t *Tmux) snapshotPaneIdleWithPrefix(session, promptPrefix string) (bool, error) {
+	return t.snapshotPaneIdleFor(session, promptPrefix, "")
+}
+
+// snapshotPaneIdleFor captures the pane once and classifies it through
+// classifyIdlePaneFor with the pane's provider family, so a grok pane's
+// Ctrl+c:cancel footer counts as busy where the shared scan alone would read
+// its still-visible composer as idle. A capture error is returned verbatim so
+// callers can distinguish a session that has gone away (ErrSessionNotFound /
+// ErrNoServer) from a transient read failure.
+func (t *Tmux) snapshotPaneIdleFor(session, promptPrefix, family string) (bool, error) {
 	lines, err := t.CapturePaneLines(session, promptObservationLines)
 	if err != nil {
 		return false, err
 	}
-	return ClassifyIdlePane(lines, promptPrefix)
+	return classifyIdlePaneFor(lines, promptPrefix, family)
 }
 
 // ClassifyIdlePane classifies captured pane lines the way every pane-scanning
@@ -5803,9 +5821,20 @@ func (t *Tmux) snapshotPaneIdleWithPrefix(session, promptPrefix string) (bool, e
 // prompt-prefixed line is a numbered menu's cursor row (isMenuCursorRow) is
 // waiting for a choice: its error is [runtime.ErrIdlePendingChoice], which
 // wraps that one. The tmux idle wait and its exec twin both classify each
-// capture through it.
+// capture through it. It reads no provider family, so it carries the shared
+// indicator scan alone; the tmux leaf's own reads classify through
+// classifyIdlePaneFor with the pane's family.
 func ClassifyIdlePane(lines []string, promptPrefix string) (bool, error) {
-	if paneContainsBusyIndicator(lines) {
+	return classifyIdlePaneFor(lines, promptPrefix, "")
+}
+
+// classifyIdlePaneFor is ClassifyIdlePane with the pane's provider family in
+// play: the busy reading is paneBusyReading, the shared indicator scan plus,
+// for a grok pane, its Ctrl+c:cancel footer read relative to the live
+// composer (grokTurnRunning). The idle and pending-choice readings are the
+// same scans either way.
+func classifyIdlePaneFor(lines []string, promptPrefix, family string) (bool, error) {
+	if paneBusyReading(lines, family) {
 		return false, nil
 	}
 	if PaneShowsIdlePrompt(lines, promptPrefix) {
@@ -5854,26 +5883,32 @@ func PaneShowsIdlePrompt(lines []string, promptPrefix string) bool {
 }
 
 // SnapshotIdle reports whether the named session is at an idle interactive
-// boundary right now — a ready prompt with no active-processing indicator — in
-// a single non-blocking observation. It implements
-// [runtime.IdleSnapshotProvider]: (false, nil) means the capture contains a
-// busy-indicator string (see snapshotPaneIdleWithPrefix) and the session's
-// provider family is one whose busy reading this leaf trusts
-// (busyReadingTrusted). The same capture for any other family, and a pane
-// showing neither an indicator string nor the ready prompt, returns
-// [runtime.ErrIdleIndeterminate], as [runtime.ErrIdlePendingChoice] when the
-// pane is parked on a numbered menu (ClassifyIdlePane); a busy capture whose
-// family cannot be read (busyTrustFamily) is an error, as a failed capture
-// is. A session that has gone away is reported as an error, not as idle.
+// boundary right now — a ready prompt with no busy reading — in a single
+// non-blocking observation. It implements [runtime.IdleSnapshotProvider]:
+// (false, nil) means the capture carries a busy reading (see
+// snapshotPaneIdleFor: the shared indicator scan, plus grok's Ctrl+c:cancel
+// footer below its live composer) and the session's provider family is one
+// whose busy reading this leaf trusts (busyReadingTrusted). The same capture
+// for any other family, and a pane showing neither a busy reading nor the
+// ready prompt, returns [runtime.ErrIdleIndeterminate], as
+// [runtime.ErrIdlePendingChoice] when the pane is parked on a numbered menu
+// (classifyIdlePaneFor); a busy capture whose family cannot be read
+// (busyTrustFamily) is an error, as a failed capture is. A session that has
+// gone away is reported as an error, not as idle.
 func (t *Tmux) SnapshotIdle(session string) (bool, error) {
-	idle, err := t.snapshotPaneIdle(session)
+	promptPrefix := t.resolveIdlePromptPrefix(session)
+	// The family is resolved once, before the capture, because grok's busy
+	// reading is family-scoped (paneBusyReading): the shared scan alone reads
+	// a working grok pane as idle, its composer still on screen. A family that
+	// cannot be read keeps the shared scan, and the failed read is reported
+	// where it decides anything — on a busy reading.
+	family, familyErr := t.busyTrustFamily(session)
+	idle, err := t.snapshotPaneIdleFor(session, promptPrefix, family)
 	if err != nil || idle {
 		return idle, err
 	}
-	// The family resolves only on a busy reading.
-	family, err := t.busyTrustFamily(session)
-	if err != nil {
-		return false, fmt.Errorf("session %q shows a busy indicator: %w", session, err)
+	if familyErr != nil {
+		return false, fmt.Errorf("session %q shows a busy indicator: %w", session, familyErr)
 	}
 	if !busyReadingTrusted(family) {
 		return false, fmt.Errorf("session %q shows a busy indicator its provider family's scan cannot vouch for: %w",
@@ -5944,6 +5979,16 @@ func (t *Tmux) waitForIdleSettling(ctx context.Context, session string, timeout 
 	if err != nil {
 		return err
 	}
+	// The pane's provider family too, for the same one-exec-per-wait reason:
+	// grok's busy reading is family-scoped (paneBusyReading), and the shared
+	// scan alone reads a working grok pane as idle. A family that cannot be
+	// read keeps the shared scan, which is what the wait ran before grok's
+	// reading existed — the wait's verdict degrades to today's, never to a
+	// wrong one.
+	family, familyErr := t.busyTrustFamily(target)
+	if familyErr != nil {
+		family = ""
+	}
 
 	consecutiveIdle := 0
 	sawBusy := false
@@ -5962,7 +6007,7 @@ func (t *Tmux) waitForIdleSettling(ctx context.Context, session string, timeout 
 				return nil
 			}
 		}
-		idle, err := t.snapshotPaneIdleWithPrefix(target, promptPrefix)
+		idle, err := t.snapshotPaneIdleFor(target, promptPrefix, family)
 		if err != nil {
 			// Distinguish terminal errors from transient ones.
 			// Session not found or no server means the session is gone —

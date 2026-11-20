@@ -119,7 +119,7 @@ func wantReading(t *testing.T, err error, wantErr, wantIndeterminate bool) {
 
 // The busy reading of the pane scan is policy the leaf owns: only the
 // families whose indicator the scan reads (submitVerifyEligibleFamilies:
-// claude, codex) may report it, named by the pane's GC_PROVIDER or, without
+// claude, codex, grok) may report it, named by the pane's GC_PROVIDER or, without
 // one, by the process the pane runs. Every other family, and a pane whose
 // family cannot be told, reports the busy-indicator string as
 // runtime.ErrIdleIndeterminate, so a caller that holds on busy holds nothing
