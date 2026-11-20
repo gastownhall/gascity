@@ -381,18 +381,27 @@ func movedHeadDetail(database, before, after, evidence string) string {
 // evidence at all: nil (no window was read), Unreadable (a statement the
 // server refused), Truncated (the commit cap fell), or empty (a HEAD cannot
 // move without a commit, so a window that lists none is evidence that failed,
-// not evidence that cleared). The unattributable arms carry no evidence
-// string yet; their reasons are the verdict detail's job elsewhere.
+// not evidence that cleared). Those arms carry their reason as the evidence
+// string: an operator reading the WARN line must be able to tell "the window
+// caught gc's write" from "the window read failed", which are the same
+// verdict with opposite runbooks.
 //
 // The FIRST deciding shape wins the evidence string, in the order the shapes
 // are damning: a prefix-carrying commit, then an open-write table, then a
 // schema change — the same order a reader of the WARN line will check them.
 func windowNamesOpenWrite(window *proxyendpoint.PostOpenWindow) (evidence string, declined bool) {
-	if window == nil || window.Unreadable != "" || window.Truncated {
-		return "", true
+	if window == nil {
+		return "no commit window was read for the move", true
+	}
+	if window.Unreadable != "" {
+		return fmt.Sprintf("the commit window could not be read (%s)", window.Unreadable), true
+	}
+	if window.Truncated {
+		return fmt.Sprintf("the window held more than the %d-commit read cap, so attribution cannot see all of it",
+			proxyendpoint.PostOpenWindowCommitLimit), true
 	}
 	if len(window.Commits) == 0 && len(window.Tables) == 0 {
-		return "", true
+		return "the window listed no commits, which a moved HEAD cannot be", true
 	}
 	for _, commit := range window.Commits {
 		if strings.HasPrefix(commit, ProxiedOpenCommitPrefix) {

@@ -3,6 +3,7 @@ package proxyendpoint
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -246,6 +247,80 @@ func TestReadPostOpenReadsTheWindowWhenHeadMoved(t *testing.T) {
 		}
 		if got := len(pool.Statements()); got != 2 {
 			t.Fatalf("a read with no since issued %d statement(s), want 2", got)
+		}
+	})
+}
+
+// TestReadPostOpenCarriesAFailedWindow pins the window read's failure shapes:
+// the hashes were observed, so the report is a success — but the window half
+// failed, and the failure travels on the report for the verdict to weigh, not
+// as an error the caller would have to guess about.
+func TestReadPostOpenCarriesAFailedWindow(t *testing.T) {
+	const since = "0000000000000000000000000000aaaa"
+	const after = "0000000000000000000000000000bbbb"
+
+	t.Run("a refused window statement is carried, not an error", func(t *testing.T) {
+		pool := proxyendpointtest.NewPostOpenDB(
+			proxyendpointtest.State{Head: since},
+			proxyendpointtest.State{Head: after, Window: &proxyendpointtest.Window{
+				FailLog:  errors.New("table function not found"),
+				Commits:  []string{"unreachable"},
+				Tables:   []proxyendpointtest.WindowTable{{Name: "issues"}},
+				FailDiff: errors.New("table function not found"),
+			}})
+		t.Cleanup(func() { _ = pool.DB.Close() })
+		report, err := ReadPostOpen(context.Background(), pool.DB, since)
+		if err != nil {
+			t.Fatalf("a refused window statement failed the whole read: %v", err)
+		}
+		if report.Head != after {
+			t.Fatalf("head = %q, want %q: the hashes were observed", report.Head, after)
+		}
+		if report.Window == nil || report.Window.Unreadable == "" {
+			t.Fatalf("window = %+v, want an Unreadable one", report.Window)
+		}
+		if len(report.Window.Commits) != 0 || len(report.Window.Tables) != 0 {
+			t.Fatalf("window carried data its statements never produced: %+v", report.Window)
+		}
+	})
+
+	t.Run("a hash pair the table functions cannot take spends no statements", func(t *testing.T) {
+		pool := proxyendpointtest.NewPostOpenDB(
+			proxyendpointtest.State{Head: "before0000"},
+			proxyendpointtest.State{Head: after, Window: &proxyendpointtest.Window{
+				Commits: []string{"bd: update ga-1"},
+			}})
+		t.Cleanup(func() { _ = pool.DB.Close() })
+		report, err := ReadPostOpen(context.Background(), pool.DB, "before0000")
+		if err != nil {
+			t.Fatalf("ReadPostOpen: %v", err)
+		}
+		if report.Window == nil || report.Window.Unreadable == "" {
+			t.Fatalf("window = %+v, want an Unreadable one: the hashes are inlined, so an unprovable pair must not be asked", report.Window)
+		}
+		if got := len(pool.Statements()); got != 2 {
+			t.Fatalf("the read issued %d statement(s) for an unparameterizable pair, want 2", got)
+		}
+	})
+
+	t.Run("a window past the cap is truncated and keeps the cap's commits", func(t *testing.T) {
+		commits := make([]string, PostOpenWindowCommitLimit+1)
+		for i := range commits {
+			commits[i] = fmt.Sprintf("bd: update ga-%d", i)
+		}
+		pool := proxyendpointtest.NewPostOpenDB(
+			proxyendpointtest.State{Head: since},
+			proxyendpointtest.State{Head: after, Window: &proxyendpointtest.Window{Commits: commits}})
+		t.Cleanup(func() { _ = pool.DB.Close() })
+		report, err := ReadPostOpen(context.Background(), pool.DB, since)
+		if err != nil {
+			t.Fatalf("ReadPostOpen: %v", err)
+		}
+		if report.Window == nil || !report.Window.Truncated {
+			t.Fatalf("window = %+v, want Truncated: the cap asked for one commit more than it keeps", report.Window)
+		}
+		if got := len(report.Window.Commits); got != PostOpenWindowCommitLimit {
+			t.Fatalf("the window kept %d commits, want the cap's %d", got, PostOpenWindowCommitLimit)
 		}
 	})
 }

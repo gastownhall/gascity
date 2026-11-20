@@ -2877,3 +2877,63 @@ func TestProxiedOpenUnmovedNamesTheDecidingCommitOrTable(t *testing.T) {
 		})
 	}
 }
+
+// TestProxiedOpenUnmovedNamesWhyTheWindowCouldNotAttribute is the decline's
+// other half: when the window is NOT evidence — never read, unreadable,
+// truncated past the cap, or empty against a moved HEAD — the verdict says
+// WHICH of those it was.
+//
+// The four arms share one verdict and one WARN line, and without the reason an
+// operator reading that line cannot tell "gc's open wrote and the window
+// caught it" (act: the lane is writing when it must not) from "the window read
+// failed" (act: the proxy refused a table function; the lane never attributed
+// anything). Same line, opposite runbooks.
+func TestProxiedOpenUnmovedNamesWhyTheWindowCouldNotAttribute(t *testing.T) {
+	pinAt := func(head string) Pin {
+		return Pin{admitted: true, database: "beads", head: head, cursors: pinnedCursors()}
+	}
+	moved := func(window *proxyendpoint.PostOpenWindow) proxyendpoint.PostOpenReport {
+		return proxyendpoint.PostOpenReport{Head: "def456", IgnoredCursorTable: true, Window: window}
+	}
+
+	for _, tc := range []struct {
+		name   string
+		window *proxyendpoint.PostOpenWindow
+		reason string
+	}{
+		{
+			name:   "no window was read",
+			window: nil,
+			reason: "no commit window",
+		},
+		{
+			name:   "the window statement failed",
+			window: &proxyendpoint.PostOpenWindow{Unreadable: "reading dolt_log(0000000000000000000000000000aaaa..0000000000000000000000000000bbbb): table function not found"},
+			reason: "could not be read",
+		},
+		{
+			name:   "the commit cap truncated the window",
+			window: &proxyendpoint.PostOpenWindow{Commits: []string{"bd: update ga-1"}, Truncated: true},
+			reason: "more than",
+		},
+		{
+			name:   "the window listed no commits",
+			window: &proxyendpoint.PostOpenWindow{},
+			reason: "no commits",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ProxiedOpenUnmoved(pinAt("abc123"), moved(tc.window))
+			verdict, typed := ProxiedVerdictOf(err)
+			if !typed || verdict.Verdict != ProxiedVerdictHeadMoved {
+				t.Fatalf("err = %v, want head_moved", err)
+			}
+			if !strings.Contains(verdict.Detail, tc.reason) {
+				t.Errorf("the verdict detail does not say why the window could not attribute (%q): %s", tc.reason, verdict.Detail)
+			}
+			if tc.window != nil && tc.window.Unreadable != "" && !strings.Contains(verdict.Detail, "table function not found") {
+				t.Errorf("the verdict detail does not carry the window's own failure: %s", verdict.Detail)
+			}
+		})
+	}
+}
