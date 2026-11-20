@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -44,9 +45,14 @@ type bdSchemaScope struct {
 // library linked into this binary.
 type bdSchemaGap struct {
 	scope bdSchemaScope
-	// database and endpoint say which database it is and where it is served.
+	// database and endpoint say which database it is and where it is served;
+	// host, port and socket are the endpoint's parts, for a configured
+	// migrate command.
 	database string
 	endpoint string
+	host     string
+	port     string
+	socket   string
 	// observed are the database's cursors as the linked library reads them,
 	// and linked the library's own; realityNote, when not empty, says why the
 	// ignored lane reads lower than the number on disk.
@@ -81,26 +87,30 @@ type bdSchemaCity struct {
 	// allowBehind reports the city's beads.allow_schema_behind_migrate
 	// opt-in, under which gc's own store open migrates a behind database.
 	allowBehind bool
+	// migrateCommand is the city's beads.migrate_command template, empty for
+	// gc's default command.
+	migrateCommand string
 }
 
 // newBdSchemaCity resolves what a notice needs to know about the city at
 // cityPath from its config.
 func newBdSchemaCity(cityPath string, cfg *config.City) bdSchemaCity {
 	return bdSchemaCity{
-		path:        cityPath,
-		split:       workStoreClassHolds(cfg) != nil,
-		allowBehind: cityAllowSchemaBehindMigrate(cityPath, cfg),
+		path:           cityPath,
+		split:          workStoreClassHolds(cfg) != nil,
+		allowBehind:    cityAllowSchemaBehindMigrate(cityPath, cfg),
+		migrateCommand: cfg.Beads.MigrateCommand,
 	}
 }
 
-// migrateCommand is the exact command an operator runs to migrate the gap's
-// database. Where gc bd forwards `migrate`, it is gc bd, which projects the
+// defaultMigrateCommand is gc's own command for migrating the gap's database
+// with the pinned bd. Where gc bd forwards `migrate`, it is gc bd, which projects the
 // scope's own store, server and credentials over whatever the shell holds.
 // A split city's gc bd refuses `migrate`, so there it is the pinned bd itself,
 // run from the scope directory with BEADS_DIR pinned to the scope; bd also
 // takes a server from BEADS_DOLT_* variables, which the notice says to leave
 // unset.
-func (g bdSchemaGap) migrateCommand(city bdSchemaCity, bdPath string) string {
+func (g bdSchemaGap) defaultMigrateCommand(city bdSchemaCity, bdPath string) string {
 	if !city.split {
 		if g.scope.rig == "" {
 			return fmt.Sprintf("gc bd --city %s migrate schema", shellQuotePOSIXPath(city.path))
@@ -113,6 +123,51 @@ func (g bdSchemaGap) migrateCommand(city bdSchemaCity, bdPath string) string {
 	}
 	root := shellQuotePOSIXPath(g.scope.root)
 	return fmt.Sprintf("cd %s && BEADS_DIR=%s/.beads %s migrate schema", root, root, bd)
+}
+
+// migrateCommand is the exact command the notice names for migrating the
+// gap's database, followed by what an operator needs to know to run it: the
+// city's beads.migrate_command rendered for the database when it is set, else
+// gc's default command. A configured template that does not render (config
+// load validates it, so this is not expected) falls back to the default
+// command and says why.
+func (g bdSchemaGap) migrateCommand(city bdSchemaCity, bdPath string) string {
+	if city.migrateCommand == "" {
+		command := g.defaultMigrateCommand(city, bdPath)
+		if city.split {
+			command += " (from a shell with no BEADS_DOLT_* variables set)"
+		}
+		return command
+	}
+	bd := strings.TrimSpace(bdPath)
+	if bd == "" {
+		bd = "bd"
+	}
+	command, err := config.RenderBeadsMigrateCommand(city.migrateCommand, config.BeadsMigrateCommandData{
+		City:     city.path,
+		Rig:      g.scope.rig,
+		ScopeDir: g.scope.root,
+		BeadsDir: filepath.Join(g.scope.root, ".beads"),
+		Database: g.database,
+		Host:     g.host,
+		Port:     g.port,
+		Socket:   g.socket,
+		Bd:       bd,
+	})
+	if err != nil {
+		fallback := city
+		fallback.migrateCommand = ""
+		return fmt.Sprintf("%s (beads.migrate_command did not render: %v)", g.migrateCommand(fallback, bdPath), err)
+	}
+	return command
+}
+
+// twoLaneCaution is the sentence every behind notice puts ahead of its
+// command: bd records a schema in two migration lanes, and a migrator that
+// moves only the main one leaves the database at a schema nothing opens.
+func (g bdSchemaGap) twoLaneCaution() string {
+	return fmt.Sprintf(" The migrator must move both lanes, main and ignored, to %s: one that moves only the main lane can leave a database no bd opens. Afterwards gc doctor --check bd-schema reads both lanes.",
+		bdSchemaCursors(g.linked))
 }
 
 // notice is the operator's line for the gap: what the database is at, what gc
@@ -141,13 +196,12 @@ func (g bdSchemaGap) notice(city bdSchemaCity, bdPath, bdVersion string) string 
 	}
 	if city.allowBehind {
 		b.WriteString(" beads.allow_schema_behind_migrate is on for this city, so gc's own store migrates it the next time it opens it; that setting is the operator's consent.")
+		b.WriteString(g.twoLaneCaution())
 		fmt.Fprintf(&b, " To migrate it first, once every client of this database runs a bd that knows %s: %s", bdSchemaCursors(g.linked), g.migrateCommand(city, bdPath))
 	} else {
 		b.WriteString(" gc migrates a database only while bootstrapping it: migrating changes the schema for every client of the database at once, and a bd built for the older schema then refuses it. Until it is migrated, the pinned bd may refuse it too.")
+		b.WriteString(g.twoLaneCaution())
 		fmt.Fprintf(&b, " Once every client of this database runs a bd that knows %s, an operator migrates it with a bd at that schema: %s", bdSchemaCursors(g.linked), g.migrateCommand(city, bdPath))
-	}
-	if city.split {
-		b.WriteString(" (from a shell with no BEADS_DOLT_* variables set)")
 	}
 	if g.hasRemote {
 		b.WriteString(" (it has a Dolt remote: bd asks the one clone that migrates for all of them to add --force and then run `bd dolt push`; follow bd's message)")
@@ -247,6 +301,9 @@ func bdSchemaGapFromReport(scope bdSchemaScope, target contract.DoltConnectionTa
 		scope:    scope,
 		database: target.Database,
 		endpoint: bdSchemaEndpoint(target),
+		host:     strings.TrimSpace(target.Host),
+		port:     strings.TrimSpace(target.Port),
+		socket:   strings.TrimSpace(target.Socket),
 		observed: proxyendpoint.Cursors{
 			Main:    report.Cursors.Main,
 			Ignored: report.Reality.EffectiveIgnored(report.Cursors.Ignored),

@@ -1042,6 +1042,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Config: `[beads] migrate_command` names the migrator in `bd schema:`
+  notices.** When a city's pinned bd is not the binary an operator migrates
+  with, `migrate_command` (a one-line Go template over the database's city,
+  rig, scope and `.beads` directories, database name, server address and
+  pinned bd, with `shq` for shell quoting) replaces the command that
+  `gc start`, `gc reload` and `gc doctor`'s `bd-schema` check print. gc never
+  runs it. A template that does not render a single line for both the city's
+  database and a rig's fails config load. Every behind notice now also says
+  the migrator must move both migration lanes (main and ignored) and that
+  `gc doctor --check bd-schema` reads both afterwards. See "Databases Gas
+  City leaves to you" in "Upgrading an Existing City".
 - **Events: `session.created` and `session.closed`.** The city event
   stream announces each session joining or leaving the open set, with
   typed payloads (`SessionCreatedPayload`, `SessionClosedPayload`), so a

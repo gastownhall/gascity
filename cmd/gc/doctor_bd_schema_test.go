@@ -120,5 +120,24 @@ func TestBdSchemaDoctorCheck(t *testing.T) {
 		if r.FixHint == "" || c.CanFix() {
 			t.Fatalf("want an operator fix hint and no automatic fix: hint %q canFix %v", r.FixHint, c.CanFix())
 		}
+		if !strings.Contains(r.FixHint, "both migration lanes") {
+			t.Fatalf("fix hint %q does not say a rerun verifies both lanes", r.FixHint)
+		}
+	})
+	t.Run("configured migrate command", func(t *testing.T) {
+		c := newBdSchemaDoctorCheckForTest([]bdSchemaScope{city}, map[string]bdSchemaReadForTest{"city": behind})
+		c.city = func(cityPath string, _ *config.City) bdSchemaCity {
+			return bdSchemaCity{path: cityPath, migrateCommand: "cd {{shq .ScopeDir}} && BEADS_DIR={{shq .BeadsDir}} /opt/migrator/bd migrate schema"}
+		}
+		r := c.Run(ctx)
+		if r.Status != doctor.StatusWarning || len(r.Details) != 1 {
+			t.Fatalf("got %+v, want one warning detail", r)
+		}
+		if !strings.HasSuffix(r.Details[0], ": cd /city && BEADS_DIR=/city/.beads /opt/migrator/bd migrate schema") {
+			t.Fatalf("detail does not name the configured command rendered for the city: %q", r.Details[0])
+		}
+		if !strings.Contains(r.Details[0], "The migrator must move both lanes") {
+			t.Fatalf("detail lacks the two-lane caution: %q", r.Details[0])
+		}
 	})
 }
