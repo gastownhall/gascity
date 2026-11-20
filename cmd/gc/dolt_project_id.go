@@ -159,18 +159,6 @@ func ensureManagedDoltProjectIDAtTarget(metadataPath string, target contract.Dol
 		return managedDoltProjectIDReport{}, fmt.Errorf("missing database")
 	}
 
-	fs := fsys.OSFS{}
-	identityProjectID, identityOK, err := contract.ReadProjectIdentity(fs, scopeRoot)
-	if err != nil {
-		return managedDoltProjectIDReport{}, err
-	}
-
-	metadataProjectID, err := readManagedMetadataProjectID(metadataPath)
-	if err != nil {
-		return managedDoltProjectIDReport{}, err
-	}
-	metadataOK := metadataProjectID != ""
-
 	// Pooled handle owned by internal/doltpool; do not Close.
 	var db *sql.DB
 	if target.Socket != "" {
@@ -188,16 +176,57 @@ func ensureManagedDoltProjectIDAtTarget(metadataPath string, target contract.Dol
 		return managedDoltProjectIDReport{}, err
 	}
 
-	databaseProjectID, ok, err := readDatabaseProjectID(ctx, db)
+	return reconcileScopeProjectIdentity(ctx, fsys.OSFS{}, scopeRoot, metadataPath, cityPath, sqlProjectIdentityL3{db: db}, rec)
+}
+
+// projectIdentitySQL is the statement surface the L3 identity helpers use. A
+// pooled *sql.DB and a pinned *sql.Conn both satisfy it.
+type projectIdentitySQL interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// projectIdentityL3Store reads and seeds a scope's L3 identity, the Dolt
+// metadata table's _project_id.
+type projectIdentityL3Store interface {
+	ReadProjectID(ctx context.Context) (string, bool, error)
+	SeedProjectID(ctx context.Context, projectID string) (bool, error)
+}
+
+// sqlProjectIdentityL3 is the projectIdentityL3Store over a SQL session.
+type sqlProjectIdentityL3 struct {
+	db projectIdentitySQL
+}
+
+// ReadProjectID reads the database's _project_id.
+func (s sqlProjectIdentityL3) ReadProjectID(ctx context.Context) (string, bool, error) {
+	return readDatabaseProjectID(ctx, s.db)
+}
+
+// SeedProjectID writes projectID as the database's _project_id when it has
+// none, and refuses a different one.
+func (s sqlProjectIdentityL3) SeedProjectID(ctx context.Context, projectID string) (bool, error) {
+	return seedDatabaseProjectID(ctx, s.db, projectID)
+}
+
+// reconcileScopeProjectIdentity reconciles one scope's three identity layers
+// against l3, whatever endpoint l3 reaches: it reads L1 and L2 from disk and
+// L3 from l3, decides, and writes exactly the layers the decision names.
+func reconcileScopeProjectIdentity(ctx context.Context, fs fsys.FS, scopeRoot, metadataPath, cityPath string, l3 projectIdentityL3Store, rec events.Recorder) (managedDoltProjectIDReport, error) {
+	identityProjectID, identityOK, err := contract.ReadProjectIdentity(fs, scopeRoot)
 	if err != nil {
 		return managedDoltProjectIDReport{}, err
 	}
-
-	decision := decideReconcile(identityProjectID, identityOK, metadataProjectID, metadataOK, databaseProjectID, ok)
-	seedL3 := func(ctx context.Context, projectID string) (bool, error) {
-		return seedDatabaseProjectID(ctx, db, projectID)
+	metadataProjectID, err := readManagedMetadataProjectID(metadataPath)
+	if err != nil {
+		return managedDoltProjectIDReport{}, err
 	}
-	return applyReconcileDecision(ctx, fs, scopeRoot, metadataPath, decision, cityPath, rec, seedL3)
+	databaseProjectID, databaseOK, err := l3.ReadProjectID(ctx)
+	if err != nil {
+		return managedDoltProjectIDReport{}, err
+	}
+	decision := decideReconcile(identityProjectID, identityOK, metadataProjectID, metadataProjectID != "", databaseProjectID, databaseOK)
+	return applyReconcileDecision(ctx, fs, scopeRoot, metadataPath, decision, cityPath, rec, l3.SeedProjectID)
 }
 
 func resolveProviderOwnedProjectIdentityTarget(metadataPath, cityPath, database, user string) (contract.DoltConnectionTarget, error) {
@@ -653,7 +682,7 @@ func writeManagedMetadataProjectID(metadataPath, projectID string) (bool, error)
 	return true, nil
 }
 
-func seedDatabaseProjectID(ctx context.Context, db *sql.DB, projectID string) (bool, error) {
+func seedDatabaseProjectID(ctx context.Context, db projectIdentitySQL, projectID string) (bool, error) {
 	existing, ok, err := readDatabaseProjectID(ctx, db)
 	if err != nil {
 		return false, err
@@ -673,7 +702,7 @@ func seedDatabaseProjectID(ctx context.Context, db *sql.DB, projectID string) (b
 	return true, nil
 }
 
-func ensureDatabaseMetadataTable(ctx context.Context, db *sql.DB) error {
+func ensureDatabaseMetadataTable(ctx context.Context, db projectIdentitySQL) error {
 	_, err := db.ExecContext(ctx, "CREATE TABLE IF NOT EXISTS metadata (`key` VARCHAR(255) PRIMARY KEY, value LONGTEXT)")
 	if err != nil {
 		return fmt.Errorf("ensure metadata table: %w", err)
