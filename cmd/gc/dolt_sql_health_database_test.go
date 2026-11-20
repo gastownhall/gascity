@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,6 +33,7 @@ case "$*" in
       missing) echo "error on line 1 for query USE: Error 1049 (HY000): database not found: hq" >&2; exit 1 ;;
       ghost) echo "Error 1105 (HY000): cannot resolve default branch head for database 'hq': 'ghost'" >&2; exit 1 ;;
       garbage) printf 'head\nNULL\n' ;;
+      short) printf 'head\nabc\n' ;;
     esac
     exit 0
     ;;
@@ -359,6 +361,98 @@ func TestDoltStateHealthCheckCmdDatabaseNotInCatalog(t *testing.T) {
 	}
 	if text := readInvocations(t, invocationFile); strings.Contains(text, "CREATE TABLE IF NOT EXISTS") || strings.Contains(text, "REPLACE INTO") {
 		t.Fatalf("health check issued a write probe against a database missing from the catalog:\n%s", text)
+	}
+}
+
+// TestDoltStateHealthCheckCmdDatabaseHeadUnresolvable covers AC-2 on the
+// dolt-CLI path: a database that is in the catalog but whose
+// DOLT_HASHOF('HEAD') fails (errno 1105) or returns a value that is not a
+// commit hash reports database_ready false with a head-resolution error.
+func TestDoltStateHealthCheckCmdDatabaseHeadUnresolvable(t *testing.T) {
+	tests := []struct {
+		name     string
+		head     string
+		wantPart string
+	}{
+		{name: "errno 1105", head: "ghost", wantPart: "cannot resolve default branch head"},
+		{name: "head is not a hash", head: "garbage", wantPart: "unexpected head"},
+		{name: "head is too short", head: "short", wantPart: "unexpected head"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setupDatabaseHealthFakeDolt(t, tt.head, "ok", "ok")
+
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"dolt-state", "health-check", "--host", "127.0.0.1", "--port", "3311", "--user", "root", "--database", "hq"}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("run() = %d, stderr = %s; want exit 0 with the failure in-band", code, stderr.String())
+			}
+			got := parseDoltStateOutput(t, stdout.String())
+			if got["query_ready"] != "true" || got["database_ready"] != "false" {
+				t.Fatalf("output = %q, want query_ready true and database_ready false", stdout.String())
+			}
+			if !strings.Contains(got["database_error"], `database "hq" default branch head unresolvable`) || !strings.Contains(got["database_error"], tt.wantPart) {
+				t.Fatalf("database_error = %q, want a head-resolution error containing %q", got["database_error"], tt.wantPart)
+			}
+		})
+	}
+}
+
+// TestManagedDoltHealthCheckForPasswordPathReportsHeadFailure covers AC-2 on
+// the direct-driver path (GC_DOLT_PASSWORD set): a head that does not
+// resolve is reported in-band, the write probe never runs against the
+// broken database, and no dolt binary is invoked.
+func TestManagedDoltHealthCheckForPasswordPathReportsHeadFailure(t *testing.T) {
+	t.Setenv("GC_DOLT_PASSWORD", "secret")
+	oldQuery := managedDoltQueryProbeDirectFn
+	oldHead := managedDoltDatabaseHeadDirectFn
+	oldReadOnly := managedDoltReadOnlyStateDirectFn
+	oldReadBack := managedDoltProbeReadBackDirectFn
+	oldConnCount := managedDoltConnectionCountDirectFn
+	defer func() {
+		managedDoltQueryProbeDirectFn = oldQuery
+		managedDoltDatabaseHeadDirectFn = oldHead
+		managedDoltReadOnlyStateDirectFn = oldReadOnly
+		managedDoltProbeReadBackDirectFn = oldReadBack
+		managedDoltConnectionCountDirectFn = oldConnCount
+	}()
+
+	managedDoltQueryProbeDirectFn = func(_, _, _ string) error { return nil }
+	managedDoltDatabaseHeadDirectFn = func(_, _, _, database string) (string, error) {
+		if database != "hq" {
+			t.Errorf("head probe database = %q, want hq", database)
+		}
+		return "", errors.New("Error 1105 (HY000): no root value found in session")
+	}
+	probeRan := false
+	managedDoltReadOnlyStateDirectFn = func(_, _, _, _ string) (string, error) {
+		probeRan = true
+		return "false", nil
+	}
+	managedDoltProbeReadBackDirectFn = func(_, _, _, _ string) error {
+		probeRan = true
+		return nil
+	}
+	managedDoltConnectionCountDirectFn = func(_, _, _ string) (string, error) { return "2", nil }
+	// No dolt binary anywhere on PATH: taking the dolt-CLI path would fail
+	// the probe and surface as an error instead of the in-band verdict.
+	t.Setenv("PATH", t.TempDir())
+
+	report, err := managedDoltHealthCheckFor("127.0.0.1", "3311", "root", true, managedDoltHealthTarget{Database: "hq"})
+	if err != nil {
+		t.Fatalf("managedDoltHealthCheckFor() error = %v, want the failure in-band", err)
+	}
+	if report.DatabaseReady {
+		t.Fatalf("DatabaseReady = true, want false")
+	}
+	if !strings.Contains(report.DatabaseError, "Error 1105") || !strings.Contains(report.DatabaseError, "no root value found in session") {
+		t.Fatalf("DatabaseError = %q, want the direct head failure", report.DatabaseError)
+	}
+	if probeRan {
+		t.Fatalf("write probe ran against a database whose head does not resolve")
+	}
+	if report.ReadOnly != "unknown" {
+		t.Fatalf("ReadOnly = %q, want unknown when the database check failed", report.ReadOnly)
 	}
 }
 
