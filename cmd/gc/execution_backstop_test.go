@@ -1375,12 +1375,13 @@ func (f *executionBackstopFixture) nudgesDelivered() []string {
 // stall). Kills execution evidence vetoing the nudge: the seat started its
 // step, its turn then died on an API error, and it sits at its prompt holding
 // the claim. Once the pane has read quiet past the window it gets one claim
-// nudge: the configured one, or the pool default when its template configures
-// none, as no maintainer-city pool template does (the stamp vetoes the drain,
-// so the nudge is the seat's only way back). The hook hands the seat its own
-// claim, so the nudge is idempotent; a seat that answers is left alone. The
-// default carries no --drain-ack (mc-ilr3b): a started seat must never ack a
-// drain on the nudge's no-work answer.
+// nudge, the built-in held-claim text naming the claim, whatever its template
+// configures as its nudge (a procedure, a claim line, or none, as no
+// maintainer-city pool template does): the stamp vetoes the drain, so the
+// nudge is the seat's only way back. The hook hands the seat its own claim, so
+// the nudge is idempotent; a seat that answers is left alone. The text carries
+// no --drain-ack (mc-ilr3b): a started seat must never ack a drain on the
+// nudge's no-work answer.
 func TestExecutionBackstopNudgesAStartedSeatWhoseTurnDied(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -1390,9 +1391,8 @@ func TestExecutionBackstopNudgesAStartedSeatWhoseTurnDied(t *testing.T) {
 		want  string
 	}{
 		{name: "no nudge configured", want: defaultHeldClaimNudge},
-		{name: "a configured nudge", nudge: "gc hook --claim --json", want: "gc hook --claim --json"},
-		// A configured nudge that would ack the drain is replaced by the
-		// default: the started rung never carries --drain-ack.
+		{name: "a configured claim nudge", nudge: "gc hook --claim --json", want: defaultHeldClaimNudge},
+		{name: "a configured procedure nudge", nudge: idleClaimProcedureNudge, want: defaultHeldClaimNudge},
 		{name: "a configured --drain-ack nudge", nudge: "gc hook --claim --drain-ack --json", want: defaultHeldClaimNudge},
 		// The production pane: broadcasts have scrolled the idle prompt
 		// away, so the snapshot can read neither a prompt nor a busy line.

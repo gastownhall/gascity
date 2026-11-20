@@ -80,11 +80,12 @@ const (
 // never says to claim (#9196).
 const defaultPoolClaimNudge = "Run " + runtime.GCCommandName + " hook --claim --drain-ack --json now; if it returns work, execute it immediately."
 
-// defaultHeldClaimNudge is the default for a seat whose claim (the %s) has
-// started its step, the execution backstop's started seat: PHASE1-2 §6.6's
-// started-rung text. It carries no --drain-ack, which on a hook answer of no
-// work, the started step gate- or hold-blocked, acked a drain and gave the
-// claim back (mc-ilr3b).
+// defaultHeldClaimNudge is the text the execution backstop sends a seat
+// whose claim (the %s) has started its step: PHASE1-2 §6.6's started-rung
+// text, the text that path delivers rather than a fallback — recovery text
+// is the SDK's, never the template's configured nudge (#9196). It carries no
+// --drain-ack, which on a hook answer of no work, the started step gate- or
+// hold-blocked, acked a drain and gave the claim back (mc-ilr3b).
 const defaultHeldClaimNudge = "You hold %s and its step has started. Continue it now (run gc hook --claim --json to re-read your assignment). If you are waiting on something, say what, then stop."
 
 // idleClaimNudgeLabel and continuationClaimNudgeLabel name the claim and
@@ -954,19 +955,18 @@ func stalledPoolClaimNudgeFor(cfg *config.City, session beads.Bead) string {
 	return defaultPoolClaimNudge
 }
 
-// heldClaimNudgeFor is stalledPoolClaimNudgeFor for a seat whose claim beadID
-// has started: its configured nudge, else defaultHeldClaimNudge naming the
-// claim, and "" when its template names no configured agent. A configured
-// nudge that carries --drain-ack is not sent to a started seat either: the
-// default stands in for it, since an ack on the nudge's no-work answer is how
-// started work was lost (mc-ilr3b), and the hook's fence holds only a claim
-// whose start was recorded.
+// heldClaimNudgeFor is the text the execution backstop sends a seat whose
+// claim beadID has started: the built-in started-rung text naming the claim,
+// never the template's configured nudge, which is startup text and can be a
+// work procedure that never says to claim (#9196). The built-in text carries
+// no --drain-ack: an ack on the nudge's no-work answer is how started work
+// was lost (mc-ilr3b), and the hook's fence holds only a claim whose start
+// was recorded. A template the config does not name gets no text.
 func heldClaimNudgeFor(cfg *config.City, session beads.Bead, beadID string) string {
-	nudge, known := configuredClaimNudgeFor(cfg, session)
-	if known && (nudge == "" || strings.Contains(nudge, "--drain-ack")) {
-		return fmt.Sprintf(defaultHeldClaimNudge, strings.TrimSpace(beadID))
+	if _, known := configuredClaimNudgeFor(cfg, session); !known {
+		return ""
 	}
-	return nudge
+	return fmt.Sprintf(defaultHeldClaimNudge, strings.TrimSpace(beadID))
 }
 
 // configuredClaimNudgeFor looks up the session's template's configured
