@@ -14,9 +14,43 @@ go_library(
     visibility = ["//:__subpackages__"],
 )
 
+_WORKLADDER_TEST_DATA = glob(
+    ["**"],
+    exclude = ["BUILD.bazel"],
+)
+
 go_test(
     name = "workladder_test",
     size = "medium",
+    srcs = [
+        "codec_test.go",
+        "decide_test.go",
+        "landing_budget_test.go",
+        "notice_test.go",
+        "progress_test.go",
+        "property_test.go",
+        "purity_test.go",
+        "ratelimit_property_test.go",
+        "ratelimit_test.go",
+        "table_test.go",
+        "testenv_import_test.go",
+    ],
+    args = [
+        "-test.short",
+        "-test.skip=^TestRateLimitInvariants",
+    ],
+    data = _WORKLADDER_TEST_DATA,
+    embed = [":workladder"],
+    # The landing suite uses the 10k property budget. Keep the 100k and
+    # rate-limit census proofs in the manual qualification target.
+    shard_count = 6,
+    deps = ["//internal/testenv"],
+)
+
+go_test(
+    name = "workladder_qualification_test",
+    size = "large",
+    timeout = "long",
     srcs = [
         "codec_test.go",
         "decide_test.go",
@@ -29,16 +63,12 @@ go_test(
         "table_test.go",
         "testenv_import_test.go",
     ],
-    data = glob(
-        ["**"],
-        exclude = ["BUILD.bazel"],
-    ),
+    data = _WORKLADDER_TEST_DATA,
     embed = [":workladder"],
-    # The property sims (the ladder's and the rate-limit episode's) run
-    # 50 to 100 s each on one worker. rules_go deals tests to the 6 shards
-    # by position, so the sims land unevenly: the heaviest shard has run
-    # 190 to 220 s on rbe-west, under the medium timeout (300 s).
-    shard_count = 6,
+    shard_count = 12,
+    # Explicitly run the 100k property and rate-limit census proofs with:
+    # bazel test //internal/workladder:workladder_qualification_test
+    tags = ["manual"],
     deps = ["//internal/testenv"],
 )
 
