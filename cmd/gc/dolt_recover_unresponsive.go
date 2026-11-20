@@ -156,6 +156,7 @@ const (
 	managedDoltRecoveryReasonWindowElapsed    = "unresponsive_window_elapsed"
 	managedDoltRecoveryReasonWindowDisabled   = "unresponsive_window_disabled"
 	managedDoltRecoveryReasonRecheckFailed    = "elapsed_window_recheck_failed"
+	managedDoltRecoveryReasonHealthy          = "healthy_observation"
 )
 
 // managedDoltRecoveryRecordTag starts every recovery decision line appended to
@@ -363,6 +364,104 @@ func (g managedDoltRecoveryGate) authorizeStop(base managedDoltRecoveryRecord, i
 	return nil
 }
 
+// closeStreakAfterHealthy records a healthy decision when the gate's endpoint
+// has an open unresponsiveness streak, so a later failure starts a fresh
+// window. The caller holds the lifecycle lock and has just measured the
+// endpoint healthy; without an open streak nothing is written.
+func (g managedDoltRecoveryGate) closeStreakAfterHealthy() error {
+	now := g.ops.now().UTC()
+	history, err := readManagedDoltRecoveryHistory(g.logFile, now)
+	if err != nil {
+		return fmt.Errorf("close dolt unresponsiveness streak for %s: %w", g.endpoint(), err)
+	}
+	if !history.streakOpen(normalizePathForCompare(g.cityPath), g.endpoint()) {
+		return nil
+	}
+	rec := managedDoltRecoveryRecord{At: now, Decision: managedDoltRecoveryDecisionHealthy, Reason: managedDoltRecoveryReasonHealthy}
+	if ident, identErr := g.ops.identify(g.cityPath, g.port); identErr == nil && ident.known() {
+		rec.PID = ident.PID
+		rec.StartTime = ident.StartTime
+	}
+	if err := g.record(rec); err != nil {
+		return fmt.Errorf("close dolt unresponsiveness streak for %s: %w", g.endpoint(), err)
+	}
+	return nil
+}
+
+// closeManagedDoltStreakAfterProviderHealth closes an open unresponsiveness
+// streak after a provider health check passed outside the lifecycle lock. It
+// takes the lock without waiting (a lifecycle operation already holding it
+// owns the decision), re-measures each open-streak endpoint on port as user
+// under the lock, and records healthy only for an endpoint that is still healthy, so a
+// delayed healthy result never clears a newer server's streak.
+func closeManagedDoltStreakAfterProviderHealth(cityPath, port, user string, ops managedDoltRecoveryOps) error {
+	port = strings.TrimSpace(port)
+	if strings.TrimSpace(user) == "" {
+		user = "root"
+	}
+	if strings.TrimSpace(cityPath) == "" || port == "" {
+		return nil
+	}
+	ops = ops.withGateDefaults()
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		return fmt.Errorf("close dolt unresponsiveness streak: %w", err)
+	}
+	scope := normalizePathForCompare(cityPath)
+	history, err := readManagedDoltRecoveryHistory(layout.LogFile, ops.now().UTC())
+	if err != nil {
+		return fmt.Errorf("close dolt unresponsiveness streak: %w", err)
+	}
+	endpoints := history.openStreakEndpoints(scope, port)
+	if len(endpoints) == 0 {
+		return nil
+	}
+	lockFile, _, err := openManagedDoltLifecycleLock(cityPath)
+	if err != nil {
+		return fmt.Errorf("close dolt unresponsiveness streak: %w", err)
+	}
+	locked, err := tryManagedDoltLifecycleLock(lockFile)
+	if err != nil {
+		_ = lockFile.Close()
+		return fmt.Errorf("close dolt unresponsiveness streak: %w", err)
+	}
+	if !locked {
+		_ = lockFile.Close()
+		return nil
+	}
+	defer releaseManagedDoltLifecycleLock(lockFile)
+	for _, endpoint := range endpoints {
+		host, endpointPort, err := net.SplitHostPort(endpoint)
+		if err != nil {
+			continue
+		}
+		if ops.queryProbe(host, endpointPort, user) != nil {
+			continue
+		}
+		health, healthErr := ops.healthCheck(host, endpointPort, user)
+		if healthErr != nil || !health.QueryReady || health.ReadOnly != "false" {
+			continue
+		}
+		gate := managedDoltRecoveryGate{cityPath: cityPath, host: host, port: endpointPort, logFile: layout.LogFile, ops: ops}
+		if err := gate.closeStreakAfterHealthy(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// managedDoltUserFromEnv returns the GC_DOLT_USER a provider process runs
+// with, or empty when the environment does not set one.
+func managedDoltUserFromEnv(environ []string) string {
+	user := ""
+	for _, kv := range environ {
+		if value, ok := strings.CutPrefix(kv, "GC_DOLT_USER="); ok {
+			user = strings.TrimSpace(value)
+		}
+	}
+	return user
+}
+
 // managedDoltRecoveryHistoryTailBytes bounds how much of dolt.log recovery
 // reads back. History older than the tail cannot justify a restart.
 const managedDoltRecoveryHistoryTailBytes = 1 << 20
@@ -408,6 +507,45 @@ func (h managedDoltRecoveryHistory) openStreak(scope, endpoint string, ident man
 		}
 	}
 	return since
+}
+
+// streakOpen reports whether endpoint has an unresponsiveness streak for any
+// incarnation that no healthy or stop decision has closed.
+func (h managedDoltRecoveryHistory) streakOpen(scope, endpoint string) bool {
+	open := false
+	for _, rec := range h.Records {
+		if rec.Scope != scope || rec.Endpoint != endpoint {
+			continue
+		}
+		switch rec.Decision {
+		case managedDoltRecoveryDecisionHealthy, managedDoltRecoveryDecisionStop:
+			open = false
+		case managedDoltRecoveryDecisionDefer:
+			if !rec.Inconclusive && !rec.UnresponsiveSince.IsZero() {
+				open = true
+			}
+		}
+	}
+	return open
+}
+
+// openStreakEndpoints returns the endpoints on port with an open streak.
+func (h managedDoltRecoveryHistory) openStreakEndpoints(scope, port string) []string {
+	var endpoints []string
+	seen := map[string]bool{}
+	for _, rec := range h.Records {
+		if rec.Scope != scope || seen[rec.Endpoint] {
+			continue
+		}
+		if _, recPort, err := net.SplitHostPort(rec.Endpoint); err != nil || recPort != port {
+			continue
+		}
+		seen[rec.Endpoint] = true
+		if h.streakOpen(scope, rec.Endpoint) {
+			endpoints = append(endpoints, rec.Endpoint)
+		}
+	}
+	return endpoints
 }
 
 // readManagedDoltRecoveryHistory reads the recovery records in the bounded

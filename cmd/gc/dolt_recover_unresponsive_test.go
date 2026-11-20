@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -298,4 +300,162 @@ func TestRecoverManagedDoltSameIncarnationStreakGatesRestart(t *testing.T) {
 			t.Fatalf("last record = %+v, want stop decision", last)
 		}
 	})
+}
+
+// AC-3: a healthy measurement of the same server closes an open streak, so a
+// later failure starts a fresh window instead of inheriting the old start.
+func TestRecoverManagedDoltHealthyObservationClosesStreak(t *testing.T) {
+	t.Run("a healthy recovery closes the streak", func(t *testing.T) {
+		h := newRecoveryGateHarness(t)
+		since := h.now.Add(-170 * time.Second)
+		h.seedDefer(since, since, h.ident)
+		h.probeErr = nil
+		report, err := h.recover()
+		if err != nil || !report.Healthy || h.restarted() {
+			t.Fatalf("healthy recovery: report=%+v err=%v calls=%v", report, err, h.calls)
+		}
+		if last := h.lastRecoveryRecord(); last.Decision != managedDoltRecoveryDecisionHealthy || last.PID != h.ident.PID {
+			t.Fatalf("last record = %+v, want healthy record for pid %d", last, h.ident.PID)
+		}
+
+		h.now = h.now.Add(20 * time.Second)
+		h.probeErr = fmt.Errorf("query probe: %w", context.DeadlineExceeded)
+		report, err = h.recover()
+		assertDeferredWithoutRestart(t, h, report, err)
+		last := h.lastRecoveryRecord()
+		if !last.UnresponsiveSince.Equal(h.now) || last.Reason != managedDoltRecoveryReasonFirstObservation {
+			t.Fatalf("last record = %+v, want a fresh streak at %s", last, h.now)
+		}
+	})
+	t.Run("a healthy recovery without an open streak records nothing", func(t *testing.T) {
+		h := newRecoveryGateHarness(t)
+		h.probeErr = nil
+		if report, err := h.recover(); err != nil || !report.Healthy {
+			t.Fatalf("healthy recovery: report=%+v err=%v", report, err)
+		}
+		if strings.Contains(h.logText(), managedDoltRecoveryRecordTag) {
+			t.Fatalf("dolt.log gained a recovery record without an open streak:\n%s", h.logText())
+		}
+	})
+	t.Run("provider health closes the streak after revalidating under the lock", func(t *testing.T) {
+		h := newRecoveryGateHarness(t)
+		since := h.now.Add(-170 * time.Second)
+		h.seedDefer(since, since, h.ident)
+		h.probeErr = nil
+		if err := closeManagedDoltStreakAfterProviderHealth(h.city, h.port, "root", h.ops()); err != nil {
+			t.Fatalf("closeManagedDoltStreakAfterProviderHealth: %v", err)
+		}
+		if strings.Join(h.calls, ",") != "query,health" {
+			t.Fatalf("calls = %v, want a revalidating query and health check", h.calls)
+		}
+		if last := h.lastRecoveryRecord(); last.Decision != managedDoltRecoveryDecisionHealthy {
+			t.Fatalf("last record = %+v, want healthy record", last)
+		}
+	})
+	t.Run("provider health that fails revalidation leaves the streak open", func(t *testing.T) {
+		h := newRecoveryGateHarness(t)
+		since := h.now.Add(-170 * time.Second)
+		h.seedDefer(since, since, h.ident)
+		if err := closeManagedDoltStreakAfterProviderHealth(h.city, h.port, "root", h.ops()); err != nil {
+			t.Fatalf("closeManagedDoltStreakAfterProviderHealth: %v", err)
+		}
+		if last := h.lastRecoveryRecord(); last.Decision != managedDoltRecoveryDecisionDefer {
+			t.Fatalf("last record = %+v, want the open defer streak kept", last)
+		}
+	})
+	t.Run("provider health skips the close while another lifecycle holds the lock", func(t *testing.T) {
+		h := newRecoveryGateHarness(t)
+		since := h.now.Add(-170 * time.Second)
+		h.seedDefer(since, since, h.ident)
+		h.probeErr = nil
+		lockFile, _, err := openManagedDoltLifecycleLock(h.city)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if locked, err := tryManagedDoltLifecycleLock(lockFile); err != nil || !locked {
+			t.Fatalf("tryManagedDoltLifecycleLock = %v, %v", locked, err)
+		}
+		defer releaseManagedDoltLifecycleLock(lockFile)
+		if err := closeManagedDoltStreakAfterProviderHealth(h.city, h.port, "root", h.ops()); err != nil {
+			t.Fatalf("closeManagedDoltStreakAfterProviderHealth: %v", err)
+		}
+		if len(h.calls) != 0 {
+			t.Fatalf("calls = %v, want none while the lifecycle lock is held", h.calls)
+		}
+		if last := h.lastRecoveryRecord(); last.Decision != managedDoltRecoveryDecisionDefer {
+			t.Fatalf("last record = %+v, want the open defer streak kept", last)
+		}
+	})
+}
+
+// AC-3: keeping an unmeasured server after an inconclusive readiness wait is
+// not a healthy result and leaves an open streak untouched.
+func TestRecoverManagedDoltInconclusiveReuseKeepsStreak(t *testing.T) {
+	cityPath := t.TempDir()
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(layout.PIDFile), 0o755); err != nil {
+		t.Fatalf("MkdirAll(runtime dir): %v", err)
+	}
+	if err := os.MkdirAll(layout.DataDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(data dir): %v", err)
+	}
+	oldPort := reserveRandomTCPPort(t)
+	newPort := reserveRandomTCPPort(t)
+	for newPort == oldPort {
+		newPort = reserveRandomTCPPort(t)
+	}
+	listener := startTCPListenerProcessInDir(t, newPort, layout.DataDir)
+	if err := os.WriteFile(layout.PIDFile, []byte(strconv.Itoa(listener.Process.Pid)+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pid): %v", err)
+	}
+	state := doltRuntimeState{
+		Running:   true,
+		PID:       listener.Process.Pid,
+		Port:      newPort,
+		DataDir:   layout.DataDir,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := writeDoltRuntimeStateFile(layout.StateFile, state); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile(layout): %v", err)
+	}
+	if err := writeDoltRuntimeStateFile(managedDoltStatePath(cityPath), state); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile(published): %v", err)
+	}
+	binDir := t.TempDir()
+	writeFakeDoltSQLBinary(t, binDir, filepath.Join(t.TempDir(), "dolt-invocation"), `#!/bin/sh
+case "${1:-}" in
+  config) exit 0 ;;
+  *) exit 1 ;;
+esac
+`)
+	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
+	stubManagedDoltDial(t, func(string, string, time.Duration) (net.Conn, error) {
+		return nil, dialErrorFor("connect", syscall.EADDRNOTAVAIL)
+	})
+	since := time.Now().UTC().Add(-time.Minute)
+	if err := appendManagedDoltRecoveryRecord(layout.LogFile, managedDoltRecoveryRecord{
+		At: since, Decision: managedDoltRecoveryDecisionDefer, Reason: managedDoltRecoveryReasonFirstObservation,
+		Scope: normalizePathForCompare(cityPath), Endpoint: net.JoinHostPort("127.0.0.1", strconv.Itoa(newPort)),
+		PID: listener.Process.Pid, StartTime: "1", UnresponsiveSince: since, Window: 180 * time.Second, Caller: "seed",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := recoverManagedDoltProcess(cityPath, "127.0.0.1", strconv.Itoa(oldPort), "root", "warning", 2*time.Second)
+	if err != nil {
+		t.Fatalf("recoverManagedDoltProcess() error = %v", err)
+	}
+	if !report.ReadyInconclusive || report.Healthy {
+		t.Fatalf("report = %+v, want an inconclusive reuse", report)
+	}
+	history, err := readManagedDoltRecoveryHistory(layout.LogFile, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(history.Records) != 1 || history.Records[0].Decision != managedDoltRecoveryDecisionDefer {
+		t.Fatalf("history = %+v, want only the open defer streak", history.Records)
+	}
 }

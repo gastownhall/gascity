@@ -138,6 +138,12 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 			if err := ops.publish(cityPath); err != nil {
 				return report, fmt.Errorf("publish managed dolt runtime state: %w", err)
 			}
+			if !report.ReadyInconclusive {
+				reused := managedDoltRecoveryGate{cityPath: cityPath, host: host, port: strconv.Itoa(report.Port), logFile: layout.LogFile, ops: ops}
+				if err := reused.closeStreakAfterHealthy(); err != nil {
+					return report, err
+				}
+			}
 			return report, nil
 		}
 	}
@@ -145,6 +151,7 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 	// A completed health response that diagnoses the server keeps the
 	// restart path; a probe or health transport failure goes through the
 	// unresponsiveness gate first.
+	gate := managedDoltRecoveryGate{cityPath: cityPath, host: host, port: port, logFile: layout.LogFile, ops: ops}
 	var observedFailure error
 	if err := ops.queryProbe(host, port, user); err != nil {
 		observedFailure = fmt.Errorf("query probe: %w", err)
@@ -165,11 +172,13 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 				return report, fmt.Errorf("publish managed dolt runtime state: %w", err)
 			}
 			recoverManagedDoltPopulateReportFromRuntimeState(cityPath, port, &report)
+			if err := gate.closeStreakAfterHealthy(); err != nil {
+				return report, err
+			}
 			return report, nil
 		}
 	}
 
-	gate := managedDoltRecoveryGate{cityPath: cityPath, host: host, port: port, logFile: layout.LogFile, ops: ops}
 	if observedFailure != nil {
 		if err := gate.evaluate(observedFailure); err != nil {
 			report.Deferred = true
