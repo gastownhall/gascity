@@ -459,3 +459,56 @@ esac
 		t.Fatalf("history = %+v, want only the open defer streak", history.Records)
 	}
 }
+
+// AC-4: a refused endpoint or a completed unhealthy health response keeps the
+// existing stop/start path and records why it was taken.
+func TestRecoverManagedDoltConclusiveFailuresRecordStopAndRestart(t *testing.T) {
+	t.Run("refused endpoint", func(t *testing.T) {
+		h := newRecoveryGateHarness(t)
+		h.endpoint = managedDoltEndpointObservation{State: managedDoltEndpointRefused, Err: syscall.ECONNREFUSED}
+		report, err := h.recover()
+		if err != nil || !report.Restarted || report.Deferred {
+			t.Fatalf("report = %+v err = %v, want restart", report, err)
+		}
+		if strings.Join(h.calls, ",") != "query,observe,stop,preflight,start,health,publish" {
+			t.Fatalf("calls = %v, want the existing stop/start path", h.calls)
+		}
+		if last := h.lastRecoveryRecord(); last.Decision != managedDoltRecoveryDecisionStop || last.Reason != managedDoltRecoveryReasonEndpointRefused {
+			t.Fatalf("last record = %+v, want stop decision with reason %s", last, managedDoltRecoveryReasonEndpointRefused)
+		}
+	})
+	for _, tc := range []struct {
+		name   string
+		health managedDoltSQLHealthReport
+		reason string
+	}{
+		{name: "read-only response", health: managedDoltSQLHealthReport{QueryReady: true, ReadOnly: "true"}, reason: managedDoltRecoveryReasonReadOnly},
+		{name: "not query-ready response", health: managedDoltSQLHealthReport{QueryReady: false, ReadOnly: "false"}, reason: managedDoltRecoveryReasonNotQueryReady},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRecoveryGateHarness(t)
+			h.probeErr = nil
+			ops := h.ops()
+			healthCalls := 0
+			ops.healthCheck = func(string, string, string) (managedDoltSQLHealthReport, error) {
+				h.calls = append(h.calls, "health")
+				healthCalls++
+				if healthCalls == 1 {
+					return tc.health, nil
+				}
+				return h.health, nil
+			}
+			h.calls = nil
+			report, err := recoverManagedDoltProcessWithOps(h.city, "127.0.0.1", h.port, "root", "warning", 2*time.Second, ops)
+			if err != nil || !report.Restarted || report.Deferred {
+				t.Fatalf("report = %+v err = %v, want restart", report, err)
+			}
+			if strings.Join(h.calls, ",") != "query,health,stop,preflight,start,health,publish" {
+				t.Fatalf("calls = %v, want the existing stop/start path", h.calls)
+			}
+			if last := h.lastRecoveryRecord(); last.Decision != managedDoltRecoveryDecisionStop || last.Reason != tc.reason {
+				t.Fatalf("last record = %+v, want stop decision with reason %s", last, tc.reason)
+			}
+		})
+	}
+}

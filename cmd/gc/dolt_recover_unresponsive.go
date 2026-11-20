@@ -157,6 +157,9 @@ const (
 	managedDoltRecoveryReasonWindowDisabled   = "unresponsive_window_disabled"
 	managedDoltRecoveryReasonRecheckFailed    = "elapsed_window_recheck_failed"
 	managedDoltRecoveryReasonHealthy          = "healthy_observation"
+	managedDoltRecoveryReasonEndpointRefused  = "endpoint_refused"
+	managedDoltRecoveryReasonReadOnly         = "read_only_response"
+	managedDoltRecoveryReasonNotQueryReady    = "not_query_ready_response"
 )
 
 // managedDoltRecoveryRecordTag starts every recovery decision line appended to
@@ -297,7 +300,7 @@ func (g managedDoltRecoveryGate) evaluate(failure error) error {
 	observation := g.ops.observeEndpoint(g.host, g.port)
 	switch observation.State {
 	case managedDoltEndpointRefused:
-		return nil
+		return g.recordConclusiveStop(managedDoltRecoveryReasonEndpointRefused, probeError)
 	case managedDoltEndpointListening:
 	default:
 		base.Reason = managedDoltRecoveryReasonInconclusive
@@ -460,6 +463,22 @@ func managedDoltUserFromEnv(environ []string) string {
 		}
 	}
 	return user
+}
+
+// recordConclusiveStop records the stop decision for a failure that already
+// establishes recovery is needed (a refused endpoint, or a completed health
+// response diagnosing the server). The existing stop path keeps its ownership
+// safeguards; an unrecorded decision never starts it.
+func (g managedDoltRecoveryGate) recordConclusiveStop(reason, probeError string) error {
+	rec := managedDoltRecoveryRecord{At: g.ops.now().UTC(), Decision: managedDoltRecoveryDecisionStop, Reason: reason, ProbeError: probeError}
+	if ident, identErr := g.ops.identify(g.cityPath, g.port); identErr == nil && ident.known() {
+		rec.PID = ident.PID
+		rec.StartTime = ident.StartTime
+	}
+	if err := g.record(rec); err != nil {
+		return fmt.Errorf("%w: refusing an unrecorded restart of endpoint %s (%s): %w", errManagedDoltRecoveryDeferred, g.endpoint(), reason, err)
+	}
+	return nil
 }
 
 // managedDoltRecoveryHistoryTailBytes bounds how much of dolt.log recovery

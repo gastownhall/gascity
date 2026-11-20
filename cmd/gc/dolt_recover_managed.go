@@ -153,6 +153,7 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 	// unresponsiveness gate first.
 	gate := managedDoltRecoveryGate{cityPath: cityPath, host: host, port: port, logFile: layout.LogFile, ops: ops}
 	var observedFailure error
+	diagnosis := ""
 	if err := ops.queryProbe(host, port, user); err != nil {
 		observedFailure = fmt.Errorf("query probe: %w", err)
 	} else {
@@ -162,6 +163,7 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 			observedFailure = fmt.Errorf("health check: %w", healthErr)
 		case health.ReadOnly == "true":
 			report.DiagnosedReadOnly = true
+			diagnosis = managedDoltRecoveryReasonReadOnly
 		case health.QueryReady && health.ReadOnly == "false":
 			report.Ready = true
 			report.Healthy = true
@@ -176,6 +178,8 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 				return report, err
 			}
 			return report, nil
+		default:
+			diagnosis = managedDoltRecoveryReasonNotQueryReady
 		}
 	}
 
@@ -184,6 +188,9 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 			report.Deferred = true
 			return report, err
 		}
+	} else if err := gate.recordConclusiveStop(diagnosis, ""); err != nil {
+		report.Deferred = true
+		return report, err
 	}
 
 	stopReport, stopErr := ops.stop(cityPath, port)
