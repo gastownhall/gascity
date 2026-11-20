@@ -38,6 +38,29 @@ type State struct {
 	// exists, so a healthy state is a zero value plus a Head.
 	AbsentTables  map[string]bool
 	AbsentColumns map[string]bool
+	// Window scripts the commit-window statements (dolt_log,
+	// dolt_diff_summary) this state answers. Nil means unscripted: the window
+	// statements fail, as a server that does not know the table functions
+	// would. It is read from the AFTER state — the window is only ever asked
+	// after the observation's statements have advanced the connection.
+	Window *Window
+}
+
+// Window is what the two commit-window statements answer: the messages
+// dolt_log lists (newest first, the fake does not cap them) and the tables
+// dolt_diff_summary reports. FailLog and FailDiff make that one statement
+// fail, for the Unreadable window.
+type Window struct {
+	Commits  []string
+	Tables   []WindowTable
+	FailLog  error
+	FailDiff error
+}
+
+// WindowTable is one table dolt_diff_summary reports.
+type WindowTable struct {
+	Name         string
+	SchemaChange bool
 }
 
 // PostOpenDB is a *sql.DB whose every connection reads Before on its first
@@ -116,10 +139,11 @@ func (c *conn) Begin() (driver.Tx, error) {
 	return nil, errors.New("proxyendpointtest: the scripted pool is read-only")
 }
 
-// QueryContext answers any statement that asks for DOLT_HASHOF('HEAD'),
-// followed by one COUNT(*) per information_schema.tables sub-select (one
-// argument each, the table) and one per information_schema.columns sub-select
-// (two arguments each, table then column), in that order.
+// QueryContext answers the observation statement (DOLT_HASHOF('HEAD') followed
+// by one COUNT(*) per information_schema.tables sub-select — one argument
+// each, the table — and one per information_schema.columns sub-select — two
+// arguments each, table then column), and the two commit-window statements
+// dolt_log(...) and dolt_diff_summary(..., ...), which take none.
 func (c *conn) QueryContext(_ context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
 	c.db.mu.Lock()
 	c.db.statements = append(c.db.statements, query)
@@ -132,6 +156,12 @@ func (c *conn) QueryContext(_ context.Context, query string, args []driver.Named
 	c.issued++
 	if failure != nil {
 		return nil, failure
+	}
+	if strings.Contains(query, "dolt_log(") {
+		return windowLogRows(state.Window)
+	}
+	if strings.Contains(query, "dolt_diff_summary(") {
+		return windowDiffRows(state.Window)
 	}
 	if !strings.Contains(query, "DOLT_HASHOF('HEAD')") {
 		return nil, fmt.Errorf("proxyendpointtest: no answer for %q", query)
@@ -150,7 +180,41 @@ func (c *conn) QueryContext(_ context.Context, query string, args []driver.Named
 		key := fmt.Sprint(args[tables+2*i].Value) + "." + fmt.Sprint(args[tables+2*i+1].Value)
 		values = append(values, exists(!state.AbsentColumns[key]))
 	}
-	return &rows{values: values}, nil
+	return &rows{data: [][]driver.Value{values}}, nil
+}
+
+// windowLogRows answers a dolt_log statement from the state's script, or fails
+// the way an unscripted window fails. An unscripted state gets the zero script,
+// so FailLog alone is enough to model a broken window read.
+func windowLogRows(w *Window) (driver.Rows, error) {
+	if w == nil {
+		w = &Window{}
+	}
+	if w.FailLog != nil {
+		return nil, w.FailLog
+	}
+	data := make([][]driver.Value, 0, len(w.Commits))
+	for _, commit := range w.Commits {
+		data = append(data, []driver.Value{commit})
+	}
+	return &rows{data: data}, nil
+}
+
+// windowDiffRows answers a dolt_diff_summary statement the same way, with the
+// schema-change column as a number, which is one of the shapes a driver hands
+// it back as — the reader must accept them all.
+func windowDiffRows(w *Window) (driver.Rows, error) {
+	if w == nil {
+		w = &Window{}
+	}
+	if w.FailDiff != nil {
+		return nil, w.FailDiff
+	}
+	data := make([][]driver.Value, 0, len(w.Tables))
+	for _, table := range w.Tables {
+		data = append(data, []driver.Value{table.Name, exists(table.SchemaChange)})
+	}
+	return &rows{data: data}, nil
 }
 
 func exists(present bool) int64 {
@@ -161,12 +225,15 @@ func exists(present bool) int64 {
 }
 
 type rows struct {
-	values []driver.Value
-	done   bool
+	data [][]driver.Value
+	next int
 }
 
 func (r *rows) Columns() []string {
-	columns := make([]string, len(r.values))
+	if len(r.data) == 0 {
+		return nil
+	}
+	columns := make([]string, len(r.data[0]))
 	for i := range columns {
 		columns[i] = fmt.Sprintf("c%d", i)
 	}
@@ -176,10 +243,10 @@ func (r *rows) Columns() []string {
 func (r *rows) Close() error { return nil }
 
 func (r *rows) Next(dest []driver.Value) error {
-	if r.done {
+	if r.next >= len(r.data) {
 		return io.EOF
 	}
-	r.done = true
-	copy(dest, r.values)
+	copy(dest, r.data[r.next])
+	r.next++
 	return nil
 }

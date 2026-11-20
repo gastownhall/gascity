@@ -277,9 +277,12 @@ type proxiedNativeOpener struct {
 	// pre-open root, be-itm5), so the re-read costs round trips on a
 	// connection gc already holds and never a session of its own. Injected for
 	// the same reason as the two opens; nil means the production readers, so
-	// omitting them cannot switch the check off.
-	leafObserve    func(ctx context.Context, native *beads.NativeDoltStore) (proxyendpoint.PostOpenReport, error)
-	storageObserve func(ctx context.Context, storage beads.NativeStorage) (proxyendpoint.PostOpenReport, error)
+	// omitting them cannot switch the check off. The since argument is the
+	// pin's HEAD: when the observed HEAD differs from it, the same connection
+	// also reads the commit window between the two, which is what attributes a
+	// move to another bd client's write instead of gc's open.
+	leafObserve    func(ctx context.Context, native *beads.NativeDoltStore, since string) (proxyendpoint.PostOpenReport, error)
+	storageObserve func(ctx context.Context, storage beads.NativeStorage, since string) (proxyendpoint.PostOpenReport, error)
 
 	// logger receives the post-open check's WARN when the re-read itself
 	// fails. Nil is slog.Default(): the composition roots build this opener
@@ -461,7 +464,7 @@ func (o *proxiedNativeOpener) openNativeLeaf(ctx context.Context, pin beads.Pin,
 		leafObserve = beads.ProxiedLeafObservation
 	}
 	if verdict := o.openUnmoved(ctx, pin, site, func(ctx context.Context) (proxyendpoint.PostOpenReport, error) {
-		return leafObserve(ctx, native)
+		return leafObserve(ctx, native, pin.Head())
 	}); verdict != nil {
 		closeProxiedLeafQuietly(native)
 		return nil, verdict
@@ -497,10 +500,14 @@ func (o *proxiedNativeOpener) openNativeLeaf(ctx context.Context, pin beads.Pin,
 // it — the factory, the read path, the guard's recovery — logs it through the
 // lane's one incident line (internal/beads proxied_incident_log.go), so a
 // head_moved is reported once, at the place that decided what to do about it.
+// An ATTRIBUTED move is: no verdict fires, the open stands, and one DEBUG line
+// records both hashes and the commit count the window weighed — the healthy
+// busy-rig case must not be silence either, but it must not be an alarm.
 //
 // On a verdict the memoized admission is forgotten. Otherwise the next open in
 // this process would be served from the memo — which carries no hash — and walk
-// past the one check that just fired.
+// past the one check that just fired. An attributed move is not a verdict, so
+// the memo stands: nothing happened to forget it for.
 func (o *proxiedNativeOpener) openUnmoved(ctx context.Context, pin beads.Pin, site string, read func(context.Context) (proxyendpoint.PostOpenReport, error)) error {
 	if pin.Head() == "" {
 		return nil
@@ -513,8 +520,17 @@ func (o *proxiedNativeOpener) openUnmoved(ctx context.Context, pin beads.Pin, si
 	verdict := beads.ProxiedOpenUnmoved(pin, observed)
 	if verdict != nil {
 		beads.ForgetProxiedPin(o.scopeRoot, pin.Database())
+		return verdict
 	}
-	return verdict
+	before, after := strings.TrimSpace(pin.Head()), strings.TrimSpace(observed.Head)
+	if before != "" && after != "" && before != after {
+		commits := 0
+		if observed.Window != nil {
+			commits = len(observed.Window.Commits)
+		}
+		beads.LogProxiedHeadForeign(o.logger, o.scopeRoot, site, before, after, commits)
+	}
+	return nil
 }
 
 // recoverNativeLeaf is the guard tick's recovery for a handle that stood down
@@ -668,7 +684,7 @@ func (o *proxiedNativeOpener) reopen(longLived bool) beads.NativeReopenFunc {
 			storageObserve = beads.ProxiedOpenedObservation
 		}
 		if verdict := o.openUnmoved(ctx, pin, beads.ProxiedIncidentSiteReadReopen, func(ctx context.Context) (proxyendpoint.PostOpenReport, error) {
-			return storageObserve(ctx, storage)
+			return storageObserve(ctx, storage, pin.Head())
 		}); verdict != nil {
 			_ = storage.Close()
 			return nil, verdict

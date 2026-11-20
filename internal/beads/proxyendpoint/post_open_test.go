@@ -3,6 +3,7 @@ package proxyendpoint
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -36,7 +37,7 @@ func TestReadPostOpenObservesTheStateAfterTheOpen(t *testing.T) {
 	t.Run("the observation is the second statement on one pinned connection", func(t *testing.T) {
 		pool := proxyendpointtest.NewPostOpenDB(before, after)
 		t.Cleanup(func() { _ = pool.DB.Close() })
-		report, err := ReadPostOpen(context.Background(), pool.DB)
+		report, err := ReadPostOpen(context.Background(), pool.DB, "")
 		if err != nil {
 			t.Fatalf("ReadPostOpen: %v", err)
 		}
@@ -51,7 +52,7 @@ func TestReadPostOpenObservesTheStateAfterTheOpen(t *testing.T) {
 	t.Run("a failing advancing statement is a failure, not a stale answer", func(t *testing.T) {
 		pool := proxyendpointtest.NewPostOpenDB(before, after).Failing(errors.New("invalid connection"))
 		t.Cleanup(func() { _ = pool.DB.Close() })
-		if _, err := ReadPostOpen(context.Background(), pool.DB); err == nil {
+		if _, err := ReadPostOpen(context.Background(), pool.DB, ""); err == nil {
 			t.Fatal("a failed statement produced an observation")
 		}
 		if got := len(pool.Statements()); got != 1 {
@@ -121,7 +122,7 @@ func TestReadPostOpenObservesTheStateAfterTheOpen(t *testing.T) {
 			// took the first statement's answer would report no change.
 			pool := proxyendpointtest.NewPostOpenDB(proxyendpointtest.State{Head: "h"}, tc.after)
 			t.Cleanup(func() { _ = pool.DB.Close() })
-			report, err := ReadPostOpen(context.Background(), pool.DB)
+			report, err := ReadPostOpen(context.Background(), pool.DB, "")
 			if err != nil {
 				t.Fatalf("ReadPostOpen: %v", err)
 			}
@@ -141,8 +142,110 @@ func TestReadPostOpenObservesTheStateAfterTheOpen(t *testing.T) {
 	}
 
 	t.Run("no pool is an error", func(t *testing.T) {
-		if _, err := ReadPostOpen(context.Background(), nil); !errors.Is(err, ErrPostOpenNoPool) {
+		if _, err := ReadPostOpen(context.Background(), nil, ""); !errors.Is(err, ErrPostOpenNoPool) {
 			t.Fatalf("ReadPostOpen(nil) err = %v, want ErrPostOpenNoPool", err)
+		}
+	})
+}
+
+// TestReadPostOpenReadsTheWindowWhenHeadMoved is the evidence half of the
+// moved-HEAD attribution.
+//
+// head_moved fires whenever HEAD moved, because gc cannot tell its own open's
+// commit from another bd client's — and on a busy rig the second is the common
+// case, so a verdict that cannot tell them apart demotes every open on the
+// store. The window between the two hashes is what CAN tell them apart: every
+// commit a linked-library open mints carries the "schema:" message prefix, and
+// every table it touches on the committed plane is in the library's open-write
+// set. A window that shows neither is a move somebody else made, and the
+// observation — not the verdict — is the only place both hashes are in hand to
+// ask for it.
+//
+// The window is read ONLY for a moved HEAD, on the same pinned connection the
+// observation already holds, because the questions cost two statements and an
+// unmoved HEAD has nothing to attribute.
+func TestReadPostOpenReadsTheWindowWhenHeadMoved(t *testing.T) {
+	// Real 32-character Dolt hashes: the window's table functions take no bind
+	// parameters, so the observation inlines the two hashes into the statements
+	// and must refuse anything a real DOLT_HASHOF would not answer with.
+	const since = "0000000000000000000000000000aaaa"
+	const after = "0000000000000000000000000000bbbb"
+	scripted := &proxyendpointtest.Window{
+		Commits: []string{"bd: update ga-1", "bd: close ga-2"},
+		Tables:  []proxyendpointtest.WindowTable{{Name: "issues"}, {Name: "statuses", SchemaChange: true}},
+	}
+
+	t.Run("a moved head carries the window between the two hashes", func(t *testing.T) {
+		pool := proxyendpointtest.NewPostOpenDB(
+			proxyendpointtest.State{Head: since},
+			proxyendpointtest.State{Head: after, Window: scripted})
+		t.Cleanup(func() { _ = pool.DB.Close() })
+		report, err := ReadPostOpen(context.Background(), pool.DB, since)
+		if err != nil {
+			t.Fatalf("ReadPostOpen: %v", err)
+		}
+		if report.Window == nil {
+			t.Fatal("a moved HEAD was observed without its window: attribution has nothing to work with")
+		}
+		if got := report.Window.Unreadable; got != "" {
+			t.Fatalf("the window read failed: %s", got)
+		}
+		if !reflect.DeepEqual(report.Window.Commits, []string{"bd: update ga-1", "bd: close ga-2"}) {
+			t.Fatalf("commits = %v", report.Window.Commits)
+		}
+		if !reflect.DeepEqual(report.Window.Tables, []WindowTable{{Name: "issues"}, {Name: "statuses", SchemaChange: true}}) {
+			t.Fatalf("tables = %+v", report.Window.Tables)
+		}
+		if report.Window.Truncated {
+			t.Error("a two-commit window was read as truncated")
+		}
+		statements := pool.Statements()
+		if len(statements) != 4 {
+			t.Fatalf("the read issued %d statement(s), want 4: the advancing statement, the observation, then the window's dolt_log and dolt_diff_summary", len(statements))
+		}
+		logQuery, diffQuery := statements[2], statements[3]
+		if !strings.Contains(logQuery, "dolt_log(") || !strings.Contains(logQuery, since) || !strings.Contains(logQuery, after) {
+			t.Fatalf("the commit statement is not dolt_log over %s..%s: %s", since, after, logQuery)
+		}
+		if !strings.Contains(diffQuery, "dolt_diff_summary(") || !strings.Contains(diffQuery, since) || !strings.Contains(diffQuery, after) {
+			t.Fatalf("the table statement is not dolt_diff_summary over %s..%s: %s", since, after, diffQuery)
+		}
+		if pool.Conns() != 1 {
+			t.Fatalf("the window used %d connection(s), want 1: it must ride the pinned connection the observation already holds, not open another", pool.Conns())
+		}
+	})
+
+	t.Run("an unmoved head spends no window statements", func(t *testing.T) {
+		pool := proxyendpointtest.NewPostOpenDB(
+			proxyendpointtest.State{Head: after},
+			proxyendpointtest.State{Head: after, Window: scripted})
+		t.Cleanup(func() { _ = pool.DB.Close() })
+		report, err := ReadPostOpen(context.Background(), pool.DB, after)
+		if err != nil {
+			t.Fatalf("ReadPostOpen: %v", err)
+		}
+		if report.Window != nil {
+			t.Fatalf("an unmoved HEAD carried a window: %+v", report.Window)
+		}
+		if got := len(pool.Statements()); got != 2 {
+			t.Fatalf("an unmoved HEAD issued %d statement(s), want 2: the window is evidence about a move, and there was none", got)
+		}
+	})
+
+	t.Run("no pinned since spends no window statements", func(t *testing.T) {
+		pool := proxyendpointtest.NewPostOpenDB(
+			proxyendpointtest.State{Head: since},
+			proxyendpointtest.State{Head: after, Window: scripted})
+		t.Cleanup(func() { _ = pool.DB.Close() })
+		report, err := ReadPostOpen(context.Background(), pool.DB, "")
+		if err != nil {
+			t.Fatalf("ReadPostOpen: %v", err)
+		}
+		if report.Window != nil {
+			t.Fatalf("a memo-shaped read (no pinned hash) carried a window: %+v", report.Window)
+		}
+		if got := len(pool.Statements()); got != 2 {
+			t.Fatalf("a read with no since issued %d statement(s), want 2", got)
 		}
 	})
 }

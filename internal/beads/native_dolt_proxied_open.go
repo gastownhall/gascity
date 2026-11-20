@@ -204,13 +204,17 @@ func openNativeStorageProxied(ctx context.Context, scopeRoot string, env map[str
 // the accessor bd's own doctor and `bd sql` use). A handle that does not
 // export it is reported as an error, not as an empty report: the caller logs
 // an unobservable open rather than treating it as an unchanged one.
-func ProxiedOpenedObservation(ctx context.Context, storage NativeStorage) (proxyendpoint.PostOpenReport, error) {
+//
+// since is the HEAD the admitting probe pinned; when the observed HEAD differs
+// from it the observation also reads the commit window between the two, which
+// is what attributes a move to somebody else's write (proxyendpoint.ReadPostOpen).
+func ProxiedOpenedObservation(ctx context.Context, storage NativeStorage, since string) (proxyendpoint.PostOpenReport, error) {
 	accessor, ok := storage.(interface{ UnderlyingDB() *sql.DB })
 	if !ok {
 		return proxyendpoint.PostOpenReport{}, fmt.Errorf(
 			"observe the database after the proxied open: the linked library's %T exports no UnderlyingDB", storage)
 	}
-	report, err := proxyendpoint.ReadPostOpen(ctx, accessor.UnderlyingDB())
+	report, err := proxyendpoint.ReadPostOpen(ctx, accessor.UnderlyingDB(), since)
 	if err != nil {
 		return proxyendpoint.PostOpenReport{}, fmt.Errorf("observe the database after the proxied open: %w", err)
 	}
@@ -219,11 +223,11 @@ func ProxiedOpenedObservation(ctx context.Context, storage NativeStorage) (proxy
 
 // ProxiedLeafObservation is ProxiedOpenedObservation for a leaf the open has
 // already wrapped in a NativeDoltStore.
-func ProxiedLeafObservation(ctx context.Context, store *NativeDoltStore) (proxyendpoint.PostOpenReport, error) {
+func ProxiedLeafObservation(ctx context.Context, store *NativeDoltStore, since string) (proxyendpoint.PostOpenReport, error) {
 	storage, release, err := store.acquireStorage()
 	if err != nil {
 		return proxyendpoint.PostOpenReport{}, err
 	}
 	defer release()
-	return ProxiedOpenedObservation(ctx, storage)
+	return ProxiedOpenedObservation(ctx, storage, since)
 }

@@ -1216,8 +1216,11 @@ func TestProxiedOpenRefusesAnOpenThatMovedHead(t *testing.T) {
 				// control flow, and CloseStore is nil-safe by construction.
 				return nil, nil
 			},
-			leafObserve: func(context.Context, *beads.NativeDoltStore) (proxyendpoint.PostOpenReport, error) {
+			leafObserve: func(_ context.Context, _ *beads.NativeDoltStore, since string) (proxyendpoint.PostOpenReport, error) {
 				n.reads++
+				if since != head {
+					return proxyendpoint.PostOpenReport{}, fmt.Errorf("the re-read was handed since %q, want the pin's head %q", since, head)
+				}
 				head, err := readHead()
 				return observedHead(head), err
 			},
@@ -1346,7 +1349,7 @@ func TestProxiedOpenRefusesAnOpenThatMovedHead(t *testing.T) {
 		opener.openNativeStorage = func(context.Context, string, map[string]string) (beads.NativeStorage, error) {
 			return &closeCountingStorage{}, nil
 		}
-		opener.storageObserve = func(context.Context, beads.NativeStorage) (proxyendpoint.PostOpenReport, error) {
+		opener.storageObserve = func(context.Context, beads.NativeStorage, string) (proxyendpoint.PostOpenReport, error) {
 			return proxyendpoint.PostOpenReport{}, errors.New("invalid connection")
 		}
 		beads.ForgetProxiedPin(f.scopeRoot, "beads")
@@ -1368,8 +1371,11 @@ func TestProxiedOpenRefusesAnOpenThatMovedHead(t *testing.T) {
 			return storage, nil
 		}
 		var readFrom beads.NativeStorage
-		opener.storageObserve = func(_ context.Context, s beads.NativeStorage) (proxyendpoint.PostOpenReport, error) {
+		opener.storageObserve = func(_ context.Context, s beads.NativeStorage, since string) (proxyendpoint.PostOpenReport, error) {
 			readFrom = s
+			if since != "before0000" {
+				return proxyendpoint.PostOpenReport{}, fmt.Errorf("the reopen's re-read was handed since %q, want the pin's head", since)
+			}
 			return observedHead("after11111"), nil
 		}
 
@@ -1471,6 +1477,105 @@ func TestProxiedOpenRefusesAnOpenThatMovedHead(t *testing.T) {
 			t.Errorf("the refused handle was closed %d time(s), want 1", storage.closed)
 		}
 	})
+}
+
+// TestProxiedOpenServesAForeignMovedHead is the opener half of the moved-HEAD
+// attribution.
+//
+// TestProxiedOpenRefusesAnOpenThatMovedHead pins that a moved HEAD is refused
+// and the admission memo forgotten. On a busy rig that refusal is mostly FALSE:
+// another bd client committed inside the probe-to-re-read window, gc's open
+// wrote nothing, and the store still takes the bd front door. The post-open
+// observation now reads the window between the two hashes, and a window with
+// no schema-prefixed commit and no open-write table attributes the move to
+// that other client: the open stands, the memo stands (there is no incident to
+// forget it for), and the lane says what it saw at DEBUG rather than WARN —
+// one line an operator can find, not one per open they learn to ignore.
+func TestProxiedOpenServesAForeignMovedHead(t *testing.T) {
+	foreign := &proxyendpoint.PostOpenWindow{
+		Commits: []string{"bd: update ga-1", "bd: close ga-2"},
+		Tables:  []proxyendpoint.WindowTable{{Name: "issues"}, {Name: "comments"}},
+	}
+	f := newProxiedScopeFixture(t)
+	beads.ForgetProxiedPin(f.scopeRoot, "beads")
+	t.Cleanup(func() { beads.ForgetProxiedPin(f.scopeRoot, "beads") })
+	var probes, reads int
+	var logged strings.Builder
+	opener := &proxiedNativeOpener{
+		cityPath:     t.TempDir(),
+		scopeRoot:    f.scopeRoot,
+		database:     "beads",
+		processTable: f.processTable(),
+		probe: func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			probes++
+			served := proxyendpoint.ServedProbeForTest(f.pinnedCursors(), proxyendpoint.CursorReality{})
+			served.Head = "before0000"
+			return served
+		},
+		observed:  beads.NewGenerationSet(),
+		recovered: beads.NewGenerationSet(),
+		sleep:     func(context.Context, time.Duration) error { return nil },
+		logger:    slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		openNative: func(context.Context, string, map[string]string, ...beads.NativeDoltStoreOption) (*beads.NativeDoltStore, error) {
+			return nil, nil
+		},
+		leafObserve: func(context.Context, *beads.NativeDoltStore, string) (proxyendpoint.PostOpenReport, error) {
+			reads++
+			report := observedHead("after11111")
+			report.Window = foreign
+			return report, nil
+		},
+	}
+
+	pin, err := opener.admit(context.Background(), false)
+	if err != nil {
+		t.Fatalf("admit: %v", err)
+	}
+	leaf, err := opener.openNativeLeaf(context.Background(), pin, false, beads.ProxiedIncidentSiteOpen)
+	if err != nil {
+		t.Fatalf("an open whose window shows only another bd client's commits was refused: %v", err)
+	}
+	// The injected openNative hands back a nil leaf: the assertion is that the
+	// open STOOD and handed it back, not the leaf's contents.
+	_ = leaf
+	if probes != 1 || reads != 1 {
+		t.Fatalf("the open spent %d probe(s) and %d re-read(s), want 1 and 1", probes, reads)
+	}
+
+	// The memo stands: a foreign window is not an incident, and the next admit
+	// is served from the memo — no second probe, and a pin with no hash to
+	// compare, so the next open spends no re-read either.
+	memoized, err := opener.admit(context.Background(), false)
+	if err != nil {
+		t.Fatalf("re-admit: %v", err)
+	}
+	if probes != 1 {
+		t.Fatalf("the foreign window forgot the memo: %d probe session(s) in total, want 1", probes)
+	}
+	if memoized.Head() != "" {
+		t.Fatalf("the memoized pin carries head %q, want none: the memo never serves the hash", memoized.Head())
+	}
+	if _, err := opener.openNativeLeaf(context.Background(), memoized, false, beads.ProxiedIncidentSiteOpen); err != nil {
+		t.Fatalf("a memoized open was refused: %v", err)
+	}
+	if reads != 1 {
+		t.Fatalf("a memoized open re-read HEAD (%d reads in total, want 1): it has no hash to compare against", reads)
+	}
+
+	// One DEBUG line with both hashes and the commit count, and no incident:
+	// a WARN here would be a per-open alarm for the healthy busy case.
+	line := logged.String()
+	for _, want := range []string{
+		"level=DEBUG", "msg=" + beads.ProxiedHeadForeignMessage,
+		"site=open", "before0000", "after11111", "commits=2",
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("the foreign window's log line lacks %q:\n%s", want, line)
+		}
+	}
+	if strings.Contains(line, "level=WARN") || strings.Contains(line, beads.ProxiedHeadMovedMessage) {
+		t.Errorf("an open attributed to another bd client was logged as an incident:\n%s", line)
+	}
 }
 
 // observedHead is a post-open report of a healthy ignored plane with the given

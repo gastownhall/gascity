@@ -2720,3 +2720,98 @@ func TestGenerationSetOnlyTheClaimerEndsItsClaim(t *testing.T) {
 		t.Fatalf("B's own settle = %+v, want spent", st)
 	}
 }
+
+// TestProxiedOpenUnmovedAttributesAMovedHeadByItsWindow is the attribution the
+// head_moved verdict never had.
+//
+// The verdict's own doc says gc cannot tell its own open's commit from another
+// bd client's in the probe-to-re-read window — true for the HASH alone. The
+// WINDOW between the two hashes can tell them apart: every commit the linked
+// library's open mints carries the "schema:" message prefix, and every
+// committed table it touches is in the library's open-write set (the
+// dolt_ignore seed, the cursor tables, the custom-types/statuses backfill, the
+// nonlocal repair tables). A window with neither shape is a move somebody else
+// made, and refusing an open that made no write of its own is exactly the
+// per-open demotion the D-F3 residual priced: on a busy rig it pins the store
+// to the bd front door forever.
+//
+// Foreign is an attribution the EVIDENCE makes, not the absence of a verdict:
+// a window that was never read (nil), one the server could not answer, one the
+// commit limit truncated, or one that lists nothing at all says "unknown", and
+// unknown still declines — the verdict is detection, and a decline on unknown
+// evidence is how it stays honest.
+func TestProxiedOpenUnmovedAttributesAMovedHeadByItsWindow(t *testing.T) {
+	pinAt := func(head string) Pin {
+		return Pin{admitted: true, database: "beads", head: head, cursors: pinnedCursors()}
+	}
+	moved := func(window *proxyendpoint.PostOpenWindow) proxyendpoint.PostOpenReport {
+		return proxyendpoint.PostOpenReport{Head: "def456", IgnoredCursorTable: true, Window: window}
+	}
+
+	t.Run("a window with only another client's commits is a clean open", func(t *testing.T) {
+		foreign := &proxyendpoint.PostOpenWindow{
+			Commits: []string{"bd: update ga-1", "bd: close ga-2"},
+			Tables:  []proxyendpoint.WindowTable{{Name: "issues"}, {Name: "comments"}},
+		}
+		if err := ProxiedOpenUnmoved(pinAt("abc123"), moved(foreign)); err != nil {
+			t.Fatalf("a moved HEAD whose window shows only another bd client's commits refused the open: %v", err)
+		}
+	})
+
+	t.Run("a window with no commits and no tables still declines", func(t *testing.T) {
+		err := ProxiedOpenUnmoved(pinAt("abc123"), moved(&proxyendpoint.PostOpenWindow{}))
+		if verdict, typed := ProxiedVerdictOf(err); !typed || verdict.Verdict != ProxiedVerdictHeadMoved {
+			t.Fatalf("err = %v, want head_moved: a moved HEAD with an empty window is contradictory evidence, not a foreign move", err)
+		}
+	})
+
+	// The open-shaped rows are the attribution's teeth. Each names a write only
+	// the linked library's open makes, and each must still fire the verdict
+	// even though the window exists — a window is not a pardon. Their details
+	// are asserted in TestProxiedOpenUnmovedNamesTheDecidingCommitOrTable.
+	for _, tc := range []struct {
+		name   string
+		window *proxyendpoint.PostOpenWindow
+	}{
+		{
+			name:   "a commit carrying the schema prefix",
+			window: &proxyendpoint.PostOpenWindow{Commits: []string{"bd: update ga-1", "schema: apply migrations"}},
+		},
+		{
+			name: "a changed table in the open-write set",
+			window: &proxyendpoint.PostOpenWindow{
+				Commits: []string{"bd: update ga-1"},
+				Tables:  []proxyendpoint.WindowTable{{Name: "dolt_ignore"}},
+			},
+		},
+		{
+			name: "a schema change on any table",
+			window: &proxyendpoint.PostOpenWindow{
+				Commits: []string{"bd: update ga-1"},
+				Tables:  []proxyendpoint.WindowTable{{Name: "issues", SchemaChange: true}},
+			},
+		},
+		{
+			name:   "a window the server could not answer",
+			window: &proxyendpoint.PostOpenWindow{Unreadable: "dolt_log: table function not found"},
+		},
+		{
+			name: "a window the commit limit truncated",
+			window: &proxyendpoint.PostOpenWindow{
+				Commits:   []string{"bd: update ga-1"},
+				Truncated: true,
+			},
+		},
+	} {
+		t.Run(tc.name+" is still head_moved", func(t *testing.T) {
+			err := ProxiedOpenUnmoved(pinAt("abc123"), moved(tc.window))
+			verdict, typed := ProxiedVerdictOf(err)
+			if !typed || verdict.Verdict != ProxiedVerdictHeadMoved {
+				t.Fatalf("err = %v, want head_moved: the window is evidence, and this evidence does not attribute the move to another client", err)
+			}
+			if verdict.Terminal() {
+				t.Error("the attributed arm must stay non-terminal, like the verdict it refines")
+			}
+		})
+	}
+}

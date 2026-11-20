@@ -33,6 +33,11 @@ import (
 const (
 	// ProxiedHeadMovedMessage is the message every head_moved site logs at WARN.
 	ProxiedHeadMovedMessage = "proxied_native_head_moved"
+	// ProxiedHeadForeignMessage is what the opener logs at DEBUG when a moved
+	// HEAD was attributed to another bd client's write by the window between
+	// the two hashes, so the open stood: the healthy busy-rig case, which is
+	// exactly the case a WARN per open would teach an operator to ignore.
+	ProxiedHeadForeignMessage = "proxied_native_head_foreign"
 	// ProxiedPostOpenUnobservedMessage is what the opener logs at WARN when the
 	// post-open re-read itself failed, so the check concluded nothing about
 	// what the open did. See cmd/gc's openUnmoved (beads_proxied_native.go).
@@ -62,6 +67,23 @@ func logProxiedHeadMoved(logger *slog.Logger, scope, site string, err error) {
 		slog.String("scope", scope),
 		slog.String("verdict", string(verdict.Verdict)),
 		slog.String("detail", verdict.Detail))
+}
+
+// LogProxiedHeadForeign reports, at DEBUG, a moved HEAD the window between the
+// two hashes attributed to another bd client's write — the open stood, so this
+// is a note an operator diagnosing a demotion can find ("gc saw the move and
+// cleared it"), not an alarm. It carries both hashes and the commit count the
+// attribution weighed.
+func LogProxiedHeadForeign(logger *slog.Logger, scope, site, before, after string, commits int) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Debug(ProxiedHeadForeignMessage,
+		slog.String("site", site),
+		slog.String("scope", scope),
+		slog.String("before", before),
+		slog.String("after", after),
+		slog.Int("commits", commits))
 }
 
 // LogProxiedPostOpenUnobserved reports, at WARN, a post-open re-read that could

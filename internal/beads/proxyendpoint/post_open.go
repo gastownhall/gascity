@@ -19,7 +19,61 @@ type PostOpenReport struct {
 	// Reality is the ignored lane's sentinel reality as of the observation,
 	// read exactly as the probe reads it (council pr2 E-S4).
 	Reality CursorReality
+	// Window is the commit window between the HEAD the admitting probe pinned
+	// and Head, read only when the two differ. It is the evidence a moved HEAD
+	// is attributed BY: a window whose commits carry no "schema:" prefix and
+	// whose changed tables are all outside the library's open-write set is a
+	// move another bd client made, and beads.ProxiedOpenUnmoved lets that open
+	// stand. Nil when no window applies — the pin carried no hash (a memoized
+	// admission) or HEAD did not move — and never a substitute for the hashes
+	// above.
+	Window *PostOpenWindow
 }
+
+// PostOpenWindow is the commit window between the hash admission pinned and the
+// hash the open observed, as Dolt's own table functions report it.
+//
+// Two statements over the same pinned connection as the observation: dolt_log
+// lists the commit messages (newest first), dolt_diff_summary the tables each
+// with whether its schema changed. Neither statement takes a bind parameter, so
+// the two hashes are INLINED into the SQL — after isDoltCommitHash has accepted
+// them, which is the injection boundary, not a formality.
+//
+// A window is evidence, not a pardon. It is read only for a MOVED HEAD, and it
+// is the caller's job (beads.ProxiedOpenUnmoved) to decide what it proves: the
+// shapes only a linked-library open mints, and the failure shapes that prove
+// nothing.
+type PostOpenWindow struct {
+	// Commits are the window's commit messages, newest first, capped at
+	// PostOpenWindowCommitLimit.
+	Commits []string
+	// Tables are the tables dolt_diff_summary reports as changed in the
+	// window.
+	Tables []WindowTable
+	// Truncated reports that the window held more commits than the cap, so
+	// Commits is a prefix and attribution cannot see all of them.
+	Truncated bool
+	// Unreadable, when non-empty, names why the window could not be read (a
+	// statement the server refused, or a hash it could not be parameterized
+	// with). Whatever partial data the other statements produced is kept, for
+	// the log line, and the caller must still decline on it.
+	Unreadable string
+}
+
+// WindowTable is one table dolt_diff_summary reports as changed in the window.
+type WindowTable struct {
+	// Name is the table's name.
+	Name string
+	// SchemaChange reports whether the window changed the table's schema, not
+	// only its rows.
+	SchemaChange bool
+}
+
+// PostOpenWindowCommitLimit caps the commits one window read lists. A linked
+// library open's own writes are a handful of commits; a longer window than
+// this is a busy store's, and the flag that says so (Truncated) is cheaper
+// than listing all of it on a connection the library is waiting to use.
+const PostOpenWindowCommitLimit = 64
 
 // EffectiveIgnored is the ignored-lane cursor the linked library would compute
 // from the observed plane, given the raw cursor the admitting probe read. The
@@ -111,7 +165,15 @@ var ErrPostOpenNoPool = errors.New("proxyendpoint: post-open read has no pool")
 // no dial, no handshake, no session of gc's own on bd's proxy. It also leaves
 // the connection advanced when it goes back to the pool, which the library's
 // own first read on this path was going to need anyway.
-func ReadPostOpen(ctx context.Context, db *sql.DB) (PostOpenReport, error) {
+//
+// since is the HEAD the admitting probe pinned: when it is empty (a memoized
+// admission, Pin.withoutHead) or equal to the observed HEAD, no window is read
+// and report.Window is nil; when the two hashes differ, the same pinned
+// connection answers the window's two statements, so attribution never costs a
+// connection of its own. A window the server will not answer is carried on the
+// report (Window.Unreadable) and is NOT an error: the hashes were observed, and
+// it is the caller's verdict that decides what the unreadable window proves.
+func ReadPostOpen(ctx context.Context, db *sql.DB, since string) (PostOpenReport, error) {
 	if db == nil {
 		return PostOpenReport{}, ErrPostOpenNoPool
 	}
@@ -129,7 +191,139 @@ func ReadPostOpen(ctx context.Context, db *sql.DB) (PostOpenReport, error) {
 	if err != nil {
 		return PostOpenReport{}, fmt.Errorf("post-open read: %w", err)
 	}
+	report.Window = readPostOpenWindow(ctx, conn, since, report.Head)
 	return report, nil
+}
+
+// postOpenLogQuery and postOpenDiffSummaryQuery are the window's two
+// statements, with the hashes INLINED. Dolt's table functions take no bind
+// parameters, so there is no prepared form to hand them; isDoltCommitHash
+// accepting both hashes first is what makes inlining them safe.
+func postOpenLogQuery(since, after string) string {
+	return fmt.Sprintf("SELECT message FROM dolt_log('%s..%s') ORDER BY date DESC LIMIT %d",
+		since, after, PostOpenWindowCommitLimit+1)
+}
+
+func postOpenDiffSummaryQuery(since, after string) string {
+	return fmt.Sprintf("SELECT table_name, schema_change FROM dolt_diff_summary('%s', '%s')", since, after)
+}
+
+// isDoltCommitHash reports whether s is a Dolt commit hash exactly as
+// DOLT_HASHOF answers one: 32 characters of Dolt's base32 alphabet. It is the
+// injection boundary for the window's inlined statements, and the reason an
+// observation that cannot prove its hashes says Unreadable instead of asking.
+func isDoltCommitHash(s string) bool {
+	if len(s) != 32 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		digit, lower := '0' <= c && c <= '9', 'a' <= c && c <= 'v'
+		if !digit && !lower {
+			return false
+		}
+	}
+	return true
+}
+
+// readPostOpenWindow reads the commit window between since and after over the
+// connection the observation is already pinned to, and returns nil when no
+// window applies: since empty (a memoized admission) or equal to after (HEAD
+// did not move). A hash pair that cannot be parameterized, or a statement the
+// server refuses, is an Unreadable window — never an error, and never nil,
+// because "could not attribute" and "nothing to attribute" are different
+// answers the caller must be able to tell apart.
+func readPostOpenWindow(ctx context.Context, conn *sql.Conn, since, after string) *PostOpenWindow {
+	since, after = strings.TrimSpace(since), strings.TrimSpace(after)
+	if since == "" || since == after {
+		return nil
+	}
+	window := &PostOpenWindow{}
+	if !isDoltCommitHash(since) || !isDoltCommitHash(after) {
+		window.Unreadable = fmt.Sprintf("the moved HEAD pair %s..%s is not a pair of Dolt commit hashes, so the window's table functions cannot be parameterized for it", since, after)
+		return window
+	}
+	if commits, truncated, err := readWindowCommits(ctx, conn, since, after); err != nil {
+		window.Unreadable = err.Error()
+	} else {
+		window.Commits, window.Truncated = commits, truncated
+	}
+	// The tables are read even when the commits failed, so an operator's log
+	// line can still name the evidence the half that answered produced.
+	if tables, err := readWindowTables(ctx, conn, since, after); err != nil {
+		if window.Unreadable == "" {
+			window.Unreadable = err.Error()
+		}
+	} else {
+		window.Tables = tables
+	}
+	return window
+}
+
+func readWindowCommits(ctx context.Context, conn *sql.Conn, since, after string) (commits []string, truncated bool, err error) {
+	rows, err := conn.QueryContext(ctx, postOpenLogQuery(since, after))
+	if err != nil {
+		return nil, false, fmt.Errorf("reading dolt_log(%s..%s): %w", since, after, err)
+	}
+	defer rows.Close() //nolint:errcheck // the connection returns to the library's pool
+	for rows.Next() {
+		var message sql.NullString
+		if err := rows.Scan(&message); err != nil {
+			return nil, false, fmt.Errorf("reading dolt_log(%s..%s): %w", since, after, err)
+		}
+		commits = append(commits, message.String)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("reading dolt_log(%s..%s): %w", since, after, err)
+	}
+	if len(commits) > PostOpenWindowCommitLimit {
+		// The query asked for the cap PLUS ONE: the extra row is the flag, and
+		// it is dropped here rather than handed to attribution as evidence it
+		// cannot weigh.
+		return commits[:PostOpenWindowCommitLimit], true, nil
+	}
+	return commits, false, nil
+}
+
+func readWindowTables(ctx context.Context, conn *sql.Conn, since, after string) ([]WindowTable, error) {
+	rows, err := conn.QueryContext(ctx, postOpenDiffSummaryQuery(since, after))
+	if err != nil {
+		return nil, fmt.Errorf("reading dolt_diff_summary(%s, %s): %w", since, after, err)
+	}
+	defer rows.Close() //nolint:errcheck // the connection returns to the library's pool
+	var tables []WindowTable
+	for rows.Next() {
+		var name sql.NullString
+		var change any
+		if err := rows.Scan(&name, &change); err != nil {
+			return nil, fmt.Errorf("reading dolt_diff_summary(%s, %s): %w", since, after, err)
+		}
+		tables = append(tables, WindowTable{Name: name.String, SchemaChange: windowSchemaChange(change)})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("reading dolt_diff_summary(%s, %s): %w", since, after, err)
+	}
+	return tables, nil
+}
+
+// windowSchemaChange reads dolt_diff_summary's schema_change column, which
+// drivers hand back as any of a boolean, a number or a string depending on the
+// server, as one bool.
+func windowSchemaChange(v any) bool {
+	switch t := v.(type) {
+	case bool:
+		return t
+	case int64:
+		return t != 0
+	case float64:
+		return t != 0
+	case []byte:
+		return windowSchemaChange(string(t))
+	case string:
+		return t == "1" || t == "true" || t == "yes"
+	default:
+		return false
+	}
 }
 
 // readPostOpenOnce issues the observation's statement once on conn.
