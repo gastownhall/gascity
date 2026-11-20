@@ -857,3 +857,39 @@ func markCachedPackDirty(t *testing.T, source, commit string) {
 		t.Fatalf("WriteFile(.packman-test-dirty): %v", err)
 	}
 }
+
+func TestCheckInstalledAcceptsCleanCacheUnderGitTrace(t *testing.T) {
+	useNeutralGitTestEnv(t)
+	home := t.TempDir()
+	city := t.TempDir()
+	t.Setenv("GC_HOME", filepath.Join(home, ".gc"))
+	const source = "https://example.com/tools.git"
+
+	seeded := filepath.Join(t.TempDir(), "seed")
+	head := seedCacheRepo(t, seeded)
+	cachePath, err := RepoCachePath(source, head)
+	if err != nil {
+		t.Fatalf("RepoCachePath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.Rename(seeded, cachePath); err != nil {
+		t.Fatalf("moving seeded repo into cache: %v", err)
+	}
+	writeTestLockfile(t, city, map[string]LockedPack{
+		source: {Version: "1.0.0", Commit: head},
+	})
+
+	t.Setenv("GIT_TRACE", "1")
+	t.Setenv("GIT_TRACE2_PERF", "1")
+	report, err := CheckInstalled(city, map[string]config.Import{
+		"pack:tools": {Source: source, Version: "^1.0"},
+	})
+	if err != nil {
+		t.Fatalf("CheckInstalled: %v", err)
+	}
+	if len(report.Issues) != 0 {
+		t.Fatalf("CheckInstalled issues = %#v, want none for a clean cache under GIT_TRACE", report.Issues)
+	}
+}

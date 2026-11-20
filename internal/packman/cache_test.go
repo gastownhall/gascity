@@ -445,3 +445,45 @@ func TestDefaultRunGitBlocksDisallowedTransport(t *testing.T) {
 		t.Fatalf("error = %q; want a git transport 'ext' not allowed / protocol block", msg)
 	}
 }
+
+// useNeutralGitTestEnv isolates real-git cache tests from the host's user
+// config and locale so seeding and diagnostics are deterministic.
+func useNeutralGitTestEnv(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("LC_ALL", "C")
+}
+
+// seedCacheRepo writes a minimal pack into dir, commits it into a fresh
+// repository and returns the HEAD commit.
+func seedCacheRepo(t *testing.T, dir string) string {
+	t.Helper()
+	writeFixtureFile(t, dir, "pack.toml", "[pack]\nname = \"tools\"\nschema = 1\n", 0o644)
+	writeFixtureFile(t, dir, "formulas/build.toml", "formula = \"build\"\n", 0o644)
+	writeFixtureFile(t, dir, ".gitignore", "__pycache__/\n", 0o644)
+	fixtureGit(t, dir, "init", "-q")
+	fixtureGit(t, dir, "add", ".")
+	fixtureGit(t, dir, "commit", "-q", "-m", "seed")
+	return fixtureGit(t, dir, "rev-parse", "HEAD")
+}
+
+func TestValidateCachedRepoCheckoutIgnoresGitTrace(t *testing.T) {
+	useNeutralGitTestEnv(t)
+	dir := t.TempDir()
+	head := seedCacheRepo(t, dir)
+
+	t.Setenv("GIT_TRACE", "1")
+	t.Setenv("GIT_TRACE2_PERF", "1")
+	if err := validateCachedRepoCheckout(dir, head); err != nil {
+		t.Fatalf("validateCachedRepoCheckout with GIT_TRACE set: %v", err)
+	}
+	dirty, err := cachedRepoDirty(dir)
+	if err != nil {
+		t.Fatalf("cachedRepoDirty with GIT_TRACE set: %v", err)
+	}
+	if dirty {
+		t.Fatal("cachedRepoDirty reported a clean cache as dirty with GIT_TRACE set")
+	}
+}
