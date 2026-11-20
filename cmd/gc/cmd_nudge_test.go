@@ -4549,8 +4549,10 @@ func TestTryDeliverQueuedNudgesByPollerKeepsPendingInteractionRefusalRecoverable
 	}
 	obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince}
 
-	// One pass past the attempt cap: a refusal charged as a failed attempt
-	// would back the item off after the first pass and dead-letter it here.
+	// One pass past the attempt cap. A refusal now waits out the retry delay
+	// whether or not it is charged, so the delay alone no longer tells the two
+	// apart: makeQueuedNudgesDue rewinds deliver_after before each later pass,
+	// and the release must stay uncharged, or the item would dead-letter here.
 	passes := defaultQueuedNudgeMaxAttempts + 1
 	for i := 0; i < passes; i++ {
 		if i > 0 {

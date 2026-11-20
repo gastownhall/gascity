@@ -3901,10 +3901,15 @@ func ackQueuedNudgesWithOutcome(cityPath string, ids []string, outcome, reason, 
 // pending_interaction refusal, runtime.ErrNudgeRefusedPendingInteraction)
 // stays up until someone answers it: claiming the nudges again on the very
 // next pass would only be refused again, each time at the cost of a runtime
-// op, so they wait out the retry delay, and delivery resumes within one retry
-// delay of the answer. A session still running a turn the runtime would not
-// interrupt (runtime.ErrSessionBusy) is deferred the same way: nothing was
-// typed, and the turn needs time to end.
+// op, so they wait out the retry delay. Answering the interaction does not by
+// itself wake the queue: delivery resumes after the retry delay plus one
+// delivery pass, about 15s plus a 2s poll tick for the per-session poller, and
+// for the supervisor dispatcher the first patrol tick (30s by default) or
+// enqueue wake after deliver_after. The backoff is per batch: a nudge that
+// arrives while the interaction stays up is claimed into its own batch, costs
+// one refused runtime op, and then retries on its own clock. A session still
+// running a turn the runtime would not interrupt (runtime.ErrSessionBusy) is
+// deferred the same way: nothing was typed, and the turn needs time to end.
 func queuedNudgeReleaseAfter(err error, now time.Time) (time.Time, bool) {
 	switch {
 	case errors.Is(err, runtime.ErrSessionBusy):

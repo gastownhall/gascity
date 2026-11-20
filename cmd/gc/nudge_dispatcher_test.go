@@ -662,16 +662,6 @@ func TestDispatchAllQueuedNudgesHoldsNudgesForKillFencedSession(t *testing.T) {
 	}
 }
 
-// TestDispatchAllQueuedNudgesDeliversToIdleACPSession verifies the
-// supervisor dispatcher delivers queued nudges to a running ACP session
-// once it has been idle longer than the quiescence window. Idle ACP
-// sessions used to depend exclusively on inject-on-hook drain, but a
-// pure-hook delivery path never fires for a warm session that is not
-// receiving fresh user prompts — queued reminders piled up
-// indefinitely against an alive but quiet agent. The dispatcher now
-// owns wake delivery; the hook still drains opportunistically when the
-// agent receives external prompts, and the atomic queue claim prevents
-// double delivery.
 // A nudge the runtime refuses because an interaction is pending waits out the
 // retry delay, uncharged, instead of being claimed again by the next
 // dispatcher pass.
@@ -735,6 +725,16 @@ func TestDispatchAllQueuedNudgesBacksOffAPendingInteractionRefusal(t *testing.T)
 	}
 }
 
+// TestDispatchAllQueuedNudgesDeliversToIdleACPSession verifies the
+// supervisor dispatcher delivers queued nudges to a running ACP session
+// once it has been idle longer than the quiescence window. Idle ACP
+// sessions used to depend exclusively on inject-on-hook drain, but a
+// pure-hook delivery path never fires for a warm session that is not
+// receiving fresh user prompts — queued reminders piled up
+// indefinitely against an alive but quiet agent. The dispatcher now
+// owns wake delivery; the hook still drains opportunistically when the
+// agent receives external prompts, and the atomic queue claim prevents
+// double delivery.
 func TestDispatchAllQueuedNudgesDeliversToIdleACPSession(t *testing.T) {
 	clearGCEnv(t)
 	disableManagedDoltRecoveryForTest(t)
