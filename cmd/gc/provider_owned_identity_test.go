@@ -836,3 +836,133 @@ func TestInitAndHookDirProviderOwnedInitFailureSkipsIdentity(t *testing.T) {
 		t.Fatal("metadata.json was removed after a failed init, want gc to remove nothing under .beads")
 	}
 }
+
+// TestReconcileProviderOwnedScopeIdentityNoOpAndIneligible: a scope whose
+// three layers already agree reconciles to a no-op — no file write, no
+// stamped event, no seed — and a scope with no SQL Dolt to reconcile against
+// never opens an L3 session at all.
+func TestReconcileProviderOwnedScopeIdentityNoOpAndIneligible(t *testing.T) {
+	clearProviderOwnedProxyEnvironment(t)
+	const projectID = "11111111-2222-3333-4444-555555555555"
+
+	l3 := &projectIdentityL3Double{projectID: projectID}
+	seedCalls := 0
+	openerCalls := 0
+	recorder := &projectIdentityApplyRecordingRecorder{}
+	prevOpener := openProviderOwnedIdentityL3Fn
+	prevRecorder := openProviderOwnedIdentityRecorderFn
+	openProviderOwnedIdentityL3Fn = func(_ context.Context, _ providerOwnedIdentityEndpoint) (providerOwnedIdentityL3Session, error) {
+		openerCalls++
+		return providerOwnedIdentityL3Session{
+			read: l3.read,
+			seed: func(ctx context.Context, id string) (bool, error) {
+				seedCalls++
+				return l3.seed(ctx, id)
+			},
+		}, nil
+	}
+	openProviderOwnedIdentityRecorderFn = func(string) (events.Recorder, func()) {
+		return recorder, func() {}
+	}
+	t.Cleanup(func() {
+		openProviderOwnedIdentityL3Fn = prevOpener
+		openProviderOwnedIdentityRecorderFn = prevRecorder
+	})
+
+	newScope := func(t *testing.T, metadata string) (city, dir string) {
+		t.Helper()
+		city = t.TempDir()
+		if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\nname = \"test\"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		dir = filepath.Join(city, "rigs", "demo")
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if metadata != "" {
+			if err := os.WriteFile(filepath.Join(dir, ".beads", "metadata.json"), []byte(metadata), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return city, dir
+	}
+
+	t.Run("agreeing layers are a strict no-op", func(t *testing.T) {
+		city, dir := newScope(t, `{"database":"dolt","backend":"dolt","dolt_mode":"proxied-server","dolt_database":"hq","project_id":"`+projectID+`"}`)
+		if err := contract.WriteProjectIdentity(fsys.OSFS{}, dir, projectID); err != nil {
+			t.Fatalf("pre-write L1: %v", err)
+		}
+		identityPath := filepath.Join(dir, ".beads", "identity.toml")
+		metadataPath := scopeMetadataJSONPath(dir)
+		identityBefore := readProviderOwnedScopeFile(t, identityPath)
+		metadataBefore := readProviderOwnedScopeFile(t, metadataPath)
+		identityStat, err := os.Stat(identityPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		metadataStat, err := os.Stat(metadataPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := reconcileProviderOwnedScopeIdentity(context.Background(), city, dir); err != nil {
+			t.Fatalf("reconcile agreeing layers: %v", err)
+		}
+
+		if string(readProviderOwnedScopeFile(t, identityPath)) != string(identityBefore) {
+			t.Fatal("identity.toml was rewritten on a no-op reconcile, want byte-identical")
+		}
+		if string(readProviderOwnedScopeFile(t, metadataPath)) != string(metadataBefore) {
+			t.Fatal("metadata.json was rewritten on a no-op reconcile, want byte-identical")
+		}
+		identityAfter, err := os.Stat(identityPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		metadataAfter, err := os.Stat(metadataPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !identityAfter.ModTime().Equal(identityStat.ModTime()) || !metadataAfter.ModTime().Equal(metadataStat.ModTime()) {
+			t.Fatal("a no-op reconcile touched a layer file's mtime, want both unchanged")
+		}
+		if seedCalls != 0 {
+			t.Fatalf("a no-op reconcile seeded L3 %d time(s), want 0", seedCalls)
+		}
+		if len(recorder.records) != 0 {
+			t.Fatalf("a no-op reconcile emitted %+v, want no events", recorder.records)
+		}
+		if openerCalls != 1 {
+			t.Fatalf("opener ran %d time(s), want 1: an eligible scope opens its session even to conclude no-op", openerCalls)
+		}
+	})
+
+	eligibleMetadata := `{"database":"dolt","backend":"dolt","dolt_mode":"proxied-server","dolt_database":"hq","project_id":"` + projectID + `"}`
+	for _, tc := range []struct {
+		name     string
+		metadata string
+		cityTOML string
+	}{
+		{name: "no metadata.json", metadata: ""},
+		{name: "embedded storage", metadata: `{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"hq","project_id":"` + projectID + `"}`},
+		{name: "doltlite backend", metadata: `{"database":"doltlite","backend":"doltlite","dolt_mode":"proxied-server","dolt_database":"hq","project_id":"` + projectID + `"}`},
+		{name: "doltlite-backed city", metadata: eligibleMetadata, cityTOML: "[workspace]\nname = \"test\"\n[beads]\nprovider = \"bd\"\nbackend = \"doltlite\"\n"},
+		{name: "hosted credential-provider city", metadata: eligibleMetadata, cityTOML: hostedBeadsCityTOML("https://beads.example", "gasworks", false)},
+	} {
+		t.Run("ineligible: "+tc.name, func(t *testing.T) {
+			city, dir := newScope(t, tc.metadata)
+			if tc.cityTOML != "" {
+				if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte(tc.cityTOML), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := openerCalls
+			if err := reconcileProviderOwnedScopeIdentity(context.Background(), city, dir); err != nil {
+				t.Fatalf("reconcile an ineligible scope: %v", err)
+			}
+			if openerCalls != before {
+				t.Fatalf("the reconcile opened an L3 session for %s, want none", tc.name)
+			}
+		})
+	}
+}
