@@ -284,7 +284,9 @@ func TestGcBeadsBdRecoverFailsWhenCityDatabaseStillUnavailable(t *testing.T) {
 			"database_error\tdatabase \"hq\" default branch head unresolvable: Error 1049 (HY000): database not found: hq\\n")
 	dataDir := t.TempDir()
 
-	out := gcBeadsBdOpHarness(t, "op_recover", gcBeadsBdRecoverStubs, cityMetadataHQ,
+	// The server is down when recovery starts, so the restart runs and the
+	// check after it finds hq still unavailable.
+	out := gcBeadsBdOpHarness(t, "op_recover", gcBeadsBdRecoverStubs+"tcp_check() { return 1; }\n", cityMetadataHQ,
 		"issue_prefix: hq\ngc.endpoint_origin: managed_city\n", gcBin, dataDir)
 	if !strings.Contains(out, "status=1") {
 		t.Fatalf("op_recover output = %s, want failure while hq is still unavailable after recovery", out)
@@ -342,5 +344,69 @@ func TestGcBeadsBdHealthFallbackAcceptsRepoDirNamedWithDash(t *testing.T) {
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	if !strings.Contains(out, "status=0") {
 		t.Fatalf("op_health output = %s, want success for repository dir gas-city backing gas_city", out)
+	}
+}
+
+// gcBeadsBdRecoverObservedStubs record every restart step op_recover takes:
+// the gc helper recovery, and the shell stop and start it falls back to.
+const gcBeadsBdRecoverObservedStubs = `is_remote() { return 1; }
+recovery_should_skip_due_to_enospc() { return 1; }
+recovery_should_skip_due_to_fsync_stall() { return 1; }
+load_recover_managed_from_gc() { echo "CALLED recover-managed"; GC_RECOVER_MANAGED_USED=true; GC_RECOVER_PORT=3311; GC_RECOVER_DIAGNOSED_READ_ONLY=false; return 0; }
+op_stop_impl() { echo "CALLED stop"; }
+op_start() { echo "CALLED start"; }
+run_preflight_cleanup() { :; }
+`
+
+const cityConfigManagedHQ = "issue_prefix: hq\ngc.endpoint_origin: managed_city\n"
+
+func TestGcBeadsBdRecoverSkipsRestartWhenOnlyCityDatabaseUnavailable(t *testing.T) {
+	t.Run("gc helper", func(t *testing.T) {
+		gcBin, argvFile := writeFakeHealthCheckGC(t,
+			"query_ready\ttrue\\nread_only\tunknown\\nconnection_count\t5\\ndatabase\thq\\ndatabase_ready\tfalse\\n"+
+				"database_error\tdatabase \"hq\" default branch head unresolvable: Error 1049 (HY000): database not found: hq\\n")
+		dataDir := t.TempDir()
+
+		out := gcBeadsBdOpHarness(t, "op_recover", gcBeadsBdRecoverObservedStubs, cityMetadataHQ, cityConfigManagedHQ, gcBin, dataDir)
+		assertRecoverSkippedForCityDatabase(t, out, "database not found: hq")
+		argv, err := os.ReadFile(argvFile)
+		if err != nil {
+			t.Fatalf("ReadFile(argv): %v", err)
+		}
+		if !strings.Contains(string(argv), "--database hq --data-dir "+dataDir) {
+			t.Fatalf("health-check argv = %q, want --database hq --data-dir %s", argv, dataDir)
+		}
+	})
+	t.Run("fallback", func(t *testing.T) {
+		binDir := writeFallbackHeadDolt(t, "Error 1105 (HY000): no root value found in session")
+		dataDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dataDir, "hq", ".dolt"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+
+		out := gcBeadsBdOpHarness(t, "op_recover", gcBeadsBdRecoverObservedStubs, cityMetadataHQ, cityConfigManagedHQ, "", dataDir,
+			"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+		assertRecoverSkippedForCityDatabase(t, out, "no root value found in session")
+	})
+	t.Run("fallback missing on disk", func(t *testing.T) {
+		binDir := writeFallbackHeadDolt(t, "")
+		dataDir := t.TempDir()
+
+		out := gcBeadsBdOpHarness(t, "op_recover", gcBeadsBdRecoverObservedStubs, cityMetadataHQ, cityConfigManagedHQ, "", dataDir,
+			"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+		assertRecoverSkippedForCityDatabase(t, out, `database "hq" absent from data dir `+dataDir)
+	})
+}
+
+func assertRecoverSkippedForCityDatabase(t *testing.T, out, cause string) {
+	t.Helper()
+	if !strings.Contains(out, "status=1") || !strings.Contains(out, "dolt recovery skipped: city database 'hq' unavailable") {
+		t.Fatalf("op_recover output = %s, want recovery skipped for the city database", out)
+	}
+	if !strings.Contains(out, cause) {
+		t.Fatalf("op_recover output = %s, want the cause %q", out, cause)
+	}
+	if strings.Contains(out, "CALLED ") {
+		t.Fatalf("op_recover output = %s, want no recover-managed, stop or start", out)
 	}
 }

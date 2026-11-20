@@ -2512,6 +2512,33 @@ check_city_database() {
     return 1
 }
 
+# city_database_unavailable_on_answering_server prints why the city database
+# is unavailable and returns 0 when the server answers SQL but the city
+# database does not pass the health checks. It returns 1 when no city database
+# is named, the server is not answering, or the city database is ready. A
+# helper report without a database verdict falls back to the shell checks.
+city_database_unavailable_on_answering_server() {
+    local db data_dir failure
+    db=$(city_health_database)
+    [ -n "$db" ] || return 1
+    tcp_check || return 1
+    data_dir=$(city_health_data_dir)
+    if load_health_check_from_gc "$db" "$data_dir"; then
+        [ "$GC_HEALTH_QUERY_READY" = "true" ] || return 1
+        case "$GC_HEALTH_DATABASE_READY" in
+            true) return 1 ;;
+            false)
+                printf '%s\n' "${GC_HEALTH_DATABASE_ERROR:-health check reported database \"$db\" unavailable}"
+                return 0
+                ;;
+        esac
+    fi
+    do_query_probe || return 1
+    failure=$(check_city_database "$db" "$data_dir") && return 1
+    printf '%s\n' "$failure"
+    return 0
+}
+
 load_wait_ready_from_gc() {
     local pid="$1" timeout_ms="$2" check_deleted="${3:-false}"
     local gc_bin host output key value status parsed=false
@@ -5087,6 +5114,16 @@ op_recover() {
         echo "skipping dolt recovery: the data directory's fsync is stalled; Dolt is waiting on storage, a restart cannot fix that" >&2
         echo "  see docs/troubleshooting/dolt-storage-stalls.md; use gc dolt restart --force only if a restart is still required" >&2
         die "dolt recovery skipped: storage stall"
+    fi
+
+    # Skip recovery when the server answers SQL and only the city database is
+    # unavailable. A restart cannot recreate or repair a database, and each
+    # health tick that failed would restart the shared server again.
+    if recover_db_failure=$(city_database_unavailable_on_answering_server); then
+        recover_db=$(city_health_database)
+        echo "skipping dolt recovery: the server answers but city database '$recover_db' is unavailable: $recover_db_failure" >&2
+        echo "  a restart cannot recreate or repair a database; restore it, or run gc dolt restart if it is on disk but not loaded" >&2
+        die "dolt recovery skipped: city database '$recover_db' unavailable"
     fi
 
     if load_recover_managed_from_gc; then
