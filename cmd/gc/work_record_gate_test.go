@@ -135,6 +135,11 @@ func TestIsWorkRecordGatedBead(t *testing.T) {
 			},
 			want: false,
 		},
+		{
+			name: "operator-stamped gc.kind is still gated",
+			bead: beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.KindMetadataKey: "work"}},
+			want: true,
+		},
 		{name: "convoy bead is not gated", bead: beads.Bead{Type: "convoy"}, want: false},
 		{name: "message bead is not gated", bead: beads.Bead{Type: "message"}, want: false},
 	}
@@ -207,6 +212,7 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 		{ID: "wr-noop", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeNoOp}},
 		{ID: "wr-atomic-noop", Type: "task", Status: "in_progress", Metadata: map[string]string{}},
 		{ID: "wr-missing", Type: "task", Status: "in_progress", Metadata: map[string]string{}},
+		{ID: "wr-opkind", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.KindMetadataKey: "work"}},
 		{ID: "wr-control", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}},
 	}
 	newStore := func() beads.Store { return beads.NewMemStoreFrom(1, beadsList, nil) }
@@ -224,6 +230,10 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 		{"shipped-no-commit warns only by default", []string{"close", "wr-shipped-nocommit"}, false, false, "work-record gate (warn-only)"},
 		{"shipped-no-commit blocks when enforced", []string{"close", "wr-shipped-nocommit"}, true, true, "work-record gate (enforced)"},
 		{"missing outcome blocks when enforced", []string{"close", "wr-missing"}, true, true, "missing " + beadmeta.WorkOutcomeMetadataKey},
+		// An operator's own gc.kind vocabulary is not an engine meaning, so it
+		// leaves the bead in the covered population (ga-j347f5).
+		{"operator-kind close blocks when enforced", []string{"close", "wr-opkind"}, true, true, "close of wr-opkind: missing " + beadmeta.WorkOutcomeMetadataKey},
+		{"operator-kind close warns only by default", []string{"close", "wr-opkind"}, false, false, "close of wr-opkind: missing " + beadmeta.WorkOutcomeMetadataKey},
 		// mol-do-work stamps the record with a plain update, then closes with a reason.
 		{"no-op close with reason passes", []string{"close", "wr-noop", "--reason", "No-op: already satisfied"}, true, false, ""},
 		{"close with reason is still gated", []string{"close", "wr-missing", "--reason", "Done: x"}, true, true, "close of wr-missing"},

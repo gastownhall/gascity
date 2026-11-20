@@ -150,6 +150,22 @@ func TestGated(t *testing.T) {
 			},
 			want: false,
 		},
+		{
+			name: "operator gc.kind=work is gated",
+			bead: beads.Bead{
+				Type:     "task",
+				Metadata: map[string]string{beadmeta.KindMetadataKey: "work"},
+			},
+			want: true,
+		},
+		{
+			name: "operator gc.kind=review is gated",
+			bead: beads.Bead{
+				Type:     "task",
+				Metadata: map[string]string{beadmeta.KindMetadataKey: "review"},
+			},
+			want: true,
+		},
 		{name: "convoy is not gated", bead: beads.Bead{Type: "convoy"}, want: false},
 	}
 	for _, tc := range tests {
@@ -158,6 +174,20 @@ func TestGated(t *testing.T) {
 				t.Fatalf("Gated = %v, want %v", got, tc.want)
 			}
 		})
+	}
+
+	// Guard: every engine-owned kind stays exempt. Narrowing the kind check
+	// from "any non-empty gc.kind" to beadmeta.EngineKinds must keep the
+	// exemption the engine's own beads rely on — the task-stamped attempt
+	// children (#5246) and the rig-create idempotency receipt included.
+	for _, kind := range beadmeta.EngineKinds {
+		bead := beads.Bead{
+			Type:     "task",
+			Metadata: map[string]string{beadmeta.KindMetadataKey: kind},
+		}
+		if Gated(bead) {
+			t.Errorf("Gated(task with gc.kind=%q) = true, want false", kind)
+		}
 	}
 }
 

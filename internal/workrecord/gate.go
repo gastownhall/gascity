@@ -67,17 +67,20 @@ func ValidOutcome(v string) bool {
 }
 
 // Gated reports whether the work-record close contract applies to bead. It
-// applies to worker-claimable work units — plain task beads — and deliberately
-// NOT to control/structural beads (anything carrying gc.kind: workflow roots,
-// scope/run/check/drain steps, etc.), workflow steps identified by gc.step_id or
-// gc.step_ref, or non-task beads (convoy, message). Those use the disjoint
+// applies to worker-claimable work units — plain task and untyped beads,
+// including ones an operator stamped with its own gc.kind vocabulary (work,
+// review, ...) — and deliberately NOT to beads carrying a gc.kind the engine
+// owns (beadmeta.EngineKinds: workflow roots, scope/run/check/drain steps,
+// wisps, ...), workflow steps identified by gc.step_id or gc.step_ref, or
+// non-task beads (convoy, message). The engine's kinds use the disjoint
 // control-plane gc.outcome vocabulary and are closed by the dispatch engine,
-// not by a worker reporting a work outcome.
+// not by a worker reporting a work outcome; an operator's own kind carries no
+// engine meaning, so it leaves the bead in the covered population.
 func Gated(bead beads.Bead) bool {
 	if t := strings.TrimSpace(bead.Type); t != "" && t != "task" {
 		return false
 	}
-	if strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]) != "" {
+	if beadmeta.IsEngineKind(strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey])) {
 		return false
 	}
 	if strings.TrimSpace(bead.Metadata[beadmeta.StepIDMetadataKey]) != "" ||
