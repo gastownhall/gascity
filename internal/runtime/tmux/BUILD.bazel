@@ -192,6 +192,7 @@ go_test(
         "theme_test.go",
         "tmux_test.go",
         "tmux_unit_test.go",
+        "wait_idle_trust_test.go",
         "wake_pane_integration_test.go",
         "wake_pane_test.go",
         "wrapped_wait_cost_test.go",
