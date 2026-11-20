@@ -3788,3 +3788,15 @@ func TestSupervisorAliasedCityRefusesSiteRename(t *testing.T) {
 		t.Fatalf("running config was replaced by a refused reload")
 	}
 }
+
+// TestSupervisorAliasedCityLogsConfigName proves the supervisor reports when
+// it runs a site-bound city under a registered name that differs from the
+// name its config declares.
+func TestSupervisorAliasedCityLogsConfigName(t *testing.T) {
+	city := startAliasedSupervisorCity(t)
+
+	const want = `city 'alias-city': using registered name; config name is "site-city"`
+	if log := city.stderr.String(); !strings.Contains(log, want) {
+		t.Fatalf("supervisor stderr lacks %q (stderr: %s)", want, log)
+	}
+}

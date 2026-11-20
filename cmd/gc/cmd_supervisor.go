@@ -2370,9 +2370,9 @@ func startOneCity(
 	// name, captured here before the registered name is applied.
 	cityName := name // from entry.EffectiveName()
 	configName := lockedConfigName(cfg, path)
-	if liveName := cfg.Workspace.Name; liveName != "" && liveName != cityName {
-		fmt.Fprintf(stderr, "gc supervisor: city '%s': using registered name; city.toml workspace.name is %q\n", //nolint:errcheck
-			cityName, liveName)
+	if configName != cityName {
+		fmt.Fprintf(stderr, "gc supervisor: city '%s': using registered name; config name is %q\n", //nolint:errcheck
+			cityName, configName)
 	}
 	applyRuntimeCityIdentity(cfg, cityName)
 
