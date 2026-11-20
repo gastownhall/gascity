@@ -773,8 +773,8 @@ func TestWorkLadderRecyclesAnUnclaimedTrigger(t *testing.T) {
 		t.Fatalf("nudges %v, posted %+v; want three, then a recycle with the fourth", c.nudgedAt, c.posted)
 	}
 	for _, call := range c.sp.Calls {
-		if call.Method == "Nudge" && call.Message != "configured claim nudge" {
-			t.Fatalf("trigger nudge %q, want the configured one", call.Message)
+		if call.Method == "Nudge" && call.Message != defaultPoolClaimNudge {
+			t.Fatalf("trigger nudge %q, want the built-in claim line", call.Message)
 		}
 	}
 	// The never-claimed trigger is escalated once, with the second nudge
@@ -1098,7 +1098,7 @@ func TestWorkLadderSeeds(t *testing.T) {
 // The started text is built in: a configured nudge never replaces it.
 func TestWorkLadderStartedTextIsBuiltIn(t *testing.T) {
 	c := newLadderCity(t)
-	c.env.Cfg.Agents[0].Nudge = "configured: gc hook --claim --drain-ack --json"
+	c.env.Cfg.Agents[0].Nudge = procedureNudgeText
 	id := c.claim("started")
 	c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id})
 	c.run(5*time.Minute, 30*time.Second, nil)
@@ -1109,6 +1109,30 @@ func TestWorkLadderStartedTextIsBuiltIn(t *testing.T) {
 	}
 	if len(c.nudgedAt) == 0 {
 		t.Fatal("no nudge")
+	}
+}
+
+// Ladder text is built in for every kind and rung: the template's configured
+// nudge is startup text and can be a work procedure, which as ladder text
+// never tells the seat to claim (#9196).
+func TestLadderNudgeTextIsBuiltIn(t *testing.T) {
+	key := workladder.ClaimKey{Store: "city", Bead: "bd-1"}
+	for _, tc := range []struct {
+		name string
+		n    workladder.Nudge
+		want string
+	}{
+		{"trigger", workladder.Nudge{Key: key, Kind: workladder.KindTrigger, Rung: workladder.RungAssigned}, defaultPoolClaimNudge},
+		{"continuation", workladder.Nudge{Key: key, Kind: workladder.KindContinuation, Rung: workladder.RungAssigned}, ladderClaimedNudge},
+		{"claim claimed", workladder.Nudge{Key: key, Kind: workladder.KindClaim, Rung: workladder.RungClaimed}, ladderClaimedNudge},
+		{"claim started", workladder.Nudge{Key: key, Kind: workladder.KindClaim, Rung: workladder.RungStarted}, fmt.Sprintf(ladderStartedNudge, key.Bead)},
+		{"claim escalated", workladder.Nudge{Key: key, Kind: workladder.KindClaim, Rung: workladder.RungEscalated}, fmt.Sprintf(ladderStartedNudge, key.Bead)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ladderNudgeText(tc.n); got != tc.want {
+				t.Fatalf("nudge text = %q, want the built-in %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -2141,8 +2165,8 @@ func TestWorkLadderNudgesACollapsedSingletonSeat(t *testing.T) {
 		t.Fatalf("Nudge calls on collapsed seat %q = 0, want the ladder to nudge its unclaimed trigger", name)
 	}
 	for _, call := range sp.Calls {
-		if call.Method == "Nudge" && call.Message != "configured claim nudge" {
-			t.Fatalf("nudge %q, want the configured claim nudge", call.Message)
+		if call.Method == "Nudge" && call.Message != defaultPoolClaimNudge {
+			t.Fatalf("nudge %q, want the built-in claim line over the configured nudge", call.Message)
 		}
 	}
 }

@@ -956,7 +956,7 @@ func recycleReason(r workladder.Recycle) string {
 // as the conversation lane acks it: a provider that refuses the turn at once
 // is one cause, and that refusal answers this nudge.
 func (p *ladderPass) nudge(row beads.Bead, n workladder.Nudge, gen int64) {
-	text := p.nudgeText(row, n)
+	text := ladderNudgeText(n)
 	fields := workLadderEventFields{Kind: n.Kind.String(), Rung: n.Rung.String(), Attempt: n.Attempt, Paused: n.Paused}
 	// The delivery's time is its attempt's start, read before the call: a
 	// delivery returns only once the runtime confirms the submit (a tmux
@@ -1000,16 +1000,15 @@ func ladderDeliver(sp runtime.Provider, name, text string) error {
 	return sp.Nudge(name, runtime.TextContent(text))
 }
 
-// nudgeText is n's text (§6.6): a trigger's is the agent's configured nudge
-// or the pool default; a continuation's and an unstarted claim's the
-// configured nudge or the claim line; a started claim's is built in.
-func (p *ladderPass) nudgeText(row beads.Bead, n workladder.Nudge) string {
-	configured := strings.TrimSpace(claimNudgeFor(p.cfg, row))
+// ladderNudgeText is n's text (§6.6), picked by kind and rung only: a
+// trigger's is the pool claim line; a continuation's and an unstarted
+// claim's the claim line; a started claim's is built in. The template's
+// configured nudge is never ladder text: it is startup text and can be a
+// work procedure that never says to claim (#9196).
+func ladderNudgeText(n workladder.Nudge) string {
 	switch {
 	case n.Kind == workladder.KindClaim && n.Rung >= workladder.RungStarted:
 		return fmt.Sprintf(ladderStartedNudge, n.Key.Bead)
-	case configured != "":
-		return configured
 	case n.Kind == workladder.KindTrigger:
 		return defaultPoolClaimNudge
 	default:
