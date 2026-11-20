@@ -7396,6 +7396,196 @@ func TestExecutePreparedStartWave_StaleSessionKeyDetectedWhenPaneSurvives(t *tes
 	}
 }
 
+// startCtxDieProvider starts the session, kills it at once unless keepAlive is
+// set, and hands the test the context Start ran under. With overrun set, Start
+// returns only after that context has ended, as a provider that ignores its
+// start deadline does.
+type startCtxDieProvider struct {
+	*runtime.Fake
+	keepAlive bool
+	overrun   bool
+	startCtx  chan context.Context
+}
+
+func (p *startCtxDieProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if err := p.Fake.Start(ctx, name, cfg); err != nil {
+		return err
+	}
+	if !p.keepAlive {
+		_ = p.Stop(name)
+	}
+	p.startCtx <- ctx
+	if p.overrun {
+		<-ctx.Done()
+	}
+	return nil
+}
+
+// TestExecutePreparedStartWave_PostStartLivenessOutlastsStartupTimeout pins
+// that the post-start liveness check gets its whole stability window even when
+// Start used most of startupTimeout. The window used to run on the start's
+// timeout context, so a Start that returned with less than the window left
+// skipped the check, and a session dead right after Start counted as started.
+// A session still alive after such a window counts as started: the window
+// running past startupTimeout is not a startup timeout.
+//
+// A Start that overran startupTimeout is a startup timeout whether or not its
+// session lived, so it skips the check: it fails with a deadline error at
+// once, and a pending create is not rolled back but records a wake failure
+// and stays open for the next attempt.
+func TestExecutePreparedStartWave_PostStartLivenessOutlastsStartupTimeout(t *testing.T) {
+	type gatedStart struct {
+		name string
+		info sessionpkg.Info
+		tp   TemplateParams
+		cfg  runtime.Config
+	}
+	cases := []gatedStart{{
+		name: "resumed with a session key",
+		info: sessionpkg.Info{ID: "gc-99", SessionName: "test-agent", SessionNameMetadata: "test-agent", SessionKey: "stale-key-abc", Template: "worker"},
+		tp:   TemplateParams{Command: "claude --resume stale-key-abc", SessionName: "test-agent", TemplateName: "worker"},
+		cfg:  runtime.Config{Command: "claude --resume stale-key-abc"},
+	}}
+	if initialMessageRidesStartupPrompt(true) {
+		cases = append(cases, gatedStart{
+			name: "ACP start with a startup prompt",
+			info: sessionpkg.Info{ID: "gc-98", SessionName: "test-agent", SessionNameMetadata: "test-agent", Template: "worker"},
+			tp:   TemplateParams{Command: "agent --acp", SessionName: "test-agent", TemplateName: "worker", IsACP: true},
+			cfg:  runtime.Config{Command: "agent --acp", Nudge: "startup prompt"},
+		})
+	}
+	for _, tc := range cases {
+		for _, overrun := range []bool{false, true} {
+			// Only the ACP startup-prompt gate skips the check after an
+			// overrun; a resumed session key is checked either way.
+			if overrun && !tc.tp.IsACP {
+				continue
+			}
+			for _, alive := range []bool{false, true} {
+				name := tc.name
+				if overrun {
+					name += ", Start overran startupTimeout"
+				}
+				if alive {
+					name += ", alive"
+				} else {
+					name += ", dead"
+				}
+				t.Run(name, func(t *testing.T) {
+					if overrun {
+						runOverranStartupTimeout(t, tc.info, tc.tp, tc.cfg, alive)
+						return
+					}
+					runPostStartLivenessOutlastsStartupTimeout(t, tc.info, tc.tp, tc.cfg, alive)
+				})
+			}
+		}
+	}
+}
+
+// runPostStartLivenessOutlastsStartupTimeout runs one gated start whose Start
+// returns inside startupTimeout and whose stability window ends after it.
+func runPostStartLivenessOutlastsStartupTimeout(t *testing.T, info sessionpkg.Info, tp TemplateParams, cfg runtime.Config, alive bool) {
+	sp := &startCtxDieProvider{Fake: runtime.NewFake(), keepAlive: alive, startCtx: make(chan context.Context, 1)}
+	// The window ends only after the start's timeout has passed;
+	// like waitForStartStability, it reports false when its own
+	// context ended first.
+	windowOutlastsStartupTimeout := func(ctx context.Context, _ string) bool {
+		var startCtx context.Context
+		select {
+		case startCtx = <-sp.startCtx:
+		case <-time.After(testutil.GoroutineRaceTimeout):
+			t.Error("timed out waiting for Start")
+			return false
+		}
+		select {
+		case <-startCtx.Done():
+		case <-time.After(testutil.GoroutineRaceTimeout):
+			t.Error("timed out waiting for the startup timeout")
+			return false
+		}
+		return ctx.Err() == nil
+	}
+	item := preparedStart{candidate: startCandidate{info: info, tp: tp}, cfg: cfg}
+
+	results := executePreparedStartWaveForCity(context.Background(), []preparedStart{item}, t.TempDir(), sp, nil, nil, 250*time.Millisecond, 1,
+		withStartStabilityWaiter(windowOutlastsStartupTimeout))
+	if len(results) != 1 {
+		t.Fatalf("results = %d, want 1", len(results))
+	}
+	r := results[0]
+	if alive {
+		if r.err != nil || r.outcome != TraceOutcomeSuccess || r.diedDuringStartup {
+			t.Fatalf("result = err %v, outcome %s, diedDuringStartup %v; want the live session started", r.err, r.outcome, r.diedDuringStartup)
+		}
+		return
+	}
+	if r.err == nil || !strings.Contains(r.err.Error(), "died during startup") || !r.diedDuringStartup {
+		t.Fatalf("result = err %v, outcome %s, diedDuringStartup %v; want the dead session reported as dying during startup", r.err, r.outcome, r.diedDuringStartup)
+	}
+}
+
+// runOverranStartupTimeout runs one gated start of a pending create whose
+// Start returns only after startupTimeout has passed, then commits the failure
+// as the reconciler does.
+func runOverranStartupTimeout(t *testing.T, info sessionpkg.Info, tp TemplateParams, cfg runtime.Config, alive bool) {
+	now := time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)
+	meta := map[string]string{
+		"session_name":              info.SessionName,
+		"template":                  info.Template,
+		"state":                     "creating",
+		"pending_create_claim":      "true",
+		"pending_create_started_at": now.Format(time.RFC3339),
+	}
+	if info.SessionKey != "" {
+		meta["session_key"] = info.SessionKey
+	}
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{Title: info.SessionName, Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: meta})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := sessiontest.SeedBead(t, bead)
+	if !pending.PendingCreateClaim || pending.SessionKey != info.SessionKey {
+		t.Fatalf("seeded info = pending %v, session key %q; want a pending create with session key %q", pending.PendingCreateClaim, pending.SessionKey, info.SessionKey)
+	}
+
+	sp := &startCtxDieProvider{Fake: runtime.NewFake(), keepAlive: alive, overrun: true, startCtx: make(chan context.Context, 1)}
+	var windows atomic.Int32
+	countWindow := func(context.Context, string) bool {
+		windows.Add(1)
+		return true
+	}
+	item := preparedStart{candidate: startCandidate{info: pending, tp: tp}, cfg: cfg}
+
+	results := executePreparedStartWaveForCity(context.Background(), []preparedStart{item}, t.TempDir(), sp, nil, nil, 50*time.Millisecond, 1,
+		withStartStabilityWaiter(countWindow))
+	if len(results) != 1 {
+		t.Fatalf("results = %d, want 1", len(results))
+	}
+	r := results[0]
+	if n := windows.Load(); n != 0 {
+		t.Errorf("stability window ran %d times, want none after a Start that overran startupTimeout", n)
+	}
+	if r.outcome != TraceOutcomeDeadlineExceeded || !errors.Is(r.err, context.DeadlineExceeded) || r.diedDuringStartup || r.rollbackPending {
+		t.Errorf("result = err %v, outcome %s, diedDuringStartup %v, rollbackPending %v; want a startup timeout that keeps the pending create",
+			r.err, r.outcome, r.diedDuringStartup, r.rollbackPending)
+	}
+	if r.err == nil {
+		t.Fatal("the overran start reported no error")
+	}
+
+	commitStartFailure(r, sessionFrontDoor(store), &clock.Fake{Time: now}, events.Discard, 0, io.Discard, nil)
+	after, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status == "closed" || after.Metadata["wake_attempts"] != "1" {
+		t.Fatalf("bead after commit = status %s, wake_attempts %q, close_reason %q; want it open with one wake failure for the next attempt",
+			after.Status, after.Metadata["wake_attempts"], after.Metadata["close_reason"])
+	}
+}
+
 func TestExecutePreparedStartWave_NoStaleCheckWithoutSessionKey(t *testing.T) {
 	city := t.TempDir()
 	sp := &dieAfterStartProvider{Fake: runtime.NewFake()}
@@ -9606,5 +9796,117 @@ func TestPrepareStartCandidateForCity_SurvivingNamedTriggerLaunchesWithOnlyTheDe
 	}
 	if v := after.Metadata[beadmeta.TriggerBeadIDMetadataKey]; v != work.ID {
 		t.Errorf("durable trigger stamp = %q, want kept as %q", v, work.ID)
+	}
+}
+
+// budgetExhaustingStartProvider is a runtime whose Start outlives the start
+// budget: it waits for the start context to end, optionally cancels the
+// controller context first, and then reports a successful launch.
+type budgetExhaustingStartProvider struct {
+	*runtime.Fake
+	// cancelParent, when set, is called before Start waits, standing in for
+	// the controller canceling the start.
+	cancelParent context.CancelFunc
+}
+
+func (p *budgetExhaustingStartProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if p.cancelParent != nil {
+		p.cancelParent()
+	}
+	<-ctx.Done()
+	return p.Fake.Start(context.Background(), name, cfg)
+}
+
+// recordingStabilityWaiter records the context each stability wait received.
+type recordingStabilityWaiter struct {
+	mu     sync.Mutex
+	calls  int
+	ctxErr error
+	// after runs once the wait is recorded, before it reports.
+	after func(name string)
+}
+
+func (w *recordingStabilityWaiter) wait(ctx context.Context, name string) bool {
+	w.mu.Lock()
+	w.calls++
+	w.ctxErr = ctx.Err()
+	w.mu.Unlock()
+	if w.after != nil {
+		w.after(name)
+	}
+	return ctx.Err() == nil
+}
+
+func (w *recordingStabilityWaiter) snapshot() (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.calls, w.ctxErr
+}
+
+func runBudgetExhaustingStart(ctx context.Context, t *testing.T, sp *budgetExhaustingStartProvider, waiter *recordingStabilityWaiter) startResult {
+	t.Helper()
+	city := t.TempDir()
+	item, release := leasedStart(t, city, storelessPostStartItem(t.TempDir()))
+	defer release()
+	done := make(chan startResult, 1)
+	go func() {
+		done <- runPreparedStartCandidate(ctx, item, city, sp, nil, nil, 10*time.Millisecond, waiter.wait, immediateSessionStaleKeyDetectionWaiter, nil)
+	}()
+	select {
+	case result := <-done:
+		return result
+	case <-time.After(testutil.GoroutineRaceTimeout):
+		t.Fatal("runPreparedStartCandidate did not return after the start budget ran out")
+		return startResult{}
+	}
+}
+
+// A keyed fresh start whose provider.Start used up the whole startup budget
+// still runs the stale-resume-key liveness check: the stability wait runs on
+// the controller context, not the spent start context, so a session that died
+// right after launch is recorded as a startup death.
+func TestRunPreparedStartCandidateStabilityWaitSurvivesExhaustedStartupBudget(t *testing.T) {
+	sp := &budgetExhaustingStartProvider{Fake: runtime.NewFake()}
+	waiter := &recordingStabilityWaiter{
+		// The session dies during the stability window.
+		after: func(name string) { _ = sp.Stop(name) },
+	}
+
+	result := runBudgetExhaustingStart(context.Background(), t, sp, waiter)
+
+	calls, ctxErr := waiter.snapshot()
+	if calls != 1 {
+		t.Fatalf("stability waiter calls = %d, want 1 (the post-start liveness branch did not run)", calls)
+	}
+	if ctxErr != nil {
+		t.Fatalf("stability waiter ctx.Err() = %v, want a live context after the start budget ran out", ctxErr)
+	}
+	if !result.diedDuringStartup {
+		t.Fatalf("diedDuringStartup = false (outcome %q, err %v), want the post-start liveness check to record the death", result.outcome, result.err)
+	}
+	if result.err == nil || result.outcome == TraceOutcomeSuccess {
+		t.Fatalf("result = {outcome:%q err:%v}, want a failed start, not a success", result.outcome, result.err)
+	}
+}
+
+// A controller cancel still ends the stability wait: the waiter sees a done
+// context and the start returns instead of hanging.
+func TestRunPreparedStartCandidateStabilityWaitHonoursControllerCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sp := &budgetExhaustingStartProvider{Fake: runtime.NewFake(), cancelParent: cancel}
+	waiter := &recordingStabilityWaiter{}
+
+	result := runBudgetExhaustingStart(ctx, t, sp, waiter)
+
+	calls, ctxErr := waiter.snapshot()
+	if calls != 1 {
+		t.Fatalf("stability waiter calls = %d, want 1", calls)
+	}
+	if !errors.Is(ctxErr, context.Canceled) {
+		t.Fatalf("stability waiter ctx.Err() = %v, want context.Canceled from the controller", ctxErr)
+	}
+	if result.outcome == TraceOutcomeSuccess {
+		t.Fatalf("result = {outcome:%q err:%v}, want a canceled start, not a success", result.outcome, result.err)
 	}
 }

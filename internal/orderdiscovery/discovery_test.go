@@ -906,3 +906,88 @@ interval = "1h"
 		t.Fatal("backup enabled: the enabled=false override after the unmatched one was not applied")
 	}
 }
+
+func TestScanAllOverrideEnablesFileDisabledPackOrder(t *testing.T) {
+	const disabledOrder = `[order]
+exec = "scripts/audit.sh"
+trigger = "cooldown"
+interval = "5m"
+enabled = false
+`
+	tests := []struct {
+		name string
+		rig  string
+	}{
+		{name: "city order", rig: ""},
+		{name: "named rig", rig: "alpha"},
+		{name: "wildcard", rig: "*"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityPath, cityLayer := orderDiscoveryCity(t)
+			enabled := true
+			cfg := &config.City{
+				FormulaLayers: config.FormulaLayers{
+					City: []string{cityLayer},
+					Rigs: map[string][]string{"alpha": {cityLayer}},
+				},
+				Orders: config.OrdersConfig{
+					Overrides: []config.OrderOverride{{Name: "audit", Rig: tt.rig, Enabled: &enabled}},
+				},
+			}
+			packDir := filepath.Join(t.TempDir(), "audit-pack")
+			writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "audit", disabledOrder)
+			if tt.rig == "" {
+				cfg.PackDirs = []string{packDir}
+			} else {
+				cfg.RigPackDirs = map[string][]string{"alpha": {packDir}}
+			}
+
+			aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+			if err != nil {
+				t.Fatalf("ScanAll returned error: %v", err)
+			}
+			if len(aa) != 1 {
+				t.Fatalf("got %d orders, want 1: %#v", len(aa), aa)
+			}
+			if !aa[0].IsEnabled() {
+				t.Fatalf("order %q (rig %q) is disabled, want enabled by override", aa[0].Name, aa[0].Rig)
+			}
+		})
+	}
+}
+
+func TestScanAllDisabledCityOrderStillClaimsNameAgainstRigPackPromotion(t *testing.T) {
+	cityPath, cityLayer := orderDiscoveryCity(t)
+	writeOrderDiscoveryFile(t, filepath.Join(cityPath, "orders"), "sweep", `[order]
+exec = "scripts/city.sh"
+trigger = "cooldown"
+interval = "5m"
+enabled = false
+`)
+	packDir := filepath.Join(t.TempDir(), "sweep-pack")
+	writeOrderDiscoveryFile(t, filepath.Join(packDir, "orders"), "sweep", `[order]
+scope = "city"
+exec = "scripts/pack.sh"
+trigger = "cooldown"
+interval = "5m"
+`)
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{"alpha": {cityLayer}},
+		},
+		RigPackDirs: map[string][]string{"alpha": {packDir}},
+	}
+
+	aa, err := ScanAll(cityPath, cfg, ScanOptions{})
+	if err != nil {
+		t.Fatalf("ScanAll returned error: %v", err)
+	}
+	if len(aa) != 1 {
+		t.Fatalf("got %d orders, want 1: %#v", len(aa), aa)
+	}
+	if aa[0].Exec != "scripts/city.sh" || aa[0].IsEnabled() {
+		t.Fatalf("order = exec %q enabled %v, want the disabled city-local copy", aa[0].Exec, aa[0].IsEnabled())
+	}
+}

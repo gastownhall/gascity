@@ -53,9 +53,11 @@
 #       per OS user, because a lock directory or file another user or a
 #       sudo run created is not writable by this one; initializers running
 #       as different OS users share a lock only when this names one
-#       directory they can all write to). Where flock is installed, init
-#       must be able to create its lock file here, and fails naming the
-#       file when it cannot. Not under GC_CITY_PATH on purpose: two
+#       directory they can all write to). Where flock is installed, an init
+#       that takes the lock must be able to create its lock file here, and
+#       fails naming the file when it cannot. An init that only adopts an
+#       existing database that does not look like an interrupted bootstrap
+#       never takes it. Not under GC_CITY_PATH on purpose: two
 #       cities/worktrees that share one managed Dolt server can target the
 #       same dolt_database from different city paths, so the lock must
 #       resolve to the same file for both regardless of which city each
@@ -341,40 +343,36 @@ tcp_check() {
 }
 
 # run_with_timeout runs "$@" and sends it TERM once timeout_seconds elapse
-# (after 1s when sleep rejects the duration), returning its status. The
-# watchdog's sleep inherits every caller descriptor above 2 (op_start's fd 9
-# lock), so it must not outlive the call: the TERM that stops the watchdog
-# KILLs and reaps that sleep. KILL because a child that has forked but not
-# yet exec'd sleep runs the inherited trap and would swallow TERM. `stopped`
-# covers a TERM that lands before sleep_pid is set.
+# (after 1s when timeout_seconds is not a plain number of seconds), returning
+# its status. The timer is a `sleep` started by this function, so the caller
+# can KILL it the moment the command exits: it inherits every caller
+# descriptor above 2 (op_start's fd 9 lock) and must not outlive the call.
+# The stopper in front of it in the pipeline blocks writing into the pipe
+# until the sleep exits, then TERMs the command if it is still running. The
+# stopper holds those descriptors too: `wait` on the pipeline's pid waits for
+# both of its processes (bash and dash alike), so neither outlives the call.
+# No step depends on a process acting on a signal it traps: on macOS a
+# watchdog subshell that trapped the caller's TERM sometimes stayed blocked on
+# its sleep for the whole timeout.
 run_with_timeout() {
     local timeout_seconds="$1"
     shift
+    case "$timeout_seconds" in
+        '' | . | *[!0-9.]* | *.*.*) timeout_seconds=1 ;;
+    esac
     "$@" &
     local cmd_pid=$!
-    (
-        stopped=
-        sleep_pid=
-        trap 'stopped=1; [ -z "$sleep_pid" ] || kill -s KILL "$sleep_pid" 2>/dev/null || true' TERM
-        for duration in "$timeout_seconds" 1; do
-            [ -z "$stopped" ] || break
-            sleep "$duration" 2>/dev/null &
-            sleep_pid=$!
-            [ -z "$stopped" ] || kill -s KILL "$sleep_pid" 2>/dev/null || true
-            if wait "$sleep_pid"; then
-                sleep_pid=
-                break
-            fi
-            wait "$sleep_pid" 2>/dev/null || true
-            sleep_pid=
-        done
-        [ -n "$stopped" ] || kill "$cmd_pid" 2>/dev/null || true
-    ) </dev/null >/dev/null 2>&1 &
-    local watchdog_pid=$!
+    # shellcheck disable=SC2216 # sleep is the pipe's reader on purpose
+    {
+        trap '' PIPE
+        while printf '%8191s\n' ''; do :; done
+        ! kill -0 "$cmd_pid" || kill "$cmd_pid" || true
+    } </dev/null 2>/dev/null | sleep "$timeout_seconds" >/dev/null 2>&1 &
+    local sleep_pid=$!
     local status=0
     wait "$cmd_pid" || status=$?
-    kill "$watchdog_pid" 2>/dev/null || true
-    wait "$watchdog_pid" 2>/dev/null || true
+    kill -s KILL "$sleep_pid" 2>/dev/null || true
+    wait "$sleep_pid" 2>/dev/null || true
     return "$status"
 }
 
@@ -533,6 +531,20 @@ managed_backing_store_exists() {
 #
 # After CREATE DATABASE, polls with USE <db> to wait for catalog propagation
 # (CREATE DATABASE returns before the catalog is fully updated).
+#
+# GC_DATABASE_CREATED_BY_ENSURE answers for this call alone: every call resets
+# it, and a later call finds the database visible. INIT_CREATED_DATABASE is
+# the stricter fact whether gc may migrate the database
+# (init_bootstraps_database) rests on, kept for the rest of the process: on
+# top of this call's own view, the database it just created must hold nothing
+# bd wrote. The call's view alone is not proof. A USE can fail for a
+# transient reason, and a loopback endpoint gc does not manage keeps its
+# databases outside DATA_DIR, so a database that has been on the server all
+# along can read as "absent, then created". Such a database holds bd's tables
+# or its migration history, and a new one holds neither. Only a definite
+# "empty" counts; an unanswered probe does not. It starts false here, so a
+# value in the environment never counts.
+INIT_CREATED_DATABASE=false
 ensure_database_registered() {
     local db="$1"
     GC_DATABASE_CREATED_BY_ENSURE=false
@@ -569,6 +581,11 @@ ensure_database_registered() {
         if server_sql "USE \`$db\`" >/dev/null 2>&1; then
             if [ "$backing_absent" = true ]; then
                 GC_DATABASE_CREATED_BY_ENSURE=true
+                local holds_bd_tables=0
+                bd_runtime_store_holds_bd_tables "$db" || holds_bd_tables=$?
+                if [ "$holds_bd_tables" -eq 1 ]; then
+                    INIT_CREATED_DATABASE=true
+                fi
             fi
             return 0
         fi
@@ -1231,7 +1248,11 @@ bd_bootstrap_interrupted() {
 # that was in flight has committed, or its process has died, by the time the
 # lock is granted), and the lock stays held through the migration step that
 # follows, which releases it. Prints what it did: this is a destructive step,
-# gated on the database holding no issues.
+# gated on the database holding no issues. A reset is recorded in
+# INIT_HEALED_BOOTSTRAP: the migration step re-runs the migrations the reset
+# discarded, which makes this init the database's bootstrap
+# (init_bootstraps_database).
+INIT_HEALED_BOOTSTRAP=false
 heal_interrupted_bootstrap() {
     local db="$1"
     bd_bootstrap_interrupted "$db" || return 0
@@ -1243,16 +1264,46 @@ heal_interrupted_bootstrap() {
     echo "warning: database '$db' holds an interrupted bd bootstrap (uncommitted schema changes, no issues); discarding its working set and re-running migrations" >&2
     server_sql "USE \`$db\`; CALL DOLT_RESET('--hard')" >/dev/null 2>&1 \
         || die "failed to reset the interrupted bootstrap working set of database '$db'"
+    INIT_HEALED_BOOTSTRAP=true
 }
 
-# finish_bd_schema_migrations completes a schema that is clean but behind
-# (the state a healed bootstrap is in, and the state the old readiness probe
-# accepted as ready): bd's store open applies pending migrations, and
-# `bd migrate schema` is the idempotent entry point for exactly that. The
-# migration runs under the shared init lock: while a step is in flight this
-# database looks like an interrupted bootstrap, and only the lock keeps a
-# concurrent initializer's heal from resetting it. Without flock no heal can
-# run at all, so there is nothing to exclude.
+# init_bootstraps_database reports whether this init is bootstrapping the
+# database it pinned, the only kind of database gc runs `bd migrate schema`
+# on (see finish_bd_schema_migrations): this init's ensure_database_registered
+# created it, so creating it was consent for its schema, or
+# heal_interrupted_bootstrap just reset an interrupted bootstrap of it, whose
+# discarded migrations the step re-runs. Any other database already existed
+# on its server before this init, and clients gc cannot see may depend on it.
+init_bootstraps_database() {
+    [ "$INIT_CREATED_DATABASE" = true ] || [ "$INIT_HEALED_BOOTSTRAP" = true ]
+}
+
+# finish_bd_schema_migrations completes the schema of a database this init is
+# bootstrapping, and leaves every other database at the schema it has.
+#
+# `bd migrate schema` is bd's explicit consent to a one-way migration: since
+# bd 1.3.0 for a database on a shared server (gastownhall/beads#5920), and in
+# bd releases that carry bd's migration-consent gate for every existing
+# database (gastownhall/beads#5764). Migrating promotes the schema for every
+# client of the database at once, and a bd built for the older schema then
+# refuses the database. Whether every client is ready is an operator's call,
+# so gc makes it only for a database it is bootstrapping
+# (init_bootstraps_database): one this init created, or an interrupted
+# bootstrap this init just reset. Every other database keeps its schema and
+# init carries on: gc start, gc reload and gc doctor name a database whose
+# schema differs from the one the beads library linked into gc expects, with
+# the command an operator runs.
+# That includes a database whose bootstrap was interrupted and left clean,
+# which an earlier init created: nothing here can tell it from a database that
+# clients have been using all along.
+#
+# For a database being bootstrapped this completes a schema that is clean but
+# behind (the state a healed bootstrap is in): bd's store open applies pending
+# migrations, and `bd migrate schema` is the idempotent entry point for exactly
+# that. The migration runs under the shared init lock: while a step is in
+# flight this database looks like an interrupted bootstrap, and only the lock
+# keeps a concurrent initializer's heal from resetting it. Without flock no
+# heal can run at all, so there is nothing to exclude.
 #
 # `bd migrate schema` arrived in bd 1.0.5. An older bd's `migrate` has no
 # subcommands: it would take `schema` as an ignored argument and run the bare
@@ -1263,12 +1314,15 @@ heal_interrupted_bootstrap() {
 # the step reports a version this reads. A skipped step still drops the hold
 # a heal left.
 #
-# From bd 1.3.0 the verb is also bd's consent to promote the schema of a
-# database on a shared server (gastownhall/beads#5920), which can lock out
-# an older bd that uses the same database, so what bd reports the step did
-# goes to stderr instead of being dropped.
+# What bd reports the step did goes to stderr instead of being dropped.
 finish_bd_schema_migrations() {
     local dir="$1" db="$2" out bd_version
+    if ! init_bootstraps_database; then
+        # A heal that re-checked under its exclusive hold and found nothing
+        # to reset leaves that hold behind; drop it here, as the step would.
+        release_init_lock
+        return 0
+    fi
     bd_version=$(bd_version_number 8>&-)
     case "$bd_version" in
         0.* | v0.* | 1.0.[0-4] | v1.0.[0-4] | 1.0.[0-4][-+]* | v1.0.[0-4][-+]*)
@@ -2233,6 +2287,12 @@ data_dir: "$DATA_DIR"
 # 2.6.0+. Scheduled compaction (gc dolt compact) still handles history
 # flattening — see #1918, #1200 for that lineage. Override via city.toml
 # [dolt] auto_gc_enabled or GC_DOLT_AUTO_GC_ENABLED.
+#
+# Hazard: Dolt's generational GC makes a separate pass over dolt_ignore'd
+# tables and the working set that no table-level retention policy protects, so
+# auto-GC can destroy dolt_ignore'd data (ga-vrq5pu: mail and wisps). A city
+# that keeps state in dolt_ignore'd tables should override auto_gc_enabled to
+# false.
 behavior:
   auto_gc_behavior:
     enable: $auto_gc_enabled
@@ -2355,14 +2415,19 @@ check_read_only() {
 }
 
 load_health_check_from_gc() {
-    local gc_bin host output key value
+    local gc_bin host output key value health_db="${1:-}" health_data_dir="${2:-}"
     host=$(connect_host)
     gc_bin=$(resolve_gc_helper_bin)
     [ -n "$gc_bin" ] || return 1
-    output=$("$gc_bin" dolt-state health-check --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --check-read-only </dev/null 2>/dev/null) || return 1
+    set -- --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --check-read-only
+    [ -n "$health_db" ] && set -- "$@" --database "$health_db"
+    [ -n "$health_data_dir" ] && set -- "$@" --data-dir "$health_data_dir"
+    output=$("$gc_bin" dolt-state health-check "$@" </dev/null 2>/dev/null) || return 1
     GC_HEALTH_QUERY_READY="false"
     GC_HEALTH_READ_ONLY=""
     GC_HEALTH_CONNECTION_COUNT=""
+    GC_HEALTH_DATABASE_READY=""
+    GC_HEALTH_DATABASE_ERROR=""
     while IFS="$(printf '	')" read -r key value; do
         case "$key" in
             query_ready)
@@ -2374,11 +2439,75 @@ load_health_check_from_gc() {
             connection_count)
                 GC_HEALTH_CONNECTION_COUNT="$value"
                 ;;
+            database_ready)
+                GC_HEALTH_DATABASE_READY="$value"
+                ;;
+            database_error)
+                GC_HEALTH_DATABASE_ERROR="$value"
+                ;;
         esac
     done <<EOF
 $output
 EOF
     return 0
+}
+
+# city_health_database prints the city scope's Dolt database: the one every
+# city-level bead read and write goes through. A server can answer SQL while
+# this database is missing from its catalog or its default branch head will
+# not resolve, so health has to prove the database itself, not just the
+# server. Empty until the city scope names a database.
+city_health_database() {
+    read_existing_dolt_database "$GC_CITY_PATH/.beads/metadata.json"
+}
+
+# city_health_data_dir prints the data dir that must hold the city database's
+# repository on disk. Only a gc-managed local server keeps its data under
+# DATA_DIR; an external endpoint, loopback or not, keeps its databases
+# somewhere this script cannot see, so the on-disk check is skipped for it.
+city_health_data_dir() {
+    is_remote && return 0
+    [ "$(beads_config_value "$GC_CITY_PATH/.beads/config.yaml" gc.endpoint_origin)" = "managed_city" ] || return 0
+    printf '%s\n' "$DATA_DIR"
+}
+
+# check_city_database is the helper-less form of the database checks
+# `gc dolt-state health-check --database` runs: the repository is on disk
+# (managed servers only), the database is in the catalog, and its default
+# branch head resolves. Prints the failure and returns 1 when any fails.
+check_city_database() {
+    local db="$1" data_dir="$2" host output head db_lower entry entry_name found
+    if [ -n "$data_dir" ] && [ ! -d "$data_dir/$db/.dolt" ]; then
+        # Dolt matches database names case-insensitively, so a repository
+        # directory that differs only in case counts.
+        found=false
+        db_lower=$(printf '%s' "$db" | tr '[:upper:]' '[:lower:]')
+        for entry in "$data_dir"/*/; do
+            [ -d "$entry" ] || continue
+            entry_name=$(basename "$entry")
+            if [ "$(printf '%s' "$entry_name" | tr '[:upper:]' '[:lower:]')" = "$db_lower" ] && [ -d "$data_dir/$entry_name/.dolt" ]; then
+                found=true
+                break
+            fi
+        done
+        if [ "$found" != "true" ]; then
+            echo "database \"$db\" absent from data dir $data_dir"
+            return 1
+        fi
+    fi
+    host=$(connect_host)
+    if ! output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
+        sql -r csv -q "USE $(quote_dolt_identifier "$db"); SELECT DOLT_HASHOF('HEAD') AS head" 2>&1); then
+        echo "database \"$db\" default branch head unresolvable: $(printf '%s' "$output" | tr '\n' ' ')"
+        return 1
+    fi
+    head=$(printf '%s\n' "$output" | tail -n 1 | tr -d '[:space:]')
+    case "$head" in
+        ''|*[!0-9a-v]*) ;;
+        *) [ "${#head}" -eq 32 ] && return 0 ;;
+    esac
+    echo "database \"$db\" default branch head unresolvable: unexpected head \"$head\""
+    return 1
 }
 
 load_wait_ready_from_gc() {
@@ -2469,6 +2598,38 @@ wait_for_managed_pid_ready() {
         attempt=$((attempt + 1))
     done
     return 1
+}
+
+# launch_dolt_sql_server_detached starts dolt sql-server for the start path
+# that runs without the gc helper and prints the server PID. The server is
+# city infrastructure, not part of whatever process ran the start, so it is
+# detached the way the managed start detaches it: it leads its own session
+# (setsid) or, where setsid is missing, its own process group (job control),
+# so a kill aimed at the caller's process group leaves it running; and it
+# drops the per-session identity variables, so a process-table sweep keyed on
+# GC_SESSION_ID does not count it as the caller's. The variable list mirrors
+# managedDoltSessionScopedEnvKeys in cmd/gc/dolt_start_managed.go. Close the
+# startup lock fd in the child so the flock is released when this starter
+# exits.
+launch_dolt_sql_server_detached() {
+    (
+        for key in GC_HOOK_DEADLINE GC_SESSION_ID GC_SESSION_NAME GC_ALIAS \
+            GC_AGENT GC_TEMPLATE GC_SESSION_ORIGIN GC_RUNTIME_EPOCH \
+            GC_CONTINUATION_EPOCH GC_INSTANCE_TOKEN BEADS_HOLDER_TOKEN \
+            BEADS_ACTOR CLAUDE_CODE_SESSION_ID; do
+            unset "$key"
+        done
+        if command -v setsid >/dev/null 2>&1; then
+            # Without job control the background child is not a process
+            # group leader, so setsid(1) calls setsid(2) in place and the
+            # PID below is the server's.
+            nohup setsid sh -c 'exec 9>&-; exec dolt sql-server --config "$1"' sh "$CONFIG_FILE" < /dev/null >> "$LOG_FILE" 2>&1 &
+        else
+            set -m
+            nohup sh -c 'exec 9>&-; exec dolt sql-server --config "$1"' sh "$CONFIG_FILE" < /dev/null >> "$LOG_FILE" 2>&1 &
+        fi
+        echo "$!"
+    )
 }
 
 load_start_managed_from_gc() {
@@ -3688,10 +3849,8 @@ op_start() {
             log_offset=$(wc -c < "$LOG_FILE" 2>/dev/null || echo 0)
         fi
 
-        # Start dolt sql-server with config file. Close the startup lock fd in
-        # the child so the flock is released when this starter exits.
-        nohup sh -c 'exec 9>&-; exec dolt sql-server --config "$1"' sh "$CONFIG_FILE" >> "$LOG_FILE" 2>&1 &
-        local server_pid=$!
+        local server_pid
+        server_pid=$(launch_dolt_sql_server_detached)
 
         # Write PID file.
         echo "$server_pid" > "$PID_FILE"
@@ -4501,15 +4660,14 @@ op_init() {
                 # by an older gc may have none.
                 ensure_current_era_version_witness "$dir" "$dolt_database"
                 # A config table proves a bootstrap started, not that it
-                # finished. Complete any pending migrations before reporting
-                # the scope ready: a healed database, or one whose bootstrap
-                # was interrupted and then left clean, sits behind the
-                # binary's schema, and bd's read-only opens never migrate, so
-                # nothing else would finish it. On a dirty database that
-                # holds issues this is also where bd's dirty-table guard is
-                # allowed to speak, instead of the scope reporting ready over
-                # a half-migrated store. `bd migrate schema` only; the bare
-                # repo-id migration stays off this path
+                # finished. A database this init is bootstrapping (it created
+                # it, or the heal above just reset it) gets its pending
+                # migrations completed before the scope reports ready: it sits
+                # behind the binary's schema, and bd's read-only opens never
+                # migrate, so nothing else would finish it. Any other database
+                # keeps its schema; finish_bd_schema_migrations says why.
+                # `bd migrate schema` only; the bare repo-id migration stays
+                # off this path
                 # (TestGcBeadsBdInitUsesProjectIDHelperWithoutRepoIDMigration).
                 finish_bd_schema_migrations "$dir" "$dolt_database"
                 # GC owns canonical metadata/config normalization after this backend
@@ -4557,9 +4715,9 @@ op_init() {
     # plain init refuses the latter as "already initialized". So once the
     # canonical metadata is in place this path takes the same decision the
     # metadata-present branch takes: heal an interrupted bootstrap, then
-    # ADOPT a present schema (finish its migrations, normalize, identity) or
-    # FORCE-seed a missing one. Only a database with no bd schema reaches
-    # bd init at all.
+    # ADOPT a present schema (finish the migrations of one this init is
+    # bootstrapping, normalize, identity) or FORCE-seed a missing one. Only a
+    # database with no bd schema reaches bd init at all.
     heal_interrupted_bootstrap "$dolt_database"
     if [ "$GC_SCOPE_METADATA_PRESEEDED" = "1" ] && [ -z "$bd_init_force" ]; then
         if probe_schema_state_or_die "$dolt_database"; then
@@ -4734,16 +4892,25 @@ op_store_bridge() {
     return $?
 }
 op_health() {
-    local conn_count="" read_only_status
+    local conn_count="" read_only_status health_db health_data_dir db_failure
 
     # TCP check.
     if ! tcp_check; then
         die "dolt server not reachable on $(connect_host):$DOLT_PORT"
     fi
 
-    if load_health_check_from_gc; then
+    health_db=$(city_health_database)
+    health_data_dir=""
+    [ -n "$health_db" ] && health_data_dir=$(city_health_data_dir)
+
+    if load_health_check_from_gc "$health_db" "$health_data_dir"; then
         if [ "$GC_HEALTH_QUERY_READY" != "true" ]; then
             die "dolt query probe failed (information_schema.SCHEMATA)"
+        fi
+        # Fail closed: a requested database the helper did not report ready
+        # is unhealthy, whether it reported a failure or nothing at all.
+        if [ -n "$health_db" ] && [ "$GC_HEALTH_DATABASE_READY" != "true" ]; then
+            die "dolt city database unavailable: ${GC_HEALTH_DATABASE_ERROR:-health check did not report database \"$health_db\"}"
         fi
         if ! is_remote && [ "$GC_HEALTH_READ_ONLY" = "true" ]; then
             die "dolt server is in read-only mode"
@@ -4756,6 +4923,10 @@ op_health() {
         # Query probe.
         if ! do_query_probe; then
             die "dolt query probe failed (information_schema.SCHEMATA)"
+        fi
+
+        if [ -n "$health_db" ] && ! db_failure=$(check_city_database "$health_db" "$health_data_dir"); then
+            die "dolt city database unavailable: $db_failure"
         fi
 
         # Imposter detection disabled: TCP + query probe passed, server is
@@ -4841,7 +5012,31 @@ else
         tail -n 1000 "$LOG_FILE" 2>/dev/null \
             | grep -qE 'no space left on device|copy_file_range:.*no space|ENOSPC' \
             || return 1
+        enospc_disk_has_headroom && return 1
         return 0
+    }
+
+    enospc_disk_has_headroom() {
+        enospc_dir="${DATA_DIR:-}"
+        if [ -z "$enospc_dir" ] || [ ! -d "$enospc_dir" ]; then
+            enospc_dir=$(dirname "$LOG_FILE")
+        fi
+        enospc_floor="${GC_DOLT_WARN_FREE_BYTES:-2147483648}"
+        case "$enospc_floor" in
+            ''|*[!0-9]*) enospc_floor=2147483648 ;;
+        esac
+        # Read the floor as decimal: shell arithmetic takes a leading 0 as octal.
+        enospc_floor=$(printf '%s' "$enospc_floor" | sed 's/^0*//')
+        [ -n "$enospc_floor" ] || enospc_floor=0
+        # More than 18 digits can overflow shell arithmetic.
+        [ "${#enospc_floor}" -le 18 ] || enospc_floor=2147483648
+        # 0 means "no disk warning" to gc; it must not switch the skip off.
+        [ "$enospc_floor" -gt 0 ] || enospc_floor=2147483648
+        enospc_avail_kb=$(df -Pk "$enospc_dir" 2>/dev/null | awk 'NR == 2 { print $4 }')
+        case "$enospc_avail_kb" in
+            ''|*[!0-9]*) return 1 ;;
+        esac
+        [ "$enospc_avail_kb" -ge $(( (enospc_floor + 1023) / 1024 )) ]
     }
 fi
 
@@ -4860,7 +5055,7 @@ fi
 
 # op_recover stops the dolt server, restarts it, and verifies health.
 op_recover() {
-    local read_only_status
+    local read_only_status recover_db recover_data_dir recover_db_failure
 
     if is_remote; then
         die "recovery not supported for remote dolt servers"
@@ -4871,7 +5066,8 @@ op_recover() {
     # itself amplifies the failure: each restart triggers a conjoin/backup
     # sync that writes another partial table file to the backup remote.
     # Require manual intervention (free disk space) before recovery
-    # resumes. See gastownhall/gascity#2158.
+    # resumes; the skip lifts once the data dir is back above the free-space
+    # floor (see dolt-enospc.sh). See gastownhall/gascity#2158.
     if recovery_should_skip_due_to_enospc; then
         echo "skipping dolt recovery: recent dolt log shows ENOSPC — manual intervention required" >&2
         echo "  free disk space, then re-run health checks" >&2
@@ -4896,6 +5092,20 @@ op_recover() {
             echo "detected read-only dolt server — restarting" >&2
         fi
         DOLT_PORT="$GC_RECOVER_PORT"
+        # The helper's recovery health check proves only the server. A
+        # server that answers SQL while the city database is still missing
+        # or unreadable is not recovered.
+        recover_db=$(city_health_database)
+        if [ -n "$recover_db" ]; then
+            recover_data_dir=$(city_health_data_dir)
+            if load_health_check_from_gc "$recover_db" "$recover_data_dir"; then
+                if [ "$GC_HEALTH_DATABASE_READY" != "true" ]; then
+                    die "dolt city database still unavailable after recovery: ${GC_HEALTH_DATABASE_ERROR:-health check did not report database \"$recover_db\"}"
+                fi
+            elif ! recover_db_failure=$(check_city_database "$recover_db" "$recover_data_dir"); then
+                die "dolt city database still unavailable after recovery: $recover_db_failure"
+            fi
+        fi
         return 0
     elif [ "$GC_RECOVER_MANAGED_USED" = "true" ]; then
         if [ "$GC_RECOVER_DIAGNOSED_READ_ONLY" = "true" ]; then

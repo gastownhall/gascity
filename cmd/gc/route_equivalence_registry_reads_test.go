@@ -242,8 +242,6 @@ func TestOrderHistoryRouteEquivalence(t *testing.T) {
 				})
 				if jsonOut {
 					assertRouteEquivalentJSONModulo(t, []string{"order", "history"}, local, viaAPI, nil)
-				} else {
-					viaAPI = []byte(peekRouteDropCacheFooter(string(viaAPI)))
 				}
 				if !bytes.Equal(local, viaAPI) {
 					t.Fatalf("order history bytes differ (row order or encoding):\nlocal: %s\napi:   %s", local, viaAPI)

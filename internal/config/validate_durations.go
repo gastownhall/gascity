@@ -136,6 +136,7 @@ func ValidateDurations(cfg *City, source string) []string {
 	check("[daemon]", "wisp_gc_interval", cfg.Daemon.WispGCInterval)
 	check("[daemon]", "wisp_ttl", cfg.Daemon.WispTTL)
 	check("[daemon]", "drift_drain_timeout", cfg.Daemon.DriftDrainTimeout)
+	checkPositive("[daemon]", "drift_deferral_escalate_after", cfg.Daemon.DriftDeferralEscalateAfter)
 	check("[daemon]", "start_ready_timeout", cfg.Daemon.StartReadyTimeout)
 	check("[daemon]", "dolt_stop_timeout", cfg.Daemon.DoltStopTimeout)
 	check("[daemon]", "dolt_start_address_in_use_retry_window", cfg.Daemon.DoltStartAddressInUseRetryWindow)

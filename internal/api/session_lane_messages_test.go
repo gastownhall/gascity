@@ -178,7 +178,7 @@ func TestSubmitUnderLaneResumeConsumesTheHold(t *testing.T) {
 	e, st := laneMessageEnv(t, nil)
 	shortSettle(t)
 	info := e.session(t, "Held")
-	sessions := session.NewStore(e.fs.SessionsBeadStore())
+	sessions := session.NewStore(e.fs.Stores().Sessions())
 	wantStatus(t, "suspend", e.post(t, "/session/"+info.ID+"/suspend", "", ""), http.StatusOK)
 	if held, err := sessions.Get(info.ID); err != nil || held.State != session.StateSuspended {
 		t.Fatalf("session after suspend = %+v, %v; want it suspended", held, err)
@@ -212,7 +212,7 @@ func TestSubmitUnderLaneResumeFollowsTheProposal(t *testing.T) {
 	e, _ := laneMessageEnv(t, nil)
 	shortSettle(t)
 	info := e.session(t, "Held")
-	sessions := session.NewStore(e.fs.SessionsBeadStore())
+	sessions := session.NewStore(e.fs.Stores().Sessions())
 	wantStatus(t, "suspend", e.post(t, "/session/"+info.ID+"/suspend", "", ""), http.StatusOK)
 	e.store.set(func(s *opsTestStore) { s.createErr = errors.New("journal write refused") })
 	refused := e.post(t, "/session/"+info.ID+"/submit", "k-held", `{"message":"go","resume":true}`)
@@ -256,7 +256,7 @@ func TestSubmitUnderLaneResumeLeavesARunningSessionAlone(t *testing.T) {
 	if !e.fs.sp.IsRunning(info.SessionName) {
 		t.Fatalf("session %s is not running", info.ID)
 	}
-	sessions := session.NewStore(e.fs.SessionsBeadStore())
+	sessions := session.NewStore(e.fs.Stores().Sessions())
 	wait, err := sessions.CreateWait(session.WaitSpec{SessionID: info.ID, Kind: "deps", DepIDs: []string{"gc-dep"}, DepMode: "all", Now: time.Now().UTC()})
 	if err != nil {
 		t.Fatalf("CreateWait: %v", err)
@@ -312,7 +312,7 @@ func TestSubmitUnderLaneResumeRefusedByTheRowLeavesTheKeyFree(t *testing.T) {
 	e, st := laneMessageEnv(t, nil)
 	shortSettle(t)
 	info := e.session(t, "Draining")
-	sessions := session.NewStore(e.fs.SessionsBeadStore())
+	sessions := session.NewStore(e.fs.Stores().Sessions())
 	wantStatus(t, "suspend", e.post(t, "/session/"+info.ID+"/suspend", "", ""), http.StatusOK)
 	if err := e.store.SetMetadata(info.ID, "state", string(session.StateDraining)); err != nil {
 		t.Fatal(err)
@@ -476,7 +476,7 @@ func TestSubmitUnderLaneRetryResumesAfterACrashAfterCommit(t *testing.T) {
 	e, st := laneMessageEnv(t, nil)
 	shortSettle(t)
 	info := e.session(t, "Crash")
-	sessions := session.NewStore(e.fs.SessionsBeadStore())
+	sessions := session.NewStore(e.fs.Stores().Sessions())
 	wantStatus(t, "suspend", e.post(t, "/session/"+info.ID+"/suspend", "", ""), http.StatusOK)
 	row := crashAfterCommit(t, e, info.ID, "k-crash", `{"message":"go","resume":true}`)
 	if got, err := sessions.Get(info.ID); err != nil || got.State != session.StateSuspended || got.WakeRequest != "" {
@@ -539,7 +539,7 @@ func TestSubmitUnderLaneRetryLeavesALaterSuspendStanding(t *testing.T) {
 	e, st := laneMessageEnv(t, nil)
 	shortSettle(t)
 	info := e.session(t, "Later hold")
-	sessions := session.NewStore(e.fs.SessionsBeadStore())
+	sessions := session.NewStore(e.fs.Stores().Sessions())
 	earlier, err := opjournal.NewStore(beads.SessionStore{Store: e.store.MemStore}, &clock.Fake{Time: time.Now().UTC().Add(-time.Minute)}, opjournal.WithIDPrefix("gc"))
 	if err != nil {
 		t.Fatalf("opening the op store: %v", err)
@@ -716,7 +716,7 @@ func TestLaneMessageResultSaysWhetherItWillStart(t *testing.T) {
 				if !got.Queued || !reflect.DeepEqual(got.WillStart, tc.want) || got.WillNotStartReason != tc.reason {
 					t.Fatalf("result %s; want queued, will_start %s, will_not_start_reason %q", evs[0].Payload, willStartText(tc.want), tc.reason)
 				}
-				if row, err := session.NewStore(e.fs.SessionsBeadStore()).Get(info.ID); err != nil || row.WakeRequest != "" {
+				if row, err := session.NewStore(e.fs.Stores().Sessions()).Get(info.ID); err != nil || row.WakeRequest != "" {
 					t.Fatalf("session after the result = wake_request %q, %v; want no wake recorded by the API", row.WakeRequest, err)
 				}
 				if poked := e.fs.enqueuedKeys()[enqueued:]; slices.Contains(poked, reconcilekey.Session(info.ID)) {
@@ -792,7 +792,7 @@ func TestLaneMessageResumeResendOnTheSameProcessConsumesTheHold(t *testing.T) {
 				e, st := laneMessageEnv(t, nil)
 				shortSettle(t)
 				info := e.session(t, "Resend")
-				sessions := session.NewStore(e.fs.SessionsBeadStore())
+				sessions := session.NewStore(e.fs.Stores().Sessions())
 				wantStatus(t, "suspend", e.post(t, "/session/"+info.ID+"/suspend", "", ""), http.StatusOK)
 				first := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+path, key, `{"message":"go"}`).Body)
 				if _, reason := willStartOf(t, waitTerminalEvents(t, e.fs.eventProv, first.RequestID, 1)[0]); reason != laneSuspendedReason {
@@ -1037,7 +1037,7 @@ func TestExtmsgNotifyUnderLaneProposesANotice(t *testing.T) {
 	e, st := laneMessageEnv(t, nil)
 	info := e.session(t, "Member")
 	s := e.server(t)
-	if err := s.sendBackgroundMessageToSession(context.Background(), e.fs.SessionsBeadStore().Store, info.ID, "new message in #ops"); err != nil {
+	if err := s.sendBackgroundMessageToSession(context.Background(), e.fs.Stores().Sessions(), info.ID, "new message in #ops"); err != nil {
 		t.Fatalf("notice: %v", err)
 	}
 	open, err := st.ops.ListOpen(info.ID)
@@ -1278,7 +1278,7 @@ func TestExtmsgNoticeUnderLaneFitsTheLanePayload(t *testing.T) {
 		!strings.HasPrefix(notice, "<system-reminder>\nNew message in shared conversation slack/C123") || !strings.HasSuffix(notice, "</system-reminder>") {
 		t.Fatalf("notice of %d bytes (valid UTF-8 %v) = %q...%q; want the reminder cut to fit with its note", len(notice), utf8.ValidString(notice), notice[:80], notice[len(notice)-200:])
 	}
-	if err := s.sendBackgroundMessageToSession(context.Background(), e.fs.SessionsBeadStore().Store, info.ID, notice); err != nil {
+	if err := s.sendBackgroundMessageToSession(context.Background(), e.fs.Stores().Sessions(), info.ID, notice); err != nil {
 		t.Fatalf("notice: %v", err)
 	}
 	open, err := st.ops.ListOpen(info.ID)

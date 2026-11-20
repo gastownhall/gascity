@@ -236,6 +236,9 @@ func (c *City) WriteE2EConfig(agents []E2EAgent) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[workspace]\nname = %q\n", cityName)
 	b.WriteString("\n[beads]\nprovider = \"file\"\n")
+	// A born-split city keeps its [storage]: once its binding has served,
+	// a config that drops the section is refused at start.
+	b.WriteString(c.existingStorageSection())
 	c.WriteConfig(b.String())
 
 	var sessions strings.Builder
@@ -320,4 +323,34 @@ func (c *City) WaitForCondition(fn func() bool, timeout time.Duration) bool {
 // ReportTimeout returns the default timeout for waiting on agent reports.
 func ReportTimeout() time.Duration {
 	return 60 * time.Second
+}
+
+// existingStorageSection returns the [storage] tables of the city's current
+// city.toml as written by gc (the section and its sub-tables, contiguous), or
+// "" when it has none.
+func (c *City) existingStorageSection() string {
+	c.t.Helper()
+	data, err := os.ReadFile(filepath.Join(c.Dir, "city.toml"))
+	if os.IsNotExist(err) {
+		return ""
+	}
+	if err != nil {
+		c.t.Fatalf("reading city.toml: %v", err)
+	}
+	var b strings.Builder
+	in := false
+	for _, line := range strings.Split(string(data), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") {
+			in = trimmed == "[storage]" || strings.HasPrefix(trimmed, "[storage.")
+		}
+		if in {
+			b.WriteString(line)
+			b.WriteString("\n")
+		}
+	}
+	if b.Len() == 0 {
+		return ""
+	}
+	return "\n" + b.String()
 }
