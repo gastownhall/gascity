@@ -9607,6 +9607,112 @@ func TestUnclaimWorkAssignedToRetiredSessionBeadClearsSessionAffinity(t *testing
 	}
 }
 
+// TestUnclaimWorkAssignedToRetiredSessionBeadReleasesParkedClaimKeepingHold
+// pins #7685's retirement half: a session whose claimed bead is parked
+// (blocked, deferred, a city's custom status) still owned the claim after it
+// retired — the sweep listed open/in_progress only, so no later pass gave the
+// claim back. The sweep must release it keeping the hold, whatever the hold.
+func TestUnclaimWorkAssignedToRetiredSessionBeadReleasesParkedClaimKeepingHold(t *testing.T) {
+	for _, hold := range []string{"blocked", "deferred", "review"} {
+		t.Run(hold, func(t *testing.T) {
+			store := beads.NewMemStore()
+
+			sessionBead, err := store.Create(beads.Bead{
+				Title:  "worker",
+				Type:   sessionBeadType,
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name": "worker-1",
+					"state":        "active",
+				},
+			})
+			if err != nil {
+				t.Fatalf("create session bead: %v", err)
+			}
+
+			work, err := store.Create(beads.Bead{
+				Title:    "parked claim",
+				Assignee: sessionBead.ID,
+				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
+			})
+			if err != nil {
+				t.Fatalf("create work bead: %v", err)
+			}
+			status := hold
+			if err := store.Update(work.ID, beads.UpdateOpts{Status: &status}); err != nil {
+				t.Fatalf("park work at %s: %v", hold, err)
+			}
+
+			var stderr bytes.Buffer
+			unclaimWorkAssignedToRetiredSessionBead(testWorkLegs("", servingCity("worker"), store, nil), store, sessionBead, "worker", &stderr)
+
+			got, err := store.Get(work.ID)
+			if err != nil {
+				t.Fatalf("get work bead: %v", err)
+			}
+			if got.Assignee != "" {
+				t.Errorf("assignee = %q, want the retired session's claim released", got.Assignee)
+			}
+			if got.Status != hold {
+				t.Errorf("status = %q, want the %s hold kept", got.Status, hold)
+			}
+		})
+	}
+}
+
+// TestUnclaimWorkAssignedToRetiredSessionInfoReleasesParkedClaimKeepingHold is
+// the stranded-repair sweep's half of #7685: a stranded session info whose
+// claim is parked kept the claim forever for the same reason. The repair
+// releases the claim and keeps the hold.
+func TestUnclaimWorkAssignedToRetiredSessionInfoReleasesParkedClaimKeepingHold(t *testing.T) {
+	store := beads.NewMemStore()
+
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker-1",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	work, err := store.Create(beads.Bead{
+		Title:    "parked claim",
+		Assignee: sessionBead.ID,
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
+	})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	blocked := "blocked"
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: &blocked}); err != nil {
+		t.Fatalf("park work blocked: %v", err)
+	}
+
+	info, err := session.NewStore(beads.SessionStore{Store: store}).Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("projecting session info: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	unclaimWorkAssignedToRetiredSessionInfo(testSeatWork("", servingCity("worker"), store, nil), store, info, &stderr)
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("get work bead: %v", err)
+	}
+	if got.Assignee != "" {
+		t.Errorf("assignee = %q, want the stranded session's claim released", got.Assignee)
+	}
+	if got.Status != "blocked" {
+		t.Errorf("status = %q, want the blocked hold kept", got.Status)
+	}
+}
+
 // closeBead is the low-level metadata+close helper. Ownership checks live in
 // closeSessionBeadIfUnassigned, which has the full multi-store, multi-identifier
 // view of assigned work. closeBead itself must stay dumb so it doesn't

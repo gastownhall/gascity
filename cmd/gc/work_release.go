@@ -329,7 +329,7 @@ func ReleaseClaims(sw *SeatWork, scope ReleaseScope, seat releaseSeat, why relea
 		claims, err = appendUniqueSeatWork(claims, late), errors.Join(err, lateErr)
 	}
 	if p.releaseParked {
-		parked, parkedErr := parkedSeatWork(sw.Legs(), scope, p)
+		parked, parkedErr := parkedSeatWork(sw.Legs(), scope)
 		claims, err = appendUniqueSeatWork(claims, parked), errors.Join(err, parkedErr)
 	}
 	// The refusal needs no config: it releases nothing, so a seat whose
@@ -354,13 +354,15 @@ func ReleaseClaims(sw *SeatWork, scope ReleaseScope, seat releaseSeat, why relea
 	return releaseListed(claims, why, seat, sw.Legs().cfg, opts), err
 }
 
-// parkedSeatWork reads the scope's claims p gives back in a parked status
-// (releasesParked). The open/in_progress reads cannot list them: a live read
-// lists raw open, and an event-fed cache row carries the parked status. The
-// read is not-closed ("") through closeTimeLister, filtered in Go.
-func parkedSeatWork(legs WorkLegs, scope workScope, p releasePolicy) ([]seatWorkHit, error) {
+// parkedSeatWork reads the scope's parked claims (beads.IsParked). The
+// open/in_progress reads cannot list them: a live read lists raw open, and an
+// event-fed cache row carries the parked status. The read is not-closed ("")
+// through closeTimeLister, filtered in Go. Every parked claim is kept, pinned
+// and hooked too, so releaseListed classifies it: a claim the path does not
+// give back is kept as keptParked and named in the release log.
+func parkedSeatWork(legs WorkLegs, scope workScope) ([]seatWorkHit, error) {
 	hits, err := lateSeatWork(legs, scope, []string{""}, nil)
-	return slices.DeleteFunc(hits, func(h seatWorkHit) bool { return !p.releasesParked(h.bead) }), err
+	return slices.DeleteFunc(hits, func(h seatWorkHit) bool { return !beads.IsParked(h.bead) }), err
 }
 
 // releasesParked reports whether the path gives back b, a parked claim
