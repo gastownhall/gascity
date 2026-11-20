@@ -1048,8 +1048,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rig, scope and `.beads` directories, database name, server address and
   pinned bd, with `shq` for shell quoting) replaces the command that
   `gc start`, `gc reload` and `gc doctor`'s `bd-schema` check print. gc never
-  runs it. A template that does not render a single line for both the city's
-  database and a rig's fails config load. Every behind notice now also says
+  runs it. A template that does not parse, or does not render a single line
+  for a sample city and rig database, fails config load. Every behind notice now also says
   the migrator must move both migration lanes (main and ignored) and that
   `gc doctor --check bd-schema` reads both afterwards. See "Databases Gas
   City leaves to you" in "Upgrading an Existing City".

@@ -63,10 +63,10 @@ func RenderBeadsMigrateCommand(tmpl string, data BeadsMigrateCommandData) (strin
 	if strings.TrimSpace(tmpl) == "" {
 		return "", errors.New("is blank; remove it to use gc's default command")
 	}
-	if strings.ContainsAny(tmpl, "\r\n") {
+	if strings.ContainsAny(strings.TrimSpace(tmpl), "\r\n") {
 		return "", errors.New("spans more than one line; it must be a single shell command line")
 	}
-	t, err := template.New("migrate_command").Option("missingkey=error").Funcs(beadsMigrateCommandFuncs).Parse(tmpl)
+	t, err := template.New("migrate_command").Funcs(beadsMigrateCommandFuncs).Parse(tmpl)
 	if err != nil {
 		return "", err
 	}
@@ -85,10 +85,11 @@ func RenderBeadsMigrateCommand(tmpl string, data BeadsMigrateCommandData) (strin
 }
 
 // validateBeadsMigrateCommand rejects at load time a [beads] migrate_command
-// that would not render a one-line command for every database: it renders
-// the template for a rig's database and for the city's own (no rig), each on
-// a TCP and on a socket endpoint. A template that fails here would otherwise
-// fail first in an operator notice, when the database is already behind.
+// that does not parse or that fails to render a one-line command for sample
+// databases: a rig's and the city's own (no rig), each on a TCP and on a
+// socket endpoint. That catches unknown fields and functions on every path
+// the samples take; a branch only some real database takes is checked when a
+// notice renders it, which falls back to gc's default command and says why.
 func validateBeadsMigrateCommand(raw string) error {
 	if raw == "" {
 		return nil

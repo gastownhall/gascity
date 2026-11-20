@@ -95,12 +95,15 @@ type bdSchemaCity struct {
 // newBdSchemaCity resolves what a notice needs to know about the city at
 // cityPath from its config.
 func newBdSchemaCity(cityPath string, cfg *config.City) bdSchemaCity {
-	return bdSchemaCity{
-		path:           cityPath,
-		split:          workStoreClassHolds(cfg) != nil,
-		allowBehind:    cityAllowSchemaBehindMigrate(cityPath, cfg),
-		migrateCommand: cfg.Beads.MigrateCommand,
+	city := bdSchemaCity{
+		path:        cityPath,
+		split:       workStoreClassHolds(cfg) != nil,
+		allowBehind: cityAllowSchemaBehindMigrate(cityPath, cfg),
 	}
+	if cfg != nil {
+		city.migrateCommand = cfg.Beads.MigrateCommand
+	}
+	return city
 }
 
 // defaultMigrateCommand is gc's own command for migrating the gap's database
@@ -128,8 +131,11 @@ func (g bdSchemaGap) defaultMigrateCommand(city bdSchemaCity, bdPath string) str
 // migrateCommand is the exact command the notice names for migrating the
 // gap's database, followed by what an operator needs to know to run it: the
 // city's beads.migrate_command rendered for the database when it is set, else
-// gc's default command. A configured template that does not render (config
-// load validates it, so this is not expected) falls back to the default
+// gc's default command. A configured command almost always runs bd itself,
+// which takes a server and database from BEADS_DOLT_* variables over the
+// scope's own, so it carries the same shell note as a split city's default.
+// A configured template that does not render for this database (config load
+// renders it for sample databases, so this is rare) falls back to the default
 // command and says why.
 func (g bdSchemaGap) migrateCommand(city bdSchemaCity, bdPath string) string {
 	if city.migrateCommand == "" {
@@ -159,7 +165,7 @@ func (g bdSchemaGap) migrateCommand(city bdSchemaCity, bdPath string) string {
 		fallback.migrateCommand = ""
 		return fmt.Sprintf("%s (beads.migrate_command did not render: %v)", g.migrateCommand(fallback, bdPath), err)
 	}
-	return command
+	return command + " (from a shell with no other BEADS_DOLT_* variables set)"
 }
 
 // twoLaneCaution is the sentence every behind notice puts ahead of its

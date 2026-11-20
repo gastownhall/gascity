@@ -1495,15 +1495,15 @@ type BeadsConfig struct {
 	// existing bd database whose schema is behind the beads library linked
 	// into gc (gc start, gc reload and gc doctor's bd-schema check). gc never
 	// runs it: migrating an existing database is the operator's consent. It
-	// is a Go text/template rendered per database with the fields of
-	// BeadsMigrateCommandData ({{.City}}, {{.Rig}}, {{.ScopeDir}},
-	// {{.BeadsDir}}, {{.Database}}, {{.Host}}, {{.Port}}, {{.Socket}},
-	// {{.Bd}}) and a shq function that quotes a value for a POSIX shell. Set
+	// is a one-line Go text/template rendered per database with the fields
+	// {{.City}}, {{.Rig}}, {{.ScopeDir}}, {{.BeadsDir}}, {{.Database}},
+	// {{.Host}}, {{.Port}}, {{.Socket}} and {{.Bd}}, and a shq function that
+	// quotes a value for a POSIX shell. Set
 	// it when the city's pinned bd is not the binary to migrate with, so the
 	// notice names the migrator the operator trusts. Empty uses gc's default:
 	// gc bd ... migrate schema, or the pinned bd with BEADS_DIR in a city whose
-	// gc bd refuses migrate. A template that does not render a single-line
-	// command fails config load.
+	// gc bd refuses migrate. A template that does not parse, or that does not
+	// render a single line for sample databases, fails config load.
 	MigrateCommand string `toml:"migrate_command,omitempty"`
 	// ProxiedIdleTimeout is how long a bd-owned proxied scope's proxy and Dolt
 	// child stay up with no connections before bd retires them; the next bd

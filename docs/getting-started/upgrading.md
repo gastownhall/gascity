@@ -157,12 +157,13 @@ no `BEADS_DOLT_*` variables set, or `bd` may reach another server.
 
 ### Migrate both lanes
 
-bd records a database's schema in two migration lanes, shown as
+Beads records a database's schema in two migration lanes, shown as
 `main/ignored` (`v53/11` above). A migration is finished only when both lanes
 reach the schema the line names. A `bd` whose migration moves only the main
-lane can leave the database at, say, `v74/27`, where no `bd` opens it. Migrate
-with a `bd` you know moves both lanes, then confirm it. The check reads both
-lanes and reports the database as current only when both match:
+lane can leave the example database at `v66/11`, which `gc` still reports as
+behind and which a `bd` may refuse to open. Migrate with a `bd` you know moves
+both lanes, then confirm it. The check reads both lanes and reports the
+database as current only when both match:
 
 ```bash
 gc doctor --check bd-schema
@@ -178,7 +179,7 @@ database. Gas City never runs it.
 ```toml
 [beads]
 # One shell line, rendered per database as a Go template.
-migrate_command = "cd {{shq .ScopeDir}} && BEADS_DIR={{shq .BeadsDir}} BEADS_DOLT_SERVER_HOST={{.Host}} BEADS_DOLT_SERVER_PORT={{.Port}} /opt/beads/migrator/bd migrate schema"
+migrate_command = "cd {{shq .ScopeDir}} && BEADS_DIR={{shq .BeadsDir}} BEADS_DOLT_SERVER_HOST={{shq .Host}} BEADS_DOLT_SERVER_PORT={{shq .Port}} BEADS_DOLT_SERVER_DATABASE={{shq .Database}} /opt/beads/migrator/bd migrate schema"
 ```
 
 | Field | Value |
@@ -190,13 +191,15 @@ migrate_command = "cd {{shq .ScopeDir}} && BEADS_DIR={{shq .BeadsDir}} BEADS_DOL
 | `{{.Database}}` | the database's name on its Dolt server |
 | `{{.Host}}`, `{{.Port}}` | the Dolt server's TCP address; empty on a Unix socket |
 | `{{.Socket}}` | the Dolt server's Unix socket; empty over TCP |
-| `{{.Bd}}` | the `bd` the city pins for that scope |
+| `{{.Bd}}` | the `bd` the city pins for that scope, or `bd` if `gc` cannot resolve it |
 
-Values are raw; `shq` quotes one for a POSIX shell. Setting the server's
-address in the command keeps `bd` on the server the line names; run it from a
-shell with no other `BEADS_DOLT_*` variables set. The template must render a single
-line for the city's database and for a rig's, or `gc` refuses to load the
-config and names `beads.migrate_command`. Remove the setting to go back to the
+Values are raw; `shq` quotes one for a POSIX shell. Setting the server and
+database in the command keeps `bd` on the database the line names; run it from
+a shell with no other `BEADS_DOLT_*` variables set, as the line says. `gc`
+refuses to load a config whose template does not parse or does not render a
+single line for a sample city and rig database, and names
+`beads.migrate_command`. If the template fails for a real database, the line
+gives the default command and the reason. Remove the setting to go back to the
 default command.
 
 ### When gc and bd disagree

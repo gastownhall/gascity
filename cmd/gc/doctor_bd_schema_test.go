@@ -133,7 +133,7 @@ func TestBdSchemaDoctorCheck(t *testing.T) {
 		if r.Status != doctor.StatusWarning || len(r.Details) != 1 {
 			t.Fatalf("got %+v, want one warning detail", r)
 		}
-		if !strings.HasSuffix(r.Details[0], ": cd /city && BEADS_DIR=/city/.beads /opt/migrator/bd migrate schema") {
+		if !strings.HasSuffix(r.Details[0], ": cd /city && BEADS_DIR=/city/.beads /opt/migrator/bd migrate schema (from a shell with no other BEADS_DOLT_* variables set)") {
 			t.Fatalf("detail does not name the configured command rendered for the city: %q", r.Details[0])
 		}
 		if !strings.Contains(r.Details[0], "The migrator must move both lanes") {

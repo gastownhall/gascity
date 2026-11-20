@@ -86,6 +86,9 @@ func TestBeadsMigrateCommandValidatedAtLoad(t *testing.T) {
 		})
 	}
 
+	if _, err := Parse([]byte("[beads]\nmigrate_command = '''\n/opt/migrator/bd migrate schema\n'''\n")); err != nil {
+		t.Fatalf("a multi-line TOML string holding one command line must load: %v", err)
+	}
 	for name, value := range map[string]string{
 		"unset":     "",
 		"plain":     "/opt/migrator/bd migrate schema",
