@@ -138,14 +138,14 @@ func skipProviderOwnedIdentityReconcile(t *testing.T) {
 }
 
 // providerOwnedIdentityCity is a city whose own scope is provider-owned
-// through a fake exec provider: init writes metadata (when set), every op
-// succeeds, and each op is logged.
+// through a fake exec provider: init writes metadata (when set) and exits
+// initExit, every other op succeeds, and each op is logged.
 type providerOwnedIdentityCity struct {
 	dir   string
 	opLog string
 }
 
-func newProviderOwnedIdentityCity(t *testing.T, metadata string) providerOwnedIdentityCity {
+func newProviderOwnedIdentityCity(t *testing.T, metadata string, initExit int) providerOwnedIdentityCity {
 	t.Helper()
 	clearInheritedBeadsEnv(t)
 	clearProviderOwnedProxyEnv(t)
@@ -159,7 +159,7 @@ func newProviderOwnedIdentityCity(t *testing.T, metadata string) providerOwnedId
 	provider := filepath.Join(tools, "provider.sh")
 	body := "#!/bin/sh\n" +
 		"printf '%s\\n' \"$1\" >> " + strconv.Quote(opLog) + "\n" +
-		"if [ \"$1\" = init ]; then\n" + writeMetadata + "  exit 0\nfi\n" +
+		"if [ \"$1\" = init ]; then\n" + writeMetadata + "  exit " + strconv.Itoa(initExit) + "\nfi\n" +
 		"exit 0\n"
 	if err := os.WriteFile(provider, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
@@ -275,7 +275,7 @@ func writeIdentityFile(t *testing.T, scope, id string) {
 // _project_id = P and no identity.toml gets identity.toml = P, one L1
 // stamped event, and turns ready only after L1 was written.
 func TestInitAndHookDirProviderOwnedReconcilesProjectIdentity(t *testing.T) {
-	city := newProviderOwnedIdentityCity(t, proxiedIdentityMetadata(providerOwnedIdentityP))
+	city := newProviderOwnedIdentityCity(t, proxiedIdentityMetadata(providerOwnedIdentityP), 0)
 	stubLiveProviderOwnedProxy(t)
 	var stateAtOpen string
 	fake := &providerOwnedL3Fake{l3: &projectIdentityL3Double{projectID: providerOwnedIdentityP}}
@@ -323,7 +323,7 @@ func TestInitAndHookDirProviderOwnedReconcileLayers(t *testing.T) {
 		{name: "adopt L1 and L2 from L3", l3: providerOwnedIdentityP, wantLayers: []string{"L1", "L2"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			city := newProviderOwnedIdentityCity(t, proxiedIdentityMetadata(tc.l2))
+			city := newProviderOwnedIdentityCity(t, proxiedIdentityMetadata(tc.l2), 0)
 			if tc.l1 != "" {
 				writeIdentityFile(t, city.dir, tc.l1)
 			}
@@ -548,7 +548,7 @@ func TestInitAndHookDirProviderOwnedIdentityFailureKeepsInitializing(t *testing.
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			metadata := proxiedIdentityMetadata(providerOwnedIdentityP)
-			city := newProviderOwnedIdentityCity(t, metadata)
+			city := newProviderOwnedIdentityCity(t, metadata, 0)
 			_, fix := tc.arrange(t, city)
 			before := city.entry(t)
 			identityBefore, identityErr := os.ReadFile(contract.ProjectIdentityPath(city.dir))
@@ -594,7 +594,7 @@ func TestInitAndHookDirProviderOwnedIdentityFailureKeepsInitializing(t *testing.
 func TestInitAndHookDirProviderOwnedReadyScopeReconcilesEachPass(t *testing.T) {
 	readyCity := func(t *testing.T) (providerOwnedIdentityCity, providerScopeOwnershipEntry) {
 		t.Helper()
-		city := newProviderOwnedIdentityCity(t, proxiedIdentityMetadata(providerOwnedIdentityP))
+		city := newProviderOwnedIdentityCity(t, proxiedIdentityMetadata(providerOwnedIdentityP), 0)
 		stubLiveProviderOwnedProxy(t)
 		stubProviderOwnedL3(t, &providerOwnedL3Fake{l3: &projectIdentityL3Double{projectID: providerOwnedIdentityP}})
 		if err := initAndHookDirResolvingDatabase(city.dir, city.dir, "gc", nil); err != nil {
@@ -638,4 +638,31 @@ func TestInitAndHookDirProviderOwnedReadyScopeReconcilesEachPass(t *testing.T) {
 			t.Fatalf("journal entry = %+v, want unchanged %+v", after, before)
 		}
 	})
+}
+
+// TestInitAndHookDirProviderOwnedInitFailureSkipsIdentity: a failed init op
+// never reaches the reconcile, and the scope stays pending.
+func TestInitAndHookDirProviderOwnedInitFailureSkipsIdentity(t *testing.T) {
+	city := newProviderOwnedIdentityCity(t, "", 1)
+	calls := 0
+	prev := reconcileProviderOwnedScopeIdentityFn
+	reconcileProviderOwnedScopeIdentityFn = func(context.Context, string, string) error {
+		calls++
+		return nil
+	}
+	t.Cleanup(func() { reconcileProviderOwnedScopeIdentityFn = prev })
+	before := city.entry(t)
+
+	if err := initAndHookDirResolvingDatabase(city.dir, city.dir, "gc", nil); err == nil {
+		t.Fatal("initAndHookDirResolvingDatabase succeeded with a failing init op")
+	}
+	if calls != 0 {
+		t.Fatalf("reconcile ran %d time(s) after a failed init, want 0", calls)
+	}
+	if got := city.ops(t); strings.Join(got, " ") != "init" {
+		t.Fatalf("provider ops = %v, want [init]", got)
+	}
+	if after := city.entry(t); after != before || after.State != providerScopeInitializing {
+		t.Fatalf("journal entry = %+v, want unchanged pending %+v", after, before)
+	}
 }
