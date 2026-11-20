@@ -26,13 +26,18 @@ import (
 )
 
 // cliOpCity is a file-backed city with one awake named session running on a
-// fake runtime.
+// fake runtime. store is the city's work store (claims); sessions and mail are
+// its session- and messaging-class stores, which hold the session row and the
+// handoff mail, as cliSessionStore and cliMailStore route the CLI's own
+// session and mail commands.
 type cliOpCity struct {
-	dir   string
-	store beads.Store
-	sp    *runtime.Fake
-	bead  beads.Bead
-	name  string
+	dir      string
+	store    beads.Store
+	sessions beads.Store
+	mail     beads.Store
+	sp       *runtime.Fake
+	bead     beads.Bead
+	name     string
 }
 
 // newCLIOpCity builds the city. Its op rows live in h's opStore, a store
@@ -57,6 +62,8 @@ func newCLIOpCity(t *testing.T, h *cliOpHarness, extra map[string]string) *cliOp
 	if err != nil {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
+	sessions := openCitySessionStoreForTest(t, dir)
+	mail := openCityMailStoreForTest(t, dir)
 	const name = "s-gc-cli-op"
 	meta := map[string]string{
 		"alias":                      killPokeSessionIdentity,
@@ -75,7 +82,7 @@ func newCLIOpCity(t *testing.T, h *cliOpHarness, extra map[string]string) *cliOp
 		}
 		meta[k] = v
 	}
-	b, err := store.Create(beads.Bead{
+	b, err := sessions.Create(beads.Bead{
 		Title:    "named session",
 		Type:     session.BeadType,
 		Labels:   []string{session.LabelSession, "template:worker"},
@@ -93,10 +100,10 @@ func newCLIOpCity(t *testing.T, h *cliOpHarness, extra map[string]string) *cliOp
 	oldPoke := sessionKillPokeController
 	sessionKillPokeController = func(string, reconcilekey.Key) error { return nil }
 	t.Cleanup(func() { sessionKillPokeController = oldPoke })
-	return &cliOpCity{dir: dir, store: store, sp: sp, bead: b, name: name}
+	return &cliOpCity{dir: dir, store: store, sessions: sessions, mail: mail, sp: sp, bead: b, name: name}
 }
 
-// reload reopens the city store, so a read sees what a command wrote.
+// reload reopens the city's work store, so a read sees what a command wrote.
 func (c *cliOpCity) reload(t *testing.T) beads.Store {
 	t.Helper()
 	s, err := openCityStoreAt(c.dir)
@@ -106,10 +113,24 @@ func (c *cliOpCity) reload(t *testing.T) beads.Store {
 	return s
 }
 
+// reloadSessions reopens the city's session store, so a read of the session
+// row sees what a command wrote.
+func (c *cliOpCity) reloadSessions(t *testing.T) beads.Store {
+	t.Helper()
+	return openCitySessionStoreForTest(t, c.dir)
+}
+
+// reloadMail reopens the city's messaging store, so a read of the mail sees
+// what a command wrote.
+func (c *cliOpCity) reloadMail(t *testing.T) beads.Store {
+	t.Helper()
+	return openCityMailStoreForTest(t, c.dir)
+}
+
 // row reads the session bead fresh.
 func (c *cliOpCity) row(t *testing.T) beads.Bead {
 	t.Helper()
-	b, err := c.reload(t).Get(c.bead.ID)
+	b, err := c.reloadSessions(t).Get(c.bead.ID)
 	if err != nil {
 		t.Fatalf("reading session bead: %v", err)
 	}
@@ -120,7 +141,7 @@ func (c *cliOpCity) row(t *testing.T) beads.Bead {
 // reviving it after a kill would.
 func (c *cliOpCity) restartAs(t *testing.T, gen int) {
 	t.Helper()
-	if err := c.reload(t).SetMetadataBatch(c.bead.ID, map[string]string{
+	if err := c.reloadSessions(t).SetMetadataBatch(c.bead.ID, map[string]string{
 		"generation": strconv.Itoa(gen), "state": "awake", "state_reason": "",
 	}); err != nil {
 		t.Fatalf("reviving the session row: %v", err)
@@ -143,7 +164,7 @@ func (c *cliOpCity) closeForReopen(t *testing.T) {
 	if !ok {
 		t.Fatalf("no configured named session %q", killPokeSessionIdentity)
 	}
-	store := c.reload(t)
+	store := c.reloadSessions(t)
 	if err := store.SetMetadataBatch(c.bead.ID, map[string]string{
 		"session_name": spec.SessionName, "close_reason": "suspended",
 	}); err != nil {
@@ -165,13 +186,15 @@ func (c *cliOpCity) unreadableAtRead(t *testing.T) {
 		if !damaged {
 			damaged = true
 			task := "task"
-			if err := c.reload(t).Update(c.bead.ID, beads.UpdateOpts{Type: &task, RemoveLabels: []string{session.LabelSession}}); err != nil {
+			if err := c.reloadSessions(t).Update(c.bead.ID, beads.UpdateOpts{Type: &task, RemoveLabels: []string{session.LabelSession}}); err != nil {
 				t.Fatalf("damaging the session row: %v", err)
 			}
 		}
 		return oldBuild(cfg, name, sc, cityName, cityPath)
 	}
 	sessionKillHandle = func(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, id string) (worker.Handle, error) {
+		// Damaged, the row is a task, so the repair reaches it through the
+		// work store.
 		typ := session.BeadType
 		if err := c.reload(t).Update(c.bead.ID, beads.UpdateOpts{Type: &typ, Labels: []string{session.LabelSession}}); err != nil {
 			t.Fatalf("repairing the session row: %v", err)
@@ -588,7 +611,7 @@ func TestSessionKillOpLeaseBusyClosesRefused(t *testing.T) {
 	h := newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": "auto"})
 	c := newCLIOpCity(t, h, nil)
 	defer session.SetOperatorLeaseWaitForTest(100 * time.Millisecond)()
-	held, err := session.TryRuntimeLease(sessionFrontDoor(c.store), session.RuntimeLeaseRequest{
+	held, err := session.TryRuntimeLease(sessionFrontDoor(c.sessions), session.RuntimeLeaseRequest{
 		City: c.dir, Name: c.name, ID: c.bead.ID, TTL: time.Minute,
 	})
 	if err != nil {
@@ -618,7 +641,7 @@ func TestSessionSuspendOpFailureClosesFailed(t *testing.T) {
 		h := newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": "auto"})
 		c := newCLIOpCity(t, h, nil)
 		stubSessionSuspendController(t, true)
-		if err := c.store.Close(c.bead.ID); err != nil {
+		if err := c.sessions.Close(c.bead.ID); err != nil {
 			t.Fatalf("closing session bead: %v", err)
 		}
 		var stdout, stderr bytes.Buffer
@@ -751,7 +774,7 @@ func TestSessionKillOpUnnamedInactiveClosesFailedAndReplaysFailed(t *testing.T) 
 				t.Fatalf("stopping fake runtime: %v", err)
 			}
 			if tc.closed {
-				if err := c.store.Close(c.bead.ID); err != nil {
+				if err := c.sessions.Close(c.bead.ID); err != nil {
 					t.Fatalf("closing session bead: %v", err)
 				}
 			}
@@ -904,19 +927,28 @@ func cliOpWakeCase(t *testing.T) cliOpVerbCase {
 }
 
 // A city config that does not load leaves its [ops] gates unread: the verb
-// says so instead of silently running unrecorded, and a gate set in the
+// says so, each gate takes its builtin default, and a gate set in the
 // environment still applies.
 func TestSessionVerbOpConfigLoadFailure(t *testing.T) {
 	const broken = "\n[ops]\nlifecycle = \"require\"\ncontent = \"bogus\"\n"
 	t.Run("warns that the gates were not read", func(t *testing.T) {
 		f := newCLIOpVerbFixture(t, cliOpWakeCase(t), nil)
 		appendCityTOML(t, f.c.dir, broken)
-		r := f.run("", false)
+		r := f.run("k-1", false)
 		if r.code != 0 {
 			t.Fatalf("wake = %d; stderr=%s", r.code, r.stderr)
 		}
-		if !strings.Contains(r.stderr, "[ops] gates were not read") {
-			t.Fatalf("stderr = %q, want a warning that the [ops] gates were not read", r.stderr)
+		if !strings.Contains(r.stderr, "[ops] gates were not read, so each takes its builtin default") {
+			t.Fatalf("stderr = %q, want a warning that the [ops] gates were not read and take their builtin defaults", r.stderr)
+		}
+		// The lifecycle gate's builtin default is auto, which records only
+		// over a SQLite sessions store: over this city's it runs unrecorded,
+		// and the --key run says why.
+		if !strings.Contains(r.stderr, "op journal open failed ("+legacyop.DegradeNotRecordedByDefault+")") {
+			t.Fatalf("stderr = %q, want the builtin auto default's not-recorded warning for a --key run", r.stderr)
+		}
+		if ops := cliOpRows(t, f.h.opStore); len(ops) != 0 {
+			t.Fatalf("op rows = %+v, want none under the builtin auto default over a non-SQLite store", ops)
 		}
 	})
 	t.Run("an environment require still refuses", func(t *testing.T) {
@@ -1160,7 +1192,7 @@ func TestSessionWakeOpJSONReplayNotesTheOpOnStderr(t *testing.T) {
 // With the gate off --key is not read at all: an invalid one draws no
 // warning.
 func TestSessionWakeOpOffIgnoresAnInvalidKey(t *testing.T) {
-	newCLIOpHarness(t, nil)
+	newCLIOpHarness(t, cliOpsOffEnv())
 	f := newCLIOpWakeFixture(t)
 	code, _, stderr := f.run(t, " padded", false)
 	if code != 0 || stderr != "" {
@@ -1222,7 +1254,7 @@ func TestSessionVerbOpRequireReportsTheStoreBeforeTheKey(t *testing.T) {
 			if r.code != 1 {
 				t.Fatalf("%s = %d, want 1; stderr=%s", tc.name, r.code, r.stderr)
 			}
-			if got := cliOpFailureCode(t, []byte(r.stdout)); got != cliOpCodeUnavailable {
+			if got := tc.failureCode(t, r); got != cliOpCodeUnavailable {
 				t.Fatalf("failure code = %q, want %s", got, cliOpCodeUnavailable)
 			}
 		})
@@ -1346,7 +1378,7 @@ func TestSessionKillOpRefusesAGenerationThatMovedBeforeTheLease(t *testing.T) {
 		}
 		lease.Release()
 	}
-	start, err := session.TryRuntimeLease(sessionFrontDoor(c.store), session.RuntimeLeaseRequest{
+	start, err := session.TryRuntimeLease(sessionFrontDoor(c.sessions), session.RuntimeLeaseRequest{
 		City: c.dir, Name: c.name, ID: c.bead.ID, TTL: time.Minute,
 	})
 	if err != nil {
@@ -1362,7 +1394,7 @@ func TestSessionKillOpRefusesAGenerationThatMovedBeforeTheLease(t *testing.T) {
 			}
 			t.Errorf("the kill asked for its runtime lease while the start did not hold it: %v", err)
 		}
-		if err := c.reload(t).SetMetadataBatch(c.bead.ID, map[string]string{"generation": "5"}); err != nil {
+		if err := c.reloadSessions(t).SetMetadataBatch(c.bead.ID, map[string]string{"generation": "5"}); err != nil {
 			t.Fatalf("minting generation 5: %v", err)
 		}
 		start.Release()
@@ -1637,7 +1669,7 @@ func TestSessionCloseOpKeyReplaysOnlyByID(t *testing.T) {
 	if m := cliOpJSON(t, stdout.Bytes()); m["session_id"] != replacement || m["replayed"] == true || m["op_id"] == first.ID {
 		t.Fatalf("same-key close by alias JSON %v, want a new close of %s", m, replacement)
 	}
-	if got, err := c.reload(t).Get(replacement); err != nil || got.Status != "closed" {
+	if got, err := c.reloadSessions(t).Get(replacement); err != nil || got.Status != "closed" {
 		t.Fatalf("session %s = %+v (%v), want it closed", replacement, got, err)
 	}
 
@@ -1676,8 +1708,13 @@ func TestSessionWakeOpRetargetsWhenTheReopenFallsThrough(t *testing.T) {
 	}
 	var stdout, stderr bytes.Buffer
 	code := doSessionWake(killPokeSessionIdentity, &stdout, &stderr, true, sessionWakeDeps{
-		opKey:                     "move-1",
-		store:                     cliOpReopenFailStore{Store: c.reload(t)},
+		opKey: "move-1",
+		// Production hands doSessionWake the work store and derives the
+		// session store from it. The failing-reopen wrapper wraps the session
+		// store instead: the split-strict gate cannot see a class view
+		// through a test wrapper around its work view, so wrapping the work
+		// store would materialize the row through the work view.
+		store:                     cliOpReopenFailStore{Store: c.reloadSessions(t)},
 		cfg:                       cfg,
 		cityPath:                  c.dir,
 		cityResolved:              true,

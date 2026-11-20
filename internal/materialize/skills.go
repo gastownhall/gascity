@@ -124,19 +124,27 @@ func SupportedVendors() []string {
 // that a sink symlink will target.
 type SkillEntry struct {
 	// Name is the skill name (sink leaf). Matches the source directory
-	// basename, e.g. "gc-work" or "plan".
+	// basename, e.g. "gc-work" or "plan", qualified as
+	// "<binding>.<basename>" (e.g. "core.gc-work") for a skill imported
+	// under a pack binding.
 	Name string
 	// Source is the absolute filesystem path of the source directory.
 	// The materialized symlink targets this path.
 	Source string
 	// Origin is a diagnostic label describing which catalog this entry
-	// came from. One of: "city", "<bootstrap-pack-name>", "agent".
+	// came from. One of: "city", "<binding-name>" for an imported pack,
+	// "<bootstrap-pack-name>", "agent".
 	Origin string
 	// Description is the one-line summary pulled from the SKILL.md YAML
 	// frontmatter `description:` field, or "" when the frontmatter is
 	// absent/malformed. Used by prompt-rendering surfaces that want to
 	// show each skill's purpose alongside its name.
 	Description string
+	// FrontmatterName is the SKILL.md YAML frontmatter `name:` value, or
+	// "" when unavailable. It is display metadata only — a provider that
+	// registers skills by frontmatter name loads the skill under it — and
+	// never an identity key: Name keys the sink, manifest and fingerprints.
+	FrontmatterName string
 }
 
 // ShadowedEntry records a name that was provided by more than one source
@@ -374,6 +382,10 @@ type Request struct {
 	// Use LegacyOwnedRootsFor for the canonical list. Pass nil to keep
 	// the historical behavior.
 	LegacyOwnedRoots []string
+	// DryRun computes the pass without touching the filesystem: no sink
+	// directory, symlink, removal, or ownership manifest. The Result
+	// reports what a real pass would do.
+	DryRun bool
 }
 
 // SkippedConflict records a name in the desired set that could not be
@@ -393,7 +405,7 @@ type SkippedConflict struct {
 // invocation. Lists are sorted for deterministic test/log output.
 type Result struct {
 	// Materialized is the list of names whose symlinks now point at the
-	// desired source (created or already correct).
+	// desired source (created or already correct); after a DryRun, would.
 	Materialized []string
 	// Skipped lists desired names that were not materialized because
 	// user content occupies the target path.
@@ -406,6 +418,12 @@ type Result struct {
 	// (typically I/O errors on individual entries). The pass continued
 	// past each warning.
 	Warnings []string
+	// Created, Relinked, and Removed list the names whose symlink the
+	// pass created, re-pointed at a new target, or deleted (in a DryRun:
+	// would have).
+	Created  []string
+	Relinked []string
+	Removed  []string
 }
 
 // ownershipManifestFile is the name of the small bookkeeping file the
@@ -475,7 +493,8 @@ func manifestRecordsTarget(m ownershipManifest, name, canonTarget string) bool {
 //
 // Pass order:
 //
-//  1. Ensure SinkDir exists (mkdir -p).
+//  1. Ensure SinkDir exists (mkdir -p; a DryRun only notes that it is
+//     missing).
 //  2. Legacy-stub migration: for each name in req.LegacyNames, if a
 //     regular directory at <SinkDir>/<name> matches the v0.15.0 stub
 //     shape exactly, remove it.
@@ -498,9 +517,14 @@ func Run(req Request) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("resolving sink dir %q: %w", req.SinkDir, err)
 	}
-	if err := os.MkdirAll(absSink, 0o755); err != nil {
-		return Result{}, fmt.Errorf("creating sink dir %q: %w", absSink, err)
+	if !req.DryRun {
+		if err := os.MkdirAll(absSink, 0o755); err != nil {
+			return Result{}, fmt.Errorf("creating sink dir %q: %w", absSink, err)
+		}
 	}
+	// pendingRemoval holds legacy stub directories a DryRun would have
+	// removed, so the create step plans them as free paths.
+	pendingRemoval := make(map[string]bool)
 
 	desiredByName := make(map[string]SkillEntry, len(req.Desired))
 	for _, e := range req.Desired {
@@ -541,8 +565,9 @@ func Run(req Request) (Result, error) {
 	// Step 2: legacy stub migration.
 	for _, name := range req.LegacyNames {
 		path := filepath.Join(absSink, name)
-		if removed, warn := tryRemoveLegacyStub(path, name); removed {
+		if removed, warn := tryRemoveLegacyStub(path, name, req.DryRun); removed {
 			result.LegacyMigrated = append(result.LegacyMigrated, name)
+			pendingRemoval[name] = req.DryRun
 		} else if warn != "" {
 			result.Warnings = append(result.Warnings, warn)
 		}
@@ -550,7 +575,7 @@ func Run(req Request) (Result, error) {
 
 	// Step 3: cleanup walk.
 	dirEntries, err := os.ReadDir(absSink)
-	if err != nil {
+	if err != nil && (!req.DryRun || !os.IsNotExist(err)) {
 		return result, fmt.Errorf("reading sink dir %q: %w", absSink, err)
 	}
 	for _, de := range dirEntries {
@@ -609,9 +634,16 @@ func Run(req Request) (Result, error) {
 				}
 			}
 			// Owned but not desired — delete (covers dangling and orphaned).
+			if req.DryRun {
+				result.Removed = append(result.Removed, name)
+				continue
+			}
 			if rmErr := os.Remove(path); rmErr != nil {
 				result.Warnings = append(result.Warnings, fmt.Sprintf("removing orphan symlink %q: %v", path, rmErr))
-			} else if _, had := manifest.Targets[name]; had {
+				continue
+			}
+			result.Removed = append(result.Removed, name)
+			if _, had := manifest.Targets[name]; had {
 				delete(manifest.Targets, name)
 				manifestDirty = true
 			}
@@ -642,12 +674,15 @@ func Run(req Request) (Result, error) {
 		// Drifted target — atomic replace. Use the lexical desiredAbs
 		// (not canonicalized) so the on-disk symlink target remains the
 		// caller-intended path; canonicalization is comparison-only.
-		if rerr := atomicSymlink(desiredAbs, path); rerr != nil {
-			result.Warnings = append(result.Warnings, fmt.Sprintf("replacing symlink %q: %v", path, rerr))
-			continue
+		if !req.DryRun {
+			if rerr := atomicSymlink(desiredAbs, path); rerr != nil {
+				result.Warnings = append(result.Warnings, fmt.Sprintf("replacing symlink %q: %v", path, rerr))
+				continue
+			}
+			manifest.Targets[name] = canonDesired
+			manifestDirty = true
 		}
-		manifest.Targets[name] = canonDesired
-		manifestDirty = true
+		result.Relinked = append(result.Relinked, name)
 		result.Materialized = append(result.Materialized, name)
 		delete(desiredByName, name)
 	}
@@ -668,6 +703,10 @@ func Run(req Request) (Result, error) {
 			continue
 		}
 		info, lerr := os.Lstat(path)
+		if lerr == nil && pendingRemoval[name] {
+			// A DryRun's legacy-stub migration frees this path.
+			lerr = os.ErrNotExist
+		}
 		if lerr == nil {
 			// Something exists. If it's a symlink we already handled it
 			// in step 3 (otherwise the desiredByName entry would have
@@ -689,21 +728,24 @@ func Run(req Request) (Result, error) {
 			})
 			continue
 		}
-		if !os.IsNotExist(lerr) {
+		if !errors.Is(lerr, os.ErrNotExist) {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("lstat %q: %v", path, lerr))
 			continue
 		}
-		if cerr := atomicSymlink(desiredAbs, path); cerr != nil {
-			return result, fmt.Errorf("creating symlink %q -> %q: %w", path, desiredAbs, cerr)
+		if !req.DryRun {
+			if cerr := atomicSymlink(desiredAbs, path); cerr != nil {
+				return result, fmt.Errorf("creating symlink %q -> %q: %w", path, desiredAbs, cerr)
+			}
+			if canonDesired, cerr := canonicalizePath(desiredAbs); cerr == nil {
+				manifest.Targets[name] = canonDesired
+				manifestDirty = true
+			}
 		}
-		if canonDesired, cerr := canonicalizePath(desiredAbs); cerr == nil {
-			manifest.Targets[name] = canonDesired
-			manifestDirty = true
-		}
+		result.Created = append(result.Created, name)
 		result.Materialized = append(result.Materialized, name)
 	}
 
-	if manifestDirty {
+	if manifestDirty && !req.DryRun {
 		if serr := saveOwnershipManifest(absSink, manifest); serr != nil {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("saving ownership manifest: %v", serr))
 		}
@@ -713,6 +755,9 @@ func Run(req Request) (Result, error) {
 	sort.Slice(result.Skipped, func(i, j int) bool { return result.Skipped[i].Name < result.Skipped[j].Name })
 	sort.Strings(result.LegacyMigrated)
 	sort.Strings(result.Warnings)
+	sort.Strings(result.Created)
+	sort.Strings(result.Relinked)
+	sort.Strings(result.Removed)
 	return result, nil
 }
 
@@ -776,36 +821,46 @@ func LegacyStubNames() []string {
 	return out
 }
 
-// readSkillDescription parses the SKILL.md YAML frontmatter and returns
-// the `description:` value. Returns "" when:
+// skillFrontmatter holds the SKILL.md frontmatter fields gc reads.
+type skillFrontmatter struct {
+	Name        string
+	Description string
+}
+
+// readSkillFrontmatter parses the SKILL.md YAML frontmatter and returns
+// its `name:` and `description:` values. Both are "" when:
 //   - the file is unreadable
-//   - the file has no `---` frontmatter delimiters
-//   - the frontmatter lacks a description key
+//   - the file has no opening `---` delimiter on its first line
 //
-// Only the first 64 lines of the file are scanned — description lives
-// in frontmatter near the top; this caps the I/O cost of rendering
-// every skill's description alongside the catalog without pulling
-// large skill bodies into memory.
+// and each is "" when the frontmatter lacks its key.
 //
-// This is a minimal YAML consumer rather than a real parser. It
-// recognizes `description: <value>` (single-line), strips optional
-// surrounding quotes, and stops at the closing `---` delimiter.
-// Multi-line block scalars (`description: >\n  ...`) are not
-// supported in v0.15.1 and return "" — same end state as a missing
-// description, which the caller handles gracefully.
-func readSkillDescription(path string) string {
+// Only the first 64 lines of the file are scanned — both keys live in
+// frontmatter near the top; this caps the I/O cost of reading every
+// skill alongside the catalog without pulling large skill bodies into
+// memory.
+//
+// This is a minimal YAML consumer rather than a real parser. It stops
+// at the closing `---` delimiter, keeps the first value seen for each
+// key, trims it and strips one matching pair of surrounding quotes.
+// `name:` matches only at column zero, so a nested `name:` under
+// another key is not the skill's name; `description:` also matches
+// when indented. Values are taken literally from their own line: a
+// block-scalar indicator (`description: >`) or an inline `# comment`
+// is returned as written.
+func readSkillFrontmatter(path string) skillFrontmatter {
+	var fm skillFrontmatter
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return ""
+		return fm
 	}
 	// Strip optional UTF-8 BOM before the frontmatter check. Editors
 	// on Windows and some export pipelines prepend EF BB BF; without
 	// this the prefix check would silently fail and every exported
-	// SKILL.md would surface with a blank description.
+	// SKILL.md would surface with blank frontmatter.
 	text := strings.TrimPrefix(string(data), "\ufeff")
 	// Require frontmatter to begin on the first line.
 	if !strings.HasPrefix(text, "---\n") && !strings.HasPrefix(text, "---\r\n") {
-		return ""
+		return fm
 	}
 	// Find the closing `---` on a line by itself.
 	lines := strings.Split(text, "\n")
@@ -814,27 +869,38 @@ func readSkillDescription(path string) string {
 	if end > maxScan {
 		end = maxScan
 	}
-	for i := 1; i < end; i++ {
+	var seenName, seenDescription bool
+	for i := 1; i < end && (!seenName || !seenDescription); i++ {
 		line := strings.TrimRight(lines[i], "\r")
 		if line == "---" {
 			break
 		}
-		trimmed := strings.TrimLeft(line, " \t")
-		if !strings.HasPrefix(trimmed, "description:") {
+		if !seenName && strings.HasPrefix(line, "name:") {
+			fm.Name = frontmatterValue(strings.TrimPrefix(line, "name:"))
+			seenName = true
 			continue
 		}
-		value := strings.TrimSpace(strings.TrimPrefix(trimmed, "description:"))
-		// Strip a matching pair of surrounding quotes; no escape handling
-		// needed for the typical single-line description.
-		if len(value) >= 2 {
-			first, last := value[0], value[len(value)-1]
-			if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
-				value = value[1 : len(value)-1]
-			}
+		trimmed := strings.TrimLeft(line, " \t")
+		if !seenDescription && strings.HasPrefix(trimmed, "description:") {
+			fm.Description = frontmatterValue(strings.TrimPrefix(trimmed, "description:"))
+			seenDescription = true
 		}
-		return value
 	}
-	return ""
+	return fm
+}
+
+// frontmatterValue trims a single-line frontmatter value and strips a
+// matching pair of surrounding quotes; no escape handling is needed for
+// the typical single-line value.
+func frontmatterValue(raw string) string {
+	value := strings.TrimSpace(raw)
+	if len(value) >= 2 {
+		first, last := value[0], value[len(value)-1]
+		if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
+			value = value[1 : len(value)-1]
+		}
+	}
+	return value
 }
 
 // readSkillDir enumerates skill subdirectories of root. A subdirectory
@@ -869,11 +935,13 @@ func readSkillDir(root, origin string) ([]SkillEntry, error) {
 		if _, statErr := os.Stat(skillMD); statErr != nil {
 			continue
 		}
+		fm := readSkillFrontmatter(skillMD)
 		out = append(out, SkillEntry{
-			Name:        e.Name(),
-			Source:      dir,
-			Origin:      origin,
-			Description: readSkillDescription(skillMD),
+			Name:            e.Name(),
+			Source:          dir,
+			Origin:          origin,
+			Description:     fm.Description,
+			FrontmatterName: fm.Name,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
@@ -1005,7 +1073,7 @@ func tempSymlinkPath(dir, base string) (string, error) {
 // when the directory was removed, (false, "") when the directory does
 // not match (left alone — typical case once converged), and
 // (false, warning) when an unexpected I/O error blocks the decision.
-func tryRemoveLegacyStub(path, name string) (bool, string) {
+func tryRemoveLegacyStub(path, name string, dryRun bool) (bool, string) {
 	body, ok := legacyStubBodies[name]
 	if !ok {
 		return false, ""
@@ -1038,6 +1106,9 @@ func tryRemoveLegacyStub(path, name string) (bool, string) {
 	if string(got) != body {
 		// User-edited stub — preserve.
 		return false, ""
+	}
+	if dryRun {
+		return true, ""
 	}
 	if err := os.RemoveAll(path); err != nil {
 		return false, fmt.Sprintf("removing legacy stub dir %q: %v", path, err)

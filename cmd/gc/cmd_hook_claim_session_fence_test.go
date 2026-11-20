@@ -57,15 +57,11 @@ dir = "aoa"
 	return cityDir
 }
 
-// newFenceSessionBead creates a session bead in the city store with the given
+// newFenceSessionBead creates a session bead in the city's session store with the given
 // runtime state and instance token, returning its id.
 func newFenceSessionBead(t *testing.T, cityDir string, state session.State, instanceToken string) string {
 	t.Helper()
-	store, err := openCityStoreAt(cityDir)
-	if err != nil {
-		t.Fatalf("openCityStoreAt: %v", err)
-	}
-	bead, err := store.Create(beads.Bead{
+	bead, err := openCitySessionStoreForTest(t, cityDir).Create(beads.Bead{
 		Title:  "worker-1",
 		Type:   session.BeadType,
 		Labels: []string{"gc:session", "agent:worker-1"},

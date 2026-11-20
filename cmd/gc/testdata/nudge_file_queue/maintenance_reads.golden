@@ -255,7 +255,7 @@ result: [n-open-shadow] err=<nil>
 rewrote_state: true
 store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
 warnings:
-gc nudge: warning: marking dead-lettered nudge "n-open-shadow" terminal: injected shadow write failure
+gc nudge: warning: marking nudge "n-open-shadow" failed: injected shadow write failure
 state.json:
 {
   "pending": [
@@ -331,7 +331,15 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-7"
+      "dead_at": "T-7",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-7",
+        "attempts": 1,
+        "not_before": "T-8",
+        "last_error": "injected shadow write failure"
+      }
     }
   ]
 }
@@ -340,9 +348,6 @@ state.json:
 result: [n-kept] err=<nil>
 rewrote_state: true
 store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
-op List {label=nudge:n-open-shadow include_closed limit=21}
-op SetMetadataBatch BEAD-1
-op Close BEAD-1
 op SetMetadataBatch BEAD-2
 op Close BEAD-2
 state.json:
@@ -406,7 +411,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-7"
+      "dead_at": "T-7",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-7",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-open-shadow",
@@ -422,7 +434,15 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-7"
+      "dead_at": "T-7",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-7",
+        "attempts": 1,
+        "not_before": "T-8",
+        "last_error": "injected shadow write failure"
+      }
     }
   ]
 }
@@ -430,7 +450,7 @@ state.json:
 ### claim n-lapse an hour ago
 result: [n-lapse] err=<nil>
 rewrote_state: true
-store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
 state.json:
 {
   "pending": [
@@ -460,8 +480,8 @@ state.json:
       "deliver_after": "T-5",
       "expires_at": "T-6",
       "last_attempt_at": "TZERO-1",
-      "claimed_at": "T-8",
-      "lease_until": "T-9",
+      "claimed_at": "T-9",
+      "lease_until": "T-10",
       "dead_at": "TZERO-1"
     }
   ],
@@ -494,7 +514,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-7"
+      "dead_at": "T-7",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-7",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-open-shadow",
@@ -510,7 +537,15 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-7"
+      "dead_at": "T-7",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-7",
+        "attempts": 1,
+        "not_before": "T-8",
+        "last_error": "injected shadow write failure"
+      }
     }
   ]
 }
@@ -548,8 +583,8 @@ state.json:
       "deliver_after": "T-5",
       "expires_at": "T-6",
       "last_attempt_at": "TZERO-1",
-      "claimed_at": "T-8",
-      "lease_until": "T-9",
+      "claimed_at": "T-9",
+      "lease_until": "T-10",
       "dead_at": "TZERO-1"
     }
   ],
@@ -582,7 +617,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-7"
+      "dead_at": "T-7",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-7",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-open-shadow",
@@ -598,7 +640,15 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-7"
+      "dead_at": "T-7",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-7",
+        "attempts": 1,
+        "not_before": "T-8",
+        "last_error": "injected shadow write failure"
+      }
     }
   ]
 }
@@ -636,8 +686,8 @@ state.json:
       "deliver_after": "T-5",
       "expires_at": "T-6",
       "last_attempt_at": "TZERO-1",
-      "claimed_at": "T-8",
-      "lease_until": "T-9",
+      "claimed_at": "T-9",
+      "lease_until": "T-10",
       "dead_at": "TZERO-1"
     }
   ],
@@ -670,7 +720,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-7"
+      "dead_at": "T-7",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-7",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-open-shadow",
@@ -686,7 +743,15 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-7"
+      "dead_at": "T-7",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-7",
+        "attempts": 1,
+        "not_before": "T-8",
+        "last_error": "injected shadow write failure"
+      }
     }
   ]
 }
@@ -724,8 +789,8 @@ state.json:
       "deliver_after": "T-5",
       "expires_at": "T-6",
       "last_attempt_at": "TZERO-1",
-      "claimed_at": "T-8",
-      "lease_until": "T-9",
+      "claimed_at": "T-9",
+      "lease_until": "T-10",
       "dead_at": "TZERO-1"
     }
   ],
@@ -758,7 +823,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-7"
+      "dead_at": "T-7",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-7",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-open-shadow",
@@ -774,7 +846,15 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-7"
+      "dead_at": "T-7",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-7",
+        "attempts": 1,
+        "not_before": "T-8",
+        "last_error": "injected shadow write failure"
+      }
     }
   ]
 }
@@ -812,8 +892,8 @@ state.json:
       "deliver_after": "T-5",
       "expires_at": "T-6",
       "last_attempt_at": "TZERO-1",
-      "claimed_at": "T-8",
-      "lease_until": "T-9",
+      "claimed_at": "T-9",
+      "lease_until": "T-10",
       "dead_at": "TZERO-1"
     }
   ],
@@ -846,7 +926,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-7"
+      "dead_at": "T-7",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-7",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-open-shadow",
@@ -862,7 +949,15 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-7"
+      "dead_at": "T-7",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-7",
+        "attempts": 1,
+        "not_before": "T-8",
+        "last_error": "injected shadow write failure"
+      }
     }
   ]
 }
@@ -870,9 +965,7 @@ state.json:
 ### classify for drop
 result: {n-kept=already-dead n-lapse=droppable n-pad=droppable} err=<nil>
 rewrote_state: true
-store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
-op List {label=nudge:n-kept include_closed limit=21}
-op List {label=nudge:n-open-shadow include_closed limit=21}
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
 state.json:
 {
   "pending": [
@@ -897,7 +990,7 @@ state.json:
       "source": "session",
       "message": "message n-lapse",
       "created_at": "T-5",
-      "deliver_after": "T-10",
+      "deliver_after": "T-11",
       "expires_at": "T-6",
       "last_attempt_at": "TZERO-1",
       "claimed_at": "TZERO-1",
@@ -934,7 +1027,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-7"
+      "dead_at": "T-7",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-7",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-open-shadow",
@@ -950,7 +1050,15 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-7"
+      "dead_at": "T-7",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-7",
+        "attempts": 1,
+        "not_before": "T-8",
+        "last_error": "injected shadow write failure"
+      }
     }
   ]
 }
@@ -983,7 +1091,7 @@ state.json:
       "source": "session",
       "message": "message n-lapse",
       "created_at": "T-5",
-      "deliver_after": "T-10",
+      "deliver_after": "T-11",
       "expires_at": "T-6",
       "last_attempt_at": "TZERO-1",
       "claimed_at": "TZERO-1",
@@ -1020,7 +1128,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-7"
+      "dead_at": "T-7",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-7",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-open-shadow",
@@ -1036,7 +1151,15 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-7"
+      "dead_at": "T-7",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-7",
+        "attempts": 1,
+        "not_before": "T-8",
+        "last_error": "injected shadow write failure"
+      }
     }
   ],
   "dispatch_skips": {
@@ -1073,7 +1196,7 @@ state.json:
       "source": "session",
       "message": "message n-lapse",
       "created_at": "T-5",
-      "deliver_after": "T-10",
+      "deliver_after": "T-11",
       "expires_at": "T-6",
       "last_attempt_at": "TZERO-1",
       "claimed_at": "TZERO-1",
@@ -1110,7 +1233,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-7"
+      "dead_at": "T-7",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-7",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-open-shadow",
@@ -1126,7 +1256,15 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-7"
+      "dead_at": "T-7",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-7",
+        "attempts": 1,
+        "not_before": "T-8",
+        "last_error": "injected shadow write failure"
+      }
     }
   ],
   "dispatch_skips": {
@@ -1163,7 +1301,7 @@ state.json:
       "source": "session",
       "message": "message n-lapse",
       "created_at": "T-5",
-      "deliver_after": "T-10",
+      "deliver_after": "T-11",
       "expires_at": "T-6",
       "last_attempt_at": "TZERO-1",
       "claimed_at": "TZERO-1",
@@ -1200,7 +1338,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-7"
+      "dead_at": "T-7",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-7",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-open-shadow",
@@ -1216,7 +1361,15 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-7"
+      "dead_at": "T-7",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-7",
+        "attempts": 1,
+        "not_before": "T-8",
+        "last_error": "injected shadow write failure"
+      }
     }
   ],
   "dispatch_skips": {
@@ -1253,7 +1406,7 @@ state.json:
       "source": "session",
       "message": "message n-lapse",
       "created_at": "T-5",
-      "deliver_after": "T-10",
+      "deliver_after": "T-11",
       "expires_at": "T-6",
       "last_attempt_at": "TZERO-1",
       "claimed_at": "TZERO-1",
@@ -1290,7 +1443,14 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-7"
+      "dead_at": "T-7",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-7",
+        "paid": true,
+        "not_before": "TZERO-1"
+      }
     },
     {
       "id": "n-open-shadow",
@@ -1306,7 +1466,15 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-7"
+      "dead_at": "T-7",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-7",
+        "attempts": 1,
+        "not_before": "T-8",
+        "last_error": "injected shadow write failure"
+      }
     }
   ],
   "dispatch_skips": {
@@ -1319,6 +1487,8 @@ state.json:
 result: <nil>
 rewrote_state: true
 store_opens: 1 store_closes: 0 census_calls: 0 wake_pings: 0
+warnings:
+gc nudge: warning: marking nudge "n-open-shadow" failed: no nudges store is open
 state.json:
 {
   "pending": [
@@ -1343,7 +1513,7 @@ state.json:
       "source": "session",
       "message": "message n-lapse",
       "created_at": "T-5",
-      "deliver_after": "T-10",
+      "deliver_after": "T-11",
       "expires_at": "T-6",
       "last_attempt_at": "TZERO-1",
       "claimed_at": "TZERO-1",
@@ -1367,22 +1537,6 @@ state.json:
       "dead_at": "TZERO-1"
     },
     {
-      "id": "n-kept",
-      "bead_id": "BEAD-2",
-      "agent": "alpha",
-      "source": "session",
-      "message": "message n-kept",
-      "created_at": "T-1",
-      "deliver_after": "T-1",
-      "expires_at": "T-2",
-      "attempts": 1,
-      "last_attempt_at": "T-7",
-      "last_error": "dropped by operator (gc nudge drop)",
-      "claimed_at": "TZERO-1",
-      "lease_until": "TZERO-1",
-      "dead_at": "T-7"
-    },
-    {
       "id": "n-open-shadow",
       "bead_id": "BEAD-1",
       "agent": "alpha",
@@ -1396,7 +1550,15 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-7"
+      "dead_at": "T-7",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-7",
+        "attempts": 2,
+        "not_before": "T-12",
+        "last_error": "no nudges store is open"
+      }
     }
   ],
   "dispatch_skips": {
@@ -1433,7 +1595,7 @@ state.json:
       "source": "session",
       "message": "message n-lapse",
       "created_at": "T-5",
-      "deliver_after": "T-10",
+      "deliver_after": "T-11",
       "expires_at": "T-6",
       "last_attempt_at": "TZERO-1",
       "claimed_at": "TZERO-1",
@@ -1455,22 +1617,6 @@ state.json:
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
       "dead_at": "TZERO-1"
-    },
-    {
-      "id": "n-kept",
-      "bead_id": "BEAD-2",
-      "agent": "alpha",
-      "source": "session",
-      "message": "message n-kept",
-      "created_at": "T-1",
-      "deliver_after": "T-1",
-      "expires_at": "T-2",
-      "attempts": 1,
-      "last_attempt_at": "T-7",
-      "last_error": "dropped by operator (gc nudge drop)",
-      "claimed_at": "TZERO-1",
-      "lease_until": "TZERO-1",
-      "dead_at": "T-7"
     },
     {
       "id": "n-open-shadow",
@@ -1486,7 +1632,15 @@ state.json:
       "last_error": "dropped by operator (gc nudge drop)",
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
-      "dead_at": "T-7"
+      "dead_at": "T-7",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-7",
+        "attempts": 2,
+        "not_before": "T-12",
+        "last_error": "no nudges store is open"
+      }
     }
   ],
   "dispatch_skips": {
@@ -1495,12 +1649,10 @@ state.json:
   }
 }
 
-### a sweep outside the debounce repairs, confirms and prunes
+### a sweep inside the failed payment's backoff leaves the debt
 result: <nil>
-rewrote_state: true
-store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
-op List {label=nudge:n-kept include_closed limit=21}
-op List {label=nudge:n-open-shadow include_closed limit=21}
+rewrote_state: false
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
 state.json:
 {
   "pending": [
@@ -1525,7 +1677,7 @@ state.json:
       "source": "session",
       "message": "message n-lapse",
       "created_at": "T-5",
-      "deliver_after": "T-10",
+      "deliver_after": "T-11",
       "expires_at": "T-6",
       "last_attempt_at": "TZERO-1",
       "claimed_at": "TZERO-1",
@@ -1547,6 +1699,30 @@ state.json:
       "claimed_at": "TZERO-1",
       "lease_until": "TZERO-1",
       "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-open-shadow",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-open-shadow",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "last_attempt_at": "T-7",
+      "last_error": "dropped by operator (gc nudge drop)",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-7",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-7",
+        "attempts": 2,
+        "not_before": "T-12",
+        "last_error": "no nudges store is open"
+      }
     }
   ],
   "dispatch_skips": {
@@ -1555,10 +1731,12 @@ state.json:
   }
 }
 
-### list for alpha (status)
-result: pending=[n-pad] in_flight=[] dead=[n-zero] err=<nil>
+### a sweep after the backoff repairs and confirms; the next pass prunes
+result: <nil>
 rewrote_state: true
 store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
+op SetMetadataBatch BEAD-1
+op Close BEAD-1
 state.json:
 {
   "pending": [
@@ -1583,7 +1761,89 @@ state.json:
       "source": "session",
       "message": "message n-lapse",
       "created_at": "T-5",
-      "deliver_after": "T-10",
+      "deliver_after": "T-11",
+      "expires_at": "T-6",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "dead": [
+    {
+      "id": "n-zero",
+      "agent": "alpha",
+      "source": "session",
+      "message": "zero dead_at",
+      "created_at": "T-3",
+      "deliver_after": "T-3",
+      "expires_at": "T-4",
+      "last_attempt_at": "TZERO-1",
+      "last_error": "boom",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-open-shadow",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-open-shadow",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "last_attempt_at": "T-7",
+      "last_error": "dropped by operator (gc nudge drop)",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-7",
+      "shadow": {
+        "state": "failed",
+        "reason": "dropped by operator (gc nudge drop)",
+        "at": "T-7",
+        "paid": true,
+        "attempts": 2,
+        "not_before": "TZERO-1"
+      }
+    }
+  ],
+  "dispatch_skips": {
+    "kill-pending": 1,
+    "not-matched": 3
+  }
+}
+
+### list for alpha (status)
+result: pending=[n-pad] in_flight=[] dead=[n-zero] err=<nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-pad",
+      "bead_id": "BEAD-3",
+      "agent": " alpha ",
+      "source": "session",
+      "message": "message n-pad",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-lapse",
+      "bead_id": "BEAD-4",
+      "agent": "beta",
+      "source": "session",
+      "message": "message n-lapse",
+      "created_at": "T-5",
+      "deliver_after": "T-11",
       "expires_at": "T-6",
       "last_attempt_at": "TZERO-1",
       "claimed_at": "TZERO-1",
@@ -1615,8 +1875,8 @@ state.json:
 
 ### list for the exact agent
 result: pending=[n-pad] in_flight=[] dead=[] err=<nil>
-rewrote_state: true
-store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
+rewrote_state: false
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
 state.json:
 {
   "pending": [
@@ -1641,7 +1901,7 @@ state.json:
       "source": "session",
       "message": "message n-lapse",
       "created_at": "T-5",
-      "deliver_after": "T-10",
+      "deliver_after": "T-11",
       "expires_at": "T-6",
       "last_attempt_at": "TZERO-1",
       "claimed_at": "TZERO-1",
@@ -1673,8 +1933,8 @@ state.json:
 
 ### list for the empty agent
 result: pending=[] in_flight=[] dead=[] err=<nil>
-rewrote_state: true
-store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
+rewrote_state: false
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
 state.json:
 {
   "pending": [
@@ -1699,7 +1959,7 @@ state.json:
       "source": "session",
       "message": "message n-lapse",
       "created_at": "T-5",
-      "deliver_after": "T-10",
+      "deliver_after": "T-11",
       "expires_at": "T-6",
       "last_attempt_at": "TZERO-1",
       "claimed_at": "TZERO-1",

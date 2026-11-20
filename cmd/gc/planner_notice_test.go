@@ -34,7 +34,7 @@ func newNoticeLaneHost(t *testing.T, f *laneFixture, kinds ...string) *conversat
 // set to store.
 func newNoticeLaneHostOver(t *testing.T, f *laneFixture, store beads.Store, kinds ...string) *conversationLaneHost {
 	t.Helper()
-	h := newConversationLaneHost(&laneHostEnvFake{f: f, store: store}, kinds)
+	h := newConversationLaneHost(&laneHostEnvFake{f: f, store: store}, kinds, sessionpkg.StopRequestsLive)
 	h.clk = f.clk
 	h.state = laneHostStateRunning
 	ctx, cancel := context.WithCancel(context.Background())
@@ -157,10 +157,10 @@ func TestPlannerNoticeLaneForFollowsTheSwitch(t *testing.T) {
 // controller starts over controllerState.
 func TestPlannerNoticeLaneForFindsTheHostFromBothReconcilers(t *testing.T) {
 	f := newLaneFixture(t)
-	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}, Ops: config.OpsConfig{Authoritative: []string{"message"}}}
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}, Ops: config.OpsConfig{Authoritative: config.OpsKinds("message")}}
 	cs := &controllerState{cfg: cfg, cityPath: f.dir, cityName: "test-city", cityBeadStore: beads.NewCachingStore(f.store, nil)}
 	cr := &CityRuntime{cityName: "test-city", cityPath: f.dir, cfg: cfg, cs: cs}
-	h := newConversationLaneHost(cs, cfg.Ops.Authoritative)
+	h := newConversationLaneHost(cs, cfg.Ops.AuthoritativeKinds(), sessionpkg.StopRequestsLive)
 	h.state = laneHostStateRunning
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -572,7 +572,7 @@ func backstopRows(t *testing.T, f *laneFixture, attempts int, last time.Time) []
 // tick's work.
 func runNoticeBackstop(f *laneFixture, rows []beads.Bead, pred noticeTestBackstop, out *bytes.Buffer) {
 	work := []beads.Bead{{ID: pred.target.ID, Status: "open"}}
-	runNudgeBackstop(f.sp, f.store, rows, work, f.clk.Now(), out, "idle-claim-nudge", pred)
+	runNudgeBackstop(f.runtime(), f.store, rows, work, f.clk.Now(), out, "idle-claim-nudge", pred)
 }
 
 // episode is the Episode a backstop attempt paced from last carries.
@@ -1040,7 +1040,7 @@ func TestRunNudgeBackstopNudgesDirectlyWithTheLaneOff(t *testing.T) {
 func TestRunNudgeBackstopLeavesNoticesDirectUnderTheContentGates(t *testing.T) {
 	f := newLaneFixture(t)
 	f.cfg.Ops = config.OpsConfig{ContentMode: "require", ControlMode: "require", LifecycleMode: "require"}
-	newNoticeLaneHost(t, f, f.cfg.Ops.Authoritative...)
+	newNoticeLaneHost(t, f, f.cfg.Ops.AuthoritativeKinds()...)
 	pred := noticeTestBackstop{target: backstopTarget{ID: "wb-1"}, text: "claim wb-1"}
 	var out bytes.Buffer
 	runNoticeBackstop(f, backstopRows(t, f, 0, f.clk.Now().Add(-time.Hour)), pred, &out)
@@ -1052,11 +1052,13 @@ func TestRunNudgeBackstopLeavesNoticesDirectUnderTheContentGates(t *testing.T) {
 	}
 }
 
-// TestRunNudgeBackstopNudgesAProtocolModeSessionDirectly: no lane can type
-// into a protocol-mode runtime (t3bridge) that no other host serves, so its
+// TestRunNudgeBackstopNudgesAnUnservedProtocolSessionDirectly: no lane can
+// type into a protocol-mode runtime whose turn starts are not recorded and
+// that no other host serves (a t3bridge session is served:
+// TestPlannerNoticeProtocolSessionGoesToTheLane), so its
 // reminder is typed directly as before; a host stamped as serving message
 // for the row's generation gets the notice instead.
-func TestRunNudgeBackstopNudgesAProtocolModeSessionDirectly(t *testing.T) {
+func TestRunNudgeBackstopNudgesAnUnservedProtocolSessionDirectly(t *testing.T) {
 	f := newLaneFixture(t)
 	f.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
 	newNoticeLaneHost(t, f, "message")
@@ -1112,7 +1114,7 @@ func TestDeliverWarmBindClaimNudgeProposesANoticeOp(t *testing.T) {
 	f := newLaneFixture(t)
 	newNoticeLaneHost(t, f, "message")
 	row := warmBindLaneRow(t, f, "w-1")
-	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, row, warmClaimText, alwaysUnclaimed)
+	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, nil, row, warmClaimText, alwaysUnclaimed)
 	for _, c := range f.sp.Calls {
 		if c.Method == "Nudge" || c.Method == "WaitForIdle" {
 			t.Fatalf("the warm bind called %s itself; the lane waits for the boundary", c.Method)
@@ -1132,7 +1134,7 @@ func TestDeliverWarmBindClaimNudgeProposesANoticeOp(t *testing.T) {
 		t.Fatalf("notice record = %q, want w-1: the proposed notice is recorded for its withdraw", got)
 	}
 	// The marker still makes the binding fire once.
-	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, row, warmClaimText, alwaysUnclaimed)
+	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, nil, row, warmClaimText, alwaysUnclaimed)
 	if again := f.get(t, f.laneStore(t), op.ID); again.Revision != op.Revision {
 		t.Fatalf("op rewritten on a second pass: revision %d -> %d", op.Revision, again.Revision)
 	}
@@ -1142,7 +1144,7 @@ func TestDeliverWarmBindClaimNudgeSpendsARefusedNotice(t *testing.T) {
 	f := newLaneFixture(t)
 	newNoticeLaneHost(t, f, "message")
 	row := warmBindLaneRow(t, f, "w-1")
-	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, row, strings.Repeat("x", opjournal.MaxInlinePayload+1), alwaysUnclaimed)
+	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, nil, row, strings.Repeat("x", opjournal.MaxInlinePayload+1), alwaysUnclaimed)
 	if got := f.meta(t, warmBindNudgedForTriggerKey); got != "w-1" {
 		t.Fatalf("marker = %q after a refused notice, want w-1: retrying it can never succeed", got)
 	}
@@ -1161,12 +1163,12 @@ func TestDeliverWarmBindClaimNudgeRetriesAFailingNoticeThenGivesUp(t *testing.T)
 	store.fail.Store(true)
 	row := warmBindLaneRow(t, f, "w-1")
 	for tick := 1; tick < plannerNoticeMaxFailures; tick++ {
-		deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, row, warmClaimText, alwaysUnclaimed)
+		deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, nil, row, warmClaimText, alwaysUnclaimed)
 		if got := f.meta(t, warmBindNudgedForTriggerKey); got != "" {
 			t.Fatalf("tick %d: marker = %q, want unset so a later tick retries", tick, got)
 		}
 	}
-	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, row, warmClaimText, alwaysUnclaimed)
+	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, nil, row, warmClaimText, alwaysUnclaimed)
 	if got := f.meta(t, warmBindNudgedForTriggerKey); got != "w-1" {
 		t.Fatalf("marker = %q at the limit, want w-1: the claim backstop owns re-delivery", got)
 	}
@@ -1175,12 +1177,12 @@ func TestDeliverWarmBindClaimNudgeRetriesAFailingNoticeThenGivesUp(t *testing.T)
 	}
 }
 
-func TestDeliverWarmBindClaimNudgeNudgesAProtocolModeSlotDirectly(t *testing.T) {
+func TestDeliverWarmBindClaimNudgeNudgesAnUnservedProtocolSlotDirectly(t *testing.T) {
 	f := newLaneFixture(t)
 	f.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
 	newNoticeLaneHost(t, f, "message")
 	row := warmBindLaneRow(t, f, "w-2")
-	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, row, warmClaimText, alwaysUnclaimed)
+	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, nil, row, warmClaimText, alwaysUnclaimed)
 	if nudges := f.nudges(); len(nudges) != 1 || nudges[0].Message != warmClaimText {
 		t.Fatalf("nudges = %+v, want the one direct claim nudge", nudges)
 	}
@@ -1207,7 +1209,7 @@ func wedgeDrainReminderRow(t *testing.T, f *laneFixture) (string, sessionpkg.Inf
 	}
 	mustSetMeta(t, f.sp, f.name, reconcilerDrainAckSourceKey, reconcilerDrainAckSourceValue)
 	f.sp.SetActivity(f.name, f.clk.Now().Add(-30*time.Minute))
-	_, info := f.view(t)
+	info := f.rowInfo(t)
 	return drainAt, info
 }
 
@@ -1244,7 +1246,7 @@ func TestDrainReminderProposesANoticeOpWhenTheLaneExecutesMessages(t *testing.T)
 	}
 	// The next attempt, one cadence on, is attempt 2 of the same drain.
 	f.clk.Advance(drainReminderInterval)
-	_, info = f.view(t)
+	info = f.rowInfo(t)
 	if got := maybeRemindDrainingSession(f.sp, f.store, info, f.clk, &out); got != drainReminderProposed {
 		t.Fatalf("second outcome = %v, want proposed; journal %q", got, out.String())
 	}
@@ -1269,10 +1271,11 @@ func TestDrainReminderNudgesDirectlyWithTheLaneOff(t *testing.T) {
 	}
 }
 
-// TestDrainReminderNudgesAProtocolModeSessionDirectly: no lane can type
-// into a protocol-mode runtime no other host serves, so the reminder is
+// TestDrainReminderNudgesAnUnservedProtocolSessionDirectly: no lane can
+// type into a protocol-mode runtime whose turn starts are not recorded and
+// that no other host serves, so the reminder is
 // typed directly as before.
-func TestDrainReminderNudgesAProtocolModeSessionDirectly(t *testing.T) {
+func TestDrainReminderNudgesAnUnservedProtocolSessionDirectly(t *testing.T) {
 	f := newLaneFixture(t)
 	f.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
 	newNoticeLaneHost(t, f, "message")
@@ -1306,7 +1309,7 @@ func TestDrainReminderWaitsOnAnInFlightNotice(t *testing.T) {
 		t.Fatalf("starting the first notice: %v", err)
 	}
 	f.clk.Advance(drainReminderInterval)
-	_, info = f.view(t)
+	info = f.rowInfo(t)
 	if got := maybeRemindDrainingSession(f.sp, f.store, info, f.clk, &out); got != drainReminderHeld {
 		t.Fatalf("outcome = %v, want held behind the in-flight notice; journal %q", got, out.String())
 	}
@@ -1386,6 +1389,49 @@ func TestDrainReminderDeliveredByTheLaneHostToADrainingSession(t *testing.T) {
 	}
 	if got := sessionpkg.State(f.meta(t, "state")); got != sessionpkg.StateDraining {
 		t.Fatalf("state = %q, want still draining", got)
+	}
+}
+
+// TestDrainReminderDeliveredByTheLaneHostToAV2SignaledSession (V2-18): a
+// row v2 signaled carries its stop request beside state=draining, which the
+// gate reads as stop_requested; the drain notice passes it as it passes
+// draining, so the reminder is proposed, not nudged directly, and the lane
+// host delivers it as one notice block.
+func TestDrainReminderDeliveredByTheLaneHostToAV2SignaledSession(t *testing.T) {
+	f := newLaneFixture(t, laneStopRequestedAt(1))
+	hh := newLaneHostHarness(t, f, "message")
+	hh.start()
+	hh.waitTicker(t)
+	drainAt, info := wedgeDrainReminderRow(t, f)
+	v, row := f.view(t)
+	if p, err := newConversationLaneExec(f.deps(f.laneStore(t)), row).Probe(context.Background(), v); err != nil || p.ContentBlock != sessionpkg.ContentGateStopRequested {
+		t.Fatalf("Probe = block %q, %v; want the signaled row read as stop_requested", p.ContentBlock, err)
+	}
+	var out bytes.Buffer
+	if got := maybeRemindDrainingSession(f.sp, f.store, info, f.clk, &out); got != drainReminderProposed {
+		t.Fatalf("outcome = %v, want proposed; journal %q", got, out.String())
+	}
+	st := f.laneStore(t)
+	id := noticeOpID(t, f, drainReminderNoticePurpose, drainAt, "", 1)
+	deadline := time.After(laneWaitBudget)
+	for {
+		if got := f.get(t, st, id); got.Status == opjournal.StatusClosed {
+			if got.Outcome.Arm != opjournal.ArmSucceeded {
+				t.Fatalf("outcome = %+v, want succeeded", got.Outcome)
+			}
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("the host never delivered the drain reminder")
+		case <-hh.passes:
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	nudges := f.nudges()
+	text := drainReminderContent(info)
+	if len(nudges) != 1 || !strings.Contains(nudges[0].Message, text) || nudges[0].Message == text {
+		t.Fatalf("nudges = %+v, want one notice block carrying the reminder", nudges)
 	}
 }
 
@@ -1478,8 +1524,9 @@ func TestRunNudgeBackstopExhaustedSkipsTheReadOnceTheLastNoticeIsPastDue(t *test
 }
 
 // TestRunNudgeBackstopFailedHoldReadDoesNotHoldTheTerminalAction: a journal
-// that cannot be read while the last notice may still be due logs once and
-// lets the terminal action run, so an outage never parks the backstop.
+// that cannot be read while the last notice may still be in delivery (its
+// backoff has passed, its lease has not) logs once and lets the terminal
+// action run, so an outage never parks the backstop.
 func TestRunNudgeBackstopFailedHoldReadDoesNotHoldTheTerminalAction(t *testing.T) {
 	store := &failingOpListStore{laneTestStore: newLaneTestStore()}
 	f := newLaneFixtureOver(t, store)
@@ -1488,7 +1535,7 @@ func TestRunNudgeBackstopFailedHoldReadDoesNotHoldTheTerminalAction(t *testing.T
 	calls := 0
 	pred := noticeTestBackstop{target: backstopTarget{ID: "wb-1"}, text: "claim wb-1", exhaustedCalls: &calls}
 	var out bytes.Buffer
-	rows := backstopRows(t, f, idleClaimNudgeMaxAttempts, f.clk.Now().Add(-30*time.Second))
+	rows := backstopRows(t, f, idleClaimNudgeMaxAttempts, f.clk.Now().Add(-idleClaimNudgeBackoff-30*time.Second))
 	runNoticeBackstop(f, rows, pred, &out)
 	runNoticeBackstop(f, rows, pred, &out)
 	if calls != 2 {
@@ -1561,7 +1608,7 @@ func TestDeliverWarmBindClaimNudgeNoticesARebindingAfresh(t *testing.T) {
 	newNoticeLaneHost(t, f, "message") // no pass: past start_by, ops stay open and not due
 	logs := captureStdLog(t)
 	bind := func(trigger string) {
-		deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, warmBindLaneRow(t, f, trigger), warmClaimText, alwaysUnclaimed)
+		deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, nil, warmBindLaneRow(t, f, trigger), warmClaimText, alwaysUnclaimed)
 		f.clk.Advance(2 * time.Minute)
 	}
 	bind("w-A")
@@ -1593,7 +1640,7 @@ func TestDeliverWarmBindClaimNudgeRebindingWithinTheWindowSupersedes(t *testing.
 	logs := captureStdLog(t)
 	bind := func(trigger string) {
 		f.clk.Advance(10 * time.Second)
-		deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, warmBindLaneRow(t, f, trigger), warmClaimText, alwaysUnclaimed)
+		deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, nil, warmBindLaneRow(t, f, trigger), warmClaimText, alwaysUnclaimed)
 	}
 	bind("w-A")
 	bind("w-B")
@@ -1630,7 +1677,7 @@ func TestDeliverWarmBindClaimNudgeRebindingBeforeABoundaryDeliversOnlyTheNewest(
 	f := newLaneFixture(t)
 	newNoticeLaneHost(t, f, "message") // no pass: both notices queue
 	for _, trigger := range []string{"w-A", "w-B"} {
-		deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, warmBindLaneRow(t, f, trigger), "claim "+trigger, alwaysUnclaimed)
+		deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, nil, warmBindLaneRow(t, f, trigger), "claim "+trigger, alwaysUnclaimed)
 		f.clk.Advance(10 * time.Second)
 	}
 	hh := newLaneHostHarness(t, f, "message")
@@ -1670,7 +1717,7 @@ func TestDeliverWarmBindClaimNudgeRebindingWithEditedTextGetsItsOwnNotice(t *tes
 	newNoticeLaneHost(t, f, "message")
 	logs := captureStdLog(t)
 	bind := func(trigger, text string) {
-		deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, warmBindLaneRow(t, f, trigger), text, alwaysUnclaimed)
+		deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, nil, warmBindLaneRow(t, f, trigger), text, alwaysUnclaimed)
 		f.clk.Advance(2 * time.Minute)
 	}
 	bind("w-A", warmClaimText)
@@ -1700,7 +1747,7 @@ func TestDeliverWarmBindClaimNudgeRebindingDeliversEveryBinding(t *testing.T) {
 	hh.waitTicker(t)
 	st := f.laneStore(t)
 	for i, b := range []struct{ trigger, episode string }{{"w-A", ""}, {"w-B", ""}, {"w-A", "2"}} {
-		deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, warmBindLaneRow(t, f, b.trigger), warmClaimText, alwaysUnclaimed)
+		deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, nil, warmBindLaneRow(t, f, b.trigger), warmClaimText, alwaysUnclaimed)
 		id := noticeOpID(t, f, warmBindNoticePurpose, b.trigger, b.episode, 1)
 		deadline := time.After(laneWaitBudget)
 		for {
@@ -1730,13 +1777,13 @@ func TestDeliverWarmBindClaimNudgeRebindingDeliversEveryBinding(t *testing.T) {
 func TestDeliverWarmBindClaimNudgeRetryFindsItsDueNotice(t *testing.T) {
 	f := newLaneFixture(t)
 	newNoticeLaneHost(t, f, "message")
-	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, warmBindLaneRow(t, f, "w-1"), warmClaimText, alwaysUnclaimed)
+	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, nil, warmBindLaneRow(t, f, "w-1"), warmClaimText, alwaysUnclaimed)
 	if err := f.store.SetMetadataBatch(f.id, map[string]string{warmBindNudgedForTriggerKey: ""}); err != nil {
 		t.Fatalf("clearing the marker: %v", err)
 	}
 	f.clk.Advance(10 * time.Second)
 	row := f.row(t)
-	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, &row, warmClaimText, alwaysUnclaimed)
+	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, nil, &row, warmClaimText, alwaysUnclaimed)
 	if n := len(f.openOps(t)); n != 1 {
 		t.Fatalf("open ops = %d, want the one notice", n)
 	}
@@ -1753,7 +1800,7 @@ func TestWarmBindNoticeWaitsOnAnInFlightNotice(t *testing.T) {
 	f := newLaneFixture(t)
 	h := newNoticeLaneHost(t, f, "message")
 	st := f.laneStore(t)
-	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, warmBindLaneRow(t, f, "w-A"), warmClaimText, alwaysUnclaimed)
+	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, nil, warmBindLaneRow(t, f, "w-A"), warmClaimText, alwaysUnclaimed)
 	first := noticeOpID(t, f, warmBindNoticePurpose, "w-A", "", 1)
 	if _, err := st.Transition(first, opjournal.StatusSubmitted, opjournal.StatusExecuting, laneHostName); err != nil {
 		t.Fatalf("starting A's notice: %v", err)
@@ -1769,7 +1816,7 @@ func TestWarmBindNoticeWaitsOnAnInFlightNotice(t *testing.T) {
 	if got := f.get(t, st, first); got.Status != opjournal.StatusExecuting || got.Cancel.Recorded() {
 		t.Fatalf("A's notice = %s %+v, want executing and not canceled", got.Status, got.Cancel)
 	}
-	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, warmBindLaneRow(t, f, "w-B"), warmClaimText, alwaysUnclaimed)
+	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, nil, warmBindLaneRow(t, f, "w-B"), warmClaimText, alwaysUnclaimed)
 	if got := f.meta(t, warmBindNudgedForTriggerKey); got != "w-A" {
 		t.Fatalf("marker = %q, want w-A until B's notice is proposed", got)
 	}
@@ -1778,7 +1825,7 @@ func TestWarmBindNoticeWaitsOnAnInFlightNotice(t *testing.T) {
 		t.Fatalf("finishing A's notice: %v", err)
 	}
 	row := f.row(t)
-	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, &row, warmClaimText, alwaysUnclaimed)
+	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, nil, &row, warmClaimText, alwaysUnclaimed)
 	if got := f.get(t, st, noticeOpID(t, f, warmBindNoticePurpose, "w-B", "", 1)); got.Status == opjournal.StatusClosed {
 		t.Fatalf("B's notice = %s %+v, want open", got.Status, got.Cancel)
 	}
@@ -1798,7 +1845,7 @@ func TestPoolClaimBackstopClearWithdrawsTheWarmBindNotice(t *testing.T) {
 	newNoticeLaneHost(t, f, "message")
 	f.cfg.Agents = []config.Agent{{Name: "worker", Nudge: warmClaimText}}
 	st := f.laneStore(t)
-	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, warmBindLaneRow(t, f, "w-1"), warmClaimText, alwaysUnclaimed)
+	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, nil, warmBindLaneRow(t, f, "w-1"), warmClaimText, alwaysUnclaimed)
 	warm := noticeOpID(t, f, warmBindNoticePurpose, "w-1", "", 1)
 	var out bytes.Buffer
 	tick := func(work beads.Bead) {
@@ -1835,7 +1882,7 @@ func TestPoolClaimBackstopClearWithdrawsAWarmBindNoticeItNeverPaced(t *testing.T
 	f := newLaneFixtureOver(t, store)
 	newNoticeLaneHost(t, f, "message")
 	st := f.laneStore(t)
-	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, warmBindLaneRow(t, f, "w-1"), defaultPoolClaimNudge, alwaysUnclaimed)
+	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, nil, warmBindLaneRow(t, f, "w-1"), defaultPoolClaimNudge, alwaysUnclaimed)
 	warm := noticeOpID(t, f, warmBindNoticePurpose, "w-1", "", 1)
 	if got := f.get(t, st, warm); got.Status == opjournal.StatusClosed || !strings.Contains(got.Payload, "--drain-ack") {
 		t.Fatalf("the warm-bind notice = %s %q, want open with the default claim line", got.Status, got.Payload)
@@ -1874,7 +1921,7 @@ func TestExecutionBackstopMarkStartedWithdrawsTheWarmBindNotice(t *testing.T) {
 	f := newLaneFixture(t)
 	newNoticeLaneHost(t, f, "message")
 	st := f.laneStore(t)
-	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, warmBindLaneRow(t, f, "w-1"), defaultPoolClaimNudge, alwaysUnclaimed)
+	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, nil, warmBindLaneRow(t, f, "w-1"), defaultPoolClaimNudge, alwaysUnclaimed)
 	warm := noticeOpID(t, f, warmBindNoticePurpose, "w-1", "", 1)
 	row := f.row(t)
 	var out bytes.Buffer
@@ -2027,7 +2074,7 @@ func markIdleDrainedWedge(t *testing.T, f *laneFixture) sessionpkg.Info {
 	}
 	mustSetMeta(t, f.sp, f.name, reconcilerDrainAckSourceKey, reconcilerDrainAckSourceValue)
 	f.sp.SetActivity(f.name, f.clk.Now().Add(-30*time.Minute))
-	_, info := f.view(t)
+	info := f.rowInfo(t)
 	return info
 }
 
@@ -2043,7 +2090,7 @@ func TestDrainReminderNudgesAnIdleDrainedWedgeDirectlyWithTheMessageLane(t *test
 	hh.start()
 	hh.waitTicker(t)
 	info := markIdleDrainedWedge(t, f)
-	if got := sessionpkg.ContentGate(info, true, f.clk.Now(), sessionpkg.GateContentDrainNotice); got != sessionpkg.ContentGateStopPending {
+	if got := sessionpkg.ContentGate(info, sessionpkg.StopRequest{}, true, f.clk.Now(), sessionpkg.GateContentDrainNotice); got != sessionpkg.ContentGateStopPending {
 		t.Fatalf("drain notice gate = %q, want stop_pending on the real mark", got)
 	}
 	var out bytes.Buffer
@@ -2095,7 +2142,7 @@ func TestDrainAckStopPendingMarkKeepsTheIdleLatch(t *testing.T) {
 	if info.SleepIntent != "idle-stop-pending" {
 		t.Fatalf("sleep_intent = %q, want the idle latch kept", info.SleepIntent)
 	}
-	if got := sessionpkg.ContentGate(info, true, env.clk.Now(), sessionpkg.GateContentDrainNotice); got != sessionpkg.ContentGateStopPending {
+	if got := sessionpkg.ContentGate(info, sessionpkg.StopRequest{}, true, env.clk.Now(), sessionpkg.GateContentDrainNotice); got != sessionpkg.ContentGateStopPending {
 		t.Fatalf("drain notice gate = %q, want stop_pending", got)
 	}
 }
@@ -2111,7 +2158,7 @@ func TestDrainReminderCountsNoticesNeverDeliveredAsUndeliverable(t *testing.T) {
 	wedgeDrainReminderRow(t, f)
 	var out bytes.Buffer
 	for attempt := 1; attempt <= drainReminderMaxAttempts; attempt++ {
-		_, info := f.view(t)
+		info := f.rowInfo(t)
 		if got := maybeRemindDrainingSession(f.sp, f.store, info, f.clk, &out); got != drainReminderProposed {
 			t.Fatalf("attempt %d: outcome = %v, want proposed; journal %q", attempt, got, out.String())
 		}
@@ -2120,7 +2167,7 @@ func TestDrainReminderCountsNoticesNeverDeliveredAsUndeliverable(t *testing.T) {
 		}
 		f.clk.Advance(drainReminderInterval)
 	}
-	_, info := f.view(t)
+	info := f.rowInfo(t)
 	if got := maybeRemindDrainingSession(f.sp, f.store, info, f.clk, &out); got != drainReminderExhausted {
 		t.Fatalf("outcome = %v, want exhausted; journal %q", got, out.String())
 	}
@@ -2148,7 +2195,7 @@ func TestDrainReminderDoesNotCountDeliveredNotices(t *testing.T) {
 	st := f.laneStore(t)
 	var out bytes.Buffer
 	for attempt := 1; attempt <= drainReminderMaxAttempts; attempt++ {
-		_, info := f.view(t)
+		info := f.rowInfo(t)
 		if got := maybeRemindDrainingSession(f.sp, f.store, info, f.clk, &out); got != drainReminderProposed {
 			t.Fatalf("attempt %d: outcome = %v, want proposed; journal %q", attempt, got, out.String())
 		}
@@ -2160,7 +2207,7 @@ func TestDrainReminderDoesNotCountDeliveredNotices(t *testing.T) {
 	if n := len(f.nudges()); n != drainReminderMaxAttempts {
 		t.Fatalf("the lane delivered %d notices, want %d", n, drainReminderMaxAttempts)
 	}
-	_, info := f.view(t)
+	info := f.rowInfo(t)
 	if got := maybeRemindDrainingSession(f.sp, f.store, info, f.clk, &out); got != drainReminderExhausted {
 		t.Fatalf("outcome = %v, want exhausted; journal %q", got, out.String())
 	}
@@ -2186,14 +2233,14 @@ func TestDrainReminderExhaustionWaitsOnTheLastNotice(t *testing.T) {
 		if attempt > 1 {
 			f.clk.Advance(drainReminderInterval)
 		}
-		_, info := f.view(t)
+		info := f.rowInfo(t)
 		if got := maybeRemindDrainingSession(f.sp, f.store, info, f.clk, &out); got != drainReminderProposed {
 			t.Fatalf("attempt %d: outcome = %v, want proposed; journal %q", attempt, got, out.String())
 		}
 	}
 	last := f.clk.Now()
 	f.clk.Advance(time.Second)
-	_, info := f.view(t)
+	info := f.rowInfo(t)
 	if got := maybeRemindDrainingSession(f.sp, f.store, info, f.clk, &out); got != drainReminderHeld {
 		t.Fatalf("outcome = %v, want held behind the standing last notice; journal %q", got, out.String())
 	}
@@ -2206,7 +2253,7 @@ func TestDrainReminderExhaustionWaitsOnTheLastNotice(t *testing.T) {
 		t.Fatalf("starting the last notice: %v", err)
 	}
 	f.clk.Advance(last.Add(drainReminderInterval).Sub(f.clk.Now()))
-	_, info = f.view(t)
+	info = f.rowInfo(t)
 	if got := maybeRemindDrainingSession(f.sp, f.store, info, f.clk, &out); got != drainReminderHeld {
 		t.Fatalf("outcome = %v, want held behind the in-flight last notice; journal %q", got, out.String())
 	}
@@ -2217,7 +2264,7 @@ func TestDrainReminderExhaustionWaitsOnTheLastNotice(t *testing.T) {
 	if !drainRemindersSpent(f.row(t), f.clk.Now()) {
 		t.Fatal("an in-flight last notice held the escalation past its lease")
 	}
-	_, info = f.view(t)
+	info = f.rowInfo(t)
 	if got := maybeRemindDrainingSession(f.sp, f.store, info, f.clk, &out); got != drainReminderExhausted {
 		t.Fatalf("outcome = %v, want exhausted past the lease; journal %q", got, out.String())
 	}
@@ -2241,7 +2288,7 @@ func TestDrainReminderDirectAttemptSettlesAnUndeliveredLaneNotice(t *testing.T) 
 		t.Fatalf("latching the idle stop: %v", err)
 	}
 	f.clk.Advance(drainReminderInterval)
-	_, info = f.view(t)
+	info = f.rowInfo(t)
 	if got := maybeRemindDrainingSession(f.sp, f.store, info, f.clk, &out); got != drainReminderDelivered {
 		t.Fatalf("second outcome = %v, want delivered directly; journal %q", got, out.String())
 	}
@@ -2271,7 +2318,7 @@ func TestDrainReminderCountsNoticesTheLaneExpiresUndelivered(t *testing.T) {
 	}
 	var out bytes.Buffer
 	for attempt := 1; attempt <= drainReminderMaxAttempts; attempt++ {
-		_, info := f.view(t)
+		info := f.rowInfo(t)
 		if got := maybeRemindDrainingSession(f.sp, f.store, info, f.clk, &out); got != drainReminderProposed {
 			t.Fatalf("attempt %d outcome = %v, want proposed; journal %q", attempt, got, out.String())
 		}
@@ -2289,7 +2336,7 @@ func TestDrainReminderCountsNoticesTheLaneExpiresUndelivered(t *testing.T) {
 			t.Fatalf("after attempt %d open ops = %d, want the notice closed expired", attempt, n)
 		}
 	}
-	_, info := f.view(t)
+	info := f.rowInfo(t)
 	if got := maybeRemindDrainingSession(f.sp, f.store, info, f.clk, &out); got != drainReminderExhausted {
 		t.Fatalf("outcome = %v, want exhausted; journal %q", got, out.String())
 	}
@@ -2322,8 +2369,8 @@ func TestDrainReminderNudgesARestartPendingWedgeDirectlyWithTheMessageLane(t *te
 			if err := f.store.SetMetadataBatch(f.id, map[string]string{key: "true"}); err != nil {
 				t.Fatal(err)
 			}
-			_, info := f.view(t)
-			if got := sessionpkg.ContentGate(info, true, f.clk.Now(), sessionpkg.GateContentDrainNotice); got != sessionpkg.ContentGateRestartPending {
+			info := f.rowInfo(t)
+			if got := sessionpkg.ContentGate(info, sessionpkg.StopRequest{}, true, f.clk.Now(), sessionpkg.GateContentDrainNotice); got != sessionpkg.ContentGateRestartPending {
 				t.Fatalf("gate = %q, want restart_pending", got)
 			}
 			var out bytes.Buffer

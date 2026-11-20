@@ -194,6 +194,7 @@ func (s *nativeDoltStorageSpy) StatsReporter() (issueops.StatsReporter, error) {
 }
 
 func (s *nativeDoltMemStorage) Deleter() (issueops.Deleter, error) { return rawDeleter{raw: s}, nil }
+
 func (s *nativeDoltMemStorage) DependencyEditor() (issueops.DependencyEditor, error) {
 	return rawDependencyEditor{raw: s}, nil
 }

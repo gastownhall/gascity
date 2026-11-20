@@ -358,7 +358,7 @@ func TestReadyIsNotFailedByADarkSuspendedRig(t *testing.T) {
 		t.Fatalf("suspending %s: %v", readyBrokenRigName, err)
 	}
 	var stdout, stderr bytes.Buffer
-	if code := cmdReady(readywork.Query{}, &stdout, &stderr); code != 0 {
+	if code := cmdReady(readyFlags{}, &stdout, &stderr); code != 0 {
 		t.Fatalf("gc ready = %d with only the suspended rig dark; stderr=%s", code, stderr.String())
 	}
 	if openFailure := "rig " + strconv.Quote(readyBrokenRigName) + " store:"; strings.Contains(stderr.String(), openFailure) {
@@ -386,7 +386,7 @@ func TestReadyRefusesAnUnreadableSuspensionState(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdReady(readywork.Query{}, &stdout, &stderr); code == 0 {
+	if code := cmdReady(readyFlags{}, &stdout, &stderr); code == 0 {
 		t.Fatalf("gc ready exited 0 over an unreadable suspension state; stdout=%s", stdout.String())
 	}
 	if stdout.Len() != 0 {
@@ -398,11 +398,11 @@ func TestReadyRefusesAnUnreadableSuspensionState(t *testing.T) {
 }
 
 // TestReadyComposesTheCityConfigOncePerInvocation pins the config half of
-// reuse within one command. On a bd-backed city each rig open resolves the
-// pinned bd (workspacePinnedBdBinary), which composed the whole city config
-// again — 22 composed loads per `gc ready` on maintainer-city. The opener here
-// makes the same load inside every rig open; the invocation memo must answer
-// all of them from the one load the command already made.
+// reuse within one command. A rig open may compose the whole city config
+// again, so N rig opens would cost N composed loads. The opener here makes
+// that load inside every rig open; the invocation memo must answer all of them
+// from the one load the command already made. (The bd pin itself no longer
+// composes: workspacePinnedBdBinary reads the root city.toml alone.)
 //
 // Not parallel: composedCityConfigLoads and the opener seam are process-wide.
 func TestReadyComposesTheCityConfigOncePerInvocation(t *testing.T) {
@@ -422,7 +422,7 @@ func TestReadyComposesTheCityConfigOncePerInvocation(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	before := composedCityConfigLoads.Load()
-	if code := cmdReady(readywork.Query{}, &stdout, &stderr); code != 0 {
+	if code := cmdReady(readyFlags{}, &stdout, &stderr); code != 0 {
 		t.Fatalf("cmdReady = %d; stderr=%s", code, stderr.String())
 	}
 	if grew := composedCityConfigLoads.Load() - before; grew != 1 {

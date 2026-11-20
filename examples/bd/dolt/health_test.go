@@ -1,3 +1,5 @@
+//go:build unix
+
 // Package dolt_test validates that the dolt pack's health.sh script
 // completes within a bounded time even when the Dolt server is
 // unresponsive. This is a regression guard for the hang reported in
@@ -14,14 +16,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/gastownhall/gascity/internal/bazeltest"
 )
 
 // healthScript is the on-disk path to the health command script. The
@@ -29,15 +28,6 @@ import (
 // `run.sh` entry point (and a sibling `command.toml` descriptor), so
 // the health script lives at `commands/health/run.sh`.
 const healthScript = "commands/health/run.sh"
-
-func repoRoot(t *testing.T) string {
-	t.Helper()
-	if root := bazeltest.OverrideRoot(); root != "" {
-		return filepath.Join(root, "examples", "bd", "dolt")
-	}
-	_, filename, _, _ := runtime.Caller(0)
-	return filepath.Dir(filename)
-}
 
 // filteredEnv returns os.Environ() with the supplied keys removed and
 // every GC_* / DOLT_* entry stripped unconditionally. The blanket
@@ -428,7 +418,7 @@ fi
 exit 1
 `)
 	// No live server: lsof/nc fail, so the bounded dolt probe is skipped.
-	writeExecutable(t, filepath.Join(binDir, "lsof"), "#!/bin/sh\nexit 1\n")
+	lsofEnv := fakeLsofEnv(t, binDir, "#!/bin/sh\nexit 1\n")
 	writeExecutable(t, filepath.Join(binDir, "nc"), "#!/bin/sh\nexit 1\n")
 	writeExecutable(t, filepath.Join(binDir, "dolt"), "#!/bin/sh\nexit 1\n")
 
@@ -444,6 +434,7 @@ exit 1
 		"GC_DOLT_USER=root",
 		"GC_DOLT_PASSWORD=",
 		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+		lsofEnv,
 	)
 	out, err := cmd.Output()
 	if err != nil {
@@ -663,7 +654,7 @@ exit 1
 			}
 
 			writeManagedRuntimeStateForScript(t, cityPath, port)
-			writeExecutable(t, filepath.Join(fakeBin, "lsof"), tt.lsofBody)
+			lsofEnv := fakeLsofEnv(t, fakeBin, tt.lsofBody)
 			writeExecutable(t, filepath.Join(fakeBin, "nc"), tt.ncBody(managedPort))
 
 			cmd := exec.Command("sh", "-c", `. "$GC_PACK_DIR/assets/scripts/runtime.sh"; printf '%s\n' "$GC_DOLT_PORT"`)
@@ -672,6 +663,7 @@ exit 1
 				"GC_CITY_PATH="+cityPath,
 				"GC_PACK_DIR="+root,
 				"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+				lsofEnv,
 			)
 			out, err := cmd.CombinedOutput()
 			if tt.wantExit78 {
@@ -752,7 +744,7 @@ exit 1
 			managedPort := strconv.Itoa(port)
 
 			writeManagedRuntimeStateForScriptWithPID(t, cityPath, port, 424242)
-			writeExecutable(t, filepath.Join(fakeBin, "lsof"), tt.lsofBody)
+			lsofEnv := fakeLsofEnv(t, fakeBin, tt.lsofBody)
 			writeExecutable(t, filepath.Join(fakeBin, "nc"), tt.ncBody(managedPort))
 			writeExecutable(t, filepath.Join(fakeBin, "ps"), `#!/bin/sh
 if [ "$1" = "-p" ] && [ "$2" = "424242" ]; then
@@ -768,6 +760,7 @@ exit 1
 				"GC_CITY_PATH="+cityPath,
 				"GC_PACK_DIR="+root,
 				"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+				lsofEnv,
 			)
 			out, err := cmd.CombinedOutput()
 			if err != nil {
@@ -839,7 +832,7 @@ func reachableServerEnv(t *testing.T, root, cityPath string) []string {
 	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
 
 	fakeBin := t.TempDir()
-	writeExecutable(t, filepath.Join(fakeBin, "lsof"), "#!/bin/sh\nexit 0\n")
+	lsofEnv := fakeLsofEnv(t, fakeBin, "#!/bin/sh\nexit 0\n")
 	writeExecutable(t, filepath.Join(fakeBin, "nc"), `#!/bin/sh
 host="$2"
 probe_port="$3"
@@ -859,6 +852,7 @@ exit 1
 		"GC_DOLT_PASSWORD=",
 		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
 		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		lsofEnv,
 	)
 }
 
@@ -885,6 +879,135 @@ func TestHealthScriptReportsRunningWhenLsofIsInconclusive(t *testing.T) {
 	}
 }
 
+// TestHealthScriptServerPIDPrefersTheRecordedServer pins server.pid — and
+// with it the zombie scan's city-server exclusion — to the pid of the
+// runtime state file port resolution trusts, whenever that pid holds the
+// listener. PID 1 and this process both hold the 3307 listener of a
+// kernel-table fixture, and the holder walk meets PID 1 first. A recorded
+// server keeps its pid over that lower holder, while a state file port
+// resolution would not trust (stopped, recording another data dir or port,
+// or the provider file while GC_DOLT_STATE_FILE pins the state file) never
+// names the server: with no trusted pid the lowest running holder answers.
+func TestHealthScriptServerPIDPrefersTheRecordedServer(t *testing.T) {
+	const port = 3307
+	serverPID := os.Getpid()
+	root := repoRoot(t)
+
+	tests := []struct {
+		name string
+		// states maps a file under the dolt pack's state dir to what it records.
+		states map[string]runtimeStateForScript
+		// pinStateFile points GC_DOLT_STATE_FILE at an absent file, which
+		// keeps port resolution off dolt-provider-state.json.
+		pinStateFile bool
+		want         int
+	}{
+		{
+			name: "dolt-state.json names this process",
+			states: map[string]runtimeStateForScript{
+				"dolt-state.json": {running: true, pid: serverPID, port: port},
+			},
+			want: serverPID,
+		},
+		{
+			name: "dolt-provider-state.json alone names this process",
+			states: map[string]runtimeStateForScript{
+				"dolt-provider-state.json": {running: true, pid: serverPID, port: port},
+			},
+			want: serverPID,
+		},
+		{
+			name: "a stopped dolt-state.json naming PID 1 yields to the provider state",
+			states: map[string]runtimeStateForScript{
+				"dolt-state.json":          {running: false, pid: 1, port: port},
+				"dolt-provider-state.json": {running: true, pid: serverPID, port: port},
+			},
+			want: serverPID,
+		},
+		{
+			name: "a dolt-state.json for another data dir yields to the provider state",
+			states: map[string]runtimeStateForScript{
+				"dolt-state.json":          {running: true, pid: 1, port: port, dataDir: "/nonexistent/other-city/.beads/dolt"},
+				"dolt-provider-state.json": {running: true, pid: serverPID, port: port},
+			},
+			want: serverPID,
+		},
+		{
+			name: "a dolt-state.json for another port yields to the provider state",
+			states: map[string]runtimeStateForScript{
+				"dolt-state.json":          {running: true, pid: 1, port: port + 1},
+				"dolt-provider-state.json": {running: true, pid: serverPID, port: port},
+			},
+			want: serverPID,
+		},
+		{
+			name: "GC_DOLT_STATE_FILE keeps the provider state out, as port resolution does",
+			states: map[string]runtimeStateForScript{
+				"dolt-provider-state.json": {running: true, pid: serverPID, port: port},
+			},
+			pinStateFile: true,
+			want:         1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cityPath := t.TempDir()
+			fakeBin := t.TempDir()
+			for file, state := range tt.states {
+				writeRuntimeStateFileForScript(t, cityPath, file, state)
+			}
+			procRoot := writeProcFixture(t, listenerProbeTCPFixture, "", map[string]string{
+				"1/fd/3":                          "4242001",
+				strconv.Itoa(serverPID) + "/fd/5": "4242001",
+			})
+			marker := filepath.Join(fakeBin, "lsof-ran")
+			writeLsofRecordingShim(t, fakeBin)
+			for _, name := range []string{"gc", "nc", "dolt"} {
+				writeExecutable(t, filepath.Join(fakeBin, name), "#!/bin/sh\nexit 1\n")
+			}
+
+			env := append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
+				"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH", "LSOF_MARKER"),
+				"GC_CITY_PATH="+cityPath,
+				"GC_PACK_DIR="+root,
+				"GC_DOLT_PROC_ROOT="+procRoot,
+				"GC_DOLT_HOST=127.0.0.1",
+				"GC_DOLT_PORT="+strconv.Itoa(port),
+				"GC_DOLT_USER=root",
+				"GC_DOLT_PASSWORD=",
+				"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+				"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+				"LSOF_MARKER="+marker,
+			)
+			if tt.pinStateFile {
+				env = append(env, "GC_DOLT_STATE_FILE="+filepath.Join(t.TempDir(), "dolt-state.json"))
+			}
+			out, err := newHealthScriptCmd(root, env, "--json").Output()
+			if err != nil {
+				t.Fatalf("health.sh --json failed: %v\n%s", err, out)
+			}
+
+			var report struct {
+				Server struct {
+					Running bool `json:"running"`
+					PID     int  `json:"pid"`
+				} `json:"server"`
+			}
+			if err := json.Unmarshal(out, &report); err != nil {
+				t.Fatalf("health.sh --json returned invalid JSON: %v\n%s", err, out)
+			}
+			if !report.Server.Running || report.Server.PID != tt.want {
+				t.Fatalf("server running=%t pid=%d, want running with pid %d (this process is %d, the lower holder is 1)\n%s",
+					report.Server.Running, report.Server.PID, tt.want, serverPID, out)
+			}
+			if _, err := os.Stat(marker); err == nil {
+				t.Fatalf("lsof ran during the health probe; the kernel socket tables already answer (gascity#7553)\n%s", out)
+			}
+		})
+	}
+}
+
 func TestHealthScriptPortableTimestampFallbacksRemainNumeric(t *testing.T) {
 	tests := []struct {
 		name string
@@ -907,7 +1030,7 @@ func TestHealthScriptPortableTimestampFallbacksRemainNumeric(t *testing.T) {
 			t.Cleanup(func() { _ = listener.Close() })
 			port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
 
-			writeExecutable(t, filepath.Join(fakeBin, "lsof"), `#!/bin/sh
+			lsofEnv := fakeLsofEnv(t, fakeBin, `#!/bin/sh
 exit 0
 `)
 			writeExecutable(t, filepath.Join(fakeBin, "nc"), `#!/bin/sh
@@ -978,6 +1101,7 @@ exec /bin/date "$@"
 				"GC_DOLT_PASSWORD=",
 				"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
 				"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+				lsofEnv,
 			)
 
 			out, err := cmd.CombinedOutput()
@@ -1020,6 +1144,23 @@ func writeManagedRuntimeStateForScriptWithPID(t *testing.T, cityPath string, por
 
 func writeManagedRuntimeStateFileForScript(t *testing.T, cityPath string, filename string, port int, pid int) {
 	t.Helper()
+	writeRuntimeStateFileForScript(t, cityPath, filename, runtimeStateForScript{running: true, pid: pid, port: port})
+}
+
+// runtimeStateForScript is what a dolt runtime state file records, as
+// runtime.sh reads it. An empty dataDir records the city's managed data dir.
+type runtimeStateForScript struct {
+	running bool
+	pid     int
+	port    int
+	dataDir string
+}
+
+// writeRuntimeStateFileForScript writes state as the named file under
+// cityPath's dolt pack state dir. It also creates the city's managed data
+// dir, so runtime.sh resolves DOLT_DATA_DIR to it.
+func writeRuntimeStateFileForScript(t *testing.T, cityPath string, filename string, state runtimeStateForScript) {
+	t.Helper()
 	stateDir := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -1028,11 +1169,15 @@ func writeManagedRuntimeStateFileForScript(t *testing.T, cityPath string, filena
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	if state.dataDir == "" {
+		state.dataDir = dataDir
+	}
 	payload := []byte(fmt.Sprintf(
-		`{"running":true,"pid":%d,"port":%d,"data_dir":%q,"started_at":"2026-04-20T00:00:00Z"}`,
-		pid,
-		port,
-		dataDir,
+		`{"running":%t,"pid":%d,"port":%d,"data_dir":%q,"started_at":"2026-04-20T00:00:00Z"}`,
+		state.running,
+		state.pid,
+		state.port,
+		state.dataDir,
 	))
 	if err := os.WriteFile(filepath.Join(stateDir, filename), payload, 0o644); err != nil {
 		t.Fatal(err)
@@ -1044,6 +1189,18 @@ func writeExecutable(t *testing.T, path, contents string) {
 	if err := os.WriteFile(path, []byte(contents), 0o755); err != nil {
 		t.Fatalf("WriteFile(%s): %v", path, err)
 	}
+}
+
+// fakeLsofEnv writes an lsof shim into binDir and returns the
+// GC_DOLT_PROC_ROOT env entry that points the listener probe at an empty
+// directory. The probe answers from the kernel socket tables whenever they
+// are readable, so a test whose fixture depends on its shim must also make
+// those tables unreadable — the shape of a host without procfs, where the
+// shim's answer is the only one there is.
+func fakeLsofEnv(t *testing.T, binDir, body string) string {
+	t.Helper()
+	writeExecutable(t, filepath.Join(binDir, "lsof"), body)
+	return "GC_DOLT_PROC_ROOT=" + t.TempDir()
 }
 
 func TestHealthScriptProbesConfiguredExternalHost(t *testing.T) {
@@ -1064,7 +1221,7 @@ func TestHealthScriptProbesConfiguredExternalHost(t *testing.T) {
 	// Force the local managed-server precheck to fail. External hosts must still
 	// be probed via SQL against GC_DOLT_HOST:GC_DOLT_PORT.
 	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
-	writeExecutable(t, filepath.Join(fakeBin, "lsof"), "#!/bin/sh\nexit 1\n")
+	lsofEnv := fakeLsofEnv(t, fakeBin, "#!/bin/sh\nexit 1\n")
 	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 1\n")
 	// Append (not overwrite) each invocation's args: for an external endpoint
 	// health issues the SELECT 1 reachability probe AND a SHOW DATABASES catalog
@@ -1088,6 +1245,7 @@ exit 0
 		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
 		"FAKE_DOLT_ARGS="+argsFile,
 		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		lsofEnv,
 	)
 
 	out, err := cmd.CombinedOutput()
@@ -1168,7 +1326,7 @@ func TestHealthScriptExternalEndpointEnumeratesDatabasesViaSQL(t *testing.T) {
 	// Local managed precheck must fail so the external SQL path is taken; the
 	// on-disk data dir is empty, proving databases come from SQL, not the scan.
 	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
-	writeExecutable(t, filepath.Join(fakeBin, "lsof"), "#!/bin/sh\nexit 1\n")
+	lsofEnv := fakeLsofEnv(t, fakeBin, "#!/bin/sh\nexit 1\n")
 	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 1\n")
 	writeExecutable(t, filepath.Join(fakeBin, "dolt"), smartFakeDoltForExternal)
 
@@ -1184,6 +1342,7 @@ func TestHealthScriptExternalEndpointEnumeratesDatabasesViaSQL(t *testing.T) {
 		"GC_DOLT_PASSWORD=secret",
 		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
 		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		lsofEnv,
 	)
 
 	out, err := cmd.CombinedOutput()
@@ -1261,7 +1420,7 @@ func TestHealthScriptLocalEndpointIsNotExternal(t *testing.T) {
 	}
 
 	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
-	writeExecutable(t, filepath.Join(fakeBin, "lsof"), "#!/bin/sh\nexit 0\n")
+	lsofEnv := fakeLsofEnv(t, fakeBin, "#!/bin/sh\nexit 0\n")
 	writeExecutable(t, filepath.Join(fakeBin, "nc"), `#!/bin/sh
 if [ "$1" = "-z" ] && [ "$2" = "127.0.0.1" ] && [ "$3" = "`+port+`" ]; then
   exit 0
@@ -1282,6 +1441,7 @@ exit 1
 		"GC_DOLT_PASSWORD=",
 		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
 		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		lsofEnv,
 	)
 
 	out, err := cmd.CombinedOutput()
@@ -1331,7 +1491,7 @@ func TestHealthScriptNonOneLoopbackHostIsExternal(t *testing.T) {
 	// Local managed precheck must fail so classification alone decides the path;
 	// the smart fake answers the external SELECT 1 / SHOW DATABASES probes.
 	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
-	writeExecutable(t, filepath.Join(fakeBin, "lsof"), "#!/bin/sh\nexit 1\n")
+	lsofEnv := fakeLsofEnv(t, fakeBin, "#!/bin/sh\nexit 1\n")
 	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 1\n")
 	writeExecutable(t, filepath.Join(fakeBin, "dolt"), smartFakeDoltForExternal)
 
@@ -1347,6 +1507,7 @@ func TestHealthScriptNonOneLoopbackHostIsExternal(t *testing.T) {
 		"GC_DOLT_PASSWORD=",
 		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
 		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		lsofEnv,
 	)
 
 	out, err := cmd.CombinedOutput()
@@ -1423,7 +1584,7 @@ func runHealthScriptZombieScanExcludesRigLocalServers(t *testing.T, rigConfig st
 		fmt.Sprintf("#!/bin/sh\necho %s\necho %s\necho %s\n", mainPID, rigPID, zombiePID))
 
 	// Fake lsof: maps ports to PIDs.
-	writeExecutable(t, filepath.Join(fakeBin, "lsof"),
+	lsofEnv := fakeLsofEnv(t, fakeBin,
 		fmt.Sprintf(`#!/bin/sh
 for arg in "$@"; do
   case "$arg" in
@@ -1470,6 +1631,7 @@ exit 1
 		"GC_DOLT_USER=root",
 		"GC_DOLT_PASSWORD=",
 		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		lsofEnv,
 	)
 
 	out, err := cmd.CombinedOutput()
@@ -1577,7 +1739,7 @@ func TestHealthScriptZombieScanExcludesForeignManagedServers(t *testing.T) {
 		fmt.Sprintf("#!/bin/sh\necho %s\necho %s\necho %s\n", mainPID, foreignPID, zombiePID))
 
 	// Fake lsof: maps main port to mainPID.
-	writeExecutable(t, filepath.Join(fakeBin, "lsof"),
+	lsofEnv := fakeLsofEnv(t, fakeBin,
 		fmt.Sprintf(`#!/bin/sh
 for arg in "$@"; do
   case "$arg" in
@@ -1623,6 +1785,7 @@ exit 1
 		"GC_DOLT_USER=root",
 		"GC_DOLT_PASSWORD=",
 		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		lsofEnv,
 	)
 
 	out, err := cmd.CombinedOutput()
@@ -1686,7 +1849,7 @@ func TestHealthScriptZombieScanFlagsMismatchedForeignPidFile(t *testing.T) {
 	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
 	writeExecutable(t, filepath.Join(fakeBin, "pgrep"),
 		fmt.Sprintf("#!/bin/sh\necho %s\necho %s\n", mainPID, suspectPID))
-	writeExecutable(t, filepath.Join(fakeBin, "lsof"),
+	lsofEnv := fakeLsofEnv(t, fakeBin,
 		fmt.Sprintf(`#!/bin/sh
 for arg in "$@"; do
   case "$arg" in
@@ -1725,6 +1888,7 @@ exit 1
 		"GC_DOLT_USER=root",
 		"GC_DOLT_PASSWORD=",
 		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		lsofEnv,
 	)
 
 	out, err := cmd.CombinedOutput()
@@ -1787,7 +1951,7 @@ func TestHealthScriptZombieScanExcludesExternallyManagedServers(t *testing.T) {
 		fmt.Sprintf("#!/bin/sh\necho %s\necho %s\necho %s\n", mainPID, externalPID, zombiePID))
 
 	// Fake lsof: maps main port to mainPID.
-	writeExecutable(t, filepath.Join(fakeBin, "lsof"),
+	lsofEnv := fakeLsofEnv(t, fakeBin,
 		fmt.Sprintf(`#!/bin/sh
 for arg in "$@"; do
   case "$arg" in
@@ -1833,6 +1997,7 @@ exit 1
 		"GC_DOLT_USER=root",
 		"GC_DOLT_PASSWORD=",
 		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		lsofEnv,
 	)
 
 	out, err := cmd.CombinedOutput()
@@ -1893,7 +2058,7 @@ func TestHealthScriptZombieScanIsBoundedFork(t *testing.T) {
 	// gc fails -> metadata_files falls back to find (no rigs here).
 	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
 	// lsof maps the city port to the server PID so server_pid resolves.
-	writeExecutable(t, filepath.Join(fakeBin, "lsof"),
+	lsofEnv := fakeLsofEnv(t, fakeBin,
 		fmt.Sprintf("#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in -iTCP:%s) echo %s; exit 0 ;; esac; done\nexit 1\n", mainPort, serverPID))
 	writeExecutable(t, filepath.Join(fakeBin, "nc"), "#!/bin/sh\nexit 1\n")
 	writeExecutable(t, filepath.Join(fakeBin, "dolt"), "#!/bin/sh\nexit 1\n")
@@ -1930,6 +2095,7 @@ exit 1
 		"GC_DOLT_USER=root",
 		"GC_DOLT_PASSWORD=",
 		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+		lsofEnv,
 	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -2092,7 +2258,7 @@ func TestHealthScriptSurfacesQuarantineInJSON(t *testing.T) {
 	// always exits 0.
 	binDir := t.TempDir()
 	writeExecutable(t, filepath.Join(binDir, "gc"), "#!/bin/sh\nexit 1\n")
-	writeExecutable(t, filepath.Join(binDir, "lsof"), "#!/bin/sh\nexit 1\n")
+	lsofEnv := fakeLsofEnv(t, binDir, "#!/bin/sh\nexit 1\n")
 	writeExecutable(t, filepath.Join(binDir, "nc"), "#!/bin/sh\nexit 1\n")
 	writeExecutable(t, filepath.Join(binDir, "dolt"), "#!/bin/sh\nexit 1\n")
 
@@ -2106,6 +2272,7 @@ func TestHealthScriptSurfacesQuarantineInJSON(t *testing.T) {
 		"GC_DOLT_PASSWORD=",
 		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		lsofEnv,
 	)
 	out, err := newHealthScriptCmd(root, env, "--json").Output()
 	if err != nil {
@@ -2254,9 +2421,10 @@ type backupsReport struct {
 func runHealthBackupsJSON(t *testing.T, cityPath string) (backupsReport, []byte) {
 	t.Helper()
 	binDir := t.TempDir()
-	for _, name := range []string{"gc", "lsof", "nc", "dolt"} {
+	for _, name := range []string{"gc", "nc", "dolt"} {
 		writeExecutable(t, filepath.Join(binDir, name), "#!/bin/sh\nexit 1\n")
 	}
+	lsofEnv := fakeLsofEnv(t, binDir, "#!/bin/sh\nexit 1\n")
 	root := repoRoot(t)
 	env := append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT", "GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "GC_BACKUP_ARTIFACT_DIR", "GC_HEALTH_BACKUP_STALE_S", "GC_DOCTOR_BACKUP_STALE_S", "PATH"),
 		"GC_CITY_PATH="+cityPath,
@@ -2267,6 +2435,7 @@ func runHealthBackupsJSON(t *testing.T, cityPath string) (backupsReport, []byte)
 		"GC_DOLT_PASSWORD=",
 		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
 		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		lsofEnv,
 	)
 	out, err := newHealthScriptCmd(root, env, "--json").Output()
 	if err != nil {

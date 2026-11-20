@@ -47,18 +47,18 @@ type BindingReapStats struct {
 // The sweep is idempotent and safe to run on every reconciler tick; it must run
 // after session beads have been synced for the tick so a respawned session's
 // replacement bead is already visible.
-func ReapStaleBindings(ctx context.Context, store beads.Store, now time.Time) (BindingReapStats, error) {
-	return ReapStaleBindingsWithSessionDirectory(ctx, store, session.NewStore(beads.SessionStore{Store: store}), now)
+func ReapStaleBindings(ctx context.Context, store beads.MailStore, sessions beads.SessionStore, now time.Time) (BindingReapStats, error) {
+	return ReapStaleBindingsWithSessionDirectory(ctx, store, session.NewStore(sessions), now)
 }
 
 // ReapStaleBindingsWithSessionDirectory reconciles Messaging binding records
 // using the independently selected typed Sessions address/liveness directory.
-func ReapStaleBindingsWithSessionDirectory(ctx context.Context, store beads.Store, sessions session.AddressDirectory, now time.Time) (BindingReapStats, error) {
+func ReapStaleBindingsWithSessionDirectory(ctx context.Context, store beads.MailStore, sessions session.AddressDirectory, now time.Time) (BindingReapStats, error) {
 	var stats BindingReapStats
 	if err := checkContext(ctx); err != nil {
 		return stats, err
 	}
-	if store == nil {
+	if store == (beads.MailStore{}) {
 		return stats, nil
 	}
 	if nilAddressDirectory(sessions) {
@@ -161,18 +161,18 @@ type ParticipantReapStats struct {
 // The sweep is idempotent and safe to run on every reconciler tick; it must run
 // after session beads have been synced for the tick so a respawned session's
 // replacement bead is already visible.
-func ReapStaleParticipants(ctx context.Context, store beads.Store) (ParticipantReapStats, error) {
-	return ReapStaleParticipantsWithSessionDirectory(ctx, store, session.NewStore(beads.SessionStore{Store: store}))
+func ReapStaleParticipants(ctx context.Context, store beads.MailStore, sessions beads.SessionStore) (ParticipantReapStats, error) {
+	return ReapStaleParticipantsWithSessionDirectory(ctx, store, session.NewStore(sessions))
 }
 
 // ReapStaleParticipantsWithSessionDirectory heals Messaging participants from
 // the independently selected typed Sessions address/liveness directory.
-func ReapStaleParticipantsWithSessionDirectory(ctx context.Context, store beads.Store, sessions session.AddressDirectory) (ParticipantReapStats, error) {
+func ReapStaleParticipantsWithSessionDirectory(ctx context.Context, store beads.MailStore, sessions session.AddressDirectory) (ParticipantReapStats, error) {
 	var stats ParticipantReapStats
 	if err := checkContext(ctx); err != nil {
 		return stats, err
 	}
-	if store == nil {
+	if store == (beads.MailStore{}) {
 		return stats, nil
 	}
 	if nilAddressDirectory(sessions) {

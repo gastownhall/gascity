@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -142,6 +143,7 @@ func TestE2b2ProviderConstructionFailuresReturnThroughRun(t *testing.T) {
 		"GC_SESSION_ID="+sessionID,
 		"GC_SESSION_NAME=test-city--frontend--worker",
 		"GC_TMUX_SESSION=test-city--frontend--worker",
+		"GC_INSTANCE_TOKEN=tok-provider-failure",
 	)
 	var processStdout, processStderr bytes.Buffer
 	cmd.Stdout = &processStdout
@@ -249,6 +251,7 @@ func runE2b2ProviderFailureHelper(t *testing.T, cityPath, sessionID, markerPath 
 	t.Setenv("GC_SESSION_ID", sessionID)
 	t.Setenv("GC_SESSION_NAME", "test-city--frontend--worker")
 	t.Setenv("GC_TMUX_SESSION", "test-city--frontend--worker")
+	t.Setenv("GC_INSTANCE_TOKEN", "tok-provider-failure")
 
 	oldBuild := buildSessionProviderByName
 	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
@@ -282,7 +285,7 @@ func runE2b2ProviderFailureHelper(t *testing.T, cityPath, sessionID, markerPath 
 		{name: "runtime drain-ack explicit json", args: []string{"--city", cityPath, "runtime", "drain-ack", sessionID, "--json"}, wantCommand: "gc runtime drain-ack", wantJSONCode: "command_failed", wantJSONMessage: "command failed; see stderr for diagnostics"},
 		{name: "runtime drain-ack context text", args: []string{"--city", cityPath, "runtime", "drain-ack"}, wantCommand: "gc runtime drain-ack"},
 		{name: "runtime drain-ack context json", args: []string{"--city", cityPath, "runtime", "drain-ack", "--json"}, wantCommand: "gc runtime drain-ack", wantJSONCode: "command_failed", wantJSONMessage: "command failed; see stderr for diagnostics"},
-		{name: "runtime request-restart text", args: []string{"--city", cityPath, "runtime", "request-restart"}, wantCommand: "gc runtime request-restart"},
+		{name: "runtime request-restart text", args: []string{"--city", cityPath, "runtime", "request-restart"}, wantCommand: "gc runtime request-restart", wantMessage: "gc runtime request-restart: restart not recorded: " + constructionFailure},
 		{name: "rig status text", args: []string{"--city", cityPath, "rig", "status", "frontend"}, wantCommand: "gc rig status"},
 		{name: "rig status json", args: []string{"--city", cityPath, "rig", "status", "frontend", "--json"}, wantCommand: "gc rig status", wantJSONCode: "command_failed", wantJSONMessage: "command failed; see stderr for diagnostics"},
 		{name: "city status text", args: []string{"--city", cityPath, "status"}, wantCommand: "gc status"},
@@ -1660,47 +1663,56 @@ func TestProviderDrainOpsSetDrainAckAttemptsAckAfterCleanupErrors(t *testing.T) 
 // doRuntimeRequestRestart tests
 // ---------------------------------------------------------------------------
 
+// TestDoRuntimeRequestRestartError pins that a failed runtime hint, which
+// follows the durable row write, is only a warning (SG-3).
 func TestDoRuntimeRequestRestartError(t *testing.T) {
-	testCity := t.TempDir()
 	dops := newFakeDrainOps()
 	dops.err = errors.New("tmux borked")
 	var stdout, stderr bytes.Buffer
-	code := doRuntimeRequestRestart(dops, nil, false, events.Discard, "worker", "worker", testCity, &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("code = %d, want 1", code)
+	code := doRuntimeRequestRestart(testRowFirstRestart("gc runtime request-restart", "worker", dops, &stderr), events.Discard, &stdout)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
-	if got := stderr.String(); got != "gc runtime request-restart: tmux borked\n" {
-		t.Errorf("stderr = %q", got)
+	if got, want := stderr.String(), "gc runtime request-restart: warning: restart recorded; the runtime restart hint was not set: tmux borked\n"; got != want {
+		t.Errorf("stderr = %q, want %q", got, want)
 	}
 }
 
-// TestDoRuntimeRequestRestart_PinnedRequiresPersistRestart covers Fix 1 for
-// the gc runtime request-restart path: a pinned session (pin_awake ==
-// "true") is kill-protected by the reconciler unless an explicit controller
-// reset is persisted, so persistRestart is mandatory rather than best-effort
-// when pinned is true. Mirrors TestDoHandoff_PinnedAlwaysSessionRequiresPersistRestart.
-func TestDoRuntimeRequestRestart_PinnedRequiresPersistRestart(t *testing.T) {
-	testCity := t.TempDir()
+// TestDoRuntimeRequestRestart_RowWriteFailureRecordsNothing pins that the row
+// write is mandatory for every session (the pinned special case collapsed
+// into it): unavailable or failing, the command exits 1 with no hint, no
+// event and no poke.
+func TestDoRuntimeRequestRestart_RowWriteFailureRecordsNothing(t *testing.T) {
 	for _, tc := range []struct {
-		name           string
-		persistRestart func() error
+		name   string
+		record func(string) error
 	}{
-		{name: "nil persistRestart"},
-		{name: "persistRestart error", persistRestart: func() error { return errors.New("worker boundary unavailable") }},
+		{name: "no session store"},
+		{name: "row write error", record: func(string) error { return errors.New("worker boundary unavailable") }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dops := newFakeDrainOps()
 			rec := events.NewFake()
 			var stdout, stderr bytes.Buffer
-			code := doRuntimeRequestRestart(dops, tc.persistRestart, true, rec, "mayor", "mayor", testCity, &stdout, &stderr)
+			restart := testRowFirstRestart("gc runtime request-restart", "mayor", dops, &stderr)
+			restart.record = tc.record
+			poked := false
+			restart.poke = func(string, reconcilekey.Key) error { poked = true; return nil }
+			code := doRuntimeRequestRestart(restart, rec, &stdout)
 			if code != 1 {
 				t.Fatalf("code = %d, want 1; stderr: %s", code, stderr.String())
 			}
-			if got := stdout.String(); strings.Contains(got, "Restart requested") {
-				t.Errorf("stdout = %q, must not promise a restart when persistRestart is unavailable for a pinned session", got)
+			if got := stdout.String(); got != "" {
+				t.Errorf("stdout = %q, want nothing", got)
+			}
+			if dops.restartRequested["mayor"] {
+				t.Error("runtime restart hint set although the row write failed")
+			}
+			if poked {
+				t.Error("controller poked although nothing was recorded")
 			}
 			if len(rec.Events) != 0 {
-				t.Fatalf("got %d events, want 0 (must not record SessionDraining without a real restart request); events=%v", len(rec.Events), rec.Events)
+				t.Fatalf("events = %v, want none", rec.Events)
 			}
 		})
 	}
@@ -2319,5 +2331,222 @@ func TestDrainRuntimeRowWriteFailure(t *testing.T) {
 	code := drainRuntime(dops, func() error { return errors.New("store down") }, sp, rec, "worker", "worker", false, &stdout, &stderr)
 	if code != 1 || dops.draining["worker"] || len(rec.Events) != 0 || !strings.Contains(stderr.String(), "store down") {
 		t.Fatalf("drain = %d (draining %v, events %v, stderr %q), want 1 with nothing set", code, dops.draining["worker"], rec.Events, stderr.String())
+	}
+}
+
+// stubDrainAckSideEffects stubs the held-claim release and the controller
+// poke for a drain-ack test, returning a pointer to the poke count.
+func stubDrainAckSideEffects(t *testing.T) *int {
+	t.Helper()
+	pokes := 0
+	oldPoke := drainAckPokeController
+	drainAckPokeController = func(string, reconcilekey.Key) error { pokes++; return nil }
+	oldRelease := drainAckReleaseHeldClaims
+	drainAckReleaseHeldClaims = func(string, string, drainAckCaller, io.Writer) string { return "" }
+	t.Cleanup(func() {
+		drainAckPokeController = oldPoke
+		drainAckReleaseHeldClaims = oldRelease
+	})
+	return &pokes
+}
+
+// unpersistedAckDrainOps reports every ack write as successful while the
+// flag never lands, as a write to the wrong tmux server can (#8116).
+type unpersistedAckDrainOps struct {
+	*fakeDrainOps
+}
+
+func (unpersistedAckDrainOps) setDrainAck(string) error { return nil }
+
+func TestDoRuntimeDrainAckFailsWhenAckDidNotPersist(t *testing.T) {
+	pokes := stubDrainAckSideEffects(t)
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAck(unpersistedAckDrainOps{newFakeDrainOps()}, t.TempDir(), "worker", "worker-sess", "", drainAckCaller{}, false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if got := stdout.String(); strings.Contains(got, "Drain acknowledged") {
+		t.Errorf("stdout = %q, want no acknowledgement", got)
+	}
+	if got := stderr.String(); !strings.Contains(got, "did not persist") || !strings.Contains(got, `"worker-sess"`) {
+		t.Errorf("stderr = %q, want a did-not-persist error naming the session", got)
+	}
+	if *pokes != 0 {
+		t.Errorf("controller poked %d times, want 0", *pokes)
+	}
+}
+
+// cityTmuxProviderAnswering is the city's real tmux provider over a fake tmux
+// that runs script for every command, so the provider's own error
+// classification answers the ack.
+func cityTmuxProviderAnswering(t *testing.T, script string) runtime.Provider {
+	t.Helper()
+	installFakeTmux(t, script)
+	sp, err := newSessionProviderForCityByName(nil, "tmux", config.SessionConfig{Socket: "bright-lights"}, "city", t.TempDir())
+	if err != nil {
+		t.Fatalf("newSessionProviderForCityByName: %v", err)
+	}
+	return sp
+}
+
+// tmuxLacksSessionScript answers like a live tmux server that does not host
+// the session: #8116's stale server, which an operator shell or an unpinnable
+// $TMUX still reaches.
+const tmuxLacksSessionScript = `echo "can't find session: worker-sess" >&2; exit 1`
+
+// The ack write and its read-back both find no session on a server that lacks
+// it, and the read-back alone would take that for the reap race; with no server
+// at all, both find none either. The flag write found no session, so the legacy
+// ack fails before the poke.
+func TestDoRuntimeDrainAckFailsWhenTheFlagWriteFindsNoSession(t *testing.T) {
+	for _, tc := range []struct {
+		name, script string
+	}{
+		{"live server without the session", tmuxLacksSessionScript},
+		{"no server", `echo "no server running on /tmp/tmux-1000/bright-lights" >&2; exit 1`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pokes := stubDrainAckSideEffects(t)
+			dops := newDrainOps(cityTmuxProviderAnswering(t, tc.script))
+			var stdout, stderr bytes.Buffer
+			code := doRuntimeDrainAck(dops, t.TempDir(), "worker", "worker-sess", "", drainAckCaller{}, false, &stdout, &stderr)
+			if code != 1 {
+				t.Fatalf("code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			if got := stdout.String(); strings.Contains(got, "Drain acknowledged") {
+				t.Errorf("stdout = %q, want no acknowledgement", got)
+			}
+			if got := stderr.String(); !strings.Contains(got, "did not land") || !strings.Contains(got, "nothing acknowledged") || !strings.Contains(got, `"worker-sess"`) {
+				t.Errorf("stderr = %q, want a did-not-land error naming the session", got)
+			}
+			if *pokes != 0 {
+				t.Errorf("controller poked %d times, want 0", *pokes)
+			}
+		})
+	}
+}
+
+// A flag write that landed, read back from a server that has since stopped
+// answering, fails the ack without claiming that nothing was acknowledged: the
+// flag may well be set.
+func TestDoRuntimeDrainAckFailsUnverifiedWhenTheReadBackFindsNoServer(t *testing.T) {
+	pokes := stubDrainAckSideEffects(t)
+	dops := newDrainOps(cityTmuxProviderAnswering(t, `case "$*" in *show-environment*) echo "no server running on /tmp/tmux-1000/bright-lights" >&2; exit 1 ;; esac`))
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAck(dops, t.TempDir(), "worker", "worker-sess", "", drainAckCaller{}, false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if got := stdout.String(); strings.Contains(got, "Drain acknowledged") {
+		t.Errorf("stdout = %q, want no acknowledgement", got)
+	}
+	if got := stderr.String(); !strings.Contains(got, "could not be verified and may still take effect") || strings.Contains(got, "nothing acknowledged") || !strings.Contains(got, `"worker-sess"`) {
+		t.Errorf("stderr = %q, want an unverified-ack error naming the session", got)
+	}
+	if *pokes != 0 {
+		t.Errorf("controller poked %d times, want 0", *pokes)
+	}
+}
+
+// Under v2 the row is the ack, so a flag write that found no session leaves
+// nothing to mirror into, and the ack stands.
+func TestRowAckedDrainOpsKeepsTheAckWhenTheFlagWriteFindsNoSession(t *testing.T) {
+	var stderr bytes.Buffer
+	dops := rowAckedDrainOps{drainOps: newDrainOps(cityTmuxProviderAnswering(t, tmuxLacksSessionScript)), stderr: &stderr}
+	if err := dops.setDrainAck("worker-sess"); err != nil {
+		t.Fatalf("setDrainAck = %v, want nil: the row ack is in force", err)
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr = %q, want nothing", stderr.String())
+	}
+}
+
+// goneMirrorProvider stores metadata like the fake, then reports that the
+// GC_DRAIN_ACK mirror found the session gone. The stored flag is in force, as
+// with any mirror failure.
+type goneMirrorProvider struct {
+	*runtime.Fake
+}
+
+func (p goneMirrorProvider) SetMeta(name, key, value string) error {
+	if err := p.Fake.SetMeta(name, key, value); err != nil || key != "GC_DRAIN_ACK" {
+		return err
+	}
+	return &runtime.MetadataNotMirroredError{Session: name, Key: key, Cause: runtime.ErrSessionNotFound}
+}
+
+// A flag write whose only failure is its mirror landed, even when the mirror
+// found the session gone: the legacy ack reads the flag back and stands.
+func TestDoRuntimeDrainAckGoneMirrorStaysAcknowledged(t *testing.T) {
+	pokes := stubDrainAckSideEffects(t)
+	dops := newDrainOps(goneMirrorProvider{Fake: runtime.NewFake()})
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAck(dops, t.TempDir(), "worker", "worker", "", drainAckCaller{}, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if got := stdout.String(); got != "Drain acknowledged. Controller poked for immediate stop.\n" {
+		t.Errorf("stdout = %q", got)
+	}
+	if *pokes != 1 {
+		t.Errorf("controller poked %d times, want 1", *pokes)
+	}
+}
+
+// scriptedAckDrainOps scripts the ack write and its read-back.
+type scriptedAckDrainOps struct {
+	*fakeDrainOps
+	t        *testing.T
+	writeErr error
+	readErr  error
+	noRead   bool
+}
+
+func (o scriptedAckDrainOps) setDrainAck(string) error { return o.writeErr }
+
+func (o scriptedAckDrainOps) isDrainAcked(sessionName string) (bool, error) {
+	if o.noRead {
+		o.t.Errorf("isDrainAcked(%q) called; the ack must not be read back", sessionName)
+	}
+	return false, o.readErr
+}
+
+// A session reaped between the ack and its read-back is the benign reap race:
+// the ack still succeeds and pokes the controller.
+func TestDoRuntimeDrainAckReadBackGoneStaysAcknowledged(t *testing.T) {
+	pokes := stubDrainAckSideEffects(t)
+	gone := fmt.Errorf("reading GC_DRAIN_ACK: %w", fmt.Errorf("reading GC_DRAIN_ACK from session %q: %w: %w", "worker", runtime.ErrSessionNotFound, errors.New("session not found")))
+	dops := scriptedAckDrainOps{fakeDrainOps: newFakeDrainOps(), t: t, readErr: gone}
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAck(dops, t.TempDir(), "worker", "worker", "", drainAckCaller{}, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if got := stdout.String(); got != "Drain acknowledged. Controller poked for immediate stop.\n" {
+		t.Errorf("stdout = %q", got)
+	}
+	if *pokes != 1 {
+		t.Errorf("controller poked %d times, want 1", *pokes)
+	}
+}
+
+// An ack whose only failure is the runtime mirror is in force; it is reported
+// as a warning without a read-back, as before.
+func TestDoRuntimeDrainAckMirrorOnlyErrorSkipsReadBack(t *testing.T) {
+	pokes := stubDrainAckSideEffects(t)
+	dops := scriptedAckDrainOps{fakeDrainOps: newFakeDrainOps(), t: t, writeErr: t3OutageMirrorFailure("worker", "GC_DRAIN_ACK"), noRead: true}
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAck(dops, t.TempDir(), "worker", "worker", "", drainAckCaller{}, false, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if got := stderr.String(); !strings.HasPrefix(got, "gc runtime drain-ack: warning: ") {
+		t.Errorf("stderr = %q, want the mirror warning", got)
+	}
+	if got := stdout.String(); got != "Drain acknowledged. Controller poked for immediate stop.\n" {
+		t.Errorf("stdout = %q", got)
+	}
+	if *pokes != 1 {
+		t.Errorf("controller poked %d times, want 1", *pokes)
 	}
 }

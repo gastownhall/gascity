@@ -147,7 +147,7 @@ func TestLegacyWakeUnchanged(t *testing.T) {
 // signals exactly the wiring's channels, which the runtime's run loop selects
 // on (assertWakeSignalsWired checks the runtime half).
 func TestControllerWiringWakesItsOwnSignals(t *testing.T) {
-	w, err := newControllerWiring(&config.City{}, nil, io.Discard)
+	w, err := newControllerWiring(&config.City{}, "", nil, io.Discard)
 	if err != nil {
 		t.Fatalf("newControllerWiring: %v", err)
 	}
@@ -578,7 +578,7 @@ var wakeSignalMentions = map[string]bool{
 	"reconcile_wake.go:(*controllerWake).OnBeadEvent":           true,
 	"reconcile_wake.go:(*CityRuntime).initWake":                 true,
 	"reconcile_wiring.go:type controllerWiring":                 true,
-	"reconcile_wiring.go:newControllerWiring":                   true,
+	"reconcile_wiring.go:newControllerWiringLoggingTo":          true,
 	"reconcile_wiring.go:(*controllerWiring).runtimeParams":     true, // hands the wiring's signals to the runtime
 }
 

@@ -98,6 +98,11 @@ type Request struct {
 	Principal    string
 	Actor        string
 	Key          string
+	// KeyNamespace, when set, is the namespace the request's command keeps
+	// its clients' keys in (KeyNamespaceRequestRestart,
+	// KeyNamespaceHandoff): the op is stored under KeyNamespace+Key, and a
+	// minted key as minted. The Admission still names Key.
+	KeyNamespace string
 	Payload      string
 	Causation    string
 	Kind         opjournal.Kind
@@ -172,16 +177,22 @@ func (a *Admission) DeliveryKey() string {
 // answers by then. Inflight is the API's in-flight registry; nil (the CLI)
 // means never adopt. Neither surface adopts an op past its finish_by: a
 // same-key Admit closes it, as the sweeper would. Degraded, when set, is told
-// of every store failure the recorder degrades past. Healthy, when set, is
-// told of every close the store answers, before the op's entry is released: a
-// background retry's close lands after Finish has returned, out of the
-// caller's sight. Logger receives the recorder's rate-limited degrade lines
-// and late-result lines; nil is slog.Default(). Done, when closed (its owner
+// of every store failure the recorder degrades past but one QuietCannotRecord
+// keeps quiet. Healthy, when set, is told of every close the store answers,
+// before the op's entry is released: a background retry's close lands after
+// Finish has returned, out of the caller's sight. Logger receives the
+// recorder's rate-limited degrade lines and late-result lines; nil is
+// slog.Default(). QuietCannotRecord, set for a gate that is auto only by its
+// builtin default, treats a store that cannot record ops at all
+// (Degrade.StoreCannotRecord) as off: that degrade is logged at debug and not
+// passed to Degraded, while a store error, contention or a later-stage
+// failure still degrades loudly. Done, when closed (its owner
 // shutting down), ends any background close retry, leaving the op to the
 // sweeper; the entry stays held until the op's finish_by has passed, so a
 // same-key retry in this process does not adopt an op whose effect may
 // already have landed, and closes it once the entry is released. nil never
-// closes.
+// closes. CrashPoints, when set, hears each crash point of a recorded
+// execution (CrashPoint); production recorders carry none.
 type Recorder struct {
 	Mode     gate.Mode
 	Executor opjournal.ExecutorKind
@@ -192,6 +203,10 @@ type Recorder struct {
 	Healthy  func(stage string)
 	Logger   *slog.Logger
 	Done     <-chan struct{}
+
+	QuietCannotRecord bool
+
+	CrashPoints CrashPointFunc
 
 	// sleep waits between close retries; nil is time.Sleep.
 	sleep func(time.Duration)
@@ -233,12 +248,16 @@ func (r *Recorder) Admit(req Request) (*Admission, error) {
 	if err != nil {
 		return r.cannotRecord(req.Kind, key, minted, StageOpen, openReason(err), err)
 	}
+	stored, err := req.storedKey(key, minted)
+	if err != nil {
+		return r.unrecordable(req, key, minted, err)
+	}
 	oreq := opjournal.Request{
 		Conversation: req.Conversation,
 		Kind:         req.Kind,
 		Executor:     r.Executor,
 		MintedKey:    minted,
-		ClientKey:    key,
+		ClientKey:    stored,
 		Producer:     opjournal.Producer{Principal: req.Principal, Actor: req.Actor},
 		Payload:      req.Payload,
 		Policy:       req.Policy,
@@ -288,7 +307,9 @@ func (r *Recorder) Admit(req Request) (*Admission, error) {
 		return r.cannotRecord(req.Kind, key, minted, StagePropose, proposeReason(err), err)
 	case created, ownAmbiguousCreate(minted, op, r.Executor):
 		r.count(req.Kind, StageAdmit, ResultRecorded, "")
-		return r.execute(st, key, minted, op, entry, false), nil
+		adm := r.execute(st, key, minted, op, entry, false)
+		_ = r.crashPoint(CrashPointAdmitted, op)
+		return adm, nil
 	case op.Status == opjournal.StatusClosed:
 		release()
 		return r.replay(key, minted, op), nil
@@ -373,7 +394,9 @@ func (r *Recorder) adopt(st *opjournal.Store, key string, minted bool, op opjour
 	adopted, err := st.Adopt(op.ID, op.Attempt, string(ExecutorAPI), now.Add(ExecutionBound))
 	if err == nil {
 		r.count(op.Kind, StageAdopt, ResultAdopted, "")
-		return r.execute(st, key, minted, adopted, entry, true), nil
+		adm := r.execute(st, key, minted, adopted, entry, true)
+		_ = r.crashPoint(CrashPointAdmitted, adopted)
+		return adm, nil
 	}
 	release()
 	if errors.Is(err, opjournal.ErrAlreadyTerminal) {
@@ -388,14 +411,14 @@ func (r *Recorder) adopt(st *opjournal.Store, key string, minted bool, op opjour
 	return nil, &BusyError{ID: op.ID, Since: op.CreatedAt}
 }
 
-// unrecordable answers a request Preview refuses: run it unrecorded in auto,
-// refuse it in require.
+// unrecordable answers a request its key (ValidateKey) or Preview refuses:
+// run it unrecorded in auto, refuse it in require.
 func (r *Recorder) unrecordable(req Request, key string, minted bool, err error) (*Admission, error) {
 	reason := ReasonInvalidRequest
 	switch {
 	case errors.Is(err, opjournal.ErrPayloadTooLarge):
 		reason = ReasonPayloadTooLarge
-	case opjournal.ValidateClientKey(key) != nil:
+	case ValidateKey(req.Kind, req.KeyNamespace, key) != nil:
 		reason = ReasonInvalidKey
 	}
 	if r.Mode == gate.Require {
@@ -485,10 +508,21 @@ func (a *Admission) Finish(res Result) Finished {
 	if a == nil || a.Decision != Execute || a.done.Swap(true) {
 		return Finished{}
 	}
-	r := a.rec
 	if !a.Recorded {
 		return Finished{}
 	}
+	// done is already set, so the handler's recovery cannot Finish again: a
+	// panic or a runtime.Goexit below (the close's, or a crash-point
+	// hook's) releases the entry here and keeps unwinding.
+	var f Finished
+	a.releaseOnUnwind(func() { f = a.finish(res) })
+	return f
+}
+
+// finish is Finish's work for a recorded execution, once.
+func (a *Admission) finish(res Result) Finished {
+	r := a.rec
+	_ = r.crashPoint(CrashPointEffected, a.Op)
 	// Only a recorder that adopts (the API, with an in-flight registry)
 	// leaves an op open for a same-key retry; CLI ops always close
 	// (DES-O0API §8.2).
@@ -497,17 +531,10 @@ func (a *Admission) Finish(res Result) Finished {
 		r.count(a.Op.Kind, StageClose, ResultLeftOpen, "")
 		return Finished{}
 	}
-	// done is already set, so the handler's recovery cannot Finish again: a
-	// panic in the close releases the entry here and re-panics.
-	defer func() {
-		if p := recover(); p != nil {
-			a.release()
-			panic(p)
-		}
-	}()
 	op, err := r.closeWithRetries(a.store, a.Op, res.Outcome)
 	switch {
 	case err == nil:
+		_ = r.crashPoint(CrashPointClosed, op)
 		r.closeHealthy()
 		a.release()
 		r.count(a.Op.Kind, StageClose, ResultClosed, "")
@@ -547,7 +574,8 @@ const (
 
 // closeWithRetries closes op with outcome, retrying a failed close
 // closeRetries times, or fewer once Done has closed. ErrAlreadyTerminal and
-// a refused outcome are final.
+// a refused outcome are final. Each attempt first reports CrashPointClosing,
+// whose error fails the attempt.
 func (r *Recorder) closeWithRetries(st *opjournal.Store, op opjournal.Op, outcome opjournal.Outcome) (opjournal.Op, error) {
 	var err error
 	for i := range closeRetries {
@@ -555,7 +583,9 @@ func (r *Recorder) closeWithRetries(st *opjournal.Store, op opjournal.Op, outcom
 			break
 		}
 		var closedOp opjournal.Op
-		closedOp, err = st.CloseKnown(op, outcome, string(r.Executor))
+		if err = r.crashPoint(CrashPointClosing, op); err == nil {
+			closedOp, err = st.CloseKnown(op, outcome, string(r.Executor))
+		}
 		if err == nil || errors.Is(err, opjournal.ErrAlreadyTerminal) || errors.Is(err, opjournal.ErrInvalidRequest) {
 			return closedOp, err
 		}
@@ -569,10 +599,18 @@ func (r *Recorder) closeWithRetries(st *opjournal.Store, op opjournal.Op, outcom
 // releases the entry. When Done ends the retry before finish_by, the entry is
 // held until finish_by has passed: the request ran in this process and its
 // effect may have landed, so a same-key retry must find it in flight rather
-// than adopt it (DES-O0API I3, §12).
+// than adopt it (DES-O0API I3, §12). A close it lands reports no
+// CrashPointClosed: Finish has returned, so the surface may have answered.
 func (a *Admission) closeInBackground(outcome opjournal.Outcome, done chan<- struct{}) {
-	r := a.rec
 	defer close(done)
+	// The retry outlives Finish's unwind release: a panic or a
+	// runtime.Goexit in it (a crash-point hook's) releases the entry here.
+	a.releaseOnUnwind(func() { a.retryClose(outcome) })
+}
+
+// retryClose is closeInBackground's work.
+func (a *Admission) retryClose(outcome opjournal.Outcome) {
+	r := a.rec
 	gap := closeRetryGap
 	for !r.Clock.Now().After(a.Op.FinishBy) && r.wait(gap) {
 		err := r.closeOpened(a.Op, outcome)
@@ -594,8 +632,12 @@ func (a *Admission) closeInBackground(outcome opjournal.Outcome, done chan<- str
 	a.releaseAtFinishBy()
 }
 
-// closeOpened closes op with outcome through the store Open answers now.
+// closeOpened closes op with outcome through the store Open answers now,
+// after reporting CrashPointClosing, whose error fails the attempt.
 func (r *Recorder) closeOpened(op opjournal.Op, outcome opjournal.Outcome) error {
+	if err := r.crashPoint(CrashPointClosing, op); err != nil {
+		return err
+	}
 	st, err := r.Open()
 	if err != nil {
 		return err
@@ -629,6 +671,21 @@ func (a *Admission) release() {
 	}
 }
 
+// releaseOnUnwind runs f and releases the entry when f does not return: a
+// panic or a runtime.Goexit inside it releases the entry on its way through
+// and keeps unwinding. A release f made first is harmless: Release acts only
+// on the entry's own hold.
+func (a *Admission) releaseOnUnwind(f func()) {
+	returned := false
+	defer func() {
+		if !returned {
+			a.release()
+		}
+	}()
+	f()
+	returned = true
+}
+
 // wait sleeps d and reports whether to go on: false once Done has closed.
 func (r *Recorder) wait(d time.Duration) bool {
 	if r.sleep != nil {
@@ -657,10 +714,15 @@ func (r *Recorder) stopped() bool {
 
 // openReason is the unrecorded reason for a store that did not open.
 func openReason(err error) string {
-	if errors.Is(err, opjournal.ErrNoNamespace) {
+	var notDefault *opjournal.NotRecordedByDefaultError
+	switch {
+	case errors.Is(err, opjournal.ErrNoNamespace):
 		return ReasonNoNamespace
+	case errors.As(err, &notDefault):
+		return ReasonNotRecordedByDefault
+	default:
+		return ReasonStoreUnavailable
 	}
-	return ReasonStoreUnavailable
 }
 
 // proposeReason is the unrecorded reason for a failed Propose.
@@ -675,7 +737,10 @@ func proposeReason(err error) string {
 // or namespace gap, contention, or a store error. Every surface that degrades
 // past an op-store failure classifies it here, so the classes cannot drift.
 func DegradeReason(err error) string {
+	var notDefault *opjournal.NotRecordedByDefaultError
 	switch {
+	case errors.As(err, &notDefault):
+		return DegradeNotRecordedByDefault
 	case errors.Is(err, beads.ErrConditionalWriteUnsupported):
 		return DegradeConditionalWritesUnsupported
 	case errors.Is(err, opjournal.ErrBeadTypeUnregistered):

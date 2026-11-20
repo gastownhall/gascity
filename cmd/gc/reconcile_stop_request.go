@@ -9,14 +9,17 @@ import (
 )
 
 // The stop request (CONTRACT v5 D1): one durable stop intent per row
-// incarnation, with one reader. Its controller half is the three
-// drain_intent_* keys, its request half E3's two drain_ack_* keys, and its
-// signaled phase legacy's stop-pending projection. activeStop is the only
-// reader of the keys, and the patch builders below are D1's only writers of
-// them (I6, I14; TestStopRequestLintBansDirectKeyReads). Both halves name
-// the row's generation only, so a rekey, which moves only the token, keeps
-// them. An empty or unparseable generation is generation 0, as legacy's
-// drain tracker reads it (strconv.Atoi).
+// incarnation, with one reader in the reconciler. Its controller half is the
+// three drain_intent_* keys, its request half E3's two drain_ack_* keys, and
+// its signaled phase legacy's stop-pending projection. activeStop is the
+// reconciler's reader of the keys and v2SignaledUnacked legacy's rollback
+// guard's; outside the reconciler, session.ReadStopRequest reads the
+// controller half for the content gate (V2-18). The patch
+// builders below are D1's only writers of them (I6, I14;
+// TestStopRequestLintBansDirectKeyReads). Both halves name the row's
+// generation only, so a rekey, which moves only the token, keeps them. An
+// empty or unparseable generation is generation 0, as legacy's drain tracker
+// reads it (strconv.Atoi).
 
 // rawStopKeys are a row's raw stop-request keys, as the census read them.
 type rawStopKeys struct {
@@ -197,7 +200,7 @@ func rowGeneration(meta map[string]string) int64 {
 // stopRequestStands reports an active stop request on a row read outside
 // the census (info, with its persisted metadata meta): the work ladder's
 // gate, which must not nudge a seat being stopped. It is activeStop's
-// answer, so the keys keep one reader.
+// answer, so the reconciler's reads keep one reader.
 func stopRequestStands(info session.Info, meta map[string]string) bool {
 	row := newCensusRow(rowKey{ID: info.ID}, info)
 	row.StopKeys = readStopKeys(meta)

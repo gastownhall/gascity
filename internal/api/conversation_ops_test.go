@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"math"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/genclient"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/opjournal"
 )
@@ -28,6 +30,12 @@ type lanePokeState struct {
 	kinds []string
 	mu    sync.Mutex
 	pokes []string
+	// ops is the op store AwaitConversationOp reads; onPoke, when set, runs
+	// for each poke, as the lane host's pass would.
+	ops    *opjournal.Store
+	onPoke func(conv string)
+	// onAwait, when set, runs as each AwaitConversationOp begins.
+	onAwait func(id string)
 }
 
 func (l *lanePokeState) ConversationLaneKinds() []string {
@@ -36,8 +44,30 @@ func (l *lanePokeState) ConversationLaneKinds() []string {
 
 func (l *lanePokeState) PokeConversationLane(conv string) {
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	l.pokes = append(l.pokes, conv)
+	onPoke := l.onPoke
+	l.mu.Unlock()
+	if onPoke != nil {
+		onPoke(conv)
+	}
+}
+
+// AwaitConversationOp polls the op store until op id closes or ctx ends.
+func (l *lanePokeState) AwaitConversationOp(ctx context.Context, _ string, id string) (opjournal.Op, error) {
+	if l.onAwait != nil {
+		l.onAwait(id)
+	}
+	for {
+		op, err := l.ops.Get(id)
+		if err != nil || op.Status == opjournal.StatusClosed {
+			return op, err
+		}
+		select {
+		case <-ctx.Done():
+			return op, nil
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 }
 
 func (l *lanePokeState) poked() []string {
@@ -53,8 +83,8 @@ func (l *lanePokeState) poked() []string {
 func newLaneOpsEnv(t *testing.T, kinds ...string) (*opsEnv, *lanePokeState) {
 	t.Helper()
 	e := newControlOpsEnv(t, "off", "off")
-	e.fs.cfg.Ops.Authoritative = kinds
-	st := &lanePokeState{fakeState: e.fs, kinds: kinds}
+	e.fs.cfg.Ops.Authoritative = config.OpsKinds(kinds...)
+	st := &lanePokeState{fakeState: e.fs, kinds: kinds, ops: e.opStore(t)}
 	e.resolver.state = st
 	return e, st
 }
@@ -468,7 +498,7 @@ func TestProposeGatesOnTheRunningLaneHost(t *testing.T) {
 	t.Run("reload lists a kind", func(t *testing.T) {
 		e, _ := newLaneOpsEnv(t)
 		info := e.session(t, "Reload")
-		e.fs.cfg.Ops.Authoritative = []string{"message"}
+		e.fs.cfg.Ops.Authoritative = config.OpsKinds("message")
 		rec := e.post(t, "/session/"+info.ID+"/ops", "", `{"kind":"message","client_key":"k","payload":"x"}`)
 		wantStatus(t, "after reload", rec, http.StatusConflict)
 		if code := problemCode(t, rec); code != "kind-not-enabled" {
