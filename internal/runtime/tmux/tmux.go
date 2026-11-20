@@ -6348,10 +6348,17 @@ func lastComposerRemainder(lines []string, readyPromptPrefix string) (string, bo
 	var observed bool
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(strings.ReplaceAll(line, "\u00a0", " "))
-		for _, cand := range []string{trimmed, stripLeadingBoxBorder(trimmed)} {
+		unbordered := stripLeadingBoxBorder(trimmed)
+		for _, cand := range []string{trimmed, unbordered} {
 			switch {
 			case strings.HasPrefix(cand, normalizedPrefix):
 				remainder, observed = cand[len(normalizedPrefix):], true
+				if cand != trimmed {
+					// A line that needed its leading border stripped carries a
+					// closing border too (grok's boxed composer): drop it, or
+					// a bare boxed composer never reads drained.
+					remainder = stripTrailingBoxBorder(remainder)
+				}
 			case prefixTrimmed != "" && cand == prefixTrimmed:
 				remainder, observed = "", true
 			default:
@@ -6361,6 +6368,18 @@ func lastComposerRemainder(lines []string, readyPromptPrefix string) (string, bo
 		}
 	}
 	return remainder, observed
+}
+
+// stripTrailingBoxBorder removes one trailing vertical box-drawing character
+// (\u2502 U+2502 / \u2503 U+2503) plus the spaces before it \u2014 the closing border of a
+// composer line whose leading border stripLeadingBoxBorder already removed.
+func stripTrailingBoxBorder(s string) string {
+	s = strings.TrimRight(s, " \t")
+	r := []rune(s)
+	if len(r) > 0 && (r[len(r)-1] == '\u2502' || r[len(r)-1] == '\u2503') {
+		return strings.TrimRight(string(r[:len(r)-1]), " \t")
+	}
+	return s
 }
 
 // firstNRunes returns the first n runes of s, or all of s when it has n

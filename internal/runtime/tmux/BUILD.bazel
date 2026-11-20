@@ -112,6 +112,7 @@ go_test(
         "fence_model_test.go",
         "fence_test.go",
         "fresh_only_test.go",
+        "grok_submit_turn_test.go",
         "grok_turn_test.go",
         "held_files_linux_test.go",
         "held_files_test.go",
