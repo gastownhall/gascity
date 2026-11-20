@@ -587,3 +587,55 @@ func TestInitAndHookDirProviderOwnedIdentityFailureKeepsInitializing(t *testing.
 		})
 	}
 }
+
+// TestInitAndHookDirProviderOwnedReadyScopeReconcilesEachPass: a ready scope
+// is reconciled on every pass, or refused with an error, and its journal
+// entry never changes.
+func TestInitAndHookDirProviderOwnedReadyScopeReconcilesEachPass(t *testing.T) {
+	readyCity := func(t *testing.T) (providerOwnedIdentityCity, providerScopeOwnershipEntry) {
+		t.Helper()
+		city := newProviderOwnedIdentityCity(t, proxiedIdentityMetadata(providerOwnedIdentityP))
+		stubLiveProviderOwnedProxy(t)
+		stubProviderOwnedL3(t, &providerOwnedL3Fake{l3: &projectIdentityL3Double{projectID: providerOwnedIdentityP}})
+		if err := initAndHookDirResolvingDatabase(city.dir, city.dir, "gc", nil); err != nil {
+			t.Fatalf("first pass: %v", err)
+		}
+		entry := city.entry(t)
+		if entry.State != providerScopeReady {
+			t.Fatalf("journal state after the first pass = %q, want %q", entry.State, providerScopeReady)
+		}
+		city.ops(t)
+		if err := os.Remove(contract.ProjectIdentityPath(city.dir)); err != nil {
+			t.Fatal(err)
+		}
+		return city, entry
+	}
+
+	t.Run("missing L1 is written", func(t *testing.T) {
+		city, before := readyCity(t)
+		if err := initAndHookDirResolvingDatabase(city.dir, city.dir, "gc", nil); err != nil {
+			t.Fatalf("ready pass: %v", err)
+		}
+		if got, ok := city.identity(t); !ok || got != providerOwnedIdentityP {
+			t.Fatalf("identity.toml = (%q, %t), want %q", got, ok, providerOwnedIdentityP)
+		}
+		if got := city.ops(t); strings.Join(got, " ") != "start health" {
+			t.Fatalf("provider ops = %v, want [start health]", got)
+		}
+		if after := city.entry(t); after != before {
+			t.Fatalf("journal entry = %+v, want unchanged %+v", after, before)
+		}
+	})
+
+	t.Run("drifted L1 is refused", func(t *testing.T) {
+		city, before := readyCity(t)
+		writeIdentityFile(t, city.dir, providerOwnedIdentityQ)
+		err := initAndHookDirResolvingDatabase(city.dir, city.dir, "gc", nil)
+		if err == nil || !strings.Contains(err.Error(), city.dir) || !strings.Contains(err.Error(), providerOwnedIdentityQ) {
+			t.Fatalf("ready pass with drifted L1 = %v, want a refusal naming the scope and %s", err, providerOwnedIdentityQ)
+		}
+		if after := city.entry(t); after != before {
+			t.Fatalf("journal entry = %+v, want unchanged %+v", after, before)
+		}
+	})
+}
