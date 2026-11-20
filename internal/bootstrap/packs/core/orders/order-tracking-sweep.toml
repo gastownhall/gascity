@@ -2,8 +2,19 @@
 # exec dispatches, and prunes expired closed tracking history according to
 # [beads.policies.order_tracking].delete_after_close. Fresh tracking beads are
 # left alone so in-flight orders keep their normal single-flight protection.
+#
+# --include-wisps extends that to abandoned order-run wisp SUBTREES: a pour
+# whose root and members were left open holds its order's open-work gate shut
+# on every dispatch tick, forever, and nothing else in gc can clear it. Without
+# the flag this sweep finds no stale tracking bead, reports success, and the
+# order stays dark indefinitely. Passed with no order names it uses its own 6h
+# bound and additionally requires every open bead in the subtree to have gone
+# unwritten for that long, so a pour that is visibly progressing is left alone.
+# An order whose steps legitimately run silent for more than 6h is the case
+# this cannot tell apart from an abandoned one — drop --include-wisps for such
+# a city and recover by name instead.
 [order]
 description = "Close stale order-tracking beads and prune expired tracking history"
 trigger = "cooldown"
 interval = "1m"
-exec = "gc order sweep-tracking --stale-after 10m --quiet --confirm"
+exec = "gc order sweep-tracking --stale-after 10m --include-wisps --quiet --confirm"
