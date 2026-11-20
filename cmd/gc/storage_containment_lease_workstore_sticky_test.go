@@ -1,17 +1,30 @@
 package main
 
 // MUST 1 (slice 2 review, owner decision 2026-11-19): the work-store
-// exclusion (design doc carry-over 3) must hold end to end, over the wire,
-// for every way a recheck tick can fail reading the work store — a
-// transient error opening it, a transient error reading it, and a panic
-// inside the read, whose origin tick() cannot know and so must attribute to
-// the work store rather than assume innocent of it — and it must stay true
-// (RecheckFailureFromWorkStore sticky) across a failing streak that later
-// fails for an unrelated reason.
+// exclusion (design doc carry-over 3) must hold for every way a recheck
+// tick can fail reading the work store — a transient error opening it, a
+// transient error reading it, and a panic inside the read, whose origin
+// tick() cannot know and so must attribute to the work store rather than
+// assume innocent of it — and it must stay true (RecheckFailureFromWorkStore
+// sticky) across a failing streak that later fails for an unrelated reason.
+//
+// Most of the tests below prove this directly: a hand-built wire struct
+// (l.wire(time.Now())) fed straight to acceptContainmentLease, with no
+// socket, JSON decode or handleControllerConn involved. That is enough to
+// pin RecheckFailureFromWorkStore's own propagation (lease -> wire ->
+// acceptContainmentLease), but not that the flag actually survives the
+// real wire: TestWorkStoreFailureRefusedOverARealSocket, below, is the one
+// that serves a real lease through registerResidencyRoutes and
+// handleControllerConn over a real unix-socket listener, and fetches it
+// with a counting work-store opener (checkInfraClassConvergenceWith) to
+// prove the funnel genuinely re-runs the full check rather than trusting a
+// stale lease whose JSON happened to decode correctly.
 
 import (
+	"bytes"
 	"fmt"
 	"io"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -165,3 +178,96 @@ func TestStrandRecheckWorkStoreFlagClearsOnlyOnADefinitiveTick(t *testing.T) {
 		t.Fatalf("a definitive tick did not clear the sticky work-store flag: %+v", l)
 	}
 }
+
+// serveContainmentLeaseOverARealSocket serves routes' controller socket with
+// the REAL handleControllerConn, over the registered residency routes, so a
+// fetch crosses the real JSON encoder, the socket, fetchContainmentLease and
+// acceptContainmentLease — not a direct, in-process call.
+func serveContainmentLeaseOverARealSocket(t *testing.T, cityPath string, routes *storageRoutes) {
+	t.Helper()
+	registerResidencyRoutes(cityPath, routes, nil)
+	t.Cleanup(func() { unregisterResidencyRoutes(cityPath, routes) })
+	lis := listenControllerSocketForTest(t, cityPath)
+	go func() {
+		for {
+			conn, err := lis.Accept()
+			if err != nil {
+				return
+			}
+			go handleControllerConn(conn, cityPath, controllerHostingMode(""), func() {}, nil, nil, nil, nil, nil)
+		}
+	}()
+}
+
+// TestWorkStoreFailureRefusedOverARealSocket is MUST 1's end-to-end case: a
+// real recheck tick, routes registered, served through a listener running
+// the real handleControllerConn, fetched through
+// checkInfraClassConvergenceWith(opts.lease: true) with a counting
+// work-store opener. It must fail to accept over the wire for a transient
+// open error, a transient read (List) error and a panic inside the read,
+// and in every case the counting opener proves the funnel actually re-ran
+// the full check rather than trusting a stale lease whose JSON decoded
+// cleanly.
+func TestWorkStoreFailureRefusedOverARealSocket(t *testing.T) {
+	for _, mode := range []string{"open-transient", "list-transient", "panic"} {
+		t.Run(mode, func(t *testing.T) {
+			cityPath, cfg, target, _ := convergedCityWithRecheckLease(t)
+			s := newStrandRecheckFixture(cityPath, target)
+			s.tick()
+			if l := s.routes.lease.Load(); l == nil || !l.Serving {
+				t.Fatalf("fixture: no serving lease: %+v", l)
+			}
+			serveContainmentLeaseOverARealSocket(t, cityPath, s.routes)
+
+			healthy := openInfraMigrationSource
+			var opens atomic.Int64
+			counting := func(p string) (beads.Store, error) { opens.Add(1); return healthy(p) }
+			setInfraMigrationSourceForTest(t, counting)
+			// Control: the healthy lease is accepted through the funnel without
+			// the funnel ever opening the work store.
+			var log1 bytes.Buffer
+			if r := checkInfraClassConvergenceWith(cityPath, cfg, "gc", &log1, storageBootGateOpts{lease: true}); !r.serving() {
+				t.Fatalf("control: %s", r.Outcome)
+			}
+			if opens.Load() != 0 {
+				t.Fatalf("control: the funnel opened the work store %d time(s); the lease was not accepted end to end", opens.Load())
+			}
+
+			switch mode {
+			case "open-transient":
+				setInfraMigrationSourceForTest(t, func(string) (beads.Store, error) {
+					return nil, fmt.Errorf("bd list: %w", io.ErrUnexpectedEOF)
+				})
+			case "list-transient":
+				setInfraMigrationSourceForTest(t, func(string) (beads.Store, error) {
+					return rv2FailingListStore{Store: beads.NewMemStore(), err: fmt.Errorf("decode bd json: %w", io.ErrUnexpectedEOF)}, nil
+				})
+			case "panic":
+				setInfraMigrationSourceForTest(t, func(string) (beads.Store, error) {
+					return stickyPanicListStore{Store: beads.NewMemStore()}, nil
+				})
+			}
+			s.tick()
+			if l := s.routes.lease.Load(); l == nil || !l.RecheckFailing || !l.RecheckFailureFromWorkStore {
+				t.Fatalf("lease after the faulted tick = %+v", l)
+			}
+
+			setInfraMigrationSourceForTest(t, counting)
+			opens.Store(0)
+			var log2 bytes.Buffer
+			_ = checkInfraClassConvergenceWith(cityPath, cfg, "gc", &log2, storageBootGateOpts{lease: true})
+			if opens.Load() == 0 {
+				t.Errorf("the funnel accepted, over the real socket, a lease kept alive by a work-store %s; the full check never ran", mode)
+			}
+		})
+	}
+}
+
+// rv2FailingListStore wraps a healthy store but fails every List, so a
+// recheck tick fails READING the work store rather than opening it.
+type rv2FailingListStore struct {
+	beads.Store
+	err error
+}
+
+func (s rv2FailingListStore) List(beads.ListQuery) ([]beads.Bead, error) { return nil, s.err }

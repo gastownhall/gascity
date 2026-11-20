@@ -2702,3 +2702,19 @@ func TestTheReCopyFromTheBackupKeepsTheHoldOnOpenWork(t *testing.T) {
 		t.Fatalf("%s is not ready after %s closed and the gate lane ran: %v", parked.ID, openWork.ID, ready)
 	}
 }
+
+// TestFaultFromWorkStoreOnlyFlagsAWrappedWorkStoreFault kills a mutant that
+// makes faultFromWorkStore report true unconditionally: a plain error (a
+// local manifest or cleared-note read failure, say) must NOT be attributed
+// to the work store, since nothing about it ever touched one — only an
+// error that is, or wraps, an infraWorkStoreFault may be.
+func TestFaultFromWorkStoreOnlyFlagsAWrappedWorkStoreFault(t *testing.T) {
+	plain := fmt.Errorf("reading the copy manifest: %w", io.ErrUnexpectedEOF)
+	if faultFromWorkStore(plain) {
+		t.Errorf("faultFromWorkStore(%v) = true, want false for an error that never wraps infraWorkStoreFault", plain)
+	}
+	wrapped := fmt.Errorf("reading work store: %w", infraWorkStoreFault{io.ErrUnexpectedEOF})
+	if !faultFromWorkStore(wrapped) {
+		t.Errorf("faultFromWorkStore(%v) = false, want true for an error that wraps infraWorkStoreFault", wrapped)
+	}
+}

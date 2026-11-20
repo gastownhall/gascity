@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 )
@@ -311,5 +312,104 @@ func TestHoldBeforeLeaseReverseJournal(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "reverse migration") {
 		t.Fatalf("refusal %q does not name the reverse migration as the cause", err)
+	}
+}
+
+// TestHoldBeforeLeaseMinGCVersion kills mutant HF: a city's gc-version
+// floor (minGCVersionRefusal) holds boot before the lease is ever
+// consulted, exactly like every other hold in this file. A trustworthy
+// Converged lease already served for this target changes nothing.
+func TestHoldBeforeLeaseMinGCVersion(t *testing.T) {
+	cityPath, cfg, _, lease := convergedCityWithRecheckLease(t)
+	bornSplitLeaseListener(t, cityPath, lease)
+
+	stubGCVersion(t, "1.0.0")
+	if err := writeMinGCVersion(cityPath, "9.9.9"); err != nil {
+		t.Fatalf("writing the gc-version floor: %v", err)
+	}
+
+	var log bytes.Buffer
+	routes, err := storageBootGateWith(cityPath, cfg, "gc start", nil, &log, storageBootGateOpts{lease: true})
+	if err == nil {
+		_ = routes.close()
+		t.Fatal("leased boot below the city's gc-version floor was not refused; the version hold must run before the lease is ever consulted")
+	}
+	if !strings.Contains(err.Error(), "requires gc") {
+		t.Fatalf("refusal %q does not name the gc-version floor as the cause", err)
+	}
+}
+
+// TestHoldBeforeLeaseCityRestoreJournal kills mutant HC: an unfinished city
+// restore (storageCityRestoreBootRefusal) holds boot before the lease is
+// ever consulted, exactly like every other hold in this file.
+func TestHoldBeforeLeaseCityRestoreJournal(t *testing.T) {
+	cityPath, cfg, _, lease := convergedCityWithRecheckLease(t)
+	bornSplitLeaseListener(t, cityPath, lease)
+
+	if err := writeStorageCityRestoreJournal(cityPath, storageCityRestoreJournal{
+		Format: storageCityRestoreFormat, Snapshot: "snap1", To: cityPath, Suffix: ".aside-1",
+		StartedAt: time.Now(),
+	}); err != nil {
+		t.Fatalf("writing the city restore journal: %v", err)
+	}
+
+	var log bytes.Buffer
+	routes, err := storageBootGateWith(cityPath, cfg, "gc start", nil, &log, storageBootGateOpts{lease: true})
+	if err == nil {
+		_ = routes.close()
+		t.Fatal("leased boot with an unfinished city restore was not refused; the restore hold must run before the lease is ever consulted")
+	}
+	if !strings.Contains(err.Error(), "restore") {
+		t.Fatalf("refusal %q does not name the city restore as the cause", err)
+	}
+}
+
+// TestHoldBeforeLeaseRemoteStage kills mutant HS: a remote stage record
+// (remoteStageStorageRefusal) holds boot before the lease is ever
+// consulted, exactly like every other hold in this file.
+func TestHoldBeforeLeaseRemoteStage(t *testing.T) {
+	cityPath, cfg, _, lease := convergedCityWithRecheckLease(t)
+	bornSplitLeaseListener(t, cityPath, lease)
+
+	if err := writeRemoteStage(cityPath, remoteStage{ControllerCity: "controller-city", ControllerPath: "/srv/controller-city"}); err != nil {
+		t.Fatalf("writing the remote stage record: %v", err)
+	}
+
+	var log bytes.Buffer
+	routes, err := storageBootGateWith(cityPath, cfg, "gc start", nil, &log, storageBootGateOpts{lease: true})
+	if err == nil {
+		_ = routes.close()
+		t.Fatal("leased boot of a remotely-staged city was not refused; the remote-stage hold must run before the lease is ever consulted")
+	}
+	if !strings.Contains(err.Error(), "staged") && !strings.Contains(err.Error(), "controller-city") {
+		t.Fatalf("refusal %q does not name the remote stage as the cause", err)
+	}
+}
+
+// TestHoldBeforeLeaseRigImportInFlight kills mutant HG: an in-flight rig
+// import (rigBootRefusal) holds boot before the lease is ever consulted,
+// exactly like every other hold in this file. convergedCityWithRecheckLease's
+// own target already names a non-empty binding root, which is all
+// rigBootRefusal needs to be invoked.
+func TestHoldBeforeLeaseRigImportInFlight(t *testing.T) {
+	cityPath, cfg, target, lease := convergedCityWithRecheckLease(t)
+	bornSplitLeaseListener(t, cityPath, lease)
+	if target.Root == "" {
+		t.Fatal("fixture: target.Root is empty; rigBootRefusal is never invoked with no binding root")
+	}
+
+	inFlight := filepath.Join(target.Root, rigGraphInFlightName("packs"))
+	if err := os.WriteFile(inFlight, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("writing the in-flight rig import marker: %v", err)
+	}
+
+	var log bytes.Buffer
+	routes, err := storageBootGateWith(cityPath, cfg, "gc start", nil, &log, storageBootGateOpts{lease: true})
+	if err == nil {
+		_ = routes.close()
+		t.Fatal("leased boot with an in-flight rig import was not refused; the rig hold must run before the lease is ever consulted")
+	}
+	if !strings.Contains(err.Error(), rigImportInstruction("packs")) {
+		t.Fatalf("refusal %q does not name the rig import command as the cause", err)
 	}
 }

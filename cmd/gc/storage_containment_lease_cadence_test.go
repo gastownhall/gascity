@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -41,95 +42,82 @@ func TestStrandRecheckNextInterval(t *testing.T) {
 	}
 }
 
-// TestStrandRecheckFreshness pins
-// min(strandRecheckFreshCap, d+interval+dNext+margin) where
-// dNext = max(d,last)+margin.
+// TestStrandRecheckFreshness pins the approved formula itself (design doc
+// §4.3): min(strandRecheckFreshCap, 2×interval + d).
 func TestStrandRecheckFreshness(t *testing.T) {
 	cases := []struct {
-		interval, d, last time.Duration
-		want              time.Duration
+		interval, d time.Duration
+		want        time.Duration
 	}{
-		// 0 + 60s + max(0,0) + 2x1s margin = 62s.
-		{strandRecheckIntervalFloor, 0, 0, 62 * time.Second},
-		// 1s + 60s + max(1s,1s) + 2s = 64s.
-		{time.Minute, time.Second, time.Second, 64 * time.Second},
-		// last greater than d: dNext is bound by last, not d.
-		// 1s + 60s + max(1s,10s) + 2s = 73s.
-		{time.Minute, time.Second, 10 * time.Second, 73 * time.Second},
+		{strandRecheckIntervalFloor, 0, 2 * strandRecheckIntervalFloor},
+		{time.Minute, time.Second, 2*time.Minute + time.Second},
+		{10 * time.Minute, 0, strandRecheckFreshCap},
 		// Large enough that the uncapped formula would exceed the cap.
-		{time.Hour, time.Hour, time.Hour, strandRecheckFreshCap},
-		{strandRecheckFreshCap, 0, 0, strandRecheckFreshCap},
+		{time.Hour, time.Hour, strandRecheckFreshCap},
+		{strandRecheckFreshCap, 0, strandRecheckFreshCap},
 	}
 	for _, c := range cases {
-		if got := strandRecheckFreshness(c.interval, c.d, c.last); got != c.want {
-			t.Errorf("strandRecheckFreshness(%s, %s, %s) = %s, want %s", c.interval, c.d, c.last, got, c.want)
+		if got := strandRecheckFreshness(c.interval, c.d); got != c.want {
+			t.Errorf("strandRecheckFreshness(%s, %s) = %s, want %s", c.interval, c.d, got, c.want)
 		}
 	}
 }
 
 // TestStrandRecheckFreshnessNeverExceedsTheCap is the property the formula
-// must hold for EVERY interval, check duration and previous duration, not
-// just the pinned cases above: the cap is an upper bound, full stop.
+// must hold for EVERY interval and check duration, not just the pinned
+// cases above: the cap is an upper bound, full stop.
 func TestStrandRecheckFreshnessNeverExceedsTheCap(t *testing.T) {
 	for _, interval := range []time.Duration{0, time.Second, strandRecheckIntervalFloor, time.Minute, time.Hour, 24 * time.Hour} {
 		for _, d := range []time.Duration{0, time.Millisecond, time.Second, time.Minute, time.Hour} {
-			for _, last := range []time.Duration{0, time.Millisecond, time.Second, time.Minute, time.Hour} {
-				if got := strandRecheckFreshness(interval, d, last); got > strandRecheckFreshCap {
-					t.Errorf("strandRecheckFreshness(%s, %s, %s) = %s, exceeds the cap %s", interval, d, last, got, strandRecheckFreshCap)
-				}
+			if got := strandRecheckFreshness(interval, d); got > strandRecheckFreshCap {
+				t.Errorf("strandRecheckFreshness(%s, %s) = %s, exceeds the cap %s", interval, d, got, strandRecheckFreshCap)
 			}
 		}
 	}
 }
 
-// strandRecheckLapseEdge is the true steady-state no-lapse edge the formula's
-// own doc comment derives (last == d, interval == 10d once d is past the
-// floor's own 6s crossover): 12d+2×margin == strandRecheckFreshCap.
-var strandRecheckLapseEdge = (strandRecheckFreshCap - 2*strandRecheckLapseMargin) / 12
+// strandRecheckLapseEdge is the true steady-state no-lapse edge the
+// formula's own doc comment derives (interval == 10d once d is past the
+// floor's own crossover, d_next == d): 12d == strandRecheckFreshCap.
+const strandRecheckLapseEdge = strandRecheckFreshCap / 12
 
-// TestStrandRecheckNoLapseUpToTheDocumentedEdge is carry-over 1's property,
-// reworked for the new formula: at steady state (last == d), for every
-// check duration d strictly below strandRecheckLapseEdge, a lease taken
-// right as a tick starts does not lapse before the NEXT tick (which runs
-// after strandRecheckNextInterval(d), and is conservatively bounded to take
-// no longer than dNext = d+margin) publishes a fresh one — i.e. the
-// freshness budget strictly exceeds interval+dNext. This is the no-lapse
-// property across a range of d values the formula is designed to hold
-// everywhere below the edge, not merely at the specific values pinned
-// above.
+// TestStrandRecheckNoLapseUpToTheDocumentedEdge is carry-over 1's property:
+// at steady state (d_next == d), for every check duration d strictly below
+// strandRecheckLapseEdge, a lease taken right as a tick starts does not
+// lapse before the NEXT tick (which runs after
+// strandRecheckNextInterval(d), and is assumed — the steady-state case — to
+// take no longer than d itself) publishes a fresh one — i.e. the freshness
+// budget strictly exceeds interval+d. This is the real requirement,
+// fresh >= d+interval+d_next, not a stronger strict-inequality guarantee
+// independent of d_next, across a range of d values the formula is
+// designed to hold everywhere below the edge, not merely at the specific
+// values pinned above.
 func TestStrandRecheckNoLapseUpToTheDocumentedEdge(t *testing.T) {
 	for d := time.Duration(0); d < strandRecheckLapseEdge; d += time.Second {
 		interval := strandRecheckNextInterval(d)
-		fresh := strandRecheckFreshness(interval, d, d)
-		dNext := d + strandRecheckLapseMargin
-		if fresh <= interval+dNext {
-			t.Fatalf("d=%s: freshness %s does not outlast the wait until the next tick (interval %s + dNext %s = %s); a lease taken at this d would lapse before an on-time next tick republishes it", d, fresh, interval, dNext, interval+dNext)
+		fresh := strandRecheckFreshness(interval, d)
+		dNext := d
+		if fresh < d+interval+dNext {
+			t.Fatalf("d=%s: freshness %s does not outlast the wait until the next tick (d+interval+dNext = %s); a lease taken at this d would lapse before an on-time next tick republishes it", d, fresh, d+interval+dNext)
 		}
 	}
 }
 
 // TestStrandRecheckLapseBeginsOnlyPastTheDocumentedEdge is the other half of
-// carry-over 1: past strandRecheckLapseEdge the cap pins freshness, and the
-// no-lapse guarantee is allowed to fail — but it must not fail EARLIER than
-// the documented edge. This also kills a mutant that computes freshness
-// from strandRecheckIntervalFloor instead of the real interval/d/last: such
-// a mutant pins freshness far below the true formula's value once d grows
-// past the floor, so the no-lapse property would break well before this
-// test's edge instead of exactly at it.
+// carry-over 1: past strandRecheckLapseEdge (d > 50s) the cap pins
+// freshness, and the no-lapse guarantee is allowed to fail — but it must
+// not fail EARLIER than the documented edge.
 func TestStrandRecheckLapseBeginsOnlyPastTheDocumentedEdge(t *testing.T) {
 	// Just below the edge: still guaranteed.
 	d := strandRecheckLapseEdge - time.Second
 	interval := strandRecheckNextInterval(d)
-	fresh := strandRecheckFreshness(interval, d, d)
-	dNext := d + strandRecheckLapseMargin
-	if fresh <= interval+dNext {
-		t.Fatalf("d=%s (just below the documented edge %s): freshness %s does not outlast interval+dNext %s", d, strandRecheckLapseEdge, fresh, interval+dNext)
+	fresh := strandRecheckFreshness(interval, d)
+	if fresh < d+interval+d {
+		t.Fatalf("d=%s (just below the documented edge %s): freshness %s does not outlast d+interval+d_next %s", d, strandRecheckLapseEdge, fresh, d+interval+d)
 	}
-	// Past the edge (by a full second, clear of any integer-division
-	// rounding at the edge itself): the cap has taken over, and the cap is
-	// no longer guaranteed to outlast interval+dNext.
+	// Past the edge: the cap has taken over.
 	for _, probe := range []time.Duration{strandRecheckLapseEdge + time.Second, strandRecheckLapseEdge + 5*time.Second, time.Minute, time.Hour} {
-		if got := strandRecheckFreshness(strandRecheckNextInterval(probe), probe, probe); got != strandRecheckFreshCap {
+		if got := strandRecheckFreshness(strandRecheckNextInterval(probe), probe); got != strandRecheckFreshCap {
 			t.Errorf("d=%s (at or past the documented edge): freshness = %s, want the cap %s", probe, got, strandRecheckFreshCap)
 		}
 	}
@@ -151,6 +139,18 @@ func TestStrandRecheckFirstInterval(t *testing.T) {
 	strandRecheckInterval = time.Hour
 	if got := strandRecheckFirstInterval(); got != strandRecheckIntervalFloor {
 		t.Errorf("strandRecheckFirstInterval() = %s with a long interval, want the floor %s", got, strandRecheckIntervalFloor)
+	}
+}
+
+// TestStrandRecheckFirstIntervalHonoursTheKillSwitch (SHOULD 3, owner
+// decision 2026-11-19): with the switch off, the FIRST tick runs at the
+// fixed strandRecheckInterval, not the floor — the floor exists only to get
+// a lease refreshed quickly, and with the switch off nothing is published.
+func TestStrandRecheckFirstIntervalHonoursTheKillSwitch(t *testing.T) {
+	resetContainmentLeaseKillSwitchForTest(t)
+	t.Setenv(containmentLeaseKillSwitchEnv, "off")
+	if got := strandRecheckFirstInterval(); got != strandRecheckInterval {
+		t.Errorf("kill switch on: first recheck after %s, want the fixed %s", got, strandRecheckInterval)
 	}
 }
 
@@ -229,21 +229,19 @@ func TestStrandRecheckNextIntervalKillSwitchIsFixedCadence(t *testing.T) {
 // TestStrandRecheckKillSwitchPublishesNoLease (owner decision 2026-11-19):
 // with the switch off, neither the boot publish nor a definitive recheck
 // tick stores a lease — the controller publishes and serves none of it.
+// Driven from a CONVERGED city (not a genesis boot, which never publishes
+// regardless of the switch) so the boot half actually exercises
+// publishBootContainmentLease's own kill-switch check.
 func TestStrandRecheckKillSwitchPublishesNoLease(t *testing.T) {
-	resetContainmentLeaseKillSwitchForTest(t)
-	t.Setenv(containmentLeaseKillSwitchEnv, "off")
-
-	cityPath := t.TempDir()
-	writeScopeProjectID(t, cityPath, "prj-switch-off")
-	cfg := infraSplitConfig(t.TempDir())
-	stubInfraMigrationSource(t)
-
-	var boot bytes.Buffer
-	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, &boot)
+	cityPath, cfg, _, _ := convergedCityWithRecheckLease(t)
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, io.Discard)
 	if err != nil {
-		t.Fatalf("genesis boot refused: %v\n%s", err, boot.String())
+		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = routes.close() })
+
+	resetContainmentLeaseKillSwitchForTest(t)
+	t.Setenv(containmentLeaseKillSwitchEnv, "off")
 
 	publishBootContainmentLease(routes)
 	if l := routes.lease.Load(); l != nil {
@@ -260,25 +258,15 @@ func TestStrandRecheckKillSwitchPublishesNoLease(t *testing.T) {
 	}
 }
 
-// TestPublishBootContainmentLeaseAccountsForTheBootCheckDuration pins item 2
-// of the round-2 review: the boot gate's own check duration
-// (routes.bootVerdictDuration), not a hardcoded zero, seeds the very first
-// lease's freshness budget. It also kills two mutants: one that seeds the
-// boot lease from a zero duration regardless of how long the boot check
-// actually took (freshMS would then sit at the small floor-only value this
-// test proves it does NOT), and one that seeds it from the 10-minute
-// strandRecheckInterval instead of strandRecheckIntervalFloor (freshMS
-// would then sit at the cap, which this test's upper bound also catches).
+// TestPublishBootContainmentLeaseAccountsForTheBootCheckDuration pins the
+// approved formula's boot seed: 2×strandRecheckIntervalFloor plus twice the
+// boot gate's own check duration (routes.bootVerdictDuration), not a
+// hardcoded zero. It also kills a mutant that seeds the boot lease from the
+// 10-minute strandRecheckInterval instead of strandRecheckIntervalFloor
+// (freshMS would then sit at the cap, which this test's upper bound
+// catches).
 func TestPublishBootContainmentLeaseAccountsForTheBootCheckDuration(t *testing.T) {
 	cityPath, cfg, _, _ := convergedInfraCity(t)
-
-	const bootDelay = 50 * time.Millisecond
-	prevOpen := openInfraMigrationSource
-	openInfraMigrationSource = func(path string) (beads.Store, error) {
-		time.Sleep(bootDelay)
-		return prevOpen(path)
-	}
-	t.Cleanup(func() { openInfraMigrationSource = prevOpen })
 
 	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, io.Discard)
 	if err != nil {
@@ -286,84 +274,69 @@ func TestPublishBootContainmentLeaseAccountsForTheBootCheckDuration(t *testing.T
 	}
 	t.Cleanup(func() { _ = routes.close() })
 
-	if routes.bootVerdictDuration < bootDelay {
-		t.Fatalf("routes.bootVerdictDuration = %s, want at least the %s the boot check was slowed by", routes.bootVerdictDuration, bootDelay)
+	if routes.bootVerdictDuration <= 0 {
+		t.Fatal("routes.bootVerdictDuration is 0; this test needs a real, positive boot check duration to tell seeds apart")
 	}
+	routes.bootVerdictDuration = 4 * time.Second // hand-set: avoids depending on the fixture's real timing.
 
 	publishBootContainmentLease(routes)
 	lease := routes.lease.Load()
 	if lease == nil {
 		t.Fatal("publishBootContainmentLease stored no lease")
 	}
-	want := strandRecheckFreshness(strandRecheckIntervalFloor, routes.bootVerdictDuration, routes.bootVerdictDuration).Milliseconds()
+	want := strandRecheckFreshness(strandRecheckIntervalFloor, 2*routes.bootVerdictDuration).Milliseconds()
 	if lease.FreshMS != want {
-		t.Fatalf("FreshMS = %d, want %d computed from the real boot check duration %s", lease.FreshMS, want, routes.bootVerdictDuration)
+		t.Fatalf("FreshMS = %d, want %d computed as 2xfloor + 2xboot-duration from %s", lease.FreshMS, want, routes.bootVerdictDuration)
 	}
-	// A mutant seeding from a zero duration would sit near the floor's own
-	// 62s; a mutant seeding from strandRecheckInterval (10 minutes) would
-	// sit at the 10-minute cap. The real formula, fed a mere tens-of-ms
-	// delay, lands well clear of both: comfortably above the zero-duration
-	// floor value and comfortably below the cap.
-	zeroDurationFreshMS := strandRecheckFreshness(strandRecheckIntervalFloor, 0, 0).Milliseconds()
+	zeroDurationFreshMS := strandRecheckFreshness(strandRecheckIntervalFloor, 0).Milliseconds()
 	if lease.FreshMS <= zeroDurationFreshMS {
 		t.Fatalf("FreshMS = %d, want strictly more than the zero-duration seed %d now that the boot check took %s", lease.FreshMS, zeroDurationFreshMS, routes.bootVerdictDuration)
 	}
 	if lease.FreshMS >= strandRecheckFreshCap.Milliseconds() {
-		t.Fatalf("FreshMS = %d, want well under the 10-minute cap %d for a boot check slowed by only %s", lease.FreshMS, strandRecheckFreshCap.Milliseconds(), bootDelay)
+		t.Fatalf("FreshMS = %d, want well under the 10-minute cap %d for a boot check this cheap", lease.FreshMS, strandRecheckFreshCap.Milliseconds())
 	}
 }
 
-// TestStrandRecheckRunReArmsTheTickerToTheAdaptiveInterval pins item 3 of
-// the round-2 review: run()'s ticker.Reset(strandRecheckNextInterval(...))
-// after every tick, not just the fixed interval run() was seeded with. This
-// kills a "never re-arm" mutant (dropping the Reset call, or resetting to
-// the original seed interval unconditionally): without it, a run seeded
-// with a short first interval keeps ticking at that short interval forever,
-// instead of settling onto the adaptive cadence (here, the floor, since the
-// fixture's check is cheap) after its first tick.
+// TestStrandRecheckRunReArmsTheTickerToTheAdaptiveInterval (P6, sleep-free,
+// synctest): run()'s ticker.Reset(strandRecheckNextInterval(...)) after
+// every tick, not just the fixed interval run() was seeded with. This
+// kills three re-arm mutants: dropping the Reset call entirely (D3), one
+// that re-arms to the original SEED interval unconditionally (D3b), and one
+// that re-arms to the floor unconditionally regardless of the real adaptive
+// interval (D3c) — the hand-set lastCheckDuration below makes the real
+// adaptive interval exceed both the seed and the floor, so only the correct
+// re-arm lands a second tick at the exact moment pinned.
 func TestStrandRecheckRunReArmsTheTickerToTheAdaptiveInterval(t *testing.T) {
-	cityPath, _, target, _ := convergedCityWithRecheckLease(t)
-	s := newStrandRecheckFixture(cityPath, target)
+	synctest.Test(t, func(t *testing.T) {
+		s := &strandRecheck{stderr: io.Discard, logPrefix: "gc start"}
+		var ticks atomic.Int64
+		s.quiescent = func() bool { ticks.Add(1); return true } // skip the real read; keeps lastCheckDuration under test control.
+		const d = 30 * time.Second                              // > strandRecheckIntervalFloor/10, so the adaptive interval (300s) exceeds both the floor and the seed.
+		s.lastCheckDuration = d
 
-	var ticks atomic.Int64
-	s.quiescent = func() bool {
-		ticks.Add(1)
-		return false // never actually quiescent; just counting calls.
-	}
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan struct{})
+		go func() { defer close(done); s.run(ctx, 10*time.Millisecond) }()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		// Seeded with a very short first interval: with no re-arm, every
-		// following tick would also fire this fast.
-		s.run(ctx, 10*time.Millisecond)
-	}()
-
-	// Let the first tick land, and a little more, so a non-re-arming ticker
-	// would have fired several more times in the window below.
-	deadline := time.After(300 * time.Millisecond)
-	for ticks.Load() == 0 {
-		select {
-		case <-deadline:
-			t.Fatal("the first tick never landed")
-		case <-time.After(5 * time.Millisecond):
+		advance(10 * time.Millisecond)
+		if got := ticks.Load(); got != 1 {
+			t.Fatalf("after the seed interval: %d ticks, want 1", got)
 		}
-	}
-	afterFirst := ticks.Load()
 
-	// The fixture's check is cheap, so the re-armed interval is the floor
-	// (strandRecheckIntervalFloor, 60s) — comfortably longer than this
-	// window. A ticker still running at the 10ms seed would tick dozens of
-	// times in it; a correctly re-armed one ticks zero more times.
-	time.Sleep(300 * time.Millisecond)
-	cancel()
-	<-done
+		adaptive := strandRecheckNextInterval(d)
+		advance(adaptive - time.Millisecond)
+		if got := ticks.Load(); got != 1 {
+			t.Fatalf("before the adaptive interval (%s) elapsed: %d ticks, want still 1", adaptive, got)
+		}
 
-	if got := ticks.Load() - afterFirst; got != 0 {
-		t.Errorf("%d more tick(s) landed after the first, within a 300ms window; want 0 once the ticker re-arms to the adaptive (floor) interval", got)
-	}
+		advance(time.Millisecond)
+		if got := ticks.Load(); got != 2 {
+			t.Fatalf("at the adaptive interval: %d ticks, want 2", got)
+		}
+
+		cancel()
+		<-done
+	})
 }
 
 // TestStrandRecheckPublishLeaseUsesTheRealAdaptiveIntervalNotTheFloor kills
@@ -387,7 +360,6 @@ func TestStrandRecheckPublishLeaseUsesTheRealAdaptiveIntervalNotTheFloor(t *test
 
 	const slow = 30 * time.Second // > 6s, so the real interval (10x) exceeds the floor.
 	s.lastCheckDuration = slow
-	s.prevCheckDuration = 0
 	s.publishLease(report, takenAt)
 
 	lease := s.routes.lease.Load()
@@ -398,11 +370,11 @@ func TestStrandRecheckPublishLeaseUsesTheRealAdaptiveIntervalNotTheFloor(t *test
 	if realInterval <= strandRecheckIntervalFloor {
 		t.Fatalf("fixture: strandRecheckNextInterval(%s) = %s, want it to exceed the floor %s for this test to tell the two seeds apart", slow, realInterval, strandRecheckIntervalFloor)
 	}
-	want := strandRecheckFreshness(realInterval, slow, 0).Milliseconds()
+	want := strandRecheckFreshness(realInterval, slow).Milliseconds()
 	if lease.FreshMS != want {
 		t.Fatalf("FreshMS = %d, want %d from the real adaptive interval %s", lease.FreshMS, want, realInterval)
 	}
-	floorSeeded := strandRecheckFreshness(strandRecheckIntervalFloor, slow, 0).Milliseconds()
+	floorSeeded := strandRecheckFreshness(strandRecheckIntervalFloor, slow).Milliseconds()
 	if lease.FreshMS == floorSeeded {
 		t.Fatalf("FreshMS = %d equals the floor-seeded value %d; the real adaptive interval must be used, not the floor", lease.FreshMS, floorSeeded)
 	}
@@ -432,5 +404,32 @@ func TestStrandRecheckPanicRecordsItsOwnCheckDuration(t *testing.T) {
 
 	if s.lastCheckDuration == sentinel {
 		t.Errorf("lastCheckDuration after a panicked tick is still the sentinel %s set before it; the panic-recover path must record how long the check ran", sentinel)
+	}
+}
+
+// TestStorageBootGateMeasuresABootVerdictDurationNoSleep (P7, sleep-free):
+// the boot gate measures a real, positive check duration bounded by the
+// call's own wall time, with no fixed sleep required to observe it.
+func TestStorageBootGateMeasuresABootVerdictDurationNoSleep(t *testing.T) {
+	cityPath, cfg, _, _ := convergedCityWithRecheckLease(t)
+	start := time.Now()
+	routes, err := storageBootGate(cityPath, cfg, "gc start", nil, io.Discard)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = routes.close() })
+	if routes.bootVerdictDuration <= 0 || routes.bootVerdictDuration > elapsed {
+		t.Fatalf("bootVerdictDuration = %s, want in (0, %s]", routes.bootVerdictDuration, elapsed)
+	}
+
+	routes.bootVerdictDuration = 30 * time.Second
+	publishBootContainmentLease(routes)
+	l := routes.lease.Load()
+	if l == nil {
+		t.Fatal("no boot lease")
+	}
+	if want := strandRecheckFreshness(strandRecheckIntervalFloor, 2*30*time.Second).Milliseconds(); l.FreshMS != want {
+		t.Fatalf("FreshMS = %d, want %d", l.FreshMS, want)
 	}
 }

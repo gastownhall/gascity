@@ -117,8 +117,8 @@ type containmentLease struct {
 	TakenAt time.Time
 	// FreshMS is this lease's freshness budget in milliseconds, computed
 	// once at publish time from the recheck's interval (strandRecheckInterval
-	// — adaptive, strandRecheckNextInterval) and its last check duration
-	// (design doc §4.3): min(10 min, 2×interval + last duration)
+	// — adaptive, strandRecheckNextInterval) and the check's own duration d
+	// (design doc §4.3): min(10 min, 2×interval + d)
 	// (strandRecheckFreshness's comment). It does not change between
 	// serves of the same lease, except that a transient recheck failure
 	// stretches it to the full ten-minute cap (Q3; extendLeaseOnTransientFailure).
