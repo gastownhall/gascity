@@ -160,14 +160,29 @@ func WaitInfoFromBead(b beads.Bead) WaitInfo {
 	}
 }
 
+// KeepsWaitsAcrossResets reports whether session s's waits belong to the
+// session rather than to one conversation. An open configured named session
+// stays the same bead across every continuation reset (a restart request,
+// churn, a stale resume key, a wake_mode=fresh wake), and each wait carries
+// its own note, so its waits stay live at every epoch. Every other session's
+// waits, and those of a closed named session or a bead whose named config is
+// gone, are scoped to the conversation they were registered in.
+func KeepsWaitsAcrossResets(s Info) bool {
+	return !s.Closed && IsNamedSessionInfo(s)
+}
+
 // ContinuationStale reports whether the wait belongs to a conversation the
-// session has since retired. A wait is stale when both epochs are set and
-// differ, except that a wait registered while a fresh restart was pending is
-// current both at its registered epoch N (the reset not yet consumed, restored
-// by a refused start, or withdrawn) and at N+1 (the conversation the reset
-// opened). Epochs that do not parse as integers fall back to the plain
-// inequality.
+// session has since retired. The waits of a session that keeps its waits
+// across resets (KeepsWaitsAcrossResets) are never stale. Any other wait is
+// stale when both epochs are set and differ, except that a wait registered
+// while a fresh restart was pending is current both at its registered epoch N
+// (the reset not yet consumed, restored by a refused start, or withdrawn) and
+// at N+1 (the conversation the reset opened). Epochs that do not parse as
+// integers fall back to the plain inequality.
 func (w WaitInfo) ContinuationStale(s Info) bool {
+	if KeepsWaitsAcrossResets(s) {
+		return false
+	}
 	registered, current := w.RegisteredEpoch, s.ContinuationEpoch
 	if registered == "" || current == "" || registered == current {
 		return false

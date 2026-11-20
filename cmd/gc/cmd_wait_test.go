@@ -4761,23 +4761,40 @@ type resetWindowFixture struct {
 	now       time.Time
 }
 
-func newResetWindowFixture(t *testing.T) *resetWindowFixture {
+// resetWindowSessionOpt adjusts the fixture session's metadata before the
+// session bead is created.
+type resetWindowSessionOpt func(meta map[string]string)
+
+// namedResetWindowSession makes the fixture session a configured named
+// session that resumes its conversation.
+func namedResetWindowSession(meta map[string]string) {
+	meta["configured_named_session"] = "true"
+	meta["configured_named_identity"] = "desk"
+	meta["configured_named_mode"] = "always"
+	meta["wake_mode"] = "resume"
+}
+
+func newResetWindowFixture(t *testing.T, opts ...resetWindowSessionOpt) *resetWindowFixture {
 	t.Helper()
 	store := beads.NewMemStore()
 	dep, err := store.Create(beads.Bead{Title: "upstream step", Type: "task"})
 	if err != nil {
 		t.Fatalf("create dep: %v", err)
 	}
+	meta := map[string]string{
+		"session_name":       "worker",
+		"agent_name":         "worker",
+		"continuation_epoch": "2",
+		"state":              string(sessionpkg.StateActive),
+	}
+	for _, o := range opts {
+		o(meta)
+	}
 	sess, err := store.Create(beads.Bead{
-		Title:  "worker",
-		Type:   sessionBeadType,
-		Labels: []string{sessionBeadLabel},
-		Metadata: map[string]string{
-			"session_name":       "worker",
-			"agent_name":         "worker",
-			"continuation_epoch": "2",
-			"state":              string(sessionpkg.StateActive),
-		},
+		Title:    "worker",
+		Type:     sessionBeadType,
+		Labels:   []string{sessionBeadLabel},
+		Metadata: meta,
 	})
 	if err != nil {
 		t.Fatalf("create session: %v", err)
@@ -4895,6 +4912,111 @@ func (fx *resetWindowFixture) requireCanceled(stage, reason string) {
 	if b.Status != "closed" || b.Metadata["state"] != waitStateCanceled || b.Metadata["last_error"] != reason {
 		fx.t.Fatalf("%s: wait status=%q state=%q last_error=%q, want closed canceled %q",
 			stage, b.Status, b.Metadata["state"], b.Metadata["last_error"], reason)
+	}
+}
+
+func (fx *resetWindowFixture) requireKeptAt(stage, state string) {
+	fx.t.Helper()
+	b := fx.wait()
+	if b.Status == "closed" || b.Metadata["state"] != state || b.Metadata["registered_epoch"] != "2" || b.Metadata["last_error"] != "" {
+		fx.t.Fatalf("%s: wait status=%q state=%q registered_epoch=%q last_error=%q, want it open %s at registered_epoch 2 with no last_error",
+			stage, b.Status, b.Metadata["state"], b.Metadata["registered_epoch"], b.Metadata["last_error"], state)
+	}
+}
+
+// TestPrepareWaitWakeState_KeepsNamedSessionWaitAcrossReset covers the waits
+// of a configured named session: the session stays the same bead across
+// every continuation reset, so its waits belong to the session rather than to
+// one conversation, and an epoch move does not cancel them continuation-stale.
+// registered_epoch keeps its value from registration.
+func TestPrepareWaitWakeState_KeepsNamedSessionWaitAcrossReset(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		opts []resetWindowSessionOpt
+		run  func(fx *resetWindowFixture)
+	}{
+		{
+			name: "restart-request",
+			opts: []resetWindowSessionOpt{namedResetWindowSession},
+			run: func(fx *resetWindowFixture) {
+				fx.register()
+				fx.requestReset()
+				fx.wakePass()
+				fx.start(3)
+				fx.wakePass()
+				fx.requireKeptAt("after the restart", waitStatePending)
+			},
+		},
+		{
+			name: "churn-reset",
+			opts: []resetWindowSessionOpt{namedResetWindowSession},
+			run: func(fx *resetWindowFixture) {
+				fx.register()
+				fx.patch(sessionpkg.ConversationResetPatch(false, fx.tick()))
+				fx.start(3)
+				fx.wakePass()
+				fx.requireKeptAt("after the churn reset", waitStatePending)
+			},
+		},
+		{
+			name: "stale-key-marker-reset",
+			opts: []resetWindowSessionOpt{namedResetWindowSession},
+			run: func(fx *resetWindowFixture) {
+				fx.register()
+				fx.patch(sessionpkg.MetadataPatch{"session_key": "", "continuation_reset_pending": "true"})
+				fx.wakePass()
+				fx.requireKeptAt("with the marker set", waitStatePending)
+				fx.start(3)
+				fx.wakePass()
+				fx.requireKeptAt("after the start consumed the marker", waitStatePending)
+			},
+		},
+		{
+			name: "two-successive-resets",
+			opts: []resetWindowSessionOpt{namedResetWindowSession},
+			run: func(fx *resetWindowFixture) {
+				fx.register()
+				fx.requestReset()
+				fx.start(3)
+				fx.wakePass()
+				fx.requireKeptAt("after the first restart", waitStatePending)
+				fx.requestReset()
+				fx.start(4)
+				fx.wakePass()
+				fx.requireKeptAt("after the second restart", waitStatePending)
+			},
+		},
+		{
+			name: "dep-closes-before-reset",
+			opts: []resetWindowSessionOpt{namedResetWindowSession},
+			run: func(fx *resetWindowFixture) {
+				fx.register()
+				fx.closeDep()
+				fx.wakePass()
+				fx.requireKeptAt("before the restart", waitStateReady)
+				fx.requestReset()
+				fx.start(3)
+				fx.wakePass()
+				fx.requireKeptAt("after the restart", waitStateReady)
+			},
+		},
+		{
+			name: "dep-closes-after-reset",
+			opts: []resetWindowSessionOpt{namedResetWindowSession},
+			run: func(fx *resetWindowFixture) {
+				fx.register()
+				fx.requestReset()
+				fx.start(3)
+				fx.wakePass()
+				fx.closeDep()
+				fx.wakePass()
+				fx.requireKeptAt("after the dependency closed", waitStateReady)
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.run(newResetWindowFixture(t, tc.opts...))
+		})
 	}
 }
 
