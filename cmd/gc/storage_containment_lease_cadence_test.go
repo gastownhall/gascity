@@ -412,21 +412,25 @@ func TestStrandRecheckPublishLeaseUsesTheRealAdaptiveIntervalNotTheFloor(t *test
 // drops tick()'s panic-recover update of s.lastCheckDuration: the time a
 // tick spent before panicking must still be recorded, exactly as a normal
 // check's duration is, since run()'s ticker re-arm and the next
-// publishLease both read it.
+// publishLease both read it. A sentinel set before the panicking tick,
+// rather than a time.Sleep inside the stub, tells the two cases apart: no
+// real check ever takes 999 hours, so if it is still there after the tick,
+// the recover path never recorded anything.
 func TestStrandRecheckPanicRecordsItsOwnCheckDuration(t *testing.T) {
 	_, _, s := workStoreStickyFixture(t)
 
-	const delay = 30 * time.Millisecond
+	const sentinel = 999 * time.Hour
+	s.lastCheckDuration = sentinel
+
 	prev := openInfraMigrationSource
 	openInfraMigrationSource = func(string) (beads.Store, error) {
-		time.Sleep(delay)
 		panic("boom")
 	}
 	t.Cleanup(func() { openInfraMigrationSource = prev })
 
 	s.tick() // must not panic
 
-	if s.lastCheckDuration < delay {
-		t.Errorf("lastCheckDuration after a panicked tick = %s, want at least the %s the panicking check was slowed by", s.lastCheckDuration, delay)
+	if s.lastCheckDuration == sentinel {
+		t.Errorf("lastCheckDuration after a panicked tick is still the sentinel %s set before it; the panic-recover path must record how long the check ran", sentinel)
 	}
 }
