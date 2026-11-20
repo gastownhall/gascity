@@ -92,3 +92,70 @@ func TestChatWaitIdleBusySnapshotQueuesWithoutWaiting(t *testing.T) {
 		}
 	}
 }
+
+// The manager's wait-idle nudges serve the families whose idle boundary the
+// runtime can wait on (runtime.WaitIdleLiveFamilies) and only those: a grok
+// session is waited for and typed into live on both paths, while a codex or
+// gemini session is reported undelivered without waiting and without typing
+// (AC-6).
+func TestChatWaitIdleNudgeDeliversOnlyWaitIdleFamilies(t *testing.T) {
+	rows := []struct {
+		family    string
+		delivered bool
+	}{
+		{family: "grok", delivered: true},
+		{family: "codex"},
+		{family: "gemini"},
+	}
+	for _, tc := range rows {
+		for path, deliver := range map[string]func(*Manager, Info, runtime.Config) (bool, error){
+			"TryWaitIdleNudge": func(m *Manager, i Info, h runtime.Config) (bool, error) {
+				return m.TryWaitIdleNudge(context.Background(), testActor(m, ActorBackground), i.ID, "mail", "check deploy status", BuildResumeCommand(i), h)
+			},
+			"TryWaitIdleNudgeLiveOnly": func(m *Manager, i Info, h runtime.Config) (bool, error) {
+				return m.TryWaitIdleNudgeLiveOnly(context.Background(), i.ID, "mail", "check deploy status", h.ProcessNames)
+			},
+		} {
+			t.Run(path+"/"+tc.family, func(t *testing.T) {
+				fake := runtime.NewFake()
+				sp := &idleSnapshotFake{Fake: fake, idle: true}
+				mgr := NewManagerWithOptions(beadstest.Sessions(beads.NewMemStore()), sp, WithCityPath(t.TempDir()))
+				info, err := mgr.CreateSession(context.Background(), CreateOptions{
+					Template: "helper", Command: tc.family, WorkDir: t.TempDir(), Provider: tc.family,
+					ExtraMeta: map[string]string{"session_origin": "manual"},
+				})
+				if err != nil {
+					t.Fatalf("CreateSession: %v", err)
+				}
+				fake.WaitForIdleErrors[info.SessionName] = nil
+				before := len(fake.SnapshotCalls())
+
+				delivered, err := deliver(mgr, info, runtime.Config{WorkDir: info.WorkDir})
+				if err != nil {
+					t.Fatalf("%s: %v", path, err)
+				}
+				if delivered != tc.delivered {
+					t.Fatalf("%s delivered = %t, want %t", path, delivered, tc.delivered)
+				}
+				var waited, typed bool
+				for _, call := range fake.SnapshotCalls()[before:] {
+					if call.Name != info.SessionName {
+						continue
+					}
+					switch call.Method {
+					case "WaitForIdle":
+						waited = true
+					case "Nudge", "NudgeNow":
+						typed = true
+					}
+				}
+				if waited != tc.delivered {
+					t.Fatalf("waited for idle = %t, want %t", waited, tc.delivered)
+				}
+				if typed != tc.delivered {
+					t.Fatalf("typed = %t, want %t", typed, tc.delivered)
+				}
+			})
+		}
+	}
+}

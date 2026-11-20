@@ -3362,3 +3362,72 @@ func TestRuntimeHandleIsNotAFencedResetHandle(t *testing.T) {
 		t.Fatal("RuntimeHandle implements FencedResetHandle; want no row-backed reset")
 	}
 }
+
+// The wait-idle family gate is one list: every runtime.WaitIdleLiveFamilies
+// member's handle waits for the idle boundary and delivers live, and a family
+// outside the list is refused before the runtime is touched — the permanent
+// live_delivery_unsupported reason, never a wait (AC-6).
+func TestRuntimeHandleNudgeWaitIdleLivesForWaitIdleFamilies(t *testing.T) {
+	type row struct {
+		family  string
+		refused bool
+	}
+	var rows []row
+	for _, family := range runtime.WaitIdleLiveFamilies {
+		rows = append(rows, row{family: family})
+	}
+	rows = append(rows, row{family: "codex", refused: true}, row{family: "gemini", refused: true})
+	for _, tc := range rows {
+		t.Run(tc.family, func(t *testing.T) {
+			sp := runtime.NewFake()
+			if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			sp.WaitForIdleErrors["legacy-worker"] = nil
+
+			handle, err := NewRuntimeHandle(RuntimeHandleConfig{
+				Provider:     sp,
+				SessionName:  "legacy-worker",
+				ProviderName: tc.family,
+			})
+			if err != nil {
+				t.Fatalf("NewRuntimeHandle: %v", err)
+			}
+
+			result, err := handle.Nudge(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent), NudgeRequest{
+				Text:     "check deploy status",
+				Delivery: NudgeDeliveryWaitIdle,
+				Source:   "mail",
+			})
+			if err != nil {
+				t.Fatalf("Nudge(wait_idle): %v", err)
+			}
+			var waitCalls, nudgeNow, nudges int
+			for _, call := range sp.Calls {
+				switch call.Method {
+				case "WaitForIdle":
+					waitCalls++
+				case "NudgeNow":
+					nudgeNow++
+				case "Nudge":
+					nudges++
+				}
+			}
+			if tc.refused {
+				if result.Delivered || result.Undelivered != NudgeUndeliveredProviderUnsupported {
+					t.Fatalf("Nudge(wait_idle) = %+v, want undelivered %q", result, NudgeUndeliveredProviderUnsupported)
+				}
+				if waitCalls+nudgeNow+nudges != 0 {
+					t.Fatalf("runtime calls = %d waits, %d nudge-now, %d nudges; want none: the refusal precedes the runtime", waitCalls, nudgeNow, nudges)
+				}
+				return
+			}
+			if !result.Delivered {
+				t.Fatalf("Nudge(wait_idle) = %+v, want delivered", result)
+			}
+			if waitCalls != 1 || nudgeNow != 1 || nudges != 0 {
+				t.Fatalf("runtime calls = %d waits, %d nudge-now, %d nudges; want one wait and one live delivery", waitCalls, nudgeNow, nudges)
+			}
+		})
+	}
+}
