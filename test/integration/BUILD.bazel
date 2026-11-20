@@ -43,6 +43,7 @@ go_test(
     srcs = [
         "bdstore_batch_delete_test.go",
         "bdstore_batch_reads_test.go",
+        "bdstore_conformance_skip_test.go",
         "bdstore_runner_isolation_test.go",
         "bdstore_test.go",
         "bead_id_helpers_test.go",
@@ -421,7 +422,7 @@ go_test(
 
 # bazel.yml's gating integration-smoke lane (GA-1, item 5 ga-spec.md
 # scripts/ga/*): the bdstore and REST smoke subset of integration_test
-# (scripts/test-integration-shard's bdstore_tests + rest_smoke_tests,
+# (scripts/test-integration-shard's bdstore_conformance_tests + bdstore_tests + rest_smoke_tests,
 # scripts/bazel_integration_smoke_test.go keeps this filter equal to that
 # list). A go_variant_test rather than a global --test_filter, so a future
 # union of this lane with integration-packages (one bazel invocation) does

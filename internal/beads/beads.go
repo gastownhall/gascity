@@ -181,11 +181,14 @@ type Bead struct {
 	// outright, and one it can see supplies the child's id, so placement follows
 	// the parent's namespace instead of the child's class. That is bd's
 	// contract, not something this package layers over it, and the provider is
-	// left following the tool it drives. Nothing in CI can see the divergence
-	// either — the only conformance run over a real bd is skipped (ga-e7z613).
-	// ga-6od57 tracks making the provider comply or un-skipping that run; until
-	// one of them lands, a caller pointing a bd-backed store at a parent in
-	// another ledger gets a refusal, not a weak reference.
+	// left following the tool it drives. CI pins the refusal rather than
+	// skipping the row: BdStore's conformance run declares
+	// beadstest.Options.RefusesUnresolvableParent, and the
+	// ParentIDNamesARowThisStoreDoesNotHave subtest then asserts the refusal (an
+	// error containing "not found", no child left behind) and fails the day
+	// BdStore starts accepting a foreign parent. Until BdStore complies
+	// (ga-6mfvtl), a caller pointing a bd-backed store at a parent in another
+	// ledger gets a refusal, not a weak reference.
 	ParentID    string   `json:"parent,omitempty"`
 	Ref         string   `json:"ref,omitempty"`         // formula step ID or formula name
 	Needs       []string `json:"needs,omitempty"`       // dependency step refs
@@ -222,10 +225,12 @@ type Bead struct {
 	IsBlocked *bool `json:"is_blocked,omitempty"`
 	// CloseReason says why the bead was closed. It is empty while the bead is
 	// not closed, and when the closer gave no reason. bd-backed stores read
-	// bd's close_reason column (written by `bd close --reason`); stores that
-	// hold the whole row record the trimmed metadata.close_reason a closer
-	// stamped before closing, the same value BdStore and NativeDoltStore
-	// forward to their close. Reopening clears it.
+	// bd's close_reason column (written by `bd close --reason`) and read the
+	// default bd writes for a close without one ("Closed") as no reason, so an
+	// explicit "Closed" also reads empty on bd-backed stores; stores that hold
+	// the whole row record the trimmed metadata.close_reason a closer stamped
+	// before closing, the same value BdStore and NativeDoltStore forward to
+	// their close. Reopening clears it.
 	CloseReason string `json:"close_reason,omitempty"`
 	// IndefinitelyDeferred preserves bd's status-based deferral after richer
 	// statuses normalize to Gas City's three-state model. It is set whenever

@@ -1,6 +1,7 @@
 package beadstest
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -116,5 +117,170 @@ func TestFakeBdCreateKeepsParentAndEphemeral(t *testing.T) {
 	}
 	if _, err := store.Get(eph.ID); err != nil {
 		t.Fatalf("bd show did not answer the ephemeral bead: %v", err)
+	}
+}
+
+// TestFakeBdModelsBdDefaultCloseReason pins that a close given no --reason
+// shows bd's default "Closed" on the wire, as the real bd does
+// (cmd/bd/close.go resolveCloseReasons), while a given reason and an open row
+// show what they hold. BdStore must read the default as no reason; a fake that
+// answered "" would let it skip that.
+func TestFakeBdModelsBdDefaultCloseReason(t *testing.T) {
+	f := NewFakeBd()
+	store := f.NewBdStore()
+	reasonless, err := store.Create(beads.Bead{Title: "closed without a reason", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reasoned, err := store.Create(beads.Bead{Title: "closed with a reason", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	open, err := store.Create(beads.Bead{Title: "still open", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Run("", "bd", "close", "--json", reasonless.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Run("", "bd", "close", "--json", reasoned.ID, "--reason", "fixed in abc123"); err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]string{reasonless.ID: "Closed", reasoned.ID: "fixed in abc123", open.ID: ""} {
+		out, err := f.Run("", "bd", "show", "--json", id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var rows []struct {
+			CloseReason string `json:"close_reason"`
+		}
+		if err := json.Unmarshal(out, &rows); err != nil || len(rows) != 1 {
+			t.Fatalf("show %s = %s, %v", id, out, err)
+		}
+		if rows[0].CloseReason != want {
+			t.Errorf("show %s close_reason = %q, want %q", id, rows[0].CloseReason, want)
+		}
+	}
+}
+
+// TestFakeBdKeepsTheCloseReasonColumnApartFromMetadata pins that the fake holds
+// bd's close_reason column apart from metadata.close_reason, as real bd does:
+// `bd close --reason X` writes only the column, so the metadata key stays the
+// input BdStore forwards as --reason and never a copy of bd's output. Reopen
+// clears the column, and a close given no reason stamps bd's default again.
+func TestFakeBdKeepsTheCloseReasonColumnApartFromMetadata(t *testing.T) {
+	f := NewFakeBd()
+	store := f.NewBdStore()
+	created, err := store.Create(beads.Bead{Title: "closed straight through bd", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	show := func(step string) (column string, metadataKey bool) {
+		t.Helper()
+		out, err := f.Run("", "bd", "show", "--json", created.ID)
+		if err != nil {
+			t.Fatalf("%s: show: %v", step, err)
+		}
+		var rows []struct {
+			CloseReason string            `json:"close_reason"`
+			Metadata    map[string]string `json:"metadata"`
+		}
+		if err := json.Unmarshal(out, &rows); err != nil || len(rows) != 1 {
+			t.Fatalf("%s: show = %s, %v", step, out, err)
+		}
+		_, metadataKey = rows[0].Metadata["close_reason"]
+		return rows[0].CloseReason, metadataKey
+	}
+
+	if _, err := f.Run("", "bd", "close", "--json", created.ID, "--reason", "fixed in abc123"); err != nil {
+		t.Fatal(err)
+	}
+	if column, leaked := show("close --reason"); column != "fixed in abc123" || leaked {
+		t.Errorf("after close --reason: column = %q, metadata.close_reason present = %v; want the column only", column, leaked)
+	}
+
+	if _, err := f.Run("", "bd", "reopen", "--json", created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if column, leaked := show("reopen"); column != "" || leaked {
+		t.Errorf("after reopen: column = %q, metadata.close_reason present = %v; want neither", column, leaked)
+	}
+
+	if _, err := f.Run("", "bd", "close", "--json", created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if column, leaked := show("close without a reason"); column != "Closed" || leaked {
+		t.Errorf("after a close with no reason: column = %q, metadata.close_reason present = %v; want bd's default and no key", column, leaked)
+	}
+}
+
+// TestFakeBdBackedCloseForwardsTheMetadataReasonToBd pins, through the fake,
+// that BdStore.Close forwards metadata.close_reason to bd as --reason: the
+// column bd answers with is the reason the caller wrote, not bd's default
+// "Closed". A BdStore.Close that stopped forwarding it would leave the column
+// at the default, and this test would fail where a fake echoing the metadata
+// back on its own would stay green.
+func TestFakeBdBackedCloseForwardsTheMetadataReasonToBd(t *testing.T) {
+	f := NewFakeBd()
+	store := f.NewBdStore()
+	created, err := store.Create(beads.Bead{Title: "close forwards its reason", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Update(created.ID, beads.UpdateOpts{Metadata: map[string]string{"close_reason": "shipped in def456"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(created.ID); err != nil {
+		t.Fatal(err)
+	}
+	out, err := f.Run("", "bd", "show", "--json", created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rows []struct {
+		CloseReason string `json:"close_reason"`
+	}
+	if err := json.Unmarshal(out, &rows); err != nil || len(rows) != 1 {
+		t.Fatalf("show = %s, %v", out, err)
+	}
+	if rows[0].CloseReason != "shipped in def456" {
+		t.Errorf("bd close_reason column = %q, want the forwarded %q", rows[0].CloseReason, "shipped in def456")
+	}
+}
+
+// TestCachingStoreOverFakeBdDefaultCloseCausesNoSpuriousUpdate pins the
+// CachingStore case of the close_reason store-contract ruling: a bead closed
+// with bd's default reason, through the cache or behind it, leaves the cache
+// and bd agreeing, so a later live list and two reconciles emit no
+// bead.updated for it. The bead.closed count is the positive control: it shows
+// the notification path was live, so the absence of an update is not vacuous.
+func TestCachingStoreOverFakeBdDefaultCloseCausesNoSpuriousUpdate(t *testing.T) {
+	for _, via := range []string{"cache", "backing"} {
+		t.Run(via, func(t *testing.T) {
+			backing := NewFakeBd().NewBdStore()
+			seed, err := backing.Create(beads.Bead{Title: "closed with bd's default", Type: "task"})
+			mustNoErr(t, "Create", err)
+			cs, rec := primedNotifyingCache(t, backing)
+			if via == "cache" {
+				mustNoErr(t, "cache Close", cs.Close(seed.ID))
+			} else {
+				mustNoErr(t, "backing Close", backing.Close(seed.ID))
+			}
+			_, err = cs.List(beads.ListQuery{AllowScan: true, IncludeClosed: true, Live: true})
+			mustNoErr(t, "live List", err)
+			cs.ReconcileNowForTest()
+			cs.ReconcileNowForTest()
+			if got := rec.closes(seed.ID); got != 1 {
+				t.Errorf("bead.closed notifications = %d, want exactly 1; notifications=%s", got, rec)
+			}
+			rec.mu.Lock()
+			events := append([]string(nil), rec.events...)
+			rec.mu.Unlock()
+			for _, e := range events {
+				if e == "bead.updated "+seed.ID {
+					t.Errorf("a close with bd's default reason caused %q; notifications=%v", e, events)
+				}
+			}
+		})
 	}
 }

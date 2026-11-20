@@ -201,7 +201,7 @@ test:integration-packages --config=integration
 # The gating subset of //test/integration (bazel.yml's integration-smoke
 # lane) is //test/integration:integration_smoke_test, a go_variant_test
 # (test/integration/BUILD.bazel) whose own args carry the filter
-# (scripts/test-integration-shard's bdstore_tests and rest_smoke_tests,
+# (scripts/test-integration-shard's bdstore_conformance_tests, bdstore_tests and rest_smoke_tests,
 # which scripts/bazel_integration_smoke_test.go keeps this filter equal to):
 # a per-target args, not a global --test_filter here, so a future union
 # with integration-packages in one invocation would not filter packages'

@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/doctor"
+	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
 
 const (
@@ -43,16 +44,13 @@ const (
 // Requires: Dolt and bd binaries configured via PATH or the integration
 // override env vars.
 func TestBdStoreConformance(t *testing.T) {
-	// Skipped because BdStore fails this suite's
-	// ParentIDNamesARowThisStoreDoesNotHave row on every pinned bd: it hands
-	// ParentID to bd as --parent, and bd 1.3.x refuses a parent it cannot
-	// resolve ("parent issue ... not found"), the divergence ga-6od57 tracks.
-	// The bd 1.0.4 reason the skip was added for (ga-e7z613) no longer applies;
-	// every pin carries the #3691 empty-DB guard. The suite is in the gating
-	// integration-smoke filter, so un-skipping it (ga-x4j5ka) needs that row
-	// fixed or opted out, and a green run on both pins.
-	t.Skip("BdStore fails ParentIDNamesARowThisStoreDoesNotHave: bd refuses an unresolvable --parent (ga-6od57); un-skip is ga-x4j5ka")
 	requireDoltIntegration(t)
+	// bd 1.0.4 (deps.env BD_PREV_VERSION, the contract-tested floor) was tagged
+	// before #3691 restored bd's empty-DB auto-import guard, so it silently
+	// auto-imports into an empty on-disk DB and trips gascity's
+	// ErrBDSilentFallback guard (#2080). That is bd behavior, not a gascity
+	// regression; v1.0.5 is the first tag that contains #3691.
+	helpers.RequireBDAtLeast(t, realBDBinary, "v1.0.5", "the #3691 empty-DB auto-import guard")
 	env := newIsolatedToolEnv(t, true)
 
 	rootDir := t.TempDir()
@@ -60,11 +58,26 @@ func TestBdStoreConformance(t *testing.T) {
 	workspacesDir := filepath.Join(rootDir, "workspaces")
 	serverPort := startSharedDoltServer(t, env, doltDataDir)
 	var dbCounter atomic.Int64
+	// liveDBs are the databases of the stores handed out and not yet dropped.
+	var liveDBs []string
+	doltClientDir := filepath.Join(rootDir, "dolt-client")
+	if err := os.MkdirAll(doltClientDir, 0o755); err != nil {
+		t.Fatalf("creating dolt client dir: %v", err)
+	}
 
 	// Factory: each call creates a fresh workspace bound to the shared Dolt
 	// server. This avoids the slow startup/shutdown tail from embedded local
 	// server mode and keeps the conformance suite within CI time limits.
+	//
+	// Every store is a database on that server, and both Dolt and bd init get
+	// slower with each database the server holds, so the factory drops every
+	// store but the latest before creating the next one. Subtests run one at a
+	// time and take one store each, so only the latest can still be in use.
 	newStore := func() beads.Store {
+		for len(liveDBs) > 1 {
+			dropDoltDatabase(t, env, doltClientDir, serverPort, liveDBs[0])
+			liveDBs = liveDBs[1:]
+		}
 		n := dbCounter.Add(1)
 		prefix := fmt.Sprintf("ct%d", n)
 
@@ -84,13 +97,18 @@ func TestBdStoreConformance(t *testing.T) {
 		runBDInit(t, env, wsDir, prefix, serverPort)
 
 		configureCustomTypes(t, env, wsDir, doctor.RequiredCustomTypes)
+		liveDBs = append(liveDBs, prefix)
 
-		return beads.NewBdStore(wsDir, pinnedBdStoreCommandRunner())
+		return beads.NewBdStore(wsDir, isolatedBdStoreCommandRunner(env))
 	}
 
 	// Run conformance suite. We skip RunSequentialIDTests because BdStore
 	// uses bd's ID format (prefix-XXXX), not gc-N sequential format.
-	beadstest.RunStoreTests(t, newStore)
+	// BdStore hands ParentID to bd as --parent, which bd resolves
+	// unconditionally, so it cannot keep a parent bd does not have. The
+	// ParentID row therefore asserts that refusal instead of the weak-reference
+	// contract the other stores meet; it still executes (ga-6mfvtl).
+	beadstest.RunStoreTestsWithOptions(t, newStore, beadstest.Options{RefusesUnresolvableParent: true})
 	beadstest.RunMetadataTests(t, newStore)
 	beadstest.RunCloseReasonTests(t, newStore)
 }
@@ -172,6 +190,21 @@ func runBDInit(t *testing.T, env []string, dir, prefix, port string) {
 	}
 	if err != nil {
 		t.Fatalf("bd init: %v: %s", err, out)
+	}
+}
+
+// dropDoltDatabase drops a finished store's database from the shared Dolt
+// server. Both Dolt and bd init get slower with every database the server
+// holds (measured: init took 2.7s at one database and 16.8s at twelve), so a
+// conformance run that never dropped them would go quadratic. It runs from dir,
+// an empty directory, because the dolt client reads its working directory. A
+// failed drop only costs speed, so it is logged and the run goes on.
+func dropDoltDatabase(t *testing.T, env []string, dir, port, name string) {
+	t.Helper()
+
+	out, err := runCommand(dir, env, bdInitTimeout, doltBinary, "--host", "127.0.0.1", "--port", port, "--user", "root", "--password", "", "--no-tls", "sql", "-q", "DROP DATABASE IF EXISTS "+name)
+	if err != nil {
+		t.Logf("dropping dolt database %s: %v: %s", name, err, out)
 	}
 }
 

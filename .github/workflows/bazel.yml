@@ -28,7 +28,8 @@
 #     (//test:integration_packages, tools/bazel/integration_suite.py) and
 #     gates, in every mode (fork PRs included: no network needed);
 #   - integration-smoke runs //test/integration's bdstore and REST smoke
-#     tests (scripts/test-integration-shard's bdstore_tests and
+#     tests (scripts/test-integration-shard's bdstore_conformance_tests,
+#     bdstore_tests and
 #     rest_smoke_tests; test/integration/BUILD.bazel
 #     integration_smoke_test, a go_variant_test) and gates, in
 #     every mode: they
@@ -326,7 +327,7 @@ jobs:
           # packages-* shards).
           packages='{"lane":"integration-packages","cmd":"test --config=ci --config=integration-packages --keep_going //test:integration_packages'"$fresh"'"}'
           # Gating. The integration suite's bdstore and REST smoke tests
-          # (scripts/test-integration-shard bdstore_tests + rest_smoke_tests:
+          # (scripts/test-integration-shard bdstore_conformance_tests + bdstore_tests + rest_smoke_tests:
           # test/integration/BUILD.bazel integration_smoke_test's args). A
           # dedicated go_variant_test target rather than a global
           # --test_filter (GA-1), so --config=integration alone no longer

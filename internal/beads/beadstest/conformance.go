@@ -5,6 +5,7 @@ package beadstest
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"sort"
 	"strings"
@@ -27,6 +28,16 @@ type Options struct {
 	// valid, unexpired entry for that subtest exists in the skip ledger;
 	// otherwise the subtest fails loudly.
 	SkipTxApplyConformance bool
+	// RefusesUnresolvableParent declares that the Store refuses a Create naming
+	// a parent it cannot resolve, instead of keeping the id as a weak
+	// reference. It is a capability, not a ledger opt-out: the
+	// ParentIDNamesARowThisStoreDoesNotHave subtest still executes, asserting
+	// the refusal (an error containing "not found", no child left behind) and
+	// failing loudly the day the Store starts accepting the parent, so the
+	// declaration cannot rot into a silent exemption. Only BdStore sets it,
+	// because bd resolves --parent unconditionally; ga-6mfvtl tracks making
+	// BdStore comply. Delete this field and the branch that reads it then.
+	RefusesUnresolvableParent bool
 }
 
 // RunStoreTests runs the full conformance suite against a Store implementation.
@@ -164,7 +175,9 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 			"pool_slot":    "3",
 			"agent_name":   "tower/polecat",
 		}
-		created, err := s.Create(beads.Bead{Title: "polecat", Type: "gc:session", Labels: []string{"gc:session"}, Metadata: meta})
+		// "session" is the registered bead type and "gc:session" only its label;
+		// a bd-backed store rejects an unregistered type.
+		created, err := s.Create(beads.Bead{Title: "polecat", Type: "session", Labels: []string{"gc:session"}, Metadata: meta})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -776,6 +789,16 @@ func RunStoreTestsWithOptions(t *testing.T, newStore func() beads.Store, opts Op
 		// that have nothing to do with the cross-store shape it exists to pin.
 		if beadIDNamespace(foreign) == beadIDNamespace(control.ID) {
 			t.Fatalf("this store mints %q-shaped ids, the same namespace as the %q used as the foreign parent; the cross-store shape this row exists to pin is not being exercised", control.ID, foreign)
+		}
+
+		// A store that declares it refuses an unresolvable parent (BdStore, via
+		// bd --parent; ga-6mfvtl) is held to that refusal instead of the
+		// weak-reference contract below. The row still executes.
+		if opts.RefusesUnresolvableParent {
+			if err := checkRefusesUnresolvableParent(s, foreign); err != nil {
+				t.Fatal(err)
+			}
+			return
 		}
 
 		child, err := s.Create(beads.Bead{Title: "step", ParentID: foreign})
@@ -1855,6 +1878,38 @@ func beadIDNamespace(id string) string {
 		return ""
 	}
 	return strings.ToLower(before)
+}
+
+// checkRefusesUnresolvableParent is the refusal half of the
+// ParentIDNamesARowThisStoreDoesNotHave row, run in place of the
+// weak-reference contract by a Store that declares
+// Options.RefusesUnresolvableParent. It holds the Store to exactly the
+// behavior it documents, so a change in either direction fails loudly: Create
+// naming the unresolvable parent must fail with an error containing "not
+// found" (a bd wording change fails here on purpose), must leave no bead
+// behind (a half-created child would otherwise pass), and must not succeed (the
+// declaration is then stale and the full contract should run).
+func checkRefusesUnresolvableParent(s beads.Store, foreign string) error {
+	before, err := s.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		return fmt.Errorf("listing beads before the refused create: %w", err)
+	}
+	child, err := s.Create(beads.Bead{Title: "step", ParentID: foreign})
+	if err == nil {
+		return fmt.Errorf("create naming the unresolvable parent %q succeeded as %s: this store now accepts foreign parents, so delete Options.RefusesUnresolvableParent (ga-6mfvtl) and let the full ParentIDNamesARowThisStoreDoesNotHave contract run", foreign, child.ID)
+	}
+	var problems []error
+	if !strings.Contains(err.Error(), "not found") {
+		problems = append(problems, fmt.Errorf("create naming the unresolvable parent %q was refused for a reason other than the documented one (want an error containing %q): %w", foreign, "not found", err))
+	}
+	after, err := s.List(beads.ListQuery{AllowScan: true})
+	if err != nil {
+		return errors.Join(append(problems, fmt.Errorf("listing beads after the refused create: %w", err))...)
+	}
+	if len(after) != len(before) {
+		problems = append(problems, fmt.Errorf("the refused create left %d bead(s) behind (%d before, %d after): a half-created child", len(after)-len(before), len(before), len(after)))
+	}
+	return errors.Join(problems...)
 }
 
 // titlesOf extracts titles from a slice of beads.

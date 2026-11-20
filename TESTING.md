@@ -2646,10 +2646,18 @@ run it against real tmux. Validates the tutorial experience: `gc init`,
 **BdStore conformance** (`test/integration/bdstore_test.go`): runs the
 beads conformance suite against `BdStore` backed by a real dolt server.
 Proves the full stack: dolt server → bd CLI → BdStore → beads.Store.
-Its current caller skips before the suite because of the pinned `bd` version,
-so it is a known gap, not a passing production-constructor proof. A local
-capability skip is only convenience; required coverage needs an equipped lane
-or an explicit expiring waiver.
+It skips only when the `bd` under test predates the #3691 empty-DB guard
+(`helpers.RequireBDAtLeast`, v1.0.5), so on the pinned `bd` every subtest
+executes. It has an integration shard of its own, `bdstore-conformance`
+(`make test-integration-bdstore-conformance`, run by `rc-gate.yml`,
+`mac-regression.yml` and `make test-local-parallel`), apart from the `bdstore`
+shard that keeps `TestBdStoreMailWispInsert` and the other real-store tests;
+the gating Bazel `integration-smoke` lane selects both. It builds its stores
+through `isolatedBdStoreCommandRunner`, so an exported `BEADS_DIR` or Dolt
+server variable cannot send its `bd` calls to another database. BdStore's one
+divergence from the shared contract is declared as a capability, not skipped:
+`Options.RefusesUnresolvableParent` makes the ParentID row assert that BdStore
+refuses a parent bd cannot resolve (ga-6mfvtl).
 
 #### Session safety for end-to-end tests
 
@@ -2740,7 +2748,7 @@ constructor-specific inventory today.
 
 | Interface | Conformance suite | Current suite callers |
 |---|---|---|
-| `beads.Store` | `internal/beads/beadstest/conformance.go` | MemStore, FileStore, exec-backed stores; BdStore caller currently skips; NativeDolt caller uses a test-only storage fixture |
+| `beads.Store` | `internal/beads/beadstest/conformance.go` | MemStore, FileStore, exec-backed stores; BdStore caller runs it against real bd, with the ParentID row asserting bd's refusal (`Options.RefusesUnresolvableParent`, ga-6mfvtl); NativeDolt caller uses a test-only storage fixture |
 | `runtime.Provider` | `internal/runtime/runtimetest/conformance.go` | See the checked runtime ledger below |
 | `mail.Provider` | `internal/mail/mailtest/conformance.go` | beadmail, exec, Fake |
 | `events.Provider` | `internal/events/eventstest/conformance.go` | FileRecorder, exec, Fake |

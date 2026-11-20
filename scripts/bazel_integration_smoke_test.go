@@ -109,13 +109,18 @@ func splitQuotedList(body string) []string {
 // integration-smoke lane (test/integration/BUILD.bazel
 // integration_smoke_test, a go_variant_test over integration_test whose
 // args filters) runs exactly the tests scripts/test-integration-shard names
-// as its bdstore and rest-smoke shards (bdstore_tests, rest_smoke_tests), so
-// a test added to or dropped from either list cannot silently leave the
-// gating set.
+// as its bdstore-conformance, bdstore and rest-smoke shards
+// (bdstore_conformance_tests, bdstore_tests, rest_smoke_tests), so a test
+// added to or dropped from any list cannot silently leave the gating set. The
+// conformance suite has a shard of its own for the legacy lanes' timeout
+// budgets; the Bazel lane still gates it.
 func TestIntegrationSmokeLaneMatchesShardScript(t *testing.T) {
 	root := repoRoot(t)
 	script := readFile(t, root, "scripts/test-integration-shard")
-	tests := append(shardScriptTests(t, script, "bdstore_tests"), shardScriptTests(t, script, "rest_smoke_tests")...)
+	var tests []string
+	for _, name := range []string{"bdstore_conformance_tests", "bdstore_tests", "rest_smoke_tests"} {
+		tests = append(tests, shardScriptTests(t, script, name)...)
+	}
 	// $$-escaped in the BUILD file (go_variant_test's args is a plain
 	// Starlark string, not a %-format, but this repo writes its go_variant_test
 	// end anchors as $$ for consistency with the generated ones elsewhere).
@@ -140,7 +145,10 @@ func TestIntegrationSmokeLaneMatchesShardScript(t *testing.T) {
 func TestIntegrationSmokeVariantIsFullyPinned(t *testing.T) {
 	root := repoRoot(t)
 	script := readFile(t, root, "scripts/test-integration-shard")
-	tests := append(shardScriptTests(t, script, "bdstore_tests"), shardScriptTests(t, script, "rest_smoke_tests")...)
+	var tests []string
+	for _, name := range []string{"bdstore_conformance_tests", "bdstore_tests", "rest_smoke_tests"} {
+		tests = append(tests, shardScriptTests(t, script, name)...)
+	}
 	wantFilter := "^(" + strings.Join(tests, "|") + ")$$"
 
 	build := readFile(t, root, "test/integration/BUILD.bazel")
@@ -291,5 +299,71 @@ func TestReviewFormulasRunTheShardScriptsFormulaTestsUnderBazel(t *testing.T) {
 	}
 	if got := wf.Jobs["review-formulas"].Name; got != "Integration / review-formulas" {
 		t.Errorf("review-formulas.yml fan-in name = %q, want %q (scripts/prwatchdog watches it)", got, "Integration / review-formulas")
+	}
+}
+
+// shardScriptBlock returns the text from the line starting with start up to
+// the line equal to end (both inclusive-exclusive of surrounding text) in
+// scripts/test-integration-shard.
+func shardScriptBlock(t *testing.T, script, start, end string) string {
+	t.Helper()
+	_, rest, ok := strings.Cut(script, "\n"+start)
+	if !ok {
+		t.Fatalf("scripts/test-integration-shard has no %q", start)
+	}
+	block, _, ok := strings.Cut(rest, "\n"+end)
+	if !ok {
+		t.Fatalf("scripts/test-integration-shard has no %q after %q", end, start)
+	}
+	return block
+}
+
+// TestRestFullShardExcludesTheBdStoreConformanceSuite keeps TestBdStoreConformance
+// out of the rest-full matrix: it has a shard of its own, so a rest-full row
+// that also ran it would pay for it twice and break that row's budget.
+func TestRestFullShardExcludesTheBdStoreConformanceSuite(t *testing.T) {
+	script := readFile(t, repoRoot(t), "scripts/test-integration-shard")
+	if !slices.Contains(shardScriptTests(t, script, "bdstore_conformance_tests"), "TestBdStoreConformance") {
+		t.Fatal("bdstore_conformance_tests does not list TestBdStoreConformance")
+	}
+	body := shardScriptBlock(t, script, "run_rest_full_shard_modulo() {", "}")
+	if !strings.Contains(body, `"${bdstore_conformance_tests[@]}"`) {
+		t.Errorf("run_rest_full_shard_modulo does not exclude bdstore_conformance_tests:\n%s", body)
+	}
+}
+
+// TestAllShardRunsTheBdStoreConformanceShard keeps the all shard, which the
+// local full run uses, running the conformance suite's own shard.
+func TestAllShardRunsTheBdStoreConformanceShard(t *testing.T) {
+	script := readFile(t, repoRoot(t), "scripts/test-integration-shard")
+	body := shardScriptBlock(t, script, "  all)", "    ;;")
+	if !strings.Contains(body, `"$0" bdstore-conformance`) {
+		t.Errorf("the all shard does not run bdstore-conformance:\n%s", body)
+	}
+}
+
+// TestMakefileShardAggregatesRunTheBdStoreConformanceTarget keeps both
+// aggregate targets, the plain and the coverage one, running the conformance
+// shard: an aggregate without it drops the suite from every local full run.
+func TestMakefileShardAggregatesRunTheBdStoreConformanceTarget(t *testing.T) {
+	makefile := readFile(t, repoRoot(t), "Makefile")
+	for aggregate, want := range map[string]string{
+		"test-integration-shards":       "test-integration-bdstore-conformance",
+		"test-integration-shards-cover": "test-integration-bdstore-conformance-cover",
+	} {
+		var deps []string
+		for _, line := range strings.Split(makefile, "\n") {
+			if rest, ok := strings.CutPrefix(line, aggregate+":"); ok {
+				deps = strings.Fields(rest)
+				break
+			}
+		}
+		if len(deps) == 0 {
+			t.Errorf("Makefile has no %s rule with prerequisites", aggregate)
+			continue
+		}
+		if !slices.Contains(deps, want) {
+			t.Errorf("%s prerequisites %v do not include %s", aggregate, deps, want)
+		}
 	}
 }
