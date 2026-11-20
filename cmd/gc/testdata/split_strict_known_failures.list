@@ -28,6 +28,7 @@ TestCityRestoreRoundTripsASplit	fails under the gate: the split left the work st
 TestCityRuntimeBeadReconcileTick_IdleClaimNudgeSeesReadyUnassignedRoutedTrigger	fails under the gate: idle-claim nudge count = "0", want 1 for ready routed unassigned trigger; output=""
 TestCityRuntimeBuildDesiredState_StandaloneIncludesRigStores	fails under the gate: store = &{0x1399298b5dc0 0x139929411140 2}, want city store
 TestCityRuntimeClassAccessorsAreIdentity	fails under the gate: CityRuntime.graphBeadStore() = 0x1399289b35a0, want cityBeadStore 0x139929104e00
+TestCityRuntimeDemandSnapshotFreshWakeIgnoresBlockedAssignedStep	fails under the gate: PoolDesiredCounts[worker] = 0, want 1 in the dependency-cleared control: the fixture seeds its asleep pool session and the step assigned to it into one bare MemStore handed in as cityBeadStore, so the demand build reads them through the gate's work view, which hides session rows (the same fixture shape as TestCityRuntimeDemandSnapshotRefreshesForNewRoutedReadyWork). The blocked subtest expects zero demand, so it passes under the gate either way.
 TestCityRuntimeDemandSnapshotRefreshesForNewRoutedReadyWork	fails under the gate: PoolDesiredCounts[gascity/gc.gap-analyst] = 0, want 1 for newly-ready routed work
 TestCityRuntimeRecoverUnroutedWorkRoutes	fails under the gate: CW-1 gc.routed_to = "", want city/gastown.polecat
 TestCityRuntimeStartupLegacyPhaseSequenceUnchanged	fails under the gate: startup store calls changed.
