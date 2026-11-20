@@ -75,7 +75,10 @@ func ValidOutcome(v string) bool {
 // workflow steps identified by gc.step_id or gc.step_ref, or non-task beads
 // (convoy, message). Those use the disjoint control-plane gc.outcome
 // vocabulary and are closed by the dispatch engine, not by a worker reporting
-// a work outcome.
+// a work outcome. Nor does it apply to infrastructure bookkeeping that
+// beads.IsReadyExcludedBead recognizes by label (order tracking, session,
+// op-journal rows), whatever storage tier the bead was written to; a bead's
+// NoHistory or Ephemeral flag alone does not exempt it.
 func Gated(bead beads.Bead) bool {
 	if t := strings.TrimSpace(bead.Type); t != "" && t != "task" {
 		return false
@@ -85,6 +88,9 @@ func Gated(bead beads.Bead) bool {
 	}
 	if strings.TrimSpace(bead.Metadata[beadmeta.StepIDMetadataKey]) != "" ||
 		strings.TrimSpace(bead.Metadata[beadmeta.StepRefMetadataKey]) != "" {
+		return false
+	}
+	if beads.IsReadyExcludedBead(bead) {
 		return false
 	}
 	return true

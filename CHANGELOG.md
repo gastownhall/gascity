@@ -1386,6 +1386,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the HTTP close doors is refused. Without enforcement the close logs a
   warning and goes ahead, as it does for a plain task.
 
+- **Order tracking beads could not be closed under work-record enforcement.**
+  The tracking bead `orders` writes for each run has no type and no
+  `gc.kind`, so the close gate read it as a work bead and, with
+  `GC_WORK_RECORD_ENFORCE` set, refused its close through `gc bd close` or
+  `gc bd update --status closed` for a missing `gc.work_outcome`, leaving it
+  open. The gate now skips infrastructure
+  beads that Ready already excludes by label (`order-tracking`,
+  `gc:order-tracking`, `gc:session`, `gc:op`, `gc:fact`, `gc:rt`).
+
 - **`gc convoy create` ignored an explicit `--rig` (#8696).** The convoy
   landed in the first issue's store, or in the city store when no issues
   were given, so an empty convoy created with `--rig <rig>` could never

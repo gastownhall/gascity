@@ -161,6 +161,26 @@ func TestGated(t *testing.T) {
 			bead: beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.KindMetadataKey: "review"}},
 			want: true,
 		},
+		{
+			name: "no-history order tracking bead is not gated",
+			bead: beads.Bead{Labels: []string{"order-run:nightly", "order-tracking"}, NoHistory: true},
+			want: false,
+		},
+		{
+			name: "order tracking bead stored with history is not gated",
+			bead: beads.Bead{Labels: []string{"order-run:nightly", "order-tracking"}},
+			want: false,
+		},
+		{
+			name: "gc:order-tracking labeled task is not gated",
+			bead: beads.Bead{Type: "task", Labels: []string{"gc:order-tracking"}},
+			want: false,
+		},
+		{
+			name: "task with an unrelated label is gated",
+			bead: beads.Bead{Type: "task", Labels: []string{"area:billing"}},
+			want: true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
