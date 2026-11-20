@@ -12333,3 +12333,139 @@ func noWispOpenWork(beads.Store, beads.Bead) (bool, error) { return false, nil }
 // runCompletionGraceForTest mirrors orders.runCompletionGrace, the fixed
 // recovery grace past a persisted dispatch deadline.
 const runCompletionGraceForTest = time.Minute
+
+// completionCloseConflictStore fails the first normal completion close of a
+// tracking bead with a transient error, so a dispatch's deferred close must
+// retry to finish its run's lifecycle. Sweep closes pass through.
+type completionCloseConflictStore struct {
+	beads.Store
+	conflicts atomic.Int32
+}
+
+func (s *completionCloseConflictStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	if metadata["close_reason"] == completedOrderTrackingCloseReason && s.conflicts.CompareAndSwap(0, 1) {
+		return 0, errors.New("transient close conflict")
+	}
+	return s.Store.CloseAll(ids, metadata)
+}
+
+// TestOrderDispatchProtectedRunPersistsOutcomeAndClose proves the dispatch
+// keeps its own lifecycle while a stale sweep runs inside its protection: a
+// run that succeeds, and one that reaches its deadline while the outer
+// cleanup context stays live and is still finishing in the grace window, each
+// survive the sweep, stamp their outcome and close with the normal completion
+// reason after one transient close conflict. A timed-out run's failure names
+// its effective timeout.
+func TestOrderDispatchProtectedRunPersistsOutcomeAndClose(t *testing.T) {
+	tests := []struct {
+		name        string
+		timeout     string
+		sweepAfter  time.Duration // sweep time, from the dispatch
+		staleAfter  time.Duration
+		wantLabel   string
+		wantFailMsg string // "" when the run must succeed
+	}{
+		{
+			name:       "succeeds",
+			timeout:    "30m",
+			sweepAfter: 11 * time.Minute,
+			staleAfter: defaultOrderTrackingSweepStaleAfter,
+			wantLabel:  "exec",
+		},
+		{
+			name:    "reaches deadline",
+			timeout: "100ms",
+			// Past the deadline and older than the sweep's age cutoff, but
+			// inside the completion grace.
+			sweepAfter:  100*time.Millisecond + runCompletionGraceForTest/2,
+			staleAfter:  10 * time.Second,
+			wantLabel:   "exec-failed",
+			wantFailMsg: "order timeout of 100ms exceeded",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &completionCloseConflictStore{Store: beads.NewMemStore()}
+			var rec memRecorder
+			stopped := make(chan struct{})
+			release := make(chan struct{})
+			fakeExec := func(ctx context.Context, _, _ string, _ []string) ([]byte, error) {
+				if tt.wantFailMsg != "" {
+					<-ctx.Done() // the deadline stops the run ...
+				}
+				close(stopped)
+				<-release // ... and its cleanup is still finishing.
+				if tt.wantFailMsg != "" {
+					return nil, ctx.Err()
+				}
+				return []byte("ok\n"), nil
+			}
+			ad := buildOrderDispatcherFromListExec([]orders.Order{{
+				Name:     "guarded",
+				Trigger:  "cooldown",
+				Interval: "1h",
+				Timeout:  tt.timeout,
+				Exec:     "scripts/guarded.sh",
+				Source:   "/city/orders/guarded.toml",
+			}}, store, nil, fakeExec, &rec)
+			if ad == nil {
+				t.Fatal("expected non-nil dispatcher")
+			}
+			start := time.Now()
+			ad.dispatch(context.Background(), t.TempDir(), start)
+			select {
+			case <-stopped:
+			case <-time.After(10 * time.Second):
+				close(release)
+				t.Fatal("exec runner did not reach its stop point")
+			}
+			tracked := trackingBeads(t, store, "order-run:guarded")
+			if len(tracked) != 1 {
+				close(release)
+				t.Fatalf("tracking beads = %d, want 1", len(tracked))
+			}
+			trackingID := tracked[0].ID
+
+			swept, err := sweepStaleOrderTrackingAcrossStoresLimit([]beads.Store{store}, nil, start.Add(tt.sweepAfter), tt.staleAfter, nil, orderTrackingSweepMetadataInitiator, false, 10, staleTrackingReadNotClosed)
+			close(release)
+			ad.drain(context.Background())
+			if err != nil {
+				t.Fatalf("sweep: %v", err)
+			}
+			if swept.trackingClosed != 0 {
+				t.Fatalf("sweep closed %d tracking beads, want 0 (the run is inside its deadline plus grace)", swept.trackingClosed)
+			}
+
+			b, err := store.Get(trackingID)
+			if err != nil {
+				t.Fatalf("Get(%s): %v", trackingID, err)
+			}
+			if b.Status != "closed" || b.Metadata["close_reason"] != completedOrderTrackingCloseReason {
+				t.Fatalf("tracking bead %s = status %q close_reason %q, want closed with %q", trackingID, b.Status, b.Metadata["close_reason"], completedOrderTrackingCloseReason)
+			}
+			if !slicesContain(b.Labels, tt.wantLabel) {
+				t.Fatalf("tracking bead %s labels = %v, want outcome %q", trackingID, b.Labels, tt.wantLabel)
+			}
+			if n := store.conflicts.Load(); n != 1 {
+				t.Fatalf("injected completion-close conflicts = %d, want 1 (retried once)", n)
+			}
+			rec.mu.Lock()
+			defer rec.mu.Unlock()
+			var failMsgs []string
+			for _, e := range rec.events {
+				if e.Type == events.OrderFailed {
+					failMsgs = append(failMsgs, e.Message)
+				}
+			}
+			if tt.wantFailMsg == "" {
+				if len(failMsgs) != 0 {
+					t.Fatalf("order.failed events = %q, want none for a successful run", failMsgs)
+				}
+				return
+			}
+			if len(failMsgs) != 1 || !strings.Contains(failMsgs[0], tt.wantFailMsg) {
+				t.Fatalf("order.failed messages = %q, want one naming %q", failMsgs, tt.wantFailMsg)
+			}
+		})
+	}
+}
