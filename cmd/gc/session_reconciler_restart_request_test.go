@@ -20,6 +20,7 @@ import (
 type restartRequestTestEnv struct {
 	store        beads.Store
 	sp           *runtime.Fake
+	provider     runtime.Provider // what the reconciler is handed; nil hands it sp
 	dt           *drainTracker
 	clk          *clock.Fake
 	rec          events.Recorder
@@ -52,6 +53,21 @@ func newRestartRequestTestEnv(t testing.TB) *restartRequestTestEnv {
 	env.startOptions = append(env.startOptions, withAsyncDrainAckStopTracker(env.stops))
 	t.Cleanup(func() { env.stops.wait(5 * time.Second) })
 	return env
+}
+
+// useFreshReads hands the reconciler sp profiled as tmux, a backend whose
+// liveness reads are fresh. Calls still land on sp.
+func (e *restartRequestTestEnv) useFreshReads() {
+	e.provider = runtime.NewFakeProfile(runtime.ProfileTmux, runtime.FullFake{Fake: e.sp})
+}
+
+// reconcilerProvider is the provider the reconcile helpers hand the
+// reconciler.
+func (e *restartRequestTestEnv) reconcilerProvider() runtime.Provider {
+	if e.provider != nil {
+		return e.provider
+	}
+	return e.sp
 }
 
 func (e *restartRequestTestEnv) createSessionBead(name string) beads.Bead {
@@ -112,7 +128,7 @@ func (e *restartRequestTestEnv) reconcileWithPoolDesiredAndDrainOps(sessions []b
 		e.desiredState,
 		cfgNames,
 		e.cfg,
-		e.sp,
+		e.reconcilerProvider(),
 		e.store,
 		dops,
 		nil,
@@ -1017,4 +1033,76 @@ func TestReconcileSessionBeads_RestartRequestSetsAsleepOnlyWhenLiveRuntimeKilled
 			t.Fatal("last_woke_at empty, want same-tick wake commit")
 		}
 	})
+}
+
+// newPinnedAlwaysRestartScenario is a pinned always-mode named session whose
+// runtime is live, with the explicit controller reset gc runtime
+// request-restart records (restart_requested + continuation_reset_pending).
+func newPinnedAlwaysRestartScenario(t *testing.T) (*restartRequestTestEnv, beads.Bead, string) {
+	t.Helper()
+	env := newRestartRequestTestEnv(t)
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "true",
+		SessionName:  sessionName,
+		TemplateName: "worker",
+		ResolvedProvider: &config.ResolvedProvider{
+			SessionIDFlag: "--session-id",
+		},
+	}
+	session := env.createSessionBead(sessionName)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "always",
+		"state":                      "active",
+		"pin_awake":                  "true",
+		"restart_requested":          "true",
+		"continuation_reset_pending": "true",
+		"session_key":                "original-key",
+		"started_config_hash":        "hash-before-restart",
+	})
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	if err := env.sp.SetMeta(sessionName, "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	env.sp.Calls = nil
+	return env, session, sessionName
+}
+
+// restartCalls returns the recorded Stop and Start calls for name, in order.
+func restartCalls(sp *runtime.Fake, name string) []runtime.Call {
+	var out []runtime.Call
+	for _, c := range sp.SnapshotCalls() {
+		if c.Name == name && (c.Method == "Stop" || c.Method == "Start") {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// TestReconcileSessionBeads_RestartRequestLiveKillRestartsSamePass is
+// #7691: once a fresh read proves the killed runtime's name released, the
+// pass that killed a restart-requested session starts it again, instead of
+// leaving the start to a later pass that may not come for minutes.
+func TestReconcileSessionBeads_RestartRequestLiveKillRestartsSamePass(t *testing.T) {
+	env, session, sessionName := newPinnedAlwaysRestartScenario(t)
+	env.useFreshReads()
+
+	env.reconcile([]beads.Bead{session})
+
+	calls := restartCalls(env.sp, sessionName)
+	if len(calls) != 2 || calls[0].Method != "Stop" || calls[1].Method != "Start" {
+		t.Fatalf("Stop/Start calls for %q = %+v, want a Stop followed by a Start in one pass", sessionName, calls)
+	}
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q is not running after the pass that killed it; stderr: %s", sessionName, env.stderr.String())
+	}
 }
