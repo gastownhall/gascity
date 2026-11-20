@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -1990,5 +1991,104 @@ func TestConvergeSocketTimeoutReportsClaimedRequest(t *testing.T) {
 
 		// The claimed create ran to completion: exactly one loop.
 		assertConvergenceBeadCount(t, store, 1)
+	})
+}
+
+// TestConvergenceHandoff (AC-5): exactly one queued→claimed or
+// queued→withdrawn transition wins, in either ordering and under
+// competition; the state is shared through request value copies; and a
+// withdrawn handoff prevents direct dispatch.
+func TestConvergenceHandoff(t *testing.T) {
+	t.Run("claim settles before withdraw", func(t *testing.T) {
+		h := &convergenceHandoff{}
+		if !h.claim() {
+			t.Fatal("first claim must win")
+		}
+		if h.claim() {
+			t.Error("second claim must fail")
+		}
+		if h.withdraw() {
+			t.Error("withdraw after claim must fail")
+		}
+	})
+
+	t.Run("withdraw settles before claim", func(t *testing.T) {
+		h := &convergenceHandoff{}
+		if !h.withdraw() {
+			t.Fatal("first withdraw must win")
+		}
+		if h.claim() {
+			t.Error("claim after withdraw must fail")
+		}
+		if h.withdraw() {
+			t.Error("second withdraw must fail")
+		}
+	})
+
+	t.Run("state is shared through request value copies", func(t *testing.T) {
+		enqueued := convergenceRequest{Command: "create", handoff: &convergenceHandoff{}}
+		received := enqueued // the copy the channel delivers
+		if !enqueued.handoff.withdraw() {
+			t.Fatal("withdraw via the sender's copy must win")
+		}
+		if received.handoff.claim() {
+			t.Error("claim via the received copy must see the withdrawal")
+		}
+	})
+
+	t.Run("nil handoff admits in-process requests", func(t *testing.T) {
+		var req convergenceRequest
+		if !req.handoff.claim() {
+			t.Error("nil handoff must admit the dispatcher")
+		}
+		if req.handoff.withdraw() {
+			t.Error("nil handoff has nothing to withdraw")
+		}
+	})
+
+	t.Run("competing transitions admit exactly one", func(t *testing.T) {
+		h := &convergenceHandoff{}
+		const goroutines = 8
+		start := make(chan struct{})
+		var wins atomic.Int32
+		var wg sync.WaitGroup
+		for i := 0; i < goroutines; i++ {
+			claim := i%2 == 0
+			wg.Add(1)
+			go func(claim bool) {
+				defer wg.Done()
+				<-start
+				won := claim && h.claim() || !claim && h.withdraw()
+				if won {
+					wins.Add(1)
+				}
+			}(claim)
+		}
+		close(start)
+		wg.Wait()
+		if got := wins.Load(); got != 1 {
+			t.Errorf("successful transitions = %d, want exactly 1", got)
+		}
+	})
+
+	t.Run("withdrawn handoff prevents direct dispatch", func(t *testing.T) {
+		cr, store := setupConvergenceRuntime(t)
+		req := convergenceRequest{
+			Command: "create",
+			Params: map[string]string{
+				"formula":        "test-formula",
+				"target":         "test-agent",
+				"max_iterations": "3",
+			},
+			handoff: &convergenceHandoff{},
+		}
+		if !req.handoff.withdraw() {
+			t.Fatal("withdraw must win")
+		}
+		reply := cr.handleConvergenceRequest(context.Background(), req)
+		if !strings.Contains(reply.Error, "withdrawn") {
+			t.Errorf("dispatch error = %q, want the withdrawal rejection", reply.Error)
+		}
+		assertConvergenceBeadCount(t, store, 0)
 	})
 }
