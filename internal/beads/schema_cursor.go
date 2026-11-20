@@ -283,6 +283,13 @@ func ProxiedOpenUnmoved(pin Pin, observed proxyendpoint.PostOpenReport) error {
 		return nil
 	}
 	if before != after {
+		if reason := proxiedWindowUnattributable(observed.Window); reason != "" {
+			return NewProxiedVerdictError(ProxiedVerdictHeadMoved, fmt.Sprintf(
+				"opening the linked library against database %q moved HEAD from %s to %s and the commits in between "+
+					"cannot be attributed (%s): a move gc cannot show was another client's may be gc writing to "+
+					"bd's database, so this open takes bd's front door and the next open re-probes",
+				pin.Database(), before, after, reason), nil)
+		}
 		return NewProxiedVerdictError(ProxiedVerdictHeadMoved, fmt.Sprintf(
 			"opening the linked library against database %q moved HEAD from %s to %s: "+
 				"PR2's native lane serves reads only, so an open that commits may be gc writing to bd's database "+
@@ -302,4 +309,24 @@ func ProxiedOpenUnmoved(pin Pin, observed proxyendpoint.PostOpenReport) error {
 			pin.Database(), after, now, admitted, observed.IgnoredPlaneReason()), nil)
 	}
 	return nil
+}
+
+// proxiedWindowUnattributable names why a moved HEAD's window is no evidence
+// about who moved it, or returns "" for a window that can be attributed. A
+// window that was not read, could not be read, holds more commits than were
+// read, or lists no commits at all says nothing about the move, so it can
+// never be read as another client's.
+func proxiedWindowUnattributable(window *proxyendpoint.PostOpenWindow) string {
+	switch {
+	case window == nil:
+		return "no window was read between the two hashes"
+	case window.Unreadable != "":
+		return "the window could not be read: " + window.Unreadable
+	case window.Truncated:
+		return fmt.Sprintf("the window holds more than %d commits", proxyendpoint.PostOpenWindowCommitLimit)
+	case len(window.Commits) == 0:
+		return "the window lists no commits"
+	default:
+		return ""
+	}
 }

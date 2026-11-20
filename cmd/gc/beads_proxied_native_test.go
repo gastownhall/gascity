@@ -1216,7 +1216,7 @@ func TestProxiedOpenRefusesAnOpenThatMovedHead(t *testing.T) {
 				// control flow, and CloseStore is nil-safe by construction.
 				return nil, nil
 			},
-			leafObserve: func(context.Context, *beads.NativeDoltStore) (proxyendpoint.PostOpenReport, error) {
+			leafObserve: func(context.Context, *beads.NativeDoltStore, string) (proxyendpoint.PostOpenReport, error) {
 				n.reads++
 				head, err := readHead()
 				return observedHead(head), err
@@ -1346,7 +1346,7 @@ func TestProxiedOpenRefusesAnOpenThatMovedHead(t *testing.T) {
 		opener.openNativeStorage = func(context.Context, string, map[string]string) (beads.NativeStorage, error) {
 			return &closeCountingStorage{}, nil
 		}
-		opener.storageObserve = func(context.Context, beads.NativeStorage) (proxyendpoint.PostOpenReport, error) {
+		opener.storageObserve = func(context.Context, beads.NativeStorage, string) (proxyendpoint.PostOpenReport, error) {
 			return proxyendpoint.PostOpenReport{}, errors.New("invalid connection")
 		}
 		beads.ForgetProxiedPin(f.scopeRoot, "beads")
@@ -1368,7 +1368,7 @@ func TestProxiedOpenRefusesAnOpenThatMovedHead(t *testing.T) {
 			return storage, nil
 		}
 		var readFrom beads.NativeStorage
-		opener.storageObserve = func(_ context.Context, s beads.NativeStorage) (proxyendpoint.PostOpenReport, error) {
+		opener.storageObserve = func(_ context.Context, s beads.NativeStorage, _ string) (proxyendpoint.PostOpenReport, error) {
 			readFrom = s
 			return observedHead("after11111"), nil
 		}
