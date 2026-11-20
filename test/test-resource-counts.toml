@@ -277,6 +277,12 @@ resource = "http_test_server"
 calls = 10
 
 [[count]]
+path = "cmd/gc/cmd_daemon_windows_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "cmd/gc/cmd_doctor_test.go"
 resource = "slow_process_gate"
 calls = 2
@@ -325,6 +331,12 @@ calls = 1
 path = "cmd/gc/cmd_handoff_test.go"
 resource = "fixed_sleep"
 calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_hook_claim_runmap_windows_test.go"
+resource = "subprocess"
+calls = 3
+tagged = true
 
 [[count]]
 path = "cmd/gc/cmd_hook_test.go"
@@ -540,6 +552,18 @@ calls = 1
 path = "cmd/gc/cmd_start_drift_test.go"
 resource = "http_test_server"
 calls = 1
+
+[[count]]
+path = "cmd/gc/cmd_start_drift_windows_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "cmd/gc/cmd_start_drift_windows_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
 
 [[count]]
 path = "cmd/gc/cmd_start_test.go"
@@ -1370,19 +1394,26 @@ resource = "listener_helper"
 calls = 1
 
 [[count]]
+path = "cmd/gc/startup_nudge_handback_test.go"
+resource = "fixed_sleep"
+calls = 1
+
+[[count]]
 path = "cmd/gc/status_provider_test.go"
 resource = "fixed_sleep"
 calls = 1
 
 [[count]]
-path = "cmd/gc/storage_containment_lease_cadence_test.go"
+path = "cmd/gc/status_timeouts_windows_test.go"
 resource = "fixed_sleep"
-calls = 2
+calls = 1
+tagged = true
 
 [[count]]
-path = "cmd/gc/storage_containment_lease_socket_test_helpers_test.go"
-resource = "net_listen"
+path = "cmd/gc/status_timeouts_windows_test.go"
+resource = "subprocess"
 calls = 1
+tagged = true
 
 [[count]]
 path = "cmd/gc/storage_snapshot_hosted_bd_integration_test.go"
@@ -1450,6 +1481,12 @@ calls = 1
 path = "cmd/gc/test_process_control_unix_test.go"
 resource = "fixed_sleep"
 calls = 2
+
+[[count]]
+path = "cmd/gc/test_process_control_windows_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
 
 [[count]]
 path = "cmd/gc/testenv_test.go"

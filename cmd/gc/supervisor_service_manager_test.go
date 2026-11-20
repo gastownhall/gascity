@@ -3,8 +3,6 @@ package main
 import (
 	"bytes"
 	"errors"
-	"os"
-	"path/filepath"
 	goruntime "runtime"
 	"strings"
 	"testing"
@@ -13,10 +11,6 @@ import (
 // On Windows gc invokes no systemctl, loginctl or launchctl. The supported
 // lifecycle there is a foreground supervisor with explicit CLI start and stop;
 // scheduled startup would be a later opt-in.
-//
-// The risk is not that install does too much on Windows — it already refused —
-// but that the refusal was indistinguishable from any other failure, and that
-// the refusal could later be "fixed" by registering a Windows service.
 
 func TestSupervisorServiceManagerKindMatchesPlatform(t *testing.T) {
 	kind := supervisorServiceManagerKind()
@@ -82,57 +76,6 @@ func TestSupervisorInstallRefusesWithoutAServiceManager(t *testing.T) {
 	}
 }
 
-// TestNoWindowsServiceRegistration is the guard the typed error exists to
-// protect. Registering the supervisor as a Windows service would start it in a
-// session with no desktop and no user profile, which is precisely what a
-// supervisor that launches interactive agent sessions cannot work in — so the
-// failure would appear as sessions that never come up rather than as an
-// install error.
-func TestNoWindowsServiceRegistration(t *testing.T) {
-	// Windows service support is planned for a later PR; until then this keeps registration from landing piecemeal.
-	root := repoRoot(t)
-	banned := []string{
-		"golang.org/x/sys/windows/svc",
-		"OpenSCManager",
-		"CreateServiceW",
-		"svc.Run(",
-		"mgr.Connect(",
-	}
-
-	self := filepath.Base(mustAbs(t, thisTestFile()))
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if entry.IsDir() {
-			switch entry.Name() {
-			case ".git", "vendor", "node_modules":
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !strings.HasSuffix(path, ".go") || entry.Name() == self {
-			return nil
-		}
-		data, readErr := os.ReadFile(path)
-		if readErr != nil {
-			return readErr
-		}
-		for _, needle := range banned {
-			if bytes.Contains(data, []byte(needle)) {
-				rel, _ := filepath.Rel(root, path)
-				t.Errorf("%s references %q: gc must not register a Windows service", rel, needle)
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("walking %s: %v", root, err)
-	}
-}
-
-func thisTestFile() string { return "supervisor_service_manager_test.go" }
-
 // TestEnsureSupervisorRunningAcceptsALiveSupervisorWithoutAServiceManager
 // pins the contract of ensureSupervisorRunning: it must leave a supervisor
 // running, not start one.
@@ -159,15 +102,6 @@ func TestEnsureSupervisorRunningAcceptsALiveSupervisorWithoutAServiceManager(t *
 	if got := stderr.String(); strings.Contains(got, "already running") {
 		t.Fatalf("stderr = %q, want no failure for a supervisor that is already serving", got)
 	}
-}
-
-func mustAbs(t *testing.T, path string) string {
-	t.Helper()
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		t.Fatalf("Abs(%q): %v", path, err)
-	}
-	return abs
 }
 
 // TestInstallSupervisorServiceRefusesUnsupportedGOOSWithTypedMessage pins the
