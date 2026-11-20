@@ -373,8 +373,16 @@ func TestReconcileSessionBeads_RestartRequestSuppressesGoneClearRestartRequested
 
 	env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{session}, map[string]int{"worker": 0}, dops)
 
-	if got := env.stderr.String(); got != "" {
+	// The gone-session clear error itself must stay suppressed. The plain
+	// fake cannot read fresh, so the restart yield after the kill is
+	// expected: the yield notice is the release gate's own diagnostic, not
+	// the marker-clear failure's.
+	got := env.stderr.String()
+	if strings.Contains(got, "clearing restart-requested marker") {
 		t.Fatalf("stderr = %q, want no diagnostic for gone clearRestartRequested error", got)
+	}
+	if !strings.Contains(got, "starts on the next pass") {
+		t.Fatalf("stderr = %q, want the release-gate yield notice", got)
 	}
 }
 
@@ -1212,5 +1220,67 @@ func TestReconcileSessionBeads_RestartRequestLiveKillSamePassStartsFresh(t *test
 	}
 	if !started {
 		t.Fatalf("no Start recorded for %q in the pass", sessionName)
+	}
+}
+
+// sinceUnavailableReads is a backend whose fresh liveness read fails.
+type sinceUnavailableReads struct{ runtime.FullFake }
+
+func (sinceUnavailableReads) ObserveLivenessSince(string, []string, time.Time) (runtime.Liveness, error) {
+	return runtime.Liveness{}, runtime.ErrRuntimeUnavailable
+}
+
+// unprovenReleaseCases are restart-requested live kills whose release a
+// fresh read cannot prove: the name still reads present, the backend cannot
+// read fresh, or the fresh read fails.
+var unprovenReleaseCases = []struct {
+	name    string
+	prepare func(env *restartRequestTestEnv, sessionName string)
+}{
+	{"name still present", func(env *restartRequestTestEnv, sessionName string) {
+		env.useFreshReads()
+		env.sp.StopLeavesRunning[sessionName] = true
+	}},
+	{"backend cannot read fresh", func(*restartRequestTestEnv, string) {}},
+	{"fresh read fails", func(env *restartRequestTestEnv, _ string) {
+		env.provider = runtime.NewFakeProfile(runtime.ProfileTmux, sinceUnavailableReads{runtime.FullFake{Fake: env.sp}})
+	}},
+}
+
+// TestReconcileSessionBeads_RestartRequestLiveKillYieldsWhenReleaseUnproven
+// keeps the next-pass start when the killed runtime's name is not proven
+// released: a start would find the name and adopt the old runtime. The
+// handoff is recorded as before, and stderr says the session starts on the
+// next pass.
+func TestReconcileSessionBeads_RestartRequestLiveKillYieldsWhenReleaseUnproven(t *testing.T) {
+	for _, tc := range unprovenReleaseCases {
+		t.Run(tc.name, func(t *testing.T) {
+			env, session, sessionName := newPinnedAlwaysRestartScenario(t)
+			tc.prepare(env, sessionName)
+
+			env.reconcile([]beads.Bead{session})
+
+			calls := restartCalls(env.sp, sessionName)
+			if len(calls) != 1 || calls[0].Method != "Stop" {
+				t.Fatalf("Stop/Start calls for %q = %+v, want only the Stop", sessionName, calls)
+			}
+			got, err := env.store.Get(session.ID)
+			if err != nil {
+				t.Fatalf("store.Get(%s): %v", session.ID, err)
+			}
+			if got.Metadata["state"] != "asleep" {
+				t.Errorf("state = %q, want asleep", got.Metadata["state"])
+			}
+			if got.Metadata["restart_requested"] != "" {
+				t.Errorf("restart_requested = %q, want consumed", got.Metadata["restart_requested"])
+			}
+			if key := got.Metadata["session_key"]; key == "original-key" {
+				t.Errorf("session_key = %q, want rotated", key)
+			}
+			stderr := env.stderr.String()
+			if !strings.Contains(stderr, sessionName) || !strings.Contains(stderr, "starts on the next pass") {
+				t.Errorf("stderr = %q, want it to name %q and say it starts on the next pass", stderr, sessionName)
+			}
+		})
 	}
 }
