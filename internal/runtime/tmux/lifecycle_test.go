@@ -1,7 +1,9 @@
 package tmux
 
 import (
+	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -171,4 +173,56 @@ func containsSetOptionExitEmptyWithValue(args []string, value string) bool {
 		}
 	}
 	return false
+}
+
+// settleObservation records one server socket observation made during
+// KillServer's settle wait: the path observed and how many tmux commands had
+// run when it was made.
+type settleObservation struct {
+	path  string
+	calls int
+}
+
+// TestKillServerWaitsForListenerToClose verifies that KillServer and
+// TeardownServer on a named socket do not return while the server's listener
+// still answers after tmux acknowledged kill-server: an immediate restart would
+// otherwise be refused with ErrServerDegraded reason=live-unix-socket.
+func TestKillServerWaitsForListenerToClose(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		kill func(*Tmux) error
+	}{
+		{name: "KillServer", kill: (*Tmux).KillServer},
+		{name: "TeardownServer", kill: (*Tmux).TeardownServer},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fe := &fakeExecutor{}
+			const liveObservations = 2
+			var observed []settleObservation
+			tm := &Tmux{cfg: Config{SocketName: "gc-settle"}, exec: fe}
+			tm.serverSocketObserver = func(_ context.Context, path string) error {
+				observed = append(observed, settleObservation{path: path, calls: len(fe.calls)})
+				if len(observed) <= liveObservations {
+					return errors.New("path=" + path + " inode=1 peer_pid=42 reason=live-unix-socket")
+				}
+				return nil
+			}
+
+			if err := tc.kill(tm); err != nil {
+				t.Fatalf("%s() error = %v", tc.name, err)
+			}
+			if len(observed) != liveObservations+1 {
+				t.Fatalf("%s returned after %d socket observations; want %d (it must wait until the listener stops answering)", tc.name, len(observed), liveObservations+1)
+			}
+			wantPath := tm.namedServerSocketPath()
+			for i, obs := range observed {
+				if obs.path != wantPath {
+					t.Errorf("observation %d path = %q, want named socket path %q", i, obs.path, wantPath)
+				}
+				if obs.calls != 1 || !slices.Contains(fe.calls[0], "kill-server") {
+					t.Errorf("observation %d made after %d tmux calls %v; want it after exactly the kill-server call", i, obs.calls, fe.calls)
+				}
+			}
+		})
+	}
 }
