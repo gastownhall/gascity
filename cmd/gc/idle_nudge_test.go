@@ -1422,4 +1422,23 @@ func TestClaimRecoveryTextIgnoresTheConfiguredNudge(t *testing.T) {
 			t.Fatalf("unstarted-claim text for an unknown template = %q, want empty (fail closed)", got)
 		}
 	})
+	// The trigger backstop completes the crossing: the built-in claim line
+	// for every nudge value, "" only for a template the config does not name.
+	for _, nv := range claimRecoveryNudges {
+		t.Run("trigger backstop, "+nv.name, func(t *testing.T) {
+			cfg := idleClaimTestCfg()
+			cfg.Agents[0].Nudge = nv.nudge
+			if got, want := (poolClaimBackstop{cfg: cfg}).content(idleClaimPoolSession()), defaultPoolClaimNudge; got != want {
+				t.Fatalf("trigger-backstop text = %q, want the built-in claim line %q", got, want)
+			}
+		})
+	}
+	t.Run("trigger backstop, unknown template", func(t *testing.T) {
+		cfg := idleClaimTestCfg()
+		session := idleClaimPoolSession()
+		session.Metadata["template"] = "unknown-agent"
+		if got := (poolClaimBackstop{cfg: cfg}).content(session); got != "" {
+			t.Fatalf("trigger-backstop text for an unknown template = %q, want empty (fail closed)", got)
+		}
+	})
 }
