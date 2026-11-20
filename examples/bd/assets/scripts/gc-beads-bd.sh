@@ -2637,13 +2637,41 @@ launch_dolt_sql_server_detached() {
             BEADS_ACTOR CLAUDE_CODE_SESSION_ID; do
             unset "$key"
         done
+        launch_monitor_was_on=false
+        case $- in
+            *m*) launch_monitor_was_on=true ;;
+        esac
         if command -v setsid >/dev/null 2>&1; then
             # Without job control the background child is not a process
             # group leader, so setsid(1) calls setsid(2) in place and the
-            # PID below is the server's.
+            # PID below is the server's. A background job that already leads
+            # a process group (monitor mode on) makes setsid(1) fork to
+            # create the session, leaving the PID below naming the
+            # short-lived parent, so monitor mode is off for the launch.
+            if [ "$launch_monitor_was_on" = "true" ]; then
+                set +m
+            fi
             nohup setsid sh -c 'exec 9>&-; exec dolt sql-server --config "$1"' sh "$CONFIG_FILE" < /dev/null >> "$LOG_FILE" 2>&1 &
-        else
+            if [ "$launch_monitor_was_on" = "true" ]; then
+                set -m
+            fi
+        elif [ -n "${BASH_VERSION:-}" ]; then
+            # Job control puts the background job in its own process group
+            # (the harness-reap pattern, working under bash 3.2); the group
+            # leader PID is the server's after the exec chain. Monitor mode
+            # is restored to its prior setting straight after the launch;
+            # the group assignment persists.
             set -m
+            nohup sh -c 'exec 9>&-; exec dolt sql-server --config "$1"' sh "$CONFIG_FILE" < /dev/null >> "$LOG_FILE" 2>&1 &
+            if [ "$launch_monitor_was_on" = "false" ]; then
+                set +m
+            fi
+        else
+            # dash without setsid(1): without a tty job control cannot be
+            # enabled at all, and with a tty a background job would stop
+            # itself reading the terminal, so the server stays in this
+            # process group. Say so instead of pretending to detach.
+            echo "warning: dolt sql-server shares the caller's process group: no setsid(1) and no bash job control" >&2
             nohup sh -c 'exec 9>&-; exec dolt sql-server --config "$1"' sh "$CONFIG_FILE" < /dev/null >> "$LOG_FILE" 2>&1 &
         fi
         echo "$!"
