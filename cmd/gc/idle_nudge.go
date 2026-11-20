@@ -78,9 +78,8 @@ const (
 // warm-bind reminder and the work ladder's trigger rung all send it.
 const defaultPoolClaimNudge = "Run " + runtime.GCCommandName + " hook --claim --drain-ack --json now; if it returns work, execute it immediately."
 
-// defaultHeldClaimNudge is the default for a seat whose claim (the %s) has
-// started its step, the execution backstop's started seat: PHASE1-2 §6.6's
-// started-rung text. It carries no --drain-ack, which on a hook answer of no
+// defaultHeldClaimNudge is the text the execution backstop sends a seat whose
+// claim (the %s) has started its step: PHASE1-2 §6.6's started-rung text. It carries no --drain-ack, which on a hook answer of no
 // work, the started step gate- or hold-blocked, acked a drain and gave the
 // claim back (mc-ilr3b).
 const defaultHeldClaimNudge = "You hold %s and its step has started. Continue it now (run gc hook --claim --json to re-read your assignment). If you are waiting on something, say what, then stop."
@@ -945,18 +944,15 @@ func stalledPoolClaimNudgeFor(cfg *config.City, session beads.Bead) string {
 }
 
 // heldClaimNudgeFor is stalledPoolClaimNudgeFor for a seat whose claim beadID
-// has started: its configured nudge, else defaultHeldClaimNudge naming the
-// claim, and "" when its template names no configured agent. A configured
-// nudge that carries --drain-ack is not sent to a started seat either: the
-// default stands in for it, since an ack on the nudge's no-work answer is how
-// started work was lost (mc-ilr3b), and the hook's fence holds only a claim
-// whose start was recorded.
+// has started: defaultHeldClaimNudge naming the claim, and "" when its
+// template names no configured agent (fail closed). The configured nudge is
+// never sent (issue #9196), so the text never carries --drain-ack, whose ack
+// on the nudge's no-work answer is how started work was lost (mc-ilr3b).
 func heldClaimNudgeFor(cfg *config.City, session beads.Bead, beadID string) string {
-	nudge, known := configuredClaimNudgeFor(cfg, session)
-	if known && (nudge == "" || strings.Contains(nudge, "--drain-ack")) {
-		return fmt.Sprintf(defaultHeldClaimNudge, strings.TrimSpace(beadID))
+	if _, known := configuredClaimNudgeFor(cfg, session); !known {
+		return ""
 	}
-	return nudge
+	return fmt.Sprintf(defaultHeldClaimNudge, strings.TrimSpace(beadID))
 }
 
 func configuredClaimNudgeFor(cfg *config.City, session beads.Bead) (string, bool) {
