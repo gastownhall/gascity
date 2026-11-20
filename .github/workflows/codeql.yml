@@ -50,7 +50,17 @@ jobs:
     name: Analyze (${{ matrix.language }})
     needs: runner-policy
     # A merge group runs only the merge-group step: a 2 vCPU runner.
-    runs-on: ${{ github.event_name == 'merge_group' && needs.runner-policy.outputs.runner_2vcpu || needs.runner-policy.outputs.runner_16vcpu }}
+    # Outside a merge group: the Go leg is CPU-bound autobuild +
+    # extraction and grew from 3.4 to 5.0 min wall on 16 vCPU
+    # (ci-speed-review-2026-11-20.md §3, §7), now the second floor on the
+    # PR critical path. Trial it on a 32 vCPU Blacksmith runner — the
+    # CodeQL init's threads/ram inputs are left at their default (0 =
+    # autodetect all cores / most RAM), so autobuild and the extractor
+    # already use the extra cores without an explicit override.
+    runs-on: >-
+      ${{ github.event_name == 'merge_group' && needs.runner-policy.outputs.runner_2vcpu
+      || matrix.language == 'go' && needs.runner-policy.outputs.runner_32vcpu
+      || needs.runner-policy.outputs.runner_16vcpu }}
     timeout-minutes: 30
     permissions:
       actions: read
