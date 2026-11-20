@@ -333,6 +333,35 @@ func TestDoltStateHealthCheckCmdReportsUnavailableDatabaseInBand(t *testing.T) {
 	}
 }
 
+// TestDoltStateHealthCheckCmdDatabaseNotInCatalog covers AC-1: a server
+// that answers queries while the named database is gone from its catalog
+// keeps exit 0 (the server layer is up), reports query_ready true,
+// database_ready false, and a one-line database_error naming the database,
+// and never issues the read-only write probe, whose target may be the
+// broken database.
+func TestDoltStateHealthCheckCmdDatabaseNotInCatalog(t *testing.T) {
+	invocationFile := setupDatabaseHealthFakeDolt(t, "missing", "ok", "ok")
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-state", "health-check", "--host", "127.0.0.1", "--port", "3311", "--user", "root", "--check-read-only", "--database", "hq"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, stderr = %s; want exit 0 with the failure in-band", code, stderr.String())
+	}
+	got := parseDoltStateOutput(t, stdout.String())
+	if got["query_ready"] != "true" || got["database_ready"] != "false" {
+		t.Fatalf("output = %q, want query_ready true and database_ready false", stdout.String())
+	}
+	if !strings.Contains(got["database_error"], "hq") {
+		t.Fatalf("database_error = %q, want it to name hq", got["database_error"])
+	}
+	if strings.Contains(got["database_error"], "\n") {
+		t.Fatalf("database_error = %q, want a single line", got["database_error"])
+	}
+	if text := readInvocations(t, invocationFile); strings.Contains(text, "CREATE TABLE IF NOT EXISTS") || strings.Contains(text, "REPLACE INTO") {
+		t.Fatalf("health check issued a write probe against a database missing from the catalog:\n%s", text)
+	}
+}
+
 func TestDoltStateHealthCheckCmdChecksDataDir(t *testing.T) {
 	setupDatabaseHealthFakeDolt(t, "ok", "ok", "ok")
 	dataDir := t.TempDir()
