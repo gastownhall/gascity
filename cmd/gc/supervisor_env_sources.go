@@ -152,13 +152,30 @@ var supervisorEnvSourcesReportOrder = []supervisorEnvSource{
 }
 
 // installSupervisorServiceReporting installs data as goos's platform service
-// and, only when the install succeeds, reports where data's env came from.
+// and, only when the install succeeds, reports where data's env came from
+// and warns of the shell routing names it withheld.
 func installSupervisorServiceReporting(goos string, data *supervisorServiceData, stdout, stderr io.Writer) int {
 	code := installSupervisorService(goos, data, stdout, stderr)
 	if code == 0 {
 		reportSupervisorServiceEnv(stdout, data)
+		warnSupervisorWithheldEnv(stderr, data.WithheldEnv)
 	}
 	return code
+}
+
+// warnSupervisorWithheldEnv prints one warning per provider prefix whose
+// shell routing names an install withheld, naming the names, the durable
+// credential sources and the two remedies. It never prints a value.
+func warnSupervisorWithheldEnv(stderr io.Writer, withheld []supervisorWithheldEnv) {
+	for _, group := range withheld {
+		sources := make([]string, 0, len(group.CredentialSources))
+		for _, source := range group.CredentialSources {
+			sources = append(sources, source.String())
+		}
+		fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
+			"gc supervisor install: warning: not persisting this shell's %s: %s credentials come only from %s, so their routing must come from there too. Add these names to %s, or list them in GC_SUPERVISOR_ENV to persist this shell's values.\n",
+			strings.Join(group.Names, ", "), group.Prefix, strings.Join(sources, " and "), supervisorSecretsEnvFilePath())
+	}
 }
 
 // reportSupervisorServiceEnv prints, for each tier that supplied any of

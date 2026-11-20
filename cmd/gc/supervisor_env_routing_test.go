@@ -385,3 +385,44 @@ func TestSupervisorInstallReportsEnvSourcesWithoutValues(t *testing.T) {
 		t.Fatalf("failed install printed the sources report:\n%s", stdout)
 	}
 }
+
+// TestSupervisorInstallWarnsOfWithheldShellRouting pins AC-6: the #9257
+// install still succeeds, the written unit carries none of the withheld
+// names, and stderr names each of them, the prefix, the credential source,
+// the secrets.env path and the GC_SUPERVISOR_ENV opt-in, with no value.
+func TestSupervisorInstallWarnsOfWithheldShellRouting(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("systemd path only applies on linux")
+	}
+	isolateSupervisorRoutingEnv(t)
+	setIncidentEnv(t)
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	code, stdout, stderr := installSupervisorServiceForTest(t, "linux", data)
+	if code != 0 {
+		t.Fatalf("install code = %d, want 0; stderr=%s", code, stderr)
+	}
+	unit, err := os.ReadFile(supervisorSystemdServicePath())
+	if err != nil {
+		t.Fatalf("reading installed unit: %v", err)
+	}
+	for _, name := range incidentRoutingNames {
+		if strings.Contains(string(unit), name) {
+			t.Errorf("installed unit carries withheld %s:\n%s", name, unit)
+		}
+	}
+	for _, want := range append([]string{"ANTHROPIC_", "secrets.env", supervisorSecretsEnvFilePath(), "GC_SUPERVISOR_ENV"}, incidentRoutingNames...) {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr does not name %q:\n%s", want, stderr)
+		}
+	}
+	for _, name := range incidentRoutingNames {
+		value := "shell-" + strings.ToLower(name)
+		if strings.Contains(stdout, value) || strings.Contains(stderr, value) {
+			t.Errorf("install output carries withheld value %q", value)
+		}
+	}
+}

@@ -1377,6 +1377,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gc supervisor install` paired a shell endpoint with a file credential
+  (#9257).** The install that `gc supervisor install` and every `gc start`
+  run took each provider-prefixed variable from whichever tier had it, so a
+  shell-exported `ANTHROPIC_BASE_URL` or `ANTHROPIC_*_MODEL` was persisted
+  beside an `ANTHROPIC_AUTH_TOKEN` that only `${GC_HOME}/secrets.env`
+  supplied, sending that credential to the wrong endpoint. When every
+  credential under a provider prefix comes from secrets.env or launchctl, the
+  calling shell's routing names under that prefix (names with a word such as
+  `URL`, `ENDPOINT`, `HOST`, `BASE`, `PROXY` or `MODEL`, and no word such as
+  `KEY`, `TOKEN` or `SECRET`) are no longer persisted; secrets.env's own value
+  is used when it has one, and stderr warns with the remedies. Names listed in
+  `GC_SUPERVISOR_ENV` and credentials keep their old precedence. Every
+  successful install now prints which tier (shell, `GC_SUPERVISOR_ENV`,
+  secrets.env, launchctl or gc) supplied each persisted name, never a value.
 - **`gc convoy create` ignored an explicit `--rig` (#8696).** The convoy
   landed in the first issue's store, or in the city store when no issues
   were given, so an empty convoy created with `--rig <rig>` could never
