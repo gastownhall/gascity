@@ -4260,6 +4260,96 @@ func TestCityRuntimeBeadReconcileTick_IdleClaimNudgeFallsBackForBlankNudgeOnRepo
 	t.Logf("controller recovery delivered %q to running pool session %q; persisted attempt=%s", nudges[0].Message, nudges[0].Name, got.Metadata[idleClaimNudgeCountKey])
 }
 
+// Issue #9196: a template whose nudge is a work procedure, not a claim
+// instruction, must not hear that procedure as its claim-recovery text. The
+// legacy tick's trigger backstop sends the built-in claim line — exactly
+// defaultPoolClaimNudge, none of the configured text — or the seat runs its
+// procedure forever and never claims its routed trigger.
+func TestCityRuntimeBeadReconcileTick_IdleClaimNudgeSendsTheClaimLineNotAProcedureNudge(t *testing.T) {
+	sp := runtime.NewFake()
+	if !sp.Capabilities().CanReportActivity {
+		t.Fatal("precondition: fake runtime must report activity for this un-gate test to be meaningful")
+	}
+	if err := sp.Start(context.Background(), "worker-bd-idle", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	// The trigger lives in the store too: the backstop re-reads it live
+	// before delivery and nudges only while that read still shows it open.
+	trigger := workBead("w-idle", "worker", "", "open", 5)
+	store := beads.NewMemStoreFrom(0, []beads.Bead{trigger}, nil)
+	staleObs := time.Now().Add(-2 * idleClaimNudgeGrace).UTC().Format(time.RFC3339)
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel, "agent:worker"},
+		Metadata: map[string]string{
+			"session_name":                    "worker-bd-idle",
+			"template":                        "worker",
+			"agent_name":                      "worker",
+			"pool_slot":                       "1",
+			poolManagedMetadataKey:            boolMetadata(true),
+			"state":                           "awake",
+			"generation":                      "1",
+			beadmeta.TriggerBeadIDMetadataKey: "w-idle",
+			// Pre-seed the backstop marker so we are already past the observe
+			// grace on attempt 0: a single tick should nudge.
+			idleClaimNudgeTriggerKey: "w-idle",
+			idleClaimNudgeCountKey:   "0",
+			idleClaimNudgeAtKey:      staleObs,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create session bead: %v", err)
+	}
+
+	cr := &CityRuntime{
+		cityPath:            t.TempDir(),
+		cityName:            "maintainer-city",
+		cfg:                 &config.City{Agents: []config.Agent{{Name: "worker", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(5), Nudge: procedureNudgeText}}},
+		sp:                  sp,
+		standaloneCityStore: store,
+		sessionDrains:       newDrainTracker(),
+		rec:                 events.Discard,
+		stdout:              io.Discard,
+		stderr:              io.Discard,
+	}
+
+	result := DesiredStateResult{
+		State:             map[string]TemplateParams{},
+		ScaleCheckCounts:  map[string]int{"worker": 0},
+		AssignedWorkBeads: []beads.Bead{trigger},
+	}
+	cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), result, cr.loadSessionBeadSnapshot(), nil, false)
+
+	got, err := store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get after tick: %v", err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("tick unexpectedly closed the idle pool session: %+v", got)
+	}
+	if c := got.Metadata[idleClaimNudgeCountKey]; c != "1" {
+		t.Fatalf("idle-claim nudge did not fire for a report-activity runtime: attempt count = %q, want 1", c)
+	}
+	var nudges []runtime.Call
+	for _, call := range sp.SnapshotCalls() {
+		if call.Method == "Nudge" {
+			nudges = append(nudges, call)
+		}
+	}
+	if len(nudges) != 1 {
+		t.Fatalf("runtime Nudge calls = %#v, want exactly one delivery", nudges)
+	}
+	if got, want := nudges[0].Message, defaultPoolClaimNudge; got != want {
+		t.Fatalf("claim-recovery payload = %q, want exactly the built-in %q", got, want)
+	}
+	if strings.Contains(nudges[0].Message, "uncommitted") {
+		t.Fatalf("claim-recovery payload %q leaks the configured procedure nudge", nudges[0].Message)
+	}
+}
+
 // A warm pool slot can finish its startup turn before work is routed. When the
 // next demand snapshot binds a ready, routed, unassigned bead as that slot's
 // trigger, the idle-claim backstop must see the bead even though it is absent

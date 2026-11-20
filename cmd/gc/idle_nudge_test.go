@@ -25,6 +25,11 @@ const (
 	testTriggerBeadStoreRefKey = "gc.trigger_bead_store_ref"
 )
 
+// procedureNudgeText is a shipped procedure-style nudge (issue #9196's
+// report): startup text that names no claim protocol, so it must never be
+// sent as claim-recovery text.
+const procedureNudgeText = "Check for uncommitted changes and commit them in logical groupings."
+
 func idleClaimTestCfg() *config.City {
 	return &config.City{Agents: []config.Agent{{
 		Name:  "agent-a",
@@ -131,12 +136,15 @@ func TestNudgeStalledPoolClaims_UsesClaimFallbackWhenNudgeIsBlank(t *testing.T) 
 	}
 }
 
-func TestPoolClaimBackstopContent_PreservesExplicitNudge(t *testing.T) {
+// Claim recovery never sends the configured nudge (#9196): the nudge is
+// startup text and can be a work procedure, so the backstop's text is the
+// built-in claim line whatever the pack configures.
+func TestPoolClaimBackstopContent_IgnoresTheConfiguredNudge(t *testing.T) {
 	cfg := idleClaimTestCfg()
 	cfg.Agents[0].Nudge = "  Use the configured wake text exactly.  "
 
-	if got, want := (poolClaimBackstop{cfg: cfg}).content(idleClaimPoolSession()), "Use the configured wake text exactly."; got != want {
-		t.Fatalf("claim nudge = %q, want normalized configured value %q", got, want)
+	if got, want := (poolClaimBackstop{cfg: cfg}).content(idleClaimPoolSession()), defaultPoolClaimNudge; got != want {
+		t.Fatalf("claim nudge = %q, want the built-in claim line %q", got, want)
 	}
 }
 
@@ -1271,5 +1279,19 @@ func TestNudgeStalledPoolClaims_IgnoresPlainNamedSession(t *testing.T) {
 	nudgeStalledPoolClaims(sp, cfg, store, []beads.Bead{session}, work, nil, clk.Now(), live, &out)
 	if got := sp.CountCalls("Nudge", name); got != 0 {
 		t.Fatalf("Nudge calls = %d, want 0 for a plain named session", got)
+	}
+}
+
+// A configured nudge that is a work procedure, not a claim instruction, must
+// not be sent verbatim as claim-backstop text: the backstop exists to make an
+// idle seat claim its routed trigger, so its text has to invoke the claim
+// protocol (issue #9196).
+func TestPoolClaimBackstopContent_ProcedureNudgeStillAsksToClaim(t *testing.T) {
+	cfg := idleClaimTestCfg()
+	cfg.Agents[0].Nudge = "Check for uncommitted changes and commit them in logical groupings."
+
+	got := (poolClaimBackstop{cfg: cfg}).content(idleClaimPoolSession())
+	if !strings.Contains(got, "gc hook --claim") {
+		t.Fatalf("claim backstop nudge = %q, want text that invokes gc hook --claim", got)
 	}
 }

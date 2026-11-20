@@ -46,7 +46,9 @@ func TestWarmBindClaimText(t *testing.T) {
 		{Name: config.ControlDispatcherAgentName, StartCommand: "gc convoy control --serve"},
 	}}
 	for template, want := range map[string]string{
-		"worker":                          warmClaimText,
+		// The configured nudge is never the reminder text (#9196): the
+		// built-in claim line is, whatever the pack configures.
+		"worker":                          defaultPoolClaimNudge,
 		"quiet":                           defaultPoolClaimNudge,
 		"ghost":                           "",
 		config.ControlDispatcherAgentName: "",
