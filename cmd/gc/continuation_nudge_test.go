@@ -770,6 +770,52 @@ func TestPoolContinuationBackstopContent_SkipsBlankNudge(t *testing.T) {
 	}
 }
 
+// A blank nudge keeps the continuation lane's terminal behavior (#9196's fix
+// leaves #5227's gate alone): past the grace, tick after tick, nothing is
+// ever delivered and the lane's terminal action is the no-op it always was.
+func TestNudgeStalledPoolContinuations_BlankNudgeNeverDelivers(t *testing.T) {
+	const sessionName = "session-a"
+	now := time.Date(2026, 1, 1, 0, 5, 0, 0, time.UTC)
+	classLeg := string(storeref.ClassRef(wholeSplitClasses()))
+
+	root, step := continuationCandidateBeads("step-a", sessionName)
+	binding := beads.NewMemStoreFrom(0, []beads.Bead{root, step}, nil)
+	candidates, partial := selectReadyContinuationClaimCandidates(
+		"split-city",
+		[]beads.Bead{step},
+		[]beads.Store{binding},
+		[]string{classLeg},
+		map[storeScopedBeadKey]bool{{StoreRef: classLeg, ID: step.ID}: true},
+	)
+	if partial || len(candidates) != 1 {
+		t.Fatalf("binding candidates = {%#v partial:%v}, want exactly one candidate", candidates, partial)
+	}
+
+	sp := continuationRunningFake(t, sessionName)
+	cfg := continuationNudgeCfg()
+	cfg.Agents[0].Nudge = " \t "
+	session := continuationPoolSession("session-bead-a", sessionName)
+	backing := beads.NewMemStoreFrom(0, []beads.Bead{session}, nil)
+	seedContinuationMarker(t, backing, session, candidates[0], 0, now.Add(-idleClaimNudgeGrace-time.Second))
+	session = mustGetTestBead(t, backing, session.ID)
+
+	for i := range 4 {
+		nudgeStalledPoolContinuations(
+			sp,
+			cfg,
+			backing,
+			[]beads.Bead{session},
+			candidates,
+			false,
+			now.Add(time.Duration(i)*idleClaimNudgeBackoff),
+			&bytes.Buffer{},
+		)
+	}
+	if got := sp.CountCalls("Nudge", sessionName); got != 0 {
+		t.Fatalf("Nudge calls = %d across ticks past the grace, want 0 for a blank nudge", got)
+	}
+}
+
 func continuationCandidateBeads(id, assignee string) (beads.Bead, beads.Bead) {
 	root := continuationRoot("rig:fixture")
 	root.Metadata[beadmeta.SessionNameMetadataKey] = assignee
