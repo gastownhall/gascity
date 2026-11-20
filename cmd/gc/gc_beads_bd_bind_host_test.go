@@ -1,3 +1,5 @@
+//go:build unix
+
 package main
 
 import (
@@ -16,10 +18,6 @@ import (
 // loopback, with GC_DOLT_HOST still honored as the explicit override.
 func TestGcBeadsBdDefaultBindHostIsLoopback(t *testing.T) {
 	t.Parallel()
-
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("sh not available; skipping shell test")
-	}
 
 	line := extractGcBeadsBdDoltHostDefault(t)
 
@@ -59,10 +57,6 @@ func TestGcBeadsBdDefaultBindHostIsLoopback(t *testing.T) {
 // detection.
 func TestGcBeadsBdIsRemoteHostClassification(t *testing.T) {
 	t.Parallel()
-
-	if _, err := exec.LookPath("sh"); err != nil {
-		t.Skip("sh not available; skipping shell-function test")
-	}
 
 	root := repoRootForLint(t)
 	scriptPath := filepath.Join(root, "examples", "bd", "assets", "scripts", "gc-beads-bd.sh")

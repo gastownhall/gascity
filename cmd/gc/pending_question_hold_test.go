@@ -15,7 +15,7 @@ import (
 )
 
 // An open AskUserQuestion dialog reaches the controller as a pending
-// interaction of kind "question": the operator answers it in the terminal, and
+// interaction of kind "question": the operator answers it (respond or terminal), and
 // nothing typed at the pane may land on it. Every typed-nudge path here must
 // hold off while one is open, and none may spend a delivery attempt on it.
 
@@ -154,12 +154,12 @@ func TestDeliverSessionNudgeImmediateRefusesPendingQuestion(t *testing.T) {
 		}
 	}
 	text := stderr.String()
-	for _, want := range []string{"question", "tmux-question-0123456789abcdef", "gc session attach", "--delivery=queue"} {
+	for _, want := range []string{"question", "tmux-question-0123456789abcdef", "gc session attach", "--delivery=queue", "respond with action select"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("stderr = %q, want it to mention %q", text, want)
 		}
 	}
-	for _, banned := range []string{"permission prompt", "pprove", "respond"} {
+	for _, banned := range []string{"permission prompt", "pprove"} {
 		if strings.Contains(text, banned) {
 			t.Errorf("stderr = %q mentions %q, which does not apply to a question", text, banned)
 		}

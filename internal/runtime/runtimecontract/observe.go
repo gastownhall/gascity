@@ -442,8 +442,8 @@ func probeObserveFreshOnly(ctx context.Context, r *runner, hs runtime.ProtocolIn
 		return StatusFail, "a fresh_only start over a held name succeeded"
 	case again.unsupported:
 		return StatusFail, "a fresh_only start returned exit 2"
-	case again.exitCode != 73 && !collisionPhrase(again.err.Error()):
-		return StatusFail, fmt.Sprintf("a fresh_only start over a held name exited %d without the collision phrase; want 73 or already exists/already running", again.exitCode)
+	case again.exitCode != runtime.ExitCodeFreshCollision && !collisionPhrase(again.err.Error()):
+		return StatusFail, fmt.Sprintf("a fresh_only start over a held name exited %d without the collision phrase; want %d or already exists/already running", again.exitCode, runtime.ExitCodeFreshCollision)
 	}
 	after, s, d := presentObserve(ctx, r, name, "running")
 	if s != StatusPass {
@@ -619,8 +619,18 @@ func probeObserveCityScoped(ctx context.Context, r *runner, hs runtime.ProtocolI
 	if !hs.Has(observeCityToken) {
 		return StatusSkip, observeCityToken + " not declared"
 	}
-	cityA := []string{"GC_EXEC_CITY_NAME=rpp-a", "GC_EXEC_CITY_PATH=/gc-rpp/city-a"}
-	cityB := []string{"GC_EXEC_CITY_NAME=rpp-b", "GC_EXEC_CITY_PATH=/gc-rpp/city-b"}
+	// Two private cities: a final server-stop ends each one's server before
+	// it is removed, which a fixed path shared by concurrent runs could not.
+	cityA, removeA, err := newPrivateCity(ctx, r, hs)
+	if err != nil {
+		return StatusFail, err.Error()
+	}
+	defer removeA()
+	cityB, removeB, err := newPrivateCity(ctx, r, hs)
+	if err != nil {
+		return StatusFail, err.Error()
+	}
+	defer removeB()
 	name := r.nextName()
 	if s, d := startOrFail(ctx, r, cityA, name); s != StatusPass {
 		return s, d

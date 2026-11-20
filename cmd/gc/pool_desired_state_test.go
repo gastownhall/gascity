@@ -2331,7 +2331,7 @@ func TestBuildDesiredState_BlockedFreshSessionMaterializesRunnableReplacement(t 
 				readyFlags[i] = result.ReadyAssigned[storeScopedBeadKey{StoreRef: storeRef, ID: work.ID}]
 			}
 			openInfos := snapshot.OpenInfos()
-			poolWork := filterAssignedWorkBeadsForPoolDemand(
+			poolWork, _ := filterAssignedWorkBeadsForPoolDemand(
 				cfg,
 				cityPath,
 				store,
