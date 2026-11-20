@@ -1806,3 +1806,96 @@ func TestConvergeCreateTimedOutRequestDoesNotCreateLoop(t *testing.T) {
 		}
 	})
 }
+
+// serviceConvergenceQueue mimics the event loop's between-ticks path for one
+// queued request: claim-dispatch-reply through the logging wrapper.
+func serviceConvergenceQueue(t *testing.T, cr *CityRuntime) {
+	t.Helper()
+	go func() {
+		req := <-cr.convergenceReqCh
+		reply := cr.safeHandleConvergenceRequest(context.Background(), req)
+		req.replyCh <- reply
+	}()
+}
+
+// TestConvergeSocketNormalReply (AC-3): a socket request serviced before its
+// deadline returns the actual reply — success, a domain error, or a
+// recovered-panic error — and an in-process request (nil handoff) stays
+// admissible through the direct dispatcher. A malformed payload never
+// enqueues.
+func TestConvergeSocketNormalReply(t *testing.T) {
+	cr, store := setupConvergenceRuntime(t)
+
+	// A promptly serviced create returns its real result.
+	serviceConvergenceQueue(t, cr)
+	line := socketConvergeReply(t, cr.convergenceReqCh,
+		`{"command":"create","params":{"formula":"test-formula","target":"test-agent","max_iterations":"3"}}`)
+	var created convergenceReply
+	if err := json.Unmarshal([]byte(line), &created); err != nil {
+		t.Fatalf("decoding reply %q: %v", line, err)
+	}
+	if created.Error != "" {
+		t.Fatalf("promptly serviced create errored: %s", created.Error)
+	}
+	var result convergence.CreateResult
+	if err := json.Unmarshal(created.Result, &result); err != nil {
+		t.Fatalf("decoding create result %s: %v", created.Result, err)
+	}
+	if result.BeadID == "" || result.FirstWispID == "" {
+		t.Errorf("create result = %s, want bead and wisp IDs", created.Result)
+	}
+
+	// A promptly serviced domain error returns the real error.
+	serviceConvergenceQueue(t, cr)
+	line = socketConvergeReply(t, cr.convergenceReqCh,
+		`{"command":"create","params":{"formula":"test-formula","target":"test-agent","max_iterations":"3","rig":"no-such-rig"}}`)
+	var errored convergenceReply
+	if err := json.Unmarshal([]byte(line), &errored); err != nil {
+		t.Fatalf("decoding reply %q: %v", line, err)
+	}
+	if !strings.Contains(errored.Error, "no-such-rig") {
+		t.Errorf("promptly serviced error reply = %q, want the unknown-rig error", errored.Error)
+	}
+
+	// An in-process request (nil handoff) stays admissible through the
+	// direct dispatcher.
+	direct := sendAndReceive(t, cr, convergenceRequest{
+		Command: "stop",
+		BeadID:  result.BeadID,
+		User:    "test-operator",
+	})
+	if direct.Error != "" {
+		t.Errorf("nil-handoff stop error: %s", direct.Error)
+	}
+
+	// A panicking handler is recovered by the wrapper and its error reply
+	// still reaches the socket client.
+	created2 := createLoopForTest(t, cr, "3")
+	cr.convScopes[""] = cr.newConvergenceScope("", getPanicStore{Store: beads.NewMemStore()}, cr.cityPath, []string{sharedTestFormulaDir}, false)
+	serviceConvergenceQueue(t, cr)
+	line = socketConvergeReply(t, cr.convergenceReqCh,
+		fmt.Sprintf(`{"command":"approve","bead_id":%q,"user":"test-operator"}`, created2.BeadID))
+	var panicked convergenceReply
+	if err := json.Unmarshal([]byte(line), &panicked); err != nil {
+		t.Fatalf("decoding reply %q: %v", line, err)
+	}
+	if !strings.Contains(panicked.Error, "internal error (panic)") {
+		t.Errorf("panic-wrapper reply = %q, want the recovered panic error", panicked.Error)
+	}
+
+	// A malformed payload replies without enqueueing anything.
+	line = socketConvergeReply(t, cr.convergenceReqCh, "{not json")
+	var invalid convergenceReply
+	if err := json.Unmarshal([]byte(line), &invalid); err != nil {
+		t.Fatalf("decoding reply %q: %v", line, err)
+	}
+	if !strings.Contains(invalid.Error, "invalid request") {
+		t.Errorf("malformed payload reply = %q, want the invalid-request error", invalid.Error)
+	}
+	if queued := len(cr.convergenceReqCh); queued != 0 {
+		t.Errorf("malformed payload enqueued %d requests, want 0", queued)
+	}
+
+	// The panic swap must not leak into the store the earlier legs used.
+	assertConvergenceBeadCount(t, store, 2)
+}
