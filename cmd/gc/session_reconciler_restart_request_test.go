@@ -1103,6 +1103,32 @@ func TestReconcileSessionBeads_RestartRequestLiveKillRestartsSamePass(t *testing
 	if startAt < stopAt {
 		t.Fatalf("Start (call %d) precedes the Stop (call %d) for %q; the pass must record the kill before the replacement start", startAt, stopAt, sessionName)
 	}
+
+	// The pass that killed and restarted the session must also land the
+	// complete handoff: the request markers consumed, the wake recorded, and
+	// the replacement started on the rotated key, never the pre-restart one.
+	got := restartRequestBead(t, env, session.ID)
+	if got.Metadata["restart_requested"] != "" {
+		t.Fatalf("restart_requested = %q, want consumed by the same-pass restart", got.Metadata["restart_requested"])
+	}
+	if got.Metadata["continuation_reset_pending"] != "" {
+		t.Fatalf("continuation_reset_pending = %q, want cleared by the same-pass wake's PreWakePatch", got.Metadata["continuation_reset_pending"])
+	}
+	if got.Metadata["last_woke_at"] == "" {
+		t.Fatal("last_woke_at empty, want the same-pass wake recorded")
+	}
+	if got.Metadata["session_key"] == "" || got.Metadata["session_key"] == "original-key" {
+		t.Fatalf("session_key = %q, want the rotated key after the explicit reset", got.Metadata["session_key"])
+	}
+	var startCmd string
+	for _, call := range env.sp.SnapshotCalls() {
+		if call.Method == "Start" && call.Name == sessionName {
+			startCmd = call.Config.Command
+		}
+	}
+	if strings.Contains(startCmd, "original-key") {
+		t.Fatalf("replacement Start command %q carries the pre-restart session key; the fresh conversation must not resume it", startCmd)
+	}
 }
 
 // TestReconcileSessionBeads_RestartRequestFreshReadsKeepOnDemandNextPassWake
