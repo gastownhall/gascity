@@ -6605,10 +6605,11 @@ func TestCityRuntimeReloadRestartsConfigWatcherWithNewPackTargets(t *testing.T) 
 }
 
 // writeSkillMaterializationTestConfig writes a minimal city.toml with a
-// single city-scoped, stage-1-eligible agent (tmux session provider,
-// claude agent provider) — no builtin pack imports, so the config has
-// exactly one agent and no implicit extras to confuse a materialization
-// assertion. Extra raw TOML fragments (e.g. "[orders]\nskip = [...]\n")
+// single declared city-scoped, stage-1-eligible agent (tmux session
+// provider, claude agent provider) and no builtin pack imports. Its
+// [providers.claude] block makes the loader inject the implicit "claude"
+// agent after it, so the declared agent shares <city>/.claude/skills with
+// that implicit agent. Extra raw TOML fragments (e.g. "[orders]\nskip = [...]\n")
 // may be appended to force a real revision change between two writes
 // without touching workspace.name, which rejects live reload.
 func writeSkillMaterializationTestConfig(t *testing.T, tomlPath string, extra ...string) {
@@ -6779,6 +6780,64 @@ func TestCityRuntimeReloadRejectsCollidingSkillMaterialization(t *testing.T) {
 	if !strings.Contains(stderr.String(), "skill collision") {
 		t.Fatalf("stderr missing skill collision warning: %q", stderr.String())
 	}
+}
+
+// newSkillReloadTestCityRuntime builds a city runtime over the config at
+// tomlPath for the skill-materialization reload tests.
+func newSkillReloadTestCityRuntime(t *testing.T, cityPath, tomlPath string, stdout, stderr *bytes.Buffer) *CityRuntime {
+	t.Helper()
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
+	sp := runtime.NewFake()
+	return newTestCityRuntime(t, CityRuntimeParams{
+		CityPath:     cityPath,
+		CityName:     "test-city",
+		TomlPath:     tomlPath,
+		WatchTargets: config.WatchTargets(nil, cfg, cityPath),
+		ConfigRev:    configRev,
+		ConfigDirty:  &atomic.Bool{},
+		Cfg:          cfg,
+		SP:           sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		PokeCh: make(chan struct{}, 8),
+		Stdout: stdout,
+		Stderr: stderr,
+	})
+}
+
+// TestCityRuntimeReloadKeepsAgentLocalSkillInSharedSink is the reload half
+// of #7547: the declared agent shares its sink with the injected implicit
+// claude agent, and an applied reload must keep the declared agent's
+// agent-local skill linked.
+func TestCityRuntimeReloadKeepsAgentLocalSkillInSharedSink(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	clearInheritedBeadsEnv(t)
+	requireNoLeakedDoltAfterForPaths(t, cityPath)
+	writeSkillSource(t, filepath.Join(cityPath, "skills", "plan"))
+	notesSource := filepath.Join(cityPath, "agents", "mayor", "skills", "notes")
+	writeSkillSource(t, notesSource)
+	writeSkillMaterializationTestConfig(t, tomlPath)
+
+	var stdout, stderr bytes.Buffer
+	cr := newSkillReloadTestCityRuntime(t, cityPath, tomlPath, &stdout, &stderr)
+	if err := runStage1SkillMaterialization(cityPath, cr.cfg, &stderr); err != nil {
+		t.Fatalf("seeding stage-1 pass: %v (stderr: %s)", err, stderr.String())
+	}
+
+	writeSkillMaterializationTestConfig(t, tomlPath, "[orders]\nskip = [\"reaper\"]\n")
+	lastProviderName := "tmux"
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceWatch)
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reload outcome = %q, want %q; stderr=%q", reply.Outcome, reloadOutcomeApplied, stderr.String())
+	}
+
+	sink := filepath.Join(cityPath, ".claude", "skills")
+	requireSkillLink(t, sink, "notes", notesSource)
+	requireSkillLink(t, sink, "plan", filepath.Join(cityPath, "skills", "plan"))
 }
 
 func TestCityRuntimeManualReloadPanicAfterReloadKeepsReloadReplyAndClears(t *testing.T) {
