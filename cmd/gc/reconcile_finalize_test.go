@@ -207,3 +207,53 @@ func TestLegacyFinalizeUsesExtractedBuilder(t *testing.T) {
 		t.Fatalf("finalizeDrainAckStoppedSession calls %v; want finalizePatch and no drain patch built itself", calls)
 	}
 }
+
+// drainAckPruneSeat is a stop-pending session row whose worker_dir is a prune
+// fixture's clean, pushed, unmanaged checkout, plus the rig-root probe that
+// records every removal the prune helper requests.
+type drainAckPruneSeat struct {
+	env     *reconcilerTestEnv
+	fx      *pruneTestFixture
+	rig     *fakeGitProbe
+	removes []string
+	id      string
+}
+
+// newDrainAckPruneSeat builds the seat as an unnamed pool session of template
+// demo/worker; meta is written over its metadata last.
+func newDrainAckPruneSeat(t *testing.T, meta map[string]string) *drainAckPruneSeat {
+	t.Helper()
+	fx := newPruneFixture(t)
+	env := newReconcilerTestEnv(t)
+	fx.cfg.Agents = []config.Agent{{Name: "worker", Dir: "demo"}}
+	env.cfg = fx.cfg
+	s := &drainAckPruneSeat{env: env, fx: fx}
+	s.rig = &fakeGitProbe{isRepo: true, worktreeRemove: func(path string, _ bool) error {
+		s.removes = append(s.removes, path)
+		return nil
+	}}
+	fx.setProbe(fx.rigRoot, s.rig)
+
+	b := env.createSessionBead("demo/worker-1", "demo/worker")
+	patch := session.DrainAckStopPendingPatch(env.clk.Now().UTC())
+	patch[poolManagedMetadataKey] = boolMetadata(true)
+	patch["worker_dir"] = fx.workerDir
+	for k, v := range meta {
+		patch[k] = v
+	}
+	if err := env.store.SetMetadataBatch(b.ID, patch); err != nil {
+		t.Fatalf("SetMetadataBatch(stop-pending): %v", err)
+	}
+	s.id = b.ID
+	return s
+}
+
+// status is the seat's persisted status and lifecycle state.
+func (s *drainAckPruneSeat) status(t *testing.T) (string, string) {
+	t.Helper()
+	got, err := s.env.store.Get(s.id)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", s.id, err)
+	}
+	return got.Status, got.Metadata["state"]
+}

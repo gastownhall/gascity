@@ -1643,6 +1643,30 @@ func TestFinalizeDrainAckStopPendingSessionsClosesStoppedPoolBeforeAllocation(t 
 	}
 }
 
+// TestFinalizeDrainAckStopPendingSessionsPrunesDrainedPoolSlotWorkerDir
+// (gascity#8093). The stop-pending pass closes a drain-acked, unnamed pool
+// seat and reclaims its clean, pushed worker_dir exactly once: a forced
+// removal from the rig root, as the pool-freeable close does.
+func TestFinalizeDrainAckStopPendingSessionsPrunesDrainedPoolSlotWorkerDir(t *testing.T) {
+	s := newDrainAckPruneSeat(t, nil)
+	store := beads.SessionStore{Store: s.env.store}
+
+	finalized := finalizeDrainAckStopPendingSessions(
+		s.fx.cityPath, s.env.cfg, s.env.sp, store, testSeatWork(s.fx.cityPath, s.env.cfg, store, nil), []sessionpkg.Info{s.env.sessionInfo(s.id)},
+		newFakeDrainOps(), s.env.dt, nil, s.env.clk, s.env.rec, &s.env.stderr,
+	)
+	if finalized != 1 {
+		t.Fatalf("finalized = %d, want 1", finalized)
+	}
+	if status, state := s.status(t); status != "closed" || state != "drained" {
+		t.Fatalf("status/state = %q/%q, want closed/drained", status, state)
+	}
+	if len(s.removes) != 1 || s.removes[0] != s.fx.workerDir || !s.rig.removedForce {
+		t.Fatalf("rig-root removals = %q (force %v), want exactly [%s] forced; stderr=%s",
+			s.removes, s.rig.removedForce, s.fx.workerDir, s.env.stderr.String())
+	}
+}
+
 // reparentSurvivorProvider models PR #4181's finalizer finding: at the
 // finalizer's first observation the runtime pane is still live, so the
 // stop-pending session is queued for async stop; the first kill then takes out
