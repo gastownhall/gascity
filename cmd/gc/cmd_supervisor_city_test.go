@@ -3764,3 +3764,27 @@ func TestSupervisorAliasedCityReloadKeepsAliasIdentityAndSiteBinding(t *testing.
 		t.Fatalf(".gc/site.toml changed across the reload:\nbefore: %q\nafter:  %q", siteBefore, siteAfter)
 	}
 }
+
+// TestSupervisorAliasedCityRefusesSiteRename proves the reload lock still
+// refuses a genuine on-disk rename of an aliased city, and reports it against
+// the config-declared name rather than the registry alias.
+func TestSupervisorAliasedCityRefusesSiteRename(t *testing.T) {
+	city := startAliasedSupervisorCity(t)
+	before := city.runningConfig(t)
+
+	if err := config.PersistWorkspaceSiteBinding(osFS{}, city.path, "renamed-city", ""); err != nil {
+		t.Fatalf("PersistWorkspaceSiteBinding: %v", err)
+	}
+	reply := city.waitReload(t)
+
+	if reply.Outcome != reloadOutcomeFailed {
+		t.Fatalf("reload outcome = %q, want %q (stderr: %s)", reply.Outcome, reloadOutcomeFailed, city.stderr.String())
+	}
+	const want = `workspace.name changed from "site-city" to "renamed-city" (restart controller to apply)`
+	if reply.Error != want {
+		t.Fatalf("reload error = %q, want %q", reply.Error, want)
+	}
+	if after := city.runningConfig(t); after != before {
+		t.Fatalf("running config was replaced by a refused reload")
+	}
+}
