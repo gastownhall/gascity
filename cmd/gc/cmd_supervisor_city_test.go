@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -3615,7 +3616,7 @@ func startAliasedSupervisorCity(t *testing.T) *aliasedSupervisorCity {
 	if err := os.WriteFile(tomlPath, []byte(aliasedSupervisorCityToml), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := config.PersistWorkspaceSiteBinding(osFS{}, cityPath, "site-city", ""); err != nil {
+	if err := config.PersistWorkspaceSiteBinding(fsys.OSFS{}, cityPath, "site-city", ""); err != nil {
 		t.Fatalf("PersistWorkspaceSiteBinding: %v", err)
 	}
 
@@ -3700,12 +3701,27 @@ func (c *aliasedSupervisorCity) waitReload(t *testing.T) reloadControlReply {
 	return reply
 }
 
-func (c *aliasedSupervisorCity) setShutdownTimeout(t *testing.T, timeout string) {
+// reloadShutdownTimeout edits daemon.shutdown_timeout in city.toml, sends a
+// waiting reload, and returns the running config once it carries the edit.
+// The config watcher can apply the edit on its own debounced tick before the
+// manual request is staged; the manual reload then has nothing left to apply
+// and reports no_change. Either outcome passes once the edit is running.
+func (c *aliasedSupervisorCity) reloadShutdownTimeout(t *testing.T, timeout string) *config.City {
 	t.Helper()
 	data := strings.Replace(aliasedSupervisorCityToml, `shutdown_timeout = "100ms"`, `shutdown_timeout = "`+timeout+`"`, 1)
 	if err := os.WriteFile(c.tomlPath, []byte(data), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	reply := c.waitReload(t)
+	if reply.Outcome != reloadOutcomeApplied && reply.Outcome != reloadOutcomeNoChange {
+		t.Fatalf("reload outcome = %q (error %q), want %q or %q (stderr: %s)",
+			reply.Outcome, reply.Error, reloadOutcomeApplied, reloadOutcomeNoChange, c.stderr.String())
+	}
+	cfg := c.runningConfig(t)
+	if got := cfg.Daemon.ShutdownTimeout; got != timeout {
+		t.Fatalf("running daemon.shutdown_timeout = %q, want the reloaded %q (stderr: %s)", got, timeout, c.stderr.String())
+	}
+	return cfg
 }
 
 // TestSupervisorAliasedCityReloadsAgainstConfigName is the regression for
@@ -3715,12 +3731,8 @@ func (c *aliasedSupervisorCity) setShutdownTimeout(t *testing.T, timeout string)
 func TestSupervisorAliasedCityReloadsAgainstConfigName(t *testing.T) {
 	city := startAliasedSupervisorCity(t)
 
-	city.setShutdownTimeout(t, "150ms")
-	reply := city.waitReload(t)
+	city.reloadShutdownTimeout(t, "150ms")
 
-	if reply.Outcome != reloadOutcomeApplied {
-		t.Fatalf("reload outcome = %q (error %q), want %q (stderr: %s)", reply.Outcome, reply.Error, reloadOutcomeApplied, city.stderr.String())
-	}
 	log := city.stderr.String()
 	for _, rejection := range []string{"workspace.name changed", "keeping old config"} {
 		if strings.Contains(log, rejection) {
@@ -3740,16 +3752,7 @@ func TestSupervisorAliasedCityReloadKeepsAliasIdentityAndSiteBinding(t *testing.
 	}
 	bootPrefix := config.EffectiveHQPrefix(city.runningConfig(t))
 
-	city.setShutdownTimeout(t, "150ms")
-	reply := city.waitReload(t)
-	if reply.Outcome != reloadOutcomeApplied {
-		t.Fatalf("reload outcome = %q (error %q), want %q (stderr: %s)", reply.Outcome, reply.Error, reloadOutcomeApplied, city.stderr.String())
-	}
-
-	cfg := city.runningConfig(t)
-	if got := cfg.Daemon.ShutdownTimeout; got != "150ms" {
-		t.Fatalf("running daemon.shutdown_timeout = %q, want the reloaded 150ms", got)
-	}
+	cfg := city.reloadShutdownTimeout(t, "150ms")
 	if got := config.EffectiveCityName(cfg, ""); got != "alias-city" {
 		t.Fatalf("running EffectiveCityName = %q, want alias-city", got)
 	}
@@ -3772,7 +3775,7 @@ func TestSupervisorAliasedCityRefusesSiteRename(t *testing.T) {
 	city := startAliasedSupervisorCity(t)
 	before := city.runningConfig(t)
 
-	if err := config.PersistWorkspaceSiteBinding(osFS{}, city.path, "renamed-city", ""); err != nil {
+	if err := config.PersistWorkspaceSiteBinding(fsys.OSFS{}, city.path, "renamed-city", ""); err != nil {
 		t.Fatalf("PersistWorkspaceSiteBinding: %v", err)
 	}
 	reply := city.waitReload(t)

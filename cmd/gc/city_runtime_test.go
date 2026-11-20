@@ -5573,6 +5573,64 @@ func TestNewCityRuntimeConfigNameLocksReloadNotAlias(t *testing.T) {
 	}
 }
 
+// TestCityRuntimeSameRevisionReloadPublishesAliasIdentity pins that a
+// same-revision reload applied because the store metadata changed publishes the
+// registered alias to the API controller state, not the config-declared name,
+// so the HQ prefix derived from the name stays the boot prefix.
+func TestCityRuntimeSameRevisionReloadPublishesAliasIdentity(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfigNamed(t, tomlPath, "workspace-name", "fake")
+	writeBackendMetadata(t, cityPath, `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`)
+
+	cfg, configRev := loadCityRuntimeControllerConfig(t, cityPath)
+	configName := lockedConfigName(cfg, cityPath)
+	applyRuntimeCityIdentity(cfg, "machine-alias")
+	bootPrefix := config.EffectiveHQPrefix(cfg)
+	if declaredPrefix := config.DeriveBeadsPrefix(configName); declaredPrefix == bootPrefix {
+		t.Fatalf("precondition: alias prefix %q must differ from the config-declared prefix", bootPrefix)
+	}
+
+	sp := runtime.NewFake()
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "machine-alias", cityPath)
+	var stdout bytes.Buffer
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath:   cityPath,
+		CityName:   "machine-alias",
+		ConfigName: configName,
+		TomlPath:   tomlPath,
+		ConfigRev:  configRev,
+		Cfg:        cfg,
+		SP:         sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: &stdout,
+		Stderr: io.Discard,
+	})
+	cr.setControllerState(cs)
+
+	writeBackendMetadata(t, cityPath, `{"database":"beads","backend":"postgres","storage_endpoint":"postgres://bd@db.example.test:5432","storage_database":"beads_pg"}`)
+	lastProviderName := "fake"
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceManual)
+
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reply.Outcome = %q (error %q), want %q", reply.Outcome, reply.Error, reloadOutcomeApplied)
+	}
+	if cr.configRev != configRev {
+		t.Fatalf("configRev = %q, want same revision %q", cr.configRev, configRev)
+	}
+	published := cs.Config()
+	if got := config.EffectiveCityName(published, ""); got != "machine-alias" {
+		t.Fatalf("published EffectiveCityName = %q, want machine-alias", got)
+	}
+	if got := config.EffectiveHQPrefix(published); got != bootPrefix {
+		t.Fatalf("published EffectiveHQPrefix = %q, want boot prefix %q", got, bootPrefix)
+	}
+}
+
 func TestCityRuntimeReloadLifecycleFailureKeepsOldConfig(t *testing.T) {
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")

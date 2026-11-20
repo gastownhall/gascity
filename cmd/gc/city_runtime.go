@@ -2743,6 +2743,10 @@ func (cr *CityRuntime) reloadConfigTraced(
 	for _, warning := range result.Warnings {
 		appendWarning(warning)
 	}
+	// The reload lock compared the config-declared name. Every path below
+	// publishes the candidate (order rescan, API state, runtime config), so it
+	// takes the name this city runs as, a registered alias included, as at boot.
+	applyRuntimeCityIdentity(result.Cfg, cr.cityName)
 	oldRevision := cr.configRev
 	// rejectSuperseded keeps the current runtime generation when the
 	// controller state rejects this candidate because a newer config (an API
@@ -2846,7 +2850,6 @@ func (cr *CityRuntime) reloadConfigTraced(
 	oldAgentCount := len(cr.cfg.Agents)
 	oldRigCount := len(cr.cfg.Rigs)
 	nextCfg := result.Cfg
-	applyRuntimeCityIdentity(nextCfg, cr.cityName)
 
 	// session_reconciler is boot-latched, but unlike [storage] the rest of the
 	// config is coherent without a restart, so a changed value only warns.
