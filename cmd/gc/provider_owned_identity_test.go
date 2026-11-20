@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	gcapi "github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads/contract"
@@ -658,4 +660,100 @@ func TestInitAndHookDirProviderOwnedInitFailureSkipsIdentity(t *testing.T) {
 	if after := city.entry(t); after != before || after.State != providerScopeInitializing {
 		t.Fatalf("journal entry = %+v, want unchanged pending %+v", after, before)
 	}
+}
+
+// TestReconcileProviderOwnedScopeIdentityNoOpAndIneligible: agreeing layers
+// and ineligible scopes produce no write and no stamped event.
+func TestReconcileProviderOwnedScopeIdentityNoOpAndIneligible(t *testing.T) {
+	t.Run("agreeing layers", func(t *testing.T) {
+		clearInheritedBeadsEnv(t)
+		clearProviderOwnedProxyEnv(t)
+		city := providerOwnedIdentityCity{dir: t.TempDir()}
+		writeReadyTopologyScope(t, city.dir, readyTopologyScope{beadsConfig: bdTemplateBeadsConfig, metadata: proxiedIdentityMetadata(providerOwnedIdentityP)})
+		writeIdentityFile(t, city.dir, providerOwnedIdentityP)
+		stubLiveProviderOwnedProxy(t)
+		fake := &providerOwnedL3Fake{l3: &projectIdentityL3Double{projectID: providerOwnedIdentityP}}
+		stubProviderOwnedL3(t, fake)
+		paths := []string{scopeMetadataJSONPath(city.dir), contract.ProjectIdentityPath(city.dir)}
+		before := statFiles(t, paths)
+
+		if err := reconcileProviderOwnedScopeIdentity(context.Background(), city.dir, city.dir); err != nil {
+			t.Fatalf("reconcileProviderOwnedScopeIdentity: %v", err)
+		}
+		if after := statFiles(t, paths); after != before {
+			t.Fatalf("files after a no-op reconcile = %q, want unchanged %q", after, before)
+		}
+		if fake.seeds != 0 || len(fake.opened) != 1 || fake.closed != 1 {
+			t.Fatalf("L3 seeds=%d opens=%d closes=%d, want 0 seeds and one closed read", fake.seeds, len(fake.opened), fake.closed)
+		}
+		if got := city.stampedLayers(t); len(got) != 0 {
+			t.Fatalf("stamped layers = %v, want none", got)
+		}
+	})
+
+	for _, tc := range []struct {
+		name     string
+		metadata string
+		hosted   bool
+		env      map[string]string
+	}{
+		{name: "no metadata.json"},
+		{name: "embedded", metadata: `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"hq"}`},
+		{name: "doltlite metadata backend", metadata: `{"backend":"doltlite","dolt_mode":"server","dolt_database":"hq"}`},
+		{name: "doltlite city backend", metadata: proxiedIdentityMetadata(""), env: map[string]string{"GC_BEADS_BACKEND": "doltlite"}},
+		{name: "no recorded database", metadata: `{"backend":"dolt","dolt_mode":"server"}`},
+		{name: "hosted credential provider", metadata: proxiedIdentityMetadata(""), hosted: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearInheritedBeadsEnv(t)
+			clearProviderOwnedProxyEnv(t)
+			resetHostedCredentialProbeCache()
+			t.Cleanup(resetHostedCredentialProbeCache)
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			city := providerOwnedIdentityCity{dir: t.TempDir()}
+			if tc.hosted {
+				writeHostedProbeCity(t, city.dir, true, time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC))
+			}
+			if tc.metadata != "" {
+				writeReadyTopologyScope(t, city.dir, readyTopologyScope{beadsConfig: bdTemplateBeadsConfig, metadata: tc.metadata})
+			}
+			stubLiveProviderOwnedProxy(t)
+			fake := &providerOwnedL3Fake{l3: &projectIdentityL3Double{projectID: providerOwnedIdentityP}}
+			stubProviderOwnedL3(t, fake)
+			metadataBefore, _ := os.ReadFile(scopeMetadataJSONPath(city.dir))
+
+			if err := reconcileProviderOwnedScopeIdentity(context.Background(), city.dir, city.dir); err != nil {
+				t.Fatalf("reconcileProviderOwnedScopeIdentity: %v", err)
+			}
+			if len(fake.opened) != 0 {
+				t.Fatalf("ineligible scope opened L3 for %+v", fake.opened)
+			}
+			if _, ok := city.identity(t); ok {
+				t.Fatal("ineligible scope got an identity.toml")
+			}
+			if metadataAfter, _ := os.ReadFile(scopeMetadataJSONPath(city.dir)); string(metadataAfter) != string(metadataBefore) {
+				t.Fatalf("metadata.json = %q, want unchanged %q", metadataAfter, metadataBefore)
+			}
+			if got := city.stampedLayers(t); len(got) != 0 {
+				t.Fatalf("stamped layers = %v, want none", got)
+			}
+		})
+	}
+}
+
+// statFiles renders each path's bytes and modification time, so a rewrite
+// with identical content still shows.
+func statFiles(t *testing.T, paths []string) string {
+	t.Helper()
+	var b strings.Builder
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintf(&b, "%s|%d|%s\n", path, info.ModTime().UnixNano(), mustReadFile(t, path))
+	}
+	return b.String()
 }
