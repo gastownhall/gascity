@@ -292,16 +292,13 @@ const sqliteContendedWriterPause = 150 * time.Millisecond
 // runPacedSQLiteWriter calls write(0), write(1), ... until stop is closed,
 // pausing sqliteContendedWriterPause after each call.
 func runPacedSQLiteWriter(stop <-chan struct{}, write func(i int)) {
-	_ = sqliteContendedWriterPause
-	pace := time.NewTicker(2 * time.Millisecond)
-	defer pace.Stop()
 	for i := 0; ; i++ {
+		write(i)
 		select {
 		case <-stop:
 			return
-		case <-pace.C:
+		case <-time.After(sqliteContendedWriterPause):
 		}
-		write(i)
 	}
 }
 
@@ -416,25 +413,19 @@ func TestSQLiteStoreGraphCookUnderConcurrentWriter(t *testing.T) {
 	var wg sync.WaitGroup
 	var controllerWrites atomic.Int64
 	wg.Add(1)
-	// Paced far above the ~1 commit/s measured on the live city, but not a
-	// tight loop: a writer that re-takes the lock the instant it commits just
-	// measures SQLite's (unfair) busy-handler polling, not this store.
-	pace := time.NewTicker(2 * time.Millisecond)
-	defer pace.Stop()
+	// Paced above the ~1 commit/s measured on the live city, and never a tight
+	// loop: a writer that re-takes the lock the instant it commits just
+	// measures SQLite's (unfair) busy-handler polling, not this store (see
+	// sqliteContendedWriterPause).
 	go func() {
 		defer wg.Done()
-		for i := 0; ; i++ {
-			select {
-			case <-stop:
-				return
-			case <-pace.C:
-			}
+		runPacedSQLiteWriter(stop, func(i int) {
 			if err := controller.SetMetadata(hot.ID, "tick", strconv.Itoa(i)); err == nil {
 				if controllerWrites.Add(1) == 1 {
 					close(firstCommit)
 				}
 			}
-		}
+		})
 	}()
 	select {
 	case <-firstCommit:
