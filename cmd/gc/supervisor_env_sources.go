@@ -1,8 +1,11 @@
 package main
 
 import (
+	"fmt"
+	"io"
 	"slices"
 	"sort"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/processenv"
 )
@@ -133,4 +136,47 @@ func withholdShellRoutingBesideDurableCredentials(env map[string]supervisorTrack
 		return 0
 	})
 	return withheld
+}
+
+// supervisorEnvSourcesReportHeader opens the sources report a successful
+// install prints on stdout.
+const supervisorEnvSourcesReportHeader = "Supervisor service env sources (names only):"
+
+// supervisorEnvSourcesReportOrder is the order the sources report lists tiers.
+var supervisorEnvSourcesReportOrder = []supervisorEnvSource{
+	supervisorEnvSourceShell,
+	supervisorEnvSourceExplicit,
+	supervisorEnvSourceSecretsFile,
+	supervisorEnvSourceLaunchctl,
+	supervisorEnvSourceGC,
+}
+
+// installSupervisorServiceReporting installs data as goos's platform service
+// and, only when the install succeeds, reports where data's env came from.
+func installSupervisorServiceReporting(goos string, data *supervisorServiceData, stdout, stderr io.Writer) int {
+	code := installSupervisorService(goos, data, stdout, stderr)
+	if code == 0 {
+		reportSupervisorServiceEnv(stdout, data)
+	}
+	return code
+}
+
+// reportSupervisorServiceEnv prints, for each tier that supplied any of
+// data's ExtraEnv, the sorted names it supplied. It never prints a value.
+func reportSupervisorServiceEnv(stdout io.Writer, data *supervisorServiceData) {
+	bySource := make(map[supervisorEnvSource][]string)
+	for _, v := range data.ExtraEnv {
+		bySource[v.Source] = append(bySource[v.Source], v.Name)
+	}
+	var b strings.Builder
+	b.WriteString(supervisorEnvSourcesReportHeader + "\n")
+	for _, source := range supervisorEnvSourcesReportOrder {
+		names := bySource[source]
+		if len(names) == 0 {
+			continue
+		}
+		sort.Strings(names)
+		fmt.Fprintf(&b, "  %s: %s\n", source, strings.Join(names, ", "))
+	}
+	fmt.Fprint(stdout, b.String()) //nolint:errcheck // best-effort stdout
 }

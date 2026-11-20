@@ -1633,7 +1633,7 @@ func doSupervisorInstall(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc supervisor install: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	return installSupervisorService(goruntime.GOOS, data, stdout, stderr)
+	return installSupervisorServiceReporting(goruntime.GOOS, data, stdout, stderr)
 }
 
 func newSupervisorUninstallCmd(stdout, stderr io.Writer) *cobra.Command {

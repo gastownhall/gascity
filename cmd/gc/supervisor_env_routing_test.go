@@ -1,13 +1,17 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"reflect"
+	goruntime "runtime"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/processenv"
+	"github.com/gastownhall/gascity/internal/runtime/tmux"
 )
 
 // isolateSupervisorRoutingEnv gives a test an empty HOME and GC_HOME, a fixed
@@ -259,5 +263,125 @@ func TestSupervisorServiceEnvTakesWithheldRoutingFromSecretsFile(t *testing.T) {
 	}}
 	if !reflect.DeepEqual(data.WithheldEnv, wantWithheld) {
 		t.Fatalf("WithheldEnv = %+v, want %+v", data.WithheldEnv, wantWithheld)
+	}
+}
+
+// installSupervisorServiceForTest runs installSupervisorServiceReporting for
+// goos with systemd and the running-supervisor probe stubbed: no supervisor
+// answers, and every systemctl call succeeds.
+func installSupervisorServiceForTest(t *testing.T, goos string, data *supervisorServiceData) (int, string, string) {
+	t.Helper()
+	stubRunningSupervisor(t, false, "", nil)
+	oldRun, oldActive, oldLinger := supervisorSystemctlRun, supervisorSystemctlActive, supervisorLingerEnabled
+	t.Cleanup(func() {
+		supervisorSystemctlRun, supervisorSystemctlActive, supervisorLingerEnabled = oldRun, oldActive, oldLinger
+	})
+	supervisorSystemctlRun = func(...string) error { return nil }
+	supervisorSystemctlActive = func(string) bool { return false }
+	supervisorLingerEnabled = func(string) bool { return true }
+	stubSupervisorSystemctlUserAvailable(t, true)
+	stubSupervisorRunningPreserveSignalReady(t, true)
+
+	var stdout, stderr bytes.Buffer
+	code := installSupervisorServiceReporting(goos, data, &stdout, &stderr)
+	return code, stdout.String(), stderr.String()
+}
+
+// parseSupervisorEnvSourcesReport returns the report's names by source label.
+func parseSupervisorEnvSourcesReport(t *testing.T, stdout string) map[string][]string {
+	t.Helper()
+	_, report, ok := strings.Cut(stdout, supervisorEnvSourcesReportHeader+"\n")
+	if !ok {
+		t.Fatalf("stdout has no %q report:\n%s", supervisorEnvSourcesReportHeader, stdout)
+	}
+	bySource := make(map[string][]string)
+	for _, line := range strings.Split(report, "\n") {
+		if !strings.HasPrefix(line, "  ") {
+			break
+		}
+		label, names, ok := strings.Cut(strings.TrimSpace(line), ": ")
+		if !ok {
+			t.Fatalf("report line %q has no %q", line, ": ")
+		}
+		bySource[label] = strings.Split(names, ", ")
+	}
+	return bySource
+}
+
+// TestSupervisorInstallReportsEnvSourcesWithoutValues pins AC-5: a successful
+// install prints every persisted name once, under the label of the tier that
+// supplied it, and prints no value; a failed install prints no report.
+func TestSupervisorInstallReportsEnvSourcesWithoutValues(t *testing.T) {
+	if goruntime.GOOS != "linux" {
+		t.Skip("systemd path only applies on linux")
+	}
+	isolateSupervisorRoutingEnv(t)
+	setIncidentEnv(t)
+	t.Setenv("GC_SUPERVISOR_ENV", "ANTHROPIC_BASE_URL")
+	t.Setenv("LANG", "en_US.UTF-8")
+	t.Setenv("GC_DOLT_PASSWORD", "")
+	t.Setenv(tmux.TmpdirEnv, "")
+	oldLaunchctl := supervisorLaunchctlGetenv
+	t.Cleanup(func() { supervisorLaunchctlGetenv = oldLaunchctl })
+	supervisorLaunchctlGetenv = func(key string) string {
+		if key == "GC_DOLT_PASSWORD" {
+			return "dolt-pass-from-launchctl"
+		}
+		return ""
+	}
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	code, stdout, stderr := installSupervisorServiceForTest(t, "linux", data)
+	if code != 0 {
+		t.Fatalf("install code = %d, want 0; stderr=%s", code, stderr)
+	}
+
+	bySource := parseSupervisorEnvSourcesReport(t, stdout)
+	seen := make(map[string]string)
+	for label, names := range bySource {
+		if !slices.IsSorted(names) {
+			t.Errorf("report %s names %v are not sorted", label, names)
+		}
+		for _, name := range names {
+			if prev, dup := seen[name]; dup {
+				t.Errorf("report lists %s under both %s and %s", name, prev, label)
+			}
+			seen[name] = label
+		}
+	}
+	for _, v := range data.ExtraEnv {
+		if got, want := seen[v.Name], v.Source.String(); got != want {
+			t.Errorf("report lists %s under %q, want %q", v.Name, got, want)
+		}
+	}
+	if len(seen) != len(data.ExtraEnv) {
+		t.Errorf("report lists %d names, want the %d ExtraEnv names: %v", len(seen), len(data.ExtraEnv), bySource)
+	}
+	for label, want := range map[string]string{
+		"GC_SUPERVISOR_ENV": "ANTHROPIC_BASE_URL",
+		"secrets.env":       "ANTHROPIC_AUTH_TOKEN",
+		"launchctl":         "GC_DOLT_PASSWORD",
+		"shell":             "LANG",
+		"gc":                tmux.TmpdirEnv,
+	} {
+		if !slices.Contains(bySource[label], want) {
+			t.Errorf("report %s = %v, want it to list %s", label, bySource[label], want)
+		}
+	}
+	for _, secret := range []string{"tok-file-1", "tok-file-2", "tok-file-zai", "shell-anthropic_base_url", "dolt-pass-from-launchctl", "en_US.UTF-8"} {
+		if strings.Contains(stdout, secret) || strings.Contains(stderr, secret) {
+			t.Errorf("install output carries persisted value %q:\nstdout=%s\nstderr=%s", secret, stdout, stderr)
+		}
+	}
+
+	code, stdout, _ = installSupervisorServiceForTest(t, "freebsd", data)
+	if code == 0 {
+		t.Fatalf("install on freebsd code = 0, want nonzero")
+	}
+	if strings.Contains(stdout, supervisorEnvSourcesReportHeader) {
+		t.Fatalf("failed install printed the sources report:\n%s", stdout)
 	}
 }
