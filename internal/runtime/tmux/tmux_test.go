@@ -4321,6 +4321,43 @@ func TestConfigureServerReappliesExitEmptyAfterReplacement(t *testing.T) {
 	}
 }
 
+// TestKillServerClosesListenerBeforeReturning verifies against a real tmux
+// server that KillServer's nil return means the named socket no longer
+// answers: a dying server acknowledges kill-server while its listener is
+// still bound, and an immediate restart would be refused with
+// ErrServerDegraded (reason=live-unix-socket).
+func TestKillServerClosesListenerBeforeReturning(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+
+	cfg := DefaultConfig()
+	cfg.SocketName = privateSocketName("settle")
+	provider := NewProviderWithConfig(cfg)
+	tmux := provider.Tmux()
+	socketPath := namedSocketPath(cfg.SocketName)
+	t.Cleanup(func() {
+		if err := tmux.KillServer(); err != nil && !errors.Is(err, ErrNoServer) {
+			t.Errorf("tear down test tmux server: %v", err)
+		}
+		if err := os.Remove(socketPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("remove test tmux socket: %v", err)
+		}
+	})
+
+	if err := provider.Start(context.Background(), "settle-holder", runtimepkg.Config{Command: "sleep 600"}); err != nil {
+		t.Fatalf("start holder session: %v", err)
+	}
+	if err := tmux.KillServer(); err != nil {
+		t.Fatalf("KillServer() error = %v, want nil", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := observeNamedSocket(ctx, socketPath); err != nil {
+		t.Fatalf("socket still answers immediately after KillServer returned nil: %v", err)
+	}
+}
+
 func mustTmuxServerPID(t *testing.T, tmux *Tmux) string {
 	t.Helper()
 	out, err := tmux.run("list-sessions", "-F", "#{pid}")
