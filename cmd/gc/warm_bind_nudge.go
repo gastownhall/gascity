@@ -107,10 +107,11 @@ func buildWarmClaimTriggerProbe(cfg *config.City, resolve warmClaimTriggerResolv
 }
 
 // warmBindClaimText is the claim instruction a warm reuse reminds slot s
-// with: its template's configured nudge, else the pool default, the text the
-// claim backstop sends later (stalledPoolClaimNudgeFor). A template that
-// suppresses its startup prompt (the deterministic control dispatcher) gets
-// none, as at cold start.
+// with: the pool claim line the claim backstop sends later
+// (stalledPoolClaimNudgeFor), never the template's configured nudge, which is
+// startup text. A template that suppresses its startup prompt (the
+// deterministic control dispatcher) gets none, as at cold start, and so does
+// one not in the config.
 func warmBindClaimText(cfg *config.City, s beads.Bead) string {
 	if suppressStartupPromptForAgent(findAgentByTemplate(cfg, normalizedSessionTemplate(s, cfg))) {
 		return ""
