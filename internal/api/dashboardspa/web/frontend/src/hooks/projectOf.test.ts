@@ -379,6 +379,20 @@ describe('isWorkerSession', () => {
     ).toBe(true);
   });
 
+  it('counts a pool session named after its provider (gascity#9230)', () => {
+    // A pool on the default `claude` provider has no worker/polecat role in its
+    // name. The Agents rows list it as running, so the header count must too.
+    expect(
+      isWorkerSession(
+        gcSession({
+          template: 'claude',
+          session_name: 'claude-gcg-session-abc123',
+          rig: 'gascity',
+        }),
+      ),
+    ).toBe(true);
+  });
+
   it("counts a worker reported in the 'running' state", () => {
     // isRunningAgent / isSessionStreamable / stateTone all honour 'running';
     // isWorkerSession must too, or a worker in that state is silently dropped
@@ -395,6 +409,13 @@ describe('isWorkerSession', () => {
     expect(
       isWorkerSession(gcSession({ template: 'polecat', rig: 'gascity', state: 'closed' })),
     ).toBe(false);
+  });
+
+  it('excludes city infrastructure (deacon, boot, dog, witness, refinery) whatever its rig (gascity#9230)', () => {
+    for (const template of ['deacon', 'boot', 'dog', 'witness', 'refinery', 'gastown.deacon', 'gastown.boot', 'gastown.dog', 'gastown.witness', 'gastown.refinery']) {
+      expect(isWorkerSession(gcSession({ template, rig: '', state: 'running' }))).toBe(false);
+      expect(isWorkerSession(gcSession({ template, rig: 'gascity', state: 'running' }))).toBe(false);
+    }
   });
 
   it('excludes cross-rig orchestration (mayor, control-dispatcher, chief-of-staff)', () => {
@@ -416,7 +437,9 @@ describe('isWorkerSession', () => {
     );
   });
 
-  it('excludes a non-worker rig session (no worker/pool role)', () => {
-    expect(isWorkerSession(gcSession({ template: 'reviewer', rig: 'gascity' }))).toBe(false);
+  it('counts a non-orchestration rig session with no worker/pool role (gascity#9230)', () => {
+    // Option (a): the header counts every running non-orchestration session,
+    // matching the Agents rows. Only orchestration is excluded.
+    expect(isWorkerSession(gcSession({ template: 'reviewer', rig: 'gascity' }))).toBe(true);
   });
 });
