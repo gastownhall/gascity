@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/doltpool"
+	"github.com/go-sql-driver/mysql"
 )
 
 type managedDoltSQLHealthReport struct {
@@ -34,6 +35,14 @@ type managedDoltSQLHealthReport struct {
 	// DatabaseError says which database check failed when DatabaseReady is
 	// false.
 	DatabaseError string
+	// DatabaseFaultPersistent is true when DatabaseReady is false because
+	// the database itself is at fault, which a server restart cannot
+	// repair: its repository is absent from the data dir, or the server's
+	// answer to the head probe says the database is not in its catalog or
+	// its head does not resolve (managedDoltHeadFaultPersistent). A probe
+	// that timed out or lost its connection, any other answer, and a failed
+	// sample write or read-back leave it false.
+	DatabaseFaultPersistent bool
 }
 
 // managedDoltHealthTarget names the scope database a health check must prove
@@ -302,8 +311,9 @@ func managedDoltHealthCheckFor(host, port, user string, checkReadOnly bool, targ
 		Database:   strings.TrimSpace(target.Database),
 	}
 	if report.Database != "" {
-		if err := managedDoltCheckDatabase(host, port, user, report.Database, target.DataDir); err != nil {
+		if persistent, err := managedDoltCheckDatabase(host, port, user, report.Database, target.DataDir); err != nil {
 			report.DatabaseError = err.Error()
+			report.DatabaseFaultPersistent = persistent
 			if checkReadOnly {
 				report.ReadOnly = "unknown"
 			}
@@ -345,32 +355,60 @@ func managedDoltConnectionCountBestEffort(host, port, user string) string {
 // managedDoltCheckDatabase proves database exists and its default branch head
 // resolves. When dataDir is set it first requires the database's on-disk
 // repository, because a server can keep serving a database whose directory
-// was removed or swapped underneath it.
-func managedDoltCheckDatabase(host, port, user, database, dataDir string) error {
+// was removed or swapped underneath it. On failure, persistent reports
+// whether the database itself is at fault (DatabaseFaultPersistent).
+func managedDoltCheckDatabase(host, port, user, database, dataDir string) (persistent bool, err error) {
 	if strings.TrimSpace(dataDir) != "" {
 		if err := managedDoltDatabaseOnDisk(dataDir, database); err != nil {
-			return err
+			return true, err
 		}
 	}
 	if _, err := managedDoltDatabaseHead(host, port, user, database); err != nil {
-		return fmt.Errorf("database %q default branch head unresolvable: %w", database, err)
+		return managedDoltHeadFaultPersistent(err), fmt.Errorf("database %q default branch head unresolvable: %w", database, err)
 	}
-	return nil
+	return false, nil
 }
 
-// managedDoltDatabaseName maps a repository directory name to the database
-// name Dolt exposes it as: '-' becomes '_' and matching is
-// case-insensitive. The provider script's managed_backing_store_exists
-// compares the same way.
-func managedDoltDatabaseName(name string) string {
-	return strings.ReplaceAll(strings.ToLower(name), "-", "_")
+// managedDoltCLIErrorPattern matches a server answer as the dolt CLI prints
+// it, "Error 1049 (HY000): database not found: hq", capturing the errno and
+// the message.
+var managedDoltCLIErrorPattern = regexp.MustCompile(`Error (\d+) \([0-9A-Z]{5}\): (.*)`)
+
+// managedDoltHeadFaultPersistent reports whether a head probe failure is the
+// server's answer that the database itself is at fault: errno 1049 (the
+// database is not in its catalog), errno 1105 with one of the messages Dolt
+// gives when the database's default branch head does not resolve, or a head
+// that is not a commit hash. A timeout, a lost connection or any other
+// answer does not confirm it; errno 1105 is Dolt's code for most internal
+// errors, so only its head-resolution messages count.
+func managedDoltHeadFaultPersistent(err error) bool {
+	if errors.Is(err, errManagedDoltUnexpectedHead) {
+		return true
+	}
+	var errno, message string
+	var serverErr *mysql.MySQLError
+	if errors.As(err, &serverErr) {
+		errno, message = strconv.Itoa(int(serverErr.Number)), serverErr.Message
+	} else if match := managedDoltCLIErrorPattern.FindStringSubmatch(err.Error()); match != nil {
+		errno, message = match[1], match[2]
+	}
+	switch errno {
+	case "1049":
+		return true
+	case "1105":
+		return strings.Contains(message, "cannot resolve default branch head") ||
+			strings.Contains(message, "no root value found in session")
+	}
+	return false
 }
 
 // managedDoltDatabaseOnDisk reports whether dataDir holds a Dolt repository
 // for database. Dolt matches database names case-insensitively, so a
-// directory that differs only in case counts, and it exposes a directory
-// named with '-' as a database named with '_'. A repository reached
-// through a symlink counts, like the shell glob's directory test.
+// directory that differs only in case counts, and a repository reached
+// through a symlink counts, like the shell glob's directory test. Dolt serves
+// a directory under its own name unless DOLT_DBNAME_REPLACE is set, and gc
+// and bd do not set it, so a directory gas-city does not hold the database
+// gas_city.
 func managedDoltDatabaseOnDisk(dataDir, database string) error {
 	if managedDoltIsRepoDir(filepath.Join(dataDir, database)) {
 		return nil
@@ -379,15 +417,8 @@ func managedDoltDatabaseOnDisk(dataDir, database string) error {
 	if err != nil {
 		return fmt.Errorf("database %q: reading data dir %s: %w", database, dataDir, err)
 	}
-	want := managedDoltDatabaseName(database)
 	for _, entry := range entries {
-		if managedDoltDatabaseName(entry.Name()) != want {
-			continue
-		}
-		if info, err := os.Stat(filepath.Join(dataDir, entry.Name())); err != nil || !info.IsDir() {
-			continue
-		}
-		if managedDoltIsRepoDir(filepath.Join(dataDir, entry.Name())) {
+		if strings.EqualFold(entry.Name(), database) && managedDoltIsRepoDir(filepath.Join(dataDir, entry.Name())) {
 			return nil
 		}
 	}
@@ -415,11 +446,15 @@ func managedDoltDatabaseHead(host, port, user, database string) (string, error) 
 	return managedDoltParseHead(out)
 }
 
+// errManagedDoltUnexpectedHead is the head probe's failure when the server
+// answers with a value that is not a commit hash.
+var errManagedDoltUnexpectedHead = errors.New("unexpected head")
+
 func managedDoltParseHead(out string) (string, error) {
 	lines := strings.Split(strings.TrimSpace(out), "\n")
 	head := strings.TrimSpace(lines[len(lines)-1])
 	if !managedDoltCommitHashPattern.MatchString(head) {
-		return "", fmt.Errorf("unexpected head %q", strings.TrimSpace(out))
+		return "", fmt.Errorf("%w %q", errManagedDoltUnexpectedHead, strings.TrimSpace(out))
 	}
 	return head, nil
 }
@@ -473,6 +508,7 @@ func managedDoltHealthCheckFields(report managedDoltSQLHealthReport) []string {
 	return append(fields,
 		"database_ready\tfalse",
 		"database_error\t"+managedDoltFieldValue(report.DatabaseError),
+		"database_fault_persistent\t"+strconv.FormatBool(report.DatabaseFaultPersistent),
 	)
 }
 

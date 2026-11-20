@@ -2414,12 +2414,18 @@ check_read_only() {
     return 2
 }
 
+# load_health_check_from_gc runs `gc dolt-state health-check` and loads its
+# report into the GC_HEALTH_* variables. $1 and $2 name the scope database to
+# prove and the data dir that must hold it. $3=false drops --check-read-only:
+# the check then runs no read-only probe and no sample write against the
+# database. Returns 1 when there is no helper or the helper fails.
 load_health_check_from_gc() {
-    local gc_bin host output key value health_db="${1:-}" health_data_dir="${2:-}"
+    local gc_bin host output key value health_db="${1:-}" health_data_dir="${2:-}" health_check_read_only="${3:-true}"
     host=$(connect_host)
     gc_bin=$(resolve_gc_helper_bin)
     [ -n "$gc_bin" ] || return 1
-    set -- --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --check-read-only
+    set -- --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER"
+    [ "$health_check_read_only" = "true" ] && set -- "$@" --check-read-only
     [ -n "$health_db" ] && set -- "$@" --database "$health_db"
     [ -n "$health_data_dir" ] && set -- "$@" --data-dir "$health_data_dir"
     output=$("$gc_bin" dolt-state health-check "$@" </dev/null 2>/dev/null) || return 1
@@ -2428,6 +2434,7 @@ load_health_check_from_gc() {
     GC_HEALTH_CONNECTION_COUNT=""
     GC_HEALTH_DATABASE_READY=""
     GC_HEALTH_DATABASE_ERROR=""
+    GC_HEALTH_DATABASE_FAULT_PERSISTENT=""
     while IFS="$(printf '	')" read -r key value; do
         case "$key" in
             query_ready)
@@ -2444,6 +2451,9 @@ load_health_check_from_gc() {
                 ;;
             database_error)
                 GC_HEALTH_DATABASE_ERROR="$value"
+                ;;
+            database_fault_persistent)
+                GC_HEALTH_DATABASE_FAULT_PERSISTENT="$value"
                 ;;
         esac
     done <<EOF
@@ -2474,20 +2484,21 @@ city_health_data_dir() {
 # check_city_database is the helper-less form of the database checks
 # `gc dolt-state health-check --database` runs: the repository is on disk
 # (managed servers only), the database is in the catalog, and its default
-# branch head resolves. Prints the failure and returns 1 when any fails.
+# branch head resolves. Prints the failure and returns 1 when any fails
+# because the database itself is at fault, and 2 when the head probe failed
+# without the server saying so (a lost connection), the way
+# managedDoltHeadFaultPersistent tells them apart.
 check_city_database() {
-    local db="$1" data_dir="$2" host output head db_norm entry entry_name found
+    local db="$1" data_dir="$2" host output head db_lower entry entry_name found
     if [ -n "$data_dir" ] && [ ! -d "$data_dir/$db/.dolt" ]; then
         # Dolt matches database names case-insensitively, so a repository
-        # directory that differs only in case counts, and it exposes a
-        # directory named with '-' as a database named with '_' — the rule
-        # managed_backing_store_exists compares by.
+        # directory that differs only in case counts.
         found=false
-        db_norm=$(printf '%s' "$db" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
+        db_lower=$(printf '%s' "$db" | tr '[:upper:]' '[:lower:]')
         for entry in "$data_dir"/*/; do
             [ -d "$entry" ] || continue
             entry_name=$(basename "$entry")
-            if [ "$(printf '%s' "$entry_name" | tr '[:upper:]' '[:lower:]' | tr '-' '_')" = "$db_norm" ] && [ -d "$data_dir/$entry_name/.dolt" ]; then
+            if [ "$(printf '%s' "$entry_name" | tr '[:upper:]' '[:lower:]')" = "$db_lower" ] && [ -d "$data_dir/$entry_name/.dolt" ]; then
                 found=true
                 break
             fi
@@ -2501,7 +2512,12 @@ check_city_database() {
     if ! output=$(dolt --host "$host" --port "$DOLT_PORT" --user "$DOLT_USER" --password "${DOLT_PASSWORD:-}" --no-tls \
         sql -r csv -q "USE $(quote_dolt_identifier "$db"); SELECT DOLT_HASHOF('HEAD') AS head" 2>&1); then
         echo "database \"$db\" default branch head unresolvable: $(printf '%s' "$output" | tr '\n' ' ')"
-        return 1
+        case "$output" in
+            *"Error 1049 ("*) return 1 ;;
+            *"Error 1105 ("*"cannot resolve default branch head"*) return 1 ;;
+            *"Error 1105 ("*"no root value found in session"*) return 1 ;;
+        esac
+        return 2
     fi
     head=$(printf '%s\n' "$output" | tail -n 1 | tr -d '[:space:]')
     case "$head" in
@@ -2514,20 +2530,25 @@ check_city_database() {
 
 # city_database_unavailable_on_answering_server prints why the city database
 # is unavailable and returns 0 when the server answers SQL but the city
-# database does not pass the health checks. It returns 1 when no city database
-# is named, the server is not answering, or the city database is ready. A
-# helper report without a database verdict falls back to the shell checks.
+# database has a fault a restart cannot repair: its repository is absent from
+# the data dir, or the server says it is not in the catalog or its head does
+# not resolve. It returns 1 when no city database is named, the server is not
+# answering, the city database is ready, or the checks do not confirm such a
+# fault (a probe timed out or lost its connection). It runs no sample write:
+# a failing write path is recover-managed's to diagnose. A helper report
+# without a database verdict falls back to the shell checks.
 city_database_unavailable_on_answering_server() {
     local db data_dir failure
     db=$(city_health_database)
     [ -n "$db" ] || return 1
     tcp_check || return 1
     data_dir=$(city_health_data_dir)
-    if load_health_check_from_gc "$db" "$data_dir"; then
+    if load_health_check_from_gc "$db" "$data_dir" false; then
         [ "$GC_HEALTH_QUERY_READY" = "true" ] || return 1
         case "$GC_HEALTH_DATABASE_READY" in
             true) return 1 ;;
             false)
+                [ "$GC_HEALTH_DATABASE_FAULT_PERSISTENT" = "true" ] || return 1
                 printf '%s\n' "${GC_HEALTH_DATABASE_ERROR:-health check reported database \"$db\" unavailable}"
                 return 0
                 ;;
@@ -2535,6 +2556,7 @@ city_database_unavailable_on_answering_server() {
     fi
     do_query_probe || return 1
     failure=$(check_city_database "$db" "$data_dir") && return 1
+    [ "$?" -eq 1 ] || return 1
     printf '%s\n' "$failure"
     return 0
 }
@@ -5116,9 +5138,11 @@ op_recover() {
         die "dolt recovery skipped: storage stall"
     fi
 
-    # Skip recovery when the server answers SQL and only the city database is
-    # unavailable. A restart cannot recreate or repair a database, and each
-    # health tick that failed would restart the shared server again.
+    # Skip recovery when the server answers SQL and the city database has a
+    # fault a restart cannot repair. A restart cannot recreate or repair a
+    # database, and each health tick that failed would restart the shared
+    # server again. A probe that timed out or lost its connection, or a
+    # failing write path, still gets recovery.
     if recover_db_failure=$(city_database_unavailable_on_answering_server); then
         recover_db=$(city_health_database)
         echo "skipping dolt recovery: the server answers but city database '$recover_db' is unavailable: $recover_db_failure" >&2
