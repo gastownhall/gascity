@@ -229,6 +229,15 @@ func (c providerOwnedIdentityCity) stampedLayers(t *testing.T) []string {
 	return layers
 }
 
+func (c providerOwnedIdentityCity) metadataProjectID(t *testing.T) string {
+	t.Helper()
+	id, err := readManagedMetadataProjectID(scopeMetadataJSONPath(c.dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
 func (c providerOwnedIdentityCity) identity(t *testing.T) (string, bool) {
 	t.Helper()
 	id, ok, err := contract.ReadProjectIdentity(fsys.OSFS{}, c.dir)
@@ -244,6 +253,13 @@ func proxiedIdentityMetadata(projectID string) string {
 		m += `,"project_id":"` + projectID + `"`
 	}
 	return m + "}"
+}
+
+func writeIdentityFile(t *testing.T, scope, id string) {
+	t.Helper()
+	if _, err := writeProjectIdentityIfNeeded(fsys.OSFS{}, scope, id); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // TestInitAndHookDirProviderOwnedReconcilesProjectIdentity: a pending
@@ -279,5 +295,56 @@ func TestInitAndHookDirProviderOwnedReconcilesProjectIdentity(t *testing.T) {
 	}
 	if fake.closed != len(fake.opened) {
 		t.Fatalf("L3 opened %d time(s) and closed %d, want every open closed", len(fake.opened), fake.closed)
+	}
+}
+
+// TestInitAndHookDirProviderOwnedReconcileLayers: with L1 = P, exactly the
+// layers decideReconcile selects are written to P, one stamped event each.
+func TestInitAndHookDirProviderOwnedReconcileLayers(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		l1, l2, l3 string
+		wantLayers []string
+		wantSeeds  int
+	}{
+		{name: "seed L3", l1: providerOwnedIdentityP, l2: providerOwnedIdentityP, wantLayers: []string{"L3"}, wantSeeds: 1},
+		{name: "repair stale L2", l1: providerOwnedIdentityP, l2: providerOwnedIdentityQ, l3: providerOwnedIdentityP, wantLayers: []string{"L2"}},
+		{name: "repair stale L2 and seed L3", l1: providerOwnedIdentityP, l2: providerOwnedIdentityQ, wantLayers: []string{"L2", "L3"}, wantSeeds: 1},
+		{name: "seed missing L2", l1: providerOwnedIdentityP, l3: providerOwnedIdentityP, wantLayers: []string{"L2"}},
+		{name: "seed missing L2 and L3", l1: providerOwnedIdentityP, wantLayers: []string{"L2", "L3"}, wantSeeds: 1},
+		{name: "adopt L1 and L2 from L3", l3: providerOwnedIdentityP, wantLayers: []string{"L1", "L2"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			city := newProviderOwnedIdentityCity(t, proxiedIdentityMetadata(tc.l2))
+			if tc.l1 != "" {
+				writeIdentityFile(t, city.dir, tc.l1)
+			}
+			stubLiveProviderOwnedProxy(t)
+			fake := &providerOwnedL3Fake{l3: &projectIdentityL3Double{projectID: tc.l3}}
+			stubProviderOwnedL3(t, fake)
+
+			if err := initAndHookDirResolvingDatabase(city.dir, city.dir, "gc", nil); err != nil {
+				t.Fatalf("initAndHookDirResolvingDatabase: %v", err)
+			}
+
+			if got := city.stampedLayers(t); strings.Join(got, ",") != strings.Join(tc.wantLayers, ",") {
+				t.Fatalf("stamped layers = %v, want %v", got, tc.wantLayers)
+			}
+			if fake.seeds != tc.wantSeeds {
+				t.Fatalf("L3 seeds = %d, want %d", fake.seeds, tc.wantSeeds)
+			}
+			if got, ok := city.identity(t); !ok || got != providerOwnedIdentityP {
+				t.Fatalf("L1 = (%q, %t), want %q", got, ok, providerOwnedIdentityP)
+			}
+			if got := city.metadataProjectID(t); got != providerOwnedIdentityP {
+				t.Fatalf("L2 = %q, want %q", got, providerOwnedIdentityP)
+			}
+			if fake.l3.projectID != providerOwnedIdentityP {
+				t.Fatalf("L3 = %q, want %q", fake.l3.projectID, providerOwnedIdentityP)
+			}
+			if got := city.entry(t).State; got != providerScopeReady {
+				t.Fatalf("journal state = %q, want %q", got, providerScopeReady)
+			}
+		})
 	}
 }
