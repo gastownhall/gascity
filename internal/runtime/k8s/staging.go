@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -40,7 +41,7 @@ func stageFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Con
 	podWorkDir := "/workspace"
 	workDirRel, workDirIsNested := relativeCityWorkDir(ctrlCity, cfg.WorkDir)
 	if workDirIsNested {
-		podWorkDir = filepath.Join("/workspace", workDirRel)
+		podWorkDir = path.Join("/workspace", filepath.ToSlash(workDirRel))
 	}
 	workDirStaged := false
 	workDirIsCityRoot := ctrlCity != "" && filepath.Clean(cfg.WorkDir) == filepath.Clean(ctrlCity)

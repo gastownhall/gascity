@@ -335,7 +335,7 @@ func TestStageFilesQuietWhenWorkDirHoldsKiroFallback(t *testing.T) {
 
 	var warnings bytes.Buffer
 	ops := newCapturingStageOps()
-	err := stageFiles(context.Background(), ops, "gc-kiro", runtime.Config{
+	_, err := stageFiles(context.Background(), ops, "gc-kiro", runtime.Config{
 		WorkDir:         workDir,
 		ProviderName:    "kiro",
 		PackOverlayDirs: []string{packOverlay},
