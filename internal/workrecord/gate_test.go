@@ -159,6 +159,17 @@ func TestGated(t *testing.T) {
 			}
 		})
 	}
+
+	// Every engine-owned kind stays outside the contract, including the
+	// task kind stamped on attempt roots and rig-create receipts.
+	for _, kind := range beadmeta.EngineKinds {
+		t.Run("engine kind "+kind+" is not gated", func(t *testing.T) {
+			bead := beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.KindMetadataKey: kind}}
+			if Gated(bead) {
+				t.Fatalf("Gated(gc.kind=%q) = true, want false", kind)
+			}
+		})
+	}
 }
 
 // TestPreferredReachabilityRef exercises the ref-selection decision behind
