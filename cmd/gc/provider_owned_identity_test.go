@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -398,4 +399,76 @@ func TestProviderOwnedIdentityProxiedEndpoint(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestProviderOwnedIdentityDirectEndpoint: a direct scope connects to the
+// target the connection contract resolves: bd's own live server port, even
+// when legacy managed coordinates are in the environment, and the socket or
+// host:port bd persisted for an external binding.
+func TestProviderOwnedIdentityDirectEndpoint(t *testing.T) {
+	directScope := func(t *testing.T, metadata string) (string, *providerOwnedL3Fake) {
+		t.Helper()
+		clearInheritedBeadsEnv(t)
+		clearProviderOwnedProxyEnv(t)
+		city := t.TempDir()
+		writeReadyTopologyScope(t, city, readyTopologyScope{beadsConfig: bdTemplateBeadsConfig, metadata: metadata})
+		writeIdentityFile(t, city, providerOwnedIdentityP)
+		fake := &providerOwnedL3Fake{l3: &projectIdentityL3Double{projectID: providerOwnedIdentityP}}
+		stubProviderOwnedL3(t, fake)
+		return city, fake
+	}
+	reconcileTarget := func(t *testing.T, city string, fake *providerOwnedL3Fake) contract.DoltConnectionTarget {
+		t.Helper()
+		if err := reconcileProviderOwnedScopeIdentity(context.Background(), city, city); err != nil {
+			t.Fatalf("reconcileProviderOwnedScopeIdentity: %v", err)
+		}
+		if len(fake.opened) != 1 {
+			t.Fatalf("L3 opened %d time(s), want 1", len(fake.opened))
+		}
+		opened := fake.opened[0]
+		if opened.ProxyPort != 0 {
+			t.Fatalf("direct scope opened through a proxy port %d", opened.ProxyPort)
+		}
+		if opened.Database != opened.Target.Database {
+			t.Fatalf("opened database %q, target database %q: want the same", opened.Database, opened.Target.Database)
+		}
+		return opened.Target
+	}
+
+	t.Run("bd-owned local server wins over legacy managed coordinates", func(t *testing.T) {
+		city, fake := directScope(t, `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"prov","project_id":"`+providerOwnedIdentityP+`"}`)
+		listener := listenOnRandomPort(t)
+		t.Cleanup(func() { _ = listener.Close() })
+		port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+		beadsDir := filepath.Join(city, ".beads")
+		if err := os.WriteFile(filepath.Join(beadsDir, "dolt-server.pid"), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, "dolt-server.port"), []byte(port+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GC_DOLT_HOST", "127.0.0.1")
+		t.Setenv("GC_DOLT_PORT", "1")
+
+		target := reconcileTarget(t, city, fake)
+		if target.Host != "127.0.0.1" || target.Port != port || target.Socket != "" || target.Database != "prov" {
+			t.Fatalf("target = %+v, want bd's own server 127.0.0.1:%s/prov", target, port)
+		}
+	})
+
+	t.Run("external host:port binding", func(t *testing.T) {
+		city, fake := directScope(t, `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_server_host":"db.example","dolt_server_port":4406,"dolt_database":"hosted","project_id":"`+providerOwnedIdentityP+`"}`)
+		target := reconcileTarget(t, city, fake)
+		if target.Host != "db.example" || target.Port != "4406" || target.Socket != "" || target.Database != "hosted" {
+			t.Fatalf("target = %+v, want bd's persisted external db.example:4406/hosted", target)
+		}
+	})
+
+	t.Run("external socket binding", func(t *testing.T) {
+		city, fake := directScope(t, `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_server_socket":"/run/dolt/provider.sock","dolt_database":"hosted","project_id":"`+providerOwnedIdentityP+`"}`)
+		target := reconcileTarget(t, city, fake)
+		if target.Socket != "/run/dolt/provider.sock" || target.Database != "hosted" {
+			t.Fatalf("target = %+v, want bd's persisted socket /run/dolt/provider.sock for hosted", target)
+		}
+	})
 }
