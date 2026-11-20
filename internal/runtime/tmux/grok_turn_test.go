@@ -222,3 +222,97 @@ func TestGrokPaneReadsItsFooter(t *testing.T) {
 		})
 	}
 }
+
+// A claude pane carrying grok's footer text — the hint above the ready
+// prompt, below it, or as the whole screen — never reads busy: the hint is
+// grok's own indicator, and no reader this leaf consults (the busy scan,
+// TurnRunning, the verified submit's busy reader) treats it as another
+// family's (AC-4).
+const (
+	claudeIdleWithGrokHintAbove = "● Done.\n" +
+		"\n" +
+		grokHintRow + "\n" +
+		"❯ \n" +
+		"  ? for shortcuts"
+	claudeIdleWithGrokHintBelow = "● Done.\n" +
+		"\n" +
+		"❯ \n" +
+		grokHintRow + "\n" +
+		"  ? for shortcuts"
+)
+
+// Guard: grok's hint text alone never produces a busy reading outside a grok
+// pane. The grok-side placement rules (the hint below the composer is busy,
+// above it is transcript) are pinned by the tests above; this pins the other
+// half of the scoping — the reader is consulted only for a grok pane, so the
+// same text in a claude pane is inert (AC-4).
+func TestGrokHintTextIsNotBusyOutsideGrokPanes(t *testing.T) {
+	screens := []struct {
+		name   string
+		screen string
+	}{
+		{name: "hint above the prompt", screen: claudeIdleWithGrokHintAbove},
+		{name: "hint below the prompt", screen: claudeIdleWithGrokHintBelow},
+		{name: "hint with no prompt", screen: grokBusyNoComposer},
+	}
+	t.Run("paneBusyReading", func(t *testing.T) {
+		for _, tc := range screens {
+			if paneBusyReading(strings.Split(tc.screen, "\n"), "claude") {
+				t.Errorf("%s: paneBusyReading(claude) = true, want false: grok's hint is not claude's indicator", tc.name)
+			}
+		}
+	})
+	t.Run("TurnRunning", func(t *testing.T) {
+		for _, tc := range screens {
+			tm := NewTmux()
+			tm.exec = &familyStaticPane{family: "claude", screen: tc.screen}
+
+			running, err := tm.TurnRunning("lab")
+			if err != nil {
+				t.Fatalf("TurnRunning(%s) err = %v, want nil", tc.name, err)
+			}
+			if running {
+				t.Errorf("%s: TurnRunning = true, want false: the hint text alone is not a claude turn", tc.name)
+			}
+		}
+	})
+	t.Run("paneBusyFor", func(t *testing.T) {
+		for _, tc := range screens {
+			tm := NewTmux()
+			tm.exec = &familyStaticPane{family: "claude", screen: tc.screen}
+
+			busy, err := tm.paneBusyFor("lab", "claude")
+			if err != nil {
+				t.Fatalf("paneBusyFor(%s) err = %v, want nil", tc.name, err)
+			}
+			if busy {
+				t.Errorf("%s: paneBusyFor(claude) = true, want false: the verified submit's busy reader must not fire on grok's hint", tc.name)
+			}
+		}
+	})
+}
+
+// The same claude pane stays idle in the snapshot scan: grok's hint text in
+// the transcript does not push a prompt-visible pane off idle (AC-4).
+func TestSnapshotIdleIgnoresGrokHintTextInAClaudePane(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		screen string
+	}{
+		{name: "hint above the prompt", screen: claudeIdleWithGrokHintAbove},
+		{name: "hint below the prompt", screen: claudeIdleWithGrokHintBelow},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tm := NewTmux()
+			tm.exec = &familyStaticPane{family: "claude", screen: tc.screen}
+
+			idle, err := tm.SnapshotIdle("lab")
+			if err != nil {
+				t.Fatalf("SnapshotIdle err = %v, want nil", err)
+			}
+			if !idle {
+				t.Errorf("SnapshotIdle = false, want true: the pane is at its ready prompt")
+			}
+		})
+	}
+}
