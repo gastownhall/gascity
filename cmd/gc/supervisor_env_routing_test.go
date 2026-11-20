@@ -139,3 +139,53 @@ func TestSupervisorServiceEnvWithholdsShellRoutingPerPrefix(t *testing.T) {
 		t.Fatalf("WithheldEnv = %+v, want %+v", data.WithheldEnv, want)
 	}
 }
+
+// TestSupervisorServiceEnvKeepsShellRoutingWithoutDurableOnlyCredentials pins
+// AC-2: shell routing persists as it always has when no credential under the
+// prefix comes from a durable tier, or when the shell itself supplies one.
+func TestSupervisorServiceEnvKeepsShellRoutingWithoutDurableOnlyCredentials(t *testing.T) {
+	t.Run("no secrets.env", func(t *testing.T) {
+		isolateSupervisorRoutingEnv(t)
+		t.Setenv("ANTHROPIC_BASE_URL", "https://shell.example.test")
+		t.Setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+
+		data, err := buildSupervisorServiceData()
+		if err != nil {
+			t.Fatalf("buildSupervisorServiceData: %v", err)
+		}
+		got := supervisorServiceEnvMap(data.ExtraEnv)
+		if got["ANTHROPIC_BASE_URL"] != "https://shell.example.test" {
+			t.Errorf("ExtraEnv[ANTHROPIC_BASE_URL] = %q, want shell value", got["ANTHROPIC_BASE_URL"])
+		}
+		if got["OLLAMA_HOST"] != "http://127.0.0.1:11434" {
+			t.Errorf("ExtraEnv[OLLAMA_HOST] = %q, want shell value", got["OLLAMA_HOST"])
+		}
+		if len(data.WithheldEnv) != 0 {
+			t.Errorf("WithheldEnv = %+v, want none", data.WithheldEnv)
+		}
+	})
+	t.Run("shell supplies a credential", func(t *testing.T) {
+		isolateSupervisorRoutingEnv(t)
+		t.Setenv("ANTHROPIC_AUTH_TOKEN", "tok-shell")
+		t.Setenv("ANTHROPIC_BASE_URL", "https://shell.example.test")
+		writeSupervisorSecretsEnvFile(t, "ANTHROPIC_AUTH_TOKEN_ZAI=tok-file-zai\n")
+
+		data, err := buildSupervisorServiceData()
+		if err != nil {
+			t.Fatalf("buildSupervisorServiceData: %v", err)
+		}
+		got := supervisorServiceEnvMap(data.ExtraEnv)
+		for name, want := range map[string]string{
+			"ANTHROPIC_AUTH_TOKEN":     "tok-shell",
+			"ANTHROPIC_BASE_URL":       "https://shell.example.test",
+			"ANTHROPIC_AUTH_TOKEN_ZAI": "tok-file-zai",
+		} {
+			if got[name] != want {
+				t.Errorf("ExtraEnv[%s] = %q, want %q", name, got[name], want)
+			}
+		}
+		if len(data.WithheldEnv) != 0 {
+			t.Errorf("WithheldEnv = %+v, want none", data.WithheldEnv)
+		}
+	})
+}
