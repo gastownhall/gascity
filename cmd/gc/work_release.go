@@ -439,7 +439,11 @@ func releaseListed(claims []seatWorkHit, why releaseWhy, seat releaseSeat, cfg *
 // into the claim's next assignment, where once its socket is gone it holds
 // the work for good.
 func releaseServed(c seatWorkHit, wa workAssignment, p releasePolicy, fallback string) (string, error) {
-	if p.pool && !liveWorkAssignmentStillReleasable(c.store, c.bead.ID, c.bead.Status, strings.TrimSpace(c.bead.Assignee)) {
+	// A parked claim skips the raw-status re-read, which lists open and so
+	// cannot see it: every write the release can take is fenced on the
+	// snapshot (the revision CAS, or releaseAssignmentFenced on its recorded
+	// status and assignee), and ReleaseIfCurrent takes in_progress only.
+	if p.pool && !p.releasesParked(c.bead) && !liveWorkAssignmentStillReleasable(c.store, c.bead.ID, c.bead.Status, strings.TrimSpace(c.bead.Assignee)) {
 		return keptMoved, nil
 	}
 	if p.detached {

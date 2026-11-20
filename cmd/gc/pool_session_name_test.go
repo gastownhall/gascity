@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -2799,4 +2800,47 @@ func TestDirectSessionBeadIDCandidates_SkipsFlagLikeCandidates(t *testing.T) {
 			t.Fatalf("candidate %q starts with %q; stores that shell out would read it as a flag (all: %v)", c, "-", candidates)
 		}
 	}
+}
+
+// TestReleaseOrphanedPoolAssignmentsReleasesParkedClaim: the orphan sweep
+// gives back a routed pool claim its dead assignee left parked, keeping the
+// status: the claim is reported released, the one write carries no status,
+// and the bead ends unassigned and still blocked, not kept as moved on every
+// tick because a raw-open re-read cannot see it. Both write tiers keep the
+// status: bd's guarded update on a folded row, and the revision CAS on a
+// store that records the raw status.
+func TestReleaseOrphanedPoolAssignmentsReleasesParkedClaim(t *testing.T) {
+	routed := map[string]string{beadmeta.RoutedToMetadataKey: "worker"}
+	sweep := func(store beads.Store, wb beads.Bead) []releasedPoolAssignment {
+		return releaseOrphanedPoolAssignments(store, beads.SessionStore{Store: store}, testPoolReleaseConfig(), "", nil,
+			[]beads.Bead{wb}, []beads.Store{store}, nil, nil, nil, nil, nil)
+	}
+
+	t.Run("guarded update", func(t *testing.T) {
+		bd := newParkedBdStore()
+		claim := foldBdStatus(seedParkedClaim(t, bd.mem, "worker-dead", "blocked", routed))
+
+		released := sweep(bd, claim)
+		if len(released) != 1 || released[0].ID != claim.ID {
+			t.Fatalf("released = %v, want [%s]", released, claim.ID)
+		}
+		assertParkedRelease(t, bd.mem, claim.ID, "blocked")
+		if len(bd.guarded) != 1 || bd.guarded[0].status != "blocked" || bd.guarded[0].opts.Status != nil {
+			t.Errorf("guarded updates = %+v, want one fenced on blocked writing no status", bd.guarded)
+		}
+	})
+
+	t.Run("revision CAS", func(t *testing.T) {
+		store := openRevisionReleaseStore(t, gate.Require)
+		claim := seedParkedClaim(t, store.MemStore, "worker-dead", "blocked", routed)
+
+		released := sweep(store, claim)
+		if len(released) != 1 || released[0].ID != claim.ID {
+			t.Fatalf("released = %v, want [%s]", released, claim.ID)
+		}
+		assertParkedRelease(t, store.MemStore, claim.ID, "blocked")
+		if store.conditionalCalls != 1 || store.legacyCalls != 0 {
+			t.Errorf("writes: conditional=%d legacy=%d, want the one revision CAS", store.conditionalCalls, store.legacyCalls)
+		}
+	})
 }
