@@ -1905,7 +1905,8 @@ func supervisorServiceExtraEnv() ([]supervisorServiceEnvVar, []supervisorWithhel
 	// entry must clear the same gate the other tiers use — the persist
 	// allowlist or an explicit opt-in — so a stray key cannot bloat the
 	// service env.
-	for key, val := range supervisorSecretsEnvFileEntries() {
+	secrets := supervisorSecretsEnvFileEntries()
+	for key, val := range secrets {
 		if val == "" {
 			continue
 		}
@@ -1945,7 +1946,7 @@ func supervisorServiceExtraEnv() ([]supervisorServiceEnvVar, []supervisorWithhel
 			env[key] = supervisorTrackedEnv{Value: val, Source: supervisorEnvSourceLaunchctl}
 		}
 	}
-	withheld := withholdShellRoutingBesideDurableCredentials(env)
+	withheld := withholdShellRoutingBesideDurableCredentials(env, secrets)
 	// This process is a Gas City-owned recursive child. Assign the canonical
 	// fixed value after every inherited, explicit, secrets-file, and launchctl
 	// tier so none can re-enable product metrics in the service process.

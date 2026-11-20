@@ -64,10 +64,12 @@ type supervisorWithheldEnv struct {
 // withholdShellRoutingBesideDurableCredentials keeps a provider's routing
 // consistent with the tier its credentials come from. For each provider
 // prefix whose credential-class names all come from secrets.env or launchctl,
-// it removes from env every routing-class name the implicit shell scan
-// supplied, and reports those names per prefix. Credential-class names and
-// GC_SUPERVISOR_ENV opt-ins are never touched.
-func withholdShellRoutingBesideDurableCredentials(env map[string]supervisorTrackedEnv) []supervisorWithheldEnv {
+// it withholds every routing-class name the implicit shell scan supplied:
+// the name takes secrets' non-empty value for it when there is one (the
+// value the secrets.env tier would have filled had the shell not set it), and
+// is removed from env otherwise. It reports the withheld names per prefix.
+// Credential-class names and GC_SUPERVISOR_ENV opt-ins are never touched.
+func withholdShellRoutingBesideDurableCredentials(env map[string]supervisorTrackedEnv, secrets map[string]string) []supervisorWithheldEnv {
 	type prefixEnv struct {
 		durable      map[supervisorEnvSource]bool
 		shellCred    bool
@@ -104,6 +106,10 @@ func withholdShellRoutingBesideDurableCredentials(env map[string]supervisorTrack
 		}
 		sort.Strings(p.shellRouting)
 		for _, name := range p.shellRouting {
+			if val := secrets[name]; val != "" {
+				env[name] = supervisorTrackedEnv{Value: val, Source: supervisorEnvSourceSecretsFile}
+				continue
+			}
 			delete(env, name)
 		}
 		sources := make([]supervisorEnvSource, 0, len(p.durable))

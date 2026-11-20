@@ -234,3 +234,30 @@ func TestSupervisorServiceEnvPersistsExplicitShellRouting(t *testing.T) {
 		}
 	}
 }
+
+// TestSupervisorServiceEnvTakesWithheldRoutingFromSecretsFile pins AC-4: a
+// withheld shell routing name that secrets.env also sets persists with the
+// file's value and source, beside the file's credential.
+func TestSupervisorServiceEnvTakesWithheldRoutingFromSecretsFile(t *testing.T) {
+	isolateSupervisorRoutingEnv(t)
+	t.Setenv("ANTHROPIC_BASE_URL", "https://shell.example.test")
+	writeSupervisorSecretsEnvFile(t, "ANTHROPIC_AUTH_TOKEN=tok-file\nANTHROPIC_BASE_URL=https://file.example.test\n")
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	got := supervisorServiceEnvByName(data.ExtraEnv)
+	want := supervisorServiceEnvVar{Name: "ANTHROPIC_BASE_URL", Value: "https://file.example.test", Source: supervisorEnvSourceSecretsFile}
+	if got["ANTHROPIC_BASE_URL"] != want {
+		t.Fatalf("ExtraEnv[ANTHROPIC_BASE_URL] = %+v, want %+v", got["ANTHROPIC_BASE_URL"], want)
+	}
+	wantWithheld := []supervisorWithheldEnv{{
+		Prefix:            "ANTHROPIC_",
+		Names:             []string{"ANTHROPIC_BASE_URL"},
+		CredentialSources: []supervisorEnvSource{supervisorEnvSourceSecretsFile},
+	}}
+	if !reflect.DeepEqual(data.WithheldEnv, wantWithheld) {
+		t.Fatalf("WithheldEnv = %+v, want %+v", data.WithheldEnv, wantWithheld)
+	}
+}
