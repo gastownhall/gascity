@@ -208,7 +208,7 @@ func TestStaleOpenRunsDecodesNoClosedRowOnNativeDolt(t *testing.T) {
 	}}
 	store := beads.NewNativeDoltStoreOverStorageForTest(ledger)
 
-	runs, err := ordersStoreOver(store).StaleOpenRuns(time.Now())
+	runs, err := ordersStoreOver(store).StaleOpenRuns(time.Now(), time.Now())
 	if err != nil {
 		t.Fatalf("StaleOpenRuns(): %v", err)
 	}
@@ -246,14 +246,14 @@ func TestNotClosedSweepReadsListAHandParkedTrackingBeadOnNativeDolt(t *testing.T
 	}}
 	st := ordersStoreOver(beads.NewNativeDoltStoreOverStorageForTest(ledger))
 
-	stale, err := st.StaleOpenRuns(time.Now())
+	stale, err := st.StaleOpenRuns(time.Now(), time.Now())
 	if err != nil {
 		t.Fatalf("StaleOpenRuns(): %v", err)
 	}
 	if got, want := runIDs(stale), []string{"gc-open"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("StaleOpenRuns() IDs = %v, want %v (a parked status is in neither exact query)", got, want)
 	}
-	notClosed, err := st.StaleNotClosedRuns(time.Now())
+	notClosed, err := st.StaleNotClosedRuns(time.Now(), time.Now())
 	if err != nil {
 		t.Fatalf("StaleNotClosedRuns(): %v", err)
 	}

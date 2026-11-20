@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -12021,4 +12022,210 @@ func TestOrderDispatchExecUsesPersistedDeadline(t *testing.T) {
 			t.Fatalf("persisted deadline is %s after dispatch, want the formula default 30s (it bounds instantiation, not the graph lifetime)", d)
 		}
 	})
+}
+
+// TestOrderDispatchLongExecTrackingSurvivesWatchdogSweep runs an exec order
+// whose run outlives the stale watchdog's window but not its own timeout: a
+// watchdog pass while the exec is still running must leave the dispatch's
+// tracking bead open, or the order loses its single-flight marker mid-run.
+func TestOrderDispatchLongExecTrackingSurvivesWatchdogSweep(t *testing.T) {
+	for _, pass := range staleWatchdogPasses {
+		t.Run(pass.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			var rec memRecorder
+
+			started := make(chan struct{})
+			release := make(chan struct{})
+			fakeExec := func(ctx context.Context, _, _ string, _ []string) ([]byte, error) {
+				close(started)
+				select {
+				case <-release:
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				}
+				return []byte("ok\n"), nil
+			}
+
+			aa := []orders.Order{{
+				Name:     "long-exec",
+				Trigger:  "cooldown",
+				Interval: "1h",
+				Timeout:  "30m",
+				Exec:     "scripts/long.sh",
+				Source:   "/city/orders/long-exec.toml",
+			}}
+			ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, &rec)
+			if ad == nil {
+				t.Fatal("expected non-nil dispatcher")
+			}
+			start := time.Now()
+			ad.dispatch(context.Background(), t.TempDir(), start)
+			select {
+			case <-started:
+			case <-time.After(10 * time.Second):
+				t.Fatal("exec runner was not called")
+			}
+
+			cr := &CityRuntime{
+				cityName:            "test-city",
+				cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+				standaloneCityStore: store,
+				stdout:              io.Discard,
+				stderr:              io.Discard,
+				logPrefix:           "gc test",
+			}
+			// Still well inside the order's 30m timeout.
+			runStaleWatchdogPass(cr, pass.read, start.Add(orderTrackingSweepWatchdogStaleAfter+5*time.Minute))
+
+			tracked := trackingBeads(t, store, "order-run:long-exec")
+			close(release)
+			ad.drain(context.Background())
+
+			if len(tracked) == 0 {
+				t.Fatal("no tracking bead for long-exec")
+			}
+			for _, b := range tracked {
+				if b.Status == "closed" {
+					t.Fatalf("tracking bead %s closed by the watchdog while its exec was still running inside its 30m timeout (close_reason=%q)", b.ID, b.Metadata["close_reason"])
+				}
+			}
+		})
+	}
+}
+
+// TestOrderDispatchLongExecSurvivesTrackingSweeps drives an uncapped 30-minute
+// exec through every stale sweep that runs while it is still inside its
+// deadline: both watchdog reads at start+3m and the ten-minute on-demand sweep,
+// dry run included, at start+11m. Each must leave the run's tracking bead open
+// and spend neither close budget nor dry-run count on it (an older-deadline-free
+// stale bead beside it takes the one-close budget), so a due tick still finds
+// the single-flight marker and starts no second exec. Released, the run records
+// its own outcome and its normal completion close.
+func TestOrderDispatchLongExecSurvivesTrackingSweeps(t *testing.T) {
+	store := beads.NewMemStore()
+	var rec memRecorder
+	var calls atomic.Int32
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	fakeExec := func(ctx context.Context, _, _ string, _ []string) ([]byte, error) {
+		calls.Add(1)
+		started <- struct{}{}
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		return []byte("ok\n"), nil
+	}
+	aa := []orders.Order{{
+		Name:     "long-exec",
+		Trigger:  "cooldown",
+		Interval: "1m",
+		Timeout:  "30m",
+		Exec:     "scripts/long.sh",
+		Source:   "/city/orders/long-exec.toml",
+	}}
+	ad := buildOrderDispatcherFromListExec(aa, store, nil, fakeExec, &rec)
+	if ad == nil {
+		t.Fatal("expected non-nil dispatcher")
+	}
+	cityDir := t.TempDir()
+	start := time.Now()
+	ad.dispatch(context.Background(), cityDir, start)
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("exec runner was not called")
+	}
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+			ad.drain(context.Background())
+		}
+	}()
+	tracked := trackingBeads(t, store, "order-run:long-exec")
+	if len(tracked) != 1 {
+		t.Fatalf("tracking beads = %d, want 1", len(tracked))
+	}
+	trackingID := tracked[0].ID
+	assertOpen := func(when string) {
+		t.Helper()
+		b, err := store.Get(trackingID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", trackingID, err)
+		}
+		if b.Status == "closed" {
+			t.Fatalf("%s closed tracking bead %s while its 30m exec was still running (close_reason=%q)", when, trackingID, b.Metadata["close_reason"])
+		}
+	}
+
+	for _, pass := range staleWatchdogPasses {
+		cr := &CityRuntime{
+			cityName:            "test-city",
+			cfg:                 &config.City{Workspace: config.Workspace{Name: "test-city"}},
+			standaloneCityStore: store,
+			stdout:              io.Discard,
+			stderr:              io.Discard,
+			logPrefix:           "gc test",
+		}
+		runStaleWatchdogPass(cr, pass.read, start.Add(3*time.Minute))
+		assertOpen("watchdog " + pass.name)
+	}
+
+	// A stale tracking bead with no deadline, created after the protected run,
+	// so an oldest-first budget would reach the protected run first.
+	legacy, err := store.Create(beads.Bead{
+		Title:  "order:legacy",
+		Labels: []string{"order-run:legacy", labelOrderTracking},
+	})
+	if err != nil {
+		t.Fatalf("Create(legacy): %v", err)
+	}
+	sweepAt := start.Add(11 * time.Minute)
+	stores := []beads.Store{store}
+	dry, err := sweepStaleOrderTrackingAcrossStoresDryRun(stores, nil, sweepAt, defaultOrderTrackingSweepStaleAfter, nil, false)
+	if err != nil {
+		t.Fatalf("dry-run sweep: %v", err)
+	}
+	if dry.trackingClosed != 1 {
+		t.Fatalf("dry-run sweep would close %d tracking beads, want 1 (the deadline-free one only)", dry.trackingClosed)
+	}
+	assertOpen("dry-run sweep")
+	swept, err := sweepStaleOrderTrackingAcrossStoresLimit(stores, nil, sweepAt, defaultOrderTrackingSweepStaleAfter, nil, orderTrackingSweepMetadataInitiator, false, 1, staleTrackingReadNotClosed)
+	if err != nil {
+		t.Fatalf("on-demand sweep: %v", err)
+	}
+	if swept.trackingClosed != 1 {
+		t.Fatalf("on-demand sweep closed %d tracking beads, want 1", swept.trackingClosed)
+	}
+	assertOpen("on-demand sweep")
+	if got, err := store.Get(legacy.ID); err != nil || got.Status != "closed" {
+		t.Fatalf("deadline-free stale bead %s = (%+v, %v), want closed by the one-close budget", legacy.ID, got, err)
+	}
+
+	// The order is due (1m cooldown) but its run is still in flight.
+	ad.dispatch(context.Background(), cityDir, start.Add(12*time.Minute))
+	select {
+	case <-started:
+		t.Fatal("a due tick started a second exec while the first run's tracking bead was open")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+	released = true
+	ad.drain(context.Background())
+	if n := calls.Load(); n != 1 {
+		t.Fatalf("exec runner calls = %d, want 1", n)
+	}
+	b, err := store.Get(trackingID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", trackingID, err)
+	}
+	if b.Status != "closed" || b.Metadata["close_reason"] != completedOrderTrackingCloseReason {
+		t.Fatalf("tracking bead %s = status %q close_reason %q, want closed with %q", trackingID, b.Status, b.Metadata["close_reason"], completedOrderTrackingCloseReason)
+	}
+	if !slicesContain(b.Labels, "exec") {
+		t.Fatalf("tracking bead %s labels = %v, want the run's exec outcome", trackingID, b.Labels)
+	}
 }

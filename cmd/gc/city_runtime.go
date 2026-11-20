@@ -2262,9 +2262,12 @@ func (cr *CityRuntime) runOrderTrackingSweepWatchdog(cfg *config.City, now time.
 	// order's tracking so that order could bootstrap and clean the rest — a
 	// single-point-of-failure: when slow reconciler cycles keep order-tracking-
 	// sweep from firing, every order's tracking jams and no order fires (#2168).
-	// The staleAfter cutoff still protects in-flight dispatches regardless of
-	// which order they belong to, so a direct all-orders sweep is safe and
-	// recovers the jam without depending on any single order being scheduled.
+	// An in-flight dispatch is protected regardless of which order it belongs
+	// to: the staleAfter cutoff spares a fresh one, and the persisted dispatch
+	// deadline holds an unfinished one until its deadline plus the completion
+	// grace (orders.Store.StaleOpenRuns), however long its timeout. A direct
+	// all-orders sweep is therefore safe and recovers the jam without depending
+	// on any single order being scheduled.
 	// Closed-history retention is intentionally left to the maintenance exec
 	// order or the gc order sweep-tracking CLI; the watchdog only recovers
 	// stale tracking beads that are not closed.

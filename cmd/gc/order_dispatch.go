@@ -3537,12 +3537,14 @@ const (
 	staleTrackingReadOpenInProgress
 )
 
-// runs lists the stale tracking runs this read selects at or before cutoff.
-func (r staleTrackingRead) runs(front *orders.Store, cutoff time.Time) ([]orders.OrderRun, error) {
+// runs lists the stale tracking runs this read selects at or before cutoff,
+// leaving out the unfinished runs a persisted dispatch deadline still holds at
+// now.
+func (r staleTrackingRead) runs(front *orders.Store, cutoff, now time.Time) ([]orders.OrderRun, error) {
 	if r == staleTrackingReadOpenInProgress {
-		return front.StaleOpenRuns(cutoff)
+		return front.StaleOpenRuns(cutoff, now)
 	}
-	return front.StaleNotClosedRuns(cutoff)
+	return front.StaleNotClosedRuns(cutoff, now)
 }
 
 func sweepStaleOrderTrackingAcrossStores(stores []beads.Store, wispStore beads.Store, now time.Time, staleAfter time.Duration, onlyOrders map[string]struct{}, includeWispSubtrees bool) (orderTrackingSweepResult, error) {
@@ -3687,7 +3689,7 @@ func sweepStaleOrderTrackingWithOptionsLimitMode(store beads.Store, now time.Tim
 	var runs []orders.OrderRun
 	err := beads.RelicRead(func() error {
 		var listErr error
-		runs, listErr = read.runs(orders.NewStore(beads.OrdersStore{Store: store}), cutoff)
+		runs, listErr = read.runs(orders.NewStore(beads.OrdersStore{Store: store}), cutoff, now)
 		return listErr
 	})
 	if err != nil {

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/convergence"
 )
@@ -154,7 +155,7 @@ func TestRecentRunsAllOpenRunsUseLiveTier(t *testing.T) {
 	// The stale sweep clears the gate OpenRuns holds, so it must see the same
 	// Live set, not the cache snapshot.
 	spy.queries = nil
-	if _, err := st.StaleOpenRuns(time.Now().Add(time.Hour)); err != nil {
+	if _, err := st.StaleOpenRuns(time.Now().Add(time.Hour), time.Now()); err != nil {
 		t.Fatalf("StaleOpenRuns(): %v", err)
 	}
 	assertAllLive(t, "StaleOpenRuns", spy.queries)
@@ -164,7 +165,7 @@ func TestRecentRunsAllOpenRunsUseLiveTier(t *testing.T) {
 	assertSweepQueryShape(t, "StaleOpenRuns", spy.queries, "open", "in_progress")
 
 	spy.queries = nil
-	if _, err := st.StaleNotClosedRuns(time.Now().Add(time.Hour)); err != nil {
+	if _, err := st.StaleNotClosedRuns(time.Now().Add(time.Hour), time.Now()); err != nil {
 		t.Fatalf("StaleNotClosedRuns(): %v", err)
 	}
 	assertAllLive(t, "StaleNotClosedRuns", spy.queries)
@@ -418,7 +419,7 @@ func TestStaleOpenRunsCutoff(t *testing.T) {
 	st := NewStore(beads.OrdersStore{Store: mem})
 
 	// cutoff after the bead's creation → stale.
-	stale, err := st.StaleOpenRuns(old.CreatedAt.Add(time.Hour))
+	stale, err := st.StaleOpenRuns(old.CreatedAt.Add(time.Hour), time.Now())
 	if err != nil {
 		t.Fatalf("StaleOpenRuns(): %v", err)
 	}
@@ -426,7 +427,7 @@ func TestStaleOpenRunsCutoff(t *testing.T) {
 		t.Fatalf("StaleOpenRuns(after) = %+v, want the old run", stale)
 	}
 	// cutoff before the bead's creation → not stale.
-	fresh, err := st.StaleOpenRuns(old.CreatedAt.Add(-time.Hour))
+	fresh, err := st.StaleOpenRuns(old.CreatedAt.Add(-time.Hour), time.Now())
 	if err != nil {
 		t.Fatalf("StaleOpenRuns(): %v", err)
 	}
@@ -463,14 +464,14 @@ func TestStaleNotClosedRunsListsEveryNotClosedStatusAtOrBeforeCutoff(t *testing.
 	st := ordersStoreOver(beads.NewMemStoreFrom(len(seed), seed, nil))
 	cutoff := base.Add(5 * time.Minute)
 
-	stale, err := st.StaleNotClosedRuns(cutoff)
+	stale, err := st.StaleNotClosedRuns(cutoff, time.Now())
 	if err != nil {
 		t.Fatalf("StaleNotClosedRuns(): %v", err)
 	}
 	if got, want := runIDs(stale), []string{"gc-open", "gc-claimed", "gc-parked", "gc-marker"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("StaleNotClosedRuns() IDs = %v, want every not-closed bead at or before the cutoff, oldest-first %v", got, want)
 	}
-	bounded, err := st.StaleOpenRuns(cutoff)
+	bounded, err := st.StaleOpenRuns(cutoff, time.Now())
 	if err != nil {
 		t.Fatalf("StaleOpenRuns(): %v", err)
 	}
@@ -486,8 +487,8 @@ func TestSweepReadersOverAZeroHandleListNothing(t *testing.T) {
 	st := NewStore(beads.OrdersStore{})
 	cutoff := time.Now()
 	for name, read := range map[string]func() ([]OrderRun, error){
-		"StaleOpenRuns":      func() ([]OrderRun, error) { return st.StaleOpenRuns(cutoff) },
-		"StaleNotClosedRuns": func() ([]OrderRun, error) { return st.StaleNotClosedRuns(cutoff) },
+		"StaleOpenRuns":      func() ([]OrderRun, error) { return st.StaleOpenRuns(cutoff, time.Now()) },
+		"StaleNotClosedRuns": func() ([]OrderRun, error) { return st.StaleNotClosedRuns(cutoff, time.Now()) },
 		"OrphanedOpenRuns":   st.OrphanedOpenRuns,
 	} {
 		if runs, err := read(); runs != nil || err != nil {
@@ -573,7 +574,7 @@ func primedCacheWithBackingOnlyTracking(t *testing.T) (*beads.CachingStore, bead
 func TestStaleOpenRunsBypassesCache(t *testing.T) {
 	cache, written := primedCacheWithBackingOnlyTracking(t)
 
-	runs, err := ordersStoreOver(cache).StaleOpenRuns(time.Now().Add(time.Hour))
+	runs, err := ordersStoreOver(cache).StaleOpenRuns(time.Now().Add(time.Hour), time.Now())
 	if err != nil {
 		t.Fatalf("StaleOpenRuns(): %v", err)
 	}
@@ -587,7 +588,7 @@ func TestStaleOpenRunsBypassesCache(t *testing.T) {
 func TestStaleNotClosedRunsBypassesCache(t *testing.T) {
 	cache, written := primedCacheWithBackingOnlyTracking(t)
 
-	runs, err := ordersStoreOver(cache).StaleNotClosedRuns(time.Now().Add(time.Hour))
+	runs, err := ordersStoreOver(cache).StaleNotClosedRuns(time.Now().Add(time.Hour), time.Now())
 	if err != nil {
 		t.Fatalf("StaleNotClosedRuns(): %v", err)
 	}
@@ -646,14 +647,14 @@ func TestSweepReadsOldestFirst(t *testing.T) {
 	want := []string{"gc-c", "gc-a", "gc-b", "gc-f", "gc-d", "gc-e"}
 	st := ordersStoreOver(beads.NewMemStoreFrom(len(seed), seed, nil))
 
-	stale, err := st.StaleOpenRuns(time.Now())
+	stale, err := st.StaleOpenRuns(time.Now(), time.Now())
 	if err != nil {
 		t.Fatalf("StaleOpenRuns(): %v", err)
 	}
 	if got := runIDs(stale); !reflect.DeepEqual(got, want) {
 		t.Errorf("StaleOpenRuns() IDs = %v, want oldest-first %v", got, want)
 	}
-	notClosed, err := st.StaleNotClosedRuns(time.Now())
+	notClosed, err := st.StaleNotClosedRuns(time.Now(), time.Now())
 	if err != nil {
 		t.Fatalf("StaleNotClosedRuns(): %v", err)
 	}
@@ -689,11 +690,11 @@ func TestSweepReadsKeepInProgressAndExcludeClosed(t *testing.T) {
 	openBead, inProgress, closedBead := mk("open"), mk("in_progress"), mk("closed")
 	st := ordersStoreOver(mem)
 
-	stale, err := st.StaleOpenRuns(time.Now().Add(time.Hour))
+	stale, err := st.StaleOpenRuns(time.Now().Add(time.Hour), time.Now())
 	if err != nil {
 		t.Fatalf("StaleOpenRuns(): %v", err)
 	}
-	notClosed, err := st.StaleNotClosedRuns(time.Now().Add(time.Hour))
+	notClosed, err := st.StaleNotClosedRuns(time.Now().Add(time.Hour), time.Now())
 	if err != nil {
 		t.Fatalf("StaleNotClosedRuns(): %v", err)
 	}
@@ -748,7 +749,7 @@ func TestStaleOpenRunsListsABeadClaimedBetweenItsReadsOnce(t *testing.T) {
 	}
 	st := ordersStoreOver(&claimAfterFirstReadStore{Store: mem, claim: b.ID})
 
-	runs, err := st.StaleOpenRuns(time.Now().Add(time.Hour))
+	runs, err := st.StaleOpenRuns(time.Now().Add(time.Hour), time.Now())
 	if err != nil {
 		t.Fatalf("StaleOpenRuns(): %v", err)
 	}
@@ -781,4 +782,64 @@ func runsContain(runs []OrderRun, id string) bool {
 		}
 	}
 	return false
+}
+
+// deadlineTracking builds a tracking bead created at created whose persisted
+// dispatch deadline is deadline (no metadata when deadline is zero).
+func deadlineTracking(id, status string, created, deadline time.Time, extra ...string) beads.Bead {
+	b := beads.Bead{
+		ID:        id,
+		Title:     "order:digest",
+		Status:    status,
+		Labels:    append([]string{"order-run:digest", "order-tracking"}, extra...),
+		CreatedAt: created,
+	}
+	if !deadline.IsZero() {
+		b.Metadata = map[string]string{beadmeta.OrderRunDeadlineMetadataKey: deadline.UTC().Format(time.RFC3339Nano)}
+	}
+	return b
+}
+
+// TestStaleReadersRespectDispatchDeadline proves the stale sweeps' reads hold
+// an unfinished run until its persisted deadline plus the completion grace,
+// however far past the age cutoff it is: before the deadline, inside the grace
+// and one nanosecond short of its end the run is held, and at deadline+grace
+// it is eligible again. A run with a terminal outcome, or with no deadline at
+// all, keeps the age rule alone, and a run younger than the cutoff stays
+// ineligible whatever its deadline.
+func TestStaleReadersRespectDispatchDeadline(t *testing.T) {
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	cutoff := now.Add(-2 * time.Minute)
+	created := now.Add(-time.Hour)
+	at := func(i int) time.Time { return created.Add(time.Duration(i) * time.Second) }
+	seed := []beads.Bead{
+		deadlineTracking("gc-future", "open", at(0), now.Add(10*time.Minute)),
+		deadlineTracking("gc-in-grace", "open", at(1), now.Add(-30*time.Second)),
+		deadlineTracking("gc-edge", "open", at(2), now.Add(-runCompletionGrace+time.Nanosecond)),
+		deadlineTracking("gc-boundary", "open", at(3), now.Add(-runCompletionGrace)),
+		deadlineTracking("gc-expired", "open", at(4), now.Add(-time.Hour)),
+		deadlineTracking("gc-missing", "open", at(5), time.Time{}),
+		deadlineTracking("gc-finished", "open", at(6), now.Add(10*time.Minute), "exec"),
+		deadlineTracking("gc-claimed", "in_progress", at(7), now.Add(10*time.Minute)),
+		deadlineTracking("gc-claimed-expired", "in_progress", at(8), now.Add(-time.Hour)),
+		deadlineTracking("gc-parked", "blocked", at(9), now.Add(10*time.Minute)),
+		deadlineTracking("gc-parked-expired", "blocked", at(10), now.Add(-time.Hour)),
+		deadlineTracking("gc-fresh-expired", "open", now.Add(-time.Minute), now.Add(-time.Hour)),
+	}
+	st := ordersStoreOver(beads.NewMemStoreFrom(len(seed), seed, nil))
+
+	stale, err := st.StaleOpenRuns(cutoff, now)
+	if err != nil {
+		t.Fatalf("StaleOpenRuns(): %v", err)
+	}
+	if got, want := runIDs(stale), []string{"gc-boundary", "gc-expired", "gc-missing", "gc-finished", "gc-claimed-expired"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("StaleOpenRuns() IDs = %v, want %v (unfinished runs before deadline+grace held)", got, want)
+	}
+	notClosed, err := st.StaleNotClosedRuns(cutoff, now)
+	if err != nil {
+		t.Fatalf("StaleNotClosedRuns(): %v", err)
+	}
+	if got, want := runIDs(notClosed), []string{"gc-boundary", "gc-expired", "gc-missing", "gc-finished", "gc-claimed-expired", "gc-parked-expired"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("StaleNotClosedRuns() IDs = %v, want %v (unfinished runs before deadline+grace held)", got, want)
+	}
 }
