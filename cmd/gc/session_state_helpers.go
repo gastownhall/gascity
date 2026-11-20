@@ -31,13 +31,6 @@ func isDrainedSessionInfo(i sessionpkg.Info) bool {
 	return state == "asleep" && strings.TrimSpace(i.SleepReason) == string(sessionpkg.SleepReasonDrained)
 }
 
-// isRetiredDrainedSessionInfo reports whether info is a drained session the
-// reconciler will not wake in place: every drained session except a configured
-// always-mode named session, which ComputeAwakeSet reuses.
-func isRetiredDrainedSessionInfo(i sessionpkg.Info) bool {
-	return isDrainedSessionInfo(i) && (!isNamedSessionInfo(i) || namedSessionModeInfo(i) != "always")
-}
-
 // poolSessionIsLiveInfo reports whether a pool session represents an actively
 // running session for the runningSessions counter in build_desired_state. An
 // asleep or drained session is not live — it holds no active process and must

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net"
 	"strings"
 	"testing"
@@ -1113,17 +1114,26 @@ func (f *legBDispatchFixture) setMetadata(t *testing.T, id string, meta map[stri
 	}
 }
 
-// A nudge fenced to a drained sibling of the same agent, in either drained
+// poolSeatMeta is meta on a seat of a controller pool: the fixture's session,
+// created manual, restamped ephemeral, pool-managed and slotted.
+func poolSeatMeta(meta map[string]string) map[string]string {
+	seat := map[string]string{"session_origin": "ephemeral", "pool_managed": "true", "pool_slot": "3"}
+	maps.Copy(seat, meta)
+	return seat
+}
+
+// A nudge fenced to a drained seat of a controller pool, in either drained
 // shape the codec decodes as asleep (raw state=drained from a drain-ack, or
 // state=asleep with sleep_reason=drained from the dead-runtime heal), is
-// adopted by a running sibling: the drained row no longer holds its fence.
-func TestDispatchAdoptsANudgeFencedToADrainedSibling(t *testing.T) {
+// adopted by a running session of the same agent: pool demand never starts a
+// drained seat again, so the seat no longer holds its fence.
+func TestDispatchAdoptsANudgeFencedToADrainedPoolSeat(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		meta map[string]string
 	}{
-		{name: "raw drained", meta: map[string]string{"state": "drained"}},
-		{name: "asleep drained", meta: map[string]string{"state": "asleep", "sleep_reason": "drained"}},
+		{name: "raw drained", meta: poolSeatMeta(map[string]string{"state": "drained"})},
+		{name: "asleep drained", meta: poolSeatMeta(map[string]string{"state": "asleep", "sleep_reason": "drained"})},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newLegBDispatchFixture(t)
@@ -1156,7 +1166,7 @@ func TestDispatchAdoptsANudgeFencedToADrainedSibling(t *testing.T) {
 }
 
 // fenceHoldingSiblingShapes are open sibling shapes that keep their nudge
-// fence: the reconciler may wake them in place under the same bead id.
+// fence: the reconciler may start each again in place under the same bead id.
 var fenceHoldingSiblingShapes = []struct {
 	name string
 	meta map[string]string
@@ -1165,7 +1175,11 @@ var fenceHoldingSiblingShapes = []struct {
 	{name: "asleep runtime-missing", meta: map[string]string{"state": "asleep", "sleep_reason": "runtime-missing"}},
 	{name: "draining", meta: map[string]string{"state": "draining"}},
 	{name: "quarantined", meta: map[string]string{"state": "quarantined"}},
-	{name: "drained always-mode named", meta: map[string]string{"state": "drained", "configured_named_session": "true", "configured_named_mode": "always"}},
+	{name: "drained manual", meta: map[string]string{"state": "drained"}},
+	{name: "drained on-demand named", meta: map[string]string{"state": "drained", "session_origin": "named", "configured_named_session": "true", "configured_named_mode": "on_demand"}},
+	{name: "drained always-mode named", meta: map[string]string{"state": "drained", "session_origin": "named", "configured_named_session": "true", "configured_named_mode": "always"}},
+	{name: "drained pool seat with an explicit wake", meta: poolSeatMeta(map[string]string{"state": "drained", "wake_request": "explicit"})},
+	{name: "drained pool seat under an operator hold", meta: poolSeatMeta(map[string]string{"state": "drained", "sleep_intent": "user-hold"})},
 }
 
 // A nudge fenced to an open sibling that still holds its fence stays pending,

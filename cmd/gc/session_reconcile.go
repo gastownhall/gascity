@@ -162,7 +162,7 @@ func sessionWithinDesiredConfigInfo(info sessionpkg.Info, cfg *config.City, pool
 	}
 	// ComputeAwakeSet deliberately reuses drained always-mode named beads.
 	// Keep the display classifier aligned with that decision.
-	if isRetiredDrainedSessionInfo(info) {
+	if isDrainedSessionInfo(info) && (!isNamedSessionInfo(info) || namedSessionModeInfo(info) != "always") {
 		return agent, false
 	}
 	if info.DependencyOnlyMetadata == "true" {

@@ -221,7 +221,9 @@ func dispatchQueuedNudges(queue nudgeQueueHandle, cityPath string, cfg *config.C
 		// claim of the pass read, misses a session another process created
 		// after it. The starvation check of a busy target judges with the
 		// snapshot census too, so holding a busy session back reads no store
-		// (nudgeTarget.starvationCensus).
+		// (nudgeTarget.starvationCensus). The check precedes the observe, so
+		// a target that may claim nothing counts as not-claimable, never as
+		// not-running, whether or not it runs.
 		if !nudgeTargetMayClaimPerSnapshot(queue, target, snapshotCensus, nudgeLaunchReader(target, sp), time.Now()) {
 			skipCounts["not-claimable"]++
 			logNudgeDispatchSkip(debugOut, "not-claimable", target.agentKey(), target.sessionName, "")
