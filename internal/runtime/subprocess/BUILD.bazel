@@ -42,6 +42,7 @@ go_test(
         "shellfixture_windows_test.go",
         "socket_probe_test.go",
         "socketdir_unix_test.go",
+        "start_ctx_unix_test.go",
         "stop_not_confirmed_dead_test.go",
         "subprocess_private_unix_test.go",
         "subprocess_test.go",
