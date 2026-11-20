@@ -177,6 +177,16 @@ func TestGated(t *testing.T) {
 			want: false,
 		},
 		{
+			name: "plain no-history task is gated",
+			bead: beads.Bead{Type: "task", NoHistory: true},
+			want: true,
+		},
+		{
+			name: "plain ephemeral task is gated",
+			bead: beads.Bead{Type: "task", Ephemeral: true},
+			want: true,
+		},
+		{
 			name: "task with an unrelated label is gated",
 			bead: beads.Bead{Type: "task", Labels: []string{"area:billing"}},
 			want: true,
