@@ -182,7 +182,7 @@ func runHealthOp(t *testing.T, helper bool, dataReadError, pingError string) (st
 	}
 	var prelude strings.Builder
 	prelude.WriteString("set -e\nDOLT_PORT=1\n")
-	prelude.WriteString("tcp_check() { return 0; }\nconnect_host() { echo 127.0.0.1; }\nis_remote() { return 1; }\n")
+	prelude.WriteString("tcp_check() { return 0; }\nconnect_host() { echo 127.0.0.1; }\nis_remote() { return 1; }\ncity_health_database() { return 0; }\n")
 	if helper {
 		prelude.WriteString("load_health_check_from_gc() { GC_HEALTH_QUERY_READY=true; GC_HEALTH_READ_ONLY=false; GC_HEALTH_CONNECTION_COUNT=2;" +
 			" GC_HEALTH_DATA_READ_ERROR='" + dataReadError + "'; GC_HEALTH_DATA_READ_WARNING=''; return 0; }\n")
