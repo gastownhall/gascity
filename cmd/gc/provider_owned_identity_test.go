@@ -465,3 +465,118 @@ func TestProviderOwnedIdentityDirectEndpoint(t *testing.T) {
 		}
 	})
 }
+
+// TestInitAndHookDirProviderOwnedIdentityFailureKeepsInitializing: when
+// bd init succeeded but the reconcile fails, the pass returns an error naming
+// the scope and the cause, the journal stays provider_initializing with its
+// intent, nothing under .beads/ is removed or rewritten, and a later pass with
+// the cause removed reconciles and marks the scope ready.
+func TestInitAndHookDirProviderOwnedIdentityFailureKeepsInitializing(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// arrange sets up the failure and returns the fix.
+		arrange   func(t *testing.T, city providerOwnedIdentityCity) (fake *providerOwnedL3Fake, fix func())
+		wantCause string
+	}{
+		{
+			name: "L1/L3 mismatch refusal",
+			arrange: func(t *testing.T, city providerOwnedIdentityCity) (*providerOwnedL3Fake, func()) {
+				writeIdentityFile(t, city.dir, providerOwnedIdentityQ)
+				stubLiveProviderOwnedProxy(t)
+				fake := &providerOwnedL3Fake{l3: &projectIdentityL3Double{projectID: providerOwnedIdentityP}}
+				stubProviderOwnedL3(t, fake)
+				return fake, func() {
+					if err := os.Remove(contract.ProjectIdentityPath(city.dir)); err != nil {
+						t.Fatal(err)
+					}
+					writeIdentityFile(t, city.dir, providerOwnedIdentityP)
+				}
+			},
+			wantCause: providerOwnedIdentityQ,
+		},
+		{
+			name: "L3 write error",
+			arrange: func(t *testing.T, city providerOwnedIdentityCity) (*providerOwnedL3Fake, func()) {
+				writeIdentityFile(t, city.dir, providerOwnedIdentityP)
+				stubLiveProviderOwnedProxy(t)
+				fake := &providerOwnedL3Fake{l3: &projectIdentityL3Double{seedErr: errors.New("metadata table is read-only")}}
+				stubProviderOwnedL3(t, fake)
+				return fake, func() { fake.l3.seedErr = nil }
+			},
+			wantCause: "metadata table is read-only",
+		},
+		{
+			name: "non-live proxy",
+			arrange: func(t *testing.T, _ providerOwnedIdentityCity) (*providerOwnedL3Fake, func()) {
+				fake := &providerOwnedL3Fake{l3: &projectIdentityL3Double{projectID: providerOwnedIdentityP}}
+				stubProviderOwnedL3(t, fake)
+				return fake, func() { stubLiveProviderOwnedProxy(t) }
+			},
+			wantCause: "is not live",
+		},
+		{
+			name: "unresolvable endpoint",
+			arrange: func(t *testing.T, city providerOwnedIdentityCity) (*providerOwnedL3Fake, func()) {
+				stubLiveProviderOwnedProxy(t)
+				fake := &providerOwnedL3Fake{l3: &projectIdentityL3Double{projectID: providerOwnedIdentityP}}
+				stubProviderOwnedL3(t, fake)
+				// A proxy root nothing can resolve: the sidecar is not JSON.
+				if err := os.MkdirAll(filepath.Join(city.dir, ".beads"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv(proxyendpoint.RootPathEnv, "")
+				sidecar := proxyendpoint.SidecarPath(filepath.Join(city.dir, ".beads"))
+				if err := os.WriteFile(sidecar, []byte("{not json"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return fake, func() {
+					if err := os.Remove(sidecar); err != nil {
+						t.Fatal(err)
+					}
+					stubLiveProviderOwnedProxy(t)
+				}
+			},
+			wantCause: "resolve bd proxy root",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			metadata := proxiedIdentityMetadata(providerOwnedIdentityP)
+			city := newProviderOwnedIdentityCity(t, metadata)
+			_, fix := tc.arrange(t, city)
+			before := city.entry(t)
+			identityBefore, identityErr := os.ReadFile(contract.ProjectIdentityPath(city.dir))
+
+			err := initAndHookDirResolvingDatabase(city.dir, city.dir, "gc", nil)
+			if err == nil {
+				t.Fatal("initAndHookDirResolvingDatabase succeeded, want the reconcile failure")
+			}
+			for _, want := range []string{city.dir, tc.wantCause} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("error = %q, want it to name %q", err, want)
+				}
+			}
+			after := city.entry(t)
+			if after.State != providerScopeInitializing || after.Intent != before.Intent || after.Intent == (providerScopeIntent{}) {
+				t.Fatalf("journal entry after failure = %+v, want %q with intent %+v", after, providerScopeInitializing, before.Intent)
+			}
+			if got := string(mustReadFile(t, scopeMetadataJSONPath(city.dir))); got != metadata {
+				t.Fatalf("metadata.json after failure = %q, want bd's %q untouched", got, metadata)
+			}
+			identityAfter, identityAfterErr := os.ReadFile(contract.ProjectIdentityPath(city.dir))
+			if string(identityAfter) != string(identityBefore) || (identityErr == nil) != (identityAfterErr == nil) {
+				t.Fatalf("identity.toml after failure = (%q, %v), want unchanged (%q, %v)", identityAfter, identityAfterErr, identityBefore, identityErr)
+			}
+
+			fix()
+			if err := initAndHookDirResolvingDatabase(city.dir, city.dir, "gc", nil); err != nil {
+				t.Fatalf("retry after removing the cause: %v", err)
+			}
+			if got := city.entry(t).State; got != providerScopeReady {
+				t.Fatalf("journal state after retry = %q, want %q", got, providerScopeReady)
+			}
+			if got, ok := city.identity(t); !ok || got != providerOwnedIdentityP {
+				t.Fatalf("identity.toml after retry = (%q, %t), want %q", got, ok, providerOwnedIdentityP)
+			}
+		})
+	}
+}
