@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -217,6 +218,88 @@ func TestJSONLExportMaintainsArchiveObjectDatabase(t *testing.T) {
 	exits := regexp.MustCompile(`\bmaintain_archive_or_exit\b(?:[^(]|$)`)
 	if got := len(exits.FindAllString(body, -1)); got != 5 {
 		t.Fatalf("jsonl-export.sh runs archive maintenance at %d exits, want five (normal, HALT, pending push, failed DB, no changes)", got)
+	}
+}
+
+// A maintenance failure that repeats is counted and escalated, and the repack
+// is bounded so one hung pass cannot run the order into its own timeout.
+func TestJSONLExportEscalatesRepeatedArchiveMaintenanceFailures(t *testing.T) {
+	data, err := fs.ReadFile(PackFS, "assets/scripts/jsonl-export.sh")
+	if err != nil {
+		t.Fatalf("ReadFile(jsonl-export.sh): %v", err)
+	}
+	commentLine := regexp.MustCompile(`^[ \t]*#`)
+	var code []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if !commentLine.MatchString(line) {
+			code = append(code, line)
+		}
+	}
+	body := strings.Join(code, "\n")
+
+	for _, want := range []string{
+		`GC_JSONL_MAX_MAINTENANCE_FAILURES`,
+		`GC_JSONL_GC_TIMEOUT_SECS`,
+		`consecutive_maintenance_failures`,
+		`maintenance_failure_escalated`,
+		`last_maintenance_failure_at`,
+		`last_maintenance_failure_cause`,
+		`last_maintenance_failure_arm`,
+		`last_maintenance_failure_evidence`,
+		`ESCALATION: JSONL archive maintenance failing [HIGH]`,
+		`troubleshooting.md#archive-object-maintenance`,
+		`stats_read_failed`,
+		`stats_malformed`,
+		`stats_incomplete`,
+		`low_space`,
+		`gc_failed`,
+		`gc_timeout`,
+		`gtimeout`,
+		`maintenance escalation was not delivered; the next failing run will retry`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("jsonl-export.sh is missing maintenance-escalation contract %q", want)
+		}
+	}
+
+	// Every exit that runs maintenance names its arm.
+	arms := map[string]int{}
+	callSite := regexp.MustCompile(`\bmaintain_archive_or_exit\s+"\$SUMMARY"\s+(halt|post_push|no_change)\b`)
+	for _, match := range callSite.FindAllStringSubmatch(body, -1) {
+		arms[match[1]]++
+	}
+	if want := map[string]int{"halt": 1, "post_push": 1, "no_change": 3}; !reflect.DeepEqual(arms, want) {
+		t.Errorf("maintenance call sites by arm = %v, want %v", arms, want)
+	}
+
+	// The repack's default bound plus the 300 s the run keeps for the rest of
+	// its work fits inside the order's timeout.
+	timeoutDefault := regexp.MustCompile(`GC_JSONL_GC_TIMEOUT_SECS:-(\d+)`).FindStringSubmatch(body)
+	if timeoutDefault == nil {
+		t.Fatalf("jsonl-export.sh does not default GC_JSONL_GC_TIMEOUT_SECS")
+	}
+	bound, err := time.ParseDuration(timeoutDefault[1] + "s")
+	if err != nil {
+		t.Fatalf("default GC_JSONL_GC_TIMEOUT_SECS %q: %v", timeoutDefault[1], err)
+	}
+	orderData, err := fs.ReadFile(PackFS, "orders/jsonl-export.toml")
+	if err != nil {
+		t.Fatalf("ReadFile(jsonl-export.toml): %v", err)
+	}
+	var order struct {
+		Order struct {
+			Timeout string `toml:"timeout"`
+		} `toml:"order"`
+	}
+	if _, err := toml.Decode(string(orderData), &order); err != nil {
+		t.Fatalf("decoding jsonl-export.toml: %v", err)
+	}
+	orderTimeout, err := time.ParseDuration(order.Order.Timeout)
+	if err != nil {
+		t.Fatalf("order timeout %q: %v", order.Order.Timeout, err)
+	}
+	if bound+300*time.Second > orderTimeout {
+		t.Errorf("default repack bound %s plus 300s exceeds the order timeout %s", bound, orderTimeout)
 	}
 }
 

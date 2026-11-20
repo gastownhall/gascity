@@ -12344,6 +12344,874 @@ func TestJsonlExportArchiveMaintenanceReportsTelemetry(t *testing.T) {
 	})
 }
 
+// --- Repeated archive-maintenance failures: streak counting and escalation ---
+//
+// A failing maintenance pass fails the run every time, so a failure that
+// persists would only ever show as a red order. The order counts consecutive
+// failing runs in its state file and sends one escalation once the count
+// reaches GC_JSONL_MAX_MAINTENANCE_FAILURES; a run whose maintenance passes
+// clears the record.
+
+const maintenanceFailureSubject = "ESCALATION: JSONL archive maintenance failing [HIGH]"
+
+var maintenanceFailureKeys = []string{
+	"consecutive_maintenance_failures",
+	"maintenance_failure_escalated",
+	"last_maintenance_failure_at",
+	"last_maintenance_failure_cause",
+	"last_maintenance_failure_arm",
+	"last_maintenance_failure_evidence",
+}
+
+var maintenanceFailureTimestamp = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$`)
+
+// maintenanceStreakFixture is an archive fixture in which every run tries to
+// pack (a loose-object limit of zero is always reached) and the data the export
+// returns follows the arm the run exercises. The records start at 120 so a
+// halt arm can drop the count far enough to trip the spike check.
+type maintenanceStreakFixture struct {
+	archiveMaintenanceFixture
+	records int
+}
+
+// newMaintenanceStreakFixture returns a fixture that has completed one healthy
+// run, so every later run starts from an archive the export has populated.
+func newMaintenanceStreakFixture(t *testing.T) *maintenanceStreakFixture {
+	t.Helper()
+	f := &maintenanceStreakFixture{
+		archiveMaintenanceFixture: newArchiveMaintenanceFixture(t, 120, 120),
+		records:                   120,
+	}
+	f.env["GC_JSONL_GC_LOOSE_OBJECTS"] = "0"
+	f.exportOnce(t)
+	return f
+}
+
+// runArm runs the export so it takes the named maintenance arm: post_push
+// exports new data, halt drops the record count past the spike threshold, and
+// no_change exports the data it exported last.
+func (f *maintenanceStreakFixture) runArm(t *testing.T, arm string) (string, error) {
+	t.Helper()
+	switch arm {
+	case "post_push":
+		f.records++
+	case "halt":
+		if f.records < 100 {
+			t.Fatalf("a halt needs at least 100 archived records to drop from, have %d", f.records)
+		}
+		f.records = 10
+	case "no_change":
+	default:
+		t.Fatalf("unknown maintenance arm %q", arm)
+	}
+	writeMultiRecordDoltStub(t, f.binDir, f.records)
+	return f.run(t)
+}
+
+// writeGitSubcommandStub installs a git that runs body, a shell snippet that
+// must exit, when its arguments name subcommand, and runs the real git
+// otherwise.
+func writeGitSubcommandStub(t *testing.T, binDir, realGit, subcommand, body string) {
+	t.Helper()
+	writeExecutable(t, filepath.Join(binDir, "git"), fmt.Sprintf(`#!/bin/sh
+for arg in "$@"; do
+    if [ "$arg" = %q ]; then
+%s
+    fi
+done
+exec '%s' "$@"
+`, subcommand, body, realGit))
+}
+
+// installMaintenanceFault makes archive maintenance fail with the named cause.
+func (f archiveMaintenanceFixture) installMaintenanceFault(t *testing.T, cause string) {
+	t.Helper()
+	realGit := lookPathGit(t)
+	switch cause {
+	case "stats_read_failed":
+		writeGitSubcommandStub(t, f.binDir, realGit, "count-objects", `        echo "simulated count-objects failure" >&2
+        exit 1`)
+	case "stats_malformed":
+		writeGitSubcommandStub(t, f.binDir, realGit, "count-objects", `        printf 'count: 12x\nsize: 4\npacks: 1\nsize-pack: 8\n'
+        exit 0`)
+	case "stats_incomplete":
+		writeGitSubcommandStub(t, f.binDir, realGit, "count-objects", `        printf 'count: 5\nsize: 4\npacks: 1\n'
+        exit 0`)
+	case "gc_failed":
+		f.failGitRepack(t)
+	case "gc_timeout":
+		f.env["GC_JSONL_GC_TIMEOUT_SECS"] = "1"
+		writeGitSubcommandStub(t, f.binDir, realGit, "repack", `        exec sleep 20`)
+	default:
+		t.Fatalf("unknown maintenance fault %q", cause)
+	}
+}
+
+// clearMaintenanceFault removes the git and df stubs a fault installed.
+func (f archiveMaintenanceFixture) clearMaintenanceFault(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{"git", "df"} {
+		if err := os.Remove(filepath.Join(f.binDir, name)); err != nil && !os.IsNotExist(err) {
+			t.Fatalf("Remove(%s stub): %v", name, err)
+		}
+	}
+}
+
+// setState merges updates into the state file and its backup.
+func (f archiveMaintenanceFixture) setState(t *testing.T, updates map[string]any) {
+	t.Helper()
+	for _, path := range []string{f.stateFile(), f.stateFile() + ".bak"} {
+		state := map[string]any{}
+		if _, err := os.Stat(path); err == nil {
+			state = readStateObject(t, path)
+		}
+		for key, value := range updates {
+			state[key] = value
+		}
+		data, err := json.Marshal(state)
+		if err != nil {
+			t.Fatalf("Marshal(%s): %v", path, err)
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s): %v", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, append(data, '\n'), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s): %v", path, err)
+		}
+	}
+}
+
+// maintenanceStreak is the consecutive failing runs the state records.
+func maintenanceStreak(state map[string]any) int {
+	n, _ := state["consecutive_maintenance_failures"].(float64)
+	return int(n)
+}
+
+// requireMaintenanceKeysCleared fails if the state holds any of the six keys.
+func requireMaintenanceKeysCleared(t *testing.T, state map[string]any, context string) {
+	t.Helper()
+	for _, key := range maintenanceFailureKeys {
+		if _, ok := state[key]; ok {
+			t.Errorf("%s: state still holds %s: %v", context, key, state)
+		}
+	}
+}
+
+// maintenanceExit is the exit status of a finished script, or -1 when it did
+// not exit normally.
+func maintenanceExit(err error) int {
+	if err == nil {
+		return 0
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		return exitErr.ExitCode()
+	}
+	return -1
+}
+
+// requireFailingRun fails unless the run exited 1, the status every failing
+// maintenance run reports whether or not its escalation was delivered.
+func requireFailingRun(t *testing.T, out string, err error, context string) {
+	t.Helper()
+	if code := maintenanceExit(err); code != 1 {
+		t.Fatalf("%s: exit status = %d, want 1:\n%s", context, code, out)
+	}
+}
+
+func maintenanceMailCount(t *testing.T, f archiveMaintenanceFixture) int {
+	t.Helper()
+	return strings.Count(f.mail(t), maintenanceFailureSubject)
+}
+
+// maintenanceEvidenceSection is the mail body's evidence lines: those between
+// the Evidence heading and the Remediation heading.
+func maintenanceEvidenceSection(t *testing.T, mail string) []string {
+	t.Helper()
+	start := strings.Index(mail, "\nEvidence")
+	end := strings.Index(mail, "\nRemediation:")
+	if start < 0 || end < start {
+		t.Fatalf("the escalation has no Evidence section before its Remediation:\n%s", mail)
+	}
+	var lines []string
+	for _, line := range strings.Split(mail[start+1:end], "\n")[1:] {
+		if strings.TrimSpace(line) != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+// requireMaintenanceRecord checks the state a failing run leaves.
+func requireMaintenanceRecord(t *testing.T, state map[string]any, streak int, cause, arm, evidence string, escalated bool) {
+	t.Helper()
+	if got := maintenanceStreak(state); got != streak {
+		t.Errorf("consecutive_maintenance_failures = %d, want %d: %v", got, streak, state)
+	}
+	if got := state["last_maintenance_failure_cause"]; got != cause {
+		t.Errorf("last_maintenance_failure_cause = %v, want %s", got, cause)
+	}
+	if got := state["last_maintenance_failure_arm"]; got != arm {
+		t.Errorf("last_maintenance_failure_arm = %v, want %s", got, arm)
+	}
+	at, _ := state["last_maintenance_failure_at"].(string)
+	if !maintenanceFailureTimestamp.MatchString(at) {
+		t.Errorf("last_maintenance_failure_at = %q, want a UTC timestamp like 2006-01-02T15:04:05Z", at)
+	}
+	got, _ := state["last_maintenance_failure_evidence"].(string)
+	if !strings.Contains(got, evidence) {
+		t.Errorf("last_maintenance_failure_evidence = %q, want it to contain %q", got, evidence)
+	}
+	if len(got) > 512 {
+		t.Errorf("last_maintenance_failure_evidence is %d bytes, want at most 512", len(got))
+	}
+	if flag, _ := state["maintenance_failure_escalated"].(bool); flag != escalated {
+		t.Errorf("maintenance_failure_escalated = %v, want %v: %v", state["maintenance_failure_escalated"], escalated, state)
+	}
+}
+
+// Row 1: a statistics read that keeps failing escalates once, on the run that
+// reaches the threshold, from either arm that has data to pack after.
+func TestJsonlExportEscalatesRepeatedMaintenanceStatsReadFailure(t *testing.T) {
+	for _, arm := range []string{"post_push", "no_change"} {
+		t.Run(arm, func(t *testing.T) {
+			f := newMaintenanceStreakFixture(t)
+			f.installMaintenanceFault(t, "stats_read_failed")
+			for run := 1; run <= 3; run++ {
+				headBefore := f.head(t)
+				out, err := f.runArm(t, arm)
+				requireFailingRun(t, out, err, fmt.Sprintf("run %d", run))
+				if arm == "post_push" && f.head(t) == headBefore {
+					t.Fatalf("run %d: the snapshot must be committed before maintenance fails:\n%s", run, out)
+				}
+				state := f.state(t)
+				if got := maintenanceStreak(state); got != run {
+					t.Fatalf("run %d: consecutive_maintenance_failures = %d, want %d:\n%v\n%s", run, got, run, state, out)
+				}
+				wantMails := 0
+				if run == 3 {
+					wantMails = 1
+				}
+				if got := maintenanceMailCount(t, f.archiveMaintenanceFixture); got != wantMails {
+					t.Fatalf("run %d: %d escalations sent, want %d:\n%s", run, got, wantMails, f.mail(t))
+				}
+				if !strings.Contains(out, "archive maintenance failed") {
+					t.Errorf("run %d: expected the archive maintenance failed line:\n%s", run, out)
+				}
+			}
+			mail := f.mail(t)
+			for _, want := range []string{
+				maintenanceFailureSubject,
+				"Order: jsonl-export",
+				"Archive: " + f.archiveRepo,
+				"Consecutive failures: 3 (threshold: 3)",
+				"Cause: stats_read_failed",
+				"Arm: " + arm,
+				"Last failure at: ",
+				"simulated count-objects failure",
+				"GC_JSONL_MAX_MAINTENANCE_FAILURES=99",
+				"docs/getting-started/troubleshooting.md#archive-object-maintenance",
+			} {
+				if !strings.Contains(mail, want) {
+					t.Errorf("the escalation is missing %q:\n%s", want, mail)
+				}
+			}
+			requireMaintenanceRecord(t, f.state(t), 3, "stats_read_failed", arm, "simulated count-objects failure", true)
+
+			// The record is kept and counted, but the alert is not repeated.
+			out, err := f.runArm(t, arm)
+			requireFailingRun(t, out, err, "run 4")
+			if got := maintenanceMailCount(t, f.archiveMaintenanceFixture); got != 1 {
+				t.Fatalf("run 4 sent another escalation (%d in all):\n%s", got, f.mail(t))
+			}
+			requireMaintenanceRecord(t, f.state(t), 4, "stats_read_failed", arm, "simulated count-objects failure", true)
+		})
+	}
+}
+
+// Row 2: malformed and incomplete statistics record the raw values git printed,
+// and a threshold of 0 or 1 alerts on the first failing run.
+func TestJsonlExportEscalatesMalformedAndIncompleteMaintenanceStats(t *testing.T) {
+	for _, tc := range []struct {
+		cause, threshold, evidence string
+	}{
+		{"stats_malformed", "1", "count=12x"},
+		{"stats_incomplete", "1", "size-pack=<missing>"},
+		{"stats_malformed", "0", "count=12x"},
+	} {
+		t.Run(tc.cause+" threshold "+tc.threshold, func(t *testing.T) {
+			f := newMaintenanceStreakFixture(t)
+			f.env["GC_JSONL_MAX_MAINTENANCE_FAILURES"] = tc.threshold
+			f.installMaintenanceFault(t, tc.cause)
+
+			out, err := f.runArm(t, "post_push")
+			requireFailingRun(t, out, err, "the failing run")
+			if got := maintenanceMailCount(t, f.archiveMaintenanceFixture); got != 1 {
+				t.Fatalf("%d escalations sent on the first failing run, want 1:\n%s", got, out)
+			}
+			mail := f.mail(t)
+			for _, want := range []string{"Cause: " + tc.cause, "Arm: post_push", tc.evidence} {
+				if !strings.Contains(mail, want) {
+					t.Errorf("the escalation is missing %q:\n%s", want, mail)
+				}
+			}
+			requireMaintenanceRecord(t, f.state(t), 1, tc.cause, "post_push", tc.evidence, true)
+		})
+	}
+}
+
+// Row 3: a refusal for want of free space is its own cause, and its
+// remediation names the setting that disables the check.
+func TestJsonlExportEscalatesMaintenanceLowSpace(t *testing.T) {
+	f := newMaintenanceStreakFixture(t)
+	f.env["GC_JSONL_MAX_MAINTENANCE_FAILURES"] = "1"
+	f.seedLargePackAndBacklog(t)
+	f.env["GC_JSONL_GC_MIN_FREE_KB"] = "512"
+	writeArchiveFreeSpaceDFStub(t, f.binDir, "non-largest", 511)
+
+	out, err := f.runArm(t, "post_push")
+	requireFailingRun(t, out, err, "the refused run")
+	state := f.state(t)
+	evidence, _ := state["last_maintenance_failure_evidence"].(string)
+	match := regexp.MustCompile(`free_kb=(\d+) needed_kb=(\d+) floor_kb=512`).FindStringSubmatch(evidence)
+	if match == nil {
+		t.Fatalf("low_space evidence = %q, want free_kb=<n> needed_kb=<n> floor_kb=512", evidence)
+	}
+	free, _ := strconv.Atoi(match[1])
+	needed, _ := strconv.Atoi(match[2])
+	if free-needed != 511 {
+		t.Errorf("free_kb %d is not 511 KiB beyond needed_kb %d (the stub leaves that margin)", free, needed)
+	}
+	requireMaintenanceRecord(t, state, 1, "low_space", "post_push", "floor_kb=512", true)
+	mail := f.mail(t)
+	for _, want := range []string{
+		"Cause: low_space",
+		"GC_JSONL_GC_MIN_FREE_KB=0",
+		"-c pack.windowMemory=",
+		"-c pack.threads=1 repack -d -l -q --geometric=2",
+	} {
+		if !strings.Contains(mail, want) {
+			t.Errorf("the escalation is missing %q:\n%s", want, mail)
+		}
+	}
+}
+
+// Row 4: a repack that exits non-zero is gc_failed, with its exit status,
+// what it printed and the loose objects it left in the evidence.
+func TestJsonlExportEscalatesFailedMaintenanceRepack(t *testing.T) {
+	f := newMaintenanceStreakFixture(t)
+	f.env["GC_JSONL_MAX_MAINTENANCE_FAILURES"] = "1"
+	f.installMaintenanceFault(t, "gc_failed")
+
+	out, err := f.runArm(t, "post_push")
+	requireFailingRun(t, out, err, "the failing run")
+	state := f.state(t)
+	requireMaintenanceRecord(t, state, 1, "gc_failed", "post_push", "exit status 1", true)
+	evidence, _ := state["last_maintenance_failure_evidence"].(string)
+	for _, want := range []string{"simulated git repack failure", "loose_objects="} {
+		if !strings.Contains(evidence, want) {
+			t.Errorf("last_maintenance_failure_evidence = %q, want it to contain %q", evidence, want)
+		}
+	}
+	mail := f.mail(t)
+	for _, want := range []string{"Cause: gc_failed", "exit status 1", "repack -d -l -q --geometric=2", "-c pack.threads=1"} {
+		if !strings.Contains(mail, want) {
+			t.Errorf("the escalation is missing %q:\n%s", want, mail)
+		}
+	}
+	if strings.Contains(mail, " gc ") {
+		t.Errorf("the remediation must give the by-hand repack, not a git gc:\n%s", mail)
+	}
+	// The repack's own stderr still reaches the run's stderr.
+	if !strings.Contains(out, "simulated git repack failure") {
+		t.Errorf("the repack's stderr must still be printed:\n%s", out)
+	}
+}
+
+func requireTimeoutBinary(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{"timeout", "gtimeout"} {
+		if _, err := exec.LookPath(name); err == nil {
+			return
+		}
+	}
+	t.Skip("neither timeout nor gtimeout is on PATH: the repack runs unbounded")
+}
+
+// Row 5: a repack that outlives GC_JSONL_GC_TIMEOUT_SECS is stopped, and the
+// snapshot it followed is already committed and pushed.
+func TestJsonlExportEscalatesTimedOutMaintenanceRepack(t *testing.T) {
+	requireTimeoutBinary(t)
+	f := newMaintenanceStreakFixture(t)
+	remote := f.addOrigin(t)
+	f.env["GC_JSONL_MAX_MAINTENANCE_FAILURES"] = "1"
+	f.installMaintenanceFault(t, "gc_timeout")
+
+	started := time.Now()
+	out, err := f.runArm(t, "post_push")
+	if elapsed := time.Since(started); elapsed > 15*time.Second {
+		t.Errorf("the run took %s; the 1s repack bound did not stop the repack", elapsed)
+	}
+	requireFailingRun(t, out, err, "the timed-out run")
+	if head, origin := f.head(t), f.originMain(t, remote); head != origin {
+		t.Errorf("origin main = %s, want the run's snapshot %s: the push must come before the bound trips", origin, head)
+	}
+	requireMaintenanceRecord(t, f.state(t), 1, "gc_timeout", "post_push", "timed out after 1s", true)
+	mail := f.mail(t)
+	for _, want := range []string{"Cause: gc_timeout", "GC_JSONL_GC_TIMEOUT_SECS", "timed out after 1s", "Archive push this run: ok"} {
+		if !strings.Contains(mail, want) {
+			t.Errorf("the escalation is missing %q:\n%s", want, mail)
+		}
+	}
+}
+
+// A bound of 0 leaves the repack unbounded.
+func TestJsonlExportMaintenanceTimeoutZeroLeavesRepackUnbounded(t *testing.T) {
+	f := newMaintenanceStreakFixture(t)
+	f.env["GC_JSONL_GC_TIMEOUT_SECS"] = "0"
+	writeGitSubcommandStub(t, f.binDir, lookPathGit(t), "repack", `        sleep 2
+        exit 0`)
+
+	out, err := f.runArm(t, "post_push")
+	if err != nil {
+		t.Fatalf("a repack under no bound must run to the end: %v\n%s", err, out)
+	}
+	if got := maintenanceMailCount(t, f.archiveMaintenanceFixture); got != 0 {
+		t.Errorf("%d escalations sent for a passing run:\n%s", got, f.mail(t))
+	}
+}
+
+// Row 6: the count follows failures across arms and causes, and the one
+// escalation names the cause and arm of the run that reached the threshold.
+func TestJsonlExportMaintenanceStreakSpansArmsAndCauses(t *testing.T) {
+	f := newMaintenanceStreakFixture(t)
+
+	f.installMaintenanceFault(t, "gc_failed")
+	out, err := f.runArm(t, "post_push")
+	requireFailingRun(t, out, err, "post_push run")
+	requireMaintenanceRecord(t, f.state(t), 1, "gc_failed", "post_push", "exit status 1", false)
+
+	f.clearMaintenanceFault(t)
+	f.installMaintenanceFault(t, "stats_read_failed")
+	out, err = f.runArm(t, "halt")
+	requireFailingRun(t, out, err, "halt run")
+	requireMaintenanceRecord(t, f.state(t), 2, "stats_read_failed", "halt", "simulated count-objects failure", false)
+	if got := maintenanceMailCount(t, f.archiveMaintenanceFixture); got != 0 {
+		t.Fatalf("an escalation went out below the threshold:\n%s", f.mail(t))
+	}
+
+	f.clearMaintenanceFault(t)
+	f.installMaintenanceFault(t, "stats_malformed")
+	out, err = f.runArm(t, "no_change")
+	requireFailingRun(t, out, err, "no_change run")
+	requireMaintenanceRecord(t, f.state(t), 3, "stats_malformed", "no_change", "count=12x", true)
+	if got := maintenanceMailCount(t, f.archiveMaintenanceFixture); got != 1 {
+		t.Fatalf("%d escalations sent, want 1:\n%s", got, f.mail(t))
+	}
+	mail := f.mail(t)
+	for _, want := range []string{"Consecutive failures: 3 (threshold: 3)", "Cause: stats_malformed", "Arm: no_change"} {
+		if !strings.Contains(mail, want) {
+			t.Errorf("the escalation is missing %q:\n%s", want, mail)
+		}
+	}
+}
+
+// Row 7: a run whose maintenance passes clears the whole record, including a
+// run that finds the archive below its limits; the pass is reported done, and
+// a later break counts from zero and escalates again.
+func TestJsonlExportMaintenanceRecoveryClearsRecord(t *testing.T) {
+	f := newMaintenanceStreakFixture(t)
+	f.env["GC_MAINTENANCE_DONE_TARGET"] = "deacon/"
+	f.installMaintenanceFault(t, "stats_read_failed")
+	for run := 1; run <= 3; run++ {
+		out, err := f.runArm(t, "post_push")
+		requireFailingRun(t, out, err, fmt.Sprintf("failing run %d", run))
+	}
+	if got := maintenanceMailCount(t, f.archiveMaintenanceFixture); got != 1 {
+		t.Fatalf("%d escalations after three failing runs, want 1:\n%s", got, f.mail(t))
+	}
+	if got := strings.Count(f.gcCalls(t), "MAINTENANCE_DONE"); got != 0 {
+		t.Fatalf("a failing run reported MAINTENANCE_DONE %d times:\n%s", got, f.gcCalls(t))
+	}
+
+	f.clearMaintenanceFault(t)
+	out, err := f.runArm(t, "post_push")
+	if err != nil {
+		t.Fatalf("the healthy run failed: %v\n%s", err, out)
+	}
+	requireMaintenanceKeysCleared(t, f.state(t), "after a passing run")
+	if got := strings.Count(f.gcCalls(t), "MAINTENANCE_DONE"); got != 1 {
+		t.Fatalf("the healthy run reported MAINTENANCE_DONE %d times, want 1:\n%s", got, f.gcCalls(t))
+	}
+
+	// The same break again starts a new streak and gets its own escalation.
+	f.installMaintenanceFault(t, "stats_read_failed")
+	for run := 1; run <= 3; run++ {
+		out, err := f.runArm(t, "post_push")
+		requireFailingRun(t, out, err, fmt.Sprintf("second streak run %d", run))
+		if want := run; maintenanceStreak(f.state(t)) != want {
+			t.Fatalf("second streak run %d: count = %d, want %d", run, maintenanceStreak(f.state(t)), want)
+		}
+	}
+	if got := maintenanceMailCount(t, f.archiveMaintenanceFixture); got != 2 {
+		t.Fatalf("%d escalations after the second streak, want 2:\n%s", got, f.mail(t))
+	}
+
+	// A run that finds the archive below its limits passes without a pack,
+	// and clears a record left by earlier runs.
+	f.clearMaintenanceFault(t)
+	f.env["GC_JSONL_GC_LOOSE_OBJECTS"] = archiveLimitOutOfReach
+	f.env["GC_JSONL_GC_LOOSE_KB"] = archiveLimitOutOfReach
+	f.setState(t, map[string]any{
+		"consecutive_maintenance_failures":  2,
+		"last_maintenance_failure_at":       "2026-01-02T03:04:05Z",
+		"last_maintenance_failure_cause":    "gc_failed",
+		"last_maintenance_failure_arm":      "post_push",
+		"last_maintenance_failure_evidence": "exit status 1",
+	})
+	out, err = f.runArm(t, "no_change")
+	if err != nil {
+		t.Fatalf("the below-limits run failed: %v\n%s", err, out)
+	}
+	requireMaintenanceKeysCleared(t, f.state(t), "after a run below the limits")
+}
+
+// Row 8: each run attempts one repack on each of the five paths that reach
+// maintenance, and a failing run adds exactly one to the count.
+func TestJsonlExportAttemptsOneMaintenanceRepackPerRun(t *testing.T) {
+	f := newMaintenanceStreakFixture(t)
+	argvLog := filepath.Join(t.TempDir(), "git-argv.log")
+	writeGitArgvLogStub(t, f.binDir, lookPathGit(t), argvLog)
+	repacks := func() int {
+		data, err := os.ReadFile(argvLog)
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatalf("ReadFile(git argv log): %v", err)
+		}
+		return strings.Count(string(data), " repack ")
+	}
+
+	f.addOrigin(t)
+	steps := []struct {
+		path string
+		run  func() (string, error)
+	}{
+		{"halt", func() (string, error) { return f.runArm(t, "halt") }},
+		// The halt left its snapshot unpushed, so the next run with the same
+		// data owes a push; the one after owes nothing.
+		{"pending push", func() (string, error) { return f.runArm(t, "no_change") }},
+		{"no changes", func() (string, error) { return f.runArm(t, "no_change") }},
+		{"normal export", func() (string, error) { return f.runArm(t, "post_push") }},
+		{"failed database", func() (string, error) {
+			writeIssuesExportFailureDoltStub(t, f.binDir)
+			return f.run(t)
+		}},
+	}
+	for _, step := range steps {
+		before := repacks()
+		out, err := step.run()
+		if err != nil {
+			t.Fatalf("%s: %v\n%s", step.path, err, out)
+		}
+		if got := repacks() - before; got != 1 {
+			t.Errorf("%s: %d repack calls, want exactly 1:\n%s", step.path, got, out)
+		}
+	}
+
+	// A failing run counts once however it ends: a seeded 2 becomes 3.
+	f.clearMaintenanceFault(t)
+	writeMultiRecordDoltStub(t, f.binDir, f.records)
+	f.installMaintenanceFault(t, "gc_failed")
+	f.setState(t, map[string]any{"consecutive_maintenance_failures": 2})
+	out, err := f.runArm(t, "post_push")
+	requireFailingRun(t, out, err, "the seeded run")
+	if got := maintenanceStreak(f.state(t)); got != 3 {
+		t.Errorf("a seeded count of 2 became %d after one failing run, want 3", got)
+	}
+	if got := maintenanceMailCount(t, f.archiveMaintenanceFixture); got != 1 {
+		t.Errorf("%d escalations after the run that reached the threshold, want 1:\n%s", got, f.mail(t))
+	}
+}
+
+// Row 9: a spike halt commits its snapshot and holds its push; a maintenance
+// failure there still escalates, after the spike alert, and says no push was
+// attempted.
+func TestJsonlExportEscalatesMaintenanceFailureOnHalt(t *testing.T) {
+	f := newArchiveMaintenanceFixture(t, 100, 10)
+	f.env["GC_JSONL_GC_LOOSE_OBJECTS"] = "0"
+	f.env["GC_JSONL_MAX_MAINTENANCE_FAILURES"] = "1"
+	remote := f.addOrigin(t)
+	originBefore := f.originMain(t, remote)
+	f.installMaintenanceFault(t, "gc_failed")
+
+	out, err := f.run(t)
+	requireFailingRun(t, out, err, "the halted run")
+	state := f.state(t)
+	requireMaintenanceRecord(t, state, 1, "gc_failed", "halt", "exit status 1", true)
+	if subject := f.headSubject(t); !strings.Contains(subject, "[HALT]") {
+		t.Errorf("HEAD subject = %q, want the [HALT] snapshot", subject)
+	}
+	if origin := f.originMain(t, remote); origin != originBefore {
+		t.Errorf("origin main moved from %s to %s on a halted run", originBefore, origin)
+	}
+	if pending, _ := state["pending_archive_push"].(bool); !pending {
+		t.Errorf("pending_archive_push = %v, want true so a later run pushes the halt snapshot", state["pending_archive_push"])
+	}
+	mail := f.mail(t)
+	spike := strings.Index(mail, "ESCALATION: JSONL spike")
+	maintenance := strings.Index(mail, maintenanceFailureSubject)
+	if spike < 0 || maintenance < 0 || spike > maintenance {
+		t.Errorf("the spike alert (at %d) must be sent before the maintenance escalation (at %d):\n%s", spike, maintenance, mail)
+	}
+	for _, want := range []string{"Arm: halt", "Archive push this run: not attempted (spike halt)"} {
+		if !strings.Contains(mail, want) {
+			t.Errorf("the escalation is missing %q:\n%s", want, mail)
+		}
+	}
+	if strings.Contains(mail, "JSONL push failed") {
+		t.Errorf("a halted run sent a push escalation:\n%s", mail)
+	}
+}
+
+// addBrokenOrigin points origin at a directory that is not a repository, so a
+// push fails until repairOrigin makes it one.
+func (f archiveMaintenanceFixture) addBrokenOrigin(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	runGit(t, f.archiveRepo, "remote", "add", "origin", dir)
+	return dir
+}
+
+func (f archiveMaintenanceFixture) repairOrigin(t *testing.T, dir string) {
+	t.Helper()
+	runGit(t, f.archiveRepo, "init", "--bare", "-q", dir)
+}
+
+// Row 10: the escalation says how this run's push went, and the push is done
+// first, so a push that succeeds is already on origin when the mail goes out.
+func TestJsonlExportMaintenanceEscalationReportsArchivePush(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want string
+		run  func(t *testing.T, f *maintenanceStreakFixture) (string, error)
+	}{
+		{"pushed", "ok", func(t *testing.T, f *maintenanceStreakFixture) (string, error) {
+			remote := f.addOrigin(t)
+			f.installMaintenanceFault(t, "gc_failed")
+			out, err := f.runArm(t, "post_push")
+			if head, origin := f.head(t), f.originMain(t, remote); head != origin {
+				t.Errorf("origin main = %s, want the run's snapshot %s", origin, head)
+			}
+			return out, err
+		}},
+		{"local-only", "skipped (local-only)", func(t *testing.T, f *maintenanceStreakFixture) (string, error) {
+			f.installMaintenanceFault(t, "gc_failed")
+			return f.runArm(t, "post_push")
+		}},
+		{"push failed", "failed", func(t *testing.T, f *maintenanceStreakFixture) (string, error) {
+			f.addBrokenOrigin(t)
+			f.installMaintenanceFault(t, "gc_failed")
+			return f.runArm(t, "post_push")
+		}},
+		{"pending push delivered", "ok", func(t *testing.T, f *maintenanceStreakFixture) (string, error) {
+			f.addOrigin(t)
+			f.installMaintenanceFault(t, "gc_failed")
+			return f.runArm(t, "no_change")
+		}},
+		{"nothing waiting", "not attempted (nothing waiting)", func(t *testing.T, f *maintenanceStreakFixture) (string, error) {
+			f.addOrigin(t)
+			if out, err := f.runArm(t, "no_change"); err != nil {
+				t.Fatalf("settling the archive: %v\n%s", err, out)
+			}
+			if pending, _ := f.state(t)["pending_archive_push"].(bool); pending {
+				t.Fatalf("settling the archive left a push pending: %v", f.state(t))
+			}
+			f.installMaintenanceFault(t, "gc_failed")
+			return f.runArm(t, "no_change")
+		}},
+		{"failed database, nothing waiting", "not attempted (nothing waiting)", func(t *testing.T, f *maintenanceStreakFixture) (string, error) {
+			f.addOrigin(t)
+			if out, err := f.runArm(t, "no_change"); err != nil {
+				t.Fatalf("settling the archive: %v\n%s", err, out)
+			}
+			writeIssuesExportFailureDoltStub(t, f.binDir)
+			f.installMaintenanceFault(t, "gc_failed")
+			return f.run(t)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newMaintenanceStreakFixture(t)
+			f.env["GC_JSONL_MAX_MAINTENANCE_FAILURES"] = "1"
+			out, err := tc.run(t, f)
+			requireFailingRun(t, out, err, "the failing run")
+			if want := "Archive push this run: " + tc.want; !strings.Contains(f.mail(t), want) {
+				t.Errorf("the escalation is missing %q:\n%s", want, f.mail(t))
+			}
+		})
+	}
+}
+
+// Row 11: the push failure record and the maintenance failure record count
+// separately; neither escalates, clears or resets the other.
+func TestJsonlExportMaintenanceAndPushFailureRecordsAreIndependent(t *testing.T) {
+	f := newMaintenanceStreakFixture(t)
+	f.env["GC_JSONL_MAX_PUSH_FAILURES"] = "3"
+	origin := f.addBrokenOrigin(t)
+	f.installMaintenanceFault(t, "stats_read_failed")
+	for run := 1; run <= 3; run++ {
+		out, err := f.runArm(t, "post_push")
+		requireFailingRun(t, out, err, fmt.Sprintf("run %d", run))
+	}
+	state := f.state(t)
+	if got, _ := state["consecutive_push_failures"].(float64); int(got) != 3 {
+		t.Errorf("consecutive_push_failures = %v, want 3: %v", state["consecutive_push_failures"], state)
+	}
+	if flag, _ := state["push_failure_escalated"].(bool); !flag {
+		t.Errorf("push_failure_escalated = %v, want true", state["push_failure_escalated"])
+	}
+	requireMaintenanceRecord(t, state, 3, "stats_read_failed", "post_push", "simulated count-objects failure", true)
+	mail := f.mail(t)
+	if got := strings.Count(mail, "ESCALATION: JSONL push failed [HIGH]"); got != 1 {
+		t.Errorf("%d push escalations, want 1:\n%s", got, mail)
+	}
+	if got := strings.Count(mail, maintenanceFailureSubject); got != 1 {
+		t.Errorf("%d maintenance escalations, want 1:\n%s", got, mail)
+	}
+
+	// A push that succeeds clears the push record and leaves the maintenance
+	// record counting.
+	f.repairOrigin(t, origin)
+	out, err := f.runArm(t, "post_push")
+	requireFailingRun(t, out, err, "run 4")
+	state = f.state(t)
+	if got, _ := state["consecutive_push_failures"].(float64); got != 0 {
+		t.Errorf("consecutive_push_failures = %v after a good push, want 0", state["consecutive_push_failures"])
+	}
+	if _, ok := state["push_failure_escalated"]; ok {
+		t.Errorf("push_failure_escalated survived a good push: %v", state)
+	}
+	requireMaintenanceRecord(t, state, 4, "stats_read_failed", "post_push", "simulated count-objects failure", true)
+
+	// Dropping to local-only resets the push record and leaves the
+	// maintenance record alone.
+	runGit(t, f.archiveRepo, "remote", "remove", "origin")
+	out, err = f.runArm(t, "post_push")
+	requireFailingRun(t, out, err, "run 5")
+	state = f.state(t)
+	if got, _ := state["consecutive_push_failures"].(float64); got != 0 {
+		t.Errorf("consecutive_push_failures = %v in local-only mode, want 0", state["consecutive_push_failures"])
+	}
+	requireMaintenanceRecord(t, state, 5, "stats_read_failed", "post_push", "simulated count-objects failure", true)
+	if got := strings.Count(f.mail(t), maintenanceFailureSubject); got != 1 {
+		t.Errorf("%d maintenance escalations after run 5, want 1:\n%s", got, f.mail(t))
+	}
+
+	// Maintenance recovering clears its own record and nothing else.
+	f.clearMaintenanceFault(t)
+	out, err = f.runArm(t, "post_push")
+	if err != nil {
+		t.Fatalf("the healthy run failed: %v\n%s", err, out)
+	}
+	requireMaintenanceKeysCleared(t, f.state(t), "after recovery")
+}
+
+// Row 12: an escalation that is not delivered leaves the flag unset and says
+// so; the next failing run sends it again, and once delivered it is not sent
+// a third time.
+func TestJsonlExportRetriesUndeliveredMaintenanceEscalation(t *testing.T) {
+	f := newMaintenanceStreakFixture(t)
+	f.installMaintenanceFault(t, "stats_read_failed")
+	for run := 1; run <= 2; run++ {
+		out, err := f.runArm(t, "post_push")
+		requireFailingRun(t, out, err, fmt.Sprintf("run %d", run))
+	}
+
+	writeJsonlExportGCStubWithMailExitCode(t, f.binDir, 1)
+	out, err := f.runArm(t, "post_push")
+	requireFailingRun(t, out, err, "run 3, delivery refused")
+	const notDelivered = "jsonl-export: maintenance escalation was not delivered; the next failing run will retry"
+	if !strings.Contains(out, notDelivered) {
+		t.Errorf("expected %q on stderr:\n%s", notDelivered, out)
+	}
+	if flag, _ := f.state(t)["maintenance_failure_escalated"].(bool); flag {
+		t.Errorf("maintenance_failure_escalated is set though the mail was not delivered: %v", f.state(t))
+	}
+	if got := maintenanceMailCount(t, f.archiveMaintenanceFixture); got != 1 {
+		t.Fatalf("%d delivery attempts on run 3, want 1:\n%s", got, f.mail(t))
+	}
+
+	writeJsonlExportGCStub(t, f.binDir)
+	out, err = f.runArm(t, "post_push")
+	requireFailingRun(t, out, err, "run 4, delivered")
+	if strings.Contains(out, notDelivered) {
+		t.Errorf("run 4 delivered but reported otherwise:\n%s", out)
+	}
+	requireMaintenanceRecord(t, f.state(t), 4, "stats_read_failed", "post_push", "simulated count-objects failure", true)
+	if got := maintenanceMailCount(t, f.archiveMaintenanceFixture); got != 2 {
+		t.Fatalf("%d delivery attempts after run 4, want 2:\n%s", got, f.mail(t))
+	}
+
+	out, err = f.runArm(t, "post_push")
+	requireFailingRun(t, out, err, "run 5")
+	if got := maintenanceMailCount(t, f.archiveMaintenanceFixture); got != 2 {
+		t.Errorf("run 5 sent again after a delivered escalation (%d in all):\n%s", got, f.mail(t))
+	}
+}
+
+// Row 13: the two new settings are validated before the run commits anything.
+func TestJsonlExportRejectsInvalidMaintenanceEscalationSettings(t *testing.T) {
+	for _, tc := range []struct{ name, value string }{
+		{"GC_JSONL_MAX_MAINTENANCE_FAILURES", "2k"},
+		{"GC_JSONL_MAX_MAINTENANCE_FAILURES", "-1"},
+		{"GC_JSONL_MAX_MAINTENANCE_FAILURES", "99999999999999999999"},
+		{"GC_JSONL_GC_TIMEOUT_SECS", "1m"},
+		{"GC_JSONL_GC_TIMEOUT_SECS", "-5"},
+		{"GC_JSONL_GC_TIMEOUT_SECS", "99999999999999999999"},
+	} {
+		t.Run(tc.name+"="+tc.value, func(t *testing.T) {
+			f := newArchiveMaintenanceFixture(t, 3, 5)
+			seedHead := f.head(t)
+			f.env[tc.name] = tc.value
+
+			out, err := f.run(t)
+			if err == nil {
+				t.Fatalf("expected %s=%q to fail the run:\n%s", tc.name, tc.value, out)
+			}
+			if !strings.Contains(out, "jsonl-export: "+tc.name+" must be") {
+				t.Fatalf("expected a %s validation error:\n%s", tc.name, out)
+			}
+			if head := f.head(t); head != seedHead {
+				t.Fatalf("an invalid setting must stop the run before it commits: HEAD %s, want %s", head, seedHead)
+			}
+		})
+	}
+}
+
+// Row 14: a repack that prints a great deal still leaves a bounded record, and
+// the escalation shows a bounded tail of it, while the run's own stderr keeps
+// all of it.
+func TestJsonlExportBoundsMaintenanceFailureEvidence(t *testing.T) {
+	f := newMaintenanceStreakFixture(t)
+	f.env["GC_JSONL_MAX_MAINTENANCE_FAILURES"] = "1"
+	writeGitSubcommandStub(t, f.binDir, lookPathGit(t), "repack", `        i=0
+        while [ $i -lt 400 ]; do
+            echo "line $i of noisy repack output padded with filler text" >&2
+            i=$((i + 1))
+        done
+        exit 1`)
+
+	out, err := f.runArm(t, "post_push")
+	requireFailingRun(t, out, err, "the noisy run")
+	requireMaintenanceRecord(t, f.state(t), 1, "gc_failed", "post_push", "exit status 1", true)
+	if lines := maintenanceEvidenceSection(t, f.mail(t)); len(lines) == 0 || len(lines) > 20 {
+		t.Errorf("the escalation shows %d evidence lines, want between 1 and 20:\n%s", len(lines), f.mail(t))
+	}
+	for _, want := range []string{"line 0 of noisy repack output", "line 399 of noisy repack output"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the run's stderr lost %q:\n%.2000s", want, out)
+		}
+	}
+}
+
 // gateSweepEnv constructs the env for a gate-sweep.sh invocation with a
 // PATH-shimmed bd stub that logs every call to BD_LOG. Every store the tests
 // list has its own database, as in a city whose rigs keep their own stores;
