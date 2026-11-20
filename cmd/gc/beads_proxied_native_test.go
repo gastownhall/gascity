@@ -1669,6 +1669,70 @@ func TestProxiedOpenServesADemotedSplitWhenTheLeafRefusedNonTerminally(t *testin
 	}
 }
 
+// TestProxiedOpenKeepsTheRefusalForOneShotOpens pins the boundary of the
+// demote-and-serve arm (issue #9156): the arm exists so a LONG-LIVED store keeps
+// its guard and its way back to native reads. A one-shot's handle does not
+// outlive the command, so the same verdict must stay a refusal — no split, no
+// guard ticker, no bd leaf built for a store that is about to close — and the
+// verdict must still reach the factory so the bd front door opens with a reason.
+func TestProxiedOpenKeepsTheRefusalForOneShotOpens(t *testing.T) {
+	own := &proxyendpoint.PostOpenWindow{
+		Commits: []string{"schema: apply migrations"},
+	}
+	f := newProxiedScopeFixture(t)
+	beads.ForgetProxiedPin(f.scopeRoot, "beads")
+	t.Cleanup(func() { beads.ForgetProxiedPin(f.scopeRoot, "beads") })
+	var bdOpens int
+	leafStorage := &closeCountingStorage{}
+	opener := &proxiedNativeOpener{
+		cityPath:     t.TempDir(),
+		scopeRoot:    f.scopeRoot,
+		database:     "beads",
+		processTable: f.processTable(),
+		probe: func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			served := proxyendpoint.ServedProbeForTest(f.pinnedCursors(), proxyendpoint.CursorReality{})
+			served.Head = "before0000"
+			return served
+		},
+		observed:  beads.NewGenerationSet(),
+		recovered: beads.NewGenerationSet(),
+		sleep:     func(context.Context, time.Duration) error { return nil },
+		openNative: func(context.Context, string, map[string]string, ...beads.NativeDoltStoreOption) (*beads.NativeDoltStore, error) {
+			return beads.NewNativeDoltStoreOverStorageForTest(leafStorage), nil
+		},
+		leafObserve: func(_ context.Context, _ *beads.NativeDoltStore, since string) (proxyendpoint.PostOpenReport, error) {
+			if since != "before0000" {
+				return proxyendpoint.PostOpenReport{}, fmt.Errorf("the re-read was handed since %q, want the pin's head", since)
+			}
+			report := observedHead("after11111")
+			report.Window = own
+			return report, nil
+		},
+		openBd: func() (beads.Store, error) {
+			bdOpens++
+			return beads.NewMemStore(), nil
+		},
+	}
+
+	store, _, err := opener.open(context.Background(), false)
+	if err == nil {
+		t.Fatalf("a one-shot open was served %T; its handle does not outlive the command", store)
+	}
+	verdict, typed := beads.ProxiedVerdictOf(err)
+	if !typed || verdict.Verdict != beads.ProxiedVerdictHeadMoved {
+		t.Fatalf("err = %v, want the typed head_moved verdict the factory falls back on", err)
+	}
+	if store != nil {
+		t.Fatalf("the one-shot open returned a store (%T) alongside its refusal", store)
+	}
+	if bdOpens != 0 {
+		t.Fatalf("the demote arm built %d bd leaf(s) for a one-shot: a guard on a 40ms store is a ticker bought for nothing", bdOpens)
+	}
+	if leafStorage.closed != 1 {
+		t.Fatalf("the refused native leaf was closed %d time(s), want 1", leafStorage.closed)
+	}
+}
+
 // observedHead is a post-open report of a healthy ignored plane with the given
 // HEAD — the shape of every observation the rows that are about HEAD alone need.
 // The zero report is NOT that: it says the ignored cursor table is gone.
