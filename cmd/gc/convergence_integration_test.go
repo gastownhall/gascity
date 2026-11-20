@@ -2066,3 +2066,106 @@ func TestConvergeSocketTimeoutReportsClaimedRequest(t *testing.T) {
 		}
 	})
 }
+
+// TestConvergenceHandoff: the dispatcher's claim and the socket handler's
+// withdrawal settle a request exactly once in either order, the state is
+// shared by every value copy of the request, and a withdrawn request never
+// runs.
+func TestConvergenceHandoff(t *testing.T) {
+	t.Run("claim-before-withdraw", func(t *testing.T) {
+		h := &convergenceHandoff{}
+		if !h.claim() {
+			t.Fatal("claim of a queued request failed")
+		}
+		if h.withdraw() {
+			t.Error("withdraw succeeded after claim")
+		}
+		if h.claim() {
+			t.Error("second claim succeeded")
+		}
+	})
+
+	t.Run("withdraw-before-claim", func(t *testing.T) {
+		h := &convergenceHandoff{}
+		if !h.withdraw() {
+			t.Fatal("withdraw of a queued request failed")
+		}
+		if h.claim() {
+			t.Error("claim succeeded after withdraw")
+		}
+		if h.withdraw() {
+			t.Error("second withdraw succeeded")
+		}
+	})
+
+	t.Run("nil-handoff", func(t *testing.T) {
+		var h *convergenceHandoff
+		if !h.claim() {
+			t.Error("an in-process request must always be claimable")
+		}
+		if h.withdraw() {
+			t.Error("an in-process request must never be withdrawable")
+		}
+	})
+
+	t.Run("competing", func(t *testing.T) {
+		for i := 0; i < 200; i++ {
+			h := &convergenceHandoff{}
+			start := make(chan struct{})
+			results := make(chan bool, 2)
+			go func() { <-start; results <- h.claim() }()
+			go func() { <-start; results <- h.withdraw() }()
+			close(start)
+			wins := 0
+			for range 2 {
+				if <-results {
+					wins++
+				}
+			}
+			if wins != 1 {
+				t.Fatalf("round %d: %d transitions succeeded, want exactly 1", i, wins)
+			}
+		}
+	})
+
+	t.Run("withdrawn-copy-prevents-dispatch", func(t *testing.T) {
+		cr, store := setupConvergenceRuntime(t)
+		queued := convergenceRequest{
+			Command: "create",
+			Params:  map[string]string{"formula": "test-formula", "target": "test-agent", "max_iterations": "3"},
+			replyCh: make(chan convergenceReply, 1),
+			handoff: &convergenceHandoff{},
+		}
+		dequeued := queued // the channel hands the event loop a value copy
+		if !queued.handoff.withdraw() {
+			t.Fatal("withdraw of a queued request failed")
+		}
+		reply := cr.handleConvergenceRequest(context.Background(), dequeued)
+		if reply.Error != convergenceRequestWithdrawnError {
+			t.Errorf("dispatch reply = %+v, want %q", reply, convergenceRequestWithdrawnError)
+		}
+		if live := liveConvergenceLoops(t, store); len(live) != 0 {
+			t.Errorf("withdrawn create made %d loops", len(live))
+		}
+	})
+
+	t.Run("claimed-copy-blocks-withdraw", func(t *testing.T) {
+		cr, store := setupConvergenceRuntime(t)
+		queued := convergenceRequest{
+			Command: "create",
+			Params:  map[string]string{"formula": "test-formula", "target": "test-agent", "max_iterations": "3"},
+			replyCh: make(chan convergenceReply, 1),
+			handoff: &convergenceHandoff{},
+		}
+		dequeued := queued
+		if reply := cr.handleConvergenceRequest(context.Background(), dequeued); reply.Error != "" {
+			t.Fatalf("dispatch error: %s", reply.Error)
+		}
+		if queued.handoff.withdraw() {
+			t.Error("withdraw succeeded after the event loop ran the request")
+		}
+		if live := liveConvergenceLoops(t, store); len(live) != 1 {
+			t.Errorf("live loops = %d, want 1", len(live))
+		}
+	})
+}
