@@ -1155,6 +1155,52 @@ func TestDispatchAdoptsANudgeFencedToADrainedSibling(t *testing.T) {
 	}
 }
 
+// fenceHoldingSiblingShapes are open sibling shapes that keep their nudge
+// fence: the reconciler may wake them in place under the same bead id.
+var fenceHoldingSiblingShapes = []struct {
+	name string
+	meta map[string]string
+}{
+	{name: "asleep idle", meta: map[string]string{"state": "asleep", "sleep_reason": "idle"}},
+	{name: "asleep runtime-missing", meta: map[string]string{"state": "asleep", "sleep_reason": "runtime-missing"}},
+	{name: "draining", meta: map[string]string{"state": "draining"}},
+	{name: "quarantined", meta: map[string]string{"state": "quarantined"}},
+	{name: "drained always-mode named", meta: map[string]string{"state": "drained", "configured_named_session": "true", "configured_named_mode": "always"}},
+}
+
+// A nudge fenced to an open sibling that still holds its fence stays pending,
+// fenced to that sibling: a running sibling of the same agent does not take it.
+func TestDispatchHoldsANudgeFencedToAFenceHoldingSibling(t *testing.T) {
+	for _, tc := range fenceHoldingSiblingShapes {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLegBDispatchFixture(t)
+			s3 := f.create(t)
+			f.setMetadata(t, s3.ID, tc.meta)
+			snapshot, err := loadSessionBeadSnapshot(f.store.Store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info, ok := snapshot.FindInfoByID(s3.ID); !ok || !sessionHoldsNudgeFence(info) {
+				t.Fatalf("setup: s3 in the snapshot = %+v (found %v), want it open and holding its fence", info, ok)
+			}
+			if err := enqueueQueuedNudge(f.dir, newQueuedNudgeWithOptions("worker", "held for s3", "session", time.Now().Add(-time.Minute), queuedNudgeOptions{SessionID: s3.ID})); err != nil {
+				t.Fatal(err)
+			}
+			delivered, err := dispatchAllQueuedNudges(f.dir, supervisorCfg(), f.store.Store, f.store.Store, f.fake, snapshot, nil)
+			if err != nil {
+				t.Fatalf("dispatch: %v", err)
+			}
+			if msgs := f.nudgeCalls(); delivered != 0 || len(msgs) != 0 {
+				t.Fatalf("s1 took the nudge fenced to fence-holding s3 (delivered=%d): %s", delivered, strings.Join(msgs, " | "))
+			}
+			pending, _, _, err := listQueuedNudges(f.dir, "worker", time.Now())
+			if err != nil || len(pending) != 1 || pending[0].SessionID != s3.ID {
+				t.Fatalf("pending = %v, %v; want the nudge still fenced to s3", nqCharItems(pending), err)
+			}
+		})
+	}
+}
+
 // onNudgeProvider runs onNudge after each delivery the fake records.
 type onNudgeProvider struct {
 	*runtime.Fake
