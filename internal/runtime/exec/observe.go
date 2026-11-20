@@ -30,10 +30,6 @@ const probeOpTimeout = 4 * time.Second
 // observeOutputCap is the most stdout one `observe` answer may print.
 const observeOutputCap = 1 << 20
 
-// exitCodeFreshCollision is a fresh_only `start` or `provision` refusing a
-// name a box holds (EX_CANTCREAT).
-const exitCodeFreshCollision = 73
-
 // absentPollInterval paces Relaunch's wait for its stopped box to go.
 var absentPollInterval = 200 * time.Millisecond
 
@@ -395,7 +391,7 @@ func freshCollision(err error) bool {
 	if !errors.As(err, &e) || e.op != "start" && e.op != "provision" {
 		return false
 	}
-	return e.code == exitCodeFreshCollision || isStartCollision(e.msg)
+	return e.code == runtime.ExitCodeFreshCollision || isStartCollision(e.msg)
 }
 
 // cleanupAfterFreshStartFailure returns the error a failed fresh start

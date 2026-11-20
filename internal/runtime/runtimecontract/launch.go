@@ -143,10 +143,10 @@ func probeLaunchFreshOnly(ctx context.Context, r *runner, hs runtime.ProtocolInf
 	if res := r.isRunning(ctx, name); !res.ok() || strings.TrimSpace(res.stdout) != "true" {
 		return StatusFail, fmt.Sprintf("is-running after a fresh_only launch into a provisioned box = %q (%v), want \"true\"", strings.TrimSpace(res.stdout), res.err)
 	}
-	if res := r.launch(ctx, name, launchConfig{FreshOnly: true}); res.exitCode != 73 {
-		return StatusFail, fmt.Sprintf("a fresh_only launch on a running agent exited %d (%v), want 73", res.exitCode, res.err)
+	if res := r.launch(ctx, name, launchConfig{FreshOnly: true}); res.exitCode != runtime.ExitCodeFreshCollision {
+		return StatusFail, fmt.Sprintf("a fresh_only launch on a running agent exited %d (%v), want %d", res.exitCode, res.err, runtime.ExitCodeFreshCollision)
 	}
-	return StatusPass, "a fresh_only launch starts an agent in a provisioned box and exits 73 on a running one"
+	return StatusPass, fmt.Sprintf("a fresh_only launch starts an agent in a provisioned box and exits %d on a running one", runtime.ExitCodeFreshCollision)
 }
 
 // launchIdentity is the identity the identity probe writes as gc writes a
