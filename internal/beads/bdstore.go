@@ -833,23 +833,23 @@ func truncateRawOutput(data []byte, maxBytes int) string {
 // store bridge, t3bridge, libstore, provider lifecycle — current and future.
 const bdAutoBackupOptOutEnvKey = "BD_BACKUP_ENABLED"
 
-// Legacy and current bd OTEL env var names. gc's own telemetry
-// (SetProcessOTELAttrs, internal/telemetry/subprocess.go) sets the legacy
-// BD_OTEL_METRICS_URL / BD_OTEL_LOGS_URL names process-wide so every bd
-// subprocess inherits them. bd v1.2.0, v1.2.1 and v1.3.0+ deprecate those
-// names in favor of the standard OTEL_EXPORTER_OTLP_*_ENDPOINT names gated by
+// Legacy and current bd OTEL env var names. bd v1.2.0, v1.2.1 and v1.3.0+
+// deprecate the legacy BD_OTEL_METRICS_URL / BD_OTEL_LOGS_URL names in favor
+// of the standard OTEL_EXPORTER_OTLP_*_ENDPOINT names gated by
 // BD_OTEL_ENABLED=true, and log a stderr deprecation warning on every
 // invocation that still carries a legacy name; older bd reads only the legacy
 // names.
 //
-// The standard names are NOT set process-wide (e.g. in SetProcessOTELAttrs):
-// unlike the bd-specific legacy names, OTEL_EXPORTER_OTLP_METRICS_ENDPOINT /
-// OTEL_EXPORTER_OTLP_LOGS_ENDPOINT are consulted by any standard
-// OTel-instrumented child process, not just bd. Setting them in the
-// gc process's own environment would make every other child that honors the
-// OTel spec (not only bd) start exporting to gc's collectors, whether or not
-// it ever opted in. Translating here, scoped to the "bd" exec only, keeps the
-// new names off every other child gc spawns.
+// gc's own telemetry (SetProcessOTELAttrs and OTELEnvMap,
+// internal/telemetry/subprocess.go) emits BD_OTEL_ENABLED=true plus the
+// standard OTEL_EXPORTER_OTLP_METRICS_ENDPOINT /
+// OTEL_EXPORTER_OTLP_LOGS_ENDPOINT names, and no legacy names. The standard
+// names are deliberately visible to every OTel-aware child gc spawns, not
+// only bd, and they overwrite any per-signal endpoint already present in gc's
+// process environment.
+//
+// translateBdLegacyOTELEnv therefore only translates legacy names that come
+// from the user or the inherited environment, scoped to the "bd" exec.
 const (
 	bdLegacyOTELMetricsURLKey = "BD_OTEL_METRICS_URL"
 	bdLegacyOTELLogsURLKey    = "BD_OTEL_LOGS_URL"
@@ -877,7 +877,8 @@ func execEnvFor(name string, baseEnv []string, overrides map[string]string, read
 }
 
 // translateBdLegacyOTELEnv rewrites the legacy BD_OTEL_METRICS_URL /
-// BD_OTEL_LOGS_URL names gc's own telemetry sets process-wide into the names a
+// BD_OTEL_LOGS_URL names, which gc's own telemetry no longer emits but which a
+// user or the inherited environment may still set, into the names a
 // current bd reads, scoped to this bd child's environment only. It applies the
 // same mapping bd itself applies at startup, so the bd exports exactly as it
 // would have, minus the deprecation warning:

@@ -18,9 +18,10 @@ import (
 // (runtime.TakeStartupNudgeHandback) and, when that start succeeded
 // (started), queues it: under program_status = "on", a nudge the session's
 // program held back behind a dialog through the whole startup ladder is never
-// typed and never fails the start (design §10.2 row A20). It waits in the
-// session's queue as a user's submit, stamped with the started row's
-// continuation and bound to the launch that stands
+// typed and never fails the start (design §10.2 row A20); an exec pack's
+// un-welded launch hands back every first turn, which its Start never types.
+// It waits in the session's queue as a user's submit, stamped with the
+// started row's continuation, held until the nudge's NotBefore, and bound to the launch that stands
 // (session.StartupTurnLaunchID: the leaf's live token, else startToken, the
 // one the start carried), so the queue delivers it to that launch alone,
 // ahead of the session's other items, and drops it once another launch
@@ -45,13 +46,13 @@ func queueStartupNudgeHandback(cityPath string, cfg *config.City, leaf runtime.P
 	if err != nil {
 		log.Printf("session %s: reading its initial message to split from the startup nudge: %v", info.ID, err)
 	}
-	turn := newQueuedNudgeWithOptions(target.agentKey(), nudge, nudgequeue.SourceSubmit, now, queuedNudgeOptionsFromTarget(target))
-	items := session.StartupHandbackItems(turn, session.StartupTurnLaunchID(leaf, name, startToken), overrides[session.InitialMessageOverrideKey], newQueuedNudgeID())
+	turn := newQueuedNudgeWithOptions(target.agentKey(), nudge.Text, nudgequeue.SourceSubmit, now, queuedNudgeOptionsFromTarget(target))
+	items := session.StartupHandbackItems(turn, nudge.NotBefore, session.StartupTurnLaunchID(leaf, name, startToken), overrides[session.InitialMessageOverrideKey], newQueuedNudgeID())
 	queue := openNudgeQueue(cityPath, beads.NudgesStore{}).Queue
 	var errs []error
 	for _, item := range items {
 		if err := queue.EnqueueDeferred(item); err != nil {
-			errs = append(errs, fmt.Errorf("queueing session %s's startup nudge %s behind its program's dialog: %w", info.ID, item.ID, err))
+			errs = append(errs, fmt.Errorf("queueing session %s's handed-back startup nudge %s: %w", info.ID, item.ID, err))
 		}
 	}
 	if len(errs) < len(items) {

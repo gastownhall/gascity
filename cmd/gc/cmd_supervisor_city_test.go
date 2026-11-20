@@ -1358,6 +1358,118 @@ func TestSupervisorUnregisterTransactionTimeoutReportsRestorationFailure(t *test
 	}
 }
 
+// A rollback while gc stop's own stop of the city runs (a wall-clock cap that
+// gave up waiting for it) leaves the city unregistered and says so: the
+// supervisor would relaunch a restored city under that stop. The stop ending
+// afterwards neither restores nor commits the registration, and a repeated
+// rollback has nothing more to report.
+func TestSupervisorUnregisterTransactionRollbackDuringOwnStopLeavesCityUnregistered(t *testing.T) {
+	tx, reg, entry, stdout := newSupervisorUnregisterTransactionFixture(t)
+	if _, err := tx.unregister(reg, entry, entry.Path, stdout); err != nil {
+		t.Fatal(err)
+	}
+	if !tx.beginOwnStop() {
+		t.Fatal("beginOwnStop on a removed registration = false, want true")
+	}
+
+	rollback := tx.rollback()
+	if rollback.performed || !rollback.leftUnregistered || rollback.entry != entry {
+		t.Fatalf("rollback during the own stop = %+v, want the city left unregistered", rollback)
+	}
+	var stderr bytes.Buffer
+	writeSupervisorUnregisterRollback(&stderr, "gc stop", "wall-clock timeout", rollback)
+	// The name is no longer registered, so the report gives the path to stop.
+	if want := "gc stop: wall-clock timeout; left 'registered-alias' (" + entry.Path + ") unregistered so the supervisor does not relaunch it under a stop that may still be running; run gc stop " + shellQuotePath(entry.Path) + " to finish the stop\n"; stderr.String() != want {
+		t.Fatalf("rollback report = %q, want %q", stderr.String(), want)
+	}
+
+	tx.endOwnStop()
+	tx.commit()
+	if again := tx.rollback(); again.performed || again.leftUnregistered {
+		t.Fatalf("rollback after the own stop ended = %+v, want nothing more to report", again)
+	}
+	if reg.registerCalls != 0 || len(reg.entries) != 0 {
+		t.Fatalf("registry %v after %d Register calls, want the city left unregistered", reg.entries, reg.registerCalls)
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("output = %q, want no unregister success for a stop the cap gave up on", stdout.String())
+	}
+}
+
+// Once gc stop's own stop has ended, the unregister settles as it does
+// without one: a failed stop restores the exact registration, a successful
+// one commits its removal.
+func TestSupervisorUnregisterTransactionSettlesAsUsualOnceOwnStopEnds(t *testing.T) {
+	t.Run("a failed stop restores the registration", func(t *testing.T) {
+		tx, reg, entry, stdout := newSupervisorUnregisterTransactionFixture(t)
+		if _, err := tx.unregister(reg, entry, entry.Path, stdout); err != nil {
+			t.Fatal(err)
+		}
+		if !tx.beginOwnStop() {
+			t.Fatal("beginOwnStop on a removed registration = false, want true")
+		}
+		tx.endOwnStop()
+		if rollback := tx.rollback(); !rollback.performed || rollback.err != nil || rollback.leftUnregistered {
+			t.Fatalf("rollback after the own stop ended = %+v, want the registration restored", rollback)
+		}
+		if len(reg.entries) != 1 || reg.entries[0] != entry {
+			t.Fatalf("registry = %v, want exact original entry %+v", reg.entries, entry)
+		}
+	})
+	t.Run("a successful stop commits the removal", func(t *testing.T) {
+		tx, reg, entry, stdout := newSupervisorUnregisterTransactionFixture(t)
+		if _, err := tx.unregister(reg, entry, entry.Path, stdout); err != nil {
+			t.Fatal(err)
+		}
+		if !tx.beginOwnStop() {
+			t.Fatal("beginOwnStop on a removed registration = false, want true")
+		}
+		tx.endOwnStop()
+		tx.commit()
+		if len(reg.entries) != 0 {
+			t.Fatalf("registry = %v, want empty", reg.entries)
+		}
+		if got := strings.Count(stdout.String(), "Unregistered city 'registered-alias'"); got != 1 {
+			t.Fatalf("commit output = %q, want one unregister success line", stdout.String())
+		}
+	})
+}
+
+// gc stop must not begin its own stop of a city once a wall-clock cap gave up
+// on the stop: the cap fenced the unregister before it removed anything, or
+// already restored (or failed to restore) the registration.
+func TestSupervisorUnregisterTransactionOwnStopDoesNotBeginOnceACapGaveUp(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		settle func(t *testing.T, tx *supervisorUnregisterTransaction, reg *supervisorUnregisterTransactionRegistry, entry supervisor.CityEntry, stdout io.Writer)
+	}{
+		{"fenced before removal", func(_ *testing.T, tx *supervisorUnregisterTransaction, _ *supervisorUnregisterTransactionRegistry, _ supervisor.CityEntry, _ io.Writer) {
+			tx.rollback()
+		}},
+		{"restored", func(t *testing.T, tx *supervisorUnregisterTransaction, reg *supervisorUnregisterTransactionRegistry, entry supervisor.CityEntry, stdout io.Writer) {
+			if _, err := tx.unregister(reg, entry, entry.Path, stdout); err != nil {
+				t.Fatal(err)
+			}
+			tx.rollback()
+		}},
+		{"restore failed", func(t *testing.T, tx *supervisorUnregisterTransaction, reg *supervisorUnregisterTransactionRegistry, entry supervisor.CityEntry, stdout io.Writer) {
+			if _, err := tx.unregister(reg, entry, entry.Path, stdout); err != nil {
+				t.Fatal(err)
+			}
+			reg.registerErr = errors.New("registry is read-only")
+			tx.rollback()
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tx, reg, entry, stdout := newSupervisorUnregisterTransactionFixture(t)
+			c.settle(t, tx, reg, entry, stdout)
+			if tx.beginOwnStop() {
+				t.Fatal("beginOwnStop after a cap gave up = true, want false")
+			}
+		})
+	}
+}
+
 func TestUnregisterCityFromSupervisorWaitsForControllerStop(t *testing.T) {
 	gcHome := t.TempDir()
 	t.Setenv("GC_HOME", gcHome)
@@ -2034,10 +2146,20 @@ func TestCmdStopSupervisorManagedCityReliesOnSupervisorCleanup(t *testing.T) {
 	t.Setenv("GC_BEADS", "exec:"+script)
 	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
 
+	// The supervisor's controller serves the city until the unregister's
+	// reconcile stops it.
+	sockPath := filepath.Join(cityPath, ".gc", "controller.sock")
+	lis, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lis.Close() //nolint:errcheck
+
 	withSupervisorTestHooks(
 		t,
 		func(_, _ io.Writer) int { return 0 },
 		func(_, _ io.Writer) int {
+			_ = lis.Close()
 			if err := shutdownBeadsProvider(cityPath); err != nil {
 				t.Fatalf("shutdownBeadsProvider: %v", err)
 			}
@@ -2049,26 +2171,27 @@ func TestCmdStopSupervisorManagedCityReliesOnSupervisorCleanup(t *testing.T) {
 		time.Millisecond,
 	)
 
-	sockPath := filepath.Join(cityPath, ".gc", "controller.sock")
-	lis, err := net.Listen("unix", sockPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lis.Close() //nolint:errcheck
-
 	stopped := make(chan struct{}, 1)
 	go func() {
-		conn, acceptErr := lis.Accept()
-		if acceptErr != nil {
-			return
+		for {
+			conn, acceptErr := lis.Accept()
+			if acceptErr != nil {
+				return
+			}
+			buf := make([]byte, 32)
+			n, _ := conn.Read(buf)
+			switch line := string(buf[:n]); {
+			case strings.Contains(line, "stop"):
+				select {
+				case stopped <- struct{}{}:
+				default:
+				}
+				conn.Write([]byte("ok\n")) //nolint:errcheck
+			case strings.Contains(line, "ping"):
+				conn.Write([]byte("4242\n")) //nolint:errcheck
+			}
+			conn.Close() //nolint:errcheck
 		}
-		defer conn.Close() //nolint:errcheck
-		buf := make([]byte, 32)
-		n, _ := conn.Read(buf)
-		if strings.Contains(string(buf[:n]), "stop") {
-			stopped <- struct{}{}
-		}
-		conn.Write([]byte("ok\n")) //nolint:errcheck
 	}()
 
 	var stdout, stderr bytes.Buffer

@@ -240,8 +240,9 @@ func (h *startupHandbacks) take(session string) (string, bool) {
 // TakeStartupNudgeHandback implements [runtime.StartupNudgeHandbackProvider]:
 // the startup nudge the last Start of name could not type because its
 // program reported a dialog through the whole startup ladder, once.
-func (p *Provider) TakeStartupNudgeHandback(name string) (string, bool) {
-	return p.tm.handbacks.take(name)
+func (p *Provider) TakeStartupNudgeHandback(name string) (runtime.StartupNudge, bool) {
+	nudge, ok := p.tm.handbacks.take(name)
+	return runtime.StartupNudge{Text: nudge}, ok
 }
 
 var _ runtime.StartupNudgeHandbackProvider = (*Provider)(nil)

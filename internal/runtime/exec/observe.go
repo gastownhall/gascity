@@ -30,10 +30,6 @@ const probeOpTimeout = 4 * time.Second
 // observeOutputCap is the most stdout one `observe` answer may print.
 const observeOutputCap = 1 << 20
 
-// exitCodeFreshCollision is a fresh_only `start` or `provision` refusing a
-// name a box holds (EX_CANTCREAT).
-const exitCodeFreshCollision = 73
-
 // absentPollInterval paces Relaunch's wait for its stopped box to go.
 var absentPollInterval = 200 * time.Millisecond
 
@@ -324,26 +320,34 @@ func (p *Provider) startFresh(ctx context.Context, name string, cfg runtime.Conf
 }
 
 // createFresh creates the box and launches the agent: `provision` then a
-// fresh launchAgent for a separable pack, otherwise the welded `start` op
-// followed by finishStart, as Start runs it. For a pack sharing the host
-// filesystem the host work comes first and session_setup last, as in Start.
+// fresh launchAgent and its first turn's handback for a separable pack, otherwise the
+// welded `start` op followed by finishStart, as Start runs it. For a pack
+// sharing the host filesystem the host work comes first and session_setup
+// last, as in Start.
 func (p *Provider) createFresh(ctx context.Context, name string, cfg runtime.Config) error {
 	hostWork := p.sharesHostFS()
+	if p.supportsSeparableLaunch() {
+		data, err := p.startConfigFor(ctx, name, withoutNudge(cfg), hostWork)
+		if err != nil {
+			return err
+		}
+		if _, err := p.runWithContext(ctx, p.startTimeout, data, "provision", name); err != nil {
+			return err
+		}
+		if err := p.launchAgent(ctx, name, cfg); err != nil {
+			return err
+		}
+		p.finishSeparableLaunch(ctx, name, cfg, hostWork)
+		return nil
+	}
 	data, err := p.startConfigFor(ctx, name, cfg, hostWork)
 	if err != nil {
 		return err
 	}
-	if p.supportsSeparableLaunch() {
-		if _, err := p.runWithContext(ctx, p.startTimeout, data, "provision", name); err != nil {
-			return err
-		}
-		err = p.launchAgent(ctx, name, cfg)
-	} else {
-		if _, err := p.runWithContext(ctx, p.startTimeout, data, "start", name); err != nil {
-			return err
-		}
-		_, err = p.finishStart(ctx, name, cfg)
+	if _, err := p.runWithContext(ctx, p.startTimeout, data, "start", name); err != nil {
+		return err
 	}
+	_, err = p.finishStart(ctx, name, cfg)
 	if err == nil && hostWork {
 		p.runHostSessionSetup(ctx, name, cfg)
 	}
@@ -387,7 +391,7 @@ func freshCollision(err error) bool {
 	if !errors.As(err, &e) || e.op != "start" && e.op != "provision" {
 		return false
 	}
-	return e.code == exitCodeFreshCollision || isStartCollision(e.msg)
+	return e.code == runtime.ExitCodeFreshCollision || isStartCollision(e.msg)
 }
 
 // cleanupAfterFreshStartFailure returns the error a failed fresh start
