@@ -1,7 +1,14 @@
 package beadmeta
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -151,6 +158,109 @@ func TestScopeCheckExemptKindsComposition(t *testing.T) {
 			t.Errorf("%q is in both EngineMintedOnlyKinds and WorkflowTopologyKinds", k)
 		}
 	}
+}
+
+// TestEngineKindsComposition pins EngineKinds to its declared composition —
+// ControlKinds ∪ StructuralGraphKinds ∪ WorkflowTopologyKinds ∪ {wisp, task,
+// closed} — so the set stays exactly the gc.kind vocabulary the engine
+// writes. A reader asking "is this the engine's own bead?" (the work-record
+// close gate, internal/workrecord) must answer no for anything else: an
+// operator-stamped kind (work, review, bug) is operator vocabulary with no
+// engine meaning.
+func TestEngineKindsComposition(t *testing.T) {
+	if dup := firstDuplicate(EngineKinds); dup != "" {
+		t.Errorf("EngineKinds contains duplicate %q", dup)
+	}
+
+	var derived []string
+	derived = append(derived, ControlKinds...)
+	derived = append(derived, StructuralGraphKinds...)
+	derived = append(derived, WorkflowTopologyKinds...)
+	derived = append(derived, KindWisp, KindTask, KindClosed)
+	slices.Sort(derived)
+	derived = slices.Compact(derived) // KindScope is in two of the unioned sets
+	got := slices.Clone(EngineKinds)
+	slices.Sort(got)
+	if !slices.Equal(got, derived) {
+		t.Errorf("EngineKinds = %v\nwant ControlKinds ∪ StructuralGraphKinds ∪ WorkflowTopologyKinds ∪ {wisp, task, closed} = %v", got, derived)
+	}
+
+	for _, k := range EngineKinds {
+		if !IsEngineKind(k) {
+			t.Errorf("IsEngineKind(%q) = false, want true", k)
+		}
+	}
+	for _, k := range []string{"", "work", "review", "bug", " step", "Task"} {
+		if IsEngineKind(k) {
+			t.Errorf("IsEngineKind(%q) = true, want false", k)
+		}
+	}
+
+	// Drift guard: every Kind* constant this package declares (the *MetadataKey
+	// key names aside) is a value the engine writes, so it must be in
+	// EngineKinds. A future engine kind then cannot silently fall outside the
+	// set — an engine-minted bead would newly answer "not the engine's" to
+	// every IsEngineKind reader.
+	for _, val := range declaredKindConstants(t) {
+		if !IsEngineKind(val) {
+			t.Errorf("declared kind constant %q is not in EngineKinds", val)
+		}
+	}
+}
+
+// declaredKindConstants parses this package's non-test Go files and returns
+// the string value of every constant named Kind* that is not a *MetadataKey
+// key name — the same source-scan shape guard_test.go uses, scoped to the
+// package that declares the vocabulary.
+func declaredKindConstants(t *testing.T) []string {
+	t.Helper()
+	pkgDir := filepath.Join(repoRoot(t), "internal", "beadmeta")
+	entries, err := os.ReadDir(pkgDir)
+	if err != nil {
+		t.Fatalf("reading %s: %v", pkgDir, err)
+	}
+	fset := token.NewFileSet()
+	var values []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, perr := parser.ParseFile(fset, filepath.Join(pkgDir, name), nil, 0)
+		if perr != nil {
+			t.Fatalf("parsing %s: %v", name, perr)
+		}
+		for _, decl := range file.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.CONST {
+				continue
+			}
+			for _, spec := range gen.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok || len(vs.Values) == 0 {
+					continue
+				}
+				for _, nameIdent := range vs.Names {
+					if !strings.HasPrefix(nameIdent.Name, "Kind") || strings.HasSuffix(nameIdent.Name, "MetadataKey") {
+						continue
+					}
+					lit, ok := vs.Values[0].(*ast.BasicLit)
+					if !ok || lit.Kind != token.STRING {
+						t.Fatalf("%s: constant %s has no string literal value; the drift guard needs one per Kind* declaration", name, nameIdent.Name)
+					}
+					val, uerr := strconv.Unquote(lit.Value)
+					if uerr != nil {
+						t.Fatalf("%s: unquoting %s: %v", name, nameIdent.Name, uerr)
+					}
+					values = append(values, val)
+				}
+			}
+		}
+	}
+	if len(values) == 0 {
+		t.Fatal("the kind-constant scan found no Kind* constants; it is no longer guarding anything")
+	}
+	return values
 }
 
 func firstDuplicate(set []string) string {

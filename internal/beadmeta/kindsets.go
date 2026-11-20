@@ -14,9 +14,11 @@ import "slices"
 // dispatch.isAttemptControlKind both derive from IsControlKind, and each has
 // a lockstep test pinning the equality).
 //
-// Three persisted kind values sit outside every set below: KindWisp (wisp
-// molecule roots), KindClosed (closed-marker beads), and KindTask (written on
-// simple attempt roots by internal/dispatch/control.go). gc.original_kind
+// Three persisted kind values sit outside every BEHAVIOR set below: KindWisp
+// (wisp molecule roots), KindClosed (closed-marker beads), and KindTask
+// (written on simple attempt roots by internal/dispatch/control.go). They are
+// engine vocabulary all the same and sit inside EngineKinds, the union of
+// every gc.kind value the engine writes. gc.original_kind
 // (OriginalKindMetadataKey) also persists values from this vocabulary with no
 // current Go reader.
 const (
@@ -156,4 +158,42 @@ var GraphContractMetadataKinds = []string{
 // this composition.
 var EngineMintedOnlyKinds = []string{
 	KindFanout,
+}
+
+// EngineKinds lists every gc.kind value the engine writes. It is exactly
+// ControlKinds ∪ StructuralGraphKinds ∪ WorkflowTopologyKinds ∪ {KindWisp,
+// KindTask, KindClosed} — KindScope is the only value more than one of those
+// sets shares — and TestEngineKindsComposition pins the composition. Any
+// other gc.kind value is operator vocabulary: the engine never mints it and
+// attaches no meaning to it, so a predicate asking whether a bead is the
+// engine's own answers no for it. Distinct from EngineMintedOnlyKinds, which
+// is a validation concept — the kinds only the formula compiler may mint
+// ({fanout}) — rather than the full engine-written vocabulary.
+var EngineKinds = []string{
+	// ControlKinds
+	KindRetry,
+	KindRalph,
+	KindCheck,
+	KindRetryEval,
+	KindFanout,
+	KindDrain,
+	KindScopeCheck,
+	KindWorkflowFinalize,
+	// StructuralGraphKinds
+	KindScope,
+	KindCleanup,
+	KindRun,
+	KindRetryRun,
+	// WorkflowTopologyKinds
+	KindWorkflow,
+	KindSpec,
+	// Persisted values no behavior set covers
+	KindWisp,
+	KindTask,
+	KindClosed,
+}
+
+// IsEngineKind reports whether kind is a member of EngineKinds.
+func IsEngineKind(kind string) bool {
+	return slices.Contains(EngineKinds, kind)
 }
