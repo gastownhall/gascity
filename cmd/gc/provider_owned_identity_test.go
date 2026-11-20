@@ -774,3 +774,65 @@ func TestInitAndHookDirProviderOwnedReadyScopeReconcilesEachPass(t *testing.T) {
 		}
 	})
 }
+
+// writeProviderOwnedFailingInitScript writes a fake exec beads provider whose
+// init op fails, like bd failing to bring a store up.
+func writeProviderOwnedFailingInitScript(t *testing.T, path, oplog string) {
+	t.Helper()
+	body := "#!/bin/sh\n" +
+		"printf '%s\\n' \"$1\" >> '" + oplog + "'\n" +
+		"if [ \"$1\" = init ]; then\n" +
+		"  exit 1\n" +
+		"fi\n" +
+		"exit 0\n"
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestInitAndHookDirProviderOwnedInitFailureSkipsIdentity: when the provider
+// init op itself fails, the pass returns the init failure exactly as it did
+// before identity reconciliation existed — the reconcile is never invoked,
+// the journal keeps its initializing intent, and no layer is touched.
+func TestInitAndHookDirProviderOwnedInitFailureSkipsIdentity(t *testing.T) {
+	clearProviderOwnedProxyEnvironment(t)
+	const projectID = "11111111-2222-3333-4444-555555555555"
+	script := filepath.Join(t.TempDir(), "provider.sh")
+	writeProviderOwnedFailingInitScript(t, script, filepath.Join(t.TempDir(), "oplog"))
+	city, dir := newProviderOwnedIdentityScope(t, script)
+	writeProviderOwnedScopeMetadata(t, dir, projectID)
+
+	openerCalls := 0
+	recorder := &projectIdentityApplyRecordingRecorder{}
+	prevOpener := openProviderOwnedIdentityL3Fn
+	prevRecorder := openProviderOwnedIdentityRecorderFn
+	openProviderOwnedIdentityL3Fn = func(_ context.Context, _ providerOwnedIdentityEndpoint) (providerOwnedIdentityL3Session, error) {
+		openerCalls++
+		return providerOwnedIdentityL3Session{}, nil
+	}
+	openProviderOwnedIdentityRecorderFn = func(string) (events.Recorder, func()) {
+		return recorder, func() {}
+	}
+	t.Cleanup(func() {
+		openProviderOwnedIdentityL3Fn = prevOpener
+		openProviderOwnedIdentityRecorderFn = prevRecorder
+	})
+
+	err := initAndHookDirResolvingDatabase(city, dir, "prov", nil)
+	if err == nil || !strings.Contains(err.Error(), "provider-owned beads init") {
+		t.Fatalf("init pass error = %v, want the provider init failure as-is", err)
+	}
+	if openerCalls != 0 {
+		t.Fatalf("the identity reconcile ran %d time(s) after a failed init, want 0", openerCalls)
+	}
+	assertProviderOwnedScopeInitializing(t, city, dir)
+	if len(recorder.records) != 0 {
+		t.Fatalf("identity events after a failed init = %+v, want none", recorder.records)
+	}
+	if _, ok, readErr := contract.ReadProjectIdentity(fsys.OSFS{}, dir); readErr != nil || ok {
+		t.Fatalf("identity.toml after a failed init = (%t, %v), want absent", ok, readErr)
+	}
+	if got := readProviderOwnedScopeFile(t, scopeMetadataJSONPath(dir)); got == nil {
+		t.Fatal("metadata.json was removed after a failed init, want gc to remove nothing under .beads")
+	}
+}
