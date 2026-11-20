@@ -1209,6 +1209,114 @@ dolt.auto-start: false
 	}
 }
 
+func TestRuntimeCityDoltTargetUsesReadyProviderRemoteBinding(t *testing.T) {
+	for _, tc := range []struct {
+		name, host, overrideHost, overridePort, wantHost, wantPort string
+		fixture                                                    string
+		wantHealth                                                 bool
+	}{
+		{name: "persisted remote", host: "db.example.com", wantHost: "db.example.com", wantPort: "4406"},
+		{name: "ignore unsafe ambient sentinel", host: "db.example.com", overrideHost: "stale.invalid", overridePort: "5511", wantHost: "db.example.com", wantPort: "4406"},
+		{name: "retain explicit conflicting override", host: "db.example.com", overrideHost: "override.example.com", overridePort: "5511", wantHost: "override.example.com", wantPort: "5511"},
+		{name: "leave local provider recovery alone", host: "127.0.0.1", wantHealth: true},
+		{name: "keep published managed port", fixture: "managed-live"},
+		{name: "leave distinct persisted rig binding alone", host: "db.example.com", fixture: "rig", wantHealth: true},
+		{name: "leave managed data root recovery alone", host: "db.example.com", fixture: "managed-root", wantHealth: true},
+		{name: "leave managed origin recovery alone", host: "db.example.com", fixture: "managed-origin", wantHealth: true},
+		{name: "leave live local sidecar alone", host: "db.example.com", fixture: "local-sidecar", wantHealth: true},
+		{name: "leave missing sandbox binding alone", fixture: "missing-binding", wantHealth: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			city := t.TempDir()
+			script := filepath.Join(city, "gc-beads-bd.sh")
+			calls := filepath.Join(city, "health.calls")
+			if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' \"$1\" >> \""+calls+"\"\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\nname = \"test\"\n[beads]\nprovider = \"exec:"+script+"\"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("GC_BEADS", "exec:"+script)
+			t.Setenv("GC_DOLT", "")
+			t.Setenv("GC_DOLT_HOST", tc.overrideHost)
+			t.Setenv("GC_DOLT_PORT", tc.overridePort)
+			t.Setenv("BEADS_DOLT_SERVER_SOCKET", "")
+			wantPort := tc.wantPort
+			if tc.fixture == "managed-live" {
+				wantPort = strconv.Itoa(writeReachableManagedDoltState(t, city))
+				if err := os.WriteFile(filepath.Join(city, ".beads", "config.yaml"), []byte("issue_prefix: test\ngc.endpoint_origin: managed_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				writeScopeBeadsMetadata(t, city, `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"city_test","dolt_server_host":"`+tc.host+`","dolt_server_port":4406}`)
+				conf := "issue_prefix: test\ndolt.auto-start: false\n"
+				if tc.fixture == "managed-origin" {
+					conf += "gc.endpoint_origin: managed_city\ngc.endpoint_status: verified\n"
+				}
+				if err := os.WriteFile(filepath.Join(city, ".beads", "config.yaml"), []byte(conf), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				target := "external"
+				if tc.host == "127.0.0.1" {
+					target = "local"
+				}
+				journalCityScopeOwnership(t, city, city, providerScopeIntent{Transport: "direct", Target: target})
+			}
+
+			target := execStoreTarget{ScopeKind: "city", ScopeRoot: city, Prefix: "test"}
+			switch tc.fixture {
+			case "rig":
+				rig := t.TempDir()
+				writeScopeBeadsMetadata(t, rig, `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"rig_test","dolt_server_host":"other-rig.example.com","dolt_server_port":5533}`)
+				if err := os.WriteFile(filepath.Join(rig, ".beads", "config.yaml"), []byte("issue_prefix: rig\ndolt.auto-start: false\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				target = execStoreTarget{ScopeKind: "rig", ScopeRoot: rig, Prefix: "rig"}
+			case "managed-root":
+				if err := os.MkdirAll(filepath.Join(scopeDoltDataDir(city), "city_test", ".dolt"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := writeDoltState(city, doltRuntimeState{DataDir: scopeDoltDataDir(city)}); err != nil {
+					t.Fatal(err)
+				}
+			case "local-sidecar":
+				ln, err := net.Listen("tcp", "127.0.0.1:0")
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = ln.Close() })
+				for file, n := range map[string]int{"dolt-server.pid": os.Getpid(), "dolt-server.port": ln.Addr().(*net.TCPAddr).Port} {
+					if err := os.WriteFile(filepath.Join(city, ".beads", file), []byte(strconv.Itoa(n)+"\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			entries, err := bdCommandEnv(city, nil, target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			env := runtimeEnvEntriesToMap(entries)
+			if !samePath(env["BEADS_DIR"], filepath.Join(target.ScopeRoot, ".beads")) {
+				t.Errorf("projected BEADS_DIR = %q, want selected scope %q", env["BEADS_DIR"], target.ScopeRoot)
+			}
+			if env["GC_DOLT_HOST"] != tc.wantHost || env["BEADS_DOLT_SERVER_PORT"] != wantPort {
+				t.Errorf("projected host:port = %q:%q, want %q:%q", env["GC_DOLT_HOST"], env["BEADS_DOLT_SERVER_PORT"], tc.wantHost, wantPort)
+			}
+			if data, err := os.ReadFile(calls); tc.wantHealth {
+				wantCalls := "health\n"
+				if target.ScopeKind == "rig" {
+					wantCalls += "health\n"
+				}
+				if err != nil || string(data) != wantCalls {
+					t.Errorf("provider calls = %q (%v), want %q", data, err, wantCalls)
+				}
+			} else if !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("provider calls = %q (%v), want no health recovery", data, err)
+			}
+		})
+	}
+}
+
 func TestManagedLocalDoltHostRecognizesIPv6LoopbackAndWildcard(t *testing.T) {
 	for _, tc := range []struct {
 		host string
