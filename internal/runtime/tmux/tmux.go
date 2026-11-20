@@ -534,7 +534,8 @@ type Tmux struct {
 
 	// serverSocketObserver observes the server socket only after tmux reports
 	// ErrNoServer, during the new-session preflight or a liveness observation
-	// (serverConfirmedDead). Nil selects the production observer; tests inject
+	// (serverConfirmedDead), or after tmux acknowledged kill-server
+	// (awaitServerSocketClosed). Nil selects the production observer; tests inject
 	// a deterministic observation without opening a socket.
 	serverSocketObserver func(context.Context, string) error
 
@@ -1674,13 +1675,19 @@ func (t *Tmux) KillPaneProcessesExcluding(pane string, excludePIDs []string) err
 	return terminateProcessKillPlan(plan)
 }
 
-// KillServer terminates the entire tmux server and all sessions.
+// KillServer terminates the entire tmux server and all sessions. tmux
+// acknowledges kill-server before the dying server closes its listener, so on a
+// named socket KillServer returns only after the listener stops answering;
+// otherwise an immediate restart on that socket would be refused as degraded.
 func (t *Tmux) KillServer() error {
 	_, err := t.run("kill-server")
 	if errors.Is(err, ErrNoServer) {
 		return nil // Already dead
 	}
-	return err
+	if err != nil || t.cfg.SocketName == "" {
+		return err
+	}
+	return t.awaitServerSocketClosed()
 }
 
 // ConfigureServer sets tmux server options required for Gas City lifecycle
@@ -1691,6 +1698,8 @@ func (t *Tmux) ConfigureServer() error {
 }
 
 // TeardownServer terminates the tmux server after all sessions are drained.
+// Like KillServer, on a named socket it returns only after the server's
+// listener stops answering.
 func (t *Tmux) TeardownServer() error {
 	return t.KillServer()
 }
