@@ -109,12 +109,19 @@ func nativeListPushableStatus(status string) bool {
 // The readers that move or flag a session's work read the same answer, so
 // parked work is left assigned where it is: the retirement reassignments
 // (cmd/gc session_beads.go, internal/api session_resolution.go) and the
-// identity-residue doctor. That is BdStore's behavior, accepted here as
-// parity; ga-7uf6c7 tracks moving parked work as well. The dead-holder
-// releases (the close cascade, the stranded repair, the retired sweep and the
-// orphan releases) read parked claims apart, not-closed, and give them back
-// keeping their status, pinned and hooked excepted; so a seat the close gate
-// lets go with only parked work loses the claim, not the hold.
+// identity-residue doctor. That is BdStore's behavior, accepted here as parity;
+// ga-7uf6c7 tracks moving parked work as well. The dead-holder releases (the
+// close cascade, the retired sweep and the orphan releases) give back a claim
+// parked as blocked or deferred, keeping the status, and keep any other parked
+// claim, reading them apart, not-closed, where their own read lists none; so a
+// seat the close gate lets go with only blocked or deferred work loses the
+// claim, not the hold. The stranded repair leaves them to the cascade its close
+// runs. A cached leg answers that read from its cache wherever the close-time
+// re-read does (cmd/gc closeTimeLister), so a claim parked where its cache
+// cannot see it stays assigned, and the release log names the leg: a bd leg
+// whose cache cannot answer not-closed (cold, dirty or primed in part) is not
+// read, and any other cache primed in part answers with its open rows, which
+// leave out a claim an event parked as blocked since the prime.
 //
 // A non-Live read keeps the folded answer while CachingStore serves it from
 // the cache: PrimeActive lists without Live, so the cache holds blocked rows

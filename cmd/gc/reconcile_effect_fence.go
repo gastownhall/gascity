@@ -124,7 +124,7 @@ func (p *effectPass) readWork(row session.Info, it intent) *txWork {
 	// (O4).
 	var scope workScope = releaseScope(row, p.World.Env.Cfg)
 	if it.Reason == decideIdleTimeout { // legacy's late claim: in-progress work under the narrow scope (SESS-574)
-		late, err := lateSeatWork(p.reads.legs, scope, []string{"in_progress"}, nil)
+		late, err := lateSeatWork(p.reads.legs, scope, []string{"in_progress"}, nil, closeReRead)
 		return &txWork{Free: len(late) == 0 && err == nil, Err: err}
 	}
 	if it.Kind != intentClose {

@@ -79,21 +79,23 @@ type releasePolicy struct {
 	// detached holds a claim carrying gc.detached until its probe attests the
 	// runtime dead (detachedProbeAllowsOrphanRelease).
 	detached bool
-	// releaseParked gives back a claim parked in a status statuses cannot
-	// name (beads.IsParked: bd's blocked or deferred, a custom status),
-	// keeping that status: the path releases from a holder that is gone, so
-	// the claim would otherwise stay on it for good (#7685).
+	// releaseParked gives back a claim parked as bd's blocked or deferred
+	// (parkedReleasable), keeping that status, and reads the scope's parked
+	// claims to find it (parkedSeatWork): the path releases from a holder
+	// that is gone, so the claim would otherwise stay on it for good (#7685).
 	releaseParked bool
 }
 
 var (
 	openOrStarted = []string{"open", "in_progress"}
 	startedOnly   = []string{"in_progress"}
-	// parkedOutlivesHolder are the parked statuses whose holder is not a
-	// session's claim, so no release gives them back: a pinned bead is
-	// persistent context, and a hooked bead is an identity's hook, which its
-	// next session runs.
-	parkedOutlivesHolder = []string{"pinned", "hooked"}
+	// parkedReleasable are the parked statuses (beads.IsParked) a release
+	// gives back, keeping the status: bd's built-in holds on work. Every other
+	// parked status is kept with its holder (keptParked): a pinned bead is
+	// persistent context, a hooked bead is an identity's hook, which its next
+	// session runs, and a status a city declares may be one bd counts done (a
+	// done category), whose assignee records who did the work.
+	parkedReleasable = []string{"blocked", "deferred"}
 )
 
 // releasePolicies is every release path's started-work policy, in one place
@@ -127,19 +129,27 @@ var (
 //     on a pool route alone;
 //   - every release clears the gc.detached of the claim it gives back, in
 //     the same write (releaseServed), so no reopened claim carries a probe;
-//   - the paths whose holder is gone (the cascade, the stranded repair, both
-//     orphan releases and the retired-session sweep) also give back a claim
-//     its holder parked (releaseParked), keeping its status: the hold stays
-//     for whoever lifts it, and only the dead holder goes. A pinned or hooked
-//     claim (parkedOutlivesHolder) is kept, as keptParked. The paths of a
-//     live seat (killed, drain-ack, ladder, stalled) keep a parked claim
-//     (keptParked): it is the seat's own, and if its row later closes the
-//     cascade releases it.
+//   - the paths whose holder is gone (the cascade, both orphan releases and
+//     the retired-session sweep) also give back a claim its holder parked as
+//     blocked or deferred (releaseParked, parkedReleasable), keeping its
+//     status: the hold stays for whoever lifts it, and only the dead holder
+//     goes. A deferred claim keeps its defer_until too, and reads ready once
+//     the store wakes it. This supersedes #6207's rule (#8442) that kept a
+//     dead assignee until the store woke the row: it held only while a
+//     release wrote status=open, un-deferring the row and stranding its date,
+//     and a parked release writes no status. A claim in any other parked
+//     status (pinned, hooked, one a city declares) is kept, as keptParked,
+//     and named in the release log. The stranded repair keeps a parked claim
+//     too (keptParked), and does not read for one: the close it ends in runs
+//     the cascade, which gives the claim back, and inside a tick the repair
+//     releases from the tick's index alone. The paths of a live seat (killed,
+//     drain-ack, ladder, stalled) keep a parked claim (keptParked): it is the
+//     seat's own, and if its row later closes the cascade releases it.
 var releasePolicies = map[releaseWhy]releasePolicy{
 	releaseKilledSeat:     {statuses: openOrStarted, startedKeeps: true, lane: laneDirect, seatRoute: true},
 	releaseDrainAck:       {statuses: startedOnly, startedNamedKeeps: true, lane: laneCarried, seatRoute: true},
 	releaseCloseCascade:   {statuses: openOrStarted, lane: laneCarried, seatRoute: true, releaseParked: true},
-	releaseStrandedRepair: {statuses: openOrStarted, lane: laneCarried, seatRoute: true, detached: true, releaseParked: true},
+	releaseStrandedRepair: {statuses: openOrStarted, lane: laneCarried, seatRoute: true, detached: true},
 	releaseOrphan:         {statuses: openOrStarted, lane: laneDirect, pool: true, detached: true, releaseParked: true},
 	releaseRetired:        {statuses: openOrStarted, lane: laneCarried, seatRoute: true, releaseParked: true},
 	releaseLadder:         {statuses: startedOnly, lane: laneCarried, seatRoute: true},
@@ -325,7 +335,7 @@ func ReleaseClaims(sw *SeatWork, scope ReleaseScope, seat releaseSeat, why relea
 	p := releasePolicies[why]
 	claims, err := sw.snapshot(seatWorkQuery{scope: scope, statuses: p.statuses}, false)
 	if opts.Late {
-		late, lateErr := lateSeatWork(sw.Legs(), scope, p.statuses, nil)
+		late, lateErr := lateSeatWork(sw.Legs(), scope, p.statuses, nil, closeReRead)
 		claims, err = appendUniqueSeatWork(claims, late), errors.Join(err, lateErr)
 	}
 	if p.releaseParked {
@@ -354,22 +364,26 @@ func ReleaseClaims(sw *SeatWork, scope ReleaseScope, seat releaseSeat, why relea
 	return releaseListed(claims, why, seat, sw.Legs().cfg, opts), err
 }
 
-// parkedSeatWork reads the scope's parked claims (beads.IsParked). The
-// open/in_progress reads cannot list them: a live read lists raw open, and an
-// event-fed cache row carries the parked status. The read is not-closed ("")
-// through closeTimeLister, filtered in Go. Every parked claim is kept, pinned
-// and hooked too, so releaseListed classifies it: a claim the path does not
-// give back is kept as keptParked and named in the release log.
+// parkedSeatWork reads the scope's parked claims (beads.IsParked), which the
+// open/in_progress reads cannot list: a live read lists raw open, and an
+// event-fed cache row carries the parked status. It lists every leg
+// not-closed, per identity (lateSeatWork's parkedRead: a cached leg answers
+// from its cache alone), and keeps the parked rows. Every parked claim is
+// kept, whatever its status, so releaseListed classifies it: a claim the
+// path does not give back is kept as keptParked and named in the release
+// log. A leg the read could not list in full (a bd leg whose cache cannot
+// answer, a cache primed in part) is named in the error, so the release log
+// reports what it may have left assigned.
 func parkedSeatWork(legs WorkLegs, scope workScope) ([]seatWorkHit, error) {
-	hits, err := lateSeatWork(legs, scope, []string{""}, nil)
+	hits, err := lateSeatWork(legs, scope, []string{""}, nil, parkedRead)
 	return slices.DeleteFunc(hits, func(h seatWorkHit) bool { return !beads.IsParked(h.bead) }), err
 }
 
 // releasesParked reports whether the path gives back b, a parked claim
-// (beads.IsParked): it releases parked claims, and b's status is not one
-// whose holder outlives a session (parkedOutlivesHolder).
+// (beads.IsParked): it releases parked claims, and b's recorded status is one
+// a release gives back (parkedReleasable).
 func (p releasePolicy) releasesParked(b beads.Bead) bool {
-	return p.releaseParked && beads.IsParked(b) && !slices.Contains(parkedOutlivesHolder, beads.RecordedStatus(b))
+	return p.releaseParked && slices.Contains(parkedReleasable, beads.RecordedStatus(b))
 }
 
 // releaseListed is ReleaseClaims' body for claims a caller already listed

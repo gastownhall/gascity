@@ -30,7 +30,7 @@ func TestReleasePoliciesTable(t *testing.T) {
 		releaseKilledSeat:     {statuses: []string{"open", "in_progress"}, startedKeeps: true, lane: laneDirect, seatRoute: true},
 		releaseDrainAck:       {statuses: []string{"in_progress"}, startedNamedKeeps: true, lane: laneCarried, seatRoute: true},
 		releaseCloseCascade:   {statuses: []string{"open", "in_progress"}, lane: laneCarried, seatRoute: true, releaseParked: true},
-		releaseStrandedRepair: {statuses: []string{"open", "in_progress"}, lane: laneCarried, seatRoute: true, detached: true, releaseParked: true},
+		releaseStrandedRepair: {statuses: []string{"open", "in_progress"}, lane: laneCarried, seatRoute: true, detached: true},
 		releaseOrphan:         {statuses: []string{"open", "in_progress"}, lane: laneDirect, pool: true, detached: true, releaseParked: true},
 		releaseRetired:        {statuses: []string{"open", "in_progress"}, lane: laneCarried, seatRoute: true, releaseParked: true},
 		releaseLadder:         {statuses: []string{"in_progress"}, lane: laneCarried, seatRoute: true},
@@ -1343,13 +1343,15 @@ func TestDetectorKeepsAFreshStampALaggingListCallsStale(t *testing.T) {
 	}
 }
 
-// TestReleaseListedKeepsPinnedAndHookedClaims: the paths that give back a
-// dead holder's parked claim keep a pinned or hooked one, assignee and status
-// both, and write nothing: a pinned bead is persistent context and a hooked
-// bead is its identity's hook, whose next session runs it. The kept claim is
-// logged with the status it is parked in. Each store shape is covered: bd's
-// folded read, a store recording the raw status, and a revision-CAS store.
-func TestReleaseListedKeepsPinnedAndHookedClaims(t *testing.T) {
+// TestReleaseListedKeepsPinnedHookedAndCustomStatusClaims: the paths that
+// give back a dead holder's blocked or deferred claim keep a pinned, hooked or
+// custom-status one, assignee and status both, and write nothing: a pinned
+// bead is persistent context, a hooked bead is its identity's hook, whose next
+// session runs it, and a status a city declares may be one bd counts done. The
+// kept claim is logged with the status it is parked in. Each store shape is
+// covered: bd's folded read, a store recording the raw status, and a
+// revision-CAS store.
+func TestReleaseListedKeepsPinnedHookedAndCustomStatusClaims(t *testing.T) {
 	paths := map[string]releaseWhy{
 		"close cascade":   releaseCloseCascade,
 		"stranded repair": releaseStrandedRepair,
@@ -1358,7 +1360,7 @@ func TestReleaseListedKeepsPinnedAndHookedClaims(t *testing.T) {
 	}
 	routed := map[string]string{beadmeta.RoutedToMetadataKey: "worker"}
 	for name, why := range paths {
-		for _, status := range []string{"pinned", "hooked"} {
+		for _, status := range []string{"pinned", "hooked", "archived", "review"} {
 			t.Run(name+"/"+status, func(t *testing.T) {
 				bd := newParkedBdStore()
 				folded := foldBdStatus(seedParkedClaim(t, bd.mem, "dead-session", status, routed))
@@ -1413,50 +1415,71 @@ func TestReleaseListedKeepsPinnedAndHookedClaims(t *testing.T) {
 	}
 }
 
-// TestReleaseClaimsParkedReadReleasesRetiredAndStrandedHolds: the retired
-// sweep and the stranded repair give back a retired seat's parked claim,
-// keeping its status, though their open/in_progress read cannot list it. That
-// holds for bd's built-in parked statuses and for a status a city defines,
-// in both shapes a parked claim is read in: bd's folded row, which records
-// the raw status in SourceStatus, and a store that records it as Status.
-func TestReleaseClaimsParkedReadReleasesRetiredAndStrandedHolds(t *testing.T) {
+// TestReleaseClaimsParkedReadReleasesRetiredHolds: the retired sweep gives
+// back a retired seat's claim parked as blocked or deferred, keeping its
+// status, though its open/in_progress read cannot list it, and keeps one in a
+// status a city declares (which may be a done category), naming it as kept.
+// Each holds in both shapes a parked claim is read in: bd's folded row, which
+// records the raw status in SourceStatus, and a store that records it as
+// Status.
+func TestReleaseClaimsParkedReadReleasesRetiredHolds(t *testing.T) {
 	seatBead := beads.Bead{ID: "retired-seat", Metadata: map[string]string{"session_name": "worker-1"}}
 	routed := map[string]string{beadmeta.RoutedToMetadataKey: "worker"}
-	for name, why := range map[string]releaseWhy{"retired": releaseRetired, "stranded repair": releaseStrandedRepair} {
-		for _, status := range []string{"blocked", "deferred", "review"} {
-			t.Run(name+"/"+status+"/folded", func(t *testing.T) {
-				bd := newParkedBdStore()
-				claim := seedParkedClaim(t, bd.mem, seatBead.ID, status, routed)
-				scope := releaseScopeOwn(seatBead)
-
-				out, err := ReleaseClaims(seatWorkFor(testWorkLegs("", servingCity("worker"), bd, nil), scope), scope, releaseSeatOfBead(seatBead), why, ReleaseOpts{})
-				if err != nil {
-					t.Fatal(err)
-				}
-				if len(out.Released) != 1 {
-					t.Fatalf("released %d claims, want %s (kept as %q)", len(out.Released), claim.ID, out.Why[claim.ID])
-				}
-				assertParkedRelease(t, bd.mem, claim.ID, status)
-				if len(bd.guarded) != 1 || bd.guarded[0].status != status {
-					t.Errorf("guarded updates = %+v, want one fenced on %s", bd.guarded, status)
-				}
-			})
-			t.Run(name+"/"+status+"/raw", func(t *testing.T) {
-				mem := beads.NewMemStore()
-				claim := seedParkedClaim(t, mem, seatBead.ID, status, routed)
-				scope := releaseScopeOwn(seatBead)
-
-				out, err := ReleaseClaims(seatWorkFor(testWorkLegs("", servingCity("worker"), mem, nil), scope), scope, releaseSeatOfBead(seatBead), why, ReleaseOpts{})
-				if err != nil {
-					t.Fatal(err)
-				}
-				if len(out.Released) != 1 {
-					t.Fatalf("released %d claims, want %s (kept as %q)", len(out.Released), claim.ID, out.Why[claim.ID])
-				}
-				assertParkedRelease(t, mem, claim.ID, status)
-			})
+	release := func(t *testing.T, store beads.Store) ReleaseOutcome {
+		t.Helper()
+		scope := releaseScopeOwn(seatBead)
+		out, err := ReleaseClaims(seatWorkFor(testWorkLegs("", servingCity("worker"), store, nil), scope), scope, releaseSeatOfBead(seatBead), releaseRetired, ReleaseOpts{})
+		if err != nil {
+			t.Fatal(err)
 		}
+		return out
 	}
+	for _, status := range []string{"blocked", "deferred"} {
+		t.Run(status+"/folded", func(t *testing.T) {
+			bd := newParkedBdStore()
+			claim := seedParkedClaim(t, bd.mem, seatBead.ID, status, routed)
+
+			if out := release(t, bd); len(out.Released) != 1 {
+				t.Fatalf("released %d claims, want %s (kept as %q)", len(out.Released), claim.ID, out.Why[claim.ID])
+			}
+			assertParkedRelease(t, bd.mem, claim.ID, status)
+			if len(bd.guarded) != 1 || bd.guarded[0].status != status {
+				t.Errorf("guarded updates = %+v, want one fenced on %s", bd.guarded, status)
+			}
+		})
+		t.Run(status+"/raw", func(t *testing.T) {
+			mem := beads.NewMemStore()
+			claim := seedParkedClaim(t, mem, seatBead.ID, status, routed)
+
+			if out := release(t, mem); len(out.Released) != 1 {
+				t.Fatalf("released %d claims, want %s (kept as %q)", len(out.Released), claim.ID, out.Why[claim.ID])
+			}
+			assertParkedRelease(t, mem, claim.ID, status)
+		})
+	}
+	t.Run("custom status/folded", func(t *testing.T) {
+		bd := newParkedBdStore()
+		claim := seedParkedClaim(t, bd.mem, seatBead.ID, "archived", routed)
+
+		out := release(t, bd)
+		if len(out.Released) != 0 || out.Why[claim.ID] != keptParked {
+			t.Fatalf("released %d claims, %s kept as %q; want it kept as %q", len(out.Released), claim.ID, out.Why[claim.ID], keptParked)
+		}
+		assertWork(t, bd.mem, claim.ID, "archived", seatBead.ID)
+		if len(bd.guarded) != 0 || bd.writes != 0 {
+			t.Errorf("bd writes: guarded=%d other=%d, want none", len(bd.guarded), bd.writes)
+		}
+	})
+	t.Run("custom status/raw", func(t *testing.T) {
+		mem := beads.NewMemStore()
+		claim := seedParkedClaim(t, mem, seatBead.ID, "archived", routed)
+
+		out := release(t, mem)
+		if len(out.Released) != 0 || out.Why[claim.ID] != keptParked {
+			t.Fatalf("released %d claims, %s kept as %q; want it kept as %q", len(out.Released), claim.ID, out.Why[claim.ID], keptParked)
+		}
+		assertWork(t, mem, claim.ID, "archived", seatBead.ID)
+	})
 }
 
 // TestReleaseParkedClaimStaleSnapshotWritesNothing: a dead-holder release of
@@ -1517,6 +1540,69 @@ func TestReleaseParkedClaimStaleSnapshotWritesNothing(t *testing.T) {
 			})
 		}
 	}
+}
+
+// TestReleaseParkedClaimLostRevisionCASFails: a dead-holder release of a
+// parked claim that loses the revision CAS reads the conflict as moved on
+// only when the live re-read shows the claim moved (unblocked, or claimed
+// again; TestReleaseParkedClaimStaleSnapshotWritesNothing). When an unrelated
+// write moved the revision but left status and assignee, or when the re-read
+// fails, the claim is reported failed and nothing is written: a stranded
+// repair or a close gated on the release must not take it for a kept claim
+// and close the seat over a claim still assigned to it.
+func TestReleaseParkedClaimLostRevisionCASFails(t *testing.T) {
+	routed := map[string]string{beadmeta.RoutedToMetadataKey: "worker"}
+	for _, tc := range []struct {
+		name      string
+		reReadErr error
+	}{
+		{name: "unrelated write"},
+		{name: "failed re-read", reReadErr: errors.New("live read failed")},
+	} {
+		for pathName, why := range map[string]releaseWhy{"close cascade": releaseCloseCascade, "retired": releaseRetired} {
+			t.Run(tc.name+"/"+pathName, func(t *testing.T) {
+				store := openRevisionReleaseStore(t, gate.Require)
+				snapshot := seedParkedClaim(t, store.MemStore, "dead-session", "blocked", routed)
+				if err := store.MemStore.Update(snapshot.ID, beads.UpdateOpts{Metadata: map[string]string{"note": "unrelated"}}); err != nil {
+					t.Fatal(err)
+				}
+				want, err := store.Get(snapshot.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if want.Revision == snapshot.Revision {
+					t.Fatalf("the unrelated write left revision %d, want it moved", want.Revision)
+				}
+				var leg beads.Store = store
+				if tc.reReadErr != nil {
+					leg = &liveReadFailingStore{revisionReleaseStore: store, err: tc.reReadErr}
+				}
+
+				out := releaseListed([]seatWorkHit{{store: leg, bead: snapshot}}, why, releaseSeat{id: "dead-session", fallback: "worker"}, testPoolReleaseConfig(), ReleaseOpts{})
+				if len(out.Failed) != 1 || len(out.Released) != 0 || len(out.Kept) != 0 {
+					t.Fatalf("failed %d, released %d, kept %d (%q); want the lost CAS reported failed", len(out.Failed), len(out.Released), len(out.Kept), out.Why[snapshot.ID])
+				}
+				if store.conditionalCalls != 1 || store.legacyCalls != 0 {
+					t.Errorf("writes: conditional=%d legacy=%d, want only the CAS that lost", store.conditionalCalls, store.legacyCalls)
+				}
+				assertBeadUnchanged(t, store.MemStore, want)
+			})
+		}
+	}
+}
+
+// liveReadFailingStore is a revision-CAS store whose reads by ID fail, as the
+// live re-read after a lost revision CAS can. Its writes and its
+// conditional-writes stamp are the store's (ConditionalWritesResolveTarget).
+type liveReadFailingStore struct {
+	*revisionReleaseStore
+	err error
+}
+
+func (s *liveReadFailingStore) Get(string) (beads.Bead, error) { return beads.Bead{}, s.err }
+
+func (s *liveReadFailingStore) ConditionalWritesResolveTarget() beads.Store {
+	return s.revisionReleaseStore
 }
 
 // assertBeadUnchanged checks that the bead still has want's assignee, status,

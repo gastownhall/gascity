@@ -9609,9 +9609,10 @@ func TestUnclaimWorkAssignedToRetiredSessionBeadClearsSessionAffinity(t *testing
 
 // TestUnclaimWorkAssignedToRetiredSessionBeadReleasesParkedClaimKeepingHold
 // pins #7685's retirement half: a session whose claimed bead is parked
-// (blocked, deferred, a city's custom status) still owned the claim after it
-// retired — the sweep listed open/in_progress only, so no later pass gave the
-// claim back. The sweep must release it keeping the hold, whatever the hold.
+// (blocked, deferred) still owned the claim after it retired — the sweep
+// listed open/in_progress only, so no later pass gave the claim back. The
+// sweep must release it keeping the hold. A claim in a status a city
+// declares stays with its holder: that status may be one bd counts done.
 func TestUnclaimWorkAssignedToRetiredSessionBeadReleasesParkedClaimKeepingHold(t *testing.T) {
 	for _, hold := range []string{"blocked", "deferred", "review"} {
 		t.Run(hold, func(t *testing.T) {
@@ -9650,8 +9651,12 @@ func TestUnclaimWorkAssignedToRetiredSessionBeadReleasesParkedClaimKeepingHold(t
 			if err != nil {
 				t.Fatalf("get work bead: %v", err)
 			}
-			if got.Assignee != "" {
-				t.Errorf("assignee = %q, want the retired session's claim released", got.Assignee)
+			want := "" // released
+			if hold == "review" {
+				want = sessionBead.ID // a city's status stays with its holder
+			}
+			if got.Assignee != want {
+				t.Errorf("assignee = %q, want %q", got.Assignee, want)
 			}
 			if got.Status != hold {
 				t.Errorf("status = %q, want the %s hold kept", got.Status, hold)
@@ -9660,57 +9665,46 @@ func TestUnclaimWorkAssignedToRetiredSessionBeadReleasesParkedClaimKeepingHold(t
 	}
 }
 
-// TestUnclaimWorkAssignedToRetiredSessionInfoReleasesParkedClaimKeepingHold is
-// the stranded-repair sweep's half of #7685: a stranded session info whose
-// claim is parked kept the claim forever for the same reason. The repair
-// releases the claim and keeps the hold.
-func TestUnclaimWorkAssignedToRetiredSessionInfoReleasesParkedClaimKeepingHold(t *testing.T) {
-	store := beads.NewMemStore()
+// TestRepairStrandedPoolWorkerBeadLeavesParkedClaimToItsCascade is the
+// stranded repair's half of #7685: a stranded seat that also left a claim
+// parked loses that claim with the seat, and the claim keeps its hold. The
+// repair's own release does not read parked claims (inside a tick it
+// releases from the tick's index alone), so it leaves the parked claim
+// assigned and counts nothing failed or held; the repair then closes the
+// seat, and the close's cascade gives the claim back keeping its status.
+func TestRepairStrandedPoolWorkerBeadLeavesParkedClaimToItsCascade(t *testing.T) {
+	routed := map[string]string{beadmeta.RoutedToMetadataKey: "worker"}
+	now := time.Date(2026, 5, 23, 12, 0, 0, 0, time.UTC)
+	aged := now.Add(-strandedRepairConfirmGrace - time.Minute).Format(time.RFC3339)
 
-	sessionBead, err := store.Create(beads.Bead{
-		Title:  "worker",
-		Type:   sessionBeadType,
-		Labels: []string{sessionBeadLabel},
-		Metadata: map[string]string{
-			"session_name": "worker-1",
-			"state":        "active",
-		},
+	t.Run("the repair's release keeps it", func(t *testing.T) {
+		store, sessionBead, work := strandedRepairFixture(t)
+		parked := seedParkedClaim(t, store, sessionBead.ID, "blocked", routed)
+
+		var stderr bytes.Buffer
+		res := unclaimWorkAssignedToRetiredSessionInfo(testSeatWork("", servingCity("worker"), store, nil), store, seedSessionInfo(sessionBead), &stderr)
+		if res.Failed != 0 || res.Held != 0 || res.Released != 1 {
+			t.Fatalf("unclaim = %+v, want the started claim released and nothing failed or held (stderr: %s)", res, stderr.String())
+		}
+		assertWork(t, store, work.ID, "open", "")
+		assertWork(t, store, parked.ID, "blocked", sessionBead.ID)
 	})
-	if err != nil {
-		t.Fatalf("create session bead: %v", err)
-	}
 
-	work, err := store.Create(beads.Bead{
-		Title:    "parked claim",
-		Assignee: sessionBead.ID,
-		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
+	t.Run("the close's cascade gives it back", func(t *testing.T) {
+		store, sessionBead, work := strandedRepairFixture(t)
+		parked := seedParkedClaim(t, store, sessionBead.ID, "blocked", routed)
+		sessionBead.Metadata[strandedEventEmittedKey] = aged
+
+		var stderr bytes.Buffer
+		if !repairStrandedPoolWorkerBead(testSeatWork("", servingCity("worker"), store, nil), store, seedSessionInfo(sessionBead), &clock.Fake{Time: now}, &stderr) {
+			t.Fatalf("repair = false, want the seat closed (stderr: %s)", stderr.String())
+		}
+		assertWork(t, store, work.ID, "open", "")
+		assertParkedRelease(t, store, parked.ID, "blocked")
+		if row, _ := store.Get(sessionBead.ID); row.Status != "closed" {
+			t.Fatalf("session status = %q, want closed", row.Status)
+		}
 	})
-	if err != nil {
-		t.Fatalf("create work bead: %v", err)
-	}
-	blocked := "blocked"
-	if err := store.Update(work.ID, beads.UpdateOpts{Status: &blocked}); err != nil {
-		t.Fatalf("park work blocked: %v", err)
-	}
-
-	info, err := session.NewStore(beads.SessionStore{Store: store}).Get(sessionBead.ID)
-	if err != nil {
-		t.Fatalf("projecting session info: %v", err)
-	}
-
-	var stderr bytes.Buffer
-	unclaimWorkAssignedToRetiredSessionInfo(testSeatWork("", servingCity("worker"), store, nil), store, info, &stderr)
-
-	got, err := store.Get(work.ID)
-	if err != nil {
-		t.Fatalf("get work bead: %v", err)
-	}
-	if got.Assignee != "" {
-		t.Errorf("assignee = %q, want the stranded session's claim released", got.Assignee)
-	}
-	if got.Status != "blocked" {
-		t.Errorf("status = %q, want the blocked hold kept", got.Status)
-	}
 }
 
 // TestReleaseWorkFromClosedSessionBeadNamesKeptParkedClaims pins the log half
@@ -11429,4 +11423,62 @@ func TestCloseCascadeReleasesParkedClaimKeepingStatus(t *testing.T) {
 		out := releaseWorkFromClosedSessionBeadExcept(cache, testSeatWork("", servingCity("worker"), cache, nil), sessionBead, nil, &stderr)
 		check(t, backing, out, claim.ID, logs, &stderr)
 	})
+}
+
+// TestCloseCascadeNamesTheLegAPartialCacheReadsInPart: a cache primed in part
+// (PrimeActive, as a controller's is until its full prime lands) cannot answer
+// the parked read whole: its open rows leave out a claim an event parked as
+// blocked since the prime. The cascade does not take those rows for every
+// parked claim: it names the leg in the release log rather than missing the
+// claim in silence, and the claim stays assigned for a later read.
+func TestCloseCascadeNamesTheLegAPartialCacheReadsInPart(t *testing.T) {
+	backing := beads.NewMemStore()
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	sessionBead, err := backing.Create(beads.Bead{
+		Title:    "worker",
+		Type:     sessionBeadType,
+		Labels:   []string{sessionBeadLabel},
+		Metadata: map[string]string{"session_name": "worker-1", "template": "worker", "state": "active"},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+	claim, err := backing.Create(beads.Bead{Title: "claim", Assignee: sessionBead.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatalf("prime active: %v", err)
+	}
+	// The holder parks its claim in another process; the cache learns of it
+	// from the event, not from a read.
+	blocked := "blocked"
+	if err := backing.Update(claim.ID, beads.UpdateOpts{Status: &blocked}); err != nil {
+		t.Fatalf("park claim: %v", err)
+	}
+	row, err := backing.Get(claim.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := beads.EncodeBeadEventPayload(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache.ApplyEvent("bead.updated", payload)
+	if got, err := cache.Get(claim.ID); err != nil || got.Status != "blocked" {
+		t.Fatalf("cache row status %q (%v), want the event-patched blocked claim", got.Status, err)
+	}
+
+	var stderr bytes.Buffer
+	out := releaseWorkFromClosedSessionBeadExcept(cache, testSeatWork("", servingCity("worker"), cache, nil), sessionBead, nil, &stderr)
+
+	if len(out.Released) != 0 {
+		t.Fatalf("released %v, want nothing: the read cannot see the claim", out.Released)
+	}
+	if !strings.Contains(stderr.String(), "leg city work store: parked claims not read") {
+		t.Fatalf("stderr = %q, want the leg read in part named", stderr.String())
+	}
+	if got, err := backing.Get(claim.ID); err != nil || got.Status != "blocked" || got.Assignee != sessionBead.ID {
+		t.Fatalf("claim = status %q assignee %q (%v), want it left blocked on %s", got.Status, got.Assignee, err, sessionBead.ID)
+	}
 }

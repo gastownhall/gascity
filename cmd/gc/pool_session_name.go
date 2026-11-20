@@ -777,8 +777,11 @@ func releaseOrphanedPoolAssignment(store beads.Store, wb beads.Bead, clearDetach
 // and session affinity cleared, a dead gc.detached too when clearDetached,
 // and the status reopened unless wb is parked (beads.IsParked). A parked
 // claim keeps its status, as releaseWorkBead keeps it: only the dead holder
-// goes, and the hold stays for whoever lifts it. The update is built before
-// the write tier is chosen, so every tier keeps the status.
+// goes, and the hold stays for whoever lifts it. A claim the store records
+// deferred keeps its defer_until too, and reads ready once the store wakes it
+// (releasePolicies: this supersedes #6207's keep-until-woken rule). The
+// update is built before the write tier is chosen, so every tier keeps the
+// status.
 func poolReleaseUpdate(wb beads.Bead, clearDetached bool) beads.UpdateOpts {
 	update := beads.UpdateOpts{
 		Assignee: stringPtr(""),
