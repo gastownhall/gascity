@@ -93,6 +93,11 @@ const ExitCodeNoScreen = 66
 // token it is an ordinary failure.
 const ExitCodeInputOutcome = 80
 
+// ExitCodeFreshCollision is sysexits.h EX_CANTCREAT: a fresh_only `start`,
+// `provision` or `launch` refusing a name a box or an agent already holds,
+// live or dead, rather than recycling, killing or reusing it.
+const ExitCodeFreshCollision = 73
+
 // CapacitySourceExitStatus is the [CapacityError.Source] of a refusal observed
 // as the launched command's exit status.
 const CapacitySourceExitStatus = "exit_status"

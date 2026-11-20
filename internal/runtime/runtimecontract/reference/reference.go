@@ -27,7 +27,7 @@ const (
 	faultGuard = `be || exit 1; `
 
 	goldenStart = `cfg=$(cat); fresh=$(printf %s "$cfg" | sed -n 's/.*"fresh_only":true.*/y/p'); ` +
-		`if [ -d "$box" ]; then if [ -n "$fresh" ]; then exit 73; fi; exit 1; fi; ` +
+		goldenStartCollision +
 		`mkdir -p "$box.tmp"; ` +
 		`for k in GC_SESSION_ID GC_RUNTIME_EPOCH GC_INSTANCE_TOKEN GT_PROCESS_NAMES; do v=$(printf %s "$cfg" | sed -n "s/.*\"$k\":\"\([^\"]*\)\".*/\1/p"); if [ -n "$v" ]; then printf %s "$v" > "$box.tmp/meta.$k"; fi; done; ` +
 		`printf %s "$cfg" | sed -n 's/.*"process_names":\[\([^]]*\)\].*/\1/p' | tr -d '"' > "$box.tmp/procs"; ` +
@@ -228,7 +228,8 @@ func nonTmux(b map[string]string) map[string]string {
 // it types. The box's typed-input log is $box/typed, which peek shows after
 // the screen, as a terminal echoes what is typed into it. The fault knobs,
 // all under conformance-faults: blocked (the box's agent waits on a pending
-// interaction, which a nudge's text would answer), lose_reply (the input is
+// interaction, which a nudge's text would answer), refuse_<word> (a nudge
+// answers that outcome word and types nothing), lose_reply (the input is
 // typed, then the reply is lost: a nudge is unconfirmed, any other op exit
 // 1) and hold_send (a nudge is held unresolved in $box/held, and a second
 // identical one while it is held is unconfirmed again without being held
@@ -242,6 +243,7 @@ const (
 	goldenInputObserveDead = `if [ "${GC_RPP_FAULT:-}" = dead ]; then printf '{"state":"dead","object":{"id":"%s","created":"%s"}}\n' "$(cat "$box/id")" "$(cat "$box/created")"; exit 0; fi; `
 
 	goldenInputNudge = `txt=$(cat); ` + goldenInputEntry +
+		`case "$F" in refuse_*) out "${F#refuse_}" ;; esac; ` +
 		`if [ "$F" = blocked ]; then out pending_interaction; fi; ` +
 		`if [ "$F" = hold_send ]; then if grep -qxF -- "$txt" "$box/held" 2>/dev/null; then out unconfirmed; fi; printf '%s\n' "$txt" >> "$box/held"; out unconfirmed; fi; ` +
 		`printf '%s\n' "$txt" >> "$box/typed"; ` +
@@ -307,6 +309,54 @@ const goldenInterruptEnds = `reap "$box"; rm -rf "$box"; `
 func InterruptEndsBoxBodies(b map[string]string) map[string]string {
 	b["interrupt"] = strings.Replace(b["interrupt"], `printf '%s\n' "$*" >> "$box/typed"; `,
 		`printf '%s\n' "$*" >> "$box/typed"; `+goldenInterruptEnds, 1)
+	return b
+}
+
+// StartupDialogEnv is the env key of a launch config whose agent shows a
+// startup dialog (LaunchBodies): set to "1", the launched box's screen shows
+// the bypass-permissions warning until a send-keys Enter answers it, and its
+// prompt after.
+const StartupDialogEnv = "GC_RPP_STARTUP_DIALOG"
+
+// The launch op (LaunchBodies): the golden start's box, created in place of
+// a running one, whose agent it replaces, unless the config is fresh_only.
+const (
+	goldenStartCollision = `if [ -d "$box" ]; then if [ -n "$fresh" ]; then exit 73; fi; exit 1; fi; `
+	goldenLaunchReplace  = `if [ -d "$box" ]; then if [ -n "$fresh" ]; then exit 73; fi; reap "$box"; rm -rf "$box"; fi; `
+
+	// goldenLaunchDialog draws the startup dialog a launch config asks for
+	// (StartupDialogEnv) on the launched box's screen ($box/dialog): the
+	// bypass-permissions warning as the agent draws it, its two rows with
+	// the first selected and the confirmation footer, since the dialog pass
+	// confirms a menu only once a reread shows the wanted row selected.
+	goldenLaunchDialog = `case "$cfg" in *'"` + StartupDialogEnv + `":"1"'*) printf '%s\n' 'Bypass Permissions mode' '❯ 1. No, exit' '  2. Yes, I accept' 'Enter to confirm · Esc to cancel' > "$box/dialog" ;; esac`
+	// goldenDialogAnswer is the agent answering its dialog: Down selects
+	// the accepting row, and Enter on that row leaves its prompt where the
+	// dialog was. Enter on the first row leaves the dialog open.
+	goldenDialogAnswer = `if [ -f "$box/dialog" ] && grep -q 'Bypass Permissions mode' "$box/dialog"; then _n=0; for _k in "$@"; do _n=$((_n+1)); if [ "$_n" -le 2 ]; then continue; fi; case "$_k" in Down) printf '%s\n' 'Bypass Permissions mode' '  1. No, exit' '❯ 2. Yes, I accept' 'Enter to confirm · Esc to cancel' > "$box/dialog" ;; Enter) if grep -q '^❯ 2[.] Yes, I accept' "$box/dialog"; then echo '❯ ' > "$box/dialog"; fi ;; esac; done; fi; `
+)
+
+// LaunchBodies returns b, a reference whose start is complete (Bodies or a
+// variant), for a reference that un-welds start with proc.provision and
+// proc.launch: provision prepares nothing (a box without its agent), and
+// launch starts the agent as b's start does, replacing a running one unless
+// the config is fresh_only (exit 73), and types nothing. A launch config
+// carrying StartupDialogEnv shows a startup dialog, which peek shows first
+// and send-keys Enter answers. Apply it last, so launch is the variant's own
+// start.
+func LaunchBodies(b map[string]string) map[string]string {
+	b["protocol"] = strings.Replace(b["protocol"], `"server-lifecycle"`, `"server-lifecycle","proc.provision","proc.launch"`, 1)
+	b["launch"] = strings.Replace(b["start"], goldenStartCollision, goldenLaunchReplace, 1) + "; " + goldenLaunchDialog
+	// While the warning is up it is the whole screen, as a modal is: its
+	// confirmation footer is the last line, with nothing typed echoed under
+	// it. Once answered, the prompt it left is shown above the command.
+	answered := strings.Replace(b["peek"], `cat "$box/cmd0"; echo`, `if [ -f "$box/dialog" ]; then cat "$box/dialog"; fi; cat "$box/cmd0"; echo`, 1)
+	b["peek"] = `if [ -f "$box/dialog" ] && grep -q 'Bypass Permissions mode' "$box/dialog"; then cat "$box/dialog"; else ` + answered + `; fi`
+	keys := b["send-keys"]
+	if keys == "" {
+		keys = ":"
+	}
+	b["send-keys"] = goldenDialogAnswer + keys
 	return b
 }
 

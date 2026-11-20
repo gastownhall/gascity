@@ -279,6 +279,99 @@ func TestSQLiteStoreWriteTxTakesWriteLockAtBegin(t *testing.T) {
 	}
 }
 
+// sqliteContendedWriterPause is how long a fixture's competing writer leaves
+// the write lock free after each commit. It is longer than the longest sleep of
+// SQLite's default busy handler (100 ms), so a writer waiting in BEGIN
+// IMMEDIATE polls at least once inside every pause, however long the competing
+// commit took. A ticker does not do that: on a loaded host a commit outlasts
+// the tick, the next tick is already waiting, and the writer re-takes the lock
+// microseconds after releasing it, so the waiting writer's polls keep missing
+// the gap until retryOnBusy gives up after 7 x 5 s (ga-rh8jgr).
+const sqliteContendedWriterPause = 150 * time.Millisecond
+
+// runPacedSQLiteWriter calls write(0), write(1), ... until stop is closed,
+// pausing sqliteContendedWriterPause after each call.
+func runPacedSQLiteWriter(stop <-chan struct{}, write func(i int)) {
+	for i := 0; ; i++ {
+		write(i)
+		select {
+		case <-stop:
+			return
+		case <-time.After(sqliteContendedWriterPause):
+		}
+	}
+}
+
+// TestPacedSQLiteWriterLeavesTheWriteLockToAWaitingWriter pins the pacing the
+// concurrent-writer fixtures rely on. Every transaction of the competing writer
+// holds the write lock for 20 ms, the way a commit does on a loaded host's
+// disk; the graph apply waiting behind it must still get in at once. Paced by
+// a 2 ms ticker instead, the same writer starves the apply until it fails with
+// "begin tx: database is locked" after 7 x 5 s (ga-rh8jgr).
+func TestPacedSQLiteWriterLeavesTheWriteLockToAWaitingWriter(t *testing.T) {
+	prevSleep := sqliteBusySleep
+	sqliteBusySleep = func(time.Duration) {}
+	t.Cleanup(func() { sqliteBusySleep = prevSleep })
+
+	cli := newSQLiteGraphApplyStore(t, t.TempDir(), WithSQLiteStoreIDPrefix(sqliteGraphPrefix))
+	writer, err := sql.Open("sqlite", sqliteStoreWriterDSN(cli.path))
+	if err != nil {
+		t.Fatalf("open competing writer: %v", err)
+	}
+	writer.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = writer.Close() })
+
+	stop := make(chan struct{})
+	firstCommit := make(chan struct{})
+	var wg sync.WaitGroup
+	var commits atomic.Int64
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		runPacedSQLiteWriter(stop, func(i int) {
+			tx, err := writer.BeginTx(context.Background(), nil)
+			if err != nil {
+				return
+			}
+			defer tx.Rollback() //nolint:errcheck
+			if _, err := tx.Exec(`INSERT OR REPLACE INTO kv(key,value) VALUES('paced-writer', ?)`, strconv.Itoa(i)); err != nil {
+				return
+			}
+			<-time.After(20 * time.Millisecond) // hold the write lock, as a slow commit does
+			if tx.Commit() == nil && commits.Add(1) == 1 {
+				close(firstCommit)
+			}
+		})
+	}()
+	select {
+	case <-firstCommit:
+	case <-time.After(30 * time.Second):
+		close(stop)
+		wg.Wait()
+		t.Fatal("competing writer never committed")
+	}
+
+	plan := &GraphApplyPlan{}
+	for i := 0; i < 30; i++ {
+		node := GraphApplyNode{Key: strconv.Itoa(i), Title: "step"}
+		if i > 0 {
+			node.ParentKey = "0"
+		}
+		plan.Nodes = append(plan.Nodes, node)
+	}
+	start := time.Now()
+	_, applyErr := cli.ApplyGraphPlan(context.Background(), plan)
+	waited := time.Since(start)
+	close(stop)
+	wg.Wait()
+	if applyErr != nil {
+		t.Fatalf("ApplyGraphPlan behind a paced writer: %v (writer commits: %d, waited %v)", applyErr, commits.Load(), waited)
+	}
+	if waited > 5*time.Second {
+		t.Fatalf("ApplyGraphPlan waited %v behind a paced writer, want well under one 5 s busy_timeout", waited)
+	}
+}
+
 // TestSQLiteStoreGraphCookUnderConcurrentWriter reproduces the maintainer-city
 // cook failure end to end: a graph store holding an id at
 // math.MaxInt64-1 and a block of ids from the overflowed old allocator,
@@ -320,25 +413,19 @@ func TestSQLiteStoreGraphCookUnderConcurrentWriter(t *testing.T) {
 	var wg sync.WaitGroup
 	var controllerWrites atomic.Int64
 	wg.Add(1)
-	// Paced far above the ~1 commit/s measured on the live city, but not a
-	// tight loop: a writer that re-takes the lock the instant it commits just
-	// measures SQLite's (unfair) busy-handler polling, not this store.
-	pace := time.NewTicker(2 * time.Millisecond)
-	defer pace.Stop()
+	// Paced above the ~1 commit/s measured on the live city, and never a tight
+	// loop: a writer that re-takes the lock the instant it commits just
+	// measures SQLite's (unfair) busy-handler polling, not this store (see
+	// sqliteContendedWriterPause).
 	go func() {
 		defer wg.Done()
-		for i := 0; ; i++ {
-			select {
-			case <-stop:
-				return
-			case <-pace.C:
-			}
+		runPacedSQLiteWriter(stop, func(i int) {
 			if err := controller.SetMetadata(hot.ID, "tick", strconv.Itoa(i)); err == nil {
 				if controllerWrites.Add(1) == 1 {
 					close(firstCommit)
 				}
 			}
-		}
+		})
 	}()
 	select {
 	case <-firstCommit:

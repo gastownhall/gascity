@@ -4285,6 +4285,15 @@ server it was to end may still be running. A runtime that does not scope
 its server by GC_EXEC_CITY_PATH ends every session the server holds, so
 check it only against a backend that no live city uses.
 
+A runtime whose handshake un-welds start (proc.provision with
+proc.launch, or with proc.exec and without carrier.ops) is sent
+provision, which must leave is-running false, and with proc.launch a
+launch into that box, which must leave is-running true, and a fresh_only
+launch over the running agent, which must exit 73. They run in a private
+city of their own, as server-stop does. Such a runtime must also keep
+metadata, since gc publishes each launch's identity with set-meta: a
+set-meta that exits 2 fails the metadata round-trip instead of skipping it.
+
 The argument is an executable (path or PATH name) or a pack-declared
 runtime name: when it names a [runtimes.&lt;name&gt;] entry from the current
 city's packs, the check runs against that pack's declared command.
@@ -5360,7 +5369,8 @@ session stopped. If it could not list the runtime's sessions completely,
 or could not check whether a session is still running, it names what it
 could not verify, still stops every session it did see, and exits
 non-zero; a supervisor registration is restored. When a controller
-handled the stop, gc stop lists the runtime afterwards: a session still
+handled the stop, or gc stop itself stopped a registered city that no
+controller served, gc stop lists the runtime afterwards: a session still
 running, or a runtime that does not answer the listing in time (a wedged
 server), is reported the same way. Resolve the reported error and run gc
 stop again.
@@ -5368,8 +5378,12 @@ stop again.
 Use --timeout=DURATION to cap the wall-clock time gc stop will spend
 before giving up; the default budgets configured session interrupt and
 stop waves, the configured shutdown grace wait, and a second orphan
-cleanup pass. Use --force to skip the interrupt grace period and go
-straight to kill.
+cleanup pass. If the cap fires while gc stop is itself stopping a
+registered city that no controller served, the city is left unregistered
+rather than restored, so the supervisor does not relaunch it under that
+stop, and gc stop prints the command that finishes the stop: it names
+the city by its path, since its name no longer resolves. Use --force to
+skip the interrupt grace period and go straight to kill.
 
 ```
 gc stop [path|name] [flags]

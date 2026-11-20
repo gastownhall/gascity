@@ -1449,7 +1449,7 @@ func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, by Actor, id strin
 	} else if err != nil {
 		return false, err
 	}
-	if started.queued {
+	if started.queued || m.startupTurnAhead(ctx, b, sessName) {
 		return false, nil // not delivered: the caller queues it behind the first turn
 	}
 	if transportFromMetadata(b) == "acp" {
@@ -1480,6 +1480,9 @@ func (m *Manager) tryWaitIdleNudgeLocked(ctx context.Context, by Actor, id strin
 func (m *Manager) tryWaitIdleNudgeLiveOnlyLocked(ctx context.Context, b beads.Bead, source, sessName, message string, processNames []string) (bool, error) {
 	if !m.liveAgent(sessName, processNames) { // a dead agent's pane takes nothing (mc-wdjni)
 		return false, nil
+	}
+	if m.startupTurnAhead(ctx, b, sessName) {
+		return false, nil // not delivered: the caller queues it behind the first turn
 	}
 	if transportFromMetadata(b) == "acp" {
 		if err := m.nudgeSession(ctx, sessName, message, false); err != nil {
@@ -1590,11 +1593,12 @@ func (m *Manager) sendLocked(ctx context.Context, by Actor, id string, b beads.B
 	if verifyDeferredDialogs {
 		m.dismissKnownDialogsLocked(ctx, sessName, codexDeferredDialogDelay)
 	}
-	if started.queued {
-		// The start this send made queued the session's first turn: the
-		// message waits behind it in the queue rather than reach the agent
-		// ahead of its startup prompt. Nothing was typed, so the dialogs
-		// stay unverified until a send types.
+	if started.queued || m.startupTurnAhead(ctx, b, sessName) {
+		// The session's first turn is still queued, by the start this send
+		// made or by an earlier one (an un-welded exec launch hands back
+		// every first turn): the message waits behind it in the queue
+		// rather than reach the agent ahead of its startup prompt. Nothing
+		// was typed, so the dialogs stay unverified until a send types.
 		return true, m.enqueueDeferredSubmitLocked(b, sessName, message, queueSource)
 	}
 	if err := m.pendingInteractionLocked(sessName); err != nil {
@@ -1662,7 +1666,7 @@ func (m *Manager) send(ctx context.Context, by Actor, id, message, resumeCommand
 func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediate bool, processNames []string) (bool, error) {
 	var delivered bool
 	err := withSessionMutationLock(id, func() error {
-		_, sessName, err := m.sessionBead(id)
+		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
@@ -1670,6 +1674,13 @@ func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediat
 		if err != nil || !live.Running || !live.Alive { // a dead agent's pane takes nothing (mc-wdjni)
 			delivered = false
 			return runtime.LivenessFenceMiss(ctx, sessName, live, err)
+		}
+		if m.startupTurnAhead(ctx, b, sessName) {
+			// The session's first turn is still in the queue, waiting or
+			// being delivered by the queue's own send: this send would
+			// reach the agent ahead of it. Undelivered, so the lane waits
+			// and its other callers queue it behind the turn.
+			return nil
 		}
 		if err := m.pendingInteractionLocked(sessName); err != nil {
 			return err
@@ -1737,7 +1748,10 @@ func (m *Manager) SendImmediate(ctx context.Context, by Actor, id, message, resu
 // resumes or restarts the session. Under an input fence in ctx, a session it
 // finds not running, or with its agent exited, is a miss rather than
 // undelivered, and a liveness read that fails is runtime.ErrRuntimeUnavailable
-// (runtime.LivenessFenceMiss).
+// (runtime.LivenessFenceMiss). A session whose startup turn is still in the
+// queue, waiting or being delivered, reports the send undelivered, typing
+// nothing ahead of it, unless the send is the queue's delivery of that turn
+// (made under the delivery key the turn is pinned to).
 func (m *Manager) SendLiveOnly(ctx context.Context, id, message string, processNames []string) (bool, error) {
 	return m.sendLiveOnly(ctx, id, message, false, processNames)
 }
@@ -1773,6 +1787,10 @@ func (m *Manager) TryWaitIdleNudge(ctx context.Context, by Actor, id, source, me
 // TryWaitIdleNudgeLiveOnly delivers a best-effort nudge at a safe boundary
 // only when the runtime is already live with its agent alive (by
 // processNames; none reads alive). It never resumes or restarts the session.
+// A session whose startup turn is still in the queue, waiting or being
+// delivered, reports it undelivered, typing nothing ahead of it, unless the
+// nudge is the queue's delivery of that turn (made under the delivery key
+// the turn is pinned to).
 func (m *Manager) TryWaitIdleNudgeLiveOnly(ctx context.Context, id, source, message string, processNames []string) (bool, error) {
 	var delivered bool
 	err := withSessionMutationLock(id, func() error {

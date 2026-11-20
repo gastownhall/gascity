@@ -132,7 +132,7 @@ type Fake struct {
 	// once per session name ([StartupNudgeHandbackProvider]), as a leaf
 	// whose Start found its program blocked through the startup ladder.
 	// Use SetStartupNudgeHandback while other goroutines may read the fake.
-	StartupNudgeHandbacks map[string]string
+	StartupNudgeHandbacks map[string]StartupNudge
 	// ProgramStatusErrors fail a FullFake's ProgramStatus by session name.
 	ProgramStatusErrors map[string]error
 	// ProgramCaptureHealErrors fail a FullFake's HealProgramCapture by

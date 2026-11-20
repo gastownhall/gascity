@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -16,49 +17,53 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-// stageFiles copies overlay, copy_files, and rig workdir into the pod
-// via the init container, then signals it to exit. Copies extract in place, so
-// a failed copy is returned before that signal: the pod may hold a partial
-// tree, and the caller deletes it. A workdir or copy_files source that cannot
-// be stat'ed is skipped silently, whatever the error (absent, permission
-// denied, symlink loop), and so is a workdir that is not a directory. An
-// overlay dir is skipped only when absent; any other stat error, or a
-// non-directory, fails staging.
-func stageFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Config, ctrlCity string, warn io.Writer) error {
+// stageFiles copies overlay, copy_files, and rig workdir into the pod via the
+// init container, then signals it to exit. Copies extract in place, so a
+// failed copy is returned before that signal: the pod may hold a partial tree,
+// and the caller deletes it. The result is true only when a real non-city
+// workdir directory completed its dedicated streamed copy. A workdir or
+// copy_files source that cannot be stat'ed is skipped silently, whatever the
+// error (absent, permission denied, symlink loop), and so is a workdir that is
+// not a directory. An overlay dir is skipped only when absent; any other stat
+// error, or a non-directory, fails staging.
+func stageFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Config, ctrlCity string, warn io.Writer) (bool, error) {
 	// Wait for init container to be running (up to 60s).
 	if err := waitForInitContainer(ctx, ops, podName, 60*time.Second); err != nil {
-		return err
+		return false, err
 	}
 
 	// Wait for exec endpoint to be ready. The kubelet reports Running
 	// before the CRI exec handler is set up, so we poll a trivial command.
 	if err := waitForExecReady(ctx, ops, podName, 120*time.Second); err != nil {
-		return err
+		return false, err
 	}
 	// Recheck after the potentially long pod-readiness wait, immediately before
 	// overlay suppression and transport.
 	if err := runtime.ValidateReconcilerOwnedCopyFiles(cfg); err != nil {
-		return err
+		return false, err
 	}
 
 	// Copy rig work_dir into the pod.
 	podWorkDir := "/workspace"
-	if ctrlCity != "" && cfg.WorkDir != "" && cfg.WorkDir != ctrlCity {
-		if rel, ok := strings.CutPrefix(cfg.WorkDir, ctrlCity+"/"); ok {
-			podWorkDir = "/workspace/" + rel
-		}
+	workDirRel, workDirIsNested := relativeCityWorkDir(ctrlCity, cfg.WorkDir)
+	if workDirIsNested {
+		podWorkDir = path.Join("/workspace", filepath.ToSlash(workDirRel))
 	}
-	if cfg.WorkDir != "" && cfg.WorkDir != ctrlCity {
-		if err := copyDirToPod(ctx, ops, podName, "stage", cfg.WorkDir, podWorkDir); err != nil {
-			return fmt.Errorf("staging workdir %s to %s: %w", cfg.WorkDir, podWorkDir, err)
+	workDirStaged := false
+	workDirIsCityRoot := ctrlCity != "" && filepath.Clean(cfg.WorkDir) == filepath.Clean(ctrlCity)
+	if cfg.WorkDir != "" && !workDirIsCityRoot {
+		copied, err := copyDirToPodInternal(ctx, ops, podName, "stage", cfg.WorkDir, podWorkDir, "")
+		if err != nil {
+			return false, fmt.Errorf("staging workdir %s to %s: %w", cfg.WorkDir, podWorkDir, err)
 		}
+		workDirStaged = copied
 	}
 
 	if err := stageProviderOverlaysToPod(ctx, ops, podName, cfg, podWorkDir, warn); err != nil {
-		return err
+		return false, err
 	}
 	if err := runtime.ValidateReconcilerOwnedCopyFiles(cfg); err != nil {
-		return err
+		return false, err
 	}
 
 	// Copy each copy_files entry.
@@ -67,7 +72,7 @@ func stageFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Con
 		owned := runtimeOwnsMergeablePath(cfg, entry.RelDst)
 		if owned {
 			if _, err := os.Stat(entry.Src); err != nil {
-				return fmt.Errorf("staging reconciler-owned copy_file %s: %w", entry.Src, err)
+				return false, fmt.Errorf("staging reconciler-owned copy_file %s: %w", entry.Src, err)
 			}
 			dst = podWorkDir
 		}
@@ -76,16 +81,16 @@ func stageFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Con
 		}
 		if err := copyToPod(ctx, ops, podName, "stage", entry.Src, dst); err != nil {
 			if owned {
-				return fmt.Errorf("staging reconciler-owned copy_file %s → %s: %w", entry.Src, dst, err)
+				return false, fmt.Errorf("staging reconciler-owned copy_file %s → %s: %w", entry.Src, dst, err)
 			}
-			return fmt.Errorf("staging copy_file %s → %s: %w", entry.Src, dst, err)
+			return false, fmt.Errorf("staging copy_file %s → %s: %w", entry.Src, dst, err)
 		}
 	}
 	// Copying reopens the local source after the last contract validation. Bind
 	// the handoff to the bytes that actually landed in the pod before allowing
 	// the init container to release the main container.
 	if err := verifyReconcilerOwnedPodFiles(ctx, ops, podName, "stage", cfg, podWorkDir); err != nil {
-		return err
+		return false, err
 	}
 
 	// Mirror .gc/ into city volume when GC_CITY differs from work_dir.
@@ -97,7 +102,37 @@ func stageFiles(ctx context.Context, ops k8sOps, podName string, cfg runtime.Con
 	// Signal init container to exit.
 	_, err := ops.execInPod(ctx, podName, "stage",
 		[]string{"touch", "/workspace/.gc-ready"}, nil)
-	return err
+	if err != nil {
+		return false, err
+	}
+	return workDirStaged, nil
+}
+
+// relativeCityWorkDir returns the normalized city-relative path only when
+// workDir is a strict descendant of ctrlCity. Cleaning before filepath.Rel
+// avoids treating shared-prefix siblings as nested city paths.
+func relativeCityWorkDir(ctrlCity, workDir string) (string, bool) {
+	if ctrlCity == "" || workDir == "" {
+		return "", false
+	}
+	rel, err := filepath.Rel(filepath.Clean(ctrlCity), filepath.Clean(workDir))
+	if err != nil || rel == "." || filepath.IsAbs(rel) || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return rel, true
+}
+
+// cityTemplateSkipRel authorizes omission only after the dedicated workdir
+// copy completed. The city template must retain the path for skipped sources.
+func cityTemplateSkipRel(workDirStaged bool, ctrlCity, workDir string) string {
+	if !workDirStaged {
+		return ""
+	}
+	rel, ok := relativeCityWorkDir(ctrlCity, workDir)
+	if !ok {
+		return ""
+	}
+	return rel
 }
 
 const podFileReadScript = `
@@ -262,9 +297,27 @@ func waitForExecReady(ctx context.Context, ops k8sOps, podName string, timeout t
 
 // copyDirToPod copies a local directory into the pod via tar-based exec.
 func copyDirToPod(ctx context.Context, ops k8sOps, podName, container, srcDir, dstDir string) error {
+	_, err := copyDirToPodInternal(ctx, ops, podName, container, srcDir, dstDir, "")
+	return err
+}
+
+// copyDirToPodSkipping copies a local directory into the pod while omitting the
+// exact normalized relative subtree skipRel from the streamed archive.
+func copyDirToPodSkipping(ctx context.Context, ops k8sOps, podName, container, srcDir, dstDir, skipRel string) error {
+	_, err := copyDirToPodInternal(ctx, ops, podName, container, srcDir, dstDir, skipRel)
+	return err
+}
+
+// copyDirToPodInternal reports copied=true only when srcDir was a directory
+// and the streamed copy was acknowledged by the pod.
+func copyDirToPodInternal(ctx context.Context, ops k8sOps, podName, container, srcDir, dstDir, skipRel string) (bool, error) {
+	normalizedSkipRel, err := validateSkipRel(skipRel)
+	if err != nil {
+		return false, err
+	}
 	info, err := os.Stat(srcDir)
 	if err != nil || !info.IsDir() {
-		return nil // skip silently if not a directory
+		return false, nil // skip silently if not a directory
 	}
 
 	// Create destination directory in the pod.
@@ -275,7 +328,7 @@ func copyDirToPod(ctx context.Context, ops k8sOps, podName, container, srcDir, d
 	// tar extractor so the archive is never held in memory.
 	err = streamArchive(
 		func(w io.Writer, entriesComplete func()) error {
-			if err := tarDirWithWalkComplete(srcDir, w, entriesComplete); err != nil {
+			if err := tarDirSkippingWithWalkComplete(srcDir, normalizedSkipRel, w, entriesComplete); err != nil {
 				return fmt.Errorf("creating tar of %s: %w", srcDir, err)
 			}
 			return nil
@@ -291,9 +344,20 @@ func copyDirToPod(ctx context.Context, ops k8sOps, podName, container, srcDir, d
 			return nil
 		})
 	if err != nil {
-		return fmt.Errorf("copying directory %s to pod %s:%s: %w", srcDir, podName, dstDir, err)
+		return false, fmt.Errorf("copying directory %s to pod %s:%s: %w", srcDir, podName, dstDir, err)
 	}
-	return nil
+	return true, nil
+}
+
+func validateSkipRel(skipRel string) (string, error) {
+	if skipRel == "" {
+		return "", nil
+	}
+	cleaned := filepath.Clean(skipRel)
+	if filepath.IsAbs(skipRel) || filepath.VolumeName(skipRel) != "" || cleaned != skipRel || cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("invalid relative subtree %q", skipRel)
+	}
+	return cleaned, nil
 }
 
 var (
@@ -385,8 +449,16 @@ func tarDir(dir string, w io.Writer) error {
 }
 
 func tarDirWithWalkComplete(dir string, w io.Writer, onComplete func()) error {
+	return tarDirSkippingWithWalkComplete(dir, "", w, onComplete)
+}
+
+func tarDirSkippingWithWalkComplete(dir, skipRel string, w io.Writer, onComplete func()) error {
+	normalizedSkipRel, err := validateSkipRel(skipRel)
+	if err != nil {
+		return err
+	}
 	tw := tar.NewWriter(w)
-	if err := walkTar(dir, tw); err != nil {
+	if err := walkTarSkipping(dir, tw, normalizedSkipRel); err != nil {
 		return err
 	}
 	if onComplete != nil {
@@ -395,7 +467,7 @@ func tarDirWithWalkComplete(dir string, w io.Writer, onComplete func()) error {
 	return tw.Close()
 }
 
-func walkTar(dir string, tw *tar.Writer) error {
+func walkTarSkipping(dir string, tw *tar.Writer, skipRel string) error {
 	return filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -406,6 +478,12 @@ func walkTar(dir string, tw *tar.Writer) error {
 			return err
 		}
 		if rel == "." {
+			return nil
+		}
+		if skipRel != "" && rel == skipRel {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 

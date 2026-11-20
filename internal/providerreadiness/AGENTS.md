@@ -49,7 +49,7 @@ that marker before any wrapped stale/refusal/unavailable error and retain the
 lane's at-most-once outcome. For approval verification, preserve success only
 for a proven missing session; an unavailable observation proves neither success
 nor an unsent answer. See `internal/runtime/REQUIREMENTS.md`,
-RUNTIME-CONTRACT-020 and RUNTIME-CONTRACT-021.
+RUNTIME-CONTRACT-029 and RUNTIME-CONTRACT-021.
 
 ## Complete multiline input
 

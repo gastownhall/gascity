@@ -23,6 +23,9 @@ import (
 // routes a FreshOnly start to the raw provider's: an optional interface the
 // cut-over does not forward does not exist in production.
 //
+// The first turn a separable launch hands back is passed through too
+// (TakeStartupNudgeHandback).
+//
 // The process-table scanner, which only a v2-ready pack sharing the host
 // can use (process_scan.go), and the local-transcript trait (hoststage.go)
 // are passed through from the files that define them.
@@ -59,6 +62,8 @@ var (
 	_ runtime.ReconcilerOwnedMergeablePathProvider = (*seamBackedProvider)(nil)
 
 	_ runtime.ServerLifecycleProvider = (*seamBackedProvider)(nil)
+
+	_ runtime.StartupNudgeHandbackProvider = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked wraps an exec provider for the given script so it is served
@@ -86,6 +91,12 @@ func (s *seamBackedProvider) Start(ctx context.Context, name string, cfg runtime
 		return s.raw.startFresh(ctx, name, cfg)
 	}
 	return s.Provider.Start(ctx, name, cfg)
+}
+
+// TakeStartupNudgeHandback passes through to the underlying provider: the
+// first turn a separable launch handed back (startup_ladder.go).
+func (s *seamBackedProvider) TakeStartupNudgeHandback(name string) (runtime.StartupNudge, bool) {
+	return s.raw.TakeStartupNudgeHandback(name)
 }
 
 // ObserveLivenessWithError passes a v2-ready pack's fresh `observe` through;
