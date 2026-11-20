@@ -2,11 +2,17 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
@@ -290,4 +296,194 @@ func TestInitAndHookDirProviderOwnedReconcilesProjectIdentity(t *testing.T) {
 	assertProjectIdentityApplyStampedEvents(t, recorder.records, []projectIdentityApplyStampedEvent{
 		{source: "migrated_from_metadata", layer: "L1", newID: projectID},
 	})
+}
+
+// clearProviderOwnedProxyEnvironment removes the ambient proxy-root
+// environment so ProviderRoot derives the root from the fixture alone.
+func clearProviderOwnedProxyEnvironment(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{
+		proxyendpoint.RootPathEnv,
+		proxyendpoint.DoltDataDirEnv,
+		proxyendpoint.SharedServerModeEnv,
+		proxyendpoint.SharedServerDirEnv,
+	} {
+		t.Setenv(name, "")
+	}
+}
+
+// providerOwnedProxyRoot materializes a proxy root at scope/.beads/rel.
+func providerOwnedProxyRoot(t *testing.T, scope, rel string) string {
+	t.Helper()
+	root := filepath.Join(scope, ".beads", rel)
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// makeProviderOwnedProxyRecord fabricates a record that validates against root.
+func makeProviderOwnedProxyRecord(t *testing.T, root string, pid, port int) proxyendpoint.Record {
+	t.Helper()
+	rootID, err := proxyendpoint.RootID(root)
+	if err != nil {
+		t.Fatalf("identify proxy root: %v", err)
+	}
+	return proxyendpoint.Record{
+		PID:         pid,
+		Port:        port,
+		UpstreamID:  "identity-test-upstream",
+		Schema:      proxyendpoint.SchemaV2,
+		Kind:        proxyendpoint.RecordKind,
+		Birth:       proxyendpoint.BirthToken("identity-test-boot", fmt.Sprint(pid)),
+		RootID:      rootID,
+		ControlPort: port + 1,
+	}
+}
+
+func writeProviderOwnedProxyRecord(t *testing.T, root string, record proxyendpoint.Record) {
+	t.Helper()
+	data, err := json.Marshal(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(proxyendpoint.PIDPath(root), data, 0o600); err != nil {
+		t.Fatalf("write proxy endpoint record: %v", err)
+	}
+}
+
+func providerOwnedProxyArgv(root string) []string {
+	return []string{"bd", proxyendpoint.ChildVerb, proxyendpoint.RootFlag, root, proxyendpoint.IdleTimeoutFlag, "0"}
+}
+
+// stubProviderOwnedProcessTable points the resolver's proxy inspection at a
+// table that vouches for record when alive and for nothing when dead.
+func stubProviderOwnedProcessTable(t *testing.T, record proxyendpoint.Record, root string, alive bool) {
+	t.Helper()
+	prev := providerOwnedIdentityProcessTableFn
+	providerOwnedIdentityProcessTableFn = func() proxyendpoint.ProcessTable {
+		return proxyendpoint.ProcessTable{
+			Alive: func(pid int) bool { return alive && pid == record.PID },
+			Argv:  func(int) ([]string, error) { return providerOwnedProxyArgv(root), nil },
+			Birth: func(int) (string, error) { return record.Birth, nil },
+		}
+	}
+	t.Cleanup(func() { providerOwnedIdentityProcessTableFn = prev })
+}
+
+// newProviderOwnedProxiedScopeForResolution builds a bare scope whose metadata
+// records an eligible proxied-server binding, with a sidecar that both roots
+// the proxy under .beads/proxy-root and names an external upstream the
+// resolver must never dial. It returns the scope root and the proxy root.
+func newProviderOwnedProxiedScopeForResolution(t *testing.T) (scope, root string) {
+	t.Helper()
+	scope = t.TempDir()
+	if err := os.MkdirAll(filepath.Join(scope, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeProviderOwnedScopeMetadata(t, scope, "")
+	sidecar := `{"root_path":"proxy-root","idle_timeout":-1,"external":{"host":"db.example","port":4406}}`
+	if err := os.WriteFile(proxyendpoint.SidecarPath(filepath.Join(scope, ".beads")), []byte(sidecar), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root = providerOwnedProxyRoot(t, scope, "proxy-root")
+	return scope, root
+}
+
+// TestProviderOwnedIdentityEndpointResolution: a proxied scope's L3 endpoint
+// is bd's loopback proxy from the live record — never the sidecar's external
+// upstream — and a record that is absent is the proxy's ordinary stopped
+// state, while a dead record is a fault the resolver names.
+func TestProviderOwnedIdentityEndpointResolution(t *testing.T) {
+	t.Run("proxied resolves the live proxy record, never the sidecar upstream", func(t *testing.T) {
+		clearProviderOwnedProxyEnvironment(t)
+		scope, root := newProviderOwnedProxiedScopeForResolution(t)
+		record := makeProviderOwnedProxyRecord(t, root, 4321, 45231)
+		writeProviderOwnedProxyRecord(t, root, record)
+		stubProviderOwnedProcessTable(t, record, root, true)
+
+		endpoint, ok, err := resolveProviderOwnedIdentityEndpoint(t.TempDir(), scope, scopeMetadataJSONPath(scope))
+		if err != nil || !ok {
+			t.Fatalf("resolve endpoint = (%+v, %t, %v), want the live proxy", endpoint, ok, err)
+		}
+		if !endpoint.proxied || endpoint.port != 45231 || endpoint.database != "hq" {
+			t.Fatalf("endpoint = %+v, want the proxied endpoint on the record's port 45231 for database hq", endpoint)
+		}
+	})
+
+	t.Run("proxied without a record is the stopped proxy", func(t *testing.T) {
+		clearProviderOwnedProxyEnvironment(t)
+		scope, _ := newProviderOwnedProxiedScopeForResolution(t)
+
+		endpoint, ok, err := resolveProviderOwnedIdentityEndpoint(t.TempDir(), scope, scopeMetadataJSONPath(scope))
+		if err != nil || !ok {
+			t.Fatalf("resolve endpoint = (%+v, %t, %v), want the no-record endpoint", endpoint, ok, err)
+		}
+		if !endpoint.proxied || endpoint.port != 0 || endpoint.database != "hq" {
+			t.Fatalf("endpoint = %+v, want the proxied no-record endpoint (port 0) for database hq", endpoint)
+		}
+	})
+
+	t.Run("proxied with a dead record refuses, naming the root", func(t *testing.T) {
+		clearProviderOwnedProxyEnvironment(t)
+		scope, root := newProviderOwnedProxiedScopeForResolution(t)
+		record := makeProviderOwnedProxyRecord(t, root, 4322, 45232)
+		writeProviderOwnedProxyRecord(t, root, record)
+		stubProviderOwnedProcessTable(t, record, root, false)
+
+		_, ok, err := resolveProviderOwnedIdentityEndpoint(t.TempDir(), scope, scopeMetadataJSONPath(scope))
+		if err == nil || ok {
+			t.Fatalf("resolve endpoint = (%t, %v), want a refusal for a dead proxy", ok, err)
+		}
+		for _, want := range []string{"not live", "dead", root} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("resolve error = %q, want it to name %q", err.Error(), want)
+			}
+		}
+	})
+}
+
+// TestReconcileProviderOwnedScopeIdentityProxiedUsesOnePrivateSession: with a
+// live record, the reconcile's L3 is exactly one TCP session to the proxy's
+// loopback data port — the handshake failing here proves the dial reached that
+// port and no redial ladder followed — and a session that cannot open leaves
+// every layer untouched.
+func TestReconcileProviderOwnedScopeIdentityProxiedUsesOnePrivateSession(t *testing.T) {
+	clearProviderOwnedProxyEnvironment(t)
+	const projectID = "11111111-2222-3333-4444-555555555555"
+	scope, root := newProviderOwnedProxiedScopeForResolution(t)
+	writeProviderOwnedScopeMetadata(t, scope, projectID)
+
+	listener, err := net.Listen("tcp", net.JoinHostPort(proxyendpoint.Host, "0"))
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	var accepted atomic.Int64
+	go func() {
+		for {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			accepted.Add(1)
+			_ = conn.Close()
+		}
+	}()
+	t.Cleanup(func() { _ = listener.Close() })
+	port := listener.Addr().(*net.TCPAddr).Port
+
+	record := makeProviderOwnedProxyRecord(t, root, 4323, port)
+	writeProviderOwnedProxyRecord(t, root, record)
+	stubProviderOwnedProcessTable(t, record, root, true)
+
+	err = reconcileProviderOwnedScopeIdentity(context.Background(), t.TempDir(), scope)
+	if err == nil || !strings.Contains(err.Error(), "open proxy session") {
+		t.Fatalf("reconcile against a proxy that closes at once = %v, want the session-open failure", err)
+	}
+	if got := accepted.Load(); got != 1 {
+		t.Fatalf("the reconcile dialed the proxy %d time(s), want exactly 1: the session is private and single-shot, never database/sql's redial ladder", got)
+	}
+	if _, ok, readErr := contract.ReadProjectIdentity(fsys.OSFS{}, scope); readErr != nil || ok {
+		t.Fatalf("identity.toml after a failed session = (%t, %v), want absent: no layer is written when L3 cannot open", ok, readErr)
+	}
 }
