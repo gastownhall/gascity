@@ -56,11 +56,14 @@ jobs:
     # PR critical path. Trial it on a 32 vCPU Blacksmith runner — the
     # CodeQL init's threads/ram inputs are left at their default (0 =
     # autodetect all cores / most RAM), so autobuild and the extractor
-    # already use the extra cores without an explicit override.
+    # already use the extra cores without an explicit override. The other
+    # three legs (actions/javascript-typescript/python, build-mode none)
+    # run under a minute on 16 vCPU today — they are not CPU-bound, so
+    # right-size them to 2 vCPU instead of paying for 16 (§11 item 11).
     runs-on: >-
       ${{ github.event_name == 'merge_group' && needs.runner-policy.outputs.runner_2vcpu
       || matrix.language == 'go' && needs.runner-policy.outputs.runner_32vcpu
-      || needs.runner-policy.outputs.runner_16vcpu }}
+      || needs.runner-policy.outputs.runner_2vcpu }}
     timeout-minutes: 30
     permissions:
       actions: read

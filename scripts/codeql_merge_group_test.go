@@ -54,8 +54,8 @@ func TestCodeQLMergeGroupReportsWithoutAnalysis(t *testing.T) {
 	}
 	// Outside a merge group, the Go leg trials a 32 vCPU runner (the next
 	// floor on the PR critical path, ci-speed-review-2026-11-20.md §7,
-	// §11 item 9); the other three legs stay on 16 vCPU for now (right-sized
-	// to 2 vCPU in a follow-up change, §11 item 11).
+	// §11 item 9); the other three legs run under a minute on 16 vCPU
+	// today and are right-sized to 2 vCPU (§11 item 11).
 	events := []struct {
 		name        string
 		ctx         map[string]string
@@ -64,10 +64,10 @@ func TestCodeQLMergeGroupReportsWithoutAnalysis(t *testing.T) {
 		otherRunner string // other events: every other leg's runner
 	}{
 		{name: "merge_group", ctx: mergeGroupCtx(nil), runner: "blacksmith-2vcpu-ubuntu-2404"},
-		{name: "pull_request", ctx: map[string]string{"github.event_name": "pull_request", "github.ref": "refs/pull/7001/merge"}, goRunner: "blacksmith-32vcpu-ubuntu-2404", otherRunner: "blacksmith-16vcpu-ubuntu-2404"},
-		{name: "push", ctx: map[string]string{"github.event_name": "push", "github.ref": "refs/heads/main"}, goRunner: "blacksmith-32vcpu-ubuntu-2404", otherRunner: "blacksmith-16vcpu-ubuntu-2404"},
-		{name: "schedule", ctx: map[string]string{"github.event_name": "schedule", "github.ref": "refs/heads/main"}, goRunner: "blacksmith-32vcpu-ubuntu-2404", otherRunner: "blacksmith-16vcpu-ubuntu-2404"},
-		{name: "workflow_dispatch", ctx: map[string]string{"github.event_name": "workflow_dispatch", "github.ref": "refs/heads/main"}, goRunner: "blacksmith-32vcpu-ubuntu-2404", otherRunner: "blacksmith-16vcpu-ubuntu-2404"},
+		{name: "pull_request", ctx: map[string]string{"github.event_name": "pull_request", "github.ref": "refs/pull/7001/merge"}, goRunner: "blacksmith-32vcpu-ubuntu-2404", otherRunner: "blacksmith-2vcpu-ubuntu-2404"},
+		{name: "push", ctx: map[string]string{"github.event_name": "push", "github.ref": "refs/heads/main"}, goRunner: "blacksmith-32vcpu-ubuntu-2404", otherRunner: "blacksmith-2vcpu-ubuntu-2404"},
+		{name: "schedule", ctx: map[string]string{"github.event_name": "schedule", "github.ref": "refs/heads/main"}, goRunner: "blacksmith-32vcpu-ubuntu-2404", otherRunner: "blacksmith-2vcpu-ubuntu-2404"},
+		{name: "workflow_dispatch", ctx: map[string]string{"github.event_name": "workflow_dispatch", "github.ref": "refs/heads/main"}, goRunner: "blacksmith-32vcpu-ubuntu-2404", otherRunner: "blacksmith-2vcpu-ubuntu-2404"},
 	}
 	for _, ev := range events {
 		ctx := maps.Clone(ev.ctx)
