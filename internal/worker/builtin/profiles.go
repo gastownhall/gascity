@@ -495,7 +495,6 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		UpstreamAPIKeyEnv: "XAI_API_KEY",
 		OptionDefaults: map[string]string{
 			"permission_mode": "unrestricted",
-			"model":           "grok-composer-2.5-fast",
 		},
 		// The grok TUI accepts no positional or flag-delivered initial
 		// prompt (`-p/--single` is print-and-exit), so prompts are
@@ -518,7 +517,6 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ResumeFlag:       "--resume",
 		ResumeStyle:      "flag",
 		PrintArgs:        []string{"-p"},
-		TitleModel:       "grok-composer-2.5-fast",
 		PermissionModes: map[string]string{
 			"default":      "--permission-mode default",
 			"auto-edit":    "--permission-mode acceptEdits",
@@ -542,16 +540,13 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 			},
 			effortOption([]string{"--effort", optionValuePlaceholder}, effortTiers...),
 			modelOption(
-				modelChoice("grok-build", "Grok Build"),
-				modelChoice("grok-composer-2.5", "Grok Composer 2.5"),
-				modelChoice("grok-composer-2.5-fast", "Grok Composer 2.5 Fast"),
-				// Frontier coding ids. Gasburger pins grok-4.6 on refinery and
-				// gorkcats; this enum had not been touched since grok was added
-				// and carried none of them, so the launch path found no
-				// FlagArgs and silently omitted --model (ga-fyh). grok-4.7 is
-				// listed ahead of its rollout.
-				modelChoice("grok-4.6", "Grok 4.6"),
 				modelChoice("grok-4.7", "Grok 4.7"),
+				modelChoice("grok-4.6", "Grok 4.6"),
+				// Gasburger pins grok-4.6 on refinery and gorkcats; grok-4.7
+				// is the CLI's own default on current Grok Build. The option
+				// is open, so a newly released id still renders without a gc
+				// upgrade (ga-fyh).
+				modelChoice("grok-build", "Grok Build"),
 			),
 		},
 
