@@ -1200,7 +1200,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 
 	dt := newDrainTracker()
 	openInfos := sessionBeads.OpenInfos()
-	poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, oneShotStore, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
+	poolWorkBeads, poolWorkRefs := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, oneShotStore, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
 	poolDecisionTime := time.Now()
 	// The pass's park verdicts, decided once: the pool counts and the
 	// reconciler's hold read the same set.
@@ -1208,7 +1208,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		cfg,
 		PoolDesiredCounts(computePoolDesiredStatesParkedAt(
-			cfg, poolWorkBeads, openInfos, dsResult.ScaleCheckCounts, nil, poolDecisionTime, parked, nil)),
+			cfg, poolWorkBeads, readyAssignedFlagsForBeads(dsResult.ReadyAssigned, poolWorkBeads, poolWorkRefs), openInfos, dsResult.ScaleCheckCounts, nil, poolDecisionTime, parked, nil)),
 		sessionBeads,
 		effectivePoolPartialRetentionTemplates(dsResult),
 	)
