@@ -1,12 +1,14 @@
 package main
 
 import (
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -248,6 +250,13 @@ func newDrainAckPruneSeat(t *testing.T, meta map[string]string) *drainAckPruneSe
 	return s
 }
 
+// finalize runs the drain-ack finalizer over info, the seat's snapshot.
+func (s *drainAckPruneSeat) finalize(info session.Info, closeIfUnassigned bool) drainAckFinalizeResult {
+	sw := testSeatWork(s.fx.cityPath, s.env.cfg, s.env.store, nil)
+	return finalizeDrainAckStoppedSession(s.fx.cityPath, s.env.cfg, s.env.store, sw, info, "", closeIfUnassigned,
+		newFakeDrainOps(), s.env.dt, s.env.clk, events.Discard, &s.env.stderr)
+}
+
 // status is the seat's persisted status and lifecycle state.
 func (s *drainAckPruneSeat) status(t *testing.T) (string, string) {
 	t.Helper()
@@ -256,4 +265,86 @@ func (s *drainAckPruneSeat) status(t *testing.T) (string, string) {
 		t.Fatalf("Get(%s): %v", s.id, err)
 	}
 	return got.Status, got.Metadata["state"]
+}
+
+// TestFinalizeDrainAckStoppedSessionPruneRefusalKeepsTheClose (gascity#8093).
+// The worker_dir prune follows a drain-ack close the store already holds: a
+// prune the helper refuses or cannot finish leaves the seat closed as
+// drained, and the helper keeps its own refusal, marker and error report.
+func TestFinalizeDrainAckStoppedSessionPruneRefusalKeepsTheClose(t *testing.T) {
+	cases := []struct {
+		name        string
+		setup       func(s *drainAckPruneSeat)
+		wantRemoves int
+		wantMarker  string
+		wantLog     string
+	}{
+		{
+			name: "auto-prune disabled",
+			setup: func(s *drainAckPruneSeat) {
+				off := false
+				s.fx.cfg.Daemon.AutoPruneWorkerDir = &off
+			},
+		},
+		{
+			name: "uncommitted changes",
+			setup: func(s *drainAckPruneSeat) {
+				s.fx.setProbe(s.fx.workerDir, &fakeGitProbe{isRepo: true, currentBranch: "work/w1", hasUncommitted: true})
+			},
+			wantMarker: "uncommitted-work",
+			wantLog:    "has uncommitted changes",
+		},
+		{
+			name: "unpushed commits",
+			setup: func(s *drainAckPruneSeat) {
+				s.fx.setProbe(s.fx.workerDir, &fakeGitProbe{isRepo: true, currentBranch: "work/w1", hasUnpushed: true})
+			},
+			wantMarker: "unpushed-commits",
+			wantLog:    "has unpushed commits",
+		},
+		{
+			name: "removal fails",
+			setup: func(s *drainAckPruneSeat) {
+				s.rig.worktreeRemove = func(path string, _ bool) error {
+					s.removes = append(s.removes, path)
+					return errors.New("worktree locked")
+				}
+			},
+			wantRemoves: 1,
+			wantLog:     "worktree locked",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := newDrainAckPruneSeat(t, nil)
+			c.setup(s)
+
+			res := s.finalize(s.env.sessionInfo(s.id), true)
+
+			if !res.closed {
+				t.Fatalf("finalize result %+v, want the close reported", res)
+			}
+			if status, state := s.status(t); status != "closed" || state != "drained" {
+				t.Fatalf("status/state = %q/%q, want closed/drained despite the prune outcome", status, state)
+			}
+			if len(s.removes) != c.wantRemoves {
+				t.Fatalf("rig-root removals = %q, want %d", s.removes, c.wantRemoves)
+			}
+			if c.wantMarker != "" {
+				assertWorktreeStaleMarker(t, s.fx.workerDir, "work/w1", c.wantMarker)
+			} else {
+				assertNoWorktreeStaleMarker(t, s.fx.workerDir)
+			}
+			log := s.env.stderr.String()
+			if strings.Contains(log, "pruned worker_dir") {
+				t.Fatalf("stderr reports a prune: %s", log)
+			}
+			if c.wantLog == "" && strings.Contains(log, "worker_dir") {
+				t.Fatalf("stderr = %q, want no worker_dir report", log)
+			}
+			if !strings.Contains(log, c.wantLog) || (c.wantLog != "" && !strings.Contains(log, s.fx.workerDir)) {
+				t.Fatalf("stderr = %q, want a report naming %s: %q", log, s.fx.workerDir, c.wantLog)
+			}
+		})
+	}
 }
