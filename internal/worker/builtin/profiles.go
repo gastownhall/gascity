@@ -496,21 +496,21 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		OptionDefaults: map[string]string{
 			"permission_mode": "unrestricted",
 		},
-		// The grok TUI accepts no positional or flag-delivered initial
-		// prompt (`-p/--single` is print-and-exit), so prompts are
-		// delivered via tmux send-keys once the TUI is ready.
+		// Positional delivery is verified on current Grok Build (1.0.50): the
+		// startup prompt rides the launch argv as a shell-quoted positional
+		// suffix, so no keystrokes go into a TUI that is not listening yet.
 		//
-		// grok's input handler does not accept send-keys until ~5-6s after
-		// launch (TUI init: auth check + model-list load). Its prompt box
-		// renders earlier (~3s) but silently drops keystrokes until then, so
-		// ReadyPromptPrefix-based readiness detection can't be used here — the
-		// box would match and we'd send into a not-yet-listening TUI. A blind
-		// 5000ms delay raced that window: the initial nudge was lost and the
-		// worker idled forever at the welcome screen (never running `gc hook`).
-		// 12000ms clears the ready threshold with margin for spawn-time load.
-		// Empirically verified against grok 0.2.32: send-keys is dropped at 5s
-		// and lands reliably from ~6s onward.
-		PromptMode:       "none",
+		// ReadyDelayMs stays for the paths that still type: the configured
+		// startup nudge, the oversized-prompt nudge fallback (prompt_delivery),
+		// resume launches (whose prompt rides the nudge), and
+		// WaitForRuntimeReady's fixed-delay fallback. Its 12000ms value dates
+		// from grok 0.2.32, whose input handler silently dropped send-keys
+		// until ~5-6s after launch; a shorter delay lost the initial nudge
+		// and the worker idled forever at the welcome screen.
+		//
+		// An old install whose TUI takes no positional prompt overrides with
+		// prompt_mode = "none".
+		PromptMode:       "arg",
 		ReadyDelayMs:     12000,
 		ProcessNames:     []string{"grok"},
 		InstructionsFile: "AGENTS.md",

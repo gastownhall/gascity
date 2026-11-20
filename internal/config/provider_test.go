@@ -513,8 +513,8 @@ func TestBuiltinProvidersGrokPreset(t *testing.T) {
 	if p.Command != "grok" {
 		t.Errorf("Command = %q, want %q", p.Command, "grok")
 	}
-	if p.PromptMode != "none" {
-		t.Errorf("PromptMode = %q, want %q", p.PromptMode, "none")
+	if p.PromptMode != "arg" {
+		t.Errorf("PromptMode = %q, want %q", p.PromptMode, "arg")
 	}
 	if p.InstructionsFile != "AGENTS.md" {
 		t.Errorf("InstructionsFile = %q, want %q", p.InstructionsFile, "AGENTS.md")

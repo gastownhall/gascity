@@ -621,3 +621,77 @@ func promptDeliveryResultLens(r promptDeliveryResult) string {
 		"OversizedFallback=" + strconv.FormatBool(r.OversizedFallback),
 	}, " ")
 }
+
+// TestPromptDeliveryGrokPositional pins grok's startup-prompt delivery: the
+// builtin resolves prompt_mode "arg" (positional delivery is verified on
+// current Grok Build), so a rendered prompt under the argv limits becomes the
+// shell-quoted positional suffix (EffectiveMode "argv") and is absent from
+// the nudge, and a prompt at or over either byte limit reroutes through the
+// nudge (EffectiveMode "nudge-fallback") on a nudge-fallback runtime such as
+// tmux.
+func TestPromptDeliveryGrokPositional(t *testing.T) {
+	rp, err := config.ResolveProvider(&config.Agent{Name: "worker", Provider: "grok"}, nil,
+		config.BuiltinProviders(), func(s string) (string, error) { return s, nil })
+	if err != nil {
+		t.Fatalf("ResolveProvider(grok): %v", err)
+	}
+	if rp.PromptMode != "arg" {
+		t.Fatalf("resolved grok PromptMode = %q, want arg", rp.PromptMode)
+	}
+
+	t.Run("under the limits delivers positionally", func(t *testing.T) {
+		const prompt = "run the hook"
+		got, err := promptDelivery(prompt, false, rp, "wake", "tmux", nil)
+		if err != nil {
+			t.Fatalf("promptDelivery: %v", err)
+		}
+		want := promptDeliveryResult{
+			PromptSuffix:   shellquote.Quote(prompt),
+			Nudge:          "wake",
+			Delivered:      true,
+			ConfiguredMode: "arg",
+			EffectiveMode:  "argv",
+			RawBytes:       len(prompt),
+			ArgvBytes:      len(shellquote.Quote(prompt)),
+		}
+		if got != want {
+			t.Fatalf("promptDelivery() = %+v, want %+v", got, want)
+		}
+		if strings.Contains(got.Nudge, prompt) {
+			t.Fatalf("nudge %q carries the prompt; positional delivery must leave it out", got.Nudge)
+		}
+	})
+
+	t.Run("at the raw limit falls back to the nudge", func(t *testing.T) {
+		prompt := strings.Repeat("a", maxPromptSuffixRawBytes)
+		got, err := promptDelivery(prompt, false, rp, "wake", "tmux", nil)
+		if err != nil {
+			t.Fatalf("promptDelivery: %v", err)
+		}
+		if !got.Delivered || !got.OversizedFallback || got.EffectiveMode != "nudge-fallback" {
+			t.Fatalf("promptDelivery() = %s, want delivered nudge-fallback", promptDeliveryResultLens(got))
+		}
+		if got.PromptSuffix != "" || !strings.Contains(got.Nudge, prompt) {
+			t.Fatalf("promptDelivery() = %s, want the prompt rerouted into the nudge", promptDeliveryResultLens(got))
+		}
+	})
+
+	t.Run("at the quoted limit falls back to the nudge", func(t *testing.T) {
+		// Each ' inflates to '\'' (4 bytes) when quoted, so this prompt is
+		// under the raw limit but over the quoted one.
+		prompt := strings.Repeat("'", 40000)
+		if quoted := shellquote.Quote(prompt); len(prompt) >= maxPromptSuffixRawBytes || len(quoted) < maxPromptSuffixQuotedBytes {
+			t.Fatalf("precondition: raw %d (limit %d), quoted %d (limit %d)", len(prompt), maxPromptSuffixRawBytes, len(quoted), maxPromptSuffixQuotedBytes)
+		}
+		got, err := promptDelivery(prompt, false, rp, "wake", "tmux", nil)
+		if err != nil {
+			t.Fatalf("promptDelivery: %v", err)
+		}
+		if !got.Delivered || !got.OversizedFallback || got.EffectiveMode != "nudge-fallback" {
+			t.Fatalf("promptDelivery() = %s, want delivered nudge-fallback", promptDeliveryResultLens(got))
+		}
+		if got.PromptSuffix != "" || !strings.Contains(got.Nudge, prompt) {
+			t.Fatalf("promptDelivery() = %s, want the prompt rerouted into the nudge", promptDeliveryResultLens(got))
+		}
+	})
+}
