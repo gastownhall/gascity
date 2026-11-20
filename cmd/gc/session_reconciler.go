@@ -3816,6 +3816,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					// reset. Unproven, the start waits for the next pass.
 					if !confirmRuntimeReleased(ctx, sp, tp.Hints.ProcessNames, name, releasedSince) {
 						fmt.Fprintf(stderr, "session reconciler: restart-requested %s stopped, but its runtime name is not confirmed released; it starts on the next pass\n", name) //nolint:errcheck
+						if reconcileOpts.asyncFollowUp != nil {
+							reconcileOpts.asyncFollowUp()
+						}
 						continue
 					}
 					// Released: fall through like the already-dead
