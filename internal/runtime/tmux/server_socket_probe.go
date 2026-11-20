@@ -329,8 +329,9 @@ const killServerSettlePoll = 10 * time.Millisecond
 // awaitServerSocketClosed waits until the named server socket is safely
 // absent or stale, polling every killServerSettlePoll and bounded by
 // killServerSettleTimeout. A socket still answering at the bound fails with
-// ErrServerDegraded carrying the last observation; like probeServerAlive's
-// refusal, the error never wraps ErrNoServer.
+// ErrServerDegraded naming the settle protocol, the socket path, the bound
+// and the last observation; like probeServerAlive's refusal, the error never
+// wraps ErrNoServer.
 func (t *Tmux) awaitServerSocketClosed() error {
 	ctx, cancel := context.WithTimeout(context.Background(), killServerSettleTimeout)
 	defer cancel()
@@ -345,7 +346,7 @@ func (t *Tmux) awaitServerSocketClosed() error {
 		if ctx.Err() == nil && sleepWithContext(ctx, killServerSettlePoll) == nil {
 			continue
 		}
-		return fmt.Errorf("%w: kill-server settle timed out after %s: %w", ErrServerDegraded, killServerSettleTimeout, last)
+		return fmt.Errorf("%w: protocol=kill-server-settle path=%s waited=%s observation=%w", ErrServerDegraded, path, killServerSettleTimeout, last)
 	}
 }
 

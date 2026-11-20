@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -222,6 +224,74 @@ func TestKillServerWaitsForListenerToClose(t *testing.T) {
 				if calls != 1 || !slices.Contains(fe.calls[0], "kill-server") {
 					t.Fatalf("observation %d happened with %d executor call(s) %v, want only kill-server", i+1, calls, fe.calls)
 				}
+			}
+		})
+	}
+}
+
+// TestKillServerReportsListenerThatStaysLive verifies the settle bound: when
+// the named socket never stops answering, KillServer returns no sooner than
+// killServerSettleTimeout with an ErrServerDegraded error naming the settle
+// protocol, the socket path and the last observation, and never wrapping
+// ErrNoServer. An observer that blocks until its context ends must not push
+// the return past the bound either.
+func TestKillServerReportsListenerThatStaysLive(t *testing.T) {
+	const bound = 50 * time.Millisecond
+	original := killServerSettleTimeout
+	killServerSettleTimeout = bound
+	t.Cleanup(func() { killServerSettleTimeout = original })
+
+	live := errors.New("inode=7 peer_pid=42 reason=live-unix-socket")
+	for _, tc := range []struct {
+		name     string
+		observer func(context.Context, string) error
+	}{
+		{
+			name: "polling observer",
+			observer: func(context.Context, string) error {
+				return live
+			},
+		},
+		{
+			name: "observer blocked until the deadline",
+			observer: func(ctx context.Context, _ string) error {
+				<-ctx.Done()
+				return live
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fe := &fakeExecutor{}
+			observations := 0
+			tmux := &Tmux{
+				cfg:  Config{SocketName: "gc-settle-live"},
+				exec: fe,
+				serverSocketObserver: func(ctx context.Context, path string) error {
+					observations++
+					return tc.observer(ctx, path)
+				},
+			}
+
+			start := time.Now()
+			err := tmux.KillServer()
+			elapsed := time.Since(start)
+
+			if !errors.Is(err, ErrServerDegraded) {
+				t.Fatalf("KillServer() error = %v, want ErrServerDegraded", err)
+			}
+			if errors.Is(err, ErrNoServer) {
+				t.Fatalf("KillServer() error = %v, must not wrap ErrNoServer", err)
+			}
+			for _, want := range []string{"protocol=kill-server-settle", tmux.namedServerSocketPath(), live.Error()} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("KillServer() error %q does not contain %q", err, want)
+				}
+			}
+			if elapsed < bound {
+				t.Errorf("KillServer() returned after %s, before the %s bound", elapsed, bound)
+			}
+			if tc.name == "polling observer" && observations < 2 {
+				t.Errorf("KillServer() made %d socket observations, want at least 2", observations)
 			}
 		})
 	}
