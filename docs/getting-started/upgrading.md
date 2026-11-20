@@ -176,6 +176,10 @@ not the binary you migrate with, set `migrate_command` under `[beads]`. Every
 line and the `bd-schema` check then give your command, filled in for each
 database. Gas City never runs it.
 
+Pick a migrator whose schema is the one the city's pinned `bd` runs at, never
+a newer one. A database migrated past the pinned `bd`'s schema is one that
+`bd` refuses, so change the migrator only together with the pinned `bd`.
+
 ```toml
 [beads]
 # One shell line, rendered per database as a Go template.
