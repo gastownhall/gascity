@@ -1744,3 +1744,65 @@ func TestConvergeSocketTimeoutWithdrawsQueuedRequest(t *testing.T) {
 		}
 	})
 }
+
+// TestConvergeCreateTimedOutRequestDoesNotCreateLoop: when the event loop is
+// busy past the socket reply timeout, the client is told the create failed.
+// That queued create must not still run later, and a retry must not leave two
+// live loops for the same formula and target.
+func TestConvergeCreateTimedOutRequestDoesNotCreateLoop(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cr, store := setupConvergenceRuntime(t)
+		payload := `{"command":"create","params":{"formula":"test-formula","target":"test-agent","max_iterations":"3"}}`
+
+		// Attempt 1: the event loop is inside a long tick and does not service the channel.
+		server, client := net.Pipe()
+		go func() {
+			handleConvergeSocketCmd(server, payload, cr.convergenceReqCh)
+			server.Close() //nolint:errcheck // test pipe
+		}()
+		line, err := bufio.NewReader(client).ReadString('\n')
+		if err != nil {
+			t.Fatalf("reading reply: %v", err)
+		}
+		client.Close() //nolint:errcheck // test pipe
+		var first convergenceReply
+		if err := json.Unmarshal([]byte(line), &first); err != nil {
+			t.Fatalf("decoding reply %q: %v", line, err)
+		}
+		if first.Error == "" {
+			t.Fatalf("expected a timeout error reply, got %q", line)
+		}
+
+		// The tick ends; the event loop drains whatever is still queued.
+		for len(cr.convergenceReqCh) > 0 {
+			req := <-cr.convergenceReqCh
+			r := cr.handleConvergenceRequest(context.Background(), req)
+			if r.Error == "" {
+				t.Errorf("queued %q ran after the client was told %q: result=%s", req.Command, first.Error, r.Result)
+			}
+		}
+
+		// Attempt 2: the caller retries the create it was told had failed.
+		var req convergenceRequest
+		if err := json.Unmarshal([]byte(payload), &req); err != nil {
+			t.Fatal(err)
+		}
+		if r := cr.handleConvergenceRequest(context.Background(), req); r.Error != "" {
+			t.Fatalf("retry create: %s", r.Error)
+		}
+
+		loops, err := store.List(beads.ListQuery{Type: "convergence"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		live := 0
+		for _, b := range loops {
+			if b.Status != "closed" {
+				live++
+			}
+		}
+		if live != 1 {
+			t.Errorf("create reported %q then retried: %d live loops for the same formula and target, want 1", first.Error, live)
+		}
+	})
+}
