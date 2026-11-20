@@ -1,6 +1,7 @@
 package packman
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -486,4 +487,48 @@ func TestValidateCachedRepoCheckoutIgnoresGitTrace(t *testing.T) {
 	if dirty {
 		t.Fatal("cachedRepoDirty reported a clean cache as dirty with GIT_TRACE set")
 	}
+}
+
+func TestDefaultRunGitFailureKeepsDiagnostics(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	t.Run("non-zero exit", func(t *testing.T) {
+		useNeutralGitTestEnv(t)
+		dir := t.TempDir()
+		seedCacheRepo(t, dir)
+		out, err := defaultRunGit(dir, "rev-parse", "--verify", "refs/heads/missing-revision")
+		if out != "" {
+			t.Errorf("output = %q, want empty on failure", out)
+		}
+		if err == nil {
+			t.Fatal("defaultRunGit succeeded for a missing revision")
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) {
+			t.Errorf("error = %v, want it to wrap *exec.ExitError", err)
+		}
+		for _, want := range []string{"git rev-parse --verify refs/heads/missing-revision", "fatal:"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error = %q, want it to contain %q", err, want)
+			}
+		}
+	})
+	t.Run("cannot start", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Setenv("PATH", "")
+		out, err := defaultRunGit(dir, "rev-parse", "HEAD")
+		if out != "" {
+			t.Errorf("output = %q, want empty on failure", out)
+		}
+		if err == nil {
+			t.Fatal("defaultRunGit succeeded with git missing from PATH")
+		}
+		if !errors.Is(err, exec.ErrNotFound) {
+			t.Errorf("error = %v, want it to wrap exec.ErrNotFound", err)
+		}
+		if !strings.Contains(err.Error(), "git rev-parse HEAD") {
+			t.Errorf("error = %q, want it to name git rev-parse HEAD", err)
+		}
+	})
 }
