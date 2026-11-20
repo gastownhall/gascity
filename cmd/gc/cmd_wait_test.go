@@ -5101,6 +5101,38 @@ func TestDispatchReadyWaitNudges_DeliversKeptNamedSessionWaitAtCurrentEpoch(t *t
 		fx.wakePass()
 		fx.requireClosed("after delivery")
 	})
+	t.Run("nudge-queued-before-reset", func(t *testing.T) {
+		fx := newResetWindowFixture(t, namedResetWindowSession)
+		fx.register()
+		fx.closeDep()
+		fx.wakePass()
+		fx.dispatch("before the restart")
+		fx.requireOneQueued("before the restart", "1", "2")
+		fx.requestReset()
+		fx.start(3)
+		fx.wakePass()
+		fx.requireKeptAt("after the restart", waitStateReady)
+		fx.dispatch("first dispatch after the restart")
+		fx.dispatch("second dispatch after the restart")
+		item := fx.requireOneQueued("after the restart", "1", "2")
+		target := nudgeTarget{agent: config.Agent{Name: "worker"}, sessionID: fx.sessionID, continuationEpoch: "3", sessionName: "worker"}
+		if !queuedNudgeClaimableForTarget(target, item, nil) {
+			t.Fatalf("queued nudge %+v is not claimable by the epoch-3 target", item)
+		}
+		if reason, blocked, err := blockedQueuedWaitNudgeReason(fx.sf, item); err != nil || blocked {
+			t.Fatalf("blockedQueuedWaitNudgeReason = %q, %v, %v; want the reminder deliverable", reason, blocked, err)
+		}
+		fx.markDelivered(item.ID)
+		fx.wakePass()
+		fx.requireClosed("after delivery")
+		fx.dispatch("dispatch after the close")
+		if n := waitNudgeShadowCount(t, fx.store, item.ID); n != 1 {
+			t.Fatalf("nudge shadows of %s = %d, want 1: one reminder in total", item.ID, n)
+		}
+		if got := fx.queued("after the close"); len(got) > 1 {
+			t.Fatalf("queued %d nudges after the close, want no second reminder", len(got))
+		}
+	})
 }
 
 // TestPrepareWaitWakeState_KeepsWaitRegisteredDuringPendingReset covers a wait
