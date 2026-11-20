@@ -1705,6 +1705,10 @@ type supervisorServiceData struct {
 	SafeName      string
 	Path          string
 	ExtraEnv      []supervisorServiceEnvVar
+	// WithheldEnv lists, per provider prefix, the calling shell's routing
+	// names the install did not persist because that provider's credentials
+	// come only from a durable tier.
+	WithheldEnv []supervisorWithheldEnv
 	// PortInUseExitCode is the exit code the supervisor returns on a duplicate
 	// API-port collision; the systemd unit lists it in RestartPreventExitStatus
 	// so a duplicate install does not crash-loop on the shared port.
@@ -1728,7 +1732,8 @@ func buildSupervisorServiceData() (*supervisorServiceData, error) {
 	if supervisor.UsesIsolatedGCHomeOverride() {
 		xdgRuntimeDir = ""
 	}
-	extraEnv, err := withRecordedTmuxTmpdir(supervisorServiceExtraEnv())
+	serviceEnv, withheld := supervisorServiceExtraEnv()
+	extraEnv, err := withRecordedTmuxTmpdir(serviceEnv)
 	if err != nil {
 		return nil, err
 	}
@@ -1741,6 +1746,7 @@ func buildSupervisorServiceData() (*supervisorServiceData, error) {
 		SafeName:          sanitizeServiceName(filepath.Base(home)),
 		Path:              searchpath.ExpandPath(homeDir, goruntime.GOOS, os.Getenv("PATH")),
 		ExtraEnv:          extraEnv,
+		WithheldEnv:       withheld,
 		PortInUseExitCode: supervisorExitCodePortInUse,
 	}, nil
 }
@@ -1862,8 +1868,12 @@ var supervisorServiceFixedEnvKeys = map[string]bool{
 	"XDG_RUNTIME_DIR":                     true,
 }
 
-func supervisorServiceExtraEnv() []supervisorServiceEnvVar {
-	env := make(map[string]string)
+// supervisorServiceExtraEnv returns the service env admitted from the shell,
+// GC_SUPERVISOR_ENV, secrets.env and launchctl tiers plus gc's fixed entries,
+// sorted by name, and the shell routing names it withheld per provider prefix
+// (withholdShellRoutingBesideDurableCredentials).
+func supervisorServiceExtraEnv() ([]supervisorServiceEnvVar, []supervisorWithheldEnv) {
+	env := make(map[string]supervisorTrackedEnv)
 	explicitEnvKeys := supervisorServiceExplicitEnvKeys(os.Getenv("GC_SUPERVISOR_ENV"))
 	explicitEnvKeySet := make(map[string]bool, len(explicitEnvKeys))
 	for _, key := range explicitEnvKeys {
@@ -1874,11 +1884,11 @@ func supervisorServiceExtraEnv() []supervisorServiceEnvVar {
 		if !ok || val == "" || !shouldPersistSupervisorEnv(key) {
 			continue
 		}
-		env[key] = val
+		env[key] = supervisorTrackedEnv{Value: val, Source: supervisorEnvSourceShell}
 	}
 	for _, key := range explicitEnvKeys {
 		if val := os.Getenv(key); val != "" {
-			env[key] = val
+			env[key] = supervisorTrackedEnv{Value: val, Source: supervisorEnvSourceExplicit}
 		}
 	}
 	// Merge a persistent machine-local secrets file (${GC_HOME}/secrets.env)
@@ -1902,7 +1912,7 @@ func supervisorServiceExtraEnv() []supervisorServiceEnvVar {
 		if !shouldPersistSupervisorEnv(key) && !explicitEnvKeySet[key] {
 			continue
 		}
-		env[key] = val
+		env[key] = supervisorTrackedEnv{Value: val, Source: supervisorEnvSourceSecretsFile}
 	}
 	// Fall back to `launchctl getenv` for known-allowlisted keys and
 	// for GC_SUPERVISOR_ENV opt-ins. Without this, launchctl-set
@@ -1929,13 +1939,14 @@ func supervisorServiceExtraEnv() []supervisorServiceEnvVar {
 			continue
 		}
 		if val := supervisorLaunchctlGetenv(key); val != "" {
-			env[key] = val
+			env[key] = supervisorTrackedEnv{Value: val, Source: supervisorEnvSourceLaunchctl}
 		}
 	}
+	withheld := withholdShellRoutingBesideDurableCredentials(env)
 	// This process is a Gas City-owned recursive child. Assign the canonical
 	// fixed value after every inherited, explicit, secrets-file, and launchctl
 	// tier so none can re-enable product metrics in the service process.
-	env[execenv.UsageMetricsDisableEnv] = execenv.UsageMetricsDisableValue
+	env[execenv.UsageMetricsDisableEnv] = supervisorTrackedEnv{Value: execenv.UsageMetricsDisableValue, Source: supervisorEnvSourceGC}
 
 	keys := make([]string, 0, len(env))
 	for key := range env {
@@ -1944,9 +1955,9 @@ func supervisorServiceExtraEnv() []supervisorServiceEnvVar {
 	sort.Strings(keys)
 	out := make([]supervisorServiceEnvVar, 0, len(keys))
 	for _, key := range keys {
-		out = append(out, supervisorServiceEnvVar{Name: key, Value: env[key]})
+		out = append(out, supervisorServiceEnvVar{Name: key, Value: env[key].Value})
 	}
-	return out
+	return out, withheld
 }
 
 func shouldPersistSupervisorEnv(key string) bool {

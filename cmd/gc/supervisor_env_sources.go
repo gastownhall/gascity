@@ -1,0 +1,130 @@
+package main
+
+import (
+	"slices"
+	"sort"
+
+	"github.com/gastownhall/gascity/internal/processenv"
+)
+
+// supervisorEnvSource names the tier that supplied a name persisted into the
+// supervisor service env. The zero value is gc's own fixed entries.
+type supervisorEnvSource int
+
+const (
+	// supervisorEnvSourceGC marks an entry gc sets itself.
+	supervisorEnvSourceGC supervisorEnvSource = iota
+	// supervisorEnvSourceShell marks an entry the implicit scan of the
+	// calling shell's environment admitted.
+	supervisorEnvSourceShell
+	// supervisorEnvSourceExplicit marks a shell value named in
+	// GC_SUPERVISOR_ENV.
+	supervisorEnvSourceExplicit
+	// supervisorEnvSourceSecretsFile marks a value from ${GC_HOME}/secrets.env.
+	supervisorEnvSourceSecretsFile
+	// supervisorEnvSourceLaunchctl marks a value from `launchctl getenv`.
+	supervisorEnvSourceLaunchctl
+)
+
+// String returns the label an install report shows for the source.
+func (s supervisorEnvSource) String() string {
+	switch s {
+	case supervisorEnvSourceShell:
+		return "shell"
+	case supervisorEnvSourceExplicit:
+		return "GC_SUPERVISOR_ENV"
+	case supervisorEnvSourceSecretsFile:
+		return supervisorSecretsEnvFileName
+	case supervisorEnvSourceLaunchctl:
+		return "launchctl"
+	default:
+		return "gc"
+	}
+}
+
+// supervisorTrackedEnv is a service env value with the tier that supplied it.
+type supervisorTrackedEnv struct {
+	Value  string
+	Source supervisorEnvSource
+}
+
+// supervisorWithheldEnv is one provider prefix's shell routing names that an
+// install did not persist from the shell, because every credential-class
+// name under the prefix came from a durable tier.
+type supervisorWithheldEnv struct {
+	// Prefix is the provider prefix, for example "ANTHROPIC_".
+	Prefix string
+	// Names are the withheld routing names, sorted.
+	Names []string
+	// CredentialSources are the durable tiers that supplied the prefix's
+	// credential-class names, in source order.
+	CredentialSources []supervisorEnvSource
+}
+
+// withholdShellRoutingBesideDurableCredentials keeps a provider's routing
+// consistent with the tier its credentials come from. For each provider
+// prefix whose credential-class names all come from secrets.env or launchctl,
+// it removes from env every routing-class name the implicit shell scan
+// supplied, and reports those names per prefix. Credential-class names and
+// GC_SUPERVISOR_ENV opt-ins are never touched.
+func withholdShellRoutingBesideDurableCredentials(env map[string]supervisorTrackedEnv) []supervisorWithheldEnv {
+	type prefixEnv struct {
+		durable      map[supervisorEnvSource]bool
+		shellCred    bool
+		shellRouting []string
+	}
+	byPrefix := make(map[string]*prefixEnv)
+	for name, entry := range env {
+		prefix, ok := processenv.ProviderEnvPrefix(name)
+		if !ok {
+			continue
+		}
+		p := byPrefix[prefix]
+		if p == nil {
+			p = &prefixEnv{durable: make(map[supervisorEnvSource]bool)}
+			byPrefix[prefix] = p
+		}
+		if processenv.IsProviderRoutingEnv(name) {
+			if entry.Source == supervisorEnvSourceShell {
+				p.shellRouting = append(p.shellRouting, name)
+			}
+			continue
+		}
+		switch entry.Source {
+		case supervisorEnvSourceSecretsFile, supervisorEnvSourceLaunchctl:
+			p.durable[entry.Source] = true
+		case supervisorEnvSourceShell, supervisorEnvSourceExplicit:
+			p.shellCred = true
+		}
+	}
+	var withheld []supervisorWithheldEnv
+	for prefix, p := range byPrefix {
+		if len(p.durable) == 0 || p.shellCred || len(p.shellRouting) == 0 {
+			continue
+		}
+		sort.Strings(p.shellRouting)
+		for _, name := range p.shellRouting {
+			delete(env, name)
+		}
+		sources := make([]supervisorEnvSource, 0, len(p.durable))
+		for source := range p.durable {
+			sources = append(sources, source)
+		}
+		slices.Sort(sources)
+		withheld = append(withheld, supervisorWithheldEnv{
+			Prefix:            prefix,
+			Names:             p.shellRouting,
+			CredentialSources: sources,
+		})
+	}
+	slices.SortFunc(withheld, func(a, b supervisorWithheldEnv) int {
+		switch {
+		case a.Prefix < b.Prefix:
+			return -1
+		case a.Prefix > b.Prefix:
+			return 1
+		}
+		return 0
+	})
+	return withheld
+}
