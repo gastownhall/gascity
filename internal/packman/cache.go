@@ -315,24 +315,20 @@ func normalizeRemoteSource(source string) remoteSource {
 	return remoteSource{CloneURL: parsed.CloneURL, Subpath: parsed.Subpath}
 }
 
+// defaultRunGit runs the local repo-cache git commands (rev-parse, status,
+// checkout, reset, clean) through config.RunRepoCacheGit, the shared
+// repo-cache runner: stdout only, no GIT_TRACE* in git's environment, and a
+// command that exits 0 with stderr fails closed instead of passing an
+// incomplete answer off as a commit hash or a clean worktree. The pack
+// source URL can be attacker-influenced on the API import path, so the
+// runner keeps baseHardeningGitArgs ahead of every invocation: the
+// redirect/transport hardening is inert for these local commands, and the
+// argv stays byte-identical to the network runner's no-credential base (a
+// slice comparison in tests). The remaining DNS-rebinding residual is
+// documented at the pack SSRF fence (internal/api/pack_source_policy.go).
+// Network fetch/clone/ls-remote run through defaultRunNetworkGit.
 func defaultRunGit(dir string, args ...string) (string, error) {
-	// The pack source URL can be attacker-influenced on the API import path, and
-	// this runner drives the network fetch/clone/ls-remote for it. Harden every
-	// invocation against redirect-based SSRF and transport abuse; the flags are
-	// inert for the local cache operations (rev-parse, checkout, reset, ...) that
-	// also flow through here. The remaining DNS-rebinding residual is documented
-	// at the pack SSRF fence (internal/api/pack_source_policy.go).
-	cmdArgs := append(baseHardeningGitArgs(), args...)
-	cmd := exec.Command("git", cmdArgs...)
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	cmd.Env = gitutil.HermeticEnv()
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(string(out)), err)
-	}
-	return strings.TrimSpace(string(out)), nil
+	return config.RunRepoCacheGit(dir, baseHardeningGitArgs(), args...)
 }
 
 // baseHardeningGitArgs returns the leading `-c` flags every network git

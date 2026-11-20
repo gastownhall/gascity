@@ -619,12 +619,16 @@ func dirtyStatusSummary(status string) string {
 	return strings.Join(quoted, ", ")
 }
 
-func defaultRunRepoCacheGit(dir string, args ...string) (string, error) {
-	cmdArgs := append([]string{
-		"-c", "core.fsmonitor=false",
-		"-c", "core.hooksPath=/dev/null",
-		"-c", "core.untrackedCache=false",
-	}, args...)
+// RunRepoCacheGit is the single repo-cache git runner, shared by the config
+// loader (defaultRunRepoCacheGit) and packman's local cache commands. It runs
+// `git <gitConfigArgs> <args>` in dir with repoCacheGitEnv and returns stdout
+// with trailing CR/LF trimmed. On a non-zero exit or a failure to start it
+// returns "" and an error naming `git <args>`, carrying git's stderr and
+// wrapping the process error. A command that exits 0 but wrote stderr also
+// returns an error: callers parse stdout as a commit hash or porcelain
+// records, so an incomplete answer must never pass as clean.
+func RunRepoCacheGit(dir string, gitConfigArgs []string, args ...string) (string, error) {
+	cmdArgs := append(append([]string(nil), gitConfigArgs...), args...)
 	cmd := exec.Command("git", cmdArgs...)
 	cmd.Dir = dir
 	cmd.Env = repoCacheGitEnv()
@@ -648,6 +652,14 @@ func defaultRunRepoCacheGit(dir string, args ...string) (string, error) {
 	// Trim only trailing newlines: leading spaces are porcelain status
 	// columns the dirty-cache diagnostics must preserve.
 	return strings.TrimRight(string(out), "\r\n"), nil
+}
+
+func defaultRunRepoCacheGit(dir string, args ...string) (string, error) {
+	return RunRepoCacheGit(dir, []string{
+		"-c", "core.fsmonitor=false",
+		"-c", "core.hooksPath=/dev/null",
+		"-c", "core.untrackedCache=false",
+	}, args...)
 }
 
 // repoCacheGitEnv is gitutil.HermeticEnv without GIT_TRACE* variables. Trace

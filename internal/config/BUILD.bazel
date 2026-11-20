@@ -157,6 +157,7 @@ go_test(
         "order_discovery_test.go",
         "pack_agent_defaults_test.go",
         "pack_agent_patches_test.go",
+        "pack_cache_runner_test.go",
         "pack_discovery_integration_test.go",
         "pack_doctor_merge_test.go",
         "pack_fetch_test.go",
