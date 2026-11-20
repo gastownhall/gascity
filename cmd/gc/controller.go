@@ -534,7 +534,10 @@ func handleConvergeSocketCmd(conn net.Conn, payload string, ch chan convergenceR
 		writeJSONLine(conn, convergenceReply{Error: fmt.Sprintf("invalid request: %v", err)})
 		return
 	}
+	// The reply channel is buffered so the event loop never blocks
+	// delivering a reply nobody is waiting for any more.
 	req.replyCh = make(chan convergenceReply, 1)
+	req.handoff = &convergenceHandoff{}
 	// Send to event loop with a timeout to prevent hanging if the loop is stuck.
 	select {
 	case ch <- req:
@@ -547,8 +550,27 @@ func handleConvergeSocketCmd(conn net.Conn, payload string, ch chan convergenceR
 	case reply := <-req.replyCh:
 		writeJSONLine(conn, reply)
 	case <-time.After(60 * time.Second):
-		writeJSONLine(conn, convergenceReply{Error: "controller did not respond in time"})
+		writeJSONLine(conn, convergenceReplyAfterTimeout(req))
 	}
+}
+
+// convergeReplyWithdrawnError tells the client its request timed out while
+// still queued and was withdrawn, so it was never applied.
+const convergeReplyWithdrawnError = "controller did not respond in time; the request was withdrawn and not applied, so it is safe to retry"
+
+// convergenceReplyAfterTimeout settles a request whose reply did not arrive
+// within the wait. A reply that is already buffered wins; otherwise the
+// request is withdrawn if the event loop has not claimed it yet.
+func convergenceReplyAfterTimeout(req convergenceRequest) convergenceReply {
+	select {
+	case reply := <-req.replyCh:
+		return reply
+	default:
+	}
+	if req.handoff.withdraw() {
+		return convergenceReply{Error: convergeReplyWithdrawnError}
+	}
+	return convergenceReply{Error: "controller did not respond in time"}
 }
 
 // writeJSONLine marshals v as JSON and writes it as a single line to w.

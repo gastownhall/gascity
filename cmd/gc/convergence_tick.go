@@ -8,6 +8,7 @@ import (
 	"os/user"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -22,6 +23,48 @@ type convergenceRequest struct {
 	User    string            `json:"user,omitempty"` // resolved client-side for audit attribution
 	Params  map[string]string `json:"params"`         // command-specific parameters
 	replyCh chan convergenceReply
+	// handoff settles whether the event loop runs the request or the socket
+	// handler withdraws it after giving up waiting. It is a pointer so every
+	// value copy of the request shares one state. Nil for in-process callers,
+	// whose requests cannot be withdrawn.
+	handoff *convergenceHandoff
+}
+
+// convergenceRequestWithdrawnError is the dispatcher's reply to a request
+// the socket handler withdrew before the event loop reached it.
+const convergenceRequestWithdrawnError = "request withdrawn before execution: client wait timed out"
+
+// Lifecycle states of a convergenceHandoff.
+const (
+	convergenceHandoffQueued    int32 = iota // enqueued, not yet claimed or withdrawn
+	convergenceHandoffClaimed                // the event loop owns it and runs it
+	convergenceHandoffWithdrawn              // the socket handler gave up; it never runs
+)
+
+// convergenceHandoff is the shared admission state of one socket request.
+// Exactly one of claim and withdraw succeeds, so a request either runs or
+// is withdrawn, never both.
+type convergenceHandoff struct {
+	state atomic.Int32
+}
+
+// claim moves a queued request to claimed and reports whether the caller
+// may run it. A nil handoff (an in-process request) is always claimable.
+func (h *convergenceHandoff) claim() bool {
+	if h == nil {
+		return true
+	}
+	return h.state.CompareAndSwap(convergenceHandoffQueued, convergenceHandoffClaimed)
+}
+
+// withdraw moves a queued request to withdrawn and reports whether it
+// succeeded. Success guarantees the request never runs; failure means the
+// event loop already claimed it. A nil handoff cannot be withdrawn.
+func (h *convergenceHandoff) withdraw() bool {
+	if h == nil {
+		return false
+	}
+	return h.state.CompareAndSwap(convergenceHandoffQueued, convergenceHandoffWithdrawn)
 }
 
 // convergenceReply is the response from the event loop to a socket command.
@@ -416,7 +459,13 @@ func (cr *CityRuntime) safeHandleConvergenceRequest(ctx context.Context, req con
 
 // handleConvergenceRequest dispatches a single convergence command to the
 // scope selected by the request's "rig" parameter.
+//
+// A socket request is claimed here, before any scope lookup or handler
+// runs; one the socket handler already withdrew is rejected unexecuted.
 func (cr *CityRuntime) handleConvergenceRequest(ctx context.Context, req convergenceRequest) convergenceReply {
+	if !req.handoff.claim() {
+		return convergenceReply{Error: convergenceRequestWithdrawnError}
+	}
 	if cr.convScopes == nil {
 		return convergenceReply{Error: "convergence not available (no bead store)"}
 	}
