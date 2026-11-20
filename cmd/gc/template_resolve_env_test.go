@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/processenv"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 func TestResolveTemplatePrependsGCBinDirToPATH(t *testing.T) {
@@ -457,6 +458,32 @@ func TestResolveTemplatePinsInheritedDemandMarkersEmpty(t *testing.T) {
 		t.Fatalf("resolveTemplate: %v", err)
 	}
 	assertEnvWithholds(t, "no-trigger resolution env", tp.Env, processenv.DemandSpawnEnvKeys...)
+}
+
+// The demand stamp lands after resolution (resolveTemplateForSessionBeadInfo
+// writes sessionDemandSpawnEnv onto tp.Env), so withholding the demand-spawn
+// keys in resolveTemplate cannot strip a stamped row's marker. The trigger id
+// itself never reaches the session shell (gastownhall/gascity#5738): a
+// stamped row carries the presence-only marker and every GC_TRIGGER_* key
+// stays withheld, so a fresh trigger can never pair with a stale id or store
+// ref. A row with no stamp keeps every demand-spawn key withheld too.
+func TestResolveTemplateForSessionBeadInfoStampsOverInheritedDemandMarkers(t *testing.T) {
+	params, agent := demandMarkerCityParams(t)
+
+	stamped, err := resolveTemplateForSessionBeadInfo(params, agent, agent.QualifiedName(), nil, sessionpkg.Info{TriggerBeadID: "w-new"})
+	if err != nil {
+		t.Fatalf("resolveTemplateForSessionBeadInfo (stamped): %v", err)
+	}
+	if got := stamped.Env["GC_SPAWN_ORIGIN"]; got != demandSpawnOriginValue {
+		t.Errorf("stamped row: GC_SPAWN_ORIGIN = %q, want %q (the stamp must survive the withhold)", got, demandSpawnOriginValue)
+	}
+	assertEnvWithholdsTriggerIDs(t, "stamped row env", stamped.Env)
+
+	unstamped, err := resolveTemplateForSessionBeadInfo(params, agent, agent.QualifiedName(), nil, sessionpkg.Info{})
+	if err != nil {
+		t.Fatalf("resolveTemplateForSessionBeadInfo (unstamped): %v", err)
+	}
+	assertEnvWithholds(t, "unstamped row env", unstamped.Env, processenv.DemandSpawnEnvKeys...)
 }
 
 // TestResolveTemplatePopulatesOperatorEnvWithExplicitProviderSelection covers
