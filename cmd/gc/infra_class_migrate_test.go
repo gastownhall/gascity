@@ -619,7 +619,7 @@ func TestEnsureInfraClassMigratedIsDarkForGenesisCities(t *testing.T) {
 			refuseInfraMigrationSource(t)
 
 			var log bytes.Buffer
-			if got := checkInfraClassConvergence(cityPath, tc.cfg, "gc start", &log); got.Outcome != infraMigrationNotConfigured {
+			if got := checkInfraClassConvergenceWith(cityPath, tc.cfg, "gc start", &log, storageBootGateOpts{}); got.Outcome != infraMigrationNotConfigured {
 				t.Fatalf("outcome = %v, want not-configured; log: %s", got.Outcome, log.String())
 			}
 			if log.Len() != 0 {
@@ -1253,7 +1253,7 @@ func TestEnsureInfraClassMigratedAcceptsWispGCDeletions(t *testing.T) {
 
 	// The boot check: the GC'd rows are retained copies to clear, never strands.
 	var log bytes.Buffer
-	report := checkInfraClassConvergence(cityPath, cfg, "gc start", &log)
+	report := checkInfraClassConvergenceWith(cityPath, cfg, "gc start", &log, storageBootGateOpts{})
 	if report.Outcome != infraMigrationRetained {
 		t.Fatalf("boot outcome = %v, want retained-copies; the binding's own GC must not read as a stranded write. log: %s", report.Outcome, log.String())
 	}
@@ -2700,5 +2700,21 @@ func TestTheReCopyFromTheBackupKeepsTheHoldOnOpenWork(t *testing.T) {
 	}
 	if ready := readyIDsOf(t, binding); !slices.Contains(ready, parked.ID) {
 		t.Fatalf("%s is not ready after %s closed and the gate lane ran: %v", parked.ID, openWork.ID, ready)
+	}
+}
+
+// TestFaultFromWorkStoreOnlyFlagsAWrappedWorkStoreFault kills a mutant that
+// makes faultFromWorkStore report true unconditionally: a plain error (a
+// local manifest or cleared-note read failure, say) must NOT be attributed
+// to the work store, since nothing about it ever touched one — only an
+// error that is, or wraps, an infraWorkStoreFault may be.
+func TestFaultFromWorkStoreOnlyFlagsAWrappedWorkStoreFault(t *testing.T) {
+	plain := fmt.Errorf("reading the copy manifest: %w", io.ErrUnexpectedEOF)
+	if faultFromWorkStore(plain) {
+		t.Errorf("faultFromWorkStore(%v) = true, want false for an error that never wraps infraWorkStoreFault", plain)
+	}
+	wrapped := fmt.Errorf("reading work store: %w", infraWorkStoreFault{io.ErrUnexpectedEOF})
+	if !faultFromWorkStore(wrapped) {
+		t.Errorf("faultFromWorkStore(%v) = false, want true for an error that wraps infraWorkStoreFault", wrapped)
 	}
 }
