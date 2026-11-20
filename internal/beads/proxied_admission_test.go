@@ -2784,3 +2784,62 @@ func TestProxiedOpenUnmovedRefusesAnUnattributableWindow(t *testing.T) {
 		})
 	}
 }
+
+// TestProxiedOpenUnmovedNamesTheOpenShapedWrite is AC-2: a moved HEAD whose
+// window carries anything a library open writes — a schema:-prefixed commit,
+// a schema change on any table, or a change to one of the tables the open's
+// seed, heal, backfill and repair paths commit — is head_moved, and the
+// detail names the commit or table that decided it.
+func TestProxiedOpenUnmovedNamesTheOpenShapedWrite(t *testing.T) {
+	data := func(names ...string) []proxyendpoint.WindowTable {
+		var tables []proxyendpoint.WindowTable
+		for _, name := range names {
+			tables = append(tables, proxyendpoint.WindowTable{Name: name})
+		}
+		return tables
+	}
+	rows := []struct {
+		name   string
+		window proxyendpoint.PostOpenWindow
+		naming string
+	}{
+		{
+			name: "a schema: commit over data-only tables (the aux-rekey shape)",
+			window: proxyendpoint.PostOpenWindow{
+				Commits: []string{"bd: update ga-1", "schema: apply migrations"}, Tables: data("events", "comments"),
+			},
+			naming: "schema: apply migrations",
+		},
+		{
+			name: "the dolt_ignore seed swept into another client's ordinary commit",
+			window: proxyendpoint.PostOpenWindow{
+				Commits: []string{"bd: update ga-1"}, Tables: data("issues", "dolt_ignore"),
+			},
+			naming: "dolt_ignore",
+		},
+		{
+			name: "a schema change on an ordinary table",
+			window: proxyendpoint.PostOpenWindow{
+				Commits: []string{"bd: update ga-1"}, Tables: []proxyendpoint.WindowTable{{Name: "issues", SchemaChange: true}},
+			},
+			naming: "issues",
+		},
+	}
+	for _, table := range []string{"schema_migrations", "ignored_schema_migrations", "custom_types", "custom_statuses", "dolt_nonlocal_tables"} {
+		rows = append(rows, struct {
+			name   string
+			window proxyendpoint.PostOpenWindow
+			naming string
+		}{
+			name:   "a data change to " + table,
+			window: proxyendpoint.PostOpenWindow{Commits: []string{"bd: update ga-1"}, Tables: data("issues", table)},
+			naming: table,
+		})
+	}
+	for _, tc := range rows {
+		t.Run(tc.name, func(t *testing.T) {
+			window := tc.window
+			requireHeadMoved(t, ProxiedOpenUnmoved(movedHeadPin(), movedHeadReport(&window)), tc.naming)
+		})
+	}
+}

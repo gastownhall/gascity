@@ -2,6 +2,7 @@ package beads
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
@@ -290,6 +291,13 @@ func ProxiedOpenUnmoved(pin Pin, observed proxyendpoint.PostOpenReport) error {
 					"bd's database, so this open takes bd's front door and the next open re-probes",
 				pin.Database(), before, after, reason), nil)
 		}
+		if shape := proxiedWindowOpenShape(observed.Window); shape != "" {
+			return NewProxiedVerdictError(ProxiedVerdictHeadMoved, fmt.Sprintf(
+				"opening the linked library against database %q moved HEAD from %s to %s through %s, which is the "+
+					"shape of a library open's own write (a seed, heal, backfill, repair or migration commit): "+
+					"PR2's native lane serves reads only, so this open takes bd's front door and the next open re-probes",
+				pin.Database(), before, after, shape), nil)
+		}
 		return NewProxiedVerdictError(ProxiedVerdictHeadMoved, fmt.Sprintf(
 			"opening the linked library against database %q moved HEAD from %s to %s: "+
 				"PR2's native lane serves reads only, so an open that commits may be gc writing to bd's database "+
@@ -329,4 +337,51 @@ func proxiedWindowUnattributable(window *proxyendpoint.PostOpenWindow) string {
 	default:
 		return ""
 	}
+}
+
+// proxiedOpenCommitPrefix is the message prefix every commit the linked
+// library's open path makes under its own label carries: the dolt_ignore seed,
+// the migration commits and the #4356 untrack and sweep.
+const proxiedOpenCommitPrefix = "schema:"
+
+// proxiedOpenWriteTables are the tables the linked library's open path writes:
+// its seed, heal, backfill and repair commits touch nothing else as data, and
+// the repairs and migrations 0040/0041 commit dolt_nonlocal_tables under
+// messages that carry no schema: prefix. A window that changes any of them is
+// the open's shape whatever its commit messages say, because another client's
+// -Am commit can sweep the open's uncommitted write into itself.
+var proxiedOpenWriteTables = []string{
+	"dolt_ignore",
+	"schema_migrations",
+	"ignored_schema_migrations",
+	"custom_types",
+	"custom_statuses",
+	"dolt_nonlocal_tables",
+}
+
+// proxiedWindowOpenShape names the commit or table that makes window look
+// like the linked library's own open-time write, or returns "" when nothing in
+// it does. The checks are in order of how directly they name the open: a
+// schema:-prefixed message, then a schema change on any table, then a change
+// to a table only the open path writes.
+func proxiedWindowOpenShape(window *proxyendpoint.PostOpenWindow) string {
+	if window == nil {
+		return ""
+	}
+	for _, message := range window.Commits {
+		if strings.HasPrefix(strings.TrimSpace(message), proxiedOpenCommitPrefix) {
+			return fmt.Sprintf("commit %q", message)
+		}
+	}
+	for _, table := range window.Tables {
+		if table.SchemaChange {
+			return fmt.Sprintf("a schema change to table %q", table.Name)
+		}
+	}
+	for _, table := range window.Tables {
+		if slices.Contains(proxiedOpenWriteTables, table.Name) {
+			return fmt.Sprintf("a change to table %q", table.Name)
+		}
+	}
+	return ""
 }
