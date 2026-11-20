@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -176,7 +177,7 @@ func newTurnSessionWith(t *testing.T, sp runtime.Provider, provider string, opts
 	t.Helper()
 	root := t.TempDir()
 	store := beads.NewMemStore()
-	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()),
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithCityPath(t.TempDir()),
 		// A keyed start would otherwise wait out the stale-key detection delay.
 		sessionpkg.WithStaleKeyDetectionWaiter(func(context.Context, string) error { return nil }))
 	spec := SessionSpec{

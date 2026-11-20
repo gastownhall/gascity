@@ -50,6 +50,27 @@ func TestBuildOrderDispatcherOverrideDisablesOrder(t *testing.T) {
 	requireOrderNames(t, mad.aa, "keep")
 }
 
+func TestBuildOrderDispatcherSkipsFileDisabledOrder(t *testing.T) {
+	cityDir, cfg := newOrderEnabledFilterCity(t)
+	path := filepath.Join(cityDir, "orders", "off.toml")
+	if err := os.WriteFile(path, []byte(`[order]
+exec = "scripts/off.sh"
+trigger = "cooldown"
+interval = "1m"
+enabled = false
+`), 0o644); err != nil {
+		t.Fatalf("write order: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	ad := buildOrderDispatcher(nil, cityDir, cfg, events.Discard, &stderr)
+	if ad == nil {
+		t.Fatalf("buildOrderDispatcher returned nil; stderr: %s", stderr.String())
+	}
+	mad := ad.(*memoryOrderDispatcher)
+	requireOrderNames(t, mad.aa, "keep")
+}
+
 func TestControllerStateOrdersOverrideDisablesOrder(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	cityDir, cfg := newOrderEnabledFilterCity(t)
@@ -121,7 +142,9 @@ func TestCmdOrderHistoryIncludesOverrideDisabledOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := store.Create(beads.Bead{Title: "drop run", Type: "task", Labels: []string{"order-run:drop"}})
+	// A run record carries order-tracking beside its order-run label, as
+	// orders.(*Store).CreateRun writes it.
+	run, err := store.Create(beads.Bead{Title: "drop run", Type: "task", Labels: []string{"order-run:drop", labelOrderTracking}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +209,7 @@ func writeOrderEnabledFilterFixture(t *testing.T, cityDir, name string) {
 		t.Fatalf("mkdir orders: %v", err)
 	}
 	content := `[order]
-exec = "scripts/` + name + `.sh"
+exec = "scripts/` + name + `"
 trigger = "cooldown"
 interval = "1m"
 `
@@ -247,4 +270,51 @@ func clearCityRigFlags(t *testing.T) {
 		cityFlag = prevCityFlag
 		rigFlag = prevRigFlag
 	})
+}
+
+// TestControllerStateOrdersHonorsOverridesAfterUnmatchedOne pins the API
+// path: an override naming a missing order must not re-enable an order a
+// later override disables.
+func TestControllerStateOrdersHonorsOverridesAfterUnmatchedOne(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	cityDir, cfg := newOrderEnabledFilterCity(t)
+	cfg.Orders.Overrides = append([]config.OrderOverride{{Name: "missing"}}, cfg.Orders.Overrides...)
+
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+	var active []orders.Order
+	logs := captureCmdOrderLogs(t, func() {
+		active = cs.Orders()
+	})
+	requireOrderNames(t, active, "keep")
+	if !strings.Contains(logs, `order "missing" not found`) {
+		t.Fatalf("logs = %q, want the unmatched override reported", logs)
+	}
+}
+
+// TestControllerStateDisableOrderAfterUnmatchedOverride pins the order
+// disable round trip: DisableOrder appends its override, so a stale entry
+// earlier in city.toml must not hide it.
+func TestControllerStateDisableOrderAfterUnmatchedOverride(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	cityDir, cfg := newOrderEnabledFilterCity(t)
+	writeProviderAwareTestCity(t, cityDir, `[workspace]
+name = "test-city"
+
+[[orders.overrides]]
+name = "missing"
+enabled = false
+
+[[orders.overrides]]
+name = "drop"
+enabled = false
+`)
+	disabled := false
+	cfg.Orders.Overrides = append([]config.OrderOverride{{Name: "missing", Enabled: &disabled}}, cfg.Orders.Overrides...)
+
+	cs := newControllerState(context.Background(), cfg, runtime.NewFake(), events.NewFake(), "test-city", cityDir)
+	if err := cs.DisableOrder("keep", ""); err != nil {
+		t.Fatalf("DisableOrder: %v", err)
+	}
+	requireOrderAbsent(t, cs.Orders(), "keep")
+	requireOrderEnabledState(t, cs.OrdersAll(), "keep", false)
 }

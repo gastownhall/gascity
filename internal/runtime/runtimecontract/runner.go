@@ -11,7 +11,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
+	"github.com/gastownhall/gascity/internal/runtime/runtimecontract/privatecity"
 )
 
 // Options tune a conformance run. The zero value is CI-ready.
@@ -60,13 +63,25 @@ func (o *Options) applyDefaults() {
 }
 
 // Run validates the executable against the full conformance catalog and
-// returns a per-requirement report. It returns an error only when the run
-// cannot start at all (executable not resolvable); contract violations are
-// recorded as failed results, never as errors.
+// returns a per-requirement report. Every op runs in a city, as gc's own ops
+// do: the inherited GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH when
+// GC_EXEC_CITY_PATH is set, otherwise a private city removed when Run
+// returns. Every private city the run makes, its own and its probes', is
+// sent server-stop before it is removed when the executable declares
+// server-lifecycle (a failed one is a Warning). It returns an error only
+// when the run cannot start at all (executable not resolvable, or no
+// private city can be made); contract violations are recorded as failed
+// results, never as errors.
 //
 // Run emits exactly one [Result] per [Catalog] requirement, in catalog
 // order (enforced by TestRunCoversEveryCatalogRequirement).
 func Run(ctx context.Context, executable string, opts Options) (Report, error) {
+	return run(ctx, executable, opts, nil)
+}
+
+// run is Run, probing only the requirements selected reports true for
+// (every one when it is nil) and recording the rest as skipped.
+func run(ctx context.Context, executable string, opts Options, selected func(Code) bool) (Report, error) {
 	path, err := exec.LookPath(executable)
 	if err != nil {
 		return Report{}, fmt.Errorf("resolving executable %q: %w", executable, err)
@@ -77,27 +92,57 @@ func Run(ctx context.Context, executable string, opts Options) (Report, error) {
 	}
 	r := &runner{path: path, opts: opts}
 	report := Report{Executable: path}
+	if !privatecity.Inherited() {
+		city, removeCity, err := privatecity.New(privateCityPrefix)
+		if err != nil {
+			return Report{}, fmt.Errorf("running %s outside a city: %w", executable, err)
+		}
+		defer removeCity()
+		r.city = city
+	}
 
 	// Resolve the handshake once; capability-gated probes consult it.
 	report.Protocol = r.handshake(ctx)
+	report.V2Missing = sessionexec.V2ProfileGaps(report.Protocol)
 
 	for _, req := range catalog {
+		if selected != nil && !selected(req.Code) {
+			report.record(req, StatusSkip, "not selected")
+			continue
+		}
 		probe, ok := probes[req.Code]
 		if !ok {
 			report.record(req, StatusFail, "no probe registered for this requirement (runtimecontract bug)")
 			continue
 		}
 		status, detail := probe(ctx, r, report.Protocol)
+		if status == StatusFail && advisory(req.Group) {
+			detail = "advisory, does not gate v2_ready: " + detail
+		}
 		report.record(req, status, detail)
+		if status == StatusFail && !advisory(req.Group) {
+			report.V2Failed = append(report.V2Failed, req.Code)
+		}
 	}
+	report.V2Ready = len(report.V2Missing) == 0 && len(report.V2Failed) == 0
+	if r.city != nil {
+		endServer(ctx, r, report.Protocol, nil)
+	}
+	report.Warnings = r.warnings
 	return report, nil
 }
 
 // runner drives one executable across a conformance run.
 type runner struct {
-	path    string
-	opts    Options
+	path string
+	opts Options
+	// city is the env of the private city every op runs in; nil means every
+	// op runs in the city the run inherited. An op's own city keys replace
+	// it.
+	city    []string
 	counter int
+	// warnings collect the run's Report.Warnings.
+	warnings []string
 }
 
 // nextName returns a fresh, unique session name for a probe.
@@ -112,6 +157,10 @@ type outcome struct {
 	unsupported bool  // exit 2 — op not implemented
 	err         error // any failure other than exit 2 (stderr included)
 	exitCode    int   // the op's process exit code (0 on success; set for non-2 exit errors)
+	// failedStdout is a failed op's raw stdout: an exit 80's outcome line
+	// under input-outcome, untrimmed so gc's stdout cap reads on what the
+	// pack printed (sessionexec.ReadExit80Outcome).
+	failedStdout string
 }
 
 func (o outcome) ok() bool { return o.err == nil && !o.unsupported }
@@ -124,10 +173,25 @@ func (r *runner) op(ctx context.Context, args ...string) outcome {
 }
 
 func (r *runner) opTimeout(ctx context.Context, timeout time.Duration, stdin []byte, args ...string) outcome {
+	return r.opEnv(ctx, timeout, nil, stdin, args...)
+}
+
+// opEnv is opTimeout with the run's private city, then env, added to the
+// executable's environment (GC_EXEC_CITY_PATH, GC_RPP_FAULT for the observe
+// group). The last value of a key wins, so the city keys of a probe's own
+// city replace the run's, while other keys, a fault among them, add to it.
+func (r *runner) opEnv(ctx context.Context, timeout time.Duration, env []string, stdin []byte, args ...string) outcome {
+	var cmdEnv []string
+	if r.city != nil || env != nil {
+		// Read before the op's deadline, so the read is not the op's. During
+		// a native store open it is the environment as the open found it.
+		cmdEnv = append(append(execenv.Environ(), r.city...), env...)
+	}
 	opCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	cmd := exec.CommandContext(opCtx, r.path, args...)
+	cmd.Env = cmdEnv
 	// Force pipe closure shortly after the deadline even when grandchild
 	// processes hold them open: a conformance run reports a hang, not
 	// inherits it.
@@ -156,7 +220,7 @@ func (r *runner) opTimeout(ctx context.Context, timeout time.Duration, stdin []b
 		case msg == "":
 			msg = err.Error()
 		}
-		res := outcome{err: fmt.Errorf("%s: %s", strings.Join(args, " "), msg)}
+		res := outcome{err: fmt.Errorf("%s: %s", strings.Join(args, " "), msg), failedStdout: stdout.String()}
 		if isExit {
 			res.exitCode = exitErr.ExitCode()
 		}
@@ -167,22 +231,38 @@ func (r *runner) opTimeout(ctx context.Context, timeout time.Duration, stdin []b
 
 // start sends a start config for name and returns the raw outcome.
 func (r *runner) start(ctx context.Context, name string) outcome {
+	return r.startIn(ctx, nil, name)
+}
+
+// startIn is start with env added to the executable's environment (a
+// city's GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH).
+func (r *runner) startIn(ctx context.Context, env []string, name string) outcome {
 	cfg, _ := json.Marshal(struct {
 		WorkDir string `json:"work_dir,omitempty"`
 		Command string `json:"command,omitempty"`
 	}{WorkDir: r.opts.WorkDir, Command: r.opts.Command})
+	return r.opEnv(ctx, r.opts.StartTimeout, env, cfg, "start", name)
+}
+
+func (r *runner) startCommand(ctx context.Context, name, command string) outcome {
+	cfg, _ := json.Marshal(struct {
+		WorkDir string `json:"work_dir,omitempty"`
+		Command string `json:"command,omitempty"`
+	}{WorkDir: r.opts.WorkDir, Command: command})
 	return r.opTimeout(ctx, r.opts.StartTimeout, cfg, "start", name)
 }
 
 // provision sends a provision config for name and returns the raw outcome.
 // provision mirrors start's payload but is the box-without-agent half of the
 // un-weld: it creates a reachable box without launching the agent (exit 2 =
-// the optional op is unimplemented).
-func (r *runner) provision(ctx context.Context, name string) outcome {
+// the optional op is unimplemented). freshOnly marks the config fresh_only,
+// as gc's fresh start (createFresh) sends it.
+func (r *runner) provision(ctx context.Context, name string, freshOnly bool) outcome {
 	cfg, _ := json.Marshal(struct {
-		WorkDir string `json:"work_dir,omitempty"`
-		Command string `json:"command,omitempty"`
-	}{WorkDir: r.opts.WorkDir, Command: r.opts.Command})
+		WorkDir   string `json:"work_dir,omitempty"`
+		Command   string `json:"command,omitempty"`
+		FreshOnly bool   `json:"fresh_only,omitempty"`
+	}{WorkDir: r.opts.WorkDir, Command: r.opts.Command, FreshOnly: freshOnly})
 	return r.opTimeout(ctx, r.opts.StartTimeout, cfg, "provision", name)
 }
 
@@ -194,6 +274,10 @@ func (r *runner) stop(ctx context.Context, name string) outcome {
 // isRunning runs is-running and returns the trimmed stdout plus outcome.
 func (r *runner) isRunning(ctx context.Context, name string) outcome {
 	return r.op(ctx, "is-running", name)
+}
+
+func (r *runner) peek(ctx context.Context, name string, lines int) outcome {
+	return r.op(ctx, "peek", name, fmt.Sprint(lines))
 }
 
 // execOp runs a command in the box via the RPP exec op: the command rides

@@ -2,8 +2,8 @@ package api
 
 import "github.com/gastownhall/gascity/internal/api/genclient"
 
-// SessionView is the CLI-facing shape for `gc session list` rows and
-// `gc session peek` output. It mirrors the subset of server-side
+// SessionView is the CLI-facing shape for `gc session peek` output (list rows
+// use SessionListView). It mirrors the subset of server-side
 // sessionResponse fields that the CLI formatter reads so cmd/gc/ never
 // imports genclient directly.
 type SessionView struct {
@@ -78,22 +78,6 @@ func programStatusFromGen(g *genclient.SessionProgramStatus) *SessionProgramStat
 	if g.Progress != nil {
 		progress := int(*g.Progress)
 		out.Progress = &progress
-	}
-	return out
-}
-
-// sessionsFromGenList translates the genclient list body into
-// []SessionView. Returns an empty slice (never nil) when the body is
-// missing or holds no items so callers can uniformly format the empty
-// case.
-func sessionsFromGenList(body *genclient.ListBodySessionResponse) []SessionView {
-	if body == nil || body.Items == nil {
-		return []SessionView{}
-	}
-	items := *body.Items
-	out := make([]SessionView, 0, len(items))
-	for _, item := range items {
-		out = append(out, sessionViewFromGen(item))
 	}
 	return out
 }

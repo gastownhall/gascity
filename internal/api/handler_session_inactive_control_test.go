@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
+
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -36,7 +38,7 @@ func TestStopAndKillOfInactiveSessionAreIdempotent(t *testing.T) {
 	fs := newSessionFakeState(t)
 	state := &stateWithSessionProvider{fakeState: fs, provider: tmuxLikeProvider{Fake: fs.sp}}
 	h := newTestCityHandlerWith(t, state, New(state))
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
+	mgr := session.NewManagerWithOptions(beadstest.Sessions(fs.cityBeadStore), fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
 		Template: "default", Title: "inactive-control", Command: "codex", WorkDir: "/tmp", Provider: "codex",
 		ExtraMeta: map[string]string{"session_origin": "manual"},

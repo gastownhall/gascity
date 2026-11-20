@@ -14,9 +14,10 @@ import (
 )
 
 // conversationLanesDoctorCheck reports the conversation lanes ([ops]
-// authoritative): whether the sessions store can host them, and, from the
-// running controller's lane-status, whether its lane host runs, how long ago
-// it last passed, and the op rows it quarantined. With the list empty it
+// authoritative, or, unset, the builtin default effectiveLaneKinds supplies):
+// whether the sessions store can host them, and, from the running
+// controller's lane-status, whether its lane host runs, how long ago it last
+// passed, and the op rows it quarantined. With the list set and empty it
 // opens no store, and asks the controller only whether it still serves the
 // list it started with. It is never fixable.
 type conversationLanesDoctorCheck struct {
@@ -51,26 +52,36 @@ func (*conversationLanesDoctorCheck) WarmupEligible() bool { return false }
 // Fix implements doctor.Check.
 func (*conversationLanesDoctorCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
-// Run implements doctor.Check: with the list empty, OK unless the controller
-// still serves, or waits for its store to serve, the list it started with, a
-// Warning; an Error when a kind is listed and the sessions store cannot apply
-// guarded batches, the controller runs no lane host (a supervisor-hosted
-// city), or it refused to start the host; a Warning when the controller does
-// not answer, waits for its sessions store, runs another list than
-// city.toml's, has quarantined op rows, or failed its last pass or anything
-// since its last good one; else OK with the last pass's age.
+// Run implements doctor.Check: with the list set and empty, OK unless the
+// controller still serves, or waits for its store to serve, the list it
+// started with, a Warning; with it unset, OK naming legacy delivery where
+// the default runs no lane (a sessions store that is not SQLite with guarded
+// batches), else as listed, the kinds marked default; an Error when a kind
+// is listed and the sessions store cannot apply guarded batches, the
+// controller runs no lane host (a supervisor-hosted city), or it refused to
+// start the host; a Warning when the city store does not open, the
+// controller does not answer, waits for its sessions store, runs another
+// list than city.toml's, has quarantined op rows, or failed its last pass or
+// anything since its last good one; else OK with the last pass's age.
 func (c *conversationLanesDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	r := &doctor.CheckResult{Name: c.Name(), Status: doctor.StatusOK}
+	unset := c.cfg != nil && !c.cfg.Ops.AuthoritativeSet()
 	var kinds []string
 	if c.cfg != nil {
-		kinds = c.cfg.Ops.Authoritative
+		kinds = c.cfg.Ops.AuthoritativeKinds()
 	}
-	if len(kinds) == 0 {
+	if !unset && len(kinds) == 0 {
 		c.reportOff(ctx, r)
 		return r
 	}
 	listed := strings.Join(kinds, ", ")
-	if c.storeProblem(r, listed) {
+	if unset {
+		var done bool
+		if kinds, done = c.defaultKinds(ctx, r); done {
+			return r
+		}
+		listed = "default: " + strings.Join(kinds, ", ")
+	} else if c.storeProblem(r, listed) {
 		return r
 	}
 	st, err := c.ask(ctx)
@@ -79,6 +90,68 @@ func (c *conversationLanesDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.Che
 	}
 	reportLaneService(r, listed, kinds, st)
 	return r
+}
+
+// defaultKinds reports on r the kinds an unset [ops] authoritative runs over
+// the city's sessions store (effectiveLaneKinds), and says whether that is
+// the whole report (done): the store does not open or has no sessions store,
+// a Warning; or the default runs no lane there, OK, naming legacy delivery
+// and why, unless the controller still serves a list it started with
+// (reportOff's Warning).
+func (c *conversationLanesDoctorCheck) defaultKinds(ctx *doctor.CheckContext, r *doctor.CheckResult) (kinds []string, done bool) {
+	store, err := c.open()
+	if err != nil {
+		r.Status = doctor.StatusWarning
+		r.Message = fmt.Sprintf("conversation lanes default undecided: opening the city store failed: %v", err)
+		return nil, true
+	}
+	sessions := c.sessions(store)
+	kinds, _ = cliLaneKinds(c.cfg, sessions)
+	capErr := laneStoreCapability(sessions)
+	_ = closeBeadStoreHandle(store)
+	switch {
+	case errors.Is(capErr, errLaneStoreMissing):
+		r.Status = doctor.StatusWarning
+		r.Message = "conversation lanes default undecided: the city store has no sessions store"
+		return nil, true
+	case len(kinds) > 0:
+		return kinds, false
+	}
+	c.reportOff(ctx, r)
+	if r.Status != doctor.StatusOK {
+		return nil, true
+	}
+	// The explicit list's refusal text names remedies for a listed kind;
+	// with none listed, the remedy is the split legacy-delivery names.
+	why := "the sessions store is not SQLite"
+	var incapable *laneStoreIncapableError
+	if errors.As(capErr, &incapable) {
+		why = fmt.Sprintf("its sessions class is bound to %s, which cannot apply guarded batches", incapable.binding)
+	}
+	r.Message = fmt.Sprintf("conversation lanes are off by default here (%s); this city keeps legacy delivery until its storage is split (%s)", why, legacyDeliverySplitRemedy)
+	return nil, true
+}
+
+// sessionsFit opens the city store and reports how its sessions class can
+// host the conversation lane (laneStoreFitFor, the lane host's own
+// predicate) and, for a store that fits none, what it is bound to
+// (laneStoreBinding). errLaneStoreMissing when the city store has no
+// sessions store. It closes the store after.
+func (c *conversationLanesDoctorCheck) sessionsFit() (laneStoreFit, string, error) {
+	store, err := c.open()
+	if err != nil {
+		return laneStoreFitNone, "", fmt.Errorf("opening the city store: %w", err)
+	}
+	defer func() { _ = closeBeadStoreHandle(store) }()
+	sessions := c.sessions(store)
+	if isNilBeadStore(sessions) {
+		return laneStoreFitNone, "", errLaneStoreMissing
+	}
+	fit := laneStoreFitFor(sessionFrontDoor(sessions).Store())
+	if fit != laneStoreFitNone {
+		return fit, "", nil
+	}
+	return fit, laneStoreBinding(sessions), nil
 }
 
 // reportOff reports the list empty on r: OK, unless the controller still

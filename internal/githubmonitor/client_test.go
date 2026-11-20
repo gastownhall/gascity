@@ -7,11 +7,13 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestGraphQLClientListOpenPullRequestsPaginates(t *testing.T) {
 	var calls int
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("method = %s, want POST", r.Method)
 		}
@@ -41,7 +43,7 @@ func TestGraphQLClientListOpenPullRequestsPaginates(t *testing.T) {
 		default:
 			t.Fatalf("unexpected call %d", calls)
 		}
-	}))
+	})))
 	defer server.Close()
 
 	client := NewGraphQLClient("test-token", WithEndpoint(server.URL))
@@ -58,9 +60,9 @@ func TestGraphQLClientListOpenPullRequestsPaginates(t *testing.T) {
 }
 
 func TestGraphQLClientReportsHTTPFailure(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(testutil.IgnoreForeignLoopbackProbes(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "bad token", http.StatusUnauthorized)
-	}))
+	})))
 	defer server.Close()
 
 	client := NewGraphQLClient("test-token", WithEndpoint(server.URL))

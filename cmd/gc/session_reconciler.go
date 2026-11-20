@@ -923,6 +923,7 @@ func (r drainAckFinalizeResult) applyTo(info sessionpkg.Info) sessionpkg.Info {
 }
 
 func finalizeDrainAckStoppedSession(
+	cityPath string,
 	cfg *config.City,
 	store beads.Store,
 	sw *SeatWork,
@@ -997,6 +998,12 @@ func finalizeDrainAckStoppedSession(
 				dt.remove(info.ID)
 			}
 			recordStopped(true)
+			// Pool worktrees are transient by design — reclaim disk when the
+			// session bead is retired, same as the stranded-repair and
+			// pool-freeable close paths below. Skipped under safety gates
+			// (uncommitted, unpushed) and overridable via
+			// cfg.Daemon.AutoPruneWorkerDir (gascity#8093).
+			pruneAgentHomeWorktreeIfSafeInfo(info, cityPath, cfg, stderr)
 			// write-returns-Info (Step 6d): the caller's snapshot fold is ApplyPatch(the
 			// ClosePatch) + MarkClosed (closed:true). The raw session.Status="closed"
 			// mirror is deleted — the caller's MarkClosed fold is the sole same-tick
@@ -1120,7 +1127,7 @@ func reconcileDrainAckStopPending(
 		return true, drainAckFinalizeResult{}
 	}
 	return true, finalizeDrainAckStoppedSession(
-		cfg, store, sw, info, tp.TemplateName,
+		cityPath, cfg, store, sw, info, tp.TemplateName,
 		!desired || isPoolManagedSessionInfo(info),
 		dops, dt, clk, rec, stderr,
 	)
@@ -1273,7 +1280,7 @@ func finalizeDrainAckStopPendingSessions(
 		// state=drained: open pool session beads occupy slots in the next demand
 		// calculation, while closed beads remain only as lifecycle history.
 		finalizeDrainAckStoppedSession(
-			cfg, store, sw, info,
+			cityPath, cfg, store, sw, info,
 			normalizedSessionTemplateInfo(info, cfg),
 			isPoolManagedSessionInfo(info),
 			dops, dt, clk, rec, stderr,
@@ -2299,8 +2306,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 
 		// Skip beads with unrecognized states. This enables forward-compatible
-		// rollback: a newer version's states, and this binary's own archived and
-		// draining rows, are ignored rather than crashing the reconciler. An
+		// rollback: a newer gc version's states, and this binary's own parked
+		// rows it does not manage (archived, closing, a draining without its
+		// drain-ack reason), are ignored rather than crashing the reconciler. An
 		// interrupted close of this binary's own (a close code left on an open
 		// row when the status Close was lost) is finished first instead, or
 		// rolled back to asleep when its gate now refuses it, and the next tick
@@ -2771,7 +2779,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							continue
 						}
 						result := finalizeDrainAckStoppedSession(
-							cfg, store, sw, infoByID[id], template,
+							cityPath, cfg, store, sw, infoByID[id], template,
 							!configuredNames[name], dops, dt, clk, rec, stderr,
 						)
 						// finalizeDrainAckStoppedSession may close the bead in memory; fold
@@ -3522,7 +3530,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						finalizeDT = nil
 					}
 					result := finalizeDrainAckStoppedSession(
-						cfg, store, sw, infoByID[id], tp.TemplateName,
+						cityPath, cfg, store, sw, infoByID[id], tp.TemplateName,
 						isPoolManagedSessionInfo(infoByID[id]),
 						dops, finalizeDT,
 						clk, rec, stderr,
@@ -3949,7 +3957,12 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		driftRestartedInPlace := false
 		// Config drift: if alive and config changed, drain for restart.
 		// Live-only drift: re-apply session_live without restart.
-		if alive {
+		// Both drift checks hash tp, so they run only on a desired session.
+		// The one undesired row that reaches here is a preserved named
+		// session whose template did not resolve this tick (preserveErr
+		// above): its tp is zero, and hashing that would read as drift and
+		// restart or reset a session whose config never changed.
+		if alive && desired {
 			template := tp.TemplateName
 			if template == "" {
 				template = normalizedSessionTemplateInfo(infoByID[id], cfg)
@@ -3960,7 +3973,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// to avoid false-positive drains. Fixes #127.
 			storedHash := infoByID[id].StartedConfigHash
 			if template != "" && storedHash != "" {
-				cfgAgent := findAgentByTemplate(cfg, template)
+				cfgAgent := findSessionAgentByTemplate(cfg, template)
 				if cfgAgent != nil {
 					agentCfg := sessionCoreConfigForHashInfo(tp, infoByID[id])
 					currentHash := runtime.CoreFingerprint(agentCfg)
@@ -4142,7 +4155,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							// assigned work and drain naturally. The same shape
 							// of protection is already applied to the
 							// orphan/suspended drain at line 754.
-							hasAssignedWork, assignedErr := sessionHasOpenAssignedWorkForReachableStore(sw, infoByID[id])
+							heldBy, hasAssignedWork, assignedErr := firstOpenAssignedWorkBeadForReachableStore(sw, infoByID[id])
 							if assignedErr != nil {
 								fmt.Fprintf(stderr, "session reconciler: checking assigned work before config-drift drain for %s: %v\n", name, assignedErr) //nolint:errcheck
 								continue
@@ -4160,6 +4173,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 									}))
 								}
 								logDrainSkip(dt, stdout, id, fmt.Sprintf("Skipping config-drift drain for '%s': live assigned work found", name), clk.Now())
+								recordConfigDriftHeldWorkEpisode(infoByID[id], sessFront, tick, rec, driftDeferralHorizon(cfg), driftKey, driftedFields, heldBy.ID, clk.Now(), stderr)
 								continue
 							}
 							if launchOnlyDrift {
@@ -4291,14 +4305,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		infoAsleepDrift := infoByID[id]
 		skipAsleepDriftRepair := driftRestartedInPlace ||
 			pendingResumePreservingNamedRestartInfo(infoAsleepDrift, clk, startupTimeout)
-		if !alive && isNamedSessionInfo(infoByID[id]) && !skipAsleepDriftRepair {
+		if !alive && desired && isNamedSessionInfo(infoByID[id]) && !skipAsleepDriftRepair {
 			template := tp.TemplateName
 			if template == "" {
 				template = normalizedSessionTemplateInfo(infoByID[id], cfg)
 			}
 			storedHash := infoByID[id].StartedConfigHash
 			if template != "" && storedHash != "" {
-				if cfgAgent := findAgentByTemplate(cfg, template); cfgAgent != nil {
+				if cfgAgent := findSessionAgentByTemplate(cfg, template); cfgAgent != nil {
 					agentCfg := sessionCoreConfigForHashInfo(tp, infoByID[id])
 					currentHash := runtime.CoreFingerprint(agentCfg)
 					if storedHash != currentHash {
@@ -4831,14 +4845,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if sessionIsQuarantinedInfo(info, clk) {
 				continue // crash-loop protection
 			}
-			if episode, err := sessFront.LoadStartupHealthEpisode(startupHealthEpisodeKey(info, name)); err != nil {
+			// LoadStartupHealthEpisode returns the zero episode alongside an
+			// error, so the hold check below is a no-op on the fail-open path.
+			startupEpisode, startupEpisodeErr := sessFront.LoadStartupHealthEpisode(startupHealthEpisodeKey(info, name))
+			if startupEpisodeErr != nil {
 				// Fail open: proceed as if no quarantine episode exists rather
 				// than block every session start on a transient store-read
 				// error. Logged (matching the two LoadStartupHealthEpisode
 				// call sites in session_lifecycle_parallel.go) so the miss is
 				// observable instead of silent.
-				fmt.Fprintf(stderr, "session reconciler: loading startup-health episode for %s: %v\n", name, err) //nolint:errcheck
-			} else if !episode.QuarantinedUntil.IsZero() {
+				fmt.Fprintf(stderr, "session reconciler: loading startup-health episode for %s: %v\n", name, startupEpisodeErr) //nolint:errcheck
+			} else if !startupEpisode.QuarantinedUntil.IsZero() {
 				// Mirror the active episode onto the visible session row
 				// (ga-em8g4o) so a caller can see why a start is being held
 				// back through the typed front door alone, without a separate
@@ -4847,12 +4864,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// whether "now" is still before QuarantinedUntil, so the
 				// mirrored state stays visible through the tick that lets the
 				// quarantine expire.
-				if mirrorErr := mirrorStartupHealthEpisodeMetadata(sessFront, target.info.ID, episode); mirrorErr != nil {
+				if mirrorErr := mirrorStartupHealthEpisodeMetadata(sessFront, target.info.ID, startupEpisode); mirrorErr != nil {
 					fmt.Fprintf(stderr, "session reconciler: mirroring startup-health episode for %s: %v\n", name, mirrorErr) //nolint:errcheck
 				}
-				if clk.Now().Before(episode.QuarantinedUntil) {
-					continue // startup-health crash-loop protection (pending-create failures)
-				}
+			}
+			// StartHoldUntil is the later of the threshold quarantine and the
+			// per-failure retry backoff. The mirror above stays gated on
+			// QuarantinedUntil alone: a sub-threshold backoff is the normal
+			// self-healing cadence and must not surface on the session row (or,
+			// through it, in gc doctor) as a crash-loop quarantine.
+			if hold := startupEpisode.StartHoldUntil(); !hold.IsZero() && clk.Now().Before(hold) {
+				continue // startup-health crash-loop protection (pending-create failures)
 			}
 			// A start is in flight only while its holder lives: one a crashed
 			// controller left between PreWake and its commit is relaunched
@@ -5278,7 +5300,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				tick.markClosed(target.info.ID)
 				// Pool worktrees are transient by design — reclaim disk
 				// when the session bead is retired. Skipped under safety
-				// gates (uncommitted, unpushed, stashed) and overridable
+				// gates (uncommitted, unpushed) and overridable
 				// via cfg.Daemon.AutoPruneWorkerDir.
 				pruneAgentHomeWorktreeIfSafeInfo(infoByID[target.info.ID], cityPath, cfg, stderr)
 			}
@@ -5328,6 +5350,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		info, ok := infoByID[id]
 		return info, ok
 	}
+	// Planned starts already ran. Drop suspend drains that the resume made
+	// stale before the scan can arm GC_DRAIN_ACK on the replacement process.
+	cancelResumedSuspendDrains(dt, sp, infoLookup, wakeEvals, cfg, citySuspendedWithState(cfg, suspState), trace)
 	advanceSessionDrainsWithSessionsTraced(cityPath, dt, sp, store, infoLookup, wakeEvals, cfg, clk, trace)
 	clearMissingIdleProbes(dt, infoByID)
 	// Drain-skip lines print on transition (session_drain_skip_log.go); a
@@ -5549,6 +5574,13 @@ func (c *healAliveConfirmer) alive(info sessionpkg.Info, name string, processNam
 // (gc-ft31x: retain rather than reap).
 func sessionHasOpenAssignedWorkForReachableStore(sw *SeatWork, info sessionpkg.Info) (bool, error) {
 	return sw.has(seatWorkQuery{scope: releaseScope(info, sw.Legs().cfg), statuses: seatWorkStatuses})
+}
+
+// firstOpenAssignedWorkBeadForReachableStore is
+// sessionHasOpenAssignedWorkForReachableStore's query answering with the
+// first open or in-progress bead it finds.
+func firstOpenAssignedWorkBeadForReachableStore(sw *SeatWork, info sessionpkg.Info) (beads.Bead, bool, error) {
+	return sw.first(seatWorkQuery{scope: releaseScope(info, sw.Legs().cfg), statuses: seatWorkStatuses})
 }
 
 // sessionHasOpenAssignedWorkForReachableStoreForCloseGate is the drain-ack
@@ -6220,30 +6252,27 @@ type strandedAssignedWork struct {
 	store beads.Store
 }
 
+// filterDetachedStrandedDiagnosticWork keeps the work the stranded diagnostic
+// lists: work without gc.detached, and work whose probe attests its runtime
+// dead, whose gc.detached it clears. Work whose probe reports it alive, or
+// observed nothing (error or timeout), may still run, so it is held out
+// (detachedProbeAllowsOrphanRelease): a diagnostic over held work alone
+// records no event and stamps no stranded marker, which the stranded repair
+// would release that work on once the marker aged.
 func filterDetachedStrandedDiagnosticWork(work []strandedAssignedWork) []strandedAssignedWork {
 	if len(work) == 0 {
 		return work
 	}
 	out := make([]strandedAssignedWork, 0, len(work))
 	for _, item := range work {
-		spec := strings.TrimSpace(item.bead.Metadata[detachedProbeMetadataKey])
-		if spec == "" {
-			out = append(out, item)
+		allowed, dead := detachedProbeAllowsOrphanRelease(item.bead)
+		if !allowed {
 			continue
 		}
-		result := probeDetachedWork(context.Background(), spec)
-		switch result.Status {
-		case detachedProbeAlive:
-			log.Printf("session reconciler: suppressing session.stranded for %s: detached probe alive: %s", item.bead.ID, spec)
-			continue
-		case detachedProbeDead:
-			log.Printf("session reconciler: clearing dead detached probe for %s before session.stranded: %s", item.bead.ID, spec)
+		if dead {
 			clearDetachedProbeMetadata(item.store, item.bead.ID)
-			out = append(out, item)
-		default:
-			log.Printf("session reconciler: preserving session.stranded for %s after detached probe %s: %v", item.bead.ID, result.Status, result.Err)
-			out = append(out, item)
 		}
+		out = append(out, item)
 	}
 	return out
 }
@@ -6556,6 +6585,24 @@ func recordNamedSessionConfigDriftDeferredAt(info sessionpkg.Info, sessFront *se
 	})
 }
 
+// recordConfigDriftHeldWorkEpisode is legacy's held-work drift episode
+// (#8345): an observation that writes (its first, or its one escalation
+// past horizon) folds the write into the tick and records
+// session.config_drift_deferred; a failed write is logged and records
+// nothing, for a later pass to retry. The write is driftEpisodePatch's, the
+// registered builder step.Patch comes from, so its keys resolve as advisory.
+func recordConfigDriftHeldWorkEpisode(info sessionpkg.Info, sessFront *sessionpkg.Store, tick *reconcileTick, rec events.Recorder, horizon time.Duration, driftKey string, fields []string, workBeadID string, now time.Time, stderr io.Writer) {
+	step := driftEpisode(info, driftKey, now, horizon)
+	if step.Patch == nil || sessFront == nil || info.ID == "" {
+		return
+	}
+	if err := sessFront.ApplyPatch(info.ID, driftEpisodePatch(driftKey, now, step.Escalated)); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: recording config-drift deferral for %s: %v\n", info.ID, err) //nolint:errcheck
+		return
+	}
+	rec.Record(configDriftDeferredEvent(tick.apply(info.ID, step.Patch), fields, workBeadID, step.Since, now, step.Escalated))
+}
+
 func clearSessionConfigDriftDeferral(info sessionpkg.Info, sessFront *sessionpkg.Store) error {
 	if sessFront == nil || info.ID == "" {
 		return nil
@@ -6563,7 +6610,8 @@ func clearSessionConfigDriftDeferral(info sessionpkg.Info, sessFront *sessionpkg
 	if info.ConfigDriftDeferredAt == "" &&
 		info.ConfigDriftDeferredKey == "" &&
 		info.AttachedConfigDriftDeferredAt == "" &&
-		info.AttachedConfigDriftDeferredKey == "" {
+		info.AttachedConfigDriftDeferredKey == "" &&
+		info.ConfigDriftEscalatedAt == "" {
 		return nil
 	}
 	return sessFront.ApplyPatch(info.ID, map[string]string{
@@ -6571,6 +6619,7 @@ func clearSessionConfigDriftDeferral(info sessionpkg.Info, sessFront *sessionpkg
 		namedSessionConfigDriftDeferredKeyMetadata:    "",
 		sessionAttachedConfigDriftDeferredAtMetadata:  "",
 		sessionAttachedConfigDriftDeferredKeyMetadata: "",
+		configDriftEscalatedAtMetadata:                "",
 	})
 }
 
@@ -6647,7 +6696,7 @@ func sessionAttachedForConfigDrift(id string, sp runtime.Provider, cityPath stri
 		// (ErrSessionNotFound is tolerated). ResolveSessionRecordByExactID is the
 		// front-door typed twin of the raw ResolveSessionBeadByExactID — identical
 		// error contract, no bead escapes.
-		if _, _, err := sessionpkg.ResolveSessionRecordByExactID(store, id); err != nil && !errors.Is(err, sessionpkg.ErrSessionNotFound) {
+		if _, _, err := sessionpkg.ResolveSessionRecordByExactID(beads.SessionStore{Store: store}, id); err != nil && !errors.Is(err, sessionpkg.ErrSessionNotFound) {
 			return false, err
 		}
 	}
@@ -6676,7 +6725,7 @@ func sessionConfigDriftKey(info sessionpkg.Info, cfg *config.City, tp TemplatePa
 	if template == "" || storedHash == "" {
 		return ""
 	}
-	if findAgentByTemplate(cfg, template) == nil {
+	if findSessionAgentByTemplate(cfg, template) == nil {
 		return ""
 	}
 	agentCfg := sessionCoreConfigForHashInfo(tp, info)
@@ -6951,6 +7000,7 @@ func resetConfiguredNamedSessionForConfigDriftInfo(
 	batch[namedSessionConfigDriftDeferredKeyMetadata] = ""
 	batch[sessionAttachedConfigDriftDeferredAtMetadata] = ""
 	batch[sessionAttachedConfigDriftDeferredKeyMetadata] = ""
+	batch[configDriftEscalatedAtMetadata] = ""
 	if err := sessionFrontDoor(store).ApplyPatch(info.ID, batch); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: recording config-drift repair for %s: %v\n", sessionName, err) //nolint:errcheck
 		return nil
@@ -7900,7 +7950,16 @@ func relaunchAgentForLaunchDrift(
 		fmt.Fprintf(stderr, "session reconciler: launch-drift relaunch for %s minted a speculative resume key (no prior conversation); falling back to full restart\n", name) //nolint:errcheck
 		return false, relaunchAbortResidueFold(preparedInfo, sessFront, hadResumeKeyBeforePrepare)
 	}
-	if err := r.Relaunch(ctx, name, prepared.cfg); err != nil {
+	relaunchErr := r.Relaunch(ctx, name, prepared.cfg)
+	// A startup nudge the runtime handed back (one held behind a dialog
+	// under program_status = "on", row A20, or an un-welded exec launch's
+	// first turn) is queued, never typed or failed.
+	// A warm relaunch keeps the box's token, never the config's, so the turn
+	// binds to the live token alone (else it is queued untagged).
+	if err := queueStartupNudgeHandback(cityPath, cfg, sp, preparedInfo, name, "", relaunchErr == nil, time.Now()); err != nil {
+		fmt.Fprintf(stderr, "session reconciler: relaunch %s: %v\n", name, err) //nolint:errcheck
+	}
+	if err := relaunchErr; err != nil {
 		// ErrRelaunchUnsupported (a wrapper whose backend cannot relaunch) or a
 		// genuine failure (e.g. the warm box vanished → ErrSessionNotFound). Fall
 		// back to the full restart so the launch change is still applied.

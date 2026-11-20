@@ -136,7 +136,9 @@ type ListQuery struct {
 	// A Live Status "open" is the backing's own answer, which on a bd-backed
 	// store is bd's raw "open": a bead bd records as blocked, deferred or
 	// another parked status reads as "open" but is not in it. NativeDoltStore
-	// reads the flag to push that raw status (nativeListPushesRawOpen); other
+	// reads the flag to push that raw status (nativeListPushesRawOpen), and
+	// SQLiteStore, which records a deferral as its defer_until alone, to leave
+	// out a row deferred into the future (sqliteListLeavesOutDeferred); other
 	// backing stores ignore it. A non-Live "open" through CachingStore is gc's
 	// folded answer only while the cache serves it: the cache's fallback
 	// re-issues the read Live, so a cold or dirty cache returns the raw answer.

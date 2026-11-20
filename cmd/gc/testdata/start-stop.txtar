@@ -5,7 +5,10 @@ env GC_BEADS=file
 env GC_DOLT=skip
 
 # gc init bootstraps a new city.
-exec gc init $WORK/my-city
+# --storage=single: this script's gc start is the one-shot reconcile, which
+# only the legacy session reconciler has; a born-split city runs v2 under the
+# controller.
+exec gc init $WORK/my-city --storage=single
 stdout 'Welcome to Gas City!'
 stdout 'Initialized city'
 

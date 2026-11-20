@@ -5,30 +5,31 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
-// splitStrictSeam is the split-strict test gate's hook into the city's store
-// accessors. It is nil in every production binary, so the helpers below return
-// their argument unchanged: only cmd/gc's test binary installs it, and only
-// under GC_TEST_SPLIT_STRICT=1 (split_strict_gate_test.go).
+// splitStrictSeam is the split-strict test gate's projection. It is nil in
+// every production binary, so the helpers below return their argument
+// unchanged: only cmd/gc's test binary installs it, and only under
+// GC_TEST_SPLIT_STRICT=1 (split_strict_gate_test.go).
 //
 // With it installed, a city whose routes relocate nothing still looks split to
-// the code under test: work accessors (controllerState.CityBeadStore, BeadStore,
-// BeadStores, and the CityRuntime's standalone stores) return a view of the one
-// physical store that hides infrastructure rows, and resolveClassStore's
-// identity branch returns a view that hides work rows. A read that reaches the
-// wrong one is charged to its call site (internal/beads/splittest/projection.go).
-var splitStrictSeam interface {
-	workView(beads.Store) beads.Store
-	classView(beads.Store) beads.Store
-}
+// the code under test. The class handles get it at the mint (mintCityStores
+// passes it to storeref.NewStores): a work handle is a view of the one
+// physical store that hides infrastructure rows, and a class handle that falls
+// to the work store is a view that hides work rows. The raw work accessors
+// (controllerState.CityBeadStore, BeadStore, BeadStores, and the CityRuntime's
+// standalone stores) still apply the work view themselves, until they hand
+// out handles too. A read that reaches the wrong side is charged to its call
+// site (internal/beads/splittest/projection.go).
+var splitStrictSeam storeref.Projection
 
 // splitStrictWorkView returns the gate's work view of store, or store.
 func splitStrictWorkView(store beads.Store) beads.Store {
 	if splitStrictSeam == nil || store == nil {
 		return store
 	}
-	return splitStrictSeam.workView(store)
+	return splitStrictSeam.WorkView(store)
 }
 
 // splitStrictClassView returns the gate's class view of store, or store.
@@ -36,7 +37,7 @@ func splitStrictClassView(store beads.Store) beads.Store {
 	if splitStrictSeam == nil || store == nil {
 		return store
 	}
-	return splitStrictSeam.classView(store)
+	return splitStrictSeam.ClassView(store)
 }
 
 // splitStrictWorkViews applies splitStrictWorkView to every store of a map,

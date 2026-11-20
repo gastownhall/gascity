@@ -64,14 +64,18 @@ type Work struct {
 	Key  ClaimKey
 	Kind Kind
 	// AwaitsHuman: the seat said it waits on a person's decision about this
-	// work (the caller reads it off the claim). Its entry is only nudged, a
-	// Cap apart, and never recycled or released, and its pacing raises none
-	// of AlertStartedRecycled, AlertStartedUnanswered and
-	// AlertReleaseUnfinished: no nudge can hurry a person, and one a Cap
-	// apart still re-drives a seat whose turn ended after the answer came
-	// but before the seat said the wait is over. A nudge the seat cannot
-	// take still counts toward AlertNudgeRefused, and a pending release that
-	// raced a start still raises AlertReleaseRacedStart.
+	// work (the caller reads it off the claim). Its entry is never recycled
+	// or released, and its pacing raises none of AlertStartedRecycled,
+	// AlertStartedUnanswered and AlertReleaseUnfinished: no nudge can hurry
+	// a person. While the seat's turns show the newest ended turn completed
+	// (Observation.Turns), it is nudged only a WaitCap apart: that takes up
+	// an answer that started no turn of the seat. Any other reading (a turn
+	// open, a failed, canceled or status-less newest turn, no turn, none)
+	// keeps it nudged a Cap apart: that re-drives a seat whose turn died
+	// after the answer came but before the seat said the wait is over. A
+	// nudge the seat cannot take still counts toward AlertNudgeRefused, and
+	// a pending release that raced a start still raises
+	// AlertReleaseRacedStart.
 	AwaitsHuman bool
 }
 
@@ -172,6 +176,11 @@ type TurnReading struct {
 	// LastFailed reports that the newest ended turn failed, whatever the
 	// cause, and no turn is open.
 	LastFailed bool
+	// LastCompleted reports that the newest ended turn completed (the
+	// provider served it) and no turn is open. A turn canceled, or ended
+	// with no status (an end inferred from an idle boundary, a family that
+	// records none), is not completed.
+	LastCompleted bool
 	// ServedAt is when the newest turn the provider completed ended,
 	// anywhere in the turns read; zero when none did.
 	ServedAt time.Time
@@ -205,10 +214,14 @@ type Policy struct {
 	Base          time.Duration // the backoff after the first nudge; doubles
 	Cap           time.Duration // the longest backoff; the interval forever after
 	PausedCap     time.Duration // the longest backoff while the provider is degraded
+	WaitCap       time.Duration // a wait on a person's interval while its seat's newest turn completed; no less than Cap
 	ProgressReset time.Duration // activity this long after the last nudge restarts the count
 	RecycleRepost time.Duration // a trigger's recycle request is reposted no sooner
 	Threshold     map[Kind]map[Rung]int
 	MaxRecycles   int // R: recycles of a started claim per seat
+	// TriggerAlert is the counted nudges a trigger gets before the due
+	// pass that raises AlertTriggerUnanswered (once per entry).
+	TriggerAlert int
 
 	// RateLimitThreshold is how many turns in a row the provider must
 	// refuse with a rate limit before the refusals open an episode.
@@ -288,6 +301,13 @@ func (RateLimitMove) isAction() {}
 
 // Alert reasons.
 const (
+	// AlertTriggerUnanswered: the seat took a nudge about the trigger it
+	// was spawned for and still has not claimed it a Base later. It is
+	// raised once per entry, with the nudge that follows, before the
+	// trigger's recycle and before a seat idle-drains: a template whose
+	// seats raise it in a row is not claiming its work (the controller's
+	// claims-stall guard counts it).
+	AlertTriggerUnanswered      = "trigger_unanswered"
 	AlertContinuationUnanswered = "continuation_unanswered"
 	AlertStartedUnanswered      = "started_unanswered"
 	AlertStartedRecycled        = "started_recycled"
@@ -354,7 +374,7 @@ type Entry struct {
 	Attempts  int       // counted nudges on this rung, this generation
 	Paused    int       // nudges sent while the provider was degraded
 	Last      time.Time // the last nudge or recycle, or the start of a wait on a person
-	Next      time.Time // when the entry is next due if the seat stays quiet
+	Next      time.Time // when the entry is next due if the seat stays quiet; for a wait on a person, the earliest it is due (never before Last + WaitCap while its seat's newest turn completed)
 	Recycles  int       // across generations
 	Escalated bool      // the entry's alert was raised (cleared on a rung change)
 	Seed      StartSource
@@ -371,8 +391,9 @@ type Entry struct {
 	// the caller settles it (SettleNotice); zero when there is none.
 	Notice NoticeMark
 	// AwaitsHuman: the entry's episode is a wait on a person
-	// (Work.AwaitsHuman). The wait's start and its end each begin a new
-	// episode, with a fresh count.
+	// (Work.AwaitsHuman), nudged only a WaitCap apart while its seat's newest
+	// turn completed. The wait's start and its end each begin a new episode,
+	// with a fresh count.
 	AwaitsHuman bool
 }
 
