@@ -298,6 +298,17 @@ func ProxiedOpenUnmoved(pin Pin, observed proxyendpoint.PostOpenReport) error {
 					"PR2's native lane serves reads only, so this open takes bd's front door and the next open re-probes",
 				pin.Database(), before, after, shape), nil)
 		}
+	}
+	admitted := pin.Cursors().Ignored
+	if now := observed.EffectiveIgnored(admitted); now != admitted {
+		return NewProxiedVerdictError(ProxiedVerdictHeadMoved, fmt.Sprintf(
+			"opening the linked library against database %q, with HEAD at %s, left the ignored plane's effective "+
+				"cursor at %d where admission found %d (%s): the dolt_ignore'd plane is never committed, so HEAD "+
+				"cannot see it, and a plane the next writable open would replay is not one this leaf may serve; "+
+				"this open takes bd's front door and the next open re-probes",
+			pin.Database(), after, now, admitted, observed.IgnoredPlaneReason()), nil)
+	}
+	if before != after {
 		return NewProxiedVerdictError(ProxiedVerdictHeadMoved, fmt.Sprintf(
 			"opening the linked library against database %q moved HEAD from %s to %s: "+
 				"PR2's native lane serves reads only, so an open that commits may be gc writing to bd's database "+
@@ -306,15 +317,6 @@ func ProxiedOpenUnmoved(pin Pin, observed proxyendpoint.PostOpenReport) error {
 				"If another bd client committed in the same window this is that write and not gc's, "+
 				"which is why the verdict is non-terminal and the next open re-probes",
 			pin.Database(), before, after), nil)
-	}
-	admitted := pin.Cursors().Ignored
-	if now := observed.EffectiveIgnored(admitted); now != admitted {
-		return NewProxiedVerdictError(ProxiedVerdictHeadMoved, fmt.Sprintf(
-			"opening the linked library against database %q left HEAD at %s but the ignored plane's effective "+
-				"cursor at %d where admission found %d (%s): the dolt_ignore'd plane is never committed, so HEAD "+
-				"cannot see it, and a plane the next writable open would replay is not one this leaf may serve; "+
-				"this open takes bd's front door and the next open re-probes",
-			pin.Database(), after, now, admitted, observed.IgnoredPlaneReason()), nil)
 	}
 	return nil
 }
