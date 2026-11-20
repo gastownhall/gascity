@@ -1190,3 +1190,99 @@ func declaredInStruct(source, structName, field string) bool {
 	}
 	return false
 }
+
+// TestProxiedOpenWriteSetMatchesPinnedBeads holds the moved-HEAD attribution's
+// two constants against the pinned module's own commit sites.
+//
+// The attribution leans on a claim about the LIBRARY: every commit its open
+// mints carries "schema:", and every committed table its open touches that a
+// bd client would not touch is in gc's open-write set. Both halves are stated
+// on gc's side (schema_cursor.go), because beads exports no accessor for
+// either — which is exactly why both need a drift test: a beads bump that
+// rewords a commit message or moves an open-time write to a new prefixless
+// commit would otherwise leave gc attributing its own write to another client,
+// and the first sign would be a demotion nobody can explain.
+func TestProxiedOpenWriteSetMatchesPinnedBeads(t *testing.T) {
+	dir := filepath.Join(beadstest.PinnedBeadsModuleDir(t), filepath.FromSlash("internal/storage/schema"))
+	sources := readGoSources(t, dir)
+
+	contains := func(needle string) bool {
+		for _, body := range sources {
+			if strings.Contains(string(body), needle) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// 1. The commit half: the open's commit sites still carry the prefix. These
+	// are the writes the window must read as gc's own by MESSAGE; a reworded
+	// one drops out of the prefix check and reads as another client's.
+	for _, message := range []string{
+		"schema: seed dolt_ignore patterns",
+		"schema: apply migrations",
+		"schema: apply migration ",
+		"schema: untrack legacy ignored_schema_migrations so dolt_ignore can apply (gastownhall/beads#4356)",
+	} {
+		if !contains(message) {
+			t.Errorf("the pinned beads no longer mints %q.\nThe prefix check is the commit half of the moved-HEAD "+
+				"attribution; an open-time commit that lost the prefix reads as another client's write. Re-read the "+
+				"commit sites under %s and bring ProxiedOpenCommitPrefix or this pin into line.", message, dir)
+		}
+	}
+	if beads.ProxiedOpenCommitPrefix != "schema:" {
+		t.Errorf("ProxiedOpenCommitPrefix = %q, want the \"schema:\" the pinned module's open-time commits carry "+
+			"(and that part 1's literals still show)", beads.ProxiedOpenCommitPrefix)
+	}
+
+	// 2. The table half: the open also commits WITHOUT the prefix, and those
+	// writes are only visible by their tables. The repair and fk-migration
+	// commits on dolt_nonlocal_tables are the known prefixless sites.
+	for _, message := range []string{
+		"repair: clear partial 0040 nonlocal rows before replay",
+		"repair: restore pre-0041 nonlocal rows before replay",
+		"disable nonlocal tables for fk migrations",
+	} {
+		if !contains(message) {
+			t.Errorf("the pinned beads no longer mints the prefixless open-time commit %q.\nThose commits are what "+
+				"put dolt_nonlocal_tables in the open-write set; if the site moved or reworded, re-read it under %s.",
+				message, dir)
+		}
+	}
+
+	// 3. The set is exactly the open's committed-plane tables. Membership is
+	// load-bearing in both directions: a table the library never writes is a
+	// false decline waiting for the first bd client that touches it, and a
+	// missing one is gc's own write read as another client's. The names appear
+	// inside SQL strings as often as as literals, so the pin matches the table
+	// as a word — and \b does not split "schema_migrations" out of
+	// "ignored_schema_migrations", which the substring a naive check would.
+	openWriteTables := beads.ProxiedOpenWriteTables()
+	for _, table := range openWriteTables {
+		if !containsWord(sources, table) {
+			t.Errorf("open-write table %q is not named anywhere under %s.\nThe set must be the library's own open-time "+
+				"tables, not a guess: drop it, or re-read what the pinned module's open now writes.", table, dir)
+		}
+	}
+	if !slices.Contains(openWriteTables, "dolt_nonlocal_tables") {
+		t.Error("dolt_nonlocal_tables left the open-write set; the prefixless repair commits (part 2) are then invisible to the attribution")
+	}
+	for _, table := range []string{"dolt_ignore", "schema_migrations", "ignored_schema_migrations", "custom_types", "custom_statuses"} {
+		if !slices.Contains(openWriteTables, table) {
+			t.Errorf("%q left the open-write set; it is the committed plane of the prefix-carrying open commits in part 1", table)
+		}
+	}
+}
+
+// containsWord reports whether the table is named as a word anywhere in the
+// sources, so "schema_migrations" does not count as named by
+// "ignored_schema_migrations" and a name inside a larger SQL string does.
+func containsWord(sources map[string][]byte, table string) bool {
+	pattern := regexp.MustCompile(`\b` + regexp.QuoteMeta(table) + `\b`)
+	for _, body := range sources {
+		if pattern.Match(body) {
+			return true
+		}
+	}
+	return false
+}

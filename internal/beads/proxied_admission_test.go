@@ -2815,3 +2815,65 @@ func TestProxiedOpenUnmovedAttributesAMovedHeadByItsWindow(t *testing.T) {
 		})
 	}
 }
+
+// TestProxiedOpenUnmovedNamesTheDecidingCommitOrTable is what an operator
+// reads when the attribution does NOT clear the open.
+//
+// A declined window is a claim that this open's own write moved HEAD, and a
+// claim needs its evidence: the deciding commit message or table name, beside
+// the two hashes. Without it the WARN line asks an operator to take gc's word
+// against bd's, and the only way to check is to replay dolt_log by hand with
+// the hashes the line does at least carry.
+func TestProxiedOpenUnmovedNamesTheDecidingCommitOrTable(t *testing.T) {
+	pinAt := func(head string) Pin {
+		return Pin{admitted: true, database: "beads", head: head, cursors: pinnedCursors()}
+	}
+	moved := func(window *proxyendpoint.PostOpenWindow) proxyendpoint.PostOpenReport {
+		return proxyendpoint.PostOpenReport{Head: "def456", IgnoredCursorTable: true, Window: window}
+	}
+
+	for _, tc := range []struct {
+		name     string
+		window   *proxyendpoint.PostOpenWindow
+		evidence string
+	}{
+		{
+			name: "a schema-prefixed commit decides",
+			window: &proxyendpoint.PostOpenWindow{
+				Commits: []string{"bd: update ga-1", "schema: apply migrations"},
+			},
+			evidence: "schema: apply migrations",
+		},
+		{
+			name: "an open-write table decides",
+			window: &proxyendpoint.PostOpenWindow{
+				Commits: []string{"bd: update ga-1"},
+				Tables:  []proxyendpoint.WindowTable{{Name: "issues"}, {Name: "dolt_ignore"}},
+			},
+			evidence: "dolt_ignore",
+		},
+		{
+			name: "a schema change decides",
+			window: &proxyendpoint.PostOpenWindow{
+				Tables: []proxyendpoint.WindowTable{{Name: "issues", SchemaChange: true}},
+			},
+			evidence: "issues",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ProxiedOpenUnmoved(pinAt("abc123"), moved(tc.window))
+			verdict, typed := ProxiedVerdictOf(err)
+			if !typed || verdict.Verdict != ProxiedVerdictHeadMoved {
+				t.Fatalf("err = %v, want head_moved", err)
+			}
+			if verdict.Terminal() {
+				t.Error("the open-shaped arm must stay non-terminal")
+			}
+			for _, want := range []string{"abc123", "def456", tc.evidence} {
+				if !strings.Contains(verdict.Detail, want) {
+					t.Errorf("the verdict detail lacks %q: %s", want, verdict.Detail)
+				}
+			}
+		})
+	}
+}

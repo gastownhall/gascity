@@ -332,15 +332,8 @@ func ProxiedOpenUnmoved(pin Pin, observed proxyendpoint.PostOpenReport) error {
 		return nil
 	}
 	if before != after {
-		if !windowAttributesMoveElsewhere(observed.Window) {
-			return NewProxiedVerdictError(ProxiedVerdictHeadMoved, fmt.Sprintf(
-				"opening the linked library against database %q moved HEAD from %s to %s: "+
-					"PR2's native lane serves reads only, so an open that commits may be gc writing to bd's database "+
-					"(a writable library open can seed dolt_ignore, heal the tracked cursor table, or add a "+
-					"content_hash column, each ending in a DOLT_COMMIT); this open takes bd's front door. "+
-					"If another bd client committed in the same window this is that write and not gc's, "+
-					"which is why the verdict is non-terminal and the next open re-probes",
-				pin.Database(), before, after), nil)
+		if evidence, declined := windowNamesOpenWrite(observed.Window); declined {
+			return NewProxiedVerdictError(ProxiedVerdictHeadMoved, movedHeadDetail(pin.Database(), before, after, evidence), nil)
 		}
 		// A foreign window: the move is another bd client's, named by evidence
 		// gc read off the window between the two hashes. The open stands; the
@@ -359,27 +352,51 @@ func ProxiedOpenUnmoved(pin Pin, observed proxyendpoint.PostOpenReport) error {
 	return nil
 }
 
-// windowAttributesMoveElsewhere reports whether the window between the pinned
-// HEAD and the observed one attributes the move to a write that was not gc's
-// open: every commit it lists lacks ProxiedOpenCommitPrefix, no table it lists
-// changed schema, and no table it lists is in the open-write set.
+// movedHeadDetail is the head_moved verdict's message for a moved HEAD. When
+// the window named this open's own write, evidence says which commit or table
+// decided it — a decline is a claim, and a claim travels with its evidence.
+func movedHeadDetail(database, before, after, evidence string) string {
+	detail := fmt.Sprintf("opening the linked library against database %q moved HEAD from %s to %s", database, before, after)
+	if evidence != "" {
+		detail += ", and the window between the two hashes names this open's own write: " + evidence + ";"
+	} else {
+		detail += ":"
+	}
+	return detail + " PR2's native lane serves reads only, so an open that commits may be gc writing to bd's database " +
+		"(a writable library open can seed dolt_ignore, heal the tracked cursor table, or add a " +
+		"content_hash column, each ending in a DOLT_COMMIT); this open takes bd's front door. " +
+		"If another bd client committed in the same window this is that write and not gc's, " +
+		"which is why the verdict is non-terminal and the next open re-probes"
+}
+
+// windowNamesOpenWrite weighs the commit window between the pinned HEAD and
+// the observed one and reports whether the move is attributed to gc's own
+// open, with the evidence that decided it.
 //
-// The name is the contract. Everything that is NOT a foreign window — nil (no
-// window was read), Unreadable, Truncated, empty, or carrying any shape the
-// linked library's open mints — returns false, and a false answer here is a
-// verdict there. An empty window is not a foreign move: a HEAD cannot move
-// without a commit, so a window that lists none is evidence that failed, not
-// evidence that cleared.
-func windowAttributesMoveElsewhere(window *proxyendpoint.PostOpenWindow) bool {
+// declined=false is the FOREIGN answer — every commit the window lists lacks
+// ProxiedOpenCommitPrefix, no table it lists changed schema, and no table it
+// lists is in the open-write set — and it is the only answer that lets the
+// open stand. Everything else declines, because the shapes only a
+// linked-library open mints are in the window, or because the window is not
+// evidence at all: nil (no window was read), Unreadable (a statement the
+// server refused), Truncated (the commit cap fell), or empty (a HEAD cannot
+// move without a commit, so a window that lists none is evidence that failed,
+// not evidence that cleared). The unattributable arms carry no evidence
+// string yet; their reasons are the verdict detail's job elsewhere.
+//
+// The FIRST deciding shape wins the evidence string, in the order the shapes
+// are damning: a prefix-carrying commit, then an open-write table, then a
+// schema change — the same order a reader of the WARN line will check them.
+func windowNamesOpenWrite(window *proxyendpoint.PostOpenWindow) (evidence string, declined bool) {
 	if window == nil || window.Unreadable != "" || window.Truncated {
-		return false
+		return "", true
 	}
 	if len(window.Commits) == 0 && len(window.Tables) == 0 {
-		return false
+		return "", true
 	}
 	for _, commit := range window.Commits {
 		if strings.HasPrefix(commit, ProxiedOpenCommitPrefix) {
-			return false
+			return fmt.Sprintf("commit %q carries the %q prefix every linked-library open commit mints", commit, ProxiedOpenCommitPrefix), true
 		}
 	}
 	openWriteTables := make(map[string]bool, len(proxiedOpenWriteTables))
@@ -387,9 +404,14 @@ func windowAttributesMoveElsewhere(window *proxyendpoint.PostOpenWindow) bool {
 		openWriteTables[table] = true
 	}
 	for _, table := range window.Tables {
-		if table.SchemaChange || openWriteTables[table.Name] {
-			return false
+		if openWriteTables[table.Name] {
+			return fmt.Sprintf("the window's diff changes %q, a table only a linked-library open writes", table.Name), true
 		}
 	}
-	return true
+	for _, table := range window.Tables {
+		if table.SchemaChange {
+			return fmt.Sprintf("the window's diff reports a schema change on %q", table.Name), true
+		}
+	}
+	return "", false
 }
