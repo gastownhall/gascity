@@ -3574,3 +3574,135 @@ func TestSessionStartAwaitsSupervisor(t *testing.T) {
 		})
 	}
 }
+
+// aliasedSupervisorCity is a city the supervisor started under a registered
+// name (alias-city) that differs from the name its config declares through
+// .gc/site.toml (site-city), with no [workspace] name in city.toml.
+type aliasedSupervisorCity struct {
+	path     string
+	tomlPath string
+	sitePath string
+	registry *cityRegistry
+	stdout   *lockedBuffer
+	stderr   *lockedBuffer
+}
+
+const aliasedSupervisorCityToml = `[workspace]
+
+[orders]
+skip = ["beads-health", "cross-rig-deps", "gate-sweep", "jsonl-export", "reaper", "order-tracking-sweep", "orphan-sweep", "prune-branches", "spawn-storm-detect", "wisp-compact"]
+
+[session]
+provider = "fake"
+
+[daemon]
+shutdown_timeout = "100ms"
+`
+
+// startAliasedSupervisorCity registers a site-bound city under a different
+// name and starts it through reconcileCities, the path that overlays the
+// registered name onto the config before the runtime is built.
+func startAliasedSupervisorCity(t *testing.T) *aliasedSupervisorCity {
+	t.Helper()
+	t.Setenv("GC_HOME", t.TempDir())
+
+	cityPath := shortSocketTempDir(t, "gc-alias-reload-")
+	cleanupManagedDoltTestCity(t, cityPath)
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	if err := os.WriteFile(tomlPath, []byte(aliasedSupervisorCityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.PersistWorkspaceSiteBinding(osFS{}, cityPath, "site-city", ""); err != nil {
+		t.Fatalf("PersistWorkspaceSiteBinding: %v", err)
+	}
+
+	script := writeSpyScript(t, filepath.Join(t.TempDir(), "ops.log"))
+	t.Setenv("GC_BEADS", "exec:"+script)
+	t.Setenv("GC_BEADS_SCOPE_ROOT", cityPath)
+
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(cityPath, "alias-city"); err != nil {
+		t.Fatal(err)
+	}
+
+	c := &aliasedSupervisorCity{
+		path:     cityPath,
+		tomlPath: tomlPath,
+		sitePath: config.SiteBindingPath(cityPath),
+		registry: newCityRegistry(),
+		stdout:   &lockedBuffer{},
+		stderr:   &lockedBuffer{},
+	}
+	reconcileCities(context.Background(), reg, c.registry, supervisor.PublicationConfig{}, c.stdout, c.stderr)
+	t.Cleanup(func() {
+		if done := c.registry.CancelCity(canonicalTestPath(cityPath)); done != nil {
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Error("city goroutine did not exit in time")
+			}
+		}
+	})
+	if !strings.Contains(c.stdout.String(), "Launching city") && !strings.Contains(c.stderr.String(), "Launching city") {
+		t.Fatalf("city never finished starting (stderr: %s)", c.stderr.String())
+	}
+	// Startup ends with its own config reload; a config edit made before
+	// then is applied by startup instead of by the reload under test.
+	awaitCond(t, func() bool {
+		started := false
+		c.registry.ReadCallback(func(
+			cities map[string]*managedCity,
+			_ map[string]cityInitProgress,
+			_ map[string]*initFailRecord,
+			_ map[string]*panicRecord,
+		) {
+			if mc := cities[canonicalTestPath(cityPath)]; mc != nil {
+				started = mc.started
+			}
+		})
+		return started
+	}, "aliased city finishing startup")
+	return c
+}
+
+// waitReload sends a waiting reload over the city's controller socket.
+func (c *aliasedSupervisorCity) waitReload(t *testing.T) reloadControlReply {
+	t.Helper()
+	reply, err := sendReloadControlRequest(c.path, reloadControlRequest{Wait: true, Timeout: "30s"})
+	if err != nil {
+		t.Fatalf("sendReloadControlRequest: %v (stderr: %s)", err, c.stderr.String())
+	}
+	return reply
+}
+
+func (c *aliasedSupervisorCity) setShutdownTimeout(t *testing.T, timeout string) {
+	t.Helper()
+	data := strings.Replace(aliasedSupervisorCityToml, `shutdown_timeout = "100ms"`, `shutdown_timeout = "`+timeout+`"`, 1)
+	if err := os.WriteFile(c.tomlPath, []byte(data), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestSupervisorAliasedCityReloadsAgainstConfigName is the regression for
+// gastownhall/gascity#8959: a city registered under an alias (for example via
+// `gc register --name`) must keep accepting config reloads, because the
+// reload lock is the name its config declares, not the registry alias.
+func TestSupervisorAliasedCityReloadsAgainstConfigName(t *testing.T) {
+	city := startAliasedSupervisorCity(t)
+
+	city.setShutdownTimeout(t, "150ms")
+	reply := city.waitReload(t)
+
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reload outcome = %q (error %q), want %q (stderr: %s)", reply.Outcome, reply.Error, reloadOutcomeApplied, city.stderr.String())
+	}
+	log := city.stderr.String()
+	for _, rejection := range []string{"workspace.name changed", "keeping old config"} {
+		if strings.Contains(log, rejection) {
+			t.Fatalf("supervisor stderr contains %q; the reload was rejected against the registry alias (stderr: %s)", rejection, log)
+		}
+	}
+}

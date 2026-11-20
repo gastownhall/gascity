@@ -426,8 +426,14 @@ type runtimeDemandSnapshot struct {
 // CityRuntime. Internal components (crashTracker, etc.) are built by the
 // constructor from these inputs.
 type CityRuntimeParams struct {
-	CityPath     string
-	CityName     string
+	CityPath string
+	CityName string
+	// ConfigName is the city name the on-disk config declares, captured
+	// before CityName was applied to Cfg. Config reloads are locked to it, so
+	// a registered alias that differs from the config-declared name does not
+	// read as a workspace rename. Empty means Cfg was not overlaid and the
+	// name is derived from Cfg.
+	ConfigName   string
 	TomlPath     string
 	WatchTargets []config.WatchTarget
 	ConfigRev    string
@@ -522,7 +528,10 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 	if err := checkReconcilerWiring(p); err != nil {
 		return nil, err
 	}
-	configName := lockedConfigName(p.Cfg, p.CityPath)
+	configName := p.ConfigName
+	if configName == "" {
+		configName = lockedConfigName(p.Cfg, p.CityPath)
+	}
 	applyRuntimeCityIdentity(p.Cfg, p.CityName)
 
 	var ct crashTracker

@@ -5518,6 +5518,61 @@ func TestCityRuntimeReloadAllowsRegistryAliasDifferentFromWorkspaceName(t *testi
 	}
 }
 
+// TestNewCityRuntimeConfigNameLocksReloadNotAlias pins the ConfigName
+// contract: a caller that overlays a registered alias onto Cfg before building
+// the runtime (as startOneCity does) passes the pre-overlay name, and reloads
+// are checked against it rather than against the alias.
+func TestNewCityRuntimeConfigNameLocksReloadNotAlias(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeCityRuntimeConfigNamed(t, tomlPath, "workspace-name", "fake")
+
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	configName := lockedConfigName(cfg, cityPath)
+	applyRuntimeCityIdentity(cfg, "machine-alias")
+
+	sp := runtime.NewFake()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath:   cityPath,
+		CityName:   "machine-alias",
+		ConfigName: configName,
+		TomlPath:   tomlPath,
+		Cfg:        cfg,
+		SP:         sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: &stdout,
+		Stderr: &stderr,
+	})
+
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "machine-alias", cityPath)
+	cs.cityBeadStore = beads.NewMemStore()
+	cr.setControllerState(cs)
+	cr.sessionDrains = newDrainTracker()
+
+	writeCityRuntimeConfigNamed(t, tomlPath, "workspace-name", "fail")
+	lastProviderName := "fake"
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceWatch)
+
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reload outcome = %q (error %q), want %q; stderr=%q", reply.Outcome, reply.Error, reloadOutcomeApplied, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "workspace.name changed") {
+		t.Fatalf("reload treated the registry alias as workspace drift: %s", stderr.String())
+	}
+	if got := config.EffectiveCityName(cr.cfg, ""); got != "machine-alias" {
+		t.Fatalf("EffectiveCityName after reload = %q, want machine-alias", got)
+	}
+}
+
 func TestCityRuntimeReloadLifecycleFailureKeepsOldConfig(t *testing.T) {
 	cityPath := t.TempDir()
 	tomlPath := filepath.Join(cityPath, "city.toml")
