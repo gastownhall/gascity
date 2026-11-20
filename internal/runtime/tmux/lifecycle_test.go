@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -222,6 +224,72 @@ func TestKillServerWaitsForListenerToClose(t *testing.T) {
 				if obs.calls != 1 || !slices.Contains(fe.calls[0], "kill-server") {
 					t.Errorf("observation %d made after %d tmux calls %v; want it after exactly the kill-server call", i, obs.calls, fe.calls)
 				}
+			}
+		})
+	}
+}
+
+// TestKillServerReportsListenerThatStaysLive verifies that KillServer reports a
+// listener still answering at the settle bound as ErrServerDegraded with the
+// socket path and the last observation, and never as ErrNoServer, including
+// when the observation itself hangs until the bound.
+func TestKillServerReportsListenerThatStaysLive(t *testing.T) {
+	const bound = 50 * time.Millisecond
+	saved := killServerSettleTimeout
+	killServerSettleTimeout = bound
+	t.Cleanup(func() { killServerSettleTimeout = saved })
+
+	for _, tc := range []struct {
+		name            string
+		observe         func(ctx context.Context, path string) error
+		minObservations int
+	}{
+		{
+			name: "observer reports live",
+			observe: func(_ context.Context, path string) error {
+				return errors.New("path=" + path + " inode=1 peer_pid=42 reason=live-unix-socket")
+			},
+			minObservations: 2,
+		},
+		{
+			name: "observer hangs until the bound",
+			observe: func(ctx context.Context, path string) error {
+				<-ctx.Done()
+				return errors.New("path=" + path + " peer_pid=42 reason=live-unix-socket")
+			},
+			minObservations: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fe := &fakeExecutor{}
+			observations := 0
+			tm := &Tmux{cfg: Config{SocketName: "gc-settle"}, exec: fe}
+			tm.serverSocketObserver = func(ctx context.Context, path string) error {
+				observations++
+				return tc.observe(ctx, path)
+			}
+
+			start := time.Now()
+			err := tm.KillServer()
+			elapsed := time.Since(start)
+
+			if !errors.Is(err, ErrServerDegraded) {
+				t.Fatalf("KillServer() error = %v, want ErrServerDegraded", err)
+			}
+			if errors.Is(err, ErrNoServer) {
+				t.Errorf("KillServer() error = %v wraps ErrNoServer; a live listener must not read as an absent server", err)
+			}
+			path := tm.namedServerSocketPath()
+			for _, want := range []string{"protocol=kill-server-settle", "path=" + path, "peer_pid=42 reason=live-unix-socket"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("KillServer() error = %q, want it to contain %q", err, want)
+				}
+			}
+			if observations < tc.minObservations {
+				t.Errorf("KillServer observed the socket %d times, want at least %d", observations, tc.minObservations)
+			}
+			if elapsed < bound {
+				t.Errorf("KillServer returned after %s, want no sooner than the %s settle bound", elapsed, bound)
 			}
 		})
 	}

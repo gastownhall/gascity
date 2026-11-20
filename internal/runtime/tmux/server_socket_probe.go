@@ -324,8 +324,10 @@ var killServerSettleTimeout = 5 * time.Second
 const killServerSettlePoll = 10 * time.Millisecond
 
 // awaitServerSocketClosed polls the named server socket until its observation
-// reports it absent or stale, bounded by killServerSettleTimeout. The observer
-// receives the bounded context, so a hung observation still ends at the bound.
+// reports it absent or stale, bounded by killServerSettleTimeout. A listener
+// still answering at the bound is ErrServerDegraded carrying the last
+// observation the bound did not cut short. The observer receives the bounded
+// context, so a hung observation still ends at the bound.
 func (t *Tmux) awaitServerSocketClosed() error {
 	ctx, cancel := context.WithTimeout(context.Background(), killServerSettleTimeout)
 	defer cancel()
@@ -340,7 +342,9 @@ func (t *Tmux) awaitServerSocketClosed() error {
 			last = observationErr
 		}
 		if sleepWithContext(ctx, killServerSettlePoll) != nil {
-			return fmt.Errorf("waiting for tmux server socket %s to close: %w", path, last)
+			// Never wrap ErrNoServer: a listener that still answers is not an
+			// absent server, and the next start on this socket would refuse it.
+			return fmt.Errorf("%w: protocol=kill-server-settle path=%s waited=%s observation=%w", ErrServerDegraded, path, killServerSettleTimeout, last)
 		}
 	}
 }
