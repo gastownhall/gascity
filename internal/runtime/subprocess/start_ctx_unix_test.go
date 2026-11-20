@@ -445,14 +445,15 @@ func TestConcurrentStartsOfOneNameHaveOneWinner(t *testing.T) {
 	if !p.IsRunning("contended") {
 		t.Error("the winning Start's session is not running")
 	}
-	live := 0
+	// The winner's process is still being waited on by its reap goroutine, so
+	// only the losers' commands may be inspected: each must be killed and reaped.
+	p.mu.Lock()
+	winner := p.procs["contended"].cmd
+	p.mu.Unlock()
 	for _, cmd := range rec.started() {
-		if cmd.ProcessState == nil {
-			live++
+		if cmd != winner && cmd.ProcessState == nil {
+			t.Errorf("process %d belongs to a losing Start and was not killed and reaped", cmd.Process.Pid)
 		}
-	}
-	if live != 1 {
-		t.Errorf("%d started process(es) are unreaped, want 1 (the winner): a losing Start leaked its process", live)
 	}
 	if err := p.Stop("contended"); err != nil {
 		t.Fatalf("Stop: %v", err)
@@ -616,4 +617,44 @@ func TestStopAfterInFlightStartFailsIsNoOp(t *testing.T) {
 		t.Fatal("Stop did not return after the Start it waited for failed")
 	}
 	requireNothingLeaked(t, p, "doomed", fds)
+}
+
+// (c) The commit re-checks the name under the map guard: a live session that
+// appeared in p.procs while this Start was in flight wins, this Start returns
+// runtime.ErrSessionExists, and it leaves the holder alone and its own process
+// reaped.
+// Kills: a commit that overwrites p.procs[name] without looking.
+func TestStartCommitRechecksNameUnderMapGuard(t *testing.T) {
+	p := newTestProvider(t)
+	rec := newRecordingStart(p)
+	rec.killAllAtCleanup(t)
+	fds := devNullFDs(t)
+	blk := newBlockingStart(p.ops.start)
+	p.ops.start = blk.start
+	t.Cleanup(blk.unblock)
+
+	startErr := make(chan error, 1)
+	go func() {
+		startErr <- p.Start(context.Background(), "late", runtime.Config{Command: "sleep 300", Env: identityEnv})
+	}()
+	waitClosed(t, blk.entered, "Start to reach providerOps.start")
+
+	holder := &sessionConn{done: make(chan struct{})}
+	p.mu.Lock()
+	p.procs["late"] = holder
+	p.mu.Unlock()
+	blk.unblock()
+
+	if err := <-startErr; !errors.Is(err, runtime.ErrSessionExists) {
+		t.Fatalf("Start = %v, want runtime.ErrSessionExists", err)
+	}
+	p.mu.Lock()
+	cur := p.procs["late"]
+	delete(p.procs, "late")
+	p.mu.Unlock()
+	if cur != holder {
+		t.Error("a losing Start replaced the live session that held the name")
+	}
+	rec.requireAllReaped(t)
+	requireNothingLeaked(t, p, "late", fds)
 }

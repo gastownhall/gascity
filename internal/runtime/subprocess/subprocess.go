@@ -41,6 +41,12 @@ import (
 )
 
 // Provider manages agent sessions as child processes.
+//
+// mu is a short map guard: it covers reads, inserts and deletes of procs,
+// workDirs, starting, stopping and scanExecutables, and nothing that can block.
+// Process creation, work-dir staging, control-socket setup, Kill and Wait never
+// run while it is held, so a wedged Start of one name cannot queue any other
+// call. A Start owns its name through the starting reservation instead.
 type Provider struct {
 	mu       sync.Mutex
 	dir      string                  // socket/meta file directory
@@ -51,7 +57,12 @@ type Provider struct {
 	// channel closed once that Stop has finished. Start and Stop wait on it,
 	// so no replacement starts, and no second Stop reports success, while the
 	// first is still confirming the tree gone.
-	stopping        map[string]chan struct{}
+	stopping map[string]chan struct{}
+	// starting holds, for each name a Start is in flight for, a channel closed
+	// once that Start has finished, committed or not. A second Start of the
+	// name reports [runtime.ErrSessionExists] rather than racing the first; a
+	// Stop of the name waits on it.
+	starting        map[string]chan struct{}
 	scanExecutables []string
 	// fenceChecked is a test seam run between a fenced operation's check and
 	// its signal.
@@ -147,21 +158,37 @@ func newProvider(dir string) *Provider {
 			dial:   net.DialTimeout,
 		},
 		stopping: make(map[string]chan struct{}),
+		starting: make(map[string]chan struct{}),
 	}
 }
 
 // Start spawns a child process for the given session name and config.
-// Returns an error if a session with that name is already running.
+// Returns an error if a session with that name is already running or is being
+// started.
 // Startup hints (ReadyPromptPrefix, ProcessNames, etc.) are ignored —
 // all sessions are fire-and-forget.
-func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) error {
+//
+// Start holds no provider-wide lock while it works: it reserves name, does the
+// slow steps (work-dir staging, process creation, identity sidecar, control
+// socket) outside p.mu, and commits the session under it. ctx is checked at
+// each step boundary, so a canceled or expired ctx stops Start at the next one
+// and leaves nothing behind: no process, work-dir entry, /dev/null descriptor,
+// identity sidecar or socket artifact. ctx is deliberately not tied to the
+// session process itself ([exec.CommandContext] would kill a healthy session
+// when a per-start timeout expires), and process creation is not interruptible,
+// so a ctx that expires inside it is seen at the boundary after it. A process
+// that outlives its kill for [runtime.ManagedProcessReapGrace] yields an error
+// satisfying errors.Is([runtime.ErrProcessNotConfirmedDead]) joined with the
+// cause.
+func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) error {
 	// Build environment: inherit parent env + apply overrides. An empty override
 	// spells withholding, matching the tmux adapter: remove the inherited entry
 	// instead of passing KEY=, so namespace isolation remains real to children.
 	// The parent env is read through execenv.Environ so a native beads store
 	// open projecting its scope's BEADS_* variables cannot leak into the session.
-	// It is read before p.mu, so the provider's other calls never wait on the
-	// read; execenv.Environ itself never waits for an open's projection window.
+	// It is read before the name is reserved, so the provider's other calls
+	// never wait on the read; execenv.Environ itself never waits for an open's
+	// projection window.
 	env := execenv.Environ()
 	if len(cfg.Env) > 0 {
 		keys := make([]string, 0, len(cfg.Env))
@@ -178,41 +205,32 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 		}
 	}
 
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	euid := os.Geteuid()
-	if err := p.awaitStopLocked(name); err != nil {
+	release, err := p.reserveStart(name)
+	if err != nil {
 		return err
 	}
-
-	// Check in-memory tracking first.
-	if existing, ok := p.procs[name]; ok {
-		if existing.alive() {
-			return fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
-		}
-		// The leader has exited, but a tree still held has members that
-		// outlived it; a replacement must not start beside them.
-		// p.mu is held, and reap takes it before it finishes, so this must not
-		// wait for reap the way terminateSessionConn does.
-		if processgroup.HoldsTree(existing.cmd) {
-			if err := processgroup.TerminateManagedCommand(existing.cmd, existing.pgid, existing.done, runtime.ManagedProcessStopGrace, processgroup.Options{}); err != nil {
-				return fmt.Errorf("stopping what the previous session %q left running: %w", name, processStopError(err))
-			}
-		}
-		delete(p.procs, name)
-	}
+	defer release()
 
 	// Check socket for cross-process case.
 	if p.socketAliveAt(name, euid) {
 		return fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
 	}
 
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("starting session %q: %w", name, err)
+	}
+
 	// Store workDir for CopyTo.
 	if cfg.WorkDir != "" {
+		p.mu.Lock()
 		p.workDirs[name] = cfg.WorkDir
+		p.mu.Unlock()
 	}
 	clearWorkDir := func() {
+		p.mu.Lock()
 		delete(p.workDirs, name)
+		p.mu.Unlock()
 	}
 
 	if err := runtime.StageSessionWorkDir(cfg); err != nil {
@@ -255,6 +273,11 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 		clearWorkDir()
 		return fmt.Errorf("preparing control socket for %q: %w", name, err)
 	}
+	if err := ctx.Err(); err != nil {
+		_ = nullFile.Close()
+		clearWorkDir()
+		return fmt.Errorf("starting session %q: %w", name, err)
+	}
 	pgid, err := p.ops.start(cmd)
 	if err != nil {
 		_ = nullFile.Close()
@@ -263,13 +286,23 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 	}
 	_ = nullFile.Close()
 
+	// From here a process exists, so every exit kills it and clears the work
+	// dir; exits after the metadata write also clear the sidecar.
+	if err := ctx.Err(); err != nil {
+		clearWorkDir()
+		return reapFailedStart(cmd, pgid, fmt.Errorf("starting session %q: %w", name, err))
+	}
+
 	// Seed the identity sidecar before the control socket exists, so no
 	// reader can see a live socket that carries no identity.
 	if err := p.persistStartMetadata(name, cfg.Env); err != nil {
-		_ = processgroup.KillCommandGroup(cmd, pgid, processgroup.Options{})
-		_ = cmd.Wait()
 		clearWorkDir()
-		return fmt.Errorf("storing metadata for %q: %w", name, err)
+		return reapFailedStart(cmd, pgid, fmt.Errorf("storing metadata for %q: %w", name, err))
+	}
+	if err := ctx.Err(); err != nil {
+		p.clearSessionMeta(name)
+		clearWorkDir()
+		return reapFailedStart(cmd, pgid, fmt.Errorf("starting session %q: %w", name, err))
 	}
 
 	// Create control socket for cross-process discovery.
@@ -280,29 +313,123 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 	lis, err := p.startControlSocket(name, sc, socketDir, euid)
 	if err != nil {
 		// Socket creation failed — reap the owned tree and bail.
-		_ = processgroup.KillCommandGroup(cmd, pgid, processgroup.Options{})
-		_ = cmd.Wait()
 		p.clearSessionMeta(name)
 		clearWorkDir()
-		return fmt.Errorf("creating control socket for %q: %w", name, err)
+		return reapFailedStart(cmd, pgid, fmt.Errorf("creating control socket for %q: %w", name, err))
+	}
+	sc.listener = lis
+
+	// abortBound undoes a Start whose socket exists but which cannot commit:
+	// the socket goes first so no reader sees a session that is about to fail,
+	// then the sidecar, then the process.
+	abortBound := func(cause error) error {
+		_ = lis.Close()
+		_ = p.removeSocketArtifactsAt(name, socketDir, euid)
+		p.clearSessionMeta(name)
+		clearWorkDir()
+		return reapFailedStart(cmd, pgid, cause)
+	}
+	if err := ctx.Err(); err != nil {
+		return abortBound(fmt.Errorf("starting session %q: %w", name, err))
 	}
 
-	sc.listener = lis
-	go p.reap(name, sc, socketDir, euid)
-
+	// Re-check the name under the map guard: whatever the reservation kept out
+	// of p.procs, a live session there now means this Start lost.
+	p.mu.Lock()
+	if existing, ok := p.procs[name]; ok && existing.alive() {
+		p.mu.Unlock()
+		return abortBound(fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name))
+	}
 	p.procs[name] = sc
+	go p.reap(name, sc, socketDir, euid)
+	p.mu.Unlock()
 	return nil
+}
+
+// reserveStart gives the caller the exclusive right to start name until the
+// returned release is called. It waits out a Stop of name already in progress,
+// reports [runtime.ErrSessionExists] for a name that is live or whose Start is
+// in flight, and, when a tracked session has exited but left a held tree
+// behind, stops that tree first so a replacement does not start beside its
+// members. The reservation is taken before that slow stop, and the stop runs
+// outside p.mu.
+func (p *Provider) reserveStart(name string) (release func(), err error) {
+	p.mu.Lock()
+	if err := p.awaitNameLocked(name, false); err != nil {
+		p.mu.Unlock()
+		return nil, err
+	}
+	if _, inflight := p.starting[name]; inflight {
+		p.mu.Unlock()
+		return nil, fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
+	}
+	existing, tracked := p.procs[name]
+	if tracked && existing.alive() {
+		p.mu.Unlock()
+		return nil, fmt.Errorf("%w: session %q", runtime.ErrSessionExists, name)
+	}
+	done := make(chan struct{})
+	p.starting[name] = done
+	p.mu.Unlock()
+	release = func() {
+		p.mu.Lock()
+		delete(p.starting, name)
+		close(done)
+		p.mu.Unlock()
+	}
+	if !tracked {
+		return release, nil
+	}
+	// The leader has exited, but a tree still held has members that outlived
+	// it; a replacement must not start beside them. reap takes p.mu before it
+	// finishes, so this must not wait for reap the way terminateSessionConn does.
+	if processgroup.HoldsTree(existing.cmd) {
+		if err := processgroup.TerminateManagedCommand(existing.cmd, existing.pgid, existing.done, runtime.ManagedProcessStopGrace, processgroup.Options{}); err != nil {
+			release()
+			return nil, fmt.Errorf("stopping what the previous session %q left running: %w", name, processStopError(err))
+		}
+	}
+	p.mu.Lock()
+	if p.procs[name] == existing {
+		delete(p.procs, name)
+	}
+	p.mu.Unlock()
+	return release, nil
+}
+
+// reapFailedStart kills the process group of a Start that cannot commit and
+// waits at most [runtime.ManagedProcessReapGrace] for the process to be reaped.
+// It returns cause once the process is gone. A process that outlives its kill
+// yields an error satisfying errors.Is([runtime.ErrProcessNotConfirmedDead])
+// that also wraps cause, so a caller cannot read the join as "gone" even when
+// the cause's text says "not found".
+func reapFailedStart(cmd *exec.Cmd, pgid int, cause error) error {
+	_ = processgroup.KillCommandGroup(cmd, pgid, processgroup.Options{})
+	waited := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(waited)
+	}()
+	timer := time.NewTimer(runtime.ManagedProcessReapGrace)
+	defer timer.Stop()
+	select {
+	case <-waited:
+		return cause
+	case <-timer.C:
+		return fmt.Errorf("%w: process still running %v after SIGKILL: %w", runtime.ErrProcessNotConfirmedDead, runtime.ManagedProcessReapGrace, cause)
+	}
 }
 
 // reap cleans up after sc's process exits. The socket goes first, so
 // ListRunning never sees a stale socket after Stop returns. done closes next,
 // so the runtime reads not alive before its identity sidecar is cleared.
 //
-// The sidecar is cleared only while it is still this incarnation's. Under p.mu
-// no newer Start in this provider can be mid-seed, so a name this provider now
-// tracks for a newer incarnation is left alone; a sidecar another provider has
-// reseeded carries a different token. The token check is a read before the
-// remove, so it narrows the cross-process race rather than closing it.
+// The sidecar is cleared only while it is still this incarnation's. A name this
+// provider now tracks for a newer incarnation, or has reserved for a Start that
+// is mid-seed, is left alone (that Start clears and reseeds the sidecar itself);
+// a sidecar another provider has reseeded carries a different token. The token
+// check is a read before the remove, so it narrows the cross-process race
+// rather than closing it.
 func (p *Provider) reap(name string, sc *sessionConn, socketDir string, euid int) {
 	defer close(sc.reaped)
 	_ = sc.cmd.Wait()
@@ -317,7 +444,11 @@ func (p *Provider) reap(name string, sc *sessionConn, socketDir string, euid int
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if cur, ok := p.procs[name]; ok && cur != sc {
+	cur, tracked := p.procs[name]
+	if tracked && cur != sc {
+		return
+	}
+	if _, starting := p.starting[name]; starting && !tracked {
 		return
 	}
 	if token, err := p.GetMeta(name, "GC_INSTANCE_TOKEN"); err != nil || token != sc.token {
@@ -345,7 +476,9 @@ func envWithoutKey(env []string, key string) []string {
 func (p *Provider) Stop(name string) error {
 	euid := os.Geteuid()
 	p.mu.Lock()
-	if err := p.awaitStopLocked(name); err != nil {
+	// A Start of name still in flight is waited for, so Stop never reports
+	// success while the process that Start is about to commit goes unstopped.
+	if err := p.awaitNameLocked(name, true); err != nil {
 		p.mu.Unlock()
 		return err
 	}
@@ -394,27 +527,33 @@ func (p *Provider) Stop(name string) error {
 var testHookBeforeStopTeardown func(name string)
 
 // stopWaitTimeout bounds how long Start or Stop waits for a Stop of the same
-// session already in progress: a cooperative grace, then a forced
-// termination and its confirmation.
+// session already in progress, or Stop for a Start of it: a cooperative grace,
+// then a forced termination and its confirmation.
 const stopWaitTimeout = 3*runtime.ManagedProcessStopGrace + 10*time.Second
 
-// awaitStopLocked waits for a Stop of name already in progress to finish,
-// releasing p.mu while it waits. p.mu must be held, and is held on return.
-func (p *Provider) awaitStopLocked(name string) error {
+// awaitNameLocked waits for a Stop of name already in progress to finish and,
+// when waitStart is set, for a Start of name in flight to finish, releasing
+// p.mu while it waits. p.mu must be held, and is held on return.
+func (p *Provider) awaitNameLocked(name string, waitStart bool) error {
 	deadline := time.Now().Add(stopWaitTimeout)
 	for {
-		stopped, stopping := p.stopping[name]
-		if !stopping {
+		pending, ok := p.stopping[name]
+		what := "stopped"
+		if !ok && waitStart {
+			pending, ok = p.starting[name]
+			what = "started"
+		}
+		if !ok {
 			return nil
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			return fmt.Errorf("session %q is still being stopped after %s", name, stopWaitTimeout)
+			return fmt.Errorf("session %q is still being %s after %s", name, what, stopWaitTimeout)
 		}
 		p.mu.Unlock()
 		timer := time.NewTimer(remaining)
 		select {
-		case <-stopped:
+		case <-pending:
 		case <-timer.C:
 		}
 		timer.Stop()
