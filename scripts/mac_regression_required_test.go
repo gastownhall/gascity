@@ -67,41 +67,26 @@ func runMacGateStep(t *testing.T, env map[string]string) map[string]string {
 	return got
 }
 
+// There is no automatic per-PR trigger (ci-speed-review-2026-11-20.md §6,
+// §7, §11 item 10): the smoke tier failed on
+// TestProxyProcessReapRegistryMatchesAnEquivalentSpelling on 92-100% of PR
+// runs while gating nothing (not a required check), at about $5.1k/30d.
+// Coverage now comes from the nightly schedule (full tier) and, on demand,
+// the needs-mac PR label, which dispatch-labeled-pr-suite.yml turns into a
+// workflow_dispatch with suite=needs-mac.
 func TestMacRegressionGateRunsSmokeOnEveryNonDocsPullRequest(t *testing.T) {
-	sameRepoPR := map[string]string{
-		"EVENT_NAME":     "pull_request",
-		"PR_HEAD_REPO":   "gastownhall/gascity",
-		"PR_DRAFT":       "false",
-		"NEEDS_LABEL":    "false",
-		"FILTER_OUTCOME": "success",
-		"CODE_CHANGED":   "true",
-	}
-	with := func(over map[string]string) map[string]string {
-		env := map[string]string{}
-		for k, v := range sameRepoPR {
-			env[k] = v
-		}
-		for k, v := range over {
-			env[k] = v
-		}
-		return env
-	}
 	cases := []struct {
 		name                  string
 		env                   map[string]string
 		smoke, full, formulas string
 		reason                string
 	}{
-		{name: "code change", env: sameRepoPR, smoke: "true", full: "false", formulas: "false"},
-		{name: "docs-only change", env: with(map[string]string{"CODE_CHANGED": "false"}), smoke: "false", full: "false", formulas: "false", reason: "docs-only"},
-		{name: "diff not classified", env: with(map[string]string{"FILTER_OUTCOME": "failure", "CODE_CHANGED": ""}), smoke: "true", full: "false", formulas: "false"},
-		{name: "needs-mac label", env: with(map[string]string{"NEEDS_LABEL": "true", "CODE_CHANGED": "false"}), smoke: "true", full: "true", formulas: "false"},
-		{name: "draft", env: with(map[string]string{"PR_DRAFT": "true"}), smoke: "false", full: "false", formulas: "false", reason: "draft"},
-		{name: "fork", env: with(map[string]string{"PR_HEAD_REPO": "someone/gascity"}), smoke: "false", full: "false", formulas: "false", reason: "fork"},
 		{name: "merge group", env: map[string]string{"EVENT_NAME": "merge_group"}, smoke: "false", full: "false", formulas: "false", reason: "merge_group"},
 		{name: "nightly", env: map[string]string{"EVENT_NAME": "schedule"}, smoke: "true", full: "true", formulas: "true"},
 		{name: "dispatch full", env: map[string]string{"EVENT_NAME": "workflow_dispatch", "SUITE_INPUT": "full"}, smoke: "true", full: "true", formulas: "true"},
-		{name: "dispatch needs-mac", env: map[string]string{"EVENT_NAME": "workflow_dispatch", "SUITE_INPUT": "needs-mac"}, smoke: "true", full: "true", formulas: "false"},
+		{name: "dispatch needs-mac (e.g. the needs-mac PR label)", env: map[string]string{"EVENT_NAME": "workflow_dispatch", "SUITE_INPUT": "needs-mac"}, smoke: "true", full: "true", formulas: "false"},
+		{name: "dispatch smoke", env: map[string]string{"EVENT_NAME": "workflow_dispatch", "SUITE_INPUT": "smoke"}, smoke: "true", full: "false", formulas: "false"},
+		{name: "no trigger matched", env: map[string]string{"EVENT_NAME": "pull_request"}, smoke: "false", full: "false", formulas: "false", reason: "no trigger matched"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -113,32 +98,6 @@ func TestMacRegressionGateRunsSmokeOnEveryNonDocsPullRequest(t *testing.T) {
 				t.Errorf("gate reason = %q, want it to mention %q", got["reason"], tc.reason)
 			}
 		})
-	}
-}
-
-// The gate classifies a pull request's diff as docs-only or not; anything
-// outside the docs trees (and the root's markdown files) runs the smoke tier.
-func TestMacRegressionGateClassifiesDocsOnlyDiffs(t *testing.T) {
-	filter := macRegressionStep(t, "gate", "filter")
-	if got := filter.With["predicate-quantifier"]; got != "every" {
-		t.Errorf("gate filter predicate-quantifier = %q, want every (a file is code only when it matches every pattern)", got)
-	}
-	var filters map[string][]string
-	if err := yaml.Unmarshal([]byte(filter.With["filters"]), &filters); err != nil {
-		t.Fatalf("gate filters: %v", err)
-	}
-	want := []string{"**", "!docs/**", "!engdocs/**", "!*.md"}
-	if got := filters["code"]; !slices.Equal(got, want) {
-		t.Errorf("gate code filter = %q, want %q", got, want)
-	}
-	decide := macRegressionStep(t, "gate", "gate")
-	for name, want := range map[string]string{
-		"FILTER_OUTCOME": "${{ steps.filter.outcome }}",
-		"CODE_CHANGED":   "${{ steps.filter.outputs.code }}",
-	} {
-		if got := decide.Env[name]; got != want {
-			t.Errorf("gate decision env %s = %q, want %q", name, got, want)
-		}
 	}
 }
 

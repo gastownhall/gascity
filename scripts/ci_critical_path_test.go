@@ -413,11 +413,13 @@ func TestMacAcceptanceRetainsExternalBdContract(t *testing.T) {
 	}
 }
 
-// TestMacRegressionGateCentralizesTierRouting asserts the new centralized
+// TestMacRegressionGateCentralizesTierRouting asserts the centralized
 // `gate` job (ga-hd99jq D1 / ga-n7ef4e): it always runs (no `if:`, so an
-// all-skipped workflow run can no longer happen), computes one reason string
-// plus the three tier booleans other jobs key off of, and mirrors
-// review-formulas.yml's own paths-filter + decision-step shape.
+// all-skipped workflow run can no longer happen) and computes one reason
+// string plus the three tier booleans other jobs key off of. There is no
+// automatic pull_request trigger (ci-speed-review-2026-11-20.md §6, §7,
+// §11 item 10) and so no paths-filter step: the gate only branches on
+// schedule, workflow_dispatch (full/needs-mac/smoke), and merge_group.
 func TestMacRegressionGateCentralizesTierRouting(t *testing.T) {
 	wf := readCriticalPathWorkflow(t, "mac-regression.yml")
 
@@ -448,16 +450,13 @@ func TestMacRegressionGateCentralizesTierRouting(t *testing.T) {
 		}
 	}
 
-	var filterStep, decideStep, checkoutStep ciCriticalPathStep
-	var hasFilter, hasDecide, hasCheckout bool
+	var decideStep, checkoutStep ciCriticalPathStep
+	var hasDecide, hasCheckout bool
 	for _, step := range gate.Steps {
 		if strings.HasPrefix(step.Uses, "actions/checkout@") {
 			checkoutStep, hasCheckout = step, true
 		}
-		switch step.ID {
-		case "filter":
-			filterStep, hasFilter = step, true
-		case "gate":
+		if step.ID == "gate" {
 			decideStep, hasDecide = step, true
 		}
 	}
@@ -474,24 +473,13 @@ func TestMacRegressionGateCentralizesTierRouting(t *testing.T) {
 			t.Errorf("gate checkout with.%s = %q, want %q (every other mac-regression job pins the same head ref/repo and disables credential persistence; the gate job must not be the odd one out)", name, got, want)
 		}
 	}
-	if !hasFilter {
-		t.Fatal("gate job has no paths-filter step (id: filter)")
-	}
-	if !strings.Contains(filterStep.Uses, "dorny/paths-filter") {
-		t.Errorf("gate filter step uses = %q, want dorny/paths-filter (same tool review-formulas.yml uses)", filterStep.Uses)
-	}
-	// The filter's classification (docs-only or not) is pinned by
-	// TestMacRegressionGateClassifiesDocsOnlyDiffs.
 	if !hasDecide {
 		t.Fatal("gate job has no routing-decision step (id: gate)")
 	}
 
 	wantDecideEnv := map[string]string{
-		"EVENT_NAME":   "${{ github.event_name }}",
-		"SUITE_INPUT":  "${{ inputs.suite }}",
-		"PR_HEAD_REPO": "${{ github.event.pull_request.head.repo.full_name }}",
-		"PR_DRAFT":     "${{ github.event.pull_request.draft }}",
-		"NEEDS_LABEL":  "${{ contains(github.event.pull_request.labels.*.name, 'needs-mac') }}",
+		"EVENT_NAME":  "${{ github.event_name }}",
+		"SUITE_INPUT": "${{ inputs.suite }}",
 	}
 	for name, want := range wantDecideEnv {
 		if got := decideStep.Env[name]; got != want {
@@ -500,17 +488,17 @@ func TestMacRegressionGateCentralizesTierRouting(t *testing.T) {
 	}
 
 	// Every trigger path the exit_contract enumerates must be handled so the
-	// refactor preserves today's per-job run/skip outcome exactly.
+	// refactor preserves today's per-job run/skip outcome exactly. There is
+	// no pull_request branch: the automatic per-PR trigger was removed
+	// (ci-speed-review-2026-11-20.md §11 item 10).
 	for _, marker := range []string{
 		`"$EVENT_NAME" == "schedule"`,
 		`run_smoke=true; run_full=true; run_review_formulas=true`,
 		`"$EVENT_NAME" == "workflow_dispatch"`,
 		`case "$SUITE_INPUT" in`,
 		`needs-mac)`,
-		`"$EVENT_NAME" == "pull_request"`,
-		`"$PR_HEAD_REPO" != "${{ github.repository }}"`,
-		`"$PR_DRAFT" == "true"`,
-		`"$NEEDS_LABEL" == "true"`,
+		`"$EVENT_NAME" == "merge_group"`,
+		`reason="merge_group: not a required check, no tier run"`,
 		`echo "run_smoke=$run_smoke"`,
 		`echo "run_full=$run_full"`,
 		`echo "run_review_formulas=$run_review_formulas"`,
