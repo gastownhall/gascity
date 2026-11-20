@@ -704,3 +704,73 @@ func TestInitAndHookDirProviderOwnedIdentityFailureKeepsInitializing(t *testing.
 		assertProviderOwnedScopeInitializing(t, city, dir)
 	})
 }
+
+// newProviderOwnedReadyScope builds a city and a scope whose journal entry is
+// already ready, with metadata seeded from projectID.
+func newProviderOwnedReadyScope(t *testing.T, script, projectID string) (city, dir string) {
+	t.Helper()
+	city, dir = newProviderOwnedIdentityScope(t, script)
+	writeProviderOwnedScopeMetadata(t, dir, projectID)
+	if err := markProviderScopeOwnershipReady(city, dir); err != nil {
+		t.Fatalf("mark scope ready: %v", err)
+	}
+	return city, dir
+}
+
+// TestInitAndHookDirProviderOwnedReadyScopeReconcilesEachPass: a ready
+// scope's lifecycle pass reconciles its layers like a pending one — the pass
+// runs start then health, writes what drifted, and leaves the journal ready.
+func TestInitAndHookDirProviderOwnedReadyScopeReconcilesEachPass(t *testing.T) {
+	const projectID = "11111111-2222-3333-4444-555555555555"
+	const wrongID = "99999999-8888-7777-6666-555555555555"
+
+	t.Run("ready scope reconciles a missing L1 each pass", func(t *testing.T) {
+		clearProviderOwnedProxyEnvironment(t)
+		script := filepath.Join(t.TempDir(), "provider.sh")
+		oplog := filepath.Join(t.TempDir(), "oplog")
+		writeProviderOwnedLoggingInitScript(t, script, oplog)
+		city, dir := newProviderOwnedReadyScope(t, script, projectID)
+		l3 := &projectIdentityL3Double{projectID: projectID}
+		recorder := stubProviderOwnedIdentitySeams(t, l3)
+
+		if err := initAndHookDirResolvingDatabase(city, dir, "prov", nil); err != nil {
+			t.Fatalf("ready-scope pass: %v", err)
+		}
+
+		ops := readProviderOwnedScopeFile(t, oplog)
+		if strings.TrimSpace(string(ops)) != "start\nhealth" {
+			t.Fatalf("op log = %q, want \"start health\": a ready scope reopens its provider rather than re-initializing", ops)
+		}
+		got, ok, err := contract.ReadProjectIdentity(fsys.OSFS{}, dir)
+		if err != nil || !ok || got != projectID {
+			t.Fatalf("L1 after the ready-scope pass = (%q, %t, %v), want %q", got, ok, err, projectID)
+		}
+		entry, ok, err := providerScopeOwnership(city, dir)
+		if err != nil || !ok || entry.State != providerScopeReady {
+			t.Fatalf("journal after the ready-scope pass = (%+v, %t, %v), want unchanged ready", entry, ok, err)
+		}
+		assertProjectIdentityApplyStampedEvents(t, recorder.records, []projectIdentityApplyStampedEvent{
+			{source: "migrated_from_metadata", layer: "L1", newID: projectID},
+		})
+	})
+
+	t.Run("ready scope refuses a mismatch without changing the journal", func(t *testing.T) {
+		clearProviderOwnedProxyEnvironment(t)
+		script := filepath.Join(t.TempDir(), "provider.sh")
+		writeProviderOwnedLoggingInitScript(t, script, filepath.Join(t.TempDir(), "oplog"))
+		city, dir := newProviderOwnedReadyScope(t, script, projectID)
+		if err := contract.WriteProjectIdentity(fsys.OSFS{}, dir, wrongID); err != nil {
+			t.Fatalf("pre-write a disagreeing L1: %v", err)
+		}
+		stubProviderOwnedIdentitySeams(t, &projectIdentityL3Double{projectID: projectID})
+
+		err := initAndHookDirResolvingDatabase(city, dir, "prov", nil)
+		if err == nil || !strings.Contains(err.Error(), "MISMATCH") {
+			t.Fatalf("ready-scope pass with a drifted identity = %v, want the mismatch refusal", err)
+		}
+		entry, ok, err := providerScopeOwnership(city, dir)
+		if err != nil || !ok || entry.State != providerScopeReady {
+			t.Fatalf("journal after the refused ready-scope pass = (%+v, %t, %v), want unchanged ready", entry, ok, err)
+		}
+	})
+}
