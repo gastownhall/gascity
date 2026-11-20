@@ -650,6 +650,17 @@ func (opts StoreOpenOptions) openProxiedNative(ctx context.Context, diag *BeadsD
 		return false, StoreOpenResult{}, nil
 	}
 	store, report, err := opts.OpenProxiedStore(ctx, opts.LongLived)
+	if verdict := demotedProxiedVerdict(store, err); verdict != nil {
+		// A long-lived open whose native leaf refused non-terminally. The
+		// store serves from the bd leaf until its guard re-pins it, so until
+		// then the caller and the operator are told exactly what the bd
+		// fallback for the same verdict tells them.
+		opts.noteProxiedVerdict(diag, report, verdict)
+		fallback := *diag
+		fallback.Store = storeNameBdStore
+		result, stampErr := opts.stampedResult(StoreOpenResult{Store: store, Diagnostic: fallback}, nil)
+		return true, result, stampErr
+	}
 	if err == nil && store != nil {
 		result, stampErr := opts.stampedResult(StoreOpenResult{
 			Store: store,
@@ -668,7 +679,36 @@ func (opts StoreOpenOptions) openProxiedNative(ctx context.Context, diag *BeadsD
 	if err == nil {
 		err = errors.New("proxied store opener returned no store and no error")
 	}
-	if verdictErr, ok := ProxiedVerdictOf(err); ok && verdictErr.Verdict == ProxiedVerdictHeadMoved {
+	if verdictErr, ok := ProxiedVerdictOf(err); ok {
+		opts.noteProxiedVerdict(diag, report, verdictErr)
+		return false, StoreOpenResult{}, nil
+	}
+	// An UNTYPED failure is a different thing: admission is supposed to name
+	// every outcome, so this is a bug or an unhandled shape. The city still
+	// gets its store -- an operator who turned on a rollout flag must not lose
+	// a city to it -- but loudly, and with the text preserved.
+	diag.Proxied = report.diagnostic(ProxiedVerdictNone, err.Error())
+	logNativeUnavailable(opts.Logger, opts.ScopeRoot, proxiedProviderGate, err.Error())
+	return false, StoreOpenResult{}, nil
+}
+
+// demotedProxiedVerdict returns the verdict a successfully opened split store
+// is serving from the bd leaf under, or nil when it serves natively. One read:
+// a store carries a verdict exactly while it is demoted.
+func demotedProxiedVerdict(store Store, err error) *ProxiedVerdictError {
+	proxied, ok := store.(*ProxiedStore)
+	if !ok || err != nil {
+		return nil
+	}
+	return proxied.Verdict()
+}
+
+// noteProxiedVerdict records a verdict that put this open on the bd leaf: a
+// refusal the caller falls back on, or the verdict a demoted store was opened
+// with. Both are the same account, so an operator cannot tell them apart by
+// the diagnostic or the log.
+func (opts StoreOpenOptions) noteProxiedVerdict(diag *BeadsDiagnostic, report ProxiedOpenReport, verdictErr *ProxiedVerdictError) {
+	if verdictErr.Verdict == ProxiedVerdictHeadMoved {
 		// NOT an expected refusal: HEAD moved across gc's own library open,
 		// which may be gc having committed to bd's database (council pr2 D-F3).
 		// The city still gets its store, but the operator is told — at WARN,
@@ -681,24 +721,14 @@ func (opts StoreOpenOptions) openProxiedNative(ctx context.Context, diag *BeadsD
 		// open that could not report it (council pr2 E-S2).
 		diag.Proxied = report.diagnostic(verdictErr.Verdict, verdictErr.Detail)
 		logProxiedHeadMoved(opts.Logger, opts.ScopeRoot, ProxiedIncidentSiteOpen, verdictErr)
-		return false, StoreOpenResult{}, nil
+		return
 	}
-	if verdictErr, ok := ProxiedVerdictOf(err); ok {
-		// An expected refusal. The bd front door is the designed outcome, so
-		// this is not logged as an outage: proxied_provider is the one gate
-		// logNativeUnavailable deliberately stays quiet about, and a warning
-		// per open on every scope of a healthy Finite-idle city would be noise
-		// an operator learns to ignore.
-		diag.Proxied = report.diagnostic(verdictErr.Verdict, "")
-		return false, StoreOpenResult{}, nil
-	}
-	// An UNTYPED failure is a different thing: admission is supposed to name
-	// every outcome, so this is a bug or an unhandled shape. The city still
-	// gets its store -- an operator who turned on a rollout flag must not lose
-	// a city to it -- but loudly, and with the text preserved.
-	diag.Proxied = report.diagnostic(ProxiedVerdictNone, err.Error())
-	logNativeUnavailable(opts.Logger, opts.ScopeRoot, proxiedProviderGate, err.Error())
-	return false, StoreOpenResult{}, nil
+	// An expected refusal. The bd front door is the designed outcome, so this
+	// is not logged as an outage: proxied_provider is the one gate
+	// logNativeUnavailable deliberately stays quiet about, and a warning per
+	// open on every scope of a healthy Finite-idle city would be noise an
+	// operator learns to ignore.
+	diag.Proxied = report.diagnostic(verdictErr.Verdict, "")
 }
 
 func (opts StoreOpenOptions) openBdFallback(provider string, diag BeadsDiagnostic) (StoreOpenResult, error) {
