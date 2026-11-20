@@ -301,6 +301,43 @@ func TestGcBeadsBdRecoverSkipsWhenCityDatabaseUnavailableFallback(t *testing.T) 
 	}
 }
 
+// TestGcBeadsBdRecoverProceedsWhenCityDatabaseReadyOrUnnamed covers AC-8:
+// with no city database named, or with a ready one, recovery proceeds to
+// the managed recovery unchanged and the helper is called without
+// --database.
+func TestGcBeadsBdRecoverProceedsWhenCityDatabaseReadyOrUnnamed(t *testing.T) {
+	t.Run("no city database named", func(t *testing.T) {
+		gcBin, _ := writeFakeHealthCheckGC(t, "query_ready\ttrue\\nread_only\tfalse\\nconnection_count\t5\\n")
+		marker := filepath.Join(t.TempDir(), "recover-marker")
+
+		out := gcBeadsBdOpHarness(t, "op_recover", writeRecoverMarkerStubs(true),
+			`{"database":"dolt","backend":"dolt","dolt_mode":"server"}`,
+			"issue_prefix: hq\ngc.endpoint_origin: managed_city\n", gcBin, t.TempDir(),
+			"RECOVER_MARKER="+marker)
+		if !strings.Contains(out, "status=0") || strings.Contains(out, "recovery skipped") {
+			t.Fatalf("op_recover output = %s, want recovery to proceed", out)
+		}
+		if markerText := readMarker(t, marker); !strings.Contains(markerText, "helper-recover") {
+			t.Fatalf("recovery marker = %q, want the managed recovery to run", markerText)
+		}
+	})
+	t.Run("city database ready", func(t *testing.T) {
+		gcBin, _ := writeFakeHealthCheckGC(t,
+			"query_ready\ttrue\\nread_only\tfalse\\nconnection_count\t5\\ndatabase\thq\\ndatabase_ready\ttrue\\n")
+		marker := filepath.Join(t.TempDir(), "recover-marker")
+
+		out := gcBeadsBdOpHarness(t, "op_recover", writeRecoverMarkerStubs(true), cityMetadataHQ,
+			"issue_prefix: hq\ngc.endpoint_origin: managed_city\n", gcBin, t.TempDir(),
+			"RECOVER_MARKER="+marker)
+		if !strings.Contains(out, "status=0") || strings.Contains(out, "recovery skipped") {
+			t.Fatalf("op_recover output = %s, want recovery to proceed", out)
+		}
+		if markerText := readMarker(t, marker); !strings.Contains(markerText, "helper-recover") {
+			t.Fatalf("recovery marker = %q, want the managed recovery to run", markerText)
+		}
+	})
+}
+
 // writeFallbackHeadDolt writes a dolt CLI that answers only the city
 // database HEAD probe, failing it with headErr when non-empty.
 func writeFallbackHeadDolt(t *testing.T, headErr string) string {
