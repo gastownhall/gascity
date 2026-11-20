@@ -131,12 +131,31 @@ func TestNudgeStalledPoolClaims_UsesClaimFallbackWhenNudgeIsBlank(t *testing.T) 
 	}
 }
 
-func TestPoolClaimBackstopContent_PreservesExplicitNudge(t *testing.T) {
+// idleClaimProcedureNudge is a configured nudge that is a work procedure, not
+// a claim instruction: startup text the claim-recovery paths must never send
+// in place of their own claim line (issue #9196).
+const idleClaimProcedureNudge = "Check for uncommitted changes and commit them in logical groupings."
+
+func TestPoolClaimBackstopContent_IgnoresTheConfiguredNudge(t *testing.T) {
 	cfg := idleClaimTestCfg()
 	cfg.Agents[0].Nudge = "  Use the configured wake text exactly.  "
 
-	if got, want := (poolClaimBackstop{cfg: cfg}).content(idleClaimPoolSession()), "Use the configured wake text exactly."; got != want {
-		t.Fatalf("claim nudge = %q, want normalized configured value %q", got, want)
+	if got, want := (poolClaimBackstop{cfg: cfg}).content(idleClaimPoolSession()), defaultPoolClaimNudge; got != want {
+		t.Fatalf("claim nudge = %q, want the built-in claim line %q", got, want)
+	}
+}
+
+// A configured nudge that is a work procedure, not a claim instruction, must
+// not be sent verbatim as claim-backstop text: the backstop exists to make an
+// idle seat claim its routed trigger, so its text has to invoke the claim
+// protocol (issue #9196).
+func TestPoolClaimBackstopContent_ProcedureNudgeStillAsksToClaim(t *testing.T) {
+	cfg := idleClaimTestCfg()
+	cfg.Agents[0].Nudge = idleClaimProcedureNudge
+
+	got := (poolClaimBackstop{cfg: cfg}).content(idleClaimPoolSession())
+	if !strings.Contains(got, "gc hook --claim") {
+		t.Fatalf("claim backstop nudge = %q, want text that invokes gc hook --claim", got)
 	}
 }
 

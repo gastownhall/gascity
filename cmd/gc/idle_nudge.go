@@ -73,6 +73,11 @@ const (
 	idleClaimNudgeBusyHoldLimit = 10 * time.Minute
 )
 
+// defaultPoolClaimNudge is the claim line the trigger backstop, the warm-bind
+// reminder and the ladder's trigger rung send. It is the text those paths
+// deliver, not a fallback: recovery text is the SDK's, never the template's
+// configured nudge, which is startup text and can be a work procedure that
+// never says to claim (#9196).
 const defaultPoolClaimNudge = "Run " + runtime.GCCommandName + " hook --claim --drain-ack --json now; if it returns work, execute it immediately."
 
 // defaultHeldClaimNudge is the default for a seat whose claim (the %s) has
@@ -936,15 +941,17 @@ func claimNudgeFor(cfg *config.City, session beads.Bead) string {
 	return ladderClaimedNudge
 }
 
+// stalledPoolClaimNudgeFor is the claim line the trigger backstop and the
+// warm-bind reminder send: the built-in default, never the template's
+// configured nudge, which is startup text and can be a work procedure that
+// never says to claim (#9196). A template the config does not name gets no
+// text: the backstop fails closed rather than nudge a session it cannot
+// vouch for.
 func stalledPoolClaimNudgeFor(cfg *config.City, session beads.Bead) string {
-	nudge, known := configuredClaimNudgeFor(cfg, session)
-	if !known {
+	if _, known := configuredClaimNudgeFor(cfg, session); !known {
 		return ""
 	}
-	if nudge == "" {
-		return defaultPoolClaimNudge
-	}
-	return nudge
+	return defaultPoolClaimNudge
 }
 
 // heldClaimNudgeFor is stalledPoolClaimNudgeFor for a seat whose claim beadID
@@ -962,6 +969,9 @@ func heldClaimNudgeFor(cfg *config.City, session beads.Bead, beadID string) stri
 	return nudge
 }
 
+// configuredClaimNudgeFor looks up the session's template's configured
+// nudge. known reports whether the config names the template at all: the
+// recovery paths' fail-closed gate.
 func configuredClaimNudgeFor(cfg *config.City, session beads.Bead) (string, bool) {
 	template := normalizedSessionTemplate(session, cfg)
 	if template == "" {

@@ -2017,8 +2017,8 @@ func TestWarmReuseRemindsWithTheClaimInstructionNotTheReprimePayload(t *testing.
 		nudge string // the template's configured nudge
 		want  string
 	}{
-		{"lane", []string{"message"}, warmClaimText, warmClaimText},
-		{"direct", nil, warmClaimText, warmClaimText},
+		{"lane", []string{"message"}, warmClaimText, defaultPoolClaimNudge},
+		{"direct", nil, warmClaimText, defaultPoolClaimNudge},
 		{"lane, no configured nudge", []string{"message"}, "", defaultPoolClaimNudge},
 		{"direct, no configured nudge", nil, "", defaultPoolClaimNudge},
 	} {
