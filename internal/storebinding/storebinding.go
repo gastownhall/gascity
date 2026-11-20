@@ -318,7 +318,7 @@ type OrdersStore interface {
 	OpenRuns() ([]orders.OrderRun, error)
 	StaleOpenRuns(time.Time, time.Time) ([]orders.OrderRun, error)
 	StaleNotClosedRuns(time.Time, time.Time) ([]orders.OrderRun, error)
-	OrphanedOpenRuns() ([]orders.OrderRun, error)
+	OrphanedOpenRuns(time.Time) ([]orders.OrderRun, error)
 	ClosedRunsForRetention() ([]orders.OrderRun, error)
 	CloseRuns(context.Context, []string, string) (int, error)
 	CloseRunsSwept(context.Context, []string, string, string) (int, error)

@@ -1253,8 +1253,9 @@ func (m *memoryOrderDispatcher) doneInflight() {
 // expires. It returns true when no work remains and returns immediately if
 // nothing is in flight. When ctx expires, any still-running dispatches keep
 // running (they will still write tracking-bead outcomes via ctx-unaware store
-// calls); the startup sweep closes orphaned tracking beads on the next boot if
-// drain did not have enough time to let them finish. The channel-signal design
+// calls); if drain did not have enough time to let them finish, the next boot's
+// startup sweep, or a later stale sweep, closes their orphaned tracking beads
+// once each run's persisted deadline plus completion grace has passed. The channel-signal design
 // spawns no waiter goroutine and cannot leak state past return.
 func (m *memoryOrderDispatcher) drain(ctx context.Context) bool {
 	m.inflightMu.Lock()
@@ -3428,18 +3429,20 @@ func (m *memoryOrderDispatcher) gateFailClosed(ctx context.Context, a orders.Ord
 }
 
 // sweepOrphanedOrderTracking closes any open order-tracking beads left
-// behind by a previous controller instance. Returns the count of beads
-// closed. This is non-fatal: dispatch proceeds even if the sweep fails.
-func sweepOrphanedOrderTracking(store beads.Store) (int, error) {
-	return sweepOrphanedOrderTrackingLimit(store, 0)
+// behind by a previous controller instance, except the unfinished runs whose
+// persisted dispatch deadline plus completion grace is still after now.
+// Returns the count of beads closed. This is non-fatal: dispatch proceeds even
+// if the sweep fails.
+func sweepOrphanedOrderTracking(store beads.Store, now time.Time) (int, error) {
+	return sweepOrphanedOrderTrackingLimit(store, now, 0)
 }
 
-func sweepOrphanedOrderTrackingLimit(store beads.Store, limit int) (int, error) {
+func sweepOrphanedOrderTrackingLimit(store beads.Store, now time.Time, limit int) (int, error) {
 	// OrphanedOpenRuns lists the OPEN tracking beads across both tiers (new wisp
 	// + legacy issues) and excludes the trigger-env-failure markers the open-work
-	// gate intentionally keeps open.
+	// gate intentionally keeps open and the runs a dispatch deadline still holds.
 	front := orders.NewStore(beads.OrdersStore{Store: store})
-	runs, err := front.OrphanedOpenRuns()
+	runs, err := front.OrphanedOpenRuns(now)
 	if err != nil {
 		return 0, fmt.Errorf("listing order-tracking beads: %w", err)
 	}
@@ -4421,11 +4424,11 @@ func openSubtreeOlderThan(subtree []beads.Bead, cutoff time.Time) bool {
 // would stamp an already-closed bead is store-specific; see
 // internal/beads/beads.go). The wrapper sleeps for up to attempts*backoff in
 // the worst case.
-func sweepOrphanedOrderTrackingRetry(store beads.Store, attempts int, backoff time.Duration) (int, error) { //nolint:unparam // attempts is configurable for testability
-	return sweepOrphanedOrderTrackingRetryLimit(store, attempts, backoff, 0)
+func sweepOrphanedOrderTrackingRetry(store beads.Store, now time.Time, attempts int, backoff time.Duration) (int, error) { //nolint:unparam // attempts is configurable for testability
+	return sweepOrphanedOrderTrackingRetryLimit(store, now, attempts, backoff, 0)
 }
 
-func sweepOrphanedOrderTrackingRetryLimit(store beads.Store, attempts int, backoff time.Duration, limit int) (int, error) { //nolint:unparam // attempts is configurable for testability
+func sweepOrphanedOrderTrackingRetryLimit(store beads.Store, now time.Time, attempts int, backoff time.Duration, limit int) (int, error) { //nolint:unparam // attempts is configurable for testability
 	if attempts <= 0 {
 		attempts = 1
 	}
@@ -4443,7 +4446,7 @@ func sweepOrphanedOrderTrackingRetryLimit(store beads.Store, attempts int, backo
 			}
 		}
 		var n int
-		n, err = sweepOrphanedOrderTrackingLimit(store, remainingLimit)
+		n, err = sweepOrphanedOrderTrackingLimit(store, now, remainingLimit)
 		total += n
 		if err == nil {
 			return total, nil

@@ -225,10 +225,14 @@ func staleRuns(live beads.LiveReader, cutoff, now time.Time, statuses ...string)
 // bead OpenRuns does. Like StaleNotClosedRuns it reads every not-closed status
 // in one query, a tracking bead parked by hand included: it runs once per boot,
 // so it can afford the closed rows a native Dolt store decodes for that query.
+// It has no age floor, but like the stale reads it holds an unfinished run whose
+// persisted dispatch deadline plus runCompletionGrace is still after now: the
+// controller that dispatched it is gone, but a child it started may still be
+// working (deadlineHolds).
 // It is the typed read half of the orphaned-order-tracking startup sweep; the
 // caller closes the returned runs via CloseRuns. Names are best-effort (the
 // sweep closes by ID and does not resolve names).
-func (s *Store) OrphanedOpenRuns() ([]OrderRun, error) {
+func (s *Store) OrphanedOpenRuns(now time.Time) ([]OrderRun, error) {
 	if s.store == (beads.OrdersStore{}) {
 		return nil, nil
 	}
@@ -238,7 +242,7 @@ func (s *Store) OrphanedOpenRuns() ([]OrderRun, error) {
 	}
 	out := make([]OrderRun, 0, len(all))
 	for _, b := range all {
-		if beadLabelsContain(b.Labels, labelTriggerEnvFail) {
+		if beadLabelsContain(b.Labels, labelTriggerEnvFail) || deadlineHolds(b, now) {
 			continue
 		}
 		name, _ := NameFromTrackingBead(b)

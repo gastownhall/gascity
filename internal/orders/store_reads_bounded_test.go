@@ -260,7 +260,7 @@ func TestNotClosedSweepReadsListAHandParkedTrackingBeadOnNativeDolt(t *testing.T
 	if got, want := runIDs(notClosed), []string{"gc-open", "gc-parked"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("StaleNotClosedRuns() IDs = %v, want %v: the on-demand sweep's read must list every not-closed status the gate counts, a parked one included", got, want)
 	}
-	orphaned, err := st.OrphanedOpenRuns()
+	orphaned, err := st.OrphanedOpenRuns(time.Now())
 	if err != nil {
 		t.Fatalf("OrphanedOpenRuns(): %v", err)
 	}

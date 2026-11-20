@@ -435,6 +435,16 @@ Before dispatching, the orchestrator checks whether the order already has open
 it's due — so a still-running pancakes batch doesn't get a second one piled on
 top.
 
+The open work an order run leaves is its tracking record, which records the
+run's deadline: the dispatch time plus its effective timeout. The recovery
+sweeps that clear stale tracking records — the orchestrator's periodic
+watchdog, `gc order sweep-tracking`, and the sweep at orchestrator startup —
+leave an unfinished run's record open until that deadline and a one-minute
+completion grace have passed, so a long exec order keeps its single-flight
+protection for its whole timeout. The protection is bounded: once the deadline
+and grace pass, the sweeps close the record even if the run never reported
+back.
+
 The open-work check runs against the store with a bounded timeout; if the store
 is so contended that the check times out, the order is skipped — it fails
 closed. Orders whose dispatch is safe to repeat (sweeps and feeders where a

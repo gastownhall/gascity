@@ -2361,7 +2361,7 @@ func TestOrphanedOrderTrackingSweepSeesBeadsWrittenBehindTheCache(t *testing.T) 
 	store, backing := policyWrappedPrimedCache(t, cfg)
 	orphan := createBehindTheCache(t, store, backing, orderTrackingSweepOrder)
 
-	if _, err := sweepOrphanedOrderTrackingLimit(store, orderTrackingSweepCloseBudget); err != nil {
+	if _, err := sweepOrphanedOrderTrackingLimit(store, time.Now(), orderTrackingSweepCloseBudget); err != nil {
 		t.Fatalf("sweepOrphanedOrderTrackingLimit(): %v", err)
 	}
 
@@ -2436,7 +2436,7 @@ func TestOrderTrackingSweepsCloseOldestFirstWithinBudget(t *testing.T) {
 
 	t.Run("orphan sweep", func(t *testing.T) {
 		store := beads.NewMemStoreFrom(len(oldestFirst), seed(), nil)
-		if _, err := sweepOrphanedOrderTrackingLimit(store, orderTrackingSweepCloseBudget); err != nil {
+		if _, err := sweepOrphanedOrderTrackingLimit(store, time.Now(), orderTrackingSweepCloseBudget); err != nil {
 			t.Fatalf("sweepOrphanedOrderTrackingLimit(): %v", err)
 		}
 		assertClosedOldest(t, store)
