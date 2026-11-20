@@ -1762,3 +1762,100 @@ func TestConvergeSocketTimeoutWithdrawsQueuedRequest(t *testing.T) {
 		}
 	}
 }
+
+// serviceConvergeSocketCmd runs one socket command and services it from the
+// event loop's tick drain before the reply deadline, returning the reply.
+func serviceConvergeSocketCmd(t *testing.T, cr *CityRuntime, payload string) convergenceReply {
+	t.Helper()
+	replies := startConvergeSocketCmd(t, cr.convergenceReqCh, payload)
+	synctest.Wait() // the handler has enqueued and is waiting for the reply
+	cr.processConvergenceRequests(context.Background())
+	reply, ok := <-replies
+	if !ok {
+		t.Fatal("converge socket handler wrote no reply")
+	}
+	return reply
+}
+
+// liveConvergenceLoops lists the non-closed convergence loops in store for
+// the given formula and target.
+func liveConvergenceLoops(t *testing.T, store beads.Store, formula, target string) []beads.Bead {
+	t.Helper()
+	loops, err := store.List(beads.ListQuery{Type: "convergence", IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("listing convergence loops: %v", err)
+	}
+	var live []beads.Bead
+	for _, b := range loops {
+		if b.Status != "closed" && b.Metadata[convergence.FieldFormula] == formula && b.Metadata[convergence.FieldTarget] == target {
+			live = append(live, b)
+		}
+	}
+	return live
+}
+
+// TestConvergeSocketRetryAfterWithdrawnCreateMakesOneLoop reproduces the
+// reported duplicate: a create times out while the event loop is busy, the
+// stale request is drained after the tick, and the caller retries. Exactly
+// one loop for the formula and target may be live in that store scope.
+func TestConvergeSocketRetryAfterWithdrawnCreateMakesOneLoop(t *testing.T) {
+	for _, rig := range []string{"", "gascity-prod"} {
+		name := "hq"
+		if rig != "" {
+			name = "rig"
+		}
+		t.Run(name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				cr, hqStore := setupConvergenceRuntime(t)
+				store := hqStore
+				params := map[string]string{"formula": "test-formula", "target": "test-agent", "max_iterations": "3"}
+				if rig != "" {
+					rigStore := beads.NewMemStore()
+					addConvergenceRigScope(cr, rig, rigStore)
+					store = rigStore
+					params["rig"] = rig
+				}
+				payload := convergeSocketPayload(t, convergenceRequest{Command: "create", Params: params})
+				emptyHQ := convergenceStoreSnapshot(t, hqStore)
+				emptyScope := convergenceStoreSnapshot(t, store)
+
+				// Attempt 1: the event loop is inside a long tick and does not
+				// service the queue before the reply deadline.
+				first := convergeSocketReply(t, cr.convergenceReqCh, payload)
+				if first.Error == "" {
+					t.Fatalf("first create reply = %+v, want a timeout error", first)
+				}
+
+				// The tick ends and drains what is still queued.
+				cr.processConvergenceRequests(context.Background())
+				if got := convergenceStoreSnapshot(t, store); got != emptyScope {
+					t.Errorf("drained create %q wrote beads (root or wisp):\n%s", first.Error, got)
+				}
+
+				// Attempt 2: the caller retries, and the event loop services it.
+				retry := serviceConvergeSocketCmd(t, cr, payload)
+				if retry.Error != "" {
+					t.Fatalf("retry create: %s", retry.Error)
+				}
+				var created convergence.CreateResult
+				if err := json.Unmarshal(retry.Result, &created); err != nil {
+					t.Fatalf("unmarshaling retry result: %v", err)
+				}
+
+				live := liveConvergenceLoops(t, store, "test-formula", "test-agent")
+				if len(live) != 1 || live[0].ID != created.BeadID {
+					ids := make([]string, 0, len(live))
+					for _, b := range live {
+						ids = append(ids, b.ID)
+					}
+					t.Errorf("create reported %q then retried: live loops %v, want exactly [%s]", first.Error, ids, created.BeadID)
+				}
+				if rig != "" {
+					if got := convergenceStoreSnapshot(t, hqStore); got != emptyHQ {
+						t.Errorf("rig-scoped create wrote to the HQ store:\n%s", got)
+					}
+				}
+			})
+		})
+	}
+}
