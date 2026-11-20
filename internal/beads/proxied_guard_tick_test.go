@@ -788,6 +788,100 @@ func TestProxiedGuardTickRecoversANonTerminallyDemotedHandle(t *testing.T) {
 	})
 }
 
+// newDemotedGuardFixture hands the guard fixture back with its store REPLACED by
+// one built demoted at birth through the production constructor — the shape the
+// opener's demote-and-serve arm installs (issue #9156). The pin is still a real
+// admission pass (newGuardFixture's), because the recovery compares the world
+// against it; the bd leaf is fresh so the discarded healthy fixture's store
+// cannot reach it.
+func newDemotedGuardFixture(t *testing.T) *guardFixture {
+	t.Helper()
+	f := newGuardFixture(t)
+	pin := f.store.Pin()
+	writeLeaf := newNativeDoltStoreForTest(&nativeDoltMemStorage{
+		store: &MemStore{IDPrefix: "prx", HonorExplicitIDs: true},
+	})
+	writeLeaf.idPrefix = "prx"
+	f.bd = &recordingLeaf{Store: writeLeaf}
+	store, err := NewDemotedProxiedStore(f.bd, pin,
+		NewProxiedVerdictError(ProxiedVerdictHeadMoved, "head moved from abc123 to def456 on beads", nil),
+		WithNativeLeafReopener(func(ctx context.Context) (*NativeDoltStore, Pin, error) {
+			f.recoveries++
+			if f.recover == nil {
+				return nil, Pin{}, errors.New("this fixture installed no recovery")
+			}
+			return f.recover(ctx)
+		}))
+	if err != nil {
+		t.Fatalf("NewDemotedProxiedStore: %v", err)
+	}
+	f.store = store
+	return f
+}
+
+// TestProxiedGuardTickRecoversADemotedAtBirthHandle is the recovery half of the
+// demote-and-serve arm (issue #9156): the store a long-lived open now serves
+// after a non-terminal refusal has NEVER held a native leaf, and its way back
+// is the guard tick alone. The rows pin that the tick's existing recovery
+// handles that shape — no stand-down ever ran, the verdict came with the
+// constructor — and that a terminal answer still latches and stops, so a
+// birth-demoted handle can neither strand nor spin.
+func TestProxiedGuardTickRecoversADemotedAtBirthHandle(t *testing.T) {
+	t.Run("a fresh leaf is installed and the store is native again", func(t *testing.T) {
+		f := newDemotedGuardFixture(t)
+		f.start()
+		replacement := newNativeDoltStoreForTest(&nativeDoltMemStorage{
+			store: &MemStore{IDPrefix: "prx", HonorExplicitIDs: true},
+		})
+		replacement.idPrefix = "prx"
+		f.recover = func(context.Context) (*NativeDoltStore, Pin, error) {
+			return replacement, f.store.Pin(), nil
+		}
+
+		if !f.store.Demoted() {
+			t.Fatal("the fixture's store was not demoted at birth")
+		}
+		if step := f.tick(); step != proxiedGuardRepinned {
+			t.Fatalf("the recovery tick reported %s, want repinned", step)
+		}
+		if f.store.Demoted() {
+			t.Fatal("the tick reported a re-pin and left the store on the bd leaf")
+		}
+		if f.store.Verdict() != nil {
+			t.Fatalf("the re-pin left the birth verdict in place: %v", f.store.Verdict())
+		}
+		if f.store.BdLeaf() != Store(f.bd) {
+			t.Fatal("the recovery replaced the bd leaf: recovery installs a native leaf, and the bd leaf is the store's own")
+		}
+		if f.recoveries != 1 {
+			t.Fatalf("the guard called the recovery %d time(s), want exactly 1", f.recoveries)
+		}
+	})
+
+	t.Run("a terminal recovery refusal latches and the tick stops", func(t *testing.T) {
+		f := newDemotedGuardFixture(t)
+		f.start()
+		f.recover = func(context.Context) (*NativeDoltStore, Pin, error) {
+			return nil, Pin{}, NewSchemaSkewVerdictError(ProxiedSkewLaneIgnored, ProxiedSkewDirBehind,
+				"the database moved while this handle was demoted")
+		}
+
+		if step := f.tick(); step != proxiedGuardStoodDown {
+			t.Fatalf("a terminal recovery refusal reported %s, want stood-down", step)
+		}
+		verdict := f.store.Verdict()
+		if verdict == nil || verdict.Verdict != ProxiedVerdictSchemaSkew || !verdict.Terminal() {
+			t.Fatalf("verdict = %v, want a terminal schema_skew", verdict)
+		}
+		if step := f.tick(); step != proxiedGuardStopped {
+			t.Fatalf("the tick after a terminal latch reported %s, want stopped", step)
+		}
+		if f.recoveries != 1 {
+			t.Fatalf("the guard asked %d time(s) after a TERMINAL refusal, want exactly 1", f.recoveries)
+		}
+	})
+}
+
 // TestProxiedGuardTickSpendsOneSessionPerTick is the tick's stated budget, made
 // an assertion.
 //
