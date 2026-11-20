@@ -5072,7 +5072,6 @@ else
         esac
         ENOSPC_FLOOR_BYTES=$(printf '%s' "$ENOSPC_FLOOR_BYTES" | sed 's/^0*//')
         [ -n "$ENOSPC_FLOOR_BYTES" ] || ENOSPC_FLOOR_BYTES=2147483648
-        [ "${#ENOSPC_FLOOR_BYTES}" -le 18 ] || ENOSPC_FLOOR_BYTES=2147483648
         if [ -d "$ENOSPC_PROBE_DIR" ] \
             && ENOSPC_FREE_BYTES=$(df -Pk "$ENOSPC_PROBE_DIR" 2>/dev/null); then
             # Available is the field before the first NN% field, so a filesystem
@@ -5096,6 +5095,7 @@ else
             echo "warning: cannot read free space on $ENOSPC_PROBE_DIR; treating the ENOSPC evidence in $LOG_FILE as current" >&2
             return 0
         fi
+        # Compare in awk: a floor of any length cannot overflow shell arithmetic.
         awk -v free="$ENOSPC_FREE_BYTES" -v floor="$ENOSPC_FLOOR_BYTES" \
             'BEGIN { exit !(free + 0 < floor + 0) }'
     }

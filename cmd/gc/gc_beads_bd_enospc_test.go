@@ -66,9 +66,9 @@ func TestENOSPCSkipHoldsOnlyWhileTheDiskIsShort(t *testing.T) {
 		// A leading 0 must read as decimal, not octal (0900 is no octal number).
 		{name: "ENOSPC with a zero-padded floor and disk short", log: "ENOSPC\n", availKB: strconv.Itoa(gib), floor: "02147483648", wantSkip: true},
 		{name: "ENOSPC with a zero-padded small floor", log: "ENOSPC\n", availKB: strconv.Itoa(gib), floor: "0900", wantSkip: false},
-		// More than 18 digits could overflow shell arithmetic; it means the default floor.
+		// A floor too large for shell arithmetic is still that many bytes.
 		{name: "ENOSPC with an oversized floor and disk short", log: "ENOSPC\n", availKB: strconv.Itoa(gib), floor: "9999999999999999999", wantSkip: true},
-		{name: "ENOSPC with an oversized floor and space back", log: "ENOSPC\n", availKB: strconv.Itoa(3 * gib), floor: "9999999999999999999", wantSkip: false},
+		{name: "ENOSPC with an oversized floor and 3 GiB free", log: "ENOSPC\n", availKB: strconv.Itoa(3 * gib), floor: "9999999999999999999", wantSkip: true},
 		// A floor that is not a whole KiB rounds up, so exactly 2 GiB is still short of 2 GiB + 1 byte.
 		{name: "ENOSPC with a floor just over a KiB boundary", log: "ENOSPC\n", availKB: strconv.Itoa(2 * gib), floor: "2147483649", wantSkip: true},
 	}
@@ -128,6 +128,50 @@ func TestENOSPCSkipMeasuresTheDataDir(t *testing.T) {
 				}
 				if got := strings.TrimSpace(string(args)); got != "-Pk "+want {
 					t.Fatalf("df args = %q, want %q", got, "-Pk "+want)
+				}
+			})
+		}
+	}
+}
+
+// floorEmpty makes runENOSPCDetector set GC_DOLT_WARN_FREE_BYTES to the empty
+// string rather than leave it unset.
+const floorEmpty = "<empty>"
+
+// TestENOSPCSkipFloorFromEnv pins how the detector reads its free-space floor
+// from GC_DOLT_WARN_FREE_BYTES: a positive decimal integer of any length is
+// that many bytes (leading zeros read as decimal), and anything else, 0
+// included, is the 2 GiB default.
+func TestENOSPCSkipFloorFromEnv(t *testing.T) {
+	const defaultFloor = "2147483648"
+	cases := []struct{ env, want string }{
+		{"", defaultFloor},
+		{floorEmpty, defaultFloor},
+		{"0", defaultFloor},
+		{"000", defaultFloor},
+		{"-5", defaultFloor},
+		{"1.5", defaultFloor},
+		{"abc", defaultFloor},
+		{"4294967296", "4294967296"},
+		{"0900", "900"},
+		{"9999999999999999999", "9999999999999999999"},
+		{"123456789012345678901234", "123456789012345678901234"},
+	}
+	for label, detector := range enospcDetectors(t) {
+		for _, tc := range cases {
+			t.Run(label+"/"+tc.env, func(t *testing.T) {
+				dir := t.TempDir()
+				dataDir := filepath.Join(dir, "data")
+				if err := os.MkdirAll(dataDir, 0o755); err != nil {
+					t.Fatalf("mkdir data: %v", err)
+				}
+				logFile := filepath.Join(dir, "dolt.log")
+				if err := os.WriteFile(logFile, []byte("ENOSPC\n"), 0o644); err != nil {
+					t.Fatalf("write log: %v", err)
+				}
+				stdout, stderr, _ := runENOSPCDetectorStreams(t, dir, detector, logFile, dataDir, "1", tc.env)
+				if !strings.Contains(stdout, "FLOOR="+tc.want+"\n") {
+					t.Fatalf("GC_DOLT_WARN_FREE_BYTES=%q: want floor %s\nstdout:\n%s\nstderr:\n%s", tc.env, tc.want, stdout, stderr)
 				}
 			})
 		}
@@ -209,7 +253,7 @@ echo "/dev/fake 999999999 1 ` + availKB + ` 1% /"
 	}
 	writeExecutable(t, filepath.Join(binDir, "df"), df)
 	harness := filepath.Join(dir, "harness.sh")
-	writeExecutable(t, harness, "#!/bin/sh\n"+detector+"\nif recovery_should_skip_due_to_enospc; then echo SKIP; else echo RUN; fi\n")
+	writeExecutable(t, harness, "#!/bin/sh\n"+detector+"\nif recovery_should_skip_due_to_enospc; then echo SKIP; else echo RUN; fi\necho \"FLOOR=$ENOSPC_FLOOR_BYTES\"\n")
 	cmd := exec.Command("/bin/sh", harness)
 	env := os.Environ()
 	for _, key := range []string{"PATH", "LOG_FILE", "DATA_DIR", "GC_DOLT_DATA_DIR", "GC_DOLT_WARN_FREE_BYTES"} {
@@ -219,7 +263,11 @@ echo "/dev/fake 999999999 1 ` + availKB + ` 1% /"
 	if dataDir != "" {
 		env = append(env, "DATA_DIR="+dataDir)
 	}
-	if floor != "" {
+	switch floor {
+	case "":
+	case floorEmpty:
+		env = append(env, "GC_DOLT_WARN_FREE_BYTES=")
+	default:
 		env = append(env, "GC_DOLT_WARN_FREE_BYTES="+floor)
 	}
 	cmd.Env = env
