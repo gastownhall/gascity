@@ -1103,6 +1103,58 @@ func TestDispatchAdoptsANudgeFencedToAnArchivedSibling(t *testing.T) {
 	}
 }
 
+// setMetadata applies meta to the session bead id.
+func (f *legBDispatchFixture) setMetadata(t *testing.T, id string, meta map[string]string) {
+	t.Helper()
+	for k, v := range meta {
+		if err := f.store.SetMetadata(id, k, v); err != nil {
+			t.Fatalf("SetMetadata(%s, %s=%s): %v", id, k, v, err)
+		}
+	}
+}
+
+// A nudge fenced to a drained sibling of the same agent, in either drained
+// shape the codec decodes as asleep (raw state=drained from a drain-ack, or
+// state=asleep with sleep_reason=drained from the dead-runtime heal), is
+// adopted by a running sibling: the drained row no longer holds its fence.
+func TestDispatchAdoptsANudgeFencedToADrainedSibling(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		meta map[string]string
+	}{
+		{name: "raw drained", meta: map[string]string{"state": "drained"}},
+		{name: "asleep drained", meta: map[string]string{"state": "asleep", "sleep_reason": "drained"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLegBDispatchFixture(t)
+			s3 := f.create(t)
+			f.setMetadata(t, s3.ID, tc.meta)
+			snapshot, err := loadSessionBeadSnapshot(f.store.Store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info, ok := snapshot.FindInfoByID(s3.ID); !ok || info.Closed {
+				t.Fatalf("setup: s3 in the snapshot = %+v (found %v), want it open", info, ok)
+			}
+			if err := enqueueQueuedNudge(f.dir, newQueuedNudgeWithOptions("worker", "left for drained s3", "session", time.Now().Add(-time.Minute), queuedNudgeOptions{SessionID: s3.ID})); err != nil {
+				t.Fatal(err)
+			}
+			delivered, err := dispatchAllQueuedNudges(f.dir, supervisorCfg(), f.store.Store, f.store.Store, f.fake, snapshot, nil)
+			if err != nil {
+				t.Fatalf("dispatch: %v", err)
+			}
+			msgs := f.nudgeCalls()
+			if delivered != 1 || len(msgs) != 1 || !strings.Contains(msgs[0], "left for drained s3") || !strings.HasPrefix(msgs[0], f.s1.SessionName+":") {
+				t.Fatalf("delivered=%d nudges=%v, want s1 to adopt the drained s3's nudge once", delivered, msgs)
+			}
+			pending, _, _, err := listQueuedNudges(f.dir, "worker", time.Now())
+			if err != nil || len(pending) != 0 {
+				t.Fatalf("pending = %v, %v; want no worker item left", nqCharItems(pending), err)
+			}
+		})
+	}
+}
+
 // onNudgeProvider runs onNudge after each delivery the fake records.
 type onNudgeProvider struct {
 	*runtime.Fake
