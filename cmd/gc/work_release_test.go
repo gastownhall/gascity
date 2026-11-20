@@ -29,15 +29,60 @@ func TestReleasePoliciesTable(t *testing.T) {
 	want := map[releaseWhy]releasePolicy{
 		releaseKilledSeat:     {statuses: []string{"open", "in_progress"}, startedKeeps: true, lane: laneDirect, seatRoute: true},
 		releaseDrainAck:       {statuses: []string{"in_progress"}, startedNamedKeeps: true, lane: laneCarried, seatRoute: true},
-		releaseCloseCascade:   {statuses: []string{"open", "in_progress"}, lane: laneCarried, seatRoute: true},
-		releaseStrandedRepair: {statuses: []string{"open", "in_progress"}, lane: laneCarried, seatRoute: true, detached: true},
-		releaseOrphan:         {statuses: []string{"open", "in_progress"}, lane: laneDirect, pool: true, detached: true},
-		releaseRetired:        {statuses: []string{"open", "in_progress"}, lane: laneCarried, seatRoute: true},
+		releaseCloseCascade:   {statuses: []string{"open", "in_progress"}, lane: laneCarried, seatRoute: true, releaseParked: true},
+		releaseStrandedRepair: {statuses: []string{"open", "in_progress"}, lane: laneCarried, seatRoute: true, detached: true, releaseParked: true},
+		releaseOrphan:         {statuses: []string{"open", "in_progress"}, lane: laneDirect, pool: true, detached: true, releaseParked: true},
+		releaseRetired:        {statuses: []string{"open", "in_progress"}, lane: laneCarried, seatRoute: true, releaseParked: true},
 		releaseLadder:         {statuses: []string{"in_progress"}, lane: laneCarried, seatRoute: true},
 		releaseStalled:        {statuses: []string{"open", "in_progress"}, lane: laneCarried, seatRoute: true},
 	}
 	if !reflect.DeepEqual(releasePolicies, want) {
 		t.Fatalf("releasePolicies = %+v\nwant %+v", releasePolicies, want)
+	}
+}
+
+// TestReleaseListedLiveSeatPoliciesKeepParkedClaims: a path that releases
+// from a live seat keeps the claim its seat parked, assignee and status both:
+// the hold is the seat's own, and the cascade gives it back once the seat's
+// row closes. It is kept as parked in both shapes a parked claim reaches
+// release code in: bd's folded read and a store that records the raw status.
+func TestReleaseListedLiveSeatPoliciesKeepParkedClaims(t *testing.T) {
+	for name, why := range map[string]releaseWhy{
+		"killed seat": releaseKilledSeat,
+		"drain-ack":   releaseDrainAck,
+		"ladder":      releaseLadder,
+		"stalled":     releaseStalled,
+	} {
+		t.Run(name, func(t *testing.T) {
+			bd := newParkedBdStore()
+			folded := foldBdStatus(seedParkedClaim(t, bd.mem, "live-seat", "blocked", map[string]string{beadmeta.RoutedToMetadataKey: "worker"}))
+			mem := beads.NewMemStore()
+			raw := seedParkedClaim(t, mem, "live-seat", "blocked", map[string]string{beadmeta.RoutedToMetadataKey: "worker"})
+			seat := releaseSeat{id: "live-seat", fallback: "worker"}
+
+			out := releaseListed([]seatWorkHit{{store: bd, bead: folded}, {store: mem, bead: raw}}, why, seat, testPoolReleaseConfig(), ReleaseOpts{})
+			if len(out.Released) != 0 || len(out.Failed) != 0 {
+				t.Fatalf("released %d, failed %d; want the parked claims kept", len(out.Released), len(out.Failed))
+			}
+			for _, c := range []struct {
+				mem *beads.MemStore
+				id  string
+			}{{bd.mem, folded.ID}, {mem, raw.ID}} {
+				if out.Why[c.id] != keptParked {
+					t.Errorf("%s kept as %q, want %q", c.id, out.Why[c.id], keptParked)
+				}
+				got, err := c.mem.Get(c.id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got.Assignee != "live-seat" || got.Status != "blocked" {
+					t.Errorf("%s assignee=%q status=%q, want live-seat and blocked kept", c.id, got.Assignee, got.Status)
+				}
+			}
+			if len(bd.guarded) != 0 || bd.writes != 0 {
+				t.Errorf("bd writes: guarded=%d other=%d, want none", len(bd.guarded), bd.writes)
+			}
+		})
 	}
 }
 

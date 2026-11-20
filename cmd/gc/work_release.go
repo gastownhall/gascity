@@ -79,6 +79,11 @@ type releasePolicy struct {
 	// detached holds a claim carrying gc.detached until its probe attests the
 	// runtime dead (detachedProbeAllowsOrphanRelease).
 	detached bool
+	// releaseParked gives back a claim parked in a status statuses cannot
+	// name (beads.IsParked: bd's blocked or deferred, a custom status),
+	// keeping that status: the path releases from a holder that is gone, so
+	// the claim would otherwise stay on it for good (#7685).
+	releaseParked bool
 }
 
 var (
@@ -116,14 +121,21 @@ var (
 //     that is gone, and only the dead-assignee sweep would probe it again,
 //     on a pool route alone;
 //   - every release clears the gc.detached of the claim it gives back, in
-//     the same write (releaseServed), so no reopened claim carries a probe.
+//     the same write (releaseServed), so no reopened claim carries a probe;
+//   - the paths whose holder is gone (the cascade, the stranded repair, both
+//     orphan releases and the retired-session sweep) also give back a claim
+//     its holder parked (releaseParked), keeping its status: the hold stays
+//     for whoever lifts it, and only the dead holder goes. The paths of a
+//     live seat (killed, drain-ack, ladder, stalled) keep a parked claim
+//     (keptParked): it is the seat's own, and if its row later closes the
+//     cascade releases it.
 var releasePolicies = map[releaseWhy]releasePolicy{
 	releaseKilledSeat:     {statuses: openOrStarted, startedKeeps: true, lane: laneDirect, seatRoute: true},
 	releaseDrainAck:       {statuses: startedOnly, startedNamedKeeps: true, lane: laneCarried, seatRoute: true},
-	releaseCloseCascade:   {statuses: openOrStarted, lane: laneCarried, seatRoute: true},
-	releaseStrandedRepair: {statuses: openOrStarted, lane: laneCarried, seatRoute: true, detached: true},
-	releaseOrphan:         {statuses: openOrStarted, lane: laneDirect, pool: true, detached: true},
-	releaseRetired:        {statuses: openOrStarted, lane: laneCarried, seatRoute: true},
+	releaseCloseCascade:   {statuses: openOrStarted, lane: laneCarried, seatRoute: true, releaseParked: true},
+	releaseStrandedRepair: {statuses: openOrStarted, lane: laneCarried, seatRoute: true, detached: true, releaseParked: true},
+	releaseOrphan:         {statuses: openOrStarted, lane: laneDirect, pool: true, detached: true, releaseParked: true},
+	releaseRetired:        {statuses: openOrStarted, lane: laneCarried, seatRoute: true, releaseParked: true},
 	releaseLadder:         {statuses: startedOnly, lane: laneCarried, seatRoute: true},
 	releaseStalled:        {statuses: openOrStarted, lane: laneCarried, seatRoute: true},
 }
@@ -134,6 +146,7 @@ const (
 	keptUnservedRoute = "unserved-route"
 	keptMoved         = "moved"
 	keptDetachedHeld  = "detached-held" // its gc.detached probe did not attest the runtime dead
+	keptParked        = "parked"        // parked in a status the path does not give back (releasesParked)
 	failedBudget      = "budget"
 )
 
@@ -313,6 +326,12 @@ func ReleaseClaims(sw *SeatWork, scope ReleaseScope, seat releaseSeat, why relea
 	return releaseListed(claims, why, seat, sw.Legs().cfg, opts), err
 }
 
+// releasesParked reports whether the path gives back b, a parked claim
+// (beads.IsParked).
+func (p releasePolicy) releasesParked(b beads.Bead) bool {
+	return p.releaseParked && beads.IsParked(b)
+}
+
 // releaseListed is ReleaseClaims' body for claims a caller already listed
 // (the orphan releases list them from the tick's census).
 func releaseListed(claims []seatWorkHit, why releaseWhy, seat releaseSeat, cfg *config.City, opts ReleaseOpts) ReleaseOutcome {
@@ -321,7 +340,16 @@ func releaseListed(claims []seatWorkHit, why releaseWhy, seat releaseSeat, cfg *
 	keep := func(c seatWorkHit, why string) { out.Kept = append(out.Kept, c); out.Why[c.bead.ID] = why }
 	var mine []seatWorkHit
 	for _, c := range claims {
-		if slices.Contains(p.statuses, c.bead.Status) {
+		switch {
+		case beads.IsParked(c.bead):
+			// Classified on the recorded status before the status filter: a
+			// folding store reads a parked claim as "open".
+			if !p.releasesParked(c.bead) {
+				keep(c, keptParked)
+				continue
+			}
+			mine = append(mine, c)
+		case slices.Contains(p.statuses, c.bead.Status):
 			mine = append(mine, c)
 		}
 	}
