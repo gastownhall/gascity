@@ -551,7 +551,7 @@ calls = 1
 [[count]]
 path = "cmd/gc/cmd_start_drift_test.go"
 resource = "http_test_server"
-calls = 1
+calls = 2
 
 [[count]]
 path = "cmd/gc/cmd_start_drift_windows_test.go"
