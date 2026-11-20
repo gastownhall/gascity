@@ -137,6 +137,16 @@ func TestIsWorkRecordGatedBead(t *testing.T) {
 		},
 		{name: "convoy bead is not gated", bead: beads.Bead{Type: "convoy"}, want: false},
 		{name: "message bead is not gated", bead: beads.Bead{Type: "message"}, want: false},
+		{
+			name: "operator-kinded work bead is gated",
+			bead: beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.KindMetadataKey: "work"}},
+			want: true,
+		},
+		{
+			name: "operator-kinded review bead is gated",
+			bead: beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.KindMetadataKey: "review"}},
+			want: true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -208,6 +218,7 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 		{ID: "wr-atomic-noop", Type: "task", Status: "in_progress", Metadata: map[string]string{}},
 		{ID: "wr-missing", Type: "task", Status: "in_progress", Metadata: map[string]string{}},
 		{ID: "wr-control", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}},
+		{ID: "wr-operator-kind", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.KindMetadataKey: "work"}},
 	}
 	newStore := func() beads.Store { return beads.NewMemStoreFrom(1, beadsList, nil) }
 
@@ -224,6 +235,9 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 		{"shipped-no-commit warns only by default", []string{"close", "wr-shipped-nocommit"}, false, false, "work-record gate (warn-only)"},
 		{"shipped-no-commit blocks when enforced", []string{"close", "wr-shipped-nocommit"}, true, true, "work-record gate (enforced)"},
 		{"missing outcome blocks when enforced", []string{"close", "wr-missing"}, true, true, "missing " + beadmeta.WorkOutcomeMetadataKey},
+		{"operator-kinded close blocks when enforced", []string{"close", "wr-operator-kind"}, true, true, "close of wr-operator-kind: missing " + beadmeta.WorkOutcomeMetadataKey},
+		{"operator-kinded update --status closed blocks when enforced", []string{"update", "wr-operator-kind", "--status", "closed"}, true, true, "close of wr-operator-kind: missing " + beadmeta.WorkOutcomeMetadataKey},
+		{"operator-kinded close warns only by default", []string{"close", "wr-operator-kind"}, false, false, "work-record gate (warn-only): close of wr-operator-kind"},
 		// mol-do-work stamps the record with a plain update, then closes with a reason.
 		{"no-op close with reason passes", []string{"close", "wr-noop", "--reason", "No-op: already satisfied"}, true, false, ""},
 		{"close with reason is still gated", []string{"close", "wr-missing", "--reason", "Done: x"}, true, true, "close of wr-missing"},
@@ -353,6 +367,17 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 			}
 		})
 	}
+
+	// Warn-only mode reports an operator-kinded violation exactly once.
+	t.Run("operator-kinded warn-only close logs one line", func(t *testing.T) {
+		var stderr strings.Builder
+		if evaluateWorkRecordCloseGate([]string{"close", "wr-operator-kind"}, newStore(), nil, workRecordRepoDirs{legacy: t.TempDir()}, false, &stderr) {
+			t.Fatalf("warn-only close blocked; stderr=%s", stderr.String())
+		}
+		if lines := strings.Count(stderr.String(), "\n"); lines != 1 {
+			t.Fatalf("gate output has %d lines, want 1: %q", lines, stderr.String())
+		}
+	})
 }
 
 func TestEvaluateWorkRecordCloseGateAtomicShippedUpdate(t *testing.T) {
