@@ -199,12 +199,18 @@ func (w WaitInfo) ContinuationStale(s Info) bool {
 }
 
 // DeliveryEpoch is the continuation epoch of the conversation the wait's
-// reminder belongs to on session s, the epoch its delivery is fenced on: the
-// registered epoch N, except that a wait registered while a fresh restart was
-// pending belongs to the conversation the reset opened once the session is in
-// it, N+1. A stale wait, a wait with no registered epoch, and a session that
-// records no epoch keep the registered epoch.
+// reminder belongs to on session s, the epoch its delivery is fenced on. A
+// session that keeps its waits across resets (KeepsWaitsAcrossResets) is
+// reminded in the conversation current at dispatch, its continuation epoch.
+// Any other wait belongs to its registered epoch N, except that a wait
+// registered while a fresh restart was pending belongs to the conversation the
+// reset opened once the session is in it, N+1. A stale wait, a wait with no
+// registered epoch, and a session that records no epoch keep the registered
+// epoch.
 func (w WaitInfo) DeliveryEpoch(s Info) string {
+	if KeepsWaitsAcrossResets(s) && s.ContinuationEpoch != "" {
+		return s.ContinuationEpoch
+	}
 	if !w.RegisteredResetPending || w.RegisteredEpoch == "" || s.ContinuationEpoch == "" || w.ContinuationStale(s) {
 		return w.RegisteredEpoch
 	}

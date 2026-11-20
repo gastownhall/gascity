@@ -812,6 +812,8 @@ func TestWaitInfoDeliveryEpoch(t *testing.T) {
 		name         string
 		registered   string
 		flagged      bool
+		named        bool
+		closed       bool
 		sessionEpoch string
 		want         string
 	}{
@@ -824,12 +826,21 @@ func TestWaitInfoDeliveryEpoch(t *testing.T) {
 		{name: "flagged/non-numeric-session", registered: "2", flagged: true, sessionEpoch: "x", want: "2"},
 		{name: "flagged/empty-session", registered: "2", flagged: true, want: "2"},
 		{name: "flagged/empty-registered", flagged: true, sessionEpoch: "3", want: ""},
+		{name: "named/at-registered-epoch", registered: "2", named: true, sessionEpoch: "2", want: "2"},
+		{name: "named/next-epoch", registered: "2", named: true, sessionEpoch: "3", want: "3"},
+		{name: "named/several-epochs-on", registered: "2", named: true, sessionEpoch: "5", want: "5"},
+		{name: "named/flagged-two-epochs-on", registered: "2", flagged: true, named: true, sessionEpoch: "4", want: "4"},
+		{name: "named/empty-session", registered: "2", named: true, want: "2"},
+		{name: "named/empty-registered", named: true, sessionEpoch: "3", want: "3"},
+		{name: "closed-named/next-epoch", registered: "2", named: true, closed: true, sessionEpoch: "3", want: "2"},
+		{name: "closed-named/flagged-at-next-epoch", registered: "2", flagged: true, named: true, closed: true, sessionEpoch: "3", want: "3"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := WaitInfo{RegisteredEpoch: tc.registered, RegisteredResetPending: tc.flagged}
-			if got := w.DeliveryEpoch(Info{ContinuationEpoch: tc.sessionEpoch}); got != tc.want {
-				t.Fatalf("DeliveryEpoch(registered=%q flagged=%v, session=%q) = %q, want %q",
-					tc.registered, tc.flagged, tc.sessionEpoch, got, tc.want)
+			s := Info{ContinuationEpoch: tc.sessionEpoch, ConfiguredNamedSession: tc.named, Closed: tc.closed}
+			if got := w.DeliveryEpoch(s); got != tc.want {
+				t.Fatalf("DeliveryEpoch(registered=%q flagged=%v, session=%q named=%v closed=%v) = %q, want %q",
+					tc.registered, tc.flagged, tc.sessionEpoch, tc.named, tc.closed, got, tc.want)
 			}
 		})
 	}

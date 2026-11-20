@@ -4753,6 +4753,7 @@ func TestClearOrphanedWaitHoldsRederivesEachPass(t *testing.T) {
 // passes over the in-memory store.
 type resetWindowFixture struct {
 	t         *testing.T
+	dir       string
 	store     beads.Store
 	sf        *sessionpkg.Store
 	sessionID string
@@ -4801,6 +4802,7 @@ func newResetWindowFixture(t *testing.T, opts ...resetWindowSessionOpt) *resetWi
 	}
 	return &resetWindowFixture{
 		t:         t,
+		dir:       t.TempDir(),
 		store:     store,
 		sf:        sessionFrontDoor(store),
 		sessionID: sess.ID,
@@ -4878,6 +4880,63 @@ func (fx *resetWindowFixture) wakePass() {
 	fx.t.Helper()
 	if _, err := prepareWaitWakeState(fx.store, fx.tick()); err != nil {
 		fx.t.Fatalf("prepareWaitWakeState: %v", err)
+	}
+}
+
+// dispatch runs a ready-wait dispatch pass over the fixture's city and store.
+func (fx *resetWindowFixture) dispatch(stage string) {
+	fx.t.Helper()
+	setWaitTestFileBeads(fx.t)
+	if err := dispatchReadyWaitNudges(fx.dir, fx.store, runtime.NewFake(), fx.tick()); err != nil {
+		fx.t.Fatalf("%s: dispatchReadyWaitNudges: %v", stage, err)
+	}
+}
+
+// queued lists every nudge the queue holds for the fixture session's agent.
+func (fx *resetWindowFixture) queued(stage string) []queuedNudge {
+	fx.t.Helper()
+	pending, inFlight, dead, err := listQueuedNudges(fx.dir, "worker", fx.now)
+	if err != nil {
+		fx.t.Fatalf("%s: listQueuedNudges: %v", stage, err)
+	}
+	return append(append(pending, inFlight...), dead...)
+}
+
+// requireOneQueued requires the queue to hold exactly the wait's attempt
+// nudge, fenced on epoch, and returns it.
+func (fx *resetWindowFixture) requireOneQueued(stage, attempt, epoch string) queuedNudge {
+	fx.t.Helper()
+	got := fx.queued(stage)
+	if len(got) != 1 {
+		fx.t.Fatalf("%s: queued %d nudges (%+v), want 1", stage, len(got), got)
+	}
+	if want := "wait-" + fx.waitID + "-2-" + attempt; got[0].ID != want {
+		fx.t.Fatalf("%s: queued nudge id = %q, want %q", stage, got[0].ID, want)
+	}
+	if got[0].ContinuationEpoch != epoch {
+		fx.t.Fatalf("%s: queued nudge epoch = %q, want %q", stage, got[0].ContinuationEpoch, epoch)
+	}
+	return got[0]
+}
+
+// markDelivered records the shadow of queue nudge nudgeID as injected, the
+// ack of a delivered reminder.
+func (fx *resetWindowFixture) markDelivered(nudgeID string) {
+	fx.t.Helper()
+	shadows, err := fx.store.List(beads.ListQuery{Label: "nudge:" + nudgeID, IncludeClosed: true})
+	if err != nil || len(shadows) != 1 {
+		fx.t.Fatalf("shadows of %s = %d, %v; want 1", nudgeID, len(shadows), err)
+	}
+	if err := fx.store.SetMetadata(shadows[0].ID, "state", "injected"); err != nil {
+		fx.t.Fatalf("marking %s delivered: %v", nudgeID, err)
+	}
+}
+
+func (fx *resetWindowFixture) requireClosed(stage string) {
+	fx.t.Helper()
+	if b := fx.wait(); b.Status != "closed" || b.Metadata["state"] != waitStateClosed {
+		fx.t.Fatalf("%s: wait status=%q state=%q last_error=%q, want closed %q",
+			stage, b.Status, b.Metadata["state"], b.Metadata["last_error"], waitStateClosed)
 	}
 }
 
@@ -5018,6 +5077,30 @@ func TestPrepareWaitWakeState_KeepsNamedSessionWaitAcrossReset(t *testing.T) {
 			tc.run(newResetWindowFixture(t, tc.opts...))
 		})
 	}
+}
+
+// TestDispatchReadyWaitNudges_DeliversKeptNamedSessionWaitAtCurrentEpoch
+// covers the reminder of a configured named session's wait that a reset kept:
+// it goes to the conversation that is current at dispatch, under the
+// attempt's id, which still names the registered epoch, and its delivery
+// closes the wait once.
+func TestDispatchReadyWaitNudges_DeliversKeptNamedSessionWaitAtCurrentEpoch(t *testing.T) {
+	t.Run("dep-closes-after-reset", func(t *testing.T) {
+		fx := newResetWindowFixture(t, namedResetWindowSession)
+		fx.register()
+		fx.requestReset()
+		fx.start(3)
+		fx.wakePass()
+		fx.closeDep()
+		fx.wakePass()
+		fx.requireKeptAt("after the dependency closed", waitStateReady)
+		fx.dispatch("first dispatch")
+		fx.dispatch("second dispatch")
+		item := fx.requireOneQueued("after dispatch", "1", "3")
+		fx.markDelivered(item.ID)
+		fx.wakePass()
+		fx.requireClosed("after delivery")
+	})
 }
 
 // TestPrepareWaitWakeState_KeepsWaitRegisteredDuringPendingReset covers a wait
