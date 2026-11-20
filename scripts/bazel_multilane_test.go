@@ -427,13 +427,13 @@ var (
 )
 
 // wantMultiLanes: the lanes each (event, mode) starts, in order, for a pull
-// request that does not touch the split-strict storage paths.
+// request or merge group that does not touch the split-strict storage paths.
 func wantMultiLanes(event, mode string) []string {
 	return wantMultiLanesPaths(event, mode, "false")
 }
 
 // wantMultiLanesPaths is wantMultiLanes with the Split-strict paths step's
-// answer for a pull request ("" off pull requests).
+// answer for a pull request or merge group ("" off every other event).
 func wantMultiLanesPaths(event, mode, splitPaths string) []string {
 	// Every mode tests (the gate fails a run with no lane). Acceptance and
 	// the gating integration lanes run in every mode, the fork pool's
@@ -446,9 +446,12 @@ func wantMultiLanesPaths(event, mode, splitPaths string) []string {
 		lanes = append(lanes, "integration")
 	}
 	// The split-strict gate runs remotely only (no fork certificate, no
-	// local re-execution of two whole suites): nightly, on dispatch, and on
-	// pull requests that touch the storage paths.
-	if mode == "remote" && (event == "schedule" || event == "workflow_dispatch" || (event == "pull_request" && splitPaths == "true")) {
+	// local re-execution of two whole suites): nightly, on dispatch, on pull
+	// requests that touch the storage paths, and on merge groups whose entry
+	// does (ga-splitstrict-mergegroup-stopgap: a merge group is always mode
+	// remote, so this never excludes one that touches the paths).
+	if mode == "remote" && (event == "schedule" || event == "workflow_dispatch" ||
+		((event == "pull_request" || event == "merge_group") && splitPaths == "true")) {
 		lanes = append(lanes, "split-strict")
 	}
 	return lanes
@@ -479,7 +482,7 @@ func TestBazelMultiLaneLaneList(t *testing.T) {
 		for _, mode := range multiLaneModes {
 			for _, fresh := range []string{"false", "true"} {
 				for _, splitPaths := range []string{"false", "true"} {
-					if splitPaths == "true" && event != "pull_request" {
+					if splitPaths == "true" && event != "pull_request" && event != "merge_group" {
 						continue
 					}
 					raw, err := multiLaneLanes(t, step.Run, event, mode, fresh, splitPaths)
