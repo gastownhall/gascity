@@ -1342,3 +1342,73 @@ func TestDetectorKeepsAFreshStampALaggingListCallsStale(t *testing.T) {
 		t.Fatalf("stamp %v, want the fresh stamp for gc-9 kept", got.Metadata)
 	}
 }
+
+// TestReleaseListedKeepsPinnedAndHookedClaims: the paths that give back a
+// dead holder's parked claim keep a pinned or hooked one, assignee and status
+// both, and write nothing: a pinned bead is persistent context and a hooked
+// bead is its identity's hook, whose next session runs it. The kept claim is
+// logged with the status it is parked in. Each store shape is covered: bd's
+// folded read, a store recording the raw status, and a revision-CAS store.
+func TestReleaseListedKeepsPinnedAndHookedClaims(t *testing.T) {
+	paths := map[string]releaseWhy{
+		"close cascade":   releaseCloseCascade,
+		"stranded repair": releaseStrandedRepair,
+		"orphan":          releaseOrphan,
+		"retired":         releaseRetired,
+	}
+	routed := map[string]string{beadmeta.RoutedToMetadataKey: "worker"}
+	for name, why := range paths {
+		for _, status := range []string{"pinned", "hooked"} {
+			t.Run(name+"/"+status, func(t *testing.T) {
+				bd := newParkedBdStore()
+				folded := foldBdStatus(seedParkedClaim(t, bd.mem, "dead-session", status, routed))
+				// Each store numbers its beads apart, so every claim has its own ID.
+				mem := beads.NewMemStoreFrom(10, nil, nil)
+				raw := seedParkedClaim(t, mem, "dead-session", status, routed)
+				cas := &revisionReleaseStore{MemStore: beads.NewMemStoreFrom(20, nil, nil)}
+				stampConditionalWrites(t, cas, gate.Require)
+				casClaim := seedParkedClaim(t, cas.MemStore, "dead-session", status, routed)
+				seat := releaseSeat{id: "dead-session", fallback: "worker"}
+
+				out := releaseListed([]seatWorkHit{
+					{store: bd, bead: folded},
+					{store: mem, bead: raw},
+					{store: cas, bead: casClaim},
+				}, why, seat, testPoolReleaseConfig(), ReleaseOpts{Late: why == releaseCloseCascade})
+				if len(out.Released) != 0 || len(out.Failed) != 0 {
+					t.Fatalf("released %d, failed %d; want the %s claims kept", len(out.Released), len(out.Failed), status)
+				}
+				for _, c := range []struct {
+					mem *beads.MemStore
+					id  string
+				}{{bd.mem, folded.ID}, {mem, raw.ID}, {cas.MemStore, casClaim.ID}} {
+					if out.Why[c.id] != keptParked {
+						t.Errorf("%s kept as %q, want %q", c.id, out.Why[c.id], keptParked)
+					}
+					got, err := c.mem.Get(c.id)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if got.Assignee != "dead-session" || got.Status != status {
+						t.Errorf("%s assignee=%q status=%q, want dead-session and %s kept", c.id, got.Assignee, got.Status, status)
+					}
+				}
+				if len(bd.guarded) != 0 || bd.writes != 0 {
+					t.Errorf("bd writes: guarded=%d other=%d, want none", len(bd.guarded), bd.writes)
+				}
+				if cas.conditionalCalls != 0 || cas.legacyCalls != 0 {
+					t.Errorf("revision-CAS writes: conditional=%d legacy=%d, want none", cas.conditionalCalls, cas.legacyCalls)
+				}
+
+				var stderr bytes.Buffer
+				logRelease(&stderr, "closed", "dead-session", out, nil)
+				for _, id := range []string{folded.ID, raw.ID, casClaim.ID} {
+					want := "keeps claim " + id + ": parked as \"" + status + "\""
+					if !strings.Contains(stderr.String(), want) {
+						t.Errorf("release log = %q, want it to contain %q", stderr.String(), want)
+					}
+				}
+			})
+		}
+	}
+}

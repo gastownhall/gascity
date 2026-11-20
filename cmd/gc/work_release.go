@@ -89,6 +89,11 @@ type releasePolicy struct {
 var (
 	openOrStarted = []string{"open", "in_progress"}
 	startedOnly   = []string{"in_progress"}
+	// parkedOutlivesHolder are the parked statuses whose holder is not a
+	// session's claim, so no release gives them back: a pinned bead is
+	// persistent context, and a hooked bead is an identity's hook, which its
+	// next session runs.
+	parkedOutlivesHolder = []string{"pinned", "hooked"}
 )
 
 // releasePolicies is every release path's started-work policy, in one place
@@ -125,7 +130,8 @@ var (
 //   - the paths whose holder is gone (the cascade, the stranded repair, both
 //     orphan releases and the retired-session sweep) also give back a claim
 //     its holder parked (releaseParked), keeping its status: the hold stays
-//     for whoever lifts it, and only the dead holder goes. The paths of a
+//     for whoever lifts it, and only the dead holder goes. A pinned or hooked
+//     claim (parkedOutlivesHolder) is kept, as keptParked. The paths of a
 //     live seat (killed, drain-ack, ladder, stalled) keep a parked claim
 //     (keptParked): it is the seat's own, and if its row later closes the
 //     cascade releases it.
@@ -281,6 +287,23 @@ func (o ReleaseOutcome) Unserved() []strandedClaim {
 	return out
 }
 
+// keptParkedClaim is one claim kept because the path does not give back its
+// parked status.
+type keptParkedClaim struct{ id, status string }
+
+// Parked are the claims kept as keptParked, with the status each is parked
+// in, by ID.
+func (o ReleaseOutcome) Parked() []keptParkedClaim {
+	var out []keptParkedClaim
+	for _, k := range o.Kept {
+		if o.Why[k.bead.ID] == keptParked {
+			out = append(out, keptParkedClaim{id: k.bead.ID, status: beads.RecordedStatus(k.bead)})
+		}
+	}
+	slices.SortFunc(out, func(a, b keptParkedClaim) int { return strings.Compare(a.id, b.id) })
+	return out
+}
+
 // HeldDetached counts the claims kept because their gc.detached probe did not
 // attest the runtime dead: work that may still run elsewhere, still assigned
 // to the seat.
@@ -327,9 +350,10 @@ func ReleaseClaims(sw *SeatWork, scope ReleaseScope, seat releaseSeat, why relea
 }
 
 // releasesParked reports whether the path gives back b, a parked claim
-// (beads.IsParked).
+// (beads.IsParked): it releases parked claims, and b's status is not one
+// whose holder outlives a session (parkedOutlivesHolder).
 func (p releasePolicy) releasesParked(b beads.Bead) bool {
-	return p.releaseParked && beads.IsParked(b)
+	return p.releaseParked && beads.IsParked(b) && !slices.Contains(parkedOutlivesHolder, beads.RecordedStatus(b))
 }
 
 // releaseListed is ReleaseClaims' body for claims a caller already listed

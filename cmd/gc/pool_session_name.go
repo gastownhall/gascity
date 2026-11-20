@@ -410,7 +410,11 @@ func releaseOrphanedPoolAssignments(
 		// The verb's route guard is the one this sweep's pre-filter lacks:
 		// an expanded workflow root's run_target is no lane (NEW-5).
 		if out := releaseListed([]seatWorkHit{{store: ownerStore, bead: wb}}, releaseOrphan, releaseSeat{}, cfg, ReleaseOpts{}); len(out.Released) == 0 {
-			keepLog.log(wb.ID, assignee, out.Why[wb.ID])
+			why := out.Why[wb.ID]
+			if why == keptParked {
+				why += " as " + beads.RecordedStatus(wb)
+			}
+			keepLog.log(wb.ID, assignee, why)
 			continue
 		}
 		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i})
