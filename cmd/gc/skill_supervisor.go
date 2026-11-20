@@ -37,7 +37,9 @@ import (
 // Catalog load happens once per scope per call and feeds every
 // sink's materialization in this pass. Per-sink errors are logged to
 // stderr and do not abort the pass — every other sink is still
-// reconciled. Shared-catalog load failures are also logged and
+// reconciled. A sink is left unchanged, and reported, when a member's
+// agent catalog cannot be read or members want one skill name from
+// different sources of the same class. Shared-catalog load failures are also logged and
 // then downgraded to an empty shared desired set, while preserving
 // owned-root cleanup so stale gc-managed symlinks can still be pruned.
 // The returned error joins every per-sink error, or is nil.
@@ -195,6 +197,7 @@ func stage1SkillRequests(cityPath string, cfg *config.City, stderr io.Writer) []
 		sinkDir string
 		agents  []string
 		members []materialize.SinkMember
+		held    []string
 	}
 	var groups []*sinkGroup
 	groupBySink := make(map[string]*sinkGroup)
@@ -208,15 +211,6 @@ func stage1SkillRequests(cityPath string, cfg *config.City, stderr io.Writer) []
 		vendor, ok := materialize.VendorSink(provider)
 		if !ok {
 			continue
-		}
-
-		agentCat, lerr := materialize.LoadAgentCatalog(agent.SkillsDir)
-		if lerr != nil {
-			fmt.Fprintf(stderr, "gc: stage-1 materialize-skills for agent %q: LoadAgentCatalog %q: %v\n", //nolint:errcheck // best-effort stderr
-				agent.QualifiedName(), agent.SkillsDir, lerr)
-			// Continue with empty agent catalog rather than skipping the
-			// whole materialization — the shared catalog still delivers.
-			agentCat = materialize.AgentCatalog{}
 		}
 
 		rigName := agentRigScopeName(agent, cfg.Rigs)
@@ -244,6 +238,16 @@ func stage1SkillRequests(cityPath string, cfg *config.City, stderr io.Writer) []
 			groups = append(groups, group)
 		}
 		group.agents = append(group.agents, agent.QualifiedName())
+
+		// An unreadable agent catalog holds the agent's sink: reconciling
+		// it against an empty catalog would prune links whose sources
+		// still exist. The other members still load, so one pass reports
+		// every reason. The held reason carries the read error, which
+		// names the directory, and is logged with the sink.
+		agentCat, lerr := materialize.LoadAgentCatalog(agent.SkillsDir)
+		if lerr != nil {
+			group.held = append(group.held, fmt.Sprintf("agent %q: %v", agent.QualifiedName(), lerr))
+		}
 		group.members = append(group.members, materialize.SinkMember{
 			Agent:  agent.QualifiedName(),
 			Shared: cityCat,
@@ -254,7 +258,7 @@ func stage1SkillRequests(cityPath string, cfg *config.City, stderr io.Writer) []
 	reqs := make([]stage1SkillRequest, 0, len(groups))
 	for _, group := range groups {
 		union := materialize.UnionSinkMembers(group.members)
-		var held []string
+		held := group.held
 		for _, c := range union.Conflicts {
 			held = append(held, formatSinkConflict(c))
 		}

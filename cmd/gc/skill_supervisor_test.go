@@ -1017,3 +1017,53 @@ func TestRunStage1SharedSinkConflictLeavesSinkUnchanged(t *testing.T) {
 		requireSkillLink(t, rigSink, "plan", filepath.Join(cityPath, "skills", "plan"))
 	})
 }
+
+// TestRunStage1SharedSinkCatalogReadErrorKeepsLinks: when a member's
+// agent-local skills directory cannot be read, its shared sink is left as
+// it was rather than reconciled against an empty catalog for that member,
+// the read error is reported and returned, sinks the member is not in
+// are still reconciled, and the first pass that reads every catalog
+// reconciles the sink again.
+func TestRunStage1SharedSinkCatalogReadErrorKeepsLinks(t *testing.T) {
+	cityPath, mayorSkills, cfg := sharedSinkTestCity(t)
+	cfg.Agents = append(cfg.Agents, config.Agent{Name: "gamma", Scope: "city", Provider: "codex"})
+	var stderr bytes.Buffer
+	if err := runStage1SkillMaterialization(cityPath, cfg, &stderr); err != nil {
+		t.Fatalf("seeding pass: %v (stderr: %s)", err, stderr.String())
+	}
+	claudeSink := filepath.Join(cityPath, ".claude", "skills")
+	before := skillSinkSnapshot(t, claudeSink)
+
+	if err := os.Chmod(mayorSkills, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(mayorSkills, 0o755) })
+	if _, err := os.ReadDir(mayorSkills); err == nil {
+		t.Skip("environment ignores chmod 000 (likely running as root)")
+	}
+	writeSkillSource(t, filepath.Join(cityPath, "skills", "lint"))
+
+	stderr.Reset()
+	err := runStage1SkillMaterialization(cityPath, cfg, &stderr)
+	if err == nil || !strings.Contains(err.Error(), claudeSink) || !strings.Contains(err.Error(), mayorSkills) {
+		t.Fatalf("err = %v, want an error naming %s and the unreadable %s", err, claudeSink, mayorSkills)
+	}
+	requireSkillSinkUnchanged(t, claudeSink, before)
+	if !strings.Contains(stderr.String(), "permission denied") || !strings.Contains(stderr.String(), mayorSkills) {
+		t.Fatalf("stderr missing the read error for %s: %s", mayorSkills, stderr.String())
+	}
+	requireSkillLink(t, filepath.Join(cityPath, ".agents", "skills"), "lint", filepath.Join(cityPath, "skills", "lint"))
+
+	// The shared skill added while the sink was held waits for the next
+	// pass that can read every catalog, so its link proves that pass
+	// reconciled the sink.
+	if err := os.Chmod(mayorSkills, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stderr.Reset()
+	if err := runStage1SkillMaterialization(cityPath, cfg, &stderr); err != nil {
+		t.Fatalf("pass after %s reads again: %v (stderr: %s)", mayorSkills, err, stderr.String())
+	}
+	requireSkillLink(t, claudeSink, "lint", filepath.Join(cityPath, "skills", "lint"))
+	requireSkillLink(t, claudeSink, "notes", filepath.Join(mayorSkills, "notes"))
+}
