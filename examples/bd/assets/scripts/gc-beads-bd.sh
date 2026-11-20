@@ -5089,6 +5089,29 @@ op_recover() {
         die "dolt recovery skipped: storage stall"
     fi
 
+    # Skip recovery when the server answers SQL but the city database is
+    # not ready. A restart cannot recreate or repair a database: cycling
+    # the shared server drops every scope's connections for nothing, and
+    # the beads-health order would re-trigger the same failed recovery on
+    # its next tick. Restore the database, or use gc dolt restart when it
+    # is on disk but not loaded.
+    recover_db=$(city_health_database)
+    recover_data_dir=""
+    if [ -n "$recover_db" ] && tcp_check; then
+        recover_data_dir=$(city_health_data_dir)
+        if load_health_check_from_gc "$recover_db" "$recover_data_dir"; then
+            if [ "$GC_HEALTH_QUERY_READY" = "true" ] && [ "$GC_HEALTH_DATABASE_READY" != "true" ]; then
+                echo "city database \"$recover_db\" is unavailable: ${GC_HEALTH_DATABASE_ERROR:-health check did not report database \"$recover_db\"}" >&2
+                echo "  a restart cannot recreate or repair a database; restore it, or run gc dolt restart if it is on disk but not loaded" >&2
+                die "dolt recovery skipped: city database '$recover_db' unavailable"
+            fi
+        elif do_query_probe && ! recover_db_failure=$(check_city_database "$recover_db" "$recover_data_dir"); then
+            echo "city database \"$recover_db\" is unavailable: $recover_db_failure" >&2
+            echo "  a restart cannot recreate or repair a database; restore it, or run gc dolt restart if it is on disk but not loaded" >&2
+            die "dolt recovery skipped: city database '$recover_db' unavailable"
+        fi
+    fi
+
     if load_recover_managed_from_gc; then
         if [ "$GC_RECOVER_DIAGNOSED_READ_ONLY" = "true" ]; then
             echo "detected read-only dolt server — restarting" >&2
@@ -5097,9 +5120,8 @@ op_recover() {
         # The helper's recovery health check proves only the server. A
         # server that answers SQL while the city database is still missing
         # or unreadable is not recovered.
-        recover_db=$(city_health_database)
         if [ -n "$recover_db" ]; then
-            recover_data_dir=$(city_health_data_dir)
+            [ -n "$recover_data_dir" ] || recover_data_dir=$(city_health_data_dir)
             if load_health_check_from_gc "$recover_db" "$recover_data_dir"; then
                 if [ "$GC_HEALTH_DATABASE_READY" != "true" ]; then
                     die "dolt city database still unavailable after recovery: ${GC_HEALTH_DATABASE_ERROR:-health check did not report database \"$recover_db\"}"

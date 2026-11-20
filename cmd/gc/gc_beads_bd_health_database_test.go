@@ -222,6 +222,85 @@ func TestGcBeadsBdHealthFallbackFailsClosedNotInconclusive(t *testing.T) {
 	}
 }
 
+// writeRecoverMarkerStubs stub op_recover's recovery entry points to append
+// to $RECOVER_MARKER instead of touching the server, so a test can prove
+// recovery never started. helper picks the gc-helper restart (return 0) or
+// its absence (return 1).
+func writeRecoverMarkerStubs(helper bool) string {
+	helperBody := `load_recover_managed_from_gc() { echo helper-recover >> "$RECOVER_MARKER"; GC_RECOVER_PORT=3311; GC_RECOVER_DIAGNOSED_READ_ONLY=false; return 0; }`
+	if !helper {
+		helperBody = `load_recover_managed_from_gc() { echo helper-recover >> "$RECOVER_MARKER"; GC_RECOVER_MANAGED_USED=false; return 1; }`
+	}
+	return `is_remote() { return 1; }
+recovery_should_skip_due_to_enospc() { return 1; }
+recovery_should_skip_due_to_fsync_stall() { return 1; }
+` + helperBody + `
+op_stop_impl() { echo stop >> "$RECOVER_MARKER"; }
+op_start() { echo start >> "$RECOVER_MARKER"; }
+`
+}
+
+func readMarker(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return ""
+		}
+		t.Fatalf("ReadFile(marker): %v", err)
+	}
+	return string(data)
+}
+
+// TestGcBeadsBdRecoverSkipsWhenCityDatabaseUnavailableHelper covers AC-7 on
+// the gc-helper path: a local server that answers the query probe while the
+// city database is not ready makes recover exit 1 with the skip message and
+// never invoke the managed recovery, stop, or start.
+func TestGcBeadsBdRecoverSkipsWhenCityDatabaseUnavailableHelper(t *testing.T) {
+	gcBin, _ := writeFakeHealthCheckGC(t,
+		"query_ready\ttrue\\nread_only\tunknown\\nconnection_count\t5\\ndatabase\\thq\\ndatabase_ready\tfalse\\n"+
+			"database_error\\tdatabase \"hq\" default branch head unresolvable: Error 1049 (HY000): database not found: hq\\n")
+	marker := filepath.Join(t.TempDir(), "recover-marker")
+
+	out := gcBeadsBdOpHarness(t, "op_recover", writeRecoverMarkerStubs(true), cityMetadataHQ,
+		"issue_prefix: hq\ngc.endpoint_origin: managed_city\n", gcBin, t.TempDir(),
+		"RECOVER_MARKER="+marker)
+	if !strings.Contains(out, "status=1") {
+		t.Fatalf("op_recover output = %s, want failure", out)
+	}
+	if !strings.Contains(out, "dolt recovery skipped: city database 'hq' unavailable") {
+		t.Fatalf("op_recover output = %s, want the skip message", out)
+	}
+	if markerText := readMarker(t, marker); markerText != "" {
+		t.Fatalf("recovery actions ran despite the skip guard: %q", markerText)
+	}
+}
+
+// TestGcBeadsBdRecoverSkipsWhenCityDatabaseUnavailableFallback covers AC-7
+// on the helper-less fallback path.
+func TestGcBeadsBdRecoverSkipsWhenCityDatabaseUnavailableFallback(t *testing.T) {
+	binDir := writeFallbackHeadDolt(t, "Error 1105 (HY000): cannot resolve default branch head for database 'hq': 'ghost'")
+	dataDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dataDir, "hq", ".dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(t.TempDir(), "recover-marker")
+
+	out := gcBeadsBdOpHarness(t, "op_recover", writeRecoverMarkerStubs(false), cityMetadataHQ,
+		"issue_prefix: hq\ngc.endpoint_origin: managed_city\n", "", dataDir,
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"RECOVER_MARKER="+marker)
+	if !strings.Contains(out, "status=1") {
+		t.Fatalf("op_recover output = %s, want failure", out)
+	}
+	if !strings.Contains(out, "dolt recovery skipped: city database 'hq' unavailable") {
+		t.Fatalf("op_recover output = %s, want the skip message", out)
+	}
+	if markerText := readMarker(t, marker); markerText != "" {
+		t.Fatalf("recovery actions ran despite the skip guard: %q", markerText)
+	}
+}
+
 // writeFallbackHeadDolt writes a dolt CLI that answers only the city
 // database HEAD probe, failing it with headErr when non-empty.
 func writeFallbackHeadDolt(t *testing.T, headErr string) string {
@@ -278,10 +357,39 @@ func TestGcBeadsBdHealthFallbackFailsClosedWhenRepositoryMissingOnDisk(t *testin
 	}
 }
 
+// writeStatefulHealthCheckGC writes a gc helper whose `dolt-state
+// health-check` reports the city database ready on the first call and
+// unavailable afterwards, so a test can span a recovery that breaks the
+// database.
+func writeStatefulHealthCheckGC(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	counter := filepath.Join(dir, "calls")
+	gcBin := filepath.Join(dir, "gc-helper")
+	script := `#!/bin/sh
+[ "$1 $2" = "dolt-state health-check" ] || { echo "unexpected gc call: $*" >&2; exit 2; }
+n=$(cat "` + counter + `" 2>/dev/null || echo 0)
+n=$((n + 1))
+echo "$n" > "` + counter + `"
+printf 'query_ready\ttrue\nread_only\tunknown\nconnection_count\t5\ndatabase\thq\n'
+if [ "$n" -ge 2 ]; then
+  printf 'database_ready\tfalse\ndatabase_error\tdatabase "hq" default branch head unresolvable: Error 1049 (HY000): database not found: hq\n'
+else
+  printf 'database_ready\ttrue\n'
+fi
+`
+	if err := os.WriteFile(gcBin, []byte(script), 0o755); err != nil {
+		t.Fatalf("WriteFile(gc): %v", err)
+	}
+	return gcBin
+}
+
+// TestGcBeadsBdRecoverFailsWhenCityDatabaseStillUnavailable proves the
+// post-recovery check: the database is ready when recovery starts, the
+// restart runs, and a database broken by the restart still fails recover —
+// the skip guard alone cannot catch a database that breaks during recovery.
 func TestGcBeadsBdRecoverFailsWhenCityDatabaseStillUnavailable(t *testing.T) {
-	gcBin, argvFile := writeFakeHealthCheckGC(t,
-		"query_ready\ttrue\\nread_only\tunknown\\nconnection_count\t5\\ndatabase\thq\\ndatabase_ready\tfalse\\n"+
-			"database_error\tdatabase \"hq\" default branch head unresolvable: Error 1049 (HY000): database not found: hq\\n")
+	gcBin := writeStatefulHealthCheckGC(t)
 	dataDir := t.TempDir()
 
 	out := gcBeadsBdOpHarness(t, "op_recover", gcBeadsBdRecoverStubs, cityMetadataHQ,
@@ -291,13 +399,6 @@ func TestGcBeadsBdRecoverFailsWhenCityDatabaseStillUnavailable(t *testing.T) {
 	}
 	if !strings.Contains(out, "still unavailable after recovery") || !strings.Contains(out, "database not found: hq") {
 		t.Fatalf("op_recover output = %s, want the post-recovery database failure named", out)
-	}
-	argv, err := os.ReadFile(argvFile)
-	if err != nil {
-		t.Fatalf("ReadFile(argv): %v", err)
-	}
-	if !strings.Contains(string(argv), "--database hq --data-dir "+dataDir) {
-		t.Fatalf("health-check argv = %q, want --database hq --data-dir %s", argv, dataDir)
 	}
 }
 
