@@ -1,7 +1,13 @@
 package beadmeta
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -151,6 +157,99 @@ func TestScopeCheckExemptKindsComposition(t *testing.T) {
 			t.Errorf("%q is in both EngineMintedOnlyKinds and WorkflowTopologyKinds", k)
 		}
 	}
+}
+
+// TestEngineKindsComposition pins EngineKinds to its declared composition —
+// ControlKinds ∪ StructuralGraphKinds ∪ WorkflowTopologyKinds ∪ {wisp, task,
+// closed} — and guards it against drift: every Kind* constant this package
+// declares must be a member, so a new engine kind cannot silently fall into
+// the operator vocabulary (and with it, the work-record close gate).
+func TestEngineKindsComposition(t *testing.T) {
+	if dup := firstDuplicate(EngineKinds); dup != "" {
+		t.Errorf("EngineKinds contains duplicate %q", dup)
+	}
+
+	var derived []string
+	for _, set := range [][]string{ControlKinds, StructuralGraphKinds, WorkflowTopologyKinds, {KindWisp, KindTask, KindClosed}} {
+		for _, k := range set {
+			if !slices.Contains(derived, k) {
+				derived = append(derived, k)
+			}
+		}
+	}
+	slices.Sort(derived)
+	got := slices.Clone(EngineKinds)
+	slices.Sort(got)
+	if !slices.Equal(got, derived) {
+		t.Errorf("EngineKinds = %v\nwant ControlKinds ∪ StructuralGraphKinds ∪ WorkflowTopologyKinds ∪ {wisp, task, closed} = %v", got, derived)
+	}
+
+	for _, k := range declaredKindValues(t) {
+		if !slices.Contains(EngineKinds, k) {
+			t.Errorf("declared kind constant %q is missing from EngineKinds", k)
+		}
+	}
+
+	for _, k := range EngineKinds {
+		if !IsEngineKind(k) {
+			t.Errorf("IsEngineKind(%q) = false, want true", k)
+		}
+	}
+	for _, k := range []string{"", "work", "review", "bug", "step", " task", "Task"} {
+		if IsEngineKind(k) {
+			t.Errorf("IsEngineKind(%q) = true, want false", k)
+		}
+	}
+}
+
+// declaredKindValues returns the value of every string constant named Kind*
+// (other than metadata-key names) declared in this package's non-test files.
+func declaredKindValues(t *testing.T) []string {
+	t.Helper()
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("reading package dir: %v", err)
+	}
+	fset := token.NewFileSet()
+	var values []string
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", name, err)
+		}
+		for _, decl := range file.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.CONST {
+				continue
+			}
+			for _, spec := range gen.Specs {
+				vs := spec.(*ast.ValueSpec)
+				for i, ident := range vs.Names {
+					if !strings.HasPrefix(ident.Name, "Kind") || strings.HasSuffix(ident.Name, "MetadataKey") || i >= len(vs.Values) {
+						continue
+					}
+					lit, ok := vs.Values[i].(*ast.BasicLit)
+					if !ok || lit.Kind != token.STRING {
+						t.Fatalf("%s: constant %s is not a string literal", name, ident.Name)
+					}
+					v, err := strconv.Unquote(lit.Value)
+					if err != nil {
+						t.Fatalf("%s: unquoting %s: %v", name, ident.Name, err)
+					}
+					values = append(values, v)
+				}
+			}
+		}
+	}
+	// A walk that found no kind constant would pass the drift guard vacuously.
+	if len(values) == 0 {
+		t.Fatal("found no Kind* constants; the drift guard inspected nothing")
+	}
+	return values
 }
 
 func firstDuplicate(set []string) string {
