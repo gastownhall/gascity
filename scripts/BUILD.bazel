@@ -114,6 +114,8 @@ go_test(
         "check_split_topology_rows_test.go",
         "ci_critical_path_test.go",
         "ci_merge_queue_test.go",
+        "ci_pr_required_checks_test.go",
+        "ci_required_checks_union_test.go",
         "ci_required_coverage_test.go",
         "cmd_gc_shards_test.go",
         "cmd_gc_testhooks_test.go",
