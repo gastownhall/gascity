@@ -233,25 +233,15 @@ func TestHoldLoopbackPortSkipsCandidateWhoseV6TwinIsTaken(t *testing.T) {
 		t.Skip("[::1] is not usable on this host")
 	}
 	calls, first := 0, 0
-	blocker := -1
-	t.Cleanup(func() {
-		if blocker >= 0 {
-			_ = syscall.Close(blocker)
-		}
-	})
+	inner := twinTakenCandidate(t, 1, v4Candidate)
 	candidate := func() (int, int, error) {
-		fd, port, err := v4Candidate()
+		fd, port, err := inner()
 		if err != nil {
 			return -1, 0, err
 		}
 		calls++
 		if calls == 1 {
 			first = port
-			blocker, _, err = rawBind(syscall.AF_INET6, port, false)
-			if err != nil {
-				_ = syscall.Close(fd)
-				return -1, 0, err
-			}
 		}
 		return fd, port, nil
 	}
@@ -357,33 +347,92 @@ func socketInode(fd int) uint64 {
 }
 
 // twinTakenCandidate returns a candidate source for holdLoopbackPortFDs: a
-// SO_REUSEADDR bind(0) on 127.0.0.1 like v4Candidate, whose [::1] twin the first
-// taken candidates find held by a bound-only socket without SO_REUSEADDR. Later
-// candidates are left alone. The blockers close at t.Cleanup.
-func twinTakenCandidate(t *testing.T, taken int) func() (int, int, error) {
+// 127.0.0.1 socket from source (v4Candidate in the tests below), whose [::1]
+// twin the first taken candidates find held by this test's own bound-only
+// socket without SO_REUSEADDR. Later candidates are left alone.
+//
+// A twin some other socket already holds is not taken for this purpose: one
+// bound with SO_REUSEADDR and never listening (another test action's port hold)
+// refuses the blocker's plain bind but admits holdLoopbackPortFDs's SO_REUSEADDR
+// bind. Such a number is set aside and source is asked again. The set-aside
+// sockets stay open, so bind(0) cannot hand the number back, and they close
+// with the blockers at t.Cleanup.
+func twinTakenCandidate(t *testing.T, taken int, source func() (int, int, error)) func() (int, int, error) {
 	t.Helper()
-	var blockers []int
-	t.Cleanup(func() { closeFDs(blockers) })
+	var held []int
+	t.Cleanup(func() { closeFDs(held) })
 	picks := 0
 	return func() (int, int, error) {
-		fd, port, err := v4Candidate()
-		if err != nil {
-			return -1, 0, err
-		}
 		picks++
-		if picks <= taken {
+		for try := 0; try < holdLoopbackPortTries; try++ {
+			fd, port, err := source()
+			if err != nil || picks > taken {
+				return fd, port, err
+			}
 			blocker, _, err := rawBind(syscall.AF_INET6, port, false)
 			switch {
 			case err == nil:
-				blockers = append(blockers, blocker)
+				held = append(held, blocker)
+				return fd, port, nil
 			case errors.Is(err, syscall.EADDRINUSE):
-				// a foreign socket already holds the twin: the pick is rejected either way
+				held = append(held, fd)
 			default:
 				_ = syscall.Close(fd)
 				return -1, 0, err
 			}
 		}
+		t.Fatalf("no 127.0.0.1 candidate whose [::1] twin this test could hold itself in %d tries", holdLoopbackPortTries)
+		return -1, 0, nil
+	}
+}
+
+// TestTwinTakenCandidateTakesTheTwinItself pins the premise the tests below
+// rest on: every candidate twinTakenCandidate returns as taken has its [::1]
+// twin held against holdLoopbackPortFDs's own SO_REUSEADDR bind. A twin that
+// another socket already holds with SO_REUSEADDR, bound and never listening,
+// refuses the blocker's plain bind but admits that SO_REUSEADDR bind. That is
+// how another test action's port hold looks on an executor that shares the
+// loopback port space (ga-bds6lca0), so the source plants one on the first
+// number it hands out. A twin some socket already holds needs no plant: it is
+// the same condition.
+func TestTwinTakenCandidateTakesTheTwinItself(t *testing.T) {
+	if !loopbackV6Usable(t) {
+		t.Skip("[::1] is not usable on this host")
+	}
+	var foreign []int
+	t.Cleanup(func() { closeFDs(foreign) })
+	planted := 0
+	source := func() (int, int, error) {
+		fd, port, err := v4Candidate()
+		if err != nil || planted != 0 {
+			return fd, port, err
+		}
+		planted = port
+		twin, _, err := rawBind(syscall.AF_INET6, port, true)
+		switch {
+		case err == nil:
+			foreign = append(foreign, twin)
+		case !errors.Is(err, syscall.EADDRINUSE):
+			_ = syscall.Close(fd)
+			return -1, 0, err
+		}
 		return fd, port, nil
+	}
+	fd, port, err := twinTakenCandidate(t, 1, source)()
+	if err != nil {
+		t.Fatalf("candidate: %v", err)
+	}
+	t.Cleanup(func() { _ = syscall.Close(fd) })
+	if port == planted {
+		t.Errorf("returned %d as taken, but another socket holds its [::1] twin with SO_REUSEADDR", port)
+	}
+	probe, _, err := rawBind(syscall.AF_INET6, port, true)
+	if err == nil {
+		_ = syscall.Close(probe)
+		t.Fatalf("a SO_REUSEADDR bind of [::1]:%d succeeded, want the twin held against it", port)
+	}
+	if !errors.Is(err, syscall.EADDRINUSE) {
+		t.Fatalf("SO_REUSEADDR bind of [::1]:%d: %v, want EADDRINUSE", port, err)
 	}
 }
 
@@ -395,7 +444,7 @@ func TestHoldLoopbackPortFDsGivesUpAtTheTryBound(t *testing.T) {
 		t.Skip("[::1] is not usable on this host")
 	}
 	const bound = 64
-	inner := twinTakenCandidate(t, bound*2)
+	inner := twinTakenCandidate(t, bound*2, v4Candidate)
 	calls := 0
 	candidate := func() (int, int, error) {
 		calls++
@@ -429,7 +478,7 @@ func TestHoldLoopbackPortFDsKeepsRejectedCandidatesOpenUntilThePickEnds(t *testi
 		ino      uint64
 	}
 	var picks []pick
-	inner := twinTakenCandidate(t, taken)
+	inner := twinTakenCandidate(t, taken, v4Candidate)
 	candidate := func() (int, int, error) {
 		for _, p := range picks {
 			if socketInode(p.fd) != p.ino {
