@@ -205,3 +205,66 @@ func TestProviderProcessPassthroughEnvOmitsUnsetTZ(t *testing.T) {
 		t.Errorf(`m["TZ"] = %q present, want absent when host TZ is unset`, v)
 	}
 }
+
+func TestIsProviderRoutingEnv(t *testing.T) {
+	for _, tt := range []struct {
+		key  string
+		want bool
+	}{
+		{"ANTHROPIC_BASE_URL", true},
+		{"ANTHROPIC_DEFAULT_HAIKU_MODEL", true},
+		{"ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION", true},
+		{"OPENAI_API_BASE", true},
+		{"OPENAI_BASE_URL", true},
+		{"AZURE_OPENAI_ENDPOINT", true},
+		{"GOOGLE_GEMINI_BASE_URL", true},
+		{"ZCODE_MODEL", true},
+		{"OLLAMA_HOST", true},
+		// A trailing digit run is trimmed before the routing-word match.
+		{"OPENAI_BASE_URL2", true},
+		{"ANTHROPIC_AUTH_TOKEN2", false},
+		{"ANTHROPIC_AUTH_TOKEN_ZAI", false},
+		{"ANTHROPIC_API_KEY", false},
+		{"GOOGLE_APPLICATION_CREDENTIALS", false},
+		{"GOOGLE_CLOUD_PROJECT", false},
+		{"AZURE_CLIENT_ID", false},
+		{"OPENAI_ORG_ID", false},
+		{"ANTHROPIC_CUSTOM_HEADERS", false},
+		// Whole words only: MODELS and HOSTNAMES are not routing words.
+		{"OLLAMA_MODELS", false},
+		{"OLLAMA_HOSTNAMES", false},
+		// Exact-name keys and non-provider names are never routing-class.
+		{"AWS_ENDPOINT_URL", false},
+		{"HTTPS_PROXY", false},
+		// A secret word vetoes a routing word, as written or digit-trimmed.
+		{"OPENAI_PROXY_API_KEY", false},
+		{"ANTHROPIC_BASE_URL_TOKEN3", false},
+		{"GOOGLE_CERT_BASE64", false},
+		// The bare prefix has no words.
+		{"ANTHROPIC_", false},
+		{"", false},
+	} {
+		if got := IsProviderRoutingEnv(tt.key); got != tt.want {
+			t.Errorf("IsProviderRoutingEnv(%q) = %v, want %v", tt.key, got, tt.want)
+		}
+	}
+}
+
+func TestProviderEnvPrefix(t *testing.T) {
+	for _, tt := range []struct {
+		key        string
+		wantPrefix string
+		wantOK     bool
+	}{
+		{"ANTHROPIC_BASE_URL", "ANTHROPIC_", true},
+		{"OPENROUTER_API_KEY", "OPENROUTER_", true},
+		{"OPENAI_API_KEY", "OPENAI_", true},
+		{"AWS_ACCESS_KEY_ID", "", false},
+		{"HTTPS_PROXY", "", false},
+	} {
+		prefix, ok := ProviderEnvPrefix(tt.key)
+		if prefix != tt.wantPrefix || ok != tt.wantOK {
+			t.Errorf("ProviderEnvPrefix(%q) = (%q, %v), want (%q, %v)", tt.key, prefix, ok, tt.wantPrefix, tt.wantOK)
+		}
+	}
+}

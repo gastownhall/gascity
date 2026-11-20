@@ -187,6 +187,80 @@ func IsProviderCredentialEnv(key string) bool {
 	return false
 }
 
+// providerRoutingWords are the words of a provider-prefixed env name that say
+// where a call goes or what it asks for, not who makes it.
+var providerRoutingWords = map[string]bool{
+	"URL":        true,
+	"URI":        true,
+	"ENDPOINT":   true,
+	"HOST":       true,
+	"BASE":       true,
+	"PROXY":      true,
+	"MODEL":      true,
+	"DEPLOYMENT": true,
+}
+
+// providerSecretWords are the words of a provider-prefixed env name that may
+// carry a secret. Any one of them keeps the name credential-class whatever
+// routing words it also holds, so the routing classification never withholds
+// a credential. The list errs long: a false veto only keeps a name
+// credential-class.
+var providerSecretWords = map[string]bool{
+	"KEY":         true,
+	"KEYS":        true,
+	"TOKEN":       true,
+	"TOKENS":      true,
+	"SECRET":      true,
+	"SECRETS":     true,
+	"PASSWORD":    true,
+	"PASSWD":      true,
+	"PASS":        true,
+	"AUTH":        true,
+	"CREDENTIAL":  true,
+	"CREDENTIALS": true,
+	"CERT":        true,
+	"CERTIFICATE": true,
+	"BASE64":      true,
+}
+
+// ProviderEnvPrefix returns the provider prefix (for example "ANTHROPIC_")
+// that key starts with. Exact-name provider keys (the AWS_ set) and names
+// outside the provider allowlist report false.
+func ProviderEnvPrefix(key string) (string, bool) {
+	for _, prefix := range providerCredentialEnvPrefixes {
+		if strings.HasPrefix(key, prefix) {
+			return prefix, true
+		}
+	}
+	return "", false
+}
+
+// IsProviderRoutingEnv reports whether key is a routing-class provider name:
+// one that says where a provider call goes or which model it asks for (such
+// as ANTHROPIC_BASE_URL or ANTHROPIC_MODEL), as opposed to a credential-class
+// name that says who is calling. It is true iff key has a provider prefix and
+// the words after the prefix, split on "_", include a routing word (matched
+// with any trailing digits trimmed) and no secret word (matched as written or
+// with trailing digits trimmed). Every other provider-prefixed name is
+// credential-class.
+func IsProviderRoutingEnv(key string) bool {
+	prefix, ok := ProviderEnvPrefix(key)
+	if !ok {
+		return false
+	}
+	routing := false
+	for _, word := range strings.Split(strings.TrimPrefix(key, prefix), "_") {
+		trimmed := strings.TrimRight(word, "0123456789")
+		if providerSecretWords[word] || providerSecretWords[trimmed] {
+			return false
+		}
+		if providerRoutingWords[trimmed] {
+			routing = true
+		}
+	}
+	return routing
+}
+
 // ProviderProcessPassthroughEnv returns non-GC process context that provider
 // sessions need to start reliably: user/home, provider auth/config, locale,
 // time zone, XDG, telemetry, and Claude nesting resets. It also pins
