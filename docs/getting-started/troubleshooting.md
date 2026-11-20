@@ -1058,6 +1058,59 @@ check the free space first:
 git -C "$ARCHIVE" -c pack.windowMemory=64m -c pack.threads=1 gc
 ```
 
+#### When maintenance keeps failing
+
+Every failing pass fails its run, and the order reports the failure again
+each time it runs. The exporter counts the runs in a row that fail in the
+archive's state file (`consecutive_maintenance_failures`) and, once the count
+reaches `GC_JSONL_MAX_MAINTENANCE_FAILURES` (default 3), sends one
+`ESCALATION: JSONL archive maintenance failing [HIGH]` message to the default
+human escalation mailbox. With `0` or `1` it alerts on the first failing run.
+Any run whose pass succeeds, including one that finds the archive below its
+packing limits, clears the count.
+
+The message names the cause. The state file keeps the last failure's record
+beside the count:
+
+| Cause | What failed | Evidence in the message |
+|---|---|---|
+| `stats_read_failed` | `git count-objects -v` exited non-zero | Git's stderr |
+| `stats_malformed` | A statistic was not a number | The values read, such as `count=12x` |
+| `stats_incomplete` | A statistic was missing | The values read, with `size-pack=<missing>` for a missing one |
+| `low_space` | The free-space check refused the pass | `free_kb`, `needed_kb` and `floor_kb` |
+| `gc_failed` | The repack exited non-zero | Its exit status, the loose objects it left and its last lines of stderr |
+| `gc_timeout` | The repack ran past its time limit and was stopped | The limit and the loose objects it left |
+
+The message also says which run path hit the failure (`Arm`: `halt`,
+`post_push` or `no_change`) and what happened to the archive push in the same
+run. The state file holds at most 512 bytes of evidence, and the message at
+most 20 lines of it.
+
+The repack stops after `GC_JSONL_GC_TIMEOUT_SECS=480` seconds, so one stuck
+pass cannot run the order into its own 900-second timeout. Set it to `0` to
+leave the repack unbounded; keep it at least 300 seconds below the order's
+timeout otherwise. The limit needs `timeout` (or `gtimeout` from GNU
+coreutils on macOS); a host with neither packs without a limit and says so on
+stderr. A larger archive that needs more time can be packed once by hand with
+the command below.
+
+One escalation covers one streak. The exporter sets
+`maintenance_failure_escalated` only after the message was delivered. If
+delivery fails, the run prints `maintenance escalation was not delivered; the
+next failing run will retry` and the next failing run sends it again.
+
+To recover, fix the cause the message names. Then run the one-off repack by
+hand, or wait for the next run, which clears the count when its pass
+succeeds:
+
+```bash
+git -C "$ARCHIVE" -c pack.windowMemory=256m -c pack.threads=1 repack -d -l -q --geometric=2
+```
+
+For `low_space`, free disk space or set `GC_JSONL_GC_MIN_FREE_KB=0`. To
+silence the alert while you work on it, set `GC_JSONL_MAX_MAINTENANCE_FAILURES=99`
+in the orchestrator's environment; the runs still fail and still count.
+
 ### Enabling off-box backup
 
 Pick a repository that only this host will push to (the archive contains

@@ -1042,6 +1042,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The `jsonl-export` order escalates when archive maintenance keeps failing.**
+  Each run whose archive maintenance fails (a statistics read, the free-space
+  check or the repack) is counted in the order's state file, with the cause,
+  the run path and the evidence of the last failure. Once
+  `GC_JSONL_MAX_MAINTENANCE_FAILURES` runs in a row have failed (default 3; `0`
+  and `1` alert on the first), the order sends one
+  `ESCALATION: JSONL archive maintenance failing [HIGH]` message, and a run
+  whose maintenance passes clears the count. A failing run still exits 1 as
+  before, and an undelivered escalation is sent again by the next failing run.
+  See "When maintenance keeps failing" in the troubleshooting guide.
+- **`GC_JSONL_GC_TIMEOUT_SECS` for the `jsonl-export` repack.** The setting
+  bounds the archive repack (default 480 seconds; `0` leaves it unbounded), so
+  one stuck pass cannot run the order into its 900-second timeout. It needs
+  `timeout` or `gtimeout`; a host with neither packs without a limit.
 - **Events: `session.created` and `session.closed`.** The city event
   stream announces each session joining or leaving the open set, with
   typed payloads (`SessionCreatedPayload`, `SessionClosedPayload`), so a
@@ -1230,6 +1244,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   claim for different packs fails the add.
 
 ### Changed
+
+- **The `jsonl-export` archive repack is bounded in time.** It stops after
+  `GC_JSONL_GC_TIMEOUT_SECS` (default 480 seconds) and the run counts that as a
+  maintenance failure with the cause `gc_timeout`; it used to run until the
+  order's own 900-second timeout killed the whole run. Set the variable to `0`
+  to keep the old unbounded behavior.
 
 - **API: `GET /v0/city/{cityName}/orders/history` and
   `GET /v0/city/{cityName}/order/history/{bead_id}` report `created_at` with
