@@ -1298,10 +1298,11 @@ func rigEdgeDispositions(plan rigImportPlan) map[string]string {
 	return out
 }
 
-// rigBackupEntry is one cleared row with its out-edges and its in-edges from
-// rows that stay, each marked with what the import did with it.
+// rigBackupEntry is one cleared row, with the raw-status signals its JSON
+// leaves out, its out-edges and its in-edges from rows that stay, each marked
+// with what the import did with it.
 func rigBackupEntry(rigStore beads.Store, b beads.Bead, down, up []beads.Dep, clearing map[string]bool, disposition map[string]string) (infraBackupEntry, error) {
-	entry := infraBackupEntry{Bead: b, Class: coordclass.Classify(b).String()}
+	entry := newInfraBackupEntry(b)
 	for _, d := range down {
 		if d.IssueID == "" {
 			d.IssueID = b.ID
@@ -1544,6 +1545,13 @@ func doStorageMigrateFromRigs(ctx context.Context, request storageOperatorReques
 	// A shared-store attestation is recorded per rig, where it lifts that
 	// rig's refusal (importRig).
 	recordStorageAttestation(request.CityPath, logPrefix, request.Force.acceptedHazards(), stderr)
+	return importRigs(request, target, rigs, stdout, stderr)
+}
+
+// importRigs imports each of rigs inside the caller's controller lock, guard
+// and maintenance window, and reports each: 1 when any did not import, clean
+// or skip. `gc storage migrate --from-rigs` and the guided split share it.
+func importRigs(request storageOperatorRequest, target infraBindingTarget, rigs []config.Rig, stdout, stderr io.Writer) int {
 	env := rigImportEnv{
 		CityPath: request.CityPath,
 		CityName: loadedCityName(request.Cfg, request.CityPath),

@@ -103,7 +103,7 @@ func wispStepAssignees() []string {
 // resolveActiveWispStep returns the agent's current formula step bead.
 //
 // Resolution order:
-//  1. Find the agent's in-progress molecule bead (type=molecule or type=wisp).
+//  1. Find the agent's in-progress molecule bead (type=molecule).
 //  2. Find that molecule's in-progress type=step child — the current step.
 //  3. If no in-progress step child exists, fall back to the entry step: the
 //     first open type=step child (deterministic formula start position).
@@ -291,8 +291,10 @@ const (
 )
 
 // activeMoleculeTypes are the root types searched for an active molecule, in
-// preference order.
-var activeMoleculeTypes = []string{"molecule", "wisp"}
+// preference order. Every entry must be in beads.RequiredCustomTypes: a store
+// that validates types (bd) refuses a typed listing of one that is not
+// registered, and gc writes no roots of a type outside that list.
+var activeMoleculeTypes = []string{"molecule"}
 
 // claimedWork is every in-progress bead assigned to the hook's identities,
 // newest created first: the one listing the step reminder's in-progress

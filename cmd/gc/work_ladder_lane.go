@@ -142,6 +142,13 @@ func (l *externalReadsLane) runWorkLadder(ctx context.Context, env externalReads
 			return
 		}
 		if !ladderGoverns(p.cfg, row) {
+			if ladderSeat(p.cfg, row) {
+				// Excluded only as one_shot: settle what an earlier governed
+				// pass left in its cell, so a pending release cannot keep the
+				// hook refusing the claim's start for good. Never nudges,
+				// releases or recycles.
+				p.standDownSeat(row, workladder.Gate{Held: true, Reason: "one_shot"})
+			}
 			continue
 		}
 		governed[row.ID] = true
@@ -150,18 +157,36 @@ func (l *externalReadsLane) runWorkLadder(ctx context.Context, env externalReads
 	l.ladderTurns.keep(governed)
 }
 
-// ladderGoverns is the seats the ladder paces: open pool-managed session
-// rows with a runtime name, as the backstops governed, including a
-// canonical-singleton pool seat a configured named session took over
-// (isCollapsedCanonicalSingletonPoolBead).
+// ladderGoverns is the seats the ladder paces: every ladderSeat except a
+// lifecycle=one_shot agent's (ladderOneShot). A one-shot seat executes by
+// running its process, not by answering a prompt; process exit, crash
+// recovery and idle_timeout already own it (gascity#8152), so the ladder must
+// not nudge a quiet one mid-step, release its unstarted-looking claim out
+// from under a still-running script, or recycle it.
 func ladderGoverns(cfg *config.City, row beads.Bead) bool {
+	return ladderSeat(cfg, row) && !ladderOneShot(cfg, row)
+}
+
+// ladderSeat is the seats whose work_ladder cell the ladder owns: open
+// pool-managed session rows with a runtime name, as the backstops governed,
+// including a canonical-singleton pool seat a configured named session took
+// over (isCollapsedCanonicalSingletonPoolBead). The ladder paces only those
+// ladderGoverns admits, but settles a leftover release or notice on any.
+func ladderSeat(cfg *config.City, row beads.Bead) bool {
 	if strings.EqualFold(strings.TrimSpace(row.Status), "closed") || !isSessionBead(row) || strings.TrimSpace(row.Metadata["session_name"]) == "" {
 		return false
 	}
 	return strings.TrimSpace(row.Metadata["pool_managed"]) == "true" || isCollapsedCanonicalSingletonPoolBead(cfg, row)
 }
 
-// standDownLadder hands every governed seat back to the backstops when the
+// ladderOneShot reports whether row's agent is configured lifecycle=one_shot.
+// A row whose agent the config does not name is not one-shot.
+func ladderOneShot(cfg *config.City, row beads.Bead) bool {
+	agent := findAgentByTemplate(cfg, normalizedSessionTemplate(row, cfg))
+	return agent != nil && agent.Lifecycle == config.AgentLifecycleOneShot
+}
+
+// standDownLadder hands every ladder seat (ladderSeat) back to the backstops when the
 // ladder is turned off. By one CAS on each cell it drops the pending release
 // (nothing will finish it, and the hook refuses to hand out a claim a
 // release names) and folds in its notices' fates (W5). Each notice still
@@ -173,38 +198,45 @@ func (l *externalReadsLane) standDownLadder(env externalReadsEnv, raw []beads.Be
 	p := &ladderPass{l: l, env: env, cfg: env.Cfg, now: l.now(), front: sessionFrontDoor(env.CityStore)}
 	off := workladder.Gate{Held: true, Reason: "work_ladder_off"}
 	for _, row := range raw {
-		if !ladderGoverns(p.cfg, row) {
-			continue
+		if ladderSeat(p.cfg, row) {
+			p.standDownSeat(row, off)
 		}
-		r, err := workladder.DecodeLadder(row.Metadata[session.WorkLadderKey])
+	}
+}
+
+// standDownSeat hands one seat's cell back under the held gate off: by one
+// CAS it drops the pending release and folds in its notices' fates,
+// withdrawing each notice still pending. It writes nothing when the cell
+// holds neither, and never nudges, releases or recycles.
+func (p *ladderPass) standDownSeat(row beads.Bead, off workladder.Gate) {
+	r, err := workladder.DecodeLadder(row.Metadata[session.WorkLadderKey])
+	if err != nil {
+		return
+	}
+	outs := p.noticeOutcomes(row, r, off)
+	if r.Release == nil && len(outs) == 0 {
+		return
+	}
+	var settled []ladderSettled
+	wrote, err := p.front.UpdateRowFenced(row.ID, workLadderCommitAttempts, func(_ session.Info, resp session.PersistedResponse) (session.RowPatch, bool) {
+		r, err := workladder.DecodeLadder(resp.Metadata[session.WorkLadderKey])
 		if err != nil {
-			continue
+			return session.RowPatch{}, false
 		}
-		outs := p.noticeOutcomes(row, r, off)
-		if r.Release == nil && len(outs) == 0 {
-			continue
+		r, settled = foldLadderNotices(r, outs)
+		if r.Release == nil && len(settled) == 0 {
+			return session.RowPatch{}, false
 		}
-		var settled []ladderSettled
-		wrote, err := p.front.UpdateRowFenced(row.ID, workLadderCommitAttempts, func(_ session.Info, resp session.PersistedResponse) (session.RowPatch, bool) {
-			r, err := workladder.DecodeLadder(resp.Metadata[session.WorkLadderKey])
-			if err != nil {
-				return session.RowPatch{}, false
-			}
-			r, settled = foldLadderNotices(r, outs)
-			if r.Release == nil && len(settled) == 0 {
-				return session.RowPatch{}, false
-			}
-			r.Release = nil
-			return session.RowPatch{Metadata: session.MetadataPatch{session.WorkLadderKey: workladder.EncodeLadder(r)}}, true
-		})
-		if err != nil {
-			fmt.Fprintf(l.stderr, "work-ladder: standing down %s's cell: %v\n", row.ID, err) //nolint:errcheck // best-effort stderr
-			continue
-		}
-		if wrote {
-			for _, s := range settled {
-				p.noticeSettled(row, s)
-			}
+		r.Release = nil
+		return session.RowPatch{Metadata: session.MetadataPatch{session.WorkLadderKey: workladder.EncodeLadder(r)}}, true
+	})
+	if err != nil {
+		fmt.Fprintf(p.l.stderr, "work-ladder: standing down %s's cell: %v\n", row.ID, err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	if wrote {
+		for _, s := range settled {
+			p.noticeSettled(row, s)
 		}
 	}
 }

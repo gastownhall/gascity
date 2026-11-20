@@ -111,6 +111,10 @@ It resolves its destination from [storage.classes], so it has nothing to check
 until that section names a binding. On a city with no infrastructure split it
 reports exactly that and exits non-zero — author the split first.
 
+It starts no bead-store provider: on a city whose provider is down, or with
+a proxied server stopped, it says so and what lets a later run read, runs every
+check that reads no store, skips each that reads one, and exits non-zero.
+
 It names every check that would refuse, not only the first: a check that
 blocks does not stop the report, and a check that depends on one that blocked
 is printed as [SKIP] with the check it needs.
@@ -186,8 +190,23 @@ quiescent binding; nothing else is written.`,
 func doStoragePreflight(request storageOperatorRequest, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "city: %s\n", request.CityPath) //nolint:errcheck // best-effort stdout
 	var found preflightFindings
+	// The read gate --split takes: a store whose server is down is not read,
+	// because any read would start it and leave it running on the stopped
+	// city (ga-683m7f). The checks that read no store still run.
+	why, remedy := splitStoreReadGate(request.CityPath, request.Cfg)
+	if why != "" {
+		found.unread = why
+		preflightNote(stdout, "stores", why+"; this command starts nothing, so the checks that read a store are skipped")
+	}
 	if code := runStoragePreflightChecks(request, &found, stdout, stderr); code != 0 || found.converged {
+		if code != 0 && why != "" {
+			fmt.Fprintf(stdout, "The checks marked [SKIP] read the city's stores and did not run. %s.\n", remedy) //nolint:errcheck // best-effort stdout
+		}
 		return code
+	}
+	if why != "" {
+		fmt.Fprintf(stdout, "\n%s: the checks that read the city's stores did not run, because this command starts nothing. %s.\n", storagePreflightLogPrefix, remedy) //nolint:errcheck // best-effort stdout
+		return 1
 	}
 	command := append([]string{storageMigrationCommand, "--" + storageFleetStoppedFlag}, request.Force.flags()...)
 	fmt.Fprintf(stdout, "\nReady. When the fleet is stopped, run: %s\n", strings.Join(command, " ")) //nolint:errcheck // best-effort stdout
@@ -206,6 +225,10 @@ type preflightFindings struct {
 	all  map[string]beads.Bead
 	// plan is the copy's plan over rows.
 	plan infraCopyPlan
+	// writesPayloads reports that the work store's lane writes an edge's
+	// payload (beads.DepMetadataWriter), which `gc storage migrate --to-work`
+	// needs to carry one back.
+	writesPayloads bool
 	// rigs is the per-rig census.
 	rigs []rigCensusRow
 	// converged reports a city the migration would not copy.
@@ -453,6 +476,8 @@ func preflightWorkStore(request storageOperatorRequest, found *preflightFindings
 		return
 	}
 	rows, all, listErr := readInfraSnapshotRows(source, coordclass.CurrentGeneration)
+	under, _, _ := unwrapBeadPolicyStore(source)
+	_, writesPayloads := beads.As[beads.DepMetadataWriter](under)
 	var edgeErr, holdsErr, literalErr error
 	var unheldExternal, unheldUnread []string
 	var plan infraCopyPlan
@@ -469,7 +494,8 @@ func preflightWorkStore(request storageOperatorRequest, found *preflightFindings
 		edgeErr = migrationWindowPayloadRefusal(request.CityPath, edgeErr)
 		// The same plan the migration runs, so a hold it would refuse is named
 		// before the window rather than inside it: the cross-boundary plan's
-		// edge holds (D9) and the status holds.
+		// edge holds (D9). The status holds cross as parked holds, which
+		// preflightCopyNotes lists.
 		if edgeErr == nil {
 			holdsErr = infraCopyHoldsRefusal(request.CityPath, request.Cfg, &plan, all, false)
 		}
@@ -499,7 +525,7 @@ func preflightWorkStore(request storageOperatorRequest, found *preflightFindings
 		preflightSkipWorkStoreReaders(stdout)
 		return
 	}
-	found.read, found.rows, found.all, found.plan = true, rows, all, plan
+	found.read, found.rows, found.all, found.plan, found.writesPayloads = true, rows, all, plan, writesPayloads
 	preflightPass(stdout, "work store", fmt.Sprintf("would copy %d infrastructure bead(s)", len(rows)))
 	switch {
 	case edgeErr != nil:
@@ -544,6 +570,14 @@ func preflightLiveRowIDs(source infraRowLister) ([]string, error) {
 // preflightCopyNotes reports, without blocking, what a copy that clears its
 // holds does to edges the operator may care about.
 func preflightCopyNotes(stdout io.Writer, plan infraCopyPlan, unheldExternal, unheldUnread []string) {
+	// A hold bd keeps in the status crosses parked: deferred to a date no
+	// clock reaches, the hold recorded beside it for the reverse.
+	if parked := infraParkedRows(plan.rows); len(parked) > 0 {
+		preflightNote(stdout, "parked holds", fmt.Sprintf("%d open bead(s) the copy moves are parked by a status the binding cannot record; each crosses deferred until %s, out of every ready view and every read of live work, with its status recorded in %s, and stays parked: the binding refuses to claim it, as bd refuses to claim a parked bead, `gc bd update --status` gives it no status but open or closed, and no gc bd verb clears a binding bead's deferral (`gc bd undefer` and `gc bd update --defer` are refused for it). So release one here before the copy if it is to be worked after it. In the split city a parked bead can only be closed, or returned with its status by `gc storage migrate --to-work`:", len(parked), infraParkedDeferUntil.Format("2006-01-02"), beadmeta.MigratedParkedHoldMetadataKey))
+		for _, line := range parked {
+			fmt.Fprintf(stdout, "%s%s\n", preflightDetailIndent, line) //nolint:errcheck // best-effort stdout
+		}
+	}
 	// An external: reference is carried as it is, and a split city's readers
 	// enforce it, so a moved row waiting on one whose bead no store holds
 	// arrives blocked until something holds and closes it.
@@ -796,7 +830,7 @@ func preflightBlockRow(stdout io.Writer, check string, cause error) {
 // import cannot move without a cross-store edge, or a rig it cannot read —
 // blocks.
 func preflightRigScopes(request storageOperatorRequest, target infraBindingTarget, found *preflightFindings, stdout io.Writer) {
-	rows := censusRigs(request.CityPath, request.Cfg, target, true)
+	rows := censusRigsAttested(request.CityPath, request.Cfg, target, true, request.Force)
 	found.rigs = rows
 	if len(rows) == 0 {
 		preflightPass(stdout, preflightRigScopesCheck, "this city declares no rig")
@@ -804,6 +838,9 @@ func preflightRigScopes(request storageOperatorRequest, target infraBindingTarge
 	}
 	var refusals []string
 	for _, r := range rows {
+		for _, live := range r.LiveCoTenants {
+			preflightNote(stdout, "rig "+r.Rig, fmt.Sprintf("rig %s's store is shared with city %s, which is live: the rig import (the guided split's rig step) refuses at this rig until that city is stopped (`%s`)", r.Rig, live, storageCoTenantStopCommand))
+		}
 		switch {
 		case r.State == rigCensusSkipped:
 			preflightPass(stdout, "rig "+r.Rig, "n/a ("+r.Why+")")

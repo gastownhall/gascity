@@ -83,6 +83,11 @@ const (
 	GroupDiscovery   Group = "discovery"
 	GroupProcess     Group = "process"
 	GroupConcurrency Group = "concurrency"
+
+	// The observation group (observation.go) reads a box's screen, its last
+	// activity, clears its scrollback and copies into it. It is advisory
+	// (see advisory): a FAIL is reported but does not gate v2_ready yet.
+	GroupObservation Group = "observation"
 )
 
 // Requirement is one behavior an RPP executable must satisfy to be a
@@ -134,10 +139,31 @@ const (
 	// the controller can launch — and later relaunch — the agent in a warm box
 	// over exec instead of paying a full re-provision on every config change. The
 	// defining behavior: after `provision`, is-running reports false (no agent),
-	// yet the box is exec-able (the controller's launch transport). Optional
-	// (absent = SKIP): a welded `start` pack that launches the agent in one shot
-	// need not implement it. See REQUIREMENTS.md (RUNTIME-RPP-014).
+	// yet the box is exec-able (the controller's launch transport) — under
+	// proc.exec; a pack declaring proc.launch without it is launch-able instead
+	// (RPP-PROVISION-002). Optional (absent = SKIP): a welded `start` pack that
+	// launches the agent in one shot need not implement it. See REQUIREMENTS.md
+	// (RUNTIME-RPP-014).
 	ReqProvisionBoxWithoutAgent Code = "RPP-PROVISION-001"
+
+	// The proc.launch half of the provision group (RUNTIME-RPP-029): the
+	// `launch` op starts the agent in the box provision prepared, replacing a
+	// running one unless fresh_only (a fresh_only launch into a freshly
+	// provisioned box starts it), and types nothing. Optional: SKIP unless
+	// proc.launch is declared; RPP-PROVISION-003 also SKIPs without
+	// observe.v1, whose identity shows the replacement.
+	ReqProvisionLaunchStartsAgent Code = "RPP-PROVISION-002"
+	ReqProvisionLaunchReplaces    Code = "RPP-PROVISION-003"
+	ReqProvisionLaunchFreshOnly   Code = "RPP-PROVISION-004"
+
+	// A pack that un-welds start (proc.provision with proc.launch, or with
+	// proc.exec under the default carrier) has its first turn queued bound
+	// to the launch identity gc writes with set-meta after the launch, and
+	// judged and fenced by get-meta reads of it: after provision (and launch,
+	// under proc.launch), get-meta answers each identity key set-meta
+	// stored. Optional: SKIP unless the handshake un-welds start. Such a
+	// pack's meta group fails on exit 2 too, as under observe.v1.
+	ReqProvisionLaunchIdentity Code = "RPP-PROVISION-005"
 
 	// The observe group is the observe.v1 profile (PAR-EXEC): what a script
 	// declaring the observe.v1 capability promises reconciler v2. Every
@@ -250,6 +276,19 @@ const (
 	ReqInputExit80OneLine       Code = "RPP-INPUT-010"
 	ReqInputDeadBoxGone         Code = "RPP-INPUT-011"
 	ReqInputKeysDelivered       Code = "RPP-INPUT-012"
+
+	// The observation group: peek, get-last-activity, clear-scrollback and
+	// copy-to on a running box (RunProviderTests' *_NoError cases). An op
+	// that answers exit 2 SKIPs, unless a declared token makes it mandatory:
+	// carrier.ops for peek and clear-scrollback (the ops carrier reads that
+	// exit 2 as a failure), input-outcome for clear-scrollback, and
+	// report-activity for get-last-activity. copy-to is optional under every
+	// handshake. Advisory: a FAIL does not enter v2_failed. See
+	// REQUIREMENTS.md (RUNTIME-RPP-037).
+	ReqObservationPeek            Code = "RPP-OBSERVATION-001"
+	ReqObservationLastActivity    Code = "RPP-OBSERVATION-002"
+	ReqObservationClearScrollback Code = "RPP-OBSERVATION-003"
+	ReqObservationCopyTo          Code = "RPP-OBSERVATION-004"
 )
 
 // catalog is the authoritative, ordered requirement list. Run walks it in
@@ -267,7 +306,11 @@ var catalog = []Requirement{
 	{ReqConnectionExec, GroupConnection, "exec runs a command in the box: command on stdin, combined output on stdout, op exit == command exit (generic exec is optional: absent = SKIP; output and command exit code are checked when present)", true},
 	{ReqConnectionIdleBoundary, GroupConnection, "with idle-boundary declared, the selected carrier reads a started box: tmux main answers has-session and capture over exec; carrier.ops answers is-running true, peek 120 shows the started agent's command line or output, and get-meta answers a non-default ready prompt set-meta stored, byte for byte (undeclared = SKIP)", true},
 
-	{ReqProvisionBoxWithoutAgent, GroupProvision, "provision creates a reachable box WITHOUT launching the agent: after provision, is-running reports false yet the box is exec-able, so the controller launches the agent over exec (absent = SKIP; a welded start pack launches in one shot)", true},
+	{ReqProvisionBoxWithoutAgent, GroupProvision, "provision creates a reachable box WITHOUT launching the agent: after provision, is-running reports false yet the box is exec-able, so the controller launches the agent over exec; a pack declaring proc.launch without proc.exec is launch-able instead (RPP-PROVISION-002) (absent = SKIP; a welded start pack launches in one shot)", true},
+	{ReqProvisionLaunchStartsAgent, GroupProvision, "after provision, launch starts the agent (is-running true) and types nothing, not even the nudge its config carries (declared proc.launch only)", true},
+	{ReqProvisionLaunchReplaces, GroupProvision, "launch without fresh_only on a running agent replaces it: observe shows the new launch's identity (declared proc.launch with observe.v1 only)", true},
+	{ReqProvisionLaunchFreshOnly, GroupProvision, "launch with fresh_only into the box provision just prepared starts the agent (is-running true), and on a running agent exits 73 (declared proc.launch only)", true},
+	{ReqProvisionLaunchIdentity, GroupProvision, "a pack that un-welds start keeps the launch identity gc writes: after provision (and launch under proc.launch), get-meta answers GC_RUNTIME_EPOCH, GC_CONTINUATION_EPOCH and GC_INSTANCE_TOKEN as set-meta stored them, never exit 2 (un-welded start only)", true},
 
 	{ReqObserveDeclaredOpsRespond, GroupObserve, "observe, inventory and kill-object answer (never exit 2) when observe.v1 is declared", true},
 	{ReqObserveAbsentNeverStarted, GroupObserve, "observe on a never-started name answers absent", true},
@@ -334,6 +377,20 @@ var catalog = []Requirement{
 	{ReqInputExit80OneLine, GroupInput, "exit 80 always carries exactly one outcome line gc reads as typed: a non-success word the op may answer", true},
 	{ReqInputDeadBoxGone, GroupInput, "under GC_RPP_FAULT=dead (the box holds the name but nothing runs in it: observe reports it dead), every driving op exits 80 gone and types nothing: gone means no running box holds the name (declared conformance-faults only)", true},
 	{ReqInputKeysDelivered, GroupInput, "send-keys, interrupt and clear-scrollback to a running box exit 0 with stdout empty or exactly one delivered line", true},
+
+	{ReqObservationPeek, GroupObservation, "peek of a running box exits 0 (absent = SKIP; exit 2 FAILs under carrier.ops or the v2 profile; advisory)", true},
+	{ReqObservationLastActivity, GroupObservation, "get-last-activity of a running box exits 0 with an RFC3339 time or nothing (absent = SKIP; exit 2 FAILs under report-activity; advisory)", true},
+	{ReqObservationClearScrollback, GroupObservation, "clear-scrollback of a running box exits 0 (absent = SKIP; exit 2 FAILs under carrier.ops or input-outcome; advisory)", true},
+	{ReqObservationCopyTo, GroupObservation, "copy-to into a running box exits 0 even when the source is missing: the copy is best-effort (absent = SKIP; advisory)", true},
+}
+
+// advisory reports whether a FAIL in group is kept out of v2_failed and
+// out of a failed run: a ported group lands advisory, so a published pack
+// it would fail is neither taken off v2_ready nor failed by a gc upgrade,
+// and is made strict once published packs pass it. Only the observation
+// group is advisory.
+func advisory(group Group) bool {
+	return group == GroupObservation
 }
 
 // Catalog returns the authoritative requirement list in run order. The

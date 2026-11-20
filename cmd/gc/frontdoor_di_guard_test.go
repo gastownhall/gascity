@@ -413,6 +413,10 @@ var sessionRelocationRoutedFiles = []string{
 	// relocated sessions class — a green result that reads as "no stuck
 	// sessions" when the check simply looked in the wrong store.
 	"doctor_startup_health.go",
+	// gc doctor's live-session reader and the session registry the
+	// agent-sessions and orphan-sessions checks read. Unrouted, a split city's
+	// every live session reads as orphaned and every agent as sessionless.
+	"cmd_doctor_live_sessions.go",
 	// `gc agent is-foreign` vouches for a claimant through this city's session
 	// records. Unrouted, it finds none under a relocated sessions class, so every
 	// dead local claim the orphan-sweep order asks about reads as foreign and is

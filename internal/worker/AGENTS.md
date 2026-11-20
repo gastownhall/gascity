@@ -178,6 +178,17 @@ receipt on a nudge. A lookup that cannot tell fails the request wrapping
 `runtime.ErrNudgeNotSent`, with nothing sent. A request without `Redelivery`
 looks nothing up.
 
+The key also tells the queue's own delivery of a session's startup turn
+apart. A `RuntimeHandle` built for a session row
+(`Factory.SessionRuntimeHandle`: cmd/gc's nudge targets and the
+conversation lane's runtime handle) holds every nudge to the running
+session behind a startup turn the session's queue still holds, pending or
+in flight (`RuntimeHandleConfig.StartupTurnHolds`, reading
+`session.Manager.StartupTurnQueued`), as the session manager's own sends
+do: the nudge is undelivered and types nothing. Only a nudge under the key
+of the batch the claim pinned the turn to, the queue's delivery of that
+turn, passes it. The rule lives in `internal/session`; the handle only asks.
+
 ## Codex activity
 
 Codex activity comes from matching native turn lifecycle events, not assistant
