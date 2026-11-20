@@ -928,8 +928,9 @@ func TestStorageBootGateChecksCheckedAtBeforeTheCheckRuns(t *testing.T) {
 // successor to round 2's i4 (which pinned FreshMS at the fixed-cadence cap,
 // true only while interval was hardcoded at strandRecheckInterval). With
 // the adaptive cadence wired up (design doc §4.3, carry-over 1), a fast
-// definitive tick's lease gets strandRecheckFreshness(strandRecheckNextInterval(d), d)
-// for its own measured duration d, not the 10-minute cap — a city whose
+// definitive tick's lease gets
+// strandRecheckFreshness(strandRecheckNextInterval(d), d, prev) for its own
+// measured duration d, not the 10-minute cap — a city whose
 // check is cheap gets a shorter, not longer, freshness budget, because its
 // own recheck comes back around sooner.
 func TestStrandRecheckTickFreshMSMatchesTheAdaptiveFormula(t *testing.T) {
@@ -950,7 +951,7 @@ func TestStrandRecheckTickFreshMSMatchesTheAdaptiveFormula(t *testing.T) {
 	if lease == nil {
 		t.Fatal("a definitive tick published no lease")
 	}
-	want := strandRecheckFreshness(strandRecheckNextInterval(s.lastCheckDuration), s.lastCheckDuration).Milliseconds()
+	want := strandRecheckFreshness(strandRecheckNextInterval(s.lastCheckDuration), s.lastCheckDuration, s.prevCheckDuration).Milliseconds()
 	if lease.FreshMS != want {
 		t.Fatalf("FreshMS = %d, want %d from the adaptive formula (measured duration %s)", lease.FreshMS, want, s.lastCheckDuration)
 	}

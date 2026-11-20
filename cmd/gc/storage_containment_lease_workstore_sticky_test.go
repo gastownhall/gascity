@@ -133,7 +133,7 @@ func TestStrandRecheckWorkStoreFlagIsStickyAcrossAFailingStreak(t *testing.T) {
 		t.Fatalf("fixture: first failing tick not flagged from-work-store: %+v", first)
 	}
 	// A second failing attempt, NOT attributed to the work store.
-	s.extendLeaseOnTransientFailureFor(infraMigrationReport{Outcome: infraMigrationUncheckable, Transient: true}, time.Now())
+	s.extendLeaseOnTransientFailure(time.Now(), infraMigrationReport{Outcome: infraMigrationUncheckable, Transient: true}.FaultFromWorkStore)
 	second := s.routes.lease.Load()
 	if !second.RecheckFailureFromWorkStore {
 		t.Fatalf("the work-store flag cleared after a later, unrelated failure: %+v", second)

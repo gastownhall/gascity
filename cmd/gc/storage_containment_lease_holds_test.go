@@ -169,8 +169,8 @@ func TestLegacyMarkerAlwaysTakesTheFullCheckEvenLeased(t *testing.T) {
 	}
 }
 
-// TestHoldBeforeLeaseStillRefusesUnleased is the control for both cases
-// above: the same two holds, with opts.lease left false (no socket served
+// TestHoldBeforeLeaseStillRefusesUnleased is the control for every case in
+// this file: the same holds, with opts.lease left false (no socket served
 // at all), must refuse identically — proving the lease option changes
 // nothing about what these holds catch, only whether a lease is consulted
 // once they do not fire.
@@ -195,4 +195,121 @@ func TestHoldBeforeLeaseStillRefusesUnleased(t *testing.T) {
 			t.Fatalf("unleased re-check with a mismatched served-binding note = %s, want genesis-blocked: %s", boot.Outcome, log.String())
 		}
 	})
+	t.Run("re-copy record", func(t *testing.T) {
+		cityPath, cfg, target, _ := convergedCityWithRecheckLease(t)
+		if err := writeInfraRecopyRecord(target, infraMigrationFromBackup); err != nil {
+			t.Fatalf("writing the re-copy record: %v", err)
+		}
+		var log bytes.Buffer
+		if boot := checkInfraClassConvergenceWith(cityPath, cfg, "gc start", &log, storageBootGateOpts{}); boot.Outcome != infraMigrationUncheckable {
+			t.Fatalf("unleased re-check with an open re-copy record = %s, want uncheckable: %s", boot.Outcome, log.String())
+		}
+	})
+	t.Run("restore record", func(t *testing.T) {
+		cityPath, cfg, target, _ := convergedCityWithRecheckLease(t)
+		if err := writeInfraRestoreRecord(target, infraRestoreRecord{
+			Snapshot: "snap1", To: target.Database, Database: target.Database,
+			AsideSuffix: ".aside-1", Command: "gc storage snapshot restore",
+		}); err != nil {
+			t.Fatalf("writing the restore record: %v", err)
+		}
+		var log bytes.Buffer
+		if boot := checkInfraClassConvergenceWith(cityPath, cfg, "gc start", &log, storageBootGateOpts{}); boot.Outcome != infraMigrationUncheckable {
+			t.Fatalf("unleased re-check with an open restore record = %s, want uncheckable: %s", boot.Outcome, log.String())
+		}
+	})
+	t.Run("reverse journal", func(t *testing.T) {
+		cityPath, cfg, _, _ := convergedCityWithRecheckLease(t)
+		if err := writeStorageReverseJournal(cityPath, storageReverseJournal{
+			Format: storageReverseJournalFormat, Mode: reverseToWork, Phase: reverseStarted,
+		}); err != nil {
+			t.Fatalf("writing the reverse journal: %v", err)
+		}
+		var log bytes.Buffer
+		if _, err := storageBootGateWith(cityPath, cfg, "gc start", nil, &log, storageBootGateOpts{}); err == nil || !strings.Contains(err.Error(), "reverse migration") {
+			t.Fatalf("unleased boot with an open reverse journal = %v, want a reverse-migration refusal: %s", err, log.String())
+		}
+	})
+}
+
+// TestHoldBeforeLeaseRecopyRecord is T3's re-copy case (design review R11):
+// an open re-copy record (infra.recopying) holds the marker stale
+// (readInfraConvergenceState) even with a trustworthy-looking Converged
+// lease served for the same target. markerWorkStoreIdentityHold's own
+// identity check passes — nothing about this city changed — so the catch
+// here is readInfraConvergenceState itself, read unconditionally before
+// confirmInfraConvergenceWith (and so the lease) is ever reached: this kills
+// a "lease before the marker-state read" reorder, which would let this same
+// city serve Converged from the lease instead of refusing as stale.
+func TestHoldBeforeLeaseRecopyRecord(t *testing.T) {
+	cityPath, cfg, target, lease := convergedCityWithRecheckLease(t)
+	bornSplitLeaseListener(t, cityPath, lease)
+
+	if err := writeInfraRecopyRecord(target, infraMigrationFromBackup); err != nil {
+		t.Fatalf("writing the re-copy record: %v", err)
+	}
+
+	var log bytes.Buffer
+	boot := checkInfraClassConvergenceWith(cityPath, cfg, "gc start", &log, storageBootGateOpts{lease: true})
+	if boot.Outcome != infraMigrationUncheckable {
+		t.Fatalf("leased re-check with an open re-copy record = %s, want uncheckable; the marker-state read must run before the lease is ever consulted: %s", boot.Outcome, log.String())
+	}
+	if !strings.Contains(log.String(), "re-copy") {
+		t.Errorf("refusal %q does not name the re-copy as the cause", log.String())
+	}
+}
+
+// TestHoldBeforeLeaseRestoreRecord is T3's restore case: an open restore
+// record (infra.restoring) holds the marker stale the same way the re-copy
+// record does, and must refuse a leased re-check identically.
+func TestHoldBeforeLeaseRestoreRecord(t *testing.T) {
+	cityPath, cfg, target, lease := convergedCityWithRecheckLease(t)
+	bornSplitLeaseListener(t, cityPath, lease)
+
+	if err := writeInfraRestoreRecord(target, infraRestoreRecord{
+		Snapshot: "snap1", To: target.Database, Database: target.Database,
+		AsideSuffix: ".aside-1", Command: "gc storage snapshot restore",
+	}); err != nil {
+		t.Fatalf("writing the restore record: %v", err)
+	}
+
+	var log bytes.Buffer
+	boot := checkInfraClassConvergenceWith(cityPath, cfg, "gc start", &log, storageBootGateOpts{lease: true})
+	if boot.Outcome != infraMigrationUncheckable {
+		t.Fatalf("leased re-check with an open restore record = %s, want uncheckable; the marker-state read must run before the lease is ever consulted: %s", boot.Outcome, log.String())
+	}
+	if !strings.Contains(log.String(), "restore") {
+		t.Errorf("refusal %q does not name the restore as the cause", log.String())
+	}
+}
+
+// TestHoldBeforeLeaseReverseJournal is T3's reverse-journal case: an open
+// reverse migration holds boot (storageReverseRefusal), run unconditionally
+// at the very top of storageBootGateWith — before resolveInfraBindingTarget,
+// let alone checkInfraClassConvergenceWith and the lease it may consult, is
+// ever reached. A trustworthy-looking Converged lease already served for
+// this same target changes nothing: this test proves that directly, by
+// calling storageBootGateWith itself (not checkInfraClassConvergenceWith,
+// which an open reverse never even gets called into) with opts.lease true,
+// and getting the identical reverse-migration refusal the unleased control
+// in TestHoldBeforeLeaseStillRefusesUnleased gets.
+func TestHoldBeforeLeaseReverseJournal(t *testing.T) {
+	cityPath, cfg, _, lease := convergedCityWithRecheckLease(t)
+	bornSplitLeaseListener(t, cityPath, lease)
+
+	if err := writeStorageReverseJournal(cityPath, storageReverseJournal{
+		Format: storageReverseJournalFormat, Mode: reverseToWork, Phase: reverseStarted,
+	}); err != nil {
+		t.Fatalf("writing the reverse journal: %v", err)
+	}
+
+	var log bytes.Buffer
+	routes, err := storageBootGateWith(cityPath, cfg, "gc start", nil, &log, storageBootGateOpts{lease: true})
+	if err == nil {
+		_ = routes.close()
+		t.Fatal("leased boot with an open reverse journal was not refused; the reverse hold must run before the lease is ever consulted")
+	}
+	if !strings.Contains(err.Error(), "reverse migration") {
+		t.Fatalf("refusal %q does not name the reverse migration as the cause", err)
+	}
 }

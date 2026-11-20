@@ -132,6 +132,15 @@ type storageRoutes struct {
 	// it publishes only a CHANGE from what boot already recorded.
 	bootVerdict infraMigrationReport
 	target      infraBindingTarget
+	// bootVerdictDuration is how long the boot gate's own check (the one that
+	// produced bootVerdict) took to run, measured the same way a recheck
+	// tick's lastCheckDuration is: from just before the check to just after
+	// it returns, excluding everything storageBootGateWith does with the
+	// result afterward. publishBootContainmentLease feeds it to
+	// strandRecheckFreshness in place of a recheck tick's lastCheckDuration,
+	// so the very first lease's freshness budget is sized from how expensive
+	// THIS city's check actually was, not from a check duration of zero.
+	bootVerdictDuration time.Duration
 	// lease is this process's live containment lease for target: the boot
 	// verdict above, then every definitive strand-recheck tick after it
 	// (storage_containment_lease.go). Nil until the first report that
@@ -171,22 +180,24 @@ func servedContainmentLease(cityPath string) (*containmentLease, bool) {
 // newContainmentLease is the one place that distinguishes that case, so
 // there is nothing else for this function to check.
 //
-// The boot verdict's own check duration was never measured as a recheck
-// tick's is, so this seeds the freshness budget with a zero check duration
-// and the SAME floor interval the first recheck tick itself starts the
-// adaptive cadence from (strandRecheckIntervalFloor, strandRecheckNextInterval(0)):
-// strandRecheckFreshness(strandRecheckIntervalFloor, 0) is 2 minutes — Q1's
-// "about 2 min by default" — not the 10-minute cap, so this lease is never
-// served longer than the first recheck tick needs to refresh it. TakenAt is
-// the check itself (bootVerdict.CheckedAt), not
-// this call, which can run later in boot — so the budget already starts
-// being spent on whatever boot does in between, not only on the wait for
-// the first recheck tick.
+// The boot verdict's own check duration (routes.bootVerdictDuration) is
+// measured the same way a recheck tick's lastCheckDuration is, so this seeds
+// the freshness budget with it, not a zero duration — a slow boot check gets
+// the same accounting a recheck tick would give it, and with no measurement
+// to rely on (bootVerdictDuration == 0, e.g. the tests that build routes
+// directly) this reduces to strandRecheckFreshness(strandRecheckIntervalFloor,
+// 0, 0), the SAME floor interval the first recheck tick itself starts the
+// adaptive cadence from. There is no earlier check to call "last" here — this
+// IS the first one — so the boot duration stands in for both of
+// strandRecheckFreshness's duration inputs. TakenAt is the check itself
+// (bootVerdict.CheckedAt), not this call, which can run later in boot — so
+// the budget already starts being spent on whatever boot does in between,
+// not only on the wait for the first recheck tick.
 func publishBootContainmentLease(routes *storageRoutes) {
 	if routes == nil || containmentLeaseDisabled() {
 		return
 	}
-	freshMS := strandRecheckFreshness(strandRecheckIntervalFloor, 0).Milliseconds()
+	freshMS := strandRecheckFreshness(strandRecheckIntervalFloor, routes.bootVerdictDuration, routes.bootVerdictDuration).Milliseconds()
 	takenAt := routes.bootVerdict.CheckedAt
 	if takenAt.IsZero() {
 		takenAt = time.Now()
@@ -548,6 +559,10 @@ func storageBootGateWith(cityPath string, cfg *config.City, logPrefix string, re
 		}
 	}
 	report.CheckedAt = checkedAt
+	// Measured here, right after the check returns and before anything this
+	// gate does with the result (refusal advice, the rig hold, opening the
+	// routes) — those are boot's own overhead, not the check's.
+	checkDuration := time.Since(checkedAt)
 	// A stranded city whose binding names no id twice serves degraded
 	// (infraMigrationReport.servesDegraded): the stranded rows stay invisible
 	// to their class readers, and this process says so once, here, rather than
@@ -590,7 +605,7 @@ func storageBootGateWith(cityPath string, cfg *config.City, logPrefix string, re
 	if err != nil {
 		return nil, err
 	}
-	routes.bootVerdict, routes.target = report, target
+	routes.bootVerdict, routes.target, routes.bootVerdictDuration = report, target, checkDuration
 	if err := recordServedBinding(plan, cityPath, storage, target); err != nil {
 		return nil, errors.Join(fmt.Errorf("%s: %w", logPrefix, err), routes.close())
 	}
@@ -1056,9 +1071,12 @@ var strandRecheckInterval = 10 * time.Minute
 // city that strands between ticks is caught within a bounded, non-trivial
 // wait rather than being polled as fast as the machine allows. It is also
 // what publishBootContainmentLease seeds the very first lease's freshness
-// budget with (strandRecheckFreshness(strandRecheckIntervalFloor, 0) = 2
-// minutes, matching Q1's "about 2 min by default"), so the boot lease is
-// never served longer than the first recheck tick needs to refresh it.
+// budget with (strandRecheckFreshness(strandRecheckIntervalFloor, d, d) for
+// the boot check's own duration d — just over a minute, 2×margin plus 2d,
+// for a boot check cheap enough that d is negligible; Q1's original "about
+// 2 min by default" described the OLD 2×interval+d formula and no longer
+// applies now that the formula has changed), so the boot lease is never
+// served longer than the first recheck tick needs to refresh it.
 const strandRecheckIntervalFloor = 60 * time.Second
 
 // strandRecheckNextInterval is the adaptive cadence itself (design doc §4.3,
@@ -1087,31 +1105,58 @@ func strandRecheckNextInterval(lastCheckDuration time.Duration) time.Duration {
 // (Q3): doctor's WARN past this point is slice 3.
 const strandRecheckFreshCap = 10 * time.Minute
 
-// strandRecheckFreshness is a lease's freshness budget (design doc §4.3):
-// min(strandRecheckFreshCap, 2×interval + last check duration). A caller
-// (slice 2's fetchContainmentLease) accepts a lease only while its age is
-// within this budget, with a 10-minute cap of its own independent of it
+// strandRecheckLapseMargin is a fixed amount of slack strandRecheckFreshness
+// spends twice: once to make its bound on the NEXT check's duration (dNext
+// below) conservative, and once more so the freshness budget it returns is
+// STRICTLY greater than d+interval+dNext, not merely equal to it.
+const strandRecheckLapseMargin = time.Second
+
+// strandRecheckFreshness is a lease's freshness budget (design doc §4.3,
+// reworked per PR review to actually guarantee the no-lapse property
+// carry-over 1 asks for, up to strandRecheckFreshCap):
+//
+//	dNext := max(d, last) + strandRecheckLapseMargin
+//	fresh := min(strandRecheckFreshCap, d + interval + dNext + strandRecheckLapseMargin)
+//
+// d is this tick's own check duration and last is the one before it
+// (strandRecheck.prevCheckDuration); dNext is this function's conservative
+// bound on how long the NEXT check will take — "no slower than the slower
+// of the last two, plus a margin" — since that is the check whose own
+// publish is what must land before THIS lease goes stale. A caller (slice
+// 2's fetchContainmentLease) accepts a lease only while its age is within
+// this budget, with a 10-minute cap of its own independent of it
 // (carry-over 4).
 //
 // publishLease always calls this with interval = the NEXT adaptive interval
-// (strandRecheckNextInterval(lastCheckDuration)) — the gap until the recheck
-// tries to refresh this very lease — which is why 2×interval, not 1×, is
-// the first term: the lease must still read fresh if the NEXT tick runs
-// late by as much as one more interval (a loaded machine, a slow
-// scheduler), not only if it lands exactly on schedule. With interval =
-// max(floor, 10d) that keeps fresh_ms strictly greater than interval+d for
-// every d (2×interval+d > interval+d whenever interval > 0), so the lease
-// does not lapse between on-time ticks — except once d grows past roughly
-// the point where 2×interval+d itself exceeds strandRecheckFreshCap
-// (around d ≈ 55s, where interval ≈ 550s: 2×550s+55s = 1155s > the 600s
-// cap, and interval+d = 605s already exceeds the capped fresh_ms too). Past
-// that point freshness is pinned at the cap no matter how interval grows,
-// so a lease taken right as a tick starts can lapse before the NEXT one
-// publishes; carry-over 1 asks only that this be documented, not that it be
-// impossible, since the cap itself (Q3's bound on staleness) is what stops
-// it from growing further.
-func strandRecheckFreshness(interval, lastCheckDuration time.Duration) time.Duration {
-	if fresh := 2*interval + lastCheckDuration; fresh < strandRecheckFreshCap {
+// (strandRecheckNextInterval(d)) — the gap from THIS tick until the recheck
+// tries to refresh this very lease. So the true gap, barring a slow
+// scheduler, is interval+dNext: the wait, then however long the next check
+// itself takes. fresh exceeds d+interval+dNext by a further
+// strandRecheckLapseMargin, so fresh > d+interval+dNext strictly — the
+// lease does not lapse between on-time ticks, PROVIDED the next check's
+// real duration is no more than dNext bounds it at (true whenever a city's
+// check durations do not more than double tick-over-tick, which is the
+// normal case: a check's cost tracks city size, which does not double
+// between two adjacent ticks).
+//
+// That guarantee holds only below strandRecheckFreshCap: once the
+// uncapped sum would exceed it, freshness is pinned at the cap instead, and
+// a lease taken right as a tick starts can then lapse before the NEXT one
+// publishes. With interval = max(floor, 10d) and, at steady state,
+// last == d (so dNext = d+margin), the uncapped sum is
+// d+interval+dNext+margin = 12d+2×margin once d is past the floor's own 6s
+// crossover, so the cap is reached once 12d+2×margin >= strandRecheckFreshCap,
+// i.e. d >= (600s-2s)/12 ≈ 49.83s — the true edge, now that the formula has
+// changed (carry-over 1 asks only that this be documented, not that it be
+// impossible past the cap, since the cap itself — Q3's bound on staleness —
+// is what stops it from growing further).
+func strandRecheckFreshness(interval, d, last time.Duration) time.Duration {
+	dNext := d
+	if last > dNext {
+		dNext = last
+	}
+	dNext += strandRecheckLapseMargin
+	if fresh := d + interval + dNext + strandRecheckLapseMargin; fresh < strandRecheckFreshCap {
 		return fresh
 	}
 	return strandRecheckFreshCap
@@ -1153,11 +1198,18 @@ type strandRecheck struct {
 	// direct construction of a strandRecheck in this package's own tests
 	// (predating F3) keeps doing.
 	quiescent func() bool
-	// lastCheckDuration is what the most recent measured tick cost, one of
-	// strandRecheckFreshness's two inputs (the other, interval, is the
-	// NEXT adaptive interval, strandRecheckNextInterval(lastCheckDuration) —
-	// also computed from this same field).
+	// lastCheckDuration is what the most recent measured tick cost. It feeds
+	// strandRecheckNextInterval (the next adaptive interval) and is the "d"
+	// strandRecheckFreshness bounds the NEXT check's duration from, together
+	// with prevCheckDuration below.
 	lastCheckDuration time.Duration
+	// prevCheckDuration is what lastCheckDuration held before the most
+	// recent measured tick overwrote it — the "last" strandRecheckFreshness
+	// takes alongside "d" (lastCheckDuration) to bound the NEXT check's
+	// duration conservatively as max(d, last)+margin, rather than from d
+	// alone: a check that just got cheaper after a run of expensive ones
+	// must not have its lease sized as though the next one will stay cheap.
+	prevCheckDuration time.Duration
 	// basisFault is the text of the basis-capture failure noteBasisCapture
 	// last printed, or "" once a definitive tick captured a basis again.
 	basisFault string
@@ -1194,6 +1246,14 @@ func strandRecheckKey(report infraMigrationReport) string {
 	return report.Outcome.String()
 }
 
+// recordCheckDuration stashes the duration a tick measured, keeping both
+// the current and the previous one (prevCheckDuration, lastCheckDuration):
+// strandRecheckFreshness's "last" and "d" inputs.
+func (s *strandRecheck) recordCheckDuration(d time.Duration) {
+	s.prevCheckDuration = s.lastCheckDuration
+	s.lastCheckDuration = d
+}
+
 // tick runs one recheck and publishes the verdict if it changed. A panic is
 // contained here: the recheck runs inside the supervisor that hosts every
 // city, and a report-only probe must never take it down.
@@ -1210,8 +1270,8 @@ func (s *strandRecheck) tick() {
 			// lease is kept and re-dated, up to strandRecheckFreshCap, same
 			// as the report.Transient branch below, rather than left to age
 			// on the normal cadence as though nothing had gone wrong.
-			s.lastCheckDuration = time.Since(takenAt)
-			s.extendLeaseOnTransientFailure(takenAt)
+			s.recordCheckDuration(time.Since(takenAt))
+			s.extendLeaseOnTransientFailure(takenAt, true)
 		}
 	}()
 	if s.quiescent != nil && s.quiescent() {
@@ -1222,7 +1282,7 @@ func (s *strandRecheck) tick() {
 		return
 	}
 	report := confirmInfraContainment(s.cityPath, s.target, s.logPrefix, io.Discard)
-	s.lastCheckDuration = time.Since(takenAt)
+	s.recordCheckDuration(time.Since(takenAt))
 	report.Target = s.target
 	report.CheckedAt = takenAt
 	if report.Outcome == infraMigrationUncheckable {
@@ -1237,7 +1297,7 @@ func (s *strandRecheck) tick() {
 			// to strandRecheckFreshCap past its own TakenAt (owner decision
 			// Q3): a lease never outlives that cap no matter how long the
 			// recheck keeps failing.
-			s.extendLeaseOnTransientFailureFor(report, takenAt)
+			s.extendLeaseOnTransientFailure(takenAt, report.FaultFromWorkStore)
 			return
 		}
 		// A standing (non-transient) fault is not a lease to keep stale: it
@@ -1294,7 +1354,7 @@ func (s *strandRecheck) publishLease(report infraMigrationReport, takenAt time.T
 	// the one that governed the wait before THIS tick (strandRecheckFreshness's
 	// comment).
 	nextInterval := strandRecheckNextInterval(s.lastCheckDuration)
-	freshMS := strandRecheckFreshness(nextInterval, s.lastCheckDuration).Milliseconds()
+	freshMS := strandRecheckFreshness(nextInterval, s.lastCheckDuration, s.prevCheckDuration).Milliseconds()
 	s.routes.lease.Store(newContainmentLease(s.target, report, freshMS, takenAt))
 }
 
@@ -1328,33 +1388,24 @@ func (s *strandRecheck) noteBasisCapture(basisErr error) {
 // recheck withdrew: a transient failure never brings a lease back, only a
 // definitive tick does.
 //
-// Called only from tick()'s panic recover: a panic's origin is unknown, so
-// it is attributed to the work store (fromWorkStore = true) rather than
-// assumed innocent of it.
-func (s *strandRecheck) extendLeaseOnTransientFailure(attemptAt time.Time) {
-	s.extendLeaseOnTransientFailureFromWorkStore(attemptAt, true)
-}
-
-// extendLeaseOnTransientFailureFor is extendLeaseOnTransientFailure, also
-// carrying report.FaultFromWorkStore onto the extended lease
-// (RecheckFailureFromWorkStore, design doc carry-over 3): slice 2's caller
-// must be able to tell a transient fault that touched the work store itself
-// from one that did not.
-func (s *strandRecheck) extendLeaseOnTransientFailureFor(report infraMigrationReport, attemptAt time.Time) {
-	s.extendLeaseOnTransientFailureFromWorkStore(attemptAt, report.FaultFromWorkStore)
-}
-
-// extendLeaseOnTransientFailureFromWorkStore is sticky in fromWorkStore: once
-// any attempt in a failing streak is attributed to the work store, the
-// extended lease stays flagged for every attempt after it, even one that
-// fails elsewhere (a deliberately drained basis-capture path, an unrelated
-// transient). Only a definitive tick (publishLease) ever republishes a lease
-// from scratch and so is the only place the flag clears. Without this, a
-// panic or fault inside the work-store read could be followed by one
-// attempt that fails for an unrelated reason, and the caller would then
-// accept a lease whose staleness the work-store fault is still the true
-// cause of.
-func (s *strandRecheck) extendLeaseOnTransientFailureFromWorkStore(attemptAt time.Time, fromWorkStore bool) {
+// fromWorkStore carries onto the extended lease as RecheckFailureFromWorkStore
+// (design doc carry-over 3): slice 2's caller must be able to tell a
+// transient fault that touched the work store itself from one that did not.
+// Called from tick()'s panic recover with fromWorkStore = true unconditionally
+// — a panic's origin is unknown, so it is attributed to the work store rather
+// than assumed innocent of it — and from the report.Transient branch with
+// report.FaultFromWorkStore.
+//
+// Sticky in fromWorkStore: once any attempt in a failing streak is
+// attributed to the work store, the extended lease stays flagged for every
+// attempt after it, even one that fails elsewhere (a deliberately drained
+// basis-capture path, an unrelated transient). Only a definitive tick
+// (publishLease) ever republishes a lease from scratch and so is the only
+// place the flag clears. Without this, a panic or fault inside the
+// work-store read could be followed by one attempt that fails for an
+// unrelated reason, and the caller would then accept a lease whose
+// staleness the work-store fault is still the true cause of.
+func (s *strandRecheck) extendLeaseOnTransientFailure(attemptAt time.Time, fromWorkStore bool) {
 	if s.routes == nil {
 		return
 	}
