@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -105,8 +107,8 @@ func routeAwaySettled(routedAt string, now time.Time) bool {
 	return !at.After(now.Add(-routeAwaySettleWindow)) || at.After(now.Add(routeAwaySettleWindow))
 }
 
-// routeAwayReleasable reports whether claimed bead wb was handed off away
-// from its live holder and the handoff has settled at now: wb is no control
+// routeAwayReleasable reports whether claimed bead wb is held away from the
+// pool it is routed to and its route has settled at now: wb is no control
 // bead (the dispatcher, not a pool, owns those), it is routed to the
 // generic-ephemeral pool target (template, resolved by the caller), its
 // assignee is a session identity rather than the bare target template, every
@@ -126,4 +128,63 @@ func routeAwayReleasable(owners routeAwayOwnerIndex, wb beads.Bead, target *conf
 		return false
 	}
 	return routeAwaySettled(wb.Metadata[beadmeta.RoutedAtMetadataKey], now)
+}
+
+// routeAwayJudge is one orphan-release sweep's route-away judgment: the
+// owners of the sweep's open sessions, and the clock it judges routes at.
+type routeAwayJudge struct {
+	cfg           *config.City
+	owners        routeAwayOwnerIndex
+	storeRefAware bool
+	now           time.Time
+}
+
+// newRouteAwayJudge builds the judge of one sweep over openSessionInfos.
+// claimRefs is the city's assignedWorkClaimRefs, resolved by the caller.
+func newRouteAwayJudge(cityPath string, cfg *config.City, claimRefs []string, openSessionInfos []session.Info, storeRefAware bool, now time.Time) *routeAwayJudge {
+	return &routeAwayJudge{
+		cfg:           cfg,
+		owners:        makeRouteAwayOwnerIndex(cityPath, cfg, claimRefs, openSessionInfos, storeRefAware),
+		storeRefAware: storeRefAware,
+		now:           now,
+	}
+}
+
+// releasable reports whether claim wb, listed under workStoreRef, is
+// routeAwayReleasable, judged on wb's own route: a bead waiting on a person,
+// or one whose route names no generic-ephemeral pool, is not. The sweep
+// judges its listed row and the release its live row with this one test.
+func (j *routeAwayJudge) releasable(wb beads.Bead, workStoreRef string) bool {
+	if beadmeta.HasHumanLabel(wb.Labels) {
+		return false
+	}
+	template := routedToOrLegacyWorkflowTarget(wb)
+	target := findAgentByTemplate(j.cfg, template)
+	if template == "" || !target.SupportsGenericEphemeralSessions() {
+		return false
+	}
+	return routeAwayReleasable(j.owners, wb, target, template, workStoreRef, j.storeRefAware, j.now)
+}
+
+// release gives claim c, which the sweep judged releasable on the tick's
+// listed row, back to its route's pool, only while its live row still is
+// one. A route change after the list is invisible to the orphan release's
+// fence: on a store whose lists carry no revision (BdStore) it checks status
+// and assignee alone, so a bead routed back to its holder's agent, re-routed
+// with a fresh stamp or labeled for a person since would still be released.
+// So release reads c live, keeps it unless that row holds c's claim (status
+// and assignee) and is releasable judged afresh, and releases that row under
+// the route-away policy, whose one write is fenced on the row it judged
+// (releaseJudgedRow): on its revision, so that any write landing after the
+// read keeps the claim for the next tick, or, on a store that cannot fence a
+// revision (a bd without --if-revision), on its status and assignee.
+func (j *routeAwayJudge) release(c seatWorkHit, workStoreRef string) ReleaseOutcome {
+	live, err := beads.HandlesFor(c.store).Live.Get(c.bead.ID)
+	if err != nil && !errors.Is(err, beads.ErrNotFound) {
+		return ReleaseOutcome{Failed: []seatWorkHit{c}, Why: map[string]string{c.bead.ID: fmt.Sprintf("re-reading routed-away claim: %v", err)}}
+	}
+	if err != nil || live.Status != c.bead.Status || strings.TrimSpace(live.Assignee) != strings.TrimSpace(c.bead.Assignee) || !j.releasable(live, workStoreRef) {
+		return ReleaseOutcome{Kept: []seatWorkHit{c}, Why: map[string]string{c.bead.ID: keptMoved}}
+	}
+	return releaseListed([]seatWorkHit{{store: c.store, bead: live}}, releaseRouteAway, releaseSeat{}, j.cfg, ReleaseOpts{})
 }

@@ -3460,7 +3460,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 	})
 	if len(released) > 0 {
 		for _, r := range released {
-			fmt.Fprintf(cr.stderr, "released orphaned pool work: %s\n", r.ID) //nolint:errcheck
+			fmt.Fprintln(cr.stderr, r.releasedLine()) //nolint:errcheck
 		}
 		// Turn the otherwise-silent reopen into an observable signal. The reopen
 		// (clear dead assignee, reset in_progress→open) already ran above and is

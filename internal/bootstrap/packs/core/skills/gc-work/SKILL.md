@@ -66,6 +66,13 @@ failed claim as "held by someone else" and do not work that bead. To pick up
 routed work in a multi-agent city, prefer `gc hook --claim`, which finds and
 claims one item in a single step.
 
+A bead's route (`gc.routed_to`, set by `gc sling`) decides which agent's pool
+serves it, over any claim. A claim you hold on a bead routed to another
+agent's pool, because you slung it there or claimed it while it was routed
+there, is released to that pool once the route is 90 seconds old, and a
+session of that pool works it. So claim only work routed to you, and stop
+working a bead once you sling it to another agent.
+
 ## Closing work
 
 ```

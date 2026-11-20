@@ -152,7 +152,7 @@ Examples:
 	cmd.Flags().StringVar(&merge, "merge", "", "merge strategy: direct, mr, or local")
 	cmd.Flags().BoolVar(&noConvoy, "no-convoy", false, "skip auto-convoy creation")
 	cmd.Flags().BoolVar(&owned, "owned", false, "mark auto-convoy as owned (skip auto-close)")
-	cmd.Flags().BoolVar(&reassign, "reassign", false, "clear any existing human assignee before routing (for human→pool handoff)")
+	cmd.Flags().BoolVar(&reassign, "reassign", false, "clear the bead's assignee and reopen it before routing, so the target can claim it at once (without it, the controller releases another agent's live claim to a pool target once the route is 90s old)")
 	cmd.Flags().StringVar(&onFormula, "on", "", "attach wisp from formula to bead before routing")
 	cmd.Flags().BoolVarP(&dryRun, "dry-run", "n", false, "show what would be done without executing")
 	cmd.Flags().BoolVar(&noFormula, "no-formula", false, "suppress default formula (route raw bead)")

@@ -82,6 +82,14 @@ type releasedPoolAssignment struct {
 	RoutedAway bool
 }
 
+// releasedLine is the operator's stderr line for released pool work r.
+func (r releasedPoolAssignment) releasedLine() string {
+	if r.RoutedAway {
+		return "released routed-away pool work: " + r.ID
+	}
+	return "released orphaned pool work: " + r.ID
+}
+
 // PoolSessionName derives the bead-ID-scoped runtime session name for a pool
 // worker session. Format: {basename(template)}-{beadID} (e.g., "claude-mc-xyz").
 //
@@ -295,7 +303,7 @@ func releaseOrphanedPoolAssignments(
 
 	// Built on the first claimed bead, so a sweep over unassigned work alone
 	// resolves no claim refs.
-	var routeAwayOwners routeAwayOwnerIndex
+	var routeAway *routeAwayJudge
 	var released []releasedPoolAssignment
 	claimGate := newForeignClaimGate(cfg, sessionStore)
 	defer claimGate.log()
@@ -327,21 +335,26 @@ func releaseOrphanedPoolAssignments(
 		if agentCfg == nil || !agentCfg.SupportsGenericEphemeralSessions() {
 			continue
 		}
-		// A claim handed off away from its live holder (gc sling to another
-		// agent rewrites only gc.routed_to) is released past its settle
-		// window even though that holder is open: every guard below that keeps
-		// a claim for a live holder would otherwise keep it forever, and the
-		// target pool would never see it as demand.
+		// The route decides which pool serves a bead, over any live claim: a
+		// claim held by an open session of another agent is released to the
+		// route's pool once the route has settled, even though that holder is
+		// open. That is a handoff away from the holder (gc sling to another
+		// agent rewrites only gc.routed_to), and equally a claim the holder
+		// took on a bead already routed elsewhere (gc bd update --claim checks
+		// no route), whose holder is not told and may still be working it.
+		// Every guard below that keeps a claim for a live holder would
+		// otherwise keep it forever, and the route's pool would never see it
+		// as demand.
 		routedAway := false
 		if assignee != "" {
-			if routeAwayOwners == nil {
+			if routeAway == nil {
 				var claimRefs []string
 				if storeRefAware {
 					claimRefs = assignedWorkClaimRefs(cityPath, cfg, store)
 				}
-				routeAwayOwners = makeRouteAwayOwnerIndex(cityPath, cfg, claimRefs, openSessionInfos, storeRefAware)
+				routeAway = newRouteAwayJudge(cityPath, cfg, claimRefs, openSessionInfos, storeRefAware, now)
 			}
-			routedAway = routeAwayReleasable(routeAwayOwners, wb, agentCfg, template, workStoreRef, storeRefAware, now)
+			routedAway = routeAway.releasable(wb, workStoreRef)
 		}
 		// Retain work the same tick's wake arm is about to act on: the release
 		// pass runs first over a pre-tick snapshot in which a replacement
@@ -447,10 +460,17 @@ func releaseOrphanedPoolAssignments(
 			}
 			continue
 		}
-		// The verb's route guard is the one this sweep's pre-filter lacks:
-		// an expanded workflow root's run_target is no lane (NEW-5).
-		if out := releaseListed([]seatWorkHit{{store: ownerStore, bead: wb}}, releaseOrphan, releaseSeat{}, cfg, ReleaseOpts{}); len(out.Released) == 0 {
-			keepLog.log(wb.ID, assignee, out.Why[wb.ID])
+		claim := seatWorkHit{store: ownerStore, bead: wb}
+		var out ReleaseOutcome
+		if routedAway {
+			out = routeAway.release(claim, workStoreRef)
+		} else {
+			// The verb's route guard is the one this sweep's pre-filter lacks:
+			// an expanded workflow root's run_target is no lane (NEW-5).
+			out = releaseListed([]seatWorkHit{claim}, releaseOrphan, releaseSeat{}, cfg, ReleaseOpts{})
+		}
+		if len(out.Released) == 0 {
+			keepLog.log(wb.ID, assignee, out.Why[wb.ID], routedAway)
 			continue
 		}
 		released = append(released, releasedPoolAssignment{ID: wb.ID, Index: i, RoutedAway: routedAway})
@@ -475,24 +495,31 @@ type deadAssigneeKeepLog struct {
 }
 
 // log logs why the dead-assignee sweep kept id, when the reason changed
-// since the last log, and reports whether it logged.
-func (l *deadAssigneeKeepLog) log(id, assignee, why string) bool {
+// since the last log, and reports whether it logged. routedAway marks the
+// claim of a live holder whose bead is routed to another pool
+// (routeAwayJudge): it is logged as that holder's, not a dead assignee's,
+// and a change between the two kinds logs again.
+func (l *deadAssigneeKeepLog) log(id, assignee, why string, routedAway bool) bool {
 	if why == "" {
 		return false
 	}
+	holder := "dead assignee"
+	if routedAway {
+		holder = "routed-away live holder"
+	}
 	if l != nil {
 		l.mu.Lock()
-		repeat := l.last[id] == why
+		repeat := l.last[id] == holder+": "+why
 		if l.last == nil {
 			l.last = make(map[string]string)
 		}
-		l.last[id] = why
+		l.last[id] = holder + ": " + why
 		l.mu.Unlock()
 		if repeat {
 			return false
 		}
 	}
-	log.Printf("releaseOrphanedPoolAssignments: kept %q of dead assignee %q: %s", id, assignee, why)
+	log.Printf("releaseOrphanedPoolAssignments: kept %q of %s %q: %s", id, holder, assignee, why)
 	return true
 }
 
@@ -780,15 +807,7 @@ func releaseOrphanedPoolAssignment(store beads.Store, wb beads.Bead, clearDetach
 	if store == nil || strings.TrimSpace(wb.ID) == "" {
 		return false
 	}
-	update := beads.UpdateOpts{
-		Assignee: stringPtr(""),
-		Status:   stringPtr("open"),
-		Metadata: clearedSessionAffinityMetadata(),
-	}
-	if clearDetached {
-		update.Metadata[detachedProbeMetadataKey] = ""
-	}
-	if released, handled, err := releaseWorkAssignmentIfRevisionMatches(store, wb, update); handled {
+	if released, handled, err := releaseWorkAssignmentIfRevisionMatches(store, wb, poolReleaseUpdate(clearDetached)); handled {
 		if err != nil {
 			log.Printf("releaseOrphanedPoolAssignments: %v", err)
 		}
@@ -810,6 +829,21 @@ func releaseOrphanedPoolAssignment(store beads.Store, wb beads.Bead, clearDetach
 		}
 	}
 	return releasePoolAssignmentWithRecheck(store, wb, clearDetached)
+}
+
+// poolReleaseUpdate is a pool release's one write: the claim open and
+// unassigned, its session-affinity metadata cleared and, with clearDetached,
+// its gc.detached probe.
+func poolReleaseUpdate(clearDetached bool) beads.UpdateOpts {
+	update := beads.UpdateOpts{
+		Assignee: stringPtr(""),
+		Status:   stringPtr("open"),
+		Metadata: clearedSessionAffinityMetadata(),
+	}
+	if clearDetached {
+		update.Metadata[detachedProbeMetadataKey] = ""
+	}
+	return update
 }
 
 // beadHasActiveContinuationGroup reports whether wb still advertises the active
@@ -899,15 +933,7 @@ func clearReleasedPoolAssignmentMetadata(store beads.Store, id string) {
 // trace. Such a bead stays assigned until the store can fence or, for a release
 // that need not be one write, its snapshot fits ReleaseIfCurrent.
 func releasePoolAssignmentWithRecheck(store beads.Store, wb beads.Bead, clearDetached bool) bool {
-	opts := beads.UpdateOpts{
-		Assignee: stringPtr(""),
-		Status:   stringPtr("open"),
-		Metadata: clearedSessionAffinityMetadata(),
-	}
-	if clearDetached {
-		opts.Metadata[detachedProbeMetadataKey] = ""
-	}
-	outcome, err := releaseAssignmentFenced(store, wb, opts)
+	outcome, err := releaseAssignmentFenced(store, wb, poolReleaseUpdate(clearDetached))
 	switch {
 	case err != nil:
 		log.Printf("releaseOrphanedPoolAssignments: releasing orphaned pool assignment %s: %v", wb.ID, err)
