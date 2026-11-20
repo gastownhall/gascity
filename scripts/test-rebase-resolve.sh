@@ -1103,6 +1103,119 @@ func TestMainOnly(t *testing.T) {
 '
 }
 
+# The last inserted line is shared, while the first differs. This catches a
+# missing trailing scan and one that starts a line late, independently of the
+# leading-line refusal. A distinct final line must still allow the union.
+test_bounded_rebase_shared_trailing_line_refused_with_distinct_control() {
+    local base head feature main
+    head=$'package widget\n\nimport "testing"\n\nfunc TestWidget(t *testing.T) {\n\tt.Log("start")\n'
+    base="${head}"$'}\n'
+    feature="${head}"$'\tt.Log("feature")\n\tt.Log("finish")\n}\n'
+    main="${head}"$'\tt.Log("main")\n\tt.Log("finish")\n}\n'
+    bounded_go_scenario "bounded/shared-trailing-line-refused" refused \
+        pkg/widget_test.go "$base" "$feature" "$main"
+
+    main="${head}"$'\tt.Log("main")\n\tt.Log("done")\n}\n'
+    bounded_go_scenario "bounded/distinct-trailing-lines-still-resolve" resolved \
+        pkg/widget_test.go "$base" "$feature" "$main"
+}
+
+later_commit_go_contents() {
+    printf 'package widget\n\nimport "testing"\n\nfunc TestWidget(t *testing.T) {\n\twant := %s\n\t_ = want\n}\n\nfunc TestOther(t *testing.T) {\n\n\tgot := %s\n\t_ = got\n}\n' "$1" "$2"
+}
+
+# The first feature commit conflicts on notes.md and can be unioned. Only
+# --continue replays the second commit and produces its Go conflict. Rewriting
+# main's line must abort the ENTIRE rebase; changing a distant line must push
+# both commits, including the earlier doc resolution.
+bounded_later_commit_scenario() {
+    local label="$1" expect="$2" feature_want="$3" feature_got="$4"
+    local remote seed work setup_rc
+    remote="$(new_bare_remote)"
+    seed="$(mktemp -d "${TMPDIR:-/tmp}/gc-deployer-rebase-seed.XXXXXX")"
+    work="$(mktemp -d "${TMPDIR:-/tmp}/gc-deployer-rebase-work.XXXXXX")"
+    (
+        set -e
+        git clone -q "$remote" "$seed" 2>/dev/null
+        cd "$seed"
+        git config commit.gpgsign false
+        mkdir -p pkg
+        later_commit_go_contents 1 10 > pkg/widget_test.go
+        printf '# Notes\n' > notes.md
+        git add -A && git commit -qm base
+        git push -q origin main
+        git checkout -q -b feature
+        printf '# Notes\n- feature\n' > notes.md
+        git add -A && git commit -qm "feature notes"
+        later_commit_go_contents "$feature_want" "$feature_got" > pkg/widget_test.go
+        git add -A && git commit -qm "feature Go change"
+        git push -q origin feature
+        git checkout -q main
+        printf '# Notes\n- main\n' > notes.md
+        later_commit_go_contents 3 10 > pkg/widget_test.go
+        git add -A && git commit -qm "main notes and Go change"
+        git push -q origin main
+
+        git clone -q "$remote" "$work"
+        cd "$work"
+        git config commit.gpgsign false
+        # Ensure --continue must supply diff3 itself, even if the caller's
+        # global config already prefers diff3.
+        git config merge.conflictStyle merge
+        git checkout -q feature
+    )
+    setup_rc=$?
+    if [[ $setup_rc -ne 0 ]]; then
+        record_fail "$label" "fixture setup failed (rc=$setup_rc)"
+        rm -rf "$remote" "$seed" "$work"
+        return
+    fi
+
+    local before_local remote_before after_local remote_after output rc
+    before_local="$(git -C "$work" rev-parse HEAD)"
+    remote_before="$(remote_sha "$remote" refs/heads/feature)"
+    output="$(cd "$work" && attempt_bounded_self_rebase feature main 2>&1)"; rc=$?
+    after_local="$(git -C "$work" rev-parse HEAD)"
+    remote_after="$(remote_sha "$remote" refs/heads/feature)"
+
+    if [[ "$expect" == "refused" ]]; then
+        if [[ $rc -eq 12 \
+              && "$after_local" == "$before_local" \
+              && "$remote_after" == "$remote_before" \
+              && ! -d "$work/.git/rebase-merge" \
+              && ! -d "$work/.git/rebase-apply" \
+              && -z "$(git -C "$work" status --porcelain)" ]] \
+           && ! has_markers "$work"; then
+            record_pass "$label (rc=12, original HEAD and remote restored, no markers)"
+        else
+            record_fail "$label" \
+                "expected rc=12 untouched; rc=$rc before_local=$before_local after_local=$after_local remote_before=$remote_before remote_after=$remote_after output=$output"
+        fi
+    else
+        if [[ $rc -eq 0 \
+              && "$after_local" != "$before_local" \
+              && "$remote_after" == "$after_local" \
+              && -z "$(git -C "$work" status --porcelain)" \
+              && "$(cat "$work/pkg/widget_test.go")" == "$(later_commit_go_contents 3 "$feature_got")" \
+              && "$(grep -Fxc -- '- main' "$work/notes.md")" == 1 \
+              && "$(grep -Fxc -- '- feature' "$work/notes.md")" == 1 ]] \
+           && git -C "$work" merge-base --is-ancestor origin/main HEAD \
+           && ! has_markers "$work" \
+           && gofmt -e "$work/pkg/widget_test.go" >/dev/null 2>&1; then
+            record_pass "$label (rc=0, both commits preserved and pushed, valid Go)"
+        else
+            record_fail "$label" \
+                "expected rc=0 with both commits pushed; rc=$rc before_local=$before_local after_local=$after_local remote_after=$remote_after output=$output"
+        fi
+    fi
+    rm -rf "$remote" "$seed" "$work"
+}
+
+test_bounded_rebase_later_commit_same_line_refused_with_distant_control() {
+    bounded_later_commit_scenario "bounded/later-commit-same-line-refused" refused 2 10
+    bounded_later_commit_scenario "bounded/later-commit-distant-lines-still-resolve" resolved 1 11
+}
+
 # write_go_conflict <path> <ours_block> <theirs_block>: a Go file whose one
 # conflict hunk has no diff3 base section (two pure insertions).
 write_go_conflict() {
@@ -1446,6 +1559,8 @@ run_all() {
     test_bounded_rebase_shared_local_declaration_both_sides_refused
     test_bounded_rebase_shared_heading_both_sides_refused
     test_bounded_rebase_shared_middle_line_still_resolves
+    test_bounded_rebase_shared_trailing_line_refused_with_distinct_control
+    test_bounded_rebase_later_commit_same_line_refused_with_distant_control
     test_resolve_go_duplicate_top_level_declaration
     test_resolve_go_diff3_nonempty_base_is_real_conflict
     test_resolve_go_unparseable_prints_gofmt_diagnostic
