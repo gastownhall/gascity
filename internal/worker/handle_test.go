@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/tmux"
@@ -111,7 +112,7 @@ func TestSessionHandleStateBusyDoesNotPrimeHistoryCache(t *testing.T) {
 	workDir := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithCityPath(t.TempDir()))
 	handle, err := NewSessionHandle(SessionHandleConfig{
 		Manager:     manager,
 		SearchPaths: []string{searchBase},
@@ -2138,11 +2139,11 @@ type idleSnapshotFake struct {
 func (f *idleSnapshotFake) SnapshotIdle(string) (bool, error) { return f.idle, f.err }
 
 // A wait-idle nudge whose pre-read (runtime.IdleBoundaryNow) shows the
-// session busy, or reads indeterminate while the runtime reports a pending
-// interaction (an open dialog), is queued at once: it reports
-// no_idle_boundary without entering the 30 s idle wait and types nothing. A
-// pre-read at the boundary, or one that cannot tell, waits for idle as
-// before.
+// session busy, reads a pending choice (a numbered menu), or reads
+// indeterminate while the runtime reports a pending interaction (an open
+// dialog), is queued at once: it reports no_idle_boundary without entering
+// the 30 s idle wait and types nothing. A pre-read at the boundary, or one
+// that cannot tell, waits for idle as before.
 func TestRuntimeHandleWaitIdleBusySnapshotQueuesWithoutWaiting(t *testing.T) {
 	indeterminate := fmt.Errorf("scan: %w", runtime.ErrIdleIndeterminate)
 	for _, tc := range []struct {
@@ -2155,6 +2156,7 @@ func TestRuntimeHandleWaitIdleBusySnapshotQueuesWithoutWaiting(t *testing.T) {
 	}{
 		{name: "busy"},
 		{name: "pending", err: indeterminate, pending: &runtime.PendingInteraction{RequestID: "tmux-1", Kind: "approval", Prompt: "Allow Bash?"}},
+		{name: "pending choice", err: fmt.Errorf("scan: %w", runtime.ErrIdlePendingChoice)},
 		{name: "at the boundary", idle: true, wantWait: true, delivered: true},
 		{name: "indeterminate", err: indeterminate, wantWait: true, delivered: true},
 	} {
@@ -2233,7 +2235,7 @@ func TestRuntimeHandleNudgeWaitIdleUnsupportedProviderReturnsUndelivered(t *test
 func TestSessionCatalogUsesWorkerBoundary(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
+	mgr := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithCityPath(t.TempDir()))
 	handle, err := NewSessionHandle(SessionHandleConfig{
 		Manager: mgr,
 		Session: SessionSpec{
@@ -2659,7 +2661,7 @@ func TestSessionHandleStartUsesSessionIDOnFirstStartAndResumeAfterSuspend(t *tes
 	if err != nil {
 		t.Fatalf("Get(%q): %v", handle.sessionID, err)
 	}
-	handle.searchPaths = []string{searchBase}
+	handle.adapter.SearchPaths = []string{searchBase}
 	transcriptDir := filepath.Join(searchBase, sessionlog.ProjectSlug(info.WorkDir))
 	if err := os.MkdirAll(transcriptDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll: %v", err)
@@ -2690,7 +2692,7 @@ func TestSessionHandleStartUsesSessionIDOnFirstStartAndResumeAfterSuspend(t *tes
 func TestSessionHandleStartUsesCurrentResumeOverridesAfterSuspend(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithCityPath(t.TempDir()))
 
 	info, err := manager.CreateSession(
 		context.Background(), sessionpkg.CreateOptions{Template: "probe", Title: "Probe", Command: "legacy-agent", WorkDir: t.TempDir(), Provider: "legacy-agent", Env: nil, Resume: sessionpkg.ProviderResume{
@@ -2764,7 +2766,7 @@ func newTestSessionHandleWithRecorder(t *testing.T, spec SessionSpec, recorder e
 
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), sp, sessionpkg.WithCityPath(t.TempDir()))
 	handle, err := NewSessionHandle(SessionHandleConfig{
 		Manager:  manager,
 		Recorder: recorder,
@@ -3061,7 +3063,7 @@ func startKeyedClaudeHistorySession(t *testing.T) keyedClaudeHistorySession {
 	store := beads.NewMemStore()
 	// The stale-resume-key probe delay is production timing, not what these
 	// tests own; skip it so the keyed (session-id) start does not sleep.
-	manager := sessionpkg.NewManagerWithOptions(store, runtime.NewFake(), sessionpkg.WithStaleKeyDetectionWaiter(
+	manager := sessionpkg.NewManagerWithOptions(beadstest.Sessions(store), runtime.NewFake(), sessionpkg.WithStaleKeyDetectionWaiter(
 		func(context.Context, string) error { return nil },
 	), sessionpkg.WithCityPath(t.TempDir()))
 	handle, err := NewSessionHandle(SessionHandleConfig{

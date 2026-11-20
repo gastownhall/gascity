@@ -74,44 +74,63 @@ func preflightBDContextReader(cityPath string) func(scope string) (contract.Pref
 // reader (internal/beads/proxyendpoint.ReadCursorReportOverConn).
 func preflightDatabaseSchemaCursorsReader(cityPath string) func(scope string) (contract.PreflightSchemaCursors, bool, error) {
 	return func(scope string) (contract.PreflightSchemaCursors, bool, error) {
-		target, ok, err := canonicalScopeDoltTarget(cityPath, scope)
+		var report proxyendpoint.CursorReport
+		ok, err := withScopeDoltConn(cityPath, scope, func(ctx context.Context, conn *sql.Conn, _ contract.DoltConnectionTarget) error {
+			var readErr error
+			report, readErr = proxyendpoint.ReadCursorReportOverConn(ctx, conn)
+			return readErr
+		})
 		if err != nil || !ok {
-			return contract.PreflightSchemaCursors{}, false, err
-		}
-		if target.DoltMode == "proxied-server" {
-			// The proxied lane already gates its own schema compatibility
-			// (internal/beads.CursorsMatchPinned) before gc ever opens the
-			// linked library against it; there is no direct SQL endpoint for
-			// this control-plane probe to read here.
-			return contract.PreflightSchemaCursors{}, false, nil
-		}
-		// Pooled handle owned by internal/doltpool; do not Close.
-		var db *sql.DB
-		if target.Socket != "" {
-			db, err = managedDoltOpenDatabaseSocket(target.Socket, target.User, target.Database)
-		} else {
-			db, err = managedDoltOpenDatabase(target.Host, target.Port, target.User, target.Database)
-		}
-		if err != nil {
-			return contract.PreflightSchemaCursors{}, false, err
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		conn, err := db.Conn(ctx)
-		if err != nil {
-			return contract.PreflightSchemaCursors{}, false, err
-		}
-		defer conn.Close() //nolint:errcheck // best-effort release of a pooled handle
-		if err := conn.PingContext(ctx); err != nil {
-			return contract.PreflightSchemaCursors{}, false, err
-		}
-		report, err := proxyendpoint.ReadCursorReportOverConn(ctx, conn)
-		if err != nil {
 			return contract.PreflightSchemaCursors{}, false, err
 		}
 		return preflightSchemaCursorsFromReport(report), true, nil
 	}
+}
+
+// scopeDoltConnTimeout bounds one control-plane read of a scope's database:
+// the dial, the ping, and whatever the caller reads over the connection.
+const scopeDoltConnTimeout = 5 * time.Second
+
+// withScopeDoltConn runs fn over a pinned, pinged connection to the database
+// scope's canonical Dolt target names, on the pooled handle the managed-Dolt
+// open family shares. It reports false, running nothing, for a scope with no
+// direct SQL endpoint to read: a scope config that is not authoritative, or
+// a proxied-server scope, whose proxied lane gates its own schema
+// compatibility (internal/beads.CursorsMatchPinned) before gc ever opens the
+// linked library against it.
+func withScopeDoltConn(cityPath, scope string, fn func(ctx context.Context, conn *sql.Conn, target contract.DoltConnectionTarget) error) (bool, error) {
+	target, ok, err := canonicalScopeDoltTarget(cityPath, scope)
+	if err != nil || !ok {
+		return false, err
+	}
+	if target.DoltMode == "proxied-server" {
+		return false, nil
+	}
+	// Pooled handle owned by internal/doltpool; do not Close.
+	var db *sql.DB
+	if target.Socket != "" {
+		db, err = managedDoltOpenDatabaseSocket(target.Socket, target.User, target.Database)
+	} else {
+		db, err = managedDoltOpenDatabase(target.Host, target.Port, target.User, target.Database)
+	}
+	if err != nil {
+		return false, err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), scopeDoltConnTimeout)
+	defer cancel()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer conn.Close() //nolint:errcheck // best-effort release of a pooled handle
+	if err := conn.PingContext(ctx); err != nil {
+		return false, err
+	}
+	if err := fn(ctx, conn, target); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // preflightSchemaCursorsFromReport maps a raw proxyendpoint.CursorReport onto
@@ -229,7 +248,7 @@ func preflightIdentityDeferredReader(cityPath string) func(scope string) bool {
 
 func preflightDatabaseProjectIDReader(cityPath string) func(scope string) (string, bool, error) {
 	return func(scope string) (string, bool, error) {
-		target, ok, err := canonicalScopeDoltTarget(cityPath, scope)
+		target, ok, err := preflightProbeTarget(cityPath, scope)
 		if err != nil || !ok {
 			return "", false, err
 		}
@@ -256,4 +275,18 @@ func preflightDatabaseProjectIDReader(cityPath string) func(scope string) (strin
 		}
 		return readDatabaseProjectID(ctx, db)
 	}
+}
+
+// preflightProbeTarget returns the Dolt endpoint the identity check reads a
+// scope's project_id from: the scope's canonical target or, where the platform
+// supplies one, the server bd runs for a provider-owned direct scope
+// (providerOwnedDirectProbeTarget). ok is false when there is no endpoint to
+// probe.
+func preflightProbeTarget(cityPath, scope string) (contract.DoltConnectionTarget, bool, error) {
+	target, ok, err := canonicalScopeDoltTarget(cityPath, scope)
+	if err != nil || ok {
+		return target, ok, err
+	}
+	target, ok = providerOwnedDirectProbeTarget(cityPath, scope)
+	return target, ok, nil
 }

@@ -59,6 +59,7 @@ go_test(
         "//internal/events",
         "//internal/session",
         "//internal/testenv",
+        "//internal/testutil",
     ],
 )
 

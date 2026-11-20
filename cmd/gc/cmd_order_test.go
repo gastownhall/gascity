@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1034,11 +1035,19 @@ func TestOrderCheckWithStoresResolverUsesLegacyCityStore(t *testing.T) {
 func TestOrderCheckConditionUsesCityScope(t *testing.T) {
 	cityDir := t.TempDir()
 	orderDir := filepath.Join(cityDir, "packs", "workflows", "orders")
-	check := fmt.Sprintf(
-		`test "$GC_CITY_PATH" = '%s' && test "$GC_STORE_ROOT" = '%s' && test "$GC_STORE_SCOPE" = city && test "$ORDER_DIR" = '%s'`,
-		cityDir,
-		cityDir,
-		orderDir,
+	check := platformCommand(
+		fmt.Sprintf(
+			`test "$GC_CITY_PATH" = '%s' && test "$GC_STORE_ROOT" = '%s' && test "$GC_STORE_SCOPE" = city && test "$ORDER_DIR" = '%s'`,
+			cityDir,
+			cityDir,
+			orderDir,
+		),
+		fmt.Sprintf(
+			`if ($env:GC_CITY_PATH -eq %s -and $env:GC_STORE_ROOT -eq %s -and $env:GC_STORE_SCOPE -eq 'city' -and $env:ORDER_DIR -eq %s) { exit 0 }; exit 1`,
+			psLiteral(cityDir),
+			psLiteral(cityDir),
+			psLiteral(orderDir),
+		),
 	)
 	aa := []orders.Order{{
 		Name:    "pr-review-router",
@@ -1353,7 +1362,7 @@ name = "test-city"
 		Name:    "release-exec",
 		Trigger: "event",
 		On:      events.BeadClosed,
-		Exec:    "printf ok",
+		Exec:    platformCommand("printf ok", "[Console]::Out.Write('ok')"),
 	}}
 
 	var stdout, stderr bytes.Buffer
@@ -1398,7 +1407,7 @@ name = "test-city"
 		t.Fatal(err)
 	}
 	writeFile(t, filepath.Join(cityDir, "orders", "release-exec.toml"), `[order]
-exec = "printf ok"
+exec = "`+platformCommand("printf ok", "[Console]::Out.Write('ok')")+`"
 trigger = "event"
 on = "bead.closed"
 `)
@@ -3034,7 +3043,7 @@ prefix = "ct"
 		Name:     "poll",
 		Trigger:  "cooldown",
 		Interval: "1m",
-		Exec:     fmt.Sprintf(`printf '%%s\n%%s\n%%s\n' "$GC_DOLT_HOST" "$GC_DOLT_PORT" "$GC_DOLT_USER" > %q`, outPath),
+		Exec:     platformCommand(fmt.Sprintf(`printf '%%s\n%%s\n%%s\n' "$GC_DOLT_HOST" "$GC_DOLT_PORT" "$GC_DOLT_USER" > %q`, outPath), fmt.Sprintf("[IO.File]::WriteAllText(%s, \"${env:GC_DOLT_HOST}`n${env:GC_DOLT_PORT}`n${env:GC_DOLT_USER}`n\")", psLiteral(outPath))),
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -3181,7 +3190,7 @@ prefix = "ct"
 		Name:     "dolt-test-cooldown",
 		Trigger:  "cooldown",
 		Interval: "1m",
-		Exec:     fmt.Sprintf(`printf 'managed=<%%s>\nhost=<%%s>\nport=<%%s>\npack_state=<%%s>\ndata=<%%s>\nconfig=<%%s>\nstate=<%%s>\n' "$GC_DOLT_MANAGED_LOCAL" "$GC_DOLT_HOST" "$GC_DOLT_PORT" "$GC_PACK_STATE_DIR" "$GC_DOLT_DATA_DIR" "$GC_DOLT_CONFIG_FILE" "$GC_DOLT_STATE_FILE" > %q`, outPath),
+		Exec:     platformCommand(fmt.Sprintf(`printf 'managed=<%%s>\nhost=<%%s>\nport=<%%s>\npack_state=<%%s>\ndata=<%%s>\nconfig=<%%s>\nstate=<%%s>\n' "$GC_DOLT_MANAGED_LOCAL" "$GC_DOLT_HOST" "$GC_DOLT_PORT" "$GC_PACK_STATE_DIR" "$GC_DOLT_DATA_DIR" "$GC_DOLT_CONFIG_FILE" "$GC_DOLT_STATE_FILE" > %q`, outPath), fmt.Sprintf("[IO.File]::WriteAllText(%s, \"managed=<${env:GC_DOLT_MANAGED_LOCAL}>`nhost=<${env:GC_DOLT_HOST}>`nport=<${env:GC_DOLT_PORT}>`npack_state=<${env:GC_PACK_STATE_DIR}>`ndata=<${env:GC_DOLT_DATA_DIR}>`nconfig=<${env:GC_DOLT_CONFIG_FILE}>`nstate=<${env:GC_DOLT_STATE_FILE}>`n\")", psLiteral(outPath))),
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -3381,7 +3390,7 @@ prefix = "fe"
 		Rig:      "frontend",
 		Trigger:  "cooldown",
 		Interval: "1m",
-		Exec:     "true",
+		Exec:     "exit 0",
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -3464,7 +3473,7 @@ prefix = "ct"
 		Name:     "leaky",
 		Trigger:  "cooldown",
 		Interval: "1m",
-		Exec:     `printf '%s\n' "$GITHUB_TOKEN"; exit 1`,
+		Exec:     platformCommand(`printf '%s\n' "$GITHUB_TOKEN"; exit 1`, `[Console]::Out.WriteLine($env:GITHUB_TOKEN); exit 1`),
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -3512,7 +3521,7 @@ prefix = "ct"
 		Name:     "leaky",
 		Trigger:  "cooldown",
 		Interval: "1m",
-		Exec:     `printf '%s\n' "$GITHUB_TOKEN"`,
+		Exec:     platformCommand(`printf '%s\n' "$GITHUB_TOKEN"`, `[Console]::Out.WriteLine($env:GITHUB_TOKEN)`),
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -4219,9 +4228,10 @@ func TestRouteOrderHistory_MultiOrderFallback(t *testing.T) {
 	}
 }
 
-// TestRouteOrderHistory_StaleBannerOver30s verifies the > 30 s stale banner
-// on the API render path; matches the rig-list staleness test contract.
-func TestRouteOrderHistory_StaleBannerOver30s(t *testing.T) {
+// TestRouteOrderHistory_CacheAgeFooterOnStderr verifies the API render path
+// prints the cache-age footer on stderr, not stdout, when the supervisor
+// reports a cache age more than twice its re-scan interval.
+func TestRouteOrderHistory_CacheAgeFooterOnStderr(t *testing.T) {
 	t.Setenv("GC_DEBUG", "0")
 
 	cityPath := writeOrderHistoryTestCity(t)
@@ -4232,7 +4242,7 @@ func TestRouteOrderHistory_StaleBannerOver30s(t *testing.T) {
 	aa, _ := loadAllOrders(cityPath, cfg, &bytes.Buffer{}, "test")
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("X-GC-Cache-Age-S", "45")
+		setBehindCacheHeaders(w)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"entries": []map[string]any{
@@ -4256,9 +4266,7 @@ func TestRouteOrderHistory_StaleBannerOver30s(t *testing.T) {
 	if code := routeOrderHistory(cityPath, cfg, "digest", "", aa, c, "", orderHistoryBounds{Limit: defaultOrderHistoryLimit}, false, &stdout, &stderr); code != 0 {
 		t.Fatalf("exit = %d, stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "cache age: 45s") {
-		t.Errorf("stale banner missing from human output:\n%s", stdout.String())
-	}
+	assertCacheAgeFooterOnStderr(t, stdout.String(), stderr.String())
 }
 
 // TestOrderScopedName verifies city-level vs rig-level scoping matches the
@@ -4697,6 +4705,69 @@ dir = "frontend"
 				t.Fatalf("doOrderRunWithJSON = %d, want 0; stderr: %s", code, stderr.String())
 			}
 			requireBeadTitled(t, store, tc.want)
+		})
+	}
+}
+
+// TestOrderCheckNeverRunEventOrderReadsOnlyPastTheHead: gc order check of an
+// event order that has never run reads the log from its head, not from seq 0,
+// so it opens none of the history (every archive included) and does not report
+// the order due on history the controller never replays (ga-1clac5). Both
+// output shapes.
+func TestOrderCheckNeverRunEventOrderReadsOnlyPastTheHead(t *testing.T) {
+	for _, jsonOutput := range []bool{false, true} {
+		t.Run(fmt.Sprintf("json=%v", jsonOutput), func(t *testing.T) {
+			spy := &eventCheckSpy{Fake: events.NewFake(), typ: events.BeadClosed}
+			spy.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+			spy.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+			aa := []orders.Order{{Name: "watch", Trigger: "event", On: events.BeadClosed, Formula: "mol-watch"}}
+			store := beads.NewMemStore()
+			resolver := func(a orders.Order) ([]beads.OrdersStore, error) {
+				if a.Name != "watch" {
+					return nil, fmt.Errorf("unexpected order %q", a.Name)
+				}
+				return []beads.OrdersStore{{Store: store}}, nil
+			}
+			check := func() (int, string) {
+				var stdout, stderr bytes.Buffer
+				code := doOrderCheckWithStoresResolverScopedJSON("", nil, aa, time.Now(), spy, resolver, jsonOutput, &stdout, &stderr)
+				if stderr.Len() > 0 {
+					t.Fatalf("stderr: %s", stderr.String())
+				}
+				return code, stdout.String()
+			}
+
+			if code, out := check(); code != 1 || strings.Contains(out, "bead.closed event(s)") {
+				t.Fatalf("history only: code %d, want 1 (not due); stdout:\n%s", code, out)
+			}
+			if got := spy.readsAfter(); !slices.Equal(got, []uint64{2}) {
+				t.Fatalf("history only: reads after %v, want one read after the head [2]", got)
+			}
+
+			// A standalone check holds no record of when the controller began
+			// watching, so a never-run order stays not due; the controller
+			// fires it on its next pass.
+			spy.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
+			if code, out := check(); code != 1 {
+				t.Fatalf("never run, new event: code %d, want 1 (not due); stdout:\n%s", code, out)
+			}
+			if got := spy.readsAfter(); !slices.Equal(got, []uint64{2, 3}) {
+				t.Fatalf("never run: reads after %v, want each read after the head [2 3]", got)
+			}
+
+			// Once it has run, the check reads past its run cursor.
+			if _, err := store.Create(beads.Bead{
+				Title:  "order:watch",
+				Labels: []string{"order-run:watch", "order-tracking", "order:watch", "seq:2"},
+			}); err != nil {
+				t.Fatalf("create run: %v", err)
+			}
+			if code, out := check(); code != 0 || !strings.Contains(out, "1 bead.closed event(s)") {
+				t.Fatalf("has run: code %d, want 0 (due on the one event past its cursor); stdout:\n%s", code, out)
+			}
+			if got := spy.readsAfter(); !slices.Equal(got, []uint64{2, 3, 2}) {
+				t.Fatalf("has run: reads after %v, want the last read after its run cursor 2", got)
+			}
 		})
 	}
 }

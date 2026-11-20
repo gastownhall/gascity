@@ -124,6 +124,10 @@ type Spec struct {
 	AttemptID string
 	// DryRun plans without mutating anything.
 	DryRun bool
+	// SkipLFSSmudge sets GIT_LFS_SKIP_SMUDGE=1 only for the git worktree add
+	// that creates this workspace. Verification and ordinary worktree adds keep
+	// git's default environment.
+	SkipLFSSmudge bool
 }
 
 // Provenance is the durable, worktree-specific ownership record. It lives in
@@ -597,12 +601,13 @@ func planDryRun(spec Spec, rep Report, branchExists bool, resolvedBase string) (
 
 func createWorktree(repoGit *git.Git, spec Spec, branchExists bool) error {
 	var err error
+	opts := git.WorktreeAddOptions{SkipLFSSmudge: spec.SkipLFSSmudge}
 	if branchExists {
-		err = repoGit.WorktreeAddExistingBranch(spec.Path, spec.Branch)
+		err = repoGit.WorktreeAddExistingBranchWithOptions(spec.Path, spec.Branch, opts)
 	} else {
 		// Preserve the explicit base verbatim so git's own branch-setup
 		// semantics follow the operator's stated intent.
-		err = repoGit.WorktreeAddNewBranch(spec.Path, spec.Branch, spec.Base)
+		err = repoGit.WorktreeAddNewBranchWithOptions(spec.Path, spec.Branch, spec.Base, opts)
 	}
 	if err != nil {
 		return fmt.Errorf("ensuring worktree %q: %w", spec.Path, err)

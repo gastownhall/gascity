@@ -2,10 +2,21 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "dolttest",
-    srcs = ["dolttest.go"],
+    srcs = [
+        "dolttest.go",
+        "dolttest_unix.go",
+        "dolttest_windows.go",
+    ],
     importpath = "github.com/gastownhall/gascity/test/dolttest",
     visibility = ["//visibility:public"],
-    deps = ["//internal/doltorphan"],
+    deps = [
+        "//internal/doltorphan",
+    ] + select({
+        "@rules_go//go/platform:windows": [
+            "//internal/pidutil",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 go_test(
