@@ -58,6 +58,9 @@ func useListenerPID(t *testing.T, replacement func(port int, candidates ...int) 
 // its path.
 func fakeDolt(t *testing.T, body string) string {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake dolt stand-ins are /bin/sh scripts")
+	}
 	path := filepath.Join(t.TempDir(), "fake-dolt.sh")
 	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
 		t.Fatalf("writing the stand-in server: %v", err)
