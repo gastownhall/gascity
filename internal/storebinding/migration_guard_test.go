@@ -122,3 +122,29 @@ func TestAcquireMigrationGuardRejectsNoncanonicalOrSymlinkedCityDirectory(t *tes
 		t.Fatal("AcquireMigrationGuard() succeeded for a symlinked city directory")
 	}
 }
+
+func TestMigrationGuardScopeRejectsMissingFileAndLeafSymlink(t *testing.T) {
+	parent := t.TempDir()
+	file := filepath.Join(parent, "file", ".gc")
+	if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(parent, "linked", ".gc")
+	if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(testMigrationGuardDirectory(t), link); err != nil {
+		t.Fatal(err)
+	}
+	for _, directory := range []string{filepath.Join(parent, "missing", ".gc"), file, link} {
+		t.Run(filepath.Base(filepath.Dir(directory)), func(t *testing.T) {
+			scope, err := NewMigrationGuardScope(directory)
+			if !errors.Is(err, ErrInvalidMigrationGuard) || scope.Directory() != "" {
+				t.Fatalf("NewMigrationGuardScope(%q) = (%q, %v), want no scope and ErrInvalidMigrationGuard", directory, scope.Directory(), err)
+			}
+		})
+	}
+}

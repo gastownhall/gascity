@@ -226,6 +226,55 @@ func TestWorkspaceRootCanonicalizesTheCitySpelling(t *testing.T) {
 	}
 }
 
+func TestWorkspaceRootCanonicalizesMissingCityBelowSymlink(t *testing.T) {
+	parent := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "parent-link")
+	if err := os.Symlink(parent, alias); err != nil {
+		t.Fatal(err)
+	}
+	for _, tail := range []string{"city", filepath.Join("not-created", "city")} {
+		t.Run(tail, func(t *testing.T) {
+			direct := filepath.Join(parent, tail)
+			linked := filepath.Join(alias, tail)
+			fromDirect, err := WorkspaceRoot(direct, testConfigRef)
+			if err != nil {
+				t.Fatalf("WorkspaceRoot(direct missing city): %v", err)
+			}
+			fromLink, err := WorkspaceRoot(linked, testConfigRef)
+			if err != nil {
+				t.Fatalf("WorkspaceRoot(linked missing city): %v", err)
+			}
+			if fromLink != fromDirect {
+				t.Errorf("one prospective city has two binding locations: direct=%q linked=%q", fromDirect, fromLink)
+			}
+			for _, city := range []string{direct, linked} {
+				if _, err := os.Lstat(city); !os.IsNotExist(err) {
+					t.Errorf("WorkspaceRoot must not provision city %q: Lstat error = %v", city, err)
+				}
+			}
+		})
+	}
+}
+
+func TestWorkspaceRootRejectsUnresolvableCity(t *testing.T) {
+	parent := t.TempDir()
+	file := filepath.Join(parent, "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loop := filepath.Join(parent, "loop")
+	if err := os.Symlink(loop, loop); err != nil {
+		t.Fatal(err)
+	}
+	for _, city := range []string{filepath.Join(file, "city"), filepath.Join(loop, "city")} {
+		t.Run(filepath.Base(filepath.Dir(city)), func(t *testing.T) {
+			if root, err := WorkspaceRoot(city, testConfigRef); err == nil || root != "" {
+				t.Fatalf("WorkspaceRoot(%q) = (%q, %v), want empty location and resolution error", city, root, err)
+			}
+		})
+	}
+}
+
 // TestWorkspaceRootRefusesWithoutACityRatherThanGuessingOne is the whole reason
 // the city root is carried: the tempting default is the working directory, and
 // under a supervisor that hosts every registered city from one process, that

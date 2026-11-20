@@ -17,6 +17,41 @@ import (
 	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
+func TestGraphPathCanonicalizesProspectiveRootsAndRejectsLoops(t *testing.T) {
+	parent := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(parent, alias); err != nil {
+		t.Fatal(err)
+	}
+	for _, tail := range []string{"city", filepath.Join("not-created", "city")} {
+		t.Run(tail, func(t *testing.T) {
+			direct, err := GraphPath(filepath.Join(parent, tail))
+			if err != nil {
+				t.Fatal(err)
+			}
+			linked, err := GraphPath(filepath.Join(alias, tail))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if direct != linked {
+				t.Errorf("one prospective Graph root has two locators: %q != %q", direct, linked)
+			}
+			if _, err := os.Lstat(filepath.Join(parent, tail)); !os.IsNotExist(err) {
+				t.Errorf("GraphPath must not create its prospective root: Lstat error = %v", err)
+			}
+		})
+	}
+	t.Run("loop is an error", func(t *testing.T) {
+		loop := filepath.Join(parent, "loop")
+		if err := os.Symlink(loop, loop); err != nil {
+			t.Fatal(err)
+		}
+		if path, err := GraphPath(filepath.Join(loop, "city")); err == nil || path != "" {
+			t.Fatalf("GraphPath(loop) = (%q, %v), want no locator and resolution error", path, err)
+		}
+	})
+}
+
 func TestInspectGraphEscapesURIAndDoesNotMutateStaticSource(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "source ? # % spaces")
 	graphDir := filepath.Join(root, "graph")

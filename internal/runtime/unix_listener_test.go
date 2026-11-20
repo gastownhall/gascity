@@ -114,3 +114,27 @@ func TestUnixSocketPathCandidates(t *testing.T) {
 		}
 	}
 }
+
+func TestUnixSocketPathCandidatesClimbPastBrokenAncestors(t *testing.T) {
+	root := t.TempDir()
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, target := range map[string]string{
+		"dangling": filepath.Join(root, "missing"),
+		"loop":     filepath.Join(root, "loop"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := os.Symlink(target, filepath.Join(root, name)); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(root, name, "gone", "city.sock")
+			got := unixSocketPathCandidates(path)
+			wantResolved := filepath.Join(resolvedRoot, name, "gone", "city.sock")
+			if len(got) != 2 || got[0] != path || got[1] != wantResolved {
+				t.Fatalf("unixSocketPathCandidates(%q) = %q, want [%q %q]", path, got, path, wantResolved)
+			}
+		})
+	}
+}

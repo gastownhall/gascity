@@ -14,6 +14,32 @@ import (
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
+func TestManagedPathCanonicalizationPreservesMissingLeavesAndErrors(t *testing.T) {
+	parent := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(parent, alias); err != nil {
+		t.Fatal(err)
+	}
+	direct, err := canonicalPathAllowMissing(filepath.Join(parent, "new", "worker"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	linked, err := canonicalPathAllowMissing(filepath.Join(alias, "new", "worker"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if direct != linked {
+		t.Errorf("one prospective worktree has two canonical paths: %q != %q", direct, linked)
+	}
+	loop := filepath.Join(parent, "loop")
+	if err := os.Symlink(loop, loop); err != nil {
+		t.Fatal(err)
+	}
+	if path, err := canonicalPathAllowMissing(filepath.Join(loop, "worker")); err == nil || path != "" {
+		t.Fatalf("canonicalPathAllowMissing(loop) = (%q, %v), want no path and resolution error", path, err)
+	}
+}
+
 // runGit runs a git command in dir and fails the test on error. Strips
 // repository-locating git env vars so host hooks cannot interfere.
 func runGit(t *testing.T, dir string, args ...string) string {

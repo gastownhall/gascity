@@ -644,6 +644,21 @@ func TestNamedSocketPathFallsBackToTmpWhenTMUXTMPDIREmpty(t *testing.T) {
 	}
 }
 
+func TestSocketDirFallsBackToTmpForDanglingTMUXTMPDIR(t *testing.T) {
+	parent := t.TempDir()
+	dangling := filepath.Join(parent, "dangling")
+	if err := os.Symlink(filepath.Join(parent, "missing"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	tmp, err := filepath.EvalSymlinks("/tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := SocketDirIn(parent, dangling), filepath.Join(tmp, fmt.Sprintf("tmux-%d", os.Getuid())); got != want {
+		t.Fatalf("SocketDirIn() with dangling TMUX_TMPDIR = %q, want tmux fallback %q", got, want)
+	}
+}
+
 // tmux keeps a TMUX_TMPDIR that resolves to a file and fails there, so the
 // socket path stays below the resolved file and never moves to /tmp, where
 // a stale socket could read as a dead server.

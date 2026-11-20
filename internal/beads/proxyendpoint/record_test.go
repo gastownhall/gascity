@@ -228,6 +228,26 @@ func TestRootIDIsSpellingIndependent(t *testing.T) {
 	}
 }
 
+func TestRootIDRejectsUnresolvableRoots(t *testing.T) {
+	base := t.TempDir()
+	missing := filepath.Join(base, "missing")
+	dangling := filepath.Join(base, "dangling")
+	if err := os.Symlink(missing, dangling); err != nil {
+		t.Fatal(err)
+	}
+	loop := filepath.Join(base, "loop")
+	if err := os.Symlink(loop, loop); err != nil {
+		t.Fatal(err)
+	}
+	for _, root := range []string{missing, dangling, loop} {
+		t.Run(filepath.Base(root), func(t *testing.T) {
+			if id, err := RootID(root); err == nil || id != "" {
+				t.Fatalf("RootID(%q) = (%q, %v), want no identity and resolution error", root, id, err)
+			}
+		})
+	}
+}
+
 // TestValidateRefusesACopiedRecord is the foreign-root case stated directly: the
 // record is bd's, valid, and describes a live proxy — of somebody else's root.
 func TestValidateRefusesACopiedRecord(t *testing.T) {

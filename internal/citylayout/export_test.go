@@ -653,3 +653,22 @@ func TestWorkDirExportEntriesErrors(t *testing.T) {
 		t.Error("file work dir: want error")
 	}
 }
+
+func TestWorkDirExportEntriesRejectUnresolvableRoots(t *testing.T) {
+	base := t.TempDir()
+	dangling := filepath.Join(base, "dangling")
+	if err := os.Symlink(filepath.Join(base, "missing"), dangling); err != nil {
+		t.Fatal(err)
+	}
+	loop := filepath.Join(base, "loop")
+	if err := os.Symlink(loop, loop); err != nil {
+		t.Fatal(err)
+	}
+	for _, root := range []string{dangling, loop} {
+		t.Run(filepath.Base(root), func(t *testing.T) {
+			if entries, err := WorkDirExportEntries(root); err == nil || len(entries) != 0 {
+				t.Fatalf("WorkDirExportEntries(%q) = (%v, %v), want no entries and resolution error", root, entries, err)
+			}
+		})
+	}
+}

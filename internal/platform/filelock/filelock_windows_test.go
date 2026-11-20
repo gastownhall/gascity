@@ -350,6 +350,66 @@ func TestOpenDirectoryLockUsesStableExternalIdentity(t *testing.T) {
 	}
 }
 
+func TestOpenDirectoryLockRejectsUnresolvableOrNonDirectoryTarget(t *testing.T) {
+	parent := t.TempDir()
+	t.Setenv("LOCALAPPDATA", filepath.Join(parent, "cache"))
+	file := filepath.Join(parent, "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{filepath.Join(parent, "missing"), file} {
+		t.Run(filepath.Base(path), func(t *testing.T) {
+			f, label, err := OpenDirectoryLock(path)
+			if f != nil {
+				_ = f.Close()
+			}
+			if err == nil || f != nil || label != "" {
+				t.Fatalf("OpenDirectoryLock(%q) = (%v, %q, %v), want no handle, no identity and error", path, f, label, err)
+			}
+		})
+	}
+	if _, err := os.Stat(filepath.Join(parent, "cache")); !os.IsNotExist(err) {
+		t.Fatalf("rejected targets must not create a lock cache: Stat error = %v", err)
+	}
+}
+
+func TestOpenDirectoryLockUnifiesSymlinkIdentityAndRejectsDanglingLink(t *testing.T) {
+	parent := t.TempDir()
+	t.Setenv("LOCALAPPDATA", filepath.Join(parent, "cache"))
+	target := filepath.Join(parent, "store")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(parent, "alias")
+	if err := os.Symlink(target, alias); err != nil {
+		t.Fatal(err)
+	}
+	var identity string
+	for _, path := range []string{target, alias} {
+		f, label, err := OpenDirectoryLock(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := f.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if identity != "" && label != identity {
+			t.Errorf("one directory has two lock identities: %q != %q", identity, label)
+		}
+		identity = label
+	}
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+	f, label, err := OpenDirectoryLock(alias)
+	if f != nil {
+		_ = f.Close()
+	}
+	if err == nil || f != nil || label != "" {
+		t.Fatalf("OpenDirectoryLock(dangling link) = (%v, %q, %v), want no handle, no identity and error", f, label, err)
+	}
+}
+
 func TestOpenDirectoryForSyncSupportsFlush(t *testing.T) {
 	dir := t.TempDir()
 	f, err := OpenDirectoryForSync(dir)

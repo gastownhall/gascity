@@ -7,6 +7,35 @@ import (
 	"testing"
 )
 
+func TestSameTopologyScopeCanonicalizesProspectiveRoots(t *testing.T) {
+	parent := t.TempDir()
+	t.Chdir(parent)
+	if err := os.Mkdir("real", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(parent, "real"), "alias"); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, first, second string
+		want                bool
+	}{
+		{"existing root", "real", "alias", true},
+		{"missing leaf", filepath.Join("real", "city"), filepath.Join("alias", "city"), true},
+		{"missing chain", filepath.Join("real", "new", "city"), filepath.Join("alias", "new", "city"), true},
+		{"relative and absolute", filepath.Join("alias", "new", "city"), filepath.Join(parent, "real", "new", "city"), true},
+		{"distinct prospective roots", filepath.Join("real", "first"), filepath.Join("alias", "second"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, pair := range [][2]string{{tc.first, tc.second}, {tc.second, tc.first}} {
+				if got := sameTopologyScope(pair[0], pair[1]); got != tc.want {
+					t.Errorf("sameTopologyScope(%q, %q) = %v, want %v", pair[0], pair[1], got, tc.want)
+				}
+			}
+		})
+	}
+}
+
 // TestResolveLegacyGCBinarySeparatesUnsetFromMisconfigured pins the distinction
 // the M5 shape used to lose. A "" meant both "the operator did not set
 // GC_ACCEPTANCE_LEGACY_GC_BIN" and "they set it to something unusable", and
