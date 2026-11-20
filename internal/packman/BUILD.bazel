@@ -82,6 +82,7 @@ go_test(
         "cache_test.go",
         "check_test.go",
         "embedded_pin_hash_test.go",
+        "git_stderr_test.go",
         "git_trace_test.go",
         "install_test.go",
         "lockfile_test.go",
