@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -1898,4 +1899,96 @@ func TestConvergeSocketNormalReply(t *testing.T) {
 
 	// The panic swap must not leak into the store the earlier legs used.
 	assertConvergenceBeadCount(t, store, 2)
+}
+
+// gatedCreateStore blocks the first convergence-root Create until released,
+// standing in for a dispatch slow enough to outlast the socket reply wait.
+type gatedCreateStore struct {
+	*beads.MemStore
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *gatedCreateStore) Create(b beads.Bead) (beads.Bead, error) {
+	if b.Type == "convergence" {
+		s.entered <- struct{}{}
+		<-s.release
+	}
+	return s.MemStore.Create(b)
+}
+
+// TestConvergeSocketTimeoutReportsClaimedRequest (AC-4): when the reply wait
+// expires while a dispatcher already claimed and is executing the request,
+// the client gets the distinct outcome-unknown response — never a withdrawal
+// claim — and the late reply is delivered into the buffered reply channel
+// without blocking the event loop.
+func TestConvergeSocketTimeoutReportsClaimedRequest(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cr, store := setupConvergenceRuntime(t)
+		gated := &gatedCreateStore{
+			MemStore: store,
+			entered:  make(chan struct{}, 1),
+			release:  make(chan struct{}),
+		}
+		cr.convScopes[""] = cr.newConvergenceScope("", gated, cr.cityPath, []string{sharedTestFormulaDir}, false)
+		var releaseOnce sync.Once
+		release := func() { releaseOnce.Do(func() { close(gated.release) }) }
+		t.Cleanup(release) // never strand a goroutine inside the gate
+
+		payload := `{"command":"create","params":{"formula":"test-formula","target":"test-agent","max_iterations":"3"}}`
+		server, client := net.Pipe()
+		t.Cleanup(func() {
+			server.Close() //nolint:errcheck // unblock a stranded goroutine
+			client.Close() //nolint:errcheck // unblock a stranded goroutine
+		})
+		go handleConvergeSocketCmd(server, payload, cr.convergenceReqCh)
+
+		// The event loop claims the request and its dispatch blocks inside
+		// the gated store's Create.
+		dispatchDone := make(chan struct{})
+		var claimed convergenceRequest
+		go func() {
+			defer close(dispatchDone)
+			claimed = <-cr.convergenceReqCh
+			reply := cr.safeHandleConvergenceRequest(context.Background(), claimed)
+			// Buffered reply channel: this send must not block even though
+			// the socket handler has stopped reading.
+			claimed.replyCh <- reply
+		}()
+		<-gated.entered
+
+		// The socket handler's reply wait expires while the dispatch holds
+		// the claim.
+		line, err := bufio.NewReader(client).ReadString('\n')
+		if err != nil {
+			t.Fatalf("reading socket reply: %v", err)
+		}
+		var reply convergenceReply
+		if err := json.Unmarshal([]byte(line), &reply); err != nil {
+			t.Fatalf("decoding reply %q: %v", line, err)
+		}
+		if !strings.Contains(reply.Error, "controller started the request") ||
+			!strings.Contains(reply.Error, `gc converge list`) {
+			t.Errorf("claimed-at-timeout reply = %q, want the outcome-unknown message", reply.Error)
+		}
+		if strings.Contains(reply.Error, "withdrawn") {
+			t.Errorf("claimed-at-timeout reply = %q, must not claim withdrawal", reply.Error)
+		}
+
+		// Release the dispatch: it completes, and its reply must be sitting
+		// in the buffered reply channel (nonblocking delivery).
+		release()
+		<-dispatchDone
+		select {
+		case late := <-claimed.replyCh:
+			if late.Error != "" {
+				t.Errorf("late reply error: %s", late.Error)
+			}
+		default:
+			t.Error("the completed dispatch's reply was not delivered to the buffered reply channel")
+		}
+
+		// The claimed create ran to completion: exactly one loop.
+		assertConvergenceBeadCount(t, store, 1)
+	})
 }

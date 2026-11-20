@@ -81,6 +81,10 @@ const (
 	// convergeWithdrawnError is the dispatcher's rejection for a request the
 	// socket handler withdrew; the wrapper logs it like any reply error.
 	convergeWithdrawnError = "request withdrawn before execution: client wait timed out"
+	// convergeOutcomeUnknownReply is returned when a dispatcher claimed the
+	// request before the wait expired: it is running or finished, but its
+	// reply had not arrived, so retrying may duplicate the work.
+	convergeOutcomeUnknownReply = `controller started the request but its result is not available; it may still be applied, so check "gc converge list" in the same rig scope before retrying`
 )
 
 // convergenceReply is the response from the event loop to a socket command.

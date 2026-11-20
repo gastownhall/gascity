@@ -548,15 +548,30 @@ func handleConvergeSocketCmd(conn net.Conn, payload string, ch chan convergenceR
 	case reply := <-req.replyCh:
 		writeJSONLine(conn, reply)
 	case <-time.After(60 * time.Second):
-		// The reply wait expired. Withdraw the request so a dispatcher that
-		// has not picked it up yet never executes it after the caller was
-		// told it failed (#8387).
+		// The reply wait expired. First take a reply that already landed in
+		// the buffered channel.
+		select {
+		case reply := <-req.replyCh:
+			writeJSONLine(conn, reply)
+			return
+		default:
+		}
+		// Withdraw the request so a dispatcher that has not picked it up
+		// yet never executes it after the caller was told it failed
+		// (#8387).
 		if req.handoff.withdraw() {
 			writeJSONLine(conn, convergenceReply{Error: convergeWithdrawnReply})
 			return
 		}
-		// A dispatcher already claimed the request and may still deliver.
-		writeJSONLine(conn, convergenceReply{Error: "controller did not respond in time"})
+		// A dispatcher already claimed the request: it is running or done,
+		// and its reply may have arrived since the check above. Neither
+		// check may block — a late delivery lands in the buffer.
+		select {
+		case reply := <-req.replyCh:
+			writeJSONLine(conn, reply)
+		default:
+			writeJSONLine(conn, convergenceReply{Error: convergeOutcomeUnknownReply})
+		}
 	}
 }
 
