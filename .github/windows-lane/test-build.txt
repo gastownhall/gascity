@@ -50,10 +50,8 @@
 ./internal/resilience
 ./internal/reviewquorum
 ./internal/rollout/gate
-./internal/runtime/exec
 ./internal/runtime/herdr/herdrtest
 ./internal/runtime/proctable
-./internal/runtime/runtimecontract
 ./internal/sdnotify
 ./internal/searchpath
 ./internal/shellquote
