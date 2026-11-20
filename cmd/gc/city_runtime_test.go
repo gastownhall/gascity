@@ -9678,3 +9678,49 @@ func TestCityRuntimeShutdownSweepsWhenAttestationTurnsOnDuringTheListing(t *test
 		t.Fatalf("probe-1 survived the shutdown: the blind listing was read as attested; stderr = %q", stderr.String())
 	}
 }
+
+// TestCityRuntimeReloadWarnsOfUnreconciledSkillSink: an applied reload that
+// leaves a skill sink unreconciled (here a member's unreadable agent skills
+// directory) stays applied and reports the sink in the reply's warnings.
+func TestCityRuntimeReloadWarnsOfUnreconciledSkillSink(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	clearInheritedBeadsEnv(t)
+	requireNoLeakedDoltAfterForPaths(t, cityPath)
+	writeSkillSource(t, filepath.Join(cityPath, "skills", "plan"))
+	mayorSkills := filepath.Join(cityPath, "agents", "mayor", "skills")
+	writeSkillSource(t, filepath.Join(mayorSkills, "notes"))
+	writeSkillMaterializationTestConfig(t, tomlPath)
+
+	var stdout, stderr bytes.Buffer
+	cr := newSkillReloadTestCityRuntime(t, cityPath, tomlPath, &stdout, &stderr)
+	if err := runStage1SkillMaterialization(cityPath, cr.cfg, &stderr); err != nil {
+		t.Fatalf("seeding stage-1 pass: %v (stderr: %s)", err, stderr.String())
+	}
+
+	if err := os.Chmod(mayorSkills, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(mayorSkills, 0o755) })
+	if _, err := os.ReadDir(mayorSkills); err == nil {
+		t.Skip("environment ignores chmod 000 (likely running as root)")
+	}
+
+	writeSkillMaterializationTestConfig(t, tomlPath, "[orders]\nskip = [\"reaper\"]\n")
+	lastProviderName := "tmux"
+	reply := cr.reloadConfigTraced(context.Background(), &lastProviderName, cityPath, nil, reloadSourceWatch)
+	if reply.Outcome != reloadOutcomeApplied {
+		t.Fatalf("reload outcome = %q, want %q; stderr=%q", reply.Outcome, reloadOutcomeApplied, stderr.String())
+	}
+	sink := filepath.Join(cityPath, ".claude", "skills")
+	var warned bool
+	for _, w := range reply.Warnings {
+		if strings.Contains(w, "skill materialization incomplete") && strings.Contains(w, sink) {
+			warned = true
+			break
+		}
+	}
+	if !warned {
+		t.Fatalf("reply warnings %q do not report the unreconciled sink %s; stderr=%q", reply.Warnings, sink, stderr.String())
+	}
+}

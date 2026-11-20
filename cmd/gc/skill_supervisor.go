@@ -148,6 +148,16 @@ func formatSinkAgents(agents []string) string {
 	return "agents " + strings.Join(quoted, ", ")
 }
 
+// unwrapJoinedErrors returns the errors joined into err by errors.Join, or
+// err alone when it is not a join, so each unreconciled sink is reported
+// on its own.
+func unwrapJoinedErrors(err error) []error {
+	if joined, ok := err.(interface{ Unwrap() []error }); ok { //nolint:errorlint // splits one errors.Join level; errors.As would find a nested join instead
+		return joined.Unwrap()
+	}
+	return []error{err}
+}
+
 // stage1SkillRequests builds the stage-1 skill pass of every eligible
 // agent's sink, one request per physical sink, ordered by each sink's
 // first member in config order. Each scope's shared catalog loads once.
