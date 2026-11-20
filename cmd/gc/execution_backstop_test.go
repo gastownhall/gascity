@@ -1346,7 +1346,9 @@ func TestExecutionBackstopNudgesAStartedSeatWhoseTurnDied(t *testing.T) {
 		want  string
 	}{
 		{name: "no nudge configured", want: defaultHeldClaimNudge},
-		{name: "a configured nudge", nudge: "gc hook --claim --json", want: "gc hook --claim --json"},
+		// Recovery text is the SDK's (#9196): whatever the pack configures,
+		// a started seat hears the built-in started-rung text.
+		{name: "a configured nudge", nudge: "gc hook --claim --json", want: defaultHeldClaimNudge},
 		// A configured nudge that would ack the drain is replaced by the
 		// default: the started rung never carries --drain-ack.
 		{name: "a configured --drain-ack nudge", nudge: "gc hook --claim --drain-ack --json", want: defaultHeldClaimNudge},

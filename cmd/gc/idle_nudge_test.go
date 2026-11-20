@@ -1345,4 +1345,35 @@ func TestClaimRecoveryTextIgnoresTheConfiguredNudge(t *testing.T) {
 			t.Fatalf("warm-bind text for a prompt-suppressed template = %q, want empty", got)
 		}
 	})
+	// The execution backstop's started seat hears the built-in started-rung
+	// text naming its claim, whatever the pack configures, and never a
+	// --drain-ack (mc-ilr3b).
+	startedSession := func() beads.Bead {
+		s := idleClaimPoolSession()
+		s.Metadata["instance_token"] = "tok-1"
+		s.Metadata[executionClaimNudgeWorkKey] = "bd-99"
+		s.Metadata[executionClaimStartedKey] = "tok-1|bd-99"
+		return s
+	}
+	for _, nv := range claimRecoveryNudges {
+		t.Run("execution started, "+nv.name, func(t *testing.T) {
+			cfg := idleClaimTestCfg()
+			cfg.Agents[0].Nudge = nv.nudge
+			got := (poolExecutionBackstop{cfg: cfg}).content(startedSession())
+			if want := fmt.Sprintf(defaultHeldClaimNudge, "bd-99"); got != want {
+				t.Fatalf("started-seat text = %q, want the built-in %q", got, want)
+			}
+			if strings.Contains(got, "--drain-ack") {
+				t.Fatalf("started-seat text %q carries --drain-ack", got)
+			}
+		})
+	}
+	t.Run("execution started, unknown template", func(t *testing.T) {
+		cfg := idleClaimTestCfg()
+		s := startedSession()
+		s.Metadata["template"] = "unknown-agent"
+		if got := (poolExecutionBackstop{cfg: cfg}).content(s); got != "" {
+			t.Fatalf("started-seat text for an unknown template = %q, want empty (fail closed)", got)
+		}
+	})
 }
