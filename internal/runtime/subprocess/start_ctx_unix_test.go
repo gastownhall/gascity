@@ -409,13 +409,21 @@ func TestConcurrentStartsOfOneNameHaveOneWinner(t *testing.T) {
 	p := newTestProvider(t)
 	rec := newRecordingStart(p)
 	rec.killAllAtCleanup(t)
+	const n = 8
+	// The winner is held inside process creation until every other Start has
+	// returned, so the starts are guaranteed to overlap. A broken reservation
+	// lets a second Start reach process creation, where it waits out the bound.
+	losersDone := make(chan struct{})
+	var losersReturned atomic.Int32
 	realStart := p.ops.start
 	p.ops.start = func(cmd *exec.Cmd) (int, error) {
-		time.Sleep(20 * time.Millisecond) // widen the window in which starts overlap
+		select {
+		case <-losersDone:
+		case <-time.After(5 * time.Second):
+		}
 		return realStart(cmd)
 	}
 
-	const n = 8
 	errs := make([]error, n)
 	var wg sync.WaitGroup
 	gate := make(chan struct{})
@@ -425,6 +433,9 @@ func TestConcurrentStartsOfOneNameHaveOneWinner(t *testing.T) {
 			defer wg.Done()
 			<-gate
 			errs[i] = p.Start(context.Background(), "contended", runtime.Config{Command: "sleep 300", Env: identityEnv})
+			if errs[i] != nil && losersReturned.Add(1) == n-1 {
+				close(losersDone)
+			}
 		}(i)
 	}
 	close(gate)
