@@ -725,3 +725,54 @@ func TestHoldLabelRoutedToCheckBackfillsUnboundHoldVerbatim(t *testing.T) {
 		t.Errorf("post-fix v2-routed-to-namespace status = %v, want OK: %#v", res.Status, res)
 	}
 }
+
+// TestHoldLabelRoutedToFixContinuesPastWriteFailure covers ga-g6dy4y AC-5: a
+// failed backfill in one store must not hide the remaining repairs or the
+// skipped-scope report. Fix attempts every target, repairs the accessible
+// rig, and returns one error wrapping every write failure alongside the
+// scope that could not be opened.
+func TestHoldLabelRoutedToFixContinuesPastWriteFailure(t *testing.T) {
+	cityDir, okRigDir, failRigDir, closedRigDir := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "planner", BindingName: "ops"}},
+		Rigs: []config.Rig{
+			{Name: "ok", Path: okRigDir},
+			{Name: "readonly", Path: failRigDir},
+			{Name: "closed", Path: closedRigDir},
+		},
+	}
+	held := func(id string) []beads.Bead {
+		return []beads.Bead{{ID: id, Title: "held", Type: "task", Status: "open", Labels: []string{"hold:planner"}}}
+	}
+	errCityWrite := errors.New("city write denied")
+	errRigWrite := errors.New("rig write denied")
+	cityStore := routeSetMetadataErrorStore{Store: beads.NewMemStoreFrom(0, held("C-1"), nil), err: errCityWrite}
+	okRigStore := beads.NewMemStoreFrom(0, held("R-1"), nil)
+	failRigStore := routeSetMetadataErrorStore{Store: beads.NewMemStoreFrom(0, held("F-1"), nil), err: errRigWrite}
+	stores := map[string]beads.Store{cityDir: cityStore, okRigDir: okRigStore, failRigDir: failRigStore}
+	check := newHoldLabelRoutedToCheck(cfg, cityDir, func(path string) (beads.Store, error) {
+		if path == closedRigDir {
+			return nil, errors.New("permission denied")
+		}
+		return holdLabelStores(stores)(path)
+	})
+
+	err := check.Fix(&doctor.CheckContext{})
+	if err == nil {
+		t.Fatal("Fix error = nil, want joined write and skipped-scope failures")
+	}
+	for _, sentinel := range []error{errCityWrite, errRigWrite} {
+		if !errors.Is(err, sentinel) {
+			t.Errorf("Fix error %q does not wrap %q", err, sentinel)
+		}
+	}
+	msg := err.Error()
+	for _, want := range []string{"city bead C-1", "rig readonly bead F-1", "rig closed skipped", "permission denied"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("Fix error = %q, want it to mention %q", msg, want)
+		}
+	}
+	if got := holdLabelRoute(t, okRigStore, "R-1"); got != "ops.planner" {
+		t.Errorf("R-1 gc.routed_to = %q after Fix, want ops.planner repaired despite earlier write failure", got)
+	}
+}

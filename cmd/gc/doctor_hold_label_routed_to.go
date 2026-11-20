@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -172,20 +173,23 @@ func (c *holdLabelRoutedToCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult
 
 // Fix writes the repair route of every target that has one. Targets whose
 // hold value names several bound routes are left untouched; doctor's
-// verifying re-run keeps reporting them.
+// verifying re-run keeps reporting them. A failed write does not stop the
+// remaining repairs: every write failure and any skipped scope are joined
+// into the returned error.
 func (c *holdLabelRoutedToCheck) Fix(_ *doctor.CheckContext) error {
 	targets, skipped := c.collect()
+	var errs []error
 	for _, tgt := range targets {
 		route, ok := tgt.route()
 		if !ok {
 			continue
 		}
 		if err := tgt.store.SetMetadata(tgt.beadID, beadmeta.RoutedToMetadataKey, route); err != nil {
-			return fmt.Errorf("%s bead %s: backfill gc.routed_to: %w", tgt.label, tgt.beadID, err)
+			errs = append(errs, fmt.Errorf("%s bead %s: backfill gc.routed_to: %w", tgt.label, tgt.beadID, err))
 		}
 	}
 	if len(skipped) > 0 {
-		return fmt.Errorf("hold-label-routed-to skipped %d scope(s): %s", len(skipped), strings.Join(skipped, "; "))
+		errs = append(errs, fmt.Errorf("hold-label-routed-to skipped %d scope(s): %s", len(skipped), strings.Join(skipped, "; ")))
 	}
-	return nil
+	return errors.Join(errs...)
 }
