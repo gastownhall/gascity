@@ -189,3 +189,48 @@ func TestSupervisorServiceEnvKeepsShellRoutingWithoutDurableOnlyCredentials(t *t
 		}
 	})
 }
+
+// supervisorServiceEnvByName indexes vars by name, keeping each entry's source.
+func supervisorServiceEnvByName(vars []supervisorServiceEnvVar) map[string]supervisorServiceEnvVar {
+	m := make(map[string]supervisorServiceEnvVar, len(vars))
+	for _, v := range vars {
+		m[v.Name] = v
+	}
+	return m
+}
+
+// TestSupervisorServiceEnvPersistsExplicitShellRouting pins AC-3: a routing
+// name listed in GC_SUPERVISOR_ENV persists with the shell value and source
+// GC_SUPERVISOR_ENV, while the prefix's other shell routing names are still
+// withheld.
+func TestSupervisorServiceEnvPersistsExplicitShellRouting(t *testing.T) {
+	isolateSupervisorRoutingEnv(t)
+	setIncidentEnv(t)
+	t.Setenv("GC_SUPERVISOR_ENV", "ANTHROPIC_BASE_URL")
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	got := supervisorServiceEnvByName(data.ExtraEnv)
+	want := supervisorServiceEnvVar{Name: "ANTHROPIC_BASE_URL", Value: "shell-anthropic_base_url", Source: supervisorEnvSourceExplicit}
+	if got["ANTHROPIC_BASE_URL"] != want {
+		t.Errorf("ExtraEnv[ANTHROPIC_BASE_URL] = %+v, want %+v", got["ANTHROPIC_BASE_URL"], want)
+	}
+	if src := got["ANTHROPIC_AUTH_TOKEN"].Source; src != supervisorEnvSourceSecretsFile {
+		t.Errorf("ExtraEnv[ANTHROPIC_AUTH_TOKEN].Source = %v, want %v", src, supervisorEnvSourceSecretsFile)
+	}
+	wantWithheld := []supervisorWithheldEnv{{
+		Prefix:            "ANTHROPIC_",
+		Names:             []string{"ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL"},
+		CredentialSources: []supervisorEnvSource{supervisorEnvSourceSecretsFile},
+	}}
+	if !reflect.DeepEqual(data.WithheldEnv, wantWithheld) {
+		t.Fatalf("WithheldEnv = %+v, want %+v", data.WithheldEnv, wantWithheld)
+	}
+	for _, name := range wantWithheld[0].Names {
+		if v, ok := got[name]; ok {
+			t.Errorf("ExtraEnv persisted withheld %s=%q", name, v.Value)
+		}
+	}
+}

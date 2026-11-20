@@ -1718,6 +1718,9 @@ type supervisorServiceData struct {
 type supervisorServiceEnvVar struct {
 	Name  string
 	Value string
+	// Source is the tier that supplied Value. The service templates render
+	// only Name and Value, so a change of source alone leaves the unit as is.
+	Source supervisorEnvSource
 }
 
 func buildSupervisorServiceData() (*supervisorServiceData, error) {
@@ -1955,7 +1958,7 @@ func supervisorServiceExtraEnv() ([]supervisorServiceEnvVar, []supervisorWithhel
 	sort.Strings(keys)
 	out := make([]supervisorServiceEnvVar, 0, len(keys))
 	for _, key := range keys {
-		out = append(out, supervisorServiceEnvVar{Name: key, Value: env[key].Value})
+		out = append(out, supervisorServiceEnvVar{Name: key, Value: env[key].Value, Source: env[key].Source})
 	}
 	return out, withheld
 }
