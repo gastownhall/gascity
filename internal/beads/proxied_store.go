@@ -395,6 +395,22 @@ func (s *ProxiedStore) Report() ProxiedOpenReport {
 	return report
 }
 
+// readsBySubprocess reports whether Get forks a process, so a CachingStore
+// over the split bounds its event checks only while it must: never while the
+// native leaf serves reads, and whatever the bd leaf says once it does. A
+// split that hid its bd leaf here would have a demoted controller store fork
+// one bd per event on the event watcher's goroutine.
+func (s *ProxiedStore) readsBySubprocess() bool {
+	s.mu.RLock()
+	native, bd := s.native, s.bd
+	s.mu.RUnlock()
+	if native != nil {
+		return false
+	}
+	r, ok := bd.(subprocessReader)
+	return ok && r.readsBySubprocess()
+}
+
 // readLeaf returns the store reads go to: the native leaf while it is serving,
 // the bd leaf after a stand-down.
 func (s *ProxiedStore) readLeaf() Store {
