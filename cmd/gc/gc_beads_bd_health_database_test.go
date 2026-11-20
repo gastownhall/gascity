@@ -410,3 +410,40 @@ func assertRecoverSkippedForCityDatabase(t *testing.T, out, cause string) {
 		t.Fatalf("op_recover output = %s, want no recover-managed, stop or start", out)
 	}
 }
+
+func TestGcBeadsBdRecoverRestartsWhenCityDatabaseIsNotTheCause(t *testing.T) {
+	readyReport := "query_ready\ttrue\\nread_only\ttrue\\nconnection_count\t5\\ndatabase\thq\\ndatabase_ready\ttrue\\n"
+	cases := []struct {
+		name     string
+		metadata string
+		report   string
+		stubs    string
+		wantArgv string
+		denyArgv string
+	}{
+		{name: "city database ready", metadata: cityMetadataHQ, report: readyReport, wantArgv: "--database hq"},
+		{name: "no city database named", metadata: "", report: "query_ready\ttrue\\nread_only\ttrue\\nconnection_count\t5\\n", denyArgv: "--database"},
+		{name: "server not answering TCP", metadata: cityMetadataHQ, report: readyReport, stubs: "tcp_check() { return 1; }\n"},
+		{name: "server not answering SQL", metadata: cityMetadataHQ, report: "query_ready\tfalse\\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			gcBin, argvFile := writeFakeHealthCheckGC(t, tc.report)
+
+			out := gcBeadsBdOpHarness(t, "op_recover", gcBeadsBdRecoverObservedStubs+tc.stubs, tc.metadata, cityConfigManagedHQ, gcBin, t.TempDir())
+			if !strings.Contains(out, "CALLED recover-managed") || strings.Contains(out, "recovery skipped") {
+				t.Fatalf("op_recover output = %s, want recovery to reach recover-managed", out)
+			}
+			argv, err := os.ReadFile(argvFile)
+			if err != nil && !os.IsNotExist(err) {
+				t.Fatalf("ReadFile(argv): %v", err)
+			}
+			if tc.wantArgv != "" && !strings.Contains(string(argv), tc.wantArgv) {
+				t.Fatalf("health-check argv = %q, want %q", argv, tc.wantArgv)
+			}
+			if tc.denyArgv != "" && strings.Contains(string(argv), tc.denyArgv) {
+				t.Fatalf("health-check argv = %q, want no %q", argv, tc.denyArgv)
+			}
+		})
+	}
+}
