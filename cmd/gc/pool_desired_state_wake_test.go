@@ -282,86 +282,159 @@ func TestComputePoolDesiredStates_FreshWakeSkipsAsleepResume(t *testing.T) {
 	}
 }
 
-// TestComputePoolDesiredStates_FreshWakeSkipsBlockedAssignedStep verifies the
-// companion gap to #4849 above (gastownhall/gascity#8172): a wake_mode="fresh"
-// agent's asleep owner session must not spawn a new session for an assigned
-// step that is open only because the orphan-release pass
-// (appendOpenRoutedWorkUnique) surfaced it, never because it passed a
-// readiness gate (collectAssignedWorkBeadsWithStores' ReadyAssigned).
-//
-// Before the fix, computePoolDesiredStatesAt's fresh+asleep branch planned a
-// wake-known-identity request from Status alone, with no regard for whether
-// the bead's own dependency had actually cleared. A continuation step
-// preassigned to a builder's session, waiting on a review step on another
-// pool, would spawn a fresh session every reconcile tick while its owner
-// slept — and that session, unable to claim a step blocked and assigned to
-// another session, drained itself about a minute later, only to be respawned
-// on the next tick.
-//
-// The table pins both sides: readyAssigned=false must produce no request at
-// all (not even a doomed resume of the stale asleep session — the owner's own
-// eventual fresh wake handles it once the blocker clears); readyAssigned=true
-// for the identical open+asleep+fresh shape must still produce the legitimate
-// wake-known-identity request from the existing #4849 guard, proving the new
-// gate is additive, not a blanket suppression of that tier.
-func TestComputePoolDesiredStates_FreshWakeSkipsBlockedAssignedStep(t *testing.T) {
-	const sessionID = "sess-owner"
+// freshWakeRequests runs the parked planner for one fresh-wake pool agent with
+// one pool session and returns the pool's requests.
+func freshWakeRequests(t *testing.T, sessionState string, minSessions int, work []beads.Bead, ready []bool) []SessionRequest {
+	t.Helper()
+	return poolWakeRequests(t, "fresh", sessionState, minSessions, work, ready)
+}
+
+// poolWakeRequests runs the parked planner for one pool agent with the given
+// wake mode and one pool session in sessionState, and returns the pool's
+// requests.
+func poolWakeRequests(t *testing.T, wakeMode, sessionState string, minSessions int, work []beads.Bead, ready []bool) []SessionRequest {
+	t.Helper()
+	agent := poolAgent("claude", "", intPtr(5), minSessions)
+	agent.WakeMode = wakeMode
+	cfg := &config.City{Agents: []config.Agent{agent}}
+	sessions := []beads.Bead{poolSessionBeadWithState("sess-1", sessionState, "")}
+	states := computePoolDesiredStatesParkedAt(cfg, work, ready, sessionInfosFromBeads(sessions), nil, nil, time.Time{}, nil, nil)
+	var reqs []SessionRequest
+	for _, ds := range states {
+		reqs = append(reqs, ds.Requests...)
+	}
+	return reqs
+}
+
+// TestComputePoolDesiredStates_FreshWakeSkipsUnreadyOpenStep pins the
+// readiness gate on the fresh+asleep branch (gastownhall/gascity#8172): an open
+// step assigned to a wake_mode="fresh" agent's asleep session, with no
+// store-scoped readiness proof, must neither plan a clean session for that step
+// nor resume the stale asleep session. Before the gate, every tick planned a
+// fresh session that could not claim the blocked step, drained, and respawned.
+func TestComputePoolDesiredStates_FreshWakeSkipsUnreadyOpenStep(t *testing.T) {
 	cases := []struct {
 		name         string
-		readyAssign  bool
-		wantRequests int
-		wantTier     string
+		sessionState string
+		minSessions  int
+		ready        []bool
+	}{
+		{name: "flag false", sessionState: "asleep", ready: []bool{false}},
+		{name: "empty non-nil flags deny unproven open work", sessionState: "asleep", ready: []bool{}},
+		{name: "drained normalizes to asleep", sessionState: "drained", ready: []bool{false}},
+		{name: "min fill is not bound to the blocked step", sessionState: "asleep", minSessions: 1, ready: []bool{false}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			work := []beads.Bead{workBead("w1", "claude", "sess-1", "open", 2)}
+			reqs := freshWakeRequests(t, tc.sessionState, tc.minSessions, work, tc.ready)
+			for _, req := range reqs {
+				if req.WorkBeadID == "w1" {
+					t.Errorf("request %+v binds the unready open step w1, want none", req)
+				}
+				if req.SessionBeadID == "sess-1" {
+					t.Errorf("request %+v resumes the stale asleep session, want none", req)
+				}
+			}
+			if tc.minSessions == 0 && len(reqs) != 0 {
+				t.Errorf("requests = %+v, want none at min_active_sessions=0", reqs)
+			}
+			if tc.minSessions > 0 && len(reqs) == 0 {
+				t.Errorf("min-fill demand disappeared with the blocked step, want an unbound floor request")
+			}
+		})
+	}
+}
+
+// TestComputePoolDesiredStates_FreshWakeGatesOnReadiness pins the actionable
+// side of the fresh-wake readiness gate: proven-ready open work and claimed
+// in-progress work still get exactly one clean wake-known-identity request
+// (#4849's recovery), an unready open bead listed first does not consume the
+// template's single wake slot, and nil readiness keeps the actionable-input
+// wrappers' behavior.
+func TestComputePoolDesiredStates_FreshWakeGatesOnReadiness(t *testing.T) {
+	cases := []struct {
+		name     string
+		work     []beads.Bead
+		ready    []bool
+		wantWork string
 	}{
 		{
-			name:         "blocked step not ready-assigned produces no request",
-			readyAssign:  false,
-			wantRequests: 0,
+			name:     "ready open step",
+			work:     []beads.Bead{workBead("w1", "claude", "sess-1", "open", 2)},
+			ready:    []bool{true},
+			wantWork: "w1",
 		},
 		{
-			name:         "ready-assigned open step still produces wake-known-identity",
-			readyAssign:  true,
-			wantRequests: 1,
-			wantTier:     "wake-known-identity",
+			name:     "in-progress step without a readiness flag stays actionable",
+			work:     []beads.Bead{workBead("w1", "claude", "sess-1", "in_progress", 2)},
+			ready:    []bool{false},
+			wantWork: "w1",
+		},
+		{
+			name: "blocked first does not consume the wake slot of a ready second",
+			work: []beads.Bead{
+				workBead("w-blocked", "claude", "sess-1", "open", 2),
+				workBead("w-ready", "claude", "sess-1", "open", 2),
+			},
+			ready:    []bool{false, true},
+			wantWork: "w-ready",
+		},
+		{
+			name: "ready first step wakes even when a later step is unproven",
+			work: []beads.Bead{
+				workBead("w-ready", "claude", "sess-1", "open", 2),
+				workBead("w-blocked", "claude", "sess-1", "open", 2),
+			},
+			ready:    []bool{true, false},
+			wantWork: "w-ready",
+		},
+		{
+			name:     "nil readiness keeps actionable-input behavior",
+			work:     []beads.Bead{workBead("w1", "claude", "sess-1", "open", 2)},
+			ready:    nil,
+			wantWork: "w1",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			// minSess=0: the default min_active_sessions floor, so no
-			// unrelated min-fill request can mask what this test is
-			// actually checking.
-			agent := poolAgent("claude", "", intPtr(5), 0)
-			agent.WakeMode = "fresh"
-			cfg := &config.City{Agents: []config.Agent{agent}}
-			sessions := []beads.Bead{poolSessionBeadWithState(sessionID, "asleep", "")}
-			// Status "open", not "in_progress": a blocked continuation step
-			// surfaced only by the orphan-release pass looks exactly like
-			// this on the collapsed-status cache tier.
-			work := []beads.Bead{workBead("w1", "claude", sessionID, "open", 2)}
-			storeRefs := []string{""}
-			readyAssigned := map[storeScopedBeadKey]bool{}
-			if tc.readyAssign {
-				readyAssigned[storeScopedBeadKey{StoreRef: "", ID: "w1"}] = true
+			reqs := freshWakeRequests(t, "asleep", 0, tc.work, tc.ready)
+			if len(reqs) != 1 {
+				t.Fatalf("requests = %+v, want exactly one", reqs)
 			}
+			req := reqs[0]
+			if req.Tier != "wake-known-identity" || req.SessionBeadID != "" || req.WorkBeadID != tc.wantWork {
+				t.Errorf("request = {Tier:%q SessionBeadID:%q WorkBeadID:%q}, want {wake-known-identity \"\" %q}",
+					req.Tier, req.SessionBeadID, req.WorkBeadID, tc.wantWork)
+			}
+		})
+	}
+}
 
-			result := computePoolDesiredStatesAt(cfg, work, storeRefs, readyAssigned, sessionInfosFromBeads(sessions), nil, nil, time.Time{}, nil)
-
-			total := 0
-			var reqs []SessionRequest
-			for _, ds := range result {
-				total += len(ds.Requests)
-				reqs = append(reqs, ds.Requests...)
+// TestComputePoolDesiredStates_FreshWakeGateLeavesResumesUnchanged pins the
+// gate's scope: it applies only to a fresh-wake agent's asleep assignee. A
+// resume-mode agent with an asleep session, and a fresh-wake agent whose
+// session is still live, keep resuming that session for unproven open work.
+func TestComputePoolDesiredStates_FreshWakeGateLeavesResumesUnchanged(t *testing.T) {
+	cases := []struct {
+		name         string
+		wakeMode     string
+		sessionState string
+	}{
+		{name: "resume-mode agent still resumes for not-ready open work", wakeMode: "", sessionState: "asleep"},
+		{name: "fresh wake still resumes a live session for not-ready open work", wakeMode: "fresh", sessionState: "active"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			work := []beads.Bead{workBead("w1", "claude", "sess-1", "open", 2)}
+			reqs := poolWakeRequests(t, tc.wakeMode, tc.sessionState, 0, work, []bool{false})
+			if len(reqs) != 1 {
+				t.Fatalf("requests = %+v, want exactly one", reqs)
 			}
-			if total != tc.wantRequests {
-				t.Fatalf("requests = %d, want %d: %#v", total, tc.wantRequests, result)
-			}
-			if tc.wantRequests == 0 {
-				return
-			}
-			if reqs[0].Tier != tc.wantTier {
-				t.Errorf("tier = %q, want %q", reqs[0].Tier, tc.wantTier)
-			}
-			if reqs[0].WorkBeadID != "w1" {
-				t.Errorf("WorkBeadID = %q, want w1", reqs[0].WorkBeadID)
+			req := reqs[0]
+			if req.Tier != "resume" || req.SessionBeadID != "sess-1" || req.WorkBeadID != "w1" {
+				t.Errorf("request = {Tier:%q SessionBeadID:%q WorkBeadID:%q}, want {resume \"sess-1\" \"w1\"}",
+					req.Tier, req.SessionBeadID, req.WorkBeadID)
 			}
 		})
 	}
