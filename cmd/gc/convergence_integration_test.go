@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -1968,5 +1969,100 @@ func TestConvergeSocketNormalReply(t *testing.T) {
 				t.Errorf("live loops after drain = %d, want 0", len(live))
 			}
 		})
+	})
+}
+
+// gatedConvergenceCreateStore blocks the creation of a convergence root until
+// released, so a test can hold a claimed create mid-dispatch.
+type gatedConvergenceCreateStore struct {
+	*beads.MemStore
+	entered chan struct{} // receives once dispatch reaches the gated Create
+	release chan struct{} // closed to let the gated Create proceed
+}
+
+func (s *gatedConvergenceCreateStore) Create(b beads.Bead) (beads.Bead, error) {
+	if b.Type == "convergence" {
+		s.entered <- struct{}{}
+		<-s.release
+	}
+	return s.MemStore.Create(b)
+}
+
+// TestConvergeSocketTimeoutReportsClaimedRequest: when the event loop has
+// claimed a request but not finished it by the reply deadline, the socket
+// handler must say the outcome is unknown rather than claim withdrawal, and
+// the event loop's later reply must not block it.
+func TestConvergeSocketTimeoutReportsClaimedRequest(t *testing.T) {
+	t.Run("socket", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			cr, _ := setupConvergenceRuntime(t)
+			gated := &gatedConvergenceCreateStore{
+				MemStore: beads.NewMemStore(),
+				entered:  make(chan struct{}, 1),
+				release:  make(chan struct{}),
+			}
+			cr.convScopes[""] = cr.newConvergenceScope("", gated, cr.cityPath, []string{sharedTestFormulaDir}, false)
+			var releaseOnce sync.Once
+			releaseGate := func() { releaseOnce.Do(func() { close(gated.release) }) }
+			t.Cleanup(releaseGate)
+
+			replies := startConvergeSocketCmd(t, cr.convergenceReqCh, convergeSocketPayload(t, convergenceRequest{
+				Command: "create",
+				Params:  map[string]string{"formula": "test-formula", "target": "test-agent", "max_iterations": "3"},
+			}))
+			synctest.Wait() // the handler has enqueued and is waiting for the reply
+
+			consumed := make(chan struct{})
+			go func() {
+				defer close(consumed)
+				cr.processConvergenceRequests(context.Background())
+			}()
+			<-gated.entered // the event loop claimed the create and is inside it
+
+			reply, ok := <-replies // the bubble clock passes the reply deadline
+			if !ok {
+				t.Fatal("converge socket handler wrote no reply")
+			}
+			if !strings.Contains(reply.Error, "may still be applied") || !strings.Contains(reply.Error, "gc converge list") {
+				t.Errorf("timeout reply = %q, want the outcome-unknown error", reply.Error)
+			}
+			if strings.Contains(reply.Error, "withdrawn") {
+				t.Errorf("timeout reply = %q claims withdrawal of a claimed request", reply.Error)
+			}
+
+			releaseGate()
+			<-consumed // delivering the late reply did not block the event loop
+			if live := liveConvergenceLoops(t, gated); len(live) != 1 {
+				t.Errorf("live loops = %d, want the one claimed create", len(live))
+			}
+		})
+	})
+
+	t.Run("claimed-without-reply", func(t *testing.T) {
+		req := convergenceRequest{replyCh: make(chan convergenceReply, 1), handoff: &convergenceHandoff{}}
+		if !req.handoff.claim() {
+			t.Fatal("claim of a queued request failed")
+		}
+		reply := convergenceReplyAfterTimeout(req)
+		if !strings.Contains(reply.Error, "may still be applied") || strings.Contains(reply.Error, "withdrawn") {
+			t.Errorf("reply = %q, want the outcome-unknown error", reply.Error)
+		}
+		select {
+		case req.replyCh <- convergenceReply{Error: "late"}:
+		default:
+			t.Error("late reply delivery blocked")
+		}
+	})
+
+	t.Run("buffered-reply-wins", func(t *testing.T) {
+		req := convergenceRequest{replyCh: make(chan convergenceReply, 1), handoff: &convergenceHandoff{}}
+		if !req.handoff.claim() {
+			t.Fatal("claim of a queued request failed")
+		}
+		req.replyCh <- convergenceReply{Result: json.RawMessage(`{"BeadID":"gc-1"}`)}
+		reply := convergenceReplyAfterTimeout(req)
+		if reply.Error != "" || string(reply.Result) != `{"BeadID":"gc-1"}` {
+			t.Errorf("reply = %+v, want the buffered result", reply)
+		}
 	})
 }

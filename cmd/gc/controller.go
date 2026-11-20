@@ -554,13 +554,22 @@ func handleConvergeSocketCmd(conn net.Conn, payload string, ch chan convergenceR
 	}
 }
 
-// convergeReplyWithdrawnError tells the client its request timed out while
-// still queued and was withdrawn, so it was never applied.
-const convergeReplyWithdrawnError = "controller did not respond in time; the request was withdrawn and not applied, so it is safe to retry"
+// Socket replies for a convergence request whose reply wait expired.
+const (
+	// convergeReplyWithdrawnError: the request timed out while still queued
+	// and was withdrawn, so it was never applied.
+	convergeReplyWithdrawnError = "controller did not respond in time; the request was withdrawn and not applied, so it is safe to retry"
+	// convergeReplyClaimedError: the event loop had already started the
+	// request, so it may still be applied after this reply.
+	convergeReplyClaimedError = `controller started the request but its result is not available; it may still be applied, so check "gc converge list" in the same rig scope before retrying`
+)
 
 // convergenceReplyAfterTimeout settles a request whose reply did not arrive
 // within the wait. A reply that is already buffered wins; otherwise the
-// request is withdrawn if the event loop has not claimed it yet.
+// request is withdrawn if the event loop has not claimed it yet. A claimed
+// request keeps running: its reply is returned if it has just arrived, and
+// otherwise the outcome is reported as unknown, since the reply may still
+// arrive after this check.
 func convergenceReplyAfterTimeout(req convergenceRequest) convergenceReply {
 	select {
 	case reply := <-req.replyCh:
@@ -570,7 +579,12 @@ func convergenceReplyAfterTimeout(req convergenceRequest) convergenceReply {
 	if req.handoff.withdraw() {
 		return convergenceReply{Error: convergeReplyWithdrawnError}
 	}
-	return convergenceReply{Error: "controller did not respond in time"}
+	select {
+	case reply := <-req.replyCh:
+		return reply
+	default:
+		return convergenceReply{Error: convergeReplyClaimedError}
+	}
 }
 
 // writeJSONLine marshals v as JSON and writes it as a single line to w.
