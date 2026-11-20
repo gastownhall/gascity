@@ -2844,3 +2844,57 @@ func TestReleaseOrphanedPoolAssignmentsReleasesParkedClaim(t *testing.T) {
 		}
 	})
 }
+
+// TestControllerDemandExcludesReleasedParkedClaim: a blocked claim the orphan
+// sweep gave back keeps out of controller demand while it is blocked, and once
+// its raw status is set open it is demanded unassigned on its route.
+func TestControllerDemandExcludesReleasedParkedClaim(t *testing.T) {
+	routed := map[string]string{beadmeta.RoutedToMetadataKey: "worker"}
+	sweep := func(store beads.Store, wb beads.Bead) {
+		releaseOrphanedPoolAssignments(store, beads.SessionStore{Store: store}, testPoolReleaseConfig(), "", nil,
+			[]beads.Bead{wb}, []beads.Store{store}, nil, nil, nil, nil, nil)
+	}
+	demanded := func(t *testing.T, store beads.Store, id string) (beads.Bead, bool) {
+		t.Helper()
+		rows, err := listOpenForControllerDemandLive(store)
+		if err != nil {
+			t.Fatalf("listOpenForControllerDemandLive: %v", err)
+		}
+		for _, b := range rows {
+			if b.ID == id {
+				return b, true
+			}
+		}
+		return beads.Bead{}, false
+	}
+	stores := map[string]func(t *testing.T) (beads.Store, *beads.MemStore, beads.Bead){
+		"guarded update": func(t *testing.T) (beads.Store, *beads.MemStore, beads.Bead) {
+			bd := newParkedBdStore()
+			return bd, bd.mem, foldBdStatus(seedParkedClaim(t, bd.mem, "worker-dead", "blocked", routed))
+		},
+		"revision CAS": func(t *testing.T) (beads.Store, *beads.MemStore, beads.Bead) {
+			store := openRevisionReleaseStore(t, gate.Require)
+			return store, store.MemStore, seedParkedClaim(t, store.MemStore, "worker-dead", "blocked", routed)
+		},
+	}
+	for name, open := range stores {
+		t.Run(name, func(t *testing.T) {
+			store, mem, claim := open(t)
+			sweep(store, claim)
+			if b, ok := demanded(t, store, claim.ID); ok {
+				t.Fatalf("released blocked claim %s counted as demand: %+v", claim.ID, b)
+			}
+
+			if err := mem.Update(claim.ID, beads.UpdateOpts{Status: stringPtr("open")}); err != nil {
+				t.Fatal(err)
+			}
+			b, ok := demanded(t, store, claim.ID)
+			if !ok {
+				t.Fatalf("unblocked claim %s not counted as demand", claim.ID)
+			}
+			if b.Assignee != "" || b.Metadata[beadmeta.RoutedToMetadataKey] != "worker" {
+				t.Errorf("demanded %s assignee %q route %q, want unassigned on worker", b.ID, b.Assignee, b.Metadata[beadmeta.RoutedToMetadataKey])
+			}
+		})
+	}
+}
