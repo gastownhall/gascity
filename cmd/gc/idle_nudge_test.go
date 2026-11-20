@@ -140,6 +140,70 @@ func TestPoolClaimBackstopContent_PreservesExplicitNudge(t *testing.T) {
 	}
 }
 
+// TestClaimRecoveryTextIgnoresTheConfiguredNudge crosses the configured nudge
+// values a pack can ship with every claim-recovery site: each sends its own
+// built-in text (issue #9196). The configured nudge's presence still gates
+// the legacy continuation and unstarted-execution lanes.
+func TestClaimRecoveryTextIgnoresTheConfiguredNudge(t *testing.T) {
+	const bead = "work-b"
+	sites := []struct {
+		name string
+		// configuredOnly: "" for a blank nudge (the lane is gated on it).
+		configuredOnly bool
+		want           string
+		text           func(cfg *config.City, s beads.Bead) string
+	}{
+		{name: "trigger backstop", want: defaultPoolClaimNudge, text: func(cfg *config.City, s beads.Bead) string {
+			return (poolClaimBackstop{cfg: cfg}).content(s)
+		}},
+		{name: "warm-bind reminder", want: defaultPoolClaimNudge, text: warmBindClaimText},
+		{name: "execution backstop, started", want: fmt.Sprintf(defaultHeldClaimNudge, bead), text: func(cfg *config.City, s beads.Bead) string {
+			s.Metadata[executionClaimNudgeWorkKey] = bead
+			s.Metadata[executionClaimStartedKey] = startedValue(s, bead)
+			return (poolExecutionBackstop{cfg: cfg}).content(s)
+		}},
+		{name: "execution backstop, unstarted", configuredOnly: true, want: ladderClaimedNudge, text: func(cfg *config.City, s beads.Bead) string {
+			s.Metadata[executionClaimNudgeWorkKey] = bead
+			return (poolExecutionBackstop{cfg: cfg}).content(s)
+		}},
+		{name: "continuation backstop", configuredOnly: true, want: ladderClaimedNudge, text: func(cfg *config.City, s beads.Bead) string {
+			return (poolContinuationBackstop{cfg: cfg}).content(s)
+		}},
+	}
+	nudges := []struct {
+		name, nudge string
+		blank       bool
+	}{
+		{name: "empty", nudge: "", blank: true},
+		{name: "whitespace", nudge: " \t ", blank: true},
+		{name: "procedure", nudge: idleClaimProcedureNudge},
+		{name: "claim", nudge: "gc hook --claim --json"},
+		{name: "claim with drain-ack", nudge: "gc hook --claim --drain-ack --json"},
+		{name: "shipped polecat line", nudge: "Find work, create a branch, implement, push, hand off to refinery."},
+	}
+	for _, site := range sites {
+		for _, nc := range nudges {
+			t.Run(site.name+"/"+nc.name, func(t *testing.T) {
+				cfg := idleClaimTestCfg()
+				cfg.Agents[0].Nudge = nc.nudge
+				s := idleClaimPoolSession()
+				s.Metadata["instance_token"] = "tok-1"
+				want := site.want
+				if site.configuredOnly && nc.blank {
+					want = ""
+				}
+				got := site.text(cfg, s)
+				if got != want {
+					t.Fatalf("text = %q, want %q", got, want)
+				}
+				if strings.HasSuffix(site.name, ", started") && strings.Contains(got, "--drain-ack") {
+					t.Fatalf("started text %q carries --drain-ack", got)
+				}
+			})
+		}
+	}
+}
+
 func TestPoolClaimBackstopContent_FailsClosedForUnknownTemplate(t *testing.T) {
 	cfg := idleClaimTestCfg()
 	session := idleClaimPoolSession()
