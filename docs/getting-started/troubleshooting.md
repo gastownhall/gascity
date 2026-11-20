@@ -695,19 +695,48 @@ exported in the calling shell still takes precedence over the file, and
 `GC_SUPERVISOR_OMIT_PROVIDER_CREDS=1` suppresses provider credentials from both
 sources.
 
-Routing names are the exception. A provider's routing names say where its
-calls go and which model they ask for: names under the provider's prefix with
-a word such as `URL`, `ENDPOINT`, `HOST`, `BASE`, `PROXY` or `MODEL` and no
-word such as `KEY`, `TOKEN`, `SECRET` or `AUTH` (for example
-`ANTHROPIC_BASE_URL` or `ANTHROPIC_DEFAULT_OPUS_MODEL`). When every credential
-under a prefix comes from the secrets file or launchctl, `gc` does not persist
-the calling shell's routing names under that prefix, because they would send
-the file's credential somewhere it does not belong. It uses the secrets file's
-value for such a name when the file has one, and warns on stderr:
+Routing names are the exception. The names under a provider's prefix fall
+into three groups:
+
+- **Credentials** have a word such as `KEY`, `TOKEN`, `SECRET`, `AUTH` or
+  `HEADERS` (for example `ANTHROPIC_AUTH_TOKEN`).
+- **Routing names** say where calls go and which model they ask for: a word
+  such as `URL`, `ENDPOINT`, `HOST`, `BASE`, `PROXY` or `MODEL`, and no
+  credential word (for example `ANTHROPIC_BASE_URL` or
+  `ANTHROPIC_DEFAULT_OPUS_MODEL`).
+- **Settings** are every other name, such as `OPENAI_ORG_ID` or
+  `OLLAMA_MODELS`. They persist like any other name and play no part in the
+  check below.
+
+When every credential under a prefix comes from the secrets file or
+launchctl, `gc` does not persist the calling shell's routing names under that
+prefix, because they would send the file's credential somewhere it does not
+belong. It uses the secrets file's value for such a name when the file has
+one, and warns on stderr about the names it drops:
 
 ```text
-gc supervisor install: warning: not persisting this shell's ANTHROPIC_BASE_URL, ANTHROPIC_MODEL: ANTHROPIC_ credentials come only from secrets.env, so their routing must come from there too. Add these names to /home/you/.gc/secrets.env, or list them in GC_SUPERVISOR_ENV to persist this shell's values.
+gc supervisor install: warning: not persisting this shell's ANTHROPIC_BASE_URL, ANTHROPIC_MODEL: ANTHROPIC_ credentials come only from secrets.env, so their routing must come from there too. New agent sessions do not get these names either, and running ones keep their values until gc restart. Add them to /home/you/.gc/secrets.env, or list them in GC_SUPERVISOR_ENV to persist this shell's values.
 ```
+
+A name whose secrets file value differs from the shell's gets a note instead,
+since it already takes the file's value:
+
+```text
+gc supervisor install: note: persisting secrets.env's ANTHROPIC_DEFAULT_OPUS_MODEL, not this shell's: ANTHROPIC_ credentials come only from secrets.env.
+```
+
+An agent session takes its routing names only from its own environment: the
+supervisor's, plus the city's own settings, such as `[workspace.env]`, an
+agent's `env` or an `[upstreams.<name>]` entry. The city's tmux server keeps
+the environment it started with until `gc stop`, so it may still hold a
+shell's endpoint, but a new or relaunched agent session never takes a routing
+name from it. Sessions already running keep the environment they started
+with: after you change where routing comes from, restart them with
+`gc restart`.
+
+The check groups names by prefix only. A credential with no provider prefix,
+such as `CLAUDE_CODE_OAUTH_TOKEN`, or under another prefix, such as
+`GEMINI_API_KEY` beside `GOOGLE_GEMINI_BASE_URL`, withholds nothing.
 
 To keep a routing setting, do one of these:
 

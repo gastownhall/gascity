@@ -505,24 +505,24 @@ func TestRespawnAgentMarksControllerTokenRemovedFromSessionEnv(t *testing.T) {
 	if err := ops.respawnAgent("gc-test-token-pin", "/proj", "claude", env); err != nil {
 		t.Fatalf("respawnAgent: %v", err)
 	}
-	if len(exec.calls) != 5 {
-		t.Fatalf("tmux calls = %d (%v), want 5 (set-environment, adopt check, pane lookup, respawn-pane, the input fence's environment read)", len(exec.calls), exec.calls)
+	if len(exec.calls) != 6 {
+		t.Fatalf("tmux calls = %d (%v), want 6 (the server's global environment read, set-environment, adopt check, pane lookup, respawn-pane, the input fence's environment read)", len(exec.calls), exec.calls)
 	}
 
-	setEnv := strings.Join(exec.calls[0], " ")
+	setEnv := strings.Join(exec.calls[1], " ")
 	if !strings.Contains(setEnv, "set-environment -t =gc-test-token-pin -r GC_CONTROLLER_TOKEN") {
-		t.Errorf("first call = %q, want it to mark GC_CONTROLLER_TOKEN removed from the session env", setEnv)
+		t.Errorf("second call = %q, want it to mark GC_CONTROLLER_TOKEN removed from the session env", setEnv)
 	}
 	if strings.Contains(setEnv, "-u GC_CONTROLLER_TOKEN") {
-		t.Errorf("first call = %q uses -u; that unsets the session entry and re-exposes the server's global value", setEnv)
+		t.Errorf("second call = %q uses -u; that unsets the session entry and re-exposes the server's global value", setEnv)
 	}
-	if respawn := strings.Join(exec.calls[3], " "); !strings.Contains(respawn, "respawn-pane") {
-		t.Errorf("fourth call = %q, want respawn-pane", respawn)
+	if respawn := strings.Join(exec.calls[4], " "); !strings.Contains(respawn, "respawn-pane") {
+		t.Errorf("fifth call = %q, want respawn-pane", respawn)
 	}
 	// A non-empty key is a real value, not a withholding, and must not be
 	// marked for removal.
 	if strings.Contains(setEnv, "GC_CITY") {
-		t.Errorf("first call = %q marked GC_CITY removed; only empty-valued keys are withheld", setEnv)
+		t.Errorf("second call = %q marked GC_CITY removed; only empty-valued keys are withheld", setEnv)
 	}
 
 	t.Run("hosted beads namespace", func(t *testing.T) {
@@ -540,27 +540,29 @@ func TestRespawnAgentMarksControllerTokenRemovedFromSessionEnv(t *testing.T) {
 		if err := ops.respawnAgent("gc-test-beads-pin", "/proj", "claude", env); err != nil {
 			t.Fatalf("respawnAgent: %v", err)
 		}
-		if len(exec.calls) != 6 {
-			t.Fatalf("tmux calls = %d (%v), want two set-environment calls, the adopt check, the pane lookup, respawn-pane, then the input fence's environment read", len(exec.calls), exec.calls)
+		if len(exec.calls) != 7 {
+			t.Fatalf("tmux calls = %d (%v), want the server's global environment read, two set-environment calls, the adopt check, the pane lookup, respawn-pane, then the input fence's environment read", len(exec.calls), exec.calls)
 		}
 		for i, key := range []string{"BEADS_DB", "BEADS_FUTURE_AUTHORITY"} {
-			setEnv := strings.Join(exec.calls[i], " ")
+			setEnv := strings.Join(exec.calls[i+1], " ")
 			if !strings.Contains(setEnv, "set-environment -t =gc-test-beads-pin -r "+key) {
-				t.Errorf("call %d = %q, want %s marked removed from the session env", i, setEnv, key)
+				t.Errorf("call %d = %q, want %s marked removed from the session env", i+1, setEnv, key)
 			}
 		}
-		if respawn := strings.Join(exec.calls[4], " "); !strings.Contains(respawn, "respawn-pane") {
-			t.Errorf("fifth call = %q, want respawn-pane", respawn)
+		if respawn := strings.Join(exec.calls[5], " "); !strings.Contains(respawn, "respawn-pane") {
+			t.Errorf("sixth call = %q, want respawn-pane", respawn)
 		}
 	})
 }
 
-// No withheld CREDENTIAL means no extra tmux round-trip. The nesting-detection
-// flags every session env pins empty are deliberately included here: they are
-// not secrets, the `env -u` prefix already does what they need, and marking them
-// would put an extra tmux call on the hot path of every session in the repo for
-// no gain. Scope is a correctness property, not just a cost one — a marker
-// failure is fatal, so every key marked is a key that can fail a launch.
+// No withheld CREDENTIAL means no extra tmux round-trip beyond the read of the
+// server's global environment (withServerRoutingWithheld). The
+// nesting-detection flags every session env pins empty are deliberately
+// included here: they are not secrets, the `env -u` prefix already does what
+// they need, and marking them would put an extra tmux call on the hot path of
+// every session in the repo for no gain. Scope is a correctness property, not
+// just a cost one — a marker failure is fatal, so every key marked is a key
+// that can fail a launch.
 func TestRespawnAgentSkipsSessionEnvMarkingWhenNoCredentialWithheld(t *testing.T) {
 	exec := &fakeExecutor{out: "agent\t@1.%0"}
 	tm := NewTmux()
@@ -577,8 +579,8 @@ func TestRespawnAgentSkipsSessionEnvMarkingWhenNoCredentialWithheld(t *testing.T
 	if err := ops.respawnAgent("gc-test-no-pins", "/proj", "claude", env); err != nil {
 		t.Fatalf("respawnAgent: %v", err)
 	}
-	if len(exec.calls) != 4 {
-		t.Fatalf("tmux calls = %d (%v), want 4 (adopt check, pane lookup, respawn-pane and the input fence's environment read only; nesting flags must not be marked)", len(exec.calls), exec.calls)
+	if len(exec.calls) != 5 {
+		t.Fatalf("tmux calls = %d (%v), want 5 (the server's global environment read, adopt check, pane lookup, respawn-pane and the input fence's environment read only; nesting flags must not be marked)", len(exec.calls), exec.calls)
 	}
 }
 
@@ -610,7 +612,7 @@ func TestRespawnTargetsAgentPaneNotActivePane(t *testing.T) {
 	}{
 		{"respawnAgent, marked pane moved behind a human's", "orphan\t@3.%8\nagent\t@4.%7\norphan\t@4.%9", func(_ *Tmux, ops *tmuxStartOps) error {
 			return ops.respawnAgent("gc-test-agent-pane", "/proj", "claude", nil)
-		}, [][]string{adopt, lookup, respawn("=gc-test-agent-pane:@4.%7", "-c", "/proj", "claude"), {"show-environment", "-t", "=gc-test-agent-pane"}}},
+		}, [][]string{{"show-environment", "-g"}, adopt, lookup, respawn("=gc-test-agent-pane:@4.%7", "-c", "/proj", "claude"), {"show-environment", "-t", "=gc-test-agent-pane"}}},
 		{"unmarked session takes the first pane", "pane\t@3.%7\npane\t@3.%8", func(tm *Tmux, _ *tmuxStartOps) error {
 			return tm.RespawnPaneWithWorkDir("gc-test-agent-pane", "", "claude")
 		}, [][]string{lookup, respawn("=gc-test-agent-pane:@3.%7", "claude")}},
@@ -1368,6 +1370,55 @@ func TestDemandSpawnKeysMarkedRemovedOnCreateAndRespawn(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// A provider routing name a session env pins empty, such as each one
+// withServerRoutingWithheld adds, has to stay withheld in respawn-pane too: a
+// tmux server started under an earlier supervisor env still holds the calling
+// shell's ANTHROPIC_BASE_URL in its global env, and the relaunched agent would
+// pair it with a credential from another tier. Only empty-valued routing names
+// are marked: a routing value is a real setting, and a provider setting or
+// secret pinned empty is no routing withholding.
+func TestWithheldProviderRoutingMarkedRemovedOnCreateAndRespawn(t *testing.T) {
+	paths := []struct {
+		name string
+		run  func(*Tmux, map[string]string) error
+	}{
+		{"create", func(tm *Tmux, env map[string]string) error {
+			return tm.NewSessionWithCommandAndEnv("gc-test-routing-pin", "", "claude", env)
+		}},
+		{"respawn", func(tm *Tmux, env map[string]string) error {
+			return (&tmuxStartOps{tm: tm}).respawnAgent("gc-test-routing-pin", "/proj", "claude", env)
+		}},
+	}
+	for _, path := range paths {
+		t.Run(path.name, func(t *testing.T) {
+			exec := &fakeExecutor{out: "agent\t@1.%0"}
+			tm := NewTmux()
+			tm.exec = exec
+
+			env := map[string]string{
+				"GC_CITY":                      "/tmp/city",
+				"ANTHROPIC_AUTH_TOKEN":         "tok-file",
+				"ANTHROPIC_BASE_URL":           "",
+				"ANTHROPIC_DEFAULT_OPUS_MODEL": "",
+				"OPENAI_BASE_URL":              "https://configured.example.test/v1",
+				"OPENAI_ORG_ID":                "",
+			}
+			if err := path.run(tm, env); err != nil {
+				t.Fatalf("%s: %v", path.name, err)
+			}
+			var marked []string
+			for _, call := range exec.calls {
+				if i := slices.Index(call, "set-environment"); i >= 0 && slices.Contains(call[i:], "-r") {
+					marked = append(marked, call[len(call)-1])
+				}
+			}
+			if want := []string{"ANTHROPIC_BASE_URL", "ANTHROPIC_DEFAULT_OPUS_MODEL"}; !slices.Equal(marked, want) {
+				t.Errorf("keys marked removed from the session env = %v, want %v", marked, want)
+			}
+		})
 	}
 }
 

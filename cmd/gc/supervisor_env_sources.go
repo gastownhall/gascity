@@ -52,88 +52,120 @@ type supervisorTrackedEnv struct {
 }
 
 // supervisorWithheldEnv is one provider prefix's shell routing names that an
-// install did not persist from the shell, because every credential-class
-// name under the prefix came from a durable tier.
+// install did not persist from the shell, because a durable tier supplied
+// every secret-class name under the prefix.
 type supervisorWithheldEnv struct {
 	// Prefix is the provider prefix, for example "ANTHROPIC_".
 	Prefix string
-	// Names are the withheld routing names, sorted.
-	Names []string
+	// Dropped are the withheld names the service env does not carry, because
+	// secrets.env has no value for them, sorted.
+	Dropped []string
+	// Replaced are the withheld names that took a secrets.env value other
+	// than the shell's, sorted.
+	Replaced []string
 	// CredentialSources are the durable tiers that supplied the prefix's
-	// credential-class names, in source order.
+	// secret-class names, in source order.
 	CredentialSources []supervisorEnvSource
+}
+
+// supervisorProviderTiers records, for one provider prefix, which tiers
+// supplied its secret-class names and which routing names the shell scan
+// supplied.
+type supervisorProviderTiers struct {
+	// durable are the durable tiers that supplied a secret-class name.
+	durable map[supervisorEnvSource]bool
+	// shellSecret is set when the calling shell supplied a secret-class name,
+	// through the implicit scan or GC_SUPERVISOR_ENV.
+	shellSecret bool
+	// shellRouting are the routing-class names the implicit shell scan
+	// supplied.
+	shellRouting []string
+}
+
+// note records one service env entry under the prefix. A setting-class name
+// records nothing: it neither carries a credential nor routes a call.
+func (p *supervisorProviderTiers) note(name string, class processenv.ProviderEnvClass, source supervisorEnvSource) {
+	switch class {
+	case processenv.ProviderEnvRouting:
+		if source == supervisorEnvSourceShell {
+			p.shellRouting = append(p.shellRouting, name)
+		}
+	case processenv.ProviderEnvSecret:
+		switch source {
+		case supervisorEnvSourceSecretsFile, supervisorEnvSourceLaunchctl:
+			p.durable[source] = true
+		case supervisorEnvSourceShell, supervisorEnvSourceExplicit:
+			p.shellSecret = true
+		}
+	}
+}
+
+// withholdsShellRouting reports whether the shell supplied routing under the
+// prefix while a durable tier supplied every secret-class name.
+func (p *supervisorProviderTiers) withholdsShellRouting() bool {
+	return len(p.durable) > 0 && !p.shellSecret && len(p.shellRouting) > 0
+}
+
+// withhold withholds the prefix's shell routing names from env. A name takes
+// secrets' non-empty value for it when there is one (the value the
+// secrets.env tier would have filled had the shell not set it) and is
+// removed from env otherwise. It reports the removed names and the names
+// whose value changed.
+func (p *supervisorProviderTiers) withhold(prefix string, env map[string]supervisorTrackedEnv, secrets map[string]string) supervisorWithheldEnv {
+	group := supervisorWithheldEnv{Prefix: prefix}
+	for source := range p.durable {
+		group.CredentialSources = append(group.CredentialSources, source)
+	}
+	slices.Sort(group.CredentialSources)
+	sort.Strings(p.shellRouting)
+	for _, name := range p.shellRouting {
+		val := secrets[name]
+		if val == "" {
+			delete(env, name)
+			group.Dropped = append(group.Dropped, name)
+			continue
+		}
+		if val != env[name].Value {
+			group.Replaced = append(group.Replaced, name)
+		}
+		env[name] = supervisorTrackedEnv{Value: val, Source: supervisorEnvSourceSecretsFile}
+	}
+	return group
 }
 
 // withholdShellRoutingBesideDurableCredentials keeps a provider's routing
 // consistent with the tier its credentials come from. For each provider
-// prefix whose credential-class names all come from secrets.env or launchctl,
-// it withholds every routing-class name the implicit shell scan supplied:
-// the name takes secrets' non-empty value for it when there is one (the
-// value the secrets.env tier would have filled had the shell not set it), and
-// is removed from env otherwise. It reports the withheld names per prefix.
-// Credential-class names and GC_SUPERVISOR_ENV opt-ins are never touched.
+// prefix whose secret-class names (processenv.ClassifyProviderEnv) all come
+// from secrets.env or launchctl, it withholds every routing-class name the
+// implicit shell scan supplied (supervisorProviderTiers.withhold) and reports
+// the names it dropped or whose value it replaced. Secret- and setting-class
+// names and GC_SUPERVISOR_ENV opt-ins are never touched, and a setting-class
+// name never decides which tier a prefix's credentials come from.
 func withholdShellRoutingBesideDurableCredentials(env map[string]supervisorTrackedEnv, secrets map[string]string) []supervisorWithheldEnv {
-	type prefixEnv struct {
-		durable      map[supervisorEnvSource]bool
-		shellCred    bool
-		shellRouting []string
-	}
-	byPrefix := make(map[string]*prefixEnv)
+	byPrefix := make(map[string]*supervisorProviderTiers)
 	for name, entry := range env {
-		prefix, ok := processenv.ProviderEnvPrefix(name)
-		if !ok {
+		prefix, class := processenv.ClassifyProviderEnv(name)
+		if class == processenv.ProviderEnvNone {
 			continue
 		}
 		p := byPrefix[prefix]
 		if p == nil {
-			p = &prefixEnv{durable: make(map[supervisorEnvSource]bool)}
+			p = &supervisorProviderTiers{durable: make(map[supervisorEnvSource]bool)}
 			byPrefix[prefix] = p
 		}
-		if processenv.IsProviderRoutingEnv(name) {
-			if entry.Source == supervisorEnvSourceShell {
-				p.shellRouting = append(p.shellRouting, name)
-			}
-			continue
-		}
-		switch entry.Source {
-		case supervisorEnvSourceSecretsFile, supervisorEnvSourceLaunchctl:
-			p.durable[entry.Source] = true
-		case supervisorEnvSourceShell, supervisorEnvSourceExplicit:
-			p.shellCred = true
-		}
+		p.note(name, class, entry.Source)
 	}
 	var withheld []supervisorWithheldEnv
 	for prefix, p := range byPrefix {
-		if len(p.durable) == 0 || p.shellCred || len(p.shellRouting) == 0 {
+		if !p.withholdsShellRouting() {
 			continue
 		}
-		sort.Strings(p.shellRouting)
-		for _, name := range p.shellRouting {
-			if val := secrets[name]; val != "" {
-				env[name] = supervisorTrackedEnv{Value: val, Source: supervisorEnvSourceSecretsFile}
-				continue
-			}
-			delete(env, name)
+		if group := p.withhold(prefix, env, secrets); len(group.Dropped)+len(group.Replaced) > 0 {
+			withheld = append(withheld, group)
 		}
-		sources := make([]supervisorEnvSource, 0, len(p.durable))
-		for source := range p.durable {
-			sources = append(sources, source)
-		}
-		slices.Sort(sources)
-		withheld = append(withheld, supervisorWithheldEnv{
-			Prefix:            prefix,
-			Names:             p.shellRouting,
-			CredentialSources: sources,
-		})
 	}
 	slices.SortFunc(withheld, func(a, b supervisorWithheldEnv) int {
-		switch {
-		case a.Prefix < b.Prefix:
-			return -1
-		case a.Prefix > b.Prefix:
-			return 1
-		}
-		return 0
+		return strings.Compare(a.Prefix, b.Prefix)
 	})
 	return withheld
 }
@@ -163,18 +195,28 @@ func installSupervisorServiceReporting(goos string, data *supervisorServiceData,
 	return code
 }
 
-// warnSupervisorWithheldEnv prints one warning per provider prefix whose
-// shell routing names an install withheld, naming the names, the durable
-// credential sources and the two remedies. It never prints a value.
+// warnSupervisorWithheldEnv prints, for each provider prefix whose shell
+// routing an install withheld, a warning naming the dropped names, the
+// durable credential sources, that running agent sessions keep their values
+// until a restart, and the two remedies, and a note naming the names that took
+// a different secrets.env value instead. It never prints a value.
 func warnSupervisorWithheldEnv(stderr io.Writer, withheld []supervisorWithheldEnv) {
 	for _, group := range withheld {
 		sources := make([]string, 0, len(group.CredentialSources))
 		for _, source := range group.CredentialSources {
 			sources = append(sources, source.String())
 		}
-		fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
-			"gc supervisor install: warning: not persisting this shell's %s: %s credentials come only from %s, so their routing must come from there too. Add these names to %s, or list them in GC_SUPERVISOR_ENV to persist this shell's values.\n",
-			strings.Join(group.Names, ", "), group.Prefix, strings.Join(sources, " and "), supervisorSecretsEnvFilePath())
+		credentials := fmt.Sprintf("%s credentials come only from %s", group.Prefix, strings.Join(sources, " and "))
+		if len(group.Dropped) > 0 {
+			fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
+				"gc supervisor install: warning: not persisting this shell's %s: %s, so their routing must come from there too. New agent sessions do not get these names either, and running ones keep their values until gc restart. Add them to %s, or list them in GC_SUPERVISOR_ENV to persist this shell's values.\n",
+				strings.Join(group.Dropped, ", "), credentials, supervisorSecretsEnvFilePath())
+		}
+		if len(group.Replaced) > 0 {
+			fmt.Fprintf(stderr, //nolint:errcheck // best-effort stderr
+				"gc supervisor install: note: persisting %s's %s, not this shell's: %s.\n",
+				supervisorSecretsEnvFileName, strings.Join(group.Replaced, ", "), credentials)
+		}
 	}
 }
 

@@ -1707,7 +1707,8 @@ type supervisorServiceData struct {
 	ExtraEnv      []supervisorServiceEnvVar
 	// WithheldEnv lists, per provider prefix, the calling shell's routing
 	// names the install did not persist because that provider's credentials
-	// come only from a durable tier.
+	// come only from a durable tier: those it dropped and those that took
+	// secrets.env's value instead.
 	WithheldEnv []supervisorWithheldEnv
 	// PortInUseExitCode is the exit code the supervisor returns on a duplicate
 	// API-port collision; the systemd unit lists it in RestartPreventExitStatus
@@ -1872,7 +1873,7 @@ var supervisorServiceFixedEnvKeys = map[string]bool{
 }
 
 // supervisorServiceExtraEnv returns the service env admitted from the shell,
-// GC_SUPERVISOR_ENV, secrets.env and launchctl tiers plus gc's fixed entries,
+// GC_SUPERVISOR_ENV, secrets.env and launchctl tiers plus gc's fixed entry,
 // sorted by name, and the shell routing names it withheld per provider prefix
 // (withholdShellRoutingBesideDurableCredentials).
 func supervisorServiceExtraEnv() ([]supervisorServiceEnvVar, []supervisorWithheldEnv) {
@@ -1918,12 +1919,32 @@ func supervisorServiceExtraEnv() ([]supervisorServiceEnvVar, []supervisorWithhel
 		}
 		env[key] = supervisorTrackedEnv{Value: val, Source: supervisorEnvSourceSecretsFile}
 	}
-	// Fall back to `launchctl getenv` for known-allowlisted keys and
-	// for GC_SUPERVISOR_ENV opt-ins. Without this, launchctl-set
-	// documented Dolt credential/logging settings are silently dropped:
-	// the plist's EnvironmentVariables block scopes the spawned
-	// supervisor's env, and `os.Environ()` only sees what's exported in
-	// the calling shell.
+	mergeSupervisorLaunchctlEnv(env, explicitEnvKeys)
+	withheld := withholdShellRoutingBesideDurableCredentials(env, secrets)
+	// This process is a Gas City-owned recursive child. Assign the canonical
+	// fixed value after every inherited, explicit, secrets-file, and launchctl
+	// tier so none can re-enable product metrics in the service process.
+	env[execenv.UsageMetricsDisableEnv] = supervisorTrackedEnv{Value: execenv.UsageMetricsDisableValue, Source: supervisorEnvSourceGC}
+
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]supervisorServiceEnvVar, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, supervisorServiceEnvVar{Name: key, Value: env[key].Value, Source: env[key].Source})
+	}
+	return out, withheld
+}
+
+// mergeSupervisorLaunchctlEnv falls back to `launchctl getenv` for the
+// allowlisted keys and the GC_SUPERVISOR_ENV opt-ins that no earlier tier
+// set. Without this, launchctl-set documented Dolt credential/logging
+// settings are silently dropped: the plist's EnvironmentVariables block
+// scopes the spawned supervisor's env, and `os.Environ()` only sees what's
+// exported in the calling shell.
+func mergeSupervisorLaunchctlEnv(env map[string]supervisorTrackedEnv, explicitEnvKeys []string) {
 	launchctlKeys := make([]string, 0, len(supervisorServiceEnvKeys)+len(explicitEnvKeys))
 	launchctlSeen := make(map[string]bool, cap(launchctlKeys))
 	for key := range supervisorServiceEnvKeys {
@@ -1946,22 +1967,6 @@ func supervisorServiceExtraEnv() ([]supervisorServiceEnvVar, []supervisorWithhel
 			env[key] = supervisorTrackedEnv{Value: val, Source: supervisorEnvSourceLaunchctl}
 		}
 	}
-	withheld := withholdShellRoutingBesideDurableCredentials(env, secrets)
-	// This process is a Gas City-owned recursive child. Assign the canonical
-	// fixed value after every inherited, explicit, secrets-file, and launchctl
-	// tier so none can re-enable product metrics in the service process.
-	env[execenv.UsageMetricsDisableEnv] = supervisorTrackedEnv{Value: execenv.UsageMetricsDisableValue, Source: supervisorEnvSourceGC}
-
-	keys := make([]string, 0, len(env))
-	for key := range env {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	out := make([]supervisorServiceEnvVar, 0, len(keys))
-	for _, key := range keys {
-		out = append(out, supervisorServiceEnvVar{Name: key, Value: env[key].Value, Source: env[key].Source})
-	}
-	return out, withheld
 }
 
 func shouldPersistSupervisorEnv(key string) bool {

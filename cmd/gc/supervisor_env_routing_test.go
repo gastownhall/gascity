@@ -108,7 +108,7 @@ func TestSupervisorServiceEnvWithholdsIncidentShellRouting(t *testing.T) {
 	}
 	want := []supervisorWithheldEnv{{
 		Prefix:            "ANTHROPIC_",
-		Names:             incidentRoutingNames,
+		Dropped:           incidentRoutingNames,
 		CredentialSources: []supervisorEnvSource{supervisorEnvSourceSecretsFile},
 	}}
 	if !reflect.DeepEqual(data.WithheldEnv, want) {
@@ -136,11 +136,54 @@ func TestSupervisorServiceEnvWithholdsShellRoutingPerPrefix(t *testing.T) {
 	}
 	want := []supervisorWithheldEnv{{
 		Prefix:            "OPENAI_",
-		Names:             []string{"OPENAI_BASE_URL"},
+		Dropped:           []string{"OPENAI_BASE_URL"},
 		CredentialSources: []supervisorEnvSource{supervisorEnvSourceSecretsFile},
 	}}
 	if !reflect.DeepEqual(data.WithheldEnv, want) {
 		t.Fatalf("WithheldEnv = %+v, want %+v", data.WithheldEnv, want)
+	}
+}
+
+// TestSupervisorServiceEnvWithholdsShellRoutingBesideLaunchctlCredential
+// pins launchctl as a durable credential tier: a GC_SUPERVISOR_ENV-listed
+// credential that only launchctl supplies withholds the shell's routing as a
+// secrets.env credential does, and the warning names both durable tiers when
+// each supplies one.
+func TestSupervisorServiceEnvWithholdsShellRoutingBesideLaunchctlCredential(t *testing.T) {
+	isolateSupervisorRoutingEnv(t)
+	t.Setenv("ANTHROPIC_BASE_URL", "https://shell.example.test")
+	t.Setenv("GC_SUPERVISOR_ENV", "ANTHROPIC_API_KEY")
+	writeSupervisorSecretsEnvFile(t, "ANTHROPIC_AUTH_TOKEN=tok-file\n")
+	oldLaunchctl := supervisorLaunchctlGetenv
+	t.Cleanup(func() { supervisorLaunchctlGetenv = oldLaunchctl })
+	supervisorLaunchctlGetenv = func(key string) string {
+		if key == "ANTHROPIC_API_KEY" {
+			return "sk-launchctl"
+		}
+		return ""
+	}
+
+	data, err := buildSupervisorServiceData()
+	if err != nil {
+		t.Fatalf("buildSupervisorServiceData: %v", err)
+	}
+	got := supervisorServiceEnvByName(data.ExtraEnv)
+	want := supervisorServiceEnvVar{Name: "ANTHROPIC_API_KEY", Value: "sk-launchctl", Source: supervisorEnvSourceLaunchctl}
+	if got["ANTHROPIC_API_KEY"] != want {
+		t.Errorf("ExtraEnv[ANTHROPIC_API_KEY] = %+v, want %+v", got["ANTHROPIC_API_KEY"], want)
+	}
+	wantWithheld := []supervisorWithheldEnv{{
+		Prefix:            "ANTHROPIC_",
+		Dropped:           []string{"ANTHROPIC_BASE_URL"},
+		CredentialSources: []supervisorEnvSource{supervisorEnvSourceSecretsFile, supervisorEnvSourceLaunchctl},
+	}}
+	if !reflect.DeepEqual(data.WithheldEnv, wantWithheld) {
+		t.Fatalf("WithheldEnv = %+v, want %+v", data.WithheldEnv, wantWithheld)
+	}
+	var stderr bytes.Buffer
+	warnSupervisorWithheldEnv(&stderr, data.WithheldEnv)
+	if want := "ANTHROPIC_ credentials come only from secrets.env and launchctl"; !strings.Contains(stderr.String(), want) {
+		t.Errorf("warning %q does not say %q", stderr.String(), want)
 	}
 }
 
@@ -226,13 +269,13 @@ func TestSupervisorServiceEnvPersistsExplicitShellRouting(t *testing.T) {
 	}
 	wantWithheld := []supervisorWithheldEnv{{
 		Prefix:            "ANTHROPIC_",
-		Names:             []string{"ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL"},
+		Dropped:           []string{"ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL"},
 		CredentialSources: []supervisorEnvSource{supervisorEnvSourceSecretsFile},
 	}}
 	if !reflect.DeepEqual(data.WithheldEnv, wantWithheld) {
 		t.Fatalf("WithheldEnv = %+v, want %+v", data.WithheldEnv, wantWithheld)
 	}
-	for _, name := range wantWithheld[0].Names {
+	for _, name := range wantWithheld[0].Dropped {
 		if v, ok := got[name]; ok {
 			t.Errorf("ExtraEnv persisted withheld %s=%q", name, v.Value)
 		}
@@ -241,29 +284,105 @@ func TestSupervisorServiceEnvPersistsExplicitShellRouting(t *testing.T) {
 
 // TestSupervisorServiceEnvTakesWithheldRoutingFromSecretsFile pins AC-4: a
 // withheld shell routing name that secrets.env also sets persists with the
-// file's value and source, beside the file's credential.
+// file's value and source, beside the file's credential. The install reports
+// the name as replaced only when the file's value differs from the shell's.
 func TestSupervisorServiceEnvTakesWithheldRoutingFromSecretsFile(t *testing.T) {
-	isolateSupervisorRoutingEnv(t)
-	t.Setenv("ANTHROPIC_BASE_URL", "https://shell.example.test")
-	writeSupervisorSecretsEnvFile(t, "ANTHROPIC_AUTH_TOKEN=tok-file\nANTHROPIC_BASE_URL=https://file.example.test\n")
+	for _, tt := range []struct {
+		name         string
+		fileValue    string
+		wantWithheld []supervisorWithheldEnv
+	}{
+		{
+			name:      "file value differs",
+			fileValue: "https://file.example.test",
+			wantWithheld: []supervisorWithheldEnv{{
+				Prefix:            "ANTHROPIC_",
+				Replaced:          []string{"ANTHROPIC_BASE_URL"},
+				CredentialSources: []supervisorEnvSource{supervisorEnvSourceSecretsFile},
+			}},
+		},
+		{
+			name:      "file value matches",
+			fileValue: "https://shell.example.test",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			isolateSupervisorRoutingEnv(t)
+			t.Setenv("ANTHROPIC_BASE_URL", "https://shell.example.test")
+			writeSupervisorSecretsEnvFile(t, "ANTHROPIC_AUTH_TOKEN=tok-file\nANTHROPIC_BASE_URL="+tt.fileValue+"\n")
 
-	data, err := buildSupervisorServiceData()
-	if err != nil {
-		t.Fatalf("buildSupervisorServiceData: %v", err)
+			data, err := buildSupervisorServiceData()
+			if err != nil {
+				t.Fatalf("buildSupervisorServiceData: %v", err)
+			}
+			got := supervisorServiceEnvByName(data.ExtraEnv)
+			want := supervisorServiceEnvVar{Name: "ANTHROPIC_BASE_URL", Value: tt.fileValue, Source: supervisorEnvSourceSecretsFile}
+			if got["ANTHROPIC_BASE_URL"] != want {
+				t.Fatalf("ExtraEnv[ANTHROPIC_BASE_URL] = %+v, want %+v", got["ANTHROPIC_BASE_URL"], want)
+			}
+			if !reflect.DeepEqual(data.WithheldEnv, tt.wantWithheld) {
+				t.Fatalf("WithheldEnv = %+v, want %+v", data.WithheldEnv, tt.wantWithheld)
+			}
+		})
 	}
-	got := supervisorServiceEnvByName(data.ExtraEnv)
-	want := supervisorServiceEnvVar{Name: "ANTHROPIC_BASE_URL", Value: "https://file.example.test", Source: supervisorEnvSourceSecretsFile}
-	if got["ANTHROPIC_BASE_URL"] != want {
-		t.Fatalf("ExtraEnv[ANTHROPIC_BASE_URL] = %+v, want %+v", got["ANTHROPIC_BASE_URL"], want)
-	}
-	wantWithheld := []supervisorWithheldEnv{{
-		Prefix:            "ANTHROPIC_",
-		Names:             []string{"ANTHROPIC_BASE_URL"},
-		CredentialSources: []supervisorEnvSource{supervisorEnvSourceSecretsFile},
-	}}
-	if !reflect.DeepEqual(data.WithheldEnv, wantWithheld) {
-		t.Fatalf("WithheldEnv = %+v, want %+v", data.WithheldEnv, wantWithheld)
-	}
+}
+
+// TestSupervisorServiceEnvIgnoresNeutralProviderSettings pins that a provider
+// setting that neither carries a credential nor routes a call (OPENAI_ORG_ID,
+// OLLAMA_MODELS) persists from its own tier and never decides which tier a
+// provider's credentials come from: a shell setting does not keep the shell's
+// routing beside a credential only secrets.env supplies, and a secrets.env
+// setting does not withhold the shell's routing where no credential exists.
+func TestSupervisorServiceEnvIgnoresNeutralProviderSettings(t *testing.T) {
+	t.Run("shell setting beside a file-only credential", func(t *testing.T) {
+		isolateSupervisorRoutingEnv(t)
+		t.Setenv("OPENAI_BASE_URL", "https://shell.example.test/v1")
+		t.Setenv("OPENAI_ORG_ID", "org-shell")
+		writeSupervisorSecretsEnvFile(t, "OPENAI_API_KEY=sk-openai-file\n")
+
+		data, err := buildSupervisorServiceData()
+		if err != nil {
+			t.Fatalf("buildSupervisorServiceData: %v", err)
+		}
+		got := supervisorServiceEnvByName(data.ExtraEnv)
+		if v, ok := got["OPENAI_BASE_URL"]; ok {
+			t.Errorf("ExtraEnv persisted shell routing OPENAI_BASE_URL=%q beside a secrets.env-only credential; a shell OPENAI_ORG_ID carries no credential", v.Value)
+		}
+		want := supervisorServiceEnvVar{Name: "OPENAI_ORG_ID", Value: "org-shell", Source: supervisorEnvSourceShell}
+		if got["OPENAI_ORG_ID"] != want {
+			t.Errorf("ExtraEnv[OPENAI_ORG_ID] = %+v, want %+v", got["OPENAI_ORG_ID"], want)
+		}
+		wantWithheld := []supervisorWithheldEnv{{
+			Prefix:            "OPENAI_",
+			Dropped:           []string{"OPENAI_BASE_URL"},
+			CredentialSources: []supervisorEnvSource{supervisorEnvSourceSecretsFile},
+		}}
+		if !reflect.DeepEqual(data.WithheldEnv, wantWithheld) {
+			t.Fatalf("WithheldEnv = %+v, want %+v", data.WithheldEnv, wantWithheld)
+		}
+	})
+	t.Run("file setting without a credential", func(t *testing.T) {
+		isolateSupervisorRoutingEnv(t)
+		t.Setenv("OLLAMA_HOST", "http://remote-host:11434")
+		writeSupervisorSecretsEnvFile(t, "OLLAMA_MODELS=/srv/ollama/models\n")
+
+		data, err := buildSupervisorServiceData()
+		if err != nil {
+			t.Fatalf("buildSupervisorServiceData: %v", err)
+		}
+		got := supervisorServiceEnvByName(data.ExtraEnv)
+		for _, want := range []supervisorServiceEnvVar{
+			{Name: "OLLAMA_HOST", Value: "http://remote-host:11434", Source: supervisorEnvSourceShell},
+			{Name: "OLLAMA_MODELS", Value: "/srv/ollama/models", Source: supervisorEnvSourceSecretsFile},
+		} {
+			if got[want.Name] != want {
+				t.Errorf("ExtraEnv[%s] = %+v, want %+v", want.Name, got[want.Name], want)
+			}
+		}
+		if len(data.WithheldEnv) != 0 {
+			t.Errorf("WithheldEnv = %+v, want none: OLLAMA_MODELS carries no credential", data.WithheldEnv)
+		}
+	})
 }
 
 // installSupervisorServiceForTest runs installSupervisorServiceReporting for
@@ -386,16 +505,32 @@ func TestSupervisorInstallReportsEnvSourcesWithoutValues(t *testing.T) {
 	}
 }
 
-// TestSupervisorInstallWarnsOfWithheldShellRouting pins AC-6: the #9257
-// install still succeeds, the written unit carries none of the withheld
-// names, and stderr names each of them, the prefix, the credential source,
-// the secrets.env path and the GC_SUPERVISOR_ENV opt-in, with no value.
+// stderrLineNaming returns the first line of stderr that contains name, or "".
+func stderrLineNaming(stderr, name string) string {
+	for _, line := range strings.Split(stderr, "\n") {
+		if strings.Contains(line, name) {
+			return line
+		}
+	}
+	return ""
+}
+
+// TestSupervisorInstallWarnsOfWithheldShellRouting pins AC-6 and its two
+// outcomes. The #9257 install still succeeds. The written unit sets no dropped
+// name and sets secrets.env's value for a name the file also has. stderr warns
+// of the dropped names with the prefix, the credential source, that running
+// agent sessions keep their values until gc restart, the secrets.env path and
+// the GC_SUPERVISOR_ENV opt-in, notes a name that took a different
+// secrets.env value without that remedy, says nothing of a name whose two
+// values match, and prints no value.
 func TestSupervisorInstallWarnsOfWithheldShellRouting(t *testing.T) {
 	if goruntime.GOOS != "linux" {
 		t.Skip("systemd path only applies on linux")
 	}
 	isolateSupervisorRoutingEnv(t)
 	setIncidentEnv(t)
+	writeSupervisorSecretsEnvFile(t, "ANTHROPIC_AUTH_TOKEN=tok-file-1\nANTHROPIC_MODEL=file-model\nANTHROPIC_SMALL_FAST_MODEL=shell-anthropic_small_fast_model\n")
+	dropped := []string{"ANTHROPIC_BASE_URL", "ANTHROPIC_DEFAULT_OPUS_MODEL"}
 
 	data, err := buildSupervisorServiceData()
 	if err != nil {
@@ -405,24 +540,41 @@ func TestSupervisorInstallWarnsOfWithheldShellRouting(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("install code = %d, want 0; stderr=%s", code, stderr)
 	}
-	unit, err := os.ReadFile(supervisorSystemdServicePath())
+	unitBytes, err := os.ReadFile(supervisorSystemdServicePath())
 	if err != nil {
 		t.Fatalf("reading installed unit: %v", err)
 	}
-	for _, name := range incidentRoutingNames {
-		if strings.Contains(string(unit), name) {
-			t.Errorf("installed unit carries withheld %s:\n%s", name, unit)
+	unit := string(unitBytes)
+	for _, name := range dropped {
+		if strings.Contains(unit, "Environment="+name+"=") {
+			t.Errorf("installed unit sets withheld %s:\n%s", name, unit)
 		}
 	}
-	for _, want := range append([]string{"ANTHROPIC_", "secrets.env", supervisorSecretsEnvFilePath(), "GC_SUPERVISOR_ENV"}, incidentRoutingNames...) {
-		if !strings.Contains(stderr, want) {
-			t.Errorf("stderr does not name %q:\n%s", want, stderr)
+	if want := `Environment=ANTHROPIC_MODEL="file-model"`; !strings.Contains(unit, want) {
+		t.Errorf("installed unit lacks %s:\n%s", want, unit)
+	}
+
+	warning := stderrLineNaming(stderr, "ANTHROPIC_BASE_URL")
+	for _, want := range append([]string{"warning", "ANTHROPIC_ credentials", "secrets.env", "running ones keep their values until gc restart", supervisorSecretsEnvFilePath(), "GC_SUPERVISOR_ENV"}, dropped...) {
+		if !strings.Contains(warning, want) {
+			t.Errorf("warning %q does not name %q; stderr:\n%s", warning, want, stderr)
 		}
 	}
-	for _, name := range incidentRoutingNames {
-		value := "shell-" + strings.ToLower(name)
+	note := stderrLineNaming(stderr, "ANTHROPIC_MODEL")
+	if note == "" || note == warning {
+		t.Errorf("stderr has no line of its own for ANTHROPIC_MODEL, which took a different secrets.env value:\n%s", stderr)
+	}
+	for _, remedy := range []string{"warning", "GC_SUPERVISOR_ENV", supervisorSecretsEnvFilePath()} {
+		if strings.Contains(note, remedy) {
+			t.Errorf("note %q carries the remedy text %q; the name already takes secrets.env's value", note, remedy)
+		}
+	}
+	if strings.Contains(stderr, "ANTHROPIC_SMALL_FAST_MODEL") {
+		t.Errorf("stderr names ANTHROPIC_SMALL_FAST_MODEL, whose shell and secrets.env values match:\n%s", stderr)
+	}
+	for _, value := range []string{"shell-anthropic_base_url", "shell-anthropic_default_opus_model", "shell-anthropic_model", "shell-anthropic_small_fast_model", "file-model", "tok-file-1"} {
 		if strings.Contains(stdout, value) || strings.Contains(stderr, value) {
-			t.Errorf("install output carries withheld value %q", value)
+			t.Errorf("install output carries value %q", value)
 		}
 	}
 }

@@ -206,65 +206,59 @@ func TestProviderProcessPassthroughEnvOmitsUnsetTZ(t *testing.T) {
 	}
 }
 
-func TestIsProviderRoutingEnv(t *testing.T) {
-	for _, tt := range []struct {
-		key  string
-		want bool
-	}{
-		{"ANTHROPIC_BASE_URL", true},
-		{"ANTHROPIC_DEFAULT_HAIKU_MODEL", true},
-		{"ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION", true},
-		{"OPENAI_API_BASE", true},
-		{"OPENAI_BASE_URL", true},
-		{"AZURE_OPENAI_ENDPOINT", true},
-		{"GOOGLE_GEMINI_BASE_URL", true},
-		{"ZCODE_MODEL", true},
-		{"OLLAMA_HOST", true},
-		// A trailing digit run is trimmed before the routing-word match.
-		{"OPENAI_BASE_URL2", true},
-		{"ANTHROPIC_AUTH_TOKEN2", false},
-		{"ANTHROPIC_AUTH_TOKEN_ZAI", false},
-		{"ANTHROPIC_API_KEY", false},
-		{"GOOGLE_APPLICATION_CREDENTIALS", false},
-		{"GOOGLE_CLOUD_PROJECT", false},
-		{"AZURE_CLIENT_ID", false},
-		{"OPENAI_ORG_ID", false},
-		{"ANTHROPIC_CUSTOM_HEADERS", false},
-		// Whole words only: MODELS and HOSTNAMES are not routing words.
-		{"OLLAMA_MODELS", false},
-		{"OLLAMA_HOSTNAMES", false},
-		// Exact-name keys and non-provider names are never routing-class.
-		{"AWS_ENDPOINT_URL", false},
-		{"HTTPS_PROXY", false},
-		// A secret word vetoes a routing word, as written or digit-trimmed.
-		{"OPENAI_PROXY_API_KEY", false},
-		{"ANTHROPIC_BASE_URL_TOKEN3", false},
-		{"GOOGLE_CERT_BASE64", false},
-		// The bare prefix has no words.
-		{"ANTHROPIC_", false},
-		{"", false},
-	} {
-		if got := IsProviderRoutingEnv(tt.key); got != tt.want {
-			t.Errorf("IsProviderRoutingEnv(%q) = %v, want %v", tt.key, got, tt.want)
-		}
-	}
-}
-
-func TestProviderEnvPrefix(t *testing.T) {
+func TestClassifyProviderEnv(t *testing.T) {
 	for _, tt := range []struct {
 		key        string
 		wantPrefix string
-		wantOK     bool
+		wantClass  ProviderEnvClass
 	}{
-		{"ANTHROPIC_BASE_URL", "ANTHROPIC_", true},
-		{"OPENROUTER_API_KEY", "OPENROUTER_", true},
-		{"OPENAI_API_KEY", "OPENAI_", true},
-		{"AWS_ACCESS_KEY_ID", "", false},
-		{"HTTPS_PROXY", "", false},
+		{"ANTHROPIC_BASE_URL", "ANTHROPIC_", ProviderEnvRouting},
+		{"ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_", ProviderEnvRouting},
+		{"ANTHROPIC_SMALL_FAST_MODEL_AWS_REGION", "ANTHROPIC_", ProviderEnvRouting},
+		{"OPENAI_API_BASE", "OPENAI_", ProviderEnvRouting},
+		{"OPENAI_BASE_URL", "OPENAI_", ProviderEnvRouting},
+		{"AZURE_OPENAI_ENDPOINT", "AZURE_", ProviderEnvRouting},
+		{"GOOGLE_GEMINI_BASE_URL", "GOOGLE_", ProviderEnvRouting},
+		{"ZCODE_MODEL", "ZCODE_", ProviderEnvRouting},
+		{"OLLAMA_HOST", "OLLAMA_", ProviderEnvRouting},
+		// A trailing digit run is trimmed before the routing-word match.
+		{"OPENAI_BASE_URL2", "OPENAI_", ProviderEnvRouting},
+		// A secret word makes a name secret-class, as written or digit-trimmed.
+		{"ANTHROPIC_AUTH_TOKEN2", "ANTHROPIC_", ProviderEnvSecret},
+		{"ANTHROPIC_AUTH_TOKEN_ZAI", "ANTHROPIC_", ProviderEnvSecret},
+		{"ANTHROPIC_API_KEY", "ANTHROPIC_", ProviderEnvSecret},
+		{"OPENROUTER_API_KEY", "OPENROUTER_", ProviderEnvSecret},
+		{"GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_", ProviderEnvSecret},
+		{"AZURE_CLIENT_SECRET", "AZURE_", ProviderEnvSecret},
+		// Gateways take their key in a header.
+		{"ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_", ProviderEnvSecret},
+		// A secret word vetoes a routing word in the same name.
+		{"OPENAI_PROXY_API_KEY", "OPENAI_", ProviderEnvSecret},
+		{"ANTHROPIC_BASE_URL_TOKEN3", "ANTHROPIC_", ProviderEnvSecret},
+		{"GOOGLE_CERT_BASE64", "GOOGLE_", ProviderEnvSecret},
+		// Any other provider name is a setting that neither carries a
+		// credential nor routes a call.
+		{"OPENAI_ORG_ID", "OPENAI_", ProviderEnvSetting},
+		{"ANTHROPIC_BETAS", "ANTHROPIC_", ProviderEnvSetting},
+		{"GOOGLE_CLOUD_PROJECT", "GOOGLE_", ProviderEnvSetting},
+		{"AZURE_CLIENT_ID", "AZURE_", ProviderEnvSetting},
+		// Whole words only: MODELS and HOSTNAMES are not routing words.
+		{"OLLAMA_MODELS", "OLLAMA_", ProviderEnvSetting},
+		{"OLLAMA_HOSTNAMES", "OLLAMA_", ProviderEnvSetting},
+		// The bare prefix has no words.
+		{"ANTHROPIC_", "ANTHROPIC_", ProviderEnvSetting},
+		// Exact-name keys and non-provider names have no provider prefix.
+		{"AWS_ENDPOINT_URL", "", ProviderEnvNone},
+		{"AWS_ACCESS_KEY_ID", "", ProviderEnvNone},
+		{"HTTPS_PROXY", "", ProviderEnvNone},
+		{"", "", ProviderEnvNone},
 	} {
-		prefix, ok := ProviderEnvPrefix(tt.key)
-		if prefix != tt.wantPrefix || ok != tt.wantOK {
-			t.Errorf("ProviderEnvPrefix(%q) = (%q, %v), want (%q, %v)", tt.key, prefix, ok, tt.wantPrefix, tt.wantOK)
+		prefix, class := ClassifyProviderEnv(tt.key)
+		if prefix != tt.wantPrefix || class != tt.wantClass {
+			t.Errorf("ClassifyProviderEnv(%q) = (%q, %v), want (%q, %v)", tt.key, prefix, class, tt.wantPrefix, tt.wantClass)
+		}
+		if got, want := IsProviderRoutingEnv(tt.key), tt.wantClass == ProviderEnvRouting; got != want {
+			t.Errorf("IsProviderRoutingEnv(%q) = %v, want %v", tt.key, got, want)
 		}
 	}
 }
