@@ -455,7 +455,8 @@ func retirePoolSlotAtDrainDeadline(
 	}
 
 	// Pool worktrees are transient by design; the deadline path preempts the
-	// pool-freeable close, which is the only other site that reclaims them.
+	// pool-freeable close, so it reclaims them here as that close and the
+	// drain-ack close do.
 	poolSlotRetireWorktreePrune(info, cityPath, cfg, stderr)
 
 	fmt.Fprintf(stderr, "session reconciler: retired pool slot %s at the drain deadline after %s in an unfinalized drain; its runtime name is free again\n", name, drainAge.Round(time.Second)) //nolint:errcheck

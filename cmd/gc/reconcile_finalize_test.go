@@ -131,8 +131,9 @@ func TestFinalizeDrainAckStoppedSession_PrunesWorkerDir(t *testing.T) {
 		t.Fatalf("write .git marker: %v", err)
 	}
 	env.setSessionMetadata(&b, map[string]string{
-		"session_key": "k-1",
-		"worker_dir":  workerDir,
+		"session_key":          "k-1",
+		"worker_dir":           workerDir,
+		poolManagedMetadataKey: boolMetadata(true),
 	})
 
 	probe := &fakeGitProbe{isRepo: true}
@@ -435,6 +436,37 @@ func TestFinalizeDrainAckStoppedSessionPrunesOnlyItsOwnClose(t *testing.T) {
 			}
 			if len(s.removes) != 0 || s.rig.removeInvoked {
 				t.Fatalf("rig-root removals = %q, want none; stderr=%s", s.removes, s.env.stderr.String())
+			}
+		})
+	}
+}
+
+// TestFinalizeDrainAckStoppedSessionKeepsNonPoolWorkerDir (gascity#8093). The
+// drain-ack close reclaims only unnamed pool seats' checkouts, the population
+// the pool-freeable close prunes: a named or non-pool session's worker_dir is
+// a persistent agent home that every git safety gate would otherwise pass.
+func TestFinalizeDrainAckStoppedSessionKeepsNonPoolWorkerDir(t *testing.T) {
+	cases := []struct {
+		name string
+		meta map[string]string
+	}{
+		{name: "named pool session", meta: map[string]string{session.NamedSessionMetadataKey: "true"}},
+		{name: "manual session", meta: map[string]string{poolManagedMetadataKey: "", "session_origin": "manual"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := newDrainAckPruneSeat(t, c.meta)
+
+			res := s.finalize(s.env.sessionInfo(s.id), true)
+
+			if !res.closed {
+				t.Fatalf("finalize result %+v, want the close reported", res)
+			}
+			if status, state := s.status(t); status != "closed" || state != "drained" {
+				t.Fatalf("status/state = %q/%q, want closed/drained", status, state)
+			}
+			if len(s.removes) != 0 || s.rig.removeInvoked {
+				t.Fatalf("rig-root removals = %q, want none for a non-pool home; stderr=%s", s.removes, s.env.stderr.String())
 			}
 		})
 	}
