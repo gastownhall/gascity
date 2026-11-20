@@ -487,29 +487,27 @@ func sessionTriggerBeadVia(front sessionFrontGetter, sessionID string) (string, 
 	return strings.TrimSpace(info.TriggerBeadID), nil
 }
 
-// hookSessionCurrentClaim is the production ReadSessionClaim seam: the
-// session row's current-claim stamp, read through the routed front door the
-// stamp is written through.
-func hookSessionCurrentClaim(sessionID string) (string, error) {
-	return sessionCurrentClaimVia(sessionCurrentClaimFrontDoor, sessionID)
+// hookForgetSessionClaim is the production ForgetSessionClaim seam: beadID
+// taken back off the session row's current-claim stamp by a CAS
+// (session.Store.ClearCurrentClaim), through the routed front door the stamp
+// is written through.
+func hookForgetSessionClaim(sessionID, beadID string) error {
+	return forgetSessionClaimVia(sessionCurrentClaimFrontDoor, sessionID, beadID)
 }
 
-// sessionCurrentClaimVia is hookSessionCurrentClaim through front. An empty
+// forgetSessionClaimVia is hookForgetSessionClaim through front. An empty
 // session id has no stamp and never opens the front door.
-func sessionCurrentClaimVia(front sessionFrontGetter, sessionID string) (string, error) {
+func forgetSessionClaimVia(front sessionFrontGetter, sessionID, beadID string) error {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
-		return "", nil
+		return nil
 	}
 	sessFront, err := front()
 	if err != nil {
-		return "", fmt.Errorf("opening the session front door for %q: %w", sessionID, err)
+		return fmt.Errorf("opening the session front door for %q: %w", sessionID, err)
 	}
-	beadID, err := sessFront.CurrentClaimBeadID(sessionID)
-	if err != nil {
-		return "", fmt.Errorf("reading the current claim of session %q: %w", sessionID, err)
-	}
-	return beadID, nil
+	_, err = sessFront.ClearCurrentClaim(sessionID, beadID)
+	return err
 }
 
 // hookClaimStoreRefForDir is the production StoreRef seam: the work leg at

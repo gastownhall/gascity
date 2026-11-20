@@ -390,11 +390,12 @@ type hookClaimOps struct {
 	// row the controller counted when it spawned the seat, read only by the
 	// demand/claim divergence diagnostics after the drain result is written.
 	ReadSessionTrigger hookReadSessionTriggerFunc
-	// ReadSessionClaim reads the session row's current-claim stamp: the read
-	// half of StampSessionClaim, through the same routed front door. A
-	// dropped purged adoption reads it so it clears the stamp only when the
-	// stamp names the dead bead.
-	ReadSessionClaim hookReadSessionClaimFunc
+	// ForgetSessionClaim takes a bead back off the session row's current-claim
+	// stamp by a CAS, through the routed front door StampSessionClaim writes
+	// through: a stamp naming other work, or none, is left alone, so a claim
+	// another invocation of the session stamped since survives it. A dropped
+	// purged adoption forgets its claim through it.
+	ForgetSessionClaim hookForgetSessionClaimFunc
 	// StoreRef names the work leg at dir as the work cells key a claim that
 	// resides in it (claimStoreRef), or "" when it is not knowable. A claim
 	// the class route took resides in the binding instead: the cells' key for
@@ -448,7 +449,7 @@ type (
 	hookForgetWorkStartedFunc        func(sessionID string, key hookStartedKey) error
 	hookReadWorkStartedFunc          func(sessionID string) (string, error)
 	hookReadSessionTriggerFunc       func(sessionID string) (string, error)
-	hookReadSessionClaimFunc         func(sessionID string) (string, error)
+	hookForgetSessionClaimFunc       func(sessionID, beadID string) error
 	// hookWorkflowStoreFunc (ctx, dir, env, beadID, actor) opens the store
 	// that holds beadID's workflow, writing as actor.
 	hookWorkflowStoreFunc func(ctx context.Context, dir string, env []string, beadID, actor string) beads.Store
@@ -787,8 +788,8 @@ func (ops *hookClaimOps) applyDefaults() {
 	if ops.ReadSessionTrigger == nil {
 		ops.ReadSessionTrigger = hookSessionTriggerBead
 	}
-	if ops.ReadSessionClaim == nil {
-		ops.ReadSessionClaim = hookSessionCurrentClaim
+	if ops.ForgetSessionClaim == nil {
+		ops.ForgetSessionClaim = hookForgetSessionClaim
 	}
 	if ops.StoreRef == nil {
 		ops.StoreRef = hookClaimStoreRefForDir
@@ -1511,30 +1512,26 @@ func certifyHookAdoption(bead beads.Bead, opts hookClaimOptions, ops hookClaimOp
 	return hookAdoptionOwned, strings.TrimSpace(canonical.Assignee)
 }
 
-// dropMissingHookAdoption clears the session's current-claim stamp when it
-// names beadID, an adoption certifyHookAdoption found in no store of the city,
-// so `gc hook current` stops naming a bead that exists nowhere.
+// dropMissingHookAdoption takes beadID, an adoption certifyHookAdoption found
+// in no store of the city, back off the session's current-claim stamp, so
+// `gc hook current` stops naming a bead that exists nowhere.
 //
-// The clear is guarded. The stamp names the session's LATEST claim, which may
-// be other live work, and sessionOwnsLiveClaim reads it as the demand-class
-// drain veto: clearing it unconditionally could drain the seat mid-turn. A
-// stamp that cannot be read is left alone — a stamp naming a bead that does
-// not exist already reads as owning nothing there. Best-effort: failures are
-// reported on stderr and change no exit code.
+// The clear is a CAS on beadID (ForgetSessionClaim). The stamp names the
+// session's LATEST claim, which may be other live work, even work another
+// invocation of this session stamped after this one read it, and
+// sessionOwnsLiveClaim reads it as the demand-class drain veto: erasing it
+// could drain the seat mid-turn. Best-effort: a failure, a store with no
+// metadata CAS among them, is reported on stderr, leaves the stamp alone and
+// changes no exit code — a stamp naming a bead that does not exist already
+// reads as owning nothing there.
 func dropMissingHookAdoption(beadID string, opts hookClaimOptions, ops hookClaimOps, stderr io.Writer) {
 	sessionID := hookClaimSessionID(opts.Env)
-	if sessionID == "" || ops.ReadSessionClaim == nil {
+	if sessionID == "" {
 		return
 	}
-	stamped, err := ops.ReadSessionClaim(sessionID)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc hook --claim: leaving session %s's current claim alone after dropping %s: reading it: %v\n", sessionID, beadID, err) //nolint:errcheck
-		return
+	if err := ops.ForgetSessionClaim(sessionID, beadID); err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: leaving session %s's current claim alone after dropping %s: %v\n", sessionID, beadID, err) //nolint:errcheck
 	}
-	if strings.TrimSpace(stamped) != beadID {
-		return
-	}
-	clearHookSessionCurrentClaim(opts, ops, stderr)
 }
 
 // withoutHookCandidate returns candidates minus the row whose id is beadID.

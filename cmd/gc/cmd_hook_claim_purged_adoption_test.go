@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -40,26 +41,30 @@ type purgedAdoptionEnv struct {
 	prove func(ids []string) (bool, error)
 	// session sets GC_SESSION_ID so the session current-claim seams run.
 	session bool
-	// stamp and stampErr are the ReadSessionClaim fake's answer.
-	stamp    string
-	stampErr error
-	// clearErr is returned by the StampSessionClaim spy.
-	clearErr error
+	// stamp is the session row's current-claim stamp the fakes keep:
+	// StampSessionClaim writes it, ForgetSessionClaim clears it while it
+	// names the bead.
+	stamp string
+	// forgetErr, when set, is ForgetSessionClaim's answer, and the stamp
+	// stays.
+	forgetErr error
+	// front, when set, is a real session front door the two stamp seams
+	// write through, by the production ...Via functions, in place of the
+	// fakes.
+	front *session.Store
 
-	reads      []string
-	proofs     [][]string
-	stampReads []string
-	claims     []string
-	stopReads  []string
-	sessSpy    sessionClaimSpy
-	stdout     bytes.Buffer
-	stderr     bytes.Buffer
+	reads     []string
+	proofs    [][]string
+	stampOps  []string // "stamp <session> <bead>" and "forget <session> <bead>", in order
+	claims    []string
+	stopReads []string
+	stdout    bytes.Buffer
+	stderr    bytes.Buffer
 }
 
 const purgedAdoptionSessionID = "mc-sess1"
 
 func (e *purgedAdoptionEnv) ops() hookClaimOps {
-	e.sessSpy.err = e.clearErr
 	ops := hookClaimOps{
 		Runner: func(string, string) (string, error) {
 			dead := purgedAdoptionDeadRow
@@ -91,12 +96,30 @@ func (e *purgedAdoptionEnv) ops() hookClaimOps {
 		},
 		ResolveWorkBranch: func(hookClaimWorkTree) string { return "" },
 		StampWorkMeta:     noopStampWorkMeta,
-		StampSessionClaim: e.sessSpy.fn,
 		PublishRunMap:     noopPublishRunMap,
-		ReadSessionClaim: func(sessionID string) (string, error) {
-			e.stampReads = append(e.stampReads, sessionID)
-			return e.stamp, e.stampErr
+		StampSessionClaim: func(sessionID, beadID string) error {
+			e.stampOps = append(e.stampOps, "stamp "+sessionID+" "+beadID)
+			e.stamp = beadID
+			return nil
 		},
+		ForgetSessionClaim: func(sessionID, beadID string) error {
+			e.stampOps = append(e.stampOps, "forget "+sessionID+" "+beadID)
+			if e.forgetErr != nil {
+				return e.forgetErr
+			}
+			if e.stamp == beadID {
+				e.stamp = ""
+			}
+			return nil
+		},
+	}
+	if e.front != nil {
+		ops.StampSessionClaim = func(sessionID, beadID string) error {
+			return stampSessionCurrentClaimVia(func() (*session.Store, error) { return e.front, nil }, sessionID, beadID)
+		}
+		ops.ForgetSessionClaim = func(sessionID, beadID string) error {
+			return forgetSessionClaimVia(func() (*session.Store, error) { return e.front, nil }, sessionID, beadID)
+		}
 	}
 	if e.prove != nil {
 		ops.ProveInputAbsent = func(_ context.Context, ids []string) (bool, error) {
@@ -188,33 +211,31 @@ func TestHookClaimPurgedAdoptionDropsAProvenMissingBead(t *testing.T) {
 	})
 }
 
-// AC-2: the session's current-claim stamp is cleared only when it names the
-// dropped bead, and before any later claim in the same invocation re-stamps.
+// AC-2: the dropped bead is taken back off the session's current-claim stamp,
+// by a CAS on its id, before any later claim in the same invocation re-stamps.
+// A stamp naming other work stays: the drop never clears blind.
 func TestHookClaimPurgedAdoptionClearsOnlyItsOwnStamp(t *testing.T) {
+	const forgetDead = "forget " + purgedAdoptionSessionID + " work-1"
 	for _, tc := range []struct {
 		name       string
 		extraRows  []string
 		stamp      string
-		stampErr   error
-		clearErr   error
+		forgetErr  error
 		wantCode   int
-		wantWrites []string
+		wantOps    []string
+		wantStamp  string
 		wantStderr string
 	}{
-		{name: "stamp names the dead bead", stamp: "work-1", wantCode: 1, wantWrites: []string{""}},
+		{name: "stamp names the dead bead", stamp: "work-1", wantCode: 1, wantOps: []string{forgetDead}, wantStamp: ""},
 		{
-			name: "cleared before the next claim restamps", extraRows: []string{purgedAdoptionOpenRow},
-			stamp: "work-1", wantCode: 0, wantWrites: []string{"", "work-2"},
+			name: "cleared before the next claim restamps", extraRows: []string{purgedAdoptionOpenRow}, stamp: "work-1",
+			wantCode: 0, wantOps: []string{forgetDead, "stamp " + purgedAdoptionSessionID + " work-2"}, wantStamp: "work-2",
 		},
-		{name: "empty stamp", stamp: "", wantCode: 1, wantWrites: nil},
-		{name: "stamp names other live work", stamp: "work-9", wantCode: 1, wantWrites: nil},
+		{name: "empty stamp", stamp: "", wantCode: 1, wantOps: []string{forgetDead}, wantStamp: ""},
+		{name: "stamp names other live work", stamp: "work-9", wantCode: 1, wantOps: []string{forgetDead}, wantStamp: "work-9"},
 		{
-			name: "unreadable stamp is left alone", stampErr: errors.New("session store down"),
-			wantCode: 1, wantWrites: nil, wantStderr: "session store down",
-		},
-		{
-			name: "a failed clear changes no exit code", stamp: "work-1", clearErr: errors.New("clear refused"),
-			wantCode: 1, wantWrites: []string{""}, wantStderr: "clear refused",
+			name: "a failed forget changes no exit code", stamp: "work-1", forgetErr: errors.New("session store down"),
+			wantCode: 1, wantOps: []string{forgetDead}, wantStamp: "work-1", wantStderr: "session store down",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -224,8 +245,7 @@ func TestHookClaimPurgedAdoptionClearsOnlyItsOwnStamp(t *testing.T) {
 				prove:     proveAbsent,
 				session:   true,
 				stamp:     tc.stamp,
-				stampErr:  tc.stampErr,
-				clearErr:  tc.clearErr,
+				forgetErr: tc.forgetErr,
 			}
 
 			code := e.run()
@@ -233,11 +253,11 @@ func TestHookClaimPurgedAdoptionClearsOnlyItsOwnStamp(t *testing.T) {
 			if code != tc.wantCode {
 				t.Fatalf("code = %d, want %d; stdout=%s stderr=%s", code, tc.wantCode, e.stdout.String(), e.stderr.String())
 			}
-			if strings.Join(e.sessSpy.beadIDs, ",") != strings.Join(tc.wantWrites, ",") || len(e.sessSpy.beadIDs) != len(tc.wantWrites) {
-				t.Fatalf("session claim writes = %q, want %q", e.sessSpy.beadIDs, tc.wantWrites)
+			if strings.Join(e.stampOps, ",") != strings.Join(tc.wantOps, ",") {
+				t.Fatalf("session stamp ops = %q, want %q", e.stampOps, tc.wantOps)
 			}
-			if len(e.stampReads) != 1 || e.stampReads[0] != purgedAdoptionSessionID {
-				t.Errorf("stamp reads = %v, want exactly one read of %s", e.stampReads, purgedAdoptionSessionID)
+			if e.stamp != tc.wantStamp {
+				t.Errorf("current claim = %q, want %q", e.stamp, tc.wantStamp)
 			}
 			if tc.wantStderr != "" && !strings.Contains(e.stderr.String(), tc.wantStderr) {
 				t.Errorf("stderr = %q, want it to report %q", e.stderr.String(), tc.wantStderr)
@@ -245,50 +265,163 @@ func TestHookClaimPurgedAdoptionClearsOnlyItsOwnStamp(t *testing.T) {
 		})
 	}
 
-	t.Run("no session reads no stamp", func(t *testing.T) {
+	t.Run("no session forgets nothing", func(t *testing.T) {
 		e := &purgedAdoptionEnv{missing: map[string]bool{"work-1": true}, prove: proveAbsent, stamp: "work-1"}
 
 		if code := e.run(); code != 1 {
 			t.Fatalf("code = %d, want 1; stderr=%s", code, e.stderr.String())
 		}
-		if len(e.stampReads) != 0 || len(e.sessSpy.beadIDs) != 0 {
-			t.Fatalf("stamp reads = %v writes = %q, want none without a session id", e.stampReads, e.sessSpy.beadIDs)
+		if len(e.stampOps) != 0 {
+			t.Fatalf("session stamp ops = %q, want none without a session id", e.stampOps)
 		}
 	})
 }
 
-// sessionCurrentClaimVia is the read half of the claim stamp, through the same
-// session front door the stamp writes through.
-func TestSessionCurrentClaimVia(t *testing.T) {
-	t.Run("returns the stamp", func(t *testing.T) {
+// purgedAdoptionSessionStore holds the seat's session row, stamped with claim.
+func purgedAdoptionSessionStore(claim string) *beads.MemStore {
+	return beads.NewMemStoreFrom(1, []beads.Bead{{
+		ID: purgedAdoptionSessionID, Type: session.BeadType, Status: "open", Title: "session",
+		Labels:   []string{session.LabelSession},
+		Metadata: map[string]string{"state": string(session.StateActive), beadmeta.CurrentClaimBeadIDMetadataKey: claim},
+	}}, nil)
+}
+
+// sessionClaimStampRacer lands a newer claim stamp on a session row just
+// before the first write to it, blind or CAS: another `gc hook --claim` of
+// the same session stamping its own claim after this one read the stamp.
+type sessionClaimStampRacer struct {
+	*beads.MemStore
+	t     *testing.T
+	stamp string
+	raced bool
+}
+
+func (r *sessionClaimStampRacer) SetMetadata(id, key, value string) error {
+	r.landRace(id)
+	return r.MemStore.SetMetadata(id, key, value)
+}
+
+func (r *sessionClaimStampRacer) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	r.landRace(id)
+	return r.MemStore.CompareAndSetMetadataKey(id, key, expected, next)
+}
+
+// landRace is the fixture's write, outside the store adapter the session
+// guards look past (storeWriteMethod).
+func (r *sessionClaimStampRacer) landRace(id string) {
+	if r.raced {
+		return
+	}
+	r.raced = true
+	if err := r.MemStore.SetMetadata(id, beadmeta.CurrentClaimBeadIDMetadataKey, r.stamp); err != nil {
+		r.t.Errorf("landing the racing stamp: %v", err)
+	}
+}
+
+// The drop takes its claim back through the production session seams, over a
+// real session row: the dead bead's stamp is cleared, and a claim another
+// invocation of the session stamps between this one's read of the row and
+// its write survives the drop.
+func TestHookClaimPurgedAdoptionKeepsAClaimStampedMeanwhile(t *testing.T) {
+	claimOf := func(t *testing.T, mem *beads.MemStore) string {
+		t.Helper()
+		row, err := mem.Get(purgedAdoptionSessionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return row.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey]
+	}
+
+	t.Run("the dead bead's stamp is cleared", func(t *testing.T) {
+		mem := purgedAdoptionSessionStore("work-1")
+		e := &purgedAdoptionEnv{
+			missing: map[string]bool{"work-1": true},
+			prove:   proveAbsent,
+			session: true,
+			front:   session.NewStore(beads.SessionStore{Store: mem}),
+		}
+
+		if code := e.run(); code != 1 {
+			t.Fatalf("code = %d, want 1; stdout=%s stderr=%s", code, e.stdout.String(), e.stderr.String())
+		}
+		if got := claimOf(t, mem); got != "" {
+			t.Fatalf("current claim = %q, want the dead bead's stamp cleared; stderr=%s", got, e.stderr.String())
+		}
+	})
+
+	t.Run("a claim stamped meanwhile survives", func(t *testing.T) {
+		mem := purgedAdoptionSessionStore("work-1")
+		racer := &sessionClaimStampRacer{MemStore: mem, t: t, stamp: "work-2"}
+		e := &purgedAdoptionEnv{
+			missing: map[string]bool{"work-1": true},
+			prove:   proveAbsent,
+			session: true,
+			front:   session.NewStore(beads.SessionStore{Store: racer}),
+		}
+
+		if code := e.run(); code != 1 {
+			t.Fatalf("code = %d, want 1; stdout=%s stderr=%s", code, e.stdout.String(), e.stderr.String())
+		}
+		if !racer.raced {
+			t.Fatal("the drop wrote nothing to the session row, so the racing stamp never landed")
+		}
+		if got := claimOf(t, mem); got != "work-2" {
+			t.Fatalf("current claim = %q, want the claim stamped meanwhile (work-2)", got)
+		}
+		if strings.Contains(e.stderr.String(), "leaving session") {
+			t.Errorf("stderr = %q, want a lost CAS reported as no failure", e.stderr.String())
+		}
+	})
+}
+
+// forgetSessionClaimVia takes a claim back off the session row through the
+// session front door the stamp is written through.
+func TestForgetSessionClaimVia(t *testing.T) {
+	via := func(front *session.Store) sessionFrontGetter {
+		return func() (*session.Store, error) { return front, nil }
+	}
+
+	t.Run("clears the stamp naming the bead", func(t *testing.T) {
 		front := hookCurrentFrontDoor(t, "work-1")
-		got, err := sessionCurrentClaimVia(func() (*session.Store, error) { return front, nil }, hookCurrentSessionID)
-		if err != nil || got != "work-1" {
-			t.Fatalf("sessionCurrentClaimVia = (%q, %v), want (work-1, nil)", got, err)
+		if err := forgetSessionClaimVia(via(front), hookCurrentSessionID, "work-1"); err != nil {
+			t.Fatalf("forgetSessionClaimVia: %v", err)
+		}
+		if got, err := front.CurrentClaimBeadID(hookCurrentSessionID); err != nil || got != "" {
+			t.Fatalf("current claim = (%q, %v), want it cleared", got, err)
+		}
+	})
+
+	t.Run("leaves a stamp naming other work", func(t *testing.T) {
+		front := hookCurrentFrontDoor(t, "work-1")
+		if err := forgetSessionClaimVia(via(front), hookCurrentSessionID, "work-9"); err != nil {
+			t.Fatalf("forgetSessionClaimVia: %v", err)
+		}
+		if got, err := front.CurrentClaimBeadID(hookCurrentSessionID); err != nil || got != "work-1" {
+			t.Fatalf("current claim = (%q, %v), want work-1 left in place", got, err)
 		}
 	})
 
 	t.Run("wraps a front-door error", func(t *testing.T) {
 		boom := errors.New("front door down")
-		_, err := sessionCurrentClaimVia(func() (*session.Store, error) { return nil, boom }, hookCurrentSessionID)
+		err := forgetSessionClaimVia(func() (*session.Store, error) { return nil, boom }, hookCurrentSessionID, "work-1")
 		if !errors.Is(err, boom) || !strings.Contains(err.Error(), hookCurrentSessionID) {
 			t.Fatalf("err = %v, want the front-door error wrapped with the session id", err)
 		}
 	})
 
-	t.Run("wraps an unreadable session", func(t *testing.T) {
+	t.Run("names an unreadable session", func(t *testing.T) {
 		front := hookCurrentFrontDoor(t, "work-1")
-		_, err := sessionCurrentClaimVia(func() (*session.Store, error) { return front, nil }, "mc-absent")
-		if err == nil || !strings.Contains(err.Error(), "mc-absent") {
-			t.Fatalf("err = %v, want the absent session named", err)
+		err := forgetSessionClaimVia(via(front), "mc-absent", "work-1")
+		if !errors.Is(err, beads.ErrNotFound) || !strings.Contains(err.Error(), "mc-absent") {
+			t.Fatalf("err = %v, want the absent session's not-found, naming it", err)
 		}
 	})
 
 	t.Run("empty id never opens the front door", func(t *testing.T) {
 		opened := false
-		got, err := sessionCurrentClaimVia(func() (*session.Store, error) { opened = true; return nil, nil }, "  ")
-		if err != nil || got != "" || opened {
-			t.Fatalf("sessionCurrentClaimVia(\"\") = (%q, %v) opened=%v, want (\"\", nil) without opening", got, err, opened)
+		err := forgetSessionClaimVia(func() (*session.Store, error) { opened = true; return nil, nil }, "  ", "work-1")
+		if err != nil || opened {
+			t.Fatalf("forgetSessionClaimVia(\"\") = %v opened=%v, want nil without opening", err, opened)
 		}
 	})
 }
@@ -326,10 +459,13 @@ func TestHookClaimPurgedAdoptionNeedsACompleteProof(t *testing.T) {
 			if len(e.proofs) != tc.wantProofs {
 				t.Errorf("proofs = %v, want %d", e.proofs, tc.wantProofs)
 			}
-			for _, id := range e.sessSpy.beadIDs {
-				if id == "" {
-					t.Fatalf("session claim writes = %q, want no clear of an unproven adoption", e.sessSpy.beadIDs)
+			for _, op := range e.stampOps {
+				if strings.HasPrefix(op, "forget ") {
+					t.Fatalf("session stamp ops = %q, want no forget of an unproven adoption", e.stampOps)
 				}
+			}
+			if e.stamp != "work-1" {
+				t.Errorf("current claim = %q, want the unproven adoption's stamp kept", e.stamp)
 			}
 			if !strings.Contains(e.stderr.String(), tc.wantStderr) {
 				t.Errorf("stderr = %q, want %q", e.stderr.String(), tc.wantStderr)

@@ -662,6 +662,44 @@ func (s *Store) CurrentClaimBeadID(id string) (string, error) {
 	return strings.TrimSpace(b.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey]), nil
 }
 
+// ClearCurrentClaim takes back the claim beadID from session id's current-claim
+// stamp: a value CAS from the stamp it read, while that stamp names beadID, to
+// "". It reports whether this call cleared the stamp.
+//
+// It is the clear for a caller that knows which claim it is taking back but
+// not what the session claimed since. Another `gc hook --claim` of the same
+// session may stamp a newer claim between this read and this write, and that
+// stamp must survive: SetCurrentClaim(id, "") would erase it. A stamp naming
+// other work, a stamp already clear, or a blank beadID writes nothing.
+//
+// It shares SetCurrentClaim's exact, session-validated read (validatedBead),
+// and its errors carry the claim and the session. A store with no metadata
+// CAS refuses with an error wrapping beads.ErrConditionalWriteUnsupported
+// rather than clearing blind.
+func (s *Store) ClearCurrentClaim(id, beadID string) (bool, error) {
+	beadID = strings.TrimSpace(beadID)
+	if beadID == "" {
+		return false, nil
+	}
+	b, err := s.validatedBead(id)
+	if err != nil {
+		return false, fmt.Errorf("clearing current claim %q of session %q: %w", beadID, id, err)
+	}
+	stamped := b.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey]
+	if strings.TrimSpace(stamped) != beadID {
+		return false, nil
+	}
+	writer, ok := beads.As[beads.MetadataCASWriter](s.store)
+	if !ok {
+		return false, fmt.Errorf("clearing current claim %q of session %q: %w", beadID, id, beads.ErrConditionalWriteUnsupported)
+	}
+	cleared, err := writer.CompareAndSetMetadataKey(b.ID, beadmeta.CurrentClaimBeadIDMetadataKey, stamped, "")
+	if err != nil {
+		return false, fmt.Errorf("clearing current claim %q of session %q: %w", beadID, id, err)
+	}
+	return cleared, nil
+}
+
 // CloseWithoutReason closes the session bead identified by id without stamping
 // terminal close metadata. It is the front door for the raw store.Close(id)
 // call in closeBead, which stamps ClosePatch via setMetaBatch separately and

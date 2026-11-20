@@ -485,6 +485,17 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 				return fieldBead(t, m, id).Metadata
 			},
 		},
+		"internal/session/store.go:Store.ClearCurrentClaim": { // a claim taken back, by a CAS on its id
+			[]string{beadmeta.CurrentClaimBeadIDMetadataKey, "gc-claimed"},
+			func(t *testing.T, meta []string) map[string]string {
+				m, _ := stampedMem(t, gate.Require)
+				id := fieldRow(t, m, meta...)
+				if cleared, err := sessionFrontDoor(m).ClearCurrentClaim(id, pairs(meta)[beadmeta.CurrentClaimBeadIDMetadataKey]); err != nil || !cleared {
+					t.Fatalf("ClearCurrentClaim = %t, %v", cleared, err)
+				}
+				return fieldBead(t, m, id).Metadata
+			},
+		},
 		"internal/session/lifecycle_transition.go:CommitStartedPatch": {
 			[]string{"continuation_reset_pending", "true", session.ResetCommittedAtKey, ago(time.Minute)},
 			patchSite(func(session.Info) session.MetadataPatch {
