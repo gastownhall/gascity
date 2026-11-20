@@ -197,6 +197,31 @@ func TestGcBeadsBdHealthPassesDatabaseWithoutDataDirForRemoteServer(t *testing.T
 	}
 }
 
+// TestGcBeadsBdHealthFallbackFailsClosedNotInconclusive covers AC-6: with
+// no usable gc helper and a city database that fails its checks, op_health
+// exits 1 naming the database instead of downgrading the failing write
+// probe to a "read-only probe inconclusive" warning and exiting 0.
+func TestGcBeadsBdHealthFallbackFailsClosedNotInconclusive(t *testing.T) {
+	binDir := writeFallbackHeadDolt(t, "Error 1105 (HY000): cannot resolve default branch head for database 'hq': 'ghost'")
+	dataDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dataDir, "hq", ".dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	out := gcBeadsBdOpHarness(t, "op_health", `check_read_only() { return 2; }
+`, cityMetadataHQ, "issue_prefix: hq\ngc.endpoint_origin: managed_city\n", "", dataDir,
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if !strings.Contains(out, "status=1") {
+		t.Fatalf("op_health output = %s, want failure", out)
+	}
+	if !strings.Contains(out, `dolt city database unavailable: database "hq" default branch head unresolvable`) {
+		t.Fatalf("op_health output = %s, want the city database named", out)
+	}
+	if strings.Contains(out, "read-only probe inconclusive") {
+		t.Fatalf("op_health output = %s, a broken city database must not read as an inconclusive read-only probe", out)
+	}
+}
+
 // writeFallbackHeadDolt writes a dolt CLI that answers only the city
 // database HEAD probe, failing it with headErr when non-empty.
 func writeFallbackHeadDolt(t *testing.T, headErr string) string {
