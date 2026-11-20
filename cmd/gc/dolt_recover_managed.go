@@ -183,6 +183,10 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 		}
 	}
 
+	if err := managedDoltRecoveryCooldownError(cityPath, layout.LogFile, ops.now().UTC(), providerRecoverCooldown()); err != nil {
+		report.Deferred = true
+		return report, err
+	}
 	if observedFailure != nil {
 		if err := gate.evaluate(observedFailure); err != nil {
 			report.Deferred = true

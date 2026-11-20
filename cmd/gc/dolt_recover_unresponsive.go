@@ -481,6 +481,43 @@ func (g managedDoltRecoveryGate) recordConclusiveStop(reason, probeError string)
 	return nil
 }
 
+// managedDoltRecoveryCooldownError returns a deferral error when the newest
+// defer or stop decision for cityPath, by any process and for any server
+// incarnation, lies within cooldown of now. It never records anything, so a
+// rejection does not extend the cooldown; records dated after now were
+// already discarded as malformed and cannot suppress recovery indefinitely.
+func managedDoltRecoveryCooldownError(cityPath, logFile string, now time.Time, cooldown time.Duration) error {
+	history, err := readManagedDoltRecoveryHistory(logFile, now)
+	if err != nil {
+		return fmt.Errorf("%w: cannot check the recovery cooldown: %w", errManagedDoltRecoveryDeferred, err)
+	}
+	scope := normalizePathForCompare(cityPath)
+	var newest managedDoltRecoveryRecord
+	for _, rec := range history.Records {
+		if rec.Scope != scope || (rec.Decision != managedDoltRecoveryDecisionDefer && rec.Decision != managedDoltRecoveryDecisionStop) {
+			continue
+		}
+		if rec.At.After(newest.At) {
+			newest = rec
+		}
+	}
+	if newest.At.IsZero() || now.Sub(newest.At) >= cooldown {
+		return nil
+	}
+	return fmt.Errorf("%w: recovery cooldown: a %s decision (%s, %s) was recorded %s ago in %s; next recovery allowed after %s",
+		errManagedDoltRecoveryDeferred, newest.Decision, newest.Reason, newest.Caller, now.Sub(newest.At).Round(time.Second), logFile, cooldown)
+}
+
+// managedDoltRecoveryCooldownForCity applies managedDoltRecoveryCooldownError
+// to cityPath's managed dolt log.
+func managedDoltRecoveryCooldownForCity(cityPath string, now time.Time, cooldown time.Duration) error {
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		return fmt.Errorf("%w: cannot check the recovery cooldown: %w", errManagedDoltRecoveryDeferred, err)
+	}
+	return managedDoltRecoveryCooldownError(cityPath, layout.LogFile, now.UTC(), cooldown)
+}
+
 // managedDoltRecoveryHistoryTailBytes bounds how much of dolt.log recovery
 // reads back. History older than the tail cannot justify a restart.
 const managedDoltRecoveryHistoryTailBytes = 1 << 20

@@ -512,3 +512,138 @@ func TestRecoverManagedDoltConclusiveFailuresRecordStopAndRestart(t *testing.T) 
 		})
 	}
 }
+
+// recoveryRecordCount returns how many valid recovery records dolt.log holds.
+func (h *recoveryGateHarness) recoveryRecordCount() int {
+	h.t.Helper()
+	history, err := readManagedDoltRecoveryHistory(h.logFile(), h.now)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return len(history.Records)
+}
+
+// AC-6: a recovery decision recorded by another process within the cooldown
+// makes this recovery report unhealthy without acting or recording, even
+// after the first attempt replaced the server.
+func TestRecoverManagedDoltDurableCooldownAcrossProcesses(t *testing.T) {
+	replaced := managedDoltServerIncarnation{PID: 1111, StartTime: "previous"}
+	for _, tc := range []struct {
+		name  string
+		seed  func(h *recoveryGateHarness)
+		setup func(h *recoveryGateHarness)
+	}{
+		{
+			name: "recent stop by another process, refused endpoint",
+			seed: func(h *recoveryGateHarness) {
+				h.seedRecoveryRecord(managedDoltRecoveryRecord{
+					At: h.now.Add(-10 * time.Second), Decision: managedDoltRecoveryDecisionStop, Reason: managedDoltRecoveryReasonEndpointRefused,
+					PID: replaced.PID, StartTime: replaced.StartTime, Caller: "gc pid=1",
+				})
+			},
+			setup: func(h *recoveryGateHarness) {
+				h.endpoint = managedDoltEndpointObservation{State: managedDoltEndpointRefused, Err: syscall.ECONNREFUSED}
+			},
+		},
+		{
+			name: "recent defer on another endpoint, listening server",
+			seed: func(h *recoveryGateHarness) {
+				h.seedRecoveryRecord(managedDoltRecoveryRecord{
+					At: h.now.Add(-10 * time.Second), Decision: managedDoltRecoveryDecisionDefer, Reason: managedDoltRecoveryReasonFirstObservation,
+					Endpoint: "127.0.0.1:3399", PID: replaced.PID, StartTime: replaced.StartTime, UnresponsiveSince: h.now.Add(-10 * time.Second),
+				})
+			},
+			setup: func(*recoveryGateHarness) {},
+		},
+		{
+			name: "recent stop, completed read-only response",
+			seed: func(h *recoveryGateHarness) {
+				h.seedRecoveryRecord(managedDoltRecoveryRecord{
+					At: h.now.Add(-29 * time.Second), Decision: managedDoltRecoveryDecisionStop, Reason: managedDoltRecoveryReasonReadOnly,
+					PID: replaced.PID, StartTime: replaced.StartTime,
+				})
+			},
+			setup: func(h *recoveryGateHarness) {
+				h.probeErr = nil
+				h.health = managedDoltSQLHealthReport{QueryReady: true, ReadOnly: "true"}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRecoveryGateHarness(t)
+			tc.seed(h)
+			tc.setup(h)
+			before := h.recoveryRecordCount()
+			report, err := h.recover()
+			assertDeferredWithoutRestart(t, h, report, err)
+			if !strings.Contains(err.Error(), "cooldown") {
+				t.Fatalf("err = %v, want an explicit cooldown reason", err)
+			}
+			if got := h.recoveryRecordCount(); got != before {
+				t.Fatalf("recovery records = %d, want %d (a cooldown rejection must not extend the cooldown):\n%s", got, before, h.logText())
+			}
+		})
+	}
+	t.Run("an expired cooldown lets recovery proceed", func(t *testing.T) {
+		h := newRecoveryGateHarness(t)
+		h.seedRecoveryRecord(managedDoltRecoveryRecord{
+			At: h.now.Add(-31 * time.Second), Decision: managedDoltRecoveryDecisionStop, Reason: managedDoltRecoveryReasonEndpointRefused,
+			PID: replaced.PID, StartTime: replaced.StartTime,
+		})
+		h.endpoint = managedDoltEndpointObservation{State: managedDoltEndpointRefused, Err: syscall.ECONNREFUSED}
+		if report, err := h.recover(); err != nil || !report.Restarted {
+			t.Fatalf("report = %+v err = %v, want restart after the cooldown", report, err)
+		}
+	})
+	t.Run("a healthy server is reported healthy inside the cooldown", func(t *testing.T) {
+		h := newRecoveryGateHarness(t)
+		h.seedRecoveryRecord(managedDoltRecoveryRecord{
+			At: h.now.Add(-5 * time.Second), Decision: managedDoltRecoveryDecisionStop, Reason: managedDoltRecoveryReasonEndpointRefused,
+		})
+		h.probeErr = nil
+		if report, err := h.recover(); err != nil || !report.Healthy || h.restarted() {
+			t.Fatalf("report = %+v err = %v calls = %v, want healthy without restart", report, err, h.calls)
+		}
+	})
+}
+
+// AC-6 through provider health: a durable recovery decision from another
+// process skips the provider recover op even with no in-memory timestamp.
+func TestHealthBeadsProviderHonorsDurableRecoveryCooldown(t *testing.T) {
+	cityPath := t.TempDir()
+	writeMinimalCityToml(t, cityPath)
+	opsFile := writeBreakerAwarePreflightFakes(t, cityPath, "unhealthy")
+	cityKey := normalizePathForCompare(cityPath)
+	t.Cleanup(func() { lastBeadsProviderRecover.Delete(cityKey) })
+
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+	prevNow := providerRecoverNow
+	providerRecoverNow = func() time.Time { return t0 }
+	t.Cleanup(func() { providerRecoverNow = prevNow })
+
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := appendManagedDoltRecoveryRecord(layout.LogFile, managedDoltRecoveryRecord{
+		At: t0.Add(-10 * time.Second), Decision: managedDoltRecoveryDecisionStop, Reason: managedDoltRecoveryReasonEndpointRefused,
+		Scope: cityKey, Endpoint: "127.0.0.1:3311", PID: 1111, StartTime: "previous", Window: 180 * time.Second, Caller: "gc pid=1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	err = healthBeadsProvider(cityPath)
+	if err == nil || !strings.Contains(err.Error(), "cooldown") {
+		t.Fatalf("healthBeadsProvider() error = %v, want unhealthy with a cooldown reason", err)
+	}
+	ops, readErr := os.ReadFile(opsFile)
+	if readErr != nil {
+		t.Fatalf("read provider ops: %v", readErr)
+	}
+	if got := strings.Fields(strings.TrimSpace(string(ops))); len(got) != 1 || got[0] != "health" {
+		t.Fatalf("provider ops = %v, want only health (recover skipped by the durable cooldown)", got)
+	}
+	if _, loaded := lastBeadsProviderRecover.Load(cityKey); loaded {
+		t.Fatalf("durable cooldown skip must not record an in-memory recover timestamp")
+	}
+}
