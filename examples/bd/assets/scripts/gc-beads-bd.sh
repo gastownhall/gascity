@@ -5054,35 +5054,50 @@ else
     # temporary file without sibling assets. Keep the production helper as the
     # canonical copy, but preserve the same detector behavior for those harnesses.
     recovery_should_skip_due_to_enospc() {
+        ENOSPC_PROBE_DIR=""
+        ENOSPC_FREE_BYTES=""
+        ENOSPC_FLOOR_BYTES=""
         [ -n "${LOG_FILE:-}" ] && [ -r "$LOG_FILE" ] || return 1
+        # Scan the recent log tail rather than the whole file; an old transient
+        # ENOSPC error from a since-resolved disk-pressure event should not block
+        # recovery indefinitely.
         tail -n 1000 "$LOG_FILE" 2>/dev/null \
             | grep -qE 'no space left on device|copy_file_range:.*no space|ENOSPC' \
             || return 1
-        enospc_disk_has_headroom && return 1
-        return 0
-    }
-
-    enospc_disk_has_headroom() {
-        enospc_dir="${DATA_DIR:-}"
-        if [ -z "$enospc_dir" ] || [ ! -d "$enospc_dir" ]; then
-            enospc_dir=$(dirname "$LOG_FILE")
+        ENOSPC_PROBE_DIR="${DATA_DIR:-}"
+        [ -n "$ENOSPC_PROBE_DIR" ] || ENOSPC_PROBE_DIR=$(dirname "$LOG_FILE")
+        ENOSPC_FLOOR_BYTES="${GC_DOLT_WARN_FREE_BYTES:-}"
+        case "$ENOSPC_FLOOR_BYTES" in
+            ''|*[!0-9]*) ENOSPC_FLOOR_BYTES=2147483648 ;;
+        esac
+        ENOSPC_FLOOR_BYTES=$(printf '%s' "$ENOSPC_FLOOR_BYTES" | sed 's/^0*//')
+        [ -n "$ENOSPC_FLOOR_BYTES" ] || ENOSPC_FLOOR_BYTES=2147483648
+        [ "${#ENOSPC_FLOOR_BYTES}" -le 18 ] || ENOSPC_FLOOR_BYTES=2147483648
+        if [ -d "$ENOSPC_PROBE_DIR" ] \
+            && ENOSPC_FREE_BYTES=$(df -Pk "$ENOSPC_PROBE_DIR" 2>/dev/null); then
+            # Available is the field before the first NN% field, so a filesystem
+            # name with spaces still parses; KiB become bytes in awk, not in shell
+            # arithmetic.
+            ENOSPC_FREE_BYTES=$(printf '%s\n' "$ENOSPC_FREE_BYTES" | awk '
+                NR > 1 {
+                    for (i = 2; i <= NF; i++) {
+                        if ($i ~ /^[0-9]+%$/ && $(i - 1) ~ /^-?[0-9]+$/) {
+                            kb = $(i - 1) + 0
+                            if (kb < 0) kb = 0
+                            printf "%.0f\n", kb * 1024
+                            exit
+                        }
+                    }
+                }')
+        else
+            ENOSPC_FREE_BYTES=""
         fi
-        enospc_floor="${GC_DOLT_WARN_FREE_BYTES:-2147483648}"
-        case "$enospc_floor" in
-            ''|*[!0-9]*) enospc_floor=2147483648 ;;
-        esac
-        # Read the floor as decimal: shell arithmetic takes a leading 0 as octal.
-        enospc_floor=$(printf '%s' "$enospc_floor" | sed 's/^0*//')
-        [ -n "$enospc_floor" ] || enospc_floor=0
-        # More than 18 digits can overflow shell arithmetic.
-        [ "${#enospc_floor}" -le 18 ] || enospc_floor=2147483648
-        # 0 means "no disk warning" to gc; it must not switch the skip off.
-        [ "$enospc_floor" -gt 0 ] || enospc_floor=2147483648
-        enospc_avail_kb=$(df -Pk "$enospc_dir" 2>/dev/null | awk 'NR == 2 { print $4 }')
-        case "$enospc_avail_kb" in
-            ''|*[!0-9]*) return 1 ;;
-        esac
-        [ "$enospc_avail_kb" -ge $(( (enospc_floor + 1023) / 1024 )) ]
+        if [ -z "$ENOSPC_FREE_BYTES" ]; then
+            echo "warning: cannot read free space on $ENOSPC_PROBE_DIR; treating the ENOSPC evidence in $LOG_FILE as current" >&2
+            return 0
+        fi
+        awk -v free="$ENOSPC_FREE_BYTES" -v floor="$ENOSPC_FLOOR_BYTES" \
+            'BEGIN { exit !(free + 0 < floor + 0) }'
     }
 fi
 

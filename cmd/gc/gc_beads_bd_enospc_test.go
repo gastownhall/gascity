@@ -134,9 +134,61 @@ func TestENOSPCSkipMeasuresTheDataDir(t *testing.T) {
 	}
 }
 
+// TestENOSPCSkipHoldsWhenFreeSpaceIsUnmeasurable pins the fail-closed side of
+// the free-space check (gastownhall/gascity#2158): when the probe directory's
+// free space cannot be read, the ENOSPC evidence still counts, and the
+// detector says once on stderr which directory it could not measure.
+func TestENOSPCSkipHoldsWhenFreeSpaceIsUnmeasurable(t *testing.T) {
+	const roomyKB = "3145728" // 3 GiB in df -Pk blocks, above the default floor
+	for label, detector := range enospcDetectors(t) {
+		for _, tc := range []struct {
+			name        string
+			availKB     string
+			missingData bool
+		}{
+			{name: "df fails", availKB: ""},
+			{name: "df prints no Available value", availKB: "garbage"},
+			{name: "df prints a non-numeric Available", availKB: "notanumber"},
+			{name: "data dir does not exist", availKB: roomyKB, missingData: true},
+		} {
+			t.Run(label+"/"+tc.name, func(t *testing.T) {
+				dir := t.TempDir()
+				dataDir := filepath.Join(dir, "data")
+				if !tc.missingData {
+					if err := os.MkdirAll(dataDir, 0o755); err != nil {
+						t.Fatalf("mkdir data: %v", err)
+					}
+				}
+				logFile := filepath.Join(dir, "dolt.log")
+				if err := os.WriteFile(logFile, []byte("fatal: no space left on device\n"), 0o644); err != nil {
+					t.Fatalf("write log: %v", err)
+				}
+				stdout, stderr, skipped := runENOSPCDetectorStreams(t, dir, detector, logFile, dataDir, tc.availKB, "")
+				if !skipped {
+					t.Fatalf("skip = false, want true (fail closed)\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+				}
+				lines := strings.Split(strings.TrimRight(stderr, "\n"), "\n")
+				if len(lines) != 1 || !strings.Contains(lines[0], dataDir) {
+					t.Fatalf("stderr = %q, want exactly one line naming %s", stderr, dataDir)
+				}
+			})
+		}
+	}
+}
+
 // runENOSPCDetector sources detector in /bin/sh with a fake df on PATH and
-// reports whether recovery_should_skip_due_to_enospc returned true.
+// reports whether recovery_should_skip_due_to_enospc returned true. availKB
+// is the fake df's Available column; "" makes df fail and "garbage" makes it
+// print output with no Available value.
 func runENOSPCDetector(t *testing.T, dir, detector, logFile, dataDir, availKB, floor string) (string, bool) {
+	t.Helper()
+	stdout, stderr, skipped := runENOSPCDetectorStreams(t, dir, detector, logFile, dataDir, availKB, floor)
+	return stdout + stderr, skipped
+}
+
+// runENOSPCDetectorStreams is runENOSPCDetector with stdout and stderr kept
+// apart.
+func runENOSPCDetectorStreams(t *testing.T, dir, detector, logFile, dataDir, availKB, floor string) (string, string, bool) {
 	t.Helper()
 	binDir := filepath.Join(dir, "bin")
 	if err := os.MkdirAll(binDir, 0o755); err != nil {
@@ -145,9 +197,12 @@ func runENOSPCDetector(t *testing.T, dir, detector, logFile, dataDir, availKB, f
 	df := `#!/bin/sh
 printf '%s\n' "$*" > "` + filepath.Join(dir, "df.args") + `"
 `
-	if availKB == "" {
+	switch availKB {
+	case "":
 		df += "echo 'df: probe failed' >&2\nexit 1\n"
-	} else {
+	case "garbage":
+		df += "echo 'df: no file systems processed'\n"
+	default:
 		df += `echo 'Filesystem 1024-blocks Used Available Capacity Mounted on'
 echo "/dev/fake 999999999 1 ` + availKB + ` 1% /"
 `
@@ -168,9 +223,11 @@ echo "/dev/fake 999999999 1 ` + availKB + ` 1% /"
 		env = append(env, "GC_DOLT_WARN_FREE_BYTES="+floor)
 	}
 	cmd.Env = env
-	out, err := cmd.CombinedOutput()
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("run detector: %v\n%s", err, out)
+		t.Fatalf("run detector: %v\nstdout:\n%s\nstderr:\n%s", err, out, stderr.String())
 	}
-	return string(out), strings.Contains(string(out), "SKIP")
+	return string(out), stderr.String(), strings.Contains(string(out), "SKIP")
 }
