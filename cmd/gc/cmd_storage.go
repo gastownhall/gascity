@@ -230,6 +230,7 @@ operator arranges rather than something a program can observe.`,
 		newStorageVouchBdCmd(surface, stdout, stderr),
 		newStorageRemoteStageCmd(stdout, stderr),
 		newStorageSnapshotCmd(surface, stdout, stderr),
+		newStorageSplitCmd(surface, stdout, stderr),
 	)
 	return cmd
 }
@@ -620,10 +621,47 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 	}
 	defer window.closeReporting(logPrefix, stderr, &code)
 	window.setTimeBudget(request.TimeBudget)
+	result, code := runCityMigration(ctx, request, target, plan, shared, logPrefix, stderr, "")
+	if code != 0 {
+		return code
+	}
+	// The window closes before the run reports: a provider its stop left
+	// running fails the run, and the report then says to start nothing.
+	window.closeReporting(logPrefix, stderr, &code)
+	startCity := " Start the city with `gc start`."
+	if code != 0 {
+		startCity = ""
+	}
+	fmt.Fprintf(stdout, "Migrated. %s now serves %s from %s; %s%s.%s\n", //nolint:errcheck // best-effort stdout
+		target.Binding, infraMigrationClassList(), target.Database, describeInfraClear(result.report.Clear), relowerSuccessClause(result.relowered), startCity)
+	if awaiting := rigsWithoutImportRecord(request.CityPath, request.Cfg, target); len(awaiting) > 0 {
+		fmt.Fprintf(stdout, "Rigs awaiting import (their graph rows stay readable until then): %s. Import them with `%s`.\n", strings.Join(awaiting, ", "), rigImportAllInstruction()) //nolint:errcheck // best-effort stdout
+	}
+	return code
+}
+
+// cityMigrationResult is what a city migration that converged did.
+type cityMigrationResult struct {
+	report    infraMigrationReport
+	relowered opjournal.RelowerReport
+}
+
+// runCityMigration is the city migration inside the caller's controller lock,
+// shared-store exclusion, guard and maintenance window: the foreign-row census
+// an attested shared store calls for, the copy (or the re-copy from the
+// backup) and the clear, the served-binding note, and the re-lowering of the
+// converged binding's deliver-now units. It returns a non-zero exit code on
+// anything short of converged: 75 when the time budget paused it. The caller
+// closes the window and reports; `gc storage migrate --from-work` and the
+// guided split share it. unconverged, when the caller gives it, is the advice
+// said and recorded for a copy that stopped before its convergence marker, in
+// place of the engine's, whose remedy is `gc storage migrate --from-work`:
+// the guided split names its own command, which keeps its journal.
+func runCityMigration(ctx context.Context, request storageOperatorRequest, target infraBindingTarget, plan *storebinding.StoragePlan, shared sharedStoreExclusion, logPrefix string, stderr io.Writer, unconverged string) (cityMigrationResult, int) {
 	if shared.Attested && !request.FromBackup {
 		if err := sharedStoreForeignRowRefusal(request.CityPath, request.Cfg); err != nil {
 			fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-			return 1
+			return cityMigrationResult{}, 1
 		}
 	}
 
@@ -648,15 +686,20 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 		// still under way.
 		fmt.Fprintf(stderr, "%s: %v (exit %d)\n", logPrefix, report.Paused, storagePausedExitCode) //nolint:errcheck // best-effort stderr
 		recordStorageBindingOutcome(rec, report, report.Paused.Error())
-		return storagePausedExitCode
+		return cityMigrationResult{}, storagePausedExitCode
 	}
 	if !report.serving() {
 		advice := infraMigrationOperatorAdvice(report, logPrefix)
+		// An unconverged copy whose binding could not be read keeps the
+		// engine's advice: it puts the hazard of a missing volume first.
+		if unconverged != "" && report.Outcome == infraMigrationUnconverged && report.BindingProbe == nil {
+			advice = unconverged
+		}
 		if advice != "" {
 			fmt.Fprintln(stderr, advice) //nolint:errcheck // best-effort stderr
 		}
 		recordStorageBindingOutcome(rec, report, advice)
-		return 1
+		return cityMigrationResult{}, 1
 	}
 	recordStorageBindingOutcome(rec, report, "")
 	// The served-binding note, now rather than at the first boot: the binding
@@ -668,32 +711,21 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 	// already current.
 	if err := recordServedBinding(plan, request.CityPath, request.Cfg.EffectiveStorage(), target); err != nil {
 		fmt.Fprintf(stderr, "%s: recording the served binding: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
-		return 1
+		return cityMigrationResult{}, 1
 	}
 	// The last step, on a converged binding only: every other binding handle
 	// of this command is closed, and the step opens the binding as the
 	// runtime serves it.
-	var relowered opjournal.RelowerReport
+	result := cityMigrationResult{report: report}
 	if converged, ok := report.convergedBinding(plan, request.CityPath, request.Cfg); ok {
-		relowered, err = relowerConvergedNowUnits(ctx, converged, rec, logPrefix, stderr)
+		relowered, err := relowerConvergedNowUnits(ctx, converged, rec, logPrefix, stderr)
 		if err != nil {
 			fmt.Fprintln(stderr, relowerFailureAdvice(logPrefix, target.Binding, err)) //nolint:errcheck // best-effort stderr
-			return 1
+			return cityMigrationResult{}, 1
 		}
+		result.relowered = relowered
 	}
-	// The window closes before the run reports: a provider its stop left
-	// running fails the run, and the report then says to start nothing.
-	window.closeReporting(logPrefix, stderr, &code)
-	startCity := " Start the city with `gc start`."
-	if code != 0 {
-		startCity = ""
-	}
-	fmt.Fprintf(stdout, "Migrated. %s now serves %s from %s; %s%s.%s\n", //nolint:errcheck // best-effort stdout
-		target.Binding, infraMigrationClassList(), target.Database, describeInfraClear(report.Clear), relowerSuccessClause(relowered), startCity)
-	if awaiting := rigsWithoutImportRecord(request.CityPath, request.Cfg, target); len(awaiting) > 0 {
-		fmt.Fprintf(stdout, "Rigs awaiting import (their graph rows stay readable until then): %s. Import them with `%s`.\n", strings.Join(awaiting, ", "), rigImportAllInstruction()) //nolint:errcheck // best-effort stdout
-	}
-	return code
+	return result, 0
 }
 
 // acquireStorageMigrationGuard takes the city's storage migration guard, with
@@ -720,7 +752,7 @@ func doStorageStatus(request storageOperatorRequest, stdout, stderr io.Writer) i
 		return code
 	}
 	fmt.Fprintln(stdout, "rigs:") //nolint:errcheck // best-effort stdout
-	if reportRigCensus(stdout, censusRigs(request.CityPath, request.Cfg, target, false)) != 0 {
+	if reportRigCensus(stdout, censusRigs(request.CityPath, request.Cfg, target)) != 0 {
 		code = 1
 	}
 	return code

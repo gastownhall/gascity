@@ -11,9 +11,13 @@ package main
 //     integrity_check on the copy before the manifest. Its JSONL is read from
 //     the copy, a page of ids at a time, so the two agree row for row and the
 //     read holds one page in memory;
-//   - a native Dolt work or rig store: a Dolt tag of HEAD (exact, copies
-//     nothing; beads.NativeDoltTagger). It covers the committed tables, not
-//     the dolt_ignore'd ones bd keeps wisps in: the JSONL holds those;
+//   - a work or rig store in the city's managed Dolt: in `gc storage
+//     snapshot --work`, the server's data directory, copied with the server
+//     stopped (storage_snapshot_city.go), when the maintenance window
+//     started the server; else a Dolt tag of HEAD (copies nothing;
+//     beads.NativeDoltTagger), which covers the committed tables, not the
+//     dolt_ignore'd ones bd keeps wisps in;
+//   - another native Dolt store: a Dolt tag of HEAD;
 //   - a bd-backed store on another lane (bd CLI, hosted bd, proxied): `bd
 //     export --all`, the core jsonl-export format;
 //   - a file store: a copy of its file;
@@ -41,8 +45,11 @@ package main
 // writing storage verb does (storage_verb_exclusion.go), because a stopped
 // managed-Dolt city has no server to read until the window starts one.
 //
-// Restore (storage_snapshot_restore.go) puts a snapshot's binding back. A
-// work-store restore is a runbook step (owner decision O7).
+// `gc storage snapshot --work` also records city.toml and the city's storage
+// records (storage_snapshot_city.go; snapshotOptions.City). Restore puts a
+// snapshot's binding back (storage_snapshot_restore.go), or the whole city
+// from a snapshot taken before the split (--city, storage_snapshot_city.go;
+// owner decision D-b supersedes O7's runbook step).
 //
 // No function here takes or returns a store: each store is opened, read and
 // closed inside one function, and the readers take the narrow read surfaces
@@ -125,6 +132,14 @@ type snapshotOptions struct {
 	// NoRetention keeps every earlier snapshot: the reverse's mandatory one
 	// (R0) must not prune an older one, the pre-split snapshot among them.
 	NoRetention bool
+	// City makes a snapshot with the work store a way back to the whole city
+	// (`restore --city`): it records city.toml and the city's storage
+	// records, and copies a managed Dolt's data directory with the server
+	// stopped. `gc storage snapshot --work` sets it. The reverse's mandatory
+	// snapshot (R0) does not: it holds a binding, which --city never
+	// restores, so the copy would stop the server mid-reverse and take the
+	// disk for nothing.
+	City bool
 }
 
 // storageSnapshotDefaultDir is .gc/snapshots: under .gc, so `gc init --from`
@@ -153,13 +168,33 @@ Each store gets an exact copy where its kind has one and, always, a JSONL of
 every row with its edges and their payloads:
 
   binding (SQLite)   VACUUM INTO, then PRAGMA integrity_check on the copy
-  native Dolt        a Dolt tag of HEAD (wisps, in dolt_ignore'd tables, are
-                     not in it; the JSONL holds them)
+  managed Dolt       the server's data directory, copied with the server
+                     stopped, when this run started the server; else a Dolt
+                     tag of HEAD (wisps, in dolt_ignore'd tables, are not in
+                     a tag; the JSONL holds them)
+  other native Dolt  a Dolt tag of HEAD
   bd CLI, hosted bd  bd export --all
   file               a copy of the file
   generic exec       the JSONL alone
 
 The JSONL is a record, not yet a restore source: no tool imports it.
+
+A managed Dolt's data directory is copied whole, empty directories
+included. The copy is refused before the server stops when it would leave
+less than the managed Dolt's critical floor (GC_DOLT_MIN_FREE_BYTES) free
+where it lands.
+
+--work also records city.toml and the city's storage records (the id-floor
+file, the served-binding and cleared notes), so a snapshot taken before the
+split is a way back to the whole city: gc storage snapshot restore <id>
+--city puts it back.
+
+The copy of a managed Dolt's data directory holds every database the server
+serves. --work refuses, before it starts or stops anything, when a rig keeps
+its store there and --rigs is not passed: the snapshot would record no store
+for that database, and --city would refuse it. A database no store of the city keeps
+(gc's probe database, a removed rig's) is named in a note: --city puts it back
+as the copy holds it, unproven.
 
 manifest.json records the stores, their row and edge counts, each file's
 sha256, the gc version, the work store's identity, and the binding root's
@@ -247,6 +282,10 @@ func doStorageSnapshot(ctx context.Context, request storageOperatorRequest, opts
 	}
 	identity, err := currentWorkStoreIdentity(request.CityPath)
 	if err != nil {
+		return fail(err)
+	}
+	opts.City = opts.Work
+	if err := snapshotCityRigsRefusal(request, opts); err != nil {
 		return fail(err)
 	}
 
@@ -376,17 +415,8 @@ func takeStorageSnapshot(ctx context.Context, request storageOperatorRequest, op
 			return "", nil, err
 		}
 	}
-	if opts.Work {
-		if err := add(snapshotScope(request, snapshotScopeRef{name: "work", root: request.CityPath}, snapshotTagName(id, to), dir)); err != nil {
-			return "", nil, err
-		}
-	}
-	if opts.Rigs {
-		for _, rig := range snapshotRigs(request) {
-			if err := add(snapshotScope(request, rig, snapshotTagName(id, to), dir)); err != nil {
-				return "", nil, err
-			}
-		}
+	if err := snapshotWorkAndRigs(request, opts, snapshotTagName(id, to), dir, &manifest, add); err != nil {
+		return "", nil, err
 	}
 	if err := publishSnapshotManifest(ctx, dir, manifest); err != nil {
 		return "", nil, err
@@ -414,6 +444,8 @@ func takeStorageSnapshot(ctx context.Context, request storageOperatorRequest, op
 
 func describeSnapshotExact(e snapshotExact) string {
 	switch e.Method {
+	case snapshotMethodDoltDataDir:
+		return fmt.Sprintf("the managed Dolt's data directory %s (%d file(s))", e.Tree.Path, len(e.Tree.Files))
 	case snapshotMethodDoltTag:
 		return fmt.Sprintf("Dolt tag %s (%s)", e.Tag, e.Commit)
 	case snapshotMethodNone:
@@ -631,11 +663,12 @@ func snapshotScope(request storageOperatorRequest, scope snapshotScopeRef, tag, 
 		}
 		rec.Exact = snapshotExact{Method: snapshotMethodBdExport, File: &file}
 	case snapshotMethodFileCopy:
+		copiedAt := time.Now().UTC()
 		file, err := copySnapshotFile(dir, filepath.Join(scope.root, ".gc", "beads.json"), filepath.Join(files, "beads.json"))
 		if err != nil {
 			return rec, err
 		}
-		rec.Exact = snapshotExact{Method: snapshotMethodFileCopy, File: &file}
+		rec.Exact = snapshotExact{Method: snapshotMethodFileCopy, File: &file, CopiedAt: copiedAt}
 	default:
 		rec.Exact = snapshotExact{Method: snapshotMethodNone}
 		rec.Notes = append(rec.Notes, "provider "+provider+" has no exact snapshot, and no tool restores a store from the JSONL yet: this snapshot is a record of the store, not a way back to it")
@@ -645,6 +678,7 @@ func snapshotScope(request storageOperatorRequest, scope snapshotScopeRef, tag, 
 	if err != nil {
 		return rec, fmt.Errorf("listing the store: %w", err)
 	}
+	rec.JSONLReadAt = time.Now().UTC()
 	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
 	batch, _ := beads.As[beads.DependencyBatchLister](under)
 	payloadBatch, _ := beads.As[beads.DepMetadataBatchReader](under)
@@ -663,6 +697,92 @@ func snapshotScope(request storageOperatorRequest, scope snapshotScopeRef, tag, 
 		return nil
 	})
 	return rec, err
+}
+
+// snapshotWorkAndRigs snapshots the work store and the rigs opts names into
+// manifest through add. A copy of the managed Dolt's data directory, taken
+// for the work store (snapshotWork), is the exact copy of every store in it,
+// and its census (snapshotDoltCensus) runs once every store is recorded.
+func snapshotWorkAndRigs(request storageOperatorRequest, opts snapshotOptions, tag, dir string, manifest *snapshotManifest, add func(snapshotStoreRecord, error) error) error {
+	var dolt *snapshotExact
+	if opts.Work {
+		var err error
+		if dolt, err = snapshotWork(request, opts, tag, dir, manifest, add); err != nil {
+			return err
+		}
+	}
+	if opts.Rigs {
+		for _, rig := range snapshotRigs(request) {
+			if err := add(snapshotRigScope(request, rig, tag, dir, dolt)); err != nil {
+				return err
+			}
+		}
+	}
+	if dolt == nil {
+		return nil
+	}
+	return snapshotDoltCensus(request, *dolt.Tree, manifest)
+}
+
+// snapshotWork snapshots the work store into manifest through add. A
+// snapshot that is a way back to the whole city (opts.City) first records the
+// city (city.toml and its storage records) and, for a work store in the
+// city's managed Dolt, copies the server's data directory before any store is
+// opened on it (D-c). It returns that copy, the exact one of every store in
+// it.
+func snapshotWork(request storageOperatorRequest, opts snapshotOptions, tag, dir string, manifest *snapshotManifest, add func(snapshotStoreRecord, error) error) (*snapshotExact, error) {
+	var dolt *snapshotExact
+	database := ""
+	if opts.City {
+		city, err := snapshotCityFiles(request.CityPath, dir)
+		if err != nil {
+			return nil, fmt.Errorf("city: %w", err)
+		}
+		manifest.CityRecord = city
+		manifest.Notes = append(manifest.Notes, snapshotCityConfigNote)
+		if database = snapshotScopeDoltDatabase(request.CityPath, request.CityPath); database != "" {
+			exact, why, err := snapshotDoltDataDir(request.CityPath, dir)
+			if err != nil {
+				return nil, err
+			}
+			if exact == nil {
+				manifest.Notes = append(manifest.Notes, why)
+			}
+			dolt = exact
+		}
+	}
+	work := snapshotScopeRef{name: "work", root: request.CityPath}
+	return dolt, add(withSnapshotDoltCopy(snapshotScope(request, work, tag, dir))(dolt, database))
+}
+
+// snapshotRigScope snapshots one rig's store. A rig whose database is in the
+// managed Dolt's data directory the snapshot copied (dolt) takes that copy as
+// its exact one.
+func snapshotRigScope(request storageOperatorRequest, rig snapshotScopeRef, tag, dir string, dolt *snapshotExact) (snapshotStoreRecord, error) {
+	database := ""
+	if dolt != nil {
+		database = snapshotScopeDoltDatabase(request.CityPath, rig.root)
+	}
+	return withSnapshotDoltCopy(snapshotScope(request, rig, tag, dir))(dolt, database)
+}
+
+// withSnapshotDoltCopy returns a function that records dolt, the managed
+// Dolt's data directory, as the exact copy of a store that keeps database in
+// it, in place of the Dolt tag its kind takes; the tag stays a note. A store
+// with no database there (database "") keeps its own exact copy.
+func withSnapshotDoltCopy(rec snapshotStoreRecord, err error) func(dolt *snapshotExact, database string) (snapshotStoreRecord, error) {
+	return func(dolt *snapshotExact, database string) (snapshotStoreRecord, error) {
+		if err != nil || dolt == nil || database == "" {
+			return rec, err
+		}
+		if rec.Exact.Method == snapshotMethodDoltTag {
+			rec.Notes = append(rec.Notes, fmt.Sprintf("Dolt tag %s (%s) also taken", rec.Exact.Tag, rec.Exact.Commit))
+		}
+		rec.Exact = *dolt
+		rec.Exact.Database = database
+		rec.Notes = append(rec.Notes, "the exact copy is the managed Dolt's data directory, copied with the server stopped; it holds every database the server serves, wisps included, and this store's is "+database)
+		return rec, nil
+	}
 }
 
 // snapshotExactMethod is the exact copy a scope's kind has (S5 §5.3 table).

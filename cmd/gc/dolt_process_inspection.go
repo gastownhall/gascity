@@ -10,10 +10,10 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/pidutil"
+	"github.com/gastownhall/gascity/internal/processgroup"
 )
 
 const (
@@ -387,15 +387,15 @@ func lsofOutputWithTimeout(timeout time.Duration, args ...string) ([]byte, error
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "lsof", args...)
 	cmd.WaitDelay = 100 * time.Millisecond
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	processgroup.StartCommandInNewGroup(cmd)
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return nil
 		}
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
-			return err
-		}
-		return nil
+		// Force-kill the whole group, matching the immediate SIGKILL this
+		// cancel has always sent: the deadline has passed and a probe holding
+		// the output pipes open would otherwise outlive it.
+		return processgroup.KillCommandGroup(cmd, 0, processgroup.Options{})
 	}
 	out, err := cmd.Output()
 	if ctxErr := ctx.Err(); ctxErr != nil {
@@ -584,15 +584,15 @@ func processArgsFromPS(pid int, timeout time.Duration) (string, error) {
 
 	cmd := exec.CommandContext(ctx, "ps", "-p", strconv.Itoa(pid), "-o", "args=")
 	cmd.WaitDelay = 100 * time.Millisecond
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	processgroup.StartCommandInNewGroup(cmd)
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
 			return nil
 		}
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
-			return err
-		}
-		return nil
+		// Force-kill the whole group, matching the immediate SIGKILL this
+		// cancel has always sent: the deadline has passed and a probe holding
+		// the output pipes open would otherwise outlive it.
+		return processgroup.KillCommandGroup(cmd, 0, processgroup.Options{})
 	}
 	out, err := cmd.Output()
 	if ctx.Err() != nil {

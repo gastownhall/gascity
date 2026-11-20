@@ -923,6 +923,7 @@ func (r drainAckFinalizeResult) applyTo(info sessionpkg.Info) sessionpkg.Info {
 }
 
 func finalizeDrainAckStoppedSession(
+	cityPath string,
 	cfg *config.City,
 	store beads.Store,
 	sw *SeatWork,
@@ -997,6 +998,12 @@ func finalizeDrainAckStoppedSession(
 				dt.remove(info.ID)
 			}
 			recordStopped(true)
+			// Pool worktrees are transient by design — reclaim disk when the
+			// session bead is retired, same as the stranded-repair and
+			// pool-freeable close paths below. Skipped under safety gates
+			// (uncommitted, unpushed) and overridable via
+			// cfg.Daemon.AutoPruneWorkerDir (gascity#8093).
+			pruneAgentHomeWorktreeIfSafeInfo(info, cityPath, cfg, stderr)
 			// write-returns-Info (Step 6d): the caller's snapshot fold is ApplyPatch(the
 			// ClosePatch) + MarkClosed (closed:true). The raw session.Status="closed"
 			// mirror is deleted — the caller's MarkClosed fold is the sole same-tick
@@ -1120,7 +1127,7 @@ func reconcileDrainAckStopPending(
 		return true, drainAckFinalizeResult{}
 	}
 	return true, finalizeDrainAckStoppedSession(
-		cfg, store, sw, info, tp.TemplateName,
+		cityPath, cfg, store, sw, info, tp.TemplateName,
 		!desired || isPoolManagedSessionInfo(info),
 		dops, dt, clk, rec, stderr,
 	)
@@ -1273,7 +1280,7 @@ func finalizeDrainAckStopPendingSessions(
 		// state=drained: open pool session beads occupy slots in the next demand
 		// calculation, while closed beads remain only as lifecycle history.
 		finalizeDrainAckStoppedSession(
-			cfg, store, sw, info,
+			cityPath, cfg, store, sw, info,
 			normalizedSessionTemplateInfo(info, cfg),
 			isPoolManagedSessionInfo(info),
 			dops, dt, clk, rec, stderr,
@@ -2783,7 +2790,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							continue
 						}
 						result := finalizeDrainAckStoppedSession(
-							cfg, store, sw, infoByID[id], template,
+							cityPath, cfg, store, sw, infoByID[id], template,
 							!configuredNames[name], dops, dt, clk, rec, stderr,
 						)
 						// finalizeDrainAckStoppedSession may close the bead in memory; fold
@@ -3534,7 +3541,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						finalizeDT = nil
 					}
 					result := finalizeDrainAckStoppedSession(
-						cfg, store, sw, infoByID[id], tp.TemplateName,
+						cityPath, cfg, store, sw, infoByID[id], tp.TemplateName,
 						isPoolManagedSessionInfo(infoByID[id]),
 						dops, finalizeDT,
 						clk, rec, stderr,
@@ -5354,6 +5361,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		info, ok := infoByID[id]
 		return info, ok
 	}
+	// Planned starts already ran. Drop suspend drains that the resume made
+	// stale before the scan can arm GC_DRAIN_ACK on the replacement process.
+	cancelResumedSuspendDrains(dt, sp, infoLookup, wakeEvals, cfg, citySuspendedWithState(cfg, suspState), trace)
 	advanceSessionDrainsWithSessionsTraced(cityPath, dt, sp, store, infoLookup, wakeEvals, cfg, clk, trace)
 	clearMissingIdleProbes(dt, infoByID)
 	// Drain-skip lines print on transition (session_drain_skip_log.go); a
@@ -7952,9 +7962,12 @@ func relaunchAgentForLaunchDrift(
 		return false, relaunchAbortResidueFold(preparedInfo, sessFront, hadResumeKeyBeforePrepare)
 	}
 	relaunchErr := r.Relaunch(ctx, name, prepared.cfg)
-	// A startup nudge the session's program held back behind a dialog
-	// (program_status = "on", row A20) is queued, never typed or failed.
-	if err := queueStartupNudgeHandback(cityPath, cfg, sp, preparedInfo, name, relaunchErr == nil, time.Now()); err != nil {
+	// A startup nudge the runtime handed back (one held behind a dialog
+	// under program_status = "on", row A20, or an un-welded exec launch's
+	// first turn) is queued, never typed or failed.
+	// A warm relaunch keeps the box's token, never the config's, so the turn
+	// binds to the live token alone (else it is queued untagged).
+	if err := queueStartupNudgeHandback(cityPath, cfg, sp, preparedInfo, name, "", relaunchErr == nil, time.Now()); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: relaunch %s: %v\n", name, err) //nolint:errcheck
 	}
 	if err := relaunchErr; err != nil {

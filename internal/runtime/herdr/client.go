@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -253,9 +254,19 @@ func (c *client) run(ctx context.Context, args ...string) (json.RawMessage, erro
 // find. declared comes from whoever built the argv; see redaction.go.
 func (c *client) runWithSecrets(ctx context.Context, declared []string, args ...string) (json.RawMessage, error) {
 	full := append([]string{"--session", c.session}, args...)
-	out, err := exec.CommandContext(ctx, c.bin, full...).Output()
+	cmd := exec.CommandContext(ctx, c.bin, full...)
+	if err := execenv.CheckBatchFileArgs(cmd); err != nil {
+		safe, _ := redactedArgv(args, declared)
+		return nil, fmt.Errorf("herdr %v: %w", safe, err)
+	}
+	out, err := cmd.Output()
 	if err != nil {
 		safe, secrets := redactedArgv(args, declared)
+		if cerr := ctx.Err(); cerr != nil {
+			// exec killed herdr when ctx ended, and a killed process's exit
+			// status says nothing about why.
+			return nil, fmt.Errorf("herdr %v: %w", safe, cerr)
+		}
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
 			return nil, fmt.Errorf("herdr %v: %w", safe, &herdrStderr{Text: redactText(string(ee.Stderr), secrets)})
@@ -370,7 +381,7 @@ func (c *client) listAgents(ctx context.Context) ([]agentInfo, error) {
 	if err := json.Unmarshal(res, &wrap); err != nil {
 		return nil, fmt.Errorf("herdr agent list: decode: %w", err)
 	}
-	return wrap.Agents, nil
+	return filterAgentInfos(wrap.Agents), nil
 }
 
 // paneRead → `herdr pane read <paneID> --source <source> [--lines n]`
@@ -401,9 +412,18 @@ func (c *client) paneRead(ctx context.Context, paneID, source string, lines int)
 // [client.runWithSecrets] treatment.
 func (c *client) runRaw(ctx context.Context, args ...string) (string, error) {
 	full := append([]string{"--session", c.session}, args...)
-	out, err := exec.CommandContext(ctx, c.bin, full...).Output()
+	cmd := exec.CommandContext(ctx, c.bin, full...)
+	if err := execenv.CheckBatchFileArgs(cmd); err != nil {
+		safe, _ := redactedArgv(args, nil)
+		return "", fmt.Errorf("herdr %v: %w", safe, err)
+	}
+	out, err := cmd.Output()
 	if err != nil {
 		safe, secrets := redactedArgv(args, nil)
+		if cerr := ctx.Err(); cerr != nil {
+			// See run: a ctx that ended killed herdr.
+			return "", fmt.Errorf("herdr %v: %w", safe, cerr)
+		}
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
 			return "", fmt.Errorf("herdr %v: %w", safe, &herdrStderr{Text: redactText(string(ee.Stderr), secrets)})
@@ -1276,44 +1296,30 @@ func (c *client) ensurePlacement(ctx context.Context, wsLabel, tabLabel, cwd str
 
 // socketPath is the unix socket for this client's herdr session. Must match
 // wherever the herdr binary itself binds the session server (herdr's
-// api_socket_path_for): <config>/herdr.sock for the unnamed/default session,
-// <config>/sessions/<name>/herdr.sock otherwise, with <config> resolved by
-// herdrConfigDir. Any divergence makes this client dial a socket no herdr
+// api_socket_path_for): <config>/herdr/herdr.sock for the unnamed/default
+// session, <config>/herdr/sessions/<name>/herdr.sock otherwise, with <config>
+// resolved by herdrConfigDir. Any divergence makes this client dial a socket no herdr
 // process ever binds, so serverAlive() reads false against a perfectly
 // healthy server ("did not become ready"), and every retry launches a
 // redundant herdr server contending for the same pane ("agent_pane_busy") —
 // ga-nqlb8q, and on macOS #5770, where the former os.UserConfigDir()
 // resolution named $HOME/Library/Application Support, a directory herdr
 // never uses.
+//
+// herdrConfigDir supplies <config> by herdr's rule for the platform. herdr on
+// Windows resolves it by other rules, which the Windows herdrConfigDir
+// reproduces, and serves the path as a named pipe rather than a socket
+// (herdrPipeName); herdrJoin builds the path as herdr does on each platform,
+// which on Windows means without cleaning it.
 func (c *client) socketPath() string {
 	if c.sockPath != "" {
 		return c.sockPath
 	}
 	configDir := herdrConfigDir()
 	if c.session == "" || c.session == "default" {
-		return filepath.Join(configDir, "herdr.sock")
+		return herdrJoin(configDir, "herdr", "herdr.sock")
 	}
-	return filepath.Join(configDir, "sessions", c.session, "herdr.sock")
-}
-
-// herdrConfigDir is the directory herdr keeps its config and session sockets
-// in, resolved by herdr's own non-Windows rule (src/config/io.rs config_dir
-// and platform_config_dir), which does not vary by OS:
-// $XDG_CONFIG_HOME/herdr, else $HOME/.config/herdr, else <temp dir>/herdr.
-// os.UserConfigDir() is not that rule: on macOS it ignores XDG_CONFIG_HOME
-// and returns $HOME/Library/Application Support, a directory herdr never
-// uses (#5770). herdr reads each variable with std::env::var, so a variable
-// that is set counts even when it is empty or relative (filepath.Join("",
-// "herdr") is "herdr", as PathBuf::from("").join("herdr") is); startServer
-// refuses the relative socket path that results.
-func herdrConfigDir() string {
-	if dir, ok := os.LookupEnv("XDG_CONFIG_HOME"); ok {
-		return filepath.Join(dir, "herdr")
-	}
-	if home, ok := os.LookupEnv("HOME"); ok {
-		return filepath.Join(home, ".config", "herdr")
-	}
-	return filepath.Join(os.TempDir(), "herdr")
+	return herdrJoin(configDir, "herdr", "sessions", c.session, "herdr.sock")
 }
 
 // serverAlive reports whether the session-server is actually accepting
@@ -1321,14 +1327,29 @@ func herdrConfigDir() string {
 // that exits uncleanly leaves its socket inode behind — and herdr's own
 // `session stop` can't remove it, since that too needs a live server to reach —
 // so the stale socket answers connects with ECONNREFUSED. Presence != liveness;
-// dial to find out for real.
+// dial to find out for real. The dial is c.dialUnix, the connect the event
+// stream uses, so alive means reachable by that same connect.
 func (c *client) serverAlive() bool {
-	conn, err := net.DialTimeout("unix", c.socketPath(), serverDialTimeout)
+	alive, _ := c.probeServer()
+	return alive
+}
+
+// probeServer is serverAlive that also reports a connect which reached
+// something at the socket path and refused it (errEndpointRefused): the
+// endpoint is held by something that is not this user's herdr, which no server
+// started now could take from it.
+func (c *client) probeServer() (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), serverDialTimeout)
+	defer cancel()
+	conn, err := c.dialUnix(ctx, c.socketPath())
 	if err != nil {
-		return false
+		if errors.Is(err, errEndpointRefused) {
+			return false, err
+		}
+		return false, nil
 	}
 	_ = conn.Close()
-	return true
+	return true, nil
 }
 
 // serverDialTimeout bounds one connect to the session server's socket when
@@ -1363,17 +1384,20 @@ func (c *client) serverConfirmedDead(ctx context.Context) bool {
 	return err == nil && !bound
 }
 
-// removeStaleSocket unlinks the socket inode when it exists but nothing live is
-// listening, so a freshly launched server can bind. Guard with serverAlive
-// first — only call once liveness has already returned false.
-func (c *client) removeStaleSocket() {
-	if fi, err := os.Stat(c.socketPath()); err == nil && fi.Mode()&os.ModeSocket != 0 {
-		_ = os.Remove(c.socketPath())
-	}
-}
+// errEndpointRefused marks a connect that reached something at herdr's socket
+// path and refused it, because this user's herdr could not be what serves it.
+var errEndpointRefused = errors.New("refused herdr's endpoint")
+
+// endpointRefusal marks its error as errEndpointRefused, keeping its message.
+type endpointRefusal struct{ error }
+
+func (endpointRefusal) Is(target error) bool { return target == errEndpointRefused }
+
+func (r endpointRefusal) Unwrap() error { return r.error }
 
 // startServer launches the headless herdr server for this session (detached)
 // and waits for it to accept connections. Idempotent — no-op if already live.
+// An endpoint the connect refuses fails it at once, launched or not.
 //
 // It refuses a relative socket path before dialing, unlinking or launching
 // anything. Each process resolves such a path against its own working
@@ -1386,7 +1410,11 @@ func (c *client) startServer() error {
 	}
 	c.serverMu.Lock()
 	defer c.serverMu.Unlock()
-	if c.serverAlive() {
+	alive, err := c.probeServer()
+	if err != nil {
+		return fmt.Errorf("herdr server for session %q: %w", c.session, err)
+	}
+	if alive {
 		return nil
 	}
 	// A prior server may have died leaving a stale socket inode; serverAlive
@@ -1412,7 +1440,11 @@ func (c *client) startServer() error {
 	}
 	_ = cmd.Process.Release() // detach; herdr owns the daemon lifetime
 	for i := 0; i < 40; i++ {
-		if c.serverAlive() {
+		alive, err := c.probeServer()
+		if err != nil {
+			return fmt.Errorf("herdr server for session %q: %w", c.session, err)
+		}
+		if alive {
 			return nil
 		}
 		time.Sleep(250 * time.Millisecond)

@@ -2959,7 +2959,7 @@ func TestQueuedNudgeStarvedForTargetAtTheStarvationAge(t *testing.T) {
 		{name: "exactly the starvation age", now: createdAt.Add(queuedNudgeStarvedAfter), want: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			starved, err := queuedNudgeStarvedForTarget(target, tc.now)
+			starved, err := queuedNudgeStarvedForTarget(target, nil, tc.now)
 			if err != nil {
 				t.Fatalf("queuedNudgeStarvedForTarget: %v", err)
 			}
@@ -4549,10 +4549,15 @@ func TestTryDeliverQueuedNudgesByPollerKeepsPendingInteractionRefusalRecoverable
 	}
 	obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince}
 
-	// One pass past the attempt cap: a refusal charged as a failed attempt
-	// would back the item off after the first pass and dead-letter it here.
+	// One pass past the attempt cap. A refusal now waits out the retry delay
+	// whether or not it is charged, so the delay alone no longer tells the two
+	// apart: makeQueuedNudgesDue rewinds deliver_after before each later pass,
+	// and the release must stay uncharged, or the item would dead-letter here.
 	passes := defaultQueuedNudgeMaxAttempts + 1
 	for i := 0; i < passes; i++ {
+		if i > 0 {
+			makeQueuedNudgesDue(t, dir)
+		}
 		delivered, err := tryDeliverQueuedNudgesByPoller(target, openNudgeBeadStore(dir).Store, openNudgeBeadStore(dir).Store, fake, 3*time.Second, obs)
 		if err != nil {
 			t.Fatalf("tryDeliverQueuedNudgesByPoller pass %d: %v", i+1, err)
@@ -4580,7 +4585,7 @@ func TestTryDeliverQueuedNudgesByPollerKeepsPendingInteractionRefusalRecoverable
 		}
 	}
 	if nudgeCalls != passes {
-		t.Fatalf("nudge calls = %d, want %d: each pass should retry the refused nudge", nudgeCalls, passes)
+		t.Fatalf("nudge calls = %d, want %d: each claim the retry delay allows should retry the refused nudge", nudgeCalls, passes)
 	}
 }
 
@@ -4643,6 +4648,74 @@ func TestTryDeliverQueuedNudgesByPollerKeepsABusyDeferralQueued(t *testing.T) {
 	}
 }
 
+// A queued nudge the runtime refuses because an interaction is pending stays
+// queued, spends none of its bounded attempts, and is not claimed again until
+// the retry delay has passed: the interaction stays up until someone answers
+// it, so an immediate retry would only be refused again.
+func TestTryDeliverQueuedNudgesByPollerBacksOffAPendingInteractionRefusal(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "check hook output", time.Now().Add(-1*time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	fake := &pendingInteractionNudgeProvider{Fake: runtime.NewFake()}
+	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.Activity = map[string]time.Time{"sess-worker": idleSince}
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		resolved:    &config.ResolvedProvider{Name: "codex"},
+		sessionName: "sess-worker",
+	}
+	obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince}
+
+	before := time.Now()
+	for pass := 1; pass <= 2; pass++ {
+		delivered, err := tryDeliverQueuedNudgesByPoller(target, openNudgeBeadStore(dir).Store, openNudgeBeadStore(dir).Store, fake, 3*time.Second, obs)
+		if err != nil || delivered {
+			t.Fatalf("pass %d: delivered %t err %v, want the refused nudge left queued", pass, delivered, err)
+		}
+	}
+	after := time.Now()
+
+	if got := fake.CountCalls("Nudge", "sess-worker"); got != 1 {
+		t.Fatalf("nudge calls = %d, want 1: the refusal waits out the retry delay before the next try", got)
+	}
+	state, err := nudgequeue.LoadState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Pending) != 1 || len(state.InFlight) != 0 || len(state.Dead) != 0 {
+		t.Fatalf("pending/inFlight/dead = %d/%d/%d, want 1/0/0", len(state.Pending), len(state.InFlight), len(state.Dead))
+	}
+	item := state.Pending[0]
+	if item.Attempts != 0 {
+		t.Fatalf("attempts = %d, want 0: a pending-interaction refusal is not a delivery failure", item.Attempts)
+	}
+	earliest := before.Add(defaultQueuedNudgeRetryDelay)
+	latest := after.Add(defaultQueuedNudgeRetryDelay)
+	if item.DeliverAfter.Before(earliest) || item.DeliverAfter.After(latest) {
+		t.Fatalf("deliver_after = %v, want within [%v, %v]: one retry delay after the refusal", item.DeliverAfter, earliest, latest)
+	}
+}
+
+// makeQueuedNudgesDue rewinds every pending item of cityPath's queue to due
+// now, as if its retry delay had run out.
+func makeQueuedNudgesDue(t *testing.T, cityPath string) {
+	t.Helper()
+	if err := nudgequeue.WithState(cityPath, func(state *nudgequeue.State) error {
+		for i := range state.Pending {
+			state.Pending[i].DeliverAfter = time.Now().Add(-time.Second).UTC()
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("rewinding the retry delay: %v", err)
+	}
+}
+
 func TestQueuedNudgeReleaseAfter(t *testing.T) {
 	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
 	backoff := now.Add(defaultQueuedNudgeRetryDelay)
@@ -4654,8 +4727,8 @@ func TestQueuedNudgeReleaseAfter(t *testing.T) {
 		wantRetryAt  time.Time
 	}{
 		{"provider does not own the session", fmt.Errorf("%w: provider does not own %q", runtime.ErrSessionNotFound, "sess-worker"), true, time.Time{}},
-		{"runtime pending-interaction refusal", runtimeRefusal, true, time.Time{}},
-		{"session mapping of the runtime refusal", fmt.Errorf("%w: %w", session.ErrPendingInteraction, runtimeRefusal), true, time.Time{}},
+		{"runtime pending-interaction refusal", runtimeRefusal, true, backoff},
+		{"session mapping of the runtime refusal", fmt.Errorf("%w: %w", session.ErrPendingInteraction, runtimeRefusal), true, backoff},
 		{"permission prompt the runtime would not type into", fmt.Errorf("sending message to session: %w: sess-worker", runtime.ErrPendingInteraction), true, backoff},
 		{"session pending-interaction refusal", session.ErrPendingInteraction, true, backoff},
 		{"runtime could not be observed", fmt.Errorf("sending message to session: %w: bridge down", runtime.ErrRuntimeUnavailable), true, backoff},
@@ -5562,7 +5635,7 @@ func TestClaimDueQueuedNudgesForTargetLeavesSiblingFencePending(t *testing.T) {
 		sessionID:         "gc-1",
 		continuationEpoch: "1",
 	}
-	claimed, err := claimDueQueuedNudgesForTarget(dir, target, time.Now())
+	claimed, err := claimDueQueuedNudgesForTarget(dir, target, nil, time.Now())
 	if err != nil {
 		t.Fatalf("claimDueQueuedNudgesForTarget: %v", err)
 	}
@@ -5601,7 +5674,7 @@ func TestClaimDueQueuedNudgesForTargetClaimsHistoricalAlias(t *testing.T) {
 		aliasHistory: []string{"mayor"},
 		sessionID:    "gc-1",
 	}
-	claimed, err := claimDueQueuedNudgesForTarget(dir, target, time.Now())
+	claimed, err := claimDueQueuedNudgesForTarget(dir, target, nil, time.Now())
 	if err != nil {
 		t.Fatalf("claimDueQueuedNudgesForTarget: %v", err)
 	}
@@ -5628,7 +5701,7 @@ func TestClaimDueQueuedNudgesForTargetClaimsSameSessionStaleEpoch(t *testing.T) 
 		sessionID:         "gc-1",
 		continuationEpoch: "2",
 	}
-	claimed, err := claimDueQueuedNudgesForTarget(dir, target, time.Now())
+	claimed, err := claimDueQueuedNudgesForTarget(dir, target, nil, time.Now())
 	if err != nil {
 		t.Fatalf("claimDueQueuedNudgesForTarget: %v", err)
 	}
@@ -5719,7 +5792,7 @@ func TestClaimDueQueuedNudgesForTargetClaimsReplacedSession(t *testing.T) {
 		sessionID:         "gc-new",
 		continuationEpoch: "2",
 	}
-	claimed, err := claimDueQueuedNudgesForTarget(dir, target, time.Now())
+	claimed, err := claimDueQueuedNudgesForTarget(dir, target, nil, time.Now())
 	if err != nil {
 		t.Fatalf("claimDueQueuedNudgesForTarget: %v", err)
 	}
@@ -5766,7 +5839,7 @@ func TestClaimDueQueuedNudgesForTargetLeavesLiveSiblingFencePending(t *testing.T
 		sessionID:         "gc-1",
 		continuationEpoch: "1",
 	}
-	claimed, err := claimDueQueuedNudgesForTarget(dir, target, time.Now())
+	claimed, err := claimDueQueuedNudgesForTarget(dir, target, nil, time.Now())
 	if err != nil {
 		t.Fatalf("claimDueQueuedNudgesForTarget: %v", err)
 	}
