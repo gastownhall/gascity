@@ -1209,3 +1209,23 @@ func TestReconcileSessionBeads_RestartRequestLiveKillYieldsWhenReleaseUnproven(t
 		})
 	}
 }
+
+// TestReconcileSessionBeads_RestartRequestLiveKillYieldRequestsFollowUpPass
+// asks for the next pass at once when the restart yields, so the start does
+// not wait out the patrol interval.
+func TestReconcileSessionBeads_RestartRequestLiveKillYieldRequestsFollowUpPass(t *testing.T) {
+	for _, tc := range unprovenReleaseCases {
+		t.Run(tc.name, func(t *testing.T) {
+			env, session, sessionName := newPinnedAlwaysRestartScenario(t)
+			tc.prepare(env, sessionName)
+			followUps := 0
+			env.startOptions = append(env.startOptions, withAsyncStartFollowUp(func() { followUps++ }))
+
+			env.reconcile([]beads.Bead{session})
+
+			if followUps != 1 {
+				t.Fatalf("follow-up pass requested %d times, want 1", followUps)
+			}
+		})
+	}
+}
