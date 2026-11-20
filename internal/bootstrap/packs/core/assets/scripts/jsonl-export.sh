@@ -69,6 +69,15 @@ GC_WINDOW_MEMORY="${GC_JSONL_GC_WINDOW_MEMORY:-256m}"
 # of the whole archive, the repack leaves the largest pack out. 0 disables the
 # check.
 GC_MIN_FREE_KB="${GC_JSONL_GC_MIN_FREE_KB:-512000}"
+# A failing maintenance pass fails the run every time it fails. Consecutive
+# failing runs are counted in the state file, and one escalation goes out once
+# the count reaches this many (0 and 1 both alert on the first failing run); the
+# next passing run clears the count. The repack is stopped after
+# GC_TIMEOUT_SECS seconds (0 leaves it unbounded) so one hung pass cannot run
+# the order into its own timeout; keep this at least 300 s below the order's
+# timeout, which leaves the rest of the run its time.
+MAX_MAINTENANCE_FAILURES="${GC_JSONL_MAX_MAINTENANCE_FAILURES:-3}"
+GC_TIMEOUT_SECS="${GC_JSONL_GC_TIMEOUT_SECS:-480}"
 
 # Cached archive mode ("push" or "local-only"). Resolved once on the first
 # get_archive_mode call and reused thereafter so every push checkpoint in a
@@ -97,6 +106,8 @@ require_non_negative_integer() {
 require_non_negative_integer GC_JSONL_GC_LOOSE_OBJECTS "$GC_LOOSE_OBJECT_LIMIT"
 require_non_negative_integer GC_JSONL_GC_LOOSE_KB "$GC_LOOSE_KB_LIMIT"
 require_non_negative_integer GC_JSONL_GC_MIN_FREE_KB "$GC_MIN_FREE_KB"
+require_non_negative_integer GC_JSONL_MAX_MAINTENANCE_FAILURES "$MAX_MAINTENANCE_FAILURES"
+require_non_negative_integer GC_JSONL_GC_TIMEOUT_SECS "$GC_TIMEOUT_SECS"
 # Git reads pack.windowMemory as a byte count with an optional unit suffix,
 # takes 0 to mean no limit and a leading 0 as octal; reject all of those now
 # rather than on the first packing run.
@@ -793,7 +804,45 @@ run_archive_repack() {
     if command -v ionice >/dev/null 2>&1 && ionice -t -c 3 true >/dev/null 2>&1; then
         repack_command=(ionice -t -c 3 "${repack_command[@]}")
     fi
+    # The bound goes outermost, so one TERM to the process group (timeout runs
+    # its command in its own, without --foreground) stops nice, ionice and git.
+    # A host with neither timeout nor gtimeout (stock macOS) repacks unbounded.
+    if [ "$GC_TIMEOUT_SECS" -gt 0 ]; then
+        if command -v timeout >/dev/null 2>&1; then
+            repack_command=(timeout "$GC_TIMEOUT_SECS" "${repack_command[@]}")
+        elif command -v gtimeout >/dev/null 2>&1; then
+            repack_command=(gtimeout "$GC_TIMEOUT_SECS" "${repack_command[@]}")
+        else
+            echo "jsonl-export: neither timeout nor gtimeout is installed; packing without a time limit" >&2
+        fi
+    fi
     "${repack_command[@]}"
+}
+
+# Runs a command and keeps what it printed: stdout in CAPTURED_STDOUT and stderr
+# in CAPTURED_STDERR, each without its trailing newlines. The caller decides
+# what to pass on. Returns the command's status.
+run_capturing_output() {
+    local out_file
+    local err_file
+    local rc=0
+
+    CAPTURED_STDOUT=""
+    CAPTURED_STDERR=""
+    out_file=$(mktemp "${TMPDIR:-/tmp}/jsonl-export-out.XXXXXX") || out_file=""
+    err_file=$(mktemp "${TMPDIR:-/tmp}/jsonl-export-err.XXXXXX") || err_file=""
+    if [ -z "$out_file" ] || [ -z "$err_file" ]; then
+        rm -f "$out_file" "$err_file"
+        echo "jsonl-export: creating a temporary file to capture command output failed" >&2
+        CAPTURED_STDERR="(stderr not captured: creating a temporary file failed)"
+        "$@" || rc=$?
+        return "$rc"
+    fi
+    "$@" >"$out_file" 2>"$err_file" || rc=$?
+    CAPTURED_STDOUT=$(cat "$out_file")
+    CAPTURED_STDERR=$(cat "$err_file")
+    rm -f "$out_file" "$err_file"
+    return "$rc"
 }
 
 # Pack to keep out of the repack ("pack-<id>.pack"), or empty to repack all.
@@ -837,26 +886,181 @@ check_archive_gc_free_space() {
             return 0
         fi
     fi
+    MAINTENANCE_SPACE_EVIDENCE="free_kb=$free_kb needed_kb=$rest_kb floor_kb=$GC_MIN_FREE_KB"
     echo "jsonl-export: not packing the archive object database: ${free_kb} KiB free, and repacking the ${archive_kb} KiB archive (${rest_kb} KiB without its largest pack) would leave less than GC_JSONL_GC_MIN_FREE_KB=${GC_MIN_FREE_KB} KiB; free disk space or set GC_JSONL_GC_MIN_FREE_KB=0 to disable this check" >&2
     printf 'jsonl-export: the archive size counts loose objects at their full size, though they usually pack to a small fraction of it; to pack the archive once by hand, run: git -C %q -c pack.windowMemory=%s -c pack.threads=1 repack -d -l -q --geometric=2\n' "$ARCHIVE_REPO" "$GC_WINDOW_MEMORY" >&2
     return 1
 }
 
+# The record of a failing maintenance pass. maintain_archive_repository writes
+# it at each failing return, from the arm that called it, and the next passing
+# run removes it. The cause is one of stats_read_failed, stats_malformed,
+# stats_incomplete, low_space, gc_failed and gc_timeout.
+MAINTENANCE_ARM=""
+MAINTENANCE_PUSH_STATUS=""
+MAINTENANCE_FAILURE_CAUSE=""
+MAINTENANCE_FAILURE_EVIDENCE=""
+MAINTENANCE_FAILURE_AT=""
+MAINTENANCE_FAILURE_STREAK=0
+MAINTENANCE_SPACE_EVIDENCE=""
+
+# The copy of the evidence kept in state is at most 512 bytes, the "..." that
+# marks a cut included.
+truncate_evidence_for_state() {
+    local raw="$1"
+    local max_bytes=512
+    local size
+
+    size=$(printf '%s' "$raw" | LC_ALL=C wc -c | tr -d ' ')
+    if [ "$size" -le "$max_bytes" ]; then
+        printf '%s' "$raw"
+        return
+    fi
+    printf '%s' "$raw" | LC_ALL=C head -c "$((max_bytes - 3))"
+    printf '...'
+}
+
+# Counts this failing run in the state file and keeps its cause and evidence.
+# It reports a state write failure on stderr and always returns 0, so the
+# caller's own failing return is the one that stands.
+record_maintenance_failure() {
+    local cause="$1"
+    local evidence="$2"
+    local count
+    local state_evidence
+    local new_state
+
+    MAINTENANCE_FAILURE_CAUSE="$cause"
+    MAINTENANCE_FAILURE_EVIDENCE="$evidence"
+    MAINTENANCE_FAILURE_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    state_evidence=$(truncate_evidence_for_state "$evidence")
+    count=$(read_state_json | jq -r '.consecutive_maintenance_failures // 0') || count=0
+    case "$count" in
+        ''|*[!0-9]*) count=0 ;;
+    esac
+    count=$((count + 1))
+    MAINTENANCE_FAILURE_STREAK="$count"
+    if ! new_state=$(
+        read_state_json \
+            | jq -c \
+                --argjson count "$count" \
+                --arg at "$MAINTENANCE_FAILURE_AT" \
+                --arg cause "$cause" \
+                --arg arm "$MAINTENANCE_ARM" \
+                --arg evidence "$state_evidence" \
+                '.consecutive_maintenance_failures = $count
+                 | .last_maintenance_failure_at = $at
+                 | .last_maintenance_failure_cause = $cause
+                 | .last_maintenance_failure_arm = $arm
+                 | .last_maintenance_failure_evidence = $evidence'
+    ); then
+        echo "jsonl-export: recording the maintenance failure in state failed" >&2
+        return 0
+    fi
+    write_state_json "$new_state" || echo "jsonl-export: recording the maintenance failure in state failed" >&2
+    return 0
+}
+
+# A passing pass ends the streak: the count, the escalation marker and the
+# last failure's record all go.
+clear_maintenance_failure_record() {
+    local new_state
+
+    if ! read_state_json | jq -e '[.consecutive_maintenance_failures, .maintenance_failure_escalated, .last_maintenance_failure_at, .last_maintenance_failure_cause, .last_maintenance_failure_arm, .last_maintenance_failure_evidence] | any(. != null)' >/dev/null; then
+        return 0
+    fi
+    new_state=$(read_state_json | jq -c 'del(.consecutive_maintenance_failures, .maintenance_failure_escalated, .last_maintenance_failure_at, .last_maintenance_failure_cause, .last_maintenance_failure_arm, .last_maintenance_failure_evidence)') || return 1
+    write_state_json "$new_state"
+}
+
+mark_maintenance_failure_escalated() {
+    write_state_json "$(read_state_json | jq -c '.maintenance_failure_escalated = true')"
+}
+
+# Escalates once the streak reaches GC_JSONL_MAX_MAINTENANCE_FAILURES and no
+# escalation has gone out for it. The marker is set only when the escalation
+# was delivered, so an undelivered one is tried again by the next failing run.
+escalate_maintenance_failure() {
+    local already_escalated
+    local evidence_display
+    local remediation
+    local body
+
+    already_escalated=$(read_state_json | jq -r '.maintenance_failure_escalated // false') || already_escalated="false"
+    if [ "$MAINTENANCE_FAILURE_STREAK" -lt "$MAX_MAINTENANCE_FAILURES" ] || [ "$already_escalated" = "true" ]; then
+        return 0
+    fi
+    evidence_display=$(truncate_stderr_context "$MAINTENANCE_FAILURE_EVIDENCE")
+    if [ -z "$evidence_display" ]; then
+        evidence_display="(no evidence captured)"
+    fi
+    remediation=$(printf -- '- Pack the archive once by hand: git -C %q -c pack.windowMemory=%s -c pack.threads=1 repack -d -l -q --geometric=2' "$ARCHIVE_REPO" "$GC_WINDOW_MEMORY")
+    case "$MAINTENANCE_FAILURE_CAUSE" in
+        low_space)
+            remediation="$remediation
+- Free disk space on the archive's filesystem, or disable the free-space check: export GC_JSONL_GC_MIN_FREE_KB=0"
+            ;;
+        gc_timeout)
+            remediation="$remediation
+- The repack was stopped after GC_JSONL_GC_TIMEOUT_SECS=$GC_TIMEOUT_SECS seconds; raise it (keep it 300 s below the order timeout) or pack by hand as above"
+            ;;
+        stats_*)
+            remediation="$remediation
+- Check the archive object database: git -C $ARCHIVE_REPO count-objects -v"
+            ;;
+    esac
+    body=$(cat <<ESCALATION
+Order: jsonl-export
+Archive: $ARCHIVE_REPO
+Consecutive failures: $MAINTENANCE_FAILURE_STREAK (threshold: $MAX_MAINTENANCE_FAILURES)
+Cause: $MAINTENANCE_FAILURE_CAUSE
+Arm: $MAINTENANCE_ARM
+Last failure at: $MAINTENANCE_FAILURE_AT
+Archive push this run: $MAINTENANCE_PUSH_STATUS
+
+Evidence (at most the last 20 lines):
+$evidence_display
+
+Remediation:
+$remediation
+- Temporarily suppress: export GC_JSONL_MAX_MAINTENANCE_FAILURES=99
+- See docs/getting-started/troubleshooting.md#archive-object-maintenance
+ESCALATION
+)
+    if "$ESCALATE_SCRIPT" \
+        --subject "ESCALATION: JSONL archive maintenance failing [HIGH]" \
+        --message "$body" \
+        2>/dev/null; then
+        mark_maintenance_failure_escalated || echo "jsonl-export: marking the maintenance escalation as sent failed" >&2
+    else
+        echo "jsonl-export: maintenance escalation was not delivered; the next failing run will retry" >&2
+    fi
+}
+
 # Sets ARCHIVE_LOOSE_OBJECTS, ARCHIVE_LOOSE_KB, ARCHIVE_PACKS and
-# ARCHIVE_PACK_KB from git count-objects.
+# ARCHIVE_PACK_KB from git count-objects. A failure is recorded as a
+# maintenance failure and returns 1.
 read_archive_object_stats() {
     local object_stats
     local key
     local value
+    local rc=0
+    local raw_values
 
     ARCHIVE_LOOSE_OBJECTS=""
     ARCHIVE_LOOSE_KB=""
     ARCHIVE_PACKS=""
     ARCHIVE_PACK_KB=""
-    object_stats=$(git -C "$ARCHIVE_REPO" count-objects -v) || {
+    run_capturing_output git -C "$ARCHIVE_REPO" count-objects -v || rc=$?
+    object_stats="$CAPTURED_STDOUT"
+    if [ -n "$CAPTURED_STDERR" ]; then
+        printf '%s\n' "$CAPTURED_STDERR" >&2
+    fi
+    if [ "$rc" -ne 0 ]; then
         echo "jsonl-export: reading archive object statistics failed" >&2
+        record_maintenance_failure stats_read_failed "${CAPTURED_STDERR:-git count-objects -v exited with status $rc and printed nothing}"
         return 1
-    }
+    fi
     while IFS=': ' read -r key value; do
         case "$key" in
             count) ARCHIVE_LOOSE_OBJECTS="$value" ;;
@@ -866,13 +1070,16 @@ read_archive_object_stats() {
         esac
     done <<< "$object_stats"
 
+    raw_values="count=${ARCHIVE_LOOSE_OBJECTS:-<missing>} size=${ARCHIVE_LOOSE_KB:-<missing>} packs=${ARCHIVE_PACKS:-<missing>} size-pack=${ARCHIVE_PACK_KB:-<missing>}"
     case "$ARCHIVE_LOOSE_OBJECTS:$ARCHIVE_LOOSE_KB:$ARCHIVE_PACKS:$ARCHIVE_PACK_KB" in
         *[!0-9:]*)
             echo "jsonl-export: archive object statistics were malformed" >&2
+            record_maintenance_failure stats_malformed "$raw_values"
             return 1
             ;;
         :*|*:|*::*)
             echo "jsonl-export: archive object statistics were incomplete" >&2
+            record_maintenance_failure stats_incomplete "$raw_values"
             return 1
             ;;
     esac
@@ -888,6 +1095,9 @@ maintain_archive_repository() {
     local mode=geometric
     local started
     local wall
+    local repack_rc=0
+    local cause
+    local evidence
 
     read_archive_object_stats || return 1
     if [ "$ARCHIVE_LOOSE_OBJECTS" -lt "$GC_LOOSE_OBJECT_LIMIT" ] \
@@ -898,15 +1108,41 @@ maintain_archive_repository() {
     loose_kb="$ARCHIVE_LOOSE_KB"
     packs_before="$ARCHIVE_PACKS"
 
-    check_archive_gc_free_space "$((ARCHIVE_PACK_KB + loose_kb))" || return 1
+    if ! check_archive_gc_free_space "$((ARCHIVE_PACK_KB + loose_kb))"; then
+        record_maintenance_failure low_space "$MAINTENANCE_SPACE_EVIDENCE"
+        return 1
+    fi
     if [ -n "$ARCHIVE_KEEP_PACK" ]; then
         mode=geometric-keep-largest
     fi
     echo "jsonl-export: packing archive object database (loose_objects=$loose_objects, loose_kb=$loose_kb)" >&2
     started=$SECONDS
-    if ! run_archive_repack; then
+    run_capturing_output run_archive_repack || repack_rc=$?
+    if [ -n "$CAPTURED_STDOUT" ]; then
+        printf '%s\n' "$CAPTURED_STDOUT"
+    fi
+    if [ -n "$CAPTURED_STDERR" ]; then
+        printf '%s\n' "$CAPTURED_STDERR" >&2
+    fi
+    if [ "$repack_rc" -ne 0 ]; then
         echo "jsonl-export: archive maintenance: mode=$mode wall=$((SECONDS - started))s loose_before=$loose_objects packs_before=$packs_before status=failed" >&2
-        echo "jsonl-export: archive object database maintenance failed (repack --geometric needs git 2.32 or newer)" >&2
+        # timeout exits 124 when it stopped the repack. The header comes first
+        # so the state copy, cut at 512 bytes, keeps it; the repack's last
+        # lines follow, enough to keep the whole at 20 lines or fewer.
+        if [ "$repack_rc" -eq 124 ] && [ "$GC_TIMEOUT_SECS" -gt 0 ]; then
+            cause=gc_timeout
+            evidence="timed out after ${GC_TIMEOUT_SECS}s (exit status $repack_rc), loose_objects=$loose_objects loose_kb=$loose_kb"
+            echo "jsonl-export: archive object database maintenance timed out after ${GC_TIMEOUT_SECS}s (GC_JSONL_GC_TIMEOUT_SECS)" >&2
+        else
+            cause=gc_failed
+            evidence="repack failed: exit status $repack_rc, loose_objects=$loose_objects loose_kb=$loose_kb"
+            echo "jsonl-export: archive object database maintenance failed (repack --geometric needs git 2.32 or newer)" >&2
+        fi
+        if [ -n "$CAPTURED_STDERR" ]; then
+            evidence="$evidence
+$(printf '%s\n' "$CAPTURED_STDERR" | tail -n 18)"
+        fi
+        record_maintenance_failure "$cause" "$evidence"
         return 1
     fi
     wall=$((SECONDS - started))
@@ -916,14 +1152,23 @@ maintain_archive_repository() {
 
 # Maintenance runs after the export and its push, so a failed pass never holds
 # the snapshot back. Its failure still fails the run, with the summary the run
-# would have reported.
+# would have reported, after the failure is counted and, once the streak is long
+# enough, escalated. Arguments: the summary, the arm that called it (halt,
+# post_push or no_change) and what happened to the archive push this run, for
+# the escalation.
 maintain_archive_or_exit() {
     local summary="$1"
 
-    if [ -d "$ARCHIVE_REPO/.git" ] && ! maintain_archive_repository; then
-        echo "jsonl-export: $summary; archive maintenance failed" >&2
-        exit 1
+    MAINTENANCE_ARM="$2"
+    MAINTENANCE_PUSH_STATUS="$3"
+    [ -d "$ARCHIVE_REPO/.git" ] || return 0
+    if maintain_archive_repository; then
+        clear_maintenance_failure_record || echo "jsonl-export: clearing the maintenance failure record failed" >&2
+        return 0
     fi
+    escalate_maintenance_failure || true
+    echo "jsonl-export: $summary; archive maintenance failed" >&2
+    exit 1
 }
 
 discard_failed_db_outputs() {
@@ -1345,7 +1590,7 @@ if [ "$HALTED" -eq 1 ]; then
     # Pack only after the alert is sent or saved for retry: the commit above
     # already advanced the baseline, so this spike is never detected again.
     SUMMARY="jsonl — HALTED on spike detection$(coverage_gaps)"
-    maintain_archive_or_exit "$SUMMARY"
+    maintain_archive_or_exit "$SUMMARY" halt "not attempted (spike halt)"
     maintenance_done "$SUMMARY"
     exit 0
 fi
@@ -1365,21 +1610,21 @@ if git diff --cached --quiet 2>/dev/null; then
         else
             SUMMARY="jsonl — no changes, push: $PUSH_STATUS"
         fi
-        maintain_archive_or_exit "$SUMMARY"
+        maintain_archive_or_exit "$SUMMARY" no_change "$PUSH_STATUS"
         maintenance_done "$SUMMARY"
         echo "jsonl-export: $SUMMARY"
         exit 0
     fi
     if [ -n "$FAILED_DBS$NOT_ARCHIVED_SCOPES" ]; then
         SUMMARY="jsonl — exported $EXPORTED_DBS/$TOTAL_DBS, records: $TOTAL_EXPORTED, push: skipped$(coverage_gaps)"
-        maintain_archive_or_exit "$SUMMARY"
+        maintain_archive_or_exit "$SUMMARY" no_change "not attempted (nothing waiting)"
         maintenance_done "$SUMMARY"
         echo "jsonl-export: $SUMMARY"
         exit 0
     fi
     # No changes.
     SUMMARY="jsonl — no changes"
-    maintain_archive_or_exit "$SUMMARY"
+    maintain_archive_or_exit "$SUMMARY" no_change "not attempted (nothing waiting)"
     maintenance_done "$SUMMARY"
     exit 0
 fi
@@ -1404,6 +1649,6 @@ fi
 SUMMARY="jsonl — exported $EXPORTED_DBS/$TOTAL_DBS, records: $TOTAL_EXPORTED, push: $PUSH_STATUS$(coverage_gaps)"
 
 # After the push, so a packing failure never holds back the new snapshot.
-maintain_archive_or_exit "$SUMMARY"
+maintain_archive_or_exit "$SUMMARY" post_push "$PUSH_STATUS"
 maintenance_done "$SUMMARY"
 echo "jsonl-export: $SUMMARY"

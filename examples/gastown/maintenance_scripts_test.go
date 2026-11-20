@@ -12822,6 +12822,8 @@ func TestJsonlExportMaintenanceStreakSpansArmsAndCauses(t *testing.T) {
 func TestJsonlExportMaintenanceRecoveryClearsRecord(t *testing.T) {
 	f := newMaintenanceStreakFixture(t)
 	f.env["GC_MAINTENANCE_DONE_TARGET"] = "deacon/"
+	// The fixture's own healthy export has already reported done once.
+	baseline := strings.Count(f.gcCalls(t), "MAINTENANCE_DONE")
 	f.installMaintenanceFault(t, "stats_read_failed")
 	for run := 1; run <= 3; run++ {
 		out, err := f.runArm(t, "post_push")
@@ -12830,8 +12832,8 @@ func TestJsonlExportMaintenanceRecoveryClearsRecord(t *testing.T) {
 	if got := maintenanceMailCount(t, f.archiveMaintenanceFixture); got != 1 {
 		t.Fatalf("%d escalations after three failing runs, want 1:\n%s", got, f.mail(t))
 	}
-	if got := strings.Count(f.gcCalls(t), "MAINTENANCE_DONE"); got != 0 {
-		t.Fatalf("a failing run reported MAINTENANCE_DONE %d times:\n%s", got, f.gcCalls(t))
+	if got := strings.Count(f.gcCalls(t), "MAINTENANCE_DONE"); got != baseline {
+		t.Fatalf("a failing run reported MAINTENANCE_DONE (%d reports, %d before the failures):\n%s", got, baseline, f.gcCalls(t))
 	}
 
 	f.clearMaintenanceFault(t)
@@ -12840,8 +12842,8 @@ func TestJsonlExportMaintenanceRecoveryClearsRecord(t *testing.T) {
 		t.Fatalf("the healthy run failed: %v\n%s", err, out)
 	}
 	requireMaintenanceKeysCleared(t, f.state(t), "after a passing run")
-	if got := strings.Count(f.gcCalls(t), "MAINTENANCE_DONE"); got != 1 {
-		t.Fatalf("the healthy run reported MAINTENANCE_DONE %d times, want 1:\n%s", got, f.gcCalls(t))
+	if got := strings.Count(f.gcCalls(t), "MAINTENANCE_DONE"); got != baseline+1 {
+		t.Fatalf("the healthy run left %d MAINTENANCE_DONE reports, want %d:\n%s", got, baseline+1, f.gcCalls(t))
 	}
 
 	// The same break again starts a new streak and gets its own escalation.
