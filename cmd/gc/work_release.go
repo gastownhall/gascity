@@ -255,7 +255,7 @@ func startedClaimBead(stamp string) string {
 
 // ReleaseOpts adjusts one release.
 type ReleaseOpts struct {
-	Late     bool      // add the close-time re-read of the seat's legs (the cascade)
+	Late     bool      // add the close-time re-read of the seat's legs, parked claims included (the cascade)
 	Deadline time.Time // zero: none; a write past it fails with failedBudget
 	// RefuseStarted refuses the whole release when the claims read include
 	// one the seat keeps as started (releaseSeat.keepsStarted): nothing is
@@ -326,6 +326,10 @@ func ReleaseClaims(sw *SeatWork, scope ReleaseScope, seat releaseSeat, why relea
 	if opts.Late {
 		late, lateErr := lateSeatWork(sw.Legs(), scope, p.statuses, nil)
 		claims, err = appendUniqueSeatWork(claims, late), errors.Join(err, lateErr)
+		if p.releaseParked {
+			parked, parkedErr := parkedSeatWork(sw.Legs(), scope, p)
+			claims, err = appendUniqueSeatWork(claims, parked), errors.Join(err, parkedErr)
+		}
 	}
 	// The refusal needs no config: it releases nothing, so a seat whose
 	// config did not load is still refused, not acked past its started work.
@@ -347,6 +351,15 @@ func ReleaseClaims(sw *SeatWork, scope ReleaseScope, seat releaseSeat, why relea
 		return ReleaseOutcome{}, err
 	}
 	return releaseListed(claims, why, seat, sw.Legs().cfg, opts), err
+}
+
+// parkedSeatWork reads the scope's claims p gives back in a parked status
+// (releasesParked). The open/in_progress reads cannot list them: a live read
+// lists raw open, and an event-fed cache row carries the parked status. The
+// read is not-closed ("") through closeTimeLister, filtered in Go.
+func parkedSeatWork(legs WorkLegs, scope workScope, p releasePolicy) ([]seatWorkHit, error) {
+	hits, err := lateSeatWork(legs, scope, []string{""}, nil)
+	return slices.DeleteFunc(hits, func(h seatWorkHit) bool { return !p.releasesParked(h.bead) }), err
 }
 
 // releasesParked reports whether the path gives back b, a parked claim

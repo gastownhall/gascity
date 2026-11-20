@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11106,4 +11107,156 @@ func findClosedNamedSessionBead(store beads.Store, identity string) (beads.Bead,
 func findClosedNamedSessionBeadForSessionName(store beads.Store, identity, sessionName string) (beads.Bead, bool) {
 	bead, ok, _ := session.FindClosedNamedSessionBeadForSessionName(beadstest.Sessions(store), identity, sessionName)
 	return bead, ok
+}
+
+// TestReleaseWorkFromClosedSessionBeadReleasesBlockedClaim pins #7685: a
+// worker that set its claimed bead to blocked before its session closed
+// leaves a claim no release path gives back. The close cascade must clear the
+// dead holder's assignee whatever the claim's non-terminal status, keeping
+// the blocked hold itself visible.
+func TestReleaseWorkFromClosedSessionBeadReleasesBlockedClaim(t *testing.T) {
+	store := beads.NewMemStore()
+
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker-1",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	work, err := store.Create(beads.Bead{
+		Title:    "claimed work the worker marked blocked",
+		Metadata: map[string]string{"gc.routed_to": "worker"},
+		Assignee: sessionBead.ID,
+	})
+	if err != nil {
+		t.Fatalf("create work bead: %v", err)
+	}
+	blocked := "blocked"
+	if err := store.Update(work.ID, beads.UpdateOpts{Status: &blocked}); err != nil {
+		t.Fatalf("mark work blocked: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", servingCity("worker"), store, nil), sessionBead, nil, &stderr)
+
+	got, err := store.Get(work.ID)
+	if err != nil {
+		t.Fatalf("get work bead: %v", err)
+	}
+	if got.Assignee != "" {
+		t.Fatalf("blocked work bead Assignee = %q, want cleared: the closed session %s can never release it (stderr: %s)", got.Assignee, sessionBead.ID, stderr.String())
+	}
+	if got.Status != "blocked" {
+		t.Fatalf("blocked work bead Status = %q, want blocked kept", got.Status)
+	}
+}
+
+// TestCloseCascadeReleasesParkedClaimKeepingStatus: when a session's row
+// closes, the cascade gives back the claim it left parked, as the cascade
+// gives back open work: unassigned, its session affinity cleared and the
+// seat's fallback route stamped when it carried none. Only the holder goes;
+// the claim keeps its status, so the hold stays for whoever lifts it. The
+// release is reported, and its fenced write lands rather than reading as an
+// assignment that changed under it.
+//
+// Two shapes reach the cascade that no open/in_progress read lists: a store
+// that records the raw status, and a cache row an event patched to it after
+// the cache was primed.
+func TestCloseCascadeReleasesParkedClaimKeepingStatus(t *testing.T) {
+	newSession := func(t *testing.T, store beads.Store) beads.Bead {
+		t.Helper()
+		b, err := store.Create(beads.Bead{
+			Title:    "worker",
+			Type:     sessionBeadType,
+			Labels:   []string{sessionBeadLabel},
+			Metadata: map[string]string{"session_name": "worker-1", "template": "worker", "state": "active"},
+		})
+		if err != nil {
+			t.Fatalf("create session bead: %v", err)
+		}
+		return b
+	}
+	affinity := func(sessionID string) map[string]string {
+		m := map[string]string{}
+		for _, key := range beadmeta.SessionAffinityMetadataKeys {
+			m[key] = sessionID
+		}
+		return m
+	}
+	check := func(t *testing.T, mem *beads.MemStore, out ReleaseOutcome, id string, logs *strings.Builder, stderr *bytes.Buffer) {
+		t.Helper()
+		if !slices.ContainsFunc(out.Released, func(c seatWorkHit) bool { return c.bead.ID == id }) {
+			t.Errorf("released %d claims, want %s among them (kept as %q; stderr: %s)", len(out.Released), id, out.Why[id], stderr.String())
+		}
+		assertParkedRelease(t, mem, id, "blocked")
+		got, err := mem.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Metadata[beadmeta.RunTargetMetadataKey] != "worker" {
+			t.Errorf("gc.run_target = %q, want the seat's fallback route worker", got.Metadata[beadmeta.RunTargetMetadataKey])
+		}
+		if strings.Contains(logs.String(), "assignment changed") {
+			t.Errorf("log = %q, want the fenced release to land", logs.String())
+		}
+	}
+
+	seedParkedStatus := func(t *testing.T, mem *beads.MemStore, id, status string) beads.Bead {
+		t.Helper()
+		if err := mem.Update(id, beads.UpdateOpts{Status: &status}); err != nil {
+			t.Fatalf("park claim as %s: %v", status, err)
+		}
+		b, err := mem.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+
+	t.Run("raw status store", func(t *testing.T) {
+		logs := captureStdLog(t)
+		store := beads.NewMemStore()
+		sessionBead := newSession(t, store)
+		claim := seedParkedClaim(t, store, sessionBead.ID, "blocked", affinity(sessionBead.ID))
+
+		var stderr bytes.Buffer
+		out := releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", servingCity("worker"), store, nil), sessionBead, nil, &stderr)
+		check(t, store, out, claim.ID, logs, &stderr)
+	})
+
+	t.Run("event-patched cache row", func(t *testing.T) {
+		logs := captureStdLog(t)
+		backing := beads.NewMemStore()
+		cache := beads.NewCachingStoreForTest(backing, nil)
+		sessionBead := newSession(t, backing)
+		claim, err := backing.Create(beads.Bead{Title: "claim", Assignee: sessionBead.ID, Metadata: affinity(sessionBead.ID)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cache.Prime(context.Background()); err != nil {
+			t.Fatalf("prime cache: %v", err)
+		}
+		// The holder parks its claim in another process; the cache learns
+		// of it from the event, not from a read.
+		claim = seedParkedStatus(t, backing, claim.ID, "blocked")
+		payload, err := json.Marshal(claim)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cache.ApplyEvent("bead.updated", payload)
+		if rows, ok := cache.CachedList(beads.ListQuery{Assignee: sessionBead.ID, Status: "blocked"}); !ok || len(rows) != 1 {
+			t.Fatalf("cache rows in blocked = %d (served %t), want the event-patched claim", len(rows), ok)
+		}
+
+		var stderr bytes.Buffer
+		out := releaseWorkFromClosedSessionBeadExcept(cache, testSeatWork("", servingCity("worker"), cache, nil), sessionBead, nil, &stderr)
+		check(t, backing, out, claim.ID, logs, &stderr)
+	})
 }
