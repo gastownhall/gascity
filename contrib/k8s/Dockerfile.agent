@@ -3,6 +3,8 @@
 # Built on top of gc-agent-base (Dockerfile.base) which has all system
 # dependencies. This layer only copies project binaries, so rebuilds
 # after code changes take ~5s instead of ~2.5 min.
+# The codex-builder stage (npm, keyed on CODEX_VERSION) is cached the same way
+# and only re-runs when CODEX_VERSION changes.
 #
 # Build:
 #   make docker-agent
