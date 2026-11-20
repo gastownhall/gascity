@@ -246,6 +246,27 @@ func TestExecutionBackstopNudgesAnIdleClaimHolderExactlyOnce(t *testing.T) {
 	}
 }
 
+// An unstarted claim on a template that configures a nudge is reminded with
+// the built-in claim line, not the configured text: that is the agent's
+// startup text, which can be a work procedure that never tells the seat to
+// claim (issue #9196).
+func TestExecutionBackstopNudgesAnUnstartedClaimWithTheClaimLine(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.cfg.Agents[0].Nudge = idleClaimProcedureNudge
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t) // first sighting: start the grace clock
+
+	f.now = f.now.Add(idleClaimNudgeGrace + time.Second)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if got := f.nudgesDelivered(); len(got) != 1 || got[0] != ladderClaimedNudge {
+		t.Fatalf("nudges delivered = %q, want exactly [%q]; stdout=%s", got, ladderClaimedNudge, f.stdout.String())
+	}
+	if len(f.drained) != 0 {
+		t.Fatalf("drain requests = %v, want none while attempts remain", f.drained)
+	}
+}
+
 // Control A: a WORKING agent. The provider reports recent activity, so the
 // predicate holds — zero nudges and, just as importantly, zero writes, because a
 // backstop that marks a busy session is a backstop that will eventually nudge it

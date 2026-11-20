@@ -869,6 +869,36 @@ func TestNudgeStalledPoolContinuations_ObserveNudgePersistBackoffAndCap(t *testi
 	}
 }
 
+// A continuation candidate on a template that configures a nudge is reminded
+// with the built-in claim line, not the configured text: that is the agent's
+// startup text, which can be a work procedure (issue #9196).
+func TestNudgeStalledPoolContinuations_SendsTheClaimLineNotTheConfiguredNudge(t *testing.T) {
+	const sessionName = "session-a"
+	sp := continuationRunningFake(t, sessionName)
+	cfg := continuationNudgeCfg()
+	cfg.Agents[0].Nudge = idleClaimProcedureNudge
+	session := continuationPoolSession("session-bead-a", sessionName)
+	store := beads.NewMemStoreFrom(0, []beads.Bead{session}, nil)
+	clk := &clock.Fake{Time: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	candidates := []ContinuationClaimCandidate{validContinuationCandidate("step-a", sessionName)}
+	var out bytes.Buffer
+
+	nudgeStalledPoolContinuations(sp, cfg, store, []beads.Bead{session}, candidates, false, clk.Now(), &out)
+	session = mustGetTestBead(t, store, session.ID)
+	clk.Advance(idleClaimNudgeGrace + time.Second)
+	nudgeStalledPoolContinuations(sp, cfg, store, []beads.Bead{session}, candidates, false, clk.Now(), &out)
+
+	var got []string
+	for _, call := range sp.SnapshotCalls() {
+		if call.Method == "Nudge" && call.Name == sessionName {
+			got = append(got, call.Message)
+		}
+	}
+	if len(got) != 1 || got[0] != ladderClaimedNudge {
+		t.Fatalf("continuation nudges = %q, want exactly [%q]; out=%s", got, ladderClaimedNudge, out.String())
+	}
+}
+
 func TestNudgeStalledPoolContinuations_WriteAheadFailurePreventsDelivery(t *testing.T) {
 	const sessionName = "session-a"
 	sp := continuationRunningFake(t, sessionName)

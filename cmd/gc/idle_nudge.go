@@ -924,11 +924,18 @@ func isUnclaimedTrigger(cfg *config.City, w beads.Bead) bool {
 	return assignee == "" || isKnownPoolTemplate(assignee, cfg)
 }
 
-// claimNudgeFor resolves the slot's configured startup nudge (the worker's
-// `gc hook --claim` line) from the agent template behind this session bead.
+// claimNudgeFor is the claim instruction the legacy continuation backstop and
+// the legacy execution backstop's unstarted claim send: ladderClaimedNudge.
+// The presence of the template's configured nudge gates those two lanes: a
+// blank nudge, or a template that names no configured agent, gets "" (nothing
+// to send). The configured text itself is never sent: it is the agent's
+// startup text, which can be a work procedure rather than a claim instruction
+// (issue #9196).
 func claimNudgeFor(cfg *config.City, session beads.Bead) string {
-	nudge, _ := configuredClaimNudgeFor(cfg, session)
-	return nudge
+	if nudge, known := configuredClaimNudgeFor(cfg, session); !known || nudge == "" {
+		return ""
+	}
+	return ladderClaimedNudge
 }
 
 // stalledPoolClaimNudgeFor is the claim instruction the trigger backstop and
