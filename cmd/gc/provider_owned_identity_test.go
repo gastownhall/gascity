@@ -441,6 +441,88 @@ func TestProviderOwnedIdentityEndpointResolution(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("direct local reads bd's own server port over legacy managed coordinates", func(t *testing.T) {
+		clearProviderOwnedProxyEnvironment(t)
+		scope := t.TempDir()
+		beadsDir := filepath.Join(scope, ".beads")
+		if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// The metadata also records an external binding a stale state could
+		// have left behind; bd's own live server must win over it.
+		metadata := `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_server_host":"db.example","dolt_server_port":4406,"dolt_database":"prov"}`
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		listener := listenOnRandomPort(t)
+		bdPort := fmt.Sprintf("%d", listener.Addr().(*net.TCPAddr).Port)
+		if err := os.WriteFile(filepath.Join(beadsDir, "dolt-server.pid"), []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, "dolt-server.port"), []byte(bdPort+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue_prefix: prov\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		endpoint, ok, err := resolveProviderOwnedIdentityEndpoint(t.TempDir(), scope, scopeMetadataJSONPath(scope))
+		if err != nil || !ok {
+			t.Fatalf("resolve endpoint = (%+v, %t, %v), want bd's own server", endpoint, ok, err)
+		}
+		if endpoint.proxied || endpoint.target.Host != "127.0.0.1" || endpoint.target.Port != bdPort || endpoint.target.Socket != "" || endpoint.database != "prov" {
+			t.Fatalf("endpoint = %+v, want bd's own endpoint 127.0.0.1:%s for database prov, ahead of the recorded external binding", endpoint, bdPort)
+		}
+	})
+
+	t.Run("direct external reads the persisted host port binding", func(t *testing.T) {
+		clearProviderOwnedProxyEnvironment(t)
+		scope := t.TempDir()
+		beadsDir := filepath.Join(scope, ".beads")
+		if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		metadata := `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_server_host":"db.example","dolt_server_port":4406,"dolt_database":"hosted"}`
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue_prefix: prov\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		endpoint, ok, err := resolveProviderOwnedIdentityEndpoint(t.TempDir(), scope, scopeMetadataJSONPath(scope))
+		if err != nil || !ok {
+			t.Fatalf("resolve endpoint = (%+v, %t, %v), want the persisted external binding", endpoint, ok, err)
+		}
+		if endpoint.proxied || endpoint.target.Host != "db.example" || endpoint.target.Port != "4406" || endpoint.database != "hosted" {
+			t.Fatalf("endpoint = %+v, want the external endpoint db.example:4406 for database hosted", endpoint)
+		}
+	})
+
+	t.Run("direct external reads the persisted socket binding", func(t *testing.T) {
+		clearProviderOwnedProxyEnvironment(t)
+		scope := t.TempDir()
+		beadsDir := filepath.Join(scope, ".beads")
+		if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		metadata := `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_server_socket":"/run/dolt/provider.sock","dolt_database":"hosted"}`
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue_prefix: prov\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		endpoint, ok, err := resolveProviderOwnedIdentityEndpoint(t.TempDir(), scope, scopeMetadataJSONPath(scope))
+		if err != nil || !ok {
+			t.Fatalf("resolve endpoint = (%+v, %t, %v), want the persisted socket binding", endpoint, ok, err)
+		}
+		if endpoint.proxied || endpoint.target.Socket != "/run/dolt/provider.sock" || endpoint.database != "hosted" {
+			t.Fatalf("endpoint = %+v, want the socket endpoint /run/dolt/provider.sock for database hosted", endpoint)
+		}
+	})
 }
 
 // TestReconcileProviderOwnedScopeIdentityProxiedUsesOnePrivateSession: with a
