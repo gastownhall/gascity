@@ -296,3 +296,42 @@ func TestKillServerReportsListenerThatStaysLive(t *testing.T) {
 		})
 	}
 }
+
+// TestKillServerAlreadyGoneSkipsSettle guards the KillServer paths the settle
+// wait must not change: an already-dead server stays idempotent success, a
+// failed kill-server returns its error unchanged, and the default socket
+// keeps its immediate return — none of them ever observes the socket.
+func TestKillServerAlreadyGoneSkipsSettle(t *testing.T) {
+	killErr := errors.New("tmux kill-server: socket flooded")
+	for _, tc := range []struct {
+		name    string
+		cfg     Config
+		execErr error
+		wantErr error
+	}{
+		{name: "named socket already dead", cfg: Config{SocketName: "gc-settle-gone"}, execErr: ErrNoServer},
+		{name: "named socket kill failure", cfg: Config{SocketName: "gc-settle-err"}, execErr: killErr, wantErr: killErr},
+		{name: "default socket skips settle", cfg: DefaultConfig()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fe := &fakeExecutor{err: tc.execErr}
+			observations := 0
+			tmux := &Tmux{
+				cfg:  tc.cfg,
+				exec: fe,
+				serverSocketObserver: func(context.Context, string) error {
+					observations++
+					return errors.New("inode=9 peer_pid=42 reason=live-unix-socket")
+				},
+			}
+
+			err := tmux.KillServer()
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("KillServer() error = %v, want %v", err, tc.wantErr)
+			}
+			if observations != 0 {
+				t.Fatalf("KillServer() made %d socket observations, want 0 on the %s path", observations, tc.name)
+			}
+		})
+	}
+}
