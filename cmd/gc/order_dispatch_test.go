@@ -11109,7 +11109,7 @@ func TestRunDispatchGuardedRecoversPanic(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		m.runDispatchGuarded(context.Background(), beads.NewMemStore(), execStoreTarget{}, order, "/city", "track-x", nil, nil)
+		m.runDispatchGuarded(context.Background(), beads.NewMemStore(), execStoreTarget{}, order, "/city", "track-x", newOrderRunDeadline(time.Now(), effectiveTimeout(order, 0)), nil, nil)
 	}()
 
 	select {
@@ -11883,6 +11883,142 @@ func TestOrderFormulaVars(t *testing.T) {
 		}
 		if _, ok := got["binding_prefix"]; ok {
 			t.Fatalf("binding_prefix set for a pack with two bindings: %v", got)
+		}
+	})
+}
+
+// TestOrderDispatchExecUsesPersistedDeadline proves the controller dispatch
+// stamps its effective deadline on the tracking bead's initial Create and runs
+// the exec against that same instant: the runner's context deadline equals the
+// persisted one exactly (a relative timeout restarted after the Create would
+// land later), max_timeout caps both, and an earlier parent deadline still
+// stops the run first without moving the persisted deadline.
+func TestOrderDispatchExecUsesPersistedDeadline(t *testing.T) {
+	parentDeadline := time.Now().Add(time.Hour)
+	tests := []struct {
+		name         string
+		timeout      string
+		maxTimeout   time.Duration
+		parent       func() (context.Context, context.CancelFunc)
+		wantDuration time.Duration
+		wantParent   bool
+	}{
+		{name: "order timeout", timeout: "30m", wantDuration: 30 * time.Minute},
+		{name: "max_timeout caps the timeout", timeout: "30m", maxTimeout: 10 * time.Minute, wantDuration: 10 * time.Minute},
+		{
+			name:    "earlier parent deadline stops the run first",
+			timeout: "2h",
+			parent: func() (context.Context, context.CancelFunc) {
+				return context.WithDeadline(context.Background(), parentDeadline)
+			},
+			wantDuration: 2 * time.Hour,
+			wantParent:   true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			runnerDeadline := make(chan time.Time, 1)
+			m := &memoryOrderDispatcher{
+				aa: []orders.Order{{
+					Name:     "long-exec",
+					Trigger:  "cooldown",
+					Interval: "1h",
+					Exec:     "scripts/long.sh",
+					Timeout:  tt.timeout,
+				}},
+				storeFn: func(_ execStoreTarget) (beads.Store, error) { return store, nil },
+				execRun: func(ctx context.Context, _, _ string, _ []string) ([]byte, error) {
+					d, ok := ctx.Deadline()
+					if !ok {
+						t.Error("exec context carries no deadline")
+					}
+					runnerDeadline <- d
+					return []byte("ok\n"), nil
+				},
+				rec:        events.Discard,
+				stderr:     lockedStderr(&bytes.Buffer{}),
+				cfg:        &config.City{},
+				maxTimeout: tt.maxTimeout,
+			}
+			ctx := context.Background()
+			if tt.parent != nil {
+				var cancel context.CancelFunc
+				ctx, cancel = tt.parent()
+				defer cancel()
+			}
+			before := time.Now()
+			m.dispatch(ctx, t.TempDir(), before)
+			m.drain(context.Background())
+			after := time.Now()
+
+			tracked := trackingBeads(t, store, "order-run:long-exec")
+			if len(tracked) != 1 {
+				t.Fatalf("tracking beads = %d, want 1", len(tracked))
+			}
+			raw, ok := tracked[0].Metadata[beadmeta.OrderRunDeadlineMetadataKey]
+			if !ok {
+				t.Fatalf("tracking bead %s carries no %s; metadata = %v", tracked[0].ID, beadmeta.OrderRunDeadlineMetadataKey, tracked[0].Metadata)
+			}
+			persisted, err := time.Parse(time.RFC3339Nano, raw)
+			if err != nil {
+				t.Fatalf("parsing persisted deadline %q: %v", raw, err)
+			}
+			if persisted.Before(before.Add(tt.wantDuration)) || persisted.After(after.Add(tt.wantDuration)) {
+				t.Fatalf("persisted deadline %v outside [%v, %v] for an effective timeout of %s", persisted, before.Add(tt.wantDuration), after.Add(tt.wantDuration), tt.wantDuration)
+			}
+			var got time.Time
+			select {
+			case got = <-runnerDeadline:
+			default:
+				t.Fatal("exec runner was not called")
+			}
+			want := persisted
+			if tt.wantParent {
+				want = parentDeadline
+			}
+			if !got.Equal(want) {
+				t.Fatalf("exec context deadline = %v, want %v (persisted %v)", got, want, persisted)
+			}
+		})
+	}
+
+	// A formula dispatch shares the launch path: its tracking bead carries
+	// the same persisted deadline, which bounds instantiation (the formula
+	// default timeout), not the graph's lifetime.
+	t.Run("formula order persists the same deadline", func(t *testing.T) {
+		store := beads.NewMemStore()
+		ad := buildOrderDispatcherFromList([]orders.Order{{
+			Name:         "deadline-formula",
+			Trigger:      "cooldown",
+			Interval:     "1m",
+			Formula:      "test-formula",
+			FormulaLayer: sharedTestFormulaDir,
+		}}, store, nil)
+		if ad == nil {
+			t.Fatal("expected non-nil dispatcher")
+		}
+		before := time.Now()
+		ad.dispatch(context.Background(), t.TempDir(), before)
+		ad.drain(context.Background())
+
+		var deadline time.Time
+		for _, b := range trackingBeads(t, store, "order-run:deadline-formula") {
+			raw, present := b.Metadata[beadmeta.OrderRunDeadlineMetadataKey]
+			if !present {
+				continue
+			}
+			parsed, err := time.Parse(time.RFC3339Nano, raw)
+			if err != nil {
+				t.Fatalf("tracking bead %s %s = %q: %v", b.ID, beadmeta.OrderRunDeadlineMetadataKey, raw, err)
+			}
+			deadline = parsed
+		}
+		if deadline.IsZero() {
+			t.Fatalf("no tracking bead for deadline-formula carries %s", beadmeta.OrderRunDeadlineMetadataKey)
+		}
+		if d := deadline.Sub(before); d <= 0 || d > 35*time.Second {
+			t.Fatalf("persisted deadline is %s after dispatch, want the formula default 30s (it bounds instantiation, not the graph lifetime)", d)
 		}
 	})
 }

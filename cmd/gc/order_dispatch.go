@@ -1153,14 +1153,14 @@ func (m *memoryOrderDispatcher) fireCandidate(ctx context.Context, cand *orderDi
 // once after dispatchOne returns — i.e. after this goroutine's final store
 // call — so the caller can hold per-tick store handles open until the
 // goroutine releases them (gascity#3157). A nil onDone is treated as a no-op.
-func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars, execEnv map[string]string, onDone func()) {
+func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, deadline orderRunDeadline, vars, execEnv map[string]string, onDone func()) {
 	if onDone == nil {
 		onDone = func() {}
 	}
 	if m.dispatchCtx == nil {
 		go func() {
 			defer onDone()
-			m.runDispatchGuarded(ctx, store, target, a, cityPath, trackingID, vars, execEnv)
+			m.runDispatchGuarded(ctx, store, target, a, cityPath, trackingID, deadline, vars, execEnv)
 		}()
 		return
 	}
@@ -1173,7 +1173,7 @@ func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, store bea
 		defer onDone()
 		defer stopAfter()
 		defer cancelMerged()
-		m.runDispatchGuarded(mergedCtx, store, target, a, cityPath, trackingID, vars, execEnv)
+		m.runDispatchGuarded(mergedCtx, store, target, a, cityPath, trackingID, deadline, vars, execEnv)
 	}()
 }
 
@@ -1184,19 +1184,21 @@ func (m *memoryOrderDispatcher) launchDispatchOne(ctx context.Context, store bea
 // webhook-derived args) would otherwise crash the whole supervisor. dispatchOne's
 // own defers close the tracking bead as the stack unwinds before recovery here;
 // this boundary logs the panic and contains it to the single dispatch.
-func (m *memoryOrderDispatcher) runDispatchGuarded(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars, execEnv map[string]string) {
+func (m *memoryOrderDispatcher) runDispatchGuarded(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, deadline orderRunDeadline, vars, execEnv map[string]string) {
 	defer func() {
 		if p := recover(); p != nil {
 			logDispatchError(m.stderr, "gc: order %s: dispatch goroutine panic (tracking %s): %v", a.ScopedName(), trackingID, p)
 		}
 	}()
-	m.dispatchOne(ctx, store, target, a, cityPath, trackingID, vars, execEnv)
+	m.dispatchOne(ctx, store, target, a, cityPath, trackingID, deadline, vars, execEnv)
 }
 
 // launchResolvedDispatch is the single fire path shared by the controller tick
-// loop and the webhook dispatch seam (memoryOrderDispatcher.Dispatch). It writes
-// the order-tracking bead that suppresses re-fire, registers the in-flight
-// goroutine so drain can await outcome persistence, and launches dispatchOne.
+// loop and the webhook dispatch seam (memoryOrderDispatcher.Dispatch). It fixes
+// the run's absolute deadline (now plus the effective timeout) once, writes the
+// order-tracking bead that suppresses re-fire with that deadline on its initial
+// Create, registers the in-flight goroutine so drain can await outcome
+// persistence, and launches dispatchOne bounded by the same instant.
 // vars drive required-param validation and the formula ExpandVars channel;
 // execEnv is the exec-env overlay (nil ⇒ vars) that untrusted callers
 // pre-namespace for R4. onDone runs after the dispatch goroutine returns (the
@@ -1204,12 +1206,13 @@ func (m *memoryOrderDispatcher) runDispatchGuarded(ctx context.Context, store be
 // A caller tracking its own WaitGroup must register it before calling and
 // release it in onDone (and, on a returned error, itself — nothing launched).
 func (m *memoryOrderDispatcher) launchResolvedDispatch(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath string, vars, execEnv map[string]string, onDone func()) (orders.OrderRun, error) {
-	trackingRun, err := m.orderFrontDoorFor(store).CreateRun(a.ScopedName(), orders.RunOpts{})
+	deadline := newOrderRunDeadline(time.Now(), effectiveTimeout(a, m.maxTimeout))
+	trackingRun, err := m.orderFrontDoorFor(store).CreateRun(a.ScopedName(), orders.RunOpts{Deadline: deadline.at})
 	if err != nil {
 		return orders.OrderRun{}, err
 	}
 	m.addInflight()
-	m.launchDispatchOne(ctx, store, target, a, cityPath, trackingRun.ID, vars, execEnv, onDone)
+	m.launchDispatchOne(ctx, store, target, a, cityPath, trackingRun.ID, deadline, vars, execEnv, onDone)
 	return trackingRun, nil
 }
 
@@ -2009,7 +2012,7 @@ func orderTriggerUsesLastRun(a orders.Order) bool {
 // namespaced execEnv (GC_WEBHOOK_ARG_*) so an untrusted payload can never shadow
 // a controller-owned or static [order.env] key (R4); the tick loop and CLI pass
 // nil (raw overlay), preserving existing semantics.
-func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, vars, execEnv map[string]string) {
+func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Store, target execStoreTarget, a orders.Order, cityPath, trackingID string, deadline orderRunDeadline, vars, execEnv map[string]string) {
 	// Defer order matters: doneInflight runs last, after Close makes the
 	// tracking bead outcome observable to a waiting drain.
 	defer m.doneInflight()
@@ -2038,8 +2041,12 @@ func (m *memoryOrderDispatcher) dispatchOne(ctx context.Context, store beads.Sto
 		return
 	}
 
-	timeout := effectiveTimeout(a, m.maxTimeout)
-	childCtx, cancel := withOrderTimeout(ctx, timeout)
+	// The run is bounded by the deadline persisted on its tracking bead, not a
+	// timeout restarted here: the recovery sweeps preserve the bead through
+	// that same instant. An earlier parent deadline still stops it first. The
+	// deferred tracking close above keeps the outer ctx, so a run that reaches
+	// its deadline still gets the close's bounded retries.
+	childCtx, cancel := deadline.bound(ctx)
 	defer cancel()
 
 	m.rec.Record(events.Event{
@@ -4473,10 +4480,25 @@ func (e orderTimeoutError) Unwrap() error {
 	return context.DeadlineExceeded
 }
 
-// withOrderTimeout bounds an order run by its effective timeout, with an
-// orderTimeoutError naming that timeout as the deadline's cause.
-func withOrderTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
-	return context.WithTimeoutCause(ctx, timeout, orderTimeoutError{timeout: timeout})
+// orderRunDeadline is the absolute instant an order run's execution is bounded
+// by, together with the effective timeout it was computed from. It is fixed once
+// at dispatch, before the tracking bead is created, so the deadline persisted on
+// that bead and the one the run executes against are the same instant.
+type orderRunDeadline struct {
+	at      time.Time
+	timeout time.Duration
+}
+
+// newOrderRunDeadline returns the deadline of a run dispatched at now with the
+// given effective timeout.
+func newOrderRunDeadline(now time.Time, timeout time.Duration) orderRunDeadline {
+	return orderRunDeadline{at: now.Add(timeout), timeout: timeout}
+}
+
+// bound bounds ctx by the run's deadline, with an orderTimeoutError naming the
+// effective timeout as the deadline's cause.
+func (d orderRunDeadline) bound(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithDeadlineCause(ctx, d.at, orderTimeoutError{timeout: d.timeout})
 }
 
 // orderRunErrorText returns the failure text for err, an error from work an

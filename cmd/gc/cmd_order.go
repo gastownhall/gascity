@@ -1086,7 +1086,7 @@ func doOrderRunExecResult(a orders.Order, cityPath string, cfg *config.City, var
 		maxTimeout = cfg.Orders.MaxTimeoutDuration()
 	}
 	timeout := effectiveTimeout(a, maxTimeout)
-	ctx, cancel := withOrderTimeout(context.Background(), timeout)
+	ctx, cancel := newOrderRunDeadline(time.Now(), timeout).bound(context.Background())
 	defer cancel()
 
 	target, err := resolveOrderExecTarget(cityPath, cfg, a)

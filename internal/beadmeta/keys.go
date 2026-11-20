@@ -269,6 +269,7 @@ const (
 	NextAttemptMetadataKey              = "gc.next_attempt"
 	OnExhaustedMetadataKey              = "gc.on_exhausted"
 	OnFailMetadataKey                   = "gc.on_fail"
+	OrderRunDeadlineMetadataKey         = "gc.order_run_deadline"
 	OriginalKindMetadataKey             = "gc.original_kind"
 	OutcomeBeadIDMetadataKey            = "gc.outcome_bead_id"
 	OutcomeMetadataKey                  = "gc.outcome"
@@ -726,6 +727,7 @@ var KnownMetadataKeys = []string{
 	NextAttemptMetadataKey,
 	OnExhaustedMetadataKey,
 	OnFailMetadataKey,
+	OrderRunDeadlineMetadataKey,
 	OriginalKindMetadataKey,
 	OutcomeBeadIDMetadataKey,
 	OutcomeMetadataKey,
