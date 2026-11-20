@@ -2017,8 +2017,11 @@ func TestWarmReuseRemindsWithTheClaimInstructionNotTheReprimePayload(t *testing.
 		nudge string // the template's configured nudge
 		want  string
 	}{
-		{"lane", []string{"message"}, warmClaimText, warmClaimText},
-		{"direct", nil, warmClaimText, warmClaimText},
+		// A configured nudge is startup text, not the claim: warm reuse always
+		// sends the built-in claim line, --drain-ack included, for an unstarted
+		// slot (gascity#9196).
+		{"lane", []string{"message"}, warmClaimText, defaultPoolClaimNudge},
+		{"direct", nil, warmClaimText, defaultPoolClaimNudge},
 		{"lane, no configured nudge", []string{"message"}, "", defaultPoolClaimNudge},
 		{"direct, no configured nudge", nil, "", defaultPoolClaimNudge},
 	} {
