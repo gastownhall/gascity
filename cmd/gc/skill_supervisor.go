@@ -50,6 +50,18 @@ func runStage1SkillMaterialization(cityPath string, cfg *config.City, stderr io.
 
 	var errs []error
 	for _, req := range stage1SkillRequests(cityPath, cfg, stderr) {
+		if len(req.Held) > 0 {
+			// The sink keeps exactly its last reconciled state: a pass
+			// against a partial desired set would prune or re-point links
+			// another member still wants.
+			reportHeldSkillSink(stderr, req)
+			for _, agent := range req.Agents {
+				skipPass.markIncomplete(agent)
+			}
+			errs = append(errs, fmt.Errorf("skill sink %s (%s) not reconciled: %s",
+				req.Request.SinkDir, formatSinkAgents(req.Agents), strings.Join(req.Held, "; ")))
+			continue
+		}
 		res, merr := materialize.Run(req.Request)
 		if merr != nil {
 			for _, agent := range req.Agents {
@@ -89,6 +101,30 @@ type stage1SkillRequest struct {
 	Request materialize.Request
 	// WantedBy attributes each desired skill name to a member agent.
 	WantedBy map[string]string
+	// Held lists the reasons the sink must not be written in this pass.
+	// A request with any reason is reported, never run.
+	Held []string
+}
+
+// reportHeldSkillSink logs why req's sink is left unchanged.
+func reportHeldSkillSink(stderr io.Writer, req stage1SkillRequest) {
+	for _, reason := range req.Held {
+		fmt.Fprintf(stderr, "gc: stage-1 materialize-skills: leaving %s unchanged: %s\n", req.Request.SinkDir, reason) //nolint:errcheck // best-effort stderr
+	}
+}
+
+// formatSinkConflict describes a skill name that members of one sink want
+// from different sources of the same class.
+func formatSinkConflict(c materialize.SinkConflict) string {
+	class := "shared"
+	if c.Local {
+		class = "agent-local"
+	}
+	sources := make([]string, len(c.Sources))
+	for i, src := range c.Sources {
+		sources[i] = fmt.Sprintf("agent %q (%s)", src.Agent, src.Source)
+	}
+	return fmt.Sprintf("skill %q is wanted from different %s sources: %s", c.Name, class, strings.Join(sources, ", "))
 }
 
 // wantedBy names the member agent a report about skill name belongs to:
@@ -208,7 +244,11 @@ func stage1SkillRequests(cityPath string, cfg *config.City, stderr io.Writer) []
 	reqs := make([]stage1SkillRequest, 0, len(groups))
 	for _, group := range groups {
 		union := materialize.UnionSinkMembers(group.members)
-		if len(union.Desired) == 0 && len(union.OwnedRoots) == 0 {
+		var held []string
+		for _, c := range union.Conflicts {
+			held = append(held, formatSinkConflict(c))
+		}
+		if len(held) == 0 && len(union.Desired) == 0 && len(union.OwnedRoots) == 0 {
 			continue
 		}
 		reqs = append(reqs, stage1SkillRequest{
@@ -221,6 +261,7 @@ func stage1SkillRequests(cityPath string, cfg *config.City, stderr io.Writer) []
 				LegacyOwnedRoots: materialize.LegacyOwnedRootsFor(cityPath),
 			},
 			WantedBy: union.WantedBy,
+			Held:     held,
 		})
 	}
 	return reqs

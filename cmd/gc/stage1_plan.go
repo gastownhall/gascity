@@ -152,8 +152,9 @@ func describeMCPPlan(plan materialize.MCPProjectionPlan) string {
 
 // planStage1SkillMaterialization reports what runStage1SkillMaterialization
 // would change, writing nothing: per skill sink, the links it would create,
-// re-point, or remove. Errors are reported inline, as the real pass logs
-// them, and never fail the preview.
+// re-point, or remove. Errors and sinks the real pass would leave unchanged
+// are reported inline, as the real pass logs them, and never fail the
+// preview.
 func planStage1SkillMaterialization(cityPath string, cfg *config.City, stderr io.Writer) []string {
 	if cfg == nil {
 		return nil
@@ -163,6 +164,10 @@ func planStage1SkillMaterialization(cityPath string, cfg *config.City, stderr io
 	}
 	sinks := make(map[string]*sinkPlan)
 	for _, req := range stage1SkillRequests(cityPath, cfg, stderr) {
+		if len(req.Held) > 0 {
+			reportHeldSkillSink(stderr, req)
+			continue
+		}
 		req.Request.DryRun = true
 		res, err := materialize.Run(req.Request)
 		if err != nil {

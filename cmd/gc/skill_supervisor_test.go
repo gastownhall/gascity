@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -858,4 +859,161 @@ func TestRunStage1SharedSinkAgentLocalOverridesShared(t *testing.T) {
 			requireSkillLink(t, sink, "plan", filepath.Join(mayorSkills, "plan"))
 		})
 	}
+}
+
+// skillSinkSnapshot records every entry of a sink (a symlink's target, or a
+// marker for anything else) and the ownership manifest's bytes.
+func skillSinkSnapshot(t *testing.T, sink string) map[string]string {
+	t.Helper()
+	entries, err := os.ReadDir(sink)
+	if err != nil {
+		t.Fatalf("reading sink %s: %v", sink, err)
+	}
+	snap := make(map[string]string, len(entries))
+	for _, e := range entries {
+		path := filepath.Join(sink, e.Name())
+		if target, err := os.Readlink(path); err == nil {
+			snap[e.Name()] = "link:" + target
+			continue
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			snap[e.Name()] = "entry"
+			continue
+		}
+		snap[e.Name()] = "file:" + string(data)
+	}
+	return snap
+}
+
+func requireSkillSinkUnchanged(t *testing.T, sink string, before map[string]string) {
+	t.Helper()
+	after := skillSinkSnapshot(t, sink)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("sink %s changed:\nbefore %v\nafter  %v", sink, before, after)
+	}
+}
+
+// TestRunStage1SharedSinkConflictLeavesSinkUnchanged: when members of one
+// sink want one skill name from two different sources of the same class,
+// the pass leaves that whole sink (links and manifest) as it was, reports
+// the clash and returns an error naming the sink, and still reconciles
+// every other sink. An agent-local entry settles a shared clash.
+func TestRunStage1SharedSinkConflictLeavesSinkUnchanged(t *testing.T) {
+	t.Run("agent-local vs agent-local", func(t *testing.T) {
+		clearGCEnv(t)
+		cityPath := t.TempDir()
+		t.Setenv("GC_HOME", t.TempDir())
+		packSkills := filepath.Join(cityPath, "skills")
+		writeSkillSource(t, filepath.Join(packSkills, "plan"))
+		alphaSkills := filepath.Join(cityPath, "agents", "alpha", "skills")
+		betaSkills := filepath.Join(cityPath, "agents", "beta", "skills")
+		writeSkillSource(t, filepath.Join(alphaSkills, "notes"))
+		cfg := &config.City{
+			PackSkillsDir: packSkills,
+			Session:       config.SessionConfig{Provider: "tmux"},
+			Agents: []config.Agent{
+				{Name: "alpha", Scope: "city", Provider: "claude", SkillsDir: alphaSkills},
+				{Name: "beta", Scope: "city", Provider: "claude", SkillsDir: betaSkills},
+				{Name: "gamma", Scope: "city", Provider: "codex"},
+			},
+		}
+		var stderr bytes.Buffer
+		if err := runStage1SkillMaterialization(cityPath, cfg, &stderr); err != nil {
+			t.Fatalf("seeding pass: %v (stderr: %s)", err, stderr.String())
+		}
+		claudeSink := filepath.Join(cityPath, ".claude", "skills")
+		before := skillSinkSnapshot(t, claudeSink)
+
+		writeSkillSource(t, filepath.Join(alphaSkills, "review"))
+		writeSkillSource(t, filepath.Join(betaSkills, "review"))
+		writeSkillSource(t, filepath.Join(packSkills, "lint"))
+		stderr.Reset()
+		err := runStage1SkillMaterialization(cityPath, cfg, &stderr)
+		if err == nil || !strings.Contains(err.Error(), claudeSink) {
+			t.Fatalf("err = %v, want an error naming %s", err, claudeSink)
+		}
+		requireSkillSinkUnchanged(t, claudeSink, before)
+		for _, want := range []string{claudeSink, `"review"`, `agent "alpha"`, filepath.Join(alphaSkills, "review"), `agent "beta"`, filepath.Join(betaSkills, "review")} {
+			if !strings.Contains(stderr.String(), want) {
+				t.Errorf("stderr missing %q: %s", want, stderr.String())
+			}
+		}
+		requireSkillLink(t, filepath.Join(cityPath, ".agents", "skills"), "lint", filepath.Join(packSkills, "lint"))
+	})
+
+	// twoRigsOneConfig binds "ops" to a different pack in two rigs at one
+	// path, each with a claude agent, beside a city-scoped claude agent.
+	twoRigsOneConfig := func(t *testing.T) (cityPath, rigPath, opsA, opsB string, cfg *config.City) {
+		t.Helper()
+		clearGCEnv(t)
+		cityPath = t.TempDir()
+		t.Setenv("GC_HOME", t.TempDir())
+		rigPath = filepath.Join(cityPath, "rigs", "shared")
+		if err := os.MkdirAll(rigPath, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeSkillSource(t, filepath.Join(cityPath, "skills", "plan"))
+		opsA = filepath.Join(cityPath, "packs", "ops-a", "skills")
+		opsB = filepath.Join(cityPath, "packs", "ops-b", "skills")
+		writeSkillSource(t, filepath.Join(opsA, "deploy"))
+		writeSkillSource(t, filepath.Join(opsB, "deploy"))
+		cfg = &config.City{
+			PackSkillsDir: filepath.Join(cityPath, "skills"),
+			Session:       config.SessionConfig{Provider: "tmux"},
+			Rigs:          []config.Rig{{Name: "a", Path: rigPath}, {Name: "b", Path: rigPath}},
+			RigPackSkills: map[string][]config.DiscoveredSkillCatalog{
+				"a": {{SourceDir: opsA, BindingName: "ops", PackName: "ops-a"}},
+				"b": {{SourceDir: opsB, BindingName: "ops", PackName: "ops-b"}},
+			},
+			Agents: []config.Agent{
+				{Name: "alpha", Scope: "rig", Dir: "a", Provider: "claude"},
+				{Name: "beta", Scope: "rig", Dir: "b", Provider: "claude"},
+				{Name: "gamma", Scope: "city", Provider: "claude"},
+			},
+		}
+		return cityPath, rigPath, opsA, opsB, cfg
+	}
+
+	t.Run("shared vs shared", func(t *testing.T) {
+		cityPath, rigPath, opsA, opsB, cfg := twoRigsOneConfig(t)
+		agents := cfg.Agents
+		cfg.Agents = []config.Agent{agents[0], agents[2]}
+		var stderr bytes.Buffer
+		if err := runStage1SkillMaterialization(cityPath, cfg, &stderr); err != nil {
+			t.Fatalf("seeding pass: %v (stderr: %s)", err, stderr.String())
+		}
+		rigSink := filepath.Join(rigPath, ".claude", "skills")
+		requireSkillLink(t, rigSink, "ops.deploy", filepath.Join(opsA, "deploy"))
+		before := skillSinkSnapshot(t, rigSink)
+
+		cfg.Agents = agents
+		writeSkillSource(t, filepath.Join(cityPath, "skills", "lint"))
+		stderr.Reset()
+		err := runStage1SkillMaterialization(cityPath, cfg, &stderr)
+		if err == nil || !strings.Contains(err.Error(), rigSink) {
+			t.Fatalf("err = %v, want an error naming %s", err, rigSink)
+		}
+		requireSkillSinkUnchanged(t, rigSink, before)
+		for _, want := range []string{rigSink, `"ops.deploy"`, `agent "a/alpha"`, filepath.Join(opsA, "deploy"), `agent "b/beta"`, filepath.Join(opsB, "deploy")} {
+			if !strings.Contains(stderr.String(), want) {
+				t.Errorf("stderr missing %q: %s", want, stderr.String())
+			}
+		}
+		requireSkillLink(t, filepath.Join(cityPath, ".claude", "skills"), "lint", filepath.Join(cityPath, "skills", "lint"))
+	})
+
+	t.Run("agent-local entry settles a shared clash", func(t *testing.T) {
+		cityPath, rigPath, _, _, cfg := twoRigsOneConfig(t)
+		alphaSkills := filepath.Join(cityPath, "agents", "alpha", "skills")
+		writeSkillSource(t, filepath.Join(alphaSkills, "ops.deploy"))
+		cfg.Agents[0].SkillsDir = alphaSkills
+		var stderr bytes.Buffer
+		if err := runStage1SkillMaterialization(cityPath, cfg, &stderr); err != nil {
+			t.Fatalf("runStage1SkillMaterialization: %v (stderr: %s)", err, stderr.String())
+		}
+		rigSink := filepath.Join(rigPath, ".claude", "skills")
+		requireSkillLink(t, rigSink, "ops.deploy", filepath.Join(alphaSkills, "ops.deploy"))
+		requireSkillLink(t, rigSink, "plan", filepath.Join(cityPath, "skills", "plan"))
+	})
 }

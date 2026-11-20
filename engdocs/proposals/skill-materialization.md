@@ -62,6 +62,15 @@ activation is **out of scope for v0.15.1** and lands on main afterwards.
    agent starts.
 2. Each agent additionally gets its own `agents/<name>/skills/` entries in
    the same sink; agent-local wins on name collision within a single agent.
+   Agents with the same scope root and provider family share one sink, and
+   stage 1 reconciles it once per pass against the union of their effective
+   sets (`materialize.UnionSinkMembers`), so no member prunes another's
+   entries. An agent-local entry wins across the whole shared sink, whatever
+   the agents' order. When members want one name from two different sources
+   of the same class (two agents' local skills, or two rigs at one path that
+   bind one name to different packs), or a member's agent catalog cannot be
+   read, the pass leaves that sink unchanged and reports why until the
+   configuration changes.
 3. Content changes to any materialized skill drain and restart the affected
    agents.
 4. Skill removal produces no dangling symlinks.
@@ -520,11 +529,16 @@ first, materialize-skills runs last (immediately before the agent command).
 
 **Concurrency note.** Stage-1 materialization writes to scope-root sinks
 (`<city>/.claude/skills/`, `<rig>/.claude/skills/`). Stage-2 materialization
-writes to per-session-worktree sinks
+writes to per-session work-directory sinks
 (`<rig>/.gc/worktrees/<rig>/polecat-N/.claude/skills/`). These paths are
-disjoint by construction, so the supervisor-tick materializer and a
-per-session PreStart never target the same sink. No cross-stage lock is
-required.
+disjoint only while every session's work_dir is its own: two sessions of
+different agents that share a work_dir, or a session whose work_dir is
+another agent's scope root, write one sink from separate processes. Each
+stage-2 run reconciles that sink against its own agent's effective set
+alone, so such sessions can prune each other's agent-local entries; stage 1
+reconciles a shared sink against all its members, but stage 2 does not
+yet. No cross-stage lock is taken. Reconciling shared stage-2 sinks is a
+follow-up (#7547).
 
 **Pool scale-up cost.** A pool scaling from 0 to N spawns N sessions, each
 running its own `gc internal materialize-skills` invocation in PreStart —
