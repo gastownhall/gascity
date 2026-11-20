@@ -501,7 +501,8 @@ func (o *proxiedNativeOpener) openNativeLeaf(ctx context.Context, pin beads.Pin,
 //
 // On a verdict the memoized admission is forgotten. Otherwise the next open in
 // this process would be served from the memo — which carries no hash — and walk
-// past the one check that just fired.
+// past the one check that just fired. A HEAD another client moved is no
+// verdict: the memo stands and the move is logged at DEBUG with both hashes.
 func (o *proxiedNativeOpener) openUnmoved(ctx context.Context, pin beads.Pin, site string, read func(context.Context) (proxyendpoint.PostOpenReport, error)) error {
 	if pin.Head() == "" {
 		return nil
@@ -514,8 +515,12 @@ func (o *proxiedNativeOpener) openUnmoved(ctx context.Context, pin beads.Pin, si
 	verdict := beads.ProxiedOpenUnmoved(pin, observed)
 	if verdict != nil {
 		beads.ForgetProxiedPin(o.scopeRoot, pin.Database())
+		return verdict
 	}
-	return verdict
+	if observed.Head != pin.Head() {
+		beads.LogProxiedForeignHeadMove(o.logger, o.scopeRoot, site, pin.Database(), pin.Head(), observed.Head)
+	}
+	return nil
 }
 
 // recoverNativeLeaf is the guard tick's recovery for a handle that stood down

@@ -1762,3 +1762,128 @@ func TestProxiedRecoverIssuesOneStopPerGeneration(t *testing.T) {
 		t.Fatalf("the provider's recover ran %d time(s) over two generations, want 2", got)
 	}
 }
+
+// TestProxiedOpenKeepsNativeWhenAnotherClientMovedHead is AC-1: bd writes to
+// its database constantly, so a HEAD that moved between admission's probe and
+// the post-open re-read is, most of the time, another client's ordinary
+// commit. When the window between the two hashes shows only that — messages
+// without the schema: prefix, data-only changes to tables the open never
+// writes — the open is served natively, the leaf is kept, the memoized
+// admission survives and nothing is logged above DEBUG. Each row runs the
+// PRODUCTION re-read over a pool scripted with such a window, through every
+// library open the lane makes: the first open, the read path's reopen and the
+// guard's recovery.
+func TestProxiedOpenKeepsNativeWhenAnotherClientMovedHead(t *testing.T) {
+	const since = "0123456789abcdefghijklmnopqrstuv"
+	const after = "vutsrqponmlkjihgfedcba9876543210"
+	foreignPool := func(t *testing.T) *proxyendpointtest.PostOpenDB {
+		t.Helper()
+		pool := proxyendpointtest.NewPostOpenDB(proxyendpointtest.State{Head: since}, proxyendpointtest.State{Head: after}).
+			WithWindow(proxyendpointtest.Window{
+				Commits: []string{"bd: update ga-1", "bd: create ga-2"},
+				Tables:  []proxyendpointtest.WindowTable{{Name: "issues"}, {Name: "events"}},
+			})
+		t.Cleanup(func() { _ = pool.DB.Close() })
+		return pool
+	}
+	newOpener := func(t *testing.T, probes *int, logged *strings.Builder) *proxiedNativeOpener {
+		t.Helper()
+		f := newProxiedScopeFixture(t)
+		beads.ForgetProxiedPin(f.scopeRoot, "beads")
+		t.Cleanup(func() { beads.ForgetProxiedPin(f.scopeRoot, "beads") })
+		return &proxiedNativeOpener{
+			cityPath:     t.TempDir(),
+			scopeRoot:    f.scopeRoot,
+			database:     "beads",
+			processTable: f.processTable(),
+			probe: func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+				*probes++
+				served := proxyendpoint.ServedProbeForTest(f.pinnedCursors(), proxyendpoint.CursorReality{})
+				served.Head = since
+				return served
+			},
+			observed:  beads.NewGenerationSet(),
+			recovered: beads.NewGenerationSet(),
+			sleep:     func(context.Context, time.Duration) error { return nil },
+			logger:    slog.New(slog.NewTextHandler(logged, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		}
+	}
+	requireQuietForeignMove := func(t *testing.T, logged string) {
+		t.Helper()
+		if strings.Contains(logged, "level=WARN") || strings.Contains(logged, "level=ERROR") {
+			t.Fatalf("another client's commit was logged above DEBUG:\n%s", logged)
+		}
+		for _, want := range []string{"level=DEBUG", since, after} {
+			if !strings.Contains(logged, want) {
+				t.Errorf("the foreign move's DEBUG line lacks %q:\n%s", want, logged)
+			}
+		}
+	}
+
+	t.Run("the first open keeps its leaf and the memoized admission", func(t *testing.T) {
+		var probes int
+		var logged strings.Builder
+		opener := newOpener(t, &probes, &logged)
+		storage := &poolExportingStorage{db: foreignPool(t).DB}
+		opener.openNative = func(context.Context, string, map[string]string, ...beads.NativeDoltStoreOption) (*beads.NativeDoltStore, error) {
+			return beads.NewNativeDoltStoreOverStorageForTest(storage), nil
+		}
+		pin, err := opener.admit(context.Background(), false)
+		if err != nil {
+			t.Fatalf("admit: %v", err)
+		}
+		native, err := opener.openNativeLeaf(context.Background(), pin, false, beads.ProxiedIncidentSiteOpen)
+		if err != nil {
+			t.Fatalf("an open whose HEAD another client moved was refused: %v", err)
+		}
+		if native == nil {
+			t.Fatal("the open served no leaf")
+		}
+		if storage.closed != 0 {
+			t.Fatalf("the served leaf was closed %d time(s)", storage.closed)
+		}
+		requireQuietForeignMove(t, logged.String())
+		if _, err := opener.admit(context.Background(), false); err != nil {
+			t.Fatalf("re-admit: %v", err)
+		}
+		if probes != 1 {
+			t.Fatalf("the next open probed again (%d probe sessions): a foreign move must keep the memo", probes)
+		}
+	})
+
+	t.Run("the read path's reopen keeps the storage it opened", func(t *testing.T) {
+		var probes int
+		var logged strings.Builder
+		opener := newOpener(t, &probes, &logged)
+		storage := &poolExportingStorage{db: foreignPool(t).DB}
+		opener.openNativeStorage = func(context.Context, string, map[string]string) (beads.NativeStorage, error) {
+			return storage, nil
+		}
+		got, err := opener.reopen(false)(context.Background())
+		if err != nil {
+			t.Fatalf("a reopen whose HEAD another client moved was refused: %v", err)
+		}
+		if got != beads.NativeStorage(storage) || storage.closed != 0 {
+			t.Fatalf("reopen = %v with the handle closed %d time(s), want the opened handle, open", got, storage.closed)
+		}
+		requireQuietForeignMove(t, logged.String())
+	})
+
+	t.Run("the guard's recovery keeps the leaf it opened", func(t *testing.T) {
+		var probes int
+		var logged strings.Builder
+		opener := newOpener(t, &probes, &logged)
+		storage := &poolExportingStorage{db: foreignPool(t).DB}
+		opener.openNative = func(context.Context, string, map[string]string, ...beads.NativeDoltStoreOption) (*beads.NativeDoltStore, error) {
+			return beads.NewNativeDoltStoreOverStorageForTest(storage), nil
+		}
+		native, pin, err := opener.recoverNativeLeaf()(context.Background())
+		if err != nil {
+			t.Fatalf("a recovery whose HEAD another client moved was refused: %v", err)
+		}
+		if native == nil || pin.Head() != since || storage.closed != 0 {
+			t.Fatalf("recovery = (leaf %v, pin head %q, closed %d), want the open leaf under the probe's pin", native, pin.Head(), storage.closed)
+		}
+		requireQuietForeignMove(t, logged.String())
+	})
+}

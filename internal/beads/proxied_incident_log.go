@@ -37,6 +37,10 @@ const (
 	// post-open re-read itself failed, so the check concluded nothing about
 	// what the open did. See cmd/gc's openUnmoved (beads_proxied_native.go).
 	ProxiedPostOpenUnobservedMessage = "proxied_native_post_open_unobserved"
+	// ProxiedForeignHeadMoveMessage is what the opener logs at DEBUG when HEAD
+	// moved between admission and the post-open re-read only through another
+	// client's ordinary writes, so the open was served natively.
+	ProxiedForeignHeadMoveMessage = "proxied_native_foreign_head_move"
 
 	// ProxiedIncidentSiteOpen is a store's first library open.
 	ProxiedIncidentSiteOpen = "open"
@@ -81,4 +85,21 @@ func LogProxiedPostOpenUnobserved(logger *slog.Logger, scope, site string, err e
 		slog.String("site", site),
 		slog.String("scope", scope),
 		slog.String("reason", reason))
+}
+
+// LogProxiedForeignHeadMove reports, at DEBUG, a HEAD that moved between
+// admission and the post-open re-read through another client's ordinary
+// writes. It is not an incident — bd writes to its database constantly — so
+// it stays below WARN, but the two hashes are kept so an operator chasing a
+// later head_moved can see which moves the lane attributed elsewhere.
+func LogProxiedForeignHeadMove(logger *slog.Logger, scope, site, database, from, to string) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Debug(ProxiedForeignHeadMoveMessage,
+		slog.String("site", site),
+		slog.String("scope", scope),
+		slog.String("database", database),
+		slog.String("from", from),
+		slog.String("to", to))
 }
