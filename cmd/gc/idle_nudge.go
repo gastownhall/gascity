@@ -73,6 +73,9 @@ const (
 	idleClaimNudgeBusyHoldLimit = 10 * time.Minute
 )
 
+// defaultPoolClaimNudge is the claim instruction the controller sends a pool
+// slot whose routed trigger is still unclaimed: the trigger backstop, the
+// warm-bind reminder and the work ladder's trigger rung all send it.
 const defaultPoolClaimNudge = "Run " + runtime.GCCommandName + " hook --claim --drain-ack --json now; if it returns work, execute it immediately."
 
 // defaultHeldClaimNudge is the default for a seat whose claim (the %s) has
@@ -929,15 +932,16 @@ func claimNudgeFor(cfg *config.City, session beads.Bead) string {
 	return nudge
 }
 
+// stalledPoolClaimNudgeFor is the claim instruction the trigger backstop and
+// the warm-bind reminder send slot session: defaultPoolClaimNudge, and "" when
+// its template names no configured agent (fail closed). The agent's configured
+// nudge is its startup text, which can be a work procedure rather than a claim
+// instruction, so it is never sent here (issue #9196).
 func stalledPoolClaimNudgeFor(cfg *config.City, session beads.Bead) string {
-	nudge, known := configuredClaimNudgeFor(cfg, session)
-	if !known {
+	if _, known := configuredClaimNudgeFor(cfg, session); !known {
 		return ""
 	}
-	if nudge == "" {
-		return defaultPoolClaimNudge
-	}
-	return nudge
+	return defaultPoolClaimNudge
 }
 
 // heldClaimNudgeFor is stalledPoolClaimNudgeFor for a seat whose claim beadID

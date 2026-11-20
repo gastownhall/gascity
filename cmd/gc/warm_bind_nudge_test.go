@@ -46,7 +46,7 @@ func TestWarmBindClaimText(t *testing.T) {
 		{Name: config.ControlDispatcherAgentName, StartCommand: "gc convoy control --serve"},
 	}}
 	for template, want := range map[string]string{
-		"worker":                          warmClaimText,
+		"worker":                          defaultPoolClaimNudge,
 		"quiet":                           defaultPoolClaimNudge,
 		"ghost":                           "",
 		config.ControlDispatcherAgentName: "",
