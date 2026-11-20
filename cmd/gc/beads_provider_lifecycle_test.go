@@ -14233,3 +14233,78 @@ func TestStartBeadsLifecycleKeepsNoJournalCityOnLegacyDirectPath(t *testing.T) {
 		t.Fatalf("provider operations = %v, want legacy direct start before init", operations)
 	}
 }
+
+func TestGcBeadsBdHealthFailsWhenCityDatabaseMissing(t *testing.T) {
+	cityPath := t.TempDir()
+	materializeBuiltinPacksForTest(t, cityPath)
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"backend":"dolt","database":"dolt","dolt_mode":"server","dolt_database":"beads"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	scriptData, err := os.ReadFile(bundledGcBeadsBdScriptForTest(t))
+	if err != nil {
+		t.Fatalf("ReadFile(gc-beads-bd): %v", err)
+	}
+	prelude, _, ok := strings.Cut(string(scriptData), "# --- Main ---")
+	if !ok {
+		t.Fatal("gc-beads-bd script missing main marker")
+	}
+
+	// The server answers information_schema queries, but the city database
+	// "beads" is gone from its catalog (errno 1049). A helper asked about the
+	// city database reports it unavailable; a server-level probe stays green.
+	gcBin := filepath.Join(t.TempDir(), "gc")
+	if err := os.WriteFile(gcBin, []byte(`#!/bin/sh
+case "$1 $2" in
+  "dolt-state health-check")
+    printf 'query_ready\ttrue\nread_only\tfalse\nconnection_count\t1\n'
+    case "$*" in
+      *--database*)
+        printf 'database_ready\tfalse\ndatabase_error\tdatabase not found: beads\n'
+        ;;
+    esac
+    exit 0
+    ;;
+esac
+echo "unexpected gc command: $*" >&2
+exit 2
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile(gc): %v", err)
+	}
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "dolt"), []byte(`#!/bin/sh
+echo "Error 1049 (HY000): database not found: beads" >&2
+exit 1
+`), 0o755); err != nil {
+		t.Fatalf("WriteFile(dolt): %v", err)
+	}
+
+	harness := filepath.Join(t.TempDir(), "health-city-db-missing.sh")
+	body := prelude + fmt.Sprintf(`
+GC_BIN=%q
+GC_CITY_PATH=%q
+GC_DOLT_HOST=""
+DOLT_PORT=3311
+DOLT_USER=root
+tcp_check() { return 0; }
+set +e
+( op_health )
+status=$?
+set -e
+printf 'status=%%s\n' "$status"
+`, gcBin, cityPath)
+	if err := os.WriteFile(harness, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	out := runShHarness(t, harness, "op_health", sanitizedBaseEnv(
+		"PATH="+binDir+string(os.PathListSeparator)+os.Getenv("PATH"),
+		"GC_CITY_PATH="+cityPath,
+	))
+	if strings.Contains(string(out), "status=0") {
+		t.Fatalf("op_health reported healthy while the city database %q is missing from the server catalog:\n%s", "beads", out)
+	}
+}

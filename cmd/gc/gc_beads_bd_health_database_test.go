@@ -174,6 +174,29 @@ func TestGcBeadsBdHealthWithoutCityDatabaseKeepsServerOnlyCheck(t *testing.T) {
 	}
 }
 
+// TestGcBeadsBdHealthPassesDatabaseWithoutDataDirForRemoteServer covers
+// AC-5's remote leg: a remote server's databases are not under the local
+// DATA_DIR, so the helper receives --database but no --data-dir, and health
+// still fails closed when the database is not reported ready.
+func TestGcBeadsBdHealthPassesDatabaseWithoutDataDirForRemoteServer(t *testing.T) {
+	gcBin, argvFile := writeFakeHealthCheckGC(t,
+		"query_ready\ttrue\\nread_only\tunknown\\nconnection_count\t5\\ndatabase\\thq\\ndatabase_ready\tfalse\\n"+
+			"database_error\\tdatabase \"hq\" default branch head unresolvable: Error 1049 (HY000): database not found: hq\\n")
+
+	out := gcBeadsBdOpHarness(t, "op_health", `is_remote() { return 0; }
+`, cityMetadataHQ, "issue_prefix: hq\ndolt.host: db.example\ndolt.port: \"4406\"\n", gcBin, t.TempDir())
+	if !strings.Contains(out, "status=1") || !strings.Contains(out, `"hq"`) {
+		t.Fatalf("op_health output = %s, want failure naming hq while the remote server answers SQL", out)
+	}
+	argv, err := os.ReadFile(argvFile)
+	if err != nil {
+		t.Fatalf("ReadFile(argv): %v", err)
+	}
+	if !strings.Contains(string(argv), "--database hq") || strings.Contains(string(argv), "--data-dir") {
+		t.Fatalf("health-check argv = %q, want --database hq without --data-dir for a remote server", argv)
+	}
+}
+
 // writeFallbackHeadDolt writes a dolt CLI that answers only the city
 // database HEAD probe, failing it with headErr when non-empty.
 func writeFallbackHeadDolt(t *testing.T, headErr string) string {
