@@ -108,11 +108,13 @@ func nativeListPushableStatus(status string) bool {
 //
 // The readers that move or flag a session's work read the same answer, so
 // parked work is left assigned where it is: the retirement reassignments
-// (cmd/gc session_beads.go, internal/api session_resolution.go), the
-// stranded-repair unclaim through SeatWork, and the identity-residue doctor;
-// a seat the close gate lets go with only parked work keeps it too. That is
-// BdStore's behavior, accepted here as parity; ga-7uf6c7 tracks moving parked
-// work as well.
+// (cmd/gc session_beads.go, internal/api session_resolution.go) and the
+// identity-residue doctor. That is BdStore's behavior, accepted here as
+// parity; ga-7uf6c7 tracks moving parked work as well. The dead-holder
+// releases (the close cascade, the stranded repair, the retired sweep and the
+// orphan releases) read parked claims apart, not-closed, and give them back
+// keeping their status, pinned and hooked excepted; so a seat the close gate
+// lets go with only parked work loses the claim, not the hold.
 //
 // A non-Live read keeps the folded answer while CachingStore serves it from
 // the cache: PrimeActive lists without Live, so the cache holds blocked rows

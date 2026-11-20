@@ -1469,9 +1469,11 @@ func isBdClaimConflictMessage(msg string) bool {
 		strings.Contains(msg, strings.ToLower(issueops.ErrNotClaimable.Error()))
 }
 
-// mapBdStatus maps bd's statuses to Gas City's 3. bd uses: open,
-// in_progress, blocked, review, testing, closed. Gas City uses:
-// open, in_progress, closed.
+// mapBdStatus maps bd's statuses to Gas City's 3. bd's built-in statuses
+// are open, in_progress, blocked, deferred, closed, pinned and hooked, and a
+// city may declare custom ones (status.custom, e.g. review); every status but
+// in_progress and closed folds to open. Gas City uses: open, in_progress,
+// closed. The read keeps the raw status in SourceStatus (RecordedStatus).
 func mapBdStatus(s string) string {
 	switch s {
 	case "closed":

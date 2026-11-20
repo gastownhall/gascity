@@ -255,7 +255,7 @@ func startedClaimBead(stamp string) string {
 
 // ReleaseOpts adjusts one release.
 type ReleaseOpts struct {
-	Late     bool      // add the close-time re-read of the seat's legs, parked claims included (the cascade)
+	Late     bool      // add the close-time re-read of the seat's legs (the cascade)
 	Deadline time.Time // zero: none; a write past it fails with failedBudget
 	// RefuseStarted refuses the whole release when the claims read include
 	// one the seat keeps as started (releaseSeat.keepsStarted): nothing is
@@ -318,18 +318,19 @@ func (o ReleaseOutcome) HeldDetached() int {
 }
 
 // ReleaseClaims gives back the claims scope holds on sw's legs, as why's
-// policy says. A read that fails releases nothing on a startedKeeps path,
-// whose gate needs the whole seat; elsewhere what was read is released.
+// policy says. A policy that releases parked claims also reads them
+// (parkedSeatWork). A read that fails releases nothing on a startedKeeps
+// path, whose gate needs the whole seat; elsewhere what was read is released.
 func ReleaseClaims(sw *SeatWork, scope ReleaseScope, seat releaseSeat, why releaseWhy, opts ReleaseOpts) (ReleaseOutcome, error) {
 	p := releasePolicies[why]
 	claims, err := sw.snapshot(seatWorkQuery{scope: scope, statuses: p.statuses}, false)
 	if opts.Late {
 		late, lateErr := lateSeatWork(sw.Legs(), scope, p.statuses, nil)
 		claims, err = appendUniqueSeatWork(claims, late), errors.Join(err, lateErr)
-		if p.releaseParked {
-			parked, parkedErr := parkedSeatWork(sw.Legs(), scope, p)
-			claims, err = appendUniqueSeatWork(claims, parked), errors.Join(err, parkedErr)
-		}
+	}
+	if p.releaseParked {
+		parked, parkedErr := parkedSeatWork(sw.Legs(), scope, p)
+		claims, err = appendUniqueSeatWork(claims, parked), errors.Join(err, parkedErr)
 	}
 	// The refusal needs no config: it releases nothing, so a seat whose
 	// config did not load is still refused, not acked past its started work.

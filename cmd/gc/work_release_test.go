@@ -1412,3 +1412,49 @@ func TestReleaseListedKeepsPinnedAndHookedClaims(t *testing.T) {
 		}
 	}
 }
+
+// TestReleaseClaimsParkedReadReleasesRetiredAndStrandedHolds: the retired
+// sweep and the stranded repair give back a retired seat's parked claim,
+// keeping its status, though their open/in_progress read cannot list it. That
+// holds for bd's built-in parked statuses and for a status a city defines,
+// in both shapes a parked claim is read in: bd's folded row, which records
+// the raw status in SourceStatus, and a store that records it as Status.
+func TestReleaseClaimsParkedReadReleasesRetiredAndStrandedHolds(t *testing.T) {
+	seatBead := beads.Bead{ID: "retired-seat", Metadata: map[string]string{"session_name": "worker-1"}}
+	routed := map[string]string{beadmeta.RoutedToMetadataKey: "worker"}
+	for name, why := range map[string]releaseWhy{"retired": releaseRetired, "stranded repair": releaseStrandedRepair} {
+		for _, status := range []string{"blocked", "deferred", "review"} {
+			t.Run(name+"/"+status+"/folded", func(t *testing.T) {
+				bd := newParkedBdStore()
+				claim := seedParkedClaim(t, bd.mem, seatBead.ID, status, routed)
+				scope := releaseScopeOwn(seatBead)
+
+				out, err := ReleaseClaims(seatWorkFor(testWorkLegs("", servingCity("worker"), bd, nil), scope), scope, releaseSeatOfBead(seatBead), why, ReleaseOpts{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(out.Released) != 1 {
+					t.Fatalf("released %d claims, want %s (kept as %q)", len(out.Released), claim.ID, out.Why[claim.ID])
+				}
+				assertParkedRelease(t, bd.mem, claim.ID, status)
+				if len(bd.guarded) != 1 || bd.guarded[0].status != status {
+					t.Errorf("guarded updates = %+v, want one fenced on %s", bd.guarded, status)
+				}
+			})
+			t.Run(name+"/"+status+"/raw", func(t *testing.T) {
+				mem := beads.NewMemStore()
+				claim := seedParkedClaim(t, mem, seatBead.ID, status, routed)
+				scope := releaseScopeOwn(seatBead)
+
+				out, err := ReleaseClaims(seatWorkFor(testWorkLegs("", servingCity("worker"), mem, nil), scope), scope, releaseSeatOfBead(seatBead), why, ReleaseOpts{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(out.Released) != 1 {
+					t.Fatalf("released %d claims, want %s (kept as %q)", len(out.Released), claim.ID, out.Why[claim.ID])
+				}
+				assertParkedRelease(t, mem, claim.ID, status)
+			})
+		}
+	}
+}
