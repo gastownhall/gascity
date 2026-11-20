@@ -28,10 +28,6 @@ import (
 // are pinned here: the nudge never carries the pool --drain-ack fallback, and
 // exhaustion never drains or recycles the seat.
 
-// namedClaimPickupLaneStepName is the external-reads lane step that runs the
-// backstop under reconciler v2, in every work_ladder mode.
-const namedClaimPickupLaneStepName = "named-claim-pickup"
-
 // claimPickupExhaustedEventType is the typed give-up event's type.
 const claimPickupExhaustedEventType = "session.claim_pickup_exhausted"
 
@@ -66,7 +62,7 @@ func claimPickupWork(id, assignee, status string, created time.Time) beads.Bead 
 func claimPickupRun(t *testing.T, sp runtime.Provider, store beads.Store, rec events.Recorder, work []beads.Bead, partial bool, now time.Time, out *bytes.Buffer) {
 	t.Helper()
 	rows := []beads.Bead{mustGetTestBead(t, store, "session-bead-n")}
-	nudgeNamedClaimPickups(sp, store, rows, work, partial, now, rec, out)
+	nudgeNamedClaimPickups(sp, idleClaimTestCfg(), store, rows, work, partial, now, rec, out)
 }
 
 func claimPickupSeat(t *testing.T, store beads.Store) map[string]string {

@@ -1038,6 +1038,11 @@ cmd/gc/molecule_autoclose.go	doMoleculeAutocloseWith	unwrap	1
 cmd/gc/molecule_autoclose.go	subtreeTerminalExcludingRoot	raw-param	1
 cmd/gc/molecule_autoclose.go	subtreeTerminalOrErr	mint	1
 cmd/gc/molecule_autoclose.go	subtreeTerminalOrErr	raw-param	1
+cmd/gc/named_claim_pickup.go	namedClaimPickupBackstop.clear	raw-param	1
+cmd/gc/named_claim_pickup.go	namedClaimPickupBackstop.exhausted	raw-param	1
+cmd/gc/named_claim_pickup.go	namedClaimPickupBackstop.observe	raw-param	1
+cmd/gc/named_claim_pickup.go	namedClaimPickupBackstop.reserve	raw-param	1
+cmd/gc/named_claim_pickup.go	nudgeNamedClaimPickups	raw-param	1
 cmd/gc/nudge_backstop.go	backstopHoldObserver	raw-param	2
 cmd/gc/nudge_backstop.go	backstopLastNoticeStands	raw-param	1
 cmd/gc/nudge_backstop.go	backstopPredicate	raw-param	4

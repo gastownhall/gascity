@@ -343,6 +343,14 @@ const (
 	// the start path (legacy prepare, v2 PreWake); the envelope's Subject is
 	// the agent and SessionID the session bead.
 	SessionConversationReset = "session.conversation_reset"
+	// SessionClaimPickupExhausted fires once when the named-seat claim-pickup
+	// backstop spends its bounded re-nudges on a configured-named seat whose
+	// open assigned bead it never picked up, and latches
+	// claim_pickup_state=given_up. Subject carries the unclaimed bead,
+	// SessionID the session bead; the payload is
+	// SessionClaimPickupExhaustedPayload. It is a controller LIVENESS fact: the
+	// controller stops nudging, it does not drain or recycle the seat.
+	SessionClaimPickupExhausted = "session.claim_pickup_exhausted"
 	// SessionPending fires when a session gains a pending interaction (an
 	// approval prompt or question the session is blocked on) and
 	// SessionPendingCleared fires when that interaction goes away — answered,
@@ -732,6 +740,7 @@ var KnownEventTypes = []string{
 	SessionProgramStatusShadow,
 	SessionColdStartTimeout,
 	SessionConversationReset,
+	SessionClaimPickupExhausted,
 	SessionPending, SessionPendingCleared,
 	SessionCreated, SessionClosed,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,

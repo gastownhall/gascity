@@ -44,7 +44,8 @@ func (l *externalReadsLane) addPoolSteps(summary func() *allocSummary, stalled f
 	l.summary, l.stalled = summary, stalled
 	l.steps = append(l.steps,
 		&laneStep{name: "work-ladder", legs: sourceNone, run: l.workLadder},
-		&laneStep{name: "orphan-release", legs: sourceNone, run: l.orphanRelease})
+		&laneStep{name: "orphan-release", legs: sourceNone, run: l.orphanRelease},
+		&laneStep{name: namedClaimPickupLaneStepName, legs: sourceNone, run: l.namedClaimPickup})
 }
 
 // laneSummary is the planner's last allocation summary, or nil when there is
@@ -107,6 +108,29 @@ func (l *externalReadsLane) legacyBackstops(ctx context.Context, env externalRea
 		return
 	}
 	nudgeStalledPoolExecution(env.SP, env.Cfg, sessStore, raw, s.AssignedWork, s.AssignedStores, s.AssignedStoreRefs, s.Partial, now, l.events, l.requestExecutionStalled(env), l.stderr)
+}
+
+// namedClaimPickupLaneStepName is the lane step that runs the named-seat
+// claim-pickup backstop.
+const namedClaimPickupLaneStepName = "named-claim-pickup"
+
+// namedClaimPickup is the named-seat claim-pickup step: the backstop for a
+// configured-named seat with no bound step whose own open work sits unclaimed
+// (named_claim_pickup.go). It runs in every work_ladder mode, because the
+// ladder paces pool seats only, over the planner's last allocation summary and
+// a live read of the raw session rows its pacing keys live on. A partial or
+// stale summary does nothing.
+func (l *externalReadsLane) namedClaimPickup(_ context.Context, env externalReadsEnv) {
+	s := l.laneSummary()
+	if s == nil || s.Partial || env.Cfg == nil || env.CityStore == nil {
+		return
+	}
+	raw, err := loadSessionBeads(env.CityStore)
+	if err != nil {
+		fmt.Fprintf(l.stderr, "external reads: loading sessions for the named claim-pickup nudge: %v\n", err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	nudgeNamedClaimPickups(env.SP, env.Cfg, env.CityStore, raw, s.AssignedWork, s.Partial, l.now(), l.events, l.stderr)
 }
 
 // requestExecutionStalled is the execution backstop's requestDrain: it reads

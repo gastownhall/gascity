@@ -542,6 +542,8 @@ var registry = slices.Concat([]Field{
 	same(ClassAdvisory, false, sites(legacy("cmd/gc/session_wake.go", "freshWakeResetPriorValues")), PrimingAttemptedAtMetadataKey),
 	same(ClassAdvisory, false, sites(legacyCreate), "synced_at", "startup_kickoff_state", "startup_kickoff_started_at", "startup_kickoff_attempts"),
 	same(ClassAdvisory, false, sites(legacy(srcBeads, "startupKickoffReopenMetadata")), "startup_kickoff_last_nudge_at"),
+	same(ClassAdvisory, false, sites(legacy("cmd/gc/named_claim_pickup.go", "namedClaimPickupBackstop.observe"), legacy("cmd/gc/named_claim_pickup.go", "namedClaimPickupBackstop.reserve"), legacy("cmd/gc/named_claim_pickup.go", "namedClaimPickupBackstop.exhausted"), legacy("cmd/gc/named_claim_pickup.go", "namedClaimPickupBackstop.clear")), "claim_pickup_state", "claim_pickup_started_at",
+		"claim_pickup_attempts", "claim_pickup_last_nudge_at", "claim_pickup_bead_id"),
 	same(ClassAdvisory, false, sites(op("cmd/gc/cmd_nudge.go", "stampLastNudgeDeliveredAt")), MetadataLastNudgeDeliveredAt),
 	same(ClassAdvisory, false, sites(legacy("cmd/gc/usage_compute.go", "emitComputeFactForBead"), legacy("cmd/gc/usage_compute.go", "CityRuntime.settleClosedInterval")), "usage_compute_emitted_at"),
 	same(ClassAdvisory, false, sites(legacy("cmd/gc/usage_compute.go", "CityRuntime.emitDueComputeFacts"), legacy("cmd/gc/usage_compute.go", "CityRuntime.settleClosedInterval")), "usage_model_swept_at"),

@@ -3579,6 +3579,9 @@
             "$ref": "#/components/schemas/RotatedPayload"
           },
           {
+            "$ref": "#/components/schemas/SessionClaimPickupExhaustedPayload"
+          },
+          {
             "$ref": "#/components/schemas/SessionClosedPayload"
           },
           {
@@ -8966,6 +8969,31 @@
           "ExpiresAt",
           "BindingGeneration",
           "Metadata"
+        ],
+        "type": "object"
+      },
+      "SessionClaimPickupExhaustedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "attempts": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "bead_id": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "session_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "session_name",
+          "bead_id",
+          "attempts"
         ],
         "type": "object"
       },
@@ -15082,6 +15110,7 @@
             "request.result.session.message": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionMessage",
             "request.result.session.submit": "#/components/schemas/TypedEventStreamEnvelopeRequestResultSessionSubmit",
             "rig.provision.progress": "#/components/schemas/TypedEventStreamEnvelopeRigProvisionProgress",
+            "session.claim_pickup_exhausted": "#/components/schemas/TypedEventStreamEnvelopeSessionClaimPickupExhausted",
             "session.closed": "#/components/schemas/TypedEventStreamEnvelopeSessionClosed",
             "session.cold_start_timeout": "#/components/schemas/TypedEventStreamEnvelopeSessionColdStartTimeout",
             "session.config_drift_deferred": "#/components/schemas/TypedEventStreamEnvelopeSessionConfigDriftDeferred",
@@ -15374,6 +15403,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeRigProvisionProgress"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionClaimPickupExhausted"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSessionClosed"
@@ -17199,6 +17231,7 @@
                 "session.program_status_shadow",
                 "session.cold_start_timeout",
                 "session.conversation_reset",
+                "session.claim_pickup_exhausted",
                 "session.pending",
                 "session.pending_cleared",
                 "session.created",
@@ -20227,6 +20260,63 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope rig.provision.progress",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeSessionClaimPickupExhausted": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionClaimPickupExhaustedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.claim_pickup_exhausted",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope session.claim_pickup_exhausted",
         "type": "object"
       },
       "TypedEventStreamEnvelopeSessionClosed": {
@@ -23276,6 +23366,7 @@
             "request.result.session.message": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionMessage",
             "request.result.session.submit": "#/components/schemas/TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit",
             "rig.provision.progress": "#/components/schemas/TypedTaggedEventStreamEnvelopeRigProvisionProgress",
+            "session.claim_pickup_exhausted": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionClaimPickupExhausted",
             "session.closed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionClosed",
             "session.cold_start_timeout": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionColdStartTimeout",
             "session.config_drift_deferred": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionConfigDriftDeferred",
@@ -23568,6 +23659,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeRigProvisionProgress"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionClaimPickupExhausted"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionClosed"
@@ -25508,6 +25602,7 @@
                 "session.program_status_shadow",
                 "session.cold_start_timeout",
                 "session.conversation_reset",
+                "session.claim_pickup_exhausted",
                 "session.pending",
                 "session.pending_cleared",
                 "session.created",
@@ -28741,6 +28836,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope rig.provision.progress",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSessionClaimPickupExhausted": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionClaimPickupExhaustedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "session.claim_pickup_exhausted",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope session.claim_pickup_exhausted",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSessionClosed": {

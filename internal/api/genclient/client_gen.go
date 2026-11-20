@@ -5410,6 +5410,14 @@ type SessionBindingRecord struct {
 	Status BindingStatus `json:"Status"`
 }
 
+// SessionClaimPickupExhaustedPayload defines model for SessionClaimPickupExhaustedPayload.
+type SessionClaimPickupExhaustedPayload struct {
+	Attempts    int64  `json:"attempts"`
+	BeadId      string `json:"bead_id"`
+	SessionId   string `json:"session_id"`
+	SessionName string `json:"session_name"`
+}
+
 // SessionClosedPayload defines model for SessionClosedPayload.
 type SessionClosedPayload struct {
 	// AgentName The concrete agent identity the session ran as. Empty when the session records none.
@@ -9041,6 +9049,22 @@ type TypedEventStreamEnvelopeRigProvisionProgress struct {
 	Workflow         *WorkflowEventProjection    `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeSessionClaimPickupExhausted defines model for TypedEventStreamEnvelopeSessionClaimPickupExhausted.
+type TypedEventStreamEnvelopeSessionClaimPickupExhausted struct {
+	Actor            string                             `json:"actor"`
+	DependsOnStepIds *[]string                          `json:"depends_on_step_ids,omitempty"`
+	Message          *string                            `json:"message,omitempty"`
+	Payload          SessionClaimPickupExhaustedPayload `json:"payload"`
+	RunId            *string                            `json:"run_id,omitempty"`
+	Seq              int64                              `json:"seq"`
+	SessionId        *string                            `json:"session_id,omitempty"`
+	StepId           *string                            `json:"step_id,omitempty"`
+	Subject          *string                            `json:"subject,omitempty"`
+	Ts               time.Time                          `json:"ts"`
+	Type             string                             `json:"type"`
+	Workflow         *WorkflowEventProjection           `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSessionClosed defines model for TypedEventStreamEnvelopeSessionClosed.
 type TypedEventStreamEnvelopeSessionClosed struct {
 	Actor            string                   `json:"actor"`
@@ -11236,6 +11260,23 @@ type TypedTaggedEventStreamEnvelopeRigProvisionProgress struct {
 	Ts               time.Time                   `json:"ts"`
 	Type             string                      `json:"type"`
 	Workflow         *WorkflowEventProjection    `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSessionClaimPickupExhausted defines model for TypedTaggedEventStreamEnvelopeSessionClaimPickupExhausted.
+type TypedTaggedEventStreamEnvelopeSessionClaimPickupExhausted struct {
+	Actor            string                             `json:"actor"`
+	City             string                             `json:"city"`
+	DependsOnStepIds *[]string                          `json:"depends_on_step_ids,omitempty"`
+	Message          *string                            `json:"message,omitempty"`
+	Payload          SessionClaimPickupExhaustedPayload `json:"payload"`
+	RunId            *string                            `json:"run_id,omitempty"`
+	Seq              int64                              `json:"seq"`
+	SessionId        *string                            `json:"session_id,omitempty"`
+	StepId           *string                            `json:"step_id,omitempty"`
+	Subject          *string                            `json:"subject,omitempty"`
+	Ts               time.Time                          `json:"ts"`
+	Type             string                             `json:"type"`
+	Workflow         *WorkflowEventProjection           `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionClosed defines model for TypedTaggedEventStreamEnvelopeSessionClosed.
@@ -15091,6 +15132,32 @@ func (t *EventPayload) FromRotatedPayload(v RotatedPayload) error {
 
 // MergeRotatedPayload performs a merge with any union data inside the EventPayload, using the provided RotatedPayload
 func (t *EventPayload) MergeRotatedPayload(v RotatedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSessionClaimPickupExhaustedPayload returns the union data inside the EventPayload as a SessionClaimPickupExhaustedPayload
+func (t EventPayload) AsSessionClaimPickupExhaustedPayload() (SessionClaimPickupExhaustedPayload, error) {
+	var body SessionClaimPickupExhaustedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionClaimPickupExhaustedPayload overwrites any union data inside the EventPayload as the provided SessionClaimPickupExhaustedPayload
+func (t *EventPayload) FromSessionClaimPickupExhaustedPayload(v SessionClaimPickupExhaustedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionClaimPickupExhaustedPayload performs a merge with any union data inside the EventPayload, using the provided SessionClaimPickupExhaustedPayload
+func (t *EventPayload) MergeSessionClaimPickupExhaustedPayload(v SessionClaimPickupExhaustedPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -19898,6 +19965,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeRigProvisionProg
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSessionClaimPickupExhausted returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionClaimPickupExhausted
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionClaimPickupExhausted() (TypedEventStreamEnvelopeSessionClaimPickupExhausted, error) {
+	var body TypedEventStreamEnvelopeSessionClaimPickupExhausted
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSessionClaimPickupExhausted overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSessionClaimPickupExhausted
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSessionClaimPickupExhausted(v TypedEventStreamEnvelopeSessionClaimPickupExhausted) error {
+	v.Type = "session.claim_pickup_exhausted"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSessionClaimPickupExhausted performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSessionClaimPickupExhausted
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSessionClaimPickupExhausted(v TypedEventStreamEnvelopeSessionClaimPickupExhausted) error {
+	v.Type = "session.claim_pickup_exhausted"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionClosed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionClosed
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionClosed() (TypedEventStreamEnvelopeSessionClosed, error) {
 	var body TypedEventStreamEnvelopeSessionClosed
@@ -21556,6 +21651,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeRequestResultSessionSubmit()
 	case "rig.provision.progress":
 		return t.AsTypedEventStreamEnvelopeRigProvisionProgress()
+	case "session.claim_pickup_exhausted":
+		return t.AsTypedEventStreamEnvelopeSessionClaimPickupExhausted()
 	case "session.closed":
 		return t.AsTypedEventStreamEnvelopeSessionClosed()
 	case "session.cold_start_timeout":
@@ -23887,6 +23984,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeRigP
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSessionClaimPickupExhausted returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionClaimPickupExhausted
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionClaimPickupExhausted() (TypedTaggedEventStreamEnvelopeSessionClaimPickupExhausted, error) {
+	var body TypedTaggedEventStreamEnvelopeSessionClaimPickupExhausted
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSessionClaimPickupExhausted overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSessionClaimPickupExhausted
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSessionClaimPickupExhausted(v TypedTaggedEventStreamEnvelopeSessionClaimPickupExhausted) error {
+	v.Type = "session.claim_pickup_exhausted"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSessionClaimPickupExhausted performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSessionClaimPickupExhausted
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSessionClaimPickupExhausted(v TypedTaggedEventStreamEnvelopeSessionClaimPickupExhausted) error {
+	v.Type = "session.claim_pickup_exhausted"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionClosed returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionClosed
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionClosed() (TypedTaggedEventStreamEnvelopeSessionClosed, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionClosed
@@ -25545,6 +25670,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeRequestResultSessionSubmit()
 	case "rig.provision.progress":
 		return t.AsTypedTaggedEventStreamEnvelopeRigProvisionProgress()
+	case "session.claim_pickup_exhausted":
+		return t.AsTypedTaggedEventStreamEnvelopeSessionClaimPickupExhausted()
 	case "session.closed":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionClosed()
 	case "session.cold_start_timeout":
