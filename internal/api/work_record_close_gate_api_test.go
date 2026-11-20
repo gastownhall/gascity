@@ -229,6 +229,64 @@ func TestAPIBeadCloseEnforcesWorkRecord(t *testing.T) {
 	}
 }
 
+// TestAPIBeadCloseLeavesOrderTrackingOutsideTheWorkRecordGate pins the HTTP
+// plane's half of the order-tracking exemption. A tracking bead shaped as
+// orders.Store.CreateRun writes it (untyped, kindless, labeled
+// order-run:<scoped> and order-tracking) is infrastructure bookkeeping, not a
+// work unit, so the work-record gate passes it silently under enforcement,
+// whether it was stored no-history or with history.
+//
+// The generic close spellings refuse such a bead anyway, as an owned order run
+// record (refuseOwnedClose; TestGenericAPIClosesAnOrderRunRoot), before the
+// gate is asked. The rows below pin that the refusal they answer stays that
+// ownership refusal and is never the work-record gate's.
+func TestAPIBeadCloseLeavesOrderTrackingOutsideTheWorkRecordGate(t *testing.T) {
+	for _, noHistory := range []bool{true, false} {
+		t.Run(fmt.Sprintf("no_history=%v", noHistory), func(t *testing.T) {
+			t.Setenv(workrecord.EnforceEnvVar, "1")
+			st := newFakeState(t)
+			city := beads.NewMemStore()
+			st.cityBeadStore = city
+			st.stores = nil
+			st.cfg.Rigs = nil
+			city.HonorExplicitIDs = true
+			created, err := city.Create(beads.Bead{
+				ID:        "wr-tracking-1",
+				Title:     "order:nightly",
+				Labels:    []string{"order-run:nightly", "order-tracking"},
+				NoHistory: noHistory,
+			})
+			if err != nil {
+				t.Fatalf("seeding tracking bead: %v", err)
+			}
+			logged := captureWorkRecordGateLog(t)
+			s := New(st)
+
+			stores := st.Stores()
+			store, stored, err := s.resolveBeadOwnerIn(stores, created.ID)
+			if err != nil {
+				t.Fatalf("resolving owner of %s: %v", created.ID, err)
+			}
+			if err := s.gateWorkRecordClose(context.Background(), stores, created.ID, store, stored, nil); err != nil {
+				t.Fatalf("work-record gate refused a tracking bead: %v", err)
+			}
+			if out := logged.String(); out != "" {
+				t.Fatalf("expected no gate output for a tracking bead, got %q", out)
+			}
+
+			for _, spelling := range closeSpellings() {
+				err := spelling.close(s, context.Background(), created.ID)
+				if err != nil && strings.Contains(err.Error(), "work-record") {
+					t.Fatalf("%s: refused by the work-record gate: %v", spelling.name, err)
+				}
+			}
+			if out := logged.String(); out != "" {
+				t.Fatalf("expected no gate output from the close doors, got %q", out)
+			}
+		})
+	}
+}
+
 // TestAPIBeadCloseHandsTheOracleTheRequestContext pins this plane's half of the
 // reachability probe's cancellation path. The probe shells out to git, and the
 // only thing that can stop that subprocess when the client is gone is the
