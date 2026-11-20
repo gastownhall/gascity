@@ -156,6 +156,13 @@ func TestAPIBeadCloseEnforcesWorkRecord(t *testing.T) {
 			enforce: true,
 		},
 		{
+			name:         "an operator-kinded bead with a missing outcome refuses under enforcement",
+			meta:         map[string]string{beadmeta.KindMetadataKey: "work"},
+			enforce:      true,
+			wantConflict: "missing " + beadmeta.WorkOutcomeMetadataKey,
+			wantWarn:     "missing " + beadmeta.WorkOutcomeMetadataKey,
+		},
+		{
 			name:    "a control bead closes untouched",
 			meta:    map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow},
 			enforce: true,
