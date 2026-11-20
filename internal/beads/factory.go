@@ -150,6 +150,13 @@ type ProxiedOpenReport struct {
 	IdlePolicy string
 	Cursors    proxyendpoint.Cursors
 	Demoted    bool
+	// Verdict is why a SERVED store is demoted, read off a store that stood
+	// down at birth or since. Empty while the store serves natively, and
+	// empty on a refusal's report: a refusal carries its verdict as the
+	// open's error, and it is the factory that moves that one onto the wire.
+	Verdict ProxiedVerdict
+	// Detail is that verdict's operator-facing text, set alongside Verdict.
+	Detail string
 }
 
 // diagnostic projects the report, plus whatever ended the open, onto the wire.
@@ -651,6 +658,27 @@ func (opts StoreOpenOptions) openProxiedNative(ctx context.Context, diag *BeadsD
 	}
 	store, report, err := opts.OpenProxiedStore(ctx, opts.LongLived)
 	if err == nil && store != nil {
+		if report.Demoted {
+			// A demotion at birth SERVES (issue #9156): the split's bd leaf
+			// answers reads and writes, and its guard holds the only way back
+			// to native reads. The wire reports exactly the fields the bd
+			// fallback below would have — same store name, same gate, same
+			// reason, taken from the same diag that fallback was going to
+			// serialize — because a reader comparing two scopes must not be
+			// asked to learn a third vocabulary for "the bd front door is
+			// answering". What changed is the additive account: Demoted is
+			// true and the verdict rides in Proxied.
+			diag.Proxied = report.diagnostic(report.Verdict, report.Detail)
+			if report.Verdict == ProxiedVerdictHeadMoved {
+				// Served, but the incident is the one the fallback logs:
+				// serving the bd leaf changes where reads come from, not
+				// whether gc's own library open wrote to bd's database.
+				logProxiedHeadMoved(opts.Logger, opts.ScopeRoot, ProxiedIncidentSiteOpen,
+					NewProxiedVerdictError(report.Verdict, report.Detail, nil))
+			}
+			result, stampErr := opts.stampedResult(StoreOpenResult{Store: store, Diagnostic: *diag}, nil)
+			return true, result, stampErr
+		}
 		result, stampErr := opts.stampedResult(StoreOpenResult{
 			Store: store,
 			Diagnostic: BeadsDiagnostic{

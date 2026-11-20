@@ -1578,6 +1578,97 @@ func TestProxiedOpenServesAForeignMovedHead(t *testing.T) {
 	}
 }
 
+// TestProxiedOpenServesADemotedSplitWhenTheLeafRefusedNonTerminally is the
+// serving half of the open path (issue #9156).
+//
+// TestProxiedOpenRefusesAnOpenThatMovedHead pins the refusal; returning it to
+// the factory installs a plain bd front door with NO recovery for the process
+// lifetime — on a controller's long-lived store that is exactly the demotion
+// the issue is about. A NON-terminal verdict on a long-lived open is therefore
+// served as a split demoted at birth: the bd leaf answers and writes, the
+// verdict is recorded on the store, and the guard holds the reopener that can
+// re-pin a fresh native leaf one tick later. The refused native leaf is still
+// closed exactly once, and the report tells the factory what happened so the
+// wire keeps the fallback's vocabulary.
+func TestProxiedOpenServesADemotedSplitWhenTheLeafRefusedNonTerminally(t *testing.T) {
+	// A window whose one commit carries the "schema:" prefix every
+	// linked-library open mints: the move is gc's own, attribution declines,
+	// and the verdict fires. This is the attribution code deciding, not the
+	// test naming a verdict.
+	own := &proxyendpoint.PostOpenWindow{
+		Commits: []string{"schema: apply migrations"},
+	}
+	f := newProxiedScopeFixture(t)
+	beads.ForgetProxiedPin(f.scopeRoot, "beads")
+	t.Cleanup(func() { beads.ForgetProxiedPin(f.scopeRoot, "beads") })
+	var probes, reads, bdOpens int
+	leafStorage := &closeCountingStorage{}
+	bdLeaf := beads.NewMemStore()
+	opener := &proxiedNativeOpener{
+		cityPath:     t.TempDir(),
+		scopeRoot:    f.scopeRoot,
+		database:     "beads",
+		processTable: f.processTable(),
+		probe: func(context.Context, proxyendpoint.Endpoint, string) proxyendpoint.ProbeResult {
+			probes++
+			served := proxyendpoint.ServedProbeForTest(f.pinnedCursors(), proxyendpoint.CursorReality{})
+			served.Head = "before0000"
+			return served
+		},
+		observed:  beads.NewGenerationSet(),
+		recovered: beads.NewGenerationSet(),
+		sleep:     func(context.Context, time.Duration) error { return nil },
+		openNative: func(context.Context, string, map[string]string, ...beads.NativeDoltStoreOption) (*beads.NativeDoltStore, error) {
+			return beads.NewNativeDoltStoreOverStorageForTest(leafStorage), nil
+		},
+		leafObserve: func(_ context.Context, _ *beads.NativeDoltStore, since string) (proxyendpoint.PostOpenReport, error) {
+			reads++
+			if since != "before0000" {
+				return proxyendpoint.PostOpenReport{}, fmt.Errorf("the re-read was handed since %q, want the pin's head", since)
+			}
+			report := observedHead("after11111")
+			report.Window = own
+			return report, nil
+		},
+		openBd: func() (beads.Store, error) {
+			bdOpens++
+			return bdLeaf, nil
+		},
+	}
+
+	store, report, err := opener.open(context.Background(), true)
+	if err != nil {
+		t.Fatalf("a long-lived open whose leaf refused non-terminally was not served: %v", err)
+	}
+	split, ok := store.(*beads.ProxiedStore)
+	if !ok {
+		t.Fatalf("Store = %T, want a *beads.ProxiedStore demoted at birth", store)
+	}
+	t.Cleanup(func() { _ = split.CloseStore() })
+	if !split.Demoted() {
+		t.Fatal("the served split reports itself native: reads would wait on a leaf that refused to open")
+	}
+	if verdict := split.Verdict(); verdict == nil || verdict.Verdict != beads.ProxiedVerdictHeadMoved {
+		t.Fatalf("verdict = %v, want the head_moved that demoted the leaf", verdict)
+	}
+	if split.BdLeaf() != beads.Store(bdLeaf) {
+		t.Fatal("the demoted split does not answer from the bd leaf the opener built it around")
+	}
+	if !report.Demoted || report.Verdict != beads.ProxiedVerdictHeadMoved || report.Detail == "" {
+		t.Fatalf("report = %+v, want Demoted carrying the head_moved verdict and its detail", report)
+	}
+	if bdOpens != 1 {
+		t.Fatalf("the open built %d bd leaf(s), want exactly 1", bdOpens)
+	}
+	if leafStorage.closed != 1 {
+		t.Fatalf("the refused native leaf was closed %d time(s), want 1: an unclosed leaf is a live pool on bd's proxy",
+			leafStorage.closed)
+	}
+	if probes != 1 || reads != 1 {
+		t.Fatalf("the open spent %d probe(s) and %d re-read(s), want 1 and 1", probes, reads)
+	}
+}
+
 // observedHead is a post-open report of a healthy ignored plane with the given
 // HEAD — the shape of every observation the rows that are about HEAD alone need.
 // The zero report is NOT that: it says the ignored cursor table is gone.

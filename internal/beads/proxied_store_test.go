@@ -1330,3 +1330,102 @@ func TestStandDownKeepsTheTerminalReason(t *testing.T) {
 		t.Error("the store promoted itself")
 	}
 }
+
+// TestNewDemotedProxiedStoreServesTheBdLeafFromBirth is the constructor behind
+// the opener's demote-and-serve arm (issue #9156): a long-lived open whose
+// first library leaf refused NON-terminally is built as a split already stood
+// down, because returning the verdict instead installs the bd front door with
+// no recovery for the process lifetime, while a demoted split keeps the guard
+// whose tick re-pins a fresh native leaf.
+//
+// The refusals are the arm's safety rail: a TERMINAL verdict has no way back,
+// so the honest shape for it is the factory's fallback, and a demotion at
+// birth with no reopener is the one-way front door wearing a split's clothes —
+// the guard tick would have nothing to call.
+func TestNewDemotedProxiedStoreServesTheBdLeafFromBirth(t *testing.T) {
+	pin := PinForTest("/scope", "", "beads")
+	headMoved := NewProxiedVerdictError(ProxiedVerdictHeadMoved, "head moved from abc123 to def456 on beads", nil)
+	reopener := func(context.Context) (*NativeDoltStore, Pin, error) {
+		return nil, Pin{}, errors.New("not called by this test")
+	}
+
+	t.Run("refusals", func(t *testing.T) {
+		for _, tc := range []struct {
+			name    string
+			wantIn  string
+			bd      Store
+			pin     Pin
+			verdict *ProxiedVerdictError
+			opts    []ProxiedStoreOption
+		}{
+			{
+				name:    "nil bd leaf",
+				wantIn:  "bd write leaf is nil",
+				pin:     pin,
+				verdict: headMoved,
+				opts:    []ProxiedStoreOption{WithNativeLeafReopener(reopener)},
+			},
+			{
+				name:   "nil verdict",
+				wantIn: "verdict is nil",
+				bd:     NewMemStore(),
+				pin:    pin,
+				opts:   []ProxiedStoreOption{WithNativeLeafReopener(reopener)},
+			},
+			{
+				name:    "terminal verdict",
+				wantIn:  "terminal",
+				bd:      NewMemStore(),
+				pin:     pin,
+				verdict: NewSchemaSkewVerdictError(ProxiedSkewLaneMain, ProxiedSkewDirAhead, "main=67 pinned=66"),
+				opts:    []ProxiedStoreOption{WithNativeLeafReopener(reopener)},
+			},
+			{
+				name:    "unadmitted pin",
+				wantIn:  "was not admitted",
+				bd:      NewMemStore(),
+				verdict: headMoved,
+				opts:    []ProxiedStoreOption{WithNativeLeafReopener(reopener)},
+			},
+			{
+				name:    "no reopener",
+				wantIn:  "reopener",
+				bd:      NewMemStore(),
+				pin:     pin,
+				verdict: headMoved,
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				store, err := NewDemotedProxiedStore(tc.bd, tc.pin, tc.verdict, tc.opts...)
+				if err == nil || store != nil {
+					t.Fatalf("NewDemotedProxiedStore(...) = (%v, %v), want a refusal naming %q", store, err, tc.wantIn)
+				}
+				if !strings.Contains(err.Error(), tc.wantIn) {
+					t.Fatalf("refusal = %q, want it to name %q", err, tc.wantIn)
+				}
+			})
+		}
+	})
+
+	t.Run("the split is demoted at birth and carries its verdict", func(t *testing.T) {
+		bd := NewMemStore()
+		store, err := NewDemotedProxiedStore(bd, pin, headMoved, WithNativeLeafReopener(reopener))
+		if err != nil {
+			t.Fatalf("NewDemotedProxiedStore: %v", err)
+		}
+		t.Cleanup(func() { _ = store.CloseStore() })
+		if !store.Demoted() {
+			t.Fatal("a store demoted at birth reports itself as serving natively")
+		}
+		if store.Verdict() != headMoved {
+			t.Fatalf("verdict = %v, want the one the store was demoted for", store.Verdict())
+		}
+		if store.readLeaf() != Store(bd) || store.BdLeaf() != Store(bd) {
+			t.Fatal("a demoted-at-birth split does not answer from the bd leaf it was built around")
+		}
+		report := store.Report()
+		if !report.Demoted || report.Verdict != ProxiedVerdictHeadMoved || report.Detail != headMoved.Detail {
+			t.Fatalf("report = %+v, want Demoted carrying the head_moved verdict and its detail", report)
+		}
+	})
+}

@@ -1289,6 +1289,111 @@ func TestOpenStoreAtForCityProxiedHeadMovedIsLoud(t *testing.T) {
 	}
 }
 
+// TestOpenStoreAtForCityServesADemotedProxiedSplitUnderTheFallbackGate is the
+// served half of a demotion at birth (issue #9156).
+//
+// The refusal rows above pin what a verdict DOES when it is returned; the
+// opener now answers some of them with a store instead — a split demoted at
+// birth, whose bd leaf answers reads and writes and whose guard holds the only
+// way back to native reads. The factory must report that store in the SAME
+// vocabulary the bd fallback below it uses — store name, gate, reason — because
+// a reader comparing two scopes cannot be asked to learn a third word for "the
+// bd front door is answering"; what changed is the additive account: Demoted is
+// true and the verdict rides in Proxied. head_moved stays loud exactly as it is
+// on the fallback: serving the bd leaf changes where the reads come from, not
+// whether gc's own library open may have written to bd's database.
+func TestOpenStoreAtForCityServesADemotedProxiedSplitUnderTheFallbackGate(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		verdict  ProxiedVerdict
+		wantLoud bool
+	}{
+		{
+			name:     "head_moved is served and still reported at WARN",
+			verdict:  ProxiedVerdictHeadMoved,
+			wantLoud: true,
+		},
+		{
+			name:    "any other non-terminal verdict is served quietly",
+			verdict: ProxiedVerdictDraining,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(nativeForceFallbackEnv, "")
+			t.Setenv(proxiedNativeEnv, "1")
+			scope := proxiedScopeFixture(t)
+			served := NewMemStore()
+
+			report := proxiedOpenReportFixture()
+			report.Demoted = true
+			report.Verdict = tc.verdict
+			report.Detail = "head moved from before0000 to after11111 on beads"
+
+			var logged bytes.Buffer
+			logger := slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			result, err := OpenStoreAtForCity(context.Background(), StoreOpenOptions{
+				ScopeRoot:        scope,
+				Provider:         "bd",
+				Logger:           logger,
+				LongLived:        true,
+				PreflightChecker: refusingPreflightChecker(t),
+				OpenBdStore: func() (Store, error) {
+					t.Fatal("the bd fallback opened under a served demotion: the split already carries the bd leaf")
+					return nil, nil
+				},
+				OpenProxiedStore: func(context.Context, bool) (Store, ProxiedOpenReport, error) {
+					return served, report, nil
+				},
+			})
+			if err != nil {
+				t.Fatalf("OpenStoreAtForCity: %v", err)
+			}
+			if result.Store != Store(served) {
+				t.Fatalf("Store = %T, want the demoted split itself, not a second store", result.Store)
+			}
+			diag := result.Diagnostic
+			if diag.Store != BeadsStoreNameBdStore {
+				t.Errorf("beads_store = %q, want %q: the reads a caller gets are the bd leaf's", diag.Store, BeadsStoreNameBdStore)
+			}
+			if diag.NativeStoreEligible {
+				t.Error("native_store_eligible = true on a store whose native leaf refused to open")
+			}
+			if diag.PreflightGate != BeadsGateProxiedProvider {
+				t.Errorf("preflight_gate = %q, want %q unchanged: internal/doctor matches on it", diag.PreflightGate, BeadsGateProxiedProvider)
+			}
+			if diag.PreflightReason != "proxied-server mode is owned by the bd provider" {
+				t.Errorf("preflight_reason = %q, want today's text unchanged", diag.PreflightReason)
+			}
+			proxiedDiag := diag.Proxied
+			if proxiedDiag == nil {
+				t.Fatal("a served demotion reported no proxied account")
+			}
+			if proxiedDiag.Verdict != tc.verdict {
+				t.Errorf("verdict = %q, want %q", proxiedDiag.Verdict, tc.verdict)
+			}
+			if !proxiedDiag.Demoted {
+				t.Error("demoted = false on the one open that knows it demoted at birth")
+			}
+			if proxiedDiag.Endpoint.Generation != "6001:44556677" {
+				t.Errorf("endpoint = %+v, want the pinned generation the report carried", proxiedDiag.Endpoint)
+			}
+			// The stamp still reaches the store: a served demotion funnels
+			// through stampedResult like every other selection path.
+			carrier, ok := result.Store.(conditionalWritesModeCarrier)
+			if !ok {
+				t.Fatal("the served demotion carries no conditional-writes stamp")
+			}
+			if _, defaulted := carrier.conditionalWritesMode(); !defaulted {
+				t.Error("an unthreaded conditional-writes mode did not default on the served demotion")
+			}
+			loud := strings.Contains(logged.String(), "level=WARN") && strings.Contains(logged.String(), ProxiedHeadMovedMessage)
+			if loud != tc.wantLoud {
+				t.Fatalf("logged loudly = %v, want %v:\n%s", loud, tc.wantLoud, logged.String())
+			}
+		})
+	}
+}
+
 // TestOpenStoreAtForCityProxiedForceFallbackWinsOverTheFlag pins the escape
 // hatch's precedence. GC_BEADS_FORCE_FALLBACK is checked before the persisted
 // topology is even read, so an operator turning it on gets BdStore on a box

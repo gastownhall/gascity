@@ -395,6 +395,35 @@ func (o *proxiedNativeOpener) open(parent context.Context, longLived bool) (bead
 
 	native, err := o.openNativeLeaf(ctx, pin, longLived, beads.ProxiedIncidentSiteOpen)
 	if err != nil {
+		// A NON-terminal refusal of a long-lived open is served, not returned
+		// (issue #9156): the verdict would install the bd front door with no
+		// recovery for the process lifetime, while a demoted split serves the
+		// same bd leaf AND keeps the guard whose tick can re-pin a fresh
+		// native leaf once the proxy is healthy again. A one-shot keeps the
+		// refusal: its handle does not outlive the command, and a guard would
+		// be a ticker bought for nothing. Any failure building the served
+		// shape falls through to the refusal return, so the arm is an
+		// optimization of the fallback, never a new failure mode.
+		if verdict, typed := beads.ProxiedVerdictOf(err); typed && !verdict.Terminal() {
+			if longLived {
+				// The refused native leaf is already closed by openNativeLeaf.
+				// A failure building the served shape — the bd leaf would not
+				// open, or the constructor refused — closes the bd leaf it
+				// opened and falls through to the refusal return, so the
+				// factory sees the same refusal it would have seen without
+				// the arm.
+				bd, bdErr := o.openBd()
+				if bdErr == nil {
+					store, serveErr := beads.NewDemotedProxiedStore(bd, pin, verdict,
+						beads.WithNativeLeafReopener(o.recoverNativeLeaf()))
+					if serveErr == nil {
+						store.StartGuard()
+						return store, store.Report(), nil
+					}
+					closeProxiedLeafQuietly(bd)
+				}
+			}
+		}
 		return nil, pin.Report(), err
 	}
 

@@ -276,6 +276,57 @@ func NewProxiedStore(native *NativeDoltStore, bd Store, pin Pin, opts ...Proxied
 	return store, nil
 }
 
+// NewDemotedProxiedStore builds the split store already stood down: reads and
+// writes both on the bd leaf, the verdict that demoted the native lane recorded
+// on the store, and the guard's reopener as the only way back to native reads.
+//
+// It is the opener's answer to a NON-terminal refusal at a store's first
+// library open (issue #9156): the long-lived store this open is building has a
+// guard whose recovery can re-pin a fresh native leaf one interval later, so
+// serving the bd leaf NOW is a demotion with a way back — while returning the
+// verdict to the factory would install a plain bd front door with no recovery
+// for the process lifetime. A TERMINAL verdict is refused here as well:
+// terminal means no way back, and the honest shape for that is the factory's
+// fallback, not a store whose guard could never recover what it lost.
+//
+// The reopener is required, and checked after opts are applied, because a
+// demotion at birth has no native leaf for the read path to recover through:
+// the guard tick's re-pin is the only route back, and a demoted store that
+// could not take it would be the one-way front door wearing a split's clothes.
+func NewDemotedProxiedStore(bd Store, pin Pin, verdict *ProxiedVerdictError, opts ...ProxiedStoreOption) (*ProxiedStore, error) {
+	if bd == nil {
+		return nil, errors.New("proxied demoted store: bd write leaf is nil")
+	}
+	if verdict == nil {
+		return nil, errors.New("proxied demoted store: verdict is nil; a demoted store exists to carry one")
+	}
+	if verdict.Terminal() {
+		return nil, fmt.Errorf("proxied demoted store: verdict %s is terminal; a terminal refusal takes the bd front door, not a demotion", verdict.Verdict)
+	}
+	if !pin.Admitted() {
+		return nil, errors.New("proxied demoted store: pin was not admitted; only beads.Admit mints one")
+	}
+	store := &ProxiedStore{
+		bd:       bd,
+		pin:      pin,
+		verdict:  verdict,
+		root:     pin.Root(),
+		database: pin.Database(),
+	}
+	// H2's surgery, demoted half: the bd leaf owns the sidecar because it is
+	// the leaf that WRITES local strings, and because there is no other leaf.
+	if carrier, ok := bd.(localSidecarCarrier); ok {
+		store.sidecar = carrier.localSidecarHandle()
+	}
+	for _, opt := range opts {
+		opt(store)
+	}
+	if store.reopenNative == nil {
+		return nil, errors.New("proxied demoted store: no native leaf reopener; a demotion at birth has no other recovery")
+	}
+	return store, nil
+}
+
 // ProxiedPrefixAgreement is H10, and it is exported because it is checked in
 // two places: once by the opener with both handles fresh, and again by the
 // guard tick's recovery when it installs a replacement native leaf.
@@ -343,12 +394,17 @@ func (s *ProxiedStore) Verdict() *ProxiedVerdictError {
 }
 
 // Report projects this store's current state onto the factory's diagnostic
-// shape, so doctor can see the pin AND the demotion in one place.
+// shape, so doctor can see the pin AND the demotion in one place. A demoted
+// store carries the verdict that stood it down, so a served demotion reports
+// on the wire exactly what a refused one would.
 func (s *ProxiedStore) Report() ProxiedOpenReport {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	report := s.pin.Report()
 	report.Demoted = s.native == nil
+	if s.verdict != nil {
+		report.Verdict, report.Detail = s.verdict.Verdict, s.verdict.Detail
+	}
 	return report
 }
 
