@@ -372,8 +372,16 @@ func TestReconcileSessionBeads_RestartRequestSuppressesGoneClearRestartRequested
 
 	env.reconcileWithPoolDesiredAndDrainOps([]beads.Bead{session}, map[string]int{"worker": 0}, dops)
 
-	if got := env.stderr.String(); got != "" {
-		t.Fatalf("stderr = %q, want no diagnostic for gone clearRestartRequested error", got)
+	// The gone-session clear error itself must stay suppressed. The plain
+	// fake cannot read fresh, so the restart yield after the kill is
+	// expected: the yield notice is the release gate's own diagnostic, not
+	// the marker-clear failure's.
+	got := env.stderr.String()
+	if strings.Contains(got, "clearing restart-requested marker") {
+		t.Fatalf("stderr = %q, want the gone clearRestartRequested error suppressed", got)
+	}
+	if !strings.Contains(got, "starts on the next pass") {
+		t.Fatalf("stderr = %q, want the release-gate yield notice", got)
 	}
 }
 
@@ -1129,6 +1137,103 @@ func TestReconcileSessionBeads_RestartRequestLiveKillRestartsSamePass(t *testing
 	if strings.Contains(startCmd, "original-key") {
 		t.Fatalf("replacement Start command %q carries the pre-restart session key; the fresh conversation must not resume it", startCmd)
 	}
+}
+
+// TestReconcileSessionBeads_RestartRequestLiveKillYieldsWhenReleaseUnproven
+// pins the release gate's false side against the same-pass fall-through: when
+// the killed name's release cannot be proven — the name still reads present
+// after the kill (a corpse holding it), the provider cannot read fresh, or
+// the fresh read fails — the pass still consumes the request and rotates the
+// key, but yields the restart to the next pass instead of starting a
+// replacement that would land in adoption.
+func TestReconcileSessionBeads_RestartRequestLiveKillYieldsWhenReleaseUnproven(t *testing.T) {
+	setup := func(t *testing.T) (*restartRequestTestEnv, beads.Bead, string) {
+		t.Helper()
+		env := newRestartRequestTestEnv(t)
+		env.cfg = &config.City{
+			Workspace:     config.Workspace{Name: "test-city"},
+			Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
+			NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
+		}
+		sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+		env.desiredState[sessionName] = TemplateParams{
+			Command:      "true",
+			SessionName:  sessionName,
+			TemplateName: "worker",
+			ResolvedProvider: &config.ResolvedProvider{
+				SessionIDFlag: "--session-id",
+			},
+		}
+		session := env.createSessionBead(sessionName)
+		env.setSessionMetadata(&session, map[string]string{
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "worker",
+			namedSessionModeMetadata:     "always",
+			"state":                      "active",
+			"pin_awake":                  "true",
+			"restart_requested":          "true",
+			"continuation_reset_pending": "true",
+			"session_key":                "original-key",
+			"started_config_hash":        "hash-before-restart",
+		})
+		if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+			t.Fatalf("start session: %v", err)
+		}
+		if err := env.sp.SetMeta(sessionName, "GC_SESSION_ID", session.ID); err != nil {
+			t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+		}
+		return env, session, sessionName
+	}
+	assertYield := func(t *testing.T, env *restartRequestTestEnv, session beads.Bead, sessionName string) {
+		t.Helper()
+		stopAt := -1
+		for i, call := range env.sp.SnapshotCalls() {
+			if stopAt == -1 && call.Method == "Stop" && call.Name == sessionName {
+				stopAt = i
+				continue
+			}
+			if stopAt != -1 && call.Method == "Start" && call.Name == sessionName {
+				t.Fatalf("Start recorded for %q after the kill (Stop at call %d); an unproven release must yield the restart to the next pass", sessionName, stopAt)
+			}
+		}
+		if stopAt == -1 {
+			t.Fatalf("no Stop recorded for %q; the explicit reset must still kill the live runtime before yielding", sessionName)
+		}
+		got := restartRequestBead(t, env, session.ID)
+		if got.Metadata["state"] != "asleep" {
+			t.Fatalf("state = %q after the yielded kill, want asleep", got.Metadata["state"])
+		}
+		if got.Metadata["restart_requested"] != "" {
+			t.Fatalf("restart_requested = %q, want consumed even when the restart yields", got.Metadata["restart_requested"])
+		}
+		if got.Metadata["session_key"] == "" || got.Metadata["session_key"] == "original-key" {
+			t.Fatalf("session_key = %q, want the rotated key even when the restart yields", got.Metadata["session_key"])
+		}
+		stderr := env.stderr.String()
+		if !strings.Contains(stderr, sessionName) || !strings.Contains(stderr, "starts on the next pass") {
+			t.Fatalf("stderr = %q, want the release-gate yield notice naming %q", stderr, sessionName)
+		}
+	}
+
+	t.Run("name still reads present after the kill", func(t *testing.T) {
+		env, session, sessionName := setup(t)
+		env.sp.StopLeavesRunning[sessionName] = true
+		env.useFreshReads()
+		env.reconcile([]beads.Bead{session})
+		assertYield(t, env, session, sessionName)
+	})
+	t.Run("provider that cannot read fresh", func(t *testing.T) {
+		env, session, sessionName := setup(t)
+		env.reconcile([]beads.Bead{session})
+		assertYield(t, env, session, sessionName)
+	})
+	t.Run("fresh read fails", func(t *testing.T) {
+		env, session, sessionName := setup(t)
+		env.useFreshReads()
+		env.provider = scriptedRelease{Provider: env.provider, err: runtime.ErrRuntimeUnavailable}
+		env.reconcile([]beads.Bead{session})
+		assertYield(t, env, session, sessionName)
+	})
 }
 
 // TestReconcileSessionBeads_RestartRequestFreshReadsKeepOnDemandNextPassWake

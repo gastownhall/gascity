@@ -3826,6 +3826,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					if confirmRuntimeReleased(ctx, sp, tp.Hints.ProcessNames, name, releasedSince) {
 						running, alive = false, false
 					} else {
+						fmt.Fprintf(stderr, "session reconciler: restart-requested %s stopped, but its runtime name is not confirmed released; it starts on the next pass\n", name) //nolint:errcheck
 						continue
 					}
 				}
