@@ -146,3 +146,37 @@ func TestWorkflowRootCloseMetadata(t *testing.T) {
 		})
 	}
 }
+
+// processSkippedBlockerWorkflow runs w's finalizer and returns the result and
+// the root as it closed.
+func processSkippedBlockerWorkflow(t *testing.T, store beads.Store, w skippedBlockerWorkflow) (ControlResult, beads.Bead) {
+	t.Helper()
+	result, err := ProcessControl(beadstest.Graph(store), w.finalizer, ProcessOptions{Work: beadstest.Work(store)})
+	if err != nil {
+		t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+	}
+	root, err := store.Get(w.root.ID)
+	if err != nil {
+		t.Fatalf("get root: %v", err)
+	}
+	return result, root
+}
+
+// A pass in which no blocker was skipped writes no marker: absence, not an
+// empty value, is what tells a watcher every blocker ran.
+func TestProcessWorkflowFinalizeAllPassedWritesNoSkipMarker(t *testing.T) {
+	t.Parallel()
+
+	store := beads.NewMemStore()
+	w := newSkippedBlockerWorkflow(t, store, nil, beadmeta.OutcomePass, beadmeta.OutcomePass)
+	result, root := processSkippedBlockerWorkflow(t, store, w)
+	if !result.Processed || result.Action != "workflow-pass" {
+		t.Fatalf("result = %+v, want processed workflow-pass", result)
+	}
+	if root.Status != "closed" || root.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomePass {
+		t.Fatalf("root = %s/%q, want closed/pass", root.Status, root.Metadata[beadmeta.OutcomeMetadataKey])
+	}
+	if got, ok := root.Metadata["gc.skipped_blockers"]; ok {
+		t.Fatalf("root gc.skipped_blockers = %q, want the key absent when no blocker was skipped", got)
+	}
+}
