@@ -1375,6 +1375,11 @@ resource = "fixed_sleep"
 calls = 1
 
 [[count]]
+path = "cmd/gc/storage_containment_lease_cadence_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
 path = "cmd/gc/storage_containment_lease_socket_test_helpers_test.go"
 resource = "net_listen"
 calls = 1
