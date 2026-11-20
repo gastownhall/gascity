@@ -348,3 +348,94 @@ func TestFinalizeDrainAckStoppedSessionPruneRefusalKeepsTheClose(t *testing.T) {
 		})
 	}
 }
+
+// TestFinalizeDrainAckStoppedSessionPrunesOnlyItsOwnClose (gascity#8093). A
+// drain-ack finalize that does not itself close the seat (assigned work, an
+// operator's suspend, a keep-open finalize, or witnessing another observer's
+// close) requests no worker_dir removal and keeps its lifecycle result: the
+// assigned seat sleeps idle, the suspended and keep-open seats drain open.
+func TestFinalizeDrainAckStoppedSessionPrunesOnlyItsOwnClose(t *testing.T) {
+	cases := []struct {
+		name              string
+		setup             func(t *testing.T, s *drainAckPruneSeat)
+		closeIfUnassigned bool
+		wantStatus        string
+		wantState         string
+		wantSleepReason   string
+		wantWitness       bool
+	}{
+		{
+			name:              "assigned work",
+			setup:             func(t *testing.T, s *drainAckPruneSeat) { assignWork(t, s.env.store, s.id) },
+			closeIfUnassigned: true,
+			wantStatus:        "open",
+			wantState:         "asleep",
+			wantSleepReason:   "idle",
+		},
+		{
+			name: "operator suspended",
+			setup: func(t *testing.T, s *drainAckPruneSeat) {
+				if _, err := sessionFrontDoor(s.env.store).OperatorSuspend(s.id, s.env.clk.Now()); err != nil {
+					t.Fatalf("OperatorSuspend: %v", err)
+				}
+			},
+			closeIfUnassigned: true,
+			wantStatus:        "open",
+			wantState:         "drained",
+		},
+		{
+			name:       "keep-open finalize",
+			setup:      func(*testing.T, *drainAckPruneSeat) {},
+			wantStatus: "open",
+			wantState:  "drained",
+		},
+		{
+			name: "witness of another observer's close",
+			setup: func(t *testing.T, s *drainAckPruneSeat) {
+				if err := s.env.store.Close(s.id); err != nil {
+					t.Fatalf("Close(%s): %v", s.id, err)
+				}
+			},
+			closeIfUnassigned: true,
+			wantStatus:        "closed",
+			wantWitness:       true,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := newDrainAckPruneSeat(t, nil)
+			before := s.env.sessionInfo(s.id)
+			c.setup(t, s)
+			info := s.env.sessionInfo(s.id)
+			if c.wantWitness {
+				// The witnessing observer's snapshot predates the other close.
+				info = before
+			}
+
+			res := s.finalize(info, c.closeIfUnassigned)
+
+			if res.closed {
+				t.Fatalf("finalize result %+v, want no close of its own", res)
+			}
+			if (res.witnessInfo != nil) != c.wantWitness {
+				t.Fatalf("witness result %v, want %v", res.witnessInfo != nil, c.wantWitness)
+			}
+			got, err := s.env.store.Get(s.id)
+			if err != nil {
+				t.Fatalf("Get(%s): %v", s.id, err)
+			}
+			if got.Status != c.wantStatus {
+				t.Fatalf("status = %q, want %q", got.Status, c.wantStatus)
+			}
+			if c.wantState != "" && got.Metadata["state"] != c.wantState {
+				t.Fatalf("state = %q, want %q", got.Metadata["state"], c.wantState)
+			}
+			if c.wantSleepReason != "" && got.Metadata["sleep_reason"] != c.wantSleepReason {
+				t.Fatalf("sleep_reason = %q, want %q", got.Metadata["sleep_reason"], c.wantSleepReason)
+			}
+			if len(s.removes) != 0 || s.rig.removeInvoked {
+				t.Fatalf("rig-root removals = %q, want none; stderr=%s", s.removes, s.env.stderr.String())
+			}
+		})
+	}
+}
