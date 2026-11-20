@@ -14,6 +14,7 @@ go_library(
         "held_file_owner_unix.go",
         "held_file_owner_windows.go",
         "held_files.go",
+        "idle_wait_family.go",
         "interaction.go",
         "interaction_codex.go",
         "interaction_question.go",

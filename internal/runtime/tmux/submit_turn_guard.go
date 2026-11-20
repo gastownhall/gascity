@@ -128,8 +128,9 @@ const codexTurnStatusRows = 6
 // back as busy for good, and a transcript row shaped like another provider's
 // indicator (a tool's "(2s · 3.1 MB)" reads as Claude's spinner) did the same.
 // A Codex pane with no composer on screen cannot be read that way and falls
-// back to Codex's indicator anywhere in lines. Every other family keeps the
-// shared indicator scan plus grok's own footer read (paneBusyReading).
+// back to Codex's indicator anywhere in lines. Every other family reads
+// paneBusyReading: grok its own footer below the live composer, the rest the
+// shared indicator scan.
 func paneShowsRunningTurn(lines []string, family string) bool {
 	if family != "codex" {
 		return paneBusyReading(lines, family)

@@ -3363,27 +3363,38 @@ func TestRuntimeHandleIsNotAFencedResetHandle(t *testing.T) {
 	}
 }
 
-// The wait-idle family gate is one list: every runtime.WaitIdleLiveFamilies
-// member's handle waits for the idle boundary and delivers live, and a family
-// outside the list is refused before the runtime is touched — the permanent
-// live_delivery_unsupported reason, never a wait (AC-6).
+// The wait-idle family gate is one predicate, runtime.WaitIdleLiveOn: every
+// runtime.WaitIdleLiveFamilies member's handle waits for the idle boundary and
+// delivers live on a runtime whose idle wait reads its turn (tmux reads them
+// all), and a family outside the list is refused before the runtime is
+// touched — the permanent live_delivery_unsupported reason, never a wait
+// (AC-6). grok's turn shows only in its own footer, which the exec runtime's
+// family-blind wait cannot read, so grok is refused there the same way, while
+// claude, whose indicator every wait reads, still goes live.
 func TestRuntimeHandleNudgeWaitIdleLivesForWaitIdleFamilies(t *testing.T) {
 	type row struct {
 		family  string
+		runtime runtime.Profile
 		refused bool
 	}
 	var rows []row
 	for _, family := range runtime.WaitIdleLiveFamilies {
-		rows = append(rows, row{family: family})
+		rows = append(rows, row{family: family, runtime: runtime.ProfileTmux})
 	}
-	rows = append(rows, row{family: "codex", refused: true}, row{family: "gemini", refused: true})
+	rows = append(rows,
+		row{family: "codex", runtime: runtime.ProfileTmux, refused: true},
+		row{family: "gemini", runtime: runtime.ProfileTmux, refused: true},
+		row{family: "claude", runtime: runtime.ProfileExec},
+		row{family: "grok", runtime: runtime.ProfileExec, refused: true},
+	)
 	for _, tc := range rows {
-		t.Run(tc.family, func(t *testing.T) {
-			sp := runtime.NewFake()
+		t.Run(tc.family+" on "+tc.runtime.String(), func(t *testing.T) {
+			fake := runtime.NewFake()
+			sp := runtime.NewFakeProfile(tc.runtime, runtime.FullFake{Fake: fake})
 			if err := sp.Start(context.Background(), "legacy-worker", runtime.Config{}); err != nil {
 				t.Fatalf("Start: %v", err)
 			}
-			sp.WaitForIdleErrors["legacy-worker"] = nil
+			fake.WaitForIdleErrors["legacy-worker"] = nil
 
 			handle, err := NewRuntimeHandle(RuntimeHandleConfig{
 				Provider:     sp,
@@ -3403,7 +3414,7 @@ func TestRuntimeHandleNudgeWaitIdleLivesForWaitIdleFamilies(t *testing.T) {
 				t.Fatalf("Nudge(wait_idle): %v", err)
 			}
 			var waitCalls, nudgeNow, nudges int
-			for _, call := range sp.Calls {
+			for _, call := range fake.Calls {
 				switch call.Method {
 				case "WaitForIdle":
 					waitCalls++
@@ -3425,7 +3436,7 @@ func TestRuntimeHandleNudgeWaitIdleLivesForWaitIdleFamilies(t *testing.T) {
 			if !result.Delivered {
 				t.Fatalf("Nudge(wait_idle) = %+v, want delivered", result)
 			}
-			if waitCalls != 1 || nudgeNow != 1 || nudges != 0 {
+			if waitCalls != 1 || nudgeNow+nudges != 1 {
 				t.Fatalf("runtime calls = %d waits, %d nudge-now, %d nudges; want one wait and one live delivery", waitCalls, nudgeNow, nudges)
 			}
 		})

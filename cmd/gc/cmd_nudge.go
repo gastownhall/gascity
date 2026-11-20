@@ -1570,13 +1570,13 @@ func deliverSessionNudgeLegacy(target nudgeTarget, store beads.Store, sp runtime
 	// WaitForIdle returns promptly); an unknown LastActivity is treated as
 	// not-busy so untracked sessions keep the existing behavior.
 	//
-	// Restrict this to the families whose handle actually blocks on
-	// WaitForIdle — runtime.WaitIdleLiveFamilies, the one predicate every
+	// Restrict this to the sessions whose handle actually blocks on
+	// WaitForIdle — runtime.WaitIdleLiveOn, the one predicate every
 	// wait-idle gate asks — on the non-ACP transport. ACP delivers live
-	// in-process and every other family returns immediately (see
+	// in-process and every other session returns immediately (see
 	// internal/worker/runtime_handle.go nudgeWaitIdle), so short-circuiting
 	// those would needlessly downgrade live delivery to queued. (gco-90ui)
-	if mode == nudgeDeliveryWaitIdle && target.sessionTransport() != "acp" && runtime.WaitIdleLiveFamily(target.providerFamily()) {
+	if mode == nudgeDeliveryWaitIdle && target.sessionTransport() != "acp" && runtime.WaitIdleLiveOn(sp, target.sessionName, target.providerFamily()) {
 		if obs, obsErr := nudgeObserveTarget(target, sessStore, sp); obsErr == nil && obs.Running && nudgeObservationBusy(obs) {
 			// This busy pre-read stands in for the worker's (which records
 			// its own when it runs): under the shadow switch it is recorded

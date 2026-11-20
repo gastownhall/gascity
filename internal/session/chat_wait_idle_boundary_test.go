@@ -93,19 +93,25 @@ func TestChatWaitIdleBusySnapshotQueuesWithoutWaiting(t *testing.T) {
 	}
 }
 
-// The manager's wait-idle nudges serve the families whose idle boundary the
-// runtime can wait on (runtime.WaitIdleLiveFamilies) and only those: a grok
-// session is waited for and typed into live on both paths, while a codex or
-// gemini session is reported undelivered without waiting and without typing
-// (AC-6).
+// The manager's wait-idle nudges serve the sessions whose idle boundary the
+// runtime can wait on (runtime.WaitIdleLiveOn) and only those: a grok session
+// on a runtime whose idle wait reads grok's footer (tmux) is waited for and
+// typed into live on both paths, while the same grok session on the exec
+// runtime, whose family-blind wait reads a working grok pane as idle, and a
+// codex or gemini session anywhere, are reported undelivered without waiting
+// and without typing. claude, whose indicator every wait reads, still goes
+// live on exec (AC-6).
 func TestChatWaitIdleNudgeDeliversOnlyWaitIdleFamilies(t *testing.T) {
 	rows := []struct {
 		family    string
+		runtime   runtime.Profile
 		delivered bool
 	}{
-		{family: "grok", delivered: true},
-		{family: "codex"},
-		{family: "gemini"},
+		{family: "grok", runtime: runtime.ProfileTmux, delivered: true},
+		{family: "grok", runtime: runtime.ProfileExec},
+		{family: "claude", runtime: runtime.ProfileExec, delivered: true},
+		{family: "codex", runtime: runtime.ProfileTmux},
+		{family: "gemini", runtime: runtime.ProfileTmux},
 	}
 	for _, tc := range rows {
 		for path, deliver := range map[string]func(*Manager, Info, runtime.Config) (bool, error){
@@ -116,9 +122,9 @@ func TestChatWaitIdleNudgeDeliversOnlyWaitIdleFamilies(t *testing.T) {
 				return m.TryWaitIdleNudgeLiveOnly(context.Background(), i.ID, "mail", "check deploy status", h.ProcessNames)
 			},
 		} {
-			t.Run(path+"/"+tc.family, func(t *testing.T) {
+			t.Run(path+"/"+tc.family+" on "+tc.runtime.String(), func(t *testing.T) {
 				fake := runtime.NewFake()
-				sp := &idleSnapshotFake{Fake: fake, idle: true}
+				sp := runtime.NewFakeProfile(tc.runtime, runtime.FullFake{Fake: fake})
 				mgr := NewManagerWithOptions(beadstest.Sessions(beads.NewMemStore()), sp, WithCityPath(t.TempDir()))
 				info, err := mgr.CreateSession(context.Background(), CreateOptions{
 					Template: "helper", Command: tc.family, WorkDir: t.TempDir(), Provider: tc.family,

@@ -33,11 +33,25 @@ func grokTurnRunning(lines []string) bool {
 }
 
 // paneBusyReading is the leaf's busy reading for a pane of provider family
-// family: the shared indicator scan every family gets
-// (paneContainsBusyIndicator), plus grok's processing footer read relative to
-// its live composer (grokTurnRunning). Only a grok pane consults the grok
-// reader; every other family keeps the shared scan alone, so grok's footer
-// string in another family's transcript never reads as busy.
+// family. A grok pane reads its own processing footer relative to its live
+// composer (grokTurnRunning) and nothing else, as the codex turn guard reads
+// only codex's own indicator (paneShowsRunningTurn): grok never draws the
+// other families' indicators, so a transcript row shaped like one (a tool's
+// "(2s · 3.1 MB)" reads as Claude's spinner) is not its turn. Every other
+// family keeps the shared indicator scan (paneContainsBusyIndicator), so
+// grok's footer string in another family's transcript never reads as busy.
 func paneBusyReading(lines []string, family string) bool {
-	return paneContainsBusyIndicator(lines) || (family == "grok" && grokTurnRunning(lines))
+	if family == "grok" {
+		return grokTurnRunning(lines)
+	}
+	return paneContainsBusyIndicator(lines)
+}
+
+// paneReadingNeedsFamily reports whether the pane's provider family decides
+// lines' reading: a shared-scan indicator is busy for every family but grok,
+// and trusted only for some (busyReadingTrusted), and grok's footer below its
+// live composer is busy only on a grok pane. A capture showing neither reads
+// the same for every family, so it needs no family read.
+func paneReadingNeedsFamily(lines []string) bool {
+	return paneContainsBusyIndicator(lines) || grokTurnRunning(lines)
 }

@@ -513,8 +513,8 @@ func snapshotHoldFor(sp runtime.Provider, sessName string) string {
 // clock for the session whose metadata is meta: its transport is not ACP. ACP
 // delivers in-process, with no pane to read. Which provider families' busy
 // readings count is the runtime leaf's policy, not this gate's: the tmux leaf
-// reports a busy indicator it cannot vouch for, on every family but claude
-// and codex, as runtime.ErrIdleIndeterminate, which holds nothing
+// reports a busy indicator it cannot vouch for, on every family but claude,
+// codex and grok, as runtime.ErrIdleIndeterminate, which holds nothing
 // (snapshotHoldFor, turnHoldFor), so such a session keeps the activity clock
 // alone.
 func executionSnapshotVetoApplies(meta map[string]string) bool {
