@@ -19,13 +19,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/execenv"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
+	"github.com/gastownhall/gascity/internal/runtime/runtimecontract/privatecity"
 )
 
 // Status is the outcome of a single conformance check.
@@ -52,6 +52,10 @@ type Result struct {
 	// executable has no protocol op or the handshake failed.
 	Protocol runtime.ProtocolInfo
 	Checks   []Check
+	// Warnings name what the run could not clean up and did not gate: a
+	// final server-stop in a private city that did not exit 0 before the
+	// city was removed.
+	Warnings []string
 }
 
 // Failed reports whether any check failed.
@@ -119,8 +123,13 @@ type startConfig struct {
 }
 
 // Run validates the executable against RPP v0 and returns per-check
-// results. It returns an error only when the run cannot start at all
-// (executable not found); protocol violations are recorded as failed
+// results. Every op runs in a city, as gc's own ops do: the inherited
+// GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH when GC_EXEC_CITY_PATH is set,
+// otherwise a private city removed when Run returns, after server-stop there
+// for a script declaring server-lifecycle (a failed one is a Warning). It
+// returns an
+// error only when the run cannot start at all (executable not found, or no
+// private city can be made); protocol violations are recorded as failed
 // checks, never as errors.
 func Run(ctx context.Context, executable string, opts Options) (Result, error) {
 	path, err := exec.LookPath(executable)
@@ -130,18 +139,59 @@ func Run(ctx context.Context, executable string, opts Options) (Result, error) {
 	opts.applyDefaults()
 
 	c := &checker{path: path, opts: opts}
+	if !privatecity.Inherited() {
+		city, removeCity, err := privatecity.New(privateCityPrefix)
+		if err != nil {
+			return Result{}, fmt.Errorf("checking %s outside a city: %w", executable, err)
+		}
+		defer removeCity()
+		c.city = city
+	}
 	c.checkHandshake(ctx)
 	c.checkLifecycle(ctx)
 	c.checkServerLifecycle(ctx)
 	c.checkInputOutcome(ctx)
+	if c.city != nil {
+		c.endServer(ctx, nil)
+	}
 	return c.result, nil
 }
 
 // checker accumulates check results across the run.
 type checker struct {
-	path   string
-	opts   Options
+	path string
+	opts Options
+	// city is the env of the private city every op runs in; nil means every
+	// op runs in the city it inherited. An op's own city keys replace it.
+	city   []string
 	result Result
+}
+
+// privateCityPrefix starts the name of every private city the check makes.
+const privateCityPrefix = "gc-rpp-check-city-"
+
+// endServer sends server-stop to a private city the check is done with (city,
+// or the check's own for nil) when the handshake declares server-lifecycle,
+// as gc does to a city it stops: the server the check's sessions brought up
+// there ends before the city is removed, an interrupted check's included, on
+// a cancellation-detached context. The server-lifecycle checks gate the op
+// itself, so a server-stop that does not exit 0 here is a Warning, not a
+// check.
+func (c *checker) endServer(ctx context.Context, city []string) {
+	if !c.result.Protocol.Has(runtime.ProtocolCapabilityServerLifecycle) {
+		return
+	}
+	res := c.runOpEnv(context.WithoutCancel(ctx), c.opts.OpTimeout, city, nil, "server-stop")
+	err := res.err
+	if res.unsupported {
+		err = errors.New("exit 2, although the handshake declares server-lifecycle")
+	}
+	if err != nil {
+		if city == nil {
+			city = c.city
+		}
+		c.result.Warnings = append(c.result.Warnings, privatecity.ServerStopWarning(city, err))
+	}
 }
 
 func (c *checker) record(name string, status Status, detail string) {
@@ -170,14 +220,16 @@ func (c *checker) runOpTimeout(ctx context.Context, timeout time.Duration, stdin
 	return c.runOpEnv(ctx, timeout, nil, stdin, args...)
 }
 
-// runOpEnv is runOpTimeout with env added to the executable's environment
-// (a city's GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH).
+// runOpEnv is runOpTimeout with the check's private city, then env, added
+// to the executable's environment. The last value of a key wins, so the
+// city keys of an op's own city (a server check's GC_EXEC_CITY_NAME and
+// GC_EXEC_CITY_PATH) replace the check's, while other keys add to it.
 func (c *checker) runOpEnv(ctx context.Context, timeout time.Duration, env []string, stdin []byte, args ...string) opResult {
 	var cmdEnv []string
-	if env != nil {
-		// Read before the op's deadline: execenv.Environ waits out an
-		// in-flight native store open, and that wait is not the op's.
-		cmdEnv = append(execenv.Environ(), env...)
+	if c.city != nil || env != nil {
+		// Read before the op's deadline, so the read is not the op's. During
+		// a native store open it is the environment as the open found it.
+		cmdEnv = append(append(execenv.Environ(), c.city...), env...)
 	}
 	opCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -487,20 +539,22 @@ func (c *checker) goneAfterStop(op string, res opResult) bool {
 // script that does not declare the token is not sent server-stop.
 //
 // server-stop names no session: it ends every session of the city it runs
-// in. So every op here runs in a private city (privateCity), never in the
-// GC_EXEC_CITY_NAME and GC_EXEC_CITY_PATH the check inherited, and a check
-// run from a city leaves that city's sessions running.
+// in. So every op here runs in a private city of its own, never in the city
+// the rest of the check runs in, and a check run from a city leaves that
+// city's sessions running. The city's last op, once its session is stopped,
+// is a final server-stop (endServer), so no server outlives the check.
 func (c *checker) checkServerLifecycle(ctx context.Context) {
 	if !c.result.Protocol.Has(runtime.ProtocolCapabilityServerLifecycle) {
 		return
 	}
-	city, removeCity, err := privateCity()
+	city, removeCity, err := privatecity.New(privateCityPrefix)
 	if err != nil {
 		c.record(serverStopCheck, StatusFail, err.Error())
 		c.record(serverStopIdempotentCheck, StatusSkip, "skipped: no private city to run server-stop in")
 		return
 	}
 	defer removeCity()
+	defer c.endServer(ctx, city)
 	name := c.opts.SessionName + "-server"
 	cfg, err := json.Marshal(startConfig{WorkDir: c.opts.WorkDir, Command: c.opts.Command})
 	if err != nil {
@@ -543,17 +597,6 @@ func (c *checker) checkServerLifecycle(ctx context.Context) {
 	default:
 		c.record(serverStopIdempotentCheck, StatusPass, "")
 	}
-}
-
-// privateCity returns the env of a city no live city uses: GC_EXEC_CITY_NAME
-// and GC_EXEC_CITY_PATH name a fresh temp dir, which remove deletes.
-func privateCity() (env []string, remove func(), err error) {
-	dir, err := os.MkdirTemp("", "gc-rpp-check-city-")
-	if err != nil {
-		return nil, nil, fmt.Errorf("creating a private city to run server-stop in: %w", err)
-	}
-	env = []string{"GC_EXEC_CITY_NAME=" + filepath.Base(dir), "GC_EXEC_CITY_PATH=" + dir}
-	return env, func() { _ = os.RemoveAll(dir) }, nil
 }
 
 // checkRequiredBool asserts is-running prints exactly the wanted value

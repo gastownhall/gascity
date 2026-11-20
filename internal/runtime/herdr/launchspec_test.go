@@ -2,6 +2,7 @@ package herdr
 
 import (
 	"reflect"
+	goruntime "runtime"
 	"testing"
 )
 
@@ -10,8 +11,8 @@ import (
 // supported agent *kind*'s canonical executable into an existing shell pane
 // and waits for TUI detection. Clean invocations of a supported kind take
 // that path (registered agent: native detection, prompt, wait, status);
-// everything else is typed into the pane shell as `exec /bin/sh -c <cmd>` so
-// the pane still dies with the command (tmux parity).
+// everything else is typed into the pane shell (launchRaw) so the pane still
+// dies with the command (tmux parity).
 
 func TestLaunchSpecForCleanClaudeCommandUsesKind(t *testing.T) {
 	got := launchSpecFor(`claude --dangerously-skip-permissions --effort max --settings "/city root/.gc/settings.json"`)
@@ -28,7 +29,16 @@ func TestLaunchSpecForCleanClaudeCommandUsesKind(t *testing.T) {
 }
 
 func TestLaunchSpecForPathQualifiedKind(t *testing.T) {
-	got := launchSpecFor("/usr/local/bin/claude --resume abc123")
+	const command = "/usr/local/bin/claude --resume abc123"
+	got := launchSpecFor(command)
+	if goruntime.GOOS == "windows" {
+		// A path names one file among those the bare kind name could resolve
+		// to on Windows, so it launches raw there (see agentKindOf).
+		if got.Kind != "" || got.Raw != command {
+			t.Fatalf("spec = %+v; want the raw launch on Windows", got)
+		}
+		return
+	}
 	if got.Kind != "claude" || got.Raw != "" {
 		t.Fatalf("spec = %+v; want kind claude via basename", got)
 	}

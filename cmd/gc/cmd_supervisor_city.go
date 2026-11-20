@@ -743,6 +743,12 @@ const (
 	supervisorUnregisterAborted
 	supervisorUnregisterRolledBack
 	supervisorUnregisterRollbackFailed
+	// supervisorUnregisterOwnStop is Removed while gc stop's own stop of the
+	// city runs (beginOwnStop until endOwnStop).
+	supervisorUnregisterOwnStop
+	// supervisorUnregisterLeftUnregistered is a rollback that came during
+	// that stop: the registration stays removed.
+	supervisorUnregisterLeftUnregistered
 )
 
 var errSupervisorUnregisterAborted = errors.New("supervisor unregister transaction aborted")
@@ -751,7 +757,8 @@ var errSupervisorUnregisterAborted = errors.New("supervisor unregister transacti
 // the caller that bounds the complete stop sequence accepts its result. Its
 // mutex deliberately spans Registry.Unregister/Register: a timeout either
 // fences removal before it begins or waits for removal and restores the exact
-// captured entry before returning.
+// captured entry before returning. While gc stop's own stop of the city runs
+// (beginOwnStop), a timeout leaves the entry removed instead.
 type supervisorUnregisterTransaction struct {
 	mu          sync.Mutex
 	state       supervisorUnregisterState
@@ -763,8 +770,11 @@ type supervisorUnregisterTransaction struct {
 
 type supervisorUnregisterRollback struct {
 	performed bool
-	entry     supervisor.CityEntry
-	err       error
+	// leftUnregistered reports a rollback that came while gc stop's own stop
+	// of the city ran, so the entry was left removed rather than restored.
+	leftUnregistered bool
+	entry            supervisor.CityEntry
+	err              error
 }
 
 func newSupervisorUnregisterTransaction() *supervisorUnregisterTransaction {
@@ -817,6 +827,37 @@ func (tx *supervisorUnregisterTransaction) commit() {
 	writeSupervisorUnregisterSuccess(stdout, entry)
 }
 
+// beginOwnStop holds the removed registration for gc stop's own stop of the
+// city, which the caller runs next, until endOwnStop. A rollback meanwhile (a
+// wall-clock cap that gave up waiting for the stop) leaves the city
+// unregistered: the supervisor would relaunch a restored city under the stop
+// still running. It reports false when a rollback already settled the
+// unregister, so a cap gave up before the stop began: the stop must not run.
+func (tx *supervisorUnregisterTransaction) beginOwnStop() bool {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+
+	switch tx.state {
+	case supervisorUnregisterAborted, supervisorUnregisterRolledBack, supervisorUnregisterRollbackFailed:
+		return false
+	case supervisorUnregisterRemoved:
+		tx.state = supervisorUnregisterOwnStop
+	}
+	return true
+}
+
+// endOwnStop ends the hold beginOwnStop took, once the stop has ended, so
+// the registration is committed or restored as usual. A rollback that came
+// during the stop stands.
+func (tx *supervisorUnregisterTransaction) endOwnStop() {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+
+	if tx.state == supervisorUnregisterOwnStop {
+		tx.state = supervisorUnregisterRemoved
+	}
+}
+
 func (tx *supervisorUnregisterTransaction) rollback() supervisorUnregisterRollback {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
@@ -825,6 +866,9 @@ func (tx *supervisorUnregisterTransaction) rollback() supervisorUnregisterRollba
 	case supervisorUnregisterOpen:
 		tx.state = supervisorUnregisterAborted
 		return supervisorUnregisterRollback{}
+	case supervisorUnregisterOwnStop:
+		tx.state = supervisorUnregisterLeftUnregistered
+		return supervisorUnregisterRollback{leftUnregistered: true, entry: tx.entry}
 	case supervisorUnregisterRemoved:
 		result := supervisorUnregisterRollback{performed: true, entry: tx.entry}
 		if err := tx.registry.Register(tx.entry.Path, tx.entry.EffectiveName()); err != nil {
@@ -847,6 +891,12 @@ func writeSupervisorUnregisterSuccess(stdout io.Writer, entry supervisor.CityEnt
 }
 
 func writeSupervisorUnregisterRollback(stderr io.Writer, commandName, reason string, rollback supervisorUnregisterRollback) {
+	if rollback.leftUnregistered {
+		// The city's name is no longer registered, so only its path finds
+		// it again.
+		fmt.Fprintf(stderr, "%s: %s; left '%s' (%s) unregistered so the supervisor does not relaunch it under a stop that may still be running; run %s %s to finish the stop\n", commandName, reason, rollback.entry.EffectiveName(), rollback.entry.Path, commandName, shellQuotePath(rollback.entry.Path)) //nolint:errcheck
+		return
+	}
 	if !rollback.performed {
 		return
 	}

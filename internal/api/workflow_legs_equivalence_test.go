@@ -508,6 +508,10 @@ type t7dOp struct {
 	name         string
 	frozen, live func(t *testing.T, fx t7dFixture) string
 	resultsOnly  bool // a declared log divergence; see the op
+	// probeID marks a buildWorkflowSnapshot op on that workflow id: the
+	// graph-binding shortcut's declared divergences apply
+	// (t7dAllowSnapshotProbe).
+	probeID string
 	// keepsMarkers is a reader T7d leaves marked (the order reads, T7f): only
 	// its stores come from the workflow legs, so every verdict stays.
 	keepsMarkers bool
@@ -603,7 +607,7 @@ func t7dOps(city string) []t7dOp {
 	for _, wid := range []string{"run-1", "run-9", "run-5", "run-7", "run-3", "run-tw", "tc1-wf", "gcg1-wf", "al9-wf", "tw-wf", "co-1", "co-2", "missing"} {
 		for _, scope := range [][2]string{{"", ""}, {beadmeta.ScopeKindRig, "alpha"}, {beadmeta.ScopeKindCity, city}} {
 			ops = append(ops, t7dOp{
-				name: "buildWorkflowSnapshot " + wid + " " + scope[0] + ":" + scope[1],
+				name: "buildWorkflowSnapshot " + wid + " " + scope[0] + ":" + scope[1], probeID: wid,
 				frozen: func(_ *testing.T, fx t7dFixture) string {
 					return t7dJSON(frozenBuildWorkflowSnapshot(New(fx.state), wid, scope[0], scope[1], 0))
 				},
@@ -769,6 +773,10 @@ func TestWorkflowLegsMatchTheFrozenReaders(t *testing.T) {
 					for _, op := range t7dOps(shape.cityName()) {
 						ffx, lfx := fixture(), fixture()
 						want, got := t7dCanonical(op.frozen(t, ffx)), t7dCanonical(op.live(t, lfx))
+						skipLog := false
+						if op.probeID != "" {
+							want, got, skipLog = t7dAllowSnapshotProbe(t, op.probeID, lfx, want, got)
+						}
 						if strings.Contains(want+got, "<unknown>") {
 							t.Fatalf("%s: a result names a store the fixture does not hold: %s / %s", op.name, got, want)
 						}
@@ -776,7 +784,7 @@ func TestWorkflowLegsMatchTheFrozenReaders(t *testing.T) {
 							t.Errorf("%s: live %s\n  frozen %s", op.name, got, want)
 							continue
 						}
-						if op.resultsOnly {
+						if op.resultsOnly || skipLog {
 							continue
 						}
 						w, g := t7dSortDepRuns(*ffx.log), t7dSortDepRuns(*lfx.log)
@@ -801,6 +809,80 @@ func TestWorkflowLegsMatchTheFrozenReaders(t *testing.T) {
 			}
 		})
 	}
+}
+
+// t7dAllowSnapshotProbe admits the two differences buildWorkflowSnapshot's
+// graph-binding shortcut (tryGraphBindingSnapshot) makes on a city with a
+// graph leg that is not refused, and nothing else. Like the orders: hint
+// divergence above, the answer is the frozen one's; only what is read
+// differs.
+//
+//   - A root the shortcut serves from the binding names only the binding in
+//     stores_scanned, and the run reads the binding alone. The results are
+//     compared without stores_scanned, every live read must be a read of the
+//     binding, and the logs are not compared further (skip).
+//   - On a decline the live run first asks the residency resolver, which
+//     probes the id with one Get on the graph binding (and one on an orders
+//     binding apart from it, which the resolver asks too), and then reads
+//     exactly what the frozen run reads. Those leading probe reads, at most
+//     one Get per binding, are dropped from the live log; a second probe read,
+//     or any other extra read, is left in and fails the comparison.
+//
+// A refused graph class is never probed (graphLegRefused), and a city with no
+// graph leg has no shortcut: there every result and read stays strict.
+func t7dAllowSnapshotProbe(t *testing.T, id string, lfx t7dFixture, want, got string) (string, string, bool) {
+	t.Helper()
+	st := lfx.state.Stores()
+	legs, _ := workflowLegs(st, lfx.state.CityName(), workflowLegQuery{})
+	graph, ok := workflowGraphStore(legs)
+	if !ok || graphLegRefused(st, graph) {
+		return want, got, false
+	}
+	physical := func(r beads.StoreReader) string { name, _, _ := strings.Cut(lfx.name(r), "/"); return name }
+	graphName := physical(graph.leg.Reader)
+	bindings := map[string]bool{graphName: true}
+	if orders := physical(st.Orders()); !slices.ContainsFunc(legs, func(l workflowStoreInfo) bool { return physical(l.leg.Reader) == orders }) {
+		bindings[orders] = true
+	}
+
+	var live workflowSnapshotResponse
+	if json.Unmarshal([]byte(got), &live) == nil && strings.HasPrefix(live.ResolvedRootStore, workflowGraphStoreRefPrefix+":") &&
+		slices.Equal(live.StoresScanned, []string{live.ResolvedRootStore}) {
+		for _, entry := range *lfx.log {
+			if name, _, _ := strings.Cut(entry, " "); name != graphName {
+				t.Errorf("buildWorkflowSnapshot %s, served from the graph binding, read %q", id, entry)
+			}
+		}
+		return t7dWithoutStoresScanned(want), t7dWithoutStoresScanned(got), true
+	}
+
+	log := *lfx.log
+	for len(log) > 0 {
+		name, rest, _ := strings.Cut(log[0], " ")
+		if !bindings[name] || !strings.HasPrefix(rest, "Get "+id+" [") {
+			break
+		}
+		delete(bindings, name)
+		log = log[1:]
+	}
+	*lfx.log = log
+	return want, got, false
+}
+
+// t7dWithoutStoresScanned is a canonical snapshot result with its
+// stores_scanned dropped; any other result is returned as it is.
+func t7dWithoutStoresScanned(result string) string {
+	body, rest, _ := strings.Cut(result, " error: ")
+	var snap workflowSnapshotResponse
+	if err := json.Unmarshal([]byte(body), &snap); err != nil || snap.RootBeadID == "" {
+		return result
+	}
+	snap.StoresScanned = nil
+	data, _ := json.Marshal(snap)
+	if rest != "" {
+		return string(data) + " error: " + rest
+	}
+	return string(data)
 }
 
 // t7dFirstDiff renders where two logs part.

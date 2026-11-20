@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **gc no longer migrates an existing bd database's schema; an operator
+  does.** `bd migrate schema` is bd's consent to a one-way schema change for
+  every client of a database (gastownhall/beads#5920 on a shared server,
+  gastownhall/beads#5764 for any existing database). The bd pack's init ran it
+  on every scope whose database already had a schema, on every `gc start` and
+  `gc reload`, so whenever the pinned bd was newer than a database, gc
+  consented on the operator's behalf and could lock out every older bd that
+  shares it. Init now runs it only on a database it is
+  bootstrapping: one this init created, or an interrupted bootstrap it has
+  just reset. Every other database keeps its schema, and init still reports
+  the scope ready instead of failing it. `gc start`, `gc reload` (as reply
+  warnings) and the new `bd-schema` check of `gc doctor` print a
+  `bd schema:` line for each database whose schema differs from the beads
+  library linked into gc, naming both schemas, what the pinned bd reports and
+  the command an operator runs once every client of the database is ready
+  (`gc bd --city <city> [--rig <rig>] migrate schema`, or the pinned bd with
+  `BEADS_DIR` pinned on a split city, whose `gc bd` refuses `migrate`). A rig
+  whose database the pinned bd then cannot open because of that difference is
+  left unserved, with a line in the city's log saying so, instead of failing
+  the whole start or reload; the city's own database still has to open. Upgrade bd, then migrate
+  each database yourself (see "Databases Gas City leaves to you" in "Upgrading
+  an Existing City"); `beads.allow_schema_behind_migrate = true` still lets
+  gc's own store migrate a database that is behind. A database whose
+  bootstrap an earlier init left clean but unfinished is no longer completed
+  on the next start; its `bd schema:` line names the command. Embedded scopes
+  are unaffected: init never ran the step on them, and bd decides whether
+  they migrate. gc measures against its linked beads library, which an OSS
+  city's pinned bd can differ from; a newer bd can refuse writes to a
+  database gc reports as current, and its own message names the schema it
+  needs.
+
 - **New cities are born split.** `gc init` now writes a `[storage]` section
   that keeps work in the work ledger and puts the five infrastructure classes
   (graph, sessions, messaging, orders, nudges) in one SQLite store under
@@ -1346,6 +1377,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`gc convoy create` ignored an explicit `--rig` (#8696).** The convoy
+  landed in the first issue's store, or in the city store when no issues
+  were given, so an empty convoy created with `--rig <rig>` could never
+  track that rig's beads: every later `gc convoy add` failed with
+  `bead not found`. The convoy now lands in the named rig's store. The
+  value is a rig name, matched as `gc bd` and `gc formula` match it. A
+  non-empty `--rig` that names no rig (including the city name and
+  path-looking values such as `./dir`, `dir/` or an absolute directory,
+  which convoy create used to accept by ignoring the flag), a rig with no
+  path binding, or an issue whose prefix routes to another store now
+  fails before anything is written. An empty `--rig` and runs without
+  `--rig` keep the old placement.
+
 - **Adopting or restarting with a bd store bound to a loopback Dolt server
   gc does not run works.** A store `bd init --server --external` bound to a
   dolt sql-server on `127.0.0.1`/`localhost`/`::1` was classified as gc's own
@@ -2020,6 +2064,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   installed, init fails naming the lock file when it cannot create it.
   Without `flock`, init refuses to reset an interrupted bootstrap and says
   how to install it (#5926).
+
+- **The controller no longer wakes an on-demand named session for a
+  deferred molecule or wisp root it cannot claim.** An assigned, open,
+  ephemeral/no-history/workflow molecule root counts as ready wake demand
+  (`appendOpenAssignedMoleculeWorkUnique`) so an on-demand session gets
+  woken for its actual next turn — but the check never looked at
+  `defer_until` or an indefinite defer, even though the hook
+  (`isFutureDeferredHookCandidate`) already refuses the same row while its
+  `defer_until` is in the future. The session woke, found nothing
+  claimable, and drained; the next pass counted the same root again. Deferring a molecule or wisp
+  root now actually pauses the session it would otherwise wake, the same
+  way deferring a plain task already does.
 
 - **`passthroughEnv` now honors `GC_SUPERVISOR_ENV` when deciding which
   non-`GC_`-prefixed variables reach a spawned agent session, not only which

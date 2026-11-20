@@ -32,6 +32,10 @@ var probes = map[Code]probe{
 	ReqConnectionExec:             probeExec,
 	ReqConnectionIdleBoundary:     probeIdleBoundary,
 	ReqProvisionBoxWithoutAgent:   probeProvision,
+	ReqProvisionLaunchStartsAgent: probeLaunchStartsAgent,
+	ReqProvisionLaunchReplaces:    probeLaunchReplaces,
+	ReqProvisionLaunchFreshOnly:   probeLaunchFreshOnly,
+	ReqProvisionLaunchIdentity:    probeLaunchIdentity,
 
 	ReqObserveDeclaredOpsRespond:   probeObserveDeclaredOps,
 	ReqObserveAbsentNeverStarted:   probeObserveAbsentNeverStarted,
@@ -99,6 +103,11 @@ var probes = map[Code]probe{
 	ReqInputExit80OneLine:       probeInputExit80OneLine,
 	ReqInputDeadBoxGone:         probeInputDeadBoxGone,
 	ReqInputKeysDelivered:       probeInputKeysDelivered,
+
+	ReqObservationPeek:            probeObservationPeek,
+	ReqObservationLastActivity:    probeObservationLastActivity,
+	ReqObservationClearScrollback: probeObservationClearScrollback,
+	ReqObservationCopyTo:          probeObservationCopyTo,
 }
 
 func probeProtocolHandshake(ctx context.Context, r *runner, _ runtime.ProtocolInfo) (Status, string) {
@@ -397,12 +406,14 @@ func opsReadyPromptStore(ctx context.Context, r *runner, name string) (Status, s
 // provision must create a reachable box WITHOUT launching the agent. The
 // defining behavior — and what separates provision from start — is that
 // is-running reports false after provision (no agent), while the box is
-// exec-able so the controller can launch the agent over exec. Optional (absent
+// exec-able so the controller can launch the agent over exec. A pack declaring
+// proc.launch without proc.exec launches through the launch op instead, which
+// RPP-PROVISION-002 checks, so its box need not be exec-able. Optional (absent
 // = SKIP): a welded start pack that launches the agent in one shot does not
 // implement provision and is driven through start instead.
 func probeProvision(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (Status, string) {
 	name := r.nextName()
-	prov := r.provision(ctx, name)
+	prov := r.provision(ctx, name, false)
 	switch {
 	case prov.unsupported && hs.Has(runtime.ProtocolCapabilityProvision):
 		return StatusFail, "provision returned exit 2 although the handshake declares proc.provision; a declared op cannot be unknown"
@@ -429,7 +440,12 @@ func probeProvision(ctx context.Context, r *runner, hs runtime.ProtocolInfo) (St
 	// The box must be reachable so the controller can launch the agent over
 	// exec — provision "returns when the box is exec-able". A provision-capable
 	// pack therefore also implements exec (proc.exec); if it cannot, the
-	// controller could never launch into the box it provisioned.
+	// controller could never launch into the box it provisioned. Under
+	// proc.launch without proc.exec the controller launches through the
+	// launch op (RPP-PROVISION-002), never over exec.
+	if hs.Has(runtime.ProtocolCapabilityLaunch) && !hs.Has(runtime.ProtocolCapabilityConnectionExec) {
+		return StatusPass, "provision creates a box without launching the agent; proc.launch launches into it"
+	}
 	const sentinel = "GC_RPP_PROVISION_OK"
 	out := r.execOp(ctx, name, "echo "+sentinel)
 	switch {
