@@ -1458,3 +1458,76 @@ func TestReleaseClaimsParkedReadReleasesRetiredAndStrandedHolds(t *testing.T) {
 		}
 	}
 }
+
+// TestReleaseParkedClaimStaleSnapshotWritesNothing: a dead-holder release of
+// a parked claim whose bead moved on after the snapshot writes nothing and
+// fails nothing, so the next pass decides again on what it reads then. The
+// bead moved on either by being unblocked (its raw status is open now, and
+// may be claimed from the queue at any moment) or by being claimed again. The
+// fence holds on both write tiers: bd's guarded update on a folded snapshot,
+// and the revision CAS on a raw one.
+func TestReleaseParkedClaimStaleSnapshotWritesNothing(t *testing.T) {
+	routed := map[string]string{beadmeta.RoutedToMetadataKey: "worker"}
+	moves := map[string]beads.UpdateOpts{
+		"unblocked": {Status: stringPtr("open")},
+		"reclaimed": {Assignee: stringPtr("new-seat")},
+	}
+	paths := map[string]releaseWhy{"close cascade": releaseCloseCascade, "orphan": releaseOrphan}
+	for pathName, why := range paths {
+		for moveName, move := range moves {
+			t.Run(pathName+"/"+moveName+"/guarded update", func(t *testing.T) {
+				bd := newParkedBdStore()
+				snapshot := foldBdStatus(seedParkedClaim(t, bd.mem, "dead-session", "blocked", routed))
+				if err := bd.mem.Update(snapshot.ID, move); err != nil {
+					t.Fatal(err)
+				}
+				want, err := bd.mem.Get(snapshot.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				out := releaseListed([]seatWorkHit{{store: bd, bead: snapshot}}, why, releaseSeat{id: "dead-session", fallback: "worker"}, testPoolReleaseConfig(), ReleaseOpts{})
+				if len(out.Released) != 0 || len(out.Failed) != 0 {
+					t.Fatalf("released %d, failed %d (%q); want the stale snapshot left for the next pass", len(out.Released), len(out.Failed), out.Why[snapshot.ID])
+				}
+				if bd.writes != 0 {
+					t.Errorf("bd wrote %d times, want none", bd.writes)
+				}
+				assertBeadUnchanged(t, bd.mem, want)
+			})
+			t.Run(pathName+"/"+moveName+"/revision CAS", func(t *testing.T) {
+				store := openRevisionReleaseStore(t, gate.Require)
+				snapshot := seedParkedClaim(t, store.MemStore, "dead-session", "blocked", routed)
+				if err := store.MemStore.Update(snapshot.ID, move); err != nil {
+					t.Fatal(err)
+				}
+				want, err := store.Get(snapshot.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				out := releaseListed([]seatWorkHit{{store: store, bead: snapshot}}, why, releaseSeat{id: "dead-session", fallback: "worker"}, testPoolReleaseConfig(), ReleaseOpts{})
+				if len(out.Released) != 0 || len(out.Failed) != 0 {
+					t.Fatalf("released %d, failed %d (%q); want the stale snapshot left for the next pass", len(out.Released), len(out.Failed), out.Why[snapshot.ID])
+				}
+				if store.legacyCalls != 0 {
+					t.Errorf("legacy writes = %d, want none", store.legacyCalls)
+				}
+				assertBeadUnchanged(t, store.MemStore, want)
+			})
+		}
+	}
+}
+
+// assertBeadUnchanged checks that the bead still has want's assignee, status,
+// revision and metadata.
+func assertBeadUnchanged(t *testing.T, mem *beads.MemStore, want beads.Bead) {
+	t.Helper()
+	got, err := mem.Get(want.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Assignee != want.Assignee || got.Status != want.Status || got.Revision != want.Revision || !reflect.DeepEqual(got.Metadata, want.Metadata) {
+		t.Errorf("%s = %q/%q rev %d %v, want unchanged %q/%q rev %d %v", want.ID, got.Status, got.Assignee, got.Revision, got.Metadata, want.Status, want.Assignee, want.Revision, want.Metadata)
+	}
+}

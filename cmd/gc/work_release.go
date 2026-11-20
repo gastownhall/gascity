@@ -458,6 +458,15 @@ func releaseServed(c seatWorkHit, wa workAssignment, p releasePolicy, fallback s
 		}
 		return "", nil
 	}
+	if p.releasesParked(c.bead) {
+		// A parked claim that moved on since the snapshot is kept, not
+		// reported released: nothing was written.
+		released, err := wa.releaseWorkBead(c.bead, fallback, clearDetached)
+		if err == nil && !released {
+			return keptMoved, nil
+		}
+		return "", err
+	}
 	if clearDetached {
 		return "", wa.ReleaseDetachedWorkBead(c.bead, fallback)
 	}
