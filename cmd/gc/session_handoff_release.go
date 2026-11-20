@@ -97,10 +97,12 @@ func releaseStagedSelfHandoffs(mailStore beads.MailStore, sessions beads.Session
 			}
 		}
 
-		// The row is this tick's snapshot; gc handoff may have restaged since.
-		// Re-read it live and act only while it still points at the brief
-		// evaluated above and nothing has written that brief off.
-		live, ok := liveStagedHandoffRow(sessions, sessionID, messageID, sessionAddress)
+		// The row is this tick's snapshot, which only decided whether to look
+		// again: gc handoff may have restaged since, or a successor may have
+		// confirmed its start. Re-read it live, act only while it still points
+		// at the brief evaluated above and nothing has written that brief off,
+		// and take the release-or-write-off decision from the live row.
+		live, successorStarted, ok := liveStagedHandoffDecision(sessions, sessionID, messageID, sessionAddress, stagedForToken, now, cfg)
 		if !ok {
 			continue
 		}
@@ -159,6 +161,30 @@ func recordHandoffReleaseAttempt(sessions beads.SessionStore, writer beads.Condi
 	return sessions.SetMetadataBatch(live.ID, marker)
 }
 
+// liveStagedHandoffDecision re-reads the session row live (liveStagedHandoffRow)
+// and decides from that row, not the tick's snapshot, whether a confirmed
+// successor now holds the session. Without one it acts only when the live
+// stage time has passed controllerRestartTimeout(cfg); a brief that has not
+// timed out, or whose stage time does not parse, is left for a later tick
+// (ok false). So a successor that confirms its start after the snapshot is
+// released to, never written off.
+func liveStagedHandoffDecision(sessions beads.SessionStore, sessionID, messageID, sessionAddress, stagedForToken string, now time.Time, cfg *config.City) (live beads.Bead, successorStarted, ok bool) {
+	live, ok = liveStagedHandoffRow(sessions, sessionID, messageID, sessionAddress)
+	if !ok {
+		return beads.Bead{}, false, false
+	}
+	info := sessionpkg.ReconcileRowsFromBeads([]beads.Bead{live})[0].Info
+	currentToken := strings.TrimSpace(info.InstanceToken)
+	if currentToken != "" && currentToken != stagedForToken && sessionStartConfirmed(info) {
+		return live, true, true
+	}
+	stagedAt, err := time.Parse(time.RFC3339, strings.TrimSpace(info.HandoffStageCommittedAt))
+	if err != nil || now.Sub(stagedAt) < controllerRestartTimeout(cfg) {
+		return beads.Bead{}, false, false
+	}
+	return live, false, true
+}
+
 // liveStagedHandoffRow re-reads the session row through the live handle and
 // returns it only while it still points at messageID and carries no
 // release-attempt marker. Anything else means the tick's snapshot is stale (a
@@ -182,10 +208,11 @@ func liveStagedHandoffRow(sessions beads.SessionStore, sessionID, messageID, ses
 }
 
 // clearStagedHandoffPointer clears the session's staged-brief pointer and its
-// stage time. With a conditional writer it swaps the pointer only while it
-// still names messageID, and clears the stage time only after that swap wins
-// and only while it is still the value live read, so a newer brief's pointer
-// is never wiped. Without one it writes both keys, after the caller's live
+// stage time. With a conditional writer it clears both in one update that
+// lands only while the row is still at live's revision, where it still names
+// messageID, so a newer brief's pointer or stage time is never wiped; a moved
+// row returns the error and the next tick retries (the mail release before it
+// is idempotent). Without one it writes both keys, after the caller's live
 // re-read.
 func clearStagedHandoffPointer(sessions beads.SessionStore, writer beads.ConditionalWriter, live beads.Bead, messageID string) error {
 	if writer == nil {
@@ -194,15 +221,11 @@ func clearStagedHandoffPointer(sessions beads.SessionStore, writer beads.Conditi
 			handoffStageCommittedAtKey: "",
 		})
 	}
-	swapped, err := writer.CompareAndSetMetadataKey(live.ID, handoffStagedMessageIDKey, messageID, "")
-	if err != nil {
-		return err
-	}
-	if !swapped {
-		return fmt.Errorf("session %s no longer stages %s", live.ID, messageID)
-	}
-	if _, err := writer.CompareAndSetMetadataKey(live.ID, handoffStageCommittedAtKey, live.Metadata[handoffStageCommittedAtKey], ""); err != nil {
-		return err
+	if err := writer.UpdateIfMatch(live.ID, live.Revision, beads.UpdateOpts{Metadata: map[string]string{
+		handoffStagedMessageIDKey:  "",
+		handoffStageCommittedAtKey: "",
+	}}); err != nil {
+		return fmt.Errorf("clearing staged message %s on session %s at revision %d: %w", messageID, live.ID, live.Revision, err)
 	}
 	return nil
 }

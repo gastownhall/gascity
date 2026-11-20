@@ -599,3 +599,48 @@ func TestStaleReleaseTickDoesNotClearNewerPointer(t *testing.T) {
 	assertHandoffProvisionalRecord(t, mustGet(t, env.store, second.ID), "origin-instance")
 	assertEventCount(t, recorder.Events, redSessionHandoffReleasedEvent, 0)
 }
+
+// TestStaleTimeoutSnapshotDoesNotWriteOffConfirmedSuccessor runs the release on
+// rows snapshotted while the brief had timed out under the origin token, after
+// a successor confirmed its start. The live row shows that successor, so the
+// tick must release the brief to it, not write it off.
+func TestStaleTimeoutSnapshotDoesNotWriteOffConfirmedSuccessor(t *testing.T) {
+	env, sessionBead := newHandoffReconcileSession(t, "origin-instance")
+	recorder := events.NewFake()
+	env.rec = recorder
+
+	mustStageSelfHandoff(t, env.store, recorder, nil, "first brief")
+	brief := onlyOpenHandoffMessage(t, env.store)
+	env.setSessionMetadata(&sessionBead, map[string]string{
+		redHandoffStageCommittedAtKey: env.clk.Now().Add(-controllerRestartTimeout(env.cfg) - time.Second).Format(time.RFC3339),
+	})
+	snapshot, err := env.store.Get(sessionBead.ID)
+	if err != nil {
+		t.Fatalf("get session snapshot: %v", err)
+	}
+	staleRows := sessionpkg.ReconcileRowsFromBeads([]beads.Bead{snapshot})
+
+	// A successor confirms its start after the snapshot was taken.
+	if err := env.store.SetMetadataBatch(sessionBead.ID, map[string]string{
+		"instance_token":            "successor-instance",
+		"state":                     "active",
+		"pending_create_claim":      "",
+		"pending_create_started_at": "",
+	}); err != nil {
+		t.Fatalf("confirm successor: %v", err)
+	}
+
+	released, failed := releaseStagedSelfHandoffs(beads.MailStore{Store: env.store}, beads.SessionStore{Store: env.store}, staleRows, env.cfg, env.clk, recorder)
+	if released != 1 || failed != 0 {
+		t.Fatalf("stale tick = (released=%d, failed=%d), want (1, 0)", released, failed)
+	}
+	if marker := mustGet(t, env.store, sessionBead.ID).Metadata[redHandoffReleaseAttemptedAtKey]; marker != "" {
+		t.Fatalf("stale timeout snapshot wrote off the brief a confirmed successor holds: marker %q", marker)
+	}
+	assertHandoffReleased(t, env.store, sessionBead.ID, brief.ID)
+	visible, err := newTestBeadMail(env.store).Check("worker")
+	if err != nil || len(visible) != 1 || visible[0].ID != brief.ID {
+		t.Fatalf("Check after release = (%#v, %v), want the brief %q", visible, err, brief.ID)
+	}
+	assertEventCount(t, recorder.Events, redSessionHandoffFailedEvent, 0)
+}
