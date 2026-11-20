@@ -542,14 +542,14 @@ func TestFailedStartHandsNothingBack(t *testing.T) {
 		t.Fatal("Start succeeded over a failing server")
 	}
 	if nudge, ok := p.TakeStartupNudgeHandback("s"); ok {
-		t.Fatalf("failed Start handed back %q", nudge)
+		t.Fatalf("failed Start handed back %q", nudge.Text)
 	}
 	tm.handbacks.set("s", "an earlier start's nudge")
 	if err := p.Relaunch(context.Background(), "s", runtime.Config{Command: "agent", Nudge: "start working"}); err == nil {
 		t.Fatal("Relaunch succeeded over a failing server")
 	}
 	if nudge, ok := p.TakeStartupNudgeHandback("s"); ok {
-		t.Fatalf("failed Relaunch handed back %q", nudge)
+		t.Fatalf("failed Relaunch handed back %q", nudge.Text)
 	}
 }
 

@@ -79,7 +79,9 @@ func TestGcBeadsBdInitNeverHealsWhileAnotherInitializerHoldsTheLock(t *testing.T
 // did not before the lock existed), and neither runs while another initializer
 // holds the lock exclusively to reset the database or force a reinit. Init
 // gets no wait budget, under a flock that refuses a zero wait the way the
-// macOS port does.
+// macOS port does. The ready-path rows create the database in this init and
+// find a schema in it, the race with a concurrent initializer: only a
+// database this init is bootstrapping gets the migration step at all.
 func TestGcBeadsBdInitMigrationStepsHoldTheInitLockShared(t *testing.T) {
 	hostFlock := requireFlockForTest(t)
 	for _, tc := range []struct {
@@ -89,8 +91,8 @@ func TestGcBeadsBdInitMigrationStepsHoldTheInitLockShared(t *testing.T) {
 		step         string
 		how          int
 	}{
-		{"migrate schema alongside a migrating initializer", true, []string{"init-done", "reset-done"}, "migrate schema", syscall.LOCK_SH},
-		{"migrate schema during an exclusive hold", true, []string{"init-done", "reset-done"}, "migrate schema", syscall.LOCK_EX},
+		{"migrate schema alongside a migrating initializer", true, []string{"database-absent", "init-done", "reset-done"}, "migrate schema", syscall.LOCK_SH},
+		{"migrate schema during an exclusive hold", true, []string{"database-absent", "init-done", "reset-done"}, "migrate schema", syscall.LOCK_EX},
 		{"plain init alongside a migrating initializer", false, []string{"reset-done"}, "init ", syscall.LOCK_SH},
 		{"plain init during an exclusive hold", false, []string{"reset-done"}, "init ", syscall.LOCK_EX},
 	} {

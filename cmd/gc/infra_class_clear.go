@@ -145,10 +145,18 @@ type infraBackupHeader struct {
 // depending on it). Inbound edges from other cleared rows are recorded once,
 // as those rows' outbound edges.
 type infraBackupEntry struct {
-	Bead       beads.Bead        `json:"bead"`
-	Class      string            `json:"class"`
-	Deps       []infraBackupEdge `json:"deps,omitempty"`
-	Dependents []infraBackupEdge `json:"dependents,omitempty"`
+	Bead  beads.Bead `json:"bead"`
+	Class string     `json:"class"`
+	// SourceStatus and IndefinitelyDeferred are the row's raw-status signals
+	// (beads.Bead.SourceStatus, beads.Bead.IndefinitelyDeferred), which
+	// beads.Bead keeps off its JSON. They are the hold a bead bd parks by its
+	// status has, so a re-copy from the backup carries it parked as the copy
+	// did (infraCarryParkedHold). A backup an earlier build wrote records
+	// neither.
+	SourceStatus         string            `json:"source_status,omitempty"`
+	IndefinitelyDeferred bool              `json:"indefinitely_deferred,omitempty"`
+	Deps                 []infraBackupEdge `json:"deps,omitempty"`
+	Dependents           []infraBackupEdge `json:"dependents,omitempty"`
 	// Endpoints is which bead each far end of the row's edges was when a purge
 	// backed the row up, by id and created_at, for every far end the work store
 	// held that is not itself a backed-up row (infraPurgeBackupEntries). The
@@ -783,9 +791,23 @@ func infraBindingRows(target infraBindingTarget) (map[string]beads.Bead, error) 
 	return held, nil
 }
 
+// newInfraBackupEntry is b's backup entry before its edges: the row, its
+// class, and the raw-status signals the row's JSON leaves out.
+func newInfraBackupEntry(b beads.Bead) infraBackupEntry {
+	return infraBackupEntry{Bead: b, Class: coordclass.Classify(b).String(), SourceStatus: b.SourceStatus, IndefinitelyDeferred: b.IndefinitelyDeferred}
+}
+
+// row is the row the entry backed up, its raw-status signals restored.
+func (e infraBackupEntry) row() beads.Bead {
+	b := e.Bead
+	b.SourceStatus = e.SourceStatus
+	b.IndefinitelyDeferred = e.IndefinitelyDeferred
+	return b
+}
+
 // infraBackupEntryFor reads one retained row's edges, with payloads.
 func infraBackupEntryFor(source beads.Store, b beads.Bead, retained map[string]bool) (infraBackupEntry, error) {
-	entry := infraBackupEntry{Bead: b, Class: coordclass.Classify(b).String()}
+	entry := newInfraBackupEntry(b)
 	down, err := source.DepList(b.ID, "down")
 	if err != nil {
 		return entry, fmt.Errorf("listing deps of %s: %w", b.ID, err)
@@ -1070,7 +1092,7 @@ func openInfraBackupSource(target infraBindingTarget) (beads.Store, error) {
 	// from the city work store. The edges onto a row from rows that stayed
 	// are not carried: the clear removed them from the work store.
 	for _, e := range entries {
-		rows = append(rows, e.Bead)
+		rows = append(rows, e.row())
 		for _, edge := range e.Deps {
 			deps = append(deps, edge.dep())
 			if edge.Carried {

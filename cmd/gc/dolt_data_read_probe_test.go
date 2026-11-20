@@ -205,7 +205,7 @@ func TestManagedDoltHealthCheckReportsDataReadErrorWithoutFailingTheCheck(t *tes
 	}
 	stubManagedDoltHealthyServer(t)
 
-	report, err := managedDoltHealthCheck("127.0.0.1", "3311", "root", false)
+	report, err := managedDoltHealthCheckFor("127.0.0.1", "3311", "root", false, managedDoltHealthTarget{})
 	if err != nil {
 		t.Fatalf("managedDoltHealthCheck() error = %v, want nil (a returned error makes recovery kill the server)", err)
 	}
@@ -225,7 +225,7 @@ func TestManagedDoltHealthCheckReportsDataReadWarning(t *testing.T) {
 	}
 	stubManagedDoltHealthyServer(t)
 
-	report, err := managedDoltHealthCheck("127.0.0.1", "3311", "root", false)
+	report, err := managedDoltHealthCheckFor("127.0.0.1", "3311", "root", false, managedDoltHealthTarget{})
 	if err != nil {
 		t.Fatalf("managedDoltHealthCheck() error = %v", err)
 	}
@@ -267,7 +267,7 @@ func stubManagedDoltHealthyServer(t *testing.T) {
 		managedDoltQueryProbeDirectFn, managedDoltReadOnlyStateDirectFn, managedDoltConnectionCountDirectFn = oldQuery, oldReadOnly, oldConn
 	})
 	managedDoltQueryProbeDirectFn = func(_, _, _ string) error { return nil }
-	managedDoltReadOnlyStateDirectFn = func(_, _, _ string) (string, error) { return "false", nil }
+	managedDoltReadOnlyStateDirectFn = func(_, _, _, _ string) (string, error) { return "false", nil }
 	managedDoltConnectionCountDirectFn = func(_, _, _ string) (string, error) { return "1", nil }
 }
 

@@ -21,6 +21,9 @@ base = "builtin:claude"
 [imports.hyperscale]
 source = "packs/hyperscale"
 
+# No [storage]: this city stays single-store. Its sessions run in pods, and a
+# split city's pods refuse mail, nudges, sessions, orders and workflows until
+# worker-site transport exists, so gc init starts a k8s city single-store too.
 [session]
 provider = "k8s"
 

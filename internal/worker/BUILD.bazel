@@ -99,6 +99,7 @@ go_test(
         "observe_capability_test.go",
         "observe_shared_test.go",
         "operation_events_1a_test.go",
+        "operation_events_persisted_test.go",
         "operation_events_test.go",
         "operator_kill_test.go",
         "program_status_shadow_test.go",

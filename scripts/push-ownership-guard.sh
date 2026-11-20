@@ -116,10 +116,21 @@ _pog_read_with_retry() {
     return 1
 }
 
+# _pog_returned_bead_id <json>: prints the id of the bead an already-fetched
+# `bd show <id> --json` payload describes (.[0].id), or nothing when that id
+# is missing, empty or not a string. `bd show` falls back to substring
+# matching when no bead has the exact id, so a successful read can describe a
+# different bead; callers compare this against the id they asked for before
+# trusting any other field of the payload.
+_pog_returned_bead_id() {
+    jq -r '.[0]?.id? | strings' <<<"$1" 2>/dev/null || true
+}
+
 # _pog_branch_id_bead_inactive <id>: true (rc 0) only if a FRESH bd show
-# confirms <id>'s status is neither in_progress nor open -- i.e. the branch-
-# derived bead is no longer the live claim. Fails safe: any read/parse
-# failure returns 1 (treat as still-active / not confirmed inactive), so an
+# returns <id> itself and confirms its status is neither in_progress nor
+# open -- i.e. the branch-derived bead is no longer the live claim. Fails
+# safe: any read/parse failure, or a response for any other id, returns 1
+# (treat as still-active / not confirmed inactive), so an
 # unreachable bd never triggers the branch-reuse override below -- it just
 # falls through to the existing branch-id-wins path, which itself blocks
 # safely on the same failure via assert_bead_still_claimed's own read.
@@ -129,6 +140,7 @@ _pog_branch_id_bead_inactive() {
     json="$(_pog_read_with_retry bd show "$id" --json)" || return 1
     [[ -n "$json" ]] || return 1
     jq -e '.' <<<"$json" >/dev/null 2>&1 || return 1
+    [[ "$(_pog_returned_bead_id "$json")" == "$id" ]] || return 1
     local st
     st="$(jq -r '.[0].status // empty' <<<"$json" 2>/dev/null || true)"
     [[ "$st" != "in_progress" && "$st" != "open" && -n "$st" ]]
@@ -198,9 +210,12 @@ _pog_ownership_violation() {
 
 # _pog_resolve_bead_id: prints the bead id this push should be checked
 # against; prints nothing if none can be resolved. Resolution order:
-#   1. The current branch name, matched against ga-[0-9a-z]{6,}(\.[0-9]+)* —
-#      the bead's own id format (six characters for legacy ids, seven for
-#      current ones; {6,} takes the whole run, `-` and `/` end it),
+#   1. The current branch name, matched against
+#      (^|[^0-9A-Za-z])ga-((mol|wisp)-)?[0-9a-z]{3,}(\.[0-9]+)* with the
+#      leading separator stripped — the bead's own id format (bd mints
+#      base36 hashes of at least three characters by default, and lengths
+#      three through seven all occur in the store; {3,} takes the whole run,
+#      `-` and `/` end it),
 #      extended with zero or more repeated
 #      sub-bead suffixes because this repo's real branch convention is
 #      builder/<bead-id>-<slug> and sub-beads are routine at any nesting
@@ -212,6 +227,12 @@ _pog_ownership_violation() {
 #      grandchild bead the branch is for. The literal 6-char-only pattern
 #      would misresolve to the root bead on any sub-bead's own branch, and
 #      truncate a seven-character id to a nonexistent six-character one.
+#      The id is read only at the start of the name or after a
+#      non-alphanumeric separator (`/`, `-`, `_`, `.`), so a word such as
+#      `omega-checker` is not read as the bead ga-checker. Molecule and wisp
+#      ids keep their bd infix (ga-mol-<hash>, ga-wisp-<hash>): the
+#      leftmost-longest match takes the infixed id whole instead of stopping
+#      at ga-mol or ga-wisp.
 #   2. Falls back to this session's in-progress assignment
 #      (bd list --assignee="$GC_AGENT" --status=in_progress --json) when
 #      the branch name doesn't match. Only resolves when that query returns
@@ -280,7 +301,7 @@ _pog_resolve_bead_id() {
 
     local branch_id=""
     if [[ -n "$branch" ]]; then
-        branch_id="$(grep -oE 'ga-[0-9a-z]{6,}(\.[0-9]+)*' <<<"$branch" | head -1 || true)"
+        branch_id="$(grep -oE '(^|[^0-9A-Za-z])ga-((mol|wisp)-)?[0-9a-z]{3,}(\.[0-9]+)*' <<<"$branch" | head -1 | sed -E 's/^[^0-9A-Za-z]//' || true)"
     fi
 
     # assignee_read_failed distinguishes "the read failed" (ambiguity) from
@@ -435,11 +456,22 @@ assert_bead_still_claimed() {
 
     local json
     if ! json="$(_pog_read_with_retry bd show "$id" --json)" || [[ -z "$json" ]]; then
-        echo "push-ownership-guard: BLOCKED — bd show $id unreachable after $POG_READ_ATTEMPTS attempts; re-run the push first — if it keeps failing, bd/Dolt needs attention. Last resort: git push --no-verify" >&2
+        echo "push-ownership-guard: BLOCKED — bd show $id failed after $POG_READ_ATTEMPTS attempts (the bead may be absent from this store, or bd/Dolt may be unreachable), so ownership cannot be verified; re-run the push first — if it keeps failing, bd/Dolt needs attention. Last resort: git push --no-verify" >&2
         return 1
     fi
     if ! jq -e '.' <<<"$json" >/dev/null 2>&1; then
         echo "push-ownership-guard: BLOCKED — bd show $id --json returned unparseable output; re-run the push first — if it keeps failing, bd/Dolt needs attention. Last resort: git push --no-verify" >&2
+        return 1
+    fi
+
+    local returned_id
+    returned_id="$(_pog_returned_bead_id "$json")"
+    if [[ -z "$returned_id" ]]; then
+        echo "push-ownership-guard: BLOCKED — bd show $id returned no bead id, so ownership of $id cannot be verified; re-run the push first — if it keeps failing, bd/Dolt needs attention. Last resort: git push --no-verify" >&2
+        return 1
+    fi
+    if [[ "$returned_id" != "$id" ]]; then
+        echo "push-ownership-guard: BLOCKED — bd show $id returned bead $returned_id, not $id (no exact match; bd matched another bead), so ownership of $id cannot be verified. Bypass with: git push --no-verify" >&2
         return 1
     fi
 

@@ -83,6 +83,7 @@ No shell invocation — the script is exec'd directly.
 | 2 | Unknown operation (treated as success — forward compatible). From `start`, and from an operation the script declares, it is not success; see below. |
 | 66 | `peek` only, from a v2-ready script (one that declares `observe.v1` and `report-attachment`): no screen. Nothing holds a screen for the name (no box, or a dead box whose screen is gone). See [`peek` under observe.v1](#peek-name-lines-under-observev1). On any other operation, or from a script that is not v2-ready, 66 is an ordinary failure. |
 | 75 | `start` only: temporary failure (`EX_TEMPFAIL`). The endpoint the agent launches against is at capacity or unavailable, so the start is retryable and not specific to this session. Gas City still tears the box down. On any other operation 75 is an ordinary failure. |
+| 80 | `nudge`, `send-keys`, `interrupt` and `clear-scrollback` only, from a script that declares `input-outcome`: the input was not delivered, and stdout carries exactly one outcome line naming why. See [Typed input outcomes](#typed-input-outcomes-input-outcome). To a Gas City that does not read the token, and on any other operation, 80 is an ordinary failure. |
 
 Exit code 2 is the forward-compatibility mechanism. When Gas City adds new
 operations in the future, old scripts return exit 2 and the provider treats
@@ -90,11 +91,16 @@ it as a no-op success. Scripts only need to implement the operations they
 care about. An operation a script declares in its
 [handshake](#protocol-handshake-protocol) cannot be unknown, so declared
 operations do not read exit 2 as success: under `proc.exec`, `exec` returns it
-as the command's own exit code, and under `proc.provision`,
-`report-attachment` and `server-lifecycle`, `provision`, `is-attached` and
-`server-stop` report it as a failure.
+as the command's own exit code, and under `proc.provision`, `proc.launch`,
+`report-attachment` and `server-lifecycle`, `provision`, `launch`,
+`is-attached` and `server-stop` report it as a failure, and under
+`input-outcome` so do the four driving operations.
 `start` cannot be unknown either, so its exit 2 (for example a helper's
 `grep` or `jq` exit status escaping a `set -e` script) is a failed start.
+Under `carrier.ops`, the five driving operations (`nudge`, `peek`,
+`send-keys`, `interrupt` and `clear-scrollback`) cannot be unknown either:
+gc has no other way to drive the script's sessions, so their exit 2 is a
+failure.
 
 ## Cancellation
 
@@ -124,7 +130,7 @@ my-backend wait-ready "$created"
 trap - EXIT TERM                           # startup succeeded; keep the session
 ```
 
-Each call has a deadline. `start` and `provision` get 120 seconds, `attach`
+Each call has a deadline. `start`, `provision` and `launch` get 120 seconds, `attach`
 none (it holds your terminal), and `watch-startup` runs only while gc clears
 startup dialogs. Every other operation gets 30 seconds, and a caller can
 cancel a call sooner. Two operations are stopped differently from the steps
@@ -138,6 +144,8 @@ above: a canceled `exec` or `watch-startup` call is killed outright, with
 | `start` | `script start <name>` | JSON config | — |
 | `stop` | `script stop <name>` | — | — |
 | `interrupt` | `script interrupt <name>` | — | — |
+| `send-keys` | `script send-keys <name> <keys...>` | — | — |
+| `clear-scrollback` | `script clear-scrollback <name>` | — | — |
 | `is-running` | `script is-running <name>` | — | `true` or `false` |
 | `attach` | `script attach <name>` | tty passthrough | tty passthrough |
 | `process-alive` | `script process-alive <name>` | process names (1/line) | `true` or `false` |
@@ -152,6 +160,7 @@ above: a canceled `exec` or `watch-startup` call is killed outright, with
 | `is-attached` | `script is-attached <name>` | — | `true` or `false` |
 | `exec` | `script exec <name>` | command | combined output (op exit == command exit) |
 | `provision` | `script provision <name>` | JSON config | — |
+| `launch` | `script launch <name>` | JSON config | — (under `fresh_only`: starts the agent in a box with none, exit 73 when an agent runs) |
 | `observe` | `script observe <name>` | process names (1/line) | one JSON object (see [observe.v1](#observev1-reconciler-v2)) |
 | `inventory` | `script inventory` | — | one JSON object (see [observe.v1](#observev1-reconciler-v2)) |
 | `kill-object` | `script kill-object <name>` | JSON request | `killed`, `gone`, `renamed`, `live` or `changed` |
@@ -160,29 +169,153 @@ above: a canceled `exec` or `watch-startup` call is killed outright, with
 **Box without agent (the un-weld).** `provision` is `start` MINUS the agent
 launch: it creates/prepares the box (PreStart, SessionSetup, SessionSetupScript,
 SessionLive — every box step `start` runs EXCEPT spawning the agent in tmux) and
-returns. The controller then launches the agent itself by exec-ing `tmux
-new-session` / `respawn-pane -k` over the `exec` op, so a launch-only config
-change relaunches the agent in the warm box instead of reprovisioning (B2.3). A
-pack opts in by declaring `proc.provision` (and `proc.exec`, since the controller
-drives the launch over `exec`); without it, the welded `start` op provisions and
-launches as before, and the controller issues no `provision`/launch. The op is
-gated by the `RPP-PROVISION-001` conformance requirement.
+returns. The orchestrator then launches the agent itself, so a launch-only
+config change relaunches the agent in the warm box instead of reprovisioning
+(B2.3). A pack opts in by declaring `proc.provision` and a way to launch:
+
+- `proc.launch`: the orchestrator runs the `launch` operation, with the start
+  config `provision` received on stdin. `launch` starts the config's `command`
+  in the prepared box, with its `env` and `work_dir`, and exits 0 once the
+  agent process runs. Without `fresh_only`, it replaces an agent already
+  running in the box; with `fresh_only`, it starts the agent in a box with
+  none (the box `provision` just prepared, which is how every fresh start
+  launches) and a running agent is exit 73. It types nothing: no `nudge` and
+  no dialog keys. A pack without tmux in its box should also declare
+  `carrier.ops`: under the default carrier gc still answers startup dialogs
+  and types the first turn with tmux over `exec` (the agent must run in tmux
+  `main`), and falls back to the dedicated ops only when `exec` is
+  unimplemented (exit 2).
+- `proc.exec`, with the default tmux carrier: the orchestrator exec-s `tmux
+  new-session` / `respawn-pane -k` over the `exec` op.
+
+Without either, or with `carrier.ops` and only `proc.exec`, the welded `start`
+op provisions and launches, and the orchestrator issues no `provision` or
+separate launch. The ops are gated by the `RPP-PROVISION-001` to `005`
+conformance requirements (`002` to `004` only for `proc.launch`, `005` only
+for a pack that un-welds start). `gc runtime check` smoke-tests the un-welded
+start in a private city of its own: `provision` exits 0 and leaves
+`is-running` false, and under `proc.launch` a `launch` into that box exits 0
+with `is-running` true and a `fresh_only` launch over the running agent exits
+73.
+
+**The first turn on the un-welded path.** `provision` runs before any agent
+exists and `launch` types nothing, so the orchestrator delivers the start
+config's `nudge` itself, and leaves it out of the config it sends to
+`provision` and `launch`. The start never types it. After the launch the
+orchestrator publishes the ready prompt, answers startup dialogs and, under
+`fs.host`, runs `session_setup` on the host. The start then ends, and the
+first turn waits in the session's nudge queue as the user's submit. The
+queue delivers it through the path every later nudge takes (see [Startup
+Hints](#startup-hints)), once the session takes input:
+
+- With `idle-boundary` declared, the queue's own readiness gate decides when
+  the session takes input.
+- Without it, the queue sends the turn no earlier than `ready_delay_ms` after
+  the start's dialog pass ends. On a pack with neither an idle boundary nor
+  an activity clock (`report-activity`), the queue cannot see the session go
+  quiet, so the turn can wait for its starvation bypass, up to 2 minutes
+  past that floor.
+
+The turn is bound to the launch that produced it, and the queue keeps it
+first:
+
+| Rule | What the queue does |
+|---|---|
+| Identity | Right after the launch, the orchestrator writes the launch's `GC_RUNTIME_EPOCH`, `GC_CONTINUATION_EPOCH` and then `GC_INSTANCE_TOKEN` with `set-meta`, all within one operation timeout. A key the start config does not carry keeps the box's value. A failed write is read back with `get-meta`. If the box already holds the value, as it does for a key `provision` seeded, the writes go on. Otherwise the launch fails, and the start or relaunch with it, so no first turn is queued for a launch the queue could not tell apart: a failed start is torn down like any failed launch, and a failed relaunch falls back to a restart. A `set-meta` that exits 2 (no metadata store) is not read back and fails the launch the same way. Nothing is removed. The queue reads the keys back with `get-meta` to tell which launch runs now. |
+| Delivery | The turn goes only to the launch that produced it, alone, and before every other queued item of the session. The send is fenced to that launch when the pack declares `input-fence`. |
+| Replacement | When another launch replaces the session first, the old turn is dropped (`stale-launch`) and the new launch's own turn goes instead. |
+| Ordering | Reminders queued earlier, and messages sent to the session while its turn is still queued, wait behind the turn. |
+| Unreadable identity | While `get-meta` cannot answer the token, the queue neither sends nor drops the turn, and the session's other queued items wait behind it, until the read answers or the turn expires (24 hours). `gc nudge drop` removes it. |
+
+A script that un-welds start must therefore implement `set-meta`, `get-meta`
+and `remove-meta` for every box. For such a script, exit 2 from one of them
+is a missing store, not an unknown op: conformance fails the metadata
+requirements on it, as it does under `observe.v1`, `gc runtime check` fails
+its metadata round-trip rather than skipping it, and `RPP-PROVISION-005`
+checks that `get-meta` answers the identity keys `set-meta` stored after the
+launch. The orchestrator reports such an exit 2 as a missing store too, and
+from `set-meta` it fails the launch, as the Identity rule says. A script
+without a metadata store therefore cannot start an agent on this path: its
+first turn could be bound to no launch, so messages sent to the session
+would reach the agent ahead of it.
+
+The queue reads the answer as the [typed input
+outcomes](#typed-input-outcomes-input-outcome) say: delivered and
+`delivered_unobserved` are final, a refusal (`busy`, `pending_interaction`,
+`rejected`, `not_sent`, `unavailable`) typed nothing and is retried, and the
+turn is acked once. `unconfirmed` (the submit may or may not have taken) is
+retried too, so delivery is at least once: a turn answered `unconfirmed` can
+be typed twice.
+
+Because the turn is queued, no start deadline can cut it off or lose it, for
+example to a slow host `session_setup`. The cost is latency: the turn lands
+after the start returns, on the queue's next delivery pass, not inside the
+start as the tmux provider's startup nudge does. Under the supervisor's
+nudge dispatcher, a turn not yet due when it is queued waits for the
+dispatcher's next tick. An agent that dies during startup is found by the
+orchestrator's liveness checks like any other dead session; the next start's
+launch then drops its turn. Until the start returns, the turn is held only
+in the orchestrator's memory, so an orchestrator restart in that window
+loses it, as it would lose a turn typed inside the start.
+
+A pack that cannot fence input (`carrier.ops`, or no `input-fence`) has its
+turn checked against the live launch just before the send, not at the
+keystroke. A replacement launch that starts in that window can still receive
+the old launch's turn.
+
+Known limits of the first turn on the un-welded path:
+
+- On a warm relaunch, from the moment the new agent starts until the
+  orchestrator writes its identity, `get-meta` still answers the replaced
+  launch. On a pack that cannot fence, a first turn of the replaced launch
+  that is still queued can be typed into the new agent in that window.
+  A `fresh_only` start has no such window: `provision` seeds the new
+  launch's identity before the box is visible (rule 5 of
+  [observe.v1](#observev1-reconciler-v2)).
+- A failed identity write fails a warm relaunch after its new agent has
+  started. Until the restart that follows replaces that agent, `get-meta`
+  can still answer the replaced launch's token, possibly with the new
+  launch's counters, so the window above lasts until then.
+- A send that may only reach a live session (the conversation lane's
+  message op, a mail or sling notice) is reported undelivered until the
+  first turn is delivered, and the answer does not say that a first turn
+  is waiting.
+- If the queue or the session's record cannot be read, such a send is
+  reported undelivered as if a first turn were waiting.
+- When the conversation lane does not deliver messages
+  (`[ops] authoritative` does not list `message`), and for a session no
+  lane serves, the orchestrator's reminders are typed with the provider's
+  `nudge` directly and do not wait behind a queued first turn: the claim,
+  continuation and execution backstops, the warm-bind claim nudge, the
+  drain reminder and the work ladder's direct delivery. A backstop's first
+  reminder comes 90 seconds after it first sees the seat's claim, so a
+  claim reminder can reach the agent before a first turn that is still
+  waiting out `ready_delay_ms` and the starvation bypass.
+- A script whose `get-meta` exits 2 although its `set-meta` stored the
+  launch's identity, against the metadata requirement above, gets no
+  binding: its first turn is queued as a plain submit, the rules in the
+  table do not apply to it, and a message sent to the session can reach
+  the agent ahead of it.
 
 **The connection primitive (slim RPP).** `exec` is the connection op
-(`RPP-CONN-001`): a carrier drives a box *through* `exec` rather than via
-dedicated driving ops, and any runtime that declares an `env.*` capability
-already implements it. It is **optional for now** — conformance verifies it
-only when present (the output reaches the caller and the op exit mirrors the
-command's exit code) — and becomes required as Gas City moves its own input
-delivery and observation onto `exec`. The dedicated driving ops (`interrupt`,
-`nudge`, `peek`, `clear-scrollback`, `send-keys`) are reproducible over `exec`
-and are deliberately NOT conformance requirements: gc now drives input and reads
-output **over `exec`** (via the tmux carrier) when a runtime implements it, and
-**falls back** to the dedicated driving ops when `exec` is unsupported
-(`RPP-CONN-001` answered exit 2). So a runtime that ships `exec` + tmux-in-box
-needs none of the driving ops, while one that implements only the driving ops
-keeps working via the fallback. (`watch-startup` is a streaming op the
-request/response `exec` connection cannot carry, so it stays a dedicated op.)
+(`RPP-CONN-001`). It is optional; conformance checks output and command exit
+codes when implemented. Runtimes declaring `env.*` capabilities need it.
+
+Without a carrier declaration, gc tries tmux over `exec` first, even without
+`proc.exec`. Dedicated-op fallback happens only when `exec` exits 2 and
+`proc.exec` is undeclared. Declared `proc.exec` makes exit 2 the command's own
+exit code, never a fallback signal.
+
+Declare `carrier.ops` to select the existing `nudge`, `peek`, `send-keys`,
+`interrupt` and `clear-scrollback` ops directly, without tmux. All five are
+required for this carrier, so an exit 2 from one fails like any other
+non-zero exit: a nudge the script never delivered is not reported delivered,
+and a missing `peek` is not read as an empty screen. `gc runtime check`
+exercises all five and fails unsupported or broken ops. `gc runtime
+conformance` checks only the `peek` read under `idle-boundary`, not the other
+four driving ops. With `idle-boundary`, both checkers also require the
+[ready-prompt store](#idle-sleep). `watch-startup` stays a dedicated streaming
+op for either carrier.
 
 ### Protocol Handshake (`protocol`)
 
@@ -212,21 +345,29 @@ Capabilities:
 |------------|--------|
 | `report-attachment` | `is-attached <name>` is called and trusted; without it, sessions always read as detached and `is-attached` is never invoked. Because the op is declared, its exit 2 is a failure like any other non-zero exit, not the "unknown op" sentinel. Also required for full idle sleep (see [Idle sleep](#idle-sleep)). |
 | `report-activity` | `get-last-activity <name>` results are treated as meaningful for idle/health decisions. Report the time of the agent's last output. For a tmux-in-box runtime that is the newest `#{window_activity}` of the session's windows: `#{session_activity}` does not advance while no client is attached. Also required for full idle sleep. |
-| `proc.exec` | The `exec` op's process exit code carries the in-box command's exit code, so an exec-op exit of 2 is read as the command's own exit 2 rather than the "unknown op" sentinel (`ErrExecUnsupported`). Lets the carrier drive input/output over `exec`; without it, gc uses the dedicated driving ops (the fallback path). Also required for full idle sleep. |
-| `idle-boundary` | With `proc.exec`, `report-activity` and `report-attachment`, declares that the agent runs in the in-box tmux session `main`, so gc may read its idle boundary with `capture-pane` over `exec` (see [Idle sleep](#idle-sleep)). Without it, gc runs no idle wait for the pack and its interactive sessions do not sleep. A runtime whose box runs no tmux does not declare it. `gc runtime conformance` checks the declaration (`RPP-CONN-002`): in a started box, `tmux has-session -t main` and the idle capture must succeed over `exec`. |
-| `input-fence` | With `proc.exec`, declares that the box's tmux can hold an input fence, so gc sends nudges, keys and interrupts only to the agent incarnation they are meant for (see [Fenced input over `exec`](#fenced-input-over-exec)). Without it, gc touches no fence in the box, and a fenced request to the runtime is refused (`ErrInputFenceUnsupported`); unfenced input is unaffected. |
-| `proc.provision` | The script implements the box-without-agent `provision` op (see Operations), so the controller provisions the box, then launches the agent over `exec` (the un-weld). Without it, `start` provisions and launches in one op. |
+| `proc.exec` | The `exec` op's process exit code carries the in-box command's exit code, so an exec-op exit of 2 is read as the command's own exit 2 rather than the "unknown op" sentinel (`ErrExecUnsupported`). Does not select the carrier. Without `carrier.ops`, gc always tries tmux over `exec` first. Required for the default tmux carrier's full idle sleep. |
+| `carrier.ops` | Selects the five required dedicated driving ops, with no tmux commands; an exit 2 from one is a failure. Start stays welded with `proc.provision` unless the script also declares `proc.launch`. Fenced input is refused, even with `input-fence`. With `idle-boundary`, the script also keeps each session's ready prompt with `set-meta` and `get-meta` (see [Idle sleep](#idle-sleep)). No token means the tmux-first default; unknown tokens are ignored. |
+| `idle-boundary` | Declares that the selected carrier can answer `Peek`. Full idle sleep also needs `report-activity`, `report-attachment` and either `carrier.ops` or the default carrier's `proc.exec`. `RPP-CONN-002` checks tmux main and capture over `exec` for the default carrier; for `carrier.ops`, it checks `is-running`, `peek <name> 120` showing the started agent's command line or output, and that `set-meta` and `get-meta` round-trip a non-default ready prompt byte for byte, which `gc runtime check` requires too. Neither probe classifies the ready prompt. |
+| `input-fence` | With `proc.exec` and without `carrier.ops`, declares that the box's tmux can hold an input fence, so gc sends nudges, keys and interrupts only to the agent incarnation they are meant for (see [Fenced input over `exec`](#fenced-input-over-exec)). Without it, gc touches no fence in the box, and a fenced request to the runtime is refused (`ErrInputFenceUnsupported`); unfenced input is unaffected. |
+| `proc.provision` | The script implements the box-without-agent `provision` op (see Operations), so the orchestrator provisions the box, then launches the agent and queues its first turn itself. Also requires a way to launch: `proc.launch`, or `proc.exec` with the default tmux carrier. Without one, `start` provisions and launches in one op. |
+| `proc.launch` | The script implements the `launch` op (see Operations), which starts the agent in the box `provision` prepared, replacing a running one unless `fresh_only`, and types nothing. With `proc.provision`, the orchestrator launches through it instead of sending tmux launch argv over `exec`. A pack without tmux in its box declares `carrier.ops` too, since the default carrier still answers dialogs and types the first turn with tmux over `exec`. Without `proc.provision` it has no effect. |
 | `proc.stream` | Reserved (connection-plane family, parallel to `env.*`): declares the persistent bidirectional `stream` connection op (ACP over a stream, tmux pipe-pane). Sets `CanStream`. The `stream` op and its capability-gated conformance entry land with the connection rewrite. |
 | `tty.attach` | Reserved: declares an interactive PTY `attach` connection op. Sets `CanAttachTTY`. |
 | `observe.v1` | The script keeps the observe.v1 profile reconciler v2 reads: the `observe`, `inventory` and `kill-object` ops, `fresh_only` starts and strict exits (see [observe.v1](#observev1-reconciler-v2)). With `report-attachment`, the script is v2-ready. |
 | `server-lifecycle` | The script owns a server its boxes run under and implements `server-stop`, which gc runs after it stops the city's sessions, at `gc stop` and at the orchestrator's shutdown (see [Server teardown](#server-teardown-server-lifecycle) for when). Without it, gc sends no `server-stop`. |
 | `fs.host` | With `"locality": "local"` only: the script's boxes run on gc's host as gc's user, with gc's view of the filesystem, so `work_dir`, `HOME` and transcript paths name the same files inside the box. gc then stages the work dir, runs `pre_start` before `start` and `session_setup` after it on the host itself, leaves that work out of the start config, reads the agent's transcripts for turns, on a v2-ready script reaps a session's leftover processes from its process table, and admits skills and MCP for the runtime (see [Host filesystem (`fs.host`)](#host-filesystem-fshost)). Without `"locality": "local"` it is ignored. |
-| `conformance-faults` | Conformance only: under `GC_RPP_FAULT=unavailable` the script's backend calls fail, so `observe`, `inventory` and `is-attached` take their real failure path and `gc runtime conformance` can check a fault reads unknown. Inject at the backend call (for example, shadow the backend's CLI with a shell function that fails), not with an early exit: an early exit hides an op that swallows a failed backend read. |
+| `input-outcome` | The four driving operations (`nudge`, `send-keys`, `interrupt`, `clear-scrollback`) answer with a typed outcome: exit 0 when the input was delivered, exit 80 with one outcome line otherwise (see [Typed input outcomes](#typed-input-outcomes-input-outcome)). Their exit 2 is then a failure. It changes what gc reads from the dedicated operations, so it has no effect on input the default tmux carrier delivers over `exec`. |
+| `conformance-faults` | Conformance only: under `GC_RPP_FAULT=unavailable` the script's backend calls fail, so `observe`, `inventory` and `is-attached` take their real failure path and `gc runtime conformance` can check a fault reads unknown. Inject at the backend call (for example, shadow the backend's CLI with a shell function that fails), not with an early exit: an early exit hides an op that swallows a failed backend read. A script that declares `input-outcome` also honors `GC_RPP_FAULT=blocked`, `lose_reply`, `hold_send` and `dead` (see [Typed input outcomes](#typed-input-outcomes-input-outcome)). |
 | `city-scoped` | Conformance only: the script scopes its boxes by `GC_EXEC_CITY_PATH`, which `gc runtime conformance` then checks. |
 
 A successful handshake is cached for the provider's life. A failed one is
 cached for 30 seconds, then retried, so a transient failure does not leave
-the script on the no-capability floor until gc restarts.
+the script on the no-capability floor until gc restarts. Before the first
+successful handshake, gc retains tmux-first behavior. A non-tmux pack with a
+broken handshake can therefore receive tmux text through a generic `exec`
+until a retry selects `carrier.ops`. Both checkers report the broken
+handshake. A first driving call can read `protocol` before `exec`, even
+if the provider has not started a session.
 
 ### Idle sleep
 
@@ -239,13 +380,15 @@ depends on its handshake:
 | Handshake declares | `sleep_capability` | What sleeps |
 |---|---|---|
 | `report-activity`, `report-attachment`, `proc.exec` **and** `idle-boundary` | `full` | Every session class, interactive ones included. |
+| `report-activity`, `report-attachment`, `carrier.ops` and `idle-boundary` | `full` | Every session class, through `peek` rather than tmux. The script must also keep each session's ready prompt with `set-meta` and `get-meta` (see below). |
 | anything less (or no handshake) | `timed_only` | Non-interactive sessions only. An interactive policy resolves to `off` with `sleep_policy_adjustment_reason = interactive_capability_insufficient`. |
 
 `full` needs a safe idle boundary, so an interactive session is never stopped
-in the middle of a turn. A runtime that declares all four must:
+in the middle of a turn. A runtime with a full idle boundary must:
 
-- **Run the agent in the in-box tmux session `main`.** The orchestrator reads
-  the pane over `exec` (`tmux capture-pane -t main -p -S -120`). It treats the
+- **Show the agent's screen.** The default carrier reads tmux session `main`
+  over `exec` with `tmux capture-pane -t main -p -S -120`. `carrier.ops`
+  reads `peek <name> 120` under the wait's context. It treats the
   session as idle after two consecutive captures, 200 ms apart, that show the
   agent's ready prompt (`ready_prompt_prefix`, default `❯ `) and no busy
   indicator such as `esc to interrupt`. This is the same check a local tmux
@@ -268,7 +411,33 @@ limits, not targets: a capture that ends exactly at the 5 s mark does not
 count. A slower check fails closed: the session stays awake, and the check
 runs again on the next orchestrator tick.
 
-Once the agent's tmux session exists, the orchestrator stores the session's
+For `carrier.ops`, after `start` the orchestrator publishes the effective
+prompt using `set-meta <name> GC_READY_PROMPT_PREFIX` with the prefix on
+stdin. Another provider instance recovers it with `get-meta` under the wait's
+deadline. A missing key or failed read uses the default without caching, so
+the next wait retries. Publication is best effort and retried only on the
+next start; a failed `set-meta` is reported on the orchestrator's stderr.
+Pack metadata may outlive `stop`. If a new start's `set-meta`
+fails, another provider instance can recover the previous incarnation's
+prompt. Packs should drop session metadata on `stop` to prevent stale prompt
+recovery. Trailing newlines and a trailing carriage return are trimmed from
+metadata, so prefixes ending in either cannot be recovered.
+
+A `carrier.ops` script that declares `idle-boundary` must therefore implement
+`set-meta` and `get-meta`, and `get-meta` must answer the stored prompt byte
+for byte, non-ASCII characters and a trailing space included (gc trims only
+the trailing newlines and carriage returns above). Without them,
+every gc process that did not start the session, such as a restarted
+orchestrator or a `gc` command, looks for the default prompt, so a session
+whose agent shows another prompt never reads as idle there, although the
+runtime reports `full`. `gc runtime check` (`capability carrier.ops:
+ready-prompt metadata`) and `gc runtime conformance` (`RPP-CONN-002`) store a
+non-default prompt and fail a script whose store does not return it. An
+unimplemented `set-meta` (exit 2) on a script that is not v2-ready reads as
+success at the orchestrator, like any unknown operation, so only the checkers
+catch it.
+
+For the default carrier, once the agent's tmux session exists, the orchestrator stores the session's
 `ready_prompt_prefix` in that session's environment as
 `GC_READY_PROMPT_PREFIX` (`tmux -u set-environment -t main`; a blank prefix
 stores the default prompt, `❯ `), as local tmux sessions do. A process that
@@ -307,7 +476,11 @@ noninteractive = "60s"
 
 ### Fenced input over `exec`
 
-A runtime that declares both `proc.exec` and `input-fence` takes fenced
+A `carrier.ops` runtime takes no fenced input, even if it declares
+`proc.exec` and `input-fence`. Fenced nudges, keys, interrupts and dialog
+dismissal refuse before sending any op. Unfenced input is unaffected.
+
+A runtime using the default carrier that declares both `proc.exec` and `input-fence` takes fenced
 input: gc sends a nudge, keys or an interrupt only to the agent incarnation it
 is meant for. The fence is the pane option `@gc_fence` on the agent pane of
 the in-box tmux session `main`, and gc manages it over `exec`. Declare
@@ -334,7 +507,10 @@ incarnation's fence on it. When `start`, or the fence publish after it, then
 fails and the box stays up (it reports that the session already exists, or
 `is-running` said it was running before the attempt), gc puts the fence back
 on the same pane, as long as the pane's root process is unchanged and no
-other fence has been set since.
+other fence has been set since. A `launch` (`proc.launch`) clears the fence
+the same way, and when the `launch` op, or the fence publish after it,
+fails, gc puts the fence back under the same conditions, so an agent that a
+refused `launch` left running keeps taking fenced input.
 
 Fenced input sends nothing until tmux in the box answers the fence read. A
 live tmux server without the `main` session or its agent pane answers that
@@ -384,15 +560,133 @@ it.
 in one city leaves another city's sessions running, only for a script that
 also declares `city-scoped`). `gc runtime check` runs it twice, the second
 time to check that it is idempotent. Both commands run the op, and the
-sessions they check it against, in a private city: `GC_EXEC_CITY_NAME` and
-`GC_EXEC_CITY_PATH` name a fresh temporary directory, never the city you run
-them from. A script that does not scope its server by `GC_EXEC_CITY_PATH`
-ends every session the server holds, so check it only against a backend that
-no live city uses.
+sessions they check it against, in a private city of their own:
+`GC_EXEC_CITY_NAME` and `GC_EXEC_CITY_PATH` name a fresh temporary
+directory, never the city the rest of the run uses. The `city-scoped` probes
+use private cities too. Before either command removes a private city, an
+interrupted run included, it sends that city a final `server-stop`, and
+reports one that does not exit 0 as a warning, since the server it was to
+end may still be running. A script that does not scope its server by
+`GC_EXEC_CITY_PATH` ends every session the server holds, so check it only
+against a backend that no live city uses.
+
+### Typed input outcomes (`input-outcome`)
+
+A script that declares `input-outcome` tells gc what happened to each input
+its `nudge`, `send-keys`, `interrupt` and `clear-scrollback` deliver. The
+arguments and stdin of the four operations are unchanged; the answer is the
+exit code, refined by at most one line of stdout:
+
+| Exit | Stdout | Meaning |
+|------|--------|---------|
+| 0 | empty, or exactly `{"outcome":"delivered"}` | Delivered. |
+| 0 | exactly one line `{"outcome":"delivered_unobserved","detail":"..."}` | `nudge` only: delivered, but the turn start was not observed. |
+| 80 | exactly one line `{"outcome":"<word>","detail":"..."}` | The non-success outcome `<word>` (below). |
+| 1 | — (stderr as usual) | The outcome is unknown. |
+| 2 | — | A failure: a declared operation cannot be unknown. |
+
+Each word is the projection of one outcome gc already acts on; the wire adds
+no meaning of its own:
+
+| Word | Exit | Allowed on | gc reads it as | The nudge queue |
+|------|------|------------|----------------|-----------------|
+| `delivered` | 0 | all four | delivered | acks it |
+| `delivered_unobserved` | 0 | `nudge` | delivered, turn start unobserved (`ErrNudgeDeliveredUnobserved`) | acks it, never redelivers |
+| `unconfirmed` | 80 | `nudge` | the submit may or may not have taken (`ErrNudgeDeliveryUnconfirmed`) | charges an attempt and redelivers |
+| `not_sent` | 80 | all four | nothing reached the session; a retry may get past it (`ErrNudgeNotSent`) | charges an attempt |
+| `rejected` | 80 | all four | the runtime will never accept the input as given (`ErrNudgeRejected`) | charges an attempt |
+| `busy` | 80 | `nudge` | deferred: the session runs a turn the submit would interrupt (`ErrSessionBusy`) | retries later, no attempt |
+| `pending_interaction` | 80 | `nudge` | refused: the session waits on an interaction the text would answer (`ErrNudgeRefusedPendingInteraction`) | retries later, no attempt |
+| `unavailable` | 80 | all four | the runtime could not reach its backend (`ErrRuntimeUnavailable`) | retries later, no attempt |
+| `gone` | 80 | all four | no running box holds the name: none holds it, or the box that does is dead (`observe` would report `dead`) (`ErrSessionNotFound`) | releases it, no attempt |
+
+`detail` is optional, at most 1 KiB, and must hold no secrets: gc puts it in
+the error it reports, with control characters replaced by spaces and cut at
+1 KiB on a character boundary, and conformance fails a longer one
+(`RPP-INPUT-010`). Unknown fields are ignored. Trailing newlines
+after the line are ignored on both exit codes, as everywhere gc reads stdout.
+
+The exit code is the class and the line is detail inside it. Exit 0 always
+means delivered: gc ignores anything on exit 0 but the two delivered lines,
+and conformance fails anything else a driving operation prints when it
+delivers to a running box (`RPP-INPUT-001` for `nudge`, `RPP-INPUT-012` for
+the other three). An exit 80 gc cannot read as one valid line (no line,
+two lines, more than 64 KiB of stdout counting trailing newlines, a
+delivered word, an unknown word, or a word the operation may not answer) is
+an untyped failure, which the queue charges like exit 1; `gc runtime
+conformance` and `gc runtime check` read exit 80 with the same rules, cap
+included. A `nudge` that gc cancels at its deadline reads as `unconfirmed`,
+because the text may already have been typed.
+
+The script's obligations:
+
+- A non-success outcome never exits 0, so a refusal never reads as delivered.
+- `unconfirmed` means the submit may or may not have taken. The queue
+  redelivers it, so the script must not type a redelivered text twice: a
+  re-send of the same text while an earlier one is unresolved answers
+  `unconfirmed` again, or delivered, without typing it.
+- A `nudge` whose text was written to the runtime but whose result the
+  script cannot confirm (the reply was lost, or the runtime still holds the
+  text) is never `not_sent`, whether gc gets its answer at once or while
+  the runtime still holds it. The script answers it under one of two
+  delivery policies, and conformance accepts either:
+  - **At least once:** exit 80 `unconfirmed`. The queue redelivers the
+    nudge, so the script must keep a record of what it sent and
+    de-duplicate the redelivery (above). Nothing is lost if the runtime
+    dies holding the text, but a script that does not de-duplicate types
+    it twice.
+  - **At most once:** a written send is delivered: exit 0, empty or
+    `delivered`, or `delivered_unobserved`. The queue acks it and never
+    redelivers it, so the script needs no send record, as with tmux's
+    `send-keys`. The cost is that a nudge is lost if the runtime dies
+    while it still holds the text. A delivered answer is final, so the
+    text must be typed exactly once. And a `nudge` gc cancels at its
+    deadline still reads as `unconfirmed` and is redelivered, which types
+    it a second time since the script keeps no send record, so answer well
+    within gc's op timeout.
+- A timeout or lost connection after `send-keys`, `interrupt` or
+  `clear-scrollback` reached the runtime is exit 1 (unknown), never
+  `not_sent` or `unavailable`: a retried Esc or Ctrl-C can exit the program.
+- `rejected` is for input the runtime will never accept as given, such as a
+  key it has no spelling for; `not_sent` is for a refusal a retry may get
+  past.
+
+Nothing is negotiated per call. A Gas City that does not read the token
+(older, or within the 30 seconds a failed handshake is cached) sees exit 0
+for both delivered words and an ordinary failure for exit 80, which its queue
+charges and retries, so the script answers the same way for every Gas City.
+gc reads the outcomes from the dedicated operations: with `carrier.ops`, or
+once the script's `exec` has answered exit 2 without `proc.exec`. It then
+skips its own presence check before a driving call, because the script
+answers `gone` itself, so `gone` must cover a dead box as well as an absent
+name: a driving operation to a box with nothing running in it answers `gone`,
+never exit 0. Input the default tmux carrier delivers over `exec`
+is unaffected. Fenced input is not on this wire: `carrier.ops` refuses it
+before any operation runs.
+
+`gc runtime conformance` checks the token as the `input` group
+(`RPP-INPUT-001` to `RPP-INPUT-012`). With `conformance-faults` it also
+injects `GC_RPP_FAULT=blocked` (the box's agent waits on a pending
+interaction: `nudge` answers `pending_interaction` and types nothing),
+`lose_reply` (the input is typed, then the reply is lost: `nudge` answers
+`unconfirmed` or, at most once, delivered, never `not_sent`; the other
+three exit 1) and `hold_send` (a `nudge` stays unresolved until the fault
+is gone, and the text is typed once: when the held `nudge` answered
+`unconfirmed`, a second identical `nudge` answers `unconfirmed` or
+delivered without typing it again; when it answered delivered, at most
+once, no second `nudge` is sent, because gc does not redeliver it) and
+`dead` (the box holds the
+name but nothing runs in it: `observe`, when declared, reports it `dead`,
+and every driving operation answers `gone` and types nothing). It reads what was typed from
+`peek`, as a terminal shows typed input. When it drives one running box in
+turn it sends `interrupt` last, so a pack whose interrupt ends the box's
+command, and with it a box that lives only while its command runs, is not
+asked about the box after it. `gc runtime check` sends a `nudge`
+to a name no box holds and requires exit 80 `gone`.
 
 ### Start Config (JSON on stdin)
 
-The `start` and `provision` operations receive a JSON object on stdin:
+The `start`, `provision` and `launch` operations receive a JSON object on stdin:
 
 ```json
 {
@@ -415,7 +709,7 @@ Every field is optional and omitted when empty. The complete set:
 | `lifecycle` | `"one_shot"` for a command expected to exit after one turn |
 | `env` | The session's environment (see [Session environment](#session-environment)) |
 | `process_names` | The process names the agent runs as |
-| `nudge` | Text to type into the agent once it is ready |
+| `nudge` | Text to type into the agent once it is ready (`start` only: gc delivers it itself after `provision` and `launch`) |
 | `ready_prompt_prefix` | The prompt prefix that shows the agent is ready |
 | `ready_delay_ms` | A fixed delay to wait instead, when there is no prompt to watch for |
 | `pre_start` | Commands to run on the target before the session is created |
@@ -486,8 +780,8 @@ a runtime that declares the capabilities they need, and when the start config
 lists `process_names` or the provider declares a bypass-permissions dialog (a
 provider's `accept_startup_dialogs` setting overrides both) it dismisses known
 startup dialogs, such as workspace trust, through `watch-startup`, `peek` and
-`send-keys` (`peek` and `send-keys` go over `exec` when the runtime implements
-it).
+`send-keys`. These use the selected carrier. Without `carrier.ops`, gc tries
+tmux over `exec`, with dedicated-op fallback only on `ErrExecUnsupported`.
 
 If `start` fails or times out, or a step after it fails, gc runs
 `stop <name>` to tear down whatever the attempt created, then reports the
@@ -495,12 +789,15 @@ start as failed. It skips that `stop` when the box belongs to a live session:
 when `is-running` printed `true` before the attempt, or when `start` exited
 non-zero on its own with stderr saying the name is taken (it contains
 `already exists` or `already running`). The stderr check does not apply to a
-`start` that gc canceled at its deadline. A runtime that declares both
-`proc.provision` and `proc.exec` gets `provision` in place of that `start`:
-no `stop` follows a failed `provision`, and one always follows a failed agent
-launch after it. It gets that `is-running` (`observe` on a v2-ready
-script) only when it also declares `fs.host`, because gc needs the answer
-before it does any [host work](#host-filesystem-fshost).
+`start` that gc canceled at its deadline. A runtime that un-welds start
+(`proc.provision` with `proc.launch`, or with `proc.exec` and without
+`carrier.ops`) gets `provision` in place of that `start`: no `stop` follows a failed `provision`, and one always
+follows a failed agent launch after it. It gets that `is-running` (`observe`
+on a v2-ready script) only when it also declares `fs.host`, because gc needs
+the answer before it does any [host work](#host-filesystem-fshost). A
+`provision` that exits non-zero with stderr saying the name is taken is read
+the way such a `start` is: as the session already existing, not as a failed
+start.
 
 Scripts may handle these hints or ignore them:
 
@@ -517,9 +814,14 @@ Scripts may handle these hints or ignore them:
 - **`nudge`** — text that the tmux adapter types into the session after
   the agent is ready. gc does not send it through the `nudge` operation
   when `start` returns, so a script that wants the agent to receive it
-  types it in itself, in `start`, once the agent is ready. Later nudges,
-  such as `gc session nudge`, go through the `nudge` operation, or over
-  `exec` when the runtime implements it.
+  types it in itself, in `start`, once the agent is ready. On the un-welded
+  path gc queues it after `launch` and its queue delivers it (see [the first
+  turn on the un-welded path](#operations)); gc never sends it to
+  `provision` or `launch`. Later nudges,
+  such as `gc session nudge`, use the selected carrier. Under `carrier.ops`
+  that is the `nudge` operation. Otherwise gc types them through tmux over
+  `exec`, and uses the `nudge` operation when the runtime does not implement
+  `exec`.
 
 - **`pre_start`** — array of shell commands to run on the target
   filesystem **before** the session is created. Used for directory
@@ -591,12 +893,12 @@ name absent or its box dead (a start recycles a dead box, so the work is
 done again, as after a death under tmux). Into a name a running box holds,
 or one whose read fails, it does none of it and sends the full config.
 
-When gc relaunches the agent in a warm box (a script declaring
-`proc.provision` and `proc.exec`), it runs `session_setup` and
-`session_setup_script` on the host again after the launch, as the tmux
-runtime does. It does not stage the work dir or run `pre_start` again: the
-box is warm. A script without `proc.provision` is relaunched by a `stop`
-and a `start`, which do all of the host work again.
+When gc relaunches the agent in a warm box (a script that un-welds start:
+`proc.provision` with `proc.launch`, or with `proc.exec` and without
+`carrier.ops`), it runs `session_setup` and `session_setup_script` on the
+host again after the launch, as the tmux runtime does. It does not stage the
+work dir or run `pre_start` again: the box is warm. Any other script is relaunched by a
+`stop` and a `start`, which do all of the host work again.
 
 gc runs no `session_live` for an exec runtime; the field stays in the start
 config. Commands there are typically tmux theming and keybindings, written
@@ -640,7 +942,12 @@ sessions: a process that left the agent's process group and outlived its
 terminal, carrying the session's `GC_SESSION_ID` and `GC_CITY_PATH`. The
 orphan sweep ends such a process once its session is closed, or stopped with
 no live box under its name, and a session's start ends its own stopped
-incarnation's leftovers first. A leftover counts as live while a box the
+incarnation's leftovers first. Neither ends a leftover that runs in a systemd
+user service unit of its own, one whose environment carries the session's
+identity (inherited after `systemctl --user import-environment` from an agent
+shell, or set with `systemd-run --user --setenv`): gc logs it with its unit
+and leaves it running. A leftover in the unit of gc's own supervisor is still ended. A
+leftover counts as live while a box the
 script's [`inventory`](#inventory) lists carries its `GC_SESSION_ID`; for a
 listed box whose `GC_SESSION_ID` reads empty, the leftover's
 `GC_SESSION_NAME` decides. gc does not scan for the sessions of a script
@@ -658,12 +965,70 @@ sessions, and a session's start refuses rather than end a leftover the
 inventory could have shown. gc signals a process only while it still
 carries the session's `GC_SESSION_ID` and the start time the scan read.
 
+How gc reads a tmux server in a box's picture depends on where the box's
+agent runs:
+
+| The script declares | The agent runs | The scan |
+|---|---|---|
+| `proc.exec` without `carrier.ops` | In the box's tmux session `main`; with `proc.provision`, gc starts it there | Counts every pane of that tmux server as one of the box's processes, as for the tmux runtime |
+| `carrier.ops`, or no `proc.exec` | Outside tmux | Skips every process that a tmux server or client carrying a `GC_SESSION_ID` hosts |
+
+A script whose agent runs under a tmux server in its box declares
+`proc.exec`. Without it, gc reads the agent as running outside tmux, and
+the scan skips the agent. When the agent runs in session `main`, a session's
+start ends a stale incarnation's agent that its box's tmux server kept
+running, and the drain-ack escalation can end a wedged session's agent, as
+for the tmux runtime. A tmux session an agent starts on that server is the
+session's too, and is ended with its leftovers.
+
+When the agent runs outside tmux, a tmux server carrying a `GC_SESSION_ID`
+is one an agent or a user started inside a box (`tmux new -d`, or the
+user's default tmux server when none was running): tmux copies the
+environment of the process that starts its server, so the server and every
+process in its panes carry the session's `GC_SESSION_ID`. The scan skips
+the server, its clients and every process in its panes, and when the city
+also runs ACP agents, gc reports only what that scan reports for them too.
+A session's start and the drain-ack escalation therefore never end a tmux
+session running inside such a box, nor any process in its panes. A tmux
+server that carries no `GC_SESSION_ID`, such as a multiplexer a script
+starts for its boxes from the operation's own environment, changes nothing.
+gc cannot read the environment of another user's tmux server, so it skips
+a process under one and reports a scan error.
+
+gc recognizes tmux by its process name: `tmux`, or a title tmux takes from
+the name it runs under, so a renamed tmux binary is recognized too, except
+on macOS, where only `tmux` is. On Linux that title is `<name>: server` or
+`<name>: client` for a name of up to six characters, and `<name>:` for a
+name of 7 to 14 characters, because the kernel keeps 15 bytes of a process
+name and tmux cuts the rest at its last space; a longer name is not
+recognized. Any other process whose name takes one of these forms is
+treated as tmux too.
+
+Skipping these processes has costs:
+
+- A process that leaves such a pane and is adopted by init (or the user's
+  subreaper) is no longer under tmux, and counts as a leftover like any
+  other. Once a box has founded the user's default tmux server, anything
+  the user later starts there carries the session's identity, and can be
+  ended as the session's leftover once it leaves its pane and is adopted.
+- A tmux session an agent starts with `tmux new -d` inside a box is never
+  cleaned up by gc. It runs until it exits or someone ends it.
+- In a city that also runs ACP agents, the same rule covers the ACP
+  agents' processes, since gc cannot tell a tmux server an ACP agent
+  started from one inside a box. A tmux session an ACP agent starts
+  (`tmux new -d`) is no longer ended when that session restarts, as it is
+  in a city without such a script, and any ACP agent process under it is
+  skipped.
+- The drain-ack escalation ends a wedged session's processes only when
+  their parent is a tmux server, so it finds nothing to end for such a
+  box's session: the slot stays occupied until the box exits.
+
 Start a process that serves several boxes, such as a multiplexer or a daemon
 the boxes run under, from the operation's own environment, never after
 applying a start config's `env`. A process that carries a session's
 `GC_SESSION_ID` and outlives that session's box is that session's leftover:
-gc ends it with its process group, and every box it serves goes down with
-it.
+unless it runs in a systemd user service unit of its own, gc ends it with its
+process group, and every box it serves goes down with it.
 
 `gc runtime conformance` checks the promise in its `fshost` group: a box's
 command copies a file the runner wrote and records its `id -u`, which the
@@ -803,7 +1168,9 @@ and keeps copying the whole work dir.
   name per line.
 - **Idempotent stop**: `stop` must succeed (exit 0) even if the session
   doesn't exist.
-- **Best-effort interrupt/nudge**: Return 0 even if the session doesn't exist.
+- **Best-effort interrupt/nudge**: Without `input-outcome`, return 0 even if
+  the session doesn't exist. With it, answer exit 80 `gone` (see
+  [Typed input outcomes](#typed-input-outcomes-input-outcome)).
 - **Empty = unsupported**: `get-last-activity` returning empty stdout means
   the backend doesn't support activity tracking (zero time in Go).
 
@@ -1045,6 +1412,7 @@ skipped when its op answers exit 2 and failed when it answers wrongly:
 | `process` | `RPP-PROCESS-001` to `002` | `process-alive` with no names answers `true`; after `stop` it never answers `true` or empty. |
 | `concurrency` | `RPP-CONCURRENCY-001` to `005` | Under `observe.v1`: `start`, `stop`, `is-running`, `process-alive` and `list-running` on distinct names all work at once. |
 | `observe` | `RPP-OBSERVE-017` to `018` | With `report-attachment`: `is-attached` answers `false`, exit 0, for a running box with no client and for a name no box holds. |
+| `observation` | `RPP-OBSERVATION-001` to `004` | On a running box: `peek` exits 0; `get-last-activity` exits 0 with an RFC3339 time or nothing; `clear-scrollback` exits 0; `copy-to` of a missing source exits 0. An exit 2 fails `peek` under `carrier.ops` or the v2 profile (`observe.v1` with `report-attachment`), `clear-scrollback` under `carrier.ops` or `input-outcome`, and `get-last-activity` under `report-activity`. Advisory for now: a failure is reported but affects neither `v2_ready` nor the exit code. |
 
 ### Switching an existing exec city to v2
 
@@ -1116,6 +1484,14 @@ handshake should still read no state and answer the same for every city:
 `gc start`, the orchestrator and `gc doctor` each probe it in their own
 process and remember the answer per version of the file.
 
+`gc runtime check` and `gc runtime conformance` (its `--env` suite included)
+set them on every operation too: to the caller's city when
+`GC_EXEC_CITY_PATH` is set, otherwise, as in a shell outside any city, to a
+private city. That city is a fresh temporary directory, removed when the run
+ends or is interrupted, after a final `server-stop` there for a script
+declaring `server-lifecycle`. So a script that serves only cities may refuse any
+operation but `protocol` that names no city, and still pass both commands.
+
 gc sets `GC_EXEC_DEADLINE_MS` on every operation it runs under a deadline
 — all of them but `attach`, and `watch-startup` when its start has none —
 whether or not the provider serves a city. It is the whole milliseconds left,
@@ -1125,6 +1501,17 @@ script can budget its own inner calls by it. gc counts it from just before
 the spawn, so it is an upper bound; an operation whose deadline has passed
 before it is spawned is not run at all. It is informational: no handshake
 capability declares or gates it.
+
+A session a script starts may live in a cgroup of its own that the script
+kills whole when it stops the session. The city's store is not caught in
+it when a gc command in the session starts it: gc starts its managed Dolt
+server in a transient user scope under `GC_INFRA_SLICE` (default
+`gascity-infra.slice`) when the session runs under the user's systemd
+manager, or in the user's login session and the user lingers. From any
+other cgroup, such as a system-level scope or a container, gc moves the
+server only when `GC_INFRA_SLICE` names a slice, and `GC_INFRA_SLICE=off`
+turns the move off. A supervisor a session forks is not moved. See
+[City infrastructure](/reference/tmux-agent-slice#city-infrastructure-gc_infra_slice).
 
 A script runs with gc's own environment, without the session identity a gc
 command run from an agent's shell carries (`GC_SESSION_ID`,

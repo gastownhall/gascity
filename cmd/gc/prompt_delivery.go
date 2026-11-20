@@ -116,8 +116,7 @@ func promptDeliverySupportFor(runtimeName string, packRuntimes map[string]config
 	// the prime through its post-idle delivery path (herdr/provider.go:246).
 	case "herdr":
 		return promptDeliverySupportNudgeFallback
-	// k8s never reads cfg.PromptSuffix and delivers cfg.Nudge post-start
-	// (k8s/provider.go:310,409).
+	// k8s places arg/flag prompts on the agent argv (k8s/pod.go agentCommandB64) and falls back to cfg.Nudge post-start for none mode and oversized prompts.
 	case "k8s":
 		return promptDeliverySupportNudgeFallback
 	// hybrid routes per session name to tmux or k8s and delegates Nudge to

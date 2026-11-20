@@ -72,6 +72,6 @@ func TestRuntimeHandleStartTakesTheStartupHandback(t *testing.T) {
 		t.Fatalf("StartResolved: %v", err)
 	}
 	if nudge, ok := sp.TakeStartupNudgeHandback("legacy-3"); ok {
-		t.Fatalf("handback %q left after the start", nudge)
+		t.Fatalf("handback %q left after the start", nudge.Text)
 	}
 }

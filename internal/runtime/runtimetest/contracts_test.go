@@ -167,6 +167,27 @@ func TestCheckMissingSessionInput(t *testing.T) {
 	}
 }
 
+func TestCheckRefusalNeverDelivered(t *testing.T) {
+	cases := []struct {
+		name   string
+		err    error
+		wantOK bool
+	}{
+		{"reported delivered", nil, false},
+		{"reported delivered unobserved", fmt.Errorf("pack: %w", runtime.ErrNudgeDeliveredUnobserved), false},
+		{"untyped refusal", fmt.Errorf("exec provider nudge s: exit status 80"), true},
+		{"typed refusal", fmt.Errorf("nudge %q: %w", "s", runtime.ErrNudgeRefusedPendingInteraction), true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkRefusalNeverDelivered(inputAnswerProvider{Provider: runtime.NewFake(), err: tc.err}, "s")
+			if (err == nil) != tc.wantOK {
+				t.Errorf("checkRefusalNeverDelivered(%v) = %v, want ok=%v", tc.err, err, tc.wantOK)
+			}
+		})
+	}
+}
+
 // defaultServerTeardownConfig is the start config of fixtures that set none.
 var defaultServerTeardownConfig = ServerTeardownFixtures{}.startConfig
 
