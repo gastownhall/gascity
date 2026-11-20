@@ -80,6 +80,7 @@ go_test(
         "bundled_test.go",
         "cache_compat_test.go",
         "cache_runner_diagnostics_test.go",
+        "cache_stat_dirty_test.go",
         "cache_test.go",
         "check_test.go",
         "embedded_pin_hash_test.go",
