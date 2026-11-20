@@ -277,3 +277,45 @@ func TestGcBeadsBdHealthFallbackAcceptsRepositoryDifferingOnlyInCase(t *testing.
 		t.Fatalf("op_health output = %s, want success for data dir entry HQ", out)
 	}
 }
+
+func TestGcBeadsBdHealthFallbackMatchesDataDirEntriesAsDoltNamesThem(t *testing.T) {
+	const metadata = `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"gas_city"}`
+	const config = "issue_prefix: gc\ngc.endpoint_origin: managed_city\n"
+	binDir := writeFallbackHeadDolt(t, "")
+	pathEnv := "PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH")
+
+	t.Run("hyphenated directory", func(t *testing.T) {
+		dataDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dataDir, "gas-city", ".dolt"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		out := gcBeadsBdHealthHarness(t, metadata, config, "", dataDir, pathEnv)
+		if !strings.Contains(out, "status=0") {
+			t.Fatalf("op_health output = %s, want success for data dir entry gas-city", out)
+		}
+	})
+	t.Run("symlinked directory", func(t *testing.T) {
+		dataDir := t.TempDir()
+		target := filepath.Join(t.TempDir(), "store")
+		if err := os.MkdirAll(filepath.Join(target, ".dolt"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(dataDir, "Gas-City")); err != nil {
+			t.Fatal(err)
+		}
+		out := gcBeadsBdHealthHarness(t, metadata, config, "", dataDir, pathEnv)
+		if !strings.Contains(out, "status=0") {
+			t.Fatalf("op_health output = %s, want success for symlinked data dir entry Gas-City", out)
+		}
+	})
+	t.Run("only another repository", func(t *testing.T) {
+		dataDir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dataDir, "other_db", ".dolt"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		out := gcBeadsBdHealthHarness(t, metadata, config, "", dataDir, pathEnv)
+		if !strings.Contains(out, "status=1") || !strings.Contains(out, `database "gas_city" absent from data dir `+dataDir) {
+			t.Fatalf("op_health output = %s, want gas_city named absent", out)
+		}
+	})
+}

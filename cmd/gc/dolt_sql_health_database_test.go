@@ -360,3 +360,90 @@ func TestDoltStateHealthCheckCmdChecksDataDir(t *testing.T) {
 		t.Fatalf("output = %q, want database_ready true once hq is on disk", stdout.String())
 	}
 }
+
+// TestDoltStateHealthCheckCmdMatchesDataDirEntriesAsDoltNamesThem checks the
+// on-disk proof against the name Dolt gives a repository directory: Dolt
+// exposes directory gas-city as database gas_city, matches names
+// case-insensitively, and loads a repository through a symlinked directory.
+func TestDoltStateHealthCheckCmdMatchesDataDirEntriesAsDoltNamesThem(t *testing.T) {
+	cases := []struct {
+		name      string
+		database  string
+		setup     func(t *testing.T, dataDir string)
+		wantReady bool
+	}{
+		{
+			name:     "only another repository",
+			database: "gascity",
+			setup: func(t *testing.T, dataDir string) {
+				mustMkdirRepo(t, filepath.Join(dataDir, "other_db"))
+			},
+		},
+		{
+			name:      "hyphenated directory names underscored database",
+			database:  "gas_city",
+			setup:     func(t *testing.T, dataDir string) { mustMkdirRepo(t, filepath.Join(dataDir, "gas-city")) },
+			wantReady: true,
+		},
+		{
+			name:      "hyphenated database names hyphenated directory",
+			database:  "gas-city",
+			setup:     func(t *testing.T, dataDir string) { mustMkdirRepo(t, filepath.Join(dataDir, "gas-city")) },
+			wantReady: true,
+		},
+		{
+			name:     "data dir absent",
+			database: "gascity",
+			setup: func(t *testing.T, dataDir string) {
+				if err := os.Remove(dataDir); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:     "symlinked repository directory",
+			database: "gascity",
+			setup: func(t *testing.T, dataDir string) {
+				target := filepath.Join(t.TempDir(), "store")
+				mustMkdirRepo(t, target)
+				if err := os.Symlink(target, filepath.Join(dataDir, "GasCity")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantReady: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			setupDatabaseHealthFakeDolt(t, "ok", "ok", "ok")
+			dataDir := filepath.Join(t.TempDir(), "data")
+			if err := os.Mkdir(dataDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			tc.setup(t, dataDir)
+
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"dolt-state", "health-check", "--host", "127.0.0.1", "--port", "3311", "--user", "root", "--check-read-only", "--database", tc.database, "--data-dir", dataDir}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+			}
+			got := parseDoltStateOutput(t, stdout.String())
+			if tc.wantReady {
+				if got["database_ready"] != "true" {
+					t.Fatalf("output = %q, want database_ready true", stdout.String())
+				}
+				return
+			}
+			if got["database_ready"] != "false" || !strings.Contains(got["database_error"], tc.database) || !strings.Contains(got["database_error"], dataDir) {
+				t.Fatalf("output = %q, want an on-disk database_error naming %q and %s", stdout.String(), tc.database, dataDir)
+			}
+		})
+	}
+}
+
+func mustMkdirRepo(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dir, ".dolt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}

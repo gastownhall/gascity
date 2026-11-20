@@ -2476,16 +2476,18 @@ city_health_data_dir() {
 # (managed servers only), the database is in the catalog, and its default
 # branch head resolves. Prints the failure and returns 1 when any fails.
 check_city_database() {
-    local db="$1" data_dir="$2" host output head db_lower entry entry_name found
+    local db="$1" data_dir="$2" host output head db_name entry entry_name found
     if [ -n "$data_dir" ] && [ ! -d "$data_dir/$db/.dolt" ]; then
-        # Dolt matches database names case-insensitively, so a repository
-        # directory that differs only in case counts.
+        # A repository directory counts when the database name Dolt derives
+        # from it matches: Dolt maps '-' to '_' and compares names
+        # case-insensitively. The glob follows symlinked directories, as the
+        # server does.
         found=false
-        db_lower=$(printf '%s' "$db" | tr '[:upper:]' '[:lower:]')
+        db_name=$(printf '%s' "$db" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
         for entry in "$data_dir"/*/; do
             [ -d "$entry" ] || continue
             entry_name=$(basename "$entry")
-            if [ "$(printf '%s' "$entry_name" | tr '[:upper:]' '[:lower:]')" = "$db_lower" ] && [ -d "$data_dir/$entry_name/.dolt" ]; then
+            if [ "$(printf '%s' "$entry_name" | tr '[:upper:]' '[:lower:]' | tr '-' '_')" = "$db_name" ] && [ -d "$data_dir/$entry_name/.dolt" ]; then
                 found=true
                 break
             fi
