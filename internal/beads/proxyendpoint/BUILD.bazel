@@ -39,6 +39,7 @@ go_test(
         "probe_session_test.go",
         "probe_test.go",
         "record_test.go",
+        "session_test.go",
         "testenv_import_test.go",
     ],
     data = [

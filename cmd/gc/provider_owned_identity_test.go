@@ -348,3 +348,47 @@ func TestInitAndHookDirProviderOwnedReconcileLayers(t *testing.T) {
 		})
 	}
 }
+
+// TestProviderOwnedIdentityProxiedEndpoint: a proxied scope, local or
+// external upstream, reaches L3 through bd's live local proxy on the record's
+// port for the metadata dolt_database; the sidecar's upstream is never the
+// endpoint, and the one session is closed before the reconcile returns.
+func TestProviderOwnedIdentityProxiedEndpoint(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		sidecar string
+	}{
+		{name: "local upstream", sidecar: residentProxySidecar},
+		{name: "external upstream", sidecar: externalProxySidecar},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clearInheritedBeadsEnv(t)
+			clearProviderOwnedProxyEnv(t)
+			city := t.TempDir()
+			writeReadyTopologyScope(t, city, readyTopologyScope{
+				beadsConfig: bdTemplateBeadsConfig,
+				metadata:    proxiedLocalMetadata,
+				sidecar:     tc.sidecar,
+			})
+			stubLiveProviderOwnedProxy(t)
+			fake := &providerOwnedL3Fake{l3: &projectIdentityL3Double{}}
+			stubProviderOwnedL3(t, fake)
+			writeIdentityFile(t, city, providerOwnedIdentityP)
+
+			if err := reconcileProviderOwnedScopeIdentity(context.Background(), city, city); err != nil {
+				t.Fatalf("reconcileProviderOwnedScopeIdentity: %v", err)
+			}
+
+			want := providerOwnedIdentityEndpoint{ProxyPort: providerOwnedProxyPort, Database: "prov"}
+			if len(fake.opened) != 1 || fake.opened[0] != want {
+				t.Fatalf("L3 opened for %+v, want exactly one open for %+v", fake.opened, want)
+			}
+			if fake.closed != 1 {
+				t.Fatalf("L3 session closed %d time(s), want 1 before the reconcile returned", fake.closed)
+			}
+			if fake.l3.projectID != providerOwnedIdentityP {
+				t.Fatalf("L3 = %q, want seeded %q", fake.l3.projectID, providerOwnedIdentityP)
+			}
+		})
+	}
+}
