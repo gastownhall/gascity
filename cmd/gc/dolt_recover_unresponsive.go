@@ -153,6 +153,9 @@ const (
 	managedDoltRecoveryReasonWithinWindow     = "within_unresponsive_window"
 	managedDoltRecoveryReasonInconclusive     = "inconclusive_endpoint_observation"
 	managedDoltRecoveryReasonUnknownIdentity  = "unknown_server_identity"
+	managedDoltRecoveryReasonWindowElapsed    = "unresponsive_window_elapsed"
+	managedDoltRecoveryReasonWindowDisabled   = "unresponsive_window_disabled"
+	managedDoltRecoveryReasonRecheckFailed    = "elapsed_window_recheck_failed"
 )
 
 // managedDoltRecoveryRecordTag starts every recovery decision line appended to
@@ -317,7 +320,221 @@ func (g managedDoltRecoveryGate) evaluate(failure error) error {
 	}
 	base.PID = ident.PID
 	base.StartTime = ident.StartTime
-	base.Reason = managedDoltRecoveryReasonFirstObservation
-	base.UnresponsiveSince = now
-	return g.deferRecovery(base, fmt.Sprintf("endpoint %s (pid %d) is listening after %v; first unresponsive observation, restart allowed after %s", g.endpoint(), ident.PID, failure, window))
+
+	history, err := readManagedDoltRecoveryHistory(g.logFile, now)
+	if err != nil {
+		return fmt.Errorf("%w: endpoint %s (pid %d) is listening after %s and recovery history is unreadable: %w", errManagedDoltRecoveryDeferred, g.endpoint(), ident.PID, failure.Error(), err)
+	}
+	historyNote := history.note()
+
+	if window == 0 {
+		return g.authorizeStop(base, ident, managedDoltRecoveryReasonWindowDisabled, failure)
+	}
+	since := history.openStreak(normalizePathForCompare(g.cityPath), g.endpoint(), ident)
+	if since.IsZero() {
+		base.Reason = managedDoltRecoveryReasonFirstObservation
+		base.UnresponsiveSince = now
+		return g.deferRecovery(base, fmt.Sprintf("endpoint %s (pid %d) is listening after %v; first unresponsive observation, restart allowed after %s%s", g.endpoint(), ident.PID, failure, window, historyNote))
+	}
+	base.UnresponsiveSince = since
+	if elapsed := now.Sub(since); elapsed < window {
+		base.Reason = managedDoltRecoveryReasonWithinWindow
+		return g.deferRecovery(base, fmt.Sprintf("endpoint %s (pid %d) is listening after %v; unresponsive for %s of the %s window%s", g.endpoint(), ident.PID, failure, elapsed.Round(time.Second), window, historyNote))
+	}
+	return g.authorizeStop(base, ident, managedDoltRecoveryReasonWindowElapsed, failure)
+}
+
+// authorizeStop re-verifies that the same incarnation still holds the
+// endpoint, then records the stop decision. Recording must succeed before the
+// caller may stop anything.
+func (g managedDoltRecoveryGate) authorizeStop(base managedDoltRecoveryRecord, ident managedDoltServerIncarnation, reason string, failure error) error {
+	recheck := g.ops.observeEndpoint(g.host, g.port)
+	current, identErr := g.ops.identify(g.cityPath, g.port)
+	if recheck.State != managedDoltEndpointListening || identErr != nil || current != ident {
+		base.Reason = managedDoltRecoveryReasonRecheckFailed
+		base.Inconclusive = true
+		return g.deferRecovery(base, fmt.Sprintf("endpoint %s changed before restart (observation %s, pid %d -> %d, identity error %v); leaving it running", g.endpoint(), recheck.State, ident.PID, current.PID, identErr))
+	}
+	base.Decision = managedDoltRecoveryDecisionStop
+	base.Reason = reason
+	if err := g.record(base); err != nil {
+		return fmt.Errorf("%w: refusing an unrecorded restart of endpoint %s (pid %d) after %s: %w", errManagedDoltRecoveryDeferred, g.endpoint(), ident.PID, failure.Error(), err)
+	}
+	return nil
+}
+
+// managedDoltRecoveryHistoryTailBytes bounds how much of dolt.log recovery
+// reads back. History older than the tail cannot justify a restart.
+const managedDoltRecoveryHistoryTailBytes = 1 << 20
+
+// managedDoltRecoveryHistory is the valid recovery records in the readable
+// tail of dolt.log, oldest first.
+type managedDoltRecoveryHistory struct {
+	Records   []managedDoltRecoveryRecord
+	Malformed int
+}
+
+func (h managedDoltRecoveryHistory) note() string {
+	if h.Malformed == 0 {
+		return ""
+	}
+	return fmt.Sprintf("; ignored %d malformed recovery record(s) in dolt.log", h.Malformed)
+}
+
+// openStreak returns the start of the unresponsiveness streak for ident on
+// endpoint, or zero when none is open. Healthy and stop decisions close a
+// streak, a positive observation of another incarnation replaces it, and
+// inconclusive deferrals neither open nor advance it.
+func (h managedDoltRecoveryHistory) openStreak(scope, endpoint string, ident managedDoltServerIncarnation) time.Time {
+	var since time.Time
+	for _, rec := range h.Records {
+		if rec.Scope != scope || rec.Endpoint != endpoint {
+			continue
+		}
+		switch rec.Decision {
+		case managedDoltRecoveryDecisionHealthy, managedDoltRecoveryDecisionStop:
+			since = time.Time{}
+		case managedDoltRecoveryDecisionDefer:
+			if rec.Inconclusive || rec.UnresponsiveSince.IsZero() {
+				continue
+			}
+			if rec.PID != ident.PID || rec.StartTime != ident.StartTime {
+				since = time.Time{}
+				continue
+			}
+			if since.IsZero() {
+				since = rec.UnresponsiveSince
+			}
+		}
+	}
+	return since
+}
+
+// readManagedDoltRecoveryHistory reads the recovery records in the bounded
+// tail of logFile. A missing log is an empty history. Records that do not
+// parse, lie in the future, or claim an impossible streak start are counted
+// as malformed and never used.
+func readManagedDoltRecoveryHistory(logFile string, now time.Time) (managedDoltRecoveryHistory, error) {
+	f, err := os.Open(logFile)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return managedDoltRecoveryHistory{}, nil
+		}
+		return managedDoltRecoveryHistory{}, fmt.Errorf("read dolt recovery history: %w", err)
+	}
+	defer f.Close() //nolint:errcheck // read-only
+	info, err := f.Stat()
+	if err != nil {
+		return managedDoltRecoveryHistory{}, fmt.Errorf("read dolt recovery history: stat %s: %w", logFile, err)
+	}
+	offset := info.Size() - managedDoltRecoveryHistoryTailBytes
+	if offset < 0 {
+		offset = 0
+	}
+	data := make([]byte, info.Size()-offset)
+	if _, err := f.ReadAt(data, offset); err != nil && !errors.Is(err, io.EOF) {
+		return managedDoltRecoveryHistory{}, fmt.Errorf("read dolt recovery history: %s: %w", logFile, err)
+	}
+	lines := strings.Split(string(data), "\n")
+	if offset > 0 && len(lines) > 0 {
+		// The first line of a tail may be cut mid-record.
+		lines = lines[1:]
+	}
+	if len(lines) > 0 {
+		// Only newline-terminated lines are complete records.
+		lines = lines[:len(lines)-1]
+	}
+	history := managedDoltRecoveryHistory{}
+	for _, line := range lines {
+		if !strings.HasPrefix(line, managedDoltRecoveryRecordTag+" ") {
+			continue
+		}
+		rec, err := parseManagedDoltRecoveryRecord(line)
+		if err != nil || rec.At.After(now) || (!rec.UnresponsiveSince.IsZero() && rec.UnresponsiveSince.After(rec.At)) {
+			history.Malformed++
+			continue
+		}
+		history.Records = append(history.Records, rec)
+	}
+	return history, nil
+}
+
+// parseManagedDoltRecoveryRecord parses one line written by
+// managedDoltRecoveryRecord.format. Every field must be present.
+func parseManagedDoltRecoveryRecord(line string) (managedDoltRecoveryRecord, error) {
+	rest, ok := strings.CutPrefix(line, managedDoltRecoveryRecordTag+" ")
+	if !ok {
+		return managedDoltRecoveryRecord{}, fmt.Errorf("not a recovery record")
+	}
+	fields := map[string]string{}
+	for rest != "" {
+		key, value, found := strings.Cut(rest, "=")
+		if !found || key == "" || strings.Contains(key, " ") {
+			return managedDoltRecoveryRecord{}, fmt.Errorf("malformed field near %q", rest)
+		}
+		if strings.HasPrefix(value, "\"") {
+			quoted, err := strconv.QuotedPrefix(value)
+			if err != nil {
+				return managedDoltRecoveryRecord{}, fmt.Errorf("field %s: %w", key, err)
+			}
+			unquoted, err := strconv.Unquote(quoted)
+			if err != nil {
+				return managedDoltRecoveryRecord{}, fmt.Errorf("field %s: %w", key, err)
+			}
+			fields[key] = unquoted
+			value = value[len(quoted):]
+		} else {
+			end := strings.IndexByte(value, ' ')
+			if end < 0 {
+				end = len(value)
+			}
+			fields[key] = value[:end]
+			value = value[end:]
+		}
+		if value != "" && !strings.HasPrefix(value, " ") {
+			return managedDoltRecoveryRecord{}, fmt.Errorf("field %s: trailing data", key)
+		}
+		rest = strings.TrimPrefix(value, " ")
+	}
+	for _, key := range []string{"at", "decision", "reason", "scope", "endpoint", "pid", "start", "since", "elapsed", "window", "inconclusive", "probe_error", "caller"} {
+		if _, ok := fields[key]; !ok {
+			return managedDoltRecoveryRecord{}, fmt.Errorf("missing field %s", key)
+		}
+	}
+	rec := managedDoltRecoveryRecord{
+		Decision:   managedDoltRecoveryDecision(fields["decision"]),
+		Reason:     fields["reason"],
+		Scope:      fields["scope"],
+		Endpoint:   fields["endpoint"],
+		StartTime:  fields["start"],
+		ProbeError: fields["probe_error"],
+		Caller:     fields["caller"],
+	}
+	switch rec.Decision {
+	case managedDoltRecoveryDecisionDefer, managedDoltRecoveryDecisionStop, managedDoltRecoveryDecisionHealthy:
+	default:
+		return managedDoltRecoveryRecord{}, fmt.Errorf("unknown decision %q", rec.Decision)
+	}
+	var err error
+	if rec.At, err = time.Parse(time.RFC3339Nano, fields["at"]); err != nil {
+		return managedDoltRecoveryRecord{}, fmt.Errorf("field at: %w", err)
+	}
+	if fields["since"] != "-" {
+		if rec.UnresponsiveSince, err = time.Parse(time.RFC3339Nano, fields["since"]); err != nil {
+			return managedDoltRecoveryRecord{}, fmt.Errorf("field since: %w", err)
+		}
+	}
+	if rec.PID, err = strconv.Atoi(fields["pid"]); err != nil || rec.PID < 0 {
+		return managedDoltRecoveryRecord{}, fmt.Errorf("field pid: %q", fields["pid"])
+	}
+	if rec.Window, err = time.ParseDuration(fields["window"]); err != nil {
+		return managedDoltRecoveryRecord{}, fmt.Errorf("field window: %w", err)
+	}
+	if _, err = time.ParseDuration(fields["elapsed"]); err != nil {
+		return managedDoltRecoveryRecord{}, fmt.Errorf("field elapsed: %w", err)
+	}
+	if rec.Inconclusive, err = strconv.ParseBool(fields["inconclusive"]); err != nil {
+		return managedDoltRecoveryRecord{}, fmt.Errorf("field inconclusive: %w", err)
+	}
+	return rec, nil
 }

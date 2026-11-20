@@ -37,6 +37,7 @@ func newRecoveryGateHarness(t *testing.T) *recoveryGateHarness {
 		port:     "3311",
 		now:      time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC),
 		probeErr: fmt.Errorf("query probe: %w", context.DeadlineExceeded),
+		health:   managedDoltSQLHealthReport{QueryReady: true, ReadOnly: "false"},
 		endpoint: managedDoltEndpointObservation{State: managedDoltEndpointListening},
 		ident:    managedDoltServerIncarnation{PID: 4242, StartTime: "777"},
 		window:   180 * time.Second,
@@ -165,4 +166,136 @@ func TestRecoverManagedDoltLiveListenerWithoutMetadataDefers(t *testing.T) {
 	h.calls = nil
 	report, err := recoverManagedDoltProcessWithOps(h.city, "127.0.0.1", h.port, "root", "warning", 2*time.Second, ops)
 	assertDeferredWithoutRestart(t, h, report, err)
+}
+
+// seedRecoveryRecord appends a recovery record for the harness city/endpoint.
+func (h *recoveryGateHarness) seedRecoveryRecord(rec managedDoltRecoveryRecord) {
+	h.t.Helper()
+	if rec.Scope == "" {
+		rec.Scope = normalizePathForCompare(h.city)
+	}
+	if rec.Endpoint == "" {
+		rec.Endpoint = net.JoinHostPort("127.0.0.1", h.port)
+	}
+	if rec.Caller == "" {
+		rec.Caller = "seed"
+	}
+	if rec.Window == 0 {
+		rec.Window = h.window
+	}
+	if err := appendManagedDoltRecoveryRecord(h.logFile(), rec); err != nil {
+		h.t.Fatal(err)
+	}
+}
+
+func (h *recoveryGateHarness) seedDefer(at, since time.Time, ident managedDoltServerIncarnation) {
+	h.seedRecoveryRecord(managedDoltRecoveryRecord{
+		At: at, Decision: managedDoltRecoveryDecisionDefer, Reason: managedDoltRecoveryReasonFirstObservation,
+		PID: ident.PID, StartTime: ident.StartTime, UnresponsiveSince: since,
+	})
+}
+
+// lastRecoveryRecord parses the newest recovery record in dolt.log.
+func (h *recoveryGateHarness) lastRecoveryRecord() managedDoltRecoveryRecord {
+	h.t.Helper()
+	history, err := readManagedDoltRecoveryHistory(h.logFile(), h.now)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	if len(history.Records) == 0 {
+		h.t.Fatalf("dolt.log has no recovery records:\n%s", h.logText())
+	}
+	return history.Records[len(history.Records)-1]
+}
+
+// AC-2: repeated failures of the same verified incarnation keep the original
+// streak start while inside the window, and record a stop decision then enter
+// the existing recovery path once the window has elapsed.
+func TestRecoverManagedDoltSameIncarnationStreakGatesRestart(t *testing.T) {
+	t.Run("inside the window preserves the original streak and defers", func(t *testing.T) {
+		h := newRecoveryGateHarness(t)
+		since := h.now.Add(-100 * time.Second)
+		h.seedDefer(since, since, h.ident)
+		h.seedDefer(h.now.Add(-40*time.Second), since, h.ident)
+		report, err := h.recover()
+		assertDeferredWithoutRestart(t, h, report, err)
+		last := h.lastRecoveryRecord()
+		if last.Decision != managedDoltRecoveryDecisionDefer || !last.UnresponsiveSince.Equal(since) {
+			t.Fatalf("last record = %+v, want defer with original since %s", last, since)
+		}
+		if last.Reason != managedDoltRecoveryReasonWithinWindow {
+			t.Fatalf("last reason = %q, want %q", last.Reason, managedDoltRecoveryReasonWithinWindow)
+		}
+	})
+	for _, elapsed := range []time.Duration{180 * time.Second, 400 * time.Second} {
+		t.Run("at or after the window records stop and restarts/"+elapsed.String(), func(t *testing.T) {
+			h := newRecoveryGateHarness(t)
+			since := h.now.Add(-elapsed)
+			h.seedDefer(since, since, h.ident)
+			h.seedDefer(h.now.Add(-60*time.Second), since, h.ident)
+			report, err := h.recover()
+			if err != nil {
+				t.Fatalf("recover: %v (calls=%v)", err, h.calls)
+			}
+			if !report.Restarted || report.Deferred {
+				t.Fatalf("report = %+v, want Restarted=true Deferred=false", report)
+			}
+			if strings.Join(h.calls, ",") != "query,observe,observe,stop,preflight,start,health,publish" {
+				t.Fatalf("calls = %v, want a re-verified observation before stop/start", h.calls)
+			}
+			last := h.lastRecoveryRecord()
+			if last.Decision != managedDoltRecoveryDecisionStop || !last.UnresponsiveSince.Equal(since) || last.PID != h.ident.PID {
+				t.Fatalf("last record = %+v, want stop decision for pid %d since %s", last, h.ident.PID, since)
+			}
+		})
+	}
+	t.Run("a changed incarnation starts a fresh window", func(t *testing.T) {
+		h := newRecoveryGateHarness(t)
+		since := h.now.Add(-400 * time.Second)
+		h.seedDefer(since, since, managedDoltServerIncarnation{PID: h.ident.PID, StartTime: "older-boot"})
+		report, err := h.recover()
+		assertDeferredWithoutRestart(t, h, report, err)
+		last := h.lastRecoveryRecord()
+		if !last.UnresponsiveSince.Equal(h.now) || last.Reason != managedDoltRecoveryReasonFirstObservation {
+			t.Fatalf("last record = %+v, want a fresh streak at %s", last, h.now)
+		}
+	})
+	t.Run("a different endpoint's streak does not count", func(t *testing.T) {
+		h := newRecoveryGateHarness(t)
+		since := h.now.Add(-400 * time.Second)
+		h.seedRecoveryRecord(managedDoltRecoveryRecord{
+			At: since, Decision: managedDoltRecoveryDecisionDefer, Reason: managedDoltRecoveryReasonFirstObservation,
+			Endpoint: "127.0.0.1:9999", PID: h.ident.PID, StartTime: h.ident.StartTime, UnresponsiveSince: since,
+		})
+		report, err := h.recover()
+		assertDeferredWithoutRestart(t, h, report, err)
+	})
+	t.Run("an elapsed window whose re-verification changes identity defers", func(t *testing.T) {
+		h := newRecoveryGateHarness(t)
+		since := h.now.Add(-400 * time.Second)
+		h.seedDefer(h.now.Add(-60*time.Second), since, h.ident)
+		ops := h.ops()
+		identifyCalls := 0
+		ops.identify = func(string, string) (managedDoltServerIncarnation, error) {
+			identifyCalls++
+			if identifyCalls > 1 {
+				return managedDoltServerIncarnation{PID: 9191, StartTime: "replacement"}, nil
+			}
+			return h.ident, nil
+		}
+		h.calls = nil
+		report, err := recoverManagedDoltProcessWithOps(h.city, "127.0.0.1", h.port, "root", "warning", 2*time.Second, ops)
+		assertDeferredWithoutRestart(t, h, report, err)
+	})
+	t.Run("zero window restarts a positively observed listener at once", func(t *testing.T) {
+		h := newRecoveryGateHarness(t)
+		h.window = 0
+		report, err := h.recover()
+		if err != nil || !report.Restarted {
+			t.Fatalf("report = %+v err = %v, want restart with a zero window", report, err)
+		}
+		if last := h.lastRecoveryRecord(); last.Decision != managedDoltRecoveryDecisionStop {
+			t.Fatalf("last record = %+v, want stop decision", last)
+		}
+	})
 }
