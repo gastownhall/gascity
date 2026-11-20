@@ -5079,6 +5079,55 @@ func TestPrepareWaitWakeState_KeepsNamedSessionWaitAcrossReset(t *testing.T) {
 				fx.requireKeptAt("after the dependency closed", waitStateReady)
 			},
 		},
+		{
+			name: "control/unnamed-is-stale",
+			run: func(fx *resetWindowFixture) {
+				fx.register()
+				fx.requestReset()
+				fx.start(3)
+				fx.wakePass()
+				fx.requireCanceled("after the restart", "continuation-stale")
+			},
+		},
+		{
+			name: "control/named-config-gone-is-stale",
+			opts: []resetWindowSessionOpt{func(meta map[string]string) {
+				meta["configured_named_identity"] = "desk"
+			}},
+			run: func(fx *resetWindowFixture) {
+				fx.register()
+				fx.requestReset()
+				fx.start(3)
+				fx.wakePass()
+				fx.requireCanceled("after the restart", "continuation-stale")
+			},
+		},
+		{
+			name: "control/closed-named-is-stale",
+			opts: []resetWindowSessionOpt{namedResetWindowSession},
+			run: func(fx *resetWindowFixture) {
+				fx.register()
+				fx.requestReset()
+				fx.start(3)
+				if err := fx.store.Close(fx.sessionID); err != nil {
+					fx.t.Fatalf("close session: %v", err)
+				}
+				fx.wakePass()
+				fx.requireCanceled("after the session closed", "continuation-stale")
+			},
+		},
+		{
+			name: "control/closed-named-at-its-epoch-is-session-closed",
+			opts: []resetWindowSessionOpt{namedResetWindowSession},
+			run: func(fx *resetWindowFixture) {
+				fx.register()
+				if err := fx.store.Close(fx.sessionID); err != nil {
+					fx.t.Fatalf("close session: %v", err)
+				}
+				fx.wakePass()
+				fx.requireCanceled("after the session closed", "session-closed")
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.run(newResetWindowFixture(t, tc.opts...))

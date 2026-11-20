@@ -1305,4 +1305,74 @@ func TestWaitOfNamedSessionReachesTheConversationAfterItsReset(t *testing.T) {
 			t.Fatalf("after delivery: wait state = %s, want %s", got.State, waitStateClosed)
 		}
 	})
+
+	for _, tc := range []struct {
+		name      string
+		opts      []laneFixtureOpt
+		close     func(t *testing.T, f *laneFixture, st *opjournal.Store, op opjournal.Op)
+		state     string
+		attempt   string
+		lastError string
+	}{
+		{
+			name: "control/named skipped conversation closed",
+			opts: []laneFixtureOpt{namedLaneSession},
+			close: func(t *testing.T, _ *laneFixture, st *opjournal.Store, op opjournal.Op) {
+				if _, err := st.Close(op.ID, opjournal.Outcome{Arm: opjournal.ArmSkipped, Reason: opjournal.ReasonConversationClosed}, "lane:ctl"); err != nil {
+					t.Fatal(err)
+				}
+			},
+			state: waitStateCanceled, attempt: "1", lastError: "notice skipped: conversation_closed",
+		},
+		{
+			name: "control/named skipped stale without a fence",
+			opts: []laneFixtureOpt{namedLaneSession},
+			close: func(t *testing.T, _ *laneFixture, st *opjournal.Store, op opjournal.Op) {
+				if _, err := st.Close(op.ID, opjournal.Outcome{Arm: opjournal.ArmSkipped, Reason: opjournal.ReasonStale}, "lane:ctl"); err != nil {
+					t.Fatal(err)
+				}
+			},
+			state: waitStateCanceled, attempt: "1", lastError: "notice skipped: stale",
+		},
+		{
+			name: "control/named withdrawn by gc:wait",
+			opts: []laneFixtureOpt{namedLaneSession},
+			close: func(t *testing.T, _ *laneFixture, st *opjournal.Store, op opjournal.Op) {
+				if _, _, err := st.Cancel(op.ID, waitNoticePrincipal, waitNoticeWithdrawReason); err != nil {
+					t.Fatal(err)
+				}
+			},
+			state: waitStateReady, attempt: "2",
+		},
+		{
+			name: "control/unnamed fenced off by the reset",
+			close: func(t *testing.T, f *laneFixture, st *opjournal.Store, op opjournal.Op) {
+				startConsumingTheReset(t, f, 2, "tok-2")
+				if _, err := f.pass(context.Background(), t, f.lane(t, st), st, nil); err != nil {
+					t.Fatalf("lane pass: %v", err)
+				}
+				if got := f.get(t, st, op.ID); !opjournal.FencedOff(got) {
+					t.Fatalf("notice = %s %+v, want it fenced off by the reset", got.Status, got.Outcome)
+				}
+			},
+			state: waitStateCanceled, attempt: "1", lastError: "continuation-stale",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLaneFixture(t, tc.opts...)
+			newNoticeLaneHost(t, f, "message")
+			st := f.laneStore(t)
+			wait := readyWait(t, f, "Pick up the next step.")
+			dispatchWaits(t, f)
+			tc.close(t, f, st, waitNotice(t, f, st, wait))
+			prepareWaits(t, f)
+			got := waitNow(t, f, wait)
+			if got.State != tc.state || got.DeliveryAttempt != tc.attempt {
+				t.Fatalf("wait = state %s attempt %s, want state %s attempt %s", got.State, got.DeliveryAttempt, tc.state, tc.attempt)
+			}
+			if le := waitLastError(t, f, wait); le != tc.lastError {
+				t.Fatalf("wait last_error = %q, want %q", le, tc.lastError)
+			}
+		})
+	}
 }
