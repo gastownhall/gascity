@@ -3706,6 +3706,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		// tmux/container session is still stopped before the next wake.
 		{
 			runtimeRunning := running || alive
+			releasedSince := time.Time{} // set when the kill completed; wall clock, not clk
 			tmuxRequested := false
 			if runtimeRunning && dops != nil {
 				tmuxRequested, _ = dops.isRestartRequested(name)
@@ -3740,6 +3741,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						fmt.Fprintf(stderr, "session reconciler: stopping restart-requested %s: %v\n", name, err) //nolint:errcheck
 						continue
 					}
+					// Wall clock, not clk: the fresh read below compares the
+					// runtime's listing times on the real clock (the tmux
+					// state cache included), so the release proof is bounded
+					// by when the kill actually completed.
+					releasedSince = time.Now()
 				}
 				if identity := namedSessionIdentityInfo(infoByID[id]); identity != "" {
 					if err := resetSessionCircuitBreakerState(store, id, identity, cb); err != nil {
@@ -3806,15 +3812,28 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						}
 					}
 					fmt.Fprintf(stdout, "Stopped restart-requested session '%s'\n", name) //nolint:errcheck
-					// Yield this tick so the kill and the next wake run
-					// on separate reconciler passes; the new start should
-					// not race the tmux alias release.
-					continue
+					// The kill is synchronous on a backend that reads fresh,
+					// so once a bounded fresh read proves the runtime name
+					// absent there is nothing left to wait for: fall through
+					// to the wake decision and start the replacement this
+					// same pass, exactly as the already-dead branch below
+					// does. A name that is not proven released — still listed
+					// (a corpse, an async-teardown backend), a failed read,
+					// or a backend that cannot read fresh — must NOT start
+					// here: the start would find the name present, take the
+					// ErrSessionExists adoption branch and silently drop the
+					// reset. That row yields to the next pass.
+					if confirmRuntimeReleased(ctx, sp, tp.Hints.ProcessNames, name, releasedSince) {
+						running, alive = false, false
+					} else {
+						continue
+					}
 				}
-				// Runtime was already dead — no kill happened, no alias
-				// release to wait on. Fall through so the wake decision
-				// can pick up the freshly cleared metadata and emit a
-				// start_candidate on this same tick. See #2345.
+				// Fall through so the wake decision can pick up the freshly
+				// cleared metadata and emit a start_candidate on this same
+				// tick: either the runtime was already dead (no kill
+				// happened, no alias release to wait on; #2345), or the kill
+				// was just confirmed released above.
 			}
 		}
 

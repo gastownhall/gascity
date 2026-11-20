@@ -30,6 +30,9 @@ type restartRequestTestEnv struct {
 	startOptions []startExecutionOption
 	city         string             // the reconcile helpers' city path; only a test of the no-city refusal sets ""
 	stops        *asyncStartTracker // the drain-ack's async stops the reconcile helpers queue
+	// provider, when set, is the provider the reconcile helpers pass instead
+	// of sp (useFreshReads); nil keeps sp.
+	provider runtime.Provider
 }
 
 func newRestartRequestTestEnv(t testing.TB) *restartRequestTestEnv {
@@ -103,8 +106,20 @@ func (e *restartRequestTestEnv) reconcileWithDrainOps(sessions []beads.Bead, dop
 	e.reconcileWithPoolDesiredAndDrainOps(sessions, poolDesired, dops)
 }
 
+// useFreshReads routes the reconcile helpers through a tmux-profiled view of
+// the fake, whose liveness reads are fresh and error-bearing as production
+// tmux's are; every call still lands on e.sp, so SnapshotCalls, IsRunning and
+// the scripted-error maps keep working unchanged.
+func (e *restartRequestTestEnv) useFreshReads() {
+	e.provider = runtime.NewFakeProfile(runtime.ProfileTmux, runtime.FullFake{Fake: e.sp})
+}
+
 func (e *restartRequestTestEnv) reconcileWithPoolDesiredAndDrainOps(sessions []beads.Bead, poolDesired map[string]int, dops drainOps) {
 	cfgNames := configuredSessionNames(e.cfg, "", e.store)
+	sp := runtime.Provider(e.sp)
+	if e.provider != nil {
+		sp = e.provider
+	}
 	_ = reconcileSessionBeadsAtPath(
 		context.Background(),
 		e.city,
@@ -112,7 +127,7 @@ func (e *restartRequestTestEnv) reconcileWithPoolDesiredAndDrainOps(sessions []b
 		e.desiredState,
 		cfgNames,
 		e.cfg,
-		e.sp,
+		sp,
 		e.store,
 		dops,
 		nil,
@@ -1017,4 +1032,147 @@ func TestReconcileSessionBeads_RestartRequestSetsAsleepOnlyWhenLiveRuntimeKilled
 			t.Fatal("last_woke_at empty, want same-tick wake commit")
 		}
 	})
+}
+
+// TestReconcileSessionBeads_RestartRequestLiveKillRestartsSamePass is
+// gastownhall/gascity#7691: a running, pinned, always-mode named session with
+// an explicit controller reset (restart_requested + continuation_reset_pending,
+// as `gc runtime request-restart` writes) is killed by the reconciler, and on
+// a provider whose fresh read proves the runtime name released the replacement
+// must start on that SAME pass — the kill may not wait for a later pass whose
+// timing nothing bounds. Before the fix the restart-requested block always
+// yielded the row after the kill, so the start could only come from the next
+// full pass.
+func TestReconcileSessionBeads_RestartRequestLiveKillRestartsSamePass(t *testing.T) {
+	env := newRestartRequestTestEnv(t)
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "always"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "true",
+		SessionName:  sessionName,
+		TemplateName: "worker",
+		ResolvedProvider: &config.ResolvedProvider{
+			SessionIDFlag: "--session-id",
+		},
+	}
+
+	session := env.createSessionBead(sessionName)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "always",
+		"state":                      "active",
+		"pin_awake":                  "true",
+		"restart_requested":          "true",
+		"continuation_reset_pending": "true",
+		"session_key":                "original-key",
+		"started_config_hash":        "hash-before-restart",
+	})
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	if err := env.sp.SetMeta(sessionName, "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	env.useFreshReads()
+
+	env.reconcile([]beads.Bead{session})
+
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("pinned always-mode session %q is not running after the pass that killed it; its restart waits for a later reconcile pass (state=%q last_woke_at=%q)", sessionName, restartRequestBead(t, env, session.ID).Metadata["state"], restartRequestBead(t, env, session.ID).Metadata["last_woke_at"])
+	}
+	stopAt, startAt := -1, -1
+	for i, call := range env.sp.SnapshotCalls() {
+		switch {
+		case call.Method == "Stop" && call.Name == sessionName && stopAt == -1:
+			stopAt = i
+		case call.Method == "Start" && call.Name == sessionName:
+			startAt = i
+		}
+	}
+	if stopAt == -1 {
+		t.Fatalf("no Stop recorded for %q; the explicit reset must kill the live runtime this pass", sessionName)
+	}
+	if startAt == -1 {
+		t.Fatalf("no Start recorded for %q after the kill (Stop at call %d); the replacement must start on the same pass", sessionName, stopAt)
+	}
+	if startAt < stopAt {
+		t.Fatalf("Start (call %d) precedes the Stop (call %d) for %q; the pass must record the kill before the replacement start", startAt, stopAt, sessionName)
+	}
+}
+
+// TestReconcileSessionBeads_RestartRequestFreshReadsKeepOnDemandNextPassWake
+// pins the #2345 fold exclusion against the same-pass fall-through: under
+// fresh reads an on_demand named session with no demand and no pin still does
+// NOT start on the pass that killed it (reset_committed_at is deliberately
+// kept off the tick fold), and wakes on the next pass.
+func TestReconcileSessionBeads_RestartRequestFreshReadsKeepOnDemandNextPassWake(t *testing.T) {
+	env := newRestartRequestTestEnv(t)
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "true", MaxActiveSessions: restartRequestTestIntPtr(1)}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.desiredState[sessionName] = TemplateParams{
+		Command:      "true",
+		SessionName:  sessionName,
+		TemplateName: "worker",
+		ResolvedProvider: &config.ResolvedProvider{
+			SessionIDFlag: "--session-id",
+		},
+	}
+
+	session := env.createSessionBead(sessionName)
+	env.setSessionMetadata(&session, map[string]string{
+		namedSessionMetadataKey:      "true",
+		namedSessionIdentityMetadata: "worker",
+		namedSessionModeMetadata:     "on_demand",
+		"state":                      "active",
+		"restart_requested":          "true",
+		"continuation_reset_pending": "true",
+		"session_key":                "original-key",
+		"started_config_hash":        "hash-before-restart",
+	})
+	if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("start session: %v", err)
+	}
+	if err := env.sp.SetMeta(sessionName, "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+	env.useFreshReads()
+
+	env.reconcile([]beads.Bead{session})
+
+	if env.sp.IsRunning(sessionName) {
+		t.Fatalf("on_demand session %q with no demand started on the pass that killed it; the reset_committed_at fold exclusion (#2345) must keep its wake on the next pass", sessionName)
+	}
+	first := restartRequestBead(t, env, session.ID)
+	if first.Metadata["state"] != "asleep" {
+		t.Fatalf("state = %q after the killing pass, want asleep", first.Metadata["state"])
+	}
+
+	env.reconcile([]beads.Bead{first})
+
+	if !env.sp.IsRunning(sessionName) {
+		t.Fatalf("session %q did not wake on the next pass after the restart-requested kill", sessionName)
+	}
+	woke := restartRequestBead(t, env, session.ID)
+	if woke.Metadata["last_woke_at"] == "" {
+		t.Fatal("last_woke_at empty after the next-pass wake, want a timestamp from the wake commit")
+	}
+}
+
+// restartRequestBead reads the session bead back from the env's store.
+func restartRequestBead(t testing.TB, env *restartRequestTestEnv, id string) beads.Bead {
+	t.Helper()
+	got, err := env.store.Get(id)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", id, err)
+	}
+	return got
 }
