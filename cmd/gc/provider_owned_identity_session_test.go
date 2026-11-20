@@ -3,15 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
-	"net"
 	"os"
-	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
-	"github.com/gastownhall/gascity/internal/beads/proxyendpoint"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -24,38 +20,22 @@ func TestReconcileProviderOwnedScopeIdentityProxiedUsesOnePrivateSession(t *test
 	clearInheritedBeadsEnv(t)
 	clearProviderOwnedProxyEnv(t)
 	scope := t.TempDir()
-	beadsDir := filepath.Join(scope, ".beads")
-	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	metadata := []byte(proxiedIdentityMetadata(providerOwnedIdentityP))
-	if err := os.WriteFile(scopeMetadataJSONPath(scope), metadata, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeReadyTopologyScope(t, scope, readyTopologyScope{
+		beadsConfig: bdTemplateBeadsConfig,
+		metadata:    proxiedIdentityMetadata(providerOwnedIdentityP),
+	})
+	metadata := mustReadFile(t, scopeMetadataJSONPath(scope))
 
-	listener, err := net.Listen("tcp", net.JoinHostPort(proxyendpoint.Host, "0"))
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	var accepted atomic.Int64
-	go func() {
-		for {
-			conn, acceptErr := listener.Accept()
-			if acceptErr != nil {
-				return
-			}
-			accepted.Add(1)
-			_ = conn.Close()
-		}
-	}()
-	t.Cleanup(func() { _ = listener.Close() })
-	stubLiveProviderOwnedProxyOnPort(t, listener.Addr().(*net.TCPAddr).Port)
+	// The listener binds 127.0.0.1, which is proxyendpoint.Host: the loopback
+	// address the session dials.
+	port, accepts := acceptCountingListener(t)
+	stubLiveProviderOwnedProxyOnPort(t, port)
 
-	err = reconcileProviderOwnedScopeIdentity(context.Background(), t.TempDir(), scope)
+	err := reconcileProviderOwnedScopeIdentity(context.Background(), scope, scope)
 	if err == nil || !strings.Contains(err.Error(), "open bd proxy session") {
 		t.Fatalf("reconcile against a proxy that closes at once = %v, want the session-open failure", err)
 	}
-	if got := accepted.Load(); got != 1 {
+	if got := accepts(); got != 1 {
 		t.Fatalf("the reconcile dialed the proxy %d time(s), want exactly 1: the session is private and single-shot, never database/sql's redial ladder", got)
 	}
 	if _, ok, readErr := contract.ReadProjectIdentity(fsys.OSFS{}, scope); readErr != nil || ok {

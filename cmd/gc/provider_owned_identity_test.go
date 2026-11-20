@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -91,15 +92,28 @@ func stubLiveProviderOwnedProxy(t *testing.T) {
 func stubLiveProviderOwnedProxyOnPort(t *testing.T, port int) {
 	t.Helper()
 	root := filepath.Join(t.TempDir(), "proxy-root")
+	t.Setenv(proxyendpoint.RootPathEnv, root)
+	stubProviderOwnedProcessTable(t, publishLiveProxyRecord(t, root, 4242, port))
+}
+
+// liveProxyFixture is a proxy record published under root.
+type liveProxyFixture struct {
+	root   string
+	record proxyendpoint.Record
+}
+
+// publishLiveProxyRecord writes a schema-2 proxy record for pid on port under
+// root, creating root. It is live once a process table vouches for pid
+// (stubProviderOwnedProcessTable).
+func publishLiveProxyRecord(t *testing.T, root string, pid, port int) liveProxyFixture {
+	t.Helper()
 	if err := os.MkdirAll(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv(proxyendpoint.RootPathEnv, root)
 	rootID, err := proxyendpoint.RootID(root)
 	if err != nil {
 		t.Fatalf("identify proxy root: %v", err)
 	}
-	const pid = 4242
 	record := proxyendpoint.Record{
 		PID:         pid,
 		Port:        port,
@@ -117,13 +131,29 @@ func stubLiveProviderOwnedProxyOnPort(t *testing.T, port int) {
 	if err := os.WriteFile(proxyendpoint.PIDPath(root), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	argv := []string{"bd", proxyendpoint.ChildVerb, proxyendpoint.RootFlag, root, proxyendpoint.IdleTimeoutFlag, "0"}
+	return liveProxyFixture{root: root, record: record}
+}
+
+// stubProviderOwnedProcessTable makes the identity step's process table vouch
+// for exactly the given proxies: each pid is alive, runs bd's proxy child for
+// its own root, and carries its record's birth.
+func stubProviderOwnedProcessTable(t *testing.T, proxies ...liveProxyFixture) {
+	t.Helper()
+	byPID := make(map[int]liveProxyFixture, len(proxies))
+	for _, proxy := range proxies {
+		byPID[proxy.record.PID] = proxy
+	}
 	prev := providerOwnedIdentityProcessTable
 	providerOwnedIdentityProcessTable = func() proxyendpoint.ProcessTable {
 		return proxyendpoint.ProcessTable{
-			Alive: func(p int) bool { return p == pid },
-			Argv:  func(int) ([]string, error) { return argv, nil },
-			Birth: func(int) (string, error) { return record.Birth, nil },
+			Alive: func(pid int) bool {
+				_, ok := byPID[pid]
+				return ok
+			},
+			Argv: func(pid int) ([]string, error) {
+				return []string{"bd", proxyendpoint.ChildVerb, proxyendpoint.RootFlag, byPID[pid].root, proxyendpoint.IdleTimeoutFlag, "0"}, nil
+			},
+			Birth: func(pid int) (string, error) { return byPID[pid].record.Birth, nil },
 		}
 	}
 	t.Cleanup(func() { providerOwnedIdentityProcessTable = prev })
@@ -359,120 +389,236 @@ func TestInitAndHookDirProviderOwnedReconcileLayers(t *testing.T) {
 	}
 }
 
-// TestProviderOwnedIdentityProxiedEndpoint: a proxied scope, local or
-// external upstream, reaches L3 through bd's live local proxy on the record's
-// port for the metadata dolt_database; the sidecar's upstream is never the
-// endpoint, and the one session is closed before the reconcile returns.
+// TestProviderOwnedIdentityProxiedEndpoint: a proxied scope with a local
+// upstream reaches L3 through bd's live local proxy on the record's port for
+// the metadata dolt_database, and the one session is closed before the
+// reconcile returns.
 func TestProviderOwnedIdentityProxiedEndpoint(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	clearProviderOwnedProxyEnv(t)
+	city := t.TempDir()
+	writeReadyTopologyScope(t, city, readyTopologyScope{
+		beadsConfig: bdTemplateBeadsConfig,
+		metadata:    proxiedLocalMetadata,
+		sidecar:     residentProxySidecar,
+	})
+	stubLiveProviderOwnedProxy(t)
+	fake := &providerOwnedL3Fake{l3: &projectIdentityL3Double{}}
+	stubProviderOwnedL3(t, fake)
+	writeIdentityFile(t, city, providerOwnedIdentityP)
+
+	if err := reconcileProviderOwnedScopeIdentity(context.Background(), city, city); err != nil {
+		t.Fatalf("reconcileProviderOwnedScopeIdentity: %v", err)
+	}
+
+	if len(fake.opened) != 1 {
+		t.Fatalf("L3 opened %d time(s) for %+v, want exactly one open", len(fake.opened), fake.opened)
+	}
+	opened := fake.opened[0]
+	wantPort := strconv.Itoa(providerOwnedProxyPort)
+	if opened.ProxyPort != providerOwnedProxyPort || opened.Target.Host != proxyendpoint.Host || opened.Target.Port != wantPort || opened.Target.Database != "prov" {
+		t.Fatalf("L3 opened for %+v, want bd's local proxy %s:%s/prov", opened, proxyendpoint.Host, wantPort)
+	}
+	if fake.closed != 1 {
+		t.Fatalf("L3 session closed %d time(s), want 1 before the reconcile returned", fake.closed)
+	}
+	if fake.l3.projectID != providerOwnedIdentityP {
+		t.Fatalf("L3 = %q, want seeded %q", fake.l3.projectID, providerOwnedIdentityP)
+	}
+}
+
+// TestInitAndHookDirProviderOwnedIdentityPinsSharedServerOff: an owned
+// scope's proxy root is resolved under the shared-server opt-out bd runs under
+// for it. With BEADS_DOLT_SHARED_SERVER=1 inherited from an operator's shell,
+// bd still serves the scope from its own root, so the init pass and the ready
+// pass after it both reach the proxy recorded there, and never the live proxy
+// in the shared-server directory.
+func TestInitAndHookDirProviderOwnedIdentityPinsSharedServerOff(t *testing.T) {
+	city := newProviderOwnedIdentityCity(t, proxiedIdentityMetadata(providerOwnedIdentityP), 0)
+	shared := t.TempDir()
+	t.Setenv(proxyendpoint.SharedServerModeEnv, "1")
+	t.Setenv(proxyendpoint.SharedServerDirEnv, shared)
+	scopeProxy := publishLiveProxyRecord(t, filepath.Join(city.dir, ".beads", proxyendpoint.DefaultRootDirName), 4301, 45201)
+	sharedProxy := publishLiveProxyRecord(t, filepath.Join(shared, proxyendpoint.DefaultRootDirName), 4302, 45202)
+	stubProviderOwnedProcessTable(t, scopeProxy, sharedProxy)
+	fake := &providerOwnedL3Fake{l3: &projectIdentityL3Double{projectID: providerOwnedIdentityP}}
+	stubProviderOwnedL3(t, fake)
+
+	for _, pass := range []string{"init", "ready"} {
+		if err := initAndHookDirResolvingDatabase(city.dir, city.dir, "gc", nil); err != nil {
+			t.Fatalf("%s pass under an inherited shared-server mode: %v", pass, err)
+		}
+	}
+
+	if len(fake.opened) != 2 {
+		t.Fatalf("L3 opened %d time(s), want once per pass", len(fake.opened))
+	}
+	for _, opened := range fake.opened {
+		if opened.ProxyPort != scopeProxy.record.Port {
+			t.Fatalf("L3 opened through proxy port %d, want the scope's own proxy on %d (the shared-server proxy is on %d)", opened.ProxyPort, scopeProxy.record.Port, sharedProxy.record.Port)
+		}
+	}
+	if got := city.entry(t).State; got != providerScopeReady {
+		t.Fatalf("journal state = %q, want %q", got, providerScopeReady)
+	}
+	if got, ok := city.identity(t); !ok || got != providerOwnedIdentityP {
+		t.Fatalf("identity file = (%q, %t), want %q", got, ok, providerOwnedIdentityP)
+	}
+}
+
+// TestProviderOwnedIdentityDirectEndpoint: a direct scope served by bd's own
+// live server connects to that server's port, even when legacy managed
+// coordinates are in the environment.
+func TestProviderOwnedIdentityDirectEndpoint(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	clearProviderOwnedProxyEnv(t)
+	city := t.TempDir()
+	writeReadyTopologyScope(t, city, readyTopologyScope{beadsConfig: bdTemplateBeadsConfig, metadata: directLocalMetadata})
+	writeIdentityFile(t, city, providerOwnedIdentityP)
+	fake := &providerOwnedL3Fake{l3: &projectIdentityL3Double{projectID: providerOwnedIdentityP}}
+	stubProviderOwnedL3(t, fake)
+	listener := listenOnRandomPort(t)
+	t.Cleanup(func() { _ = listener.Close() })
+	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+	beadsDir := filepath.Join(city, ".beads")
+	if err := os.WriteFile(filepath.Join(beadsDir, "dolt-server.pid"), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "dolt-server.port"), []byte(port+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_DOLT_HOST", "127.0.0.1")
+	t.Setenv("GC_DOLT_PORT", "1")
+
+	if err := reconcileProviderOwnedScopeIdentity(context.Background(), city, city); err != nil {
+		t.Fatalf("reconcileProviderOwnedScopeIdentity: %v", err)
+	}
+
+	if len(fake.opened) != 1 {
+		t.Fatalf("L3 opened %d time(s), want 1", len(fake.opened))
+	}
+	opened := fake.opened[0]
+	if opened.ProxyPort != 0 {
+		t.Fatalf("direct scope opened through a proxy port %d", opened.ProxyPort)
+	}
+	if target := opened.Target; target.Host != "127.0.0.1" || target.Port != port || target.Socket != "" || target.Database != "prov" || target.External {
+		t.Fatalf("target = %+v, want bd's own server 127.0.0.1:%s/prov", target, port)
+	}
+}
+
+// acceptCountingListener is a loopback endpoint gc cannot authenticate to: it
+// closes every connection it accepts at once. accepts reports how many dials
+// reached it.
+func acceptCountingListener(t *testing.T) (port int, accepts func() int64) {
+	t.Helper()
+	listener := listenOnRandomPort(t)
+	var accepted atomic.Int64
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			accepted.Add(1)
+			_ = conn.Close()
+		}
+	}()
+	t.Cleanup(func() { _ = listener.Close() })
+	return listener.Addr().(*net.TCPAddr).Port, accepted.Load
+}
+
+// TestReconcileProviderOwnedScopeIdentityDefersExternalEndpoints: an external
+// endpoint (a direct external binding, or the external upstream behind a
+// proxied scope) is never opened in-process. With the real L3 opener in
+// place, the reconcile succeeds, nothing dials the endpoint, and no layer is
+// written. gc cannot authenticate to it the way bd does (credential command,
+// TLS, a per-scope password), so a pass that opened it would fail every start.
+func TestReconcileProviderOwnedScopeIdentityDefersExternalEndpoints(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		sidecar string
+		name  string
+		shape func(port int) readyTopologyScope
 	}{
-		{name: "local upstream", sidecar: residentProxySidecar},
-		{name: "external upstream", sidecar: externalProxySidecar},
+		{
+			name: "direct external host:port binding",
+			shape: func(port int) readyTopologyScope {
+				return readyTopologyScope{
+					beadsConfig: bdTemplateBeadsConfig,
+					metadata:    fmt.Sprintf(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_server_host":"127.0.0.1","dolt_server_port":%d,"dolt_database":"hosted"}`, port),
+				}
+			},
+		},
+		{
+			// Nothing listens on the socket: a dial would fail the reconcile.
+			name: "direct external socket binding",
+			shape: func(int) readyTopologyScope {
+				return readyTopologyScope{
+					beadsConfig: bdTemplateBeadsConfig,
+					metadata:    `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_server_socket":"/nonexistent/provider-owned-identity.sock","dolt_database":"hosted"}`,
+				}
+			},
+		},
+		{
+			name: "proxied scope with an external upstream",
+			shape: func(port int) readyTopologyScope {
+				return readyTopologyScope{
+					beadsConfig: bdTemplateBeadsConfig,
+					metadata:    proxiedLocalMetadata,
+					sidecar:     fmt.Sprintf(`{"idle_timeout":-1,"external":{"host":"127.0.0.1","port":%d}}`, port),
+				}
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			clearInheritedBeadsEnv(t)
 			clearProviderOwnedProxyEnv(t)
+			port, accepts := acceptCountingListener(t)
 			city := t.TempDir()
-			writeReadyTopologyScope(t, city, readyTopologyScope{
-				beadsConfig: bdTemplateBeadsConfig,
-				metadata:    proxiedLocalMetadata,
-				sidecar:     tc.sidecar,
-			})
-			stubLiveProviderOwnedProxy(t)
-			fake := &providerOwnedL3Fake{l3: &projectIdentityL3Double{}}
-			stubProviderOwnedL3(t, fake)
-			writeIdentityFile(t, city, providerOwnedIdentityP)
+			writeReadyTopologyScope(t, city, tc.shape(port))
+			metadataBefore := mustReadFile(t, scopeMetadataJSONPath(city))
 
 			if err := reconcileProviderOwnedScopeIdentity(context.Background(), city, city); err != nil {
-				t.Fatalf("reconcileProviderOwnedScopeIdentity: %v", err)
+				t.Fatalf("reconcileProviderOwnedScopeIdentity: %v, want the external endpoint deferred", err)
 			}
-
-			want := providerOwnedIdentityEndpoint{ProxyPort: providerOwnedProxyPort, Database: "prov"}
-			if len(fake.opened) != 1 || fake.opened[0] != want {
-				t.Fatalf("L3 opened for %+v, want exactly one open for %+v", fake.opened, want)
+			if got := accepts(); got != 0 {
+				t.Fatalf("the reconcile dialed the external endpoint %d time(s), want 0", got)
 			}
-			if fake.closed != 1 {
-				t.Fatalf("L3 session closed %d time(s), want 1 before the reconcile returned", fake.closed)
+			if _, ok := (providerOwnedIdentityCity{dir: city}).identity(t); ok {
+				t.Fatal("a deferred scope got an identity file")
 			}
-			if fake.l3.projectID != providerOwnedIdentityP {
-				t.Fatalf("L3 = %q, want seeded %q", fake.l3.projectID, providerOwnedIdentityP)
+			if got := mustReadFile(t, scopeMetadataJSONPath(city)); string(got) != string(metadataBefore) {
+				t.Fatalf("metadata.json = %q, want unchanged %q", got, metadataBefore)
 			}
 		})
 	}
 }
 
-// TestProviderOwnedIdentityDirectEndpoint: a direct scope connects to the
-// target the connection contract resolves: bd's own live server port, even
-// when legacy managed coordinates are in the environment, and the socket or
-// host:port bd persisted for an external binding.
-func TestProviderOwnedIdentityDirectEndpoint(t *testing.T) {
-	directScope := func(t *testing.T, metadata string) (string, *providerOwnedL3Fake) {
-		t.Helper()
-		clearInheritedBeadsEnv(t)
-		clearProviderOwnedProxyEnv(t)
-		city := t.TempDir()
-		writeReadyTopologyScope(t, city, readyTopologyScope{beadsConfig: bdTemplateBeadsConfig, metadata: metadata})
-		writeIdentityFile(t, city, providerOwnedIdentityP)
-		fake := &providerOwnedL3Fake{l3: &projectIdentityL3Double{projectID: providerOwnedIdentityP}}
-		stubProviderOwnedL3(t, fake)
-		return city, fake
+// TestInitAndHookDirProviderOwnedReadyExternalScopeStarts: a ready scope bound
+// to an external server gc cannot authenticate to still passes its lifecycle
+// pass, without dialing that server, and its journal entry is untouched.
+func TestInitAndHookDirProviderOwnedReadyExternalScopeStarts(t *testing.T) {
+	city := newProviderOwnedIdentityCity(t, "", 0)
+	port, accepts := acceptCountingListener(t)
+	writeReadyTopologyScope(t, city.dir, readyTopologyScope{
+		beadsConfig: bdTemplateBeadsConfig,
+		metadata:    fmt.Sprintf(`{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_server_host":"127.0.0.1","dolt_server_port":%d,"dolt_database":"hosted"}`, port),
+	})
+	if err := markProviderScopeOwnershipReady(city.dir, city.dir); err != nil {
+		t.Fatal(err)
 	}
-	reconcileTarget := func(t *testing.T, city string, fake *providerOwnedL3Fake) contract.DoltConnectionTarget {
-		t.Helper()
-		if err := reconcileProviderOwnedScopeIdentity(context.Background(), city, city); err != nil {
-			t.Fatalf("reconcileProviderOwnedScopeIdentity: %v", err)
-		}
-		if len(fake.opened) != 1 {
-			t.Fatalf("L3 opened %d time(s), want 1", len(fake.opened))
-		}
-		opened := fake.opened[0]
-		if opened.ProxyPort != 0 {
-			t.Fatalf("direct scope opened through a proxy port %d", opened.ProxyPort)
-		}
-		if opened.Database != opened.Target.Database {
-			t.Fatalf("opened database %q, target database %q: want the same", opened.Database, opened.Target.Database)
-		}
-		return opened.Target
+	before := city.entry(t)
+
+	if err := initAndHookDirResolvingDatabase(city.dir, city.dir, "gc", nil); err != nil {
+		t.Fatalf("ready pass over an external binding: %v, want the identity step deferred", err)
 	}
-
-	t.Run("bd-owned local server wins over legacy managed coordinates", func(t *testing.T) {
-		city, fake := directScope(t, `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"prov","project_id":"`+providerOwnedIdentityP+`"}`)
-		listener := listenOnRandomPort(t)
-		t.Cleanup(func() { _ = listener.Close() })
-		port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
-		beadsDir := filepath.Join(city, ".beads")
-		if err := os.WriteFile(filepath.Join(beadsDir, "dolt-server.pid"), []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(beadsDir, "dolt-server.port"), []byte(port+"\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv("GC_DOLT_HOST", "127.0.0.1")
-		t.Setenv("GC_DOLT_PORT", "1")
-
-		target := reconcileTarget(t, city, fake)
-		if target.Host != "127.0.0.1" || target.Port != port || target.Socket != "" || target.Database != "prov" {
-			t.Fatalf("target = %+v, want bd's own server 127.0.0.1:%s/prov", target, port)
-		}
-	})
-
-	t.Run("external host:port binding", func(t *testing.T) {
-		city, fake := directScope(t, `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_server_host":"db.example","dolt_server_port":4406,"dolt_database":"hosted","project_id":"`+providerOwnedIdentityP+`"}`)
-		target := reconcileTarget(t, city, fake)
-		if target.Host != "db.example" || target.Port != "4406" || target.Socket != "" || target.Database != "hosted" {
-			t.Fatalf("target = %+v, want bd's persisted external db.example:4406/hosted", target)
-		}
-	})
-
-	t.Run("external socket binding", func(t *testing.T) {
-		city, fake := directScope(t, `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_server_socket":"/run/dolt/provider.sock","dolt_database":"hosted","project_id":"`+providerOwnedIdentityP+`"}`)
-		target := reconcileTarget(t, city, fake)
-		if target.Socket != "/run/dolt/provider.sock" || target.Database != "hosted" {
-			t.Fatalf("target = %+v, want bd's persisted socket /run/dolt/provider.sock for hosted", target)
-		}
-	})
+	if got := city.ops(t); strings.Join(got, " ") != "start health" {
+		t.Fatalf("provider ops = %v, want [start health]", got)
+	}
+	if got := accepts(); got != 0 {
+		t.Fatalf("the pass dialed the external endpoint %d time(s), want 0", got)
+	}
+	if after := city.entry(t); after != before {
+		t.Fatalf("journal entry = %+v, want unchanged %+v", after, before)
+	}
 }
 
 // TestInitAndHookDirProviderOwnedIdentityFailureKeepsInitializing: when
@@ -545,7 +691,7 @@ func TestInitAndHookDirProviderOwnedIdentityFailureKeepsInitializing(t *testing.
 					stubLiveProviderOwnedProxy(t)
 				}
 			},
-			wantCause: "resolve bd proxy root",
+			wantCause: "resolve provider-owned Dolt binding",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

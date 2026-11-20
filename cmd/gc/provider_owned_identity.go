@@ -23,31 +23,13 @@ import (
 const providerOwnedIdentityBudget = 5 * time.Second
 
 // providerOwnedIdentityBinding is the part of bd's persisted binding
-// (.beads/metadata.json) that decides whether and where a provider-owned
-// scope's identity is reconciled. It is read from disk rather than from the
-// ownership journal, whose intent is cleared once the scope is ready.
+// (.beads/metadata.json) that decides whether a provider-owned scope's
+// identity is reconciled. It is read from disk rather than from the ownership
+// journal, whose intent is cleared once the scope is ready.
 type providerOwnedIdentityBinding struct {
 	Backend      string `json:"backend"`
 	DoltMode     string `json:"dolt_mode"`
 	DoltDatabase string `json:"dolt_database"`
-}
-
-// proxied reports whether bd reaches this scope's store through its own
-// local proxy.
-func (b providerOwnedIdentityBinding) proxied() bool {
-	return contract.IsProxiedDoltMode(b.Backend, b.DoltMode)
-}
-
-// providerOwnedIdentityEndpoint is the one SQL endpoint a provider-owned
-// scope's L3 identity is read and seeded through.
-type providerOwnedIdentityEndpoint struct {
-	// ProxyPort is bd's live local proxy port for a proxied scope, and zero
-	// for a direct one.
-	ProxyPort int
-	// Target is the direct endpoint for a server-mode scope.
-	Target contract.DoltConnectionTarget
-	// Database is the scope's metadata dolt_database.
-	Database string
 }
 
 // readProviderOwnedIdentityBinding reads dir's persisted binding and reports
@@ -88,63 +70,32 @@ func readProviderOwnedIdentityBinding(cityPath, dir string) (providerOwnedIdenti
 	return binding, !hosted, nil
 }
 
-// resolveProviderOwnedIdentityEndpoint resolves the endpoint dir's L3
-// identity is reached through. A proxied scope always goes through bd's live
-// local proxy, which authenticates to any upstream itself, so the sidecar's
-// upstream is never dialed. A direct scope takes the target the connection
-// contract resolves: bd's own live server, bd's persisted external binding,
-// or an explicit or city-canonical endpoint.
-func resolveProviderOwnedIdentityEndpoint(cityPath, dir string, binding providerOwnedIdentityBinding, processTable proxyendpoint.ProcessTable) (providerOwnedIdentityEndpoint, error) {
-	if binding.proxied() {
-		root, err := proxyendpoint.ProviderRoot(dir)
-		if err != nil {
-			return providerOwnedIdentityEndpoint{}, fmt.Errorf("resolve bd proxy root for scope %q: %w", dir, err)
-		}
-		endpoint := proxyendpoint.Inspect(root, processTable)
-		if !endpoint.Verdict.Live() {
-			if endpoint.Err != nil {
-				return providerOwnedIdentityEndpoint{}, fmt.Errorf("bd proxy for scope %q at %s is not live (%s): %w", dir, root, endpoint.Verdict, endpoint.Err)
-			}
-			return providerOwnedIdentityEndpoint{}, fmt.Errorf("bd proxy for scope %q at %s is not live (%s)", dir, root, endpoint.Verdict)
-		}
-		return providerOwnedIdentityEndpoint{ProxyPort: endpoint.Record.Port, Database: binding.DoltDatabase}, nil
-	}
-	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, cityPath, dir)
-	if err != nil {
-		return providerOwnedIdentityEndpoint{}, fmt.Errorf("resolve Dolt endpoint for scope %q: %w", dir, err)
-	}
-	if strings.TrimSpace(target.Socket) == "" && strings.TrimSpace(target.Port) == "" {
-		return providerOwnedIdentityEndpoint{}, fmt.Errorf("resolve Dolt endpoint for scope %q: binding names no SQL endpoint", dir)
-	}
-	target.Database = binding.DoltDatabase
-	return providerOwnedIdentityEndpoint{Target: target, Database: binding.DoltDatabase}, nil
-}
-
 // openProviderOwnedScopeL3Fn opens the L3 identity store at a resolved
 // endpoint. Tests replace it to stand in for Dolt.
 var openProviderOwnedScopeL3Fn = openProviderOwnedScopeL3
 
 // openProviderOwnedScopeL3 opens endpoint's L3 identity store and returns it
-// with its close func. A proxied endpoint gets one private session to bd's
-// proxy, closed by the close func. A direct endpoint gets the pooled handle
-// the managed reconciler uses, which internal/doltpool owns.
+// with its close func. bd's local proxy gets one private session, closed by
+// the close func, so a long-lived gc holds nothing that would defer the
+// proxy's idle retirement. Any other endpoint gets the pooled handle the
+// managed reconciler uses, which internal/doltpool owns.
 func openProviderOwnedScopeL3(ctx context.Context, endpoint providerOwnedIdentityEndpoint) (projectIdentityL3Store, func() error, error) {
+	target := endpoint.Target
 	if endpoint.ProxyPort != 0 {
-		conn, closeSession, err := proxyendpoint.OpenSession(ctx, endpoint.ProxyPort, endpoint.Database)
+		conn, closeSession, err := proxyendpoint.OpenSession(ctx, endpoint.ProxyPort, target.Database)
 		if err != nil {
-			return nil, nil, fmt.Errorf("open bd proxy session %s:%d/%s: %w", proxyendpoint.Host, endpoint.ProxyPort, endpoint.Database, err)
+			return nil, nil, fmt.Errorf("open bd proxy session %s:%d/%s: %w", proxyendpoint.Host, endpoint.ProxyPort, target.Database, err)
 		}
 		return sqlProjectIdentityL3{db: conn}, closeSession, nil
 	}
-	target := endpoint.Target
 	var (
 		db  *sql.DB
 		err error
 	)
 	if strings.TrimSpace(target.Socket) != "" {
-		db, err = managedDoltOpenDatabaseSocket(target.Socket, target.User, endpoint.Database)
+		db, err = managedDoltOpenDatabaseSocket(target.Socket, target.User, target.Database)
 	} else {
-		db, err = managedDoltOpenDatabase(target.Host, target.Port, target.User, endpoint.Database)
+		db, err = managedDoltOpenDatabase(target.Host, target.Port, target.User, target.Database)
 	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("open Dolt endpoint %s: %w", describeDoltConnectionTarget(target), err)
@@ -175,18 +126,30 @@ var providerOwnedIdentityProcessTable = proxyendpoint.DefaultProcessTable
 var reconcileProviderOwnedScopeIdentityFn = reconcileProviderOwnedScopeIdentity
 
 // reconcileProviderOwnedScopeIdentity reconciles a provider-owned scope's
-// three project-identity layers (L1 .beads/identity.toml, L2 metadata
-// project_id, L3 Dolt _project_id) through the endpoint its persisted binding
-// resolves to, under providerOwnedIdentityBudget. An ineligible scope is left
+// three project-identity layers (L1 the canonical identity file, L2 metadata
+// project_id, L3 Dolt _project_id) under providerOwnedIdentityBudget, through
+// the endpoint resolveProviderOwnedIdentityEndpoint resolves: the one the
+// provider's init op reconciles through as well. An ineligible scope is left
 // alone. Layers already written stay written when a later step fails.
+//
+// An external endpoint is deferred rather than reconciled: a direct external
+// binding, or the external upstream behind a proxied scope. gc would open it
+// in-process with only GC_DOLT_PASSWORD and no TLS, while bd authenticates to
+// it through the scope's own chain: .beads/.env, the credentials file, a
+// credential command, TLS. The identity preflight defers external endpoints for
+// the same reason (preflightIdentityDeferredReader). gc-beads-bd's init op
+// reconciles them once, with the endpoint and credentials it was handed.
 func reconcileProviderOwnedScopeIdentity(ctx context.Context, cityPath, dir string) error {
 	binding, eligible, err := readProviderOwnedIdentityBinding(cityPath, dir)
 	if err != nil || !eligible {
 		return err
 	}
-	endpoint, err := resolveProviderOwnedIdentityEndpoint(cityPath, dir, binding, providerOwnedIdentityProcessTable())
+	endpoint, err := resolveProviderOwnedIdentityEndpoint(scopeMetadataJSONPath(dir), cityPath, binding.DoltDatabase, "", providerOwnedIdentityProcessTable())
 	if err != nil {
 		return err
+	}
+	if endpoint.Target.External {
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, providerOwnedIdentityBudget)
 	defer cancel()

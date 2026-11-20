@@ -234,47 +234,98 @@ func resolveProviderOwnedProjectIdentityTarget(metadataPath, cityPath, database,
 }
 
 func resolveProviderOwnedProjectIdentityTargetWithProcessTable(metadataPath, cityPath, database, user string, processTable proxyendpoint.ProcessTable) (contract.DoltConnectionTarget, error) {
-	scopeRoot, err := scopeRootFromMetadataPath(metadataPath)
+	endpoint, err := resolveProviderOwnedIdentityEndpoint(metadataPath, cityPath, database, user, processTable)
 	if err != nil {
 		return contract.DoltConnectionTarget{}, err
 	}
+	return endpoint.Target, nil
+}
+
+// providerOwnedIdentityEndpoint is the SQL endpoint a provider-owned scope's
+// L3 identity is read and seeded through.
+type providerOwnedIdentityEndpoint struct {
+	// Target is the endpoint, naming the scope's database and user.
+	Target contract.DoltConnectionTarget
+	// ProxyPort is the live record's data port when Target is bd's local proxy
+	// for the scope, and zero when Target is the scope's persisted binding.
+	ProxyPort int
+}
+
+// resolveProviderOwnedIdentityEndpoint is the one resolver of a provider-owned
+// scope's identity endpoint. `gc dolt-state ensure-project-id` uses it when the
+// provider's init op omits --port, and gc's own reconcile on every lifecycle
+// pass (reconcileProviderOwnedScopeIdentity) uses it too, so both reach the
+// same endpoint. It is the target the connection contract resolves from bd's
+// persisted binding (bd's own live server, bd's external binding, or the
+// external upstream a proxied scope's sidecar records), except that a proxied
+// scope with a local upstream is reached through bd's live local proxy.
+func resolveProviderOwnedIdentityEndpoint(metadataPath, cityPath, database, user string, processTable proxyendpoint.ProcessTable) (providerOwnedIdentityEndpoint, error) {
+	scopeRoot, err := scopeRootFromMetadataPath(metadataPath)
+	if err != nil {
+		return providerOwnedIdentityEndpoint{}, err
+	}
 	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, cityPath, scopeRoot)
 	if err != nil {
-		return contract.DoltConnectionTarget{}, fmt.Errorf("resolve provider-owned Dolt binding: %w", err)
+		return providerOwnedIdentityEndpoint{}, fmt.Errorf("resolve provider-owned Dolt binding: %w", err)
 	}
+	proxyPort := 0
 	if strings.EqualFold(strings.TrimSpace(target.DoltMode), "proxied-server") && target.Socket == "" && target.Port == "" {
-		target, err = resolveLocalProxiedProjectIdentityTarget(scopeRoot, target, processTable)
+		target, proxyPort, err = resolveLocalProxiedProjectIdentityTarget(cityPath, scopeRoot, target, processTable)
 		if err != nil {
-			return contract.DoltConnectionTarget{}, err
+			return providerOwnedIdentityEndpoint{}, err
 		}
 	}
 	if target.Socket == "" && target.Port == "" {
-		return contract.DoltConnectionTarget{}, fmt.Errorf("provider-owned Dolt binding for %s has no SQL endpoint", scopeRoot)
+		return providerOwnedIdentityEndpoint{}, fmt.Errorf("provider-owned Dolt binding for %s has no SQL endpoint", scopeRoot)
 	}
 	target.Database = strings.TrimSpace(database)
 	if strings.TrimSpace(user) != "" {
 		target.User = strings.TrimSpace(user)
 	}
-	return target, nil
+	return providerOwnedIdentityEndpoint{Target: target, ProxyPort: proxyPort}, nil
 }
 
-func resolveLocalProxiedProjectIdentityTarget(scopeRoot string, target contract.DoltConnectionTarget, processTable proxyendpoint.ProcessTable) (contract.DoltConnectionTarget, error) {
-	root, err := proxyendpoint.ProviderRoot(scopeRoot)
+// resolveLocalProxiedProjectIdentityTarget points target at bd's live local
+// proxy for scopeRoot and returns that proxy's data port. A proxy whose record
+// is absent or does not verify as live is an error, never a fallback.
+func resolveLocalProxiedProjectIdentityTarget(cityPath, scopeRoot string, target contract.DoltConnectionTarget, processTable proxyendpoint.ProcessTable) (contract.DoltConnectionTarget, int, error) {
+	root, err := providerOwnedScopeProxyRoot(cityPath, scopeRoot)
 	if err != nil {
-		return contract.DoltConnectionTarget{}, fmt.Errorf("resolve provider-owned proxy root for %s: %w", scopeRoot, err)
+		return contract.DoltConnectionTarget{}, 0, fmt.Errorf("resolve provider-owned proxy root for %s: %w", scopeRoot, err)
 	}
 	endpoint := proxyendpoint.Inspect(root, processTable)
 	if !endpoint.Verdict.Live() {
 		if endpoint.Err == nil {
-			return contract.DoltConnectionTarget{}, fmt.Errorf("provider-owned proxy endpoint %s is not live (%s)", root, endpoint.Verdict)
+			return contract.DoltConnectionTarget{}, 0, fmt.Errorf("provider-owned proxy endpoint %s is not live (%s)", root, endpoint.Verdict)
 		}
-		return contract.DoltConnectionTarget{}, fmt.Errorf("provider-owned proxy endpoint %s is not live (%s): %w", root, endpoint.Verdict, endpoint.Err)
+		return contract.DoltConnectionTarget{}, 0, fmt.Errorf("provider-owned proxy endpoint %s is not live (%s): %w", root, endpoint.Verdict, endpoint.Err)
 	}
 	target.Host = proxyendpoint.Host
 	target.Port = strconv.Itoa(endpoint.Record.Port)
 	target.Socket = ""
 	target.External = false
-	return target, nil
+	return target, endpoint.Record.Port, nil
+}
+
+// providerOwnedScopeProxyRoot resolves the root bd serves scopeRoot's proxy
+// from, in the environment bd runs under for that scope: this process's, plus
+// the shared-server opt-out every bd gc spawns for a scope it owns carries
+// (applyGCOwnedScopeSharedServerOptOut). An operator's shell that exports
+// BEADS_DOLT_SHARED_SERVER=1 hands it to gc as well as to bd, and bd is pinned
+// off for an owned scope, so the root is resolved pinned off too, without
+// changing this process's environment. A scope gc does not own keeps the
+// inherited mode, as its bd does.
+func providerOwnedScopeProxyRoot(cityPath, scopeRoot string) (string, error) {
+	pinned := map[string]string{}
+	if err := applyGCOwnedScopeSharedServerOptOut(pinned, cityPath, scopeRoot); err != nil {
+		return "", err
+	}
+	return proxyendpoint.ProviderRootWithEnv(scopeRoot, func(key string) string {
+		if value, ok := pinned[key]; ok {
+			return value
+		}
+		return os.Getenv(key)
+	})
 }
 
 func managedDoltProjectIDFields(report managedDoltProjectIDReport) []string {
