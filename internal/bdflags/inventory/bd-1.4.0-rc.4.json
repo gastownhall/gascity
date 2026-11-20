@@ -1,8 +1,8 @@
 {
- "version": "1.4.0-rc.3",
+ "version": "1.4.0-rc.4",
  "build": "dev",
  "provenance": {
-  "commit": "d42ff8dc678c050f9b1ffcd9adfe0b037d497e0d",
+  "commit": "7c0e969e269d08e19781f4af87c6a52a78615622",
   "build_tags": "gms_pure_go",
   "go_version": "go1.27.4",
   "cobra_version": "v1.10.2",

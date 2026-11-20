@@ -58,7 +58,7 @@ func TestReadDecodesEveryFieldBdWrites(t *testing.T) {
 
 // TestReadDecodesTheDataPortProtocolMarker reads proxy.pid in bd's own
 // spelling: the documents below have the fields, in order, of a record beads
-// v1.4.0-rc.3 wrote for a live proxy (the values are placeholders), and the
+// v1.4.0-rc.4 wrote for a live proxy (the values are placeholders), and the
 // same document as a bd from before the control_proto marker writes it.
 // Marshaling a Record and reading it back, as TestReadDecodesEveryFieldBdWrites
 // does, would agree with any tag spelling.

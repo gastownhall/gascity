@@ -357,7 +357,7 @@ gc bd backup init <backup_url>
 gc bd list --status in_progress --json | jq '.[] | {id, title, status}'
 ```
 
-- `--recreate-missing` is how the pinned bd release (v1.4.0-rc.3) re-creates the database
+- `--recreate-missing` is how the pinned bd release (v1.4.0-rc.4) re-creates the database
   of a scope that is already initialized once that database is gone; a plain `gc bd init`
   refuses, and so does `--reinit-local`, which on this release re-initializes local
   `.beads/` data only and does not authorize recreating a missing server-mode database.

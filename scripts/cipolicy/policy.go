@@ -382,7 +382,7 @@ const (
 	// (the first patched Dolt release for the eMudhra CA distrust):
 	// the workflow DOLT_VERSION env value only. Then Beads v1.3.2 -> v1.3.3:
 	// the workflow BD_VERSION env value only. Then Beads v1.3.3 -> v1.3.4:
-	// the workflow BD_VERSION env value only. Then Beads v1.3.4 -> v1.4.0-rc.3
+	// the workflow BD_VERSION env value only. Then Beads v1.3.4 -> v1.4.0-rc.4
 	// (RC test branch): the workflow BD_VERSION env value only. Then (ga-hd99jq D5) one new
 	// job, nightly-summary: ubuntu-latest, timeout-minutes 5, `if: always()`,
 	// needs every other Nightly job, one python3 step fed by a dedicated
@@ -394,7 +394,7 @@ const (
 	// GC_ACCEPTANCE_SPLIT_RC1_BD_BIN through GITHUB_ENV for the split-storage
 	// upgrade scenario's v1.5.0-rc1 half; no new job, trigger, permission or
 	// secret.
-	expectedNightlyExecutionHash = "cdcdd17b1d705aba1b3b9c84d46a42e0678fd8cb52a81a363bf71cb3b7732c35"
+	expectedNightlyExecutionHash = "ef2f2a998c18b461be04aa562da107f957beb66aec8582ad825602fd77b5f30d"
 	// Setup action: reviewed delta (Go module fetch resilience) is setup-go
 	// `cache: false` and one step right after it,
 	// `uses: ./.github/actions/go-mod-download`. Then the claude-version

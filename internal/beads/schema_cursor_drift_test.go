@@ -150,7 +150,7 @@ func TestIgnoredSentinelsMatchPinnedBeads(t *testing.T) {
 }
 
 // pinnedCursorRealityFloorDigest is cursorRealityFloorDigest at the pinned
-// beads (v1.4.0-rc.3, internal/storage/schema/schema.go: readCursor clamps the
+// beads (v1.4.0-rc.4, internal/storage/schema/schema.go: readCursor clamps the
 // read cursor to cursorReality's floor when it is limited and lower, and
 // collects the absent floored tables that carry a lossNotice for migrate's
 // warning; cursorRealityFloor wraps cursorReality; cursorReality floors at 0
