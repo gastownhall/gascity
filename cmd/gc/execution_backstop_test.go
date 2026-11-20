@@ -1346,7 +1346,8 @@ func TestExecutionBackstopNudgesAStartedSeatWhoseTurnDied(t *testing.T) {
 		want  string
 	}{
 		{name: "no nudge configured", want: defaultHeldClaimNudge},
-		{name: "a configured nudge", nudge: "gc hook --claim --json", want: "gc hook --claim --json"},
+		// A configured nudge is the agent's startup text; the started rung always names the claim (gascity#9196).
+		{name: "a configured nudge", nudge: "gc hook --claim --json", want: defaultHeldClaimNudge},
 		// A configured nudge that would ack the drain is replaced by the
 		// default: the started rung never carries --drain-ack.
 		{name: "a configured --drain-ack nudge", nudge: "gc hook --claim --drain-ack --json", want: defaultHeldClaimNudge},

@@ -929,30 +929,25 @@ func claimNudgeFor(cfg *config.City, session beads.Bead) string {
 	return nudge
 }
 
+// stalledPoolClaimNudgeFor is the claim line a stalled pool seat is nudged with:
+// always the built-in claim line, and "" when its template names no configured
+// agent. A configured nudge is the agent's startup/wake text, not a claim
+// instruction; sent as the claim, a work procedure never claims (gascity#9196).
 func stalledPoolClaimNudgeFor(cfg *config.City, session beads.Bead) string {
-	nudge, known := configuredClaimNudgeFor(cfg, session)
-	if !known {
+	if _, known := configuredClaimNudgeFor(cfg, session); !known {
 		return ""
 	}
-	if nudge == "" {
-		return defaultPoolClaimNudge
-	}
-	return nudge
+	return defaultPoolClaimNudge
 }
 
 // heldClaimNudgeFor is stalledPoolClaimNudgeFor for a seat whose claim beadID
-// has started: its configured nudge, else defaultHeldClaimNudge naming the
-// claim, and "" when its template names no configured agent. A configured
-// nudge that carries --drain-ack is not sent to a started seat either: the
-// default stands in for it, since an ack on the nudge's no-work answer is how
-// started work was lost (mc-ilr3b), and the hook's fence holds only a claim
-// whose start was recorded.
+// has started: defaultHeldClaimNudge naming the claim, and "" when its template
+// names no configured agent (gascity#9196).
 func heldClaimNudgeFor(cfg *config.City, session beads.Bead, beadID string) string {
-	nudge, known := configuredClaimNudgeFor(cfg, session)
-	if known && (nudge == "" || strings.Contains(nudge, "--drain-ack")) {
-		return fmt.Sprintf(defaultHeldClaimNudge, strings.TrimSpace(beadID))
+	if _, known := configuredClaimNudgeFor(cfg, session); !known {
+		return ""
 	}
-	return nudge
+	return fmt.Sprintf(defaultHeldClaimNudge, strings.TrimSpace(beadID))
 }
 
 func configuredClaimNudgeFor(cfg *config.City, session beads.Bead) (string, bool) {

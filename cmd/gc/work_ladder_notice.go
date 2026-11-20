@@ -548,7 +548,7 @@ func (p *ladderPass) withdrawDropped(row beads.Bead, ops []string) {
 // by id and settles its real fate, or, if it never landed, settles it never
 // proposed.
 func (p *ladderPass) proposeNotice(row beads.Bead, n workladder.Nudge, e workladder.Entry, gen int64, m workladder.NoticeMark, route *ladderRoute) {
-	notice := ladderNotice(n.Key, e, p.nudgeText(row, n))
+	notice := ladderNotice(n.Key, e, p.nudgeText(n))
 	out, op, err := proposePlannerNotice(route.lane, row, notice)
 	fields := workLadderEventFields{Kind: n.Kind.String(), Rung: n.Rung.String(), Attempt: n.Attempt, Paused: n.Paused}
 	tally := ladderProposeTallyKey(row.ID)

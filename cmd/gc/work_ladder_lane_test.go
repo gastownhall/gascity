@@ -773,8 +773,8 @@ func TestWorkLadderRecyclesAnUnclaimedTrigger(t *testing.T) {
 		t.Fatalf("nudges %v, posted %+v; want three, then a recycle with the fourth", c.nudgedAt, c.posted)
 	}
 	for _, call := range c.sp.Calls {
-		if call.Method == "Nudge" && call.Message != "configured claim nudge" {
-			t.Fatalf("trigger nudge %q, want the configured one", call.Message)
+		if call.Method == "Nudge" && call.Message != defaultPoolClaimNudge {
+			t.Fatalf("trigger nudge %q, want the built-in claim line (gascity#9196)", call.Message)
 		}
 	}
 	// The never-claimed trigger is escalated once, with the second nudge
@@ -2141,8 +2141,8 @@ func TestWorkLadderNudgesACollapsedSingletonSeat(t *testing.T) {
 		t.Fatalf("Nudge calls on collapsed seat %q = 0, want the ladder to nudge its unclaimed trigger", name)
 	}
 	for _, call := range sp.Calls {
-		if call.Method == "Nudge" && call.Message != "configured claim nudge" {
-			t.Fatalf("nudge %q, want the configured claim nudge", call.Message)
+		if call.Method == "Nudge" && call.Message != defaultPoolClaimNudge {
+			t.Fatalf("nudge %q, want the built-in claim line (gascity#9196)", call.Message)
 		}
 	}
 }

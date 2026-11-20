@@ -131,12 +131,14 @@ func TestNudgeStalledPoolClaims_UsesClaimFallbackWhenNudgeIsBlank(t *testing.T) 
 	}
 }
 
-func TestPoolClaimBackstopContent_PreservesExplicitNudge(t *testing.T) {
+// The configured nudge is the agent's startup text, not the claim: the backstop
+// always sends the built-in claim line (gascity#9196).
+func TestPoolClaimBackstopContent_IgnoresConfiguredNudge(t *testing.T) {
 	cfg := idleClaimTestCfg()
 	cfg.Agents[0].Nudge = "  Use the configured wake text exactly.  "
 
-	if got, want := (poolClaimBackstop{cfg: cfg}).content(idleClaimPoolSession()), "Use the configured wake text exactly."; got != want {
-		t.Fatalf("claim nudge = %q, want normalized configured value %q", got, want)
+	if got, want := (poolClaimBackstop{cfg: cfg}).content(idleClaimPoolSession()), defaultPoolClaimNudge; got != want {
+		t.Fatalf("claim nudge = %q, want the built-in claim line %q", got, want)
 	}
 }
 

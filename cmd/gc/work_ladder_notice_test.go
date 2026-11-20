@@ -998,19 +998,8 @@ func TestWorkLadderNoticeProposalFailures(t *testing.T) {
 			t.Fatalf("%d failure tallies after an outage, want one for the seat", tallies)
 		}
 	})
-	t.Run("the configured nudge is too large", func(t *testing.T) {
-		lc := newLadderLaneCity(t, "message")
-		lc.env.Cfg.Agents[0].Nudge = strings.Repeat("x", opjournal.MaxInlinePayload+1)
-		id := lc.claim("unstarted")
-		lc.at(0)
-		lc.at(halfPast(1))
-		if e := lc.entry(id); !e.Notice.IsZero() || e.Attempts != 1 || e.Refused != 0 {
-			t.Fatalf("entry %+v, want counted as failed", e)
-		}
-		if n := len(lc.events(events.WorkNudgeFailed)); n != 1 {
-			t.Fatalf("work.nudge_failed = %d", n)
-		}
-	})
+	// The "configured nudge is too large" subtest is removed (gascity#9196): a
+	// configured nudge is never the claim text, so it cannot reach the claim payload.
 }
 
 func TestWorkLadderUnsettledNoticeCountsPastItsBound(t *testing.T) {
