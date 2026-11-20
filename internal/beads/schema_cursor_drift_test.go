@@ -1190,3 +1190,201 @@ func declaredInStruct(source, structName, field string) bool {
 	}
 	return false
 }
+
+// openPathCommit is one commit a library open can make on the pinned beads
+// module's open path: the file it is made in, its message verbatim, and the
+// table it writes when the message alone does not mark it as the open's.
+type openPathCommit struct {
+	file    string
+	message string
+	table   string
+}
+
+// The pinned beads module's open-path commits, relative to its schema package:
+// the dolt_ignore seed, the migration commits, the #4356 untrack and sweep, the
+// version-40/41 nonlocal repairs, and the commits inside migrations 0040, 0041
+// and 0062. The messages and tables are restated here, verbatim, because the
+// moved-HEAD attribution (beads.ProxiedOpenUnmoved) keeps a window that carries
+// none of them, and a beads release that renames one would turn gc's own write
+// into "another client's".
+const pinnedSchemaPackage = "internal/storage/schema"
+
+var openPathCommits = []openPathCommit{
+	{file: "schema.go", message: "schema: seed dolt_ignore patterns"},
+	{file: "schema.go", message: "schema: apply migrations"},
+	{file: "schema.go", message: "schema: apply migration "},
+	{file: "ignored_cursor_untrack.go", message: "schema: untrack legacy ignored_schema_migrations so dolt_ignore can apply (gastownhall/beads#4356)"},
+	{file: "ignored_cursor_untrack.go", message: "schema: drop stray ignored_schema_migrations untrack scratch table (gastownhall/beads#4356)"},
+	{file: "migration_repairs.go", message: "repair: clear partial 0040 nonlocal rows before replay", table: "dolt_nonlocal_tables"},
+	{file: "migration_repairs.go", message: "repair: restore pre-0041 nonlocal rows before replay", table: "dolt_nonlocal_tables"},
+	{file: "cli_migrations.go", message: "disable nonlocal tables for fk migrations", table: "dolt_nonlocal_tables"},
+	{file: "migrations/0040_ignored_tables_also_nonlocal_tables.up.sql", message: "create nonlocal table wisps", table: "dolt_nonlocal_tables"},
+	{file: "migrations/0040_ignored_tables_also_nonlocal_tables.up.sql", message: "create nonlocal table wisp_*", table: "dolt_nonlocal_tables"},
+	{file: "migrations/0040_ignored_tables_also_nonlocal_tables.up.sql", message: "create nonlocal table repo_mtimes", table: "dolt_nonlocal_tables"},
+	{file: "migrations/0040_ignored_tables_also_nonlocal_tables.up.sql", message: "create nonlocal table local_metadata", table: "dolt_nonlocal_tables"},
+	{file: "migrations/0041_split_dependencies_target.up.sql", message: "disable nonlocal tables for fk migrations", table: "dolt_nonlocal_tables"},
+	{file: "migrations/0062_events_dolt_ignore.up.sql", message: "schema: drop versioned events table for ignored-plane flip (bd-red8u)"},
+}
+
+// openPathCommitSites is how many commit sites each file of the schema package
+// holds: CALL DOLT_COMMIT statements plus calls into the package's scoped
+// commit helpers. A file not named here must hold none, so a release that adds
+// a commit site anywhere in the package fails the pin until the site's message
+// and table are restated above.
+var openPathCommitSites = map[string]int{
+	"schema.go":                 3,
+	"ignored_cursor_untrack.go": 2,
+	"migration_repairs.go":      4,
+	"cli_migrations.go":         1,
+	"migrations/0040_ignored_tables_also_nonlocal_tables.up.sql": 4,
+	"migrations/0041_split_dependencies_target.up.sql":           1,
+	"migrations/0062_events_dolt_ignore.up.sql":                  1,
+}
+
+// openPathCommitMarkers are what makes a code line a commit site.
+var openPathCommitMarkers = []string{"CALL DOLT_COMMIT(", "commitScopedTableChange(ctx", "commitNonlocalRepair(ctx"}
+
+// TestProxiedOpenWriteShapesMatchPinnedBeads keeps the moved-HEAD attribution's
+// open-write set and schema: prefix honest against the pinned beads module:
+// every open-path commit is still made with the message and table pinned
+// above, every one of them is classified as the open's own write, and no file
+// of the schema package has gained a commit site the pin does not know.
+func TestProxiedOpenWriteShapesMatchPinnedBeads(t *testing.T) {
+	schemaDir := filepath.Join(beadstest.PinnedBeadsModuleDir(t), filepath.FromSlash(pinnedSchemaPackage))
+	if problems := openWriteDrift(t, schemaDir); len(problems) > 0 {
+		t.Fatalf("beads %s's open-path commits no longer match what the moved-HEAD attribution knows:\n  %s\n"+
+			"Re-read the new commit sites, update proxiedOpenCommitPrefix and proxiedOpenWriteTables in "+
+			"internal/beads/schema_cursor.go, and restate the sites here: a commit the attribution cannot "+
+			"recognize is gc's own write served as another client's.",
+			beadstest.PinnedBeadsVersion(t), strings.Join(problems, "\n  "))
+	}
+}
+
+// TestOpenWriteDriftSeesEveryDirection proves the pin can fail: on a copy of
+// the pinned schema package whose open-path commit lost its schema: prefix,
+// whose repair writes a table outside the open-write set, or which gained a
+// commit site, openWriteDrift names the message, table or file.
+func TestOpenWriteDriftSeesEveryDirection(t *testing.T) {
+	pinned := filepath.Join(beadstest.PinnedBeadsModuleDir(t), filepath.FromSlash(pinnedSchemaPackage))
+	for _, tc := range []struct {
+		name, file, old, new, naming string
+	}{
+		{"a message that lost its schema: prefix", "schema.go", "'schema: apply migrations'", "'apply migrations'", "schema: apply migrations"},
+		{"a repair that writes a table outside the set", "migration_repairs.go", "dolt_nonlocal_tables", "dolt_remote_branches", "dolt_nonlocal_tables"},
+		{"a new commit site", "schema.go", "\nfunc ", "\nfunc tidy(ctx context.Context, db DBConn) error {\n\treturn DrainCall(ctx, db, \"CALL DOLT_COMMIT('-m', 'tidy')\")\n}\n\nfunc ", "schema.go"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// The fixture holds only the files the pin counts, so the walk
+			// meets no file the real package would not also show it.
+			fixture := t.TempDir()
+			for file := range openPathCommitSites {
+				body, err := os.ReadFile(filepath.Join(pinned, filepath.FromSlash(file)))
+				if err != nil {
+					t.Fatalf("reading the pinned %s: %v", file, err)
+				}
+				if file == tc.file {
+					if !strings.Contains(string(body), tc.old) {
+						t.Fatalf("the pinned %s holds no %q to mutate", file, tc.old)
+					}
+					body = []byte(strings.Replace(string(body), tc.old, tc.new, 1))
+					if tc.old == "dolt_nonlocal_tables" {
+						body = []byte(strings.ReplaceAll(string(body), tc.old, tc.new))
+					}
+				}
+				target := filepath.Join(fixture, filepath.FromSlash(file))
+				if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(target, body, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if problems := openWriteDrift(t, fixture); !slices.ContainsFunc(problems, func(p string) bool {
+				return strings.Contains(p, tc.naming)
+			}) {
+				t.Fatalf("openWriteDrift = %q, want a problem naming %q", problems, tc.naming)
+			}
+		})
+	}
+}
+
+// openWriteDrift compares the schema package at schemaDir with the pin and
+// returns one line per mismatch.
+func openWriteDrift(t *testing.T, schemaDir string) []string {
+	t.Helper()
+	code := map[string]string{}
+	err := filepath.WalkDir(schemaDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		name := d.Name()
+		isGo := strings.HasSuffix(name, ".go") && !strings.HasSuffix(name, "_test.go")
+		if !isGo && !strings.HasSuffix(name, ".sql") {
+			return nil
+		}
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(schemaDir, path)
+		if err != nil {
+			return err
+		}
+		comment := "--"
+		if isGo {
+			comment = "//"
+		}
+		var lines []string
+		for _, line := range strings.Split(string(body), "\n") {
+			if !strings.HasPrefix(strings.TrimSpace(line), comment) {
+				lines = append(lines, line)
+			}
+		}
+		code[filepath.ToSlash(rel)] = strings.Join(lines, "\n")
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("reading the schema package at %s: %v", schemaDir, err)
+	}
+
+	var problems []string
+	files := make([]string, 0, len(code))
+	for file := range code {
+		files = append(files, file)
+	}
+	sort.Strings(files)
+	for _, file := range files {
+		sites := 0
+		for _, line := range strings.Split(code[file], "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "func ") {
+				continue
+			}
+			for _, marker := range openPathCommitMarkers {
+				sites += strings.Count(line, marker)
+			}
+		}
+		if want := openPathCommitSites[file]; sites != want {
+			problems = append(problems, fmt.Sprintf("%s holds %d commit site(s), the pin knows %d", file, sites, want))
+		}
+	}
+	for _, site := range openPathCommits {
+		body, ok := code[site.file]
+		switch {
+		case !ok:
+			problems = append(problems, fmt.Sprintf("%s is gone; it committed %q", site.file, site.message))
+			continue
+		case !strings.Contains(body, site.message):
+			problems = append(problems, fmt.Sprintf("%s no longer commits %q", site.file, site.message))
+		case site.table != "" && !strings.Contains(body, site.table):
+			problems = append(problems, fmt.Sprintf("%s's %q no longer writes %s", site.file, site.message, site.table))
+		}
+		tables := []proxyendpoint.WindowTable{{Name: "issues"}}
+		if site.table != "" {
+			tables = []proxyendpoint.WindowTable{{Name: site.table}}
+		}
+		if beads.ProxiedOpenWriteShapeForTest(&proxyendpoint.PostOpenWindow{Commits: []string{site.message}, Tables: tables}) == "" {
+			problems = append(problems, fmt.Sprintf("%s's %q (writing %v) is not classified as a library open's write", site.file, site.message, tables))
+		}
+	}
+	return problems
+}
