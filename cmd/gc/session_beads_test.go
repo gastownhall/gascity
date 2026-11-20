@@ -9713,6 +9713,70 @@ func TestUnclaimWorkAssignedToRetiredSessionInfoReleasesParkedClaimKeepingHold(t
 	}
 }
 
+// TestReleaseWorkFromClosedSessionBeadNamesKeptParkedClaims pins the log half
+// of #7685: a dead holder's close cascade that keeps a parked claim (pinned and
+// hooked outlive the holder) says so, naming the claim and the status the
+// store recorded. A raw-status store lists them only through the parked read.
+func TestReleaseWorkFromClosedSessionBeadNamesKeptParkedClaims(t *testing.T) {
+	store := beads.NewMemStore()
+
+	sessionBead, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name": "worker-1",
+			"state":        "active",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create session bead: %v", err)
+	}
+
+	ids := map[string]string{}
+	for _, hold := range []string{"pinned", "hooked"} {
+		claim, err := store.Create(beads.Bead{
+			Title:    hold + " claim",
+			Assignee: sessionBead.ID,
+			Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
+		})
+		if err != nil {
+			t.Fatalf("create %s claim: %v", hold, err)
+		}
+		status := hold
+		if err := store.Update(claim.ID, beads.UpdateOpts{Status: &status}); err != nil {
+			t.Fatalf("park claim at %s: %v", hold, err)
+		}
+		ids[hold] = claim.ID
+	}
+
+	var stderr bytes.Buffer
+	out := releaseWorkFromClosedSessionBeadExcept(store, testSeatWork("", servingCity("worker"), store, nil), sessionBead, nil, &stderr)
+
+	if len(out.Released) != 0 {
+		t.Fatalf("released %d claims, want the holds that outlive the holder kept", len(out.Released))
+	}
+	for _, hold := range []string{"pinned", "hooked"} {
+		id := ids[hold]
+		if out.Why[id] != keptParked {
+			t.Fatalf("why[%s] = %q, want %q", hold, out.Why[id], keptParked)
+		}
+		if want := fmt.Sprintf("keeps claim %s: parked as %q", id, hold); !strings.Contains(stderr.String(), want) {
+			t.Fatalf("stderr does not contain %q: %s", want, stderr.String())
+		}
+		got, err := store.Get(id)
+		if err != nil {
+			t.Fatalf("get %s claim: %v", hold, err)
+		}
+		if got.Assignee != sessionBead.ID {
+			t.Fatalf("%s claim assignee = %q, want the hold kept with its holder", hold, got.Assignee)
+		}
+		if got.Status != hold {
+			t.Fatalf("%s claim status = %q, want the hold kept", hold, got.Status)
+		}
+	}
+}
+
 // closeBead is the low-level metadata+close helper. Ownership checks live in
 // closeSessionBeadIfUnassigned, which has the full multi-store, multi-identifier
 // view of assigned work. closeBead itself must stay dumb so it doesn't
