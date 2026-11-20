@@ -309,7 +309,8 @@ func TestLaunchFinalizerSeamsAreOnlyTheTwoLaunchBranches(t *testing.T) {
 						}
 					}
 				case *ast.SelectorExpr:
-					if x.Sel.Name == "launchFinalizer" {
+					// finalizeLaunch is the one helper that reads m.launchFinalizer.
+					if x.Sel.Name == "finalizeLaunch" {
 						refsFinalizer[fn.Name.Name] = true
 					}
 				}
@@ -319,7 +320,7 @@ func TestLaunchFinalizerSeamsAreOnlyTheTwoLaunchBranches(t *testing.T) {
 	}
 	for name := range startedIn {
 		if !finalizing[name] && !reusesFinalized[name] {
-			t.Errorf("%s starts a runtime with sp.Start( but is not a known launch seam: finalize its config through m.launchFinalizer or declare why it reuses one (ga-vytkfv ruling; ga-4k4zfk)", name)
+			t.Errorf("%s starts a runtime with sp.Start( but is not a known launch seam: finalize its config through m.finalizeLaunch or declare why it reuses one (ga-vytkfv ruling; ga-4k4zfk)", name)
 		}
 	}
 	for name := range finalizing {
@@ -327,7 +328,7 @@ func TestLaunchFinalizerSeamsAreOnlyTheTwoLaunchBranches(t *testing.T) {
 			t.Errorf("%s no longer starts a runtime: update this guard", name)
 		}
 		if !refsFinalizer[name] {
-			t.Errorf("%s starts a runtime without finalizing its config: call m.launchFinalizer before sp.Start (ga-vytkfv ruling)", name)
+			t.Errorf("%s starts a runtime without finalizing its config: call m.finalizeLaunch before sp.Start (ga-vytkfv ruling)", name)
 		}
 	}
 	for name := range reusesFinalized {

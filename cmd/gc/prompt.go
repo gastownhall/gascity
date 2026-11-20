@@ -2,13 +2,16 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"text/template"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -400,10 +403,20 @@ func defaultBranchFor(dir string) string {
 	if dir == "" {
 		return "main"
 	}
-	g := git.New(dir)
-	branch, _ := g.DefaultBranch()
+	// Bounded: a prompt render runs on the session launch path, under the
+	// runtime lease, and must not wait on a stuck filesystem. A probe the
+	// deadline cut short answers "", as an unanswered probe always has here.
+	ctx, cancel := context.WithTimeout(context.Background(), defaultBranchProbeTimeout)
+	defer cancel()
+	branch, err := git.New(dir).DefaultBranchCtx(ctx)
+	if err != nil {
+		slog.Warn("default branch probe unanswered; rendering without it", "dir", dir, "error", err)
+	}
 	return branch
 }
+
+// defaultBranchProbeTimeout bounds the local git probes behind defaultBranchFor.
+const defaultBranchProbeTimeout = 5 * time.Second
 
 // defaultBranchForRig returns the rig's recorded DefaultBranch when set,
 // falling back to a runtime probe of dir. Use this in prompt/template

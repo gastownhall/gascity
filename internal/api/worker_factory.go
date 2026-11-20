@@ -33,6 +33,7 @@ func (s *Server) workerFactory(store beads.SessionStore) (*worker.Factory, error
 		FormulaMemo:           s.formulaMemo,
 		RuntimeLeaseTTL:       session.RuntimeLeaseTTLFor(cfg),
 		DeferredSubmits:       s.state.NudgeQueue(),
+		FinalizeLaunch:        s.state.StartupPromptFinalizer(),
 	})
 }
 

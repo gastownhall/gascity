@@ -293,12 +293,6 @@ func (s *seededState) ExtMsgServices() *extmsg.Services         { return s.extms
 func (s *seededState) AdapterRegistry() *extmsg.AdapterRegistry { return s.adapterReg }
 func (s *seededState) MaintenanceLoop() MaintenanceProvider     { return nil }
 
-// ApplyStartupPrompt returns hints unchanged: a seeded city renders no startup
-// prompts.
-func (s *seededState) ApplyStartupPrompt(_ session.Info, _ *config.ResolvedProvider, _ string, hints runtime.Config) (runtime.Config, error) {
-	return hints, nil
-}
-
 // StartupPromptFinalizer is nil: a seeded city renders no startup prompts.
 func (s *seededState) StartupPromptFinalizer() session.LaunchFinalizer { return nil }
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -134,6 +135,8 @@ func reconcilerLaunch(t *testing.T, _ contractCity, mode launchMode, prompt stri
 	return prepared.cfg
 }
 
+// cliWorkerResumeLaunch is the config the CLI worker factory's finalizer hands
+// to Provider.Start for a resume: the resolver's hints, finalized at the launch seam.
 func cliWorkerResumeLaunch(t *testing.T, c contractCity, mode launchMode, _ string) runtime.Config {
 	t.Helper()
 	resolved, err := resolvedWorkerRuntimeWithConfig(c.path, c.cfg, c.sessionInfo(mode), "")
@@ -143,16 +146,29 @@ func cliWorkerResumeLaunch(t *testing.T, c contractCity, mode launchMode, _ stri
 	if resolved == nil {
 		t.Fatal("resolvedWorkerRuntimeWithConfig() = nil")
 	}
-	return resolved.Hints
+	finalize := startupPromptLaunchFinalizer(c.path, c.cfg, io.Discard)
+	if finalize == nil {
+		t.Fatal("startupPromptLaunchFinalizer() = nil")
+	}
+	got, err := finalize(session.LaunchContext{Kind: session.LaunchResume, Info: c.sessionInfo(mode), Config: resolved.Hints})
+	if err != nil {
+		t.Fatalf("finalize: %v", err)
+	}
+	return got
 }
 
+// apiWorkerResumeLaunch is the config the API's finalizer (the controller state's)
+// hands to Provider.Start for a resume.
 func apiWorkerResumeLaunch(t *testing.T, c contractCity, mode launchMode, _ string) runtime.Config {
 	t.Helper()
-	cs := c.controllerState()
+	finalize := c.controllerState().StartupPromptFinalizer()
+	if finalize == nil {
+		t.Fatal("StartupPromptFinalizer() = nil")
+	}
 	hints := runtime.Config{WorkDir: c.path, Env: map[string]string{"KEEP": "me"}}
-	got, err := cs.ApplyStartupPrompt(c.sessionInfo(mode), c.resolved, "", hints)
+	got, err := finalize(session.LaunchContext{Kind: session.LaunchResume, Info: c.sessionInfo(mode), Config: hints})
 	if err != nil {
-		t.Fatalf("ApplyStartupPrompt: %v", err)
+		t.Fatalf("finalize: %v", err)
 	}
 	return got
 }
@@ -272,9 +288,9 @@ func TestStartupPromptContractEveryLaunchableStateGetsThePrompt(t *testing.T) {
 			info.Closed = tc.closed
 			hints := runtime.Config{WorkDir: city.path, Env: map[string]string{"KEEP": "me"}}
 
-			got, err := cs.ApplyStartupPrompt(info, city.resolved, "", hints)
+			got, err := finalizeResume(cs, info, "", hints)
 			if err != nil {
-				t.Fatalf("ApplyStartupPrompt: %v", err)
+				t.Fatalf("finalize: %v", err)
 			}
 			sent := strings.Contains(got.Nudge, contractPromptBody)
 			if sent != tc.wantSent {
@@ -298,17 +314,17 @@ func TestStartupPromptContractRuntimeThatCannotCarryANudgeIsLeftAlone(t *testing
 	cs := city.controllerState()
 	hints := runtime.Config{WorkDir: city.path, Env: map[string]string{"KEEP": "me"}}
 
-	got, err := cs.ApplyStartupPrompt(city.sessionInfo(launchModes[1]), city.resolved, "", hints)
+	got, err := finalizeResume(cs, city.sessionInfo(launchModes[1]), "", hints)
 	if err != nil {
-		t.Fatalf("ApplyStartupPrompt: %v", err)
+		t.Fatalf("finalize: %v", err)
 	}
 	if got.Nudge != "" || got.PromptSuffix != "" || got.Env[startupPromptDeliveredEnv] != "" {
 		t.Errorf("a runtime that cannot carry a nudge must be left alone, got Nudge=%q PromptSuffix=%q Env=%v", abbreviate(got.Nudge), abbreviate(got.PromptSuffix), got.Env)
 	}
 
-	got, err = cs.ApplyStartupPrompt(city.sessionInfo(launchModes[1]), city.resolved, config.SessionTransportACP, hints)
+	got, err = finalizeResume(cs, city.sessionInfo(launchModes[1]), config.SessionTransportACP, hints)
 	if err != nil {
-		t.Fatalf("ApplyStartupPrompt (acp): %v", err)
+		t.Fatalf("finalize (acp): %v", err)
 	}
 	if !strings.Contains(got.Nudge, contractPromptBody) || got.Env[startupPromptDeliveredEnv] != "1" {
 		t.Errorf("an ACP launch carries the prompt through its protocol, got Nudge=%q Env=%v", abbreviate(got.Nudge), got.Env)
@@ -340,9 +356,9 @@ func TestStartupPromptContractRendersSessionIdentityNotCallerEnvironment(t *test
 			info.AgentName = "test-city/worker-7"
 			info.Alias = tc.alias
 
-			got, err := city.controllerState().ApplyStartupPrompt(info, city.resolved, "", runtime.Config{WorkDir: city.path})
+			got, err := finalizeResume(city.controllerState(), info, "", runtime.Config{WorkDir: city.path})
 			if err != nil {
-				t.Fatalf("ApplyStartupPrompt: %v", err)
+				t.Fatalf("finalize: %v", err)
 			}
 			if want := "agent=" + tc.wantAgent + " dir=" + city.path; !strings.Contains(got.Nudge, want) {
 				t.Errorf("nudge = %q, want it to contain %q", abbreviate(got.Nudge), want)
@@ -390,12 +406,16 @@ func TestStartupPromptContractClientProviderChatGetsNoPersona(t *testing.T) {
 				if resolved == nil {
 					t.Fatal("resolvedWorkerRuntimeWithConfig() = nil")
 				}
-				return resolved.Hints
+				got, err := finalizeResumeWith(startupPromptLaunchFinalizer(city.path, city.cfg, io.Discard), info, resolved.Hints)
+				if err != nil {
+					t.Fatalf("finalize: %v", err)
+				}
+				return got
 			}},
 			{name: "API worker resume", build: func(t *testing.T) runtime.Config {
-				got, err := city.controllerState().ApplyStartupPrompt(info, city.resolved, "", runtime.Config{WorkDir: city.path, Env: map[string]string{"KEEP": "me"}})
+				got, err := finalizeResume(city.controllerState(), info, "", runtime.Config{WorkDir: city.path, Env: map[string]string{"KEEP": "me"}})
 				if err != nil {
-					t.Fatalf("ApplyStartupPrompt: %v", err)
+					t.Fatalf("finalize: %v", err)
 				}
 				return got
 			}},
@@ -466,13 +486,13 @@ func TestStartupPromptContractNothingToDeliverLeavesHintsAlone(t *testing.T) {
 	hints := runtime.Config{WorkDir: city.path, Env: map[string]string{"KEEP": "me"}}
 
 	noConfig := &controllerState{cityPath: city.path}
-	if got, err := noConfig.ApplyStartupPrompt(city.sessionInfo(launchModes[1]), city.resolved, "", hints); err != nil || got.Nudge != "" || got.Env[startupPromptDeliveredEnv] != "" {
+	if got, err := finalizeResume(noConfig, city.sessionInfo(launchModes[1]), "", hints); err != nil || got.Nudge != "" || got.Env[startupPromptDeliveredEnv] != "" {
 		t.Errorf("no config: got Nudge=%q Env=%v err=%v, want hints unchanged", abbreviate(got.Nudge), got.Env, err)
 	}
 
 	info := city.sessionInfo(launchModes[1])
 	info.Template = "not-a-configured-agent"
-	if got, err := city.controllerState().ApplyStartupPrompt(info, city.resolved, "", hints); err != nil || got.Nudge != "" || got.Env[startupPromptDeliveredEnv] != "" {
+	if got, err := finalizeResume(city.controllerState(), info, "", hints); err != nil || got.Nudge != "" || got.Env[startupPromptDeliveredEnv] != "" {
 		t.Errorf("unknown template: got Nudge=%q Env=%v err=%v, want hints unchanged", abbreviate(got.Nudge), got.Env, err)
 	}
 }
@@ -486,15 +506,15 @@ func TestStartupPromptContractWorkerResumeLeavesCallerEnvUntouched(t *testing.T)
 	shared := map[string]string{"KEEP": "me"}
 	hints := runtime.Config{WorkDir: city.path, Env: shared}
 
-	got, err := cs.ApplyStartupPrompt(city.sessionInfo(launchModes[1]), city.resolved, "", hints)
+	got, err := finalizeResume(cs, city.sessionInfo(launchModes[1]), "", hints)
 	if err != nil {
-		t.Fatalf("ApplyStartupPrompt: %v", err)
+		t.Fatalf("finalize: %v", err)
 	}
 	if got.Env[startupPromptDeliveredEnv] != "1" {
 		t.Fatalf("returned hints must carry the marker, got %v", got.Env)
 	}
 	if _, leaked := shared[startupPromptDeliveredEnv]; leaked {
-		t.Errorf("ApplyStartupPrompt mutated the caller's env map: %v", shared)
+		t.Errorf("finalizer mutated the caller's env map: %v", shared)
 	}
 }
 
@@ -521,4 +541,16 @@ func TestStartupPromptAPIWorkerResumeOfLargePromptSuppressesTheHookPrompt(t *tes
 	if !managedSessionHookPromptAlreadyDelivered(primeHookContext{HookEventName: "SessionStart"}) {
 		t.Errorf("the launch env must make the SessionStart hook suppress its prompt (marker=%q)", cfg.Env[startupPromptDeliveredEnv])
 	}
+}
+
+// finalizeResume runs the controller state's launch finalizer the way a resume
+// launch does: the manager hands it the hints the runtime resolver built.
+func finalizeResume(cs *controllerState, info session.Info, transport string, hints runtime.Config) (runtime.Config, error) {
+	finalize := cs.StartupPromptFinalizer()
+	return finalize(session.LaunchContext{Kind: session.LaunchResume, Info: info, Transport: transport, Config: hints})
+}
+
+// finalizeResumeWith runs finalize as a resume launch of info with cfg.
+func finalizeResumeWith(finalize session.LaunchFinalizer, info session.Info, cfg runtime.Config) (runtime.Config, error) {
+	return finalize(session.LaunchContext{Kind: session.LaunchResume, Info: info, Config: cfg})
 }

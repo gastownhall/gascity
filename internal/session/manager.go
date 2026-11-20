@@ -1232,6 +1232,13 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 		}
 		cfg.Env = git.ApplySSHKeepaliveEnv(cfg.Env)
 		cfg = runtime.SyncWorkDirEnv(cfg)
+		var finalizeErr error
+		if cfg, finalizeErr = m.finalizeLaunch(LaunchCreate, b, transport, cfg); finalizeErr != nil {
+			if rbErr := rollbackFailedCreate(); rbErr != nil {
+				return errors.Join(fmt.Errorf("finalizing launch: %w", finalizeErr), rbErr)
+			}
+			return fmt.Errorf("finalizing launch: %w", finalizeErr)
+		}
 
 		// Start the runtime session. Refuse to start if a prior escaped process
 		// for this session could not be confirmed dead: a survivor would race

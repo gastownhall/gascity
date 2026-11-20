@@ -1,6 +1,9 @@
 package session
 
-import "github.com/gastownhall/gascity/internal/runtime"
+import (
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/runtime"
+)
 
 // LaunchKind says which Manager launch seam is finalizing a runtime.Config.
 type LaunchKind string
@@ -33,4 +36,15 @@ type LaunchFinalizer func(LaunchContext) (runtime.Config, error)
 // A nil f leaves launches exactly as the Manager assembled them.
 func WithLaunchFinalizer(f LaunchFinalizer) ManagerOption {
 	return func(m *Manager) { m.launchFinalizer = f }
+}
+
+// finalizeLaunch runs the installed LaunchFinalizer over cfg, the config a
+// launch of row b is about to hand to the runtime provider. With no finalizer
+// installed it returns cfg unchanged. The caller owns the failure path: on an
+// error nothing has been started.
+func (m *Manager) finalizeLaunch(kind LaunchKind, b beads.Bead, transport string, cfg runtime.Config) (runtime.Config, error) {
+	if m.launchFinalizer == nil {
+		return cfg, nil
+	}
+	return m.launchFinalizer(LaunchContext{Kind: kind, Info: m.infoFromBead(b), Transport: transport, Config: cfg})
 }

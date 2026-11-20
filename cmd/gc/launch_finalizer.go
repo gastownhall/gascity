@@ -4,7 +4,6 @@ import (
 	"io"
 
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -15,7 +14,8 @@ func startupPromptLaunchFinalizer(cityPath string, cfg *config.City, stderr io.W
 	if cfg == nil {
 		return nil
 	}
-	_ = cityPath
-	_ = stderr
-	return func(lc session.LaunchContext) (runtime.Config, error) { return lc.Config, nil }
+	if stderr == nil {
+		stderr = io.Discard
+	}
+	return startupPromptCity{path: cityPath, cfg: cfg, stderr: stderr}.finalize
 }

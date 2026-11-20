@@ -116,6 +116,7 @@ func workerFactoryWithAttribution(
 		RuntimeLeaseTTL:         session.RuntimeLeaseTTLFor(cfg),
 		ResolveBead:             resolveBead,
 		FormulaMemo:             memo,
+		FinalizeLaunch:          startupPromptLaunchFinalizer(cityPath, cfg, os.Stderr),
 		// The zero store resolves no class store: a deferred submit writes
 		// no shadow, so it opens nothing.
 		DeferredSubmits: openNudgeQueue(cityPath, beads.NudgesStore{}).Queue,
@@ -807,13 +808,8 @@ func resolvedWorkerRuntimeWithConfigAndMetadata(cityPath string, cfg *config.Cit
 	// path does; this resume resolver builds runtime.Config directly and never
 	// routes through resolveTemplate (gc-6bw8o).
 	applyWorkerOverlayHints(&runtimeHints, cfg, cityPath, info.Template, resolved)
-	// Deliver the startup prompt the way the reconciler's resume does: this
-	// resolver builds runtime.Config directly, so without it a resumed launch
-	// leaves the SessionStart hook as the only carrier of the prompt (ga-4k4zfk).
-	runtimeHints, err = startupPromptCity{path: cityPath, cfg: cfg, stderr: os.Stderr}.applyTo(info, resolved, transport, runtimeHints)
-	if err != nil {
-		return nil, err
-	}
+	// The hints carry no startup prompt: the Manager's launch finalizer delivers
+	// it at the launch seam, only for a launch that starts a runtime (ga-vytkfv).
 	return &worker.ResolvedRuntime{
 		Command:    command,
 		WorkDir:    workDir,

@@ -92,10 +92,6 @@ type fakeState struct {
 	// matching the real implementation's answer for the MemStore fakes most
 	// tests use.
 	scopedStoreFn func(ctx context.Context, existing beads.Store) (beads.Store, error)
-	// startupPromptFn backs ApplyStartupPrompt. Nil (the default) returns the
-	// hints unchanged — a state with no startup prompt to deliver — so tests that
-	// do not care about prompt delivery are unaffected.
-	startupPromptFn func(info session.Info, resolved *config.ResolvedProvider, transport string, hints runtime.Config) (runtime.Config, error)
 	// launchFinalizer backs StartupPromptFinalizer. Nil (the default) installs
 	// no finalizer.
 	launchFinalizer session.LaunchFinalizer
@@ -393,13 +389,6 @@ func (f *fakeState) WebhookDispatcher() orderdispatch.Dispatcher { return f.webh
 func (f *fakeState) ExtMsgServices() *extmsg.Services         { return f.extmsgSvc }
 func (f *fakeState) AdapterRegistry() *extmsg.AdapterRegistry { return f.adapterReg }
 func (f *fakeState) MaintenanceLoop() MaintenanceProvider     { return f.maintenance }
-
-func (f *fakeState) ApplyStartupPrompt(info session.Info, resolved *config.ResolvedProvider, transport string, hints runtime.Config) (runtime.Config, error) {
-	if f.startupPromptFn != nil {
-		return f.startupPromptFn(info, resolved, transport, hints)
-	}
-	return hints, nil
-}
 
 func (f *fakeState) StartupPromptFinalizer() session.LaunchFinalizer { return f.launchFinalizer }
 

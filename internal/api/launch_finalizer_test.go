@@ -79,23 +79,25 @@ func TestSessionManagerInstallsStateLaunchFinalizer(t *testing.T) {
 
 // TestResolveWorkerSessionRuntimeRendersNoPrompt: the resolver builds launch
 // hints only. Prompt delivery belongs to the launch seam, so resolving a
-// runtime never renders a prompt (the same hints are built for launches that
-// never start a runtime).
+// runtime never renders a prompt or invokes the finalizer (the same hints are
+// built for launches that never start a runtime).
 func TestResolveWorkerSessionRuntimeRendersNoPrompt(t *testing.T) {
-	fs, calls := startupPromptState(t)
+	var seen []session.LaunchContext
+	fs := startupPromptState(t)
+	fs.launchFinalizer = recordingLaunchFinalizer(&seen)
 	srv := New(fs)
 
 	runtimeCfg, err := srv.resolveWorkerSessionRuntimeWithMetadata(startupPromptSessionInfo(), "", nil)
 	if err != nil || runtimeCfg == nil {
 		t.Fatalf("resolveWorkerSessionRuntimeWithMetadata = %v, %v", runtimeCfg, err)
 	}
-	if len(*calls) != 0 {
-		t.Errorf("resolver asked State to render the startup prompt %d times, want 0", len(*calls))
+	if len(seen) != 0 {
+		t.Errorf("resolver invoked the launch finalizer %d times, want 0", len(seen))
 	}
 	if runtimeCfg.Hints.Nudge != "" || runtimeCfg.Hints.PromptSuffix != "" {
 		t.Errorf("resolver hints carry a prompt: Nudge=%q PromptSuffix=%q", runtimeCfg.Hints.Nudge, runtimeCfg.Hints.PromptSuffix)
 	}
-	if _, ok := runtimeCfg.Hints.Env[startupPromptSentinelMarker]; ok {
+	if _, ok := runtimeCfg.Hints.Env["GC_STARTUP_PROMPT_DELIVERED"]; ok {
 		t.Errorf("resolver hints set the delivered marker: %v", runtimeCfg.Hints.Env)
 	}
 }

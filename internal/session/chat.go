@@ -996,6 +996,14 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 		}
 		inc, provisional = &minted, true
 		cfg = startConfig(cfg, b, minted)
+		if cfg, err = m.finalizeLaunch(LaunchResume, b, transport, cfg); err != nil {
+			// Nothing started: the mint is withdrawn by the deferred
+			// unmintStart (provisional, no process under it).
+			if unroute != nil {
+				unroute()
+			}
+			return fmt.Errorf("finalizing launch: %w", err)
+		}
 		if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 			switch {
 			// A capacity refusal is also a startup death, but the endpoint

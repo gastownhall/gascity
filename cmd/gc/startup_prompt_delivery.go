@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log/slog"
+	"maps"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -69,7 +70,6 @@ type startupPromptPlan struct {
 	// its priming markers from it, never from the env marker, which a resume
 	// launch sets for hook consumption even though it delivers nothing new.
 	Delivery promptDeliveryResult
-	launch   startupPromptLaunch
 }
 
 // planStartupPrompt decides how a launch of the given kind carries src's prompt.
@@ -100,7 +100,6 @@ func planStartupPrompt(src startupPromptSource, launch startupPromptLaunch) (sta
 		Nudge:         delivery.Nudge,
 		MarkDelivered: delivery.Delivered,
 		Delivery:      delivery,
-		launch:        launch,
 	}, nil
 }
 
@@ -110,21 +109,20 @@ func resumeStartupPromptPlan(prompt, hintNudge string) startupPromptPlan {
 	return startupPromptPlan{
 		Nudge:         restartPromptNudge(prompt, hintNudge),
 		MarkDelivered: strings.TrimSpace(prompt) != "",
-		launch:        startupPromptResumeLaunch,
 	}
 }
 
-// applyTo writes the plan's payload and marker into cfg. cfg.Env must be owned
-// by the caller: it is written in place, and allocated when the plan marks a
-// launch that has no env. A resume launch also strips a stale marker, so a
-// resume that delivers nothing never inherits one.
+// applyTo writes the plan's payload and marker into cfg. The marker is the
+// plan's alone: an inherited GC_STARTUP_PROMPT_DELIVERED is erased and set again
+// only when the plan delivers, so a launch that delivers nothing never tells the
+// SessionStart hook the prompt was carried. cfg.Env is cloned first, so the
+// caller's map is never written.
 func (p startupPromptPlan) applyTo(cfg *runtime.Config) {
 	cfg.PromptSuffix = p.PromptSuffix
 	cfg.PromptFlag = p.PromptFlag
 	cfg.Nudge = p.Nudge
-	if p.launch == startupPromptResumeLaunch {
-		delete(cfg.Env, startupPromptDeliveredEnv)
-	}
+	cfg.Env = maps.Clone(cfg.Env)
+	delete(cfg.Env, startupPromptDeliveredEnv)
 	if p.MarkDelivered {
 		if cfg.Env == nil {
 			cfg.Env = map[string]string{}
