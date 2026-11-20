@@ -238,3 +238,33 @@ func TestProcessWorkflowFinalizeNonPassWritesNoSkipMarker(t *testing.T) {
 		})
 	}
 }
+
+// The marker rides the blocker scan the finalizer already makes and the root
+// close it already writes: a pass with skipped blockers costs exactly the
+// store calls of the same workflow with every blocker passed
+// (call_budget_test.go pins the workflow-finalize ceilings).
+func TestProcessWorkflowFinalizeSkipMarkerCostsNoStoreCall(t *testing.T) {
+	t.Parallel()
+
+	count := func(outcomes ...string) *callCountingStore {
+		t.Helper()
+		store := beads.NewMemStore()
+		w := newSkippedBlockerWorkflow(t, store, nil, outcomes...)
+		counting := &callCountingStore{Store: store}
+		result, err := ProcessControl(beadstest.Graph(counting), w.finalizer, ProcessOptions{Work: beadstest.Work(counting)})
+		if err != nil {
+			t.Fatalf("ProcessControl(workflow-finalize): %v", err)
+		}
+		if result.Action != "workflow-pass" {
+			t.Fatalf("result = %+v, want workflow-pass", result)
+		}
+		return counting
+	}
+	skipped := count(beadmeta.OutcomeSkipped, beadmeta.OutcomePass, beadmeta.OutcomeSkipped)
+	passed := count(beadmeta.OutcomePass, beadmeta.OutcomePass, beadmeta.OutcomePass)
+	if skipped.reads != passed.reads || skipped.writes != passed.writes {
+		t.Fatalf("skipped-blocker pass = %d reads/%d writes, all-passed = %d reads/%d writes, want equal\nskipped:\n  %s\npassed:\n  %s",
+			skipped.reads, skipped.writes, passed.reads, passed.writes,
+			strings.Join(skipped.ops, "\n  "), strings.Join(passed.ops, "\n  "))
+	}
+}
