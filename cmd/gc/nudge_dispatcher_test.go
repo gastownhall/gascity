@@ -1201,6 +1201,42 @@ func TestDispatchHoldsANudgeFencedToAFenceHoldingSibling(t *testing.T) {
 	}
 }
 
+// A running session whose only due nudge is fenced to a fence-holding sibling
+// can claim nothing, so the pass skips it as not-claimable before any runtime
+// observe: no provider call names it.
+func TestDispatchSkipsObservingATargetThatCanClaimNothing(t *testing.T) {
+	f := newLegBDispatchFixture(t)
+	s3 := f.create(t)
+	f.setMetadata(t, s3.ID, map[string]string{"state": "asleep", "sleep_reason": "idle"})
+	snapshot, err := loadSessionBeadSnapshot(f.store.Store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enqueueQueuedNudge(f.dir, newQueuedNudgeWithOptions("worker", "held for s3", "session", time.Now().Add(-time.Minute), queuedNudgeOptions{SessionID: s3.ID})); err != nil {
+		t.Fatal(err)
+	}
+	n := len(f.fake.SnapshotCalls())
+	if _, err := dispatchAllQueuedNudges(f.dir, supervisorCfg(), f.store.Store, f.store.Store, f.fake, snapshot, nil); err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	for _, call := range f.fake.SnapshotCalls()[n:] {
+		if call.Name == f.s1.SessionName {
+			t.Fatalf("the pass made runtime call %s naming s1, which can claim nothing", call.Method)
+		}
+	}
+	state, err := nudgequeue.LoadState(f.dir)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if got := state.DispatchSkips["not-claimable"]; got != 1 {
+		t.Fatalf("DispatchSkips[not-claimable] = %d, want 1 (full map: %#v)", got, state.DispatchSkips)
+	}
+	pending, _, _, err := listQueuedNudges(f.dir, "worker", time.Now())
+	if err != nil || len(pending) != 1 || pending[0].SessionID != s3.ID {
+		t.Fatalf("pending = %v, %v; want the nudge still fenced to s3", nqCharItems(pending), err)
+	}
+}
+
 // onNudgeProvider runs onNudge after each delivery the fake records.
 type onNudgeProvider struct {
 	*runtime.Fake
